@@ -296,6 +296,7 @@ pub async fn serve(
             "/api/v1/dbnums/{dbnum}/data/above/{watermark}",
             get(handlers::dbnum_prune_above_preview).delete(handlers::dbnum_prune_above),
         )
+        .route("/api/v1/trace", get(handlers::trace))
         .route("/api/v1/queue", get(handlers::queue_snapshot))
         .route("/api/v1/queue/pause", post(handlers::queue_pause))
         .route("/api/v1/queue/resume", post(handlers::queue_resume))

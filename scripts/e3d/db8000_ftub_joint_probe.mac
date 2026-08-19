@@ -1,0 +1,46 @@
+-- D2 取证(安全版):量 FTUB2/3/4 的 POS/HEIG/ORI/ARRI/LEAV,离线算 leave 点。
+--
+-- 每个构件单独一个 ALPHA LOG 文件:上一版把三个构件塞进一个 log 块,中途一条
+-- 非法查询(Q POS OF PARR/PLEA)让 des.exe 访问违例崩溃,整块日志没落盘。分块后
+-- 已完成构件的结果先落盘,且这里只用实测安全的查询(TYPE/REF/POS/HEIG/ORI/ARRI/LEAV)。
+--
+-- 只读,无 SAVEWORK,不写 QUIT/FINISH(会话归 driver wrapper)。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_ftub_joint_23260.log" OVER
+$P CODEX-FTUB-23260-ALIVE
+=24384/23260
+Q TYPE
+Q REF
+Q POS
+Q ORI
+Q HEIG
+Q ARRI
+Q LEAV
+$P CODEX-FTUB-23260-DONE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_ftub_23261.log" OVER
+$P CODEX-FTUB-23261-ALIVE
+=24384/23261
+Q TYPE
+Q REF
+Q POS
+Q ORI
+Q HEIG
+Q ARRI
+Q LEAV
+$P CODEX-FTUB-23261-DONE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_ftub_23262.log" OVER
+$P CODEX-FTUB-23262-ALIVE
+=24384/23262
+Q TYPE
+Q REF
+Q POS
+Q ORI
+Q HEIG
+Q ARRI
+Q LEAV
+$P CODEX-FTUB-23262-DONE
+ALPHA LOG END

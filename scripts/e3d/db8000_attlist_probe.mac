@@ -1,0 +1,10 @@
+-- 迭代打印分支属性名(逐个,只名不值,安全)。找 BTOL/CBTOLE 的准确拼写。
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_attlist.log" OVER
+$P CODEX-ATTLIST-ALIVE
+=24384/23257
+VAR !attl ATTLIST
+DO !a VALUES !attl
+$P ATT $!a
+ENDDO
+$P CODEX-ATTLIST-DONE
+ALPHA LOG END

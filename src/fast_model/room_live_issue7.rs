@@ -595,12 +595,19 @@ mod tests {
 
         assert_eq!(
             planned,
-            vec![(
-                ModelWorkAction::RegenRoot,
-                RefnoEnum::from(BRANCH).to_pdms_str(),
-                "BRAN".to_string()
-            )],
-            "挪管件必须排整根重生成，不能是管件自己的 Transform（issue #5 的修法就在这一跳）"
+            vec![
+                (
+                    ModelWorkAction::RegenRoot,
+                    RefnoEnum::from(BRANCH).to_pdms_str(),
+                    "BRAN".to_string()
+                ),
+                (
+                    ModelWorkAction::PostRegenAabb,
+                    RefnoEnum::from(ELEMENT).to_pdms_str(),
+                    String::new()
+                )
+            ],
+            "挪管件必须排整根重生成并在重生成后刷新靶件 AABB，不能是管件自己的 Transform（issue #5 的修法就在这一跳）"
         );
         assert_eq!(after_move.len(), 1, "移动后仍该只有一段管段");
         assert!(

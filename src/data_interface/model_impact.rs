@@ -1084,6 +1084,54 @@ mod tests {
         );
     }
 
+    /// 递归遍历 `dir` 下的所有 `.rs` 文件，交给 `visit` 看路径与全文。
+    fn each_rs_file(dir: &std::path::Path, visit: &mut impl FnMut(&std::path::Path, &str)) {
+        let entries = std::fs::read_dir(dir)
+            .unwrap_or_else(|error| panic!("读取目录 {} 失败: {error}", dir.display()));
+        for entry in entries {
+            let path = entry.expect("目录项不可读").path();
+            if path.is_dir() {
+                each_rs_file(&path, visit);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                let text = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|error| panic!("读取 {} 失败: {error}", path.display()));
+                visit(&path, &text);
+            }
+        }
+    }
+
+    /// ADR-032 边界 A 的守卫。core.dll 的 `DB_MemberCompare` 逐个差异点吐带 kind 的
+    /// 记录（`kind == 3` → `elementReordered(member)`），我们的 `classify_children_delta`
+    /// 只给整表三态，单操作层还原不出「哪个成员被换了位置」。这个缺口今天不影响输出，
+    /// 前提正是 `Reordered` 桶既没人产也没人读——两头任一被打破，边界就得重新审视，
+    /// 而不是让一个语义不完整的桶被当成可信输入。
+    #[test]
+    fn the_reordered_bucket_has_no_producer_and_no_consumer() {
+        let own_source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/data_interface/model_impact.rs"
+        ));
+        let bucket = concat!("ChangeBucket::", "Reordered");
+        // 本文件里只该有 `ALL` 数组那一处提到它；多出来的一处就是有人开始产它了。
+        assert_eq!(
+            own_source.matches(bucket).count(),
+            1,
+            "model_impact.rs 里这个桶的提及数变了：它今天只列在 ALL 数组里、没有任何产出点，见 ADR-032 边界 A"
+        );
+
+        let src_root = std::path::PathBuf::from(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
+        let mut consumers: Vec<String> = Vec::new();
+        each_rs_file(&src_root, &mut |path, text| {
+            if !path.ends_with("model_impact.rs") && text.contains(bucket) {
+                consumers.push(path.display().to_string());
+            }
+        });
+        assert!(
+            consumers.is_empty(),
+            "有人开始消费 Reordered 桶了（{consumers:?}）：它今天恒为空，见 ADR-032 边界 A"
+        );
+    }
+
     #[test]
     fn core_primary_list_snapshot_is_complete_and_self_consistent() {
         let snapshot: serde_json::Value =

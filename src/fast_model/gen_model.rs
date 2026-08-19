@@ -6,8 +6,6 @@ use crate::fast_model::{
     resolve_desi_comp, shared,
 };
 use crate::process_meshes_update_db_deep;
-#[cfg(feature = "gen_model")]
-use aios_core::csg::manifold::ManifoldRust;
 use aios_core::geometry::{EleInstGeo, PlantGeoData, ShapeInstancesData};
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::{BoxImplied, TubeImplied};

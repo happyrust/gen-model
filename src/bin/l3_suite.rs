@@ -23,6 +23,8 @@ use serde_json::{Value, json};
 mod fixture;
 
 const API: &str = "http://127.0.0.1:8028/api/v1";
+const DATA_API: &str = "http://127.0.0.1:8028";
+const SURREAL_PORT: u16 = 8048;
 const SURREAL_SQL: &str = "http://127.0.0.1:8048/sql";
 const PROJECT: &str = "AvevaMarineSample";
 const MDB: &str = "ALL";
@@ -49,6 +51,8 @@ struct Scenario {
     refno: &'static str,
     /// Existing current-file elements that the apply macro navigates or copies.
     required_refnos: &'static [&'static str],
+    /// Project databases whose records are dereferenced by the mutation macro.
+    required_project_dbs: &'static [(u32, &'static str)],
     expect: Expect,
     rvm: bool,
 }
@@ -63,6 +67,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_after: Some("1CUP001VAR"),
         refno: "24381_100819",
         required_refnos: &["24381/100819"],
+        required_project_dbs: &[],
         expect: Expect::Regen {
             roots: &["24381/100817"],
         },
@@ -77,6 +82,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_after: Some("1CUP001VAR"),
         refno: "24381_100819",
         required_refnos: &["24381/100819"],
+        required_project_dbs: &[],
         expect: Expect::TransformOnly {
             root: "24381/100817",
         },
@@ -91,6 +97,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_after: None,
         refno: "24381_107146",
         required_refnos: &["24381/107146"],
+        required_project_dbs: &[],
         expect: Expect::Deleted {
             root: "24381/107104",
         },
@@ -105,6 +112,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_after: Some("1CUP001VAR_CODEX"),
         refno: "24381_100819",
         required_refnos: &["24381/100819"],
+        required_project_dbs: &[],
         expect: Expect::DataOnly,
         rvm: false,
     },
@@ -117,6 +125,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_after: Some("CODEX_L3_FTUB"),
         refno: "",
         required_refnos: &["24384/22402", "24384/22403"],
+        required_project_dbs: &[(5052, "CATA")],
         expect: Expect::Regen {
             roots: &["24384/22402"],
         },
@@ -131,6 +140,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_after: Some("24384/22403"),
         refno: "24384_22403",
         required_refnos: &["24384/22402", "24384/22403", "24384/22404"],
+        required_project_dbs: &[],
         expect: Expect::Regen {
             roots: &["24384/22402", "24384/22404"],
         },
@@ -146,6 +156,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_after: None,
         refno: "",
         required_refnos: &[],
+        required_project_dbs: &[],
         expect: Expect::DataOnly,
         rvm: false,
     },
@@ -158,6 +169,7 @@ const SCENARIOS: &[Scenario] = &[
         focus_after: Some("24383/66460"),
         refno: "24383_66460",
         required_refnos: &["24383/66460"],
+        required_project_dbs: &[],
         expect: Expect::Room,
         rvm: false,
     },
@@ -232,6 +244,102 @@ struct Cli {
     /// Validate the manifest and target DB header/WORLD, write preflight.json, then stop.
     #[arg(long)]
     fixture_check_only: bool,
+    /// **Debugging only**: pass `--debug-dbnum` through to the service this run starts.
+    ///
+    /// The service then narrows its data batches to those dbnums and traces them at
+    /// every decision point. The run also pulls `GET /api/v1/trace` into the run
+    /// directory before the stack comes down — that teardown is exactly why the two
+    /// 2026-08-17 failures had no evidence left to read.
+    #[arg(long, value_name = "N[,N...]")]
+    debug_dbnum: Option<String>,
+    /// Run the golden suite without plant-ui: every data-plane assertion stays,
+    /// UI focus / screenshots / tree verdicts are skipped and the report says so.
+    /// For hosts where the UI stack is unavailable; V-level coverage is absent.
+    #[arg(long)]
+    no_ui: bool,
+    /// Bootstrap an empty per-run Surreal store before scenarios run: SYS meta +
+    /// per-dbnum design baselines + file scan, discard the discovered delivery
+    /// backlog, then seed the selected scenarios' roots on demand. Replaces the
+    /// golden-pair restore on hosts without the golden assets; requires
+    /// `--skip-restore` so the missing golden mirror is an explicit decision.
+    #[arg(long)]
+    bootstrap_store: bool,
+}
+
+/// `--bootstrap-store` 与金基线恢复互斥：恢复会把刚引导好的店整个镜像掉。
+/// 要求调用方显式带 `--skip-restore`，缺金基线这件事必须是明说的决定。
+fn validate_store_flags(bootstrap_store: bool, skip_restore: bool) -> Result<()> {
+    ensure!(
+        !bootstrap_store || skip_restore,
+        "--bootstrap-store requires --skip-restore: the golden-pair mirror would overwrite the freshly bootstrapped store"
+    );
+    Ok(())
+}
+
+/// Add `--debug-dbnum` to a service launch when this run asked for it.
+///
+/// Environment variables would have been inherited for free; a command-line switch
+/// (plan D2) has to be threaded through every launcher by hand, so both of them live
+/// here rather than being spelled out twice.
+fn with_debug_dbnum<'a>(command: &'a mut Command, debug_dbnum: Option<&str>) -> &'a mut Command {
+    match debug_dbnum {
+        Some(raw) => command.args(["serve", "--debug-dbnum", raw]),
+        None => command,
+    }
+}
+
+/// Pulls `GET /api/v1/trace` into the run directory **before the stack comes down**.
+///
+/// The trace ring lives in the service process and is deliberately not persisted
+/// (plan D6), so the window to read it closes when the stack is torn down. Both
+/// 2026-08-17 investigations lost their evidence exactly there — by the time the
+/// question was asked, the process that knew the answer was gone.
+///
+/// It is a drop guard rather than a call at the end of the happy path because the
+/// early `?` exits are the runs that most need the evidence. Declare it *after* the
+/// `Stack` it reads from: locals drop in reverse, so this fires while the service is
+/// still answering.
+struct TraceDump {
+    path: Option<PathBuf>,
+}
+
+impl TraceDump {
+    fn new(run_dir: &Path, debug_dbnum: Option<&str>) -> Self {
+        Self {
+            path: debug_dbnum.map(|_| run_dir.join("trace.json")),
+        }
+    }
+}
+
+impl Drop for TraceDump {
+    fn drop(&mut self) {
+        let Some(path) = self.path.as_ref() else {
+            return;
+        };
+        // Best effort by design: a failed dump must not mask the run's own verdict,
+        // and it must not be silent either — a missing trace.json with no explanation
+        // is the same dead end this guard exists to prevent.
+        let dumped = Command::new("curl.exe")
+            .args([
+                "--silent",
+                "--show-error",
+                "--fail",
+                &format!("{API}/trace?limit=0"),
+            ])
+            .output();
+        match dumped {
+            Ok(output) if output.status.success() => match fs::write(path, &output.stdout) {
+                Ok(()) => println!("trace dumped to {}", path.display()),
+                Err(error) => eprintln!("trace dump could not be written: {error}"),
+            },
+            Ok(output) => eprintln!(
+                "trace dump failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            Err(error) => eprintln!("trace dump could not call curl.exe: {error}"),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -261,11 +369,25 @@ struct Paths {
     db_option: PathBuf,
 }
 
+/// 工具 exe 目录：跟着当前 l3_suite 自己的构建产物走——debug 版找 debug 邻居、
+/// release 版找 release 邻居（OCC 布尔在 debug 下慢到撞 /model/ensure 的 120s
+/// 同步窗口，生成类场景必须能整套跑 release）。取不到 current_exe 时退回
+/// CARGO_TARGET_DIR/debug 的旧行为。
+fn tool_dir(repo: &Path) -> PathBuf {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        return dir.to_path_buf();
+    }
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| repo.join("target"))
+        .join("debug")
+}
+
 impl Paths {
     fn discover(repo: PathBuf, project_dir: Option<PathBuf>) -> Result<Self> {
-        let target = std::env::var_os("CARGO_TARGET_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| repo.join("target"));
+        let tools = tool_dir(&repo);
         Ok(Self {
             project_work: project_dir.unwrap_or_else(|| {
                 env_path(
@@ -280,42 +402,50 @@ impl Paths {
             surreal_work: env_path("L3_SURREAL_WORK", repo.join(".surreal/l3-suite-work")),
             surreal_golden: env_path("L3_SURREAL_GOLDEN", repo.join(".surreal/l3-golden-v1")),
             surreal_exe: env_path("L3_SURREAL_EXE", repo.join("bin/surreal.exe")),
-            service_exe: env_path("L3_SERVICE_EXE", target.join("debug/aios-database.exe")),
+            service_exe: env_path("L3_SERVICE_EXE", tools.join("aios-database.exe")),
             plant_ui_root: env_path(
                 "L3_PLANT_UI_ROOT",
                 repo.parent().unwrap_or(&repo).join("plant-ui"),
             ),
-            plant_ui_exe: env_path("L3_PLANT_UI_EXE", target.join("debug/plant-ui-app.exe")),
-            inspect_exe: env_path("L3_INSPECT_EXE", target.join("debug/inspect.exe")),
+            plant_ui_exe: env_path("L3_PLANT_UI_EXE", tools.join("plant-ui-app.exe")),
+            inspect_exe: env_path("L3_INSPECT_EXE", tools.join("inspect.exe")),
             e3d_driver: env_path(
                 "L3_E3D_DRIVER",
                 repo.join("scripts/e3d/run_ams_c_entrymacro.bat"),
             ),
-            db_option: repo.join("db_options/DbOption-l3-suite.toml"),
+            // 隔离环境（test-increment）按轮生成配置后经 L3_DB_OPTION 指进来；
+            // 不设时保持原 L3 工作副本的固定配置。
+            db_option: env_path(
+                "L3_DB_OPTION",
+                repo.join("db_options/DbOption-l3-suite.toml"),
+            ),
             repo,
         })
     }
 
-    fn preflight_files(&self, restore: bool) -> Result<()> {
-        for path in [
+    fn preflight_files(&self, restore: bool, ui: bool) -> Result<()> {
+        let mut files = vec![
             &self.surreal_exe,
             &self.service_exe,
-            &self.plant_ui_exe,
-            &self.inspect_exe,
             &self.e3d_driver,
             &self.db_option,
-        ] {
+        ];
+        let mut dirs = vec![self.repo.join("resource/surreal")];
+        if ui {
+            files.extend([&self.plant_ui_exe, &self.inspect_exe]);
+            dirs.extend([
+                self.plant_ui_root.join("assets"),
+                self.plant_ui_root.join("assets/meshes"),
+            ]);
+        }
+        for path in files {
             ensure!(
                 path.is_file(),
                 "required file is missing: {}",
                 path.display()
             );
         }
-        for dir in [
-            self.plant_ui_root.join("assets"),
-            self.plant_ui_root.join("assets/meshes"),
-            self.repo.join("resource/surreal"),
-        ] {
+        for dir in dirs {
             ensure!(
                 dir.is_dir(),
                 "required runtime directory is missing: {}",
@@ -413,6 +543,8 @@ struct RunHeader {
     baseline: String,
     keep_stack: bool,
     skip_restore: bool,
+    no_ui: bool,
+    bootstrap_store: bool,
     stack_failure: Option<String>,
 }
 
@@ -513,18 +645,32 @@ fn main() -> Result<()> {
         );
         return Ok(());
     }
-    paths.preflight_files(!cli.skip_restore)?;
-    assert_clean_host()?;
+    validate_store_flags(cli.bootstrap_store, cli.skip_restore)?;
+    paths.preflight_files(!cli.skip_restore, !cli.no_ui)?;
+    assert_clean_host(!cli.no_ui)?;
     if !cli.skip_restore {
         restore_golden_pair(&paths)?;
     }
 
-    let mut stack = start_stack(&paths, &run_dir, cli.keep_stack)?;
+    let bootstrap = cli.bootstrap_store.then(|| scenario_dbnums(&selected));
+    let mut stack = start_stack(
+        &paths,
+        &run_dir,
+        cli.keep_stack,
+        cli.debug_dbnum.as_deref(),
+        !cli.no_ui,
+        bootstrap.as_deref(),
+    )?;
+    // 声明在 `stack` 之后：局部量逆序析构，它会在服务还活着时先跑，把追踪取走。
+    let _trace_dump = TraceDump::new(&run_dir, cli.debug_dbnum.as_deref());
     let manifest_path = paths.repo.join(&cli.baseline_manifest);
     if cli.record_baseline {
         return record_baseline(&manifest_path);
     }
     let baseline = validate_baseline(&manifest_path, &run_dir, cli.skip_restore)?;
+    if cli.bootstrap_store {
+        seed_scenario_models(&selected, &run_dir)?;
+    }
 
     let mut reports = Vec::new();
     let mut stack_failure = None;
@@ -538,7 +684,7 @@ fn main() -> Result<()> {
             ..Default::default()
         };
         let mut stop_after_case = false;
-        match run_scenario(scenario, &paths, &driver, &run_dir) {
+        match run_scenario(scenario, &paths, &driver, &run_dir, !cli.no_ui) {
             Ok(notes) => {
                 report.passed = true;
                 report.notes = notes;
@@ -566,6 +712,8 @@ fn main() -> Result<()> {
         baseline,
         keep_stack: cli.keep_stack,
         skip_restore: cli.skip_restore,
+        no_ui: cli.no_ui,
+        bootstrap_store: cli.bootstrap_store,
         stack_failure,
     };
     write_report(&run_dir, &header, &reports)?;
@@ -637,8 +785,15 @@ fn surreal_result(response: &Value) -> Result<&Value> {
         .ok_or_else(|| anyhow!("Surreal response has no result: {row}"))
 }
 
-fn assert_clean_host() -> Result<()> {
-    for port in [8048, 8028, 5719] {
+fn assert_clean_host(ui: bool) -> Result<()> {
+    // 5719 是 plant-ui 的 AccessKit 检视口；--no-ui 不起界面，用户自己开着的
+    // plant-ui 不应该拦住一次纯数据面的跑。
+    let ports: &[u16] = if ui {
+        &[8048, 8028, 5719]
+    } else {
+        &[8048, 8028]
+    };
+    for &port in ports {
         ensure!(!port_open(port), "dedicated port {port} is already in use");
     }
     assert_no_e3d_session()
@@ -719,7 +874,23 @@ fn mirror(source: &Path, target: &Path) -> Result<()> {
     Ok(())
 }
 
-fn start_stack(paths: &Paths, out: &Path, keep: bool) -> Result<Stack> {
+fn start_stack(
+    paths: &Paths,
+    out: &Path,
+    keep: bool,
+    debug_dbnum: Option<&str>,
+    ui: bool,
+    bootstrap_dbnums: Option<&[u32]>,
+) -> Result<Stack> {
+    if bootstrap_dbnums.is_some() {
+        // 引导只对空店有意义：往一家有历史的店上再铺一层首次导入，水位与积压
+        // 会互相打架。工作店目录必须是新的（runner 按轮生成路径）。
+        ensure!(
+            !paths.surreal_work.exists() || fs::read_dir(&paths.surreal_work)?.next().is_none(),
+            "--bootstrap-store needs a fresh Surreal store directory, found existing data at {}",
+            paths.surreal_work.display()
+        );
+    }
     let mut stack = Stack::new(keep);
     stack.push(
         "surreal",
@@ -739,40 +910,186 @@ fn start_stack(paths: &Paths, out: &Path, keep: bool) -> Result<Stack> {
         )?,
     );
     wait_port(8048, Duration::from_secs(60))?;
+    if let Some(dbnums) = bootstrap_dbnums {
+        bootstrap_store(paths, out, dbnums)?;
+    }
 
     let config_no_ext = paths.db_option.with_extension("");
     stack.push(
         "service",
         spawn_logged(
-            Command::new(&paths.service_exe)
-                .current_dir(&paths.repo)
-                .env("DB_OPTION_FILE", config_no_ext)
-                .env("RUST_MIN_STACK", "67108864")
-                // 套件把启动自动执行显式钉为 true，避免外部配置把批次改成 held；
-                // 整套断言都建立在「批次真的被执行」之上。
-                // 房间全量重建仍旧跳过：这里要的是增量执行，不是 2 万面板重算。
-                .env("AIOS_STARTUP_AUTORUN", "1")
-                .env("AIOS_SKIP_STARTUP_ROOM_BUILD", "1"),
+            with_debug_dbnum(
+                Command::new(&paths.service_exe)
+                    .current_dir(&paths.repo)
+                    .env("DB_OPTION_FILE", config_no_ext)
+                    .env("RUST_MIN_STACK", "67108864")
+                    // 套件把启动自动执行显式钉为 true，避免外部配置把批次改成 held；
+                    // 整套断言都建立在「批次真的被执行」之上。
+                    // 房间全量重建仍旧跳过：这里要的是增量执行，不是 2 万面板重算。
+                    .env("AIOS_STARTUP_AUTORUN", "1")
+                    .env("AIOS_SKIP_STARTUP_ROOM_BUILD", "1"),
+                debug_dbnum,
+            ),
             &out.join("stack-service.log"),
         )?,
     );
     wait_http(&format!("{API}/health"), Duration::from_secs(180))?;
 
-    let ui_runtime = prepare_plant_ui_runtime(&paths.repo, &paths.plant_ui_root, out)?;
-    stack.push(
-        "plant-ui",
-        spawn_logged(
-            Command::new(&paths.plant_ui_exe)
-                .current_dir(&paths.repo)
-                .env("EGUI_INSPECTION", "1")
-                .env("PLANT_UI_SETTINGS_FILE", &ui_runtime.settings_file)
-                .env("PLANT_ASSET_ROOT", &ui_runtime.asset_root)
-                .env("PLANT_MODEL_API_URL", "http://127.0.0.1:8028"),
-            &out.join("stack-plant-ui.log"),
-        )?,
-    );
-    wait_inspect(&paths.inspect_exe, Duration::from_secs(120))?;
+    if ui {
+        let ui_runtime =
+            prepare_plant_ui_runtime(&paths.repo, &paths.plant_ui_root, out, &paths.db_option)?;
+        stack.push(
+            "plant-ui",
+            spawn_logged(
+                Command::new(&paths.plant_ui_exe)
+                    .current_dir(&paths.repo)
+                    .env("EGUI_INSPECTION", "1")
+                    .env("PLANT_UI_SETTINGS_FILE", &ui_runtime.settings_file)
+                    .env("PLANT_ASSET_ROOT", &ui_runtime.asset_root)
+                    .env("PLANT_MODEL_API_URL", "http://127.0.0.1:8028"),
+                &out.join("stack-plant-ui.log"),
+            )?,
+        );
+        wait_inspect(&paths.inspect_exe, Duration::from_secs(120))?;
+    }
     Ok(stack)
+}
+
+/// 空店引导（`--bootstrap-store`）：与夹具模式同一套三件套 + 积压出清，只是按
+/// 场景涉及的全部 dbnum 走。金基线三件套（E3D31-L3 项目副本、l3-golden-v1
+/// 快照、水位清单）在本机已不存在，隔离环境用「每轮现建」换掉「每轮恢复」。
+fn bootstrap_store(paths: &Paths, out: &Path, dbnums: &[u32]) -> Result<()> {
+    ensure!(
+        !dbnums.is_empty(),
+        "--bootstrap-store selected no scenario dbnums"
+    );
+    let tools = tool_dir(&paths.repo);
+    let sync_sys = tools.join("sync_sys_only.exe");
+    let initialize = tools.join("initialize_ams_dbnums.exe");
+    let scan = tools.join("manual_scan_probe.exe");
+    for exe in [&sync_sys, &initialize, &scan] {
+        ensure!(
+            exe.is_file(),
+            "bootstrap executable is missing: {}",
+            exe.display()
+        );
+    }
+    let config_no_ext = paths.db_option.with_extension("");
+    fixture::run_fixture_bin(
+        &sync_sys,
+        &[],
+        &paths.repo,
+        &config_no_ext,
+        &out.join("bootstrap-sys.log"),
+    )?;
+    fixture::run_fixture_bin(
+        &initialize,
+        &dbnums.iter().map(u32::to_string).collect::<Vec<_>>(),
+        &paths.repo,
+        &config_no_ext,
+        &out.join("bootstrap-desi.log"),
+    )?;
+    fixture::run_fixture_bin(
+        &scan,
+        &[PROJECT.to_owned()],
+        &paths.repo,
+        &config_no_ext,
+        &out.join("bootstrap-scan.log"),
+    )?;
+    // 首次导入会把库里每个交付单元排进重生成积压。套件只对自己场景的根负责：
+    // 播种步骤（seed_scenario_models）会显式重建并等待那些根，其余积压在
+    // worker 启动前丢弃，否则第一个场景要陪跑上千个无关模型任务。
+    let list = dbnum_list(dbnums);
+    let reset = surreal_sql(&format!(
+        "DELETE model_update_pending WHERE dbnum IN [{list}]; \
+         RETURN count(SELECT * FROM model_update_pending WHERE dbnum IN [{list}]);"
+    ))?;
+    fs::write(
+        out.join("bootstrap-pending-reset.json"),
+        serde_json::to_vec_pretty(&reset)?,
+    )?;
+    let remaining = reset
+        .as_array()
+        .and_then(|rows| rows.last())
+        .and_then(|row| row.get("result"))
+        .and_then(Value::as_u64);
+    ensure!(
+        remaining == Some(0),
+        "failed to discard the bootstrap backlog for dbnums [{list}]"
+    );
+    Ok(())
+}
+
+/// 选中场景涉及的 dbnum，升序去重。引导（首次导入基线）与积压出清都按它走。
+fn scenario_dbnums(selected: &[&'static Scenario]) -> Vec<u32> {
+    let mut dbnums = selected.iter().map(|s| s.dbnum).collect::<Vec<_>>();
+    dbnums.sort_unstable();
+    dbnums.dedup();
+    dbnums
+}
+
+fn dbnum_list(dbnums: &[u32]) -> String {
+    dbnums
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// 给选中场景的根按需播种基线模型（`POST /model/ensure`），并等到这些库的
+/// 非房间 pending 清零。m1/m2 的断言（geo_relate 恒为 5、位移后 inst 变化）
+/// 都以「场景开跑前模型已在」为前提；金基线时代这由全量生成快照保证，
+/// 引导模式下由这里显式建立。
+fn seed_scenario_models(selected: &[&'static Scenario], run_dir: &Path) -> Result<()> {
+    let roots = selected
+        .iter()
+        .flat_map(|s| scenario_roots(s))
+        .collect::<std::collections::BTreeSet<_>>();
+    let model_before = model_drain_task_ids()?;
+    let mut evidence = Vec::new();
+    for root in &roots {
+        let mut body = identity();
+        body.as_object_mut()
+            .expect("identity() is an object")
+            .insert("refno".into(), json!(root));
+        body.as_object_mut()
+            .expect("identity() is an object")
+            .insert("force".into(), json!(true));
+        let response = http_json("POST", &format!("{API}/model/ensure"), Some(body))?;
+        evidence.push(json!({"root": root, "response": response}));
+    }
+    fs::write(
+        run_dir.join("bootstrap-models.json"),
+        serde_json::to_vec_pretty(&evidence)?,
+    )?;
+    let dbnums = scenario_dbnums(selected);
+    wait_seeded_backlog_empty(&dbnums, run_dir)?;
+    wait_model_drain_settlement(&model_before)?;
+    Ok(())
+}
+
+/// 等选中库的非房间 pending 清零。房间 action 由空闲轮单独收敛（ADR-011 §8），
+/// 计入这里会让任何房间未收干净的库把播种卡成超时。
+fn wait_seeded_backlog_empty(dbnums: &[u32], run_dir: &Path) -> Result<()> {
+    let list = dbnum_list(dbnums);
+    let deadline = Instant::now() + DEFAULT_TIMEOUT;
+    loop {
+        let response = surreal_sql(&format!(
+            "RETURN count(SELECT * FROM model_update_pending WHERE dbnum IN [{list}] \
+             AND action NOT IN ['room_recalc_panel', 'room_recalc_element']);"
+        ))?;
+        let remaining = surreal_result(&response)?.as_u64();
+        if remaining == Some(0) {
+            return Ok(());
+        }
+        ensure!(
+            Instant::now() < deadline,
+            "seeded scenario models did not settle for dbnums [{list}]: {remaining:?} pending; \
+             see {}",
+            run_dir.join("bootstrap-models.json").display()
+        );
+        thread::sleep(Duration::from_secs(2));
+    }
 }
 
 struct PlantUiRuntime {
@@ -784,14 +1101,15 @@ fn prepare_plant_ui_runtime(
     repo: &Path,
     plant_ui_root: &Path,
     out: &Path,
+    service_config: &Path,
 ) -> Result<PlantUiRuntime> {
-    let asset_root = plant_ui_root.join("assets");
-    let mesh_dir = asset_root.join("meshes");
+    let source_assets = plant_ui_root.join("assets");
+    let mesh_dir = source_assets.join("meshes");
     let surreal_assets = repo.join("resource/surreal");
     ensure!(
-        asset_root.is_dir(),
+        source_assets.is_dir(),
         "Plant UI assets missing: {}",
-        asset_root.display()
+        source_assets.display()
     );
     ensure!(
         mesh_dir.is_dir(),
@@ -803,6 +1121,8 @@ fn prepare_plant_ui_runtime(
         "runtime SurrealQL directory missing: {}",
         surreal_assets.display()
     );
+    let asset_root = stage_ui_asset_root(&source_assets, out)?;
+    write_ui_project_config(&asset_root, service_config)?;
     let settings_file = out.join("plant-ui-settings.ron");
     let mesh = serde_json::to_string(&mesh_dir.to_string_lossy().replace('\\', "/"))?;
     fs::write(
@@ -818,6 +1138,128 @@ fn prepare_plant_ui_runtime(
     Ok(PlantUiRuntime {
         settings_file,
         asset_root,
+    })
+}
+
+/// 本轮专属的资产根。`config` 是真目录，剩下的全部用目录联接指回原资产。
+///
+/// plant-ui 原生启动会读 `asset_root/config/e3d.project.ron` 里的库地址，仓库那份钉死
+/// `ws://localhost:8009`；把仓库资产目录原样交给它，界面就连到套件之外的库上去了。
+/// 复制整份资产不现实——`meshes` 一支就近 300 MB——所以只把 `config` 换掉。
+fn stage_ui_asset_root(source: &Path, out: &Path) -> Result<PathBuf> {
+    let root = out.join("plant-ui-assets");
+    ensure!(
+        !root.exists(),
+        "run-scoped plant-ui asset root already exists: {}",
+        root.display()
+    );
+    fs::create_dir_all(root.join("config"))?;
+    for entry in fs::read_dir(source)
+        .with_context(|| format!("read plant-ui assets {}", source.display()))?
+    {
+        let entry = entry?;
+        let name = entry.file_name();
+        if name.to_string_lossy().eq_ignore_ascii_case("config") {
+            continue;
+        }
+        let link = root.join(&name);
+        if entry.file_type()?.is_file() {
+            fs::copy(entry.path(), &link)?;
+        } else {
+            link_directory(&entry.path(), &link)?;
+        }
+    }
+    Ok(root)
+}
+
+fn link_directory(target: &Path, link: &Path) -> Result<()> {
+    let status = Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .with_context(|| format!("mklink /J {} {}", link.display(), target.display()))?;
+    ensure!(
+        status.success() && link.exists(),
+        "failed to link {} -> {}",
+        link.display(),
+        target.display()
+    );
+    Ok(())
+}
+
+/// 按**服务自己那份配置**给 UI 现写项目配置，两边因此不可能指到不同的库上。
+fn write_ui_project_config(asset_root: &Path, service_config: &Path) -> Result<PathBuf> {
+    let endpoint = read_service_endpoint(service_config)?;
+    // 套件把 Surreal 钉在 8048。配置漂到别处时宁可当场停，也不要让界面安静地连上
+    // 另一个库——那种失败在证据里跟「元素真的不存在」一模一样。
+    ensure!(
+        endpoint.port == SURREAL_PORT,
+        "service config {} points at Surreal port {} but the suite binds {SURREAL_PORT}",
+        service_config.display(),
+        endpoint.port
+    );
+    let path = asset_root.join("config").join("e3d.project.ron");
+    fs::write(
+        &path,
+        format!(
+            "(\n    api_host: \"{DATA_API}\",\n    db_host: \"{}\",\n    mdb_name: \"{}\",\n    project_name: \"{}\",\n    project_code: \"{}\",\n    module: \"DESI\",\n    auto_gen_mesh: false,\n)\n",
+            endpoint.db_host(),
+            endpoint.mdb,
+            endpoint.project,
+            endpoint.namespace,
+        ),
+    )?;
+    Ok(path)
+}
+
+struct ServiceEndpoint {
+    host: String,
+    port: u16,
+    namespace: String,
+    project: String,
+    mdb: String,
+}
+
+impl ServiceEndpoint {
+    /// plant-ui 的旧版项目配置只认 `ws://主机:端口`，而 `DbOption` 的 `v_ip` 通常是裸主机名。
+    fn db_host(&self) -> String {
+        if self.host.starts_with("ws://") || self.host.starts_with("wss://") {
+            format!("{}:{}", self.host, self.port)
+        } else {
+            format!("ws://{}:{}", self.host, self.port)
+        }
+    }
+}
+
+fn read_service_endpoint(config: &Path) -> Result<ServiceEndpoint> {
+    let text = fs::read_to_string(config)
+        .with_context(|| format!("read service DbOption {}", config.display()))?;
+    let document: toml::Value = text
+        .parse()
+        .with_context(|| format!("parse service DbOption {}", config.display()))?;
+    // `surreal_ns` 在配置里是裸数字，`project_name` 是字符串，两种都要能取。
+    let scalar = |key: &str| -> Result<String> {
+        match document
+            .get(key)
+            .ok_or_else(|| anyhow!("{} has no {key}", config.display()))?
+        {
+            toml::Value::String(value) => Ok(value.clone()),
+            toml::Value::Integer(value) => Ok(value.to_string()),
+            other => bail!("{} has a non-scalar {key}: {other}", config.display()),
+        }
+    };
+    let port = scalar("v_port")?;
+    Ok(ServiceEndpoint {
+        host: scalar("v_ip")?.trim_end_matches('/').to_owned(),
+        port: port
+            .parse()
+            .with_context(|| format!("{} has an invalid v_port {port}", config.display()))?,
+        namespace: scalar("surreal_ns")?,
+        project: scalar("project_name")?,
+        mdb: scalar("mdb_name")?,
     })
 }
 
@@ -926,6 +1368,7 @@ fn run_scenario(
     paths: &Paths,
     driver: &E3dDriver,
     run_dir: &Path,
+    ui: bool,
 ) -> Result<Vec<String>> {
     if s.id == "f7" {
         return Ok(vec![
@@ -935,12 +1378,18 @@ fn run_scenario(
     let mut notes = Vec::new();
     let dir = run_dir.join(s.id);
     fs::create_dir_all(&dir)?;
-    match s.focus_before {
-        Some(target) => focus_target(paths, target, &s.refno.replace('_', "/"), &dir, "before")?,
-        None => notes.push("V: target does not exist yet, before.png is unfocused".into()),
+    if ui {
+        match s.focus_before {
+            Some(target) => {
+                focus_target(paths, target, &s.refno.replace('_', "/"), &dir, "before")?
+            }
+            None => notes.push("V: target does not exist yet, before.png is unfocused".into()),
+        }
+        inspect_shot(paths, &dir.join(format!("{}-before.png", s.id)))?;
+    } else {
+        notes.push("V: UI verdicts skipped (--no-ui), data-plane assertions only".into());
     }
-    inspect_shot(paths, &dir.join(format!("{}-before.png", s.id)))?;
-    let before = database_snapshot(s)?;
+    let before = database_snapshot(s, None)?;
     fs::write(dir.join("before.json"), serde_json::to_vec_pretty(&before)?)?;
 
     let room_before = if matches!(s.expect, Expect::Room) {
@@ -949,6 +1398,7 @@ fn run_scenario(
         HashSet::new()
     };
     let target_db_file = standard_target_db_file(paths, s.dbnum)?;
+    ensure_scenario_project_databases(&paths.project_work, s.required_project_dbs)?;
     ensure_current_scenario_refnos(&target_db_file, s.required_refnos)?;
     // Establish the observation boundary before SAVEWORK. Calling preview after the save
     // would consume the observation and make execute correctly report no merged saves.
@@ -997,6 +1447,9 @@ fn run_scenario(
     }
     // V 级判据的一半在这里：树上还找不找得到那个节点。删除场景要求找不到，
     // 新增/改名场景要求按**新**名字找得到——四张图只采不判的话，这两件事没人管。
+    // --no-ui 档跳过树上判定，但动态 refno（f5 新建件）仍要解析：它走的是
+    // Surreal 名字反查而非界面树，后面的快照与恢复断言都指着它。
+    let mut dynamic_refno = None;
     match s.focus_after {
         Some(target) => {
             let refno = if s.refno.is_empty() {
@@ -1004,9 +1457,14 @@ fn run_scenario(
             } else {
                 s.refno.replace('_', "/")
             };
-            focus_target(paths, target, &refno, &dir, "after")?;
+            if ui {
+                focus_target(paths, target, &refno, &dir, "after")?;
+            }
+            if s.refno.is_empty() {
+                dynamic_refno = Some(refno);
+            }
         }
-        None => {
+        None if ui => {
             let stale = (!s.refno.is_empty())
                 .then(|| tree_locates(paths, &s.refno.replace('_', "/")))
                 .transpose()?
@@ -1018,9 +1476,12 @@ fn run_scenario(
             );
             notes.push("V: target left the tree as expected".into());
         }
+        None => {}
     }
-    inspect_shot(paths, &dir.join(format!("{}-after.png", s.id)))?;
-    let after = database_snapshot(s)?;
+    if ui {
+        inspect_shot(paths, &dir.join(format!("{}-after.png", s.id)))?;
+    }
+    let after = database_snapshot(s, dynamic_refno.as_deref())?;
     fs::write(dir.join("after.json"), serde_json::to_vec_pretty(&after)?)?;
     assert_scenario(s, &receipt, &tasks, &before, &after)?;
     assert_macro_parity(s, &macro_log, &after)?;
@@ -1034,17 +1495,19 @@ fn run_scenario(
         receipt_task_ids(&repeat).is_empty(),
         "I-7 repeat created new tasks: {repeat}"
     );
-    inspect_shot(paths, &dir.join(format!("{}-repeat.png", s.id)))?;
-    let after_png = fs::read(dir.join(format!("{}-after.png", s.id)))?;
-    let repeat_png = fs::read(dir.join(format!("{}-repeat.png", s.id)))?;
-    ensure!(
-        after_png == repeat_png,
-        "I-7 after/repeat screenshots differ"
-    );
-    fs::write(
-        dir.join("repeat.sha256"),
-        sha256(&dir.join(format!("{}-repeat.png", s.id)))?,
-    )?;
+    if ui {
+        inspect_shot(paths, &dir.join(format!("{}-repeat.png", s.id)))?;
+        let after_png = fs::read(dir.join(format!("{}-after.png", s.id)))?;
+        let repeat_png = fs::read(dir.join(format!("{}-repeat.png", s.id)))?;
+        ensure!(
+            after_png == repeat_png,
+            "I-7 after/repeat screenshots differ"
+        );
+        fs::write(
+            dir.join("repeat.sha256"),
+            sha256(&dir.join(format!("{}-repeat.png", s.id)))?,
+        )?;
+    }
 
     if s.rvm {
         notes.push(run_rvm(s, paths)?);
@@ -1076,15 +1539,33 @@ fn run_scenario(
                 .any(|t| task_terminal(t).ok() == Some(Some(false))),
             "restore task failed"
         );
-        let restored = database_snapshot(s)?;
+        let restored = database_snapshot(s, dynamic_refno.as_deref())?;
         fs::write(
             dir.join("restored.json"),
             serde_json::to_vec_pretty(&restored)?,
         )?;
-        ensure!(
-            restorable_payload(&before) == restorable_payload(&restored),
-            "restore did not return PE/model state to baseline"
-        );
+        if s.refno.is_empty() {
+            ensure!(
+                restored
+                    .pointer("/payload/pe/deleted")
+                    .and_then(Value::as_bool)
+                    == Some(true)
+                    && restored
+                        .pointer("/payload/inst")
+                        .and_then(Value::as_array)
+                        .is_some_and(Vec::is_empty)
+                    && restored
+                        .pointer("/payload/owner")
+                        .and_then(Value::as_array)
+                        .is_some_and(Vec::is_empty),
+                "restore did not remove the dynamically-created PE/model state"
+            );
+        } else {
+            ensure!(
+                restorable_payload(&before) == restorable_payload(&restored),
+                "restore did not return PE/model state to baseline"
+            );
+        }
     }
     notes.insert(0, format!("I-1/I-2/I-7 passed for dbnum {}", s.dbnum));
     Ok(notes)
@@ -1131,6 +1612,24 @@ fn ensure_current_scenario_refnos(path: &Path, required: &[&str]) -> Result<()> 
     Ok(())
 }
 
+fn ensure_scenario_project_databases(project: &Path, required: &[(u32, &str)]) -> Result<()> {
+    for &(dbnum, expected_type) in required {
+        let path = project.join("ams000").join(format!("ams{dbnum}_0001"));
+        ensure!(
+            path.is_file(),
+            "scenario dependency is absent from the isolated E3D project: {} ({expected_type} dbnum {dbnum})",
+            path.display()
+        );
+        let (actual_dbnum, actual_type, _) = fixture::inspect_target_db(&path, PROJECT)?;
+        ensure!(
+            actual_dbnum == dbnum && actual_type.eq_ignore_ascii_case(expected_type),
+            "scenario dependency {} is {actual_type} dbnum {actual_dbnum}, expected {expected_type} dbnum {dbnum}",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn focus_target(
     paths: &Paths,
     locate_target: &str,
@@ -1159,9 +1658,8 @@ fn focus_target(
             dir.join(format!("inspect-command-input-{phase}.txt")),
             &input,
         )?;
-        let (input_x, input_y) = role_rect_center(&input, "TextInput").ok_or_else(|| {
-            anyhow!("plant-ui command input is not visible while locating {locate_target}")
-        })?;
+        let (input_x, input_y) = command_input_rect(&input)
+            .with_context(|| format!("locate plant-ui command input for {locate_target}"))?;
         inspect(
             paths,
             &["click", &input_x.to_string(), &input_y.to_string()],
@@ -1169,6 +1667,17 @@ fn focus_target(
         inspect(paths, &["key", "ctrl+a"])?;
         let command = locate_command(locate_target);
         inspect(paths, &["type", &command])?;
+        // 敲进去了才算敲进去。点错输入框时界面一声不吭，回车之后也只是安静地什么都
+        // 没发生，接下来 30 秒轮询的是一棵根本没人动过的树。
+        let typed = inspect(paths, &["tree"])?;
+        if !text_input_holds(&typed, &command) {
+            let dump = dir.join(format!("inspect-command-input-{phase}-rejected.txt"));
+            fs::write(&dump, &typed)?;
+            bail!(
+                "plant-ui command input did not accept {command}; full tree dump: {}",
+                dump.display()
+            );
+        }
         inspect(paths, &["key", "enter"])?;
 
         let deadline = Instant::now() + Duration::from_secs(30);
@@ -1183,11 +1692,19 @@ fn focus_target(
         }
     }
 
-    let (x, y) = center.ok_or_else(|| {
-        anyhow!(
-            "inspect tree could not locate {phase} TreeItem refno={expected_refno} after command-line locate {locate_target}"
-        )
-    })?;
+    let Some((x, y)) = center else {
+        // UI 把「树外元素」「已不在这条路径上」「子层还在路上」写在自己的日志面板里，
+        // 而带 refno 过滤的那份 dump 三种情况下都是同一个空文件。失败时留一份全量快照，
+        // 否则三种截然不同的失败在证据里长得一模一样。
+        let full = inspect(paths, &["tree"])
+            .unwrap_or_else(|error| format!("inspect tree failed while dumping: {error:#}"));
+        let dump = dir.join(format!("inspect-tree-{phase}-failed.txt"));
+        fs::write(&dump, &full)?;
+        bail!(
+            "inspect tree could not locate {phase} TreeItem refno={expected_refno} after command-line locate {locate_target}; full tree dump: {}",
+            dump.display()
+        );
+    };
     inspect(paths, &["click", &x.to_string(), &y.to_string()])?;
     Ok(())
 }
@@ -1245,6 +1762,9 @@ fn resolve_ui_refno_by_name(name: &str) -> Result<String> {
         .context("UI refno lookup row has no refno")
 }
 
+/// 生产路径已换 `command_input_rect`（最宽输入框）；留作测试对照展示
+/// 「第一个 TextInput」这种取法会定位到哪里。
+#[cfg(test)]
 fn role_rect_center(tree: &str, role: &str) -> Option<(i32, i32)> {
     tree.lines().skip(1).find_map(|line| {
         let fields = line.split_whitespace().collect::<Vec<_>>();
@@ -1252,6 +1772,45 @@ fn role_rect_center(tree: &str, role: &str) -> Option<(i32, i32)> {
             .then(|| accesskit_rect(line))
             .flatten()
     })
+}
+
+/// plant-ui 的命令行：整屏最宽的那个文本输入框。
+///
+/// 不能拿「dump 里第一个 TextInput」顶替。右侧属性面板一有选中元素就冒出八个 202
+/// 宽的编辑框，而 AccessKit 的节点顺序并不稳定：data 那一格还没选中过元素、屏幕上
+/// 只有命令行一个输入框，所以蒙对了；room-member 那一格排在前面的是属性框，命令就
+/// 敲进了属性面板——界面一声不吭，30 秒轮询的是一棵没人动过的树。
+fn command_input_rect(tree: &str) -> Result<(i32, i32)> {
+    let mut inputs = tree
+        .lines()
+        .skip(1)
+        .filter(|line| line.split_whitespace().nth(1) == Some("TextInput"))
+        .filter_map(|line| Some((accesskit_width(line)?, accesskit_rect(line)?)))
+        .collect::<Vec<_>>();
+    inputs.sort_by_key(|(width, _)| std::cmp::Reverse(*width));
+    let (width, center) = *inputs
+        .first()
+        .context("plant-ui shows no text input at all")?;
+    ensure!(
+        inputs.iter().filter(|(other, _)| *other == width).count() == 1,
+        "plant-ui shows several {width}-wide text inputs; the command line is ambiguous"
+    );
+    Ok(center)
+}
+
+fn text_input_holds(tree: &str, text: &str) -> bool {
+    tree.lines()
+        .skip(1)
+        .any(|line| line.split_whitespace().nth(1) == Some("TextInput") && line.contains(text))
+}
+
+fn accesskit_width(line: &str) -> Option<i32> {
+    line.split_whitespace()
+        .nth(3)?
+        .split_once('x')?
+        .0
+        .parse()
+        .ok()
 }
 
 fn accesskit_rect(line: &str) -> Option<(i32, i32)> {
@@ -1553,6 +2112,19 @@ fn assert_scenario(
             "I-4 M1 AABB/mesh snapshot did not change"
         );
     }
+    if s.id == "f5" {
+        ensure!(
+            after
+                .pointer("/payload/pe/cata_hash")
+                .and_then(Value::as_str)
+                .is_some_and(|hash| !hash.is_empty())
+                && after
+                    .pointer("/payload/inst")
+                    .and_then(Value::as_array)
+                    .is_some_and(|rows| !rows.is_empty()),
+            "I-3 F5 created a pipeline component without renderable catalogue geometry"
+        );
+    }
     if matches!(s.expect, Expect::Deleted { .. }) {
         ensure!(
             after
@@ -1607,10 +2179,19 @@ fn assert_macro_parity(s: &Scenario, log: &str, after: &Value) -> Result<()> {
                 "F4 Surreal PE name does not match E3D"
             );
         }
-        "f5" => ensure!(
-            log.contains("CODEX_L3_FTUB"),
-            "F5 Q CE did not report the new FTUB"
-        ),
+        "f5" => {
+            ensure!(
+                log.contains("CODEX_L3_FTUB"),
+                "F5 Q CE did not report the new FTUB"
+            );
+            ensure!(
+                log.contains("Spref /ACP1000-Trough/")
+                    && log.contains("Lstube /ACP1000-Trough/")
+                    && !log.contains("Nulref")
+                    && !log.contains("Unknown Ref"),
+                "F5 copied an FTUB without resolved SPREF/LSTUBE: {log}"
+            );
+        }
         "f6" => {
             ensure!(
                 log.contains("24384/22404"),
@@ -1651,13 +2232,16 @@ fn contains_number(value: &Value, expected: f64, tolerance: f64) -> bool {
     }
 }
 
-fn database_snapshot(s: &Scenario) -> Result<Value> {
-    let pe = if s.refno.is_empty() {
+fn database_snapshot(s: &Scenario, dynamic_refno: Option<&str>) -> Result<Value> {
+    let refno = dynamic_refno
+        .map(|value| value.replace('/', "_"))
+        .unwrap_or_else(|| s.refno.to_owned());
+    let pe = if refno.is_empty() {
         "NONE".into()
     } else {
         format!(
             "(SELECT name, noun, owner, deleted, cata_hash FROM pe:{})[0]",
-            s.refno
+            refno
         )
     };
     let roots = scenario_roots(s)
@@ -1672,7 +2256,7 @@ fn database_snapshot(s: &Scenario) -> Result<Value> {
     let sql = format!(
         "RETURN {{ watermark: (SELECT * FROM dbnum_watermark:{db})[0], pe: {pe}, pending: (SELECT action, target_refno, attempts, last_error FROM model_update_pending WHERE dbnum = {db} AND action NOT IN ['room_recalc_panel', 'room_recalc_element']), room_pending: (SELECT action, target_refno, attempts, last_error FROM model_update_pending WHERE dbnum = {db} AND action IN ['room_recalc_panel', 'room_recalc_element']), inst: (SELECT in, out, aabb, world_trans FROM inst_relate WHERE in = pe:{refno}), geo: (SELECT in, out FROM geo_relate WHERE in IN [{roots}]), owner: (SELECT in, out FROM pe_owner WHERE in = pe:{refno}), room: (SELECT in, out, room_num, inside_count, center_dist FROM room_relate WHERE out = pe:{refno}) }};",
         db = s.dbnum,
-        refno = if s.refno.is_empty() { "0_0" } else { s.refno },
+        refno = if refno.is_empty() { "0_0" } else { &refno },
     );
     let response = surreal_sql(&sql)?;
     Ok(json!({"sql": sql, "payload": surreal_result(&response)?}))
@@ -1904,8 +2488,8 @@ fn write_report(run_dir: &Path, header: &RunHeader, reports: &[CaseReport]) -> R
     writeln!(file, "| baseline | {} |", header.baseline)?;
     writeln!(
         file,
-        "| bypasses | keep-stack={} skip-restore={} |",
-        header.keep_stack, header.skip_restore
+        "| bypasses | keep-stack={} skip-restore={} no-ui={} bootstrap-store={} |",
+        header.keep_stack, header.skip_restore, header.no_ui, header.bootstrap_store
     )?;
     if let Some(failure) = &header.stack_failure {
         writeln!(
@@ -1940,6 +2524,97 @@ fn write_report(run_dir: &Path, header: &RunHeader, reports: &[CaseReport]) -> R
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn scratch(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "l3-suite-{label}-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn source_assets(root: &Path) -> PathBuf {
+        let source = root.join("assets");
+        fs::create_dir_all(source.join("config")).unwrap();
+        fs::create_dir_all(source.join("fonts")).unwrap();
+        fs::write(
+            source.join("config/e3d.project.ron"),
+            "(\n    db_host: \"ws://localhost:8009\",\n)\n",
+        )
+        .unwrap();
+        fs::write(source.join("fonts/regular.ttf"), "font").unwrap();
+        fs::write(source.join("manifest.json"), "{}").unwrap();
+        source
+    }
+
+    fn service_config(root: &Path, port: u16) -> PathBuf {
+        let path = root.join("DbOption.toml");
+        fs::write(
+            &path,
+            format!(
+                "v_ip = \"localhost\"\nv_port = {port}\nsurreal_ns = 1516\nproject_name = \"AvevaMarineSample\"\nmdb_name = \"ALL\"\n"
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    /// 回归：UI 曾经拿着仓库那份钉死 8009 的项目配置起来，模型树里一个夹具元素都没有，
+    /// 而失败措辞跟「元素真的不存在」分不开。本轮资产根必须换掉 `config`。
+    #[test]
+    fn the_staged_asset_root_replaces_the_checked_in_project_config() {
+        let scratch = scratch("asset-root");
+        let source = source_assets(&scratch);
+        let out = scratch.join("run");
+        fs::create_dir_all(&out).unwrap();
+
+        let staged = stage_ui_asset_root(&source, &out).unwrap();
+        assert!(!staged.join("config/e3d.project.ron").exists());
+        assert_eq!(
+            fs::read_to_string(staged.join("fonts/regular.ttf")).unwrap(),
+            "font"
+        );
+        assert!(staged.join("manifest.json").is_file());
+        assert!(stage_ui_asset_root(&source, &out).is_err());
+
+        write_ui_project_config(&staged, &service_config(&scratch, SURREAL_PORT)).unwrap();
+        let written = fs::read_to_string(staged.join("config/e3d.project.ron")).unwrap();
+        assert!(
+            written.contains("db_host: \"ws://localhost:8048\""),
+            "{written}"
+        );
+        assert!(written.contains("project_code: \"1516\""), "{written}");
+        assert!(
+            written.contains("api_host: \"http://127.0.0.1:8028\""),
+            "{written}"
+        );
+        assert!(!written.contains("8009"), "{written}");
+
+        let _ = fs::remove_dir_all(scratch);
+    }
+
+    /// 配置漂到套件没绑的端口上时当场停：安静地连到别的库比报错难查得多。
+    #[test]
+    fn the_ui_project_config_refuses_an_endpoint_the_suite_does_not_bind() {
+        let scratch = scratch("endpoint-drift");
+        let source = source_assets(&scratch);
+        let out = scratch.join("run");
+        fs::create_dir_all(&out).unwrap();
+        let staged = stage_ui_asset_root(&source, &out).unwrap();
+
+        let error = write_ui_project_config(&staged, &service_config(&scratch, 8009))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("8009") && error.contains("8048"), "{error}");
+        assert!(!staged.join("config/e3d.project.ron").exists());
+
+        let _ = fs::remove_dir_all(scratch);
+    }
 
     #[test]
     fn scenario_csv_is_ordered_deduplicated_and_rejects_unknown_ids() {
@@ -1982,21 +2657,29 @@ mod tests {
 
     #[test]
     fn plant_ui_runtime_uses_an_isolated_absolute_settings_file() {
-        let root = std::env::temp_dir().join(format!("l3-ui-runtime-{}", std::process::id()));
+        let root = scratch("ui-runtime");
         let repo = root.join("gen-model");
         let ui = root.join("plant-ui");
         let out = root.join("evidence");
         fs::create_dir_all(repo.join("resource/surreal")).unwrap();
         fs::create_dir_all(ui.join("assets/meshes")).unwrap();
         fs::create_dir_all(&out).unwrap();
+        let config = service_config(&root, SURREAL_PORT);
 
-        let runtime = prepare_plant_ui_runtime(&repo, &ui, &out).unwrap();
+        let runtime = prepare_plant_ui_runtime(&repo, &ui, &out, &config).unwrap();
         assert!(runtime.settings_file.is_absolute());
         assert!(runtime.settings_file.starts_with(&out));
-        assert_eq!(runtime.asset_root, ui.join("assets"));
+        // 资产根也必须是本轮自己的：共用仓库那份就等于共用它写死的库地址。
+        assert!(runtime.asset_root.starts_with(&out));
+        assert!(runtime.asset_root.join("meshes").is_dir());
+        let project =
+            fs::read_to_string(runtime.asset_root.join("config/e3d.project.ron")).unwrap();
+        assert!(project.contains("ws://localhost:8048"), "{project}");
         let settings = fs::read_to_string(runtime.settings_file).unwrap();
         assert!(settings.contains("http://127.0.0.1:8028"));
         assert!(settings.contains("assets/meshes"));
+
+        let _ = fs::remove_dir_all(root);
     }
 
     /// 场景表是数据，但它得是**自洽**的数据：V 级判据整个押在这两列上，而写错
@@ -2050,6 +2733,7 @@ mod tests {
             Some("scripts/e3d/l3_ftub_add_restore.mac")
         );
         assert_eq!(scenario.required_refnos, ["24384/22402", "24384/22403"]);
+        assert_eq!(scenario.required_project_dbs, [(5052, "CATA")]);
         assert_eq!(scenario_roots(scenario), ["24384/22402"]);
 
         let apply = fs::read_to_string(
@@ -2058,6 +2742,8 @@ mod tests {
         .unwrap();
         assert!(apply.contains("NEW FTUB /CODEX_L3_FTUB"), "{apply}");
         assert!(apply.contains("COPY =24384/22403"), "{apply}");
+        assert!(apply.contains("Q SPRE"), "{apply}");
+        assert!(apply.contains("Q LSTU"), "{apply}");
         assert!(
             !apply.contains("GENSEC"),
             "stale structural fixture leaked into F5: {apply}"
@@ -2096,13 +2782,29 @@ mod tests {
         let preflight = run_scenario
             .find("ensure_current_scenario_refnos")
             .expect("current-file preflight must exist");
+        let project_db_preflight = run_scenario
+            .find("ensure_scenario_project_databases")
+            .expect("project DB dependency preflight must exist");
         let mutation = run_scenario
             .find("fixture::run_guarded_mutation")
             .expect("guarded mutation must exist");
         assert!(
-            preflight < mutation,
+            preflight < mutation && project_db_preflight < mutation,
             "a stale fixture refno must stop before E3D can enter the mutation macro"
         );
+    }
+
+    #[test]
+    fn missing_catalogue_dependency_stops_before_e3d_mutation() {
+        let root = std::env::temp_dir().join(format!("l3-e3d-cata-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("ams000")).unwrap();
+        let error = ensure_scenario_project_databases(&root, &[(5052, "CATA")])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("ams5052_0001"), "{error}");
+        assert!(error.contains("CATA dbnum 5052"), "{error}");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2150,6 +2852,31 @@ mod tests {
             accesskit_rect("123 Button 10,20 30x40 target"),
             Some((25, 40))
         );
+    }
+
+    /// 回归：属性面板一有选中元素就冒出一排 202 宽的编辑框，而 AccessKit 的节点顺序
+    /// 不稳定。取「第一个 TextInput」会把定位命令敲进属性面板，界面一声不吭。
+    #[test]
+    fn the_command_line_is_the_widest_text_input_not_the_first_one() {
+        let tree = "step=21500 ppp=1.5 nodes=470\n\
+            1 TextInput 1375,313 202x18        0\n\
+            2 TreeItem 4,108 289x24           refno=24383/101895; name=/AIOS-INC-DATA\n\
+            3 TextInput 1375,237 202x18        /AIOS-INC-DATA-EQ\n\
+            4 TextInput 326,951 364x21         \n\
+            5 TextInput 1375,361 202x18        AIOS baseline\n";
+        assert_eq!(command_input_rect(tree).unwrap(), (508, 961));
+        assert_eq!(role_rect_center(tree, "TextInput"), Some((1476, 322)));
+
+        // 「敲进去了」只认输入框，树行里出现过同一个名字不算数。
+        assert!(text_input_holds(tree, "/AIOS-INC-DATA-EQ"));
+        assert!(!text_input_holds(tree, "/AIOS-INC-ROOM-MEMBER-EQ"));
+        assert!(!text_input_holds(tree, "refno=24383/101895"));
+
+        let ambiguous = "step=1 ppp=1 nodes=2\n\
+            1 TextInput 0,0 364x21         \n\
+            2 TextInput 0,40 364x21         \n";
+        assert!(command_input_rect(ambiguous).is_err());
+        assert!(command_input_rect("step=1 ppp=1 nodes=0\n").is_err());
     }
 
     #[test]

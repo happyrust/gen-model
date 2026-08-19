@@ -4,21 +4,266 @@
 
 ### 新增
 
-- 增量窗口收集统一为 `collect_window → collect_net_window` 单一路径（ADR-031），
-  逐会话实体回放由默认关闭的 `legacy_session_replay` feature 隔离；生产构建不再编译
-  回放 API，Python 调试绑定、诊断探针与 replay oracle 显式启用。
-- core.dll `DB_Noun::primaryList` 门控改为已跟踪的 E3D 3.1 权威快照：1931 个
-  noun 中 1879 个使用真值，52 个 unknown 保守为 true；净窗口三态与 DTO 不变。
+- 引入 ADR-037 dabacon 快照完整性契约：`pdms-io` 以单一打开句柄生成稳定文件身份
+  `SnapshotToken`，净窗口、冻结会话和模型计划终态存在性复核共享同一文件世代与
+  target root；`parse_pdms_db` 增加不依赖属性字典的最小元素身份解码。
+
+- `watch_dbnums` 限定模式增加权威 CATA 引用清单与元素级引用闭包：完整扫描继续裁决
+  CATA 身份、重复文件和项目优先级，但不排全量 Catalogue 批次；模型窗口只索引被监听
+  DESI 与裁决后的 CATA 文件。任务与健康接口新增依赖阶段、文件、解析/缺失计数和
+  300 秒停滞截止时间。
+
+- 暂存窗口按 sesno 拆窗（ADR-017 修订二，形态 C：预算式定窗 + 触顶收窄兜底）。
+  第一层：`AIOS_STAGING_WINDOW_MAX_SESSIONS` 会话预算在**执行侧**收窄应用窗口右端，
+  切点只落在真实 SAVEWORK 边界（会话号稀疏，取第 N 个真实会话而非按号算术）；预览与
+  看门狗仍看整段待应用窗口。第二层：资源废弃档位触顶不再只记阻断，把该 dbnum 的会话
+  预算收窄一档（减半、地板 1 个会话）再交还，预算 1 仍触顶才是真阻断；收窄记录追平
+  `file_latest` 时清除。截断窗口提交成功后余量**立即重排**（不等下一轮重扫），
+  `file_latest_sesno` 与并入基线沿用冻结批次那份——余量不是新观察，上界也绝不改写
+  `FileObservation.file_latest_sesno`（源码钉）。相位纪元批次（`epoch_id > 0`）一律
+  不参与收窄（ADR-025 phase totals 按批次记账，截断算不算相位完成未厘清）。提交侧
+  一行未改：水位部分推进与 `align_end_sesno` 本来就容纳更窄的右端。原子单元变小
+  （子窗口间可见真实保存点的中间态、跨子窗口的根会重复生成）待业主签字。
+
+- 增量链增加独立阶段控制：`data_incremental`、`model_incremental`、
+  `room_incremental` 分别控制数据、模型、房间消费，缺省均开启，并支持对应
+  `AIOS_*_INCREMENTAL` 环境变量覆盖。关闭数据阶段仍扫描入队；关闭模型阶段时数据、
+  水位与 durable 模型计划照常提交，模型积压留待恢复；下游不得越过未完成上游。
+  `/api/v1/health` 同时暴露三个最终生效值，供单阶段调试直接确认运行姿态。
+
+- 净窗口收集下沉到 pdms-io：`session_index_diff`（会话索引双根差分）与 `net_window`
+  （净三态 → 操作流合成）整体从 `src/data_interface/` 迁到 `pdms_io::session_index_diff`
+  / `pdms_io::net_window`，上层按新路径直接引用，`data_interface` 不做转发。理由是
+  **被它替代的逐会话回放本来就在那一层**（`PdmsIO::collect_increment_eles` 一家，
+  `legacy_session_replay` feature 门后），把替代品建在上一层等于同一个问题两份实现
+  分居两个 crate；更要紧的是 `walk_tree` 复刻的是 pdms-io 的 `btree_search_optimized_recursive`
+  路由规则（同键首见者胜、升序前缀、哨兵最左分支、`[本键,下一键)` 区间），复刻件与
+  正本隔着 crate 边界时编译器帮不上忙，正本一改这边不会红、只会悄悄口径漂移（后果是
+  漏报删除）。两个模块本就零 `crate::` 依赖（只用 `aios_core` + `pdms_io`），迁移是
+  平移不是解耦。纯单测 24 条跟着下沉，在 pdms-io 里原样通过。
+  **留在本仓**的是批次层的关切：`IncrementPipeline::collect_window`（会话页清单截取、
+  `net_caliber_warning` 口径标注、`CollectedWindow` 形状、唯一入口源码断言），以及三条
+  跨结构 live 对拍——它们的参照臂 `collect_changes` 是 legacy 回放外加两个 Save Work
+  终稿补丁的包装、计时对象是生产入口 `collect_window`，在 pdms-io 里够不着，现迁入
+  `increment_pipeline.rs` 的 `cache_tests`。性质 h/i（`db8000_session_pairs`）不动，
+  改调 pdms-io 的收集器——它是这次平移的验收面：20 条全绿，其中
+  `index_diff_matches_replay_folding_on_every_case_window` 与
+  `net_window_collector_matches_replay_ops_on_every_case_window` 证明净口径逐案例
+  仍与回放折叠一致。行为零改动，不涉及口径变更。
 
 ### 修复
 
-- 退役配置探测改为独立读取原始 TOML，并覆盖非布尔值、配置错误、空值与非 Unicode
-  环境变量；issue-019 固定窗口严格钉住 changed=3、a/m/d=0/1/2、会话和水位 26、
-  两个精确墓碑，强制空跑红证与原文件 SHA 恢复均已复验。
-- `diff_ele_data` 收敛到 `old-pdms-io` 单一实现，净窗口与 legacy 对拍共享同一属性/
-  UDA/children diff；不可读子页、层级异常和终稿不可解析按规格跳过并计数。
-- 去除构建对宿主 `protoc` 的依赖：`dpcsync` 检入等价生成文件并移除
-  `prost-build`，主仓删除未使用的直接依赖并钉住新 vendor 提交。
+- 非白名单终稿解析失败、已选中索引 child 读取失败和层级未下降现在硬失败，不再构造
+  可推进水位的不完整窗口；MNUM 仅按代码白名单记录结构化诊断。基线 chunk 失败会
+  停止后续调度、等待 writer 收口并清空该 dbnum；CATA 扫描失败或 closure `missing`
+  不再写空/不完整缓存，下一次触发会重新扫描。
+
+- 修复复制大量节点后暂存写回把 167 条 journal/869 行合成单事务而永久停在
+  `commit`：改为按条数、字节和预计行多维分块，增加块级进展、SQL 指纹和 120 秒
+  单查询停滞边界，水位仍只由尾事务推进。
+
+- 修复 dbnum=8000 净窗口删除漏判：父元素 `children_changed` 净减少现在使用
+  目标会话 OWNER 成员表仲裁，区分删除与跨 OWNER 搬迁，并沿基会话展开
+  不可达子树；控制台新增“成员补删”计数。新增停服维护工具
+  `db_window_repair`，以独立 staging journal 纠正已提交窗口并保持水位不变。
+
+- 增量 worker 控制台补齐可观测信息：检测保存时打印保存时间与 sesno 会话区间，
+  各执行阶段打印当前窗口，完成时打印新增、修改、删除及合计数量；暂存提交超过
+  10 秒时持续输出等待心跳，避免长事务期间看起来没有响应。
+
+- 修复 `scripts/e3d/run_ams_gui.bat` 只启动裸 `des.exe`、未完成 AMS 模型树与
+  DrawList 初始化的问题：启动流程现复用 repaired AMS 链，显式绑定
+  `D:\AVEVA\Projects\E3D3.1\AvevaMarineSample` 的项目 evars，隔离用户/工作目录，
+  跳过串入 YCYK 的通用修复宏，并以 graphics finisher 与 runtime health probe 验证
+  MDB、模型树、3D 文档和编辑运行时。
+
+- 载不进 manifold 的输入网格不再拖垮整个生成根：目录与设计两条布尔路径遇到
+  `manifold-csg ingest failed`（`NotManifold` 等）时跳过该元素、标 `bad_bool` 并把
+  refno 与原因打到控制台，不再 `?` 出去。坏几何是确定性失败，抛出去只会让
+  `regen_root` 连撞 `MAX_ATTEMPTS` 判死信，同批其它根做完也没用——2026-08-19 现场
+  BEND `24384/23259` 的正实体 `NotManifold` 就把 BRAN `/C-OR-1R345-C` 卡成死信，
+  10 个根里 9 个成功，`model_ready` 仍永远停在 false。跳过的件保留未切洞的正实体
+  几何（与「没找到正实体」「差集为空」同一档降级），负实体只要有一个载不进就整件
+  跳过——少减一个洞比整件不切更难发现。
+
+- 新增布尔降级账本 `geom_error` 表：跳过之后 `model_update_pending` 那一行不再产生，
+  控制台那句也会滚走，于是「哪些件的洞没切」事后无从查起。现在每次跳过按
+  `(kind, target)` 归行落库——`kind` 为 `bool_pos` / `bool_neg`，带栽在哪块几何
+  （`geom`）、累计次数、首末时刻与最近一句错误，同一元素下次布尔做成时自动销账。
+  `SELECT * FROM geom_error ORDER BY last_seen_at DESC` 直接可查，`/api/v1/health`
+  新增 `geom_errors` 摘要（表空是 `null`）。写的是 `SUL_DB` 而不是暂存路由：诊断账本
+  要在窗口回滚后依然留着，累加计数本身也不满足 journal 的幂等要求。
+
+- CATA 引用元素改用确定性 `CONTENT` replacement，UDA 与 owner 集合先清后写；缓存键
+  同时包含源窗口右端和 CATA 文件指纹，且只在 DESI 水位提交成功后发布。依赖错误、
+  `missing > 0` 与连续 300 秒无实质进展现在使暂存窗口失败并保持水位。周期 reconcile
+  遇到运行任务时保留活动 epoch，新的 manifest 延后到任务终态后的重扫激活。
+
+- 修复启动 epoch 延后模型阶段时绕过 CATA Required 依赖，以及 CATA replacement 用
+  `FOR $row` 被 staging journal ReplaySafe 拒绝的问题；replacement 改为显式记录目标，
+  UDA 以 500 元素为上限合并事务。8000 live 重放解析 404、缺失 0，水位 33→232，
+  journal 由 1284 条降至 404 条，失败重放与成功提交均保持水位/暂存原子语义。
+
+- 修复会话预算枚举对 `pdms_io::PdmsIO::get_nearest_large_sesno` 现行 `Option<i32>`
+  返回值仍按旧 `Result` 形状解构造成的测试编译失败；缺少后继会话时现在按既有语义
+  结束稀疏会话枚举，预算切点仍只落在真实 SAVEWORK 边界。
+
+- 修正 issue #5 真实房间 live 用例的计划断言：生产计划在 BRAN `RegenRoot` 后还会为
+  被移动管件排 `PostRegenAabb`，旧断言只接受单个重生成工作项，导致正确计划被误报；
+  现在同时钉住整根重生成与靶件 AABB 后处理，仍拒绝管件自己的 `Transform` 路线。
+
+- 修正 `test_cal_rooms` 把旧 AMS 切面的 124 间房/147 块面板写死为永久不变量的问题：
+  常规 live 对拍只要求房间与面板集合非空，精确切面计数改由
+  `AIOS_EXPECT_ROOM_COUNT` / `AIOS_EXPECT_ROOM_PANEL_COUNT` 显式钉住；核心判据仍是单构件
+  增量重算与同轮全量基线逐边相等。测试的空间树前置也改走生产启动同款
+  `load_project_tree_verified`，让空间状态机进入 Ready；旧 `load_aabb_tree` 只读文件却不
+  完成发布门，当前状态机会正确报 `SPATIAL_TREE_NOT_READY`。
+
+- 生产布尔的空差集不再静默吞件（specs/009 T025 的静态半、ADR-029 决策 3 对齐到
+  manifold 生产路径）：`apply_insts_boolean_manifold_single` 与
+  `apply_cata_neg_boolean_manifold` 在 `subtract_negatives` 之后各加一道门——差集
+  网格为空（verts/idx < 3）就不写 `.mesh`、不写 `booled_id` / `inst_geo`，标记
+  `bad_bool` 并出声，与 OCC 对拍路径「切洞结果为空不覆盖已有 booled_id」同一条
+  不变量。顺手拆掉同函数里恒假的 `found_need_occ` 分支与恒真的 `success` 死代码。
+  源码断言 `empty_difference_is_bad_bool_not_a_silent_swallow` 钉住两条路径。
+
+- 挤出截面的 FRADIUS 倒角不再静默变直角：`tessellate_extrusion` 之前把轮廓顶点 z
+  （倒角半径）直接丢掉，带倒角的 `PrimExtrusion` 全部出直角、无警告、不回退。
+  现在每环先过 aios-core `wire::gen_polyline_original`（OCC 路径同一份权威实现，
+  z>0 顶点换成圆弧）再按 `Extrusion::tol()` 的弦高容差 `arcs_to_approx_lines`
+  折线化；首环建不出即失败，孔环建不出跳过（与 `gen_occ_wires` 同一容错口径）。
+  样条轮廓（`CurveType::Spline`）没有 libgm 等价实现，回 `None` 走 OCC，不再拿
+  控制点连线冒充。新增体积对拍（四角 r=20 方截面 vs 解析值 1%）、带孔轮廓不破、
+  样条回退三条单测。
+
+### 新增
+
+- 增量监听限定域：新增 `DbOption.toml` 的 `watch_dbnums` 与 `aios-database serve
+  --watch-dbnum 7998,8000`（命令行压过配置），把增量摄入的数据批次圈到指定 dbnum，
+  调试时不必再让整个项目 287 个 DESI 陪跑。SYS meta（SYST/DICT/GLB/GLOB）不受限
+  ——MDB 的成员名单就存在那些库里，圈掉只会得到「什么都没发现」的假现场。两者都
+  没给时判定与本特性引入前逐位相同（`an_unset_watch_scope_leaves_the_scope_verdict_untouched`
+  钉住）。它与 `--debug-dbnum` 各管各的（那个额外带链路追踪、刻意进不了配置文件），
+  与早已被剥夺增量否决权的 `manual_db_nums` / `exclude_db_nums` 也无关。
+  **因为形状与坑出 issue #10 的手写名单一样，护栏比 `--debug-dbnum` 只多不少**：
+  跳过理由、重扫聚合、回执声明三处都点名 `watch_dbnums` 并说清限定来自配置还是
+  命令行（配置里的名单能躺一个月，命令行的进程一停就没了，两者的处置不同），
+  与 MDB 范围判定、调试限定两种嗓音两两无交集；启动横幅同时挂在 `run_cli` 与
+  Python `full_init` 上，`/health` 新增 `watch_dbnums` / `watch_dbnums_origin` 两栏。
+  新增单测 12 条，含两条源码顺序断言（重扫三个桶的分桶次序、两个入口回执的声明
+  位置）。
+
+- 元素 diff 与 core.dll 的对照收口成两条显式已知边界（ADR-032 +
+  `docs/evidence/2026-08-19-core-element-diff-boundary-audit.md`），行为未变。原先怀疑
+  的五条分歧查证后三条不成立：OWNER 走 `elementIncluded` 我们已按 ADR-009 做了；属性
+  宇宙用 schema 表还是键并集在结果上等价；core 按 `DB_Attribute::type()` 分十二类的比较
+  **每一类最终都是精确比较**（`D3_Vector::operator==` 就是三个 double 逐个比，没有
+  epsilon），分类只因为它拿到的是 typed 值。UDA 的 `isUdaUnset` 需要
+  `hasAttributeChangedBetween` 第八参为真，而 `elementsChangedBetween` 传 0——core 自己在
+  这条链上就关着。剩下两条记为边界：**A** 成员差分只有整表三态，没有 `DB_MemberCompare`
+  的逐成员 kind（`kind == 3` → `elementReordered`），不实现是因为 `ChangeBucket::Reordered`
+  今天既没人产也没人读，新增守卫 `the_reordered_bucket_has_no_producer_and_no_consumer`
+  钉住这两头、任一被打破即红并指回 ADR（两条回退各自实测变红：`src/` 下多一处提及会被
+  点名，`user_change_buckets` 里多一行产出会报「提及数 2 ≠ 1」）；**B** 没有 `DB_Uda::oldToNew` 的旧键归一化——它
+  不是值的语义归一化而是键迁移重映射（值 > `0x171FAD39` 时查 `DB_Attribute::findOldKey` /
+  `DB_Noun::findOldKey` 换成当前 id），门是 `ityp ∈ {51, 52}`，且同一调用挂在
+  `DB_Element::getAtt` 七个重载与 `getInt` 上——**是读路径归一化而非 diff 语义**，真要对齐
+  落点在 parse 层。受影响的属性是可枚举的九个（ityp 51：`GTYP`/`USYSTY`/`QUES`/`ATNA`/
+  `AKEY`/`CURTYP`/`ATTSET`；ityp 52：`BASETYPE`/`DBELET`），全是 `TYPE=6`/`SIZE=1`，其中
+  `GTYP` 就挂在我们解析用 schema 的 55 个 noun 上；但重映射只在**值** > `0x171FAD39`（即指向
+  用户自定义的 UDA/UDET）时才动手，暴露面收窄到「用了 UDET/UDA 且定义重编号过」的项目。
+  现有 db8000 语料是常规模型数据、本就不含这类事件，探针跑出 0 也只能证明「本语料未观测
+  到」，故按 ADR-002「仅在发现与 core.dll 分歧时才对齐」两条都不预先实现。配套把
+  `AttrInfo` 加上 `#[serde(default)] pub ityp: Option<i32>`（`None` = 尚未采集，不是取值 0）：
+  `all_attr_info.json` 是 JSON 而非 bincode，旧文件不带该键照样反序列化，行为零变化；仓外
+  唯一构造点 `noun_layout.rs` 填 `None`。ityp 的数据其实已经在
+  `output/noun_attr_fields.json`（`NounLayoutExport.cs` 顺带产出的 57 字段字典转储，4271 个
+  属性、ITYP 零缺失），不需要 live E3D 采集。同时记下一条待决项：
+  `core-primary-list-e3d31.json` 的 `core_sha256` 与本机 E3D 3.1 `core.dll` 实际哈希对不上
+  （字节数精确相同、文件早于采集两个月未改动），而现有断言把该字段钉成硬编码字面量，
+  结构上抓不到这类溯源漂移。
+
+- 逐会话实体回放升级为跨仓编译隔离：`old-pdms-io` 与主仓新增默认关闭的
+  `legacy_session_replay` feature，生产构建不再编译回放 API；Python 调试绑定、诊断
+  探针与 replay oracle 显式启用。以无 feature compile-fail 和生产 check 取代可被
+  helper 绕过的 `include_str!` 字符串禁调，净窗口、HTTP DTO、水位和暂存协议不变。
+
+### 修复
+
+- ADR-017 phase-1 审计的四处收口。① **写回的确定性失败原来没有出口**：它无条件走
+  `retry_until_recovered`，那个函数返回 `(T, u32)` 而不是 `Result`——4 次快重试之后每
+  30 秒重放同一份 journal，永远不返回；而这一整段持 `STAGED_COMMIT_SERIAL`，于是一条被
+  持久层确定性拒绝的语句会把 `fast_delete`、提交后空间收敛与其余 dbnum 一起停摆，外在
+  表现是「增量跑了、模型没变、重启还是同一区间」，控制台每 30 秒刷同一行。现在按
+  `staged_writeback_failure_is_transient` 分流：断连与写冲突照旧无限等（必然自愈），其余
+  判死——记 `window_block`（reason 带原始错误）、DROP 窗口、放锁、批次转 Failed；水位没动、
+  持久层零痕迹，journal 随窗口丢，恢复路径与崩溃同一条。journal 入口早有
+  `ReplayUnsafeRejection` 判死确定性拒绝，这是它在写回端缺失的对偶物。② **而「确定性写回
+  失败」不是假想**：暂存库刻意不装 `update_dbnum_event`、持久库装，这道有意的不对称制造了
+  一类「暂存全绿、写回逐条被拒」的语句——pe 上一旦生效的是那版对数组形制 record id 用
+  `array::at` 的旧实现，整窗口写不回去，而发现它的时刻是解析与生成都已白跑之后。
+  `create_window` 现在进程内一次性读回事件定义验指纹（好版含 `string::split`），坏版直接
+  拒绝开窗、不建实例；读不到按瞬时故障放行，只缓存成功，排毒后下一次开窗自动放行。
+  ③ **资源废弃档位没有可执行的出口**：`Abandon` 只在语句入口 bail，冒泡上来与普通失败无从
+  区分，而这类失败重算不会好（同一会话区间必然再次触顶，窗口只被吸收扩大、没有按 sesno
+  拆窗的机制）。现在按档位单独记 `window_block`，reason 带测得的字节 / 行数、生效上限并点名
+  `AIOS_STAGING_ABANDON_BYTES` / `AIOS_STAGING_ABANDON_ROWS`。④ 退役
+  `sweep_orphan_staging_databases_on`：每窗口一个独立 `mem://` 实例之后跨窗口孤儿库不存在，
+  生产侧无调用方，留着只会让人以为还有一层兜底回收。回归四条（三条实测过回退变红）：
+  `a_deterministic_writeback_failure_returns_instead_of_holding_the_lock`、
+  `only_transport_and_conflict_count_as_transient_writeback_failures`、
+  `a_rejected_writeback_records_a_block_and_releases_the_window`（源码钉：记阻断 → 放窗口 →
+  交还终态）、`the_writeback_schema_gate_runs_before_the_window_instance`（源码钉：兼容门
+  必须排在建实例之前）。ADR-017 同步修订，并把两处「文档与实现不一致」写进正文：规则④的
+  水位行只读拷入例外，以及 §6 之外那档更宽的模型让位口径（`epoch_id > 0`，重扫排出来的稳态
+  DESI 也在内，这批的模型走窗口外逐根直写——决策 1 的整窗口原子在这条路径上按 ADR-025 §7
+  被交换掉了）。已知仍未解决并留在台账：拆窗机制不存在；资源计量用 SQL 文本字节做摄入代理，
+  `estimate_write_rows` 对带 WHERE 的集合写按 1 行计，两处都低报。
+
+- 去除跨仓构建对宿主 `protoc` 的依赖：`dpcsync` 删除 `build.rs` 与
+  `prost-build`，检入字节一致的 `prost` 生成文件；`old-pdms-io` 钉住该提交，主仓
+  删除未使用的直接 `dpcsync` 依赖。PROTOC/PROTOC_INCLUDE 均未设置时三仓构建与
+  回归通过，依赖树中不再出现 `prost-build`。
+
+## 2026-08-18
+
+### 新增
+
+- 增量窗口收集统一到净窗口单一口径（ADR-031）。`collect_window` 不再读灰度开关、不再走逐会话回放；预览与执行共用 `collect_net_window`（与 core.dll `elementsChangedBetween` 同思想的双根 B+ 差分）。`net_window_collection` / `AIOS_NET_WINDOW` 退役，残留设置在 `run_cli` 与 `aios_db.full_init` 打显式告警——配置层没有 `deny_unknown_fields`，删字段会让 `net_window_collection = false` 被安静忽略，字面意思与实际相反。`collect_changes` 降为 legacy 诊断入口（性质 h/i、live 对拍、逐会话取证），生产链四个函数体的源码断言禁调。口径升级对外可见（原 ADR-022 §5，现无条件生效）：改了又改回不再触发 regen；加了又删不再留墓碑行；删了又建判净修改；逐会话明细退出主口径。回退手段是 `git revert` 单路径提交，不是解开配置键。T11b 改净臂单跑；执行层双臂 A/B 退役为历史证据（2026-08-13 两轮全绿仍在档）。T18 release 完整收集按协议入档（记录项，非门）：testbed 8000 高复触窗 warm median 10ms vs 53ms ≈5.3×，Add 地板窗 128ms vs 908ms ≈7.1×；SYST 250206 列为上线后现场复测。
+
+- 两条启动检查 live 用例（`increment_manager::tests`，live 8019），钉住「已解析的库旁边新增一个库」这个现场形状。此前只有 08-17 那条单库用例，够不着的正是下面两件事：
+  - `live_startup_sweep_routes_a_new_db_to_baseline_beside_an_applied_one`——**两条路由在同一份清单里不串味**。存量库（默认 8000，`applied=file_latest` 且 pe 有数据支撑）与从未解析的新库（默认 7998）放进同一个一次性监控目录：一轮启动重扫里存量库一行都不排（`discover_batch` 的水位早退），新库排 `apply_window` 窗口 `1..=file_latest`、worker 走 `needs_initial_load` → `initialize_dbnum_baseline`、回执含「首次按需初始化完成」，收尾断言存量库水位一格没动。存量库那侧的两个前提（追平、有支撑）写成断言而不是注释——差一个会话是普通增量、pe 零行是幽灵水位，两种都会入队，「一行都不排」也就无从断言。库号可配（`AIOS_STARTUP_APPLIED_DBNUM` / `AIOS_STARTUP_NEW_DBNUM`），默认走秒级的 7998，真靶按现场口径设 7999。
+  - `live_scope_refresh_baselines_a_db_the_mdb_just_declared`——**MDB 才是增量范围的定义**。库文件全程躺在监控目录里，变的只有 MDB：把目标库从当前 MDB 的 `CURD` 里摘掉 → 重扫一行都不排，而且**连观察值都不写**（范围门排在 `record_observation` 之前，这条断言正是它的证据）；装回 CURD → `resweep_for_scope_change` 的 `scope-refresh` 重扫把它发现出来，照样走首次导入基线。复刻的是生产里「有人往 MDB 里加一个库」——那些刚进范围的设计库自己没有任何文件变更事件，不重扫就得等下次重启。夹具只动 `CURD`（`DBLS` 不碰，摘除态仍是「库存在、只是本期不在成员名单里」的合法现场），原样 CURD 存进 `queue_control:test_mdb_curd_backup` 再按原样写回；主体断言包在 `isolate_panic` 壳里，保证无论红绿都先扶正 MDB，用例开头另无条件还原一次以自愈上一轮的中断。
+  夹具助手一并抽出共用（`locate_watched_db` / `isolated_watch_dir` / `queued_row` / `restore_registered_path`）：隔离目录这一手不是图省事——沙箱里躺着二十多个范围内却从未解析的 DESI 与一批 CATA，整面重扫会把它们一起排进多相位清单，而相位屏障要靠生产 worker 的重扫循环才走得完，`drain_queue_until_empty` 单独消化不了。两条各跑两个靶、**2026-08-18 四轮全通过**（默认 7998 靶 13.13s / 13.23s，现场口径 7999 靶 75.86s / 72.37s，窗口 `1..=120`，@8019），跑后实测沙箱完全还原（CURD 71 项、备份行 0、7999 水位回到 120 且 pe 有支撑、8000 停在 209 未动），台账已同步。
+
+### 修复
+
+- core.dll 净窗口的第二层“候选元素两端属性/成员 diff”收敛为单一实现：将
+  `diff_ele_data` 提取到本地 `old-pdms-io`，legacy 会话回放与生产净窗口共同调用，
+  删除 `net_window.rs` 的复刻分支并保留 re-export 兼容原符号路径。共享纯函数覆盖
+  普通属性、显式属性、UDA（按 hash）和有序 children；vendor 新增 2 条纯单测，
+  主仓净窗口 13 项、pipeline 48 项、会话夹具 20 项、两条真实文件对拍及 issue-019
+  全链 `2 passed` 均通过。以后任一桶语义修正只改一处，不再产生净路径/回放漂移。
+
+- core.dll `DB_Noun::primaryList` 门控从恒 `true` 改为权威快照驱动。通过已初始化
+  E3D 3.1 进程直接调用 `db_get_element_info(noun_hash, 297853135)`，冻结 1931 个
+  noun：1879 resolved（true 1142 / false 737）、52 unknown；resolved false 现在
+  真正抑制 DB_UserChanges 成员事件，unknown 单列并保守为 true。快照钉住 core.dll
+  SHA，采集脚本可复跑；B-EVT-03 同时覆盖 DAMP=true、TP=false、ROD=unknown 与
+  `user_change_buckets` 实际调用。净窗口三态、children 两端持久化、模型 Regen 与
+  公开 DTO 均未改变。
+
+- 净窗口审核缺口闭环：退役键探测从 `DbOptionExtFields` 整体反序列化中拆出，独立读取原始 TOML，键值无论布尔/字符串/整数都报警；配置缺失、读取或语法错误显式报告，`AIOS_NET_WINDOW` 用 `var_os` 覆盖空值与非 Unicode 值，CLI/Python 接线断言收窄到函数体。Python 全链签名与 T11b 改用已跟踪 issue-019 baseline@24/final@26 作为固定真值，严格钉住 `changed_elements=3`、会话 `[25,26]`、水位 26、a/m/d=`0/1/2`、精确两个墓碑与活行恰减 2；移除运行时同源 oracle 和可变切点。正常档 `2 passed`，强制空跑在起点活行断言准确变红，清变量立即复跑通过，原 db8000 SHA 无损恢复。固定窗口还揭示 preview 会漏掉“冻结页存在但净操作为空”的会话，现改为从冻结会话页清单预建 `sessions[]` 并补纯单测。live 台账、ADR-031 回执、Web API 规格与证据同步。
+
+- `rebuild_dbnum_info_from_pe` 把整个库的 pe 行拉回客户端再在 Rust 里按 Ref0 分组（`SELECT record::id(id) AS key, sesno FROM pe WHERE dbnum = N`），目录库量级直接把 ws 连接打死：2026-08-18 现场 ams7351 有 3,345,853 行，语句吊了 9 分钟后 router 任务连同 channel 一起没了，报 `read PE stats dbnum=7351 failed: Internal error: receiving from an empty and closed channel`，把前面那趟 **2.6 小时**的全量解析整个作废（数据其实已经全部落库、统计也由事件维护到位，死在的是这次纯多余的回读），批次 failed 后按相位门连坐把 catalogue 之后的 design 相位一起堵死。两处一起改：① 聚合下沉到服务端 `GROUP BY ref0`，返回行数等于 Ref0 个数（个位数），传输量与内存与库大小无关——SQL 抽成 `pe_stat_groups_sql()` 单一事实来源供测试与生产共用；② `sync_total_async_threaded` 结尾不再无条件重算——这条路径**不摘事件**（摘事件的是 `sync_pdms` / `sync_sys_only`），统计一路由 CREATE 分支维护到位，先用两条索引支撑的便宜计数问一句「对不对得上」（`classify_stats_settlement`），对得上就只补事件写不出的身份字段（`UPDATE`，无 DELETE，事件那条行原地留着），对不上才付全量重算的代价。回归测试三条：`stats_rebuild_aggregates_server_side_one_row_per_ref0`（两个 Ref0 五行 pe，聚合必须返回 2 行；退回逐行回读即报 `missing field 'ref0'`）、`stamping_identity_keeps_event_maintained_stats_in_place`（靠事件写的 `updated_at` 区分「原地补写」与「删了重建」；退回无条件重算即红）、`absent_or_mismatched_stats_still_pay_for_a_full_rebuild`（统计整体缺席时两侧和同为 0，不许被认成「对得上」）。三条都实测过回退变红。
+
+- 初始化批次让位模型相位时，`defer_model_phase` 分支无条件打「初始化数据与水位已收口」，**失败批次照打**：2026-08-18 现场 ams7351 数据批次 failed，日志里却先宣告收口、下一行才是失败记账，排查只能绕到 `/api/v1/tasks/<id>` 回执里才拿到真错。改为按 `applied` 分叉，没推上水位的批次在同一行说清楚「未收口、模型工作不领取、原因见回执」。
+
+- `pe` 表统计事件 `update_dbnum_event` 的 DELETE 分支在统计行缺席时把整条删除语句打死：写法是 `UPSERT type::thing('dbnum_info_table', $ref_0) MERGE { count: count - 1, ... } WHERE count > 0`，而 UPSERT 在目标行不存在时走的是**创建**路径，`WHERE` 拦不住，`NONE - 1` 当场报 `Cannot perform subtraction with 'NONE' and '1'`。统计行缺席是常态而非异常——`sync_pdms` / `sync_sys_only` 为了性能先 `REMOVE EVENT` 再写 pe，那批行天生没有统计行（2026-08-18 现场：ams5100 有 236 条 pe、零条统计行）——于是 `fast_delete` 的 Ref0 range DELETE 必炸，首次按需初始化与整库重建都过不去，批次 failed 后还按相位门连坐阻断同相位其余库（现场 dbnum=5100 卡死 meta 相位，design 相位的增量窗口排在后面永远轮不到）。改为 `UPDATE ... count?:0 - 1`：`?:0` 对齐 CREATE 分支 2026-08-06 审计定下的 NONE 免疫惯例，`UPDATE` 在 SurrealDB 2.x 只改已存在的行、缺行空转——不能让删除事件凭空造一条统计行，那条 MERGE 压根不写 `dbnum`，造出来的行连 `DELETE dbnum_info_table WHERE dbnum = N` 都清不掉；缺席的统计交给 `rebuild_dbnum_info_from_pe` 重算。事件 SQL 抽成 `dbnum_event_sql()` 单一事实来源供测试与装载共用，回归测试 `deleting_pe_rows_without_a_stats_row_neither_fails_nor_fabricates_one` 走 mem 引擎复刻现场形状（事件装载**前**写 pe，再删），已实测：回退成旧写法即报同一个 `TrySub("NONE", "1")`。
+
+- 净窗口收集（ADR-022）在一切真实库文件上必现失败：cea58087（08-14）把三种真实文件常态升成了整窗硬错误，回退为「跳过 + 记账」并把回归钉进单测。三处分别是——① 索引树下降时**子页读不动**、② **子页层级不低于父层级**：这两种都是回收页残留的形状，生产点查 `filter_index_data` 对它们同样静默跳过，点查到不了的分支本就不参与触达集，跳过整枝不损完整性，现在计入 `unreadable_child_pages` / `level_anomalies`（索引**根页**读不动仍是硬错误，那是证明不了完整性）；③ **终稿记录解析失败**：全窗 1..=230 实测 64 条字典缺项的系统记录必现（首例 `16192_1` 报 `MNUM not exist in attr_info_map`），而回放路径对同一批记录同样以 `None` 操作落空、从未入库，硬失败等于每个含系统段的窗口整批打死，现在跳过 + `unparseable_finals` 计数 + **聚合**警告（逐条刷屏会把回执淹掉）。三处容忍都不许静默：形状进 stats、明细随回执透出。单测 `level_regressions_and_routing_anomalies_are_counted_and_flags_stay_blind`、`unreadable_child_pages_are_skipped_with_a_count_and_a_bad_root_is_fatal`、`an_unparseable_final_is_skipped_counted_and_aggregated` 各自带回归背景注释，改回硬错误即红。ADR-022 与 specs/003（Edge Cases + FR-8）同步修订并附修订说明。两条 ams8000 纯文件 live 用例复验通过、台账已同步。
+
+- 增量更新审核（2026-08-18）五项收口。① watcher 重扫把被 `--debug-dbnum` 圈掉的库混进「不在 MDB 声明名单」聚合——对它们那句是**事实性错误**（在名单里，只是被调试限定圈掉，范围判定本轮根本没问过），正是 issue #10 的嗓音混同：D7 护栏一只钉了 `skip_reason` 的两种说法无交集，没钉 sweep 真的走它（`skip_reason` 在生产路径上无人调用）。现分成两个聚合桶各说各话（保留聚合防刷屏），调试桶点名 `--debug-dbnum` 并自证「不是 MDB 范围判定」，分桶判定复用 `debug_scope_admits` 与 `skip_reason` 同序（调试门在前），源码形状回归 `the_sweep_keeps_debug_exclusions_out_of_the_scope_bucket` 钉住。② 净窗口两种容忍形状 `unreadable_child_pages` / `level_anomalies` 只进 stats，而 stats 在 `collect_window` 拼完口径 warning 后即被丢弃——批次回执上「跳过整枝」实际静默，只有 python 探针的 `to_json` 能看见，违 spec-003 FR-8「任何一种容忍都不许静默」。现随口径标注透出 `不可读子页(t/b)` / `层级异常(t/b)`（t/b = target/base，与台账叙述口径一致），口径标注抽成 `net_caliber_warning` 纯函数，单测 `the_net_caliber_warning_carries_the_tolerated_shape_counts` 钉住，从 warning 里删掉计数即红。③ `debug_scope::trace` 的载荷改为闭包惰性构造：json! 实参是急切求值的，此前八个追踪点在未启用时也逐次构造 JSON（扫描点每轮全面重扫逐文件走到），调度器入队点还无条件取 `InitializationCoordinator` 的 allows+snapshot 两把锁——与「未启用零成本」的自述不符；闭包在 debug_scope 锁外执行以免锁序问题，惰性由 `tracing_is_inert_until_the_switch_is_set` / `tracing_ignores_dbnums_outside_the_debug_scope` 用会 panic 的载荷闭包钉住。④ `mode_notice` 说「其余 DESI 一律跳过」但豁免名单是 COLD_START_DB_TYPES（SYST/DICT/GLB/GLOB），CATA 一样被圈掉——措辞改为如实点名「DESI、CATA 等非 SYS meta」（行为未变：调试限定本就只该放行 SYS meta，CATA 是 ADR-025 正式数据阶段，要不要豁免属设计裁决，本轮不动）。⑤ `aios-database trace` 子命令写死 `curl.exe`，在 CentOS 7 部署目标上必挂——按平台 cfg 选 `curl`/`curl.exe`。
 
 ## 2026-08-17
 
@@ -28,6 +273,7 @@
 
 ### 修复
 
+- db7999 设备九场景夹具首次全绿（9/9 PASS，四平面断言全过，隔离副本 `test-increment`）。此前两轮全红于 `saved session N is absent from data task merged_sesnos`，`--debug-dbnum 7999` 追踪定位为**夹具缺陷而非引擎回归**：`execute_fixture_and_wait` 在 SAVEWORK 之后轮询 `POST /update/preview` 等窗口张开，而预览唯一的写操作 `record_observation` 会把 merged_sesnos 冻结基线推到本窗口右端（红轮 trace 里全部 19 条入队记录 frozen_prev==右端），并入名单按规格恒空。就绪门改为本地读镜像文件头（`file_latest_sesno`，镜像拷贝本就同步、无需轮询），门票与预期会话号落盘 `execute-gate.json`；删除只剩这一个调用方的 `find_observed_window`。源码形状回归测试 `the_execute_gate_reads_the_file_header_not_preview` 钉住「就绪门不得咨询 preview」。红轮诊断与绿轮证据：`test-increment/runs/fixture7999-20260817-{145932-trace,154724-gatefix}/`，台账已同步。
 - 初始化执行过程审核（ADR-025 链路）四项收口：
   1. F6 重扫读不出 DESI 最新会话号时此前只 warn 就跳过——清单缺着这个库照样宣告 `data_ready`、模型门照开，库持续读不动时外面毫无痕迹（DICT/CATA 头不可读却是阻断 Meta 的，同一种「观察不完整」两副面孔）。现在读失败记进对应阶段 blockers，该阶段保持可见地不就绪，共享盘瞬态靠周期对账重扫（默认 300s）恢复即解。源码钉 `sweep_skips_always_leave_a_phase_blocker`。
   2. 批次终态阻断数据阶段的判据从任务标签改为数据窗口本身（`batch_failure_blocks_data_phase`）：数据 Applied 而模型/副作用失败的 Partial 不再 `mark_failed`——那些失败在 durable pending 的重试账与死信门槛里，再关数据门只会让同阶段其余库连坐一个对账周期；数据批次 Failed 折成的 Partial（有单元成功）照旧阻断。单测钉 `only_an_unsettled_data_window_blocks_the_data_phase`。

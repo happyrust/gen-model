@@ -283,28 +283,94 @@ fn preserve_unparsed_pe_metadata(
     preserved
 }
 
+/// 按 Ref0 聚合一个 dbnum 的 pe 统计。**回归测试与生产共用这一份文本。**
+///
+/// 返回行数等于 Ref0 个数，与库里有多少 pe 行无关——这正是它存在的理由，
+/// 见 [`rebuild_dbnum_info_from_pe`] 的注释。
+fn pe_stat_groups_sql(dbnum: u32) -> String {
+    format!(
+        "SELECT string::split(record::id(id), '_')[0] AS ref0, count() AS count, \
+         math::max(sesno ?? 0) AS max_sesno, \
+         math::max(<int> string::split(record::id(id), '_')[1]) AS max_ref1 \
+         FROM pe WHERE dbnum = {dbnum} GROUP BY ref0;"
+    )
+}
+
+/// 只补 [`dbnum_event_sql`] 写不出的身份字段，不碰 count / sesno。
+///
+/// 与重建的关键差别是**没有 DELETE**：事件维护出来的那条行原地留着。
+fn stamp_dbnum_info_identity_sql(dbnum: u32, file_name: &str, db_type: &str) -> String {
+    let file_name = file_name.replace('\'', "\\'");
+    let db_type = db_type.replace('\'', "\\'");
+    format!(
+        "UPDATE dbnum_info_table SET file_name = '{file_name}', db_type = '{db_type}' \
+         WHERE dbnum = {dbnum};"
+    )
+}
+
+/// total sync 结尾要不要付全量重算的代价。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StatsSettlement {
+    /// 统计已由事件维护到位，只补身份字段。
+    StampIdentity,
+    /// 统计缺席或对不上，从 pe 全量重算。
+    Rebuild,
+}
+
+/// 纯判定：两侧计数对得上、且统计行确实存在，才算「事件已经维护到位」。
+///
+/// `info_rows > 0` 这一半不能省——统计整体缺席时两侧的和同为 0（空库，或
+/// `sync_sys_only` 摘着事件写出来的那批行），`pe_count == info_count` 会成立，
+/// 但那不是「维护到位」，是「一条都没记」。
+fn classify_stats_settlement(
+    pe_count: usize,
+    info_rows: usize,
+    info_count: usize,
+) -> StatsSettlement {
+    if info_rows > 0 && pe_count == info_count {
+        StatsSettlement::StampIdentity
+    } else {
+        StatsSettlement::Rebuild
+    }
+}
+
+/// 一个 Ref0 的统计聚合结果（服务端 `GROUP BY` 直接产出，一个 Ref0 一行）。
 #[derive(Deserialize)]
-struct PeStatRow {
-    key: String,
-    // Legacy/baseline PE rows can predate per-element session tracking.
-    sesno: Option<i32>,
+struct PeStatGroup {
+    /// `record::id(id)` 下划线左半段，仍是字符串：投影里不做 `<int>` 转换，
+    /// 好让形制不对的 id 在 Rust 侧报出原文，而不是在 SurrealQL 里静默成 NONE。
+    ref0: String,
+    count: usize,
+    /// 投影里已经 `sesno ?? 0`，正常永远是数值；留 `Option` 只是不让一个
+    /// 意外的 NONE 把整次重建打成失败。
+    max_sesno: Option<i32>,
+    max_ref1: Option<u64>,
 }
 
 #[cfg(test)]
 mod pe_stat_row_tests {
-    use super::{PeStatRow, preserve_unparsed_pe_metadata};
+    use super::{PeStatGroup, preserve_unparsed_pe_metadata};
     use aios_core::db::{DbBasicData, EleDataEntry};
     use aios_core::pdms_types::RefU64;
     use dashmap::DashMap;
     use std::collections::BTreeMap;
 
+    /// 会话号缺失是历史 pe 行的常态（早于逐元素会话跟踪）。投影里的 `sesno ?? 0`
+    /// 已经把它折平，但聚合列本身仍可能整列缺席（空组、旧引擎），解码不许因此失败。
     #[test]
     fn legacy_null_session_is_accepted() {
-        let row: PeStatRow =
-            serde_json::from_value(serde_json::json!({"key": "24384_22403", "sesno": null}))
-                .unwrap();
+        let group: PeStatGroup = serde_json::from_value(serde_json::json!({
+            "ref0": "24384",
+            "count": 3,
+            "max_sesno": null,
+            "max_ref1": null,
+        }))
+        .unwrap();
 
-        assert_eq!(row.sesno.unwrap_or_default(), 0);
+        assert_eq!(group.ref0, "24384");
+        assert_eq!(group.count, 3);
+        assert_eq!(group.max_sesno.unwrap_or_default(), 0);
+        assert_eq!(group.max_ref1.unwrap_or_default(), 0);
     }
 
     #[test]
@@ -400,42 +466,48 @@ mod pe_stat_row_tests {
 /// 事件只做增量维护：漏记（如事件曾被坏版本覆盖）造成的 count 缺口不会自愈，
 /// 这里是唯一的纠偏入口。基线路径（`initialize_dbnum_baseline`）在统计不齐时
 /// 自动调用；已有基线的库用 `rebuild_dbnum_stats` bin 手动触发。
+///
+/// **聚合必须留在服务端。** 旧写法是 `SELECT record::id(id) AS key, sesno FROM pe
+/// WHERE dbnum = N`，把整个库的 pe 行拉回客户端再在 Rust 里分组。目录库的量级
+/// 直接把 ws 连接打死：2026-08-18 现场 ams7351 有 3,345,853 行，语句吊了 9 分钟后
+/// router 任务连同 channel 一起没了，报 `receiving from an empty and closed
+/// channel`，把前面那趟 2.6 小时的全量解析整个作废（数据其实已经全部落库、统计
+/// 也由事件维护到位，死在的是这次纯多余的回读）。改成 `GROUP BY ref0` 之后返回
+/// 的行数等于 Ref0 个数（个位数），传输量与内存都与库的大小无关。
+///
+/// 代价说清楚：服务端逐行 `string::split` 不便宜，同一个 3.3M 行的库实测 861 秒。
+/// 这条路径只在统计**真的**对不上时才该走——常态收口见
+/// [`settle_dbnum_info_after_total_sync`]。
 pub async fn rebuild_dbnum_info_from_pe(
     dbnum: u32,
     file_name: &str,
     db_type: &str,
 ) -> anyhow::Result<usize> {
     let mut response = SUL_DB
-        .query(format!(
-            "SELECT record::id(id) AS key, sesno FROM pe WHERE dbnum = {dbnum};"
-        ))
+        .query(pe_stat_groups_sql(dbnum))
         .await
         .map_err(|error| anyhow::anyhow!("read PE stats dbnum={dbnum} failed: {error}"))?
         .check()
         .map_err(|error| {
             anyhow::anyhow!("read PE stats dbnum={dbnum} statement failed: {error}")
         })?;
-    let rows: Vec<PeStatRow> = response
+    let groups: Vec<PeStatGroup> = response
         .take(0)
         .map_err(|error| anyhow::anyhow!("decode PE stats dbnum={dbnum} failed: {error}"))?;
 
     let mut by_ref0: BTreeMap<u64, (usize, i32, u64)> = BTreeMap::new();
-    for row in &rows {
-        let sesno = row.sesno.unwrap_or_default();
-        let (ref0, ref1) = row
-            .key
-            .split_once('_')
-            .ok_or_else(|| anyhow::anyhow!("invalid PE record id: {}", row.key))?;
-        let ref0 = ref0.parse::<u64>()?;
-        let ref1 = ref1.parse::<u64>()?;
-        by_ref0
-            .entry(ref0)
-            .and_modify(|(count, max_sesno, max_ref1)| {
-                *count += 1;
-                *max_sesno = (*max_sesno).max(sesno);
-                *max_ref1 = (*max_ref1).max(ref1);
-            })
-            .or_insert((1, sesno, ref1));
+    for group in groups {
+        let ref0 = group.ref0.parse::<u64>().map_err(|error| {
+            anyhow::anyhow!("invalid PE record id Ref0 {}: {error}", group.ref0)
+        })?;
+        by_ref0.insert(
+            ref0,
+            (
+                group.count,
+                group.max_sesno.unwrap_or_default(),
+                group.max_ref1.unwrap_or_default(),
+            ),
+        );
     }
 
     execute_surreal_checked(
@@ -445,6 +517,7 @@ pub async fn rebuild_dbnum_info_from_pe(
     .await?;
     let file_name = file_name.replace('\'', "\\'");
     let db_type = db_type.replace('\'', "\\'");
+    let mut counted = 0_usize;
     for (ref0, (count, max_sesno, max_ref1)) in by_ref0 {
         execute_surreal_checked(
             &format!(
@@ -455,8 +528,87 @@ pub async fn rebuild_dbnum_info_from_pe(
             &format!("rebuild dbnum_info_table dbnum={dbnum} ref0={ref0}"),
         )
         .await?;
+        counted += count;
     }
-    Ok(rows.len())
+    Ok(counted)
+}
+
+/// `dbnum` 的两侧计数：pe 实际行数、`dbnum_info_table` 的统计行数与 count 之和。
+///
+/// 两条都是索引支撑的服务端聚合（1112 实测各 20ms 级），跟按 Ref0 分组那条
+/// 逐行 `string::split` 的语句不是一个量级——所以「要不要重建」值得先问一次。
+async fn dbnum_stat_totals(dbnum: u32) -> anyhow::Result<(usize, usize, usize)> {
+    #[derive(Deserialize)]
+    struct PeCountRow {
+        count: usize,
+    }
+    #[derive(Deserialize)]
+    struct InfoTotalRow {
+        row_count: usize,
+        total: Option<usize>,
+    }
+
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT count() AS count FROM pe WHERE dbnum = {dbnum} GROUP ALL; \
+             SELECT count() AS row_count, math::sum(count) AS total \
+             FROM dbnum_info_table WHERE dbnum = {dbnum} GROUP ALL;"
+        ))
+        .await
+        .map_err(|error| anyhow::anyhow!("read stat totals dbnum={dbnum} failed: {error}"))?
+        .check()
+        .map_err(|error| {
+            anyhow::anyhow!("read stat totals dbnum={dbnum} statement failed: {error}")
+        })?;
+    let pe_rows: Vec<PeCountRow> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("decode PE count dbnum={dbnum} failed: {error}"))?;
+    let info_rows: Vec<InfoTotalRow> = response
+        .take(1)
+        .map_err(|error| anyhow::anyhow!("decode stats total dbnum={dbnum} failed: {error}"))?;
+    let pe_count = pe_rows.first().map(|row| row.count).unwrap_or_default();
+    let (info_rows, info_count) = info_rows
+        .first()
+        .map(|row| (row.row_count, row.total.unwrap_or_default()))
+        .unwrap_or_default();
+    Ok((pe_count, info_rows, info_count))
+}
+
+/// total sync 结尾的统计收口：事件在场时统计已经是对的，不必再整表重算一遍。
+///
+/// `sync_total_async_threaded` 过去无条件调 [`rebuild_dbnum_info_from_pe`]。但
+/// 这条路径并不摘事件（摘事件的是 `sync_pdms` / `sync_sys_only`），统计一路由
+/// CREATE 分支维护到位——2026-08-18 现场 ams7351 的 pe 与统计都是 3,345,853，
+/// 分毫不差，那次重算从头到尾没有纠正任何东西，只贡献了一次把连接打死的全表回读。
+///
+/// 于是先用两条便宜的计数问一句「对不对得上」：对得上就只补事件写不出的身份字段
+/// （`file_name` / `db_type`，`rebuild_dbnum_stats` bin 拿它做身份兜底），对不上
+/// 才付全量重算的代价。
+async fn settle_dbnum_info_after_total_sync(
+    dbnum: u32,
+    file_name: &str,
+    db_type: &str,
+) -> anyhow::Result<()> {
+    let (pe_count, info_rows, info_count) = dbnum_stat_totals(dbnum).await?;
+    if classify_stats_settlement(pe_count, info_rows, info_count) == StatsSettlement::StampIdentity
+    {
+        execute_surreal_checked(
+            &stamp_dbnum_info_identity_sql(dbnum, file_name, db_type),
+            &format!("stamp dbnum_info_table identity dbnum={dbnum}"),
+        )
+        .await?;
+        println!(
+            "dbnum={dbnum} 统计与 pe 一致（{pe_count} 行 / {info_rows} 个 Ref0），\
+             跳过全量重算，只补身份字段"
+        );
+        return Ok(());
+    }
+    println!(
+        "dbnum={dbnum} 统计与 pe 不一致（pe={pe_count} 统计={info_count} 行数={info_rows}），\
+         从 pe 全量重算"
+    );
+    rebuild_dbnum_info_from_pe(dbnum, file_name, db_type).await?;
+    Ok(())
 }
 
 #[cfg(feature = "sql")]
@@ -823,8 +975,9 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn define_dbnum_event() -> anyhow::Result<()> {
-    let event_sql = r#"
+/// `pe` 表统计维护事件的**唯一**定义（回归测试与生产装载共用这一份文本）。
+pub(crate) fn dbnum_event_sql() -> &'static str {
+    r#"
     DEFINE EVENT OVERWRITE update_dbnum_event ON pe WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN {
             -- 获取当前记录的 dbnum
             LET $dbnum = $value.dbnum;
@@ -849,8 +1002,18 @@ pub async fn define_dbnum_event() -> anyhow::Result<()> {
                     updated_at: time::now()
                 };
             } ELSE IF $event = "DELETE" OR $is_delete  {
-                UPSERT type::thing('dbnum_info_table', $ref_0) MERGE {
-                    count: count - 1,
+                -- UPDATE 而不是 UPSERT（2026-08-18）：统计行缺席是**常态**——
+                -- `sync_pdms` / `sync_sys_only` 为了性能先 REMOVE EVENT 再写 pe，
+                -- 那批行天生没有统计行（实测 ams5100 有 236 条 pe、零条统计行）。
+                -- UPSERT 在缺行时走创建路径，`WHERE count > 0` 拦不住它，
+                -- `NONE - 1` 当场把整条 DELETE 语句打死：清库重建与首次按需初始化
+                -- 都过不去（2026-08-18 现场：dbnum 5100 批次 failed，报
+                -- "Cannot perform subtraction with 'NONE' and '1'"）。而且这条
+                -- MERGE 不写 dbnum，创建出来的行连 `DELETE ... WHERE dbnum = N`
+                -- 都清不掉。缺行意味着这个 Ref0 的统计本就没在维护，交给
+                -- `rebuild_dbnum_info_from_pe` 重算，不在这里凭空造一行。
+                UPDATE type::thing('dbnum_info_table', $ref_0) MERGE {
+                    count: count?:0 - 1,
                     sesno: math::max([sesno?:0, $max_sesno]),
                     max_ref1: $ref_1,
                     updated_at: time::now()
@@ -863,9 +1026,11 @@ pub async fn define_dbnum_event() -> anyhow::Result<()> {
                 };
             };
         };
-    "#;
+    "#
+}
 
-    SUL_DB.query(event_sql).await?;
+pub async fn define_dbnum_event() -> anyhow::Result<()> {
+    SUL_DB.query(dbnum_event_sql()).await?;
 
     // 定义后立即读回自证。这个事件有过不兼容的同名实现（rs-core 里对 string 形态
     // pe id 用 array::at 解析的版本，$ref_0 恒为 NONE，统计维护整体静默断供），
@@ -1103,11 +1268,11 @@ pub async fn sync_total_async_threaded(
     let is_parse_sys = db_types_clone.contains(&"SYST".to_string());
     let is_save_db = db_option.is_save_db();
     let is_total_sync = db_option.total_sync;
-    let sync_versioned = db_option.sync_versioned.unwrap_or(false);
-
     let sender_clone = sender.clone();
     let parsed_db_infos = Arc::new(DashMap::<u32, (String, String, usize)>::new());
     let parsed_db_infos_for_parser = parsed_db_infos.clone();
+    let failed_baseline_dbnums = Arc::new(DashSet::<u32>::new());
+    let failed_baseline_dbnums_for_parser = failed_baseline_dbnums.clone();
     let children_files_len = children_files.len();
     let db_file_progress_chunk = (proj_progress_chunk as f32 / children_files_len as f32) as usize;
     // let progress_sender_clone = progress_sender.clone();
@@ -1140,12 +1305,19 @@ pub async fn sync_total_async_threaded(
                     // progress_sender_clone.send(db_file_progress_chunk).await.unwrap();
                 }
                 // dbg!(&file_name);
-                let mut file = File::open(&path).await.unwrap();
-                let mut buf = vec![0u8; 60];
-                file.read_exact(&mut buf).await.unwrap();
-                let db_basic_info = parse_file_basic_info(&buf);
-                let db_type = db_basic_info.db_type;
-                let db_no = db_basic_info.db_no;
+                let mut baseline_snapshot =
+                    match pdms_io::snapshot::DabaconSnapshot::open(project.as_str(), &path) {
+                        Ok(snapshot) => snapshot,
+                        Err(error) => {
+                            log::error!(
+                                "打开基线 dabacon 快照失败 {}: {error:#}",
+                                path.display()
+                            );
+                            continue;
+                        }
+                    };
+                let db_type = baseline_snapshot.token().db_type().to_owned();
+                let db_no = baseline_snapshot.token().dbnum() as u32;
                 //如果不是全部解析，需要检查类型，全部解析一定要解析syst等配置文件数据库
                 if !db_types_clone.contains(&db_type) {
                     continue;
@@ -1162,44 +1334,18 @@ pub async fn sync_total_async_threaded(
                 dbno_set.insert(db_no);
                 // 如果需要解析的文件列表为空或包含当前文件名，则执行以下代码块
                 println!("path={:?}", &file_name); // 打印文件路径
-                let mut ses_range_map = BTreeMap::new();
-                let mut sesno = 0;
-                // let mut dt = Local::now().naive_local();
-                {
-                    let mut io = PdmsIO::new(&project, path.clone(), true);
-
-                    //打开文件
-                    if io.open().is_ok() {
-                        //获取最新sesno
-                        sesno = io.get_latest_sesno().unwrap_or_default();
-                        if sesno > 0 {
-                            // let sql = format!(
-                            //     "
-                            //     DELETE db_file_info:{0};
-                            //     INSERT INTO db_file_info (id, db_type, sesno, dbnum, dt) VALUES ('{0}', '{1}', {2}, {3}, '{4}');",
-                            //     &file_name, db_type, sesno, db_no, dt.and_utc().to_rfc3339()
-                            // );
-                            // SUL_DB.query(&sql).await.expect("save db_info failed");
-                            // if sync_versioned {
-                            //     continue;
-                            // }
-                        } else {
-                            continue;
-                        }
-                        // 只保留最新数据：不再写历史/版本表（sessions/element_changes/pe_ses_h/ses/pe VERSION）。
-                        // ses_range_map 已由 io.open() 构建，无需 store_all_refno_sesno_map。
-                        //获取sesno range
-                        ses_range_map = io.ses_range_map;
-                    }
+                let sesno = baseline_snapshot.token().target_sesno();
+                if sesno == 0 {
+                    continue;
                 }
+                let ses_range_map = baseline_snapshot.session_ranges();
 
                 let project_name = project.as_str().to_string(); // 获取项目名称的字符串
                 // 解析失败绝不能退化成“空库”：`unwrap_or_default()` 会让本文件以 0 元素
                 // 计入 parsed_db_infos，基线层据此认定合法空库并推进 applied_sesno，
                 // 于是整个 dbnum 被静默跳过。跳过本文件、不登记结果，让基线层以
                 // “解析未返回目标文件结果”显式失败。
-                let mut db_basic = match parse_file_db_basic_data(
-                    &path,
+                let mut db_basic = match baseline_snapshot.read_full_basic_data(
                     &file_name,
                     project_name.clone().as_str(),
                 ) {
@@ -1263,6 +1409,7 @@ pub async fn sync_total_async_threaded(
                 let debug_refnos = Arc::new(debug_refnos);
                 //按照SITE划分？
                 let mut total_cnt = 0;
+                let mut chunk_failed = false;
                 for (chunk_index, chunk) in all_refnos.chunks(chunk_size).enumerate() {
                     let db_option_clone = db_option_arc.clone();
                     let file_name_clone = file_name.clone();
@@ -1322,7 +1469,7 @@ pub async fn sync_total_async_threaded(
                             //开始执行保存数据
                             println!("开始保存pe数量: {}", total_attr_map_arc.len());
                             if !is_debug && is_save_db {
-                                save_pes(
+                                if let Err(error) = save_pes(
                                     &db_basic_clone,
                                     &total_attr_map_arc,
                                     db_no as i32,
@@ -1332,7 +1479,14 @@ pub async fn sync_total_async_threaded(
                                     sender_clone.clone(),
                                 )
                                 .await
-                                .expect("save pe to surreal failed");
+                                {
+                                    log::error!(
+                                        "baseline chunk PE dispatch failed: file={file_name_clone} dbnum={db_no} chunk={chunk_index}: {error:#}"
+                                    );
+                                    failed_baseline_dbnums_for_parser.insert(db_no);
+                                    chunk_failed = true;
+                                    break;
+                                }
                             }
                             if b_save_mysql {
                                 #[cfg(feature = "sql")]
@@ -1408,9 +1562,21 @@ pub async fn sync_total_async_threaded(
                             }
                         }
                         Err(e) => {
-                            dbg!(e.to_string());
+                            log::error!(
+                                "baseline chunk failed: file={file_name_clone} dbnum={db_no} chunk={chunk_index}: {e:#}"
+                            );
+                            failed_baseline_dbnums_for_parser.insert(db_no);
+                            chunk_failed = true;
+                            break;
                         }
                     }
+                }
+
+                if chunk_failed {
+                    println!(
+                        "{file_name}: 基线 chunk 失败，停止该文件后续调度；等待写入收口后清理 dbnum={db_no}"
+                    );
+                    continue;
                 }
 
                 println!(
@@ -1448,12 +1614,29 @@ pub async fn sync_total_async_threaded(
     if let Err(error) = crate::data_interface::parse_error::flush().await {
         log::warn!("{error:#}");
     }
-    finish_write_pipeline(sender, insert_handles, parser_outcome).await?;
+    let pipeline_result = finish_write_pipeline(sender, insert_handles, parser_outcome).await;
+    let mut cleanup_errors = Vec::new();
+    for dbnum in failed_baseline_dbnums
+        .iter()
+        .map(|entry| *entry)
+        .collect::<Vec<_>>()
+    {
+        if let Err(error) = crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await {
+            cleanup_errors.push(format!("dbnum={dbnum}: {error:#}"));
+        }
+    }
+    if !cleanup_errors.is_empty() {
+        anyhow::bail!(
+            "baseline chunk 失败后的清库未完成: {}",
+            cleanup_errors.join("; ")
+        );
+    }
+    pipeline_result?;
     if is_total_sync && is_save_db {
         for entry in parsed_db_infos.iter() {
             let dbnum = *entry.key();
             let (file_name, db_type, _) = entry.value();
-            rebuild_dbnum_info_from_pe(dbnum, file_name, db_type).await?;
+            settle_dbnum_info_after_total_sync(dbnum, file_name, db_type).await?;
         }
     }
     // all_handles.push(parse_handle);
@@ -1720,6 +1903,36 @@ async fn finish_write_pipeline_succeeds_when_parser_and_writers_are_clean() {
 }
 
 #[test]
+fn baseline_chunk_failure_stops_scheduling_and_wipes_only_after_writers_finish() {
+    let source = include_str!("database.rs");
+    let parser = source
+        .split_once("let mut chunk_failed = false;")
+        .expect("chunk failure state")
+        .1
+        .split_once("parsed_db_infos_for_parser")
+        .expect("parsed result boundary")
+        .0;
+    assert!(parser.contains("chunk_failed = true;"));
+    assert!(parser.contains("break;"), "失败后必须停止后续 chunk 调度");
+    assert!(
+        parser.contains("if chunk_failed") && parser.contains("continue;"),
+        "失败文件不得登记 parsed result"
+    );
+
+    let finish_at = source
+        .find("let pipeline_result = finish_write_pipeline")
+        .expect("writer drain");
+    let wipe_at = source[finish_at..]
+        .find("wipe_dbnum_for_reinit")
+        .map(|offset| finish_at + offset)
+        .expect("failed dbnum cleanup");
+    assert!(
+        finish_at < wipe_at,
+        "必须先等待已派发写入，再清空失败 dbnum"
+    );
+}
+
+#[test]
 fn sync_pdms_awaits_global_meta_then_catalogue_then_design() {
     let source = include_str!("database.rs");
     let body = source
@@ -1741,5 +1954,273 @@ fn sync_pdms_awaits_global_meta_then_catalogue_then_design() {
     assert!(
         body[cata..desi].contains(".await"),
         "Catalogue must settle before Design"
+    );
+}
+
+/// 统计行缺席时删 pe 不许炸，也不许凭空造一条统计行。
+///
+/// 现场（2026-08-18，test-increment 副本）：`sync_sys_only` 为提性能先
+/// `REMOVE EVENT` 再写 pe，ams5100 于是有 236 条 pe、零条 `dbnum_info_table` 行；
+/// 随后首次按需初始化要清库，`fast_delete` 的 Ref0 range DELETE 触发本事件，
+/// 旧写法 `UPSERT ... SET count = count - 1 WHERE count > 0` 在缺行时走创建路径
+/// （WHERE 拦不住），`NONE - 1` 把整条语句打死，批次 failed 并按相位门连坐阻断
+/// 后面所有库。改回 UPSERT 或去掉 `?:0` 都会让本测试变红。
+#[tokio::test(flavor = "multi_thread")]
+async fn deleting_pe_rows_without_a_stats_row_neither_fails_nor_fabricates_one() {
+    use surrealdb::engine::any::connect;
+
+    #[derive(serde::Deserialize)]
+    struct InfoRow {
+        count: Option<i64>,
+    }
+
+    let db = connect("mem://").await.expect("mem boots");
+    db.use_ns("dbnum_event")
+        .use_db("missing_stats_row")
+        .await
+        .expect("use db");
+
+    // 事件装载**之前**写入的 pe 行：与 sync 路径（先 REMOVE EVENT 再写）同形。
+    db.query("CREATE pe:5100_1 SET dbnum = 5100, noun = 'GPRO', sesno = 3;")
+        .await
+        .expect("seed transport")
+        .check()
+        .expect("seed pe before the event exists");
+    db.query(dbnum_event_sql())
+        .await
+        .expect("define event transport")
+        .check()
+        .expect("define event");
+
+    let info: Vec<InfoRow> = db
+        .query("SELECT count FROM dbnum_info_table;")
+        .await
+        .expect("stats transport")
+        .take(0)
+        .expect("decode stats");
+    assert!(
+        info.is_empty(),
+        "前提：事件装载前写的 pe 行没有统计行，本测试才在验想验的东西"
+    );
+
+    db.query("DELETE pe:5100_1;")
+        .await
+        .expect("delete transport")
+        .check()
+        .expect("统计行缺席时删 pe 必须成功——NONE - 1 会把清库整条打死");
+
+    let info: Vec<InfoRow> = db
+        .query("SELECT count FROM dbnum_info_table;")
+        .await
+        .expect("stats transport")
+        .take(0)
+        .expect("decode stats");
+    assert!(
+        info.is_empty(),
+        "缺席的统计行不许被删除事件凭空创建：那条行连 dbnum 都没有，\
+         `DELETE dbnum_info_table WHERE dbnum = N` 清不掉它"
+    );
+
+    // 正常账仍要减：事件在场时创建的行有统计，删除后回到 0。
+    db.query("CREATE pe:5100_2 SET dbnum = 5100, noun = 'GPRO', sesno = 4;")
+        .await
+        .expect("counted seed transport")
+        .check()
+        .expect("seed pe with the event live");
+    let info: Vec<InfoRow> = db
+        .query("SELECT count FROM dbnum_info_table;")
+        .await
+        .expect("stats transport")
+        .take(0)
+        .expect("decode stats");
+    assert_eq!(
+        info.first().and_then(|row| row.count),
+        Some(1),
+        "事件在场时创建的行必须记账"
+    );
+
+    db.query("DELETE pe:5100_2;")
+        .await
+        .expect("delete transport")
+        .check()
+        .expect("delete counted row");
+    let info: Vec<InfoRow> = db
+        .query("SELECT count FROM dbnum_info_table;")
+        .await
+        .expect("stats transport")
+        .take(0)
+        .expect("decode stats");
+    assert_eq!(
+        info.first().and_then(|row| row.count),
+        Some(0),
+        "有统计行时删除必须把计数减回去"
+    );
+}
+
+/// 统计重算必须在服务端按 Ref0 聚合：**返回行数跟着 Ref0 走，不跟着 pe 行数走。**
+///
+/// 现场（2026-08-18，test-increment 副本）：旧写法 `SELECT record::id(id) AS key,
+/// sesno FROM pe WHERE dbnum = N` 把整库拉回客户端，ams7351 的 3,345,853 行把 ws
+/// 连接打死（`receiving from an empty and closed channel`），连带作废前面 2.6 小时
+/// 的全量解析。回退成逐行回读会让本测试变红：那种语句一行 pe 出一行结果，既凑不出
+/// `ref0` / `count` 字段，行数也会是 5 而不是 2。
+#[tokio::test(flavor = "multi_thread")]
+async fn stats_rebuild_aggregates_server_side_one_row_per_ref0() {
+    use surrealdb::engine::any::connect;
+
+    let db = connect("mem://").await.expect("mem boots");
+    db.use_ns("dbnum_stats")
+        .use_db("server_side_aggregate")
+        .await
+        .expect("use db");
+
+    // 两个 Ref0、五行 pe，外加一行别的库（不许混进来）与一行缺 sesno 的历史行。
+    db.query(
+        "CREATE pe:23735_1 SET dbnum = 7351, sesno = 3; \
+         CREATE pe:23735_900 SET dbnum = 7351, sesno = 116; \
+         CREATE pe:23735_12 SET dbnum = 7351; \
+         CREATE pe:25688_7 SET dbnum = 7351, sesno = 40; \
+         CREATE pe:25688_4134 SET dbnum = 7351, sesno = 12; \
+         CREATE pe:99999_1 SET dbnum = 8000, sesno = 230;",
+    )
+    .await
+    .expect("seed transport")
+    .check()
+    .expect("seed pe");
+
+    let groups: Vec<PeStatGroup> = db
+        .query(pe_stat_groups_sql(7351))
+        .await
+        .expect("aggregate transport")
+        .take(0)
+        .expect("decode aggregate");
+
+    assert_eq!(
+        groups.len(),
+        2,
+        "聚合必须一个 Ref0 一行；行数等于 pe 行数就是又把整库拉回客户端了"
+    );
+    let mut by_ref0: BTreeMap<&str, &PeStatGroup> = BTreeMap::new();
+    for group in &groups {
+        by_ref0.insert(group.ref0.as_str(), group);
+    }
+    let first = by_ref0.get("23735").expect("Ref0 23735 分组");
+    assert_eq!(first.count, 3);
+    assert_eq!(first.max_sesno.unwrap_or_default(), 116);
+    assert_eq!(
+        first.max_ref1.unwrap_or_default(),
+        900,
+        "max_ref1 必须是数值最大值：`900` 与 `12` 按字符串比会取反"
+    );
+    let second = by_ref0.get("25688").expect("Ref0 25688 分组");
+    assert_eq!(second.count, 2);
+    assert_eq!(second.max_sesno.unwrap_or_default(), 40);
+    assert_eq!(second.max_ref1.unwrap_or_default(), 4134);
+}
+
+/// 事件维护到位的统计不许被「顺手重算一遍」抹掉重写：只补身份字段，原地不动。
+///
+/// 现场（2026-08-18）：`sync_total_async_threaded` 这条路径**不摘事件**，ams7351
+/// 的 pe 与统计都是 3,345,853、分毫不差，那次无条件重算没纠正任何东西，只贡献了
+/// 一次把连接打死的全表回读。身份补写用 `UPDATE`（无 DELETE），所以事件写下的
+/// `updated_at` 必须活着——退回无条件 `rebuild_dbnum_info_from_pe` 会先
+/// `DELETE dbnum_info_table WHERE dbnum = N`，那一列当场消失，本测试变红。
+#[tokio::test(flavor = "multi_thread")]
+async fn stamping_identity_keeps_event_maintained_stats_in_place() {
+    use surrealdb::engine::any::connect;
+
+    #[derive(serde::Deserialize)]
+    struct InfoRow {
+        count: Option<i64>,
+        sesno: Option<i64>,
+        file_name: Option<String>,
+        db_type: Option<String>,
+        updated_at: Option<String>,
+    }
+
+    let db = connect("mem://").await.expect("mem boots");
+    db.use_ns("dbnum_stats")
+        .use_db("stamp_identity")
+        .await
+        .expect("use db");
+    db.query(dbnum_event_sql())
+        .await
+        .expect("define event transport")
+        .check()
+        .expect("define event");
+
+    // 事件在场时写 pe：统计由 CREATE 分支维护出来，带 updated_at、不带身份字段。
+    db.query("CREATE pe:23735_1 SET dbnum = 7351, sesno = 3; CREATE pe:23735_2 SET dbnum = 7351, sesno = 116;")
+        .await
+        .expect("seed transport")
+        .check()
+        .expect("seed pe with the event live");
+
+    let before: Vec<InfoRow> = db
+        .query("SELECT * FROM dbnum_info_table WHERE dbnum = 7351;")
+        .await
+        .expect("stats transport")
+        .take(0)
+        .expect("decode stats");
+    assert_eq!(before.len(), 1, "前提：事件已经维护出统计行");
+    assert_eq!(before[0].count, Some(2));
+    assert!(
+        before[0].updated_at.is_some(),
+        "前提：事件写的行带 updated_at，本测试靠它区分「原地补写」与「删了重建」"
+    );
+    assert!(
+        before[0].file_name.is_none(),
+        "前提：事件写不出身份字段，所以身份补写这一步确有必要"
+    );
+
+    assert_eq!(
+        classify_stats_settlement(2, 1, 2),
+        StatsSettlement::StampIdentity,
+        "两侧对得上、统计行在场，就不该再付全量重算"
+    );
+
+    db.query(stamp_dbnum_info_identity_sql(7351, "ams7351_0001", "CATA"))
+        .await
+        .expect("stamp transport")
+        .check()
+        .expect("stamp identity");
+
+    let after: Vec<InfoRow> = db
+        .query("SELECT * FROM dbnum_info_table WHERE dbnum = 7351;")
+        .await
+        .expect("stats transport")
+        .take(0)
+        .expect("decode stats");
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].count, Some(2), "身份补写不许动 count");
+    assert_eq!(after[0].sesno, Some(116), "身份补写不许动 sesno");
+    assert_eq!(after[0].file_name.as_deref(), Some("ams7351_0001"));
+    assert_eq!(after[0].db_type.as_deref(), Some("CATA"));
+    assert_eq!(
+        after[0].updated_at, before[0].updated_at,
+        "统计行必须是原地更新的那一条——updated_at 变了就说明它被删掉重建过"
+    );
+}
+
+/// 「对得上就跳过」不许把「一条都没记」也认成对得上。
+#[test]
+fn absent_or_mismatched_stats_still_pay_for_a_full_rebuild() {
+    // 事件维护到位（2026-08-18 ams7351 现场形状）。
+    assert_eq!(
+        classify_stats_settlement(3_345_853, 1, 3_345_853),
+        StatsSettlement::StampIdentity
+    );
+    // 统计整体缺席（`sync_sys_only` 摘着事件写出来的那批行，ams5100 现场形状）：
+    // 两侧的和都不等，就算相等也不能跳过——没有统计行就是没记过。
+    assert_eq!(
+        classify_stats_settlement(236, 0, 0),
+        StatsSettlement::Rebuild
+    );
+    // 空库：pe 与统计同为 0，仍要走重建，让残留的陈旧统计行被 DELETE 清掉。
+    assert_eq!(classify_stats_settlement(0, 0, 0), StatsSettlement::Rebuild);
+    // count 缺口（事件曾被坏版本覆盖）：这正是重建唯一能纠正的那类漏记。
+    assert_eq!(
+        classify_stats_settlement(100, 1, 99),
+        StatsSettlement::Rebuild
     );
 }

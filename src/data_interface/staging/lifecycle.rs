@@ -70,6 +70,43 @@ pub struct ActiveStagedWindow {
     root_locks: Arc<tokio::sync::Mutex<HeldRootLocks>>,
 }
 
+/// 建窗前的一次性写回兼容门（2026-08-19 phase-1 审计）。
+///
+/// 暂存库刻意不装 `update_dbnum_event`、持久库装，这道不对称本身是有意的
+/// （理由见 [`init_staging_schema`]），代价是存在一类「暂存全绿、写回被持久层
+/// **确定性**拒绝」的语句：pe 上一旦生效的是那版对数组形制 record id 用
+/// `array::at` 的旧实现，窗口里每一条 pe 写在重放时都会整条打死。等到写回那
+/// 一刻才发现是最贵的——一窗口的解析与生成已经白跑。
+///
+/// 好版的指纹是 `string::split`（它按字符串 id 解析），坏版没有。只缓存成功：
+/// 排毒（重跑 `define_dbnum_event`）之后下一次开窗自动放行。读不到不算证伪——
+/// 那是持久层瞬时故障，写回自己的传输重试会处理。
+static WRITEBACK_SCHEMA_GATE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
+async fn ensure_writeback_schema_compatible() -> anyhow::Result<()> {
+    WRITEBACK_SCHEMA_GATE
+        .get_or_try_init(|| async {
+            match crate::versioned_db::database::verify_dbnum_event_definition().await {
+                Ok(true) => Ok(()),
+                Ok(false) => bail!(
+                    "持久层 pe 上的 update_dbnum_event 不是本进程的实现（读回的定义不含 \
+                     string::split 指纹）。暂存库不装该事件，窗口 journal 重放会被它逐条\
+                     拒绝、整窗口写不回去；先让本进程重跑 define_dbnum_event 覆盖回好版\
+                     再开窗"
+                ),
+                Err(error) => {
+                    eprintln!(
+                        "开窗前读取 update_dbnum_event 定义失败，按瞬时故障放行\
+                         （写回自带传输重试）: {error:#}"
+                    );
+                    Ok(())
+                }
+            }
+        })
+        .await
+        .map(|_| ())
+}
+
 /// 在独立的生产内存实例上开一个新窗口。
 ///
 /// 不能克隆全局 `STAGE_DB`：克隆共享 namespace/database 会话，并发窗口会通过
@@ -79,6 +116,7 @@ pub async fn create_window(
     start_sesno: i32,
     end_sesno: i32,
 ) -> anyhow::Result<ActiveStagedWindow> {
+    ensure_writeback_schema_compatible().await?;
     let instance = connect("mem://")
         .await
         .context("连接窗口独立暂存实例（mem://）失败")?;
@@ -511,49 +549,6 @@ pub fn resource_snapshots() -> Vec<serde_json::Value> {
         .collect()
 }
 
-/// 窗口终态清扫：DROP 暂存实例上所有「不在册」的 staging database。
-/// 返回被清掉的库名。生产在每个窗口终态后调用一次（便宜：INFO FOR NS 一次）。
-pub async fn sweep_orphan_staging_databases_on(
-    instance: &Surreal<Any>,
-) -> anyhow::Result<Vec<String>> {
-    instance
-        .use_ns(STAGING_NS)
-        .await
-        .context("清扫切换 namespace 失败")?;
-    let mut response = instance
-        .query("INFO FOR NS")
-        .await
-        .context("INFO FOR NS 传输失败")?;
-    let value: surrealdb::Value = response.take(0).context("INFO FOR NS 取值失败")?;
-    let json = serde_json::to_value(&value).context("INFO FOR NS 序列化失败")?;
-
-    let registered: std::collections::BTreeSet<String> = REGISTRY
-        .lock()
-        .expect("registry lock")
-        .keys()
-        .cloned()
-        .collect();
-
-    let mut dropped = Vec::new();
-    if let Some(databases) = json
-        .pointer("/Object/databases/Object")
-        .and_then(|v| v.as_object())
-    {
-        for name in databases.keys() {
-            if name.starts_with("staging_") && !registered.contains(name) {
-                instance
-                    .query(format!("REMOVE DATABASE IF EXISTS `{name}`;"))
-                    .await
-                    .with_context(|| format!("清扫孤儿暂存库 {name} 传输失败"))?
-                    .check()
-                    .with_context(|| format!("清扫孤儿暂存库 {name} 失败"))?;
-                dropped.push(name.clone());
-            }
-        }
-    }
-    Ok(dropped)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -750,36 +745,41 @@ mod tests {
         window.drop_database().await.expect("cleanup");
     }
 
-    /// 终态 DROP 出册 + 清扫兜底孤儿库。
+    /// 写回兼容门必须排在建实例**之前**（源码钉）。
+    ///
+    /// 放到开窗之后就失去了意义：坏版事件的代价正是「解析 + 生成全跑完，写回
+    /// 那一刻才逐条被拒」。这条钉子只认顺序，不认调用存在与否。
+    #[test]
+    fn the_writeback_schema_gate_runs_before_the_window_instance() {
+        let source = include_str!("lifecycle.rs");
+        let body = source
+            .split_once("pub async fn create_window(")
+            .expect("create_window exists")
+            .1
+            .split_once("\npub async fn create_window_on(")
+            .expect("create_window_on follows")
+            .0;
+        let gate = body
+            .find("ensure_writeback_schema_compatible().await?")
+            .expect("建窗必须先过写回兼容门");
+        let connect = body.find("connect(\"mem://\")").expect("建窗要连 mem 实例");
+        assert!(gate < connect, "兼容门必须排在建实例之前，否则白跑一窗口");
+    }
+
+    /// 终态 DROP 出册。
+    ///
+    /// 「清扫不在册的孤儿库」那套随 2026-08-19 phase-1 审计一起退役：生产窗口
+    /// 各占一个独立 `mem://` 实例，实例随窗口句柄回收，跨窗口孤儿库不存在，
+    /// 那个函数生产侧没有任何调用方（只有它自己的测试）。留着它只会让人以为
+    /// 还有一层兜底回收。
     #[tokio::test(flavor = "multi_thread")]
-    async fn drop_unregisters_and_sweep_reaps_orphans() {
+    async fn drop_unregisters_the_window() {
         let instance = own_instance().await;
         let window = create_window_on(&instance, 7904, 1, 3, ResourceThresholds::default())
             .await
             .expect("create");
         let label = window.label().to_string();
-
-        // 孤儿库：手工建、不在册。
-        instance
-            .use_ns(STAGING_NS)
-            .use_db("staging_7904_9999999")
-            .await
-            .expect("use orphan");
-        instance
-            .query("UPSERT junk:x SET v = 1")
-            .await
-            .expect("write orphan")
-            .check()
-            .expect("written");
-
-        let dropped = sweep_orphan_staging_databases_on(&instance)
-            .await
-            .expect("sweep");
-        assert!(
-            dropped.contains(&"staging_7904_9999999".to_string()),
-            "孤儿应被清扫: {dropped:?}"
-        );
-        assert!(!dropped.contains(&label), "在册窗口不得被清扫: {dropped:?}");
+        assert!(registered_windows().iter().any(|m| m.label == label));
 
         window.drop_database().await.expect("drop");
         assert!(

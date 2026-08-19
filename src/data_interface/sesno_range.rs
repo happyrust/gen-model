@@ -102,6 +102,46 @@ impl SesnoRangeResolver {
         (nearest <= file_latest_sesno).then(|| nearest..=file_latest_sesno)
     }
 
+    /// 窗口内**真实存在**的会话号（升序）。最多取 `limit + 1` 个——多取一个只为
+    /// 回答「预算是不是真的截断了什么」，不必把整段积压走完。
+    ///
+    /// 走真实会话而不是按 sesno 号算术切分：会话号是稀疏的，`100..=100000` 里可能
+    /// 只有三次保存，按号切会切出几百个空窗口，每个都白付一趟解析与提交。
+    fn sessions_in_window(io: &mut PdmsIO, start: i32, end: i32, limit: usize) -> Vec<i32> {
+        let mut sessions = Vec::new();
+        let mut seek = start;
+        while sessions.len() <= limit && seek <= end {
+            let Some(next) = io.get_nearest_large_sesno(seek) else {
+                break;
+            };
+            if next < seek || next > end {
+                break;
+            }
+            sessions.push(next);
+            let Some(advanced) = next.checked_add(1) else {
+                break;
+            };
+            seek = advanced;
+        }
+        sessions
+    }
+
+    /// 会话预算收窄后的右端（纯函数）。`sessions` 是窗口内真实会话号（升序，
+    /// 由 [`Self::sessions_in_window`] 取，长度至多 `limit + 1`）。
+    ///
+    /// 切点必须落在**会话边界**：一个 sesno 就是 E3D 里的一次 SAVEWORK，切进它
+    /// 内部等于把一次用户保存劈成两半，读者会看见源模型从未存在过的中间态。
+    /// 预算装得下、或没有预算时原样返回右端。
+    fn budget_end(sessions: &[i32], full_end: i32, max_sessions: Option<usize>) -> i32 {
+        let Some(limit) = max_sessions.filter(|limit| *limit > 0) else {
+            return full_end;
+        };
+        if sessions.len() <= limit {
+            return full_end;
+        }
+        sessions[limit - 1]
+    }
+
     /// Authoritative watermark for this dbnum.
     ///
     /// Delegates to [`DbnumState::applied_sesno`], which reads the single
@@ -120,6 +160,8 @@ impl SesnoRangeResolver {
     /// one open serves both the header read and the nearest-session jump
     /// （2026-08-10 审核 P2-2：此前这里开一次读 header、`resolve_with_header`
     /// 又开一次跳会话号——watcher 热路径每个文件白开一遍）。
+    /// `max_sessions`：会话预算（ADR-017 拆窗第一层）。**只有执行侧传 Some**——
+    /// 预览与看门狗必须看见整段待应用窗口，收窄是执行策略而不是事实。
     pub async fn resolve(
         &self,
         path: &Path,
@@ -128,6 +170,7 @@ impl SesnoRangeResolver {
         file_latest_sesno: i32,
         skip_cata: bool,
         db_type: &str,
+        max_sessions: Option<usize>,
     ) -> anyhow::Result<Option<SesnoUpdatePlan>> {
         // 快速短路：被跳过的 CATA 连水位查询那趟 DB 都不打（语义由 admission 兜底）。
         if skip_cata && db_type == "CATA" {
@@ -152,6 +195,7 @@ impl SesnoRangeResolver {
             db_type,
             db_latest_sesno,
             cold_start,
+            max_sessions,
         ))
     }
 
@@ -187,6 +231,8 @@ impl SesnoRangeResolver {
             db_type,
             db_latest_sesno,
             cold_start,
+            // 看门狗只回答「有没有待应用窗口」，不做执行侧的预算收窄。
+            None,
         ))
     }
 
@@ -201,18 +247,42 @@ impl SesnoRangeResolver {
         db_type: &str,
         db_latest_sesno: u32,
         cold_start: bool,
+        max_sessions: Option<usize>,
     ) -> Option<SesnoUpdatePlan> {
         let dbnum = basic_info.pdms_header.db_num as u32;
         let file_latest_sesno = basic_info.latest_ses_data.sesno;
 
         let seek = Self::seek_from(db_latest_sesno, cold_start);
         let nearest = io.get_nearest_large_sesno(seek).unwrap_or(seek);
-        let range = Self::window(nearest, file_latest_sesno)?;
+        let full_range = Self::window(nearest, file_latest_sesno)?;
+
+        // 会话预算收窄。`file_latest_sesno` 字段保持文件的真实值——它要进
+        // 水位表与身份异常分类，收窄的只是这一批应用到哪。
+        let range = match max_sessions.filter(|limit| *limit > 0) {
+            Some(limit) => {
+                let sessions =
+                    Self::sessions_in_window(io, *full_range.start(), *full_range.end(), limit);
+                let end = Self::budget_end(&sessions, *full_range.end(), Some(limit));
+                if end < *full_range.end() {
+                    println!(
+                        "SesnoRangeResolver: dbnum={dbnum} 按 {limit} 个会话的预算收窄窗口 {}..={} → {}..={end}",
+                        full_range.start(),
+                        full_range.end(),
+                        full_range.start(),
+                    );
+                }
+                *full_range.start()..=end
+            }
+            None => full_range,
+        };
 
         if cold_start {
             println!(
                 "SesnoRangeResolver: {} cold start dbnum={}, range={}..={}",
-                db_type, dbnum, nearest, file_latest_sesno
+                db_type,
+                dbnum,
+                range.start(),
+                range.end()
             );
         }
 
@@ -231,6 +301,80 @@ impl SesnoRangeResolver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 会话预算收窄（ADR-017 拆窗第一层）：切点只落在真实会话边界。
+    ///
+    /// 不变量：切进一个 sesno 内部 = 把一次 SAVEWORK 劈成两半，读者会看见源模型
+    /// 从未存在过的中间态。所以右端只能取 `sessions[limit - 1]`，不能是
+    /// `start + limit - 1` 这类按号算术——会话号是稀疏的。
+    #[test]
+    fn a_session_budget_cuts_only_on_real_session_boundaries() {
+        let budget_end = SesnoRangeResolver::budget_end;
+
+        // 无预算 / 预算为 0：原样。
+        assert_eq!(budget_end(&[10, 20, 30], 30, None), 30);
+        assert_eq!(budget_end(&[10, 20, 30], 30, Some(0)), 30);
+
+        // 预算装得下（会话数 <= 预算）：不切。
+        assert_eq!(budget_end(&[10, 20], 20, Some(2)), 20);
+        assert_eq!(budget_end(&[10, 20], 20, Some(5)), 20);
+
+        // 装不下：右端 = 第 limit 个真实会话，不是按号算术。
+        assert_eq!(budget_end(&[10, 200, 3000], 3000, Some(1)), 10);
+        assert_eq!(budget_end(&[10, 200, 3000], 3000, Some(2)), 200);
+
+        // 地板：预算 1 也必须给出一个完整会话，不能退化成空窗。
+        assert_eq!(budget_end(&[7, 9], 9, Some(1)), 7);
+    }
+
+    /// 预算只约束应用窗口的右端，不得改写文件真实值（ADR-017 拆窗·源码钉）。
+    ///
+    /// `SesnoUpdatePlan.file_latest_sesno` 喂给 `FileObservation` →
+    /// `DbnumState::record_observation` 与身份异常分类；把它改小，水位表里
+    /// 「文件里最新是第几个会话」就是假的，会话号回退这类异常会被顺手掩掉。
+    /// 同时看门狗路径（`resolve_with_header`）必须看见整段待应用窗口——收窄是
+    /// 执行策略而不是事实，预览与告警不得被它缩小。
+    #[test]
+    fn the_budget_narrows_the_range_but_never_the_observed_file_latest() {
+        let source = include_str!("sesno_range.rs");
+        let build_plan = source
+            .split_once("fn build_plan(")
+            .expect("build_plan 必须存在")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("build_plan 之后是测试模块")
+            .0;
+        assert!(
+            build_plan.contains("let file_latest_sesno = basic_info.latest_ses_data.sesno;"),
+            "file_latest_sesno 必须直接取自文件 header"
+        );
+        let narrowed_at = build_plan
+            .find("budget_end(&sessions")
+            .expect("预算收窄必须走 budget_end 纯函数");
+        let plan_at = build_plan.find("Some(SesnoUpdatePlan {").expect("组装计划");
+        assert!(narrowed_at < plan_at, "收窄发生在组装计划之前");
+        let plan_literal = &build_plan[plan_at..];
+        assert!(
+            plan_literal.contains("file_latest_sesno,"),
+            "计划里的 file_latest_sesno 必须是 header 那份原值，不许被收窄右端顶掉"
+        );
+
+        let watch = source
+            .split_once("pub async fn resolve_with_header(")
+            .expect("看门狗路径必须存在")
+            .1
+            .split_once("fn build_plan(")
+            .expect("看门狗路径边界")
+            .0;
+        assert!(
+            !watch.contains("max_sessions"),
+            "看门狗路径不接预算参数——预览必须看见整段待应用窗口"
+        );
+        assert!(
+            watch.contains("None,"),
+            "看门狗调 build_plan 必须显式传 None（不收窄）"
+        );
+    }
 
     /// IU-S2-01/02/03（资格半边）：准入真值表。窗口取错则后面每个阶段都在处理
     /// 错误的数据，这张表是整条增量链路「读哪段」的唯一裁决。

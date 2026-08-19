@@ -140,6 +140,12 @@ http_api_cors = ["*"]
 # 给「要增量、不要 2 万面板重算」的场景（L3 夹具就用它）。
 startup_autorun = true
 
+#【新增 2026-08-19】三段增量执行控制，默认均为 true。
+# 顺序固定为数据 → 模型 → 房间；关闭阶段只停消费，不删除 durable 工作。
+# 环境变量 AIOS_DATA_INCREMENTAL / AIOS_MODEL_INCREMENTAL 可覆盖前两项。
+data_incremental = true
+model_incremental = true
+
 #【新增 2026-08-10，默认值 2026-08-12 改为 true】room_incremental
 # 房间归属的「增量」重算；默认 true = 照排照收。
 #   true ：位姿/删除刷新包围盒之后排 room_recalc 目标（直写事务与暂存窗口收口
@@ -155,6 +161,22 @@ startup_autorun = true
 # 而关着的代价更贵：房间归属只在删除时还会被清，搬家后的重算全靠启动全量重建
 # 回补，而那条兜底路径排在 startup_autorun 之后——默认部署里等于没有回补通道。
 room_incremental = true
+
+#【新增 2026-08-19】watch_dbnums —— 调试用，默认不写 = 全范围
+# 把增量摄入的数据批次圈到这几个 dbnum，例如 watch_dbnums = [7998, 8000]。
+# SYS meta（SYST/DICT/GLB/GLOB）不受限：MDB 的成员名单就存在那些库里，圈掉它们
+# 只会得到一个「什么都没发现」的假现场。
+# 命令行 `aios-database serve --watch-dbnum 7998,8000` 压过本键；两者都没给就是
+# 全范围，判定与本特性引入前逐位相同。
+# 与别的名单无关，别混：manual_db_nums / exclude_db_nums 早已被剥夺增量否决权
+# （只供全量模型生成与按需基线解析），--debug-dbnum 是另一个开关（额外带六个
+# 裁决点的链路追踪，且刻意进不了配置文件）。
+# 【这是非正常运行状态】它的形状与坑出 issue #10 的 manual_db_nums 一模一样，
+# 区别全部做在「有多大声」上：启动横幅、/health 的 watch_dbnums 栏、每一份
+# preview / execute 回执的 warnings、重扫日志里独立的一句聚合，都会点名本键
+# 并说清限定来自配置还是命令行。用完记得删——命令行参数进程一停就没了，
+# 写在这里的能躺一个月。
+# watch_dbnums = [7998, 8000]
 
 #【退役 2026-08-18 / ADR-031】net_window_collection / AIOS_NET_WINDOW
 # 收集口径已统一为净窗口（collect_window → collect_net_window）。逐会话回放

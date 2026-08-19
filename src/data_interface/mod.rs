@@ -12,9 +12,15 @@ pub mod project_paths;
 
 pub mod extract_family;
 
+pub mod debug_scope;
+
+pub mod watch_scope;
+
 pub mod increment_manager;
 
 pub mod increment_pipeline;
+
+pub mod window_repair;
 
 pub mod model_refresh;
 
@@ -48,6 +54,8 @@ pub mod helper;
 pub mod cata_closure;
 
 pub mod parse_error;
+
+pub mod geom_error;
 
 pub mod embedded_surql;
 

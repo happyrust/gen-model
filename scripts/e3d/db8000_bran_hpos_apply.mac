@@ -1,0 +1,37 @@
+-- db8000 BRAN 增量测试 / apply 腿：把支管头部抬高 500mm。
+--
+-- 目标：/C-OR-1R345-C（= 24384/23257，PIPE /1RX-345，ZONE /1RX03-LCT）。
+--
+-- 变更选型：只动 BRAN 自己的 HPOS，不碰成员、不碰拓扑。头部一动，第一段 FTUB
+-- 的起点随之改变（BEND 1 不动，于是那段管子变长），整条支管重新生成、包围盒变化
+-- ——这正是要测的「BRAN 级增量」：一个交付单元根的属性变更如何走完
+-- 解析 → 暂存窗口 → 生成 → 写回 → 空间收敛。
+-- 改 bore 会连带目录闭包、改成员会动拓扑，都会把失败面搅在一起，不适合首轮。
+--
+-- restore 值来自 db8000_bran_probe.mac 的实测基线（2026-08-12）：
+--   Hposition E 8551mm N 14060mm U 2900mm   （restore 腿写死的就是这个）
+--   Tposition E 9093mm  N 9973mm  U 2900mm  （本腿不动它）
+-- 离线可知的唯一理由就是先探后改；别在没跑探针的库上复用这对宏。
+--
+-- 纪律（与 db8000_scratch_*.mac 同）：恰好一个 SAVEWORK；不写 QUIT/FINISH
+-- （会话归 l3_suite driver 的 wrapper）；Q REF 与 Q NAME 成对，便于回读 refno；
+-- 按名字导航（db8000 的 TTY 会话里按 refno 导航不成立）。
+--
+-- restore 搭档：db8000_bran_hpos_restore.mac
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bran_hpos_apply.log" OVER
+$P CODEX-DB8000-BRAN-HPOS-APPLY-ALIVE
+/C-OR-1R345-C
+Q CE
+Q REF
+Q NAME
+Q HPOS
+HPOS E 8551mm N 14060mm U 3400mm
+Q CE
+Q REF
+Q NAME
+Q HPOS
+Q TPOS
+SAVEWORK 'CODEX db8000 BRAN /C-OR-1R345-C head up 500mm (U2900 -> U3400)'
+$P CODEX-DB8000-BRAN-HPOS-APPLY-DONE
+ALPHA LOG END

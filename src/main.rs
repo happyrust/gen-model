@@ -61,12 +61,142 @@ use surrealdb::opt::auth::Root;
 /// 栈是保留地址空间、按页提交，多留不花实际内存。
 const RUNTIME_STACK_SIZE: usize = 64 * 1024 * 1024;
 
+/// 增量服务的命令行面。
+///
+/// **无子命令 = 起服务**。仓内所有脚本、`l3_suite` 夹具与部署包都是裸调这个
+/// 二进制的，这条默认行为是硬约束，不是便利。
+#[derive(clap::Parser)]
+#[command(
+    name = "aios-database",
+    version,
+    about = "AVEVA E3D 增量解析与几何生成服务"
+)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// 起增量服务（不带任何子命令时的默认行为）。
+    Serve(ServeArgs),
+    /// 取本机服务的增量链路追踪。纯客户端，走 HTTP，不拿实例锁。
+    ///
+    /// 不拿锁是关键：`run_app` 一上来就 `acquire_process_instance_lock`，若这个
+    /// 子命令也走那条路，服务跑着时它根本执行不了——而那正是唯一想用它的时候。
+    Trace(TraceArgs),
+}
+
+#[derive(clap::Args, Default)]
+struct ServeArgs {
+    /// **调试用**：把本轮数据批次的检查圈到这些 dbnum，并全程追踪它们。
+    ///
+    /// 逗号分隔（`7998,8000`）。SYS meta 不受限——MDB 的成员名单存在那些库里。
+    /// 这不是运行策略，所以它只能从命令行来，进不了配置文件。开启后 `/health`、
+    /// 每一份 preview / execute 回执都会明说本进程是跛的。
+    #[arg(long, value_name = "N[,N...]")]
+    debug_dbnum: Option<String>,
+
+    /// **调试用**：把增量摄入的数据批次圈到这些 dbnum，不带追踪。
+    ///
+    /// 逗号分隔（`7998,8000`）。SYS meta 不受限——MDB 的成员名单存在那些库里。
+    /// 压过 `DbOption.toml` 的 `watch_dbnums`；与 `--debug-dbnum` 各管各的，两个
+    /// 都给就两道门都要过。开启后启动横幅、`/health`、每一份 preview / execute
+    /// 回执都会明说本进程的监听范围被收窄了。
+    #[arg(long, value_name = "N[,N...]")]
+    watch_dbnum: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct TraceArgs {
+    /// 只看这一个 dbnum；不给就全都要。
+    #[arg(long)]
+    dbnum: Option<u32>,
+    /// 最多取多少条（取最新的）；0 表示不限。
+    #[arg(long, default_value_t = 0)]
+    limit: usize,
+    /// 服务地址。缺省取配置里的 `server_release_ip`。
+    #[arg(long)]
+    url: Option<String>,
+}
+
 fn main() -> anyhow::Result<()> {
+    use clap::Parser;
+
+    let cli = Cli::parse();
+    let serve = match cli.command {
+        Some(Command::Trace(args)) => return fetch_trace(&args),
+        Some(Command::Serve(args)) => args,
+        None => ServeArgs::default(),
+    };
+    if let Some(raw) = serve.debug_dbnum.as_deref() {
+        // 拼错的取值直接失败，不回落。悄悄吞成「全范围」看起来像参数没生效，吞成
+        // 「空集」看起来像什么都没跑，两种都要人再花一轮才发现是自己手误。
+        let dbnums = aios_database::data_interface::debug_scope::parse_dbnums(raw)
+            .map_err(|message| anyhow::anyhow!(message))?;
+        println!(
+            "*** 调试限定模式：数据批次只处理 dbnum {dbnums:?}，SYS meta 不受限。\
+             这不是正常运行状态。***"
+        );
+        aios_database::data_interface::debug_scope::set_dbnums(dbnums);
+    }
+    if let Some(raw) = serve.watch_dbnum.as_deref() {
+        // 同样不回落（理由同上）。横幅不在这里打：配置里写的 `watch_dbnums` 也要
+        // 有同一句声明，两个来源共用 `run_cli` 那一处出口才不会漏掉配置那条路。
+        let dbnums = aios_database::data_interface::watch_scope::parse_dbnums(raw)
+            .map_err(|message| anyhow::anyhow!(message))?;
+        aios_database::data_interface::watch_scope::set_cli_dbnums(dbnums);
+    }
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_stack_size(RUNTIME_STACK_SIZE)
         .build()?
         .block_on(run_app(None))
+}
+
+/// 走 curl 而不是引一个 HTTP 客户端依赖：仓内已有先例
+/// （`l3_suite` 的健康等待、`fixture.rs` 的服务探活都用它），为一个诊断子命令
+/// 往服务二进制里塞一整套 TLS 栈不划算。
+///
+/// Windows 上必须点名 `curl.exe`（PowerShell 的 `curl` 是 Invoke-WebRequest
+/// 别名，虽然 CreateProcess 不走别名，点名后缀是仓内既有惯例）；部署目标
+/// CentOS 7 上没有 `.exe`，写死会让这个子命令在服务器上必挂（2026-08-18 审核 P3）。
+#[cfg(windows)]
+const CURL: &str = "curl.exe";
+#[cfg(not(windows))]
+const CURL: &str = "curl";
+
+fn fetch_trace(args: &TraceArgs) -> anyhow::Result<()> {
+    let base = args.url.clone().unwrap_or_else(|| {
+        let endpoint = get_db_option().server_release_ip.clone();
+        if endpoint.starts_with("http") {
+            endpoint
+        } else {
+            format!("http://{endpoint}")
+        }
+    });
+    let mut url = format!(
+        "{}/api/v1/trace?limit={}",
+        base.trim_end_matches('/'),
+        args.limit
+    );
+    if let Some(dbnum) = args.dbnum {
+        url.push_str(&format!("&dbnum={dbnum}"));
+    }
+    let output = std::process::Command::new(CURL)
+        .args(["--silent", "--show-error", "--fail", &url])
+        .output()
+        .map_err(|e| anyhow::anyhow!("调用 {CURL} 失败: {e}"))?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "取追踪失败（{}）：{}\n服务没起、或它不是带 http_api 的构建时会走到这里。",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    std::io::stdout().write_all(&output.stdout)?;
+    println!();
+    Ok(())
 }
 
 #[test]

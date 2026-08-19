@@ -57,3 +57,27 @@ patch/diff 为 `semantic-window-diff.json`；验证记录为 `summary.json`；ro
 
 同时通过：Python TTY 编排 10、`e3d_query` 5、`l3_suite` 20、`e3d_mcp` 2、
 真实 `live_identity_query` 1、Python 解析离线档 12。
+
+## 2026-08-19 续测
+
+再次执行 `scripts/e3d/Test-TtyNetWindow.ps1`，exit status 0。证据目录：
+`output/e3d-tty-net-window/20260819-082310/`。
+
+- 会话：baseline 230 → apply 231 → restore 232；
+- apply / restore 均为 2 条 Modified（目标 FTUB + BRAN.CACHID）；
+- FTUB.POS.U：`2900 → 3400 → 2900`，最终元素属性与 baseline 相等；
+- 合并窗口 231..=232 中目标 FTUB 消失，`unchanged_rewrites=1`；
+- 合并窗口仅剩 BRAN.CACHID `14 → 16`，无业务属性残留；
+- `summary.json.rollback.verified=true`，restore driver exit status 0；
+- 本轮结束后重新枚举进程，只存在 2026-08-15 已启动的既存
+  `des.exe` / `PDMSConsole.exe` 会话，本轮未遗留新会话。
+
+四个复核角色均已重新打开：修改对象
+`D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams8000_0001`；基线副本
+`baseline-db-file.copy`（SHA-256
+`1bd3c8306486572c3d6be5d7b623da2a05b2df9336f803bdbbedd79eb3471b56`）；
+语义 patch/diff `semantic-window-diff.json`；验证记录 `summary.json`；rollback
+命令与字面输出见 `restore-driver.json` / `restore-driver/check-driver.log`。
+最终文件因正常追加 restore 会话而具有新的文件 SHA-256
+`fb8d66ac8f9186b8e6de43c484825ea143cc28de05225987deeac346c3b69311`；回滚判据是
+目标业务属性恢复而非文件逐字节回退。

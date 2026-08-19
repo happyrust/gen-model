@@ -85,7 +85,7 @@ impl OnDemandDbSession {
 
     fn open_single(path: &Path) -> anyhow::Result<Self> {
         let configured = ReadMode::configured();
-        let (mut mode, mut fallback_reason) = if let Some(extent) = first_extra_extent(path) {
+        let (mode, fallback_reason) = if let Some(extent) = first_extra_extent(path) {
             (
                 ReadMode::Legacy,
                 Some(format!("multi_extent:{}", extent.display())),
@@ -93,27 +93,21 @@ impl OnDemandDbSession {
         } else {
             (configured, None)
         };
+        let authoritative = pdms_io::snapshot::DabaconSnapshot::open("", path)
+            .with_context(|| format!("open authoritative dabacon snapshot {}", path.display()))?;
         let mut opened_paged = None;
         if mode == ReadMode::Paged {
             let paged = PagedDbSession::open(path)?;
             let paged_sesno = paged.snapshot().sesno;
-            let mut authoritative = pdms_io::io::PdmsIO::new("", path, true);
-            match authoritative.get_latest_sesno() {
-                Ok(file_sesno) if !paged_snapshot_matches_file(paged_sesno, file_sesno) => {
-                    mode = ReadMode::Legacy;
-                    fallback_reason = Some(format!(
-                        "snapshot_sesno_mismatch:paged={paged_sesno},file={file_sesno}"
-                    ));
-                }
-                Ok(_) => opened_paged = Some(paged),
-                Err(error) => {
-                    log::warn!(
-                        "[paged_db] snapshot verification unavailable path={} error={error:#}",
-                        path.display()
-                    );
-                    opened_paged = Some(paged);
-                }
-            }
+            let file_sesno = authoritative.token().target_sesno();
+            anyhow::ensure!(
+                paged_snapshot_matches_file(paged_sesno, file_sesno),
+                "paged snapshot sesno mismatch path={} paged={} authoritative={}",
+                path.display(),
+                paged_sesno,
+                file_sesno
+            );
+            opened_paged = Some(paged);
         }
         if let Some(reason) = fallback_reason {
             let message = format!(
@@ -129,14 +123,25 @@ impl OnDemandDbSession {
             ReadMode::Paged => SessionSource::Paged(
                 opened_paged.expect("paged mode always retains its verified open session"),
             ),
-            ReadMode::Compare => SessionSource::Compare {
-                legacy: open_legacy(path)?,
-                paged: PagedDbSession::open(path)?,
-            },
+            ReadMode::Compare => {
+                let paged = PagedDbSession::open(path)?;
+                anyhow::ensure!(
+                    paged.snapshot().sesno == authoritative.token().target_sesno(),
+                    "compare paged snapshot mismatch path={} paged={} authoritative={}",
+                    path.display(),
+                    paged.snapshot().sesno,
+                    authoritative.token().target_sesno()
+                );
+                SessionSource::Compare {
+                    legacy: open_legacy(path)?,
+                    paged,
+                }
+            }
         };
+        authoritative.verify_path_identity()?;
         Ok(Self {
             path: path.to_path_buf(),
-            dbnum: read_dbnum(path).unwrap_or_default(),
+            dbnum: authoritative.token().dbnum() as u32,
             source,
             parsed_records: 0,
             parent: None,
@@ -268,7 +273,16 @@ fn scan_ref0s_one(path: &Path, project: &str) -> anyhow::Result<Vec<u32>> {
 }
 
 fn scan_ref0s_paged(path: &Path) -> anyhow::Result<Vec<u32>> {
+    let authoritative = pdms_io::snapshot::DabaconSnapshot::open("", path)?;
     let mut session = PagedDbSession::open(path)?;
+    anyhow::ensure!(
+        session.snapshot().sesno == authoritative.token().target_sesno(),
+        "paged ref0 scan snapshot mismatch path={} paged={} authoritative={}",
+        path.display(),
+        session.snapshot().sesno,
+        authoritative.token().target_sesno()
+    );
+    authoritative.verify_path_identity()?;
     let values = session.scan_ref0s()?;
     let snapshot = session.snapshot();
     log_page_summary(path, snapshot.sesno, snapshot.page_size, session.stats(), 0);
@@ -280,8 +294,8 @@ fn scan_ref0s_legacy(path: &Path, project: &str) -> anyhow::Result<Vec<u32>> {
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or_default();
-    let data =
-        parse_pdms_db::parse::parse_file_db_basic_data(&path.to_path_buf(), file_name, project)?;
+    let mut snapshot = pdms_io::snapshot::DabaconSnapshot::open(project, path)?;
+    let data = snapshot.read_full_basic_data(file_name, project)?;
     let mut values = HashSet::new();
     for entry in data.refno_table_map.iter() {
         let ref0 = entry.key().get_0();
@@ -462,9 +476,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn upgraded_file_snapshot_mismatch_routes_away_from_paged() {
+    fn upgraded_file_snapshot_mismatch_is_detected() {
         assert!(paged_snapshot_matches_file(90, 90));
         assert!(!paged_snapshot_matches_file(343_597_384, 90));
+    }
+
+    #[test]
+    fn paged_snapshot_verification_is_fail_closed() {
+        let source = include_str!("on_demand_db.rs");
+        let open = source
+            .split_once("fn open_single(path: &Path)")
+            .expect("open_single")
+            .1
+            .split_once("pub(crate) fn is_compare")
+            .expect("open boundary")
+            .0;
+        assert!(open.contains("DabaconSnapshot::open"));
+        assert!(open.contains("paged snapshot sesno mismatch"));
+        assert!(!open.contains("verification unavailable"));
+        assert!(!open.contains("opened_paged = Some(paged);\n                }"));
     }
 
     #[test]

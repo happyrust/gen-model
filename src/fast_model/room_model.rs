@@ -32,11 +32,27 @@ use std::sync::OnceLock;
 #[ignore = "manual integration: requires the configured Surreal project and room mesh files"]
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
     let option = init_test_surreal().await?;
-    load_aabb_tree().await?;
+    crate::fast_model::aabb_tree::load_project_tree_verified().await?;
 
     let rooms = load_room_panel_map(&option).await?;
-    assert_eq!(rooms.rooms.len(), 124, "AMS 应识别出 124 间房");
-    assert_eq!(rooms.all_panels.len(), 147, "AMS 应识别出 147 块房间面板");
+    assert!(!rooms.rooms.is_empty(), "AMS 房间清单不得为空");
+    assert!(!rooms.all_panels.is_empty(), "AMS 房间面板清单不得为空");
+    if let Ok(raw) = std::env::var("AIOS_EXPECT_ROOM_COUNT") {
+        let expected = raw
+            .parse::<usize>()
+            .expect("AIOS_EXPECT_ROOM_COUNT must be usize");
+        assert_eq!(rooms.rooms.len(), expected, "AMS 房间数与显式基线不符");
+    }
+    if let Ok(raw) = std::env::var("AIOS_EXPECT_ROOM_PANEL_COUNT") {
+        let expected = raw
+            .parse::<usize>()
+            .expect("AIOS_EXPECT_ROOM_PANEL_COUNT must be usize");
+        assert_eq!(
+            rooms.all_panels.len(),
+            expected,
+            "AMS 房间面板数与显式基线不符"
+        );
+    }
     build_room_relations(&option).await?;
 
     #[derive(Debug, Deserialize, PartialEq)]

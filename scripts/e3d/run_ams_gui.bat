@@ -1,49 +1,109 @@
 @echo off
-rem Launch E3D DESIGN on AvevaMarineSample with the STANDARD appware start macro.
-rem
-rem   run_ams_gui.bat [<mdb>]      default mdb: /ALL
-rem
-rem AVEVA_DESIGN_ENTRYMACRO is what brings the appware up. Without it the session
-rem still gets a ribbon - CAF builds that on the .NET side - but PMLUI's
-rem DES/admin/vars never runs, so not one synonym is ever defined, and every
-rem ribbon button that goes through one dies in the command processor. Save Work
-rem is the loudest: it runs !!runSynonym('CALLG MSAVEW'), runsynonym.pmlmac line
-rem 44 is a bare $1, so CALLG reaches the parser undefined and the session
-rem answers "(47,15) CP: Syntax error".
-rem
-rem The E: shadow install is the one to use. C:'s install no longer has a des.exe
-rem at its root, and D:\AVEVA\Everything3D3.1 is an IDA workspace - a copy of
-rem core.dll plus its .i64/.id0/.id1 databases, no des.exe and no evars.bat - so
-rem the entry macro this script used to point at never existed. projects_dir comes
-rem from custom_evars.bat under D:\AVEVA\Projects\E3D3.1.
-rem
-rem The entry macro goes through the 8.3 short path: $M takes the string as-is, so
-rem any space in the install path would cut the macro path in half.
-rem
-rem Detached because des.exe is GUI-subsystem: started from a console it inherits
-rem one and core.dll then skips spawning its own console host.
-
+chcp 65001 >nul 2>&1
 setlocal
 
-set MDB=%1
-if "%MDB%"=="" set MDB=/ALL
+rem Launch the D: AvevaMarineSample project through the verified repaired AMS
+rem startup chain.  This project copy is the source consumed by aios-database;
+rem E:\reverse\e3d\launch_ams.bat intentionally targets the separate E: copy.
+rem
+rem Usage:
+rem   run_ams_gui.bat [<mdb>]      default: /ALL
+rem   set E3D_LOGIN=USER/PASSWORD  optional login override
 
-set E3DC=E:\reverse\e3d\shadow_e3d31_aps_all
-cd /d "%E3DC%"
-call evars.bat "%E3DC%\"
-set AVEVA_PRODUCT=3D
-set AVEVA_DESIGN_INSTALLED_DIR=%E3DC%\
-call set_aveva_design.bat
-set AVEVA_DESIGN_CONSOLE_WINDOW=ACTIVE
-set PDMS_SHOWCONSOLE=1
+set "MDB=%~1"
+if not defined MDB if defined E3D_MDB set "MDB=%E3D_MDB%"
+if not defined MDB set "MDB=/ALL"
+if not defined E3D_LOGIN set "E3D_LOGIN=SYSTEM/XXXXXX"
 
-for %%I in ("%E3DC%") do set E3DSHORT=%%~sI
-set E3DMAC=%E3DSHORT:\=/%
-set AVEVA_DESIGN_ENTRYMACRO=$M "%E3DMAC%/PMLUI/DES/admin/start"
+set "REPAIRED_ROOT=E:\reverse\e3d"
+set "PROJECTS_ROOT=D:\AVEVA\Projects\E3D3.1"
+set "PROJECT_ROOT=%PROJECTS_ROOT%\AvevaMarineSample"
+set "PROJECT_EVARS=%PROJECT_ROOT%\evarsAvevaMarineSample.bat"
+set "E3D_LAUNCHER=%REPAIRED_ROOT%\launch_e3d_sample_repaired.ps1"
+set "AMS_GRAPHICS_FINISHER=%REPAIRED_ROOT%\finish_ams_graphics_document.ps1"
+set "AMS_RUNTIME_VERIFIER=%REPAIRED_ROOT%\verify_ams_runtime_health.ps1"
+set "SHADOW_INSTALL=%REPAIRED_ROOT%\shadow_e3d31_aps_all"
+set "SAFE_COPY_DLL=%REPAIRED_ROOT%\artifacts\design_edit_runtime_fix_20260811\Aveva.Core.Explorer.safe_copy.dll"
+set "SELF_PASTE_GUARD_DLL=%REPAIRED_ROOT%\artifacts\copy_paste_self_guard_20260809\ExplorerControl.patched.dll"
+set "DRAWLIST_MENU_FIX_DLL=%REPAIRED_ROOT%\artifacts\model_explorer_nested_add_remove_fix_20260815\DrawListAddin.active_empty_routing_fixed.dll"
+set "AMS_USER_DIR=%REPAIRED_ROOT%\aveva_user_ams_d_project"
+set "AMS_WORK_DIR=%REPAIRED_ROOT%\aveva_work_ams_d_project"
 
-echo === ENTRYMACRO: %AVEVA_DESIGN_ENTRYMACRO% ===
-echo === STARTING (detached) des.exe ams SYSTEM/XXXXXX %MDB% ===
-powershell -NoProfile -ExecutionPolicy Bypass -File "D:\work\plant-code\old\gen-model\scripts\e3d\launch_detached.ps1" -Exe "%E3DC%\des.exe" -WorkingDirectory "%E3DC%" -Arguments "ams SYSTEM/XXXXXX %MDB%"
-echo === LAUNCHER EXIT CODE: %ERRORLEVEL% ===
+rem The generic NativeFixup repair macro points at YCYK and can block the AMS UI.
+rem The AMS graphics finisher below owns document creation and drawlist filling.
+set "E3D_SKIP_REPAIR_MACRO=1"
 
-endlocal
+for %%F in (
+  "%E3D_LAUNCHER%"
+  "%AMS_GRAPHICS_FINISHER%"
+  "%AMS_RUNTIME_VERIFIER%"
+  "%PROJECT_EVARS%"
+  "%SHADOW_INSTALL%\des.exe"
+  "%SAFE_COPY_DLL%"
+  "%SELF_PASTE_GUARD_DLL%"
+  "%DRAWLIST_MENU_FIX_DLL%"
+) do if not exist "%%~F" (
+  echo [FAIL] Missing required file: %%~F
+  exit /b 1
+)
+
+where pwsh.exe >nul 2>&1
+if errorlevel 1 (
+  echo [FAIL] pwsh.exe was not found in PATH.
+  exit /b 1
+)
+
+echo [PROJECT] AMS ^(AvevaMarineSample, D: project copy^)
+echo [EVARS]   %PROJECT_EVARS%
+echo [MODULE]  Design
+echo [MDB]     %MDB%
+echo [INSTALL] %SHADOW_INSTALL%
+
+rem Keep the verified Model Explorer and hierarchy editing fixes byte-identical
+rem to the repaired AMS launcher before starting Design.
+fc /b "%SELF_PASTE_GUARD_DLL%" "%SHADOW_INSTALL%\ExplorerControl.dll" >nul 2>&1
+if errorlevel 1 copy /y "%SELF_PASTE_GUARD_DLL%" "%SHADOW_INSTALL%\ExplorerControl.dll" >nul || exit /b 1
+fc /b "%SAFE_COPY_DLL%" "%SHADOW_INSTALL%\Aveva.Core.Explorer.dll" >nul 2>&1
+if errorlevel 1 copy /y "%SAFE_COPY_DLL%" "%SHADOW_INSTALL%\Aveva.Core.Explorer.dll" >nul || exit /b 1
+fc /b "%DRAWLIST_MENU_FIX_DLL%" "%SHADOW_INSTALL%\DrawListAddin.dll" >nul 2>&1
+if errorlevel 1 copy /y "%DRAWLIST_MENU_FIX_DLL%" "%SHADOW_INSTALL%\DrawListAddin.dll" >nul || exit /b 1
+echo [EDIT] Copy/paste/delete and Model Explorer DrawList fixes ready.
+
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%E3D_LAUNCHER%" ^
+  -UseShadowInstall ^
+  -NoCleanup ^
+  -NoDllDeploy ^
+  -NoSensitiveBinaryRefresh ^
+  -NoCorePatch ^
+  -NoPostRepair ^
+  -NoSuspendedLaunch ^
+  -UseInjectorWatcher ^
+  -MinimalRuntimePatches ^
+  -PostInjectionDelaySeconds 55 ^
+  -UserDir "%AMS_USER_DIR%" ^
+  -WorkDir "%AMS_WORK_DIR%" ^
+  -ProjectCode ams ^
+  -ProjectRoot "%PROJECTS_ROOT%" ^
+  -ProjectDirectory AvevaMarineSample ^
+  -ProjectEnvPrefix AMS ^
+  -ProjectEvarsBatch "%PROJECT_EVARS%" ^
+  -Login "%E3D_LOGIN%" ^
+  -Mdb "%MDB%"
+
+set "LAUNCH_EXIT=%ERRORLEVEL%"
+if not "%LAUNCH_EXIT%"=="0" goto launch_failed
+
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%AMS_GRAPHICS_FINISHER%"
+set "LAUNCH_EXIT=%ERRORLEVEL%"
+if not "%LAUNCH_EXIT%"=="0" goto launch_failed
+
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%AMS_RUNTIME_VERIFIER%"
+set "LAUNCH_EXIT=%ERRORLEVEL%"
+if "%LAUNCH_EXIT%"=="0" (
+  echo [OK] D: AMS MDB, model tree, 3D drawlist, and edit runtime verified.
+  exit /b 0
+)
+
+:launch_failed
+echo [FAIL] AMS launcher exited with code %LAUNCH_EXIT%.
+exit /b %LAUNCH_EXIT%

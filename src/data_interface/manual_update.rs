@@ -2,8 +2,9 @@
 //!
 //! Preview is strictly side-effect-free with respect to element data, models and
 //! the applied watermark: it only opens E3D files, collects the pending delta via
-//! the shared [`IncrementPipeline::collect_changes`], refreshes scan-observation
-//! fields through [`DbnumState::record_scan`], and returns a DTO.
+//! the shared [`IncrementPipeline::collect_window`] (net window, ADR-031),
+//! refreshes scan-observation fields through [`DbnumState::record_scan`], and
+//! returns a DTO.
 //!
 //! Net-change merging (add→modify, multi-modify, modify→delete, add→delete) is a
 //! pure state machine ([`fold_net_op`]) so every cross-session sequence is unit
@@ -57,6 +58,7 @@ use crate::data_interface::batch_scheduler::{ManualEnqueueReceipt, ShadowedCandi
 use crate::data_interface::dbnum_state::{
     DbnumState, FileAnomaly, FileObservation, check_file_against_state, escape_surql_str,
 };
+use crate::data_interface::debug_scope;
 use crate::data_interface::helper::pe_thing_to_refno;
 use crate::data_interface::increment_manager::{
     INGEST_MAX_DEPTH, ScanGate, duplicate_dbnums, in_scope_with, is_candidate_db_file,
@@ -71,6 +73,7 @@ use crate::data_interface::project_paths::resolve_project_root;
 use crate::data_interface::sesno_range::{COLD_START_DB_TYPES, SesnoRangeResolver};
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_interface::update_scope::UpdateScope;
+use crate::data_interface::watch_scope;
 
 /// Max owner-chain depth to walk when resolving delivery units. PDMS
 /// hierarchies (WORLD/SITE/ZONE/…/leaf) are shallow; this only guards cycles.
@@ -2186,9 +2189,41 @@ pub struct DataBatchResult {
     pub merged_sesno_times: Vec<Option<String>>,
     /// Raw changed-element operation count in the window.
     pub changed_elements: usize,
+    /// 净窗口中的新增元素数。与控制台完成行使用同一份执行结果，避免从 warning 文本反解析。
+    #[serde(default)]
+    pub added_elements: usize,
+    /// 净窗口中的修改元素数。
+    #[serde(default)]
+    pub modified_elements: usize,
+    /// 净窗口中的删除元素数。
+    #[serde(default)]
+    pub deleted_elements: usize,
 }
 
 impl DataBatchResult {
+    /// 从已经冻结并完成净窗口合并的操作集填充增删改统计。
+    ///
+    /// `range_eles` 是执行路径的权威输入；控制台、任务回执和 `changed_elements`
+    /// 都从这里取得同一组数字，避免再解析人类可读 warning。
+    fn set_change_counts(
+        &mut self,
+        range_eles: &std::collections::BTreeMap<u32, Vec<EleOperationData>>,
+    ) {
+        self.added_elements = 0;
+        self.modified_elements = 0;
+        self.deleted_elements = 0;
+        for op in range_eles.values().flatten() {
+            match &op.detail {
+                EleOperationDetail::Add(_) => self.added_elements += 1,
+                EleOperationDetail::Modified(_) => self.modified_elements += 1,
+                EleOperationDetail::Deleted => self.deleted_elements += 1,
+                EleOperationDetail::None => {}
+            }
+        }
+        self.changed_elements =
+            self.added_elements + self.modified_elements + self.deleted_elements;
+    }
+
     /// 并入名单与它的平行时刻数组是否自洽（plant-ui ADR-0019 Q5 的两条硬约束）。
     ///
     /// ① 两者等长；② 末条并入正好落在窗口右端时，两处说的是同一页会话，时刻必须
@@ -3519,6 +3554,12 @@ impl AiosDBManager {
         project: &str,
         mdb: Option<&str>,
     ) -> anyhow::Result<ManualUpdatePreview> {
+        // 与 `enqueue_manual_update` 同一条纪律（D7 护栏三）：调试限定必须在人真会
+        // 看的地方现身，而不是只躺在 stdout 里。**用它给 warnings 播种**而不是事后
+        // push——播种之后就没有哪条路径能产出一份不带声明的预览了；早退路径返回的
+        // 是 Err，调用方本来就收不到预览，不存在被蒙蔽的可能。
+        let mut warnings = Vec::from_iter(debug_scope::mode_notice());
+        warnings.extend(watch_scope::mode_notice());
         let project_dir = resolve_project_root(&self.db_option, project)
             .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
         if !project_dir.exists() {
@@ -3526,7 +3567,7 @@ impl AiosDBManager {
         }
         let scope = self.update_scope(mdb).await?;
 
-        let mut warnings = Vec::from_iter(scope.warning().map(str::to_owned));
+        warnings.extend(scope.warning().map(str::to_owned));
         let (by_dbnum, shadowed, phase_blockers) =
             self.scan_initialization_candidates(project, &scope, &mut warnings);
         warnings.extend(
@@ -4277,6 +4318,8 @@ impl AiosDBManager {
                     cand.file_latest_sesno,
                     false,
                     &cand.db_type,
+                    // 预览必须显示整段待应用窗口：执行侧的会话预算是策略，不是事实。
+                    None,
                 )
                 .await?
             {
@@ -4295,7 +4338,8 @@ impl AiosDBManager {
                     let collected = IncrementPipeline::collect_window(&cand.path, plan.range)?;
                     warnings.extend(collected.warnings.iter().cloned());
                     let range_eles = &collected.range_eles;
-                    let details = fill_change_summary(&mut preview, range_eles);
+                    let details =
+                        fill_change_summary(&mut preview, range_eles, &collected.session_sesnos);
                     // Delivery units are a model-delivery concept: only DESI dbs
                     // generate models (spec §数据库类型 — CATA/SYST/… 参与数据更新
                     // 但不触发模型生成), so only DESI gets a rollup.
@@ -4392,6 +4436,13 @@ impl AiosDBManager {
             namespace: self.db_option.surreal_ns.clone(),
             ..Default::default()
         };
+        // 调试限定要在回执里现身（D7 护栏三）。只有 `println!` 而调用方回执里看不见
+        // 的报告，视同没有报告——issue #10 死在的正是这一条。放在最前面，任何一条
+        // 早退分支都带得走它。
+        receipt.warnings.extend(debug_scope::mode_notice());
+        // 监听限定同理，而且更要紧：它可以是配置里躺了一个月的名单，人手上没有
+        // 「我刚敲了什么参数」这条线索可循。
+        receipt.warnings.extend(watch_scope::mode_notice());
         let Some(project_dir) = resolve_project_root(&self.db_option, project) else {
             receipt
                 .warnings
@@ -4652,6 +4703,19 @@ impl AiosDBManager {
             manifest_phases.push(
                 crate::data_interface::initialization_phase::DataPhase::of_db_type(&cand.db_type),
             );
+            // `previous_observed_sesno` 是 `merged_sesnos` 的基线，入队时冻结、随
+            // 队列行传给 worker，此后只活在内存里。2026-08-17 的九场景全红就是栽在
+            // 看不见它（计划 §2 现场 A）。
+            debug_scope::trace(debug_scope::TracePoint::Enqueue, dbnum, || {
+                serde_json::json!({
+                    "intent": format!("{intent:?}"),
+                    "applied_sesno": applied,
+                    "file_latest_sesno": cand.file_latest_sesno,
+                    "previous_observed_sesno": previous_observed_sesno,
+                    "epoch_id": epoch_id,
+                    "outcome": format!("{:?}", outcome.outcome),
+                })
+            });
             match outcome.outcome {
                 Enqueued::New | Enqueued::BehindRunning => receipt.enqueued.push(outcome.info),
                 Enqueued::Merged => receipt.merged.push(outcome.info),
@@ -4692,11 +4756,14 @@ impl AiosDBManager {
     /// **不得**在这里用执行时裁决的 `previous_file_latest_sesno()` 顶替——
     /// 入队扫描早已把观察值推到本窗口右端，再现读只会得到「基线 = 右端」，
     /// 并入名单恒空（2026-08-16 pipeline-f5 现场，回归测试钉着）。
+    /// `session_budget`：本批最多应用多少个真实会话（ADR-017 拆窗第一层，
+    /// `None` = 不收窄）。余量留给下一批——水位本来就支持部分推进。
     pub(crate) async fn execute_one_dbnum(
         &self,
         project: &str,
         cand: &FileCandidate,
         previous_observed_sesno: i32,
+        session_budget: Option<usize>,
         progress: &Option<ManualUpdateProgress>,
         warnings: &mut Vec<String>,
     ) -> (Option<DataBatchResult>, Vec<UnitTask>) {
@@ -4726,6 +4793,9 @@ impl AiosDBManager {
                     merged_sesnos: Vec::new(),
                     merged_sesno_times: Vec::new(),
                     changed_elements: 0,
+                    added_elements: 0,
+                    modified_elements: 0,
+                    deleted_elements: 0,
                 }),
                 Vec::new(),
             )
@@ -4757,6 +4827,9 @@ impl AiosDBManager {
                         merged_sesnos: Vec::new(),
                         merged_sesno_times: Vec::new(),
                         changed_elements: 0,
+                        added_elements: 0,
+                        modified_elements: 0,
+                        deleted_elements: 0,
                     }),
                     Vec::new(),
                 );
@@ -4814,6 +4887,9 @@ impl AiosDBManager {
                             merged_sesnos: Vec::new(),
                             merged_sesno_times: Vec::new(),
                             changed_elements: 0,
+                            added_elements: 0,
+                            modified_elements: 0,
+                            deleted_elements: 0,
                         }),
                         Vec::new(),
                     );
@@ -4840,6 +4916,9 @@ impl AiosDBManager {
                     merged_sesnos: Vec::new(),
                     merged_sesno_times: Vec::new(),
                     changed_elements: 0,
+                    added_elements: 0,
+                    modified_elements: 0,
+                    deleted_elements: 0,
                 }),
                 Vec::new(),
             );
@@ -4867,6 +4946,9 @@ impl AiosDBManager {
                             merged_sesnos: Vec::new(),
                             merged_sesno_times: Vec::new(),
                             changed_elements: 0,
+                            added_elements: 0,
+                            modified_elements: 0,
+                            deleted_elements: 0,
                         }),
                         Vec::new(),
                     );
@@ -4884,12 +4966,26 @@ impl AiosDBManager {
             warnings.push(note);
         }
 
-        if needs_initial_load(
+        let initial_load = needs_initial_load(
             applied,
             cand.file_latest_sesno,
             has_any_data,
             verdict.confirmed_empty_baseline_sesno(),
-        ) {
+        );
+        // 冻结点复核之后、动手之前的那一刻：走基线还是走增量窗口，以及这个判断
+        // 依赖的三个输入。2026-08-17 的 7998 `applied=0` 就是栽在看不见它
+        //（计划 §2 现场 B）。
+        debug_scope::trace(debug_scope::TracePoint::Route, dbnum, || {
+            serde_json::json!({
+                "applied_sesno": applied,
+                "file_latest_sesno": cand.file_latest_sesno,
+                "has_any_pe_row": has_any_data,
+                "confirmed_empty_baseline_sesno": verdict.confirmed_empty_baseline_sesno(),
+                "reinitialized_by_rollback": reinitialized,
+                "route": if initial_load { "initial_load" } else { "increment_window" },
+            })
+        });
+        if initial_load {
             return match self
                 .initialize_dbnum_baseline(
                     project,
@@ -4920,6 +5016,9 @@ impl AiosDBManager {
                         merged_sesnos: Vec::new(),
                         merged_sesno_times: Vec::new(),
                         changed_elements: count,
+                        added_elements: 0,
+                        modified_elements: 0,
+                        deleted_elements: 0,
                     }),
                     Vec::new(),
                 ),
@@ -4937,6 +5036,9 @@ impl AiosDBManager {
                         merged_sesnos: Vec::new(),
                         merged_sesno_times: Vec::new(),
                         changed_elements: 0,
+                        added_elements: 0,
+                        modified_elements: 0,
+                        deleted_elements: 0,
                     }),
                     Vec::new(),
                 ),
@@ -4954,6 +5056,7 @@ impl AiosDBManager {
                 cand.file_latest_sesno,
                 false,
                 &cand.db_type,
+                session_budget,
             )
             .await
         {
@@ -4974,6 +5077,9 @@ impl AiosDBManager {
                         merged_sesnos: Vec::new(),
                         merged_sesno_times: Vec::new(),
                         changed_elements: 0,
+                        added_elements: 0,
+                        modified_elements: 0,
+                        deleted_elements: 0,
                     }),
                     Vec::new(),
                 );
@@ -4982,6 +5088,15 @@ impl AiosDBManager {
 
         let start_sesno = *plan.range.start();
         let end_sesno = *plan.range.end();
+        // 截断必须说出来：否则面板上是一个「成功但水位没追平」的批次，分不清
+        // 它是按预算收窄了还是漏了一段。
+        if end_sesno < cand.file_latest_sesno {
+            warnings.push(format!(
+                "dbnum={dbnum}: 本批按会话预算只应用到 sesno {end_sesno}（文件最新 {}），\
+                 余量由下一批继续",
+                cand.file_latest_sesno
+            ));
+        }
         emit(
             progress,
             ManualUpdateEvent::DataBatchStarted {
@@ -5012,6 +5127,9 @@ impl AiosDBManager {
             merged_sesnos: Vec::new(),
             merged_sesno_times: Vec::new(),
             changed_elements: 0,
+            added_elements: 0,
+            modified_elements: 0,
+            deleted_elements: 0,
         };
 
         println!(
@@ -5040,7 +5158,29 @@ impl AiosDBManager {
             &cand.path,
             sessions_merged_after(&collected.session_sesnos, previous_observed_sesno),
         );
-        batch.changed_elements = collected.range_eles.values().map(|v| v.len()).sum();
+        batch.set_change_counts(&collected.range_eles);
+        println!(
+            "增量变更统计 dbnum={dbnum} 保存时间={} sesno {}..={}：新增={} 修改={} 删除={} 合计={}",
+            batch.end_sesno_time.as_deref().unwrap_or("未解析"),
+            batch.start_sesno,
+            batch.end_sesno,
+            batch.added_elements,
+            batch.modified_elements,
+            batch.deleted_elements,
+            batch.changed_elements,
+        );
+        // 并入名单是怎么算出来的：会话页清单减去入队时冻结的基线。名单空了到底是
+        // 「窗口里本来就没有更新的会话」还是「基线被推到了右端」，只有两个输入
+        // 摆在一起才分得出（计划 §2 现场 A）。
+        debug_scope::trace(debug_scope::TracePoint::Collect, dbnum, || {
+            serde_json::json!({
+                "window": [batch.start_sesno, batch.end_sesno],
+                "session_sesnos": collected.session_sesnos,
+                "previous_observed_sesno": previous_observed_sesno,
+                "merged_sesnos": batch.merged_sesnos,
+                "changed_elements": batch.changed_elements,
+            })
+        });
 
         // Apply through the shared pipeline: persist + datacenter side meta +
         // watermark advance on ITS success path only (per-file isolation).
@@ -5095,7 +5235,7 @@ impl AiosDBManager {
                     batch.end_sesno = success.end_sesno;
                     fill_batch_session_times(&mut batch, project, &cand.path, merged);
                 }
-                batch.changed_elements = success.range_eles.values().map(Vec::len).sum();
+                batch.set_change_counts(&success.range_eles);
             }
             // MySQL 可选同步（feature = "sql"）：从退役的 `execute_incr_update` 搬来。
             // 合流后不再分手动/自动，每个应用成功的批次都同步；失败只记警告，
@@ -5121,6 +5261,18 @@ impl AiosDBManager {
             }
         }
 
+        debug_scope::trace(debug_scope::TracePoint::Terminal, dbnum, || {
+            serde_json::json!({
+                "status": format!("{:?}", batch.status),
+                "window": [batch.start_sesno, batch.end_sesno],
+                "applied_sesno_before": applied,
+                "merged_sesnos": batch.merged_sesnos,
+                "changed_elements": batch.changed_elements,
+                "unit_tasks": units.len(),
+                "message": batch.message.clone(),
+                "warnings": &*warnings,
+            })
+        });
         emit(
             progress,
             ManualUpdateEvent::DataBatchFinished {
@@ -5168,12 +5320,26 @@ async fn build_transform_target_summaries(
 fn fill_change_summary(
     preview: &mut DbnumPreview,
     range_eles: &std::collections::BTreeMap<u32, Vec<EleOperationData>>,
+    session_sesnos: &[u32],
 ) -> Vec<NetChangeDetail> {
+    let mut sessions = session_sesnos
+        .iter()
+        .copied()
+        .map(|sesno| {
+            (
+                sesno,
+                SessionPreview {
+                    sesno,
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     for (&sesno, ops) in range_eles {
-        let mut session = SessionPreview {
+        let session = sessions.entry(sesno).or_insert_with(|| SessionPreview {
             sesno,
             ..Default::default()
-        };
+        });
         for op in ops {
             match &op.detail {
                 EleOperationDetail::Add(_) => session.added += 1,
@@ -5182,8 +5348,8 @@ fn fill_change_summary(
                 EleOperationDetail::None => {}
             }
         }
-        preview.sessions.push(session);
     }
+    preview.sessions.extend(sessions.into_values());
 
     let details = merge_net_change_details(range_eles);
     for change in &details {
@@ -5198,6 +5364,32 @@ fn fill_change_summary(
         }
     }
     details
+}
+
+#[cfg(test)]
+mod preview_session_tests {
+    use super::*;
+
+    /// 空保存与净抵消会话没有操作 key，但仍属于冻结会话页清单；preview 不得漏掉。
+    #[test]
+    fn preview_sessions_come_from_the_frozen_session_page_list() {
+        let mut preview = DbnumPreview::default();
+        let details = fill_change_summary(&mut preview, &BTreeMap::new(), &[25, 26]);
+        assert!(details.is_empty());
+        assert_eq!(
+            preview
+                .sessions
+                .iter()
+                .map(|session| (
+                    session.sesno,
+                    session.added,
+                    session.modified,
+                    session.deleted,
+                ))
+                .collect::<Vec<_>>(),
+            vec![(25, 0, 0, 0), (26, 0, 0, 0)]
+        );
+    }
 }
 
 #[cfg(test)]
@@ -5352,8 +5544,8 @@ mod tests {
         let collects = body.matches("collect_window(").count();
         assert_eq!(
             collects, 1,
-            "execute_one_dbnum 只应收集一次增量窗口（经 collect_window 统一入口，\
-             ADR-022 口径开关只在这一处生效），实际 {collects} 次"
+            "execute_one_dbnum 只应收集一次增量窗口（经 collect_window 统一入口），\
+             实际 {collects} 次"
         );
         assert_eq!(
             body.matches("collect_changes(").count(),
@@ -5427,6 +5619,85 @@ mod tests {
                 && reinit < applied
                 && applied < counts,
             "顺序必须是 scan gate 三态 -> 水位/计数/解析: {body}"
+        );
+    }
+
+    /// D7 护栏三：调试限定的声明必须进回执，且要排在任何一条早退分支**之前**。
+    ///
+    /// 这条钉的不是「说法对不对」（那是护栏一），而是「到底说没说」。issue #10 的
+    /// 全部危害就在这里：收窄本身没错，错在收窄之后现场只剩一句与「MDB 里没这个
+    /// 库」一模一样的话，而回执里连一个字都没有。
+    ///
+    /// 两个入口都要钉，但两者的危险形状不同，所以判据也不同。
+    ///
+    /// `enqueue_manual_update` 每条路径都返回一份**回执**，包括那些早退的——那正是
+    /// 会静默的形状，所以要求声明排在第一条 `return receipt` 之前。
+    /// `preview_manual_update` 的早退返回 `Err`，调用方压根收不到预览，不存在被蒙蔽
+    /// 的可能；那里要求的是**用声明给 `warnings` 播种**，播种之后就没有哪条路径能
+    /// 产出一份不带声明的预览。
+    #[test]
+    fn the_debug_scope_announces_itself_in_both_receipts() {
+        let source = include_str!("manual_update.rs");
+
+        let enqueue = source
+            .split_once("pub async fn enqueue_manual_update(")
+            .expect("enqueue_manual_update 必须存在")
+            .1;
+        let announced = enqueue
+            .find("receipt.warnings.extend(debug_scope::mode_notice())")
+            .expect("执行回执必须带上调试限定声明");
+        let first_return = enqueue.find("return receipt").expect("必然有早退回执");
+        assert!(
+            announced < first_return,
+            "声明必须排在第一条早退回执之前，否则那条路径上的回执是哑的"
+        );
+
+        let preview = source
+            .split_once("pub async fn preview_manual_update(")
+            .expect("preview_manual_update 必须存在")
+            .1;
+        let seeded = preview
+            .find("let mut warnings = Vec::from_iter(debug_scope::mode_notice());")
+            .expect("预览必须用调试限定声明给 warnings 播种，而不是事后 push");
+        let other_warning = preview
+            .find("warnings.extend(scope.warning()")
+            .expect("范围告警仍要进 warnings");
+        assert!(seeded < other_warning, "播种必须是 warnings 的第一次赋值");
+    }
+
+    /// 同上，监听限定那一份。判据与调试限定逐条对齐，只是它更要紧：`--debug-dbnum`
+    /// 是人刚敲下去的，而 `watch_dbnums` 可以是配置里躺了一个月的名单——回执里不说，
+    /// 现场就完全没有线索可循。
+    #[test]
+    fn the_watch_scope_announces_itself_in_both_receipts() {
+        let source = include_str!("manual_update.rs");
+
+        let enqueue = source
+            .split_once("pub async fn enqueue_manual_update(")
+            .expect("enqueue_manual_update 必须存在")
+            .1;
+        let announced = enqueue
+            .find("receipt.warnings.extend(watch_scope::mode_notice())")
+            .expect("执行回执必须带上监听限定声明");
+        let first_return = enqueue.find("return receipt").expect("必然有早退回执");
+        assert!(
+            announced < first_return,
+            "声明必须排在第一条早退回执之前，否则那条路径上的回执是哑的"
+        );
+
+        let preview = source
+            .split_once("pub async fn preview_manual_update(")
+            .expect("preview_manual_update 必须存在")
+            .1;
+        let seeded = preview
+            .find("warnings.extend(watch_scope::mode_notice());")
+            .expect("预览必须在第一次赋值时就带上监听限定声明");
+        let other_warning = preview
+            .find("warnings.extend(scope.warning()")
+            .expect("范围告警仍要进 warnings");
+        assert!(
+            seeded < other_warning,
+            "监听声明必须排在任何业务告警之前，与调试声明同批播种"
         );
     }
 
@@ -7648,7 +7919,52 @@ mod tests {
             merged_sesnos: Vec::new(),
             merged_sesno_times: Vec::new(),
             changed_elements: 0,
+            added_elements: 0,
+            modified_elements: 0,
+            deleted_elements: 0,
         }
+    }
+
+    #[test]
+    fn batch_change_counts_use_the_frozen_net_operations() {
+        let mut batch = batch(8000, BatchStatus::Applied);
+        let operations = BTreeMap::from([(
+            235,
+            vec![
+                EleOperationData::new(
+                    r(1).into(),
+                    235,
+                    EleOperationDetail::Add(Default::default()),
+                ),
+                EleOperationData::new(
+                    r(2).into(),
+                    235,
+                    EleOperationDetail::Modified(pdms_io::io::ModifiedElement {
+                        current_data: Default::default(),
+                        added_attrs: Default::default(),
+                        deleted_attrs: Default::default(),
+                        modified_attrs: Default::default(),
+                        added_explicit_attrs: Default::default(),
+                        deleted_explicit_attrs: Default::default(),
+                        modified_explicit_attrs: Default::default(),
+                        added_uda_attrs: Default::default(),
+                        deleted_uda_attrs: Default::default(),
+                        modified_uda_attrs: Default::default(),
+                        noun: "STRU".into(),
+                        children_changed: None,
+                    }),
+                ),
+                EleOperationData::new(r(3).into(), 235, EleOperationDetail::Deleted),
+                EleOperationData::new(r(4).into(), 235, EleOperationDetail::None),
+            ],
+        )]);
+
+        batch.set_change_counts(&operations);
+
+        assert_eq!(batch.added_elements, 1);
+        assert_eq!(batch.modified_elements, 1);
+        assert_eq!(batch.deleted_elements, 1);
+        assert_eq!(batch.changed_elements, 3, "None 不属于增删改合计");
     }
 
     fn unit_result(root: u64, status: UnitGenStatus) -> ModelUnitResult {

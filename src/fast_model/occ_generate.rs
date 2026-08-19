@@ -1,6 +1,10 @@
+#[cfg(feature = "occ")]
+use crate::fast_model::manifold_bool::design_boolean_mesh_id;
 use crate::fast_model::manifold_bool::{
     apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold,
 };
+#[cfg(feature = "manifold")]
+use crate::fast_model::manifold_tessellate::tessellate_libgm_param;
 use crate::fast_model::{EXIST_MESH_GEO_HASHES, utils};
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::error::{init_deserialize_error, init_query_error, init_save_database_error};
@@ -412,6 +416,53 @@ struct QueryGeoParam {
     pub param: PdmsGeoParam,
 }
 
+/// libgm 路径没有 OCC 边。`pts` 取网格 AABB 八角，禁止空列表假装成功。
+fn mesh_aabb_corner_pts(aabb: &Aabb) -> [glam::Vec3; 8] {
+    aabb.vertices().map(|p| glam::Vec3::new(p.x, p.y, p.z))
+}
+
+fn persist_libgm_plant_mesh(
+    id: &str,
+    mesh: &PlantMesh,
+    dir: &PathBuf,
+    aabb_map: &DashMap<String, Aabb>,
+    chunk_aabbs: &DashMap<String, Aabb>,
+    chunk_pts: &DashMap<u64, String>,
+    update_sql: &mut String,
+) -> anyhow::Result<()> {
+    let aabb = mesh
+        .aabb
+        .ok_or_else(|| anyhow!("几何 {id} libgm 三角化后没有包围盒"))?;
+    if mesh.indices.len() < 3 || mesh.vertices.len() < 3 {
+        anyhow::bail!("几何 {id} libgm 网格为空");
+    }
+    mesh.ser_to_file(&dir.join(format!("{id}.mesh")))
+        .map_err(|error| anyhow!("save generated mesh {id} failed: {error}"))?;
+    let mut pt_hashes = HashSet::new();
+    for point in mesh_aabb_corner_pts(&aabb) {
+        let pts_hash = RsVec3(point).gen_hash();
+        pt_hashes.insert(format!("vec3:⟨{pts_hash}⟩"));
+        if !chunk_pts.contains_key(&pts_hash) {
+            chunk_pts.insert(
+                pts_hash,
+                serde_json::to_string(&point)
+                    .map_err(|error| anyhow!("serialize mesh point failed: {error}"))?,
+            );
+        }
+    }
+    if pt_hashes.is_empty() {
+        anyhow::bail!("几何 {id} libgm 网格 AABB 没有角点，拒绝空 pts");
+    }
+    let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
+    update_sql.push_str(&format!(
+        "update inst_geo:⟨{id}⟩ set meshed = true, aabb = aabb:⟨{aabb_hash}⟩, pts=[{}];",
+        pt_hashes.into_iter().join(",")
+    ));
+    aabb_map.entry(aabb_hash.to_string()).or_insert(aabb);
+    chunk_aabbs.entry(aabb_hash.to_string()).or_insert(aabb);
+    Ok(())
+}
+
 /// 生成实例的网格数据
 ///
 /// # 参数
@@ -428,13 +479,12 @@ pub async fn gen_inst_meshes(
     replace_exist: bool,
     dir: PathBuf,
 ) -> anyhow::Result<()> {
-    #[cfg(not(feature = "occ"))]
+    #[cfg(all(not(feature = "occ"), not(feature = "manifold")))]
     {
         let _ = (refnos, replace_exist, dir);
-        eprintln!("warning: gen_inst_meshes skipped (feature `occ` disabled)");
-        return Ok(());
+        anyhow::bail!("gen_inst_meshes: no tessellation backend (enable `occ` or `manifold`)");
     }
-    #[cfg(feature = "occ")]
+    #[cfg(any(feature = "occ", feature = "manifold"))]
     {
         const PAGE_NUM: usize = 100;
         let inst_keys = get_inst_relate_keys(refnos);
@@ -496,7 +546,10 @@ pub async fn gen_inst_meshes(
             let aabb_map = aabb_map.clone();
             let task = crate::data_interface::staging::write_context::spawn_with_staged_io(
                 async move {
+                    #[cfg(feature = "occ")]
                     let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
+                    #[cfg(feature = "manifold")]
+                    let mut libgm_meshes: HashMap<String, PlantMesh> = HashMap::new();
                     // 形状都建不出来的几何。它们进不了 `shapes_map`，所以下面那句
                     // `set bad = true` 一辈子轮不到它们——得在这里自己记下来。
                     let mut unbuildable: Vec<String> = Vec::new();
@@ -542,10 +595,48 @@ pub async fn gen_inst_meshes(
                                 ))]
                                 println!("gen mesh param: {}", &g.id);
                                 //检查是否是PrimPolyhedron
+                                #[cfg(feature = "occ")]
                                 let is_polyhedron = match &g.param {
                                     PdmsGeoParam::PrimPolyhedron(_) => true,
                                     _ => false,
                                 };
+                                #[cfg(feature = "manifold")]
+                                {
+                                    match tessellate_libgm_param(&g.param) {
+                                        Ok(Some(mesh)) => {
+                                            libgm_meshes.insert(g.id, mesh);
+                                            continue;
+                                        }
+                                        Ok(None) => {}
+                                        Err(error) => {
+                                            #[cfg(not(feature = "occ"))]
+                                            {
+                                                let affected =
+                                                    aios_core::query_refnos_by_geo_hash(&g.id)
+                                                        .await
+                                                        .unwrap_or_default();
+                                                eprintln!(
+                                                    "几何 {} libgm 建不出形状，标记跳过（波及 {} 个构件）：{error}",
+                                                    g.id,
+                                                    affected.len()
+                                                );
+                                                unbuildable.push(g.id);
+                                                continue;
+                                            }
+                                            #[cfg(feature = "occ")]
+                                            {
+                                                let _ = error;
+                                            }
+                                        }
+                                    }
+                                }
+                                #[cfg(not(feature = "occ"))]
+                                {
+                                    eprintln!("几何 {} 无 libgm 适配且 occ 已关，标记跳过", g.id);
+                                    unbuildable.push(g.id);
+                                    continue;
+                                }
+                                #[cfg(feature = "occ")]
                                 match g.param.gen_occ_shape() {
                                     Ok(shape) => {
                                         let mut aabb = Aabb::new_invalid();
@@ -614,6 +705,30 @@ pub async fn gen_inst_meshes(
                                     .push_str(&format!("update inst_geo:⟨{id}⟩ set bad = true;"));
                             }
 
+                            #[cfg(feature = "manifold")]
+                            for (id, mesh) in &libgm_meshes {
+                                if let Err(error) = persist_libgm_plant_mesh(
+                                    id,
+                                    mesh,
+                                    &dir,
+                                    &aabb_map,
+                                    &chunk_aabbs,
+                                    &chunk_pts,
+                                    &mut update_sql,
+                                ) {
+                                    let affected = aios_core::query_refnos_by_geo_hash(id)
+                                        .await
+                                        .unwrap_or_default();
+                                    eprintln!(
+                                        "几何 {id} libgm 网格落盘失败，标记跳过（波及 {} 个构件）：{error}",
+                                        affected.len()
+                                    );
+                                    update_sql
+                                        .push_str(&format!("update inst_geo:⟨{id}⟩ set bad=true;"));
+                                }
+                            }
+
+                            #[cfg(feature = "occ")]
                             for (id, (s, tol)) in &shapes_map {
                                 let mut m_tol = *tol;
                                 // dbg!(m_tol);
@@ -757,7 +872,7 @@ pub async fn gen_inst_meshes(
         // 这里不再有 join 之后的全局补写——那正是崩溃时留下悬空指针的窗口。
 
         Ok(())
-    } // cfg(feature = "occ")
+    } // cfg(any(occ, manifold))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1307,6 +1422,7 @@ pub struct ParamNegInfo {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub(crate) struct OccGeoTransQuery {
     pub refno: RefnoEnum,
+    pub sesno: u32,
     pub noun: String,
     pub wt: Transform,
     pub aabb: Aabb,
@@ -1336,10 +1452,11 @@ pub async fn apply_insts_boolean_occ(
         r#"
             select
                 in as refno,
+                in.sesno as sesno,
                 in.noun as noun,
                 world_trans.d as wt,
                 aabb.d as aabb,
-                (select value [out.param, trans.d] from out->geo_relate) as ts,
+                (select value [out.param, trans.d] from out->geo_relate where geo_type in ["Compound", "Pos"] and trans.d != NONE) as ts,
                 (select value [in, world_trans.d, (select out.param as param, geo_type, trans.d as trans,
                 out.aabb.d as aabb, object::keys(out.param)[0] as para_type
                 from out->geo_relate where geo_type in ["Neg", "CataCrossNeg"] and trans.d != NONE )]
@@ -1348,8 +1465,7 @@ pub async fn apply_insts_boolean_occ(
         "#,
         inst_keys
     );
-    // if !replace_exist
-    {
+    if !replace_exist {
         sql.push_str(" and !booled");
     }
     match crate::data_interface::staging::active_data_db()
@@ -1364,158 +1480,185 @@ pub async fn apply_insts_boolean_occ(
                     // dbg!(boolean_query.len());
                     // dbg!(&boolean_query);
                     if boolean_query.is_empty() {
+                        if replace_exist {
+                            return Err(anyhow!(
+                                "OCC boolean selected 0 instances ({inst_keys}); replace_exist 重切不能静默跳过"
+                            ));
+                        }
                         return Ok(());
                     }
 
                     let chunk = (boolean_query.len() / 16).max(1);
+                    let mut wrote = 0usize;
                     for chunk in boolean_query.chunks(chunk) {
                         let group = chunk.to_vec();
                         let dir_clone = dir.clone();
-                        // let shapes_map_clone = shapes_map_arc.clone();
-                        // let task = tokio::spawn(async move {
                         let mut update_sql = String::new();
                         for mut b in group {
                             if b.ts.is_empty() {
-                                continue;
+                                return Err(anyhow!(
+                                    "OCC boolean {}: 没有 Pos/Compound 正实体",
+                                    b.refno
+                                ));
                             }
                             let Some((pos_param, pos_t)) = b.ts.pop() else {
-                                continue;
+                                return Err(anyhow!(
+                                    "OCC boolean {}: 没有 Pos/Compound 正实体",
+                                    b.refno
+                                ));
                             };
                             let inst_relate_id = b.refno.to_table_key("inst_relate");
-                            //没有实体的情况，下次就不要再继续计算布尔运算了
-                            let Ok(mut pos_shape) = pos_param.gen_occ_shape() else {
-                                println!("布尔运算失败: 无法生成正实体形状, refno: {}", &b.refno);
-                                update_sql.push_str(&format!(
-                                    "update {} set bad_bool=true;",
-                                    &inst_relate_id
-                                ));
-                                continue;
-                            };
+                            let mut pos_shape = pos_param.gen_occ_shape().map_err(|error| {
+                                anyhow!("OCC boolean {}: 无法生成正实体形状: {error}", b.refno)
+                            })?;
                             let pos_matrix = pos_t.compute_matrix().as_dmat4();
-                            let Ok(mut pos_shape) = pos_shape.transformed(&pos_matrix) else {
-                                println!("布尔运算失败: 无法转换正实体形状, refno: {}", &b.refno);
-                                update_sql.push_str(&format!(
-                                    "update {} set bad_bool=true;",
-                                    &inst_relate_id
-                                ));
-                                continue;
-                            };
+                            pos_shape = pos_shape.transformed(&pos_matrix).map_err(|error| {
+                                anyhow!("OCC boolean {}: 无法转换正实体形状: {error}", b.refno)
+                            })?;
 
                             for (param, t) in b.ts.iter() {
-                                // dbg!(id);
-                                if let Ok(shape) = param.gen_occ_shape() {
-                                    if let Ok(s) = shape.transformed(&t.compute_matrix().as_dmat4())
-                                    {
-                                        pos_shape = pos_shape.union(&s.0).shape.into();
-                                    }
-                                }
+                                let shape = param.gen_occ_shape().map_err(|error| {
+                                    anyhow!(
+                                        "OCC boolean {}: 额外正实体建不出形状: {error}",
+                                        b.refno
+                                    )
+                                })?;
+                                let s = shape.transformed(&t.compute_matrix().as_dmat4()).map_err(
+                                    |error| {
+                                        anyhow!(
+                                            "OCC boolean {}: 额外正实体变换失败: {error}",
+                                            b.refno
+                                        )
+                                    },
+                                )?;
+                                pos_shape = pos_shape.union(&s.0).shape.into();
                             }
-                            // dbg!(b.refno);
                             let inverse_mat = b.wt.compute_matrix().as_dmat4().inverse();
 
                             #[cfg(feature = "debug_model")]
                             pos_shape.write_step(format!("{}.step", "pos")).unwrap();
-                            // dbg!(b.neg_ts.len());
                             let mut neg_shapes = vec![];
                             let mut cross_neg_shapes = vec![];
-                            for (refno, neg_t, negs) in b.neg_ts.into_iter() {
+                            let mut skipped_unusable = 0usize;
+                            let mut neg_groups = 0usize;
+                            for (neg_refno, neg_t, negs) in b.neg_ts.into_iter() {
                                 for ParamNegInfo {
                                     param,
                                     geo_type,
-                                    para_type,
                                     trans,
-                                    aabb,
+                                    ..
                                 } in negs
                                 {
-                                    if aabb.is_none() {
-                                        // dbg!(&id);
-                                        continue;
-                                    }
-                                    if let Ok(neg_shape) = param.gen_occ_shape() {
-                                        let m = round_dmat4(
-                                            inverse_mat
-                                                * neg_t.compute_matrix().as_dmat4()
-                                                * trans.compute_matrix().as_dmat4(),
-                                        );
-                                        // dbg!(m);
-                                        // dbg!(refno);
-                                        if let Ok(t_neg_shape) = neg_shape.0.transformed_by_gmat(&m)
-                                        {
-                                            // t_neg_shape.write_step(format!("{}.step", &neg_id)).unwrap();
+                                    neg_groups += 1;
+                                    match param.gen_occ_shape() {
+                                        Ok(neg_shape) => {
+                                            let m = round_dmat4(
+                                                inverse_mat
+                                                    * neg_t.compute_matrix().as_dmat4()
+                                                    * trans.compute_matrix().as_dmat4(),
+                                            );
+                                            let t_neg_shape = neg_shape
+                                                .0
+                                                .transformed_by_gmat(&m)
+                                                .map_err(|error| {
+                                                    anyhow!(
+                                                        "OCC boolean {}: 负体 {neg_refno} 变换失败: {error}",
+                                                        b.refno
+                                                    )
+                                                })?;
                                             if geo_type == "Neg" {
-                                                // dbg!(refno);
                                                 neg_shapes.push(t_neg_shape);
                                             } else {
                                                 cross_neg_shapes.push(t_neg_shape);
                                             }
                                         }
-                                    }
-                                }
-                            }
-                            // dbg!((neg_shapes.len(), cross_neg_shapes.len()));
-                            if !neg_shapes.is_empty() || !cross_neg_shapes.is_empty() {
-                                let mut success = false;
-                                let inst_relate_id = b.refno.to_table_key("inst_relate");
-                                if let Ok(pos_shape) = pos_shape.subtract_shapes(&neg_shapes, false)
-                                {
-                                    if let Ok(final_shape) =
-                                        pos_shape.subtract_shapes(&cross_neg_shapes, true)
-                                    {
-                                        let tol = b.aabb.half_extents().magnitude() * 0.01;
-                                        #[cfg(feature = "debug_model")]
-                                        {
-                                            final_shape
-                                                .write_step(format!("{}.step", b.refno))
-                                                .unwrap();
-                                        }
-                                        if let Ok(mesh) =
-                                            PlantMesh::gen_occ_mesh(&final_shape, tol as _)
-                                        {
-                                            //保存到文件到dir下
-                                            if mesh
-                                                .ser_to_file(
-                                                    &dir_clone.join(format!("{}.mesh", b.refno)),
-                                                )
-                                                .is_ok()
-                                            {
-                                                update_sql.push_str(&format!(
-                                                    "update {} set booled=true;",
-                                                    &inst_relate_id
-                                                ));
-                                                success = true;
-                                            }
+                                        Err(error) => {
+                                            skipped_unusable += 1;
+                                            eprintln!(
+                                                "OCC boolean {}: 跳过无法建形的负体 {neg_refno}: {error}",
+                                                b.refno
+                                            );
                                         }
                                     }
                                 }
-                                if !success {
-                                    println!(
-                                        "布尔运算失败: 无法保存结果 mesh, refno: {}",
-                                        &b.refno
-                                    );
-                                    update_sql.push_str(&format!(
-                                        "update {} set bad_bool=true;",
-                                        &inst_relate_id
-                                    ));
-                                }
                             }
-                            // dbg!(&update_sql);
+                            if neg_shapes.is_empty() && cross_neg_shapes.is_empty() {
+                                return Err(anyhow!(
+                                    "OCC boolean {}: 没有可用负体（共 {neg_groups} 条，跳过无法建形 {skipped_unusable}）",
+                                    b.refno
+                                ));
+                            }
+
+                            let cut = if neg_shapes.is_empty() {
+                                pos_shape
+                            } else {
+                                pos_shape
+                                    .subtract_shapes(&neg_shapes, false)
+                                    .map_err(|error| {
+                                        anyhow!(
+                                            "OCC boolean {}: subtract Neg 失败: {error}",
+                                            b.refno
+                                        )
+                                    })?
+                                    .into()
+                            };
+                            let final_shape = if cross_neg_shapes.is_empty() {
+                                cut
+                            } else {
+                                cut.subtract_shapes(&cross_neg_shapes, true)
+                                    .map_err(|error| {
+                                        anyhow!(
+                                            "OCC boolean {}: subtract CataCrossNeg 失败: {error}",
+                                            b.refno
+                                        )
+                                    })?
+                                    .into()
+                            };
+                            let tol = b.aabb.half_extents().magnitude() * 0.01;
+                            #[cfg(feature = "debug_model")]
+                            {
+                                final_shape.write_step(format!("{}.step", b.refno)).unwrap();
+                            }
+                            let mesh = PlantMesh::gen_occ_mesh(&final_shape, tol as _).map_err(
+                                |error| anyhow!("OCC boolean {}: 三角化失败: {error}", b.refno),
+                            )?;
+                            if mesh.vertices.len() < 3 || mesh.indices.len() < 3 {
+                                return Err(anyhow!(
+                                    "OCC boolean {}: 切洞结果为空（verts={} idx={}），不覆盖已有 booled_id 网格",
+                                    b.refno,
+                                    mesh.vertices.len(),
+                                    mesh.indices.len()
+                                ));
+                            }
+                            let mesh_id = design_boolean_mesh_id(&b.refno, b.sesno);
+                            mesh.ser_to_file(&dir_clone.join(format!("{mesh_id}.mesh")))
+                                .map_err(|error| {
+                                    anyhow!(
+                                        "OCC boolean {}: 保存 {mesh_id}.mesh 失败: {error}",
+                                        b.refno
+                                    )
+                                })?;
+                            update_sql.push_str(&format!(
+                                "update {inst_relate_id} set booled_id='{mesh_id}', booled=true;"
+                            ));
+                            wrote += 1;
+                            println!(
+                                "OCC boolean {}: wrote {mesh_id}.mesh (negs={} cross={} skipped_unusable={skipped_unusable} tol={tol:.3})",
+                                b.refno,
+                                neg_shapes.len(),
+                                cross_neg_shapes.len()
+                            );
                         }
                         if !update_sql.is_empty() {
-                            if crate::surreal_retry::execute_model_write(
+                            crate::surreal_retry::execute_model_write(
                                 &update_sql,
                                 "mark boolean model state",
                             )
-                            .await
-                            .is_err()
-                            {
-                                init_save_database_error(
-                                    &update_sql,
-                                    &std::panic::Location::caller().to_string(),
-                                );
-                            }
+                            .await?;
                         }
-                        // });
-                        // tasks.push(task);
+                    }
+                    if replace_exist && wrote == 0 {
+                        return Err(anyhow!("OCC boolean wrote 0 meshes for {inst_keys}"));
                     }
                 }
                 Err(e) => {
@@ -1731,6 +1874,48 @@ pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) -> anyhow::Result<()> {
 }
 
 #[cfg(test)]
+mod occ_inst_boolean_persist_tests {
+    /// OCC 切洞结果必须落到 `query_valid_insts` 读的 `booled_id` 上。
+    /// 只写 `booled=true` + `{refno}.mesh` 时，对拍和生产渲染仍加载 manifold 旧网格。
+    #[test]
+    fn occ_inst_boolean_writes_booled_id_for_query_valid_insts() {
+        let source = include_str!("occ_generate.rs");
+        let body = source
+            .split_once("pub async fn apply_insts_boolean_occ(")
+            .expect("apply_insts_boolean_occ exists")
+            .1
+            .split_once("pub struct CataNegGroup")
+            .expect("apply_insts_boolean_occ boundary")
+            .0;
+        assert!(
+            body.contains("in.sesno as sesno"),
+            "OCC 查询必须带 sesno，才能生成与 manifold 同一 mesh id"
+        );
+        assert!(
+            body.contains("design_boolean_mesh_id"),
+            "OCC 必须用 design_boolean_mesh_id，不能写 {{refno}}.mesh"
+        );
+        assert!(
+            body.contains("booled_id"),
+            "OCC 成功后必须 set booled_id，否则 query_valid_insts 仍读旧网格"
+        );
+        assert!(
+            body.contains("if !replace_exist"),
+            "replace_exist=true 时必须能重切已有布尔结果"
+        );
+        assert!(
+            !body.contains("and !booled")
+                || body.contains("if !replace_exist")
+                    && body
+                        .split("if !replace_exist")
+                        .nth(1)
+                        .is_some_and(|tail| tail.contains("and !booled")),
+            "and !booled 不得无条件挂上，否则 replace 重切会被跳过"
+        );
+    }
+}
+
+#[cfg(test)]
 mod aabb_write_order_tests {
     #[test]
     fn mesh_workers_propagate_query_write_and_join_failures() {
@@ -1785,6 +1970,49 @@ mod aabb_write_order_tests {
                 && !body.contains("save_pts_to_surreal(&pts_json_map)"),
             "join 之后不得再有全局记录补写"
         );
+    }
+
+    #[test]
+    fn gen_inst_meshes_bails_without_backend_and_tries_libgm_first() {
+        let source = include_str!("occ_generate.rs");
+        let body = source
+            .split_once("pub async fn gen_inst_meshes(")
+            .expect("gen_inst_meshes exists")
+            .1
+            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .expect("gen_inst_meshes boundary")
+            .0;
+        assert!(
+            body.contains("no tessellation backend"),
+            "T005: not(occ) without manifold must bail"
+        );
+        assert!(
+            !body.contains("gen_inst_meshes skipped (feature `occ` disabled)"),
+            "T005: silent skip is forbidden"
+        );
+        assert!(
+            body.contains("tessellate_libgm_param"),
+            "T007: box/cylinder/extrusion must try libgm first"
+        );
+        assert!(
+            body.contains("persist_libgm_plant_mesh"),
+            "T007: manifold meshes must persist AABB/pts from the mesh"
+        );
+    }
+
+    #[test]
+    fn mesh_aabb_corners_are_eight_and_non_empty() {
+        use parry3d::bounding_volume::Aabb;
+        use parry3d::math::Point;
+        let aabb = Aabb::new(Point::new(-1.0, -2.0, -3.0), Point::new(4.0, 5.0, 6.0));
+        let corners = super::mesh_aabb_corner_pts(&aabb);
+        assert_eq!(corners.len(), 8);
+        assert!(
+            corners
+                .iter()
+                .any(|p| *p == glam::Vec3::new(-1.0, -2.0, -3.0))
+        );
+        assert!(corners.iter().any(|p| *p == glam::Vec3::new(4.0, 5.0, 6.0)));
     }
 
     /// `aabb:⟨hash⟩` 记录必须先于 `inst_relate.aabb` 指针落库（与 `trans` 记录同一条

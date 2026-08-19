@@ -196,6 +196,9 @@ pub fn to_attr_infos(noun: &LayoutNoun, slotted: &HashSet<i32>) -> Result<Vec<At
                 offset: *off,
                 default_val: default_val_of(a),
                 att_type: att_type_of(a.type_code),
+                // `noun_layout.json` 走 `DbElementType.SystemAttributes()` 导出，那份记录
+                // 里没有 ityp（ADR-032 边界 B 的 T2 还没采）。
+                ityp: None,
             })
         })
         .collect())

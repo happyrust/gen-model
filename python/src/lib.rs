@@ -388,10 +388,9 @@ fn net_window(
 ) -> PyResult<Py<PyAny>> {
     let value = py
         .detach(|| {
-            let mut io = pdms_io::io::PdmsIO::new("", path.clone(), true);
-            io.open()
-                .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
-            let outcome = pdms_io::net_window::collect_net_window(&mut io, start..=end)?;
+            let mut snapshot = pdms_io::snapshot::DabaconSnapshot::open("", path.clone())
+                .map_err(|error| anyhow::anyhow!("冻结 Dabacon 快照失败: {error}"))?;
+            let outcome = pdms_io::net_window::collect_net_window(&mut snapshot, start..=end)?;
             let mut counts = serde_json::Map::from_iter([
                 ("added".into(), serde_json::json!(0usize)),
                 ("deleted".into(), serde_json::json!(0usize)),

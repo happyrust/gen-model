@@ -103,6 +103,12 @@ impl ResourceGauge {
         self.estimated_write_rows.fetch_add(rows, Ordering::Relaxed);
     }
 
+    /// 本窗口生效的三级阈值。废弃档位的阻断记录要把「测得多少 / 上限多少」
+    /// 一起写出去，否则现场只看得见一条无从下手的失败。
+    pub fn thresholds(&self) -> ResourceThresholds {
+        self.thresholds
+    }
+
     /// 合计摄入量（同一配额：暂存 SQL 字节 + journal 字节）。
     pub fn total_bytes(&self) -> u64 {
         self.staged_sql_bytes.load(Ordering::Relaxed) + self.journal_bytes.load(Ordering::Relaxed)

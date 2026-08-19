@@ -10,7 +10,20 @@ pub mod shared;
 
 pub mod occ_generate;
 
+pub mod mesh_primitives;
+
+pub mod sweep_mesh;
+
+#[cfg(test)]
+pub mod mesh_assert;
+
 pub mod manifold_bool;
+
+#[cfg(feature = "manifold")]
+pub mod manifold_csg;
+
+#[cfg(feature = "manifold")]
+pub mod manifold_tessellate;
 
 pub mod room_fixture;
 

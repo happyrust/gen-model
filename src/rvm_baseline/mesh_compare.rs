@@ -7,8 +7,10 @@
 //! - RVM 侧：rvm-rs 的 [`rvm_rs::export::Tessellate`] 把每个 group 的几何三角化到本地，
 //!   再乘 `geometry.transform`（rvm-rs 已把层级烘进单几何变换，同 OBJ 导出口径）并
 //!   放大 `M_TO_MM` 到世界 mm。按 group 名归并。
-//! - gen 侧（需 `occ`）：从版本库取 `inst_geo.param`，用 `gen_occ_shape` + `gen_occ_mesh`
-//!   **就地重建**单位网格（不依赖磁盘 `.mesh`），再乘 `world_trans × inst.transform`。
+//! - gen 侧（需 `occ`）：有 `booled_id` 时加载布尔后的 `{id}.mesh` 再乘 `world_trans`
+//!   （与生产 `query_valid_insts` 同口径）；否则从 `inst_geo.param` 就地
+//!   `gen_occ_shape`+`gen_occ_mesh`，再乘 `world_trans × inst.transform`
+//!   （param 为空的复合几何回退磁盘 `.mesh`）。
 //!
 //! 阈值不是 1mm：曲面墙两侧都是有限三角化，E3D FacetGroup 的弦误差是判定地板，
 //! 门限按实测证据定（见 `mesh_wall_live` 测试与 `docs/2026-08-12_live-test-ledger.md`）。
@@ -23,6 +25,17 @@ use parry3d::shape::{TriMesh, TriMeshFlags};
 /// rvm-rs 把几何坐标（含 FacetGroup 顶点、geometry.transform 平移）存成米，
 /// E3D world 与生成侧都是毫米。与 [`super::import`] 的 `M_TO_MM` 同一口径。
 const M_TO_MM: f32 = 1000.0;
+
+/// 与 [`crate::data_interface::staging::query_valid_insts`] 同一口径：
+/// `inst_relate.booled_id` 在则只渲染布尔后的那份网格（NXTR/NBOX 已切掉，
+/// 实例变换已烘进 `{booled_id}.mesh`）。`NONE` / 空串视为没有。
+pub fn resolve_booled_mesh_id(booled_id: Option<&str>) -> Option<&str> {
+    let id = booled_id.map(str::trim).filter(|s| !s.is_empty())?;
+    if id.eq_ignore_ascii_case("none") {
+        return None;
+    }
+    Some(id)
+}
 
 /// 世界 mm 三角网格累加器：多几何 / 多实例合成一个网格。
 #[derive(Default)]
@@ -240,21 +253,44 @@ mod gen_side {
         Mat4::from_scale_rotation_translation(scale, rotation, translation)
     }
 
-    /// 就地重建一个元素的 gen 世界三角网格。geo_hash → param → OCC 形状 → 网格，
-    /// 再乘 `world_trans × inst.transform`。`gen_tol` 是 OCC 细分弦容差（mm）。
+    /// 就地重建一个元素的 gen 世界三角网格。
+    ///
+    /// 有 `booled_id` 时与生产 `query_valid_insts` 一样，只加载布尔后的
+    /// `{booled_id}.mesh` 再乘 `world_trans`（切洞结果已烘进网格）。没有则
+    /// geo_hash → param → OCC 形状 → 网格，再乘 `world_trans × inst.transform`。
+    /// `gen_tol` 是 OCC 细分弦容差（mm），只用于未布尔的 param 重建。
     pub async fn gen_world_mesh(
         db: &Surreal<Any>,
         pe_key: &str,
         gen_tol: f64,
     ) -> Result<Option<TriMesh>> {
-        let sql =
-            format!("SELECT world_trans.d AS wt, insts_flat FROM inst_relate WHERE in = {pe_key};");
+        let sql = format!(
+            "SELECT world_trans.d AS wt, insts_flat, booled_id FROM inst_relate WHERE in = {pe_key};"
+        );
         let mut resp = db.query(sql).await.context("查询 inst_relate 失败")?;
         let rows: Vec<serde_json::Value> = resp.take(0).context("解析 inst_relate 结果失败")?;
         let Some(row) = rows.into_iter().next() else {
             return Ok(None);
         };
         let wt = mat_from_trans(row.get("wt").unwrap_or(&serde_json::Value::Null));
+        let booled_id = row.get("booled_id").and_then(|v| v.as_str());
+        if let Some(booled_id) = super::resolve_booled_mesh_id(booled_id) {
+            let mesh_path = Path::new("assets/meshes").join(format!("{booled_id}.mesh"));
+            let unit = PlantMesh::des_mesh_file(&mesh_path).with_context(|| {
+                format!(
+                    "{pe_key} 有 booled_id={booled_id} 但缺少 {}（布尔网格未落盘，不能回退到未开洞正挤出）",
+                    mesh_path.display()
+                )
+            })?;
+            let mut accum = MeshAccum::default();
+            let mut verts = Vec::with_capacity(unit.vertices.len());
+            for v in &unit.vertices {
+                let w = wt.transform_point3(*v);
+                verts.push(Point::new(w.x, w.y, w.z));
+            }
+            accum.add_world_points(&verts, &unit.indices);
+            return Ok(accum.into_trimesh());
+        }
         let insts = row
             .get("insts_flat")
             .and_then(|v| v.as_array())
@@ -951,9 +987,73 @@ mod mesh_wall_live {
         );
     }
 
+    async fn ensure_booled_mesh_files(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        pe_keys: &[&str],
+    ) {
+        let mut missing_pe = Vec::new();
+        for pe_key in pe_keys {
+            let sql = format!("SELECT booled_id FROM inst_relate WHERE in = {pe_key};");
+            let mut resp = db.query(sql).await.expect("booled_id");
+            let rows: Vec<serde_json::Value> = resp.take(0).expect("booled rows");
+            let raw = rows
+                .first()
+                .and_then(|r| r.get("booled_id"))
+                .and_then(|v| v.as_str());
+            match crate::rvm_baseline::mesh_compare::resolve_booled_mesh_id(raw) {
+                Some(id) => {
+                    let path = std::path::Path::new("assets/meshes").join(format!("{id}.mesh"));
+                    let usable = path
+                        .metadata()
+                        .ok()
+                        .is_some_and(|m| m.is_file() && m.len() > 256);
+                    if usable {
+                    } else {
+                        println!(
+                            "{pe_key} missing or empty assets/meshes/{id}.mesh — regen boolean"
+                        );
+                        missing_pe.push(*pe_key);
+                    }
+                }
+                None => {}
+            }
+        }
+        if missing_pe.is_empty() {
+            return;
+        }
+        aios_core::init_test_surreal()
+            .await
+            .expect("init_test_surreal 连 8009");
+        let dir = std::path::PathBuf::from("assets/meshes");
+        let mut mesh_refnos = Vec::new();
+        let mut bool_refnos = Vec::new();
+        for pe_key in &missing_pe {
+            let r: aios_core::RefnoEnum = pe_key.trim_start_matches("pe:").into();
+            bool_refnos.push(r);
+            mesh_refnos.push(r);
+            let negs = aios_core::query_deep_neg_inst_refnos(r)
+                .await
+                .unwrap_or_else(|e| panic!("query_deep_neg_inst_refnos {pe_key}: {e}"));
+            println!("{pe_key} neg insts={}", negs.len());
+            mesh_refnos.extend(negs);
+        }
+        println!(
+            "gen_inst_meshes {} refnos (replace) then boolean {}",
+            mesh_refnos.len(),
+            bool_refnos.len()
+        );
+        crate::fast_model::occ_generate::gen_inst_meshes(&mesh_refnos, true, dir.clone())
+            .await
+            .expect("gen_inst_meshes");
+        crate::fast_model::manifold_bool::apply_insts_boolean_manifold(&bool_refnos, true, dir)
+            .await
+            .expect("apply_insts_boolean_manifold");
+    }
+
     /// AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 20 堵 GWALL（挤出）合成 union。
     /// 1:1 按 AABB 中心配对会撞在同一簇上，所以装配层对拍。盒状挤出（≤16 三角）
-    /// 钉 gen→rvm p95≤1mm；高面片墙的开洞与大体量范围差只打印。
+    /// 钉 gen→rvm p95≤1mm；高面片墙的开洞与带 NXTR 的大体量范围差只打印
+    /// （见 `mesh_gwall_extra_against_cwall_union`）。
     ///
     /// 跑法：`cargo test --features rvm_verify --lib mesh_gwall_union -- --ignored --nocapture`
     #[tokio::test]
@@ -987,6 +1087,7 @@ mod mesh_wall_live {
             "pe:17496_118163",
             "pe:17496_118174",
         ];
+        ensure_booled_mesh_files(&db, &pe_keys).await;
 
         let mut rvm_parts = Vec::new();
         let mut missing_rvm = Vec::new();
@@ -1086,5 +1187,127 @@ mod mesh_wall_live {
             simple_failures.is_empty(),
             "盒状 GWALL（≤16 三角）的 gen 表面必须贴 E3D union（p95≤1mm）：{simple_failures:?}"
         );
+    }
+
+    /// 3 堵 GWALL 大体量 gen→rvm 余量：NXTR 已布尔后的对拍。
+    ///
+    /// `inst_relate.booled_id` 指向切洞后网格；对拍与生产 `query_valid_insts`
+    /// 同一口径。缺 `.mesh` 时先 `gen_inst_meshes` + `apply_insts_boolean_manifold`。
+    /// OCC 布尔会把 116569 切成空网格，生产不走这条路径。盒状守卫仍在
+    /// `mesh_gwall_union_surface_distance`。
+    ///
+    /// 跑法：`cargo test --features rvm_verify --lib mesh_gwall_extra -- --ignored --nocapture`
+    #[tokio::test]
+    #[ignore = "live 8009 + occ：1112 3 堵大体量 GWALL 的 NXTR/范围差取证"]
+    async fn mesh_gwall_extra_against_cwall_union() {
+        use crate::fast_model::shared::farthest_from_surface;
+
+        let rvm_path = std::path::Path::new("test_data/rvm/1RS-WF03-W-C-RR001.rvm");
+        let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse rvm");
+        let db = live_8009().await;
+        let extra_keys = ["pe:17496_105828", "pe:17496_105880", "pe:17496_116569"];
+        ensure_booled_mesh_files(&db, &extra_keys).await;
+
+        let mut gwall_parts = Vec::new();
+        let mut cwall_parts = Vec::new();
+        for (noun, n) in [("WALL", 4), ("STWALL", 4), ("GWALL", 20)] {
+            for i in 1..=n {
+                let prefix = format!("{noun} {i}");
+                let Some(m) = rvm_by_prefix(&rvm_meshes, &prefix) else {
+                    panic!("missing RVM {prefix}");
+                };
+                cwall_parts.push(m.clone());
+                if noun == "GWALL" {
+                    gwall_parts.push(m.clone());
+                }
+            }
+        }
+        let gwall_union = merge_trimeshes(&gwall_parts).expect("gwall union");
+        let cwall_union = merge_trimeshes(&cwall_parts).expect("cwall union");
+
+        let extras = [
+            ("pe:17496_105828", 4usize, 12.0_f32),
+            ("pe:17496_105880", 5, 12.0),
+            ("pe:17496_116569", 8, 180.0),
+        ];
+        let mut nxtr_failures = Vec::new();
+        let mut dist_failures = Vec::new();
+        for (pe_key, expect_nxtr, p95_tol) in extras {
+            let nxtr_sql =
+                format!("SELECT record::id(id) FROM pe WHERE noun = 'NXTR' AND owner = {pe_key};");
+            let mut resp = db.query(nxtr_sql).await.expect("nxtr count");
+            let rows: Vec<serde_json::Value> = resp.take(0).expect("nxtr rows");
+            let n = rows.len();
+            println!("{pe_key} NXTR children={n} (expect ≥ {expect_nxtr})");
+            if n < expect_nxtr {
+                nxtr_failures.push(format!("{pe_key}: nxtr={n}"));
+            }
+
+            let Some(part) = gen_world_mesh(&db, pe_key, 3.0).await.expect("gen mesh") else {
+                panic!("{pe_key} has no gen mesh");
+            };
+            let aabb = part.local_aabb();
+            let g2gwall =
+                crate::fast_model::shared::one_way_surface_distance(&part, &gwall_union, 4000)
+                    .expect("g2 gwall");
+            let g2cwall =
+                crate::fast_model::shared::one_way_surface_distance(&part, &cwall_union, 4000)
+                    .expect("g2 cwall");
+            println!(
+                "    mesh_aabb min=[{:.1},{:.1},{:.1}] max=[{:.1},{:.1},{:.1}] tris={}",
+                aabb.mins.x,
+                aabb.mins.y,
+                aabb.mins.z,
+                aabb.maxs.x,
+                aabb.maxs.y,
+                aabb.maxs.z,
+                part.indices().len()
+            );
+            println!(
+                "    gen->gwall_union p95={:.1} max={:.1} | gen->cwall_union p95={:.1} max={:.1}",
+                g2gwall.p95, g2gwall.hausdorff, g2cwall.p95, g2cwall.hausdorff
+            );
+            for (p, dist) in farthest_from_surface(&part, &gwall_union, 4000, 2) {
+                println!(
+                    "    worst gen->gwall [{:.0},{:.0},{:.0}] d={:.1}",
+                    p[0], p[1], p[2], dist
+                );
+            }
+            if g2gwall.p95 > p95_tol {
+                dist_failures.push(format!(
+                    "{pe_key}: gen->gwall p95={:.1} > {p95_tol}",
+                    g2gwall.p95
+                ));
+            }
+        }
+        assert!(
+            nxtr_failures.is_empty(),
+            "大体量 GWALL 必须带着 NXTR 负体：{nxtr_failures:?}"
+        );
+        assert!(
+            dist_failures.is_empty(),
+            "布尔后 gen 应贴 E3D GWALL union（105828/105880 p95≤12，116569 回归 ≤180）：{dist_failures:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod mesh_source_tests {
+    use super::resolve_booled_mesh_id;
+
+    #[test]
+    fn booled_id_matches_query_valid_insts() {
+        assert_eq!(
+            resolve_booled_mesh_id(Some("17496_105828_716")),
+            Some("17496_105828_716")
+        );
+        assert_eq!(
+            resolve_booled_mesh_id(Some("  17496_105828_716  ")),
+            Some("17496_105828_716")
+        );
+        assert_eq!(resolve_booled_mesh_id(None), None);
+        assert_eq!(resolve_booled_mesh_id(Some("")), None);
+        assert_eq!(resolve_booled_mesh_id(Some("NONE")), None);
+        assert_eq!(resolve_booled_mesh_id(Some("none")), None);
     }
 }

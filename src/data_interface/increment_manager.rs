@@ -36,20 +36,48 @@ use walkdir::WalkDir;
 
 // 本地模块导入
 use crate::api::element::gen_pdms_element_insert_sql;
+use crate::data_interface::debug_scope;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::project_paths::{MountState, path_starts_with};
+use crate::data_interface::sesno_range::COLD_START_DB_TYPES;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_interface::update_scope::UpdateScope;
+use crate::data_interface::watch_scope;
 use crate::fast_model::*;
 use tracing_subscriber::fmt::format;
 
 use crate::consts::PDMS_ELEMENTS_TABLE;
+
+fn running_queue_row(
+    rows: &[crate::data_interface::batch_scheduler::QueueRow],
+) -> Option<&crate::data_interface::batch_scheduler::QueueRow> {
+    rows.iter().find(|row| row.state == "running")
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::SUL_DB;
     use std::path::Path;
+
+    #[test]
+    fn reconcile_detects_a_running_row_before_replacing_the_epoch() {
+        use crate::data_interface::batch_scheduler::QueueRow;
+        let rows = vec![QueueRow {
+            task_id: "db-epoch-1".into(),
+            dbnum: 8000,
+            db_type: "DESI".into(),
+            phase: "design",
+            epoch_id: 7,
+            blocked_by_phase: None,
+            intent: "apply_window",
+            state: "running",
+            start_sesno: 34,
+            end_sesno: 232,
+        }];
+        let running = running_queue_row(&rows).expect("running task must hold its epoch");
+        assert_eq!((running.epoch_id, running.dbnum), (7, 8000));
+    }
 
     #[test]
     fn duplicate_dbnums_are_detected_across_separate_paths() {
@@ -312,6 +340,7 @@ mod tests {
     /// 现在配置里怎么写都不影响：MDB 说了算。
     #[test]
     fn handwritten_dbnum_lists_no_longer_narrow_the_increment_scope() {
+        let _lease = debug_scope::test_guard();
         let mut option = DbOption::default();
         option.project_name = "Main".to_string();
         option.manual_db_nums = Some(vec![1001]);
@@ -332,6 +361,287 @@ mod tests {
         assert!(
             in_scope_with(&option, &scope, "Main", "SYST", 8191),
             "SYS meta 始终解析：MDB 的成员名单本身就存在它里面"
+        );
+    }
+
+    /// D7 护栏二：没给 `--debug-dbnum`，入范围判定必须与本特性引入前逐位相同。
+    ///
+    /// 它拦的是「默认值写错成某个库」这类低级但致命的错——一旦发生，服务看起来
+    /// 一切正常，只是永远不处理其他库。
+    #[test]
+    fn an_unset_debug_scope_leaves_the_scope_verdict_untouched() {
+        let _lease = debug_scope::test_guard();
+        let mut option = DbOption::default();
+        option.project_name = "Main".to_string();
+        let scope = UpdateScope::for_tests("/ALL", &[7997, 7998, 8000]);
+
+        for dbnum in [7997, 7998, 8000] {
+            assert!(
+                in_scope_with(&option, &scope, "Main", "DESI", dbnum),
+                "未设调试限定时 {dbnum} 必须照旧进范围"
+            );
+        }
+        for db_type in COLD_START_DB_TYPES {
+            assert!(in_scope_with(&option, &scope, "Main", db_type, 8191));
+        }
+    }
+
+    /// D7 护栏一：调试限定挡掉的库，说法必须与 MDB 范围判定那句**无交集**。
+    ///
+    /// 回退到复用 `out_of_scope_reason` 就红。两句话长得一样，人就分不出「MDB 里
+    /// 没有这个库」和「我自己在命令行上把它划掉了」——那正是 issue #10。
+    #[test]
+    fn the_debug_exclusion_never_speaks_with_the_scope_verdicts_voice() {
+        let _lease = debug_scope::test_guard();
+        let scope = UpdateScope::for_tests("/ALL", &[7998]);
+        let mdb_voice = out_of_scope_reason(&scope, "DESI", 7997);
+
+        debug_scope::set_dbnums(vec![7998]);
+        let debug_voice = skip_reason(&scope, "DESI", 7997);
+        let in_scope_voice = skip_reason(&scope, "DESI", 7998);
+        debug_scope::set_dbnums(Vec::new());
+
+        assert_ne!(debug_voice, mdb_voice);
+        assert!(debug_voice.contains("--debug-dbnum"), "{debug_voice}");
+        assert!(
+            !debug_voice.contains("不在本期执行范围"),
+            "调试限定不得借用范围判定的措辞: {debug_voice}"
+        );
+        // 限定域**内**的库若真的不在 MDB 范围里，仍旧要听到范围判定那句。
+        assert_eq!(in_scope_voice, out_of_scope_reason(&scope, "DESI", 7998));
+    }
+
+    /// SYS meta 不受调试限定（D3）：MDB 的成员名单存在它们里面，圈掉就解不出
+    /// 「目标库在不在范围内」，只会得到一个「什么都没发现」的假现场。
+    #[test]
+    fn the_debug_scope_never_gates_sys_meta() {
+        let _lease = debug_scope::test_guard();
+        debug_scope::set_dbnums(vec![7998]);
+        for db_type in COLD_START_DB_TYPES {
+            assert!(
+                debug_scope_admits(db_type, 8191),
+                "{db_type} 不该被调试限定挡住"
+            );
+        }
+        assert!(!debug_scope_admits("DESI", 8191));
+        debug_scope::set_dbnums(Vec::new());
+    }
+
+    /// 没配置 `watch_dbnums`、没给 `--watch-dbnum`，入范围判定必须与本特性引入前
+    /// 逐位相同。这个字段的形状与坑过人的 `manual_db_nums` 一样：默认值一旦不是
+    /// 空表，服务看起来一切正常，只是永远不处理别的库。
+    #[test]
+    fn an_unset_watch_scope_leaves_the_scope_verdict_untouched() {
+        let _lease = watch_scope::test_guard();
+        watch_scope::set_dbnums_for_tests(Vec::new(), watch_scope::Origin::Config);
+        let mut option = DbOption::default();
+        option.project_name = "Main".to_string();
+        let scope = UpdateScope::for_tests("/ALL", &[7997, 7998, 8000]);
+
+        for dbnum in [7997, 7998, 8000] {
+            assert!(
+                in_scope_with(&option, &scope, "Main", "DESI", dbnum),
+                "未设监听限定时 {dbnum} 必须照旧进范围"
+            );
+        }
+        for db_type in COLD_START_DB_TYPES {
+            assert!(in_scope_with(&option, &scope, "Main", db_type, 8191));
+        }
+        watch_scope::clear_for_tests();
+    }
+
+    /// 监听限定挡掉的库，说法必须与 MDB 范围判定、调试限定那两句都**无交集**。
+    ///
+    /// 三种成因说同一句话就是 issue #10：人分不出「MDB 里没有这个库」「我在命令行
+    /// 上划的」「一个月前有人写进配置了」，而这三种的处置完全不同。
+    #[test]
+    fn the_watch_exclusion_never_borrows_the_other_two_voices() {
+        let _lease = watch_scope::test_guard();
+        let scope = UpdateScope::for_tests("/ALL", &[7998]);
+        let mdb_voice = out_of_scope_reason(&scope, "DESI", 7997);
+
+        watch_scope::set_dbnums_for_tests(vec![7998], watch_scope::Origin::Config);
+        let watch_voice = skip_reason(&scope, "DESI", 7997);
+        let in_scope_voice = skip_reason(&scope, "DESI", 7998);
+        watch_scope::clear_for_tests();
+
+        assert_ne!(watch_voice, mdb_voice);
+        assert!(
+            watch_voice.contains(watch_scope::WATCH_CONFIG_KEY),
+            "{watch_voice}"
+        );
+        assert!(
+            !watch_voice.contains("不在本期执行范围"),
+            "监听限定不得借用范围判定的措辞: {watch_voice}"
+        );
+        assert!(
+            !watch_voice.contains("--debug-dbnum"),
+            "监听限定不得借用调试限定的措辞: {watch_voice}"
+        );
+        // 限定域**内**的库若真的不在 MDB 范围里，仍旧要听到范围判定那句。
+        assert_eq!(in_scope_voice, out_of_scope_reason(&scope, "DESI", 7998));
+    }
+
+    /// 两道门都关着时，先听见能跨重启活下去的那一道：命令行参数进程一停就没了，
+    /// 配置里的名单能躺一个月。
+    #[test]
+    fn the_watch_verdict_is_announced_before_the_debug_one() {
+        let _lease = watch_scope::test_guard();
+        let scope = UpdateScope::for_tests("/ALL", &[7997]);
+        watch_scope::set_dbnums_for_tests(vec![7998], watch_scope::Origin::Config);
+        debug_scope::set_dbnums(vec![8000]);
+        let reason = skip_reason(&scope, "DESI", 7997);
+        debug_scope::set_dbnums(Vec::new());
+        watch_scope::clear_for_tests();
+
+        assert!(
+            reason.contains(watch_scope::WATCH_CONFIG_KEY) && !reason.contains("--debug-dbnum"),
+            "两道门都关着时该先报监听限定: {reason}"
+        );
+    }
+
+    /// SYS meta 不受监听限定：MDB 的成员名单存在它们里面，圈掉就解不出「目标库在
+    /// 不在范围内」，只会得到一个「什么都没发现」的假现场。
+    #[test]
+    fn the_watch_scope_never_gates_sys_meta() {
+        let _lease = watch_scope::test_guard();
+        watch_scope::set_dbnums_for_tests(vec![7998], watch_scope::Origin::Config);
+        for db_type in COLD_START_DB_TYPES {
+            assert!(
+                watch_scope_admits(db_type, 8191),
+                "{db_type} 不该被监听限定挡住"
+            );
+        }
+        assert!(!watch_scope_admits("DESI", 8191));
+        watch_scope::clear_for_tests();
+    }
+
+    /// 入范围判定读的是**进程级**调试限定，而 `cargo test` 默认多线程并行：
+    /// 一条用例装载了限定域，另一条同时断言 1001 在范围内，谁先跑都会红。
+    ///
+    /// 2026-08-17 实测过这个形状——
+    /// `handwritten_dbnum_lists_no_longer_narrow_the_increment_scope` 与
+    /// `the_debug_exclusion_never_speaks_with_the_scope_verdicts_voice` 撞在一起，
+    /// 报出来的却是「MDB 声明了 1001，配置里的手写名单不该有否决权」，看着像 issue #10
+    /// 复发。所以这条规矩不能只写在 `debug_scope` 的模块注释里：凡是碰这几个判定的
+    /// 用例，都必须先拿串行闸。监听限定域同理，`watch_scope::test_guard()` 借的就是
+    /// 同一把锁——两个限定域各持一把必然出现锁序问题。
+    #[test]
+    fn every_scope_verdict_test_holds_the_debug_scope_serialisation_lease() {
+        let src = include_str!("increment_manager.rs");
+        let verdicts = [
+            concat!("in_scope_", "with("),
+            concat!("skip_", "reason("),
+            concat!("debug_scope_", "admits("),
+            concat!("watch_scope_", "admits("),
+        ];
+        let lease = concat!("test_", "guard()");
+        for chunk in src.split("#[test]").skip(1) {
+            let body = chunk.split_once("\n    }").map_or(chunk, |(body, _)| body);
+            let name = body
+                .split_once("fn ")
+                .and_then(|(_, rest)| rest.split_once('('))
+                .map_or("<未命名>", |(name, _)| name);
+            if name == "every_scope_verdict_test_holds_the_debug_scope_serialisation_lease" {
+                continue;
+            }
+            if verdicts.iter().any(|call| body.contains(call)) {
+                assert!(
+                    body.contains(lease),
+                    "{name} 调用了入范围判定却没拿 debug_scope / watch_scope 的 test_guard()，\
+                     它会与装载限定域的用例并行相撞"
+                );
+            }
+        }
+    }
+
+    /// 重扫日志里，调试排除与 MDB 范围排除必须是**两个聚合桶、两种嗓音**。
+    ///
+    /// D7 护栏一只钉了 `skip_reason` 的两种说法无交集，没钉「sweep 真的走它」——
+    /// 2026-08-18 审核发现被 `--debug-dbnum` 圈掉的库照样进 `out_of_scope` 聚合，
+    /// 控制台说它「不在 MDB 声明名单里」，而它明明在名单里（范围判定压根没轮到
+    /// 执行）：那句是事实性错误，正是 issue #10 的嗓音混同。sweep 依赖实库与
+    /// 文件系统，只能钉源码形状。
+    #[test]
+    fn the_sweep_keeps_debug_exclusions_out_of_the_scope_bucket() {
+        let src = include_str!("increment_manager.rs");
+        let body = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 未找到")
+            .1;
+        // 分桶判定必须问调试门本身，且先于范围桶入账。
+        let debug_gate = body
+            .find(concat!("debug_scope_", "admits(&db_type, db_no)"))
+            .expect("sweep 缺调试排除分桶判定");
+        let debug_bucket = body
+            .find(concat!("debug_excluded", ".push("))
+            .expect("sweep 缺调试排除桶入账");
+        let scope_bucket = body
+            .find(concat!("out_of_scope", ".push("))
+            .expect("sweep 缺范围外桶入账");
+        assert!(
+            debug_gate < debug_bucket && debug_bucket < scope_bucket,
+            "调试分桶必须先于范围桶入账，否则调试排除又会混回 MDB 的嗓音"
+        );
+        // 调试桶的聚合要点名开关并自证不是范围判定；MDB 桶那句不许提开关。
+        assert!(
+            body.contains("个库被 --debug-dbnum") && body.contains("不是 MDB 范围判定"),
+            "调试排除聚合必须点名 --debug-dbnum 并自证不是范围判定"
+        );
+        let scope_print = body.split_once("个库不在 MDB").expect("范围外聚合未找到").1;
+        // 只看到这条 println 语句收口为止（首个 `);`），不许把后面的调试聚合扫进来。
+        let scope_print = scope_print
+            .split_once(");")
+            .map_or(scope_print, |(statement, _)| statement);
+        assert!(
+            !scope_print.contains("--debug-dbnum"),
+            "MDB 范围聚合不许借调试限定的嗓音"
+        );
+    }
+
+    /// 同上，第三个桶：被 `watch_dbnums` 圈掉的库不许混进另外两个聚合。
+    ///
+    /// 它比调试桶更要紧——配置里的名单能跨重启活着，而混同之后控制台会说它「不在
+    /// MDB 声明名单里」，那句是事实性错误（范围判定本轮压根没轮到执行）。
+    #[test]
+    fn the_sweep_keeps_watch_exclusions_out_of_the_other_two_buckets() {
+        let src = include_str!("increment_manager.rs");
+        let body = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 未找到")
+            .1;
+        let watch_gate = body
+            .find(concat!("watch_scope_", "admits(&db_type, db_no)"))
+            .expect("sweep 缺监听排除分桶判定");
+        let watch_bucket = body
+            .find(concat!("watch_excluded", ".push("))
+            .expect("sweep 缺监听排除桶入账");
+        let debug_bucket = body
+            .find(concat!("debug_excluded", ".push("))
+            .expect("sweep 缺调试排除桶入账");
+        let scope_bucket = body
+            .find(concat!("out_of_scope", ".push("))
+            .expect("sweep 缺范围外桶入账");
+        assert!(
+            watch_gate < watch_bucket && watch_bucket < debug_bucket,
+            "监听分桶必须先于调试桶入账，与 skip_reason 的分发顺序一致"
+        );
+        assert!(watch_bucket < scope_bucket);
+        // 监听桶的聚合要点名配置键、说清来源，并自证不是范围判定。
+        let watch_print = body
+            .split_once("个库被 {} {} 监听限定跳过")
+            .expect("监听排除聚合未找到")
+            .1
+            .split_once(");")
+            .map_or("", |(statement, _)| statement);
+        assert!(
+            watch_print.contains("不是 MDB 范围判定")
+                && watch_print.contains(concat!("watch_origin", ".describe()")),
+            "监听排除聚合必须自证不是范围判定并点名来源: {watch_print}"
+        );
+        assert!(
+            !watch_print.contains("--debug-dbnum"),
+            "监听排除聚合不许借调试限定的嗓音: {watch_print}"
         );
     }
 
@@ -386,6 +696,7 @@ mod tests {
     /// DICT 目录库不在此列：它是被主项目依赖的数据，dbnum 也不冲突，照旧摄入。
     #[test]
     fn foreign_project_runtime_sys_databases_are_out_of_scope() {
+        let _lease = debug_scope::test_guard();
         let mut option = DbOption::default();
         option.project_name = "AvevaMarineSample".to_string();
         let scope = UpdateScope::for_tests("/ALL", &[8000]);
@@ -787,6 +1098,459 @@ mod tests {
             "登记路径必须还原到正本"
         );
         fs::remove_dir_all(&fixture).expect("remove fixture directory");
+    }
+
+    /// 启动重扫类 live 夹具眼里，一个库文件的现场事实。
+    ///
+    /// 四项全部从**文件本体**取。这几条用例要模拟的正是「这个库从未解析过」，
+    /// 那种状态下库里没有任何登记行可读，改从水位表取就成了循环论证。
+    struct WatchedDbFile {
+        path: PathBuf,
+        db_type: String,
+        /// 去扩展名的文件名，[`AiosDBManager::scan_and_check_file`] 的入参口径。
+        file_stem: String,
+        file_latest_sesno: i32,
+    }
+
+    /// 在**当前**监控目录里按 dbnum 找出正本。必须赶在把 watcher 换成一次性
+    /// 目录之前调用。
+    fn locate_watched_db(manager: &AiosDBManager, project: &str, dbnum: u32) -> WatchedDbFile {
+        let path = manager
+            .watch_dirs()
+            .into_iter()
+            .flat_map(|dir| {
+                WalkDir::new(dir)
+                    .max_depth(INGEST_MAX_DEPTH)
+                    .into_iter()
+                    .filter_map(Result::ok)
+            })
+            .filter(|entry| entry.file_type().is_file())
+            .map(|entry| entry.into_path())
+            .filter(|path| is_candidate_db_file(path))
+            .find(|path| try_parse_db_basic_info(path).is_some_and(|info| info.db_no == dbnum))
+            .unwrap_or_else(|| panic!("监控目录里没有 dbnum={dbnum} 的库文件"));
+        let db_type = try_parse_db_basic_info(&path)
+            .expect("read target header")
+            .db_type;
+        let file_stem = path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .expect("target file name")
+            .to_string();
+        let file_latest_sesno = PdmsIO::new(project, path.clone(), true)
+            .get_latest_sesno()
+            .unwrap_or_else(|error| panic!("读 dbnum={dbnum} 的最新会话号失败: {error}"))
+            as i32;
+        assert!(file_latest_sesno > 0, "夹具库 dbnum={dbnum} 必须含会话");
+        WatchedDbFile {
+            path,
+            db_type,
+            file_stem,
+            file_latest_sesno,
+        }
+    }
+
+    /// 环境变量里的库号；没给就用默认值，给了但不是数字要当场喊出来。
+    fn env_dbnum(key: &str, fallback: u32) -> u32 {
+        match std::env::var(key) {
+            Ok(raw) => raw
+                .trim()
+                .parse::<u32>()
+                .unwrap_or_else(|_| panic!("{key} 必须是 u32，收到 {raw:?}")),
+            Err(_) => fallback,
+        }
+    }
+
+    /// 只含指定库副本的一次性监控目录。
+    ///
+    /// 启动重扫类 live 用例一律用它，不能拿真实监控目录整面重扫：沙箱里躺着
+    /// 二十多个范围内却从未解析的 DESI 和一批 CATA，它们会一起进清单，而多相位
+    /// 屏障要靠生产 worker 的「相位切换后重扫」循环才走得完，
+    /// [`crate::data_interface::batch_worker::drain_queue_until_empty`] 单独消化
+    /// 不了（ADR-025；2026-08-17 首轮红跑实测）。
+    fn isolated_watch_dir(tag: &str, files: &[&WatchedDbFile]) -> PathBuf {
+        let fixture = std::env::temp_dir().join(format!("aios-{tag}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&fixture);
+        fs::create_dir_all(&fixture).expect("create fixture directory");
+        for file in files {
+            let name = file.path.file_name().expect("fixture file name");
+            fs::copy(&file.path, fixture.join(name)).expect("copy fixture db file");
+        }
+        fixture
+    }
+
+    /// 队列快照里这个 dbnum 那一行；没有就是这一轮没排它。
+    fn queued_row(dbnum: u32) -> Option<crate::data_interface::batch_scheduler::QueueRow> {
+        crate::data_interface::batch_scheduler::BatchScheduler::global()
+            .snapshot()
+            .into_iter()
+            .find(|row| row.dbnum == dbnum)
+    }
+
+    /// 把登记路径从一次性目录搬回正本：对正本补一次扫描裁决，`PathMigrated` 属
+    /// 良性搬家、自动迁移。不还原的话，登记行会指着即将删除的临时目录，下一轮
+    /// 全目录扫描就把它判成文件缺失。
+    async fn restore_registered_path(
+        mgr: &AiosDBManager,
+        project: &str,
+        dbnum: u32,
+        file: &WatchedDbFile,
+    ) {
+        use crate::data_interface::dbnum_state::DbnumState;
+
+        let restore = mgr
+            .scan_and_check_file(
+                project,
+                &file.path,
+                &file.file_stem,
+                &file.db_type,
+                dbnum,
+                file.file_latest_sesno,
+            )
+            .await;
+        assert_eq!(
+            restore.gate,
+            ScanGate::Proceed,
+            "dbnum={dbnum} 正本回归不得阻断"
+        );
+        assert_eq!(
+            DbnumState::read(dbnum)
+                .await
+                .expect("read state")
+                .expect("registered state")
+                .file_path,
+            file.path.display().to_string(),
+            "dbnum={dbnum} 登记路径必须还原到正本"
+        );
+    }
+
+    /// 摘除态的备份行。
+    ///
+    /// 放在 `queue_control`（暂停旗标与播种标记的同表邻居）：那张表的每个消费者
+    /// 都按记录 id 直取，多一行谁都碰不到；暂存窗口的数据面对拍也把整张表列进了
+    /// 控制面豁免。
+    const MDB_CURD_BACKUP: &str = "queue_control:test_mdb_curd_backup";
+
+    /// 把 `dbnum` 从 `mdb` 当前的 CURD 里摘掉，原样 CURD 存进备份行以便还原。
+    ///
+    /// 「取哪一条 MDB」与 [`UpdateScope`] 同口径：同名多条取 CURD 最长的那条
+    /// （目录侧那条同名 `/ALL` 的 CURD 往往只剩一两项）。只动 `CURD`——范围查询
+    /// 读的就是它；`DBLS`（全部库）保持不动，摘除态因此是一个「这个库存在、
+    /// 只是本期不在成员名单里」的合法现场，而不是把库从项目里抹掉。
+    ///
+    /// 返回摘掉的条目数。不是 1 就说明夹具前提不成立（这个库压根不在这个 MDB
+    /// 里，或者 CURD 里有重复项），调用方必须当场失败——否则「摘掉之后没入队」
+    /// 是一条假绿。
+    async fn detach_dbnum_from_mdb(mdb: &str, dbnum: u32) -> anyhow::Result<usize> {
+        let sql = format!(
+            "LET $m = (SELECT id, CURD, n FROM (SELECT id, CURD, \
+               array::len(CURD ?? []) AS n FROM MDB WHERE NAME = $mdb) \
+               ORDER BY n DESC LIMIT 1)[0];\
+             LET $t = (SELECT VALUE id FROM $m.CURD WHERE refno.DBNO = $dbnum);\
+             UPSERT {MDB_CURD_BACKUP} SET mdb = $m.id, curd = $m.CURD, \
+               dbnum = $dbnum, saved_at = time::now();\
+             UPDATE $m.id SET CURD = array::complement($m.CURD, $t);\
+             RETURN array::len($t);"
+        );
+        let mut response = SUL_DB
+            .query(sql)
+            .bind(("mdb", aios_core::helper::to_e3d_name(mdb).into_owned()))
+            .bind(("dbnum", dbnum))
+            .await?
+            .check()?;
+        let removed: Option<usize> = response.take(4)?;
+        Ok(removed.unwrap_or_default())
+    }
+
+    /// 还原 [`detach_dbnum_from_mdb`] 摘掉的那一项：整份 CURD 按原样写回（顺序
+    /// 与内容都不变），随后删掉备份行。
+    ///
+    /// 幂等：没有备份行时什么都不做并返回 `false`。用例开头也调它一次——上一轮
+    /// 崩在摘除与还原之间会留下一个摘除态的 MDB，就地自愈比让下一轮红在莫名其妙
+    /// 的地方好。
+    async fn restore_mdb_curd() -> anyhow::Result<bool> {
+        let sql = format!(
+            "LET $b = (SELECT mdb, curd FROM {MDB_CURD_BACKUP})[0];\
+             IF $b != NONE {{ UPDATE $b.mdb SET CURD = $b.curd; }};\
+             DELETE {MDB_CURD_BACKUP};\
+             RETURN $b != NONE;"
+        );
+        let mut response = SUL_DB.query(sql).await?.check()?;
+        let restored: Option<bool> = response.take(3)?;
+        Ok(restored.unwrap_or(false))
+    }
+
+    /// 存量库与新库在**同一轮启动重扫**里各走各的路由。
+    ///
+    /// 场景就是现场那句「8000 早就解析过了，现在监控目录里多出来一个库」：存量
+    /// 库水位追平文件且 pe 有数据支撑，新库一行登记都没有。要的结果是——存量库
+    /// 一行都不排（`discover_batch` 的水位早退），新库走「发现从未解析过的文件」
+    /// → worker `needs_initial_load` → `initialize_dbnum_baseline`，而不是拿
+    /// `applied + 1` 去接一个根本不存在的增量窗口。
+    ///
+    /// 与 [`live_startup_sweep_baselines_a_never_parsed_db`] 的分界：那条的目录里
+    /// 只有一个孤零零的新库，钉的是单库路由；这条钉的是**两条路由在同一份清单里
+    /// 不串味**——首次导入不许顺手把存量库重解析一遍，增量窗口也不许接管新库。
+    ///
+    /// 库号可配：`AIOS_STARTUP_APPLIED_DBNUM`（默认 8000，存量）与
+    /// `AIOS_STARTUP_NEW_DBNUM`（默认 7998，81 KB / 12 会话，秒级）。按现场口径
+    /// 复现时把后者设成 7999（56 MB / 120 会话，基线以分钟计）。
+    #[tokio::test]
+    #[ignore = "manual live: wipes and rebuilds AIOS_STARTUP_NEW_DBNUM (default 7998)"]
+    async fn live_startup_sweep_routes_a_new_db_to_baseline_beside_an_applied_one() {
+        use crate::data_interface::batch_scheduler::BatchScheduler;
+        use crate::data_interface::dbnum_state::DbnumState;
+        use crate::data_interface::manual_update::dbnum_has_any_pe_row;
+        use crate::data_interface::task_registry::{TaskRegistry, TaskState};
+
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        let project = std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set project fixture");
+        let applied_dbnum = env_dbnum("AIOS_STARTUP_APPLIED_DBNUM", 8000);
+        let new_dbnum = env_dbnum("AIOS_STARTUP_NEW_DBNUM", 7998);
+        assert_ne!(applied_dbnum, new_dbnum, "存量库与新库必须是两个不同的库");
+
+        let mut manager = AiosDBManager::init_form_config()
+            .await
+            .expect("init manager");
+        let applied_file = locate_watched_db(&manager, &project, applied_dbnum);
+        let new_file = locate_watched_db(&manager, &project, new_dbnum);
+
+        // 存量库的基线要赶在换 watcher 之前建：`initialize_project_dbnum_baseline`
+        // 扫的是项目目录与监控目录的交集，watcher 指到临时目录之后它一个候选都
+        // 找不到。
+        if DbnumState::applied_sesno(applied_dbnum)
+            .await
+            .expect("read applied")
+            == 0
+        {
+            manager
+                .initialize_project_dbnum_baseline(&project, applied_dbnum)
+                .await
+                .expect("establish the applied-side baseline");
+        }
+        let applied_before = DbnumState::applied_sesno(applied_dbnum)
+            .await
+            .expect("read applied");
+        // 夹具前提写成断言而不是注释：存量库这一侧要的是「水位追平且有数据支撑」，
+        // 那才是 `discover_batch` 早退的那一格。差一个会话就是普通增量、pe 零行
+        // 就是幽灵水位，两种都会入队，本用例「一行都不排」也就无从断言。
+        assert_eq!(
+            applied_before, applied_file.file_latest_sesno,
+            "夹具前提：dbnum={applied_dbnum} 要先追平文件（先跑一轮增量再来）"
+        );
+        assert!(
+            dbnum_has_any_pe_row(applied_dbnum)
+                .await
+                .expect("probe applied backing"),
+            "夹具前提：dbnum={applied_dbnum} 必须有数据支撑，否则它自己就是幽灵水位"
+        );
+
+        crate::data_interface::fast_delete::delete_dbnum_fast(new_dbnum)
+            .await
+            .expect("wipe the new dbnum to a never-parsed state");
+        assert!(
+            DbnumState::read(new_dbnum)
+                .await
+                .expect("read state")
+                .is_none(),
+            "夹具必须回到「从未登记」：无水位行、无统计行"
+        );
+
+        let fixture = isolated_watch_dir("startup-new-beside-applied", &[&applied_file, &new_file]);
+        manager.watcher = Arc::new(PdmsWatcher::new(vec![fixture.clone()]));
+        let mgr = Arc::new(manager);
+
+        // 模拟生产缺省 startup_autorun=true：重扫排出来的行不挂起。
+        BatchScheduler::global().arm_auto_work();
+        mgr.sweep_watch_dirs("live-startup-new-beside-applied", false)
+            .await
+            .expect("startup sweep");
+
+        assert!(
+            queued_row(applied_dbnum).is_none(),
+            "水位已追平的存量库不得入队：那是 discover_batch 的早退分支"
+        );
+        let row = queued_row(new_dbnum).expect("startup sweep must enqueue the never-parsed dbnum");
+        assert_eq!(row.intent, "apply_window");
+        assert_eq!(row.start_sesno, 1, "水位 0 的首次导入窗口从 1 起");
+        assert_eq!(row.end_sesno, new_file.file_latest_sesno);
+        assert_eq!(row.state, "queued", "上弦后重扫行不得挂起");
+
+        let ran = crate::data_interface::batch_worker::drain_queue_until_empty(&mgr).await;
+        assert!(ran >= 1, "新库必须被自动消费");
+        let task = TaskRegistry::global()
+            .get(&row.task_id)
+            .expect("task exists");
+        assert_eq!(
+            task.state,
+            TaskState::Succeeded,
+            "task result: {:?}",
+            task.result
+        );
+        let result_text = serde_json::to_string(&task.result).expect("serialize result");
+        assert!(
+            result_text.contains("首次按需初始化完成"),
+            "必须走基线分支而不是增量窗口: {result_text}"
+        );
+        assert_eq!(
+            DbnumState::applied_sesno(new_dbnum)
+                .await
+                .expect("read applied"),
+            new_file.file_latest_sesno
+        );
+        assert!(
+            dbnum_has_any_pe_row(new_dbnum)
+                .await
+                .expect("probe backing")
+        );
+        // 存量库全程一条批次都没跑，水位自然一格都不该走。
+        assert_eq!(
+            DbnumState::applied_sesno(applied_dbnum)
+                .await
+                .expect("read applied"),
+            applied_before,
+            "存量库的水位不许被新库那一轮带着走"
+        );
+
+        restore_registered_path(&mgr, &project, new_dbnum, &new_file).await;
+        restore_registered_path(&mgr, &project, applied_dbnum, &applied_file).await;
+        fs::remove_dir_all(&fixture).expect("remove fixture directory");
+    }
+
+    /// MDB 才是增量范围的定义：库文件一直躺在监控目录里，声明与否决定它跑不跑。
+    ///
+    /// 两拍：
+    /// 1. 把这个库从当前 MDB 的 CURD 里摘掉 → 重扫一行都不排，而且**连观察值都
+    ///    不写**（范围门排在 `record_observation` 之前，那条断言正是它的证据）。
+    /// 2. 装回 CURD → [`AiosDBManager::resweep_for_scope_change`]（SYS meta 落库后
+    ///    那条 `scope-refresh` 重扫）把它发现出来，照样走首次导入基线。
+    ///
+    /// 第二拍复刻的是生产里「有人往 MDB 里加一个库」的形状：那些**刚刚进入范围**
+    /// 的设计库自己没有任何文件变更事件，不重扫就得等下次重启才会被发现。
+    ///
+    /// 夹具直接改沙箱库里那条 MDB 的 `CURD`，用完按原样写回；用例开头先无条件
+    /// 还原一次，上一轮崩在中途留下的摘除态就地自愈。库号与上一条用例同源。
+    #[tokio::test]
+    #[ignore = "manual live: mutates the sandbox MDB CURD and rebuilds AIOS_STARTUP_NEW_DBNUM (default 7998)"]
+    async fn live_scope_refresh_baselines_a_db_the_mdb_just_declared() {
+        use crate::data_interface::batch_scheduler::BatchScheduler;
+        use crate::data_interface::dbnum_state::DbnumState;
+        use crate::data_interface::manual_update::dbnum_has_any_pe_row;
+        use crate::data_interface::task_registry::{TaskRegistry, TaskState};
+
+        aios_core::init_test_surreal()
+            .await
+            .expect("connect surreal");
+        let project = std::env::var("AIOS_MANUAL_UPDATE_PROJECT").expect("set project fixture");
+        let applied_dbnum = env_dbnum("AIOS_STARTUP_APPLIED_DBNUM", 8000);
+        let new_dbnum = env_dbnum("AIOS_STARTUP_NEW_DBNUM", 7998);
+        assert_ne!(applied_dbnum, new_dbnum, "存量库与新库必须是两个不同的库");
+
+        // 上一轮若崩在摘除与还原之间，这里就地把 MDB 扶正。
+        restore_mdb_curd()
+            .await
+            .expect("heal any leftover MDB CURD backup");
+
+        let mut manager = AiosDBManager::init_form_config()
+            .await
+            .expect("init manager");
+        let mdb_name = manager.db_option.mdb_name.clone();
+        let applied_file = locate_watched_db(&manager, &project, applied_dbnum);
+        let new_file = locate_watched_db(&manager, &project, new_dbnum);
+
+        crate::data_interface::fast_delete::delete_dbnum_fast(new_dbnum)
+            .await
+            .expect("wipe the new dbnum to a never-parsed state");
+
+        let fixture = isolated_watch_dir("scope-refresh-new-db", &[&applied_file, &new_file]);
+        manager.watcher = Arc::new(PdmsWatcher::new(vec![fixture.clone()]));
+        let mgr = Arc::new(manager);
+        BatchScheduler::global().arm_auto_work();
+
+        // 摘除态是一个必须还原的现场：主体的断言包在隔离壳里，无论红绿都先把
+        // MDB 扶正，再把失败原样抛出去。
+        let outcome = crate::data_interface::batch_worker::isolate_panic(async {
+            let removed = detach_dbnum_from_mdb(&mdb_name, new_dbnum)
+                .await
+                .expect("detach the target dbnum from the MDB");
+            assert_eq!(
+                removed, 1,
+                "夹具前提：dbnum={new_dbnum} 本来就该在 MDB {mdb_name} 的 CURD 里，且只有一项"
+            );
+            crate::data_interface::update_scope::invalidate_scope_cache();
+
+            mgr.sweep_watch_dirs("live-scope-refresh-undeclared", false)
+                .await
+                .expect("sweep while undeclared");
+            assert!(
+                queued_row(new_dbnum).is_none(),
+                "MDB 没声明它，重扫不得入队"
+            );
+            assert!(
+                DbnumState::read(new_dbnum)
+                    .await
+                    .expect("read state")
+                    .is_none(),
+                "范围外的库连观察值都不许写：范围门排在 record_observation 之前"
+            );
+
+            // 第二拍：MDB 声明它。
+            assert!(
+                restore_mdb_curd().await.expect("re-declare in the MDB"),
+                "还原必须真的写回了 CURD"
+            );
+            crate::data_interface::update_scope::invalidate_scope_cache();
+
+            mgr.resweep_for_scope_change()
+                .await
+                .expect("scope-refresh sweep");
+            let row = queued_row(new_dbnum).expect("MDB 声明之后必须被 scope-refresh 发现");
+            assert_eq!(row.intent, "apply_window");
+            assert_eq!(row.start_sesno, 1, "水位 0 的首次导入窗口从 1 起");
+            assert_eq!(row.end_sesno, new_file.file_latest_sesno);
+            assert_eq!(row.state, "queued", "上弦后重扫行不得挂起");
+
+            let ran = crate::data_interface::batch_worker::drain_queue_until_empty(&mgr).await;
+            assert!(ran >= 1, "刚进范围的库必须被自动消费");
+            let task = TaskRegistry::global()
+                .get(&row.task_id)
+                .expect("task exists");
+            assert_eq!(
+                task.state,
+                TaskState::Succeeded,
+                "task result: {:?}",
+                task.result
+            );
+            let result_text = serde_json::to_string(&task.result).expect("serialize result");
+            assert!(
+                result_text.contains("首次按需初始化完成"),
+                "刚进范围的库同样走基线，不是增量窗口: {result_text}"
+            );
+            assert_eq!(
+                DbnumState::applied_sesno(new_dbnum)
+                    .await
+                    .expect("read applied"),
+                new_file.file_latest_sesno
+            );
+            assert!(
+                dbnum_has_any_pe_row(new_dbnum)
+                    .await
+                    .expect("probe backing")
+            );
+
+            restore_registered_path(&mgr, &project, new_dbnum, &new_file).await;
+            restore_registered_path(&mgr, &project, applied_dbnum, &applied_file).await;
+        })
+        .await;
+
+        restore_mdb_curd().await.expect("restore the MDB CURD");
+        crate::data_interface::update_scope::invalidate_scope_cache();
+        let _ = fs::remove_dir_all(&fixture);
+        if let Err(reason) = outcome {
+            panic!("{reason}");
+        }
     }
 
     /// 黑名单那一道门。直接调被生产路径用的那个函数——这里过去是一份手抄的副本，
@@ -1351,7 +2115,55 @@ pub(crate) fn in_scope_with(
         );
         return false;
     }
+    if !watch_scope_admits(db_type, db_num) {
+        return false;
+    }
+    if !debug_scope_admits(db_type, db_num) {
+        return false;
+    }
     scope.admits(db_type, db_num)
+}
+
+/// 监听限定（`DbOption.toml` 的 `watch_dbnums` / `serve --watch-dbnum`）对这个库
+/// 放不放行。
+///
+/// SYS meta 永不受限，理由与 [`debug_scope_admits`] 逐字相同：MDB 的成员名单就存在
+/// SYST/DICT/GLB/GLOB 里，圈掉它们只会得到一个「什么都没发现」的假现场。
+///
+/// 排在调试限定**之前**：两道门都关着时，人该先听见能跨重启活下去的那一道
+/// ——命令行参数进程一停就没了，配置里的名单能躺一个月（issue #10 就是这么来的）。
+///
+/// 没配置、没给开关时恒为 `true`，判定与本特性引入前逐位相同。
+pub(crate) fn watch_scope_admits(db_type: &str, db_num: u32) -> bool {
+    COLD_START_DB_TYPES.contains(&db_type) || watch_scope::admits(db_num)
+}
+
+/// 命令行调试限定（`--debug-dbnum`）对这个库放不放行。
+///
+/// SYS meta 永不受限：MDB 的成员名单就存在 SYST/DICT/GLB/GLOB 里，圈掉它们就解不出
+/// 「目标库在不在范围内」，只会得到一个「什么都没发现」的假现场（计划
+/// `2026-08-17-dbnum-increment-trace-plan.md` D3）。
+///
+/// 没给开关时恒为 `true`，判定与本特性引入前逐位相同——这条由
+/// [`debug_scope::admits`] 的单测与本模块的
+/// `an_unset_debug_scope_leaves_the_scope_verdict_untouched` 一起钉着。
+pub(crate) fn debug_scope_admits(db_type: &str, db_num: u32) -> bool {
+    COLD_START_DB_TYPES.contains(&db_type) || debug_scope::admits(db_num)
+}
+
+/// 「这个库为什么被跳过」的唯一分发点。
+///
+/// 监听限定、调试限定与 MDB 范围判定是三种成因，**必须给三种说法**。它们说同一
+/// 句话正是 issue #10 的病灶：7999 被 `manual_db_nums` 划掉，日志与「MDB 里没这个
+///库」一字不差，于是没人看得出是自己在配置里划的。
+pub(crate) fn skip_reason(scope: &UpdateScope, db_type: &str, db_num: u32) -> String {
+    if !watch_scope_admits(db_type, db_num) {
+        return watch_scope::excluded_reason(db_num);
+    }
+    if !debug_scope_admits(db_type, db_num) {
+        return debug_scope::excluded_reason(db_num);
+    }
+    out_of_scope_reason(scope, db_type, db_num)
 }
 
 /// 「这个库为什么被跳过」——说给盯着控制台的人听。
@@ -1648,6 +2460,7 @@ impl AiosDBManager {
             String,
         )>,
         Vec<String>,
+        Vec<(String, u32, PathBuf)>,
     ) {
         use crate::data_interface::initialization_phase::{
             CatalogueCandidate, DataPhase, select_catalogue_candidates,
@@ -1697,6 +2510,7 @@ impl AiosDBManager {
         }
 
         let mut selected = HashSet::new();
+        let mut cata_dependencies = Vec::new();
         for (db_type, phase) in [("DICT", DataPhase::Meta), ("CATA", DataPhase::Catalogue)] {
             let result = select_catalogue_candidates(
                 by_type.remove(db_type).unwrap_or_default(),
@@ -1710,6 +2524,15 @@ impl AiosDBManager {
                         .iter()
                         .map(|candidate| candidate.path.clone()),
                 );
+                if db_type == "CATA" {
+                    cata_dependencies.extend(result.selected.iter().map(|candidate| {
+                        (
+                            candidate.project.clone(),
+                            candidate.dbnum,
+                            candidate.path.clone(),
+                        )
+                    }));
+                }
             }
             for candidate in result.shadowed {
                 shadowed.push(format!(
@@ -1727,7 +2550,7 @@ impl AiosDBManager {
             }
             blockers.extend(result.blockers.into_iter().map(|message| (phase, message)));
         }
-        (selected, blockers, shadowed)
+        (selected, blockers, shadowed, cata_dependencies)
     }
 
     /// F6：自动 watcher 的「文件观察落库 + 异常检测」。
@@ -1825,8 +2648,22 @@ impl AiosDBManager {
             ),
         }
 
+        let gate = scan_gate_for(&verdict);
+        debug_scope::trace(debug_scope::TracePoint::Scan, db_num, || {
+            serde_json::json!({
+                "project": project,
+                "db_type": db_type,
+                "file_name": file_name,
+                "applied_sesno": verdict.applied_sesno(),
+                "previous_observed_sesno": previous_observed_sesno,
+                "observed_file_latest_sesno": file_latest_sesno,
+                "confirmed_empty_baseline_sesno": verdict.confirmed_empty_baseline_sesno(),
+                "anomaly": verdict.anomaly.as_ref().map(|a| format!("{a:?}")),
+                "gate": format!("{gate:?}"),
+            })
+        });
         ScanCheck {
-            gate: scan_gate_for(&verdict),
+            gate,
             previous_observed_sesno,
         }
     }
@@ -1916,7 +2753,7 @@ impl AiosDBManager {
         if let Some(warning) = scope.warning() {
             println!("[{origin}] {warning}");
         }
-        let (selected_catalogue_paths, mut phase_blockers, shadowed) =
+        let (selected_catalogue_paths, mut phase_blockers, shadowed, cata_dependencies) =
             self.catalogue_manifest_for_dirs(&watch_dirs);
 
         let mut params: IndexMap<PathBuf, crate::data_interface::batch_scheduler::DiscoveredBatch> =
@@ -1936,6 +2773,14 @@ impl AiosDBManager {
             .collect();
         // 范围外的库：聚合成一句，别让 258 行「跳过」把重扫日志淹掉。
         let mut out_of_scope: Vec<String> = Vec::new();
+        // 被 --debug-dbnum 圈掉的库：**单独的桶、单独的嗓音**。混进 out_of_scope
+        // 会让控制台说它「不在 MDB 声明名单里」——对它们这句是事实性错误（在名单
+        // 里，只是被调试限定圈掉，而且范围判定本轮根本没问过），正是 issue #10
+        // 的嗓音混同（2026-08-18 审核 P1）。
+        let mut debug_excluded: Vec<String> = Vec::new();
+        // 被 watch_dbnums / --watch-dbnum 圈掉的库：**第三个桶、第三种嗓音**。
+        // 理由同上，而且这一个更要紧——配置里的名单能跨重启活着。
+        let mut watch_excluded: Vec<String> = Vec::new();
         let mut manifest_totals = Vec::new();
         let time = Instant::now();
         log::debug!("[{origin}] 监控目录: {watch_dirs:?}");
@@ -2042,6 +2887,17 @@ impl AiosDBManager {
                              （dbnum 只在项目内唯一，本库只承载主项目 {} 的系统库）",
                             self.db_option.project_name
                         );
+                        continue;
+                    }
+                    // 先分桶再入账：监听限定、调试限定与 MDB 范围是三种成因，聚合
+                    // 也得各说各话（与 skip_reason 的分发顺序一致——监听门、调试门
+                    // 在前，因为 in_scope_with 里范围判定压根没轮到执行）。
+                    if !watch_scope_admits(&db_type, db_no) {
+                        watch_excluded.push(format!("{db_type}:{db_no}"));
+                        continue;
+                    }
+                    if !debug_scope_admits(&db_type, db_no) {
+                        debug_excluded.push(format!("{db_type}:{db_no}"));
                         continue;
                     }
                     // 逐个打印会在整面重扫时刷屏（AvevaMarineSample 目录里躺着
@@ -2226,6 +3082,37 @@ impl AiosDBManager {
                 if out_of_scope.len() > 12 { " …" } else { "" }
             );
         }
+        if !watch_excluded.is_empty() {
+            let sample = watch_excluded.iter().take(12).join("、");
+            let (watch_dbnums, watch_origin) = watch_scope::resolved();
+            println!(
+                "[{origin}] {} 个库被 {} {} 监听限定跳过（来自{}；这是监听限定，\
+                 不是 MDB 范围判定——这些库在不在 MDB 名单里，本轮没有问过）：{sample}{}",
+                watch_excluded.len(),
+                watch_scope::WATCH_CONFIG_KEY,
+                watch_dbnums.iter().join(","),
+                watch_origin.describe(),
+                if watch_excluded.len() > 12 {
+                    " …"
+                } else {
+                    ""
+                }
+            );
+        }
+        if !debug_excluded.is_empty() {
+            let sample = debug_excluded.iter().take(12).join("、");
+            println!(
+                "[{origin}] {} 个库被 --debug-dbnum {} 调试限定跳过（这是调试限定，\
+                 不是 MDB 范围判定——这些库在不在 MDB 名单里，本轮没有问过）：{sample}{}",
+                debug_excluded.len(),
+                debug_scope::dbnums().iter().join(","),
+                if debug_excluded.len() > 12 {
+                    " …"
+                } else {
+                    ""
+                }
+            );
+        }
 
         // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选，阻断的库不入队）。
         if !blocked_dupes.is_empty() {
@@ -2250,6 +3137,7 @@ impl AiosDBManager {
             phase_blockers,
             shadowed,
             manifest_totals,
+            cata_dependencies,
         );
 
         println!(
@@ -2414,6 +3302,7 @@ impl AiosDBManager {
         )>,
         shadowed: Vec<String>,
         manifest_totals: Vec<crate::data_interface::initialization_phase::DataPhase>,
+        cata_dependencies: Vec<(String, u32, PathBuf)>,
     ) {
         use crate::data_interface::batch_queue::Enqueued;
         use crate::data_interface::batch_scheduler::BatchScheduler;
@@ -2479,6 +3368,21 @@ impl AiosDBManager {
         }
         let coordinator =
             crate::data_interface::initialization_phase::InitializationCoordinator::global();
+        let active_rows = scheduler.snapshot();
+        if let Some(running) = running_queue_row(&active_rows) {
+            let active_epoch = coordinator.snapshot().epoch_id;
+            println!(
+                "[{origin}] 保留活动 epoch={active_epoch}：task {} / dbnum={} 仍在运行；本轮 manifest 留待任务终态后的下一次重扫激活",
+                running.task_id, running.dbnum
+            );
+            return;
+        }
+        let dependency_manifest_version =
+            crate::data_interface::cata_closure::install_dependency_manifest(cata_dependencies);
+        println!(
+            "[manifest] CATA 依赖清单已激活：{} 个选中文件，版本={dependency_manifest_version}",
+            crate::data_interface::cata_closure::dependency_manifest_snapshot().len()
+        );
         let epoch_id = coordinator.begin_discovery();
         let phases = params.values().map(|found| found.phase).collect::<Vec<_>>();
         coordinator.install_manifest(epoch_id, phases, hold, phase_blockers);

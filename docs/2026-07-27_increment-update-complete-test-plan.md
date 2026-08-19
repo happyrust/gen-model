@@ -248,7 +248,7 @@ S4 是全链路测试密度最高、也最健康的阶段，可作为其他阶�
 | IU-S5-03 | 六个变化桶到本地 `NetOp` 是全映射且优先级无歧义 | L0 | `core_user_change_kinds_and_effect_precedence_are_total` | 绿 |
 | IU-S5-04 | OWNER 变化 → Moved，新旧 owner 都记 member-changed | L0 | `b_evt_01_…`、`owner_move_retains_both_membership_sides` | 绿 |
 | IU-S5-05 | 新建元素 → 其 owner 记 member-changed | L0 | `b_evt_02_created_element_records_owner_membership` | 绿 |
-| IU-S5-06 | 成员差分只对 `primaryList` 类型执行 | L0 | `b_evt_03_member_diff_only_runs_for_primary_list_types` | 绿（但 `primary_list_hint()` 仍恒 `true`，见 §10） |
+| IU-S5-06 | 成员差分只对 `primaryList` 类型执行 | L0 | `b_evt_03_member_diff_only_runs_for_primary_list_types` + `core_primary_list_snapshot_is_complete_and_self_consistent` | 绿（2026-08-18：core.dll 快照 1879 resolved / 52 unknown，resolved false 已进入实际 gate） |
 | IU-S5-07 | 重排与增删成员是不同事件，但都触发父根重生成 | L0 | `b_evt_04_…`、`child_list_change_distinguishes_reorder_from_membership` | 绿 |
 | IU-S5-08 | 字典全量 noun 的更新策略是全函数（无 noun 落空） | L0 | `all_dictionary_nouns_have_a_total_incremental_update_policy` | 绿 |
 | IU-S5-09 | 字典 `point==true` 的容器一律不作生成根 | L0 | `every_dictionary_point_container_is_skipped_as_a_generation_root` | 绿 |
@@ -453,7 +453,7 @@ Gate 4 之前跑 S10，只能得到「查无此物」而不是「结果不对」
 | 1 | **跨仓未提交**：gen-model 217 / pdms-io 37 / rs-core-pin 5 / plant-io 14 个改动全在工作区 | 任何测试基线都不可复现 | Gate 0 之前先落一次提交；提交前用 `watch_repo_idle.ps1` 确认无并行会话在写 |
 | 2 | **主力库无生成几何**（218 表无 `inst_info`/`geo_relate`） | S10 全部 11 项 + P0-1 无观测对象 | Gate 4 |
 | 3 | **视觉证据为零** | D 批第三断言全线为空 | Gate 5，先解 `0x80070057` |
-| 4 | `primary_list_hint()` 仍恒返回 `true` | IU-S5-06 的门控只验证了机制，未验证真实名单 | 需 `primaryList` 权威名单（走 `db_get_element_info`，不在字典） |
+| 4 | ~~`primary_list_hint()` 仍恒返回 `true`~~ | **2026-08-18 CLOSED**：live core.dll 同字段读取链冻结 1931 noun；1879 resolved 使用真值，52 unknown 显式列账并保守为真 | `tests/fixtures/core-primary-list-e3d31.json` + B-EVT-03 + 快照完整性测试 |
 | 5 | B6：CATA 派生根仍继承目录库 dbnum | 死信只能被 CATA 新会话复活 | 记为开放缺陷，补 L0 断言钉住现状再改 |
 | 6 | B4：init 递归 vs watch `max_depth(1)` 深度不对称 | IU-S0-06 无法写断言（约定未定） | 先定约定：init 降一层，还是 watch 改递归 |
 | 7 | 3 条 `A transaction was dropped without being committed or cancelled`（`surreal_8042.log.err`） | IU-S8-06 | 未定位代码路径 |

@@ -212,6 +212,11 @@ pub fn full_init(
             if let Some(notice) = aios_database::options::retired_net_window_notice() {
                 eprintln!("{notice}");
             }
+            // 同上：配置里的 `watch_dbnums` 在这条路上一样生效，testbed / live A/B
+            // 走的正是它，不能只让二进制路径听见这句。
+            if let Some(notice) = aios_database::data_interface::watch_scope::mode_notice() {
+                eprintln!("*** {notice} ***");
+            }
 
             // 1b. 锁挡不住跨部署互踩（锁按项目根隔离，两个部署包各持各的锁却写
             //     同一个工程），所以再探一次同工程活服务。放在锁之后：锁能挡的

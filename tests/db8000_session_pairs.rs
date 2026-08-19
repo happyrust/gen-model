@@ -57,6 +57,7 @@ use parse_pdms_db::paged::PagedDbSession;
 use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement, PdmsIO};
 use pdms_io::net_window;
 use pdms_io::session_index_diff;
+use pdms_io::snapshot::DabaconSnapshot;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -769,9 +770,10 @@ fn net_window_collector_matches_replay_ops_on_every_case_window() {
     let mut payloads_compared = 0usize;
     for case in fixture.cases() {
         let window = case_window(case);
-        let mut io = PdmsIO::new("", fixture.final_path.clone(), true);
+        let mut snapshot = DabaconSnapshot::open("", fixture.cut(window.end))
+            .unwrap_or_else(|error| panic!("案例 {} 冻结快照失败: {error:#}", window.id));
         let outcome =
-            net_window::collect_net_window(&mut io, window.apply as i32..=window.end as i32)
+            net_window::collect_net_window(&mut snapshot, window.apply as i32..=window.end as i32)
                 .unwrap_or_else(|error| panic!("案例 {} 净收集失败: {error:#}", window.id));
         assert!(
             outcome.warnings.is_empty(),

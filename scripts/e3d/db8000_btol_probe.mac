@@ -1,0 +1,27 @@
+-- D2 取证:分支连接容差 BTOL(E3D 权威值)。每条查询单独一个 ALPHA LOG 文件,
+-- 崩之前成功的先落盘,借此定位哪条查询非法(上一版整块崩、全丢)。
+-- 只读,无 SAVEWORK,不写 QUIT/FINISH。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/btol_a_name.log" OVER
+$P A
+=24384/23257
+Q NAME
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/btol_b_btol.log" OVER
+$P B
+Q BTOL
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/btol_c_cbtole.log" OVER
+$P C
+Q CBTOLE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/btol_d_pipe.log" OVER
+$P D
+=24384/23225
+Q TYPE
+Q NAME
+Q BTOL
+ALPHA LOG END

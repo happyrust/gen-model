@@ -447,6 +447,8 @@ fn run_fixture_cases(
         project,
         namespace,
     )?;
+    // 声明在 `stack` 之后：局部量逆序析构，它会在服务还活着时先跑，把追踪取走。
+    let _trace_dump = TraceDump::new(run_dir, cli.debug_dbnum.as_deref());
     let resolved = resolve_objects(manifest, target_dbnum, namespace, project)?;
     fs::write(
         run_dir.join("fixture-map.json"),
@@ -526,14 +528,12 @@ fn start_fixture_stack(
     for port in [8048, 8028] {
         ensure!(!port_open(port), "fixture port {port} is already in use");
     }
-    let target = std::env::var_os("CARGO_TARGET_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| repo.join("target"));
+    let tools = tool_dir(repo);
     let surreal = env_path("L3_SURREAL_EXE", repo.join("bin/surreal.exe"));
-    let service = target.join("debug/aios-database.exe");
-    let sync_sys = target.join("debug/sync_sys_only.exe");
-    let initialize = target.join("debug/initialize_ams_dbnums.exe");
-    let scan = target.join("debug/manual_scan_probe.exe");
+    let service = tools.join("aios-database.exe");
+    let sync_sys = tools.join("sync_sys_only.exe");
+    let initialize = tools.join("initialize_ams_dbnums.exe");
+    let scan = tools.join("manual_scan_probe.exe");
     for path in [&surreal, &service, &sync_sys, &initialize, &scan] {
         ensure!(
             path.is_file(),
@@ -644,22 +644,25 @@ fn start_fixture_stack(
     stack.push(
         "service",
         spawn_logged(
-            Command::new(service)
-                .current_dir(repo)
-                .env("DB_OPTION_FILE", &config_no_ext)
-                .env("RUST_MIN_STACK", "67108864")
-                // 套件把启动自动执行显式钉为 true，避免外部配置把批次改成 held；
-                // 整套断言都建立在「批次真的被执行」之上。
-                // 房间全量重建仍旧跳过：这里要的是增量执行，不是 2 万面板重算。
-                .env("AIOS_STARTUP_AUTORUN", "1")
-                .env("AIOS_SKIP_STARTUP_ROOM_BUILD", "1"),
+            with_debug_dbnum(
+                Command::new(service)
+                    .current_dir(repo)
+                    .env("DB_OPTION_FILE", &config_no_ext)
+                    .env("RUST_MIN_STACK", "67108864")
+                    // 套件把启动自动执行显式钉为 true，避免外部配置把批次改成 held；
+                    // 整套断言都建立在「批次真的被执行」之上。
+                    // 房间全量重建仍旧跳过：这里要的是增量执行，不是 2 万面板重算。
+                    .env("AIOS_STARTUP_AUTORUN", "1")
+                    .env("AIOS_SKIP_STARTUP_ROOM_BUILD", "1"),
+                cli.debug_dbnum.as_deref(),
+            ),
             &run_dir.join("stack-service.log"),
         )?,
     );
     wait_http(&format!("{API}/health"), Duration::from_secs(180))?;
     if cli.fixture_ui {
-        let ui = target.join("debug/plant-ui-app.exe");
-        let inspect = target.join("debug/inspect.exe");
+        let ui = tools.join("plant-ui-app.exe");
+        let inspect = tools.join("inspect.exe");
         ensure!(
             ui.is_file() && inspect.is_file(),
             "--fixture-ui requires plant-ui-app.exe and inspect.exe"
@@ -668,7 +671,7 @@ fn start_fixture_stack(
             "L3_PLANT_UI_ROOT",
             repo.parent().unwrap_or(repo).join("plant-ui"),
         );
-        let ui_runtime = prepare_plant_ui_runtime(repo, &plant_ui_root, run_dir)?;
+        let ui_runtime = prepare_plant_ui_runtime(repo, &plant_ui_root, run_dir, &config)?;
         stack.push(
             "plant-ui",
             spawn_logged(
@@ -824,7 +827,7 @@ fn write_runtime_config(
     Ok(())
 }
 
-fn run_fixture_bin(
+pub(super) fn run_fixture_bin(
     exe: &Path,
     args: &[String],
     cwd: &Path,
@@ -1057,7 +1060,15 @@ fn run_case(
             mutation_report.after_sesno > mutation_report.before_sesno,
             "guarded E3D mutation did not expose a new file session"
         );
-        let (_, tasks) = execute_fixture_and_wait(&dir, project, &driver.mdb, ns, dbnum)?;
+        let (_, tasks) = execute_fixture_and_wait(
+            &dir,
+            project,
+            &driver.mdb,
+            ns,
+            dbnum,
+            mirror_target_db,
+            mutation_report.after_sesno,
+        )?;
         ensure!(
             tasks.iter().any(|task| {
                 task.get("kind").and_then(Value::as_str) == Some("data_batch")
@@ -1134,8 +1145,16 @@ fn run_case(
                 .unwrap_or_default(),
         )?;
         copy_fixture_db_snapshot(live_target_db, mirror_target_db)?;
-        execute_fixture_and_wait(&dir.join("restore"), project, &driver.mdb, ns, dbnum)
-            .context("restore increment failed")?;
+        execute_fixture_and_wait(
+            &dir.join("restore"),
+            project,
+            &driver.mdb,
+            ns,
+            dbnum,
+            mirror_target_db,
+            restore_report.after_sesno,
+        )
+        .context("restore increment failed")?;
         wait_fixture_pending(&dir, ns, project, dbnum, "restore")?;
         let restored = fixture_snapshot(ns, project, dbnum, scenario, map)?;
         fs::write(
@@ -1495,7 +1514,15 @@ fn prime_room_structure_baselines(
                     .unwrap_or_default(),
             )?;
             copy_fixture_db_snapshot(live_target_db, mirror_target_db)?;
-            execute_fixture_and_wait(&dir.join(phase), project, &driver.mdb, ns, dbnum)?;
+            execute_fixture_and_wait(
+                &dir.join(phase),
+                project,
+                &driver.mdb,
+                ns,
+                dbnum,
+                mirror_target_db,
+                report.after_sesno,
+            )?;
             wait_fixture_pending(&dir, ns, project, dbnum, phase)?;
         }
         let snapshot = fixture_snapshot(ns, project, dbnum, scenario, map)?;
@@ -1783,35 +1810,47 @@ fn room_numbers(snapshot: &Value, target_refno: Option<&str>) -> BTreeSet<String
         .collect()
 }
 
+/// Execute the pending window and wait for the receipt's tasks to settle.
+///
+/// The readiness gate reads the **mirror file header locally** instead of polling
+/// `POST /update/preview`. Preview's one write (`record_observation`) moves the
+/// `merged_sesnos` baseline to whatever it just saw — polling it between SAVEWORK
+/// and execute pushes the baseline to the very session this call is about to
+/// apply, so the receipt's merged list comes out empty by construction and the
+/// apply assertion goes red on every case (2026-08-17 nine-scenario all-red,
+/// trace evidence in runs/fixture7999-20260817-145932-trace/). The engine is
+/// correct there; the fixture must not consult a baseline-moving endpoint here.
+///
+/// No retry loop: the caller copied the snapshot synchronously
+/// (`copy_fixture_db_snapshot`) after the TTY process returned, so the mirror
+/// content is final. A stale header means the copy did not deliver — fail loud
+/// and immediately.
+#[allow(clippy::too_many_arguments)]
 fn execute_fixture_and_wait(
     dir: &Path,
     project: &str,
     mdb: &str,
     ns: &str,
     dbnum: u32,
+    mirror_target_db: &Path,
+    min_expected_sesno: i32,
 ) -> Result<(Value, Vec<Value>)> {
     fs::create_dir_all(dir)?;
     let model_before = model_drain_task_ids()?;
     let deadline = Instant::now() + DEFAULT_TIMEOUT;
-    loop {
-        let preview = http_json(
-            "POST",
-            &format!("{API}/update/preview"),
-            Some(fixture_identity(project, mdb, ns)),
-        )?;
-        fs::write(
-            dir.join("preview.json"),
-            serde_json::to_vec_pretty(&preview)?,
-        )?;
-        if find_observed_window(&preview, dbnum).is_some_and(|(applied, latest)| latest > applied) {
-            break;
-        }
-        ensure!(
-            Instant::now() < deadline,
-            "dbnum {dbnum} file session did not advance"
-        );
-        thread::sleep(Duration::from_secs(1));
-    }
+    let mirror_latest = file_latest_sesno(mirror_target_db, project)?;
+    fs::write(
+        dir.join("execute-gate.json"),
+        serde_json::to_vec_pretty(&json!({
+            "mirror_file_latest_sesno": mirror_latest,
+            "min_expected_sesno": min_expected_sesno,
+        }))?,
+    )?;
+    ensure!(
+        mirror_latest >= min_expected_sesno,
+        "dbnum {dbnum} mirror DB header stayed at sesno {mirror_latest}, expected at least \
+         {min_expected_sesno}: the fixture mirror copy did not deliver the saved session"
+    );
     let receipt = http_json(
         "POST",
         &format!("{API}/update/execute"),
@@ -1843,28 +1882,6 @@ fn execute_fixture_and_wait(
     );
     tasks.extend(wait_model_drain_settlement(&model_before)?);
     Ok((receipt, tasks))
-}
-
-fn find_observed_window(value: &Value, dbnum: u32) -> Option<(i64, i64)> {
-    match value {
-        Value::Object(object) => {
-            if object.get("dbnum").and_then(Value::as_u64) == Some(dbnum as u64) {
-                let applied = object.get("applied_sesno").and_then(Value::as_i64)?;
-                let latest = object
-                    .get("file_latest_sesno")
-                    .or_else(|| object.get("latest_sesno"))
-                    .and_then(Value::as_i64)?;
-                return Some((applied, latest));
-            }
-            object
-                .values()
-                .find_map(|child| find_observed_window(child, dbnum))
-        }
-        Value::Array(values) => values
-            .iter()
-            .find_map(|child| find_observed_window(child, dbnum)),
-        _ => None,
-    }
 }
 
 fn fixture_identity(project: &str, mdb: &str, ns: &str) -> Value {
@@ -2459,5 +2476,30 @@ mod tests {
         assert_eq!(preserve_readable_after_sesno(10, &readable), 11);
         let unreadable = Err(anyhow!("header unavailable"));
         assert_eq!(preserve_readable_after_sesno(10, &unreadable), 10);
+    }
+
+    /// 执行前的就绪门不得咨询 preview：预览唯一的写操作（`record_observation`）
+    /// 会把 `merged_sesnos` 基线推到它刚看到的会话号。在 SAVEWORK 与 execute
+    /// 之间轮询它，基线就被推到本次要应用的窗口右端，回执的并入名单恒空，
+    /// apply 断言逢案必红（2026-08-17 九场景全红，trace 证据见
+    /// runs/fixture7999-20260817-145932-trace/）。门只许读镜像文件头。
+    #[test]
+    fn the_execute_gate_reads_the_file_header_not_preview() {
+        let source = include_str!("fixture.rs");
+        let body = source
+            .split_once("fn execute_fixture_and_wait(")
+            .expect("execute_fixture_and_wait 必须存在")
+            .1
+            .split_once("\nfn ")
+            .expect("函数之后应有下一个条目")
+            .0;
+        assert!(
+            !body.contains(concat!("update/", "preview")),
+            "就绪门不得在 SAVEWORK 与 execute 之间调用 preview: {body}"
+        );
+        assert!(
+            body.contains("file_latest_sesno("),
+            "就绪门必须直接读镜像文件头: {body}"
+        );
     }
 }

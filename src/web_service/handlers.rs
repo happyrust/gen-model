@@ -115,6 +115,13 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         let db_option = aios_core::get_db_option();
         sul_db["endpoint"] = json!(format!("{}:{}", db_option.v_ip, db_option.v_port));
     }
+    // 调试限定常驻一栏（D7 护栏三的第二个落点）：跛着的服务必须一眼看得出来，
+    // 而不是等人从满屏日志里发现「怎么只有一个库在动」。空列表 = 正常全范围。
+    let debug_dbnums = crate::data_interface::debug_scope::dbnums();
+    // 监听限定同栏。它比调试限定更需要常驻：配置里的名单跨重启活着，而「怎么只有
+    // 一个库在动」这个问题在面板上问一次就该有答案，来源也要一起给出去。
+    let (watch_dbnums, watch_origin) = crate::data_interface::watch_scope::resolved();
+    let watch_dbnums_origin = (!watch_dbnums.is_empty()).then(|| watch_origin.describe());
     let window_blocks = crate::data_interface::staging::attempts::load_window_blocks()
         .await
         .unwrap_or_default();
@@ -147,6 +154,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 上弦（auto_work_armed=false，队列里那些行在 /queue 上是 held）、或者 worker
         // 真的死了（worker_alive）。少了中间这个字段，前两种在接口上分不出来。
         "startup_autorun": crate::options::startup_autorun(),
+        // 三段增量的最终生效值（含环境变量覆盖）。顺序依赖由 worker 的共享阶段门
+        // 保证；这里拆成三个平铺字段，面板不用猜「没活」还是「阶段关闭」。
+        "data_incremental": crate::options::data_incremental(),
+        "model_incremental": crate::options::model_incremental(),
         // 房间增量的总开关（默认 true）。关着时房间泳道永远是空的，而「没活」与
         // 「开关关着」在外面长得一模一样——少了这个字段，只能去翻启动日志里那一行。
         "room_incremental": crate::options::room_incremental(),
@@ -155,10 +166,18 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "initialization": crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot(),
         "worker_alive": worker_alive,
         "worker_idle_secs": worker_idle_secs,
+        // 数据批次内部最昂贵、过去完全不可见的 CATA 依赖阶段。字段为空表示当前
+        // 没有依赖闭包在跑；非空时携带任务、文件、计数与 300s 停滞截止时间。
+        "active_dependency": crate::data_interface::task_registry::TaskRegistry::global()
+            .active_dependency_snapshot(),
         // 解析错误清单（表空是 null）。模型生成侧的失败有 pending 行的 last_error
         // 与死信计数，解析侧此前只有一句会滚走的 warn——`element_parse_skipped` 之后
         // 元素按 cache-miss 静默跳过，事后没有任何查询能说出它是谁。
         "parse_errors": crate::data_interface::parse_error::snapshot().await,
+        // 布尔降级清单（表空是 null）。载不进 manifold 的网格现在跳过这一件继续跑，
+        // 于是 `model_update_pending` 那一行不再产生——少了这本账，「这个件的洞没
+        // 切」就只剩控制台上一句会滚走的话。
+        "geom_errors": crate::data_interface::geom_error::snapshot().await,
         // 空闲轮 panic 账本（从没 panic 过是 null）。`parked: true` = 同一句 panic
         // 连撞到上限、空闲轮已停跑，房间收敛与范围重扫一并暂停——旗子还立着、心跳
         // 也在跳，少了这个字段，外面看到的是一个「健康但什么都不收敛」的服务。
@@ -186,7 +205,30 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 静态资源是可选能力（spec §7）：false = 目录缺失、/assets 在 404，
         // REST/WS 不受影响。没有这个字段，降级只在启动日志里出现一次。
         "static_assets": state.static_assets,
+        // 非空 = 本进程被 `--debug-dbnum` 圈住了，只处理这几个库的数据批次。
+        "debug_dbnums": debug_dbnums,
+        // 非空 = 本进程的增量监听范围被 `watch_dbnums` / `--watch-dbnum` 收窄了；
+        // `watch_dbnums_origin` 说清是配置写的还是这次命令行给的。
+        "watch_dbnums": watch_dbnums,
+        "watch_dbnums_origin": watch_dbnums_origin,
     }))
+}
+
+/// GET /api/v1/trace — 取进程内的增量链路追踪环形缓存。
+///
+/// 之所以要有它：任务终态不落库，服务一拆栈证据就全没了。2026-08-17 的两次
+/// live 轮次都因此无法复核（计划 §2）。缓存溢出时 `dropped` 会如实说出丢了几条。
+pub async fn trace(Query(query): Query<TraceQuery>) -> Json<serde_json::Value> {
+    Json(crate::data_interface::debug_scope::snapshot(
+        query.dbnum,
+        query.limit.unwrap_or(0),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TraceQuery {
+    pub dbnum: Option<u32>,
+    pub limit: Option<usize>,
 }
 
 /// POST /api/v1/query — the fixed read-only MCP query contract over HTTP.
@@ -800,6 +842,25 @@ mod tests {
             .0;
         assert!(ensure.contains("InitializationNotReady"));
         assert!(ensure.contains("initialization_not_ready"));
+    }
+
+    #[test]
+    fn health_exposes_all_increment_stage_controls() {
+        let source = include_str!("handlers.rs");
+        let health = source
+            .split_once("pub async fn health(")
+            .expect("health exists")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health end exists")
+            .0;
+        for key in [
+            "\"data_incremental\"",
+            "\"model_incremental\"",
+            "\"room_incremental\"",
+        ] {
+            assert!(health.contains(key), "health 必须暴露 {key}: {health}");
+        }
     }
 
     /// `/health` 的 `spatial_reconcile` / `spatial_tree` 字段（台账缺口 G-02）。

@@ -70,7 +70,7 @@
 | 4 | T804/D-01 源触发 | 未开始 | 需活 E3D 授权 |
 | 5 | 视觉验收 | **阻塞** | `empty1/e2e-test/evidence` 18 个文件**全是 .txt，零张截图**；桌面捕获 0x80070057 未解决 |
 | 6 | D-07/08/09 | 未开始 | D-07 换库目标现在有了：AvevaPlantSample 有 SUPPO 11,801；但 D-08 要的 `neg_relate` 在主力库是 0 行 |
-| 7 | primaryList 名单 + DCHC 码表 | 未开始（有意保守） | `model_impact.rs` 的 `primary_list_hint()` 仍 `-> true`；门控机制可显式传 `false`，有 B-EVT-03 单测 |
+| 7 | primaryList 名单 + DCHC 码表 | ✅ 2026-08-18 收口 | primaryList 从 live core.dll 的 `db_get_element_info(hash, 297853135)` 冻结：1931 total / 1879 resolved / 52 unknown，resolved false 已进入生产提示，unknown 保守为真；DCHC 继续使用既有字典快照 |
 
 ### P2
 

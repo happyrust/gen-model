@@ -70,6 +70,14 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub startup_autorun: Option<bool>,
 
+    /// 数据增量批次消费（默认 `true`）。关闭时仍扫描、入队，但 worker 不领取批次。
+    #[serde(default)]
+    pub data_incremental: Option<bool>,
+
+    /// 模型增量消费（默认 `true`）。关闭时数据与水位照常提交，模型工作 durable 留存。
+    #[serde(default)]
+    pub model_incremental: Option<bool>,
+
     /// 房间归属的**增量**重算（默认 `true` = 照排照收）。
     ///
     /// 只管增量这一条链，启动全量重建与人工重建不受它影响。详见
@@ -80,6 +88,15 @@ pub struct DbOptionExt {
     /// 跨项目 DICT/CATA 裸 dbnum 冲突的显式选主顺序（ADR-025）。
     #[serde(default)]
     pub catalogue_project_priority: Option<Vec<String>>,
+
+    /// **调试用**：把增量摄入的数据批次圈到这些 dbnum（默认空 = 全范围）。
+    ///
+    /// 命令行 `serve --watch-dbnum` 压过它；SYS meta 不受限。它与
+    /// `manual_db_nums` / `exclude_db_nums` 无关（那两个已被剥夺增量否决权），
+    /// 也不是 `--debug-dbnum`（那个额外带链路追踪且进不了配置文件）。
+    /// 口径与全部护栏见 [`crate::data_interface::watch_scope`]。
+    #[serde(default)]
+    pub watch_dbnums: Option<Vec<u32>>,
 }
 
 impl Deref for DbOptionExt {
@@ -110,8 +127,11 @@ impl From<DbOption> for DbOptionExt {
             http_api_cors: None,
             data_batch_workers: None,
             startup_autorun: None,
+            data_incremental: None,
+            model_incremental: None,
             room_incremental: None,
             catalogue_project_priority: None,
+            watch_dbnums: None,
         }
     }
 }
@@ -143,9 +163,15 @@ struct DbOptionExtFields {
     #[serde(default)]
     startup_autorun: Option<bool>,
     #[serde(default)]
+    data_incremental: Option<bool>,
+    #[serde(default)]
+    model_incremental: Option<bool>,
+    #[serde(default)]
     room_incremental: Option<bool>,
     #[serde(default)]
     catalogue_project_priority: Option<Vec<String>>,
+    #[serde(default)]
+    watch_dbnums: Option<Vec<u32>>,
 }
 
 fn load_ext_fields() -> &'static DbOptionExtFields {
@@ -197,9 +223,36 @@ pub fn get_db_option_ext() -> DbOptionExt {
         http_api_cors: ext.http_api_cors.clone(),
         data_batch_workers: ext.data_batch_workers,
         startup_autorun: ext.startup_autorun,
+        data_incremental: ext.data_incremental,
+        model_incremental: ext.model_incremental,
         room_incremental: ext.room_incremental,
         catalogue_project_priority: ext.catalogue_project_priority.clone(),
+        watch_dbnums: ext.watch_dbnums.clone(),
     }
+}
+
+/// 配置里的增量监听限定域（`DbOption.toml` 的 `watch_dbnums`，**默认空 = 全范围**）。
+///
+/// 只读扩展字段、不触发 `aios_core::get_db_option()` 的完整配置装载，因此在没有
+/// 完整配置的单测环境里也能安全调用（缺文件时回空表 = 不限定）。
+///
+/// 命令行 `serve --watch-dbnum` 压过它；生效取值、来源与全部护栏统一由
+/// [`crate::data_interface::watch_scope`] 裁决，别的地方不要直接读这个函数来做
+/// 入范围判定——那样会绕开「跳过了要有声」的三道护栏。
+pub fn watch_dbnums() -> Vec<u32> {
+    normalise_watch_dbnums(load_ext_fields().watch_dbnums.as_deref())
+}
+
+/// 去重且保序。配置里写重了不是错误（`[7998, 7998]` 的意图毫无歧义），但重复项会
+/// 让回执里的名单看着像两个库。
+fn normalise_watch_dbnums(configured: Option<&[u32]>) -> Vec<u32> {
+    let mut normalised: Vec<u32> = Vec::new();
+    for dbnum in configured.unwrap_or_default() {
+        if !normalised.contains(dbnum) {
+            normalised.push(*dbnum);
+        }
+    }
+    normalised
 }
 
 /// 跨项目 DICT/CATA 同 dbnum 的选主顺序。空列表不猜优先级：只有实际发生冲突时
@@ -246,6 +299,41 @@ pub fn startup_autorun() -> bool {
 }
 
 fn effective_startup_autorun(configured: Option<bool>, env_override: Option<&str>) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(true)
+}
+
+/// 环境变量名：一次性覆盖 [`data_incremental`]。
+pub const DATA_INCREMENTAL_ENV: &str = "AIOS_DATA_INCREMENTAL";
+
+/// 数据增量阶段是否领取共享批次队列（默认 `true`）。
+///
+/// 关闭只冻结消费，不冻结发现：watcher 与手动入口仍走同一权威入队路径，队列行
+/// 原样保留，重新开启后继续执行。
+pub fn data_incremental() -> bool {
+    effective_incremental_stage(
+        load_ext_fields().data_incremental,
+        std::env::var(DATA_INCREMENTAL_ENV).ok().as_deref(),
+    )
+}
+
+/// 环境变量名：一次性覆盖 [`model_incremental`]。
+pub const MODEL_INCREMENTAL_ENV: &str = "AIOS_MODEL_INCREMENTAL";
+
+/// 模型增量阶段是否消费模型计划（默认 `true`）。
+///
+/// 关闭时数据批次复用初始化的延后模型提交纪律：数据、水位与 durable 模型计划
+/// 一起落定，模型生成和模型副作用留给重新开启后的空闲轮。
+pub fn model_incremental() -> bool {
+    effective_incremental_stage(
+        load_ext_fields().model_incremental,
+        std::env::var(MODEL_INCREMENTAL_ENV).ok().as_deref(),
+    )
+}
+
+fn effective_incremental_stage(configured: Option<bool>, env_override: Option<&str>) -> bool {
     env_override
         .and_then(parse_bool_flag)
         .or(configured)
@@ -463,6 +551,23 @@ mod tests {
         assert_eq!(effective_data_batch_workers(Some(32)), 8);
     }
 
+    /// 缺配置就是「全范围」：这个字段的形状与坑过人的 `manual_db_nums` 一样，
+    /// 一旦默认值不是空表，服务看起来一切正常，只是永远不处理别的库。
+    #[test]
+    fn a_missing_watch_dbnum_list_narrows_nothing() {
+        assert!(normalise_watch_dbnums(None).is_empty());
+        assert!(normalise_watch_dbnums(Some(&[])).is_empty());
+    }
+
+    /// 写重了不算配置错误，但回执里的名单不该看着像两个库。
+    #[test]
+    fn a_configured_watch_dbnum_list_is_deduplicated_in_order() {
+        assert_eq!(
+            normalise_watch_dbnums(Some(&[8000, 7998, 8000])),
+            vec![8000, 7998]
+        );
+    }
+
     /// ADR-023：缺配置按自动执行；显式 false 仍保留冷启动检查能力。
     #[test]
     fn startup_autorun_is_on_unless_someone_turns_it_off() {
@@ -489,6 +594,25 @@ mod tests {
         assert!(effective_startup_autorun(Some(true), Some("ture")));
         assert!(!effective_startup_autorun(Some(false), Some("ture")));
         assert!(effective_startup_autorun(None, Some("")));
+    }
+
+    /// 三段增量缺配置都保持历史行为；显式关闭必须生效。
+    #[test]
+    fn data_and_model_incremental_are_on_unless_explicitly_disabled() {
+        assert!(effective_incremental_stage(None, None));
+        assert!(!effective_incremental_stage(Some(false), None));
+        assert!(effective_incremental_stage(Some(true), None));
+    }
+
+    /// 数据与模型使用同一套严格布尔覆盖规则：双向可压，拼错回落配置。
+    #[test]
+    fn data_and_model_incremental_env_overrides_are_strict_and_bidirectional() {
+        assert!(effective_incremental_stage(Some(false), Some("on")));
+        assert!(!effective_incremental_stage(Some(true), Some("0")));
+        assert!(effective_incremental_stage(None, Some("yes")));
+        assert!(effective_incremental_stage(Some(true), Some("ture")));
+        assert!(!effective_incremental_stage(Some(false), Some("ture")));
+        assert!(effective_incremental_stage(None, Some("ture")));
     }
 
     /// 缺配置就是「算增量房间」（2026-08-12 起）：关着时房间归属只在删除路径被

@@ -2,7 +2,7 @@
 //!
 //! 一个提交单元持有一个执行器：窗口计算期间所有持久层写语句改从这里过——
 //! 按 [`ExecMode`] 决定「在暂存库生效」与「进语句日志」两件事各自做不做；
-//! 写回 = 把日志按原序、按 [`TX_CHUNK`] 分块事务重放到持久层，尾事务收口由
+//! 写回 = 把日志按原序、按条数/字节数/预计行数分块事务重放到持久层，尾事务收口由
 //! 调用方渲染（水位推进、attempts 清除、pending 收口——T1.3）。
 //!
 //! 恢复语义（ADR-017 §4）：journal 只活在内存。写回失败且进程存活 → 同一份
@@ -20,9 +20,12 @@ use super::resources::{ResourceBand, ResourceGauge};
 use crate::data_interface::increment_pipeline::wrap_in_transaction;
 use crate::surreal_retry::execute_surreal_checked_on;
 
-/// 写回分块大小。整窗口单事务撑爆 ws 通道是已记录事故（amssys 冷启动 4000+
-/// 元素，`increment_pipeline.rs`），沿用同一分块纪律。
-pub const TX_CHUNK: usize = 500;
+/// 写回分块上限。不能只按 journal 条数切：一条语句可能写几百行，现场 8000/239
+/// 的 167 条 journal 被合成一个 869 行事务后，让 SurrealDB 单核计算超过 10 分钟。
+pub const TX_CHUNK: usize = 32;
+pub const TX_MAX_BYTES: usize = 64 * 1024;
+pub const TX_MAX_WRITE_ROWS: u64 = 250;
+pub const COMMIT_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// 一次 `execute` 调用的路由模式（ADR-017 §3 读路由四则的写侧对偶）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +46,16 @@ pub enum ExecMode {
 pub struct JournalEntry {
     pub sql: String,
     pub mode: ExecMode,
+    pub estimated_rows: u64,
+}
+
+#[derive(Clone, Debug)]
+struct ReplayBatch {
+    sql: String,
+    entries: usize,
+    sql_bytes: usize,
+    estimated_rows: u64,
+    explicit_transaction: bool,
 }
 
 /// 一个提交单元的暂存执行器。
@@ -136,7 +149,11 @@ impl StagedExecutor {
                     gauge.record_journal(sql.len());
                     gauge.record_write_rows(estimated_rows);
                 }
-                self.journal.push(JournalEntry { sql, mode });
+                self.journal.push(JournalEntry {
+                    sql,
+                    mode,
+                    estimated_rows,
+                });
             }
             ExecMode::StagingOnly => {
                 self.run_on_staging(&sql).await?;
@@ -150,7 +167,11 @@ impl StagedExecutor {
                     gauge.record_journal(sql.len());
                     gauge.record_write_rows(estimated_rows);
                 }
-                self.journal.push(JournalEntry { sql, mode });
+                self.journal.push(JournalEntry {
+                    sql,
+                    mode,
+                    estimated_rows,
+                });
             }
         }
         Ok(())
@@ -184,17 +205,39 @@ impl StagedExecutor {
     ) -> anyhow::Result<()> {
         self.replay_journal_to(target, TX_CHUNK, None).await?;
         for (index, transaction) in pre_tail_transactions.iter().enumerate() {
-            execute_surreal_checked_on(
-                target,
-                transaction,
-                &format!("[{}] 写回窗口语句批 {index}", self.label),
-            )
-            .await?;
+            let context = format!("[{}] 写回窗口语句批 {index}", self.label);
+            let rows = replay_safe::estimate_write_rows(transaction)
+                .with_context(|| format!("{context} 资源估算失败"))?;
+            execute_commit_query(target, transaction, &context, transaction.len(), rows).await?;
+            crate::data_interface::batch_worker::note_commit_progress(
+                &self.label,
+                "窗口语句批",
+                index + 1,
+                pre_tail_transactions.len(),
+                transaction.len(),
+                rows,
+            );
         }
         if let Some(tail) = tail_transaction {
             let tail_tx = wrap_in_transaction(&[tail.to_string()]).expect("非空尾事务必然可包装");
-            execute_surreal_checked_on(target, &tail_tx, &format!("[{}] 写回尾事务", self.label))
-                .await?;
+            let rows = replay_safe::estimate_write_rows(&tail_tx)
+                .with_context(|| format!("[{}] 写回尾事务资源估算失败", self.label))?;
+            execute_commit_query(
+                target,
+                &tail_tx,
+                &format!("[{}] 写回尾事务", self.label),
+                tail_tx.len(),
+                rows,
+            )
+            .await?;
+            crate::data_interface::batch_worker::note_commit_progress(
+                &self.label,
+                "尾事务",
+                1,
+                1,
+                tail_tx.len(),
+                rows,
+            );
         }
         Ok(())
     }
@@ -217,38 +260,138 @@ impl StagedExecutor {
         chunk_size: usize,
         max_chunks: Option<usize>,
     ) -> anyhow::Result<usize> {
-        let mut batches = Vec::new();
-        let mut plain = Vec::new();
-        let flush_plain = |plain: &mut Vec<String>, batches: &mut Vec<String>| {
-            if let Some(sql) = wrap_in_transaction(plain) {
-                batches.push(sql);
-                plain.clear();
-            }
-        };
-        for entry in &self.journal {
-            if replay_safe::is_explicit_transaction(&entry.sql) {
-                flush_plain(&mut plain, &mut batches);
-                batches.push(entry.sql.clone());
-            } else {
-                plain.push(entry.sql.clone());
-                if plain.len() == chunk_size.max(1) {
-                    flush_plain(&mut plain, &mut batches);
-                }
-            }
-        }
-        flush_plain(&mut plain, &mut batches);
+        let batches = plan_replay_batches(
+            &self.journal,
+            chunk_size.max(1),
+            TX_MAX_BYTES,
+            TX_MAX_WRITE_ROWS,
+        );
+        let total_batches = batches.len();
 
         let mut replayed = 0usize;
-        for (index, sql) in batches.into_iter().enumerate() {
+        for (index, batch) in batches.into_iter().enumerate() {
             if max_chunks.is_some_and(|max| index >= max) {
                 break;
             }
-            execute_surreal_checked_on(target, &sql, &format!("[{}] 写回块 {index}", self.label))
-                .await?;
+            println!(
+                "[增量] 写回块开始 窗口={} 块={}/{} journal={} 字节={} 预计行={} 显式事务={} 指纹={:016x}",
+                self.label,
+                index + 1,
+                total_batches,
+                batch.entries,
+                batch.sql_bytes,
+                batch.estimated_rows,
+                batch.explicit_transaction,
+                sql_fingerprint(&batch.sql),
+            );
+            execute_commit_query(
+                target,
+                &batch.sql,
+                &format!("[{}] 写回块 {}/{}", self.label, index + 1, total_batches),
+                batch.sql_bytes,
+                batch.estimated_rows,
+            )
+            .await?;
             replayed += 1;
+            crate::data_interface::batch_worker::note_commit_progress(
+                &self.label,
+                "journal",
+                replayed,
+                total_batches,
+                batch.sql_bytes,
+                batch.estimated_rows,
+            );
         }
         Ok(replayed)
     }
+}
+
+fn plan_replay_batches(
+    journal: &[JournalEntry],
+    max_entries: usize,
+    max_bytes: usize,
+    max_rows: u64,
+) -> Vec<ReplayBatch> {
+    let mut batches = Vec::new();
+    let mut plain = Vec::new();
+    let mut plain_bytes = 0usize;
+    let mut plain_rows = 0u64;
+    let flush_plain = |plain: &mut Vec<String>,
+                       plain_bytes: &mut usize,
+                       plain_rows: &mut u64,
+                       batches: &mut Vec<ReplayBatch>| {
+        if let Some(sql) = wrap_in_transaction(plain) {
+            batches.push(ReplayBatch {
+                sql,
+                entries: plain.len(),
+                sql_bytes: *plain_bytes,
+                estimated_rows: *plain_rows,
+                explicit_transaction: false,
+            });
+            plain.clear();
+            *plain_bytes = 0;
+            *plain_rows = 0;
+        }
+    };
+
+    for entry in journal {
+        if replay_safe::is_explicit_transaction(&entry.sql) {
+            flush_plain(&mut plain, &mut plain_bytes, &mut plain_rows, &mut batches);
+            batches.push(ReplayBatch {
+                sql: entry.sql.clone(),
+                entries: 1,
+                sql_bytes: entry.sql.len(),
+                estimated_rows: entry.estimated_rows,
+                explicit_transaction: true,
+            });
+            continue;
+        }
+
+        let projected_entries = plain.len() + 1;
+        let projected_bytes = plain_bytes.saturating_add(entry.sql.len());
+        let projected_rows = plain_rows.saturating_add(entry.estimated_rows);
+        if !plain.is_empty()
+            && (projected_entries > max_entries.max(1)
+                || projected_bytes > max_bytes.max(1)
+                || projected_rows > max_rows.max(1))
+        {
+            flush_plain(&mut plain, &mut plain_bytes, &mut plain_rows, &mut batches);
+        }
+        plain_bytes = plain_bytes.saturating_add(entry.sql.len());
+        plain_rows = plain_rows.saturating_add(entry.estimated_rows);
+        plain.push(entry.sql.clone());
+    }
+    flush_plain(&mut plain, &mut plain_bytes, &mut plain_rows, &mut batches);
+    batches
+}
+
+async fn execute_commit_query(
+    target: &Surreal<Any>,
+    sql: &str,
+    context: &str,
+    sql_bytes: usize,
+    estimated_rows: u64,
+) -> anyhow::Result<()> {
+    tokio::time::timeout(
+        COMMIT_QUERY_TIMEOUT,
+        execute_surreal_checked_on(target, sql, context),
+    )
+    .await
+    .map_err(|_| {
+        anyhow::anyhow!(
+            "{context} 连续 {}s 未返回，终止本窗口；字节={sql_bytes} 预计行={estimated_rows} 指纹={:016x}",
+            COMMIT_QUERY_TIMEOUT.as_secs(),
+            sql_fingerprint(sql),
+        )
+    })?
+}
+
+fn sql_fingerprint(sql: &str) -> u64 {
+    sql.as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        })
 }
 
 #[cfg(test)]
@@ -283,6 +426,67 @@ mod tests {
         let mut response = db.query(sql).await.expect("query");
         let value: surrealdb::Value = response.take(0).expect("take");
         serde_json::to_string(&value).expect("serialize")
+    }
+
+    fn journal_entry(index: usize, estimated_rows: u64) -> JournalEntry {
+        JournalEntry {
+            sql: format!("UPSERT pe:r{index} SET noun = 'STRU';"),
+            mode: ExecMode::Both,
+            estimated_rows,
+        }
+    }
+
+    #[test]
+    fn replay_batches_bound_entries_bytes_and_rows() {
+        let journal = (0..70)
+            .map(|index| journal_entry(index, 1))
+            .collect::<Vec<_>>();
+        let by_entries = plan_replay_batches(&journal, 32, usize::MAX, u64::MAX);
+        assert_eq!(
+            by_entries
+                .iter()
+                .map(|batch| batch.entries)
+                .collect::<Vec<_>>(),
+            vec![32, 32, 6]
+        );
+
+        let by_rows = plan_replay_batches(&journal[..5], usize::MAX, usize::MAX, 2);
+        assert_eq!(
+            by_rows
+                .iter()
+                .map(|batch| batch.estimated_rows)
+                .collect::<Vec<_>>(),
+            vec![2, 2, 1]
+        );
+
+        let one_len = journal[0].sql.len();
+        let by_bytes = plan_replay_batches(&journal[..3], usize::MAX, one_len * 2, u64::MAX);
+        assert_eq!(
+            by_bytes
+                .iter()
+                .map(|batch| batch.entries)
+                .collect::<Vec<_>>(),
+            vec![2, 1]
+        );
+    }
+
+    #[test]
+    fn replay_batches_preserve_explicit_transaction_as_its_own_batch() {
+        let mut journal = vec![journal_entry(1, 1)];
+        journal.push(JournalEntry {
+            sql: "BEGIN TRANSACTION; UPSERT pe:explicit SET noun = 'STRU'; COMMIT TRANSACTION;"
+                .into(),
+            mode: ExecMode::Both,
+            estimated_rows: 1,
+        });
+        journal.push(journal_entry(2, 1));
+
+        let batches = plan_replay_batches(&journal, 32, TX_MAX_BYTES, TX_MAX_WRITE_ROWS);
+        assert_eq!(batches.len(), 3);
+        assert!(!batches[0].explicit_transaction);
+        assert!(batches[1].explicit_transaction);
+        assert!(!batches[2].explicit_transaction);
+        assert_eq!(batches.iter().map(|batch| batch.entries).sum::<usize>(), 3);
     }
 
     /// T0.2 验收：三种模式对「暂存生效」「进日志」的路由各自正确，

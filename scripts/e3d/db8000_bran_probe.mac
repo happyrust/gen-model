@@ -1,0 +1,34 @@
+-- db8000 BRAN 增量测试的基线探针（只读，无 SAVEWORK）。
+--
+-- 目标 BRAN：/C-OR-1R345-C（= 24384/23257，PIPE /1RX-345，ZONE /1RX03-LCT），
+-- 库里有 7 段 FTUB + 2 个 BEND，是 db8000 里直管段最多的支管之一。
+--
+-- 为什么先探再改：apply/restore 这一对腿必须把值放回**原样**，而生产元素当前的
+-- HPOS/TPOS/BORE 离线不可知（自建元素才能让 before/after 自决——见
+-- db8000_scratch_create.mac 头注）。这里先把基线读出来，再据此写死 restore 的值。
+--
+-- 两条既有教训照搬（db8000_zone_members_probe.mac 头注）：
+--   1. ALPHA LOG 的内容要到 ALPHA LOG END 才落盘，中途任一语句报错整段日志都没有，
+--      所以只开一个日志块、只放最稳的语句；
+--   2. `=24384/23257` 这种按 refno 导航在 db8000 的 TTY 会话里不成立，一律按名字导航。
+--
+-- 不写 QUIT / FINISH：会话由 l3_suite 的 driver wrapper 拥有（它负责 L3-ALIVE /
+-- $M / L3-DONE / QUIT），宏自己终止会话会让 wrapper 写不出 L3-DONE、整轮判失败。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bran_probe.log" OVER
+$P CODEX-DB8000-BRAN-PROBE-ALIVE
+/C-OR-1R345-C
+Q CE
+Q TYPE
+Q REF
+Q NAME
+Q OWNE
+Q HPOS
+Q TPOS
+Q HBOR
+Q TBOR
+Q HDIR
+Q TDIR
+Q MEMB
+$P CODEX-DB8000-BRAN-PROBE-DONE
+ALPHA LOG END

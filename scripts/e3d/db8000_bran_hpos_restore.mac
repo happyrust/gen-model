@@ -1,0 +1,27 @@
+-- db8000 BRAN 增量测试 / restore 腿：把支管头部放回 db8000_bran_probe.mac
+-- 实测到的基线位置 U 2900mm（apply 腿把它抬到了 U 3400mm）。
+--
+-- 目标：/C-OR-1R345-C（= 24384/23257）。E/N 两个分量 apply 腿没动过，这里照原值
+-- 一起写回，让这条腿自身就是完整的终态声明，不依赖「只改了 U」这个记忆。
+--
+-- 跑完这条腿库在逻辑上回到 apply 之前：会话链上多两个会话（apply + restore），
+-- 净变更为零——增量侧应当能把包围盒与实例几何收敛回原值。
+--
+-- 纪律同 apply 腿：恰好一个 SAVEWORK，不写 QUIT/FINISH，按名字导航。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bran_hpos_restore.log" OVER
+$P CODEX-DB8000-BRAN-HPOS-RESTORE-ALIVE
+/C-OR-1R345-C
+Q CE
+Q REF
+Q NAME
+Q HPOS
+HPOS E 8551mm N 14060mm U 2900mm
+Q CE
+Q REF
+Q NAME
+Q HPOS
+Q TPOS
+SAVEWORK 'CODEX db8000 BRAN /C-OR-1R345-C head back to U2900 (restore)'
+$P CODEX-DB8000-BRAN-HPOS-RESTORE-DONE
+ALPHA LOG END

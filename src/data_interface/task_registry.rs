@@ -110,6 +110,25 @@ pub struct TaskEntry {
     pub total_units: Option<u32>,
     /// 该任务累计广播过的进度事件数（重连后前端用于对齐，见 spec §5.4）。
     pub events_seen: u64,
+    /// 当前执行子阶段。数据批次使用稳定英文值，供 `/tasks` 与 `/health` 对账。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_stage: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_started_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stage_last_progress_at: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependency_dbnum: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependency_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependency_refnos_total: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependency_refnos_parsed: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dependency_refnos_missing: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stall_deadline: Option<String>,
     /// kind 专属的详情（如房间轮的 `{panels, elements, dead_letters}`，
     /// ADR-011 §10）；建行时写入，与终态 `result` 互不替代。
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -210,6 +229,15 @@ impl TaskRegistry {
             units_done: None,
             total_units: None,
             events_seen: 0,
+            current_stage: None,
+            stage_started_at: None,
+            stage_last_progress_at: None,
+            dependency_dbnum: None,
+            dependency_path: None,
+            dependency_refnos_total: None,
+            dependency_refnos_parsed: None,
+            dependency_refnos_missing: None,
+            stall_deadline: None,
             detail: None,
             result: None,
         });
@@ -243,6 +271,15 @@ impl TaskRegistry {
             units_done: Some(0),
             total_units: Some(total),
             events_seen: 0,
+            current_stage: None,
+            stage_started_at: None,
+            stage_last_progress_at: None,
+            dependency_dbnum: None,
+            dependency_path: None,
+            dependency_refnos_total: None,
+            dependency_refnos_parsed: None,
+            dependency_refnos_missing: None,
+            stall_deadline: None,
             detail: Some(detail),
             result: None,
         });
@@ -275,6 +312,15 @@ impl TaskRegistry {
             units_done: Some(0),
             total_units: Some(total),
             events_seen: 0,
+            current_stage: None,
+            stage_started_at: None,
+            stage_last_progress_at: None,
+            dependency_dbnum: None,
+            dependency_path: None,
+            dependency_refnos_total: None,
+            dependency_refnos_parsed: None,
+            dependency_refnos_missing: None,
+            stall_deadline: None,
             detail: Some(detail),
             result: None,
         });
@@ -437,6 +483,81 @@ impl TaskRegistry {
         }
     }
 
+    /// 记录数据批次的可观测子阶段。重复报告同一阶段只刷新进展时刻，不重置起点。
+    pub fn set_stage(&self, task_id: &str, stage: &str) {
+        let mut inner = self.entries();
+        if let Some(entry) = inner.get_mut(task_id) {
+            let now = Local::now().to_rfc3339();
+            if entry.current_stage.as_deref() != Some(stage) {
+                entry.current_stage = Some(stage.to_string());
+                entry.stage_started_at = Some(now.clone());
+            }
+            entry.stage_last_progress_at = Some(now);
+        }
+    }
+
+    /// 依赖闭包的实质进展；调用一次即代表停滞计时可以重新起算。
+    pub fn set_dependency_progress(
+        &self,
+        task_id: &str,
+        stage: &str,
+        dbnum: Option<u32>,
+        path: Option<String>,
+        total: u64,
+        parsed: u64,
+        missing: u64,
+        stall_secs: i64,
+    ) {
+        self.set_stage(task_id, stage);
+        let mut inner = self.entries();
+        if let Some(entry) = inner.get_mut(task_id) {
+            let now = Local::now();
+            entry.dependency_dbnum = dbnum;
+            entry.dependency_path = path;
+            entry.dependency_refnos_total = Some(total);
+            entry.dependency_refnos_parsed = Some(parsed);
+            entry.dependency_refnos_missing = Some(missing);
+            entry.stage_last_progress_at = Some(now.to_rfc3339());
+            entry.stall_deadline = Some((now + chrono::Duration::seconds(stall_secs)).to_rfc3339());
+            entry.events_seen = entry.events_seen.saturating_add(1);
+        }
+    }
+
+    /// 更新当前依赖定位但不把它算作实质进展；用于进入一个可能卡住的文件/块之前。
+    pub fn set_dependency_location(
+        &self,
+        task_id: &str,
+        stage: &str,
+        dbnum: Option<u32>,
+        path: Option<String>,
+        total: u64,
+    ) {
+        let mut inner = self.entries();
+        if let Some(entry) = inner.get_mut(task_id) {
+            if entry.current_stage.as_deref() != Some(stage) {
+                entry.current_stage = Some(stage.to_string());
+                entry.stage_started_at = Some(Local::now().to_rfc3339());
+            }
+            entry.dependency_dbnum = dbnum;
+            entry.dependency_path = path;
+            entry.dependency_refnos_total = Some(total);
+        }
+    }
+
+    /// `/health` 的单一活动依赖快照；同一时刻 CATA 全局锁只允许一个解析者。
+    pub fn active_dependency_snapshot(&self) -> Option<TaskEntry> {
+        self.entries()
+            .values()
+            .find(|entry| {
+                entry.state == TaskState::Running
+                    && entry
+                        .current_stage
+                        .as_deref()
+                        .is_some_and(|stage| stage.starts_with("dependency_"))
+            })
+            .cloned()
+    }
+
     /// 覆盖 kind 专属详情。房间轮收尾时必须用收敛后的计数覆盖建行时那份
     /// （`{panels, elements, dead_letters}`）：`finish` 从不动 `detail`，而收敛到 0
     /// 的下一空闲轮不再建新行——不覆盖的话，客户端泳道读到的 live 永远停在本轮
@@ -453,6 +574,7 @@ impl TaskRegistry {
         if let Some(entry) = inner.get_mut(task_id) {
             entry.state = state;
             entry.finished_at = Some(Local::now().to_rfc3339());
+            entry.stall_deadline = None;
             entry.result = Some(result);
         }
     }
@@ -497,6 +619,15 @@ mod tests {
             units_done: None,
             total_units: None,
             events_seen: 0,
+            current_stage: None,
+            stage_started_at: None,
+            stage_last_progress_at: None,
+            dependency_dbnum: None,
+            dependency_path: None,
+            dependency_refnos_total: None,
+            dependency_refnos_parsed: None,
+            dependency_refnos_missing: None,
+            stall_deadline: None,
             detail: None,
             result: None,
         });
@@ -511,6 +642,37 @@ mod tests {
         for i in 0..count {
             queue_row(registry, &format!("q-{i}"), 90_000 + i as u32, 1, 2);
         }
+    }
+
+    #[test]
+    fn dependency_progress_is_visible_and_terminal_state_clears_the_deadline() {
+        let registry = TaskRegistry::default();
+        queue_row(&registry, "dep", 8000, 34, 232);
+        registry.mark_started("dep");
+        registry.set_dependency_progress(
+            "dep",
+            "dependency_closure",
+            Some(7355),
+            Some("C:/fixture/ams7355".into()),
+            20,
+            12,
+            1,
+            300,
+        );
+        let active = registry
+            .active_dependency_snapshot()
+            .expect("active dependency");
+        assert_eq!(active.current_stage.as_deref(), Some("dependency_closure"));
+        assert_eq!(active.dependency_refnos_parsed, Some(12));
+        assert!(active.stall_deadline.is_some());
+
+        registry.finish(
+            "dep",
+            TaskState::Failed,
+            serde_json::json!({"error":"stall"}),
+        );
+        assert!(registry.active_dependency_snapshot().is_none());
+        assert!(registry.get("dep").unwrap().stall_deadline.is_none());
     }
 
     #[test]

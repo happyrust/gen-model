@@ -31,7 +31,7 @@ mqtt = []
 viewer = []                                                           #是否开启视图
 gen_model = ["aios_core/gen_model"]
 occ = ["aios_core/occ", "dep:opencascade"]
-manifold = ["aios_core/manifold"]
+manifold = ["dep:manifold-csg"]
 sql = ["dep:sqlx"]
 debug_parse = ["pdms_io/debug_parse"]
 legacy_session_replay = ["pdms_io/legacy_session_replay"] # 逐会话实体回放，仅诊断/对拍
@@ -116,7 +116,7 @@ pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "2247616
 
 clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }
-tokio = { version = "1.37.0", features = ["full"] }
+tokio = { version = "1.37.0", features = ["full", "test-util"] }
 serde = { version = "1.0.137", features = ["derive"] }
 id_tree = { version = "1.8.0", features = ["serde_support"] }
 glam = { version = "0.29.3", features = ["serde", "rkyv"] }
@@ -124,8 +124,16 @@ cached = "0.55.1"
 rkyv = { version = "0.7.45", features = ["hashbrown"] }
 
 
+# 扫掠体截面：与 aios-core `wire::gen_polyline_original` 同一个 Polyline 类型（同一 fork），
+# 倒角与弧段只有那一份权威实现，这里只做 bulge → 折线的离散。
+cavalier_contours = { git = "https://gitee.com/happydpc/cavalier_contours" }
+# 扫掠体端面：结构截面是凹的（L/C/I），端盖需要带孔的多边形三角剖分。
+earcutr = "0.4.3"
+
 #造型功能，先在database测试
 opencascade = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6e122b42a9efaf5c241af05bc3098c01b79", optional = true }
+# ADR-029：设计布尔走本地 manifold-csg（不经 aios-core 的旧 manifold-sys）。
+manifold-csg = { path = "../manifold-csg/crates/manifold-csg", optional = true }
 serde_with = { version = "3.9.0", features = ["macros"] }
 rayon = "1.10.0"
 indexmap = "2.2.6"
@@ -197,14 +205,14 @@ kicad-parser = { git = "https://github.com/happyrust/occt-rs.git", rev = "1c44c6
 # pre-push 守卫（.githooks/pre-push）会挡住，不必靠记性。
 #
 # LOCAL-DEPS PATCH BEGIN
-# [patch."https://github.com/happyrust/old-aios-core.git"]
-# aios_core = { path = "../vendor/old-aios-core" }
-#
-# [patch."https://github.com/happyrust/old-parse-pdms-db.git"]
-# parse_pdms_db = { path = "../vendor/old-parse-pdms-db" }
-#
-# [patch."https://github.com/happyrust/old-pdms-io.git"]
-# pdms_io = { path = "../vendor/old-pdms-io" }
+[patch."https://github.com/happyrust/old-aios-core.git"]
+aios_core = { path = "../vendor/old-aios-core" }
+
+[patch."https://github.com/happyrust/old-parse-pdms-db.git"]
+parse_pdms_db = { path = "../vendor/old-parse-pdms-db" }
+
+[patch."https://github.com/happyrust/old-pdms-io.git"]
+pdms_io = { path = "../vendor/old-pdms-io" }
 # LOCAL-DEPS PATCH END
 
 [build-dependencies]

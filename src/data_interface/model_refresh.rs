@@ -14,9 +14,73 @@ use std::str::FromStr;
 
 use aios_core::RefnoEnum;
 use aios_core::pdms_types::*;
+use anyhow::Context;
 
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::gen_all_geos_data;
+
+fn dependency_stall_message() -> String {
+    let seconds = crate::data_interface::batch_worker::DEPENDENCY_STALL_TIMEOUT.as_secs();
+    let Some(task) =
+        crate::data_interface::task_registry::TaskRegistry::global().active_dependency_snapshot()
+    else {
+        return format!("CATA 依赖准备连续 {seconds} 秒没有实质进展");
+    };
+    format!(
+        "CATA 依赖准备连续 {seconds} 秒没有实质进展：stage={} dbnum={} path={} parsed={} missing={}",
+        task.current_stage.as_deref().unwrap_or("dependency_index"),
+        task.dependency_dbnum
+            .map_or_else(|| "未解析".to_string(), |value| value.to_string()),
+        task.dependency_path.as_deref().unwrap_or("未解析"),
+        task.dependency_refnos_parsed.unwrap_or(0),
+        task.dependency_refnos_missing.unwrap_or(0),
+    )
+}
+
+async fn await_required_dependency<F, T>(future: F) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let timeout = crate::data_interface::batch_worker::DEPENDENCY_STALL_TIMEOUT;
+    await_dependency_with_timeout(
+        future,
+        timeout,
+        crate::data_interface::batch_worker::active_dependency_progress_receiver(),
+    )
+    .await
+}
+
+async fn await_dependency_with_timeout<F, T>(
+    future: F,
+    timeout: std::time::Duration,
+    progress: Option<tokio::sync::watch::Receiver<u64>>,
+) -> anyhow::Result<T>
+where
+    F: std::future::Future<Output = anyhow::Result<T>>,
+{
+    let Some(mut progress) = progress else {
+        return tokio::time::timeout(timeout, future)
+            .await
+            .map_err(|_| anyhow::anyhow!(dependency_stall_message()))?;
+    };
+    tokio::pin!(future);
+    let timer = tokio::time::sleep(timeout);
+    tokio::pin!(timer);
+    loop {
+        tokio::select! {
+            result = &mut future => return result,
+            changed = progress.changed() => {
+                if changed.is_err() {
+                    anyhow::bail!("CATA 依赖进度通道提前关闭");
+                }
+                timer.as_mut().reset(tokio::time::Instant::now() + timeout);
+            }
+            _ = &mut timer => {
+                anyhow::bail!(dependency_stall_message());
+            }
+        }
+    }
+}
 
 #[cfg(test)]
 static FAIL_GENERATIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
@@ -30,6 +94,88 @@ pub(crate) fn fail_generations_for_test(count: usize) {
 pub struct ModelRefreshPolicy;
 
 impl ModelRefreshPolicy {
+    /// Prepare every CATA input required by a staged DESI window without
+    /// forcing model generation to run in the data phase.
+    ///
+    /// Cold-start epochs deliberately defer geometry until all data batches
+    /// have settled.  The dependency rows are different: they belong to the
+    /// source window's atomic journal and therefore must be present before the
+    /// watermark can commit even when geometry is deferred.
+    pub(crate) async fn prepare_required_dependencies(
+        mgr: &AiosDBManager,
+        roots: &[String],
+    ) -> anyhow::Result<()> {
+        if roots.is_empty() {
+            return Ok(());
+        }
+        let root_refnos = roots
+            .iter()
+            .map(|root| RefnoEnum::from(root.as_str()))
+            .collect::<Vec<_>>();
+        let root_refus = roots
+            .iter()
+            .filter_map(|root| RefU64::from_str(root).ok())
+            .collect::<Vec<_>>();
+        if root_refus.len() != roots.len() {
+            anyhow::bail!(
+                "CATA 必需依赖包含未解析生成根：total={} parsed={}",
+                roots.len(),
+                root_refus.len()
+            );
+        }
+
+        crate::data_interface::batch_worker::set_active_task_stage("dependency_index");
+        let project = mgr.db_option.project_name.clone();
+        await_required_dependency(async move {
+            crate::data_interface::batch_worker::note_dependency_progress(
+                "dependency_index",
+                None,
+                None,
+                roots.len() as u64,
+                0,
+                0,
+            );
+            crate::data_interface::staging::preload::preload_generation_root_closure(
+                &project,
+                &root_refnos,
+            )
+            .await
+            .context("暂存 DESI 窗口的生成根闭包准备失败")?;
+            crate::data_interface::batch_worker::note_dependency_progress(
+                "dependency_closure",
+                None,
+                None,
+                root_refus.len() as u64,
+                0,
+                0,
+            );
+            if !crate::data_interface::cata_closure::cata_closure_enabled() {
+                return Ok(());
+            }
+            let outcome =
+                crate::data_interface::cata_closure::preload_cata_for_roots(&project, &root_refus)
+                    .await
+                    .context("暂存 DESI 窗口的 CATA 必需依赖准备失败")?;
+            if outcome.missing > 0 {
+                anyhow::bail!(
+                    "CATA 必需依赖未收口：parsed={} missing={}",
+                    outcome.parsed,
+                    outcome.missing
+                );
+            }
+            println!(
+                "[cata_closure] 必需依赖预加载完成: parsed={} missing={}",
+                outcome.parsed, outcome.missing
+            );
+            crate::data_interface::parse_error::note_preload_success(&project);
+            if let Err(error) = crate::data_interface::parse_error::flush().await {
+                log::warn!("{error:#}");
+            }
+            Ok(())
+        })
+        .await
+    }
+
     /// Execute explicit, already-planned generation roots. The pending-work
     /// consumer owns root selection; this method owns only generator setup.
     pub(crate) async fn generate_roots(
@@ -65,25 +211,32 @@ impl ModelRefreshPolicy {
         // （种子含 RegenRoot 与本批新单元根）；下面的子树重解析 + CATA 闭包只
         // 负责根自身与根以下，惰性闭包退回本职——兜 CATA 漏边，不再承担 DESI
         // 祖先正确性。窗口外（直写/手动/补偿路径）读的是持久层，祖先本就在场。
-        crate::data_interface::staging::preload::preload_generation_root_closure(
-            &db_option.project_name,
-            &root_refnos,
-        )
-        .await?;
-        // 按需解析（Phase 4）：主动预取这些生成根的 CATA 依赖闭包（默认 Off；开关见 cata_closure_enabled）。
-        // 与 resolve 层惰性兜底并存：主动保效率、惰性收漏边；失败仅告警、回退惰性兜底。
-        if crate::data_interface::cata_closure::cata_closure_enabled() {
+        let required = crate::data_interface::staging::active_staging_writes().is_some();
+        if required {
+            Self::prepare_required_dependencies(mgr, roots).await?;
+        } else {
+            crate::data_interface::staging::preload::preload_generation_root_closure(
+                &db_option.project_name,
+                &root_refnos,
+            )
+            .await?;
+        }
+        // 暂存 DESI 窗口把 CATA 闭包视为提交单元的必需输入；窗口外的独立按需生成
+        // 保留历史 best-effort + 惰性兜底。两种策略必须在这一处显式分叉，不能再让
+        // 暂存路径的错误落进 warning 后照常推进水位。
+        if !required && crate::data_interface::cata_closure::cata_closure_enabled() {
             let root_refus: Vec<RefU64> = db_option
                 .debug_root_refnos
                 .as_ref()
                 .map(|v| v.iter().filter_map(|s| RefU64::from_str(s).ok()).collect())
                 .unwrap_or_default();
-            match crate::data_interface::cata_closure::preload_cata_for_roots(
+            crate::data_interface::batch_worker::set_active_task_stage("dependency_index");
+            let preload = crate::data_interface::cata_closure::preload_cata_for_roots(
                 &db_option.project_name,
                 &root_refus,
-            )
-            .await
-            {
+            );
+            let preload = preload.await;
+            match preload {
                 Ok(outcome) => {
                     println!(
                         "[cata_closure] 按需预加载完成: parsed={} missing={}",
@@ -108,6 +261,7 @@ impl ModelRefreshPolicy {
                 log::warn!("{error:#}");
             }
         }
+        crate::data_interface::batch_worker::set_active_task_stage("model_generate");
         crate::data_interface::staging::preload::preload_existing_generation_products(&root_refnos)
             .await?;
         println!(
@@ -151,6 +305,27 @@ impl ModelRefreshPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn dependency_watchdog_resets_only_on_progress_and_times_out_after_silence() {
+        let (progress, receiver) = tokio::sync::watch::channel(0u64);
+        let pending = std::future::pending::<anyhow::Result<()>>();
+        let watchdog = tokio::spawn(await_dependency_with_timeout(
+            pending,
+            std::time::Duration::from_secs(300),
+            Some(receiver),
+        ));
+
+        tokio::time::advance(std::time::Duration::from_secs(299)).await;
+        assert!(!watchdog.is_finished());
+        progress.send_replace(1);
+        tokio::task::yield_now().await;
+        tokio::time::advance(std::time::Duration::from_secs(299)).await;
+        assert!(!watchdog.is_finished(), "实质进展应重置停滞时钟");
+        tokio::time::advance(std::time::Duration::from_secs(1)).await;
+        let error = watchdog.await.expect("watchdog task").unwrap_err();
+        assert!(format!("{error:#}").contains("300 秒"), "{error:#}");
+    }
 
     /// F1 · T106（live）：按 `pe.deleted` 反推的清理必须扫净整棵子树，且**只**动被删的那棵。
     ///

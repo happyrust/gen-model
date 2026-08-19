@@ -3,7 +3,7 @@
 //! Interface: `apply(ranges_map) -> IncrResult`
 //! Does NOT own model refresh or MQTT sync (callers consume `IncrResult`).
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::ops::RangeInclusive;
 use std::path::PathBuf;
@@ -36,6 +36,10 @@ pub struct CollectedWindow {
     pub range_eles: BTreeMap<u32, Vec<EleOperationData>>,
     pub session_sesnos: Vec<u32>,
     pub warnings: Vec<String>,
+    /// ADR-036 成员关系仲裁补出的删除数。
+    pub membership_deleted: usize,
+    /// 同一打开句柄产生的冻结身份；执行前必须用它复核目标 root。
+    pub snapshot_token: Option<pdms_io::snapshot::SnapshotToken>,
 }
 
 /// 生产构建中 legacy 逐会话实体回放入口必须在类型层面不存在。
@@ -513,9 +517,10 @@ fn net_caliber_warning(
     outcome: &pdms_io::net_window::NetWindowOutcome,
 ) -> String {
     format!(
-        "收集口径：净窗口（会话索引差分，ADR-031 单一口径）——added={added} deleted={deleted} \
-         modified={modified} 原样重写跳过={} 终稿不可解析={} 不可读子页(t/b)={}/{} \
+        "收集口径：净窗口（会话索引差分，ADR-031/036 单一口径）——added={added} deleted={deleted} \
+         modified={modified} 成员补删={} 原样重写跳过={} 终稿不可解析={} 不可读子页(t/b)={}/{} \
          层级异常(t/b)={}/{} 目标侧读页={} 差分 {}ms",
+        outcome.membership_deleted,
         outcome.unchanged_rewrites,
         outcome.unparseable_finals,
         outcome.stats.target.unreadable_child_pages,
@@ -525,6 +530,24 @@ fn net_caliber_warning(
         outcome.stats.target.pages_read,
         outcome.stats.elapsed_ms
     )
+}
+
+/// 净窗口是终态而不是事件流：同一 refno 只能有一种终态操作。
+///
+/// 成员补删会覆盖索引差分的旧操作；这道出口断言防止以后的合并改动
+/// 把同一元素同时交给落库和模型影响分类。
+fn ensure_unique_terminal_operations(
+    window: &BTreeMap<u32, Vec<EleOperationData>>,
+) -> anyhow::Result<()> {
+    let mut seen = BTreeSet::new();
+    for operation in window.values().flatten() {
+        anyhow::ensure!(
+            seen.insert(operation.refno),
+            "净窗口终态重复: refno={}",
+            operation.refno
+        );
+    }
+    Ok(())
 }
 
 /// 启动自检：收口事务依赖的 SurrealDB 自定义函数在不在。
@@ -761,7 +784,7 @@ fn reconcile_plan_with_live_set(
 }
 
 fn reconcile_plan_final_presence(
-    path: &std::path::Path,
+    snapshot_token: &pdms_io::snapshot::SnapshotToken,
     end_sesno: i32,
     plan: &mut crate::data_interface::model_update_plan::ModelUpdatePlan,
 ) -> anyhow::Result<usize> {
@@ -795,20 +818,23 @@ fn reconcile_plan_final_presence(
             .filter(|refno| refno.is_valid())
             .map(|refno| refno.refno()),
     );
-    candidates.sort_unstable();
-    candidates.dedup();
+    let candidates = candidates.into_iter().collect::<BTreeSet<_>>();
     if candidates.is_empty() {
         return Ok(retain_finally_live_design_refnos(plan, |_| false));
     }
-    let mut final_file = parse_pdms_db::paged::PagedDbSession::open(path)
-        .map_err(|error| anyhow::anyhow!("打开 Save Work 最终页式索引失败: {error:#}"))?;
-    if final_file.snapshot().sesno != end_sesno as u32 {
-        return Ok(0);
-    }
-    let live = final_file
-        .read_raw_records(&candidates)
-        .map_err(|error| anyhow::anyhow!("读取模型计划最终记录存在性失败: {error:#}"))?
-        .into_keys()
+    anyhow::ensure!(end_sesno >= 0, "模型计划复核会话非法: {end_sesno}");
+    anyhow::ensure!(
+        snapshot_token.target_sesno() == end_sesno as u32,
+        "模型计划复核 target={} 与冻结 token target={} 不一致",
+        end_sesno,
+        snapshot_token.target_sesno()
+    );
+    let mut snapshot = pdms_io::snapshot::DabaconSnapshot::open_verified("", snapshot_token)
+        .map_err(|error| anyhow::anyhow!("重开 Save Work 冻结快照失败: {error:#}"))?;
+    let live = snapshot
+        .contains_refnos_at(end_sesno as u32, &candidates)
+        .map_err(|error| anyhow::anyhow!("读取模型计划冻结目标 root 失败: {error:#}"))?
+        .into_iter()
         .collect::<std::collections::HashSet<_>>();
     Ok(reconcile_plan_with_live_set(plan, &live))
 }
@@ -1014,11 +1040,11 @@ impl IncrementPipeline {
         path: &std::path::Path,
         sesno_range: RangeInclusive<i32>,
     ) -> anyhow::Result<CollectedWindow> {
-        let mut io = PdmsIO::new("", path.to_path_buf(), true);
-        io.open()
-            .map_err(|e| anyhow::anyhow!("打开 PDMS IO 失败: {e}"))?;
-        let session_sesnos = session_sesnos_in_range(&io.sesno_pgno_map, &sesno_range);
-        let outcome = pdms_io::net_window::collect_net_window(&mut io, sesno_range)?;
+        let mut snapshot = pdms_io::snapshot::DabaconSnapshot::open("", path)
+            .map_err(|e| anyhow::anyhow!("打开 dabacon 冻结快照失败: {e}"))?;
+        let session_sesnos = snapshot.session_sesnos_in_range(sesno_range.clone());
+        let outcome = pdms_io::net_window::collect_net_window(&mut snapshot, sesno_range)?;
+        ensure_unique_terminal_operations(&outcome.window)?;
         let (mut added, mut deleted, mut modified) = (0usize, 0usize, 0usize);
         for operation in outcome.window.values().flatten() {
             match &operation.detail {
@@ -1031,9 +1057,11 @@ impl IncrementPipeline {
         let mut warnings = vec![net_caliber_warning(added, deleted, modified, &outcome)];
         warnings.extend(outcome.warnings);
         Ok(CollectedWindow {
+            snapshot_token: outcome.snapshot_token,
             range_eles: outcome.window,
             session_sesnos,
             warnings,
+            membership_deleted: outcome.membership_deleted,
         })
     }
 
@@ -1214,9 +1242,13 @@ impl IncrementPipeline {
                 collected
             }
         };
+        let snapshot_token = collected.snapshot_token.ok_or_else(|| {
+            anyhow::anyhow!("增量窗口缺冻结 SnapshotToken，拒绝持久化和推进水位")
+        })?;
         let session_sesnos = collected.session_sesnos;
         let range_eles = collected.range_eles;
-        let removed_plan_refnos = reconcile_plan_final_presence(path, end_sesno, &mut model_plan)?;
+        let removed_plan_refnos =
+            reconcile_plan_final_presence(&snapshot_token, end_sesno, &mut model_plan)?;
         if removed_plan_refnos > 0 {
             warnings.push(format!(
                 "dbnum={dbnum}: 从持久模型计划收敛 {removed_plan_refnos} 个 Save Work 后不存在的设计目标"
@@ -2211,9 +2243,11 @@ mod cache_tests {
     #[test]
     fn handed_in_window_is_only_accepted_on_an_exact_range_match() {
         let collected = || CollectedWindow {
+            snapshot_token: None,
             range_eles: BTreeMap::from([(25u32, Vec::<EleOperationData>::new())]),
             session_sesnos: vec![25, 26],
             warnings: vec!["收集口径：净窗口（Net）".to_string()],
+            membership_deleted: 0,
         };
 
         assert!(
@@ -2239,10 +2273,12 @@ mod cache_tests {
         assert_eq!(session_sesnos_in_range(&pages, &(2..=8)), vec![3, 6]);
 
         let collected = CollectedWindow {
+            snapshot_token: None,
             // 会话 3 是空保存，会话 6 的操作在净窗口内自抵消：最终操作集为空。
             range_eles: BTreeMap::new(),
             session_sesnos: session_sesnos_in_range(&pages, &(2..=8)),
             warnings: vec!["收集口径：净窗口（Net）".to_string()],
+            membership_deleted: 0,
         };
         assert!(collected.range_eles.is_empty());
         assert_eq!(collected.session_sesnos, vec![3, 6]);
@@ -2256,10 +2292,13 @@ mod cache_tests {
     #[test]
     fn the_net_caliber_warning_carries_the_tolerated_shape_counts() {
         let mut outcome = pdms_io::net_window::NetWindowOutcome {
+            snapshot_token: None,
             window: BTreeMap::new(),
             warnings: Vec::new(),
             unchanged_rewrites: 4,
             unparseable_finals: 3,
+            ignored_finals: Vec::new(),
+            membership_deleted: 6,
             stats: pdms_io::session_index_diff::NetChangeStats::default(),
         };
         outcome.stats.target.unreadable_child_pages = 2;
@@ -2278,6 +2317,7 @@ mod cache_tests {
             "added=7",
             "deleted=8",
             "modified=9",
+            "成员补删=6",
             "原样重写跳过=4",
             "终稿不可解析=3",
             "不可读子页(t/b)=2/1",
@@ -2288,9 +2328,33 @@ mod cache_tests {
         }
     }
 
+    #[test]
+    #[ignore = "manual live: needs AvevaMarineSample ams8000_0001"]
+    fn live_ams8000_ses236_membership_delete_matches_expected_net() {
+        let path =
+            std::path::Path::new(r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001");
+        let collected = IncrementPipeline::collect_window(path, 236..=236)
+            .expect("collect exact live window 236");
+        let (mut added, mut modified, mut deleted) = (0, 0, 0);
+        for operation in collected.range_eles.values().flatten() {
+            match operation.detail {
+                EleOperationDetail::Add(_) => added += 1,
+                EleOperationDetail::Modified(_) => modified += 1,
+                EleOperationDetail::Deleted => deleted += 1,
+                EleOperationDetail::None => {}
+            }
+        }
+        assert_eq!((added, modified, deleted), (0, 1, 1));
+        assert_eq!(collected.membership_deleted, 1);
+        assert!(collected.range_eles.values().flatten().any(|operation| {
+            operation.refno == RefU64::from_two_nums(24384, 26201)
+                && matches!(operation.detail, EleOperationDetail::Deleted)
+        }));
+    }
+
     /// 收集入口不许再长出第二个口径（ADR-031）：`collect_window` 只走净窗口——
     /// 没有开关、没有分支、不碰 legacy 回放。会话页清单仍与操作流共用**同一次**
-    /// 打开的 `PdmsIO`：双开会允许同路径在两次读取之间被替换，拼出 A 文件的会话
+    /// 打开的 `DabaconSnapshot`：双开会允许同路径在两次读取之间被替换，拼出 A 文件的会话
     /// 清单 + B 文件的操作流。
     #[test]
     fn the_collector_has_no_caliber_branch() {
@@ -2304,15 +2368,15 @@ mod cache_tests {
             .0;
 
         assert!(
-            body.contains("net_window::collect_net_window(&mut io"),
+            body.contains("net_window::collect_net_window(&mut snapshot"),
             "唯一口径必须是净窗口收集器: {body}"
         );
         assert!(
-            body.contains("session_sesnos_in_range(&io.sesno_pgno_map"),
-            "会话页清单必须来自同一次打开的 PdmsIO: {body}"
+            body.contains("snapshot.session_sesnos_in_range"),
+            "会话页清单必须来自同一次打开的 DabaconSnapshot: {body}"
         );
         assert_eq!(
-            body.matches("PdmsIO::new(").count(),
+            body.matches("DabaconSnapshot::open(").count(),
             1,
             "收集入口只许打开一次文件: {body}"
         );
@@ -2519,9 +2583,9 @@ mod cache_tests {
             });
         assert!(path.is_file(), "找不到 ams8000 文件: {}", path.display());
 
-        let mut io = PdmsIO::new("", path.clone(), true);
-        io.open().expect("open ams8000");
-        let latest = io.get_latest_sesno().expect("latest sesno") as i32;
+        let mut snapshot =
+            pdms_io::snapshot::DabaconSnapshot::open("", &path).expect("open ams8000 snapshot");
+        let latest = snapshot.token().target_sesno() as i32;
         let starts: Vec<i32> = {
             let mut list = vec![1, latest / 2, (latest - 5).max(1), latest];
             list.dedup();
@@ -2624,7 +2688,7 @@ mod cache_tests {
         for start in [1, latest / 2, (latest - 5).max(1)] {
             let window = start..=latest;
             let net_started = Instant::now();
-            let outcome = pdms_io::net_window::collect_net_window(&mut io, window.clone())
+            let outcome = pdms_io::net_window::collect_net_window(&mut snapshot, window.clone())
                 .expect("net window");
             let net_ms = net_started.elapsed().as_millis();
 
@@ -2879,6 +2943,13 @@ mod fold_tests {
 
     fn op(id: u64, sesno: u32, element: ModifiedElement) -> EleOperationData {
         EleOperationData::new(refno(id), sesno, EleOperationDetail::Modified(element))
+    }
+
+    #[test]
+    fn net_window_rejects_duplicate_terminal_operations() {
+        let window = BTreeMap::from([(1, vec![op(1, 1, blank())]), (2, vec![op(1, 2, blank())])]);
+        let error = ensure_unique_terminal_operations(&window).expect_err("duplicate must block");
+        assert!(error.to_string().contains("净窗口终态重复"));
     }
 
     fn window(ops: Vec<EleOperationData>) -> BTreeMap<u32, Vec<EleOperationData>> {

@@ -416,6 +416,37 @@ impl BatchScheduler {
             };
             EnqueueOutcome { outcome, info }
         };
+        // 阶段闸的当下裁定跟着入队一起记。入队成功不等于会被执行：屏障是按
+        // **阶段**关的，别的项目的一处身份歧义就能让本行永远停在 queued，而回执里
+        // 只写着「已覆盖」。2026-08-17 的 7998 就是这么消失的，追踪必须把这两件事
+        // 摆在同一条记录里，否则读的人还得自己去 /health 拼。
+        // 协调器的 allows/snapshot 取证在闭包里：未启用追踪时一把锁都不多拿。
+        crate::data_interface::debug_scope::trace(
+            crate::data_interface::debug_scope::TracePoint::Enqueue,
+            found.dbnum,
+            || {
+                let phase_admits =
+                    InitializationCoordinator::global().allows(found.phase, found.epoch_id);
+                let snapshot = InitializationCoordinator::global().snapshot();
+                serde_json::json!({
+                    "origin": "scheduler",
+                    "task_id": outcome.info.task_id,
+                    "outcome": format!("{:?}", outcome.outcome),
+                    "held": hold,
+                    "intent": outcome.info.intent,
+                    "phase": outcome.info.phase,
+                    "epoch_id": outcome.info.epoch_id,
+                    "position": outcome.info.position,
+                    "start_sesno": outcome.info.start_sesno,
+                    "end_sesno": outcome.info.end_sesno,
+                    "previous_observed_sesno": found.previous_observed_sesno,
+                    "phase_admits_dispatch": phase_admits,
+                    "initialization_status": snapshot.status,
+                    "current_phase": snapshot.current_phase,
+                    "blockers": snapshot.blockers,
+                })
+            },
+        );
         self.notify.notify_one();
         outcome
     }
