@@ -481,6 +481,7 @@ pub fn resolve_window(py: Python<'_>, path: PathBuf, skip_cata: bool) -> PyResul
                         latest,
                         skip_cata,
                         &basic.db_type,
+                        None,
                     )
                     .await?;
                 anyhow::Ok(match plan {
