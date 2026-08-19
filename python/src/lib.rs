@@ -388,8 +388,15 @@ fn net_window(
 ) -> PyResult<Py<PyAny>> {
     let value = py
         .detach(|| {
-            let mut snapshot = pdms_io::snapshot::DabaconSnapshot::open("", path.clone())
-                .map_err(|error| anyhow::anyhow!("冻结 Dabacon 快照失败: {error}"))?;
+            // 冻结点取窗口终点，与生产收集口径一致
+            // （`IncrementPipeline::collect_window_for_candidate` 同样 `open_at(target)`）。
+            // 冻在「文件当前最新会话」的话，库一长出新会话，历史窗口就再也复算不出来
+            // ——净窗口对冻结点有硬校验，事后取证与回归夹具首当其冲。
+            let target =
+                u32::try_from(end).map_err(|_| anyhow::anyhow!("窗口终点会话号非法: {end}"))?;
+            let mut snapshot =
+                pdms_io::snapshot::DabaconSnapshot::open_at("", path.clone(), target)
+                    .map_err(|error| anyhow::anyhow!("冻结 Dabacon 快照失败: {error}"))?;
             let outcome = pdms_io::net_window::collect_net_window(&mut snapshot, start..=end)?;
             let mut counts = serde_json::Map::from_iter([
                 ("added".into(), serde_json::json!(0usize)),
