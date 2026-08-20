@@ -2,7 +2,20 @@
 
 ## 2026-08-20
 
+### 新增
+
+- 复验 BRAN/TUBI 房间计算合成 live 链：`live_room_tubi_row_enters_tree_and_tracks_regen`
+  在 8071 一次性空库通过，确认 BRAN 重生成后的隐含 TUBI 进入空间树并新增正确的
+  `room_relate` 成员边；证据见 `docs/evidence/2026-08-20-bran-room-tubi-live.md`，并已
+  回填 live-test ledger。
+
 ### 修复
+
+- 修复 `node_gen_room_probe` 在大表上用 `WHERE out IN (...)` / `WHERE in IN (...)`
+  扫描 `room_relate`、`room_panel_relate` 的性能问题：改为从 `pe` 记录执行
+  `<-room_relate`、`->room_relate`、`->room_panel_relate` 边遍历。8019 实测执行计划
+  从 `Iterate Table` 变为 `Iterate Edges`，BRAN 根 `24384/23257` 的 10 元素子树汇报
+  即时完成；新增源码回归测试，禁止旧扫描 SQL 回流。
 
 - 修复布尔成品已写入 `booled_id`、但 `insts_flat` 尚未回填时查看端仍加载正体原语的问题：Manifold/OCC 布尔成功路径与平表补扫现在同步优先写入单位变换的成品实例；旧库回退查询同样优先读取 `booled_id`。`=24381/36945` 不再加载带 `Z×234` 变换的正体圆柱，右视图恢复为半球。
 

@@ -208,7 +208,7 @@ cargo test --lib --features http_api <测试名> -- --ignored --exact --nocaptur
 | `live_room_delete_clears_membership` | room_fixture.rs:1295 | 一次性空库 @8071 | 2026-08-12 @8071 | **通过**（1.4s） |
 | `live_room_incremental_parity` | room_fixture.rs:1378 | 一次性空库 @8071 | 2026-08-12 @8071 | **通过**（1.6s） |
 | `live_room_deleted_edges_come_back_after_a_move` | room_fixture.rs:1491 | 一次性空库 @8071 | 2026-08-12 @8071 | **通过**（1.8s） |
-| `live_room_tubi_row_enters_tree_and_tracks_regen` | room_fixture.rs:1663 | 一次性空库 @8071 | 2026-08-12 @8071 | **通过**（1.9s） |
+| `live_room_tubi_row_enters_tree_and_tracks_regen` | room_fixture.rs:1663 | 一次性空库 @8071 | **2026-08-20 @8071 复验通过**（脚本 2.4s；测试本体 1.07s）：BRAN 重生成后的隐含 TUBI 进入空间树并参加房间计算，成员边 6→7，日志明确记录 `4000000001_30` 从无房间进入 `K100`；证据 `docs/evidence/2026-08-20-bran-room-tubi-live.md` |
 | `live_record_scan_never_moves_the_applied_watermark` | dbnum_state.rs:1398 | 魔术 dbnum | 2026-08-12 批次1 @8019 | **通过**（3.5s） |
 | `live_blocked_observation_keeps_the_verdict_evidence_intact` | dbnum_state.rs:1500 | 魔术 dbnum | 2026-08-12 批次1 @8019 | **通过**（3.4s） |
 | `live_finalize_is_crash_safe_and_idempotent` | model_update_pending.rs:4326 | 魔术 dbnum | 2026-08-12 批次1 @8019 | **通过**（3.4s） |
@@ -352,7 +352,7 @@ ams8000 世代）+ 长跑专项 1（manual_update 二遍）+ 未跑 4（room mes
 
 | 测试 | 位置 | 前置 | 最近通过 | 结论 |
 |---|---|---|---|---|
-| `staged_regen_persists_tubi_mesh_and_boolean_before_advancing_watermark` | tests/staged_regen_e2e.rs:72 | 真实项目库 + 待应用 BRAN/HANG RegenRoot；`AIOS_STAGED_REGEN_DB_FILE` | — | **2026-08-19 前置阻断**：本轮未提供 `AIOS_STAGED_REGEN_DB_FILE`，未进入窗口执行；日志 `output/live-integration-remaining-20260819-083450/01-staged_regen_persists_tubi_mesh_and_boolean_before_advancing_watermark.log` |
+| `staged_regen_persists_tubi_mesh_and_boolean_before_advancing_watermark` | tests/staged_regen_e2e.rs:72 | 真实项目库 + 待应用 BRAN/HANG RegenRoot；`AIOS_STAGED_REGEN_DB_FILE` | — | **2026-08-20 执行链完成、门禁断言失败**：隔离 8019 上 db8000 窗口 210..243 暂存并提交，BRAN `24384/23257` 生成成功，水位 209→243；首次以默认线程栈触发 `STATUS_STACK_OVERFLOW`，设 `RUST_MIN_STACK=33554432` 后执行完成。夹具带 4 条已分类 warning，而门禁要求 0，故断言失败；房间阶段 `room_scope_requested=0`，未触发房间重算。测试后已恢复水位 209、PE 6542 行并关闭 8019。日志 `output/bran-room-staged/20260820-134513/staged-regeneration-stack32m.log`、`restore-verified.log`。 |
 | `staged_transform_follows_a_pure_pose_move` | tests/staged_transform_e2e.rs:183 | 真实项目库 + 待应用位姿增量；不设 `GEN_MODEL_DIRECT_INCREMENT` | — | **2026-08-19 执行链通过、断言失败**：7997 窗口 105..106 已经暂存、生成 2 根并提交，水位推进到 106；结果携带净窗口口径提示及 2 个未解析生成根 warning，旧断言要求 warning=0；日志 `output/live-integration-remaining-20260819-083450/02-staged_transform_follows_a_pure_pose_move.log` |
 | `staged_pane_replay_goes_through_the_kvmem_window` | tests/staged_pane_replay_probe.rs:112 | 7997 待应用窗口在位（探针型） | — | **2026-08-19 前置阻断**：前一 staged transform 已把 file/applied 收口为 106/106，本轮无待重放窗口；日志 `output/live-integration-remaining-20260819-083450/03-staged_pane_replay_goes_through_the_kvmem_window.log` |
 | `rebuild_room_membership_on_the_live_project` | tests/room_rebuild_repair.rs:80 | 真实项目库；`AIOS_ROOM_KEYWORD` 可选过滤 | 2026-08-19 @8019 | **通过**（206.63s）：空间树 42341，214 间房/229 块面板，room_relate 1→41367（+41366）；1 块无几何面板按口径跳过 |

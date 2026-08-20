@@ -85,27 +85,6 @@ fn pe_keys(chunk: &[RefnoEnum]) -> String {
         .join(",")
 }
 
-/// Render edge-table sources through SurrealDB's adjacency index.
-///
-/// `room_relate` only has the unique `(in, out)` index. A predicate such as
-/// `WHERE out IN [...]` cannot use that index and scans the whole edge table;
-/// graph sources address the same rows through the record-edge index instead.
-fn incoming_room_edges(scope: &[RefnoEnum]) -> String {
-    scope
-        .iter()
-        .map(|refno| format!("{}<-room_relate", refno.to_pe_key()))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn outgoing_room_edges(scope: &[RefnoEnum]) -> String {
-    scope
-        .iter()
-        .map(|refno| format!("{}->room_relate", refno.to_pe_key()))
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
 /// 子树里已写入 inst_relate 的元素数（与 on_demand_model 的 written 口径一致）。
 async fn written_instances(scope: &[RefnoEnum]) -> anyhow::Result<usize> {
     let mut total = 0usize;
@@ -133,10 +112,10 @@ async fn member_edges_by_room(scope: &[RefnoEnum]) -> anyhow::Result<BTreeMap<St
         if chunk.is_empty() {
             continue;
         }
-        let edges = incoming_room_edges(chunk);
+        let keys = pe_keys(chunk);
         let rows: Vec<RoomCountRow> = SUL_DB
             .query(format!(
-                "SELECT room_num, count() AS c FROM {edges} GROUP BY room_num;"
+                "SELECT room_num, count() AS c FROM room_relate WHERE out IN [{keys}] GROUP BY room_num;"
             ))
             .await?
             .check()?
@@ -188,7 +167,7 @@ async fn rooms_in_subtree(scope: &[RefnoEnum]) -> anyhow::Result<Vec<(String, Re
 async fn room_member_edges(room: RefnoEnum) -> anyhow::Result<(usize, usize)> {
     let mut response = SUL_DB
         .query(format!(
-            "SELECT VALUE out FROM {}->room_panel_relate;",
+            "SELECT VALUE out FROM room_panel_relate WHERE in = {};",
             room.to_pe_key()
         ))
         .await?
@@ -197,9 +176,11 @@ async fn room_member_edges(room: RefnoEnum) -> anyhow::Result<(usize, usize)> {
     if panels.is_empty() {
         return Ok((0, 0));
     }
-    let edges = outgoing_room_edges(&panels);
+    let keys = pe_keys(&panels);
     let mut response = SUL_DB
-        .query(format!("RETURN array::len(SELECT VALUE id FROM {edges});"))
+        .query(format!(
+            "RETURN array::len(SELECT VALUE id FROM room_relate WHERE in IN [{keys}]);"
+        ))
         .await?
         .check()?;
     let edges: Option<usize> = response.take(0)?;
@@ -227,8 +208,8 @@ async fn rooms_of_element(refno: RefnoEnum) -> anyhow::Result<Vec<(String, Strin
     }
     let mut response = SUL_DB
         .query(format!(
-            "SELECT in.name AS panel_name, room_num FROM {}<-room_relate;",
-            refno.to_pe_key(),
+            "SELECT in.name AS panel_name, room_num FROM room_relate WHERE out = {};",
+            refno.to_pe_key()
         ))
         .await?
         .check()?;
@@ -506,38 +487,4 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn room_probe_walks_edge_indexes_instead_of_scanning_relation_tables() {
-        let elements = [
-            RefnoEnum::from("4000000001/20"),
-            RefnoEnum::from("4000000001/24"),
-        ];
-        assert_eq!(
-            incoming_room_edges(&elements),
-            "pe:4000000001_20<-room_relate,pe:4000000001_24<-room_relate"
-        );
-        assert_eq!(
-            outgoing_room_edges(&elements),
-            "pe:4000000001_20->room_relate,pe:4000000001_24->room_relate"
-        );
-
-        let source = include_str!("node_gen_room_probe.rs");
-        for forbidden in [
-            ["FROM room_relate", " WHERE out IN"].concat(),
-            ["FROM room_relate", " WHERE out ="].concat(),
-            ["FROM room_relate", " WHERE in IN"].concat(),
-            ["FROM room_panel_relate", " WHERE in ="].concat(),
-        ] {
-            assert!(
-                !source.contains(&forbidden),
-                "table scan returned: {forbidden}"
-            );
-        }
-    }
 }
