@@ -1,15 +1,15 @@
 //! 扫掠体网格：目录截面 → 2D 闭合环 → 三角网格。
 //!
-//! 截面语义（倒角半径、弧段、环形扇区）复用 aios-core 的
-//! `wire::gen_polyline_original`——OCC 那条路径用的是同一个函数，截面解释只有这一份权威
-//! 实现。本模块只负责两件事：把带 bulge 的闭合环离散成折线，以及把折线成体。
+//! 截面语义（倒角半径、弧段、环形扇区）走 `libgm_discretise::profile_spans`——
+//! E3D `mth::mthArcFillet` 的口径，与 `manifold_tessellate` 的挤出截面同一份实现。
+//! 本模块只负责两件事：把带 bulge 的闭合环离散成折线，以及把折线成体。
 //!
 //! manifold-csg 不参与成体，布尔另走 `manifold_bool.rs`。
 
+use crate::fast_model::libgm_discretise;
 use aios_core::parsed_data::{CateProfileParam, SProfileData, SannData};
 use aios_core::prim_geo::spine::SweepPath3D;
 use aios_core::prim_geo::sweep_solid::{SolidSegmentKind, SweepSolid};
-use aios_core::prim_geo::wire::gen_polyline_original;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use anyhow::{anyhow, bail};
 use cavalier_contours::core::math::bulge_from_angle;
@@ -51,7 +51,7 @@ pub fn profile_loops(profile: &CateProfileParam, chord_tol: f64) -> anyhow::Resu
     Ok(ProfileLoops { loops })
 }
 
-/// SPRO / SREC：顶点带倒角半径的单环。`frads[i]` 走 `gen_polyline_original` 的第三分量。
+/// SPRO / SREC：顶点带倒角半径的单环。`frads[i]` 走 `profile_spans` 的第三分量。
 fn spro_loops(p: &SProfileData, chord_tol: f64) -> anyhow::Result<Vec<Loop2D>> {
     if p.verts.len() < 3 {
         bail!("SPRO 截面只有 {} 个顶点，不足以成环", p.verts.len());
@@ -63,13 +63,20 @@ fn spro_loops(p: &SProfileData, chord_tol: f64) -> anyhow::Result<Vec<Loop2D>> {
             p.verts.len()
         );
     }
-    let pts: Vec<Vec3> = p
+    let raw: Vec<[f64; 3]> = p
         .verts
         .iter()
         .zip(p.frads.iter())
-        .map(|(v, r)| Vec3::new(v.x, v.y, *r))
+        .map(|(v, r)| [v.x as f64, v.y as f64, *r as f64])
         .collect();
-    let pline = gen_polyline_original(&pts)?;
+    let spans = libgm_discretise::profile_spans(&raw);
+    if spans.len() < 3 {
+        bail!("SPRO 截面展开倒角后只剩 {} 段", spans.len());
+    }
+    let mut pline = Polyline::new_closed();
+    for span in &spans {
+        pline.add(span.point[0], span.point[1], span.bulge);
+    }
     // `plin_pos` 是截面原点相对轮廓坐标的偏移，与 OCC 路径同一符号（先平移后旋转）
     let outer = flatten_loop(&pline, chord_tol, -p.plin_pos, true)?;
     Ok(vec![outer])
@@ -128,6 +135,11 @@ fn full_circle(radius: f64) -> Polyline {
 }
 
 /// 弧段离散成折线，去重、平移，并按 `ccw` 统一绕向。
+///
+/// 弧走 `libgm_discretise::span_polyline_by_tol`（libgm 的整圆角度格子），与
+/// `manifold_tessellate::flatten_profile_loop` 同一份规则——扫掠体的端面截面和
+/// 挤出的截面是同一类东西，两边分段不一致的话，同一条目录截面在两条路上会得到
+/// 不同的顶点，共面抵消随之失效。
 fn flatten_loop(
     pline: &Polyline,
     chord_tol: f64,
@@ -135,20 +147,21 @@ fn flatten_loop(
     ccw: bool,
 ) -> anyhow::Result<Loop2D> {
     let tol = if chord_tol > 0.0 { chord_tol } else { 1.0 };
-    let flat = pline
-        .arcs_to_approx_lines(tol)
-        .ok_or_else(|| anyhow!("弧段折线化失败（容差 {tol}）"))?;
 
-    let mut pts: Vec<Vec2> = Vec::with_capacity(flat.vertex_count());
-    for v in flat.iter_vertexes() {
-        let p = Vec2::new(v.x as f32, v.y as f32) + offset;
-        if pts
-            .last()
-            .is_some_and(|last: &Vec2| last.distance(p) < POS_EPS)
-        {
-            continue;
+    let mut pts: Vec<Vec2> = Vec::with_capacity(pline.vertex_count());
+    for (v1, v2) in pline.iter_segments() {
+        let span =
+            libgm_discretise::span_polyline_by_tol([v1.x, v1.y], [v2.x, v2.y], v1.bulge, tol);
+        for q in span {
+            let p = Vec2::new(q[0] as f32, q[1] as f32) + offset;
+            if pts
+                .last()
+                .is_some_and(|last: &Vec2| last.distance(p) < POS_EPS)
+            {
+                continue;
+            }
+            pts.push(p);
         }
-        pts.push(p);
     }
     while pts.len() >= 2 && pts[0].distance(pts[pts.len() - 1]) < POS_EPS {
         pts.pop();
@@ -222,7 +235,10 @@ fn cap_triangles_ccw(loops: &[Loop2D]) -> anyhow::Result<Vec<[u32; 3]>> {
 
 /// 侧面与端盖只保证彼此一致，整体朝里朝外由摆放变换的手性决定（`lmirror` 就会翻手性）。
 /// 统一在这里用有向体积兜底：为负就整体翻面。
-fn orient_outward(vertices: &[Vec3], indices: &mut [u32], normals: &mut [Vec3]) {
+///
+/// `manifold_tessellate::tessellate_polyhedron` 也用它——面片壳的各面朝向同样只
+/// 保证彼此一致，整体朝向得靠体积定。
+pub(crate) fn orient_outward(vertices: &[Vec3], indices: &mut [u32], normals: &mut [Vec3]) {
     let mut volume = 0.0f64;
     for tri in indices.chunks_exact(3) {
         let p = |i: usize| {
@@ -523,16 +539,13 @@ fn profile_na_axis(profile: &CateProfileParam) -> glam::Vec3 {
     }
 }
 
-/// 弧段分几段：弦高不超过 `chord_tol`。
+/// 弧段分几段。走 libgm 的权威规则 `d2_numberOfSegmentsForPartRev`
+/// （见 `plant-4/libgm-boolean-algorithm.md` §7.9 与 `libgm_discretise`）：
+/// **先算整圈段数（取到 4 的倍数）再按扫角等比例缩**，不是拿扫角直接除步长——
+/// 后者得到的数会跟 E3D 差一段，而共面抵消只认全等重叠。
 fn arc_segments(radius: f64, angle: f32, chord_tol: f64) -> u32 {
-    if radius <= chord_tol || chord_tol <= 0.0 {
-        return 8;
-    }
-    let max_step = 2.0 * (1.0 - chord_tol / radius).clamp(-1.0, 1.0).acos();
-    if max_step <= f64::EPSILON {
-        return 512;
-    }
-    ((angle.abs() as f64 / max_step).ceil() as u32).clamp(3, 512)
+    crate::fast_model::libgm_discretise::sweep_segments_rad(radius, chord_tol, angle.abs() as f64)
+        as u32
 }
 
 /// 扫掠体成网格。分支判定用 `do_solid_segments()`——Core3D `DB_Gensec` 的权威三支，

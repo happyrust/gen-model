@@ -10,6 +10,8 @@ pub mod shared;
 
 pub mod occ_generate;
 
+pub mod libgm_discretise;
+
 pub mod mesh_primitives;
 
 pub mod sweep_mesh;

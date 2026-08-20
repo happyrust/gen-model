@@ -1,0 +1,28 @@
+-- =24384/26251（/Copy-of-1RX-RM12-R972-VOLU 下 PANE 1 的 PLOO）顶点只读探针。
+-- 服务于 FRAD 倒角与 libgeom mthArcFillet 的截面对拍：删点之后需要现场的 PAVE 顺序、
+-- POS（相对 owner）与 FRAD，库侧因 watch_dbnums=[8000] 拿不到 24384 的增量。
+--
+-- 只读：不改属性、不 SAVEWORK、不 QUIT，结束前把 CE 还原回进来时那个元素。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/ploo_26251_pave_probe.log" OVER
+$P PAVE_PROBE_BEGIN
+VAR !OLD CE
+=24384/26251
+$P SECTION_PLOO
+Q CE
+Q TYPE
+Q OWNE
+Q MEMB
+VAR !PAVES COLLECT ALL PAVE FOR CE
+$P SECTION_PAVE_LIST
+Q VAR !PAVES
+DO !I INDICES !PAVES
+  $!PAVES[$!I]
+  $P SECTION_PAVE_ROW
+  Q CE
+  Q POS WRT OWNER
+  Q FRAD
+ENDDO
+$!OLD
+$P PAVE_PROBE_DONE
+ALPHA LOG END
