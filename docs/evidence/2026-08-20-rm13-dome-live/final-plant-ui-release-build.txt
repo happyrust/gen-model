@@ -1,0 +1,1096 @@
+warning: variant `NonLinear` is never constructed
+  --> vendor\gpu-allocator\src\allocator\mod.rs:18:5
+   |
+15 | pub(crate) enum AllocationType {
+   |                 -------------- variant in this enum
+...
+18 |     NonLinear,
+   |     ^^^^^^^^^
+   |
+   = note: `AllocationType` has derived impls for the traits `Debug` and `Clone`, but these are intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `gpu-allocator` (lib) generated 1 warning
+warning: unused import: `log::error`
+  --> vendor\forks\parry\crates\parry3d\..\..\src\transformation\polygon_intersection.rs:1:5
+   |
+ 1 | use log::error;
+   |     ^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> vendor\forks\parry\crates\parry3d\..\..\src\lib.rs:15:9
+   |
+15 | #![warn(unused_imports)]
+   |         ^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `spade::ConstrainedDelaunayTriangulation::<V, DE, UE, F, L>::bulk_load_cdt_stable`: Use bulk_load_cdt instead. It is now stable by default.
+   --> vendor\forks\parry\crates\parry3d\..\..\src\transformation\mesh_intersection\mesh_intersection.rs:422:43
+    |
+422 |         ConstrainedDelaunayTriangulation::bulk_load_cdt_stable(planar_points, edges)?;
+    |                                           ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry3d\..\..\src\query\contact_manifolds\contact_manifolds_composite_shape_composite_shape.rs:199:32
+    |
+199 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData {
+    |                                ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                |
+    |                                the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+199 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_> {
+    |                                                            ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry3d\..\..\src\query\contact_manifolds\contact_manifolds_composite_shape_shape.rs:160:32
+    |
+160 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData {
+    |                                ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                |
+    |                                the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+160 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_> {
+    |                                                            ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry3d\..\..\src\query\contact_manifolds\contact_manifolds_heightfield_composite_shape.rs:176:32
+    |
+176 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData {
+    |                                ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                |
+    |                                the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+176 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_> {
+    |                                                            ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry3d\..\..\src\query\contact_manifolds\contact_manifolds_heightfield_shape.rs:190:32
+    |
+190 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData {
+    |                                ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                |
+    |                                the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+190 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_> {
+    |                                                            ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry3d\..\..\src\query\contact_manifolds\contact_manifolds_trimesh_shape.rs:219:32
+    |
+219 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData {
+    |                                ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                |
+    |                                the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+219 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_> {
+    |                                                            ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> vendor\forks\parry\crates\parry3d\..\..\src\query\contact_manifolds\contact_manifolds_workspace.rs:78:32
+   |
+78 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData;
+   |                                ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                                |
+   |                                the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+   |
+78 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_>;
+   |                                                            ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:370:23
+    |
+370 |     fn as_typed_shape(&self) -> TypedShape;
+    |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+370 |     fn as_typed_shape(&self) -> TypedShape<'_>;
+    |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:695:23
+    |
+695 |     fn as_typed_shape(&self) -> TypedShape {
+    |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+695 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+    |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:749:23
+    |
+749 |     fn as_typed_shape(&self) -> TypedShape {
+    |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+749 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+    |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:814:23
+    |
+814 |     fn as_typed_shape(&self) -> TypedShape {
+    |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+814 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+    |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:873:23
+    |
+873 |     fn as_typed_shape(&self) -> TypedShape {
+    |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+873 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+    |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:949:23
+    |
+949 |     fn as_typed_shape(&self) -> TypedShape {
+    |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+949 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+    |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:1016:23
+     |
+1016 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1016 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:1068:23
+     |
+1068 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1068 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:1118:23
+     |
+1118 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1118 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:1169:23
+     |
+1169 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1169 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:1287:23
+     |
+1287 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1287 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:1356:23
+     |
+1356 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1356 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:1414:23
+     |
+1414 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1414 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:1481:23
+     |
+1481 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1481 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:1523:31
+     |
+1523 |               fn as_typed_shape(&self) -> TypedShape {
+     |                                 ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                                 |
+     |                                 the lifetime is elided here
+...
+1548 | / impl_shape_for_round_shape!(
+1549 | |     Cuboid,
+1550 | |     RoundCuboid,
+1551 | |     (|this: &Self, scale: &Vector<Real>, _num_subdivisions: u32| {
+...    |
+1557 | |     })
+1558 | | );
+     | |_- in this macro invocation
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: this warning originates in the macro `impl_shape_for_round_shape` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: use `'_` for type paths
+     |
+1523 |             fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                                   ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:1523:31
+     |
+1523 |               fn as_typed_shape(&self) -> TypedShape {
+     |                                 ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                                 |
+     |                                 the lifetime is elided here
+...
+1560 | / impl_shape_for_round_shape!(
+1561 | |     Triangle,
+1562 | |     RoundTriangle,
+1563 | |     (|this: &Self, scale: &Vector<Real>, _num_subdivisions: u32| {
+...    |
+1569 | |     })
+1570 | | );
+     | |_- in this macro invocation
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: this warning originates in the macro `impl_shape_for_round_shape` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: use `'_` for type paths
+     |
+1523 |             fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                                   ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:1523:31
+     |
+1523 |               fn as_typed_shape(&self) -> TypedShape {
+     |                                 ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                                 |
+     |                                 the lifetime is elided here
+...
+1587 | / impl_shape_for_round_shape!(
+1588 | |     Cylinder,
+1589 | |     RoundCylinder,
+1590 | |     (|this: &Self, scale: &Vector<Real>, num_subdivisions: u32| {
+...    |
+1609 | |     })
+1610 | | );
+     | |_- in this macro invocation
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: this warning originates in the macro `impl_shape_for_round_shape` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: use `'_` for type paths
+     |
+1523 |             fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                                   ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:1523:31
+     |
+1523 |               fn as_typed_shape(&self) -> TypedShape {
+     |                                 ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                                 |
+     |                                 the lifetime is elided here
+...
+1612 | / impl_shape_for_round_shape!(
+1613 | |     Cone,
+1614 | |     RoundCone,
+1615 | |     (|this: &Self, scale: &Vector<Real>, num_subdivisions: u32| {
+...    |
+1634 | |     })
+1635 | | );
+     | |_- in this macro invocation
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: this warning originates in the macro `impl_shape_for_round_shape` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: use `'_` for type paths
+     |
+1523 |             fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                                   ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry3d\..\..\src\shape\shape.rs:1523:31
+     |
+1523 |               fn as_typed_shape(&self) -> TypedShape {
+     |                                 ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                                 |
+     |                                 the lifetime is elided here
+...
+1639 | / impl_shape_for_round_shape!(
+1640 | |     ConvexPolyhedron,
+1641 | |     RoundConvexPolyhedron,
+1642 | |     (|this: &Self, scale: &Vector<Real>, _num_subdivisions: u32| {
+...    |
+1648 | |     })
+1649 | | );
+     | |_- in this macro invocation
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: this warning originates in the macro `impl_shape_for_round_shape` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: use `'_` for type paths
+     |
+1523 |             fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                                   ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry3d\..\..\src\shape\heightfield3.rs:254:35
+    |
+254 |     pub fn triangles_around_point(&self, point: &Point3<Real>) -> HeightFieldRadialTriangles {
+    |                                   ^^^^^                           ^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                   |
+    |                                   the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+254 |     pub fn triangles_around_point(&self, point: &Point3<Real>) -> HeightFieldRadialTriangles<'_> {
+    |                                                                                             ++++
+
+warning: unused import: `log::error`
+  --> vendor\forks\parry\crates\parry2d\..\..\src\transformation\polygon_intersection.rs:1:5
+   |
+ 1 | use log::error;
+   |     ^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> vendor\forks\parry\crates\parry2d\..\..\src\lib.rs:15:9
+   |
+15 | #![warn(unused_imports)]
+   |         ^^^^^^^^^^^^^^
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry2d\..\..\src\query\contact_manifolds\contact_manifolds_composite_shape_composite_shape.rs:199:32
+    |
+199 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData {
+    |                                ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                |
+    |                                the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+199 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_> {
+    |                                                            ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry2d\..\..\src\query\contact_manifolds\contact_manifolds_composite_shape_shape.rs:160:32
+    |
+160 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData {
+    |                                ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                |
+    |                                the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+160 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_> {
+    |                                                            ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry2d\..\..\src\query\contact_manifolds\contact_manifolds_heightfield_composite_shape.rs:176:32
+    |
+176 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData {
+    |                                ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                |
+    |                                the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+176 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_> {
+    |                                                            ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry2d\..\..\src\query\contact_manifolds\contact_manifolds_heightfield_shape.rs:190:32
+    |
+190 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData {
+    |                                ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                |
+    |                                the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+190 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_> {
+    |                                                            ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry2d\..\..\src\query\contact_manifolds\contact_manifolds_trimesh_shape.rs:219:32
+    |
+219 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData {
+    |                                ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                |
+    |                                the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+219 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_> {
+    |                                                            ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> vendor\forks\parry\crates\parry2d\..\..\src\query\contact_manifolds\contact_manifolds_workspace.rs:78:32
+   |
+78 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData;
+   |                                ^^^^^     ^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                                |
+   |                                the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+   |
+78 |     fn as_typed_workspace_data(&self) -> TypedWorkspaceData<'_>;
+   |                                                            ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:370:23
+    |
+370 |     fn as_typed_shape(&self) -> TypedShape;
+    |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+370 |     fn as_typed_shape(&self) -> TypedShape<'_>;
+    |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:695:23
+    |
+695 |     fn as_typed_shape(&self) -> TypedShape {
+    |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+695 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+    |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:749:23
+    |
+749 |     fn as_typed_shape(&self) -> TypedShape {
+    |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+749 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+    |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:814:23
+    |
+814 |     fn as_typed_shape(&self) -> TypedShape {
+    |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+814 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+    |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:873:23
+    |
+873 |     fn as_typed_shape(&self) -> TypedShape {
+    |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+873 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+    |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:949:23
+    |
+949 |     fn as_typed_shape(&self) -> TypedShape {
+    |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+    |                       |
+    |                       the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+949 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+    |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:1016:23
+     |
+1016 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1016 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:1068:23
+     |
+1068 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1068 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:1118:23
+     |
+1118 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1118 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:1169:23
+     |
+1169 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1169 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:1219:23
+     |
+1219 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1219 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:1481:23
+     |
+1481 |     fn as_typed_shape(&self) -> TypedShape {
+     |                       ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                       |
+     |                       the lifetime is elided here
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+     |
+1481 |     fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                           ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:1523:31
+     |
+1523 |               fn as_typed_shape(&self) -> TypedShape {
+     |                                 ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                                 |
+     |                                 the lifetime is elided here
+...
+1548 | / impl_shape_for_round_shape!(
+1549 | |     Cuboid,
+1550 | |     RoundCuboid,
+1551 | |     (|this: &Self, scale: &Vector<Real>, _num_subdivisions: u32| {
+...    |
+1557 | |     })
+1558 | | );
+     | |_- in this macro invocation
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: this warning originates in the macro `impl_shape_for_round_shape` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: use `'_` for type paths
+     |
+1523 |             fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                                   ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:1523:31
+     |
+1523 |               fn as_typed_shape(&self) -> TypedShape {
+     |                                 ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                                 |
+     |                                 the lifetime is elided here
+...
+1560 | / impl_shape_for_round_shape!(
+1561 | |     Triangle,
+1562 | |     RoundTriangle,
+1563 | |     (|this: &Self, scale: &Vector<Real>, _num_subdivisions: u32| {
+...    |
+1569 | |     })
+1570 | | );
+     | |_- in this macro invocation
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: this warning originates in the macro `impl_shape_for_round_shape` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: use `'_` for type paths
+     |
+1523 |             fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                                   ++++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+    --> vendor\forks\parry\crates\parry2d\..\..\src\shape\shape.rs:1523:31
+     |
+1523 |               fn as_typed_shape(&self) -> TypedShape {
+     |                                 ^^^^^     ^^^^^^^^^^ the same lifetime is hidden here
+     |                                 |
+     |                                 the lifetime is elided here
+...
+1574 | / impl_shape_for_round_shape!(
+1575 | |     ConvexPolygon,
+1576 | |     RoundConvexPolygon,
+1577 | |     (|this: &Self, scale: &Vector<Real>, _num_subdivisions: u32| {
+...    |
+1583 | |     })
+1584 | | );
+     | |_- in this macro invocation
+     |
+     = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+     = note: this warning originates in the macro `impl_shape_for_round_shape` (in Nightly builds, run with -Z macro-backtrace for more info)
+help: use `'_` for type paths
+     |
+1523 |             fn as_typed_shape(&self) -> TypedShape<'_> {
+     |                                                   ++++
+
+warning: `parry3d` (lib) generated 28 warnings (run `cargo fix --lib -p parry3d` to apply 27 suggestions)
+warning: `parry2d` (lib) generated 22 warnings (run `cargo fix --lib -p parry2d` to apply 22 suggestions)
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:282:17
+    |
+282 |     pub fn iter(&self) -> RTreeIterator<T> {
+    |                 ^^^^^     ^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                 |
+    |                 the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+    = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+    |
+282 |     pub fn iter(&self) -> RTreeIterator<'_, T> {
+    |                                         +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:296:21
+    |
+296 |     pub fn iter_mut(&mut self) -> RTreeIteratorMut<T> {
+    |                     ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                     |
+    |                     the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+296 |     pub fn iter_mut(&mut self) -> RTreeIteratorMut<'_, T> {
+    |                                                    +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:320:31
+    |
+320 |     pub fn locate_in_envelope(&self, envelope: &T::Envelope) -> LocateInEnvelope<T> {
+    |                               ^^^^^ the lifetime is elided here ^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+320 |     pub fn locate_in_envelope(&self, envelope: &T::Envelope) -> LocateInEnvelope<'_, T> {
+    |                                                                                  +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:325:35
+    |
+325 |     pub fn locate_in_envelope_mut(&mut self, envelope: &T::Envelope) -> LocateInEnvelopeMut<T> {
+    |                                   ^^^^^^^^^ the lifetime is elided here ^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+325 |     pub fn locate_in_envelope_mut(&mut self, envelope: &T::Envelope) -> LocateInEnvelopeMut<'_, T> {
+    |                                                                                             +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:339:18
+    |
+339 |     pub fn drain(&mut self) -> DrainIterator<T, SelectAllFunc, Params> {
+    |                  ^^^^^^^^^     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                  |
+    |                  the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+339 |     pub fn drain(&mut self) -> DrainIterator<'_, T, SelectAllFunc, Params> {
+    |                                              +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:345:9
+    |
+345 |         &mut self,
+    |         ^^^^^^^^^ the lifetime is elided here
+346 |         envelope: T::Envelope,
+347 |     ) -> DrainIterator<T, SelectInEnvelopeFunction<T>, Params> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+347 |     ) -> DrainIterator<'_, T, SelectInEnvelopeFunction<T>, Params> {
+    |                        +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:388:9
+    |
+388 |         &self,
+    |         ^^^^^ the lifetime is elided here
+389 |         envelope: &T::Envelope,
+390 |     ) -> LocateInEnvelopeIntersecting<T> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+390 |     ) -> LocateInEnvelopeIntersecting<'_, T> {
+    |                                       +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:399:9
+    |
+399 |         &mut self,
+    |         ^^^^^^^^^ the lifetime is elided here
+400 |         envelope: &T::Envelope,
+401 |     ) -> LocateInEnvelopeIntersectingMut<T> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+401 |     ) -> LocateInEnvelopeIntersectingMut<'_, T> {
+    |                                          +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:416:9
+    |
+416 |         &self,
+    |         ^^^^^ the lifetime is elided here
+417 |         selection_function: S,
+418 |     ) -> SelectionIterator<T, S> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+418 |     ) -> SelectionIterator<'_, T, S> {
+    |                            +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:424:9
+    |
+424 |         &mut self,
+    |         ^^^^^^^^^ the lifetime is elided here
+425 |         selection_function: S,
+426 |     ) -> SelectionIteratorMut<T, S> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+426 |     ) -> SelectionIteratorMut<'_, T, S> {
+    |                               +++
+
+warning: hiding a lifetime that's named elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:437:10
+    |
+435 |         &'a self,
+    |          -- the lifetime is named here
+436 |         other: &'a RTree<U>,
+    |                 -- the lifetime is named here
+437 |     ) -> IntersectionIterator<T, U>
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: consistently use `'a`
+    |
+437 |     ) -> IntersectionIterator<'a, T, U>
+    |                               +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:499:45
+    |
+499 |     pub fn drain_with_selection_function<F>(&mut self, function: F) -> DrainIterator<T, F, Params>
+    |                                             ^^^^^^^^^                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |                                             |
+    |                                             the lifetime is elided here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+499 |     pub fn drain_with_selection_function<F>(&mut self, function: F) -> DrainIterator<'_, T, F, Params>
+    |                                                                                      +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:510:9
+    |
+510 |         &mut self,
+    |         ^^^^^^^^^ the lifetime is elided here
+511 |         envelope: T::Envelope,
+512 |     ) -> DrainIterator<T, SelectInEnvelopeFuncIntersecting<T>, Params> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+512 |     ) -> DrainIterator<'_, T, SelectInEnvelopeFuncIntersecting<T>, Params> {
+    |                        +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:560:9
+    |
+560 |         &self,
+    |         ^^^^^ the lifetime is elided here
+561 |         point: &<T::Envelope as Envelope>::Point,
+562 |     ) -> LocateAllAtPoint<T> {
+    |          ^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+562 |     ) -> LocateAllAtPoint<'_, T> {
+    |                           +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:568:9
+    |
+568 |         &mut self,
+    |         ^^^^^^^^^ the lifetime is elided here
+569 |         point: &<T::Envelope as Envelope>::Point,
+570 |     ) -> LocateAllAtPointMut<T> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+570 |     ) -> LocateAllAtPointMut<'_, T> {
+    |                              +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:719:9
+    |
+719 |         &self,
+    |         ^^^^^ the lifetime is elided here
+...
+722 |     ) -> LocateWithinDistanceIterator<T> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+722 |     ) -> LocateWithinDistanceIterator<'_, T> {
+    |                                       +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:732:9
+    |
+732 |         &mut self,
+    |         ^^^^^^^^^ the lifetime is elided here
+...
+735 |     ) -> DrainIterator<T, SelectWithinDistanceFunction<T>, Params> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+735 |     ) -> DrainIterator<'_, T, SelectWithinDistanceFunction<T>, Params> {
+    |                        +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:760:9
+    |
+760 |         &self,
+    |         ^^^^^ the lifetime is elided here
+761 |         query_point: &<T::Envelope as Envelope>::Point,
+762 |     ) -> NearestNeighborIterator<T> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+762 |     ) -> NearestNeighborIterator<'_, T> {
+    |                                  +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:772:9
+    |
+772 |         &self,
+    |         ^^^^^ the lifetime is elided here
+773 |         query_point: &<T::Envelope as Envelope>::Point,
+774 |     ) -> NearestNeighborDistance2Iterator<T> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+774 |     ) -> NearestNeighborDistance2Iterator<'_, T> {
+    |                                           +++
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+   --> vendor\forks\rstar\src\rtree.rs:783:9
+    |
+783 |         &self,
+    |         ^^^^^ the lifetime is elided here
+784 |         query_point: &<T::Envelope as Envelope>::Point,
+785 |     ) -> NearestNeighborDistance2Iterator<T> {
+    |          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+    |
+    = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+help: use `'_` for type paths
+    |
+785 |     ) -> NearestNeighborDistance2Iterator<'_, T> {
+    |                                           +++
+
+warning: `rstar` (lib) generated 20 warnings (run `cargo fix --lib -p rstar` to apply 20 suggestions)
+warning: function `check` is never used
+   --> vendor\bevy_egui35\src\render\systems.rs:103:16
+    |
+103 |     pub scale: Vec2,
+    |                ^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `check` is never used
+   --> vendor\bevy_egui35\src\render\systems.rs:105:22
+    |
+105 |     pub translation: Vec2,
+    |                      ^^^^
+
+warning: `bevy_egui35` (lib) generated 2 warnings
+    Finished `release` profile [optimized] target(s) in 4.57s

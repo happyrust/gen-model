@@ -561,9 +561,13 @@ pub async fn apply_insts_boolean_manifold_single(
                                                 b.refno
                                             )
                                         })?;
+                                    let mesh_id_literal =
+                                        crate::data_interface::dbnum_state::escape_surql_str(
+                                            &mesh_id,
+                                        );
                                     update_sql.push_str(&format!(
-                                        "update {} set booled_id='{}';",
-                                        &inst_relate_id, mesh_id
+                                        "update {} set booled_id='{}', insts_flat=[{{geo_hash:'{}'}}];",
+                                        &inst_relate_id, mesh_id_literal, mesh_id_literal
                                     ));
                                     // 做成了就销账，别让修好的件一直挂在降级清单上。
                                     geom_error::note_success(&b.refno.to_pdms_str()).await;
@@ -744,7 +748,9 @@ fn empty_difference_is_bad_bool_not_a_silent_swallow() {
         .0;
     assert!(design.contains("不覆盖 booled_id"), "{design}");
     assert!(
-        design.contains("set bad_bool=true") && design.contains("set booled_id='"),
+        design.contains("set bad_bool=true")
+            && design.contains("set booled_id='")
+            && design.contains("insts_flat=[{{geo_hash:'"),
         "{design}"
     );
     assert!(

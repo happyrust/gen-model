@@ -1,0 +1,15 @@
+OK bytes=73198080 sha256=042161CCEDD5532FEA7C643F60E82432F072769241039BF2F3C072081261BBD5 path=D:\work\plant-code\old\test-worklspace\bin\plant-ui-app.exe
+OK bytes=12532 sha256=83BB4CACEA90CA4A9DFD83E486359FEF3C8935B0683AADA8576B94A0AF04BE22 path=D:\work\plant-code\old\gen-model\docs\evidence\2026-08-20-rm13-dome-live\bool-display-fix.patch
+OK bytes=4783 sha256=3195A175BF224295B36729B85D4A4B28A3BD7ED55CFFAB7D85D0A7B485BBDC19 path=D:\work\plant-code\old\gen-model\docs\evidence\2026-08-20-rm13-dome-live\verification-record.md
+OK bytes=1936 sha256=99552799092B3878426CFC83A12F3B74513C235028C421B9565CBE6D1109E8A5 path=D:\work\plant-code\old\gen-model\docs\evidence\2026-08-20-rm13-dome-live\rollback-bool-display-fix.ps1
+OK bytes=362548 sha256=2ADDAEE74F8DD74AC52C1A7A88C9ED1D4ADAD0C8468844275FDD1BF08D5581AA path=D:\work\plant-code\old\gen-model\docs\evidence\2026-08-20-rm13-dome-live\plant-ui-fixed-right-view.png
+OK bytes=131726 sha256=63D66346A2AC1D39347675C8EA07C3BCF85A19C9D126EACB1A913FC6F9C19F50 path=D:\work\plant-code\old\gen-model\docs\evidence\2026-08-20-rm13-dome-live\e3d-direct-comparison.png
+PATCH_CONTAINS fn display_insts
+PATCH_CONTAINS insts_flat=[{{geo_hash
+PATCH_CONTAINS IF booled_id != NONE THEN
+RECORD_CONTAINS 基线行为
+RECORD_CONTAINS 修改后数据库行为
+RECORD_CONTAINS Plant UI / E3D
+RECORD_CONTAINS 回滚
+PROCESS_OK pid=12344
+ARTIFACTS_REOPENED_OK

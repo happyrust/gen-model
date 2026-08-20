@@ -229,8 +229,9 @@ pub async fn sweep_inst_relate_flat() -> anyhow::Result<usize> {
     loop {
         let sql = format!(
             "LET $rows = SELECT VALUE id FROM inst_relate WHERE insts_flat = NONE AND aabb.d != none LIMIT {BATCH};\n\
-             UPDATE $rows SET insts_flat = (SELECT trans.d AS transform, record::id(out) AS geo_hash \
-             FROM out->geo_relate WHERE visible && out.meshed && trans.d != none && geo_type='Pos'), \
+             UPDATE $rows SET insts_flat = IF booled_id != NONE THEN \
+             [{{ geo_hash: booled_id }}] ELSE (SELECT trans.d AS transform, record::id(out) AS geo_hash \
+             FROM out->geo_relate WHERE visible && out.meshed && trans.d != none && geo_type='Pos') END, \
              aabb_d = aabb.d, world_trans_d = world_trans.d RETURN NONE;\n\
              RETURN array::len($rows);"
         );
@@ -1160,6 +1161,20 @@ mod tests {
     use parry3d::bounding_volume::Aabb;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn flat_cache_prefers_booled_mesh_over_positive_primitives() {
+        let source = include_str!("pdms_inst.rs");
+        let body = source
+            .split_once("pub async fn sweep_inst_relate_flat()")
+            .expect("flat sweep exists")
+            .1
+            .split_once("pub async fn sweep_inst_relate_flat_if_dirty()")
+            .expect("flat sweep boundary")
+            .0;
+        assert!(body.contains("IF booled_id != NONE THEN"), "{body}");
+        assert!(body.contains("geo_hash: booled_id"), "{body}");
+    }
 
     fn normal_batch(refno_text: &str, visible: bool) -> ShapeInstancesData {
         let refno = RefnoEnum::from(refno_text);

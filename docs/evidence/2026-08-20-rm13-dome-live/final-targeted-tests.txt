@@ -1,0 +1,4931 @@
+
+> cargo test --locked --lib booled --no-default-features --features ws,gen_model,manifold,project_hd -- --nocapture
+warning: the feature `generic_const_exprs` is incomplete and may not be safe to use and/or cause compiler crashes
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:8:12
+  |
+8 | #![feature(generic_const_exprs)]
+  |            ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: see issue #76560 <https://github.com/rust-lang/rust/issues/76560> for more information
+  = note: `#[warn(incomplete_features)]` on by default
+
+warning: the feature `core_intrinsics` is internal to the compiler or standard library
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:4:12
+  |
+4 | #![feature(core_intrinsics)]
+  |            ^^^^^^^^^^^^^^^
+  |
+  = note: using it is strongly discouraged
+  = note: `#[warn(internal_features)]` on by default
+
+warning: unused `#[macro_use]` import
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:10:1
+   |
+10 | #[macro_use]
+   | ^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused `#[macro_use]` import
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:25:1
+   |
+25 | #[macro_use]
+   | ^^^^^^^^^^^^
+
+warning: unused `#[macro_use]` import
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:28:1
+   |
+28 | #[macro_use]
+   | ^^^^^^^^^^^^
+
+warning: unused `#[macro_use]` import
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:32:1
+   |
+32 | #[macro_use]
+   | ^^^^^^^^^^^^
+
+warning: unused import: `aios_core::tool::db_tool::db1_hash`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:35:5
+   |
+35 | use aios_core::tool::db_tool::db1_hash;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `futures::stream::TryStreamExt`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:36:5
+   |
+36 | use futures::stream::TryStreamExt;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashSet`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:37:5
+   |
+37 | use std::collections::HashSet;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::error::Error`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:38:5
+   |
+38 | use std::error::Error;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Instant`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:39:5
+   |
+39 | use std::time::Instant;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `NAME_HASH` and `TYPE_HASH`
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:6:39
+  |
+6 | use aios_core::consts::{EXPR_ATT_SET, NAME_HASH, TYPE_HASH};
+  |                                       ^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `aios_core::parse::*`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:11:5
+   |
+11 | use aios_core::parse::*;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::petgraph::PetRefnoNode`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:13:5
+   |
+13 | use aios_core::petgraph::PetRefnoNode;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `cached::proc_macro::cached`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:19:5
+   |
+19 | use cached::proc_macro::cached;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `pretty_hex` and `simple_hex`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:37:18
+   |
+37 | use pretty_hex::{pretty_hex, simple_hex};
+   |                  ^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `Seek`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:45:21
+   |
+45 | use std::io::{Read, Seek, Write};
+   |                     ^^^^
+
+warning: unused import: `Deref`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:46:16
+   |
+46 | use std::ops::{Deref, Range};
+   |                ^^^^^
+
+warning: unnecessary parentheses around assigned value
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:650:17
+    |
+650 |                 ((next_attr_info.offset & 0xFFFFF) as i32 - (attr_info.offset & 0xFFFFF) as i32);
+    |                 ^                                                                              ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+650 -                 ((next_attr_info.offset & 0xFFFFF) as i32 - (attr_info.offset & 0xFFFFF) as i32);
+650 +                 (next_attr_info.offset & 0xFFFFF) as i32 - (attr_info.offset & 0xFFFFF) as i32;
+    |
+
+warning: unexpected `cfg` condition name: `debug_parse_expr`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2636:11
+     |
+2636 |     #[cfg(debug_parse_expr)]
+     |           ^^^^^^^^^^^^^^^^
+     |
+     = help: expected names are: `docsrs`, `feature`, and `test` and 33 more
+     = help: consider using a Cargo feature instead
+     = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+              [lints.rust]
+              unexpected_cfgs = { level = "warn", check-cfg = ['cfg(debug_parse_expr)'] }
+     = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(debug_parse_expr)");` to the top of the `build.rs`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+     = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unnecessary parentheses around function argument
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2654:37
+     |
+2654 |                 result = StringType((format!("{}{}", first_data, second)));
+     |                                     ^                                   ^
+     |
+help: remove these parentheses
+     |
+2654 -                 result = StringType((format!("{}{}", first_data, second)));
+2654 +                 result = StringType(format!("{}{}", first_data, second));
+     |
+
+warning: unnecessary parentheses around function argument
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2664:37
+     |
+2664 |                 result = StringType((format!("{}{}{}", first_data, second_data, third)));
+     |                                     ^                                                 ^
+     |
+help: remove these parentheses
+     |
+2664 -                 result = StringType((format!("{}{}{}", first_data, second_data, third)));
+2664 +                 result = StringType(format!("{}{}{}", first_data, second_data, third));
+     |
+
+warning: unnecessary parentheses around function argument
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2670:41
+     |
+2670 |                     result = StringType((format!("PP {}", d)));
+     |                                         ^                   ^
+     |
+help: remove these parentheses
+     |
+2670 -                     result = StringType((format!("PP {}", d)));
+2670 +                     result = StringType(format!("PP {}", d));
+     |
+
+warning: unnecessary parentheses around assigned value
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2969:35
+     |
+2969 |                     let end_pos = (next_pos + 12); //隐含属性实际结束点
+     |                                   ^             ^
+     |
+help: remove these parentheses
+     |
+2969 -                     let end_pos = (next_pos + 12); //隐含属性实际结束点
+2969 +                     let end_pos = next_pos + 12; //隐含属性实际结束点
+     |
+
+warning: unused import: `aios_core::bin_data::convert_str_to_bytes`
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:3:5
+  |
+3 | use aios_core::bin_data::convert_str_to_bytes;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `parse_to_f64`
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:4:25
+  |
+4 | use aios_core::helper::{parse_to_f64, parse_to_i16, parse_to_i32, parse_to_u16, parse_to_u32};
+  |                         ^^^^^^^^^^^^
+
+warning: unused import: `RefI32Tuple`
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:6:46
+  |
+6 | use aios_core::pdms_types::{DbAttributeType, RefI32Tuple};
+  |                                              ^^^^^^^^^^^
+
+warning: unused import: `dashmap::DashMap`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:10:5
+   |
+10 | use dashmap::DashMap;
+   |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `be_u8`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:15:45
+   |
+15 | use nom::number::complete::{be_i16, be_i32, be_u8, be_u16, be_u32};
+   |                                             ^^^^^
+
+warning: unused import: `pretty_hex::pretty_hex`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:17:5
+   |
+17 | use pretty_hex::pretty_hex;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs::File`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:18:5
+   |
+18 | use std::fs::File;
+   |     ^^^^^^^^^^^^^
+
+warning: unused import: `std::io::BufReader`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:19:5
+   |
+19 | use std::io::BufReader;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tokio::count`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:20:5
+   |
+20 | use tokio::count;
+   |     ^^^^^^^^^^^^
+
+warning: unused import: `std::io::Read`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:1:5
+   |
+ 1 | use std::io::Read;
+   |     ^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:52:1
+   |
+52 | pub mod test_cases;
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_uda.rs:1:5
+   |
+ 1 | use super::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:11:1
+   |
+11 | mod test_parse_uda;
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_uda.rs:2:5
+   |
+ 2 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:11:1
+   |
+11 | mod test_parse_uda;
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::init_test_surreal`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_uda.rs:3:5
+   |
+ 3 | use aios_core::init_test_surreal;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:11:1
+   |
+11 | mod test_parse_uda;
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_expr.rs:1:5
+   |
+ 1 | use super::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:13:1
+   |
+13 | mod test_parse_expr;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_expr.rs:2:5
+   |
+ 2 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:13:1
+   |
+13 | mod test_parse_expr;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_chinese.rs:1:5
+   |
+ 1 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:15:1
+   |
+15 | mod test_chinese;
+   | ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_chinese.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:15:1
+   |
+15 | mod test_chinese;
+   | ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_chinese.rs:3:5
+   |
+ 3 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:15:1
+   |
+15 | mod test_chinese;
+   | ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::types::*`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_chinese.rs:4:5
+   |
+ 4 | use aios_core::types::*;
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:15:1
+   |
+15 | mod test_chinese;
+   | ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:1:5
+   |
+ 1 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::pdms_types::NounHash`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:3:5
+   |
+ 3 | use aios_core::pdms_types::NounHash;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `db1_dehash`, `db1_hash`, `read_attr_info_config_from_bin`, and `read_attr_info_config_from_json`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:5:5
+   |
+ 5 |     db1_dehash, db1_hash, read_attr_info_config_from_bin, read_attr_info_config_from_json,
+   |     ^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `PdmsDatabaseInfo` and `get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:7:17
+   |
+ 7 | use aios_core::{PdmsDatabaseInfo, get_default_pdms_db_info};
+   |                 ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs::File`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:8:5
+   |
+ 8 | use std::fs::File;
+   |     ^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::io::Write`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:9:5
+   |
+ 9 | use std::io::Write;
+   |     ^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `parse_ele_data` and `process_explicit_attrs`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:1:20
+   |
+ 1 | use crate::parse::{parse_ele_data, process_explicit_attrs};
+   |                    ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse_explict_tools::parse_expression_attr`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:2:5
+   |
+ 2 | use crate::parse_explict_tools::parse_expression_attr;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:3:5
+   |
+ 3 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:4:5
+   |
+ 4 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::pdms_types::PdmsDatabaseInfo`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:5:5
+   |
+ 5 | use aios_core::pdms_types::PdmsDatabaseInfo;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::types::*`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:6:5
+   |
+ 6 | use aios_core::types::*;
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `dashmap::DashMap`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:7:5
+   |
+ 7 | use dashmap::DashMap;
+   |     ^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs::File`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:8:5
+   |
+ 8 | use std::fs::File;
+   |     ^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::io::Write`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:9:5
+   |
+ 9 | use std::io::Write;
+   |     ^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::str::FromStr`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:10:5
+   |
+10 | use std::str::FromStr;
+   |     ^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:1:5
+   |
+ 1 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::tool::db_tool::db1_dehash`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:2:5
+   |
+ 2 | use aios_core::tool::db_tool::db1_dehash;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused imports: `take_till` and `take_until`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:4:33
+   |
+ 4 | use nom::bytes::complete::{tag, take_till, take_until};
+   |                                 ^^^^^^^^^  ^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused imports: `not`, `recognize`, `value`, and `verify`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:5:28
+   |
+ 5 | use nom::combinator::{map, not, recognize, value, verify};
+   |                            ^^^  ^^^^^^^^^  ^^^^^  ^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `nom::sequence::preceded`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:8:5
+   |
+ 8 | use nom::sequence::preceded;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_element.rs:2:20
+   |
+ 2 | use crate::parse::{parse_ele_data, parse_raw_ele_data};
+   |                    ^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:19:1
+   |
+19 | mod test_parse_element;
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_element.rs:3:5
+   |
+ 3 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:19:1
+   |
+19 | mod test_parse_element;
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:1:5
+   |
+ 1 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:3:5
+   |
+ 3 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::pdms_types::RefU64`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:4:5
+   |
+ 4 | use aios_core::pdms_types::RefU64;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused imports: `db1_dehash` and `read_attr_info_config_from_json`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:5:32
+   |
+ 5 | use aios_core::tool::db_tool::{db1_dehash, read_attr_info_config_from_json};
+   |                                ^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused imports: `parse_ele_data` and `parse_raw_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\binary_data_parser_test.rs:1:20
+   |
+ 1 | use crate::parse::{parse_ele_data, parse_raw_ele_data};
+   |                    ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:22:1
+   |
+22 | mod binary_data_parser_test;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\binary_data_parser_test.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:22:1
+   |
+22 | mod binary_data_parser_test;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `NamedAttrValue` and `get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\binary_data_parser_test.rs:3:17
+   |
+ 3 | use aios_core::{NamedAttrValue, get_default_pdms_db_info};
+   |                 ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:22:1
+   |
+22 | mod binary_data_parser_test;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_string.rs:1:5
+   |
+ 1 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:23:1
+   |
+23 | mod test_parse_string;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_string.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:23:1
+   |
+23 | mod test_parse_string;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_string.rs:3:5
+   |
+ 3 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:23:1
+   |
+23 | mod test_parse_string;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `db1_dehash`, `db1_hash`, and `read_attr_info_config_from_json`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_string.rs:4:32
+   |
+ 4 | use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_json};
+   |                                ^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:23:1
+   |
+23 | mod test_parse_string;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: the feature `associated_type_bounds` has been stable since 1.79.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:5:12
+  |
+5 | #![feature(associated_type_bounds)]
+  |            ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(stable_features)]` on by default
+
+warning: the feature `let_chains` has been stable since 1.88.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:6:12
+  |
+6 | #![feature(let_chains)]
+  |            ^^^^^^^^^^
+
+warning: the feature `async_closure` has been stable since 1.85.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:7:12
+  |
+7 | #![feature(async_closure)]
+  |            ^^^^^^^^^^^^^
+
+warning: the feature `exclusive_range_pattern` has been stable since 1.80.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:9:12
+  |
+9 | #![feature(exclusive_range_pattern)]
+  |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: the feature `array_methods` has been stable since 1.77.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:2:12
+  |
+2 | #![feature(array_methods)]
+  |            ^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:93:9
+   |
+93 |     let mut pdms_project_data_map = DashMap::new();
+   |         ----^^^^^^^^^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:110:9
+    |
+110 |     let mut pdms_db_name_map = DashMap::new(); //file_name->db_name
+    |         ----^^^^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1283:13
+     |
+1283 |         let mut pgno = entry.pos / 0x800;
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1284:13
+     |
+1284 |         let mut sesno = get_sesno(&ses_range_map, pgno as _).unwrap_or_default();
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1309:13
+     |
+1309 |         let mut is_debug = test_refno.is_some() && test_refno == Some(*source_refno);
+     |             ----^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1362:9
+     |
+1362 |     let mut type_ele_map = Arc::new(DashMap::new());
+     |         ----^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1363:9
+     |
+1363 |     let mut total_attr_map: Arc<DashMap<RefU64, NamedAttrMap>> = Arc::new(DashMap::new());
+     |         ----^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1369:9
+     |
+1369 |         mut db_no,
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1385:9
+     |
+1385 |     let mut gen_ref_time = Instant::now();
+     |         ----^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1392:9
+     |
+1392 |     let mut root_refno = world_refno;
+     |         ----^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1393:9
+     |
+1393 |     let mut refno_info_map = Arc::new(DashMap::new());
+     |         ----^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused import: `tokio::io::AsyncReadExt`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:50:5
+   |
+50 | use tokio::io::AsyncReadExt;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `itertools::Itertools`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:24:5
+   |
+24 | use itertools::Itertools;
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `core::slice::SlicePattern`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:22:5
+   |
+22 | use core::slice::SlicePattern;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3074:9
+     |
+3074 |     let mut refno_table = DashMap::new();
+     |         ----^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `refno`
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:261:44
+    |
+261 | pub fn parse_expression_func(input: &[u8], refno: RefU64) -> IResult<&[u8], String> {
+    |                                            ^^^^^ help: if this is intentional, prefix it with an underscore: `_refno`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3075:9
+     |
+3075 |     let mut word_refno_hashset = DashSet::new();
+     |         ----^^^^^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3114:9
+     |
+3114 |     let mut refno_table: DashMap<RefU64, EleDataEntry> = DashMap::new();
+     |         ----^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3115:9
+     |
+3115 |     let mut word_refno_hashset = DashSet::new();
+     |         ----^^^^^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `noun_map`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2867:9
+     |
+2867 |     let noun_map = get_default_pdms_db_info();
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_noun_map`
+
+warning: unused variable: `len`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2947:18
+     |
+2947 |         let (_, (len, refno)) = tuple::<_, _, nom::error::Error<&[u8]>, _>((
+     |                  ^^^ help: if this is intentional, prefix it with an underscore: `_len`
+
+warning: unused variable: `refno`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2947:23
+     |
+2947 |         let (_, (len, refno)) = tuple::<_, _, nom::error::Error<&[u8]>, _>((
+     |                       ^^^^^ help: if this is intentional, prefix it with an underscore: `_refno`
+
+warning: unused variable: `noun_attr_info_map`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3103:5
+     |
+3103 |     noun_attr_info_map: &DashMap<String, DashMap<String, AttrInfo>>,
+     |     ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_noun_attr_info_map`
+
+warning: value assigned to `value` is never read
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2510:41
+     |
+2510 |                         let mut value = "".to_string();
+     |                                         ^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+2517 |                                 value = (-v as f32 / 10.0).to_string();
+     |                                 ----- `value` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3183:13
+     |
+3183 |         let mut s = t + 4 * 6;
+     |             ----^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2643:14
+     |
+2643 |         let (mut tmp_input, (a, b, c, d, e)) =
+     |              ----^^^^^^^^^
+     |              |
+     |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2679:40
+     |
+2679 |                         let (residual, mut coord) = parse_xyz_data(axis_data, refno, true)?;
+     |                                        ----^^^^^
+     |                                        |
+     |                                        help: remove this `mut`
+
+warning: unused variable: `owner`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1401:9
+     |
+1401 |         owner,
+     |         ^^^^^ help: try ignoring the field: `owner: _`
+
+warning: unused variable: `name`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1405:9
+     |
+1405 |         name,
+     |         ^^^^ help: try ignoring the field: `name: _`
+
+warning: unused variable: `a`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2643:30
+     |
+2643 |         let (mut tmp_input, (a, b, c, d, e)) =
+     |                              ^ help: if this is intentional, prefix it with an underscore: `_a`
+
+warning: unused variable: `b`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2643:33
+     |
+2643 |         let (mut tmp_input, (a, b, c, d, e)) =
+     |                                 ^ help: if this is intentional, prefix it with an underscore: `_b`
+
+warning: unused variable: `c`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2643:36
+     |
+2643 |         let (mut tmp_input, (a, b, c, d, e)) =
+     |                                    ^ help: if this is intentional, prefix it with an underscore: `_c`
+
+warning: unused variable: `i`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2678:25
+     |
+2678 |                     for i in 0..count {
+     |                         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1111:9
+     |
+1111 |     let mut gen_ref_time = Instant::now();
+     |         ----^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1118:9
+     |
+1118 |     let mut root_refno = world_refno;
+     |         ----^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1136:9
+     |
+1136 |     let mut memb_time = Instant::now();
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `file_name`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1110:44
+     |
+1110 | pub fn parse_db_basic_data(input: Vec<u8>, file_name: &str, project: &str) -> Result<DbBasicData> {
+     |                                            ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_file_name`
+
+warning: unused variable: `refno`
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:735:9
+    |
+735 |     let refno = ele_data.refno;
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_refno`
+
+warning: unused variable: `project`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1110:61
+     |
+1110 | pub fn parse_db_basic_data(input: Vec<u8>, file_name: &str, project: &str) -> Result<DbBasicData> {
+     |                                                             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_project`
+
+warning: unused variable: `db_type`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1177:9
+     |
+1177 |         db_type,
+     |         ^^^^^^^ help: try ignoring the field: `db_type: _`
+
+warning: unused variable: `db_no`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1179:9
+     |
+1179 |         db_no,
+     |         ^^^^^ help: try ignoring the field: `db_no: _`
+
+warning: value assigned to `step_w` is never read
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:628:26
+    |
+628 |         let mut step_w = 0;
+    |                          ^ this value is reassigned later and never used
+...
+652 |             step_w = origin_impl_len / 4 - (attr_info.offset as i32 & 0xFFFFF);
+    |             ------------------------------------------------------------------ `step_w` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:212:9
+    |
+212 |     let mut basic_data = parse_db_basic_data(buf, file_name, project)?;
+    |         ----^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: value assigned to `memb_bytes_len` is never read
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:459:30
+    |
+459 |     let mut memb_bytes_len = 0;
+    |                              ^ this value is reassigned later and never used
+...
+463 |             memb_bytes_len = parse_to_u16(&membs_data[2..4]) as usize * 4;
+    |             ------------------------------------------------------------- `memb_bytes_len` is overwritten here before the previous value is read
+
+warning: unused variable: `noun`
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:492:9
+    |
+492 |     let noun = type_hash as u32;
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_noun`
+
+warning: unused variable: `implicit_data`
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:503:9
+    |
+503 |     let implicit_data = &input[0..actual_impl_len];
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_implicit_data`
+
+warning: value assigned to `memb_bytes_len` is never read
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:510:30
+    |
+510 |     let mut memb_bytes_len = 0;
+    |                              ^ this value is reassigned later and never used
+...
+514 |             memb_bytes_len = parse_to_u16(&membs_data[2..4]) as usize * 4;
+    |             ------------------------------------------------------------- `memb_bytes_len` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1724:9
+     |
+1724 |     let mut is_debug = test_refno == Some(refno);
+     |         ----^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `e`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1760:21
+     |
+1760 |                 Err(e) => {
+     |                     ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning: unused variable: `e`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1778:21
+     |
+1778 |                 Err(e) => {
+     |                     ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning: function `test_parse_specific_segments` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\binary_data_parser_test.rs:73:4
+   |
+73 | fn test_parse_specific_segments(data: &[u8]) {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `parser` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:10:4
+   |
+10 | fn parser(s: &[u8]) -> IResult<&[u8], (Vec<i32>, &[u8])> {
+   |    ^^^^^^
+
+warning: function `gen_resolve_error` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\error_types.rs:61:4
+   |
+61 | fn gen_resolve_error() -> anyhow::Result<u32> {
+   |    ^^^^^^^^^^^^^^^^^
+
+warning: function `test_parse_members_has_07` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_element.rs:42:10
+   |
+42 | async fn test_parse_members_has_07() {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ATT_PX` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:22:7
+   |
+22 | const ATT_PX: i32 = 0xFFF7E177u32 as i32;
+   |       ^^^^^^
+
+warning: function `get_uda_full_name` is never used
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1672:10
+     |
+1672 | async fn get_uda_full_name(hash: i32) -> Option<String> {
+     |          ^^^^^^^^^^^^^^^^^
+
+warning: constant `ATT_PY` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:23:7
+   |
+23 | const ATT_PY: i32 = 0xFFF7E15Cu32 as i32;
+   |       ^^^^^^
+
+warning: function `get_uda_short_name` is never used
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1684:10
+     |
+1684 | async fn get_uda_short_name(hash: i32) -> Option<String> {
+     |          ^^^^^^^^^^^^^^^^^^
+
+warning: function `convert_int_to_axis_str` is never used
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2155:4
+     |
+2155 | fn convert_int_to_axis_str(n: i32) -> &'static str {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ATT_PZ` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:24:7
+   |
+24 | const ATT_PZ: i32 = 0xFFF7E141u32 as i32;
+   |       ^^^^^^
+
+warning: constant `ATT_PDIA` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:25:7
+   |
+25 | const ATT_PDIA: i32 = 0xFFF77D0Fu32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PHEI` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:26:7
+   |
+26 | const ATT_PHEI: i32 = 0xFFF520EFu32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PDIS` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:27:7
+   |
+27 | const ATT_PDIS: i32 = 0xFFF21519u32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PCON` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:28:7
+   |
+28 | const ATT_PCON: i32 = 0xFFF3848Du32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PBOR` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:29:7
+   |
+29 | const ATT_PBOR: i32 = 0xFFF2511Cu32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PPRO` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:30:7
+   |
+30 | const ATT_PPRO: i32 = 0xFFF32DC0u32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_DPRO` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:31:7
+   |
+31 | const ATT_DPRO: i32 = 0xFFF32DCCu32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_BTHK` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:32:7
+   |
+32 | const ATT_BTHK: i32 = 0xFFF47D68u32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PTCDI` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:33:7
+   |
+33 | const ATT_PTCDI: i32 = 0x95A34;
+   |       ^^^^^^^^^
+
+warning: feature `type_ascription` is declared but not used
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:1:12
+  |
+1 | #![feature(type_ascription)]
+  |            ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_features)]` (part of `#[warn(unused)]`) on by default
+
+warning: feature `core_intrinsics` is declared but not used
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:4:12
+  |
+4 | #![feature(core_intrinsics)]
+  |            ^^^^^^^^^^^^^^^
+
+warning: `parse_pdms_db` (lib) generated 155 warnings (run `cargo fix --lib -p parse_pdms_db` to apply 115 suggestions)
+warning: unused import: `anyhow::anyhow`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:1:5
+  |
+1 | use anyhow::anyhow;
+  |     ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `deku::prelude::*`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:2:5
+  |
+2 | use deku::prelude::*;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `TryFrom` and `TryInto`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:3:20
+  |
+3 | use std::convert::{TryFrom, TryInto};
+  |                    ^^^^^^^  ^^^^^^^
+
+warning: unused import: `std::fmt::Debug`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:4:5
+  |
+4 | use std::fmt::Debug;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs::File`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:5:5
+  |
+5 | use std::fs::File;
+  |     ^^^^^^^^^^^^^
+
+warning: unused imports: `Read`, `SeekFrom`, and `Seek`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:6:15
+  |
+6 | use std::io::{Read, Seek, SeekFrom};
+  |               ^^^^  ^^^^  ^^^^^^^^
+
+warning: unused import: `std::mem::size_of`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:7:5
+  |
+7 | use std::mem::size_of;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MappedLocalTime`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:4:31
+  |
+4 | use chrono::{DateTime, Local, MappedLocalTime, TimeZone, Utc};
+  |                               ^^^^^^^^^^^^^^^
+
+warning: unused import: `TryInto`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:10:29
+   |
+10 | use std::convert::{TryFrom, TryInto};
+   |                             ^^^^^^^
+
+warning: unused import: `std::str::FromStr`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:11:5
+   |
+11 | use std::str::FromStr;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `surrealdb::sql::Thing`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:12:5
+   |
+12 | use surrealdb::sql::Thing;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\search.rs:5:55
+  |
+5 | use crate::io::{EleOperationData, EleOperationDetail, PdmsIO};
+  |                                                       ^^^^^^
+
+warning: unused imports: `NamedAttrValue` and `RefU64`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\search.rs:6:17
+  |
+6 | use aios_core::{NamedAttrValue, RefU64};
+  |                 ^^^^^^^^^^^^^^  ^^^^^^
+
+warning: unused import: `anyhow`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\search.rs:7:22
+  |
+7 | use anyhow::{Result, anyhow};
+  |                      ^^^^^^
+
+warning: unused import: `TryInto`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse.rs:2:29
+  |
+2 | use std::convert::{TryFrom, TryInto};
+  |                             ^^^^^^^
+
+warning: unused import: `crate::io::PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_max_att_version.rs:1:5
+  |
+1 | use crate::io::PdmsIO;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_db_option`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_max_att_version.rs:2:5
+  |
+2 | use aios_core::get_db_option;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_max_att_version.rs:3:5
+  |
+3 | use std::path::PathBuf;
+  |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::io::PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse_ele.rs:1:5
+  |
+1 | use crate::io::PdmsIO;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::tool::db_tool::db1_dehash`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse_ele.rs:2:5
+  |
+2 | use aios_core::tool::db_tool::db1_dehash;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `RefU64` and `init_test_surreal`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse_ele.rs:3:17
+  |
+3 | use aios_core::{RefU64, init_test_surreal};
+  |                 ^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::defines::SessionPageData`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_ses_data.rs:1:5
+  |
+1 | use crate::defines::SessionPageData;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `parse_pdms_db::test_cases::convert_str_to_bytes`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_ses_data.rs:2:5
+  |
+2 | use parse_pdms_db::test_cases::convert_str_to_bytes;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `RefU64` and `init_test_surreal`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_history_data.rs:1:17
+  |
+1 | use aios_core::{RefU64, init_test_surreal};
+  |                 ^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::io::PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_history_data.rs:5:5
+  |
+5 | use crate::io::PdmsIO;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `EleOperationDetail` and `PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_refno_status.rs:8:17
+  |
+8 | use crate::io::{EleOperationDetail, PdmsIO};
+  |                 ^^^^^^^^^^^^^^^^^^  ^^^^^^
+
+warning: unused imports: `EleOperation` and `RefU64`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_refno_status.rs:9:29
+  |
+9 | use aios_core::pdms_types::{EleOperation, RefU64};
+  |                             ^^^^^^^^^^^^  ^^^^^^
+
+warning: unused import: `std::time::Instant`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_refno_status.rs:10:5
+   |
+10 | use std::time::Instant;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `archive_reader::IoReader`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\sync\compress.rs:16:24
+   |
+16 | use dpcsync::{HashSum, archive_reader::IoReader, chunk_dictionary as dict};
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PdmsHeader`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:1:39
+  |
+1 | use crate::defines::{DbPageBasicInfo, PdmsHeader};
+  |                                       ^^^^^^^^^^
+
+warning: unused import: `future::ok`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:7:5
+  |
+7 |     future::ok,
+  |     ^^^^^^^^^^
+
+warning: unused import: `RecursiveMode`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:10:49
+   |
+10 | use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+   |                                                 ^^^^^^^^^^^^^
+
+warning: unused import: `Read`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:12:15
+   |
+12 | use std::io::{Read, Write};
+   |               ^^^^
+
+warning: unused import: `TryFrom`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:10:20
+   |
+10 | use std::convert::{TryFrom, TryInto};
+   |                    ^^^^^^^
+
+warning: unused import: `TryFrom`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse.rs:2:20
+  |
+2 | use std::convert::{TryFrom, TryInto};
+  |                    ^^^^^^^
+
+warning: unused import: `StreamExt`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:5:14
+  |
+5 |     SinkExt, StreamExt,
+  |              ^^^^^^^^^
+
+warning: unused variable: `input`
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:117:21
+    |
+117 |                 let input = path.to_path_buf();
+    |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `output`
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:118:21
+    |
+118 |                 let output: PathBuf =
+    |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `tmp_path`
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:120:21
+    |
+120 |                 let tmp_path = cbas_dir_path.clone();
+    |                     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tmp_path`
+
+warning: unused variable: `rotate_size`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\io_log.rs:44:5
+   |
+44 |     rotate_size: u64,
+   |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rotate_size`
+
+warning: unused variable: `max_files`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\io_log.rs:45:5
+   |
+45 |     max_files: usize,
+   |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_max_files`
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:422:25
+    |
+422 |         let (next_rest, mut d) = RefnoDataLoc::read(rest, ())?;
+    |                         ----^
+    |                         |
+    |                         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `db_headers`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\sync\files.rs:7:9
+  |
+7 |     let db_headers = get_remote_db_headers(ip_dst).await;
+  |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_db_headers`
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\session_index_diff.rs:587:28
+    |
+587 |                         Ok(mut data) => Some(data.att_map().get_type()),
+    |                            ----^^^^
+    |                            |
+    |                            help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\session_index_diff.rs:573:9
+    |
+573 |     let mut enrich = |io: &mut PdmsIO,
+    |         ----^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `modified`
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\search.rs:171:42
+    |
+171 |             EleOperationDetail::Modified(modified) => {
+    |                                          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_modified`
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\net_window.rs:547:9
+    |
+547 |     let mut push = |window: &mut BTreeMap<u32, Vec<EleOperationData>>,
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: function `get_test_database_path` is never used
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_history_data.rs:78:4
+   |
+78 | fn get_test_database_path(relative_path: &str) -> String {
+   |    ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `pdms_io` (lib) generated 48 warnings (run `cargo fix --lib -p pdms_io` to apply 44 suggestions)
+   Compiling aios-database v0.1.18 (D:\work\plant-code\old\gen-model)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.84s
+warning: the following packages contain code that will be rejected by a future version of Rust: num-bigint-dig v0.8.4
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src\lib.rs (D:\Rust\target\debug\build\aios-database/fd5c52fbc9991f51\out\aios_database-fd5c52fbc9991f51.exe)
+
+running 2 tests
+test fast_model::pdms_inst::tests::flat_cache_prefers_booled_mesh_over_positive_primitives ... ok
+test fast_model::occ_generate::occ_inst_boolean_persist_tests::occ_inst_boolean_writes_booled_id_for_query_valid_insts ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1065 filtered out; finished in 0.00s
+
+exit 0
+
+> cargo test --locked --lib rm13_dome_pane_minus_nrev_is_a_hemisphere --no-default-features --features ws,gen_model,manifold,project_hd -- --nocapture
+warning: the feature `generic_const_exprs` is incomplete and may not be safe to use and/or cause compiler crashes
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:8:12
+  |
+8 | #![feature(generic_const_exprs)]
+  |            ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: see issue #76560 <https://github.com/rust-lang/rust/issues/76560> for more information
+  = note: `#[warn(incomplete_features)]` on by default
+
+warning: the feature `core_intrinsics` is internal to the compiler or standard library
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:4:12
+  |
+4 | #![feature(core_intrinsics)]
+  |            ^^^^^^^^^^^^^^^
+  |
+  = note: using it is strongly discouraged
+  = note: `#[warn(internal_features)]` on by default
+
+warning: unused `#[macro_use]` import
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:10:1
+   |
+10 | #[macro_use]
+   | ^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused `#[macro_use]` import
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:25:1
+   |
+25 | #[macro_use]
+   | ^^^^^^^^^^^^
+
+warning: unused `#[macro_use]` import
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:28:1
+   |
+28 | #[macro_use]
+   | ^^^^^^^^^^^^
+
+warning: unused `#[macro_use]` import
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:32:1
+   |
+32 | #[macro_use]
+   | ^^^^^^^^^^^^
+
+warning: unused import: `aios_core::tool::db_tool::db1_hash`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:35:5
+   |
+35 | use aios_core::tool::db_tool::db1_hash;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `futures::stream::TryStreamExt`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:36:5
+   |
+36 | use futures::stream::TryStreamExt;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashSet`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:37:5
+   |
+37 | use std::collections::HashSet;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::error::Error`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:38:5
+   |
+38 | use std::error::Error;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Instant`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:39:5
+   |
+39 | use std::time::Instant;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `NAME_HASH` and `TYPE_HASH`
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:6:39
+  |
+6 | use aios_core::consts::{EXPR_ATT_SET, NAME_HASH, TYPE_HASH};
+  |                                       ^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `aios_core::parse::*`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:11:5
+   |
+11 | use aios_core::parse::*;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::petgraph::PetRefnoNode`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:13:5
+   |
+13 | use aios_core::petgraph::PetRefnoNode;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `cached::proc_macro::cached`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:19:5
+   |
+19 | use cached::proc_macro::cached;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `pretty_hex` and `simple_hex`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:37:18
+   |
+37 | use pretty_hex::{pretty_hex, simple_hex};
+   |                  ^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `Seek`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:45:21
+   |
+45 | use std::io::{Read, Seek, Write};
+   |                     ^^^^
+
+warning: unused import: `Deref`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:46:16
+   |
+46 | use std::ops::{Deref, Range};
+   |                ^^^^^
+
+warning: unnecessary parentheses around assigned value
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:650:17
+    |
+650 |                 ((next_attr_info.offset & 0xFFFFF) as i32 - (attr_info.offset & 0xFFFFF) as i32);
+    |                 ^                                                                              ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+650 -                 ((next_attr_info.offset & 0xFFFFF) as i32 - (attr_info.offset & 0xFFFFF) as i32);
+650 +                 (next_attr_info.offset & 0xFFFFF) as i32 - (attr_info.offset & 0xFFFFF) as i32;
+    |
+
+warning: unexpected `cfg` condition name: `debug_parse_expr`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2636:11
+     |
+2636 |     #[cfg(debug_parse_expr)]
+     |           ^^^^^^^^^^^^^^^^
+     |
+     = help: expected names are: `docsrs`, `feature`, and `test` and 33 more
+     = help: consider using a Cargo feature instead
+     = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+              [lints.rust]
+              unexpected_cfgs = { level = "warn", check-cfg = ['cfg(debug_parse_expr)'] }
+     = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(debug_parse_expr)");` to the top of the `build.rs`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+     = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unnecessary parentheses around function argument
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2654:37
+     |
+2654 |                 result = StringType((format!("{}{}", first_data, second)));
+     |                                     ^                                   ^
+     |
+help: remove these parentheses
+     |
+2654 -                 result = StringType((format!("{}{}", first_data, second)));
+2654 +                 result = StringType(format!("{}{}", first_data, second));
+     |
+
+warning: unnecessary parentheses around function argument
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2664:37
+     |
+2664 |                 result = StringType((format!("{}{}{}", first_data, second_data, third)));
+     |                                     ^                                                 ^
+     |
+help: remove these parentheses
+     |
+2664 -                 result = StringType((format!("{}{}{}", first_data, second_data, third)));
+2664 +                 result = StringType(format!("{}{}{}", first_data, second_data, third));
+     |
+
+warning: unnecessary parentheses around function argument
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2670:41
+     |
+2670 |                     result = StringType((format!("PP {}", d)));
+     |                                         ^                   ^
+     |
+help: remove these parentheses
+     |
+2670 -                     result = StringType((format!("PP {}", d)));
+2670 +                     result = StringType(format!("PP {}", d));
+     |
+
+warning: unnecessary parentheses around assigned value
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2969:35
+     |
+2969 |                     let end_pos = (next_pos + 12); //隐含属性实际结束点
+     |                                   ^             ^
+     |
+help: remove these parentheses
+     |
+2969 -                     let end_pos = (next_pos + 12); //隐含属性实际结束点
+2969 +                     let end_pos = next_pos + 12; //隐含属性实际结束点
+     |
+
+warning: unused import: `aios_core::bin_data::convert_str_to_bytes`
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:3:5
+  |
+3 | use aios_core::bin_data::convert_str_to_bytes;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `parse_to_f64`
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:4:25
+  |
+4 | use aios_core::helper::{parse_to_f64, parse_to_i16, parse_to_i32, parse_to_u16, parse_to_u32};
+  |                         ^^^^^^^^^^^^
+
+warning: unused import: `RefI32Tuple`
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:6:46
+  |
+6 | use aios_core::pdms_types::{DbAttributeType, RefI32Tuple};
+  |                                              ^^^^^^^^^^^
+
+warning: unused import: `dashmap::DashMap`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:10:5
+   |
+10 | use dashmap::DashMap;
+   |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `be_u8`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:15:45
+   |
+15 | use nom::number::complete::{be_i16, be_i32, be_u8, be_u16, be_u32};
+   |                                             ^^^^^
+
+warning: unused import: `pretty_hex::pretty_hex`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:17:5
+   |
+17 | use pretty_hex::pretty_hex;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs::File`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:18:5
+   |
+18 | use std::fs::File;
+   |     ^^^^^^^^^^^^^
+
+warning: unused import: `std::io::BufReader`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:19:5
+   |
+19 | use std::io::BufReader;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tokio::count`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:20:5
+   |
+20 | use tokio::count;
+   |     ^^^^^^^^^^^^
+
+warning: unused import: `std::io::Read`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:1:5
+   |
+ 1 | use std::io::Read;
+   |     ^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:52:1
+   |
+52 | pub mod test_cases;
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_uda.rs:1:5
+   |
+ 1 | use super::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:11:1
+   |
+11 | mod test_parse_uda;
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_uda.rs:2:5
+   |
+ 2 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:11:1
+   |
+11 | mod test_parse_uda;
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::init_test_surreal`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_uda.rs:3:5
+   |
+ 3 | use aios_core::init_test_surreal;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:11:1
+   |
+11 | mod test_parse_uda;
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_expr.rs:1:5
+   |
+ 1 | use super::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:13:1
+   |
+13 | mod test_parse_expr;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_expr.rs:2:5
+   |
+ 2 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:13:1
+   |
+13 | mod test_parse_expr;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_chinese.rs:1:5
+   |
+ 1 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:15:1
+   |
+15 | mod test_chinese;
+   | ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_chinese.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:15:1
+   |
+15 | mod test_chinese;
+   | ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_chinese.rs:3:5
+   |
+ 3 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:15:1
+   |
+15 | mod test_chinese;
+   | ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::types::*`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_chinese.rs:4:5
+   |
+ 4 | use aios_core::types::*;
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:15:1
+   |
+15 | mod test_chinese;
+   | ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:1:5
+   |
+ 1 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::pdms_types::NounHash`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:3:5
+   |
+ 3 | use aios_core::pdms_types::NounHash;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `db1_dehash`, `db1_hash`, `read_attr_info_config_from_bin`, and `read_attr_info_config_from_json`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:5:5
+   |
+ 5 |     db1_dehash, db1_hash, read_attr_info_config_from_bin, read_attr_info_config_from_json,
+   |     ^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `PdmsDatabaseInfo` and `get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:7:17
+   |
+ 7 | use aios_core::{PdmsDatabaseInfo, get_default_pdms_db_info};
+   |                 ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs::File`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:8:5
+   |
+ 8 | use std::fs::File;
+   |     ^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::io::Write`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:9:5
+   |
+ 9 | use std::io::Write;
+   |     ^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `parse_ele_data` and `process_explicit_attrs`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:1:20
+   |
+ 1 | use crate::parse::{parse_ele_data, process_explicit_attrs};
+   |                    ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse_explict_tools::parse_expression_attr`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:2:5
+   |
+ 2 | use crate::parse_explict_tools::parse_expression_attr;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:3:5
+   |
+ 3 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:4:5
+   |
+ 4 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::pdms_types::PdmsDatabaseInfo`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:5:5
+   |
+ 5 | use aios_core::pdms_types::PdmsDatabaseInfo;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::types::*`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:6:5
+   |
+ 6 | use aios_core::types::*;
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `dashmap::DashMap`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:7:5
+   |
+ 7 | use dashmap::DashMap;
+   |     ^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs::File`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:8:5
+   |
+ 8 | use std::fs::File;
+   |     ^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::io::Write`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:9:5
+   |
+ 9 | use std::io::Write;
+   |     ^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::str::FromStr`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:10:5
+   |
+10 | use std::str::FromStr;
+   |     ^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:1:5
+   |
+ 1 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::tool::db_tool::db1_dehash`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:2:5
+   |
+ 2 | use aios_core::tool::db_tool::db1_dehash;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused imports: `take_till` and `take_until`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:4:33
+   |
+ 4 | use nom::bytes::complete::{tag, take_till, take_until};
+   |                                 ^^^^^^^^^  ^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused imports: `not`, `recognize`, `value`, and `verify`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:5:28
+   |
+ 5 | use nom::combinator::{map, not, recognize, value, verify};
+   |                            ^^^  ^^^^^^^^^  ^^^^^  ^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `nom::sequence::preceded`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:8:5
+   |
+ 8 | use nom::sequence::preceded;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_element.rs:2:20
+   |
+ 2 | use crate::parse::{parse_ele_data, parse_raw_ele_data};
+   |                    ^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:19:1
+   |
+19 | mod test_parse_element;
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_element.rs:3:5
+   |
+ 3 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:19:1
+   |
+19 | mod test_parse_element;
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:1:5
+   |
+ 1 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:3:5
+   |
+ 3 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::pdms_types::RefU64`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:4:5
+   |
+ 4 | use aios_core::pdms_types::RefU64;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused imports: `db1_dehash` and `read_attr_info_config_from_json`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:5:32
+   |
+ 5 | use aios_core::tool::db_tool::{db1_dehash, read_attr_info_config_from_json};
+   |                                ^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused imports: `parse_ele_data` and `parse_raw_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\binary_data_parser_test.rs:1:20
+   |
+ 1 | use crate::parse::{parse_ele_data, parse_raw_ele_data};
+   |                    ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:22:1
+   |
+22 | mod binary_data_parser_test;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\binary_data_parser_test.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:22:1
+   |
+22 | mod binary_data_parser_test;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `NamedAttrValue` and `get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\binary_data_parser_test.rs:3:17
+   |
+ 3 | use aios_core::{NamedAttrValue, get_default_pdms_db_info};
+   |                 ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:22:1
+   |
+22 | mod binary_data_parser_test;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_string.rs:1:5
+   |
+ 1 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:23:1
+   |
+23 | mod test_parse_string;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_string.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:23:1
+   |
+23 | mod test_parse_string;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_string.rs:3:5
+   |
+ 3 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:23:1
+   |
+23 | mod test_parse_string;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `db1_dehash`, `db1_hash`, and `read_attr_info_config_from_json`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_string.rs:4:32
+   |
+ 4 | use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_json};
+   |                                ^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:23:1
+   |
+23 | mod test_parse_string;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: the feature `associated_type_bounds` has been stable since 1.79.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:5:12
+  |
+5 | #![feature(associated_type_bounds)]
+  |            ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(stable_features)]` on by default
+
+warning: the feature `let_chains` has been stable since 1.88.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:6:12
+  |
+6 | #![feature(let_chains)]
+  |            ^^^^^^^^^^
+
+warning: the feature `async_closure` has been stable since 1.85.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:7:12
+  |
+7 | #![feature(async_closure)]
+  |            ^^^^^^^^^^^^^
+
+warning: the feature `exclusive_range_pattern` has been stable since 1.80.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:9:12
+  |
+9 | #![feature(exclusive_range_pattern)]
+  |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: the feature `array_methods` has been stable since 1.77.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:2:12
+  |
+2 | #![feature(array_methods)]
+  |            ^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:93:9
+   |
+93 |     let mut pdms_project_data_map = DashMap::new();
+   |         ----^^^^^^^^^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:110:9
+    |
+110 |     let mut pdms_db_name_map = DashMap::new(); //file_name->db_name
+    |         ----^^^^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1283:13
+     |
+1283 |         let mut pgno = entry.pos / 0x800;
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1284:13
+     |
+1284 |         let mut sesno = get_sesno(&ses_range_map, pgno as _).unwrap_or_default();
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1309:13
+     |
+1309 |         let mut is_debug = test_refno.is_some() && test_refno == Some(*source_refno);
+     |             ----^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1362:9
+     |
+1362 |     let mut type_ele_map = Arc::new(DashMap::new());
+     |         ----^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1363:9
+     |
+1363 |     let mut total_attr_map: Arc<DashMap<RefU64, NamedAttrMap>> = Arc::new(DashMap::new());
+     |         ----^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1369:9
+     |
+1369 |         mut db_no,
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1385:9
+     |
+1385 |     let mut gen_ref_time = Instant::now();
+     |         ----^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1392:9
+     |
+1392 |     let mut root_refno = world_refno;
+     |         ----^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1393:9
+     |
+1393 |     let mut refno_info_map = Arc::new(DashMap::new());
+     |         ----^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused import: `tokio::io::AsyncReadExt`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:50:5
+   |
+50 | use tokio::io::AsyncReadExt;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `itertools::Itertools`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:24:5
+   |
+24 | use itertools::Itertools;
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `core::slice::SlicePattern`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:22:5
+   |
+22 | use core::slice::SlicePattern;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3074:9
+     |
+3074 |     let mut refno_table = DashMap::new();
+     |         ----^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `refno`
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:261:44
+    |
+261 | pub fn parse_expression_func(input: &[u8], refno: RefU64) -> IResult<&[u8], String> {
+    |                                            ^^^^^ help: if this is intentional, prefix it with an underscore: `_refno`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3075:9
+     |
+3075 |     let mut word_refno_hashset = DashSet::new();
+     |         ----^^^^^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3114:9
+     |
+3114 |     let mut refno_table: DashMap<RefU64, EleDataEntry> = DashMap::new();
+     |         ----^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3115:9
+     |
+3115 |     let mut word_refno_hashset = DashSet::new();
+     |         ----^^^^^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `noun_map`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2867:9
+     |
+2867 |     let noun_map = get_default_pdms_db_info();
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_noun_map`
+
+warning: unused variable: `len`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2947:18
+     |
+2947 |         let (_, (len, refno)) = tuple::<_, _, nom::error::Error<&[u8]>, _>((
+     |                  ^^^ help: if this is intentional, prefix it with an underscore: `_len`
+
+warning: unused variable: `refno`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2947:23
+     |
+2947 |         let (_, (len, refno)) = tuple::<_, _, nom::error::Error<&[u8]>, _>((
+     |                       ^^^^^ help: if this is intentional, prefix it with an underscore: `_refno`
+
+warning: unused variable: `noun_attr_info_map`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3103:5
+     |
+3103 |     noun_attr_info_map: &DashMap<String, DashMap<String, AttrInfo>>,
+     |     ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_noun_attr_info_map`
+
+warning: value assigned to `value` is never read
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2510:41
+     |
+2510 |                         let mut value = "".to_string();
+     |                                         ^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+2517 |                                 value = (-v as f32 / 10.0).to_string();
+     |                                 ----- `value` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3183:13
+     |
+3183 |         let mut s = t + 4 * 6;
+     |             ----^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2643:14
+     |
+2643 |         let (mut tmp_input, (a, b, c, d, e)) =
+     |              ----^^^^^^^^^
+     |              |
+     |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2679:40
+     |
+2679 |                         let (residual, mut coord) = parse_xyz_data(axis_data, refno, true)?;
+     |                                        ----^^^^^
+     |                                        |
+     |                                        help: remove this `mut`
+
+warning: unused variable: `owner`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1401:9
+     |
+1401 |         owner,
+     |         ^^^^^ help: try ignoring the field: `owner: _`
+
+warning: unused variable: `name`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1405:9
+     |
+1405 |         name,
+     |         ^^^^ help: try ignoring the field: `name: _`
+
+warning: unused variable: `a`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2643:30
+     |
+2643 |         let (mut tmp_input, (a, b, c, d, e)) =
+     |                              ^ help: if this is intentional, prefix it with an underscore: `_a`
+
+warning: unused variable: `b`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2643:33
+     |
+2643 |         let (mut tmp_input, (a, b, c, d, e)) =
+     |                                 ^ help: if this is intentional, prefix it with an underscore: `_b`
+
+warning: unused variable: `c`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2643:36
+     |
+2643 |         let (mut tmp_input, (a, b, c, d, e)) =
+     |                                    ^ help: if this is intentional, prefix it with an underscore: `_c`
+
+warning: unused variable: `i`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2678:25
+     |
+2678 |                     for i in 0..count {
+     |                         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1111:9
+     |
+1111 |     let mut gen_ref_time = Instant::now();
+     |         ----^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1118:9
+     |
+1118 |     let mut root_refno = world_refno;
+     |         ----^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1136:9
+     |
+1136 |     let mut memb_time = Instant::now();
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `file_name`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1110:44
+     |
+1110 | pub fn parse_db_basic_data(input: Vec<u8>, file_name: &str, project: &str) -> Result<DbBasicData> {
+     |                                            ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_file_name`
+
+warning: unused variable: `refno`
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:735:9
+    |
+735 |     let refno = ele_data.refno;
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_refno`
+
+warning: unused variable: `project`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1110:61
+     |
+1110 | pub fn parse_db_basic_data(input: Vec<u8>, file_name: &str, project: &str) -> Result<DbBasicData> {
+     |                                                             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_project`
+
+warning: unused variable: `db_type`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1177:9
+     |
+1177 |         db_type,
+     |         ^^^^^^^ help: try ignoring the field: `db_type: _`
+
+warning: unused variable: `db_no`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1179:9
+     |
+1179 |         db_no,
+     |         ^^^^^ help: try ignoring the field: `db_no: _`
+
+warning: value assigned to `step_w` is never read
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:628:26
+    |
+628 |         let mut step_w = 0;
+    |                          ^ this value is reassigned later and never used
+...
+652 |             step_w = origin_impl_len / 4 - (attr_info.offset as i32 & 0xFFFFF);
+    |             ------------------------------------------------------------------ `step_w` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:212:9
+    |
+212 |     let mut basic_data = parse_db_basic_data(buf, file_name, project)?;
+    |         ----^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: value assigned to `memb_bytes_len` is never read
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:459:30
+    |
+459 |     let mut memb_bytes_len = 0;
+    |                              ^ this value is reassigned later and never used
+...
+463 |             memb_bytes_len = parse_to_u16(&membs_data[2..4]) as usize * 4;
+    |             ------------------------------------------------------------- `memb_bytes_len` is overwritten here before the previous value is read
+
+warning: unused variable: `noun`
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:492:9
+    |
+492 |     let noun = type_hash as u32;
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_noun`
+
+warning: unused variable: `implicit_data`
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:503:9
+    |
+503 |     let implicit_data = &input[0..actual_impl_len];
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_implicit_data`
+
+warning: value assigned to `memb_bytes_len` is never read
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:510:30
+    |
+510 |     let mut memb_bytes_len = 0;
+    |                              ^ this value is reassigned later and never used
+...
+514 |             memb_bytes_len = parse_to_u16(&membs_data[2..4]) as usize * 4;
+    |             ------------------------------------------------------------- `memb_bytes_len` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1724:9
+     |
+1724 |     let mut is_debug = test_refno == Some(refno);
+     |         ----^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `e`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1760:21
+     |
+1760 |                 Err(e) => {
+     |                     ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning: unused variable: `e`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1778:21
+     |
+1778 |                 Err(e) => {
+     |                     ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning: function `test_parse_specific_segments` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\binary_data_parser_test.rs:73:4
+   |
+73 | fn test_parse_specific_segments(data: &[u8]) {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `parser` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:10:4
+   |
+10 | fn parser(s: &[u8]) -> IResult<&[u8], (Vec<i32>, &[u8])> {
+   |    ^^^^^^
+
+warning: function `gen_resolve_error` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\error_types.rs:61:4
+   |
+61 | fn gen_resolve_error() -> anyhow::Result<u32> {
+   |    ^^^^^^^^^^^^^^^^^
+
+warning: function `test_parse_members_has_07` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_element.rs:42:10
+   |
+42 | async fn test_parse_members_has_07() {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ATT_PX` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:22:7
+   |
+22 | const ATT_PX: i32 = 0xFFF7E177u32 as i32;
+   |       ^^^^^^
+
+warning: function `get_uda_full_name` is never used
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1672:10
+     |
+1672 | async fn get_uda_full_name(hash: i32) -> Option<String> {
+     |          ^^^^^^^^^^^^^^^^^
+
+warning: constant `ATT_PY` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:23:7
+   |
+23 | const ATT_PY: i32 = 0xFFF7E15Cu32 as i32;
+   |       ^^^^^^
+
+warning: function `get_uda_short_name` is never used
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1684:10
+     |
+1684 | async fn get_uda_short_name(hash: i32) -> Option<String> {
+     |          ^^^^^^^^^^^^^^^^^^
+
+warning: function `convert_int_to_axis_str` is never used
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2155:4
+     |
+2155 | fn convert_int_to_axis_str(n: i32) -> &'static str {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ATT_PZ` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:24:7
+   |
+24 | const ATT_PZ: i32 = 0xFFF7E141u32 as i32;
+   |       ^^^^^^
+
+warning: constant `ATT_PDIA` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:25:7
+   |
+25 | const ATT_PDIA: i32 = 0xFFF77D0Fu32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PHEI` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:26:7
+   |
+26 | const ATT_PHEI: i32 = 0xFFF520EFu32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PDIS` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:27:7
+   |
+27 | const ATT_PDIS: i32 = 0xFFF21519u32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PCON` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:28:7
+   |
+28 | const ATT_PCON: i32 = 0xFFF3848Du32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PBOR` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:29:7
+   |
+29 | const ATT_PBOR: i32 = 0xFFF2511Cu32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PPRO` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:30:7
+   |
+30 | const ATT_PPRO: i32 = 0xFFF32DC0u32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_DPRO` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:31:7
+   |
+31 | const ATT_DPRO: i32 = 0xFFF32DCCu32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_BTHK` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:32:7
+   |
+32 | const ATT_BTHK: i32 = 0xFFF47D68u32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PTCDI` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:33:7
+   |
+33 | const ATT_PTCDI: i32 = 0x95A34;
+   |       ^^^^^^^^^
+
+warning: feature `type_ascription` is declared but not used
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:1:12
+  |
+1 | #![feature(type_ascription)]
+  |            ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_features)]` (part of `#[warn(unused)]`) on by default
+
+warning: feature `core_intrinsics` is declared but not used
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:4:12
+  |
+4 | #![feature(core_intrinsics)]
+  |            ^^^^^^^^^^^^^^^
+
+warning: `parse_pdms_db` (lib) generated 155 warnings (run `cargo fix --lib -p parse_pdms_db` to apply 115 suggestions)
+warning: unused import: `anyhow::anyhow`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:1:5
+  |
+1 | use anyhow::anyhow;
+  |     ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `deku::prelude::*`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:2:5
+  |
+2 | use deku::prelude::*;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `TryFrom` and `TryInto`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:3:20
+  |
+3 | use std::convert::{TryFrom, TryInto};
+  |                    ^^^^^^^  ^^^^^^^
+
+warning: unused import: `std::fmt::Debug`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:4:5
+  |
+4 | use std::fmt::Debug;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs::File`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:5:5
+  |
+5 | use std::fs::File;
+  |     ^^^^^^^^^^^^^
+
+warning: unused imports: `Read`, `SeekFrom`, and `Seek`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:6:15
+  |
+6 | use std::io::{Read, Seek, SeekFrom};
+  |               ^^^^  ^^^^  ^^^^^^^^
+
+warning: unused import: `std::mem::size_of`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:7:5
+  |
+7 | use std::mem::size_of;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MappedLocalTime`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:4:31
+  |
+4 | use chrono::{DateTime, Local, MappedLocalTime, TimeZone, Utc};
+  |                               ^^^^^^^^^^^^^^^
+
+warning: unused import: `TryInto`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:10:29
+   |
+10 | use std::convert::{TryFrom, TryInto};
+   |                             ^^^^^^^
+
+warning: unused import: `std::str::FromStr`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:11:5
+   |
+11 | use std::str::FromStr;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `surrealdb::sql::Thing`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:12:5
+   |
+12 | use surrealdb::sql::Thing;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\search.rs:5:55
+  |
+5 | use crate::io::{EleOperationData, EleOperationDetail, PdmsIO};
+  |                                                       ^^^^^^
+
+warning: unused imports: `NamedAttrValue` and `RefU64`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\search.rs:6:17
+  |
+6 | use aios_core::{NamedAttrValue, RefU64};
+  |                 ^^^^^^^^^^^^^^  ^^^^^^
+
+warning: unused import: `anyhow`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\search.rs:7:22
+  |
+7 | use anyhow::{Result, anyhow};
+  |                      ^^^^^^
+
+warning: unused import: `TryInto`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse.rs:2:29
+  |
+2 | use std::convert::{TryFrom, TryInto};
+  |                             ^^^^^^^
+
+warning: unused import: `crate::io::PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_max_att_version.rs:1:5
+  |
+1 | use crate::io::PdmsIO;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_db_option`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_max_att_version.rs:2:5
+  |
+2 | use aios_core::get_db_option;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_max_att_version.rs:3:5
+  |
+3 | use std::path::PathBuf;
+  |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::io::PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse_ele.rs:1:5
+  |
+1 | use crate::io::PdmsIO;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::tool::db_tool::db1_dehash`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse_ele.rs:2:5
+  |
+2 | use aios_core::tool::db_tool::db1_dehash;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `RefU64` and `init_test_surreal`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse_ele.rs:3:17
+  |
+3 | use aios_core::{RefU64, init_test_surreal};
+  |                 ^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::defines::SessionPageData`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_ses_data.rs:1:5
+  |
+1 | use crate::defines::SessionPageData;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `parse_pdms_db::test_cases::convert_str_to_bytes`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_ses_data.rs:2:5
+  |
+2 | use parse_pdms_db::test_cases::convert_str_to_bytes;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `RefU64` and `init_test_surreal`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_history_data.rs:1:17
+  |
+1 | use aios_core::{RefU64, init_test_surreal};
+  |                 ^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::io::PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_history_data.rs:5:5
+  |
+5 | use crate::io::PdmsIO;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `EleOperationDetail` and `PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_refno_status.rs:8:17
+  |
+8 | use crate::io::{EleOperationDetail, PdmsIO};
+  |                 ^^^^^^^^^^^^^^^^^^  ^^^^^^
+
+warning: unused imports: `EleOperation` and `RefU64`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_refno_status.rs:9:29
+  |
+9 | use aios_core::pdms_types::{EleOperation, RefU64};
+  |                             ^^^^^^^^^^^^  ^^^^^^
+
+warning: unused import: `std::time::Instant`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_refno_status.rs:10:5
+   |
+10 | use std::time::Instant;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `archive_reader::IoReader`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\sync\compress.rs:16:24
+   |
+16 | use dpcsync::{HashSum, archive_reader::IoReader, chunk_dictionary as dict};
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PdmsHeader`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:1:39
+  |
+1 | use crate::defines::{DbPageBasicInfo, PdmsHeader};
+  |                                       ^^^^^^^^^^
+
+warning: unused import: `future::ok`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:7:5
+  |
+7 |     future::ok,
+  |     ^^^^^^^^^^
+
+warning: unused import: `RecursiveMode`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:10:49
+   |
+10 | use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+   |                                                 ^^^^^^^^^^^^^
+
+warning: unused import: `Read`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:12:15
+   |
+12 | use std::io::{Read, Write};
+   |               ^^^^
+
+warning: unused import: `TryFrom`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:10:20
+   |
+10 | use std::convert::{TryFrom, TryInto};
+   |                    ^^^^^^^
+
+warning: unused import: `TryFrom`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse.rs:2:20
+  |
+2 | use std::convert::{TryFrom, TryInto};
+  |                    ^^^^^^^
+
+warning: unused import: `StreamExt`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:5:14
+  |
+5 |     SinkExt, StreamExt,
+  |              ^^^^^^^^^
+
+warning: unused variable: `input`
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:117:21
+    |
+117 |                 let input = path.to_path_buf();
+    |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `output`
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:118:21
+    |
+118 |                 let output: PathBuf =
+    |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `tmp_path`
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:120:21
+    |
+120 |                 let tmp_path = cbas_dir_path.clone();
+    |                     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tmp_path`
+
+warning: unused variable: `rotate_size`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\io_log.rs:44:5
+   |
+44 |     rotate_size: u64,
+   |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rotate_size`
+
+warning: unused variable: `max_files`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\io_log.rs:45:5
+   |
+45 |     max_files: usize,
+   |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_max_files`
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:422:25
+    |
+422 |         let (next_rest, mut d) = RefnoDataLoc::read(rest, ())?;
+    |                         ----^
+    |                         |
+    |                         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `db_headers`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\sync\files.rs:7:9
+  |
+7 |     let db_headers = get_remote_db_headers(ip_dst).await;
+  |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_db_headers`
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\session_index_diff.rs:587:28
+    |
+587 |                         Ok(mut data) => Some(data.att_map().get_type()),
+    |                            ----^^^^
+    |                            |
+    |                            help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\session_index_diff.rs:573:9
+    |
+573 |     let mut enrich = |io: &mut PdmsIO,
+    |         ----^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `modified`
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\search.rs:171:42
+    |
+171 |             EleOperationDetail::Modified(modified) => {
+    |                                          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_modified`
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\net_window.rs:547:9
+    |
+547 |     let mut push = |window: &mut BTreeMap<u32, Vec<EleOperationData>>,
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: function `get_test_database_path` is never used
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_history_data.rs:78:4
+   |
+78 | fn get_test_database_path(relative_path: &str) -> String {
+   |    ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `pdms_io` (lib) generated 48 warnings (run `cargo fix --lib -p pdms_io` to apply 44 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.80s
+warning: the following packages contain code that will be rejected by a future version of Rust: num-bigint-dig v0.8.4
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src\lib.rs (D:\Rust\target\debug\build\aios-database/fd5c52fbc9991f51\out\aios_database-fd5c52fbc9991f51.exe)
+
+running 1 test
+test fast_model::manifold_tessellate::tests::rm13_dome_pane_minus_nrev_is_a_hemisphere ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1066 filtered out; finished in 1.01s
+
+exit 0
+
+> cargo test --locked --lib empty_difference_is_bad_bool_not_a_silent_swallow --no-default-features --features ws,gen_model,manifold,project_hd -- --nocapture
+warning: the feature `generic_const_exprs` is incomplete and may not be safe to use and/or cause compiler crashes
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:8:12
+  |
+8 | #![feature(generic_const_exprs)]
+  |            ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: see issue #76560 <https://github.com/rust-lang/rust/issues/76560> for more information
+  = note: `#[warn(incomplete_features)]` on by default
+
+warning: the feature `core_intrinsics` is internal to the compiler or standard library
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:4:12
+  |
+4 | #![feature(core_intrinsics)]
+  |            ^^^^^^^^^^^^^^^
+  |
+  = note: using it is strongly discouraged
+  = note: `#[warn(internal_features)]` on by default
+
+warning: unused `#[macro_use]` import
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:10:1
+   |
+10 | #[macro_use]
+   | ^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused `#[macro_use]` import
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:25:1
+   |
+25 | #[macro_use]
+   | ^^^^^^^^^^^^
+
+warning: unused `#[macro_use]` import
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:28:1
+   |
+28 | #[macro_use]
+   | ^^^^^^^^^^^^
+
+warning: unused `#[macro_use]` import
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:32:1
+   |
+32 | #[macro_use]
+   | ^^^^^^^^^^^^
+
+warning: unused import: `aios_core::tool::db_tool::db1_hash`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:35:5
+   |
+35 | use aios_core::tool::db_tool::db1_hash;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `futures::stream::TryStreamExt`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:36:5
+   |
+36 | use futures::stream::TryStreamExt;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::collections::HashSet`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:37:5
+   |
+37 | use std::collections::HashSet;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::error::Error`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:38:5
+   |
+38 | use std::error::Error;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::time::Instant`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:39:5
+   |
+39 | use std::time::Instant;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `NAME_HASH` and `TYPE_HASH`
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:6:39
+  |
+6 | use aios_core::consts::{EXPR_ATT_SET, NAME_HASH, TYPE_HASH};
+  |                                       ^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `aios_core::parse::*`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:11:5
+   |
+11 | use aios_core::parse::*;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::petgraph::PetRefnoNode`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:13:5
+   |
+13 | use aios_core::petgraph::PetRefnoNode;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `cached::proc_macro::cached`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:19:5
+   |
+19 | use cached::proc_macro::cached;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `pretty_hex` and `simple_hex`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:37:18
+   |
+37 | use pretty_hex::{pretty_hex, simple_hex};
+   |                  ^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `Seek`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:45:21
+   |
+45 | use std::io::{Read, Seek, Write};
+   |                     ^^^^
+
+warning: unused import: `Deref`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:46:16
+   |
+46 | use std::ops::{Deref, Range};
+   |                ^^^^^
+
+warning: unnecessary parentheses around assigned value
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:650:17
+    |
+650 |                 ((next_attr_info.offset & 0xFFFFF) as i32 - (attr_info.offset & 0xFFFFF) as i32);
+    |                 ^                                                                              ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+650 -                 ((next_attr_info.offset & 0xFFFFF) as i32 - (attr_info.offset & 0xFFFFF) as i32);
+650 +                 (next_attr_info.offset & 0xFFFFF) as i32 - (attr_info.offset & 0xFFFFF) as i32;
+    |
+
+warning: unexpected `cfg` condition name: `debug_parse_expr`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2636:11
+     |
+2636 |     #[cfg(debug_parse_expr)]
+     |           ^^^^^^^^^^^^^^^^
+     |
+     = help: expected names are: `docsrs`, `feature`, and `test` and 33 more
+     = help: consider using a Cargo feature instead
+     = help: or consider adding in `Cargo.toml` the `check-cfg` lint config for the lint:
+              [lints.rust]
+              unexpected_cfgs = { level = "warn", check-cfg = ['cfg(debug_parse_expr)'] }
+     = help: or consider adding `println!("cargo::rustc-check-cfg=cfg(debug_parse_expr)");` to the top of the `build.rs`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+     = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unnecessary parentheses around function argument
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2654:37
+     |
+2654 |                 result = StringType((format!("{}{}", first_data, second)));
+     |                                     ^                                   ^
+     |
+help: remove these parentheses
+     |
+2654 -                 result = StringType((format!("{}{}", first_data, second)));
+2654 +                 result = StringType(format!("{}{}", first_data, second));
+     |
+
+warning: unnecessary parentheses around function argument
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2664:37
+     |
+2664 |                 result = StringType((format!("{}{}{}", first_data, second_data, third)));
+     |                                     ^                                                 ^
+     |
+help: remove these parentheses
+     |
+2664 -                 result = StringType((format!("{}{}{}", first_data, second_data, third)));
+2664 +                 result = StringType(format!("{}{}{}", first_data, second_data, third));
+     |
+
+warning: unnecessary parentheses around function argument
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2670:41
+     |
+2670 |                     result = StringType((format!("PP {}", d)));
+     |                                         ^                   ^
+     |
+help: remove these parentheses
+     |
+2670 -                     result = StringType((format!("PP {}", d)));
+2670 +                     result = StringType(format!("PP {}", d));
+     |
+
+warning: unnecessary parentheses around assigned value
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2969:35
+     |
+2969 |                     let end_pos = (next_pos + 12); //隐含属性实际结束点
+     |                                   ^             ^
+     |
+help: remove these parentheses
+     |
+2969 -                     let end_pos = (next_pos + 12); //隐含属性实际结束点
+2969 +                     let end_pos = next_pos + 12; //隐含属性实际结束点
+     |
+
+warning: unused import: `aios_core::bin_data::convert_str_to_bytes`
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:3:5
+  |
+3 | use aios_core::bin_data::convert_str_to_bytes;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `parse_to_f64`
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:4:25
+  |
+4 | use aios_core::helper::{parse_to_f64, parse_to_i16, parse_to_i32, parse_to_u16, parse_to_u32};
+  |                         ^^^^^^^^^^^^
+
+warning: unused import: `RefI32Tuple`
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:6:46
+  |
+6 | use aios_core::pdms_types::{DbAttributeType, RefI32Tuple};
+  |                                              ^^^^^^^^^^^
+
+warning: unused import: `dashmap::DashMap`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:10:5
+   |
+10 | use dashmap::DashMap;
+   |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `be_u8`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:15:45
+   |
+15 | use nom::number::complete::{be_i16, be_i32, be_u8, be_u16, be_u32};
+   |                                             ^^^^^
+
+warning: unused import: `pretty_hex::pretty_hex`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:17:5
+   |
+17 | use pretty_hex::pretty_hex;
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs::File`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:18:5
+   |
+18 | use std::fs::File;
+   |     ^^^^^^^^^^^^^
+
+warning: unused import: `std::io::BufReader`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:19:5
+   |
+19 | use std::io::BufReader;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tokio::count`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:20:5
+   |
+20 | use tokio::count;
+   |     ^^^^^^^^^^^^
+
+warning: unused import: `std::io::Read`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:1:5
+   |
+ 1 | use std::io::Read;
+   |     ^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:52:1
+   |
+52 | pub mod test_cases;
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_uda.rs:1:5
+   |
+ 1 | use super::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:11:1
+   |
+11 | mod test_parse_uda;
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_uda.rs:2:5
+   |
+ 2 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:11:1
+   |
+11 | mod test_parse_uda;
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::init_test_surreal`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_uda.rs:3:5
+   |
+ 3 | use aios_core::init_test_surreal;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:11:1
+   |
+11 | mod test_parse_uda;
+   | ^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `super::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_expr.rs:1:5
+   |
+ 1 | use super::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:13:1
+   |
+13 | mod test_parse_expr;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_expr.rs:2:5
+   |
+ 2 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:13:1
+   |
+13 | mod test_parse_expr;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_chinese.rs:1:5
+   |
+ 1 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:15:1
+   |
+15 | mod test_chinese;
+   | ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_chinese.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:15:1
+   |
+15 | mod test_chinese;
+   | ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_chinese.rs:3:5
+   |
+ 3 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:15:1
+   |
+15 | mod test_chinese;
+   | ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::types::*`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_chinese.rs:4:5
+   |
+ 4 | use aios_core::types::*;
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:15:1
+   |
+15 | mod test_chinese;
+   | ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:1:5
+   |
+ 1 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::pdms_types::NounHash`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:3:5
+   |
+ 3 | use aios_core::pdms_types::NounHash;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `db1_dehash`, `db1_hash`, `read_attr_info_config_from_bin`, and `read_attr_info_config_from_json`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:5:5
+   |
+ 5 |     db1_dehash, db1_hash, read_attr_info_config_from_bin, read_attr_info_config_from_json,
+   |     ^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `PdmsDatabaseInfo` and `get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:7:17
+   |
+ 7 | use aios_core::{PdmsDatabaseInfo, get_default_pdms_db_info};
+   |                 ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs::File`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:8:5
+   |
+ 8 | use std::fs::File;
+   |     ^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::io::Write`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_data_new.rs:9:5
+   |
+ 9 | use std::io::Write;
+   |     ^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:16:1
+   |
+16 | mod test_data_new;
+   | ^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `parse_ele_data` and `process_explicit_attrs`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:1:20
+   |
+ 1 | use crate::parse::{parse_ele_data, process_explicit_attrs};
+   |                    ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse_explict_tools::parse_expression_attr`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:2:5
+   |
+ 2 | use crate::parse_explict_tools::parse_expression_attr;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:3:5
+   |
+ 3 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:4:5
+   |
+ 4 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::pdms_types::PdmsDatabaseInfo`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:5:5
+   |
+ 5 | use aios_core::pdms_types::PdmsDatabaseInfo;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::types::*`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:6:5
+   |
+ 6 | use aios_core::types::*;
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `dashmap::DashMap`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:7:5
+   |
+ 7 | use dashmap::DashMap;
+   |     ^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs::File`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:8:5
+   |
+ 8 | use std::fs::File;
+   |     ^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::io::Write`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:9:5
+   |
+ 9 | use std::io::Write;
+   |     ^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::str::FromStr`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_expression.rs:10:5
+   |
+10 | use std::str::FromStr;
+   |     ^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:17:1
+   |
+17 | mod test_expression;
+   | ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:1:5
+   |
+ 1 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::tool::db_tool::db1_dehash`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:2:5
+   |
+ 2 | use aios_core::tool::db_tool::db1_dehash;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused imports: `take_till` and `take_until`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:4:33
+   |
+ 4 | use nom::bytes::complete::{tag, take_till, take_until};
+   |                                 ^^^^^^^^^  ^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused imports: `not`, `recognize`, `value`, and `verify`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:5:28
+   |
+ 5 | use nom::combinator::{map, not, recognize, value, verify};
+   |                            ^^^  ^^^^^^^^^  ^^^^^  ^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `nom::sequence::preceded`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:8:5
+   |
+ 8 | use nom::sequence::preceded;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:18:1
+   |
+18 | mod test_nom;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_element.rs:2:20
+   |
+ 2 | use crate::parse::{parse_ele_data, parse_raw_ele_data};
+   |                    ^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:19:1
+   |
+19 | mod test_parse_element;
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_element.rs:3:5
+   |
+ 3 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:19:1
+   |
+19 | mod test_parse_element;
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:1:5
+   |
+ 1 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:3:5
+   |
+ 3 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::pdms_types::RefU64`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:4:5
+   |
+ 4 | use aios_core::pdms_types::RefU64;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused imports: `db1_dehash` and `read_attr_info_config_from_json`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_uda.rs:5:32
+   |
+ 5 | use aios_core::tool::db_tool::{db1_dehash, read_attr_info_config_from_json};
+   |                                ^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:20:1
+   |
+20 | mod test_uda;
+   | ^^^^^^^^^^^^^
+
+warning: unused imports: `parse_ele_data` and `parse_raw_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\binary_data_parser_test.rs:1:20
+   |
+ 1 | use crate::parse::{parse_ele_data, parse_raw_ele_data};
+   |                    ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:22:1
+   |
+22 | mod binary_data_parser_test;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\binary_data_parser_test.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:22:1
+   |
+22 | mod binary_data_parser_test;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `NamedAttrValue` and `get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\binary_data_parser_test.rs:3:17
+   |
+ 3 | use aios_core::{NamedAttrValue, get_default_pdms_db_info};
+   |                 ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:22:1
+   |
+22 | mod binary_data_parser_test;
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::parse::parse_ele_data`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_string.rs:1:5
+   |
+ 1 | use crate::parse::parse_ele_data;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:23:1
+   |
+23 | mod test_parse_string;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::test_cases::convert_str_to_bytes`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_string.rs:2:5
+   |
+ 2 | use crate::test_cases::convert_str_to_bytes;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:23:1
+   |
+23 | mod test_parse_string;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_default_pdms_db_info`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_string.rs:3:5
+   |
+ 3 | use aios_core::get_default_pdms_db_info;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:23:1
+   |
+23 | mod test_parse_string;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `db1_dehash`, `db1_hash`, and `read_attr_info_config_from_json`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_string.rs:4:32
+   |
+ 4 | use aios_core::tool::db_tool::{db1_dehash, db1_hash, read_attr_info_config_from_json};
+   |                                ^^^^^^^^^^  ^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: if this is a test module, consider adding a `#[cfg(test)]` to the containing module
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\mod.rs:23:1
+   |
+23 | mod test_parse_string;
+   | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: the feature `associated_type_bounds` has been stable since 1.79.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:5:12
+  |
+5 | #![feature(associated_type_bounds)]
+  |            ^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(stable_features)]` on by default
+
+warning: the feature `let_chains` has been stable since 1.88.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:6:12
+  |
+6 | #![feature(let_chains)]
+  |            ^^^^^^^^^^
+
+warning: the feature `async_closure` has been stable since 1.85.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:7:12
+  |
+7 | #![feature(async_closure)]
+  |            ^^^^^^^^^^^^^
+
+warning: the feature `exclusive_range_pattern` has been stable since 1.80.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:9:12
+  |
+9 | #![feature(exclusive_range_pattern)]
+  |            ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: the feature `array_methods` has been stable since 1.77.0 and no longer requires an attribute to enable
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:2:12
+  |
+2 | #![feature(array_methods)]
+  |            ^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:93:9
+   |
+93 |     let mut pdms_project_data_map = DashMap::new();
+   |         ----^^^^^^^^^^^^^^^^^^^^^
+   |         |
+   |         help: remove this `mut`
+   |
+   = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:110:9
+    |
+110 |     let mut pdms_db_name_map = DashMap::new(); //file_name->db_name
+    |         ----^^^^^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1283:13
+     |
+1283 |         let mut pgno = entry.pos / 0x800;
+     |             ----^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1284:13
+     |
+1284 |         let mut sesno = get_sesno(&ses_range_map, pgno as _).unwrap_or_default();
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1309:13
+     |
+1309 |         let mut is_debug = test_refno.is_some() && test_refno == Some(*source_refno);
+     |             ----^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1362:9
+     |
+1362 |     let mut type_ele_map = Arc::new(DashMap::new());
+     |         ----^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1363:9
+     |
+1363 |     let mut total_attr_map: Arc<DashMap<RefU64, NamedAttrMap>> = Arc::new(DashMap::new());
+     |         ----^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1369:9
+     |
+1369 |         mut db_no,
+     |         ----^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1385:9
+     |
+1385 |     let mut gen_ref_time = Instant::now();
+     |         ----^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1392:9
+     |
+1392 |     let mut root_refno = world_refno;
+     |         ----^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1393:9
+     |
+1393 |     let mut refno_info_map = Arc::new(DashMap::new());
+     |         ----^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused import: `tokio::io::AsyncReadExt`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:50:5
+   |
+50 | use tokio::io::AsyncReadExt;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `itertools::Itertools`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:24:5
+   |
+24 | use itertools::Itertools;
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `core::slice::SlicePattern`
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:22:5
+   |
+22 | use core::slice::SlicePattern;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3074:9
+     |
+3074 |     let mut refno_table = DashMap::new();
+     |         ----^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `refno`
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:261:44
+    |
+261 | pub fn parse_expression_func(input: &[u8], refno: RefU64) -> IResult<&[u8], String> {
+    |                                            ^^^^^ help: if this is intentional, prefix it with an underscore: `_refno`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3075:9
+     |
+3075 |     let mut word_refno_hashset = DashSet::new();
+     |         ----^^^^^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3114:9
+     |
+3114 |     let mut refno_table: DashMap<RefU64, EleDataEntry> = DashMap::new();
+     |         ----^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3115:9
+     |
+3115 |     let mut word_refno_hashset = DashSet::new();
+     |         ----^^^^^^^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `noun_map`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2867:9
+     |
+2867 |     let noun_map = get_default_pdms_db_info();
+     |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_noun_map`
+
+warning: unused variable: `len`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2947:18
+     |
+2947 |         let (_, (len, refno)) = tuple::<_, _, nom::error::Error<&[u8]>, _>((
+     |                  ^^^ help: if this is intentional, prefix it with an underscore: `_len`
+
+warning: unused variable: `refno`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2947:23
+     |
+2947 |         let (_, (len, refno)) = tuple::<_, _, nom::error::Error<&[u8]>, _>((
+     |                       ^^^^^ help: if this is intentional, prefix it with an underscore: `_refno`
+
+warning: unused variable: `noun_attr_info_map`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3103:5
+     |
+3103 |     noun_attr_info_map: &DashMap<String, DashMap<String, AttrInfo>>,
+     |     ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_noun_attr_info_map`
+
+warning: value assigned to `value` is never read
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2510:41
+     |
+2510 |                         let mut value = "".to_string();
+     |                                         ^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+2517 |                                 value = (-v as f32 / 10.0).to_string();
+     |                                 ----- `value` is overwritten here before the previous value is read
+     |
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:3183:13
+     |
+3183 |         let mut s = t + 4 * 6;
+     |             ----^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2643:14
+     |
+2643 |         let (mut tmp_input, (a, b, c, d, e)) =
+     |              ----^^^^^^^^^
+     |              |
+     |              help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2679:40
+     |
+2679 |                         let (residual, mut coord) = parse_xyz_data(axis_data, refno, true)?;
+     |                                        ----^^^^^
+     |                                        |
+     |                                        help: remove this `mut`
+
+warning: unused variable: `owner`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1401:9
+     |
+1401 |         owner,
+     |         ^^^^^ help: try ignoring the field: `owner: _`
+
+warning: unused variable: `name`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1405:9
+     |
+1405 |         name,
+     |         ^^^^ help: try ignoring the field: `name: _`
+
+warning: unused variable: `a`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2643:30
+     |
+2643 |         let (mut tmp_input, (a, b, c, d, e)) =
+     |                              ^ help: if this is intentional, prefix it with an underscore: `_a`
+
+warning: unused variable: `b`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2643:33
+     |
+2643 |         let (mut tmp_input, (a, b, c, d, e)) =
+     |                                 ^ help: if this is intentional, prefix it with an underscore: `_b`
+
+warning: unused variable: `c`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2643:36
+     |
+2643 |         let (mut tmp_input, (a, b, c, d, e)) =
+     |                                    ^ help: if this is intentional, prefix it with an underscore: `_c`
+
+warning: unused variable: `i`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2678:25
+     |
+2678 |                     for i in 0..count {
+     |                         ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1111:9
+     |
+1111 |     let mut gen_ref_time = Instant::now();
+     |         ----^^^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1118:9
+     |
+1118 |     let mut root_refno = world_refno;
+     |         ----^^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1136:9
+     |
+1136 |     let mut memb_time = Instant::now();
+     |         ----^^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `file_name`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1110:44
+     |
+1110 | pub fn parse_db_basic_data(input: Vec<u8>, file_name: &str, project: &str) -> Result<DbBasicData> {
+     |                                            ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_file_name`
+
+warning: unused variable: `refno`
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:735:9
+    |
+735 |     let refno = ele_data.refno;
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_refno`
+
+warning: unused variable: `project`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1110:61
+     |
+1110 | pub fn parse_db_basic_data(input: Vec<u8>, file_name: &str, project: &str) -> Result<DbBasicData> {
+     |                                                             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_project`
+
+warning: unused variable: `db_type`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1177:9
+     |
+1177 |         db_type,
+     |         ^^^^^^^ help: try ignoring the field: `db_type: _`
+
+warning: unused variable: `db_no`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1179:9
+     |
+1179 |         db_no,
+     |         ^^^^^ help: try ignoring the field: `db_no: _`
+
+warning: value assigned to `step_w` is never read
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:628:26
+    |
+628 |         let mut step_w = 0;
+    |                          ^ this value is reassigned later and never used
+...
+652 |             step_w = origin_impl_len / 4 - (attr_info.offset as i32 & 0xFFFFF);
+    |             ------------------------------------------------------------------ `step_w` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:212:9
+    |
+212 |     let mut basic_data = parse_db_basic_data(buf, file_name, project)?;
+    |         ----^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: value assigned to `memb_bytes_len` is never read
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:459:30
+    |
+459 |     let mut memb_bytes_len = 0;
+    |                              ^ this value is reassigned later and never used
+...
+463 |             memb_bytes_len = parse_to_u16(&membs_data[2..4]) as usize * 4;
+    |             ------------------------------------------------------------- `memb_bytes_len` is overwritten here before the previous value is read
+
+warning: unused variable: `noun`
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:492:9
+    |
+492 |     let noun = type_hash as u32;
+    |         ^^^^ help: if this is intentional, prefix it with an underscore: `_noun`
+
+warning: unused variable: `implicit_data`
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:503:9
+    |
+503 |     let implicit_data = &input[0..actual_impl_len];
+    |         ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_implicit_data`
+
+warning: value assigned to `memb_bytes_len` is never read
+   --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:510:30
+    |
+510 |     let mut memb_bytes_len = 0;
+    |                              ^ this value is reassigned later and never used
+...
+514 |             memb_bytes_len = parse_to_u16(&membs_data[2..4]) as usize * 4;
+    |             ------------------------------------------------------------- `memb_bytes_len` is overwritten here before the previous value is read
+
+warning: variable does not need to be mutable
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1724:9
+     |
+1724 |     let mut is_debug = test_refno == Some(refno);
+     |         ----^^^^^^^^
+     |         |
+     |         help: remove this `mut`
+
+warning: unused variable: `e`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1760:21
+     |
+1760 |                 Err(e) => {
+     |                     ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning: unused variable: `e`
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1778:21
+     |
+1778 |                 Err(e) => {
+     |                     ^ help: if this is intentional, prefix it with an underscore: `_e`
+
+warning: function `test_parse_specific_segments` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\binary_data_parser_test.rs:73:4
+   |
+73 | fn test_parse_specific_segments(data: &[u8]) {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `parser` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_nom.rs:10:4
+   |
+10 | fn parser(s: &[u8]) -> IResult<&[u8], (Vec<i32>, &[u8])> {
+   |    ^^^^^^
+
+warning: function `gen_resolve_error` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\error_types.rs:61:4
+   |
+61 | fn gen_resolve_error() -> anyhow::Result<u32> {
+   |    ^^^^^^^^^^^^^^^^^
+
+warning: function `test_parse_members_has_07` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\test_cases\test_parse_element.rs:42:10
+   |
+42 | async fn test_parse_members_has_07() {
+   |          ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ATT_PX` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:22:7
+   |
+22 | const ATT_PX: i32 = 0xFFF7E177u32 as i32;
+   |       ^^^^^^
+
+warning: function `get_uda_full_name` is never used
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1672:10
+     |
+1672 | async fn get_uda_full_name(hash: i32) -> Option<String> {
+     |          ^^^^^^^^^^^^^^^^^
+
+warning: constant `ATT_PY` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:23:7
+   |
+23 | const ATT_PY: i32 = 0xFFF7E15Cu32 as i32;
+   |       ^^^^^^
+
+warning: function `get_uda_short_name` is never used
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:1684:10
+     |
+1684 | async fn get_uda_short_name(hash: i32) -> Option<String> {
+     |          ^^^^^^^^^^^^^^^^^^
+
+warning: function `convert_int_to_axis_str` is never used
+    --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse.rs:2155:4
+     |
+2155 | fn convert_int_to_axis_str(n: i32) -> &'static str {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `ATT_PZ` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:24:7
+   |
+24 | const ATT_PZ: i32 = 0xFFF7E141u32 as i32;
+   |       ^^^^^^
+
+warning: constant `ATT_PDIA` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:25:7
+   |
+25 | const ATT_PDIA: i32 = 0xFFF77D0Fu32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PHEI` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:26:7
+   |
+26 | const ATT_PHEI: i32 = 0xFFF520EFu32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PDIS` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:27:7
+   |
+27 | const ATT_PDIS: i32 = 0xFFF21519u32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PCON` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:28:7
+   |
+28 | const ATT_PCON: i32 = 0xFFF3848Du32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PBOR` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:29:7
+   |
+29 | const ATT_PBOR: i32 = 0xFFF2511Cu32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PPRO` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:30:7
+   |
+30 | const ATT_PPRO: i32 = 0xFFF32DC0u32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_DPRO` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:31:7
+   |
+31 | const ATT_DPRO: i32 = 0xFFF32DCCu32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_BTHK` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:32:7
+   |
+32 | const ATT_BTHK: i32 = 0xFFF47D68u32 as i32;
+   |       ^^^^^^^^
+
+warning: constant `ATT_PTCDI` is never used
+  --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\parse_explict_tools.rs:33:7
+   |
+33 | const ATT_PTCDI: i32 = 0x95A34;
+   |       ^^^^^^^^^
+
+warning: feature `type_ascription` is declared but not used
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:1:12
+  |
+1 | #![feature(type_ascription)]
+  |            ^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_features)]` (part of `#[warn(unused)]`) on by default
+
+warning: feature `core_intrinsics` is declared but not used
+ --> D:\work\plant-code\old\vendor\old-parse-pdms-db\src\lib.rs:4:12
+  |
+4 | #![feature(core_intrinsics)]
+  |            ^^^^^^^^^^^^^^^
+
+warning: `parse_pdms_db` (lib) generated 155 warnings (run `cargo fix --lib -p parse_pdms_db` to apply 115 suggestions)
+warning: unused import: `anyhow::anyhow`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:1:5
+  |
+1 | use anyhow::anyhow;
+  |     ^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `deku::prelude::*`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:2:5
+  |
+2 | use deku::prelude::*;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `TryFrom` and `TryInto`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:3:20
+  |
+3 | use std::convert::{TryFrom, TryInto};
+  |                    ^^^^^^^  ^^^^^^^
+
+warning: unused import: `std::fmt::Debug`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:4:5
+  |
+4 | use std::fmt::Debug;
+  |     ^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fs::File`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:5:5
+  |
+5 | use std::fs::File;
+  |     ^^^^^^^^^^^^^
+
+warning: unused imports: `Read`, `SeekFrom`, and `Seek`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:6:15
+  |
+6 | use std::io::{Read, Seek, SeekFrom};
+  |               ^^^^  ^^^^  ^^^^^^^^
+
+warning: unused import: `std::mem::size_of`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\common.rs:7:5
+  |
+7 | use std::mem::size_of;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `MappedLocalTime`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:4:31
+  |
+4 | use chrono::{DateTime, Local, MappedLocalTime, TimeZone, Utc};
+  |                               ^^^^^^^^^^^^^^^
+
+warning: unused import: `TryInto`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:10:29
+   |
+10 | use std::convert::{TryFrom, TryInto};
+   |                             ^^^^^^^
+
+warning: unused import: `std::str::FromStr`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:11:5
+   |
+11 | use std::str::FromStr;
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `surrealdb::sql::Thing`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:12:5
+   |
+12 | use surrealdb::sql::Thing;
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\search.rs:5:55
+  |
+5 | use crate::io::{EleOperationData, EleOperationDetail, PdmsIO};
+  |                                                       ^^^^^^
+
+warning: unused imports: `NamedAttrValue` and `RefU64`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\search.rs:6:17
+  |
+6 | use aios_core::{NamedAttrValue, RefU64};
+  |                 ^^^^^^^^^^^^^^  ^^^^^^
+
+warning: unused import: `anyhow`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\search.rs:7:22
+  |
+7 | use anyhow::{Result, anyhow};
+  |                      ^^^^^^
+
+warning: unused import: `TryInto`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse.rs:2:29
+  |
+2 | use std::convert::{TryFrom, TryInto};
+  |                             ^^^^^^^
+
+warning: unused import: `crate::io::PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_max_att_version.rs:1:5
+  |
+1 | use crate::io::PdmsIO;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::get_db_option`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_max_att_version.rs:2:5
+  |
+2 | use aios_core::get_db_option;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::path::PathBuf`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_max_att_version.rs:3:5
+  |
+3 | use std::path::PathBuf;
+  |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::io::PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse_ele.rs:1:5
+  |
+1 | use crate::io::PdmsIO;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aios_core::tool::db_tool::db1_dehash`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse_ele.rs:2:5
+  |
+2 | use aios_core::tool::db_tool::db1_dehash;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `RefU64` and `init_test_surreal`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse_ele.rs:3:17
+  |
+3 | use aios_core::{RefU64, init_test_surreal};
+  |                 ^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::defines::SessionPageData`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_ses_data.rs:1:5
+  |
+1 | use crate::defines::SessionPageData;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `parse_pdms_db::test_cases::convert_str_to_bytes`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_ses_data.rs:2:5
+  |
+2 | use parse_pdms_db::test_cases::convert_str_to_bytes;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `RefU64` and `init_test_surreal`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_history_data.rs:1:17
+  |
+1 | use aios_core::{RefU64, init_test_surreal};
+  |                 ^^^^^^  ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::io::PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_history_data.rs:5:5
+  |
+5 | use crate::io::PdmsIO;
+  |     ^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `EleOperationDetail` and `PdmsIO`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_refno_status.rs:8:17
+  |
+8 | use crate::io::{EleOperationDetail, PdmsIO};
+  |                 ^^^^^^^^^^^^^^^^^^  ^^^^^^
+
+warning: unused imports: `EleOperation` and `RefU64`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_refno_status.rs:9:29
+  |
+9 | use aios_core::pdms_types::{EleOperation, RefU64};
+  |                             ^^^^^^^^^^^^  ^^^^^^
+
+warning: unused import: `std::time::Instant`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_refno_status.rs:10:5
+   |
+10 | use std::time::Instant;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `archive_reader::IoReader`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\sync\compress.rs:16:24
+   |
+16 | use dpcsync::{HashSum, archive_reader::IoReader, chunk_dictionary as dict};
+   |                        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `PdmsHeader`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:1:39
+  |
+1 | use crate::defines::{DbPageBasicInfo, PdmsHeader};
+  |                                       ^^^^^^^^^^
+
+warning: unused import: `future::ok`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:7:5
+  |
+7 |     future::ok,
+  |     ^^^^^^^^^^
+
+warning: unused import: `RecursiveMode`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:10:49
+   |
+10 | use notify::{Config, Event, RecommendedWatcher, RecursiveMode, Watcher};
+   |                                                 ^^^^^^^^^^^^^
+
+warning: unused import: `Read`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:12:15
+   |
+12 | use std::io::{Read, Write};
+   |               ^^^^
+
+warning: unused import: `TryFrom`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:10:20
+   |
+10 | use std::convert::{TryFrom, TryInto};
+   |                    ^^^^^^^
+
+warning: unused import: `TryFrom`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_parse.rs:2:20
+  |
+2 | use std::convert::{TryFrom, TryInto};
+  |                    ^^^^^^^
+
+warning: unused import: `StreamExt`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:5:14
+  |
+5 |     SinkExt, StreamExt,
+  |              ^^^^^^^^^
+
+warning: unused variable: `input`
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:117:21
+    |
+117 |                 let input = path.to_path_buf();
+    |                     ^^^^^ help: if this is intentional, prefix it with an underscore: `_input`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `output`
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:118:21
+    |
+118 |                 let output: PathBuf =
+    |                     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_output`
+
+warning: unused variable: `tmp_path`
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\watch.rs:120:21
+    |
+120 |                 let tmp_path = cbas_dir_path.clone();
+    |                     ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tmp_path`
+
+warning: unused variable: `rotate_size`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\io_log.rs:44:5
+   |
+44 |     rotate_size: u64,
+   |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rotate_size`
+
+warning: unused variable: `max_files`
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\io_log.rs:45:5
+   |
+45 |     max_files: usize,
+   |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_max_files`
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\defines.rs:422:25
+    |
+422 |         let (next_rest, mut d) = RefnoDataLoc::read(rest, ())?;
+    |                         ----^
+    |                         |
+    |                         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `db_headers`
+ --> D:\work\plant-code\old\vendor\old-pdms-io\src\sync\files.rs:7:9
+  |
+7 |     let db_headers = get_remote_db_headers(ip_dst).await;
+  |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_db_headers`
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\session_index_diff.rs:587:28
+    |
+587 |                         Ok(mut data) => Some(data.att_map().get_type()),
+    |                            ----^^^^
+    |                            |
+    |                            help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\session_index_diff.rs:573:9
+    |
+573 |     let mut enrich = |io: &mut PdmsIO,
+    |         ----^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `modified`
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\search.rs:171:42
+    |
+171 |             EleOperationDetail::Modified(modified) => {
+    |                                          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_modified`
+
+warning: variable does not need to be mutable
+   --> D:\work\plant-code\old\vendor\old-pdms-io\src\net_window.rs:547:9
+    |
+547 |     let mut push = |window: &mut BTreeMap<u32, Vec<EleOperationData>>,
+    |         ----^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: function `get_test_database_path` is never used
+  --> D:\work\plant-code\old\vendor\old-pdms-io\src\test\test_history_data.rs:78:4
+   |
+78 | fn get_test_database_path(relative_path: &str) -> String {
+   |    ^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `pdms_io` (lib) generated 48 warnings (run `cargo fix --lib -p pdms_io` to apply 44 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.79s
+warning: the following packages contain code that will be rejected by a future version of Rust: num-bigint-dig v0.8.4
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src\lib.rs (D:\Rust\target\debug\build\aios-database/fd5c52fbc9991f51\out\aios_database-fd5c52fbc9991f51.exe)
+
+running 1 test
+test fast_model::manifold_bool::empty_difference_is_bad_bool_not_a_silent_swallow ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1066 filtered out; finished in 0.00s
+
+exit 0

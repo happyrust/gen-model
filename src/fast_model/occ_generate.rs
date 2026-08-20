@@ -1660,8 +1660,11 @@ pub async fn apply_insts_boolean_occ(
                                         b.refno
                                     )
                                 })?;
+                            let mesh_id_literal =
+                                crate::data_interface::dbnum_state::escape_surql_str(&mesh_id);
                             update_sql.push_str(&format!(
-                                "update {inst_relate_id} set booled_id='{mesh_id}', booled=true;"
+                                "update {inst_relate_id} set booled_id='{mesh_id_literal}', booled=true, \
+                                 insts_flat=[{{geo_hash:'{mesh_id_literal}'}}];"
                             ));
                             wrote += 1;
                             println!(
@@ -1920,6 +1923,10 @@ mod occ_inst_boolean_persist_tests {
         assert!(
             body.contains("booled_id"),
             "OCC 成功后必须 set booled_id，否则 query_valid_insts 仍读旧网格"
+        );
+        assert!(
+            body.contains("insts_flat=[{{geo_hash:'"),
+            "OCC 成功后必须同步平表缓存，否则 Plant UI 仍会加载缩放后的正体"
         );
         assert!(
             body.contains("if !replace_exist"),
