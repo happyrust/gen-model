@@ -84,6 +84,13 @@
 { "status": "ok", "project": "HD", "sync_live": false, "version": "0.1.3",
   "started_at": "2026-07-27T21:02:11+08:00",
   "queue_paused": false, "static_assets": false,
+  "model_update_pending": {
+    "retryable": 4053, "dead_letters": 1,
+    "data_phase": { "retryable": 0, "dead_letters": 1 },
+    "room_phase": { "retryable": 4053, "dead_letters": 0 },
+    "by_action": {}, "blocking_samples": []
+  },
+  "blocking_conditions": ["model_update_pending.data_phase.dead_letters=1"],
   "initialization": {
     "status": "running", "epoch_id": 7, "current_phase": "catalogue",
     "data_ready": false, "model_ready": false, "model_in_flight": false,
@@ -100,6 +107,18 @@
   blocker 与被项目优先级遮蔽的 DICT/CATA。`data_ready=false` 时模型写保持待处理。
 - `static_assets`：当前是否找到可服务的前端资源目录。`false` 只表示 UI 静态资源不可用，
   不降低 REST/WS 与增量 worker 的健康状态。
+- `model_update_pending`：一次 SurrealQL 往返形成的持久工作快照，分别列出总量、
+  `data_phase`、`room_phase`、各 action 的可重试/死信计数，以及最多 10 条
+  `blocking_samples`（action、目标、noun、attempts、last_error、revision、updated_at）。
+  `attempts < 5` 只算普通积压；`attempts >= 5` 才是死信。
+- `blocking_conditions`：当前明确阻断健康状态的条件。数据模型死信或房间死信非零时，
+  顶层 `status` 为 `degraded`；普通可重试积压保持 `ok`。模型死信仍关闭模型门，Room
+  不得越过 ADR-025 的 Model 阶段。
+- `geom_errors`：数据库 `geom_error` 的当前错误摘要。除 `bool_pos` / `bool_neg` 布尔降级外，
+  `primitive` 表示基本体缺失/非法 BREP 或 NaN 变换；记录以 `(kind, target)` 唯一，
+  `noun` 保存元素类型，`last_error` 保存包含尺寸的原始失败，成功生成后按类别自动销账。
+- `degraded_sections` 仍只表示 health 子查询失败或超过统一 2 秒预算；
+  `model_update_pending` 查询失败/超时时加入同名 section，并在对象的 `error` 字段留因。
 - `ref0_affiliation_conflicts`：locator 构建时发现的冲突 Ref0 数量；非零时只阻断命中这些
   Ref0 的工作，不代表整个项目停止服务。
 - `sul_db.endpoint`（2026-08-12 新增）：本服务连接的 SurrealDB 端点（配置的
@@ -263,6 +282,19 @@
 - 单根生成通常秒级，同步等待即可；HTTP 层等待预算为 120s，耗尽后按上述 202 契约返回，
   不取消后台生成。实测 AMS 8000 的 SUPPO 与风管 BRAN 冷生成要 99–104s，贴着这条线，
   客户端自身超时不能设得比它更短。
+
+### 4.5.1 `DELETE /api/v1/model/subtree` — 清理指定 refno 的模型子树
+
+- 查询参数：`refno=24381%2F100677&confirm=24381%2F100677`；`confirm` 必须与
+  `refno` 原文完全一致，否则返回 `400 bad_request`。
+- 删除范围严格是传入 refno 自身及其全部 PE 后代，不向上归一到 generation root。
+  generation root 解析只用于取得与按需/增量生成相同的互斥锁；任一覆盖根正在生成时
+  返回 `409 conflict`，不与生成并发互相覆盖。
+- 删除模型关系、无剩余引用的实例信息、直管边、房间归属和空间树条目；不删除 PE、
+  内容寻址共享的 `inst_geo` 或磁盘 `.mesh`。
+- 重复调用幂等，响应
+  `{ "requested_refno": "24381/100677", "scope": "exact_subtree", "status": "deleted" }`。
+- 本端点只清理。需要重建时，由调用方随后调用 §4.5，并显式传 `force=true`。
 
 ### 4.6 `GET /api/v1/update/pending-units` — 待重试模型单元
 - 映射：`load_pending_model_units()`，响应 `{ "units": [...] }`，元素为 `PendingModelUnit` 原样。

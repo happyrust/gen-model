@@ -36,7 +36,123 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 队列空转时的兜底唤醒间隔：Notify 丢失或外部直接改表时最多晚这一拍。
 const IDLE_WAKE: Duration = Duration::from_secs(30);
+const MODEL_DEAD_LETTER_REPEAT_SECS: i64 = 300;
 pub(crate) const DEPENDENCY_STALL_TIMEOUT: Duration = Duration::from_secs(300);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ModelDeadLetterNotice {
+    Quiet,
+    Active(String),
+    Recovered,
+}
+
+#[derive(Debug, Default)]
+struct ModelDeadLetterAnnouncement {
+    fingerprint: Option<String>,
+    last_emitted_at: Option<i64>,
+}
+
+impl ModelDeadLetterAnnouncement {
+    fn observe(
+        &mut self,
+        status: &model_update_pending::ModelPendingStatus,
+        now: i64,
+    ) -> ModelDeadLetterNotice {
+        if !status.has_data_dead_letters() {
+            let recovered = self.fingerprint.take().is_some();
+            self.last_emitted_at = None;
+            return if recovered {
+                ModelDeadLetterNotice::Recovered
+            } else {
+                ModelDeadLetterNotice::Quiet
+            };
+        }
+
+        let action_counts = status
+            .by_action
+            .iter()
+            .filter(|(action, counts)| {
+                counts.dead_letters > 0
+                    && crate::data_interface::model_update_plan::ModelWorkAction::parse(action)
+                        .is_none_or(|action| !action.is_room_recalc())
+            })
+            .map(|(action, counts)| format!("{action}:{}", counts.dead_letters))
+            .collect::<Vec<_>>()
+            .join("|");
+        let samples = status
+            .data_blocking_samples()
+            .map(|sample| {
+                format!(
+                    "{}:{}:{}:{}:{}:{}:{}",
+                    sample.action,
+                    sample.target_refno,
+                    sample.noun,
+                    sample.attempts,
+                    sample.revision,
+                    sample.last_error.as_deref().unwrap_or(""),
+                    sample.updated_at
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("|");
+        let fingerprint = format!(
+            "{}|{action_counts}|{samples}",
+            status.data_phase.dead_letters
+        );
+        let changed = self.fingerprint.as_deref() != Some(fingerprint.as_str());
+        let repeat_due = self
+            .last_emitted_at
+            .is_none_or(|last| now.saturating_sub(last) >= MODEL_DEAD_LETTER_REPEAT_SECS);
+        self.fingerprint = Some(fingerprint);
+        if !changed && !repeat_due {
+            return ModelDeadLetterNotice::Quiet;
+        }
+        self.last_emitted_at = Some(now);
+
+        let details = status
+            .data_blocking_samples()
+            .take(10)
+            .map(|sample| {
+                format!(
+                    "{}:{} attempts={} error={}",
+                    sample.action,
+                    sample.target_refno,
+                    sample.attempts,
+                    sample.last_error.as_deref().unwrap_or("未记录")
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        ModelDeadLetterNotice::Active(format!(
+            "模型工作存在 {} 条死信，模型门保持未就绪；可重试数据工作 {} 条；按动作={action_counts}；阻断样本={details}",
+            status.data_phase.dead_letters, status.data_phase.retryable
+        ))
+    }
+}
+
+static MODEL_DEAD_LETTER_ANNOUNCEMENT: std::sync::Mutex<ModelDeadLetterAnnouncement> =
+    std::sync::Mutex::new(ModelDeadLetterAnnouncement {
+        fingerprint: None,
+        last_emitted_at: None,
+    });
+
+fn announce_model_dead_letters(status: &model_update_pending::ModelPendingStatus) {
+    let notice = MODEL_DEAD_LETTER_ANNOUNCEMENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .observe(status, Local::now().timestamp());
+    match notice {
+        ModelDeadLetterNotice::Quiet => {}
+        ModelDeadLetterNotice::Active(message) => {
+            log::error!("{message}");
+            eprintln!("{message}");
+        }
+        ModelDeadLetterNotice::Recovered => {
+            log::info!("模型工作死信已清零，模型门可继续收敛");
+            println!("模型工作死信已清零，模型门可继续收敛");
+        }
+    }
+}
 
 #[derive(Clone)]
 struct ActiveDataTaskContext {
@@ -233,6 +349,9 @@ fn reset_window_session_budget(dbnum: u32) {
 const STAGED_COMMIT_ATTEMPTS: u32 = 4;
 const STAGED_COMMIT_BACKOFF: Duration = Duration::from_millis(250);
 const STAGED_STALLED_RETRY_BACKOFF: Duration = Duration::from_secs(30);
+/// 提交查询超时的重放预算：超过这个次数就当确定性阻断交回调用方。
+/// 每次尝试最坏烧掉一个 `COMMIT_QUERY_TIMEOUT`，预算必须小。
+const STAGED_COMMIT_TIMEOUT_ATTEMPTS: u32 = 3;
 
 /// worker 还在不在。
 ///
@@ -567,6 +686,9 @@ pub fn ensure_batch_worker(mgr: Arc<AiosDBManager>) {
             let _live = WorkerLiveGuard;
             run_batch_worker(mgr).await;
         });
+        // 与唯一 worker 分开运行：worker 卡在数据库 await 或已经退出时，未出队任务
+        // 仍必须持续把原因写到控制台与可带走的 JSONL。
+        tokio::spawn(crate::data_interface::queue_stall_diagnostics::run());
         newly_started = true;
     });
     if !newly_started {
@@ -1647,6 +1769,19 @@ async fn execute_frozen_batch(
         committed.end_sesno,
         committed.cache_refnos.len()
     );
+    if finalize.plan.room_rebuild_required {
+        println!(
+            "[房间增量] dbnum={} 会话区间={}..={} 的结构面板枚举不完整；已随水位原子标记全量房间重建要求，原因={}",
+            job.dbnum,
+            finalize.start_sesno,
+            finalize.end_sesno,
+            finalize
+                .plan
+                .room_rebuild_reason
+                .as_deref()
+                .unwrap_or("未记录")
+        );
+    }
     crate::data_interface::cata_closure::publish_deferred_cache(job.dbnum).await;
     LAST_STAGED_COMMIT_MS.store(
         commit_started.elapsed().as_millis().min(u64::MAX as u128) as u64,
@@ -1927,23 +2062,36 @@ where
     unreachable!("max_attempts is normalized to at least one")
 }
 
-/// 写回失败是不是瞬时的。
+/// 写回失败是不是瞬时的（`attempts` 是刚失败的这一次是第几次）。
 ///
-/// 只有传输层断连与写冲突算瞬时——这两类等下去必然自愈，无限重试是对的。其余
-/// （语句被持久层拒绝：事件 / schema / 约束不一致）是**确定性**失败：同一份
+/// 只有传输层断连与写冲突算无限瞬时——这两类等下去必然自愈，无限重试是对的。
+/// 其余（语句被持久层拒绝：事件 / schema / 约束不一致）是**确定性**失败：同一份
 /// journal 重放多少次都是同一个错。journal **入口**早就有
 /// `ReplayUnsafeRejection` 把确定性拒绝判死、不烧重试（`replay_safe.rs`），
 /// 写回这一端必须有对偶物，否则就是抱着 [`STAGED_COMMIT_SERIAL`] 空转，把
 /// `fast_delete`、提交后空间收敛和其余 dbnum 一起拖停。
-fn staged_writeback_failure_is_transient(error: &anyhow::Error) -> bool {
+///
+/// 提交查询超时是**第三类**，两边都不是：等满死线没等到服务端裁决，语句既没被
+/// 接受也没被拒绝，这是活性问题。journal 块本来就按幂等重放设计，再来一次安全，
+/// 所以它算瞬时——但预算必须有限（[`STAGED_COMMIT_TIMEOUT_ATTEMPTS`]），否则一条
+/// 真的永远跑不完的语句就走到另一个极端：抱着提交锁每 30 秒重放一次到天荒地老。
+fn staged_writeback_failure_is_transient(error: &anyhow::Error, attempts: u32) -> bool {
     let message = format!("{error:#}");
-    message.contains("commit outcome unknown")
+    if message.contains("commit outcome unknown")
         || crate::surreal_retry::is_retryable_sul_db_transport_error(&message)
         || crate::surreal_retry::is_retryable_surreal_write_error(&message)
+    {
+        return true;
+    }
+    message.contains(crate::data_interface::staging::executor::COMMIT_QUERY_TIMEOUT_MARKER)
+        && attempts < STAGED_COMMIT_TIMEOUT_ATTEMPTS
 }
 
 /// 与 [`retry_until_recovered`] 同形，但只对 `is_transient` 认可的失败无限等；
 /// 确定性失败立刻交回调用方处置（转终态阻断），不占着提交锁空转。
+///
+/// `is_transient` 一并收到「这是第几次尝试」，好让某些失败只在有限预算内算瞬时
+/// （见 [`staged_writeback_failure_is_transient`] 对提交超时的处置）。
 ///
 /// 前 `initial_attempts` 次是快重试（延迟翻倍），之后每 `stalled_delay` 一次并
 /// 回调告警——与 [`retry_until_recovered`] 的节奏逐拍相同，只多了那道分流。
@@ -1959,7 +2107,7 @@ where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = anyhow::Result<T>>,
     S: FnMut(&anyhow::Error, u32),
-    P: Fn(&anyhow::Error) -> bool,
+    P: Fn(&anyhow::Error, u32) -> bool,
 {
     let initial_attempts = initial_attempts.max(1);
     let mut delay = initial_delay;
@@ -1968,7 +2116,7 @@ where
         attempts = attempts.saturating_add(1);
         match operation().await {
             Ok(value) => return Ok((value, attempts)),
-            Err(error) if !is_transient(&error) => return Err((error, attempts)),
+            Err(error) if !is_transient(&error, attempts) => return Err((error, attempts)),
             Err(error) if attempts < initial_attempts => {
                 log::warn!("暂存窗口写回第 {attempts} 次失败，{delay:?} 后重试: {error:#}");
                 tokio::time::sleep(delay).await;
@@ -3338,17 +3486,17 @@ async fn idle_round(
     let (has_dead_work, dead_check_failed) = if !model_phase_open {
         (false, false)
     } else {
-        match model_update_pending::has_dead_data_work().await {
-            Ok(dead) => (dead, false),
+        match model_update_pending::model_pending_status().await {
+            Ok(status) => {
+                announce_model_dead_letters(&status);
+                (status.has_data_dead_letters(), false)
+            }
             Err(error) => {
                 println!("检查模型死信失败（模型门保持未就绪）: {error:#}");
                 (false, true)
             }
         }
     };
-    if has_dead_work {
-        println!("模型工作存在死信，模型门保持未就绪，等待新触发复活或人工处置");
-    }
     let failed = side_effect_failed
         || data_phase_failed
         || backlog_check_failed
@@ -3868,22 +4016,62 @@ mod tests {
         assert_eq!(stalled.load(Ordering::SeqCst), 2);
     }
 
-    /// 分类口径本身：只有断连与写冲突算瞬时。
+    /// 分类口径本身：断连与写冲突无限瞬时，语句被拒是确定性。
     #[test]
     fn only_transport_and_conflict_count_as_transient_writeback_failures() {
-        assert!(staged_writeback_failure_is_transient(&anyhow::anyhow!(
-            "写回块 3 transport failed: connection reset"
-        )));
-        assert!(staged_writeback_failure_is_transient(&anyhow::anyhow!(
-            "Failed to commit transaction due to a read or write conflict. \
-             This transaction can be retried"
-        )));
-        assert!(!staged_writeback_failure_is_transient(&anyhow::anyhow!(
-            "写回块 3 statement failed: Parse error: unexpected token"
-        )));
-        assert!(!staged_writeback_failure_is_transient(&anyhow::anyhow!(
-            "写回尾事务 statement failed: Cannot perform subtraction with 'NONE' and '1'"
-        )));
+        assert!(staged_writeback_failure_is_transient(
+            &anyhow::anyhow!("写回块 3 transport failed: connection reset"),
+            1
+        ));
+        assert!(staged_writeback_failure_is_transient(
+            &anyhow::anyhow!(
+                "Failed to commit transaction due to a read or write conflict. \
+                 This transaction can be retried"
+            ),
+            99
+        ));
+        assert!(!staged_writeback_failure_is_transient(
+            &anyhow::anyhow!("写回块 3 statement failed: Parse error: unexpected token"),
+            1
+        ));
+        assert!(!staged_writeback_failure_is_transient(
+            &anyhow::anyhow!(
+                "写回尾事务 statement failed: Cannot perform subtraction with 'NONE' and '1'"
+            ),
+            1
+        ));
+    }
+
+    /// 提交查询超时是活性问题，有限预算内必须重放，超预算才转阻断。
+    ///
+    /// 回归背景（2026-08-19 现场）：dbnum=8000 的 `242..=243` 一个 32 行 / 1.6 KB
+    /// 的写回块撞上 120s 死线，错误文案是「终止本查询」——分类器认得的四个标记
+    /// 一个都不沾，于是**一次尝试**就把窗口判成确定性拒绝、永久阻断，水位停在
+    /// 241。超时既没被接受也没被拒绝，重放本来就是安全的；反过来无限重放又会抱着
+    /// 提交锁每 30 秒烧一个 120s 死线，所以预算必须有限。
+    #[test]
+    fn a_commit_query_timeout_is_transient_only_within_a_bounded_budget() {
+        let timeout = || {
+            anyhow::anyhow!(
+                "写回块 1/409 连续 120s 未返回，终止本查询（{}）；字节=1652 预计行=32 指纹=b8fa0f57f380baa6",
+                crate::data_interface::staging::executor::COMMIT_QUERY_TIMEOUT_MARKER
+            )
+        };
+        for attempt in 1..STAGED_COMMIT_TIMEOUT_ATTEMPTS {
+            assert!(
+                staged_writeback_failure_is_transient(&timeout(), attempt),
+                "第 {attempt} 次超时还在预算内，必须重放"
+            );
+        }
+        assert!(
+            !staged_writeback_failure_is_transient(&timeout(), STAGED_COMMIT_TIMEOUT_ATTEMPTS),
+            "超预算的超时必须转阻断，不许抱着提交锁无限烧死线"
+        );
+        // 标记由 executor 那一端生成，两边不能各写各的字面量。
+        assert!(
+            include_str!("staging/executor.rs").contains("COMMIT_QUERY_TIMEOUT_MARKER}）；"),
+            "终止本查询的文案必须带上共享标记"
+        );
     }
 
     /// 写回被判死之后必须放掉窗口、记下阻断（源码钉）。
@@ -4979,6 +5167,79 @@ mod tests {
             idle_body.contains("if room_round_is_due(data_outcome) {"),
             "房间轮必须由 room_round_is_due 把门，不能只认 Settled: {idle_body}"
         );
+    }
+
+    fn dead_letter_status(target: &str, error: &str) -> model_update_pending::ModelPendingStatus {
+        model_update_pending::ModelPendingStatus {
+            retryable: 4,
+            dead_letters: 1,
+            data_phase: model_update_pending::ModelPendingPhaseStatus {
+                retryable: 4,
+                dead_letters: 1,
+            },
+            blocking_samples: vec![model_update_pending::ModelPendingBlockingSample {
+                action: "regen_root".into(),
+                target_refno: target.into(),
+                noun: "FRMW".into(),
+                attempts: model_update_pending::MAX_ATTEMPTS,
+                last_error: Some(error.into()),
+                revision: 2,
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn model_dead_letter_notice_reports_changes_repeats_slowly_and_recovers_once() {
+        let mut announcement = ModelDeadLetterAnnouncement::default();
+        let first = dead_letter_status("24381/38436", "DIAM=0, HEIG=0");
+        let changed = dead_letter_status("24381/38436", "DIAM=0, HEIG=1");
+
+        assert!(matches!(
+            announcement.observe(&first, 1_000),
+            ModelDeadLetterNotice::Active(message)
+                if message.contains("24381/38436") && message.contains("DIAM=0")
+        ));
+        assert_eq!(
+            announcement.observe(&first, 1_299),
+            ModelDeadLetterNotice::Quiet
+        );
+        assert!(matches!(
+            announcement.observe(&first, 1_300),
+            ModelDeadLetterNotice::Active(_)
+        ));
+        assert!(matches!(
+            announcement.observe(&changed, 1_301),
+            ModelDeadLetterNotice::Active(_)
+        ));
+
+        let clear = model_update_pending::ModelPendingStatus::default();
+        assert_eq!(
+            announcement.observe(&clear, 1_302),
+            ModelDeadLetterNotice::Recovered
+        );
+        assert_eq!(
+            announcement.observe(&clear, 1_303),
+            ModelDeadLetterNotice::Quiet
+        );
+    }
+
+    #[test]
+    fn dead_letter_reporting_does_not_relax_model_before_room_ordering() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn idle_round(")
+            .expect("idle_round exists")
+            .1
+            .split_once("/// 一个空闲轮消化完这一页之后的处置")
+            .expect("idle_round end")
+            .0;
+        let status_at = body.find("model_pending_status()").expect("status read");
+        let failed_at = body.find("let failed =").expect("failed gate");
+        let room_at = body.find("room_round_is_due").expect("room gate");
+        assert!(status_at < failed_at && failed_at < room_at, "{body}");
+        assert!(body.contains("status.has_data_dead_letters()"), "{body}");
     }
 
     /// 空闲轮必须同时受暂停与上弦两道门管。

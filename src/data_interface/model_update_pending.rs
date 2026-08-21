@@ -100,6 +100,69 @@ pub struct PendingModelWork {
     pub required_panels: Vec<String>,
 }
 
+/// One phase's durable model-work posture, exposed by `/health`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+pub struct ModelPendingPhaseStatus {
+    pub retryable: usize,
+    pub dead_letters: usize,
+}
+
+/// One terminal row shown in the bounded dead-letter sample.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelPendingBlockingSample {
+    pub action: String,
+    pub target_refno: String,
+    #[serde(default)]
+    pub noun: String,
+    #[serde(default)]
+    pub attempts: u32,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub revision: u64,
+    #[serde(default)]
+    pub updated_at: serde_json::Value,
+}
+
+/// Single-round-trip snapshot of the durable model/room work table.
+///
+/// `data_phase.dead_letters` is the model-gate blocker. Room rows are reported
+/// separately because ADR-025 keeps Room behind Model, but operators still need
+/// to see the work accumulating on the downstream side of that barrier.
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct ModelPendingStatus {
+    pub retryable: usize,
+    pub dead_letters: usize,
+    pub data_phase: ModelPendingPhaseStatus,
+    pub room_phase: ModelPendingPhaseStatus,
+    pub by_action: BTreeMap<String, ModelPendingPhaseStatus>,
+    pub blocking_samples: Vec<ModelPendingBlockingSample>,
+    pub error: Option<String>,
+}
+
+impl ModelPendingStatus {
+    pub fn error(error: impl std::fmt::Display) -> Self {
+        Self {
+            error: Some(error.to_string()),
+            ..Self::default()
+        }
+    }
+
+    pub fn has_data_dead_letters(&self) -> bool {
+        self.data_phase.dead_letters > 0
+    }
+
+    pub fn has_room_dead_letters(&self) -> bool {
+        self.room_phase.dead_letters > 0
+    }
+
+    pub fn data_blocking_samples(&self) -> impl Iterator<Item = &ModelPendingBlockingSample> {
+        self.blocking_samples.iter().filter(|sample| {
+            ModelWorkAction::parse(&sample.action).is_none_or(|action| !action.is_room_recalc())
+        })
+    }
+}
+
 /// One durable room row addressed by the same `(action, target)` identity as
 /// [`record_id_of`].  A post-commit drain carries these keys across the RocksDB
 /// boundary instead of discovering work by scanning the global pending table.
@@ -930,6 +993,11 @@ pub(crate) fn render_finalize_tail_with_effects(
         // 事务才 bump——没动树的提交不该作废别人的文件。
         statements.push(crate::fast_model::aabb_tree::render_spatial_epoch_bump());
     }
+    if plan.room_rebuild_required {
+        statements.push(crate::fast_model::room_model::render_room_rebuild_required(
+            plan.room_rebuild_reason.as_deref(),
+        ));
+    }
     statements.extend(settled_regen.iter().map(|(root, revision)| {
         render_delete_revision(ModelWorkAction::RegenRoot, root, *revision)
     }));
@@ -960,6 +1028,11 @@ fn render_baseline_transaction(
         .iter()
         .map(|item| render_upsert(item, source_time_for(item, end_sesno, end_sesno_time)))
         .collect();
+    if plan.room_rebuild_required {
+        statements.push(crate::fast_model::room_model::render_room_rebuild_required(
+            plan.room_rebuild_reason.as_deref(),
+        ));
+    }
     statements.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
     statements.push(if confirmed_empty {
         format!("UPDATE dbnum_watermark:{dbnum} SET confirmed_empty_baseline_sesno = {end_sesno};")
@@ -2605,6 +2678,94 @@ pub async fn has_dead_data_work() -> anyhow::Result<bool> {
         .await?
         .check()?;
     Ok(response.take::<Option<bool>>(0)?.unwrap_or(false))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ModelPendingActionCount {
+    action: String,
+    c: usize,
+}
+
+fn phase_for_action(action: &str) -> bool {
+    ModelWorkAction::parse(action).is_some_and(ModelWorkAction::is_room_recalc)
+}
+
+fn add_model_pending_counts(
+    status: &mut ModelPendingStatus,
+    rows: impl IntoIterator<Item = ModelPendingActionCount>,
+    dead: bool,
+) {
+    for row in rows {
+        let action = status.by_action.entry(row.action.clone()).or_default();
+        let phase = if phase_for_action(&row.action) {
+            &mut status.room_phase
+        } else {
+            // Unknown actions are deliberately conservative: an unrecognised row
+            // must keep the model gate closed rather than disappear from health.
+            &mut status.data_phase
+        };
+        if dead {
+            status.dead_letters += row.c;
+            phase.dead_letters += row.c;
+            action.dead_letters += row.c;
+        } else {
+            status.retryable += row.c;
+            phase.retryable += row.c;
+            action.retryable += row.c;
+        }
+    }
+}
+
+fn build_model_pending_status(
+    retryable: Vec<ModelPendingActionCount>,
+    dead: Vec<ModelPendingActionCount>,
+    mut blocking_samples: Vec<ModelPendingBlockingSample>,
+) -> ModelPendingStatus {
+    let mut status = ModelPendingStatus::default();
+    add_model_pending_counts(&mut status, retryable, false);
+    add_model_pending_counts(&mut status, dead, true);
+    blocking_samples.truncate(10);
+    status.blocking_samples = blocking_samples;
+    status
+}
+
+/// Read all model/room pending counts and a bounded terminal sample in one
+/// database round trip. This is shared by the idle worker and `/health`, so the
+/// console and API cannot disagree about whether the model gate is blocked.
+fn render_model_pending_status_query() -> String {
+    format!(
+        "SELECT action, count() AS c FROM {TABLE} \
+             WHERE status IN ['pending', 'failed'] AND (attempts?:0) < {MAX_ATTEMPTS} \
+             GROUP BY action;\
+             SELECT action, count() AS c FROM {TABLE} \
+             WHERE status IN ['pending', 'failed'] AND (attempts?:0) >= {MAX_ATTEMPTS} \
+             GROUP BY action;\
+             SELECT action, target_refno, noun, attempts, last_error, revision, updated_at \
+             FROM {TABLE} WHERE status IN ['pending', 'failed'] \
+             AND (attempts?:0) >= {MAX_ATTEMPTS} \
+             ORDER BY updated_at DESC, id ASC LIMIT 10;"
+    )
+}
+
+pub async fn model_pending_status() -> anyhow::Result<ModelPendingStatus> {
+    let mut response = SUL_DB
+        .query(render_model_pending_status_query())
+        .await
+        .map_err(|error| anyhow::anyhow!("read model pending status failed: {error}"))?
+        .check()
+        .map_err(|error| anyhow::anyhow!("read model pending status statement failed: {error}"))?;
+    let retryable = response
+        .take::<Vec<ModelPendingActionCount>>(0)
+        .map_err(|error| {
+            anyhow::anyhow!("decode retryable model pending counts failed: {error}")
+        })?;
+    let dead = response
+        .take::<Vec<ModelPendingActionCount>>(1)
+        .map_err(|error| anyhow::anyhow!("decode model dead-letter counts failed: {error}"))?;
+    let samples = response
+        .take::<Vec<ModelPendingBlockingSample>>(2)
+        .map_err(|error| anyhow::anyhow!("decode model dead-letter samples failed: {error}"))?;
+    Ok(build_model_pending_status(retryable, dead, samples))
 }
 
 /// 待重算房间目标的分项计数（ADR-011 §10：随 `room_recalc` 任务详情带出）。
@@ -4531,6 +4692,39 @@ mod tests {
         );
     }
 
+    #[test]
+    fn degraded_room_plan_marks_rebuild_before_advancing_watermark() {
+        let plan = ModelUpdatePlan {
+            room_rebuild_required: true,
+            room_rebuild_reason: Some("dbnum=8000: panel query failed at C:\\fixture".into()),
+            ..Default::default()
+        };
+        let render = render_finalize_tail(8000, 240, None, &plan, &[]);
+        let marker = render
+            .tail
+            .find("UPSERT room_build:main SET")
+            .expect("durable room rebuild marker");
+        assert!(
+            render.tail[marker..].contains("rebuild_required = true"),
+            "room_build 尾事务必须置位全量重建要求: {}",
+            render.tail
+        );
+        let watermark = render
+            .tail
+            .find("UPSERT dbnum_watermark:8000")
+            .expect("watermark tail");
+        assert!(
+            marker < watermark,
+            "恢复标记必须和水位同尾事务且先于水位: {}",
+            render.tail
+        );
+        assert!(
+            render.tail.contains("C:\\\\fixture"),
+            "Windows 路径必须转义: {}",
+            render.tail
+        );
+    }
+
     /// 窗口语句批按 [`FINALIZE_WINDOW_TX_CHUNK`] 分块：块内原序、块间原序，
     /// 空窗口不产批。
     #[test]
@@ -5887,5 +6081,89 @@ mod tests {
         assert!(body.contains("status IN ['pending', 'failed']"));
         assert!(body.contains("(attempts?:0) >= {MAX_ATTEMPTS}"));
         assert!(body.contains("{DATA_ACTION_FILTER}"));
+    }
+
+    #[test]
+    fn model_pending_status_splits_retryable_and_dead_work_by_phase() {
+        let query = render_model_pending_status_query();
+        assert!(
+            query.contains("(attempts?:0) < 5"),
+            "attempts=4 is retryable"
+        );
+        assert!(
+            query.matches("(attempts?:0) >= 5").count() >= 2,
+            "attempts=5 is terminal"
+        );
+        assert!(query.contains("LIMIT 10"), "blocking samples stay bounded");
+        let samples = (0..12)
+            .map(|index| ModelPendingBlockingSample {
+                action: if index == 0 {
+                    "regen_root".into()
+                } else {
+                    "room_recalc_element".into()
+                },
+                target_refno: format!("1/{index}"),
+                attempts: MAX_ATTEMPTS,
+                ..Default::default()
+            })
+            .collect();
+        let status = build_model_pending_status(
+            vec![
+                ModelPendingActionCount {
+                    action: "regen_root".into(),
+                    c: 4,
+                },
+                ModelPendingActionCount {
+                    action: "room_recalc_panel".into(),
+                    c: 36,
+                },
+            ],
+            vec![
+                ModelPendingActionCount {
+                    action: "regen_root".into(),
+                    c: 1,
+                },
+                ModelPendingActionCount {
+                    action: "room_recalc_element".into(),
+                    c: 2,
+                },
+            ],
+            samples,
+        );
+
+        assert_eq!(status.retryable, 40);
+        assert_eq!(status.dead_letters, 3);
+        assert_eq!(status.data_phase.retryable, 4);
+        assert_eq!(status.data_phase.dead_letters, 1);
+        assert_eq!(status.room_phase.retryable, 36);
+        assert_eq!(status.room_phase.dead_letters, 2);
+        assert_eq!(
+            status.blocking_samples.len(),
+            10,
+            "health sample is bounded"
+        );
+        assert!(status.has_data_dead_letters());
+        assert!(status.has_room_dead_letters());
+        assert_eq!(status.data_blocking_samples().count(), 1);
+    }
+
+    #[test]
+    fn unknown_pending_actions_conservatively_block_the_data_phase() {
+        let status = build_model_pending_status(
+            Vec::new(),
+            vec![ModelPendingActionCount {
+                action: "future_action".into(),
+                c: 1,
+            }],
+            vec![ModelPendingBlockingSample {
+                action: "future_action".into(),
+                target_refno: "9/9".into(),
+                attempts: MAX_ATTEMPTS,
+                ..Default::default()
+            }],
+        );
+        assert_eq!(status.data_phase.dead_letters, 1);
+        assert_eq!(status.room_phase.dead_letters, 0);
+        assert_eq!(status.data_blocking_samples().count(), 1);
     }
 }

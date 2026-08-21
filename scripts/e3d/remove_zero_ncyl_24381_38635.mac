@@ -1,0 +1,73 @@
+-- Guarded source correction for specs/022-model-dead-letter-recovery.
+-- Run only in a fresh Design session after the paired file/Surreal backup has
+-- passed scripts/Repair-ZeroNcylDeadLetter.ps1 -Execute -Phase Backup.
+-- Any failed expression stops this macro before DELETE/SAVEWORK.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/remove_zero_ncyl_24381_38635.log" OVER
+$P CODEX-ZERO-NCYL-GUARD-START
+
+=24381/38635
+Q CE
+Q TYPE
+Q OWNE
+Q NAME
+Q DIAM
+Q HEIG
+Q POS
+Q ORI
+
+!guard = TRUE
+!pos = !!ce.pos
+!ori = !!ce.ori
+!xdir = !ori.xdir()
+!ydir = !ori.ydir()
+!zdir = !ori.zdir()
+
+if (!!ce.ref.string().neq('24381/38635')) then
+  !guard = FALSE
+  $P CODEX-ZERO-NCYL-GUARD-FAIL REFNO
+endif
+if (!!ce.owner.ref.string().neq('24381/38614')) then
+  !guard = FALSE
+  $P CODEX-ZERO-NCYL-GUARD-FAIL OWNER
+endif
+if (!!ce.type.neq('NCYL')) then
+  !guard = FALSE
+  $P CODEX-ZERO-NCYL-GUARD-FAIL NOUN
+endif
+if (not (!!ce.name.unset() or !!ce.name.eq(''))) then
+  !guard = FALSE
+  $P CODEX-ZERO-NCYL-GUARD-FAIL NAME
+endif
+if (!!ce.diam.neq(0) or !!ce.heig.neq(0)) then
+  !guard = FALSE
+  $P CODEX-ZERO-NCYL-GUARD-FAIL DIMENSIONS
+endif
+if (!pos.east.neq(0) or !pos.north.neq(0) or !pos.up.neq(0)) then
+  !guard = FALSE
+  $P CODEX-ZERO-NCYL-GUARD-FAIL POSITION
+endif
+-- An unset/zero stored orientation resolves to the identity basis in Design.
+if (!xdir.east.neq(1) or !xdir.north.neq(0) or !xdir.up.neq(0)) then
+  !guard = FALSE
+  $P CODEX-ZERO-NCYL-GUARD-FAIL ORIENTATION-X
+endif
+if (!ydir.east.neq(0) or !ydir.north.neq(1) or !ydir.up.neq(0)) then
+  !guard = FALSE
+  $P CODEX-ZERO-NCYL-GUARD-FAIL ORIENTATION-Y
+endif
+if (!zdir.east.neq(0) or !zdir.north.neq(0) or !zdir.up.neq(1)) then
+  !guard = FALSE
+  $P CODEX-ZERO-NCYL-GUARD-FAIL ORIENTATION-Z
+endif
+
+if (!guard) then
+  $P CODEX-ZERO-NCYL-GUARD-PASS
+  DELETE NCYL
+  SAVEWORK 'CODEX remove empty NCYL 24381/38635'
+  $P CODEX-ZERO-NCYL-DELETE-DONE
+else
+  $P CODEX-ZERO-NCYL-ABORTED-NO-SAVEWORK
+endif
+
+ALPHA LOG END

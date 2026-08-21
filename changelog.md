@@ -1,15 +1,204 @@
 # 变更记录
 
+## 2026-08-21
+
+### 新增
+
+- `geom_error` 扩展 `primitive` 基本体错误：缺失/非法 BREP 与 NaN 变换按参考号持久落库，
+  保存 noun、尺寸诊断、累计次数和首末时间；成功生成后精确销账，诊断写入失败随模型失败上浮。
+- health 新增 `model_update_pending` 单查询快照与 `blocking_conditions`：模型/房间死信会把
+  顶层状态降为 `degraded`，普通可重试积压不降级；查询失败仍沿用 2 秒预算并只进入
+  `degraded_sections`。
+- 新增零尺寸 NCYL 现场修复编排、严格守卫 E3D 宏和成对基线回滚脚本；默认 dry-run，
+  只在参考号、owner、noun、空名称、尺寸与位姿全部匹配时删除 `24381/38635`。
+
+### 修复
+
+- 定向 `CYLI/SLCY/NCYL` 生成无效 BREP 时保留硬失败，并在错误中带出参考号、noun、
+  `DIAM` 与 `HEIG`，零尺寸根因不再只显示“invalid BREP shape”。
+- 模型死信公告改为状态指纹驱动：首次/变化立即输出，相同内容最多 300 秒一次，清零仅
+  输出一次恢复消息；30 秒 worker 退避和 Model→Room 阻断顺序保持不变。
+
 ## 2026-08-20
 
 ### 新增
+
+- 新增独立的数据批次停滞看门狗：任务在 `queued` / `held` 超过 60 秒时，不再只靠
+  在线 `/health` 与 `/queue` 排查，而是把暂停、上弦、阶段屏障、epoch、worker 存活、
+  会话窗口和初始化 blockers 组成一条 `AIOS-QUEUE-STALL` JSON，同时写 stderr 与
+  `logs/queue-stalls-YYYY-MM-DD.jsonl`；同一任务每 5 分钟续记一次。看门狗与唯一 worker
+  分属两个 Tokio 任务，因此 worker 卡在数据库 await 或已经退出时仍能留下异机可带走的
+  离线证据。
+
+- 复验 issue-019 的 T11b 固定存量删除 live：在仅含 SYST+8000 的隔离项目副本中，
+  `test_net_window_agrees_on_a_stock_deletion` 以 `1 passed in 20.65s` 通过；窗口
+  25..=26 的净三态为 `0/1/2`，固定 EQUI/BOX 从活行准确变为墓碑，写回水位为 26，
+  finally 恢复后的 db8000 SHA 与起点一致。证据与 live-test ledger 已同步。
 
 - 复验 BRAN/TUBI 房间计算合成 live 链：`live_room_tubi_row_enters_tree_and_tracks_regen`
   在 8071 一次性空库通过，确认 BRAN 重生成后的隐含 TUBI 进入空间树并新增正确的
   `room_relate` 成员边；证据见 `docs/evidence/2026-08-20-bran-room-tubi-live.md`，并已
   回填 live-test ledger。
 
+- `PrimRevolution` 接进 `tessellate_libgm_param`（specs/009 的回转支）：此前它掉在
+  `_ => Ok(None)` 里，而 `Ok(None)` 就是「回退 OCC」的信号——PANE 的负实体大量是
+  NREV，正体走 manifold、负体走 OCC，这一减整条设计布尔又被拖回 OCC。新增
+  `tessellate_revolution` 语义逐条对齐 OCC 权威实现 `Revolution::gen_occ_shape`：
+  倒角复用挤出那份 `gen_polyline_original` 离散（`flatten_extrusion_loop` 改名
+  `flatten_profile_loop` 两边共用），角度按「≈360 / >360 / ==0 一律当整圈」归一，
+  回转分段数按弦高容差 `R(1−cos(π/n)) ≤ tol` 算并夹在 [12, 512]。换算进
+  「(半径, 轴向)」二维系那一步行列式是 −1 会翻绕向，而 `FillRule::Positive` 只填
+  逆时针环，所以按外环有向面积统一翻一次（所有环一起翻，保住外环与孔的相对绕向）；
+  摆回本地系的变换刻意保持 det = +1，轮廓落在轴负侧时半径方向与出平面基向量一起
+  取反，否则网格被镜像、负实体法向朝里，减出来是反的。**出平面的轴仍回 `None`**：
+  manifold 的 revolve 只认一种摆放，PDMS 的 REVO/NREV 都满足，不满足的宁可走 OCC
+  也不硬凑形状。三条单测：=24381/36945（1RX-RM13 穹顶）那颗「圆柱 − 半球」负实体
+  与 ⅓πR³ 对拍（轮廓含「倒角吃光两条腿、四顶点里两个坐标重合」的退化写法）、
+  轴负侧顺时针轮廓不镜像、出平面轴回退行为钉死。
+
+- 新增 `src/fast_model/libgm_discretise.rs`：圆怎么分段，全库唯一一份，逐条移植
+  libgm 的权威规则（IDA 逆出 `d2_numberOfSegmentsForCircle` / `d2_numberOfSegmentsForPartRev`，
+  两者都是 libgeom 导出、libgm 只是导入方，跟 `leftShadow` 同一类；全文与常量记在
+  `plant-4/libgm-boolean-algorithm.md` §7.9）。原先两处各写各的：
+  `manifold_tessellate::circular_segments_for` 的弦高公式 `π/acos(1 − tol/R)` 与
+  libgm 一致但漏了**段数取到 4 的倍数**与**步长封顶 45°（整圆最少 8 段）**（下限写的
+  是 12）；`sweep_mesh::arc_segments` 则是拿扫角直接除步长，而 libgm 是**先算整圈段数
+  再按角度等比例缩、最少 2 段**——两种算法的结果会差一段。
+  那个「4 的倍数」不是凑整：它保证 0/90/180/270 落在网格上。少了它段数会跟 E3D 差
+  1~3 段，而 §6.11 的 `cancelFacets` **只消全等重叠**，共面两层侧壁段数一差抵消就整个
+  放弃，结果里留一层内壁。这是布尔收不收敛的问题，不是画质问题。
+  单测按 Core3D 主初始化实际用的 `gm_SetDefaultFacetTolerance(0.5)` 钉一张表
+  （R=25→16、100→32、250→52、3000→176、23400→484），另按 `arctol_` 初值 0.1 钉一张，
+  并断言段数恒为 4 的倍数、恒落在 [8, 512]。R=100 恰好是 32 —— 那正是本仓一直写死 32
+  的来处，也说明它只在那一个尺寸上对。512 上限是我们自己的护栏（libgm 没有），
+  差异写在常量注释里。
+  **两件还没做的写在模块文档里**：(1) 容差口径未对齐——libgm 是一个全局 `arctol_`
+  绝对量，我们是每个原语按自身尺度给 `tol()`，比例容差会让段数与尺寸无关；
+  (2) 其余曲面原语（圆柱/球/碟/锥台/两种环面/切角柱）仍写死 32 段，尚未走这条规则，
+  因为改段数会打断「所有普通圆柱共用一个 `CYLINDER_GEO_HASH` 单位网格」的复用，
+  得先把段数并进 hash。
+
+- 补齐 libgm 截面弧的**取点相位**：`GM_Extrusion::calcFacets` 实际逐 span 调
+  `D2_Span::getApproxPolyLine(tol)`，并非把每段弧按扫角均分；它先按整圆容差求 `n`，
+  再只插入落在弧角区间内的固定格点 `k·2π/n`，首尾保留真实端点。现将
+  `manifold_tessellate::flatten_profile_loop` 与 `sweep_mesh::flatten_loop` 同时切到
+  `libgm_discretise::span_polyline_by_tol`，避免挤出端面与扫掠截面对同一 PAVE 得到不同
+  顶点。回归钉住 `R=100, tol=0.5, 5°→95°` 的 10 点格子、正反 bulge、跨 0°、
+  近零 bulge 与 RM12 两道大圆弧；部署后 `24381/36931` 的单位网格为
+  4392 顶点 / 1464 三角，Plant UI 中弧面恢复且 ERROR=0。
+
+- `PrimLoft`（SweepSolid，结构件扫掠体）接进 `tessellate_libgm_param`：内核
+  `sweep_mesh::sweep_solid_mesh` 早已三支齐全、纯函数单测全绿，卡着没接的是各自的
+  RVM 门（T019/T020/T022）。这一轮先接线、RVM 门欠着——它是活库里数量最大的一类，
+  不接等于 OCC 退不掉。分派仍走 `do_solid_segments()`（Core3D `DB_Gensec` 的权威
+  三支），与 `SweepSolid::gen_occ_shape` 同一份输入、同一个局部坐标系：直脊无斜切
+  → 挤出，真斜切 → 放样（端面变换用 OCC 那边 `Solid::loft` 用的同一个
+  `get_face_mat4`），弧脊 → 回转。核对过 OCC 那条路上唯一看着像分歧的地方——SANN
+  的 btm/top 两条 wire 其实是同一条（`gen_occ_sann_wire` 里区分二者的那段是注释掉
+  的），所以直脊 SANN 走 loft 与走挤出同形。新增两条接线测试：三支都不得回 `None`
+  且各自过实体体检、未知截面响亮失败（OCC 那边同样是 `Err`）。
+  **至此 `PdmsGeoParam` 的 14 个 Prim 变体全部由 manifold 路径覆盖。**
+
+- `tessellate_libgm_param` 的兜底从 `_ => Ok(None)` 改成穷举
+  `Unknown | CompoundShape`：变体全覆盖之后，`_` 的意思就从「还没做的类型」变成了
+  「以后新增的类型自动悄悄回退 OCC」。往 `PdmsGeoParam` 加变体现在是一条编译错误。
+
+- `PrimPolyhedron` 接进 `tessellate_libgm_param`（specs/009 T010）：面片壳本来就是
+  现成的封闭壳，**不需要任何 CSG**，没有理由把整条链路拖回 OCC。解析阶段已带
+  `mesh` 的直接用，否则逐面剖分——每张面按 Newell 法向定面内二维基、`loops[0]`
+  外环其余是孔走 earcutr（面片常有孔，扇形三角化会填实），顶点不跨面复用所以
+  平面片按面着色，最后 `sweep_mesh::orient_outward` 按有向体积把整壳翻成外向。
+  容错口径与 `Polyhedron::gen_occ_shape` 一致（单张面建不出就跳过），但一张都剖
+  不出来是 hard fail，不回 `None` 悄悄溜去 OCC。五条单测：立方体六面对拍体积与
+  包围盒并过闭合可定向体检、整壳反绕向被体积兜底翻回、带孔面积 = 外环 − 孔、
+  自带网格优先、无面片与全共线两种响亮失败。
+
 ### 修复
+
+- 跨项目 DICT/CATA 裸 dbnum 选主改为「显式名单 + `included_projects` 顺序」两段式，
+  与全量同步侧对齐。`select_catalogue_candidates` 的 rank 此前只从
+  `catalogue_project_priority` 建，没被点名的项目一律 `usize::MAX`，一组候选里全是
+  `usize::MAX` 就抛「没有 catalogue_project_priority 选主」——于是**配置里漏写一个项目
+  就阻断整个 Catalogue 相位**，而 ADR-025 的相位屏障会把它后面每一条 Design 批次一起
+  钉在队列里（现场：`blockers:["catalogue: 跨项目 CATA/DICT dbnum=7000 冲突且没有
+  catalogue_project_priority 选主"]`，同时 `blocked_by_phase:"catalogue"`、
+  `design:{total:1,pending:1}`、`CATA 依赖清单已激活：0 个选中文件`）。这既不是文档口径
+  ——2026-08-04 配置变更记录里这个键的默认值一直写着「与 `included_projects` 同顺序」
+  ——也不是另一条路径的口径：`versioned_db::database` 的全量同步本来就是先推显式名单、
+  再把剩下的 `included_projects` 按书写顺序接在后面。现在 rank 补上同样的尾巴
+  （偏移量从 `priority.len()` 起跳，保证点名的恒压过没点名的；`or_insert` 让
+  `included_projects` 里写重的名字只认第一次）。**打错字仍然阻断**：名单里出现
+  `included_projects` 之外的项目或重复项目照旧记 blocker——漏写是「没意见」，写错是
+  另一回事，两者处置相反。落选方仍照打 `[manifest] … 被项目优先级遮蔽`，只是不再
+  停下来等人。三条单测：空名单按 included 顺序选主（候选刻意倒序传入，钉死「赢家来自
+  配置顺序而不是遍历顺序」）、半份名单里点名的在前其余按 included 排、未知项目仍阻断。
+
+- 房间增量的四条清边语句与纠正窗口的 `pe_owner` 清理改走图遍历边目标：
+  `render_room_relate_statements`、`render_room_panel_relate_write`、
+  `render_panel_room_topology_statements`、`render_element_relate_write` 以及
+  `existing_members_of_panel` 此前都是 `WHERE in =` / `WHERE out =` 的谓词形式，
+  `window_repair` 的硬删除则只把成对语句改了一半（`increment_pipeline` 那条早已是
+  `DELETE {pe}->pe_owner`）。**DELETE 拿不到二级索引**：8009 现场三张边表其实都有
+  `(in, out)` UNIQUE 索引（`unique_room_relate` / `unique_room_panel_relate` /
+  `unique_pe_owner`，前两条在仓库源码里找不到创建处——索引口径不能只看源码），但
+  10 万条边、索引在场的隔离实例实测 `DELETE … WHERE in = X` 仍是 3.132s，
+  `DELETE X->room_relate` 244.973ms；`out` 侧 2.953s vs 24.455ms，删除行数逐对相同。
+  面板重算按面板发、元素分支按元素发——全量重建就是面板数乘边表全扫。
+  读侧另算：`out` 侧连 SELECT 都够不着索引前缀（8009 只读实测 1.12s vs 392µs），
+  而 `existing_members_of_panel` 是按 `in` 的 SELECT，本来就走索引，改成边目标
+  **没有收益**（791.9µs vs 1.1236ms），只为四条房间语句形状一致。取证见
+  `docs/evidence/2026-08-20-edge-scan-sweep/`。排除子句从
+  `AND in NOT IN [..]` 变成挂在边目标后的 `WHERE in NOT IN [..]`，形状仍过
+  ReplaySafe（`is_bounded_target` 认边目标）。新增两条回归：一条钉住五条语句的边目标
+  形状并禁止谓词写法回流，另一条在 mem 库上实测「边目标 DELETE 真的删掉
+  `INSERT RELATION` 写入的边、且不误删同面板的其它成员边」——这是本次唯一会静默出错
+  的地方，若引擎只在 `RELATE` 时维护邻接索引，先清后写会退化成只写不清且不报错。
+
+- 同一条纪律补到另外两处：`query_service::spatial_bounds` 的
+  `FROM inst_relate WHERE in = pe:{refno}` 改成按记录 id 直接寻址
+  `FROM inst_relate:{refno}`（写口 `pdms_inst` 用同一对 `to_inst_relate_key()` /
+  `to_pe_key()` 渲染 id 与 in，两者选中同一行；数组 id 的版本化历史行的 `in` 是
+  版本化 pe，本来就不在命中集里）——`inst_relate` 是唯一连 `(in, out)` 索引都没有的
+  边表（只有 `anc` / `dbnum`），`LIMIT 1` 也救不了没有 aabb 的 refno，那要一路扫到
+  表尾；8009 现场只读实测 968.4ms vs 直址 121µs。`staging::preload` 删除子树的 `pe_owner`
+  拓扑拷贝从 `WHERE in IN [..] AND out IN [..]` 改为按成员出边走图再过滤 `out`
+  （`IN` 不是 `=`，`unique_pe_owner` 用不上），与它上面那条「`pe` 按记录 id 直接
+  寻址、895 万行 64.4s → 0.5ms」的注释同源。`preload` 的 `pe_owner` 夹具顺带从
+  `RELATE` 换成生产写口的复合 id `INSERT RELATION`：子树闭包与删除桶拷贝都走图遍历，
+  夹具用 `RELATE` 的话「邻接索引是否也对 `INSERT RELATION` 维护」这个区别测不出来，
+  而它一旦不成立就是删除级联在暂存里走不到后代、`status = OK` 地少删一片。
+
+- RVM 基准对拍工具的四处边表全扫一并收口：`compare::render_children_select` 的
+  `FROM pe_owner WHERE out IN [..]` 改成 `{owner}<-pe_owner`——它在
+  `load_subtree_refnos` 的 BFS 里每层每块各发一次，是全仓边表全扫**次数**最多的地方，
+  一次子树对拍要扫几十遍整张 `pe_owner`（8009 现场 912 万条边）；`compare::load_gen_side` 的
+  `FROM inst_relate WHERE in IN [..]` 改成按记录 id 直接寻址；`mesh_compare` 的
+  `gen_world_mesh` 与 `ensure_booled_mesh_files` 的 `WHERE in = {pe_key}` 改成
+  `{pe_key}->inst_relate`（这里拿到的是字符串键，走图不必再做 id 字符串手术）。
+  mem 库实测确认两件事：`INSERT RELATION` 写入的 `inst_relate` 行经
+  `{pe}->inst_relate` 取得到、计划为 `Iterate Edges`；直接寻址一组 id 时不存在的那些
+  **不出行**，与 `WHERE in IN [..]` 逐字同一份结果——`load_gen_side` 拿整棵子树当输入，
+  绝大多数节点没有 `inst_relate` 行，多出 NONE 行就会让 `GenRow` 反序列化整批失败。
+
+- 边表全扫收口完毕：诊断 bin、夹具与 live 集成测试里剩下的谓词写法一并改为边目标
+  或记录 id 直址——`test_tubi_inst_relate`（嵌套两层全扫）、`l3_suite` 的场景快照
+  （`inst` / `owner` / `room` 三项，每场景拍三次）、`room_fixture` 的清理与两处
+  `WHERE out =`、`room_live_issue7` 七处、`issue7_e2e_increment` 四处、
+  `staged_transform_e2e`、`increment_pipeline` 与 `cata_closure` / `cata_model` /
+  `model_update_plan` / `fork_surreal_compat` 的 live 断言、`spatial_tree_8000.py`。
+  `room_fixture` 那四条 `WHERE in IN [..] OR out IN [..]` 换成 `{pe}<->{table}`
+  （mem 实测确认 `<->` 一次删掉两个方向）。
+
+  两处**刻意没动**：`l3_suite` 快照里的 `geo_relate WHERE in IN [pe:..]` 传的是
+  `pe:` 键，而全仓每个 `geo_relate` 写口（`pdms_inst`、`occ_generate`、
+  `manifold_bool`、`increment_manager`）的 `in` 都是 `inst_info:`，照此它应当恒空，
+  可 m1 的 I-3 断言又要求它恰好是 5——两者不可能同时成立，得连断言一起判，不是性能
+  收口该顺手改的；`staged_regen_e2e` 与 `Run-RoomE3DE2E.ps1` 的 `WHERE in = X OR
+  anc CONTAINS Y` / `OR in.owner = X` 带解引用与 `OR`，图遍历不等价。
+
+  `test_tubi_inst_relate` 的重写踩到一个坑，记在这里：从**一组**记录出发的
+  `$var->inst_relate` 会把每个字段裹一层数组（`refno: [pe:xxx]`），必须
+  `array::flatten(...)`，否则下游 `RefnoEnum` / `String` 反序列化整批失败。
 
 - 修复 `node_gen_room_probe` 在大表上用 `WHERE out IN (...)` / `WHERE in IN (...)`
   扫描 `room_relate`、`room_panel_relate` 的性能问题：改为从 `pe` 记录执行
@@ -17,7 +206,166 @@
   从 `Iterate Table` 变为 `Iterate Edges`，BRAN 根 `24384/23257` 的 10 元素子树汇报
   即时完成；新增源码回归测试，禁止旧扫描 SQL 回流。
 
-- 修复布尔成品已写入 `booled_id`、但 `insts_flat` 尚未回填时查看端仍加载正体原语的问题：Manifold/OCC 布尔成功路径与平表补扫现在同步优先写入单位变换的成品实例；旧库回退查询同样优先读取 `booled_id`。`=24381/36945` 不再加载带 `Z×234` 变换的正体圆柱，右视图恢复为半球。
+- 整库快删与 ADR-021 回退重建的 `pe_owner` 清理改走 OWNER 复合 id 区间：每个权威
+  Ref0 一条 `DELETE pe_owner:[pe:{ref0}_0, NONE]..=[pe:{ref0}_9999999999, ..]`，取代
+  原来 `array::flatten(SELECT VALUE ->/<-pe_owner FROM pe:{ref0}_0..)` 那两句图遍历。
+  边 id 固定是 `[OWNER_PE, 槽位]`，owner 在区间内的边本就是 id 连续的一段，不必先把
+  边 id 全捞进内存——百万级 PE 的库上那是清库耗时的大头。少掉的 `->pe_owner` 方向
+  在整库清理里是空扫（所有权链不跨库，且本 dbnum 的每个 Ref0 各出一条），**部分
+  裁剪不满足这个前提**，`prune_above_watermark` 一行未动。这个跨 owner 的区间形状是
+  `staging::replay_safe` 明令拒绝的写法，该限制不放宽，边界就地写在 `fast_delete.rs`。
+  顺带换来幂等：新语句不读 `pe`，上一轮清库半途失败留下的边下一轮能清掉（遍历从空
+  区间出发永远够不着）。后置条件同步加严，逐 Ref0 数 `pe_owner` 残留必须为 0，删边
+  语句写歪时当场报错而不是报成功。三条回归测试 + 隔离库实测（目标区间 3 → 0，上下
+  两侧相邻 Ref0 与前缀延长型 Ref0 全部保留）留证于
+  `docs/evidence/pe-owner-range-fast-delete-20260820/`。
+
+- 修正 `db8000_two_delete_fixture`、`db8000_session_pairs` 的 CI 依赖图：移除
+  `legacy_session_replay` required-feature，所有窗口采集改走生产权威入口
+  `IncrementPipeline::collect_window`。跨会话断言改为“窗口右端每个 refno 恰好一个
+  终态操作”，索引差分与 vendor 对拍直接比较净窗口，不再把逐会话操作并集当生产语义。
+  固定工具链下默认 feature 命令通过 6/6 与 21/21，Cargo metadata 确认两个 target
+  `required_features` 均为空。
+
+- 为 `/health.room_build` 增加 2 秒硬超时。现场新版启动期 SurrealDB 繁忙时该新增
+  查询曾让整个健康接口超过 10 秒无响应；现在返回 `rebuild_required=true` 与超时原因，
+  不再让可观察字段拖死探活，并有 pending future 回归测试。
+
+- 修复布尔成品已经写入 `booled_id`、但 `insts_flat` 尚未回填时 Plant UI 仍加载正体
+  原语的问题：Manifold/OCC 两条布尔成功路径现在与 `booled_id` 同步写入单位变换的
+  成品实例，平表补扫也优先使用该成品；Plant UI 的旧库回退查询同样优先读取
+  `booled_id`。`=24381/36945` 不再加载带 `Z×234` 变换的正体圆柱，右视图恢复为
+  宽高比 2:1 的半球。新增写入不变量、平表优先级和读侧 identity transform 回归。
+
+- 修复 Plant UI 中 `=24381/36945`（1RX-RM13 穹顶）与 E3D 外观不一致：首先发现
+  Plant UI 实际读取 `test-worklspace/bin/assets/meshes`，其中仍部署着 2026-07-20 的
+  旧网格，而本轮生成结果在仓库 `assets/meshes`，两者 SHA256 不同；已按哈希暂存并
+  原子替换部署网格。其次把 `manifold_to_plant_mesh` 从无条件逐三角面法线改成按 f64
+  精确位置归组、面积加权的折痕感知法线：夹角小于 10° 的曲面片光顺，端盖/侧壁和
+  箱体棱边继续拆组。新增球面共享法线与箱体三组硬边回归。定向重生成后 AABB 保持
+  `46919.106 × 46919.106 × 23400 mm`；网格逐点球面方程回归也已补齐。最终界面实例
+  选路问题由上一条修复；部署前网格、源码、补丁和可执行回滚均已留证。
+
+- **`=24381/36945`（1RX-RM13 穹顶）现在能端到端出一个干净的半球。** 新增
+  `rm13_dome_pane_minus_nrev_is_a_hemisphere`：按活库里存的两个参数三角化，再走生产
+  那条 manifold 差集，判据是 `Manifold::genus() == 0` 加 f64 体积对 ⅔πR³（0.1%）加
+  包围盒。这颗构件把两层「倒角把直边吃光」的把戏叠在一起（PLOO 四角 FRAD 等于半边长
+  → 方变圆；NREV 四个顶点里两个坐标重合 → 倒角吃掉两条腿只剩一段圆弧），是整条链路
+  最硬的压力测试，一口气挖出四个独立缺陷，逐条记在下面。
+
+- 修复 `NREV` / `REVO` 同时命中 LOOP owner 与 primitive noun 表时被重复派发的问题：
+  这两类参数必须先由子 LOOP/PLOO 拼装，现统一从 primitive worker 路由中排除。
+  定向生成不再因 `NREV` 的预期 `None` 误报 hard fail；`24381/36945` live 强制替换
+  返回 `Generated`、可渲染 1、写入 2，几何/AABB/空间树计数保持稳定。
+
+- 挤出的顺时针轮廓建不出任何东西。`tessellate_extrusion` 靠 `FillRule::Positive` 挖孔，
+  而它只填逆时针环——PDMS 的轮廓**不保证绕向**（那颗 PANE 的 PLOO 就是顺时针），
+  于是截面直接是空的、`bail!`、回退 OCC。按外环有向面积统一翻一次，所有环一起翻，
+  外环与孔的相对绕向不变。回转支 2026-08-19 就修过同一个坑，挤出支漏了。
+
+- 布尔结果的法向在 f32 上算，23400mm 处只剩三四位有效数字：轻则法向歪，重则两个顶点
+  舍入到同一个 f32 → 叉积为零 → `normalize()` 给出 **NaN 法向**，一路写进 `.mesh`。
+  `manifold_to_plant_mesh` 改为在 f64 顶点上算法向，并丢掉 0.1µm 内塌陷的三角
+  （丢它不开洞：设 A、B 重合，这个三角贡献的是一条自环加上互为反向的两条边，
+  自己跟自己抵消，其余边的配对一条没动）。
+
+- **共壁负体的差集会碎成一地薄片。** PDMS 里负体常与母体共壁（那颗穹顶的 NREV 就是
+  跟 PANE 同一个圆柱，只在内部多挖半球）。两个圆柱各自离散出的 484 边形只要不是逐位
+  相同，差集就沿着共壁碎开——实测 **亏格 −131，即 132 个互不相连的壳**：一个半球加
+  131 片碎屑。碎屑总体积只有 1e-7，体积对拍根本发现不了，但它们会进 `.mesh`、会
+  z-fighting、会让后续布尔更难收敛。`subtract_negatives` 现在把每个负体按**自身包围盒
+  中心**放大 1e-6（那颗穹顶上是 0.023mm）再做差，亏格回到 0，体积偏差 0.018%。
+  E3D 不需要这一步，它靠共面反向面逐面全等抵消（§6.11），而那条路要求两侧段数与相位
+  完全一致。
+
+- 挤出与回转的弦高容差改用**绝对量** `FACET_TOL_MM = 0.5`（Core3D 主初始化传给
+  `gm_SetDefaultFacetTolerance` 的就是这个值）。原来用的是 `BrepShapeTrait::tol()`
+  ——按自身尺度给的**比例**容差，`tol/R` 恒定，段数于是与尺寸无关：同一个圆在挤出侧
+  和回转侧只要包围盒不同就分成不同段数（那颗穹顶正是正体 60 段、负体 84 段）。
+  改成绝对量之后两侧同为 484 段，配合 §7.9「段数取到 4 的倍数」保证相位也一致
+  （顶点都落在 0/90/180/270 上）。**其余曲面原语仍是写死 32 段**，见上面 `libgm_discretise` 那条。
+
+- 修复提交查询超时被当成「确定性拒绝」、一次尝试就把暂存窗口永久判死的问题。
+  等满 `COMMIT_QUERY_TIMEOUT` 没等到服务端回话，语句既没被接受也没被拒绝，这是
+  活性问题；但非 outcome-sensitive 的那条分支只报「终止本查询」，
+  `staged_writeback_failure_is_transient` 认得的三个标记一个都不沾，于是走确定性
+  出口直接落终态阻断——现场 dbnum=8000 的 `242..=243` 就是这样卡在一个 32 行 /
+  1.6 KB 的块上、水位停在 241。两个超时分支现在共用 `COMMIT_QUERY_TIMEOUT_MARKER`，
+  分类器据此把它归进瞬时桶；journal 块本来就按幂等重放设计，重放安全。预算是有限的
+  （`STAGED_COMMIT_TIMEOUT_ATTEMPTS = 3`）：无限重放会走到另一个极端，一条真的跑不完
+  的语句抱着 `STAGED_COMMIT_SERIAL` 每 30 秒烧一个 120s 死线。`is_transient` 判据
+  因此多收一个「这是第几次」。
+
+- 修复同 dbnum 多文件的阻断一律记在 Design 阶段的问题：CATA/DICT 的同号冲突也会
+  因此把 design 拽成 blocked，而 design 侧可能一个问题都没有，阶段就绪判定从此
+  说谎。`blocked_dupes` 现在带着 `DataPhase::of_db_type` 判出的阶段入账，与同一段里
+  `manifest_totals` 的口径一致。顺带修掉 `dependency_manifest_version` 连着被赋两次、
+  第一个直接被遮蔽的问题——那行日志此前数的是依赖清单的文件数、打的却是身份清单的
+  版本号；两份清单各有独立计数器，现在各报各的。
+
+- `boolean_generation_refreshes_aabb_after_final_relations_exist` 这道顺序门自己红了：
+  它按源码文本找 `apply_insts_boolean_manifold(&target_visible_refnos`，而那处调用早已
+  被 rustfmt 拆成多行，带实参的针扎不中，`expect` 直接 panic。针改成只认函数名。
+  值得记一笔的是失败方向：源码断言找不到锚点时是「测试红」而不是「守卫失效」，
+  这次运气好；反过来写（找不到就当通过）会安静地把不变量丢掉。
+
+- 修复增量看门狗在共享盘抖动时可能整体死锁、且此后不再发现任何增量的问题。
+  三件事凑成一个锁环：notify 8.0.0 的 poll 线程**同时持有 `watches` 与
+  `data_builder` 两把互斥锁**同步调用事件回调（整轮 rescan 都在锁内）；回调过去是
+  往容量 1 的 futures channel 上阻塞发送，而该 channel 的真实容量是
+  `buffer + sender 数` = 2，一轮 rescan 里变化文件超过两个就把 poll 线程堵在发送上
+  （与「单轮重扫比轮询间隔慢」无关，光靠数量就能触发）；唯一能腾出容量的是
+  `async_watch` 的事件循环，而它同一时刻可能正走重挂分支，`MountState::mount` →
+  `PollWatcher::watch()` 要的正是 poll 线程手里那两把锁。回调现在只做一次非阻塞
+  `try_send` 置位，永不等待；`the_poll_watcher_callback_never_waits_on_the_event_loop`
+  钉住这条（复现它要真的把共享盘挂掉，只能钉源码）。
+
+- 修复一次 SAVEWORK 会换来 K 轮背靠背完整重扫的问题：notify 的 `rescan` 对**每一个**
+  变化 path 单独发一条事件、事件之间零合并，而每条候选事件此前都独立触发一轮完整
+  清单重扫，K 轮扫出来的还是同一份结论。现在事件只把 `WatchSweepGate` 置脏，首事件
+  立刻开一轮，最小间隔（`AIOS_WATCH_MIN_SWEEP_GAP_SECS`，默认 5s）内的后续变化攒成
+  一位脏，闸一开补**恰好一轮**。这是限频不是丢弃——闸内到达的变化完全可能是上一轮
+  重扫**之后**才发生的新保存，脏位只准被真正跑出去的那一轮清掉，否则它就只能等下一
+  拍周期对账（300s）。两条纯状态机回归钉住这两半语义。与「事件只标脏、判定必须走
+  完整清单」不冲突：闸只改什么时候调那条权威路径，不新增任何按事件的局部判定。
+
+- 修复 PollWatcher 轮询线程死亡时无人知晓的问题。此前 `async_watch` 把「信号流关闭」
+  当作看门狗死亡的判据，而那个条件永远不会成立：发送端活在事件回调里、回调活在
+  `watcher` 的 `data_builder` 里，只要 `watcher` 对象还在栈上，poll 线程死透了发送端
+  也不会被丢弃。notify 8.0.0 又把 `thread::spawn` 的返回值直接 `let _ =` 丢掉，线程
+  起不来与 panic 掉一样没有声音——外在表现就是「服务在跑、文件改了没反应」，只有
+  周期对账还在兜。现在每一拍对账都主动 `PollWatcher::poll()` 探一次（控制 channel
+  的 Receiver 正是被那条线程拿着的，线程没了 send 就失败），失败即按永久性故障逐拍
+  告警并说明当前退化成多少秒一次的发现。探不了「线程活着但卡死」：从外面看它和
+  「厂里没人动」一模一样，需要 notify 自己吐进度。
+
+- 共享盘重挂轮的 `MissedTickBehavior` 补成 `Delay`（此前是 tokio 默认的 `Burst`）：
+  本循环里每一拍都可能 await 一轮完整重扫，被挡久了以后 `Burst` 会把欠下的拍一次性
+  连补出来，等于在最忙的时刻再排队几轮重挂。周期对账那一拍早已是 `Delay`。
+
+- `async_watch` 的两个间隔默认值抽成 `DEFAULT_WATCH_POLL_SECS` /
+  `DEFAULT_WATCH_RECONCILE_SECS`，并加一条守卫断言子集轮的默认值必须比全集对账轮密
+  （调反不会有任何东西报错，但最贵的那一轮会变成主路径）。**两个值本身都没动**：
+  子集轮询仍是 30s，周期对账仍是 300s。曾计划把子集轮询降到 5s 以缩短发现延迟，
+  评审后撤回——决定负载的不是「单轮重扫多快」（本地实测 0.35~0.83s），而是「一次
+  保存产生多少轮重扫」，而后者在共享盘上一个数都还没量到；上面两条修复正是把这个
+  乘数压掉的前置条件。顺带更正一处此前写错的算式：`MAX_ATTEMPTS = 5` 撑出的
+  `5 × 300s = 25 分钟`故障容忍窗口只在**文件安静**时成立，park 计数的条件是
+  「同 dbnum 窗口右端没前进」、不区分是哪种来源把它重新入的队，watch 重扫一样在烧
+  这份预算。
+
+- 修复相邻构件方向不共线时直段被静默丢弃、三维里只剩一段空白的问题：轴线判定不再决定
+  「写不写这一行」，只决定这一行是不是实体管。不可成管的连接照样落库，带
+  `invalid` 与 `invalid_reason`（`direction` / `no_bore`），位姿改用局部 `+Z` 贯穿两个
+  连接点，让查看端既有的虚线中心线正好画在 E3D 画点线的位置。口径解析提前到判定之前，
+  拐死的连接也报得出它本该有的口径。查询层的诊断标记从「端点已删除」扩成
+  「记录自带标记 or 端点已删除」，缺字段的历史行仍按可成管处理。
+
+- 修复 BRAN 直管关系在增量重生成后保留旧高位索引、且新关系引用未落库
+  `trans` / `aabb` 内容的问题：每个 BRAN 现以单个事务删除旧出边、持久化内容寻址记录并
+  写入完整 `tubi_relate` 集合，空集合同样生效；直接写与 ADR-017 暂存写共用
+  `execute_model_write`。元素级联清理同时删除其直管出边，并补充变短、空集合、幂等重放、
+  内容可解引用及事务失败保旧回归。
 
 ## 2026-08-19
 
@@ -72,6 +420,17 @@
 
 ### 修复
 
+- 修复 dbnum=8000 复制 BRAN 的增量数据已进入但 plant-ui 无节点/模型的链式故障：
+  Watch Scope 现保留 PROP 与多项目 CATA 的 Ref0 身份，无关项目 DESI 副本不再阻断
+  8000；CATA OWNER 替换按硬行数上限语义分块；Add 的旧入边清理改用图遍历目标，
+  避免 `DELETE ... WHERE in` 全边表扫描卡满 120 秒。LSnout 的单元参数现与三位小数
+  mesh hash 使用同一归一化值，消除 `0.5555555/0.5555556` 共用同一
+  `inst_geo` id 却内容冲突的模型死信。直管段现在只写 `tubi_relate`，不再通过
+  `ShapeInstancesData::insert_tubi` 用 `leave_refno` 覆盖 ELBO/TEE/VALV/BEND 的
+  `inst_relate` 元件库关系。现场窗口 `242..=243` 已提交到水位 243；新 BRAN
+  `24384/26229` 强制重算后保留 17 条元件实例关系和 7 条直管关系，可绘制网格实例由
+  25 恢复为 57。
+
 - 修复 manifold 路径生成的 `.mesh` 法线数组为空，导致 plant-ui 将同一 EXTR 端盖
   按三角形渲染出随机明暗的问题：Manifold 输出现在展开为带面法线的硬边网格；回送
   CSG 前按变换后坐标焊接顶点，兼顾 E3D 外观与闭合拓扑。增加 dbnum=8000 会话 239
@@ -79,8 +438,16 @@
 
 - 修复 D: AMS 直接图形文档中 `Limits CE` 无响应：该文档暴露的视图类型为 `G3D`，
   原命令只接受 `GM3D` 并静默返回；启动修复现在同时接受两种 3D 视图，并在本地
-  Drawlist 为空时先加入、更新当前元素，再执行 limits 与刷新。修复脚本带原件备份、
-  幂等标记和启动前验证，避免 E3D 补丁漂移被静默跳过。
+  Drawlist 为空时先加入、更新当前元素，再执行 limits 与刷新。进一步统一 Model
+  Explorer Add 与 Limits 的直接 AMS 路由：`ViewId=0` 时固定选择最新注册的 Drawlist，
+  不再让已写入内容的旧 `DL[0]` 通过“成员最多”启发式夺走命令。相机 limits 现在也
+  使用该 Drawlist 实际 attachment 的可见 G3D gadget，避免元素已加入但仍只在视口边缘
+  露出一段。启动后不再 kill/re-register 已注册命令，因为 Ribbon 的托管委托会继续
+  指向被销毁实例；改为保留并验证启动时实例。活动与 shadow PMLLIB 同时幂等修复，
+  Frida 临时目录移至 E:，避免系统盘耗尽导致图形 finisher 半途退出。新增 CE 图形物化
+  刷新：`drawlist.update()` 后先刷新 attachment view，再读取 limits，修复冷启动第一次
+  点击灰屏、第二次才显示的问题；现场清理 5 个并发 AMS 实例后，以唯一 PID 61168 验证
+  复制 BRAN 首次点击即可完整显示并居中。
 
 - 修复 D: AMS 启动后 Steelwork 命令刷新反复报告 PML `(2,751)`：shadow
   `PMLCOMMANDMANAGER` 先创建 `STEELWORKGSETTINGS`，并将自动命令事件注册移到支持命令

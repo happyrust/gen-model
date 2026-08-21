@@ -20,6 +20,23 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
+fn invalid_brep_message(
+    refno: impl std::fmt::Display,
+    noun: &str,
+    cylinder_dimensions: Option<(f32, f32)>,
+    targeted: bool,
+) -> String {
+    let dimensions = cylinder_dimensions
+        .map(|(diameter, height)| format!("; DIAM={diameter}, HEIG={height}"))
+        .unwrap_or_default();
+    let prefix = if targeted {
+        "targeted primitive"
+    } else {
+        "primitive"
+    };
+    format!("{prefix} {refno} ({noun}) produced an invalid BREP shape{dimensions}")
+}
+
 /// 生成基本体的几何数据
 pub async fn gen_prim_geos(
     db_option: Arc<DbOption>,
@@ -46,8 +63,8 @@ pub async fn gen_prim_geos(
         let all_refnos = all_refnos.clone();
         let processed_cnt = processed_cnt.clone();
         let sender = sender.clone();
-        let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(
-            async move {
+        let handle =
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
                 let negative_nouns = shared::negative_noun_refs();
                 let mut shape_insts_data = ShapeInstancesData::default();
                 let start_idx = i * batch_size;
@@ -212,30 +229,90 @@ pub async fn gen_prim_geos(
                         attr.create_brep_shape(neg_limit_size)
                     };
                     let Some(brep_shape) = brep_shape else {
+                        let prefix = if targeted {
+                            "targeted primitive"
+                        } else {
+                            "primitive"
+                        };
+                        let message =
+                            format!("{prefix} {refno} ({cur_type}) produced no BREP shape");
+                        crate::data_interface::geom_error::record_primitive_failure(
+                            &refno.to_pdms_str(),
+                            cur_type,
+                            &message,
+                        )
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "{message}; persist primitive geom_error failed: {error:#}"
+                            )
+                        })?;
                         if targeted {
-                            anyhow::bail!(
-                                "targeted primitive {refno} ({cur_type}) produced no BREP shape"
-                            );
+                            anyhow::bail!(message);
                         }
                         continue;
                     };
                     if !brep_shape.check_valid() {
+                        let cylinder_dimensions = matches!(cur_type, "CYLI" | "SLCY" | "NCYL")
+                            .then(|| {
+                                (
+                                    attr.get_f32_or_default("DIAM"),
+                                    attr.get_f32_or_default("HEIG"),
+                                )
+                            });
+                        let message =
+                            invalid_brep_message(refno, cur_type, cylinder_dimensions, targeted);
+                        crate::data_interface::geom_error::record_primitive_failure(
+                            &refno.to_pdms_str(),
+                            cur_type,
+                            &message,
+                        )
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "{message}; persist primitive geom_error failed: {error:#}"
+                            )
+                        })?;
                         if targeted {
-                            anyhow::bail!(
-                                "targeted primitive {refno} ({cur_type}) produced an invalid BREP shape"
-                            );
+                            anyhow::bail!(message);
                         }
                         continue;
                     }
 
                     transform = brep_shape.get_trans();
                     if transform.is_nan() {
+                        let prefix = if targeted {
+                            "targeted primitive"
+                        } else {
+                            "primitive"
+                        };
+                        let message =
+                            format!("{prefix} {refno} ({cur_type}) produced a NaN transform");
+                        crate::data_interface::geom_error::record_primitive_failure(
+                            &refno.to_pdms_str(),
+                            cur_type,
+                            &message,
+                        )
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "{message}; persist primitive geom_error failed: {error:#}"
+                            )
+                        })?;
                         if targeted {
-                            anyhow::bail!(
-                                "targeted primitive {refno} ({cur_type}) produced a NaN transform"
-                            );
+                            anyhow::bail!(message);
                         }
                         continue;
+                    }
+                    if let Err(error) = crate::data_interface::geom_error::clear_primitive_failure(
+                        &refno.to_pdms_str(),
+                    )
+                    .await
+                    {
+                        log::warn!(
+                            "[geom_error] 基本体成功后的销账失败 target={}: {error:#}",
+                            refno.to_pdms_str()
+                        );
                     }
                     geo_param = brep_shape
                         .convert_to_geo_param()
@@ -302,8 +379,7 @@ pub async fn gen_prim_geos(
                     // dbg!("Send last prim insts data");
                 }
                 Ok::<_, anyhow::Error>(())
-            },
-        );
+            });
 
         handles.push(handle);
     }
@@ -316,4 +392,27 @@ pub async fn gen_prim_geos(
         t.elapsed().as_millis()
     );
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::invalid_brep_message;
+
+    #[test]
+    fn zero_sized_targeted_ncyl_reports_the_dimensions_and_stays_an_error() {
+        let message = invalid_brep_message("24381_38635", "NCYL", Some((0.0, 0.0)), true);
+        assert!(message.contains("24381_38635 (NCYL)"), "{message}");
+        assert!(message.contains("DIAM=0"), "{message}");
+        assert!(message.contains("HEIG=0"), "{message}");
+        assert!(message.contains("invalid BREP shape"), "{message}");
+    }
+
+    #[test]
+    fn non_cylinder_invalid_brep_keeps_the_generic_diagnostic() {
+        let message = invalid_brep_message("1_2", "BOX", None, true);
+        assert_eq!(
+            message,
+            "targeted primitive 1_2 (BOX) produced an invalid BREP shape"
+        );
+    }
 }

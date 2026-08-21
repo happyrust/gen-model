@@ -45,6 +45,8 @@ pub const TABLE: &str = "geom_error";
 pub(crate) const BOOL_POS: &str = "bool_pos";
 /// 负实体网格载不进 manifold 的诊断类型。
 pub(crate) const BOOL_NEG: &str = "bool_neg";
+/// 基本体数据无法产生可用 BREP（缺失、非法或变换含 NaN）。
+pub(crate) const PRIMITIVE: &str = "primitive";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeometryFailurePolicy {
@@ -52,7 +54,7 @@ pub enum GeometryFailurePolicy {
     BestEffortFallback,
 }
 
-const KINDS: [&str; 2] = [BOOL_POS, BOOL_NEG];
+const BOOL_KINDS: [&str; 2] = [BOOL_POS, BOOL_NEG];
 
 /// 本进程已知在表里有行的目标；决定一次成功要不要发 DELETE。
 static KNOWN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
@@ -61,6 +63,10 @@ fn known() -> std::sync::MutexGuard<'static, Option<HashSet<String>>> {
     KNOWN
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn known_key(kind: &str, target: &str) -> String {
+    format!("{kind}\0{target}")
 }
 
 fn record_id(kind: &str, target: &str) -> String {
@@ -82,13 +88,30 @@ fn render_upsert(kind: &str, target: &str, geom: &str, error: &str) -> String {
     )
 }
 
+fn render_primitive_upsert(target: &str, noun: &str, error: &str) -> String {
+    format!(
+        "UPSERT {id} SET kind = '{PRIMITIVE}', target = '{target_text}', noun = '{noun_text}', \
+         occurrences = (occurrences?:0) + 1, \
+         first_seen_at = first_seen_at?:time::now(), \
+         last_seen_at = time::now(), last_error = '{error_text}';",
+        id = record_id(PRIMITIVE, target),
+        target_text = escape_surql_str(target),
+        noun_text = escape_surql_str(noun),
+        error_text = escape_surql_str(error),
+    )
+}
+
 /// 一个元素布尔成功就把它这两类降级记录一起清掉：正/负实体是同一件事的两侧，
 /// 留半条会让清单说「它还坏着」。
 fn render_clear(target: &str) -> String {
-    KINDS
+    BOOL_KINDS
         .iter()
         .map(|kind| format!("DELETE {};", record_id(kind, target)))
         .collect()
+}
+
+fn render_clear_kind(kind: &str, target: &str) -> String {
+    format!("DELETE {};", record_id(kind, target))
 }
 
 /// 把表里现有的行播种进 [`KNOWN`]。
@@ -97,15 +120,20 @@ async fn seed() -> anyhow::Result<()> {
         return Ok(());
     }
     let mut response = SUL_DB
-        .query(format!("SELECT target FROM {TABLE};"))
+        .query(format!("SELECT kind, target FROM {TABLE};"))
         .await?
         .check()?;
     #[derive(serde::Deserialize)]
     struct Row {
+        kind: String,
         target: String,
     }
     let rows: Vec<Row> = response.take(0)?;
-    *known() = Some(rows.into_iter().map(|row| row.target).collect());
+    *known() = Some(
+        rows.into_iter()
+            .map(|row| known_key(&row.kind, &row.target))
+            .collect(),
+    );
     Ok(())
 }
 
@@ -126,8 +154,45 @@ pub(crate) async fn note_skip(kind: &'static str, target: &str, geom: &str, erro
         return;
     }
     if let Some(set) = known().as_mut() {
-        set.insert(target.to_string());
+        set.insert(known_key(kind, target));
     }
+}
+
+/// 严格记录一条基本体数据错误。调用方仍保留原来的生成失败语义；若诊断写入失败，
+/// 错误会继续上浮，避免“模型坏了，但数据库里没有记录”的静默缺口。
+pub(crate) async fn record_primitive_failure(
+    target: &str,
+    noun: &str,
+    error: &str,
+) -> anyhow::Result<()> {
+    if let Err(seed_error) = seed().await {
+        log::warn!("[geom_error] 已有错误行播种失败（继续尝试写当前基本体）: {seed_error:#}");
+    }
+    SUL_DB
+        .query(render_primitive_upsert(target, noun, error))
+        .await?
+        .check()?;
+    if let Some(set) = known().as_mut() {
+        set.insert(known_key(PRIMITIVE, target));
+    }
+    Ok(())
+}
+
+/// 基本体重新生成成功后销掉它自己的错误行，不触碰同一目标可能存在的布尔错误。
+pub(crate) async fn clear_primitive_failure(target: &str) -> anyhow::Result<()> {
+    seed().await?;
+    let key = known_key(PRIMITIVE, target);
+    if !known().as_ref().is_some_and(|set| set.contains(&key)) {
+        return Ok(());
+    }
+    SUL_DB
+        .query(render_clear_kind(PRIMITIVE, target))
+        .await?
+        .check()?;
+    if let Some(set) = known().as_mut() {
+        set.remove(&key);
+    }
+    Ok(())
 }
 
 /// 这个元素这一轮布尔做成了：销账。没在册的目标一个 DELETE 都不发。
@@ -136,7 +201,11 @@ pub(crate) async fn note_success(target: &str) {
         log::warn!("[geom_error] 已有降级行播种失败（本轮不销账）: {error:#}");
         return;
     }
-    let listed = known().as_ref().is_some_and(|set| set.contains(target));
+    let listed = known().as_ref().is_some_and(|set| {
+        BOOL_KINDS
+            .iter()
+            .any(|kind| set.contains(&known_key(kind, target)))
+    });
     if !listed {
         return;
     }
@@ -149,7 +218,9 @@ pub(crate) async fn note_success(target: &str) {
         return;
     }
     if let Some(set) = known().as_mut() {
-        set.remove(target);
+        for kind in BOOL_KINDS {
+            set.remove(&known_key(kind, target));
+        }
     }
 }
 
@@ -165,6 +236,8 @@ pub async fn snapshot() -> Option<serde_json::Value> {
         #[serde(default)]
         geom: Option<String>,
         #[serde(default)]
+        noun: Option<String>,
+        #[serde(default)]
         occurrences: u64,
         #[serde(default)]
         last_error: Option<String>,
@@ -172,7 +245,7 @@ pub async fn snapshot() -> Option<serde_json::Value> {
         last_seen_at: Option<String>,
     }
     let query = format!(
-        "SELECT kind, target, geom, occurrences, last_error, \
+        "SELECT kind, target, geom, noun, occurrences, last_error, \
          type::string(last_seen_at) AS last_seen_at \
          FROM {TABLE} ORDER BY last_seen_at DESC;"
     );
@@ -183,13 +256,13 @@ pub async fn snapshot() -> Option<serde_json::Value> {
         .and_then(|mut response| response.take(0))
         .unwrap_or_default();
     let latest = rows.first()?;
-    let by_kind = KINDS
-        .iter()
-        .filter_map(|kind| {
-            let count = rows.iter().filter(|row| row.kind == *kind).count();
-            (count > 0).then(|| (kind.to_string(), serde_json::json!(count)))
-        })
-        .collect::<serde_json::Map<_, _>>();
+    let mut by_kind = serde_json::Map::new();
+    for row in &rows {
+        let count = by_kind
+            .entry(row.kind.clone())
+            .or_insert_with(|| serde_json::json!(0));
+        *count = serde_json::json!(count.as_u64().unwrap_or_default() + 1);
+    }
     Some(serde_json::json!({
         "total": rows.len(),
         "by_kind": by_kind,
@@ -197,6 +270,7 @@ pub async fn snapshot() -> Option<serde_json::Value> {
         "last_kind": latest.kind,
         "last_target": latest.target,
         "last_geom": latest.geom,
+        "last_noun": latest.noun,
         "last_error": latest.last_error,
         "last_seen_at": latest.last_seen_at,
     }))
@@ -240,6 +314,29 @@ mod tests {
             sql.contains("DELETE geom_error:['bool_neg', '24384/23259'];"),
             "{sql}"
         );
+    }
+
+    #[test]
+    fn primitive_success_only_clears_the_primitive_error() {
+        let sql = render_clear_kind(PRIMITIVE, "24381/38635");
+        assert_eq!(sql, "DELETE geom_error:['primitive', '24381/38635'];");
+        assert!(!sql.contains("bool_pos"), "{sql}");
+        assert!(!sql.contains("bool_neg"), "{sql}");
+    }
+
+    #[test]
+    fn primitive_failure_persists_noun_dimensions_and_reference() {
+        let sql = render_primitive_upsert(
+            "24381/38635",
+            "NCYL",
+            "targeted primitive 24381_38635 (NCYL) produced an invalid BREP shape; DIAM=0, HEIG=0",
+        );
+        assert!(
+            sql.contains("geom_error:['primitive', '24381/38635']"),
+            "{sql}"
+        );
+        assert!(sql.contains("noun = 'NCYL'"), "{sql}");
+        assert!(sql.contains("DIAM=0, HEIG=0"), "{sql}");
     }
 
     /// 目标与错误文本进的是记录 id 与字段，单引号必须逃逸——否则一句带撇号的错误
@@ -328,5 +425,49 @@ mod tests {
             .expect("recount statement");
         let remaining: Vec<serde_json::Value> = response.take(0).expect("decode remaining");
         assert!(remaining.is_empty(), "销账之后不该还有行: {remaining:?}");
+
+        db.query(render_primitive_upsert(
+            "24381/38635",
+            "NCYL",
+            "targeted primitive 24381_38635 (NCYL) produced an invalid BREP shape; DIAM=0, HEIG=0",
+        ))
+        .await
+        .expect("primitive upsert")
+        .check()
+        .expect("primitive upsert statement");
+        let mut response = db
+            .query(format!(
+                "SELECT kind, target, noun, last_error FROM {TABLE};"
+            ))
+            .await
+            .expect("read primitive")
+            .check()
+            .expect("read primitive statement");
+        let rows: Vec<serde_json::Value> = response.take(0).expect("decode primitive");
+        assert_eq!(rows.len(), 1, "基本体错误必须真实落库: {rows:?}");
+        assert_eq!(rows[0]["kind"], PRIMITIVE);
+        assert_eq!(rows[0]["target"], "24381/38635");
+        assert_eq!(rows[0]["noun"], "NCYL");
+        assert!(
+            rows[0]["last_error"]
+                .as_str()
+                .is_some_and(|error| error.contains("DIAM=0") && error.contains("HEIG=0")),
+            "尺寸诊断必须跟记录一起落库: {rows:?}"
+        );
+
+        db.query(render_clear_kind(PRIMITIVE, "24381/38635"))
+            .await
+            .expect("clear primitive")
+            .check()
+            .expect("clear primitive statement");
+        let mut response = db
+            .query(format!("SELECT target FROM {TABLE};"))
+            .await
+            .expect("recount primitive")
+            .check()
+            .expect("recount primitive statement");
+        let remaining: Vec<serde_json::Value> =
+            response.take(0).expect("decode primitive remaining");
+        assert!(remaining.is_empty(), "基本体恢复后必须销账: {remaining:?}");
     }
 }

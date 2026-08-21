@@ -58,6 +58,61 @@ fn resolve_identity<'a>(
     Ok(&state.identity)
 }
 
+/// 每个读库分项各自的上限。
+///
+/// 库一断，SDK 会把查询挂在自动重连上永不返回——此前只有 `sul_db` 探活那一句
+/// 有 2 秒上限，后面七个分项一个都没有，于是 2026-08-20 那次 SurrealDB 崩溃把
+/// 整个 /health 一起拖没了声音：`worker_alive`、`worker_idle_secs`、队列姿态、
+/// 断连账本这些**进程内**字段明明都还在，却因为某个读库 await 永远回不来而
+/// 一个都送不出去，外面只剩「端点挂死」这一个无信息量的现象。
+const HEALTH_SECTION_BUDGET: Duration = Duration::from_secs(2);
+
+/// 给一个读库分项套上 [`HEALTH_SECTION_BUDGET`]；超时返回 `None`，由调用点落到
+/// 它自己那份降级形状，并把分项名记进 `degraded_sections`。
+async fn within_health_budget<T>(section: impl std::future::Future<Output = T>) -> Option<T> {
+    tokio::time::timeout(HEALTH_SECTION_BUDGET, section)
+        .await
+        .ok()
+}
+
+/// 超时分项的记名器：`None` 就记一笔并把降级值交回去。
+///
+/// 记名是必需的而不是锦上添花——`parse_errors` / `geom_errors` 的「表空」与
+/// `spatial_tree` 的「读不到」都渲染成 `null`，没有这份名单，超时与真的空表在
+/// 接口上长得一模一样。
+fn or_degraded<T>(
+    section: &'static str,
+    value: Option<T>,
+    degraded: &mut Vec<&'static str>,
+    fallback: impl FnOnce() -> T,
+) -> T {
+    match value {
+        Some(value) => value,
+        None => {
+            degraded.push(section);
+            fallback()
+        }
+    }
+}
+
+fn health_budget_exceeded(section: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{section}读取超过 {} 秒（/health 分项上限）",
+        HEALTH_SECTION_BUDGET.as_secs_f64()
+    )
+}
+
+fn health_status(
+    degraded_sections: &[&'static str],
+    blocking_conditions: &[&'static str],
+) -> &'static str {
+    if degraded_sections.is_empty() && blocking_conditions.is_empty() {
+        "ok"
+    } else {
+        "degraded"
+    }
+}
+
 /// GET /api/v1/health
 ///
 /// `started_at` 是进程启动时刻——队列不持久，重启后由重扫重建（ADR-011 §4），
@@ -122,26 +177,105 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     // 一个库在动」这个问题在面板上问一次就该有答案，来源也要一起给出去。
     let (watch_dbnums, watch_origin) = crate::data_interface::watch_scope::resolved();
     let watch_dbnums_origin = (!watch_dbnums.is_empty()).then(|| watch_origin.describe());
-    let window_blocks = crate::data_interface::staging::attempts::load_window_blocks()
-        .await
-        .unwrap_or_default();
+    // 以下每一项都读库，因此每一项都过 within_health_budget；超时的记进
+    // degraded_sections，绝不让任何一项把整个端点拖住。
+    let mut degraded: Vec<&'static str> = Vec::new();
+    let window_blocks = or_degraded(
+        "staging_window_blocks",
+        within_health_budget(crate::data_interface::staging::attempts::load_window_blocks())
+            .await
+            .and_then(Result::ok),
+        &mut degraded,
+        Vec::new,
+    );
     // 读库失败的降级形状与成功形状同源（side_effect_pending 里同键渲染，
-    // 形状由那边的单测钉住），不在这里手搓 JSON。
-    let spatial_reconcile = crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_status()
-        .await
-        .unwrap_or_else(|error| {
-            crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_error_status(&error)
-        });
+    // 形状由那边的单测钉住），不在这里手搓 JSON。超时走同一份降级形状，
+    // 只是错误那句换成预算超限。
+    let spatial_reconcile = match within_health_budget(
+        crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_status(),
+    )
+    .await
+    {
+        Some(Ok(status)) => status,
+        Some(Err(error)) => crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_error_status(&error),
+        None => {
+            degraded.push("spatial_reconcile");
+            crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_error_status(
+                &health_budget_exceeded("空间收敛状态"),
+            )
+        }
+    };
     // 可 drain 副作用（SystDerived / RefRevMaintain）的死信/待处理计数（P2-4）。
     // 读库失败的降级与成功形状同源（side_effect_pending 里同键渲染，形状由那边的
     // 单测钉住），不在这里手搓 JSON。
-    let side_effect_pending = crate::data_interface::side_effect_pending::SideEffectCompensator::side_effect_status()
-        .await
-        .unwrap_or_else(|error| {
-            crate::data_interface::side_effect_pending::SideEffectCompensator::side_effect_error_status(&error)
-        });
+    let side_effect_pending = match within_health_budget(
+        crate::data_interface::side_effect_pending::SideEffectCompensator::side_effect_status(),
+    )
+    .await
+    {
+        Some(Ok(status)) => status,
+        Some(Err(error)) => crate::data_interface::side_effect_pending::SideEffectCompensator::side_effect_error_status(&error),
+        None => {
+            degraded.push("side_effect_pending");
+            crate::data_interface::side_effect_pending::SideEffectCompensator::side_effect_error_status(
+                &health_budget_exceeded("副作用补偿状态"),
+            )
+        }
+    };
+    let model_update_pending = match within_health_budget(
+        crate::data_interface::model_update_pending::model_pending_status(),
+    )
+    .await
+    {
+        Some(Ok(status)) => status,
+        Some(Err(error)) => {
+            degraded.push("model_update_pending");
+            crate::data_interface::model_update_pending::ModelPendingStatus::error(error)
+        }
+        None => {
+            degraded.push("model_update_pending");
+            crate::data_interface::model_update_pending::ModelPendingStatus::error(
+                health_budget_exceeded("模型工作状态"),
+            )
+        }
+    };
+    let mut blocking_conditions: Vec<&'static str> = Vec::new();
+    if model_update_pending.has_data_dead_letters() {
+        blocking_conditions.push("model_update_pending.data_dead_letters");
+    }
+    if model_update_pending.has_room_dead_letters() {
+        blocking_conditions.push("model_update_pending.room_dead_letters");
+    }
+    let parse_errors = or_degraded(
+        "parse_errors",
+        within_health_budget(crate::data_interface::parse_error::snapshot()).await,
+        &mut degraded,
+        || None,
+    );
+    let geom_errors = or_degraded(
+        "geom_errors",
+        within_health_budget(crate::data_interface::geom_error::snapshot()).await,
+        &mut degraded,
+        || None,
+    );
+    let spatial_tree = or_degraded(
+        "spatial_tree",
+        within_health_budget(crate::fast_model::aabb_tree::spatial_tree_status()).await,
+        &mut degraded,
+        || Value::Null,
+    );
+    // room_build 自带 2 秒上限（room_build_health_from），降级形状也是它自己渲染的。
+    let room_build = crate::fast_model::room_model::room_build_health().await;
     Json(json!({
-        "status": "ok",
+        // 有分项没在预算内答完就不是 ok：库半死不活时这个字段是唯一一眼可见的
+        // 信号，剩下的看 degraded_sections。
+        "status": health_status(&degraded, &blocking_conditions),
+        // 空数组 = 八个读库分项全部按时答完。非空 = 这些分项的值是降级值，
+        // 不是现场真相（`null` 在这里可能是「超时」而不是「表空」）。
+        "degraded_sections": degraded,
+        // 非空表示查询虽然答上来了，但持久状态本身仍阻断收敛。它与
+        // degraded_sections（查询失败/超时）严格分开，避免把真死信误报成读库故障。
+        "blocking_conditions": blocking_conditions,
         "project": state.identity.project,
         "mdb": state.identity.mdb,
         "namespace": state.identity.namespace,
@@ -161,6 +295,11 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 房间增量的总开关（默认 true）。关着时房间泳道永远是空的，而「没活」与
         // 「开关关着」在外面长得一模一样——少了这个字段，只能去翻启动日志里那一行。
         "room_incremental": crate::options::room_incremental(),
+        // 本项目此刻生效的最小交付单元名词表。客户端要按元素归并生成根时只能靠它
+        // ——`delivery_unit_types` 能整体替换默认值、`append_delivery_unit_types`
+        // 能扩充，硬编码那四个默认名词在改过配置的项目上会静默算错。进程内
+        // OnceLock，不读库，因此不套 within_health_budget。
+        "delivery_unit_types": crate::data_interface::generation_root::configured_delivery_unit_types(),
         "auto_work_armed": crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed(),
         "increment_mode": crate::data_interface::batch_worker::increment_mode(),
         "initialization": crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot(),
@@ -173,11 +312,11 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 解析错误清单（表空是 null）。模型生成侧的失败有 pending 行的 last_error
         // 与死信计数，解析侧此前只有一句会滚走的 warn——`element_parse_skipped` 之后
         // 元素按 cache-miss 静默跳过，事后没有任何查询能说出它是谁。
-        "parse_errors": crate::data_interface::parse_error::snapshot().await,
+        "parse_errors": parse_errors,
         // 布尔降级清单（表空是 null）。载不进 manifold 的网格现在跳过这一件继续跑，
         // 于是 `model_update_pending` 那一行不再产生——少了这本账，「这个件的洞没
         // 切」就只剩控制台上一句会滚走的话。
-        "geom_errors": crate::data_interface::geom_error::snapshot().await,
+        "geom_errors": geom_errors,
         // 空闲轮 panic 账本（从没 panic 过是 null）。`parked: true` = 同一句 panic
         // 连撞到上限、空闲轮已停跑，房间收敛与范围重扫一并暂停——旗子还立着、心跳
         // 也在跳，少了这个字段，外面看到的是一个「健康但什么都不收敛」的服务。
@@ -196,12 +335,17 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // （P2-4）。到顶死信此前只在库里、/health 看不见，也没有复活出口——现在
         // dead_letters/by_kind 摆出来，复活走 POST /update/side-effects/retry。
         "side_effect_pending": side_effect_pending,
+        // 数据模型与房间工作一次查询得出同一快照；死信样本最多十条，普通积压
+        // 只计数、不把启动期间的正常工作误标成 degraded。
+        "model_update_pending": model_update_pending,
         // 空间树状态机 + 文件/库指纹（现读现比）+ 本次启动的装载裁决
         // （reused / replayed / rebuilt / migrated / degraded / preloaded）。
         // 十五键契约钉在 aabb_tree 的渲染器旁（台账 G-02 契约迁移）。
         // drift=true 而 spatial_reconcile 又无 pending，说明树在静默漂移——正是
         // 启动判据要在下次重启拦下的那类状态，这里让它运行中就可见。
-        "spatial_tree": crate::fast_model::aabb_tree::spatial_tree_status().await,
+        "spatial_tree": spatial_tree,
+        // 结构面板枚举失败时随水位原子置位；只有成功的全量房间重建会清除。
+        "room_build": room_build,
         // 静态资源是可选能力（spec §7）：false = 目录缺失、/assets 在 404，
         // REST/WS 不受影响。没有这个字段，降级只在启动日志里出现一次。
         "static_assets": state.static_assets,
@@ -342,6 +486,46 @@ pub async fn task_get(
     serde_json::to_value(&entry)
         .map(Json)
         .map_err(|e| ApiError::from_domain(e.into()))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteModelSubtreeReq {
+    pub refno: String,
+    #[serde(default)]
+    pub confirm: Option<String>,
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+}
+
+/// DELETE /api/v1/model/subtree — delete generated data below exactly one refno.
+pub async fn model_delete_subtree(
+    State(state): State<AppState>,
+    Query(query): Query<DeleteModelSubtreeReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &query.identity)?;
+    if query.confirm.as_deref() != Some(query.refno.as_str()) {
+        return Err(ApiError::bad_request(format!(
+            "confirm must equal refno: confirm={:?}, refno={}",
+            query.confirm, query.refno
+        )));
+    }
+    let Ok(refu) = RefU64::from_str(&query.refno) else {
+        return Err(ApiError::bad_request(format!(
+            "refno 格式非法（应为 a/b，如 24381/100677）: {}",
+            query.refno
+        )));
+    };
+    let refno = RefnoEnum::from(refu);
+    state
+        .mgr
+        .delete_model_subtree(refno)
+        .await
+        .map_err(ensure_error)?;
+    Ok(Json(json!({
+        "requested_refno": refno.to_pdms_str(),
+        "scope": "exact_subtree",
+        "status": "deleted",
+    })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -756,6 +940,37 @@ mod tests {
     }
 
     #[test]
+    fn model_subtree_delete_requires_exact_confirmation_and_preserves_requested_scope() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn model_delete_subtree(")
+            .expect("model subtree delete handler must exist")
+            .1
+            .split_once("/// POST /api/v1/model/ensure")
+            .expect("model ensure must follow subtree delete")
+            .0;
+
+        assert!(
+            body.contains("query.confirm.as_deref() != Some(query.refno.as_str())"),
+            "destructive model cleanup must require an exact refno confirmation: {body}"
+        );
+        assert!(
+            body.contains(".delete_model_subtree(refno)"),
+            "handler must pass the requested refno unchanged to the delete service: {body}"
+        );
+        for field in [
+            "\"requested_refno\"",
+            "\"scope\": \"exact_subtree\"",
+            "\"status\": \"deleted\"",
+        ] {
+            assert!(
+                body.contains(field),
+                "delete response must expose {field}: {body}"
+            );
+        }
+    }
+
+    #[test]
     fn pending_units_adds_room_rows_without_changing_legacy_counts() {
         let units = vec![PendingModelUnit {
             attempts: crate::data_interface::model_update_pending::MAX_ATTEMPTS,
@@ -820,6 +1035,58 @@ mod tests {
         }
     }
 
+    /// /health 的读库分项必须**一个不落**地套在 [`within_health_budget`] 里。
+    ///
+    /// 上面那条只钉住了探活那一句的超时。2026-08-20 SurrealDB 崩掉时，后面七个
+    /// 分项全是裸 await，SDK 把它们挂在自动重连上永不返回，于是整个端点跟着库
+    /// 一起没了声音——而它本该正是那一刻唯一还答得出话的地方：`worker_alive`、
+    /// `worker_idle_secs`、队列姿态、断连账本全在进程内，一个都不需要库。
+    #[test]
+    fn every_health_db_section_runs_on_a_budget() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn health(")
+            .expect("health handler must exist")
+            .1
+            .split_once("pub async fn trace(")
+            .expect("health 之后是 trace")
+            .0;
+
+        for section in [
+            "load_window_blocks()",
+            "spatial_reconcile_status()",
+            "side_effect_status()",
+            "model_pending_status()",
+            "parse_error::snapshot()",
+            "geom_error::snapshot()",
+            "spatial_tree_status()",
+        ] {
+            let at = body
+                .find(section)
+                .unwrap_or_else(|| panic!("{section} 必须还在 /health 里: {body}"));
+            let before = &body[..at];
+            let budget_at = before
+                .rfind("within_health_budget(")
+                .unwrap_or_else(|| panic!("{section} 必须套在 within_health_budget 里: {body}"));
+            assert!(
+                !before[budget_at..].contains(".await"),
+                "{section} 与它前面那个 within_health_budget 之间不该再有 .await——说明它没被套住: {body}"
+            );
+        }
+
+        // room_build 是唯一的豁免：它自带 ROOM_BUILD_HEALTH_TIMEOUT。
+        assert!(
+            body.contains("room_build_health()"),
+            "room_build 必须来自 room_model 的共享渲染器（含它自己的超时）: {body}"
+        );
+        // 超时不能装作没发生：降级分项名要摆出来，否则 `null` 分不出「表空」
+        // 还是「没答上来」。
+        assert!(
+            body.contains("\"degraded_sections\""),
+            "超时分项必须记名: {body}"
+        );
+    }
+
     #[test]
     fn health_and_model_ensure_expose_initialization_contract() {
         let source = include_str!("handlers.rs");
@@ -845,6 +1112,39 @@ mod tests {
     }
 
     #[test]
+    fn health_is_degraded_by_dead_letters_but_not_by_retryable_backlog() {
+        assert_eq!(health_status(&[], &[]), "ok");
+        assert_eq!(
+            health_status(&[], &["model_update_pending.data_dead_letters"]),
+            "degraded"
+        );
+        assert_eq!(
+            health_status(&[], &["model_update_pending.room_dead_letters"]),
+            "degraded"
+        );
+        assert_eq!(health_status(&["model_update_pending"], &[]), "degraded");
+
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn health(")
+            .expect("health exists")
+            .1
+            .split_once("pub async fn trace(")
+            .expect("health end")
+            .0;
+        assert!(body.contains("\"model_update_pending\""), "{body}");
+        assert!(body.contains("\"blocking_conditions\""), "{body}");
+        assert!(
+            body.contains("model_update_pending.data_dead_letters"),
+            "{body}"
+        );
+        assert!(
+            body.contains("model_update_pending.room_dead_letters"),
+            "{body}"
+        );
+    }
+
+    #[test]
     fn health_exposes_all_increment_stage_controls() {
         let source = include_str!("handlers.rs");
         let health = source
@@ -863,14 +1163,40 @@ mod tests {
         }
     }
 
-    /// `/health` 的 `spatial_reconcile` / `spatial_tree` 字段（台账缺口 G-02）。
+    /// `/health` 必须报出本项目生效的最小交付单元名词表。
+    ///
+    /// plant-ui 的「重新生成模型」要按元素归并生成根，而这张表是项目配置
+    /// （`delivery_unit_types` 整体替换、`append_delivery_unit_types` 扩充）。
+    /// 少了这个字段，客户端只能硬编码那四个默认名词——改过配置的项目上它会
+    /// 静默把同一个根重生成几十遍或者整批漏掉，两种都不报错。
+    #[test]
+    fn health_exposes_the_delivery_unit_types() {
+        let source = include_str!("handlers.rs");
+        let health = source
+            .split_once("pub async fn health(")
+            .expect("health exists")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health end exists")
+            .0;
+        assert!(
+            health.contains("\"delivery_unit_types\""),
+            "health 必须暴露 delivery_unit_types: {health}"
+        );
+        assert!(
+            health.contains("generation_root::configured_delivery_unit_types()"),
+            "名词表必须来自共享的项目配置解析，不许在 handler 里另列一份: {health}"
+        );
+    }
+
+    /// `/health` 的 `spatial_reconcile` / `spatial_tree` / `room_build` 字段。
     ///
     /// 值级形状由渲染器旁边的单测钉住（side_effect_pending 四键 / aabb_tree
     /// 九键），这里钉的是接线纪律：两个键必须在、读库失败的降级必须走共享的
     /// 同键渲染器而不是在 handler 里手搓 JSON——手搓正是这两个形状此前
     /// 靠肉眼保持一致的原因。
     #[test]
-    fn health_routes_spatial_status_through_the_shared_renderers() {
+    fn health_routes_spatial_and_room_status_through_the_shared_renderers() {
         let source = include_str!("handlers.rs");
         let body = source
             .split_once("pub async fn health(")
@@ -880,7 +1206,11 @@ mod tests {
             .expect("health 之后是 update_preview")
             .0;
 
-        for key in ["\"spatial_reconcile\"", "\"spatial_tree\""] {
+        for key in [
+            "\"spatial_reconcile\"",
+            "\"spatial_tree\"",
+            "\"room_build\"",
+        ] {
             assert!(body.contains(key), "health 必须暴露 {key}: {body}");
         }
         assert!(
@@ -890,6 +1220,10 @@ mod tests {
         assert!(
             body.contains("spatial_tree_status()"),
             "spatial_tree 必须来自 aabb_tree 的共享渲染器: {body}"
+        );
+        assert!(
+            body.contains("room_build_health()"),
+            "room_build 必须来自 room_model 的共享渲染器: {body}"
         );
     }
 
