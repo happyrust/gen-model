@@ -140,7 +140,9 @@ impl From<DbOption> for DbOptionExt {
 ///
 /// `aios_core::get_db_option()` 只反序列化 `DbOption` 本身，扩展字段会被丢弃，
 /// 因此这里对同一个配置文件再读一次，只取扩展部分。
-#[derive(Debug, Default, Deserialize)]
+/// `Serialize` 不是给谁写配置用的，是 [`ext_field_names`] 用来枚举自己有哪些字段的
+/// 唯一途径——加字段时那句告警要自动跟上，靠的就是它。
+#[derive(Debug, Default, Deserialize, Serialize)]
 struct DbOptionExtFields {
     #[serde(default)]
     mqtt_server: Option<String>,
@@ -174,16 +176,123 @@ struct DbOptionExtFields {
     watch_dbnums: Option<Vec<u32>>,
 }
 
+/// 读一次 `DbOption` 的扩展字段，把三种结局分开——它们要求的处置完全不同。
+///
+/// * **配置文件不存在** → `Ok(默认值)`。这里沉默**不是**因为「没配置也能好好跑」：
+///   真跑起来的进程还会调 `aios_core::get_db_option()`，那边 `File::with_name` 是
+///   `required` 且 `build().unwrap()`，缺文件当场 panic，轮不到这句话说什么。沉默是
+///   因为单测与探针根本不带 `DbOption.toml`，在这儿嚷一句只会让每次 `cargo test` 都
+///   挂一条假告警，真告警反而没人看。
+/// * **文件在但读不动**（TOML 语法错，或任一字段类型写错）→ `Err(说明)`。
+/// * **文件在且合法** → `Ok(取到的值)`。
+///
+/// 三格里真正「能活下来、又没人吭声」的只有一格：核心配置解析得动，只是某个**扩展**
+/// 字段类型写错。TOML 整个语法坏掉那格 `aios_core` 会先 panic 掉二进制路径，本函数
+/// 的 Err 只在 python 与单测那两条路上还有意义。本轮修的就是能活下来那一格。
+///
+/// 这个 `Result` 就是本函数存在的理由。它此前写成
+/// `.ok().and_then(|s| s.try_deserialize().ok()).unwrap_or_default()`，把上面第二种
+/// 结局折叠进了第一种：配置里任何一个字段类型写错，**整张扩展表一起回落默认值**，
+/// 而且一声不响。`startup_autorun`、`watch_dbnums`、`data_batch_workers`、
+/// `http_api_addr` 会同时失效，服务看上去一切正常，只是没在按配置跑。
+///
+/// **未知字段仍然照收不误**，这是现状也是有意的：`DbOptionExtFields` 没有
+/// `deny_unknown_fields`，配置里多出来的键会被忽略。整张表本来就只取
+/// `aios_core::DbOption` 之外的那一部分，同一个文件里属于 `DbOption` 的键在这里
+/// 全是「未知」的——拒收未知字段会让每一个正常配置都读不动。代价是拼错一个键名
+/// 不会有人告诉你，退役键 `net_window_collection` 正是为此才由
+/// [`probe_retired_net_window_config`] 单独探测。
+fn read_ext_fields(configured: Option<OsString>) -> Result<DbOptionExtFields, String> {
+    let config_name = ext_config_name(configured.clone());
+    // `required` 不能写死 `false`。`required(false)` 时 `config` 会把**定位文件**那一
+    // 阶段的每一种失败都折叠成「没有这个文件」——不只是真的没有，还包括「扩展名不
+    // 是它认得的格式」和读文件本身失败（权限、被独占、这个路径其实是个目录）。于是
+    // `DB_OPTION_FILE` 指到一个没有扩展名、或者叫 `.cfg` 的文件时，文件明明在那儿、
+    // 内容明明写坏了，却会静默回落默认值——正是本函数要消灭的那种沉默。
+    //
+    // 所以先自己看一眼那儿有没有东西：有就 `required(true)`，读不动一律变成 Err；
+    // 真没有才允许「缺文件 = Ok(默认值)」。候选路径沿用
+    // [`config_path_candidates`]（字面路径，外加补 `.toml`），与退役开关探针同一口径；
+    // 换句话说 `DbOption.json` 这类非 TOML 落在口径之外，仍旧走 `required(false)`。
+    let present = config_path_candidates(configured)
+        .iter()
+        .any(|candidate| candidate.exists());
+    config::Config::builder()
+        .add_source(config::File::with_name(&config_name).required(present))
+        .build()
+        .map_err(|error| format!("读取扩展配置 {config_name} 失败：{error}"))?
+        .try_deserialize::<DbOptionExtFields>()
+        .map_err(|error| format!("解析扩展配置 {config_name} 失败：{error}"))
+}
+
+/// 扩展表里全部字段的名字，从 [`DbOptionExtFields`] 自身导出。
+///
+/// 读坏配置时整张表一起回落，那句告警得说清「一起」是哪些人。手抄一份名单迟早会
+/// 与结构体脱节——加了字段而告警没跟上，那个字段就成了失效了却没人告诉你的设置，
+/// 正是本轮要修的毛病换个地方重演。所以名单从结构体自己身上取。
+///
+/// 走 `serde_json` 是因为 `Option` 字段没有 `skip_serializing_if`，默认值序列化出来
+/// 每个键都在（值为 `null`），键集恰好就是字段全集。取不到就退成空表：一句话少几个
+/// 名字，好过为了凑名字让启动崩掉。
+///
+/// 拿到的是 **serde 名**而不是 Rust 标识符。若哪天某个字段带上
+/// `#[serde(rename = "…")]`，这里给出的就是 rename 后那个——那正是运维在
+/// `DbOption.toml` 里亲手写的键名，也就是他该去改的那一行。
+fn ext_field_names() -> Vec<String> {
+    match serde_json::to_value(DbOptionExtFields::default()) {
+        Ok(serde_json::Value::Object(map)) => map.into_iter().map(|(name, _)| name).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// 把一次读取的结局落成最终取值：读坏时回落默认值，并留下那句必须被人看见的话。
+///
+/// 读坏了仍旧回落默认值、而不是让启动失败——配置写错的部署此前是能起来的，只是
+/// 没在按配置跑。本轮要改掉的是「一声不响」，不是「还能起来」。
+///
+/// 单独拆出来是为了能测：[`load_ext_fields`] 的 `OnceLock` 一个进程只跑一次，
+/// 两种结局没法在同一次测试里各走一遍。
+fn loaded_from(read: Result<DbOptionExtFields, String>) -> (DbOptionExtFields, Option<String>) {
+    match read {
+        Ok(fields) => (fields, None),
+        Err(error) => (
+            DbOptionExtFields::default(),
+            // 出错的那一项之外还有谁一起失效，必须逐个写在话里：运维看见「配置没生效」
+            // 只会去看自己刚改的那一行，不会想到 startup_autorun 也一并回默认了。
+            // 名单摆在最后一句，终端里最容易扫。
+            //
+            // 措辞只说「配置里写的值没生效」而不说「现在全是默认值」：环境变量与
+            // 命令行覆盖走的是 `env_override.or(configured)`（见
+            // [`effective_startup_autorun`]、[`effective_incremental_stage`]）和
+            // `watch_scope::resolved`，配置回落压根碰不着它们。说成「全是默认值」
+            // 会把排障的人指向一个错误的现场。
+            Some(format!(
+                "⚠ 扩展配置未生效：{error}。修好配置后重启，本进程内取值不会再变。\
+                 整张扩展表一起回落——出错的那一项之外，下面这些键在配置里写的值\
+                 同样没有生效（`AIOS_*` 环境变量与 `serve --watch-dbnum` 这类命令行\
+                 覆盖不在此列，它们照常压过默认值）：{}",
+                ext_field_names().join("、")
+            )),
+        ),
+    }
+}
+
 fn load_ext_fields() -> &'static DbOptionExtFields {
     static INSTANCE: OnceLock<DbOptionExtFields> = OnceLock::new();
     INSTANCE.get_or_init(|| {
-        let config_name = ext_config_name(std::env::var_os("DB_OPTION_FILE"));
-        config::Config::builder()
-            .add_source(config::File::with_name(&config_name))
-            .build()
-            .ok()
-            .and_then(|source| source.try_deserialize::<DbOptionExtFields>().ok())
-            .unwrap_or_default()
+        let (fields, notice) = loaded_from(read_ext_fields(std::env::var_os("DB_OPTION_FILE")));
+        if let Some(notice) = notice {
+            // 直接进 stderr 而不是 `log::error!`：`serve` 路径没有装 log 后端，
+            // `log` 宏一个字也落不下来（同 `fast_model::prim_model` 里那条注释）。
+            //
+            // 打在装载处而不是 `run_cli` 的启动横幅里，而且不留一个「告警文本」入口
+            // 给调用方去取：横幅只在二进制路径上跑，python 模块走 `exec_api` 直接调
+            // [`get_db_option_ext`] / [`watch_dbnums`]，压根不经过 `run_cli`。这一句
+            // 是「启动日志里一声不响」的正面修复，它必须挂在取值本身上——谁用到这张
+            // 表，谁就一定听得见，不依赖任何人记得去打印它。
+            eprintln!("{notice}");
+        }
+        fields
     })
 }
 
@@ -636,6 +745,305 @@ mod tests {
         assert!(effective_room_incremental(Some(true), Some("ture")));
         assert!(!effective_room_incremental(Some(false), Some("ture")));
         assert!(effective_room_incremental(None, Some("ture")));
+    }
+
+    /// 缺配置文件走默认值，而且不出声。单测环境与最小部署都没有 `DbOption.toml`，
+    /// 把「没有配置」读成错误会让每一次启动都带一句假告警，真告警就没人看了。
+    #[test]
+    fn a_missing_config_file_yields_defaults_without_complaining() {
+        let dir = tempfile::tempdir().expect("temp config dir");
+        let missing = dir.path().join("missing-DbOption");
+        let fields = read_ext_fields(Some(missing.into())).expect("缺配置不是错误");
+        assert_eq!(fields.startup_autorun, None);
+        assert_eq!(fields.watch_dbnums, None);
+        assert_eq!(fields.data_batch_workers, None);
+        assert_eq!(fields.http_api_addr, None);
+    }
+
+    /// **本轮要修的就是这一条。** 一个字段类型写错，此前会让整张扩展表静默回落
+    /// 默认值：出错的那项失效是意料之中，可 `startup_autorun`、`watch_dbnums`、
+    /// `http_api_addr` 也会一起变回默认，而启动日志里一个字都没有。
+    ///
+    /// 断言分两半，缺一不可：一是**必须报错**而不是交出一张默认表；二是错误里
+    /// 要指得出是哪个字段，否则运维只知道「配置没生效」，还得自己二分查找。
+    #[test]
+    fn a_field_of_the_wrong_type_is_loud_instead_of_silently_defaulting() {
+        let (_dir, path) = write_probe_config(
+            "wrong-type.toml",
+            "data_batch_workers = \"many\"\n\
+             startup_autorun = false\n\
+             http_api_addr = \"0.0.0.0:8020\"\n",
+        );
+        let error = read_ext_fields(Some(path.into()))
+            .expect_err("字段类型写错必须报错，不能交出一张默认表");
+        assert!(error.contains("解析扩展配置"), "{error}");
+        assert!(
+            error.contains("data_batch_workers"),
+            "错误要指得出是哪个字段：{error}"
+        );
+    }
+
+    /// 未知字段照收不误，这是现状，写下来是为了让它成为一个**被选择**的行为而不是
+    /// 一个没人注意到的默认。整张表本来就只取 `aios_core::DbOption` 之外的部分，
+    /// 同一个文件里属于 `DbOption` 的键在这里全是「未知」的，所以
+    /// `deny_unknown_fields` 会让每一个正常配置都读不动。
+    ///
+    /// 代价是拼错键名没人告诉你——`stratup_autorun` 会被安静忽略。退役键
+    /// `net_window_collection` 正因为这个代价才由独立探针单独盯着。
+    #[test]
+    fn an_unknown_field_is_ignored_and_does_not_cost_the_known_ones() {
+        let (_dir, path) = write_probe_config(
+            "unknown-field.toml",
+            "startup_autorun = false\n\
+             stratup_autorun = true\n\
+             meshes_path = \"/srv/meshes\"\n\
+             net_window_collection = false\n",
+        );
+        let fields = read_ext_fields(Some(path.into())).expect("未知字段不该让配置读不动");
+        assert_eq!(
+            fields.startup_autorun,
+            Some(false),
+            "拼对的那个必须生效——拼错的兄弟键不能把它顶掉"
+        );
+    }
+
+    /// 合法配置照常读出来，四个被点名的字段各取一个类型：bool、数组、整数、字符串。
+    #[test]
+    fn a_valid_config_reads_every_field_it_states() {
+        let (_dir, path) = write_probe_config(
+            "valid.toml",
+            "startup_autorun = false\n\
+             watch_dbnums = [8000, 7998]\n\
+             data_batch_workers = 4\n\
+             http_api_addr = \"0.0.0.0:8020\"\n",
+        );
+        let fields = read_ext_fields(Some(path.into())).expect("合法配置要照常读出来");
+        assert_eq!(fields.startup_autorun, Some(false));
+        assert_eq!(
+            fields.watch_dbnums.as_deref(),
+            Some([8000, 7998].as_slice())
+        );
+        assert_eq!(fields.data_batch_workers, Some(4));
+        assert_eq!(fields.http_api_addr.as_deref(), Some("0.0.0.0:8020"));
+    }
+
+    /// TOML 本身就坏掉时同样要出声，理由与字段类型写错完全一样：文件在那儿、
+    /// 有人写了内容、而它一个字都没生效。
+    #[test]
+    fn invalid_toml_is_loud_too() {
+        let (_dir, path) = write_probe_config("invalid.toml", "watch_dbnums = [\n");
+        let error = read_ext_fields(Some(path.into())).expect_err("非法 TOML 必须报错");
+        assert!(error.contains("扩展配置"), "{error}");
+    }
+
+    /// 读坏之后的处置：**既要回落默认值、也要留下一句指名道姓的话**，两者缺一不可。
+    ///
+    /// 回落是刻意的——配置写错的部署此前照样能起来，本轮不把它改成起不来。
+    /// 但正因为它还能起来，那句话就是运维唯一的线索，所以断言不止要求「有话」，
+    /// 还要求话里点到那四个被一起带下水的字段：只说「配置没生效」的话，人只会去
+    /// 看自己刚改的那一行，想不到 `startup_autorun` 也一并回默认了。
+    #[test]
+    fn a_broken_config_falls_back_to_defaults_and_names_everyone_it_took_down() {
+        let (fields, notice) = loaded_from(Err("解析扩展配置 DbOption 失败：invalid type".into()));
+
+        assert_eq!(fields.startup_autorun, None, "读坏必须回落默认值");
+        assert_eq!(fields.watch_dbnums, None);
+
+        let notice = notice.expect("读坏必须留下一句话，不能一声不响");
+        assert!(
+            notice.contains("解析扩展配置"),
+            "话里要带上原始错误：{notice}"
+        );
+        for field in [
+            "startup_autorun",
+            "watch_dbnums",
+            "data_batch_workers",
+            "http_api_addr",
+        ] {
+            assert!(notice.contains(field), "话里要点到 {field}：{notice}");
+        }
+    }
+
+    /// 读得动就一个字都不说，取值原样交出去。
+    ///
+    /// 与上一条同等重要：每次启动都挂一句假告警，真告警就没人看了。
+    #[test]
+    fn a_config_that_reads_clean_says_nothing_and_keeps_its_values() {
+        let (fields, notice) = loaded_from(Ok(DbOptionExtFields {
+            startup_autorun: Some(false),
+            data_batch_workers: Some(4),
+            ..DbOptionExtFields::default()
+        }));
+
+        assert_eq!(notice, None, "配置干净时不该有任何告警");
+        assert_eq!(fields.startup_autorun, Some(false));
+        assert_eq!(fields.data_batch_workers, Some(4));
+    }
+
+    /// 那句告警要点到扩展表里的**每一个**字段，不是当初被点名的那四个。
+    ///
+    /// 名单由 [`ext_field_names`] 从结构体自身导出，所以加字段时它自己就跟上了，
+    /// 这条测试钉的是「自己跟上」这件事还成立：`#[serde(skip)]`、
+    /// `skip_serializing_if`、或者把 `Serialize` 摘掉，都会让某个字段悄悄从名单里
+    /// 掉出去，而那恰好是这句话最不能出错的地方——漏掉谁，谁就是那个失效了却没人
+    /// 告诉你的设置。
+    ///
+    /// 判据取自源码里结构体的字面声明，与 `serde` 那条路互相独立：两边都从对方
+    /// 拿不到答案，所以只有真的一致才会绿。
+    ///
+    /// 顺带钉住「配置键 = 字段名」：扩展字段不许带 `#[serde(rename = "…")]`。运维在
+    /// `DbOption.toml` 里写的是 serde 名，而 `DbOptionExt` 和文档写的是字段名，两者
+    /// 一分家，照着文档写进配置的那个键就变成未知字段被静默忽略——正是这套代码要修
+    /// 的那种沉默换了个地方发作。所以 rename 要当场拦下，而不是让告警替它圆场。
+    #[test]
+    fn the_notice_names_every_field_the_table_actually_carries() {
+        let source = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/options.rs"));
+        let body = source
+            .split_once("struct DbOptionExtFields {")
+            .expect("DbOptionExtFields 必须存在")
+            .1
+            .split_once("\n}")
+            .expect("结构体结束边界必须存在")
+            .0;
+        let mut declared: Vec<&str> = Vec::new();
+        let mut renames: Vec<(&str, &str)> = Vec::new();
+        let mut pending_rename: Option<&str> = None;
+        for line in body.lines().map(str::trim) {
+            // 文档注释里带冒号（`/// 见：…`）会被下面那个 `split_once(':')` 当成字段名，
+            // 于是给字段写一行注释就能把这条测试搞红。那是纯误报，先滤掉。
+            if line.is_empty() || line.starts_with("//") {
+                continue;
+            }
+            if line.starts_with('#') {
+                if let Some((_, rest)) = line.split_once("rename = \"") {
+                    pending_rename = rest.split_once('"').map(|(name, _)| name);
+                }
+                continue;
+            }
+            if let Some((ident, _)) = line.split_once(':') {
+                if let Some(rename) = pending_rename.take() {
+                    renames.push((ident, rename));
+                }
+                declared.push(ident);
+            }
+        }
+        assert!(
+            renames.is_empty(),
+            "扩展字段不许改 serde 名：{renames:?}。配置键和字段名一分家，DbOptionExt \
+             与文档里还是旧名字，照着它们写进 DbOption.toml 的键会被当未知字段静默\
+             忽略。真要改名，三处一起改。"
+        );
+        // 解析垮掉时名单会是空的，那样下面的循环一次都不跑、测试白绿。
+        assert!(
+            declared.len() >= 10,
+            "源码里没解析出像样的字段名单，只拿到 {declared:?}"
+        );
+
+        let derived = ext_field_names();
+        assert_eq!(
+            derived.len(),
+            declared.len(),
+            "结构体声明了 {declared:?}，导出的名单却是 {derived:?}"
+        );
+
+        let notice = loaded_from(Err("解析扩展配置 DbOption 失败：invalid type".into()))
+            .1
+            .expect("读坏必须留下一句话");
+        for field in declared {
+            assert!(
+                derived.iter().any(|name| name == field),
+                "{field} 没进导出名单：{derived:?}"
+            );
+            assert!(notice.contains(field), "告警没点到 {field}：{notice}");
+        }
+    }
+
+    /// 覆盖告警**真的到达人眼**这一步，也就是 [`load_ext_fields`] 里那句 `eprintln!`。
+    ///
+    /// 上面那些用例测的都是 [`loaded_from`] 算不算得出那句话，没有一条管它有没有被说
+    /// 出口。而那句 `eprintln!` 是这句话到达人眼的**唯一**出口——把它删掉，
+    /// 「一声不响」原样复活，那些用例却一条都不会红。整个改动修的就是「一声不响」，
+    /// 所以这一步不能没有覆盖。
+    ///
+    /// 只能开子进程：`OnceLock` 一个进程只装载一次，`DB_OPTION_FILE` 又是进程级环境
+    /// 变量，本进程里既不能保证自己是第一个取值的人，也没法换份配置再来一遍。重入
+    /// 测试二进制自己，让子进程带着一份写坏的配置从头走一遍真实装载路径——顺带把
+    /// `DB_OPTION_FILE` → `read_ext_fields` → `loaded_from` → stderr 整条接线一起钉住，
+    /// 那条链此前同样没有任何用例走过。
+    #[test]
+    fn the_warning_actually_reaches_stderr_when_the_real_loader_runs() {
+        const REENTRY: &str = "T132_EXT_CONFIG_STDERR_CHILD";
+
+        if std::env::var_os(REENTRY).is_some() {
+            // 子进程这一侧：真去取一次扩展字段，触发装载。父进程看的就是这一下的 stderr。
+            let _ = load_ext_fields();
+            return;
+        }
+
+        let (_dir, path) =
+            write_probe_config("stderr-probe.toml", "data_batch_workers = \"many\"\n");
+        let output =
+            std::process::Command::new(std::env::current_exe().expect("拿不到测试二进制自身路径"))
+                .args([
+                    "options::tests::the_warning_actually_reaches_stderr_when_the_real_loader_runs",
+                    "--exact",
+                    // 不加这个，libtest 会把子进程里那句话吞进它自己的缓冲区。
+                    "--nocapture",
+                ])
+                .env(REENTRY, "1")
+                .env("DB_OPTION_FILE", &path)
+                .output()
+                .expect("重入测试二进制失败");
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // 先验夹具、再验行为。子进程压根没起来，或者将来有人改了这条测试的名字、
+        // 让 `--exact` 一条都没匹配上，stderr 同样是空的——那跟「修复坏了」长得
+        // 一模一样。不先把这两种情形分出去，将来这条红了没人说得清红在哪。
+        assert!(
+            output.status.success(),
+            "子进程没能正常跑完（{}）。stdout：{stdout}stderr：{stderr}",
+            output.status
+        );
+        assert!(
+            stdout.contains("1 passed"),
+            "子进程没真跑到那一条测试，坏的是夹具不是修复。stdout：{stdout}"
+        );
+
+        assert!(
+            stderr.contains("⚠ 扩展配置未生效"),
+            "配置写坏了，装载时却什么都没说。stderr：{stderr}"
+        );
+        assert!(
+            stderr.contains("startup_autorun"),
+            "说了，但没说清谁跟着失效了。stderr：{stderr}"
+        );
+    }
+
+    /// 文件在那儿、只是 `config` 认不出它的格式——这同样是「读不动」，不是「没有」。
+    ///
+    /// `DB_OPTION_FILE` 是外部给的路径（`full_init(config=…)` 直接透传），指到一个
+    /// 没有扩展名或者叫 `.cfg` 的文件是现实中会发生的事。`config` 在 `required(false)`
+    /// 下会把这一类连同「路径其实是个目录」一起折叠成「没有这个文件」，于是内容写坏
+    /// 了也一声不响——与本轮要修的毛病一模一样，只是换了个触发方式。
+    #[test]
+    fn a_config_file_that_exists_but_cannot_be_parsed_is_never_read_as_absent() {
+        for name in ["broken-without-extension", "broken.cfg"] {
+            let (_dir, path) = write_probe_config(name, "data_batch_workers = \"many\"\n");
+            assert!(path.exists(), "夹具没写出文件：{}", path.display());
+            let error = read_ext_fields(Some(path.clone().into()))
+                .err()
+                .unwrap_or_else(|| panic!("{name} 在那儿却被当成不存在，静默回落了默认值"));
+            assert!(error.contains("扩展配置"), "{error}");
+        }
+
+        let dir = tempfile::tempdir().expect("temp config dir");
+        let as_dir = dir.path().join("DbOption");
+        fs::create_dir(&as_dir).expect("create dir");
+        read_ext_fields(Some(as_dir.into()))
+            .err()
+            .expect("路径是个目录同样是读不动，不能当成没有配置");
     }
 
     fn write_probe_config(name: &str, contents: &str) -> (tempfile::TempDir, PathBuf) {
