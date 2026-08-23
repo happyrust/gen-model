@@ -5012,7 +5012,7 @@ dependencies = [
 [[package]]
 name = "pdms_io"
 version = "0.1.0"
-source = "git+https://github.com/happyrust/old-pdms-io.git?rev=99094048fe309ea272048b1c7d28cee2b3e383cb#99094048fe309ea272048b1c7d28cee2b3e383cb"
+source = "git+https://github.com/happyrust/old-pdms-io.git?rev=b11469480e9198de13be59040580f6b7da07b3c7#b11469480e9198de13be59040580f6b7da07b3c7"
 dependencies = [
  "aios_core",
  "anyhow",
