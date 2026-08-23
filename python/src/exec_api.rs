@@ -616,7 +616,7 @@ pub fn gen_models(py: Python<'_>, refnos: Vec<String>) -> PyResult<()> {
         runtime().block_on(async {
             aios_database::data_interface::initialization_phase::require_model_generation()?;
             let db_option = db_option().await?;
-            aios_database::fast_model::occ_generate::process_meshes_update_db_deep(
+            aios_database::fast_model::mesh_generate::process_meshes_update_db_deep(
                 &db_option,
                 &parse_refnos(refnos),
             )
@@ -666,11 +666,11 @@ pub fn update_aabbs(
                 aios_database::data_interface::initialization_phase::require_model_generation()?;
                 let refnos = parse_refnos(refnos);
                 let changes = if durable {
-                    aios_database::fast_model::occ_generate::
+                    aios_database::fast_model::mesh_generate::
                         update_inst_relate_aabbs_by_refnos_incremental(&refnos, replace)
                     .await?
                 } else {
-                    aios_database::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos(
+                    aios_database::fast_model::mesh_generate::update_inst_relate_aabbs_by_refnos(
                         &refnos, replace,
                     )
                     .await?
@@ -957,10 +957,10 @@ pub fn enqueue(py: Python<'_>, changes: Bound<'_, PyAny>) -> PyResult<usize> {
         noun: String,
     }
     let changes: Vec<ChangeIn> = pythonize::depythonize(&changes)?;
-    let changes: Vec<aios_database::fast_model::occ_generate::AabbChange> = changes
+    let changes: Vec<aios_database::fast_model::mesh_generate::AabbChange> = changes
         .into_iter()
         .map(
-            |change| aios_database::fast_model::occ_generate::AabbChange {
+            |change| aios_database::fast_model::mesh_generate::AabbChange {
                 refno: parse_refno(&change.refno),
                 noun: change.noun,
             },

@@ -2,7 +2,7 @@
 
 ## User Stories
 
-### US1：关掉 `occ` 不能假装生成成功
+### US1：缺少网格后端不能假装生成成功
 
 生产或 CI 在没有三角化后端时请求生成网格，系统必须响亮失败。调用方回执和日志都能看见
 「没有可用的三角化后端」，不得只打 warning 后返回成功。
@@ -34,13 +34,12 @@ WALL / STWALL / GENSEC 的扫掠体在直线、带斜切平面、圆弧路径上
 
 ## Functional Requirements
 
-- **FR-001**：`gen_inst_meshes` 在 `occ` 关闭且没有替代三角化后端时必须返回错误；禁止
+- **FR-001**：`gen_inst_meshes` 在没有 manifold 三角化后端时必须返回错误；禁止
   `Ok(())` 静默跳过。
 - **FR-002**：生产布尔只走 manifold-csg 入口；OCC 布尔不得重新接到生成调度。
 - **FR-003**：切洞若得到空网格，不得覆盖已有 `booled_id` 文件；ingest 空网格必须失败。
 - **FR-004**：每个 `PdmsGeoParam` 应对齐一条 libgm `gm_Create*`（箱/柱/球/挤出/旋转/
-  多面体 / PrimLSnout / 圆环面 / 碟 / 锥 / 斜端柱）。未实现的类型在替代器就绪前可回退 OCC；
-  扫掠体走 FR-005。
+  多面体 / PrimLSnout / 圆环面 / 碟 / 锥 / 斜端柱）。未实现类型必须响亮失败；扫掠体走 FR-005。
 - **FR-005**：扫掠体网格器必须覆盖 `DB_Gensec::do_solid_segments` 的 libgm 三支：
   `gm_CreateExtrusion`、`gm_CreateRevolution`（含 180° 半圆组合）、
   `gm_CreateRuledSolid`；斜切用延伸挤出挂到 CSG 树，不得改 ADR-026 的斜切平面 /
@@ -52,8 +51,8 @@ WALL / STWALL / GENSEC 的扫掠体在直线、带斜切平面、圆弧路径上
   盘点；生产路径上仍出现的未覆盖类型要么有替代器，要么使关 `occ` 的构建失败。
 - **FR-009**：浸水计算若仍依赖 OCC 形状拓扑，不得作为删除 `occ` 的阻塞项混进主生成路径；
   要么改为网格 CSG，要么独立 feature 且不进最终 release default。
-- **FR-010**：后端切换不得靠放宽既有 RVM / mesh 对拍阈值过门。失败回滚只恢复 `occ`
-  feature，不恢复 OCC 布尔。
+- **FR-010**：后端切换不得靠放宽既有 RVM / mesh 对拍阈值过门。部署失败只回滚到预先归档的
+  过渡二进制，不回退新身份键，也不恢复 OCC 布尔。
 - **FR-011**（2026-08-23 追加，依据 ADR-030 修订二 / ADR-044）：曲面原语的三角化段数
   必须由**真实半径**与统一弦高容差按 libgm 的权威规则算出，不得使用写死的段数常量或
   按构件自身尺度给的相对容差。回转 / collar 轮廓与挤出轮廓是 libgm 里的**两套**离散
@@ -94,5 +93,9 @@ WALL / STWALL / GENSEC 的扫掠体在直线、带斜切平面、圆弧路径上
   缺失 caliber 的复用参数、旧身份孤儿或失败队列。
 - **FR-016**：T031 的现场硬门是球、SSCL、多面体与 YOFF Snout 均有 dabacon 样本，且
   T046–T049 在 8009、7997 两副本均按原阈值通过；缺样本不以纯函数测试替代。
-- **FR-017**：OCC 保留为可选参照 feature，但不得进入 default、console 或 Windows release；
-  T040b 与多段 SPINE 不属于本阶段。
+- **FR-017**：最终源码、vendor API、Python、CI 与 Windows release 不得包含 `occ` feature、
+  OCCT 依赖或 `gen_occ_shape` API；RVM 与 libgm 逆向证据是独立参照。
+- **FR-018**：轮廓离散必须保留 libgm 的硬边符号语义：相邻单位切向仅在
+  `abs(1-dot) <= 1e-6` 时光顺；硬边、侧壁/端盖交界必须以拆顶点和独立法线组写入现有
+  `PlantMesh`，不得新增序列化字段。
+- **FR-019**：多段 SPINE 继续响亮失败，不作为删除从未可达的 OCC API 的扩展条件。

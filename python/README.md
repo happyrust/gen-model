@@ -12,18 +12,15 @@ uv venv .venv                          # 首次
 uv pip install maturin --python .venv  # 首次
 $env:VIRTUAL_ENV = (Resolve-Path .venv).Path
 .venv\Scripts\maturin.exe develop            # 日常调试（debug，解析/查询够快）
-.venv\Scripts\maturin.exe develop --release  # 跑生成类操作前（OCC 布尔运算 debug 慢）
+.venv\Scripts\maturin.exe develop --release  # 跑大规模生成类操作前
 ```
 
 - 绑定 crate 是仓内 workspace 成员，与主 crate 共享 `Cargo.lock` / `target/` /
-  `[patch]` vendor 重定向（`Toggle-LocalDeps.ps1` 同样生效），OCC 只编一次。
+  `[patch]` vendor 重定向（`Toggle-LocalDeps.ps1` 同样生效）。
 - abi3 wheel：一个 pyd 通吃 Python ≥ 3.10，升 Python 不用重编。
 - 实测（2026-08-12，共享 `D:\Rust\target` 缓存已热）：`develop --release` 从改动
   绑定源到装好 1m59s，产物 ~76 MB；两档 pytest 在 release 与 debug 上结果一致、
-  耗时也几乎一样（12.4s vs 12.9s）——这套用例是进程启动与建库主导的，OCC 布尔
-  运算的 debug/release 差距要跑真实生成（`model.gen*` / 整库）才看得出来。
-- OCCT 是动态链接：包装层（`pysrc/aios_db/__init__.py`）在导入扩展前把 PATH
-  上所有目录注册进 DLL 搜索路径，正常情况无需手工干预。
+  耗时也几乎一样（12.4s vs 12.9s）——这套用例是进程启动与建库主导的。
 
 ## 三层初始化（与单实例锁的关系）
 
@@ -145,7 +142,7 @@ uv pip install pytest --python .venv     # 首次
 
 离线档不连 SurrealDB、不碰 E3D 装机、不扫项目目录，数据全来自
 `tests/fixtures/issues/issue-019-*` 的 db8000 快照——所以它进得了 CI
-（`.github/workflows/windows-tests.yml` 的 `python-bindings` job：备 OCCT →
+（`.github/workflows/windows-tests.yml` 的 `python-bindings` job：
 `maturin build` → 装 wheel → 跑这一档 → 传 wheel artifact）。
 
 房间增量档对一次性内存 SurrealDB（conftest 自起 `bin/surreal.exe` @8071，进程

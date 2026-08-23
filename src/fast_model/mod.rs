@@ -8,17 +8,19 @@ pub mod loop_model;
 
 pub mod shared;
 
-pub mod occ_generate;
+pub mod mesh_generate;
 
 pub mod libgm_discretise;
 
 pub mod mesh_primitives;
 
+#[cfg(feature = "manifold")]
 pub mod sweep_mesh;
 
 #[cfg(test)]
 pub mod mesh_assert;
 
+#[cfg(feature = "manifold")]
 pub mod manifold_bool;
 
 #[cfg(feature = "manifold")]
@@ -56,7 +58,7 @@ pub mod coverage_audit;
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};
 pub use gen_model::*;
-pub use occ_generate::*;
+pub use mesh_generate::*;
 use once_cell::sync::Lazy;
 use parry3d::bounding_volume::Aabb;
 pub use query::*;

@@ -478,7 +478,7 @@ pub const ROOM_INCREMENTAL_ENV: &str = "AIOS_ROOM_INCREMENTAL";
 /// 开关取值进程内固定（配置经 `load_ext_fields` 的 `OnceLock` 只读一次，环境变量
 /// 随进程出生定死），改开关必然伴随重启；而增量链的两条空间提交（暂存尾事务、
 /// 直写 durable 事务）无论开关都递增 spatial epoch——关着开关只摘 `room_recalc`
-/// 语句，epoch 照 bump（见 `occ_generate` 直写分支的注释）——于是「关闭期间发生过
+/// 语句，epoch 照 bump（见 `mesh_generate` 直写分支的注释）——于是「关闭期间发生过
 /// 任何空间提交」⇒ 启动的 `reconcile_startup_room_build` stamp 对账必失配 ⇒ 全量
 /// 重建必跑；对账相等则说明关闭期间真的无可回补。全量/手动生成路径不递增 epoch，
 /// 但本就以整体房间重建收尾，不在此闭环内。唯一要盯的：启动全量重建失败只降级

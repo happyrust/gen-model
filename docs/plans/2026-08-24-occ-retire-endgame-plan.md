@@ -14,7 +14,7 @@
 已收口：
 
 - **WP-F 假回退**（T033–T037）：`tessellate_libgm_param` 只剩一处 `Ok(None)` 且语义固定为
-  「非形状」；OCC 形状回退在 `src/fast_model/occ_generate.rs` 整段拆除。
+  「非形状」；OCC 形状回退在 `src/fast_model/mesh_generate.rs` 整段拆除。
 - **WP-G 口径**（T038 / T039 / T040 / T040a / T042）：曲面段数按真实半径走
   `src/fast_model/libgm_discretise.rs` 权威规则；回转与挤出两套轮廓口径分开；
   弦高容差全库唯一 `FACET_TOL_MM`，兜底默认值已删。柱/球写死段数收成

@@ -22,17 +22,11 @@ env:
   # 代码用了一批 #![feature(...)]，.cargo/config.toml 还带 -Z threads=8：必须 nightly。
   # 固定到与本地开发一致、已知可编译的版本；要升级只改这一行。
   RUST_TOOLCHAIN: nightly-2026-08-02
-  OCC_VERSION: 7.9.3
-  OCC_ARCHIVE_URL: https://github.com/Open-Cascade-SAS/OCCT/releases/download/V7_9_3/opencascade-7.9.3-vc14-64-combined.zip
-  OCC_ARCHIVE_SHA256: afbef3457fbc4a2bdca0608e0fe284392f51e4c2c42ccbfb9df7168d8e4eb9b3
   PROTOC_ARCHIVE_URL: https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-win64.zip
   PROTOC_ARCHIVE_SHA256: 5d3ff218d7d91eea95f7569bcb5a98f3030f8996d44151279d9772edcff76082
   # manifold-sys 的 bindgen 要 libclang。不显式给，.cargo/config.toml 会填进
   # runner 上不存在的 D:\LLVM\bin，clang-sys 见到无效路径直接报错不再探测。
   LIBCLANG_PATH: C:\Program Files\LLVM\bin
-  # OpenCASCADE 7.9 headers use std::optional/std::variant; cc-rs otherwise
-  # inherits MSVC's older default language mode on the hosted runner.
-  CXXFLAGS: /std:c++17
 
 jobs:
   build:
@@ -49,31 +43,6 @@ jobs:
           rustup default $env:RUST_TOOLCHAIN
           rustc --version
           cargo --version
-
-      - name: Download prebuilt OpenCASCADE
-        shell: pwsh
-        run: |
-          $archive = "$env:RUNNER_TEMP\occt.zip"
-          $extract = "$env:RUNNER_TEMP\occt-extract"
-          $source = "$extract\opencascade-$env:OCC_VERSION-vc14-64"
-          $root = "$env:RUNNER_TEMP\occt"
-          Invoke-WebRequest $env:OCC_ARCHIVE_URL -OutFile $archive
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne $env:OCC_ARCHIVE_SHA256) {
-            throw 'OpenCASCADE archive checksum mismatch'
-          }
-          New-Item -ItemType Directory -Force $extract, "$root\include\opencascade", "$root\lib", "$root\bin" | Out-Null
-          tar -xf $archive -C $extract `
-            "opencascade-$env:OCC_VERSION-vc14-64/inc/*" `
-            "opencascade-$env:OCC_VERSION-vc14-64/win64/vc14/lib/*" `
-            "opencascade-$env:OCC_VERSION-vc14-64/win64/vc14/bin/*" `
-            '3rdparty-vc14-64/tbb-2021.13.0-x64/bin/tbb12.dll' `
-            '3rdparty-vc14-64/jemalloc-vc14-64/bin/jemalloc.dll'
-          Copy-Item "$source\inc\*" "$root\include\opencascade" -Recurse
-          Copy-Item "$source\win64\vc14\lib\*" "$root\lib"
-          Copy-Item "$source\win64\vc14\bin\*" "$root\bin"
-          Copy-Item "$extract\3rdparty-vc14-64\tbb-2021.13.0-x64\bin\tbb12.dll" "$root\bin"
-          Copy-Item "$extract\3rdparty-vc14-64\jemalloc-vc14-64\bin\jemalloc.dll" "$root\bin"
-          "OCC_ROOT=$root" >> $env:GITHUB_ENV
 
       - name: Download prebuilt protoc
         shell: pwsh
@@ -104,7 +73,7 @@ jobs:
         run: >-
           cargo build --release --locked --bin aios-database
           --no-default-features
-          --features ws,gen_model,manifold,occ,project_hd,http_api
+          --features ws,gen_model,manifold,project_hd,http_api
 
       # 键里带 run_id：失败轮也把编译进度存下来，重试从断点继续。
       - name: Save cargo cache
@@ -123,7 +92,8 @@ jobs:
           $out = "dist/aios-database-windows-x64"
           New-Item -ItemType Directory -Force $out | Out-Null
           Copy-Item target/release/aios-database.exe $out
-          Get-ChildItem "$env:OCC_ROOT/bin/*.dll" | Copy-Item -Destination $out
+          $forbidden = Get-ChildItem $out -Recurse -File | Where-Object { $_.Name -match "^(TK|OCCT).*\.dll$" }
+          if ($forbidden) { throw "release package contains an OCCT runtime DLL: $($forbidden.FullName -join ', ')" }
           @"
           commit=$env:GITHUB_SHA
           ref=$env:GITHUB_REF

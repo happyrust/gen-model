@@ -4,7 +4,7 @@
     "只读：连 8009 生产验证库（DbOption：v_port=8009 / ns=1516 / db=AvevaMarineSample）取",
     "inst_geo.param + insts_flat 就地重建 gen 世界网格（param 空的复合几何回退 assets/meshes/*.mesh），",
     "与 test_data/rvm/*.rvm 的 E3D 三角化做双向采样表面距离。不写库、不动 testbed。",
-    "features 用 rvm_verify（默认 feature 含 occ，gen_occ_shape/gen_occ_mesh 需要）。",
+    "features 用 rvm_verify，生成与对拍均走 libgm 语义实现与 manifold-csg。",
     "带断言的回归守卫：",
     "  * mesh_wall_surface_distance —— 1112 CWALL WALL 1/2/3 的 gen->rvm p95 ≤ 12mm（圆弧墙几何）。",
     "  * mesh_stwall_surface_distance —— 1112 CWALL 4 堵直线 STWALL 双向 p95 ≤ 12mm。",

@@ -98,7 +98,7 @@ impl StagingWriteContext {
 
     pub async fn defer_room_changes(
         &self,
-        changes: &[crate::fast_model::occ_generate::AabbChange],
+        changes: &[crate::fast_model::mesh_generate::AabbChange],
     ) {
         let mut spatial = self.spatial.lock().await;
         for change in changes {
@@ -504,7 +504,7 @@ mod tests {
             .scope(async {
                 active_staging_writes()
                     .expect("context")
-                    .defer_room_changes(&[crate::fast_model::occ_generate::AabbChange {
+                    .defer_room_changes(&[crate::fast_model::mesh_generate::AabbChange {
                         refno: target,
                         noun: "EQUI".into(),
                     }])

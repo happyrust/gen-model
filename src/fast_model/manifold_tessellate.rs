@@ -86,15 +86,42 @@ pub fn tessellate_extrusion(
     if height <= f32::EPSILON {
         anyhow::bail!("extrusion height {height} is not positive");
     }
-    let mut polygons: Vec<Vec<[f64; 2]>> = Vec::with_capacity(verts.len());
-    polygons.push(flatten_profile_loop(&verts[0], chord_tol)?);
+    let (outer_spans, tol) = profile_spans_of(&verts[0], chord_tol)?;
+    let outer_steps = libgm_discretise::profile_steps_extruded(&outer_spans, tol);
+    let mut rings = vec![crate::fast_model::sweep_mesh::profile_ring_from_spans(
+        &outer_spans,
+        &outer_steps,
+        glam::Vec2::ZERO,
+    )?];
     for hole in verts.iter().skip(1) {
-        let Ok(ring) = flatten_profile_loop(hole, chord_tol) else {
+        let Ok((spans, tol)) = profile_spans_of(hole, chord_tol) else {
             continue;
         };
-        polygons.push(ring);
+        let steps = libgm_discretise::profile_steps_extruded(&spans, tol);
+        let Ok(ring) = crate::fast_model::sweep_mesh::profile_ring_from_spans(
+            &spans,
+            &steps,
+            glam::Vec2::ZERO,
+        ) else {
+            continue;
+        };
+        rings.push(ring);
     }
-    extrude_flat_polygons(polygons, height, "extrusion")
+    let outer_area = rings[0]
+        .points
+        .iter()
+        .enumerate()
+        .map(|(i, a)| {
+            let b = rings[0].points[(i + 1) % rings[0].points.len()];
+            a.x as f64 * b.y as f64 - b.x as f64 * a.y as f64
+        })
+        .sum::<f64>();
+    if outer_area < 0.0 {
+        for ring in &mut rings {
+            ring.reverse();
+        }
+    }
+    crate::fast_model::sweep_mesh::extrude_loops(&rings, height)
 }
 
 /// 已离散好的二维环 → 沿 +Z 挤出。绕向按外环有向面积统一翻正，空截面 / 空网格
@@ -380,8 +407,8 @@ fn dedup_ring(ring: &[glam::Vec3]) -> Vec<glam::Vec3> {
 /// 一张平面多边形 → 三角形，追加进 `(vertices, normals, indices)`。
 ///
 /// 顶点不跨面复用（平面片按面着色，法向就是这张面的 Newell 法向）。建不出来的
-/// 面返回 `false` 由调用方决定容忍还是报错——与 `Polyhedron::gen_occ_shape`
-/// 逐面 `continue` 的容错口径一致。
+/// 面返回 `false` 由调用方决定容忍还是报错——与 libgm 多面体逐面接收有效面的
+/// 容错口径一致。
 fn append_planar_face(
     polygon: &Polygon,
     vertices: &mut Vec<glam::Vec3>,
@@ -511,7 +538,7 @@ fn signed_area(ring: &[[f64; 2]]) -> f64 {
 /// `gm_CreateRevolution(profile, axis, angle)`：`verts` 与挤出同一约定（xy 为坐标，
 /// z 是 FRADIUS 倒角半径），绕 `rot_pt` / `rot_dir` 定义的轴回转 `angle` 度。
 ///
-/// 语义对齐 OCC 权威实现 `Revolution::gen_occ_shape`：轮廓离散走
+/// 语义对齐 libgm `GM_Revolution::calcFacetsWithoutSurfaces`：轮廓离散走
 /// `flatten_profile_loop_revolved`——与挤出共用 `profile_spans` 的倒角展开，但
 /// **段数是另一套**（`GM_Profile::setNSteps`，见 `libgm_discretise` §7.9.2）。
 /// 角度按「≈360 / >360 / ==0 一律当整圈」归一。
@@ -879,7 +906,7 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
                 return Err(anyhow!("PrimLoft extrude direction is degenerate"));
             }
             // 三支分派由 `do_solid_segments()`（Core3D `DB_Gensec` 的权威判定）决定，
-            // 与 `SweepSolid::gen_occ_shape` 同一份输入、同一个局部坐标系。
+            // 并统一消费同一份输入和局部坐标系。
             covered(
                 crate::fast_model::sweep_mesh::sweep_solid_mesh(s)?,
                 "PrimLoft",

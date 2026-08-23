@@ -2419,7 +2419,9 @@ mod tests {
             .split_once("pub fn build_from_dir")
             .expect("build boundary")
             .0;
-        let scan_at = build.find("scan_db_ref0s(&entry.path, project)?").unwrap();
+        let scan_at = build
+            .find("scan_identity_ref0s(&entry.path, &entry.db_type, &entry.project)?")
+            .unwrap();
         let put_at = build.find("cache.put(*dbnum").unwrap();
         assert!(scan_at < put_at, "先成功扫描，后写缓存");
 

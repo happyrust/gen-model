@@ -24,19 +24,50 @@ use parry3d::math::Point;
 /// 相邻点近于这个距离就并成一个点（PDMS 单位是 mm）。
 const POS_EPS: f32 = 1e-4;
 
-/// 一条闭合环的折线点列，首尾不重复。
-pub type Loop2D = Vec<Vec2>;
+/// 一条闭合轮廓环，首尾点不重复。
+///
+/// `smooth_to_next[i]` 描述点 `i` 处入边与出边是否按 libgm 的切向规则属于同一光顺组。
+/// 名称沿用计划术语；它不是“当前边是否曲线”，而是该顶点能否跨到下一条出边。
+#[derive(Debug, Clone, Default)]
+pub struct ProfileRing {
+    pub points: Vec<Vec2>,
+    pub smooth_to_next: Vec<bool>,
+}
+
+impl ProfileRing {
+    fn validate(&self) -> anyhow::Result<()> {
+        if self.points.len() < 3 {
+            bail!("截面环离散后只剩 {} 个点", self.points.len());
+        }
+        if self.points.len() != self.smooth_to_next.len() {
+            bail!(
+                "截面环点数 {} 与光顺标记数 {} 不一致",
+                self.points.len(),
+                self.smooth_to_next.len()
+            );
+        }
+        Ok(())
+    }
+
+    pub(crate) fn reverse(&mut self) {
+        self.points.reverse();
+        self.smooth_to_next.reverse();
+    }
+}
 
 /// 截面离散结果：`loops[0]` 是外环（逆时针），其余是孔（顺时针）。
 #[derive(Debug, Clone, Default)]
 pub struct ProfileLoops {
-    pub loops: Vec<Loop2D>,
+    pub loops: Vec<ProfileRing>,
 }
 
 impl ProfileLoops {
     /// 截面净面积（外环减孔）。
     pub fn area(&self) -> f32 {
-        self.loops.iter().map(|l| signed_area(l)).sum::<f32>()
+        self.loops
+            .iter()
+            .map(|ring| signed_area(&ring.points))
+            .sum::<f32>()
     }
 }
 
@@ -55,7 +86,7 @@ pub fn profile_loops(profile: &CateProfileParam, chord_tol: f64) -> anyhow::Resu
 }
 
 /// SPRO / SREC：顶点带倒角半径的单环。`frads[i]` 走 `profile_spans` 的第三分量。
-fn spro_loops(p: &SProfileData, chord_tol: f64) -> anyhow::Result<Vec<Loop2D>> {
+fn spro_loops(p: &SProfileData, chord_tol: f64) -> anyhow::Result<Vec<ProfileRing>> {
     if p.verts.len() < 3 {
         bail!("SPRO 截面只有 {} 个顶点，不足以成环", p.verts.len());
     }
@@ -86,7 +117,7 @@ fn spro_loops(p: &SProfileData, chord_tol: f64) -> anyhow::Result<Vec<Loop2D>> {
 }
 
 /// SANN：环形扇区。360° 时退化成带孔圆环，按两段半圆弧拼（不是单次 360° 弧）。
-fn sann_loops(p: &SannData, chord_tol: f64) -> anyhow::Result<Vec<Loop2D>> {
+fn sann_loops(p: &SannData, chord_tol: f64) -> anyhow::Result<Vec<ProfileRing>> {
     let r_out = (p.pradius + p.drad) as f64;
     let width = (p.pwidth + p.dwid) as f64;
     let r_in = r_out - width;
@@ -148,37 +179,73 @@ fn flatten_loop(
     chord_tol: f64,
     offset: Vec2,
     ccw: bool,
-) -> anyhow::Result<Loop2D> {
+) -> anyhow::Result<ProfileRing> {
     if !libgm_discretise::chord_tol_is_usable(chord_tol) {
         bail!("截面环拿到的弦高容差 {chord_tol} 不可用");
     }
     let tol = chord_tol;
 
-    let mut pts: Vec<Vec2> = Vec::with_capacity(pline.vertex_count());
-    for (v1, v2) in pline.iter_segments() {
-        let span =
-            libgm_discretise::span_polyline_by_tol([v1.x, v1.y], [v2.x, v2.y], v1.bulge, tol);
-        for q in span {
-            let p = Vec2::new(q[0] as f32, q[1] as f32) + offset;
-            if pts
+    let spans = pline
+        .iter_vertexes()
+        .map(|v| libgm_discretise::ProfileSpan {
+            point: [v.x, v.y],
+            bulge: v.bulge,
+        })
+        .collect::<Vec<_>>();
+    let steps = libgm_discretise::profile_steps_extruded(&spans, tol);
+    let mut ring = profile_ring_from_spans(&spans, &steps, offset)?;
+    if (signed_area(&ring.points) > 0.0) != ccw {
+        ring.reverse();
+    }
+    Ok(ring)
+}
+
+pub(crate) fn profile_ring_from_spans(
+    spans: &[libgm_discretise::ProfileSpan],
+    steps: &[i32],
+    offset: Vec2,
+) -> anyhow::Result<ProfileRing> {
+    if spans.len() != steps.len() {
+        bail!(
+            "profile span 数 {} 与步数 {} 不一致",
+            spans.len(),
+            steps.len()
+        );
+    }
+    let mut points = Vec::<Vec2>::new();
+    let mut smooth_to_next = Vec::<bool>::new();
+    for i in 0..spans.len() {
+        let next = (i + 1) % spans.len();
+        let seg = libgm_discretise::span_polyline_in_steps(
+            spans[i].point,
+            spans[next].point,
+            spans[i].bulge,
+            steps[i],
+        );
+        // 终点由下一 span 作为起点加入，这样该点上的光顺标记只写一次。
+        for (j, q) in seg.iter().take(seg.len().saturating_sub(1)).enumerate() {
+            let point = Vec2::new(q[0] as f32, q[1] as f32) + offset;
+            if points
                 .last()
-                .is_some_and(|last: &Vec2| last.distance(p) < POS_EPS)
+                .is_some_and(|last| last.distance(point) < POS_EPS)
             {
                 continue;
             }
-            pts.push(p);
+            points.push(point);
+            smooth_to_next.push(if j == 0 {
+                let previous = (i + spans.len() - 1) % spans.len();
+                libgm_discretise::profile_span_leads_smoothly(spans, previous)
+            } else {
+                true
+            });
         }
     }
-    while pts.len() >= 2 && pts[0].distance(pts[pts.len() - 1]) < POS_EPS {
-        pts.pop();
-    }
-    if pts.len() < 3 {
-        bail!("截面环离散后只剩 {} 个点", pts.len());
-    }
-    if (signed_area(&pts) > 0.0) != ccw {
-        pts.reverse();
-    }
-    Ok(pts)
+    let ring = ProfileRing {
+        points,
+        smooth_to_next,
+    };
+    ring.validate()?;
+    Ok(ring)
 }
 
 /// 鞋带公式。逆时针为正。
@@ -193,14 +260,14 @@ fn signed_area(pts: &[Vec2]) -> f32 {
 }
 
 /// 端盖三角剖分。结构截面是凹的（L/C/I），扇形环还带孔，不能用扇形三角化。
-fn triangulate(loops: &[Loop2D]) -> anyhow::Result<Vec<[u32; 3]>> {
+fn triangulate(loops: &[ProfileRing]) -> anyhow::Result<Vec<[u32; 3]>> {
     let mut flat: Vec<f64> = Vec::new();
     let mut hole_starts: Vec<usize> = Vec::new();
     for (i, ring) in loops.iter().enumerate() {
         if i > 0 {
             hole_starts.push(flat.len() / 2);
         }
-        for p in ring {
+        for p in &ring.points {
             flat.push(p.x as f64);
             flat.push(p.y as f64);
         }
@@ -217,12 +284,15 @@ fn triangulate(loops: &[Loop2D]) -> anyhow::Result<Vec<[u32; 3]>> {
 }
 
 /// 端盖顶点在 `loops` 里的线性下标（与 `triangulate` 的编号一致）。
-fn flat_points(loops: &[Loop2D]) -> Vec<Vec2> {
-    loops.iter().flat_map(|r| r.iter().copied()).collect()
+fn flat_points(loops: &[ProfileRing]) -> Vec<Vec2> {
+    loops
+        .iter()
+        .flat_map(|ring| ring.points.iter().copied())
+        .collect()
 }
 
 /// 把端盖三角在**截面 2D 坐标系里**统一成逆时针，摆放变换再怎么转都不影响这个基准。
-fn cap_triangles_ccw(loops: &[Loop2D]) -> anyhow::Result<Vec<[u32; 3]>> {
+fn cap_triangles_ccw(loops: &[ProfileRing]) -> anyhow::Result<Vec<[u32; 3]>> {
     let pts = flat_points(loops);
     let mut tris = triangulate(loops)?;
     for tri in &mut tris {
@@ -268,7 +338,7 @@ pub(crate) fn orient_outward(vertices: &[Vec3], indices: &mut [u32], normals: &m
 }
 
 /// 沿 +Z 挤出：底面在 z=0，顶面在 z=height。对齐 `gm_CreateExtrusion(profile, height)`。
-pub fn extrude_loops(loops: &[Loop2D], height: f32) -> anyhow::Result<PlantMesh> {
+pub fn extrude_loops(loops: &[ProfileRing], height: f32) -> anyhow::Result<PlantMesh> {
     if height <= POS_EPS {
         bail!("挤出高度 {height} 不是正数");
     }
@@ -279,7 +349,7 @@ pub fn extrude_loops(loops: &[Loop2D], height: f32) -> anyhow::Result<PlantMesh>
 
 /// 两端各自摆放的放样：底面走 `place(p, false)`，顶面走 `place(p, true)`，
 /// 两端点数一一对应。对齐 `gm_CreateRuledSolid`（斜切段就是它）。
-pub fn loft_loops<F>(loops: &[Loop2D], place: F) -> anyhow::Result<PlantMesh>
+pub fn loft_loops<F>(loops: &[ProfileRing], place: F) -> anyhow::Result<PlantMesh>
 where
     F: Fn(Vec2, bool) -> Vec3,
 {
@@ -292,34 +362,81 @@ where
     let mut vertices: Vec<Vec3> = Vec::new();
     let mut normals: Vec<Vec3> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
+    let mut groups: Vec<u32> = Vec::new();
+    let mut next_group = 0u32;
 
-    // 侧面：每条边独立顶点，棱边法线不被平均
+    // 侧面：同一 libgm 光顺组共享法线；硬边处组号断开。
     for ring in loops {
-        for i in 0..ring.len() {
-            let j = (i + 1) % ring.len();
+        ring.validate()?;
+        let edge_groups = edge_smoothing_groups(ring, &mut next_group);
+        for i in 0..ring.points.len() {
+            let j = (i + 1) % ring.points.len();
             let quad = [
-                place(ring[i], false),
-                place(ring[j], false),
-                place(ring[j], true),
-                place(ring[i], true),
+                place(ring.points[i], false),
+                place(ring.points[j], false),
+                place(ring.points[j], true),
+                place(ring.points[i], true),
             ];
-            push_quad(&mut vertices, &mut normals, &mut indices, quad);
+            push_quad(
+                &mut vertices,
+                &mut normals,
+                &mut indices,
+                &mut groups,
+                edge_groups[i],
+                quad,
+            );
         }
     }
 
     // 端盖：底面用反向绕、顶面用正向绕，二者与侧面互相自洽
     for top in [false, true] {
+        let cap_group = next_group;
+        next_group += 1;
         push_cap(
             &mut vertices,
             &mut normals,
             &mut indices,
+            &mut groups,
+            cap_group,
             &cap_tris,
             cap_pts.iter().map(|p| place(*p, top)),
             top,
         );
     }
 
-    finish(vertices, normals, indices)
+    finish(vertices, normals, indices, Some(groups))
+}
+
+/// 每条轮廓边所属的光顺组。点 `i` 的标记连接边 `i-1` 与边 `i`。
+fn edge_smoothing_groups(ring: &ProfileRing, next_group: &mut u32) -> Vec<u32> {
+    let n = ring.points.len();
+    let mut parent = (0..n).collect::<Vec<_>>();
+    fn root(parent: &mut [usize], mut x: usize) -> usize {
+        while parent[x] != x {
+            parent[x] = parent[parent[x]];
+            x = parent[x];
+        }
+        x
+    }
+    for vertex in 0..n {
+        if ring.smooth_to_next[vertex] {
+            let a = (vertex + n - 1) % n;
+            let ra = root(&mut parent, a);
+            let rb = root(&mut parent, vertex);
+            parent[rb] = ra;
+        }
+    }
+    let mut ids = std::collections::HashMap::<usize, u32>::new();
+    (0..n)
+        .map(|edge| {
+            let r = root(&mut parent, edge);
+            *ids.entry(r).or_insert_with(|| {
+                let id = *next_group;
+                *next_group += 1;
+                id
+            })
+        })
+        .collect()
 }
 
 /// 一块侧面四边形（`quad` 依次是底 i、底 j、顶 j、顶 i），退化的直接丢掉。
@@ -327,6 +444,8 @@ fn push_quad(
     vertices: &mut Vec<Vec3>,
     normals: &mut Vec<Vec3>,
     indices: &mut Vec<u32>,
+    groups: &mut Vec<u32>,
+    group: u32,
     quad: [Vec3; 4],
 ) {
     let n = (quad[1] - quad[0]).cross(quad[2] - quad[0]);
@@ -338,6 +457,7 @@ fn push_quad(
     let base = vertices.len() as u32;
     vertices.extend_from_slice(&quad);
     normals.extend_from_slice(&[n, n, n, n]);
+    groups.extend_from_slice(&[group; 4]);
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
 }
 
@@ -346,6 +466,8 @@ fn push_cap(
     vertices: &mut Vec<Vec3>,
     normals: &mut Vec<Vec3>,
     indices: &mut Vec<u32>,
+    groups: &mut Vec<u32>,
+    group: u32,
     tris: &[[u32; 3]],
     placed: impl Iterator<Item = Vec3>,
     forward: bool,
@@ -353,6 +475,7 @@ fn push_cap(
     let base = vertices.len() as u32;
     let start = vertices.len();
     vertices.extend(placed);
+    groups.extend(std::iter::repeat_n(group, vertices.len() - start));
     let mut accum = vec![Vec3::ZERO; vertices.len() - start];
     for tri in tris {
         let tri = if forward {
@@ -395,9 +518,13 @@ fn finish(
     vertices: Vec<Vec3>,
     mut normals: Vec<Vec3>,
     mut indices: Vec<u32>,
+    groups: Option<Vec<u32>>,
 ) -> anyhow::Result<PlantMesh> {
     if indices.len() < 3 {
         bail!("扫掠体没有产出三角形");
+    }
+    if let Some(groups) = groups {
+        smooth_normals_by_group(&vertices, &indices, &groups, &mut normals);
     }
     orient_outward(&vertices, &mut indices, &mut normals);
     let aabb = compute_aabb(&vertices);
@@ -410,10 +537,43 @@ fn finish(
     })
 }
 
+fn smooth_normals_by_group(
+    vertices: &[Vec3],
+    indices: &[u32],
+    groups: &[u32],
+    normals: &mut [Vec3],
+) {
+    let mut sums = std::collections::HashMap::<([u32; 3], u32), Vec3>::new();
+    for tri in indices.chunks_exact(3) {
+        let (a, b, c) = (
+            vertices[tri[0] as usize],
+            vertices[tri[1] as usize],
+            vertices[tri[2] as usize],
+        );
+        let area_normal = (b - a).cross(c - a);
+        if area_normal.length_squared() <= f32::EPSILON {
+            continue;
+        }
+        for &index in tri {
+            let i = index as usize;
+            let p = vertices[i];
+            let key = ([p.x.to_bits(), p.y.to_bits(), p.z.to_bits()], groups[i]);
+            *sums.entry(key).or_default() += area_normal;
+        }
+    }
+    for (i, normal) in normals.iter_mut().enumerate() {
+        let p = vertices[i];
+        let key = ([p.x.to_bits(), p.y.to_bits(), p.z.to_bits()], groups[i]);
+        if let Some(sum) = sums.get(&key).and_then(|n| n.try_normalize()) {
+            *normal = sum;
+        }
+    }
+}
+
 /// 绕全局 Z 轴回转 `angle_rad`。`placement` 先把 2D 截面摆进 3D（通常摆到含 Z 轴的平面上，
 /// 并沿 X 平移脊线半径），对齐 `gm_CreateRevolution` 与 OCC 的 `face.revolve(原点, Z, 角)`。
 pub fn revolve_loops(
-    loops: &[Loop2D],
+    loops: &[ProfileRing],
     placement: DMat4,
     angle_rad: f32,
     segments: u32,
@@ -442,9 +602,13 @@ pub fn revolve_loops(
     let mut vertices: Vec<Vec3> = Vec::new();
     let mut normals: Vec<Vec3> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
+    let mut groups: Vec<u32> = Vec::new();
+    let mut next_group = 0u32;
 
     for ring in loops {
-        let placed: Vec<Vec3> = ring.iter().map(|p| place(*p)).collect();
+        ring.validate()?;
+        let edge_groups = edge_smoothing_groups(ring, &mut next_group);
+        let placed: Vec<Vec3> = ring.points.iter().map(|p| place(*p)).collect();
         for step in 0..segments {
             let next = if is_full && step + 1 == segments {
                 0
@@ -457,6 +621,8 @@ pub fn revolve_loops(
                     &mut vertices,
                     &mut normals,
                     &mut indices,
+                    &mut groups,
+                    edge_groups[i],
                     [
                         spin(placed[i], step),
                         spin(placed[j], step),
@@ -470,10 +636,14 @@ pub fn revolve_loops(
 
     if !is_full {
         for (step, forward) in [(0u32, false), (segments, true)] {
+            let cap_group = next_group;
+            next_group += 1;
             push_cap(
                 &mut vertices,
                 &mut normals,
                 &mut indices,
+                &mut groups,
+                cap_group,
                 &cap_tris,
                 cap_pts.iter().map(|p| spin(place(*p), step)),
                 forward,
@@ -481,7 +651,7 @@ pub fn revolve_loops(
         }
     }
 
-    finish(vertices, normals, indices)
+    finish(vertices, normals, indices, Some(groups))
 }
 
 /// 截面摆进 3D 的变换，逐行对应 `SweepSolid::gen_occ_spro_wire` / `gen_occ_sann_wire`
@@ -607,7 +777,7 @@ pub fn sweep_solid_mesh(sweep: &SweepSolid) -> anyhow::Result<PlantMesh> {
             };
             let radius = loops
                 .iter()
-                .flatten()
+                .flat_map(|ring| ring.points.iter())
                 .map(|p| {
                     let v = mat * DVec4::new(p.x as f64, p.y as f64, 0.0, 1.0);
                     v.x.hypot(v.y)
@@ -625,13 +795,13 @@ pub fn sweep_solid_mesh(sweep: &SweepSolid) -> anyhow::Result<PlantMesh> {
 /// 生产 CSG 路径。垂直/平行端面已由 `do_solid_segments()` 留在 Extrusion 分支。
 fn ruled_solid_mesh(
     sweep: &SweepSolid,
-    loops: &[Loop2D],
+    loops: &[ProfileRing],
     height: f32,
     placement: DMat4,
 ) -> anyhow::Result<PlantMesh> {
     let spans = loops
         .iter()
-        .flatten()
+        .flat_map(|ring| ring.points.iter())
         .map(|point| libgm_discretise::ProfileSpan {
             point: [point.x as f64, point.y as f64],
             // `loops` 已按真实弧离散；这里对生产网格的实际顶点求 reach，不能再引入
@@ -884,17 +1054,114 @@ mod tests {
     fn rectangle_profile_area_and_winding() {
         let loops = profile_loops(&rect_profile(100.0, 50.0), 1.0).expect("rect profile");
         assert_eq!(loops.loops.len(), 1);
-        assert_eq!(loops.loops[0].len(), 4);
+        assert_eq!(loops.loops[0].points.len(), 4);
         assert!(
-            signed_area(&loops.loops[0]) > 0.0,
+            signed_area(&loops.loops[0].points) > 0.0,
             "外环必须是逆时针，实测面积 {}",
-            signed_area(&loops.loops[0])
+            signed_area(&loops.loops[0].points)
         );
         assert!(
             (loops.area() - 5000.0).abs() < 1e-2,
             "面积 {}",
             loops.area()
         );
+        assert!(
+            loops.loops[0].smooth_to_next.iter().all(|smooth| !smooth),
+            "矩形四角必须都是 libgm 硬边"
+        );
+    }
+
+    #[test]
+    fn rounded_profile_keeps_tangent_joins_smooth() {
+        let profile = CateProfileParam::SPRO(SProfileData {
+            verts: vec![
+                Vec2::new(0.0, 0.0),
+                Vec2::new(100.0, 0.0),
+                Vec2::new(100.0, 50.0),
+                Vec2::new(0.0, 50.0),
+            ],
+            frads: vec![10.0; 4],
+            ..Default::default()
+        });
+        let loops = profile_loops(&profile, 0.5).expect("rounded rectangle");
+        let ring = &loops.loops[0];
+        assert_eq!(ring.points.len(), ring.smooth_to_next.len());
+        assert!(
+            ring.smooth_to_next.iter().all(|smooth| *smooth),
+            "直线与倒角圆弧的相切连接必须全部光顺: {:?}",
+            ring.smooth_to_next
+        );
+    }
+
+    #[test]
+    fn reversing_a_ring_keeps_boundary_flags_attached_to_their_points() {
+        let mut ring = ProfileRing {
+            points: vec![Vec2::ZERO, Vec2::X, Vec2::Y],
+            smooth_to_next: vec![false, true, false],
+        };
+        let before = ring
+            .points
+            .iter()
+            .map(|point| [point.x.to_bits(), point.y.to_bits()])
+            .zip(ring.smooth_to_next.iter().copied())
+            .collect::<std::collections::HashMap<_, _>>();
+        ring.reverse();
+        for (point, smooth) in ring.points.iter().zip(&ring.smooth_to_next) {
+            assert_eq!(before[&[point.x.to_bits(), point.y.to_bits()]], *smooth);
+        }
+    }
+
+    #[test]
+    fn extrusion_splits_corner_normals_but_smooths_arc_chords() {
+        let rect = profile_loops(&rect_profile(100.0, 50.0), 0.5).unwrap();
+        let mesh = extrude_loops(&rect.loops, 20.0).unwrap();
+        let mut rect_by_position = std::collections::HashMap::<[u32; 3], Vec<Vec3>>::new();
+        for (point, normal) in mesh.vertices.iter().zip(&mesh.normals) {
+            if normal.z.abs() < 0.5 {
+                rect_by_position
+                    .entry([point.x.to_bits(), point.y.to_bits(), point.z.to_bits()])
+                    .or_default()
+                    .push(*normal);
+            }
+        }
+        assert!(
+            rect_by_position.values().any(|normals| normals
+                .iter()
+                .any(|a| normals.iter().any(|b| a.dot(*b) < 0.5))),
+            "矩形角点必须保留不同侧壁法线"
+        );
+
+        let rounded = CateProfileParam::SPRO(SProfileData {
+            verts: vec![
+                Vec2::new(0.0, 0.0),
+                Vec2::new(100.0, 0.0),
+                Vec2::new(100.0, 50.0),
+                Vec2::new(0.0, 50.0),
+            ],
+            frads: vec![10.0; 4],
+            ..Default::default()
+        });
+        let loops = profile_loops(&rounded, 0.5).unwrap();
+        let mesh = extrude_loops(&loops.loops, 20.0).unwrap();
+        let mut by_position = std::collections::HashMap::<[u32; 3], Vec<Vec3>>::new();
+        for (point, normal) in mesh.vertices.iter().zip(&mesh.normals) {
+            if normal.z.abs() < 0.5 {
+                by_position
+                    .entry([point.x.to_bits(), point.y.to_bits(), point.z.to_bits()])
+                    .or_default()
+                    .push(*normal);
+            }
+        }
+        let shared = by_position
+            .values()
+            .filter(|normals| normals.len() >= 2)
+            .collect::<Vec<_>>();
+        assert!(shared.len() > 8, "倒角侧壁必须有足够多的共享顶点");
+        assert!(shared.iter().all(|normals| {
+            normals
+                .iter()
+                .all(|normal| normal.abs_diff_eq(normals[0], 1e-5))
+        }));
     }
 
     #[test]
@@ -926,8 +1193,8 @@ mod tests {
         let (r, w) = (200.0f32, 20.0f32);
         let loops = profile_loops(&ann_profile(r, w, 360.0), 0.05).expect("sann full");
         assert_eq!(loops.loops.len(), 2, "整环必须是外环 + 内孔");
-        assert!(signed_area(&loops.loops[0]) > 0.0, "外环逆时针");
-        assert!(signed_area(&loops.loops[1]) < 0.0, "内孔顺时针");
+        assert!(signed_area(&loops.loops[0].points) > 0.0, "外环逆时针");
+        assert!(signed_area(&loops.loops[1].points) < 0.0, "内孔顺时针");
         let exact = PI * (r * r - (r - w) * (r - w));
         let got = loops.area();
         assert!(

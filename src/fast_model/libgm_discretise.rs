@@ -220,6 +220,69 @@ pub fn span_arc(p0: [f64; 2], p1: [f64; 2], bulge: f64) -> Option<SpanArc> {
     })
 }
 
+/// `D2_Span::getFirstTangent` / `getLastTangent` 的公共实现。
+///
+/// 直段返回规范化弦方向；圆弧返回端点处沿 bulge 绕向的单位切向。退化 span 没有
+/// 可定义的切向，返回 `None`，调用方必须把连接判成硬边。
+fn span_tangent(p0: [f64; 2], p1: [f64; 2], bulge: f64, at_end: bool) -> Option<[f64; 2]> {
+    let Some(arc) = span_arc(p0, p1, bulge) else {
+        return unit([p1[0] - p0[0], p1[1] - p0[1]]);
+    };
+    let p = if at_end { p1 } else { p0 };
+    let radial = [
+        (p[0] - arc.centre[0]) / arc.radius,
+        (p[1] - arc.centre[1]) / arc.radius,
+    ];
+    Some(if bulge > 0.0 {
+        [-radial[1], radial[0]]
+    } else {
+        [radial[1], -radial[0]]
+    })
+}
+
+pub fn span_first_tangent(p0: [f64; 2], p1: [f64; 2], bulge: f64) -> Option<[f64; 2]> {
+    span_tangent(p0, p1, bulge, false)
+}
+
+pub fn span_last_tangent(p0: [f64; 2], p1: [f64; 2], bulge: f64) -> Option<[f64; 2]> {
+    span_tangent(p0, p1, bulge, true)
+}
+
+/// `D2_Span::leadsSmoothlyTo`（E3D 3.1 libgeom `0x10029B50`）。
+///
+/// libgeom 比较两条**单位**切向，且只接受同向连接：`abs(1-dot) <= 1e-6`。
+pub fn spans_lead_smoothly(
+    p0: [f64; 2],
+    join: [f64; 2],
+    bulge0: f64,
+    p2: [f64; 2],
+    bulge1: f64,
+) -> bool {
+    let (Some(a), Some(b)) = (
+        span_last_tangent(p0, join, bulge0),
+        span_first_tangent(join, p2, bulge1),
+    ) else {
+        return false;
+    };
+    (1.0 - (a[0] * b[0] + a[1] * b[1])).abs() <= 1e-6
+}
+
+/// 闭合 profile 中 span `i` 是否光顺接到下一 span。
+pub fn profile_span_leads_smoothly(spans: &[ProfileSpan], i: usize) -> bool {
+    if spans.len() < 2 || i >= spans.len() {
+        return false;
+    }
+    let next = (i + 1) % spans.len();
+    let after = (i + 2) % spans.len();
+    spans_lead_smoothly(
+        spans[i].point,
+        spans[next].point,
+        spans[i].bulge,
+        spans[after].point,
+        spans[next].bulge,
+    )
+}
+
 /// `D2_Span::getApproxPolyLineInSteps(n)`（3.1 libgeom `0x10029CC0`）。
 ///
 /// **弧不是均分的。** libgeom 把整圆分成 `n` 份得到一张固定的角度格子
@@ -1506,5 +1569,59 @@ mod tests {
         assert!(arc.centre[0].abs() < 1e-9 && arc.centre[1].abs() < 1e-9);
         assert!(arc.alpha0 < arc.alpha1, "逆时针必须 α0 < α1");
         assert!(span_arc([0.0, 0.0], [1.0, 0.0], 0.0).is_none(), "直段无圆");
+    }
+
+    #[test]
+    fn leads_smoothly_uses_libgeom_unit_tangent_tolerance() {
+        assert!(spans_lead_smoothly(
+            [0.0, 0.0],
+            [1.0, 0.0],
+            0.0,
+            [2.0, 0.0],
+            0.0
+        ));
+        assert!(!spans_lead_smoothly(
+            [0.0, 0.0],
+            [1.0, 0.0],
+            0.0,
+            [1.0, 1.0],
+            0.0
+        ));
+
+        // dot = cos(angle)。阈值两侧各取一个角，防止回退成任意“视觉角度”。
+        let inside = (1.5e-6_f64).sqrt() * 0.5;
+        let outside = (3.0e-6_f64).sqrt();
+        assert!(spans_lead_smoothly(
+            [0.0, 0.0],
+            [1.0, 0.0],
+            0.0,
+            [1.0 + inside.cos(), inside.sin()],
+            0.0
+        ));
+        assert!(!spans_lead_smoothly(
+            [0.0, 0.0],
+            [1.0, 0.0],
+            0.0,
+            [1.0 + outside.cos(), outside.sin()],
+            0.0
+        ));
+    }
+
+    #[test]
+    fn arc_tangents_follow_bulge_direction() {
+        let first = span_first_tangent(
+            [1.0, 0.0],
+            [0.0, 1.0],
+            (std::f64::consts::FRAC_PI_2 * 0.25).tan(),
+        )
+        .unwrap();
+        let last = span_last_tangent(
+            [1.0, 0.0],
+            [0.0, 1.0],
+            (std::f64::consts::FRAC_PI_2 * 0.25).tan(),
+        )
+        .unwrap();
+        assert!((first[0]).abs() < 1e-9 && (first[1] - 1.0).abs() < 1e-9);
+        assert!((last[0] + 1.0).abs() < 1e-9 && last[1].abs() < 1e-9);
     }
 }

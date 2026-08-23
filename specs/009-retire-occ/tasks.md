@@ -24,14 +24,14 @@
   布尔 ingest f64、空网格 hard fail、禁止 `ManifoldRust`（ADR-029 骨架）。
 - [ ] T004（串行，依赖 T003）编译并跑 `cube_minus_inner_cube` / `ingest_rejects_empty_mesh`；
   live `mesh_gwall_extra_against_cwall`；更新 `docs/2026-08-12_live-test-ledger.md`。
-- [x] T005（串行，依赖 T003）`src/fast_model/occ_generate.rs`：`not(occ)` 且无
+- [x] T005（串行，依赖 T003）`src/fast_model/mesh_generate.rs`：`not(occ)` 且无
   `tessellate_libgm_param` 后端时 `bail!`，禁止 `Ok(())` 静默跳过。
 
 ## WP-A / B1–B2 箱柱挤出骨架
 
 - [x] T006（可与 T003 并行）`src/fast_model/manifold_tessellate.rs`、`src/fast_model/mod.rs`：
   单位箱、单位柱、`PrimExtrusion` 轮廓挤出；空挤出 hard fail。五条单测已绿。
-- [x] T007（串行，依赖 T005+T006）`src/fast_model/occ_generate.rs`：`gen_inst_meshes` 对
+- [x] T007（串行，依赖 T005+T006）`src/fast_model/mesh_generate.rs`：`gen_inst_meshes` 对
   `PrimBox` / `PrimLCylinder` / 无切角 `PrimSCylinder` / `PrimExtrusion` 先
   `tessellate_libgm_param`，失败或 `None` 再 OCC；AABB/`pts` 改从网格取，禁止空 `pts` 静默。
 - [x] T007a（2026-08-19 补口径）`src/fast_model/manifold_tessellate.rs`：挤出 FRADIUS 倒角接
@@ -157,7 +157,7 @@
 
 ## WP-E 离散口径与收口
 
-- [x] T028（依赖 T007）`src/fast_model/occ_generate.rs`：manifold 路径 AABB 来自 `PlantMesh`；`pts` 有明确
+- [x] T028（依赖 T007）`src/fast_model/mesh_generate.rs`：manifold 路径 AABB 来自 `PlantMesh`；`pts` 有明确
   来源或省略策略写进回执，禁止空列表假装成功。
 > T029（活库盘点）已拆分为 T045；T030（测试与浸水解绑）已拆分为 T043 / T044。
 > 两条不再单独跟踪，勾在拆出去的那几条上。
@@ -201,7 +201,7 @@
   `cal_circus_center`，内外圈同一套 `gen_occ_spline_wire` 点位，直线挤出与弧形墙
   共用 `extrude_flat_polygons` 尾段）；三条门测试 +「SPINE 点出平面 / thick 吃穿
   半径」也硬失败。
-- [x] T037（可并行）`src/fast_model/manifold_tessellate.rs`、`src/fast_model/occ_generate.rs`：`Unknown` /
+- [x] T037（可并行）`src/fast_model/manifold_tessellate.rs`、`src/fast_model/mesh_generate.rs`：`Unknown` /
   `CompoundShape` 直接推进 `unbuildable` 标 `bad`，不经 OCC 分支
   （两者 `check_valid()` 为 false，`gen_occ_shape()` 本来就 `Err`）。
   门：源码断言 manifold 分支之后不再有 `#[cfg(feature = "occ")]` 的形状回退路径。
@@ -609,6 +609,12 @@ ws,gen_model,manifold,project_hd`：T039 / T042 落地后是 **1062 通过 / 1 �
 - [x] T026/T027/T028：源码护栏钉住退役 Core3D 操作、目录负体 Manifold 唯一入口，
   并钉住有效 `PlantMesh` → 持久化 → AABB 角点回执顺序；3 条定向测试全绿。
   **T052a 的 dabacon YOFF 现场普查仍未完成。**
-- [x] T002-release：aios-core `d4a39c22`、parse `853ed155`、pdms-io `53b9e38c` 已发布并同步升级
-  根包与 Python；local-deps OFF 的依赖图只有一份 aios-core。
-- [ ] T031：按现场样本硬门暂停；现有证据缺球、SSCL、多面体，且尚无 YOFF dabacon 普查。
+- [x] T002-release：无 OCC 的 aios-core `f9551ef4`、parse `ac85df94`、pdms-io `c4f02e97`
+  已发布并同步升级根包与 Python；local-deps OFF 的依赖图只有一份 aios-core。
+- [x] T031-code：主仓、Python、CI 与发布流程已删除 OCC feature、依赖、API、布尔和 DLL
+  装配；无 Manifold 后端时 `gen_inst_meshes` 明确失败。**最终现场发布仍按硬门暂停：现有
+  证据缺球、SSCL、多面体，且尚无 YOFF dabacon 普查。**
+- [x] T054-code：`ProfileRing` 显式保存逐边光顺关系；libgm `1e-6` 切向判据、反向重排、
+  端盖硬边、Manifold 属性顶点和布尔后的法线传播均有纯函数/网格回归测试。
+- [x] T032-code：`cargo fmt --check`、默认与无默认 feature `cargo check`、全量 lib、四个
+  CI 集成目标和 Python offline 测试通过；维护窗口、双库 RVM 与 live ledger 留待现场硬门。

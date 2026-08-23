@@ -12,7 +12,7 @@ use surrealdb::{Surreal, engine::any::Any};
 use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::occ_generate::AabbChange;
+use crate::fast_model::mesh_generate::AabbChange;
 use crate::fast_model::room_model;
 
 pub const TABLE: &str = "model_update_pending";
@@ -605,9 +605,9 @@ pub(crate) async fn refresh_post_regen_aabbs(refnos: &[RefnoEnum]) -> anyhow::Re
     if refnos.is_empty() {
         return Ok(0);
     }
-    crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos_incremental(refnos, true)
+    crate::fast_model::mesh_generate::update_inst_relate_aabbs_by_refnos_incremental(refnos, true)
         .await?;
-    let changes = crate::fast_model::occ_generate::existing_geometric_aabb_changes(refnos).await?;
+    let changes = crate::fast_model::mesh_generate::existing_geometric_aabb_changes(refnos).await?;
     if let Some(context) = crate::data_interface::staging::active_staging_writes() {
         context.defer_room_changes(&changes).await;
     } else {

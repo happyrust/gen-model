@@ -10,7 +10,7 @@ Rust edition 2024，**必须用 nightly**（`.cargo/config.toml` 带 `-Z threads
 
 - `src/` —— 库 `aios_database` + `src/main.rs` + `src/bin/` 下 27 个探针/工具 bin
   - `data_interface/` —— 增量引擎核心：批次队列 / 调度 / worker、`dbnum_state` 水位、`manual_update`、`model_impact` 影响分类、`generation_root` 生成根解析、`cata_closure`、`staging/`（ADR-017 暂存窗口提交）
-  - `fast_model/` —— 几何生成：`gen_model` / `cata_model` / `occ_generate` / `manifold_bool` / `pdms_inst` / `aabb_tree`·`spatial_state` 空间索引 / `room_*` 房间归属
+  - `fast_model/` —— 几何生成：`gen_model` / `cata_model` / `mesh_generate` / `manifold_bool` / `pdms_inst` / `aabb_tree`·`spatial_state` 空间索引 / `room_*` 房间归属
   - `web_service/` —— `http_api` 的 axum 面：`mod.rs`(serve)、`handlers.rs`、`ws.rs`、`events.rs`
   - `versioned_db/` —— 版本化落库：`pe.rs`、`database.rs`、`attmap.rs`、`member_prune.rs`
   - `data_to_file/` —— 回写 dabacon 文件格式（`modify/`、`increment/`）
@@ -33,16 +33,16 @@ Rust edition 2024，**必须用 nightly**（`.cargo/config.toml` 带 `-Z threads
 | 场景 | 命令 |
 |---|---|
 | 装工具链 | `rustup toolchain install nightly-2026-08-02 --profile minimal; rustup default nightly-2026-08-02` |
-| Release 构建（CI 口径） | `cargo build --release --locked --bin aios-database --no-default-features --features ws,gen_model,manifold,occ,project_hd,http_api` |
+| Release 构建（CI 口径） | `cargo build --release --locked --bin aios-database --no-default-features --features ws,gen_model,manifold,project_hd,http_api` |
 | CentOS 7 交叉编译 | `cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.17` |
 | 快速质量门 | `cargo check` |
-| 单测（CI 口径，注意**不带 `occ`**） | `cargo test --locked --lib <测试名> --no-default-features --features ws,gen_model,manifold,project_hd -- --nocapture` |
+| 单测（CI 口径） | `cargo test --locked --lib <测试名> --no-default-features --features ws,gen_model,manifold,project_hd -- --nocapture` |
 | 集成测试（CI 跑这四个） | 同上，把 `--lib <测试名>` 换成 `--test db8000_two_delete_fixture` / `db_session_fixture_selfcheck` / `db8000_session_pairs` / `pdms_record_boundary` |
 | 单条 live 用例 | `$env:DB_OPTION_FILE = 'python/testbed/DbOption-pytest'` 然后 `cargo test --lib --features http_api <测试名> -- --ignored --exact --nocapture` |
 | 批量 live | `powershell -File scripts\Run-LiveBatch.ps1 -Manifest scripts\live-batches\<批次>.json` |
 | 纯 Python 用例 | `python -m unittest discover -s tests/python -p "test_*.py" -v` |
 | 装绑定（日常调试） | `cd python; uv venv .venv; uv pip install maturin --python .venv; $env:VIRTUAL_ENV = (Resolve-Path .venv).Path; .venv\Scripts\maturin.exe develop` |
-| 装绑定（跑生成类操作前） | `.venv\Scripts\maturin.exe develop --release`（OCC 布尔运算 debug 太慢） |
+| 装绑定（跑生成类操作前） | `.venv\Scripts\maturin.exe develop --release` |
 | 绑定离线档（CI 只跑这档，秒级） | `cd python; .venv\Scripts\python.exe -m pytest -m offline -q` |
 | 绑定全档（需 `bin/surreal.exe`） | `cd python; .venv\Scripts\python.exe -m pytest -q` |
 | 构建 wheel | `cd python; maturin build --locked --out <目录>` |

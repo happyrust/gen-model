@@ -57,7 +57,7 @@ use surrealdb::opt::auth::Root;
 /// `thread 'tokio-rt-worker' has overflowed its stack`——服务能起、/health 全绿，
 /// 直到真有增量要应用才当场死。release 压得下，所以 `#[tokio::main]` 一直没出事。
 ///
-/// 取值对齐 `fast_model/occ_generate.rs` 给 `gensec-occ-regression` 线程的 64MB：
+/// 取值对齐 `fast_model/mesh_generate.rs` 给 `gensec-occ-regression` 线程的 64MB：
 /// 栈是保留地址空间、按页提交，多留不花实际内存。
 const RUNTIME_STACK_SIZE: usize = 64 * 1024 * 1024;
 

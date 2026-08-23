@@ -22,7 +22,7 @@ Push-Location $repo
 try {
     cargo build --bin aios-database --bin l3_suite --bin sync_sys_only `
         --bin initialize_ams_dbnums --bin manual_scan_probe `
-        --no-default-features --features "ws,gen_model,manifold,occ,project_hd,http_api"
+--no-default-features --features "ws,gen_model,manifold,project_hd,http_api"
     if ($LASTEXITCODE) { exit $LASTEXITCODE }
     # The baseline bootstrap walks a deep ownership graph on the process main
     # thread. Rust's RUST_MIN_STACK only covers spawned threads, so reserve the

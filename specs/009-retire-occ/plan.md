@@ -51,13 +51,13 @@ T011 / T013 / T016 一直空着，现已全部两头对照过（libgm 构造函�
 | `PrimRevolution` | `tessellate_revolution` | ✅ 配对口径（T040） | 不涉及 | 出平面轴 `bail!`；轴心吸附已补（T035） |
 | `PrimLoft` | `sweep_mesh::sweep_solid_mesh` | ✅ 绝对容差（T042） | 不涉及 | 四道 RVM 门一条没跑（WP-J） |
 | `PrimLCylinder` / 无切角 `PrimSCylinder` | 单位柱 | ⛔ 具名欠账 32 | 不涉及 | 身份键挡着，等 T041 |
-| 切角 `PrimSCylinder`（SSCL） | `gen_slope_ended_cylinder` | ✅ `circle(radius)` | ✅ T016 | **剪切角未折进 (−90, 90]**（Core3D 会折）；活库 0 实例 |
-| `PrimSphere` | `unit_sphere()` | ⛔ 具名欠账 16×36 | 不涉及 | 身份键挡着，等 T041；活库 0 实例 |
-| `PrimLSnout` | `gen_snout` | ✅ `fmax(rBtm, rTop)` | ✅ T011 | **偏心摆位错（T050）**、**YOFF 未接（T051）** |
+| 切角 `PrimSCylinder`（SSCL） | `gen_slope_ended_cylinder` | ✅ libgm circle 规则，输入真实半径 | ✅ T016 | **剪切角未折进 (−90, 90]**（Core3D 会折）；活库 0 实例 |
+| `PrimSphere` | 单位球生成器 | ⛔ 具名欠账 16×36 | 不涉及 | 身份键挡着，等 T041；活库 0 实例 |
+| `PrimLSnout` | `gen_snout` | ✅ libgm 取上下半径较大值 | ✅ T011 | **偏心摆位错（T050）**、**YOFF 未接（T051）** |
 | `PrimDish`（球碟） | `gen_spherical_dish` | ✅ 两方向均权威 | ✅ `CSG_BasicDIS` `0x10726D10` | — |
 | `PrimDish`（椭圆碟） | `gen_elliptical_dish` | ✅ 三方向均权威 | ✅ | 2026-08-24 换成托里球形封头（T038a）；活库 0 样本，未经现场验证 |
-| `PrimCTorus` | `gen_circular_torus` | ✅ `partRev(rOut)` + 管截面 | ✅ T013 | `RINS` 未按 Core3D 夹 `fmax(·, 0)` |
-| `PrimRTorus` | `gen_rectangular_torus` | ✅ `partRev(rOut)` | ✅ T013 | 同上 |
+| `PrimCTorus` | `gen_circular_torus` | ✅ libgm partial-revolution 规则 + 管截面 | ✅ T013 | `RINS` 未按 Core3D 夹到非负值 |
+| `PrimRTorus` | `gen_rectangular_torus` | ✅ libgm partial-revolution 规则 | ✅ T013 | 同上 |
 | `Unknown` / `CompoundShape` | 回 `None` → 标 `bad` | 不涉及 | 不涉及 | — |
 
 「⛔ 具名欠账」不是「忘了改」：段数只许有三个出处——权威规则、点名的身份键欠账
@@ -73,10 +73,9 @@ T011 / T013 / T016 一直空着，现已全部两头对照过（libgm 构造函�
 > **G3 的范围不是「柱与球」，是所有参与复用的曲面原语**，见 T053。
 
 `occ` 在源码里剩下的引用只有四处，全部不在生成路径上：
-`src/rvm_baseline/mesh_compare.rs` 的 `gen_side`、`src/fast_model/occ_generate.rs` 里两条
+`src/rvm_baseline/mesh_compare.rs` 的 `gen_side`、`src/fast_model/mesh_generate.rs` 里两条
 `#[cfg]` 测试与已注释的 `apply_insts_boolean_occ` / `apply_cata_neg_boolean_occ`、
-`src/fast_model/loop_model.rs` 一条断言、`src/plug_in/water_calculation.rs`（挂在
-**Cargo.toml 里根本没定义**的 `opencascade_rs` feature 上，等于常关死代码）。
+`src/fast_model/loop_model.rs` 一条断言，以及已经删除的历史浸水插件死代码。
 
 ## 阻塞 Phase 4 的到底是什么
 
@@ -112,7 +111,7 @@ T011 / T013 / T016 一直空着，现已全部两头对照过（libgm 构造函�
   `(double startAngle, double finishAngle, D2_Point const& origin, double axisAngle,
   GM_Profile*, double tol)`——轴是**平面内的角度**。
   `translatePolygonIntoStandardPosition`（`0x10097810`）把原点搬到零点、
-  `rotateBy(90 − axisAngle)` 把轴摆到 +Y。libgm 表达不出出平面轴。
+  随后按 `90 − axisAngle` 旋转，把轴摆到 +Y。libgm 表达不出出平面轴。
 - **本仓侧**：`Revolution` 的唯一构造点是 aios-core
   `../vendor/old-aios-core/src/prim_geo/category.rs`，走 `..Default::default()`，
   `rot_dir` 恒为 `Vec3::X`。
@@ -145,11 +144,11 @@ T011 / T013 / T016 一直空着，现已全部两头对照过（libgm 构造函�
 
 ### F4 `Unknown` / `CompoundShape` → 直接标 `bad`
 
-- **证据**：两者 `check_valid()` 为 `false`，`gen_occ_shape()` 第一句即
-  `Err("Invalid shape")`。回 `None` 只是换个地方报同一个错。
+- **证据**：两者的有效性检查均为 false，历史 OCC 入口立即返回 Invalid shape。
+  回 `None` 只是换个地方报同一个错。
 - **改法**：`tessellate_libgm_param` 的返回类型换掉 `Option`，或让这两支返回一个显式的
   「非形状」判定，由 `gen_inst_meshes` 直接推进 `unbuildable`，不经 OCC 分支。
-- **门**：源码断言 `src/fast_model/occ_generate.rs` 的 manifold 分支之后不再有
+- **门**：源码断言 `src/fast_model/mesh_generate.rs` 的 manifold 分支之后不再有
   `#[cfg(feature = "occ")]` 的形状回退路径。
 
 ---
@@ -168,7 +167,7 @@ T011 / T013 / T016 一直空着，现已全部两头对照过（libgm 构造函�
 （本仓 `span_polyline_in_steps` 已经是它），差别只在喂进去的 `n`。** 所以 G1 不需要新的
 弧数学，只需要一套新的段数计算。
 
-#### 1. `pairedSpan(i)`（`0x1008F7F0`）：反向重合边
+#### 1. libgm pairedSpan（`0x1008F7F0`）：反向重合边
 
 设 span `i` 是 `pts[i-1] → pts[i]`。
 - 起点等于终点（退化）→ 返回 `-1`。
@@ -178,7 +177,7 @@ T011 / T013 / T016 一直空着，现已全部两头对照过（libgm 构造函�
 
 即：轮廓上原路折返的那对边互为配对。零厚度翅片、回转轮廓的接缝都会命中。
 
-#### 2. `setNSteps(tol)`（`0x1008F2E0`）：配对取大 + 单调取大
+#### 2. libgm setNSteps（`0x1008F2E0`）：配对取大 + 单调取大
 
 ```text
 for i in 1..=nSpans:
@@ -190,7 +189,7 @@ for i in 1..=nSpans:
 
 #### 3. 1000 封顶：**不是逐段截断，是整条轮廓重算**
 
-`polygonForFacet` 在 `setNSteps` 之后取 `getNFacetsRoundProfile()`（`0x1008ECB0`）：
+polygonForFacet 在 setNSteps 之后读取整圈 facet 数（`0x1008ECB0`）：
 
 ```text
 total = 0
@@ -205,10 +204,10 @@ for i in 1..=nSpans:
 tol' = tol · ((total − nSpans) / (1000 − nSpans))²
 ```
 
-再跑一遍 `setNSteps(tol')`。平方是对的：`n ∝ 1/√tol`，所以 `tol` 乘 `k²` 让 `n` 除以 `k`，
+再按新容差跑一遍 setNSteps。平方是对的：`n ∝ 1/√tol`，所以 `tol` 乘 `k²` 让 `n` 除以 `k`，
 恰好把 `total` 拉回 1000 附近。
 
-> **这条修正了既有文档。** `plant-4/libgm-boolean-algorithm.md` §7.9.1 写的是
+> **这条修正了既有逆向笔记。** 本仓证据 `docs/evidence/2026-08-24-libgm-profile-edge-semantics.md` 写明
 > 「每个原语都在自己内部 `if (n > 1000) n = 1000`」，`libgm_discretise` 的模块文档写的是
 > 「截面那条路上没有封顶」。对曲面原语两句都对；对**轮廓**这条路两句都不对——
 > 封顶存在，但形式是全局容差重标定，会改变**每一段**的段数，而不是只削掉超限的那些。
@@ -239,11 +238,11 @@ tol' = tol · ((total − nSpans) / (1000 − nSpans))²
 | 原语 | 喂进去的半径 | 附加规则 | 状态 |
 |---|---|---|---|
 | SSCL 切角柱 | `radius`（`getNCoords` `0x1009E3A0`） | — | ✅ |
-| `PrimLSnout` | `fmax(rBtm, rTop)`（`getNCoords` `0x1009F600`） | 不是底也不是顶 | ✅ |
-| `PrimRTorus` | `partRev(rOut, tol, s, e)` | — | ✅ |
-| `PrimCTorus` | 扫掠 `partRev(rOut, …)`，管截面 `circle((rOut−rIns)/2, …)` | 非整圈段数 **+1**（在环面生成器内部做，别加第二次） | ✅ |
-| `PrimDish`（球碟） | `h ≥ a ? R : a`，`R = (a²/h + h)/2` | 经向 `ceil(θ/(2π/n))`，`θ = acos(1 − h/R)` | ✅ |
-| `PrimDish`（椭圆碟） | 绕轴 `circle(a, tol)`——喂**底半径**，不是 `R_c` | 经向见下 | 绕轴 ✅ / 经向 ⛔ |
+| `PrimLSnout` | 上下半径较大值（`getNCoords` `0x1009F600`） | 不是底也不是顶 | ✅ |
+| `PrimRTorus` | 外半径的 partial-revolution 规则 | — | ✅ |
+| `PrimCTorus` | 外半径 partial-revolution，管截面取半径差的一半 | 非整圈段数 **+1**（在环面生成器内部做，别加第二次） | ✅ |
+| `PrimDish`（球碟） | `h ≥ a ? R : a`，`R = (a²/h + h)/2` | 经向按球冠角和环向角步长向上取整 | ✅ |
+| `PrimDish`（椭圆碟） | 绕轴按底半径执行 circle 规则，不是 `R_c` | 经向见下 | 绕轴 ✅ / 经向 ⛔ |
 
 椭圆碟这一行 2026-08-24 反完，**结论是它不属于 G2**：libgm 的 `GM_EDish`
 （`0x10054AB0`）是托里球形封头——球冠加一圈相切的环面拐角，而本仓
@@ -253,12 +252,12 @@ tol' = tol · ((total − nSpans) / (1000 − nSpans))²
 
 - `r_k = h / (1 + (a − h)/√(a² + h²))`；Core3D 现算后传入，`RADI` 只当开关、数值被丢掉。
 - `R_c = radiusOfHub() = (a² + h² − 2a·r_k) / (2(h − r_k))`。
-- **`θ = acos((R_c − h)/(R_c − r_k)) = atan2(h, a)`**。~~`acos((h − r_k)/(R_c − r_k))`~~
+- **球冠角满足 `θ = atan2(h, a)`，亦等于对应半径比值的反余弦。**
   是上一版记错的——那是 Hex-Rays 吞掉 acos 实参后的伪码，反汇编（`0x10054CCB`）是
-  `acos(1 − q)`。
+  实际调用是对 `1 − q` 取反余弦。
 - `n_hub = partRev(R_c, tol, 0°, θ°)`、`n_knuckle = partRev(r_k, tol, θ°, 90°)`；
   封顶判据 `2(n_hub + n_knuckle) > 1000`，触发后 `4·n > 1000` 的那一段各自夹到 250。
-- `isSpherical()`（`|a − h| ≤ 1e-6`）时 `θ` 直接取 45°，且 `R_c` 保持等于 `r_k`。
+- 球形判定为 `|a − h| ≤ 1e-6`；命中时 `θ` 直接取 45°，且 `R_c` 保持等于 `r_k`。
 
 - **文件**：`src/fast_model/manifold_tessellate.rs`、`src/fast_model/mesh_primitives.rs`
   （`DEFAULT_CIRCULAR_SEGMENTS` 与散落的 `32` / `16` 已从生产路径清掉；剩下的两处
@@ -276,7 +275,7 @@ tol' = tol · ((total − nSpans) / (1000 − nSpans))²
 > `docs/evidence/2026-08-24-unit-normalised-curved-primitives.md`。
 
 - **问题**：`LCylinder::hash_unit_mesh_params()` 返回常量 `CYLINDER_GEO_HASH`，
-  `gen_unit_shape()` 返回 `Self::default()`；一份网格没法同时是 16 段和 484 段。
+  规范单位形状返回默认参数；一份网格没法同时是 16 段和 484 段。
 - **改法**（ADR-044 决策 2 / 5）：`hash_unit_mesh_params` 混入该实例算出的段数；
   `src/fast_model/pdms_inst.rs` 的 `canonical_unit_param_json` 里那条 `CYLINDER_GEO_HASH`
   特判跟着按新键走。
@@ -298,7 +297,7 @@ tol' = tol · ((total − nSpans) / (1000 − nSpans))²
   论证在扫掠体上的同一个病，只是此前没人量过墙这一侧。已改成全局绝对量。
 - 常量从 `manifold_tessellate` 迁到 `libgm_discretise`：段数规则与它喂的容差住在一起，
   「全库唯一一份」才不只是句注释。模块文档里「我们这边仍是每个原语按自身尺度给
-  `tol()`，口径尚未对齐」同步作废。
+  相对容差，口径尚未对齐」同步作废。
 - **代价与缺口**：墙的弧段段数会变，而能量它的是 WP-J 的 RVM 门，**要等 H1 解绑才跑
   得起来**。目前只有纯函数单测与体积门覆盖。这一条不要当成已验收。
 
@@ -321,7 +320,7 @@ tol' = tol · ((total − nSpans) / (1000 − nSpans))²
 
 - ~~`src/fast_model/loop_model.rs` 那条 `occ` 断言改成对 manifold 结果断言。~~ 已改：
   原 `occ` 块在 CI 口径下根本不编，是一条从来没跑过的断言。
-- ~~`src/plug_in/water_calculation.rs` 是死代码，删之前确认 STP 路径确实是空的。~~
+- ~~历史浸水插件是死代码，删之前确认 STP 路径确实是空的。~~
   已确认并删除：`opencascade_rs` 在任何 `Cargo.toml` 里都没定义过，`export_stp` 的
   唯一调用点连自己的 `mod` 声明都是注释。整个模块随后由另一会话一并删除，
   重启路径以 `changelog.md` 那条为准。
@@ -346,7 +345,7 @@ tol' = tol · ((total − nSpans) / (1000 − nSpans))²
 | 证据 | `docs/evidence/2026-08-23-occ-retire-census.md`（含全部查询与原始导出） | 本节表格 |
 
 正式库 `.surreal/ams-8009` 已被 3.x 写坏且决定不修（AGENTS.md），两次都没碰它。
-库 A 走 `bin/surreal.exe` 2.1.4 打开只读副本，盘点后副本与进程已清理。
+库 A 走仓库脚本解析到的 SurrealDB 2.1.4 打开只读副本，盘点后副本与进程已清理。
 
 ### 变体分布
 
@@ -523,7 +522,7 @@ T041 / T050 / T038a 三件「改完必须对拍才敢认」的改动——它们
 > （`../vendor/old-aios-core/src/prim_geo/snout.rs` 上同时压着 T002 的规范化修复与
 > WP-K 的两条）串成一条链，要求一次推上游、别分三次改同一个文件。两份出现分歧时
 > 以本文件的**依赖关系**与那份的**执行顺序**各自为准；若连依赖关系都对不上，
-> 说明有一份没跟上 `tasks.md`，先对台账。
+> 说明有一份没跟上 `specs/009-retire-occ/tasks.md`，先对台账。
 
 ## 验证
 

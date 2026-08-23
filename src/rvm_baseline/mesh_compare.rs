@@ -259,13 +259,9 @@ mod gen_side {
     /// 有 `booled_id` 时与生产 `query_valid_insts` 一样，只加载布尔后的
     /// `{booled_id}.mesh` 再乘 `world_trans`（切洞结果已烘进网格）。没有则
     /// geo_hash → param → 生产同款 `tessellate_libgm_param` → 网格，再乘
-    /// `world_trans × inst.transform`。`gen_tol` 是 OCC 参照分支的细分弦容差
-    /// （mm），只在带 `occ` 的构建里用得上。
-    pub async fn gen_world_mesh(
-        db: &Surreal<Any>,
-        pe_key: &str,
-        gen_tol: f64,
-    ) -> Result<Option<TriMesh>> {
+    /// `world_trans × inst.transform`。如果 libgm 语义实现不支持该参数，
+    /// 只允许对已落盘的布尔/复合结果读取 `.mesh`，不切换几何后端。
+    pub async fn gen_world_mesh(db: &Surreal<Any>, pe_key: &str) -> Result<Option<TriMesh>> {
         // 走这个 pe 的出边，不要 `WHERE in = {pe_key}`：`inst_relate` 没有
         // `(in, out)` 索引，谓词形式在真库上是整表扫，而对拍要逐件调用本函数。
         let sql = format!(
@@ -310,7 +306,7 @@ mod gen_side {
                 continue;
             };
             if !unit_cache.contains_key(hash) {
-                let unit = build_unit_mesh(db, hash, gen_tol).await?;
+                let unit = build_unit_mesh(db, hash).await?;
                 unit_cache.insert(hash.to_string(), unit);
             }
             let Some(unit) = unit_cache.get(hash).and_then(|m| m.as_ref()) else {
@@ -329,11 +325,7 @@ mod gen_side {
         Ok(accum.into_trimesh())
     }
 
-    async fn build_unit_mesh(
-        db: &Surreal<Any>,
-        geo_hash: &str,
-        gen_tol: f64,
-    ) -> Result<Option<PlantMesh>> {
+    async fn build_unit_mesh(db: &Surreal<Any>, geo_hash: &str) -> Result<Option<PlantMesh>> {
         let sql =
             format!("SELECT param FROM inst_geo WHERE record::id(id) = '{geo_hash}' LIMIT 1;");
         let mut resp = db.query(sql).await.context("查询 inst_geo.param 失败")?;
@@ -353,20 +345,9 @@ mod gen_side {
                 Ok(Some(mesh)) => return Ok(Some(mesh)),
                 Ok(None) => {}
                 Err(error) => {
-                    eprintln!("geo_hash={geo_hash} libgm 三角化失败，走参照回退: {error}");
+                    eprintln!("geo_hash={geo_hash} libgm 三角化失败，尝试读取已落盘结果: {error}");
                 }
             }
-            // OCC 仅作可选参照分支（T043）：生产不再用它建形状，但在带 `occ` 的
-            // 构建里保留，供事后验收对拍时多一条独立参照。
-            #[cfg(feature = "occ")]
-            match param.gen_occ_shape() {
-                Ok(shape) => return Ok(Some(PlantMesh::gen_occ_mesh(&shape, gen_tol)?)),
-                Err(error) => {
-                    eprintln!("geo_hash={geo_hash} gen_occ_shape 失败，回退磁盘 .mesh: {error}");
-                }
-            }
-            #[cfg(not(feature = "occ"))]
-            let _ = gen_tol;
         }
         // param 为空或建不出形状 → 磁盘 .mesh（布尔/复合结果，如 BEND；CWD=仓库根，
         // meshes_path 默认 assets/meshes）。
@@ -466,7 +447,7 @@ mod mesh_wall_live {
             let rvm = rvm_meshes
                 .get(rvm_name)
                 .unwrap_or_else(|| panic!("RVM 缺 group {rvm_name}"));
-            let gen_mesh = gen_world_mesh(&db, pe_key, 3.0)
+            let gen_mesh = gen_world_mesh(&db, pe_key)
                 .await
                 .expect("gen mesh")
                 .unwrap_or_else(|| panic!("gen 缺网格 {pe_key}"));
@@ -597,7 +578,7 @@ mod mesh_wall_live {
             let rvm = rvm_meshes
                 .get(rvm_name)
                 .unwrap_or_else(|| panic!("RVM 缺 group {rvm_name}"));
-            let Some(gen_mesh) = gen_world_mesh(&db, pe_key, 3.0).await.expect("gen mesh") else {
+            let Some(gen_mesh) = gen_world_mesh(&db, pe_key).await.expect("gen mesh") else {
                 println!("{rvm_name} ({pe_key}): 库里没有这件的生成几何，跳过对拍");
                 missing.push(format!("{rvm_name} ({pe_key})"));
                 continue;
@@ -686,7 +667,7 @@ mod mesh_wall_live {
                 println!("{rvm_prefix}: RVM 无匹配 group，跳过");
                 continue;
             };
-            let gen_mesh = match gen_world_mesh(&db, pe_key, 2.0).await.expect("gen mesh") {
+            let gen_mesh = match gen_world_mesh(&db, pe_key).await.expect("gen mesh") {
                 Some(m) => m,
                 None => {
                     println!("{rvm_prefix} ({pe_key}): gen 无网格（TUBI 隐含直管？），跳过");
@@ -765,7 +746,7 @@ mod mesh_wall_live {
             if let Some(m) = find_mesh(prefix) {
                 rvm_parts.push(m);
             }
-            if let Some(m) = gen_world_mesh(&db, pe_key, 2.0).await.expect("gen mesh") {
+            if let Some(m) = gen_world_mesh(&db, pe_key).await.expect("gen mesh") {
                 gen_parts.push(m);
             }
         }
@@ -848,7 +829,7 @@ mod mesh_wall_live {
                 Some(m) => rvm_parts.push(m),
                 None => missing.push(format!("rvm:{prefix}")),
             }
-            match gen_world_mesh(&db, pe_key, 2.0).await.expect("gen mesh") {
+            match gen_world_mesh(&db, pe_key).await.expect("gen mesh") {
                 Some(m) => gen_parts.push(m),
                 None => missing.push(format!("gen:{pe_key}")),
             }
@@ -953,7 +934,7 @@ mod mesh_wall_live {
         let mut skipped = Vec::new();
         for (prefix, pe_key) in members {
             let rvm = rvm_by_prefix(&rvm_meshes, prefix).cloned();
-            let generated = gen_world_mesh(&db, pe_key, 2.0).await.expect("gen mesh");
+            let generated = gen_world_mesh(&db, pe_key).await.expect("gen mesh");
             match (rvm, generated) {
                 (Some(r), Some(g)) => {
                     rvm_parts.push(r);
@@ -1075,7 +1056,7 @@ mod mesh_wall_live {
             mesh_refnos.len(),
             bool_refnos.len()
         );
-        crate::fast_model::occ_generate::gen_inst_meshes(&mesh_refnos, true, dir.clone())
+        crate::fast_model::mesh_generate::gen_inst_meshes(&mesh_refnos, true, dir.clone())
             .await
             .expect("gen_inst_meshes");
         crate::fast_model::manifold_bool::apply_insts_boolean_manifold(
@@ -1140,7 +1121,7 @@ mod mesh_wall_live {
         let mut gen_parts = Vec::new();
         let mut missing_gen = Vec::new();
         for pe_key in pe_keys {
-            match gen_world_mesh(&db, pe_key, 3.0).await.expect("gen mesh") {
+            match gen_world_mesh(&db, pe_key).await.expect("gen mesh") {
                 Some(m) => gen_parts.push(m),
                 None => missing_gen.push(pe_key.to_string()),
             }
@@ -1283,7 +1264,7 @@ mod mesh_wall_live {
                 nxtr_failures.push(format!("{pe_key}: nxtr={n}"));
             }
 
-            let Some(part) = gen_world_mesh(&db, pe_key, 3.0).await.expect("gen mesh") else {
+            let Some(part) = gen_world_mesh(&db, pe_key).await.expect("gen mesh") else {
                 panic!("{pe_key} has no gen mesh");
             };
             let aabb = part.local_aabb();

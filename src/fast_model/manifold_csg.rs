@@ -6,22 +6,14 @@
 use aios_core::shape::pdms_shape::PlantMesh;
 use anyhow::anyhow;
 use glam::{DMat4, Vec3};
-use manifold_csg::Manifold;
+use manifold_csg::{Manifold, MeshGL64};
 use parry3d::bounding_volume::Aabb;
 use parry3d::math::Point;
-use std::collections::HashMap;
 use std::path::Path;
 
 /// 两个顶点近到这个距离（mm）就当同一个点。与 `sweep_mesh` / `manifold_tessellate`
 /// 的 `POS_EPS` 同一口径：0.1µm 在 mm 量级的 PDMS 模型里没有任何真实结构。
 const WELD_EPS: f32 = 1e-4;
-
-/// 同一位置上夹角小于 10° 的面属于同一光顺组。
-///
-/// Manifold 把圆弧离散成三角片；若把每片的面法线直接交给 Plant UI，几何虽然正确，
-/// 穹顶仍会显示成多面体。10° 足以合并 RM13 穹顶 484 段圆弧上的相邻小面，同时避免
-/// 把折线挤出体的普通转角误判成圆弧；端盖/侧壁、箱体棱边也仍保持 E3D 的硬边。
-const SMOOTH_NORMAL_COS: f64 = 0.984_807_753_012_208; // cos(10°)
 
 /// glam 列主序 4×4 → manifold-csg 的 4×3 仿射（列主序，末列平移）。
 pub(crate) fn dmat4_to_affine4x3(m: DMat4) -> [f64; 12] {
@@ -39,40 +31,51 @@ pub(crate) fn plant_mesh_to_manifold(mesh: &PlantMesh, mat: DMat4) -> anyhow::Re
             mesh.indices.len()
         );
     }
-    // PlantMesh 为硬边渲染会按面复制顶点；Manifold 的输入拓扑则要求相邻面
-    // 共享同一顶点编号。应用变换后按精确坐标焊接，保留渲染法线又不破坏 CSG。
-    let mut vert_props = Vec::with_capacity(mesh.vertices.len() * 3);
-    let mut vertex_ids = Vec::with_capacity(mesh.vertices.len());
-    let mut welded = HashMap::<[u64; 3], u64>::new();
-    for v in &mesh.vertices {
-        let p = mat.transform_point3(glam::DVec3::new(v.x as f64, v.y as f64, v.z as f64));
-        let canonical = |value: f64| if value == 0.0 { 0.0 } else { value };
-        let key = [
-            canonical(p.x).to_bits(),
-            canonical(p.y).to_bits(),
-            canonical(p.z).to_bits(),
-        ];
-        let next = welded.len() as u64;
-        let id = *welded.entry(key).or_insert_with(|| {
-            vert_props.push(p.x);
-            vert_props.push(p.y);
-            vert_props.push(p.z);
-            next
-        });
-        vertex_ids.push(id);
+    if mesh.normals.len() != mesh.vertices.len() {
+        anyhow::bail!(
+            "mesh normal count {} does not match vertex count {}",
+            mesh.normals.len(),
+            mesh.vertices.len()
+        );
     }
-    let tri: Vec<u64> = mesh
+    // 每个渲染顶点都保留 position + normal 六个属性；同位置的重复顶点只通过 merge
+    // metadata 焊接几何拓扑。这样硬边两侧仍是不同属性顶点，布尔插值也能传播这个分裂。
+    let mut vert_props = Vec::with_capacity(mesh.vertices.len() * 6);
+    let normal_xform = mat.inverse().transpose();
+    for (index, (v, normal)) in mesh.vertices.iter().zip(&mesh.normals).enumerate() {
+        let p = mat.transform_point3(glam::DVec3::new(v.x as f64, v.y as f64, v.z as f64));
+        let n = normal_xform
+            .transform_vector3(glam::DVec3::new(
+                normal.x as f64,
+                normal.y as f64,
+                normal.z as f64,
+            ))
+            .try_normalize()
+            .ok_or_else(|| anyhow!("mesh vertex {index} has a zero/invalid transformed normal"))?;
+        vert_props.extend([p.x, p.y, p.z, n.x, n.y, n.z]);
+    }
+    let tri = mesh
         .indices
         .iter()
-        .map(|&index| vertex_ids[index as usize])
-        .collect();
-    Manifold::from_mesh_f64(&vert_props, 3, &tri)
-        .map_err(|error| anyhow!("manifold-csg ingest failed: {error}"))
+        .map(|&index| index as u64)
+        .collect::<Vec<_>>();
+    let raw = MeshGL64::new(&vert_props, 6, &tri)
+        .map_err(|error| anyhow!("manifold-csg mesh construction failed: {error}"))?;
+    let merged = raw.merge();
+    Manifold::from_meshgl64(&merged).map_err(|error| anyhow!("manifold-csg ingest failed: {error}"))
 }
 
 pub(crate) fn manifold_to_plant_mesh(solid: &Manifold) -> PlantMesh {
-    let (props, n_props, tri) = solid.to_mesh_f64();
-    if n_props < 3 || tri.len() < 3 || props.len() < n_props {
+    // 输入 PlantMesh 已用属性顶点分裂表达硬边：在各属性顶点内部重算法线即可，180°
+    // 不再额外按角度切组。原生 Manifold 原语没有这个 channel，只在那一支让内核按其
+    // primitive/halfedge 语义生成法线；旧的本仓 10° 坐标邻域猜测已删除。
+    let shaded = if solid.num_prop() >= 6 {
+        solid.calculate_normals(3, 180.0)
+    } else {
+        solid.calculate_normals(3, 60.0)
+    };
+    let (props, n_props, tri) = shaded.to_mesh_f64();
+    if n_props < 6 || tri.len() < 3 || props.len() < n_props {
         return PlantMesh::default();
     }
     let vert_count = props.len() / n_props;
@@ -88,25 +91,9 @@ pub(crate) fn manifold_to_plant_mesh(solid: &Manifold) -> PlantMesh {
         source_f64.push(q);
     }
 
-    // Manifold 输出共享拓扑顶点，但没有随顶点输出法线。先收集有效面，再按精确位置
-    // 建立入射面表：同一光顺组做面积加权平均，不同组仍然通过三角形展开保留硬边。
-    // 只按 source vertex 编号平均会漏掉布尔缝两侧坐标相同、编号不同的顶点，留下亮缝，
-    // 所以这里以 f64 坐标位模式作为位置身份。
-    struct Face {
-        vertices: [usize; 3],
-        normal: glam::DVec3,
-        weight: f64,
-    }
-    let position_key = |p: glam::DVec3| {
-        let canonical = |value: f64| if value == 0.0 { 0.0 } else { value };
-        [
-            canonical(p.x).to_bits(),
-            canonical(p.y).to_bits(),
-            canonical(p.z).to_bits(),
-        ]
-    };
-    let mut faces = Vec::with_capacity(tri.len() / 3);
-    let mut incident = HashMap::<[u64; 3], Vec<usize>>::new();
+    let mut vertices = Vec::with_capacity(tri.len());
+    let mut normals = Vec::with_capacity(tri.len());
+    let mut indices = Vec::with_capacity(tri.len());
     for face in tri.chunks_exact(3) {
         let [i, j, k] = [face[0] as usize, face[1] as usize, face[2] as usize];
         // 法向在 f64 上算。顶点存 f32 是渲染的要求，但在 23400mm 这种量级上
@@ -136,35 +123,13 @@ pub(crate) fn manifold_to_plant_mesh(solid: &Manifold) -> PlantMesh {
             // f64 下都零面积：这个三角形不携带任何面积或朝向，留着只能污染法向。
             continue;
         }
-        let face_index = faces.len();
-        faces.push(Face {
-            vertices: [i, j, k],
-            normal: cross / len,
-            weight: len,
-        });
-        for source_index in [i, j, k] {
-            incident
-                .entry(position_key(source_f64[source_index]))
-                .or_default()
-                .push(face_index);
-        }
-    }
-
-    let mut vertices = Vec::with_capacity(faces.len() * 3);
-    let mut normals = Vec::with_capacity(faces.len() * 3);
-    let mut indices = Vec::with_capacity(faces.len() * 3);
-    for face in &faces {
+        let face_normal = cross / len;
         let base = vertices.len() as u32;
-        for &source_index in &face.vertices {
-            let key = position_key(source_f64[source_index]);
-            let mut sum = glam::DVec3::ZERO;
-            for &incident_index in &incident[&key] {
-                let neighbour = &faces[incident_index];
-                if face.normal.dot(neighbour.normal) >= SMOOTH_NORMAL_COS {
-                    sum += neighbour.normal * neighbour.weight;
-                }
-            }
-            let smooth = sum.try_normalize().unwrap_or(face.normal);
+        for source_index in [i, j, k] {
+            let prop = source_index * n_props;
+            let smooth = glam::DVec3::new(props[prop + 3], props[prop + 4], props[prop + 5])
+                .try_normalize()
+                .unwrap_or(face_normal);
             vertices.push(source_vertices[source_index]);
             normals.push(Vec3::new(smooth.x as f32, smooth.y as f32, smooth.z as f32));
         }
@@ -237,6 +202,7 @@ pub(crate) fn subtract_negatives(pos: Manifold, negs: &[Manifold]) -> Manifold {
 mod tests {
     use super::*;
     use glam::DVec3;
+    use std::collections::HashMap;
 
     #[test]
     fn affine4x3_keeps_translation_in_last_column() {
@@ -303,10 +269,24 @@ mod tests {
 
     #[test]
     fn curved_surface_normals_are_smooth_across_triangle_facets() {
-        let solid = Manifold::sphere(10.0, 64);
+        let ring = crate::fast_model::sweep_mesh::ProfileRing {
+            points: (0..64)
+                .map(|i| {
+                    let angle = std::f32::consts::TAU * i as f32 / 64.0;
+                    glam::Vec2::new(10.0 * angle.cos(), 10.0 * angle.sin())
+                })
+                .collect(),
+            smooth_to_next: vec![true; 64],
+        };
+        let source = crate::fast_model::sweep_mesh::extrude_loops(&[ring], 20.0).expect("圆柱网格");
+        let solid = plant_mesh_to_manifold(&source, DMat4::IDENTITY)
+            .expect("带光顺侧壁法线的圆柱网格应能作为 manifold 输入");
         let mesh = manifold_to_plant_mesh(&solid);
         let mut by_position = HashMap::<[u32; 3], Vec<Vec3>>::new();
         for (vertex, normal) in mesh.vertices.iter().zip(&mesh.normals) {
+            if normal.z.abs() > 0.5 {
+                continue;
+            }
             by_position
                 .entry([vertex.x.to_bits(), vertex.y.to_bits(), vertex.z.to_bits()])
                 .or_default()
@@ -314,7 +294,7 @@ mod tests {
         }
 
         let mut checked = 0;
-        for normals in by_position.values().filter(|normals| normals.len() >= 4) {
+        for normals in by_position.values().filter(|normals| normals.len() >= 2) {
             let first = normals[0];
             assert!(
                 normals.iter().all(|normal| normal.abs_diff_eq(first, 1e-5)),
@@ -322,7 +302,10 @@ mod tests {
             );
             checked += 1;
         }
-        assert!(checked > 20, "必须覆盖足够多的共享球面顶点，实际 {checked}");
+        assert!(
+            checked > 20,
+            "必须覆盖足够多的共享圆柱侧壁顶点，实际 {checked}"
+        );
     }
 
     #[test]

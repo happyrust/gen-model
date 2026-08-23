@@ -1,12 +1,21 @@
-# ADR-030：分阶段退役 OCC 三角化，default/release 暂不删 `occ`
+# ADR-030：以 libgm 语义完全退役 OCC
 
-状态：Accepted（2026-08-15）
+状态：Accepted（2026-08-15；2026-08-24 修订为完全退役）
 
 关联：ADR-002（几何权威在 core3d / 已解析参数）；ADR-026（扫掠体步骤与单位网格身份）；
 ADR-029（布尔改走本地 manifold-csg，OCC 只留三角化）。术语见 `CONTEXT.md`
 「扫掠体 / 单位几何 / 实例变换 / 单位网格身份 / 规范挤出 / 斜切平面」。
 
 规格：`specs/009-retire-occ/spec.md`。
+
+## 2026-08-24 最终修订
+
+- 最终源码、vendor API、Python 包、CI 与发布产物全部删除 OCC；不再保留可选参照 feature。
+- RVM 是外部几何验收基准，libgm 2.10/3.1 是离散、硬边与失败语义的算法权威。
+- 生产布尔只走 manifold-csg；历史 OCC 布尔不得恢复。
+- 球、SSCL、多面体、YOFF Snout 的现场样本与 T046–T049 仍是最终发布硬门；缺样本时可以准备代码，
+  但不得执行维护窗口、发布或宣称完全退役。
+- 部署回滚使用已归档的“新 caliber、旧 OCC 可用”过渡二进制，不回退新身份键。
 
 ## 背景
 
@@ -125,7 +134,7 @@ libgm §7.9.1 的调用点表说明每个曲面原语喂进 `d2_numberOfSegments
    走到的 `PdmsGeoParam` 都能直接稳定生成 `PlantMesh`，并通过既有 RVM 对拍门。不是
    「所有 OCC API 都换完」。
 2. **三角化后端权威放在 aios-core。** 新增 `gen_manifold_mesh(&PdmsGeoParam) -> PlantMesh`。
-   gen-model 只负责调度、布尔、AABB、缓存、落盘。`occ_generate.rs` 改成后端 trait
+   gen-model 只负责调度、布尔、AABB、缓存、落盘。`mesh_generate.rs` 改成后端 trait
    调度，不得整文件删除。
 3. **扫掠体对齐 libgm 三支，不做通用脊线扫掠。** `do_solid_segments` 逐段调用
    `gm_CreateExtrusion` / `gm_CreateRevolution`(实测 180° 半圆再组合) /

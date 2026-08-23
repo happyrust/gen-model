@@ -9,15 +9,15 @@ edition = "2024"
 publish = false
 
 [lib]
-# 内部扩展模块名；对外的 Python 包是 pysrc/aios_db（先注册 OCCT DLL 目录再导入本模块）。
+# 内部扩展模块名；对外的 Python 包是 pysrc/aios_db。
 name = "_aios_db"
 crate-type = ["cdylib"]
 
 [dependencies]
 aios-database = { path = "..", features = ["legacy_session_replay"] }
-aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "d4a39c221fa26aee981a24f7e65e30390bda70e8", default-features = false }
-pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "53b9e38cd8f58994c472c981373125addae2a32a" }
-parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "853ed155abe2949600c128703876f0e25c4ec88e" }
+aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "f9551ef407f4c2c870405c612e4260ce9e091416", default-features = false }
+pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "c4f02e97a36c0d5660a2aeab5b781b72f92144b1" }
+parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "ac85df94a788c3bc5011bf66aec0872a7a729b46" }
 
 anyhow = "1.0.57"
 serde_json = "1.0.81"

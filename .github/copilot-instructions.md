@@ -23,9 +23,9 @@ Always run `sigmap ask` (or `sigmap --query`) before searching for files relevan
 ```
 src\data_interface\increment_manager.rs:2015  # TODO: 暂时通过查询surreal来获取最终得值
 src\fast_model\gen_model.rs:669  # TODO: 检查两个类型是否有可能在一个层级树里，如果不需要可以跳过
-src\fast_model\occ_generate.rs:456  # TODO: 排除已经生成了的模型
-src\fast_model\occ_generate.rs:622  # TODO: edge 这里取中点就可以了
-src\fast_model\occ_generate.rs:713  # TODO: (与 inst_relate 同款的 D9 顺序问题)：inst_geo.aabb 指针在上面的并发任务里
+src\fast_model\mesh_generate.rs:456  # TODO: 排除已经生成了的模型
+src\fast_model\mesh_generate.rs:622  # TODO: edge 这里取中点就可以了
+src\fast_model\mesh_generate.rs:713  # TODO: (与 inst_relate 同款的 D9 顺序问题)：inst_geo.aabb 指针在上面的并发任务里
 src\fast_model\room_model.rs:75  # TODO: need figure out
 src\versioned_db\database.rs:322  # TODO: 改成一对多的实现
 src\versioned_db\database.rs:796  # TODO: 按照文件大小排序，只有小于多少的能开启多线程，模型一大就不合适了
@@ -262,7 +262,7 @@ impl StagingWriteContext  :47-175
   pub async fn defer_spatial_refresh(&self, refnos: &[aios_core::RefnoEnum])  :74-74
   pub async fn defer_spatial_remove(&self, refnos: &[aios_core::RefnoEnum])  :82-82
   pub async fn deferred_spatial_removals(&self) → HashSet<aios_core::RefnoEnum>  :91-91  # 本窗口已经决定要从空间树上摘掉、但要等提交后才真摘的那些 refno。
-  pub async fn defer_room_changes(&self, changes: &[crate::fast_model::occ_generate::AabbChange],)  :95-98
+  pub async fn defer_room_changes(&self, changes: &[crate::fast_model::mesh_generate::AabbChange],)  :95-98
   pub async fn register_finalize(&self, finalize: StagedFinalize) → anyhow::Result<()>  :107-107
   pub async fn defer_regen_settlement(&self, root_refno: String, revision: u64)  :140-140
 ```
@@ -293,7 +293,7 @@ pub async fn gen_geos_data(dbno: Option<u32>, manual_refnos: Vec<RefnoEnum>, db_
 pub async fn query_tubi_size(refno: RefnoEnum, tubi_cat_ref: RefnoEnum, is_hang: bool,) → anyhow::Result<TubiSize>  :888-914  # 查询tubi的大小
 ```
 
-### src\fast_model\occ_generate.rs
+### src\fast_model\mesh_generate.rs
 ```
 pub struct AabbChange  :746-749  # 一个元素的包围盒确实变了。
 pub struct NegInfo  :960-967
@@ -308,8 +308,6 @@ pub async fn process_meshes_update_db_deep_default(refnos: &[RefnoEnum]) → any
 pub async fn process_meshes_update_db_deep(dboption: &DbOption, refnos: &[RefnoEnum],) → anyhow::Result<()>  :290-398  # 使用指定数据库选项更新深层模型网格数据
 pub async fn gen_inst_meshes(refnos: &[RefnoEnum], replace_exist: bool, dir: PathBuf,) → anyhow::Result<()>  :423-543  # 生成实例的网格数据
 pub async fn update_inst_relate_aabbs_by_refnos(refnos: &[RefnoEnum], replace_exist: bool,) → anyhow::Result<Vec<AabbChan...  :776-781  # 刷新inst_relate 的 aabb
-pub async fn apply_insts_boolean_occ(refnos: &[RefnoEnum], replace_exist: bool, dir: PathBuf,) → anyhow::Result<()>  :1011-1118
-pub async fn apply_cata_neg_boolean_occ(dir: PathBuf) → anyhow::Result<()>  :1240-1356
 ```
 
 ### src\fast_model\room_model.rs

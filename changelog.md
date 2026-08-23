@@ -4,6 +4,9 @@
 
 ### 修复
 
+- 轮廓离散结果显式携带逐边光顺标记，并严格采用 libgm 的
+  `abs(1-dot) <= 1e-6` 切向判据。扫掠、回转和 Manifold 布尔改为按光顺组传播
+  面积加权法线；硬边与端盖拆分属性顶点，不再用 `cos(10°)` 猜测法线分组。
 - Snout 的目录参数贯通 XOFF/YOFF 两轴，Dish 的 hash 与规范单位参数统一归一化口径；旧复用参数缺失 caliber 时明确要求整库重建。
 
 - 偏心 Snout 的偏移改成**上下各摊一半**（specs/009 T050）。libgm
@@ -61,6 +64,10 @@
 
 ### 移除
 
+- 完全删除主仓和 aios-core 的 `occ` feature、OCCT 依赖、`gen_occ_shape` /
+  `gen_occ_mesh` API、OCC 布尔与参照分支；`fast_model::occ_generate` 更名为
+  `fast_model::mesh_generate`。Python 扩展不再装配 OCCT DLL 搜索路径，Windows 测试与
+  发布流程不再下载或打包 OCCT，并增加发布包不得包含 TK/OCCT DLL 的断言。
 - 删除浸水插件 `src/plug_in/water_calculation.rs`（业务上不再需要），连同
   `plug_in` 的模块声明与 `consts::AQL_WATER_CALCULATION_COLLECTION`。它是 ADR-030
   背景一节点名的「第二个 OCC 抑留点」，这条说法自此作废——抑留点只剩扫掠体

@@ -1,6 +1,6 @@
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::occ_generate::process_meshes_update_db_deep_with_policy;
+use crate::fast_model::mesh_generate::process_meshes_update_db_deep_with_policy;
 use crate::fast_model::shape_save::{SaveMode, run_shape_save_receiver};
 use crate::fast_model::{
     booleans_meshes_in_db, cata_model, coverage_audit, gen_meshes_in_db, loop_model, prim_model,

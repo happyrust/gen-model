@@ -4,7 +4,7 @@ use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBo
 use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::{RefnoEnum, SUL_DB};
 
-use crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos;
+use crate::fast_model::mesh_generate::update_inst_relate_aabbs_by_refnos;
 
 /// 写回成功后应用窗口计算期间延迟的空间树变化（提交后收敛专用）。
 ///
@@ -2042,7 +2042,7 @@ mod tests {
             // 启动加载/指针重建与提交后收敛：本身即自愈动作，落盘自带盖章。
             "fast_model/aabb_tree.rs",
             // 直写/durable 刷新：指针+bump 同事务，锁跨 [判定 → 事务 → 同步]。
-            "fast_model/occ_generate.rs",
+            "fast_model/mesh_generate.rs",
             // 房间测试夹具（#[cfg(test)]，不在生产路径）。
             "fast_model/room_fixture.rs",
         ]
