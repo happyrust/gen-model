@@ -4,6 +4,14 @@
 
 ### 修复
 
+- OCC 退役现场普查改为直接读取 dabacon 源属性，避免从已丢字段的 `inst_geo` 反推；确认
+  E3D 2.1/3.1 安装项目有 422 个非零 YOFF Snout、3,056 个 SLCY 和 1,448 个 POHE。
+  代表 YOFF/SSCL 及 4 个 POHE 子记录闭包均通过生产 libgm/Manifold 网格验证。同步修正
+  Windows wheel 的 OCCT 文件清单检查路径，并增加 manifest、源码 API 与 workflow 删除护栏。
+- `l3_suite --check-driver` 现在真正消费既有的 `--project-evar` 参数，不再把所有独立现场库
+  都硬绑到 MarineSample evars；球体夹具宏也改为从 WORL 创建独立 SITE/ZONE/EQUI 容器，
+  可在 TEST 等新增现场库执行并由配对宏整体删除。
+
 - 轮廓离散结果显式携带逐边光顺标记，并严格采用 libgm 的
   `abs(1-dot) <= 1e-6` 切向判据。扫掠、回转和 Manifold 布尔改为按光顺组传播
   面积加权法线；硬边与端盖拆分属性顶点，不再用 `cos(10°)` 猜测法线分组。

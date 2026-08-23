@@ -441,9 +441,10 @@
   `.mesh` 1→37）；按实例加权，写死的 32 段**只有 2.0% 是对的**，90.8% 过细。
   排期按大的那个（37）算。证据 `docs/evidence/2026-08-23-occ-retire-census.md`，
   两份已合并进 plan 的 WP-I 一节。
-- [ ] T045a（新，依赖 T045）**两个库都没有球 / 切角柱（SSCL） / 多面体**，这三类的段数
-  改动无法在现场验收。另找含这些原语的库，或只以纯函数单测收口并在
-  `specs/009-retire-occ/plan.md` 明确注明「未经现场验证」——不得默认它们跟圆柱一样安全。
+- [ ] T045a（新，依赖 T045）已从 E3D 2.1/3.1 的安装项目源库找到 **3,056 个 SLCY
+  （SSCL 源 noun）和 1,448 个 POHE**；E3D 3.1 PlantSample 的 4 个 POHE 已按子记录闭包
+  组装并全部通过生产 tessellator（合法索引、非退化 AABB、正体积）。**35,133,637 个索引
+  元素仍未发现 SPHE**，因此球体现场门仍保持未完成；不得用纯函数测试替代。
 
 ## WP-K 形状摆位对齐（2026-08-24 IDA，T011 顺带查出）
 
@@ -552,11 +553,16 @@
   **先做的是把范围写清楚，不是急着改键**：改身份 = 整库重建（ADR-044 决策 6），
   五类一起改和只改柱是两个量级的决策。
 
-- [ ] T052a（新，从 T052 拆出）**YOFF 要不要接，`inst_geo` 上问不出来。**
+- [x] T052a（新，从 T052 拆出）**已直接在 dabacon 源属性完成普查。**
   `LSnout` 结构里只有一个 `poff`，源数据的 YOFF 是多少都会在落库时消失——查出 0
   不构成证据（这正是静默失效：判据依赖的基准数据本身已被判据要查的那个缺陷抹掉了）。
   要回答得回 **dabacon 侧**数 SNOU 元素的 `YOFF` 属性。
-  在那之前 T051 不排期：不知道有没有用户，就不知道该加字段还是该在解析处 `bail!`。
+  E3D 3.1 安装项目找到 214 个非零 YOFF SNOU/NSNO；2.1+3.1 合计 422 个。代表样本
+  `pe:15207_10558` 为 `DBOT=2000, DTOP=700, HEIG=1200, XOFF=0, YOFF=650`，输入文件
+  SHA-256 为 `81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7`。
+  该样本经生产 tessellator 得到 404 顶点、400 三角形、正体积；AABB Y
+  `[-1325, 675]` 同时钉住 `±YOFF/2` 摆位。证据见
+  `docs/evidence/2026-08-24-occ-retire-source-census.md`。
 
 ## 既有红测（不是本规格引入的，记在这里免得每次重新排查）
 
@@ -608,12 +614,13 @@ ws,gen_model,manifold,project_hd`：T039 / T042 落地后是 **1062 通过 / 1 �
 - [x] T023-code：斜切延伸已进入 Manifold CSG；`sweep_mesh` 32 条单测全绿，T048 仍待现场 RVM。
 - [x] T026/T027/T028：源码护栏钉住退役 Core3D 操作、目录负体 Manifold 唯一入口，
   并钉住有效 `PlantMesh` → 持久化 → AABB 角点回执顺序；3 条定向测试全绿。
-  **T052a 的 dabacon YOFF 现场普查仍未完成。**
+  T052a 的 dabacon YOFF 现场普查已完成：E3D 3.1 非零样本 214 个，代表件已过生产网格验证。
 - [x] T002-release：无 OCC 的 aios-core `f9551ef4`、parse `ac85df94`、pdms-io `c4f02e97`
   已发布并同步升级根包与 Python；local-deps OFF 的依赖图只有一份 aios-core。
 - [x] T031-code：主仓、Python、CI 与发布流程已删除 OCC feature、依赖、API、布尔和 DLL
-  装配；无 Manifold 后端时 `gen_inst_meshes` 明确失败。**最终现场发布仍按硬门暂停：现有
-  证据缺球、SSCL、多面体，且尚无 YOFF dabacon 普查。**
+  装配；无 Manifold 后端时 `gen_inst_meshes` 明确失败；新增源码/manifest/workflow 删除护栏，
+  并修正 wheel OCCT 清单检查读取了错误目录的问题。**最终现场发布仍按硬门暂停：SSCL、
+  多面体、YOFF 已有真实源样本和生产网格证据，球体 SPHE 与双库 RVM 仍缺。**
 - [x] T054-code：`ProfileRing` 显式保存逐边光顺关系；libgm `1e-6` 切向判据、反向重排、
   端盖硬边、Manifold 属性顶点和布尔后的法线传播均有纯函数/网格回归测试。
 - [x] T032-code：`cargo fmt --check`、默认与无默认 feature `cargo check`、全量 lib、四个
