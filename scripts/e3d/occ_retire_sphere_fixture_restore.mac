@@ -1,0 +1,14 @@
+-- Remove the SPHE created by occ_retire_sphere_fixture_apply.mac.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-occ-retire-endgame/scripts/e3d/occ_retire_sphere_fixture_restore.log" OVER
+$P OCC-RETIRE-SPHERE-RESTORE-ALIVE
+/AIOS_OCC_RETIRE_SITE
+Q CE
+Q REF
+Q NAME
+Q OWNE
+DELETE SITE
+Q CE
+SAVEWORK 'AIOS OCC retire remove SPHE field fixture'
+$P OCC-RETIRE-SPHERE-RESTORE-DONE
+ALPHA LOG END

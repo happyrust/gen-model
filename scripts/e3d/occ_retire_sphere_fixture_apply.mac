@@ -1,0 +1,33 @@
+-- Create and export the missing SPHE field fixture for specs/009 T049.
+-- Restore partner: occ_retire_sphere_fixture_restore.mac.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model-occ-retire-endgame/scripts/e3d/occ_retire_sphere_fixture_apply.log" OVER
+$P OCC-RETIRE-SPHERE-APPLY-ALIVE
+/*
+NEW SITE /AIOS_OCC_RETIRE_SITE
+NEW ZONE /AIOS_OCC_RETIRE_ZONE
+NEW EQUI /AIOS_OCC_RETIRE_EQUI
+NEW SPHE /AIOS_OCC_RETIRE_SPHE
+RADI 500
+POS E 3000 N 0 U 0
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q POS
+Q RADI
+SAVEWORK 'AIOS OCC retire SPHE field fixture'
+
+REPRE INSU OFF
+REPRE OBST OFF
+EXPORT SYSTEM /expdri.so
+EXPORT FILE "D:/work/plant-code/old/gen-model-occ-retire-endgame/test_data/rvm/AIOS_OCC_RETIRE_SPHE.rvm"
+EXPORT FILENOTE 'OCC retirement SPHE field fixture, radius 500 mm'
+EXPORT HOLES ON
+EXPORT AUTOCOLOR DISPLAYEXPORT ON
+EXPORT REPR ON
+EXPORT /AIOS_OCC_RETIRE_SPHE
+EXPORT FINISH
+
+$P OCC-RETIRE-SPHERE-APPLY-DONE
+ALPHA LOG END

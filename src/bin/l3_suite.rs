@@ -188,7 +188,7 @@ struct Cli {
     output: Option<PathBuf>,
     #[arg(long, default_value = "db_options/l3-golden-v1.json")]
     baseline_manifest: PathBuf,
-    /// AMS-compatible E3D project work-copy used by `--check-driver`.
+    /// E3D project directory used by `--check-driver`.
     #[arg(long)]
     project_dir: Option<PathBuf>,
     /// E3D project code passed to `des.exe`.
@@ -488,6 +488,22 @@ fn ensure_e3d_project_control_files(project: &Path) -> Result<()> {
     Ok(())
 }
 
+fn resolve_check_driver_project_evar(
+    repo: &Path,
+    project: &Path,
+    explicit: Option<&Path>,
+) -> PathBuf {
+    explicit
+        .map(|path| {
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                repo.join(path)
+            }
+        })
+        .unwrap_or_else(|| project.join("evarsAvevaMarineSample.bat"))
+}
+
 struct Stack {
     children: Vec<(String, Child)>,
     keep: bool,
@@ -565,6 +581,11 @@ fn main() -> Result<()> {
         "the full suite is fixed to E3D project AMS and MDB /ALL"
     );
     let paths = Paths::discover(repo, cli.project_dir)?;
+    let project_evar = resolve_check_driver_project_evar(
+        &paths.repo,
+        &paths.project_work,
+        cli.project_evar.as_deref(),
+    );
     let driver = E3dDriver {
         launcher: paths.e3d_driver.clone(),
         projects_dir: paths
@@ -572,7 +593,7 @@ fn main() -> Result<()> {
             .parent()
             .ok_or_else(|| anyhow!("project directory has no project root"))?
             .to_path_buf(),
-        project_evar: paths.project_work.join("evarsAvevaMarineSample.bat"),
+        project_evar,
         project: cli.e3d_project,
         login: cli.e3d_login,
         mdb: cli.e3d_mdb,
@@ -2756,6 +2777,28 @@ mod tests {
         assert!(
             !apply.contains("GENSEC"),
             "stale structural fixture leaked into F5: {apply}"
+        );
+    }
+
+    #[test]
+    fn check_driver_honours_an_explicit_project_evar() {
+        let repo = Path::new(r"D:\repo");
+        let project = Path::new(r"D:\AVEVA\Projects\E3D3.1\TEST");
+        assert_eq!(
+            resolve_check_driver_project_evar(
+                repo,
+                project,
+                Some(Path::new(r"D:\AVEVA\Projects\E3D3.1\TEST\evarsTEST.bat")),
+            ),
+            PathBuf::from(r"D:\AVEVA\Projects\E3D3.1\TEST\evarsTEST.bat")
+        );
+        assert_eq!(
+            resolve_check_driver_project_evar(
+                repo,
+                project,
+                Some(Path::new(r"fixtures\evarsTEST.bat")),
+            ),
+            repo.join(r"fixtures\evarsTEST.bat")
         );
     }
 
