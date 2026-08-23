@@ -1,4 +1,6 @@
 //! Portable Issue #19 regression over the real dbnum=8000 session chain.
+//! Production and this test both use the terminal net-window collector; the
+//! retired per-session replay collector is deliberately absent from the test graph.
 //!
 //! Run:
 //! `cargo test --test db8000_two_delete_fixture -- --nocapture`
@@ -45,8 +47,18 @@ impl Db8000Fixture {
     }
 
     fn collect(&self, start: u32, end: u32) -> BTreeMap<u32, Vec<EleOperationData>> {
-        IncrementPipeline::collect_changes(&self.parent_deleted, start as i32..=end as i32)
-            .expect("collect db8000 increment window")
+        IncrementPipeline::collect_window(&self.parent_deleted, start as i32..=end as i32)
+            .expect("collect db8000 terminal net window")
+            .range_eles
+    }
+
+    fn collect_full(
+        &self,
+        start: u32,
+        end: u32,
+    ) -> aios_database::data_interface::increment_pipeline::CollectedWindow {
+        IncrementPipeline::collect_window(&self.parent_deleted, start as i32..=end as i32)
+            .expect("collect db8000 terminal net window")
     }
 }
 
@@ -113,34 +125,31 @@ fn archive_contains_the_three_declared_db8000_sessions() {
 }
 
 #[test]
-fn final_file_window_preserves_child_then_parent_delete_sessions() {
+fn final_file_window_emits_one_terminal_operation_per_refno() {
     let fixture = Db8000Fixture::load();
-    let collected = fixture.collect(CHILD_DELETE_SESNO, PARENT_DELETE_SESNO);
+    let collected = fixture.collect_full(CHILD_DELETE_SESNO, PARENT_DELETE_SESNO);
+    let operations = &collected.range_eles;
     let (zone, parent, child) = refs();
 
-    assert_operation_sessions(&collected);
-    assert_eq!(collected.keys().copied().collect::<Vec<_>>(), vec![25, 26]);
-    assert_eq!(collected[&25].len(), 2, "session 25: {:?}", collected[&25]);
-    assert_eq!(collected[&26].len(), 2, "session 26: {:?}", collected[&26]);
+    assert_eq!(collected.session_sesnos, vec![25, 26]);
+    assert_operation_sessions(operations);
+    assert_eq!(
+        operations.keys().copied().collect::<Vec<_>>(),
+        vec![PARENT_DELETE_SESNO],
+        "净窗口只按右端会话发布终态操作"
+    );
+    assert_eq!(operations[&PARENT_DELETE_SESNO].len(), 3);
     assert!(
-        collected[&25]
+        operations[&PARENT_DELETE_SESNO]
             .iter()
             .any(|op| { op.refno == child && matches!(op.detail, EleOperationDetail::Deleted) })
     );
-    assert!(collected[&25].iter().any(|op| {
-        op.refno == parent
-            && matches!(
-                &op.detail,
-                EleOperationDetail::Modified(modified)
-                    if modified.noun == "EQUI" && modified.children_changed.is_some()
-            )
-    }));
     assert!(
-        collected[&26]
+        operations[&PARENT_DELETE_SESNO]
             .iter()
             .any(|op| { op.refno == parent && matches!(op.detail, EleOperationDetail::Deleted) })
     );
-    assert!(collected[&26].iter().any(|op| {
+    assert!(operations[&PARENT_DELETE_SESNO].iter().any(|op| {
         op.refno == zone
             && matches!(
                 &op.detail,
@@ -153,11 +162,12 @@ fn final_file_window_preserves_child_then_parent_delete_sessions() {
 #[test]
 fn final_history_matches_the_session_25_point_in_time_snapshot() {
     let fixture = Db8000Fixture::load();
-    let from_session_25_file = IncrementPipeline::collect_changes(
+    let from_session_25_file = IncrementPipeline::collect_window(
         &fixture.child_deleted,
         CHILD_DELETE_SESNO as i32..=CHILD_DELETE_SESNO as i32,
     )
-    .expect("collect session 25 snapshot");
+    .expect("collect session 25 snapshot")
+    .range_eles;
     let from_final_history = fixture.collect(CHILD_DELETE_SESNO, CHILD_DELETE_SESNO);
 
     assert_eq!(
@@ -168,15 +178,16 @@ fn final_history_matches_the_session_25_point_in_time_snapshot() {
 }
 
 #[test]
-fn combined_window_equals_the_union_of_its_session_slices() {
+fn combined_window_is_not_a_union_of_intermediate_session_operations() {
     let fixture = Db8000Fixture::load();
     let combined = fixture.collect(CHILD_DELETE_SESNO, PARENT_DELETE_SESNO);
     let mut slices = fixture.collect(CHILD_DELETE_SESNO, CHILD_DELETE_SESNO);
     slices.extend(fixture.collect(PARENT_DELETE_SESNO, PARENT_DELETE_SESNO));
 
-    assert_eq!(
+    assert_ne!(
         operation_signatures(&combined),
-        operation_signatures(&slices)
+        operation_signatures(&slices),
+        "净窗口必须消除 EQUI 在中间会话的 Modified，不能退回逐会话操作并集"
     );
 }
 

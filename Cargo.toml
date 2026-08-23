@@ -60,12 +60,10 @@ required-features = ["legacy_session_replay"]
 [[test]]
 name = "db8000_two_delete_fixture"
 path = "tests/db8000_two_delete_fixture.rs"
-required-features = ["legacy_session_replay"]
 
 [[test]]
 name = "db8000_session_pairs"
 path = "tests/db8000_session_pairs.rs"
-required-features = ["legacy_session_replay"]
 
 [dependencies]
 config = "0.14.1"
