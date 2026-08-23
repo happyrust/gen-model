@@ -15,6 +15,7 @@ use crate::fast_model::manifold_csg::manifold_to_plant_mesh;
 use crate::fast_model::mesh_primitives;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::Revolution;
+use aios_core::prim_geo::facet_caliber::FacetCaliber;
 // `prim_geo` 下 `facet` 与 `polyhedron` 各有一个 `Polygon`，走模块路径点名，别用 glob 重导出。
 use aios_core::prim_geo::polyhedron::{Polygon, Polyhedron};
 use aios_core::prim_geo::wire::CurveType;
@@ -34,21 +35,16 @@ const AXIS_IN_PLANE_EPS: f32 = 1e-4;
 /// 一起，否则「唯一一份」只是句注释。
 use crate::fast_model::libgm_discretise::FACET_TOL_MM;
 
-/// 单位网格身份（ADR-026）当前锁死的段数——**按构造就是错的，欠 T041**。
-///
-/// 柱与球走一份缓存的单位网格给所有半径复用，所以这份网格带不了一个随半径变的段数：
-/// `libgm_discretise::cylinder_segments` 在这两处根本用不上。活库实测这有多离谱：
-/// 写死的 32 段只有 **2.0%** 的圆柱实例是对的，90.8% 过细，而 r ≥ 295mm 的柱在 32 段
-/// 下弦高 1.42mm、超 [`FACET_TOL_MM`] 三倍（`docs/evidence/2026-08-23-occ-retire-census.md`）。
-///
-/// 收成一处命名常量而不是散在三个 match 臂里的裸字面量（T039），是为了让下一个人
-/// 一眼看见这是笔债而不是一个取值。**值一个都不许改**：身份键不变而网格内容变了，
-/// 等于在稳定的 `geo_hash` 底下悄悄换掉几何。ADR-044 决策 2 把段数混进身份键之后
-/// （T041），这一整组随两处调用一起删掉，改按真实半径算。
-mod unit_mesh_identity {
-    pub const CYLINDER_SEGMENTS: i32 = 32;
-    pub const SPHERE_STACKS: u32 = 16;
-    pub const SPHERE_SLICES: u32 = 36;
+/// 复用单位网格必须携带按真实物理尺寸计算的离散身份。旧记录缺失该字段时，
+/// 继续生成会让同一 geo_hash 下的网格内容漂移，因此必须在维护窗口执行整库重建。
+fn explicit_caliber(what: &str, caliber: FacetCaliber) -> anyhow::Result<FacetCaliber> {
+    if caliber.is_explicit() {
+        Ok(caliber)
+    } else {
+        Err(anyhow!(
+            "{what} reusable unit mesh is missing mesh_caliber; an atomic full rebuild is required"
+        ))
+    }
 }
 
 /// 对齐 `Shape::box_centered(1,1,1)`。
@@ -682,8 +678,9 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             if !c.check_valid() {
                 return Err(anyhow!("PrimLCylinder is degenerate"));
             }
+            let caliber = explicit_caliber("PrimLCylinder", c.mesh_caliber)?;
             covered(
-                tessellate_unit_cylinder(unit_mesh_identity::CYLINDER_SEGMENTS),
+                tessellate_unit_cylinder(caliber.circumferential as i32),
                 "PrimLCylinder",
             )
         }
@@ -713,8 +710,9 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
                     "PrimSCylinder(SSCL)",
                 );
             }
+            let caliber = explicit_caliber("PrimSCylinder", c.mesh_caliber)?;
             covered(
-                tessellate_unit_cylinder(unit_mesh_identity::CYLINDER_SEGMENTS),
+                tessellate_unit_cylinder(caliber.circumferential as i32),
                 "PrimSCylinder",
             )
         }
@@ -744,11 +742,9 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             if !s.check_valid() {
                 return Err(anyhow!("PrimSphere is degenerate"));
             }
+            let caliber = explicit_caliber("PrimSphere", s.mesh_caliber)?;
             covered(
-                mesh_primitives::unit_sphere(
-                    unit_mesh_identity::SPHERE_STACKS,
-                    unit_mesh_identity::SPHERE_SLICES,
-                ),
+                mesh_primitives::unit_sphere(caliber.meridional, caliber.circumferential),
                 "PrimSphere",
             )
         }
@@ -759,19 +755,17 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             let height = (s.ptdi - s.pbdi).abs();
             let r_top = s.ptdm / 2.0;
             let r_bottom = s.pbdm / 2.0;
+            let segments = if s.poff.abs() <= f32::EPSILON && s.poff_y.abs() <= f32::EPSILON {
+                explicit_caliber("PrimLSnout", s.mesh_caliber)?.circumferential
+            } else {
+                segs(libgm_discretise::snout_segments(
+                    r_bottom as f64,
+                    r_top as f64,
+                    FACET_TOL_MM,
+                ))
+            };
             covered(
-                mesh_primitives::gen_snout(
-                    r_bottom,
-                    r_top,
-                    height,
-                    s.poff,
-                    0.0,
-                    segs(libgm_discretise::snout_segments(
-                        r_bottom as f64,
-                        r_top as f64,
-                        FACET_TOL_MM,
-                    )),
-                ),
+                mesh_primitives::gen_snout(r_bottom, r_top, height, s.poff, s.poff_y, segments),
                 "PrimLSnout",
             )
         }
@@ -779,6 +773,7 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             if !d.check_valid() {
                 return Err(anyhow!("PrimDish is degenerate"));
             }
+            let caliber = explicit_caliber("PrimDish", d.mesh_caliber)?;
             if d.prad > 0.0 {
                 // 「椭圆碟」是托里球形封头（球冠 + 相切的环面拐角），形状与两段的
                 // 经向段数一起由权威规则给；`prad` 只是「椭圆还是球」的开关，
@@ -799,9 +794,9 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
                 covered(
                     mesh_primitives::gen_elliptical_dish(
                         arc,
-                        segs(facets.around),
-                        segs(facets.hub),
-                        segs(facets.knuckle),
+                        caliber.circumferential,
+                        caliber.meridional,
+                        caliber.secondary_meridional,
                     ),
                     "PrimDish(elliptical)",
                 )
@@ -816,8 +811,8 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
                     mesh_primitives::gen_spherical_dish(
                         d.pdia,
                         d.pheig,
-                        segs(facets.around),
-                        segs(facets.meridional),
+                        caliber.circumferential,
+                        caliber.meridional,
                     ),
                     "PrimDish(spherical)",
                 )
@@ -827,21 +822,14 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             if !t.check_valid() {
                 return Err(anyhow!("PrimCTorus is degenerate"));
             }
+            let caliber = explicit_caliber("PrimCTorus", t.mesh_caliber)?;
             covered(
                 mesh_primitives::gen_circular_torus(
                     t.rins,
                     t.rout,
                     t.angle,
-                    segs(libgm_discretise::torus_ring_segments(
-                        t.rout as f64,
-                        FACET_TOL_MM,
-                        t.angle as f64,
-                    )),
-                    segs(libgm_discretise::circular_torus_tube_segments(
-                        t.rins as f64,
-                        t.rout as f64,
-                        FACET_TOL_MM,
-                    )),
+                    caliber.circumferential,
+                    caliber.meridional,
                 ),
                 "PrimCTorus",
             )
@@ -850,17 +838,14 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             if !t.check_valid() {
                 return Err(anyhow!("PrimRTorus is degenerate"));
             }
+            let caliber = explicit_caliber("PrimRTorus", t.mesh_caliber)?;
             covered(
                 mesh_primitives::gen_rectangular_torus(
                     t.rins,
                     t.rout,
                     t.height,
                     t.angle,
-                    segs(libgm_discretise::torus_ring_segments(
-                        t.rout as f64,
-                        FACET_TOL_MM,
-                        t.angle as f64,
-                    )),
+                    caliber.circumferential,
                 ),
                 "PrimRTorus",
             )
@@ -1414,19 +1399,31 @@ mod tests {
             .expect("dispatch exists")
             .1;
 
-        let mut checked = 0;
-        for call in ["tessellate_unit_cylinder(", "unit_sphere("] {
-            for (at, _) in dispatch.match_indices(call) {
-                let tail = &dispatch[at + call.len()..];
-                let args = tail.split_once(')').map(|(head, _)| head).unwrap_or(tail);
-                assert!(
-                    args.contains("unit_mesh_identity::"),
-                    "{call} 的段数必须点名到欠账常量，不许退回裸数字: {args}"
-                );
-                checked += 1;
-            }
+        assert!(
+            !production.contains("unit_mesh_identity"),
+            "写死单位网格段数的旧身份模块不得回流"
+        );
+        for primitive in [
+            "PrimLCylinder",
+            "PrimSCylinder",
+            "PrimSphere",
+            "PrimLSnout",
+            "PrimDish",
+            "PrimCTorus",
+            "PrimRTorus",
+        ] {
+            let arm = dispatch
+                .split_once(&format!("PdmsGeoParam::{primitive}"))
+                .unwrap_or_else(|| panic!("missing {primitive} arm"))
+                .1
+                .split_once("PdmsGeoParam::")
+                .map(|(head, _)| head)
+                .unwrap_or(dispatch);
+            assert!(
+                arm.contains("mesh_caliber"),
+                "{primitive} 的复用单位网格必须显式消费 mesh_caliber: {arm}"
+            );
         }
-        assert_eq!(checked, 3, "两处单位柱加一处单位球，少一处说明有人绕开了");
 
         // 其余曲面原语的段数一律现算：`segs(...)` 是它们唯一的入口，实参不许是常数，
         // 且用到它的那一臂必须自己从 `libgm_discretise` 取规则（碟那两臂先把规则算进
@@ -1455,7 +1452,7 @@ mod tests {
         // 任何东西说明它是欠账（T038a），改动它一位不会有测试变红。
         //
         // 判据是「实参里不许出现裸数字」：`as i32` / `f64` 这类类型名里的数字不算，
-        // 它们前面挨着字母。段数要么是 `segs(规则)`、要么点名到 `unit_mesh_identity`、
+        // 它们前面挨着字母。段数要么是 `segs(规则)`、要么来自显式 `mesh_caliber`、
         // 要么是本臂里绑的局部名，而局部名自己也过同一条判据。
         fn split_args(after_open_paren: &str) -> Vec<&str> {
             let (mut depth, mut start, mut out) = (0i32, 0usize, Vec::new());
@@ -1505,7 +1502,7 @@ mod tests {
                         .trim();
                     assert!(
                         !has_bare_number(arg),
-                        "{call} 的段数实参写了裸数字，段数只许来自规则或点名的欠账: {arg}"
+                        "{call} 的段数实参写了裸数字，段数只许来自规则或显式 caliber: {arg}"
                     );
                 }
             }
@@ -1536,6 +1533,24 @@ mod tests {
                 "段数局部名 `{name}` 不许绑成裸数字: {code}"
             );
         }
+    }
+
+    #[test]
+    fn reusable_unit_param_without_mesh_caliber_requires_atomic_rebuild() {
+        let missing = PdmsGeoParam::PrimLCylinder(Default::default());
+        let error = tessellate_libgm_param(&missing).unwrap_err().to_string();
+        assert!(
+            error.contains("atomic full rebuild"),
+            "unexpected error: {error}"
+        );
+
+        let mut explicit = aios_core::prim_geo::LCylinder::default();
+        explicit.mesh_caliber = FacetCaliber::circumferential(32);
+        let mesh = tessellate_libgm_param(&PdmsGeoParam::PrimLCylinder(explicit))
+            .expect("explicit caliber is accepted")
+            .expect("cylinder is a shape");
+        assert!(!mesh.vertices.is_empty());
+        assert!(!mesh.indices.is_empty());
     }
 
     /// 不可用的容差必须报错，不许兜成 1.0mm（T042 收口）。
@@ -1593,6 +1608,10 @@ mod tests {
         let param = PdmsGeoParam::PrimSCylinder(aios_core::prim_geo::SCylinder {
             pdia: 200.0,
             phei: 80.0,
+            mesh_caliber: FacetCaliber::circumferential(libgm_discretise::cylinder_segments(
+                100.0,
+                FACET_TOL_MM,
+            )),
             ..Default::default()
         });
         let mesh = tessellate_libgm_param(&param)

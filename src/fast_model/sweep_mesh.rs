@@ -7,6 +7,9 @@
 //! manifold-csg 不参与成体，布尔另走 `manifold_bool.rs`。
 
 use crate::fast_model::libgm_discretise;
+use crate::fast_model::manifold_csg::{
+    dmat4_to_affine4x3, manifold_to_plant_mesh, plant_mesh_to_manifold,
+};
 use aios_core::parsed_data::{CateProfileParam, SProfileData, SannData};
 use aios_core::prim_geo::spine::SweepPath3D;
 use aios_core::prim_geo::sweep_solid::{SolidSegmentKind, SweepSolid};
@@ -590,11 +593,7 @@ pub fn sweep_solid_mesh(sweep: &SweepSolid) -> anyhow::Result<PlantMesh> {
             if height <= POS_EPS {
                 bail!("放样段长度 {height} 不是正数");
             }
-            // 斜切端面变换沿用 aios-core 的 get_face_mat4：OCC 的 loft 用的就是它
-            let btm = sweep.get_face_mat4(true);
-            let top =
-                DMat4::from_translation(DVec3::Z * height as f64) * sweep.get_face_mat4(false);
-            loft_loops(&loops, |p, is_top| place(p, if is_top { top } else { btm }))
+            ruled_solid_mesh(sweep, &loops, height, mat)
         }
         SolidSegmentKind::Revolution => {
             let SweepPath3D::SpineArc(arc) = &sweep.path else {
@@ -617,6 +616,84 @@ pub fn sweep_solid_mesh(sweep: &SweepSolid) -> anyhow::Result<PlantMesh> {
             revolve_loops(&loops, mat, angle, arc_segments(radius, angle, chord_tol))
         }
     }
+}
+
+/// 真斜切直线段：先按 Core3D 的 reach 规则延伸，再用工作端面裁切。
+///
+/// 直接把两个倾斜轮廓 loft 在一起只在两端轮廓一一对应时碰巧等价；先延伸后裁切才能
+/// 保证截面上的每一点都覆盖切面，并让 `mitre_extension_length` 的 1mm 余量真正进入
+/// 生产 CSG 路径。垂直/平行端面已由 `do_solid_segments()` 留在 Extrusion 分支。
+fn ruled_solid_mesh(
+    sweep: &SweepSolid,
+    loops: &[Loop2D],
+    height: f32,
+    placement: DMat4,
+) -> anyhow::Result<PlantMesh> {
+    let spans = loops
+        .iter()
+        .flatten()
+        .map(|point| libgm_discretise::ProfileSpan {
+            point: [point.x as f64, point.y as f64],
+            // `loops` 已按真实弧离散；这里对生产网格的实际顶点求 reach，不能再引入
+            // 一套不同的弧格子。
+            bulge: 0.0,
+        })
+        .collect::<Vec<_>>();
+    let line_dir = [0.0, 0.0, 1.0];
+    let plane = |is_start| -> anyhow::Result<Option<DVec3>> {
+        sweep
+            .working_mitre_plane(is_start)
+            .map(|normal| {
+                normal.try_normalize().ok_or_else(|| {
+                    anyhow!(
+                        "斜切{}端工作平面法向为零",
+                        if is_start { "起点" } else { "终点" }
+                    )
+                })
+            })
+            .transpose()
+    };
+    let start_plane = plane(true)?;
+    let end_plane = plane(false)?;
+    let extension = |normal: Option<DVec3>| {
+        normal.map_or(0.0, |normal| {
+            let reach = mitre_extension_reach(&spans, normal.to_array(), line_dir).reach;
+            mitre_extension_length(0.0, reach)
+        })
+    };
+    let start_extension = extension(start_plane);
+    let end_extension = extension(end_plane);
+
+    let extended = loft_loops(loops, |point, top| {
+        Vec3::new(
+            point.x,
+            point.y,
+            if top {
+                height + end_extension as f32
+            } else {
+                -(start_extension as f32)
+            },
+        )
+    })?;
+    let mut solid = plant_mesh_to_manifold(&extended, DMat4::IDENTITY)?;
+    if let Some(outward) = start_plane {
+        let inward = -outward;
+        solid = solid.trim_by_plane(inward.to_array(), 0.0);
+    }
+    if let Some(outward) = end_plane {
+        let inward = -outward;
+        let offset = inward.z * height as f64;
+        solid = solid.trim_by_plane(inward.to_array(), offset);
+    }
+    if solid.is_empty() {
+        bail!("斜切段经端面裁切后为空");
+    }
+    let placed = solid.transform(&dmat4_to_affine4x3(placement));
+    let mesh = manifold_to_plant_mesh(&placed);
+    if mesh.indices.len() < 3 || mesh.aabb.is_none() {
+        bail!("斜切段 CSG 没有生成有效 PlantMesh");
+    }
+    Ok(mesh)
 }
 
 fn compute_aabb(vertices: &[Vec3]) -> Option<Aabb> {
@@ -1061,6 +1138,71 @@ mod tests {
             min.z,
             max.z
         );
+    }
+
+    fn start_mitre(degrees: f64) -> DVec3 {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        DVec3::new(0.0, sin, -cos)
+    }
+
+    #[test]
+    fn ruled_csg_extends_and_trims_both_corresponding_45_degree_ends() {
+        let mut sweep = straight_sweep(rect_profile(100.0, 50.0), 200.0);
+        sweep.drns = Some(start_mitre(45.0));
+        // 与起点切面平行，且仍指向终点外侧：两端轮廓一一对应，厚度恒为 200mm。
+        sweep.drne = Some(-start_mitre(45.0));
+        assert_eq!(sweep.do_solid_segments(), SolidSegmentKind::RuledSolid);
+
+        let mesh = sweep_solid_mesh(&sweep).expect("two-ended 45 degree mitre");
+        assert_solid_mesh(&mesh, "two-ended 45 degree mitre");
+        assert_volume(
+            &mesh,
+            100.0 * 50.0 * 200.0,
+            0.001,
+            "two-ended 45 degree mitre",
+        );
+        let (min, max) = mesh_bounds(&mesh);
+        assert!((min.z + 25.0).abs() < 0.01, "45° 起点延伸不足: {min:?}");
+        assert!((max.z - 225.0).abs() < 0.01, "45° 终点延伸不足: {max:?}");
+    }
+
+    #[test]
+    fn ruled_csg_has_enough_reach_for_a_60_degree_start_cut() {
+        let mut sweep = straight_sweep(rect_profile(100.0, 50.0), 200.0);
+        sweep.drns = Some(start_mitre(60.0));
+        assert_eq!(sweep.do_solid_segments(), SolidSegmentKind::RuledSolid);
+
+        let mesh = sweep_solid_mesh(&sweep).expect("60 degree start mitre");
+        assert_solid_mesh(&mesh, "60 degree start mitre");
+        assert_volume(&mesh, 100.0 * 50.0 * 200.0, 0.001, "60 degree start mitre");
+        let expected = -25.0 * 3.0_f32.sqrt();
+        let (min, max) = mesh_bounds(&mesh);
+        assert!((min.z - expected).abs() < 0.02, "60° 起点延伸不足: {min:?}");
+        assert!((max.z - 200.0).abs() < 0.01, "水平终点漂移: {max:?}");
+    }
+
+    #[test]
+    fn parallel_mitre_attributes_stay_on_the_extrusion_path() {
+        let mut sweep = straight_sweep(rect_profile(100.0, 50.0), 200.0);
+        sweep.drns = Some(DVec3::X);
+        sweep.drne = Some(DVec3::NEG_Y);
+        assert_eq!(sweep.do_solid_segments(), SolidSegmentKind::Extrusion);
+        let mesh = sweep_solid_mesh(&sweep).expect("parallel planes are suppressed");
+        assert_bounds(
+            &mesh,
+            Vec3::new(-50.0, -25.0, 0.0),
+            Vec3::new(50.0, 25.0, 200.0),
+            "parallel planes are suppressed",
+        );
+    }
+
+    #[test]
+    fn zero_mitre_normal_fails_before_manifold_receives_nan() {
+        let mut sweep = straight_sweep(rect_profile(100.0, 50.0), 200.0);
+        sweep.drns = Some(DVec3::ZERO);
+        assert_eq!(sweep.do_solid_segments(), SolidSegmentKind::RuledSolid);
+        let error = sweep_solid_mesh(&sweep).unwrap_err();
+        assert!(error.to_string().contains("法向为零"), "{error}");
     }
 
     #[test]

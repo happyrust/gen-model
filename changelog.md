@@ -4,6 +4,8 @@
 
 ### 修复
 
+- Snout 的目录参数贯通 XOFF/YOFF 两轴，Dish 的 hash 与规范单位参数统一归一化口径；旧复用参数缺失 caliber 时明确要求整库重建。
+
 - 偏心 Snout 的偏移改成**上下各摊一半**（specs/009 T050）。libgm
   `GM_Snout::calcFacetsWithoutSurfaces` 逐顶点写的是 `r·cosθ ∓ xShift/2`，`calcRange`
   的支撑函数独立佐证同一约定，`GM_Pyramid` 也完全同构；本仓 `gen_snout` 与 aios-core 的
@@ -28,6 +30,8 @@
   Core3D 会夹 `fmax(RINS, 0)`、SSCL 的四个剪切角 Core3D 会折进 (−90, 90]，本仓两条都没做。
 
 ### 新增
+
+- OCC 退役收官接入六类复用曲面的真实尺寸 `FacetCaliber` 身份，并发布协调后的 aios-core / parse / pdms-io 修订。
 
 - 斜切延伸段的长度规则落成纯函数（specs/009 T021）：`sweep_mesh::mitre_extension_reach`
   与 `mitre_extension_length`，出处是 Core3D 的扫掠段构建器 `sub_107318E0` 及它调的

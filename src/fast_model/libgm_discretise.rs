@@ -1444,6 +1444,60 @@ mod tests {
         assert_ne!(cylinder_segments(295.0, 0.5), 32, "写死 32 会让大柱超容差");
     }
 
+    #[test]
+    fn reusable_surface_calibers_match_the_identity_authority() {
+        use aios_core::prim_geo::facet_caliber as identity;
+
+        let cylinder = identity::cylinder_caliber(295.0);
+        assert_eq!(
+            cylinder.circumferential,
+            cylinder_segments(295.0, FACET_TOL_MM) as u32
+        );
+
+        let sphere = identity::sphere_caliber(800.0);
+        let sphere_around = circle_segments(800.0, FACET_TOL_MM);
+        assert_eq!(sphere.circumferential, sphere_around as u32);
+        assert_eq!(sphere.meridional, (sphere_around / 2).max(2) as u32);
+
+        let snout = identity::snout_caliber(100.0, 420.0);
+        assert_eq!(
+            snout.circumferential,
+            snout_segments(100.0, 420.0, FACET_TOL_MM) as u32
+        );
+
+        let ctorus = identity::circular_torus_caliber(300.0, 500.0, 135.0);
+        assert_eq!(
+            ctorus.circumferential,
+            torus_ring_segments(500.0, FACET_TOL_MM, 135.0) as u32
+        );
+        assert_eq!(
+            ctorus.meridional,
+            circular_torus_tube_segments(300.0, 500.0, FACET_TOL_MM) as u32
+        );
+
+        let rtorus = identity::rectangular_torus_caliber(500.0, 135.0);
+        assert_eq!(
+            rtorus.circumferential,
+            torus_ring_segments(500.0, FACET_TOL_MM, 135.0) as u32
+        );
+
+        let spherical = spherical_dish_facets(500.0, 250.0, FACET_TOL_MM).unwrap();
+        assert_eq!(
+            identity::dish_caliber(1000.0, 250.0, false).unwrap(),
+            identity::FacetCaliber::with_meridians(spherical.around, spherical.meridional, 0)
+        );
+
+        let elliptical = elliptical_dish_facets(500.0, 250.0, FACET_TOL_MM).unwrap();
+        assert_eq!(
+            identity::dish_caliber(1000.0, 250.0, true).unwrap(),
+            identity::FacetCaliber::with_meridians(
+                elliptical.around,
+                elliptical.hub,
+                elliptical.knuckle
+            )
+        );
+    }
+
     /// 圆心与半径要跟 `calcCentreAndRadius` 同式：半圆的 bulge 是 1，圆心在弦中点。
     #[test]
     fn span_arc_solves_the_circle_like_libgeom() {

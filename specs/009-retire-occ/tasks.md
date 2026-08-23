@@ -134,13 +134,16 @@
   门（四条全绿）：切面平行时回 0；45° / 60° 两组手算 reach（30 / 30√3）；
   半圆的极值只在弧腰上，抹平 bulge 后归零（漏采弧就红）；`+1` 的边界
   （reach = 1.0 不加、2.0 → 3.0）。`sweep_mesh` 28 全绿。
-  **还没接生产**：挂到段 CSG 是 T023 的事，且它依赖 WP-J 的斜切墙 RVM 门。
+  **2026-08-24 已接生产**：T023 的 RuledSolid 路径按 reach 延伸后通过 Manifold
+  `trim_by_plane` 裁两端；45°/60°、平行切向与既有分派单测全绿。现场门仍依赖 WP-J。
   另外这一趟顺带给 F1 添了一条旁证：弧段走
   `gm_CreateRevolution(0.0, sweepDeg, pAxis, 180.0, profile)`——轴角是个写死 180 的
   **平面内角度**，出平面轴确实表达不出。
 - [ ] T022（依赖 T018；**不依赖 T021**）`gm_CreateRuledSolid`：两端轮廓一一对应连三角。
   内核 `loft_loops` 已绿（斜切不改体积）；**缺斜切墙 RVM**。
 - [ ] T023（依赖 T022）斜切延伸挤出挂到段 CSG；斜切墙 RVM；垂直/平行切向不得误走 Ruled（ADR-026）。
+  **代码完成、RVM 未完成**：生产 RuledSolid 先按 `mitre_extension_length` 延伸，随后按
+  `working_mitre_plane` 裁切；只由权威分派进入，垂直/平行仍走 Extrusion。
 - [ ] T024（可后置）多段 SPINE：`transform` + `batch_union`；无多段夹具则只单测。
 
 ## WP-D CSG 树
@@ -149,12 +152,12 @@
   空差集不覆盖 `booled_id`（**静态半 2026-08-19 已落地**：设计/目录两条 manifold
   生产路径均在写盘前拦空差集 → `bad_bool` 出声，
   `empty_difference_is_bad_bool_not_a_silent_swallow` 钉住；live p95 未跑）。
-- [ ] T026（可并行）源码断言生产路径不调用 Clip/Expand/Compress/SolidTree/Picture/Clash。
-- [ ] T027（依赖 T025）确认 `apply_cata_neg_boolean_manifold` 仍是目录负体唯一入口。
+- [x] T026（可并行）源码断言生产路径不调用 Clip/Expand/Compress/SolidTree/Picture/Clash。
+- [x] T027（依赖 T025）确认 `apply_cata_neg_boolean_manifold` 仍是目录负体唯一入口。
 
 ## WP-E 离散口径与收口
 
-- [ ] T028（依赖 T007）`src/fast_model/occ_generate.rs`：manifold 路径 AABB 来自 `PlantMesh`；`pts` 有明确
+- [x] T028（依赖 T007）`src/fast_model/occ_generate.rs`：manifold 路径 AABB 来自 `PlantMesh`；`pts` 有明确
   来源或省略策略写进回执，禁止空列表假装成功。
 > T029（活库盘点）已拆分为 T045；T030（测试与浸水解绑）已拆分为 T043 / T044。
 > 两条不再单独跟踪，勾在拆出去的那几条上。
@@ -593,3 +596,19 @@ ws,gen_model,manifold,project_hd`：T039 / T042 落地后是 **1062 通过 / 1 �
 - [ ] T049 曲面原语抽检 RVM：柱 / 球 / PrimLSnout / 碟 / 圆环面各一，段数改动后重建基准。
   阈值一律不放宽（FR-010）；证据进 `docs/evidence/`，`docs/2026-08-12_live-test-ledger.md`
   同步。
+
+
+## 2026-08-24 独立工作树执行记录
+
+- [x] T041-code / T053-code：六类复用曲面接入 `FacetCaliber`；hash 与 `gen_unit_shape()` 同键；
+  主仓删除 `unit_mesh_identity`，缺 caliber 返回原子整库重建错误；普通 LCylinder/SCylinder
+  同 caliber 仍规范成单一 `PrimLCylinder` 参数。**双库容量、重建与 RVM 仍未完成。**
+- [x] T050-code：Snout `±offset/2` 与规范化修复已发布；**现场 RVM 未完成。**
+- [x] T051-code：XOFF/YOFF 两轴已贯通解析、hash、单位参数和 Manifold；旧 XOFF 仍映射 `poff`。
+- [x] T023-code：斜切延伸已进入 Manifold CSG；`sweep_mesh` 32 条单测全绿，T048 仍待现场 RVM。
+- [x] T026/T027/T028：源码护栏钉住退役 Core3D 操作、目录负体 Manifold 唯一入口，
+  并钉住有效 `PlantMesh` → 持久化 → AABB 角点回执顺序；3 条定向测试全绿。
+  **T052a 的 dabacon YOFF 现场普查仍未完成。**
+- [x] T002-release：aios-core `d4a39c22`、parse `853ed155`、pdms-io `53b9e38c` 已发布并同步升级
+  根包与 Python；local-deps OFF 的依赖图只有一份 aios-core。
+- [ ] T031：按现场样本硬门暂停；现有证据缺球、SSCL、多面体，且尚无 YOFF dabacon 普查。

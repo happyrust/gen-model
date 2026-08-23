@@ -84,3 +84,15 @@ WALL / STWALL / GENSEC 的扫掠体在直线、带斜切平面、圆弧路径上
 - 几何参数解释与 Core3D 扫掠步骤仍以 aios-core 为准；本仓不发明新的扫掠数学。
 - manifold-csg 本期不增加通用 3D 脊线扫掠 API。
 - 不运行 `cargo clean`。
+
+
+### 2026-08-24 Endgame requirements
+
+- **FR-014**：复用曲面参数必须序列化 `FacetCaliber { circumferential, meridional, secondary_meridional }`；
+  hash 与规范单位参数使用同一 caliber，旧单位参数缺失时要求整库重建。
+- **FR-015**：身份升级、部署和 ADR-021 整库重建必须在同一维护窗口完成；重建后不得存在
+  缺失 caliber 的复用参数、旧身份孤儿或失败队列。
+- **FR-016**：T031 的现场硬门是球、SSCL、多面体与 YOFF Snout 均有 dabacon 样本，且
+  T046–T049 在 8009、7997 两副本均按原阈值通过；缺样本不以纯函数测试替代。
+- **FR-017**：OCC 保留为可选参照 feature，但不得进入 default、console 或 Windows release；
+  T040b 与多段 SPINE 不属于本阶段。

@@ -75,7 +75,7 @@ T004 后半、T008、T025–T028、T045a、T046–T049、T031、T032。
   `poff != 0` 不改身份键的钉测。**T052 > 0 时另需一件真实偏心异径管过 RVM 门。**
 - **V3（T041）** `../vendor/old-aios-core/src/prim_geo/cylinder.rs`、
   `../vendor/old-aios-core/src/prim_geo/sphere.rs`、`src/fast_model/pdms_inst.rs`：
-  柱/球 `hash_unit_mesh_params()` 混入段数，`gen_unit_shape()` 带段数，
+  柱/球 vendor 身份哈希方法 混入段数，vendor 单位形状生成方法 带段数，
   `canonical_unit_param_json` 的 `CYLINDER_GEO_HASH` 特判按新键走，
   `manifold_tessellate::unit_mesh_identity` 欠账常量组整组删除（其 doc 已写明
   「T041 换键时整组删」，T039 的两条源码断言随之改判）。
@@ -174,3 +174,16 @@ T004 后半、T008、T025–T028、T045a、T046–T049、T031、T032。
 4. **偏心 Snout 摆位修正改变现场几何**：T052 若非零，修正会让存量偏心异径管
    整体平移 `(XOFF/2, YOFF/2)`——这是**改对**，但查看者会看到构件动了位置，
    发布说明里要点名。
+
+
+## 2026-08-24 执行更新（锁定决策）
+
+- D1：身份升级与两个目标库的整库重建同一维护窗口原子切换，不接受混合期。
+- D2：球、SSCL、多面体、YOFF Snout 的 dabacon 现场样本是硬门；缺失即停止 T031。
+- D3：T046–T049 在 8009、7997 两副本都跑，缺失原语由新增现场库补齐。
+- D4：本次在独立工作树 `codex/occ-retire-endgame` / `codex/occ-retire-caliber` 执行。
+
+代码状态：T021、T023、T038a、T052 已完成；T023 的 45°/60° 延伸裁切与平行分派单测通过，
+但 T048 RVM 未完成；T050 的代码与 vendor 发布完成但 RVM 未完成；
+T041/T053 的 caliber 代码与依赖发布完成，但双库身份普查、容量估算、原子重建与 RVM 未完成。
+当前已知盘点明确缺球、SSCL、多面体，工作区也没有可读 dabacon fixture，因此 T031 按 FR-016 停在现场门前。

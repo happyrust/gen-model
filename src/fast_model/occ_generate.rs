@@ -493,6 +493,92 @@ fn persist_libgm_plant_mesh(
     Ok(())
 }
 
+#[cfg(test)]
+mod occ_retire_source_guards {
+    fn active_lines(source: &str) -> String {
+        source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn production_geometry_does_not_reintroduce_retired_core3d_operations() {
+        let source = active_lines(include_str!("occ_generate.rs"));
+        for name in [
+            "Clip",
+            "Expand",
+            "Compress",
+            "SolidTree",
+            "Picture",
+            "Clash",
+        ] {
+            for invocation in [
+                format!("{name}("),
+                format!(".{name}("),
+                format!(".{name}(").to_lowercase(),
+            ] {
+                assert!(
+                    !source.contains(&invocation),
+                    "retired Core3D operation returned to production: {invocation}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn catalogue_negatives_have_only_the_manifold_entry() {
+        let source = active_lines(
+            include_str!("occ_generate.rs")
+                .split_once("pub async fn apply_cata_neg_boolean_occ(")
+                .expect("optional OCC reference boundary")
+                .0,
+        );
+        let manifold_entry = ["apply_cata_neg_boolean_", "manifold("].concat();
+        let occ_entry = ["apply_cata_neg_boolean_", "occ("].concat();
+        assert!(
+            source.contains(&manifold_entry),
+            "catalogue negatives lost their entry"
+        );
+        assert!(
+            !source.contains(&occ_entry),
+            "catalogue negatives regained an OCC execution entry"
+        );
+    }
+
+    #[test]
+    fn libgm_receipt_is_derived_only_from_a_valid_plant_mesh() {
+        let source = include_str!("occ_generate.rs");
+        let persist = source
+            .split_once("fn persist_libgm_plant_mesh(")
+            .expect("persist function")
+            .1
+            .split_once("/// 生成实例的网格数据")
+            .expect("persist function boundary")
+            .0;
+        let valid = persist
+            .find("mesh.indices.len() < 3")
+            .expect("mesh validation");
+        let save = persist.find("mesh.ser_to_file").expect("mesh persistence");
+        let points = persist
+            .find("mesh_aabb_corner_pts(&aabb)")
+            .expect("AABB points");
+        assert!(
+            valid < save && save < points,
+            "validate -> persist -> receipt order drifted"
+        );
+        assert!(
+            persist.contains("mesh.aabb"),
+            "AABB must come from PlantMesh"
+        );
+        assert!(
+            persist.contains("拒绝空 pts"),
+            "empty point receipts must fail loudly"
+        );
+    }
+}
+
 /// 生成实例的网格数据
 ///
 /// # 参数

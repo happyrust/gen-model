@@ -735,12 +735,15 @@ fn push_inst_relate_packets(packets: &mut Vec<SqlPacket>, rows: &BTreeMap<String
 }
 
 fn canonical_unit_param_json(inst: &EleInstGeo) -> anyhow::Result<String> {
-    let param = if inst.geo_hash == aios_core::prim_geo::basic::CYLINDER_GEO_HASH {
-        // LCylinder 与非切角 SCylinder 共用单位圆柱 id；统一为一个单键 enum，
-        // 不能让先后顺序决定 `param` 的变体，更不能 MERGE 成双键对象。
-        PdmsGeoParam::PrimLCylinder(LCylinder::default())
-    } else {
-        inst.geo_param.convert_to_unit_param()
+    let param = match inst.geo_param.convert_to_unit_param() {
+        // 普通 LCylinder 与非切角 SCylinder 在 caliber 相同的情况下仍共享单位圆柱身份。
+        // 旧代码靠固定 `CYLINDER_GEO_HASH` 判定；身份升级后 id 随 caliber 变化，必须按
+        // 变体语义规范化，同时把同一 caliber 带进规范参数。
+        PdmsGeoParam::PrimSCylinder(c) if !c.is_sscl() => PdmsGeoParam::PrimLCylinder(LCylinder {
+            mesh_caliber: c.mesh_caliber,
+            ..LCylinder::default()
+        }),
+        param => param,
     };
     serde_json::to_string(&param).map_err(Into::into)
 }
@@ -1424,8 +1427,13 @@ mod tests {
 
     fn cylinder_batch(param: PdmsGeoParam) -> ShapeInstancesData {
         let refno = RefnoEnum::from("1/120");
+        let geo_hash = match &param {
+            PdmsGeoParam::PrimLCylinder(c) => c.hash_unit_mesh_params(),
+            PdmsGeoParam::PrimSCylinder(c) => c.hash_unit_mesh_params(),
+            _ => panic!("cylinder_batch only accepts cylinder params"),
+        };
         let inst = EleInstGeo {
-            geo_hash: aios_core::prim_geo::basic::CYLINDER_GEO_HASH,
+            geo_hash,
             refno,
             geo_param: param,
             transform: Transform::IDENTITY,
@@ -1456,7 +1464,12 @@ mod tests {
             .iter()
             .map(|packet| packet.sql.as_str())
             .join("\n");
-        assert_eq!(sql.matches("UPSERT inst_geo:⟨2⟩").count(), 1, "{sql}");
+        assert_eq!(sql.matches("UPSERT inst_geo:").count(), 1, "{sql}");
+        assert!(
+            !sql.contains("inst_geo:⟨2⟩"),
+            "旧固定圆柱身份不得继续使用: {sql}"
+        );
+        assert!(sql.contains("mesh_caliber"), "{sql}");
         assert!(sql.contains("PrimLCylinder"), "{sql}");
         assert!(!sql.contains("PrimSCylinder"), "{sql}");
         assert!(!sql.contains("MERGE"), "{sql}");
