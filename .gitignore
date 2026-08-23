@@ -123,6 +123,17 @@ __pycache__/
 # 失败时当 artifact 传出来）。本地照 CI 那段命令演练时同样会生成。
 /artifacts/
 
+# 现场证据目录：一次实测留下的是回滚用的旧 exe、截图、mesh 与库转储，单场次就能
+# 到几百 MB，与已入库那批几 KB 的文本证据不是一回事。已跟踪的文件不受影响，新产出
+# 默认不入库；确实要留档的单份文本用 `git add -f` 点名。
+/docs/evidence/
+
+# 一次性排查工作区与运行日志（都能重跑重造）
+/test-increment/
+/*_dblog.txt
+/.scratch_libgm*.json
+/shot.png
+
 # KC-Chat 运行时产物（插件自动生成，请勿入库）
 .cursor/mcp.json
 .cursor/kc-mcp/
