@@ -60,3 +60,13 @@
   水位和 durable pending；模型工作在数据队列清空后由既有空闲轮分页消费。补纯函数
   回归测试与 test-workspace 六库现场顺序验证
   ——`src/data_interface/batch_worker.rs`、`docs/adr/ADR-011-one-data-batch-queue-for-manual-and-auto.md`
+- [x] T018 清库性能修复（FR-009a / FR-009b）：关系阶段的 `pe_owner` 改按 OWNER 复合 id
+  区间删除（每个权威 Ref0 一条闭区间，取代两句 `array::flatten(SELECT VALUE
+  ->/<-pe_owner FROM pe:{ref0}_0..)` 图遍历），跨 owner 区间的适用边界就地写进源码且
+  不放宽 `replay_safe` 的既有拒绝；`prune_above_watermark` 保持逐元素双向删除不动；
+  后置条件加验逐 Ref0 的 `pe_owner` 区间残留归零。三条纯函数回归
+  （`the_owner_edges_go_by_id_range_not_by_graph_traversal`、
+  `the_owner_range_is_ref0_scoped_and_never_open_ended`、
+  `the_postcondition_counts_owner_edges_in_every_ref0_range`）+ 隔离库实测
+  ——`src/data_interface/fast_delete.rs`、`docs/adr/ADR-021-watermark-must-be-data-backed.md`、
+  `docs/evidence/pe-owner-range-fast-delete-20260820/`

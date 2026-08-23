@@ -26,6 +26,9 @@
   ——`src/data_interface/increment_manager.rs`。
 - 清库：`fast_delete::wipe_dbnum_for_reinit`（与整库快删同源的三阶段删除；元数据阶段 =
   统计与队列残留清空 + spatial epoch 递增 + 水位行清值不删行，整组显式事务且水位置尾）。
+  关系阶段的 `pe_owner` 走 OWNER 复合 id 区间（每个权威 Ref0 一条闭区间），不走图遍历；
+  该形状跨 owner，只在完整清理成立，`prune_above_watermark` 与 `staging` 重放路径均不适用。
+  后置条件同时验 `pe` 归零与逐 Ref0 的 `pe_owner` 区间残留归零。
 - 执行体：`execute_one_dbnum` 冻结点复核仍判回退才清库；`batch_worker` 开窗前过
   `batch_reroutes_to_initial_load` 预判（applied=0 / 回退 / 幽灵水位一律不开 ADR-017
   暂存窗口，直接走执行体），与执行体共用同一个数据支撑探针。

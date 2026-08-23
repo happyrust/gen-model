@@ -30,12 +30,19 @@
 - [x] T007a（2026-08-19 补口径）`manifold_tessellate.rs`：挤出 FRADIUS 倒角接
   `gen_polyline_original` 权威离散（弦高容差 `Extrusion::tol()`，体积对拍 1% 钉住）；
   样条轮廓（`CurveType::Spline`）回退 OCC，不得折线近似。
+- [x] T007b（2026-08-20 补口径）`manifold_tessellate.rs`：`PrimRevolution`（REVO/NREV）→
+  `tessellate_revolution`，与挤出共用 `flatten_profile_loop` 的倒角离散。原先掉在
+  `_ => Ok(None)` 上，PANE 的负实体大量是 NREV，等于设计布尔整条被拖回 OCC。
+  出平面的回转轴仍回 `None` 走 OCC（manifold 的 revolve 只认轮廓平面内的轴）。
 - [ ] T008（依赖 T007）抽检 live：一箱、一柱、一挤出网格非空；台账一行。
 
 ## WP-B 其余目录原语（可并行，均依赖 T006）
 
 - [ ] T009（可并行）`manifold_tessellate.rs`：`gm_CreateSphere` → 单位球半径 0.5（`PrimSphere`）。
-- [ ] T010（可并行）`manifold_tessellate.rs`：`PrimPolyhedron` → `from_mesh_f64`；非流形 hard fail。
+- [x] T010（可并行）`manifold_tessellate.rs`：`PrimPolyhedron` → 逐面 earcut 剖分 + 有向体积
+  定朝向；一张面都剖不出来 hard fail。**改了口径**：plan 原写 `from_mesh_f64`，但面片壳
+  不做 CSG，走 manifold ingest 只会把非水密的现场面片挡在渲染之外，而 OCC 那边
+  (`Polyhedron::gen_occ_shape`) 也只是 `Shell::from_faces`，同样不保证实体。五条单测。
 - [ ] T011（串行）IDA `idalib-32268`：钉 `gm_CreateSnout` 五参数顺序（xref `0x1073c12c`），
   写入 `specs/009-retire-occ/plan.md` B4。
 - [ ] T012（依赖 T011）`manifold_tessellate.rs`：`PrimLSnout` → 锥台 ± 偏心。
@@ -50,8 +57,12 @@
 ## WP-C 扫掠体（依赖 T006；C0 先于 C1–C4）
 
 > 截面与成体不走 manifold-csg：自建网格，manifold 只用于布尔（与 WP-B 同一决定）。
-> 内核落在 `src/fast_model/sweep_mesh.rs`，纯函数单测已绿；**接进 `tessellate_libgm_param`
-> 属于 T019/T020/T022 的后半段，要等各自的 RVM 门**，未过门前扫掠体继续回退 OCC。
+> 内核落在 `src/fast_model/sweep_mesh.rs`，纯函数单测已绿。
+>
+> **2026-08-20 口径改动**：`PrimLoft` 已接进 `tessellate_libgm_param`（`sweep_solid_mesh`
+> 三支齐上），不再等 RVM 门。理由是扫掠体是活库里数量最大的一类，不接则 `occ` 无从退役；
+> 代价是 T019/T020/T022 的 RVM 对拍**变成了事后验收**——它们仍未完成，现在欠的是
+> 「已上生产但还没跟 RVM 对过」，比原先的「没上生产也没对过」更需要尽快补。
 
 - [x] T018（串行）截面：SANN / SPRO / SREC → 2D 闭合环（外环逆时针 + 孔顺时针，弧折线）。
   文件：`src/fast_model/sweep_mesh.rs`。倒角与弧段复用 aios-core `wire::gen_polyline_original`，

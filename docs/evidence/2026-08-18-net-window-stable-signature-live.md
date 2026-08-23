@@ -75,3 +75,25 @@ python/.venv/Scripts/python.exe -m pytest `
 建立零计数条目、再叠加操作计数；纯单测
 `preview_sessions_come_from_the_frozen_session_page_list` 通过。修正只补齐诊断回执，
 不改变 `collect_window`、绑定或 HTTP DTO 形状。
+
+## 2026-08-20 T11b 隔离复验
+
+现场 testbed 项目锁被另一服务占用，因此沿用只含 SYST+8000 的隔离项目副本，单独执行
+下一个待复验项：
+
+```powershell
+$env:AIOS_NET_AB = '1'
+python/.venv/Scripts/python.exe -m pytest `
+  python/tests/test_net_window_ab.py::test_net_window_agrees_on_a_stock_deletion `
+  -q -s -p isolate_plugin -p no:cacheprovider
+```
+
+结果：exit `0`，`1 passed in 20.65s`。执行日志确认：
+
+- baseline 后固定 EQUI `24384_24778` 与 BOX `24384_24779` 均为活行；
+- worker 消费固定窗口 `25..=26`，净三态为 Add 0 / Modified 1 / Deleted 2；
+- 写回成功后水位推进至 26，测试打印的终态墓碑恰为上述两个固定目标；
+- `finally` 恢复隔离 db8000 文件，复核 SHA256 为
+  `2eae30556380eb79daf903cb15428e22df075e871e69acbcbed09a7edd337137`。
+
+本轮只操作隔离副本，未触碰被占用的 testbed 正本。

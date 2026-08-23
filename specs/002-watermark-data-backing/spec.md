@@ -105,7 +105,7 @@
 
 - 存在性判定要不要跨过软删除？`pe` 上有 `deleted` 标记，一个所有行都被软删除的库在语义上仍然「有数据」（存在性只问行在不在，不问 deleted 取值）。判定口径写死在探针注释里。
 - `applied_sesno == 0` 且库里**有**数据（刚被清库过、或播种失败）：这一格今天就走基线，`baseline_needs_full_parse` 会全量解析并用 INSERT IGNORE 补洞，行为不变，不得回归。
-- 清库执行到一半失败（关系边删了、区间行删了一半）：关系与区间阶段独立幂等；元数据阶段是单个显式事务且水位清值置尾，任一元数据语句失败则统计、队列、epoch 与水位整体回滚 → 下一轮仍判回退并幂等重放。
+- 清库执行到一半失败（关系边删了、区间行删了一半）：关系与区间阶段独立幂等；元数据阶段是单个显式事务且水位清值置尾，任一元数据语句失败则统计、队列、epoch 与水位整体回滚 → 下一轮仍判回退并幂等重放。属主边按 id 区间删除后这条幂等性才真正成立：图遍历要从 `pe` 区间出发，`pe` 行已删而边还在时它永远够不着那些边，而 id 区间删除不读 `pe`。
 - 一个库在批次执行途中被人清空（并发删除）：路由已经做完，本轮按增量跑。下一轮会检出并重建，不需要在批次内反复复查。
 - 回退批次在队列里等待期间，reconcile 重扫反复看到同一回退：入队按 dbnum 幂等合并，不得堆出第二行。
 - 回退文件最新会话为 0：以 `Reinitialize` 的 `0..=0` 控制批次进入 worker，清库后直接 Applied、水位保持 0；同形状的普通空基线不入队。
@@ -124,6 +124,8 @@
 - **FR-007**：判定为回退（`file_latest_sesno < applied_sesno`）的 dbnum，所有扫描路径 MUST 不阻断而是入队一条显式 `Reinitialize` 重建批次；该意图 MUST 能在 `file_latest_sesno == 0`、已有排队行和同 dbnum 运行中行三种状态到达 worker，扫描路径 MUST NOT 删除任何数据。
 - **FR-008**：回退的清库 MUST 只发生在数据批次 worker 执行体内，且 MUST 以冻结点的新鲜裁决（复核仍判回退）为前提；复核不判回退时 MUST NOT 清库。
 - **FR-009**：清库 MUST 覆盖该 dbnum 的全部 `pe` 行、派生行（属主边、inst/tubi/room/ref_rev/geo 关系）、noun 行、`dbnum_info_table` 统计与队列残留（`model_update_pending` / `increment_update_attempt` / `incr_side_effect_pending`），MUST 在同一元数据阶段递增 spatial epoch，且 `dbnum_watermark` 行 MUST 清值不删行（登记身份保留）。
+- **FR-009a**：属主边（`pe_owner`）在**完整 DBNUM 清理**里 MUST 按 OWNER 复合 record id 区间删除（每个权威 Ref0 一条闭区间语句），MUST NOT 依赖 `->pe_owner` / `<-pe_owner` 图遍历。该区间跨 owner，因此 MUST 只用于完整清理：本 dbnum 解析出的每个 Ref0 都各出一条语句、且所有权链不跨库，「child 在本 Ref0 而 owner 在别处」不构成需要保留的入边。**按水位裁剪（`prune_above_watermark`）MUST NOT 采用该区间形状**——它只删部分元素，不满足上述前提，MUST 保持逐元素双向关系清理。`staging` 重放路径对跨 owner 区间的既有拒绝（`replay_safe::is_owner_scoped_range`）MUST NOT 因本条放宽。
+- **FR-009b**：清库的后置条件 MUST 同时覆盖 `pe` 行归零与每个 Ref0 的 `pe_owner` 区间残留归零；任一不为零 MUST 记批次 Failed，MUST NOT 报告为清理成功。
 - **FR-010**：清库关系与区间阶段 MUST 可独立幂等重放；统计/持久队列清理、spatial epoch 与水位清零 MUST 位于同一个显式 SurrealDB 事务，水位更新置尾。任一元数据语句失败 MUST 整体回滚、记批次 Failed，下一轮 MUST 能幂等重放。
 - **FR-010a**：初始化批次 MUST 只完成数据、水位与 durable 模型工作登记；当数据队列仍有初始化任务时 MUST NOT 执行模型生成。数据队列清空后 MUST 由统一空闲轮分页消费模型工作；稳态增量窗口的模型提交语义保持不变。
 - **FR-011**：`TypeChanged` / `Duplicate` / `Missing` / `ForeignProject` MUST 保持阻断语义，MUST NOT 触发自动清库；「哪些异常转重建」MUST 由 `FileAnomaly` 上的单一谓词（`requires_reinit`）裁决。

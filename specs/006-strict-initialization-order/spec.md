@@ -25,8 +25,10 @@
 - **FR-004**：阶段转换前必须重扫；旧 epoch 完成不得满足新 manifest。
 - **FR-005**：Meta 包含主项目 SYST/GLB/GLOB 及 included_projects DICT；Catalogue
   包含所有经优先级裁决的 CATA；Design 为当前 MDB 的 DESI。
-- **FR-006**：跨项目 DICT/CATA 同 dbnum 按显式优先级选主；被遮蔽候选不得写观察、水位或队列。
-- **FR-007**：同项目重复、无选主、目录/头部不可读及 Ref0 冲突必须阻断阶段并公开原因。
+- **FR-006**：跨项目 DICT/CATA 同 dbnum 按项目顺序选主——`catalogue_project_priority`
+  点名的在前，其余按 `included_projects` 书写顺序；被遮蔽候选不得写观察、水位或队列。
+- **FR-007**：同项目重复、显式名单含未知/重复项目、目录/头部不可读及 Ref0 冲突必须阻断
+  阶段并公开原因；名单里没点到某个 `included_projects` 项目不算阻断成因。
 - **FR-008**：`startup_autorun=false` 时 manifest 整体等待；一次真实触发释放所有前置阶段。
 - **FR-009**：数据未就绪时模型 pending 不消费、不增加 attempts；需要生成的按需请求返回
   `initialization_not_ready`。
