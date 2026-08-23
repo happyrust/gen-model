@@ -344,6 +344,17 @@ mod gen_side {
         if let Some(param_json) = param_json {
             let param: PdmsGeoParam = serde_json::from_value(param_json)
                 .with_context(|| format!("反序列化 PdmsGeoParam 失败 (geo_hash={geo_hash})"))?;
+            // 顺序必须与生产 `gen_inst_meshes` 一致：先 libgm/manifold，`None` 或
+            // 失败才 OCC。写反了这道 RVM 门量的就是一条生产上已经不走的路径——
+            // 后端换了它还是绿的，等于没有门。
+            #[cfg(feature = "manifold")]
+            match crate::fast_model::manifold_tessellate::tessellate_libgm_param(&param) {
+                Ok(Some(mesh)) => return Ok(Some(mesh)),
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("geo_hash={geo_hash} libgm 三角化失败，回退 OCC: {error}");
+                }
+            }
             match param.gen_occ_shape() {
                 Ok(shape) => return Ok(Some(PlantMesh::gen_occ_mesh(&shape, gen_tol)?)),
                 Err(error) => {
@@ -571,14 +582,18 @@ mod mesh_wall_live {
         ];
         const P95_TOL: f32 = 12.0;
         let mut failures = Vec::new();
+        // 先收齐再断言：碰到第一堵没生成的墙就 panic 的话，剩下几堵的实测数字
+        // 一个都看不到，而「库里没这件几何」和「几何不贴合」要的是两种处置。
+        let mut missing = Vec::new();
         for (rvm_name, pe_key) in pairs {
             let rvm = rvm_meshes
                 .get(rvm_name)
                 .unwrap_or_else(|| panic!("RVM 缺 group {rvm_name}"));
-            let gen_mesh = gen_world_mesh(&db, pe_key, 3.0)
-                .await
-                .expect("gen mesh")
-                .unwrap_or_else(|| panic!("gen 缺网格 {pe_key}"));
+            let Some(gen_mesh) = gen_world_mesh(&db, pe_key, 3.0).await.expect("gen mesh") else {
+                println!("{rvm_name} ({pe_key}): 库里没有这件的生成几何，跳过对拍");
+                missing.push(format!("{rvm_name} ({pe_key})"));
+                continue;
+            };
             let g2r = one_way_surface_distance(&gen_mesh, rvm, 4000).expect("g2r");
             let r2g = one_way_surface_distance(rvm, &gen_mesh, 4000).expect("r2g");
             println!(
@@ -600,6 +615,10 @@ mod mesh_wall_live {
         assert!(
             failures.is_empty(),
             "STWALL 直线墙应双向贴合（p95 ≤ {P95_TOL}mm）：{failures:?}"
+        );
+        assert!(
+            missing.is_empty(),
+            "这些墙在 8009 上没有生成几何，对拍等于没跑——先对 CWALL 做一次定向重生成：{missing:?}"
         );
     }
 

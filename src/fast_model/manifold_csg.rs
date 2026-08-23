@@ -12,6 +12,17 @@ use parry3d::math::Point;
 use std::collections::HashMap;
 use std::path::Path;
 
+/// 两个顶点近到这个距离（mm）就当同一个点。与 `sweep_mesh` / `manifold_tessellate`
+/// 的 `POS_EPS` 同一口径：0.1µm 在 mm 量级的 PDMS 模型里没有任何真实结构。
+const WELD_EPS: f32 = 1e-4;
+
+/// 同一位置上夹角小于 10° 的面属于同一光顺组。
+///
+/// Manifold 把圆弧离散成三角片；若把每片的面法线直接交给 Plant UI，几何虽然正确，
+/// 穹顶仍会显示成多面体。10° 足以合并 RM13 穹顶 484 段圆弧上的相邻小面，同时避免
+/// 把折线挤出体的普通转角误判成圆弧；端盖/侧壁、箱体棱边也仍保持 E3D 的硬边。
+const SMOOTH_NORMAL_COS: f64 = 0.984_807_753_012_208; // cos(10°)
+
 /// glam 列主序 4×4 → manifold-csg 的 4×3 仿射（列主序，末列平移）。
 pub(crate) fn dmat4_to_affine4x3(m: DMat4) -> [f64; 12] {
     [
@@ -66,34 +77,97 @@ pub(crate) fn manifold_to_plant_mesh(solid: &Manifold) -> PlantMesh {
     }
     let vert_count = props.len() / n_props;
     let mut source_vertices = Vec::with_capacity(vert_count);
+    let mut source_f64 = Vec::with_capacity(vert_count);
     let mut aabb = Aabb::new_invalid();
     for i in 0..vert_count {
         let base = i * n_props;
-        let p = Vec3::new(
-            props[base] as f32,
-            props[base + 1] as f32,
-            props[base + 2] as f32,
-        );
+        let q = glam::DVec3::new(props[base], props[base + 1], props[base + 2]);
+        let p = Vec3::new(q.x as f32, q.y as f32, q.z as f32);
         aabb.take_point(Point::new(p.x, p.y, p.z));
         source_vertices.push(p);
+        source_f64.push(q);
     }
 
-    // Manifold 输出共享拓扑顶点，但没有随顶点输出法线。PlantMesh/Bevy 要求
-    // POSITION 与 NORMAL 等长；直接写空法线会让一个平面端盖按三角形随机明暗。
-    // 为保留 E3D 的硬边语义，渲染网格按三角形展开并写入面法线。
-    let mut vertices = Vec::with_capacity(tri.len());
-    let mut normals = Vec::with_capacity(tri.len());
-    let mut indices = Vec::with_capacity(tri.len());
+    // Manifold 输出共享拓扑顶点，但没有随顶点输出法线。先收集有效面，再按精确位置
+    // 建立入射面表：同一光顺组做面积加权平均，不同组仍然通过三角形展开保留硬边。
+    // 只按 source vertex 编号平均会漏掉布尔缝两侧坐标相同、编号不同的顶点，留下亮缝，
+    // 所以这里以 f64 坐标位模式作为位置身份。
+    struct Face {
+        vertices: [usize; 3],
+        normal: glam::DVec3,
+        weight: f64,
+    }
+    let position_key = |p: glam::DVec3| {
+        let canonical = |value: f64| if value == 0.0 { 0.0 } else { value };
+        [
+            canonical(p.x).to_bits(),
+            canonical(p.y).to_bits(),
+            canonical(p.z).to_bits(),
+        ]
+    };
+    let mut faces = Vec::with_capacity(tri.len() / 3);
+    let mut incident = HashMap::<[u64; 3], Vec<usize>>::new();
     for face in tri.chunks_exact(3) {
-        let [a, b, c] = [
-            source_vertices[face[0] as usize],
-            source_vertices[face[1] as usize],
-            source_vertices[face[2] as usize],
-        ];
-        let normal = (b - a).cross(c - a).normalize();
+        let [i, j, k] = [face[0] as usize, face[1] as usize, face[2] as usize];
+        // 法向在 f64 上算。顶点存 f32 是渲染的要求，但在 23400mm 这种量级上
+        // f32 相减只剩三四位有效数字，直接拿 f32 叉乘出来的法向要么歪、要么
+        // 因为两个顶点舍入到同一个 f32 而变成零向量 —— `normalize()` 于是给出
+        // NaN，一路写进 .mesh 文件。
+        // 塌掉的三角要丢掉。23400mm 处 f32 的间距就有 0.002mm，而布尔在**相切**面上
+        // （半球赤道贴着圆柱内壁就是）产出的碎楔比这还窄，两个顶点落进同一个 f32；
+        // 留着就是零面积三角，渲染看不见，却会让下游的闭合性检查与法向计算出错。
+        //
+        // 判据用 `WELD_EPS` 而不是 `==`：0.1µm 以内的两个点在 mm 量级的 CAD 里就是
+        // 同一个点，只是没恰好舍入到同一个 f32。
+        //
+        // 丢它不会开洞：设 A、B 重合，这个三角贡献的三条有向边是自环 (A,B) 加上
+        // 互为反向的 (B,C) 与 (C,A)——自己跟自己抵消，其余边的配对一条都没动。
+        let (fa, fb, fc) = (source_vertices[i], source_vertices[j], source_vertices[k]);
+        if fa.distance_squared(fb) <= WELD_EPS * WELD_EPS
+            || fb.distance_squared(fc) <= WELD_EPS * WELD_EPS
+            || fc.distance_squared(fa) <= WELD_EPS * WELD_EPS
+        {
+            continue;
+        }
+        let (a, b, c) = (source_f64[i], source_f64[j], source_f64[k]);
+        let cross = (b - a).cross(c - a);
+        let len = cross.length();
+        if !(len > 0.0) {
+            // f64 下都零面积：这个三角形不携带任何面积或朝向，留着只能污染法向。
+            continue;
+        }
+        let face_index = faces.len();
+        faces.push(Face {
+            vertices: [i, j, k],
+            normal: cross / len,
+            weight: len,
+        });
+        for source_index in [i, j, k] {
+            incident
+                .entry(position_key(source_f64[source_index]))
+                .or_default()
+                .push(face_index);
+        }
+    }
+
+    let mut vertices = Vec::with_capacity(faces.len() * 3);
+    let mut normals = Vec::with_capacity(faces.len() * 3);
+    let mut indices = Vec::with_capacity(faces.len() * 3);
+    for face in &faces {
         let base = vertices.len() as u32;
-        vertices.extend([a, b, c]);
-        normals.extend([normal; 3]);
+        for &source_index in &face.vertices {
+            let key = position_key(source_f64[source_index]);
+            let mut sum = glam::DVec3::ZERO;
+            for &incident_index in &incident[&key] {
+                let neighbour = &faces[incident_index];
+                if face.normal.dot(neighbour.normal) >= SMOOTH_NORMAL_COS {
+                    sum += neighbour.normal * neighbour.weight;
+                }
+            }
+            let smooth = sum.try_normalize().unwrap_or(face.normal);
+            vertices.push(source_vertices[source_index]);
+            normals.push(Vec3::new(smooth.x as f32, smooth.y as f32, smooth.z as f32));
+        }
         indices.extend([base, base + 1, base + 2]);
     }
     PlantMesh {
@@ -115,13 +189,47 @@ pub(crate) fn load_manifold(
     plant_mesh_to_manifold(&mesh, mat)
 }
 
+/// 负实体在做差之前按自身包围盒中心放大的相对量。
+///
+/// PDMS 里负体常常与母体**共壁**：`=24381/36945` 那颗穹顶的 NREV 就是跟 PANE 同一个
+/// 圆柱，只在内部多挖一个半球。两个圆柱各自离散出来的 484 边形只要不是逐位相同，
+/// 差集就会沿着那面共壁碎成一地薄片——实测那颗穹顶得到 **亏格 −131，也就是 132 个
+/// 互不相连的壳**：一个半球加 131 片碎屑。碎屑体积只有 1e-7，体积对拍根本发现不了，
+/// 但它们会进 `.mesh`、会 z-fighting、会让后续布尔更难收敛。
+///
+/// 1e-6 是相对量（那颗穹顶上是 0.023mm）：足够让共面分开，又远小于任何真实特征。
+/// E3D 不需要这一步，它靠的是共面反向面逐面全等抵消（见
+/// `plant-4/libgm-boolean-algorithm.md` §6.11），而那条路要求两侧段数、相位完全一致。
+const NEGATIVE_INFLATE: f64 = 1e-6;
+
+/// 以自身包围盒中心为原点等比放大，位置不动。
+fn inflate_about_center(solid: &Manifold, rel: f64) -> Manifold {
+    let Some(bb) = solid.bounding_box() else {
+        return solid.clone();
+    };
+    let (lo, hi) = (bb.min(), bb.max());
+    let center = glam::DVec3::new(
+        (lo[0] + hi[0]) * 0.5,
+        (lo[1] + hi[1]) * 0.5,
+        (lo[2] + hi[2]) * 0.5,
+    );
+    let s = 1.0 + rel;
+    let m = DMat4::from_translation(center)
+        * DMat4::from_scale(glam::DVec3::splat(s))
+        * DMat4::from_translation(-center);
+    solid.transform(&dmat4_to_affine4x3(m))
+}
+
 pub(crate) fn subtract_negatives(pos: Manifold, negs: &[Manifold]) -> Manifold {
     if negs.is_empty() {
         return pos;
     }
     let mut group = Vec::with_capacity(1 + negs.len());
     group.push(pos);
-    group.extend(negs.iter().cloned());
+    group.extend(
+        negs.iter()
+            .map(|neg| inflate_about_center(neg, NEGATIVE_INFLATE)),
+    );
     Manifold::batch_difference(&group)
 }
 
@@ -191,5 +299,48 @@ mod tests {
         }
         plant_mesh_to_manifold(&mesh, DMat4::IDENTITY)
             .expect("flat-shaded triangle expansion must remain valid manifold input");
+    }
+
+    #[test]
+    fn curved_surface_normals_are_smooth_across_triangle_facets() {
+        let solid = Manifold::sphere(10.0, 64);
+        let mesh = manifold_to_plant_mesh(&solid);
+        let mut by_position = HashMap::<[u32; 3], Vec<Vec3>>::new();
+        for (vertex, normal) in mesh.vertices.iter().zip(&mesh.normals) {
+            by_position
+                .entry([vertex.x.to_bits(), vertex.y.to_bits(), vertex.z.to_bits()])
+                .or_default()
+                .push(*normal);
+        }
+
+        let mut checked = 0;
+        for normals in by_position.values().filter(|normals| normals.len() >= 4) {
+            let first = normals[0];
+            assert!(
+                normals.iter().all(|normal| normal.abs_diff_eq(first, 1e-5)),
+                "同一球面位置的相邻三角片必须共享光顺法线: {normals:?}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 20, "必须覆盖足够多的共享球面顶点，实际 {checked}");
+    }
+
+    #[test]
+    fn cube_edges_keep_separate_normal_groups() {
+        let mesh = manifold_to_plant_mesh(&Manifold::cube(20.0, 20.0, 20.0, true));
+        let corner = mesh
+            .vertices
+            .iter()
+            .enumerate()
+            .filter(|(_, vertex)| vertex.x < 0.0 && vertex.y < 0.0 && vertex.z < 0.0)
+            .map(|(index, _)| mesh.normals[index])
+            .collect::<Vec<_>>();
+        let mut groups = Vec::<Vec3>::new();
+        for normal in corner {
+            if groups.iter().all(|known| known.dot(normal) < 0.99) {
+                groups.push(normal);
+            }
+        }
+        assert_eq!(groups.len(), 3, "箱体角点必须保留三组互相垂直的硬边法线");
     }
 }
