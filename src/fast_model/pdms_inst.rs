@@ -1202,7 +1202,7 @@ mod tests {
     use aios_core::geometry::{EleGeosInfo, EleInstGeosData, ShapeInstancesData};
     use aios_core::parsed_data::{CateProfileParam, SRectData};
     use aios_core::prim_geo::spine::{Line3D, SweepPath3D};
-    use aios_core::prim_geo::{SCylinder, SweepSolid};
+    use aios_core::prim_geo::{LSnout, SCylinder, SweepSolid};
     use aios_core::shape::pdms_shape::BrepShapeTrait;
     use futures::stream::FuturesUnordered;
     use glam::{DVec3, Vec2, Vec3};
@@ -1389,6 +1389,63 @@ mod tests {
         assert!(sql.contains("PrimLCylinder"), "{sql}");
         assert!(!sql.contains("PrimSCylinder"), "{sql}");
         assert!(!sql.contains("MERGE"), "{sql}");
+    }
+
+    fn snout_batch(param: LSnout, refno_text: &str) -> ShapeInstancesData {
+        let refno = RefnoEnum::from(refno_text);
+        let geo_hash = param.hash_unit_mesh_params();
+        let inst = EleInstGeo {
+            geo_hash,
+            refno,
+            geo_param: PdmsGeoParam::PrimLSnout(param),
+            transform: Transform::IDENTITY,
+            visible: true,
+            ..Default::default()
+        };
+        let data = EleInstGeosData {
+            inst_key: refno_text.into(),
+            refno,
+            insts: vec![inst],
+            type_name: "PrimLSnout".into(),
+            ..Default::default()
+        };
+        let mut batch = ShapeInstancesData::default();
+        batch.inst_geos_map.insert(refno_text.into(), data);
+        batch
+    }
+
+    #[test]
+    fn rounded_equal_snout_hashes_produce_one_canonical_param() {
+        let from_ratio = LSnout {
+            ptdi: 1.0,
+            pbdi: 0.0,
+            ptdm: 5.0,
+            pbdm: 9.0,
+            ..Default::default()
+        };
+        let copied_rounded = LSnout {
+            ptdi: 1.0,
+            pbdi: 0.0,
+            ptdm: 0.555_555_5,
+            pbdm: 1.0,
+            ..Default::default()
+        };
+        assert_eq!(
+            from_ratio.hash_unit_mesh_params(),
+            copied_rounded.hash_unit_mesh_params()
+        );
+
+        let plan = plan_for_test(vec![
+            snout_batch(from_ratio, "1/125"),
+            snout_batch(copied_rounded, "1/126"),
+        ])
+        .expect("hash-equal snouts must persist one canonical inst_geo row");
+        let sql = plan
+            .packets
+            .iter()
+            .map(|packet| packet.sql.as_str())
+            .join("\n");
+        assert_eq!(sql.matches("\"ptdm\":0.556").count(), 1, "{sql}");
     }
 
     fn reusable_linear_loft() -> SweepSolid {
