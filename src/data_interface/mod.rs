@@ -18,6 +18,8 @@ pub mod watch_scope;
 
 pub mod increment_manager;
 
+pub mod sweep_log;
+
 pub mod increment_pipeline;
 
 pub mod window_repair;

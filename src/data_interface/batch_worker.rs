@@ -3521,8 +3521,8 @@ async fn idle_round(
     } else {
         true
     };
-    // 房间轮也是分页的（元素侧），一页吃不完就要立刻回来——否则积压会以每 30 秒
-    // 一页的速度爬，`IDLE_WAKE` 成了房间收敛的节拍器。
+    // 房间轮两侧都是分页的，一页吃不完就要立刻回来——否则积压会以每 30 秒一页的
+    // 速度爬，`IDLE_WAKE` 成了房间收敛的节拍器。
     let room_outcome = if room_round_is_due(data_outcome) {
         room_round(mgr, registry, after_batches).await
     } else {

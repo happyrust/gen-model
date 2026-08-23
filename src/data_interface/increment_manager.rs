@@ -18,7 +18,6 @@ use aios_core::{get_default_name, get_pe};
 use anyhow::Context;
 
 // 异步和工具库导入
-use futures::{SinkExt, StreamExt};
 use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 use notify::{Config, PollWatcher, RecursiveMode, Watcher};
@@ -40,6 +39,7 @@ use crate::data_interface::debug_scope;
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::project_paths::{MountState, path_starts_with};
 use crate::data_interface::sesno_range::COLD_START_DB_TYPES;
+use crate::data_interface::sweep_log;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_interface::update_scope::UpdateScope;
 use crate::data_interface::watch_scope;
@@ -1699,6 +1699,194 @@ mod tests {
         );
     }
 
+    /// 子集观察轮的默认值必须比全集对账轮密，两者调反不会有任何东西报错。
+    ///
+    /// 它们是两种东西：poll 是响应路径（决定发现延迟，只为变了的那几个 path 发
+    /// 事件），对账是兜底路径（每轮为**每一个**候选库重读文件头、重查水位）。
+    /// 把对账调得比 poll 还密，等于让最贵的那一轮变成主路径，而 poll 那一层再快
+    /// 也没人受益——编译器和现有用例对此全都沉默，只能在这里钉一句。
+    ///
+    /// 它只管默认值：运行期的 `AIOS_WATCH_POLL_SECS=600` +
+    /// `AIOS_WATCH_RECONCILE_SECS=300` 照样合法，这条断言证明不了任何现场安全性。
+    #[test]
+    fn the_default_subset_poll_stays_denser_than_the_default_full_reconcile() {
+        assert!(
+            DEFAULT_WATCH_POLL_SECS < DEFAULT_WATCH_RECONCILE_SECS,
+            "子集轮询 {DEFAULT_WATCH_POLL_SECS}s 不得慢于全集对账 \
+             {DEFAULT_WATCH_RECONCILE_SECS}s"
+        );
+    }
+
+    /// 闸的核心语义：一串 burst 合成一轮，但**闸内到达的变化一次都不能被吞掉**。
+    ///
+    /// 限频最容易写成「刚扫完 N 秒内直接 continue」，那就把「上一轮重扫之后才发生
+    /// 的新保存」也一起丢了，只能等下一拍周期对账（默认 300s）才被捡回来。所以脏
+    /// 位只准被真正跑出去的那一轮清掉，不准被限频清掉。
+    #[test]
+    fn a_watch_burst_collapses_into_one_sweep_without_losing_the_last_change() {
+        let gap = std::time::Duration::from_secs(5);
+        let t0 = Instant::now();
+        let mut gate = WatchSweepGate::default();
+
+        // 首事件立刻开闸。
+        gate.mark_dirty();
+        assert!(gate.take_due(t0, gap));
+
+        // 刚扫完 1 秒又来变化：这一轮不许跑，但脏位必须留着。
+        gate.mark_dirty();
+        assert!(!gate.take_due(t0 + std::time::Duration::from_secs(1), gap));
+        // burst 里再来几条，仍然只欠一轮。
+        gate.mark_dirty();
+        gate.mark_dirty();
+        assert!(!gate.take_due(t0 + std::time::Duration::from_secs(4), gap));
+
+        // 闸一开，补上恰好一轮，不多不少。
+        assert!(gate.take_due(t0 + gap, gap));
+        assert!(!gate.take_due(t0 + gap, gap));
+    }
+
+    /// 欠着一轮时必须能算出「还要等多久」。
+    ///
+    /// 少了这一步，最后那次变化会一直挂在脏位上，直到下一条文件事件或下一拍对账
+    /// 才被顺带扫走——限频就把发现延迟变成了无界的。
+    #[test]
+    fn a_pending_watch_sweep_always_reports_when_it_becomes_due() {
+        let gap = std::time::Duration::from_secs(5);
+        let t0 = Instant::now();
+        let mut gate = WatchSweepGate::default();
+
+        assert_eq!(gate.wait_until_due(t0, gap), None, "不欠账就不该排唤醒");
+
+        gate.mark_dirty();
+        assert_eq!(
+            gate.wait_until_due(t0, gap),
+            Some(std::time::Duration::ZERO),
+            "首事件不必等"
+        );
+        assert!(gate.take_due(t0, gap));
+
+        gate.mark_dirty();
+        assert_eq!(
+            gate.wait_until_due(t0 + std::time::Duration::from_secs(2), gap),
+            Some(std::time::Duration::from_secs(3))
+        );
+        assert_eq!(
+            gate.wait_until_due(t0 + std::time::Duration::from_secs(9), gap),
+            Some(std::time::Duration::ZERO),
+            "已经过期的欠账要立刻可跑"
+        );
+    }
+
+    /// PollWatcher 的回调里一次等待都不许有。
+    ///
+    /// notify 8.0.0 的 poll 线程是**同时持着 `watches` 与 `data_builder` 两把互斥锁**
+    /// 同步调用回调的（整轮 rescan 都在锁内），而重挂分支走的
+    /// `MountState::mount` → `PollWatcher::watch()` 要的正是这两把锁。回调里只要有
+    /// 一次等待（历史写法是往容量 1 的 futures channel 上阻塞发送），就凑齐了
+    /// 「poll 线程等消费者、消费者等锁、锁在 poll 线程手里」的死锁三角，看门狗静默
+    /// 死亡且不会自愈。这条只能钉源码：复现它要真的把共享盘挂掉。
+    #[test]
+    fn the_poll_watcher_callback_never_waits_on_the_event_loop() {
+        let src = include_str!("increment_manager.rs");
+        let callback = src
+            .split_once(concat!("pub async fn ", "async_watch("))
+            .expect("async_watch 未找到")
+            .1
+            .split_once(concat!("PollWatcher::", "new("))
+            .expect("async_watch 必须自己建 PollWatcher")
+            .1
+            .split_once("Config::default()")
+            .expect("PollWatcher::new 之后应当是 Config")
+            .0;
+        assert!(
+            !callback.contains(concat!("block_", "on(")),
+            "PollWatcher 回调不得阻塞：它在 notify 的锁内同步执行，等待会与重挂分支的 \
+             PollWatcher::watch() 形成死锁"
+        );
+        assert!(
+            callback.contains(concat!("try_", "send(())")),
+            "回调只能非阻塞置位；容量满就丢那一位脏，变化本身由脏位与水位兜底"
+        );
+    }
+
+    /// poll 线程的死活必须被主动探，不能靠「信号流关闭」推断。
+    ///
+    /// 发送端活在回调里、回调活在 `watcher` 的 `data_builder` 里，只要 `watcher`
+    /// 对象还在栈上，poll 线程死透了发送端也不会被丢弃——那个 `None` 分支于是永远
+    /// 等不到，看门狗的事件路径死了没有任何人会知道。而 notify 8.0.0 连
+    /// `thread::spawn` 的返回值都 `let _ =` 丢掉，起不来与 panic 掉一样没有声音。
+    ///
+    /// `PollWatcher::poll()` 往控制 channel 发一次，Receiver 正是被那条线程拿着的，
+    /// 线程没了 send 就失败——这是从外面唯一能拿到的真实证据。
+    #[test]
+    fn the_poll_thread_death_is_probed_not_inferred() {
+        let src = include_str!("increment_manager.rs");
+        let watch = src
+            .split_once(concat!("pub async fn ", "async_watch("))
+            .expect("async_watch 未找到")
+            .1;
+        assert!(
+            watch.contains(concat!("watcher.", "poll()")),
+            "对账那一拍必须主动探一次 PollWatcher 的轮询线程还在不在"
+        );
+    }
+
+    #[test]
+    fn watch_scope_excludes_unwatched_design_before_extract_duplicate_blocking() {
+        let src = include_str!("increment_manager.rs");
+        let sweep = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs exists")
+            .1;
+        let scope_gate = sweep
+            .find("let in_scope = self.in_scope")
+            .expect("scope gate exists");
+        let extract_duplicate_gate = sweep
+            .find("if extract_dupes.contains")
+            .expect("extract duplicate gate exists");
+        assert!(
+            scope_gate < extract_duplicate_gate,
+            "watch-scope 外的 DESI 抽取副本不得阻断被监听的 8000"
+        );
+    }
+
+    /// 同号多文件的 blocker 记在**它自己**那个阶段上。
+    ///
+    /// 这里过去把 `blocked_dupes` 一律记成 `DataPhase::Design`：一个 CATA 或 DICT
+    /// 的同号冲突会把 design 阶段拽成 blocked，而 design 侧可能一个问题都没有——
+    /// 阶段就绪判定从此说谎，排查的人照着 design 找一整晚。db_type 在循环里本来
+    /// 就有，判据与同一段里 `manifest_totals` 那行完全一致。
+    #[test]
+    fn a_duplicate_dbnum_blocker_is_recorded_on_its_own_phase() {
+        let src = include_str!("increment_manager.rs");
+        let sweep = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs exists")
+            .1;
+        let blockers = sweep
+            .split_once("if !blocked_dupes.is_empty()")
+            .expect("同号多文件的 blocker 出口")
+            .1;
+        let extend = blockers
+            .split_once("params.retain(")
+            .expect("blocker 出口之后就是 params 过滤")
+            .0;
+        assert!(
+            !extend.contains("DataPhase::Design"),
+            "不许把所有同号冲突硬编码成 Design：{extend}"
+        );
+        let mut insertions = 0usize;
+        for (at, _) in sweep.match_indices("blocked_dupes.insert(") {
+            insertions += 1;
+            let tail = &sweep[at..sweep.len().min(at + 240)];
+            assert!(
+                tail.contains("DataPhase::of_db_type("),
+                "每一处入账都要带上这条冲突自己的阶段: {tail}"
+            );
+        }
+        assert!(insertions >= 3, "三个阻断分支都得记到 blocked_dupes 里");
+    }
+
     /// 阻断裁决只能有一个权威，自动路径不许自己再列一份异常清单。
     ///
     /// 这里过去是 `match` 只列 `Rollback` / `PathMigrated`，其余走 `_ => true` 放行，
@@ -2187,7 +2375,8 @@ pub(crate) fn out_of_scope_reason(scope: &UpdateScope, db_type: &str, db_num: u3
 
 /// 同一句范围告警只说一次。
 ///
-/// 文件事件是 30 秒一轮的轮询，范围没解出来的话每一轮都会重算出同一句话；
+/// 文件事件是定时轮询（默认 [`DEFAULT_WATCH_POLL_SECS`] 一轮，间隔越短这条越
+/// 要紧），范围没解出来的话每一轮都会重算出同一句话；
 /// 每轮都打等于把它埋进自己的噪声里。换了一句（比如 MDB 从「一条都没有」变成
 /// 「有但 CURD 是空的」）就该重新说。
 fn warn_scope_once(warning: &str) {
@@ -2254,6 +2443,137 @@ const QUERY_BATCH_SIZE: usize = 20;
 /// 只会在库里留下一份此后永不更新、看起来却很新鲜的数据（B4）。需要覆盖某个
 /// 子目录时，把它配成监控目录，而不是把遍历放深。
 pub(crate) const INGEST_MAX_DEPTH: usize = 1;
+
+/// PollWatcher 子集观察轮的默认间隔（秒），`AIOS_WATCH_POLL_SECS` 覆盖。
+///
+/// 这一层单独决定**发现延迟**，但它不是一个「每 N 秒一轮」的时钟：notify 8.0.0 的
+/// poll 线程是**整轮 rescan 跑完之后**才 `recv_timeout(interval)`（`poll.rs` 里那句
+/// TODO 说的正是 v7 曾想从 delay 里减掉扫描耗时、至今没减）。所以真实周期是
+/// 「rescan 自身耗时 + rescan 被回调卡住的时间 + 本间隔」。
+///
+/// 想调小它之前先看清代价：rescan 对**每一个**变化 path 单独发一条事件、不合并，
+/// 而每条候选事件今天都会换来一轮完整清单重扫。一次 SAVEWORK 碰 K 个库文件就是
+/// K 轮。间隔调小不会改变 K，只会让同一次保存跨到更多轮 rescan 里去。
+/// 决定负载的是「每次保存产生多少轮重扫」，不是「单轮重扫多快」——后者本地实测
+/// 0.35~0.83s（442~524 个库），共享盘上没有实测。
+///
+/// 共享盘另有一道地板：Windows SMB 客户端默认缓存目录元数据约 10s。
+const DEFAULT_WATCH_POLL_SECS: u64 = 30;
+
+/// 周期对账整面重扫的默认间隔（秒），`AIOS_WATCH_RECONCILE_SECS` 覆盖，0 = 关闭。
+///
+/// 它是兜底而不是响应路径，调短不会让任何东西变快，反而会从后门缩短故障容忍
+/// 窗口：批次连败 park 预算（`model_update_pending::MAX_ATTEMPTS`）数的是**轮次**
+/// 不是时长（ADR-035 D7 把它列为出界项，要改先把 park 改成按时长裁决）。
+///
+/// 顺带澄清一个常被写错的算式：`5 × 300s = 25 分钟`只在**文件安静**时成立。
+/// park 计数的条件是「同 dbnum 窗口右端没前进」，不区分是哪种来源把它重新入的队
+/// （见 `batch_worker::BatchFailureLedger`）——一个确定性失败、文件却还在被反复
+/// 保存的库，watch 重扫一样在烧这份预算。
+const DEFAULT_WATCH_RECONCILE_SECS: u64 = 300;
+
+/// 两轮 watch 触发的完整重扫之间的最小间隔（秒），`AIOS_WATCH_MIN_SWEEP_GAP_SECS`
+/// 覆盖，0 = 不限频。
+///
+/// 它治的是「一次保存 = K 轮重扫」：事件只把 [`WatchSweepGate`] 置脏，闸在最小
+/// 间隔内不再开第二轮，间隔一到补**恰好一轮**。注意这是限频不是丢弃——闸内到达的
+/// 变化留在 dirty 位上，一定会被后面那一轮接住（`take_due` 的语义就是这条）。
+///
+/// 与「事件只标脏、判定必须走完整清单」不冲突：闸只改什么时候调那条权威路径，
+/// 不新增任何按事件的局部判定。
+const DEFAULT_WATCH_MIN_SWEEP_GAP_SECS: u64 = 5;
+
+/// watch 事件触发完整重扫的限频闸：首事件立刻开一轮，闸内的后续变化攒成一位脏，
+/// 间隔一到补**恰好一轮**。
+///
+/// 为什么需要它：notify 8.0.0 的 `rescan` 对每个变化 path 单独发一条事件，
+/// 事件之间没有任何合并，而每条候选事件今天都换来一轮完整清单重扫。一次 SAVEWORK
+/// 碰 K 个库文件就是 K 轮背靠背的重扫，K 轮扫出来的还是同一份结论。
+///
+/// 为什么不能简单地「刚扫完 N 秒内直接丢掉事件」：闸内到达的那次变化完全可能是
+/// **上一轮重扫之后**才发生的新保存，丢掉它就只能等下一次周期对账（默认 300s）。
+/// 所以脏位只能被真正跑出去的那一轮清掉，不能被限频清掉——`take_due` 与
+/// [`Self::wait_until_due`] 成对，后者负责让调用方一定会在闸开时再回来一次。
+#[derive(Debug, Default)]
+struct WatchSweepGate {
+    dirty: bool,
+    last_run: Option<Instant>,
+}
+
+/// 回调攒给事件循环的东西：变化过的候选路径与监控器自身报的错，**只用于日志**。
+///
+/// 为什么不在回调里直接 `println!`：回调是在 notify 的两把锁内同步执行的，而
+/// `println!` 要拿 stdout 锁——输出被重定向到一个没人读的管道时它会阻塞，于是又凑
+/// 出与旧 `block_on(send)` 同一类的死锁。这里换成一段没有任何 I/O 的短临界区。
+///
+/// 路径只喂日志这一条纪律是硬的：判定必须回到完整清单重扫（守卫测试
+/// `every_scanner_gates_on_the_shared_candidate_predicate` 钉的就是这个）。两个上限
+/// 是为了让一个疯狂 churn 的目录撑不大它。
+#[derive(Debug, Default)]
+struct WatchPendingNotes {
+    paths: BTreeSet<PathBuf>,
+    errors: Vec<String>,
+}
+
+impl WatchPendingNotes {
+    const MAX_PATHS: usize = 64;
+    const MAX_ERRORS: usize = 16;
+
+    fn note_paths<'a>(&mut self, paths: impl IntoIterator<Item = &'a PathBuf>) {
+        for path in paths {
+            if self.paths.len() >= Self::MAX_PATHS {
+                break;
+            }
+            self.paths.insert(path.clone());
+        }
+    }
+
+    fn note_error(&mut self, error: String) {
+        if self.errors.len() < Self::MAX_ERRORS {
+            self.errors.push(error);
+        }
+    }
+}
+
+impl WatchSweepGate {
+    fn mark_dirty(&mut self) {
+        self.dirty = true;
+    }
+
+    /// 欠着一轮且已过最小间隔时取走这次重扫资格（清脏、记时间）；否则返回 false
+    /// 并**保留脏位**。
+    fn take_due(&mut self, now: Instant, min_gap: std::time::Duration) -> bool {
+        if !self.dirty {
+            return false;
+        }
+        if let Some(last_run) = self.last_run
+            && now.duration_since(last_run) < min_gap
+        {
+            return false;
+        }
+        self.dirty = false;
+        self.last_run = Some(now);
+        true
+    }
+
+    /// 还欠着一轮时，距离闸打开还要等多久（可以立刻开则是零）；不欠时为 `None`。
+    ///
+    /// 事件循环靠它排一个定时唤醒。少了这一步，最后一次变化会一直挂在脏位上，
+    /// 直到下一条事件或下一拍对账才被顺带扫出去——那正是限频不该付的代价。
+    fn wait_until_due(
+        &self,
+        now: Instant,
+        min_gap: std::time::Duration,
+    ) -> Option<std::time::Duration> {
+        if !self.dirty {
+            return None;
+        }
+        Some(match self.last_run {
+            Some(last_run) => min_gap.saturating_sub(now.duration_since(last_run)),
+            None => std::time::Duration::ZERO,
+        })
+    }
+}
 
 /// 同一个**项目**里出现两次的 dbnum。
 ///
@@ -2565,12 +2885,12 @@ impl AiosDBManager {
                     candidate.project,
                     candidate.path.display()
                 ));
-                println!(
+                sweep_log::note(format!(
                     "[manifest] {db_type} dbnum={} 的 {} 被项目优先级遮蔽: {}",
                     candidate.dbnum,
                     candidate.project,
                     candidate.path.display()
-                );
+                ));
             }
             blockers.extend(result.blockers.into_iter().map(|message| (phase, message)));
         }
@@ -2780,8 +3100,12 @@ impl AiosDBManager {
                 return Ok(());
             }
         };
+        // 从这里到 `sweep_log::finish` 之间，本轮的结论都攒进同一块（中间没有
+        // 提前返回，见 `sweep_dirs` 的错误处理：解不出范围那一条在上面就走了）。
+        // 稳态每 30s 一轮，这一块逐字不变，攒起来才能只在真变了的时候打。
+        sweep_log::begin(origin);
         if let Some(warning) = scope.warning() {
-            println!("[{origin}] {warning}");
+            sweep_log::note(format!("[{origin}] {warning}"));
         }
         let (
             selected_catalogue_paths,
@@ -2796,10 +3120,18 @@ impl AiosDBManager {
         // F6：同 dbnum 多文件检测（阻断不挑选，与手动路径一致）。按「归属项目 + dbnum」
         // 判重，跨项目同号的 sys 库不算重复。
         let mut seen_dbnums: HashMap<(String, u32), PathBuf> = HashMap::new();
-        let mut blocked_dupes: HashSet<(String, u32)> = HashSet::new();
+        // 值是这条冲突所属的数据阶段：同号多文件在 CATA/DICT 上一样会发生，
+        // 记到 Design 头上会让阶段就绪判定失真（一个 CATA 副本能把 design 拽黑）。
+        let mut blocked_dupes: HashMap<
+            (String, u32),
+            crate::data_interface::initialization_phase::DataPhase,
+        > = HashMap::new();
         let extract_families = self.collapse_watch_dir_families();
-        let extract_parents: HashSet<PathBuf> =
-            extract_families.shadowed_parents.into_iter().collect();
+        let extract_parents: HashSet<PathBuf> = extract_families
+            .shadowed_parents
+            .into_iter()
+            .chain(extract_families.shadowed_aliases)
+            .collect();
         let extract_dupes = extract_families.duplicate_keys;
         let extract_mismatches: HashMap<PathBuf, (u32, u32)> = extract_families
             .mismatches
@@ -2884,44 +3216,16 @@ impl AiosDBManager {
                 // 主项目目录里找，必然找不到、批次必然 failed（见 `project_of_path`）。
                 // 必须先于范围门：范围门要用它判「是不是别的项目的运行态系统库」。
                 let project = self.owning_project(path);
-                if extract_parents.contains(path) {
-                    println!(
-                        "[{origin}] 抽取树父层由叶子代表（dbnum={db_no}），本轮不单独登记: {}",
-                        path.display()
-                    );
-                    continue;
-                }
-                if let Some((filename_dbnum, header_dbnum)) = extract_mismatches.get(path) {
-                    blocked_dupes.insert((project.clone(), db_no));
-                    println!(
-                        "F6 文件名库号与文件头不一致（filename={filename_dbnum} header={header_dbnum}），\
-                         阻断项目 {} 的 dbnum={db_no}：{}",
-                        project,
-                        path.display()
-                    );
-                    continue;
-                }
-                if extract_dupes.contains(&(project.clone(), db_no)) {
-                    blocked_dupes.insert((project.clone(), db_no));
-                    println!(
-                        "F6 发现项目 {} 内同 dbnum={} 的多个抽取/副本，阻断该 dbnum：{}",
-                        project,
-                        db_no,
-                        path.display()
-                    );
-                    continue;
-                }
-
                 // 本期 MDB 声明的设计库（SYS meta 例外），与手动路径共用（`in_scope`）。
                 let in_scope = self.in_scope(&scope, &project, &db_type, db_no);
                 if !in_scope {
                     if is_foreign_runtime_sys(&self.db_option, &project, &db_type) {
-                        println!(
+                        sweep_log::note(format!(
                             "[{origin}] 忽略非主项目的运行态系统库: project={project} \
                              db_type={db_type} dbnum={db_no} file={file_name}\
                              （dbnum 只在项目内唯一，本库只承载主项目 {} 的系统库）",
                             self.db_option.project_name
-                        );
+                        ));
                         continue;
                     }
                     // 先分桶再入账：监听限定、调试限定与 MDB 范围是三种成因，聚合
@@ -2940,6 +3244,47 @@ impl AiosDBManager {
                     // CATA/DICT 已由共享清单选择器裁决并由 UpdateScope 放行，不会
                     // 落入这里；因此所有真正范围外的文件都直接跳过。
                     out_of_scope.push(format!("{db_type}:{db_no}"));
+                    continue;
+                }
+                // 抽取家族裁决仅阻断实际会执行的库。Watch Scope 下引入额外
+                // 项目只是为了建立 CATA/PROP 依赖身份；该项目内与 8000 无关的
+                // DESI 副本不得把 8000 的 Design 阶段变成 blocker。CATA/DICT 由
+                // 权威清单选主后仍会进入这里，其身份冲突继续严格阻断。
+                if extract_parents.contains(path) {
+                    println!(
+                        "[{origin}] 抽取树父层由叶子代表（dbnum={db_no}），本轮不单独登记: {}",
+                        path.display()
+                    );
+                    continue;
+                }
+                if let Some((filename_dbnum, header_dbnum)) = extract_mismatches.get(path) {
+                    blocked_dupes.insert(
+                        (project.clone(), db_no),
+                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                            &db_type,
+                        ),
+                    );
+                    println!(
+                        "F6 文件名库号与文件头不一致（filename={filename_dbnum} header={header_dbnum}），\
+                         阻断项目 {} 的 dbnum={db_no}：{}",
+                        project,
+                        path.display()
+                    );
+                    continue;
+                }
+                if extract_dupes.contains(&(project.clone(), db_no)) {
+                    blocked_dupes.insert(
+                        (project.clone(), db_no),
+                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                            &db_type,
+                        ),
+                    );
+                    println!(
+                        "F6 发现项目 {} 内同 dbnum={} 的多个抽取/副本，阻断该 dbnum：{}",
+                        project,
+                        db_no,
+                        path.display()
+                    );
                     continue;
                 }
                 manifest_totals.push(
@@ -2993,7 +3338,12 @@ impl AiosDBManager {
                 // 三个正常的库一起阻断。同项目内的人手副本仍然照旧被拦住。
                 if let Some(prev) = seen_dbnums.insert((project.clone(), db_no), path.to_path_buf())
                 {
-                    blocked_dupes.insert((project.clone(), db_no));
+                    blocked_dupes.insert(
+                        (project.clone(), db_no),
+                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                            &db_type,
+                        ),
+                    );
                     println!(
                         "F6 发现项目 {} 内同 dbnum={} 的多个文件，阻断该 dbnum：{:?} / {:?}",
                         project, db_no, prev, path
@@ -3109,18 +3459,18 @@ impl AiosDBManager {
         // ——按 MDB 口径报一次总数与样本，人一眼能判断是不是自己要的那个库落在外面。
         if !out_of_scope.is_empty() {
             let sample = out_of_scope.iter().take(12).join("、");
-            println!(
+            sweep_log::note(format!(
                 "[{origin}] {} 个库不在 MDB {} 的声明名单里，本轮不入队（本期声明 {} 个 DESI）：{sample}{}",
                 out_of_scope.len(),
                 scope.mdb(),
                 scope.declared_desi().count(),
                 if out_of_scope.len() > 12 { " …" } else { "" }
-            );
+            ));
         }
         if !watch_excluded.is_empty() {
             let sample = watch_excluded.iter().take(12).join("、");
             let (watch_dbnums, watch_origin) = watch_scope::resolved();
-            println!(
+            sweep_log::note(format!(
                 "[{origin}] {} 个库被 {} {} 监听限定跳过（来自{}；这是监听限定，\
                  不是 MDB 范围判定——这些库在不在 MDB 名单里，本轮没有问过）：{sample}{}",
                 watch_excluded.len(),
@@ -3132,11 +3482,11 @@ impl AiosDBManager {
                 } else {
                     ""
                 }
-            );
+            ));
         }
         if !debug_excluded.is_empty() {
             let sample = debug_excluded.iter().take(12).join("、");
-            println!(
+            sweep_log::note(format!(
                 "[{origin}] {} 个库被 --debug-dbnum {} 调试限定跳过（这是调试限定，\
                  不是 MDB 范围判定——这些库在不在 MDB 名单里，本轮没有问过）：{sample}{}",
                 debug_excluded.len(),
@@ -3146,19 +3496,20 @@ impl AiosDBManager {
                 } else {
                     ""
                 }
-            );
+            ));
         }
 
         // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选，阻断的库不入队）。
         if !blocked_dupes.is_empty() {
-            phase_blockers.extend(blocked_dupes.iter().map(|(project, dbnum)| {
+            phase_blockers.extend(blocked_dupes.iter().map(|((project, dbnum), phase)| {
                 (
-                    crate::data_interface::initialization_phase::DataPhase::Design,
+                    *phase,
                     format!("项目 {project} 内 dbnum={dbnum} 同号多文件"),
                 )
             }));
-            params
-                .retain(|_p, found| !blocked_dupes.contains(&(found.project.clone(), found.dbnum)));
+            params.retain(|_p, found| {
+                !blocked_dupes.contains_key(&(found.project.clone(), found.dbnum))
+            });
         }
 
         // 等所有文件检查完毕后，逐条入队；执行与发布归数据批次 worker。
@@ -3173,12 +3524,10 @@ impl AiosDBManager {
             shadowed,
             manifest_totals,
             cata_dependencies,
+            dependency_identities,
         );
 
-        println!(
-            "[{origin}] 重扫（重建队列）总耗时: {} 秒",
-            time.elapsed().as_secs_f32()
-        );
+        sweep_log::finish(origin, time.elapsed());
 
         anyhow::Ok(())
     }
@@ -3338,6 +3687,7 @@ impl AiosDBManager {
         shadowed: Vec<String>,
         manifest_totals: Vec<crate::data_interface::initialization_phase::DataPhase>,
         cata_dependencies: Vec<(String, u32, PathBuf)>,
+        dependency_identities: Vec<(String, u32, String, PathBuf)>,
     ) {
         use crate::data_interface::batch_queue::Enqueued;
         use crate::data_interface::batch_scheduler::BatchScheduler;
@@ -3387,12 +3737,12 @@ impl AiosDBManager {
                 !found.db_type.eq_ignore_ascii_case(db_type) || selected.contains(path)
             });
             for candidate in selection.shadowed {
-                println!(
+                sweep_log::note(format!(
                     "[{origin}] {db_type} dbnum={} 的 {} 被项目优先级遮蔽，不写 observation/水位/队列: {}",
                     candidate.dbnum,
                     candidate.project,
                     candidate.path.display()
-                );
+                ));
             }
             phase_blockers.extend(
                 selection
@@ -3413,12 +3763,20 @@ impl AiosDBManager {
             );
             return;
         }
+        // 两份清单各有独立的版本计数器，谁也不是谁的续号；此前后者遮蔽前者，
+        // 打出来的是身份清单的版本号，数的却是依赖清单的文件数，对不上账。
         let dependency_manifest_version =
             crate::data_interface::cata_closure::install_dependency_manifest(cata_dependencies);
-        println!(
-            "[manifest] CATA 依赖清单已激活：{} 个选中文件，版本={dependency_manifest_version}",
-            crate::data_interface::cata_closure::dependency_manifest_snapshot().len()
-        );
+        let identity_manifest_version =
+            crate::data_interface::cata_closure::install_dependency_identity_manifest(
+                dependency_identities,
+            );
+        sweep_log::note(format!(
+            "[manifest] CATA 依赖清单已激活：{} 个选中文件，版本={dependency_manifest_version}；\
+             依赖身份清单：{} 个文件，版本={identity_manifest_version}",
+            crate::data_interface::cata_closure::dependency_manifest_snapshot().len(),
+            crate::data_interface::cata_closure::dependency_identity_manifest_snapshot().len()
+        ));
         let epoch_id = coordinator.begin_discovery();
         let phases = params.values().map(|found| found.phase).collect::<Vec<_>>();
         coordinator.install_manifest(epoch_id, phases, hold, phase_blockers);
@@ -3553,21 +3911,83 @@ impl AiosDBManager {
         // 远程共享目录(SMB/CIFS/NFS)上 OS 原生事件(Windows ReadDirectoryChangesW /
         // Linux inotify)对「其他主机」的写入不可靠、甚至完全收不到，会导致增量漏检。
         // 因此这里改用 notify 的 PollWatcher：定时 stat 整棵被监控目录树，按 mtime /
-        // 新增 / 删除对比得出变化，跨网络共享稳定可靠。轮询间隔默认 30s，可用环境变量
-        // AIOS_WATCH_POLL_SECS 覆盖（单位秒；非法或 <=0 时回退默认）。
+        // 新增 / 删除对比得出变化，跨网络共享稳定可靠。轮询间隔默认
+        // DEFAULT_WATCH_POLL_SECS，可用环境变量 AIOS_WATCH_POLL_SECS 覆盖
+        // （单位秒；非法或 <=0 时回退默认）。
         let poll_secs = std::env::var("AIOS_WATCH_POLL_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
             .filter(|&s| s > 0)
-            .unwrap_or(30);
+            .unwrap_or(DEFAULT_WATCH_POLL_SECS);
 
-        // 创建定时轮询文件监控器（PollWatcher）
-        let (mut tx, mut rx) = futures::channel::mpsc::channel(1);
+        // 两轮 watch 重扫之间的最小间隔，见 `DEFAULT_WATCH_MIN_SWEEP_GAP_SECS`。
+        let min_sweep_gap = std::time::Duration::from_secs(
+            std::env::var("AIOS_WATCH_MIN_SWEEP_GAP_SECS")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_WATCH_MIN_SWEEP_GAP_SECS),
+        );
+
+        // 创建定时轮询文件监控器（PollWatcher）。
+        //
+        // 回调里**只许置位，不许等待**。这里过去是
+        // `futures::executor::block_on(tx.send(res))` 打进一个容量 1 的 futures
+        // channel，三件事叠起来就是一个不会自愈的死锁：
+        // 1. notify 8.0.0 的 poll 线程在**同时持有 `watches` 与 `data_builder` 两把
+        //    互斥锁**的情况下同步调用本回调（`poll.rs` 的 `run` 循环 +
+        //    `EventEmitter::emit`），整轮 rescan 都在锁内；
+        // 2. `futures::channel::mpsc::channel(1)` 的真实容量是 `buffer + sender 数`
+        //    = 2，一轮 rescan 变化文件一多，第三条就把 poll 线程堵在 send 上——
+        //    这跟「单轮重扫比轮询间隔慢」没关系，光靠数量就能触发；
+        // 3. 唯一能腾出容量的是下面那个事件循环，而它同一时刻可能正走重挂分支，
+        //    `MountState::mount` → `PollWatcher::watch()` 要的正是 poll 线程手里
+        //    那两把锁。于是 poll 线程等消费者、消费者等锁、锁在 poll 线程手里，
+        //    看门狗静默死亡。
+        // 现在回调只做一段无 I/O 的短临界区加一次 `try_send`（满了就丢——丢掉的是
+        // 「有事」这一位，不是变化本身：下面的闸把它当脏位用，而真正的判定从来只
+        // 认水位）。要打印的东西攒进 `WatchPendingNotes`，由事件循环去打。
+        let (signal_tx, mut signal_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let notes = Arc::new(std::sync::Mutex::new(WatchPendingNotes::default()));
+        let callback_notes = Arc::clone(&notes);
         let mut watcher = PollWatcher::new(
-            move |res| {
-                futures::executor::block_on(async {
-                    let _ = tx.send(res).await;
-                });
+            move |res: notify::Result<notify::Event>| {
+                let mut pending = callback_notes
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                let event = match res {
+                    Ok(event) => event,
+                    Err(error) => {
+                        pending.note_error(format!("{error:?}"));
+                        drop(pending);
+                        let _ = signal_tx.try_send(());
+                        return;
+                    }
+                };
+                // 过滤事件类型，只处理增/改/删这类内容相关事件。
+                // PollWatcher 通过 mtime 变化发出 Modify(Metadata(WriteTime))、
+                // 新增发出 Create(Any)、删除发出 Remove(Any)，因此这里放宽为任意
+                // Create/Modify/Remove（仅排除 Access 等纯访问事件）。最终是否真有
+                // 增量仍由后续 sesno 水位复核兜底，误报只多一次廉价头部扫描。
+                let data_changed = matches!(
+                    event.kind,
+                    notify::EventKind::Create(_)
+                        | notify::EventKind::Modify(_)
+                        | notify::EventKind::Remove(_)
+                );
+                if !data_changed {
+                    return;
+                }
+                // 预过滤：只留候选库文件（黑名单 + AVEVA 库命名白名单，
+                // 与启动重扫、重复 dbnum 复查、手动扫描共用 `is_candidate_db_file`）。
+                // 它只看文件名、不碰文件，放在锁内是安全的。
+                let mut candidates = event.paths.iter().filter(|path| is_candidate_db_file(path));
+                let Some(first) = candidates.next() else {
+                    return;
+                };
+                pending.note_paths(std::iter::once(first).chain(candidates));
+                drop(pending);
+                // 满了说明事件循环还欠着一轮没跑，那一位脏已经记下了，丢弃即可。
+                let _ = signal_tx.try_send(());
             },
             Config::default().with_poll_interval(std::time::Duration::from_secs(poll_secs)),
         )?;
@@ -3639,8 +4059,13 @@ impl AiosDBManager {
         // 事件回调再也不会被一轮增量执行堵住（ADR-011 §2 治的正是这个）。
 
         // 持续监听文件变化事件；与之并行的是共享盘重挂轮（见 `remount_secs`）。
+        //
+        // `Delay` 而不是默认的 `Burst`：本循环里每一拍都可能 await 一轮完整重扫，
+        // 被挡久了以后 `Burst` 会把欠下的拍一次性连补出来，等于在最忙的时刻再排队
+        // 几轮重挂。对账那一拍同理，理由见下。
         let mut remount_tick =
             tokio::time::interval(std::time::Duration::from_secs(remount_secs.max(1)));
+        remount_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         remount_tick.tick().await; // interval 的第一拍是立即触发的，丢掉
 
         // 周期对账重扫：PollWatcher 的事件只发一次，处理途中失败（SUL_DB 连接抖动、
@@ -3653,22 +4078,60 @@ impl AiosDBManager {
         let reconcile_secs = std::env::var("AIOS_WATCH_RECONCILE_SECS")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
-            .unwrap_or(300);
+            .unwrap_or(DEFAULT_WATCH_RECONCILE_SECS);
         let mut reconcile_tick =
             tokio::time::interval(std::time::Duration::from_secs(reconcile_secs.max(1)));
         reconcile_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         reconcile_tick.tick().await; // 第一拍立即触发，而启动重扫刚扫过，丢掉
+        let mut gate = WatchSweepGate::default();
+        // 攒到本轮重扫为止的变化路径，只为那一行日志——判定一律走完整清单。
+        let mut changed_paths = BTreeSet::new();
         loop {
-            let res = tokio::select! {
-                incoming = rx.next() => match incoming {
-                    Some(res) => res,
+            // 欠着一轮时排一个到期唤醒，否则最后那次变化会挂在脏位上等下一条事件。
+            let gate_wait = gate.wait_until_due(Instant::now(), min_sweep_gap);
+            tokio::select! {
+                incoming = signal_rx.recv() => match incoming {
+                    Some(()) => {
+                        let pending = std::mem::take(
+                            &mut *notes.lock().unwrap_or_else(|poisoned| poisoned.into_inner()),
+                        );
+                        for error in pending.errors {
+                            println!("文件监控错误: {error}");
+                        }
+                        if pending.paths.is_empty() {
+                            // 只有监控器报错、没有候选变化：喊出来就够了，不必重扫。
+                            continue;
+                        }
+                        changed_paths.extend(pending.paths);
+                        gate.mark_dirty();
+                    }
                     None => break,
                 },
+                _ = tokio::time::sleep(gate_wait.unwrap_or_default()), if gate_wait.is_some() => {}
                 _ = remount_tick.tick(), if remount_secs > 0 => {
                     self.remount_watch_dirs(&mut watcher, &mut mounted).await;
                     continue;
                 }
                 _ = reconcile_tick.tick(), if reconcile_secs > 0 => {
+                    // 顺带探一次 poll 线程还在不在。`poll()` 往控制 channel 上发一次，
+                    // 而那条 channel 的 Receiver 是被 poll 线程自己拿着的：线程没了
+                    // （notify 8.0.0 连 `thread::spawn` 的返回值都 `let _ =` 丢掉，
+                    // 起不来和 panic 掉一样没人知道），send 就失败。
+                    //
+                    // 这是本函数唯一真实的死亡探针，别指望下面那个 `None` 分支。
+                    // 代价是一次额外的目录枚举（`poll()` 会叫醒线程立刻重扫一轮），
+                    // 挂在 300s 这一拍上可以忽略；探不了「线程活着但卡死」——那要
+                    // notify 自己吐进度，从外面看「卡住」和「厂里没人动」一模一样。
+                    if let Err(error) = watcher.poll() {
+                        // 每拍都喊：这是永久性故障，不是可以说一次就算的噪音。
+                        // 事件路径已经没了，剩下的发现全靠本拍这轮对账。
+                        let msg = format!(
+                            "[reconcile] PollWatcher 轮询线程已消失，文件事件路径彻底失效，\
+                             增量发现退化成每 {reconcile_secs}s 一次的对账；重启服务恢复: {error}"
+                        );
+                        log::error!("{msg}");
+                        eprintln!("{msg}");
+                    }
                     if let Err(error) = self.sweep_watch_dirs("reconcile", false).await {
                         // 失败不退避不计数：下一拍就是重试。
                         let msg = format!("[reconcile] 周期对账重扫失败，等下一拍重试: {error:#}");
@@ -3677,68 +4140,40 @@ impl AiosDBManager {
                     }
                     continue;
                 }
-            };
-            match res {
-                Ok(event) => {
-                    // 过滤事件类型，只处理增/改/删这类内容相关事件。
-                    // PollWatcher 通过 mtime 变化发出 Modify(Metadata(WriteTime))、
-                    // 新增发出 Create(Any)、删除发出 Remove(Any)，因此这里放宽为任意
-                    // Create/Modify/Remove（仅排除 Access 等纯访问事件）。最终是否真有
-                    // 增量仍由后续 sesno 水位复核兜底，误报只多一次廉价头部扫描。
-                    let data_changed = matches!(
-                        event.kind,
-                        notify::EventKind::Create(_)
-                            | notify::EventKind::Modify(_)
-                            | notify::EventKind::Remove(_)
-                    );
-                    if !data_changed {
-                        continue;
-                    }
+            }
 
-                    // 记录文件变化事件
-                    println!("检测到文件变化: {:?}", &event);
+            // 限频（见 `WatchSweepGate`）：闸没开就继续等，脏位留着不丢。
+            if !gate.take_due(Instant::now(), min_sweep_gap) {
+                continue;
+            }
 
-                    // 预过滤：只留候选库文件（黑名单 + AVEVA 库命名白名单，
-                    // 与启动重扫、重复 dbnum 复查、手动扫描共用 `is_candidate_db_file`）。
-                    let filtered_paths: Vec<_> = event
-                        .paths
-                        .iter()
-                        .filter(|path| is_candidate_db_file(path))
-                        .cloned()
-                        .collect();
-
-                    if filtered_paths.is_empty() {
-                        println!("所有变化的文件都被排除规则过滤，跳过处理");
-                        continue;
-                    }
-
-                    // 文件事件只负责标脏；处理必须回到与启动、重挂和周期对账相同的完整清单扫描。
-                    // 这样事件到达顺序不会变成数据阶段顺序，跨项目优先级也先于 observation 裁决。
-                    println!(
-                        "候选库文件发生变化，触发共享完整清单重扫: {:?}",
-                        filtered_paths
-                    );
-                    crate::data_interface::batch_scheduler::BatchScheduler::global()
-                        .arm_auto_work();
-                    crate::data_interface::initialization_phase::InitializationCoordinator::global(
-                    )
-                    .arm();
-                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                    if let Err(error) = self.sweep_watch_dirs("watch", false).await {
-                        let message = format!(
-                            "[watch] 完整清单重扫失败，等待下一次事件或对账重试: {error:#}"
-                        );
-                        log::warn!("{message}");
-                        eprintln!("{message}");
-                    }
-                }
-                Err(e) => println!("文件监控错误: {:?}", e),
+            // 文件事件只负责标脏；处理必须回到与启动、重挂和周期对账相同的完整清单扫描。
+            // 这样事件到达顺序不会变成数据阶段顺序，跨项目优先级也先于 observation 裁决。
+            println!(
+                "候选库文件发生变化，触发共享完整清单重扫: {:?}",
+                std::mem::take(&mut changed_paths)
+            );
+            crate::data_interface::batch_scheduler::BatchScheduler::global().arm_auto_work();
+            crate::data_interface::initialization_phase::InitializationCoordinator::global().arm();
+            // 保存动作在文件系统上不是原子的，给它一小段落定时间再读文件头。
+            // 首事件是立刻开闸的，这 250ms 就是首轮唯一的缓冲。
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if let Err(error) = self.sweep_watch_dirs("watch", false).await {
+                let message =
+                    format!("[watch] 完整清单重扫失败，等待下一次事件或对账重试: {error:#}");
+                log::warn!("{message}");
+                eprintln!("{message}");
             }
         }
 
-        // 走到这里说明事件流已经关闭（PollWatcher 被丢弃 / 发送端全部消失）。
-        // 对一个本该长驻的看门狗而言这不是正常终止：过去这里返回 Ok(())，调用方
-        // 一路 .unwrap() 也是 Ok，看门狗就此静默死亡、增量再也不会被发现（T903）。
+        // 走到这里说明信号流已经关闭。对一个本该长驻的看门狗而言这不是正常终止：
+        // 过去这里返回 Ok(())，调用方一路 .unwrap() 也是 Ok，看门狗就此静默死亡、
+        // 增量再也不会被发现（T903）。
+        //
+        // 但别把这一条当成「poll 线程死了」的探针：发送端活在回调里、回调活在
+        // `watcher` 的 `data_builder` 里，只要 `watcher` 这个对象还在栈上，poll
+        // 线程死透了发送端也不会被丢弃，这里就永远等不到关闭。真正的死亡探针是
+        // 对账那一拍上的 `watcher.poll()`。
         log::error!("async_watch 事件流意外关闭，增量看门狗已停止监听");
         Err(notify::Error::generic(
             "async_watch 事件流意外关闭，增量看门狗已停止监听",
