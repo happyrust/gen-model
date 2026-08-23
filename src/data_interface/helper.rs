@@ -91,7 +91,7 @@ pub(crate) async fn collect_pe_ancestor_refnos_from(
     Ok(all)
 }
 
-/// 渲染单个 refno 的级联删除，三条语句共一个事务。
+/// 渲染单个 refno 的级联删除，模型关系与该 refno 的直管出边共一个事务。
 ///
 /// 事务不是为了跨 refno 的原子性（那反而会让一个坏 refno 拖垮整批），而是因为
 /// 「删边」与「按引用计数回收 inst_info」之间**不能存在可观察的中间态**：清理条件
@@ -117,11 +117,12 @@ pub(crate) async fn collect_pe_ancestor_refnos_from(
 ///
 /// 投影保留 `[..]` + `array::flatten` 的原形、只摘掉 `out`：`DELETE` 的入参形状不变，
 /// 改动只落在删除集本身。
-fn render_cascade_delete(inst_relate_key: &str) -> String {
+fn render_cascade_delete(inst_relate_key: &str, pe_key: &str) -> String {
     format!(
         r#"BEGIN TRANSACTION;
 let $old_inst = (select value out from {inst_relate_key})[0];
 delete from {inst_relate_key};
+delete {pe_key}->tubi_relate;
 if $old_inst != none and array::len($old_inst<-inst_relate) = 0 {{
     delete array::flatten(select value [id] from $old_inst->geo_relate);
     delete $old_inst;
@@ -168,7 +169,10 @@ pub async fn delete_inst_relate_cascade(
         let mut delete_sql_vec = vec![];
 
         for refno in chunk {
-            delete_sql_vec.push(render_cascade_delete(&refno.to_inst_relate_key()));
+            delete_sql_vec.push(render_cascade_delete(
+                &refno.to_inst_relate_key(),
+                &refno.to_pe_key(),
+            ));
         }
         if crate::data_interface::staging::active_staging_writes().is_some() {
             for sql in delete_sql_vec {
@@ -531,13 +535,17 @@ mod tests {
 
     #[test]
     fn cascade_delete_keeps_the_edge_delete_and_refcount_gc_in_one_transaction() {
-        let sql = render_cascade_delete("inst_relate:7997_1");
+        let sql = render_cascade_delete("inst_relate:7997_1", "pe:7997_1");
 
         crate::data_interface::staging::replay_safe::validate_scoped_delete_transaction(&sql)
             .expect("级联删除必须能进入暂存 journal");
 
         assert!(sql.starts_with("BEGIN TRANSACTION;"), "{sql}");
         assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");
+        assert!(
+            sql.contains("delete pe:7997_1->tubi_relate;"),
+            "BRAN cleanup must remove its straight-run edges: {sql}"
+        );
         // The GC condition reads the edge this block just deleted, so a commit
         // boundary between the two would strand inst_info on retry.
         let delete_at = sql
@@ -558,7 +566,7 @@ mod tests {
     /// `inst_info`（几何生成半途失败的残留）将永远不被回收。
     #[test]
     fn cascade_delete_reclaims_inst_info_even_without_geo_relate_edges() {
-        let sql = render_cascade_delete("inst_relate:7997_1");
+        let sql = render_cascade_delete("inst_relate:7997_1", "pe:7997_1");
 
         let explicit_gc_at = sql
             .find("delete $old_inst;")
@@ -588,7 +596,7 @@ mod tests {
     /// 反过来「不删」只是有界泄漏：同样的几何算出同样的哈希，重生成同一个根不长新行。
     #[test]
     fn cascade_delete_never_reclaims_shared_content_addressed_geometry() {
-        let sql = render_cascade_delete("inst_relate:7997_1");
+        let sql = render_cascade_delete("inst_relate:7997_1", "pe:7997_1");
 
         assert!(
             sql.contains("from $old_inst->geo_relate"),

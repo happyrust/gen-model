@@ -30,7 +30,7 @@ use glam::{DMat4, DVec3, Vec3};
 use nalgebra::Point3;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use parry3d::bounding_volume::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::mem::take;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -101,7 +101,49 @@ pub fn init_chrome_tracing() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod staged_write_routing_tests {
+    use super::{TubiInvalidReason, TubiRelationSpec, render_tubi_branch_replace, tubi_spec_from};
     use crate::data_interface::staging::replay_safe;
+    use aios_core::RefnoEnum;
+    use aios_core::prim_geo::{PdmsTubing, TubiSize};
+    use bevy_transform::components::Transform;
+    use glam::Vec3;
+    use nalgebra::Point3;
+    use parry3d::bounding_volume::Aabb;
+
+    fn tubi_row(index: usize, arrive: &str, x: f32) -> TubiRelationSpec {
+        let transform = Transform::from_translation(Vec3::new(x, 0.0, 0.0));
+        let aabb = Aabb::new(Point3::new(x, 0.0, 0.0), Point3::new(x + 10.0, 1.0, 1.0));
+        TubiRelationSpec {
+            index,
+            leave_refno: RefnoEnum::from("1/3"),
+            arrive_refno: RefnoEnum::from(arrive),
+            geo_hash: 7,
+            bore_size: "100".into(),
+            transform,
+            aabb,
+            invalid: None,
+        }
+    }
+
+    /// A run from the origin to `end_pt` whose two fitting axes are given separately, so a
+    /// test can make it collinear or kink it at will.
+    fn tubing(end_pt: Vec3, leave_dir: Vec3, arrive_dir: Vec3, tubi_size: TubiSize) -> PdmsTubing {
+        PdmsTubing {
+            leave_refno: RefnoEnum::from("1/3"),
+            arrive_refno: RefnoEnum::from("1/4"),
+            start_pt: Vec3::ZERO,
+            end_pt,
+            desire_leave_dir: leave_dir,
+            leave_ref_dir: None,
+            desire_arrive_dir: arrive_dir,
+            tubi_size,
+            index: 0,
+        }
+    }
+
+    fn unit_cyli_aabb() -> Aabb {
+        Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0))
+    }
 
     #[test]
     fn generated_tubi_relations_are_replay_safe_and_use_the_model_writer() {
@@ -122,12 +164,17 @@ mod staged_write_routing_tests {
             .expect("tracing wrapper follows generator")
             .0;
         assert_eq!(
-            body.matches("INSERT RELATION INTO tubi_relate").count(),
-            3,
-            "all three TUBI paths must use explicit relation ids"
+            body.matches("render_tubi_branch_replace(").count(),
+            2,
+            "empty-child and populated-child BRAN paths must both replace the complete set"
         );
         assert!(body.contains("execute_model_write("));
         assert!(!body.contains("SUL_DB.query(tubi_relates"));
+        assert!(
+            !body.contains("insert_tubi("),
+            "straight pipe belongs only in tubi_relate; writing it through ShapeInstancesData \
+             reuses inst_relate:<leave_refno> and overwrites the fitting's catalogue geometry"
+        );
     }
 
     #[tokio::test]
@@ -204,6 +251,425 @@ mod staged_write_routing_tests {
         );
         window.drop_database().await.expect("cleanup");
     }
+
+    #[test]
+    fn branch_tubi_replace_is_atomic_replay_safe_and_self_contained() {
+        let sql = render_tubi_branch_replace(
+            RefnoEnum::from("1/2"),
+            "[1]",
+            "7997",
+            &[tubi_row(0, "1/4", 20.0)],
+        )
+        .expect("render replacement");
+
+        replay_safe::validate_statement(&sql).expect("replacement must be ReplaySafe");
+        assert!(sql.starts_with("BEGIN TRANSACTION;"), "{sql}");
+        assert!(sql.contains("DELETE pe:1_2->tubi_relate;"), "{sql}");
+        assert!(sql.contains("INSERT IGNORE INTO trans"), "{sql}");
+        assert!(sql.contains("INSERT IGNORE INTO aabb"), "{sql}");
+        assert!(sql.contains("INSERT RELATION INTO tubi_relate"), "{sql}");
+        assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");
+
+        let empty = render_tubi_branch_replace(RefnoEnum::from("1/2"), "[1]", "7997", &[])
+            .expect("render empty replacement");
+        replay_safe::validate_statement(&empty).expect("empty replacement must be ReplaySafe");
+        assert!(empty.contains("DELETE pe:1_2->tubi_relate;"), "{empty}");
+        assert!(!empty.contains("INSERT RELATION"), "{empty}");
+    }
+
+    #[tokio::test]
+    async fn branch_tubi_replace_removes_stale_indices_and_persists_content() {
+        #[derive(Debug, serde::Deserialize)]
+        struct Row {
+            arrive: surrealdb::sql::Thing,
+            trans_exists: bool,
+            aabb_exists: bool,
+        }
+
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem db boots");
+        db.use_ns("tubi_replace")
+            .use_db("test")
+            .await
+            .expect("select db");
+        let first = render_tubi_branch_replace(
+            RefnoEnum::from("1/2"),
+            "[1]",
+            "7997",
+            &[tubi_row(0, "1/4", 10.0), tubi_row(1, "1/5", 30.0)],
+        )
+        .expect("first replacement");
+        db.query(first)
+            .await
+            .expect("first query")
+            .check()
+            .expect("first replacement");
+
+        let second = render_tubi_branch_replace(
+            RefnoEnum::from("1/2"),
+            "[1]",
+            "7997",
+            &[tubi_row(0, "1/6", 20.0)],
+        )
+        .expect("second replacement");
+        for _ in 0..2 {
+            db.query(&second)
+                .await
+                .expect("replay query")
+                .check()
+                .expect("replay replacement");
+        }
+
+        let mut response = db
+            .query(
+                "SELECT id, arrive, record::exists(world_trans) AS trans_exists, \
+                 record::exists(aabb) AS aabb_exists FROM pe:1_2->tubi_relate;",
+            )
+            .await
+            .expect("inspect replacement")
+            .check()
+            .expect("inspect query");
+        let rows = response.take::<Vec<Row>>(0).expect("decode rows");
+        assert_eq!(rows.len(), 1, "old high index must be removed: {rows:?}");
+        assert_eq!(rows[0].arrive.to_string(), "pe:1_6", "{rows:?}");
+        assert!(rows[0].trans_exists, "{rows:?}");
+        assert!(rows[0].aabb_exists, "{rows:?}");
+    }
+
+    #[tokio::test]
+    async fn branch_tubi_replace_failure_keeps_the_previous_complete_set() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem db boots");
+        db.use_ns("tubi_replace_rollback")
+            .use_db("test")
+            .await
+            .expect("select db");
+        let baseline = render_tubi_branch_replace(
+            RefnoEnum::from("1/2"),
+            "[1]",
+            "7997",
+            &[tubi_row(0, "1/4", 10.0), tubi_row(1, "1/5", 30.0)],
+        )
+        .expect("baseline replacement");
+        db.query(baseline)
+            .await
+            .expect("baseline query")
+            .check()
+            .expect("baseline replacement");
+
+        let replacement = render_tubi_branch_replace(
+            RefnoEnum::from("1/2"),
+            "[1]",
+            "7997",
+            &[tubi_row(0, "1/6", 20.0)],
+        )
+        .expect("replacement");
+        let forced_failure = replacement.replace(
+            "COMMIT TRANSACTION;",
+            "THROW 'forced replacement failure';\nCOMMIT TRANSACTION;",
+        );
+        assert!(
+            db.query(forced_failure)
+                .await
+                .expect("failed transaction response")
+                .check()
+                .is_err(),
+            "forced transaction failure must reach the caller"
+        );
+
+        let mut response = db
+            .query("SELECT VALUE arrive FROM pe:1_2->tubi_relate;")
+            .await
+            .expect("inspect rollback")
+            .check()
+            .expect("inspect query");
+        let rows = response
+            .take::<Vec<surrealdb::sql::Thing>>(0)
+            .expect("decode rows");
+        let mut rows = rows.iter().map(ToString::to_string).collect::<Vec<_>>();
+        rows.sort();
+        assert_eq!(
+            rows,
+            ["pe:1_4", "pe:1_5"],
+            "a failed replacement must preserve the previous complete set"
+        );
+    }
+
+    /// A run whose ends are not collinear used to vanish, leaving a gap where E3D draws a
+    /// dotted centre line.  Restoring the `if is_dir_ok()` gate around the push makes this red.
+    #[test]
+    fn a_kinked_run_is_kept_as_a_diagnostic_line() {
+        let end_pt = Vec3::new(100.0, 100.0, 0.0);
+        let kinked = tubing(end_pt, Vec3::X, -Vec3::Y, TubiSize::BoreSize(50.0));
+        assert!(!kinked.is_dir_ok(), "fixture must fail the axis check");
+
+        let spec = tubi_spec_from(&kinked, 7, &unit_cyli_aabb())
+            .expect("a run that cannot become a pipe still has to reach the viewer");
+        assert_eq!(spec.invalid, Some(TubiInvalidReason::Direction));
+        assert_eq!(spec.transform.translation, Vec3::ZERO);
+        assert!(
+            (spec.transform.scale.z - end_pt.length()).abs() < 1e-3,
+            "the dashed line spans the two connection points: {:?}",
+            spec.transform
+        );
+        let axis = spec.transform.rotation * Vec3::Z;
+        assert!(
+            axis.dot(end_pt.normalize()) > 0.9999,
+            "local +Z must point from the leave point to the arrive point: {axis:?}"
+        );
+    }
+
+    #[test]
+    fn a_collinear_run_stays_a_solid_pipe() {
+        let straight = tubing(
+            Vec3::new(0.0, 0.0, 100.0),
+            Vec3::Z,
+            -Vec3::Z,
+            TubiSize::BoreSize(50.0),
+        );
+        let spec = tubi_spec_from(&straight, 7, &unit_cyli_aabb()).expect("render straight run");
+        assert_eq!(spec.invalid, None);
+    }
+
+    /// A missing bore is a different failure from a kink, and swallowing it would hide the
+    /// connection just as thoroughly.
+    #[test]
+    fn a_run_without_a_bore_is_reported_rather_than_dropped() {
+        let no_bore = tubing(
+            Vec3::new(0.0, 0.0, 100.0),
+            Vec3::Z,
+            -Vec3::Z,
+            TubiSize::None,
+        );
+        assert!(
+            no_bore.get_transform().is_none(),
+            "fixture must be the case the solid path refuses"
+        );
+
+        let spec = tubi_spec_from(&no_bore, 7, &unit_cyli_aabb()).expect("still produce a row");
+        assert_eq!(spec.invalid, Some(TubiInvalidReason::NoBore));
+        assert!((spec.transform.scale.z - 100.0).abs() < 1e-3, "{spec:?}");
+    }
+
+    #[test]
+    fn the_written_row_states_whether_it_is_drawable() {
+        let mut kinked = tubi_row(0, "1/4", 20.0);
+        kinked.invalid = Some(TubiInvalidReason::Direction);
+        let sql = render_tubi_branch_replace(RefnoEnum::from("1/2"), "[1]", "7997", &[kinked])
+            .expect("render diagnostic replacement");
+        replay_safe::validate_statement(&sql).expect("diagnostic rows stay ReplaySafe");
+        assert!(
+            sql.contains("invalid: true, invalid_reason: 'direction'"),
+            "{sql}"
+        );
+
+        let solid = render_tubi_branch_replace(
+            RefnoEnum::from("1/2"),
+            "[1]",
+            "7997",
+            &[tubi_row(0, "1/4", 20.0)],
+        )
+        .expect("render solid replacement");
+        assert!(solid.contains("invalid: false"), "{solid}");
+        assert!(!solid.contains("invalid_reason"), "{solid}");
+    }
+
+    /// The axis check decides the row's flag, never whether the row exists.  Putting it back
+    /// in front of the push is the regression this pins.
+    #[test]
+    fn the_axis_check_never_gates_the_push() {
+        let source = include_str!("cata_model.rs");
+        let body = source
+            .rsplit_once("pub async fn gen_cata_geos(")
+            .expect("gen_cata_geos exists")
+            .1
+            .split_once("pub async fn gen_cata_geos_with_tracing(")
+            .expect("tracing wrapper follows generator")
+            .0;
+        assert_eq!(
+            body.matches("tubi_spec_from(").count(),
+            3,
+            "head, mid-branch and tail runs all go through the one spec builder"
+        );
+        for gate in [
+            "&& current_tubing.is_dir_ok()",
+            "if current_tubing.is_dir_ok() {",
+        ] {
+            assert!(
+                !body.contains(gate),
+                "`{gate}` would drop undrawable runs again"
+            );
+        }
+    }
+}
+
+/// Why a straight run cannot be built as a solid pipe.
+///
+/// E3D keeps drawing the connection as a dotted centre line in both cases, so the row has to
+/// reach the viewer carrying the reason instead of vanishing between two fittings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TubiInvalidReason {
+    /// The gap between the two connection points is not collinear with both fitting axes.
+    Direction,
+    /// Neither the branch nor the leaving component resolves a tube size.
+    NoBore,
+}
+
+impl TubiInvalidReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Direction => "direction",
+            Self::NoBore => "no_bore",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct TubiRelationSpec {
+    index: usize,
+    leave_refno: RefnoEnum,
+    arrive_refno: RefnoEnum,
+    geo_hash: u64,
+    bore_size: String,
+    transform: Transform,
+    aabb: Aabb,
+    invalid: Option<TubiInvalidReason>,
+}
+
+/// Turn the current tubing cursor into one straight-run row.
+///
+/// The cursor is only ever asked once per connection, so a run that fails the axis check must
+/// still come back as a row — dropping it is what leaves a silent gap where E3D shows a dotted
+/// line. `tubi_size` has to be resolved before the call: the bore is what the viewer needs to
+/// draw the solid case and what the diagnostic case still reports.
+fn tubi_spec_from(
+    tubing: &PdmsTubing,
+    geo_hash: u64,
+    unit_cyli_aabb: &Aabb,
+) -> Option<TubiRelationSpec> {
+    let invalid = if !tubing.is_dir_ok() {
+        Some(TubiInvalidReason::Direction)
+    } else if matches!(tubing.tubi_size, TubiSize::None) {
+        Some(TubiInvalidReason::NoBore)
+    } else {
+        None
+    };
+    let transform = match invalid {
+        None => tubing.get_transform()?,
+        Some(_) => diagnostic_centre_line(tubing)?,
+    };
+    let aabb = shared::aabb_apply_transform(unit_cyli_aabb, &transform);
+    Some(TubiRelationSpec {
+        index: tubing.index,
+        leave_refno: tubing.leave_refno,
+        arrive_refno: tubing.arrive_refno,
+        geo_hash,
+        bore_size: tubing.tubi_size.to_string(),
+        transform,
+        aabb,
+        invalid,
+    })
+}
+
+/// The pose a diagnostic straight run is drawn with: local `+Z` spans the two connection
+/// points.
+///
+/// `PdmsTubing::get_transform` orients a box duct along `desire_leave_dir` and refuses a run
+/// with no bore at all — both are right for a solid pipe and wrong here, where the whole point
+/// is to land the dashed line exactly on the connection that could not be built.
+fn diagnostic_centre_line(tubing: &PdmsTubing) -> Option<Transform> {
+    let span = tubing.end_pt - tubing.start_pt;
+    let length = span.length();
+    let direction = span.normalize_or_zero();
+    if !direction.is_normalized() {
+        return None;
+    }
+    let scale = match tubing.tubi_size {
+        TubiSize::BoreSize(bore) => Vec3::new(bore, bore, length),
+        TubiSize::BoxSize((width, height)) => Vec3::new(width, height, length),
+        TubiSize::None => Vec3::new(0.0, 0.0, length),
+    };
+    Some(Transform {
+        translation: tubing.start_pt,
+        rotation: glam::Quat::from_rotation_arc(Vec3::Z, direction),
+        scale,
+    })
+}
+
+/// Render one BRAN's complete straight-run relation set as a Branch-Atomic Replacement.
+///
+/// The delete is intentionally scoped by the BRAN's outgoing edges rather than by the ids
+/// produced this time: a shorter (or empty) new set must remove old high indices.  The content-
+/// addressed transform and AABB records are part of the same transaction, so every committed
+/// relation is immediately resolvable.  This whole script is one ReplaySafe journal entry in a
+/// staged window and the same atomic unit on the direct path.
+fn render_tubi_branch_replace(
+    branch_refno: RefnoEnum,
+    anc_literal: &str,
+    dbnum_literal: &str,
+    rows: &[TubiRelationSpec],
+) -> anyhow::Result<String> {
+    let branch_key = branch_refno.to_pe_key();
+    let mut transforms = BTreeMap::new();
+    let mut aabbs = BTreeMap::new();
+    let mut relations = BTreeMap::new();
+
+    for row in rows {
+        let transform_hash = gen_bytes_hash::<_, 64>(&row.transform);
+        let transform_json = serde_json::to_string(&row.transform)?;
+        transforms.insert(
+            transform_hash,
+            format!("{{ id: trans:⟨{transform_hash}⟩, d: {transform_json} }}"),
+        );
+
+        let aabb_hash = gen_bytes_hash::<_, 64>(&row.aabb);
+        let aabb_json = serde_json::to_string(&row.aabb)?;
+        aabbs.insert(
+            aabb_hash,
+            format!("{{ id: aabb:⟨{aabb_hash}⟩, d: {aabb_json} }}"),
+        );
+
+        let diagnostic = match row.invalid {
+            Some(reason) => format!("invalid: true, invalid_reason: '{}'", reason.as_str()),
+            None => "invalid: false".to_string(),
+        };
+        let relation = format!(
+            "{{ id: tubi_relate:[{branch_key}, {0}], in: {branch_key}, out: inst_geo:⟨{1}⟩, \
+             leave: {2}, arrive: {3}, aabb: aabb:⟨{aabb_hash}⟩, \
+             world_trans: trans:⟨{transform_hash}⟩, bore_size: {4}, {diagnostic}, \
+             anc: {anc_literal}, dbnum: {dbnum_literal} }}",
+            row.index,
+            row.geo_hash,
+            row.leave_refno.to_pe_key(),
+            row.arrive_refno.to_pe_key(),
+            row.bore_size,
+        );
+        anyhow::ensure!(
+            relations.insert(row.index, relation).is_none(),
+            "duplicate straight-run index {} for {branch_refno}",
+            row.index
+        );
+    }
+
+    let mut sql = format!("BEGIN TRANSACTION;\nDELETE {branch_key}->tubi_relate;\n");
+    if !transforms.is_empty() {
+        sql.push_str(&format!(
+            "INSERT IGNORE INTO trans [{}];\n",
+            transforms.into_values().collect::<Vec<_>>().join(",")
+        ));
+        sql.push_str(&format!(
+            "INSERT IGNORE INTO aabb [{}];\n",
+            aabbs.into_values().collect::<Vec<_>>().join(",")
+        ));
+        sql.push_str(&format!(
+            "INSERT RELATION INTO tubi_relate [{}];\n",
+            relations.into_values().collect::<Vec<_>>().join(",")
+        ));
+    }
+    sql.push_str("COMMIT TRANSACTION;");
+    Ok(sql)
 }
 
 /// Creates a fresh trace file, removing the existing one if present
@@ -395,7 +861,6 @@ pub async fn gen_cata_geos(
 
     let total_t = Instant::now();
     // let mut handles = FuturesUnordered::new();
-    let mut tubi_relates = vec![];
     let gen_mesh = db_option.gen_mesh;
     let mut local_al_map = Arc::new(DashMap::new());
     let is_bran = branch_map.len() > 0;
@@ -904,12 +1369,11 @@ pub async fn gen_cata_geos(
     #[cfg(feature = "profile")]
     tracing::info!("Processing branches");
     let unit_cyli_aabb = Aabb::new(Point3::new(-0.5, -0.5, 0.0), Point3::new(0.5, 0.5, 1.0));
-    let mut tubi_shape_insts_data = ShapeInstancesData::default();
-
     let t_process_branch = Instant::now();
     let mut db_time_get_children = 0;
     let mut db_time_get_branch_att = 0;
     let mut db_time_get_branch_transform = 0;
+    let mut tubi_query_time = 0;
 
     // W4（D6）：tubi_relate 的 anc/dbnum 在渲染时解一次、写死进字面量——
     // journal 纯数据化，写回重放不再对持久层求值 fn::anc_u64 / `.dbnum`。
@@ -925,6 +1389,7 @@ pub async fn gen_cata_geos(
     for bran_data in branch_map.iter() {
         let branch_refno = *bran_data.key();
         let children = bran_data.value();
+        let mut branch_tubi_relates = Vec::new();
         let branch_meta = branch_metas
             .get(&branch_refno.refno())
             .unwrap_or(&missing_branch_meta);
@@ -999,45 +1464,24 @@ pub async fn gen_cata_geos(
                 current_tubing.end_pt = bran_ttube_pt;
                 current_tubing.desire_arrive_dir = tdir;
                 let dist = current_tubing.end_pt.distance(current_tubing.start_pt);
-                if dist > TUBI_TOL && current_tubing.is_dir_ok() {
-                    if let Some(t) = current_tubing.get_transform() {
-                        let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
-                        tubi_shape_insts_data.insert_tubi(
-                            branch_refno,
-                            EleGeosInfo {
-                                refno: branch_refno,
-                                sesno: branch_att.sesno(),
-                                cata_hash: Some(tubi_geo_hash.to_string()),
-                                visible: true,
-                                generic_type: get_generic_type(branch_refno)
-                                    .await
-                                    .unwrap_or_default(),
-                                aabb: Some(aabb),
-                                world_transform: t,
-                                flow_pt_indexs: vec![],
-                                cata_refno: None,
-                                is_solid: true,
-                                ..Default::default()
-                            },
-                        );
-                        tubi_relates.push(format!(
-                                "INSERT RELATION INTO tubi_relate [{{ id: tubi_relate:[{}, {}], in: {}, out: inst_geo:⟨{tubi_geo_hash}⟩, \
-                                 leave: {}, arrive: {}, aabb: aabb:⟨{}⟩, world_trans: trans:⟨{}⟩, bore_size: {}, anc: {}, dbnum: {} }}];",
-                                branch_refno.to_pe_key(),
-                                current_tubing.index,
-                                branch_refno.to_pe_key(),
-                                current_tubing.leave_refno.to_pe_key(),
-                                current_tubing.arrive_refno.to_pe_key(),
-                                gen_bytes_hash::<_, 64>(&aabb),
-                                gen_bytes_hash::<_, 64>(&t),
-                                current_tubing.tubi_size.to_string(),
-                                branch_meta.anc_literal(),
-                                branch_meta.dbnum_literal(),
-                            ));
-                        current_tubing.index += 1;
-                    }
+                if dist > TUBI_TOL
+                    && let Some(spec) =
+                        tubi_spec_from(&current_tubing, tubi_geo_hash, &unit_cyli_aabb)
+                {
+                    branch_tubi_relates.push(spec);
+                    current_tubing.index += 1;
                 }
             }
+            let t_query = Instant::now();
+            let sql = render_tubi_branch_replace(
+                branch_refno,
+                &branch_meta.anc_literal(),
+                &branch_meta.dbnum_literal(),
+                &branch_tubi_relates,
+            )?;
+            crate::surreal_retry::execute_model_write(&sql, "replace generated tubi relations")
+                .await?;
+            tubi_query_time += t_query.elapsed().as_millis();
             continue;
         }
 
@@ -1101,106 +1545,64 @@ pub async fn gen_cata_geos(
                         // 合成薄饼管并覆盖构件几何。
                         if dist > TUBI_CONNECT_TOL && !same_dir {
                             if !exclude {
-                                if current_tubing.is_dir_ok() {
-                                    if current_tubing.leave_refno == branch_refno {
-                                        #[cfg(feature = "debug_model")]
-                                        {
-                                            dbg!(&current_tubing);
-                                            println!("管道 bran 开头有个直段.");
-                                        }
-                                        current_tubing.tubi_size = h_tubi_size;
-                                    } else {
-                                        let lstube_cat_ref = aios_core::query_single_by_paths(
-                                            current_tubing.leave_refno,
-                                            &["->LSTU->CATR"],
-                                            &["REFNO"],
-                                        )
-                                        .await
-                                        .map(|x| x.get_refno_or_default())
-                                        .unwrap_or_default();
-                                        current_tubing.tubi_size = fast_model::query_tubi_size(
-                                            current_tubing.leave_refno,
-                                            lstube_cat_ref,
-                                            is_hang,
-                                        )
-                                        .await?;
-                                    }
-                                    #[cfg(feature = "debug_model")]
-                                    dbg!(&current_tubing.tubi_size);
-                                    tubi_geo_hash =
-                                        if matches!(current_tubing.tubi_size, TubiSize::BoxSize(_))
-                                        {
-                                            BOXI_GEO_HASH
-                                        } else {
-                                            TUBI_GEO_HASH
-                                        };
-                                    if let Some(t) = current_tubing.get_transform() {
-                                        let aabb =
-                                            shared::aabb_apply_transform(&unit_cyli_aabb, &t);
-                                        tubi_shape_insts_data.insert_tubi(
-                                            current_tubing.leave_refno,
-                                            EleGeosInfo {
-                                                refno: current_tubing.leave_refno,
-                                                sesno: branch_att.sesno(),
-                                                cata_hash: Some(tubi_geo_hash.to_string()),
-                                                visible: true,
-                                                generic_type: get_generic_type(
-                                                    current_tubing.leave_refno,
-                                                )
-                                                .await
-                                                .unwrap_or_default(),
-                                                aabb: Some(aabb),
-                                                world_transform: t,
-                                                is_solid: true,
-                                                ..Default::default()
-                                            },
-                                        );
-                                        #[cfg(feature = "debug_model")]
-                                        println!(
-                                            "发现直段{}->{}, 方向: {}, 辅助方向: {}, 距离: {:.3}",
-                                            current_tubing.leave_refno.to_e3d_id(),
-                                            current_tubing.arrive_refno.to_e3d_id(),
-                                            to_pdms_vec_str(
-                                                &current_tubing.desire_leave_dir,
-                                                false
-                                            ),
-                                            to_pdms_vec_str(
-                                                &current_tubing.leave_ref_dir.unwrap_or_default(),
-                                                false
-                                            ),
-                                            dist
-                                        );
-                                        let sql = format!(
-                                            "INSERT RELATION INTO tubi_relate [{{ id: tubi_relate:[{}, {}], in: {}, out: inst_geo:⟨{tubi_geo_hash}⟩, \
-                                             leave: {}, arrive: {}, aabb: aabb:⟨{}⟩, world_trans: trans:⟨{}⟩, bore_size: {}, anc: {}, dbnum: {} }}];",
-                                            branch_refno.to_pe_key(),
-                                            current_tubing.index,
-                                            branch_refno.to_pe_key(),
-                                            current_tubing.leave_refno.to_pe_key(),
-                                            current_tubing.arrive_refno.to_pe_key(),
-                                            gen_bytes_hash::<_, 64>(&aabb),
-                                            gen_bytes_hash::<_, 64>(&t),
-                                            current_tubing.tubi_size.to_string(),
-                                            branch_meta.anc_literal(),
-                                            branch_meta.dbnum_literal(),
-                                        );
-                                        tubi_relates.push(sql);
-                                        current_tubing.index += 1;
-                                    }
-                                } else {
+                                // The bore is resolved before the axis check, not inside it: a
+                                // run that fails the check still ships as a diagnostic row and
+                                // still reports the size it would have had.
+                                if current_tubing.leave_refno == branch_refno {
                                     #[cfg(feature = "debug_model")]
                                     {
                                         dbg!(&current_tubing);
-                                        dbg!(to_pdms_vec_str(
-                                            &current_tubing.desire_arrive_dir,
-                                            false
-                                        ));
-                                        dbg!(to_pdms_vec_str(
-                                            &current_tubing.desire_leave_dir,
-                                            false
-                                        ));
-                                        println!("{} 的直段方向有问题", refno.to_string());
+                                        println!("管道 bran 开头有个直段.");
                                     }
+                                    current_tubing.tubi_size = h_tubi_size;
+                                } else {
+                                    let lstube_cat_ref = aios_core::query_single_by_paths(
+                                        current_tubing.leave_refno,
+                                        &["->LSTU->CATR"],
+                                        &["REFNO"],
+                                    )
+                                    .await
+                                    .map(|x| x.get_refno_or_default())
+                                    .unwrap_or_default();
+                                    current_tubing.tubi_size = fast_model::query_tubi_size(
+                                        current_tubing.leave_refno,
+                                        lstube_cat_ref,
+                                        is_hang,
+                                    )
+                                    .await?;
+                                }
+                                #[cfg(feature = "debug_model")]
+                                dbg!(&current_tubing.tubi_size);
+                                tubi_geo_hash =
+                                    if matches!(current_tubing.tubi_size, TubiSize::BoxSize(_)) {
+                                        BOXI_GEO_HASH
+                                    } else {
+                                        TUBI_GEO_HASH
+                                    };
+                                #[cfg(feature = "debug_model")]
+                                if !current_tubing.is_dir_ok() {
+                                    dbg!(&current_tubing);
+                                    dbg!(to_pdms_vec_str(&current_tubing.desire_arrive_dir, false));
+                                    dbg!(to_pdms_vec_str(&current_tubing.desire_leave_dir, false));
+                                    println!("{} 的直段方向有问题，按诊断线型产出", refno);
+                                }
+                                if let Some(spec) =
+                                    tubi_spec_from(&current_tubing, tubi_geo_hash, &unit_cyli_aabb)
+                                {
+                                    #[cfg(feature = "debug_model")]
+                                    println!(
+                                        "发现直段{}->{}, 方向: {}, 辅助方向: {}, 距离: {:.3}",
+                                        current_tubing.leave_refno.to_e3d_id(),
+                                        current_tubing.arrive_refno.to_e3d_id(),
+                                        to_pdms_vec_str(&current_tubing.desire_leave_dir, false),
+                                        to_pdms_vec_str(
+                                            &current_tubing.leave_ref_dir.unwrap_or_default(),
+                                            false
+                                        ),
+                                        dist
+                                    );
+                                    branch_tubi_relates.push(spec);
+                                    current_tubing.index += 1;
                                 }
                             }
                         }
@@ -1240,89 +1642,53 @@ pub async fn gen_cata_geos(
                     current_tubing.end_pt = bran_ttube_pt;
                     current_tubing.arrive_refno = tref;
                     current_tubing.desire_arrive_dir = tdir;
-                    if current_tubing.is_dir_ok() {
-                        if matches!(current_tubing.tubi_size, TubiSize::None) {
-                            let lstube_cat_ref = aios_core::query_single_by_paths(
-                                current_tubing.leave_refno,
-                                &["->LSTU->CATR"],
-                                &["REFNO"],
-                            )
-                            .await
-                            .map(|x| x.get_refno_or_default())
-                            .unwrap_or_default();
-                            current_tubing.tubi_size = fast_model::query_tubi_size(
-                                current_tubing.leave_refno,
-                                lstube_cat_ref,
-                                is_hang,
-                            )
-                            .await?;
-                        }
-                        if let Some(t) = current_tubing.get_transform() {
-                            let aabb = shared::aabb_apply_transform(&unit_cyli_aabb, &t);
-                            tubi_shape_insts_data.insert_tubi(
-                                current_tubing.leave_refno,
-                                EleGeosInfo {
-                                    refno: current_tubing.leave_refno,
-                                    sesno: branch_att.sesno(),
-                                    cata_hash: Some(tubi_geo_hash.to_string()),
-                                    visible: true,
-                                    generic_type: get_generic_type(current_tubing.leave_refno)
-                                        .await
-                                        .unwrap_or_default(),
-                                    aabb: Some(aabb),
-                                    world_transform: t,
-                                    is_solid: true,
-                                    ..Default::default()
-                                },
-                            );
-                            tubi_relates.push(format!(
-                                "INSERT RELATION INTO tubi_relate [{{ id: tubi_relate:[{}, {}], in: {}, out: inst_geo:⟨{tubi_geo_hash}⟩, \
-                                 leave: {}, arrive: {}, aabb: aabb:⟨{}⟩, world_trans: trans:⟨{}⟩, bore_size: {}, anc: {}, dbnum: {} }}];",
-                                branch_refno.to_pe_key(),
-                                current_tubing.index,
-                                branch_refno.to_pe_key(),
-                                current_tubing.leave_refno.to_pe_key(),
-                                current_tubing.arrive_refno.to_pe_key(),
-                                gen_bytes_hash::<_, 64>(&aabb),
-                                gen_bytes_hash::<_, 64>(&t),
-                                current_tubing.tubi_size.to_string(),
-                                branch_meta.anc_literal(),
-                                branch_meta.dbnum_literal(),
-                            ));
-                            current_tubing.index += 1;
-                        }
-                    } else {
-                        #[cfg(feature = "debug_model")]
-                        {
-                            dbg!(current_tubing.desire_arrive_dir);
-                            println!("{} 的直段方向有问题", refno.to_string());
-                        }
+                    if matches!(current_tubing.tubi_size, TubiSize::None) {
+                        let lstube_cat_ref = aios_core::query_single_by_paths(
+                            current_tubing.leave_refno,
+                            &["->LSTU->CATR"],
+                            &["REFNO"],
+                        )
+                        .await
+                        .map(|x| x.get_refno_or_default())
+                        .unwrap_or_default();
+                        current_tubing.tubi_size = fast_model::query_tubi_size(
+                            current_tubing.leave_refno,
+                            lstube_cat_ref,
+                            is_hang,
+                        )
+                        .await?;
+                    }
+                    #[cfg(feature = "debug_model")]
+                    if !current_tubing.is_dir_ok() {
+                        dbg!(current_tubing.desire_arrive_dir);
+                        println!("{refno} 的尾段方向有问题，按诊断线型产出");
+                    }
+                    if let Some(spec) =
+                        tubi_spec_from(&current_tubing, tubi_geo_hash, &unit_cyli_aabb)
+                    {
+                        branch_tubi_relates.push(spec);
+                        current_tubing.index += 1;
                     }
                 }
             }
             leave_type = arrive_type.to_string();
         }
+        let t_query = Instant::now();
+        let sql = render_tubi_branch_replace(
+            branch_refno,
+            &branch_meta.anc_literal(),
+            &branch_meta.dbnum_literal(),
+            &branch_tubi_relates,
+        )?;
+        crate::surreal_retry::execute_model_write(&sql, "replace generated tubi relations").await?;
+        tubi_query_time += t_query.elapsed().as_millis();
     }
     let process_branch_time = t_process_branch.elapsed().as_millis();
 
-    let t_send_data = Instant::now();
-    if tubi_shape_insts_data.inst_cnt() > 0 {
-        crate::fast_model::shape_save::send_shape_batch(&sender, tubi_shape_insts_data)
-            .await
-            .map_err(|error| anyhow::anyhow!("send tubi shape instances failed: {error}"))?;
-    }
-    let send_data_time = t_send_data.elapsed().as_millis();
-
-    let mut tubi_query_time = 0;
-    if !tubi_relates.is_empty() {
-        let t_query = Instant::now();
-        crate::surreal_retry::execute_model_write(
-            &tubi_relates.join(""),
-            "persist generated tubi relations",
-        )
-        .await?;
-        tubi_query_time = t_query.elapsed().as_millis();
-    }
+    // Straight runs are persisted exclusively as `tubi_relate`.  Feeding them
+    // through ShapeInstancesData would address `inst_relate:<leave_refno>` and
+    // replace the catalogue relation of the ELBO/TEE/VALV/BEND that owns the run.
+    let send_data_time = 0;
 
     // 获取并打印汇总统计信息
     let mut time_stats = HashMap::new();
