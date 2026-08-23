@@ -48,6 +48,20 @@ pub struct DbModelInstRefnos {
     pub prim_refnos: Arc<Vec<RefnoEnum>>,
 }
 
+/// LOOP owner 只准由 `loop_model` 生成，不能同时落进 `prim_model`。
+///
+/// `NREV` / `REVO` 同时出现在 aios-core 的 primitive 与 loop-owner noun 表里：前者
+/// 表示它们最终是基本体参数，后者表示参数必须先从子 LOOP/PLOO 拼出来。若两条路都跑，
+/// 普通批次会在 `prim_model` 静默跳过；定向批次则把这个预期的 `None` 误报成 hard fail。
+fn exclude_loop_owned_primitives(
+    mut primitive_refnos: Vec<RefnoEnum>,
+    loop_owner_refnos: &[RefnoEnum],
+) -> Vec<RefnoEnum> {
+    let loop_owners: HashSet<_> = loop_owner_refnos.iter().copied().collect();
+    primitive_refnos.retain(|refno| !loop_owners.contains(refno));
+    primitive_refnos
+}
+
 impl DbModelInstRefnos {
     pub async fn execute_gen_inst_meshes(
         &self,
@@ -585,11 +599,12 @@ pub async fn gen_geos_data_by_dbnum(
         // all_handles.push(handle);
     }
 
-    let target_prim_refnos = Arc::new(
+    let target_prim_refnos = Arc::new(exclude_loop_owned_primitives(
         query_type_refnos_by_dbnum(&GNERAL_PRIM_NOUN_NAMES, dbno, None, gen_history)
             .await
             .unwrap_or_default(),
-    );
+        target_loop_owner_refnos.as_slice(),
+    ));
 
     println!("当前分段使用基本体数量: {}", target_prim_refnos.len());
     //基本元件的生成
@@ -828,6 +843,7 @@ pub async fn gen_geos_data(
             .await?
             .into_iter()
             .collect();
+        let loop_owned_for_prim = target_loop_owner_refnos.clone();
         if gen_loop_flag && !target_loop_owner_refnos.is_empty() {
             println!("当前分段使用LOOP的数量: {}", target_loop_owner_refnos.len());
             let sjus_map_clone = loop_sjus_map_arc.clone();
@@ -847,7 +863,7 @@ pub async fn gen_geos_data(
             all_handles.push(handle);
         }
 
-        let target_prim_refnos: Vec<RefnoEnum> =
+        let target_prim_refnos: Vec<RefnoEnum> = exclude_loop_owned_primitives(
             aios_core::query_multi_deep_versioned_children_filter_inst(
                 target_refnos,
                 &GNERAL_PRIM_NOUN_NAMES,
@@ -855,7 +871,9 @@ pub async fn gen_geos_data(
             )
             .await?
             .into_iter()
-            .collect();
+            .collect(),
+            &loop_owned_for_prim,
+        );
 
         //基本元件的生成
         if gen_prim_flag && !target_prim_refnos.is_empty() {
@@ -938,6 +956,16 @@ pub async fn query_tubi_size(
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
+
+    #[test]
+    fn loop_owned_revolution_is_not_sent_to_the_primitive_worker() {
+        let nrev = RefnoEnum::from("24381/36946");
+        let box_refno = RefnoEnum::from("24381/1");
+
+        let routed = exclude_loop_owned_primitives(vec![nrev, box_refno], &[nrev]);
+
+        assert_eq!(routed, vec![box_refno]);
+    }
 
     /// 定向重生成不得整体写回 `accel_tree.bin`：文件约 21 MB，而定向路径一次可能只改了
     /// 一个属性，合批失败回退逐根时更是每根写一遍。增量变更由 `mark_aabb_tree_dirty` 加
