@@ -1,0 +1,78 @@
+-- 只读二分：db8000_bran26229_spec_probe.mac 整个崩在 0xC0000005，而它一条
+-- 写操作都没有。这里把每一步各自开一个 ALPHA LOG 并当场 END——ALPHA LOG END
+-- 会落盘，所以「最后一个存在的 stepNN 文件」就是崩溃点的上一步。
+--
+-- 先跑对照组：/C-OR-1R345-C 的 FTUB（=24384/23262，今天已经成功改过两次）。
+-- 对照组过了、26229 组崩了，就能把结论收敛到「这条 Copy-of 支管自身」。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step01.log" OVER
+$P STEP01-CONTROL-NAV
+=24384/23262
+Q REF
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step02.log" OVER
+$P STEP02-CONTROL-SPRE
+Q SPRE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step03.log" OVER
+$P STEP03-CONTROL-ISPE
+Q ISPE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step04.log" OVER
+$P STEP04-BRAN26229-NAV
+=24384/26229
+Q REF
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step05.log" OVER
+$P STEP05-BRAN26229-SPRE
+Q SPRE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step06.log" OVER
+$P STEP06-BRAN26229-PSPE
+Q PSPE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step07.log" OVER
+$P STEP07-BRAN26229-ISPE
+Q ISPE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step08.log" OVER
+$P STEP08-BRAN26229-BLTP
+Q BLTP
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step09.log" OVER
+$P STEP09-ELBO26239-NAV
+=24384/26239
+Q REF
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step10.log" OVER
+$P STEP10-ELBO26239-SPRE
+Q SPRE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step11.log" OVER
+$P STEP11-ELBO26239-ISPE
+Q ISPE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step12.log" OVER
+$P STEP12-ELBO26239-CATR
+Q CATR
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step13.log" OVER
+$P STEP13-ELBO26239-LSTU
+Q LSTU
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/bisect/step14.log" OVER
+$P STEP14-ALL-DONE
+ALPHA LOG END

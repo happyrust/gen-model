@@ -1,0 +1,37 @@
+-- 房间实机场景（f8/RL1/RL2/RL3）靶点只读定标探针。
+-- 服务于 docs/plans/2026-08-19-room-incremental-ams-copy-test-plan.md 的 P1 前置。
+-- 用法：powershell -File scripts\Test-Channel.ps1 -Macro scripts/e3d/room_targets_probe.mac
+--   （在 test-increment 环境下执行，探的是隔离副本。）
+--
+-- 【硬性纪律，2026-08-19 实测】这套无人值守 TTY runtime（shadow_e3d31_gen_model_test）
+-- 对"导航一个不存在的名字"直接访问违例退出（0xC0000005），不是普通 PML 报错。
+-- 因此本宏只许导航已证实存在的名字；新增靶点前先用 aios_db（parse.element/字节搜）
+-- 在文件侧核实存在性，再进 TTY。K101（db1112 的 /6KA-* 房间树）已随 1112 文件回退
+-- （722 < 897）整体消失，勿加回来。
+--
+-- 不改任何数据、不 SAVEWORK、不 QUIT——收尾由 runner 的 wrapper 负责。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/room_targets_probe.log" OVER
+$P ROOM_TARGETS_PROBE_BEGIN
+$P SECTION_CAP_BRANCH_1WCC1135_B1
+/1WCC1135/B1
+Q CE
+VAR !CAPS COLLECT ALL CAP FOR CE
+$!CAPS[1]
+Q CE
+Q TYPE
+Q OWNE
+Q POS
+$P SECTION_R512_FRMW
+/1RX-RM05-R512
+Q CE
+Q TYPE
+Q NAME
+Q OWNE
+Q MEMB
+$P SECTION_R512_VOLU_PANELS
+/1RX-RM05-R512-VOLU
+Q CE
+Q MEMB
+$P ROOM_TARGETS_PROBE_DONE
+ALPHA LOG END

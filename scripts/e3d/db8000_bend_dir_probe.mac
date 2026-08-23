@@ -1,0 +1,40 @@
+-- db8000 隐式管段方向探针 / 只读，不 SAVEWORK、不建会话。
+--
+-- 目标支管：=24384/26229（BRAN /Copy-of-1RCV0101-60.3-VMB-R90-R332]R333）。
+-- 库里它有 6 条 tubi_relate 隐式管段，末两条（leave 26239→arrive 26246、
+-- leave 26246→尾端）带 invalid_reason='direction'，是管线自己判出来的。
+-- 这条探针把这两段两头构件的 E3D 权威姿态读回来，作为后续 apply/restore 宏
+-- 写死基线值的依据——按既有纪律：没跑过探针的库不许复用位移宏。
+--
+-- 支管名字里带 ']'，按名导航不稳，这里一律用 refno 导航（=24384/23262 那轮
+-- 已经验证 db8000 的 TTY 会话支持 refno 导航）。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bend_dir_probe.log" OVER
+$P CODEX-DB8000-BEND-DIR-PROBE-ALIVE
+=24384/26229
+Q CE
+Q TYPE
+Q REF
+Q NAME
+Q HPOS
+Q HDIR
+Q TPOS
+Q TDIR
+Q MEMB
+=24384/26239
+Q CE
+Q TYPE
+Q REF
+Q POS
+Q ORI
+=24384/26246
+Q CE
+Q TYPE
+Q REF
+Q POS
+Q ORI
+Q ANGL
+Q LEAV
+Q ARRI
+$P CODEX-DB8000-BEND-DIR-PROBE-DONE
+ALPHA LOG END

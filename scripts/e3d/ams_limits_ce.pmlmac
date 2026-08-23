@@ -1,0 +1,39 @@
+$(H
+Confirm that the repaired Limits CE command loaded during Design startup is
+present.  Replacing an already registered global command leaves the Ribbon's
+managed delegate bound to the retired instance, so an existing command must be
+kept intact.
+$)
+!traceFile = object FILE('E:/reverse/e3d/ams_limits_ce_trace.txt')
+!trace = ARRAY()
+
+if undefined(!!designViewLimits) then
+  pml rehash all
+  handle any
+    !trace.append('FAIL rehash: ' & !!error.text)
+    !traceFile.writeFile('OVERWRITE', !trace)
+    return
+  elsehandle none
+    !trace.append('rehash ok')
+  endhandle
+
+  pml load command !!designViewLimits
+  handle any
+    !trace.append('FAIL load: ' & !!error.text)
+    !traceFile.writeFile('OVERWRITE', !trace)
+    return
+  elsehandle none
+    !trace.append('load ok')
+  endhandle
+
+  !!designViewLimits.register()
+  handle any
+    !trace.append('FAIL register: ' & !!error.text)
+  elsehandle none
+    !trace.append('PASS LIMITS_CE registered (late load)')
+  endhandle
+else
+  !trace.append('PASS LIMITS_CE registered (preloaded instance preserved)')
+endif
+!traceFile.writeFile('OVERWRITE', !trace)
+return

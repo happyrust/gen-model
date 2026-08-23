@@ -1,0 +1,37 @@
+-- db8000 隐式管段方向判定 / apply 腿：把 ELBOW 3 从立管轴线上横向挪开 500mm。
+--
+-- 目标构件：ELBO 3 of BRANCH /Copy-of-1RCV0101-60.3-VMB-R90-R332]R333
+--          （= 24384/26239）。
+--
+-- 为什么挑它、为什么这么挪：
+--   ELBO 2（=24384/26238）在 W 2306 S 8260 U 334，ELBO 3 在 W 2306 S 8260 U 921
+--   ——E/N 完全相同，中间那条隐式管段（tubi_relate 第 3 条，leave 26238 →
+--   arrive 26239）是一根纯立管，库里判定 invalid=false。
+--   沿 U 挪不破坏共线性（只是管子变长），必须横向挪：W 2306 → W 1806。
+--   挪完 ELBO 2 的 leave 轴仍指向正上方，而两端点连线已经斜了，方向判据应当
+--   失配——预期这一条从 valid 翻成 invalid_reason='direction'，
+--   dbnum 8000 的 invalid 总数从 2 变成 3。
+--
+-- 基线来自 db8000_bend_dir_probe2.mac 实测（本轮现跑）：
+--   Position W 2306mm S 8260mm U 921mm
+--   Orientation Y is E 43 N and Z is N 43 W   （本腿不动朝向）
+--
+-- 纪律：恰好一个 SAVEWORK；不写 QUIT/FINISH（会话归 l3_suite driver 的 wrapper）；
+-- 用 refno 导航（支管名字里带 ']'，按名导航不稳）。
+--
+-- restore 搭档：db8000_elbo3_offaxis_restore.mac
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_elbo3_offaxis_apply.log" OVER
+$P CODEX-DB8000-ELBO3-OFFAXIS-APPLY-ALIVE
+=24384/26239
+Q CE
+Q TYPE
+Q REF
+Q POS
+POS W 1806mm S 8260mm U 921mm
+Q CE
+Q REF
+Q POS
+SAVEWORK 'CODEX db8000 ELBO 3 of /Copy-of-1RCV0101 off riser axis (W2306 -> W1806)'
+$P CODEX-DB8000-ELBO3-OFFAXIS-APPLY-DONE
+ALPHA LOG END

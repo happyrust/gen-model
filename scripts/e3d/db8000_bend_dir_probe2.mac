@@ -1,0 +1,36 @@
+-- db8000 隐式管段方向探针 / 第二程：把 26229 支管前半段（目前判定为 valid 的
+-- 那几段）两头构件的权威姿态读回来。只读，不 SAVEWORK、不建会话。
+--
+-- 用途：为「挑一个当前 valid 的构件把它挪歪、看 invalid_reason 会不会翻成
+-- direction」这轮 apply/restore 宏提供写死的基线值。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bend_dir_probe2.log" OVER
+$P CODEX-DB8000-BEND-DIR-PROBE2-ALIVE
+=24384/26230
+Q CE
+Q TYPE
+Q REF
+Q POS
+Q ORI
+=24384/26231
+Q CE
+Q TYPE
+Q REF
+Q POS
+Q ORI
+Q ANGL
+=24384/26238
+Q CE
+Q TYPE
+Q REF
+Q POS
+Q ORI
+Q ANGL
+/Copy-of-1RCV002VP
+Q CE
+Q TYPE
+Q REF
+Q POS
+Q ORI
+$P CODEX-DB8000-BEND-DIR-PROBE2-DONE
+ALPHA LOG END

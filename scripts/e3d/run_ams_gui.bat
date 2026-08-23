@@ -16,6 +16,10 @@ if not defined MDB set "MDB=/ALL"
 if not defined E3D_LOGIN set "E3D_LOGIN=SYSTEM/XXXXXX"
 
 set "REPAIRED_ROOT=E:\reverse\e3d"
+set "E3D_TEMP_ROOT=%REPAIRED_ROOT%\temp\frida"
+if not exist "%E3D_TEMP_ROOT%" mkdir "%E3D_TEMP_ROOT%"
+set "TEMP=%E3D_TEMP_ROOT%"
+set "TMP=%E3D_TEMP_ROOT%"
 set "PROJECTS_ROOT=D:\AVEVA\Projects\E3D3.1"
 set "PROJECT_ROOT=%PROJECTS_ROOT%\AvevaMarineSample"
 set "PROJECT_EVARS=%PROJECT_ROOT%\evarsAvevaMarineSample.bat"
@@ -24,12 +28,15 @@ set "AMS_GRAPHICS_FINISHER=%REPAIRED_ROOT%\finish_ams_graphics_document.ps1"
 set "AMS_RUNTIME_VERIFIER=%REPAIRED_ROOT%\verify_ams_runtime_health.ps1"
 set "SHADOW_INSTALL=%REPAIRED_ROOT%\shadow_e3d31_aps_all"
 set "ACTIVE_PMLLIB=%REPAIRED_ROOT%\PMLLIB"
+set "SHADOW_PMLLIB=%SHADOW_INSTALL%\PMLLIB"
 set "SAFE_COPY_DLL=%REPAIRED_ROOT%\artifacts\design_edit_runtime_fix_20260811\Aveva.Core.Explorer.safe_copy.dll"
 set "SELF_PASTE_GUARD_DLL=%REPAIRED_ROOT%\artifacts\copy_paste_self_guard_20260809\ExplorerControl.patched.dll"
 set "DRAWLIST_MENU_FIX_DLL=%REPAIRED_ROOT%\artifacts\model_explorer_nested_add_remove_fix_20260815\DrawListAddin.active_empty_routing_fixed.dll"
 set "STEELWORK_GLOBAL_REPAIR=%~dp0Repair-E3dSteelworkGlobals.ps1"
 set "STEELWORK_GLOBAL_INIT=%~dp0Initialize-E3dSteelworkGlobals.ps1"
 set "LIMITS_CE_REPAIR=%~dp0Repair-E3dLimitsCe.ps1"
+set "LIMITS_CE_INIT=%~dp0Initialize-E3dLimitsCe.ps1"
+set "LIMITS_CE_MACRO=%~dp0ams_limits_ce.pmlmac"
 set "AMS_USER_DIR=%REPAIRED_ROOT%\aveva_user_ams_d_project"
 set "AMS_WORK_DIR=%REPAIRED_ROOT%\aveva_work_ams_d_project"
 
@@ -44,12 +51,15 @@ for %%F in (
   "%PROJECT_EVARS%"
   "%SHADOW_INSTALL%\des.exe"
   "%ACTIVE_PMLLIB%\common\commands\designviewLimits.pmlcmd"
+  "%SHADOW_PMLLIB%\common\commands\designviewLimits.pmlcmd"
   "%SAFE_COPY_DLL%"
   "%SELF_PASTE_GUARD_DLL%"
   "%DRAWLIST_MENU_FIX_DLL%"
   "%STEELWORK_GLOBAL_REPAIR%"
   "%STEELWORK_GLOBAL_INIT%"
   "%LIMITS_CE_REPAIR%"
+  "%LIMITS_CE_INIT%"
+  "%LIMITS_CE_MACRO%"
 ) do if not exist "%%~F" (
   echo [FAIL] Missing required file: %%~F
   exit /b 1
@@ -89,6 +99,9 @@ rem with an empty local drawlist, so ensure CE is present before applying limits
 pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%LIMITS_CE_REPAIR%" ^
   -PmlLibRoot "%ACTIVE_PMLLIB%"
 if errorlevel 1 exit /b 1
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%LIMITS_CE_REPAIR%" ^
+  -PmlLibRoot "%SHADOW_PMLLIB%"
+if errorlevel 1 exit /b 1
 
 pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%E3D_LAUNCHER%" ^
   -UseShadowInstall ^
@@ -119,6 +132,12 @@ set "LAUNCH_EXIT=%ERRORLEVEL%"
 if not "%LAUNCH_EXIT%"=="0" goto launch_failed
 
 pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%AMS_GRAPHICS_FINISHER%"
+set "LAUNCH_EXIT=%ERRORLEVEL%"
+if not "%LAUNCH_EXIT%"=="0" goto launch_failed
+
+rem Preserve the command instance registered by Design startup. Replacing that
+rem global after registration leaves the Ribbon delegate pointing at a dead object.
+pwsh.exe -NoProfile -ExecutionPolicy Bypass -File "%LIMITS_CE_INIT%"
 set "LAUNCH_EXIT=%ERRORLEVEL%"
 if not "%LAUNCH_EXIT%"=="0" goto launch_failed
 

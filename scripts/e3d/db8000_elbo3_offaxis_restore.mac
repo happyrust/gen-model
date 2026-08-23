@@ -1,0 +1,28 @@
+-- db8000 隐式管段方向判定 / restore 腿：把 ELBOW 3 放回立管轴线上。
+--
+-- 目标构件：ELBO 3 of BRANCH /Copy-of-1RCV0101-60.3-VMB-R90-R332]R333
+--          （= 24384/26239）。
+-- 基线来自 db8000_bend_dir_probe2.mac 实测：Position W 2306mm S 8260mm U 921mm。
+-- 三个分量全写，让这条腿自身就是完整的终态声明，不依赖「只改过 W」这个记忆。
+--
+-- 跑完这条腿本轮对库的净变更为零（apply + restore 各占一个会话号）：
+-- 增量侧应当把第 3 条隐式管段的 invalid 收敛回 false，dbnum 8000 的 invalid
+-- 总数回到 2（末两条 direction 是这条支管本来就有的问题，不归本轮管）。
+--
+-- 纪律同 apply 腿：恰好一个 SAVEWORK，不写 QUIT/FINISH，用 refno 导航。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_elbo3_offaxis_restore.log" OVER
+$P CODEX-DB8000-ELBO3-OFFAXIS-RESTORE-ALIVE
+=24384/26239
+Q CE
+Q TYPE
+Q REF
+Q POS
+POS W 2306mm S 8260mm U 921mm
+Q CE
+Q REF
+Q POS
+Q ORI
+SAVEWORK 'CODEX db8000 ELBO 3 of /Copy-of-1RCV0101 back on riser axis (restore W2306)'
+$P CODEX-DB8000-ELBO3-OFFAXIS-RESTORE-DONE
+ALPHA LOG END

@@ -1,0 +1,17 @@
+-- 二分用：把 ELBOW 3（=24384/26239）沿立管轴线上抬 500mm（W/S 不动）。
+-- 目的只有一个——分清「挪这个构件就会崩」还是「只有挪出轴线才崩」。
+-- 若本腿成功，紧随其后用 db8000_elbo3_offaxis_restore.mac 放回 U 921。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_elbo3_onaxis_probe.log" OVER
+$P CODEX-DB8000-ELBO3-ONAXIS-ALIVE
+=24384/26239
+Q CE
+Q REF
+Q POS
+POS W 2306mm S 8260mm U 1421mm
+Q CE
+Q REF
+Q POS
+SAVEWORK 'CODEX db8000 ELBO 3 on-axis bisect (U921 -> U1421)'
+$P CODEX-DB8000-ELBO3-ONAXIS-DONE
+ALPHA LOG END

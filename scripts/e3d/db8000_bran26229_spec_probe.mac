@@ -1,0 +1,29 @@
+-- 只读：查 26229 支管本身与几个构件的规格/目录引用，判断这条 "Copy-of" 夹具
+-- 支管是不是引用了当前 MDB 里不存在的 SPEC/CATREF——那会解释「一改构件 POS
+-- 就 0xC0000005」这个确定性崩溃。不 SAVEWORK、不建会话。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bran26229_spec_probe.log" OVER
+$P CODEX-DB8000-SPEC-PROBE-ALIVE
+=24384/26229
+Q CE
+Q REF
+Q SPRE
+Q PSPE
+Q ISPE
+Q BLTP
+=24384/26239
+Q CE
+Q REF
+Q SPRE
+Q ISPE
+Q CATR
+Q LSTU
+=24384/26238
+Q CE
+Q REF
+Q SPRE
+Q ISPE
+Q CATR
+Q LSTU
+$P CODEX-DB8000-SPEC-PROBE-DONE
+ALPHA LOG END
