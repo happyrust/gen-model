@@ -258,6 +258,16 @@ extern crate anyhow;
 //     Ok(())
 // }
 
+/// 进程起点，供「初始化完成」横幅报一次总耗时。
+///
+/// `run_app`（服务正门）与 `run_cli`（python 绑定、l3_suite 夹具直接调的那道门）
+/// 都在入口点一次名。`OnceLock` 让重复点名幂等，取到的永远是最早那次。
+static PROCESS_STARTED: OnceLock<Instant> = OnceLock::new();
+
+fn mark_process_start() -> Instant {
+    *PROCESS_STARTED.get_or_init(Instant::now)
+}
+
 /// 启动步骤耗时的人类可读渲染："0.42s" / "3m07.3s" / "1h23m45s"。
 pub(crate) fn fmt_elapsed(elapsed: std::time::Duration) -> String {
     let secs = elapsed.as_secs_f64();
@@ -276,6 +286,7 @@ pub(crate) fn fmt_elapsed(elapsed: std::time::Duration) -> String {
 }
 
 pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
+    let startup_started = mark_process_start();
     // Must precede logging, schema repair, watcher startup and every model/
     // room write. A second process exits here instead of becoming another
     // consumer of the same durable pending table.
@@ -697,6 +708,11 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         futures::future::join_all(handles).await;
     }
 
+    // 到这里为止的每一步都只在启动跑一次；再往下 `watch_task.await` 就只是挂着
+    // 等增量了。此前日志里没有这条边界线——「还在初始化」与「已经在监听、只是
+    // 这一轮没事发生」打出来的东西一模一样，只能靠猜。
+    print_startup_complete_banner(&db_option, sync_live, startup_started);
+
     if let Some(watch_task) = watch_task {
         let _ = watch_task.await;
     }
@@ -712,11 +728,50 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 「初始化完成 → 进入增量监听」这条边界的横幅。
+///
+/// 状态在这里复述一遍，而不是只打一行「完成」：阶段开关、监听限定、HTTP 地址
+/// 是出问题时第一批要确认的东西，而它们各自散在前面几十行启动日志里——等真出事
+/// 时，那些行早被稳态轮询的重扫日志刷走了。
+fn print_startup_complete_banner(db_option: &DbOption, sync_live: bool, started: Instant) {
+    const RULE: &str = "==========================================================";
+    println!("{RULE}");
+    println!(
+        "初始化完成：项目 {}，启动总耗时 {}",
+        db_option.project_name,
+        fmt_elapsed(started.elapsed())
+    );
+    println!(
+        "  增量阶段：data={} model={} room={}（顺序：数据 → 模型 → 房间）",
+        crate::options::data_incremental(),
+        crate::options::model_incremental(),
+        crate::options::room_incremental()
+    );
+    if let Some(notice) = crate::data_interface::watch_scope::mode_notice() {
+        println!("  *** {notice}");
+    }
+    #[cfg(feature = "http_api")]
+    {
+        let ext = crate::get_db_option_ext();
+        if let Some(addr) = ext.http_api_addr.as_deref() {
+            println!("  HTTP API：http://{addr}/api/v1");
+        }
+    }
+    if sync_live {
+        println!("已进入增量更新监听：库文件一有变化就入队处理，往下的日志都是运行期输出。");
+    } else {
+        println!("sync_live=false：不进文件监听，增量只能由 HTTP preview/execute 手动触发。");
+    }
+    println!("{RULE}");
+}
+
 /// 运行app
 pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     use std::sync::mpsc;
 
     use aios_core::init_surreal;
+
+    mark_process_start();
     // 如果传入的是DbOptionExt，则取其内部的DbOption
     let db_option: DbOption = option
         .map(|o| options::apply_asset_root(o.inner))
