@@ -219,8 +219,16 @@ pub fn mark_insts_flat_dirty() {
 /// 这里，不进 journal、不碰暂存窗口。
 ///
 /// 挂两处：启动序列（存量回填 = 首轮全量，pre-P4 库一次付清）＋ worker 空闲轮
-/// （脏位门控）。行只会「缺」（NONE，读侧走 slim 兜底）不会「错」：置 meshed
+/// （脏位门控）。新行只会「缺」（NONE，读侧走 slim 兜底）不会「错」：置 meshed
 /// 的生成批与建行同任务同 refno 锚点，任务成功 ⇒ 可达 geo 全 meshed|bad。
+///
+/// 但存量库里有一类历史「错」行（Spec 019）：2026-08-20 之前布尔成功只写
+/// `booled_id` 不同步平表，而首轮全量回填按正体原语落了 `insts_flat`——
+/// 行「三副本齐活」，读侧不落 slim 兜底，端给查看者的是带原语缩放的错误正体
+/// （RM13 事故，`docs/evidence/2026-08-20-rm13-dome-live/`）。第二段**修复循环**
+/// 专收这批行：`booled_id` 有值（空串与任意大小写字面 'none' 当缺失）而
+/// `insts_flat` 与成品不符（NONE / 空数组 / 首元素 geo_hash 不等）的行，改写为
+/// 单位变换成品单实例。幂等自收敛——修完不再命中谓词，常态启动第二段圈 0 行。
 pub async fn sweep_inst_relate_flat() -> anyhow::Result<usize> {
     const BATCH: usize = 500;
     println!("正在清扫 inst_relate 平表副本（insts_flat 物化；pre-P4 存量库首轮为全表）...");
@@ -248,11 +256,51 @@ pub async fn sweep_inst_relate_flat() -> anyhow::Result<usize> {
             crate::fmt_elapsed(started.elapsed())
         );
     }
+    // 修复段（Spec 019 FR-001/FR-003）：收「booled_id 有值而 insts_flat 与成品
+    // 不符」的历史错行。谓词刻意不设 aabb 门槛——布尔行必然可见，个别不可见
+    // 行修了也无害。空串/字面 'none' 当缺失跳过（FR-006），只计数不改写。
+    // 函数实参一律 `?? ''` / `?? []` 兜底：生产 8009 服务器对 NONE 实参直接
+    // 报错（AND/OR 不短路，另一臂照样求值），mem/fork 2.1.4 反而容忍——
+    // 这是三引擎的真实分叉，2026-08-20 实测钉死。
+    let mut repaired = 0usize;
+    loop {
+        let sql = format!(
+            "LET $rows = SELECT VALUE id FROM inst_relate \
+             WHERE booled_id != NONE AND booled_id != '' AND string::lowercase(booled_id ?? '') != 'none' \
+             AND (insts_flat = NONE OR array::first(insts_flat ?? []).geo_hash != booled_id) LIMIT {BATCH};\n\
+             UPDATE $rows SET insts_flat = [{{ geo_hash: booled_id }}] RETURN NONE;\n\
+             RETURN array::len($rows);"
+        );
+        let mut response = SUL_DB.query(sql).await?.check()?;
+        let fixed: Option<usize> = response.take(2)?;
+        let fixed = fixed.unwrap_or(0);
+        repaired += fixed;
+        if fixed < BATCH {
+            break;
+        }
+        println!(
+            "  inst_relate 布尔平表修复中：累计 {repaired} 行，耗时 {}",
+            crate::fmt_elapsed(started.elapsed())
+        );
+    }
+    // 脏值可见性（FR-006）：不修、不藏，非零就喊出来留给人裁决。
+    let mut response = SUL_DB
+        .query(
+            "RETURN array::len((SELECT VALUE id FROM inst_relate \
+             WHERE booled_id = '' OR string::lowercase(booled_id ?? '') = 'none'));",
+        )
+        .await?
+        .check()?;
+    let junk: Option<usize> = response.take(0)?;
+    let junk = junk.unwrap_or(0);
+    if junk > 0 {
+        println!("  警告：{junk} 行 booled_id 为空串/字面 'none' 脏值，按无成品处理，平表未改写");
+    }
     println!(
-        "inst_relate 平表副本清扫完成：补 {total} 行，耗时 {}",
+        "inst_relate 平表副本清扫完成：补 {total} 行、修复布尔存量 {repaired} 行，耗时 {}",
         crate::fmt_elapsed(started.elapsed())
     );
-    Ok(total)
+    Ok(total + repaired)
 }
 
 /// 空闲轮入口：脏位置位过才真的扫；失败把脏位放回去，下一轮重试。
@@ -1174,6 +1222,36 @@ mod tests {
             .0;
         assert!(body.contains("IF booled_id != NONE THEN"), "{body}");
         assert!(body.contains("geo_hash: booled_id"), "{body}");
+    }
+
+    /// Spec 019 FR-001/FR-003/FR-006：清扫必须带存量修复段——旧代码时代
+    /// 「先回填正体、后写 booled_id」的行 `insts_flat` 是错值而非缺值，
+    /// 只圈 NONE 的清扫永远修不到它们。删掉修复段本测试必须红。
+    #[test]
+    fn flat_sweep_repairs_stale_booled_rows() {
+        let source = include_str!("pdms_inst.rs");
+        let body = source
+            .split_once("pub async fn sweep_inst_relate_flat()")
+            .expect("flat sweep exists")
+            .1
+            .split_once("pub async fn sweep_inst_relate_flat_if_dirty()")
+            .expect("flat sweep boundary")
+            .0;
+        assert!(
+            body.contains("array::first(insts_flat ?? []).geo_hash != booled_id"),
+            "修复段必须圈「booled_id 有值而 insts_flat 与之不符」的行，\
+             且 array::first 实参必须 `?? []` 兜底（生产服对 NONE 实参报错）：{body}"
+        );
+        assert!(
+            body.contains("SET insts_flat = [{{ geo_hash: booled_id }}]"),
+            "修复段必须把脏行改写为单位变换成品单实例：{body}"
+        );
+        assert!(
+            body.contains("booled_id != ''")
+                && body.contains("string::lowercase(booled_id ?? '') != 'none'"),
+            "空串/字面 'none' 脏值必须当缺失处理（lowercase 实参 `?? ''` 兜底），\
+             不得写进 insts_flat：{body}"
+        );
     }
 
     fn normal_batch(refno_text: &str, visible: bool) -> ShapeInstancesData {

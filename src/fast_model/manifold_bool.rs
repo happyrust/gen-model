@@ -565,8 +565,10 @@ pub async fn apply_insts_boolean_manifold_single(
                                         crate::data_interface::dbnum_state::escape_surql_str(
                                             &mesh_id,
                                         );
+                                    // booled=true 与 OCC 路同形（Spec 019 FR-005）：
+                                    // 两引擎产出的行按 booled 过滤时不得分叉。
                                     update_sql.push_str(&format!(
-                                        "update {} set booled_id='{}', insts_flat=[{{geo_hash:'{}'}}];",
+                                        "update {} set booled_id='{}', booled=true, insts_flat=[{{geo_hash:'{}'}}];",
                                         &inst_relate_id, mesh_id_literal, mesh_id_literal
                                     ));
                                     // 做成了就销账，别让修好的件一直挂在降级清单上。
@@ -750,6 +752,7 @@ fn empty_difference_is_bad_bool_not_a_silent_swallow() {
     assert!(
         design.contains("set bad_bool=true")
             && design.contains("set booled_id='")
+            && design.contains("booled=true")
             && design.contains("insts_flat=[{{geo_hash:'"),
         "{design}"
     );

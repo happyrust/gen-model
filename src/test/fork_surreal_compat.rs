@@ -958,10 +958,12 @@ async fn dual_inst_relate_flat_materialization_agrees() {
     let cheap_transform = format!(
         "UPDATE inst_relate:⟨24383_100⟩ SET world_trans = trans:t2, world_trans_d = {wt_b};"
     );
-    // 清扫（sweep_inst_relate_flat 同形，BATCH 缩到 10）。
+    // 清扫（sweep_inst_relate_flat 同形，BATCH 缩到 10；2026-08-20 起值位带
+    // booled_id 优先的 IF——UPDATE 记录上下文里的 IF/ELSE + 图遍历双分支）。
     let sweep = "LET $rows = SELECT VALUE id FROM inst_relate WHERE insts_flat = NONE AND aabb.d != none LIMIT 10;\n\
-         UPDATE $rows SET insts_flat = (SELECT trans.d AS transform, record::id(out) AS geo_hash \
-         FROM out->geo_relate WHERE visible && out.meshed && trans.d != none && geo_type='Pos'), \
+         UPDATE $rows SET insts_flat = IF booled_id != NONE THEN \
+         [{ geo_hash: booled_id }] ELSE (SELECT trans.d AS transform, record::id(out) AS geo_hash \
+         FROM out->geo_relate WHERE visible && out.meshed && trans.d != none && geo_type='Pos') END, \
          aabb_d = aabb.d, world_trans_d = world_trans.d RETURN NONE;\n\
          RETURN array::len($rows);";
     // 读侧两形态（FROM 显式记录列表定序，避开 2.1.4 `SELECT VALUE … ORDER BY` 的坑）。
@@ -1018,6 +1020,113 @@ async fn dual_inst_relate_flat_materialization_agrees() {
             insts[0].as_deref(),
             Ok(r#"{"Array":[{"Array":[{"Strand":"g1"}]},{"Array":[]}]}"#),
             "[{engine}] insts_flat 应只含可见+meshed+Pos 的边（g2 未 meshed、g3 是 Neg 都不得入选）"
+        );
+    }
+}
+
+/// Spec 019 判据（存量收敛）：清扫的**修复段**在两个引擎上圈得准、改得对、收得敛。
+///
+/// 旧代码时代所有已布尔的行都是「先被清扫回填成正体、后写 booled_id」的形态
+/// （RM13 事故基线 `docs/evidence/2026-08-20-rm13-dome-live/baseline-db.json`），
+/// `insts_flat` 是**错值**而非缺值——只圈 NONE 的清扫永远修不到。修复段谓词：
+/// `booled_id` 有值（空串与任意大小写的字面 'none' 当缺失）且 `insts_flat`
+/// 与成品不符（NONE / 空数组 / 首元素 geo_hash 不等）。
+///
+/// 行清单与期望：
+/// - 200：booled_id='b9'，insts_flat=带缩放正体 → 修成 `[{ geo_hash: 'b9' }]`，
+///   且不带 transform 键（读端 serde default 落单位变换）；
+/// - 201：无 booled_id，正体 → 逐字节不动；
+/// - 202：booled_id=''（空串脏值）→ 不动；
+/// - 203：booled_id='NONE'（大小写字面脏值，钉 string::lowercase）→ 不动；
+/// - 204：booled_id='b5'，insts_flat=[] → 修；
+/// - 205：booled_id='b7'，insts_flat=NONE 且**无 aabb**（NONE 清扫因 aabb 谓词
+///   够不着的行）→ 修复段照样修，谓词刻意不设 aabb 门槛；
+/// - 206：booled_id='b6'，已是成品 → 不圈（幂等）。
+///
+/// 首轮恰好圈 3 行（200/204/205），第二轮必须圈 0 行（自收敛终止条件）。
+#[tokio::test(flavor = "multi_thread")]
+async fn dual_booled_flat_repair_converges() {
+    let Some((mem, fork, _guard)) = dual_dbs("booled_repair").await else {
+        return;
+    };
+
+    // 事故同款脏值：正体 transform 带 scale=[1,1,234]。
+    let tf_scaled = serde_json::to_string(&bevy_transform::prelude::Transform::from_scale(
+        glam::Vec3::new(1.0, 1.0, 234.0),
+    ))
+    .unwrap();
+    let seed = format!(
+        "CREATE pe:24383_2 SET noun='SITE', dbnum=7997; CREATE inst_info:i9; \
+         INSERT RELATION INTO inst_relate [\
+            {{ id: inst_relate:⟨24383_200⟩, in: pe:24383_2, out: inst_info:i9, dbnum: 7997, \
+               booled_id: 'b9', insts_flat: [{{ transform: {tf_scaled}, geo_hash: 'pos1' }}] }}, \
+            {{ id: inst_relate:⟨24383_201⟩, in: pe:24383_2, out: inst_info:i9, dbnum: 7997, \
+               insts_flat: [{{ transform: {tf_scaled}, geo_hash: 'pos2' }}] }}, \
+            {{ id: inst_relate:⟨24383_202⟩, in: pe:24383_2, out: inst_info:i9, dbnum: 7997, \
+               booled_id: '', insts_flat: [{{ geo_hash: 'pos3' }}] }}, \
+            {{ id: inst_relate:⟨24383_203⟩, in: pe:24383_2, out: inst_info:i9, dbnum: 7997, \
+               booled_id: 'NONE', insts_flat: [{{ geo_hash: 'pos4' }}] }}, \
+            {{ id: inst_relate:⟨24383_204⟩, in: pe:24383_2, out: inst_info:i9, dbnum: 7997, \
+               booled_id: 'b5', insts_flat: [] }}, \
+            {{ id: inst_relate:⟨24383_205⟩, in: pe:24383_2, out: inst_info:i9, dbnum: 7997, \
+               booled_id: 'b7' }}, \
+            {{ id: inst_relate:⟨24383_206⟩, in: pe:24383_2, out: inst_info:i9, dbnum: 7997, \
+               booled_id: 'b6', insts_flat: [{{ geo_hash: 'b6' }}] }}\
+         ];"
+    );
+    // 修复段（sweep_inst_relate_flat 修复循环同形，BATCH 缩到 10）。函数实参
+    // `?? ''` / `?? []` 兜底不是装饰：生产 8009 对 NONE 实参直接报错（AND/OR
+    // 不短路），mem/fork 反而容忍——本用例双跑只能证后两者，生产形态以
+    // live 实测为准（docs/evidence/2026-08-20-booled-flat-backfill/）。
+    let repair = "LET $rows = SELECT VALUE id FROM inst_relate \
+         WHERE booled_id != NONE AND booled_id != '' AND string::lowercase(booled_id ?? '') != 'none' \
+         AND (insts_flat = NONE OR array::first(insts_flat ?? []).geo_hash != booled_id) LIMIT 10;\n\
+         UPDATE $rows SET insts_flat = [{ geo_hash: booled_id }] RETURN NONE;\n\
+         RETURN array::len($rows);";
+    let read_untouched = "SELECT VALUE insts_flat FROM [inst_relate:⟨24383_201⟩, \
+         inst_relate:⟨24383_202⟩, inst_relate:⟨24383_203⟩];";
+    let read_hashes = "SELECT VALUE insts_flat.geo_hash FROM [inst_relate:⟨24383_200⟩, \
+         inst_relate:⟨24383_204⟩, inst_relate:⟨24383_205⟩, inst_relate:⟨24383_206⟩];";
+
+    assert_dual_same("booled_repair", &mem, &fork, &[&seed]).await;
+
+    for (engine, db) in [("mem", &mem), ("fork", &fork)] {
+        let before = exec_capture(db, read_untouched).await;
+        let round1 = exec_capture(db, repair).await;
+        assert_eq!(
+            round1[2].as_deref(),
+            Ok(r#"{"Number":{"Int":3}}"#),
+            "[{engine}] 首轮必须恰好圈 200/204/205 三行：{round1:?}"
+        );
+        let after = exec_capture(db, read_untouched).await;
+        assert_eq!(
+            before, after,
+            "[{engine}] 无成品 / 空串 / 字面 'NONE' 的行必须逐字节不动"
+        );
+        let hashes = exec_capture(db, read_hashes).await;
+        assert_eq!(
+            hashes[0].as_deref(),
+            Ok(concat!(
+                r#"{"Array":[{"Array":[{"Strand":"b9"}]},{"Array":[{"Strand":"b5"}]},"#,
+                r#"{"Array":[{"Strand":"b7"}]},{"Array":[{"Strand":"b6"}]}]}"#
+            )),
+            "[{engine}] 脏行必须收敛到成品 geo_hash，已收敛行保持原值"
+        );
+        let keys = exec_capture(
+            db,
+            "RETURN array::len(object::keys(inst_relate:⟨24383_200⟩.insts_flat[0]));",
+        )
+        .await;
+        assert_eq!(
+            keys[0].as_deref(),
+            Ok(r#"{"Number":{"Int":1}}"#),
+            "[{engine}] 成品实例只带 geo_hash 一个键，不得夹带 transform（读端 default 落单位变换）"
+        );
+        let round2 = exec_capture(db, repair).await;
+        assert_eq!(
+            round2[2].as_deref(),
+            Ok(r#"{"Number":{"Int":0}}"#),
+            "[{engine}] 第二轮必须圈 0 行——修复段的自收敛终止条件"
         );
     }
 }
