@@ -4,6 +4,10 @@
 
 ### 修复
 
+- 收紧当期项目扫描范围：`included_projects` 统一解释为 `project_path` 下的文件夹名，
+  名单外项目不再解析或扫描；`project_dirs` 不再重定向、扩大范围，也不再在空名单时
+  充当回退名单（ADR-046 / specs/027）。
+
 - 偏心 Snout 的偏移改成**上下各摊一半**（specs/009 T050）。libgm
   `GM_Snout::calcFacetsWithoutSurfaces` 逐顶点写的是 `r·cosθ ∓ xShift/2`，`calcRange`
   的支撑函数独立佐证同一约定，`GM_Pyramid` 也完全同构；本仓 `gen_snout` 与 aios-core 的

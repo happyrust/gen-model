@@ -1,11 +1,7 @@
 //! 项目目录与监控目录（watch dirs）的唯一解析口径。
 //!
-//! 一个「项目」可以落在两类位置上，而且常常混用——设计库在本机盘、目录库在共享盘：
-//!
-//! - 本地路径：`project_path = "D:/AVEVA/Projects/E3D3.1"` + 项目名；
-//! - 共享目录：UNC（`\\host\share\...` 或 `//host/share/...`）、已映射的网络盘，
-//!   既可以整个 `project_path` 指过去，也可以只让某个项目在 `project_dirs` 里
-//!   单独写成绝对路径。
+//! 当期扫描范围由 `included_projects` 唯一限定：其中每个值都是 `project_path` 下的
+//! 文件夹名。`project_dirs` 不参与范围判定，也不能把名单中的项目重定向到别处。
 //!
 //! 这里取代 `aios_core::file_helper::collect_db_dirs`。那个实现把整批项目
 //! `collect::<io::Result<Vec<_>>>()`，于是**任何一个**项目 `read_dir` 失败
@@ -17,7 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock, RwLock};
 
 use aios_core::options::DbOption;
@@ -51,41 +47,37 @@ pub fn is_absolute_input(raw: &str) -> bool {
         || normalize_path_input(trimmed).is_absolute()
 }
 
-/// 解析某个项目的根目录，与 [`DbOption::get_project_path`] 同语义，但多认两件事：
-///
-/// 1. `project_dirs` 里的条目可以直接写绝对路径 / UNC，从而实现「本地项目 + 共享
-///    盘项目」混排——`get_project_path` 只会把它当目录名拼到 `project_path` 后面，
-///    拼出 `D:/AVEVA/Projects/E3D3.1\\host\share\AMS` 这种必然不存在的路径；
-/// 2. `project_dirs` 比 `included_projects` 短时返回 `None` 而不是下标越界 panic。
-pub fn resolve_project_root(db_option: &DbOption, project: &str) -> Option<PathBuf> {
-    if is_absolute_input(project) {
-        return Some(normalize_path_input(project));
+/// 配置值是否是 `project_path` 下的单个文件夹名。
+fn is_project_folder_name(raw: &str) -> bool {
+    let trimmed = raw.trim().trim_matches('"');
+    if trimmed.is_empty()
+        || trimmed == "."
+        || trimmed == ".."
+        || trimmed.contains(['/', '\\'])
+        || is_absolute_input(trimmed)
+    {
+        return false;
     }
-    let base = normalize_path_input(&db_option.project_path);
-    let Some(overrides) = db_option.project_dirs.as_ref() else {
-        return Some(base.join(normalize_path_input(project)));
-    };
-    // `included_projects` 为空时压根没有「名字 → 下标」这层映射可查：这种配置下
-    // [`plan_watch_dirs`] 拿 `project_dirs` 自己当名单，传进来的所谓项目名其实就是
-    // 那份名单里的目录条目。不认这条的话，回退分支下每一个相对条目都恒返回
-    // `None`，报出来的还是一句「与 included_projects 对不上」——那不是真原因。
-    if db_option.included_projects.is_empty() {
-        return Some(join_project_entry(&base, project));
-    }
-    let index = db_option
-        .included_projects
-        .iter()
-        .position(|name| name.trim().eq_ignore_ascii_case(project.trim()))?;
-    let entry = overrides.get(index)?;
-    Some(join_project_entry(&base, entry))
+    let normalized = normalize_path_input(trimmed);
+    let mut components = normalized.components();
+    matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
 }
 
-fn join_project_entry(base: &Path, entry: &str) -> PathBuf {
-    if is_absolute_input(entry) {
-        normalize_path_input(entry)
-    } else {
-        base.join(normalize_path_input(entry))
+/// 解析当期名单中的项目根目录。
+///
+/// `included_projects` 的值就是 `project_path` 下的文件夹名。名单外项目、空值、绝对
+/// 路径和多段相对路径都返回 `None`；`project_dirs` 不参与解析，避免它扩大或重定向
+/// 当期扫描范围。大小写不敏感地确认成员，但拼路径时保留配置中的真实文件夹名。
+pub fn resolve_project_root(db_option: &DbOption, project: &str) -> Option<PathBuf> {
+    let folder = db_option
+        .included_projects
+        .iter()
+        .find(|folder| folder.trim().eq_ignore_ascii_case(project.trim()))?;
+    if !is_project_folder_name(folder) {
+        return None;
     }
+    let base = normalize_path_input(&db_option.project_path);
+    Some(base.join(normalize_path_input(folder)))
 }
 
 /// 这个目录名是不是库目录（`ams000` / `acp000` / `ZDJ000`）。
@@ -227,11 +219,7 @@ impl WatchDirPlan {
 ///
 /// 逐项目独立解析：一个共享盘掉线只让它自己缺席，其余项目照常监听。
 pub fn plan_watch_dirs(db_option: &DbOption) -> WatchDirPlan {
-    let names: Vec<String> = if !db_option.included_projects.is_empty() {
-        db_option.included_projects.clone()
-    } else {
-        db_option.project_dirs.clone().unwrap_or_default()
-    };
+    let names = db_option.included_projects.clone();
 
     let mut plan = WatchDirPlan::default();
     // 两个项目指到同一个目录时只监听一次：`duplicate_dbnums_across_watch_dirs`
@@ -245,8 +233,7 @@ pub fn plan_watch_dirs(db_option: &DbOption) -> WatchDirPlan {
                 root: None,
                 db_dirs: Vec::new(),
                 problem: Some(
-                    "project_dirs 与 included_projects 对不上（数量或名字），解析不出项目目录"
-                        .to_string(),
+                    "included_projects 条目必须是 project_path 下的单个文件夹名".to_string(),
                 ),
             });
             continue;
@@ -631,30 +618,20 @@ mod tests {
         );
     }
 
-    /// `project_dirs` 里的绝对路径 / UNC 要按原样用，而不是拼到 `project_path` 后面。
-    ///
-    /// 拼接的后果是 `D:/proj` + `\\nas\e3d\ZDJ` = 一个必然不存在的路径，
-    /// 于是共享盘上的项目永远解析不出来。
+    /// `project_dirs` 不能把 included_projects 中的文件夹重定向到扫描根之外。
     #[test]
-    fn absolute_and_unc_entries_are_used_as_is() {
-        let fixture = Fixture::new("absolute-entries");
-        let elsewhere = Fixture::new("absolute-elsewhere");
-        let remote = elsewhere.dir("Remote/remote000");
-        fixture.dir("Local/local000");
-
-        let elsewhere_project = elsewhere.root.join("Remote");
-        let option = fixture.options(
-            &["Local", "Remote"],
-            Some(&["Local", &elsewhere_project.to_string_lossy()]),
-        );
+    fn project_dirs_cannot_redirect_or_expand_the_scan_scope() {
+        let fixture = Fixture::new("scope-root");
+        let elsewhere = Fixture::new("scope-elsewhere");
+        let allowed = fixture.dir("Allowed/allowed000");
+        let redirected = elsewhere.dir("Redirected/redirected000");
+        let option = fixture.options(&["Allowed"], Some(&[&redirected.to_string_lossy()]));
 
         let plan = plan_watch_dirs(&option);
 
-        assert!(
-            identities(&plan.dirs()).contains(&path_identity(&remote)),
-            "写成绝对路径的项目应当落在它自己的位置上: {:?}",
-            plan.dirs()
-        );
+        assert_eq!(identities(&plan.dirs()), identities(&[allowed]));
+        assert!(!identities(&plan.dirs()).contains(&path_identity(&redirected)));
+        assert!(resolve_project_root(&option, "Redirected").is_none());
         assert!(plan.problems().is_empty(), "{:?}", plan.problems());
     }
 
@@ -675,20 +652,15 @@ mod tests {
         }
     }
 
-    /// `project_dirs` 比 `included_projects` 短时返回 `None`，而不是像
-    /// `DbOption::get_project_path` 那样下标越界 panic。
+    /// 名单外项目没有项目根，即使 project_path 下真的存在同名文件夹也不扫描。
     #[test]
-    fn short_project_dirs_yields_none_instead_of_panicking() {
-        let fixture = Fixture::new("short-overrides");
-        let option = fixture.options(&["A", "B"], Some(&["A"]));
+    fn a_project_outside_included_projects_has_no_root() {
+        let fixture = Fixture::new("outside-scope");
+        fixture.dir("Excluded/excluded000");
+        let option = fixture.options(&["Included"], None);
 
-        assert!(resolve_project_root(&option, "B").is_none());
-        let plan = plan_watch_dirs(&option);
-        assert!(
-            plan.problems().iter().any(|problem| problem.contains('B')),
-            "对不上的项目要报出来: {:?}",
-            plan.problems()
-        );
+        assert!(resolve_project_root(&option, "Excluded").is_none());
+        assert!(plan_watch_dirs(&option).dirs().is_empty());
     }
 
     /// 一个项目下有多个 `*000` 时全部收下。
@@ -709,25 +681,40 @@ mod tests {
         );
     }
 
-    /// `included_projects` 为空、拿 `project_dirs` 当名单时，相对条目也要解析得出来。
-    ///
-    /// 这个分支下没有「名字 → 下标」可查，而 `resolve_project_root` 过去无条件要求
-    /// 名字能在 `included_projects` 里找到位置：于是每一个相对条目都恒返回 `None`，
-    /// 一个目录都监听不上，报的却是「project_dirs 与 included_projects 对不上」——
-    /// 名单压根就是空的，那句话把人往配置写错的方向带。
+    /// 空 included_projects 就是空扫描范围，不得拿 project_dirs 扩大它。
     #[test]
-    fn relative_entries_resolve_when_the_project_list_is_empty() {
-        let fixture = Fixture::new("dirs-only");
-        let db_dir = fixture.dir("Proj/aaa000");
+    fn an_empty_project_list_does_not_fall_back_to_project_dirs() {
+        let fixture = Fixture::new("empty-scope");
+        fixture.dir("Proj/aaa000");
         let option = fixture.options(&[], Some(&["Proj"]));
 
-        assert_eq!(
-            resolve_project_root(&option, "Proj"),
-            Some(normalize_path_input(&fixture.root.to_string_lossy()).join("Proj"))
-        );
+        assert!(resolve_project_root(&option, "Proj").is_none());
         let plan = plan_watch_dirs(&option);
-        assert_eq!(identities(&plan.dirs()), identities(&[db_dir]));
+        assert!(plan.dirs().is_empty());
         assert!(plan.problems().is_empty(), "{:?}", plan.problems());
+    }
+
+    /// included_projects 里只能写 project_path 下的一层文件夹名。
+    #[test]
+    fn invalid_project_folder_names_are_reported_and_not_scanned() {
+        let fixture = Fixture::new("invalid-folder-name");
+        for invalid in [
+            "",
+            ".",
+            "..",
+            "Nested/Project",
+            r"C:\outside",
+            r"\\host\share",
+        ] {
+            let option = fixture.options(&[invalid], None);
+            assert!(
+                resolve_project_root(&option, invalid).is_none(),
+                "{invalid}"
+            );
+            let plan = plan_watch_dirs(&option);
+            assert!(plan.dirs().is_empty(), "{invalid}: {:?}", plan.dirs());
+            assert_eq!(plan.problems().len(), 1, "{invalid}: {:?}", plan.problems());
+        }
     }
 
     /// `ams1000` 不是库目录。
@@ -757,8 +744,8 @@ mod tests {
     #[test]
     fn a_root_that_is_itself_a_db_dir_is_used_directly() {
         let fixture = Fixture::new("root-is-db-dir");
-        let db_dir = fixture.dir("Shared/ams000");
-        let option = fixture.options(&["Shared"], Some(&[&db_dir.to_string_lossy()]));
+        let db_dir = fixture.dir("ams000");
+        let option = fixture.options(&["ams000"], None);
 
         assert_eq!(
             identities(&plan_watch_dirs(&option).dirs()),
@@ -774,10 +761,7 @@ mod tests {
     fn a_directory_listed_twice_is_watched_once() {
         let fixture = Fixture::new("duplicate-dir");
         let db_dir = fixture.dir("Proj/proj000");
-        let option = fixture.options(
-            &["Proj", "SameThing"],
-            Some(&["Proj", &db_dir.to_string_lossy()]),
-        );
+        let option = fixture.options(&["Proj", "proj"], None);
 
         assert_eq!(plan_watch_dirs(&option).dirs().len(), 1);
     }

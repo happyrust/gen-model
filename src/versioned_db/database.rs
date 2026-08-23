@@ -1136,8 +1136,8 @@ pub async fn sync_total_async_threaded(
 ) -> anyhow::Result<HashMap<u32, usize>> {
     println!("开始解析 {project} 的 {:?}", db_types);
     let db_option_arc = Arc::new(db_option.clone()); // 创建一个Arc对象，表示数据库选项
-    // 与监控目录同一套解析（认 project_dirs 里的绝对 / UNC 路径），否则共享盘上的
-    // 项目在解析这一步就会被拼成一个不存在的目录。
+    // 与监控目录同一套解析：只认 included_projects 中的文件夹名，并固定落在
+    // project_path 下，避免初始化绕过当期扫描范围。
     let project_dir =
         crate::data_interface::project_paths::resolve_project_root(db_option, project)
             .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?; // 创建一个Path对象，表示项目目录的路径

@@ -33,6 +33,7 @@
 | `replace_dbs` | `false` | `true` | 2026-07-27 | 增量重解析允许覆盖既有库文件记录 |
 | `project_path` | `D:/AVEVA/Projects/E3D2.1` | `D:/AVEVA/Projects/E3D3.1` | 2026-07-27 | AMS 样例工程迁移到 E3D3.1 项目目录 |
 | `included_projects` | 含 `"SCB"` | 移除 `"SCB"` | 2026-07-27 | E3D3.1 下未部署 SCB，避免扫描报错 |
+| `included_projects` / `project_dirs` | `project_dirs` 可按下标覆盖项目物理位置，空名单时还会成为扫描名单 | `included_projects` 是 `project_path` 下的文件夹名且是唯一项目扫描名单；`project_dirs` 不再参与扫描 | 2026-08-24 | ADR-046：当期扫描不得被另一份路径表扩大或重定向；空名单就是不扫描项目 |
 | `gen_model` | `true` | `false` | 2026-07-27 | 非 CATA 增量监听模式：启动不做全量重算，增量/按需路径内部自行强制 `true` |
 | `gen_mesh` | `true` | `false` | 2026-07-27 | 同上 |
 | `gen_spatial_tree` | `false` | `true` | 2026-07-29 | 配合房间增量与空间索引（aabbidx）验证启用 |

@@ -3063,7 +3063,7 @@ impl AiosDBManager {
         if watch_dirs.is_empty() {
             let msg = format!(
                 "[{origin}] 监控目录列表为空：没有解析出任何 *000 库目录，本轮不会发现任何库；\
-                 检查 DbOption.toml 的 project_path / included_projects / project_dirs，\
+                 检查 DbOption.toml 的 project_path / included_projects，\
                  启动日志「监控目录解析」一段列出了逐项目原因"
             );
             log::error!("{msg}");
@@ -4018,8 +4018,8 @@ impl AiosDBManager {
             // 「三个共享盘全掉线」报的是同一句话。
             let detail = if watch_dirs.is_empty() {
                 "监控目录列表为空：配置里没有解析出任何 *000 库目录。检查 DbOption.toml 的 \
-                 project_path / included_projects / project_dirs（共享目录可在 project_dirs \
-                 里对该项目单独写绝对路径或 UNC），启动日志「监控目录解析」一段列出了逐项目原因"
+                 project_path / included_projects（included_projects 必须是 project_path 下的文件夹名），\
+                 启动日志「监控目录解析」一段列出了逐项目原因"
                     .to_string()
             } else {
                 format!(
