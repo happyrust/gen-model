@@ -2144,8 +2144,9 @@ fn finish_cooperative_yield(
     }
 }
 
-/// 空闲模型页的可抢占消费。持久行仍按原查询顺序认领，但昂贵工作逐根执行；初始化
-/// 门关闭是调度结果，不写 `last_error`，也不烧掉 attempts。
+/// 空闲模型页的可抢占消费。持久行仍按原查询顺序认领；页内能进批的 regen 根一次
+/// 生成（[`run_regen_batch`]），其余的逐根执行、根与根之间可让位。初始化门关闭是
+/// 调度结果，不写 `last_error`，也不烧掉 attempts。
 async fn drain_where_cooperative(
     mgr: &AiosDBManager,
     action_filter: &str,
@@ -2182,9 +2183,48 @@ async fn drain_where_cooperative(
         ..Default::default()
     };
     model_drain_telemetry().last_attempts_delta = 0;
-    for (index, job) in jobs.iter().enumerate() {
+
+    // 页内合批。[`DRAIN_PAGE_SIZE`] 定成 16 就是为了摊薄一次生成的启动开销
+    // （ADR-011 2026-08-09 修订），但这条空闲路径过去逐根调用 `generate_roots`，
+    // 那笔开销按根重付了 16 遍——页大小的代价付了，合批本身没接上。
+    //
+    // 代价是批内不能中途让位：整批要么一起结算、要么一起回退逐根。所以只在批前
+    // 查一次 epoch，批后的让位检查由下面的逐根循环接着做。
+    let (batchable, sequential): (Vec<PendingModelWork>, Vec<PendingModelWork>) = jobs
+        .into_iter()
+        .partition(|job| job.action == ModelWorkAction::RegenRoot && joins_regen_batch(job));
+    let mut remaining = Vec::with_capacity(sequential.len());
+    if batchable.is_empty() {
+        remaining.extend(sequential);
+    } else {
         if let Some((reason, current_epoch)) = model_drain_yield_reason(claimed_epoch) {
-            let unstarted = jobs.len() - index;
+            return Ok(finish_cooperative_yield(
+                &task_id,
+                &report,
+                batchable.len() + sequential.len(),
+                claimed_epoch,
+                current_epoch,
+                reason,
+                Some(0),
+            ));
+        }
+        let batched = batchable.len();
+        let settled_before = report.done;
+        let started = Instant::now();
+        let fell_back = run_regen_batch(mgr, batchable, &mut report).await;
+        let batch_ms = started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        // 摊薄值：让 `last_root_duration_ms` 在合批前后保持「每根」的量纲。
+        model_drain_telemetry().last_root_duration_ms = Some(batch_ms / batched.max(1) as u64);
+        for _ in 0..report.done.saturating_sub(settled_before) {
+            registry.bump_units_done(&task_id);
+        }
+        remaining.extend(fell_back);
+        remaining.extend(sequential);
+    }
+
+    for (index, job) in remaining.iter().enumerate() {
+        if let Some((reason, current_epoch)) = model_drain_yield_reason(claimed_epoch) {
+            let unstarted = remaining.len() - index;
             return Ok(finish_cooperative_yield(
                 &task_id,
                 &report,
@@ -2212,7 +2252,7 @@ async fn drain_where_cooperative(
                 return Ok(finish_cooperative_yield(
                     &task_id,
                     &report,
-                    jobs.len() - index,
+                    remaining.len() - index,
                     claimed_epoch,
                     current_epoch,
                     reason,
@@ -2222,7 +2262,7 @@ async fn drain_where_cooperative(
         }
 
         if let Some((reason, current_epoch)) = model_drain_yield_reason(claimed_epoch) {
-            let unstarted = jobs.len() - index - 1;
+            let unstarted = remaining.len() - index - 1;
             return Ok(finish_cooperative_yield(
                 &task_id,
                 &report,
@@ -2337,11 +2377,40 @@ async fn drain_where_report(
     let (regen_jobs, other_jobs): (Vec<PendingModelWork>, Vec<PendingModelWork>) = jobs
         .into_iter()
         .partition(|job| job.action == ModelWorkAction::RegenRoot);
-    let (batchable, mut singles): (Vec<PendingModelWork>, Vec<PendingModelWork>) =
+    let (batchable, singles): (Vec<PendingModelWork>, Vec<PendingModelWork>) =
         regen_jobs.into_iter().partition(joins_regen_batch);
 
     let mut report = DrainReport::default();
+    let fallback = run_regen_batch(mgr, batchable, &mut report).await;
 
+    for job in fallback
+        .iter()
+        .chain(singles.iter())
+        .chain(other_jobs.iter())
+    {
+        run_one(mgr, job, &mut report).await;
+    }
+
+    Ok(report)
+}
+
+/// 一页 regen 根合批生成：生成一次、验收一次、收口一次。
+///
+/// `generate_roots` 收的本来就是根数组，下游 `gen_geos_data` 还按 100 根一块预取
+/// PLOO、用 `FuturesUnordered` 做流水重叠。逐根调用会把整条「依赖预载 → cata 闭包
+/// → 生成 → prune → mesh」按根重启一遍，块内每条批量查询也都退化成 batch-of-1：
+/// 现场量到每根 1.04 秒、每页 16.6 秒，而进程只吃 11.8% 单核——时间几乎全花在
+/// 串行往返上，不是几何计算上。
+///
+/// 返回仍需逐根执行的作业：房间映射预检读失败的修复根，以及合批失败后整页回退的
+/// 根。逐根怎么跑由调用方定——[`drain_where_report`] 一口气跑完，
+/// [`drain_where_cooperative`] 每根之间还要查一次 epoch。
+async fn run_regen_batch(
+    mgr: &AiosDBManager,
+    batchable: Vec<PendingModelWork>,
+    report: &mut DrainReport,
+) -> Vec<PendingModelWork> {
+    let mut fallback: Vec<PendingModelWork> = Vec::new();
     if !batchable.is_empty() {
         // 修复根（带 required_panels）也进合批（ADR-011 2026-08-09 修订）：生成一次、
         // 整页验收一次。生成名单先过在册预检——面板全部出册的修复根跳过生成
@@ -2372,7 +2441,7 @@ async fn drain_where_report(
                         "修复根预检读取房间映射失败，本页 {} 个修复根退回单件执行: {error:#}",
                         repair_jobs.len()
                     );
-                    singles.extend(std::mem::take(&mut repair_jobs));
+                    fallback.extend(std::mem::take(&mut repair_jobs));
                 }
             }
         }
@@ -2428,7 +2497,7 @@ async fn drain_where_report(
                                 record_failure(
                                     job_refs[index],
                                     &anyhow::anyhow!("{message}"),
-                                    &mut report,
+                                    report,
                                 )
                                 .await;
                             }
@@ -2473,25 +2542,21 @@ async fn drain_where_report(
                 }
             }
             Err(error) => {
-                // The per-root fallback acquires the same locks one by one.
+                // The per-root fallback acquires the same locks one by one, so
+                // 这一页的锁必须先在这里放掉，再把根交回调用方逐根重试。
                 drop(_root_guards);
                 drop(locks);
                 println!(
                     "批量重生成 {} 个根失败，回退逐根重试以定位问题根: {error:#}",
                     roots.len()
                 );
-                for job in plain_jobs.iter().chain(repair_jobs.iter()) {
-                    run_one(mgr, job, &mut report).await;
-                }
+                fallback.extend(plain_jobs);
+                fallback.extend(repair_jobs);
             }
         }
     }
 
-    for job in singles.iter().chain(other_jobs.iter()) {
-        run_one(mgr, job, &mut report).await;
-    }
-
-    Ok(report)
+    fallback
 }
 
 // 三个阶段的 action 白名单。合起来必须正好覆盖 `ModelWorkAction` 的全部取值：漏掉
@@ -2510,6 +2575,12 @@ const ROOM_ELEMENT_ACTION_FILTER: &str = "AND action = 'room_recalc_element'";
 /// 比数据阶段的 [`DRAIN_PAGE_SIZE`] 大：一轮房间的固定开销是两次全量查询（在册房间
 /// 映射 + 在册面板几何），页太小的话每页都要重付一遍。
 const ROOM_DRAIN_PAGE_SIZE: usize = 256;
+/// 面板侧一轮最多消化多少块。
+///
+/// 比元素页小得多：一个元素任务只是拿本构件的盒子在在册面板上筛一遍，一块面板却要
+/// 载入自己的网格、把落在包围盒里的构件逐个做点包含判定，再整间先清后写。这条路上
+/// 没有让位检查——一块面板从开始算到收口不可中断——所以页大小就是这一轮的时长上限。
+const ROOM_PANEL_PAGE_SIZE: usize = 32;
 
 fn data_phase_is_clear(succeeded: bool, has_more: bool) -> bool {
     succeeded && !has_more
@@ -2585,40 +2656,55 @@ pub async fn drain_data_phases_disposition(
     {
         return Ok(ModelDrainDisposition::Completed { done: 0 });
     }
-    let non_regen = drain_where_cooperative(mgr, NON_REGEN_ACTION_FILTER, DRAIN_PAGE_SIZE).await?;
-    let mut done = non_regen.done();
-    match non_regen {
-        ModelDrainDisposition::YieldedForData { .. } | ModelDrainDisposition::Failed { .. } => {
-            return Ok(non_regen);
-        }
-        ModelDrainDisposition::Completed { .. } => {}
-    }
+    // 每段先用 [`has_pending_work`] 探一下（LIMIT 1、不排序、1ms 量级）再决定要不要
+    // 付 drain 那条查询的钱。drain 的 ORDER BY 里有两个当场算出来的 `IS NONE` 派生
+    // 列，天生不可索引：`model_update_pending` 上没有索引，取 16 行要全表扫排一遍，
+    // 现场量到 260ms。而今天 `transform/delete_cleanup/cascade_expand` 与
+    // `post_regen_aabb` 两段的积压长期是 0——不探就是每个空闲轮白付两次全表排序。
+    let mut done = 0usize;
     if has_pending_work(NON_REGEN_ACTION_FILTER).await? {
-        return Ok(ModelDrainDisposition::Completed { done });
+        let non_regen =
+            drain_where_cooperative(mgr, NON_REGEN_ACTION_FILTER, DRAIN_PAGE_SIZE).await?;
+        done += non_regen.done();
+        match non_regen {
+            ModelDrainDisposition::YieldedForData { .. } | ModelDrainDisposition::Failed { .. } => {
+                return Ok(non_regen);
+            }
+            ModelDrainDisposition::Completed { .. } => {}
+        }
+        // 这一页消化完还有剩：regen 的前置屏障保持关闭，下一轮接着收。
+        if has_pending_work(NON_REGEN_ACTION_FILTER).await? {
+            return Ok(ModelDrainDisposition::Completed { done });
+        }
     }
 
-    let regen = drain_where_cooperative(mgr, REGEN_ACTION_FILTER, DRAIN_PAGE_SIZE).await?;
-    done += regen.done();
-    match regen {
-        ModelDrainDisposition::YieldedForData {
-            claimed_epoch,
-            current_epoch,
-            reason,
-            ..
-        } => {
-            return Ok(ModelDrainDisposition::YieldedForData {
-                done,
+    if has_pending_work(REGEN_ACTION_FILTER).await? {
+        let regen = drain_where_cooperative(mgr, REGEN_ACTION_FILTER, DRAIN_PAGE_SIZE).await?;
+        done += regen.done();
+        match regen {
+            ModelDrainDisposition::YieldedForData {
                 claimed_epoch,
                 current_epoch,
                 reason,
-            });
+                ..
+            } => {
+                return Ok(ModelDrainDisposition::YieldedForData {
+                    done,
+                    claimed_epoch,
+                    current_epoch,
+                    reason,
+                });
+            }
+            ModelDrainDisposition::Failed { message, .. } => {
+                return Ok(ModelDrainDisposition::Failed { done, message });
+            }
+            ModelDrainDisposition::Completed { .. } => {}
         }
-        ModelDrainDisposition::Failed { message, .. } => {
-            return Ok(ModelDrainDisposition::Failed { done, message });
-        }
-        ModelDrainDisposition::Completed { .. } => {}
     }
 
+    if !has_pending_work(POST_REGEN_AABB_ACTION_FILTER).await? {
+        return Ok(ModelDrainDisposition::Completed { done });
+    }
     let aabb = drain_where_cooperative(mgr, POST_REGEN_AABB_ACTION_FILTER, DRAIN_PAGE_SIZE).await?;
     done += aabb.done();
     Ok(match aabb {
@@ -2740,7 +2826,7 @@ fn render_model_pending_status_query() -> String {
              SELECT action, count() AS c FROM {TABLE} \
              WHERE status IN ['pending', 'failed'] AND (attempts?:0) >= {MAX_ATTEMPTS} \
              GROUP BY action;\
-             SELECT action, target_refno, noun, attempts, last_error, revision, updated_at \
+             SELECT id, action, target_refno, noun, attempts, last_error, revision, updated_at \
              FROM {TABLE} WHERE status IN ['pending', 'failed'] \
              AND (attempts?:0) >= {MAX_ATTEMPTS} \
              ORDER BY updated_at DESC, id ASC LIMIT 10;"
@@ -2875,13 +2961,23 @@ async fn drain_rooms_selected(
     crate::fast_model::spatial_state::ensure_spatial_ready()?;
     // Panels are always complete-before-elements. The scoped path selects exact
     // record ids; element records themselves are not accumulated across pages.
+    //
+    // 全局路径的面板侧同样分页（[`ROOM_PANEL_PAGE_SIZE`]）。此前这里传 `None`：表里
+    // 有多少块面板任务就一轮全拉进来逐块整间重算，中途不分页、不查 epoch、不让位。
+    // 而面板任务是跟着 regen 一起产的——现场 regen 每消化 55 个根就多 4 块面板，
+    // 积压跑完那一刻第一轮房间要一口气吃掉上千块。页大小在这条路上就是单轮时长上限。
     let panels = match scope {
         Some(scope) => {
             load_scoped_room_jobs(&scope.keys_for(ModelWorkAction::RoomRecalcPanel)).await?
         }
-        None => load_room_jobs(ROOM_PANEL_ACTION_FILTER, None).await?,
+        None => load_room_jobs(ROOM_PANEL_ACTION_FILTER, Some(ROOM_PANEL_PAGE_SIZE)).await?,
     };
-    let global_elements = if scope.is_none() {
+    // 满页 = 后面还有面板。元素侧本轮整页让开，保持「面板先于元素」这条既有次序：
+    // 同轮吸收（ADR-010 §8）只对本轮已重算的面板成立，面板还没收完就跑元素，等于
+    // 让本该被吸收的元素任务各自先清后写一遍，下一轮那块面板再整间重写一遍。两条
+    // 分支共用判定与边 id，收敛结果一样，但白跑一遍。
+    let panel_page_full = scope.is_none() && panels.len() >= ROOM_PANEL_PAGE_SIZE;
+    let global_elements = if scope.is_none() && !panel_page_full {
         load_room_jobs(ROOM_ELEMENT_ACTION_FILTER, Some(ROOM_DRAIN_PAGE_SIZE)).await?
     } else {
         Vec::new()
@@ -3515,11 +3611,11 @@ mod tests {
             .expect("run_one must end before render_drain_select")
             .0;
         let batch = source
-            .split_once("if !batchable.is_empty()")
-            .expect("batch regeneration branch must exist")
+            .split_once("async fn run_regen_batch(")
+            .expect("batch regeneration helper must exist")
             .1
-            .split_once("for job in singles")
-            .expect("batch regeneration branch must end before singles")
+            .split_once("const NON_REGEN_ACTION_FILTER")
+            .expect("batch regeneration helper must end before the phase whitelist")
             .0;
 
         assert!(run_one.contains("generation_root_lock"), "{run_one}");
@@ -4319,6 +4415,42 @@ mod tests {
         );
     }
 
+    /// 面板侧也必须分页，而且满页时元素侧要整页让开。
+    ///
+    /// 面板任务与 regen 是一起产的（现场每消化 55 个根多 4 块面板），而这条路上一块
+    /// 面板从载网格到整间收口不可中断、中途不查 epoch。不分页的话，积压跑完那一轮
+    /// 要一口气吃掉上千块，单轮时长没有上限。
+    #[test]
+    fn the_global_room_round_pages_its_panels_too() {
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("async fn drain_rooms_selected(")
+            .expect("drain_rooms_selected 必须存在")
+            .1
+            .split_once("async fn drain_room_element_page(")
+            .expect("drain_rooms_selected 之后是元素分页执行体")
+            .0;
+
+        assert!(
+            body.contains("load_room_jobs(ROOM_PANEL_ACTION_FILTER, Some(ROOM_PANEL_PAGE_SIZE))"),
+            "全局面板侧必须带页大小，`None` 就是没有单轮时长上限: {body}"
+        );
+        let page_full = body
+            .find("let panel_page_full")
+            .expect("满页判定必须存在——元素侧靠它决定要不要让开");
+        let elements = body
+            .find("load_room_jobs(ROOM_ELEMENT_ACTION_FILTER")
+            .expect("元素侧仍要分页加载");
+        assert!(
+            page_full < elements,
+            "满页判定必须先于元素加载，否则面板没收完就跑元素、同轮吸收白让: {body}"
+        );
+        assert!(
+            body.contains("!panel_page_full"),
+            "元素侧必须受满页判定门控: {body}"
+        );
+    }
+
     /// 同轮吸收的封闭性（ADR-010 §8，2026-07-28 修订）：旧边或候选任何一个越出本轮
     /// claimed 面板集合，元素任务都必须照跑——错吸收会把本轮没重算的面板指向该构件的
     /// 陈旧边永久留在库里，或漏写它新进入的本轮外面板的边。
@@ -4584,6 +4716,67 @@ mod tests {
             !render_drain_select("AND action = 'regen_root'", None).contains("LIMIT"),
             "explicit/manual drain keeps its drain-until-complete contract"
         );
+    }
+
+    /// 空闲页也要合批，不能一根一根地调生成。
+    ///
+    /// 这条路径过去逐根调 `generate_roots(&[one])`：[`DRAIN_PAGE_SIZE`] 付了页大小的
+    /// 代价，摊薄却一次都没发生。现场量到每页 16.6 秒、每根 1.04 秒且九页几乎一模
+    /// 一样，而进程只吃 11.8% 单核——那是 16 次流水线启动的串行往返，不是几何算力。
+    #[test]
+    fn the_idle_page_generates_its_regen_roots_in_one_batch() {
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("async fn drain_where_cooperative(")
+            .expect("cooperative drain must exist")
+            .1
+            .split_once("fn render_scoped_room_select(")
+            .expect("cooperative drain must end before the scoped room select")
+            .0;
+
+        let batch_at = body
+            .find("run_regen_batch(mgr,")
+            .expect("空闲页必须走合批，逐根调用会把生成启动开销按根重付一遍");
+        let loop_at = body
+            .find("for (index, job) in remaining")
+            .expect("合批之外的根仍要逐根跑");
+        assert!(
+            batch_at < loop_at,
+            "合批要先于逐根循环：回退下来的根才能接着享受根间让位检查: {body}"
+        );
+    }
+
+    /// 每一段都要先探再取。
+    ///
+    /// drain 那条查询的 `ORDER BY` 里有两个当场算出来的 `IS NONE` 派生列，天生不可
+    /// 索引，而 `model_update_pending` 上一个索引都没有：取 16 行要把全表扫排一遍，
+    /// 现场 1.9 万行量到 260ms。`has_pending_work` 是 LIMIT 1 不排序的 1ms 查询。
+    /// 今天非 regen 段与 post_regen_aabb 段的积压长期是 0，不探就是每个空闲轮白付
+    /// 两次全表排序。
+    #[test]
+    fn each_data_phase_probes_before_it_drains() {
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("pub async fn drain_data_phases_disposition(")
+            .expect("data phase drain must exist")
+            .1
+            .split_once("pub async fn drain_data_phases(")
+            .expect("disposition 之后是只要计数的兼容包装")
+            .0;
+
+        for filter in [
+            "NON_REGEN_ACTION_FILTER",
+            "REGEN_ACTION_FILTER",
+            "POST_REGEN_AABB_ACTION_FILTER",
+        ] {
+            let probe = body
+                .find(&format!("has_pending_work({filter})"))
+                .unwrap_or_else(|| panic!("{filter} 段缺少探测: {body}"));
+            let drain = body
+                .find(&format!("drain_where_cooperative(mgr, {filter}"))
+                .unwrap_or_else(|| panic!("{filter} 段缺少消费: {body}"));
+            assert!(probe < drain, "{filter} 段必须先探再取: {body}");
+        }
     }
 
     #[test]
@@ -6145,6 +6338,65 @@ mod tests {
         assert!(status.has_data_dead_letters());
         assert!(status.has_room_dead_letters());
         assert_eq!(status.data_blocking_samples().count(), 1);
+    }
+
+    /// 三条语句得真能在 SurrealDB 上跑一遍。
+    ///
+    /// 2026-08-21 现场：`ORDER BY updated_at DESC, id ASC` 而投影里没有 `id`，
+    /// SurrealDB 报 `Missing order idiom \`id\` in statement selection` 并拒掉整批。
+    /// 后果不是少一段样本——`/health` 的 `model_update_pending` 恒为错误、
+    /// `degraded_sections` 常驻一条、顶层 `status` 被钉在 `degraded`，把刚做好的
+    /// 「只有死信才降级」反过来盖掉了。纯字符串断言看不出这一类，得真连一次。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_pending_status_query_round_trips_on_surreal() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("model_pending_status")
+            .await
+            .expect("select fixture db");
+        db.query(format!(
+            "UPSERT {TABLE}:live SET action = 'regen_root', target_refno = '24381/38436', \
+             noun = 'FRMW', status = 'failed', attempts = 1, revision = 2, updated_at = time::now();\
+             UPSERT {TABLE}:terminal SET action = 'regen_root', target_refno = '24381/38614', \
+             noun = 'FRMW', status = 'failed', attempts = {MAX_ATTEMPTS}, \
+             last_error = 'invalid BREP shape', revision = 2, updated_at = time::now();"
+        ))
+        .await
+        .expect("seed pending rows")
+        .check()
+        .expect("seed statements");
+
+        let mut response = db
+            .query(render_model_pending_status_query())
+            .await
+            .expect("status query")
+            .check()
+            .expect("status statements parse");
+        let retryable: Vec<ModelPendingActionCount> =
+            response.take(0).expect("decode retryable counts");
+        let dead: Vec<ModelPendingActionCount> = response.take(1).expect("decode dead counts");
+        let samples: Vec<ModelPendingBlockingSample> = response.take(2).expect("decode samples");
+
+        let status = build_model_pending_status(retryable, dead, samples);
+        assert_eq!(status.retryable, 1);
+        assert_eq!(status.dead_letters, 1);
+        assert_eq!(status.blocking_samples.len(), 1, "{status:?}");
+        assert_eq!(status.blocking_samples[0].target_refno, "24381/38614");
+        assert_eq!(status.blocking_samples[0].attempts, MAX_ATTEMPTS);
+
+        // 上面那几条断言只有在引擎真会拒绝旧写法时才说明问题：把 `id` 从投影里去掉
+        // 必须报错，否则这条回归是空的。
+        let stale = render_model_pending_status_query().replace(
+            "SELECT id, action, target_refno",
+            "SELECT action, target_refno",
+        );
+        let rejected = db.query(stale).await.and_then(|response| response.check());
+        assert!(
+            rejected.is_err(),
+            "ORDER BY 的 idiom 不在投影里就该被引擎拒绝: {rejected:?}"
+        );
     }
 
     #[test]
