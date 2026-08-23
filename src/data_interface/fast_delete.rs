@@ -101,6 +101,27 @@ fn range_of(table: &str, ref0: &str) -> String {
     format!("{table}:{ref0}_0..{ref0}_{RANGE_END}")
 }
 
+/// 本 Ref0 下全部 owner 的成员块，按 `pe_owner` 的复合 record id 一段区间圈住。
+///
+/// 边 id 固定是 `[OWNER_PE, 槽位]`（`versioned_db::pe` 与 `cata_closure` 两个写口
+/// 同形），所以 owner 落在 Ref0 区间内的边天然是 id 连续的一段，不必再从 `pe` 侧
+/// 图遍历把边 id 全捞进内存——百万级 PE 的库上，那两句 `array::flatten(SELECT
+/// VALUE ->/<-pe_owner …)` 正是整库清理的耗时大头。顺带换来幂等：本语句不读
+/// `pe`，上一次清库半途失败、`pe` 行已没而边还在时，下一轮仍能把边清掉（图遍历
+/// 从空区间出发永远够不着它们）。
+///
+/// 少掉的 `->pe_owner` 方向（child 在本 Ref0、owner 在别处）在**整库**清理里是
+/// 空扫：所有权链不跨库，而本 dbnum 解析出的每个 Ref0 都会各出一条本语句，
+/// 同库跨 Ref0 的边由 owner 自己那条兜住。
+///
+/// 这个**跨 owner** 的区间形状恰是 `staging::replay_safe::is_owner_scoped_range`
+/// 明令拒绝的写法。那道闸门守的是重放路径上「圈到别人头上还不报错」；这里两端
+/// Ref0 同源、由权威 Ref0 集合导出，整段区间本来就要全删，所以安全——**仅限**
+/// 整库清理。按水位裁剪只删一部分元素，不满足这个前提，继续走逐元素双向删除。
+fn owner_range_of(ref0: &str) -> String {
+    format!("pe_owner:[pe:{ref0}_0, NONE]..=[pe:{ref0}_{RANGE_END}, ..]")
+}
+
 fn collect_ref0s(
     prefix_rows: Vec<Ref0Row>,
     info_rows: Vec<InfoRef0Row>,
@@ -316,20 +337,14 @@ fn render_delete_phases(
     let mut relations = Vec::new();
     let mut ranges = Vec::new();
     for ref0 in ref0s {
-        let pe_range = range_of("pe", ref0);
-        relations.push(format!(
-            "DELETE array::flatten(SELECT VALUE ->pe_owner FROM {pe_range});"
-        ));
-        relations.push(format!(
-            "DELETE array::flatten(SELECT VALUE <-pe_owner FROM {pe_range});"
-        ));
+        relations.push(format!("DELETE {};", owner_range_of(ref0)));
         for table in RANGE_TABLES.iter().filter(|table| **table != "pe") {
             ranges.push(format!("DELETE {};", range_of(table, ref0)));
         }
         for table in noun_tables {
             ranges.push(format!("DELETE {};", range_of(table, ref0)));
         }
-        ranges.push(format!("DELETE {pe_range};"));
+        ranges.push(format!("DELETE {};", range_of("pe", ref0)));
     }
     let mut metadata = vec![
         format!("DELETE model_update_pending WHERE dbnum = {dbnum};"),
@@ -356,6 +371,22 @@ fn render_delete_phases(
         }
     }
     (relations, ranges, metadata)
+}
+
+/// 清库后置条件：PE 归零，且每个 Ref0 的 `pe_owner` 区间也归零。
+///
+/// 边现在按 id 区间删，残留检查就落在同一套坐标里——一次区间扫描的代价，换来
+/// 这条语句自证：只数 PE 的话，删边语句写歪（区间圈错、上界漏写被引擎默默接受）
+/// 不会让任何东西喊一声。语句顺序与 `ref0s` 一致，调用方按下标逐个取。
+fn render_verify_query(dbnum: u32, ref0s: &[String]) -> String {
+    let mut sql = format!("SELECT count() AS count FROM pe WHERE dbnum = {dbnum} GROUP ALL;");
+    for ref0 in ref0s {
+        sql.push_str(&format!(
+            "\nSELECT count() AS count FROM {} GROUP ALL;",
+            owner_range_of(ref0)
+        ));
+    }
+    sql
 }
 
 async fn execute_phase(label: &str, statements: &[String]) -> anyhow::Result<()> {
@@ -477,9 +508,7 @@ async fn wipe_dbnum_rows(
     execute_transactional_phase("delete dbnum metadata", &metadata).await?;
 
     let mut verify = SUL_DB
-        .query(format!(
-            "SELECT count() AS count FROM pe WHERE dbnum = {dbnum} GROUP ALL;"
-        ))
+        .query(render_verify_query(dbnum, &ref0s))
         .await
         .context("verify fast delete")?
         .check()
@@ -492,6 +521,20 @@ async fn wipe_dbnum_rows(
         .unwrap_or_default();
     if remaining != 0 {
         bail!("dbnum {dbnum} fast delete incomplete: {remaining} PE rows remain");
+    }
+    let mut remaining_owner_edges = 0usize;
+    for (offset, ref0) in ref0s.iter().enumerate() {
+        remaining_owner_edges += verify
+            .take::<Vec<CountRow>>(offset + 1)
+            .with_context(|| format!("decode pe_owner residue for Ref0 {ref0}"))?
+            .first()
+            .map(|row| row.count)
+            .unwrap_or_default();
+    }
+    if remaining_owner_edges != 0 {
+        bail!(
+            "dbnum {dbnum} fast delete incomplete: {remaining_owner_edges} pe_owner edges remain in the Ref0 id ranges"
+        );
     }
 
     Ok(FastDeleteDbnumResult {
@@ -516,8 +559,10 @@ mod tests {
             &["EQUI".into(), "PANE".into()],
             WatermarkDisposal::DropRow,
         );
-        assert!(relations.iter().any(|sql| sql.contains("->pe_owner")));
-        assert!(relations.iter().any(|sql| sql.contains("<-pe_owner")));
+        assert_eq!(
+            relations,
+            vec!["DELETE pe_owner:[pe:24381_0, NONE]..=[pe:24381_9999999999, ..];".to_string()]
+        );
         assert!(ranges.contains(&"DELETE EQUI:24381_0..24381_9999999999;".into()));
         assert!(ranges.contains(&"DELETE inst_relate:24381_0..24381_9999999999;".into()));
         assert_eq!(
@@ -525,6 +570,85 @@ mod tests {
             "DELETE pe:24381_0..24381_9999999999;"
         );
         assert_eq!(metadata.last().unwrap(), "DELETE dbnum_watermark:7997;");
+    }
+
+    /// owner 边走复合 id 区间，整库清理的 SQL 里不该再剩任何图遍历。
+    ///
+    /// 遍历要先把边 id 全捞进内存（百万级 PE 的库上就是清库耗时的大头），而且它读
+    /// `pe`：上一次清库半途失败、`pe` 行已没而边还在时，从空区间出发的遍历再也够
+    /// 不着那些边。
+    #[test]
+    fn the_owner_edges_go_by_id_range_not_by_graph_traversal() {
+        let ref0s = ["23717".to_string(), "31909".to_string()];
+        let (relations, ranges, metadata) = render_delete_phases(
+            7333,
+            &ref0s,
+            &["EQUI".into()],
+            WatermarkDisposal::ResetForReinit,
+        );
+        let rendered = [relations.clone(), ranges, metadata].concat().join("\n");
+        assert!(
+            !rendered.contains("->pe_owner") && !rendered.contains("<-pe_owner"),
+            "整库清理不得再走 pe_owner 图遍历: {rendered}"
+        );
+        assert_eq!(
+            relations,
+            ref0s
+                .iter()
+                .map(|ref0| format!("DELETE {};", owner_range_of(ref0)))
+                .collect::<Vec<_>>(),
+            "每个 Ref0 只出一条 owner 区间删除"
+        );
+    }
+
+    /// 上界漏写与跨 Ref0 是这条语句仅有的两个致命写法：前者一路删到表尾，后者圈到
+    /// 别人头上，两者执行时都不报错。`staging::replay_safe::is_owner_scoped_range`
+    /// 拦下过的正是这两发（其一 2026-08-07 真漏进过工作区），但快删不走 staging、
+    /// 没有那道闸门，断言只能留在这里。
+    #[test]
+    fn the_owner_range_is_ref0_scoped_and_never_open_ended() {
+        for ref0 in ["24381", "23717", "4294967294"] {
+            let sql = owner_range_of(ref0);
+            let (beg, end) = sql
+                .strip_prefix("pe_owner:[")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .and_then(|rest| rest.split_once("]..=["))
+                .unwrap_or_else(|| panic!("闭区间的两端都必须写出来: {sql}"));
+            let (low, low_slot) = beg.split_once(", ").expect("下界是 [owner, 槽位]");
+            let (high, high_slot) = end.split_once(", ").expect("上界是 [owner, 槽位]");
+            assert_eq!(low, format!("pe:{ref0}_0"), "{sql}");
+            assert_eq!(high, format!("pe:{ref0}_{RANGE_END}"), "{sql}");
+            assert_eq!(
+                low.rsplit_once('_').map(|(prefix, _)| prefix),
+                high.rsplit_once('_').map(|(prefix, _)| prefix),
+                "两端必须同一个 Ref0，否则圈到相邻库头上: {sql}"
+            );
+            assert_eq!((low_slot, high_slot), ("NONE", ".."), "{sql}");
+        }
+    }
+
+    /// 后置条件必须连 owner 边一起数。只数 PE 的话，删边语句圈错区间不会有任何
+    /// 东西喊——清库照样报成功，残留边留给下一次重建去撞。
+    #[test]
+    fn the_postcondition_counts_owner_edges_in_every_ref0_range() {
+        let ref0s = ["23717".to_string(), "31909".to_string()];
+        let sql = render_verify_query(7333, &ref0s);
+        let statements = sql.lines().collect::<Vec<_>>();
+        assert_eq!(statements.len(), 1 + ref0s.len(), "{sql}");
+        assert!(
+            statements[0].contains("FROM pe WHERE dbnum = 7333"),
+            "{sql}"
+        );
+        for (offset, ref0) in ref0s.iter().enumerate() {
+            assert_eq!(
+                statements[offset + 1],
+                format!(
+                    "SELECT count() AS count FROM {} GROUP ALL;",
+                    owner_range_of(ref0)
+                ),
+                "语句顺序必须与 ref0s 一致，调用方按下标取残留数: {sql}"
+            );
+        }
     }
 
     /// 回退重建变体（ADR-021）：数据阶段与快删完全同源，元数据阶段的差别是
