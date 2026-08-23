@@ -158,24 +158,25 @@ pub(crate) async fn note_skip(kind: &'static str, target: &str, geom: &str, erro
     }
 }
 
-/// 严格记录一条基本体数据错误。调用方仍保留原来的生成失败语义；若诊断写入失败，
-/// 错误会继续上浮，避免“模型坏了，但数据库里没有记录”的静默缺口。
-pub(crate) async fn record_primitive_failure(
-    target: &str,
-    noun: &str,
-    error: &str,
-) -> anyhow::Result<()> {
+/// 记一次基本体数据降级。
+///
+/// 与 [`note_skip`] 同一条纪律：跳过这件事已经定了，记账失败只发一句 warn，不能
+/// 因为账本写不进去又把它变回硬错误。
+pub(crate) async fn note_primitive_skip(target: &str, noun: &str, error: &str) {
     if let Err(seed_error) = seed().await {
         log::warn!("[geom_error] 已有错误行播种失败（继续尝试写当前基本体）: {seed_error:#}");
     }
-    SUL_DB
+    if let Err(write_error) = SUL_DB
         .query(render_primitive_upsert(target, noun, error))
-        .await?
-        .check()?;
+        .await
+        .and_then(|response| response.check())
+    {
+        log::warn!("[geom_error] 基本体降级记录落库失败 target={target}: {write_error}");
+        return;
+    }
     if let Some(set) = known().as_mut() {
         set.insert(known_key(PRIMITIVE, target));
     }
-    Ok(())
 }
 
 /// 基本体重新生成成功后销掉它自己的错误行，不触碰同一目标可能存在的布尔错误。
@@ -329,7 +330,7 @@ mod tests {
         let sql = render_primitive_upsert(
             "24381/38635",
             "NCYL",
-            "targeted primitive 24381_38635 (NCYL) produced an invalid BREP shape; DIAM=0, HEIG=0",
+            "primitive 24381_38635 (NCYL) produced an invalid BREP shape; DIAM=0, HEIG=0",
         );
         assert!(
             sql.contains("geom_error:['primitive', '24381/38635']"),
@@ -429,7 +430,7 @@ mod tests {
         db.query(render_primitive_upsert(
             "24381/38635",
             "NCYL",
-            "targeted primitive 24381_38635 (NCYL) produced an invalid BREP shape; DIAM=0, HEIG=0",
+            "primitive 24381_38635 (NCYL) produced an invalid BREP shape; DIAM=0, HEIG=0",
         ))
         .await
         .expect("primitive upsert")

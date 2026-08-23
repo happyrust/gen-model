@@ -5,7 +5,7 @@
 ### 新增
 
 - `geom_error` 扩展 `primitive` 基本体错误：缺失/非法 BREP 与 NaN 变换按参考号持久落库，
-  保存 noun、尺寸诊断、累计次数和首末时间；成功生成后精确销账，诊断写入失败随模型失败上浮。
+  保存 noun、尺寸诊断、累计次数和首末时间；成功生成后精确销账。
 - health 新增 `model_update_pending` 单查询快照与 `blocking_conditions`：模型/房间死信会把
   顶层状态降为 `degraded`，普通可重试积压不降级；查询失败仍沿用 2 秒预算并只进入
   `degraded_sections`。
@@ -14,8 +14,15 @@
 
 ### 修复
 
-- 定向 `CYLI/SLCY/NCYL` 生成无效 BREP 时保留硬失败，并在错误中带出参考号、noun、
-  `DIAM` 与 `HEIG`，零尺寸根因不再只显示“invalid BREP shape”。
+- `CYLI/SLCY/NCYL` 生成无效 BREP 时在诊断中带出参考号、noun、`DIAM` 与 `HEIG`，
+  零尺寸根因不再只显示“invalid BREP shape”。
+- 坏基本体不再按请求模式升级成生成失败：缺失 BREP、非法 BREP 与 NaN 变换一律记进
+  `geom_error` 后跳过这一件，剩下的照常生成；账本写不进去也只发一句 warn，与布尔
+  那条链的 `note_skip` 同一纪律。此前这三处按 `targeted`
+  （`debug_root_refnos.is_some()`）分叉 bail 掉整个生成根——请求模式不是正确性边界，
+  源库里那个没名字也没尺寸的空 NCYL `24381/38635` 因此让 FRMW `24381/38614` 常驻
+  500、`regen_root` 连撞 5 次成死信，同一份数据走全量入口却只是少画一件。世界变换
+  与属性**查询失败**仍然硬失败：读不到与读到坏数据不是一回事。
 - 模型死信公告改为状态指纹驱动：首次/变化立即输出，相同内容最多 300 秒一次，清零仅
   输出一次恢复消息；30 秒 worker 退避和 Model→Room 阻断顺序保持不变。
 

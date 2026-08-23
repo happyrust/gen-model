@@ -24,17 +24,25 @@ fn invalid_brep_message(
     refno: impl std::fmt::Display,
     noun: &str,
     cylinder_dimensions: Option<(f32, f32)>,
-    targeted: bool,
 ) -> String {
     let dimensions = cylinder_dimensions
         .map(|(diameter, height)| format!("; DIAM={diameter}, HEIG={height}"))
         .unwrap_or_default();
-    let prefix = if targeted {
-        "targeted primitive"
-    } else {
-        "primitive"
-    };
-    format!("{prefix} {refno} ({noun}) produced an invalid BREP shape{dimensions}")
+    format!("primitive {refno} ({noun}) produced an invalid BREP shape{dimensions}")
+}
+
+/// 坏基本体与坏布尔是同一件事：记进 [`geom_error`](crate::data_interface::geom_error)
+/// 这本账，然后跳过这一件，剩下的照常生成。
+///
+/// 这里曾经按 `targeted` 分叉——定向生成撞上一个坏基本体就 bail 掉整个生成根。
+/// `targeted` 是请求模式（`debug_root_refnos.is_some()`）而不是正确性边界：源库里
+/// 一个零尺寸的空 NCYL 因此让整棵 FRMW 常驻 500，同一份数据换个入口跑却只是少一
+/// 件。数据坏了重试多少次都一样坏，记下来比把整根拖垮有用。
+/// 控制台那行走 `println!` 而不是 `log::warn!`：`serve` 路径没有装 log 后端，
+/// `log` 宏的输出一个字也落不到日志文件里，布尔那条链同样是 `println!`。
+async fn skip_bad_primitive(target: &str, noun: &str, message: &str) {
+    println!("基本体跳过: {message}");
+    crate::data_interface::geom_error::note_primitive_skip(target, noun, message).await;
 }
 
 /// 生成基本体的几何数据
@@ -229,27 +237,9 @@ pub async fn gen_prim_geos(
                         attr.create_brep_shape(neg_limit_size)
                     };
                     let Some(brep_shape) = brep_shape else {
-                        let prefix = if targeted {
-                            "targeted primitive"
-                        } else {
-                            "primitive"
-                        };
                         let message =
-                            format!("{prefix} {refno} ({cur_type}) produced no BREP shape");
-                        crate::data_interface::geom_error::record_primitive_failure(
-                            &refno.to_pdms_str(),
-                            cur_type,
-                            &message,
-                        )
-                        .await
-                        .map_err(|error| {
-                            anyhow::anyhow!(
-                                "{message}; persist primitive geom_error failed: {error:#}"
-                            )
-                        })?;
-                        if targeted {
-                            anyhow::bail!(message);
-                        }
+                            format!("primitive {refno} ({cur_type}) produced no BREP shape");
+                        skip_bad_primitive(&refno.to_pdms_str(), cur_type, &message).await;
                         continue;
                     };
                     if !brep_shape.check_valid() {
@@ -260,48 +250,16 @@ pub async fn gen_prim_geos(
                                     attr.get_f32_or_default("HEIG"),
                                 )
                             });
-                        let message =
-                            invalid_brep_message(refno, cur_type, cylinder_dimensions, targeted);
-                        crate::data_interface::geom_error::record_primitive_failure(
-                            &refno.to_pdms_str(),
-                            cur_type,
-                            &message,
-                        )
-                        .await
-                        .map_err(|error| {
-                            anyhow::anyhow!(
-                                "{message}; persist primitive geom_error failed: {error:#}"
-                            )
-                        })?;
-                        if targeted {
-                            anyhow::bail!(message);
-                        }
+                        let message = invalid_brep_message(refno, cur_type, cylinder_dimensions);
+                        skip_bad_primitive(&refno.to_pdms_str(), cur_type, &message).await;
                         continue;
                     }
 
                     transform = brep_shape.get_trans();
                     if transform.is_nan() {
-                        let prefix = if targeted {
-                            "targeted primitive"
-                        } else {
-                            "primitive"
-                        };
                         let message =
-                            format!("{prefix} {refno} ({cur_type}) produced a NaN transform");
-                        crate::data_interface::geom_error::record_primitive_failure(
-                            &refno.to_pdms_str(),
-                            cur_type,
-                            &message,
-                        )
-                        .await
-                        .map_err(|error| {
-                            anyhow::anyhow!(
-                                "{message}; persist primitive geom_error failed: {error:#}"
-                            )
-                        })?;
-                        if targeted {
-                            anyhow::bail!(message);
-                        }
+                            format!("primitive {refno} ({cur_type}) produced a NaN transform");
+                        skip_bad_primitive(&refno.to_pdms_str(), cur_type, &message).await;
                         continue;
                     }
                     if let Err(error) = crate::data_interface::geom_error::clear_primitive_failure(
@@ -399,8 +357,8 @@ mod tests {
     use super::invalid_brep_message;
 
     #[test]
-    fn zero_sized_targeted_ncyl_reports_the_dimensions_and_stays_an_error() {
-        let message = invalid_brep_message("24381_38635", "NCYL", Some((0.0, 0.0)), true);
+    fn zero_sized_ncyl_reports_the_dimensions() {
+        let message = invalid_brep_message("24381_38635", "NCYL", Some((0.0, 0.0)));
         assert!(message.contains("24381_38635 (NCYL)"), "{message}");
         assert!(message.contains("DIAM=0"), "{message}");
         assert!(message.contains("HEIG=0"), "{message}");
@@ -409,10 +367,64 @@ mod tests {
 
     #[test]
     fn non_cylinder_invalid_brep_keeps_the_generic_diagnostic() {
-        let message = invalid_brep_message("1_2", "BOX", None, true);
+        let message = invalid_brep_message("1_2", "BOX", None);
         assert_eq!(
             message,
-            "targeted primitive 1_2 (BOX) produced an invalid BREP shape"
+            "primitive 1_2 (BOX) produced an invalid BREP shape"
         );
+    }
+
+    /// 2026-08-21 现场：源库里 `24381/38635` 是一个没名字也没尺寸的空 NCYL
+    /// （`DIAM`/`HEIG` 都缺省成 0），OCC 建不出合法 BREP。定向生成为此 bail 掉整个
+    /// 生成根，7997 sweep 里 FRMW `24381/38614` 就常驻 500、`regen_root` 连撞 5 次成
+    /// 死信；同一份数据走全量入口却只是少画一件。请求模式不是正确性边界，坏数据
+    /// 一律记账后跳过——与布尔那条链（`manifold_bool.rs` 的 `note_skip`）同一纪律。
+    #[test]
+    fn bad_primitive_data_is_ledgered_and_skipped_instead_of_failing_the_root() {
+        let source = include_str!("prim_model.rs");
+        let body = source.split_once("#[cfg(test)]").expect("test boundary").0;
+
+        assert_eq!(
+            body.matches("skip_bad_primitive(&refno.to_pdms_str()")
+                .count(),
+            3,
+            "缺失 BREP、非法 BREP、NaN 变换三处都要走同一个记账跳过口: {body}"
+        );
+        for anchor in [
+            "produced no BREP shape",
+            "invalid_brep_message(refno,",
+            "produced a NaN transform",
+        ] {
+            let site = body.split_once(anchor).expect("failure site").1;
+            let next = site.split_once("continue;").expect("skip site").0;
+            assert!(
+                next.contains("skip_bad_primitive("),
+                "{anchor} 必须先记账再跳过: {next}"
+            );
+            assert!(
+                !next.contains("bail!"),
+                "{anchor} 不得再把坏数据升级成生成失败: {next}"
+            );
+        }
+
+        // 账本之外还得在控制台留一行：`serve` 没装 log 后端，`log::warn!` 落不下来。
+        let helper = body
+            .split_once("async fn skip_bad_primitive")
+            .expect("skip helper")
+            .1;
+        assert!(
+            helper.contains("println!(\"基本体跳过"),
+            "跳过必须同时进控制台与账本: {helper}"
+        );
+
+        // 读不到就是读不到，与"读到了但数据是坏的"不是一回事：查询失败仍然硬失败。
+        assert_eq!(
+            body.matches("anyhow::bail!").count(),
+            3,
+            "只剩世界变换与属性查询这三处硬失败: {body}"
+        );
+        assert!(body.contains("has no world transform"), "{body}");
+        assert!(body.contains("world transform failed"), "{body}");
+        assert!(body.contains("attributes failed"), "{body}");
     }
 }
