@@ -27,6 +27,15 @@ pub const TX_MAX_BYTES: usize = 64 * 1024;
 pub const TX_MAX_WRITE_ROWS: u64 = 250;
 pub const COMMIT_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
+/// 提交查询超时的可识别标记。
+///
+/// 超时是**活性**问题不是裁决：等满 `COMMIT_QUERY_TIMEOUT` 也没等到服务端回话，
+/// 语句既没被接受也没被拒绝。写回端的分类器（`staged_writeback_failure_is_transient`）
+/// 只认得几个固定标记，纯超时此前一个都不沾，于是一次尝试就把窗口当「确定性拒绝」
+/// 永久判死——2026-08-19 现场 `242..=243` 卡死走的正是这条路。两个超时分支共用这
+/// 一个标记，分类器据此把它归进（有限预算的）瞬时桶。
+pub const COMMIT_QUERY_TIMEOUT_MARKER: &str = "commit query timed out";
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommitQueryOutcome {
     Applied,
@@ -452,6 +461,12 @@ async fn execute_commit_query(
     estimated_rows: u64,
     outcome_sensitive: bool,
 ) -> anyhow::Result<CommitQueryOutcome> {
+    if let Some(directory) = std::env::var_os("AIOS_COMMIT_SQL_DUMP_DIR") {
+        let directory = std::path::PathBuf::from(directory);
+        std::fs::create_dir_all(&directory)?;
+        let path = directory.join(format!("{:016x}.surql", sql_fingerprint(sql)));
+        std::fs::write(path, sql)?;
+    }
     match tokio::time::timeout(
         COMMIT_QUERY_TIMEOUT,
         execute_surreal_checked_on(target, sql, context),
@@ -465,14 +480,14 @@ async fn execute_commit_query(
         Err(_) if outcome_sensitive => {
             crate::data_interface::batch_worker::set_active_task_stage("commit_reconcile");
             eprintln!(
-                "{context} 连续 {}s 未返回，commit outcome unknown；字节={sql_bytes} 预计行={estimated_rows} 指纹={:016x}",
+                "{context} 连续 {}s 未返回（{COMMIT_QUERY_TIMEOUT_MARKER}），commit outcome unknown；字节={sql_bytes} 预计行={estimated_rows} 指纹={:016x}",
                 COMMIT_QUERY_TIMEOUT.as_secs(),
                 sql_fingerprint(sql),
             );
             Ok(CommitQueryOutcome::OutcomeUnknown)
         }
         Err(_) => Err(anyhow::anyhow!(
-            "{context} 连续 {}s 未返回，终止本查询；字节={sql_bytes} 预计行={estimated_rows} 指纹={:016x}",
+            "{context} 连续 {}s 未返回，终止本查询（{COMMIT_QUERY_TIMEOUT_MARKER}）；字节={sql_bytes} 预计行={estimated_rows} 指纹={:016x}",
             COMMIT_QUERY_TIMEOUT.as_secs(),
             sql_fingerprint(sql),
         )),
