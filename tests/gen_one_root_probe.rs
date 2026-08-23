@@ -134,6 +134,25 @@ async fn generating_one_root_fills_geometry_aabb_and_tree() {
         "[probe] 生成后: inst_relate={insts_after} 其中有几何={geo_after} 有包围盒={aabb_after}，空间树={tree_after}"
     );
 
+    // 强制重生成是替换，不是追加：健康根前后总行数完全相等才是正常结果。旧断言只认
+    // `geo_after > geo_before`，于是 `status=Generated`、`已写入>0` 的成功替换也会报红。
+    if result.generated_instance_count > 0 {
+        assert!(
+            result.model_instance_count > 0,
+            "生成写入了 {} 个实例，但请求构件没有可渲染模型",
+            result.generated_instance_count
+        );
+        assert!(
+            geo_after >= geo_before,
+            "强制替换不得让有几何的实例总数下降（{geo_before} -> {geo_after}）"
+        );
+        assert!(
+            aabb_after >= aabb_before,
+            "强制替换不得让有包围盒的实例总数下降（{aabb_before} -> {aabb_after}）"
+        );
+        return;
+    }
+
     // 什么都没动就别下结论。`ensure` 对已有产物的根直接返回 `AlreadyAvailable`，这时
     // 前后计数相等是理所当然的，不是「生成路径坏了」——把它错报成缺陷比不报还糟。
     if geo_after == geo_before && aabb_after == aabb_before {
