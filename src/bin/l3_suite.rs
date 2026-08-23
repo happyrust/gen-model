@@ -452,7 +452,11 @@ impl Paths {
                 dir.display()
             );
         }
-        ensure_e3d_project_control_files(&self.project_work)?;
+        ensure_e3d_project_control_files(
+            &self.project_work,
+            &self.project_work.join("evarsAvevaMarineSample.bat"),
+            "AMS",
+        )?;
         if restore {
             ensure!(
                 self.project_golden.is_dir(),
@@ -469,11 +473,20 @@ impl Paths {
     }
 }
 
-fn ensure_e3d_project_control_files(project: &Path) -> Result<()> {
+fn ensure_e3d_project_control_files(
+    project: &Path,
+    project_evar: &Path,
+    project_code: &str,
+) -> Result<()> {
+    let db_dir = format!("{}000", project_code.to_ascii_lowercase());
     let required = [
-        project.join("evarsAvevaMarineSample.bat"),
-        project.join("ams000/amscom"),
-        project.join("ams000/amssys"),
+        project_evar.to_path_buf(),
+        project
+            .join(&db_dir)
+            .join(format!("{}com", project_code.to_ascii_lowercase())),
+        project
+            .join(&db_dir)
+            .join(format!("{}sys", project_code.to_ascii_lowercase())),
     ];
     let missing = required
         .iter()
@@ -482,7 +495,7 @@ fn ensure_e3d_project_control_files(project: &Path) -> Result<()> {
         .collect::<Vec<_>>();
     ensure!(
         missing.is_empty(),
-        "E3D project copy is incomplete; copy the project evars plus ams000/amscom and ams000/amssys before launching a TTY session: {}",
+        "E3D project copy is incomplete; provide its evars plus {db_dir} control databases before launching a TTY session: {}",
         missing.join(", ")
     );
     Ok(())
@@ -614,7 +627,11 @@ fn main() -> Result<()> {
             "E3D launcher is missing: {}",
             driver.launcher.display()
         );
-        ensure_e3d_project_control_files(&paths.project_work)?;
+        ensure_e3d_project_control_files(
+            &paths.project_work,
+            &driver.project_evar,
+            &driver.project,
+        )?;
         if std::env::var("L3_ALLOW_EXISTING_E3D_SESSION").as_deref() != Ok("1") {
             assert_no_e3d_session()?;
         }
@@ -2809,15 +2826,34 @@ mod tests {
         fs::create_dir_all(root.join("ams000")).unwrap();
         fs::write(root.join("evarsAvevaMarineSample.bat"), b"@echo off\n").unwrap();
 
-        let error = ensure_e3d_project_control_files(&root)
-            .unwrap_err()
-            .to_string();
+        let error = ensure_e3d_project_control_files(
+            &root,
+            &root.join("evarsAvevaMarineSample.bat"),
+            "AMS",
+        )
+        .unwrap_err()
+        .to_string();
         assert!(error.contains("amscom"), "{error}");
         assert!(error.contains("amssys"), "{error}");
 
         fs::write(root.join("ams000/amscom"), b"fixture").unwrap();
         fs::write(root.join("ams000/amssys"), b"fixture").unwrap();
-        ensure_e3d_project_control_files(&root).unwrap();
+        ensure_e3d_project_control_files(&root, &root.join("evarsAvevaMarineSample.bat"), "AMS")
+            .unwrap();
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn non_ams_check_driver_uses_its_own_control_database_prefix() {
+        let root = std::env::temp_dir().join(format!("l3-e3d-tes-controls-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(root.join("tes000")).unwrap();
+        let evar = root.join("evarsTEST.bat");
+        fs::write(&evar, b"@echo off\n").unwrap();
+        fs::write(root.join("tes000/tescom"), b"fixture").unwrap();
+        fs::write(root.join("tes000/tessys"), b"fixture").unwrap();
+
+        ensure_e3d_project_control_files(&root, &evar, "TES").unwrap();
         fs::remove_dir_all(root).unwrap();
     }
 
