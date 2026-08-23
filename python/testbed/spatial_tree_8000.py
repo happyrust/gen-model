@@ -159,8 +159,10 @@ def _epoch(aios_db) -> int:
 
 
 def _inst_rows_of(aios_db, refno: str) -> int:
+    # 按记录 id 直接寻址：`inst_relate` 的 id 就是 refno，而这张表没有 `(in, out)`
+    # 索引，`WHERE in = pe:{refno}` 在真库上是整表扫。
     rows = aios_db.db.query(
-        f"SELECT count() FROM inst_relate WHERE in = pe:{refno} GROUP ALL;"
+        f"SELECT count() FROM inst_relate:{refno} GROUP ALL;"
     )[0]
     return int(rows[0]["count"]) if rows else 0
 

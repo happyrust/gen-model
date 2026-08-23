@@ -85,7 +85,7 @@ mod tests {
         let mut response = SUL_DB
             .query(format!(
                 "SELECT record::id(in) AS panel, record::id(out) AS part, room_num \
-                 FROM room_relate WHERE out = pe:{ELEMENT} ORDER BY panel;"
+                 FROM pe:{ELEMENT}<-room_relate ORDER BY panel;"
             ))
             .await
             .expect("query room_relate")
@@ -137,7 +137,7 @@ mod tests {
     async fn element_aabb_json() -> Vec<String> {
         let mut response = SUL_DB
             .query(format!(
-                "SELECT VALUE <string>aabb.d FROM inst_relate WHERE in = pe:{ELEMENT};"
+                "SELECT VALUE <string>aabb.d FROM pe:{ELEMENT}->inst_relate;"
             ))
             .await
             .expect("query aabb")
@@ -283,7 +283,7 @@ mod tests {
 
         // 第一步：手动删掉它的房间边。
         SUL_DB
-            .query(format!("DELETE room_relate WHERE out = pe:{ELEMENT};"))
+            .query(format!("DELETE pe:{ELEMENT}<-room_relate;"))
             .await
             .expect("delete the element's room edges")
             .check()
@@ -437,7 +437,7 @@ mod tests {
                 "SELECT record::id(id) AS id, \
                         world_trans.d.translation[2] AS tz, \
                         world_trans.d.scale[2] AS sz \
-                 FROM inst_relate WHERE in = pe:{BRANCH} ORDER BY id;"
+                 FROM pe:{BRANCH}->inst_relate ORDER BY id;"
             ))
             .await
             .expect("query branch tubing")
@@ -725,27 +725,23 @@ mod tests {
             ),
             (
                 "面板在册",
-                format!(
-                    "SELECT VALUE <string>[id, room_num] FROM room_panel_relate WHERE out = pe:{PANEL};"
-                ),
+                format!("SELECT VALUE <string>[id, room_num] FROM pe:{PANEL}<-room_panel_relate;"),
             ),
             (
                 "构件几何",
                 format!(
-                    "SELECT VALUE <string>[id, aabb.d, world_trans.d != none] FROM inst_relate WHERE in = pe:{ELEMENT};"
+                    "SELECT VALUE <string>[id, aabb.d, world_trans.d != none] FROM pe:{ELEMENT}->inst_relate;"
                 ),
             ),
             (
                 "面板几何",
                 format!(
-                    "SELECT VALUE <string>[id, aabb.d, world_trans.d != none] FROM inst_relate WHERE in = pe:{PANEL};"
+                    "SELECT VALUE <string>[id, aabb.d, world_trans.d != none] FROM pe:{PANEL}->inst_relate;"
                 ),
             ),
             (
                 "归属边",
-                format!(
-                    "SELECT VALUE <string>[id, room_num] FROM room_relate WHERE out = pe:{ELEMENT};"
-                ),
+                format!("SELECT VALUE <string>[id, room_num] FROM pe:{ELEMENT}<-room_relate;"),
             ),
         ] {
             let rows: Vec<String> = SUL_DB

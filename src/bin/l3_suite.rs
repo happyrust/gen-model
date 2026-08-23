@@ -2253,8 +2253,17 @@ fn database_snapshot(s: &Scenario, dynamic_refno: Option<&str>) -> Result<Value>
     // （ADR-011 §8），它们带着触发库的 dbnum 落在同一张表里，算进欠账会让任何一个
     // 房间还没收干净的库永远判 FAIL。房间的收敛由 I-8 那条路径单独判。
     // `room_pending` 只入证据、不参与断言。
+    // `inst` / `owner` / `room` 三项按记录 id 与边目标取，不走谓词。`inst_relate` 没有
+    // in/out 索引（8009 现场只读实测 968.4ms vs 直址 121µs）；`room` 那项按 `out` 过滤，
+    // 够不着 `unique_room_relate` 的 `in` 前缀（1.12s vs 392µs）；`owner` 那项按 `in`
+    // 过滤本来就走索引，改写只为形状一致。快照每个场景要拍三次（before / after /
+    // restored）。
+    //
+    // `geo` 那项刻意原样保留——它的 `in` 传的是 `pe:`，而全仓每个 `geo_relate` 写口的
+    // `in` 都是 `inst_info:`，照此它应当恒空；可 m1 的 I-3 断言又要求它恰好是 5。
+    // 两者不可能同时成立，要连断言一起判，不是这次性能收口该顺手改的。
     let sql = format!(
-        "RETURN {{ watermark: (SELECT * FROM dbnum_watermark:{db})[0], pe: {pe}, pending: (SELECT action, target_refno, attempts, last_error FROM model_update_pending WHERE dbnum = {db} AND action NOT IN ['room_recalc_panel', 'room_recalc_element']), room_pending: (SELECT action, target_refno, attempts, last_error FROM model_update_pending WHERE dbnum = {db} AND action IN ['room_recalc_panel', 'room_recalc_element']), inst: (SELECT in, out, aabb, world_trans FROM inst_relate WHERE in = pe:{refno}), geo: (SELECT in, out FROM geo_relate WHERE in IN [{roots}]), owner: (SELECT in, out FROM pe_owner WHERE in = pe:{refno}), room: (SELECT in, out, room_num, inside_count, center_dist FROM room_relate WHERE out = pe:{refno}) }};",
+        "RETURN {{ watermark: (SELECT * FROM dbnum_watermark:{db})[0], pe: {pe}, pending: (SELECT action, target_refno, attempts, last_error FROM model_update_pending WHERE dbnum = {db} AND action NOT IN ['room_recalc_panel', 'room_recalc_element']), room_pending: (SELECT action, target_refno, attempts, last_error FROM model_update_pending WHERE dbnum = {db} AND action IN ['room_recalc_panel', 'room_recalc_element']), inst: (SELECT in, out, aabb, world_trans FROM inst_relate:{refno}), geo: (SELECT in, out FROM geo_relate WHERE in IN [{roots}]), owner: (SELECT in, out FROM pe:{refno}->pe_owner), room: (SELECT in, out, room_num, inside_count, center_dist FROM pe:{refno}<-room_relate) }};",
         db = s.dbnum,
         refno = if refno.is_empty() { "0_0" } else { &refno },
     );

@@ -264,8 +264,10 @@ mod gen_side {
         pe_key: &str,
         gen_tol: f64,
     ) -> Result<Option<TriMesh>> {
+        // 走这个 pe 的出边，不要 `WHERE in = {pe_key}`：`inst_relate` 没有
+        // `(in, out)` 索引，谓词形式在真库上是整表扫，而对拍要逐件调用本函数。
         let sql = format!(
-            "SELECT world_trans.d AS wt, insts_flat, booled_id FROM inst_relate WHERE in = {pe_key};"
+            "SELECT world_trans.d AS wt, insts_flat, booled_id FROM {pe_key}->inst_relate;"
         );
         let mut resp = db.query(sql).await.context("查询 inst_relate 失败")?;
         let rows: Vec<serde_json::Value> = resp.take(0).context("解析 inst_relate 结果失败")?;
@@ -993,7 +995,7 @@ mod mesh_wall_live {
     ) {
         let mut missing_pe = Vec::new();
         for pe_key in pe_keys {
-            let sql = format!("SELECT booled_id FROM inst_relate WHERE in = {pe_key};");
+            let sql = format!("SELECT booled_id FROM {pe_key}->inst_relate;");
             let mut resp = db.query(sql).await.expect("booled_id");
             let rows: Vec<serde_json::Value> = resp.take(0).expect("booled rows");
             let raw = rows

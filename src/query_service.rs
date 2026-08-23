@@ -447,7 +447,7 @@ impl QueryService {
         }
         let mut response = SUL_DB
             .query(format!(
-                "SELECT in AS panel, room_num FROM room_relate WHERE out = {};",
+                "SELECT in AS panel, room_num FROM {}<-room_relate;",
                 refno.to_pe_key()
             ))
             .await
@@ -460,7 +460,7 @@ impl QueryService {
         for edge in edges {
             let mut rooms = SUL_DB
                 .query(format!(
-                    "SELECT VALUE in FROM room_panel_relate WHERE out = {} LIMIT 1;",
+                    "SELECT VALUE in FROM {}<-room_panel_relate LIMIT 1;",
                     edge.panel.to_pe_key()
                 ))
                 .await
@@ -547,10 +547,15 @@ impl QueryService {
         struct BoundsRow {
             world_aabb: Aabb,
         }
+        // 按记录 id 直接寻址：`inst_relate` 的 id 就是 refno（写侧 `pdms_inst` 用同一对
+        // `to_inst_relate_key()` / `to_pe_key()` 渲染），所以这与 `WHERE in = pe:{refno}`
+        // 选中同一行。谓词形式在这张表上只能 `Iterate Table`——它没有 `(in, out)` 索引，
+        // 而 `LIMIT 1` 救不了没有 aabb 的 refno：那种情况要一路扫到表尾才知道没有。
+        // 数组 id 的版本化历史行不受影响：它们的 `in` 是版本化 pe，本来就不在命中集里。
         let mut response = SUL_DB
             .query(format!(
-                "SELECT aabb.d AS world_aabb FROM inst_relate WHERE in = {} AND aabb.d != NONE LIMIT 1;",
-                refno.to_pe_key()
+                "SELECT aabb.d AS world_aabb FROM {} WHERE aabb.d != NONE;",
+                refno.to_inst_relate_key()
             ))
             .await
             .and_then(|response| response.check())

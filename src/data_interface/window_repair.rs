@@ -246,10 +246,14 @@ pub async fn repair_committed_window(
                 .ok_or_else(|| anyhow::anyhow!("纠正硬删除缺少 staging 写上下文"))?;
             for (refno, noun) in &hard_delete_rows {
                 let pe = refno.to_pe_key();
+                // 两个方向都要清：作为成员走边目标（`{pe}->pe_owner`），作为属主走
+                // 复合 id 前缀范围。谓词形式的 `WHERE in = {pe}` 在 SurrealDB 2.1 的
+                // DELETE 里拿不到 `unique_pe_owner`，退化成边表全扫
+                // （`increment_pipeline::render_persist_statements` 同一对语句）。
                 context
                     .execute(
                         format!(
-                            "DELETE pe_owner WHERE in = {pe};\n\
+                            "DELETE {pe}->pe_owner;\n\
                              DELETE pe_owner:[{pe}, NONE]..=[{pe}, ..];\n\
                              DELETE {};\nDELETE {noun}:{};\nDELETE {pe};",
                             refno.refno().to_table_key("ATT_UDA"),

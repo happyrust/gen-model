@@ -24,23 +24,21 @@ async fn main() -> anyhow::Result<()> {
     for test_case in test_cases {
         println!("\n🧪 测试BRAN: {}", test_case);
 
-        // 查询该BRAN下的所有TUBI inst_relate记录
+        // 两层都走图：`pe_owner` 只有 `(in, out)` 复合索引（前缀是 `in`，`WHERE out =`
+        // 用不上），`inst_relate` 连索引都没有，原先的嵌套谓词是两张边表各扫一遍全表。
+        // `array::flatten` 不能省：从一组记录出发的 `->inst_relate` 会把每个字段裹一层
+        // 数组（`refno: [pe:xxx]`），下面的 `RefnoEnum` / `String` 会反序列化失败。
         let sql = format!(
             r#"
+            LET $tubis = (SELECT VALUE in FROM pe:{}<-pe_owner WHERE in.noun = 'TUBI');
             SELECT 
                 in as refno,
                 in.noun as noun,
                 world_trans.d as world_trans,
                 aabb.d as aabb,
                 out.id as inst_info_id
-            FROM inst_relate 
-            WHERE in IN (
-                SELECT value in 
-                FROM pe_owner 
-                WHERE out = pe:{}
-                AND in.noun = 'TUBI'
-            )
-            AND world_trans.d != none
+            FROM array::flatten($tubis->inst_relate)
+            WHERE world_trans.d != none
             AND aabb.d != none
             "#,
             test_case
@@ -58,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
             inst_info_id: String,
         }
 
-        match response.take::<Vec<TubiInstRelateResult>>(0) {
+        match response.take::<Vec<TubiInstRelateResult>>(1) {
             Ok(results) => {
                 if results.is_empty() {
                     println!("⚠️  未找到BRAN {} 下的TUBI inst_relate记录", test_case);
@@ -109,17 +107,12 @@ async fn main() -> anyhow::Result<()> {
         // 额外检查：查询该BRAN下所有TUBI的基本信息
         let basic_sql = format!(
             r#"
+            LET $tubis = (SELECT VALUE in FROM pe:{}<-pe_owner WHERE in.noun = 'TUBI');
             SELECT 
                 in as refno,
                 in.noun as noun,
                 COUNT() as inst_relate_count
-            FROM inst_relate 
-            WHERE in IN (
-                SELECT value in 
-                FROM pe_owner 
-                WHERE out = pe:{}
-                AND in.noun = 'TUBI'
-            )
+            FROM array::flatten($tubis->inst_relate)
             GROUP BY in
             "#,
             test_case
@@ -135,7 +128,7 @@ async fn main() -> anyhow::Result<()> {
             inst_relate_count: i64,
         }
 
-        match basic_response.take::<Vec<TubiBasicInfo>>(0) {
+        match basic_response.take::<Vec<TubiBasicInfo>>(1) {
             Ok(basic_results) => {
                 if basic_results.is_empty() {
                     println!("⚠️  BRAN {} 下没有TUBI元素或没有inst_relate记录", test_case);

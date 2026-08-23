@@ -141,13 +141,24 @@ fn pe_key(refno: &str) -> String {
     format!("pe:{}", refno.replace('/', "_"))
 }
 
+fn inst_relate_key(refno: &str) -> String {
+    format!("inst_relate:{}", refno.replace('/', "_"))
+}
+
+/// 一批属主的成员：走每个属主的 `pe_owner` 入边。
+///
+/// **不要**写成 `WHERE out IN [..]`。`unique_pe_owner` 的前缀是 `in`，只给 `out`
+/// 用不上（`docs/2026-08-06_pe-owner-uniqueness-fix-audit.md` 实测：778,925 行的表上
+/// `WHERE out = Y` 是 `Iterate Table` / 3.83 秒，走索引的形式 0.65 毫秒）。这条语句在
+/// [`load_subtree_refnos`] 的 BFS 里每层每块各发一次，是全仓边表全扫**次数**最多的
+/// 地方——一次子树对拍要扫几十遍整张 `pe_owner`。
 fn render_children_select(refnos: &[String]) -> String {
-    let ids = refnos
+    let owners = refnos
         .iter()
-        .map(|refno| pe_key(refno))
+        .map(|refno| format!("{}<-pe_owner", pe_key(refno)))
         .collect::<Vec<_>>()
         .join(", ");
-    format!("SELECT type::string(in) AS refno FROM pe_owner WHERE out IN [{ids}];")
+    format!("SELECT type::string(in) AS refno FROM {owners};")
 }
 
 async fn load_subtree_refnos(db: &Surreal<Any>, root_refno: &str) -> Result<Vec<String>> {
@@ -184,9 +195,12 @@ async fn load_gen_side(
     let mut out = HashMap::new();
 
     for chunk in refnos.chunks(QUERY_CHUNK) {
+        // 按记录 id 直接寻址（与生产读路径的 `get_inst_relate_keys` 同一形态）：
+        // `inst_relate` 的 id 就是 refno，而这张表没有 `(in, out)` 索引，
+        // `WHERE in IN [..]` 只能整表扫。不存在的 id 不出行，与谓词形式一致。
         let ids = chunk
             .iter()
-            .map(|r| pe_key(r))
+            .map(|r| inst_relate_key(r))
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
@@ -195,7 +209,7 @@ async fn load_gen_side(
                     world_trans.d AS world_trans, \
                     array::len(out->geo_relate[WHERE visible = true]) AS visible_geos, \
                     array::len(out->geo_relate) AS total_geos \
-             FROM inst_relate WHERE in IN [{ids}];"
+             FROM {ids};"
         );
 
         let mut response = db.query(sql).await.context("查询 inst_relate 失败")?;
@@ -580,7 +594,8 @@ mod tests {
         let sql = render_children_select(&["24384/22404".to_string()]);
         assert_eq!(
             sql,
-            "SELECT type::string(in) AS refno FROM pe_owner WHERE out IN [pe:24384_22404];"
+            "SELECT type::string(in) AS refno FROM pe:24384_22404<-pe_owner;"
         );
+        assert!(!sql.contains("WHERE out IN"), "{sql}");
     }
 }

@@ -102,7 +102,7 @@ async fn edges(element: &str) -> Vec<Edge> {
     let mut response = SUL_DB
         .query(format!(
             "SELECT record::id(in) AS panel, record::id(out) AS part, room_num \
-             FROM room_relate WHERE out = pe:{element} ORDER BY panel;"
+             FROM pe:{element}<-room_relate ORDER BY panel;"
         ))
         .await
         .expect("query room edges")

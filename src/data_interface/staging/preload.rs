@@ -196,10 +196,20 @@ async fn apply_model_mutation_preload_from(
         // ——一次删除子树的窗口有 96% 的时间耗在这一句上。
         // 键本身已经是 `pe:xxx` 的完整形态，表名在 FROM 里是多余的。
         copied += copy_rows(source, "pe", &format!("SELECT * FROM {keys}")).await?;
+        // 同一条纪律用在边上。`in IN [..]` 是 `IN` 不是 `=`，`unique_pe_owner` 用不上
+        // （`docs/2026-08-06_pe-owner-uniqueness-fix-audit.md` 实测：只有
+        // `in = X AND out = Y` 才走索引），整句退化成边表全扫。改从每个成员的出边走图，
+        // 「`out` 也在这份层级里」降级成挂在后面的普通过滤——源已经只是这几个成员的边。
+        let outgoing = preload
+            .delete_hierarchy
+            .iter()
+            .map(|refno| format!("{}->pe_owner", refno.to_pe_key()))
+            .collect::<Vec<_>>()
+            .join(",");
         copied += copy_relations(
             source,
             "pe_owner",
-            &format!("SELECT * FROM pe_owner WHERE in IN [{keys}] AND out IN [{keys}]"),
+            &format!("SELECT * FROM {outgoing} WHERE out IN [{keys}]"),
         )
         .await?;
     }
@@ -758,6 +768,12 @@ mod tests {
         );
     }
 
+    /// `pe_owner` 夹具刻意用生产写口的形状——带复合 id `[owner, 槽位]` 的
+    /// `INSERT RELATION`，而不是 `RELATE`（`cata_closure` 就是这么写的，`RELATE`
+    /// 被 ReplaySafe 整类拒绝）。子树闭包与删除桶拷贝都走图遍历（`<-pe_owner<-(?)`、
+    /// `{pe}->pe_owner`），要是邻接索引只对 `RELATE` 维护，这两条路会静默返回空集：
+    /// 删除级联在暂存里走不到后代，`status = OK` 地少删一片。夹具用 `RELATE` 的话
+    /// 这个区别测不出来。
     #[tokio::test(flavor = "multi_thread")]
     async fn copies_only_the_root_product_closure_without_journaling() {
         let source = connect("mem://").await.expect("source mem");
@@ -770,8 +786,9 @@ mod tests {
             "CREATE pe:⟨4000000001_1⟩ SET deleted=false; CREATE pe:⟨4000000001_2⟩ SET deleted=false;
              CREATE pe:⟨4000000001_3⟩ SET deleted=false;
              CREATE pe:⟨4000000001_9⟩ SET deleted=false;
-             RELATE pe:⟨4000000001_2⟩->pe_owner->pe:⟨4000000001_1⟩;
-             RELATE pe:⟨4000000001_3⟩->pe_owner->pe:⟨4000000001_2⟩;
+             INSERT RELATION INTO pe_owner [
+               { id: pe_owner:[pe:⟨4000000001_1⟩, 0], in: pe:⟨4000000001_2⟩, out: pe:⟨4000000001_1⟩ },
+               { id: pe_owner:[pe:⟨4000000001_2⟩, 0], in: pe:⟨4000000001_3⟩, out: pe:⟨4000000001_2⟩ }];
              CREATE trans:wt1 SET d=[1]; CREATE trans:t1 SET d=[2]; CREATE aabb:a1 SET d={x:1};
              CREATE vec3:v1 SET d=[1,2,3]; CREATE inst_info:i1 SET noun='PIPE';
              CREATE inst_geo:g1 SET aabb=aabb:a1, pts=[vec3:v1];

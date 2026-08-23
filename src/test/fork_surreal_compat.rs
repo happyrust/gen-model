@@ -435,7 +435,7 @@ async fn dual_insert_id_collision_behavior_agrees() {
 async fn owner_block(db: &Surreal<Any>, owner: &str) -> Vec<String> {
     let mut response = db
         .query(format!(
-            "SELECT VALUE id FROM pe_owner WHERE out = {owner} ORDER BY id"
+            "SELECT VALUE id FROM {owner}<-pe_owner ORDER BY id"
         ))
         .await
         .expect("读 owner 块传输")

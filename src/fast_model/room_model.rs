@@ -497,6 +497,16 @@ fn report_full_rebuild(
 ///
 /// 成员按 refno 排序后渲染：`HashMap` 的遍历顺序每次都不同，不排序的话同一份输入会渲染
 /// 出不同的 SQL，重放与逐边对拍都失去意义。
+///
+/// 那条 DELETE 走图遍历的边目标（`{panel}->room_relate`），**不要**写成
+/// `WHERE in = {panel}`。库里确实有 `unique_room_relate (in, out)`，`in` 又正是它的
+/// 前缀——但那只救得了 SELECT：**DELETE 拿不到二级索引**，谓词形式一律整表扫
+/// （`increment_pipeline::render_persist_statements` 同一发）。10 万条边、索引在场的
+/// 隔离实例实测：`DELETE … WHERE in = X` 3.132s，`DELETE X->room_relate` 244.973ms，
+/// 删除行数相同（`docs/evidence/2026-08-20-edge-scan-sweep/`）。代价随全库边数线性涨，
+/// 与本面板成员数无关，而每块面板重算各发一次——全量重建就是面板数乘边表全扫。
+/// 同一条纪律的读侧见 [`render_element_room_history`]，删除侧见
+/// `helper.rs::render_room_membership_delete`。
 fn render_room_relate_write(
     panel_refno: RefnoEnum,
     within_refnos: &HashMap<RefnoEnum, RoomMember>,
@@ -516,7 +526,7 @@ fn render_room_relate_statements(
     room_num: &str,
 ) -> Vec<String> {
     let panel_key = panel_refno.to_pe_key();
-    let mut statements = vec![format!("DELETE room_relate WHERE in = {panel_key}")];
+    let mut statements = vec![format!("DELETE {panel_key}->room_relate")];
 
     let mut members: Vec<&RoomMember> = within_refnos.values().collect();
     members.sort_by_key(|member| member.refno.to_string());
@@ -727,13 +737,15 @@ pub fn match_room_name_hh(room_name: &str) -> bool {
 /// 此前是 `relate {room}->room_panel_relate->[{panels}]`，**不带 record id**——每跑一次
 /// 就多一批完全重复的边（缺陷 D6）。带上确定的 `{room}_{panel}` id 之后重复不再产生，
 /// 而先删本房名下的旧边则让「面板从这间房挪走」也能收敛。
+///
+/// 删除同样走边目标，理由见 [`render_room_relate_write`]。
 fn render_room_panel_relate_write(
     room_refno: RefnoEnum,
     panels: &[RefnoEnum],
     room_num: &str,
 ) -> String {
     let room_key = room_refno.to_pe_key();
-    let mut statements = vec![format!("DELETE room_panel_relate WHERE in = {room_key}")];
+    let mut statements = vec![format!("DELETE {room_key}->room_panel_relate")];
     if !panels.is_empty() {
         let rows = panels
             .iter()
@@ -753,6 +765,8 @@ fn render_room_panel_relate_write(
     wrap_in_transaction(&statements).unwrap_or_default()
 }
 
+/// 一块面板归属哪间房：删掉指向它的旧 `room_panel_relate` 入边再写回本次的。
+/// 删除走边目标，理由见 [`render_room_relate_write`]。
 fn render_panel_room_topology_write(panel: RefnoEnum, room: Option<&RoomPanels>) -> String {
     wrap_in_transaction(&render_panel_room_topology_statements(panel, room)).unwrap_or_default()
 }
@@ -762,7 +776,7 @@ fn render_panel_room_topology_statements(
     room: Option<&RoomPanels>,
 ) -> Vec<String> {
     let panel_key = panel.to_pe_key();
-    let mut statements = vec![format!("DELETE room_panel_relate WHERE out = {panel_key}")];
+    let mut statements = vec![format!("DELETE {panel_key}<-room_panel_relate")];
     if let Some(room) = room {
         statements.push(format!(
             "INSERT RELATION INTO room_panel_relate [{{ id: room_panel_relate:{}_{panel}, in: {}, out: {panel_key}, room_num: '{}' }}]",
@@ -1467,6 +1481,21 @@ pub async fn load_panel_index(
 ///
 /// 查不到 `room_num` 的边照样记下面板：房间号只服务日志，而封闭性检查一条边都不能漏
 /// ——漏掉的旧边会让「旧边 ⊆ 本轮已重算面板」凭空成立，把本该照跑的元素任务错误吸收。
+///
+/// 走图遍历的边目标（`{pe_key}<-room_relate`），**不要**写成
+/// `WHERE out IN [..]`：谓词形式拿不到边索引，退化成边表全扫，成本随全库边数线性涨
+/// 而与本页元素数无关。8000 实测（`room_relate` 13.7 万条边）：一页 12 个元素的同一
+/// 份答案（29 条边），全扫写法 48.6s，图遍历 2.4ms。同一条纪律的删除侧见
+/// `helper.rs::render_room_membership_delete`。
+fn render_element_room_history(elements: &[RefnoEnum]) -> String {
+    let targets = elements
+        .iter()
+        .map(|element| format!("{}<-room_relate", element.to_pe_key()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("SELECT in AS panel, out AS element, room_num FROM {targets};")
+}
+
 #[derive(Debug, Default)]
 pub struct ElementRoomHistory {
     edges: HashMap<RefnoEnum, Vec<(RefnoEnum, Option<String>)>>,
@@ -1485,16 +1514,8 @@ impl ElementRoomHistory {
             #[serde(default)]
             room_num: Option<String>,
         }
-        let keys = elements
-            .iter()
-            .map(RefnoEnum::to_pe_key)
-            .collect::<Vec<_>>()
-            .join(",");
         let mut response = crate::data_interface::staging::active_data_db()
-            .query(format!(
-                "SELECT in AS panel, out AS element, room_num \
-                 FROM room_relate WHERE out IN [{keys}];"
-            ))
+            .query(render_element_room_history(elements))
             .await
             .map_err(|error| {
                 anyhow::anyhow!("查询 {} 个构件的现存房间归属失败: {error}", elements.len())
@@ -1820,13 +1841,18 @@ struct ElementRoomEdge {
 /// 边 id 与整间分支逐字一致（`{panel}_{element}`）。这不是巧合而是必要条件：两条
 /// 分支迟早会在同一条边上相遇，id 不同就会各写一行，`fn::room_relate_of` 取到哪条
 /// 全看存储顺序——正是排序键要消灭的那种不确定性。
+///
+/// 删除走边目标（`{element}<-room_relate`），排除子句挂在它后面成为普通 `WHERE`；
+/// 理由见 [`render_room_relate_write`]。这一侧按 `out` 过滤，是最贵的形状——`out`
+/// 连 `unique_room_relate` 的前缀都够不着，所以连 SELECT 都退化成整表扫（8009 现场
+/// 只读实测 1.12s vs 边目标 392µs），而房间轮每个元素各发一次。
 fn render_element_relate_write(
     element: RefnoEnum,
     edges: &[ElementRoomEdge],
     protected_panels: &[RefnoEnum],
 ) -> String {
     let element_key = element.to_pe_key();
-    let mut delete = format!("DELETE room_relate WHERE out = {element_key}");
+    let mut delete = format!("DELETE {element_key}<-room_relate");
     if !protected_panels.is_empty() {
         // 排序是为了让同一份缺陷面板集合每次渲染出逐字相同的语句——journal 重放与
         // 对拍都押在这上面。
@@ -1835,7 +1861,7 @@ fn render_element_relate_write(
             .map(RefnoEnum::to_pe_key)
             .sorted()
             .join(", ");
-        delete.push_str(&format!(" AND in NOT IN [{keys}]"));
+        delete.push_str(&format!(" WHERE in NOT IN [{keys}]"));
     }
     let mut statements = vec![delete];
 
@@ -1960,14 +1986,20 @@ fn log_panel_membership_change(
     );
 }
 
-/// 一块面板当前收着哪些构件：现存 `room_relate` 出边（`in = panel`）的 out 端去重。
-/// 供日志对照，也供暂存房间轮的 fail-closed 守卫判断「清边是不是无害空操作」。
+/// 一块面板当前收着哪些构件：现存 `room_relate` 出边（`{panel}->room_relate`）的
+/// out 端去重。供日志对照，也供暂存房间轮的 fail-closed 守卫判断「清边是不是无害
+/// 空操作」。
+///
+/// 这是本文件里唯一**不图快**的那处改写：它是 SELECT 且按 `in` 过滤，
+/// `unique_room_relate` 的前缀正好是 `in`，谓词形式本来就走索引（8009 只读实测
+/// 791.9µs vs 边目标 1.1236ms）。改成边目标只为让四条房间语句形状一致，
+/// 别指望它变快。真正的收益在 DELETE 侧与 `out` 侧，见 [`render_room_relate_write`]。
 pub(crate) async fn existing_members_of_panel(
     panel: RefnoEnum,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
     let mut response = crate::data_interface::staging::active_data_db()
         .query(format!(
-            "SELECT VALUE out FROM room_relate WHERE in = {};",
+            "SELECT VALUE out FROM {}->room_relate;",
             panel.to_pe_key()
         ))
         .await
@@ -2112,7 +2144,7 @@ mod tests {
     fn empty_member_set_still_clears_the_old_edges() {
         let sql = render_room_relate_write(panel(), &HashMap::new(), "K100");
         assert!(
-            sql.contains("DELETE room_relate WHERE in = pe:4000000001_10"),
+            sql.contains("DELETE pe:4000000001_10->room_relate"),
             "{sql}"
         );
         assert!(
@@ -2130,11 +2162,91 @@ mod tests {
             "K100",
         );
         assert!(
-            position_of(&sql, "DELETE room_relate") < position_of(&sql, "INSERT RELATION"),
+            position_of(&sql, "DELETE pe:4000000001_10->room_relate")
+                < position_of(&sql, "INSERT RELATION"),
             "DELETE 必须排在写入之前:\n{sql}"
         );
         assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
         assert!(sql.ends_with(";\nCOMMIT TRANSACTION;"), "{sql}");
+    }
+
+    /// 归属快照必须按边目标走图，不能退回 `WHERE out IN [..]` 的谓词写法：后者拿不到
+    /// 边索引，一页元素的同一份答案在 13.7 万条边的库上从 2.4ms 退化成 48.6s，而房间轮
+    /// 每一页都要查一次。与 `helper.rs` 删除侧同一条纪律。
+    #[test]
+    fn the_element_room_snapshot_walks_the_graph_instead_of_scanning_the_edge_table() {
+        let sql = render_element_room_history(&[
+            RefnoEnum::from("4000000001_20"),
+            RefnoEnum::from("4000000001_24"),
+        ]);
+        assert_eq!(
+            sql,
+            "SELECT in AS panel, out AS element, room_num \
+             FROM pe:4000000001_20<-room_relate, pe:4000000001_24<-room_relate;",
+            "{sql}"
+        );
+        assert!(!sql.contains("WHERE out IN"), "{sql}");
+    }
+
+    /// 四条清边语句同样按边目标走图。读侧的纪律（上一条测试）此前只管住了快照查询，
+    /// 写侧的 DELETE 还留着谓词写法——而 **DELETE 拿不到二级索引**，`unique_room_relate`
+    /// 在场也没用（10 万条边实测 3.132s vs 244.973ms），那四条每次都是整张边表全扫，
+    /// 且面板/元素各发一次。
+    ///
+    /// 排除子句必须留在边目标后面当普通 `WHERE`，不能退回 `AND in NOT IN`：后者只有
+    /// 在谓词形式下才成立。「边目标 + WHERE」是这次唯一的新形状，单独验它进得了
+    /// journal（其余四条的 ReplaySafe 由 [`room_writes_are_journal_admissible`] 管）。
+    #[test]
+    fn every_room_edge_delete_walks_the_graph_instead_of_scanning_the_edge_table() {
+        use crate::data_interface::staging::replay_safe::validate_statement;
+
+        let element = RefnoEnum::from("4000000001_20");
+        let room = RefnoEnum::from("4000000001_1");
+
+        let panel_members = render_room_relate_write(panel(), &HashMap::new(), "K100");
+        assert!(
+            panel_members.contains("DELETE pe:4000000001_10->room_relate"),
+            "{panel_members}"
+        );
+        let room_panels = render_room_panel_relate_write(room, &[], "K100");
+        assert!(
+            room_panels.contains("DELETE pe:4000000001_1->room_panel_relate"),
+            "{room_panels}"
+        );
+        let topology = render_panel_room_topology_write(panel(), None);
+        assert!(
+            topology.contains("DELETE pe:4000000001_10<-room_panel_relate"),
+            "{topology}"
+        );
+        let element_edges = render_element_relate_write(element, &[], &[]);
+        assert!(
+            element_edges.contains("DELETE pe:4000000001_20<-room_relate"),
+            "{element_edges}"
+        );
+        let protected = render_element_relate_write(element, &[], &[panel()]);
+        assert!(
+            protected.contains(
+                "DELETE pe:4000000001_20<-room_relate WHERE in NOT IN [pe:4000000001_10]"
+            ),
+            "{protected}"
+        );
+
+        validate_statement(&protected).unwrap_or_else(|error| {
+            panic!("边目标带 WHERE 必须可进 journal：{error:#}\n{protected}")
+        });
+
+        // 谓词写法不许从任何一条路径悄悄回流。字面量拆开拼接，否则这条断言自己就是
+        // 源码里的一个匹配。
+        let source = include_str!("room_model.rs");
+        for forbidden in [
+            ["DELETE room_relate", " WHERE in"].concat(),
+            ["DELETE room_relate", " WHERE out"].concat(),
+            ["DELETE room_panel_relate", " WHERE in"].concat(),
+            ["DELETE room_panel_relate", " WHERE out"].concat(),
+            ["FROM room_relate", " WHERE in ="].concat(),
+        ] {
+            assert!(!source.contains(&forbidden), "边表全扫回流了: {forbidden}");
+        }
     }
 
     /// 固定的 `{panel}_{member}` record id 是幂等的另一半：没有它，同一条边每重建一次
@@ -2231,7 +2343,7 @@ mod tests {
         let sql = render_room_panel_relate_write(room, &panels, "K100");
 
         assert!(
-            position_of(&sql, "DELETE room_panel_relate WHERE in = pe:4000000001_1")
+            position_of(&sql, "DELETE pe:4000000001_1->room_panel_relate")
                 < position_of(&sql, "INSERT RELATION"),
             "{sql}"
         );
@@ -2274,14 +2386,14 @@ mod tests {
         let element = RefnoEnum::from("4000000001_20");
         let sql = render_element_relate_write(element, &[], &[]);
         assert!(
-            sql.contains("DELETE room_relate WHERE out = pe:4000000001_20"),
+            sql.contains("DELETE pe:4000000001_20<-room_relate"),
             "{sql}"
         );
         assert!(!sql.contains("INSERT RELATION"), "{sql}");
 
         let panel_sql = render_room_relate_write(panel(), &HashMap::new(), "K100");
         assert!(
-            panel_sql.contains("DELETE room_relate WHERE in = pe:4000000001_10"),
+            panel_sql.contains("DELETE pe:4000000001_10->room_relate"),
             "{panel_sql}"
         );
     }
@@ -2405,7 +2517,7 @@ mod tests {
         let element = RefnoEnum::from("4000000002_20");
         let sql = render_element_relate_write(element, &[], &[panel()]);
         assert!(
-            sql.contains("AND in NOT IN ["),
+            sql.contains("<-room_relate WHERE in NOT IN ["),
             "判不了的面板必须从替换范围里排除: {sql}"
         );
         assert!(
@@ -2757,7 +2869,7 @@ mod tests {
     fn room_with_no_panels_still_clears() {
         let sql = render_room_panel_relate_write(RefnoEnum::from("4000000001_1"), &[], "K100");
         assert!(
-            sql.contains("DELETE room_panel_relate WHERE in = pe:4000000001_1"),
+            sql.contains("DELETE pe:4000000001_1->room_panel_relate"),
             "{sql}"
         );
         assert!(!sql.contains("INSERT RELATION"), "{sql}");
@@ -2773,10 +2885,8 @@ mod tests {
         };
         let sql = render_panel_room_topology_write(panel, Some(&room));
         assert!(
-            position_of(
-                &sql,
-                "DELETE room_panel_relate WHERE out = pe:4000000001_10"
-            ) < position_of(&sql, "INSERT RELATION"),
+            position_of(&sql, "DELETE pe:4000000001_10<-room_panel_relate")
+                < position_of(&sql, "INSERT RELATION"),
             "{sql}"
         );
         assert!(
@@ -2785,7 +2895,7 @@ mod tests {
         );
 
         let removed = render_panel_room_topology_write(panel, None);
-        assert!(removed.contains("DELETE room_panel_relate WHERE out = pe:4000000001_10"));
+        assert!(removed.contains("DELETE pe:4000000001_10<-room_panel_relate"));
         assert!(!removed.contains("INSERT RELATION"));
     }
 
@@ -2817,17 +2927,108 @@ mod tests {
         validate_statement(&registered).expect("panel 双表重写必须过 ReplaySafe");
         assert_eq!(registered.matches("BEGIN TRANSACTION").count(), 1);
         assert_eq!(registered.matches("COMMIT TRANSACTION").count(), 1);
-        assert!(registered.contains("DELETE room_relate"), "{registered}");
-        assert!(
-            registered.contains("DELETE room_panel_relate"),
-            "{registered}"
-        );
+        assert!(registered.contains("->room_relate"), "{registered}");
+        assert!(registered.contains("<-room_panel_relate"), "{registered}");
 
         let removed = render_panel_state_write(room.panels[0], &HashMap::new(), None);
         validate_statement(&removed).expect("面板不在册时的双向清边同样要过 ReplaySafe");
         assert_eq!(removed.matches("BEGIN TRANSACTION").count(), 1);
-        assert!(removed.contains("DELETE room_relate"), "{removed}");
-        assert!(removed.contains("DELETE room_panel_relate"), "{removed}");
+        assert!(removed.contains("->room_relate"), "{removed}");
+        assert!(removed.contains("<-room_panel_relate"), "{removed}");
+    }
+
+    /// 真实 mem 库：边目标的 DELETE 必须真的删掉 `INSERT RELATION` 写进去的边。
+    ///
+    /// 这是从谓词写法换到图遍历时唯一会**静默**出错的地方。两张房间表的边都由带显式
+    /// id 的 `INSERT RELATION` 写入（`RELATE` 被 ReplaySafe 整类拒绝，见
+    /// [`both_room_panel_writes_are_admitted_into_the_window_journal`]）；图遍历走的
+    /// 却是边邻接索引。要是引擎只在 `RELATE` 时维护那个索引，这四条 DELETE 会一条边
+    /// 都匹配不上、`status = OK` 地什么都不做，先清后写退化成只写不清——陈旧成员边
+    /// 从此只增不减，而没有任何东西会报错。所以这里必须实测「删完是空的」，
+    /// 不能只对拍 SQL 文本。
+    ///
+    /// 反向也要钉住：清元素入边不能顺手把**同一块面板**指向别的构件的边带走，
+    /// 否则两条分支会互相抹结果。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn graph_target_deletes_actually_remove_insert_relation_edges() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test").use_db("test").await.expect("ns/db");
+
+        let seed = "INSERT RELATION INTO room_relate [\
+             { id: room_relate:kept, in: pe:4000000001_11, out: pe:4000000001_21, room_num: 'K200' },\
+             { id: room_relate:panel_member, in: pe:4000000001_10, out: pe:4000000001_20, room_num: 'K100' },\
+             { id: room_relate:sibling_member, in: pe:4000000001_10, out: pe:4000000001_21, room_num: 'K100' }];\
+             INSERT RELATION INTO room_panel_relate [\
+             { id: room_panel_relate:topology, in: pe:4000000001_1, out: pe:4000000001_10, room_num: 'K100' },\
+             { id: room_panel_relate:other_room, in: pe:4000000001_2, out: pe:4000000001_11, room_num: 'K200' }];";
+        db.query(seed)
+            .await
+            .expect("fixture transport")
+            .check()
+            .expect("fixture statements");
+
+        async fn ids(
+            db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+            table: &str,
+        ) -> Vec<String> {
+            let mut response = db
+                .query(format!("SELECT VALUE record::id(id) FROM {table}"))
+                .await
+                .expect("inspect transport")
+                .check()
+                .expect("inspect statement");
+            let mut ids: Vec<String> = response.take(0).expect("edge ids");
+            ids.sort();
+            ids
+        }
+
+        // 元素分支：只清指向 4000000001_20 的入边。
+        db.query(render_element_relate_write(
+            RefnoEnum::from("4000000001_20"),
+            &[],
+            &[],
+        ))
+        .await
+        .expect("element delete transport")
+        .check()
+        .expect("element delete");
+        assert_eq!(
+            ids(&db, "room_relate").await,
+            vec!["kept".to_string(), "sibling_member".to_string()],
+            "元素入边没被删掉，或者连累了同面板的其它成员边"
+        );
+
+        // 整间分支：清面板 4000000001_10 的全部出边，别的面板不受影响。
+        db.query(render_room_relate_write(panel(), &HashMap::new(), "K100"))
+            .await
+            .expect("panel delete transport")
+            .check()
+            .expect("panel delete");
+        assert_eq!(ids(&db, "room_relate").await, vec!["kept".to_string()]);
+
+        // 拓扑表两个方向各来一次。
+        db.query(render_panel_room_topology_write(panel(), None))
+            .await
+            .expect("topology delete transport")
+            .check()
+            .expect("topology delete");
+        assert_eq!(
+            ids(&db, "room_panel_relate").await,
+            vec!["other_room".to_string()]
+        );
+
+        db.query(render_room_panel_relate_write(
+            RefnoEnum::from("4000000001_2"),
+            &[],
+            "K200",
+        ))
+        .await
+        .expect("room delete transport")
+        .check()
+        .expect("room delete");
+        assert!(ids(&db, "room_panel_relate").await.is_empty());
     }
 
     /// 真实 mem 暂存库故障注入：成员表已经执行 DELETE/INSERT 后、拓扑表写入前抛错，
@@ -2863,9 +3064,10 @@ mod tests {
             panels: vec![panel()],
         };
         let sql = render_panel_state_write(panel(), &members([member(21, 8, 1.0)]), Some(&room));
+        let topology_delete = format!("DELETE {}<-room_panel_relate", panel().to_pe_key());
         let injected = sql.replacen(
-            "DELETE room_panel_relate",
-            "THROW 'injected panel-state failure';\nDELETE room_panel_relate",
+            &topology_delete,
+            &format!("THROW 'injected panel-state failure';\n{topology_delete}"),
             1,
         );
         assert_ne!(injected, sql, "故障点必须插在两张表之间");

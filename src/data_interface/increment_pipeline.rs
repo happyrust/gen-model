@@ -1680,7 +1680,11 @@ impl IncrementPipeline {
             .filter(|write| matches!(&write.op.detail, EleOperationDetail::Add(_)))
         {
             let pe = format!("pe:{}", write.op.refno);
-            statements.push(format!("DELETE pe_owner WHERE in = {pe};"));
+            // `WHERE in = ...` makes SurrealDB 2.1 scan the full relation table during
+            // DELETE (105k+ model trees already exceed the 120s staging deadline). The
+            // graph target follows the same `in` side through the relation adjacency
+            // index and remains a deterministic ReplaySafe target.
+            statements.push(format!("DELETE {pe}->pe_owner;"));
             statements.push(format!("DELETE pe_owner:[{pe}, NONE]..=[{pe}, ..];"));
         }
         for write in &planned {
@@ -3030,7 +3034,7 @@ mod fold_tests {
             )]),
             7997,
         );
-        let cleanup = "DELETE pe_owner WHERE in = pe:7997_30;";
+        let cleanup = "DELETE pe:7997_30->pe_owner;";
         assert_eq!(statements.first().map(String::as_str), Some(cleanup));
         let children_cleanup = "DELETE pe_owner:[pe:7997_30, NONE]..=[pe:7997_30, ..];";
         assert_eq!(
@@ -4354,7 +4358,7 @@ mod live_tests {
         }
 
         let mut response = SUL_DB
-            .query("SELECT VALUE id FROM pe_owner WHERE out = pe:4000000003_10;")
+            .query("SELECT VALUE id FROM pe:4000000003_10<-pe_owner;")
             .await
             .expect("count relations")
             .check()
@@ -4734,7 +4738,7 @@ mod live_tests {
         let fitting_refno = RefnoEnum::from(fitting);
         SUL_DB
             .query(format!(
-                "DELETE pe_owner WHERE in = {} AND out != {};",
+                "DELETE {}->pe_owner WHERE out != {};",
                 fitting_refno.to_pe_key(),
                 old_branch.to_pe_key()
             ))
@@ -4869,7 +4873,7 @@ mod live_tests {
         .await;
         let mut response = SUL_DB
             .query(format!(
-                "SELECT VALUE out FROM pe_owner WHERE in = {};",
+                "SELECT VALUE out FROM {}->pe_owner;",
                 fitting_refno.to_pe_key()
             ))
             .await
@@ -4890,15 +4894,9 @@ mod live_tests {
             let subtree = crate::data_interface::helper::collect_pe_subtree_refnos(&[root])
                 .await
                 .expect("collect regenerated branch subtree");
-            let pe_keys = subtree
-                .iter()
-                .map(RefnoEnum::to_pe_key)
-                .collect::<Vec<_>>()
-                .join(",");
+            let inst_keys = aios_core::get_inst_relate_keys(&subtree);
             let mut response = SUL_DB
-                .query(format!(
-                    "SELECT VALUE id FROM inst_relate WHERE in IN [{pe_keys}];"
-                ))
+                .query(format!("SELECT VALUE id FROM {inst_keys};"))
                 .await
                 .expect("query regenerated branch models")
                 .check()
@@ -4959,7 +4957,7 @@ mod live_tests {
         const BAD_REFERRER: &str = "pe:codex_bad_ref_rev";
         SUL_DB
             .query(format!(
-                "DELETE ref_rev WHERE in = {BAD_REFERRER}; \
+                "DELETE {BAD_REFERRER}->ref_rev; \
                  RELATE {BAD_REFERRER}->ref_rev->{};",
                 new_branch.to_pe_key()
             ))
@@ -5016,7 +5014,7 @@ mod live_tests {
         .await
         .expect("persist reorder work and advance watermark");
         SUL_DB
-            .query(format!("DELETE ref_rev WHERE in = {BAD_REFERRER};"))
+            .query(format!("DELETE {BAD_REFERRER}->ref_rev;"))
             .await
             .expect("repair reverse index")
             .check()
@@ -5028,7 +5026,7 @@ mod live_tests {
         }
         let mut response = SUL_DB
             .query(format!(
-                "SELECT id, in AS child FROM pe_owner WHERE out = {} ORDER BY id;",
+                "SELECT id, in AS child FROM {}<-pe_owner ORDER BY id;",
                 new_branch.to_pe_key()
             ))
             .await
@@ -5070,15 +5068,9 @@ mod live_tests {
             crate::data_interface::helper::collect_pe_subtree_refnos(&[new_branch])
                 .await
                 .expect("collect reordered branch subtree");
-        let reordered_pe_keys = reordered_subtree
-            .iter()
-            .map(RefnoEnum::to_pe_key)
-            .collect::<Vec<_>>()
-            .join(",");
+        let reordered_inst_keys = aios_core::get_inst_relate_keys(&reordered_subtree);
         let mut response = SUL_DB
-            .query(format!(
-                "SELECT VALUE id FROM inst_relate WHERE in IN [{reordered_pe_keys}];"
-            ))
+            .query(format!("SELECT VALUE id FROM {reordered_inst_keys};"))
             .await
             .expect("query reordered branch models")
             .check()
@@ -5162,7 +5154,7 @@ mod live_tests {
         .expect("restore synthetic OWNER and child-order edits");
         SUL_DB
             .query(format!(
-                "DELETE pe_owner WHERE in = {} AND out != {};",
+                "DELETE {}->pe_owner WHERE out != {};",
                 fitting_refno.to_pe_key(),
                 old_branch.to_pe_key()
             ))
@@ -5178,7 +5170,7 @@ mod live_tests {
         .await;
         let mut response = SUL_DB
             .query(format!(
-                "SELECT VALUE out FROM pe_owner WHERE in = {};",
+                "SELECT VALUE out FROM {}->pe_owner;",
                 fitting_refno.to_pe_key()
             ))
             .await
@@ -5356,9 +5348,8 @@ mod live_tests {
                 "RETURN [
                     (SELECT VALUE deleted FROM pe:24381_107146)[0],
                     inst_relate:24381_107146.id != none,
-                    count(SELECT * FROM ref_rev
-                          WHERE in = pe:24381_107146 OR out = pe:24381_107146),
-                    count(SELECT * FROM pe_owner WHERE in = pe:24381_107146),
+                    count(SELECT * FROM pe:24381_107146<->ref_rev),
+                    count(SELECT * FROM pe:24381_107146->pe_owner),
                     (SELECT VALUE applied_sesno FROM dbnum_watermark:7997)[0]
                 ];",
             )

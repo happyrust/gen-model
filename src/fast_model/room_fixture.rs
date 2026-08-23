@@ -289,18 +289,29 @@ pub async fn drop_room_fixture(mesh_dir: &Path) -> anyhow::Result<()> {
         }
     }
 
-    // pe_owner / geo_relate / inst_relate / room_relate 的边按端点删，id 不完全可预测。
-    let pes = (0..25)
-        .map(|seq| format!("pe:{}", refno(seq)))
-        .collect::<Vec<_>>()
-        .join(", ");
+    // pe_owner / inst_relate / room_relate 的边按端点删，id 不完全可预测。
+    //
+    // 双向按边目标走图（`{pe}<->{table}`），**不要**写成
+    // `WHERE in IN [..] OR out IN [..]`：那个 `OR` 会让 `(in, out)` 复合索引整个失效，
+    // 退化成边表全扫，而这四条各扫一遍——同一条纪律见
+    // `helper.rs::render_room_membership_delete`（同一个构件的 2 条边，全扫写法实测
+    // 558.8ms，图遍历 2.1ms）。`<->` 与 `array::concat(->, <-)` 覆盖的方向完全相同。
+    let targets = |table: &str| {
+        (0..25)
+            .map(|seq| format!("pe:{}<->{table}", refno(seq)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     SUL_DB
         .query(format!(
-            "DELETE pe_owner WHERE in IN [{pes}] OR out IN [{pes}];\
-             DELETE room_relate WHERE in IN [{pes}] OR out IN [{pes}];\
-             DELETE room_panel_relate WHERE in IN [{pes}] OR out IN [{pes}];\
-             DELETE inst_relate WHERE in IN [{pes}];\
-             DELETE {};",
+            "DELETE {};\nDELETE {};\nDELETE {};\nDELETE {};\nDELETE {};",
+            targets("pe_owner"),
+            targets("room_relate"),
+            targets("room_panel_relate"),
+            (0..25)
+                .map(|seq| format!("inst_relate:{}", refno(seq)))
+                .collect::<Vec<_>>()
+                .join(", "),
             ids.join(", ")
         ))
         .await?
@@ -1534,7 +1545,7 @@ mod tests {
 
         // 第一步（报告人做的）：手动删掉这个构件的房间边。
         SUL_DB
-            .query(format!("DELETE room_relate WHERE out = pe:{part};"))
+            .query(format!("DELETE pe:{part}<-room_relate;"))
             .await
             .expect("delete the part's room edges")
             .check()
@@ -1633,7 +1644,7 @@ mod tests {
         let seq_refno = refno(seq);
         SUL_DB
             .query(format!(
-                "DELETE room_relate WHERE out = pe:{seq_refno};\
+                "DELETE pe:{seq_refno}<-room_relate;\
                  DELETE inst_relate:{seq_refno};\
                  DELETE pe:{seq_refno}, inst_info:zzfx_tubi_unit, aabb:zzfx_tubi_{seq};"
             ))

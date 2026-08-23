@@ -216,7 +216,7 @@ async fn edges(element: &str) -> Vec<Edge> {
     let mut response = SUL_DB
         .query(format!(
             "SELECT record::id(in) AS panel, record::id(out) AS part, room_num \
-             FROM room_relate WHERE out = pe:{element} ORDER BY panel;"
+             FROM pe:{element}<-room_relate ORDER BY panel;"
         ))
         .await
         .expect("query room edges")
@@ -229,7 +229,7 @@ async fn topology(panel: &str) -> Vec<Topology> {
     let mut response = SUL_DB
         .query(format!(
             "SELECT record::id(in) AS room, record::id(out) AS panel, room_num \
-             FROM room_panel_relate WHERE out = pe:{panel} ORDER BY room;"
+             FROM pe:{panel}<-room_panel_relate ORDER BY room;"
         ))
         .await
         .expect("query room topology")
@@ -240,7 +240,7 @@ async fn topology(panel: &str) -> Vec<Topology> {
 
 async fn panel_members(panel: &str) -> Vec<String> {
     let mut members = rows(&format!(
-        "SELECT VALUE <string>record::id(out) FROM room_relate WHERE in = pe:{panel};"
+        "SELECT VALUE <string>record::id(out) FROM pe:{panel}->room_relate;"
     ))
     .await;
     members.sort();
@@ -491,10 +491,7 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     }
     if case.delete_baseline {
         SUL_DB
-            .query(format!(
-                "DELETE room_relate WHERE out = pe:{};",
-                case.element
-            ))
+            .query(format!("DELETE pe:{}<-room_relate;", case.element))
             .await
             .expect("delete room edges")
             .check()
