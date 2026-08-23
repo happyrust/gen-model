@@ -146,7 +146,10 @@ fn flatten_loop(
     offset: Vec2,
     ccw: bool,
 ) -> anyhow::Result<Loop2D> {
-    let tol = if chord_tol > 0.0 { chord_tol } else { 1.0 };
+    if !libgm_discretise::chord_tol_is_usable(chord_tol) {
+        bail!("截面环拿到的弦高容差 {chord_tol} 不可用");
+    }
+    let tol = chord_tol;
 
     let mut pts: Vec<Vec2> = Vec::with_capacity(pline.vertex_count());
     for (v1, v2) in pline.iter_segments() {
@@ -554,7 +557,11 @@ pub fn sweep_solid_mesh(sweep: &SweepSolid) -> anyhow::Result<PlantMesh> {
     if !sweep.check_valid() {
         bail!("SweepSolid 的挤出方向非法");
     }
-    let chord_tol = sweep.tol().max(1e-3) as f64;
+    // 弦高容差走全局绝对量，不是 `sweep.tol()`（= 0.01 × 轮廓外接球半径）。比例容差让
+    // `tol/R` 恒定、段数与尺寸无关，同一个半径的弧在墙上和在与它相交的原语上会分成不同
+    // 段数，而 `cancelFacets` 只消全等重叠——差一段就留一层壁。理由全文见
+    // [`libgm_discretise::FACET_TOL_MM`]。
+    let chord_tol = crate::fast_model::libgm_discretise::FACET_TOL_MM;
     let loops = profile_loops(&sweep.profile, chord_tol)?.loops;
     let mat = placement(sweep);
     let place = |p: Vec2, extra: DMat4| {
@@ -623,6 +630,120 @@ fn compute_aabb(vertices: &[Vec3]) -> Option<Aabb> {
     Some(aabb)
 }
 
+// ─── 斜切延伸段（T021） ──────────────────────────────────────────────────────
+
+/// 斜切采样点数：libgm 对每条弧段**固定取 9 个内点**，与容差无关。
+///
+/// 这是本仓遇到的**第四套**离散口径（挤出格子、回转配对、曲面原语段数之外的一种），
+/// 它只服务下面这个包围盒，**不要拿去铺三角**。出处是 Core3D `sub_10733720`
+/// （3.1 `0x10733720`）里 `do { … } while (v28 <= 9)` 那个写死的循环上界。
+const MITRE_ARC_SAMPLES: i32 = 9;
+
+/// 一条斜切平面对某个截面的量度。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MitreReach {
+    /// 延伸长度：截面上所有采样点在切面法向上的**最大伸出量**（`max(|z⁺|, |z⁻|)`）。
+    pub reach: f64,
+    /// libgm 另算的一个量：三维包围盒对角线 × 2.2。它不进延伸长度，
+    /// 在 Core3D 那边另有去处（切割体尺寸），这里一并算出来免得下次又要反一遍。
+    pub width: f64,
+}
+
+/// 斜切延伸段要伸多长（Core3D `sub_10733720`，3.1 `0x10733720`）。
+///
+/// `plane_dir` 是斜切平面的法向、`line_dir` 是本段的扫掠方向，都在段的局部坐标系里；
+/// 截面点视作 `(x, y, 0)`。
+///
+/// ```text
+/// |plane_dir.z| ≤ 1e-6                  → 0（切面与扫掠方向平行，不用延伸）
+/// denom = dot(plane_dir, line_dir)
+/// 每个采样点 p:  z = |denom| > 1e-6 ? dot(p, plane_dir) / denom : 0
+/// 采样点 = 轮廓每个顶点 + 每条 |bulge| > 1e-6 的弧上 9 个内点
+/// 逐点累计 x / y / z 的最小最大
+/// reach = max(|z_max|, |z_min|)
+/// width = |(x,y,z)_max − (x,y,z)_min| × 2.2
+/// ```
+///
+/// **弧上那 9 个点是 `evaluatePoint(t)` 的均分参数，不是挤出那张固定角度格子。**
+/// 循环上界 9 是从反汇编读到的；参数化只能推断（`evaluatePoint` 的实参被 Hex-Rays
+/// 吞了），这里按 `t = k/10` 均分实现。它只影响包围盒的一个上界，取密一点会让
+/// `reach` 偏大——所以宁可照抄 9，不要「反正更细更安全」。
+pub fn mitre_extension_reach(
+    spans: &[libgm_discretise::ProfileSpan],
+    plane_dir: [f64; 3],
+    line_dir: [f64; 3],
+) -> MitreReach {
+    const EPS: f64 = 1e-6;
+    if plane_dir[2].abs() <= EPS || spans.is_empty() {
+        return MitreReach {
+            reach: 0.0,
+            width: 0.0,
+        };
+    }
+    let denom =
+        plane_dir[0] * line_dir[0] + plane_dir[1] * line_dir[1] + plane_dir[2] * line_dir[2];
+    let height_of = |p: [f64; 2]| -> f64 {
+        if denom.abs() <= EPS {
+            0.0
+        } else {
+            (p[0] * plane_dir[0] + p[1] * plane_dir[1]) / denom
+        }
+    };
+
+    let (mut lo, mut hi) = ([f64::MAX; 3], [f64::MIN; 3]);
+    let mut take = |p: [f64; 2]| {
+        let v = [p[0], p[1], height_of(p)];
+        for k in 0..3 {
+            lo[k] = lo[k].min(v[k]);
+            hi[k] = hi[k].max(v[k]);
+        }
+    };
+
+    for (i, span) in spans.iter().enumerate() {
+        take(span.point);
+        if span.bulge.abs() <= EPS {
+            continue;
+        }
+        let next = spans[(i + 1) % spans.len()].point;
+        let Some(arc) = libgm_discretise::span_arc(span.point, next, span.bulge) else {
+            continue;
+        };
+        let sweep = arc.alpha1 - arc.alpha0;
+        for k in 1..=MITRE_ARC_SAMPLES {
+            let t = f64::from(k) / f64::from(MITRE_ARC_SAMPLES + 1);
+            let theta = arc.alpha0 + t * sweep;
+            take([
+                arc.centre[0] + arc.radius * theta.cos(),
+                arc.centre[1] + arc.radius * theta.sin(),
+            ]);
+        }
+    }
+
+    let diag = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2)).sqrt();
+    MitreReach {
+        reach: hi[2].abs().max(lo[2].abs()),
+        width: diag * 2.2,
+    }
+}
+
+/// 斜切延伸挤出的总长度（Core3D `sub_107318E0` 里紧接 `sub_10733720` 的那几行）。
+///
+/// `gap` 是本段端点到延伸点的距离（两点在 1e-6 内重合时 Core3D 直接记 0）。
+///
+/// ```text
+/// extra = reach
+/// extra > 1.0 时 extra += 1.0        ← 是 +1，不是 ×2，也不是按比例
+/// total = gap + extra
+/// ```
+///
+/// 那个 `+1.0` 是条**无量纲的余量**：PDMS 长度单位是 mm，所以它是「伸出量超过 1mm
+/// 就多给 1mm」。看着像随手加的安全余量，照抄——延伸段是要拿去做差集的，短一点点
+/// 就在斜切面上留一层薄壁，而薄壁正是 `cancelFacets` 消不掉的那种残料。
+pub fn mitre_extension_length(gap: f64, reach: f64) -> f64 {
+    let extra = if reach > 1.0 { reach + 1.0 } else { reach };
+    gap + extra
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -661,6 +782,25 @@ mod tests {
             pangle,
             ..Default::default()
         })
+    }
+
+    /// 不可用的容差必须报错，不许兜成 1.0mm（T042 收口）。
+    ///
+    /// 这里原先写着 `let tol = if chord_tol > 0.0 { chord_tol } else { 1.0 };`。
+    /// 兜底的后果不是「画粗一点」：同一条目录截面在扫掠侧与挤出侧拿到不同段数，
+    /// 而 `cancelFacets` 只消全等重叠——共面处留一层壁，现场只看得到布尔结果里
+    /// 多一层内壁，没有一行日志指向容差。
+    #[test]
+    fn a_non_usable_chord_tolerance_is_rejected_not_defaulted() {
+        let profile = ann_profile(200.0, 20.0, 90.0);
+        for bad in [0.0, -0.5, f64::NAN] {
+            assert!(
+                profile_loops(&profile, bad).is_err(),
+                "截面离散吃下了不可用容差 {bad}"
+            );
+        }
+        // 同一个截面在正常容差下是通的，否则上面几条 Err 说明不了问题。
+        assert!(profile_loops(&profile, libgm_discretise::FACET_TOL_MM).is_ok());
     }
 
     #[test]
@@ -982,5 +1122,89 @@ mod tests {
             "整环体积 {whole_v} 与两个半环之和 {} 不符",
             2.0 * half_v
         );
+    }
+
+    // ─── 斜切延伸段（T021） ─────────────────────────────────────────────────
+
+    fn span(x: f64, y: f64, bulge: f64) -> libgm_discretise::ProfileSpan {
+        libgm_discretise::ProfileSpan {
+            point: [x, y],
+            bulge,
+        }
+    }
+
+    /// 100×60 的矩形，四个顶点、无弧。
+    fn rect_spans() -> Vec<libgm_discretise::ProfileSpan> {
+        vec![
+            span(-50.0, -30.0, 0.0),
+            span(50.0, -30.0, 0.0),
+            span(50.0, 30.0, 0.0),
+            span(-50.0, 30.0, 0.0),
+        ]
+    }
+
+    /// 切面与扫掠方向平行时不用延伸——这是函数第一句就返回的那一支。
+    #[test]
+    fn a_mitre_plane_parallel_to_the_sweep_needs_no_extension() {
+        let flat = mitre_extension_reach(&rect_spans(), [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]);
+        assert_eq!(flat.reach, 0.0);
+        assert_eq!(flat.width, 0.0);
+    }
+
+    /// 45° 斜切、沿 +Z 扫掠时，伸出量恰好是截面在切面倾斜方向上的半宽。
+    ///
+    /// `plane_dir = (0, √2/2, √2/2)`、`line_dir = (0,0,1)` ⇒ `denom = √2/2`，
+    /// 于是 `z = y·(√2/2)/(√2/2) = y`，`reach = max|y| = 30`。手算得出，不取实现值。
+    #[test]
+    fn the_reach_is_how_far_the_profile_pokes_through_the_plane() {
+        let k = std::f64::consts::FRAC_1_SQRT_2;
+        let m = mitre_extension_reach(&rect_spans(), [0.0, k, k], [0.0, 0.0, 1.0]);
+        assert!((m.reach - 30.0).abs() < 1e-9, "{m:?}");
+
+        // 切得越陡伸得越远：60° 时 z = y·tan(60°)，reach = 30·√3。
+        let (s, c) = 60.0_f64.to_radians().sin_cos();
+        let steep = mitre_extension_reach(&rect_spans(), [0.0, s, c], [0.0, 0.0, 1.0]);
+        assert!(
+            (steep.reach - 30.0 * 3.0_f64.sqrt()).abs() < 1e-9,
+            "{steep:?}"
+        );
+    }
+
+    /// 弧段上的采样点算数：极值落在弧中间而不在顶点上时，漏采就直接少算延伸长度。
+    ///
+    /// 半圆（bulge = ±1）的两个端点 y 都是 0，只有弧腰上才有 ±50。9 个内点里
+    /// `t = 0.5` 那个正好压在弧顶，所以是精确值而不是近似。
+    #[test]
+    fn the_arc_interior_is_sampled_not_just_the_vertices() {
+        let half_disc = vec![span(-50.0, 0.0, 1.0), span(50.0, 0.0, 0.0)];
+        let k = std::f64::consts::FRAC_1_SQRT_2;
+        let m = mitre_extension_reach(&half_disc, [0.0, k, k], [0.0, 0.0, 1.0]);
+        assert!(
+            (m.reach - 50.0).abs() < 1e-9,
+            "弧腰没被采到，reach 只有 {}",
+            m.reach
+        );
+
+        // 同样两个点、把 bulge 抹平：弦上处处 y = 0，伸出量归零。
+        let chord = vec![span(-50.0, 0.0, 0.0), span(50.0, 0.0, 0.0)];
+        let flat = mitre_extension_reach(&chord, [0.0, k, k], [0.0, 0.0, 1.0]);
+        assert_eq!(flat.reach, 0.0, "直弦不该有伸出量");
+    }
+
+    /// 延伸长度是「端点间距 + 伸出量」，且伸出量超过 1 时**再加 1**。
+    ///
+    /// 那个 `+1` 不是比例余量也不是取整，抄错方向（比如写成 `max(reach, 1.0)`）
+    /// 会在所有 `reach > 1` 的段上少给 1mm，斜切面上留一层薄壁。
+    #[test]
+    fn the_extension_adds_a_flat_millimetre_once_it_pokes_past_one() {
+        assert!((mitre_extension_length(0.0, 0.4) - 0.4).abs() < 1e-12);
+        assert!(
+            (mitre_extension_length(0.0, 1.0) - 1.0).abs() < 1e-12,
+            "1.0 不算超过"
+        );
+        assert!((mitre_extension_length(0.0, 2.0) - 3.0).abs() < 1e-12);
+        assert!((mitre_extension_length(10.0, 2.0) - 13.0).abs() < 1e-12);
+        // 端点重合（Core3D 判到 1e-6 内就记 0）时总长就是伸出量那一段
+        assert!((mitre_extension_length(0.0, 5.0) - 6.0).abs() < 1e-12);
     }
 }

@@ -1,9 +1,124 @@
 # 变更记录
 
-## 2026-08-21
+## 2026-08-24
+
+### 修复
+
+- 偏心 Snout 的偏移改成**上下各摊一半**（specs/009 T050）。libgm
+  `GM_Snout::calcFacetsWithoutSurfaces` 逐顶点写的是 `r·cosθ ∓ xShift/2`，`calcRange`
+  的支撑函数独立佐证同一约定，`GM_Pyramid` 也完全同构；本仓 `gen_snout` 与 aios-core 的
+  `gen_occ_shape` 却都把偏移整个加在顶圈，相对 E3D 整体平移 `(XOFF/2, YOFF/2)`。
+  **两条后端互相一致，所以此前任何双后端对比都发现不了**——只有对着 libgm 的绝对位置
+  才照得出来。vendor 侧同批抽出 `LSnout::end_centers()`，OCC 与 truck 两条路共用它，
+  约定不留第二个版本，并因此变得不依赖 `occ` / `truck` feature 就能测。
+  活库实测有 1 件 2 实例（`poff = 12.06`，错位 6.03mm ＝ 容差的十二倍），不是纯防御。
+- 「椭圆碟」（DISH 且 `RADI > 0`）建的曲面族换对了（specs/009 T038a）。libgm 的
+  `GM_EDish` 是**托里球形封头**——一段球冠加一圈与它相切的环面拐角，本仓画的是半个
+  旋转椭球。补经向段数补不上这个差，`gen_elliptical_dish` 整个重写，形状三量
+  （拐角半径 / 球冠半径 / 交接角）与三个方向的段数改由
+  `libgm_discretise::elliptical_dish_facets` 一次解出。
+  两处照抄陷阱写进了函数文档：`RADI` **只是开关**，Core3D 读了它却把数值丢掉、
+  实参是现算的 `r_k = h / (1 + (a − h)/√(a²+h²))`；交接角是 `acos(1 − q)` 而不是
+  `acos(q)`（后者是 Hex-Rays 吞掉 acos 实参之后的伪码假象，抄错会让碟身留一道折痕）。
+  绕轴喂的是底半径而不是球冠半径。活库实测 15 / 17 行是椭圆碟、102 个实例。
+- 三条 `gm_Create*` 的参数顺序补上外部权威（specs/009 T011 / T013 / T016）。两头对照
+  libgm 构造函数的字段序与 Core3D `CSG_Basic???::getPrimGeom` 的调用点，**顺序全部
+  与实现一致**；`gm_CreateSlopeEndedCylinder` 的 wrapper 内部会把两对剪切角换位，
+  对外签名是底面在前，本仓写法正确。顺带记下两条现成欠项：CTOR/RTOR 的内半径
+  Core3D 会夹 `fmax(RINS, 0)`、SSCL 的四个剪切角 Core3D 会折进 (−90, 90]，本仓两条都没做。
 
 ### 新增
 
+- 斜切延伸段的长度规则落成纯函数（specs/009 T021）：`sweep_mesh::mitre_extension_reach`
+  与 `mitre_extension_length`，出处是 Core3D 的扫掠段构建器 `sub_107318E0` 及它调的
+  `sub_10733720`。规则是「轮廓每个顶点 + 每条弧上 9 个内点，逐点算在切面法向上的
+  伸出量，取最大绝对值；超过 1 再加 1，最后与端点间距相加」。那 9 个点是本仓遇到的
+  **第四套离散口径**，与容差无关、只服务这个包围盒，已收成具名常量并写明「别拿去铺
+  三角」。还没接生产（挂到段 CSG 是 T023，依赖斜切墙 RVM 门）。
+- 两份活库盘点证据。`docs/evidence/2026-08-24-eccentric-snout-census.md`：偏心 Snout
+  两库一个 0 一个 1，**翻掉了上一轮「两库定性一致」的隐含预期**——再有「预期为 0」的
+  专项，一个库查出 0 不能当证明。
+  `docs/evidence/2026-08-24-unit-normalised-curved-primitives.md`：碟 / 两种环面 /
+  不偏心 Snout 在 `inst_geo` 里**全是单位几何**（`pdia` / `rout` / `pbdm` 恒为 1.0），
+  于是 WP-G 那套「段数由真实半径算出」的权威规则拿到的是单位半径，`tol/R = 1` 直接撞
+  45° 下限——**不论多大都是 8 段**。碟的实例尺度跨 13mm 到 48.9m，最大那件应当 492 段，
+  弦高差出容差的 3700 倍。规则对了但现场还没生效，挡在前面的仍是单位网格身份键：
+  **G3 / T041 的范围不是「柱与球」而是所有参与复用的曲面原语**，已开 T053。
+- `CONTEXT.md` 补上 ADR-041~045 各自引入的那个概念，五条一次到位，每条按主题进它该在的
+  分节而不是堆在文末：**libgm 面片口径**（紧跟「单位网格身份」，因为 ADR-044 改的就是那把
+  身份键）、**切片流水线** 与 **insts_flat 失效协议**（模型生成执行）、**分块解析基线**
+  （暂存与写回）、**refno 反查**（紧贴「空间树」）。
+  `_Avoid_` 那行写的是各决策真正要挡的叫法，不是凑同义词：切片流水线禁「ZONE 并行 / 按片
+  并行」——ADR-041 第一节整段就在拒绝这个说法，并行单位是生成根，切片只决定一次拉多少数据
+  进来；分块解析基线禁「暂存窗口」——它只取「实例 + 读路由」那一半，基线不开窗口；libgm
+  面片口径禁「默认段数 / 细分级别」——段数不是画质旋钮，共面抵消只消全等重叠，差一段布尔
+  就留一层内壁；refno 反查禁「自建 refno 索引」，理由留在正文：第二份「树上现在有什么」的
+  真值漂了不是变慢，是把已经不在那儿的构件算进某间房，而这类错误没有任何东西会报出来。
+
+### 移除
+
+- 删除浸水插件 `src/plug_in/water_calculation.rs`（业务上不再需要），连同
+  `plug_in` 的模块声明与 `consts::AQL_WATER_CALCULATION_COLLECTION`。它是 ADR-030
+  背景一节点名的「第二个 OCC 抑留点」，这条说法自此作废——抑留点只剩扫掠体
+  （PrimLoft）一处。删除时它对 OCC 的依赖其实早已不存在：唯一那处 BRep STP 导出挂在
+  从未定义过的 feature `opencascade_rs` 下，历来所有构建编的都是写死字符串的占位，
+  死分支已于 2026-08-23 删掉。剩下的 `save_stp_data_to_arangodb` 与四个 ArangoDB
+  查询函数在仓内**零调用点**。`aios_core::water_calculation` 自此在本仓无引用。
+  见 ADR-030 决策 11。
+
+## 2026-08-23
+
+### 修复
+
+- 模型生成收口三个「有意回退 OCC」的口子（specs/009-retire-occ WP-F，依据 ADR-030
+  修订二的 IDA 实证）：出平面回转轴改硬失败并带出实际轴向（libgm 的轴参数是
+  `D2_Point`，E3D 在 API 层就表达不出出平面轴）；`CurveType::Spline` 按其 OCC 权威
+  实现的本义落地为**弧形墙截面**（三点圆 + thick 内外偏移的环形扇区，弧折线走
+  libgm 角度格子），点数≠3 / 三点共线 / 出平面 / thick 吃穿半径一律硬失败；
+  `Unknown`/`CompoundShape` 直接标 `bad`。`gen_inst_meshes` 自此只有 manifold
+  一台形状引擎，OCC 形状回退整段拆除（`occ` feature 仍在，只服务对拍参照与
+  历史断言）。活库盘点三类口子出现次数均为 0，收口不动任何现存实例。
+- 回转轮廓补上 libgm `movePointsOntoYAxis` 的轴心吸附：半径坐标在
+  `GM_User::normtol_ = 1e-6`（实测初值，运行期无人改写）内的顶点精确置 0，
+  贴轴轮廓带浮点噪声时不再在轴心留一圈纳米级针状面。
+- 弦高容差收成全库唯一一份 `libgm_discretise::FACET_TOL_MM = 0.5mm`（绝对量）。
+  扫掠体（墙）此前用的是 `SweepSolid::tol()` = 0.01 × 轮廓外接球半径的**比例**容差，
+  于是 `tol/R` 恒定、段数与构件尺寸无关——同一个半径的弧在墙上和在与它相交的原语上
+  分成不同段数，而 `cancelFacets` 只消全等重叠，共面处就留一层壁。**这会改变墙的
+  弧段段数**，而 RVM 门要等 `mesh_compare` 从 `occ` 解绑（T043）才跑得起来。
+  `the_facet_tolerance_has_a_single_source` 按源码扫住第二个容差来源的回流。
+- 曲面生成器不再自带默认段数：`mesh_primitives` 删掉 `DEFAULT_CIRCULAR_SEGMENTS`，
+  `unit_sphere` 的经纬段数改由调用方给。柱与球仍锁死段数是**单位网格身份键**的欠账
+  （ADR-044 / T041），现在收成 `manifold_tessellate::unit_mesh_identity` 一处具名常量，
+  不再是散在三个 match 臂里、看着跟旁边算出来的段数一模一样的裸字面量。取值一位未动。
+- 弦高容差删掉三处兜底默认值。折线化那三条路（挤出轮廓、回转轮廓、弧墙截面）各写着
+  `if chord_tol > 0.0 { chord_tol } else { 1.0 }`，常量只定义一处并不等于「唯一一份」——
+  第二个值藏在分支里，而且只在非正容差时现身。今天不可达（生产喂的都是
+  `FACET_TOL_MM`），可一旦容差接成配置项或按构件算，它就会把 0.5mm 静默换成 1.0mm：
+  段数减半、`cancelFacets` 的共面抵消随之失效，现场只看得到布尔结果多一层内壁，
+  没有一行日志指向容差。改为 `libgm_discretise::chord_tol_is_usable` 判定后硬失败。
+- 椭圆碟的经向段数从调用处的 `(around / 2).max(4)` 收进具名
+  `libgm_discretise::elliptical_dish_meridional_segments`。它是 T038a 的欠账（libgm 把母线
+  拆成球冠段与过渡角段两次分算，`knuckleRadiusToUse` / `radiusOfHub` 还没反完），
+  混在 `d.pdia, d.pheig` 中间时跟旁边真按规则算的段数长得一模一样，改动它一位不会有
+  测试变红。段数自此只有三个出处：权威规则、点名的身份键欠账、点名的口径欠账。
+  （该函数 2026-08-24 随 T038a 落地删除——欠账还上了，具名占位一并撤走。）
+- 结构楼板极端倒角那条护栏改量真实路径（specs/009 T044）：`loop_model` 的整体断言
+  原挂在 `occ` 的 BRep 后端上，CI 口径不编 `occ`，它是一条从来不跑的断言；
+  现改走生产同款 `tessellate_libgm_param` + `compute_aabb`，顶点与包围盒的有限性
+  在 CI 里真被验到。
+- 删除浸水 STP 导出的死分支（specs/009 T044，ADR-030 决策 6）：真 BRep 导出挂在
+  从未定义过的 `opencascade_rs` feature 下，发布二进制历来只编「写一句固定字符串」
+  的占位；其唯一调用点 `test_water_calculation_stp.rs`（1382 行）的 `mod` 声明本身
+  是注释，连测试都到不了。死分支与死测试文件一并删除，占位实现的文档写明重启路径。
+
+### 新增
+
+- 新增源码断言 `the_curve_primitives_are_not_shape_arms`（specs/009 T017）：libgm 的
+  曲线/标记图元（`gm_CreateNull` / Mark / Straight / Arc / Bezier 走
+  `calcFacetsWithoutSurfaces` 出折线，不产实体）不得成为 `tessellate_libgm_param`
+  的成功分支——五个名字不许出现在生产半区，分发臂集合钉死为 14 形状 + 2 非形状，
+  新变体必须先过清单再进 match。
 - `geom_error` 扩展 `primitive` 基本体错误：缺失/非法 BREP 与 NaN 变换按参考号持久落库，
   保存 noun、尺寸诊断、累计次数和首末时间；成功生成后精确销账。
 - health 新增 `model_update_pending` 单查询快照与 `blocking_conditions`：模型/房间死信会把

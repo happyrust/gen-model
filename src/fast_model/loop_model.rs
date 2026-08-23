@@ -249,10 +249,7 @@ pub async fn gen_loop_geos(
 
 #[cfg(test)]
 mod tests {
-    use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
-    use aios_core::prim_geo::Extrusion;
     use aios_core::prim_geo::wire::gen_polyline;
-    use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh};
     use glam::Vec3;
 
     #[test]
@@ -276,22 +273,30 @@ mod tests {
                     && vertex.bulge.is_finite())
         );
 
-        #[cfg(feature = "occ")]
+        // 整体断言走生产同款判定路径（T044）：这段原先挂在 `occ` 的 BRep 后端上，
+        // 而 CI 口径（ws,gen_model,manifold,project_hd）根本不编它——一条从来不跑的
+        // 断言。现在量的就是 `gen_inst_meshes` 真正用的 manifold 网格。
+        #[cfg(feature = "manifold")]
         {
+            use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+            use aios_core::prim_geo::Extrusion;
+
             let param = PdmsGeoParam::PrimExtrusion(Extrusion {
                 verts: vec![vertices],
                 height: 100.0,
                 ..Default::default()
             });
-            let shape = param.gen_occ_shape().expect("extrusion must be generated");
+            let mesh = crate::fast_model::manifold_tessellate::tessellate_libgm_param(&param)
+                .expect("extrusion must tessellate")
+                .expect("an extrusion is a shape, not the not-a-shape verdict");
             assert!(
-                shape
-                    .edges()
-                    .flat_map(|edge| { edge.approximation_segments_custom(2.0, 2.0) })
-                    .all(|point| point.x.is_finite() && point.y.is_finite() && point.z.is_finite())
+                mesh.vertices
+                    .iter()
+                    .all(|v| v.x.is_finite() && v.y.is_finite() && v.z.is_finite()),
+                "extreme fillet must not leak non-finite vertices into the mesh"
             );
-            let mesh = PlantMesh::gen_occ_mesh(&shape, 50.0).expect("mesh must be generated");
-            let aabb = mesh.aabb.expect("mesh must have an aabb");
+            let aabb = crate::fast_model::mesh_primitives::compute_aabb(&mesh.vertices)
+                .expect("a non-empty mesh must yield an aabb");
             assert!(aabb.mins.coords.iter().all(|value| value.is_finite()));
             assert!(aabb.maxs.coords.iter().all(|value| value.is_finite()));
         }

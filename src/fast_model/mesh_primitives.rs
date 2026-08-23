@@ -9,7 +9,6 @@ use parry3d::bounding_volume::Aabb;
 use parry3d::math::Point;
 use std::f32::consts::{PI, TAU};
 
-const DEFAULT_CIRCULAR_SEGMENTS: u32 = 36;
 /// 叉积长度（= 2×三角面积）低于这个值就当退化三角丢掉。
 const TRI_AREA_EPS: f32 = 1e-9;
 /// 半边长低于这个值（PDMS 单位是 mm，即亚微米）就当作 0。
@@ -83,7 +82,17 @@ pub fn gen_sphere(radius: f32, stacks: u32, slices: u32) -> PlantMesh {
 /// 圆锥台（Snout），底面在 z = -h/2，顶面在 z = h/2。
 ///
 /// `r_bottom` / `r_top` 允许为 0（退化为圆锥）。
-/// `x_offset` / `y_offset` 控制顶面中心相对底面中心的偏移。
+///
+/// `x_offset` / `y_offset` 是**顶面中心相对底面中心**的偏移，但它**上下各摊一半**：
+/// 底圈中心落在 `(-x/2, -y/2, -h/2)`，顶圈中心落在 `(+x/2, +y/2, +h/2)`。
+/// 这不是随便挑的对称写法，是 libgm 的约定——`GM_Snout::calcFacetsWithoutSurfaces`
+/// （libgm 3.1 `0x1009EA30`）逐顶点写的就是 `r·cosθ ∓ xShift/2`，
+/// `calcRange`（`0x1009E900`）的支撑函数 `(xShift·dx + yShift·dy + height·dz)/2`
+/// 独立佐证同一件事，`GM_Pyramid` 那边也完全同构。
+///
+/// 2026-08-23 之前这里把偏移整个加在顶圈、底圈不动，相对 E3D 整体平移了
+/// `(XOFF/2, YOFF/2)`；aios-core 的 OCC 实现是同一个写法，两条后端互相一致，
+/// 所以此前任何双后端对比都发现不了。见 `specs/009-retire-occ/tasks.md` 的 T050。
 pub fn gen_snout(
     r_bottom: f32,
     r_top: f32,
@@ -94,6 +103,8 @@ pub fn gen_snout(
 ) -> PlantMesh {
     let segments = segments.max(3);
     let h2 = height / 2.0;
+    let ox = x_offset / 2.0;
+    let oy = y_offset / 2.0;
 
     let mut vertices = Vec::new();
     let mut normals = Vec::new();
@@ -107,10 +118,10 @@ pub fn gen_snout(
         let theta = i as f32 * step;
         let (sin_t, cos_t) = theta.sin_cos();
 
-        // 底面点
-        let pb = Vec3::new(r_bottom * cos_t, r_bottom * sin_t, -h2);
-        // 顶面点（含偏移）
-        let pt = Vec3::new(r_top * cos_t + x_offset, r_top * sin_t + y_offset, h2);
+        // 底面点（偏移的另一半，反号）
+        let pb = Vec3::new(r_bottom * cos_t - ox, r_bottom * sin_t - oy, -h2);
+        // 顶面点
+        let pt = Vec3::new(r_top * cos_t + ox, r_top * sin_t + oy, h2);
 
         // 侧面法线近似：沿径向，考虑锥角
         let dr = r_bottom - r_top;
@@ -144,12 +155,12 @@ pub fn gen_snout(
     // 底面 cap（r_bottom > 0）
     if r_bottom > f32::EPSILON {
         let center_idx = vertices.len() as u32;
-        vertices.push(Vec3::new(0.0, 0.0, -h2));
+        vertices.push(Vec3::new(-ox, -oy, -h2));
         normals.push(Vec3::NEG_Z);
         for i in 0..segments {
             let theta = i as f32 * step;
             let (sin_t, cos_t) = theta.sin_cos();
-            vertices.push(Vec3::new(r_bottom * cos_t, r_bottom * sin_t, -h2));
+            vertices.push(Vec3::new(r_bottom * cos_t - ox, r_bottom * sin_t - oy, -h2));
             normals.push(Vec3::NEG_Z);
         }
         for i in 0..segments {
@@ -163,16 +174,12 @@ pub fn gen_snout(
     // 顶面 cap（r_top > 0）
     if r_top > f32::EPSILON {
         let center_idx = vertices.len() as u32;
-        vertices.push(Vec3::new(x_offset, y_offset, h2));
+        vertices.push(Vec3::new(ox, oy, h2));
         normals.push(Vec3::Z);
         for i in 0..segments {
             let theta = i as f32 * step;
             let (sin_t, cos_t) = theta.sin_cos();
-            vertices.push(Vec3::new(
-                r_top * cos_t + x_offset,
-                r_top * sin_t + y_offset,
-                h2,
-            ));
+            vertices.push(Vec3::new(r_top * cos_t + ox, r_top * sin_t + oy, h2));
             normals.push(Vec3::Z);
         }
         for i in 0..segments {
@@ -306,8 +313,13 @@ pub fn gen_slope_ended_cylinder(
 ///
 /// 球心在 `(0, 0, -(R - height))`，其中 `R = (r² + h²) / (2h)`。
 /// 底面在 z=0 平面。
-pub fn gen_spherical_dish(diameter: f32, height: f32, segments: u32) -> PlantMesh {
-    let segments = segments.max(8);
+///
+/// `slices` 绕轴、`stacks` 经向，两者都由调用方按 libgm 的权威规则给
+/// （`libgm_discretise::spherical_dish_facets`）——**别在这里补默认值**：
+/// 经向沿用绕轴的角步长，不是绕轴的一半，两个方向都不是常数。
+pub fn gen_spherical_dish(diameter: f32, height: f32, slices: u32, stacks: u32) -> PlantMesh {
+    let slices = slices.max(3);
+    let stacks = stacks.max(1);
     let r = diameter / 2.0;
     let sphere_r = (r * r + height * height) / (2.0 * height);
 
@@ -317,10 +329,6 @@ pub fn gen_spherical_dish(diameter: f32, height: f32, segments: u32) -> PlantMes
     // 球冠从底面边缘到顶点的弧段
     let sin_val = (r / sphere_r).clamp(-1.0, 1.0);
     let theta_max = sin_val.asin();
-
-    let stacks = segments / 2;
-    let stacks = stacks.max(4);
-    let slices = segments;
 
     let mut vertices = Vec::new();
     let mut normals = Vec::new();
@@ -393,74 +401,125 @@ pub fn gen_spherical_dish(diameter: f32, height: f32, segments: u32) -> PlantMes
     }
 }
 
-// ─── Elliptical Dish ────────────────────────────────────────────────────────
+// ─── Elliptical Dish（托里球形封头） ─────────────────────────────────────────
 
-/// 椭圆碟：半椭圆弧绕 Z 轴旋转体。底面直径 `diameter`，高 `height`。
+/// 托里球形封头的母线形状，由 `libgm_discretise::elliptical_dish_facets` 算出。
 ///
-/// 底面在 z=0 平面，顶部在 z=height。
-pub fn gen_elliptical_dish(diameter: f32, height: f32, segments: u32) -> PlantMesh {
-    let segments = segments.max(8);
-    let r = diameter / 2.0;
+/// 用具名结构体而不是五个位置参数：这五个量里有四个都是长度，且
+/// `base_radius` / `hub_radius` / `knuckle_radius` 谁都像「半径」——正是
+/// T011 那一轮在 `gm_Create*` 上反复核对的那类顺序陷阱，不给它机会。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TorisphericalArc {
+    /// 底面半径 `a`（= DIAM/2）。
+    pub base_radius: f32,
+    /// 封头高 `h`，顶点在 `z = h`。
+    pub height: f32,
+    /// 球冠半径 `R_c`，球心在轴上 `z = h − R_c`。
+    pub hub_radius: f32,
+    /// 拐角环的管半径 `r_k`，管心圆半径 `a − r_k`、位于 `z = 0`。
+    pub knuckle_radius: f32,
+    /// 球冠与拐角的交接角（弧度），从 +Z 极点量起。
+    pub transition_angle: f32,
+}
 
-    let profile_pts = segments / 2;
-    let profile_pts = profile_pts.max(4);
-    let slices = segments;
+/// 「椭圆碟」（PDMS DISH，`RADI > 0`）：**托里球形封头**，不是椭球。
+///
+/// 底面在 z=0，顶点在 z=`height`。母线是两段相切的圆弧，从顶点往下走：
+///
+/// ```text
+/// 球冠段  φ ∈ [0, θ]      (r, z) = (R_c·sinφ,           R_c·cosφ + h − R_c)
+/// 拐角段  ψ ∈ [θ, π/2]    (r, z) = ((a − r_k) + r_k·sinψ, r_k·cosψ)
+/// ```
+///
+/// 两段在 `θ` 处位置与切向都连续（`sinθ = (a − r_k)/(R_c − r_k)`、
+/// `cosθ = (R_c − h)/(R_c − r_k)`），`ψ = π/2` 落在底面外沿 `(a, 0)`。
+///
+/// 2026-08-24 之前这里画的是半个旋转椭球 `(a·sin t, h·cos t)`——两族不同的曲面，
+/// a=2 / h=1 时径向差 1%–1.2%，而且母线的环带划分完全不同，`cancelFacets` 只消
+/// 全等重叠，共面抵消一条都不会生效。依据与完整规则见 `libgm_discretise::EllipticalDishFacets`
+/// 与 `specs/009-retire-occ/tasks.md` 的 T038a。
+///
+/// `slices` 绕轴，`hub_stacks` / `knuckle_stacks` 分别是两段的经向段数——三个都由
+/// 调用方按权威规则给，这里不自造。
+pub fn gen_elliptical_dish(
+    arc: TorisphericalArc,
+    slices: u32,
+    hub_stacks: u32,
+    knuckle_stacks: u32,
+) -> PlantMesh {
+    let slices = slices.max(3);
+    let hub_stacks = hub_stacks.max(1);
+    let knuckle_stacks = knuckle_stacks.max(1);
+    let TorisphericalArc {
+        base_radius: a,
+        height,
+        hub_radius,
+        knuckle_radius,
+        transition_angle: theta,
+    } = arc;
+    let hub_center_z = height - hub_radius;
+    let knuckle_center_r = a - knuckle_radius;
+
+    // 母线自顶点向下：(半径, z, 法向的径向分量, 法向的 z 分量)。
+    // 两段共用一个列表，接缝只存一次——存两次会在焊接后变成重合顶点，
+    // `assert_closed_manifold` 会直接把它判成退化三角。
+    let mut profile: Vec<(f32, f32, f32, f32)> = Vec::new();
+    profile.push((0.0, height, 0.0, 1.0));
+    for i in 1..=hub_stacks {
+        let phi = theta * i as f32 / hub_stacks as f32;
+        let (sin_p, cos_p) = phi.sin_cos();
+        profile.push((
+            hub_radius * sin_p,
+            hub_radius * cos_p + hub_center_z,
+            sin_p,
+            cos_p,
+        ));
+    }
+    for j in 1..=knuckle_stacks {
+        let psi = theta + (PI / 2.0 - theta) * j as f32 / knuckle_stacks as f32;
+        let (sin_p, cos_p) = psi.sin_cos();
+        // 最后一圈取解析值：f32 三角残差会把底沿推离 z=0，那条缝正好是端盖要贴上的地方
+        let (r, z) = if j == knuckle_stacks {
+            (a, 0.0)
+        } else {
+            (
+                knuckle_center_r + knuckle_radius * sin_p,
+                knuckle_radius * cos_p,
+            )
+        };
+        profile.push((r, z, sin_p, cos_p));
+    }
 
     let mut vertices = Vec::new();
     let mut normals = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
-    // 半椭圆母线（XZ 平面）：x(t) = r·sin(t)，z(t) = height·cos(t)
-    // t 从 PI/2（底面边缘 z=0）走到 0（顶点 z=height）
-    for i in 0..=profile_pts {
-        let t = (PI / 2.0) * (1.0 - i as f32 / profile_pts as f32);
-        let (sin_t, cos_t) = t.sin_cos();
-        // 两端取解析值，避免 f32 三角函数残差把边缘顶点推离 z=0 / 顶点推离轴线
-        let (profile_r, profile_z) = if i == 0 {
-            (r, 0.0)
-        } else if i == profile_pts {
-            (0.0, height)
-        } else {
-            (r * sin_t, height * cos_t)
-        };
-        // 母线切向 (r·cos t, -height·sin t) 的外法向 (height·sin t, r·cos t)
-        let nr = height * sin_t;
-        let nz = r * cos_t;
-
+    for &(r, z, nr, nz) in &profile {
         for j in 0..=slices {
-            let theta = TAU * j as f32 / slices as f32;
-            let (sin_theta, cos_theta) = theta.sin_cos();
-
-            let n = Vec3::new(nr * cos_theta, nr * sin_theta, nz);
-            let n_len = n.length();
-            let n = if n_len > f32::EPSILON {
-                n / n_len
+            let angle = TAU * j as f32 / slices as f32;
+            let (sin_a, cos_a) = angle.sin_cos();
+            let n = Vec3::new(nr * cos_a, nr * sin_a, nz);
+            let n = if n.length() > f32::EPSILON {
+                n.normalize()
             } else {
                 Vec3::Z
             };
-
-            vertices.push(Vec3::new(
-                profile_r * cos_theta,
-                profile_r * sin_theta,
-                profile_z,
-            ));
+            vertices.push(Vec3::new(r * cos_a, r * sin_a, z));
             normals.push(n);
         }
     }
 
-    // 母线自下而上，绕向与球体相反：环向在前、母线向在后才是外法向
     let stride = slices + 1;
-    for i in 0..profile_pts {
+    for i in 0..(profile.len() as u32 - 1) {
         for j in 0..slices {
-            let a = i * stride + j;
-            let b = a + stride;
-            let c = a + 1;
-            let d = b + 1;
-            indices.extend_from_slice(&[a, c, b]);
-            // 最后一圈收进顶点，[b, c, d] 会退化成线
-            if i + 1 != profile_pts {
-                indices.extend_from_slice(&[b, c, d]);
+            let p = i * stride + j;
+            let q = p + stride;
+            let (c, d) = (p + 1, q + 1);
+            // 第 0 圈整圈缩在顶点上，[p, q, c] 退化成线
+            if i != 0 {
+                indices.extend_from_slice(&[p, q, c]);
             }
+            indices.extend_from_slice(&[c, q, d]);
         }
     }
 
@@ -470,16 +529,16 @@ pub fn gen_elliptical_dish(diameter: f32, height: f32, segments: u32) -> PlantMe
     normals.push(Vec3::NEG_Z);
     let step = TAU / slices as f32;
     for i in 0..slices {
-        let theta = i as f32 * step;
-        let (sin_t, cos_t) = theta.sin_cos();
-        vertices.push(Vec3::new(r * cos_t, r * sin_t, 0.0));
+        let angle = i as f32 * step;
+        let (sin_a, cos_a) = angle.sin_cos();
+        vertices.push(Vec3::new(a * cos_a, a * sin_a, 0.0));
         normals.push(Vec3::NEG_Z);
     }
     for i in 0..slices {
-        let a = center_idx;
-        let b = center_idx + 1 + i;
+        let p = center_idx;
+        let q = center_idx + 1 + i;
         let c = center_idx + 1 + (i + 1) % slices;
-        indices.extend_from_slice(&[a, c, b]);
+        indices.extend_from_slice(&[p, c, q]);
     }
 
     let aabb = compute_aabb(&vertices);
@@ -852,8 +911,13 @@ pub fn gen_pyramid(
 
 // ─── Unit meshes (used by tessellate_libgm_param) ───────────────────────────
 
-pub fn unit_sphere() -> PlantMesh {
-    gen_sphere(0.5, 16, DEFAULT_CIRCULAR_SEGMENTS)
+/// 半径 0.5 的球，段数由调用方给。
+///
+/// 本模块不再自带默认段数（T039）：段数是 `libgm_discretise` 的权威规则按真实半径
+/// 算出来的，生成器这一层无从知道半径，一个「默认值」在这里只会看着像个合理取值。
+/// 碟与环面的生成器 T038 已经这样改过，球是最后一个。
+pub fn unit_sphere(stacks: u32, slices: u32) -> PlantMesh {
+    gen_sphere(0.5, stacks, slices)
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -862,6 +926,30 @@ pub fn unit_sphere() -> PlantMesh {
 mod tests {
     use super::*;
     use crate::fast_model::mesh_assert::*;
+
+    /// 生成器这一层不许再有默认段数（T039）。
+    ///
+    /// 段数是 `libgm_discretise` 按真实半径算出来的，而这里只看得见单位尺寸——一个
+    /// 摆在模块顶上的 `DEFAULT_*_SEGMENTS` 会被下一个人当成「合理取值」接着用，
+    /// 而它对除某一个半径以外的所有半径都是错的（活库实测：写死 32 段只有 2.0% 的
+    /// 圆柱实例对得上，见 `docs/evidence/2026-08-23-occ-retire-census.md`）。
+    /// 每个曲面生成器都必须由调用方把段数喂进来。
+    #[test]
+    fn the_generators_carry_no_default_segment_count() {
+        let source = include_str!("mesh_primitives.rs");
+        let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
+        for line in production.lines() {
+            let line = line.trim();
+            assert!(
+                !(line.starts_with("const ") && line.contains("SEGMENTS")),
+                "默认段数常量又回来了: {line}"
+            );
+        }
+        assert!(
+            production.contains("pub fn unit_sphere(stacks: u32, slices: u32)"),
+            "单位球的段数必须由调用方给"
+        );
+    }
 
     #[test]
     fn sphere_matches_analytic_volume() {
@@ -873,7 +961,7 @@ mod tests {
 
     #[test]
     fn unit_sphere_is_radius_half() {
-        let mesh = unit_sphere();
+        let mesh = unit_sphere(16, 36);
         assert_solid_mesh(&mesh, "unit_sphere");
         assert_bounds(&mesh, Vec3::splat(-0.5), Vec3::splat(0.5), "unit_sphere");
         assert_volume(&mesh, 4.0 / 3.0 * PI * 0.125, 0.04, "unit_sphere");
@@ -910,18 +998,76 @@ mod tests {
     #[test]
     fn eccentric_snout_keeps_volume_and_shifts_top() {
         let (rb, rt, h) = (2.0f32, 1.0f32, 3.0f32);
-        let mesh = gen_snout(rb, rt, h, 0.5, 0.3, 32);
+        let (ox, oy) = (0.5f32, 0.3f32);
+        let mesh = gen_snout(rb, rt, h, ox, oy, 32);
         assert_solid_mesh(&mesh, "snout eccentric");
-        // 顶圈半径 1 加偏移 (0.5, 0.3) 仍在底圈半径 2 之内，包围盒由底圈决定
+        // 偏移上下各摊一半：底圈中心 (-0.25, -0.15)、顶圈中心 (0.25, 0.15)。
+        // 顶圈半径 1 加半偏移仍落在底圈之内，包围盒由底圈决定。
         assert_bounds(
             &mesh,
-            Vec3::new(-2.0, -2.0, -1.5),
-            Vec3::new(2.0, 2.0, 1.5),
+            Vec3::new(-rb - ox / 2.0, -rb - oy / 2.0, -h / 2.0),
+            Vec3::new(rb - ox / 2.0, rb - oy / 2.0, h / 2.0),
             "snout eccentric",
         );
         // 卡瓦列里原理：偏心只平移每层截面，不改变体积
         let exact = PI * h * (rb * rb + rb * rt + rt * rt) / 3.0;
         assert_volume(&mesh, exact, 0.02, "snout eccentric");
+    }
+
+    /// 偏心偏移必须**上下各摊一半**，不能整个加在顶圈（T050）。
+    ///
+    /// 判别性在于对**底圈**的断言：把偏移全放顶面的写法会让底圈正好落在轴上，
+    /// 那正是 2026-08-23 之前的行为，也是 aios-core 的 OCC 实现至今的行为——
+    /// 两条后端一致地错着，任何双后端互比都照不出来，只有对着 libgm 的绝对位置才照得出。
+    /// 依据 `GM_Snout::calcFacetsWithoutSurfaces`（libgm 3.1 `0x1009EA30`）。
+    #[test]
+    fn the_eccentric_offset_is_split_between_the_two_ends() {
+        let (rb, rt, h) = (66.33f32 / 2.0, 84.42f32 / 2.0, 115.2f32);
+        let (ox, oy) = (12.06f32, 4.0f32); // x 取活库里那件真实偏心异径管的 POFF
+        let mesh = gen_snout(rb, rt, h, ox, oy, 48);
+        assert_solid_mesh(&mesh, "snout offset split");
+
+        // 环心取该端顶点的包围盒中点，不取形心：缝合线上的 θ=0 顶点与 cap 的中心点都是
+        // 刻意复制出来的，形心会被它们带偏（实测偏 0.34 mm，够把这条断言变成噪声）。
+        // 48 段能整除 4，cos/sin 的四个极值都恰好落在采样点上，中点就是精确环心。
+        let ring_center = |want_z: f32| -> Vec3 {
+            let pts: Vec<Vec3> = mesh
+                .vertices
+                .iter()
+                .copied()
+                .filter(|v| (v.z - want_z).abs() < 1e-3)
+                .collect();
+            assert!(!pts.is_empty(), "z = {want_z} 这一端一个顶点都没有");
+            let lo = pts.iter().copied().fold(Vec3::splat(f32::MAX), Vec3::min);
+            let hi = pts.iter().copied().fold(Vec3::splat(f32::MIN), Vec3::max);
+            (lo + hi) / 2.0
+        };
+
+        let bottom = ring_center(-h / 2.0);
+        let top = ring_center(h / 2.0);
+        let tol = 1e-2;
+
+        assert!(
+            bottom.abs_diff_eq(Vec3::new(-ox / 2.0, -oy / 2.0, -h / 2.0), tol),
+            "底圈中心 {bottom} 不在 (-XOFF/2, -YOFF/2, -h/2)——偏移八成又整个压在顶面了"
+        );
+        assert!(
+            top.abs_diff_eq(Vec3::new(ox / 2.0, oy / 2.0, h / 2.0), tol),
+            "顶圈中心 {top} 不在 (+XOFF/2, +YOFF/2, +h/2)"
+        );
+        // 上面两条已经蕴含它，但把「两端相对位移仍是整个偏移」单独钉住：
+        // 改成各摊一半不是把偏心量减半，锥面的倾斜没变。
+        assert!(
+            (top - bottom)
+                .truncate()
+                .abs_diff_eq(glam::Vec2::new(ox, oy), tol),
+            "两端相对位移 {} 不等于整个 (XOFF, YOFF)",
+            (top - bottom).truncate()
+        );
+
+        // 摆位改了，体积不能跟着变（卡瓦列里）
+        let exact = PI * h * (rb * rb + rb * rt + rt * rt) / 3.0;
+        assert_volume(&mesh, exact, 0.01, "snout offset split");
     }
 
     #[test]
@@ -965,7 +1111,7 @@ mod tests {
     #[test]
     fn spherical_dish_matches_cap_volume() {
         let (dia, h) = (4.0f32, 1.0f32);
-        let mesh = gen_spherical_dish(dia, h, 24);
+        let mesh = gen_spherical_dish(dia, h, 24, 12);
         assert_solid_mesh(&mesh, "spherical dish");
         assert_bounds(
             &mesh,
@@ -982,7 +1128,7 @@ mod tests {
 
     #[test]
     fn hemispherical_dish_matches_half_sphere() {
-        let mesh = gen_spherical_dish(4.0, 2.0, 24);
+        let mesh = gen_spherical_dish(4.0, 2.0, 24, 12);
         assert_solid_mesh(&mesh, "hemisphere dish");
         assert_bounds(
             &mesh,
@@ -997,7 +1143,7 @@ mod tests {
     fn deep_spherical_dish_passes_the_equator() {
         // h > r：球冠越过赤道，弧段要从 PI - asin(r/R) 起算
         let (dia, h) = (4.0f32, 3.0f32);
-        let mesh = gen_spherical_dish(dia, h, 24);
+        let mesh = gen_spherical_dish(dia, h, 24, 12);
         assert_solid_mesh(&mesh, "deep spherical dish");
         let r = dia / 2.0;
         let sphere_r = (r * r + h * h) / (2.0 * h);
@@ -1014,20 +1160,133 @@ mod tests {
         assert_volume(&mesh, exact, 0.04, "deep spherical dish");
     }
 
+    /// 按 libgm 的公式搭一条母线，供椭圆碟的几条测试共用。
+    ///
+    /// 刻意在测试里独立写一遍，而不是调 `libgm_discretise::elliptical_dish_facets`：
+    /// 那样是拿实现验实现，公式抄反了两边一起反。
+    ///
+    /// 内部一律 f64：浅碟的球冠段 `R_c³ · (2/3 − cosθ + cos³θ/3)` 是个
+    /// 「大数乘极小差」——a=10 / h=1 时 `R_c³ ≈ 8.8e5` 而括号 ≈ 3e-5，
+    /// f32 只剩两位有效数字，体积基准会先于被测对象失真。
+    fn torispherical_arc(a: f64, h: f64) -> (f64, f64, f64) {
+        let s = (a * a + h * h).sqrt();
+        let r_k = h / (1.0 + (a - h) / s);
+        let r_c = (a * a + h * h - 2.0 * a * r_k) / (2.0 * (h - r_k));
+        (r_k, r_c, ((r_c - h) / (r_c - r_k)).acos())
+    }
+
+    fn torispherical(a: f64, h: f64) -> TorisphericalArc {
+        let (r_k, r_c, theta) = torispherical_arc(a, h);
+        TorisphericalArc {
+            base_radius: a as f32,
+            height: h as f32,
+            hub_radius: r_c as f32,
+            knuckle_radius: r_k as f32,
+            transition_angle: theta as f32,
+        }
+    }
+
+    /// 托里球形封头的解析体积：`π∫r(z)²dz` 沿两段母线分别积出来。
+    fn torispherical_volume(a: f64, h: f64) -> f64 {
+        let (r_k, r_c, t) = torispherical_arc(a, h);
+        let rho = a - r_k;
+        let (c, s2) = (t.cos(), (2.0 * t).sin());
+        let hub = r_c * r_c * r_c * (2.0 / 3.0 - c + c * c * c / 3.0);
+        let knuckle = r_k
+            * (rho * rho * c
+                + 2.0 * rho * r_k * (std::f64::consts::FRAC_PI_4 - t / 2.0 + s2 / 4.0)
+                + r_k * r_k * (c - c * c * c / 3.0));
+        std::f64::consts::PI * (hub + knuckle)
+    }
+
+    /// 椭圆碟建的是**托里球形封头**，不是旋转椭球（T038a）。
+    ///
+    /// 基准取托里球形封头的解析体积，**不是** `2/3·π·a²h`——后者正是被换掉的那族曲面，
+    /// 拿它当基准等于把旧实现请回来当权威。
+    ///
+    /// 尺寸取 a=10 / h=1 是有意的：**体积这个判据本身很钝**。第一版写的 a=2 / h=1.5
+    /// 两族只差 0.6%，比网格自身的离散误差还小，那组尺寸下这条测试证明不了任何事
+    /// （最后那条自检就是当时红出来的）。浅碟才拉得开——这里差 16%，容差 2%。
     #[test]
-    fn elliptical_dish_matches_half_ellipsoid() {
-        let (dia, h) = (4.0f32, 1.5f32);
-        let mesh = gen_elliptical_dish(dia, h, 24);
-        assert_solid_mesh(&mesh, "elliptical dish");
-        // 底圈直径 4 落在 z=0，顶点在 z=height —— 反过来就是母线参数写反了
+    fn elliptical_dish_is_a_torispherical_head_not_an_ellipsoid() {
+        let (a, h) = (10.0f64, 1.0f64);
+        let arc = torispherical(a, h);
+        let mesh = gen_elliptical_dish(arc, 48, 8, 24);
+        assert_solid_mesh(&mesh, "torispherical dish");
+        // 底圈落在 z=0、顶点在 z=h —— 反过来就是母线两段接反了
         assert_bounds(
             &mesh,
-            Vec3::new(-2.0, -2.0, 0.0),
-            Vec3::new(2.0, 2.0, h),
-            "elliptical dish",
+            Vec3::new(-a as f32, -a as f32, 0.0),
+            Vec3::new(a as f32, a as f32, h as f32),
+            "torispherical dish",
         );
-        let r = dia / 2.0;
-        assert_volume(&mesh, 2.0 / 3.0 * PI * r * r * h, 0.04, "elliptical dish");
+
+        let exact = torispherical_volume(a, h);
+        assert_volume(&mesh, exact as f32, 0.02, "torispherical dish");
+
+        let ellipsoid = 2.0 / 3.0 * std::f64::consts::PI * a * a * h;
+        assert!(
+            (exact - ellipsoid).abs() > exact * 0.05,
+            "这组尺寸下托里球形封头 {exact} 与旋转椭球 {ellipsoid} 分不开，\
+             换一组尺寸——否则这条测试证明不了换没换对曲面"
+        );
+    }
+
+    /// 两段母线在交接角处位置与切向都连续。
+    ///
+    /// 交接角抄错（比如把 `acos(1 − q)` 抄成 `acos(q)`）不会让网格不闭合，也不太改
+    /// 体积，只会在碟身留一道折痕——只有直接量这一处才照得出来。
+    #[test]
+    fn the_two_arcs_meet_smoothly_at_the_transition_angle() {
+        let (a, h) = (2.0f32, 1.0f32);
+        let arc = torispherical(a as f64, h as f64);
+        let t = arc.transition_angle;
+        // 26.6°：libgm 那条被 Hex-Rays 吞掉实参的伪码会给 83.9°
+        assert!(
+            (t.to_degrees() - 26.565).abs() < 0.01,
+            "交接角 {}° 不是 atan2(h, a)",
+            t.to_degrees()
+        );
+
+        let (sin_t, cos_t) = t.sin_cos();
+        let hub_end = (
+            arc.hub_radius * sin_t,
+            arc.hub_radius * cos_t + h - arc.hub_radius,
+        );
+        let knuckle_start = (
+            (a - arc.knuckle_radius) + arc.knuckle_radius * sin_t,
+            arc.knuckle_radius * cos_t,
+        );
+        assert!(
+            (hub_end.0 - knuckle_start.0).abs() < 1e-4
+                && (hub_end.1 - knuckle_start.1).abs() < 1e-4,
+            "球冠段末点 {hub_end:?} 与拐角段首点 {knuckle_start:?} 对不上"
+        );
+        // 两段在该点的法向都是 (sinθ, cosθ)，位置重合即切向重合——把这一条写出来，
+        // 免得下次有人只对齐了位置就以为相切了。
+        let mesh = gen_elliptical_dish(arc, 32, 6, 6);
+        assert_solid_mesh(&mesh, "torispherical smooth");
+    }
+
+    /// `a == h` 退化成半球，与球碟生成器给出同一个体积。
+    #[test]
+    fn a_hemispherical_torispherical_head_matches_the_spherical_dish() {
+        let r = 3.0f32;
+        let arc = TorisphericalArc {
+            base_radius: r,
+            height: r,
+            hub_radius: r,
+            knuckle_radius: r,
+            transition_angle: PI / 4.0, // isSpherical 走的固定 45°
+        };
+        let mesh = gen_elliptical_dish(arc, 32, 8, 8);
+        assert_solid_mesh(&mesh, "hemispherical torispherical");
+        assert_volume(
+            &mesh,
+            2.0 / 3.0 * PI * r * r * r,
+            0.02,
+            "hemispherical torispherical",
+        );
     }
 
     #[test]

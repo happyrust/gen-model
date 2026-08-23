@@ -33,6 +33,7 @@ use parse_pdms_db::parse::round_f32;
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use surrealdb::sql::Thing;
 
 ///生成小的几何体
@@ -321,6 +322,8 @@ pub(crate) async fn process_meshes_update_db_deep_with_policy(
         let mut mesh_ms = 0u128;
         let mut aabb_ms = 0u128;
         let mut boolean_ms = 0u128;
+        // 本窗口开始前先清零，免得把上一轮（或别的调用方）的读数算进来。
+        let _ = take_stale_lookup_stats();
         for &refno in refnos {
             #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
             println!("更新模型结点: {}", refno);
@@ -414,13 +417,18 @@ pub(crate) async fn process_meshes_update_db_deep_with_policy(
                 aabb_ms += t_aabb.elapsed().as_millis();
             }
         }
+        let stale = take_stale_lookup_stats();
         println!(
-            "模型结点更新耗时: {} ms（深度查询 {} / 网格生成 {} / AABB落库 {} / 布尔运算 {}）",
+            "模型结点更新耗时: {} ms（深度查询 {} / 网格生成 {} / AABB落库 {} / 布尔运算 {}）\
+             ；其中按 refno 取旧条目 {} ms / {} 次，树最大 {} 条",
             time.elapsed().as_millis(),
             query_ms,
             mesh_ms,
             aabb_ms,
-            boolean_ms
+            boolean_ms,
+            stale.micros / 1000,
+            stale.calls,
+            stale.max_tree_entries
         );
     }
     Ok(())
@@ -501,12 +509,16 @@ pub async fn gen_inst_meshes(
     replace_exist: bool,
     dir: PathBuf,
 ) -> anyhow::Result<()> {
-    #[cfg(all(not(feature = "occ"), not(feature = "manifold")))]
+    // WP-F T037：形状生成只有 manifold 一台引擎。`occ` 仍可编译，但只服务
+    // 对拍参照与历史断言，不再是这里的回退后端。
+    #[cfg(not(feature = "manifold"))]
     {
         let _ = (refnos, replace_exist, dir);
-        anyhow::bail!("gen_inst_meshes: no tessellation backend (enable `occ` or `manifold`)");
+        anyhow::bail!(
+            "gen_inst_meshes: no tessellation backend (enable `manifold`; `occ` no longer builds shapes)"
+        );
     }
-    #[cfg(any(feature = "occ", feature = "manifold"))]
+    #[cfg(feature = "manifold")]
     {
         const PAGE_NUM: usize = 100;
         let inst_keys = get_inst_relate_keys(refnos);
@@ -549,12 +561,6 @@ pub async fn gen_inst_meshes(
         if inst_geo_ids.is_empty() {
             return Ok(());
         }
-        let thing_has_neg_map = inst_geo_ids
-            .iter()
-            .map(|(x, y)| (x.as_ref().unwrap().id.to_raw(), *y))
-            .collect::<HashMap<_, _>>();
-        let thing_has_neg_map_arc = Arc::new(thing_has_neg_map);
-        // dbg!(&thing_map);
         let mut tasks = vec![];
         // 跨任务共享只为收尾回填 `EXIST_MESH_GEO_HASHES`；库内记录由各任务自己写。
         let aabb_map = Arc::new(DashMap::new());
@@ -563,17 +569,13 @@ pub async fn gen_inst_meshes(
                 .into_iter()
                 .map(|(x, _)| x.as_ref().unwrap().to_string())
                 .join(",");
-            let thing_neg_map = thing_has_neg_map_arc.clone();
             let dir = dir.clone();
             let aabb_map = aabb_map.clone();
             let task = crate::data_interface::staging::write_context::spawn_with_staged_io(
                 async move {
-                    #[cfg(feature = "occ")]
-                    let mut shapes_map: HashMap<String, (OccSharedShape, f64)> = HashMap::new();
-                    #[cfg(feature = "manifold")]
                     let mut libgm_meshes: HashMap<String, PlantMesh> = HashMap::new();
-                    // 形状都建不出来的几何。它们进不了 `shapes_map`，所以下面那句
-                    // `set bad = true` 一辈子轮不到它们——得在这里自己记下来。
+                    // 形状建不出来（或不是形状）的几何。它们进不了 `libgm_meshes`，
+                    // 所以下面那句 `set bad = true` 一辈子轮不到它们——得在这里自己记下来。
                     let mut unbuildable: Vec<String> = Vec::new();
                     // 本任务 update_sql 引用到的 aabb / vec3 记录（D9 顺序）：记录
                     // 必须先于指针在**本任务内**落库，跨任务去重靠 INSERT IGNORE
@@ -610,104 +612,33 @@ pub async fn gen_inst_meshes(
                             }
                             // dbg!(&result);
                             for g in result {
-                                //如果属于 负实体关联的几何体，需要提前保存到hashmap，然后单独生成
                                 #[cfg(any(
                                     feature = "debug_model",
                                     feature = "debug_model_no_obj"
                                 ))]
                                 println!("gen mesh param: {}", &g.id);
-                                //检查是否是PrimPolyhedron
-                                #[cfg(feature = "occ")]
-                                let is_polyhedron = match &g.param {
-                                    PdmsGeoParam::PrimPolyhedron(_) => true,
-                                    _ => false,
-                                };
-                                #[cfg(feature = "manifold")]
-                                {
-                                    match tessellate_libgm_param(&g.param) {
-                                        Ok(Some(mesh)) => {
-                                            libgm_meshes.insert(g.id, mesh);
-                                            continue;
-                                        }
-                                        Ok(None) => {}
-                                        Err(error) => {
-                                            #[cfg(not(feature = "occ"))]
-                                            {
-                                                let affected =
-                                                    aios_core::query_refnos_by_geo_hash(&g.id)
-                                                        .await
-                                                        .unwrap_or_default();
-                                                eprintln!(
-                                                    "几何 {} libgm 建不出形状，标记跳过（波及 {} 个构件）：{error}",
-                                                    g.id,
-                                                    affected.len()
-                                                );
-                                                unbuildable.push(g.id);
-                                                continue;
-                                            }
-                                            #[cfg(feature = "occ")]
-                                            {
-                                                let _ = error;
-                                            }
-                                        }
+                                // WP-F T037：形状只有 manifold 一台引擎，这个 match 之后
+                                // 不许再长出 `#[cfg(feature = "occ")]` 的形状回退分支。
+                                // `None` = 非形状（Unknown / CompoundShape），报错 = 坏参数；
+                                // 两者都标 bad——上游取数按 `!out.bad` 过滤，标不上就
+                                // 每一轮生成都把同一份废参数重算一遍。
+                                match tessellate_libgm_param(&g.param) {
+                                    Ok(Some(mesh)) => {
+                                        libgm_meshes.insert(g.id, mesh);
                                     }
-                                }
-                                #[cfg(not(feature = "occ"))]
-                                {
-                                    eprintln!("几何 {} 无 libgm 适配且 occ 已关，标记跳过", g.id);
-                                    unbuildable.push(g.id);
-                                    continue;
-                                }
-                                #[cfg(feature = "occ")]
-                                match g.param.gen_occ_shape() {
-                                    Ok(shape) => {
-                                        let mut aabb = Aabb::new_invalid();
-                                        for edge in shape.edges() {
-                                            for point in
-                                                edge.approximation_segments_custom(2.0, 2.0)
-                                            {
-                                                aabb.take_point(nalgebra::Point3::new(
-                                                    point.x as f32,
-                                                    point.y as f32,
-                                                    point.z as f32,
-                                                ));
-                                            }
-                                        }
-                                        //如果作为负实体，需要缩小一些范围？如果作为负实体的母体，需要把精度提高一些
-                                        //如果是作为负实体可以稍微降一些？
-                                        let mut coeff = 0.005;
-                                        // dbg!(&g.id);
-                                        if thing_neg_map.get(&g.id).copied().unwrap_or(false) {
-                                            match g.param {
-                                                PdmsGeoParam::PrimExtrusion(_)
-                                                | PdmsGeoParam::PrimRevolution(_) => {
-                                                    coeff /= 10.0;
-                                                    // dbg!(&coeff);
-                                                }
-                                                _ => {
-                                                    coeff /= 5.0;
-                                                }
-                                            };
-                                        }
-
-                                        let mut tol = if is_polyhedron {
-                                            0.01
-                                        } else {
-                                            (aabb.half_extents().magnitude() as f64 * coeff)
-                                                .min(50.0)
-                                        };
-                                        // dbg!(tol);
-                                        shapes_map.insert(g.id, (shape, tol));
+                                    Ok(None) => {
+                                        eprintln!(
+                                            "几何 {} 不是形状（Unknown/CompoundShape），标记跳过",
+                                            g.id
+                                        );
+                                        unbuildable.push(g.id);
                                     }
-                                    // 参数不可能出几何（空轮廓的挤出体就是一例）。
-                                    // :417 的取数按 `!out.bad` 过滤，所以标不上 bad
-                                    // 就等于每一轮生成都把同一份废参数重算一遍。
-                                    Err(e) => {
+                                    Err(error) => {
                                         let affected = aios_core::query_refnos_by_geo_hash(&g.id)
                                             .await
                                             .unwrap_or_default();
                                         eprintln!(
-                                            "几何 {} 建不出形状，标记跳过（波及 {} 个构件）：{e}",
+                                            "几何 {} libgm 建不出形状，标记跳过（波及 {} 个构件）：{error}",
                                             g.id,
                                             affected.len()
                                         );
@@ -727,7 +658,6 @@ pub async fn gen_inst_meshes(
                                     .push_str(&format!("update inst_geo:⟨{id}⟩ set bad = true;"));
                             }
 
-                            #[cfg(feature = "manifold")]
                             for (id, mesh) in &libgm_meshes {
                                 if let Err(error) = persist_libgm_plant_mesh(
                                     id,
@@ -747,97 +677,6 @@ pub async fn gen_inst_meshes(
                                     );
                                     update_sql
                                         .push_str(&format!("update inst_geo:⟨{id}⟩ set bad=true;"));
-                                }
-                            }
-
-                            #[cfg(feature = "occ")]
-                            for (id, (s, tol)) in &shapes_map {
-                                let mut m_tol = *tol;
-                                // dbg!(m_tol);
-                                let mut success = false;
-                                // #[cfg(feature = "debug_model")]
-                                // s.write_step(format!("{}.step", id)).unwrap();
-                                #[cfg(any(
-                                    feature = "debug_model",
-                                    feature = "debug_model_no_obj"
-                                ))]
-                                println!("gen mesh hash: {}", id);
-                                match PlantMesh::gen_occ_mesh(s, m_tol) {
-                                    Ok(mesh) if mesh.aabb.is_none() => {
-                                        // 三角化出来没有包围盒，与失败等价。原先这里
-                                        // `continue` 跳过了下面的标记，于是它也每轮重算。
-                                        eprintln!("几何 {id} 三角化后没有包围盒，标记跳过");
-                                    }
-                                    Ok(mesh) => {
-                                        #[cfg(feature = "debug_model")]
-                                        mesh.export_obj(false, &format!("{}.obj", id));
-                                        // dbg!((id, m_tol, mesh.vertices.len()));
-                                        //保存到文件到dir下
-                                        mesh.ser_to_file(&dir.join(format!("{}.mesh", id)))
-                                            .map_err(|error| {
-                                                anyhow!("save generated mesh {id} failed: {error}")
-                                            })?;
-                                        #[cfg(feature = "debug_model")]
-                                        mesh.export_obj(false, &format!("{}.obj", id));
-                                        let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
-                                        let mut pt_hashes = HashSet::new();
-                                        for edge in s.edges() {
-                                            //TODO edge 这里取中点就可以了
-                                            // for point in edge.approximation_segments_custom(1.0, 1.0) {
-                                            for point in [edge.start_point(), edge.end_point()] {
-                                                let pts_hash = RsVec3(point.as_vec3()).gen_hash();
-                                                pt_hashes.insert(format!("vec3:⟨{}⟩", pts_hash));
-                                                if !chunk_pts.contains_key(&pts_hash) {
-                                                    chunk_pts.insert(
-                                                        pts_hash,
-                                                        serde_json::to_string(&point).map_err(
-                                                            |error| {
-                                                                anyhow!(
-                                                                    "serialize mesh point failed: {error}"
-                                                                )
-                                                            },
-                                                        )?,
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        update_sql.push_str(&format!(
-                                        "update inst_geo:⟨{}⟩ set meshed = true, aabb = aabb:⟨{}⟩, pts=[{}];",
-                                        id,
-                                        aabb_hash,
-                                        pt_hashes.into_iter().join(","),
-                                    ));
-                                        aabb_map
-                                            .entry(aabb_hash.to_string())
-                                            .or_insert(mesh.aabb.unwrap());
-                                        chunk_aabbs
-                                            .entry(aabb_hash.to_string())
-                                            .or_insert(mesh.aabb.unwrap());
-                                        success = true;
-                                    }
-                                    //显示哪些模型可能会受影响
-                                    Err(e) => {
-                                        let affected = aios_core::query_refnos_by_geo_hash(id)
-                                            .await
-                                            .unwrap_or_default();
-                                        eprintln!(
-                                            "几何 {id} 三角化失败，标记跳过（波及 {} 个构件）：{e}",
-                                            affected.len()
-                                        );
-                                        #[cfg(any(
-                                            feature = "debug_model",
-                                            feature = "debug_model_no_obj",
-                                            feature = "log_error"
-                                        ))]
-                                        println!("受影响的构件: {affected:?}");
-                                    }
-                                }
-                                if !success {
-                                    //有问题的模型，就不需要每次都重复生成了
-                                    update_sql.push_str(&format!(
-                                        "update inst_geo:⟨{}⟩ set bad=true;",
-                                        id
-                                    ));
                                 }
                             }
                             if !update_sql.is_empty() {
@@ -894,7 +733,7 @@ pub async fn gen_inst_meshes(
         // 这里不再有 join 之后的全局补写——那正是崩溃时留下悬空指针的窗口。
 
         Ok(())
-    } // cfg(any(occ, manifold))
+    } // cfg(manifold)
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1158,6 +997,40 @@ pub async fn update_inst_relate_aabbs_by_refnos_incremental(
     update_inst_relate_aabbs_by_refnos_mode(refnos, replace_exist, true).await
 }
 
+/// 「按 refno 取树上旧条目」那一步的累计观测（specs/026 T02，ADR-045 的前置量化）。
+///
+/// 这一步今天遍历整棵 `GLOBAL_AABB_TREE`，而一个生成根要问两遍（布尔前刷一次、布尔后
+/// 按最终关系再刷一次）。初始化时树是边生成边长大的，于是它的总代价对库规模是平方级。
+/// 动手改之前先把它单独量出来：AABB落库 那一段里还有记录落库、带房间 upsert 与 epoch
+/// bump 的事务、以及 `sync_refnos`，大头未必在这儿。没有这组数，改完无从归因。
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct StaleLookupStats {
+    pub micros: u64,
+    pub calls: u64,
+    /// 观测窗口内见过的最大树尺寸。平方项成不成立，就看它随批次怎么长。
+    pub max_tree_entries: u64,
+}
+
+static STALE_LOOKUP_MICROS: AtomicU64 = AtomicU64::new(0);
+static STALE_LOOKUP_CALLS: AtomicU64 = AtomicU64::new(0);
+static STALE_LOOKUP_MAX_TREE: AtomicU64 = AtomicU64::new(0);
+
+fn note_stale_lookup(elapsed: std::time::Duration, tree_entries: usize) {
+    STALE_LOOKUP_MICROS.fetch_add(elapsed.as_micros() as u64, Ordering::Relaxed);
+    STALE_LOOKUP_CALLS.fetch_add(1, Ordering::Relaxed);
+    STALE_LOOKUP_MAX_TREE.fetch_max(tree_entries as u64, Ordering::Relaxed);
+}
+
+/// 取走并清零。调用方按自己的观测窗口结算——一次
+/// `process_meshes_update_db_deep_with_policy` 就是一个窗口。
+pub(crate) fn take_stale_lookup_stats() -> StaleLookupStats {
+    StaleLookupStats {
+        micros: STALE_LOOKUP_MICROS.swap(0, Ordering::Relaxed),
+        calls: STALE_LOOKUP_CALLS.swap(0, Ordering::Relaxed),
+        max_tree_entries: STALE_LOOKUP_MAX_TREE.swap(0, Ordering::Relaxed),
+    }
+}
+
 async fn update_inst_relate_aabbs_by_refnos_mode(
     refnos: &[RefnoEnum],
     replace_exist: bool,
@@ -1283,12 +1156,13 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             _direct_serial = Some(crate::fast_model::spatial_state::lock_spatial_serial().await);
             direct_tree = Some(GLOBAL_AABB_TREE.write().await);
         }
-        let stale_by_refno = if let Some(tree) = direct_tree.as_ref() {
+        let t_stale = std::time::Instant::now();
+        let (stale_by_refno, stale_tree_entries) = if let Some(tree) = direct_tree.as_ref() {
             let mut stale = HashMap::<RefU64, Vec<Aabb>>::new();
             for old in tree.iter().filter(|old| target_refnos.contains(&old.refno)) {
                 stale.entry(old.refno).or_default().push(old.aabb);
             }
-            stale
+            (stale, tree.size())
         } else {
             // 暂存窗口这一轮不动树，读一次持久主库的旧基线就够：窗口内的变化寄存进
             // 上下文，提交后由 `sync_tree_from_committed_pointers` 按已提交指针收敛。
@@ -1297,8 +1171,9 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             for old in tree.iter().filter(|old| target_refnos.contains(&old.refno)) {
                 stale.entry(old.refno).or_default().push(old.aabb);
             }
-            stale
+            (stale, tree.size())
         };
+        note_stale_lookup(t_stale.elapsed(), stale_tree_entries);
         let mut aabb_change_count = 0usize;
         let chunk_changes = new_boxes
             .iter()
@@ -2044,7 +1919,7 @@ mod aabb_write_order_tests {
             .0;
         assert!(
             body.contains("no tessellation backend"),
-            "T005: not(occ) without manifold must bail"
+            "T005: 没有 manifold 后端必须 bail"
         );
         assert!(
             !body.contains("gen_inst_meshes skipped (feature `occ` disabled)"),
@@ -2052,11 +1927,34 @@ mod aabb_write_order_tests {
         );
         assert!(
             body.contains("tessellate_libgm_param"),
-            "T007: box/cylinder/extrusion must try libgm first"
+            "形状一律由 tessellate_libgm_param 裁决"
         );
         assert!(
             body.contains("persist_libgm_plant_mesh"),
             "T007: manifold meshes must persist AABB/pts from the mesh"
+        );
+    }
+
+    /// WP-F T037（ADR-030 修订二）：`gen_inst_meshes` 里不再有第二台形状引擎。
+    /// `None`（非形状）与 tessellate 报错都直接标 `bad`；把 `gen_occ_shape` 或
+    /// `shapes_map` 加回来（哪怕挂在 `#[cfg(feature = "occ")]` 下）本测试红。
+    #[test]
+    fn gen_inst_meshes_has_no_occ_shape_fallback() {
+        let source = include_str!("occ_generate.rs");
+        let body = source
+            .split_once("pub async fn gen_inst_meshes(")
+            .expect("gen_inst_meshes exists")
+            .1
+            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .expect("gen_inst_meshes boundary")
+            .0;
+        assert!(
+            !body.contains("gen_occ_shape") && !body.contains("shapes_map"),
+            "形状生成不得回退 OCC：{body}"
+        );
+        assert!(
+            body.contains("不是形状") && body.contains("unbuildable.push"),
+            "非形状判定必须留下可见的跳过记录并标 bad：{body}"
         );
     }
 

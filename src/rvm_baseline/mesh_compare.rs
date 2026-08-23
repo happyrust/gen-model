@@ -1,16 +1,17 @@
-//! Mesh 级对拍：RVM FacetGroup（E3D 三角化）vs gen OCC 网格，双向表面距离。
+//! Mesh 级对拍：RVM FacetGroup（E3D 三角化）vs gen 侧生产网格，双向表面距离。
 //!
-//! 为什么不逐顶点：E3D 与 OCC 是两套独立三角化器，顶点集不对齐、三角划分不同，
+//! 为什么不逐顶点：E3D 与本仓是两套独立三角化器，顶点集不对齐、三角划分不同，
 //! 逐顶点 / 逐三角没有共同基准。只能用与三角化无关的**表面距离**
 //! （[`crate::fast_model::shared::two_sided_surface_distance`]）。两侧统一到世界 mm。
 //!
 //! - RVM 侧：rvm-rs 的 [`rvm_rs::export::Tessellate`] 把每个 group 的几何三角化到本地，
 //!   再乘 `geometry.transform`（rvm-rs 已把层级烘进单几何变换，同 OBJ 导出口径）并
 //!   放大 `M_TO_MM` 到世界 mm。按 group 名归并。
-//! - gen 侧（需 `occ`）：有 `booled_id` 时加载布尔后的 `{id}.mesh` 再乘 `world_trans`
-//!   （与生产 `query_valid_insts` 同口径）；否则从 `inst_geo.param` 就地
-//!   `gen_occ_shape`+`gen_occ_mesh`，再乘 `world_trans × inst.transform`
-//!   （param 为空的复合几何回退磁盘 `.mesh`）。
+//! - gen 侧（需 `manifold`，ADR-030 决策 10 / T043）：有 `booled_id` 时加载布尔后的
+//!   `{id}.mesh` 再乘 `world_trans`（与生产 `query_valid_insts` 同口径）；否则从
+//!   `inst_geo.param` 就地走生产同款 `tessellate_libgm_param`，再乘
+//!   `world_trans × inst.transform`。OCC 只是可选参照分支（带 `occ` 才编译），
+//!   拿不到就回退磁盘 `.mesh`——量尺子不再跟被量的对象绑在一起。
 //!
 //! 阈值不是 1mm：曲面墙两侧都是有限三角化，E3D FacetGroup 的弦误差是判定地板，
 //! 门限按实测证据定（见 `mesh_wall_live` 测试与 `docs/2026-08-12_live-test-ledger.md`）。
@@ -208,7 +209,7 @@ fn add_geometry(accum: &mut MeshAccum, geometry: &rvm_rs::store::geometry::Geome
     accum.add_local_triangulation(&tri, &cols);
 }
 
-// ───────────────────────── gen 侧（版本库 + OCC） ─────────────────────────
+// ─────────────────── gen 侧（版本库 + 生产三角化） ───────────────────
 
 /// 两三角网格的双向表面距离，对每堵墙给出一行判定。
 #[derive(Debug, Clone)]
@@ -221,7 +222,7 @@ pub struct MeshPairResult {
     pub note: Option<String>,
 }
 
-#[cfg(feature = "occ")]
+#[cfg(feature = "manifold")]
 mod gen_side {
     use super::*;
     use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
@@ -257,8 +258,9 @@ mod gen_side {
     ///
     /// 有 `booled_id` 时与生产 `query_valid_insts` 一样，只加载布尔后的
     /// `{booled_id}.mesh` 再乘 `world_trans`（切洞结果已烘进网格）。没有则
-    /// geo_hash → param → OCC 形状 → 网格，再乘 `world_trans × inst.transform`。
-    /// `gen_tol` 是 OCC 细分弦容差（mm），只用于未布尔的 param 重建。
+    /// geo_hash → param → 生产同款 `tessellate_libgm_param` → 网格，再乘
+    /// `world_trans × inst.transform`。`gen_tol` 是 OCC 参照分支的细分弦容差
+    /// （mm），只在带 `occ` 的构建里用得上。
     pub async fn gen_world_mesh(
         db: &Surreal<Any>,
         pe_key: &str,
@@ -344,23 +346,27 @@ mod gen_side {
         if let Some(param_json) = param_json {
             let param: PdmsGeoParam = serde_json::from_value(param_json)
                 .with_context(|| format!("反序列化 PdmsGeoParam 失败 (geo_hash={geo_hash})"))?;
-            // 顺序必须与生产 `gen_inst_meshes` 一致：先 libgm/manifold，`None` 或
-            // 失败才 OCC。写反了这道 RVM 门量的就是一条生产上已经不走的路径——
-            // 后端换了它还是绿的，等于没有门。
-            #[cfg(feature = "manifold")]
+            // 与生产 `gen_inst_meshes` 同一条路：形状由 `tessellate_libgm_param` 裁决。
+            // 写成别的路径，这道 RVM 门量的就是一条生产上不走的路——后端换了它还是
+            // 绿的，等于没有门。
             match crate::fast_model::manifold_tessellate::tessellate_libgm_param(&param) {
                 Ok(Some(mesh)) => return Ok(Some(mesh)),
                 Ok(None) => {}
                 Err(error) => {
-                    eprintln!("geo_hash={geo_hash} libgm 三角化失败，回退 OCC: {error}");
+                    eprintln!("geo_hash={geo_hash} libgm 三角化失败，走参照回退: {error}");
                 }
             }
+            // OCC 仅作可选参照分支（T043）：生产不再用它建形状，但在带 `occ` 的
+            // 构建里保留，供事后验收对拍时多一条独立参照。
+            #[cfg(feature = "occ")]
             match param.gen_occ_shape() {
                 Ok(shape) => return Ok(Some(PlantMesh::gen_occ_mesh(&shape, gen_tol)?)),
                 Err(error) => {
                     eprintln!("geo_hash={geo_hash} gen_occ_shape 失败，回退磁盘 .mesh: {error}");
                 }
             }
+            #[cfg(not(feature = "occ"))]
+            let _ = gen_tol;
         }
         // param 为空或建不出形状 → 磁盘 .mesh（布尔/复合结果，如 BEND；CWD=仓库根，
         // meshes_path 默认 assets/meshes）。
@@ -372,10 +378,10 @@ mod gen_side {
     }
 }
 
-#[cfg(feature = "occ")]
+#[cfg(feature = "manifold")]
 pub use gen_side::gen_world_mesh;
 
-#[cfg(all(test, feature = "occ"))]
+#[cfg(all(test, feature = "manifold"))]
 mod mesh_wall_live {
     use super::*;
     use surrealdb::engine::any::connect;
@@ -421,9 +427,10 @@ mod mesh_wall_live {
     ///   单列打印，待 SweepSolid 修复后再收进断言。
     ///
     /// 前置：8009 生产验证库在跑；`test_data/rvm/1RS-WF03-W-C-RR001.rvm` 在位。
-    /// 跑法：`cargo test --features rvm_verify,occ mesh_wall_surface_distance -- --ignored --nocapture`
+    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_wall_surface_distance -- --ignored --nocapture`
     #[tokio::test]
-    #[ignore = "live 8009 + occ：1112 CWALL WALL 的 mesh 级对拍（gen→rvm 贴合守卫 + 洞/WALL4 取证）"]
+    #[ignore = "live 8009：1112 CWALL WALL 的 mesh 级对拍（gen→rvm 贴合守卫 + 洞/WALL4 取证）"]
     async fn mesh_wall_surface_distance() {
         // RVM 侧：group 名 → 世界 mm 网格。
         let rvm_path = std::path::Path::new("test_data/rvm/1RS-WF03-W-C-RR001.rvm");
@@ -564,9 +571,10 @@ mod mesh_wall_live {
     /// AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 4 堵直线 STWALL。AABB 对拍已 8/8；
     /// 这里钉 mesh：E3D FacetGroup 是 6 面盒（无内环），应双向贴合。
     ///
-    /// 跑法：`cargo test --features rvm_verify --lib mesh_stwall_surface_distance -- --ignored --nocapture`
+    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_stwall_surface_distance -- --ignored --nocapture`
     #[tokio::test]
-    #[ignore = "live 8009 + occ：1112 CWALL STWALL 的 mesh 级对拍（直线 SweepSolid）"]
+    #[ignore = "live 8009：1112 CWALL STWALL 的 mesh 级对拍（直线 SweepSolid）"]
     async fn mesh_stwall_surface_distance() {
         use crate::fast_model::shared::one_way_surface_distance;
 
@@ -629,9 +637,10 @@ mod mesh_wall_live {
     /// 只是 E3D 侧附加/口径差。FTUB 作对照（AABB 一向过）。第一遍取证，不硬断言。
     ///
     /// 前置：8009 上有 dbnum 8000 的生成几何；`test_data/rvm/C-OR-1R345-C.rvm` 在位。
-    /// 跑法：`cargo test --features rvm_verify --lib mesh_pipe_surface_distance -- --ignored --nocapture`
+    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_pipe_surface_distance -- --ignored --nocapture`
     #[tokio::test]
-    #[ignore = "live 8009 + occ：8000 C-OR 管系 FTUB/BEND 的 mesh 级对拍（BEND 缺陷定性）"]
+    #[ignore = "live 8009：8000 C-OR 管系 FTUB/BEND 的 mesh 级对拍（BEND 缺陷定性）"]
     async fn mesh_pipe_surface_distance() {
         use crate::fast_model::shared::{farthest_from_surface, one_way_surface_distance};
 
@@ -713,9 +722,10 @@ mod mesh_wall_live {
     /// 判「弯头腿伸进相邻直管」是**装配无害**（union 双向都小 → 腿与直管重叠、最终外观不变）
     /// 还是**真缺陷**（gen→rvm 仍大 → 腿伸出连相邻直管都盖不住）。
     ///
-    /// 跑法：`cargo test --features rvm_verify --lib mesh_branch_union -- --ignored --nocapture`
+    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_branch_union -- --ignored --nocapture`
     #[tokio::test]
-    #[ignore = "live 8009 + occ：C-OR BEND1+相邻 FTUB 的 union mesh 对拍（重叠是否装配无害）"]
+    #[ignore = "live 8009：C-OR BEND1+相邻 FTUB 的 union mesh 对拍（重叠是否装配无害）"]
     async fn mesh_branch_union_surface_distance() {
         use crate::fast_model::shared::{farthest_from_surface, two_sided_surface_distance};
 
@@ -788,9 +798,10 @@ mod mesh_wall_live {
     /// 把「gen 装配层几何正确」从 3 元素样本升级为整条管路：union 双向应落在
     /// tessellation 量级（元素边界的弯头腿归属差在整条 union 里自洽抵消）。
     ///
-    /// 跑法：`cargo test --features rvm_verify --lib mesh_full_branch -- --ignored --nocapture`
+    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_full_branch -- --ignored --nocapture`
     #[tokio::test]
-    #[ignore = "live 8009 + occ：整条 C-OR BRANCH 的 union mesh 端到端对拍"]
+    #[ignore = "live 8009：整条 C-OR BRANCH 的 union mesh 端到端对拍"]
     async fn mesh_full_branch_union_surface_distance() {
         use crate::fast_model::shared::{farthest_from_surface, two_sided_surface_distance};
 
@@ -886,9 +897,10 @@ mod mesh_wall_live {
     /// 确认 C-OR 的「gen 表面贴 E3D」在不同目录截面上仍成立；E3D RVM 含槽体外壳
     /// （比 gen 管段大约 100mm 高），rvm→gen 大是范围差。FTUBE 6 是零长隐含直管，两侧都无表面。
     ///
-    /// 跑法：`cargo test --features rvm_verify --lib mesh_c_iy_full_branch -- --ignored --nocapture`
+    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_c_iy_full_branch -- --ignored --nocapture`
     #[tokio::test]
-    #[ignore = "live 8009 + occ：整条 C-IY BRANCH 的 union mesh 端到端对拍"]
+    #[ignore = "live 8009：整条 C-IY BRANCH 的 union mesh 端到端对拍"]
     async fn mesh_c_iy_full_branch_union_surface_distance() {
         use crate::fast_model::shared::{farthest_from_surface, two_sided_surface_distance};
 
@@ -1081,9 +1093,10 @@ mod mesh_wall_live {
     /// 钉 gen→rvm p95≤1mm；高面片墙的开洞与带 NXTR 的大体量范围差只打印
     /// （见 `mesh_gwall_extra_against_cwall_union`）。
     ///
-    /// 跑法：`cargo test --features rvm_verify --lib mesh_gwall_union -- --ignored --nocapture`
+    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_gwall_union -- --ignored --nocapture`
     #[tokio::test]
-    #[ignore = "live 8009 + occ：1112 CWALL 20 堵 GWALL 的 union mesh 对拍"]
+    #[ignore = "live 8009：1112 CWALL 20 堵 GWALL 的 union mesh 对拍"]
     async fn mesh_gwall_union_surface_distance() {
         use crate::fast_model::shared::{farthest_from_surface, two_sided_surface_distance};
 
@@ -1222,9 +1235,10 @@ mod mesh_wall_live {
     /// OCC 布尔会把 116569 切成空网格，生产不走这条路径。盒状守卫仍在
     /// `mesh_gwall_union_surface_distance`。
     ///
-    /// 跑法：`cargo test --features rvm_verify --lib mesh_gwall_extra -- --ignored --nocapture`
+    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_gwall_extra -- --ignored --nocapture`
     #[tokio::test]
-    #[ignore = "live 8009 + occ：1112 3 堵大体量 GWALL 的 NXTR/范围差取证"]
+    #[ignore = "live 8009：1112 3 堵大体量 GWALL 的 NXTR/范围差取证"]
     async fn mesh_gwall_extra_against_cwall_union() {
         use crate::fast_model::shared::farthest_from_surface;
 

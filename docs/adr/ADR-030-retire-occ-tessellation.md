@@ -23,6 +23,7 @@ GENSEC 的几何是扫掠体（PrimLoft），仍绑在 OCC 上。
 但它们在 Core3D 里是 **libgm 一等原语**（见下方 IDA 修订），应用 `gm_CreateSnout` 等
 语义在 manifold 上实现，而不是当成永久 BLOCKED。`water_calculation` 仍调
 `insts_data.gen_occ_shape`，可能依赖形状拓扑，是第二个抑留点。
+（**2026-08-24 作废**：浸水插件已整个删除，不再是抑留点，见下方决策 11。）
 
 ## IDA 修订（2026-08-15，Core3D.dll.i64 / `idalib-32268`）
 
@@ -48,6 +49,76 @@ libgm             实体 + CSG 树 + 离散（gm_QueryFacetData / PictureDraw）
 OCC 是我们自己把 `gm_Create*` 翻成 BRep 的翻译层。退役目标是 **对齐 libgm 原语表**，
 不是对齐 OCC 的 loft/revolve API。
 
+## IDA 修订二（2026-08-23，libgm.dll 3.1 / `idalib-18608`）
+
+上一版翻的是 Core3D 的**调用点**。这一版翻的是 libgm 自己的**实现**，结论推翻了 T007a /
+T007b 留下的那三个「有意的 OCC 回退口子」：三个都挡的是 libgm 表达不出、我们的解析器也
+造不出来的输入。它们不是回退，是伪装成回退的死分支。
+
+### 一、回转轴在 libgm 里是二维的，没有「出平面轴」这回事
+
+| 符号 | 地址 | 事实 |
+|---|---|---|
+| `gm_CreateRevolution` | `0x1003A580` | `(double, double, D2_Point const&, double, unsigned)` |
+| `GM_Revolution::GM_Revolution` | `0x10033830` | `(double startAngle, double finishAngle, D2_Point const& origin, double axisAngle, GM_Profile*, double tol)` |
+| `translatePolygonIntoStandardPosition` | `0x10097810` | `moveBy(−origin.x, −origin.y)`；`axisAngle != 90` 时 `rotateBy(90 − axisAngle)` |
+| `movePointsOntoYAxis` | `0x100978A0` | 顶点 x 的绝对值小于 `GM_User::normtol_` 时把 x 置 0 |
+
+轴是**轮廓平面内的一个角度**，不是三维向量；标准位是「原点搬到零点、轴摆到 +Y」。
+我们这边 `Revolution` 的唯一构造点是 aios-core `prim_geo/category.rs`，走
+`..Default::default()`，`rot_dir` 恒为 `Vec3::X`。所以出平面轴既非 E3D 能画出的形状，
+也非本仓解析器能产出的状态——它属于宪法「响亮失败」条，不属于「显式回退」。
+
+`movePointsOntoYAxis` 那一下**吸附**我们还没抄：轮廓上贴近轴的顶点在 E3D 侧被精确压到
+轴上，不压就会在轴心留下一圈针状面。这是本次新发现的欠项，不是既有实现的等价改写。
+
+### 二、`CurveType::Spline` 既不是样条，也没有任何代码构造得出来
+
+`Extrusion::cur_type` 的 `Spline(thick)` 变体在整个工作区（gen-model + 三个 vendor +
+全部 worktree）**没有一处构造点**，只出现在单测里。而它对应的 OCC 实现
+`wire::gen_occ_spline_wire` 读下来根本不是 NURBS：要求恰好 3 个 SPINE 点
+（起点 / 过渡点 / 终点），解出三点圆，按 `thick` 一半向内外偏移，拼成
+「外弧 + 直段 + 内弧 + 直段」的环形扇区——就是一段**弧形墙的截面**。
+
+libgm 侧同样没有样条轮廓：`D2_Profile` 的 span 只带 bulge；`GM_Bezier`
+（`gm_CreateBezier` `0x10038880`，构造 `(D3_Point, D3_Point, D3_Point, double, double)`）
+是三点加权的**曲线图元**，靠 `gm_AddCurve`（`0x1003A7D0`）挂进树里，走
+`calcFacetsWithoutSurfaces` 出折线，不参与实体轮廓。
+
+### 三、`Unknown` / `CompoundShape` 从来没走过 OCC
+
+两者的 `check_valid()` 都返回 `false`，而 `PdmsGeoParam::gen_occ_shape()` 第一句就是
+`if !check_valid() { return Err("Invalid shape") }`。回 `None` 只是把同一个失败挪到
+另一个函数里报，删 `occ` 对它们零影响。
+
+### 四、真正的缺口：回转轮廓的离散规则跟挤出**不是同一条**
+
+`GM_Revolution::calcFacetsWithoutSurfaces`（`0x10097920`）的被调列表里有
+`GM_Profile::polygonForFacet`（`0x1008ED80`），后者走 `GM_Profile::setNSteps(double)`
+（`0x1008F2E0`）。反编译该函数：逐 span 取自身半径 `D2_Span::getRadius`，若该 span 有
+配对 span（`GM_Profile::pairedSpan` `0x1008F7F0`）则一并取其半径，
+`n = d2_numberOfSegmentsForCircle(fmax(自身半径, 配对半径), tol)`，写回时与已存步数
+**取大**（只增不减）。
+
+`polygonForFacet` 的调用方只有 `GM_Collar` 与 `GM_Revolution`（含各自的 `validate`）——
+**`GM_Extrusion::calcFacets`（`0x10056F10`）不在其中**，它走的是每 span 自算的
+`D2_Span::getApproxPolyLine`。也就是说 libgm 有两套轮廓离散口径，而本仓
+`tessellate_revolution` 目前把挤出那一套用在了回转上。REVO / NREV 是 PANE 负实体的主力，
+且已在生产路径上；段数差一段，`cancelFacets` 的共面抵消就整个放弃（§6.11），
+结果是布尔后留一层内壁。
+
+### 五、单位网格身份与 libgm 的半径相关段数直接冲突
+
+libgm §7.9.1 的调用点表说明每个曲面原语喂进 `d2_numberOfSegmentsForCircle` 的是**真实
+半径**。本仓 `tessellate_libgm_param` 里柱 / 球 / PrimLSnout / 碟 / 圆环面 / 矩形环面 /
+斜端柱的段数全是写死的 32（球是 16×36）——`libgm_discretise` 的单测已经写明 32 只在
+「R=100 配 0.5mm 容差」这一个尺寸上对。
+
+其中柱与球走**单位几何**：`LCylinder::hash_unit_mesh_params()` 返回常量
+`CYLINDER_GEO_HASH`，`gen_unit_shape()` 返回 `Self::default()`，全库所有圆柱共享一行
+`inst_geo` 和一个 `.mesh`。这份身份无法承载随半径变化的段数——要按 libgm 出段数，就得
+改身份键。该决策超出本 ADR 范围，另立 ADR-044。
+
 ## 决策
 
 1. **不在本期从 default / release 拿掉 `occ`。** 删 `occ` 的前提是：生产路径上每个会
@@ -71,6 +142,34 @@ OCC 是我们自己把 `gm_Create*` 翻成 BRep 的翻译层。退役目标是 *
 6. **浸水插件不挡主生成管线删 OCC。** 先调查它对 BREP 面/点分类的依赖；能改网格 CSG
    就改，不能则独立 feature，不进最终 release default。
 7. **回滚只加回 `occ=true`，不恢复 OCC 布尔。** 禁止 `cargo clean`。
+
+### 决策修订（2026-08-23，依据「IDA 修订二」）
+
+上面七条的意图不变，下面三条是按新证据收紧的口径：
+
+8. **`tessellate_libgm_param` 不得再有「回退 OCC」的 `Ok(None)`。** 三个现存回退口子
+   按证据重新归类：出平面回转轴 → `bail!`（libgm 表达不出，属决策 5）；
+   `CurveType::Spline` → 按弧形墙截面在 manifold 上实现（它不是样条）；
+   `Unknown` / `CompoundShape` → 直接标 `bad`，不假装有后端可退。
+9. **离散段数是布尔的前置条件，不是画质旋钮，因此进决策 1 的出口判据。** 「能稳定生成
+   `PlantMesh`」不足以放行；曲面原语的段数必须按 libgm §7.9.1 的调用点表由**真实半径**
+   算出，回转轮廓必须走 `setNSteps` 那一套（配对 span 取大 + 单调取大），
+   不得沿用挤出的每 span 自算。
+10. **删 `occ` 之前，量尺子的工具必须先脱离被量的对象。** `rvm_baseline/mesh_compare.rs`
+    的 `gen_side` 整个挂在 `#[cfg(feature = "occ")]` 下；先把它改成 manifold 为准、
+    OCC 仅作可选参照，否则删 `occ` 会连同验收能力一起删掉。
+
+### 决策修订（2026-08-24）
+
+11. **决策 6 以「删除」收口，不再调查、不再独立 feature。** 浸水插件
+    （`src/plug_in/water_calculation.rs`）业务上已不需要，整个模块删除。
+    删除时它对 OCC 的依赖其实早已不存在：唯一那处 BRep STP 导出挂在 feature
+    `opencascade_rs` 下，而这个 feature 在任何 `Cargo.toml` 里都没定义过，历来所有
+    构建编的都是那个写死字符串的占位实现，死分支已于 2026-08-23 按决策 6 删掉。
+    剩下的四个 ArangoDB 查询函数与 `save_stp_data_to_arangodb` 在仓内**零调用点**，
+    连 `AQL_WATER_CALCULATION_COLLECTION` 也只有它自己在用。
+    背景一节里「第二个抑留点」的说法自此作废，OCC 抑留点只剩扫掠体（PrimLoft）一处。
+    浸水若重新立项，从 spec 起步，不要从 git 里捞这份（它的 STP 导出从未发布过）。
 
 分期（出口见 spec）：Phase 0 失败闭合；Phase 1 布尔（ADR-029，进行中）；Phase 2 可盖
 原语；Phase 3 扫掠体网格器；Phase 4 才从 default/release 删除 `occ`。

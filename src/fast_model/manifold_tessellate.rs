@@ -30,21 +30,26 @@ const POS_EPS: f64 = 1e-4;
 /// `tessellate_revolution` 的二维分解不成立。
 const AXIS_IN_PLANE_EPS: f32 = 1e-4;
 
-/// 曲面离散的弦高容差（mm），**绝对量，全局一个**。
+/// 弦高容差的唯一来源在 `libgm_discretise`（T042）：段数规则与它喂的那个容差得住在
+/// 一起，否则「唯一一份」只是句注释。
+use crate::fast_model::libgm_discretise::FACET_TOL_MM;
+
+/// 单位网格身份（ADR-026）当前锁死的段数——**按构造就是错的，欠 T041**。
 ///
-/// 对齐 libgm：`GM_User::arctol_` 是一个全局绝对量，Core3D 主初始化那一处传的就是
-/// 0.5（另有一条粗路径传 10.0；`arctol_` 自身初值是 0.1）。见
-/// `plant-4/libgm-boolean-algorithm.md` §7.9。
+/// 柱与球走一份缓存的单位网格给所有半径复用，所以这份网格带不了一个随半径变的段数：
+/// `libgm_discretise::cylinder_segments` 在这两处根本用不上。活库实测这有多离谱：
+/// 写死的 32 段只有 **2.0%** 的圆柱实例是对的，90.8% 过细，而 r ≥ 295mm 的柱在 32 段
+/// 下弦高 1.42mm、超 [`FACET_TOL_MM`] 三倍（`docs/evidence/2026-08-23-occ-retire-census.md`）。
 ///
-/// 为什么不能沿用 `BrepShapeTrait::tol()`：那些是**按自身尺度给的比例容差**
-/// （挤出/回转是千分之一截面半径），`tol/R` 于是恒定，段数与尺寸无关——同一个圆
-/// 在挤出侧和回转侧只要包围盒不同就会分成不同段数。`=24381/36945` 那颗穹顶正是
-/// 这样：正体圆柱 60 段、负体圆柱 84 段，同一道墙两个多边形，差集在赤道上留下
-/// 一圈毫米级残料。改成绝对量之后两侧拿到同一个段数，而 libgm「段数取到 4 的
-/// 倍数」保证两者的顶点相位也一致（都落在 0/90/180/270 上），残料才真正消失。
-///
-/// 目前是常量。要做成 `DbOption` 可配之前，别在别处再写第二个容差来源。
-const FACET_TOL_MM: f64 = 0.5;
+/// 收成一处命名常量而不是散在三个 match 臂里的裸字面量（T039），是为了让下一个人
+/// 一眼看见这是笔债而不是一个取值。**值一个都不许改**：身份键不变而网格内容变了，
+/// 等于在稳定的 `geo_hash` 底下悄悄换掉几何。ADR-044 决策 2 把段数混进身份键之后
+/// （T041），这一整组随两处调用一起删掉，改按真实半径算。
+mod unit_mesh_identity {
+    pub const CYLINDER_SEGMENTS: i32 = 32;
+    pub const SPHERE_STACKS: u32 = 16;
+    pub const SPHERE_SLICES: u32 = 36;
+}
 
 /// 对齐 `Shape::box_centered(1,1,1)`。
 pub fn tessellate_unit_box() -> PlantMesh {
@@ -93,6 +98,19 @@ pub fn tessellate_extrusion(
         };
         polygons.push(ring);
     }
+    extrude_flat_polygons(polygons, height, "extrusion")
+}
+
+/// 已离散好的二维环 → 沿 +Z 挤出。绕向按外环有向面积统一翻正，空截面 / 空网格
+/// hard fail。直线挤出与弧形墙截面（`CurveType::Spline`）共用这一个尾段。
+fn extrude_flat_polygons(
+    mut polygons: Vec<Vec<[f64; 2]>>,
+    height: f32,
+    what: &str,
+) -> anyhow::Result<PlantMesh> {
+    if height <= f32::EPSILON {
+        anyhow::bail!("{what} height {height} is not positive");
+    }
     if signed_area(&polygons[0]) < 0.0 {
         for ring in &mut polygons {
             ring.reverse();
@@ -100,13 +118,135 @@ pub fn tessellate_extrusion(
     }
     let section = CrossSection::from_polygons_with_fill_rule(&polygons, FillRule::NonZero);
     if section.is_empty() {
-        anyhow::bail!("extrusion cross-section is empty after fill");
+        anyhow::bail!("{what} cross-section is empty after fill");
     }
     let solid = Manifold::extrude(&section, height as f64);
     if solid.is_empty() || solid.num_tri() == 0 {
-        anyhow::bail!("extrusion manifold is empty");
+        anyhow::bail!("{what} manifold is empty");
     }
     Ok(manifold_to_plant_mesh(&solid))
+}
+
+/// `CurveType::Spline(thick)`：**弧形墙截面**，不是样条（WP-F T036 / ADR-030 修订二）。
+///
+/// 该变体在整个工作区没有生产构造点（2026-08-23 活库盘点 0 / 2007），其 OCC 权威
+/// 实现 `wire::gen_occ_spline_wire` 要求恰好 3 个 SPINE 点：起点、过渡点、终点解出
+/// 三点圆，按 `thick` 一半向内外偏移，拼成「内弧 + 直段 + 外弧 + 直段」的环形扇区。
+/// 这里按同一套点位复刻：三点圆心复用 aios-core `cal_circus_center`（不新写弧数学），
+/// 弧折线化走 `libgm_discretise::span_polyline_by_tol`（libgm 的整圆角度格子），
+/// 闭环后与直线挤出共用 [`extrude_flat_polygons`]。
+///
+/// 点数不等于 3、三点共线、SPINE 点出平面、`thick` 吃穿半径都是硬失败——
+/// 这条分支不再有「回退 OCC」语义。
+fn tessellate_arc_wall(
+    verts: &[Vec<glam::Vec3>],
+    thick: f32,
+    height: f32,
+    chord_tol: f64,
+) -> anyhow::Result<PlantMesh> {
+    let Some(spine) = verts.first() else {
+        anyhow::bail!("arc-wall (Spline) profile has no loop");
+    };
+    if spine.len() != 3 {
+        anyhow::bail!(
+            "arc-wall (Spline) profile needs exactly 3 SPINE points, got {}",
+            spine.len()
+        );
+    }
+    if !(thick > 0.0) {
+        anyhow::bail!("arc-wall (Spline) thickness {thick} is not positive");
+    }
+    for p in spine {
+        if p.z.abs() > POS_EPS as f32 {
+            anyhow::bail!("arc-wall SPINE point leaves the profile plane: {p:?}");
+        }
+    }
+    let (pt0, transit, pt1) = (spine[0], spine[1], spine[2]);
+    let chord = glam::DVec2::new((pt1.x - pt0.x) as f64, (pt1.y - pt0.y) as f64);
+    let lead = glam::DVec2::new((transit.x - pt0.x) as f64, (transit.y - pt0.y) as f64);
+    // 共线（含点重合）解不出三点圆。相对量判据：|sin∠| 低于 1e-9 视为共线。
+    if chord.perp_dot(lead).abs() <= 1e-9 * chord.length() * lead.length()
+        || chord.length() < POS_EPS
+        || lead.length() < POS_EPS
+        || (transit - pt1).truncate().length() < POS_EPS as f32
+    {
+        anyhow::bail!(
+            "arc-wall SPINE points are collinear or coincident, no circle through them: \
+             {pt0:?} {transit:?} {pt1:?}"
+        );
+    }
+
+    let origin = aios_core::prim_geo::wire::cal_circus_center(pt0, pt1, transit);
+    let centre = glam::DVec2::new(origin.x as f64, origin.y as f64);
+    let radius = (glam::DVec2::new(pt0.x as f64, pt0.y as f64) - centre).length();
+    let half_thick = (thick as f64) * 0.5;
+    if radius - half_thick <= POS_EPS {
+        anyhow::bail!(
+            "arc-wall thickness {thick} swallows the arc radius {radius:.3} (centre {centre:?})"
+        );
+    }
+
+    // 三个点的方位角（同一个圆心，内外圈共享角度）。内弧沿「经过过渡点」的方向
+    // 从起点扫到终点；外弧原路返回，bulge 反号（bulge = tan(扫角/4)，逆时针为正）。
+    let angle_of = |p: glam::Vec3| {
+        let d = glam::DVec2::new(p.x as f64 - centre.x, p.y as f64 - centre.y);
+        d.y.atan2(d.x)
+    };
+    let tau = std::f64::consts::TAU;
+    let ccw = |from: f64, to: f64| ((to - from) % tau + tau) % tau;
+    let (a0, at, a1) = (angle_of(pt0), angle_of(transit), angle_of(pt1));
+    let ccw_sweep = ccw(a0, a1);
+    let transit_off = ccw(a0, at);
+    let (sweep, orientation) = if transit_off <= ccw_sweep {
+        (ccw_sweep, 1.0)
+    } else {
+        (tau - ccw_sweep, -1.0)
+    };
+    if sweep <= f64::from(f32::EPSILON) {
+        anyhow::bail!("arc-wall sweep collapses to zero: {pt0:?} -> {transit:?} -> {pt1:?}");
+    }
+    let bulge = orientation * (sweep * 0.25).tan();
+
+    // 与 `gen_occ_spline_wire` 同一套点位：p0/p1 内圈、p2/p3 外圈，直段连两头。
+    let radial = |p: glam::Vec3| (glam::DVec2::new(p.x as f64, p.y as f64) - centre).normalize();
+    let (v0, v1) = (radial(pt0), radial(pt1));
+    let at_radius = |v: glam::DVec2, r: f64| [centre.x + v.x * r, centre.y + v.y * r];
+    let spans = [
+        (at_radius(v0, radius - half_thick), bulge),
+        (at_radius(v1, radius - half_thick), 0.0),
+        (at_radius(v1, radius + half_thick), -bulge),
+        (at_radius(v0, radius + half_thick), 0.0),
+    ];
+
+    if !libgm_discretise::chord_tol_is_usable(chord_tol) {
+        anyhow::bail!("弧墙拿到的弦高容差 {chord_tol} 不可用");
+    }
+    let tol = chord_tol;
+    let mut ring: Vec<[f64; 2]> = Vec::new();
+    for (i, (point, bulge)) in spans.iter().enumerate() {
+        let next = spans[(i + 1) % spans.len()].0;
+        for p in libgm_discretise::span_polyline_by_tol(*point, next, *bulge, tol) {
+            if ring
+                .last()
+                .is_some_and(|last: &[f64; 2]| (last[0] - p[0]).hypot(last[1] - p[1]) < POS_EPS)
+            {
+                continue;
+            }
+            ring.push(p);
+        }
+    }
+    while ring.len() >= 2 {
+        let (first, last) = (ring[0], ring[ring.len() - 1]);
+        if (first[0] - last[0]).hypot(first[1] - last[1]) < POS_EPS {
+            ring.pop();
+        } else {
+            break;
+        }
+    }
+    if ring.len() < 3 {
+        anyhow::bail!("arc-wall ring collapsed to {} points", ring.len());
+    }
+    extrude_flat_polygons(vec![ring], height, "arc-wall")
 }
 
 /// 单条轮廓环：倒角 z → 圆弧 → 逐 span 走 libgm 的角度格子，去掉重复点与收尾闭合点。
@@ -125,6 +265,39 @@ fn flatten_profile_loop(
     loop_pts: &Vec<glam::Vec3>,
     chord_tol: f64,
 ) -> anyhow::Result<Vec<[f64; 2]>> {
+    let (spans, tol) = profile_spans_of(loop_pts, chord_tol)?;
+    let steps = libgm_discretise::profile_steps_extruded(&spans, tol);
+    assemble_ring(&spans, &steps)
+}
+
+/// 回转 / collar 口径的同一件事：`GM_Profile::polygonForFacet` → `setNSteps`
+/// （3.1 libgm `0x1008ED80` / `0x1008F2E0`，见 `libgm_discretise` §7.9.2）。
+///
+/// 与上面那支**只差喂给 `getApproxPolyLineInSteps` 的 `n`**：这里的段数按
+/// 「自身半径与配对 span 半径取大」算，整条轮廓的实际点数超过 1000 时放大容差重算。
+///
+/// 两支不得合并（ADR-044 决策 3）。合并就等于在 REVO / NREV 上继续用挤出的段数，
+/// 而 PANE 的负实体大量是 NREV——段数与 E3D 差一段，`cancelFacets` 的共面抵消
+/// 整个放弃（§6.11），布尔结果里留一层内壁。
+///
+/// 一处已知窄于 libgm 的地方：配对只在**本环内**找。libgm 的 `GM_Profile` 一个对象装
+/// 整条轮廓（含孔环），`pairedSpan` 扫的是全部 span，所以孔环与外环恰好共用同两点、
+/// 方向相反时那边会配上、我们不会。要发生得让孔精确贴到外边界上，活库里没见过；
+/// 真遇上时症状是那一对边段数不一致，不是静默变形。
+fn flatten_profile_loop_revolved(
+    loop_pts: &Vec<glam::Vec3>,
+    chord_tol: f64,
+) -> anyhow::Result<Vec<[f64; 2]>> {
+    let (spans, tol) = profile_spans_of(loop_pts, chord_tol)?;
+    let steps = libgm_discretise::profile_steps(&spans, tol);
+    assemble_ring(&spans, &steps)
+}
+
+/// 顶点环 → 带 bulge 的 span 环，外加容差兜底。两条口径共用的前半段。
+fn profile_spans_of(
+    loop_pts: &Vec<glam::Vec3>,
+    chord_tol: f64,
+) -> anyhow::Result<(Vec<libgm_discretise::ProfileSpan>, f64)> {
     let raw: Vec<[f64; 3]> = loop_pts
         .iter()
         .map(|v| [v.x as f64, v.y as f64, v.z as f64])
@@ -133,11 +306,24 @@ fn flatten_profile_loop(
     if spans.len() < 3 {
         anyhow::bail!("轮廓展开倒角后只剩 {} 段", spans.len());
     }
-    let tol = if chord_tol > 0.0 { chord_tol } else { 1.0 };
+    if !libgm_discretise::chord_tol_is_usable(chord_tol) {
+        anyhow::bail!("轮廓拿到的弦高容差 {chord_tol} 不可用");
+    }
+    Ok((spans, chord_tol))
+}
+
+/// 逐 span 走 `getApproxPolyLineInSteps(n)` 铺点、去重、掐掉收尾重复点。
+///
+/// 两条口径共用的后半段——**格子函数是同一个**，不同的只有传进来的 `steps`。
+fn assemble_ring(
+    spans: &[libgm_discretise::ProfileSpan],
+    steps: &[i32],
+) -> anyhow::Result<Vec<[f64; 2]>> {
     let mut pts: Vec<[f64; 2]> = Vec::with_capacity(spans.len());
     for (i, span) in spans.iter().enumerate() {
         let next = spans[(i + 1) % spans.len()];
-        let seg = libgm_discretise::span_polyline_by_tol(span.point, next.point, span.bulge, tol);
+        let seg =
+            libgm_discretise::span_polyline_in_steps(span.point, next.point, span.bulge, steps[i]);
         for p in seg {
             if pts
                 .last()
@@ -329,14 +515,18 @@ fn signed_area(ring: &[[f64; 2]]) -> f64 {
 /// `gm_CreateRevolution(profile, axis, angle)`：`verts` 与挤出同一约定（xy 为坐标，
 /// z 是 FRADIUS 倒角半径），绕 `rot_pt` / `rot_dir` 定义的轴回转 `angle` 度。
 ///
-/// 语义对齐 OCC 权威实现 `Revolution::gen_occ_shape`：轮廓离散复用
-/// `flatten_profile_loop`（同一份 `profile_spans` 倒角展开），角度按
-/// 「≈360 / >360 / ==0 一律当整圈」归一。
+/// 语义对齐 OCC 权威实现 `Revolution::gen_occ_shape`：轮廓离散走
+/// `flatten_profile_loop_revolved`——与挤出共用 `profile_spans` 的倒角展开，但
+/// **段数是另一套**（`GM_Profile::setNSteps`，见 `libgm_discretise` §7.9.2）。
+/// 角度按「≈360 / >360 / ==0 一律当整圈」归一。
 ///
 /// manifold 的 `revolve` 只认一种摆放：截面在 XY、绕自身 Y 轴转、结果的轴落在 Z。
 /// 所以先把轮廓换算进「(半径, 轴向)」二维系，转完再用一个**纯旋转**把 Z 摆回
-/// `rot_dir`。轴必须落在轮廓平面内——PDMS 的 REVO / NREV 都是这样；带出平面分量
-/// 的轴回 `None` 交给 OCC，不在这里硬凑一个不对的形状出来。
+/// `rot_dir`。轴必须落在轮廓平面内——这不是本实现的局限，是 libgm 的输入契约：
+/// `GM_Revolution` 构造（libgm 3.1 `0x10033830`）的轴参数是 `D2_Point` + 平面内
+/// 角度，出平面轴在 E3D 的 API 层就表达不出（ADR-030 修订二）。本仓 `Revolution`
+/// 的唯一构造点也走 `Default`（`rot_dir` 恒为 `Vec3::X`）。带出平面分量的轴因此
+/// 是坏数据，硬失败带出实际取值，不再有「回退 OCC」语义（WP-F T033）。
 pub fn tessellate_revolution(rev: &Revolution) -> anyhow::Result<Option<PlantMesh>> {
     if rev.verts.is_empty() || rev.verts[0].len() < 3 {
         anyhow::bail!(
@@ -350,7 +540,13 @@ pub fn tessellate_revolution(rev: &Revolution) -> anyhow::Result<Option<PlantMes
         anyhow::bail!("revolution axis is zero-length");
     }
     if (rev.rot_dir.z / axis_len).abs() > AXIS_IN_PLANE_EPS || rev.rot_pt.z.abs() > POS_EPS as f32 {
-        return Ok(None);
+        anyhow::bail!(
+            "revolution axis leaves the profile plane (rot_dir={:?}, rot_pt={:?}); \
+             libgm 的回转轴是轮廓平面内的 D2 轴（GM_Revolution 0x10033830），\
+             出平面轴不是可表达的输入",
+            rev.rot_dir,
+            rev.rot_pt
+        );
     }
 
     let axis = glam::DVec2::new(rev.rot_dir.x as f64, rev.rot_dir.y as f64).normalize();
@@ -378,7 +574,7 @@ pub fn tessellate_revolution(rev: &Revolution) -> anyhow::Result<Option<PlantMes
     for (i, ring) in rev.verts.iter().enumerate() {
         // 首环是外轮廓，建不出即失败；后续环是孔，建不出的跳过（与 `gen_occ_wires`
         // 同一容错口径）。
-        let flat = match flatten_profile_loop(ring, chord_tol) {
+        let flat = match flatten_profile_loop_revolved(ring, chord_tol) {
             Ok(flat) => flat,
             Err(err) if i == 0 => return Err(err),
             Err(_) => continue,
@@ -386,7 +582,12 @@ pub fn tessellate_revolution(rev: &Revolution) -> anyhow::Result<Option<PlantMes
         let mut section = Vec::with_capacity(flat.len());
         for p in flat {
             let d = glam::DVec2::new(p[0], p[1]) - origin;
-            let radius = d.dot(radial);
+            let mut radius = d.dot(radial);
+            // `movePointsOntoYAxis`（libgm 3.1 `0x100978A0`）：贴轴顶点的半径
+            // 精确置 0，否则回转后轴心留一圈纳米级针状面（WP-F T035）。
+            if radius.abs() < libgm_discretise::NORM_TOL {
+                radius = 0.0;
+            }
             max_radius = max_radius.max(radius);
             section.push([radius, d.dot(axis)]);
         }
@@ -458,7 +659,17 @@ fn covered(mesh: PlantMesh, what: &str) -> anyhow::Result<Option<PlantMesh>> {
     Ok(Some(mesh))
 }
 
-/// 已实现的 libgm 原语返回 `Some`；其余返回 `None`（调用方回退 OCC）。
+/// `libgm_discretise` 的段数（libgm 的 `int`）交给 `mesh_primitives` 的 `u32`。
+///
+/// 权威规则那边已经保证结果落在 `[1, MAX_SEGMENTS]`，这里只做类型转换；
+/// 各生成器自己还有 `max(3)` 一类的下限兜底，不在这里补第二道。
+fn segs(n: i32) -> u32 {
+    n.max(1) as u32
+}
+
+/// 16 个 `PdmsGeoParam` 变体全部在此裁决：14 个形状变体建出网格或 `bail!`；
+/// `None` 只剩一个含义——`Unknown` / `CompoundShape` 这样的**非形状**，调用方
+/// 直接标 `bad`。「回退 OCC」语义已随 WP-F 收口（ADR-030 修订二）。
 pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<PlantMesh>> {
     match param {
         PdmsGeoParam::PrimBox(b) => {
@@ -471,7 +682,10 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             if !c.check_valid() {
                 return Err(anyhow!("PrimLCylinder is degenerate"));
             }
-            covered(tessellate_unit_cylinder(32), "PrimLCylinder")
+            covered(
+                tessellate_unit_cylinder(unit_mesh_identity::CYLINDER_SEGMENTS),
+                "PrimLCylinder",
+            )
         }
         PdmsGeoParam::PrimSCylinder(c) => {
             if !c.check_valid() {
@@ -489,17 +703,29 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
                     c.top_shear_angles[1].to_radians(),
                 ];
                 return covered(
-                    mesh_primitives::gen_slope_ended_cylinder(r, h, btm, top, 32),
+                    mesh_primitives::gen_slope_ended_cylinder(
+                        r,
+                        h,
+                        btm,
+                        top,
+                        segs(libgm_discretise::cylinder_segments(r as f64, FACET_TOL_MM)),
+                    ),
                     "PrimSCylinder(SSCL)",
                 );
             }
-            covered(tessellate_unit_cylinder(32), "PrimSCylinder")
+            covered(
+                tessellate_unit_cylinder(unit_mesh_identity::CYLINDER_SEGMENTS),
+                "PrimSCylinder",
+            )
         }
         PdmsGeoParam::PrimExtrusion(e) => {
-            if matches!(e.cur_type, CurveType::Spline(_)) {
-                // 样条轮廓的权威解释在 OCC 的 `gen_occ_spline_wire`；把控制点当
-                // 折线角点是另一个形状，宁可回退也不静默变形。
-                return Ok(None);
+            if let CurveType::Spline(thick) = e.cur_type {
+                return Ok(Some(tessellate_arc_wall(
+                    &e.verts,
+                    thick,
+                    e.height,
+                    FACET_TOL_MM,
+                )?));
             }
             Ok(Some(tessellate_extrusion(
                 &e.verts,
@@ -518,7 +744,13 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             if !s.check_valid() {
                 return Err(anyhow!("PrimSphere is degenerate"));
             }
-            covered(mesh_primitives::unit_sphere(), "PrimSphere")
+            covered(
+                mesh_primitives::unit_sphere(
+                    unit_mesh_identity::SPHERE_STACKS,
+                    unit_mesh_identity::SPHERE_SLICES,
+                ),
+                "PrimSphere",
+            )
         }
         PdmsGeoParam::PrimLSnout(s) => {
             if !s.check_valid() {
@@ -528,7 +760,18 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             let r_top = s.ptdm / 2.0;
             let r_bottom = s.pbdm / 2.0;
             covered(
-                mesh_primitives::gen_snout(r_bottom, r_top, height, s.poff, 0.0, 32),
+                mesh_primitives::gen_snout(
+                    r_bottom,
+                    r_top,
+                    height,
+                    s.poff,
+                    0.0,
+                    segs(libgm_discretise::snout_segments(
+                        r_bottom as f64,
+                        r_top as f64,
+                        FACET_TOL_MM,
+                    )),
+                ),
                 "PrimLSnout",
             )
         }
@@ -537,13 +780,45 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
                 return Err(anyhow!("PrimDish is degenerate"));
             }
             if d.prad > 0.0 {
+                // 「椭圆碟」是托里球形封头（球冠 + 相切的环面拐角），形状与两段的
+                // 经向段数一起由权威规则给；`prad` 只是「椭圆还是球」的开关，
+                // 它的数值 Core3D 自己也丢掉（`CSG_BasicDIS` `0x10726D10`）。
+                let facets = libgm_discretise::elliptical_dish_facets(
+                    (d.pdia / 2.0) as f64,
+                    d.pheig as f64,
+                    FACET_TOL_MM,
+                )
+                .ok_or_else(|| anyhow!("PrimDish(elliptical) 尺寸退化，算不出母线与离散参数"))?;
+                let arc = mesh_primitives::TorisphericalArc {
+                    base_radius: d.pdia / 2.0,
+                    height: d.pheig,
+                    hub_radius: facets.hub_radius as f32,
+                    knuckle_radius: facets.knuckle_radius as f32,
+                    transition_angle: facets.transition_angle as f32,
+                };
                 covered(
-                    mesh_primitives::gen_elliptical_dish(d.pdia, d.pheig, 32),
+                    mesh_primitives::gen_elliptical_dish(
+                        arc,
+                        segs(facets.around),
+                        segs(facets.hub),
+                        segs(facets.knuckle),
+                    ),
                     "PrimDish(elliptical)",
                 )
             } else {
+                let facets = libgm_discretise::spherical_dish_facets(
+                    (d.pdia / 2.0) as f64,
+                    d.pheig as f64,
+                    FACET_TOL_MM,
+                )
+                .ok_or_else(|| anyhow!("PrimDish(spherical) 尺寸退化，算不出离散参数"))?;
                 covered(
-                    mesh_primitives::gen_spherical_dish(d.pdia, d.pheig, 32),
+                    mesh_primitives::gen_spherical_dish(
+                        d.pdia,
+                        d.pheig,
+                        segs(facets.around),
+                        segs(facets.meridional),
+                    ),
                     "PrimDish(spherical)",
                 )
             }
@@ -553,7 +828,21 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
                 return Err(anyhow!("PrimCTorus is degenerate"));
             }
             covered(
-                mesh_primitives::gen_circular_torus(t.rins, t.rout, t.angle, 32, 16),
+                mesh_primitives::gen_circular_torus(
+                    t.rins,
+                    t.rout,
+                    t.angle,
+                    segs(libgm_discretise::torus_ring_segments(
+                        t.rout as f64,
+                        FACET_TOL_MM,
+                        t.angle as f64,
+                    )),
+                    segs(libgm_discretise::circular_torus_tube_segments(
+                        t.rins as f64,
+                        t.rout as f64,
+                        FACET_TOL_MM,
+                    )),
+                ),
                 "PrimCTorus",
             )
         }
@@ -562,7 +851,17 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
                 return Err(anyhow!("PrimRTorus is degenerate"));
             }
             covered(
-                mesh_primitives::gen_rectangular_torus(t.rins, t.rout, t.height, t.angle, 32),
+                mesh_primitives::gen_rectangular_torus(
+                    t.rins,
+                    t.rout,
+                    t.height,
+                    t.angle,
+                    segs(libgm_discretise::torus_ring_segments(
+                        t.rout as f64,
+                        FACET_TOL_MM,
+                        t.angle as f64,
+                    )),
+                ),
                 "PrimRTorus",
             )
         }
@@ -605,6 +904,9 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
         // `CompoundShape` 是组合体的占位（`check_valid()` 本来就返回 false）。
         // 写成穷举而不是 `_`：往 `PdmsGeoParam` 加变体时要的是一条编译错误，
         // 不是又一个悄悄回退 OCC 的洞。
+        //
+        // 这是全文件唯一一处 `None`，语义是「非形状」——调用方直接标 `bad`，
+        // 不经任何第二台引擎（WP-F T037）。回转与弧形墙的失败一律走 `bail!`。
         PdmsGeoParam::Unknown | PdmsGeoParam::CompoundShape => Ok(None),
     }
 }
@@ -858,9 +1160,10 @@ mod tests {
         crate::fast_model::mesh_assert::assert_volume(&mesh, exact, 0.02, "mirrored revolution");
     }
 
-    /// 轴带出平面分量时二维分解不成立，必须回 `None` 让调用方走 OCC。
+    /// 出平面回转轴是坏数据不是回退理由：libgm 的轴参数是 `D2_Point`（GM_Revolution
+    /// `0x10033830`），E3D 在 API 层就表达不出出平面轴。把这里改回 `Ok(None)` 本测试红。
     #[test]
-    fn out_of_plane_revolution_axis_falls_back_to_occ() {
+    fn an_out_of_plane_revolution_axis_is_a_hard_error() {
         let param = PdmsGeoParam::PrimRevolution(aios_core::prim_geo::Revolution {
             verts: vec![vec![
                 Vec3::new(10.0, 10.0, 0.0),
@@ -871,24 +1174,406 @@ mod tests {
             rot_dir: Vec3::new(0.0, 0.0, 1.0),
             rot_pt: Vec3::ZERO,
         });
-        let result = tessellate_libgm_param(&param).expect("出平面轴不算错误");
-        assert!(result.is_none(), "出平面回转轴必须回退 OCC，不得硬凑");
+        let err = tessellate_libgm_param(&param).expect_err("出平面回转轴必须硬失败");
+        let message = err.to_string();
+        assert!(
+            message.contains("rot_dir") && message.contains("profile plane"),
+            "错误必须带出实际轴向，供现场定位坏数据: {message}"
+        );
     }
 
-    /// 样条轮廓（`CurveType::Spline`）没有 libgm 等价实现，必须回 `None` 走 OCC。
+    /// WP-F 收口后 `None` 只剩「非形状」一个含义：全文件的生产半区恰好一处
+    /// `Ok(None)`，且落在 `Unknown` / `CompoundShape` 那一臂。回转或弧形墙
+    /// 任何一支重新长出回退语义，这里先红。
     #[test]
-    fn spline_extrusion_falls_back_to_occ() {
+    fn none_is_only_the_not_a_shape_verdict() {
+        let source = include_str!("manifold_tessellate.rs");
+        let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
+        let occurrences = production.matches(concat!("Ok(", "None)")).count();
+        assert_eq!(
+            occurrences, 1,
+            "生产半区只允许 Unknown/CompoundShape 一处非形状判定"
+        );
+        let unknown_arm = production
+            .split_once("PdmsGeoParam::Unknown | PdmsGeoParam::CompoundShape =>")
+            .expect("非形状臂必须存在")
+            .1;
+        assert!(
+            unknown_arm
+                .trim_start()
+                .starts_with(concat!("Ok(", "None)")),
+            "唯一的一处必须就是非形状臂"
+        );
+    }
+
+    /// libgm 的曲线/标记图元不产实体（T017）：`gm_CreateNull` / `gm_CreateMark` /
+    /// `gm_CreateStraight` / `gm_CreateArc` / `gm_CreateBezier` 走
+    /// `calcFacetsWithoutSurfaces` 出折线、靠 `gm_AddCurve` 挂树（ADR-030 IDA
+    /// 修订二），它们不得成为 `tessellate_libgm_param` 的成功分支。
+    ///
+    /// 两道闸：这五个名字不许出现在生产半区（名字一旦落进来，下一步就是有人
+    /// 「顺手」把它接成分支）；分发臂集合钉死为 14 个形状变体 + 两个非形状变体，
+    /// `PdmsGeoParam` 新变体想进 match 必须先过这份清单——届时「它是实体还是
+    /// 曲线」就得当面回答，而不是默认长成一个出网格的臂。
+    #[test]
+    fn the_curve_primitives_are_not_shape_arms() {
+        let source = include_str!("manifold_tessellate.rs");
+        let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
+        for curve_entry in [
+            "gm_CreateNull",
+            "gm_CreateMark",
+            "gm_CreateStraight",
+            "gm_CreateArc",
+            "gm_CreateBezier",
+        ] {
+            assert!(
+                !production.contains(curve_entry),
+                "曲线图元 {curve_entry} 不得出现在生产半区"
+            );
+        }
+        let dispatch = production
+            .split_once("pub fn tessellate_libgm_param(")
+            .expect("dispatch exists")
+            .1;
+        let mut arms: Vec<&str> = dispatch
+            .split("PdmsGeoParam::")
+            .skip(1)
+            .map(|arm| {
+                arm.split(|c: char| !c.is_alphanumeric())
+                    .next()
+                    .expect("variant name")
+            })
+            .collect();
+        arms.sort_unstable();
+        arms.dedup();
+        assert_eq!(
+            arms,
+            [
+                "CompoundShape",
+                "PrimBox",
+                "PrimCTorus",
+                "PrimDish",
+                "PrimExtrusion",
+                "PrimLCylinder",
+                "PrimLPyramid",
+                "PrimLSnout",
+                "PrimLoft",
+                "PrimPolyhedron",
+                "PrimPyramid",
+                "PrimRTorus",
+                "PrimRevolution",
+                "PrimSCylinder",
+                "PrimSphere",
+                "Unknown",
+            ],
+            "分发臂集合变了：新变体先在这里报到，说清它是实体还是曲线"
+        );
+    }
+
+    /// `CurveType::Spline` 实为弧形墙截面（三点圆 + thick 内外偏移的环形扇区）。
+    /// 帕普斯：半圆环 R=100、厚 20、高 10 → 体积 = π·R·厚·高。
+    #[test]
+    fn arc_wall_spline_extrusion_matches_pappus_volume() {
+        let (r, thick, height) = (100.0f32, 20.0f32, 10.0f32);
+        let param = PdmsGeoParam::PrimExtrusion(aios_core::prim_geo::extrusion::Extrusion {
+            verts: vec![vec![
+                Vec3::new(r, 0.0, 0.0),
+                Vec3::new(0.0, r, 0.0),
+                Vec3::new(-r, 0.0, 0.0),
+            ]],
+            height,
+            cur_type: CurveType::Spline(thick),
+        });
+        let mesh = tessellate_libgm_param(&param)
+            .expect("弧形墙截面必须能生成")
+            .expect("弧形墙是形状，不是非形状判定");
+        assert_solid_mesh(&mesh);
+        let exact = std::f32::consts::PI * r * thick * height;
+        crate::fast_model::mesh_assert::assert_volume(&mesh, exact, 0.01, "arc wall");
+        // 上半圆环：两端直段压在 y=0 上，外弧顶点 90° 恰落在角度格子上。
+        let outer = r + thick / 2.0;
+        crate::fast_model::mesh_assert::assert_bounds_tol(
+            &mesh,
+            Vec3::new(-outer, 0.0, 0.0),
+            Vec3::new(outer, outer, height),
+            1.0,
+            "arc wall",
+        );
+    }
+
+    /// OCC 权威实现只认恰好 3 个 SPINE 点；多一个少一个都是坏数据，必须响亮失败。
+    #[test]
+    fn arc_wall_needs_exactly_three_spine_points() {
         let param = PdmsGeoParam::PrimExtrusion(aios_core::prim_geo::extrusion::Extrusion {
             verts: vec![vec![
                 Vec3::new(0.0, 0.0, 0.0),
                 Vec3::new(10.0, 0.0, 0.0),
                 Vec3::new(10.0, 10.0, 0.0),
+                Vec3::new(0.0, 10.0, 0.0),
             ]],
             height: 5.0,
             cur_type: CurveType::Spline(1.0),
         });
-        let result = tessellate_libgm_param(&param).expect("spline extrusion is not an error");
-        assert!(result.is_none(), "样条轮廓必须回退 OCC，不得折线近似");
+        let err = tessellate_libgm_param(&param).expect_err("四个点解不出三点圆");
+        assert!(err.to_string().contains("exactly 3"), "{err}");
+    }
+
+    /// `movePointsOntoYAxis`（T035）：半径坐标在 `normtol_ = 1e-6` 内的顶点精确
+    /// 吸附到轴上。不吸附的话，5e-7 的浮点噪声会在轴心留一圈半径纳米级的针状面
+    /// ——顶点半径落在 (0, 1e-4) 开区间里，这条测试就红。
+    #[test]
+    fn a_profile_hugging_the_axis_is_snapped_onto_it() {
+        let eps = 5e-7f32; // 低于 normtol_，是噪声不是特征
+        let (r, len) = (100.0f32, 50.0f32);
+        let param = PdmsGeoParam::PrimRevolution(aios_core::prim_geo::Revolution {
+            verts: vec![vec![
+                Vec3::new(0.0, eps, 0.0),
+                Vec3::new(len, eps, 0.0),
+                Vec3::new(len, r, 0.0),
+                Vec3::new(0.0, r, 0.0),
+            ]],
+            angle: 360.0,
+            rot_dir: Vec3::X,
+            rot_pt: Vec3::ZERO,
+        });
+        let mesh = tessellate_libgm_param(&param)
+            .expect("贴轴轮廓必须能回转")
+            .expect("PrimRevolution 是形状");
+        assert_solid_mesh(&mesh);
+
+        // 实心圆柱而不是内径 5e-7 的管：体积对解析值。
+        let exact = std::f32::consts::PI * r * r * len;
+        crate::fast_model::mesh_assert::assert_volume(&mesh, exact, 0.02, "snapped cylinder");
+
+        let mut on_axis = 0usize;
+        for v in &mesh.vertices {
+            let radial = (v.y * v.y + v.z * v.z).sqrt();
+            assert!(
+                radial == 0.0 || radial > 1e-4,
+                "轴心残留针状面顶点：radial={radial:e} at {v:?}"
+            );
+            on_axis += usize::from(radial == 0.0);
+        }
+        assert!(on_axis > 0, "吸附后轴上必须真的有顶点（端盖中心/接缝）");
+    }
+
+    /// 三点共线没有圆，退化成直线的「弧」必须硬失败而不是给一个空环。
+    #[test]
+    fn arc_wall_with_collinear_spine_points_is_a_hard_error() {
+        let param = PdmsGeoParam::PrimExtrusion(aios_core::prim_geo::extrusion::Extrusion {
+            verts: vec![vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(50.0, 0.0, 0.0),
+                Vec3::new(100.0, 0.0, 0.0),
+            ]],
+            height: 5.0,
+            cur_type: CurveType::Spline(2.0),
+        });
+        let err = tessellate_libgm_param(&param).expect_err("共线三点必须硬失败");
+        assert!(err.to_string().contains("collinear"), "{err}");
+    }
+
+    /// 回转必须走 `setNSteps` 那套段数，挤出走每 span 自算的那套。
+    ///
+    /// libgm 里这是两条真实存在的不同规则（`GM_Profile::polygonForFacet`
+    /// `0x1008ED80` 只被 `GM_Revolution` / `GM_Collar` 调用，`GM_Extrusion::calcFacets`
+    /// `0x10056F10` 不在其中）。把回转退回挤出那支、或把两支合并成一个「通用轮廓
+    /// 离散」，本测试必红——而线上症状会是布尔后多留一层内壁，比这难查得多。
+    #[test]
+    fn the_revolution_path_uses_the_paired_caliber() {
+        let source = include_str!("manifold_tessellate.rs");
+        let body = source
+            .split_once("fn tessellate_revolution(")
+            .expect("tessellate_revolution exists")
+            .1
+            .split_once("\nfn covered(")
+            .expect("revolution boundary")
+            .0;
+        assert!(
+            body.contains("flatten_profile_loop_revolved("),
+            "回转必须用 setNSteps 口径：{body}"
+        );
+        assert!(
+            !body.contains("flatten_profile_loop("),
+            "回转不得退回挤出口径：{body}"
+        );
+    }
+
+    /// 段数只许有两个出处：`libgm_discretise` 的权威规则，或那一处点了名的
+    /// [`unit_mesh_identity`] 欠账。裸字面量一个都不许有（T039）。
+    ///
+    /// 这条防的是回流。三个 `32` / `16` / `36` 散在 match 臂里的时候，它们跟旁边那些
+    /// 真算出来的段数长得一模一样，没有任何东西说明其中三处是错的——而它们错得很
+    /// 具体：写死 32 段只有 2.0% 的圆柱实例对得上。
+    #[test]
+    fn every_segment_count_is_named_or_computed() {
+        let source = include_str!("manifold_tessellate.rs");
+        let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
+        let dispatch = production
+            .split_once("pub fn tessellate_libgm_param(")
+            .expect("dispatch exists")
+            .1;
+
+        let mut checked = 0;
+        for call in ["tessellate_unit_cylinder(", "unit_sphere("] {
+            for (at, _) in dispatch.match_indices(call) {
+                let tail = &dispatch[at + call.len()..];
+                let args = tail.split_once(')').map(|(head, _)| head).unwrap_or(tail);
+                assert!(
+                    args.contains("unit_mesh_identity::"),
+                    "{call} 的段数必须点名到欠账常量，不许退回裸数字: {args}"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 3, "两处单位柱加一处单位球，少一处说明有人绕开了");
+
+        // 其余曲面原语的段数一律现算：`segs(...)` 是它们唯一的入口，实参不许是常数，
+        // 且用到它的那一臂必须自己从 `libgm_discretise` 取规则（碟那两臂先把规则算进
+        // 局部变量再喂，所以按臂看而不是按实参看）。
+        for (at, _) in dispatch.match_indices("segs(") {
+            let tail = &dispatch[at + "segs(".len()..];
+            let args = tail.split_once(')').map(|(head, _)| head).unwrap_or(tail);
+            assert!(
+                args.trim().parse::<i64>().is_err(),
+                "段数不许写成常数: segs({args})"
+            );
+        }
+        for arm in dispatch.split("PdmsGeoParam::").skip(1) {
+            if !arm.contains("segs(") {
+                continue;
+            }
+            assert!(
+                arm.contains("libgm_discretise::"),
+                "用了 segs() 的臂必须自己从 libgm_discretise 取规则: {arm}"
+            );
+        }
+
+        // 上面按 `segs(` 反查，只看得见已经走了规则的那些。这一段反过来按**生成器**
+        // 正查：每个吃段数的生成器，它那几个段数实参逐个看。漏掉的那种长这样——
+        // `(around / 2).max(4)` 混在 `d.pdia, d.pheig` 中间，既没进 `segs(`，也没有
+        // 任何东西说明它是欠账（T038a），改动它一位不会有测试变红。
+        //
+        // 判据是「实参里不许出现裸数字」：`as i32` / `f64` 这类类型名里的数字不算，
+        // 它们前面挨着字母。段数要么是 `segs(规则)`、要么点名到 `unit_mesh_identity`、
+        // 要么是本臂里绑的局部名，而局部名自己也过同一条判据。
+        fn split_args(after_open_paren: &str) -> Vec<&str> {
+            let (mut depth, mut start, mut out) = (0i32, 0usize, Vec::new());
+            for (i, ch) in after_open_paren.char_indices() {
+                match ch {
+                    '(' | '[' => depth += 1,
+                    ')' | ']' if depth == 0 => {
+                        out.push(&after_open_paren[start..i]);
+                        return out;
+                    }
+                    ')' | ']' => depth -= 1,
+                    ',' if depth == 0 => {
+                        out.push(&after_open_paren[start..i]);
+                        start = i + 1;
+                    }
+                    _ => {}
+                }
+            }
+            out
+        }
+        fn has_bare_number(expr: &str) -> bool {
+            let b = expr.as_bytes();
+            (0..b.len()).any(|i| {
+                b[i].is_ascii_digit()
+                    && (i == 0 || !(b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_'))
+            })
+        }
+
+        let mut generators_seen = 0;
+        for (call, positions) in [
+            ("tessellate_unit_cylinder(", &[0usize] as &[usize]),
+            ("unit_sphere(", &[0, 1]),
+            ("gen_slope_ended_cylinder(", &[4]),
+            ("gen_snout(", &[5]),
+            ("gen_spherical_dish(", &[2, 3]),
+            ("gen_elliptical_dish(", &[1, 2, 3]),
+            ("gen_circular_torus(", &[3, 4]),
+            ("gen_rectangular_torus(", &[4]),
+        ] {
+            for (at, _) in dispatch.match_indices(call) {
+                let args = split_args(&dispatch[at + call.len()..]);
+                generators_seen += 1;
+                for &pos in positions {
+                    let arg = args
+                        .get(pos)
+                        .unwrap_or_else(|| panic!("{call} 的第 {pos} 个实参没解析出来: {args:?}"))
+                        .trim();
+                    assert!(
+                        !has_bare_number(arg),
+                        "{call} 的段数实参写了裸数字，段数只许来自规则或点名的欠账: {arg}"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            generators_seen, 9,
+            "吃段数的生成器调用点数变了；新增一个就把它连同段数实参下标加进表里"
+        );
+
+        // 局部名走同一条判据，否则 `let meridional = 12;` 能绕过上面那一段。
+        for line in dispatch.lines() {
+            let code = line.split("//").next().unwrap_or("").trim();
+            let Some(rest) = code.strip_prefix("let ") else {
+                continue;
+            };
+            let Some((name, value)) = rest.split_once('=') else {
+                continue;
+            };
+            let name = name.trim();
+            if !["around", "meridional", "slices", "stacks"]
+                .iter()
+                .any(|n| name == *n || name.ends_with("_segments"))
+            {
+                continue;
+            }
+            assert!(
+                !has_bare_number(value),
+                "段数局部名 `{name}` 不许绑成裸数字: {code}"
+            );
+        }
+    }
+
+    /// 不可用的容差必须报错，不许兜成 1.0mm（T042 收口）。
+    ///
+    /// 挤出口径、回转口径、弧墙三条路原先各写着
+    /// `if chord_tol > 0.0 { chord_tol } else { 1.0 }`。源码扫只能拦住写法回流，
+    /// 这一条拦的是行为：非正、非有限一律 `Err`。
+    #[test]
+    fn a_non_usable_chord_tolerance_is_rejected_not_defaulted() {
+        let ring = vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(100.0, 0.0, 0.0),
+            Vec3::new(100.0, 60.0, 0.0),
+            Vec3::new(0.0, 60.0, 0.0),
+        ];
+        let spine = vec![vec![
+            Vec3::new(-100.0, 0.0, 0.0),
+            Vec3::new(0.0, 100.0, 0.0),
+            Vec3::new(100.0, 0.0, 0.0),
+        ]];
+        for bad in [0.0, -0.5, f64::NAN] {
+            assert!(
+                flatten_profile_loop(&ring, bad).is_err(),
+                "挤出口径吃下了不可用容差 {bad}"
+            );
+            assert!(
+                flatten_profile_loop_revolved(&ring, bad).is_err(),
+                "回转口径吃下了不可用容差 {bad}"
+            );
+            assert!(
+                tessellate_arc_wall(&spine, 10.0, 50.0, bad).is_err(),
+                "弧墙吃下了不可用容差 {bad}"
+            );
+        }
+        // 同一批输入在正常容差下都是通的，否则上面那些 Err 说明不了问题。
+        assert!(flatten_profile_loop(&ring, FACET_TOL_MM).is_ok());
+        assert!(flatten_profile_loop_revolved(&ring, FACET_TOL_MM).is_ok());
+        assert!(tessellate_arc_wall(&spine, 10.0, 50.0, FACET_TOL_MM).is_ok());
     }
 
     #[test]

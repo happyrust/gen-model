@@ -11,8 +11,36 @@
 //!
 //! 容差从哪来：libgm 是一个全局 `GM_User::arctol_`（初值 0.1，`gm_SetDefaultFacetTolerance`
 //! 改；Core3D 主初始化那一处传 **0.5**，另有一条粗路径传 10.0），创建原语时读一次
-//! 烤进对象。我们这边目前仍是每个原语按自身尺度给 `tol()`，**口径尚未对齐**——
-//! 那是独立的一步，本模块只负责"给定半径与弦高容差，段数是多少"。
+//! 烤进对象。本仓对齐成 [`FACET_TOL_MM`]，也是全局一个绝对量（T042）。
+
+/// 曲面离散的弦高容差（mm），**绝对量，全库唯一一份**。
+///
+/// 对齐 libgm：`GM_User::arctol_` 是一个全局绝对量，Core3D 主初始化那一处传的就是
+/// 0.5（另有一条粗路径传 10.0；`arctol_` 自身初值是 0.1）。见
+/// `plant-4/libgm-boolean-algorithm.md` §7.9。
+///
+/// 为什么不能沿用 `BrepShapeTrait::tol()`：那些是**按自身尺度给的比例容差**
+/// （挤出/回转是千分之一截面半径，`SweepSolid` 是百分之一轮廓外接球半径），`tol/R`
+/// 于是恒定，段数与尺寸无关——同一个圆在挤出侧和回转侧只要包围盒不同就会分成不同
+/// 段数。`=24381/36945` 那颗穹顶正是这样：正体圆柱 60 段、负体圆柱 84 段，同一道墙
+/// 两个多边形，差集在赤道上留下一圈毫米级残料。改成绝对量之后两侧拿到同一个段数，
+/// 而 libgm「段数取到 4 的倍数」保证两者的顶点相位也一致（都落在 0/90/180/270 上），
+/// 残料才真正消失。
+///
+/// 目前是常量。要做成 `DbOption` 可配之前，别在别处再写第二个容差来源——
+/// `the_facet_tolerance_has_a_single_source` 钉住了这一条。
+pub const FACET_TOL_MM: f64 = 0.5;
+
+/// 收到的弦高容差能不能用。不能用的**必须报错**，不许兜一个默认值。
+///
+/// 折线化那几处原先写的是 `let tol = if chord_tol > 0.0 { chord_tol } else { 1.0 };`，
+/// 三份拷贝各带一个 1.0mm。它们今天不可达（生产路径喂的都是 [`FACET_TOL_MM`]），
+/// 可一旦有人把容差接成配置项或按构件算，非正值就会**静默**变成 1.0mm：段数比
+/// 0.5mm 少一半，而 `cancelFacets` 只消全等重叠——共面处留一层壁，现场只看得到
+/// 布尔结果里多一层内壁，没有任何一行日志指向容差。
+pub fn chord_tol_is_usable(chord_tol: f64) -> bool {
+    chord_tol.is_finite() && chord_tol > 0.0
+}
 
 /// 段数上限，对齐 libgm 的 1000（同文 §7.9.1）。
 ///
@@ -20,6 +48,11 @@
 /// `GM_*::calcFacets` 各自 `if (n > 1000) n = 1000`，同时打一条
 /// 「facet tolerance too small for radius, adjusted」。所以它跟段数规则一样是复刻项，
 /// 不是我们的画质旋钮——取别的数，撞顶的那些圆就跟 E3D 逐面对不上。
+///
+/// **只对曲面原语是这个形状。** 轮廓（`GM_Profile`）那条路上封顶也存在，但不是逐段
+/// 截断：`polygonForFacet` 先按整条轮廓求实际点数，超过 1000 就清空步数数组、把容差
+/// 放大 `((total − nSpans) / (1000 − nSpans))²` 再整条重算（同文 §7.9.2）。那一套本模块
+/// 尚未实现，见 `specs/009-retire-occ/` 的 T040。
 ///
 /// 按 `facet_tol = 0.5mm`，R=23400（RM13 穹顶）要 484 段，离顶还远；把容差调到 0.05
 /// 同一个圆是 1532 段，那才会撞顶。撞到说明容差给得过细，应当去调容差。
@@ -41,9 +74,15 @@ pub fn circle_segments(radius: f64, chord_tol: f64) -> i32 {
 
 /// `d2_numberOfSegmentsForCircle` 本身，不封顶。
 ///
-/// 封顶是各 `GM_*::calcFacets` 各封各的（§7.9.1），**截面那条路上没有**：
-/// `GM_Extrusion::calcFacets` 直接把 `arctol_` 交给 `D2_Span::getApproxPolyLine`，
-/// 中间不经过任何 `if (n > 1000)`。所以截面弧要用这一支，曲面原语用上面那支。
+/// 封顶是各 `GM_*::calcFacets` 各封各的（§7.9.1），**挤出截面那条路上没有**：
+/// `GM_Extrusion::calcFacets`（3.1 libgm `0x10056F10`）直接把 `arctol_` 交给
+/// `D2_Span::getApproxPolyLine`，中间不经过任何 `if (n > 1000)`。所以挤出截面弧要用
+/// 这一支，曲面原语用上面那支。
+///
+/// **回转 / collar 的截面是第三种，两支都不是。** `GM_Revolution` 与 `GM_Collar` 走
+/// `GM_Profile::polygonForFacet` → `setNSteps`（§7.9.2）：段数取「自身半径与配对 span
+/// 半径的大者」、与已存步数单调取大，整条轮廓的实际点数超过 1000 时放大容差重算。
+/// 本模块**还没有**那一支，`tessellate_revolution` 目前误用了挤出口径——见 T040。
 pub fn circle_segments_uncapped(radius: f64, chord_tol: f64) -> i32 {
     if !(radius > 0.0) {
         return 1;
@@ -114,6 +153,18 @@ pub fn sweep_segments_rad(radius: f64, chord_tol: f64, sweep_rad: f64) -> i32 {
 /// libgeom 判「这一段其实是直线」的 bulge 阈值。同一个字面量在
 /// `getApproxPolyLineInSteps` 里又当角度容差（弧度）用，两处共享一个常量。
 pub const SPAN_EPS: f64 = 0.0000306;
+
+/// `GM_User::normtol_` —— 回转轮廓的轴心吸附阈值（mm，绝对量）。
+///
+/// `GM_Revolution` 把轮廓摆进标准位后，`movePointsOntoYAxis`（libgm 3.1
+/// `0x100978A0`）把半径坐标绝对值小于 `normtol_` 的顶点**精确置 0**：贴轴的点
+/// 若带浮点噪声，回转后会在轴心留一圈半径纳米级的针状面，缝合不水密。
+///
+/// 取值实测（2026-08-23，`idalib-18608`）：静态量在 `0x10109020`，初值 **1e-6**，
+/// 与 `arctol_`（`0x10109028`，初值 0.1）同一处初始化。与 `arctol_` 不同的是
+/// **没有人改它**：`GM_User::normtol(double)` 写入器在 libgm 内零调用（只有导出表
+/// 引用），Core3D 连这个符号都没导入。所以运行期恒为初值。
+pub const NORM_TOL: f64 = 1e-6;
 
 /// 一段 bulge 弧解出来的圆：圆心、半径与两端方位角。
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -381,9 +432,433 @@ pub fn profile_spans(loop_pts: &[[f64; 3]]) -> Vec<ProfileSpan> {
     spans
 }
 
+// ─── §7.9.2 轮廓那条路：回转 / collar 的段数 ─────────────────────────────────
+//
+// 挤出逐 span 自算（`span_polyline_by_tol`），**回转与 collar 不是**：
+// `GM_Revolution::calcFacetsWithoutSurfaces`（3.1 libgm `0x10097920`）走
+// `GM_Profile::polygonForFacet`（`0x1008ED80`）→ `GM_Profile::setNSteps`（`0x1008F2E0`）。
+// 两条路最终都落到同一个 `getApproxPolyLineInSteps(n)`（本模块的
+// `span_polyline_in_steps`），差别**只在喂进去的 `n`**。
+//
+// 这两套口径不得合并成一个「通用轮廓离散」（ADR-044 决策 3）：合并就等于在 REVO/NREV
+// 上继续用挤出的段数，而那正是 2026-08-23 之前的缺陷。
+
+/// 整条轮廓的实际点数上限，对齐 libgm 的 1000（§7.9.2 第 3 条）。
+///
+/// 与 `MAX_SEGMENTS` 不是一回事：那个是**单个曲面原语**的逐段封顶，这个是**整条轮廓**
+/// 的总点数封顶，超了不截断而是放大容差整条重算。
+pub const PROFILE_FACET_CAP: i32 = 1000;
+
+/// 闭合轮廓上第 `i` 段的弧半径；直段为 0。
+fn span_radius(spans: &[ProfileSpan], i: usize) -> f64 {
+    let next = spans[(i + 1) % spans.len()];
+    span_arc(spans[i].point, next.point, spans[i].bulge).map_or(0.0, |arc| arc.radius)
+}
+
+/// `GM_Profile::pairedSpan(i)`（3.1 libgm `0x1008F7F0`）：与第 `i` 段**同两点、反方向**
+/// 的那一段。
+///
+/// 命中的是轮廓上原路折返的那对边——零厚度翅片、回转轮廓的接缝。比较是**精确浮点
+/// 相等，没有 epsilon**（与 §7.4 / §7.6 同一风格）；起点等于终点的退化段直接回 `None`
+/// （libgm 那边是 `-1`），找不到也回 `None`（libgm 是 `-2`）。
+pub fn paired_span(spans: &[ProfileSpan], i: usize) -> Option<usize> {
+    let n = spans.len();
+    if n == 0 || i >= n {
+        return None;
+    }
+    let start = spans[i].point;
+    let end = spans[(i + 1) % n].point;
+    if start == end {
+        return None;
+    }
+    // libgm 不跳过 `i` 自己——它只可能在 start == end 时自匹配，而那一支上面已经拦掉。
+    (0..n).find(|&j| spans[j].point == end && spans[(j + 1) % n].point == start)
+}
+
+/// `GM_Profile::getNFacetsRoundProfile`（3.1 libgm `0x1008ECB0`）：整条轮廓离散出来的
+/// 实际点数。弧段按落在自己扫角内的格点数计，直段计 1。
+fn facets_round_profile(spans: &[ProfileSpan], steps: &[i32]) -> i32 {
+    let n = spans.len();
+    (0..n)
+        .map(|i| {
+            let next = spans[(i + 1) % n];
+            match span_arc(spans[i].point, next.point, spans[i].bulge) {
+                Some(arc) => {
+                    let sweep = (arc.alpha1 - arc.alpha0).abs();
+                    (f64::from(steps[i]) * sweep / std::f64::consts::TAU).trunc() as i32
+                }
+                None => 1,
+            }
+        })
+        .sum()
+}
+
+/// `GM_Profile::setNSteps(tol)`（`0x1008F2E0`）+ `polygonForFacet` 的全局封顶
+/// （`0x1008ED80`）：回转 / collar 轮廓每一段分几步。
+///
+/// ```text
+/// n[i] = d2_numberOfSegmentsForCircle(fmax(自身半径, 配对 span 半径), tol)
+/// total = Σ (弧段 ? trunc(n[i]·扫角/2π) : 1)
+/// total > 1000 时：清空 n[]，tol' = tol · ((total − nSpans) / (1000 − nSpans))²，整条重算
+/// ```
+///
+/// 那个平方是有原理的：小容差下 `n ∝ 1/√tol`，`tol` 乘 `k²` 让 `n` 除以 `k`，
+/// 于是 `total` 落回 1000 附近。**这是全局重标定，会改变每一段的段数**——不是只削掉
+/// 超限的那几段（这一点与曲面原语的 `MAX_SEGMENTS` 逐段截断正相反）。
+///
+/// libgm 那边 `setNSteps` 写回时与已存步数取大（只增不减），因为 `GM_Profile` 对象
+/// 会被复用；本函数无状态、每次从零算起，那个 `max` 因此是恒等的——**不要**为了
+/// 「照抄」再加一次，第二遍前的清空才是它可观察的那一半，已经由重新计算体现。
+///
+/// `nSpans ≥ 1000` 时不重标定：libgm 那里 `1000 − nSpans` 走无符号回绕，会得到一个
+/// 近乎 0 的容差把段数炸上天。这种轮廓本身已经超限，重标定救不了，照原样返回。
+pub fn profile_steps(spans: &[ProfileSpan], chord_tol: f64) -> Vec<i32> {
+    let n_spans = spans.len();
+    if n_spans == 0 {
+        return Vec::new();
+    }
+    let radii: Vec<f64> = (0..n_spans).map(|i| span_radius(spans, i)).collect();
+    let pairs: Vec<Option<usize>> = (0..n_spans).map(|i| paired_span(spans, i)).collect();
+
+    let fill = |tol: f64| -> Vec<i32> {
+        (0..n_spans)
+            .map(|i| {
+                let paired = pairs[i].map_or(0.0, |j| radii[j]);
+                circle_segments_uncapped(radii[i].max(paired), tol)
+            })
+            .collect()
+    };
+
+    let steps = fill(chord_tol);
+    let total = facets_round_profile(spans, &steps);
+    let spans_i32 = n_spans as i32;
+    if total <= PROFILE_FACET_CAP || spans_i32 >= PROFILE_FACET_CAP {
+        return steps;
+    }
+    let ratio = f64::from(total - spans_i32) / f64::from(PROFILE_FACET_CAP - spans_i32);
+    fill(chord_tol * ratio * ratio)
+}
+
+/// 挤出口径的每段步数：逐 span 按**自身**半径算，不看配对、不做全局封顶。
+///
+/// 与 `profile_steps` 并列存在，是为了让「两套口径确实不同」可测；生产上挤出走
+/// `span_polyline_by_tol`，两者同值。
+pub fn profile_steps_extruded(spans: &[ProfileSpan], chord_tol: f64) -> Vec<i32> {
+    (0..spans.len())
+        .map(|i| circle_segments_uncapped(span_radius(spans, i), chord_tol))
+        .collect()
+}
+
+// ─── §7.9.1 调用点表：每个曲面原语把哪个半径喂进去 ──────────────────────────
+//
+// 公式只是一半，另一半在调用点上。同一个 `d2_numberOfSegmentsForCircle`，各原语喂的
+// 半径不是同一个量——喂错了段数就跟 E3D 对不上，`cancelFacets` 只消全等重叠（§6.11），
+// 共面抵消随之整个放弃。下面每个函数对应 3.1 libgm 里的一个 `calcFacets` 调用点，
+// 括号里是地址。**不要在别处再写第二份**，也不要拿其中一个顶替另一个。
+
+/// `GM_Cylinder::calcFacets`（`0x100532F0`）、`GM_SlopeEndCyl`（`0x1009DFC0`）、
+/// `GM_Sphere`（`0x100A20F0`）：直接喂自己的半径。
+pub fn cylinder_segments(radius: f64, chord_tol: f64) -> i32 {
+    circle_segments(radius, chord_tol)
+}
+
+/// `GM_Snout::calcFacets`（`0x1009EA30`）：喂**两端半径的大者**。
+///
+/// 不是底也不是顶——锥度大时两者差很远，取错哪一个都会让侧壁跟相邻圆柱对不上。
+pub fn snout_segments(r_bottom: f64, r_top: f64, chord_tol: f64) -> i32 {
+    circle_segments(r_bottom.max(r_top), chord_tol)
+}
+
+/// `GM_CircTorus`（`0x10047150`）/ `GM_RectTorus`（`0x100962F0`）的扫掠方向：
+/// 喂**外半径**，不是中心线半径，且走部分回转那一支。
+///
+/// 返回的是**段数**。libgm 在非整圈时还会 `+1`，那一下是段数转顶点数——本仓的
+/// `mesh_primitives::gen_circular_torus` / `gen_rectangular_torus` 内部已经做了
+/// （`ring_count = ring_segments + 1`），所以这里**不要再加一次**。
+pub fn torus_ring_segments(r_outside: f64, chord_tol: f64, sweep_deg: f64) -> i32 {
+    part_rev_segments(r_outside, chord_tol, 0.0, sweep_deg).segments
+}
+
+/// `GM_CircTorus` 的管截面方向：喂 `(rOut − rIns) / 2`。
+///
+/// 两个方向喂两个不同的半径，这是 §7.9.1 点名「容易照抄错」的一条。
+pub fn circular_torus_tube_segments(r_inside: f64, r_outside: f64, chord_tol: f64) -> i32 {
+    circle_segments((r_outside - r_inside) * 0.5, chord_tol)
+}
+
+/// `GM_SDish::calcFacets`（`0x10099CF0`）解出来的球碟离散参数。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SphericalDishFacets {
+    /// 球面半径 `R = (a²/h + h) / 2`。
+    pub sphere_radius: f64,
+    /// 极角 `θ`（弧度）：从顶点量到底面边缘。`h > a` 时超过 90°。
+    pub polar_angle: f64,
+    /// 绕轴段数。
+    pub around: i32,
+    /// 经向段数。
+    pub meridional: i32,
+}
+
+/// `GM_SDish::calcFacets`（`0x10099CF0`）：**两个方向都不是常数**。
+///
+/// 绕轴先算球半径 `R = (a²/h + h)/2`，再按 `h ≥ a ? R : a` 选——实质是「这个封头上
+/// 最大的那个圆」：超过半球时最大圆在赤道而不在底面。
+///
+/// 经向**不另算容差**，直接沿用绕轴的角步长：`θ = acos(1 − h/R)`
+/// （`|h/R| ≤ 1e-6` 时退化成 `sqrt(2h/R)`），段数 `ceil(θ / (2π/n))`。
+///
+/// 注意 `θ` 要用 `acos(1 − h/R)` 而不是 `asin(a/R)`：两者只在 `h ≤ a`（不超过半球）
+/// 时相等，`h > a` 时 `asin` 会把钝角折回锐角，碟顶直接被削平。
+pub fn spherical_dish_facets(
+    base_radius: f64,
+    height: f64,
+    chord_tol: f64,
+) -> Option<SphericalDishFacets> {
+    if !(base_radius > 0.0) || !(height > 0.0) {
+        return None;
+    }
+    let sphere_radius = (base_radius * base_radius / height + height) * 0.5;
+    if !(sphere_radius > 0.0) {
+        return None;
+    }
+    let ratio = height / sphere_radius;
+    let polar_angle = if ratio.abs() <= 1e-6 {
+        (2.0 * ratio).sqrt()
+    } else {
+        (1.0 - ratio).clamp(-1.0, 1.0).acos()
+    };
+    let around = circle_segments(
+        if height >= base_radius {
+            sphere_radius
+        } else {
+            base_radius
+        },
+        chord_tol,
+    );
+    let step = std::f64::consts::TAU / f64::from(around.max(1));
+    let meridional = (polar_angle / step).ceil().max(1.0) as i32;
+    Some(SphericalDishFacets {
+        sphere_radius,
+        polar_angle,
+        around,
+        meridional,
+    })
+}
+
+/// `GM_EDish::calcFacetsWithoutSurfaces`（`0x10054AB0`）解出来的椭圆碟参数。
+///
+/// **「椭圆碟」是 PDMS 的叫法，形状不是椭球**：libgm 建的是托里球形封头——一段球冠
+/// （半径 `hub_radius`）加一圈与它相切的环面拐角（管半径 `knuckle_radius`）。
+/// 前三个字段是母线的形状参数，后三个才是段数；两者一起返回是因为 libgm 也是在
+/// 同一个函数里先算形状再按形状分段，拆开只会让两边各存一份公式。
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct EllipticalDishFacets {
+    /// 拐角环的管半径 `r_k`。
+    pub knuckle_radius: f64,
+    /// 球冠半径 `R_c`（`radiusOfHub`）。球心在轴上 `z = h − R_c`。
+    pub hub_radius: f64,
+    /// 球冠与拐角的交接角（弧度），从 **+Z 极点**量起。
+    pub transition_angle: f64,
+    /// 绕轴段数。
+    pub around: i32,
+    /// 球冠段的经向段数。
+    pub hub: i32,
+    /// 拐角段的经向段数。
+    pub knuckle: i32,
+}
+
+/// `GM_EDish::calcFacetsWithoutSurfaces`（`0x10054AB0`）：形状与段数一次解出。
+///
+/// 记 `a = base_radius`（= DIAM/2）、`h = height`、`s = √(a² + h²)`：
+///
+/// ```text
+/// r_k = h / (1 + (a − h)/s)                       knuckleRadiusToUse  0x100556A0
+/// R_c = (a² + h² − 2a·r_k) / (2(h − r_k))         radiusOfHub         0x10055750
+/// θ   = acos(1 − (h − r_k)/(R_c − r_k))                               0x10054CCB
+///     = acos((R_c − h)/(R_c − r_k)) = atan2(h, a)
+/// n_around  = circle(a, tol)                      喂底半径，不是 R_c
+/// n_hub     = partRev(R_c, tol, 0°, θ°)
+/// n_knuckle = partRev(r_k, tol, θ°, 90°)
+/// 2(n_hub + n_knuckle) > 1000 时，4·n > 1000 的那一段各自夹到 250
+/// ```
+///
+/// 三处容易抄错的地方：
+///
+/// 1. **`RADI` 只是开关。** Core3D 的 `CSG_BasicDIS::getPrimGeom`（`0x10726D10`）读了
+///    `ATT_RADI` 却只用它判「椭圆碟还是球碟」，传给 `gm_CreateEllipticalDish` 的第三个
+///    实参是上面那条现算的 `r_k`。用户填的拐角半径**不进几何**。
+/// 2. **`θ` 不是 `acos((h − r_k)/(R_c − r_k))`。** 那是 Hex-Rays 吞掉 acos 实参之后的
+///    伪码假象；反汇编是 `acos(1 − q)`，小 `q` 分支的 `sqrt(2q)` 也只有对 `1 − q` 才是
+///    正确的小角展开。抄错的话 a=2 / h=1 会得到 83.9° 而不是 26.6°，碟身留一道折痕。
+/// 3. **绕轴喂 `a`。** 喂 `R_c` 会得到另一个数，而 `R_c` 恰好也是个「看着很像半径」的量。
+///
+/// `isSpherical()`（`|a − h| ≤ 1e-6`）时 `θ` 直接取 45°、`R_c` 保持等于 `r_k`：
+/// 半球被拆成 0–45° 与 45–90° 两段同半径的弧。
+///
+/// **与 libgm 的一处有意分歧**：`R_c == r_k` 时 libgm 打
+/// `gm_reportInternalFault(GM_EDish.cxx:171)` 之后仍按 45° 继续出网格；这里回 `None`，
+/// 由调用方响亮失败。内部故障之后接着造几何，不是本仓要复刻的行为。
+pub fn elliptical_dish_facets(
+    base_radius: f64,
+    height: f64,
+    chord_tol: f64,
+) -> Option<EllipticalDishFacets> {
+    let (a, h) = (base_radius, height);
+    if !(a > 0.0) || !(h > 0.0) || !chord_tol_is_usable(chord_tol) {
+        return None;
+    }
+    let s = (a * a + h * h).sqrt();
+    let knuckle_radius = h / ((a - h) / s + 1.0);
+    if !(knuckle_radius > 0.0) {
+        return None;
+    }
+
+    let (hub_radius, transition_angle) = if (a - h).abs() <= 1e-6 {
+        (knuckle_radius, std::f64::consts::FRAC_PI_4)
+    } else {
+        let hub_radius = (a * a + h * h - 2.0 * a * knuckle_radius) / (2.0 * (h - knuckle_radius));
+        let den = hub_radius - knuckle_radius;
+        if den == 0.0 || !hub_radius.is_finite() {
+            return None;
+        }
+        let q = (h - knuckle_radius) / den;
+        let angle = if q.abs() > 1e-6 {
+            (1.0 - q).clamp(-1.0, 1.0).acos()
+        } else {
+            (2.0 * q).max(0.0).sqrt()
+        };
+        (hub_radius, angle)
+    };
+    if !(hub_radius > 0.0) || !transition_angle.is_finite() {
+        return None;
+    }
+
+    let around = circle_segments(a, chord_tol);
+    let theta_deg = transition_angle.to_degrees();
+    let mut hub = part_rev_segments(hub_radius, chord_tol, 0.0, theta_deg).segments;
+    let mut knuckle = part_rev_segments(knuckle_radius, chord_tol, theta_deg, 90.0).segments;
+    if 2 * (hub + knuckle) > MAX_SEGMENTS {
+        if 4 * knuckle > MAX_SEGMENTS {
+            knuckle = 250;
+        }
+        if 4 * hub > MAX_SEGMENTS {
+            hub = 250;
+        }
+    }
+
+    Some(EllipticalDishFacets {
+        knuckle_radius,
+        hub_radius,
+        transition_angle,
+        around,
+        hub,
+        knuckle,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 弦高容差只许有一个出处（T042）。
+    ///
+    /// 生产路径上曾经有两个：本模块的 [`FACET_TOL_MM`]（绝对量），和
+    /// `BrepShapeTrait::tol()` 那一族（按自身尺度给的比例量，`SweepSolid` 是
+    /// 0.01 × 轮廓外接球半径）。两个并存的后果不是「有的地方细有的地方粗」，而是
+    /// **同一个半径在不同构件上分成不同段数**，`cancelFacets` 只消全等重叠，于是
+    /// 布尔在共面处留一层壁——RM13 穹顶那圈残料就是这么来的。
+    ///
+    /// 这条按源码扫：几何这几个模块的生产半区里，`BrepShapeTrait::tol()` 不得出现在
+    /// 任何**代码**位置。扫的是模块而不是某一个函数，因为下一次回流未必回到同一处；
+    /// 注释里点名它是允许的——把反面写在正面旁边，正是这些注释在做的事。
+    #[test]
+    fn the_facet_tolerance_has_a_single_source() {
+        for (name, source) in [
+            ("libgm_discretise.rs", include_str!("libgm_discretise.rs")),
+            (
+                "manifold_tessellate.rs",
+                include_str!("manifold_tessellate.rs"),
+            ),
+            ("sweep_mesh.rs", include_str!("sweep_mesh.rs")),
+            ("mesh_primitives.rs", include_str!("mesh_primitives.rs")),
+        ] {
+            let production = source
+                .split_once("#[cfg(test)]")
+                .map(|(head, _)| head)
+                .unwrap_or(source);
+            let offender = production.lines().find(|line| {
+                let code = line.split("//").next().unwrap_or("");
+                code.contains(concat!(".tol(", ")"))
+            });
+            assert!(
+                offender.is_none(),
+                "{name} 的生产半区又拿 BrepShapeTrait::tol() 当容差了（它是比例量，\
+                 段数会随构件尺寸漂）: {offender:?}"
+            );
+        }
+
+        // 常量本身也只许定义一处。
+        let here = include_str!("libgm_discretise.rs");
+        assert_eq!(
+            here.matches(concat!("pub const FACET_", "TOL_MM")).count(),
+            1,
+            "FACET_TOL_MM 必须只在本模块定义一次"
+        );
+        assert!(
+            !include_str!("manifold_tessellate.rs")
+                .contains(concat!("const FACET_", "TOL_MM: f64")),
+            "manifold_tessellate 不得再自带一份容差常量"
+        );
+    }
+
+    /// 容差不许有兜底默认值（T042 收口）。
+    ///
+    /// 折线化那三处原先各写着 `if chord_tol > 0.0 { chord_tol } else { 1.0 }`。
+    /// 常量只定义一处不等于「唯一一份」——兜底把第二个值藏在了分支里，而且是
+    /// 非正值才现身，最不容易被看见的那一种。这条按源码扫容差绑定：`let tol` /
+    /// `let chord_tol` 的右手边不许出现浮点字面量，一个默认值都不许有。
+    ///
+    /// 只扫绑定行而不扫全模块，是因为规则函数内部本来就有一堆字面量
+    /// （`part_rev_segments(r, tol, 0.0, deg)` 的 `0.0` 是起始角，不是容差）。
+    #[test]
+    fn the_chord_tolerance_has_no_fallback_default() {
+        for (name, source) in [
+            ("libgm_discretise.rs", include_str!("libgm_discretise.rs")),
+            (
+                "manifold_tessellate.rs",
+                include_str!("manifold_tessellate.rs"),
+            ),
+            ("sweep_mesh.rs", include_str!("sweep_mesh.rs")),
+            ("mesh_primitives.rs", include_str!("mesh_primitives.rs")),
+        ] {
+            let production = source
+                .split_once("#[cfg(test)]")
+                .map(|(head, _)| head)
+                .unwrap_or(source);
+            for line in production.lines() {
+                let code = line.split("//").next().unwrap_or("").trim();
+                if !(code.starts_with("let tol") || code.starts_with("let chord_tol")) {
+                    continue;
+                }
+                let digits: Vec<char> = code.chars().collect();
+                let has_float = digits
+                    .windows(3)
+                    .any(|w| w[0].is_ascii_digit() && w[1] == '.' && w[2].is_ascii_digit());
+                assert!(
+                    !has_float,
+                    "{name} 的容差绑定又带上默认值了（非正容差必须报错，不许兜底）: {code}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn only_a_positive_finite_tolerance_is_usable() {
+        assert!(chord_tol_is_usable(FACET_TOL_MM));
+        for bad in [0.0, -0.5, f64::NAN, f64::INFINITY] {
+            assert!(!chord_tol_is_usable(bad), "{bad} 不该被当成可用容差");
+        }
+    }
 
     /// 按 E3D 主初始化用的 `facet_tol = 0.5mm` 手算的对照表。
     /// R=100 恰好落在 32 —— 那正是本仓一直写死 32 的来处，也说明它只在那一个尺寸上对。
@@ -652,6 +1127,321 @@ mod tests {
         ]);
         assert_eq!(flat.len(), 4);
         assert!(flat.iter().all(|s| s.bulge == 0.0));
+    }
+
+    // ─── §7.9.2 轮廓那条路 ──────────────────────────────────────────────────
+
+    /// 一条弦上背靠背的两段弧：`A→B` 是半圆（R=100），`B→A` 是 90° 弧（R=100√2）。
+    /// 两段互为「同两点、反方向」，正是 `pairedSpan` 要找的那种。
+    fn lens_profile() -> Vec<ProfileSpan> {
+        vec![
+            ProfileSpan {
+                point: [-100.0, 0.0],
+                bulge: 1.0,
+            },
+            ProfileSpan {
+                point: [100.0, 0.0],
+                bulge: (22.5_f64).to_radians().tan(),
+            },
+        ]
+    }
+
+    #[test]
+    fn paired_span_finds_the_same_two_points_walked_backwards() {
+        let lens = lens_profile();
+        assert_eq!(paired_span(&lens, 0), Some(1));
+        assert_eq!(paired_span(&lens, 1), Some(0));
+
+        // 三角形上没有任何一段是原路折返的。
+        let triangle = vec![
+            ProfileSpan {
+                point: [0.0, 0.0],
+                bulge: 0.0,
+            },
+            ProfileSpan {
+                point: [100.0, 0.0],
+                bulge: 0.0,
+            },
+            ProfileSpan {
+                point: [0.0, 100.0],
+                bulge: 0.0,
+            },
+        ];
+        assert!((0..3).all(|i| paired_span(&triangle, i).is_none()));
+
+        // 起点等于终点的退化段回 None（libgm 的 -1）。
+        let degenerate = vec![
+            ProfileSpan {
+                point: [5.0, 5.0],
+                bulge: 0.0,
+            },
+            ProfileSpan {
+                point: [5.0, 5.0],
+                bulge: 0.0,
+            },
+        ];
+        assert!(paired_span(&degenerate, 0).is_none());
+    }
+
+    /// 配对的两段拿到**同一个**段数（按大的那个半径），而挤出口径各算各的。
+    /// 这条同时钉住「两套口径确实不同」——合并了就红。
+    #[test]
+    fn the_revolution_caliber_is_not_the_extrusion_one() {
+        let lens = lens_profile();
+        let extruded = profile_steps_extruded(&lens, 0.5);
+        let revolved = profile_steps(&lens, 0.5);
+
+        // 各自半径：半圆 R=100 → 32；90° 弧 R=100√2 ≈ 141.42 → 40。
+        assert_eq!(extruded, vec![32, 40], "挤出逐段自算");
+        assert_eq!(revolved, vec![40, 40], "回转按配对取大，两段同值");
+        assert_ne!(extruded, revolved, "两套口径合并了本测试必红");
+    }
+
+    /// 整条轮廓超过 1000 点时是**放大容差整条重算**，不是逐段截到 1000。
+    ///
+    /// 判别性在最后一条：重算之后单段步数仍然远超 1000，而整条总点数落回 1000 以内。
+    /// 按「逐段截断」复刻的话单段一定 ≤ 1000，那一条必红。
+    #[test]
+    fn an_over_dense_profile_is_rescaled_not_truncated() {
+        // 半圆 + 直弦：R=10000，容差 0.005 → 单段 3144 步，整条 1573 点。
+        let dome = vec![
+            ProfileSpan {
+                point: [-10000.0, 0.0],
+                bulge: 1.0,
+            },
+            ProfileSpan {
+                point: [10000.0, 0.0],
+                bulge: 0.0,
+            },
+        ];
+
+        let raw = profile_steps_extruded(&dome, 0.005);
+        let before = facets_round_profile(&dome, &raw);
+        assert!(
+            before > PROFILE_FACET_CAP,
+            "夹具没触发封顶，实得 {before} 点"
+        );
+
+        let steps = profile_steps(&dome, 0.005);
+        let after = facets_round_profile(&dome, &steps);
+        assert!(after <= PROFILE_FACET_CAP, "重标定后仍然超限：{after}");
+        assert!(
+            after * 10 > PROFILE_FACET_CAP * 9,
+            "重标定应当落回 1000 附近，而不是过冲到 {after}"
+        );
+        assert!(
+            steps.iter().copied().max().unwrap_or(0) > PROFILE_FACET_CAP,
+            "单段步数被截到了 1000 以内 —— 那是曲面原语的规则，不是轮廓的：{steps:?}"
+        );
+    }
+
+    /// 没超限就原样返回，不做多余的重算。
+    #[test]
+    fn a_sparse_profile_is_left_alone() {
+        let lens = lens_profile();
+        let steps = profile_steps(&lens, 0.5);
+        assert!(facets_round_profile(&lens, &steps) <= PROFILE_FACET_CAP);
+        assert_eq!(steps, profile_steps(&lens, 0.5), "同输入必须同输出");
+    }
+
+    // ─── §7.9.1 调用点表 ────────────────────────────────────────────────────
+    //
+    // 下面这些期望值都是按 §7.9.1 的规则 + `facet_tol = 0.5mm` **手算**的，
+    // 不是从实现反取的。改实现时如果这些红了，先怀疑实现。
+
+    /// `GM_Snout` 取两端半径的**大者**，不是底也不是顶。
+    #[test]
+    fn a_snout_is_facetted_by_its_larger_end() {
+        // R=100 → 32；R=25 → 16。取大者意味着结果必须是 32，两个方向都试一遍。
+        assert_eq!(snout_segments(25.0, 100.0, 0.5), 32);
+        assert_eq!(snout_segments(100.0, 25.0, 0.5), 32);
+        assert_ne!(snout_segments(25.0, 100.0, 0.5), circle_segments(25.0, 0.5));
+        // 退化成圆锥（一端半径 0）时仍按大的那端算。
+        assert_eq!(snout_segments(0.0, 250.0, 0.5), circle_segments(250.0, 0.5));
+    }
+
+    /// 圆环面的两个方向喂**两个不同的半径**：扫掠用外半径，管截面用 `(rOut−rIns)/2`。
+    #[test]
+    fn a_circular_torus_feeds_two_different_radii() {
+        let (r_in, r_out) = (50.0, 250.0);
+        assert_eq!(torus_ring_segments(r_out, 0.5, 360.0), 52); // circle(250)
+        assert_eq!(circular_torus_tube_segments(r_in, r_out, 0.5), 32); // circle(100)
+        assert_ne!(
+            torus_ring_segments(r_out, 0.5, 360.0),
+            circular_torus_tube_segments(r_in, r_out, 0.5),
+            "两个方向拿到同一个数说明有一处喂错了半径"
+        );
+        // 中心线半径是 150，不是任何一个方向的输入——写错成它会得到别的数。
+        assert_ne!(
+            torus_ring_segments(r_out, 0.5, 360.0),
+            circle_segments(150.0, 0.5)
+        );
+    }
+
+    /// 扫掠方向走部分回转那一支：90° 是整圈的四分之一，向上取整。
+    ///
+    /// 返回的是**段数**；libgm 的「非整圈 +1」是段数转顶点数，由
+    /// `mesh_primitives` 的环面生成器内部完成，这里不许再加一次。
+    #[test]
+    fn a_partial_torus_ring_scales_the_full_circle_count() {
+        assert_eq!(torus_ring_segments(250.0, 0.5, 90.0), 13); // ceil(52 · 90/360)
+        assert_eq!(torus_ring_segments(250.0, 0.5, 360.0), 52);
+    }
+
+    /// 球碟绕轴喂的是「这个封头上最大的那个圆」：不超过半球时是底面半径 `a`，
+    /// 超过半球时是球半径 `R`。
+    #[test]
+    fn a_spherical_dish_feeds_the_largest_circle_on_the_head() {
+        // 浅碟 h < a：喂 a=100 → 32，而不是 R=212.5 → 48。
+        let shallow = spherical_dish_facets(100.0, 25.0, 0.5).expect("浅碟合法");
+        assert!((shallow.sphere_radius - 212.5).abs() < 1e-9);
+        assert_eq!(shallow.around, 32);
+        assert_ne!(shallow.around, circle_segments(212.5, 0.5));
+
+        // 半球 h == a：R 退化成 a，两条路同值。
+        let hemi = spherical_dish_facets(100.0, 100.0, 0.5).expect("半球合法");
+        assert!((hemi.sphere_radius - 100.0).abs() < 1e-9);
+        assert_eq!(hemi.around, 32);
+
+        // 深碟 h > a：喂 R=125 → 36，而不是 a=100 → 32。
+        let deep = spherical_dish_facets(100.0, 200.0, 0.5).expect("深碟合法");
+        assert!((deep.sphere_radius - 125.0).abs() < 1e-9);
+        assert_eq!(deep.around, 36);
+    }
+
+    /// 极角走 `acos(1 − h/R)`，不是 `asin(a/R)`。两者只在不超过半球时相等；
+    /// 超过半球时 `asin` 把钝角折回锐角，碟顶会被削平。
+    #[test]
+    fn a_deep_dish_has_an_obtuse_polar_angle() {
+        let deep = spherical_dish_facets(100.0, 200.0, 0.5).expect("深碟合法");
+        assert!(
+            deep.polar_angle > std::f64::consts::FRAC_PI_2,
+            "h > a 的碟极角必须是钝角，实得 {} rad",
+            deep.polar_angle
+        );
+        // acos(1 − 200/125) = acos(−0.6) ≈ 2.2143 rad；asin(100/125) ≈ 0.9273 rad。
+        assert!((deep.polar_angle - (-0.6_f64).acos()).abs() < 1e-12);
+        assert!(
+            (deep.polar_angle - (0.8_f64).asin()).abs() > 1.0,
+            "别回到 asin"
+        );
+
+        // 半球恰好 90°，是两条公式的交点。
+        let hemi = spherical_dish_facets(100.0, 100.0, 0.5).expect("半球合法");
+        assert!((hemi.polar_angle - std::f64::consts::FRAC_PI_2).abs() < 1e-12);
+    }
+
+    /// 经向不另算容差，直接沿用绕轴的角步长：`ceil(θ / (2π/n))`。
+    #[test]
+    fn dish_meridional_reuses_the_around_step() {
+        // 半球：θ = π/2 恰好是整圈 32 段里的 8 段。
+        let hemi = spherical_dish_facets(100.0, 100.0, 0.5).expect("半球合法");
+        assert_eq!(hemi.meridional, 8);
+
+        // 浅碟：θ ≈ 0.4889 rad，步长 2π/32 ≈ 0.1963 → 3 段。
+        let shallow = spherical_dish_facets(100.0, 25.0, 0.5).expect("浅碟合法");
+        assert_eq!(shallow.meridional, 3);
+
+        // 深碟：θ ≈ 2.2143 rad，步长 2π/36 ≈ 0.1745 → 13 段。
+        let deep = spherical_dish_facets(100.0, 200.0, 0.5).expect("深碟合法");
+        assert_eq!(deep.meridional, 13);
+    }
+
+    #[test]
+    fn a_degenerate_dish_has_no_facets_instead_of_a_guess() {
+        assert!(spherical_dish_facets(0.0, 10.0, 0.5).is_none());
+        assert!(spherical_dish_facets(100.0, 0.0, 0.5).is_none());
+        assert!(spherical_dish_facets(100.0, -5.0, 0.5).is_none());
+    }
+
+    /// 椭圆碟的母线：`r_k` / `R_c` / `θ` 三个量，数值手算自 `GM_EDish` 的公式。
+    ///
+    /// `θ` 单独钉住 `atan2(h, a)` 这个恒等式——它是判「acos 的实参有没有抄掉那个
+    /// `1 −`」的最省事的判据：抄错的那条对 a=2 / h=1 给 83.9°，正确的给 26.565°。
+    #[test]
+    fn an_elliptical_dish_is_a_torispherical_head() {
+        // a=1000 / h=250：s=1030.776，r_k=250/(1+750/s)=144.709，
+        // R_c=s(s+a−h)/(2h)=1030.776·1780.776/500=3671.16。
+        let f = elliptical_dish_facets(1000.0, 250.0, 0.5).expect("合法尺寸");
+        assert!((f.knuckle_radius - 144.7086).abs() < 1e-3, "{f:?}");
+        assert!((f.hub_radius - 3671.16).abs() < 1e-2, "{f:?}");
+        assert!(
+            (f.transition_angle - 250.0_f64.atan2(1000.0)).abs() < 1e-12,
+            "交接角必须等于 atan2(h, a)，实得 {} rad",
+            f.transition_angle
+        );
+
+        // 那条错公式：acos((h − r_k)/(R_c − r_k))，少了 `1 −`。它给的是个完全不同的角。
+        let wrong = ((250.0 - f.knuckle_radius) / (f.hub_radius - f.knuckle_radius)).acos();
+        assert!(
+            (f.transition_angle - wrong).abs() > 1.0,
+            "跟少了 `1 −` 的那条公式分不开：{} vs {wrong}",
+            f.transition_angle
+        );
+
+        // 半球：isSpherical 走固定 45°，R_c 保持等于 r_k。
+        let hemi = elliptical_dish_facets(100.0, 100.0, 0.5).expect("半球合法");
+        assert!((hemi.knuckle_radius - 100.0).abs() < 1e-9);
+        assert!((hemi.hub_radius - hemi.knuckle_radius).abs() < 1e-9);
+        assert!((hemi.transition_angle - std::f64::consts::FRAC_PI_4).abs() < 1e-12);
+    }
+
+    /// 三个方向三条不同的规则，且绕轴喂的是**底半径**。
+    ///
+    /// a=1000 / h=250 / tol=0.5：
+    /// 绕轴 `circle(1000)` = 100；球冠 `partRev(3671.16, 0°, 14.036°)`
+    /// = ceil(192·14.036/360) = 8；拐角 `partRev(144.709, 14.036°, 90°)`
+    /// = ceil(40·75.964/360) = 9。喂 `R_c` 的话绕轴会是 192——差一个数量级。
+    #[test]
+    fn the_elliptical_dish_feeds_three_different_radii() {
+        let f = elliptical_dish_facets(1000.0, 250.0, 0.5).expect("合法尺寸");
+        assert_eq!(f.around, 100, "绕轴喂底半径 a");
+        assert_eq!(f.hub, 8);
+        assert_eq!(f.knuckle, 9);
+        assert_ne!(
+            f.around,
+            circle_segments(f.hub_radius, 0.5),
+            "绕轴要是喂了 R_c 就会变成这个数"
+        );
+        assert_ne!(f.hub, f.knuckle, "两段各按自己的半径算，撞上就说明喂串了");
+
+        // 浅碟：三个方向一起塌到下限附近，也不许有哪一个退化成 0。
+        let shallow = elliptical_dish_facets(10.0, 1.0, 0.5).expect("浅碟合法");
+        assert_eq!((shallow.around, shallow.hub, shallow.knuckle), (12, 2, 2));
+    }
+
+    #[test]
+    fn a_degenerate_elliptical_dish_has_no_facets_instead_of_a_guess() {
+        assert!(elliptical_dish_facets(0.0, 10.0, 0.5).is_none());
+        assert!(elliptical_dish_facets(100.0, 0.0, 0.5).is_none());
+        assert!(elliptical_dish_facets(100.0, -5.0, 0.5).is_none());
+        assert!(
+            elliptical_dish_facets(100.0, 25.0, 0.0).is_none(),
+            "容差不可用要报错，不许兜一个默认值"
+        );
+    }
+
+    /// 柱 / 斜端柱 / 球是同一条：直接喂自己的半径。写死 32 只在 R=100 上对。
+    ///
+    /// 三个半径取自 2026-08-23 活库盘点（`docs/evidence/2026-08-23-occ-retire-census.md`）
+    /// 的两端与中间：最小 R=3（步长撞 45° 封顶，落到最少的 8 段）、R=100（恰好 32，
+    /// 也就是写死那个数唯一成立的尺寸）、R=295（56 段；用 32 段的话弦高 1.42mm，
+    /// 是 0.5mm 容差的近三倍）。
+    #[test]
+    fn a_cylinder_is_facetted_by_its_own_radius() {
+        assert_eq!(
+            cylinder_segments(3.0, 0.5),
+            8,
+            "小到步长封顶，整圈最少 8 段"
+        );
+        assert_eq!(
+            cylinder_segments(7.5, 0.5),
+            12,
+            "还没小到撞封顶，是 12 不是 8"
+        );
+        assert_eq!(cylinder_segments(100.0, 0.5), 32);
+        assert_eq!(cylinder_segments(295.0, 0.5), 56);
+        assert_ne!(cylinder_segments(295.0, 0.5), 32, "写死 32 会让大柱超容差");
     }
 
     /// 圆心与半径要跟 `calcCentreAndRadius` 同式：半圆的 bulge 是 1，圆心在弦中点。

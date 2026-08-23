@@ -210,6 +210,19 @@ pub fn mark_insts_flat_dirty() {
     INSTS_FLAT_DIRTY.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// 「这一行有没有可用的布尔成品」的唯一判据（SurrealQL 片段）。
+///
+/// 空串与任意大小写的字面 `'none'` 都是脏值，按「无成品」处理（Spec 019 FR-006）。
+/// 回填段的分支条件与修复段的 `WHERE` 必须引用这同一份：两处曾经各写各的——回填只判
+/// `booled_id != NONE`，而空串不是 NONE，于是 `booled_id = ''` 的行被回填成
+/// `insts_flat = [{ geo_hash: '' }]`，与同一函数下面两段「空串按无成品处理、平表不得
+/// 改写」的定义正相反。
+///
+/// 实参一律 `?? ''` 兜底：生产 8009 服务器对 NONE 实参直接报错（AND/OR 不短路，
+/// 另一臂照样求值），mem/fork 2.1.4 反而容忍——三引擎的真实分叉，2026-08-20 实测钉死。
+const VALID_BOOLED: &str =
+    "booled_id != NONE AND booled_id != '' AND string::lowercase(booled_id ?? '') != 'none'";
+
 /// 存量 `inst_relate` 行的平表副本清扫（P4 写时物化；幂等，自愈式）。
 ///
 /// 圈 `insts_flat = NONE` 且对读者可见（`aabb.d != none`）的行，服务端一次性
@@ -237,7 +250,7 @@ pub async fn sweep_inst_relate_flat() -> anyhow::Result<usize> {
     loop {
         let sql = format!(
             "LET $rows = SELECT VALUE id FROM inst_relate WHERE insts_flat = NONE AND aabb.d != none LIMIT {BATCH};\n\
-             UPDATE $rows SET insts_flat = IF booled_id != NONE THEN \
+             UPDATE $rows SET insts_flat = IF {VALID_BOOLED} THEN \
              [{{ geo_hash: booled_id }}] ELSE (SELECT trans.d AS transform, record::id(out) AS geo_hash \
              FROM out->geo_relate WHERE visible && out.meshed && trans.d != none && geo_type='Pos') END, \
              aabb_d = aabb.d, world_trans_d = world_trans.d RETURN NONE;\n\
@@ -258,15 +271,12 @@ pub async fn sweep_inst_relate_flat() -> anyhow::Result<usize> {
     }
     // 修复段（Spec 019 FR-001/FR-003）：收「booled_id 有值而 insts_flat 与成品
     // 不符」的历史错行。谓词刻意不设 aabb 门槛——布尔行必然可见，个别不可见
-    // 行修了也无害。空串/字面 'none' 当缺失跳过（FR-006），只计数不改写。
-    // 函数实参一律 `?? ''` / `?? []` 兜底：生产 8009 服务器对 NONE 实参直接
-    // 报错（AND/OR 不短路，另一臂照样求值），mem/fork 2.1.4 反而容忍——
-    // 这是三引擎的真实分叉，2026-08-20 实测钉死。
+    // 行修了也无害。空串/字面 'none' 当缺失跳过（FR-006，判据见 [`VALID_BOOLED`]）。
     let mut repaired = 0usize;
     loop {
         let sql = format!(
             "LET $rows = SELECT VALUE id FROM inst_relate \
-             WHERE booled_id != NONE AND booled_id != '' AND string::lowercase(booled_id ?? '') != 'none' \
+             WHERE {VALID_BOOLED} \
              AND (insts_flat = NONE OR array::first(insts_flat ?? []).geo_hash != booled_id) LIMIT {BATCH};\n\
              UPDATE $rows SET insts_flat = [{{ geo_hash: booled_id }}] RETURN NONE;\n\
              RETURN array::len($rows);"
@@ -283,18 +293,24 @@ pub async fn sweep_inst_relate_flat() -> anyhow::Result<usize> {
             crate::fmt_elapsed(started.elapsed())
         );
     }
-    // 脏值可见性（FR-006）：不修、不藏，非零就喊出来留给人裁决。
+    // 脏值可见性（FR-006）：不修、不藏，有就喊一声留给人裁决。
+    //
+    // 只探有无、不数个数。这段谓词在 `inst_relate` 上不可索引（该表只有 anc / dbnum
+    // 两个索引），原写法为了在日志里多一个数字，付的是一次**无界**全表扫，而空闲轮
+    // 每一轮都要付一遍。精确计数走人工诊断入口。
     let mut response = SUL_DB
         .query(
             "RETURN array::len((SELECT VALUE id FROM inst_relate \
-             WHERE booled_id = '' OR string::lowercase(booled_id ?? '') = 'none'));",
+             WHERE booled_id = '' OR string::lowercase(booled_id ?? '') = 'none' LIMIT 1)) > 0;",
         )
         .await?
         .check()?;
-    let junk: Option<usize> = response.take(0)?;
-    let junk = junk.unwrap_or(0);
-    if junk > 0 {
-        println!("  警告：{junk} 行 booled_id 为空串/字面 'none' 脏值，按无成品处理，平表未改写");
+    let junk: Option<bool> = response.take(0)?;
+    if junk.unwrap_or(false) {
+        println!(
+            "  警告：存在 booled_id 为空串/字面 'none' 的脏值行，按无成品处理，平表未改写\
+             （只探有无：该谓词不可索引，精确计数走人工诊断入口）"
+        );
     }
     println!(
         "inst_relate 平表副本清扫完成：补 {total} 行、修复布尔存量 {repaired} 行，耗时 {}",
@@ -1220,8 +1236,62 @@ mod tests {
             .split_once("pub async fn sweep_inst_relate_flat_if_dirty()")
             .expect("flat sweep boundary")
             .0;
-        assert!(body.contains("IF booled_id != NONE THEN"), "{body}");
+        assert!(body.contains("IF {VALID_BOOLED} THEN"), "{body}");
         assert!(body.contains("geo_hash: booled_id"), "{body}");
+    }
+
+    /// 回填段与修复段必须引用**同一份**「有没有布尔成品」的判据。
+    ///
+    /// 两处曾经各写各的：回填只判 `booled_id != NONE`，而空串不是 NONE——于是
+    /// `booled_id = ''` 的行被回填成 `insts_flat = [{ geo_hash: '' }]`，与同一函数
+    /// 下面两段「空串按无成品处理、平表不得改写」的定义正相反。回退到分别写死谓词
+    /// 时本测试必红。
+    #[test]
+    fn both_sweep_segments_share_one_valid_booled_predicate() {
+        assert!(VALID_BOOLED.contains("booled_id != NONE"), "{VALID_BOOLED}");
+        assert!(VALID_BOOLED.contains("booled_id != ''"), "{VALID_BOOLED}");
+        assert!(
+            VALID_BOOLED.contains("string::lowercase(booled_id ?? '') != 'none'"),
+            "{VALID_BOOLED}"
+        );
+
+        let source = include_str!("pdms_inst.rs");
+        let body = source
+            .split_once("pub async fn sweep_inst_relate_flat()")
+            .expect("flat sweep exists")
+            .1
+            .split_once("pub async fn sweep_inst_relate_flat_if_dirty()")
+            .expect("flat sweep boundary")
+            .0;
+        assert_eq!(
+            body.matches("{VALID_BOOLED}").count(),
+            2,
+            "回填分支与修复段各引用一次共享判据，不得各写各的: {body}"
+        );
+        assert!(
+            !body.contains("IF booled_id != NONE THEN"),
+            "回填段不得退回「只判 NONE」的旧写法: {body}"
+        );
+    }
+
+    /// 脏值探测不许在空闲轮里做无界全表扫。
+    ///
+    /// 这段谓词在 `inst_relate` 上不可索引，而它唯一的产出是一行警告。原写法把全表
+    /// id 物化出来再 `array::len`，每个空闲轮付一次；改成只探有无。
+    #[test]
+    fn the_junk_probe_is_bounded() {
+        let source = include_str!("pdms_inst.rs");
+        let body = source
+            .split_once("pub async fn sweep_inst_relate_flat()")
+            .expect("flat sweep exists")
+            .1
+            .split_once("pub async fn sweep_inst_relate_flat_if_dirty()")
+            .expect("flat sweep boundary")
+            .0;
+        assert!(
+            body.contains("= 'none' LIMIT 1))"),
+            "脏值探测必须带 LIMIT: {body}"
+        );
     }
 
     /// Spec 019 FR-001/FR-003/FR-006：清扫必须带存量修复段——旧代码时代
@@ -1246,11 +1316,12 @@ mod tests {
             body.contains("SET insts_flat = [{{ geo_hash: booled_id }}]"),
             "修复段必须把脏行改写为单位变换成品单实例：{body}"
         );
+        // 空串/字面 'none' 的排除已收进共享判据 [`VALID_BOOLED`]，由
+        // `both_sweep_segments_share_one_valid_booled_predicate` 单独钉住；这里只确认
+        // 修复段确实引用了它，而不是自己又写了一份。
         assert!(
-            body.contains("booled_id != ''")
-                && body.contains("string::lowercase(booled_id ?? '') != 'none'"),
-            "空串/字面 'none' 脏值必须当缺失处理（lowercase 实参 `?? ''` 兜底），\
-             不得写进 insts_flat：{body}"
+            body.contains("WHERE {VALID_BOOLED}"),
+            "修复段必须引用共享判据，不得自己重写空串/'none' 的排除：{body}"
         );
     }
 
