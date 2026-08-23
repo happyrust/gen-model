@@ -133,6 +133,8 @@ __pycache__/
 /*_dblog.txt
 /.scratch_libgm*.json
 /shot.png
+# run_ams_gui.bat 每次启动都重写这份 stderr 抓取，上面那条 `*.log` 盖不住 `.log.err`
+/scripts/e3d/*.log.err
 
 # KC-Chat 运行时产物（插件自动生成，请勿入库）
 .cursor/mcp.json
