@@ -520,8 +520,18 @@ pub struct CatalogueSelection {
 }
 
 /// Resolve the repository's naked-dbnum limitation before any observation is
-/// written.  Same-project duplicates always block; cross-project collisions
-/// need an explicit project priority winner.
+/// written.  Same-project duplicates always block; cross-project collisions are
+/// decided by project rank.
+///
+/// Rank is `catalogue_project_priority` first, then every remaining
+/// `included_projects` entry in the order it is written.  The explicit list is
+/// an override layer, not the whole ranking: leaving a project out of it means
+/// "no opinion", not "unrankable".  `versioned_db::database` already builds its
+/// full-sync project order exactly this way, and the config changelog has
+/// documented this key's default as "same order as `included_projects`" since
+/// it was introduced.  While this function alone treated an unlisted project as
+/// unrankable, one name missing from the list blocked the whole Catalogue phase
+/// — and with it every Design batch behind the barrier.
 pub fn select_catalogue_candidates(
     candidates: impl IntoIterator<Item = CatalogueCandidate>,
     included_projects: &[String],
@@ -542,6 +552,16 @@ pub fn select_catalogue_candidates(
         if rank.insert(key.clone(), index).is_some() {
             blockers.push(format!("catalogue_project_priority 重复项目 {project:?}"));
         }
+    }
+    // Offsets start past the explicit list so a named project always outranks an
+    // unnamed one; `or_insert` keeps the first occurrence when the list repeats
+    // a name.
+    for (offset, project) in included_projects.iter().enumerate() {
+        let key = project.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        rank.entry(key).or_insert(priority.len() + offset);
     }
 
     let mut by_dbnum: BTreeMap<u32, Vec<CatalogueCandidate>> = BTreeMap::new();
@@ -584,6 +604,11 @@ pub fn select_catalogue_candidates(
         .collect();
     for parent in &collapsed.shadowed_parents {
         if let Some(candidate) = by_path.remove(parent) {
+            extract_shadowed.push(candidate);
+        }
+    }
+    for alias in &collapsed.shadowed_aliases {
+        if let Some(candidate) = by_path.remove(alias) {
             extract_shadowed.push(candidate);
         }
     }
@@ -644,7 +669,8 @@ pub fn select_catalogue_candidates(
             .copied()
         else {
             blockers.push(format!(
-                "跨项目 CATA/DICT dbnum={dbnum} 冲突且没有 catalogue_project_priority 选主"
+                "跨项目 CATA/DICT dbnum={dbnum} 冲突，但候选归属项目名为空，\
+                 排不进 included_projects 顺序"
             ));
             continue;
         };
@@ -813,18 +839,77 @@ mod tests {
         assert_eq!(result.shadowed, vec![candidate("Main", 7000, "main7000")]);
     }
 
+    /// An unwritten priority list is "no opinion", not "unrankable": the naked
+    /// dbnum tie-break has always been "whoever comes first in
+    /// `included_projects`", which is what the full-sync path does too.
+    /// Blocking instead turns one name missing from the config into a stalled
+    /// Catalogue phase, and every Design batch waits behind that barrier.
+    ///
+    /// Candidates are handed in back-to-front on purpose: the winner must come
+    /// from the configured project order, not from iteration order.
     #[test]
-    fn cross_project_collision_without_priority_blocks() {
+    fn cross_project_collision_falls_back_to_included_project_order() {
         let result = select_catalogue_candidates(
             [
-                candidate("Main", 7000, "main7000"),
                 candidate("Catalogue", 7000, "cat7000"),
+                candidate("Main", 7000, "main7000"),
             ],
             &["Main".into(), "Catalogue".into()],
             &[],
         );
-        assert!(result.selected.is_empty());
-        assert_eq!(result.blockers.len(), 1);
+        assert!(result.blockers.is_empty(), "{:?}", result.blockers);
+        assert_eq!(result.selected, vec![candidate("Main", 7000, "main7000")]);
+        assert_eq!(
+            result.shadowed,
+            vec![candidate("Catalogue", 7000, "cat7000")]
+        );
+    }
+
+    /// The explicit list only reorders the projects it names; the rest keep
+    /// their `included_projects` order behind them.  Both halves have to be
+    /// live, or a half-written list silently becomes an all-or-nothing switch.
+    #[test]
+    fn a_partial_priority_list_ranks_the_rest_by_included_project_order() {
+        let result = select_catalogue_candidates(
+            [
+                candidate("Main", 7000, "main7000"),
+                candidate("Catalogue", 7000, "cat7000"),
+                candidate("ZDJ", 7000, "zdj7000"),
+                candidate("Catalogue", 7001, "cat7001"),
+                candidate("Main", 7001, "main7001"),
+            ],
+            &["Main".into(), "Catalogue".into(), "ZDJ".into()],
+            &["ZDJ".into()],
+        );
+        assert!(result.blockers.is_empty(), "{:?}", result.blockers);
+        assert_eq!(
+            result.selected,
+            vec![
+                // Named, so it beats Main even though Main leads the included list.
+                candidate("ZDJ", 7000, "zdj7000"),
+                // Neither is named, so the included order decides.
+                candidate("Main", 7001, "main7001"),
+            ]
+        );
+        assert_eq!(result.shadowed.len(), 3, "{:?}", result.shadowed);
+    }
+
+    /// A name that is not in `included_projects` still blocks.  It is a typo,
+    /// not an omission, and the two want opposite handling — an omission now
+    /// falls back to the included order, so the typo has to stay loud.
+    #[test]
+    fn a_priority_entry_outside_included_projects_still_blocks() {
+        let result = select_catalogue_candidates(
+            [candidate("Main", 7000, "main7000")],
+            &["Main".into()],
+            &["Typo".into()],
+        );
+        assert_eq!(result.blockers.len(), 1, "{:?}", result.blockers);
+        assert!(
+            result.blockers[0].contains("含未知项目"),
+            "{:?}",
+            result.blockers
+        );
     }
 
     #[test]
@@ -860,5 +945,26 @@ mod tests {
         );
         assert!(result.selected.is_empty());
         assert_eq!(result.blockers.len(), 1);
+    }
+
+    #[test]
+    fn exact_filename_dbnum_shadows_same_project_mismatched_alias() {
+        let result = select_catalogue_candidates(
+            [
+                candidate("ZDJ", 7200, "ZDJ000/zdj7200_0001"),
+                candidate("ZDJ", 7200, "ZDJ000/zdj7210"),
+            ],
+            &["ZDJ".into()],
+            &["ZDJ".into()],
+        );
+        assert!(result.blockers.is_empty(), "{:?}", result.blockers);
+        assert_eq!(
+            result.selected,
+            vec![candidate("ZDJ", 7200, "ZDJ000/zdj7200_0001")]
+        );
+        assert_eq!(
+            result.shadowed,
+            vec![candidate("ZDJ", 7200, "ZDJ000/zdj7210")]
+        );
     }
 }

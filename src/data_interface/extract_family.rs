@@ -36,6 +36,11 @@ pub struct DbnumMismatch {
 pub struct CollapseResult {
     pub selected: Vec<SelectedFamily>,
     pub shadowed_parents: Vec<PathBuf>,
+    /// A filename/header-mismatched alias shadowed by an exact filename match
+    /// for the same project and header dbnum.  The exact match is authoritative;
+    /// keeping the alias out of `selected` prevents it from becoming a false
+    /// same-project Duplicate.
+    pub shadowed_aliases: Vec<PathBuf>,
     pub duplicate_keys: HashSet<(String, u32)>,
     pub mismatches: Vec<DbnumMismatch>,
 }
@@ -93,9 +98,19 @@ pub fn collapse_extract_families(
         extracts: Vec<(u32, PathBuf)>,
     }
 
+    let entries = entries.into_iter().collect::<Vec<_>>();
+    let exact_keys = entries
+        .iter()
+        .filter_map(|(project, header_dbnum, path)| {
+            let parsed = parse_extract_file_name(path.file_name()?.to_str()?)?;
+            (parsed.dbnum == *header_dbnum).then(|| (project.clone(), *header_dbnum))
+        })
+        .collect::<HashSet<_>>();
+
     let mut families: HashMap<(String, u32), Family> = HashMap::new();
     let mut unparsed: Vec<(String, u32, PathBuf)> = Vec::new();
     let mut mismatches = Vec::new();
+    let mut shadowed_aliases = Vec::new();
     let mut duplicate_keys = HashSet::new();
 
     for (project, header_dbnum, path) in entries {
@@ -105,6 +120,10 @@ pub fn collapse_extract_families(
             .unwrap_or("");
         match parse_extract_file_name(name) {
             Some(parsed) if parsed.dbnum != header_dbnum => {
+                if exact_keys.contains(&(project.clone(), header_dbnum)) {
+                    shadowed_aliases.push(path);
+                    continue;
+                }
                 mismatches.push(DbnumMismatch {
                     path,
                     filename_dbnum: parsed.dbnum,
@@ -190,10 +209,12 @@ pub fn collapse_extract_families(
         ))
     });
     shadowed_parents.sort();
+    shadowed_aliases.sort();
 
     CollapseResult {
         selected,
         shadowed_parents,
+        shadowed_aliases,
         duplicate_keys,
         mismatches,
     }

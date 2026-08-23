@@ -99,6 +99,9 @@ async fn main() -> anyhow::Result<()> {
         total,
         manifest.by_dbnum.len()
     );
+    for sample in &manifest.missing_samples {
+        println!("  missing: {sample}");
+    }
     for (dbnum, refs) in &manifest.by_dbnum {
         let ty = locator.db_type_of(*dbnum).unwrap_or_default();
         println!("  dbnum={} type={} refnos={}", dbnum, ty, refs.len());

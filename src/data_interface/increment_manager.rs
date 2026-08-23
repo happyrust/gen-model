@@ -2461,6 +2461,7 @@ impl AiosDBManager {
         )>,
         Vec<String>,
         Vec<(String, u32, PathBuf)>,
+        Vec<(String, u32, String, PathBuf)>,
     ) {
         use crate::data_interface::initialization_phase::{
             CatalogueCandidate, DataPhase, select_catalogue_candidates,
@@ -2469,6 +2470,7 @@ impl AiosDBManager {
         let mut by_type: HashMap<&'static str, Vec<CatalogueCandidate>> = HashMap::new();
         let mut blockers = Vec::new();
         let mut shadowed = Vec::new();
+        let mut dependency_identities = Vec::new();
         for watch_dir in watch_dirs {
             for entry in WalkDir::new(watch_dir).max_depth(INGEST_MAX_DEPTH) {
                 let entry = match entry {
@@ -2491,6 +2493,13 @@ impl AiosDBManager {
                     ));
                     continue;
                 };
+                let project = self.owning_project(entry.path());
+                dependency_identities.push((
+                    project.clone(),
+                    info.db_no,
+                    info.db_type.clone(),
+                    entry.path().to_path_buf(),
+                ));
                 let db_type = if info.db_type.eq_ignore_ascii_case("DICT") {
                     "DICT"
                 } else if info.db_type.eq_ignore_ascii_case("CATA") {
@@ -2502,12 +2511,27 @@ impl AiosDBManager {
                     .entry(db_type)
                     .or_default()
                     .push(CatalogueCandidate {
-                        project: self.owning_project(entry.path()),
+                        project,
                         dbnum: info.db_no,
                         path: entry.path().to_path_buf(),
                     });
             }
         }
+
+        let identity_by_path = dependency_identities
+            .into_iter()
+            .map(|entry| (entry.3.clone(), entry))
+            .collect::<HashMap<_, _>>();
+        let identity_families = crate::data_interface::extract_family::collapse_extract_families(
+            identity_by_path
+                .values()
+                .map(|(project, dbnum, _, path)| (project.clone(), *dbnum, path.clone())),
+        );
+        let dependency_identities = identity_families
+            .selected
+            .into_iter()
+            .filter_map(|selected| identity_by_path.get(&selected.leaf_path).cloned())
+            .collect::<Vec<_>>();
 
         let mut selected = HashSet::new();
         let mut cata_dependencies = Vec::new();
@@ -2550,7 +2574,13 @@ impl AiosDBManager {
             }
             blockers.extend(result.blockers.into_iter().map(|message| (phase, message)));
         }
-        (selected, blockers, shadowed, cata_dependencies)
+        (
+            selected,
+            blockers,
+            shadowed,
+            cata_dependencies,
+            dependency_identities,
+        )
     }
 
     /// F6：自动 watcher 的「文件观察落库 + 异常检测」。
@@ -2753,8 +2783,13 @@ impl AiosDBManager {
         if let Some(warning) = scope.warning() {
             println!("[{origin}] {warning}");
         }
-        let (selected_catalogue_paths, mut phase_blockers, shadowed, cata_dependencies) =
-            self.catalogue_manifest_for_dirs(&watch_dirs);
+        let (
+            selected_catalogue_paths,
+            mut phase_blockers,
+            shadowed,
+            cata_dependencies,
+            dependency_identities,
+        ) = self.catalogue_manifest_for_dirs(&watch_dirs);
 
         let mut params: IndexMap<PathBuf, crate::data_interface::batch_scheduler::DiscoveredBatch> =
             IndexMap::new();
