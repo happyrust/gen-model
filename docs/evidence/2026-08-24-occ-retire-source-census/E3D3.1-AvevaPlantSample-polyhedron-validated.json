@@ -1,0 +1,110 @@
+{
+  "root": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000",
+  "target_nouns": [
+    "POHE",
+    "POLYHE"
+  ],
+  "files_scanned": 235,
+  "indexed_elements": 4164813,
+  "noun_counts": {
+    "POHE": 4
+  },
+  "samples": [
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "source_sha256": "b7dc7a204619c9a645b46fef07254fe356319a6a62b18cd8ab917e6740f18922",
+      "dbnum": 7200,
+      "refno": "pe:23584_9700",
+      "owner": "pe:23584_9699",
+      "noun": "POHE",
+      "dimensions": {},
+      "mesh_validation": {
+        "vertices": 36,
+        "triangles": 20,
+        "signed_volume": 84817895.89217119,
+        "aabb_min": [
+          -612.5,
+          -20.0,
+          -150.0
+        ],
+        "aabb_max": [
+          -537.5,
+          4580.6,
+          3044.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "source_sha256": "b7dc7a204619c9a645b46fef07254fe356319a6a62b18cd8ab917e6740f18922",
+      "dbnum": 7200,
+      "refno": "pe:23584_9753",
+      "owner": "pe:23584_9699",
+      "noun": "POHE",
+      "dimensions": {},
+      "mesh_validation": {
+        "vertices": 36,
+        "triangles": 20,
+        "signed_volume": 84817895.89217119,
+        "aabb_min": [
+          -612.5,
+          -20.0,
+          -150.0
+        ],
+        "aabb_max": [
+          -537.5,
+          4580.6,
+          3044.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "source_sha256": "b7dc7a204619c9a645b46fef07254fe356319a6a62b18cd8ab917e6740f18922",
+      "dbnum": 7200,
+      "refno": "pe:23584_9806",
+      "owner": "pe:23584_9699",
+      "noun": "POHE",
+      "dimensions": {},
+      "mesh_validation": {
+        "vertices": 24,
+        "triangles": 12,
+        "signed_volume": 1290752493.5635426,
+        "aabb_min": [
+          -612.5,
+          -20.0,
+          -229.03
+        ],
+        "aabb_max": [
+          612.5,
+          4580.6,
+          3069.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "source_sha256": "b7dc7a204619c9a645b46fef07254fe356319a6a62b18cd8ab917e6740f18922",
+      "dbnum": 7200,
+      "refno": "pe:23584_9843",
+      "owner": "pe:23584_9699",
+      "noun": "POHE",
+      "dimensions": {},
+      "mesh_validation": {
+        "vertices": 24,
+        "triangles": 12,
+        "signed_volume": 11276083741.455078,
+        "aabb_min": [
+          -537.5,
+          0.0,
+          0.0
+        ],
+        "aabb_max": [
+          537.5,
+          4560.6,
+          5369.5
+        ]
+      }
+    }
+  ]
+}

@@ -1,0 +1,1587 @@
+{
+  "root": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000",
+  "target_nouns": [
+    "SPHE",
+    "SLCY",
+    "POHE",
+    "POLYHE",
+    "SNOU",
+    "NSNO"
+  ],
+  "files_scanned": 235,
+  "indexed_elements": 4164813,
+  "noun_counts": {
+    "NSNO": 2,
+    "POHE": 4,
+    "SLCY": 30,
+    "SNOU": 22
+  },
+  "samples": [
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_1891",
+      "owner": "pe:2013286698_1890",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_1892",
+      "owner": "pe:2013286698_1890",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_1893",
+      "owner": "pe:2013286698_1890",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_1941",
+      "owner": "pe:2013286698_1890",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_1948",
+      "owner": "pe:2013286698_1947",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_1949",
+      "owner": "pe:2013286698_1947",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_1950",
+      "owner": "pe:2013286698_1947",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_1998",
+      "owner": "pe:2013286698_1947",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_2005",
+      "owner": "pe:2013286698_2004",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_2006",
+      "owner": "pe:2013286698_2004",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_2007",
+      "owner": "pe:2013286698_2004",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_2055",
+      "owner": "pe:2013286698_2004",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_2083",
+      "owner": "pe:2013286698_1588",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 700.0,
+        "HEIG": 50.0
+      },
+      "mesh_validation": {
+        "vertices": 708,
+        "triangles": 236,
+        "signed_volume": 0.7839634810908108,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_2084",
+      "owner": "pe:2013286698_1588",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 700.0,
+        "HEIG": 50.0
+      },
+      "mesh_validation": {
+        "vertices": 708,
+        "triangles": 236,
+        "signed_volume": 0.7839634810908108,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250154_0001",
+      "source_sha256": "a780eb152da5439940888f9f3bb67644690239a2f353f666200ecf45964dd710",
+      "dbnum": 250154,
+      "refno": "pe:2013286698_2085",
+      "owner": "pe:2013286698_1588",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 700.0,
+        "HEIG": 50.0
+      },
+      "mesh_validation": {
+        "vertices": 708,
+        "triangles": 236,
+        "signed_volume": 0.7839634810908108,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250160_0001",
+      "source_sha256": "591f6b417dd257d9e3767f82e359ddf31a57f0e8f8fc40d67baa09aeef8755f3",
+      "dbnum": 250160,
+      "refno": "pe:2013286704_1000",
+      "owner": "pe:2013286704_3537",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 80.0,
+        "DTOP": 800.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 260,
+        "triangles": 256,
+        "signed_volume": 29.0130739581749,
+        "aabb_min": [
+          -5.0,
+          -5.0,
+          -0.5
+        ],
+        "aabb_max": [
+          5.0,
+          5.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250160_0001",
+      "source_sha256": "591f6b417dd257d9e3767f82e359ddf31a57f0e8f8fc40d67baa09aeef8755f3",
+      "dbnum": 250160,
+      "refno": "pe:2013286704_1159",
+      "owner": "pe:2013286704_3539",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 80.0,
+        "DTOP": 800.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 260,
+        "triangles": 256,
+        "signed_volume": 29.0130739581749,
+        "aabb_min": [
+          -5.0,
+          -5.0,
+          -0.5
+        ],
+        "aabb_max": [
+          5.0,
+          5.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250160_0001",
+      "source_sha256": "591f6b417dd257d9e3767f82e359ddf31a57f0e8f8fc40d67baa09aeef8755f3",
+      "dbnum": 250160,
+      "refno": "pe:2013286704_1251",
+      "owner": "pe:2013286704_3541",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 80.0,
+        "DTOP": 800.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 260,
+        "triangles": 256,
+        "signed_volume": 29.0130739581749,
+        "aabb_min": [
+          -5.0,
+          -5.0,
+          -0.5
+        ],
+        "aabb_max": [
+          5.0,
+          5.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250160_0001",
+      "source_sha256": "591f6b417dd257d9e3767f82e359ddf31a57f0e8f8fc40d67baa09aeef8755f3",
+      "dbnum": 250160,
+      "refno": "pe:2013286704_908",
+      "owner": "pe:2013286704_3535",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 80.0,
+        "DTOP": 800.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 260,
+        "triangles": 256,
+        "signed_volume": 29.0130739581749,
+        "aabb_min": [
+          -5.0,
+          -5.0,
+          -0.5
+        ],
+        "aabb_max": [
+          5.0,
+          5.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250532_0001",
+      "source_sha256": "e05522b1676396b2f6c062a3c2234bec2e52f72efb491bd8fbbf8cdc680fbd5d",
+      "dbnum": 250532,
+      "refno": "pe:2013287076_1018",
+      "owner": "pe:2013287076_963",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 80.0,
+        "DTOP": 800.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 260,
+        "triangles": 256,
+        "signed_volume": 29.0130739581749,
+        "aabb_min": [
+          -5.0,
+          -5.0,
+          -0.5
+        ],
+        "aabb_max": [
+          5.0,
+          5.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250532_0001",
+      "source_sha256": "e05522b1676396b2f6c062a3c2234bec2e52f72efb491bd8fbbf8cdc680fbd5d",
+      "dbnum": 250532,
+      "refno": "pe:2013287076_1110",
+      "owner": "pe:2013287076_1055",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 80.0,
+        "DTOP": 800.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 260,
+        "triangles": 256,
+        "signed_volume": 29.0130739581749,
+        "aabb_min": [
+          -5.0,
+          -5.0,
+          -0.5
+        ],
+        "aabb_max": [
+          5.0,
+          5.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250532_0001",
+      "source_sha256": "e05522b1676396b2f6c062a3c2234bec2e52f72efb491bd8fbbf8cdc680fbd5d",
+      "dbnum": 250532,
+      "refno": "pe:2013287076_1324",
+      "owner": "pe:2013287076_1269",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 80.0,
+        "DTOP": 800.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 260,
+        "triangles": 256,
+        "signed_volume": 29.0130739581749,
+        "aabb_min": [
+          -5.0,
+          -5.0,
+          -0.5
+        ],
+        "aabb_max": [
+          5.0,
+          5.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250532_0001",
+      "source_sha256": "e05522b1676396b2f6c062a3c2234bec2e52f72efb491bd8fbbf8cdc680fbd5d",
+      "dbnum": 250532,
+      "refno": "pe:2013287076_1416",
+      "owner": "pe:2013287076_1361",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 80.0,
+        "DTOP": 800.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 260,
+        "triangles": 256,
+        "signed_volume": 29.0130739581749,
+        "aabb_min": [
+          -5.0,
+          -5.0,
+          -0.5
+        ],
+        "aabb_max": [
+          5.0,
+          5.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_1891",
+      "owner": "pe:2013287080_1890",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_1892",
+      "owner": "pe:2013287080_1890",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_1893",
+      "owner": "pe:2013287080_1890",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_1941",
+      "owner": "pe:2013287080_1890",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_1948",
+      "owner": "pe:2013287080_1947",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_1949",
+      "owner": "pe:2013287080_1947",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_1950",
+      "owner": "pe:2013287080_1947",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_1998",
+      "owner": "pe:2013287080_1947",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_2005",
+      "owner": "pe:2013287080_2004",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_2006",
+      "owner": "pe:2013287080_2004",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_2007",
+      "owner": "pe:2013287080_2004",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_2055",
+      "owner": "pe:2013287080_2004",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 25.0,
+        "HEIG": 250.0
+      },
+      "mesh_validation": {
+        "vertices": 132,
+        "triangles": 44,
+        "signed_volume": 0.7499999865388266,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_2083",
+      "owner": "pe:2013287080_1588",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 700.0,
+        "HEIG": 50.0
+      },
+      "mesh_validation": {
+        "vertices": 708,
+        "triangles": 236,
+        "signed_volume": 0.7839634810908108,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_2084",
+      "owner": "pe:2013287080_1588",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 700.0,
+        "HEIG": 50.0
+      },
+      "mesh_validation": {
+        "vertices": 708,
+        "triangles": 236,
+        "signed_volume": 0.7839634810908108,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps250536_0001",
+      "source_sha256": "3fda933a86d8f66f76eb22974a1ec7725348111c1a050a04fc78044146f951d9",
+      "dbnum": 250536,
+      "refno": "pe:2013287080_2085",
+      "owner": "pe:2013287080_1588",
+      "noun": "SLCY",
+      "dimensions": {
+        "DIAM": 700.0,
+        "HEIG": 50.0
+      },
+      "mesh_validation": {
+        "vertices": 708,
+        "triangles": 236,
+        "signed_volume": 0.7839634810908108,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          0.0
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          1.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_3647",
+      "owner": "pe:15207_3646",
+      "noun": "NSNO",
+      "dimensions": {
+        "DBOT": 3800.0,
+        "DTOP": 1900.0,
+        "HEIG": 1200.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 564,
+        "triangles": 560,
+        "signed_volume": 0.4579951518544741,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_3705",
+      "owner": "pe:15207_3704",
+      "noun": "NSNO",
+      "dimensions": {
+        "DBOT": 1900.0,
+        "DTOP": 3800.0,
+        "HEIG": 1200.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 564,
+        "triangles": 560,
+        "signed_volume": 1.8319806074178966,
+        "aabb_min": [
+          -1.0,
+          -1.0,
+          -0.5
+        ],
+        "aabb_max": [
+          1.0,
+          1.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_10249",
+      "owner": "pe:15207_10194",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 200.0,
+        "DTOP": 1500.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 356,
+        "triangles": 352,
+        "signed_volume": 16.93711228928882,
+        "aabb_min": [
+          -3.75,
+          -3.75,
+          -0.5
+        ],
+        "aabb_max": [
+          3.75,
+          3.75,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_10296",
+      "owner": "pe:15207_10251",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 230.0,
+        "DTOP": 2000.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 22.32109307021481,
+        "aabb_min": [
+          -4.348,
+          -4.348,
+          -0.5
+        ],
+        "aabb_max": [
+          4.348,
+          4.348,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_10392",
+      "owner": "pe:15207_10389",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2000.0,
+        "DTOP": 1000.0,
+        "HEIG": 800.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 0.45784754670624545,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_10436",
+      "owner": "pe:15207_10433",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 1000.0,
+        "DTOP": 2000.0,
+        "HEIG": 800.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 1.8313901868249824,
+        "aabb_min": [
+          -1.0,
+          -1.0,
+          -0.5
+        ],
+        "aabb_max": [
+          1.0,
+          1.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_10558",
+      "owner": "pe:15207_10507",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2000.0,
+        "DTOP": 700.0,
+        "HEIG": 1200.0,
+        "XOFF": 0.0,
+        "YOFF": 650.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 1849180847.5155287,
+        "aabb_min": [
+          -1000.0,
+          -1325.0,
+          -600.0
+        ],
+        "aabb_max": [
+          1000.0,
+          675.0,
+          600.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_10630",
+      "owner": "pe:15207_10595",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 250.0,
+        "DTOP": 2100.0,
+        "HEIG": 1000.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 420,
+        "triangles": 416,
+        "signed_volume": 20.920745521630458,
+        "aabb_min": [
+          -4.2,
+          -4.2,
+          -0.5
+        ],
+        "aabb_max": [
+          4.2,
+          4.2,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_3498",
+      "owner": "pe:15207_3453",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 273.0,
+        "DTOP": 2000.0,
+        "HEIG": 1000.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 16.21991114787995,
+        "aabb_min": [
+          -3.663,
+          -3.663,
+          -0.5
+        ],
+        "aabb_max": [
+          3.663,
+          3.663,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_3538",
+      "owner": "pe:15207_3500",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 273.0,
+        "DTOP": 2000.0,
+        "HEIG": 1000.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 16.21991114787995,
+        "aabb_min": [
+          -3.663,
+          -3.663,
+          -0.5
+        ],
+        "aabb_max": [
+          3.663,
+          3.663,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_3646",
+      "owner": "pe:15207_3641",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 4000.0,
+        "DTOP": 2000.0,
+        "HEIG": 1200.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 580,
+        "triangles": 576,
+        "signed_volume": 0.4580035792997066,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_3704",
+      "owner": "pe:15207_3699",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2000.0,
+        "DTOP": 4000.0,
+        "HEIG": 1200.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 580,
+        "triangles": 576,
+        "signed_volume": 1.832014317198827,
+        "aabb_min": [
+          -1.0,
+          -1.0,
+          -0.5
+        ],
+        "aabb_max": [
+          1.0,
+          1.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_3829",
+      "owner": "pe:15207_3777",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2000.0,
+        "DTOP": 600.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 700.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 872788246.617378,
+        "aabb_min": [
+          -1000.0,
+          -1350.0,
+          -300.0
+        ],
+        "aabb_max": [
+          1000.0,
+          650.0,
+          300.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_3909",
+      "owner": "pe:15207_3908",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 273.0,
+        "DTOP": 1000.0,
+        "HEIG": 700.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 292,
+        "triangles": 288,
+        "signed_volume": 4.7274766070959435,
+        "aabb_min": [
+          -1.8315,
+          -1.8315,
+          -0.5
+        ],
+        "aabb_max": [
+          1.8315,
+          1.8315,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_8862",
+      "owner": "pe:15207_8839",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2500.0,
+        "DTOP": 2000.0,
+        "HEIG": 1000.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 452,
+        "triangles": 448,
+        "signed_volume": 0.6384555071185867,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7015_0001",
+      "source_sha256": "499eb9c38fdcaacce756dc6ac7d0935734fec4e49cb6fcfcc4e5400e6fee9e2c",
+      "dbnum": 7015,
+      "refno": "pe:15207_8920",
+      "owner": "pe:15207_8894",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2500.0,
+        "DTOP": 2000.0,
+        "HEIG": 250.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 452,
+        "triangles": 448,
+        "signed_volume": 0.6384555071185867,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "source_sha256": "b7dc7a204619c9a645b46fef07254fe356319a6a62b18cd8ab917e6740f18922",
+      "dbnum": 7200,
+      "refno": "pe:23584_9700",
+      "owner": "pe:23584_9699",
+      "noun": "POHE",
+      "dimensions": {}
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "source_sha256": "b7dc7a204619c9a645b46fef07254fe356319a6a62b18cd8ab917e6740f18922",
+      "dbnum": 7200,
+      "refno": "pe:23584_9753",
+      "owner": "pe:23584_9699",
+      "noun": "POHE",
+      "dimensions": {}
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "source_sha256": "b7dc7a204619c9a645b46fef07254fe356319a6a62b18cd8ab917e6740f18922",
+      "dbnum": 7200,
+      "refno": "pe:23584_9806",
+      "owner": "pe:23584_9699",
+      "noun": "POHE",
+      "dimensions": {}
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000\\aps7200_0001",
+      "source_sha256": "b7dc7a204619c9a645b46fef07254fe356319a6a62b18cd8ab917e6740f18922",
+      "dbnum": 7200,
+      "refno": "pe:23584_9843",
+      "owner": "pe:23584_9699",
+      "noun": "POHE",
+      "dimensions": {}
+    }
+  ]
+}

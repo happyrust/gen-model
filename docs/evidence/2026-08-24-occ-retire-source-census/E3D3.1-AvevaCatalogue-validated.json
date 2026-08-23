@@ -1,0 +1,739 @@
+{
+  "root": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000",
+  "target_nouns": [
+    "SPHE",
+    "SLCY",
+    "POHE",
+    "POLYHE",
+    "SNOU",
+    "NSNO"
+  ],
+  "files_scanned": 39,
+  "indexed_elements": 4181799,
+  "noun_counts": {
+    "NSNO": 4,
+    "SNOU": 20
+  },
+  "samples": [
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_3647",
+      "owner": "pe:15207_3646",
+      "noun": "NSNO",
+      "dimensions": {
+        "DBOT": 3800.0,
+        "DTOP": 1900.0,
+        "HEIG": 1200.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 564,
+        "triangles": 560,
+        "signed_volume": 0.4579951518544741,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_3705",
+      "owner": "pe:15207_3704",
+      "noun": "NSNO",
+      "dimensions": {
+        "DBOT": 1900.0,
+        "DTOP": 3800.0,
+        "HEIG": 1200.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 564,
+        "triangles": 560,
+        "signed_volume": 1.8319806074178966,
+        "aabb_min": [
+          -1.0,
+          -1.0,
+          -0.5
+        ],
+        "aabb_max": [
+          1.0,
+          1.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_10249",
+      "owner": "pe:15207_10194",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 200.0,
+        "DTOP": 1500.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 356,
+        "triangles": 352,
+        "signed_volume": 16.93711228928882,
+        "aabb_min": [
+          -3.75,
+          -3.75,
+          -0.5
+        ],
+        "aabb_max": [
+          3.75,
+          3.75,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_10296",
+      "owner": "pe:15207_10251",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 230.0,
+        "DTOP": 2000.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 22.32109307021481,
+        "aabb_min": [
+          -4.348,
+          -4.348,
+          -0.5
+        ],
+        "aabb_max": [
+          4.348,
+          4.348,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_10392",
+      "owner": "pe:15207_10389",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2000.0,
+        "DTOP": 1000.0,
+        "HEIG": 800.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 0.45784754670624545,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_10436",
+      "owner": "pe:15207_10433",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 1000.0,
+        "DTOP": 2000.0,
+        "HEIG": 800.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 1.8313901868249824,
+        "aabb_min": [
+          -1.0,
+          -1.0,
+          -0.5
+        ],
+        "aabb_max": [
+          1.0,
+          1.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_10558",
+      "owner": "pe:15207_10507",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2000.0,
+        "DTOP": 700.0,
+        "HEIG": 1200.0,
+        "XOFF": 0.0,
+        "YOFF": 650.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 1849180847.5155287,
+        "aabb_min": [
+          -1000.0,
+          -1325.0,
+          -600.0
+        ],
+        "aabb_max": [
+          1000.0,
+          675.0,
+          600.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_10630",
+      "owner": "pe:15207_10595",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 250.0,
+        "DTOP": 2100.0,
+        "HEIG": 1000.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 420,
+        "triangles": 416,
+        "signed_volume": 20.920745521630458,
+        "aabb_min": [
+          -4.2,
+          -4.2,
+          -0.5
+        ],
+        "aabb_max": [
+          4.2,
+          4.2,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_3498",
+      "owner": "pe:15207_3453",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 273.0,
+        "DTOP": 2000.0,
+        "HEIG": 1000.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 16.21991114787995,
+        "aabb_min": [
+          -3.663,
+          -3.663,
+          -0.5
+        ],
+        "aabb_max": [
+          3.663,
+          3.663,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_3538",
+      "owner": "pe:15207_3500",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 273.0,
+        "DTOP": 2000.0,
+        "HEIG": 1000.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 16.21991114787995,
+        "aabb_min": [
+          -3.663,
+          -3.663,
+          -0.5
+        ],
+        "aabb_max": [
+          3.663,
+          3.663,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_3646",
+      "owner": "pe:15207_3641",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 4000.0,
+        "DTOP": 2000.0,
+        "HEIG": 1200.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 580,
+        "triangles": 576,
+        "signed_volume": 0.4580035792997066,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_3704",
+      "owner": "pe:15207_3699",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2000.0,
+        "DTOP": 4000.0,
+        "HEIG": 1200.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 580,
+        "triangles": 576,
+        "signed_volume": 1.832014317198827,
+        "aabb_min": [
+          -1.0,
+          -1.0,
+          -0.5
+        ],
+        "aabb_max": [
+          1.0,
+          1.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_3829",
+      "owner": "pe:15207_3777",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2000.0,
+        "DTOP": 600.0,
+        "HEIG": 600.0,
+        "XOFF": 0.0,
+        "YOFF": 700.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 872788246.617378,
+        "aabb_min": [
+          -1000.0,
+          -1350.0,
+          -300.0
+        ],
+        "aabb_max": [
+          1000.0,
+          650.0,
+          300.0
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_3909",
+      "owner": "pe:15207_3908",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 273.0,
+        "DTOP": 1000.0,
+        "HEIG": 700.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 292,
+        "triangles": 288,
+        "signed_volume": 4.7274766070959435,
+        "aabb_min": [
+          -1.8315,
+          -1.8315,
+          -0.5
+        ],
+        "aabb_max": [
+          1.8315,
+          1.8315,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_8862",
+      "owner": "pe:15207_8839",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2500.0,
+        "DTOP": 2000.0,
+        "HEIG": 1000.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 452,
+        "triangles": 448,
+        "signed_volume": 0.6384555071185867,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7015_0001",
+      "source_sha256": "81bbacbbb5d272b3c6e90342e240ebc8ef93f98e3b8098f444049a3eb7101ca7",
+      "dbnum": 7015,
+      "refno": "pe:15207_8920",
+      "owner": "pe:15207_8894",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2500.0,
+        "DTOP": 2000.0,
+        "HEIG": 250.0,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 452,
+        "triangles": 448,
+        "signed_volume": 0.6384555071185867,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7017_0001",
+      "source_sha256": "b5f0363f7c6b08c6f9eec00bd65ff3eef7adff467bdccf41c66ba9d9dee0d90e",
+      "dbnum": 7017,
+      "refno": "pe:15209_4168",
+      "owner": "pe:15209_4167",
+      "noun": "NSNO",
+      "dimensions": {
+        "DBOT": 3799.681,
+        "DTOP": 1900.237,
+        "HEIG": 1200.15,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 564,
+        "triangles": 560,
+        "signed_volume": 0.4579951518544741,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7017_0001",
+      "source_sha256": "b5f0363f7c6b08c6f9eec00bd65ff3eef7adff467bdccf41c66ba9d9dee0d90e",
+      "dbnum": 7017,
+      "refno": "pe:15209_4227",
+      "owner": "pe:15209_4226",
+      "noun": "NSNO",
+      "dimensions": {
+        "DBOT": 1900.237,
+        "DTOP": 3799.681,
+        "HEIG": 1200.15,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 564,
+        "triangles": 560,
+        "signed_volume": 1.8319806074178966,
+        "aabb_min": [
+          -1.0,
+          -1.0,
+          -0.5
+        ],
+        "aabb_max": [
+          1.0,
+          1.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7017_0001",
+      "source_sha256": "b5f0363f7c6b08c6f9eec00bd65ff3eef7adff467bdccf41c66ba9d9dee0d90e",
+      "dbnum": 7017,
+      "refno": "pe:15209_4019",
+      "owner": "pe:15209_3974",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 273.05,
+        "DTOP": 2000.25,
+        "HEIG": 1000.125,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 16.21991114787995,
+        "aabb_min": [
+          -3.663,
+          -3.663,
+          -0.5
+        ],
+        "aabb_max": [
+          3.663,
+          3.663,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7017_0001",
+      "source_sha256": "b5f0363f7c6b08c6f9eec00bd65ff3eef7adff467bdccf41c66ba9d9dee0d90e",
+      "dbnum": 7017,
+      "refno": "pe:15209_4059",
+      "owner": "pe:15209_4021",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 273.05,
+        "DTOP": 2000.25,
+        "HEIG": 1000.125,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 16.21991114787995,
+        "aabb_min": [
+          -3.663,
+          -3.663,
+          -0.5
+        ],
+        "aabb_max": [
+          3.663,
+          3.663,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7017_0001",
+      "source_sha256": "b5f0363f7c6b08c6f9eec00bd65ff3eef7adff467bdccf41c66ba9d9dee0d90e",
+      "dbnum": 7017,
+      "refno": "pe:15209_4167",
+      "owner": "pe:15209_4162",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 3999.706,
+        "DTOP": 2000.25,
+        "HEIG": 1200.15,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 580,
+        "triangles": 576,
+        "signed_volume": 0.4580035792997066,
+        "aabb_min": [
+          -0.5,
+          -0.5,
+          -0.5
+        ],
+        "aabb_max": [
+          0.5,
+          0.5,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7017_0001",
+      "source_sha256": "b5f0363f7c6b08c6f9eec00bd65ff3eef7adff467bdccf41c66ba9d9dee0d90e",
+      "dbnum": 7017,
+      "refno": "pe:15209_4226",
+      "owner": "pe:15209_4221",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2000.25,
+        "DTOP": 3999.706,
+        "HEIG": 1200.15,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 580,
+        "triangles": 576,
+        "signed_volume": 1.832014317198827,
+        "aabb_min": [
+          -1.0,
+          -1.0,
+          -0.5
+        ],
+        "aabb_max": [
+          1.0,
+          1.0,
+          0.5
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7017_0001",
+      "source_sha256": "b5f0363f7c6b08c6f9eec00bd65ff3eef7adff467bdccf41c66ba9d9dee0d90e",
+      "dbnum": 7017,
+      "refno": "pe:15209_4351",
+      "owner": "pe:15209_4299",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 2000.25,
+        "DTOP": 600.075,
+        "HEIG": 600.075,
+        "XOFF": 0.0,
+        "YOFF": 700.087
+      },
+      "mesh_validation": {
+        "vertices": 404,
+        "triangles": 400,
+        "signed_volume": 873115600.7717202,
+        "aabb_min": [
+          -1000.125,
+          -1350.1685,
+          -300.0375
+        ],
+        "aabb_max": [
+          1000.125,
+          650.08154,
+          300.0375
+        ]
+      }
+    },
+    {
+      "source_file": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7017_0001",
+      "source_sha256": "b5f0363f7c6b08c6f9eec00bd65ff3eef7adff467bdccf41c66ba9d9dee0d90e",
+      "dbnum": 7017,
+      "refno": "pe:15209_4431",
+      "owner": "pe:15209_4430",
+      "noun": "SNOU",
+      "dimensions": {
+        "DBOT": 273.05,
+        "DTOP": 1000.125,
+        "HEIG": 698.5,
+        "XOFF": 0.0,
+        "YOFF": 0.0
+      },
+      "mesh_validation": {
+        "vertices": 292,
+        "triangles": 288,
+        "signed_volume": 4.7274766070959435,
+        "aabb_min": [
+          -1.8315,
+          -1.8315,
+          -0.5
+        ],
+        "aabb_max": [
+          1.8315,
+          1.8315,
+          0.5
+        ]
+      }
+    }
+  ]
+}

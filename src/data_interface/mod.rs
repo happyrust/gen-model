@@ -55,6 +55,8 @@ pub mod helper;
 
 pub mod cata_closure;
 
+pub mod source_primitive_census;
+
 pub mod parse_error;
 
 pub mod geom_error;

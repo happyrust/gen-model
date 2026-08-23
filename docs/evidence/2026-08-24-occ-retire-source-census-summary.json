@@ -1,0 +1,190 @@
+{
+  "schema": "occ-retire-source-census-summary-v1",
+  "projects": [
+    {
+      "evidence_file": "docs/evidence/2026-08-24-occ-retire-source-census.json",
+      "evidence_sha256": "c9a7575ccee2f35b57fb8289c02c5aeaaee330b9fca759e0ac7c10b4e58da449",
+      "root": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000",
+      "files_scanned": 442,
+      "indexed_elements": 6362819,
+      "noun_counts": {
+        "SLCY": 1,
+        "SNOU": 344
+      },
+      "nonzero_xoff": 0,
+      "nonzero_yoff": 0
+    },
+    {
+      "evidence_file": "docs/evidence/2026-08-24-occ-retire-source-census/E3D2.1-AvevaCatalogue-acp000.json",
+      "evidence_sha256": "552da6046ecc512e496ed69f9bf32794755faa7ac494d1561dff6363590a98a9",
+      "root": "D:\\AVEVA\\Projects\\E3D2.1\\AvevaCatalogue\\acp000",
+      "files_scanned": 39,
+      "indexed_elements": 4181799,
+      "noun_counts": {
+        "NSNO": 4,
+        "SNOU": 20
+      },
+      "nonzero_xoff": 0,
+      "nonzero_yoff": 3
+    },
+    {
+      "evidence_file": "docs/evidence/2026-08-24-occ-retire-source-census/E3D2.1-AvevaMarineSample-ams000.json",
+      "evidence_sha256": "8bd7634792c19ad802ea6b0c5ad2e77b63b4891d724e59e4dd886010823790f3",
+      "root": "D:\\AVEVA\\Projects\\E3D2.1\\AvevaMarineSample\\ams000",
+      "files_scanned": 442,
+      "indexed_elements": 6362596,
+      "noun_counts": {
+        "SLCY": 1,
+        "SNOU": 344
+      },
+      "nonzero_xoff": 0,
+      "nonzero_yoff": 0
+    },
+    {
+      "evidence_file": "docs/evidence/2026-08-24-occ-retire-source-census/E3D2.1-AvevaPlantSample-aps000.json",
+      "evidence_sha256": "1d0acf28012d6f4c261447a2b72bb3284487f25dd8942bfe7cdf52739c86b7f2",
+      "root": "D:\\AVEVA\\Projects\\E3D2.1\\AvevaPlantSample\\aps000",
+      "files_scanned": 216,
+      "indexed_elements": 4129729,
+      "noun_counts": {
+        "NSNO": 2,
+        "POHE": 4,
+        "SLCY": 30,
+        "SNOU": 22
+      },
+      "nonzero_xoff": 0,
+      "nonzero_yoff": 2
+    },
+    {
+      "evidence_file": "docs/evidence/2026-08-24-occ-retire-source-census/E3D2.1-SCB-scb000.json",
+      "evidence_sha256": "d8aa164172597348628949b1c65fd4caf7f7fa7e3e5856481033fa4abd07bb15",
+      "root": "D:\\AVEVA\\Projects\\E3D2.1\\SCB\\scb000",
+      "files_scanned": 4,
+      "indexed_elements": 4315,
+      "noun_counts": {},
+      "nonzero_xoff": 0,
+      "nonzero_yoff": 0
+    },
+    {
+      "evidence_file": "docs/evidence/2026-08-24-occ-retire-source-census/E3D2.1-TEST-TES000.json",
+      "evidence_sha256": "bb9a5fd8d309ddceacc393b6cf75ff5696213db68cc69b765b52f0450e5c7ec0",
+      "root": "D:\\AVEVA\\Projects\\E3D2.1\\TEST\\TES000",
+      "files_scanned": 84,
+      "indexed_elements": 1130689,
+      "noun_counts": {
+        "POHE": 90,
+        "SLCY": 243,
+        "SNOU": 596
+      },
+      "nonzero_xoff": 447,
+      "nonzero_yoff": 201
+    },
+    {
+      "evidence_file": "docs/evidence/2026-08-24-occ-retire-source-census/E3D2.1-ZDJ-ZDJ000.json",
+      "evidence_sha256": "5d9719e6d02ababa9b060d6356782d0644cb9b375a1018b22c299a81df757410",
+      "root": "D:\\AVEVA\\Projects\\E3D2.1\\ZDJ\\ZDJ000",
+      "files_scanned": 41,
+      "indexed_elements": 97687,
+      "noun_counts": {
+        "NSNO": 2,
+        "POHE": 4,
+        "SNOU": 14
+      },
+      "nonzero_xoff": 0,
+      "nonzero_yoff": 2
+    },
+    {
+      "evidence_file": "docs/evidence/2026-08-24-occ-retire-source-census/E3D3.1-AvevaCatalogue-acp000.json",
+      "evidence_sha256": "2dbc5683f1811f79cccb1af6dccc16beff4ff5f30f7938b1e15a21679ba0359d",
+      "root": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000",
+      "files_scanned": 39,
+      "indexed_elements": 4181799,
+      "noun_counts": {
+        "NSNO": 4,
+        "SNOU": 20
+      },
+      "nonzero_xoff": 0,
+      "nonzero_yoff": 3
+    },
+    {
+      "evidence_file": "docs/evidence/2026-08-24-occ-retire-source-census/E3D3.1-AvevaPlantSample-aps000.json",
+      "evidence_sha256": "0b5a6a3548f5d0c2e396576fa261e3559a1368d08acd07588f69bf5c5e75a41f",
+      "root": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaPlantSample\\aps000",
+      "files_scanned": 235,
+      "indexed_elements": 4164813,
+      "noun_counts": {
+        "NSNO": 2,
+        "POHE": 4,
+        "SLCY": 30,
+        "SNOU": 22
+      },
+      "nonzero_xoff": 0,
+      "nonzero_yoff": 2
+    },
+    {
+      "evidence_file": "docs/evidence/2026-08-24-occ-retire-source-census/E3D3.1-SCB-scb000.json",
+      "evidence_sha256": "7a304b1200fef8713a085131b9bd97b488530da67481626a29c9e47e4bd020c2",
+      "root": "D:\\AVEVA\\Projects\\E3D3.1\\SCB\\scb000",
+      "files_scanned": 4,
+      "indexed_elements": 4315,
+      "noun_counts": {},
+      "nonzero_xoff": 0,
+      "nonzero_yoff": 0
+    },
+    {
+      "evidence_file": "docs/evidence/2026-08-24-occ-retire-source-census/E3D3.1-TEST-TES000.json",
+      "evidence_sha256": "5e6ad9c05a35604f9381bb3165a8efebf3bbf3e37f9e37a099383f1b3c9f208d",
+      "root": "D:\\AVEVA\\Projects\\E3D3.1\\TEST\\TES000",
+      "files_scanned": 84,
+      "indexed_elements": 1130689,
+      "noun_counts": {
+        "POHE": 90,
+        "SLCY": 243,
+        "SNOU": 596
+      },
+      "nonzero_xoff": 447,
+      "nonzero_yoff": 201
+    },
+    {
+      "evidence_file": "docs/evidence/2026-08-24-occ-retire-source-census/E3D3.1-YCYK-E3D-acw000.json",
+      "evidence_sha256": "9446545fb8d2d5eb6b3ee5fd2cd5f5122950f89aadb8551fbf208c6289f26526",
+      "root": "D:\\AVEVA\\Projects\\E3D3.1\\YCYK-E3D\\acw000",
+      "files_scanned": 77,
+      "indexed_elements": 3284700,
+      "noun_counts": {
+        "NSNO": 2,
+        "POHE": 1252,
+        "SLCY": 2508,
+        "SNOU": 39
+      },
+      "nonzero_xoff": 1,
+      "nonzero_yoff": 6
+    },
+    {
+      "evidence_file": "docs/evidence/2026-08-24-occ-retire-source-census/E3D3.1-ZDJ-ZDJ000.json",
+      "evidence_sha256": "cb930ea21fc07716b1ac36c749c44e83279c650c03053882db24b11bd9bf4fd0",
+      "root": "D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\ZDJ000",
+      "files_scanned": 41,
+      "indexed_elements": 97687,
+      "noun_counts": {
+        "NSNO": 2,
+        "POHE": 4,
+        "SNOU": 14
+      },
+      "nonzero_xoff": 0,
+      "nonzero_yoff": 2
+    }
+  ],
+  "totals": {
+    "files_scanned": 1748,
+    "indexed_elements": 35133637,
+    "noun_counts": {
+      "SLCY": 3056,
+      "SNOU": 2031,
+      "NSNO": 18,
+      "POHE": 1448
+    },
+    "nonzero_xoff": 895,
+    "nonzero_yoff": 422
+  }
+}
