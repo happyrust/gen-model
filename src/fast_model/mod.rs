@@ -20,6 +20,9 @@ pub mod sweep_mesh;
 #[cfg(test)]
 pub mod mesh_assert;
 
+#[cfg(test)]
+mod occ_retirement_guard;
+
 #[cfg(feature = "manifold")]
 pub mod manifold_bool;
 

@@ -173,7 +173,7 @@ jobs:
   # 数据全来自仓内 issue-019 会话快照夹具。房间增量档要 bin/surreal.exe 与
   # testbed 项目副本，留在本地跑（见 python/README.md）。
   #
-  # 绑定与服务使用同一套无 OCC 默认 feature，wheel 直接构建并导入。
+  # 绑定与服务使用同一套 Manifold 默认 feature，wheel 直接构建并导入。
   python-bindings:
     runs-on: windows-latest
     timeout-minutes: 180
@@ -251,13 +251,13 @@ jobs:
           python -m pip install --force-reinstall $wheel.FullName
 
       # 先单独试一次 import：DLL 缺失会让整档 60+ 条用例一起变成同一条
-      # "DLL load failed"，噪声盖过信号。这一步失败就直接把 OCC bin 的清单打出来，
-      # 下一轮不用靠猜。
+      # "DLL load failed"，噪声盖过信号。这里同时检查 wheel 的文件清单。
       - name: Smoke-import the extension and reject OCCT dependencies
         shell: pwsh
         run: |
           python -c "import aios_db; print(aios_db.__file__)"
-          $wheel = Get-ChildItem wheelhouse/*.whl | Select-Object -First 1
+          $wheel = Get-ChildItem "$env:CARGO_TARGET_DIR\wheels\*.whl" | Select-Object -First 1
+          if (-not $wheel) { throw 'maturin 没有产出 wheel' }
           $names = python -c "import zipfile,sys; print(chr(10).join(zipfile.ZipFile(sys.argv[1]).namelist()))" $wheel.FullName
           if ($names -match "(?i)(^|/)(TK[^/]*|OCCT[^/]*)\.dll$") {
             throw "wheel contains an OCCT runtime DLL"
