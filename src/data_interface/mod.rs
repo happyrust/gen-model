@@ -73,6 +73,8 @@ pub mod initialization_phase;
 
 pub mod batch_worker;
 
+pub mod queue_stall_diagnostics;
+
 pub mod task_registry;
 
 pub mod staging;

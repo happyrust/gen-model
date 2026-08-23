@@ -15,7 +15,7 @@ const TRI_AREA_EPS: f32 = 1e-9;
 /// 半边长低于这个值（PDMS 单位是 mm，即亚微米）就当作 0。
 const DEGENERATE_EDGE: f32 = 0.001;
 
-fn compute_aabb(vertices: &[Vec3]) -> Option<Aabb> {
+pub(crate) fn compute_aabb(vertices: &[Vec3]) -> Option<Aabb> {
     if vertices.is_empty() {
         return None;
     }
