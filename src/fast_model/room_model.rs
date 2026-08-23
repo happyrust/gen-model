@@ -343,6 +343,39 @@ struct RoomBuildStamp {
     tree_entries: u64,
 }
 
+/// 凭据行的读取形状。`rebuild_required` 必须是 `Option<bool>` 而不是 `bool`。
+///
+/// SurrealDB 的投影会把记录上**不存在**的字段照样列进结果、值为 `NONE`，而
+/// `#[serde(default)]` 只兜得住「键缺失」，兜不住「键在、值是 NONE」。老二进制
+/// 盖的章没有后两个字段——2026-08-20 现场那行就只有 `spatial_epoch=355` /
+/// `tree_entries=105650` / `built_at`，`SELECT` 回来的 `rebuild_required` 是
+/// `null`，整份凭据 `expected a boolean, found None` 解析失败。
+///
+/// 代价不只是 /health 上那句难看的错误：[`reconcile_startup_room_build`] 读不出
+/// 凭据一律判「跑」，于是每次重启都白做一次全量房间重建。
+///
+/// 严格读 + 初始化时删旧行也能解，但那要求有一条真的迁移语句；没有它，严格读
+/// 就是把线上每一次启动都钉死在重建上。缺字段按「不要求重建」读并不放松安全：
+/// 这行只在一次**成功**的全量重建之后才存在，真该重建的情形仍由 stamp 对账
+/// （epoch / 条数）与「没有凭据 ⇒ 跑」两条兜住。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct RoomBuildRecord {
+    #[serde(default)]
+    spatial_epoch: u64,
+    #[serde(default)]
+    tree_entries: u64,
+    #[serde(default)]
+    rebuild_required: Option<bool>,
+    #[serde(default)]
+    rebuild_reason: Option<String>,
+}
+
+impl RoomBuildRecord {
+    fn requires_rebuild(&self) -> bool {
+        self.rebuild_required.unwrap_or(false)
+    }
+}
+
 /// 启动该不该跑全量房间重建，以及那句要打给人看的理由。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StartupRoomBuild {
@@ -358,15 +391,18 @@ async fn current_room_build_stamp() -> anyhow::Result<RoomBuildStamp> {
     })
 }
 
-async fn read_room_build_stamp() -> anyhow::Result<Option<RoomBuildStamp>> {
+async fn read_room_build_record() -> anyhow::Result<Option<RoomBuildRecord>> {
     let mut response = SUL_DB
-        .query("SELECT spatial_epoch, tree_entries FROM room_build:main;")
+        .query(
+            "SELECT spatial_epoch, tree_entries, rebuild_required, rebuild_reason \
+             FROM room_build:main;",
+        )
         .await
         .map_err(|error| anyhow::anyhow!("读取房间重建凭据失败: {error}"))?
         .check()
         .map_err(|error| anyhow::anyhow!("读取房间重建凭据语句失败: {error}"))?;
     Ok(response
-        .take::<Vec<RoomBuildStamp>>(0)
+        .take::<Vec<RoomBuildRecord>>(0)
         .map_err(|error| anyhow::anyhow!("解析房间重建凭据失败: {error}"))?
         .into_iter()
         .next())
@@ -386,13 +422,62 @@ async fn stamp_room_build(stamp: RoomBuildStamp) -> anyhow::Result<()> {
     SUL_DB
         .query(format!(
             "UPSERT room_build:main SET spatial_epoch = {spatial_epoch}, \
-             tree_entries = {tree_entries}, built_at = time::now();"
+             tree_entries = {tree_entries}, rebuild_required = false, \
+             rebuild_reason = NONE, built_at = time::now();"
         ))
         .await
         .map_err(|error| anyhow::anyhow!("写入房间重建凭据失败: {error}"))?
         .check()
         .map_err(|error| anyhow::anyhow!("写入房间重建凭据语句失败: {error}"))?;
     Ok(())
+}
+
+/// 窗口可以提交、但结构枚举已不足以建立精确面板任务时的持久恢复信号。
+/// 该语句由数据窗口尾事务调用，只有成功的全量房间重建会清除它。
+pub(crate) fn render_room_rebuild_required(reason: Option<&str>) -> String {
+    let reason = crate::data_interface::dbnum_state::escape_surql_str(
+        reason.unwrap_or("房间结构枚举失败，需要全量重建"),
+    );
+    format!(
+        "UPSERT room_build:main SET spatial_epoch = spatial_epoch ?: 0, \
+         tree_entries = tree_entries ?: 0, rebuild_required = true, \
+         rebuild_reason = '{reason}', invalidated_at = time::now();"
+    )
+}
+
+const ROOM_BUILD_HEALTH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+async fn room_build_health_from<F>(timeout: std::time::Duration, read: F) -> serde_json::Value
+where
+    F: std::future::Future<Output = anyhow::Result<Option<RoomBuildRecord>>>,
+{
+    match tokio::time::timeout(timeout, read).await {
+        Ok(Ok(Some(record))) => serde_json::json!({
+            "rebuild_required": record.requires_rebuild(),
+            "rebuild_reason": record.rebuild_reason,
+            "spatial_epoch": record.spatial_epoch,
+            "tree_entries": record.tree_entries,
+        }),
+        Ok(Ok(None)) => serde_json::json!({
+            "rebuild_required": true,
+            "rebuild_reason": "没有成功的全量房间重建凭据",
+        }),
+        Ok(Err(error)) => serde_json::json!({
+            "rebuild_required": true,
+            "rebuild_reason": format!("读取房间重建凭据失败: {error:#}"),
+        }),
+        Err(_) => serde_json::json!({
+            "rebuild_required": true,
+            "rebuild_reason": format!(
+                "读取房间重建凭据超过 {} 秒",
+                timeout.as_secs_f64()
+            ),
+        }),
+    }
+}
+
+pub async fn room_build_health() -> serde_json::Value {
+    room_build_health_from(ROOM_BUILD_HEALTH_TIMEOUT, read_room_build_record()).await
 }
 
 /// 启动全量房间重建的对账：与上次成功重建时的凭据一致就跳过。
@@ -405,9 +490,31 @@ pub async fn reconcile_startup_room_build() -> StartupRoomBuild {
         Ok(current) => current,
         Err(error) => return StartupRoomBuild::Run(format!("读不到当前空间状态（{error:#}）")),
     };
-    match read_room_build_stamp().await {
-        Ok(last) => room_build_verdict(last, current),
+    match read_room_build_record().await {
+        Ok(last) => room_build_record_verdict(last, current),
         Err(error) => StartupRoomBuild::Run(format!("读不到上次重建凭据（{error:#}）")),
+    }
+}
+
+fn room_build_record_verdict(
+    last: Option<RoomBuildRecord>,
+    current: RoomBuildStamp,
+) -> StartupRoomBuild {
+    match last {
+        Some(record) if record.requires_rebuild() => StartupRoomBuild::Run(format!(
+            "持久重建要求：{}",
+            record
+                .rebuild_reason
+                .as_deref()
+                .unwrap_or("房间结构枚举失败")
+        )),
+        last => room_build_verdict(
+            last.map(|record| RoomBuildStamp {
+                spatial_epoch: record.spatial_epoch,
+                tree_entries: record.tree_entries,
+            }),
+            current,
+        ),
     }
 }
 
@@ -2579,6 +2686,69 @@ mod tests {
             spatial_epoch,
             tree_entries,
         }
+    }
+
+    fn record(rebuild_required: bool) -> RoomBuildRecord {
+        RoomBuildRecord {
+            spatial_epoch: 292,
+            tree_entries: 22056,
+            rebuild_required: Some(rebuild_required),
+            rebuild_reason: rebuild_required.then(|| "panel enumeration failed".into()),
+        }
+    }
+
+    /// 老二进制盖的章缺 `rebuild_required`，而 SurrealDB 的投影把它当 `NONE` 列出来。
+    ///
+    /// 2026-08-20 现场就卡在这里：`room_build:main` 只有 `spatial_epoch` /
+    /// `tree_entries` / `built_at`，严格读法整份凭据解析失败，`/health` 常驻
+    /// 「读取房间重建凭据失败」，启动对账一路判「跑」，每次重启白做一次全量重建。
+    #[test]
+    fn a_stamp_without_the_rebuild_flag_stays_readable() {
+        let record: RoomBuildRecord = serde_json::from_value(serde_json::json!({
+            "spatial_epoch": 292,
+            "tree_entries": 22056,
+            "rebuild_required": null,
+            "rebuild_reason": null,
+        }))
+        .expect("Surreal 的 NONE 必须仍然读得动");
+        assert!(!record.requires_rebuild());
+        assert_eq!(
+            room_build_record_verdict(Some(record), stamp(292, 22056)),
+            StartupRoomBuild::Skip("与上次成功全量重建一致（空间 epoch 292、树 22056 条）".into()),
+            "缺字段不该被读成「要求重建」"
+        );
+    }
+
+    #[test]
+    fn explicit_rebuild_requirement_overrides_an_equal_stamp() {
+        assert!(matches!(
+            room_build_record_verdict(Some(record(true)), stamp(292, 22056)),
+            StartupRoomBuild::Run(reason) if reason.contains("panel enumeration failed")
+        ));
+        assert_eq!(
+            room_build_record_verdict(Some(record(false)), stamp(292, 22056)),
+            StartupRoomBuild::Skip("与上次成功全量重建一致（空间 epoch 292、树 22056 条）".into())
+        );
+    }
+
+    #[test]
+    fn rebuild_marker_escapes_external_reason() {
+        let sql = render_room_rebuild_required(Some("C:\\fixture\\room's panel"));
+        assert!(sql.contains("rebuild_required = true"));
+        assert!(sql.contains("C:\\\\fixture\\\\room\\'s panel"), "{sql}");
+    }
+
+    #[tokio::test]
+    async fn room_health_returns_degraded_status_when_record_read_stalls() {
+        let stalled = std::future::pending::<anyhow::Result<Option<RoomBuildRecord>>>();
+        let health = room_build_health_from(std::time::Duration::from_millis(1), stalled).await;
+        assert_eq!(health["rebuild_required"], true);
+        assert!(
+            health["rebuild_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("超过")),
+            "{health}"
+        );
     }
 
     /// 对账的正例：空间状态与上次成功重建时一模一样，这一轮就该省掉。

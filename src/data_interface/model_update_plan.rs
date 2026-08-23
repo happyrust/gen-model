@@ -97,6 +97,13 @@ pub struct ModelUpdatePlan {
     /// Empty for windows that have no unit rollup at all (CATA / SYS meta).
     #[serde(default)]
     pub units: Vec<DeliveryUnitSummary>,
+    /// 结构面板枚举失败后留下的持久全量重建要求（ADR-040）。
+    ///
+    /// 旧恢复记录没有该字段，反序列化时必须保持 `false`。
+    #[serde(default)]
+    pub room_rebuild_required: bool,
+    #[serde(default)]
+    pub room_rebuild_reason: Option<String>,
 }
 
 impl ModelUpdatePlan {
@@ -579,11 +586,23 @@ pub(crate) struct RoomStructuralTriggers {
     pub renamed_rooms: Vec<RefnoEnum>,
     /// OWNER 变更（搬迁，ADR-009 口径）的 PANE。
     pub moved_panels: Vec<RefnoEnum>,
+    /// `project_hd` 固定层级里的中间容器；其直接 PANE 子元素继承房间归属。
+    #[cfg(feature = "project_hd")]
+    pub moved_panel_containers: Vec<RefnoEnum>,
 }
 
 impl RoomStructuralTriggers {
     pub fn is_empty(&self) -> bool {
-        self.renamed_rooms.is_empty() && self.moved_panels.is_empty()
+        self.renamed_rooms.is_empty() && self.moved_panels.is_empty() && {
+            #[cfg(feature = "project_hd")]
+            {
+                self.moved_panel_containers.is_empty()
+            }
+            #[cfg(not(feature = "project_hd"))]
+            {
+                true
+            }
+        }
     }
 }
 
@@ -669,6 +688,14 @@ pub(crate) fn collect_room_structural_triggers(
                     triggers.renamed_rooms.push(refno);
                 }
             }
+            #[cfg(feature = "project_hd")]
+            "CWALL" | "CFLOOR" => {
+                let (old_owner, new_owner) = owner_change(op);
+                let moved = (old_owner.is_some() || new_owner.is_some()) && old_owner != new_owner;
+                if moved && seen_rooms.insert(refno) {
+                    triggers.moved_panel_containers.push(refno);
+                }
+            }
             _ => {}
         }
     }
@@ -692,6 +719,46 @@ async fn panels_under_rooms(rooms: &[RefnoEnum]) -> anyhow::Result<Vec<RefnoEnum
             .query(format!(
                 "SELECT VALUE id FROM pe WHERE noun = 'PANE' AND deleted != true \
                  AND (owner IN [{keys}] OR owner.owner IN [{keys}]);"
+            ))
+            .await?
+            .check()?;
+        for thing in response.take::<Vec<Thing>>(0)? {
+            panels.push(pe_thing_to_refno(thing)?);
+        }
+    }
+    Ok(panels)
+}
+
+fn merge_structural_panel_enumeration(
+    result: anyhow::Result<Vec<RefnoEnum>>,
+    context: &str,
+    panel_targets: &mut std::collections::BTreeSet<String>,
+    rebuild_reasons: &mut Vec<String>,
+) {
+    match result {
+        Ok(panels) => panel_targets.extend(panels.iter().map(RefnoEnum::to_pdms_str)),
+        Err(error) => rebuild_reasons.push(format!("{context}: {error:#}")),
+    }
+}
+
+/// `project_hd` 的中间容器只接纳直接 PANE；不要把这条查询扩成递归遍历，
+/// 否则会和房间构建的固定两层拓扑产生两套语义。
+#[cfg(feature = "project_hd")]
+async fn panels_under_containers(containers: &[RefnoEnum]) -> anyhow::Result<Vec<RefnoEnum>> {
+    use crate::data_interface::helper::pe_thing_to_refno;
+    use surrealdb::sql::Thing;
+
+    let mut panels = Vec::new();
+    for chunk in containers.chunks(200) {
+        let keys = chunk
+            .iter()
+            .map(RefnoEnum::to_pe_key)
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT VALUE id FROM pe WHERE noun = 'PANE' AND deleted != true \
+                 AND owner IN [{keys}];"
             ))
             .await?
             .check()?;
@@ -756,6 +823,8 @@ fn build_cata_cascade_plan(
         warnings: Vec::new(),
         design_refnos: Vec::new(),
         units: Vec::new(),
+        room_rebuild_required: false,
+        room_rebuild_reason: None,
     }
 }
 
@@ -883,12 +952,13 @@ pub(crate) async fn build_model_update_plan(
 
     // D12（ADR-010 已知缺口的触发规则落地）：房间改名 → 名下全部 PANE 入队整间
     // 重算；PANE 搬迁 → 自身入队（新旧属主对应的房间都经它的整间分支收敛）。
-    // 面板枚举失败降级为告警——房间归属是可事后重建的派生数据，下一次启动的
-    // 全量重建仍是兜底，不能让它掐断整个数据窗口。
+    // 面板枚举失败降级为告警，并在尾事务持久标记全量重建要求。不能只打一行 warning：
+    // 水位推进后必须留下与它共命运的恢复信号（ADR-040）。
     let room_triggers = collect_room_structural_triggers(
         range_eles,
         &aios_core::get_db_option().get_room_key_word(),
     );
+    let mut room_rebuild_reasons = Vec::new();
     if !room_triggers.is_empty() {
         let mut panel_targets: std::collections::BTreeSet<String> = room_triggers
             .moved_panels
@@ -896,14 +966,24 @@ pub(crate) async fn build_model_update_plan(
             .map(|refno| refno.to_pdms_str())
             .collect();
         if !room_triggers.renamed_rooms.is_empty() {
-            let panels = panels_under_rooms(&room_triggers.renamed_rooms)
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!(
-                        "dbnum={dbnum}: 房间改名的面板枚举失败，拒绝推进窗口: {error:#}"
-                    )
-                })?;
-            panel_targets.extend(panels.iter().map(|refno| refno.to_pdms_str()));
+            merge_structural_panel_enumeration(
+                panels_under_rooms(&room_triggers.renamed_rooms).await,
+                &format!("dbnum={dbnum}: 房间改名的面板枚举失败"),
+                &mut panel_targets,
+                &mut room_rebuild_reasons,
+            );
+        }
+        #[cfg(feature = "project_hd")]
+        if !room_triggers.moved_panel_containers.is_empty() {
+            merge_structural_panel_enumeration(
+                panels_under_containers(&room_triggers.moved_panel_containers).await,
+                &format!("dbnum={dbnum}: CWALL/CFLOOR 搬迁的 PANE 枚举失败"),
+                &mut panel_targets,
+                &mut room_rebuild_reasons,
+            );
+        }
+        if !room_rebuild_reasons.is_empty() {
+            warnings.extend(room_rebuild_reasons.iter().cloned());
         }
         // 面板目标从持久层拓扑枚举并随尾事务落 durable pending。房间拓扑、关系和
         // 面板产物不复制进 kv-mem；提交后的 scoped drain 读取 RocksDB 新终态。
@@ -927,11 +1007,15 @@ pub(crate) async fn build_model_update_plan(
         .collect::<Vec<_>>();
     design_refnos.sort_unstable();
     design_refnos.dedup();
+    let room_rebuild_reason =
+        (!room_rebuild_reasons.is_empty()).then(|| room_rebuild_reasons.join("; "));
     Ok(ModelUpdatePlan {
         work_items,
         warnings,
         design_refnos,
         units,
+        room_rebuild_required: room_rebuild_reason.is_some(),
+        room_rebuild_reason,
     })
 }
 
@@ -1659,6 +1743,10 @@ mod tests {
         let renamed_out = aios_core::RefU64((1u64 << 32) | 13);
         let panel = aios_core::RefU64((1u64 << 32) | 14);
         let idle_panel = aios_core::RefU64((1u64 << 32) | 15);
+        #[cfg(feature = "project_hd")]
+        let cwall = aios_core::RefU64((1u64 << 32) | 16);
+        #[cfg(feature = "project_hd")]
+        let cfloor = aios_core::RefU64((1u64 << 32) | 17);
 
         let ops = BTreeMap::from([(
             42u32,
@@ -1703,6 +1791,22 @@ mod tests {
                     NamedAttrValue::StringType("old".into()),
                     NamedAttrValue::StringType("new".into()),
                 ),
+                #[cfg(feature = "project_hd")]
+                room_modified_op(
+                    cwall,
+                    "CWALL",
+                    "OWNER",
+                    NamedAttrValue::RefU64Type(aios_core::RefU64((1u64 << 32) | 21)),
+                    NamedAttrValue::RefU64Type(aios_core::RefU64((1u64 << 32) | 22)),
+                ),
+                #[cfg(feature = "project_hd")]
+                room_modified_op(
+                    cfloor,
+                    "CFLOOR",
+                    "OWNER",
+                    NamedAttrValue::RefU64Type(aios_core::RefU64((1u64 << 32) | 21)),
+                    NamedAttrValue::RefU64Type(aios_core::RefU64((1u64 << 32) | 23)),
+                ),
             ],
         )]);
 
@@ -1713,6 +1817,12 @@ mod tests {
             "改成房间与改出房间都要触发"
         );
         assert_eq!(triggers.moved_panels, vec![RefnoEnum::from(panel)]);
+        #[cfg(feature = "project_hd")]
+        assert_eq!(
+            triggers.moved_panel_containers,
+            vec![RefnoEnum::from(cwall), RefnoEnum::from(cfloor)],
+            "中间容器搬迁必须把直接 PANE 子元素送入结构枚举"
+        );
     }
 
     /// 关键字未配置时判不了房间性：一个都不触发（与房间功能本身的依赖一致），
@@ -1734,6 +1844,25 @@ mod tests {
 
         let triggers = collect_room_structural_triggers(&ops, &[]);
         assert!(triggers.is_empty(), "{triggers:?}");
+    }
+
+    #[test]
+    fn structural_panel_enumeration_failure_keeps_valid_targets_and_requests_rebuild() {
+        let preserved = RefnoEnum::from(aios_core::RefU64((1u64 << 32) | 14));
+        let mut targets = std::collections::BTreeSet::from([preserved.to_pdms_str()]);
+        let mut reasons = Vec::new();
+        merge_structural_panel_enumeration(
+            Err(anyhow::anyhow!("decode failed")),
+            "dbnum=8000: 房间改名的面板枚举失败",
+            &mut targets,
+            &mut reasons,
+        );
+        assert_eq!(
+            targets,
+            std::collections::BTreeSet::from([preserved.to_pdms_str()])
+        );
+        assert_eq!(reasons.len(), 1);
+        assert!(reasons[0].contains("decode failed"));
     }
 
     fn live_modified_op(
@@ -2249,8 +2378,8 @@ mod tests {
         let mut response = SUL_DB
             .query(
                 "RETURN [
-                    count(SELECT * FROM neg_relate
-                          WHERE in = pe:24381_100680 AND out = pe:24381_100679),
+                    count(SELECT * FROM pe:24381_100680->neg_relate
+                          WHERE out = pe:24381_100679),
                     inst_relate:24381_100680.id != none
                 ];",
             )
@@ -2354,5 +2483,15 @@ mod tests {
             .await
             .expect("build SYST plan");
         assert!(plan.work_items.is_empty(), "{:?}", plan.work_items);
+    }
+
+    #[test]
+    fn old_model_plan_defaults_room_rebuild_requirement_to_false() {
+        let plan: ModelUpdatePlan = serde_json::from_str(
+            r#"{"work_items":[],"warnings":[],"design_refnos":[],"units":[]}"#,
+        )
+        .expect("old plan shape must remain readable");
+        assert!(!plan.room_rebuild_required);
+        assert!(plan.room_rebuild_reason.is_none());
     }
 }

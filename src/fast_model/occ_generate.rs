@@ -1130,8 +1130,9 @@ pub async fn existing_geometric_aabb_changes(
 /// 共享单位几何没有 `aabb`/`pts`，此前这类行被整体跳过，从未进过空间树，也就从未
 /// 参与过房间归属。
 ///
-/// 注意返回的是「变更集」而不是「处理过的集合」——`manual_update_aabbs` 这类全量重刷
-/// 会把整个库喂进来，按处理集入队等于给每个元素都排一次房间重算。
+/// 普通入口仍只返回 AABB 变更集；定向增量入口则保守返回全部实际有几何的目标。
+/// 两者不可混用：全量重刷按处理集入队会制造全库房间任务，而定向生成若仍只看 AABB，
+/// 内部网格/布尔结果或对称位姿变化会静默漏掉（ADR-040）。
 pub async fn update_inst_relate_aabbs_by_refnos(
     refnos: &[RefnoEnum],
     replace_exist: bool,
@@ -1298,6 +1299,7 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             }
             stale
         };
+        let mut aabb_change_count = 0usize;
         let chunk_changes = new_boxes
             .iter()
             .filter_map(|(refno, noun, new_box)| {
@@ -1305,12 +1307,25 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
                     .get(&refno.refno())
                     .map(Vec::as_slice)
                     .unwrap_or(&[]);
-                tree_box_changed(olds, new_box).then(|| AabbChange {
+                let aabb_changed = tree_box_changed(olds, new_box);
+                aabb_change_count += usize::from(aabb_changed);
+                room_target_required(aabb_changed, durable_room_trigger).then(|| AabbChange {
                     refno: *refno,
                     noun: noun.clone(),
                 })
             })
             .collect::<Vec<_>>();
+        // 定向增量的输入已经是本次真正重写/变换的目标，不是全库候选。房间判定消费
+        // 最终 mesh 与变换而不只消费 AABB；因此即使盒子逐位相等，也必须留下 durable
+        // 房间目标和 epoch 痕迹。重试仍会无条件得到同一集合，关闭了“几何已写、任务未写”
+        // 崩溃后因前后看起来相同而漏触发的窗口。
+        let same_aabb_geometry = chunk_changes.len().saturating_sub(aabb_change_count);
+        if same_aabb_geometry > 0 {
+            println!(
+                "[房间增量] 本块 {} 个定向几何目标 AABB 未变，仍保守排入房间重算并推进空间 epoch",
+                same_aabb_geometry
+            );
+        }
 
         // aabb 记录先落库、指针后落库（与 trans 记录同一条 D9 教训，方向不能反）：
         // 反过来的话，两条语句之间的并发读者与中途崩溃都会看到指向缺位记录的指针，
@@ -1334,7 +1349,7 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
         }
 
         if !chunk_changes.is_empty() {
-            // 本块确有包围盒变化 → 指针写与 epoch bump 必须同事务，无论是不是定向增量。
+            // 本块确有包围盒变化或定向几何变化 → 指针写与 epoch bump 必须同事务。
             // 直写路径不产生 `spatial_reconcile` 意图行，epoch 是它在库侧留下的**唯一**
             // 痕迹：少 bump 一次，落盘前崩溃的重启就会看到 sidecar 与库指纹相等、按
             // Reuse 复用一棵陈旧的树，而 /health 的 drift 恒为 false，没有人看得见。
@@ -1362,8 +1377,7 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             )
             .await?;
         } else if !update_sql.is_empty() {
-            // 重算值与树上旧值逐位相等：库侧「树应有内容」没变，不 bump——没动树的
-            // 提交不该作废别人已经落好的树文件。
+            // 普通（非定向）重刷且盒子逐位相等：库侧「树应有内容」没变，不 bump。
             crate::surreal_retry::execute_model_write(
                 &update_sql,
                 "update inst_relate aabb pointers",
@@ -1402,6 +1416,12 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
 /// 重算一次才能收敛。
 fn tree_box_changed(old_entries: &[Aabb], new_box: &Aabb) -> bool {
     !(old_entries.len() == 1 && old_entries[0] == *new_box)
+}
+
+/// 定向增量已经由工作计划把范围缩到真实重写目标，因此它的几何变化不能再由 AABB
+/// 是否变化代替；普通全量/维护刷新仍只认 AABB，避免制造全库房间任务。
+fn room_target_required(aabb_changed: bool, durable_incremental: bool) -> bool {
+    aabb_changed || durable_incremental
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -1947,6 +1967,17 @@ mod occ_inst_boolean_persist_tests {
 #[cfg(test)]
 mod aabb_write_order_tests {
     #[test]
+    fn targeted_geometry_remains_a_room_target_when_aabb_is_identical() {
+        assert!(super::room_target_required(false, true));
+        assert!(super::room_target_required(true, true));
+        assert!(super::room_target_required(true, false));
+        assert!(
+            !super::room_target_required(false, false),
+            "普通全量/维护重刷不得按处理集制造全库房间任务"
+        );
+    }
+
+    #[test]
     fn mesh_workers_propagate_query_write_and_join_failures() {
         let source = include_str!("occ_generate.rs");
         let body = source
@@ -2323,8 +2354,10 @@ mod aabb_write_order_tests {
             .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
             .expect("aabb refresh boundary")
             .0;
+        // 只认函数名：调用一旦被 rustfmt 拆成多行，带实参的针就再也扎不中，
+        // 这道顺序门会静默变成「找不到即 panic」而不是它要守的那条不变量。
         let boolean_at = body
-            .find("apply_insts_boolean_manifold(&target_visible_refnos")
+            .find("apply_insts_boolean_manifold(")
             .expect("final boolean stage exists");
         let final_refresh_at = body[boolean_at..]
             .find("update_inst_relate_aabbs_by_refnos_incremental")
