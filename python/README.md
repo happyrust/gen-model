@@ -106,6 +106,7 @@ aios_db.room.names("24381_100677")             # 穿越的房间号列表
 from aios_client import AiosClient
 c = AiosClient()                  # http://127.0.0.1:8022（其他部署传 base，如 AiosClient("http://127.0.0.1:9099")）
 c.health(); c.dbnums(); c.queue()
+c.model_delete_subtree("24381/100677")  # DELETE 精确子树；自动带同值 confirm
 for ev in c.watch_tasks():        # WebSocket 任务事件（需 pip install websocket-client）
     print(ev)
 ```

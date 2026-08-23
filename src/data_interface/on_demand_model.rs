@@ -44,6 +44,44 @@ pub struct OnDemandModelResult {
 }
 
 impl AiosDBManager {
+    /// Delete the generated-model data rooted at exactly `requested_refno`.
+    ///
+    /// Root resolution is used only to share the same concurrency locks as
+    /// generation. The deletion scope remains the requested PE subtree.
+    pub async fn delete_model_subtree(&self, requested_refno: RefnoEnum) -> anyhow::Result<()> {
+        crate::data_interface::initialization_phase::require_model_generation()?;
+
+        let mut subtree =
+            crate::data_interface::helper::collect_pe_subtree_refnos(&[requested_refno])
+                .await?
+                .into_iter()
+                .collect::<Vec<_>>();
+        subtree.sort_by_key(RefnoEnum::to_string);
+
+        let unit_types = configured_delivery_unit_types();
+        let mut lock_roots = crate::data_interface::generation_root::resolve_generation_roots_on(
+            &SUL_DB,
+            &subtree,
+            &unit_types,
+        )
+        .await?
+        .into_iter()
+        .map(|root| root.root.to_pdms_str())
+        .collect::<Vec<_>>();
+        if lock_roots.is_empty() {
+            lock_roots.push(requested_refno.to_pdms_str());
+        }
+        lock_roots.sort_unstable();
+        lock_roots.dedup();
+
+        let mut guards = Vec::with_capacity(lock_roots.len());
+        for root in &lock_roots {
+            guards.push(try_generation_root(root)?);
+        }
+
+        crate::data_interface::helper::delete_inst_relate_subtree(&[requested_refno], 300).await
+    }
+
     /// Ensure that `requested_refno` has a renderable model.
     ///
     /// A missing model is normalized through the shared generation-root policy,
@@ -296,6 +334,36 @@ mod tests {
             try_generation_root("test/active-root"),
             Err(ModelGenerationInProgress { .. })
         ));
+    }
+
+    #[test]
+    fn subtree_delete_locks_covered_generation_roots_but_deletes_the_requested_scope() {
+        let source = include_str!("on_demand_model.rs");
+        let body = source
+            .split_once("pub async fn delete_model_subtree(")
+            .expect("delete model subtree service must exist")
+            .1
+            .split_once("pub async fn ensure_model_generated(")
+            .expect("ensure service must follow delete service")
+            .0;
+
+        let collect_at = body
+            .find("collect_pe_subtree_refnos(&[requested_refno])")
+            .expect("delete must inspect the exact requested subtree for lock coverage");
+        let resolve_at = body
+            .find("resolve_generation_roots_on(")
+            .expect("delete must resolve every covered generation root");
+        let lock_at = body
+            .find("try_generation_root")
+            .expect("delete must reject roots with active generation");
+        let delete_at = body
+            .find("delete_inst_relate_subtree(&[requested_refno], 300)")
+            .expect("delete scope must remain the requested refno subtree");
+
+        assert!(
+            collect_at < resolve_at && resolve_at < lock_at && lock_at < delete_at,
+            "scope discovery, root locking, and exact deletion must stay ordered: {body}"
+        );
     }
 
     #[test]

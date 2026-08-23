@@ -285,6 +285,10 @@ pub async fn serve(
         )
         .route("/api/v1/tasks", get(handlers::tasks_list))
         .route("/api/v1/tasks/{id}", get(handlers::task_get))
+        .route(
+            "/api/v1/model/subtree",
+            delete(handlers::model_delete_subtree),
+        )
         .route("/api/v1/model/ensure", post(handlers::model_ensure))
         .route("/api/v1/query", post(handlers::query))
         .route("/api/v1/dbnums", get(handlers::dbnums))
@@ -414,6 +418,25 @@ mod tests {
             assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
             assert_eq!(error.code, "identity_mismatch");
         }
+    }
+
+    #[test]
+    fn model_subtree_delete_uses_delete_method_and_query_handler() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("pub async fn serve(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+
+        assert!(
+            serve.contains(
+                ".route(\n            \"/api/v1/model/subtree\",\n            delete(handlers::model_delete_subtree),\n        )"
+            ),
+            "model subtree cleanup must be a DELETE route: {serve}"
+        );
     }
 
     #[test]

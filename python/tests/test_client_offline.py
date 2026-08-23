@@ -77,6 +77,7 @@ class _StubHandler(BaseHTTPRequestHandler):
 
     do_GET = _handle
     do_POST = _handle
+    do_DELETE = _handle
 
 
 @pytest.fixture()
@@ -155,6 +156,24 @@ def test_optional_arguments_are_dropped_not_sent_as_null(stub):
         "/api/v1/update/preview",
     ]
     assert handler.requests[-1]["body"] == {}
+
+
+def test_model_delete_subtree_uses_delete_with_exact_confirmation_query(stub):
+    base, handler = stub
+    client = AiosClient(base, timeout=10)
+
+    client.model_delete_subtree("24381/100677")
+
+    assert handler.requests == [
+        {
+            "method": "DELETE",
+            "path": (
+                "/api/v1/model/subtree"
+                "?refno=24381%2F100677&confirm=24381%2F100677"
+            ),
+            "body": None,
+        }
+    ]
 
 
 def test_non_2xx_raises_api_error_with_payload(stub):

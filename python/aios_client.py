@@ -135,6 +135,13 @@ class AiosClient:
             body["force"] = True
         return self._request("POST", "/model/ensure", body)
 
+    def model_delete_subtree(self, refno: str) -> dict:
+        return self._request(
+            "DELETE",
+            "/model/subtree",
+            query={"refno": refno, "confirm": refno},
+        )
+
     def pending_units(self) -> dict:
         return self._request("GET", "/update/pending-units")
 
