@@ -20,6 +20,7 @@ use aios_core::{RefU64, RefnoEnum, pdms_types::*};
 use aios_core::{
     query_multi_children_refnos, query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum,
 };
+use anyhow::Context;
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
 use futures::stream::FuturesUnordered;
@@ -220,7 +221,9 @@ pub(crate) async fn gen_all_geos_data_with_policy(
         let generation_result =
             capture_generation(gen_geos_data(None, vec![], db_option, sender.clone())).await;
         let (target_root_refnos, produced) =
-            finish_shape_writer(generation_result, sender, insert_task).await?;
+            finish_shape_writer(generation_result, sender, insert_task)
+                .await
+                .context("targeted model stage shape generation/write")?;
 
         // 收尾清理只在生成与写入都成功之后跑：这个差集分不清「真的不画了」与「本轮
         // 生成没做出来」，它的正确性押在「生成成功 ⇒ 产物完整」上（2026-08-05 决策，
@@ -231,7 +234,8 @@ pub(crate) async fn gen_all_geos_data_with_policy(
             &produced,
             300,
         )
-        .await?;
+        .await
+        .context("targeted model stage stale-row prune")?;
 
         if db_option.gen_mesh {
             // 错误必须向上传播（不再 .expect panic）：mesh 失败会让
@@ -242,7 +246,8 @@ pub(crate) async fn gen_all_geos_data_with_policy(
                 &target_root_refnos,
                 failure_policy,
             )
-            .await?;
+            .await
+            .context("targeted model stage mesh/AABB/boolean")?;
         }
     } else {
         let dbnos = if db_option.manual_db_nums.is_some() {

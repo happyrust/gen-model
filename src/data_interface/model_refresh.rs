@@ -232,54 +232,11 @@ impl ModelRefreshPolicy {
                 },
             )
             .await?;
-        } else {
-            crate::data_interface::staging::preload::preload_generation_root_closure(
-                &db_option.project_name,
-                &root_refnos,
-            )
-            .await?;
         }
-        // 暂存 DESI 窗口把 CATA 闭包视为提交单元的必需输入；窗口外的独立按需生成
-        // 保留历史 best-effort + 惰性兜底。两种策略必须在这一处显式分叉，不能再让
-        // 暂存路径的错误落进 warning 后照常推进水位。
-        if !required && crate::data_interface::cata_closure::cata_closure_enabled() {
-            let root_refus: Vec<RefU64> = db_option
-                .debug_root_refnos
-                .as_ref()
-                .map(|v| v.iter().filter_map(|s| RefU64::from_str(s).ok()).collect())
-                .unwrap_or_default();
-            crate::data_interface::batch_worker::set_active_task_stage("dependency_index");
-            let preload = crate::data_interface::cata_closure::preload_cata_for_roots(
-                &db_option.project_name,
-                &root_refus,
-                None,
-            );
-            let preload = preload.await;
-            match preload {
-                Ok(outcome) => {
-                    println!(
-                        "[cata_closure] 按需预加载完成: parsed={} missing={}",
-                        outcome.parsed, outcome.missing
-                    );
-                    crate::data_interface::parse_error::note_preload_success(
-                        &db_option.project_name,
-                    );
-                }
-                Err(e) => {
-                    eprintln!("[cata_closure] 按需预加载失败: {e:#}");
-                    log::warn!("[cata_closure] 依赖缓存预加载失败（回退惰性兜底）: {}", e);
-                    // 回退惰性兜底不报错、不阻断，于是这条在现场刷了 788 次也没人知道
-                    // 它一直在失败。按项目归行，次数就是它退了多少次兜底。
-                    crate::data_interface::parse_error::note_preload_failure(
-                        &db_option.project_name,
-                        &format!("{e:#}"),
-                    );
-                }
-            }
-            if let Err(error) = crate::data_interface::parse_error::flush().await {
-                log::warn!("{error:#}");
-            }
-        }
+        // 普通 dbnum 初始化已经先把完整数据落到持久 SurrealDB/RocksDB。
+        // 模型阶段只读数据库；不再按生成根重开源文件、补 DESI 子树或计算 CATA
+        // 闭包。缺失数据会在模型解析/网格阶段按 geom_error 归档，而不是回到分页
+        // 文件解析路径。暂存增量窗口仍在上面的原子提交分支准备必需依赖。
         crate::data_interface::batch_worker::set_active_task_stage("model_generate");
         crate::data_interface::staging::preload::preload_existing_generation_products(&root_refnos)
             .await?;
@@ -329,6 +286,28 @@ impl ModelRefreshPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn persistent_model_generation_does_not_reopen_source_dependency_files() {
+        let source = include_str!("model_refresh.rs");
+        let generate = source
+            .split_once("pub(crate) async fn generate_roots(")
+            .expect("generate_roots exists")
+            .1
+            .split_once("pub(crate) async fn cleanup_deleted_by_pe_state")
+            .expect("generate_roots boundary")
+            .0;
+        assert_eq!(
+            generate.matches("preload_generation_root_closure(").count(),
+            0,
+            "持久库模型生成不得重新解析 DESI 子树: {generate}"
+        );
+        assert_eq!(
+            generate.matches("preload_cata_for_roots(").count(),
+            0,
+            "持久库模型生成不得重新计算 CATA 闭包: {generate}"
+        );
+    }
 
     #[tokio::test(start_paused = true)]
     async fn dependency_watchdog_resets_only_on_progress_and_times_out_after_silence() {

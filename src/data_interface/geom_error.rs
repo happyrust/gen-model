@@ -49,6 +49,8 @@ pub(crate) const BOOL_NEG: &str = "bool_neg";
 pub(crate) const PRIMITIVE: &str = "primitive";
 /// 单位几何无法离散或网格无法持久化。
 pub(crate) const MESH: &str = "mesh";
+/// 持久模型工作单已隔离到单个生成根，但该根仍无法完成生成。
+pub(crate) const GENERATION_ROOT: &str = "generation_root";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeometryFailurePolicy {
@@ -116,6 +118,19 @@ fn render_mesh_upsert(geom: &str, targets: &[String], error: &str) -> String {
          last_seen_at = time::now(), last_error = '{error_text}';",
         id = record_id(MESH, geom),
         geom_text = escape_surql_str(geom),
+        error_text = escape_surql_str(error),
+    )
+}
+
+fn render_generation_root_upsert(target: &str, noun: &str, error: &str) -> String {
+    format!(
+        "UPSERT {id} SET kind = '{GENERATION_ROOT}', target = '{target_text}', \
+         noun = '{noun_text}', occurrences = (occurrences?:0) + 1, \
+         first_seen_at = first_seen_at?:time::now(), \
+         last_seen_at = time::now(), last_error = '{error_text}';",
+        id = record_id(GENERATION_ROOT, target),
+        target_text = escape_surql_str(target),
+        noun_text = escape_surql_str(noun),
         error_text = escape_surql_str(error),
     )
 }
@@ -217,6 +232,51 @@ pub(crate) async fn note_mesh_skip(geom: &str, targets: &[String], error: &str) 
     if let Some(set) = known().as_mut() {
         set.insert(known_key(MESH, geom));
     }
+}
+
+/// 记录一个已经隔离到具体生成根的模型失败。
+pub(crate) async fn note_generation_root_failure(
+    target: &str,
+    noun: &str,
+    error: &str,
+) -> anyhow::Result<()> {
+    seed().await?;
+    SUL_DB
+        .query(render_generation_root_upsert(target, noun, error))
+        .await
+        .and_then(|response| response.check())?;
+    if let Some(set) = known().as_mut() {
+        set.insert(known_key(GENERATION_ROOT, target));
+    }
+    Ok(())
+}
+
+/// 生成根重新生成成功后批量销掉对应诊断行；从未失败的根不发数据库语句。
+pub(crate) async fn clear_generation_root_failures(targets: &[String]) -> anyhow::Result<()> {
+    seed().await?;
+    let keys = targets
+        .iter()
+        .filter(|target| {
+            known()
+                .as_ref()
+                .is_some_and(|set| set.contains(&known_key(GENERATION_ROOT, target)))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let sql = keys
+        .iter()
+        .map(|target| render_clear_kind(GENERATION_ROOT, target))
+        .collect::<String>();
+    SUL_DB.query(sql).await?.check()?;
+    if let Some(set) = known().as_mut() {
+        for target in keys {
+            set.remove(&known_key(GENERATION_ROOT, &target));
+        }
+    }
+    Ok(())
 }
 
 /// 基本体重新生成成功后销掉它自己的错误行，不触碰同一目标可能存在的布尔错误。
@@ -416,6 +476,25 @@ mod tests {
         assert_eq!(
             render_clear_kind(MESH, "17028233407315457148"),
             "DELETE geom_error:['mesh', '17028233407315457148'];"
+        );
+    }
+
+    #[test]
+    fn generation_root_failure_has_its_own_observable_kind_and_cleanup_key() {
+        let sql = render_generation_root_upsert(
+            "24384/22404",
+            "EQUI",
+            "系统找不到指定的文件。 (os error 2)",
+        );
+        assert!(
+            sql.contains("geom_error:['generation_root', '24384/22404']"),
+            "{sql}"
+        );
+        assert!(sql.contains("noun = 'EQUI'"), "{sql}");
+        assert!(sql.contains("occurrences = (occurrences?:0) + 1"), "{sql}");
+        assert_eq!(
+            render_clear_kind(GENERATION_ROOT, "24384/22404"),
+            "DELETE geom_error:['generation_root', '24384/22404'];"
         );
     }
 

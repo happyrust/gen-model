@@ -178,6 +178,32 @@ pub(crate) fn load_manifold(
     plant_mesh_to_manifold_quantized(&mesh, mat, grid)
 }
 
+/// 目录布尔只有一个正实体时，把“是否需要精确属性顶点”的判定与 Manifold 载入合并。
+/// 这样同一 `.mesh` 只反序列化一次；文件缺失也会作为载入错误交给调用方的
+/// Required/BestEffort 策略，而不是在策略门之前被裸 `?` 上浮。
+pub(crate) fn load_manifold_detect_exact(
+    dir: &Path,
+    id: &str,
+    mat: DMat4,
+    more_precision: bool,
+) -> anyhow::Result<(Manifold, bool)> {
+    let path = dir.join(format!("{id}.mesh"));
+    let mesh = PlantMesh::des_mesh_file(&path)
+        .map_err(|error| anyhow!("load mesh {} failed: {error}", path.display()))?;
+    let exact_coordinates = mesh_has_expanded_attribute_vertices(&mesh);
+    let grid = if exact_coordinates {
+        None
+    } else if more_precision {
+        Some((100.0, false))
+    } else {
+        Some((10.0, true))
+    };
+    Ok((
+        plant_mesh_to_manifold_quantized(&mesh, mat, grid)?,
+        exact_coordinates,
+    ))
+}
+
 /// 三角属性顶点完全展开的网格来自 Manifold/NonZero 解析路径；再次做 0.1/0.01mm
 /// 栅格化会破坏它已经求好的交线一致性。一个布尔组只要有这种正实体，正负两侧都
 /// 保持 f64 精确坐标，不能只让一侧走栅格。

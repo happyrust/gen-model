@@ -17,7 +17,7 @@ use aios_core::{
     query_deep_visible_inst_refnos,
 };
 use aios_core::{get_db_option, init_test_surreal};
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
 use glam::DMat4;
@@ -259,7 +259,9 @@ pub(crate) async fn process_meshes_update_db_deep_with_policy(
                 // dbg!(&target_refnos);
                 // 生成模型文件
                 let t_mesh = std::time::Instant::now();
-                gen_inst_meshes(&update_refnos, replace_exist, dir.clone()).await?;
+                gen_inst_meshes(&update_refnos, replace_exist, dir.clone())
+                    .await
+                    .with_context(|| format!("root {refno} mesh generation"))?;
                 mesh_ms += t_mesh.elapsed().as_millis();
 
                 let t_aabb = std::time::Instant::now();
@@ -276,9 +278,13 @@ pub(crate) async fn process_meshes_update_db_deep_with_policy(
                 // 推进内存树；暂存路径仍只写 journal 并把变化寄存在窗口里。全量生成
                 // 本来就以 `build_room_relations` 的整体重建收尾，不逐元素排房间任务。
                 if dboption.debug_root_refnos.is_some() {
-                    update_inst_relate_aabbs_by_refnos_incremental(&update_refnos, true).await?;
+                    update_inst_relate_aabbs_by_refnos_incremental(&update_refnos, true)
+                        .await
+                        .with_context(|| format!("root {refno} incremental AABB persistence"))?;
                 } else {
-                    update_inst_relate_aabbs_by_refnos(&update_refnos, true).await?;
+                    update_inst_relate_aabbs_by_refnos(&update_refnos, true)
+                        .await
+                        .with_context(|| format!("root {refno} AABB persistence"))?;
                 }
                 aabb_ms += t_aabb.elapsed().as_millis();
             }
@@ -296,14 +302,16 @@ pub(crate) async fn process_meshes_update_db_deep_with_policy(
                     dir.clone(),
                     failure_policy,
                 )
-                .await?;
+                .await
+                .with_context(|| format!("root {refno} catalogue negative boolean"))?;
                 apply_insts_boolean_manifold(
                     &target_visible_refnos,
                     replace_exist,
                     dir.clone(),
                     failure_policy,
                 )
-                .await?;
+                .await
+                .with_context(|| format!("root {refno} instance boolean"))?;
                 boolean_ms += t_bool.elapsed().as_millis();
 
                 // 布尔阶段会新增/改指最终可见几何（例如 REDU 的 booled 关系）。上面的
@@ -314,9 +322,14 @@ pub(crate) async fn process_meshes_update_db_deep_with_policy(
                 let t_aabb = std::time::Instant::now();
                 if dboption.debug_root_refnos.is_some() {
                     update_inst_relate_aabbs_by_refnos_incremental(&target_visible_refnos, true)
-                        .await?;
+                        .await
+                        .with_context(|| {
+                            format!("root {refno} post-boolean incremental AABB persistence")
+                        })?;
                 } else {
-                    update_inst_relate_aabbs_by_refnos(&target_visible_refnos, true).await?;
+                    update_inst_relate_aabbs_by_refnos(&target_visible_refnos, true)
+                        .await
+                        .with_context(|| format!("root {refno} post-boolean AABB persistence"))?;
                 }
                 aabb_ms += t_aabb.elapsed().as_millis();
             }
@@ -1386,6 +1399,27 @@ pub struct GmGeoData {
 
 #[cfg(test)]
 mod aabb_write_order_tests {
+    #[test]
+    fn targeted_mesh_failures_name_the_root_and_stage() {
+        let source = include_str!("mesh_generate.rs");
+        let body = source
+            .split_once("pub(crate) async fn process_meshes_update_db_deep_with_policy(")
+            .expect("targeted mesh pipeline exists")
+            .1
+            .split_once("struct QueryGeoParam")
+            .expect("targeted mesh pipeline boundary")
+            .0;
+        for stage in [
+            "root {refno} mesh generation",
+            "root {refno} incremental AABB persistence",
+            "root {refno} catalogue negative boolean",
+            "root {refno} instance boolean",
+            "root {refno} post-boolean incremental AABB persistence",
+        ] {
+            assert!(body.contains(stage), "missing failure context: {stage}");
+        }
+    }
+
     #[test]
     fn targeted_geometry_remains_a_room_target_when_aabb_is_identical() {
         assert!(super::room_target_required(false, true));

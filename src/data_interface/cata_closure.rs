@@ -1490,6 +1490,155 @@ async fn collect_database_subtree_outbound_on(
     Ok(seeds.into_iter().collect())
 }
 
+/// Collect outbound references from one fully materialized baseline database.
+///
+/// A full-cover baseline already owns every active PE in `dbnum`; walking
+/// `pe_owner` one element at a time only turns the same set into thousands of
+/// database round trips. Ordered pages keep the response bounded while paying
+/// one query per page.
+async fn collect_database_dbnum_outbound_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<Vec<RefU64>> {
+    #[derive(Deserialize)]
+    struct OutboundPageRow {
+        refs: Vec<RefnoEnum>,
+    }
+
+    const PAGE_SIZE: usize = 1_000;
+    let mut offset = 0usize;
+    let mut seeds = HashSet::new();
+    loop {
+        let sql = format!(
+            "SELECT id, object::values(refno.* ?? {{}})[WHERE type::is::record($this)] AS refs \
+             FROM pe WHERE dbnum = {dbnum} AND deleted != true \
+             ORDER BY id LIMIT {PAGE_SIZE} START {offset};"
+        );
+        let mut response = db.query(sql).await?.check()?;
+        let rows = response.take::<Vec<OutboundPageRow>>(0)?;
+        let page_len = rows.len();
+        seeds.extend(
+            rows.into_iter()
+                .flat_map(|row| row.refs)
+                .map(|refno| refno.refno()),
+        );
+        if page_len < PAGE_SIZE {
+            break;
+        }
+        offset += page_len;
+    }
+    Ok(seeds.into_iter().collect())
+}
+
+#[derive(Debug, Deserialize)]
+struct MaterializedCataRow {
+    id: RefnoEnum,
+    noun: String,
+    #[serde(default)]
+    refs: Vec<RefnoEnum>,
+    #[serde(default)]
+    children: Vec<RefnoEnum>,
+}
+
+/// Resolve a CATA dependency closure from the rows produced by initialization.
+///
+/// `None` means that at least one required CATA row is not materialized, so the
+/// caller must fall back to the binary parser.  A complete hit never opens the
+/// source CATA file.  Attribute records contain both outbound references and
+/// OWNER; `pe_owner` supplies children for the same container rule used by the
+/// binary resolver.
+async fn resolve_materialized_cata_closure_on<L: CataDbLocator>(
+    db: &Surreal<Any>,
+    locator: &L,
+    seeds: &[RefU64],
+    cfg: &CataClosureConfig,
+) -> anyhow::Result<Option<CataClosureManifest>> {
+    let cata_types = cfg
+        .cata_db_types
+        .iter()
+        .map(|value| value.to_uppercase())
+        .collect::<HashSet<_>>();
+    let mut frontier = seeds.to_vec();
+    let mut visited = HashSet::new();
+    let mut by_dbnum = BTreeMap::<u32, BTreeSet<RefU64>>::new();
+    let mut rounds = 0usize;
+
+    while !frontier.is_empty() && rounds < cfg.max_rounds {
+        rounds += 1;
+        let current = std::mem::take(&mut frontier);
+        let mut by_db = HashMap::<u32, Vec<RefU64>>::new();
+        for refno in current {
+            if visited.contains(&refno) || !is_valid_ref0(refno.get_0()) {
+                continue;
+            }
+            let Some(dbnum) = locator.resolve_ref0(refno.get_0())? else {
+                return Ok(None);
+            };
+            if cfg.excluded_dbnums.contains(&dbnum) {
+                visited.insert(refno);
+                continue;
+            }
+            let Some(db_type) = locator.db_type_of(dbnum) else {
+                return Ok(None);
+            };
+            if !cata_types.contains(&db_type.to_uppercase()) {
+                visited.insert(refno);
+                continue;
+            }
+            by_db.entry(dbnum).or_default().push(refno);
+        }
+
+        for (dbnum, refs) in by_db {
+            for chunk in refs.chunks(INSERT_CHUNK) {
+                let keys = chunk
+                    .iter()
+                    .map(RefU64::to_pe_key)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                let sql = format!(
+                    "SELECT id, type::table(refno) AS noun, \
+                     object::values(refno.* ?? {{}})[WHERE type::is::record($this)] AS refs, \
+                     <-pe_owner.in AS children FROM [{keys}] WHERE record::exists(id);"
+                );
+                let mut response = db.query(sql).await?.check()?;
+                let rows = response.take::<Vec<MaterializedCataRow>>(0)?;
+                let found = rows
+                    .iter()
+                    .map(|row| row.id.refno())
+                    .collect::<HashSet<_>>();
+                if chunk.iter().any(|refno| !found.contains(refno)) {
+                    return Ok(None);
+                }
+                for row in rows {
+                    let refno = row.id.refno();
+                    if !visited.insert(refno) {
+                        continue;
+                    }
+                    by_dbnum.entry(dbnum).or_default().insert(refno);
+                    frontier.extend(row.refs.into_iter().map(|value| value.refno()));
+                    let expand_children = cfg.follow_children
+                        && cfg
+                            .container_subtree_nouns
+                            .as_ref()
+                            .is_none_or(|allow| allow.contains(&row.noun));
+                    if expand_children {
+                        frontier.extend(row.children.into_iter().map(|value| value.refno()));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(Some(CataClosureManifest {
+        by_dbnum,
+        seed_count: seeds.len(),
+        visited_count: visited.len(),
+        rounds,
+        missing: 0,
+        missing_samples: Vec::new(),
+    }))
+}
+
 /// refno 级按需闭包入口：以给定生成根（如单个 BRAN）的子树出向引用为种子，跑 CATA 闭包。
 ///
 /// 返回闭包 manifest（各 CATA dbnum 需解析的 refno 集）。Phase 3 据此 `ensure_cata_refnos_parsed`
@@ -1919,6 +2068,48 @@ pub async fn ensure_cata_parsed_for_roots(
     ensure_cata_refnos_parsed(project, &seeds).await
 }
 
+/// Prepare the catalogue union for a baseline whose design rows are already
+/// materialized in persistent SurrealDB.
+///
+/// Unlike [`ensure_cata_parsed_for_roots`], this path never reopens the DESI
+/// source file. All roots are traversed together in the database, then one
+/// resolver session consumes the deduplicated CATA seed union. That batching
+/// boundary is essential for a fresh baseline: resolving hundreds of roots one
+/// by one repeatedly rebuilds the same paged-file sessions.
+pub async fn ensure_cata_parsed_for_materialized_dbnum(
+    project: &str,
+    source_dbnum: u32,
+    root_count: usize,
+) -> anyhow::Result<LazyFallbackOutcome> {
+    if root_count == 0 || !cata_closure_enabled() {
+        return Ok(LazyFallbackOutcome::default());
+    }
+    let locator = InMemoryCataLocator::build_for_project(project).await?;
+    let outbound = collect_database_dbnum_outbound_on(&SUL_DB, source_dbnum).await?;
+    let mut seeds = outbound
+        .into_iter()
+        .filter_map(|refno| match locator.resolve_ref0(refno.get_0()) {
+            Ok(Some(dbnum))
+                if locator
+                    .db_type_of(dbnum)
+                    .is_some_and(|db_type| db_type.eq_ignore_ascii_case("CATA")) =>
+            {
+                Some(Ok(refno))
+            }
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    seeds.sort_unstable();
+    seeds.dedup();
+    println!(
+        "[cata_closure] 基线物化根合并预解析: roots={} cata_seeds={}",
+        root_count,
+        seeds.len()
+    );
+    ensure_cata_refnos_parsed(project, &seeds).await
+}
+
 /// resolve 层调用的惰性兜底入口：受 env 开关门控（默认 On）。
 ///
 /// 命中未解析 CATA refno 时调用；返回 `true` 表示已补齐、值得重试原查询。
@@ -2041,7 +2232,7 @@ struct CataDepCache {
     by_source_root: HashMap<(u32, u64), CataDepEntry>,
 }
 
-const CATA_CLOSURE_SCHEMA_VERSION: u32 = 4;
+const CATA_CLOSURE_SCHEMA_VERSION: u32 = 5;
 
 static DEFERRED_CATA_CACHE: Lazy<TokioMutex<HashMap<u32, (String, CataDepCache)>>> =
     Lazy::new(|| TokioMutex::new(HashMap::new()));
@@ -2076,13 +2267,10 @@ impl CataDepCache {
     ) -> Option<&Vec<u64>> {
         self.by_source_root
             .get(&(source_dbnum, root.0))
-            // Empty entries may have been produced before dependency-project
-            // CATA discovery was available. Treat them as misses so they heal.
             .filter(|e| {
                 e.closure_schema_version == CATA_CLOSURE_SCHEMA_VERSION
                     && e.source_sesno == source_sesno
                     && e.dependency_manifest_fingerprint == manifest_fingerprint
-                    && !e.cata_refnos.is_empty()
             })
             .map(|e| &e.cata_refnos)
     }
@@ -2207,18 +2395,6 @@ pub async fn preload_cata_for_roots(
                 );
                 seeds.extend(ids.iter().map(|&u| RefU64(u)));
             } else {
-                let manifest = run_cata_closure_pass_for_refnos(
-                    &locator,
-                    &[root],
-                    CataClosureConfig::precise(),
-                )
-                .await?;
-                let mut root_missing = manifest.missing;
-                let mut flat: HashSet<u64> = manifest
-                    .by_dbnum
-                    .values()
-                    .flat_map(|s| s.iter().map(|r| r.0))
-                    .collect();
                 let database_outbound = collect_database_subtree_outbound(&[root]).await?;
                 let mut database_seeds = Vec::new();
                 for seed in database_outbound.iter().copied() {
@@ -2236,20 +2412,50 @@ pub async fn preload_cata_for_roots(
                     database_seeds.len(),
                     database_outbound.iter().take(8).collect::<Vec<_>>()
                 );
-                if !database_seeds.is_empty() {
-                    let mut resolver =
-                        CataClosureResolver::new(&locator, CataClosureConfig::precise());
-                    resolver.seed(database_seeds);
-                    let database_manifest = resolver.resolve().await?;
-                    root_missing += database_manifest.missing;
-                    flat.extend(
-                        database_manifest
-                            .by_dbnum
-                            .values()
-                            .flat_map(|refs| refs.iter().map(|r| r.0)),
-                    );
-                }
-                let flat: Vec<u64> = flat.into_iter().collect();
+                let cfg = CataClosureConfig::precise();
+                let database = crate::data_interface::staging::active_data_db();
+                let materialized = if database_seeds.is_empty() {
+                    // The initialized design subtree is the runtime authority.
+                    // An empty CATA seed set is a complete, cacheable answer;
+                    // reopening the DESI/CATA files here recreated the old
+                    // per-batch pagination bottleneck.
+                    Some(CataClosureManifest {
+                        by_dbnum: BTreeMap::new(),
+                        seed_count: 0,
+                        visited_count: 0,
+                        rounds: 0,
+                        missing: 0,
+                        missing_samples: Vec::new(),
+                    })
+                } else {
+                    resolve_materialized_cata_closure_on(&database, &locator, &database_seeds, &cfg)
+                        .await?
+                };
+                let manifest = match materialized {
+                    Some(manifest) => {
+                        println!(
+                            "[cata_closure] SurrealDB 闭包命中: root={root:?} seeds={} visited={} rounds={}",
+                            database_seeds.len(),
+                            manifest.visited_count,
+                            manifest.rounds
+                        );
+                        manifest
+                    }
+                    None => {
+                        println!(
+                            "[cata_closure] SurrealDB 闭包不完整，回退文件解析: root={root:?}"
+                        );
+                        run_cata_closure_pass_for_refnos(&locator, &[root], cfg).await?
+                    }
+                };
+                let root_missing = manifest.missing;
+                let flat: Vec<u64> = manifest
+                    .by_dbnum
+                    .values()
+                    .flat_map(|refs| refs.iter().map(|refno| refno.0))
+                    .collect::<HashSet<_>>()
+                    .into_iter()
+                    .collect();
                 if cache.put_if_complete(
                     src_dbnum,
                     root,
@@ -2343,6 +2549,72 @@ mod tests {
             .await
             .expect("query materialization coverage");
         assert_eq!(fallback, vec![missing]);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn materialized_cata_closure_follows_database_references_without_source_files() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("cata_closure")
+            .await
+            .expect("select fixture db");
+        let first = RefU64((5052u64 << 32) | 201);
+        let second = RefU64((5052u64 << 32) | 202);
+        db.query(format!(
+            "CREATE {} SET next = {}; CREATE {} SET value = 1; \
+             CREATE {} SET refno = {}; CREATE {} SET refno = {};",
+            first.to_table_key("CATE"),
+            second.to_pe_key(),
+            second.to_table_key("CATE"),
+            first.to_pe_key(),
+            first.to_table_key("CATE"),
+            second.to_pe_key(),
+            second.to_table_key("CATE")
+        ))
+        .await
+        .expect("create materialized closure")
+        .check()
+        .expect("materialized closure statements");
+        let locator = InMemoryCataLocator::from_parts(
+            HashMap::from([(5052, 5052)]),
+            HashMap::from([(
+                5052,
+                (
+                    "CATA".to_string(),
+                    "test".to_string(),
+                    PathBuf::from("must-not-open"),
+                ),
+            )]),
+        );
+
+        let manifest = resolve_materialized_cata_closure_on(
+            &db,
+            &locator,
+            &[first],
+            &CataClosureConfig::precise(),
+        )
+        .await
+        .expect("database closure query")
+        .expect("all rows materialized");
+        assert_eq!(
+            manifest.by_dbnum.get(&5052),
+            Some(&BTreeSet::from([first, second]))
+        );
+        assert_eq!(manifest.missing, 0);
+    }
+
+    #[test]
+    fn current_schema_caches_a_complete_empty_database_closure() {
+        let root = RefU64((8000u64 << 32) | 1);
+        let mut cache = CataDepCache::default();
+        cache.put(8000, root, 233, "fixture".to_string(), Vec::new());
+        assert!(
+            cache
+                .get_fresh(8000, root, 233, "fixture")
+                .is_some_and(Vec::is_empty)
+        );
     }
 
     #[test]
@@ -2547,6 +2819,38 @@ mod tests {
         assert!(
             locator.contains("SUL_DB") && locator.contains(".query("),
             "{locator}"
+        );
+    }
+
+    #[test]
+    fn baseline_materialized_dbnum_is_paged_and_parsed_as_one_union() {
+        let source = include_str!("cata_closure.rs");
+        let body = source
+            .split_once("pub async fn ensure_cata_parsed_for_materialized_dbnum(")
+            .expect("baseline materialized-dbnum entry exists")
+            .1
+            .split_once("/// resolve 层调用的惰性兜底入口")
+            .expect("baseline entry has a bounded body")
+            .0;
+        assert_eq!(
+            body.matches("collect_database_dbnum_outbound_on(&SUL_DB, source_dbnum)")
+                .count(),
+            1,
+            "完整基线必须按 dbnum 分页读取，不能逐 PE 走图: {body}"
+        );
+        assert_eq!(
+            body.matches("ensure_cata_refnos_parsed(project, &seeds)")
+                .count(),
+            1,
+            "CATA union 必须只进入一次文件 resolver: {body}"
+        );
+        assert!(
+            !body.contains("for root in roots"),
+            "不得逐根重开文件: {body}"
+        );
+        assert!(
+            !body.contains("run_cata_closure_pass_for_refnos"),
+            "不得回读 DESI: {body}"
         );
     }
 

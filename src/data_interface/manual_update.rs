@@ -3042,45 +3042,29 @@ fn baseline_parse_confirmed_empty(
 /// meta holds project structure, so neither gets model work here — matching
 /// [`crate::data_interface::model_update_plan::build_model_update_plan`], which
 /// plans nothing but deferred cascades for those types.
-fn baseline_work_items(
+fn baseline_work_items_from_materialized_roots(
     dbnum: u32,
     db_type: &str,
     end_sesno: i32,
-    nodes: &HashMap<RefnoEnum, OwnerNode>,
-    unit_types: &[String],
+    roots: impl IntoIterator<Item = (RefnoEnum, String)>,
 ) -> ModelUpdatePlan {
     if db_type != "DESI" {
         return ModelUpdatePlan::default();
     }
-    let mut roots = BTreeMap::new();
-    for refno in nodes.keys() {
-        let Some(root) = crate::data_interface::generation_root::resolve_element_generation_root(
-            *refno,
-            unit_types,
-            |candidate| {
-                nodes.get(&candidate).map(|node| {
-                    crate::data_interface::generation_root::GenerationNode {
-                        owner: node.owner,
-                        noun: node.noun.clone(),
-                        name: node.name.clone(),
-                    }
-                })
-            },
-        ) else {
-            continue;
-        };
-        roots.entry(root.root.to_pdms_str()).or_insert(root);
-    }
+    let roots = roots
+        .into_iter()
+        .map(|(root, noun)| (root.to_pdms_str(), noun))
+        .collect::<BTreeMap<_, _>>();
     ModelUpdatePlan {
         work_items: roots
             .into_iter()
-            .map(|(target_refno, root)| ModelWorkItem {
+            .map(|(target_refno, noun)| ModelWorkItem {
                 dbnum,
                 db_type: db_type.to_string(),
                 source_end_sesno: end_sesno,
                 action: ModelWorkAction::RegenRoot,
                 target_refno,
-                noun: root.noun,
+                noun,
             })
             .collect(),
         ..Default::default()
@@ -3097,44 +3081,10 @@ struct BaselineNodeRow {
     name: String,
 }
 
-async fn load_baseline_nodes(dbnum: u32) -> anyhow::Result<HashMap<RefnoEnum, OwnerNode>> {
-    const PAGE_SIZE: usize = 5_000;
-    let mut nodes = HashMap::new();
-    loop {
-        let offset = nodes.len();
-        let mut response = SUL_DB
-            .query(format!(
-                "SELECT id, owner, noun, name FROM pe \
-                 WHERE dbnum = {dbnum} AND deleted != true \
-                 ORDER BY id LIMIT {PAGE_SIZE} START {offset};"
-            ))
-            .await
-            .map_err(|error| anyhow::anyhow!("读取 dbnum={dbnum} 基线 PE 图失败: {error}"))?
-            .check()
-            .map_err(|error| anyhow::anyhow!("读取 dbnum={dbnum} 基线 PE 图语句失败: {error}"))?;
-        let rows = response
-            .take::<Vec<BaselineNodeRow>>(0)
-            .map_err(|error| anyhow::anyhow!("解码 dbnum={dbnum} 基线 PE 图失败: {error}"))?;
-        let page_len = rows.len();
-        for row in rows {
-            let refno = pe_thing_to_refno(row.id)?;
-            let owner = row
-                .owner
-                .map(RefnoEnum::from)
-                .filter(|owner| owner.is_valid() && *owner != refno);
-            nodes.insert(
-                refno,
-                OwnerNode {
-                    owner,
-                    noun: row.noun,
-                    name: row.name,
-                },
-            );
-        }
-        if page_len < PAGE_SIZE {
-            return Ok(nodes);
-        }
-    }
+#[derive(Deserialize)]
+struct MaterializedGenerationRootRow {
+    pe: Thing,
+    noun: String,
 }
 
 /// Model work for a `dbnum` that has just established its baseline.
@@ -3143,10 +3093,12 @@ async fn load_baseline_nodes(dbnum: u32) -> anyhow::Result<HashMap<RefnoEnum, Ow
 /// regenerate nothing but the roots they themselves touched — so without this
 /// the elements that are never edited again would have no geometry, ever.
 ///
-/// Every active PE is resolved through the same delivery-unit / normal-granularity
-/// authority used by incremental and on-demand generation. The roots are then
-/// deduplicated; hierarchy containers never become generation work.
+/// The full-cover authority is `fn::sync_gen_roots`: it emits outer MDU roots plus
+/// residue roots whose disjoint subtrees cover every renderable element. Resolving
+/// every PE independently with the incremental "nearest significant owner" rule
+/// over-splits structures (8000 became 2228 jobs instead of 766).
 async fn baseline_model_plan(
+    mgr: &AiosDBManager,
     dbnum: u32,
     db_type: &str,
     end_sesno: i32,
@@ -3154,16 +3106,38 @@ async fn baseline_model_plan(
     if db_type != "DESI" {
         return Ok(ModelUpdatePlan::default());
     }
-    let nodes = load_baseline_nodes(dbnum).await.map_err(|error| {
-        anyhow::anyhow!("dbnum={dbnum} 基线生成根枚举失败: {error:#}; 不推进 applied_sesno")
-    })?;
-    Ok(baseline_work_items(
+    let mut response = SUL_DB
+        .query(format!(
+            "RETURN fn::sync_gen_roots({dbnum}); \
+             RETURN fn::sync_root_covers({dbnum}, NONE); \
+             SELECT pe, noun FROM gen_root WHERE dbnum = {dbnum} ORDER BY pe;"
+        ))
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("dbnum={dbnum} 物化基线生成根失败: {error}; 不推进 applied_sesno")
+        })?
+        .check()
+        .map_err(|error| {
+            anyhow::anyhow!("dbnum={dbnum} 物化基线生成根语句失败: {error}; 不推进 applied_sesno")
+        })?;
+    let rows = response
+        .take::<Vec<MaterializedGenerationRootRow>>(2)
+        .map_err(|error| anyhow::anyhow!("解码 dbnum={dbnum} 物化生成根失败: {error}"))?;
+    let roots = rows
+        .into_iter()
+        .map(|row| Ok((pe_thing_to_refno(row.pe)?, row.noun)))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let plan = baseline_work_items_from_materialized_roots(dbnum, db_type, end_sesno, roots);
+    crate::data_interface::cata_closure::ensure_cata_parsed_for_materialized_dbnum(
+        &mgr.db_option.project_name,
         dbnum,
-        db_type,
-        end_sesno,
-        &nodes,
-        &configured_delivery_unit_types(),
-    ))
+        plan.work_items.len(),
+    )
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("dbnum={dbnum} 基线 CATA 依赖落库失败: {error:#}; 不推进 applied_sesno")
+    })?;
+    Ok(plan)
 }
 
 fn file_modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
@@ -3527,7 +3501,7 @@ impl AiosDBManager {
         // 生成工作与水位同一事务收口：枚举失败就整体不推进，下一轮重来（applied
         // 仍为 0，`baseline_needs_full_parse` 会再解析一遍，幂等但不便宜）——这比
         // 「水位推上去、库里一个模型都没有、而且此后永远不会有」要好得多。
-        let plan = baseline_model_plan(dbnum, db_type, file_latest_sesno).await?;
+        let plan = baseline_model_plan(self, dbnum, db_type, file_latest_sesno).await?;
         let roots = plan.work_items.len();
         crate::data_interface::model_update_pending::finalize_baseline(
             dbnum,
@@ -6268,21 +6242,16 @@ mod tests {
     /// generation work; catalogue and SYS meta baselines legitimately hand back
     /// none, since neither holds generation roots.
     #[test]
-    fn a_design_baseline_uses_deduplicated_fine_grained_roots() {
+    fn a_design_baseline_queues_the_materialized_full_cover_roots() {
         let r = |n| RefnoEnum::from(RefU64((7997u64 << 32) | n));
-        let nodes = HashMap::from([
-            (r(1), owner_node(None, "WORL")),
-            (r(2), owner_node(Some(r(1)), "SITE")),
-            (r(3), owner_node(Some(r(2)), "ZONE")),
-            (r(4), owner_node(Some(r(3)), "BRAN")),
-            (r(5), owner_node(Some(r(4)), "TUBI")),
-            (r(6), owner_node(Some(r(4)), "ELBO")),
-            (r(7), owner_node(Some(r(3)), "STRU")),
-            (r(8), owner_node(Some(r(7)), "GENSEC")),
-            (r(9), owner_node(Some(r(3)), "EQUI")),
-        ]);
+        let materialized = vec![
+            (r(4), "BRAN".to_string()),
+            (r(7), "STRU".to_string()),
+            (r(9), "EQUI".to_string()),
+        ];
 
-        let plan = baseline_work_items(7997, "DESI", 76, &nodes, &resolve_delivery_unit_types(&[]));
+        let plan =
+            baseline_work_items_from_materialized_roots(7997, "DESI", 76, materialized.clone());
 
         assert_eq!(plan.work_items.len(), 3);
         assert!(
@@ -6312,9 +6281,32 @@ mod tests {
         );
 
         assert!(
-            baseline_work_items(7997, "CATA", 76, &nodes, &resolve_delivery_unit_types(&[]))
+            baseline_work_items_from_materialized_roots(7997, "CATA", 76, materialized)
                 .work_items
                 .is_empty()
+        );
+
+        let source = include_str!("manual_update.rs");
+        let body = source
+            .split_once("async fn baseline_model_plan(")
+            .expect("baseline plan exists")
+            .1
+            .split_once("fn file_modified_rfc3339")
+            .expect("baseline plan has a bounded body")
+            .0;
+        assert!(body.contains("fn::sync_gen_roots({dbnum})"), "{body}");
+        assert!(
+            body.contains("fn::sync_root_covers({dbnum}, NONE)"),
+            "{body}"
+        );
+        assert!(body.contains("SELECT pe, noun FROM gen_root"), "{body}");
+        assert!(
+            body.contains("ensure_cata_parsed_for_materialized_dbnum("),
+            "CATA union 必须从已物化的全部生成根一次落库: {body}"
+        );
+        assert!(
+            !body.contains("prepare_required_dependencies("),
+            "基线不开暂存窗口，不得套用稳态窗口依赖入口: {body}"
         );
     }
 

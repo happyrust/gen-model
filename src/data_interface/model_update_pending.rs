@@ -25,9 +25,8 @@ pub const ATTEMPT_TABLE: &str = "increment_update_attempt";
 /// 记账、驱动修复、以及在清单变化时说一声。
 const ROOM_PANEL_DEFECTS: &str = "room_panel_coverage_barrier:current";
 const QUERY_CHUNK: usize = 500;
-// 空闲轮一页的读取上界。页内逐根生成并在每根前后重查数据门：批量调用曾让新数据
-// 最多等待整页（现场 16 根超过 200 秒），而初始化门中途关闭又会把调度让位记成失败。
-// 读取仍分页，昂贵生成则以单根为不可抢占的最小单位。
+// 空闲轮保持小页：现场证明 64 根大页遇到坏根时，首次失败本身就要约 60 秒；16 根页
+// 既能摊薄生成器启动，又把失败隔离的重做范围限制住，并给 watcher 留出让位点。
 const DRAIN_PAGE_SIZE: usize = 16;
 
 /// Retry ceiling per work item (same policy as `side_effect_pending`). A job
@@ -1992,8 +1991,63 @@ async fn run_one(
     };
     match outcome {
         Ok(()) => {
+            if job.action == ModelWorkAction::RegenRoot
+                && let Err(error) =
+                    crate::data_interface::geom_error::clear_generation_root_failures(
+                        std::slice::from_ref(&job.target_refno),
+                    )
+                    .await
+            {
+                log::warn!(
+                    "[geom_error] 生成根成功后销账失败 root={}: {error:#}",
+                    job.target_refno
+                );
+            }
             report.done += 1;
             RunOneOutcome::Completed
+        }
+        Err(error)
+            if job.action == ModelWorkAction::RegenRoot
+                && !mgr.db_option.sync_live.unwrap_or(false) =>
+        {
+            // 一次性初始化没有 watcher 可等，也不应把确定性坏模型原地重试五轮。
+            // 错误进入 geom_error，工作单随本轮收口；其余根继续生成。之后数据修复或
+            // 人工 ensure 会重新触发该根，成功时由上面的销账路径清除诊断行。
+            let geom_error_result =
+                crate::data_interface::geom_error::note_generation_root_failure(
+                    &job.target_refno,
+                    &job.noun,
+                    &format!("{error:#}"),
+                )
+                .await;
+            if let Err(geom_error) = geom_error_result {
+                let combined = anyhow::anyhow!(
+                    "generation failed: {error:#}; geom_error persistence failed: {geom_error:#}"
+                );
+                if record_failure(job, &combined, report).await {
+                    model_drain_telemetry().last_attempts_delta += 1;
+                }
+                return RunOneOutcome::Failed;
+            }
+            match delete_work(job).await {
+                Ok(()) => {
+                    println!(
+                        "离线初始化模型失败已记入 geom_error 并收口工作单 root={} error={error:#}",
+                        job.target_refno
+                    );
+                    report.done += 1;
+                    RunOneOutcome::Completed
+                }
+                Err(settle_error) => {
+                    let combined = anyhow::anyhow!(
+                        "generation failed: {error:#}; geom_error recorded but pending settlement failed: {settle_error:#}"
+                    );
+                    if record_failure(job, &combined, report).await {
+                        model_drain_telemetry().last_attempts_delta += 1;
+                    }
+                    RunOneOutcome::Failed
+                }
+            }
         }
         Err(error) => {
             if record_failure(job, &error, report).await {
@@ -2184,8 +2238,8 @@ async fn drain_where_cooperative(
     };
     model_drain_telemetry().last_attempts_delta = 0;
 
-    // 页内合批。[`DRAIN_PAGE_SIZE`] 定成 16 就是为了摊薄一次生成的启动开销
-    // （ADR-011 2026-08-09 修订），但这条空闲路径过去逐根调用 `generate_roots`，
+    // 页内合批。16 根一页用于摊薄一次生成的启动开销；但这条空闲路径过去逐根调用
+    // `generate_roots`，
     // 那笔开销按根重付了 16 遍——页大小的代价付了，合批本身没接上。
     //
     // 代价是批内不能中途让位：整批要么一起结算、要么一起回退逐根。所以只在批前
@@ -2403,7 +2457,8 @@ async fn drain_where_report(
 /// 串行往返上，不是几何计算上。
 ///
 /// 返回仍需逐根执行的作业：房间映射预检读失败的修复根，以及合批失败后整页回退的
-/// 根。逐根怎么跑由调用方定——[`drain_where_report`] 一口气跑完，
+/// 根。页固定为 16，把失败回退范围限制在可控大小。逐根怎么跑由调用方定——
+/// [`drain_where_report`] 一口气跑完，
 /// [`drain_where_cooperative`] 每根之间还要查一次 epoch。
 async fn run_regen_batch(
     mgr: &AiosDBManager,
@@ -2476,6 +2531,11 @@ async fn run_regen_batch(
                 .await;
         match batch_result {
             Ok(()) => {
+                if let Err(error) =
+                    crate::data_interface::geom_error::clear_generation_root_failures(&roots).await
+                {
+                    log::warn!("[geom_error] 批量生成成功后销账失败: {error:#}");
+                }
                 let mut settlements = plain_jobs
                     .iter()
                     .map(|job| (job.target_refno.clone(), job.revision))
@@ -2658,7 +2718,7 @@ pub async fn drain_data_phases_disposition(
     }
     // 每段先用 [`has_pending_work`] 探一下（LIMIT 1、不排序、1ms 量级）再决定要不要
     // 付 drain 那条查询的钱。drain 的 ORDER BY 里有两个当场算出来的 `IS NONE` 派生
-    // 列，天生不可索引：`model_update_pending` 上没有索引，取 16 行要全表扫排一遍，
+    // 列，天生不可索引：`model_update_pending` 上没有索引，即使只取在线页的 16 行也要全表扫排一遍，
     // 现场量到 260ms。而今天 `transform/delete_cleanup/cascade_expand` 与
     // `post_regen_aabb` 两段的积压长期是 0——不探就是每个空闲轮白付两次全表排序。
     let mut done = 0usize;
@@ -3627,6 +3687,38 @@ mod tests {
         assert!(
             batch.find("lock().await") < batch.find("clear_regen_work_batch(&settlements).await"),
             "batch locks must cover queue settlement"
+        );
+    }
+
+    /// 一次性初始化遇到坏模型时要留下几何诊断并收口该工作单，不能在同一次启动里
+    /// 原地重试到死信、让主线程每 60 秒继续等 `model_ready`。
+    #[test]
+    fn offline_root_failure_is_logged_to_geom_error_and_does_not_hold_initialization_open() {
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("async fn run_one(")
+            .expect("run_one must exist")
+            .1
+            .split_once("fn render_drain_select")
+            .expect("run_one must end before drain select")
+            .0;
+        let offline = body
+            .find("!mgr.db_option.sync_live.unwrap_or(false)")
+            .expect("离线初始化必须有独立错误收口分支");
+        let geom = body
+            .find("note_generation_root_failure")
+            .expect("失败根必须进入 geom_error");
+        let persistence_gate = body[geom..]
+            .find("if let Err(geom_error) = geom_error_result")
+            .map(|offset| geom + offset)
+            .expect("geom_error 落库失败时必须保留工作单");
+        let settle = body[geom..]
+            .find("delete_work(job).await")
+            .map(|offset| geom + offset)
+            .expect("记账后必须删除已处理工作单");
+        assert!(
+            offline < geom && geom < persistence_gate && persistence_gate < settle,
+            "{body}"
         );
     }
 
@@ -4720,7 +4812,7 @@ mod tests {
 
     /// 空闲页也要合批，不能一根一根地调生成。
     ///
-    /// 这条路径过去逐根调 `generate_roots(&[one])`：[`DRAIN_PAGE_SIZE`] 付了页大小的
+    /// 这条路径过去逐根调 `generate_roots(&[one])`：有界页付了页大小的
     /// 代价，摊薄却一次都没发生。现场量到每页 16.6 秒、每根 1.04 秒且九页几乎一模
     /// 一样，而进程只吃 11.8% 单核——那是 16 次流水线启动的串行往返，不是几何算力。
     #[test]

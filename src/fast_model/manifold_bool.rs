@@ -1,7 +1,7 @@
 use crate::data_interface::geom_error::{self, BOOL_NEG, BOOL_POS};
 use crate::fast_model::manifold_csg::{
-    boolean_mesh_requires_exact_coordinates, load_manifold, manifold_to_plant_mesh,
-    subtract_negatives,
+    boolean_mesh_requires_exact_coordinates, load_manifold, load_manifold_detect_exact,
+    manifold_to_plant_mesh, subtract_negatives,
 };
 use crate::fast_model::{CataNegGroup, GmGeoData, ManiGeoTransQuery, NegInfo};
 use aios_core::error::{init_deserialize_error, init_query_error};
@@ -127,9 +127,6 @@ pub async fn apply_cata_neg_boolean_manifold(
                             ));
                             continue;
                         };
-                        let exact_coordinates =
-                            boolean_mesh_requires_exact_coordinates(&dir_clone, &pos.id)?;
-
                         #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
                         println!("正在负实体计算的mesh hash: {}", &pos.id);
 
@@ -137,14 +134,13 @@ pub async fn apply_cata_neg_boolean_manifold(
                         // 确定性毛病，重试多少次都是同一句 NotManifold。抛出去会让整个
                         // 生成根连撞 MAX_ATTEMPTS 判死，同批其它元素跟着没模型、模型
                         // 阶段永远不就绪，所以这里只跳过这一件、标 bad_bool 并出声。
-                        let pos_manifold = match load_manifold(
+                        let (pos_manifold, exact_coordinates) = match load_manifold_detect_exact(
                             &dir_clone,
                             &pos.id,
                             pos.trans.compute_matrix().as_dmat4(),
                             false,
-                            exact_coordinates,
                         ) {
-                            Ok(manifold) => manifold,
+                            Ok(loaded) => loaded,
                             Err(error) => {
                                 println!(
                                     "目录布尔运算跳过: 正实体载入失败（{error:#}），refno: {} geom: {}",
@@ -877,6 +873,26 @@ fn manifold_ingest_failure_has_required_and_best_effort_paths() {
         );
         assert!(body.contains("geom_error::note_success("), "{body}");
     }
+}
+
+#[test]
+fn catalogue_exact_detection_is_inside_the_failure_policy_gate() {
+    let source = include_str!("manifold_bool.rs");
+    let catalogue = source
+        .split_once("pub async fn apply_cata_neg_boolean_manifold(")
+        .expect("catalogue manifold function")
+        .1
+        .split_once("pub async fn apply_insts_boolean_manifold(")
+        .expect("catalogue manifold boundary")
+        .0;
+    assert!(
+        catalogue.contains("match load_manifold_detect_exact("),
+        "目录正实体必须在同一次载入里判定精确属性顶点: {catalogue}"
+    );
+    assert!(
+        !catalogue.contains("boolean_mesh_requires_exact_coordinates("),
+        "策略门之前的独立文件读取会让缺失 mesh 上浮并拖垮整页: {catalogue}"
+    );
 }
 
 #[test]
