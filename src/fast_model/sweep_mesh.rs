@@ -13,7 +13,6 @@ use aios_core::prim_geo::sweep_solid::{SolidSegmentKind, SweepSolid};
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use anyhow::{anyhow, bail};
 use cavalier_contours::core::math::bulge_from_angle;
-use cavalier_contours::polyline::{PlineSource, PlineSourceMut, Polyline};
 use glam::{DMat3, DMat4, DQuat, DVec3, DVec4, Vec2, Vec3};
 use parry3d::bounding_volume::Aabb;
 use parry3d::math::Point;
@@ -37,22 +36,82 @@ impl ProfileLoops {
     }
 }
 
-/// 折线到真实弧的最大偏离。调用方按截面尺度给，对齐 `BrepShapeTrait::tol()` 的口径。
+/// 截面离散的三套口径。libgm 里它们是**三条不同的代码路径**，不得合并成一个
+/// 「通用轮廓离散」（ADR-044 决策 3）——合并等于在回转与放样上继续用挤出的段数，
+/// 而段数差一段 `cancelFacets` 的共面抵消就整个放弃（§6.11）。
+///
+/// 三条路最后都落到同一个 `getApproxPolyLineInSteps(n)`（本仓
+/// [`libgm_discretise::span_polyline_in_steps`]），**差别只在喂进去的 `n`**。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProfileCaliber {
+    /// `GM_Extrusion::calcFacets`（3.1 libgm `0x10056F10`）：逐 span 调
+    /// `D2_Span::getApproxPolyLine(tol)`，段数只看这一段自己的半径。
+    Extruded,
+    /// `GM_Revolution::calcFacetsWithoutSurfaces`（`0x10097920`）→
+    /// `GM_Profile::polygonForFacet`（`0x1008ED80`）→ `setNSteps`（`0x1008F2E0`）：
+    /// 段数按「自身半径与配对 span 半径取大」算，整条轮廓超 1000 点时放大容差重算。
+    /// **逐轮廓各算各的**——`polygonForFacet` 是按 `GM_Profile` 对象调的。
+    Revolved,
+    /// `GM_Collar::setSpanSteps`（`0x100498C0`）：在回转口径之上，**两端外环与全部
+    /// 孔环共用一份步数表**，按 span 下标取大。放样段（`gm_CreateRuledSolid`）走这条。
+    /// 证据 `docs/evidence/2026-08-24-ida-gm-collar-ruled-solid.md`。
+    Ruled,
+}
+
+/// 还没离散的一条闭合环：带 bulge 的 span 序列、截面平移、目标绕向。
+///
+/// 三套口径共用环的构造，只在「每段分几步」上分叉，所以构造与离散拆成两步。
+struct RawLoop {
+    spans: Vec<libgm_discretise::ProfileSpan>,
+    offset: Vec2,
+    ccw: bool,
+}
+
+/// 挤出口径的截面离散（`gm_CreateExtrusion` 那一支）。
+///
+/// 折线到真实弧的最大偏离由 `chord_tol` 给，全库唯一一份见
+/// [`libgm_discretise::FACET_TOL_MM`]。
 pub fn profile_loops(profile: &CateProfileParam, chord_tol: f64) -> anyhow::Result<ProfileLoops> {
-    let loops = match profile {
-        CateProfileParam::SPRO(p) => spro_loops(p, chord_tol)?,
-        CateProfileParam::SREC(p) => spro_loops(&p.convert_to_spro(), chord_tol)?,
-        CateProfileParam::SANN(p) => sann_loops(p, chord_tol)?,
+    discretise_profile(profile, chord_tol, ProfileCaliber::Extruded)
+}
+
+/// 回转口径的截面离散（`gm_CreateRevolution` 那一支，弧墙）。
+pub fn profile_loops_revolved(
+    profile: &CateProfileParam,
+    chord_tol: f64,
+) -> anyhow::Result<ProfileLoops> {
+    discretise_profile(profile, chord_tol, ProfileCaliber::Revolved)
+}
+
+/// 放样口径的截面离散（`gm_CreateRuledSolid` 那一支，斜切墙）。
+pub fn profile_loops_ruled(
+    profile: &CateProfileParam,
+    chord_tol: f64,
+) -> anyhow::Result<ProfileLoops> {
+    discretise_profile(profile, chord_tol, ProfileCaliber::Ruled)
+}
+
+fn discretise_profile(
+    profile: &CateProfileParam,
+    chord_tol: f64,
+    caliber: ProfileCaliber,
+) -> anyhow::Result<ProfileLoops> {
+    let raw = match profile {
+        CateProfileParam::SPRO(p) => spro_raw_loops(p)?,
+        CateProfileParam::SREC(p) => spro_raw_loops(&p.convert_to_spro())?,
+        CateProfileParam::SANN(p) => sann_raw_loops(p)?,
         CateProfileParam::UNKOWN => bail!("扫掠截面类型未知，无法离散"),
     };
-    if loops.is_empty() {
+    if raw.is_empty() {
         bail!("截面离散后没有闭合环");
     }
-    Ok(ProfileLoops { loops })
+    Ok(ProfileLoops {
+        loops: discretise_loops(&raw, chord_tol, caliber)?,
+    })
 }
 
 /// SPRO / SREC：顶点带倒角半径的单环。`frads[i]` 走 `profile_spans` 的第三分量。
-fn spro_loops(p: &SProfileData, chord_tol: f64) -> anyhow::Result<Vec<Loop2D>> {
+fn spro_raw_loops(p: &SProfileData) -> anyhow::Result<Vec<RawLoop>> {
     if p.verts.len() < 3 {
         bail!("SPRO 截面只有 {} 个顶点，不足以成环", p.verts.len());
     }
@@ -73,17 +132,16 @@ fn spro_loops(p: &SProfileData, chord_tol: f64) -> anyhow::Result<Vec<Loop2D>> {
     if spans.len() < 3 {
         bail!("SPRO 截面展开倒角后只剩 {} 段", spans.len());
     }
-    let mut pline = Polyline::new_closed();
-    for span in &spans {
-        pline.add(span.point[0], span.point[1], span.bulge);
-    }
     // `plin_pos` 是截面原点相对轮廓坐标的偏移，与 OCC 路径同一符号（先平移后旋转）
-    let outer = flatten_loop(&pline, chord_tol, -p.plin_pos, true)?;
-    Ok(vec![outer])
+    Ok(vec![RawLoop {
+        spans,
+        offset: -p.plin_pos,
+        ccw: true,
+    }])
 }
 
 /// SANN：环形扇区。360° 时退化成带孔圆环，按两段半圆弧拼（不是单次 360° 弧）。
-fn sann_loops(p: &SannData, chord_tol: f64) -> anyhow::Result<Vec<Loop2D>> {
+fn sann_raw_loops(p: &SannData) -> anyhow::Result<Vec<RawLoop>> {
     let r_out = (p.pradius + p.drad) as f64;
     let width = (p.pwidth + p.dwid) as f64;
     let r_in = r_out - width;
@@ -98,11 +156,19 @@ fn sann_loops(p: &SannData, chord_tol: f64) -> anyhow::Result<Vec<Loop2D>> {
     let angle = (p.pangle as f64).abs().to_radians();
 
     if p.pangle.abs() >= 360.0 {
-        let outer = flatten_loop(&full_circle(r_out), chord_tol, offset, true)?;
+        let outer = RawLoop {
+            spans: full_circle(r_out),
+            offset,
+            ccw: true,
+        };
         if r_in <= POS_EPS as f64 {
             return Ok(vec![outer]);
         }
-        let hole = flatten_loop(&full_circle(r_in), chord_tol, offset, false)?;
+        let hole = RawLoop {
+            spans: full_circle(r_in),
+            offset,
+            ccw: false,
+        };
         return Ok(vec![outer, hole]);
     }
     if angle <= f64::EPSILON {
@@ -111,71 +177,145 @@ fn sann_loops(p: &SannData, chord_tol: f64) -> anyhow::Result<Vec<Loop2D>> {
 
     let bulge = bulge_from_angle(angle);
     let (cos_a, sin_a) = (angle.cos(), angle.sin());
-    let mut pline = Polyline::new_closed();
-    if r_in <= POS_EPS as f64 {
+    let span = |x: f64, y: f64, bulge: f64| libgm_discretise::ProfileSpan {
+        point: [x, y],
+        bulge,
+    };
+    let spans = if r_in <= POS_EPS as f64 {
         // 退化成扇形：外弧 + 两条回到圆心的直边
-        pline.add(r_out, 0.0, bulge);
-        pline.add(r_out * cos_a, r_out * sin_a, 0.0);
-        pline.add(0.0, 0.0, 0.0);
+        vec![
+            span(r_out, 0.0, bulge),
+            span(r_out * cos_a, r_out * sin_a, 0.0),
+            span(0.0, 0.0, 0.0),
+        ]
     } else {
-        pline.add(r_in, 0.0, 0.0);
-        pline.add(r_out, 0.0, bulge);
-        pline.add(r_out * cos_a, r_out * sin_a, 0.0);
-        pline.add(r_in * cos_a, r_in * sin_a, -bulge);
-    }
-    Ok(vec![flatten_loop(&pline, chord_tol, offset, true)?])
+        vec![
+            span(r_in, 0.0, 0.0),
+            span(r_out, 0.0, bulge),
+            span(r_out * cos_a, r_out * sin_a, 0.0),
+            span(r_in * cos_a, r_in * sin_a, -bulge),
+        ]
+    };
+    Ok(vec![RawLoop {
+        spans,
+        offset,
+        ccw: true,
+    }])
 }
 
 /// 整圆按两段半圆弧拼——`bulge = tan(θ/4)` 在 θ=360° 处发散，单段圆是表达不出来的。
-fn full_circle(radius: f64) -> Polyline {
-    let mut pline = Polyline::new_closed();
-    pline.add(radius, 0.0, 1.0);
-    pline.add(-radius, 0.0, 1.0);
-    pline
+fn full_circle(radius: f64) -> Vec<libgm_discretise::ProfileSpan> {
+    vec![
+        libgm_discretise::ProfileSpan {
+            point: [radius, 0.0],
+            bulge: 1.0,
+        },
+        libgm_discretise::ProfileSpan {
+            point: [-radius, 0.0],
+            bulge: 1.0,
+        },
+    ]
 }
 
-/// 弧段离散成折线，去重、平移，并按 `ccw` 统一绕向。
+/// `GM_Collar::setSpanSteps`（3.1 libgm `0x100498C0`）：两端外环与全部孔环**共用一份**
+/// 步数表，按 span 下标取大。
 ///
-/// 弧走 `libgm_discretise::span_polyline_by_tol`（libgm 的整圆角度格子），与
-/// `manifold_tessellate::flatten_profile_loop` 同一份规则——扫掠体的端面截面和
-/// 挤出的截面是同一类东西，两边分段不一致的话，同一条目录截面在两条路上会得到
-/// 不同的顶点，共面抵消随之失效。
-fn flatten_loop(
-    pline: &Polyline,
+/// 本仓的放样支两端喂的是同一副截面，所以「两端」那一半按构造成立
+/// （libgm 侧是 `GM_Collar::validate` 的硬前置：两端跨度数不等直接报 −61 拒建）；
+/// 这里要补的是**跨环**那一半——外环与孔环的半径不同，各算各的就会在同一条 span
+/// 下标上给出不同段数，而 E3D 给的是两者的大者。
+///
+/// 段数不齐的环集合直接报错：libgm 那边是拿一个共享数组按下标索引所有关联轮廓的，
+/// 下标越界它自己也读不出东西来——这种输入没有「E3D 会怎么做」的答案可抄。
+fn collar_span_steps(raw: &[RawLoop], chord_tol: f64) -> anyhow::Result<Vec<Vec<i32>>> {
+    let mut per_loop: Vec<Vec<i32>> = raw
+        .iter()
+        .map(|l| libgm_discretise::profile_steps(&l.spans, chord_tol))
+        .collect();
+    let Some(n) = per_loop.first().map(Vec::len) else {
+        bail!("放样截面没有闭合环，算不出步数表");
+    };
+    if let Some(k) = per_loop.iter().position(|s| s.len() != n) {
+        bail!(
+            "放样截面第 {k} 个环有 {} 段、外环有 {n} 段，跨环步数表对不齐",
+            per_loop[k].len()
+        );
+    }
+    for i in 0..n {
+        let widest = per_loop
+            .iter()
+            .map(|s| s[i])
+            .max()
+            .expect("环集合非空，上面已经判过");
+        for steps in per_loop.iter_mut() {
+            steps[i] = widest;
+        }
+    }
+    Ok(per_loop)
+}
+
+/// 环集合离散成折线：去重、平移，并按 `ccw` 统一绕向。
+///
+/// 三套口径**只在这里分叉**，分叉点就是每段的步数：挤出逐段自算
+/// （`span_polyline_by_tol` 内部按本段半径算），回转按配对取大，放样再跨环取大。
+fn discretise_loops(
+    raw: &[RawLoop],
     chord_tol: f64,
-    offset: Vec2,
-    ccw: bool,
-) -> anyhow::Result<Loop2D> {
+    caliber: ProfileCaliber,
+) -> anyhow::Result<Vec<Loop2D>> {
     if !libgm_discretise::chord_tol_is_usable(chord_tol) {
         bail!("截面环拿到的弦高容差 {chord_tol} 不可用");
     }
-    let tol = chord_tol;
+    let steps: Option<Vec<Vec<i32>>> = match caliber {
+        ProfileCaliber::Extruded => None,
+        ProfileCaliber::Revolved => Some(
+            raw.iter()
+                .map(|l| libgm_discretise::profile_steps(&l.spans, chord_tol))
+                .collect(),
+        ),
+        ProfileCaliber::Ruled => Some(collar_span_steps(raw, chord_tol)?),
+    };
 
-    let mut pts: Vec<Vec2> = Vec::with_capacity(pline.vertex_count());
-    for (v1, v2) in pline.iter_segments() {
-        let span =
-            libgm_discretise::span_polyline_by_tol([v1.x, v1.y], [v2.x, v2.y], v1.bulge, tol);
-        for q in span {
-            let p = Vec2::new(q[0] as f32, q[1] as f32) + offset;
-            if pts
-                .last()
-                .is_some_and(|last: &Vec2| last.distance(p) < POS_EPS)
-            {
-                continue;
+    let mut out: Vec<Loop2D> = Vec::with_capacity(raw.len());
+    for (k, ring) in raw.iter().enumerate() {
+        let n = ring.spans.len();
+        let mut pts: Vec<Vec2> = Vec::with_capacity(n);
+        for (i, span) in ring.spans.iter().enumerate() {
+            let next = ring.spans[(i + 1) % n].point;
+            let seg = match &steps {
+                None => {
+                    libgm_discretise::span_polyline_by_tol(span.point, next, span.bulge, chord_tol)
+                }
+                Some(steps) => libgm_discretise::span_polyline_in_steps(
+                    span.point,
+                    next,
+                    span.bulge,
+                    steps[k][i],
+                ),
+            };
+            for q in seg {
+                let p = Vec2::new(q[0] as f32, q[1] as f32) + ring.offset;
+                if pts
+                    .last()
+                    .is_some_and(|last: &Vec2| last.distance(p) < POS_EPS)
+                {
+                    continue;
+                }
+                pts.push(p);
             }
-            pts.push(p);
         }
+        while pts.len() >= 2 && pts[0].distance(pts[pts.len() - 1]) < POS_EPS {
+            pts.pop();
+        }
+        if pts.len() < 3 {
+            bail!("截面环离散后只剩 {} 个点", pts.len());
+        }
+        if (signed_area(&pts) > 0.0) != ring.ccw {
+            pts.reverse();
+        }
+        out.push(pts);
     }
-    while pts.len() >= 2 && pts[0].distance(pts[pts.len() - 1]) < POS_EPS {
-        pts.pop();
-    }
-    if pts.len() < 3 {
-        bail!("截面环离散后只剩 {} 个点", pts.len());
-    }
-    if (signed_area(&pts) > 0.0) != ccw {
-        pts.reverse();
-    }
-    Ok(pts)
+    Ok(out)
 }
 
 /// 鞋带公式。逆时针为正。
@@ -276,6 +416,14 @@ pub fn extrude_loops(loops: &[Loop2D], height: f32) -> anyhow::Result<PlantMesh>
 
 /// 两端各自摆放的放样：底面走 `place(p, false)`，顶面走 `place(p, true)`，
 /// 两端点数一一对应。对齐 `gm_CreateRuledSolid`（斜切段就是它）。
+///
+/// **两端点数相等不是这里凑出来的，是 libgm 的前置条件**：`GM_Collar::validate`
+/// （3.1 `0x10049290`）比两端轮廓的跨度数，不等直接报 −61 拒建
+/// （高度 ≤ 1e-6 报 −88）。本函数只收**一副**截面、两端各摆一次，所以这条按构造成立
+/// ——真要接两副不同截面，先补上那条相等判定再说，不能靠「按较短的截断」凑。
+/// 摆位口径也照它：`formBaseFacet` 写 z = 0、`formTopFacet` 写 z = height
+/// （`0x10048d60` / `0x10048f20`），**不是** box / snout 那套上下各摊一半。
+/// 证据 `docs/evidence/2026-08-24-ida-gm-collar-ruled-solid.md`。
 pub fn loft_loops<F>(loops: &[Loop2D], place: F) -> anyhow::Result<PlantMesh>
 where
     F: Fn(Vec2, bool) -> Vec3,
@@ -562,14 +710,23 @@ pub fn sweep_solid_mesh(sweep: &SweepSolid) -> anyhow::Result<PlantMesh> {
     // 段数，而 `cancelFacets` 只消全等重叠——差一段就留一层壁。理由全文见
     // [`libgm_discretise::FACET_TOL_MM`]。
     let chord_tol = crate::fast_model::libgm_discretise::FACET_TOL_MM;
-    let loops = profile_loops(&sweep.profile, chord_tol)?.loops;
+    // 截面离散的口径按分支选（T056）。libgm 那边是三个不同的类各走各的：
+    // `GM_Extrusion` 逐 span 自算、`GM_Revolution` 走 `setNSteps`、`GM_Collar`
+    // 在此之上再跨环取大。用一套口径喂三支就是在回转与放样上继续用挤出的段数。
+    let kind = sweep.do_solid_segments();
+    let loops = match kind {
+        SolidSegmentKind::Extrusion => profile_loops(&sweep.profile, chord_tol),
+        SolidSegmentKind::Revolution => profile_loops_revolved(&sweep.profile, chord_tol),
+        SolidSegmentKind::RuledSolid => profile_loops_ruled(&sweep.profile, chord_tol),
+    }?
+    .loops;
     let mat = placement(sweep);
     let place = |p: Vec2, extra: DMat4| {
         let v = extra * mat * DVec4::new(p.x as f64, p.y as f64, 0.0, 1.0);
         Vec3::new(v.x as f32, v.y as f32, v.z as f32)
     };
 
-    match sweep.do_solid_segments() {
+    match kind {
         SolidSegmentKind::Extrusion => {
             let SweepPath3D::Line(line) = &sweep.path else {
                 bail!("挤出分支拿到的不是直线脊");
@@ -857,6 +1014,68 @@ mod tests {
             (got - exact).abs() < exact * 0.01,
             "整环净面积 {got} 与解析值 {exact} 差太多"
         );
+    }
+
+    /// 放样口径要把外环与孔环的步数表并成一份（T056）。
+    ///
+    /// `GM_Collar::setSpanSteps`（3.1 libgm `0x100498C0`）拿一个共享数组按 span 下标
+    /// 索引「两端外环 + 全部孔环」，逐个取大；各环各算各的是挤出那条路的做法。
+    /// 差别看得见：整环截面的外环半径 200、内孔 120，各算各的时内孔的点数少一截。
+    #[test]
+    fn the_ruled_caliber_shares_one_step_table_across_the_hole() {
+        let profile = ann_profile(200.0, 80.0, 360.0);
+        let tol = 0.05;
+
+        let ruled = profile_loops_ruled(&profile, tol).expect("ruled annulus");
+        assert_eq!(ruled.loops.len(), 2, "整环必须是外环 + 内孔");
+        assert_eq!(
+            ruled.loops[0].len(),
+            ruled.loops[1].len(),
+            "放样口径下外环 {} 点、内孔 {} 点——跨环取大没生效",
+            ruled.loops[0].len(),
+            ruled.loops[1].len()
+        );
+
+        // 自检：这条断言必须是被「跨环取大」挣来的，不是两个半径恰好同段数。
+        let extruded = profile_loops(&profile, tol).expect("extruded annulus");
+        assert_ne!(
+            extruded.loops[0].len(),
+            extruded.loops[1].len(),
+            "挤出口径下两环点数本就相同，这组半径证明不了任何事"
+        );
+        assert_eq!(
+            ruled.loops[0].len(),
+            extruded.loops[0].len(),
+            "取大只该抬高内孔，外环不该动"
+        );
+    }
+
+    /// 三支各走各的口径，`sweep_solid_mesh` 不许拿一个入口喂三支。
+    ///
+    /// libgm 里挤出 / 回转 / 放样是三个类三条路（`GM_Extrusion::calcFacets`
+    /// `0x10056F10`、`GM_Revolution` → `polygonForFacet` `0x1008ED80`、
+    /// `GM_Collar::setSpanSteps` `0x100498C0`）。退回单一口径本测试必红，
+    /// 而线上症状是布尔后多留一层内壁——比这难查得多。
+    #[test]
+    fn the_three_sweep_branches_do_not_share_one_caliber() {
+        let source = include_str!("sweep_mesh.rs");
+        let body = source
+            .split_once("pub fn sweep_solid_mesh(")
+            .expect("sweep_solid_mesh exists")
+            .1
+            .split_once("\nfn compute_aabb(")
+            .expect("sweep_solid_mesh boundary")
+            .0;
+        for entry in [
+            "profile_loops(",
+            "profile_loops_revolved(",
+            "profile_loops_ruled(",
+        ] {
+            assert!(
+                body.contains(entry),
+                "扫掠三支必须各自取自己的口径，缺 {entry}：{body}"
+            );
+        }
     }
 
     #[test]

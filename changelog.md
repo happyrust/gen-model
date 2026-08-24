@@ -8,6 +8,18 @@
   名单外项目不再解析或扫描；`project_dirs` 不再重定向、扩大范围，也不再在空名单时
   充当回退名单（ADR-046 / specs/027）。
 
+- 扫掠体的截面离散补上另外两套口径（specs/009 T056）。libgm 里挤出 / 回转 / 放样
+  是三个类三条路，而 `sweep_mesh` 三支共用挤出那一套折线化——T040 当时只修了
+  `manifold_tessellate::tessellate_revolution`，没往扫掠这条路上看，于是弧墙与斜切墙
+  一直在用 `GM_Extrusion` 的段数。现在建环与离散拆成两步（新增 `RawLoop` 与
+  `ProfileCaliber`，`Polyline` 中间层去掉），三支只在「每段分几步」这一处分叉：
+  挤出逐 span 自算、回转按配对 span 取大、放样再由 `GM_Collar::setSpanSteps` 在
+  **外环与全部孔环之间**按 span 下标取大。
+  **回转与放样必须是两个入口**：跨环取大是 `GM_Collar` 独有的，`GM_Revolution` 的
+  `polygonForFacet` 按 `GM_Profile` 对象逐个调，没有那一层——合并入口等于给弧墙
+  加一条 E3D 没有的规则。跨环步数表对不齐时硬失败，不猜。
+  现场可见的变化是整环截面（SANN 360°）内孔的点数被抬到与外环一致；能量它的
+  RVM 门（T047 / T048）仍未跑。
 - 偏心 Snout 的偏移改成**上下各摊一半**（specs/009 T050）。libgm
   `GM_Snout::calcFacetsWithoutSurfaces` 逐顶点写的是 `r·cosθ ∓ xShift/2`，`calcRange`
   的支撑函数独立佐证同一约定，`GM_Pyramid` 也完全同构；本仓 `gen_snout` 与 aios-core 的
@@ -81,6 +93,25 @@
   硬截 1000、经向恒 `n/2`，球的身份键只需混一个 n，且现状 16×36 里的 36 在
   「幸运尺寸」下也从来没对过。SSCL 折叠与 RINS 夹取两条欠项复核仍欠，已开
   T054 / T055 排进 WP-K。
+- IDA 补齐最后一个没读过的形状臂：证据
+  `docs/evidence/2026-08-24-ida-gm-collar-ruled-solid.md`——`GM_Collar`
+  （= `gm_CreateRuledSolid`，斜切墙那一支）在 libgm 3.1 逐位读出，此前手上只有
+  teach 记录里一行 2.10 转述。四条与本仓有落差：**两端点数一一对应是 libgm 的前置
+  条件**（`validate` 比两端跨度数，不等报 −61 拒建），不是算法凑出来的；`setSpanSteps`
+  的配对表与步数表是**两端外环加全部孔环共一份**（初值 8、逐 span 取
+  `max(自身半径, 配对半径)`、容差逐轮廓、写回只增不减），而**「只增不减」正是 collar
+  强制两端同段数的机制本身**——`polygonForFacet` 冷路径会主动清掉「已设定」标志重算，
+  统一值全靠取大活下来；摆位是 **z = 0 → z = height** 而不是 box / snout 那套 ±h/2，
+  两个盖各是一个 n 边形面；侧壁是双指针归并，步长与硬边共用 `polygonForFacet` 第二
+  出参——**该出参一参两用，T040b 只做法向那一半补不齐**。
+  同一份证据里把 **T040b 的规则也反完了**（实现仍不在本期）：`getPolygonForFacet`
+  的第二出参逐顶点记「有几条 span 在这里收尾」，相邻段不平滑时取负，**闭合处一次负
+  两个**；判据 `D2_Span::leadsSmoothlyTo` 是 `1 − 点积 ≤ 1e-6`（≈0.081°），
+  **与布尔那边的 22.5° 和归一化那边的 48.3° 是三个不同判据，不得互顶**；
+  切线里 `0 < |bulge| < 3.06e-5` 走一条非单位的退化分支，效果是「极小非零 bulge 必判
+  硬边」，照抄时别顺手归一化。
+  顺带撞出 T056（当日已修，见「修复」一节）。specs/009 的 T020 / T022 / T047 / T048
+  已补上依赖与验收门。
 - `CONTEXT.md` 补上 ADR-041~045 各自引入的那个概念，五条一次到位，每条按主题进它该在的
   分节而不是堆在文末：**libgm 面片口径**（紧跟「单位网格身份」，因为 ADR-044 改的就是那把
   身份键）、**切片流水线** 与 **insts_flat 失效协议**（模型生成执行）、**分块解析基线**

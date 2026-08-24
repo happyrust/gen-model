@@ -119,6 +119,9 @@
   内核 `extrude_loops` / `loft_loops` 已绿；生产接线已落地；**缺 RVM**。
 - [ ] T020（依赖 T018）`gm_CreateRevolution(..., 180°)` 两半合并；弧墙 + 360° SANN 体积门（FR-006）。
   内核 `revolve_loops` 已绿；**缺弧墙 RVM**。
+  **2026-08-24 追加前置 T056**：这一支的截面离散还走挤出口径，而 `GM_Revolution`
+  在 libgm 里走的是 `polygonForFacet` → `setNSteps`（T040 只在 `PrimRevolution` 那条
+  路上修了）。段数定稿前跑 T047 是白跑。
 - [x] T021（2026-08-24 完成）IDA 反编译 `0x107318E0` 斜切延伸段（Start/End-mitre extension），
   写成纯函数。落在 `src/fast_model/sweep_mesh.rs`：`mitre_extension_reach` +
   `mitre_extension_length`。
@@ -152,6 +155,30 @@
   **平面内角度**，出平面轴确实表达不出。
 - [ ] T022（依赖 T018；**不依赖 T021**）`gm_CreateRuledSolid`：两端轮廓一一对应连三角。
   内核 `loft_loops` 已绿（斜切不改体积）；**缺斜切墙 RVM**。
+  **2026-08-24 IDA 补齐权威**：`GM_Collar` 一族在 libgm 3.1 逐位读出，证据
+  `docs/evidence/2026-08-24-ida-gm-collar-ruled-solid.md`。地址：`GM_Collar` ctor
+  `0x10048390`（`(height, base, top, tol)`）、`calcFacetsWithoutSurfaces` `0x10048500`、
+  `formBaseFacet` `0x10048d60`、`formTopFacet` `0x10048f20`、`formTopSides` `0x100490d0`、
+  `validate` `0x10049290`、`setSpanSteps` `0x100498c0`、`linkedProfiles` `0x10049340`。
+  四条与本仓有落差的结论：
+  (1) **「两端点数一一对应」是 libgm 的前置条件不是算法**——`validate` 比两端跨度数，
+      不等直接 −61 拒建（高度 ≤ 1e-6 报 −88）；本仓这句话此前只是 `loft_loops` 的注释。
+  (2) **段数跨端统一**：`setSpanSteps` 对「两端外环 + 全部孔环」共用一份 `pair` 表与
+      `nSteps` 表（初值 8 / −1），逐 span 取 `max(自身半径, 配对半径)` 算
+      `d2_numberOfSegmentsForCircle`，容差取各轮廓自己的 `+0x18`，写回时只增不减。
+      **单调取大不是实现细节**：`polygonForFacet` 冷路径会主动清掉 `+0x60` 标志并重算，
+      collar 的统一值全靠「重算只会更小、取大即不变」活下来。
+  (3) **摆位是 z = 0 → z = height**（`formBaseFacet` 写 0.0、`formTopFacet` 写 height），
+      不是 box / snout / pyramid 那套 ±h/2；两个盖各是**一个 n 边形面**，side 码一奇一偶。
+  (4) 侧壁是**双指针归并**（三角 / 四边混出），步长与硬边都来自 `polygonForFacet` 第二出参
+      ——该出参一参两用，T040b 只做法向那一半是不够的。
+  门（RVM 之前先收纯函数半）：
+  (a) 两端跨度数不等 → `bail!`，错误里带两端实际点数（回退成「按较短的截断」即红）；
+  (b) 段数走 T056 的 collar 口径后，两端拿到**同一份**步数表、逐点配得上；且这份表与
+      挤出支算出来的**不同**——两者相同就说明口径又被合并回去了（判别式照抄 T040 的
+      `the_revolution_caliber_is_not_the_extrusion_one`）；
+  (c) 底/顶环 z 坐标钉死为 0 与 height（改成 ±h/2 即红）；
+  (d) **斜切墙 RVM（T048）** 仍是终验收，阈值不放宽。
 - [ ] T023（依赖 T022）斜切延伸挤出挂到段 CSG；斜切墙 RVM；垂直/平行切向不得误走 Ruled（ADR-026）。
 - [ ] T024（可后置）多段 SPINE：`transform` + `batch_union`；无多段夹具则只单测。
 
@@ -373,6 +400,21 @@
   （`D2_Span::leadsSmoothlyTo` 为假时取负），是曲面法向该怎么分组的权威来源，
   与 `d0088e93 fix(geom): smooth curved-surface normals` 同一件事。本期不实现，
   单独开规格前先把这条记着。
+  **2026-08-24：规则已反编译完整，实现仍不在本期。** 证据
+  `docs/evidence/2026-08-24-ida-gm-collar-ruled-solid.md` §六。
+  `GM_Profile::getPolygonForFacet`（3.1 libgm `0x1008F8B0`）：`flags` 逐顶点，
+  `|flags[k]|` 是「有几条 span 在第 k 个顶点收尾」（正常恒 1，连续退化段才累加），
+  相邻两段 `!leadsSmoothlyTo` 时取负；**闭合处一次负两个**（末点与首点），触发条件是
+  「折线首尾点不重合**或**末段不平滑接回首段」。
+  `D2_Span::leadsSmoothlyTo`（**libgeom** 3.1 `0x10029B50`）：
+  `|1 − dot(lastTangent(a), firstTangent(b))| ≤ 1e-6`，约 0.081°——
+  **与 `isTangentDiscontinuity` 的 22.5°、`isSharp` 的 48.3° 是三个不同判据，不得互顶**。
+  切线出自 `getFirstTangent` / `getLastTangent`（libgeom `0x100296F0` / `0x10029930`）：
+  `bulge` 精确为 0 走弦向单位向量，`|bulge| ≥ 3.06e-5` 走 `(−r.y, r.x)/R`（带符号半径），
+  而 `0 < |bulge| < 3.06e-5` 落进一条**非单位**的退化分支——实际效果是「极小非零 bulge
+  必定判成硬边」，照抄时不要顺手归一化。
+  开规格时连带一件：这个出参**一参两用**，`GM_Collar` 的侧壁归并走查拿 `|flags[k]|`
+  当推进量（同上文件 §五），只实现法向那一半会让直纹面的三角/四边划分对不上。
 - [ ] T041（依赖 T038+T045）`../vendor/old-aios-core/src/prim_geo/cylinder.rs`、
   `../vendor/old-aios-core/src/prim_geo/sphere.rs`、`src/fast_model/pdms_inst.rs`：
   柱与球的 `hash_unit_mesh_params()` 混入
@@ -416,6 +458,50 @@
   **未验收的部分要说清楚**：这会改变墙的弧段段数，而能量它的 RVM 门（WP-J）要等
   T043 把 `mesh_compare` 从 `occ` 解绑才跑得起来。目前只有纯函数单测与体积门
   （全量 `--lib` 1061 通过，余 2 条是下面记着的既有红测）。
+- [x] T056（新，2026-08-24 从 GM_Collar 那一刀撞出来，同日落地；T020 / T022 / T023 的前置）
+  **扫掠体的截面离散还用着挤出口径，T040 只修了一半。**
+  `src/fast_model/sweep_mesh.rs`、`src/fast_model/libgm_discretise.rs`：
+  §7.9.2 点名 `GM_Profile::polygonForFacet` → `setNSteps` 那套段数**只服务
+  `GM_Revolution` 与 `GM_Collar`**，而这两个东西在本仓都落在 `sweep_mesh.rs`；
+  它的 `profile_loops` → `flatten_loop` 走的是 `span_polyline_by_tol`（挤出的整圆角度
+  格子），全文没有一处 `span_polyline_in_steps`。也就是**挤出支对，回转支（弧墙）与
+  放样支（斜切墙）沿用了挤出口径**——与 T040 在
+  `manifold_tessellate::tessellate_revolution` 上修掉的是同一条错，只是当时没往扫掠这
+  条路上看。不需要新反编译，规则已在 `libgm_discretise`（`profile_steps` /
+  `paired_span`）。
+  collar 比回转还多一层：配对表与步数表是**两端外环 + 全部孔环共一份**
+  （初值 8 / −1、逐 span 取大、容差逐轮廓），本仓 `paired_span` 只在本环内找，
+  要另出一个「跨环取大」的入口，不得把它合进现有的单环版本
+  （合并即 ADR-044 决策 3 点名禁止的那种「通用轮廓离散」）。
+  证据 `docs/evidence/2026-08-24-ida-gm-collar-ruled-solid.md`。
+  门：(a) 同一副带倒角截面在放样支与回转支得到的点数与挤出支**不同**（合并即红，
+  照抄 T040 的 `the_revolution_caliber_is_not_the_extrusion_one` 判别式）；
+  (b) 跨环取大：两端半径不同的一对轮廓，逐 span 拿到同一个段数；
+  (c) 段数改动后弧墙 RVM（T047）与斜切墙 RVM（T048）重建基准再对拍——
+  **这两道门在 T056 落地前跑是白跑**，基准会再变一次。
+
+  **2026-08-24 落地。** `sweep_mesh` 里「建环」与「离散」拆成两步：新增私有
+  `RawLoop`（带 bulge 的 span 序列 + 平移 + 目标绕向）与 `ProfileCaliber`
+  三值枚举，`spro_loops` / `sann_loops` 改成只建环的 `*_raw_loops`（`Polyline` 中间层
+  整个去掉，`full_circle` 直接出 `ProfileSpan`），`flatten_loop` 换成
+  `discretise_loops`——**三支只在「每段分几步」这一处分叉**。
+  对外三个入口对应 libgm 的三个类：`profile_loops`（`GM_Extrusion`，行为一位未改）、
+  `profile_loops_revolved`（`GM_Revolution`，逐环 `profile_steps`）、
+  `profile_loops_ruled`（`GM_Collar`，再加 `collar_span_steps` 跨环取大）。
+  `sweep_solid_mesh` 按 `do_solid_segments()` 的三支各取各的。
+  **回转与放样分成两个入口不是洁癖**：`setSpanSteps` 是 `GM_Collar` 独有的，
+  `GM_Revolution` 的 `polygonForFacet` 是按 `GM_Profile` 对象逐个调的，没有跨环那一层；
+  合成一个入口就等于给弧墙加了一条 E3D 没有的规则。
+  跨环步数表对不齐时 `bail!`——libgm 那边是拿共享数组按下标索引全部关联轮廓，
+  下标越界它自己也读不出东西来，这种输入没有「E3D 会怎么做」可抄。
+  门（两条全绿）：`the_ruled_caliber_shares_one_step_table_across_the_hole`
+  （外 200 / 内 120 的整环：放样口径下两环点数相等，**并自检挤出口径下两者不等**
+  ——否则这组半径证明不了任何事；同时钉住取大只抬高内孔、外环不动）；
+  `the_three_sweep_branches_do_not_share_one_caliber`（源码顺序断言，退回单一入口即红）。
+  `sweep_mesh` 30 全绿；全量 `--lib` **1085 通过 / 1 失败**，那一条仍是本文件「既有红测」
+  记着的 vendor 未发布问题。`rustfmt` + CI 口径 `cargo check` 通过。
+  **未验收**：这会改变整环截面（SANN 360°）内孔的点数，能量它的是 T047 / T048，
+  两道 RVM 门仍未跑。
 
 ## WP-H 验收能力解绑（ADR-030 决策 10）
 
@@ -691,8 +777,9 @@ ws,gen_model,manifold,project_hd`：T039 / T042 落地后是 **1062 通过 / 1 �
 ## WP-J RVM 门（依赖 T043 + WP-G 落地）
 
 - [ ] T046 直墙 RVM（T019 的门）。
-- [ ] T047 弧墙 + 360° SANN 体积门 RVM（T020 的门，FR-006）。
-- [ ] T048 斜切墙 RVM（T022 / T023 的门）。
+- [ ] T047 弧墙 + 360° SANN 体积门 RVM（T020 的门，FR-006）。**依赖 T056**：
+  回转支的截面段数还是挤出口径，改之前跑出来的基准要重建。
+- [ ] T048 斜切墙 RVM（T022 / T023 的门）。**依赖 T056**（同上，放样支）。
 - [ ] T049 曲面原语抽检 RVM：柱 / 球 / PrimLSnout / 碟 / 圆环面各一，段数改动后重建基准。
   阈值一律不放宽（FR-010）；证据进 `docs/evidence/`，`docs/2026-08-12_live-test-ledger.md`
   同步。现成样本两件：PrimLSnout 取库 B `poff = 12.06` 那件（T052 盘点），圆环面取
