@@ -896,7 +896,7 @@ pub fn gen_pyramid(
     let hy_b = snap(ybot / 2.0);
     let hx_t = snap(xtop / 2.0);
     let hy_t = snap(ytop / 2.0);
-    // 偏移在上下面各摊一半，与 aios-core 的 truck / OCC 实现同一约定
+    // 偏移在上下面各摊一半，与 aios-core `LSnout::end_centers` 同一约定
     let ox = xoff / 2.0;
     let oy = yoff / 2.0;
 

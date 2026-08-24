@@ -133,11 +133,51 @@ T004 后半、T008、T025–T028、T045a、T046–T049、T031、T032。
   阈值一律不放宽（FR-010）；证据进 `docs/evidence/`，live 台账同步。
   这一步同时收掉 T043 的「跑出对拍结果」后半门。
 
-## Phase X — 摘除与收尾（全部前置绿后）
+## Phase X — 摘除与收尾（X0a 随时可做，其余按依赖）
 
-- **X1（T031）** `Cargo.toml`：default / release 特性组去掉 `occ`；
-  CI 增加「无 occ 时 `gen_inst_meshes` 失败闭合」测试（bail 而非静默跳过）。
-  回滚预案按 ADR-030 决策 7：只加回 `occ=true`，不恢复 OCC 布尔。
+> **2026-08-24 摘除盘点**（为什么这些 cfg 门还在，以及怎么删）。
+>
+> 现存挂点：gen-model 的 `feature = "occ"` 只剩 **2 个文件 11 处**——
+> `src/fast_model/occ_generate.rs` 9 处（3 条 import、2 个 occ 回归测试、
+> `apply_insts_boolean_occ` / `apply_cata_neg_boolean_occ` 两个死布尔函数，生产调用点
+> 213/265/402 三处全是注释）与 `src/rvm_baseline/mesh_compare.rs` 2 处（T043 刻意保留的
+> 可选 OCC 参照）。`feature = "truck"` 在 gen-model **零挂点**，`Cargo.toml` 的
+> `truck = []` 是空壳；`gen_brep_shell` 在 gen-model **零调用**。
+> vendor 侧：`occ` 22 个文件约 80 处（`gm_Create*` → BRep 的整个翻译层 + 常量形状），
+> 且在 vendor **default** 里；`truck` 17 个文件约 100 处，但其依赖在 vendor Cargo.toml
+> 里**整组被注释**——开了 feature 也编不过，是纯死文本（T050/T054 还在为它做同批维护）。
+> 消费者核查：gen-model / python / parse_pdms_db 对 aios_core 全是
+> `default-features = false`，vendor 的 occ 只有 gen-model 的 `occ` feature 会点亮。
+>
+> **语义修正**：自 T037 拆除形状回退起，`occ` 在生产路径上已经**不是回退**——
+> 开着它形状也只走 manifold。它今天只买到三样：mesh_compare 的独立参照、两个
+> occ 回归测试、死布尔函数的编译覆盖。ADR-030 决策 7「回滚 = 加回 occ=true」随之失效
+> （加回来什么都不会变），真回滚只剩 git revert——X1a 落地时给 ADR-030 补一条修订。
+
+- **X0a（2026-08-24 已做）** 删 `Cargo.toml` 的 `truck = []` 空壳。
+  门已验：`rg truck` 在 gen-model 零命中（余一处注释同步改掉）+ CI 口径 `cargo check` 过。
+- **X0b（2026-08-24 已做，随 Phase V 批推上游）** 删 vendor 的 `truck` feature、
+  被注释的 truck 依赖组、17 个文件 90 处 cfg 门整段（`gen_brep_shell` 自
+  `BrepShapeTrait` 一并摘除；T050 抽出的 `end_centers()` 无 feature 依赖，保留）。
+  门已验：vendor `--no-default-features --features gen_model,sql` 编译零新警告；
+  全量 lib 测试里本批触碰模块（prim_geo / shape / test_shape）的红仍只有
+  wire 那 3 条既有红（归属另一会话未提交的 wire.rs 改动）；`rg truck` 零命中。
+  两处脚本清不掉的悬空文档注释（sweep_solid 尾部、pdms_shape trait 头）手工清除。
+- **X1a（T031 本体，依赖 R1–R4 全绿）** gen-model 摘 `occ`：
+  default / console 去 `occ`，`occ = ["aios_core/occ", "dep:opencascade"]` 与
+  `dep:opencascade` 一并删除；mesh_compare 的 OCC 参照分支删除（R4 对拍时先开着
+  occ 对照跑最后一轮留证，然后再摘）；occ_generate.rs 两个死布尔函数删除
+  （ADR-029 布尔单轨 manifold 已一年量级，注释调用点一起清）；两个 occ 回归测试处置：
+  房间面板自交修复改为 manifold 断言（轮廓修复在 wire 层、后端无关），GENSEC SPRO
+  在 R1 直墙 RVM 绿后属重复覆盖、删除。CI 增加「无 occ 时失败闭合」测试。
+  ADR-030 补决策 7 修订（回滚口径改 git revert）。
+  门：`rg 'feature = "occ"'` 在 gen-model 零命中；CI 口径全量绿；失败闭合测试红转绿。
+- **X1b（vendor，X1a 合入且 rev bump 之后，单独一批）** vendor 摘 `occ`：
+  default 去 `occ`、删 `occ` feature 与 opencascade 依赖、22 个文件的翻译层
+  （`gen_occ_shape` 自 trait 摘除）。前置：X1a 已发布（vendor occ 自此零激活方）。
+  门：vendor 全量 no-default 测试；gen-model 升 rev 后 CI 绿。
+  本机 opencascade-sys 本来就编不过（T050 记录），vendor default 带 occ 实际上
+  已经是「本地不可构建的默认值」——这一步同时把它治了。
 - **X2（T032）** `changelog.md`、live 台账、`cargo fmt` / `cargo check`、
   aios-core 解耦合上游（V4 已做即免）、`Toggle-LocalDeps -Off` 复核后推送。
 

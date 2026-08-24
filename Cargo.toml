@@ -20,7 +20,6 @@ path = "src/lib.rs"
 [features]
 default = ["ws", "gen_model", "manifold", "occ", "project_hd"]
 console = ["ws", "gen_model", "manifold", "occ", "project_hd", "mqtt"]
-truck = []
 local = []
 ws = []
 debug_obj_export = []

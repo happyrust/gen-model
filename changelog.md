@@ -79,6 +79,13 @@
 
 ### 移除
 
+- 删除 `truck` 死接线（收官计划 Phase X 的 X0a / X0b）。gen-model 侧 `truck = []`
+  是零挂点的空壳 feature，`gen_brep_shell` 在本仓零调用；vendor（aios-core）侧
+  `truck` 的依赖在 Cargo.toml 里整组被注释，**开了 feature 也编不过**，17 个文件
+  90 处 `#[cfg(feature = "truck")]` 门是纯死文本，还一直在吃同批维护（T050 / T054
+  都给它做过等价改写）。两侧一并删除：feature、注释依赖、全部门与所属条目；
+  `LSnout::end_centers()` 无 feature 依赖，保留。vendor 半区与 snout / T054 / T055
+  同批推上游。
 - 删除浸水插件 `src/plug_in/water_calculation.rs`（业务上不再需要），连同
   `plug_in` 的模块声明与 `consts::AQL_WATER_CALCULATION_COLLECTION`。它是 ADR-030
   背景一节点名的「第二个 OCC 抑留点」，这条说法自此作废——抑留点只剩扫掠体
