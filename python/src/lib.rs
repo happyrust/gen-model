@@ -304,11 +304,9 @@ fn noun_dict(py: Python<'_>, attlib_path: PathBuf) -> PyResult<Py<PyAny>> {
     Ok(pythonize(py, &value)?.unbind())
 }
 
-/// **LEGACY** 逐会话回放收集（ADR-031）：按窗口内每个会话认领本会话新写记录再
-/// 做属性 diff。纯函数、不写库、不动水位。
-///
-/// 生产预览 / 执行走的是 [`net_window`]（`IncrementPipeline::collect_window`），
-/// **不是**本入口。这里只给跨结构对拍和「哪个会话动的」取证用。
+/// 生产净窗口收集（ADR-031）：会话索引双根差分后合成终态操作。
+/// 纯函数、不写库、不动水位，与生产预览 / 执行共用
+/// [`IncrementPipeline::collect_window`] 这一个入口。
 ///
 /// 返回 `{sesno: [op, ...]}`；`detail=False` 时属性只给名字列表，`detail=True`
 /// 给完整旧值/新值。
@@ -323,12 +321,11 @@ fn collect_changes(
 ) -> PyResult<Py<PyAny>> {
     let value = py
         .detach(|| {
-            let window =
-                aios_database::data_interface::increment_pipeline::IncrementPipeline::collect_changes(
-                    &path,
-                    start..=end,
-                )?;
-            anyhow::Ok(convert::window_to_json(&window, detail))
+            let window = aios_database::data_interface::increment_pipeline::IncrementPipeline::collect_window(
+                &path,
+                start..=end,
+            )?;
+            anyhow::Ok(convert::window_to_json(&window.range_eles, detail))
         })
         .map_err(anyhow_to_py)?;
     Ok(pythonize(py, &value)?.unbind())
@@ -337,7 +334,7 @@ fn collect_changes(
 /// 会话索引差分：给定 sesno 窗口，**只靠文件本身**判定窗口内的净增删改——
 /// 不查任何数据库、不逐会话解析记录，复杂度与窗口内会话数解耦。
 ///
-/// 与 `parse.collect_changes`（逐会话回放）互为对拍：回放给出每会话操作明细，
+/// 与 `parse.collect_changes` 共用净窗口口径；本入口额外返回底层索引位置与统计。
 /// 差分给出净三态（窗口内加了又删不出现，删了又建判 modified）。实现见
 /// `pdms_io::session_index_diff`（存在性口径与生产 B+ 树点查逐字对齐）。
 ///

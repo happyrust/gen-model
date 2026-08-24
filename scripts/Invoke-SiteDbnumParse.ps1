@@ -18,6 +18,10 @@
 .PARAMETER Port
     站点的 SurrealDB 端口，默认与 Dbnum 同号。
 
+.PARAMETER ProjectPath
+    可选的项目集合根目录。用于从静态 AMS 副本初始化，同时通过同目录下的目录联接
+    复用 Catalogue 等只读参考项目；不传时沿用仓库根配置。
+
 .PARAMETER Storage
     memory = 内存实例，进程一停即清，适合测试；rocksdb = 落盘到 .surreal/site-<dbnum>。
 
@@ -34,6 +38,7 @@ param(
     [Parameter(Mandatory)][int]$Dbnum,
     [int]$Port = 0,
     [string]$Project = "AvevaMarineSample",
+    [string]$ProjectPath,
     [string[]]$DbFiles,
     [ValidateSet("memory", "rocksdb")][string]$Storage = "memory",
     [string]$ReleaseDir = (Join-Path (Split-Path -Parent $PSScriptRoot) "target\release"),
@@ -85,6 +90,10 @@ $overrides = [ordered]@{
     gen_spatial_tree        = "false"
     load_spatial_tree       = "false"
     save_spatial_tree_to_db = "false"
+}
+if ($ProjectPath) {
+    $resolvedProjectPath = (Resolve-Path -LiteralPath $ProjectPath).Path.Replace('\', '/')
+    $overrides['project_path'] = "`"$resolvedProjectPath`""
 }
 
 $lines = [System.Collections.Generic.List[string]]::new()

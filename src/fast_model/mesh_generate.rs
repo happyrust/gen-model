@@ -397,6 +397,29 @@ fn persist_libgm_plant_mesh(
     Ok(())
 }
 
+async fn note_mesh_failure(id: &str, error: &str) -> usize {
+    let targets = match aios_core::query_refnos_by_geo_hash(id).await {
+        Ok(refnos) => refnos
+            .into_iter()
+            .map(|refno| refno.to_pdms_str())
+            .collect::<Vec<_>>(),
+        Err(query_error) => {
+            eprintln!(
+                "[geom_error] 几何 {id} 的受影响构件反查失败，仍按 geo hash 记账: {query_error:#}"
+            );
+            Vec::new()
+        }
+    };
+    crate::data_interface::geom_error::note_mesh_skip(id, &targets, error).await;
+    targets.len()
+}
+
+async fn clear_mesh_failure(id: &str) {
+    if let Err(error) = crate::data_interface::geom_error::clear_mesh_failure(id).await {
+        eprintln!("[geom_error] 网格成功后的销账失败 geom={id}: {error:#}");
+    }
+}
+
 #[cfg(test)]
 mod occ_retire_source_guards {
     fn active_lines(source: &str) -> String {
@@ -474,6 +497,31 @@ mod occ_retire_source_guards {
         assert!(
             persist.contains("拒绝空 pts"),
             "empty point receipts must fail loudly"
+        );
+    }
+
+    /// `inst_geo.bad=true` 是持久诊断状态，不得只写一行控制台后静默过滤。
+    #[test]
+    fn every_mesh_failure_path_records_geom_error_before_marking_bad() {
+        let source = include_str!("mesh_generate.rs");
+        let body = source
+            .split_once("pub async fn gen_inst_meshes(")
+            .expect("gen_inst_meshes")
+            .1
+            .split_once("/// 生成模型的aabb数据")
+            .expect("gen_inst_meshes boundary")
+            .0;
+        assert!(
+            body.contains("note_mesh_failure(&g.id, message).await"),
+            "non-shape parameters must enter geom_error"
+        );
+        assert!(
+            body.contains("note_mesh_failure(&g.id, &message).await"),
+            "tessellation failures must enter geom_error"
+        );
+        assert!(
+            body.contains("note_mesh_failure(id, &message).await"),
+            "mesh persistence failures must enter geom_error"
         );
     }
 }
@@ -608,20 +656,21 @@ pub async fn gen_inst_meshes(
                                         libgm_meshes.insert(g.id, mesh);
                                     }
                                     Ok(None) => {
+                                        let message =
+                                            "libgm 参数不是可离散形状（Unknown/CompoundShape）";
+                                        let affected = note_mesh_failure(&g.id, message).await;
                                         eprintln!(
-                                            "几何 {} 不是形状（Unknown/CompoundShape），标记跳过",
-                                            g.id
+                                            "几何 {} 不是形状，标记跳过（波及 {} 个构件）",
+                                            g.id, affected
                                         );
                                         unbuildable.push(g.id);
                                     }
                                     Err(error) => {
-                                        let affected = aios_core::query_refnos_by_geo_hash(&g.id)
-                                            .await
-                                            .unwrap_or_default();
+                                        let message = format!("libgm 三角化失败: {error:#}");
+                                        let affected = note_mesh_failure(&g.id, &message).await;
                                         eprintln!(
                                             "几何 {} libgm 建不出形状，标记跳过（波及 {} 个构件）：{error}",
-                                            g.id,
-                                            affected.len()
+                                            g.id, affected
                                         );
                                         #[cfg(any(
                                             feature = "debug_model",
@@ -649,15 +698,16 @@ pub async fn gen_inst_meshes(
                                     &chunk_pts,
                                     &mut update_sql,
                                 ) {
-                                    let affected = aios_core::query_refnos_by_geo_hash(id)
-                                        .await
-                                        .unwrap_or_default();
+                                    let message = format!("libgm 网格持久化失败: {error:#}");
+                                    let affected = note_mesh_failure(id, &message).await;
                                     eprintln!(
                                         "几何 {id} libgm 网格落盘失败，标记跳过（波及 {} 个构件）：{error}",
-                                        affected.len()
+                                        affected
                                     );
                                     update_sql
                                         .push_str(&format!("update inst_geo:⟨{id}⟩ set bad=true;"));
+                                } else {
+                                    clear_mesh_failure(id).await;
                                 }
                             }
                             if !update_sql.is_empty() {

@@ -6,6 +6,16 @@
 **没有"最近通过"记录的用例视同未验资产**——本台账是唯一事实来源，动过 live 用例或
 点亮新批次必须同步更新。
 
+**2026-08-24 AMS 8000 页式 CATA 预加载（收敛中）**：
+`production_acp7000_locator_opens_authoritative_paged_session` 最近通过，识别
+`page_size_bytes=2048, sesno=272`；
+`production_cata_locator_uses_paged_snapshot_below_io_budget` 最近通过，
+ACP 7320 只读 38,858,752/431,941,632 字节，`record_pages=0`。AMS 8000 服务
+PID 72348 已从 `model_update_pending=2228, inst_relate/inst_geo=0/0` 收敛到
+`1220, 1293/1519`，CATA 页式闭包出现 `parsed=950/1908, missing=0`，无
+`SessionPageData` panic；因工作单尚未清空，不登记整体初始化完成。证据：
+`docs/evidence/2026-08-24-ams8000-paged-cata-preload.md`。
+
 **2026-08-21 零尺寸 NCYL 死信恢复（执行中）**：已建立
 `specs/022-model-dead-letter-recovery/`，完成定向圆柱类错误尺寸、模型工作状态快照、
 死信公告去重与 health degraded 语义的离线实现。现场编排固定为

@@ -1,0 +1,575 @@
+diff --git a/crates/pdmsdb_engine_v2/src/bin/engine_v2_compare_fixture.rs b/crates/pdmsdb_engine_v2/src/bin/engine_v2_compare_fixture.rs
+index b95b87e..feb88f9 100644
+--- a/crates/pdmsdb_engine_v2/src/bin/engine_v2_compare_fixture.rs
++++ b/crates/pdmsdb_engine_v2/src/bin/engine_v2_compare_fixture.rs
+@@ -2,7 +2,7 @@ use std::path::PathBuf;
+ 
+ use anyhow::{Context, Result, anyhow, bail};
+ use pdmsdb_engine_v2::compare::core_dll_oracle::CoreDllOracle;
+-use pdmsdb_engine_v2::compare::legacy_oracle::LegacyOracle;
++use pdmsdb_engine_v2::compare::fixture_oracle::FixtureOracle;
+ use pdmsdb_engine_v2::{EngineOptions, EngineV2, RefNo};
+ 
+ fn workspace_root() -> PathBuf {
+@@ -12,7 +12,7 @@ fn workspace_root() -> PathBuf {
+ }
+ 
+ fn default_db_path() -> Result<PathBuf> {
+-    LegacyOracle::resolve_repo_test_db_path(workspace_root(), "ams1112_0001")
++    FixtureOracle::resolve_repo_test_db_path(workspace_root(), "ams1112_0001")
+         .ok_or_else(|| anyhow!("未找到默认测试数据库: ams1112_0001"))
+ }
+ 
+diff --git a/crates/pdmsdb_engine_v2/src/compare/legacy_oracle.rs b/crates/pdmsdb_engine_v2/src/compare/legacy_oracle.rs
+deleted file mode 100644
+index 97bb504..0000000
+--- a/crates/pdmsdb_engine_v2/src/compare/legacy_oracle.rs
++++ /dev/null
+@@ -1,13 +0,0 @@
+-use std::path::{Path, PathBuf};
+-
+-pub struct LegacyOracle;
+-
+-impl LegacyOracle {
+-    pub fn resolve_repo_test_db_path(
+-        repo_root: impl AsRef<Path>,
+-        file_name: &str,
+-    ) -> Option<PathBuf> {
+-        let local = repo_root.as_ref().join("test-file").join(file_name);
+-        local.exists().then_some(local)
+-    }
+-}
+diff --git a/crates/pdmsdb_engine_v2/src/compare/mod.rs b/crates/pdmsdb_engine_v2/src/compare/mod.rs
+index ad4a2d4..d30d9df 100644
+--- a/crates/pdmsdb_engine_v2/src/compare/mod.rs
++++ b/crates/pdmsdb_engine_v2/src/compare/mod.rs
+@@ -1,3 +1,3 @@
+ pub mod core_dll_oracle;
+ pub mod core_dll_runtime;
+-pub mod legacy_oracle;
++pub mod fixture_oracle;
+diff --git a/crates/pdmsdb_engine_v2/src/core/mod.rs b/crates/pdmsdb_engine_v2/src/core/mod.rs
+index 25a1f3a..5bca97f 100644
+--- a/crates/pdmsdb_engine_v2/src/core/mod.rs
++++ b/crates/pdmsdb_engine_v2/src/core/mod.rs
+@@ -102,7 +102,8 @@ pub struct SessionSnapshot {
+ 
+ #[derive(Debug, Clone, Copy, Default)]
+ pub struct EngineOptions {
+-    pub page_size_hint: Option<usize>,
++    /// Optional physical page length in bytes.
++    pub page_size_bytes_hint: Option<usize>,
+     pub prefetch_pages: usize,
+ }
+ 
+diff --git a/crates/pdmsdb_engine_v2/src/db1/page_store.rs b/crates/pdmsdb_engine_v2/src/db1/page_store.rs
+index 7610f2d..73a6643 100644
+--- a/crates/pdmsdb_engine_v2/src/db1/page_store.rs
++++ b/crates/pdmsdb_engine_v2/src/db1/page_store.rs
+@@ -180,23 +180,28 @@ impl PageStore {
+         self.stats.record_pages_read = self.stats.record_pages_read.saturating_add(physical_pages);
+     }
+ 
+-    pub fn validate_page_size_from_header(
++    pub fn resolve_page_size_bytes(
+         file: &mut File,
+         header: &HeaderView,
+-        hint: Option<usize>,
++        byte_length_hint: Option<usize>,
+     ) -> Result<usize, EngineError> {
+         let mut candidates = Vec::new();
+-        if let Some(hint) = hint {
+-            candidates.push(hint);
++        if let Some(byte_length_hint) = byte_length_hint {
++            candidates.push(byte_length_hint);
+         }
+-        if matches!(header.page_size, 512 | 2048 | 4096) {
+-            candidates.push(header.page_size as usize);
++        if let Ok(header_page_size_bytes) = header.page_size_bytes() {
++            candidates.push(header_page_size_bytes);
+         }
+         candidates.extend([2048usize, 4096usize, 512usize]);
+-        candidates.dedup();
++        let mut unique_candidates = Vec::with_capacity(candidates.len());
++        for candidate in candidates {
++            if candidate > 0 && !unique_candidates.contains(&candidate) {
++                unique_candidates.push(candidate);
++            }
++        }
+ 
+         let file_len = file.metadata()?.len();
+-        for candidate in candidates {
++        for candidate in unique_candidates {
+             let page_no = header.latest_ses_pgno;
+             if page_no == 0 {
+                 continue;
+@@ -216,8 +221,8 @@ impl PageStore {
+             }
+         }
+ 
+-        if matches!(header.page_size, 512 | 2048 | 4096) {
+-            return Ok(header.page_size as usize);
++        if let Ok(header_page_size_bytes) = header.page_size_bytes() {
++            return Ok(header_page_size_bytes);
+         }
+ 
+         Ok(2048)
+@@ -528,11 +533,11 @@ mod tests {
+             latest_ses_pgno: latest_page,
+             ext_no: 1,
+             session_page_no: 2,
+-            page_size: 512,
++            page_size_words: 512,
+             stored_page_count: 0,
+         };
+ 
+-        let actual = PageStore::validate_page_size_from_header(&mut file, &header, None).unwrap();
++        let actual = PageStore::resolve_page_size_bytes(&mut file, &header, None).unwrap();
+         assert_eq!(actual, 2048);
+     }
+ }
+diff --git a/crates/pdmsdb_engine_v2/src/db2/header.rs b/crates/pdmsdb_engine_v2/src/db2/header.rs
+index aa3d5c7..8515cfa 100644
+--- a/crates/pdmsdb_engine_v2/src/db2/header.rs
++++ b/crates/pdmsdb_engine_v2/src/db2/header.rs
+@@ -10,7 +10,11 @@ pub struct HeaderView {
+     pub latest_ses_pgno: u32,
+     pub ext_no: u32,
+     pub session_page_no: u32,
+-    pub page_size: u32,
++    /// Physical page length stored as a count of 32-bit words.
++    ///
++    /// `core.dll` converts this value to bytes by multiplying by four. The
++    /// normal value is therefore 512 words, or 2048 bytes.
++    pub page_size_words: u32,
+     pub stored_page_count: u32,
+ }
+ 
+@@ -36,10 +40,35 @@ impl HeaderView {
+             latest_ses_pgno: read_u32(0x28),
+             ext_no: read_u32(0x2C),
+             session_page_no: read_u32(0x30),
+-            page_size: read_u32(0x34),
++            page_size_words: read_u32(0x34),
+             stored_page_count: read_u32(0x38),
+         })
+     }
++
++    pub fn page_size_bytes(&self) -> Result<usize, EngineError> {
++        let words = usize::try_from(self.page_size_words)
++            .map_err(|_| EngineError::Format("页长 word 数超出平台范围".into()))?;
++        words
++            .checked_mul(size_of::<u32>())
++            .filter(|bytes| *bytes > 0)
++            .ok_or_else(|| EngineError::Format("文件头 0x34 的页长 word 数无效".into()))
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::HeaderView;
++
++    #[test]
++    fn header_page_length_is_stored_in_u32_words() {
++        let mut header = [0u8; 64];
++        header[0x34..0x38].copy_from_slice(&512u32.to_be_bytes());
++
++        let parsed = HeaderView::from_bytes(&header).unwrap();
++
++        assert_eq!(parsed.page_size_words, 512);
++        assert_eq!(parsed.page_size_bytes().unwrap(), 2048);
++    }
+ }
+ 
+ pub struct HeaderUpdaterV2;
+diff --git a/crates/pdmsdb_engine_v2/src/db3/index.rs b/crates/pdmsdb_engine_v2/src/db3/index.rs
+index e484c31..ca29c38 100644
+--- a/crates/pdmsdb_engine_v2/src/db3/index.rs
++++ b/crates/pdmsdb_engine_v2/src/db3/index.rs
+@@ -870,7 +870,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn legacy_page_is_upgraded_on_rewrite() {
++    fn prior_format_page_is_upgraded_on_rewrite() {
+         // 旧实现写出的页：page_type=8、键值宽为 0、0x18 放的是页号而不是空闲字数。
+         let mut page = vec![0u8; 2048];
+         page[0..4].copy_from_slice(&8u32.to_be_bytes());
+diff --git a/crates/pdmsdb_engine_v2/src/db5/compact.rs b/crates/pdmsdb_engine_v2/src/db5/compact.rs
+index 4219db4..0405dcd 100644
+--- a/crates/pdmsdb_engine_v2/src/db5/compact.rs
++++ b/crates/pdmsdb_engine_v2/src/db5/compact.rs
+@@ -24,7 +24,7 @@ pub fn compact_database(
+     let handle = crate::db5::open_read_db(
+         source_path,
+         crate::core::EngineOptions {
+-            page_size_hint: Some(page_size),
++            page_size_bytes_hint: Some(page_size),
+             prefetch_pages: 4,
+         },
+     )?;
+diff --git a/crates/pdmsdb_engine_v2/src/db5/mod.rs b/crates/pdmsdb_engine_v2/src/db5/mod.rs
+index d1605e2..fd2c942 100644
+--- a/crates/pdmsdb_engine_v2/src/db5/mod.rs
++++ b/crates/pdmsdb_engine_v2/src/db5/mod.rs
+@@ -33,9 +33,9 @@ fn build_handle(
+     file: &mut std::fs::File,
+ ) -> Result<DbHandle, EngineError> {
+     let header = HeaderView::read_from(&mut *file)?;
+-    let page_size =
+-        PageStore::validate_page_size_from_header(&mut *file, &header, options.page_size_hint)?;
+-    let mut page_store = PageStore::new(page_size, options.prefetch_pages.max(1));
++    let page_size_bytes =
++        PageStore::resolve_page_size_bytes(&mut *file, &header, options.page_size_bytes_hint)?;
++    let mut page_store = PageStore::new(page_size_bytes, options.prefetch_pages.max(1));
+     let sessions = SessionChain::walk_latest_backwards(&mut *file, &mut page_store, &header)?;
+     let session_ranges = SessionChain::build_session_ranges(&sessions);
+ 
+diff --git a/crates/pdmsdb_engine_v2/tests/engine_v2_compare_fixture_workflow.rs b/crates/pdmsdb_engine_v2/tests/engine_v2_compare_fixture_workflow.rs
+index dff527c..bbc0410 100644
+--- a/crates/pdmsdb_engine_v2/tests/engine_v2_compare_fixture_workflow.rs
++++ b/crates/pdmsdb_engine_v2/tests/engine_v2_compare_fixture_workflow.rs
+@@ -1,12 +1,12 @@
+ use anyhow::Result;
+ use pdmsdb_engine_v2::compare::core_dll_oracle::CoreDllOracle;
+-use pdmsdb_engine_v2::compare::legacy_oracle::LegacyOracle;
++use pdmsdb_engine_v2::compare::fixture_oracle::FixtureOracle;
+ use pdmsdb_engine_v2::{EngineOptions, EngineV2, RefNo};
+ use serde_json::Value;
+ 
+ fn resolve_db() -> Option<std::path::PathBuf> {
+     let repo_root = workspace_root();
+-    LegacyOracle::resolve_repo_test_db_path(repo_root, "ams1112_0001")
++    FixtureOracle::resolve_repo_test_db_path(repo_root, "ams1112_0001")
+ }
+ 
+ fn workspace_root() -> std::path::PathBuf {
+diff --git a/crates/pdmsdb_engine_v2/tests/engine_v2_compare_legacy.rs b/crates/pdmsdb_engine_v2/tests/engine_v2_compare_legacy.rs
+deleted file mode 100644
+index b6390bd..0000000
+--- a/crates/pdmsdb_engine_v2/tests/engine_v2_compare_legacy.rs
++++ /dev/null
+@@ -1,137 +0,0 @@
+-#![cfg(feature = "legacy-oracle")]
+-
+-use aios_core::RefU64;
+-use anyhow::Result;
+-use pdms_io_legacy::PdmsIO;
+-use pdmsdb_engine_v2::compare::legacy_oracle::LegacyOracle;
+-use pdmsdb_engine_v2::{EngineOptions, EngineV2, RefNo};
+-
+-fn resolve_db() -> Option<std::path::PathBuf> {
+-    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+-        .join("..")
+-        .join("..");
+-    LegacyOracle::resolve_repo_test_db_path(repo_root, "ams1112_0001")
+-}
+-
+-fn sample_refno() -> RefNo {
+-    RefNo::from_parts(17496, 171138)
+-}
+-
+-fn open_legacy(path: &std::path::Path) -> Result<PdmsIO> {
+-    let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+-        .join("..")
+-        .join("..");
+-    let db_option_file = repo_root.join("DbOption.toml");
+-    if db_option_file.exists() {
+-        unsafe {
+-            std::env::set_var("DB_OPTION_FILE", &db_option_file);
+-        }
+-    }
+-
+-    let mut io = PdmsIO::new("legacy-oracle", path, true);
+-    io.open()?;
+-    io.init_ses_range_map()?;
+-    Ok(io)
+-}
+-
+-#[test]
+-fn compare_search_hit_with_legacy() -> Result<()> {
+-    let db_path = match resolve_db() {
+-        Some(path) => path,
+-        None => {
+-            println!("数据库文件不存在，跳过测试: ams1112_0001");
+-            return Ok(());
+-        }
+-    };
+-
+-    let handle = EngineV2::open_read(&db_path, EngineOptions::default())?;
+-    let v2 = handle
+-        .find_refno(sample_refno(), None)?
+-        .expect("v2 应命中样本 refno");
+-
+-    let mut legacy = open_legacy(&db_path)?;
+-    let legacy_refno = RefU64::from_two_nums(sample_refno().hi(), sample_refno().lo());
+-    let (legacy_sesno, legacy_offset) = legacy
+-        .search_latest_refno(legacy_refno, None)
+-        .expect("legacy 应命中样本 refno");
+-
+-    assert_eq!(v2.sesno, legacy_sesno);
+-    assert_eq!(
+-        v2.loc.page_no as u64 * handle.page_size() as u64 + v2.loc.byte_offset as u64,
+-        legacy_offset
+-    );
+-    Ok(())
+-}
+-
+-#[test]
+-fn compare_record_bytes_with_legacy() -> Result<()> {
+-    let db_path = match resolve_db() {
+-        Some(path) => path,
+-        None => {
+-            println!("数据库文件不存在，跳过测试: ams1112_0001");
+-            return Ok(());
+-        }
+-    };
+-
+-    let handle = EngineV2::open_read(&db_path, EngineOptions::default())?;
+-    let v2 = handle
+-        .find_refno(sample_refno(), None)?
+-        .expect("v2 应命中样本 refno");
+-    let v2_record = handle.read_record(v2.loc)?;
+-
+-    let mut legacy = open_legacy(&db_path)?;
+-    let legacy_refno = RefU64::from_two_nums(sample_refno().hi(), sample_refno().lo());
+-    let (_, legacy_offset) = legacy
+-        .search_latest_refno(legacy_refno, None)
+-        .expect("legacy 应命中样本 refno");
+-    let legacy_record = legacy.read_element_record_cached(legacy_offset)?;
+-
+-    assert_eq!(v2_record, legacy_record);
+-    Ok(())
+-}
+-
+-#[test]
+-fn compare_parsed_refno_and_owner_with_legacy() -> Result<()> {
+-    let db_path = match resolve_db() {
+-        Some(path) => path,
+-        None => {
+-            println!("数据库文件不存在，跳过测试: ams1112_0001");
+-            return Ok(());
+-        }
+-    };
+-
+-    let handle = EngineV2::open_read(&db_path, EngineOptions::default())?;
+-    let v2 = handle
+-        .find_refno(sample_refno(), None)?
+-        .expect("v2 应命中样本 refno");
+-
+-    let mut legacy = open_legacy(&db_path)?;
+-    let legacy_refno = RefU64::from_two_nums(sample_refno().hi(), sample_refno().lo());
+-    let (_, legacy_offset) = legacy
+-        .search_latest_refno(legacy_refno, None)
+-        .expect("legacy 应命中样本 refno");
+-    let legacy_ele = legacy.parse_raw_element(legacy_offset)?;
+-
+-    let v2_record = handle.read_record(v2.loc)?;
+-    let mut prefix = 0usize;
+-    while prefix + 4 <= v2_record.len() {
+-        let w = &v2_record[prefix..prefix + 4];
+-        if w == [0, 0, 0, 0] || w == [0, 0, 0, 7] {
+-            prefix += 4;
+-        } else {
+-            break;
+-        }
+-    }
+-
+-    let ref_hi = u32::from_be_bytes(v2_record[prefix + 4..prefix + 8].try_into().unwrap());
+-    let ref_lo = u32::from_be_bytes(v2_record[prefix + 8..prefix + 12].try_into().unwrap());
+-    let owner_hi = u32::from_be_bytes(v2_record[prefix + 16..prefix + 20].try_into().unwrap());
+-    let owner_lo = u32::from_be_bytes(v2_record[prefix + 20..prefix + 24].try_into().unwrap());
+-
+-    assert_eq!(RefNo::from_parts(ref_hi, ref_lo), sample_refno());
+-    assert_eq!(legacy_ele.refno.get_0(), ref_hi);
+-    assert_eq!(legacy_ele.refno.get_1(), ref_lo);
+-    assert_eq!(legacy_ele.owner.get_0(), owner_hi);
+-    assert_eq!(legacy_ele.owner.get_1(), owner_lo);
+-    Ok(())
+-}
+diff --git a/crates/pdmsdb_engine_v2/tests/engine_v2_db4_attrs.rs b/crates/pdmsdb_engine_v2/tests/engine_v2_db4_attrs.rs
+index e7f8cf2..d904202 100644
+--- a/crates/pdmsdb_engine_v2/tests/engine_v2_db4_attrs.rs
++++ b/crates/pdmsdb_engine_v2/tests/engine_v2_db4_attrs.rs
+@@ -1,5 +1,5 @@
+ use anyhow::Result;
+-use pdmsdb_engine_v2::compare::legacy_oracle::LegacyOracle;
++use pdmsdb_engine_v2::compare::fixture_oracle::FixtureOracle;
+ use pdmsdb_engine_v2::db4::{ElementRecordView, parse_explicit_blocks, parse_member_refs};
+ use pdmsdb_engine_v2::{EngineOptions, EngineV2, RefNo};
+ 
+@@ -7,7 +7,7 @@ fn resolve_db() -> Option<std::path::PathBuf> {
+     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+         .join("..")
+         .join("..");
+-    LegacyOracle::resolve_repo_test_db_path(repo_root, "ams1112_0001")
++    FixtureOracle::resolve_repo_test_db_path(repo_root, "ams1112_0001")
+ }
+ 
+ fn sample_refno() -> RefNo {
+diff --git a/crates/pdmsdb_engine_v2/tests/engine_v2_index_multilevel.rs b/crates/pdmsdb_engine_v2/tests/engine_v2_index_multilevel.rs
+index 694f75c..fd1714c 100644
+--- a/crates/pdmsdb_engine_v2/tests/engine_v2_index_multilevel.rs
++++ b/crates/pdmsdb_engine_v2/tests/engine_v2_index_multilevel.rs
+@@ -15,7 +15,7 @@ fn create_minimal_db(path: &std::path::Path, page_size: u32) -> Result<()> {
+     header[0x04..0x08].copy_from_slice(&2u32.to_be_bytes());
+     header[0x08..0x0C].copy_from_slice(&1u32.to_be_bytes());
+     header[0x2C..0x30].copy_from_slice(&1u32.to_be_bytes());
+-    header[0x34..0x38].copy_from_slice(&page_size.to_be_bytes());
++    header[0x34..0x38].copy_from_slice(&(page_size / 4).to_be_bytes());
+     file.write_all(&header)?;
+     file.flush()?;
+     Ok(())
+@@ -31,7 +31,7 @@ fn engine_v2_index_write_multilevel() -> Result<()> {
+     let handle = EngineV2::open_write(
+         &file_path,
+         EngineOptions {
+-            page_size_hint: Some(128),
++            page_size_bytes_hint: Some(128),
+             prefetch_pages: 0,
+         },
+     )?;
+@@ -67,7 +67,7 @@ fn engine_v2_index_update_existing() -> Result<()> {
+     let handle = EngineV2::open_write(
+         &file_path,
+         EngineOptions {
+-            page_size_hint: Some(256),
++            page_size_bytes_hint: Some(256),
+             prefetch_pages: 0,
+         },
+     )?;
+diff --git a/crates/pdmsdb_engine_v2/tests/engine_v2_index_write.rs b/crates/pdmsdb_engine_v2/tests/engine_v2_index_write.rs
+index 99226ac..271db36 100644
+--- a/crates/pdmsdb_engine_v2/tests/engine_v2_index_write.rs
++++ b/crates/pdmsdb_engine_v2/tests/engine_v2_index_write.rs
+@@ -15,7 +15,7 @@ fn create_minimal_db(path: &std::path::Path, page_size: u32) -> Result<()> {
+     header[0x04..0x08].copy_from_slice(&2u32.to_be_bytes());
+     header[0x08..0x0C].copy_from_slice(&1u32.to_be_bytes());
+     header[0x2C..0x30].copy_from_slice(&1u32.to_be_bytes());
+-    header[0x34..0x38].copy_from_slice(&page_size.to_be_bytes());
++    header[0x34..0x38].copy_from_slice(&(page_size / 4).to_be_bytes());
+     file.write_all(&header)?;
+     file.flush()?;
+     Ok(())
+@@ -61,7 +61,7 @@ fn index_upsert_splits_root_leaf_v2() -> Result<()> {
+     let handle = EngineV2::open_write(
+         &file_path,
+         EngineOptions {
+-            page_size_hint: Some(128),
++            page_size_bytes_hint: Some(128),
+             prefetch_pages: 0,
+         },
+     )?;
+diff --git a/crates/pdmsdb_engine_v2/tests/engine_v2_read_smoke.rs b/crates/pdmsdb_engine_v2/tests/engine_v2_read_smoke.rs
+index 6b20945..5a430fb 100644
+--- a/crates/pdmsdb_engine_v2/tests/engine_v2_read_smoke.rs
++++ b/crates/pdmsdb_engine_v2/tests/engine_v2_read_smoke.rs
+@@ -1,12 +1,12 @@
+ use anyhow::Result;
+-use pdmsdb_engine_v2::compare::legacy_oracle::LegacyOracle;
++use pdmsdb_engine_v2::compare::fixture_oracle::FixtureOracle;
+ use pdmsdb_engine_v2::{EngineOptions, EngineV2, RefNo};
+ 
+ fn resolve_db() -> Option<std::path::PathBuf> {
+     let repo_root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+         .join("..")
+         .join("..");
+-    LegacyOracle::resolve_repo_test_db_path(repo_root, "ams1112_0001")
++    FixtureOracle::resolve_repo_test_db_path(repo_root, "ams1112_0001")
+ }
+ 
+ fn sample_refno() -> RefNo {
+diff --git a/crates/pdmsdb_engine_v2/tests/engine_v2_session_write.rs b/crates/pdmsdb_engine_v2/tests/engine_v2_session_write.rs
+index 687081b..ccd41c6 100644
+--- a/crates/pdmsdb_engine_v2/tests/engine_v2_session_write.rs
++++ b/crates/pdmsdb_engine_v2/tests/engine_v2_session_write.rs
+@@ -15,7 +15,7 @@ fn create_minimal_db(path: &std::path::Path, page_size: u32) -> Result<()> {
+     header[0x04..0x08].copy_from_slice(&2u32.to_be_bytes());
+     header[0x08..0x0C].copy_from_slice(&1u32.to_be_bytes());
+     header[0x2C..0x30].copy_from_slice(&1u32.to_be_bytes());
+-    header[0x34..0x38].copy_from_slice(&page_size.to_be_bytes());
++    header[0x34..0x38].copy_from_slice(&(page_size / 4).to_be_bytes());
+     file.write_all(&header)?;
+     file.flush()?;
+     Ok(())
+diff --git a/crates/pdmsdb_engine_v2/tests/engine_v2_transaction.rs b/crates/pdmsdb_engine_v2/tests/engine_v2_transaction.rs
+index 4f9b91a..e3fffac 100644
+--- a/crates/pdmsdb_engine_v2/tests/engine_v2_transaction.rs
++++ b/crates/pdmsdb_engine_v2/tests/engine_v2_transaction.rs
+@@ -34,7 +34,7 @@ fn insert_and_find_roundtrip() {
+     let handle = EngineV2::open_write(
+         path,
+         EngineOptions {
+-            page_size_hint: Some(page_size),
++            page_size_bytes_hint: Some(page_size),
+             prefetch_pages: 0,
+         },
+     );
+diff --git a/crates/pdmsdb_engine_v2/tests/engine_v2_workflow.rs b/crates/pdmsdb_engine_v2/tests/engine_v2_workflow.rs
+index 6cf615e..4ec998f 100644
+--- a/crates/pdmsdb_engine_v2/tests/engine_v2_workflow.rs
++++ b/crates/pdmsdb_engine_v2/tests/engine_v2_workflow.rs
+@@ -15,7 +15,7 @@ fn create_minimal_db(path: &std::path::Path, page_size: u32) -> Result<()> {
+     header[0x04..0x08].copy_from_slice(&2u32.to_be_bytes());
+     header[0x08..0x0C].copy_from_slice(&1u32.to_be_bytes());
+     header[0x2C..0x30].copy_from_slice(&1u32.to_be_bytes());
+-    header[0x34..0x38].copy_from_slice(&page_size.to_be_bytes());
++    header[0x34..0x38].copy_from_slice(&(page_size / 4).to_be_bytes());
+     file.write_all(&header)?;
+     file.flush()?;
+     Ok(())
+diff --git a/crates/pdmsdb_engine_v2/tests/engine_v2_write_smoke.rs b/crates/pdmsdb_engine_v2/tests/engine_v2_write_smoke.rs
+index 4ac4a4b..5e6c938 100644
+--- a/crates/pdmsdb_engine_v2/tests/engine_v2_write_smoke.rs
++++ b/crates/pdmsdb_engine_v2/tests/engine_v2_write_smoke.rs
+@@ -15,7 +15,7 @@ fn create_minimal_db(path: &std::path::Path, page_size: u32) -> Result<()> {
+     header[0x04..0x08].copy_from_slice(&2u32.to_be_bytes());
+     header[0x08..0x0C].copy_from_slice(&1u32.to_be_bytes());
+     header[0x2C..0x30].copy_from_slice(&1u32.to_be_bytes());
+-    header[0x34..0x38].copy_from_slice(&page_size.to_be_bytes());
++    header[0x34..0x38].copy_from_slice(&(page_size / 4).to_be_bytes());
+     file.write_all(&header)?;
+     file.flush()?;
+     Ok(())
+diff --git "a/docs/e3d \346\225\260\346\215\256\345\272\223\345\210\206\346\236\220/E3D\346\225\260\346\215\256\345\272\223\346\226\207\344\273\266\350\257\273\345\217\226\345\210\206\346\236\220.md" "b/docs/e3d \346\225\260\346\215\256\345\272\223\345\210\206\346\236\220/E3D\346\225\260\346\215\256\345\272\223\346\226\207\344\273\266\350\257\273\345\217\226\345\210\206\346\236\220.md"
+index 075c90f..eea6dad 100644
+--- "a/docs/e3d \346\225\260\346\215\256\345\272\223\345\210\206\346\236\220/E3D\346\225\260\346\215\256\345\272\223\346\226\207\344\273\266\350\257\273\345\217\226\345\210\206\346\236\220.md"	
++++ "b/docs/e3d \346\225\260\346\215\256\345\272\223\345\210\206\346\236\220/E3D\346\225\260\346\215\256\345\272\223\346\226\207\344\273\266\350\257\273\345\217\226\345\210\206\346\236\220.md"	
+@@ -129,7 +129,10 @@ def read_page_header(file_path):
+     # 大端序读取
+     db_id = struct.unpack('>I', data[0x08:0x0C])[0]
+     version = struct.unpack('>I', data[0x04:0x08])[0]
+-    page_size = struct.unpack('>I', data[0x34:0x38])[0]
++    # 0x34 保存的是 32 位 word 数，不是字节数。core.dll 使用 words * 4
++    # 作为物理页步长；常见值 512 对应 2048 字节。
++    page_size_words = struct.unpack('>I', data[0x34:0x38])[0]
++    page_size_bytes = page_size_words * 4
+     page_count = struct.unpack('>I', data[0x38:0x3C])[0]
+     session_page = struct.unpack('>I', data[0x30:0x34])[0]
+     ext_no = struct.unpack('>I', data[0x28:0x2C])[0]
+@@ -137,7 +140,8 @@ def read_page_header(file_path):
+     return {
+         'db_id': db_id,
+         'version': version,
+-        'page_size': page_size,
++        'page_size_words': page_size_words,
++        'page_size_bytes': page_size_bytes,
+         'page_count': page_count,
+         'session_page': session_page,
+         'ext_no': ext_no
+@@ -147,12 +151,12 @@ def read_page_header(file_path):
+ ### 2. 读取指定页面
+ 
+ ```python
+-def read_page(file_path, page_num, page_size=512):
++def read_page(file_path, page_num, page_size_bytes=2048):
+     """读取指定页面"""
+-    offset = page_num * page_size
++    offset = page_num * page_size_bytes
+     with open(file_path, 'rb') as f:
+         f.seek(offset)
+-        return f.read(page_size)
++        return f.read(page_size_bytes)
+ ```
+ 
+ ### 3. 解析页面类型

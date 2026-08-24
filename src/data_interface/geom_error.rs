@@ -47,6 +47,8 @@ pub(crate) const BOOL_POS: &str = "bool_pos";
 pub(crate) const BOOL_NEG: &str = "bool_neg";
 /// 基本体数据无法产生可用 BREP（缺失、非法或变换含 NaN）。
 pub(crate) const PRIMITIVE: &str = "primitive";
+/// 单位几何无法离散或网格无法持久化。
+pub(crate) const MESH: &str = "mesh";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeometryFailurePolicy {
@@ -97,6 +99,23 @@ fn render_primitive_upsert(target: &str, noun: &str, error: &str) -> String {
         id = record_id(PRIMITIVE, target),
         target_text = escape_surql_str(target),
         noun_text = escape_surql_str(noun),
+        error_text = escape_surql_str(error),
+    )
+}
+
+fn render_mesh_upsert(geom: &str, targets: &[String], error: &str) -> String {
+    let targets = targets
+        .iter()
+        .map(|target| format!("'{}'", escape_surql_str(target)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "UPSERT {id} SET kind = '{MESH}', target = '{geom_text}', geom = '{geom_text}', \
+         targets = [{targets}], occurrences = (occurrences?:0) + 1, \
+         first_seen_at = first_seen_at?:time::now(), \
+         last_seen_at = time::now(), last_error = '{error_text}';",
+        id = record_id(MESH, geom),
+        geom_text = escape_surql_str(geom),
         error_text = escape_surql_str(error),
     )
 }
@@ -179,6 +198,27 @@ pub(crate) async fn note_primitive_skip(target: &str, noun: &str, error: &str) {
     }
 }
 
+/// 记一次单位几何离散或持久化失败。
+///
+/// `target` 使用 geo hash，`targets` 保存当前能反查到的模型元素。即使反查失败，
+/// 仍按 geo hash 留下一行，避免 `inst_geo.bad=true` 成为没有诊断记录的静默状态。
+pub(crate) async fn note_mesh_skip(geom: &str, targets: &[String], error: &str) {
+    if let Err(seed_error) = seed().await {
+        log::warn!("[geom_error] 已有错误行播种失败（继续尝试写当前网格）: {seed_error:#}");
+    }
+    if let Err(write_error) = SUL_DB
+        .query(render_mesh_upsert(geom, targets, error))
+        .await
+        .and_then(|response| response.check())
+    {
+        log::warn!("[geom_error] 网格降级记录落库失败 geom={geom}: {write_error}");
+        return;
+    }
+    if let Some(set) = known().as_mut() {
+        set.insert(known_key(MESH, geom));
+    }
+}
+
 /// 基本体重新生成成功后销掉它自己的错误行，不触碰同一目标可能存在的布尔错误。
 pub(crate) async fn clear_primitive_failure(target: &str) -> anyhow::Result<()> {
     seed().await?;
@@ -190,6 +230,20 @@ pub(crate) async fn clear_primitive_failure(target: &str) -> anyhow::Result<()> 
         .query(render_clear_kind(PRIMITIVE, target))
         .await?
         .check()?;
+    if let Some(set) = known().as_mut() {
+        set.remove(&key);
+    }
+    Ok(())
+}
+
+/// 同一 geo hash 重新生成并持久化成功后销掉网格错误。
+pub(crate) async fn clear_mesh_failure(geom: &str) -> anyhow::Result<()> {
+    seed().await?;
+    let key = known_key(MESH, geom);
+    if !known().as_ref().is_some_and(|set| set.contains(&key)) {
+        return Ok(());
+    }
+    SUL_DB.query(render_clear_kind(MESH, geom)).await?.check()?;
     if let Some(set) = known().as_mut() {
         set.remove(&key);
     }
@@ -239,6 +293,8 @@ pub async fn snapshot() -> Option<serde_json::Value> {
         #[serde(default)]
         noun: Option<String>,
         #[serde(default)]
+        targets: Vec<String>,
+        #[serde(default)]
         occurrences: u64,
         #[serde(default)]
         last_error: Option<String>,
@@ -246,7 +302,7 @@ pub async fn snapshot() -> Option<serde_json::Value> {
         last_seen_at: Option<String>,
     }
     let query = format!(
-        "SELECT kind, target, geom, noun, occurrences, last_error, \
+        "SELECT kind, target, geom, noun, targets, occurrences, last_error, \
          type::string(last_seen_at) AS last_seen_at \
          FROM {TABLE} ORDER BY last_seen_at DESC;"
     );
@@ -272,6 +328,7 @@ pub async fn snapshot() -> Option<serde_json::Value> {
         "last_target": latest.target,
         "last_geom": latest.geom,
         "last_noun": latest.noun,
+        "last_targets": latest.targets,
         "last_error": latest.last_error,
         "last_seen_at": latest.last_seen_at,
     }))
@@ -338,6 +395,28 @@ mod tests {
         );
         assert!(sql.contains("noun = 'NCYL'"), "{sql}");
         assert!(sql.contains("DIAM=0, HEIG=0"), "{sql}");
+    }
+
+    #[test]
+    fn mesh_failure_persists_geo_and_affected_models() {
+        let sql = render_mesh_upsert(
+            "17028233407315457148",
+            &["24384/23725".to_string(), "24384/23729".to_string()],
+            "libgm tessellation failed: degenerate revolution profile",
+        );
+        assert!(
+            sql.contains("geom_error:['mesh', '17028233407315457148']"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("targets = ['24384/23725','24384/23729']"),
+            "{sql}"
+        );
+        assert!(sql.contains("degenerate revolution profile"), "{sql}");
+        assert_eq!(
+            render_clear_kind(MESH, "17028233407315457148"),
+            "DELETE geom_error:['mesh', '17028233407315457148'];"
+        );
     }
 
     /// 目标与错误文本进的是记录 id 与字段，单引号必须逃逸——否则一句带撇号的错误

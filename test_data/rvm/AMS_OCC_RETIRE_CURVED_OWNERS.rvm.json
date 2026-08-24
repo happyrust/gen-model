@@ -1,0 +1,1174 @@
+{
+  "meta": {
+    "version": 1,
+    "dbnum": 7997,
+    "root_name": "/Copy-of-1TFM020MN冷凝罐",
+    "rvm_file": "test_data\\rvm\\AMS_OCC_RETIRE_CURVED_OWNERS.rvm",
+    "att_files": [],
+    "imported_at": "2026-08-24 11:14:49",
+    "member_count": 45,
+    "geometry_count": 5,
+    "resolved": 0,
+    "unresolved": 45,
+    "export_scope": "narrow",
+    "geo_type_counts": {
+      "Primitive": 5
+    },
+    "degenerate_bbox_count": 0
+  },
+  "members": [
+    {
+      "path": "/AMS/1PTU-INST23",
+      "name": "/1PTU-INST23",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 15869806505224742712,
+      "parent_stable_id": null,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-蒸汽发生器冷凝罐及其支架",
+      "name": "/Copy-of-蒸汽发生器冷凝罐及其支架",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 17827434424543854520,
+      "parent_stable_id": 15869806505224742712,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-蒸汽发生器冷凝罐及其支架/Copy-of-1TFM020MN冷凝罐",
+      "name": "/Copy-of-1TFM020MN冷凝罐",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 7080763903418607963,
+      "parent_stable_id": 17827434424543854520,
+      "translation_mm": [
+        6980.35,
+        -4837.37,
+        22216.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-蒸汽发生器冷凝罐及其支架/Copy-of-1TFM020MN冷凝罐/SUBEQUIPMENT 4 of EQUIPMENT /Copy-of-1TFM020MN冷凝罐",
+      "name": "SUBEQUIPMENT 4 of EQUIPMENT /Copy-of-1TFM020MN冷凝罐",
+      "noun": "SUBE",
+      "owner_desc": "EQUIPMENT /Copy-of-1TFM020MN冷凝罐",
+      "ordinal": 4,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 11579232274171727984,
+      "parent_stable_id": 7080763903418607963,
+      "translation_mm": [
+        6980.3394,
+        -4839.485,
+        22216.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-蒸汽发生器冷凝罐及其支架/Copy-of-1TFM020MN冷凝罐/SUBEQUIPMENT 4 of EQUIPMENT /Copy-of-1TFM020MN冷凝罐/CYLINDER 1 of SUBEQUIPMENT 4 of EQUIPMENT /Copy-of-1TFM020MN冷凝罐",
+      "name": "CYLINDER 1 of SUBEQUIPMENT 4 of EQUIPMENT /Copy-of-1TFM020MN冷凝罐",
+      "noun": "CYLI",
+      "owner_desc": "SUBEQUIPMENT 4 of EQUIPMENT /Copy-of-1TFM020MN冷凝罐",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 12727528605596228517,
+      "parent_stable_id": 11579232274171727984,
+      "translation_mm": [
+        6980.1016,
+        -4837.3984,
+        22216.0
+      ],
+      "aabb_world_mm": [
+        6974.827766418457,
+        -4842.672348022461,
+        22071.550369262695,
+        6985.37540435791,
+        -4832.124710083008,
+        22360.448837280273
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Cylinder",
+          "geo_type": "Primitive",
+          "detail": {
+            "radius": 4.764999866485596,
+            "height": 288.8999938964844
+          },
+          "transform": {
+            "matrix3": [
+              0.0009935718262568116,
+              0.00011320321209495887,
+              0.0,
+              0.00011320321209495887,
+              -0.0009935718262568116,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513
+            ],
+            "translation_mm": [
+              6980.101585388184,
+              -4837.398529052734,
+              22215.999603271484
+            ]
+          },
+          "bbox_world_mm": [
+            6974.827766418457,
+            -4842.672348022461,
+            22071.550369262695,
+            6985.37540435791,
+            -4832.124710083008,
+            22360.448837280273
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-蒸汽发生器冷凝罐及其支架/Copy-of-1TFM020MN冷凝罐/SUBEQUIPMENT 4 of EQUIPMENT /Copy-of-1TFM020MN冷凝罐/CYLINDER 2 of SUBEQUIPMENT 4 of EQUIPMENT /Copy-of-1TFM020MN冷凝罐",
+      "name": "CYLINDER 2 of SUBEQUIPMENT 4 of EQUIPMENT /Copy-of-1TFM020MN冷凝罐",
+      "noun": "CYLI",
+      "owner_desc": "SUBEQUIPMENT 4 of EQUIPMENT /Copy-of-1TFM020MN冷凝罐",
+      "ordinal": 2,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 7336993421126483398,
+      "parent_stable_id": 11579232274171727984,
+      "translation_mm": [
+        7004.746,
+        -5053.6987,
+        22216.0
+      ],
+      "aabb_world_mm": [
+        6985.821723937988,
+        -5104.888916015625,
+        22202.65007019043,
+        7023.670196533203,
+        -5002.509117126465,
+        22229.34913635254
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Cylinder",
+          "geo_type": "Primitive",
+          "detail": {
+            "radius": 13.350000381469727,
+            "height": 100.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0009935718262568116,
+              0.00011320321209495887,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.00011320321209495887,
+              0.0009935718262568116,
+              0.0
+            ],
+            "translation_mm": [
+              7004.745960235596,
+              -5053.699016571045,
+              22215.999603271484
+            ]
+          },
+          "bbox_world_mm": [
+            6985.821723937988,
+            -5104.888916015625,
+            22202.65007019043,
+            7023.670196533203,
+            -5002.509117126465,
+            22229.34913635254
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX",
+      "name": "/Copy-of-1RCS-EQUI-1RX",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 11817272301709928687,
+      "parent_stable_id": 15869806505224742712,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX",
+      "name": "EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX",
+      "noun": "EQUI",
+      "owner_desc": "ZONE /Copy-of-1RCS-EQUI-1RX",
+      "ordinal": 3,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 10105695021528025627,
+      "parent_stable_id": 11817272301709928687,
+      "translation_mm": [
+        181.27,
+        9412.01,
+        250.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿",
+      "name": "/Copy-of-1-1#支腿",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 5853731152998742223,
+      "parent_stable_id": 10105695021528025627,
+      "translation_mm": [
+        180.40492,
+        9422.013,
+        250.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/EXTRUSION 1 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "EXTRUSION 1 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "EXTR",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 9821634570255421395,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        -48.588158,
+        9372.972,
+        5329.0
+      ],
+      "aabb_world_mm": [
+        -222.21946716308594,
+        8708.977699279785,
+        5328.999996185303,
+        670.676052570343,
+        9609.829902648926,
+        5379.000186920166
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "FacetGroup",
+          "geo_type": "Primitive",
+          "detail": {
+            "polygons": 9,
+            "contours": 9,
+            "vertices": 42
+          },
+          "transform": {
+            "matrix3": [
+              0.0006626200629398227,
+              -0.0007489557028748095,
+              0.0,
+              0.0007489557028748095,
+              0.0006626200629398227,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -48.58815670013428,
+              9372.971534729004,
+              5328.999996185303
+            ]
+          },
+          "bbox_world_mm": [
+            -222.21946716308594,
+            8708.977699279785,
+            5328.999996185303,
+            670.676052570343,
+            9609.829902648926,
+            5379.000186920166
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/BOX 3 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "BOX 3 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "BOX",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 3,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 6172752757177042167,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        180.40492,
+        9422.013,
+        4474.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/PYRAMID 2 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "PYRAMID 2 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "PYRA",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 2,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 12090825741557268841,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        180.40492,
+        9422.013,
+        5049.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/CYLINDER 3 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "CYLINDER 3 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "CYLI",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 3,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 2047250496486770372,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        -9.437999,
+        9429.737,
+        910.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/CYLINDER 4 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "CYLINDER 4 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "CYLI",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 4,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 14824571274086701601,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        -9.437999,
+        9429.737,
+        4334.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/CYLINDER 8 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "CYLINDER 8 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "CYLI",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 8,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 11652513972160213877,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        370.24783,
+        9414.288,
+        910.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/CYLINDER 9 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "CYLINDER 9 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "CYLI",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 9,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 16196437265091833202,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        370.24783,
+        9414.288,
+        4334.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/BOX 6 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "BOX 6 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "BOX",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 6,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 18319776273217213160,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        -9.437999,
+        9429.737,
+        1100.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/BOX 7 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "BOX 7 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "BOX",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 7,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 3703695293355966875,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        -9.437999,
+        9429.737,
+        4144.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/BOX 8 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "BOX 8 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "BOX",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 8,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 2916796606107864546,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        370.24783,
+        9414.288,
+        1100.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/BOX 9 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "BOX 9 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "BOX",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 9,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 2485877058911126245,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        370.24783,
+        9414.288,
+        4144.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/BOX 10 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "BOX 10 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "BOX",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 10,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 7536309798539239121,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        432.69617,
+        9411.747,
+        972.5
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/BOX 11 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "BOX 11 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "BOX",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 11,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 5691644863257911118,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        432.69617,
+        9411.747,
+        4271.5
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/BOX 12 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "BOX 12 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "BOX",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 12,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 12867975565747001499,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        -71.88633,
+        9432.278,
+        972.5
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/BOX 13 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "BOX 13 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "BOX",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 13,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 9037312471898696168,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        -71.88633,
+        9432.278,
+        4271.5
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/RTORUS 2 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "RTORUS 2 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "RTOR",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 2,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 8080437224343856002,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        432.69617,
+        9411.747,
+        910.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/RTORUS 3 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "RTORUS 3 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "RTOR",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 3,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 17641817575317667333,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        432.69617,
+        9411.747,
+        4334.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/RTORUS 4 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "RTORUS 4 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "RTOR",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 4,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 8510996371154991024,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        -71.88633,
+        9432.278,
+        910.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/RTORUS 5 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "RTORUS 5 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "RTOR",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 5,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 12799704499759975107,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        -71.88633,
+        9432.278,
+        4334.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/RTORUS 6 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "RTORUS 6 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "RTOR",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 6,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 5758693324269535830,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        302.80365,
+        9417.032,
+        910.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/RTORUS 7 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "RTORUS 7 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "RTOR",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 7,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 17827919516615919737,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        302.80365,
+        9417.032,
+        4334.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/RTORUS 8 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "RTORUS 8 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "RTOR",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 8,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 17464999544414540564,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        58.006195,
+        9426.993,
+        910.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/RTORUS 9 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "RTORUS 9 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "RTOR",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 9,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 9165743436506625431,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        58.006195,
+        9426.993,
+        4334.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/BOX 14 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "BOX 14 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "BOX",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 14,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 4535964043515709501,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        302.80365,
+        9417.032,
+        972.5
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/BOX 15 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "BOX 15 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "BOX",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 15,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 11076708948009801690,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        302.80365,
+        9417.032,
+        4271.5
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/BOX 16 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "BOX 16 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "BOX",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 16,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 15337033029568076791,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        58.006195,
+        9426.993,
+        972.5
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/BOX 17 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "BOX 17 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "BOX",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 17,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 10036922770129766516,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        58.006195,
+        9426.993,
+        4271.5
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/EXTRUSION 2 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "EXTRUSION 2 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "EXTR",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 2,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 10649408275338266790,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        84.55309,
+        9525.995,
+        350.0
+      ],
+      "aabb_world_mm": [
+        58.91922861337662,
+        9247.274398803711,
+        -17.833411693572998,
+        284.2225432395935,
+        9526.590347290039,
+        349.9999940395355
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "FacetGroup",
+          "geo_type": "Primitive",
+          "detail": {
+            "polygons": 5,
+            "contours": 5,
+            "vertices": 18
+          },
+          "transform": {
+            "matrix3": [
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              -0.0009991732658818364,
+              0.00004065496250404976,
+              0.0,
+              -0.00004065496250404976,
+              -0.0009991732658818364,
+              0.0
+            ],
+            "translation_mm": [
+              84.55309271812439,
+              9525.995254516602,
+              349.9999940395355
+            ]
+          },
+          "bbox_world_mm": [
+            58.91922861337662,
+            9247.274398803711,
+            -17.833411693572998,
+            284.2225432395935,
+            9526.590347290039,
+            349.9999940395355
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/EXTRUSION 3 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "EXTRUSION 3 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "EXTR",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 3,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 240426991943497417,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        284.38773,
+        9517.864,
+        350.0
+      ],
+      "aabb_world_mm": [
+        59.0844452381134,
+        9247.267723083496,
+        -9.70238447189331,
+        284.3877375125885,
+        9526.583671569824,
+        358.1309914588928
+      ],
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "FacetGroup",
+          "geo_type": "Primitive",
+          "detail": {
+            "polygons": 5,
+            "contours": 5,
+            "vertices": 18
+          },
+          "transform": {
+            "matrix3": [
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.0009991732658818364,
+              -0.00004065496250404976,
+              0.0,
+              -0.00004065496250404976,
+              -0.0009991732658818364,
+              0.0
+            ],
+            "translation_mm": [
+              284.3877375125885,
+              9517.864227294922,
+              349.9999940395355
+            ]
+          },
+          "bbox_world_mm": [
+            59.0844452381134,
+            9247.267723083496,
+            -9.70238447189331,
+            284.3877375125885,
+            9526.583671569824,
+            358.1309914588928
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/CYLINDER 10 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "CYLINDER 10 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "CYLI",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 10,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 6074696052778072780,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        -56.81877,
+        9679.359,
+        360.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/CYLINDER 11 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "CYLINDER 11 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "CYLI",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 11,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 16975578866339072943,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        437.752,
+        9659.236,
+        360.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/CYLINDER 12 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "CYLINDER 12 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "CYLI",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 12,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 5904466637826780146,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        417.6286,
+        9164.666,
+        360.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/CYLINDER 13 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "CYLINDER 13 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "CYLI",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 13,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 14864099022416368117,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        -76.94216,
+        9184.789,
+        360.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/CYLINDER 14 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "CYLINDER 14 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "CYLI",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 14,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 1701688069256088352,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        180.40492,
+        9422.013,
+        250.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/PYRAMID 3 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "PYRAMID 3 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "PYRA",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 3,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 8711053174461604038,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        180.40492,
+        9422.013,
+        663.67
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/CYLINDER 15 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "CYLINDER 15 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "CYLI",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 15,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 7658778962090972467,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        180.40492,
+        9422.013,
+        910.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    }
+  ]
+}

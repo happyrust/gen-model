@@ -2820,6 +2820,43 @@ mod tests {
     }
 
     #[test]
+    fn tty_runner_rebinds_explicit_project_after_machine_custom_evars() {
+        let runner = include_str!("../../scripts/e3d/run_ams_c_entrymacro.bat");
+        let setup = runner
+            .find("call set_aveva_design.bat")
+            .expect("runner must initialize AVEVA DESIGN");
+        let rebind = runner
+            .find("call \"%L3_E3D_PROJECT_EVAR%\"")
+            .expect("runner must bind the selected project evars");
+        assert!(
+            setup < rebind,
+            "machine custom evars must load before the explicit fixture project is rebound"
+        );
+        assert!(
+            runner.contains("shadow_e3d31_aps_all"),
+            "TTY must use the repaired shadow locked by launch_ams.bat"
+        );
+        for reference in [
+            "evarsAvevaCatalogue.bat",
+            "evarsAvevaPlantSample.bat",
+            "evarsSCB.bat",
+            "evarsZDJ.bat",
+        ] {
+            assert!(
+                runner.contains(reference),
+                "AMS /ALL reference environment is missing: {reference}"
+            );
+        }
+        let switch_to_references = runner
+            .find("set \"projects_dir=%L3_E3D_REFERENCE_PROJECTS_DIR%\\\"")
+            .expect("runner must expand reference evars under their installed root");
+        let restore_selected = runner
+            .find("set \"projects_dir=%_L3_SELECTED_PROJECTS_DIR%\"")
+            .expect("runner must restore the isolated AMS project root");
+        assert!(switch_to_references < restore_selected);
+    }
+
+    #[test]
     fn isolated_e3d_project_requires_project_control_databases() {
         let root = std::env::temp_dir().join(format!("l3-e3d-controls-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);

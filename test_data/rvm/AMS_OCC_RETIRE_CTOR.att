@@ -1,0 +1,7 @@
+AVEVA_Attributes_File v1.0 , start: NEW , end: END , name_end: := , sep: &end&
+NEW Header Information
+  Source:= AVEVA E3D Design Data &end& Project:= AMS &end& MDB:= /ALL &end& Element:= /Copy-of-一环路过渡段
+END
+NEW CTORUS 1 of SUBEQUIPMENT /Copy-of-一环路过渡段
+  NAME:= =24381/109828 &end& TYPE:= CTOR &end& OWNER:= /Copy-of-一环路过渡段
+END

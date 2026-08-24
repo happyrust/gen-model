@@ -1,0 +1,92 @@
+diff --git a/src/paged.rs b/src/paged.rs
+index 89e18c6..6361240 100644
+--- a/src/paged.rs
++++ b/src/paged.rs
+@@ -1,4 +1,9 @@
+ //! Page-backed read sessions for on-demand element parsing.
++//!
++//! Dabacon header offset `0x34` stores the physical page length in 32-bit
++//! words, not bytes. `core.dll` converts the normal value `512` to
++//! `512 * 4 = 2048` bytes before page I/O. The engine owns that conversion;
++//! this adapter exposes only byte-qualified values.
+ 
+ use std::collections::{BTreeSet, HashMap};
+ use std::path::{Path, PathBuf};
+@@ -18,7 +23,8 @@ pub struct PagedSnapshot {
+     pub sesno: u32,
+     pub session_page: PageId,
+     pub index_root: PageId,
+-    pub page_size: usize,
++    /// Physical Dabacon page length in bytes.
++    pub page_size_bytes: usize,
+     pub extent_count: usize,
+ }
+ 
+@@ -41,7 +47,7 @@ impl PagedDbSession {
+             sesno: latest.sesno,
+             session_page: latest.page,
+             index_root: latest.index_root,
+-            page_size: handle.page_size(),
++            page_size_bytes: handle.page_size(),
+             extent_count: handle.extent_count(),
+         };
+         Ok(Self { handle, snapshot })
+@@ -141,10 +147,7 @@ fn record_payload(raw: &[u8]) -> Result<&[u8]> {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use std::path::{Path, PathBuf};
+-
+-    use aios_core::pdms_types::RefU64;
+-    use pdmsdb_engine_v2::ElementRecordView;
++    use std::path::Path;
+ 
+     use super::{PagedDbSession, record_payload};
+ 
+@@ -197,45 +200,8 @@ mod tests {
+         let session = PagedDbSession::open(path).unwrap();
+         let snapshot = session.snapshot();
+ 
+-        assert_eq!(snapshot.page_size, 2048);
++        assert_eq!(snapshot.page_size_bytes, 2048);
+         assert_eq!(snapshot.sesno, 272);
+         assert_eq!(snapshot.session_page.page_no, 110_889);
+     }
+-
+-    #[tokio::test]
+-    #[ignore = "requires the AMS real database fixture and performs one legacy full read"]
+-    async fn paged_record_matches_legacy_record_identity() {
+-        let path = PathBuf::from(r"D:\work\plant-code\pdms-io-fork\test-file\ams1112_0001");
+-        if !path.exists() {
+-            return;
+-        }
+-        let refno = RefU64::from_two_nums(17496, 171138);
+-        let mut paged = PagedDbSession::open(&path).unwrap();
+-        let mut raw_records = paged.read_raw_records(&[refno]).unwrap();
+-        let raw = raw_records.remove(&refno).unwrap();
+-        let payload = record_payload(&raw).unwrap();
+-        let view = ElementRecordView::from_raw(&raw).unwrap();
+-
+-        let legacy = crate::parse::parse_file_db_index_data(&path).unwrap();
+-        let pos = legacy.refno_table_map.get(&refno).unwrap().pos;
+-        let legacy_payload = &legacy.bytes[pos - 4..];
+-
+-        assert_eq!(&payload[..24], &legacy_payload[..24]);
+-        assert_eq!(
+-            (view.refno.hi(), view.refno.lo()),
+-            (refno.get_0(), refno.get_1())
+-        );
+-        assert_eq!(
+-            view.noun_hash,
+-            u32::from_be_bytes(payload[12..16].try_into().unwrap())
+-        );
+-        assert_eq!(
+-            view.owner.hi(),
+-            u32::from_be_bytes(payload[16..20].try_into().unwrap())
+-        );
+-        assert_eq!(
+-            view.owner.lo(),
+-            u32::from_be_bytes(payload[20..24].try_into().unwrap())
+-        );
+-    }
+ }

@@ -1,0 +1,432 @@
+{
+  "meta": {
+    "version": 1,
+    "dbnum": 7997,
+    "root_name": "/Copy-of-RCS601MT",
+    "rvm_file": "test_data\\rvm\\AMS_OCC_RETIRE_CURVED_PRIMITIVES.rvm",
+    "att_files": [
+      "test_data\\rvm\\AMS_OCC_RETIRE_CURVED_PRIMITIVES.att"
+    ],
+    "imported_at": "2026-08-24 11:16:45",
+    "member_count": 15,
+    "geometry_count": 2,
+    "resolved": 3,
+    "unresolved": 12,
+    "export_scope": "narrow",
+    "geo_type_counts": {
+      "Primitive": 2
+    },
+    "degenerate_bbox_count": 0
+  },
+  "members": [
+    {
+      "path": "/AMS/1PTU-INST23",
+      "name": "/1PTU-INST23",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 15869806505224742712,
+      "parent_stable_id": null,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-RCS001PO仪表模型",
+      "name": "/Copy-of-RCS001PO仪表模型",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 17492622527695211326,
+      "parent_stable_id": 15869806505224742712,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-RCS001PO仪表模型/Copy-of-RCS601MT",
+      "name": "/Copy-of-RCS601MT",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": "24381/101425",
+      "identity_source": "cli_root",
+      "resolved": true,
+      "stable_id": 11820983414768297631,
+      "parent_stable_id": 17492622527695211326,
+      "translation_mm": [
+        -5247.64,
+        9713.12,
+        6313.46
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-RCS001PO仪表模型/Copy-of-RCS601MT/CYLINDER 1 of EQUIPMENT /Copy-of-RCS601MT",
+      "name": "CYLINDER 1 of EQUIPMENT /Copy-of-RCS601MT",
+      "noun": "CYLI",
+      "owner_desc": "EQUIPMENT /Copy-of-RCS601MT",
+      "ordinal": 1,
+      "refno": "24381/101426",
+      "identity_source": "att_direct",
+      "resolved": true,
+      "stable_id": 5345141984016633751,
+      "parent_stable_id": 11820983414768297631,
+      "translation_mm": [
+        -5247.64,
+        9713.12,
+        6223.46
+      ],
+      "aabb_world_mm": [
+        -5272.640228271484,
+        9688.12084197998,
+        6173.460006713867,
+        -5222.640037536621,
+        9738.120079040527,
+        6273.460388183594
+      ],
+      "attrs": {
+        "NAME": "=24381/101426",
+        "OWNER": "/Copy-of-RCS601MT",
+        "TYPE": "CYLI"
+      },
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Cylinder",
+          "geo_type": "Primitive",
+          "detail": {
+            "radius": 25.0,
+            "height": 100.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -5247.640132904053,
+              9713.120460510254,
+              6223.4601974487305
+            ]
+          },
+          "bbox_world_mm": [
+            -5272.640228271484,
+            9688.12084197998,
+            6173.460006713867,
+            -5222.640037536621,
+            9738.120079040527,
+            6273.460388183594
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-蒸汽发生器冷凝罐及其支架",
+      "name": "/Copy-of-蒸汽发生器冷凝罐及其支架",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 17827434424543854520,
+      "parent_stable_id": 15869806505224742712,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-蒸汽发生器冷凝罐及其支架/Copy-of-1TFM020MN冷凝罐",
+      "name": "/Copy-of-1TFM020MN冷凝罐",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 7080763903418607963,
+      "parent_stable_id": 17827434424543854520,
+      "translation_mm": [
+        6980.35,
+        -4837.37,
+        22216.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-蒸汽发生器冷凝罐及其支架/Copy-of-1TFM020MN冷凝罐/SUBEQUIPMENT 4 of EQUIPMENT /Copy-of-1TFM020MN冷凝罐",
+      "name": "SUBEQUIPMENT 4 of EQUIPMENT /Copy-of-1TFM020MN冷凝罐",
+      "noun": "SUBE",
+      "owner_desc": "EQUIPMENT /Copy-of-1TFM020MN冷凝罐",
+      "ordinal": 4,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 11579232274171727984,
+      "parent_stable_id": 7080763903418607963,
+      "translation_mm": [
+        6980.3394,
+        -4839.485,
+        22216.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-主设备+主管道保温",
+      "name": "/Copy-of-主设备+主管道保温",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 3582089094719129120,
+      "parent_stable_id": 15869806505224742712,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-主设备+主管道保温/Copy-of-主管道保温层-吴",
+      "name": "/Copy-of-主管道保温层-吴",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 90562542753248086,
+      "parent_stable_id": 3582089094719129120,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-主设备+主管道保温/Copy-of-主管道保温层-吴/Copy-of-一环路过渡段",
+      "name": "/Copy-of-一环路过渡段",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 18212415191376574001,
+      "parent_stable_id": 90562542753248086,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-主设备+主管道保温/Copy-of-主管道保温层-吴/Copy-of-一环路过渡段/CTORUS 1 of SUBEQUIPMENT /Copy-of-一环路过渡段",
+      "name": "CTORUS 1 of SUBEQUIPMENT /Copy-of-一环路过渡段",
+      "noun": "CTOR",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-一环路过渡段",
+      "ordinal": 1,
+      "refno": "24381/109828",
+      "identity_source": "att_direct",
+      "resolved": true,
+      "stable_id": 9125935565055365253,
+      "parent_stable_id": 18212415191376574001,
+      "translation_mm": [
+        -3951.78,
+        10483.68,
+        2810.0
+      ],
+      "aabb_world_mm": [
+        -4219.133377075195,
+        9820.545196533203,
+        644.9997425079346,
+        -1676.4743328094482,
+        11956.352233886719,
+        2809.999942779541
+      ],
+      "attrs": {
+        "NAME": "=24381/109828",
+        "OWNER": "/Copy-of-一环路过渡段",
+        "TYPE": "CTOR"
+      },
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "CircularTorus",
+          "geo_type": "Primitive",
+          "detail": {
+            "offset": 1450.0,
+            "radius": 715.0,
+            "angle": 1.5707963705062866
+          },
+          "transform": {
+            "matrix3": [
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.0009274608455598354,
+              0.000373920367565006,
+              0.0,
+              0.000373920367565006,
+              -0.0009274608455598354,
+              0.0
+            ],
+            "translation_mm": [
+              -3951.780080795288,
+              10483.67977142334,
+              2809.999942779541
+            ]
+          },
+          "bbox_world_mm": [
+            -4219.133377075195,
+            9820.545196533203,
+            644.9997425079346,
+            -1676.4743328094482,
+            11956.352233886719,
+            2809.999942779541
+          ],
+          "bbox_degenerate": false,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX",
+      "name": "/Copy-of-1RCS-EQUI-1RX",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 11817272301709928687,
+      "parent_stable_id": 15869806505224742712,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX",
+      "name": "EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX",
+      "noun": "EQUI",
+      "owner_desc": "ZONE /Copy-of-1RCS-EQUI-1RX",
+      "ordinal": 3,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 10105695021528025627,
+      "parent_stable_id": 11817272301709928687,
+      "translation_mm": [
+        181.27,
+        9412.01,
+        250.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿",
+      "name": "/Copy-of-1-1#支腿",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 5853731152998742223,
+      "parent_stable_id": 10105695021528025627,
+      "translation_mm": [
+        180.40492,
+        9422.013,
+        250.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1PTU-INST23/Copy-of-1RCS-EQUI-1RX/EQUIPMENT 3 of ZONE /Copy-of-1RCS-EQUI-1RX/Copy-of-1-1#支腿/RTORUS 2 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "name": "RTORUS 2 of SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "noun": "RTOR",
+      "owner_desc": "SUBEQUIPMENT /Copy-of-1-1#支腿",
+      "ordinal": 2,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 8080437224343856002,
+      "parent_stable_id": 5853731152998742223,
+      "translation_mm": [
+        432.69617,
+        9411.747,
+        910.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    }
+  ]
+}

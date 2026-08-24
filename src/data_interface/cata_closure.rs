@@ -309,7 +309,7 @@ impl InMemoryCataLocator {
 
     /// 端到端构建：读 `dbnum_watermark` 得各库文件身份 → 扫描各库 `ref0` 集（带磁盘指纹缓存）。
     ///
-    /// `project`：工程名（legacy/compare 回读语义需要 + `file_of` 返回）。
+    /// `project`：工程名（文件快照校验与 `file_of` 返回）。
     pub async fn build_for_project(project: &str) -> anyhow::Result<Self> {
         let manifest_version = DEPENDENCY_MANIFEST_VERSION.load(Ordering::SeqCst);
         if let Some((version, locator)) = LOCATOR_CACHE.lock().await.get(project).cloned()
@@ -722,13 +722,7 @@ fn should_eager_index_identity(dbnum: u32, db_type: &str, selected_cata: &HashSe
 
 fn scan_identity_ref0s(path: &Path, db_type: &str, project: &str) -> anyhow::Result<Vec<u32>> {
     if db_type.eq_ignore_ascii_case("CATA") || db_type.eq_ignore_ascii_case("DESI") {
-        match scan_db_ref0s(path, project) {
-            Ok(ref0s) => return Ok(ref0s),
-            Err(error) => eprintln!(
-                "[cata_locator] paged Ref0 身份扫描失败，改用权威索引: db_type={db_type} path={} error={error:#}",
-                path.display()
-            ),
-        }
+        return scan_db_ref0s(path, project);
     }
     scan_authoritative_identity_ref0s(path, db_type)
 }
@@ -756,8 +750,8 @@ fn scan_authoritative_identity_ref0s(path: &Path, db_type: &str) -> anyhow::Resu
 
 /// 扫描单个 db 文件的 `ref0` 集（供 `ref0→dbnum` 反查）。
 ///
-/// paged 模式流式遍历快照索引键并只保留去重后的 `ref0`；legacy/compare 保留旧
-/// `children_map` 基线作灰度与回滚。失败或成功空扫描均上浮（该库暂不可定位，且不发布缓存）。
+/// 分页读取流式遍历快照索引键并只保留去重后的 `ref0`。
+/// 失败或成功空扫描均上浮（该库暂不可定位，且不发布缓存）。
 /// 失败只攒进解析错误账本、不落库：本函数是同步的，而三个调用点里有一个也在
 /// 同步路径上。落库交给 [`CataLocator::build_for_project`] 那个 async 收口点。
 fn scan_db_ref0s(path: &Path, project: &str) -> anyhow::Result<Vec<u32>> {
@@ -786,12 +780,10 @@ fn scan_db_ref0s(path: &Path, project: &str) -> anyhow::Result<Vec<u32>> {
 }
 
 fn scan_db_header(path: &Path) -> Option<parse_pdms_db::parse::DbBasicInfo> {
-    let snapshot = pdms_io::snapshot::DabaconSnapshot::open("", path).ok()?;
-    let info = parse_pdms_db::parse::DbBasicInfo {
-        db_type: snapshot.token().db_type().to_owned(),
-        ses_pgno: snapshot.token().latest_ses_pgno(),
-        db_no: snapshot.token().dbnum() as u32,
-    };
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut header = [0_u8; 60];
+    std::io::Read::read_exact(&mut file, &mut header).ok()?;
+    let info = parse_pdms_db::parse::parse_file_basic_info(&header);
     (info.db_no != 0 && !info.db_type.is_empty()).then_some(info)
 }
 
@@ -1005,17 +997,15 @@ async fn parse_refnos_with_session(
             }
             Ok(None) => {}
             Err(error) => {
-                if session.is_compare() {
-                    return Err(error);
-                }
-                // 解析失败：跳过，由调用方按 cache-miss 处理。日志之外还要留痕——
-                // 跳过是静默降级，事后没有任何查询能说出「哪些元素解析不出来」。
                 let target = refno.to_pe_key();
-                log::warn!("[paged_db] element_parse_skipped refno={target} error={error:#}");
                 crate::data_interface::parse_error::note_element_failure(
                     &target,
                     &format!("{error:#}"),
                 );
+                crate::data_interface::parse_error::flush()
+                    .await
+                    .with_context(|| format!("写入 CATA 分页解析错误账本失败: {target}"))?;
+                return Err(error).with_context(|| format!("分页解析 CATA 元素失败: {target}"));
             }
         }
     }
@@ -1727,6 +1717,41 @@ pub struct LazyFallbackOutcome {
     pub missing: usize,
 }
 
+/// 将已经物化到持久 SurrealDB 的 CATA 元素从文件解析候选中剔除。
+///
+/// `pe` 是模型查询的入口；属性行若意外缺失，`get_named_attmap` 的惰性兜底仍会按
+/// 单个 refno 补齐。这里先挡住初始化后最常见的整批重复解析，避免每个模型批次都
+/// 重新打开 CATA 文件并 CONTENT 覆盖同一批行。
+async fn missing_materialized_cata_refnos_on(
+    database: &Surreal<Any>,
+    seeds: &[RefU64],
+) -> anyhow::Result<Vec<RefU64>> {
+    let unique = seeds.iter().copied().collect::<BTreeSet<_>>();
+    if unique.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ordered = unique.into_iter().collect::<Vec<_>>();
+    let mut present = HashSet::with_capacity(ordered.len());
+    for chunk in ordered.chunks(INSERT_CHUNK) {
+        let keys = chunk
+            .iter()
+            .map(RefU64::to_pe_key)
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql =
+            format!("SELECT VALUE refno FROM [{keys}] WHERE record::exists(id) AND refno != NONE;");
+        let mut response = database.query(&sql).await?.check()?;
+        let rows: Vec<RefnoEnum> = response.take(0).with_context(|| {
+            format!("decode materialized CATA coverage for {} keys", chunk.len())
+        })?;
+        present.extend(rows.into_iter().map(|row| row.refno()));
+    }
+    Ok(ordered
+        .into_iter()
+        .filter(|refno| !present.contains(refno))
+        .collect())
+}
+
 fn require_all_roots_resolved(required: bool, unresolved: &[RefU64]) -> anyhow::Result<()> {
     if required && !unresolved.is_empty() {
         anyhow::bail!(
@@ -2266,7 +2291,25 @@ pub async fn preload_cata_for_roots(
     }
 
     let seeds: Vec<RefU64> = seeds.into_iter().collect();
-    let mut outcome = ensure_cata_refnos_parsed(project, &seeds).await?;
+    let parse_seeds = if staged_window {
+        // 暂存库是隔离提交面，持久层已有行并不代表暂存库可见；仍按既有 Required
+        // 路径把依赖写进当前窗口。后续可进一步改为从持久层复制，而不是重读文件。
+        seeds.clone()
+    } else {
+        missing_materialized_cata_refnos_on(&SUL_DB, &seeds).await?
+    };
+    println!(
+        "[cata_closure] SurrealDB 物化覆盖: requested={} hit={} file_fallback={} staged={}",
+        seeds.len(),
+        seeds.len().saturating_sub(parse_seeds.len()),
+        parse_seeds.len(),
+        staged_window
+    );
+    let mut outcome = if parse_seeds.is_empty() {
+        LazyFallbackOutcome::default()
+    } else {
+        ensure_cata_refnos_parsed(project, &parse_seeds).await?
+    };
     outcome.missing += closure_missing;
     Ok(outcome)
 }
@@ -2274,6 +2317,33 @@ pub async fn preload_cata_for_roots(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn materialized_cata_rows_are_not_sent_back_to_the_file_parser() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("cata_coverage")
+            .await
+            .expect("select fixture db");
+        let present = RefU64((5052u64 << 32) | 101);
+        let missing = RefU64((5052u64 << 32) | 102);
+        db.query(format!(
+            "CREATE {} SET refno = {};",
+            present.to_pe_key(),
+            present.to_table_key("CATE")
+        ))
+        .await
+        .expect("create materialized CATA row")
+        .check()
+        .expect("materialized row statement");
+
+        let fallback = missing_materialized_cata_refnos_on(&db, &[present, missing, present])
+            .await
+            .expect("query materialization coverage");
+        assert_eq!(fallback, vec![missing]);
+    }
 
     #[test]
     fn watch_scope_indexes_prop_identity_without_reopening_unwatched_design() {

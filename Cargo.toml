@@ -33,7 +33,8 @@ gen_model = ["aios_core/gen_model"]
 manifold = ["dep:manifold-csg"]
 sql = ["dep:sqlx"]
 debug_parse = ["pdms_io/debug_parse"]
-legacy_session_replay = ["pdms_io/legacy_session_replay"] # 逐会话实体回放，仅诊断/对拍
+# 仅保留两个离线会话回放探针的显式构建门；生产、Python 与本地 AMS 启动都不启用。
+legacy_session_replay = ["pdms_io/legacy_session_replay"]
 surreal_v2 = []
 project_hd = []
 project_hh = []
@@ -105,11 +106,11 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "05dde0d" }
-aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "1de7a94e8f60c0f106f2f59f0805d25e262abaeb", default-features = false }
+parse_pdms_db = { path = "../../old-parse-pdms-db-paged" }
+aios_core = { path = "../vendor/old-aios-core-occ-retire-caliber", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "a8f16214576ca9f16892b1576b7917ada7388ca8" }
+pdms_io = { path = "../../old-pdms-io-record-boundary" }
 
 clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }
@@ -170,9 +171,8 @@ rmcp = { version = "=3.1.1", features = ["server", "transport-io"] }
 
 # ── 自研 crate 的本地重定向（默认关闭）────────────────────────────────────
 #
-# 用 `scripts/Toggle-LocalDeps.ps1 -On` 打开、`-Off` 关掉，别手改标记之间的内容。
-# 打开后上面 [dependencies] 里的 git+rev 仍是权威来源声明，只是被重定向到本地
-# 工作副本：改一行 Rust 就能直接编，不必再走「提交 → push → 升 rev」三步。
+# 本分支上方 [dependencies] 已直接指向本地 aios_core / parse_pdms_db /
+# pdms_io 工作树，联调不走 git rev。本段只供其它历史工作树使用。
 #
 # 为什么用 [patch] 而不是把 [dependencies] 改成 path：parse_pdms_db 与 pdms_io
 # 在它们自己的 Cargo.toml 里也 git 依赖 aios_core。只把本仓改成 path，依赖图里

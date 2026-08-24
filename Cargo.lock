@@ -174,7 +174,6 @@ dependencies = [
 [[package]]
 name = "aios_core"
 version = "0.2.0"
-source = "git+https://github.com/happyrust/old-aios-core.git?rev=1de7a94e8f60c0f106f2f59f0805d25e262abaeb#1de7a94e8f60c0f106f2f59f0805d25e262abaeb"
 dependencies = [
  "anyhow",
  "approx 0.5.1",
@@ -4809,7 +4808,6 @@ dependencies = [
 [[package]]
 name = "parse_pdms_db"
 version = "3.0.0"
-source = "git+https://github.com/happyrust/old-parse-pdms-db.git?rev=05dde0d#05dde0d740b7cc48cfeaf101f069e4ee9ebfb10c"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -4845,7 +4843,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "smol_str 0.3.2",
- "thiserror 2.0.19",
+ "thiserror 1.0.69",
  "tokio",
 ]
 
@@ -4899,7 +4897,6 @@ dependencies = [
 [[package]]
 name = "pdms_io"
 version = "0.1.0"
-source = "git+https://github.com/happyrust/old-pdms-io.git?rev=a8f16214576ca9f16892b1576b7917ada7388ca8#a8f16214576ca9f16892b1576b7917ada7388ca8"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -4938,7 +4935,6 @@ dependencies = [
 [[package]]
 name = "pdmsdb_engine_v2"
 version = "0.1.0"
-source = "git+https://github.com/happyrust/pdms-io.git?rev=13a17e1f3a8ed8d18c1dcecdf10642c28654d4bb#13a17e1f3a8ed8d18c1dcecdf10642c28654d4bb"
 dependencies = [
  "anyhow",
  "chrono",

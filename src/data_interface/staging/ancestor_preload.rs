@@ -262,11 +262,9 @@ where
     })
 }
 
-/// 生产数据源：一次窗口固定一个页式快照根并复用页缓存；legacy/compare 模式
-/// 由统一按需会话封装，均不在本层展开成员树。
+/// 生产数据源：一次窗口固定一个页式快照根并复用页缓存，不在本层展开成员树。
 pub(crate) struct AncestorParseSession {
     session: TokioMutex<OnDemandDbSession>,
-    legacy_world_refno: Option<RefU64>,
 }
 
 impl AncestorParseSession {
@@ -274,10 +272,8 @@ impl AncestorParseSession {
     /// [`resolve_ancestor_closure`] 的逐元素 sesno 封口构成 W1 的时点纪律。
     pub(crate) fn open(path: &Path) -> anyhow::Result<Self> {
         let session = OnDemandDbSession::open(path)?;
-        let legacy_world_refno = session.legacy_world_refno();
         Ok(Self {
             session: TokioMutex::new(session),
-            legacy_world_refno,
         })
     }
 
@@ -288,7 +284,7 @@ impl AncestorParseSession {
     ) -> anyhow::Result<AncestorClosure> {
         // 页式快照不依赖文件级全量索引提供 WORL；首次走到 owner 无效的
         // terminal 时校验 noun=WORL 并固定根，后续种子必须收敛到同一根。
-        let expected_world = self.legacy_world_refno.unwrap_or(RefU64(0));
+        let expected_world = RefU64(0);
         resolve_ancestor_closure(seeds, expected_world, end_sesno, |refno| async move {
             let mut session = self.session.lock().await;
             parse_ancestor_element(&mut session, refno).await
