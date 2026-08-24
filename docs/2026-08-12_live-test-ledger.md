@@ -6,6 +6,25 @@
 **没有"最近通过"记录的用例视同未验资产**——本台账是唯一事实来源，动过 live 用例或
 点亮新批次必须同步更新。
 
+**2026-08-24 AMS 8000 空 RocksDB 初始化计时（执行中）**：
+在独立 SurrealDB 2.1.4 `127.0.0.1:8169`、独立 RocksDB
+`.scratch/init-timing-8000-sql-fixed/surreal-rocksdb` 上从 `tables={}` 开始。
+DESI 8000 解析 6540 行约 2.7s，完整覆盖生成根 766 个；基线按 dbnum 分页得到 160 个
+CATA 种子，一次页式闭包后于 15:52:47 推进水位到 233。模型按 16 根/页继续生成，
+当前已确认前 80 根收口、`geom_error=0`；整轮尚未结束，不登记整体通过。证据为同目录
+`empty-info.txt`、`init.stdout.log`、`init.stderr.log`。
+
+**2026-08-24 AMS 8000 目录布尔缺失 mesh 收口**：
+`data_interface::model_refresh::tests::live_generate_roots_with_coverage_audit` 最近通过两轮。
+单根 `24384/22404` 为 40.76s；双根 `24384/22441,24384/22478` 为 48.41s，后者
+CATA 36 个唯一项 43.55s、mesh/AABB/boolean 2.27s、总生成 46.09s。修复前同一单根
+39.84s 后以 `root 24384_22404 catalogue negative boolean -> os error 2` 失败；修复后
+缺失正实体 `.mesh` 进入 `geom_error(bool_pos)` 并标记 `bad_bool`，生成调用成功返回，
+三条旧 `generation_root` 诊断已销账。证据：
+`.scratch/model-stage-context/root-24384-22404.log`、
+`.scratch/model-stage-context/root-24384-22404-after.log`、
+`.scratch/model-stage-context/roots-24384-22441-22478-after.log`。
+
 **2026-08-24 AMS 8000 页式 CATA 预加载（收敛中）**：
 `production_acp7000_locator_opens_authoritative_paged_session` 最近通过，识别
 `page_size_bytes=2048, sesno=272`；
