@@ -296,6 +296,89 @@ pub fn span_polyline_by_tol(
     span_polyline_in_steps(p0, p1, bulge, segments)
 }
 
+// ─── 硬边：轮廓顶点上的法向该不该跨过去平均 ──────────────────────────────────
+//
+// `GM_Profile::getPolygonForFacet`（3.1 libgm `0x1008F8B0`）的第二个出参逐顶点记
+// 「有几条 span 在这里收尾」，**相邻两段不平滑相接时把该项取负**；闭合处（末段接回
+// 首段）另判一次，不平滑就把末点与首点**一起**取负。负号即「此处是硬边，法向不要跨
+// 过去平均」——曲面法向该怎么分组的权威来源。
+//
+// 判据本身在 libgeom，不在 libgm。它与布尔那边的 22.5°（`isTangentDiscontinuity`）
+// 和归一化那边的 48.3°（`isSharp`）是**三个不同的判据**，不得互相顶替。
+// 证据 `docs/evidence/2026-08-24-ida-gm-collar-ruled-solid.md` §六。
+
+/// `D2_Span::leadsSmoothlyTo` 的点积容差（3.1 libgeom `0x10029B50`）：
+/// `|1 − dot| ≤ 1e-6`，换成夹角约 0.081°。
+pub const SMOOTH_TANGENT_TOL: f64 = 1e-6;
+
+/// `D2_Span::getFirstTangent` / `getLastTangent`（3.1 libgeom `0x100296F0` /
+/// `0x10029930`）。`at_end` 为真取末端切向，否则取起端。
+///
+/// 三条分支照抄：
+///
+/// - `bulge` **精确等于 0** → 弦向单位向量；零长度段回 `(0, 0)`。
+/// - `|bulge| ≥ SPAN_EPS` → `(−r.y, r.x) / R`，`r` 是端点到圆心的向量、`R` 是带符号
+///   半径（`bulge ≤ 0` 时取反）。模长恒为 1。
+/// - `0 < |bulge| < SPAN_EPS` → libgeom 走一条**退化分支**：圆心取弦中点、半径取
+///   「尚未计算」的哨兵 −1，出来的向量**不是单位向量**。照抄不归一化——归一化会把
+///   「极小非零 bulge 必被判成硬边」这个实际行为改掉。本仓的 `profile_spans` 会把
+///   这种 bulge 收成尖角（`bulge = 0.0`），所以这条今天不可达。
+fn span_tangent(p0: [f64; 2], p1: [f64; 2], bulge: f64, at_end: bool) -> [f64; 2] {
+    if bulge == 0.0 {
+        let d = [p1[0] - p0[0], p1[1] - p0[1]];
+        let len = if d[0] == 0.0 {
+            d[1].abs()
+        } else if d[1] == 0.0 {
+            d[0].abs()
+        } else {
+            (d[0] * d[0] + d[1] * d[1]).sqrt()
+        };
+        if len == 0.0 {
+            return [0.0, 0.0];
+        }
+        return [d[0] / len, d[1] / len];
+    }
+    let (centre, radius) = match span_arc(p0, p1, bulge) {
+        Some(arc) => (arc.centre, arc.radius),
+        None => ([(p0[0] + p1[0]) * 0.5, (p0[1] + p1[1]) * 0.5], -1.0),
+    };
+    let signed = if bulge > 0.0 { radius } else { -radius };
+    let end = if at_end { p1 } else { p0 };
+    let r = [end[0] - centre[0], end[1] - centre[1]];
+    [-r[1] / signed, r[0] / signed]
+}
+
+/// `D2_Span::getLastTangent`。
+pub fn span_last_tangent(p0: [f64; 2], p1: [f64; 2], bulge: f64) -> [f64; 2] {
+    span_tangent(p0, p1, bulge, true)
+}
+
+/// `D2_Span::getFirstTangent`。
+pub fn span_first_tangent(p0: [f64; 2], p1: [f64; 2], bulge: f64) -> [f64; 2] {
+    span_tangent(p0, p1, bulge, false)
+}
+
+/// `D2_Span::leadsSmoothlyTo`（3.1 libgeom `0x10029B50`）：
+/// `|1 − dot(lastTangent(a), firstTangent(b))| ≤ SMOOTH_TANGENT_TOL`。
+pub fn tangents_are_smooth(a: [f64; 2], b: [f64; 2]) -> bool {
+    (1.0 - (a[0] * b[0] + a[1] * b[1])).abs() <= SMOOTH_TANGENT_TOL
+}
+
+/// 闭合轮廓上第 `i` 段是否平滑接进它的下一段（末段绕回首段）。
+///
+/// 为假就是硬边：`getPolygonForFacet` 会把第 `i` 段末点的计数取负。
+pub fn spans_meet_smoothly(spans: &[ProfileSpan], i: usize) -> bool {
+    let n = spans.len();
+    if n == 0 || i >= n {
+        return false;
+    }
+    let j = (i + 1) % n;
+    let k = (j + 1) % n;
+    let last = span_last_tangent(spans[i].point, spans[j].point, spans[i].bulge);
+    let first = span_first_tangent(spans[j].point, spans[k].point, spans[j].bulge);
+    tangents_are_smooth(last, first)
+}
+
 /// 轮廓环上的一段：起点，以及从这里到下一段起点的 bulge。环是闭合的，最后一段回到第一段。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ProfileSpan {

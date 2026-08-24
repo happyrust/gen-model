@@ -396,7 +396,10 @@
   `tessellate_revolution` 目前误用了挤出口径。
   `cargo fmt --check` 与 `cargo check --no-default-features --features
   ws,gen_model,manifold,project_hd` 均通过（只改注释，无行为变更）。
-- [ ] T040b（可后置）`getPolygonForFacet` 第二个出参的**负号 = 硬边**
+- [x] T040b（2026-08-24 转出：规则已反完，实现移交
+  **`specs/028-hard-edge-normal-grouping/`**，ADR-047；Phase 1 当日落地，
+  布尔侧与 10° 阈值退役分别是那边的 Phase 2 / Phase 3）
+  `getPolygonForFacet` 第二个出参的**负号 = 硬边**
   （`D2_Span::leadsSmoothlyTo` 为假时取负），是曲面法向该怎么分组的权威来源，
   与 `d0088e93 fix(geom): smooth curved-surface normals` 同一件事。本期不实现，
   单独开规格前先把这条记着。

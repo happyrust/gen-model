@@ -24,15 +24,26 @@ const POS_EPS: f32 = 1e-4;
 pub type Loop2D = Vec<Vec2>;
 
 /// 截面离散结果：`loops[0]` 是外环（逆时针），其余是孔（顺时针）。
+///
+/// `hard` 与 `loops` 一一对应，逐点标出**硬边**：为真表示侧壁法向不许跨过这个点平均。
+/// 出处是 `GM_Profile::getPolygonForFacet` 第二出参的负号（3.1 libgm `0x1008F8B0`），
+/// 判据 `D2_Span::leadsSmoothlyTo`——见 [`libgm_discretise::spans_meet_smoothly`]。
 #[derive(Debug, Clone, Default)]
 pub struct ProfileLoops {
     pub loops: Vec<Loop2D>,
+    pub hard: Vec<Vec<bool>>,
 }
 
 impl ProfileLoops {
     /// 截面净面积（外环减孔）。
     pub fn area(&self) -> f32 {
         self.loops.iter().map(|l| signed_area(l)).sum::<f32>()
+    }
+
+    /// 第 `k` 环的硬边标记。环存在但标记缺失时按「整圈都是硬边」处理——那是最保守的
+    /// 着色（逐片平直），不会把一条真实的折痕抹平。
+    fn hard_of(&self, k: usize) -> Option<&[bool]> {
+        self.hard.get(k).map(Vec::as_slice)
     }
 }
 
@@ -91,6 +102,30 @@ pub fn profile_loops_ruled(
     discretise_profile(profile, chord_tol, ProfileCaliber::Ruled)
 }
 
+/// 已经解好的 span 环直接进挤出口径的离散（弧形墙那种自己算出轮廓的调用方）。
+///
+/// `rings[0]` 当外环（逆时针），其余当孔（顺时针）。走这个入口而不是自己铺一遍点，
+/// 图的是**硬边标记跟着一起出来**——手抄一遍铺点循环就等于把硬边那一半漏在门外。
+pub fn loops_from_spans(
+    rings: Vec<Vec<libgm_discretise::ProfileSpan>>,
+    chord_tol: f64,
+) -> anyhow::Result<ProfileLoops> {
+    if rings.is_empty() {
+        bail!("截面没有闭合环");
+    }
+    let raw: Vec<RawLoop> = rings
+        .into_iter()
+        .enumerate()
+        .map(|(k, spans)| RawLoop {
+            spans,
+            offset: Vec2::ZERO,
+            ccw: k == 0,
+        })
+        .collect();
+    let (loops, hard) = discretise_loops(&raw, chord_tol, ProfileCaliber::Extruded)?;
+    Ok(ProfileLoops { loops, hard })
+}
+
 fn discretise_profile(
     profile: &CateProfileParam,
     chord_tol: f64,
@@ -105,9 +140,8 @@ fn discretise_profile(
     if raw.is_empty() {
         bail!("截面离散后没有闭合环");
     }
-    Ok(ProfileLoops {
-        loops: discretise_loops(&raw, chord_tol, caliber)?,
-    })
+    let (loops, hard) = discretise_loops(&raw, chord_tol, caliber)?;
+    Ok(ProfileLoops { loops, hard })
 }
 
 /// SPRO / SREC：顶点带倒角半径的单环。`frads[i]` 走 `profile_spans` 的第三分量。
@@ -254,15 +288,20 @@ fn collar_span_steps(raw: &[RawLoop], chord_tol: f64) -> anyhow::Result<Vec<Vec<
     Ok(per_loop)
 }
 
-/// 环集合离散成折线：去重、平移，并按 `ccw` 统一绕向。
+/// 环集合离散成折线：去重、平移，并按 `ccw` 统一绕向；同时逐点标出硬边。
 ///
 /// 三套口径**只在这里分叉**，分叉点就是每段的步数：挤出逐段自算
 /// （`span_polyline_by_tol` 内部按本段半径算），回转按配对取大，放样再跨环取大。
+///
+/// 硬边照 `GM_Profile::getPolygonForFacet`（3.1 libgm `0x1008F8B0`）：一段铺完之后，
+/// 若它不平滑接进下一段，就把**这一段的末点**标硬；末段接回首段那一次不平滑时，
+/// 末点与首点**一起**标硬。弧内部的插值点一律是软的——这正是「段数再粗的弧也该是
+/// 光顺曲面」与「再浅的折角也是折角」两件事的分界，拿夹角阈值猜是猜不出来的。
 fn discretise_loops(
     raw: &[RawLoop],
     chord_tol: f64,
     caliber: ProfileCaliber,
-) -> anyhow::Result<Vec<Loop2D>> {
+) -> anyhow::Result<(Vec<Loop2D>, Vec<Vec<bool>>)> {
     if !libgm_discretise::chord_tol_is_usable(chord_tol) {
         bail!("截面环拿到的弦高容差 {chord_tol} 不可用");
     }
@@ -277,9 +316,11 @@ fn discretise_loops(
     };
 
     let mut out: Vec<Loop2D> = Vec::with_capacity(raw.len());
+    let mut hard_out: Vec<Vec<bool>> = Vec::with_capacity(raw.len());
     for (k, ring) in raw.iter().enumerate() {
         let n = ring.spans.len();
         let mut pts: Vec<Vec2> = Vec::with_capacity(n);
+        let mut hard: Vec<bool> = Vec::with_capacity(n);
         for (i, span) in ring.spans.iter().enumerate() {
             let next = ring.spans[(i + 1) % n].point;
             let seg = match &steps {
@@ -302,20 +343,38 @@ fn discretise_loops(
                     continue;
                 }
                 pts.push(p);
+                hard.push(false);
+            }
+            // 这一段的末点：不平滑接进下一段就是硬边。首尾那一次也走这里（i = n−1 时
+            // 下一段就是首段），闭合处的另一半在收尾重复点合并之后补。
+            if !libgm_discretise::spans_meet_smoothly(&ring.spans, i) {
+                if let Some(last) = hard.last_mut() {
+                    *last = true;
+                }
             }
         }
         while pts.len() >= 2 && pts[0].distance(pts[pts.len() - 1]) < POS_EPS {
             pts.pop();
+            // 被并掉的收尾点带着的硬边归到首点身上——`getPolygonForFacet` 在闭合处
+            // 就是末点与首点一起取负。
+            if hard.pop() == Some(true) {
+                hard[0] = true;
+            }
         }
         if pts.len() < 3 {
             bail!("截面环离散后只剩 {} 个点", pts.len());
         }
+        if hard.last() == Some(&true) {
+            hard[0] = true;
+        }
         if (signed_area(&pts) > 0.0) != ring.ccw {
             pts.reverse();
+            hard.reverse();
         }
         out.push(pts);
+        hard_out.push(hard);
     }
-    Ok(out)
+    Ok((out, hard_out))
 }
 
 /// 鞋带公式。逆时针为正。
@@ -405,7 +464,7 @@ pub(crate) fn orient_outward(vertices: &[Vec3], indices: &mut [u32], normals: &m
 }
 
 /// 沿 +Z 挤出：底面在 z=0，顶面在 z=height。对齐 `gm_CreateExtrusion(profile, height)`。
-pub fn extrude_loops(loops: &[Loop2D], height: f32) -> anyhow::Result<PlantMesh> {
+pub fn extrude_loops(loops: &ProfileLoops, height: f32) -> anyhow::Result<PlantMesh> {
     if height <= POS_EPS {
         bail!("挤出高度 {height} 不是正数");
     }
@@ -424,32 +483,34 @@ pub fn extrude_loops(loops: &[Loop2D], height: f32) -> anyhow::Result<PlantMesh>
 /// 摆位口径也照它：`formBaseFacet` 写 z = 0、`formTopFacet` 写 z = height
 /// （`0x10048d60` / `0x10048f20`），**不是** box / snout 那套上下各摊一半。
 /// 证据 `docs/evidence/2026-08-24-ida-gm-collar-ruled-solid.md`。
-pub fn loft_loops<F>(loops: &[Loop2D], place: F) -> anyhow::Result<PlantMesh>
+pub fn loft_loops<F>(loops: &ProfileLoops, place: F) -> anyhow::Result<PlantMesh>
 where
     F: Fn(Vec2, bool) -> Vec3,
 {
-    if loops.is_empty() {
+    if loops.loops.is_empty() {
         bail!("放样截面没有闭合环");
     }
-    let cap_tris = cap_triangles_ccw(loops)?;
-    let cap_pts = flat_points(loops);
+    let cap_tris = cap_triangles_ccw(&loops.loops)?;
+    let cap_pts = flat_points(&loops.loops);
 
     let mut vertices: Vec<Vec3> = Vec::new();
     let mut normals: Vec<Vec3> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
-    // 侧面：每条边独立顶点，棱边法线不被平均
-    for ring in loops {
-        for i in 0..ring.len() {
-            let j = (i + 1) % ring.len();
-            let quad = [
-                place(ring[i], false),
-                place(ring[j], false),
-                place(ring[j], true),
-                place(ring[i], true),
-            ];
-            push_quad(&mut vertices, &mut normals, &mut indices, quad);
-        }
+    // 侧面：顶点逐四边形独立，法向在软边处跨格平均、硬边处不跨
+    for (k, ring) in loops.loops.iter().enumerate() {
+        let stations = [
+            ring.iter().map(|p| place(*p, false)).collect::<Vec<Vec3>>(),
+            ring.iter().map(|p| place(*p, true)).collect::<Vec<Vec3>>(),
+        ];
+        push_side_grid(
+            &mut vertices,
+            &mut normals,
+            &mut indices,
+            &stations,
+            loops.hard_of(k).unwrap_or(&[]),
+            false,
+        );
     }
 
     // 端盖：底面用反向绕、顶面用正向绕，二者与侧面互相自洽
@@ -467,23 +528,109 @@ where
     finish(vertices, normals, indices)
 }
 
-/// 一块侧面四边形（`quad` 依次是底 i、底 j、顶 j、顶 i），退化的直接丢掉。
-fn push_quad(
+/// 侧壁网格：逐格出四边形，**法向按硬边分组平均**。
+///
+/// `stations[t][i]` 是第 `t` 站、环上第 `i` 点的位置，各站点数相同；`hard[i]` 为真
+/// 表示环上第 `i` 点是硬边（出处见 [`ProfileLoops`]）；`closed_sweep` 为真时首尾两站
+/// 相接（整圈回转）。
+///
+/// 分组规则照 libgm：**沿环方向**只在软点上跨格平均，**沿扫掠方向**永远平均——
+/// 回转面沿扫掠是同一张连续曲面，它上面没有硬边，硬边全是沿扫掠方向跑的那些棱。
+/// 端盖与侧壁的接缝也永远是硬的，这一条靠端盖自带顶点天然成立。
+///
+/// 顶点仍逐四边形独立（不共享索引），改的只有着色：水密性、绕向、体积一位不动。
+/// 权重取叉积模长（正比于两倍三角面积），与 `manifold_csg` 那边的面积加权同口径。
+fn push_side_grid(
     vertices: &mut Vec<Vec3>,
     normals: &mut Vec<Vec3>,
     indices: &mut Vec<u32>,
-    quad: [Vec3; 4],
+    stations: &[Vec<Vec3>],
+    hard: &[bool],
+    closed_sweep: bool,
 ) {
-    let n = (quad[1] - quad[0]).cross(quad[2] - quad[0]);
-    let len = n.length();
-    if len <= f32::EPSILON {
+    let station_count = stations.len();
+    let rows = if closed_sweep {
+        station_count
+    } else {
+        station_count.saturating_sub(1)
+    };
+    let n = stations.first().map_or(0, Vec::len);
+    if rows == 0 || n < 3 {
         return;
     }
-    let n = n / len;
-    let base = vertices.len() as u32;
-    vertices.extend_from_slice(&quad);
-    normals.extend_from_slice(&[n, n, n, n]);
-    indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+    let quad_at = |r: usize, e: usize| -> [Vec3; 4] {
+        let (a, b) = (r, (r + 1) % station_count);
+        let e1 = (e + 1) % n;
+        [
+            stations[a][e],
+            stations[a][e1],
+            stations[b][e1],
+            stations[b][e],
+        ]
+    };
+    let faces: Vec<Vec<Option<(Vec3, f32)>>> = (0..rows)
+        .map(|r| {
+            (0..n)
+                .map(|e| {
+                    let q = quad_at(r, e);
+                    let cross = (q[1] - q[0]).cross(q[2] - q[0]);
+                    let len = cross.length();
+                    (len > f32::EPSILON).then(|| (cross / len, len))
+                })
+                .collect()
+        })
+        .collect();
+
+    // 标记缺失时按「硬」处理：那是最保守的着色（逐片平直），抹不掉真实的折痕。
+    let is_hard = |i: usize| hard.get(i).copied().unwrap_or(true);
+    let row_before = |r: usize| -> Option<usize> {
+        if closed_sweep {
+            Some((r + rows - 1) % rows)
+        } else {
+            r.checked_sub(1)
+        }
+    };
+    let row_after = |r: usize| -> Option<usize> {
+        if closed_sweep {
+            Some((r + 1) % rows)
+        } else {
+            (r + 1 < rows).then_some(r + 1)
+        }
+    };
+
+    for r in 0..rows {
+        for e in 0..n {
+            let Some((face, _)) = faces[r][e] else {
+                continue;
+            };
+            let (e_prev, e_next) = ((e + n - 1) % n, (e + 1) % n);
+            let blend = |rs: [Option<usize>; 2], es: &[usize]| -> Vec3 {
+                let mut sum = Vec3::ZERO;
+                for rr in rs.into_iter().flatten() {
+                    for &ee in es {
+                        if let Some((normal, weight)) = faces[rr][ee] {
+                            sum += normal * weight;
+                        }
+                    }
+                }
+                sum.try_normalize().unwrap_or(face)
+            };
+            let lower = [Some(r), row_before(r)];
+            let upper = [Some(r), row_after(r)];
+            let at_e: &[usize] = if is_hard(e) { &[e] } else { &[e_prev, e] };
+            let at_e1: &[usize] = if is_hard(e_next) { &[e] } else { &[e, e_next] };
+
+            let base = vertices.len() as u32;
+            vertices.extend_from_slice(&quad_at(r, e));
+            normals.extend_from_slice(&[
+                blend(lower, at_e),
+                blend(lower, at_e1),
+                blend(upper, at_e1),
+                blend(upper, at_e),
+            ]);
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+    }
 }
 
 /// 一片端盖。`tris` 是截面 2D 系里的逆时针三角，`forward` 为假时反绕（朝扫掠反方向）。
@@ -558,12 +705,12 @@ fn finish(
 /// 绕全局 Z 轴回转 `angle_rad`。`placement` 先把 2D 截面摆进 3D（通常摆到含 Z 轴的平面上，
 /// 并沿 X 平移脊线半径），对齐 `gm_CreateRevolution` 与 OCC 的 `face.revolve(原点, Z, 角)`。
 pub fn revolve_loops(
-    loops: &[Loop2D],
+    loops: &ProfileLoops,
     placement: DMat4,
     angle_rad: f32,
     segments: u32,
 ) -> anyhow::Result<PlantMesh> {
-    if loops.is_empty() {
+    if loops.loops.is_empty() {
         bail!("回转截面没有闭合环");
     }
     if angle_rad.abs() <= f32::EPSILON {
@@ -571,8 +718,8 @@ pub fn revolve_loops(
     }
     let segments = segments.max(3);
     let is_full = (angle_rad.abs() - std::f32::consts::TAU).abs() < 1e-4;
-    let cap_tris = cap_triangles_ccw(loops)?;
-    let cap_pts = flat_points(loops);
+    let cap_tris = cap_triangles_ccw(&loops.loops)?;
+    let cap_pts = flat_points(&loops.loops);
 
     let place = |p: Vec2| {
         let v = placement * DVec4::new(p.x as f64, p.y as f64, 0.0, 1.0);
@@ -588,29 +735,21 @@ pub fn revolve_loops(
     let mut normals: Vec<Vec3> = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
-    for ring in loops {
+    for (k, ring) in loops.loops.iter().enumerate() {
         let placed: Vec<Vec3> = ring.iter().map(|p| place(*p)).collect();
-        for step in 0..segments {
-            let next = if is_full && step + 1 == segments {
-                0
-            } else {
-                step + 1
-            };
-            for i in 0..placed.len() {
-                let j = (i + 1) % placed.len();
-                push_quad(
-                    &mut vertices,
-                    &mut normals,
-                    &mut indices,
-                    [
-                        spin(placed[i], step),
-                        spin(placed[j], step),
-                        spin(placed[j], next),
-                        spin(placed[i], next),
-                    ],
-                );
-            }
-        }
+        // 整圈时最后一站就是第 0 站，不另建；开口时多建一站收尾。
+        let station_count = if is_full { segments } else { segments + 1 };
+        let stations: Vec<Vec<Vec3>> = (0..station_count)
+            .map(|s| placed.iter().map(|p| spin(*p, s)).collect())
+            .collect();
+        push_side_grid(
+            &mut vertices,
+            &mut normals,
+            &mut indices,
+            &stations,
+            loops.hard_of(k).unwrap_or(&[]),
+            is_full,
+        );
     }
 
     if !is_full {
@@ -718,8 +857,7 @@ pub fn sweep_solid_mesh(sweep: &SweepSolid) -> anyhow::Result<PlantMesh> {
         SolidSegmentKind::Extrusion => profile_loops(&sweep.profile, chord_tol),
         SolidSegmentKind::Revolution => profile_loops_revolved(&sweep.profile, chord_tol),
         SolidSegmentKind::RuledSolid => profile_loops_ruled(&sweep.profile, chord_tol),
-    }?
-    .loops;
+    }?;
     let mat = placement(sweep);
     let place = |p: Vec2, extra: DMat4| {
         let v = extra * mat * DVec4::new(p.x as f64, p.y as f64, 0.0, 1.0);
@@ -764,6 +902,7 @@ pub fn sweep_solid_mesh(sweep: &SweepSolid) -> anyhow::Result<PlantMesh> {
                 arc.angle
             };
             let radius = loops
+                .loops
                 .iter()
                 .flatten()
                 .map(|p| {
@@ -1078,6 +1217,97 @@ mod tests {
         }
     }
 
+    /// 硬边是轮廓的角，不是弧上的插值点（specs/028）。
+    ///
+    /// 环形扇区四个角（两条径向直边与两段弧的交界）都不切线连续，弧内部一个都不是。
+    #[test]
+    fn the_hard_edges_are_the_profile_corners_not_the_arc_interior() {
+        let loops = profile_loops(&ann_profile(200.0, 20.0, 90.0), 0.05).expect("sann sector");
+        let hard = &loops.hard[0];
+        assert_eq!(hard.len(), loops.loops[0].len(), "硬边标记必须逐点对齐");
+        let corners = hard.iter().filter(|h| **h).count();
+        assert_eq!(corners, 4, "环形扇区正好四个角是硬边，实测 {corners}");
+        // 自检：弧上确实铺了一堆插值点，否则「其余都是软的」这句没有信息量。
+        assert!(
+            hard.len() > 40,
+            "这组容差只铺出 {} 个点，样本太稀",
+            hard.len()
+        );
+    }
+
+    /// 弧再粗也还是光顺曲面——这正是夹角阈值猜不出来的那一半（specs/028）。
+    ///
+    /// 容差放大到整圈只剩 8 段，相邻侧壁面片之间夹角 45°：按「10° 内才平均」那套
+    /// 猜法，这个圆柱面会被判成八棱柱。E3D 的判据在轮廓上，跟面片有多粗无关。
+    /// 量法是「顶点法向必须就是该顶点自己的径向」——逐片平直会差半个面片角（22.5°）。
+    #[test]
+    fn a_coarse_arc_is_still_one_smooth_surface() {
+        let loops = profile_loops(&ann_profile(200.0, 20.0, 360.0), 400.0).expect("coarse annulus");
+        assert_eq!(loops.loops[0].len(), 8, "这组容差应该只铺出八边形");
+        assert!(
+            loops.hard.iter().flatten().all(|h| !*h),
+            "整圆上一个硬边都不该有"
+        );
+
+        let mesh = extrude_loops(&loops, 40.0).expect("coarse annulus extrusion");
+        let mut worst = 0.0f32;
+        for (v, n) in mesh.vertices.iter().zip(&mesh.normals) {
+            if n.z.abs() > 0.5 {
+                continue; // 端盖
+            }
+            let radial = Vec2::new(v.x, v.y).normalize();
+            let planar = Vec2::new(n.x, n.y).normalize();
+            worst = worst.max(1.0 - radial.dot(planar).abs());
+        }
+        assert!(
+            worst < 1e-3,
+            "侧壁法向偏离顶点径向 {worst}（逐片平直会差 1−cos22.5° ≈ 0.076）"
+        );
+    }
+
+    /// 再浅的折角也是折角（specs/028）。
+    ///
+    /// 直边多边形没有一处切线连续，所以每个顶点都是硬边——包括这个只拐 5.7° 的角，
+    /// 而 `manifold_csg` 那套 10° 阈值会把它抹平成光顺过渡。
+    #[test]
+    fn a_shallow_corner_is_still_a_hard_edge() {
+        let profile = CateProfileParam::SPRO(SProfileData {
+            verts: vec![
+                Vec2::new(0.0, 0.0),
+                Vec2::new(100.0, 0.0),
+                Vec2::new(200.0, 10.0),
+                Vec2::new(200.0, 80.0),
+                Vec2::new(0.0, 80.0),
+            ],
+            frads: vec![0.0; 5],
+            ..Default::default()
+        });
+        let loops = profile_loops(&profile, 1.0).expect("shallow profile");
+        assert!(
+            loops.hard[0].iter().all(|h| *h),
+            "直边多边形的每个顶点都是硬边：{:?}",
+            loops.hard[0]
+        );
+
+        // 自检：那个角确实浅到会被 10° 阈值放过。
+        let ring = &loops.loops[0];
+        let k = ring
+            .iter()
+            .position(|p| p.distance(Vec2::new(100.0, 0.0)) < 1e-3)
+            .expect("浅角顶点还在环上");
+        let (a, b, c) = (
+            ring[(k + ring.len() - 1) % ring.len()],
+            ring[k],
+            ring[(k + 1) % ring.len()],
+        );
+        let turn = (b - a).normalize().angle_to((c - b).normalize()).abs();
+        assert!(
+            turn < 10.0f32.to_radians(),
+            "这个角拐了 {}°，够不上「浅到会被阈值放过」",
+            turn.to_degrees()
+        );
+    }
+
     #[test]
     fn zero_angle_sector_is_hard_fail() {
         let err = profile_loops(&ann_profile(200.0, 20.0, 0.0), 1.0).unwrap_err();
@@ -1110,14 +1340,14 @@ mod tests {
     #[test]
     fn zero_height_extrusion_is_hard_fail() {
         let loops = profile_loops(&rect_profile(100.0, 50.0), 1.0).expect("rect");
-        let err = extrude_loops(&loops.loops, 0.0).unwrap_err();
+        let err = extrude_loops(&loops, 0.0).unwrap_err();
         assert!(err.to_string().contains("不是正数"), "{err}");
     }
 
     #[test]
     fn rectangle_extrusion_is_a_box() {
         let loops = profile_loops(&rect_profile(100.0, 50.0), 1.0).expect("rect");
-        let mesh = extrude_loops(&loops.loops, 200.0).expect("rect extrusion");
+        let mesh = extrude_loops(&loops, 200.0).expect("rect extrusion");
         assert_solid_mesh(&mesh, "rect extrusion");
         assert_bounds(
             &mesh,
@@ -1132,7 +1362,7 @@ mod tests {
     fn concave_profile_extrusion_keeps_the_notch() {
         // 端盖若按扇形三角化，L 形的凹口会被填掉，体积正好多出缺角那块
         let loops = profile_loops(&l_profile(100.0, 60.0, 10.0), 1.0).expect("L profile");
-        let mesh = extrude_loops(&loops.loops, 30.0).expect("L extrusion");
+        let mesh = extrude_loops(&loops, 30.0).expect("L extrusion");
         assert_solid_mesh(&mesh, "L extrusion");
         assert_bounds(
             &mesh,
@@ -1147,7 +1377,7 @@ mod tests {
     fn annular_sector_extrusion_matches_analytic_volume() {
         let (r, w, deg, h) = (200.0f32, 20.0f32, 90.0f32, 40.0f32);
         let loops = profile_loops(&ann_profile(r, w, deg), 0.05).expect("sann sector");
-        let mesh = extrude_loops(&loops.loops, h).expect("sector extrusion");
+        let mesh = extrude_loops(&loops, h).expect("sector extrusion");
         assert_solid_mesh(&mesh, "sector extrusion");
         let exact = deg.to_radians() / 2.0 * (r * r - (r - w) * (r - w)) * h;
         assert_volume(&mesh, exact, 0.01, "sector extrusion");
@@ -1158,7 +1388,7 @@ mod tests {
         // 带孔端盖 + 内外两层侧壁：拓扑是环面（欧拉数 0），闭合判定不能假设亏格为 0
         let (r, w, h) = (200.0f32, 20.0f32, 40.0f32);
         let loops = profile_loops(&ann_profile(r, w, 360.0), 0.05).expect("sann full");
-        let mesh = extrude_loops(&loops.loops, h).expect("annulus extrusion");
+        let mesh = extrude_loops(&loops, h).expect("annulus extrusion");
         assert_solid_mesh(&mesh, "annulus extrusion");
         assert_bounds(
             &mesh,
@@ -1186,7 +1416,7 @@ mod tests {
         let (w, h, r) = (40.0f32, 60.0f32, 500.0f32);
         let loops = profile_loops(&rect_profile(w, h), 1.0).expect("rect");
         let angle = std::f32::consts::FRAC_PI_2;
-        let mesh = revolve_loops(&loops.loops, spine_placement(r as f64), angle, 64)
+        let mesh = revolve_loops(&loops, spine_placement(r as f64), angle, 64)
             .expect("quarter revolution");
         assert_solid_mesh(&mesh, "quarter revolution");
         assert_volume(&mesh, angle * r * w * h, 0.01, "quarter revolution");
@@ -1199,7 +1429,7 @@ mod tests {
         let (w, center_r) = (rout - rins, (rout + rins) / 2.0);
         let loops = profile_loops(&rect_profile(w, height), 0.5).expect("rect");
         let mesh = revolve_loops(
-            &loops.loops,
+            &loops,
             spine_placement(center_r as f64),
             std::f32::consts::TAU,
             64,
@@ -1221,7 +1451,7 @@ mod tests {
         // lmirror 会把摆放变换的手性翻过来，侧面与端盖的相对绕向不变但整体朝里
         let loops = profile_loops(&rect_profile(100.0, 50.0), 1.0).expect("rect");
         let mirrored = DMat4::from_scale(glam::DVec3::new(-1.0, 1.0, 1.0));
-        let mesh = loft_loops(&loops.loops, |p, top| {
+        let mesh = loft_loops(&loops, |p, top| {
             let v = mirrored * glam::DVec4::new(p.x as f64, p.y as f64, 0.0, 1.0);
             Vec3::new(v.x as f32, v.y as f32, if top { 200.0 } else { 0.0 })
         })
@@ -1233,7 +1463,7 @@ mod tests {
     #[test]
     fn zero_angle_revolution_is_hard_fail() {
         let loops = profile_loops(&rect_profile(40.0, 60.0), 1.0).expect("rect");
-        let err = revolve_loops(&loops.loops, spine_placement(500.0), 0.0, 32).unwrap_err();
+        let err = revolve_loops(&loops, spine_placement(500.0), 0.0, 32).unwrap_err();
         assert!(err.to_string().contains("回转角为 0"), "{err}");
     }
 
@@ -1322,16 +1552,12 @@ mod tests {
         // FR-006：整环不得靠单次 360° 换拓扑，必须与两半合并的结果对得上
         let (r, w, h) = (200.0f32, 20.0f32, 40.0f32);
         let whole = extrude_loops(
-            &profile_loops(&ann_profile(r, w, 360.0), 0.05)
-                .expect("full")
-                .loops,
+            &profile_loops(&ann_profile(r, w, 360.0), 0.05).expect("full"),
             h,
         )
         .expect("full annulus");
         let half = extrude_loops(
-            &profile_loops(&ann_profile(r, w, 180.0), 0.05)
-                .expect("half")
-                .loops,
+            &profile_loops(&ann_profile(r, w, 180.0), 0.05).expect("half"),
             h,
         )
         .expect("half annulus");

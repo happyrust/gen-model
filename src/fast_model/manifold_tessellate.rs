@@ -102,7 +102,13 @@ pub fn tessellate_extrusion(
 }
 
 /// 已离散好的二维环 → 沿 +Z 挤出。绕向按外环有向面积统一翻正，空截面 / 空网格
-/// hard fail。直线挤出与弧形墙截面（`CurveType::Spline`）共用这一个尾段。
+/// hard fail。
+///
+/// 走 `CrossSection` 的 NonZero 填充是**为了化解自交轮廓**：两个大倒角在同一条边上
+/// 撞车时 E3D 照铺（`mthArcFillet` 不裁），earcut 不认这种环。代价是法向由
+/// `manifold_to_plant_mesh` 的 10° 夹角阈值决定，还没接上 ADR-047 的轮廓硬边——
+/// 弧形墙那一支因为环是解析出来的、不可能自交，已经改走 `sweep_mesh`；这一支等
+/// specs/028 的 Phase 2（硬边过 manifold 的属性通道）。
 fn extrude_flat_polygons(
     mut polygons: Vec<Vec<[f64; 2]>>,
     height: f32,
@@ -210,43 +216,28 @@ fn tessellate_arc_wall(
     // 与 `gen_occ_spline_wire` 同一套点位：p0/p1 内圈、p2/p3 外圈，直段连两头。
     let radial = |p: glam::Vec3| (glam::DVec2::new(p.x as f64, p.y as f64) - centre).normalize();
     let (v0, v1) = (radial(pt0), radial(pt1));
-    let at_radius = |v: glam::DVec2, r: f64| [centre.x + v.x * r, centre.y + v.y * r];
-    let spans = [
-        (at_radius(v0, radius - half_thick), bulge),
-        (at_radius(v1, radius - half_thick), 0.0),
-        (at_radius(v1, radius + half_thick), -bulge),
-        (at_radius(v0, radius + half_thick), 0.0),
+    let at_radius = |v: glam::DVec2, r: f64| libgm_discretise::ProfileSpan {
+        point: [centre.x + v.x * r, centre.y + v.y * r],
+        bulge: 0.0,
+    };
+    let with_bulge = |mut span: libgm_discretise::ProfileSpan, bulge: f64| {
+        span.bulge = bulge;
+        span
+    };
+    let ring = vec![
+        with_bulge(at_radius(v0, radius - half_thick), bulge),
+        at_radius(v1, radius - half_thick),
+        with_bulge(at_radius(v1, radius + half_thick), -bulge),
+        at_radius(v0, radius + half_thick),
     ];
 
-    if !libgm_discretise::chord_tol_is_usable(chord_tol) {
-        anyhow::bail!("弧墙拿到的弦高容差 {chord_tol} 不可用");
-    }
-    let tol = chord_tol;
-    let mut ring: Vec<[f64; 2]> = Vec::new();
-    for (i, (point, bulge)) in spans.iter().enumerate() {
-        let next = spans[(i + 1) % spans.len()].0;
-        for p in libgm_discretise::span_polyline_by_tol(*point, next, *bulge, tol) {
-            if ring
-                .last()
-                .is_some_and(|last: &[f64; 2]| (last[0] - p[0]).hypot(last[1] - p[1]) < POS_EPS)
-            {
-                continue;
-            }
-            ring.push(p);
-        }
-    }
-    while ring.len() >= 2 {
-        let (first, last) = (ring[0], ring[ring.len() - 1]);
-        if (first[0] - last[0]).hypot(first[1] - last[1]) < POS_EPS {
-            ring.pop();
-        } else {
-            break;
-        }
-    }
-    if ring.len() < 3 {
-        anyhow::bail!("arc-wall ring collapsed to {} points", ring.len());
-    }
-    extrude_flat_polygons(vec![ring], height, "arc-wall")
+    // 弧墙的环是解析出来的，不可能自交（`thick` 吃穿半径上面已经硬失败），所以走
+    // `sweep_mesh` 自建网格那一支而不是 `Manifold::extrude`：那一支带**硬边法向分组**
+    // （ADR-047 / specs/028），弧上光顺、四个角保留折痕。一般挤出（PLOO 带倒角）留在
+    // manifold 那边，因为它要靠 `CrossSection` 的 NonZero 填充化解自交轮廓——
+    // 两个大倒角在同一条边上撞车时 E3D 照铺，earcut 不认。见 specs/028 的 T06。
+    let loops = crate::fast_model::sweep_mesh::loops_from_spans(vec![ring], chord_tol)?;
+    crate::fast_model::sweep_mesh::extrude_loops(&loops, height)
 }
 
 /// 单条轮廓环：倒角 z → 圆弧 → 逐 span 走 libgm 的角度格子，去掉重复点与收尾闭合点。
@@ -1319,6 +1310,55 @@ mod tests {
             Vec3::new(outer, outer, height),
             1.0,
             "arc wall",
+        );
+    }
+
+    /// 弧墙的两道弧是光顺曲面，四个角是折痕（ADR-047 / specs/028 T06）。
+    ///
+    /// 这一支此前走 `Manifold::extrude`，法向由 `manifold_to_plant_mesh` 的 10° 夹角
+    /// 阈值决定；现在改走 `sweep_mesh` 的挤出，硬边来自轮廓本身。半圆环有四个轮廓角
+    /// （内外弧各两端）、两个 z 层，**正好八个折痕位置**——多了说明弧上也在断，
+    /// 少了说明角被抹平了。
+    #[test]
+    fn the_arc_wall_is_smooth_along_the_arcs_and_creased_at_the_four_corners() {
+        use std::collections::HashMap;
+
+        let (r, thick, height) = (100.0f32, 20.0f32, 10.0f32);
+        let param = PdmsGeoParam::PrimExtrusion(aios_core::prim_geo::extrusion::Extrusion {
+            verts: vec![vec![
+                Vec3::new(r, 0.0, 0.0),
+                Vec3::new(0.0, r, 0.0),
+                Vec3::new(-r, 0.0, 0.0),
+            ]],
+            height,
+            cur_type: CurveType::Spline(thick),
+        });
+        let mesh = tessellate_libgm_param(&param)
+            .expect("弧形墙截面必须能生成")
+            .expect("弧形墙是形状，不是非形状判定");
+
+        let key = |p: Vec3| [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+        let mut side = HashMap::<[u32; 3], Vec<Vec3>>::new();
+        for (&p, &n) in mesh.vertices.iter().zip(&mesh.normals) {
+            if n.z.abs() < 0.5 {
+                side.entry(key(p)).or_default().push(n);
+            }
+        }
+        let shared: Vec<&Vec<Vec3>> = side.values().filter(|ns| ns.len() >= 2).collect();
+        let creased = shared
+            .iter()
+            .filter(|ns| ns[1..].iter().any(|n| !n.abs_diff_eq(ns[0], 1e-4)))
+            .count();
+        assert!(
+            shared.len() > 40,
+            "只有 {} 个相邻侧壁位置，样本太稀，说明弧根本没铺开",
+            shared.len()
+        );
+        assert_eq!(
+            creased,
+            8,
+            "折痕位置应当正好是四个轮廓角 × 两个 z 层，实测 {creased} / {}",
+            shared.len()
         );
     }
 
