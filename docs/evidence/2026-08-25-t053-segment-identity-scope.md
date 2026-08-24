@@ -116,9 +116,11 @@ SELECT * FROM geo_relate WHERE in = type::thing('inst_info','24381_40090_63');
 同类还有 `24381_40056`（41,800）、`24381_34395` / `24381_39915` / `24381_39081`
 （34,800）、`24381_38148` / `24381_38285`（33,000）、`24381_39598`（10,200）、
 `24381_46420` / `24381_180893`（8,000）、`24381_39597`（5,540），全是负体，
-所以 `insts_flat` 上柱的直径只到 5,316。碟同理：492 段那件（48.9 m 封头）
-在 Pos 口径下也在（`insts_flat` 的碟上限 156 是它自己那份不完整快照的事，见 §三），
-但差别整体来自负体。
+所以 `insts_flat` 上柱的直径只到 5,316。
+
+> 上表的三列**都是按 `geo_relate` 的 `geo_type` 拆出来的**，一个数都不来自
+> `insts_flat` 的实际内容——这很要紧，因为这份快照的 `insts_flat` 还没回填完
+> （§三：清扫 40 行未跑、migration 6,599 行未跑）。直接读它算出来的数会偏小。
 
 **排期口径：按「全部吃 `.mesh` 的」记，即 392 → 474。**
 
@@ -147,12 +149,29 @@ SELECT * FROM geo_relate WHERE in = type::thing('inst_info','24381_40090_63');
 `GENSEC` / `FIXING`），其中三行还带着 `booled_id`（如 `inst_relate:24381_100679`
 → `24381_100679_65`），按修复段本该是 `[{ geo_hash: booled_id }]`。
 
-**这条只报不判**：静态副本看不出「清扫在这份快照之后有没有跑过」，
-所以分不清是缺陷还是没跑。已开
-**`issues/ISSUE-021-insts-flat-visible-none-residue.md`**（含可直接粘的复现步骤与
-三条定性追问），归 ADR-041 / **ADR-043（`insts_flat` 失效协议）** 与
-`specs/025-insts-flat-invalidation/` 那条线（另一会话在推），不在 009 范围内。
+**当日已定性：也不是缺陷——这份快照压根没跑过清扫。**
+`queue_control` 整张表只有 `main`（`paused = true`，2026-08-09）与 `watermark_seed`
+（2026-08-04），**没有 `booled_flat_repair_migration` 标记**；把清扫段的 SQL 原样
+重放到一次性副本上，40 行**一个批次归零**。所以既不是「标记落早」也不是「清扫有漏」，
+是一份冻结基线。
+
+同一趟顺手量出：RM13 修复 migration 在这库上**有 6,599 行在等**
+（`booled_id` 有值而 `insts_flat` 首元素对不上），原样重放 **14 批 6,595 行收敛到 0**。
+库 A 是一份**前 migration 的基线**——这也解释了为什么本文件上一版拿
+`insts_flat` 算出来的那些数（碟绕轴上限 156 之类）偏小：它读的是一份还没回填完的缓存。
+**§二 的结论不受影响**，那张表是按 `geo_relate` 的 `geo_type` 拆的，没有一个数来自
+`insts_flat`。
+
+全部查询与重放步骤在
+**`issues/ISSUE-021-insts-flat-visible-none-residue.md`**（已按「非缺陷」关闭）。
+归 ADR-041 / **ADR-043（`insts_flat` 失效协议）** 与
+`specs/025-insts-flat-invalidation/` 那条线，不在 009 范围内。
 本文件只用它说明一件事：**009 的爆炸半径不依赖 `insts_flat`，按 `geo_relate` 记。**
+
+> **对 D3 的一句提醒**：D3 选了库 A 当 RVM 主基准。RVM 对拍走
+> `tessellate_libgm_param`、不读 `insts_flat`，所以那 6,599 行不影响 RVM；
+> 但**若拿这库起服务给人看**，读侧会端出 RM13 那种带原语缩放的错误正体，
+> 直到启动序列的清扫跑完为止。
 
 ## 三、对 T041 / D1 的影响
 

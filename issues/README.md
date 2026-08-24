@@ -109,7 +109,7 @@ ISSUE-{编号}-{简短描述}.md
 | ID | 标题 | 类型 | 优先级 | 状态 | 创建日期 |
 |----|------|------|--------|------|----------|
 | #001 | BRAN的TUBI对应的aabb和world_trans没有保存成功 | 🐛 Bug | 🟠 High | ✅ Fixed | 2025-01-01 |
-| #021 | `insts_flat = NONE` 的读者可见残留（库 A 快照 40 行） | 🐛 Bug | 🟡 Medium | 📝 Open | 2026-08-25 |
+| #021 | `insts_flat = NONE` 的读者可见残留（库 A 快照 40 行） | 🐛 Bug | 🟡 Medium | ❌ Closed（非缺陷） | 2026-08-25 |
 
 > 上表长期没跟上：`issues/` 下另有 `ISSUE-019-cross-session-parent-child-delete.md`
 > 与 `ISSUE-020-db8000-model-increment-ci-suite.md`，它们的状态本文件没有维护过，

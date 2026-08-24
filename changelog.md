@@ -23,10 +23,15 @@
   与「`booled_id` 有效却仍为空」两个缺陷桶都是 0。真残留在另一头——
   `insts_flat = NONE` 的 1,479 行里 **40 行对读者可见**，正是清扫段 `WHERE` 圈的、
   也是 `pdms_inst` live 断言禁止残留的那一类（三行还带 `booled_id`）。
-  静态副本判不出是缺陷还是清扫没跑，**只报不判**——开
-  `issues/ISSUE-021-insts-flat-visible-none-residue.md` 交给 ADR-041 / ADR-043 +
-  `specs/025-insts-flat-invalidation/` 那条线，含可直接粘的复现步骤与三条定性追问
-  （跑一次清扫会不会归零 / 迁移标记是不是落早了 / 是不是卡在进程级脏位那个缝里）。
+  开 `issues/ISSUE-021-insts-flat-visible-none-residue.md` 记录，**当日查完判为非缺陷**：
+  `queue_control` 上根本没有 `booled_flat_repair_migration` 标记（只有 `main`
+  `paused = true` 与 `watermark_seed`），把清扫段 SQL 原样重放到一次性副本上
+  40 行**一批归零**——既不是「标记落早」也不是「清扫有漏」，是一份冻结基线。
+  同趟量出 RM13 修复 migration 在这库上有 **6,599 行在等**，原样重放 14 批 6,595 行
+  收敛到 0。库 A 是**前 migration 的基线**：RVM 对拍走 `tessellate_libgm_param`
+  不读 `insts_flat`，不受影响；但拿它起服务给人看，读侧会端出 RM13 那种错误正体，
+  直到启动序列跑完。ADR-043 决策 5 在回填侧的脏位缝仍是真问题，但**不是这 40 行的
+  成因**，留在 specs/025。
 
 ## 2026-08-24
 
