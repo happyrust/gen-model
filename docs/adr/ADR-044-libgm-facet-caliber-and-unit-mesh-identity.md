@@ -18,7 +18,7 @@ manifold-csg）；ADR-002（几何权威在 core3d / 已解析参数）。
 |---|---|---|
 | `PrimLCylinder` / 无切角 `PrimSCylinder` | `tessellate_unit_cylinder(32)` | `circle(radius, tol)` |
 | 切角 `PrimSCylinder`（SSCL） | `gen_slope_ended_cylinder(…, 32)` | `circle(radius, tol)` |
-| `PrimSphere` | `unit_sphere()` = `gen_sphere(0.5, 16, 36)` | `circle(radius, tol)` |
+| `PrimSphere` | `unit_sphere()` = `gen_sphere(0.5, 16, 36)` | `circle(radius, tol)`；经向恒 n/2（见 2026-08-24 修订） |
 | `PrimLSnout` | `gen_snout(…, 32)` | `circle(fmax(rBtm, rTop), tol)` |
 | `PrimDish` | `gen_*_dish(…, 32)` | 球碟 / 椭圆碟各一套，两段分算 |
 | `PrimCTorus` | `gen_circular_torus(…, 32, 16)` | 扫掠 `partRev(rOut, …)` 非整圈 **+1**；管截面 `circle((rOut−rIns)/2, …)` |
@@ -67,6 +67,22 @@ R=100 配 0.5mm 容差这一个尺寸上对**。活库里的柱子从 DN15 到�
 6. **迁移是一次整库重建，不是就地改写。** 身份键变化意味着旧 `geo_hash` 全部作废；
    按首次导入重解析（与 ADR-021 的文件回退同一条路），不得让新旧两套 `geo_hash` 在库里
    共存——共存就没人说得清某一行的段数是按哪套算的。
+
+### 2026-08-24 修订（`GM_Sphere::calcFacetsWithoutSurfaces` `0x100A20F0` 反编译）
+
+球的两个方向此前只钉了绕轴那一半，经向是猜的。现在两半都有权威：
+
+- 绕轴 `n = circle(自身半径@this+5, tol@this+3)`；`n > 1000` 打
+  `GM_Sphere - facet tolerance too small for radius, adjusted` 后**硬截 1000**
+  （曲面原语那条路，非轮廓路的整体重标定）。
+- 经向带数**恒 = `n/2`**：`GM_Facets` 构造实参 `(n²/2, n(n−1), n·(n/2−1)+2)`，
+  两极各一个顶点、中间 `n/2 − 1` 圈——经向沿用绕轴同一个角步长，与球碟同构。
+
+对决策 2 的收紧：**球的身份键只需混入一个 n**，stacks 不是独立自由度。顺带把
+「现状 16×36」钉死为错：R=100 / tol=0.5 的「幸运尺寸」下 E3D 是 32 slices ×
+16 stacks——stacks 恰好对，**36 这个 slices 从来没对过**。两个盘点库都没有球实例
+（T045a），改键前唯一的保证就是这条规则本身，所以它必须来自反编译而不是推断。
+证据 `docs/evidence/2026-08-24-ida-occ-retire-audit.md`。
 
 ## 后果
 
