@@ -104,11 +104,11 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "f3537dae21f64feb3880e5340320ee1db3bd9176" }
-aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "29c91f48ce230814a26466d2150d51385417fab8", default-features = false }
+parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "313ba91b7eac4a5254d36759cf28d8bf5ba0894a" }
+aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "f9f1bf0fbaea710ce4393958266bded6f4597da0", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "b11469480e9198de13be59040580f6b7da07b3c7" }
+pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "d2d9744ba9d27255b494a2addbbe7969fef8fa56" }
 
 clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }
@@ -130,6 +130,9 @@ earcutr = "0.4.3"
 manifold-csg = { git = "https://github.com/zmerlynn/manifold-csg", rev = "2233c5a1162eba981e3f43efcd39a6bc25581335", optional = true }
 serde_with = { version = "3.9.0", features = ["macros"] }
 rayon = "1.10.0"
+# 几何并发闸默认额度 = 物理核数（specs/023 / ADR-041 第 3 条）；
+# std::thread::available_parallelism 给的是逻辑核数，物理核数只有它能拿到。
+num_cpus = "1.16"
 indexmap = "2.2.6"
 urlencoding = "2.1.3"
 notify = "8.0.0"
@@ -180,9 +183,9 @@ rmcp = { version = "=3.1.1", features = ["server", "transport-io"] }
 #
 # 前提：下面三个 vendor 目录必须存在，且停在与上面 rev 对应的提交上。
 #
-#   ../vendor/old-aios-core      codex/room-panel-wire-repair = 29c91f48
-#   ../vendor/old-parse-pdms-db  codex/room-panel-wire-repair-deps = f3537dae
-#   ../vendor/old-pdms-io        codex/mdb-projid-array-20260821 = b1146948
+#   ../vendor/old-aios-core      codex/libgm-snout-caliber = f9f1bf0f
+#   ../vendor/old-parse-pdms-db  codex/room-panel-wire-repair-deps = 313ba91b
+#   ../vendor/old-pdms-io        codex/room-panel-wire-repair-deps = d2d9744b
 #
 # 同名克隆有好几份，别接错。plant-code/rs-core 在 codex/fix-refno-enum-cata-hash
 # 上（rkyv 0.8 那条线），engine-v2 在 plant-code/pdms-io，两者都不是这里要的。
