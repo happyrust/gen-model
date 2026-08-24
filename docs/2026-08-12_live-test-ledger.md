@@ -122,8 +122,10 @@ cargo test --lib --no-default-features --features ws,gen_model,manifold,project_
 
 **2026-08-24 AMS 1112 GWALL 无 OCC 重生成复验**：新增
 `live_8009_regenerate_extreme_fillet_gwall_and_boolean`，对 `105828/105880/116569`
-及其全部 NXTR 强制重铺，并以 `GeometryFailurePolicy::Required` 执行目录/设计两层
-Manifold 布尔，**1/1 通过**。随后 `mesh_gwall_extra_against_cwall_union` **1/1 通过**：
+以及日志中已标 `bad_bool` 的 `105691/116713` 和全部 NXTR 强制重铺，并以
+`GeometryFailurePolicy::Required` 执行目录/设计两层 Manifold 布尔，**1/1 通过**；
+五行最终均为 `booled=true, bad_bool=false`。随后
+`mesh_gwall_extra_against_cwall_union` **1/1 通过**：
 NXTR=`4/5/8`，gen→GWALL p95=`0.1/9.3/167.5mm`；
 `mesh_gwall_union_surface_distance` **1/1 通过**，20/20 两侧齐全，gen→RVM
 mean/p95=`3.86/8.06mm`，盒状硬门未放宽。证据：

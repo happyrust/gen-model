@@ -2039,15 +2039,18 @@ mod live_cwall_rr001_aabb_tests {
     }
 
     /// AMS 1112 三堵大体量 GWALL 带 4–8 个 NXTR；其中 `17496/105880` 的三个大
-    /// FRADIUS 叶片互相穿越。强制重铺后立即用 Required 口径执行两层布尔，钉住
-    /// “落盘正/负实体均可被 Manifold 读回且坏件可由定向重生成复活”。
+    /// FRADIUS 叶片互相穿越。另带两堵日志中已有 `bad_bool` 的 GWALL。强制重铺后
+    /// 立即用 Required 口径执行两层布尔，钉住“落盘正/负实体均可被 Manifold 读回
+    /// 且坏件可由定向重生成复活”。
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "live 8009: 强制重铺极端圆角 GWALL 并验证目录 Manifold 布尔"]
     async fn live_8009_regenerate_extreme_fillet_gwall_and_boolean() {
         aios_core::init_surreal().await.expect("connect 8009");
         let refnos = [
+            RefnoEnum::from("17496/105691"),
             RefnoEnum::from("17496/105828"),
             RefnoEnum::from("17496/105880"),
+            RefnoEnum::from("17496/116713"),
             RefnoEnum::from("17496/116569"),
         ];
         let mesh_dir = aios_core::get_db_option().get_meshes_path();

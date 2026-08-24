@@ -5,7 +5,8 @@
 - 数据库：AMS 1112（本机 8009，`DB_OPTION_FILE=DbOption`）。
 - RVM：`test_data/rvm/1RS-WF03-W-C-RR001.rvm`
   - SHA-256 `70aad6f8644a68c1951fbab7ee9611ebb42035decc30d6832bb5d1e077b98fc0`
-- 现场目标：`17496/105828`、`17496/105880`、`17496/116569`。
+- 现场目标：RVM 三件 `17496/105828`、`17496/105880`、`17496/116569`；另含
+  生成日志里已进入 `bad_bool` 的 `17496/105691`、`17496/116713`。
 - 基线源码：`935074ba`，本记录对应其后的未发布候选差异。
 
 ## 根因与修复
@@ -57,6 +58,10 @@ DB_OPTION_FILE=DbOption cargo +nightly-2026-08-02 test --locked --lib \
 - `17496_105828_716.mesh`: `0788db883cb6691c9ed86107c740de930aee56add3533e97b20dbb0be5429dc6`
 - `17496_105880_716.mesh`: `d2c87e3a8019f0baedebdd2f8f72d809786b053865d7c855db5607cef0a2a9fc`
 - `17496_116569_716.mesh`: `e5cdc05072499c5c0d840f2ffbe7eaf43dfeb65e2ed4f6890a8a006fae170283`
+- `17496_105691_716.mesh`: `aa14d00a9bebf140f4162640a582ccd938b3028bbd66a3756c3fd9a88ab5ef55`
+- `17496_116713_716.mesh`: `96803533a1bad584a15151a51df5b21aba986a962ec7036de99cbd2bf901b3cf`
+
+重算后五行均为 `booled=true, bad_bool=false` 且 `booled_id` 指向上述可读文件。
 
 ### RVM 门
 
@@ -75,4 +80,3 @@ gen->rvm mean=3.86mm p95=8.06mm max=527.87mm
 
 `105828` 的新旧布尔网格额外做了双向 16,000 点表面核对：候选→已知通过资产
 `p95=0.0388mm/max=0.1040mm`，反向 `p95=0.0383mm/max=0.1013mm`。
-
