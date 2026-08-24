@@ -497,14 +497,12 @@ pub async fn gen_inst_meshes(
     replace_exist: bool,
     dir: PathBuf,
 ) -> anyhow::Result<()> {
-    // WP-F T037：形状生成只有 manifold 一台引擎。`occ` 仍可编译，但只服务
-    // 对拍参照与历史断言，不再是这里的回退后端。
+    // WP-F T037 + X1a：形状生成只有 manifold 一台引擎，`occ` 已从本仓摘除。
+    // 没有后端就响亮失败，不许静默跳过。
     #[cfg(not(feature = "manifold"))]
     {
         let _ = (refnos, replace_exist, dir);
-        anyhow::bail!(
-            "gen_inst_meshes: no tessellation backend (enable `manifold`; `occ` no longer builds shapes)"
-        );
+        anyhow::bail!("gen_inst_meshes: no tessellation backend (enable `manifold`)");
     }
     #[cfg(feature = "manifold")]
     {

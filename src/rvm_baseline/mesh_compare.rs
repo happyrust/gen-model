@@ -1334,8 +1334,8 @@ mod mesh_source_tests {
 
     /// T043 的另一半：量尺子不许挂第二台形状引擎。`gen_side` 里加回
     /// `gen_occ_shape` / `gen_occ_mesh`（哪怕挂在 `#[cfg(feature = "occ")]` 下）
-    /// 本测试红——默认 feature 集带 `occ`，那条分支一旦回来，对拍在默认口径下量到的
-    /// 就不是生产路径，而且会把 T037 拆掉的形状回退原样复活。
+    /// 本测试红——那条分支一旦回来，对拍量到的就不是生产路径，而且会把 T037
+    /// 拆掉的形状回退原样复活。当初它正是靠「`occ` 在 default 里」活着的。
     #[test]
     fn gen_side_has_no_second_shape_engine() {
         let source = include_str!("mesh_compare.rs");
