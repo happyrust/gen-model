@@ -6,7 +6,8 @@
 - RVM：`test_data/rvm/1RS-WF03-W-C-RR001.rvm`
   - SHA-256 `70aad6f8644a68c1951fbab7ee9611ebb42035decc30d6832bb5d1e077b98fc0`
 - 现场目标：RVM 三件 `17496/105828`、`17496/105880`、`17496/116569`；另含
-  生成日志里已进入 `bad_bool` 的 `17496/105691`、`17496/116713`。
+  生成日志里已进入 `bad_bool` 的 `17496/105691`、`17496/116713`，以及较大库副本
+  中的 `FLOOR 17496/230353`。
 - 基线源码：`935074ba`，本记录对应其后的未发布候选差异。
 
 ## 根因与修复
@@ -62,6 +63,18 @@ DB_OPTION_FILE=DbOption cargo +nightly-2026-08-02 test --locked --lib \
 - `17496_116713_716.mesh`: `96803533a1bad584a15151a51df5b21aba986a962ec7036de99cbd2bf901b3cf`
 
 重算后五行均为 `booled=true, bad_bool=false` 且 `booled_id` 指向上述可读文件。
+
+### 较大库副本复验
+
+从 `.surreal/ams-7997-e3d-test-20260805` 复制出
+`.scratch/occ-census-7997-20260824`，仅以仓库 `Start-Surreal8009.ps1` 和锁定的
+SurrealDB `2.1.4+20250317.45013fc9` 挂到 8039；独立 mesh 目录为
+`.scratch/meshes-8039`。副本初始有 `inst_geo=8094`、`inst_geo.bad=70`、
+`inst_relate.bad_bool=11`。同一 Required live 测试令 `17496/230353` 从
+`bad_bool=true, booled_id=NONE` 收敛为
+`bad_bool=false, booled=true, booled_id=17496_230353_759`；产物 SHA-256：
+`f9b5283e40a687359515248ba92b8c9a3187043af060e6d2089042d25b5d1df6`。
+余下 10 行全是非目标库 dbnum 7324 的 SJOI。验证后 8039 服务已停止；源库未打开。
 
 ### RVM 门
 

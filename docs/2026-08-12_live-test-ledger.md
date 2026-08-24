@@ -132,6 +132,11 @@ mean/p95=`3.86/8.06mm`，盒状硬门未放宽。证据：
 `docs/evidence/2026-08-24-gwall-nonzero-manifold-boolean.md`。此记录取代上述 `+occ`
 构建口径，但保留其历史数据用于回归比较。
 
+同日把 `.surreal/ams-7997-e3d-test-20260805` 的独立副本挂到 8039，以独立 mesh
+目录再次运行同一 Required 用例；历史 `bad_bool` 的 `FLOOR 17496/230353` 也成功
+复活为 `booled=true, bad_bool=false`。副本最初 11 个坏布尔中余下 10 个均属于非目标
+dbnum 7324 的 SJOI。测试后 8039 已停止。证据同上。
+
 **mesh 批次收编**：mesh 用例收进 `scripts/live-batches/mesh-verify-8009.json`（只读 8009，config=`DbOption`、features=`rvm_verify`）。2026-08-14 用 `cargo test --features rvm_verify --lib surface_distance -- --ignored --test-threads=1` 一批跑过 **4/4**（33.6s）。同日补上四份 e2e 探针的 `DiscoveredBatch.{phase,epoch_id}` 后，`cargo build --lib --tests --features rvm_verify` 已过；标准 runner `powershell -File scripts\Run-LiveBatch.ps1 -Manifest scripts\live-batches\mesh-verify-8009.json` **4/4 pass**（50.5s；报告 `output/live-batch/20260814-210048/report.json`）。扩 STWALL + C-IY 后 runner `-Only mesh_stwall_surface_distance,mesh_c_iy_full_branch` **2/2 pass**（56.9s；报告 `output/live-batch/20260814-212144/report.json`）。
 
 **2026-08-14 模型实例保存合批专项**：`fast_model::shape_save::tests` 6 项与
