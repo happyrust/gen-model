@@ -408,7 +408,7 @@ where
 }
 
 /// 每条轮廓边所属的光顺组。点 `i` 的标记连接边 `i-1` 与边 `i`。
-fn edge_smoothing_groups(ring: &ProfileRing, next_group: &mut u32) -> Vec<u32> {
+pub(crate) fn edge_smoothing_groups(ring: &ProfileRing, next_group: &mut u32) -> Vec<u32> {
     let n = ring.points.len();
     let mut parent = (0..n).collect::<Vec<_>>();
     fn root(parent: &mut [usize], mut x: usize) -> usize {

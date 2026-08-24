@@ -1,5 +1,8 @@
 use crate::data_interface::geom_error::{self, BOOL_NEG, BOOL_POS};
-use crate::fast_model::manifold_csg::{load_manifold, manifold_to_plant_mesh, subtract_negatives};
+use crate::fast_model::manifold_csg::{
+    boolean_mesh_requires_exact_coordinates, load_manifold, manifold_to_plant_mesh,
+    subtract_negatives,
+};
 use crate::fast_model::{CataNegGroup, GmGeoData, ManiGeoTransQuery, NegInfo};
 use aios_core::error::{init_deserialize_error, init_query_error};
 use aios_core::shape::pdms_shape::PlantMesh;
@@ -124,6 +127,8 @@ pub async fn apply_cata_neg_boolean_manifold(
                             ));
                             continue;
                         };
+                        let exact_coordinates =
+                            boolean_mesh_requires_exact_coordinates(&dir_clone, &pos.id)?;
 
                         #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
                         println!("正在负实体计算的mesh hash: {}", &pos.id);
@@ -137,6 +142,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                             &pos.id,
                             pos.trans.compute_matrix().as_dmat4(),
                             false,
+                            exact_coordinates,
                         ) {
                             Ok(manifold) => manifold,
                             Err(error) => {
@@ -180,7 +186,8 @@ pub async fn apply_cata_neg_boolean_manifold(
                                 continue;
                             };
                             let m = neg_geo.trans.compute_matrix().as_dmat4();
-                            match load_manifold(&dir_clone, &neg_geo.id, m, true) {
+                            match load_manifold(&dir_clone, &neg_geo.id, m, true, exact_coordinates)
+                            {
                                 Ok(manifold) => neg_manifolds.push(manifold),
                                 // 少减一个负实体就是悄悄发一件少切了洞的几何，比整件
                                 // 不切更难发现——所以坏一个负实体就整件跳过。
@@ -333,9 +340,12 @@ pub async fn apply_insts_boolean_manifold_single(
     failure_policy: geom_error::GeometryFailurePolicy,
 ) -> anyhow::Result<()> {
     //筛选出来 "Neg", "CataCrossNeg" 的关联
-    //排除不在这个范围内的ngrm geom refno
+    // CataCrossNeg 有两种权威到达路径：直接 neg_relate 明确指向本实例，或 ngmr_relate
+    // 的 ngmr 白名单命中。只查后者会漏掉 GWALL 17496/105828 的 17496/140520，
+    // 布尔体积几乎不变却会留下大面积未开孔表面。
     //这里需要截断传进来的参考号数量
-    let mut sql = format!(
+    let bad_bool_filter = if replace_exist { "" } else { "and !bad_bool" };
+    let sql = format!(
         r#"
         select
                 in as refno,
@@ -347,15 +357,13 @@ pub async fn apply_insts_boolean_manifold_single(
                 (select value [in, world_trans.d,
                     (select record::id(out) as id, geo_type, trans.d as trans, out.aabb.d as aabb
                     from array::flatten(out->geo_relate) where trans.d != NONE and ( geo_type=="Neg" or (geo_type=="CataCrossNeg"
-                        and geom_refno in (select value ngmr from pe:{refno}<-ngmr_relate) ) ))]
+                        and (geom_refno in (select value ngmr from pe:{refno}<-ngmr_relate)
+                             or geom_refno in (select value in from pe:{refno}<-neg_relate)) ) ))]
                         from array::flatten([array::flatten(in<-neg_relate.in->inst_relate), array::flatten(in<-ngmr_relate.in->inst_relate)]) where world_trans.d!=none
                 ) as neg_ts
-             from inst_relate:{refno} where in.id != none and !bad_bool and ((in<-neg_relate)[0] != none or in<-ngmr_relate[0] != none) and aabb.d != NONE
+             from inst_relate:{refno} where in.id != none {bad_bool_filter} and ((in<-neg_relate)[0] != none or in<-ngmr_relate[0] != none) and aabb.d != NONE
         "#
     );
-    // if !replace_exist {
-    //     sql.push_str(" and booled_id != none");
-    // }
     match crate::data_interface::staging::active_data_db()
         .query(&sql)
         .await
@@ -374,6 +382,15 @@ pub async fn apply_insts_boolean_manifold_single(
                             let mut update_sql = String::new();
                             'element: for mut b in group {
                                 let inst_relate_id = b.refno.to_table_key("inst_relate");
+                                let exact_coordinates = b.ts.iter().try_fold(
+                                    false,
+                                    |exact, (pos_id, _)| -> anyhow::Result<bool> {
+                                        Ok(exact
+                                            || boolean_mesh_requires_exact_coordinates(
+                                                &dir_clone, pos_id,
+                                            )?)
+                                    },
+                                )?;
                                 let mut pos_manifolds = vec![];
                                 for (pos_id, pos_t) in b.ts.iter() {
                                     #[cfg(any(
@@ -388,6 +405,7 @@ pub async fn apply_insts_boolean_manifold_single(
                                         pos_id,
                                         pos_t.compute_matrix().as_dmat4(),
                                         false,
+                                        exact_coordinates,
                                     ) {
                                         Ok(manifold) => pos_manifolds.push(manifold),
                                         Err(error) => {
@@ -479,8 +497,13 @@ pub async fn apply_insts_boolean_manifold_single(
                                         let m = inverse_mat
                                             * neg_t.compute_matrix().as_dmat4()
                                             * trans.compute_matrix().as_dmat4();
-                                        let manifold = match load_manifold(&dir_clone, &id, m, true)
-                                        {
+                                        let manifold = match load_manifold(
+                                            &dir_clone,
+                                            &id,
+                                            m,
+                                            true,
+                                            exact_coordinates,
+                                        ) {
                                             Ok(manifold) => manifold,
                                             // 少减一个负实体等于悄悄发一件少切了洞的
                                             // 几何，比整件不切更难发现——整件跳过。
@@ -568,7 +591,7 @@ pub async fn apply_insts_boolean_manifold_single(
                                     // booled=true 与 OCC 路同形（Spec 019 FR-005）：
                                     // 两引擎产出的行按 booled 过滤时不得分叉。
                                     update_sql.push_str(&format!(
-                                        "update {} set booled_id='{}', booled=true, insts_flat=[{{geo_hash:'{}'}}];",
+                                        "update {} set booled_id='{}', booled=true, bad_bool=false, insts_flat=[{{geo_hash:'{}'}}];",
                                         &inst_relate_id, mesh_id_literal, mesh_id_literal
                                     ));
                                     // 做成了就销账，别让修好的件一直挂在降级清单上。
@@ -779,6 +802,32 @@ fn empty_difference_is_bad_bool_not_a_silent_swallow() {
             "Required must reject an empty boolean result: {empty}"
         );
     }
+}
+
+/// 定向 `replace_exist=true` 是坏布尔的复活入口：修好几何后必须重新认领
+/// `bad_bool=true` 的行，并在成功写入新网格时同时销掉坏件标记。
+#[test]
+fn forced_design_boolean_revives_bad_rows_and_clears_the_marker() {
+    let source = include_str!("manifold_bool.rs");
+    let design = source
+        .split_once("pub async fn apply_insts_boolean_manifold_single(")
+        .expect("design manifold function")
+        .1
+        .split_once("fn manifold_io_uses_the_staged_router")
+        .expect("design manifold boundary")
+        .0;
+    assert!(
+        design.contains("if replace_exist { \"\" } else { \"and !bad_bool\" }"),
+        "强制重生成必须绕过 bad_bool 过滤: {design}"
+    );
+    assert!(
+        design.contains("booled=true, bad_bool=false"),
+        "成功重算必须清除 bad_bool: {design}"
+    );
+    assert!(
+        design.contains("geom_refno in (select value in from pe:{refno}<-neg_relate)"),
+        "直接 neg_relate 到达的 CataCrossNeg 也必须参与布尔: {design}"
+    );
 }
 
 /// 载不进 manifold 的网格必须服从调用入口显式选择的失败策略。

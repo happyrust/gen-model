@@ -121,7 +121,201 @@ pub fn tessellate_extrusion(
             ring.reverse();
         }
     }
-    crate::fast_model::sweep_mesh::extrude_loops(&rings, height)
+    // 普通（简单）轮廓走 sweep_mesh，保留 libgm 的逐边光顺组。现场 PLOO 允许
+    // 相邻超大 FRADIUS 互相越过，离散环因此会自交：earcut 的端盖边界与原始侧壁
+    // 边界不再一一对应，产物会开口。libgm 对这种轮廓采用 NonZero 填充语义；当
+    // 精确光顺路径不能形成 Manifold 时，用同一份离散点交给 CrossSection 做平面
+    // 分区，再挤出其真实填充边界。不得钳制 FRADIUS，也不得丢掉越界弧段。
+    if let Ok(mesh) = crate::fast_model::sweep_mesh::extrude_loops(&rings, height) {
+        if crate::fast_model::manifold_csg::plant_mesh_to_manifold(&mesh, glam::DMat4::IDENTITY)
+            .is_ok()
+        {
+            return Ok(mesh);
+        }
+    }
+
+    let polygons = rings
+        .iter()
+        .map(|ring| {
+            ring.points
+                .iter()
+                .map(|point| [point.x as f64, point.y as f64])
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
+    extrude_resolved_profile(&rings, polygons, height)
+}
+
+/// 把 NonZero 平面分区后的简单轮廓重新挂回 libgm 光顺组，再逐个连通分量挤出。
+/// CrossSection 只负责求真实填充边界；侧壁法线仍以原始 span 的硬/光顺标记为权威。
+fn extrude_resolved_profile(
+    source_rings: &[crate::fast_model::sweep_mesh::ProfileRing],
+    polygons: Vec<Vec<[f64; 2]>>,
+    height: f32,
+) -> anyhow::Result<PlantMesh> {
+    use crate::fast_model::sweep_mesh::{edge_smoothing_groups, extrude_loops};
+
+    let section =
+        CrossSection::from_polygons_with_fill_rule(&polygons, FillRule::NonZero).simplify(POS_EPS);
+    if section.is_empty() {
+        anyhow::bail!("self-intersecting extrusion cross-section is empty after fill");
+    }
+
+    let mut next_group = 0u32;
+    let mut source_edges = Vec::<([f64; 2], [f64; 2], u32)>::new();
+    for ring in source_rings {
+        let groups = edge_smoothing_groups(ring, &mut next_group);
+        for (i, point) in ring.points.iter().enumerate() {
+            let end = ring.points[(i + 1) % ring.points.len()];
+            source_edges.push((
+                [point.x as f64, point.y as f64],
+                [end.x as f64, end.y as f64],
+                groups[i],
+            ));
+        }
+    }
+
+    let resolved = section
+        .to_polygons()
+        .into_iter()
+        .filter(|ring| ring.len() >= 3 && signed_area(ring).abs() > POS_EPS * POS_EPS)
+        .map(|ring| resolved_ring_with_groups(ring, &source_edges))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut outers = resolved
+        .iter()
+        .enumerate()
+        .filter(|(_, ring)| signed_area_vec2(&ring.points) > 0.0)
+        .map(|(index, _)| vec![index])
+        .collect::<Vec<_>>();
+    if outers.is_empty() {
+        anyhow::bail!("self-intersecting extrusion fill has no outer contour");
+    }
+    for (hole_index, hole) in resolved.iter().enumerate() {
+        if signed_area_vec2(&hole.points) >= 0.0 {
+            continue;
+        }
+        let sample = hole.points[0];
+        let Some(owner) = outers
+            .iter_mut()
+            .filter(|group| point_in_ring(sample, &resolved[group[0]].points))
+            .min_by(|left, right| {
+                signed_area_vec2(&resolved[left[0]].points)
+                    .abs()
+                    .total_cmp(&signed_area_vec2(&resolved[right[0]].points).abs())
+            })
+        else {
+            anyhow::bail!("self-intersecting extrusion produced an unowned hole contour");
+        };
+        owner.push(hole_index);
+    }
+
+    let mut component_meshes = Vec::with_capacity(outers.len());
+    for group in outers {
+        let loops = group
+            .into_iter()
+            .map(|index| resolved[index].clone())
+            .collect::<Vec<_>>();
+        component_meshes.push(extrude_loops(&loops, height)?);
+    }
+    if component_meshes.len() == 1 {
+        return Ok(component_meshes.pop().expect("one resolved component"));
+    }
+
+    // NonZero 的多个正轮廓可能彼此重叠。把三角列表直接拼接会保留重叠区的内部
+    // 表面：体积看似正确，但 gen→RVM 会看到大量实体内部的假表面。每个分量先以
+    // position+normal 属性进入 Manifold，再做一次属性传播 union，既消掉内部面，
+    // 又保留上面从 libgm span 恢复的光顺分裂。
+    let components = component_meshes
+        .iter()
+        .map(|mesh| {
+            crate::fast_model::manifold_csg::plant_mesh_to_manifold(mesh, glam::DMat4::IDENTITY)
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let united = Manifold::batch_union(&components);
+    if united.is_empty() || united.num_tri() == 0 {
+        anyhow::bail!("self-intersecting extrusion component union is empty");
+    }
+    Ok(manifold_to_plant_mesh(&united))
+}
+
+fn resolved_ring_with_groups(
+    ring: Vec<[f64; 2]>,
+    source_edges: &[([f64; 2], [f64; 2], u32)],
+) -> anyhow::Result<crate::fast_model::sweep_mesh::ProfileRing> {
+    use crate::fast_model::sweep_mesh::ProfileRing;
+
+    let points = ring
+        .iter()
+        .map(|point| glam::Vec2::new(point[0] as f32, point[1] as f32))
+        .collect::<Vec<_>>();
+    let mut edge_groups = Vec::with_capacity(ring.len());
+    for i in 0..ring.len() {
+        let a = ring[i];
+        let b = ring[(i + 1) % ring.len()];
+        let Some((distance, group)) = source_edges
+            .iter()
+            .map(|&(start, end, group)| {
+                (
+                    point_line_distance_sq(a, start, end)
+                        .max(point_line_distance_sq(b, start, end)),
+                    group,
+                )
+            })
+            .min_by(|left, right| left.0.total_cmp(&right.0))
+        else {
+            anyhow::bail!("resolved extrusion contour has no source edges");
+        };
+        if distance > (POS_EPS * 4.0).powi(2) {
+            anyhow::bail!(
+                "resolved extrusion edge {a:?}->{b:?} is not on a libgm source span (distance={})",
+                distance.sqrt()
+            );
+        }
+        edge_groups.push(group);
+    }
+    let smooth_to_next = (0..ring.len())
+        .map(|vertex| edge_groups[(vertex + ring.len() - 1) % ring.len()] == edge_groups[vertex])
+        .collect();
+    Ok(ProfileRing {
+        points,
+        smooth_to_next,
+    })
+}
+
+fn point_line_distance_sq(point: [f64; 2], start: [f64; 2], end: [f64; 2]) -> f64 {
+    let delta = [end[0] - start[0], end[1] - start[1]];
+    let len_sq = delta[0] * delta[0] + delta[1] * delta[1];
+    if len_sq <= f64::EPSILON {
+        return (point[0] - start[0]).powi(2) + (point[1] - start[1]).powi(2);
+    }
+    let t = ((point[0] - start[0]) * delta[0] + (point[1] - start[1]) * delta[1]) / len_sq;
+    let nearest = [start[0] + t * delta[0], start[1] + t * delta[1]];
+    (point[0] - nearest[0]).powi(2) + (point[1] - nearest[1]).powi(2)
+}
+
+fn signed_area_vec2(ring: &[glam::Vec2]) -> f64 {
+    ring.iter()
+        .enumerate()
+        .map(|(i, point)| {
+            let next = ring[(i + 1) % ring.len()];
+            point.x as f64 * next.y as f64 - next.x as f64 * point.y as f64
+        })
+        .sum::<f64>()
+        * 0.5
+}
+
+fn point_in_ring(point: glam::Vec2, ring: &[glam::Vec2]) -> bool {
+    let mut inside = false;
+    for i in 0..ring.len() {
+        let a = ring[i];
+        let b = ring[(i + 1) % ring.len()];
+        if (a.y > point.y) != (b.y > point.y)
+            && point.x < (b.x - a.x) * (point.y - a.y) / (b.y - a.y) + a.x
+        {
+            inside = !inside;
+        }
+    }
+    inside
 }
 
 /// 已离散好的二维环 → 沿 +Z 挤出。绕向按外环有向面积统一翻正，空截面 / 空网格
@@ -139,11 +333,15 @@ fn extrude_flat_polygons(
             ring.reverse();
         }
     }
-    let section = CrossSection::from_polygons_with_fill_rule(&polygons, FillRule::NonZero);
+    // NonZero 平面分区会在自交点两侧留下数值尺度的短边；它们没有可见几何意义，
+    // 却会在 f32 PlantMesh 中形成近零面积三角。按全仓统一的 0.1µm 位置容差先合并，
+    // 再挤出，确保输出既保持填充区域又能作为后续布尔输入。
+    let section =
+        CrossSection::from_polygons_with_fill_rule(&polygons, FillRule::NonZero).simplify(POS_EPS);
     if section.is_empty() {
         anyhow::bail!("{what} cross-section is empty after fill");
     }
-    let solid = Manifold::extrude(&section, height as f64);
+    let solid = Manifold::extrude(&section, height as f64).simplify(POS_EPS);
     if solid.is_empty() || solid.num_tri() == 0 {
         anyhow::bail!("{what} manifold is empty");
     }
@@ -976,6 +1174,37 @@ mod tests {
                     .all(|&index| mesh.normals[index as usize].abs_diff_eq(normal, 1e-6))
             );
         }
+    }
+
+    /// AMS 1112 `GWALL 17496/105880` 的现场轮廓。两个超大 FRADIUS 会让展开后的
+    /// 轮廓靠得很近；生产布尔必须仍能把落盘 PlantMesh 读成 Manifold。
+    #[test]
+    fn field_gwall_extreme_fillets_are_manifold_ingestable() {
+        let verts = vec![vec![
+            Vec3::new(0.33, -106.21, 0.0),
+            Vec3::new(0.0, 3332.118, 17400.0),
+            Vec3::new(1231.06, 6428.486, 0.0),
+            Vec3::new(2253.23, 6022.08, 0.0),
+            Vec3::new(1550.83, 4255.4, 16500.0),
+            Vec3::new(1275.75, 2373.88, 0.0),
+            Vec3::new(1074.97, 2389.41, 0.0),
+            Vec3::new(892.71, 1144.12, 16500.0),
+            Vec3::new(900.31, -100.72, 0.0),
+        ]];
+        let mesh =
+            tessellate_extrusion(&verts, 100.0, FACET_TOL_MM).expect("field GWALL extrusion");
+        assert_solid_mesh(&mesh);
+        assert!(
+            mesh.vertices.iter().all(|point| point.is_finite())
+                && mesh.normals.iter().all(|normal| normal.is_finite()),
+            "field GWALL extrusion must not contain NaN/Inf"
+        );
+        assert!(
+            crate::fast_model::mesh_assert::mesh_volume(&mesh) > 0.0,
+            "field GWALL extrusion must keep outward winding"
+        );
+        crate::fast_model::manifold_csg::plant_mesh_to_manifold(&mesh, glam::DMat4::IDENTITY)
+            .expect("field GWALL mesh must be accepted by production manifold ingest");
     }
 
     /// `=24381/36931`（`1RX-RM12-R976-VOLU` 的 PANE）真实参数回归。

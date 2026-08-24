@@ -120,6 +120,16 @@ cargo test --lib --no-default-features --features ws,gen_model,manifold,project_
 
 **2026-08-14 AMS 1112 GWALL 大体量 gen 余量根因**：`mesh_gwall_extra_against_cwall_union`（live 8009 + occ）。**2026-08-14 通过**（NXTR 计数 + 布尔后距离守卫）。生产 `query_valid_insts` 用 `booled_id` 网格，对拍原先只重建正挤出，且 `{refno}_{sesno}.mesh` 未落盘。对齐 `booled_id` 并补跑 `gen_inst_meshes`+`apply_insts_boolean_manifold` 后：`105828` gen→gwall p95=0.1/max=77.6，`105880` p95=9.3/max=105，`116569` p95=137/max=152（未布尔时为 870/786/591）。守卫：前两堵 p95≤12，116569 回归 ≤180。
 
+**2026-08-24 AMS 1112 GWALL 无 OCC 重生成复验**：新增
+`live_8009_regenerate_extreme_fillet_gwall_and_boolean`，对 `105828/105880/116569`
+及其全部 NXTR 强制重铺，并以 `GeometryFailurePolicy::Required` 执行目录/设计两层
+Manifold 布尔，**1/1 通过**。随后 `mesh_gwall_extra_against_cwall_union` **1/1 通过**：
+NXTR=`4/5/8`，gen→GWALL p95=`0.1/9.3/167.5mm`；
+`mesh_gwall_union_surface_distance` **1/1 通过**，20/20 两侧齐全，gen→RVM
+mean/p95=`3.86/8.06mm`，盒状硬门未放宽。证据：
+`docs/evidence/2026-08-24-gwall-nonzero-manifold-boolean.md`。此记录取代上述 `+occ`
+构建口径，但保留其历史数据用于回归比较。
+
 **mesh 批次收编**：mesh 用例收进 `scripts/live-batches/mesh-verify-8009.json`（只读 8009，config=`DbOption`、features=`rvm_verify`）。2026-08-14 用 `cargo test --features rvm_verify --lib surface_distance -- --ignored --test-threads=1` 一批跑过 **4/4**（33.6s）。同日补上四份 e2e 探针的 `DiscoveredBatch.{phase,epoch_id}` 后，`cargo build --lib --tests --features rvm_verify` 已过；标准 runner `powershell -File scripts\Run-LiveBatch.ps1 -Manifest scripts\live-batches\mesh-verify-8009.json` **4/4 pass**（50.5s；报告 `output/live-batch/20260814-210048/report.json`）。扩 STWALL + C-IY 后 runner `-Only mesh_stwall_surface_distance,mesh_c_iy_full_branch` **2/2 pass**（56.9s；报告 `output/live-batch/20260814-212144/report.json`）。
 
 **2026-08-14 模型实例保存合批专项**：`fast_model::shape_save::tests` 6 项与

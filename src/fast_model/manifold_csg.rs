@@ -24,6 +24,14 @@ pub(crate) fn dmat4_to_affine4x3(m: DMat4) -> [f64; 12] {
 }
 
 pub(crate) fn plant_mesh_to_manifold(mesh: &PlantMesh, mat: DMat4) -> anyhow::Result<Manifold> {
+    plant_mesh_to_manifold_quantized(mesh, mat, None)
+}
+
+fn plant_mesh_to_manifold_quantized(
+    mesh: &PlantMesh,
+    mat: DMat4,
+    coordinate_grid: Option<(f64, bool)>,
+) -> anyhow::Result<Manifold> {
     if mesh.indices.len() < 3 || mesh.vertices.len() < 3 {
         anyhow::bail!(
             "mesh has no triangles (verts={} idx={})",
@@ -43,7 +51,11 @@ pub(crate) fn plant_mesh_to_manifold(mesh: &PlantMesh, mat: DMat4) -> anyhow::Re
     let mut vert_props = Vec::with_capacity(mesh.vertices.len() * 6);
     let normal_xform = mat.inverse().transpose();
     for (index, (v, normal)) in mesh.vertices.iter().zip(&mesh.normals).enumerate() {
-        let p = mat.transform_point3(glam::DVec3::new(v.x as f64, v.y as f64, v.z as f64));
+        let mut p = mat.transform_point3(glam::DVec3::new(v.x as f64, v.y as f64, v.z as f64));
+        if let Some((scale, truncate)) = coordinate_grid {
+            let snap = |value| snap_boolean_coordinate(value, scale, truncate);
+            p = glam::DVec3::new(snap(p.x), snap(p.y), snap(p.z));
+        }
         let n = normal_xform
             .transform_vector3(glam::DVec3::new(
                 normal.x as f64,
@@ -148,10 +160,47 @@ pub(crate) fn load_manifold(
     dir: &Path,
     id: &str,
     mat: DMat4,
-    _more_precision: bool,
+    more_precision: bool,
+    exact_coordinates: bool,
 ) -> anyhow::Result<Manifold> {
     let mesh = PlantMesh::des_mesh_file(&dir.join(format!("{id}.mesh")))?;
-    plant_mesh_to_manifold(&mesh, mat)
+    // 保留旧 ManifoldRust 的两档布尔栅格，但继续以 f64 属性网格承载：正实体向零
+    // 截到 0.1mm，负实体四舍五入到 0.01mm。105828 的薄 NXTR 与母体共面；若这里
+    // 忽略 `more_precision` 直接喂任意精度坐标，Manifold 会保留未开孔的大面积原面，
+    // 体积只差 0.006% 却让 gen→RVM p95 超过 750mm。
+    let grid = if exact_coordinates {
+        None
+    } else if more_precision {
+        Some((100.0, false))
+    } else {
+        Some((10.0, true))
+    };
+    plant_mesh_to_manifold_quantized(&mesh, mat, grid)
+}
+
+/// 三角属性顶点完全展开的网格来自 Manifold/NonZero 解析路径；再次做 0.1/0.01mm
+/// 栅格化会破坏它已经求好的交线一致性。一个布尔组只要有这种正实体，正负两侧都
+/// 保持 f64 精确坐标，不能只让一侧走栅格。
+pub(crate) fn boolean_mesh_requires_exact_coordinates(
+    dir: &Path,
+    id: &str,
+) -> anyhow::Result<bool> {
+    let mesh = PlantMesh::des_mesh_file(&dir.join(format!("{id}.mesh")))?;
+    Ok(mesh_has_expanded_attribute_vertices(&mesh))
+}
+
+fn snap_boolean_coordinate(value: f64, scale: f64, truncate: bool) -> f64 {
+    let scaled = value * scale;
+    let snapped = if truncate {
+        scaled.trunc()
+    } else {
+        scaled.round()
+    };
+    snapped / scale
+}
+
+fn mesh_has_expanded_attribute_vertices(mesh: &PlantMesh) -> bool {
+    !mesh.indices.is_empty() && mesh.vertices.len() == mesh.indices.len()
 }
 
 /// 负实体在做差之前按自身包围盒中心放大的相对量。
@@ -214,6 +263,33 @@ mod tests {
         assert_eq!(a[0], 1.0);
         assert_eq!(a[4], 1.0);
         assert_eq!(a[8], 1.0);
+    }
+
+    #[test]
+    fn legacy_boolean_grids_keep_their_two_rounding_directions() {
+        assert_eq!(snap_boolean_coordinate(1.29, 10.0, true), 1.2);
+        assert_eq!(snap_boolean_coordinate(-1.29, 10.0, true), -1.2);
+        assert_eq!(snap_boolean_coordinate(1.235, 100.0, false), 1.24);
+        assert_eq!(snap_boolean_coordinate(-1.235, 100.0, false), -1.24);
+    }
+
+    #[test]
+    fn expanded_attribute_meshes_select_exact_boolean_coordinates() {
+        let expanded = PlantMesh {
+            vertices: vec![Vec3::ZERO; 3],
+            normals: vec![Vec3::Z; 3],
+            indices: vec![0, 1, 2],
+            ..Default::default()
+        };
+        assert!(mesh_has_expanded_attribute_vertices(&expanded));
+
+        let indexed = PlantMesh {
+            vertices: vec![Vec3::ZERO; 4],
+            normals: vec![Vec3::Z; 4],
+            indices: vec![0, 1, 2, 0, 2, 3],
+            ..Default::default()
+        };
+        assert!(!mesh_has_expanded_attribute_vertices(&indexed));
     }
 
     #[test]
