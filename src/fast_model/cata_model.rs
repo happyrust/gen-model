@@ -8,6 +8,7 @@ use crate::fast_model::{
 };
 use aios_core::consts::{CIVIL_TYPES, NGMR_OWN_TYPES};
 use aios_core::geometry::*;
+use aios_core::get_world_transforms_many;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::CateGeomsInfo;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
@@ -22,7 +23,6 @@ use aios_core::prim_geo::{PdmsTubing, TubiEdge};
 use aios_core::rs_surreal::CataContext;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use aios_core::tool::math_tool::to_pdms_vec_str;
-use aios_core::transform::get_world_transforms_many;
 use aios_core::{
     HASH_PSEUDO_ATT_MAPS, NamedAttrMap, NamedAttrValue, RefU64, RefnoEnum, gen_bytes_hash,
 };
@@ -62,6 +62,61 @@ static TRACING_INITIALIZED: AtomicBool = AtomicBool::new(false);
 // Global tracing guard
 #[cfg(feature = "profile")]
 static mut TRACING_GUARD: Option<FlushGuard> = None;
+
+#[cfg(test)]
+mod world_transform_batch_tests {
+    use aios_core::RefnoEnum;
+
+    #[test]
+    fn cata_prefetch_uses_authoritative_world_transform_batch() {
+        let source = include_str!("cata_model.rs");
+        let imports = source
+            .split("static mut TRACING_GUARD")
+            .next()
+            .expect("module imports precede tracing state");
+        assert!(
+            imports.contains("use aios_core::get_world_transforms_many;"),
+            "CATA prefetch must use the persisted/staging-aware world-transform resolver"
+        );
+        assert!(
+            !imports.contains("use aios_core::transform::get_world_transforms_many;"),
+            "the local-matrix transform module is not equivalent for materialized ownership chains"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the AMS 8000 RocksDB fixture selected by DB_OPTION_FILE"]
+    async fn live_batch_preserves_non_identity_ftub_world_pose() {
+        aios_core::init_surreal()
+            .await
+            .expect("connect AMS fixture");
+        let refno = RefnoEnum::from("24384/22403");
+        let expected = aios_core::get_world_transform(refno)
+            .await
+            .expect("resolve authoritative transform")
+            .expect("FTUB world transform exists");
+        let actual = aios_core::get_world_transforms_many(&[refno])
+            .await
+            .expect("resolve batch")
+            .get(&refno)
+            .copied()
+            .flatten()
+            .expect("batch FTUB world transform exists");
+
+        assert!(
+            expected.translation.distance(actual.translation) <= 1.0e-3,
+            "batch translation drifted: expected={expected:?} actual={actual:?}"
+        );
+        assert!(
+            expected.rotation.dot(actual.rotation).abs() >= 1.0 - 1.0e-5,
+            "batch rotation drifted: expected={expected:?} actual={actual:?}"
+        );
+        assert!(
+            actual.translation.length() > 1.0,
+            "non-zero FTUB POS/ORI collapsed to identity: {actual:?}"
+        );
+    }
+}
 
 /// Initializes Chrome tracing for performance analysis
 #[cfg(feature = "profile")]
