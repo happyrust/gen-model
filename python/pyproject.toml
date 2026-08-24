@@ -21,8 +21,8 @@ markers = [
 
 [tool.maturin]
 # 混合工程：Rust 扩展是 aios_db._aios_db，外层 Python 包（pysrc/aios_db）负责
-# 在导入扩展前 os.add_dll_directory 注册 OCCT 运行时目录——Python 3.8+ 加载扩展
-# 不再查 PATH，而 OCCT 是动态链接（TK*.dll 在 C:\tools\occt-7.8.0\bin 一类目录）。
+# 在导入扩展前 os.add_dll_directory 注册原生运行时目录——Python 3.8+ 加载扩展
+# 不再查 PATH，而主程序 exe 走 legacy PATH 搜索，两边的搜索面要对齐。
 module-name = "aios_db._aios_db"
 python-source = "pysrc"
 # 与服务同一套默认 feature（Q7 决策：单一全量构建形态）；

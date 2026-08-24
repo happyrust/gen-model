@@ -173,9 +173,9 @@ jobs:
   # 数据全来自仓内 issue-019 会话快照夹具。房间增量档要 bin/surreal.exe 与
   # testbed 项目副本，留在本地跑（见 python/README.md）。
   #
-  # 绑定按 Q7 决策钉死「与服务同一套默认 feature」的单一构建形态，所以这里必须
-  # 备齐 OCCT——provisioning 与 windows-binary.yml 逐字同款，那边升级版本时这边
-  # 跟着改（两处 OCC_* 环境变量）。
+  # 绑定按 Q7 决策钉死「与服务同一套默认 feature」的单一构建形态。OCC 摘除
+  # （specs/009 X1a/X1b）之后这套 feature 不再链任何外部原生库，OCCT provisioning
+  # 随之删除。
   python-bindings:
     runs-on: windows-latest
     timeout-minutes: 180
@@ -184,9 +184,6 @@ jobs:
       # 绑定的 cdylib 与主 crate 共享编译产物；给绝对路径，免得 maturin 在
       # python/ 目录下跑时把 target 落到 python/target 而错过缓存。
       CARGO_TARGET_DIR: ${{ github.workspace }}\target
-      OCC_VERSION: 7.9.3
-      OCC_ARCHIVE_URL: https://github.com/Open-Cascade-SAS/OCCT/releases/download/V7_9_3/opencascade-7.9.3-vc14-64-combined.zip
-      OCC_ARCHIVE_SHA256: afbef3457fbc4a2bdca0608e0fe284392f51e4c2c42ccbfb9df7168d8e4eb9b3
 
     steps:
       - uses: actions/checkout@v6
@@ -202,40 +199,6 @@ jobs:
           rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal
           rustup default $env:RUST_TOOLCHAIN
           rustc --version
-
-      - name: Download prebuilt OpenCASCADE
-        shell: pwsh
-        run: |
-          $archive = "$env:RUNNER_TEMP\occt.zip"
-          $extract = "$env:RUNNER_TEMP\occt-extract"
-          $source = "$extract\opencascade-$env:OCC_VERSION-vc14-64"
-          $root = "$env:RUNNER_TEMP\occt"
-          Invoke-WebRequest $env:OCC_ARCHIVE_URL -OutFile $archive
-          if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLower() -ne $env:OCC_ARCHIVE_SHA256) {
-            throw 'OpenCASCADE archive checksum mismatch'
-          }
-          New-Item -ItemType Directory -Force $extract, "$root\include\opencascade", "$root\lib", "$root\bin" | Out-Null
-          # 三方 bin 全量取，不再逐个点名：windows-binary.yml 只点了 tbb12 与
-          # jemalloc，那边够用是因为它只编译打包、从不真的加载；这里要 import
-          # 扩展，TK*.dll 的**传递**依赖（tbbmalloc / freetype 等）少一个就是
-          # "DLL load failed"，而错误信息不会告诉你少的是哪个。
-          tar -xf $archive -C $extract `
-            "opencascade-$env:OCC_VERSION-vc14-64/inc/*" `
-            "opencascade-$env:OCC_VERSION-vc14-64/win64/vc14/lib/*" `
-            "opencascade-$env:OCC_VERSION-vc14-64/win64/vc14/bin/*" `
-            '3rdparty-vc14-64/*/bin/*'
-          Copy-Item "$source\inc\*" "$root\include\opencascade" -Recurse
-          Copy-Item "$source\win64\vc14\lib\*" "$root\lib"
-          Copy-Item "$source\win64\vc14\bin\*" "$root\bin"
-          # 匹配 bin 及其子目录：OpenVR 装在 `openvr-*/bin/win64/openvr_api.dll`，
-          # 只认「直接位于 bin 下」会把它漏掉——而 TKService.dll 正依赖它，
-          # 缺了就是 import 时那句不说名字的 "DLL load failed"（实测踩到）。
-          Get-ChildItem "$extract\3rdparty-vc14-64" -Recurse -Filter *.dll |
-            Where-Object { $_.DirectoryName -match '\\bin(\\|$)' } |
-            Copy-Item -Destination "$root\bin" -Force
-          "OCC_ROOT=$root" >> $env:GITHUB_ENV
-          # 运行期也要找得到 TK*.dll：包装层按 PATH 逐目录 os.add_dll_directory。
-          "$root\bin" >> $env:GITHUB_PATH
 
       - name: Download protoc
         shell: pwsh
@@ -289,131 +252,13 @@ jobs:
           if (-not $wheel) { throw 'maturin 没有产出 wheel' }
           python -m pip install --force-reinstall $wheel.FullName
 
-      # 先单独试一次 import：DLL 缺失会让整档 60+ 条用例一起变成同一条
-      # "DLL load failed"，噪声盖过信号。这一步失败就直接把 OCC bin 的清单打出来，
-      # 下一轮不用靠猜。
+      # 先单独试一次 import：加载失败会让整档 60+ 条用例一起变成同一条错误，
+      # 噪声盖过信号。OCC 摘除后扩展不再链外部原生库，一句真 import 就够了；
+      # 原先那套读 PE 导入表递归找缺失 DLL 的探针是为 OCCT 写的，随它一起删。
       - name: Smoke-import the extension
         shell: pwsh
         run: |
-          # "DLL load failed" 不说是哪个 DLL，所以逐个点名地试：先确认 OCC bin
-          # 在 PATH 上（包装层按 PATH 注册 DLL 目录），再按 pyd 的直接依赖清单
-          # （dumpbin 实测的 16 个 TK）逐个裸名加载，第一个失败的就是缺口。
-          $probe = @'
-          import os, struct, sys, sysconfig
-
-
-          def pe_imports(path):
-              """读 PE 导入表，列出这个模块直接依赖哪些 DLL（不依赖 dumpbin）。"""
-              data = open(path, "rb").read()
-              pe = struct.unpack_from("<I", data, 0x3C)[0]
-              coff = pe + 4
-              sections, = struct.unpack_from("<H", data, coff + 2)
-              opt_size, = struct.unpack_from("<H", data, coff + 16)
-              opt = coff + 20
-              magic, = struct.unpack_from("<H", data, opt)
-              imp_rva, = struct.unpack_from("<I", data, opt + (112 if magic == 0x20B else 96) + 8)
-              table = []
-              for i in range(sections):
-                  base = opt + opt_size + i * 40
-                  vsz, va, _sz, raw = struct.unpack_from("<IIII", data, base + 8)
-                  table.append((va, max(vsz, 1), raw))
-
-              def at(rva):
-                  for va, vsz, raw in table:
-                      if va <= rva < va + vsz:
-                          return raw + (rva - va)
-                  return None
-
-              names, off = [], at(imp_rva)
-              while off is not None:
-                  desc = data[off:off + 20]
-                  if len(desc) < 20 or not any(desc):
-                      break
-                  name_rva, = struct.unpack_from("<I", desc, 12)
-                  if not name_rva:
-                      break
-                  start = at(name_rva)
-                  names.append(data[start:data.index(b"\x00", start)].decode("ascii"))
-                  off += 20
-              return names
-
-
-          # wheel 安装在 purelib 下；本地 `maturin develop` 是 editable，包在源码树里。
-          # find_spec 只定位不执行 __init__，所以 import 失败时它依然给得出路径。
-          pyd = os.path.join(sysconfig.get_paths()["purelib"], "aios_db", "_aios_db.pyd")
-          if not os.path.isfile(pyd):
-              import importlib.util
-              spec = importlib.util.find_spec("aios_db")
-              for root in (spec.submodule_search_locations if spec else []) or []:
-                  candidate = os.path.join(root, "_aios_db.pyd")
-                  if os.path.isfile(candidate):
-                      pyd = candidate
-                      break
-          print("pyd exists    =", os.path.isfile(pyd), pyd)
-          occ_bin = os.path.join(os.environ.get("OCC_ROOT", ""), "bin")
-          print("OCC bin       =", occ_bin, os.path.isdir(occ_bin))
-          print("occt on PATH  =", [p for p in os.environ.get("PATH", "").split(os.pathsep)
-                                    if "occt" in p.lower()])
-
-          # 与 aios_db/__init__.py 的 _add_native_dll_dirs 同款：注册 PATH 上每个目录。
-          # 只注册 OCC bin 是不够的——TK*.dll 自己还要三方 DLL，本机上它们散在别处，
-          # 那样探针会在能正常 import 的机器上也误报。
-          search = []
-          for entry in os.environ.get("PATH", "").split(os.pathsep):
-              entry = entry.strip().strip('"')
-              if entry and os.path.isdir(entry):
-                  try:
-                      os.add_dll_directory(entry)
-                      search.append(entry)
-                  except OSError:
-                      pass
-          search += [os.path.dirname(sys.executable), os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32")]
-
-          def locate(dll):
-              for directory in search:
-                  candidate = os.path.join(directory, dll)
-                  if os.path.isfile(candidate):
-                      return candidate
-              return None
-
-
-          if os.path.isfile(pyd):
-              # 必须递归：上一轮实测「38 个直接依赖全部就位、import 依然失败」，
-              # 说明缺口在传递层（TK*.dll 自己的依赖），只查一层看不见。
-              seen, missing, walked = set(), [], 0
-              stack = [(pyd, "<pyd>")]
-              while stack:
-                  current, why = stack.pop()
-                  walked += 1
-                  try:
-                      deps = pe_imports(current)
-                  except Exception as error:
-                      print("  (无法解析", current, "->", error, ")")
-                      continue
-                  for dll in deps:
-                      key = dll.lower()
-                      if key.startswith("api-ms-win") or key in seen:
-                          continue  # API set 由系统转发，不落地成文件
-                      seen.add(key)
-                      found = locate(dll)
-                      if found is None:
-                          missing.append((dll, os.path.basename(current)))
-                      else:
-                          stack.append((found, dll))
-              print("modules walked:", walked, "| distinct deps:", len(seen))
-              print("NOT FOUND     :", missing or "<none>")
-
-          try:
-              import aios_db
-              print("import ok:", " ".join(sorted(aios_db.__all__)))
-          except Exception as error:
-              print("import failed:", error)
-              sys.exit(1)
-          '@
-          $probePath = Join-Path $env:RUNNER_TEMP 'dll_probe.py'
-          Set-Content -LiteralPath $probePath -Value $probe -Encoding utf8
-          Write-Host "OCC bin DLL 数: $((Get-ChildItem "$env:OCC_ROOT\bin\*.dll").Count)"
-          python $probePath
+          python -c "import aios_db; print('import ok:', ' '.join(sorted(aios_db.__all__)))"
           if ($LASTEXITCODE -ne 0) { throw "import aios_db failed ($LASTEXITCODE)" }
 
       - name: Run offline binding tests

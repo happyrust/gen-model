@@ -9,7 +9,7 @@ edition = "2024"
 publish = false
 
 [lib]
-# 内部扩展模块名；对外的 Python 包是 pysrc/aios_db（先注册 OCCT DLL 目录再导入本模块）。
+# 内部扩展模块名；对外的 Python 包是 pysrc/aios_db（先注册原生 DLL 目录再导入本模块）。
 name = "_aios_db"
 crate-type = ["cdylib"]
 
