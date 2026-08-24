@@ -1986,6 +1986,25 @@ mod live_cwall_rr001_aabb_tests {
     use crate::data_interface::geom_error::GeometryFailurePolicy;
     use aios_core::RefnoEnum;
 
+    /// 从生成根重建 CWALL 的 `inst_relate` / `geo_relate`，用于尚未生成该分支的数据库副本。
+    /// 端口和 mesh 目录由 `DB_OPTION_FILE` 指向的隔离配置决定。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live copy: 从生成根完整重建 1RS-WF03-W-C-RR001"]
+    async fn live_regenerate_cwall_rr001_from_generation_root() {
+        aios_core::init_surreal()
+            .await
+            .expect("connect configured copy");
+        let mut option = aios_core::get_db_option().clone();
+        option.debug_root_refnos = Some(vec!["17496/105799".to_string()]);
+        option.gen_model = true;
+        option.gen_mesh = true;
+        option.replace_mesh = Some(true);
+        option.apply_boolean_operation = true;
+        crate::fast_model::gen_model::gen_all_geos_data(&option)
+            .await
+            .expect("regenerate CWALL generation root");
+    }
+
     /// 刷新 AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 WALL/STWALL 世界包围盒。
     /// 圆弧墙必须走环扇取样；随后用 Python `rvm_aabb_compare.py --fixture 1rs-wf03-w-c-rr001` 对拍。
     #[tokio::test(flavor = "multi_thread")]

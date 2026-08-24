@@ -19,6 +19,12 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+fn rvm_mesh_dir() -> std::path::PathBuf {
+    std::env::var_os("AIOS_RVM_MESH_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("assets/meshes"))
+}
+
 use anyhow::{Context, Result};
 use parry3d::math::Point;
 use parry3d::shape::{TriMesh, TriMeshFlags};
@@ -287,7 +293,7 @@ mod gen_side {
         let wt = mat_from_trans(row.get("wt").unwrap_or(&serde_json::Value::Null));
         let booled_id = row.get("booled_id").and_then(|v| v.as_str());
         if let Some(booled_id) = super::resolve_booled_mesh_id(booled_id) {
-            let mesh_path = Path::new("assets/meshes").join(format!("{booled_id}.mesh"));
+            let mesh_path = rvm_mesh_dir().join(format!("{booled_id}.mesh"));
             let unit = PlantMesh::des_mesh_file(&mesh_path).with_context(|| {
                 format!(
                     "{pe_key} 有 booled_id={booled_id} 但缺少 {}（布尔网格未落盘，不能回退到未开洞正挤出）",
@@ -363,7 +369,7 @@ mod gen_side {
         }
         // param 为空或建不出形状 → 磁盘 .mesh（布尔/复合结果，如 BEND；CWD=仓库根，
         // meshes_path 默认 assets/meshes）。
-        let mesh_path = Path::new("assets/meshes").join(format!("{geo_hash}.mesh"));
+        let mesh_path = rvm_mesh_dir().join(format!("{geo_hash}.mesh"));
         match PlantMesh::des_mesh_file(&mesh_path) {
             Ok(mesh) => Ok(Some(mesh)),
             Err(_) => Ok(None),
@@ -393,8 +399,15 @@ mod mesh_wall_live {
         assert!(!sql.contains("insts_flat"), "RVM 门不得读取派生平表: {sql}");
     }
 
-    async fn live_8009() -> surrealdb::Surreal<surrealdb::engine::any::Any> {
-        let db = connect("ws://127.0.0.1:8009").await.expect("connect 8009");
+    fn live_db_endpoint() -> String {
+        std::env::var("AIOS_RVM_DB_ENDPOINT").unwrap_or_else(|_| "ws://127.0.0.1:8009".to_string())
+    }
+
+    async fn live_db() -> surrealdb::Surreal<surrealdb::engine::any::Any> {
+        let endpoint = live_db_endpoint();
+        let db = connect(&endpoint)
+            .await
+            .unwrap_or_else(|error| panic!("connect {endpoint}: {error}"));
         db.signin(Root {
             username: "root",
             password: "root",
@@ -419,7 +432,7 @@ mod mesh_wall_live {
             .map(|(_, m)| m)
     }
 
-    /// AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 4 堵 WALL，RVM FacetGroup vs gen OCC
+    /// AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 4 堵 WALL，RVM FacetGroup vs 生产网格
     /// 网格，双向表面距离。
     ///
     /// 实测结论（2026-08-14，见 `docs/2026-08-12_live-test-ledger.md`）：
@@ -436,25 +449,14 @@ mod mesh_wall_live {
     /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
     /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_wall_surface_distance -- --ignored --nocapture`
     #[tokio::test]
-    #[ignore = "live 8009：1112 CWALL WALL 的 mesh 级对拍（gen→rvm 贴合守卫 + 洞/WALL4 取证）"]
+    #[ignore = "live database：1112 CWALL WALL 的 mesh 级对拍（默认 8009，可由 AIOS_RVM_DB_ENDPOINT 覆盖）"]
     async fn mesh_wall_surface_distance() {
         // RVM 侧：group 名 → 世界 mm 网格。
         let rvm_path = std::path::Path::new("test_data/rvm/1RS-WF03-W-C-RR001.rvm");
         let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse rvm");
 
-        // gen 侧：连 8009。
-        let db = connect("ws://127.0.0.1:8009").await.expect("connect 8009");
-        db.signin(Root {
-            username: "root",
-            password: "root",
-        })
-        .await
-        .expect("signin");
-        db.use_ns("1516")
-            .use_db("AvevaMarineSample")
-            .await
-            .expect("use ns/db");
-
+        // gen 侧：默认连 8009；双库门通过 AIOS_RVM_DB_ENDPOINT 指向隔离副本。
+        let db = live_db().await;
         // WALL n（RVM 名）↔ gen refno（同 rvm_aabb_compare.py 的序号配对）。
         let pairs = [
             ("WALL 1 of CWALL /1RS-WF03-W-C-RR001", "pe:17496_105912"),
@@ -579,13 +581,13 @@ mod mesh_wall_live {
     /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
     /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_stwall_surface_distance -- --ignored --nocapture`
     #[tokio::test]
-    #[ignore = "live 8009：1112 CWALL STWALL 的 mesh 级对拍（直线 SweepSolid）"]
+    #[ignore = "live database：1112 CWALL STWALL 的 mesh 级对拍（默认 8009，可覆盖 endpoint）"]
     async fn mesh_stwall_surface_distance() {
         use crate::fast_model::shared::one_way_surface_distance;
 
         let rvm_path = std::path::Path::new("test_data/rvm/1RS-WF03-W-C-RR001.rvm");
         let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse rvm");
-        let db = live_8009().await;
+        let db = live_db().await;
 
         let pairs = [
             ("STWALL 1 of CWALL /1RS-WF03-W-C-RR001", "pe:17496_105812"),
@@ -637,7 +639,7 @@ mod mesh_wall_live {
         );
         assert!(
             missing.is_empty(),
-            "这些墙在 8009 上没有生成几何，对拍等于没跑——先对 CWALL 做一次定向重生成：{missing:?}"
+            "这些墙在目标库上没有生成几何，对拍等于没跑——先对 CWALL 做一次定向重生成：{missing:?}"
         );
     }
 
@@ -658,17 +660,7 @@ mod mesh_wall_live {
         let rvm_path = std::path::Path::new("test_data/rvm/C-OR-1R345-C.rvm");
         let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse rvm");
 
-        let db = connect("ws://127.0.0.1:8009").await.expect("connect 8009");
-        db.signin(Root {
-            username: "root",
-            password: "root",
-        })
-        .await
-        .expect("signin");
-        db.use_ns("1516")
-            .use_db("AvevaMarineSample")
-            .await
-            .expect("use ns/db");
+        let db = live_db().await;
 
         // FTUBE/BEND n（RVM 名前缀）↔ gen refno（同 rvm_aabb_compare.py c-or-1r345-c）。
         let pairs = [
@@ -743,17 +735,7 @@ mod mesh_wall_live {
         let rvm_path = std::path::Path::new("test_data/rvm/C-OR-1R345-C.rvm");
         let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse rvm");
 
-        let db = connect("ws://127.0.0.1:8009").await.expect("connect 8009");
-        db.signin(Root {
-            username: "root",
-            password: "root",
-        })
-        .await
-        .expect("signin");
-        db.use_ns("1516")
-            .use_db("AvevaMarineSample")
-            .await
-            .expect("use ns/db");
+        let db = live_db().await;
 
         // BEND 1 夹在 FTUBE 1 与 FTUBE 2 之间（refno 顺序 23258/23259/23260）。
         let members = [
@@ -819,17 +801,7 @@ mod mesh_wall_live {
         let rvm_path = std::path::Path::new("test_data/rvm/C-OR-1R345-C.rvm");
         let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse rvm");
 
-        let db = connect("ws://127.0.0.1:8009").await.expect("connect 8009");
-        db.signin(Root {
-            username: "root",
-            password: "root",
-        })
-        .await
-        .expect("signin");
-        db.use_ns("1516")
-            .use_db("AvevaMarineSample")
-            .await
-            .expect("use ns/db");
+        let db = live_db().await;
 
         let members = [
             ("FTUBE 1", "pe:24384_23258"),
@@ -917,7 +889,7 @@ mod mesh_wall_live {
 
         let rvm_path = std::path::Path::new("test_data/rvm/C-IY-1R330-B.rvm");
         let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse rvm");
-        let db = live_8009().await;
+        let db = live_db().await;
 
         let members = [
             ("FTUBE 1", "pe:24384_22405"),
@@ -1046,7 +1018,7 @@ mod mesh_wall_live {
                 .and_then(|v| v.as_str());
             match crate::rvm_baseline::mesh_compare::resolve_booled_mesh_id(raw) {
                 Some(id) => {
-                    let path = std::path::Path::new("assets/meshes").join(format!("{id}.mesh"));
+                    let path = rvm_mesh_dir().join(format!("{id}.mesh"));
                     let usable = path
                         .metadata()
                         .ok()
@@ -1054,7 +1026,8 @@ mod mesh_wall_live {
                     if usable {
                     } else {
                         println!(
-                            "{pe_key} missing or empty assets/meshes/{id}.mesh — regen boolean"
+                            "{pe_key} missing or empty {}/{id}.mesh — regen boolean",
+                            rvm_mesh_dir().display()
                         );
                         missing_pe.push(*pe_key);
                     }
@@ -1067,8 +1040,8 @@ mod mesh_wall_live {
         }
         aios_core::init_test_surreal()
             .await
-            .expect("init_test_surreal 连 8009");
-        let dir = std::path::PathBuf::from("assets/meshes");
+            .expect("init_test_surreal 连接配置库");
+        let dir = rvm_mesh_dir();
         let mut mesh_refnos = Vec::new();
         let mut bool_refnos = Vec::new();
         for pe_key in &missing_pe {
@@ -1107,13 +1080,13 @@ mod mesh_wall_live {
     /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
     /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_gwall_union -- --ignored --nocapture`
     #[tokio::test]
-    #[ignore = "live 8009：1112 CWALL 20 堵 GWALL 的 union mesh 对拍"]
+    #[ignore = "live database：1112 CWALL 20 堵 GWALL 的 union mesh 对拍（默认 8009，可覆盖 endpoint）"]
     async fn mesh_gwall_union_surface_distance() {
         use crate::fast_model::shared::{farthest_from_surface, two_sided_surface_distance};
 
         let rvm_path = std::path::Path::new("test_data/rvm/1RS-WF03-W-C-RR001.rvm");
         let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse rvm");
-        let db = live_8009().await;
+        let db = live_db().await;
 
         let pe_keys = [
             "pe:17496_105817",
@@ -1249,13 +1222,13 @@ mod mesh_wall_live {
     /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
     /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_gwall_extra -- --ignored --nocapture`
     #[tokio::test]
-    #[ignore = "live 8009：1112 3 堵大体量 GWALL 的 NXTR/范围差取证"]
+    #[ignore = "live database：1112 3 堵大体量 GWALL 的 NXTR/范围差取证（默认 8009，可覆盖 endpoint）"]
     async fn mesh_gwall_extra_against_cwall_union() {
         use crate::fast_model::shared::farthest_from_surface;
 
         let rvm_path = std::path::Path::new("test_data/rvm/1RS-WF03-W-C-RR001.rvm");
         let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse rvm");
-        let db = live_8009().await;
+        let db = live_db().await;
         let extra_keys = ["pe:17496_105828", "pe:17496_105880", "pe:17496_116569"];
         ensure_booled_mesh_files(&db, &extra_keys).await;
 

@@ -603,6 +603,15 @@ ws,gen_model,manifold,project_hd`：T039 / T042 落地后是 **1062 通过 / 1 �
   阈值一律不放宽（FR-010）；证据进 `docs/evidence/`，`docs/2026-08-12_live-test-ledger.md`
   同步。
 
+  **2026-08-24 双副本执行进展**：RVM 测试现可用 `AIOS_RVM_DB_ENDPOINT` 和
+  `AIOS_RVM_MESH_DIR` 指向隔离副本。默认 8009 的四堵 WALL gen→RVM p95
+  `7.86/7.84/8.63/4.05mm`，四堵 STWALL 双向 p95 全为 0；7997 副本从生成根重建后，
+  20/20 GWALL union 的 gen→RVM p95 为 4.14mm，三件大体量墙为
+  `0.1/9.3/167.5mm`，均过既有门。该副本没有 8 条历史测试专用 WALL/STWALL
+  `inst_relate`，对应测试准确报“目标库没有生成几何”，所以 T046–T048 仍不勾选；
+  需从源属性补齐副本测试资产，而不是复制 8009 的通过行。证据：
+  `docs/evidence/2026-08-24-occ-retire-dual-copy-rvm.md`。
+
 
 ## 2026-08-24 独立工作树执行记录
 
