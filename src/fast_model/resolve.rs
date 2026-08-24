@@ -3,9 +3,14 @@ use aios_core::expression::query_cata::{query_axis_params, resolve_cata_comp};
 use aios_core::expression::resolve::{SCOM_INFO_MAP, resolve_axis_param};
 use aios_core::parsed_data::{CateAxisParam, CateGeomsInfo};
 use aios_core::pdms_data::{PlinParam, ScomInfo};
-use aios_core::{CataContext, RefU64, RefnoEnum};
+use aios_core::{CataContext, NamedAttrMap, RefU64, RefnoEnum};
 use anyhow::anyhow;
 use std::collections::{BTreeMap, HashMap};
+
+fn publish_scom_info(cata_refno: RefnoEnum, scom_info: ScomInfo) -> ScomInfo {
+    SCOM_INFO_MAP.insert(cata_refno, scom_info.clone());
+    scom_info
+}
 
 ///收集SCOM的信息, 暂时慎用缓存
 pub async fn get_or_create_scom_info(cata_refno: RefnoEnum) -> anyhow::Result<ScomInfo> {
@@ -61,7 +66,7 @@ pub async fn get_or_create_scom_info(cata_refno: RefnoEnum) -> anyhow::Result<Sc
                 }
             }
         }
-        ScomInfo {
+        let scom_info = ScomInfo {
             gtype: attr_map.get_as_string("GTYP").unwrap_or("unset".into()),
             dtse_params: vec![],
             gm_params,
@@ -76,7 +81,11 @@ pub async fn get_or_create_scom_info(cata_refno: RefnoEnum) -> anyhow::Result<Sc
             axis_param_numbers,
             attr_map,
             plin_map,
-        }
+        };
+        // RocksDB remains authoritative. This cache holds only the parsed
+        // catalogue representation used by model generation, so later pages
+        // do not repeat GMRE/GSTR/NGMR traversal and expression parsing.
+        publish_scom_info(cata_refno, scom_info)
     };
     Ok(scom_info)
 }
@@ -103,6 +112,22 @@ pub async fn resolve_axis_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parsed_scom_is_published_for_later_pages() {
+        let refno: RefnoEnum = "1_987654".into();
+        SCOM_INFO_MAP.remove(&refno);
+        let mut expected = ScomInfo::default();
+        expected.gtype = "CACHE_SENTINEL".into();
+
+        publish_scom_info(refno, expected);
+
+        assert_eq!(
+            SCOM_INFO_MAP.get(&refno).map(|value| value.gtype.clone()),
+            Some("CACHE_SENTINEL".into())
+        );
+        SCOM_INFO_MAP.remove(&refno);
+    }
 
     /// BEND 24384/22456 uses this SCOM.  The on-demand CATA path persists the
     /// authoritative GMRE attribute but intentionally has no legacy `->GMRE`
@@ -197,4 +222,16 @@ pub async fn resolve_desi_comp(
     let geom_info = resolve_cata_comp(&desi_att, &scom_info, Some(context));
     // dbg!(&geom_info);
     geom_info.map_err(|_| anyhow!("resolve_cata_comp failed"))
+}
+
+/// Resolve a design component from page-prefetched attributes and catalogue
+/// identity. This avoids repeating the two hottest point reads while keeping
+/// the catalogue-expression semantics identical to [`resolve_desi_comp`].
+pub async fn resolve_desi_comp_prefetched(
+    desi_att: &NamedAttrMap,
+    scom_info: &ScomInfo,
+    context: CataContext,
+) -> anyhow::Result<CateGeomsInfo> {
+    resolve_cata_comp(desi_att, scom_info, Some(context))
+        .map_err(|_| anyhow!("resolve_cata_comp failed"))
 }

@@ -76,14 +76,15 @@ pub async fn apply_cata_neg_boolean_manifold(
     }
 
     let mut tasks = Vec::new();
-    let chunk = (params.len() / 16).max(1);
+    let worker_count = crate::fast_model::concurrency::fan_out_width(params.len());
+    let chunk = params.len().div_ceil(worker_count);
     // let chunk = params.len();
     // dbg!(&params);
     for chunk in params.chunks(chunk) {
         let group = chunk.to_vec();
         let dir_clone = dir.clone();
         let task = crate::data_interface::staging::write_context::spawn_with_staged_io(
-            async move {
+            crate::fast_model::concurrency::run_geometry(async move {
                 for g in group {
                     let pes = g
                         .boolean_group
@@ -278,7 +279,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                     }
                 }
                 Ok::<(), anyhow::Error>(())
-            },
+            }),
         );
         tasks.push(task);
     }
@@ -312,8 +313,13 @@ pub async fn apply_insts_boolean_manifold(
     failure_policy: geom_error::GeometryFailurePolicy,
 ) -> anyhow::Result<()> {
     for refno in refnos {
-        apply_insts_boolean_manifold_single(*refno, replace_exist, dir.clone(), failure_policy)
-            .await?;
+        crate::fast_model::concurrency::run_geometry(apply_insts_boolean_manifold_single(
+            *refno,
+            replace_exist,
+            dir.clone(),
+            failure_policy,
+        ))
+        .await?;
     }
     Ok(())
 }
@@ -725,6 +731,14 @@ fn manifold_io_uses_the_staged_router_and_propagates_worker_failures() {
     assert!(catalogue.contains("active_data_db()"), "{catalogue}");
     assert!(catalogue.contains("execute_model_write("), "{catalogue}");
     assert!(catalogue.contains("join_all(tasks).await"), "{catalogue}");
+    assert!(
+        catalogue.contains("concurrency::fan_out_width"),
+        "{catalogue}"
+    );
+    assert!(
+        catalogue.contains("concurrency::run_geometry"),
+        "{catalogue}"
+    );
     assert!(!catalogue.contains("try_join_all(tasks)"), "{catalogue}");
     assert!(
         catalogue.contains("for result in task_results"),
@@ -741,6 +755,17 @@ fn manifold_io_uses_the_staged_router_and_propagates_worker_failures() {
         .0;
     assert!(design.contains("active_data_db()"), "{design}");
     assert!(design.contains("execute_model_write("), "{design}");
+    let design_batch = source
+        .split_once("pub async fn apply_insts_boolean_manifold(")
+        .expect("design manifold batch function")
+        .1
+        .split_once("pub async fn apply_insts_boolean_manifold_single(")
+        .expect("design manifold batch boundary")
+        .0;
+    assert!(
+        design_batch.contains("concurrency::run_geometry"),
+        "{design_batch}"
+    );
     assert!(!design.contains("SUL_DB"), "{design}");
     assert!(
         design.contains("subtract_negatives"),

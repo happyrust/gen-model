@@ -61,6 +61,10 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub data_batch_workers: Option<usize>,
 
+    /// 全部几何生成任务共用的并发额度。`1` 是串行回滚档。
+    #[serde(default)]
+    pub geometry_permits: Option<usize>,
+
     /// 启动即自动干活（默认 `true`，见 [`startup_autorun`]）。
     ///
     /// 显式关掉时：启动重扫照常发现并入队，但排出来的行挂起（`DataBatch::held`）、
@@ -126,6 +130,7 @@ impl From<DbOption> for DbOptionExt {
             http_api_addr: None,
             http_api_cors: None,
             data_batch_workers: None,
+            geometry_permits: None,
             startup_autorun: None,
             data_incremental: None,
             model_incremental: None,
@@ -162,6 +167,8 @@ struct DbOptionExtFields {
     http_api_cors: Option<Vec<String>>,
     #[serde(default)]
     data_batch_workers: Option<usize>,
+    #[serde(default)]
+    geometry_permits: Option<usize>,
     #[serde(default)]
     startup_autorun: Option<bool>,
     #[serde(default)]
@@ -296,6 +303,12 @@ fn load_ext_fields() -> &'static DbOptionExtFields {
     })
 }
 
+fn strict_ext_config_error() -> Option<String> {
+    // Re-read only for validation. Configuration is process-immutable and this
+    // runs once when the geometry gate initializes.
+    read_ext_fields(std::env::var_os("DB_OPTION_FILE")).err()
+}
+
 fn ext_config_name(configured: Option<OsString>) -> String {
     configured
         .filter(|name| !name.to_string_lossy().trim().is_empty())
@@ -331,6 +344,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         http_api_addr: ext.http_api_addr.clone(),
         http_api_cors: ext.http_api_cors.clone(),
         data_batch_workers: ext.data_batch_workers,
+        geometry_permits: ext.geometry_permits,
         startup_autorun: ext.startup_autorun,
         data_incremental: ext.data_incremental,
         model_incremental: ext.model_incremental,
@@ -384,6 +398,34 @@ pub fn data_batch_workers() -> usize {
 
 fn effective_data_batch_workers(configured: Option<usize>) -> usize {
     configured.unwrap_or(1).clamp(1, 8)
+}
+
+pub const MAX_GEOMETRY_PERMITS: usize = 64;
+const DEFAULT_GEOMETRY_PERMITS_CAP: usize = 8;
+
+/// 全局几何并发额度。配置缺失时使用进程可用并行度并受默认资源上限约束；
+/// 显式的 0 或超上限值都是配置错误，不做静默夹取。
+pub fn geometry_permits() -> usize {
+    if let Some(error) = strict_ext_config_error() {
+        panic!("geometry_permits 配置校验失败: {error}");
+    }
+    effective_geometry_permits(load_ext_fields().geometry_permits)
+        .unwrap_or_else(|error| panic!("geometry_permits 配置校验失败: {error}"))
+}
+
+fn effective_geometry_permits(configured: Option<usize>) -> Result<usize, String> {
+    let permits = configured
+        .unwrap_or_else(|| available_parallelism_or_one().min(DEFAULT_GEOMETRY_PERMITS_CAP));
+    if permits == 0 || permits > MAX_GEOMETRY_PERMITS {
+        return Err(format!(
+            "值必须在 1..={MAX_GEOMETRY_PERMITS}，实际为 {permits}"
+        ));
+    }
+    Ok(permits)
+}
+
+fn available_parallelism_or_one() -> usize {
+    std::thread::available_parallelism().map_or(1, |value| value.get())
 }
 
 /// 环境变量名：一次性覆盖 [`startup_autorun`]，不必改配置文件。
@@ -658,6 +700,21 @@ mod tests {
         assert_eq!(effective_data_batch_workers(Some(0)), 1);
         assert_eq!(effective_data_batch_workers(Some(4)), 4);
         assert_eq!(effective_data_batch_workers(Some(32)), 8);
+    }
+
+    #[test]
+    fn geometry_permits_default_to_available_parallelism() {
+        assert_eq!(
+            effective_geometry_permits(None).unwrap(),
+            available_parallelism_or_one().min(DEFAULT_GEOMETRY_PERMITS_CAP)
+        );
+    }
+
+    #[test]
+    fn invalid_geometry_permits_fail_instead_of_being_clamped() {
+        assert!(effective_geometry_permits(Some(0)).is_err());
+        assert!(effective_geometry_permits(Some(MAX_GEOMETRY_PERMITS + 1)).is_err());
+        assert_eq!(effective_geometry_permits(Some(4)).unwrap(), 4);
     }
 
     /// 缺配置就是「全范围」：这个字段的形状与坑过人的 `manual_db_nums` 一样，

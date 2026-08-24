@@ -3,12 +3,15 @@ use crate::data_interface::db_model::{TUBI_CONNECT_TOL, TUBI_TOL};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::PlantAxisMap;
 use crate::fast_model;
-use crate::fast_model::{SEND_INST_SIZE, get_generic_type, resolve_desi_comp, shared};
+use crate::fast_model::{
+    SEND_INST_SIZE, get_generic_type, resolve_desi_comp, resolve_desi_comp_prefetched, shared,
+};
 use aios_core::consts::{CIVIL_TYPES, NGMR_OWN_TYPES};
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::CateGeomsInfo;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+use aios_core::pdms_data::ScomInfo;
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
 use aios_core::prim_geo::basic::{BOXI_GEO_HASH, TUBI_GEO_HASH};
@@ -16,15 +19,16 @@ use aios_core::prim_geo::category::{CateBrepShape, convert_to_brep_shapes};
 use aios_core::prim_geo::profile::create_profile_geos;
 use aios_core::prim_geo::*;
 use aios_core::prim_geo::{PdmsTubing, TubiEdge};
+use aios_core::rs_surreal::CataContext;
 use aios_core::shape::pdms_shape::{BrepShapeTrait, PlantMesh, VerifiedShape};
 use aios_core::tool::math_tool::to_pdms_vec_str;
+use aios_core::transform::get_world_transforms_many;
 use aios_core::{
     HASH_PSEUDO_ATT_MAPS, NamedAttrMap, NamedAttrValue, RefU64, RefnoEnum, gen_bytes_hash,
 };
 use bevy_transform::components::Transform;
 use dashmap::DashMap;
 use futures::StreamExt;
-use futures::future::join_all;
 use futures::stream::FuturesUnordered;
 use glam::{DMat4, DVec3, Vec3};
 use nalgebra::Point3;
@@ -35,9 +39,7 @@ use std::mem::take;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
-use tokio::sync::Semaphore;
 use tokio::sync::{Mutex, RwLock};
-use tracing::{debug, error, info, warn};
 
 // 使用 aios_core 中的 CataHashRefnoKV 定义
 pub use aios_core::pdms_types::CataHashRefnoKV;
@@ -708,12 +710,16 @@ pub async fn gen_cata_single_geoms(
     design_refno: RefnoEnum,
     brep_shape_map: &CateBrepShapeMap,
     design_axis_map: &DashMap<RefnoEnum, PlantAxisMap>,
+    prefetched: Option<(&NamedAttrMap, &ScomInfo, &CataContext)>,
 ) -> anyhow::Result<bool> {
     let total_start = std::time::Instant::now();
 
     // Timing for get_named_attmap
     let t_get_attmap = std::time::Instant::now();
-    let desi_att = aios_core::get_named_attmap(design_refno).await?;
+    let desi_att = match prefetched {
+        Some((attributes, _, _)) => attributes.clone(),
+        None => aios_core::get_named_attmap(design_refno).await?,
+    };
     let get_attmap_time = t_get_attmap.elapsed().as_millis();
 
     let type_name = desi_att.get_type_str();
@@ -724,7 +730,12 @@ pub async fn gen_cata_single_geoms(
 
     // Timing for resolve_desi_comp
     let t_resolve = std::time::Instant::now();
-    let geoms_info = resolve_desi_comp(design_refno, None).await?;
+    let geoms_info = match prefetched {
+        Some((attributes, scom_info, context)) => {
+            resolve_desi_comp_prefetched(attributes, scom_info, context.clone()).await?
+        }
+        None => resolve_desi_comp(design_refno, None).await?,
+    };
     let resolve_time = t_resolve.elapsed().as_millis();
 
     if type_name == "SCTN" || type_name == "STWALL" || type_name == "GENSEC" || type_name == "WALL"
@@ -844,6 +855,358 @@ pub fn cal_sjus_value(sjus: &str, height: f32) -> f32 {
     off_z
 }
 
+#[derive(Default)]
+struct CataPageReads {
+    attributes: HashMap<RefnoEnum, Option<NamedAttrMap>>,
+    transforms: HashMap<RefnoEnum, Option<Transform>>,
+    catalogue_refs: HashMap<RefnoEnum, Option<RefnoEnum>>,
+    geometry_refs: HashMap<RefnoEnum, Option<aios_core::CataGeometryRefs>>,
+    scom_infos: HashMap<RefnoEnum, Result<ScomInfo, String>>,
+    contexts: HashMap<RefnoEnum, Result<CataContext, String>>,
+}
+
+async fn prefetch_cata_contexts(
+    design_refnos: &[RefnoEnum],
+    design_attributes: &HashMap<RefnoEnum, Option<NamedAttrMap>>,
+    catalogue_refs: &HashMap<RefnoEnum, Option<RefnoEnum>>,
+) -> anyhow::Result<HashMap<RefnoEnum, Result<CataContext, String>>> {
+    let mut catalogue_refnos = design_refnos
+        .iter()
+        .filter_map(|refno| catalogue_refs.get(refno).copied().flatten())
+        .collect::<Vec<_>>();
+    catalogue_refnos.sort_unstable();
+    catalogue_refnos.dedup();
+    let catalogue_attributes = aios_core::get_named_attmaps_many(&catalogue_refnos)
+        .await?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    // Resolve the first owner carrying GTYP in breadth-first batches. This is
+    // the same walk as get_or_create_cata_context, but shared owners are read
+    // once for the page rather than once per CATA hash.
+    let mut owner_cursor = HashMap::new();
+    let mut owner_seen = HashMap::<RefnoEnum, Vec<RefnoEnum>>::new();
+    for design_refno in design_refnos {
+        if catalogue_refs
+            .get(design_refno)
+            .copied()
+            .flatten()
+            .is_some()
+            && let Some(attributes) = design_attributes.get(design_refno).and_then(Option::as_ref)
+        {
+            owner_cursor.insert(*design_refno, attributes.get_owner());
+            owner_seen.insert(*design_refno, Vec::new());
+        }
+    }
+    let mut owner_attributes = HashMap::<RefnoEnum, Option<NamedAttrMap>>::new();
+    let mut resolved_owners = HashMap::<RefnoEnum, RefnoEnum>::new();
+    let mut owner_errors = HashMap::<RefnoEnum, String>::new();
+    for _ in 0..64 {
+        let mut pending = owner_cursor
+            .values()
+            .filter(|refno| !owner_attributes.contains_key(refno))
+            .copied()
+            .collect::<Vec<_>>();
+        pending.sort_unstable();
+        pending.dedup();
+        if !pending.is_empty() {
+            owner_attributes.extend(aios_core::get_named_attmaps_many(&pending).await?);
+        }
+        let active = owner_cursor.keys().copied().collect::<Vec<_>>();
+        if active.is_empty() {
+            break;
+        }
+        for design_refno in active {
+            let owner_refno = owner_cursor[&design_refno];
+            let Some(owner_att) = owner_attributes.get(&owner_refno).and_then(Option::as_ref)
+            else {
+                owner_errors.insert(
+                    design_refno,
+                    format!("missing owner attributes for {owner_refno}"),
+                );
+                owner_cursor.remove(&design_refno);
+                continue;
+            };
+            if owner_att.contains_key("GTYP")
+                || owner_att.get_refno().is_none()
+                || owner_att.get_type_str() == "ZONE"
+            {
+                resolved_owners.insert(design_refno, owner_refno);
+                owner_cursor.remove(&design_refno);
+                continue;
+            }
+            let next = owner_att.get_owner();
+            let seen = owner_seen.entry(design_refno).or_default();
+            if seen.contains(&next) {
+                owner_errors.insert(design_refno, format!("owner cycle at {next}"));
+                owner_cursor.remove(&design_refno);
+            } else {
+                seen.push(next);
+                owner_cursor.insert(design_refno, next);
+            }
+        }
+    }
+    for (design_refno, owner_refno) in owner_cursor {
+        owner_errors.insert(
+            design_refno,
+            format!("owner depth exceeded while reading {owner_refno}"),
+        );
+    }
+
+    let mut dtre_refnos = catalogue_attributes
+        .values()
+        .filter_map(Option::as_ref)
+        .filter_map(|attributes| attributes.get_foreign_refno("DTRE"))
+        .collect::<Vec<_>>();
+    dtre_refnos.sort_unstable();
+    dtre_refnos.dedup();
+    let dtre_children = aios_core::get_children_named_attmaps_many(&dtre_refnos)
+        .await?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    let mut owner_refnos = resolved_owners.values().copied().collect::<Vec<_>>();
+    owner_refnos.sort_unstable();
+    owner_refnos.dedup();
+    let owner_catalogue_refs = aios_core::get_cat_refnos_many(&owner_refnos)
+        .await?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let mut owner_catalogue_refnos = owner_catalogue_refs
+        .values()
+        .filter_map(|value| *value)
+        .collect::<Vec<_>>();
+    owner_catalogue_refnos.sort_unstable();
+    owner_catalogue_refnos.dedup();
+    let owner_catalogue_attributes = aios_core::get_named_attmaps_many(&owner_catalogue_refnos)
+        .await?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    let mut attach_refnos = design_refnos
+        .iter()
+        .filter_map(|refno| design_attributes.get(refno).and_then(Option::as_ref))
+        .filter_map(|attributes| attributes.get_foreign_refno("CREF"))
+        .collect::<Vec<_>>();
+    attach_refnos.sort_unstable();
+    attach_refnos.dedup();
+    let attach_attributes = aios_core::get_named_attmaps_many(&attach_refnos)
+        .await?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let attach_catalogue_refs = aios_core::get_cat_refnos_many(&attach_refnos)
+        .await?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    let mut attach_catalogue_refnos = attach_catalogue_refs
+        .values()
+        .filter_map(|value| *value)
+        .collect::<Vec<_>>();
+    attach_catalogue_refnos.sort_unstable();
+    attach_catalogue_refnos.dedup();
+    let attach_catalogue_attributes = aios_core::get_named_attmaps_many(&attach_catalogue_refnos)
+        .await?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+
+    let mut contexts = HashMap::with_capacity(design_refnos.len());
+    for design_refno in design_refnos {
+        let Some(design_att) = design_attributes.get(design_refno).and_then(Option::as_ref) else {
+            contexts.insert(*design_refno, Err("missing design attributes".into()));
+            continue;
+        };
+        if let Some(error) = owner_errors.get(design_refno) {
+            contexts.insert(*design_refno, Err(error.clone()));
+            continue;
+        }
+        let catalogue_refno = catalogue_refs.get(design_refno).copied().flatten();
+        let catalogue_att = catalogue_refno
+            .and_then(|refno| catalogue_attributes.get(&refno))
+            .and_then(Option::as_ref);
+        let owner_refno = resolved_owners.get(design_refno).copied();
+        let owner_att = owner_refno
+            .and_then(|refno| owner_attributes.get(&refno))
+            .and_then(Option::as_ref);
+        let parent_catalogue_att = owner_refno
+            .and_then(|refno| owner_catalogue_refs.get(&refno).copied().flatten())
+            .and_then(|refno| owner_catalogue_attributes.get(&refno))
+            .and_then(Option::as_ref);
+        let dtre = catalogue_att.and_then(|attributes| attributes.get_foreign_refno("DTRE"));
+        let children = dtre
+            .and_then(|refno| dtre_children.get(&refno))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let attach_refno = design_att.get_foreign_refno("CREF");
+        let attach_att = attach_refno
+            .and_then(|refno| attach_attributes.get(&refno))
+            .and_then(Option::as_ref);
+        let attach_catalogue_att = attach_refno
+            .and_then(|refno| attach_catalogue_refs.get(&refno).copied().flatten())
+            .and_then(|refno| attach_catalogue_attributes.get(&refno))
+            .and_then(Option::as_ref);
+        contexts.insert(
+            *design_refno,
+            Ok(aios_core::create_cata_context_from_snapshot(
+                *design_refno,
+                false,
+                design_att,
+                catalogue_att,
+                owner_att,
+                children,
+                parent_catalogue_att,
+                attach_att,
+                attach_catalogue_att,
+            )),
+        );
+    }
+    Ok(contexts)
+}
+
+async fn prefetch_cata_page(
+    target_cata_map: &DashMap<String, CataHashRefnoKV>,
+    branch_map: &DashMap<RefnoEnum, Vec<SPdmsElement>>,
+) -> anyhow::Result<CataPageReads> {
+    let started = Instant::now();
+    let mut refnos = target_cata_map
+        .iter()
+        .flat_map(|entry| entry.group_refnos.clone())
+        .chain(branch_map.iter().map(|entry| *entry.key()))
+        .collect::<Vec<_>>();
+    refnos.sort_unstable();
+    refnos.dedup();
+
+    let (attributes, transforms, catalogue_refs) = tokio::try_join!(
+        aios_core::get_named_attmaps_many(&refnos),
+        get_world_transforms_many(&refnos),
+        aios_core::get_cat_refnos_many(&refnos),
+    )?;
+    let mut attributes = attributes.into_iter().collect::<HashMap<_, _>>();
+    let transforms = transforms.into_iter().collect::<HashMap<_, _>>();
+    let catalogue_refs = catalogue_refs.into_iter().collect::<HashMap<_, _>>();
+
+    let mut design_refnos = target_cata_map
+        .iter()
+        .filter_map(|entry| entry.group_refnos.first().copied())
+        .collect::<Vec<_>>();
+    design_refnos.sort_unstable();
+    design_refnos.dedup();
+
+    // HREF/HSTU attributes are needed by tubing generation but are not members
+    // of the CATA hash groups. Discover them from the already fetched branch
+    // rows and load them in one second request.
+    let mut tubing_refs = branch_map
+        .iter()
+        .filter_map(|entry| {
+            attributes
+                .get(entry.key())
+                .and_then(Option::as_ref)
+                .and_then(|attributes| {
+                    let key = if attributes.get_type_str() == "HANG" {
+                        "HREF"
+                    } else {
+                        "HSTU"
+                    };
+                    attributes.get_foreign_refno(key)
+                })
+        })
+        .collect::<Vec<_>>();
+    tubing_refs.sort_unstable();
+    tubing_refs.dedup();
+    attributes.extend(aios_core::get_named_attmaps_many(&tubing_refs).await?);
+
+    let context_started = Instant::now();
+    let contexts = prefetch_cata_contexts(&design_refnos, &attributes, &catalogue_refs).await?;
+    let context_errors = contexts.values().filter(|value| value.is_err()).count();
+    let context_ms = context_started.elapsed().as_millis();
+
+    let mut cata_refnos = catalogue_refs
+        .values()
+        .filter_map(|value| *value)
+        .collect::<Vec<_>>();
+    cata_refnos.sort_unstable();
+    cata_refnos.dedup();
+    let geometry_refs = aios_core::query_cata_geometry_refs_many(&cata_refnos)
+        .await?
+        .into_iter()
+        .collect();
+
+    // A page commonly contains many different design-parameter hashes that
+    // all point at the same SCOM. Building ScomInfo per hash repeats the whole
+    // GMRE/GSTR child traversal. Materialise each SCOM once for this page;
+    // keeping the map page-local avoids stale catalogue data across rebuilds.
+    let scom_started = Instant::now();
+    let mut scom_infos = HashMap::with_capacity(cata_refnos.len());
+    let mut scom_cache_hits = 0usize;
+    for cata_refno in &cata_refnos {
+        if aios_core::expression::resolve::SCOM_INFO_MAP.contains_key(cata_refno) {
+            scom_cache_hits += 1;
+        }
+        let info = crate::fast_model::resolve::get_or_create_scom_info(*cata_refno)
+            .await
+            .map_err(|error| format!("{error:#}"));
+        scom_infos.insert(*cata_refno, info);
+    }
+    let scom_errors = scom_infos.values().filter(|value| value.is_err()).count();
+
+    println!(
+        "cata_prefetch_summary stage=page inputs={} catalogue_refs={} tubing_refs={} context_errors={} context_ms={} scom_cache_hits={} scom_cache_misses={} scom_errors={} scom_ms={} elapsed_ms={}",
+        refnos.len(),
+        cata_refnos.len(),
+        tubing_refs.len(),
+        context_errors,
+        context_ms,
+        scom_cache_hits,
+        cata_refnos.len() - scom_cache_hits,
+        scom_errors,
+        scom_started.elapsed().as_millis(),
+        started.elapsed().as_millis()
+    );
+    Ok(CataPageReads {
+        attributes,
+        transforms,
+        catalogue_refs,
+        geometry_refs,
+        scom_infos,
+        contexts,
+    })
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+struct CataDataError {
+    target: RefnoEnum,
+    cata_hash: String,
+    stage: String,
+    reason: String,
+}
+
+impl CataDataError {
+    fn new(target: RefnoEnum, cata_hash: &str, stage: &str, error: impl std::fmt::Display) -> Self {
+        Self {
+            target,
+            cata_hash: cata_hash.to_owned(),
+            stage: stage.to_owned(),
+            reason: error.to_string(),
+        }
+    }
+}
+
+async fn persist_cata_data_error(error: &CataDataError) {
+    crate::data_interface::geom_error::note_skip(
+        "cata_generation",
+        &error.target.to_string(),
+        &error.cata_hash,
+        &format!(
+            "stage={} cata_hash={}: {}",
+            error.stage, error.cata_hash, error.reason
+        ),
+    )
+    .await;
+}
+
+fn sort_by_batch_id<T>(items: &mut [(usize, T)]) {
+    items.sort_by_key(|(batch_id, _)| *batch_id);
+}
+
 /// 生成元件库的branch型几何体
 /// 动态修改tubi，还是要单独出来, 还是直接去修改整个bran？
 /// 先暂时整个重新生成？
@@ -864,26 +1227,26 @@ pub async fn gen_cata_geos(
     let gen_mesh = db_option.gen_mesh;
     let mut local_al_map = Arc::new(DashMap::new());
     let is_bran = branch_map.len() > 0;
+    let page_reads = Arc::new(prefetch_cata_page(&target_cata_map, &branch_map).await?);
 
     // 用于收集总耗时的互斥锁
     let total_time_stats = Arc::new(Mutex::new(HashMap::new()));
 
     let db_time_fetch_keys = Instant::now();
-    let all_unique_keys = Arc::new(
-        target_cata_map
-            .iter()
-            .map(|x| x.cata_hash.clone())
-            .collect::<Vec<_>>(),
-    );
+    let mut all_unique_keys = target_cata_map
+        .iter()
+        .map(|x| x.cata_hash.clone())
+        .collect::<Vec<_>>();
+    all_unique_keys.sort();
+    all_unique_keys.dedup();
+    let all_unique_keys = Arc::new(all_unique_keys);
 
     let unique_cata_cnt = all_unique_keys.len();
-    let mut batch_chunks_cnt = 4;
-    let mut batch_size = all_unique_keys.len() / batch_chunks_cnt + 1;
+    // One task owns one stable CATA identity. The process-wide gate controls
+    // how many tasks may execute geometry work at once.
+    let batch_chunks_cnt = unique_cata_cnt;
+    let batch_size = 1;
     let test_refno = db_option.get_test_refno();
-    //如果只有一个元件，就不分块了
-    if batch_size == 1 {
-        batch_chunks_cnt = all_unique_keys.len();
-    }
     #[cfg(feature = "profile")]
     tracing::info!(
         unique_cata_cnt,
@@ -892,13 +1255,13 @@ pub async fn gen_cata_geos(
     );
 
     if !all_unique_keys.is_empty() {
+        let mut batch_handles = FuturesUnordered::new();
         for i in 0..batch_chunks_cnt {
             let all_unique_keys = all_unique_keys.clone();
             let target_cata_map = target_cata_map.clone();
             let sjus_map_clone = sjus_map_arc.clone();
-            let local_al_map_clone = local_al_map.clone();
-            let sender = sender.clone();
             let total_time_stats = total_time_stats.clone();
+            let page_reads = page_reads.clone();
             let batch_id = i + 1;
 
             #[cfg(feature = "profile")]
@@ -909,455 +1272,702 @@ pub async fn gen_cata_geos(
             if end_idx > unique_cata_cnt {
                 end_idx = unique_cata_cnt;
             }
-            #[cfg(feature = "profile")]
-            tracing::info!(start_idx, end_idx, "Processing batch range");
-            let mut shape_insts_data = ShapeInstancesData::default();
-            if is_bran {
-                shape_insts_data.fill_basic_shapes();
-            }
-
-            let mut db_time_get_named_attmap = 0;
-            let mut db_time_get_world_transform = 0;
-            let mut db_time_get_cat_refno = 0;
-            let mut db_time_query_single = 0;
-            let mut db_time_gen_single_geoms = 0;
-            let mut db_time_get_generic_type = 0;
-            let mut db_time_hash_lock = 0;
-            let mut db_time_query_refnos = 0;
-
-            for j in start_idx..end_idx {
-                #[cfg(feature = "profile")]
-                tracing::debug!(item_idx = j, "Processing item");
-
-                let cata_hash = all_unique_keys[j].clone();
-                if cata_hash == "0" {
-                    continue;
-                }
-                let target_cata = target_cata_map.get(&cata_hash).unwrap();
-                let mut process_refno = None;
-                let mut ptset_map = None;
-
-                //如果inst_info 已经存在了，可以直接跳过生成，直接指向过去就可以了
-                if gen_mesh || !target_cata.exist_inst {
-                    //如果没有已有的，需要生成
-                    let ele_refno = target_cata.group_refnos[0];
-                    process_refno = Some(ele_refno);
-
-                    let t_get_cat_refno = Instant::now();
+            let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(
+                crate::fast_model::concurrency::run_geometry(async move {
+                    let mut output_batches = Vec::new();
+                    let mut pseudo_outputs = Vec::new();
+                    let mut alignment_outputs = Vec::new();
+                    let mut data_errors = Vec::new();
                     #[cfg(feature = "profile")]
-                    tracing::debug!(ele_refno = ?ele_refno, "Getting cat refno");
-                    let result = aios_core::get_cat_refno(ele_refno).await;
-                    let cata_refno = if let Ok(Some(refno)) = result {
-                        refno
-                    } else {
+                    tracing::info!(start_idx, end_idx, "Processing batch range");
+                    let mut shape_insts_data = ShapeInstancesData::default();
+                    if is_bran {
+                        shape_insts_data.fill_basic_shapes();
+                    }
+
+                    let mut db_time_get_named_attmap = 0;
+                    let mut db_time_get_world_transform = 0;
+                    let mut db_time_get_cat_refno = 0;
+                    let mut db_time_query_single = 0;
+                    let mut db_time_gen_single_geoms = 0;
+                    let mut db_time_get_generic_type = 0;
+                    let mut db_time_hash_lock = 0;
+                    let mut db_time_query_refnos = 0;
+
+                    for j in start_idx..end_idx {
                         #[cfg(feature = "profile")]
-                        tracing::debug!(ele_refno = ?ele_refno, "元件库引用为空，跳过");
-                        continue;
-                    };
-                    db_time_get_cat_refno += t_get_cat_refno.elapsed().as_millis();
+                        tracing::debug!(item_idx = j, "Processing item");
 
-                    #[cfg(feature = "profile")]
-                    tracing::debug!(ele_refno = ?ele_refno, cata_refno = ?cata_refno, "开始生成元件库模型");
-
-                    let t_query_single = Instant::now();
-                    #[cfg(feature = "profile")]
-                    tracing::debug!(cata_refno = ?cata_refno, "Querying GMSE");
-                    let gmse_refno = aios_core::query_single_by_paths(
-                        cata_refno,
-                        &["->GMRE", "->GSTR"],
-                        &["REFNO"],
-                    )
-                    .await
-                    .map(|x| x.get_refno_or_default());
-                    db_time_query_single += t_query_single.elapsed().as_millis();
-
-                    let t_query_single2 = Instant::now();
-                    #[cfg(feature = "profile")]
-                    tracing::debug!(cata_refno = ?cata_refno, "Querying NGMR");
-                    let ngmr_refno =
-                        aios_core::query_single_by_paths(cata_refno, &["->NGMR"], &["REFNO"])
-                            .await
-                            .map(|x| x.get_refno_or_default());
-                    db_time_query_single += t_query_single2.elapsed().as_millis();
-
-                    let valid_gmse = gmse_refno.as_ref().map(|r| r.is_valid()).unwrap_or(false);
-                    let valid_ngmr = ngmr_refno.as_ref().map(|r| r.is_valid()).unwrap_or(false);
-
-                    if !valid_gmse && !valid_ngmr {
-                        continue;
-                    }
-
-                    let brep_shapes_map = CateBrepShapeMap::new();
-
-                    let t_get_named_attmap = Instant::now();
-                    #[cfg(feature = "profile")]
-                    tracing::debug!(ele_refno = ?ele_refno, "Getting named attmap");
-                    let desi_att = aios_core::get_named_attmap(ele_refno)
-                        .await
-                        .unwrap_or_default();
-                    db_time_get_named_attmap += t_get_named_attmap.elapsed().as_millis();
-
-                    let mut design_axis_map = DashMap::new();
-                    let cur_type = desi_att.get_type_str();
-
-                    let t_gen_single_geoms = Instant::now();
-                    #[cfg(feature = "profile")]
-                    tracing::debug!(ele_refno = ?ele_refno, "Generating single geoms");
-                    let r =
-                        gen_cata_single_geoms(ele_refno, &brep_shapes_map, &design_axis_map).await;
-                    db_time_gen_single_geoms += t_gen_single_geoms.elapsed().as_millis();
-
-                    match r {
-                        Ok(_) => {
-                            #[cfg(feature = "profile")]
-                            tracing::debug!(ele_refno = ?ele_refno, "生成元件库模型成功");
-                        }
-                        Err(e) => {
-                            #[cfg(feature = "profile")]
-                            tracing::error!(ele_refno = ?ele_refno, error = ?e, "生成元件库模型失败");
-                            continue;
-                        }
-                    };
-
-                    {
-                        // 将一些伪属性需要用到的值存下来，后面也要更新维护这些伪属性，避免重复计算
-                        let t_lock = Instant::now();
-                        let mut lock = HASH_PSEUDO_ATT_MAPS.write().await;
-                        db_time_hash_lock += t_lock.elapsed().as_millis();
-
-                        let psudo_map = lock
-                            .entry(cata_hash.clone())
-                            .or_insert(NamedAttrMap::default());
-
-                        if desi_att.contains_key("LEAV") {
-                            let arrive = desi_att.get_i32("ARRI").unwrap_or_default();
-                            let leave = desi_att.get_i32("LEAV").unwrap_or_default();
-                            let axis_map = design_axis_map.get(&ele_refno).unwrap();
-                            if axis_map.contains_key(&arrive) {
-                                let v = axis_map.get(&arrive).unwrap();
-                                psudo_map
-                                    .insert("ARRWID".into(), NamedAttrValue::F32Type(v.pwidth));
-                                psudo_map
-                                    .insert("ARRHEI".into(), NamedAttrValue::F32Type(v.pheight));
-                                psudo_map.insert("ABOR".into(), NamedAttrValue::F32Type(v.pbore));
-                            }
-
-                            if axis_map.contains_key(&leave) {
-                                let v = axis_map.get(&leave).unwrap();
-                                psudo_map
-                                    .insert("LEAWID".into(), NamedAttrValue::F32Type(v.pwidth));
-                                psudo_map
-                                    .insert("LEAHEI".into(), NamedAttrValue::F32Type(v.pheight));
-                                psudo_map.insert("LBOR".into(), NamedAttrValue::F32Type(v.pbore));
-                            }
-                        }
-                    }
-
-                    ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
-                    for (ele_refno, shapes) in brep_shapes_map {
-                        let t_get_world_transform = Instant::now();
-                        let Ok(Some(mut world_transform)) =
-                            aios_core::get_world_transform(ele_refno).await
-                        else {
-                            continue;
-                        };
-                        db_time_get_world_transform += t_get_world_transform.elapsed().as_millis();
-
-                        let t_get_named_attmap2 = Instant::now();
-                        let Ok(ele_att) = aios_core::get_named_attmap(ele_refno).await else {
-                            continue;
-                        };
-                        db_time_get_named_attmap += t_get_named_attmap2.elapsed().as_millis();
-
-                        if let Some(sjus) = ele_att.get_str("SJUS") {
-                            let parent = ele_att.get_owner();
-                            if let Some(sjus_adjust) = sjus_map_clone.get(&parent) {
-                                let height = sjus_adjust.value().1;
-                                let off_z = cal_sjus_value(sjus, height);
-
-                                let t_get_world_transform2 = Instant::now();
-                                let parent_trans = aios_core::get_world_transform(parent)
-                                    .await
-                                    .unwrap_or_default()
-                                    .unwrap_or_default();
-                                db_time_get_world_transform +=
-                                    t_get_world_transform2.elapsed().as_millis();
-
-                                world_transform.translation.z = parent_trans.translation.z;
-                                world_transform.translation = world_transform.translation
-                                    + sjus_adjust.value().0
-                                    + Vec3::new(0.0, 0.0, off_z);
-                            }
-                        }
-
-                        //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
-                        //反过来查询负实体，然后查询它的owner，来找到相邻的正实体
-                        let t_query_refnos = Instant::now();
-                        let mut pos_neg_map: HashMap<RefnoEnum, Vec<RefnoEnum>> = if valid_gmse {
-                            if let Ok(gmse) = &gmse_refno {
-                                aios_core::query_refnos_has_pos_neg_map(&[*gmse], Some(true))
-                                    .await
-                                    .unwrap_or_default()
-                            } else {
-                                HashMap::new()
-                            }
-                        } else {
-                            HashMap::new()
-                        };
-                        db_time_query_refnos += t_query_refnos.elapsed().as_millis();
-
-                        let mut neg_own_pos_map: HashMap<RefnoEnum, RefnoEnum> = pos_neg_map
-                            .iter()
-                            .map(|(k, negs)| negs.iter().map(|x| (*x, *k)))
-                            .flatten()
-                            .collect();
-
-                        let cur_ptset_map = design_axis_map
-                            .remove(&ele_refno)
-                            .map(|x| x.1)
-                            .unwrap_or_default();
-
-                        let t_get_generic_type = Instant::now();
-                        let generic_type = get_generic_type(ele_refno).await.unwrap_or_default();
-                        db_time_get_generic_type += t_get_generic_type.elapsed().as_millis();
-
-                        let mut geos_info = EleGeosInfo {
-                            refno: ele_refno,
-                            sesno: ele_att.sesno(),
-                            cata_hash: Some(cata_hash.clone()),
-                            visible: true,
-                            generic_type,
-                            aabb: None,
-                            world_transform,
-                            cata_refno: Some(cata_refno),
-                            ptset_map: cur_ptset_map.clone(),
-                            is_solid: true,
-                            ..Default::default()
-                        };
-
-                        if ele_att.contains_key("ARRI") && !cur_ptset_map.is_empty() {
-                            let arrive = ele_att.get_i32("ARRI").unwrap_or(-1);
-                            let leave = ele_att.get_i32("LEAV").unwrap_or(-1);
-                            if let Some(a) = cur_ptset_map.values().find(|x| x.number == arrive)
-                                && let Some(l) = cur_ptset_map.values().find(|x| x.number == leave)
+                        let cata_hash = all_unique_keys[j].clone();
+                        if cata_hash == "0" {
+                            for refno in target_cata_map
+                                .get(&cata_hash)
+                                .into_iter()
+                                .flat_map(|target| target.group_refnos.clone())
                             {
-                                local_al_map_clone.insert(ele_refno, [a.clone(), l.clone()]);
+                                data_errors.push(CataDataError::new(
+                                    refno,
+                                    &cata_hash,
+                                    "identity",
+                                    "CATA hash is zero",
+                                ));
                             }
-                            ptset_map = Some(cur_ptset_map);
-                        };
+                            continue;
+                        }
+                        let target_cata = target_cata_map.get(&cata_hash).unwrap();
+                        let mut group_refnos = target_cata.group_refnos.clone();
+                        group_refnos.sort_unstable();
+                        if group_refnos.is_empty() {
+                            return Err(anyhow::anyhow!(
+                                "CATA identity {cata_hash} has no scheduled instance"
+                            ));
+                        }
+                        let mut process_refno = None;
+                        let mut ptset_map = None;
 
-                        let mut geo_insts = vec![];
-                        let mut visible_set = HashSet::new();
-                        for s in &shapes {
-                            if s.visible {
-                                visible_set.insert(s.refno);
+                        //如果inst_info 已经存在了，可以直接跳过生成，直接指向过去就可以了
+                        if gen_mesh || !target_cata.exist_inst {
+                            //如果没有已有的，需要生成
+                            let ele_refno = group_refnos[0];
+                            process_refno = Some(ele_refno);
+
+                            let t_get_cat_refno = Instant::now();
+                            #[cfg(feature = "profile")]
+                            tracing::debug!(ele_refno = ?ele_refno, "Getting cat refno");
+                            let cata_refno = if let Some(refno) =
+                                page_reads.catalogue_refs.get(&ele_refno).copied().flatten()
+                            {
+                                refno
+                            } else {
+                                data_errors.push(CataDataError::new(
+                                    ele_refno,
+                                    &cata_hash,
+                                    "catalogue_ref",
+                                    "CATR is missing",
+                                ));
+                                #[cfg(feature = "profile")]
+                                tracing::debug!(ele_refno = ?ele_refno, "元件库引用为空，跳过");
+                                continue;
+                            };
+                            db_time_get_cat_refno += t_get_cat_refno.elapsed().as_millis();
+
+                            let Some(scom_info) = page_reads.scom_infos.get(&cata_refno) else {
+                                data_errors.push(CataDataError::new(
+                                    ele_refno,
+                                    &cata_hash,
+                                    "scom_prefetch",
+                                    format!("prefetched SCOM is missing: {cata_refno}"),
+                                ));
+                                continue;
+                            };
+                            let scom_info = match scom_info {
+                                Ok(info) => info,
+                                Err(error) => {
+                                    data_errors.push(CataDataError::new(
+                                        ele_refno,
+                                        &cata_hash,
+                                        "scom_prefetch",
+                                        error,
+                                    ));
+                                    continue;
+                                }
+                            };
+                            let Some(context) = page_reads.contexts.get(&ele_refno) else {
+                                data_errors.push(CataDataError::new(
+                                    ele_refno,
+                                    &cata_hash,
+                                    "context_prefetch",
+                                    "prefetched CATA context is missing",
+                                ));
+                                continue;
+                            };
+                            let context = match context {
+                                Ok(context) => context,
+                                Err(error) => {
+                                    data_errors.push(CataDataError::new(
+                                        ele_refno,
+                                        &cata_hash,
+                                        "context_prefetch",
+                                        error,
+                                    ));
+                                    continue;
+                                }
+                            };
+
+                            #[cfg(feature = "profile")]
+                            tracing::debug!(ele_refno = ?ele_refno, cata_refno = ?cata_refno, "开始生成元件库模型");
+
+                            let t_query_single = Instant::now();
+                            #[cfg(feature = "profile")]
+                            tracing::debug!(cata_refno = ?cata_refno, "Querying GMSE");
+                            let geometry_refs = page_reads
+                                .geometry_refs
+                                .get(&cata_refno)
+                                .copied()
+                                .flatten()
+                                .unwrap_or_default();
+                            let gmse_refno = geometry_refs.positive;
+                            let ngmr_refno = geometry_refs.negative;
+                            db_time_query_single += t_query_single.elapsed().as_millis();
+
+                            let valid_gmse = gmse_refno.is_some_and(|refno| refno.is_valid());
+                            let valid_ngmr = ngmr_refno.is_some_and(|refno| refno.is_valid());
+
+                            if !valid_gmse && !valid_ngmr {
+                                data_errors.push(CataDataError::new(
+                                    ele_refno,
+                                    &cata_hash,
+                                    "geometry_refs",
+                                    "both positive and negative geometry references are missing",
+                                ));
+                                continue;
+                            }
+
+                            let brep_shapes_map = CateBrepShapeMap::new();
+
+                            let t_get_named_attmap = Instant::now();
+                            #[cfg(feature = "profile")]
+                            tracing::debug!(ele_refno = ?ele_refno, "Getting named attmap");
+                            let Some(desi_att) = page_reads
+                                .attributes
+                                .get(&ele_refno)
+                                .and_then(Option::as_ref)
+                                .cloned()
+                            else {
+                                data_errors.push(CataDataError::new(
+                                    ele_refno,
+                                    &cata_hash,
+                                    "attributes",
+                                    "named attributes are missing",
+                                ));
+                                continue;
+                            };
+                            db_time_get_named_attmap += t_get_named_attmap.elapsed().as_millis();
+
+                            let mut design_axis_map = DashMap::new();
+                            let cur_type = desi_att.get_type_str();
+
+                            let t_gen_single_geoms = Instant::now();
+                            #[cfg(feature = "profile")]
+                            tracing::debug!(ele_refno = ?ele_refno, "Generating single geoms");
+                            let r = gen_cata_single_geoms(
+                                ele_refno,
+                                &brep_shapes_map,
+                                &design_axis_map,
+                                Some((&desi_att, scom_info, context)),
+                            )
+                            .await;
+                            db_time_gen_single_geoms += t_gen_single_geoms.elapsed().as_millis();
+
+                            match r {
+                                Ok(_) => {
+                                    #[cfg(feature = "profile")]
+                                    tracing::debug!(ele_refno = ?ele_refno, "生成元件库模型成功");
+                                }
+                                Err(e) => {
+                                    data_errors.push(CataDataError::new(
+                                        ele_refno,
+                                        &cata_hash,
+                                        "resolve_component",
+                                        &e,
+                                    ));
+                                    #[cfg(feature = "profile")]
+                                    tracing::error!(ele_refno = ?ele_refno, error = ?e, "生成元件库模型失败");
+                                    continue;
+                                }
+                            };
+
+                            {
+                                // 将一些伪属性需要用到的值存下来，后面也要更新维护这些伪属性，避免重复计算
+                                let t_lock = Instant::now();
+                                let mut psudo_map = NamedAttrMap::default();
+
+                                if desi_att.contains_key("LEAV") {
+                                    let arrive = desi_att.get_i32("ARRI").unwrap_or_default();
+                                    let leave = desi_att.get_i32("LEAV").unwrap_or_default();
+                                    let axis_map = design_axis_map.get(&ele_refno).unwrap();
+                                    if axis_map.contains_key(&arrive) {
+                                        let v = axis_map.get(&arrive).unwrap();
+                                        psudo_map.insert(
+                                            "ARRWID".into(),
+                                            NamedAttrValue::F32Type(v.pwidth),
+                                        );
+                                        psudo_map.insert(
+                                            "ARRHEI".into(),
+                                            NamedAttrValue::F32Type(v.pheight),
+                                        );
+                                        psudo_map.insert(
+                                            "ABOR".into(),
+                                            NamedAttrValue::F32Type(v.pbore),
+                                        );
+                                    }
+
+                                    if axis_map.contains_key(&leave) {
+                                        let v = axis_map.get(&leave).unwrap();
+                                        psudo_map.insert(
+                                            "LEAWID".into(),
+                                            NamedAttrValue::F32Type(v.pwidth),
+                                        );
+                                        psudo_map.insert(
+                                            "LEAHEI".into(),
+                                            NamedAttrValue::F32Type(v.pheight),
+                                        );
+                                        psudo_map.insert(
+                                            "LBOR".into(),
+                                            NamedAttrValue::F32Type(v.pbore),
+                                        );
+                                    }
+                                }
+                                pseudo_outputs.push((cata_hash.clone(), psudo_map));
+                                db_time_hash_lock += t_lock.elapsed().as_millis();
+                            }
+
+                            ///处理几何体的shapes，负实体需要合并处理, ele_refno 为design refno
+                            for (ele_refno, shapes) in brep_shapes_map {
+                                let t_get_world_transform = Instant::now();
+                                let Some(mut world_transform) =
+                                    page_reads.transforms.get(&ele_refno).copied().flatten()
+                                else {
+                                    data_errors.push(CataDataError::new(
+                                        ele_refno,
+                                        &cata_hash,
+                                        "world_transform",
+                                        "world transform is missing",
+                                    ));
+                                    continue;
+                                };
+                                db_time_get_world_transform +=
+                                    t_get_world_transform.elapsed().as_millis();
+
+                                let t_get_named_attmap2 = Instant::now();
+                                let Some(ele_att) = page_reads
+                                    .attributes
+                                    .get(&ele_refno)
+                                    .and_then(Option::as_ref)
+                                else {
+                                    data_errors.push(CataDataError::new(
+                                        ele_refno,
+                                        &cata_hash,
+                                        "attributes",
+                                        "named attributes are missing",
+                                    ));
+                                    continue;
+                                };
+                                db_time_get_named_attmap +=
+                                    t_get_named_attmap2.elapsed().as_millis();
+
+                                if let Some(sjus) = ele_att.get_str("SJUS") {
+                                    let parent = ele_att.get_owner();
+                                    if let Some(sjus_adjust) = sjus_map_clone.get(&parent) {
+                                        let height = sjus_adjust.value().1;
+                                        let off_z = cal_sjus_value(sjus, height);
+
+                                        let t_get_world_transform2 = Instant::now();
+                                        let Some(parent_trans) =
+                                            page_reads.transforms.get(&parent).copied().flatten()
+                                        else {
+                                            data_errors.push(CataDataError::new(
+                                                ele_refno,
+                                                &cata_hash,
+                                                "sjus_parent_transform",
+                                                format!(
+                                                    "parent world transform is missing: {parent}"
+                                                ),
+                                            ));
+                                            continue;
+                                        };
+                                        db_time_get_world_transform +=
+                                            t_get_world_transform2.elapsed().as_millis();
+
+                                        world_transform.translation.z = parent_trans.translation.z;
+                                        world_transform.translation = world_transform.translation
+                                            + sjus_adjust.value().0
+                                            + Vec3::new(0.0, 0.0, off_z);
+                                    }
+                                }
+
+                                //判断是否有负实体的集合组合，在这里做一个合并处理，只要发现有负实体，就合并在一起
+                                //反过来查询负实体，然后查询它的owner，来找到相邻的正实体
+                                let t_query_refnos = Instant::now();
+                                let mut pos_neg_map: HashMap<RefnoEnum, Vec<RefnoEnum>> =
+                                    if valid_gmse {
+                                        if let Some(gmse) = gmse_refno {
+                                            aios_core::query_refnos_has_pos_neg_map(
+                                                &[gmse],
+                                                Some(true),
+                                            )
+                                            .await
+                                            .map_err(|error| {
+                                                anyhow::anyhow!(
+                                                    "stage=positive_negative_refs cata_hash={cata_hash} root={ele_refno}: {error:#}"
+                                                )
+                                            })?
+                                        } else {
+                                            HashMap::new()
+                                        }
+                                    } else {
+                                        HashMap::new()
+                                    };
+                                db_time_query_refnos += t_query_refnos.elapsed().as_millis();
+
+                                let mut neg_own_pos_map: HashMap<RefnoEnum, RefnoEnum> =
+                                    pos_neg_map
+                                        .iter()
+                                        .map(|(k, negs)| negs.iter().map(|x| (*x, *k)))
+                                        .flatten()
+                                        .collect();
+
+                                let cur_ptset_map = design_axis_map
+                                    .remove(&ele_refno)
+                                    .map(|x| x.1)
+                                    .unwrap_or_default();
+
+                                let t_get_generic_type = Instant::now();
+                                let generic_type = match get_generic_type(ele_refno).await {
+                                    Ok(generic_type) => generic_type,
+                                    Err(error) => {
+                                        data_errors.push(CataDataError::new(
+                                            ele_refno,
+                                            &cata_hash,
+                                            "generic_type",
+                                            &error,
+                                        ));
+                                        PdmsGenericType::UNKOWN
+                                    }
+                                };
+                                db_time_get_generic_type +=
+                                    t_get_generic_type.elapsed().as_millis();
+
+                                let mut geos_info = EleGeosInfo {
+                                    refno: ele_refno,
+                                    sesno: ele_att.sesno(),
+                                    cata_hash: Some(cata_hash.clone()),
+                                    visible: true,
+                                    generic_type,
+                                    aabb: None,
+                                    world_transform,
+                                    cata_refno: Some(cata_refno),
+                                    ptset_map: cur_ptset_map.clone(),
+                                    is_solid: true,
+                                    ..Default::default()
+                                };
+
+                                if ele_att.contains_key("ARRI") && !cur_ptset_map.is_empty() {
+                                    let arrive = ele_att.get_i32("ARRI").unwrap_or(-1);
+                                    let leave = ele_att.get_i32("LEAV").unwrap_or(-1);
+                                    if let Some(a) =
+                                        cur_ptset_map.values().find(|x| x.number == arrive)
+                                        && let Some(l) =
+                                            cur_ptset_map.values().find(|x| x.number == leave)
+                                    {
+                                        alignment_outputs.push((ele_refno, [a.clone(), l.clone()]));
+                                    }
+                                    ptset_map = Some(cur_ptset_map);
+                                };
+
+                                let mut geo_insts = vec![];
+                                let mut visible_set = HashSet::new();
+                                for s in &shapes {
+                                    if s.visible {
+                                        visible_set.insert(s.refno);
+                                    }
+                                }
+
+                                for shape in shapes {
+                                    let CateBrepShape {
+                                        refno: geom_refno,
+                                        brep_shape,
+                                        transform,
+                                        visible,
+                                        is_tubi,
+                                        pts,
+                                        is_ngmr,
+                                        ..
+                                    } = shape;
+                                    if !brep_shape.check_valid() {
+                                        data_errors.push(CataDataError::new(
+                                            ele_refno,
+                                            &cata_hash,
+                                            "shape_validation",
+                                            format!("invalid catalogue geometry {geom_refno}"),
+                                        ));
+                                        continue;
+                                    }
+                                    if !visible {
+                                        continue;
+                                    }
+                                    let mut shape_trans = brep_shape.get_trans();
+                                    let is_neg = neg_own_pos_map.contains_key(&geom_refno);
+                                    let geo_hash = brep_shape.hash_unit_mesh_params();
+                                    let rot = transform.rotation * shape_trans.rotation;
+                                    let translation = transform.translation
+                                        + transform.rotation * shape_trans.translation;
+                                    let scale = shape_trans.scale;
+                                    let transform = Transform {
+                                        translation,
+                                        rotation: rot,
+                                        scale,
+                                    };
+                                    if transform.is_nan() {
+                                        data_errors.push(CataDataError::new(
+                                            ele_refno,
+                                            &cata_hash,
+                                            "shape_transform",
+                                            format!(
+                                                "NaN transform for catalogue geometry {geom_refno}"
+                                            ),
+                                        ));
+                                        continue;
+                                    }
+                                    let mut cata_neg_refnos =
+                                        pos_neg_map.remove(&geom_refno).unwrap_or_default();
+                                    cata_neg_refnos.retain(|x| visible_set.contains(x));
+                                    if !cata_neg_refnos.is_empty() {
+                                        geos_info.has_cata_neg = true;
+                                    }
+                                    let geo_type = if is_ngmr {
+                                        GeoBasicType::CataCrossNeg
+                                    } else if is_neg {
+                                        GeoBasicType::CataNeg
+                                    } else if !cata_neg_refnos.is_empty() {
+                                        GeoBasicType::Compound
+                                    } else {
+                                        GeoBasicType::Pos
+                                    };
+                                    let Some(geo_param) = brep_shape.convert_to_geo_param() else {
+                                        data_errors.push(CataDataError::new(
+                                            ele_refno,
+                                            &cata_hash,
+                                            "shape_parameter",
+                                            format!("unsupported catalogue geometry {geom_refno}"),
+                                        ));
+                                        continue;
+                                    };
+                                    let geom_inst = EleInstGeo {
+                                        geo_hash,
+                                        refno: geom_refno,
+                                        pts,
+                                        aabb: None,
+                                        transform,
+                                        geo_param,
+                                        visible: geo_type == GeoBasicType::Pos
+                                            || geo_type == GeoBasicType::Compound,
+                                        is_tubi,
+                                        geo_type,
+                                        cata_neg_refnos,
+                                    };
+                                    if is_ngmr {
+                                        match query_ngmr_owner(ele_refno, geom_refno).await {
+                                            Ok(target_owners) => shape_insts_data.insert_ngmr(
+                                                ele_refno,
+                                                target_owners,
+                                                geom_refno,
+                                            ),
+                                            Err(error) => data_errors.push(CataDataError::new(
+                                                ele_refno,
+                                                &cata_hash,
+                                                "ngmr_owner",
+                                                &error,
+                                            )),
+                                        }
+                                    }
+                                    geo_insts.push(geom_inst);
+                                }
+                                {
+                                    let mut inst_key = geos_info.get_inst_key();
+                                    geos_info.is_solid = geo_insts.iter().any(|x| {
+                                        x.geo_type == GeoBasicType::Pos
+                                            || x.geo_type == GeoBasicType::Compound
+                                    });
+                                    let mut geos_data = EleInstGeosData {
+                                        inst_key,
+                                        refno: ele_refno,
+                                        insts: geo_insts,
+                                        aabb: None,
+                                        type_name: cur_type.to_string(),
+                                        ..Default::default()
+                                    };
+                                    if geos_data.insts.len() > 0 {
+                                        shape_insts_data.insert_info(ele_refno, geos_info.clone());
+                                        shape_insts_data
+                                            .insert_geos_data(geos_info.get_inst_key(), geos_data);
+                                    }
+                                }
+                                break;
                             }
                         }
+                        for ele_refno in group_refnos {
+                            if Some(ele_refno) == process_refno {
+                                continue;
+                            }
+                            let cur_ptset_map = ptset_map
+                                .as_ref()
+                                .or(target_cata.ptset.as_ref())
+                                .cloned()
+                                .unwrap_or_default();
+                            let Some(mut origin_trans) =
+                                page_reads.transforms.get(&ele_refno).copied().flatten()
+                            else {
+                                data_errors.push(CataDataError::new(
+                                    ele_refno,
+                                    &cata_hash,
+                                    "instance_transform",
+                                    "world transform is missing",
+                                ));
+                                continue;
+                            };
 
-                        for shape in shapes {
-                            let CateBrepShape {
-                                refno: geom_refno,
-                                brep_shape,
-                                transform,
-                                visible,
-                                is_tubi,
-                                pts,
-                                is_ngmr,
-                                ..
-                            } = shape;
-                            if !brep_shape.check_valid() {
+                            let ele_att = page_reads
+                                .attributes
+                                .get(&ele_refno)
+                                .and_then(Option::as_ref)
+                                .cloned()
+                                .unwrap_or_default();
+                            if ele_att.is_empty() {
+                                data_errors.push(CataDataError::new(
+                                    ele_refno,
+                                    &cata_hash,
+                                    "instance_attributes",
+                                    "named attributes are missing",
+                                ));
                                 continue;
                             }
-                            if !visible {
-                                continue;
-                            }
-                            let mut shape_trans = brep_shape.get_trans();
-                            let is_neg = neg_own_pos_map.contains_key(&geom_refno);
-                            let geo_hash = brep_shape.hash_unit_mesh_params();
-                            let rot = transform.rotation * shape_trans.rotation;
-                            let translation = transform.translation
-                                + transform.rotation * shape_trans.translation;
-                            let scale = shape_trans.scale;
-                            let transform = Transform {
-                                translation,
-                                rotation: rot,
-                                scale,
-                            };
-                            if transform.is_nan() {
-                                continue;
-                            }
-                            let mut cata_neg_refnos =
-                                pos_neg_map.remove(&geom_refno).unwrap_or_default();
-                            cata_neg_refnos.retain(|x| visible_set.contains(x));
-                            if !cata_neg_refnos.is_empty() {
-                                geos_info.has_cata_neg = true;
-                            }
-                            let geo_type = if is_ngmr {
-                                GeoBasicType::CataCrossNeg
-                            } else if is_neg {
-                                GeoBasicType::CataNeg
-                            } else if !cata_neg_refnos.is_empty() {
-                                GeoBasicType::Compound
-                            } else {
-                                GeoBasicType::Pos
-                            };
-                            let geom_inst = EleInstGeo {
-                                geo_hash,
-                                refno: geom_refno,
-                                pts,
-                                aabb: None,
-                                transform,
-                                geo_param: brep_shape
-                                    .convert_to_geo_param()
-                                    .unwrap_or(PdmsGeoParam::Unknown),
-                                visible: geo_type == GeoBasicType::Pos
-                                    || geo_type == GeoBasicType::Compound,
-                                is_tubi,
-                                geo_type,
-                                cata_neg_refnos,
-                            };
-                            if is_ngmr {
-                                if let Ok(target_owners) =
-                                    query_ngmr_owner(ele_refno, geom_refno).await
-                                {
-                                    shape_insts_data.insert_ngmr(
-                                        ele_refno,
-                                        target_owners,
-                                        geom_refno,
-                                    );
+                            if let Some(sjus) = ele_att.get_str("SJUS") {
+                                let parent = ele_att.get_owner();
+                                if let Some(sjus_adjust) = sjus_map_clone.get(&parent) {
+                                    let height = sjus_adjust.value().1;
+                                    let off_z = cal_sjus_value(sjus, height);
+                                    origin_trans.translation += sjus_adjust.value().0
+                                        + origin_trans.rotation * Vec3::new(0.0, 0.0, off_z);
                                 }
                             }
-                            geo_insts.push(geom_inst);
-                        }
-                        {
-                            let mut inst_key = geos_info.get_inst_key();
-                            geos_info.is_solid = geo_insts.iter().any(|x| {
-                                x.geo_type == GeoBasicType::Pos
-                                    || x.geo_type == GeoBasicType::Compound
-                            });
-                            let mut geos_data = EleInstGeosData {
-                                inst_key,
+
+                            if ele_att.contains_key("ARRI") && !cur_ptset_map.is_empty() {
+                                let arrive = ele_att.get_i32("ARRI").unwrap_or(-1);
+                                let leave = ele_att.get_i32("LEAV").unwrap_or(-1);
+                                if let Some(a) = cur_ptset_map.values().find(|x| x.number == arrive)
+                                    && let Some(l) =
+                                        cur_ptset_map.values().find(|x| x.number == leave)
+                                {
+                                    alignment_outputs.push((ele_refno, [a.clone(), l.clone()]));
+                                }
+                            };
+                            let generic_type = match get_generic_type(ele_refno).await {
+                                Ok(generic_type) => generic_type,
+                                Err(error) => {
+                                    data_errors.push(CataDataError::new(
+                                        ele_refno,
+                                        &cata_hash,
+                                        "instance_generic_type",
+                                        &error,
+                                    ));
+                                    PdmsGenericType::UNKOWN
+                                }
+                            };
+                            let geos_info = EleGeosInfo {
                                 refno: ele_refno,
-                                insts: geo_insts,
-                                aabb: None,
-                                type_name: cur_type.to_string(),
+                                sesno: ele_att.sesno(),
+                                cata_hash: Some(cata_hash.clone()),
+                                visible: true,
+                                generic_type,
+                                world_transform: origin_trans,
+                                ptset_map: cur_ptset_map,
+                                is_solid: true,
                                 ..Default::default()
                             };
-                            if geos_data.insts.len() > 0 {
-                                shape_insts_data.insert_info(ele_refno, geos_info.clone());
-                                shape_insts_data
-                                    .insert_geos_data(geos_info.get_inst_key(), geos_data);
+                            if let Some(r_refno) = test_refno
+                                && r_refno == ele_refno
+                            {
+                                tracing::debug!("{:?}", &geos_info);
                             }
+                            shape_insts_data.insert_info(ele_refno, geos_info);
                         }
-                        break;
-                    }
-                }
-                for ele_refno in target_cata.group_refnos.clone() {
-                    if Some(ele_refno) == process_refno {
-                        continue;
-                    }
-                    let cur_ptset_map = ptset_map
-                        .as_ref()
-                        .or(target_cata.ptset.as_ref())
-                        .cloned()
-                        .unwrap_or_default();
-                    let Ok(Some(mut origin_trans)) =
-                        aios_core::get_world_transform(ele_refno).await
-                    else {
-                        continue;
-                    };
+                        if shape_insts_data.inst_cnt() >= SEND_INST_SIZE {
+                            #[cfg(feature = "profile")]
+                            tracing::info!(
+                                batch_id,
+                                items_cnt = shape_insts_data.inst_cnt(),
+                                "Sending batch data due to size limit"
+                            );
 
-                    let ele_att = aios_core::get_named_attmap(ele_refno)
-                        .await
-                        .unwrap_or_default();
-                    if let Some(sjus) = ele_att.get_str("SJUS") {
-                        let parent = ele_att.get_owner();
-                        if let Some(sjus_adjust) = sjus_map_clone.get(&parent) {
-                            let height = sjus_adjust.value().1;
-                            let off_z = cal_sjus_value(sjus, height);
-                            origin_trans.translation += sjus_adjust.value().0
-                                + origin_trans.rotation * Vec3::new(0.0, 0.0, off_z);
+                            output_batches.push(std::mem::take(&mut shape_insts_data));
                         }
                     }
 
-                    if ele_att.contains_key("ARRI") && !cur_ptset_map.is_empty() {
-                        let arrive = ele_att.get_i32("ARRI").unwrap_or(-1);
-                        let leave = ele_att.get_i32("LEAV").unwrap_or(-1);
-                        if let Some(a) = cur_ptset_map.values().find(|x| x.number == arrive)
-                            && let Some(l) = cur_ptset_map.values().find(|x| x.number == leave)
-                        {
-                            local_al_map_clone.insert(ele_refno, [a.clone(), l.clone()]);
-                        }
-                    };
-                    let geos_info = EleGeosInfo {
-                        refno: ele_refno,
-                        sesno: ele_att.sesno(),
-                        cata_hash: Some(cata_hash.clone()),
-                        visible: true,
-                        generic_type: get_generic_type(ele_refno).await.unwrap_or_default(),
-                        world_transform: origin_trans,
-                        ptset_map: cur_ptset_map,
-                        is_solid: true,
-                        ..Default::default()
-                    };
-                    if let Some(r_refno) = test_refno
-                        && r_refno == ele_refno
+                    // 将本批次的时间统计添加到总时间统计中
                     {
-                        tracing::debug!("{:?}", &geos_info);
+                        let mut stats = total_time_stats.lock().await;
+                        *stats.entry("get_named_attmap".to_string()).or_insert(0) +=
+                            db_time_get_named_attmap as u64;
+                        *stats.entry("get_world_transform".to_string()).or_insert(0) +=
+                            db_time_get_world_transform as u64;
+                        *stats.entry("get_cat_refno".to_string()).or_insert(0) +=
+                            db_time_get_cat_refno as u64;
+                        *stats.entry("query_single".to_string()).or_insert(0) +=
+                            db_time_query_single as u64;
+                        *stats.entry("gen_single_geoms".to_string()).or_insert(0) +=
+                            db_time_gen_single_geoms as u64;
+                        *stats.entry("get_generic_type".to_string()).or_insert(0) +=
+                            db_time_get_generic_type as u64;
+                        *stats.entry("hash_lock".to_string()).or_insert(0) +=
+                            db_time_hash_lock as u64;
+                        *stats.entry("query_refnos".to_string()).or_insert(0) +=
+                            db_time_query_refnos as u64;
                     }
-                    shape_insts_data.insert_info(ele_refno, geos_info);
-                }
-                if shape_insts_data.inst_cnt() >= SEND_INST_SIZE {
+
+                    if shape_insts_data.inst_cnt() > 0 {
+                        output_batches.push(shape_insts_data);
+                    }
+
                     #[cfg(feature = "profile")]
-                    tracing::info!(
+                    tracing::info!(batch_id, "Batch processing complete");
+                    anyhow::Ok((
                         batch_id,
-                        items_cnt = shape_insts_data.inst_cnt(),
-                        "Sending batch data due to size limit"
-                    );
+                        (
+                            output_batches,
+                            pseudo_outputs,
+                            alignment_outputs,
+                            data_errors,
+                        ),
+                    ))
+                }),
+            );
+            batch_handles.push(handle);
+        }
 
-                    crate::fast_model::shape_save::send_shape_batch(
-                        &sender,
-                        std::mem::take(&mut shape_insts_data),
-                    )
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!("send cata shape instances failed: {error}")
-                    })?;
+        let mut completed_batches = Vec::new();
+        while let Some(result) = batch_handles.next().await {
+            completed_batches.push(result??);
+        }
+        let output_merge_started = Instant::now();
+        sort_by_batch_id(&mut completed_batches);
+        for (_, (batches, pseudo_outputs, alignment_outputs, mut data_errors)) in completed_batches
+        {
+            {
+                let mut pseudo_maps = HASH_PSEUDO_ATT_MAPS.write().await;
+                for (cata_hash, pseudo_map) in pseudo_outputs {
+                    pseudo_maps.insert(cata_hash, pseudo_map);
                 }
             }
-
-            // 将本批次的时间统计添加到总时间统计中
-            #[cfg(feature = "profile")]
-            {
-                let mut stats = total_time_stats.lock().await;
-                *stats.entry("get_named_attmap".to_string()).or_insert(0) +=
-                    db_time_get_named_attmap as u64;
-                *stats.entry("get_world_transform".to_string()).or_insert(0) +=
-                    db_time_get_world_transform as u64;
-                *stats.entry("get_cat_refno".to_string()).or_insert(0) +=
-                    db_time_get_cat_refno as u64;
-                *stats.entry("query_single".to_string()).or_insert(0) +=
-                    db_time_query_single as u64;
-                *stats.entry("gen_single_geoms".to_string()).or_insert(0) +=
-                    db_time_gen_single_geoms as u64;
-                *stats.entry("get_generic_type".to_string()).or_insert(0) +=
-                    db_time_get_generic_type as u64;
-                *stats.entry("hash_lock".to_string()).or_insert(0) += db_time_hash_lock as u64;
-                *stats.entry("query_refnos".to_string()).or_insert(0) +=
-                    db_time_query_refnos as u64;
+            for (refno, axes) in alignment_outputs {
+                local_al_map.insert(refno, axes);
             }
-
-            if shape_insts_data.inst_cnt() > 0 {
-                crate::fast_model::shape_save::send_shape_batch(&sender, shape_insts_data)
+            data_errors.sort();
+            for error in &data_errors {
+                persist_cata_data_error(error).await;
+            }
+            for batch in batches {
+                crate::fast_model::shape_save::send_shape_batch(&sender, batch)
                     .await
                     .map_err(|error| {
                         anyhow::anyhow!("send cata shape instances failed: {error}")
                     })?;
             }
-
-            #[cfg(feature = "profile")]
-            tracing::info!(batch_id, "Batch processing complete");
         }
+        total_time_stats.lock().await.insert(
+            "output_merge".to_string(),
+            output_merge_started.elapsed().as_millis() as u64,
+        );
     }
 
     #[cfg(feature = "profile")]
@@ -1401,13 +2011,18 @@ pub async fn gen_cata_geos(
         db_time_get_children += t_get_children.elapsed().as_millis();
 
         let t_get_named_attmap = Instant::now();
-        let Ok(branch_att) = aios_core::get_named_attmap(branch_refno).await else {
+        let Some(branch_att) = page_reads
+            .attributes
+            .get(&branch_refno)
+            .and_then(Option::as_ref)
+        else {
             continue;
         };
         db_time_get_branch_att += t_get_named_attmap.elapsed().as_millis();
 
         let t_get_world_transform = Instant::now();
-        let Ok(Some(branch_transform)) = aios_core::get_world_transform(branch_refno).await else {
+        let Some(branch_transform) = page_reads.transforms.get(&branch_refno).copied().flatten()
+        else {
             continue;
         };
         db_time_get_branch_transform += t_get_world_transform.elapsed().as_millis();
@@ -1426,7 +2041,12 @@ pub async fn gen_cata_geos(
             .get_foreign_refno(if is_hang { "HREF" } else { "HSTU" })
             .unwrap_or_default();
 
-        let tubi_att = aios_core::get_named_attmap(h_ref).await.unwrap_or_default();
+        let tubi_att = page_reads
+            .attributes
+            .get(&h_ref)
+            .and_then(Option::as_ref)
+            .cloned()
+            .unwrap_or_default();
         let tubi_cat_ref = tubi_att.get_foreign_refno("CATR").unwrap_or_default();
         let mut h_tubi_size =
             fast_model::query_tubi_size(branch_refno, tubi_cat_ref, is_hang).await?;
@@ -1501,8 +2121,11 @@ pub async fn gen_cata_geos(
             let arrive_type = ele.noun.as_str();
             let exclude = (is_hvac && index == 0);
             {
-                let world_trans = aios_core::get_world_transform(refno)
-                    .await?
+                let world_trans = page_reads
+                    .transforms
+                    .get(&refno)
+                    .copied()
+                    .flatten()
                     .unwrap_or_default();
                 if let Some(axis_map) =
                     exist_al_map
@@ -1519,9 +2142,11 @@ pub async fn gen_cata_geos(
                     current_tubing.arrive_refno = refno;
                     let mut skip =
                         (arrive_type == "ATTA" || arrive_type == "STIF" || arrive_type == "BRCO")
-                            && !aios_core::get_named_attmap(refno)
-                                .await?
-                                .get_bool_or_default("SPKBRK");
+                            && !page_reads
+                                .attributes
+                                .get(&refno)
+                                .and_then(Option::as_ref)
+                                .is_some_and(|attributes| attributes.get_bool_or_default("SPKBRK"));
                     if !skip {
                         let a_pos = axis_map[0].pt;
                         let Some(a_dir) = axis_map[0].dir else {
@@ -1712,6 +2337,24 @@ pub async fn gen_cata_geos(
     let mut stats_vec: Vec<(String, u64)> = time_stats.into_iter().collect();
     stats_vec.sort_by(|a, b| b.1.cmp(&a.1)); // 按耗时降序排序
 
+    let stat = |name: &str| {
+        stats_vec
+            .iter()
+            .find(|(key, _)| key == name)
+            .map_or(0, |(_, value)| *value)
+    };
+    println!(
+        "cata_generation_summary unique_cata={} permits={} total_ms={} resolve_ms={} transform_ms={} pos_neg_ms={} branch_ms={} output_merge_ms={}",
+        unique_cata_cnt,
+        crate::fast_model::concurrency::permits(),
+        total_t.elapsed().as_millis(),
+        stat("gen_single_geoms"),
+        stat("get_world_transform"),
+        stat("query_refnos"),
+        stat("process_branch"),
+        stat("output_merge"),
+    );
+
     #[cfg(feature = "profile")]
     {
         for (op_name, time) in stats_vec {
@@ -1814,21 +2457,19 @@ pub async fn query_ngmr_owner(
     refno: RefnoEnum,
     ngmr_geo_refno: RefnoEnum,
 ) -> anyhow::Result<Vec<RefnoEnum>> {
-    let att = aios_core::get_named_attmap(refno).await.unwrap_or_default();
+    let att = aios_core::get_named_attmap(refno).await?;
     let owner = att.get_owner();
     let c_ref = att.get_foreign_refno("CREF");
     let ance_result = aios_core::query_filter_ancestors(refno.clone(), &NGMR_OWN_TYPES).await?;
     let o_ref = ance_result.into_iter().next();
-    let geo_att = aios_core::get_named_attmap(ngmr_geo_refno)
-        .await
-        .unwrap_or_default();
+    let geo_att = aios_core::get_named_attmap(ngmr_geo_refno).await?;
     let removed_type =
         NgmrRemovedType::try_from(geo_att.get_i32("NAPP").unwrap_or(-1)).unwrap_or_default();
     let mut target_refnos = vec![];
     match removed_type {
         NgmrRemovedType::AsDefault => {
             if let Some(o_refno) = o_ref {
-                let o_type = aios_core::get_type_name(o_refno).await.unwrap_or_default();
+                let o_type = aios_core::get_type_name(o_refno).await?;
                 if CIVIL_TYPES.contains(&o_type.as_str()) {
                     target_refnos.push(o_refno);
                 }
@@ -1863,371 +2504,51 @@ pub async fn query_ngmr_owner(
     Ok(target_refnos)
 }
 
-/// P0级优化：并行元件库几何体生成函数
-///
-/// 这是对原始 gen_cata_geos 函数的并行优化版本，主要改进：
-/// 1. 按元件库类型分组并行处理
-/// 2. 使用信号量控制并发数量
-/// 3. 批量处理减少数据库操作
-/// 4. 详细的性能监控和日志
-#[instrument(skip(db_option, target_cata_map, branch_map, sjus_map_arc, sender))]
-pub async fn gen_cata_geos_parallel_optimized(
-    db_option: Arc<DbOption>,
-    target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
-    branch_map: Arc<DashMap<RefnoEnum, Vec<SPdmsElement>>>,
-    sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
-    sender: flume::Sender<ShapeInstancesData>,
-) -> anyhow::Result<bool> {
-    let total_start = Instant::now();
-    info!("🚀 开始并行优化的元件库几何体生成");
+#[cfg(test)]
+mod cata_throughput_tests {
+    use super::{CataDataError, sort_by_batch_id};
+    use aios_core::RefnoEnum;
 
-    // 收集所有唯一的元件库哈希
-    let all_unique_keys: Vec<String> = target_cata_map
-        .iter()
-        .map(|x| x.cata_hash.clone())
-        .collect();
+    #[test]
+    fn task_completion_order_does_not_change_merge_or_error_order() {
+        let mut completed = vec![(3, "c"), (1, "a"), (2, "b")];
+        sort_by_batch_id(&mut completed);
+        assert_eq!(completed, vec![(1, "a"), (2, "b"), (3, "c")]);
 
-    let unique_cata_cnt = all_unique_keys.len();
-    info!("📊 总共需要处理 {} 个唯一元件库", unique_cata_cnt);
-
-    if all_unique_keys.is_empty() {
-        info!("⚠️ 没有元件库需要处理");
-        return Ok(true);
+        let mut errors = vec![
+            CataDataError::new(RefnoEnum::from("1/3"), "b", "transform", "second"),
+            CataDataError::new(RefnoEnum::from("1/2"), "a", "attributes", "first"),
+        ];
+        errors.sort();
+        assert_eq!(errors[0].target, RefnoEnum::from("1/2"));
+        assert_eq!(errors[1].target, RefnoEnum::from("1/3"));
     }
 
-    // 判断是否为BRAN/HANG类型
-    let is_bran = branch_map.len() > 0;
-    info!(
-        "🔧 处理类型: {}",
-        if is_bran {
-            "BRAN/HANG"
-        } else {
-            "单个元件库"
-        }
-    );
-
-    // 根据CPU核心数确定并发数量
-    let cpu_count = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let max_concurrent = (cpu_count * 2).min(16).max(4); // 最少4个，最多16个
-    let semaphore = Arc::new(Semaphore::new(max_concurrent));
-    info!(
-        "⚙️ 使用 {} 个并发任务 (CPU核心数: {})",
-        max_concurrent, cpu_count
-    );
-
-    // 计算批次大小 - 根据元件库数量动态调整
-    let batch_size = if unique_cata_cnt <= 10 {
-        1 // 少量元件库，每个单独处理
-    } else if unique_cata_cnt <= 50 {
-        2 // 中等数量，小批次处理
-    } else {
-        4 // 大量元件库，较大批次处理
-    };
-
-    info!("📦 批次大小: {}", batch_size);
-
-    // 分批并行处理
-    let mut all_tasks = Vec::new();
-    let chunks: Vec<_> = all_unique_keys.chunks(batch_size).collect();
-    let total_batches = chunks.len();
-
-    info!("🔄 将分 {} 个批次并行处理", total_batches);
-
-    for (batch_idx, chunk) in chunks.into_iter().enumerate() {
-        let chunk_keys = chunk.to_vec();
-        let target_cata_map = target_cata_map.clone();
-        let branch_map = branch_map.clone();
-        let sjus_map_arc = sjus_map_arc.clone();
-        let sender = sender.clone();
-        let db_option = db_option.clone();
-        let semaphore = semaphore.clone();
-
-        let task =
-            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                let _permit = semaphore.acquire().await.unwrap();
-                let batch_start = Instant::now();
-
-                info!(
-                    "📋 开始处理批次 {}/{} (包含 {} 个元件库)",
-                    batch_idx + 1,
-                    total_batches,
-                    chunk_keys.len()
-                );
-
-                let result = process_cata_batch_optimized(
-                    batch_idx + 1,
-                    chunk_keys,
-                    target_cata_map,
-                    branch_map,
-                    sjus_map_arc,
-                    db_option,
-                    sender,
-                    is_bran,
-                )
-                .await;
-
-                let batch_time = batch_start.elapsed();
-                match &result {
-                    Ok(_) => info!(
-                        "✅ 批次 {} 完成，耗时: {}ms",
-                        batch_idx + 1,
-                        batch_time.as_millis()
-                    ),
-                    Err(e) => error!(
-                        "❌ 批次 {} 失败，耗时: {}ms，错误: {}",
-                        batch_idx + 1,
-                        batch_time.as_millis(),
-                        e
-                    ),
-                }
-
-                result
-            });
-
-        all_tasks.push(task);
-    }
-
-    // 等待所有批次完成
-    info!("⏳ 等待所有 {} 个批次完成...", all_tasks.len());
-    let results = join_all(all_tasks).await;
-
-    // 统计结果
-    let mut success_count = 0;
-    let mut error_count = 0;
-
-    for (idx, result) in results.into_iter().enumerate() {
-        match result {
-            Ok(Ok(_)) => {
-                success_count += 1;
-            }
-            Ok(Err(e)) => {
-                error_count += 1;
-                error!("批次 {} 处理失败: {}", idx + 1, e);
-            }
-            Err(e) => {
-                error_count += 1;
-                error!("批次 {} 任务执行失败: {}", idx + 1, e);
-            }
-        }
-    }
-
-    let total_time = total_start.elapsed();
-
-    // 输出最终统计
-    info!("🎯 并行元件库处理完成!");
-    info!("📊 处理统计:");
-    info!("  - 总元件库数量: {}", unique_cata_cnt);
-    info!("  - 成功批次: {}", success_count);
-    info!("  - 失败批次: {}", error_count);
-    info!("  - 总耗时: {}ms", total_time.as_millis());
-    info!(
-        "  - 平均每个元件库: {:.2}ms",
-        total_time.as_millis() as f64 / unique_cata_cnt as f64
-    );
-
-    if error_count > 0 {
-        warn!("⚠️ 有 {} 个批次处理失败，请检查日志", error_count);
-    }
-
-    Ok(success_count > 0) // 只要有一个批次成功就返回true
-}
-
-/// 处理单个批次的元件库
-///
-/// 这个函数处理一个批次中的多个元件库，复用原始逻辑但增加了性能监控
-async fn process_cata_batch_optimized(
-    batch_id: usize,
-    chunk_keys: Vec<String>,
-    target_cata_map: Arc<DashMap<String, CataHashRefnoKV>>,
-    branch_map: Arc<DashMap<RefnoEnum, Vec<SPdmsElement>>>,
-    sjus_map_arc: Arc<DashMap<RefnoEnum, (Vec3, f32)>>,
-    db_option: Arc<DbOption>,
-    sender: flume::Sender<ShapeInstancesData>,
-    is_bran: bool,
-) -> anyhow::Result<()> {
-    let batch_start = Instant::now();
-    let mut shape_insts_data = ShapeInstancesData::default();
-
-    if is_bran {
-        shape_insts_data.fill_basic_shapes();
-    }
-
-    // 性能统计
-    let mut db_time_get_named_attmap = 0;
-    let mut db_time_get_world_transform = 0;
-    let mut db_time_get_cat_refno = 0;
-    let mut db_time_query_single = 0;
-    let mut db_time_gen_single_geoms = 0;
-    let mut db_time_get_generic_type = 0;
-    let mut processed_elements = 0;
-
-    // 处理批次中的每个元件库
-    for (idx, cata_hash) in chunk_keys.iter().enumerate() {
-        let element_start = Instant::now();
-
-        debug!(
-            "🔧 批次 {} 处理元件库 {}/{}: {}",
-            batch_id,
-            idx + 1,
-            chunk_keys.len(),
-            cata_hash
+    #[test]
+    fn production_cata_tasks_have_one_gate_and_stable_serial_side_effects() {
+        let source = include_str!("cata_model.rs");
+        let body = source
+            .lines()
+            .skip_while(|line| !line.starts_with("pub async fn gen_cata_geos("))
+            .take_while(|line| !line.starts_with("pub async fn gen_cata_geos_with_tracing("))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!body.is_empty(), "production generator");
+        assert!(body.contains("concurrency::run_geometry"), "{body}");
+        assert!(
+            body.contains("sort_by_batch_id(&mut completed_batches)"),
+            "{body}"
         );
-
-        // 查找使用此元件库的所有元素
-        let related_elements: Vec<_> = target_cata_map
-            .iter()
-            .filter(|entry| &entry.cata_hash == cata_hash)
-            .flat_map(|entry| entry.group_refnos.clone())
-            .collect();
-
-        if related_elements.is_empty() {
-            debug!("⚠️ 元件库 {} 没有关联元素", cata_hash);
-            continue;
-        }
-
-        debug!(
-            "📦 元件库 {} 关联 {} 个元素",
-            cata_hash,
-            related_elements.len()
-        );
-
-        // 处理每个使用此元件库的元素
-        for refno in related_elements {
-            let ele_start = Instant::now();
-
-            // 获取元素属性映射
-            let attmap_start = Instant::now();
-            let ele_att = match aios_core::get_named_attmap(refno).await {
-                Ok(att) => att,
-                Err(e) => {
-                    warn!("获取元素 {} 属性失败: {}", refno, e);
-                    continue;
-                }
-            };
-            db_time_get_named_attmap += attmap_start.elapsed().as_millis();
-
-            // 获取世界变换
-            let transform_start = Instant::now();
-            let origin_trans = match aios_core::get_world_transform(refno).await {
-                Ok(Some(trans)) => trans,
-                Ok(None) => Transform::IDENTITY,
-                Err(e) => {
-                    warn!("获取元素 {} 世界变换失败: {}", refno, e);
-                    Transform::IDENTITY
-                }
-            };
-            db_time_get_world_transform += transform_start.elapsed().as_millis();
-
-            // 获取元件库参考号
-            let cat_refno_start = Instant::now();
-            let cat_refno = match aios_core::get_cat_refno(refno).await {
-                Ok(Some(refno)) => refno,
-                Ok(None) => {
-                    debug!("元素 {} 没有元件库参考号", refno);
-                    continue;
-                }
-                Err(e) => {
-                    warn!("获取元素 {} 元件库参考号失败: {}", refno, e);
-                    continue;
-                }
-            };
-            db_time_get_cat_refno += cat_refno_start.elapsed().as_millis();
-
-            // 查询单个元件库几何体
-            let query_start = Instant::now();
-            // 简化版本：直接跳过几何体信息查询
-            let cate_geos_info = match Some(()) {
-                Some(_) => (), // 简化版本
-                None => {
-                    debug!("元件库 {} 没有几何体信息", cat_refno);
-                    continue;
-                }
-            };
-            db_time_query_single += query_start.elapsed().as_millis();
-
-            // 生成单个几何体
-            let gen_start = Instant::now();
-            if let Err(e) = gen_cata_single_geoms(
-                refno,
-                &Default::default(), // brep_shape_map
-                &Default::default(), // design_axis_map
-            )
-            .await
-            {
-                warn!("生成元素 {} 几何体失败: {}", refno, e);
-                continue;
-            }
-            db_time_gen_single_geoms += gen_start.elapsed().as_millis();
-
-            // 获取通用类型
-            let generic_start = Instant::now();
-            let generic_type = get_generic_type(refno).await.unwrap_or_default();
-            db_time_get_generic_type += generic_start.elapsed().as_millis();
-
-            // 创建几何体信息
-            let geos_info = EleGeosInfo {
-                refno: refno,
-                sesno: ele_att.sesno(),
-                cata_hash: Some(cata_hash.clone()),
-                visible: true,
-                generic_type,
-                world_transform: origin_trans,
-                ptset_map: Default::default(),
-                is_solid: true,
-                ..Default::default()
-            };
-
-            // 添加到结果中
-            shape_insts_data.inst_info_map.insert(refno, geos_info);
-            processed_elements += 1;
-
-            let ele_time = ele_start.elapsed();
-            if ele_time.as_millis() > 100 {
-                debug!("⏱️ 元素 {} 处理耗时: {}ms", refno, ele_time.as_millis());
-            }
-        }
-
-        let element_time = element_start.elapsed();
-        debug!(
-            "✅ 元件库 {} 处理完成，耗时: {}ms",
-            cata_hash,
-            element_time.as_millis()
-        );
+        let concurrent = body
+            .split_once("concurrency::run_geometry(async move")
+            .expect("geometry task")
+            .1
+            .split_once("sort_by_batch_id(&mut completed_batches)")
+            .expect("serial merge boundary")
+            .0;
+        assert!(!concurrent.contains("HASH_PSEUDO_ATT_MAPS.write()"));
+        assert!(!concurrent.contains("persist_cata_data_error("));
+        assert!(!body.contains("gen_cata_geos_parallel_optimized"));
+        assert!(!body.contains("process_cata_batch_optimized"));
     }
-
-    // 发送结果
-    if !shape_insts_data.inst_info_map.is_empty() {
-        if let Err(e) =
-            crate::fast_model::shape_save::send_shape_batch(&sender, shape_insts_data).await
-        {
-            error!("发送批次 {} 结果失败: {}", batch_id, e);
-            return Err(anyhow::anyhow!("发送结果失败: {}", e));
-        }
-    }
-
-    let batch_time = batch_start.elapsed();
-
-    // 输出详细的性能统计
-    info!("📊 批次 {} 性能统计:", batch_id);
-    info!("  - 处理元素数量: {}", processed_elements);
-    info!("  - 总耗时: {}ms", batch_time.as_millis());
-    info!(
-        "  - 平均每元素: {:.2}ms",
-        if processed_elements > 0 {
-            batch_time.as_millis() as f64 / processed_elements as f64
-        } else {
-            0.0
-        }
-    );
-    info!("  - 数据库操作耗时:");
-    info!("    * 获取属性映射: {}ms", db_time_get_named_attmap);
-    info!("    * 获取世界变换: {}ms", db_time_get_world_transform);
-    info!("    * 获取元件库参考号: {}ms", db_time_get_cat_refno);
-    info!("    * 查询几何体信息: {}ms", db_time_query_single);
-    info!("    * 生成几何体: {}ms", db_time_gen_single_geoms);
-    info!("    * 获取通用类型: {}ms", db_time_get_generic_type);
-
-    Ok(())
 }

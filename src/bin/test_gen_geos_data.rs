@@ -3,7 +3,6 @@ use aios_core::options::DbOption;
 use aios_database::test::{
     batch_test_gen_geos_data_performance, init_performance_tracing, save_gen_geos_data_report,
     test_gen_geos_data_from_database, test_gen_geos_data_performance,
-    test_parallel_cata_geos_performance,
 };
 use clap::Parser;
 
@@ -52,10 +51,6 @@ struct Args {
     /// 每组的参考号数量 (batch 模式使用)
     #[arg(short = 'S', long, default_value_t = 10)]
     batch_size: usize,
-
-    /// 测试P0级并行优化的元件库处理
-    #[arg(long)]
-    test_parallel_cata: bool,
 }
 
 #[tokio::main]
@@ -135,20 +130,6 @@ async fn test_manual_mode(
 
     println!("   指定参考号数量: {}", refnos.len());
     println!("   参考号列表: {:?}", refnos);
-
-    // 检查是否要测试并行优化
-    if args.test_parallel_cata {
-        println!("🚀 启用P0级并行优化测试");
-
-        // 测试并行优化的元件库处理
-        let parallel_stats = test_parallel_cata_geos_performance(refnos.clone(), db_option).await?;
-
-        println!("\n📊 并行优化测试结果:");
-        println!("{}", parallel_stats.generate_report());
-
-        // 为了兼容现有接口，我们仍然运行原始测试进行对比
-        println!("\n🔄 运行原始测试进行对比...");
-    }
 
     let mut stats = test_gen_geos_data_performance(refnos, db_option).await?;
     stats.calculate_metrics();

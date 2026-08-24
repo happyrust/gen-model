@@ -11,6 +11,7 @@ use aios_core::geometry::{EleInstGeo, PlantGeoData, ShapeInstancesData};
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::{BoxImplied, TubeImplied};
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+use aios_core::pe::SPdmsElement;
 use aios_core::prim_geo::tubing::TubiSize;
 use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::shape::pdms_shape::PlantMesh;
@@ -61,6 +62,28 @@ fn exclude_loop_owned_primitives(
     let loop_owners: HashSet<_> = loop_owner_refnos.iter().copied().collect();
     primitive_refnos.retain(|refno| !loop_owners.contains(refno));
     primitive_refnos
+}
+
+async fn load_branch_children(
+    branch_refnos: &[RefnoEnum],
+) -> anyhow::Result<(DashMap<RefnoEnum, Vec<SPdmsElement>>, Vec<RefnoEnum>)> {
+    let started = Instant::now();
+    let children_by_branch = aios_core::get_children_pes_many(branch_refnos)
+        .await
+        .context("batch read BRAN/HANG children")?;
+    let branch_map = DashMap::with_capacity(children_by_branch.len());
+    let mut component_refnos = Vec::new();
+    for (branch_refno, children) in children_by_branch {
+        component_refnos.extend(children.iter().map(|child| child.refno));
+        branch_map.insert(branch_refno, children);
+    }
+    println!(
+        "cata_prefetch_summary stage=branch_children roots={} components={} elapsed_ms={}",
+        branch_refnos.len(),
+        component_refnos.len(),
+        started.elapsed().as_millis()
+    );
+    Ok((branch_map, component_refnos))
 }
 
 impl DbModelInstRefnos {
@@ -490,14 +513,9 @@ pub async fn gen_geos_data_by_dbnum(
     //打印管道/支吊架的使用数量
     if !target_bran_hanger_refnos.is_empty() && gen_cata_flag && gen_model {
         //查询出branch 和 branch 下的子节点
-        let mut branch_refnos_map = DashMap::new();
-        let mut bran_comp_eles = HashSet::new();
-        for &refno in target_bran_hanger_refnos.as_slice() {
-            let children = aios_core::get_children_pes(refno).await.unwrap_or_default();
-            bran_comp_eles.extend(children.iter().map(|x| x.refno));
-            //求出元件对应的outside bore
-            branch_refnos_map.insert(refno, children);
-        }
+        let (branch_refnos_map, bran_comp_eles) =
+            load_branch_children(target_bran_hanger_refnos.as_slice()).await?;
+        let bran_comp_eles = bran_comp_eles.into_iter().collect::<HashSet<_>>();
 
         let target_bran_reuse_cata_map: DashMap<String, CataHashRefnoKV> = {
             let map = aios_core::query_group_by_cata_hash(target_bran_hanger_refnos.as_slice())
@@ -777,14 +795,8 @@ pub async fn gen_geos_data(
                 target_bran_hanger_refnos.len()
             );
             //查询出branch 和 branch 下的子节点
-            let mut branch_refnos_map = DashMap::new();
-            let mut bran_comp_eles = vec![];
-            for &refno in &target_bran_hanger_refnos {
-                let children = aios_core::get_children_pes(refno).await?;
-                bran_comp_eles.extend(children.iter().map(|x| x.refno));
-                //求出元件对应的outside bore
-                branch_refnos_map.insert(refno, children);
-            }
+            let (branch_refnos_map, _bran_comp_eles) =
+                load_branch_children(&target_bran_hanger_refnos).await?;
 
             //元件库的模型计算
             //bran，hanger下需要重用的模型
