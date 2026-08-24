@@ -91,3 +91,33 @@ fn workflows_do_not_download_or_install_occt() {
         }
     }
 }
+
+#[test]
+fn rebuild_readiness_gate_covers_every_reusable_surface_and_fails_closed() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = read(root, "scripts/Test-OccRetireRebuildReadiness.ps1");
+    for variant in [
+        "PrimLCylinder",
+        "PrimSphere",
+        "PrimLSnout",
+        "PrimDish",
+        "PrimCTorus",
+        "PrimRTorus",
+    ] {
+        assert!(script.contains(variant), "readiness audit misses {variant}");
+    }
+    for gate in [
+        "$missingCaliber -eq 0",
+        "$referencedMissing -eq 0",
+        "$badReusable -eq 0",
+        "@($pendingRows).Count -eq 0",
+        "@($orphanIds).Count -eq 0",
+        "@($missingMeshFiles).Count -eq 0",
+        "if ($RequireReady -and -not $ready) { exit 1 }",
+    ] {
+        assert!(
+            script.contains(gate),
+            "readiness audit drops hard gate {gate}"
+        );
+    }
+}

@@ -619,6 +619,11 @@ ws,gen_model,manifold,project_hd`：T039 / T042 落地后是 **1062 通过 / 1 �
 - [x] T041-code / T053-code：六类复用曲面接入 `FacetCaliber`；hash 与 `gen_unit_shape()` 同键；
   主仓删除 `unit_mesh_identity`，缺 caliber 返回原子整库重建错误；普通 LCylinder/SCylinder
   同 caliber 仍规范成单一 `PrimLCylinder` 参数。**双库容量、重建与 RVM 仍未完成。**
+  **2026-08-24 重建预检已落地**：`scripts/Test-OccRetireRebuildReadiness.ps1` 只读审计六类
+  身份、旧引用、坏行、队列、孤儿和 mesh 文件，并由 `-RequireReady` 失败闭合。8009 仍有
+  29 个缺 caliber 身份 / 1,607 条旧引用，7997 副本为 392 / 24,573；两边均明确
+  `ready=false`，证明维护窗口尚未执行。证据：
+  `docs/evidence/2026-08-24-occ-retire-rebuild-readiness.md`。
 - [x] T050-code：Snout `±offset/2` 与规范化修复已发布；**现场 RVM 未完成。**
 - [x] T051-code：XOFF/YOFF 两轴已贯通解析、hash、单位参数和 Manifold；旧 XOFF 仍映射 `poff`。
 - [x] T023-code：斜切延伸已进入 Manifold CSG；`sweep_mesh` 32 条单测全绿，T048 仍待现场 RVM。
