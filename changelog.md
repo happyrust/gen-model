@@ -1,5 +1,33 @@
 # 变更记录
 
+## 2026-08-25
+
+### 新增
+
+- T053 范围盘点：**段数进身份键之后，五类复用曲面原语合计 392 行 → 474 行（+82）**，
+  证据 `docs/evidence/2026-08-25-t053-segment-identity-scope.md`（库 A 一次性副本 @8039，
+  `FACET_TOL_MM = 0.5`，规则逐行照抄 `libgm_discretise` 并先跑其单测对照表自检）。
+  逐类：单位柱 1→44、`PrimCTorus` 95→102、`PrimRTorus` 167→174、`PrimLSnout` 112→133、
+  `PrimDish` 17→21。量级与旧估同档，ADR-044 决策 2 与 D1「同批重建」都不必回开；
+  plan 的 G3 / V5 与 tasks 的 T053 已按新口径改写。
+
+- 盘点口径澄清：T045 的「柱 1 → 37」算在 `inst_relate.insts_flat[]` 上，那是带
+  `geo_type = 'Pos'` 的**读侧投影**；而 `.mesh` 按 `geo_hash` 存、负体同样吃
+  （`apply_cata_neg_boolean_manifold` 取操作数走 `geo_type == "Neg" or
+  "CataCrossNeg"` 再 `record::id(out)`，与正体同一张表）。按 `geo_type` 拆开：
+  Pos/Compound 392→460（柱 1→37，与 T045 逐位吻合）、负体族 392→432、
+  全部吃 `.mesh` 的 392→474（柱 1→44）。**排期按最后一档**——差异集中在
+  8,000–41,800 mm 的负体柱，负体分错段数正是 ADR-044 要治的「共面留一层壁」。
+- `insts_flat` 的 11,992 个空数组判为**非缺陷**：逐行对着回填式的四道过滤分类，
+  11,979 行（99.9%）的边全是负体、13 行有 Pos 边但全部不可见，「有合格边却仍为空」
+  与「`booled_id` 有效却仍为空」两个缺陷桶都是 0。真残留在另一头——
+  `insts_flat = NONE` 的 1,479 行里 **40 行对读者可见**，正是清扫段 `WHERE` 圈的、
+  也是 `pdms_inst` live 断言禁止残留的那一类（三行还带 `booled_id`）。
+  静态副本判不出是缺陷还是清扫没跑，**只报不判**——开
+  `issues/ISSUE-021-insts-flat-visible-none-residue.md` 交给 ADR-041 / ADR-043 +
+  `specs/025-insts-flat-invalidation/` 那条线，含可直接粘的复现步骤与三条定性追问
+  （跑一次清扫会不会归零 / 迁移标记是不是落早了 / 是不是卡在进程级脏位那个缝里）。
+
 ## 2026-08-24
 
 ### 修复
