@@ -63,6 +63,10 @@
 
 ### 新增
 
+- 增加无 OCC Windows 发布产物的可执行证据：release 构建通过，完整 Cargo 依赖图 826 个包
+  不含 OpenCascade/`occ` feature，PE 导入和二进制字符串不含 OCCT；Python 离线 85 条与
+  删除护栏 3 条同步通过。现场 T049 与 caliber 原子重建仍保持失败闭合。
+
 - OCC 退役收官接入六类复用曲面的真实尺寸 `FacetCaliber` 身份，并发布协调后的 aios-core / parse / pdms-io 修订。
 
 - 斜切延伸段的长度规则落成纯函数（specs/009 T021）：`sweep_mesh::mitre_extension_reach`

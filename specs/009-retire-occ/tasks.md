@@ -636,6 +636,10 @@ ws,gen_model,manifold,project_hd`：T039 / T042 落地后是 **1062 通过 / 1 �
   装配；无 Manifold 后端时 `gen_inst_meshes` 明确失败；新增源码/manifest/workflow 删除护栏，
   并修正 wheel OCCT 清单检查读取了错误目录的问题。**最终现场发布仍按硬门暂停：SSCL、
   多面体、YOFF 已有真实源样本和生产网格证据，球体 SPHE 与双库 RVM 仍缺。**
+  **2026-08-24 发布产物复验**：无 OCC feature 的 Windows release 构建成功；完整 Cargo
+  metadata（826 packages）无 OpenCascade 包或 `occ` feature，PE import table 和二进制
+  字符串无 OCCT，Python offline 85 条及删除护栏 3 条全绿。证据：
+  `docs/evidence/2026-08-24-occ-retire-no-occ-release.md`。该结果不越过 T049/原子重建硬门。
 - [x] T054-code：`ProfileRing` 显式保存逐边光顺关系；libgm `1e-6` 切向判据、反向重排、
   端盖硬边、Manifold 属性顶点和布尔后的法线传播均有纯函数/网格回归测试。
 - [x] T032-code：`cargo fmt --check`、默认与无默认 feature `cargo check`、全量 lib、四个
