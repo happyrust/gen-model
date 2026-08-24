@@ -4,6 +4,14 @@
 
 ### 修复
 
+- 收口依赖追齐后暴露的两条纯函数红：T054 的 SSCL 三角化删除本地剪切角折叠副本，
+  直接消费 aios-core `f9f1bf0f` 的规范折叠值，并让「折叠后仍出界」诊断先于 bool
+  `check_valid()`，不再把 90° / 271° / NaN 误报成尺寸退化；specs/023 的元件库
+  顺序分批与并行优化 fan-out 同步改由全局几何并发闸推导块宽，移除遗留的固定 4 路
+  和 1/2/4 分块，并扩展源码守护覆盖按输入规模选择固定 fan-out 块宽的写法。
+  同批把 `cata_closure` 的源码顺序守卫跟到 `scan_identity_ref0s` 新调用点，避免旧字符串
+  `unwrap()` 让全量在守卫自身先崩。提交暂存快照全量 **1102 passed / 0 failed / 85 ignored**。
+
 - RVM mesh 对拍不再可能量到 OCC 的答案（specs/009 X1a 前半）。`mesh_compare` 的 gen 侧
   在 `tessellate_libgm_param` 返回 `Ok(None)`（非形状）或报错时会回退 `gen_occ_shape`
   ——正是 T037 从 `occ_generate.rs` 拆掉的那条形状回退，活在打分的那一侧。它也不是

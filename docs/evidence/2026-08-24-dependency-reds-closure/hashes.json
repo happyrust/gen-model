@@ -1,0 +1,22 @@
+{
+  "src/fast_model/manifold_tessellate.rs": {
+    "baseline_sha256": "46daf3f20093035c7aa7575c6242a2db4e105fc8536eb1b1eef6c78aa700e864",
+    "modified_sha256": "aee97ff982a56489c0d93a0a3389310465635643548df15bffa999deee09db5d"
+  },
+  "src/fast_model/cata_model.rs": {
+    "baseline_sha256": "5ebc6992ebb1b11d392977c05f750fd6c4bc5531afb42618595ea4602a95d41e",
+    "modified_sha256": "78301616826416b73ba50bde5184977039bf4d13fa075a5d531d0a013fda597c"
+  },
+  "src/fast_model/concurrency.rs": {
+    "baseline_sha256": "96cfb363ef809b8b9dff1894dd794cb02a0f6346ff37bc7935f50250da0a7400",
+    "modified_sha256": "8869437e1d7b4353ca5070304acfb5e54fd24afeb00a29dc985036c76aa63631"
+  },
+  "specs/009-retire-occ/tasks.md": {
+    "baseline_sha256": "e179f09e04e49e3b2e255ce7b89e108668e5a56261fdb362780e91291117f754",
+    "modified_sha256": "cab1521f8370acc7116e25cfc4f1db5f1dcec6afd24d0a919b0ee4fe899ebd17"
+  },
+  "changelog.md": {
+    "baseline_sha256": "229dfeb8071874d20eba5522c4edd7f2a6f19998dd8e3fd5eabca8120f083318",
+    "modified_sha256": "e32b3ce2433490176fc830d1f09d013f6b318e382b5920715971d451f22e72d2"
+  }
+}

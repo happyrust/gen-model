@@ -73,47 +73,163 @@ pub async fn apply_cata_neg_boolean_manifold(
     }
 
     let mut tasks = Vec::new();
-    let chunk = (params.len() / 16).max(1);
-    // let chunk = params.len();
+    // 分块宽度与在飞数都从全局几何并发闸取（specs/023）：额度 = 1 时单块串行，
+    // 与改动前逐表等价；多根并发时许可让总宽度仍不超过额度。
+    let chunk = crate::fast_model::concurrency::geometry_gate().chunk_size(params.len());
     // dbg!(&params);
     for chunk in params.chunks(chunk) {
         let group = chunk.to_vec();
         let dir_clone = dir.clone();
-        let task = crate::data_interface::staging::write_context::spawn_with_staged_io(
-            async move {
-                for g in group {
-                    let pes = g
-                        .boolean_group
-                        .iter()
-                        .flatten()
-                        .map(|x| x.to_pe_key())
-                        .collect::<Vec<_>>()
-                        .join(",");
-                    // dbg!(g.refno);
-                    let sql = format!(
-                        r#"
+        let task = crate::fast_model::concurrency::spawn_gated_leaf(async move {
+            for g in group {
+                let pes = g
+                    .boolean_group
+                    .iter()
+                    .flatten()
+                    .map(|x| x.to_pe_key())
+                    .collect::<Vec<_>>()
+                    .join(",");
+                // dbg!(g.refno);
+                let sql = format!(
+                    r#"
                     select record::id(out) as id, geom_refno, trans.d as trans, out.param as param, out.aabb as aabb_id
                     from {}->inst_relate->inst_info->geo_relate
                     where !out.bad and geom_refno in [{}]  and out.aabb!=none and out.param!=none"#,
-                        g.refno.to_pe_key(),
-                        pes
-                    );
-                    // println!("geom sql is {}", &sql);
-                    let mut resp = crate::data_interface::staging::active_data_db()
-                        .query(&sql)
-                        .await?
-                        .check()?;
-                    let gms = resp.take::<Vec<GmGeoData>>(0).map_err(|error| {
-                        anyhow!("decode catalogue manifold inputs failed: {error}")
-                    })?;
-                    // dbg!(&gms);
+                    g.refno.to_pe_key(),
+                    pes
+                );
+                // println!("geom sql is {}", &sql);
+                let mut resp = crate::data_interface::staging::active_data_db()
+                    .query(&sql)
+                    .await?
+                    .check()?;
+                let gms = resp
+                    .take::<Vec<GmGeoData>>(0)
+                    .map_err(|error| anyhow!("decode catalogue manifold inputs failed: {error}"))?;
+                // dbg!(&gms);
 
-                    let mut update_sql = String::new();
-                    'group: for bg in g.boolean_group {
-                        let Some(pos) = gms.iter().find(|x| x.geom_refno == bg[0]) else {
+                let mut update_sql = String::new();
+                'group: for bg in g.boolean_group {
+                    let Some(pos) = gms.iter().find(|x| x.geom_refno == bg[0]) else {
+                        if failure_policy == geom_error::GeometryFailurePolicy::Required {
+                            return Err(anyhow!(
+                                "required catalogue positive geometry missing for {} geom={}",
+                                g.refno,
+                                bg[0]
+                            ));
+                        }
+                        update_sql.push_str(&format!(
+                            "update {}<-inst_relate set bad_bool=true;",
+                            &g.inst_info_id,
+                        ));
+                        continue;
+                    };
+
+                    #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+                    println!("正在负实体计算的mesh hash: {}", &pos.id);
+
+                    // 网格进不了 manifold（不闭合 / 退化 / 自交）是这块几何自身的
+                    // 确定性毛病，重试多少次都是同一句 NotManifold。抛出去会让整个
+                    // 生成根连撞 MAX_ATTEMPTS 判死，同批其它元素跟着没模型、模型
+                    // 阶段永远不就绪，所以这里只跳过这一件、标 bad_bool 并出声。
+                    let pos_manifold = match load_manifold(
+                        &dir_clone,
+                        &pos.id,
+                        pos.trans.compute_matrix().as_dmat4(),
+                        false,
+                    ) {
+                        Ok(manifold) => manifold,
+                        Err(error) => {
+                            println!(
+                                "目录布尔运算跳过: 正实体载入失败（{error:#}），refno: {} geom: {}",
+                                &g.refno, bg[0]
+                            );
+                            geom_error::note_skip(
+                                BOOL_POS,
+                                &g.refno.to_pdms_str(),
+                                &pos.id,
+                                &format!("{error:#}"),
+                            )
+                            .await;
                             if failure_policy == geom_error::GeometryFailurePolicy::Required {
                                 return Err(anyhow!(
-                                    "required catalogue positive geometry missing for {} geom={}",
+                                    "required catalogue positive manifold failed for {} geom={}: {error:#}",
+                                    g.refno,
+                                    pos.id
+                                ));
+                            }
+                            update_sql.push_str(&format!(
+                                "update {}<-inst_relate set bad_bool=true;",
+                                &g.inst_info_id,
+                            ));
+                            continue;
+                        }
+                    };
+
+                    // dbg!(&update_sql);
+                    let mut neg_manifolds = vec![];
+                    //负实体的精度要比正实体大
+                    for &neg in bg.iter().skip(1) {
+                        let Some(neg_geo) = gms.iter().find(|x| x.geom_refno == neg) else {
+                            if failure_policy == geom_error::GeometryFailurePolicy::Required {
+                                return Err(anyhow!(
+                                    "required catalogue negative geometry missing for {} geom={neg}",
+                                    g.refno
+                                ));
+                            }
+                            continue;
+                        };
+                        let m = neg_geo.trans.compute_matrix().as_dmat4();
+                        match load_manifold(&dir_clone, &neg_geo.id, m, true) {
+                            Ok(manifold) => neg_manifolds.push(manifold),
+                            // 少减一个负实体就是悄悄发一件少切了洞的几何，比整件
+                            // 不切更难发现——所以坏一个负实体就整件跳过。
+                            Err(error) => {
+                                println!(
+                                    "目录布尔运算跳过: 负实体载入失败（{error:#}），refno: {} geom: {neg}",
+                                    &g.refno
+                                );
+                                geom_error::note_skip(
+                                    BOOL_NEG,
+                                    &g.refno.to_pdms_str(),
+                                    &neg_geo.id,
+                                    &format!("{error:#}"),
+                                )
+                                .await;
+                                if failure_policy == geom_error::GeometryFailurePolicy::Required {
+                                    return Err(anyhow!(
+                                        "required catalogue negative manifold failed for {} geom={}: {error:#}",
+                                        g.refno,
+                                        neg_geo.id
+                                    ));
+                                }
+                                update_sql.push_str(&format!(
+                                    "update {}<-inst_relate set bad_bool=true;",
+                                    &g.inst_info_id,
+                                ));
+                                continue 'group;
+                            }
+                        }
+                    }
+                    //没有负实体也要加上为_b后缀，表示已经进行过分析计算了。
+                    // if !neg_manifolds.is_empty()
+                    {
+                        let new_id = g.refno.hash_with_another_refno(bg[0]);
+                        let final_manifold = subtract_negatives(pos_manifold, &neg_manifolds);
+                        let mesh = manifold_to_plant_mesh(&final_manifold);
+                        // 与设计路径同一条 T025 门：差集为空不落盘、不写 inst_geo，
+                        // 标记 bad_bool 出声，禁止空网格顶掉可见几何。
+                        if mesh.indices.len() < 3 || mesh.vertices.len() < 3 {
+                            println!(
+                                "目录布尔运算失败: 差集为空（verts={} idx={}），refno: {} geom: {}",
+                                mesh.vertices.len(),
+                                mesh.indices.len(),
+                                &g.refno,
+                                bg[0]
+                            );
+                            if failure_policy == geom_error::GeometryFailurePolicy::Required {
+                                return Err(anyhow!(
+                                    "required catalogue boolean difference is empty for {} geom={}",
                                     g.refno,
                                     bg[0]
                                 ));
@@ -123,160 +239,42 @@ pub async fn apply_cata_neg_boolean_manifold(
                                 &g.inst_info_id,
                             ));
                             continue;
-                        };
-
-                        #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
-                        println!("正在负实体计算的mesh hash: {}", &pos.id);
-
-                        // 网格进不了 manifold（不闭合 / 退化 / 自交）是这块几何自身的
-                        // 确定性毛病，重试多少次都是同一句 NotManifold。抛出去会让整个
-                        // 生成根连撞 MAX_ATTEMPTS 判死，同批其它元素跟着没模型、模型
-                        // 阶段永远不就绪，所以这里只跳过这一件、标 bad_bool 并出声。
-                        let pos_manifold = match load_manifold(
-                            &dir_clone,
-                            &pos.id,
-                            pos.trans.compute_matrix().as_dmat4(),
-                            false,
-                        ) {
-                            Ok(manifold) => manifold,
-                            Err(error) => {
-                                println!(
-                                    "目录布尔运算跳过: 正实体载入失败（{error:#}），refno: {} geom: {}",
-                                    &g.refno, bg[0]
-                                );
-                                geom_error::note_skip(
-                                    BOOL_POS,
-                                    &g.refno.to_pdms_str(),
-                                    &pos.id,
-                                    &format!("{error:#}"),
-                                )
-                                .await;
-                                if failure_policy == geom_error::GeometryFailurePolicy::Required {
-                                    return Err(anyhow!(
-                                        "required catalogue positive manifold failed for {} geom={}: {error:#}",
-                                        g.refno,
-                                        pos.id
-                                    ));
-                                }
-                                update_sql.push_str(&format!(
-                                    "update {}<-inst_relate set bad_bool=true;",
-                                    &g.inst_info_id,
-                                ));
-                                continue;
-                            }
-                        };
-
-                        // dbg!(&update_sql);
-                        let mut neg_manifolds = vec![];
-                        //负实体的精度要比正实体大
-                        for &neg in bg.iter().skip(1) {
-                            let Some(neg_geo) = gms.iter().find(|x| x.geom_refno == neg) else {
-                                if failure_policy == geom_error::GeometryFailurePolicy::Required {
-                                    return Err(anyhow!(
-                                        "required catalogue negative geometry missing for {} geom={neg}",
-                                        g.refno
-                                    ));
-                                }
-                                continue;
-                            };
-                            let m = neg_geo.trans.compute_matrix().as_dmat4();
-                            match load_manifold(&dir_clone, &neg_geo.id, m, true) {
-                                Ok(manifold) => neg_manifolds.push(manifold),
-                                // 少减一个负实体就是悄悄发一件少切了洞的几何，比整件
-                                // 不切更难发现——所以坏一个负实体就整件跳过。
-                                Err(error) => {
-                                    println!(
-                                        "目录布尔运算跳过: 负实体载入失败（{error:#}），refno: {} geom: {neg}",
-                                        &g.refno
-                                    );
-                                    geom_error::note_skip(
-                                        BOOL_NEG,
-                                        &g.refno.to_pdms_str(),
-                                        &neg_geo.id,
-                                        &format!("{error:#}"),
-                                    )
-                                    .await;
-                                    if failure_policy == geom_error::GeometryFailurePolicy::Required
-                                    {
-                                        return Err(anyhow!(
-                                            "required catalogue negative manifold failed for {} geom={}: {error:#}",
-                                            g.refno,
-                                            neg_geo.id
-                                        ));
-                                    }
-                                    update_sql.push_str(&format!(
-                                        "update {}<-inst_relate set bad_bool=true;",
-                                        &g.inst_info_id,
-                                    ));
-                                    continue 'group;
-                                }
-                            }
                         }
-                        //没有负实体也要加上为_b后缀，表示已经进行过分析计算了。
-                        // if !neg_manifolds.is_empty()
+                        #[cfg(feature = "debug_model")]
+                        mesh.export_obj(false, &format!("{}.obj", g.refno));
+                        //保存到文件到dir下
+                        mesh.ser_to_file(&dir_clone.join(format!("{}.mesh", new_id)))
+                            .map_err(|error| {
+                                anyhow!("save catalogue boolean mesh {new_id} failed: {error}")
+                            })?;
                         {
-                            let new_id = g.refno.hash_with_another_refno(bg[0]);
-                            let final_manifold = subtract_negatives(pos_manifold, &neg_manifolds);
-                            let mesh = manifold_to_plant_mesh(&final_manifold);
-                            // 与设计路径同一条 T025 门：差集为空不落盘、不写 inst_geo，
-                            // 标记 bad_bool 出声，禁止空网格顶掉可见几何。
-                            if mesh.indices.len() < 3 || mesh.vertices.len() < 3 {
-                                println!(
-                                    "目录布尔运算失败: 差集为空（verts={} idx={}），refno: {} geom: {}",
-                                    mesh.vertices.len(),
-                                    mesh.indices.len(),
-                                    &g.refno,
-                                    bg[0]
-                                );
-                                if failure_policy == geom_error::GeometryFailurePolicy::Required {
-                                    return Err(anyhow!(
-                                        "required catalogue boolean difference is empty for {} geom={}",
-                                        g.refno,
-                                        bg[0]
-                                    ));
-                                }
-                                update_sql.push_str(&format!(
-                                    "update {}<-inst_relate set bad_bool=true;",
-                                    &g.inst_info_id,
-                                ));
-                                continue;
-                            }
-                            #[cfg(feature = "debug_model")]
-                            mesh.export_obj(false, &format!("{}.obj", g.refno));
-                            //保存到文件到dir下
-                            mesh.ser_to_file(&dir_clone.join(format!("{}.mesh", new_id)))
-                                .map_err(|error| {
-                                    anyhow!("save catalogue boolean mesh {new_id} failed: {error}")
-                                })?;
-                            {
-                                // `new_id` is deterministic. A previous attempt may have committed
-                                // this statement before a later statement in the batch failed, so a
-                                // durable pending retry must update the same row instead of failing
-                                // forever with "record already exists".
-                                update_sql.push_str(&render_catalogue_manifold_result_write(
-                                    new_id,
-                                    &pos.aabb_id,
-                                    &g.inst_info_id,
-                                    format!("{}_b", bg[0]),
-                                ));
-                                // 做成了就把这一件的降级记录销掉：几何换过、目录修过
-                                // 之后清单还挂着旧行，比没有清单更误导人。
-                                geom_error::note_success(&g.refno.to_pdms_str()).await;
-                                // dbg!(&update_sql);
-                            }
+                            // `new_id` is deterministic. A previous attempt may have committed
+                            // this statement before a later statement in the batch failed, so a
+                            // durable pending retry must update the same row instead of failing
+                            // forever with "record already exists".
+                            update_sql.push_str(&render_catalogue_manifold_result_write(
+                                new_id,
+                                &pos.aabb_id,
+                                &g.inst_info_id,
+                                format!("{}_b", bg[0]),
+                            ));
+                            // 做成了就把这一件的降级记录销掉：几何换过、目录修过
+                            // 之后清单还挂着旧行，比没有清单更误导人。
+                            geom_error::note_success(&g.refno.to_pdms_str()).await;
+                            // dbg!(&update_sql);
                         }
-                    }
-                    if !update_sql.is_empty() {
-                        crate::surreal_retry::execute_model_write(
-                            &update_sql,
-                            "persist catalogue manifold result",
-                        )
-                        .await?;
                     }
                 }
-                Ok::<(), anyhow::Error>(())
-            },
-        );
+                if !update_sql.is_empty() {
+                    crate::surreal_retry::execute_model_write(
+                        &update_sql,
+                        "persist catalogue manifold result",
+                    )
+                    .await?;
+                }
+            }
+            Ok::<(), anyhow::Error>(())
+        });
         tasks.push(task);
     }
     // dbg!(tasks.len());
@@ -365,7 +363,10 @@ pub async fn apply_insts_boolean_manifold_single(
             match response.take::<Vec<ManiGeoTransQuery>>(0) {
                 Ok(boolean_query) => {
                     // dbg!(&boolean_query);
-                    let chunk = (boolean_query.len() / 16).max(1);
+                    // 顺序循环里的写回攒批：宽度同样从闸派生（消灭写死的 16），
+                    // 但**不拿许可**——这里没有并发，调用方可能已是持许可的叶子。
+                    let chunk = crate::fast_model::concurrency::geometry_gate()
+                        .chunk_size(boolean_query.len());
                     //排除有NREV的情况，因为NREV的布尔计算不是很准，还要判断这个NREV的包围盒和实体的包围盒是否差不多大
                     for chunk in boolean_query.chunks(chunk) {
                         let group = chunk.to_vec();
@@ -712,6 +713,13 @@ fn manifold_io_uses_the_staged_router_and_propagates_worker_failures() {
         "{catalogue}"
     );
     assert!(!catalogue.contains("SUL_DB"), "{catalogue}");
+    // specs/023：fan-out 宽度与在飞数都来自几何并发闸，写死的 16 不得回流。
+    assert!(
+        catalogue.contains("concurrency::spawn_gated_leaf(")
+            && catalogue.contains(".chunk_size(params.len())"),
+        "目录布尔的 fan-out 必须过几何并发闸: {catalogue}"
+    );
+    assert!(!catalogue.contains("/ 16"), "{catalogue}");
 
     let design = source
         .split_once("pub async fn apply_insts_boolean_manifold_single(")
@@ -723,6 +731,16 @@ fn manifold_io_uses_the_staged_router_and_propagates_worker_failures() {
     assert!(design.contains("active_data_db()"), "{design}");
     assert!(design.contains("execute_model_write("), "{design}");
     assert!(!design.contains("SUL_DB"), "{design}");
+    // 设计路径的攒批宽度同样从闸派生；它是顺序循环，不得拿许可（防重入死锁）。
+    assert!(
+        design.contains(".chunk_size(boolean_query.len())"),
+        "{design}"
+    );
+    assert!(!design.contains("/ 16"), "{design}");
+    assert!(
+        !design.contains("spawn_gated_leaf("),
+        "顺序攒批不得拿闸许可: {design}"
+    );
     assert!(
         design.contains("subtract_negatives"),
         "设计布尔必须走 manifold-csg 适配层"

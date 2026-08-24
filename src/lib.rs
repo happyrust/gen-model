@@ -296,6 +296,12 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if let Some(notice) = crate::options::retired_net_window_notice() {
         eprintln!("{notice}");
     }
+    // 几何并发闸额度（specs/023）：非法值启动失败而非静默回退——额度是唯一的
+    // 性能旋钮兼回滚开关（=1 即串行），必须在任何生成路径起跑之前定死。
+    let geometry_workers =
+        crate::fast_model::concurrency::validate_geometry_concurrency_config()
+            .map_err(|error| anyhow::anyhow!("几何并发闸配置非法，拒绝启动：{error}"))?;
+    println!("几何并发闸额度 = {geometry_workers}（geometry_workers 未配置时取物理核数）");
     // 监听限定域（`watch_dbnums` / `--watch-dbnum`）：配置里的那份能躺一个月，
     // 所以它必须在启动时就自报家门，而不是等人从「怎么只有一个库在动」倒推。
     if let Some(notice) = crate::data_interface::watch_scope::mode_notice() {

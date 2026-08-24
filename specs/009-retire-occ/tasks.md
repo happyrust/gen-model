@@ -690,13 +690,15 @@
   (−90, 90)，`< 90.0` 的写法顺带把 NaN 拒在门外）；`hash_unit_mesh_params` 与
   `gen_unit_shape` 都取 `folded()` 规范副本（哈希与落库同源）；occ / truck 两条
   几何后端消费同一份折叠值。gen-model 侧 `manifold_tessellate` 的 SSCL 臂折叠 +
-  出界 `bail!`——`fold_shear_angle_deg` 是本地过渡拷贝，doc 写明「V4 升 rev 后改调
-  vendor 那份并删除」；两边的折叠表单测手抄同一处反编译，谁改错谁红。
+  出界 `bail!`。V4 已由 `d9517052` 追到 aios-core `f9f1bf0f`：本地过渡拷贝随即删除，
+  三角化与折叠表回归直接消费 vendor `SCylinder::folded_shear_angles()` /
+  `fold_shear_angle_deg()`；角度诊断先于只返回 bool 的 `check_valid()`，避免把 90°、
+  271°、NaN 误报成尺寸退化。
   门全绿：vendor 4 条（表 / 同键同 param / 出界拒 / 180°→直柱）+ gen-model 3 条
   （表 / 折叠对逐顶点一致 / 出界报错）。vendor 4 模块 10/10，gen-model 全量
-  `--lib` **1083 通过 / 1 预期红**（仍是 vendor 未发布那条）。
-  **仍欠**：vendor 未发布（与 V1/V2/V3 同批推上游，Phase V）；两库都无 SSCL，
-  现场验收随 T045a 找库决策。折叠会改 SSCL 的 `geo_hash`（旧库 raw 135° 一类的行
+  `--lib` **1083 通过 / 1 预期红**（当时仍是 vendor 未发布那条）；V4 追齐后的三条
+  gen-model 定点门再次通过；同 feature 全量为 **1104 通过 / 0 失败 / 86 ignored**。
+  **仍欠**：两库都无 SSCL，现场验收随 T045a 找库决策。折叠会改 SSCL 的 `geo_hash`（旧库 raw 135° 一类的行
   重哈希后换行），与 T041 整库重建同批吸收。
   顺带记录：vendor 全 `prim_geo::` 口径下另有 3 条 `wire` 红——`wire.rs` 压着另一
   会话 156/73 行的未提交改动，与本批文件零交集（`rg SCylinder|CTorus|RTorus` 零命中），

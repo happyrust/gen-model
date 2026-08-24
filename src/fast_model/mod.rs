@@ -1,5 +1,7 @@
 pub mod gen_model;
 
+pub mod concurrency;
+
 pub mod cata_model;
 
 pub mod prim_model;

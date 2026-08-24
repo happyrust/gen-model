@@ -557,144 +557,140 @@ pub async fn gen_inst_meshes(
                 .join(",");
             let dir = dir.clone();
             let aabb_map = aabb_map.clone();
-            let task = crate::data_interface::staging::write_context::spawn_with_staged_io(
-                async move {
-                    let mut libgm_meshes: HashMap<String, PlantMesh> = HashMap::new();
-                    // 形状建不出来（或不是形状）的几何。它们进不了 `libgm_meshes`，
-                    // 所以下面那句 `set bad = true` 一辈子轮不到它们——得在这里自己记下来。
-                    let mut unbuildable: Vec<String> = Vec::new();
-                    // 本任务 update_sql 引用到的 aabb / vec3 记录（D9 顺序）：记录
-                    // 必须先于指针在**本任务内**落库，跨任务去重靠 INSERT IGNORE
-                    // 幂等，不能靠共享 map——别的任务替你去了重，不等于替你把记录
-                    // 写进了库。
-                    let chunk_aabbs = DashMap::new();
-                    let chunk_pts = DashMap::new();
-                    let sql = format!(
-                        "select <string> record::id(id) as id, param from [{}] where param != NONE",
-                        ids
-                    );
-                    // println!("sql is {}", &sql);
-                    match crate::data_interface::staging::active_data_db()
-                        .query(&sql)
-                        .await
-                    {
-                        Ok(response) => {
-                            let mut response = response.check().map_err(|error| {
-                                anyhow!("query mesh parameters statement failed: {error}")
-                            })?;
-                            let r = response.take::<Vec<QueryGeoParam>>(0);
-                            if let Err(e) = &r {
-                                init_deserialize_error(
-                                    "Vec<QueryGeoParam>",
-                                    e,
-                                    &sql,
-                                    &std::panic::Location::caller().to_string(),
-                                );
-                                return Err(anyhow!("decode mesh parameters failed: {e}"));
-                            }
-                            let result: Vec<QueryGeoParam> = r.unwrap();
-                            if result.is_empty() {
-                                return Ok(());
-                            }
-                            // dbg!(&result);
-                            for g in result {
-                                #[cfg(any(
-                                    feature = "debug_model",
-                                    feature = "debug_model_no_obj"
-                                ))]
-                                println!("gen mesh param: {}", &g.id);
-                                // WP-F T037：形状只有 manifold 一台引擎，这个 match 之后
-                                // 不许再长出 `#[cfg(feature = "occ")]` 的形状回退分支。
-                                // `None` = 非形状（Unknown / CompoundShape），报错 = 坏参数；
-                                // 两者都标 bad——上游取数按 `!out.bad` 过滤，标不上就
-                                // 每一轮生成都把同一份废参数重算一遍。
-                                match tessellate_libgm_param(&g.param) {
-                                    Ok(Some(mesh)) => {
-                                        libgm_meshes.insert(g.id, mesh);
-                                    }
-                                    Ok(None) => {
-                                        eprintln!(
-                                            "几何 {} 不是形状（Unknown/CompoundShape），标记跳过",
-                                            g.id
-                                        );
-                                        unbuildable.push(g.id);
-                                    }
-                                    Err(error) => {
-                                        let affected = aios_core::query_refnos_by_geo_hash(&g.id)
-                                            .await
-                                            .unwrap_or_default();
-                                        eprintln!(
-                                            "几何 {} libgm 建不出形状，标记跳过（波及 {} 个构件）：{error}",
-                                            g.id,
-                                            affected.len()
-                                        );
-                                        #[cfg(any(
-                                            feature = "debug_model",
-                                            feature = "debug_model_no_obj",
-                                            feature = "log_error"
-                                        ))]
-                                        println!("受影响的构件: {affected:?}");
-                                        unbuildable.push(g.id);
-                                    }
+            // PAGE_NUM 只是查询分页宽度；在飞数由几何并发闸限住（specs/023），
+            // 页数不再等于并发宽度。
+            let task = crate::fast_model::concurrency::spawn_gated_leaf(async move {
+                let mut libgm_meshes: HashMap<String, PlantMesh> = HashMap::new();
+                // 形状建不出来（或不是形状）的几何。它们进不了 `libgm_meshes`，
+                // 所以下面那句 `set bad = true` 一辈子轮不到它们——得在这里自己记下来。
+                let mut unbuildable: Vec<String> = Vec::new();
+                // 本任务 update_sql 引用到的 aabb / vec3 记录（D9 顺序）：记录
+                // 必须先于指针在**本任务内**落库，跨任务去重靠 INSERT IGNORE
+                // 幂等，不能靠共享 map——别的任务替你去了重，不等于替你把记录
+                // 写进了库。
+                let chunk_aabbs = DashMap::new();
+                let chunk_pts = DashMap::new();
+                let sql = format!(
+                    "select <string> record::id(id) as id, param from [{}] where param != NONE",
+                    ids
+                );
+                // println!("sql is {}", &sql);
+                match crate::data_interface::staging::active_data_db()
+                    .query(&sql)
+                    .await
+                {
+                    Ok(response) => {
+                        let mut response = response.check().map_err(|error| {
+                            anyhow!("query mesh parameters statement failed: {error}")
+                        })?;
+                        let r = response.take::<Vec<QueryGeoParam>>(0);
+                        if let Err(e) = &r {
+                            init_deserialize_error(
+                                "Vec<QueryGeoParam>",
+                                e,
+                                &sql,
+                                &std::panic::Location::caller().to_string(),
+                            );
+                            return Err(anyhow!("decode mesh parameters failed: {e}"));
+                        }
+                        let result: Vec<QueryGeoParam> = r.unwrap();
+                        if result.is_empty() {
+                            return Ok(());
+                        }
+                        // dbg!(&result);
+                        for g in result {
+                            #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+                            println!("gen mesh param: {}", &g.id);
+                            // WP-F T037：形状只有 manifold 一台引擎，这个 match 之后
+                            // 不许再长出 `#[cfg(feature = "occ")]` 的形状回退分支。
+                            // `None` = 非形状（Unknown / CompoundShape），报错 = 坏参数；
+                            // 两者都标 bad——上游取数按 `!out.bad` 过滤，标不上就
+                            // 每一轮生成都把同一份废参数重算一遍。
+                            match tessellate_libgm_param(&g.param) {
+                                Ok(Some(mesh)) => {
+                                    libgm_meshes.insert(g.id, mesh);
                                 }
-                            }
-                            let mut update_sql = "".to_string();
-                            for id in &unbuildable {
-                                update_sql
-                                    .push_str(&format!("update inst_geo:⟨{id}⟩ set bad = true;"));
-                            }
-
-                            for (id, mesh) in &libgm_meshes {
-                                if let Err(error) = persist_libgm_plant_mesh(
-                                    id,
-                                    mesh,
-                                    &dir,
-                                    &aabb_map,
-                                    &chunk_aabbs,
-                                    &chunk_pts,
-                                    &mut update_sql,
-                                ) {
-                                    let affected = aios_core::query_refnos_by_geo_hash(id)
+                                Ok(None) => {
+                                    eprintln!(
+                                        "几何 {} 不是形状（Unknown/CompoundShape），标记跳过",
+                                        g.id
+                                    );
+                                    unbuildable.push(g.id);
+                                }
+                                Err(error) => {
+                                    let affected = aios_core::query_refnos_by_geo_hash(&g.id)
                                         .await
                                         .unwrap_or_default();
                                     eprintln!(
-                                        "几何 {id} libgm 网格落盘失败，标记跳过（波及 {} 个构件）：{error}",
+                                        "几何 {} libgm 建不出形状，标记跳过（波及 {} 个构件）：{error}",
+                                        g.id,
                                         affected.len()
                                     );
-                                    update_sql
-                                        .push_str(&format!("update inst_geo:⟨{id}⟩ set bad=true;"));
-                                }
-                            }
-                            if !update_sql.is_empty() {
-                                // D9 顺序（与 inst_relate 指针同一条教训）：先把本任务
-                                // 引用的 vec3 / aabb 记录写进库，再落 `inst_geo` 指针。
-                                // 反过来的话，两步之间的崩溃或并发读者会拿到悬空指针，
-                                // `aabb.d` 为 none 的读者把几何整条漏掉。
-                                utils::save_pts_to_surreal(&chunk_pts).await?;
-                                utils::save_aabb_to_surreal(&chunk_aabbs).await?;
-                                //执行SUL_DB update,使用chunk 保存
-                                if let Err(error) = crate::surreal_retry::execute_model_write(
-                                    &update_sql,
-                                    "mark generated inst_geo state",
-                                )
-                                .await
-                                {
-                                    init_save_database_error(
-                                        &update_sql,
-                                        &std::panic::Location::caller().to_string(),
-                                    );
-                                    return Err(error);
+                                    #[cfg(any(
+                                        feature = "debug_model",
+                                        feature = "debug_model_no_obj",
+                                        feature = "log_error"
+                                    ))]
+                                    println!("受影响的构件: {affected:?}");
+                                    unbuildable.push(g.id);
                                 }
                             }
                         }
-                        Err(e) => {
-                            init_query_error(&sql, &e, &std::panic::Location::caller().to_string());
-                            return Err(anyhow!("query mesh parameters failed: {e}"));
+                        let mut update_sql = "".to_string();
+                        for id in &unbuildable {
+                            update_sql.push_str(&format!("update inst_geo:⟨{id}⟩ set bad = true;"));
+                        }
+
+                        for (id, mesh) in &libgm_meshes {
+                            if let Err(error) = persist_libgm_plant_mesh(
+                                id,
+                                mesh,
+                                &dir,
+                                &aabb_map,
+                                &chunk_aabbs,
+                                &chunk_pts,
+                                &mut update_sql,
+                            ) {
+                                let affected = aios_core::query_refnos_by_geo_hash(id)
+                                    .await
+                                    .unwrap_or_default();
+                                eprintln!(
+                                    "几何 {id} libgm 网格落盘失败，标记跳过（波及 {} 个构件）：{error}",
+                                    affected.len()
+                                );
+                                update_sql
+                                    .push_str(&format!("update inst_geo:⟨{id}⟩ set bad=true;"));
+                            }
+                        }
+                        if !update_sql.is_empty() {
+                            // D9 顺序（与 inst_relate 指针同一条教训）：先把本任务
+                            // 引用的 vec3 / aabb 记录写进库，再落 `inst_geo` 指针。
+                            // 反过来的话，两步之间的崩溃或并发读者会拿到悬空指针，
+                            // `aabb.d` 为 none 的读者把几何整条漏掉。
+                            utils::save_pts_to_surreal(&chunk_pts).await?;
+                            utils::save_aabb_to_surreal(&chunk_aabbs).await?;
+                            //执行SUL_DB update,使用chunk 保存
+                            if let Err(error) = crate::surreal_retry::execute_model_write(
+                                &update_sql,
+                                "mark generated inst_geo state",
+                            )
+                            .await
+                            {
+                                init_save_database_error(
+                                    &update_sql,
+                                    &std::panic::Location::caller().to_string(),
+                                );
+                                return Err(error);
+                            }
                         }
                     }
-                    Ok::<(), anyhow::Error>(())
-                },
-            );
+                    Err(e) => {
+                        init_query_error(&sql, &e, &std::panic::Location::caller().to_string());
+                        return Err(anyhow!("query mesh parameters failed: {e}"));
+                    }
+                }
+                Ok::<(), anyhow::Error>(())
+            });
             tasks.push(task);
         }
 
@@ -1391,6 +1387,11 @@ mod aabb_write_order_tests {
         );
         assert!(body.contains("join_all(tasks).await"), "{body}");
         assert!(!body.contains("try_join_all(tasks)"), "{body}");
+        // specs/023：页任务的在飞数由几何并发闸限住，PAGE_NUM 只是分页宽度。
+        assert!(
+            body.contains("concurrency::spawn_gated_leaf("),
+            "网格页任务必须过几何并发闸: {body}"
+        );
     }
 
     /// `gen_inst_meshes` 的任务体内，vec3 / aabb 记录必须先于 `inst_geo` 指针

@@ -386,6 +386,50 @@ fn effective_data_batch_workers(configured: Option<usize>) -> usize {
     configured.unwrap_or(1).clamp(1, 8)
 }
 
+/// 几何并发闸额度的配置探测（`DbOption.toml` 的 `geometry_workers`，specs/023）。
+///
+/// 返回三态，调用方（`fast_model::concurrency`）据此裁决：
+///
+/// * `Ok(None)`——没配（缺文件或缺键），回落默认 = 物理核数；
+/// * `Ok(Some(n))`——配了 ≥1 的整数，照用；
+/// * `Err(说明)`——配了但**不是 ≥1 的整数**，必须**启动失败**。
+///
+/// 为什么不走 [`DbOptionExtFields`]：扩展表任一字段类型写错时整表回落默认值、
+/// 只留一句告警（那是刻意保留的「还能起来」语义）。而这个键的默认值随机器变
+/// （物理核数），静默回退会让「我明明配了 1」的回滚操作无声失效——specs/023
+/// 兼容性条款因此要求未知值启动失败。所以它与退役键探针同款，独立读原始 TOML，
+/// 不与扩展字段反序列化共命运。额度权威只有这一处，`fast_model` 不得自己再读
+/// 一遍配置。
+pub fn configured_geometry_workers() -> Result<Option<usize>, String> {
+    probe_geometry_workers_config(std::env::var_os("DB_OPTION_FILE"))
+}
+
+fn probe_geometry_workers_config(configured: Option<OsString>) -> Result<Option<usize>, String> {
+    let candidates = config_path_candidates(configured);
+    // 缺文件不是错误：单测与探针环境根本不带 DbOption.toml，真跑服务的进程
+    // 会在 aios_core::get_db_option() 那边因缺文件当场 panic，轮不到这里说话。
+    let Some(path) = candidates.iter().find(|candidate| candidate.is_file()) else {
+        return Ok(None);
+    };
+    let text = fs::read_to_string(path)
+        .map_err(|error| format!("读取 {} 失败：{error}", path.display()))?;
+    let document = toml::from_str::<toml::Value>(&text)
+        .map_err(|error| format!("解析 {} 失败：{error}", path.display()))?;
+    let table = document
+        .as_table()
+        .ok_or_else(|| format!("解析 {} 失败：TOML 顶层不是 table", path.display()))?;
+    match table.get("geometry_workers") {
+        None => Ok(None),
+        Some(toml::Value::Integer(quota)) if *quota >= 1 => Ok(Some(*quota as usize)),
+        Some(other) => Err(format!(
+            "{} 的 geometry_workers = {other} 非法：额度必须是 ≥1 的整数\
+             （1 = 串行回滚档，未配置 = 物理核数）。未知值必须启动失败而非\
+             静默回退（specs/023）。",
+            path.display()
+        )),
+    }
+}
+
 /// 环境变量名：一次性覆盖 [`startup_autorun`]，不必改配置文件。
 pub const STARTUP_AUTORUN_ENV: &str = "AIOS_STARTUP_AUTORUN";
 
@@ -1093,6 +1137,69 @@ mod tests {
             .expect("非法 TOML 必须显式报告探测失败");
         assert!(notice.contains("探测失败"), "{notice}");
         assert!(notice.contains("解析"), "{notice}");
+    }
+
+    /// 没配就是「用默认」，两种没配（缺文件 / 缺键）都不许被读成错误：
+    /// 单测与探针环境没有配置文件，最小部署的配置里也不会有这个键。
+    #[test]
+    fn geometry_workers_probe_reads_absence_as_default_not_error() {
+        let dir = tempfile::tempdir().expect("temp config dir");
+        let missing = dir.path().join("missing-DbOption");
+        assert_eq!(
+            probe_geometry_workers_config(Some(missing.into())),
+            Ok(None)
+        );
+
+        let (_dir, path) = write_probe_config("no-key.toml", "startup_autorun = true\n");
+        assert_eq!(probe_geometry_workers_config(Some(path.into())), Ok(None));
+    }
+
+    #[test]
+    fn geometry_workers_probe_accepts_positive_integers() {
+        for (value, expected) in [("1", 1_usize), ("4", 4), ("96", 96)] {
+            let (_dir, path) =
+                write_probe_config("geometry.toml", &format!("geometry_workers = {value}\n"));
+            assert_eq!(
+                probe_geometry_workers_config(Some(path.into())),
+                Ok(Some(expected))
+            );
+        }
+    }
+
+    /// specs/023 兼容性条款：未知值必须启动失败，不是静默回退。这个键的默认值
+    /// 随机器变（物理核数），静默回退会让「配了 1 做回滚」这种操作无声失效。
+    #[test]
+    fn geometry_workers_probe_rejects_everything_that_is_not_a_positive_integer() {
+        for bad in ["0", "-2", "\"many\"", "true", "4.5", "[4]"] {
+            let (_dir, path) =
+                write_probe_config("geometry-bad.toml", &format!("geometry_workers = {bad}\n"));
+            let error = probe_geometry_workers_config(Some(path.into()))
+                .expect_err(&format!("geometry_workers = {bad} 必须被拒绝"));
+            assert!(error.contains("geometry_workers"), "{error}");
+            assert!(error.contains("specs/023"), "{error}");
+        }
+    }
+
+    /// 文件在但读不动（非法 TOML）同样是错误，不能折叠成「没配置」。
+    #[test]
+    fn geometry_workers_probe_reports_invalid_toml_instead_of_defaulting() {
+        let (_dir, path) = write_probe_config("geometry-invalid.toml", "geometry_workers = [\n");
+        let error =
+            probe_geometry_workers_config(Some(path.into())).expect_err("非法 TOML 必须报错");
+        assert!(error.contains("解析"), "{error}");
+    }
+
+    /// 与退役键探针同一套路径候选：无后缀配置名回落 `.toml`。
+    #[test]
+    fn geometry_workers_probe_tries_the_literal_path_then_toml_suffix() {
+        let dir = tempfile::tempdir().expect("temp config dir");
+        let stem = dir.path().join("DbOption-geometry");
+        fs::write(stem.with_extension("toml"), "geometry_workers = 2\n")
+            .expect("write suffixed temp config");
+        assert_eq!(
+            probe_geometry_workers_config(Some(stem.into())),
+            Ok(Some(2))
+        );
     }
 
     #[test]

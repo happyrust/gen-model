@@ -2419,8 +2419,19 @@ mod tests {
             .split_once("pub fn build_from_dir")
             .expect("build boundary")
             .0;
-        let scan_at = build.find("scan_db_ref0s(&entry.path, project)?").unwrap();
-        let put_at = build.find("cache.put(*dbnum").unwrap();
+        // 针要跟着调用点走：依赖身份清单那一版把这里从 `scan_db_ref0s(&entry.path,
+        // project)?` 换成了 `scan_identity_ref0s(...)`，针没跟着改，于是 `unwrap()` 在
+        // `None` 上炸开——这条守卫连着几周没有在守任何东西。用 `expect` 而不是
+        // `unwrap`，下一次改名至少能读到「谁没跟上」。
+        let scan_at = build
+            .find("scan_identity_ref0s(&entry.path, &entry.db_type, &entry.project)?")
+            .expect(
+                "身份扫描的调用点必须留在 build_for_project 里，且失败要用 `?` 上浮；\
+                 改了名就把这根针一起改",
+            );
+        let put_at = build
+            .find("cache.put(*dbnum")
+            .expect("写缓存的调用点必须留在 build_for_project 里");
         assert!(scan_at < put_at, "先成功扫描，后写缓存");
 
         let scan = source

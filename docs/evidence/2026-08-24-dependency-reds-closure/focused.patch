@@ -1,0 +1,167 @@
+--- a/src/fast_model/manifold_tessellate.rs
++++ b/src/fast_model/manifold_tessellate.rs
+@@ -658,20 +658,6 @@
+     n.max(1) as u32
+ }
+ 
+-/// SSCL 剪切角折叠——Core3D `CSG_BasicSLC::getPrimGeom`（3.1 `0x107272D0`）在把
+-/// XTSH/YTSH/XBSH/YBSH 喂给 `gm_CreateSlopeEndedCylinder` 之前，对每个角做**且只做
+-/// 一次**：`> 90°` 减 180，然后 `< −90°` 加 180。不是取模：折完仍出界的（271° → 91°）
+-/// 由 libgm `GM_SlopeEndCyl::validate`（严格 (−90, 90)）响亮拒绝，本仓在 SSCL 臂里
+-/// `bail!`。specs/009 T054，证据 `docs/evidence/2026-08-24-ida-occ-retire-audit.md`。
+-///
+-/// 与 vendor 侧 `SCylinder::fold_shear_angle_deg` 是同一张表（两边的折叠表单测
+-/// 手抄同一处反编译）。aios-core rev 升级（plan Phase V 的 V4）后本臂改调那份方法、
+-/// 删除这条本地拷贝——两份并存只是「vendor 未发布」窗口期的过渡。
+-fn fold_shear_angle_deg(deg: f32) -> f32 {
+-    let deg = if deg > 90.0 { deg - 180.0 } else { deg };
+-    if deg < -90.0 { deg + 180.0 } else { deg }
+-}
+-
+ /// 16 个 `PdmsGeoParam` 变体全部在此裁决：14 个形状变体建出网格或 `bail!`；
+ /// `None` 只剩一个含义——`Unknown` / `CompoundShape` 这样的**非形状**，调用方
+ /// 直接标 `bad`。「回退 OCC」语义已随 WP-F 收口（ADR-030 修订二）。
+@@ -693,25 +679,25 @@
+             )
+         }
+         PdmsGeoParam::PrimSCylinder(c) => {
++            // aios-core f9f1bf0f 已成为 T054 的折叠权威。先保留折叠后的实际值，
++            // 让角度错误得到准确诊断；vendor `check_valid()` 也检查角度，但它只返回
++            // bool，若先调用会把这类输入误报成笼统的尺寸退化。
++            let (btm_deg, top_deg) = c.folded_shear_angles();
++            if btm_deg
++                .iter()
++                .chain(top_deg.iter())
++                .any(|a| !(a.abs() < 90.0))
++            {
++                return Err(anyhow!(
++                    "PrimSCylinder(SSCL) 剪切角折叠后仍出界: btm {btm_deg:?} top {top_deg:?}（Core3D 只折一次：>90°−180 / <−90°+180，折完须严格落在 (−90°, 90°)）"
++                ));
++            }
+             if !c.check_valid() {
+-                return Err(anyhow!("PrimSCylinder is degenerate"));
++                return Err(anyhow!("PrimSCylinder size is degenerate"));
+             }
+             if c.is_sscl() {
+                 let r = c.pdia / 2.0;
+                 let h = c.phei.abs();
+-                // 剪切角先过 Core3D 的折叠（T054）；折完必须严格落在 (−90°, 90°)，
+-                // 出界响亮失败（`!(<90)` 的写法同时把 NaN 拒在门外），不得静默夹到边界。
+-                let btm_deg = c.btm_shear_angles.map(fold_shear_angle_deg);
+-                let top_deg = c.top_shear_angles.map(fold_shear_angle_deg);
+-                if btm_deg
+-                    .iter()
+-                    .chain(top_deg.iter())
+-                    .any(|a| !(a.abs() < 90.0))
+-                {
+-                    return Err(anyhow!(
+-                        "PrimSCylinder(SSCL) 剪切角折叠后仍出界: btm {btm_deg:?} top {top_deg:?}（Core3D 只折一次：>90°−180 / <−90°+180，折完须严格落在 (−90°, 90°)）"
+-                    ));
+-                }
+                 let btm = [btm_deg[0].to_radians(), btm_deg[1].to_radians()];
+                 let top = [top_deg[0].to_radians(), top_deg[1].to_radians()];
+                 return covered(
+@@ -2144,7 +2130,11 @@
+             (90.0, 90.0),
+             (271.0, 91.0),
+         ] {
+-            assert_eq!(fold_shear_angle_deg(raw), folded, "fold({raw})");
++            assert_eq!(
++                aios_core::prim_geo::SCylinder::fold_shear_angle_deg(raw),
++                folded,
++                "fold({raw})"
++            );
+         }
+     }
+ 
+--- a/src/fast_model/cata_model.rs
++++ b/src/fast_model/cata_model.rs
+@@ -876,13 +876,10 @@
+     );
+ 
+     let unique_cata_cnt = all_unique_keys.len();
+-    let mut batch_chunks_cnt = 4;
+-    let mut batch_size = all_unique_keys.len() / batch_chunks_cnt + 1;
++    let batch_size =
++        crate::fast_model::concurrency::geometry_gate().chunk_size(all_unique_keys.len());
++    let batch_chunks_cnt = all_unique_keys.len().div_ceil(batch_size);
+     let test_refno = db_option.get_test_refno();
+-    //如果只有一个元件，就不分块了
+-    if batch_size == 1 {
+-        batch_chunks_cnt = all_unique_keys.len();
+-    }
+     #[cfg(feature = "profile")]
+     tracing::info!(
+         unique_cata_cnt,
+@@ -1913,14 +1910,9 @@
+         crate::fast_model::concurrency::geometry_gate().quota()
+     );
+ 
+-    // 计算批次大小 - 根据元件库数量动态调整
+-    let batch_size = if unique_cata_cnt <= 10 {
+-        1 // 少量元件库，每个单独处理
+-    } else if unique_cata_cnt <= 50 {
+-        2 // 中等数量，小批次处理
+-    } else {
+-        4 // 大量元件库，较大批次处理
+-    };
++    // fan-out 的分块宽度与实际许可额度同源，最多只创建 quota 个叶子任务；
++    // 额度 = 1 时整批串行，避免先排出一长串等待许可的任务。
++    let batch_size = crate::fast_model::concurrency::geometry_gate().chunk_size(unique_cata_cnt);
+ 
+     info!("📦 批次大小: {}", batch_size);
+ 
+--- a/src/fast_model/concurrency.rs
++++ b/src/fast_model/concurrency.rs
+@@ -247,6 +247,12 @@
+                         line.trim()
+                     );
+                 }
++                assert!(
++                    !line.trim_start().starts_with("let batch_size = if "),
++                    "{name}:{}: 按输入规模写死的 fan-out 分块：`{}`。块宽用 geometry_gate().chunk_size()",
++                    idx + 1,
++                    line.trim()
++                );
+             }
+         }
+         assert!(scanned >= 20, "扫描面塌了：只看到 {scanned} 个文件");
+--- a/specs/009-retire-occ/tasks.md
++++ b/specs/009-retire-occ/tasks.md
+@@ -690,13 +690,15 @@
+   (−90, 90)，`< 90.0` 的写法顺带把 NaN 拒在门外）；`hash_unit_mesh_params` 与
+   `gen_unit_shape` 都取 `folded()` 规范副本（哈希与落库同源）；occ / truck 两条
+   几何后端消费同一份折叠值。gen-model 侧 `manifold_tessellate` 的 SSCL 臂折叠 +
+-  出界 `bail!`——`fold_shear_angle_deg` 是本地过渡拷贝，doc 写明「V4 升 rev 后改调
+-  vendor 那份并删除」；两边的折叠表单测手抄同一处反编译，谁改错谁红。
++  出界 `bail!`。V4 已由 `d9517052` 追到 aios-core `f9f1bf0f`：本地过渡拷贝随即删除，
++  三角化与折叠表回归直接消费 vendor `SCylinder::folded_shear_angles()` /
++  `fold_shear_angle_deg()`；角度诊断先于只返回 bool 的 `check_valid()`，避免把 90°、
++  271°、NaN 误报成尺寸退化。
+   门全绿：vendor 4 条（表 / 同键同 param / 出界拒 / 180°→直柱）+ gen-model 3 条
+   （表 / 折叠对逐顶点一致 / 出界报错）。vendor 4 模块 10/10，gen-model 全量
+-  `--lib` **1083 通过 / 1 预期红**（仍是 vendor 未发布那条）。
+-  **仍欠**：vendor 未发布（与 V1/V2/V3 同批推上游，Phase V）；两库都无 SSCL，
+-  现场验收随 T045a 找库决策。折叠会改 SSCL 的 `geo_hash`（旧库 raw 135° 一类的行
++  `--lib` **1083 通过 / 1 预期红**（当时仍是 vendor 未发布那条）；V4 追齐后的三条
++  gen-model 定点门再次通过；同 feature 全量为 **1104 通过 / 0 失败 / 86 ignored**。
++  **仍欠**：两库都无 SSCL，现场验收随 T045a 找库决策。折叠会改 SSCL 的 `geo_hash`（旧库 raw 135° 一类的行
+   重哈希后换行），与 T041 整库重建同批吸收。
+   顺带记录：vendor 全 `prim_geo::` 口径下另有 3 条 `wire` 红——`wire.rs` 压着另一
+   会话 156/73 行的未提交改动，与本批文件零交集（`rg SCylinder|CTorus|RTorus` 零命中），
+--- a/changelog.md
++++ b/changelog.md
+@@ -22,6 +22,13 @@
+   （T07）。
+ 
+ ### 修复
++
++- 收口依赖追齐后暴露的两条纯函数红：T054 的 SSCL 三角化删除本地剪切角折叠副本，
++  直接消费 aios-core `f9f1bf0f` 的规范折叠值，并让「折叠后仍出界」诊断先于 bool
++  `check_valid()`，不再把 90° / 271° / NaN 误报成尺寸退化；specs/023 的元件库
++  顺序分批与并行优化 fan-out 同步改由全局几何并发闸推导块宽，移除遗留的固定 4 路
++  和 1/2/4 分块，并扩展源码守护覆盖按输入规模选择固定 fan-out 块宽的写法。T054 三条定点门、
++  并发闸 6 条纯函数门及同 feature 全量 **1104 passed / 0 failed / 86 ignored**。
+ 
+ - RVM mesh 对拍不再可能量到 OCC 的答案（specs/009 X1a 前半）。`mesh_compare` 的 gen 侧
+   在 `tessellate_libgm_param` 返回 `Ok(None)`（非形状）或报错时会回退 `gen_occ_shape`

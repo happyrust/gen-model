@@ -35,7 +35,6 @@ use std::mem::take;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
-use tokio::sync::Semaphore;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, error, info, warn};
 
@@ -877,13 +876,10 @@ pub async fn gen_cata_geos(
     );
 
     let unique_cata_cnt = all_unique_keys.len();
-    let mut batch_chunks_cnt = 4;
-    let mut batch_size = all_unique_keys.len() / batch_chunks_cnt + 1;
+    let batch_size =
+        crate::fast_model::concurrency::geometry_gate().chunk_size(all_unique_keys.len());
+    let batch_chunks_cnt = all_unique_keys.len().div_ceil(batch_size);
     let test_refno = db_option.get_test_refno();
-    //如果只有一个元件，就不分块了
-    if batch_size == 1 {
-        batch_chunks_cnt = all_unique_keys.len();
-    }
     #[cfg(feature = "profile")]
     tracing::info!(
         unique_cata_cnt,
@@ -1906,25 +1902,17 @@ pub async fn gen_cata_geos_parallel_optimized(
         }
     );
 
-    // 根据CPU核心数确定并发数量
-    let cpu_count = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
-    let max_concurrent = (cpu_count * 2).min(16).max(4); // 最少4个，最多16个
-    let semaphore = Arc::new(Semaphore::new(max_concurrent));
+    // 并发数量由全局几何并发闸统一裁决（specs/023）：这里从前有一套自己的
+    // 信号量（CPU*2 夹 4..16），与其他 fan-out 的宽度互不知情，正是 ADR-041
+    // 第 3 条要消灭的「两层各限各的」。
     info!(
-        "⚙️ 使用 {} 个并发任务 (CPU核心数: {})",
-        max_concurrent, cpu_count
+        "⚙️ 并发任务数由几何并发闸限住（额度: {}）",
+        crate::fast_model::concurrency::geometry_gate().quota()
     );
 
-    // 计算批次大小 - 根据元件库数量动态调整
-    let batch_size = if unique_cata_cnt <= 10 {
-        1 // 少量元件库，每个单独处理
-    } else if unique_cata_cnt <= 50 {
-        2 // 中等数量，小批次处理
-    } else {
-        4 // 大量元件库，较大批次处理
-    };
+    // fan-out 的分块宽度与实际许可额度同源，最多只创建 quota 个叶子任务；
+    // 额度 = 1 时整批串行，避免先排出一长串等待许可的任务。
+    let batch_size = crate::fast_model::concurrency::geometry_gate().chunk_size(unique_cata_cnt);
 
     info!("📦 批次大小: {}", batch_size);
 
@@ -1942,49 +1930,46 @@ pub async fn gen_cata_geos_parallel_optimized(
         let sjus_map_arc = sjus_map_arc.clone();
         let sender = sender.clone();
         let db_option = db_option.clone();
-        let semaphore = semaphore.clone();
 
-        let task =
-            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                let _permit = semaphore.acquire().await.unwrap();
-                let batch_start = Instant::now();
+        let task = crate::fast_model::concurrency::spawn_gated_leaf(async move {
+            let batch_start = Instant::now();
 
-                info!(
-                    "📋 开始处理批次 {}/{} (包含 {} 个元件库)",
+            info!(
+                "📋 开始处理批次 {}/{} (包含 {} 个元件库)",
+                batch_idx + 1,
+                total_batches,
+                chunk_keys.len()
+            );
+
+            let result = process_cata_batch_optimized(
+                batch_idx + 1,
+                chunk_keys,
+                target_cata_map,
+                branch_map,
+                sjus_map_arc,
+                db_option,
+                sender,
+                is_bran,
+            )
+            .await;
+
+            let batch_time = batch_start.elapsed();
+            match &result {
+                Ok(_) => info!(
+                    "✅ 批次 {} 完成，耗时: {}ms",
                     batch_idx + 1,
-                    total_batches,
-                    chunk_keys.len()
-                );
-
-                let result = process_cata_batch_optimized(
+                    batch_time.as_millis()
+                ),
+                Err(e) => error!(
+                    "❌ 批次 {} 失败，耗时: {}ms，错误: {}",
                     batch_idx + 1,
-                    chunk_keys,
-                    target_cata_map,
-                    branch_map,
-                    sjus_map_arc,
-                    db_option,
-                    sender,
-                    is_bran,
-                )
-                .await;
+                    batch_time.as_millis(),
+                    e
+                ),
+            }
 
-                let batch_time = batch_start.elapsed();
-                match &result {
-                    Ok(_) => info!(
-                        "✅ 批次 {} 完成，耗时: {}ms",
-                        batch_idx + 1,
-                        batch_time.as_millis()
-                    ),
-                    Err(e) => error!(
-                        "❌ 批次 {} 失败，耗时: {}ms，错误: {}",
-                        batch_idx + 1,
-                        batch_time.as_millis(),
-                        e
-                    ),
-                }
-
-                result
-            });
+            result
+        });
 
         all_tasks.push(task);
     }

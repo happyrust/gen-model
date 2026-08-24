@@ -217,6 +217,12 @@ pub fn full_init(
             if let Some(notice) = aios_database::data_interface::watch_scope::mode_notice() {
                 eprintln!("*** {notice} ***");
             }
+            // 与 run_cli 同款（specs/023）：几何并发闸额度非法必须启动失败，
+            // live A/B 与 testbed 正是靠这条路把额度=1 / 额度=核数两档跑出来的。
+            let geometry_workers =
+                aios_database::fast_model::concurrency::validate_geometry_concurrency_config()
+                    .map_err(|error| anyhow::anyhow!("几何并发闸配置非法，拒绝初始化：{error}"))?;
+            println!("几何并发闸额度 = {geometry_workers}（geometry_workers 未配置时取物理核数）");
 
             // 1b. 锁挡不住跨部署互踩（锁按项目根隔离，两个部署包各持各的锁却写
             //     同一个工程），所以再探一次同工程活服务。放在锁之后：锁能挡的

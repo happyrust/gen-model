@@ -658,20 +658,6 @@ fn segs(n: i32) -> u32 {
     n.max(1) as u32
 }
 
-/// SSCL 剪切角折叠——Core3D `CSG_BasicSLC::getPrimGeom`（3.1 `0x107272D0`）在把
-/// XTSH/YTSH/XBSH/YBSH 喂给 `gm_CreateSlopeEndedCylinder` 之前，对每个角做**且只做
-/// 一次**：`> 90°` 减 180，然后 `< −90°` 加 180。不是取模：折完仍出界的（271° → 91°）
-/// 由 libgm `GM_SlopeEndCyl::validate`（严格 (−90, 90)）响亮拒绝，本仓在 SSCL 臂里
-/// `bail!`。specs/009 T054，证据 `docs/evidence/2026-08-24-ida-occ-retire-audit.md`。
-///
-/// 与 vendor 侧 `SCylinder::fold_shear_angle_deg` 是同一张表（两边的折叠表单测
-/// 手抄同一处反编译）。aios-core rev 升级（plan Phase V 的 V4）后本臂改调那份方法、
-/// 删除这条本地拷贝——两份并存只是「vendor 未发布」窗口期的过渡。
-fn fold_shear_angle_deg(deg: f32) -> f32 {
-    let deg = if deg > 90.0 { deg - 180.0 } else { deg };
-    if deg < -90.0 { deg + 180.0 } else { deg }
-}
-
 /// 16 个 `PdmsGeoParam` 变体全部在此裁决：14 个形状变体建出网格或 `bail!`；
 /// `None` 只剩一个含义——`Unknown` / `CompoundShape` 这样的**非形状**，调用方
 /// 直接标 `bad`。「回退 OCC」语义已随 WP-F 收口（ADR-030 修订二）。
@@ -693,25 +679,25 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             )
         }
         PdmsGeoParam::PrimSCylinder(c) => {
+            // aios-core f9f1bf0f 已成为 T054 的折叠权威。先保留折叠后的实际值，
+            // 让角度错误得到准确诊断；vendor `check_valid()` 也检查角度，但它只返回
+            // bool，若先调用会把这类输入误报成笼统的尺寸退化。
+            let (btm_deg, top_deg) = c.folded_shear_angles();
+            if btm_deg
+                .iter()
+                .chain(top_deg.iter())
+                .any(|a| !(a.abs() < 90.0))
+            {
+                return Err(anyhow!(
+                    "PrimSCylinder(SSCL) 剪切角折叠后仍出界: btm {btm_deg:?} top {top_deg:?}（Core3D 只折一次：>90°−180 / <−90°+180，折完须严格落在 (−90°, 90°)）"
+                ));
+            }
             if !c.check_valid() {
-                return Err(anyhow!("PrimSCylinder is degenerate"));
+                return Err(anyhow!("PrimSCylinder size is degenerate"));
             }
             if c.is_sscl() {
                 let r = c.pdia / 2.0;
                 let h = c.phei.abs();
-                // 剪切角先过 Core3D 的折叠（T054）；折完必须严格落在 (−90°, 90°)，
-                // 出界响亮失败（`!(<90)` 的写法同时把 NaN 拒在门外），不得静默夹到边界。
-                let btm_deg = c.btm_shear_angles.map(fold_shear_angle_deg);
-                let top_deg = c.top_shear_angles.map(fold_shear_angle_deg);
-                if btm_deg
-                    .iter()
-                    .chain(top_deg.iter())
-                    .any(|a| !(a.abs() < 90.0))
-                {
-                    return Err(anyhow!(
-                        "PrimSCylinder(SSCL) 剪切角折叠后仍出界: btm {btm_deg:?} top {top_deg:?}（Core3D 只折一次：>90°−180 / <−90°+180，折完须严格落在 (−90°, 90°)）"
-                    ));
-                }
                 let btm = [btm_deg[0].to_radians(), btm_deg[1].to_radians()];
                 let top = [top_deg[0].to_radians(), top_deg[1].to_radians()];
                 return covered(
@@ -2144,7 +2130,11 @@ mod tests {
             (90.0, 90.0),
             (271.0, 91.0),
         ] {
-            assert_eq!(fold_shear_angle_deg(raw), folded, "fold({raw})");
+            assert_eq!(
+                aios_core::prim_geo::SCylinder::fold_shear_angle_deg(raw),
+                folded,
+                "fold({raw})"
+            );
         }
     }
 

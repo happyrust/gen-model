@@ -787,24 +787,24 @@ pub async fn gen_geos_data(
                 let sjus_map_clone = loop_sjus_map_arc.clone();
                 let db_option = db_option_arc.clone();
                 let sender = sender.clone();
-                let handle = crate::data_interface::staging::write_context::spawn_with_staged_io(
-                    async move {
-                        let start_time = Instant::now();
-                        cata_model::gen_cata_geos(
-                            db_option,
-                            Arc::new(target_bran_reuse_cata_map),
-                            Arc::new(branch_refnos_map),
-                            sjus_map_clone,
-                            sender,
-                        )
-                        .await?;
-                        println!(
-                            "异步BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms",
-                            start_time.elapsed().as_millis()
-                        );
-                        anyhow::Ok(())
-                    },
-                );
+                // cata stage 是叶子（gen_cata_geos 内部顺序执行、不 spawn 过闸子任务），
+                // 拿许可与 loop/prim 的分块 worker 共享同一份额度（specs/023）。
+                let handle = crate::fast_model::concurrency::spawn_gated_leaf(async move {
+                    let start_time = Instant::now();
+                    cata_model::gen_cata_geos(
+                        db_option,
+                        Arc::new(target_bran_reuse_cata_map),
+                        Arc::new(branch_refnos_map),
+                        sjus_map_clone,
+                        sender,
+                    )
+                    .await?;
+                    println!(
+                        "异步BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms",
+                        start_time.elapsed().as_millis()
+                    );
+                    anyhow::Ok(())
+                });
                 all_handles.push(handle);
             }
         }
@@ -814,23 +814,23 @@ pub async fn gen_geos_data(
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let db_option = db_option_arc.clone();
             let sender = sender.clone();
-            let handle =
-                crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                    let start_time = Instant::now();
-                    cata_model::gen_cata_geos(
-                        db_option,
-                        Arc::new(target_single_cata_map),
-                        Arc::new(Default::default()),
-                        sjus_map_clone,
-                        sender,
-                    )
-                    .await?;
-                    println!(
-                        "异步单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms",
-                        start_time.elapsed().as_millis()
-                    );
-                    anyhow::Ok(())
-                });
+            // 同上：cata stage 是叶子，拿许可。
+            let handle = crate::fast_model::concurrency::spawn_gated_leaf(async move {
+                let start_time = Instant::now();
+                cata_model::gen_cata_geos(
+                    db_option,
+                    Arc::new(target_single_cata_map),
+                    Arc::new(Default::default()),
+                    sjus_map_clone,
+                    sender,
+                )
+                .await?;
+                println!(
+                    "异步单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms",
+                    start_time.elapsed().as_millis()
+                );
+                anyhow::Ok(())
+            });
             all_handles.push(handle);
         }
 
