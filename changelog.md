@@ -14,6 +14,18 @@
   重新取证的前置是一个带 dbnum 1112 + 8000 生成几何的库——`.surreal/ams-8009`
   已被 3.x 写坏（fork 2.1.4 报 `format_version: 7`），2026-08-24 实测确认。
 
+- `occ` 退出 gen-model 的 default / console（specs/009 X1a 收尾）。cfg 挂点归零之后
+  这个 feature 已经和当初的 `truck = []` 一样是空壳，区别只在于它还拖着
+  `dep:opencascade` 和 `aios_core/occ` 白编一遍——feature、依赖、以及随之变成
+  「未被用到」的 occt-rs `[patch]` 段一并删除，`Run-L3Suite.ps1` /
+  `Run-E3DFixtureSuite.ps1` / `Record-Db8000SessionChain.ps1` 三个脚本的 features 串
+  同步去掉 occ。ADR-030 决策 7 的「回滚 = 把 occ 加回来」自 T037 起就已经不成立
+  （加回来形状也只走 manifold），真回滚是 git revert。
+  **Cargo.lock 不在本次提交内**：工作区正卡在 V4 中途，根 `Cargo.toml` 已把
+  aios_core 升到 `f9f1bf0f`，而 `python/Cargo.toml`、parse_pdms_db、pdms_io 仍钉
+  `29c91f48`，依赖图里因此有两份 aios_core（`RefnoEnum: From<RefU64>` 一类的红全出自
+  这里，与本次改动无关）。锁文件要由收尾 V4 的那一步一起重生成。
+
 - 摘掉 gen-model 里剩下的 occ 挂点（specs/009 X1a）。`occ_generate.rs` 的
   `apply_insts_boolean_occ` / `apply_cata_neg_boolean_occ` 两个死布尔函数、它们的
   三条 import 与全部注释调用点删除（ADR-029 布尔单轨 manifold 已一年量级）；

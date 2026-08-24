@@ -158,7 +158,7 @@ try {
     Write-Host "  宏纪律通过：$($macroPaths.Count) 条腿 / $($manifest.cases.Count) 个案例"
 
     cargo build --bin l3_suite --bin db_session_fixture `
-        --no-default-features --features "ws,gen_model,manifold,occ,project_hd,http_api"
+        --no-default-features --features "ws,gen_model,manifold,project_hd,http_api"
     Assert-Ok 'cargo build'
 
     $baseline = Get-Sesno
