@@ -4,6 +4,10 @@
 
 ### 修复
 
+- 修正直线 SweepSolid 的坐标责任边界：`POSS/POSE` 路径方向与 `BANG` 已由元素
+  `world_trans` 表达，非 SPINE 单位实例只保留长度、PLAX 与镜像，不再重复旋转路径。
+  AMS 1112 CWALL 的 4 堵 STWALL 在无 OCC 构建下恢复双向 p95=0、max≤0.06mm；
+  其中原先沿 +Y 误放的 STWALL 4 现在与 RVM 的 +X AABB 完全重合。
 - OCC 退役现场普查改为直接读取 dabacon 源属性，避免从已丢字段的 `inst_geo` 反推；确认
   E3D 2.1/3.1 安装项目有 422 个非零 YOFF Snout、3,056 个 SLCY 和 1,448 个 POHE。
   代表 YOFF/SSCL 及 4 个 POHE 子记录闭包均通过生产 libgm/Manifold 网格验证。同步修正

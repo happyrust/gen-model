@@ -846,12 +846,13 @@ fn ruled_solid_mesh(
         )
     })?;
     let mut solid = plant_mesh_to_manifold(&extended, DMat4::IDENTITY)?;
-    if let Some(outward) = start_plane {
-        let inward = -outward;
+    // Core3D stores both DRNS and DRNE as normals pointing into the segment.
+    // manifold-csg keeps `normal · point >= offset`, so the attribute direction
+    // is already the half-space normal and must not be negated here.
+    if let Some(inward) = start_plane {
         solid = solid.trim_by_plane(inward.to_array(), 0.0);
     }
-    if let Some(outward) = end_plane {
-        let inward = -outward;
+    if let Some(inward) = end_plane {
         let offset = inward.z * height as f64;
         solid = solid.trim_by_plane(inward.to_array(), offset);
     }
@@ -1392,7 +1393,7 @@ mod tests {
     #[test]
     fn mitred_gensec_takes_the_ruled_branch_and_keeps_volume() {
         let mut sweep = straight_sweep(rect_profile(100.0, 50.0), 200.0);
-        sweep.drns = Some(glam::DVec3::new(0.3, 0.0, -0.953939).normalize());
+        sweep.drns = Some(glam::DVec3::new(0.3, 0.0, 0.953939).normalize());
         assert_eq!(sweep.do_solid_segments(), SolidSegmentKind::RuledSolid);
         let mesh = sweep_solid_mesh(&sweep).expect("mitred gensec");
         assert_solid_mesh(&mesh, "mitred gensec");
@@ -1409,14 +1410,14 @@ mod tests {
 
     fn start_mitre(degrees: f64) -> DVec3 {
         let (sin, cos) = degrees.to_radians().sin_cos();
-        DVec3::new(0.0, sin, -cos)
+        DVec3::new(0.0, sin, cos)
     }
 
     #[test]
     fn ruled_csg_extends_and_trims_both_corresponding_45_degree_ends() {
         let mut sweep = straight_sweep(rect_profile(100.0, 50.0), 200.0);
         sweep.drns = Some(start_mitre(45.0));
-        // 与起点切面平行，且仍指向终点外侧：两端轮廓一一对应，厚度恒为 200mm。
+        // 与起点切面平行，且两端法向都指向实体内部：两端轮廓一一对应，厚度恒为 200mm。
         sweep.drne = Some(-start_mitre(45.0));
         assert_eq!(sweep.do_solid_segments(), SolidSegmentKind::RuledSolid);
 
@@ -1446,6 +1447,79 @@ mod tests {
         let (min, max) = mesh_bounds(&mesh);
         assert!((min.z - expected).abs() < 0.02, "60° 起点延伸不足: {min:?}");
         assert!((max.z - 200.0).abs() < 0.01, "水平终点漂移: {max:?}");
+    }
+
+    /// 8009 `/1RS-WF03-W-C-RR001` 的三个现场 STWALL 参数。
+    ///
+    /// 它们的 DRNS 均以 +Z 为主、DRNE 均以 -Z 为主，正好覆盖过去把内法向误当外法向、
+    /// 两次裁剪后得到空实体的回归。路径和法向保留数据库字面值。
+    #[test]
+    fn field_stwall_inward_mitre_normals_generate_solid_meshes() {
+        let cases = [
+            (
+                Vec3::new(-1836.0317, 346.4707, 0.0),
+                DVec3::new(-0.270238990966234, 0.0, -0.9627932736374676),
+                DVec3::new(0.270238990966234, 0.0, 0.9627932736374676),
+            ),
+            (
+                Vec3::new(-1282.7539, 2028.4346, 0.0),
+                DVec3::new(
+                    0.000309738627395556,
+                    1.3877787807814457e-16,
+                    -0.9999999520309901,
+                ),
+                DVec3::new(
+                    -0.000309738627395556,
+                    -1.3877787807814457e-16,
+                    0.9999999520309901,
+                ),
+            ),
+            (
+                Vec3::new(1500.0, 315.72852, 0.0),
+                DVec3::new(
+                    0.2059724013087852,
+                    -2.220446049250313e-16,
+                    -0.978557801000581,
+                ),
+                DVec3::new(
+                    -0.2059724013087852,
+                    2.220446049250313e-16,
+                    0.978557801000581,
+                ),
+            ),
+        ];
+
+        for (end, drne, drns) in cases {
+            let length = end.length();
+            let mut sweep = straight_sweep(
+                CateProfileParam::SPRO(SProfileData {
+                    verts: vec![
+                        Vec2::new(0.0, 0.0),
+                        Vec2::new(200.0, 0.0),
+                        Vec2::new(200.0, 250.0),
+                        Vec2::new(0.0, 250.0),
+                    ],
+                    frads: vec![0.0; 4],
+                    plax: Vec3::Y,
+                    plin_axis: Vec3::Y,
+                    na_axis: Vec3::Y,
+                    ..Default::default()
+                }),
+                length,
+            );
+            sweep.path = SweepPath3D::Line(Line3D {
+                start: Vec3::ZERO,
+                end,
+                is_spine: false,
+            });
+            sweep.drns = Some(drns);
+            sweep.drne = Some(drne);
+
+            assert_eq!(sweep.do_solid_segments(), SolidSegmentKind::RuledSolid);
+            let mesh = sweep_solid_mesh(&sweep).expect("field STWALL mitre");
+            assert_solid_mesh(&mesh, "field STWALL mitre");
+            assert_volume(&mesh, 200.0 * 250.0 * length, 0.001, "field STWALL mitre");
+        }
     }
 
     #[test]

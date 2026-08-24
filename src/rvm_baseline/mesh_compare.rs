@@ -254,6 +254,20 @@ mod gen_side {
         Mat4::from_scale_rotation_translation(scale, rotation, translation)
     }
 
+    /// 与生产 `staging::query_valid_insts` 保持同一可见实例谓词。
+    pub(super) fn valid_insts_sql(pe_key: &str) -> String {
+        format!(
+            r#"SELECT world_trans.d AS wt, booled_id,
+                      IF booled_id != NONE {{ [{{ "geo_hash": booled_id }}] }}
+                      ELSE {{ (SELECT trans.d AS transform, record::id(out) AS geo_hash
+                               FROM out->geo_relate
+                               WHERE visible && out.meshed && trans.d != NONE && geo_type = 'Pos') }}
+                      AS insts
+               FROM {pe_key}->inst_relate
+               WHERE aabb.d != NONE AND world_trans.d != NONE;"#
+        )
+    }
+
     /// 就地重建一个元素的 gen 世界三角网格。
     ///
     /// 有 `booled_id` 时与生产 `query_valid_insts` 一样，只加载布尔后的
@@ -264,9 +278,7 @@ mod gen_side {
     pub async fn gen_world_mesh(db: &Surreal<Any>, pe_key: &str) -> Result<Option<TriMesh>> {
         // 走这个 pe 的出边，不要 `WHERE in = {pe_key}`：`inst_relate` 没有
         // `(in, out)` 索引，谓词形式在真库上是整表扫，而对拍要逐件调用本函数。
-        let sql = format!(
-            "SELECT world_trans.d AS wt, insts_flat, booled_id FROM {pe_key}->inst_relate;"
-        );
+        let sql = valid_insts_sql(pe_key);
         let mut resp = db.query(sql).await.context("查询 inst_relate 失败")?;
         let rows: Vec<serde_json::Value> = resp.take(0).context("解析 inst_relate 结果失败")?;
         let Some(row) = rows.into_iter().next() else {
@@ -292,7 +304,7 @@ mod gen_side {
             return Ok(accum.into_trimesh());
         }
         let insts = row
-            .get("insts_flat")
+            .get("insts")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
@@ -367,6 +379,19 @@ mod mesh_wall_live {
     use super::*;
     use surrealdb::engine::any::connect;
     use surrealdb::opt::auth::Root;
+
+    #[test]
+    fn gen_world_mesh_query_follows_production_relation_semantics() {
+        let sql = super::gen_side::valid_insts_sql("pe:1_2");
+        assert!(sql.contains("FROM out->geo_relate"), "{sql}");
+        assert!(sql.contains("visible && out.meshed"), "{sql}");
+        assert!(sql.contains("trans.d != NONE && geo_type = 'Pos'"), "{sql}");
+        assert!(
+            sql.contains("aabb.d != NONE AND world_trans.d != NONE"),
+            "{sql}"
+        );
+        assert!(!sql.contains("insts_flat"), "RVM 门不得读取派生平表: {sql}");
+    }
 
     async fn live_8009() -> surrealdb::Surreal<surrealdb::engine::any::Any> {
         let db = connect("ws://127.0.0.1:8009").await.expect("connect 8009");
@@ -593,6 +618,12 @@ mod mesh_wall_live {
             println!(
                 "    gen->rvm mean={:.2} p95={:.2} max={:.2} | rvm->gen mean={:.2} p95={:.2} max={:.2}",
                 g2r.mean, g2r.p95, g2r.hausdorff, r2g.mean, r2g.p95, r2g.hausdorff
+            );
+            let rvm_aabb = rvm.local_aabb();
+            let gen_aabb = gen_mesh.local_aabb();
+            println!(
+                "    rvm_aabb={:?}..{:?} gen_aabb={:?}..{:?}",
+                rvm_aabb.mins, rvm_aabb.maxs, gen_aabb.mins, gen_aabb.maxs
             );
             if g2r.p95 > P95_TOL {
                 failures.push(format!("{rvm_name}: gen->rvm p95={:.2}", g2r.p95));
