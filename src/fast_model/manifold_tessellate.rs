@@ -667,6 +667,20 @@ fn segs(n: i32) -> u32 {
     n.max(1) as u32
 }
 
+/// SSCL 剪切角折叠——Core3D `CSG_BasicSLC::getPrimGeom`（3.1 `0x107272D0`）在把
+/// XTSH/YTSH/XBSH/YBSH 喂给 `gm_CreateSlopeEndedCylinder` 之前，对每个角做**且只做
+/// 一次**：`> 90°` 减 180，然后 `< −90°` 加 180。不是取模：折完仍出界的（271° → 91°）
+/// 由 libgm `GM_SlopeEndCyl::validate`（严格 (−90, 90)）响亮拒绝，本仓在 SSCL 臂里
+/// `bail!`。specs/009 T054，证据 `docs/evidence/2026-08-24-ida-occ-retire-audit.md`。
+///
+/// 与 vendor 侧 `SCylinder::fold_shear_angle_deg` 是同一张表（两边的折叠表单测
+/// 手抄同一处反编译）。aios-core rev 升级（plan Phase V 的 V4）后本臂改调那份方法、
+/// 删除这条本地拷贝——两份并存只是「vendor 未发布」窗口期的过渡。
+fn fold_shear_angle_deg(deg: f32) -> f32 {
+    let deg = if deg > 90.0 { deg - 180.0 } else { deg };
+    if deg < -90.0 { deg + 180.0 } else { deg }
+}
+
 /// 16 个 `PdmsGeoParam` 变体全部在此裁决：14 个形状变体建出网格或 `bail!`；
 /// `None` 只剩一个含义——`Unknown` / `CompoundShape` 这样的**非形状**，调用方
 /// 直接标 `bad`。「回退 OCC」语义已随 WP-F 收口（ADR-030 修订二）。
@@ -694,14 +708,21 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             if c.is_sscl() {
                 let r = c.pdia / 2.0;
                 let h = c.phei.abs();
-                let btm = [
-                    c.btm_shear_angles[0].to_radians(),
-                    c.btm_shear_angles[1].to_radians(),
-                ];
-                let top = [
-                    c.top_shear_angles[0].to_radians(),
-                    c.top_shear_angles[1].to_radians(),
-                ];
+                // 剪切角先过 Core3D 的折叠（T054）；折完必须严格落在 (−90°, 90°)，
+                // 出界响亮失败（`!(<90)` 的写法同时把 NaN 拒在门外），不得静默夹到边界。
+                let btm_deg = c.btm_shear_angles.map(fold_shear_angle_deg);
+                let top_deg = c.top_shear_angles.map(fold_shear_angle_deg);
+                if btm_deg
+                    .iter()
+                    .chain(top_deg.iter())
+                    .any(|a| !(a.abs() < 90.0))
+                {
+                    return Err(anyhow!(
+                        "PrimSCylinder(SSCL) 剪切角折叠后仍出界: btm {btm_deg:?} top {top_deg:?}（Core3D 只折一次：>90°−180 / <−90°+180，折完须严格落在 (−90°, 90°)）"
+                    ));
+                }
+                let btm = [btm_deg[0].to_radians(), btm_deg[1].to_radians()];
+                let top = [top_deg[0].to_radians(), top_deg[1].to_radians()];
                 return covered(
                     mesh_primitives::gen_slope_ended_cylinder(
                         r,
@@ -2066,5 +2087,70 @@ mod tests {
             .expect("sheared cylinder is valid")
             .expect("slope-ended cylinder is now covered by mesh_primitives");
         assert_solid_mesh(&mesh);
+    }
+
+    /// T054：折叠表手抄自 Core3D `CSG_BasicSLC::getPrimGeom`（`0x107272D0`）。
+    /// 每角一次 `>90 减 180`、再一次 `<−90 加 180`——改成取模（271 会给 −89）即红。
+    #[test]
+    fn the_shear_fold_matches_core3d() {
+        for (raw, folded) in [
+            (135.0_f32, -45.0_f32),
+            (-135.0, 45.0),
+            (91.0, -89.0),
+            (-91.0, 89.0),
+            (45.0, 45.0),
+            (180.0, 0.0),
+            (-180.0, 0.0),
+            (90.0, 90.0),
+            (271.0, 91.0),
+        ] {
+            assert_eq!(fold_shear_angle_deg(raw), folded, "fold({raw})");
+        }
+    }
+
+    /// 135° 与 −45° 在 Core3D 折叠后是同一个几何：两组属性必须逐顶点出同一张网格。
+    /// 去掉臂上的折叠（直接 `to_radians()`）即红——135° 的 tan 是负的，切面会翻向。
+    #[test]
+    fn a_foldable_shear_pair_meshes_identically() {
+        let sscl = |btm0: f32| {
+            PdmsGeoParam::PrimSCylinder(aios_core::prim_geo::SCylinder {
+                pdia: 200.0,
+                phei: 80.0,
+                btm_shear_angles: [btm0, 0.0],
+                top_shear_angles: [0.0, 30.0],
+                ..Default::default()
+            })
+        };
+        let raw = tessellate_libgm_param(&sscl(135.0))
+            .expect("135° folds to −45°, must build")
+            .expect("SSCL is a shape");
+        let folded = tessellate_libgm_param(&sscl(-45.0))
+            .expect("−45° is in range")
+            .expect("SSCL is a shape");
+        assert_eq!(raw.vertices, folded.vertices, "折叠对必须逐顶点一致");
+        assert_eq!(raw.indices, folded.indices);
+        assert_solid_mesh(&raw);
+    }
+
+    /// 折完仍出界的剪切角响亮失败，不得静默夹到边界：90°（切面与扫掠方向平行）
+    /// 与 271°（Core3D 只折一次 → 91°）都必须报错；NaN 也进不来。
+    /// 第二个角给 15° 是为了让 `is_sscl` 在新旧 vendor 下都判 SSCL——
+    /// 全 NaN 的角在 `is_sscl` 的 `>` 比较里天然为 false，根本进不了这条臂。
+    #[test]
+    fn an_unfoldable_shear_angle_is_rejected_not_bent() {
+        for bad in [90.0_f32, 271.0, f32::NAN] {
+            let param = PdmsGeoParam::PrimSCylinder(aios_core::prim_geo::SCylinder {
+                pdia: 200.0,
+                phei: 80.0,
+                btm_shear_angles: [bad, 15.0],
+                ..Default::default()
+            });
+            let err = tessellate_libgm_param(&param)
+                .expect_err("折完仍出界的角必须是硬错误，不是一张歪网格");
+            assert!(
+                err.to_string().contains("折叠后仍出界"),
+                "错误要说清是折叠后出界: {err}"
+            );
+        }
     }
 }

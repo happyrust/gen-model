@@ -60,6 +60,12 @@ T004 后半、T008、T025–T028、T045a、T046–T049、T031、T032。
 > `../vendor/old-aios-core/src/prim_geo/snout.rs` 上现在压着三件事：V1 规范化修复
 > （已写好未推）、T050 摆位、T051 Y 偏移。分三次推 vendor 是三次 rev 升级 +
 > 三轮全量验证，**合成一批**。
+>
+> **2026-08-24 追加**：IDA 复核开出的 T054（SSCL 剪切角折叠）/ T055（CTOR/RTOR 内
+> 半径夹取）**当日已落地**，vendor 半区压在 cylinder / ctorus / rtorus 三个文件上
+> （折叠收在 `SCylinder` 自己身上，构造点没动），进同一批推上游；
+> 球的身份键（V3）所需的 `GM_Sphere` 权威规则已钉（绕轴 n 硬截 1000、经向恒 n/2，
+> 键只需混一个 n），见 `docs/evidence/2026-08-24-ida-occ-retire-audit.md`。
 
 - **V1（T002 收尾·上）** `../vendor/old-aios-core/src/prim_geo/snout.rs`：
   `gen_unit_shape` 的 `f32_round_3` 规范化修复提交并推上游。

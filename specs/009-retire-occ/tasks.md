@@ -71,6 +71,10 @@
   **startAngle 恒为 `0.0`**，finishAngle = `ANGL`——所以本仓用单个 `sweep_deg` 表达是等价的。
   角度单位是**度**（同一族的 `GM_SlopeEndCyl::validate` 直接与 `90.0` 比较）。
   另一条现成欠项：两个 Core3D 入口都对内半径做 `fmax(RINS, 0.0)`，本仓 `check_valid` 未夹。
+  **2026-08-24 复核仍欠**：`CSG_BasicCTO::getPrimGeom` verbatim 确认夹取；本仓
+  `CTorus::check_valid` 要求 `rins >= 0.0`——负 RINS 在 E3D 侧夹成 0 照常建，本仓整条
+  拒绝，方向分歧。已开 **T055**（WP-K），证据
+  `docs/evidence/2026-08-24-ida-occ-retire-audit.md`。
 - [x] T014 `src/fast_model/manifold_tessellate.rs`：圆环面 / 矩形环面 → `gen_circular_torus` /
   `gen_rectangular_torus`。段数写死且两方向半径喂错，转 T038。
 - [x] T015 `src/fast_model/manifold_tessellate.rs`：`PrimDish` → 球碟 / 椭圆碟。两套段数公式都没抄，转 T038。
@@ -87,6 +91,10 @@
   角度是度且 `validate`（`0x10030300`）要求严格落在 (−90, 90)；Core3D（`0x107272D0`）
   先把 `XTSH/YTSH/XBSH/YBSH` 逐个折进该区间（>90 减 180，<−90 加 180），**本仓没做这一步**，
   已知欠项。
+  **2026-08-24 复核仍欠**：`0x107272D0` 确认是每角**一次**折叠（非取模，折完仍出界的
+  交给 `validate` 响亮拒绝）；本仓 SSCL 臂直接 `to_radians()`，一次折叠也没有——135°
+  这类输入 E3D 折成 −45° 照常建，本仓建错或拒绝。已开 **T054**（WP-K），证据
+  `docs/evidence/2026-08-24-ida-occ-retire-audit.md`。
 - [x] T017（2026-08-24 完成）源码断言：`gm_CreateNull` / Mark / Straight / Arc / Bezier 不得作为
   `tessellate_libgm_param` 的成功分支。落为 `the_curve_primitives_are_not_shape_arms`
   两道闸：五个曲线图元的名字不许出现在生产半区（名字先落进来，分支就是下一步）；
@@ -128,9 +136,13 @@
   ```
   **那 9 个点是第四套离散口径**（挤出格子、回转配对、曲面原语段数之外），与容差无关，
   只服务这个包围盒，别拿去铺三角——已收成 `MITRE_ARC_SAMPLES` 并在文档里点名。
-  **一处诚实的不确定**：循环上界 9 是从反汇编读到的，但 `evaluatePoint` 的实参被
-  Hex-Rays 吞了，参数化按 `t = k/10` 均分推断实现。取密一点会让 `reach` 偏大，
-  所以宁可照抄 9，不要「反正更细更安全」——这条写进了函数文档。
+  ~~**一处诚实的不确定**：循环上界 9 是从反汇编读到的，但 `evaluatePoint` 的实参被
+  Hex-Rays 吞了，参数化按 `t = k/10` 均分推断实现。~~
+  **2026-08-24 已销**：汇编（`0x10733b20`–`0x10733b48`）里循环计数 k 经 `cvtdq2pd`
+  后 `mulsd` 常量 `dbl_10AF25B0`，该常量按字节读出 = 0.1，即 `evaluatePoint(k × 0.1)`；
+  旁边的调试日志字符串（`0x10733b8a`）就写着 `"/10 point of span "`。t = k/10 是实证，
+  不再是推断。证据 `docs/evidence/2026-08-24-ida-occ-retire-audit.md`。
+  取密一点会让 `reach` 偏大，所以照抄 9、不要「反正更细更安全」——这条仍写在函数文档里。
   门（四条全绿）：切面平行时回 0；45° / 60° 两组手算 reach（30 / 30√3）；
   半圆的极值只在弧腰上，抹平 bulge 后归零（漏采弧就红）；`+1` 的边界
   （reach = 1.0 不加、2.0 → 3.0）。`sweep_mesh` 28 全绿。
@@ -369,6 +381,13 @@
   门：不同半径两根柱 `geo_hash` 不同且各自段数正确；同段数两根仍共享一行；
   沿用 2026-08-13 的双键 `param` 回归测试。
   **改身份 = 整库重建**（ADR-044 决策 6），必须与 T045 的爆炸半径结论一起决策。
+  **球的权威规则已钉（2026-08-24 IDA，`GM_Sphere::calcFacetsWithoutSurfaces`
+  `0x100A20F0`）**：绕轴 `n = circle(自身半径, tol)`、超 1000 报 warning 后硬截；
+  经向带数恒 = `n/2`（顶点 `n·(n/2−1)+2`，两极各一点，角步长两向同一个）。
+  所以球的身份键只需混入 **n 一个数**，stacks 不是独立自由度。现状
+  `unit_sphere()` 的 16×36 在 R=100/tol=0.5 的「幸运尺寸」下也不对——E3D 是
+  32 slices × 16 stacks，36 从来没对过。证据
+  `docs/evidence/2026-08-24-ida-occ-retire-audit.md`。
 - [x] T042（2026-08-23 完成）`src/fast_model/libgm_discretise.rs`、
   `src/fast_model/manifold_tessellate.rs`、`src/fast_model/sweep_mesh.rs`：
   **不只是加了一条断言——写断言时发现生产路径上真有第二个容差来源。**
@@ -450,6 +469,10 @@
 > **2026-08-24 T052 已量**：库 A 112 行**全不偏心**，库 B 3 行里**偏心 1 行 2 实例**
 > （`poff = 12.06`，错位 6.03 mm ＝ `FACET_TOL_MM` 的十二倍）。T050 本期做，
 > 且那一件正好当它的 RVM 验收样本。T051 另有前置（T052a），**先不排期**。
+>
+> **2026-08-24 IDA 复核追加 T054 / T055**：不是摆位而是**输入规整**——Core3D 在属性
+> 读取处就把值折/夹进合法域，本仓照原值建体或拒绝，与 E3D 行为方向分歧。
+> 证据 `docs/evidence/2026-08-24-ida-occ-retire-audit.md`。
 
 - [ ] T050（串行）`src/fast_model/mesh_primitives.rs`、
   `../vendor/old-aios-core/src/prim_geo/snout.rs`：偏心 Snout 的偏移改成**上下各摊一半**。
@@ -554,6 +577,79 @@
   不构成证据（这正是静默失效：判据依赖的基准数据本身已被判据要查的那个缺陷抹掉了）。
   要回答得回 **dabacon 侧**数 SNOU 元素的 `YOFF` 属性。
   在那之前 T051 不排期：不知道有没有用户，就不知道该加字段还是该在解析处 `bail!`。
+
+- [x] T054（新，2026-08-24 复核开号，同日落地；RVM/现场验收随 T045a）**SSCL 剪切角折叠。**
+  `../vendor/old-aios-core/src/prim_geo/cylinder.rs`、
+  `../vendor/old-aios-core/src/prim_geo/category.rs`、
+  `src/fast_model/manifold_tessellate.rs`：
+  Core3D `CSG_BasicSLC::getPrimGeom`（`0x107272D0`）把 XTSH/YTSH/XBSH/YBSH 每个角
+  折**一次**（>90 减 180、<−90 加 180，非取模；折完仍出界的交给
+  `GM_SlopeEndCyl::validate` 按严格 (−90, 90) 响亮拒绝）之后才喂 `gm_Create`。
+  本仓 SSCL 臂直接 `to_radians()`：135° 这类输入 E3D 折成 −45° 照常建，本仓建错或拒绝。
+  折叠只许一处权威实现，落在 `SCylinder` 自己身上（如 `folded_shear_angles()`），
+  哈希 / `check_valid` / 三角化臂消费同一份——目录路（`category.rs:469` 构造点）与
+  设计路不得各折各的；哈希与落库值取同一个规范值（2026-08-13 双键 `param` 的教训）。
+  vendor 改动与 Phase V 同批推上游。两个盘点库都没有 SSCL（T045a），现场验收随
+  T045a 的找库决策，在那之前按纯函数单测收口。
+  门：(a) 折叠表单测（135→−45、−135→45、91→−89、±45 不动；90 不折且被拒）；
+  (b) 同折叠对（135° 与 −45°）两组属性产出同一 `geo_hash` 与同一网格；
+  (c) 折完仍出界 hard fail，不得静默夹到边界。
+
+  **2026-08-24 落地。** vendor `SCylinder` 新增 `fold_shear_angle_deg` /
+  `folded_shear_angles()` / `folded()`；`is_sscl` 改按折叠值判（180° 的剪切角折回 0
+  即直柱，回到单位圆柱身份，不再白拆复用）；`check_valid` 加角度门（折后严格
+  (−90, 90)，`< 90.0` 的写法顺带把 NaN 拒在门外）；`hash_unit_mesh_params` 与
+  `gen_unit_shape` 都取 `folded()` 规范副本（哈希与落库同源）；occ / truck 两条
+  几何后端消费同一份折叠值。gen-model 侧 `manifold_tessellate` 的 SSCL 臂折叠 +
+  出界 `bail!`——`fold_shear_angle_deg` 是本地过渡拷贝，doc 写明「V4 升 rev 后改调
+  vendor 那份并删除」；两边的折叠表单测手抄同一处反编译，谁改错谁红。
+  门全绿：vendor 4 条（表 / 同键同 param / 出界拒 / 180°→直柱）+ gen-model 3 条
+  （表 / 折叠对逐顶点一致 / 出界报错）。vendor 4 模块 10/10，gen-model 全量
+  `--lib` **1083 通过 / 1 预期红**（仍是 vendor 未发布那条）。
+  **仍欠**：vendor 未发布（与 V1/V2/V3 同批推上游，Phase V）；两库都无 SSCL，
+  现场验收随 T045a 找库决策。折叠会改 SSCL 的 `geo_hash`（旧库 raw 135° 一类的行
+  重哈希后换行），与 T041 整库重建同批吸收。
+  顺带记录：vendor 全 `prim_geo::` 口径下另有 3 条 `wire` 红——`wire.rs` 压着另一
+  会话 156/73 行的未提交改动，与本批文件零交集（`rg SCylinder|CTorus|RTorus` 零命中），
+  归属那条线，本批未触碰。
+
+- [x] T055（新，2026-08-24 复核开号，同日落地；负 RINS 活库盘点仍欠）**CTOR / RTOR 内半径夹取。**
+  `../vendor/old-aios-core/src/prim_geo/ctorus.rs`、
+  `../vendor/old-aios-core/src/prim_geo/rtorus.rs`：
+  Core3D 两个入口（`CSG_BasicCTO` `0x10726BE0` / `CSG_BasicRTO` `0x10727140`）在属性
+  读取处就 `fmax(RINS, 0.0)`；本仓 `From<&AttrMap>` / `From<&NamedAttrMap>` 原值照收，
+  `check_valid` 的 `rins >= 0.0` 把负值整条拒绝——E3D 夹成 0 照建（内缘贴轴的实心
+  旋转体）、本仓拒绝，方向分歧。夹取落在两类 `From` 构造点（与 Core3D 同层），
+  `check_valid` 保持 `>= 0` 当保险；`rout − rins > ε` 的退化拒绝不动。
+  vendor 改动与 Phase V 同批推上游。负 RINS 的活库出现次数**没盘过**；按 T052 的
+  教训，要盘就两库都盘，一库为 0 不当证明。
+  门：(a) 属性映射单测：RINS = −5 → `rins = 0` 且 `check_valid` 通过、能建体；
+  (b) `rins = 0` 的圆环面体积对帕普斯解析值 1%（内缘贴轴是本条引入的新可达状态，
+  生成器扛不扛得住正是要量的）；
+  (c) RINS ≥ 0 的既有路径行为与 `geo_hash` 不变——夹取只对负值生效。
+
+  **2026-08-24 落地，比开号时多出两块。**
+  1. 夹取本体：CTorus / RTorus 各两个 `From` 构造点 `RINS.max(0.0)`，负值与显式 0
+     共享同一行单位几何（同键测试钉住）。
+  2. **顺着 validate 又挖出一条**：先回 idb 反编译了 `GM_CircTorus::validate`
+     （`0x10030bb0`）与 `GM_RectTorus::validate`（`0x10030780`）——两者判据都是
+     `rIns ≥ −1e-6`，即 **libgm 接受 rIns = 0**、负值才报 −87。于是发现本仓
+     `RTorus::check_valid` 的 `rins > 0.0` **比 libgm 还严**：RINS = 0 的合法矩形
+     环面今天就被拒。已改 `>= 0.0`，注释带地址。（CTorus 本来就是 `>= 0`，不动。）
+  3. 生成器扛不住，扛不住的原因和修法都记下了：`rins = 0` 时内缘缩到轴上，
+     θ=π 一列 / 内壁整面全是重合顶点，`assert_solid_mesh` 的退化与焊接判定都过
+     不去——这不是测试太严，是这种网格喂给 manifold 就不是闭合实体。
+     `mesh_primitives` 新增 `collapse_onto_axis`（贴轴顶点精确压到轴 + 移除因收拢
+     而重合的三角形），**只在 `rins < rout·1e-5` 的贴轴档启用**，不做通用「网格
+     清洗」（宪法·响亮失败）；精确吸附的哲学与 T035 的 `movePointsOntoYAxis` 同源。
+     喇叭环面收拢后：全环 = 尖点自洽闭合，矩形档 = 实心圆柱/扇柱（内壁收没、
+     顶底成扇、端面保留轴棱）。
+  门全绿：vendor 4 条（CTO/RTO 各：夹取同键 + 非负不动）；gen-model 2 条
+  （喇叭环面全环/四分之一、贴轴矩形环面全环/四分之一，全部过 `assert_solid_mesh`
+  + 体积对帕普斯）。体积阈值取同族既有门的 0.04 / 0.02，不是放宽——`rins > 0`
+  的同族门用的就是这两个值。
+  **仍欠**：负 RINS 活库出现次数未盘（按 T052 教训两库都得盘）；vendor 未发布
+  （Phase V 同批）。
 
 ## 既有红测（不是本规格引入的，记在这里免得每次重新排查）
 

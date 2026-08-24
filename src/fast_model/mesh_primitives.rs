@@ -553,6 +553,48 @@ pub fn gen_elliptical_dish(
 
 // ─── Circular Torus ─────────────────────────────────────────────────────────
 
+/// 「内缘贴轴」判据：`rins` 掉到外半径的这个比例以下，就当作 0 处理。
+///
+/// Core3D 对 CTOR / RTOR 的 RINS 做 `fmax(RINS, 0.0)`（`0x10726BE0` / `0x10727140`），
+/// libgm 的 validate 接受 rIns = 0（判据 `≥ −1e-6`），所以内缘贴轴是活库里合法可达的
+/// 状态（specs/009 T055）。贴轴时内缘整圈缩成轴上的点/线段，环带三角天然退化，
+/// 需要 [`collapse_onto_axis`] 收拢。
+const AXIS_PINCH_REL: f32 = 1e-5;
+
+/// 内缘贴轴时把网格收拢到轴上：贴轴顶点精确压到 r = 0（z 在轴上按 `eps` 聚类取代表值），
+/// 因收拢而有两角重合的三角形整个移除——它们的面积本来就是 0 量级，留着只会把
+/// 「闭合可定向」的判定搅浑。
+///
+/// **只在贴轴档调用。** 这不是通用「网格清洗」：别的退化必须响亮失败，不许拿它掩盖
+/// （宪法·响亮失败）。精确吸附的口径与 libgm 对贴轴轮廓顶点的 `movePointsOntoYAxis`
+/// （T035）同源——libgm 同样是把贴轴点精确压到轴上，而不是留一圈针状面。
+fn collapse_onto_axis(vertices: &mut [Vec3], indices: &mut Vec<u32>, eps: f32) {
+    let mut axis_z: Vec<f32> = Vec::new();
+    for v in vertices.iter_mut() {
+        if v.x.hypot(v.y) < eps {
+            v.x = 0.0;
+            v.y = 0.0;
+            // 轴上的 z 按 eps 聚类到首个代表值：圆环面的贴轴点在 sin(π_f32) 的
+            // 浮点噪声里差 1e-7 量级，不聚类就焊不成一个顶点。
+            match axis_z.iter().find(|z| (**z - v.z).abs() < eps) {
+                Some(z) => v.z = *z,
+                None => axis_z.push(v.z),
+            }
+        }
+    }
+    let mut kept = Vec::with_capacity(indices.len());
+    for tri in indices.chunks_exact(3) {
+        let p0 = vertices[tri[0] as usize];
+        let p1 = vertices[tri[1] as usize];
+        let p2 = vertices[tri[2] as usize];
+        if p0.distance(p1) < eps || p1.distance(p2) < eps || p2.distance(p0) < eps {
+            continue;
+        }
+        kept.extend_from_slice(tri);
+    }
+    *indices = kept;
+}
+
 /// 圆管环面：管截面为圆，绕 Z 轴旋转 `sweep_deg` 度。
 ///
 /// `r_inside` = 内圆半径，`r_outside` = 外圆半径。
@@ -685,6 +727,11 @@ pub fn gen_circular_torus(
         );
     }
 
+    // 喇叭环面（rins ≈ 0）：管内缘缩成轴上一点，θ=π 一列的顶点收拢成共享尖点。
+    if r_inside.abs() < r_outside * AXIS_PINCH_REL {
+        collapse_onto_axis(&mut vertices, &mut indices, r_outside * AXIS_PINCH_REL);
+    }
+
     let aabb = compute_aabb(&vertices);
     PlantMesh {
         vertices,
@@ -809,6 +856,12 @@ pub fn gen_rectangular_torus(
             n_end,
             ccw,
         );
+    }
+
+    // 内缘贴轴（rins ≈ 0）：内壁整面缩到轴线段上收没，顶/底面收成对轴心的扇，
+    // 端面矩形保留轴棱——收拢后仍是闭合实体（实心圆柱/扇柱）。
+    if r_inside.abs() < r_outside * AXIS_PINCH_REL {
+        collapse_onto_axis(&mut vertices, &mut indices, r_outside * AXIS_PINCH_REL);
     }
 
     let aabb = compute_aabb(&vertices);
@@ -1381,6 +1434,48 @@ mod tests {
             "rtorus negative sweep",
         );
         assert_volume(&mesh, PI * 12.0 * 1.5 / 4.0, 0.02, "rtorus negative sweep");
+    }
+
+    /// T055：Core3D 把负 RINS 夹成 0（`fmax(RINS, 0)`），libgm 的 validate 接受
+    /// rIns = 0，所以喇叭环面（管内缘缩到轴上一点）是合法可达的形状。收拢前它在
+    /// θ=π 一列全是重合顶点，`assert_solid_mesh` 的退化/焊接判定都过不去——
+    /// 这条钉的就是收拢后仍是**能拿去做布尔的闭合实体**且体积对帕普斯。
+    #[test]
+    fn a_zero_inner_radius_circular_torus_is_a_closed_horn_solid() {
+        let rout = 8.0f32;
+        let mesh = gen_circular_torus(0.0, rout, 360.0, 32, 24);
+        assert_solid_mesh(&mesh, "horn torus full");
+        // V = 2π² R r²，R = r = rout/2
+        let r = rout / 2.0;
+        assert_volume(&mesh, 2.0 * PI * PI * r * r * r, 0.04, "horn torus full");
+
+        let quarter = gen_circular_torus(0.0, rout, 90.0, 32, 24);
+        assert_solid_mesh(&quarter, "horn torus quarter");
+        assert_volume(
+            &quarter,
+            2.0 * PI * PI * r * r * r / 4.0,
+            0.04,
+            "horn torus quarter",
+        );
+    }
+
+    /// T055 的矩形环面档：rins = 0 时内壁整面收没、顶底收成对轴心的扇，
+    /// 剩下的就是实心圆柱（扇柱）。
+    #[test]
+    fn a_zero_inner_radius_rectangular_torus_is_a_solid_cylinder_sector() {
+        let (rout, h) = (8.0f32, 4.0f32);
+        let full = gen_rectangular_torus(0.0, rout, h, 360.0, 32);
+        assert_solid_mesh(&full, "rtorus pinched full");
+        assert_volume(&full, PI * rout * rout * h, 0.02, "rtorus pinched full");
+
+        let quarter = gen_rectangular_torus(0.0, rout, h, 90.0, 32);
+        assert_solid_mesh(&quarter, "rtorus pinched quarter");
+        assert_volume(
+            &quarter,
+            PI * rout * rout * h / 4.0,
+            0.02,
+            "rtorus pinched quarter",
+        );
     }
 
     #[test]
