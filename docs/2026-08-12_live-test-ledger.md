@@ -6,6 +6,15 @@
 **没有"最近通过"记录的用例视同未验资产**——本台账是唯一事实来源，动过 live 用例或
 点亮新批次必须同步更新。
 
+**2026-08-24 AMS 8000 世界变换与 Plant UI（最近通过）**：
+`fast_model::cata_model::world_transform_batch_tests::live_batch_preserves_non_identity_ftub_world_pose`
+在独立 RocksDB `world-transform-fixed-8` 上通过（1 passed、exit 0、2.47s）；FTUB
+`24384/22403` 的批量结果与权威单项解析一致，位移为
+`[-20475.5,-9921.84,600.0]`。完整初始化后 `/1RX03-LCT` 的 1907/1907 条
+`inst_relate.world_trans_d.translation` 非零。Plant UI 最终显示 1996 个元素、4879 个
+网格实例，模型空间分布正常；补齐全局 TUBI `2.mesh` 后 ERROR 0。证据：
+`docs/evidence/2026-08-24-cata-generation-throughput/world-transform-fixed-8.md`。
+
 **2026-08-24 AMS 8000 空 RocksDB 初始化吞吐（最近通过）**：
 在新的独立 RocksDB `.scratch/cata-throughput/concurrent-cache-8` 上以
 `geometry_permits=8` 完整初始化，按字面完成标记停止计时，wall-clock 808.312s；

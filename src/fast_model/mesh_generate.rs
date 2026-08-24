@@ -9,6 +9,7 @@ use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::error::{init_deserialize_error, init_query_error, init_save_database_error};
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+use aios_core::prim_geo::basic::{BOXI_GEO_HASH, TUBI_GEO_HASH};
 use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
@@ -363,6 +364,24 @@ struct QueryGeoParam {
     pub param: PdmsGeoParam,
 }
 
+/// TUBI/BOXI are global unit meshes referenced from `insts_flat`; they do not
+/// have an `inst_relate -> inst_info` owner edge.  Add them explicitly to the
+/// same mesh pipeline so a fresh asset directory cannot persist their database
+/// parameters while omitting the corresponding files.
+fn include_basic_shape_mesh_candidates(candidates: &mut Vec<(Option<Thing>, bool)>) {
+    for geo_hash in [BOXI_GEO_HASH, TUBI_GEO_HASH] {
+        let geo_hash = geo_hash.to_string();
+        let already_present = candidates.iter().any(|(candidate, _)| {
+            candidate.as_ref().is_some_and(|candidate| {
+                candidate.tb == "inst_geo" && candidate.id.to_raw() == geo_hash
+            })
+        });
+        if !already_present {
+            candidates.push((Some(Thing::from(("inst_geo", geo_hash.as_str()))), false));
+        }
+    }
+}
+
 /// libgm 路径没有 OCC 边。`pts` 取网格 AABB 八角，禁止空列表假装成功。
 fn mesh_aabb_corner_pts(aabb: &Aabb) -> [glam::Vec3; 8] {
     aabb.vertices().map(|p| glam::Vec3::new(p.x, p.y, p.z))
@@ -435,6 +454,9 @@ async fn clear_mesh_failure(id: &str) {
 
 #[cfg(test)]
 mod occ_retire_source_guards {
+    use super::{BOXI_GEO_HASH, TUBI_GEO_HASH, include_basic_shape_mesh_candidates};
+    use surrealdb::sql::Thing;
+
     fn active_lines(source: &str) -> String {
         source
             .lines()
@@ -537,6 +559,32 @@ mod occ_retire_source_guards {
             "mesh persistence failures must enter geom_error"
         );
     }
+
+    #[test]
+    fn fresh_mesh_generation_always_includes_global_tubi_and_boxi_assets() {
+        let existing = Thing::from(("inst_geo", BOXI_GEO_HASH.to_string().as_str()));
+        let mut candidates = vec![(Some(existing), true)];
+
+        include_basic_shape_mesh_candidates(&mut candidates);
+
+        let ids = candidates
+            .iter()
+            .filter_map(|(candidate, _)| candidate.as_ref())
+            .map(|candidate| candidate.id.to_raw())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            ids.iter()
+                .filter(|id| id.as_str() == BOXI_GEO_HASH.to_string())
+                .count(),
+            1,
+            "an already-selected global mesh must not be duplicated"
+        );
+        assert!(
+            ids.iter()
+                .any(|id| id.as_str() == TUBI_GEO_HASH.to_string()),
+            "the ownerless TUBI unit mesh must be scheduled explicitly"
+        );
+    }
 }
 
 /// 生成实例的网格数据
@@ -583,6 +631,7 @@ pub async fn gen_inst_meshes(
             .await?
             .check()?;
         let mut inst_geo_ids: Vec<(Option<Thing>, bool)> = response.take(0)?;
+        include_basic_shape_mesh_candidates(&mut inst_geo_ids);
         //todo 排除已经生成了的模型
         // let mut update_geos_by_meshes = HashSet::default();
         inst_geo_ids.retain(|(x, y)| {
