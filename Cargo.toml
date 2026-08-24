@@ -195,14 +195,14 @@ rmcp = { version = "=3.1.1", features = ["server", "transport-io"] }
 # pre-push 守卫（.githooks/pre-push）会挡住，不必靠记性。
 #
 # LOCAL-DEPS PATCH BEGIN
-# [patch."https://github.com/happyrust/old-aios-core.git"]
-# aios_core = { path = "../vendor/old-aios-core" }
-#
-# [patch."https://github.com/happyrust/old-parse-pdms-db.git"]
-# parse_pdms_db = { path = "../vendor/old-parse-pdms-db" }
-#
-# [patch."https://github.com/happyrust/old-pdms-io.git"]
-# pdms_io = { path = "../vendor/old-pdms-io" }
+[patch."https://github.com/happyrust/old-aios-core.git"]
+aios_core = { path = "../vendor/old-aios-core" }
+
+[patch."https://github.com/happyrust/old-parse-pdms-db.git"]
+parse_pdms_db = { path = "../vendor/old-parse-pdms-db" }
+
+[patch."https://github.com/happyrust/old-pdms-io.git"]
+pdms_io = { path = "../vendor/old-pdms-io" }
 # LOCAL-DEPS PATCH END
 
 [build-dependencies]

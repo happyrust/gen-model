@@ -9132,3 +9132,15 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
+
+[[patch.unused]]
+name = "parse_pdms_db"
+version = "3.0.0"
+
+[[patch.unused]]
+name = "aios_core"
+version = "0.2.0"
+
+[[patch.unused]]
+name = "pdms_io"
+version = "0.1.0"
