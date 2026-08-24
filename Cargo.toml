@@ -4,9 +4,9 @@ version = "0.1.18"
 edition = "2024"
 
 # Python 调试绑定（python/aios-py）与主 crate 同一个 workspace：
-# [patch] 段作用于全图（vendor 本地重定向对绑定同样生效），共享 Cargo.lock 与
-# target/（自研几何依赖只编一次）。default-members 钉在根 package，日常 cargo build/test
-# 行为不变；绑定构建走 python/ 目录的 maturin（docs/plans/2026-08-11-python-binding-api-plan.md）。
+# 绑定与主包共享 Cargo.lock/target；本地开发的 core/parse/pdms 三个 path 依赖在两边
+# 指向同一组干净工作树，避免出现双份 aios_core。default-members 钉在根 package，
+# 绑定构建仍走 python/ 目录的 maturin（docs/plans/2026-08-11-python-binding-api-plan.md）。
 [workspace]
 members = [".", "python"]
 default-members = ["."]
@@ -106,11 +106,11 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-parse_pdms_db = { path = "../../old-parse-pdms-db-paged" }
-aios_core = { path = "../vendor/old-aios-core-occ-retire-caliber", default-features = false }
+parse_pdms_db = { path = "../../old-parse-pdms-db-cata-throughput" }
+aios_core = { path = "../old-aios-core-cata-batch-read", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { path = "../../old-pdms-io-record-boundary" }
+pdms_io = { path = "../../old-pdms-io-cata-throughput" }
 
 clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }
@@ -174,37 +174,6 @@ rmcp = { version = "=3.1.1", features = ["server", "transport-io"] }
 # 本分支上方 [dependencies] 已直接指向本地 aios_core / parse_pdms_db /
 # pdms_io 工作树，联调不走 git rev。本段只供其它历史工作树使用。
 #
-# 为什么用 [patch] 而不是把 [dependencies] 改成 path：parse_pdms_db 与 pdms_io
-# 在它们自己的 Cargo.toml 里也 git 依赖 aios_core。只把本仓改成 path，依赖图里
-# 会同时出现两份 aios_core，而 parse_pdms_db 把 aios_core 类型摆在 API 面上，
-# 跨边界必然类型不匹配。patch 作用于整张图，三方一起收敛到同一份。
-#
-# 前提：下面三个 vendor 目录必须存在，且停在与上面 rev 对应的提交上。
-#
-#   ../vendor/old-aios-core      codex/room-panel-wire-repair = 29c91f48
-#   ../vendor/old-parse-pdms-db  codex/room-panel-wire-repair-deps = f3537dae
-#   ../vendor/old-pdms-io        codex/mdb-projid-array-20260821 = b1146948
-#
-# 同名克隆有好几份，别接错。plant-code/rs-core 在 codex/fix-refno-enum-cata-hash
-# 上（rkyv 0.8 那条线），engine-v2 在 plant-code/pdms-io，两者都不是这里要的。
-# 还有个「看着像但落后」的诱饵：plant-code/dependency-pin-parse 停在
-# newrepo-main = 03c1cdb，接上去能编过，但会把上面 rev 才有的 record-boundary
-# 修复悄悄退掉。
-#
-# 打开状态下 Cargo.lock 里这三个包的 `source` 行会消失，所以**不能带着它推 main**。
-# pre-push 守卫（.githooks/pre-push）会挡住，不必靠记性。
-#
-# LOCAL-DEPS PATCH BEGIN
-[patch."https://github.com/happyrust/old-aios-core.git"]
-aios_core = { path = "../vendor/old-aios-core" }
-
-[patch."https://github.com/happyrust/old-parse-pdms-db.git"]
-parse_pdms_db = { path = "../vendor/old-parse-pdms-db" }
-
-[patch."https://github.com/happyrust/old-pdms-io.git"]
-pdms_io = { path = "../vendor/old-pdms-io" }
-# LOCAL-DEPS PATCH END
-
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
 
