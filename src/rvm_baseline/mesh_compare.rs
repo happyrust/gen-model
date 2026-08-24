@@ -10,8 +10,9 @@
 //! - gen 侧（需 `manifold`，ADR-030 决策 10 / T043）：有 `booled_id` 时加载布尔后的
 //!   `{id}.mesh` 再乘 `world_trans`（与生产 `query_valid_insts` 同口径）；否则从
 //!   `inst_geo.param` 就地走生产同款 `tessellate_libgm_param`，再乘
-//!   `world_trans × inst.transform`。OCC 只是可选参照分支（带 `occ` 才编译），
-//!   拿不到就回退磁盘 `.mesh`——量尺子不再跟被量的对象绑在一起。
+//!   `world_trans × inst.transform`；建不出形状就回退磁盘 `.mesh`。
+//!   这条路径**只有 manifold 一个后端**：多一条 OCC 参照分支就等于让默认 feature
+//!   集下的对拍量到一条生产不走的路（T037 拆掉的形状回退会从这里长回来）。
 //!
 //! 阈值不是 1mm：曲面墙两侧都是有限三角化，E3D FacetGroup 的弦误差是判定地板，
 //! 门限按实测证据定（见 `mesh_wall_live` 测试与 `docs/2026-08-12_live-test-ledger.md`）。
@@ -259,13 +260,8 @@ mod gen_side {
     /// 有 `booled_id` 时与生产 `query_valid_insts` 一样，只加载布尔后的
     /// `{booled_id}.mesh` 再乘 `world_trans`（切洞结果已烘进网格）。没有则
     /// geo_hash → param → 生产同款 `tessellate_libgm_param` → 网格，再乘
-    /// `world_trans × inst.transform`。`gen_tol` 是 OCC 参照分支的细分弦容差
-    /// （mm），只在带 `occ` 的构建里用得上。
-    pub async fn gen_world_mesh(
-        db: &Surreal<Any>,
-        pe_key: &str,
-        gen_tol: f64,
-    ) -> Result<Option<TriMesh>> {
+    /// `world_trans × inst.transform`。
+    pub async fn gen_world_mesh(db: &Surreal<Any>, pe_key: &str) -> Result<Option<TriMesh>> {
         // 走这个 pe 的出边，不要 `WHERE in = {pe_key}`：`inst_relate` 没有
         // `(in, out)` 索引，谓词形式在真库上是整表扫，而对拍要逐件调用本函数。
         let sql = format!(
@@ -310,7 +306,7 @@ mod gen_side {
                 continue;
             };
             if !unit_cache.contains_key(hash) {
-                let unit = build_unit_mesh(db, hash, gen_tol).await?;
+                let unit = build_unit_mesh(db, hash).await?;
                 unit_cache.insert(hash.to_string(), unit);
             }
             let Some(unit) = unit_cache.get(hash).and_then(|m| m.as_ref()) else {
@@ -329,11 +325,7 @@ mod gen_side {
         Ok(accum.into_trimesh())
     }
 
-    async fn build_unit_mesh(
-        db: &Surreal<Any>,
-        geo_hash: &str,
-        gen_tol: f64,
-    ) -> Result<Option<PlantMesh>> {
+    async fn build_unit_mesh(db: &Surreal<Any>, geo_hash: &str) -> Result<Option<PlantMesh>> {
         let sql =
             format!("SELECT param FROM inst_geo WHERE record::id(id) = '{geo_hash}' LIMIT 1;");
         let mut resp = db.query(sql).await.context("查询 inst_geo.param 失败")?;
@@ -353,20 +345,9 @@ mod gen_side {
                 Ok(Some(mesh)) => return Ok(Some(mesh)),
                 Ok(None) => {}
                 Err(error) => {
-                    eprintln!("geo_hash={geo_hash} libgm 三角化失败，走参照回退: {error}");
+                    eprintln!("geo_hash={geo_hash} libgm 三角化失败，回退磁盘 .mesh: {error}");
                 }
             }
-            // OCC 仅作可选参照分支（T043）：生产不再用它建形状，但在带 `occ` 的
-            // 构建里保留，供事后验收对拍时多一条独立参照。
-            #[cfg(feature = "occ")]
-            match param.gen_occ_shape() {
-                Ok(shape) => return Ok(Some(PlantMesh::gen_occ_mesh(&shape, gen_tol)?)),
-                Err(error) => {
-                    eprintln!("geo_hash={geo_hash} gen_occ_shape 失败，回退磁盘 .mesh: {error}");
-                }
-            }
-            #[cfg(not(feature = "occ"))]
-            let _ = gen_tol;
         }
         // param 为空或建不出形状 → 磁盘 .mesh（布尔/复合结果，如 BEND；CWD=仓库根，
         // meshes_path 默认 assets/meshes）。
@@ -427,7 +408,7 @@ mod mesh_wall_live {
     ///   单列打印，待 SweepSolid 修复后再收进断言。
     ///
     /// 前置：8009 生产验证库在跑；`test_data/rvm/1RS-WF03-W-C-RR001.rvm` 在位。
-    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// 跑法（CI 口径，T043）：`cargo test --locked --lib --no-default-features
     /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_wall_surface_distance -- --ignored --nocapture`
     #[tokio::test]
     #[ignore = "live 8009：1112 CWALL WALL 的 mesh 级对拍（gen→rvm 贴合守卫 + 洞/WALL4 取证）"]
@@ -466,7 +447,7 @@ mod mesh_wall_live {
             let rvm = rvm_meshes
                 .get(rvm_name)
                 .unwrap_or_else(|| panic!("RVM 缺 group {rvm_name}"));
-            let gen_mesh = gen_world_mesh(&db, pe_key, 3.0)
+            let gen_mesh = gen_world_mesh(&db, pe_key)
                 .await
                 .expect("gen mesh")
                 .unwrap_or_else(|| panic!("gen 缺网格 {pe_key}"));
@@ -571,7 +552,7 @@ mod mesh_wall_live {
     /// AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 4 堵直线 STWALL。AABB 对拍已 8/8；
     /// 这里钉 mesh：E3D FacetGroup 是 6 面盒（无内环），应双向贴合。
     ///
-    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// 跑法（CI 口径，T043）：`cargo test --locked --lib --no-default-features
     /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_stwall_surface_distance -- --ignored --nocapture`
     #[tokio::test]
     #[ignore = "live 8009：1112 CWALL STWALL 的 mesh 级对拍（直线 SweepSolid）"]
@@ -597,7 +578,7 @@ mod mesh_wall_live {
             let rvm = rvm_meshes
                 .get(rvm_name)
                 .unwrap_or_else(|| panic!("RVM 缺 group {rvm_name}"));
-            let Some(gen_mesh) = gen_world_mesh(&db, pe_key, 3.0).await.expect("gen mesh") else {
+            let Some(gen_mesh) = gen_world_mesh(&db, pe_key).await.expect("gen mesh") else {
                 println!("{rvm_name} ({pe_key}): 库里没有这件的生成几何，跳过对拍");
                 missing.push(format!("{rvm_name} ({pe_key})"));
                 continue;
@@ -637,7 +618,7 @@ mod mesh_wall_live {
     /// 只是 E3D 侧附加/口径差。FTUB 作对照（AABB 一向过）。第一遍取证，不硬断言。
     ///
     /// 前置：8009 上有 dbnum 8000 的生成几何；`test_data/rvm/C-OR-1R345-C.rvm` 在位。
-    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// 跑法（CI 口径，T043）：`cargo test --locked --lib --no-default-features
     /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_pipe_surface_distance -- --ignored --nocapture`
     #[tokio::test]
     #[ignore = "live 8009：8000 C-OR 管系 FTUB/BEND 的 mesh 级对拍（BEND 缺陷定性）"]
@@ -686,7 +667,7 @@ mod mesh_wall_live {
                 println!("{rvm_prefix}: RVM 无匹配 group，跳过");
                 continue;
             };
-            let gen_mesh = match gen_world_mesh(&db, pe_key, 2.0).await.expect("gen mesh") {
+            let gen_mesh = match gen_world_mesh(&db, pe_key).await.expect("gen mesh") {
                 Some(m) => m,
                 None => {
                     println!("{rvm_prefix} ({pe_key}): gen 无网格（TUBI 隐含直管？），跳过");
@@ -722,7 +703,7 @@ mod mesh_wall_live {
     /// 判「弯头腿伸进相邻直管」是**装配无害**（union 双向都小 → 腿与直管重叠、最终外观不变）
     /// 还是**真缺陷**（gen→rvm 仍大 → 腿伸出连相邻直管都盖不住）。
     ///
-    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// 跑法（CI 口径，T043）：`cargo test --locked --lib --no-default-features
     /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_branch_union -- --ignored --nocapture`
     #[tokio::test]
     #[ignore = "live 8009：C-OR BEND1+相邻 FTUB 的 union mesh 对拍（重叠是否装配无害）"]
@@ -765,7 +746,7 @@ mod mesh_wall_live {
             if let Some(m) = find_mesh(prefix) {
                 rvm_parts.push(m);
             }
-            if let Some(m) = gen_world_mesh(&db, pe_key, 2.0).await.expect("gen mesh") {
+            if let Some(m) = gen_world_mesh(&db, pe_key).await.expect("gen mesh") {
                 gen_parts.push(m);
             }
         }
@@ -798,7 +779,7 @@ mod mesh_wall_live {
     /// 把「gen 装配层几何正确」从 3 元素样本升级为整条管路：union 双向应落在
     /// tessellation 量级（元素边界的弯头腿归属差在整条 union 里自洽抵消）。
     ///
-    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// 跑法（CI 口径，T043）：`cargo test --locked --lib --no-default-features
     /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_full_branch -- --ignored --nocapture`
     #[tokio::test]
     #[ignore = "live 8009：整条 C-OR BRANCH 的 union mesh 端到端对拍"]
@@ -848,7 +829,7 @@ mod mesh_wall_live {
                 Some(m) => rvm_parts.push(m),
                 None => missing.push(format!("rvm:{prefix}")),
             }
-            match gen_world_mesh(&db, pe_key, 2.0).await.expect("gen mesh") {
+            match gen_world_mesh(&db, pe_key).await.expect("gen mesh") {
                 Some(m) => gen_parts.push(m),
                 None => missing.push(format!("gen:{pe_key}")),
             }
@@ -897,7 +878,7 @@ mod mesh_wall_live {
     /// 确认 C-OR 的「gen 表面贴 E3D」在不同目录截面上仍成立；E3D RVM 含槽体外壳
     /// （比 gen 管段大约 100mm 高），rvm→gen 大是范围差。FTUBE 6 是零长隐含直管，两侧都无表面。
     ///
-    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// 跑法（CI 口径，T043）：`cargo test --locked --lib --no-default-features
     /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_c_iy_full_branch -- --ignored --nocapture`
     #[tokio::test]
     #[ignore = "live 8009：整条 C-IY BRANCH 的 union mesh 端到端对拍"]
@@ -953,7 +934,7 @@ mod mesh_wall_live {
         let mut skipped = Vec::new();
         for (prefix, pe_key) in members {
             let rvm = rvm_by_prefix(&rvm_meshes, prefix).cloned();
-            let generated = gen_world_mesh(&db, pe_key, 2.0).await.expect("gen mesh");
+            let generated = gen_world_mesh(&db, pe_key).await.expect("gen mesh");
             match (rvm, generated) {
                 (Some(r), Some(g)) => {
                     rvm_parts.push(r);
@@ -1093,7 +1074,7 @@ mod mesh_wall_live {
     /// 钉 gen→rvm p95≤1mm；高面片墙的开洞与带 NXTR 的大体量范围差只打印
     /// （见 `mesh_gwall_extra_against_cwall_union`）。
     ///
-    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// 跑法（CI 口径，T043）：`cargo test --locked --lib --no-default-features
     /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_gwall_union -- --ignored --nocapture`
     #[tokio::test]
     #[ignore = "live 8009：1112 CWALL 20 堵 GWALL 的 union mesh 对拍"]
@@ -1140,7 +1121,7 @@ mod mesh_wall_live {
         let mut gen_parts = Vec::new();
         let mut missing_gen = Vec::new();
         for pe_key in pe_keys {
-            match gen_world_mesh(&db, pe_key, 3.0).await.expect("gen mesh") {
+            match gen_world_mesh(&db, pe_key).await.expect("gen mesh") {
                 Some(m) => gen_parts.push(m),
                 None => missing_gen.push(pe_key.to_string()),
             }
@@ -1235,7 +1216,7 @@ mod mesh_wall_live {
     /// OCC 布尔会把 116569 切成空网格，生产不走这条路径。盒状守卫仍在
     /// `mesh_gwall_union_surface_distance`。
     ///
-    /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
+    /// 跑法（CI 口径，T043）：`cargo test --locked --lib --no-default-features
     /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_gwall_extra -- --ignored --nocapture`
     #[tokio::test]
     #[ignore = "live 8009：1112 3 堵大体量 GWALL 的 NXTR/范围差取证"]
@@ -1283,7 +1264,7 @@ mod mesh_wall_live {
                 nxtr_failures.push(format!("{pe_key}: nxtr={n}"));
             }
 
-            let Some(part) = gen_world_mesh(&db, pe_key, 3.0).await.expect("gen mesh") else {
+            let Some(part) = gen_world_mesh(&db, pe_key).await.expect("gen mesh") else {
                 panic!("{pe_key} has no gen mesh");
             };
             let aabb = part.local_aabb();
@@ -1349,5 +1330,33 @@ mod mesh_source_tests {
         assert_eq!(resolve_booled_mesh_id(Some("")), None);
         assert_eq!(resolve_booled_mesh_id(Some("NONE")), None);
         assert_eq!(resolve_booled_mesh_id(Some("none")), None);
+    }
+
+    /// T043 的另一半：量尺子不许挂第二台形状引擎。`gen_side` 里加回
+    /// `gen_occ_shape` / `gen_occ_mesh`（哪怕挂在 `#[cfg(feature = "occ")]` 下）
+    /// 本测试红——默认 feature 集带 `occ`，那条分支一旦回来，对拍在默认口径下量到的
+    /// 就不是生产路径，而且会把 T037 拆掉的形状回退原样复活。
+    #[test]
+    fn gen_side_has_no_second_shape_engine() {
+        let source = include_str!("mesh_compare.rs");
+        let body = source
+            .split_once("mod gen_side {")
+            .expect("gen_side exists")
+            .1
+            .split_once("\n#[cfg(all(test, feature = \"manifold\"))]")
+            .expect("gen_side boundary")
+            .0;
+        assert!(
+            !body.contains("gen_occ_shape") && !body.contains("gen_occ_mesh"),
+            "对拍 gen 侧不得回退 OCC：{body}"
+        );
+        assert!(
+            !body.contains("feature = \"occ\""),
+            "对拍 gen 侧不得按 occ 分叉：{body}"
+        );
+        assert!(
+            body.contains("tessellate_libgm_param"),
+            "gen 侧形状必须由生产同款 tessellate_libgm_param 裁决：{body}"
+        );
     }
 }
