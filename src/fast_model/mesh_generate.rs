@@ -1979,7 +1979,7 @@ mod flexible_geometry_deserialize_tests {
 
 #[cfg(test)]
 mod live_cwall_rr001_aabb_tests {
-    use super::update_inst_relate_aabbs_by_refnos;
+    use super::{gen_inst_meshes, update_inst_relate_aabbs_by_refnos};
     use aios_core::RefnoEnum;
 
     /// 刷新 AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 WALL/STWALL 世界包围盒。
@@ -2001,6 +2001,34 @@ mod live_cwall_rr001_aabb_tests {
         .into_iter()
         .map(RefnoEnum::from)
         .collect();
+        update_inst_relate_aabbs_by_refnos(&refnos, true)
+            .await
+            .expect("refresh WALL/STWALL aabb");
+    }
+
+    /// 几何算法变化后按 refno 强制重铺同一批单位 `.mesh`，避免旧 hash 对应的磁盘
+    /// 网格掩盖新实现。随后刷新世界 AABB，供 RVM 门直接读取生产关系。
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "live 8009: 强制重铺 1RS-WF03-W-C-RR001 WALL/STWALL mesh 并刷新 aabb"]
+    async fn live_8009_regenerate_cwall_rr001_wall_meshes() {
+        aios_core::init_surreal().await.expect("connect 8009");
+        let refnos: Vec<RefnoEnum> = [
+            "17496/105912",
+            "17496/105930",
+            "17496/105935",
+            "17496/105940",
+            "17496/105812",
+            "17496/105813",
+            "17496/105815",
+            "17496/105816",
+        ]
+        .into_iter()
+        .map(RefnoEnum::from)
+        .collect();
+        let mesh_dir = aios_core::get_db_option().get_meshes_path();
+        gen_inst_meshes(&refnos, true, mesh_dir)
+            .await
+            .expect("regenerate WALL/STWALL mesh");
         update_inst_relate_aabbs_by_refnos(&refnos, true)
             .await
             .expect("refresh WALL/STWALL aabb");

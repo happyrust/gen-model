@@ -724,6 +724,141 @@ fn arc_segments(radius: f64, angle: f32, chord_tol: f64) -> u32 {
         as u32
 }
 
+fn rotate_about_z(point: DVec3, angle: f64) -> DVec3 {
+    let (sin, cos) = angle.sin_cos();
+    DVec3::new(
+        point.x * cos - point.y * sin,
+        point.x * sin + point.y * cos,
+        point.z,
+    )
+}
+
+/// `Spine3D::generate_paths` 写入实例的曲线局部框架。DRNS/DRNE 仍在源坐标系，
+/// 回转网格却在规范 XY 平面；裁切前必须用同一框架把法向变回规范局部坐标。
+fn arc_segment_frame(arc: &aios_core::prim_geo::spine::Arc3D) -> anyhow::Result<DMat3> {
+    let radial = (arc.start_pt - arc.center).as_dvec3();
+    let x_axis = radial
+        .try_normalize()
+        .ok_or_else(|| anyhow!("圆弧脊起点与圆心重合"))?;
+    let ref_axis = if x_axis.dot(DVec3::Z).abs() > 1.0 - 1e-6 {
+        DVec3::Y
+    } else {
+        DVec3::Z
+    };
+    let y_axis = ref_axis
+        .cross(x_axis)
+        .try_normalize()
+        .ok_or_else(|| anyhow!("圆弧脊局部 Y 轴退化"))?;
+    let z_axis = x_axis
+        .cross(y_axis)
+        .try_normalize()
+        .ok_or_else(|| anyhow!("圆弧脊局部 Z 轴退化"))?;
+    Ok(DMat3::from_cols(x_axis, y_axis, z_axis))
+}
+
+fn arc_mitre_extension(
+    loops: &[ProfileRing],
+    placement: DMat4,
+    inward: DVec3,
+    plane_point: DVec3,
+    nominal_angle: f64,
+    direction: f64,
+) -> anyhow::Result<f64> {
+    let placed = loops
+        .iter()
+        .flat_map(|ring| ring.points.iter())
+        .map(|point| (placement * DVec4::new(point.x as f64, point.y as f64, 0.0, 1.0)).truncate())
+        .collect::<Vec<_>>();
+    let outside = |extension: f64| {
+        let angle = nominal_angle + direction * extension;
+        placed
+            .iter()
+            .map(|point| inward.dot(rotate_about_z(*point, angle) - plane_point))
+            .fold(f64::NEG_INFINITY, f64::max)
+    };
+
+    // Core3D 先把段延到整个截面越过工作切面，再裁回来。逐次扩角而不是按墙厚
+    // 猜固定角度；1mm 余量与直线 `mitre_extension_length` 的规则一致。
+    let mut high = 1e-4;
+    while high <= std::f64::consts::FRAC_PI_2 && outside(high) > -1.0 {
+        high *= 2.0;
+    }
+    if high > std::f64::consts::FRAC_PI_2 {
+        bail!("圆弧斜切在 90° 延伸内仍未越过工作切面");
+    }
+    let mut low = 0.0;
+    for _ in 0..40 {
+        let mid = (low + high) * 0.5;
+        if outside(mid) <= -1.0 {
+            high = mid;
+        } else {
+            low = mid;
+        }
+    }
+    Ok(high)
+}
+
+fn revolved_solid_mesh(
+    sweep: &SweepSolid,
+    loops: &[ProfileRing],
+    placement: DMat4,
+    angle: f32,
+    radius: f64,
+    chord_tol: f64,
+) -> anyhow::Result<PlantMesh> {
+    let SweepPath3D::SpineArc(arc) = &sweep.path else {
+        bail!("回转裁切拿到的不是圆弧脊");
+    };
+    let frame = arc_segment_frame(arc)?;
+    let local_plane = |is_start| {
+        sweep
+            .working_mitre_plane(is_start)
+            .and_then(|normal| normal.try_normalize())
+            .and_then(|normal| (frame.transpose() * normal).try_normalize())
+    };
+    let start_plane = local_plane(true);
+    let end_plane = local_plane(false);
+    let sign = if angle < 0.0 { -1.0 } else { 1.0 };
+    let spine_start = DVec3::new(arc.radius as f64, 0.0, 0.0);
+    let spine_end = rotate_about_z(spine_start, angle as f64);
+    let start_extension = start_plane
+        .map(|normal| arc_mitre_extension(loops, placement, normal, spine_start, 0.0, -sign))
+        .transpose()?
+        .unwrap_or_default();
+    let end_extension = end_plane
+        .map(|normal| arc_mitre_extension(loops, placement, normal, spine_end, angle as f64, sign))
+        .transpose()?
+        .unwrap_or_default();
+    let start_angle = -sign * start_extension;
+    let extended_angle = angle as f64 + sign * (start_extension + end_extension);
+    let extended_placement = DMat4::from_rotation_z(start_angle) * placement;
+    let extended = revolve_loops(
+        loops,
+        extended_placement,
+        extended_angle as f32,
+        arc_segments(radius, extended_angle as f32, chord_tol),
+    )?;
+    if start_plane.is_none() && end_plane.is_none() {
+        return Ok(extended);
+    }
+
+    let mut solid = plant_mesh_to_manifold(&extended, DMat4::IDENTITY)?;
+    if let Some(inward) = start_plane {
+        solid = solid.trim_by_plane(inward.to_array(), inward.dot(spine_start));
+    }
+    if let Some(inward) = end_plane {
+        solid = solid.trim_by_plane(inward.to_array(), inward.dot(spine_end));
+    }
+    if solid.is_empty() {
+        bail!("圆弧段经端面裁切后为空");
+    }
+    let mesh = manifold_to_plant_mesh(&solid);
+    if mesh.indices.len() < 3 || mesh.aabb.is_none() {
+        bail!("圆弧斜切 CSG 没有生成有效 PlantMesh");
+    }
+    Ok(mesh)
+}
+
 /// 扫掠体成网格。分支判定用 `do_solid_segments()`——Core3D `DB_Gensec` 的权威三支，
 /// 本模块不另立一套。
 pub fn sweep_solid_mesh(sweep: &SweepSolid) -> anyhow::Result<PlantMesh> {
@@ -783,7 +918,7 @@ pub fn sweep_solid_mesh(sweep: &SweepSolid) -> anyhow::Result<PlantMesh> {
                     v.x.hypot(v.y)
                 })
                 .fold(0.0f64, f64::max);
-            revolve_loops(&loops, mat, angle, arc_segments(radius, angle, chord_tol))
+            revolved_solid_mesh(sweep, &loops, mat, angle, radius, chord_tol)
         }
     }
 }
@@ -1565,6 +1700,73 @@ mod tests {
         let mesh = sweep_solid_mesh(&sweep).expect("arc gensec");
         assert_solid_mesh(&mesh, "arc gensec");
         assert_volume(&mesh, angle * radius * 40.0 * 60.0, 0.01, "arc gensec");
+    }
+
+    /// AMS 1112 `WALL 4 of CWALL /1RS-WF03-W-C-RR001` 的字面参数。
+    /// DRNS=+X 不是径向端盖：它把内半径的起点向后延约 1.4°。只按 SPINE 扫角
+    /// 回转会得到 7.83°/1778mm 的短墙；libgm 先延伸再按该工作平面裁成 9.24°/1893mm。
+    #[test]
+    fn field_arc_wall_start_mitre_matches_rvm_bounds() {
+        let profile = CateProfileParam::SPRO(SProfileData {
+            verts: vec![
+                Vec2::new(0.0, 0.0),
+                Vec2::new(1300.0, 0.0),
+                Vec2::new(1300.0, 3620.0),
+                Vec2::new(0.0, 3620.0),
+            ],
+            frads: vec![0.0; 4],
+            plax: Vec3::Y,
+            na_axis: Vec3::Y,
+            plin_axis: Vec3::Y,
+            plin_pos: Vec2::ZERO,
+            ..Default::default()
+        });
+        let sweep = SweepSolid {
+            profile,
+            drns: Some(DVec3::X),
+            drne: None,
+            plax: Vec3::Y,
+            extrude_dir: DVec3::Z,
+            path: SweepPath3D::SpineArc(Arc3D {
+                center: Vec3::new(-0.031, -0.313, 0.0),
+                radius: 17399.693,
+                angle: 0.13669491,
+                start_pt: Vec3::new(-5058.219, -16648.557, 0.0),
+                clock_wise: false,
+                axis: Vec3::Z,
+                pref_axis: Vec3::Z,
+            }),
+            ..Default::default()
+        };
+        let mesh = sweep_solid_mesh(&sweep).expect("field arc wall");
+        assert_solid_mesh(&mesh, "field arc wall");
+
+        let instance = DMat4::from_scale_rotation_translation(
+            DVec3::ONE,
+            DQuat::from_xyzw(0.0, 0.0, 0.8033385, -0.5955226),
+            DVec3::new(-0.03125, -0.3125, 0.0),
+        );
+        let world = DMat4::from_translation(DVec3::new(0.0, 0.0, -20.0)) * instance;
+        let mut bounds = Aabb::new_invalid();
+        for point in &mesh.vertices {
+            let point = world.transform_point3(point.as_dvec3());
+            bounds.take_point(Point::new(point.x as f32, point.y as f32, point.z as f32));
+        }
+        let expected_min = Vec3::new(-5058.2, -17182.5, -20.0);
+        let expected_max = Vec3::new(-2537.5, -15289.9, 3600.0);
+        let actual_min = Vec3::new(bounds.mins.x, bounds.mins.y, bounds.mins.z);
+        let actual_max = Vec3::new(bounds.maxs.x, bounds.maxs.y, bounds.maxs.z);
+        assert!(
+            (actual_min - expected_min).length() < 1.0,
+            "RVM min {expected_min:?}, got {:?}",
+            bounds.mins
+        );
+        assert!(
+            // RVM 用自己的弧格子，外弧包围盒在 Y 上有约 5.2mm 弦误差。
+            (actual_max - expected_max).length() < 6.0,
+            "RVM max {expected_max:?}, got {:?}",
+            bounds.maxs
+        );
     }
 
     #[test]

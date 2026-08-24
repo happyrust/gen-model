@@ -4,6 +4,10 @@
 
 ### 修复
 
+- 弧形 SweepSolid 现在保留 SPINE 斜切法向的源坐标系，先按整个截面需要的角度延伸
+  回转体，再由 Manifold 按 DRNS/DRNE 工作平面裁回。AMS 1112 浅弧 WALL 4 的扫角从
+  7.83° 恢复为 E3D 的 9.24°，gen→RVM p95 从 170.52mm 降至 4.05mm，并正式纳入
+  四堵 WALL 的 12mm 硬门。
 - 修正直线 SweepSolid 的坐标责任边界：`POSS/POSE` 路径方向与 `BANG` 已由元素
   `world_trans` 表达，非 SPINE 单位实例只保留长度、PLAX 与镜像，不再重复旋转路径。
   AMS 1112 CWALL 的 4 堵 STWALL 在无 OCC 构建下恢复双向 p95=0、max≤0.06mm；

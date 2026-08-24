@@ -83,6 +83,15 @@ cargo test --lib --no-default-features --features ws,gen_model,manifold,project_
 
 结论：(1) **gen 表面忠实**——WALL 1/2/3 的 gen→rvm p95 ≤ 8.1mm（仅弦误差量级），测试据此断言 `gen→rvm p95 ≤ 12mm` 作圆弧墙几何回归守卫。(2) **rvm→gen 约半墙厚（~650mm）的局部离群簇 = E3D 墙面开洞、gen 实心不开洞**。取证：4 堵 WALL 均 `has_cata_neg=false`、无负实体子（只有 SPINE + JLDATU），而 1112 里 5608 个元素靠 cata-neg 子（如 FLOOR 的 NXTR 子）正常切洞——**墙洞不是 SweepSolid 问题**，开口负实体不归墙所有，来源不在 gen 消费的已解析墙数据里（`plug_in/virtual_hole.rs` 是数据中心孔洞审批工作流，非几何切洞）。定位开口来源需 E3D 侧探针，属独立议题。(3) **WALL 4 = E3D 墙角斜接延伸，非 gen 缺陷（已证）**：径向范围与 E3D 吻合（rvm≈[16096,17400]、gen=[16100,17400]），排除厚度/半径。绕世界弧心角度跨度：rvm=[−108.31,−99.07]=9.24°，gen=[−106.90,−99.07]=7.83°——**同一末端、起点差 1.41°**。离线 `parse.element` 读 E3D 文件 SPINE 原始坐标：pt0(POINSP 105942)=(−5058.219,−16648.557)＝gen start_pt、thru(CURVE 105943)=(−3909.413,−16955.131) RADI=17400、pt1(POINSP 105944)=(−2742.352,−17182.535)，三点均在 R=17400、spine 弧 pt0→pt1=7.84°＝gen 7.83°。**gen 的墙与 PDMS spine 定义逐点吻合**；E3D 从 pt0 再延伸 1.41°（SPINE `DRNS=[1,0,0]` 驱动的墙角斜接）与 WALL 3（到 −107°）交接重叠。gen→rvm 在 WALL 4 偏大是因 gen 合法端面落在 E3D 延伸墙体内部（≈半墙厚），是 E3D 延伸的后果。WALL 2/3 的 ~52mm/0.18°、WALL 1 的 8mm 同源（延伸量随墙夹角，浅弧 WALL 4 最大）。**两处「gen 缺陷」查到底均为 E3D 侧附加几何（墙角斜接延伸 + 穿透开洞），gen 几何忠实**；是否实现 E3D 口径的墙角延伸/切洞属建模范围决策，非几何修复。
 
+**2026-08-24 AMS 1112 WALL 4 弧段斜切收口**：上面的“非 gen 缺陷”裁决被 libgm
+段构造语义推翻：SPINE 几何定义中心线范围，`DRNS/DRNE` 仍必须先延伸实体再按工作平面
+裁切。vendor 对 Arc3D 保留源坐标法向，主仓回转路径按截面求所需扩角并用 Manifold 裁回；
+`live_8009_regenerate_cwall_rr001_wall_meshes` 强制重铺单位网格后，WALL 4 扫角
+`7.83° → 9.24°`，gen→rvm `mean/p95/max = 1.40/4.05/26.55mm`，rvm→gen
+`9.37/4.28/648.40mm`（最大值仍是既有墙洞范围差）。四堵 WALL 现全部受
+`gen→rvm p95 ≤ 12mm` 断言保护。证据：
+`docs/evidence/2026-08-24-arc-wall-mitre-rvm.md`。
+
 **2026-08-14 AMS 8000 C-OR 管系 mesh 级对拍**：`rvm_baseline::mesh_compare::mesh_wall_live::mesh_pipe_surface_distance`（live 8009 + occ，跑法 `cargo test --features rvm_verify --lib mesh_pipe_surface_distance -- --ignored --nocapture`）。**2026-08-14 通过**（取证型，不硬断言）。gen 侧 FTUB 走 param 就地重建、BEND 走磁盘 `.mesh`（复合/布尔结果 `param=NONE`，`gen_world_mesh` 已加 param→.mesh 回退）。实测（双向表面距离 mm）：
 
 | 构件 | gen→rvm mean/p95/max | rvm→gen mean/p95/max | 判读 |

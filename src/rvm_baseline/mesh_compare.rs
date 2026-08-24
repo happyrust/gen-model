@@ -429,8 +429,8 @@ mod mesh_wall_live {
     /// - **rvm→gen** 有约半墙厚（~650mm）的**局部**离群簇：E3D 墙面开了洞
     ///   （WALL 1 FacetGroup polygons=48 / contours=50，2 个内环），gen 的实心
     ///   SweepSolid 不开洞 —— 这是**建模范围差异**，不在本守卫内判红，只打印。
-    /// - **WALL 4** 是真差异（浅弧墙厚度朝向：gen→rvm p95≈171、AABB Y 差 ~115mm），
-    ///   单列打印，待 SweepSolid 修复后再收进断言。
+    /// - **WALL 4** 的浅弧起点是斜切平面，不是径向端盖。弧段延伸后按 DRNS 裁切，
+    ///   gen→rvm p95 从约 171mm 降到 4.1mm，现与其余三堵墙一起判红。
     ///
     /// 前置：8009 生产验证库在跑；`test_data/rvm/1RS-WF03-W-C-RR001.rvm` 在位。
     /// 跑法（无 occ 口径，T043）：`cargo test --locked --lib --no-default-features
@@ -464,9 +464,8 @@ mod mesh_wall_live {
         ];
 
         use crate::fast_model::shared::one_way_surface_distance;
-        // gen→rvm 贴合守卫只钉 WALL 1/2/3；WALL 4 是待修真差异，只取证不判红。
+        // E3D 的内环/洞只影响 rvm→gen；四堵墙的生产表面都必须贴基准。
         const GEN_TO_RVM_P95_TOL: f32 = 12.0;
-        let guarded = ["WALL 1", "WALL 2", "WALL 3"];
         let mut guard_failures = Vec::new();
         for (rvm_name, pe_key) in pairs {
             let rvm = rvm_meshes
@@ -564,13 +563,13 @@ mod mesh_wall_live {
                 gzl,
                 gzh
             );
-            if guarded.iter().any(|g| rvm_name.starts_with(g)) && g2r.p95 > GEN_TO_RVM_P95_TOL {
+            if g2r.p95 > GEN_TO_RVM_P95_TOL {
                 guard_failures.push(format!("{rvm_name}: gen->rvm p95={:.2}", g2r.p95));
             }
         }
         assert!(
             guard_failures.is_empty(),
-            "WALL 1/2/3 的 gen 表面必须贴 E3D（gen->rvm p95 ≤ {GEN_TO_RVM_P95_TOL}mm）：{guard_failures:?}"
+            "WALL 1–4 的 gen 表面必须贴 E3D（gen->rvm p95 ≤ {GEN_TO_RVM_P95_TOL}mm）：{guard_failures:?}"
         );
     }
 

@@ -105,11 +105,11 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "20fbac4" }
-aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "6f95b65adcd485e00d3bdaae1f4391f8d288e320", default-features = false }
+parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "05dde0d" }
+aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "1de7a94e8f60c0f106f2f59f0805d25e262abaeb", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "53d9fb3b0dfb0d7cf086568f9bd6ebadff970c75" }
+pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "a8f16214576ca9f16892b1576b7917ada7388ca8" }
 
 clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }
