@@ -383,6 +383,8 @@ pub use gen_side::gen_world_mesh;
 #[cfg(all(test, feature = "manifold"))]
 mod mesh_wall_live {
     use super::*;
+    use bevy_transform::prelude::Transform;
+    use glam::Mat4;
     use surrealdb::engine::any::connect;
     use surrealdb::opt::auth::Root;
 
@@ -419,6 +421,73 @@ mod mesh_wall_live {
             .await
             .expect("use ns/db");
         db
+    }
+
+    fn transform_mat(transform: &Transform) -> Mat4 {
+        Mat4::from_scale_rotation_translation(
+            transform.scale,
+            transform.rotation,
+            transform.translation,
+        )
+    }
+
+    /// 直接从目标库的 PE/CATA/SPINE 属性走生产解析器，不依赖历史测试专用
+    /// `inst_relate`。这条路让两个数据库副本各自证明自己的源属性可生成同一 RVM 曲面。
+    async fn source_profile_world_mesh(pe_key: &str) -> Result<Option<TriMesh>> {
+        use aios_core::prim_geo::CateBrepShapeMap;
+
+        let refno: aios_core::RefnoEnum = pe_key.trim_start_matches("pe:").into();
+        let geom_info = crate::fast_model::resolve_desi_comp(refno, None)
+            .await
+            .with_context(|| format!("resolve profile catalogue for {pe_key}"))?;
+        let shapes = CateBrepShapeMap::new();
+        aios_core::prim_geo::profile::create_profile_geos(refno, &geom_info, &shapes)
+            .await
+            .with_context(|| format!("create profile geometry for {pe_key}"))?;
+        let world_transform = aios_core::get_world_transform(refno)
+            .await
+            .with_context(|| format!("query world transform for {pe_key}"))?
+            .ok_or_else(|| anyhow::anyhow!("{pe_key} has no world transform"))?;
+        let Some(entries) = shapes.get(&refno) else {
+            return Ok(None);
+        };
+
+        let mut accum = MeshAccum::default();
+        for shape in entries.iter().filter(|shape| shape.visible) {
+            if !shape.brep_shape.check_valid() {
+                continue;
+            }
+            let unit_shape = shape.brep_shape.gen_unit_shape();
+            let param = unit_shape
+                .convert_to_geo_param()
+                .ok_or_else(|| anyhow::anyhow!("{pe_key} profile unit shape has no parameter"))?;
+            let Some(mesh) = crate::fast_model::manifold_tessellate::tessellate_libgm_param(&param)
+                .with_context(|| format!("tessellate source profile for {pe_key}"))?
+            else {
+                continue;
+            };
+
+            // 与 `cata_model::gen_cata_geos` 相同：路径 frame 只贡献旋转/平移，
+            // 单位形状的真实尺寸由 BrepShapeTrait::get_trans() 贡献。
+            let unit_transform = shape.brep_shape.get_trans();
+            let instance_transform = Transform {
+                translation: shape.transform.translation
+                    + shape.transform.rotation * unit_transform.translation,
+                rotation: shape.transform.rotation * unit_transform.rotation,
+                scale: unit_transform.scale,
+            };
+            let matrix = transform_mat(&world_transform) * transform_mat(&instance_transform);
+            let vertices = mesh
+                .vertices
+                .iter()
+                .map(|vertex| {
+                    let point = matrix.transform_point3(*vertex);
+                    Point::new(point.x, point.y, point.z)
+                })
+                .collect::<Vec<_>>();
+            accum.add_world_points(&vertices, &mesh.indices);
+        }
+        Ok(accum.into_trimesh())
     }
 
     fn rvm_by_prefix<'a>(
@@ -640,6 +709,88 @@ mod mesh_wall_live {
         assert!(
             missing.is_empty(),
             "这些墙在目标库上没有生成几何，对拍等于没跑——先对 CWALL 做一次定向重生成：{missing:?}"
+        );
+    }
+
+    /// 不依赖历史派生关系的双副本门：每个副本都从自己的 PE/CATA/SPINE 源属性开始，
+    /// 经过 `resolve_desi_comp → create_profile_geos → tessellate_libgm_param` 对拍 RVM。
+    #[tokio::test]
+    #[ignore = "live database：从源属性对拍 4 WALL + 4 STWALL（DB_OPTION_FILE 选择副本）"]
+    async fn mesh_wall_and_stwall_from_source_attributes() {
+        use crate::fast_model::shared::one_way_surface_distance;
+
+        aios_core::init_surreal()
+            .await
+            .expect("connect DB_OPTION_FILE database");
+        let rvm_path = std::path::Path::new("test_data/rvm/1RS-WF03-W-C-RR001.rvm");
+        let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse rvm");
+        let pairs = [
+            (
+                "WALL 1 of CWALL /1RS-WF03-W-C-RR001",
+                "pe:17496_105912",
+                false,
+            ),
+            (
+                "WALL 2 of CWALL /1RS-WF03-W-C-RR001",
+                "pe:17496_105930",
+                false,
+            ),
+            (
+                "WALL 3 of CWALL /1RS-WF03-W-C-RR001",
+                "pe:17496_105935",
+                false,
+            ),
+            (
+                "WALL 4 of CWALL /1RS-WF03-W-C-RR001",
+                "pe:17496_105940",
+                false,
+            ),
+            (
+                "STWALL 1 of CWALL /1RS-WF03-W-C-RR001",
+                "pe:17496_105812",
+                true,
+            ),
+            (
+                "STWALL 2 of CWALL /1RS-WF03-W-C-RR001",
+                "pe:17496_105813",
+                true,
+            ),
+            (
+                "STWALL 3 of CWALL /1RS-WF03-W-C-RR001",
+                "pe:17496_105815",
+                true,
+            ),
+            (
+                "STWALL 4 of CWALL /1RS-WF03-W-C-RR001",
+                "pe:17496_105816",
+                true,
+            ),
+        ];
+        let mut failures = Vec::new();
+        for (rvm_name, pe_key, symmetric) in pairs {
+            let rvm = rvm_meshes
+                .get(rvm_name)
+                .unwrap_or_else(|| panic!("RVM missing group {rvm_name}"));
+            let generated = source_profile_world_mesh(pe_key)
+                .await
+                .unwrap_or_else(|error| panic!("generate {pe_key} from source: {error:#}"))
+                .unwrap_or_else(|| panic!("source profile produced no mesh for {pe_key}"));
+            let g2r = one_way_surface_distance(&generated, rvm, 4000).expect("gen to rvm");
+            let r2g = one_way_surface_distance(rvm, &generated, 4000).expect("rvm to gen");
+            println!(
+                "{rvm_name}: gen->rvm mean={:.2} p95={:.2} max={:.2} | rvm->gen mean={:.2} p95={:.2} max={:.2}",
+                g2r.mean, g2r.p95, g2r.hausdorff, r2g.mean, r2g.p95, r2g.hausdorff
+            );
+            if g2r.p95 > 12.0 || (symmetric && r2g.p95 > 12.0) {
+                failures.push(format!(
+                    "{rvm_name}: gen->rvm p95={:.2}, rvm->gen p95={:.2}",
+                    g2r.p95, r2g.p95
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "source profile RVM failures: {failures:?}"
         );
     }
 

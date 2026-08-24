@@ -58,12 +58,27 @@ mesh_gwall_extra_against_cwall_union
 `mesh_stwall_surface_distance`，两项均退出 0：四堵弧墙 gen→RVM p95 为
 `7.86/7.84/8.63/4.05mm`，四堵直墙双向 p95 均为 0。
 
-## 未闭合门
+## WALL/STWALL 双副本闭环
 
 7997 副本的生产生成根只生成 20 个 GWALL；该副本没有 8 条历史测试专用
-WALL/STWALL `inst_relate`。因此两项测试响亮失败于“目标库没有生成几何”，没有把
-缺行当作距离通过。T046–T048 目前状态是：8009 的 WALL/STWALL 门通过、两个副本的
-GWALL 门通过，7997 的 WALL/STWALL 测试资产仍需按源属性建立后再复验。
+WALL/STWALL `inst_relate`。第一轮测试因此准确失败于“目标库没有生成几何”。没有复制
+8009 的已通过派生行，而是新增 `mesh_wall_and_stwall_from_source_attributes`：每个副本
+各自从 PE/CATA/SPINE 源属性经过生产
+`resolve_desi_comp → create_profile_geos → gen_unit_shape → tessellate_libgm_param`，再应用
+生产同款 world/instance transform 后对拍同一 RVM。
+
+该测试在 `DB_OPTION_FILE=DbOption`（8009）和
+`DB_OPTION_FILE=.scratch/DbOption-8039`（7997 副本）各执行一次，输出逐字相同：
+
+```text
+WALL gen->RVM p95 = 7.86 / 7.83 / 8.62 / 4.05 mm
+STWALL gen->RVM p95 = 0 / 0 / 0 / 0 mm
+STWALL RVM->gen p95 = 0 / 0 / 0 / 0 mm
+1 passed; 0 failed; exit 0（两个副本各一次）
+```
+
+`full_annulus_matches_two_halves_joined` 同批复验通过，360° SANN 与两个 180° 半环体积
+误差保持在 1% 内。由此 T046–T048 的两个副本门已闭合。
 
 SPHE 现场样本仍被当前 E3D 交互会话占用挡住；本次没有终止或复用该会话，T049 与最终
 发布门继续保持未完成。

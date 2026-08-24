@@ -143,8 +143,11 @@ dbnum 7324 的 SJOI。测试后 8039 已停止。证据同上。
 `mesh_gwall_extra_against_cwall_union` 均通过：20/20 双侧齐全，union gen→RVM
 p95=`4.14mm`，三件大体量 GWALL p95=`0.1/9.3/167.5mm`。默认 8009 同候选复验
 WALL/STWALL 两项均通过（WALL p95 最大 8.63mm，STWALL 双向 p95=0）。7997 副本
-不含 8 条历史测试专用 WALL/STWALL 生产关系，两项准确失败于“目标库没有生成几何”，
-未记作通过。证据：`docs/evidence/2026-08-24-occ-retire-dual-copy-rvm.md`。
+不含 8 条历史测试专用 WALL/STWALL 生产关系，首轮准确失败于“目标库没有生成几何”；
+随后用 `mesh_wall_and_stwall_from_source_attributes` 从两个副本各自的 PE/CATA/SPINE
+源属性走生产解析器，两边均通过（WALL p95=`7.86/7.83/8.62/4.05mm`，STWALL 双向
+p95 全 0）。`full_annulus_matches_two_halves_joined` 同批通过，关闭 360° SANN 1% 体积门。
+证据：`docs/evidence/2026-08-24-occ-retire-dual-copy-rvm.md`。
 
 **mesh 批次收编**：mesh 用例收进 `scripts/live-batches/mesh-verify-8009.json`（只读 8009，config=`DbOption`、features=`rvm_verify`）。2026-08-14 用 `cargo test --features rvm_verify --lib surface_distance -- --ignored --test-threads=1` 一批跑过 **4/4**（33.6s）。同日补上四份 e2e 探针的 `DiscoveredBatch.{phase,epoch_id}` 后，`cargo build --lib --tests --features rvm_verify` 已过；标准 runner `powershell -File scripts\Run-LiveBatch.ps1 -Manifest scripts\live-batches\mesh-verify-8009.json` **4/4 pass**（50.5s；报告 `output/live-batch/20260814-210048/report.json`）。扩 STWALL + C-IY 后 runner `-Only mesh_stwall_surface_distance,mesh_c_iy_full_branch` **2/2 pass**（56.9s；报告 `output/live-batch/20260814-212144/report.json`）。
 
