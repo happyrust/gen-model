@@ -4,6 +4,24 @@
 
 ### 修复
 
+- RVM mesh 对拍不再可能量到 OCC 的答案（specs/009 X1a 前半）。`mesh_compare` 的 gen 侧
+  在 `tessellate_libgm_param` 返回 `Ok(None)`（非形状）或报错时会回退 `gen_occ_shape`
+  ——正是 T037 从 `occ_generate.rs` 拆掉的那条形状回退，活在打分的那一侧。它也不是
+  休眠的：`occ` 在 default 里，`rvm_verify` 是叠加 feature，跑法与 `Run-LiveBatch.ps1`
+  都不带 `--no-default-features`，所以台账里 2026-08-14 那 8 条 mesh 对拍**全部**是带
+  `occ` 量出来的，已在台账整体标注为口径失效、按未验资产对待。分支与只服务它的
+  `gen_tol` 参数一并摘除，`gen_side_has_no_second_shape_engine` 钉住不许长回来。
+  重新取证的前置是一个带 dbnum 1112 + 8000 生成几何的库——`.surreal/ams-8009`
+  已被 3.x 写坏（fork 2.1.4 报 `format_version: 7`），2026-08-24 实测确认。
+
+- 摘掉 gen-model 里剩下的 occ 挂点（specs/009 X1a）。`occ_generate.rs` 的
+  `apply_insts_boolean_occ` / `apply_cata_neg_boolean_occ` 两个死布尔函数、它们的
+  三条 import 与全部注释调用点删除（ADR-029 布尔单轨 manifold 已一年量级）；
+  两条只在 `occ` 下编译的回归用例改挂 `manifold`：房间面板自交修复走
+  `tessellate_libgm_param`（轮廓修复在 wire 层，与后端无关）、GENSEC 直脊 SPRO 走
+  `PdmsGeoParam::PrimLoft`。CI 不带 `occ`，所以这两条此前**从未在 CI 跑过**，
+  现在两条都进 CI 且通过。`feature = "occ"` 在 gen-model 的 cfg 挂点自此归零。
+
 - 收紧当期项目扫描范围：`included_projects` 统一解释为 `project_path` 下的文件夹名，
   名单外项目不再解析或扫描；`project_dirs` 不再重定向、扩大范围，也不再在空名单时
   充当回退名单（ADR-046 / specs/027）。

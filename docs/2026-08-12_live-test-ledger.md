@@ -72,7 +72,37 @@ cargo test --lib --no-default-features --features ws,gen_model,manifold,project_
 
 **2026-08-14 AMS 1112 WALL RVM AABB**：根因是 `inst_relate` 把 `SpineArc` 局部包围盒当盒子做 8 角变换（64° 墙 X 跨度被撑到约 3 倍）。改为环扇取样后 `live_8009_refresh_cwall_rr001_wall_aabbs` 刷新 8009，Python `rvm_aabb_compare.py --fixture 1rs-wf03-w-c-rr001` **8/8 OK**（4 WALL + 4 STWALL）。
 
-**2026-08-14 AMS 1112 WALL mesh 级对拍**：`rvm_baseline::mesh_compare::mesh_wall_live::mesh_wall_surface_distance`（live 8009 + occ，跑法 `cargo test --features rvm_verify --lib mesh_wall_surface_distance -- --ignored --nocapture`；`--features rvm_verify` 已含 occ）。**2026-08-14 通过**。实测（双向采样表面距离，单位 mm）：
+> **2026-08-24 口径失效通告——下面 8 条 2026-08-14 的 mesh 级对拍记录全部作废，需要重新取证。**
+>
+> 涉及：`mesh_wall_surface_distance` / `mesh_pipe_surface_distance` /
+> `mesh_full_branch_union_surface_distance` / `mesh_stwall_surface_distance` /
+> `mesh_c_iy_full_branch_union_surface_distance` / `mesh_gwall_union_surface_distance` /
+> `mesh_gwall_extra_against_cwall_union` / `mesh_branch_union_surface_distance`，
+> 以及「mesh 批次收编」一条里的全部批次结果。
+>
+> **原因**：这些记录全部在带 `occ` 的构建里跑出。`occ` 在 default feature 集里，
+> `rvm_verify = ["dep:rvm-rs"]` 是叠加而非替换，当时的跑法
+> （`cargo test --features rvm_verify --lib …`）与 `Run-LiveBatch.ps1` 都不带
+> `--no-default-features`。而当时 `mesh_compare` 的 gen 侧在
+> `tessellate_libgm_param` 返回 `Ok(None)`（非形状）或报错时会回退
+> `gen_occ_shape`——量尺子能用被量的后端替 manifold 答题，所以这批绿分不清
+> 哪些是 manifold 画对了、哪些是 OCC 顶上来的。该回退已于 2026-08-24 拆除
+> （commit `ee8ef636`，`gen_side_has_no_second_shape_engine` 钉住不许长回来）。
+>
+> **重新取证的前置**：`.surreal/ams-8009` 已被 3.x 写坏，fork 2.1.4 打不开
+> （`Corrupt or unsupported format_version: 7 in 000180.sst`），2026-08-24 实测确认。
+> `.surreal/ams-7997-e3d-test-20260805` 不能替代——28 个 `17496_*`（1112 墙）
+> 一个都没有，45 个 `24384_*`（C-OR / C-IY）虽有 `inst_relate` 边但
+> `insts_flat` 长度为 0、`booled_id` 为 null，gen 侧无从重建。
+> 在该库上重跑 8 条得到 1 passed / 7 failed，七条红**全部是「库里没有这件的生成几何」**，
+> 不是几何对不上，不能当结论读。**在重建出带 dbnum 1112 + 8000 生成几何的库之前，
+> 这 8 条按「未验资产」对待。**
+>
+> **顺带**：那唯一的 1 passed 是 `mesh_pipe_surface_distance`——它是取证型不硬断言，
+> 构件拿不到网格就 `continue`，在一件都没量到的库上照样报绿。它自己也需要一条
+> 「什么都没量到就红」的下限。
+
+**2026-08-14 AMS 1112 WALL mesh 级对拍**：`rvm_baseline::mesh_compare::mesh_wall_live::mesh_wall_surface_distance`（live 8009 + occ；**口径失效，见上**，跑法 `cargo test --features rvm_verify --lib mesh_wall_surface_distance -- --ignored --nocapture`；`--features rvm_verify` 已含 occ）。**2026-08-14 通过**。实测（双向采样表面距离，单位 mm）：
 
 | WALL | gen→rvm mean/p95/max | rvm→gen mean/p95/max | AABB |
 |---|---|---|---|
@@ -83,7 +113,7 @@ cargo test --lib --no-default-features --features ws,gen_model,manifold,project_
 
 结论：(1) **gen 表面忠实**——WALL 1/2/3 的 gen→rvm p95 ≤ 8.1mm（仅弦误差量级），测试据此断言 `gen→rvm p95 ≤ 12mm` 作圆弧墙几何回归守卫。(2) **rvm→gen 约半墙厚（~650mm）的局部离群簇 = E3D 墙面开洞、gen 实心不开洞**。取证：4 堵 WALL 均 `has_cata_neg=false`、无负实体子（只有 SPINE + JLDATU），而 1112 里 5608 个元素靠 cata-neg 子（如 FLOOR 的 NXTR 子）正常切洞——**墙洞不是 SweepSolid 问题**，开口负实体不归墙所有，来源不在 gen 消费的已解析墙数据里（`plug_in/virtual_hole.rs` 是数据中心孔洞审批工作流，非几何切洞）。定位开口来源需 E3D 侧探针，属独立议题。(3) **WALL 4 = E3D 墙角斜接延伸，非 gen 缺陷（已证）**：径向范围与 E3D 吻合（rvm≈[16096,17400]、gen=[16100,17400]），排除厚度/半径。绕世界弧心角度跨度：rvm=[−108.31,−99.07]=9.24°，gen=[−106.90,−99.07]=7.83°——**同一末端、起点差 1.41°**。离线 `parse.element` 读 E3D 文件 SPINE 原始坐标：pt0(POINSP 105942)=(−5058.219,−16648.557)＝gen start_pt、thru(CURVE 105943)=(−3909.413,−16955.131) RADI=17400、pt1(POINSP 105944)=(−2742.352,−17182.535)，三点均在 R=17400、spine 弧 pt0→pt1=7.84°＝gen 7.83°。**gen 的墙与 PDMS spine 定义逐点吻合**；E3D 从 pt0 再延伸 1.41°（SPINE `DRNS=[1,0,0]` 驱动的墙角斜接）与 WALL 3（到 −107°）交接重叠。gen→rvm 在 WALL 4 偏大是因 gen 合法端面落在 E3D 延伸墙体内部（≈半墙厚），是 E3D 延伸的后果。WALL 2/3 的 ~52mm/0.18°、WALL 1 的 8mm 同源（延伸量随墙夹角，浅弧 WALL 4 最大）。**两处「gen 缺陷」查到底均为 E3D 侧附加几何（墙角斜接延伸 + 穿透开洞），gen 几何忠实**；是否实现 E3D 口径的墙角延伸/切洞属建模范围决策，非几何修复。
 
-**2026-08-14 AMS 8000 C-OR 管系 mesh 级对拍**：`rvm_baseline::mesh_compare::mesh_wall_live::mesh_pipe_surface_distance`（live 8009 + occ，跑法 `cargo test --features rvm_verify --lib mesh_pipe_surface_distance -- --ignored --nocapture`）。**2026-08-14 通过**（取证型，不硬断言）。gen 侧 FTUB 走 param 就地重建、BEND 走磁盘 `.mesh`（复合/布尔结果 `param=NONE`，`gen_world_mesh` 已加 param→.mesh 回退）。实测（双向表面距离 mm）：
+**2026-08-14 AMS 8000 C-OR 管系 mesh 级对拍**：`rvm_baseline::mesh_compare::mesh_wall_live::mesh_pipe_surface_distance`（live 8009 + occ；**口径失效，见上**，跑法 `cargo test --features rvm_verify --lib mesh_pipe_surface_distance -- --ignored --nocapture`）。**2026-08-14 通过**（取证型，不硬断言）。gen 侧 FTUB 走 param 就地重建、BEND 走磁盘 `.mesh`（复合/布尔结果 `param=NONE`，`gen_world_mesh` 已加 param→.mesh 回退）。实测（双向表面距离 mm）：
 
 | 构件 | gen→rvm mean/p95/max | rvm→gen mean/p95/max | 判读 |
 |---|---|---|---|
@@ -93,17 +123,17 @@ cargo test --lib --no-default-features --features ws,gen_model,manifold,project_
 
 结论：与墙相反——**BEND 是真 gen/E3D 逐元素几何差异**。`rvm→gen` 小（E3D BEND 全贴在 gen 上），`gen→rvm` 大（gen 弯头 3 子几何、1476/2220 三角，多出约 100mm）。只读根因取证：E3D BEND 1 世界 AABB=**51×54×30mm**（FacetGroup 6 面 24 顶点，z 2900–2930＝管径 ~30mm，即弯头本体）；gen 弯头单位几何 x±100、z 0..100（世界 z 2900–3000，比管径高出 70mm），world_trans 无缩放、平移与 E3D 一致。**gen 弯头按「arrive→leave」整段生成、含两端切向直管腿（各约 100mm），伸进相邻 FTUB 区**；E3D 的 RVM BEND 只是弯头本体、直段归相邻 FTUB。worst gen→rvm 点落在 FTUB 侧＝重叠的腿。**装配 union 验证（`mesh_branch_union_surface_distance`，2026-08-14 通过）判定为装配无害、非缺陷**：BEND 1 + 相邻 FTUBE 1/2 合并成 union 后，gen union vs E3D union 双向 mean=0.67 / p95=1.50 / **hausdorff=5.80mm**（gen→rvm 从逐元素 100mm 掉到 5.8mm）。gen 弯头腿伸进的相邻直管区正好被 E3D 的 FTUB 盖住，合起来几何一致——所谓「多算 100mm」只是 gen（弯头含腿）与 RVM（腿归直管）**元素边界拆分口径不同**，最终装配一致，无需改 aios-core。
 
-**2026-08-14 C-OR 整条 BRANCH 端到端 union 对拍**：`rvm_baseline::mesh_compare::mesh_wall_live::mesh_full_branch_union_surface_distance`（live 8009 + occ，跑法 `cargo test --features rvm_verify --lib mesh_full_branch -- --ignored --nocapture`）。**2026-08-14 通过**（带断言 `p95≤10 / max≤30mm`）。整条 C-OR BRANCH 9 构件（FTUBE 1–7 + BEND 1–2）合成 union：gen vs E3D 双向 **mean=0.69 / p95=1.50 / hausdorff=18.67mm**（gen→rvm max=11.7 在 BEND 2、rvm→gen max=18.67，均 tessellation 量级）。逐元素的弯头腿归属差在整条 union 里自洽抵消——**整条管路 gen 几何在装配层与 E3D 逐点吻合到 ~1.5mm(95%)**，端到端验证 gen 正确。
+**2026-08-14 C-OR 整条 BRANCH 端到端 union 对拍**：`rvm_baseline::mesh_compare::mesh_wall_live::mesh_full_branch_union_surface_distance`（live 8009 + occ；**口径失效，见上**，跑法 `cargo test --features rvm_verify --lib mesh_full_branch -- --ignored --nocapture`）。**2026-08-14 通过**（带断言 `p95≤10 / max≤30mm`）。整条 C-OR BRANCH 9 构件（FTUBE 1–7 + BEND 1–2）合成 union：gen vs E3D 双向 **mean=0.69 / p95=1.50 / hausdorff=18.67mm**（gen→rvm max=11.7 在 BEND 2、rvm→gen max=18.67，均 tessellation 量级）。逐元素的弯头腿归属差在整条 union 里自洽抵消——**整条管路 gen 几何在装配层与 E3D 逐点吻合到 ~1.5mm(95%)**，端到端验证 gen 正确。
 
-**2026-08-14 AMS 1112 STWALL mesh 级对拍**：`mesh_stwall_surface_distance`（live 8009 + occ）。**2026-08-14 通过**（双向 p95≤12mm）。4 堵直线 STWALL 均为 12 三角盒、无内环：双向 mean/p95=0、max≤0.06mm。直线 SweepSolid 与 E3D 逐点重合。
+**2026-08-14 AMS 1112 STWALL mesh 级对拍**：`mesh_stwall_surface_distance`（live 8009 + occ；**口径失效，见上**）。**2026-08-14 通过**（双向 p95≤12mm）。4 堵直线 STWALL 均为 12 三角盒、无内环：双向 mean/p95=0、max≤0.06mm。直线 SweepSolid 与 E3D 逐点重合。
 
-**2026-08-14 AMS 8000 C-IY 槽盒 BRANCH union 对拍**：`mesh_c_iy_full_branch_union_surface_distance`（live 8009 + occ，`test_data/rvm/C-IY-1R330-B.rvm`）。**2026-08-14 通过**（守卫 `gen→rvm p95≤10 / max≤30mm`）。18 FTUB + 18 BEND 中 FTUBE 6 为零长隐含直管（HEIG=0、RVM `geometries=[]`、无 `inst_relate`），两侧无表面，跳过；其余 35 构件 union：gen→rvm **mean=0.85 / p95=4.14 / max=24.93mm**（gen 贴在 E3D 里），rvm→gen mean=21.3 / p95=100 / max=111.6mm。根因：目录 `LSTU=/ACP1000-Trough/ACP1000-TUBE:100`，E3D RVM 含约 150mm 高槽体外壳（FTUBE 1 aabb z=430–580），gen 管段 z=430–480（50mm）；worst rvm→gen 全在 z=580 槽顶。与 C-OR 圆管（insu off、双向 ~1.5mm）不同，是槽盒表示范围差，不是 gen 画错。
+**2026-08-14 AMS 8000 C-IY 槽盒 BRANCH union 对拍**：`mesh_c_iy_full_branch_union_surface_distance`（live 8009 + occ；**口径失效，见上**，`test_data/rvm/C-IY-1R330-B.rvm`）。**2026-08-14 通过**（守卫 `gen→rvm p95≤10 / max≤30mm`）。18 FTUB + 18 BEND 中 FTUBE 6 为零长隐含直管（HEIG=0、RVM `geometries=[]`、无 `inst_relate`），两侧无表面，跳过；其余 35 构件 union：gen→rvm **mean=0.85 / p95=4.14 / max=24.93mm**（gen 贴在 E3D 里），rvm→gen mean=21.3 / p95=100 / max=111.6mm。根因：目录 `LSTU=/ACP1000-Trough/ACP1000-TUBE:100`，E3D RVM 含约 150mm 高槽体外壳（FTUBE 1 aabb z=430–580），gen 管段 z=430–480（50mm）；worst rvm→gen 全在 z=580 槽顶。与 C-OR 圆管（insu off、双向 ~1.5mm）不同，是槽盒表示范围差，不是 gen 画错。
 
-**2026-08-14 AMS 1112 GWALL 挤出 union 对拍**：`mesh_gwall_union_surface_distance`（live 8009 + occ，同一份 `1RS-WF03-W-C-RR001.rvm`）。**2026-08-14 通过**（盒状 ≤16 三角的 gen→rvm p95≤1mm）。20/20 两侧都有网格。11 堵盒状 GWALL 贴合（p95=0）。高面片 E3D 墙（GWALL 3/4/15/18/19，最多 908 三角）rvm→gen p95=180–378、max=450–650mm，与 WALL 开洞同量级。1:1 AABB 中心配对不可用（同簇多墙），故走 union。
+**2026-08-14 AMS 1112 GWALL 挤出 union 对拍**：`mesh_gwall_union_surface_distance`（live 8009 + occ；**口径失效，见上**，同一份 `1RS-WF03-W-C-RR001.rvm`）。**2026-08-14 通过**（盒状 ≤16 三角的 gen→rvm p95≤1mm）。20/20 两侧都有网格。11 堵盒状 GWALL 贴合（p95=0）。高面片 E3D 墙（GWALL 3/4/15/18/19，最多 908 三角）rvm→gen p95=180–378、max=450–650mm，与 WALL 开洞同量级。1:1 AABB 中心配对不可用（同簇多墙），故走 union。
 
-**2026-08-14 AMS 1112 GWALL 大体量 gen 余量根因**：`mesh_gwall_extra_against_cwall_union`（live 8009 + occ）。**2026-08-14 通过**（NXTR 计数 + 布尔后距离守卫）。生产 `query_valid_insts` 用 `booled_id` 网格，对拍原先只重建正挤出，且 `{refno}_{sesno}.mesh` 未落盘。对齐 `booled_id` 并补跑 `gen_inst_meshes`+`apply_insts_boolean_manifold` 后：`105828` gen→gwall p95=0.1/max=77.6，`105880` p95=9.3/max=105，`116569` p95=137/max=152（未布尔时为 870/786/591）。守卫：前两堵 p95≤12，116569 回归 ≤180。
+**2026-08-14 AMS 1112 GWALL 大体量 gen 余量根因**：`mesh_gwall_extra_against_cwall_union`（live 8009 + occ；**口径失效，见上**）。**2026-08-14 通过**（NXTR 计数 + 布尔后距离守卫）。生产 `query_valid_insts` 用 `booled_id` 网格，对拍原先只重建正挤出，且 `{refno}_{sesno}.mesh` 未落盘。对齐 `booled_id` 并补跑 `gen_inst_meshes`+`apply_insts_boolean_manifold` 后：`105828` gen→gwall p95=0.1/max=77.6，`105880` p95=9.3/max=105，`116569` p95=137/max=152（未布尔时为 870/786/591）。守卫：前两堵 p95≤12，116569 回归 ≤180。
 
-**mesh 批次收编**：mesh 用例收进 `scripts/live-batches/mesh-verify-8009.json`（只读 8009，config=`DbOption`、features=`rvm_verify`）。2026-08-14 用 `cargo test --features rvm_verify --lib surface_distance -- --ignored --test-threads=1` 一批跑过 **4/4**（33.6s）。同日补上四份 e2e 探针的 `DiscoveredBatch.{phase,epoch_id}` 后，`cargo build --lib --tests --features rvm_verify` 已过；标准 runner `powershell -File scripts\Run-LiveBatch.ps1 -Manifest scripts\live-batches\mesh-verify-8009.json` **4/4 pass**（50.5s；报告 `output/live-batch/20260814-210048/report.json`）。扩 STWALL + C-IY 后 runner `-Only mesh_stwall_surface_distance,mesh_c_iy_full_branch` **2/2 pass**（56.9s；报告 `output/live-batch/20260814-212144/report.json`）。
+**mesh 批次收编**（**批次结果口径失效，见上**；`Run-LiveBatch.ps1` 不带 `--no-default-features`，所以批次跑的也是带 `occ` 的构建）：mesh 用例收进 `scripts/live-batches/mesh-verify-8009.json`（只读 8009，config=`DbOption`、features=`rvm_verify`）。2026-08-14 用 `cargo test --features rvm_verify --lib surface_distance -- --ignored --test-threads=1` 一批跑过 **4/4**（33.6s）。同日补上四份 e2e 探针的 `DiscoveredBatch.{phase,epoch_id}` 后，`cargo build --lib --tests --features rvm_verify` 已过；标准 runner `powershell -File scripts\Run-LiveBatch.ps1 -Manifest scripts\live-batches\mesh-verify-8009.json` **4/4 pass**（50.5s；报告 `output/live-batch/20260814-210048/report.json`）。扩 STWALL + C-IY 后 runner `-Only mesh_stwall_surface_distance,mesh_c_iy_full_branch` **2/2 pass**（56.9s；报告 `output/live-batch/20260814-212144/report.json`）。
 
 **2026-08-14 模型实例保存合批专项**：`fast_model::shape_save::tests` 6 项与
 `fast_model::pdms_inst::tests` 15 项通过（其中 staged mem 覆盖有序 journal、两次重放
