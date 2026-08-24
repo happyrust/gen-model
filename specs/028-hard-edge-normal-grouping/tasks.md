@@ -72,9 +72,23 @@
   这一条只测到一半（工作区被 rev 分裂打断），三条待跑探针写在 plan 里。
 - [ ] T07a（从 T07 拆出）把那三条探针一次跑完：通道是拼接还是对齐、插值是不是线性、
   同位置两行属性能不能活过布尔。第三条是 Phase 2 成立与否的那一条。
-- [ ] T08（依赖 T07）硬边随属性过布尔，`manifold_to_plant_mesh` 改按属性分组。
-  交线边一律硬——这正是 libgm `normaliseStage2` / `isTangentDiscontinuity`（22.5°）的
-  落点，届时那条常量有了自己的用途，不再是「另一个平滑阈值」。
+- [x] T07b（2026-08-24，从 T08 里拆出来先反完）**交线边的定型规则已钉死。**
+  证据 `docs/evidence/2026-08-24-ida-edge-types-and-smoothing-groups.md`。
+  `GM_Edge::isVisible`（3.1 `0x10004A60`）= `type != 1 && type != 5 && type != 6`，
+  `AM_CoEdge::calcStartNormal` 的平滑组走到「可见」边就停——**硬边在 libgm 里是边上的
+  一个枚举值，不是几何量**，谁写这个值谁是权威，一共三处（图元建面写死 / 轮廓
+  `leadsSmoothlyTo` / 布尔 `normaliseStage2`）。
+  `normaliseStage2`（`0x10066E70`）：交线边 type 3 默认判硬，只有一侧有面直接 2；
+  两侧都有时 `tangTol ≤ 0`（**开关，不是阈值**）或 `isTangentDiscontinuity` 为真判 2，
+  否则留 3、收尾统一降成 1（软）。
+  `isTangentDiscontinuity`（`0x10066A40`）：法向弦长 > **0.8182**（夹角 **48.297°**）判硬，
+  `< 0.001` 判软，中间带默认硬、除非邻面旁证「曲面还在往下弯」。
+  **常量是 cos/sin 22.5°，有效阈值是 48.3°，差一倍**——文档 §6.8.3 的「固定 22.5°」
+  说的是生成常量，照着抄会把该软的缝判硬。
+- [ ] T08（依赖 T07a + T07b）硬边随属性过布尔，`manifold_to_plant_mesh` 改按属性分组。
+  **两步，不是一步**：属性行带过来的硬边只覆盖「交线默认硬」那一半，相切的缝还要按
+  `isTangentDiscontinuity` 主动合回软的，否则同轴等径圆柱相接、倒角与母面相切这类
+  地方会留亮缝（`d0088e93` 当初治的就是这个）。
 - [ ] T09（依赖 T08）门 G-7：过一次布尔的构件，未被切到的曲面法向与不过布尔时一致；
   证据进 `docs/evidence/`，live 台账同步。
 
