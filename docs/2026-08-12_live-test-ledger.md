@@ -6,7 +6,15 @@
 **没有"最近通过"记录的用例视同未验资产**——本台账是唯一事实来源，动过 live 用例或
 点亮新批次必须同步更新。
 
-**2026-08-24 AMS 8000 空 RocksDB 初始化计时（执行中）**：
+**2026-08-24 AMS 8000 空 RocksDB 初始化吞吐（最近通过）**：
+在新的独立 RocksDB `.scratch/cata-throughput/concurrent-cache-8` 上以
+`geometry_permits=8` 完整初始化，按字面完成标记停止计时，wall-clock 808.312s；
+CATA 44 页/1702 个页内唯一身份合计 453.721s，p50/p95=9.722/20.591s，较串行
+基线下降 73.1%/69.6%。最终表计数与串行基线完全一致，3555 个 mesh 路径/SHA-256
+零差异，峰值工作集增长 19.9%。证据：
+`docs/evidence/2026-08-24-cata-generation-throughput/concurrent-cache-8.md`。
+
+**2026-08-24 AMS 8000 空 RocksDB 初始化计时（历史基线）**：
 在独立 SurrealDB 2.1.4 `127.0.0.1:8169`、独立 RocksDB
 `.scratch/init-timing-8000-sql-fixed/surreal-rocksdb` 上从 `tables={}` 开始。
 DESI 8000 解析 6540 行约 2.7s，完整覆盖生成根 766 个；基线按 dbnum 分页得到 160 个
