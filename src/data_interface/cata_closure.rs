@@ -14,6 +14,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -249,6 +250,79 @@ pub fn dependency_identity_manifest_snapshot() -> Vec<DependencyIdentityFile> {
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
+}
+
+/// 为不经过 watcher discovery 的一次性初始化程序安装 CATA 依赖清单。
+///
+/// `initialize_ams_dbnums` 直接调用基线入口，没有 `IncrementManager::enqueue_discovered`
+/// 那一步；在 `watch_dbnums` 生效时若仍留空清单，locator 会正确地失败闭合。这里复用
+/// 同一项目优先级裁决，只读所有候选文件的 60 字节头，避免退回“扫描全部 DESI Ref0”
+/// 的昂贵旧行为。
+pub fn install_configured_dependency_manifests() -> anyhow::Result<(u64, u64)> {
+    let option = get_db_option();
+    let mut identities = Vec::new();
+    let mut cata_candidates = Vec::new();
+
+    for project in &option.included_projects {
+        let root = crate::data_interface::project_paths::resolve_project_root(option, project)
+            .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
+        for entry in walkdir::WalkDir::new(&root)
+            .max_depth(8)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
+            let path = entry.path();
+            if !entry.file_type().is_file()
+                || !crate::data_interface::increment_manager::is_candidate_db_file(path)
+            {
+                continue;
+            }
+            let mut header = [0_u8; 60];
+            std::fs::File::open(path)
+                .and_then(|mut file| file.read_exact(&mut header))
+                .with_context(|| format!("读取依赖数据库头失败: {}", path.display()))?;
+            let info = parse_pdms_db::parse::parse_file_basic_info(&header);
+            identities.push((
+                project.clone(),
+                info.db_no,
+                info.db_type.clone(),
+                path.to_path_buf(),
+            ));
+            if info.db_type.eq_ignore_ascii_case("CATA") {
+                cata_candidates.push(
+                    crate::data_interface::initialization_phase::CatalogueCandidate {
+                        project: project.clone(),
+                        dbnum: info.db_no,
+                        path: path.to_path_buf(),
+                    },
+                );
+            }
+        }
+    }
+
+    let selection = crate::data_interface::initialization_phase::select_catalogue_candidates(
+        cata_candidates,
+        &option.included_projects,
+        &crate::options::catalogue_project_priority(),
+    );
+    if !selection.blockers.is_empty() {
+        anyhow::bail!("CATA 依赖清单身份阻断: {}", selection.blockers.join("; "));
+    }
+    for candidate in selection.shadowed {
+        println!(
+            "[baseline-manifest] CATA dbnum={} 的 {} 副本被项目优先级遮蔽: {}",
+            candidate.dbnum,
+            candidate.project,
+            candidate.path.display()
+        );
+    }
+    let selected = selection
+        .selected
+        .into_iter()
+        .map(|candidate| (candidate.project, candidate.dbnum, candidate.path));
+    let dependency_version = install_dependency_manifest(selected);
+    let identity_version = install_dependency_identity_manifest(identities);
+    Ok((dependency_version, identity_version))
 }
 
 fn dependency_manifest_fingerprint() -> String {
@@ -1494,39 +1568,26 @@ async fn collect_database_subtree_outbound_on(
 ///
 /// A full-cover baseline already owns every active PE in `dbnum`; walking
 /// `pe_owner` one element at a time only turns the same set into thousands of
-/// database round trips. Ordered pages keep the response bounded while paying
-/// one query per page.
+/// database round trips.  Keep this as one projection query: SurrealDB 2.1 has
+/// no index covering `(dbnum, id)`, so OFFSET pages repeatedly sort/scan the
+/// complete PE table.  On AMS 7997 that old 1,000-row paging shape consumed
+/// more than ten minutes of database CPU after the rows were already durable.
+/// The projection returns only record-valued attributes, not PE payloads.
 async fn collect_database_dbnum_outbound_on(
     db: &Surreal<Any>,
     dbnum: u32,
 ) -> anyhow::Result<Vec<RefU64>> {
-    #[derive(Deserialize)]
-    struct OutboundPageRow {
-        refs: Vec<RefnoEnum>,
-    }
-
-    const PAGE_SIZE: usize = 1_000;
-    let mut offset = 0usize;
-    let mut seeds = HashSet::new();
-    loop {
-        let sql = format!(
-            "SELECT id, object::values(refno.* ?? {{}})[WHERE type::is::record($this)] AS refs \
-             FROM pe WHERE dbnum = {dbnum} AND deleted != true \
-             ORDER BY id LIMIT {PAGE_SIZE} START {offset};"
-        );
-        let mut response = db.query(sql).await?.check()?;
-        let rows = response.take::<Vec<OutboundPageRow>>(0)?;
-        let page_len = rows.len();
-        seeds.extend(
-            rows.into_iter()
-                .flat_map(|row| row.refs)
-                .map(|refno| refno.refno()),
-        );
-        if page_len < PAGE_SIZE {
-            break;
-        }
-        offset += page_len;
-    }
+    let sql = format!(
+        "SELECT VALUE object::values(refno.* ?? {{}})[WHERE type::is::record($this)] \
+         FROM pe WHERE dbnum = {dbnum} AND deleted != true;"
+    );
+    let mut response = db.query(sql).await?.check()?;
+    let rows = response.take::<Vec<Vec<RefnoEnum>>>(0)?;
+    let seeds = rows
+        .into_iter()
+        .flatten()
+        .map(|refno| refno.refno())
+        .collect::<HashSet<_>>();
     Ok(seeds.into_iter().collect())
 }
 
@@ -1961,6 +2022,12 @@ pub async fn ensure_cata_refnos_parsed(
 
     // 3. 落库：pe + ATT_{noun} 使用 CONTENT replacement；ATT_UDA 与 pe_owner
     // 都先清当前元素/owner 的旧集合再完整重写。全部语句进入同一 staging journal。
+    if crate::data_interface::staging::active_staging_writes().is_some() {
+        crate::data_interface::staging::defer_cata_invalidation(
+            crate::fast_model::cata_cache::CataInvalidation::FullAuthority,
+        )
+        .await;
+    }
     let mut parsed = 0usize;
     for (dbnum, refs) in &delta.by_dbnum {
         let mut pe_jsons: Vec<(String, String)> = Vec::new();
@@ -2823,7 +2890,7 @@ mod tests {
     }
 
     #[test]
-    fn baseline_materialized_dbnum_is_paged_and_parsed_as_one_union() {
+    fn baseline_materialized_dbnum_is_scanned_once_and_parsed_as_one_union() {
         let source = include_str!("cata_closure.rs");
         let body = source
             .split_once("pub async fn ensure_cata_parsed_for_materialized_dbnum(")
@@ -2836,7 +2903,7 @@ mod tests {
             body.matches("collect_database_dbnum_outbound_on(&SUL_DB, source_dbnum)")
                 .count(),
             1,
-            "完整基线必须按 dbnum 分页读取，不能逐 PE 走图: {body}"
+            "完整基线必须按 dbnum 一次读取，不能逐 PE 走图: {body}"
         );
         assert_eq!(
             body.matches("ensure_cata_refnos_parsed(project, &seeds)")
@@ -2851,6 +2918,23 @@ mod tests {
         assert!(
             !body.contains("run_cata_closure_pass_for_refnos"),
             "不得回读 DESI: {body}"
+        );
+
+        let collector = source
+            .split_once("async fn collect_database_dbnum_outbound_on(")
+            .expect("baseline outbound collector exists")
+            .1
+            .split_once("struct MaterializedCataRow")
+            .expect("baseline outbound collector boundary")
+            .0;
+        assert_eq!(collector.matches("db.query(sql)").count(), 1, "{collector}");
+        assert!(
+            collector.contains("SELECT VALUE object::values"),
+            "只投影引用值，不回传完整 PE: {collector}"
+        );
+        assert!(
+            !collector.contains("START") && !collector.contains("ORDER BY"),
+            "无覆盖索引时禁止 OFFSET 分页反复全表排序: {collector}"
         );
     }
 

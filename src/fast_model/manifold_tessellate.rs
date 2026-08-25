@@ -31,6 +31,68 @@ const POS_EPS: f64 = 1e-4;
 /// `tessellate_revolution` 的二维分解不成立。
 const AXIS_IN_PLANE_EPS: f32 = 1e-4;
 
+/// Returns true only for finite catalogue parameters that describe no volume.
+///
+/// E3D/libgm treats these as an absent conditional sub-shape, not as a failed
+/// model.  AMS 8000 contains both zero-sized SBOX/LCYL alternatives and
+/// zero-area SEXT/SREV profiles.  They must be removed before `inst_geo` is
+/// scheduled; otherwise the mesh worker reports a false `geom_error` for an
+/// object that E3D intentionally does not draw.
+pub(crate) fn catalogue_param_is_empty_geometry(param: &PdmsGeoParam) -> bool {
+    fn profile_has_area_potential(loops: &[Vec<glam::Vec3>]) -> bool {
+        loops.iter().any(|ring| {
+            if ring.len() < 3
+                || ring
+                    .iter()
+                    .any(|p| !p.x.is_finite() || !p.y.is_finite() || !p.z.is_finite())
+            {
+                return false;
+            }
+
+            // A non-zero FRADIUS can turn an otherwise straight raw outline
+            // into an arc with area, so leave it to the authoritative profile
+            // discretiser rather than classifying it as empty here.
+            if ring
+                .iter()
+                .any(|p| (p.z as f64).abs() >= libgm_discretise::SPAN_EPS)
+            {
+                return true;
+            }
+
+            let (mut min_x, mut max_x) = (f32::INFINITY, f32::NEG_INFINITY);
+            let (mut min_y, mut max_y) = (f32::INFINITY, f32::NEG_INFINITY);
+            for p in ring {
+                min_x = min_x.min(p.x);
+                max_x = max_x.max(p.x);
+                min_y = min_y.min(p.y);
+                max_y = max_y.max(p.y);
+            }
+            (max_x - min_x) as f64 > POS_EPS && (max_y - min_y) as f64 > POS_EPS
+        })
+    }
+
+    match param {
+        PdmsGeoParam::PrimBox(shape) => {
+            shape.size.is_finite()
+                && (shape.size.x <= f32::EPSILON
+                    || shape.size.y <= f32::EPSILON
+                    || shape.size.z <= f32::EPSILON)
+        }
+        PdmsGeoParam::PrimLCylinder(shape) => {
+            shape.pdia.is_finite()
+                && shape.pbdi.is_finite()
+                && shape.ptdi.is_finite()
+                && (shape.pdia <= f32::EPSILON || (shape.pbdi - shape.ptdi).abs() <= f32::EPSILON)
+        }
+        PdmsGeoParam::PrimExtrusion(shape) => {
+            shape.height.is_finite()
+                && (shape.height <= f32::EPSILON || !profile_has_area_potential(&shape.verts))
+        }
+        PdmsGeoParam::PrimRevolution(shape) => !profile_has_area_potential(&shape.verts),
+        _ => false,
+    }
+}
+
 /// 弦高容差的唯一来源在 `libgm_discretise`（T042）：段数规则与它喂的那个容差得住在
 /// 一起，否则「唯一一份」只是句注释。
 use crate::fast_model::libgm_discretise::FACET_TOL_MM;
@@ -1093,7 +1155,7 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             }
             let height = (p.ptdi - p.pbdi).abs();
             covered(
-                mesh_primitives::gen_pyramid(
+                mesh_primitives::gen_rvm_pyramid(
                     p.pbbt, p.pcbt, p.pbtp, p.pctp, height, p.pbof, p.pcof,
                 ),
                 "PrimLPyramid",
@@ -1140,6 +1202,74 @@ mod tests {
     #[test]
     fn unit_cylinder_is_non_empty() {
         assert_solid_mesh(&tessellate_unit_cylinder(24));
+    }
+
+    #[test]
+    fn ams8000_zero_volume_catalogue_shapes_are_absent_not_errors() {
+        let zero_box = PdmsGeoParam::PrimBox(SBox {
+            center: Vec3::ZERO,
+            size: Vec3::new(100.0, 10.0, 0.0),
+        });
+        let zero_cylinder = PdmsGeoParam::PrimLCylinder(aios_core::prim_geo::cylinder::LCylinder {
+            pdia: 0.0,
+            pbdi: 0.0,
+            ptdi: 100.0,
+            ..Default::default()
+        });
+        let line_extrusion =
+            PdmsGeoParam::PrimExtrusion(aios_core::prim_geo::extrusion::Extrusion {
+                verts: vec![vec![
+                    Vec3::new(0.0, 51.5, 0.0),
+                    Vec3::new(0.0, -51.5, 0.0),
+                    Vec3::new(0.0, -51.5, 0.0),
+                ]],
+                height: 100.0,
+                ..Default::default()
+            });
+        let line_revolution = PdmsGeoParam::PrimRevolution(Revolution {
+            verts: vec![vec![
+                Vec3::new(0.0, -1.5, 0.0),
+                Vec3::new(0.0, -1.5, 0.0),
+                Vec3::new(1.5, -1.5, 0.0),
+                Vec3::new(1.5, -1.5, 0.0),
+            ]],
+            angle: 90.0,
+            ..Default::default()
+        });
+
+        for param in [zero_box, zero_cylinder, line_extrusion, line_revolution] {
+            assert!(
+                catalogue_param_is_empty_geometry(&param),
+                "finite zero-volume catalogue geometry must be skipped: {param:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn area_bearing_and_filleted_profiles_remain_renderable() {
+        let rectangle = PdmsGeoParam::PrimExtrusion(aios_core::prim_geo::extrusion::Extrusion {
+            verts: vec![vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(10.0, 0.0, 0.0),
+                Vec3::new(10.0, 10.0, 0.0),
+                Vec3::new(0.0, 10.0, 0.0),
+            ]],
+            height: 100.0,
+            ..Default::default()
+        });
+        let filleted_line =
+            PdmsGeoParam::PrimExtrusion(aios_core::prim_geo::extrusion::Extrusion {
+                verts: vec![vec![
+                    Vec3::new(0.0, 0.0, 1.0),
+                    Vec3::new(10.0, 0.0, 1.0),
+                    Vec3::new(20.0, 0.0, 1.0),
+                ]],
+                height: 100.0,
+                ..Default::default()
+            });
+
+        assert!(!catalogue_param_is_empty_geometry(&rectangle));
+        assert!(!catalogue_param_is_empty_geometry(&filleted_line));
     }
 
     #[test]
@@ -1540,6 +1670,58 @@ mod tests {
             1.0,
             "arc wall",
         );
+    }
+
+    /// AMS `=17496/100290` is an NXTR used by FLOOR `=17496/100202`.
+    /// Its final FRAD is much longer than the adjacent edges, so the libgm
+    /// profile crosses itself.  libgm still facets that profile; our resolved
+    /// NonZero cross-section must likewise produce a manifold boolean operand.
+    #[test]
+    fn nxtr_17496_100290_extreme_fillet_is_manifold() {
+        let param = PdmsGeoParam::PrimExtrusion(aios_core::prim_geo::extrusion::Extrusion {
+            verts: vec![vec![
+                Vec3::new(0.0, 0.0, 0.0),
+                Vec3::new(1055.796, -21.948, 0.0),
+                Vec3::new(1249.776, -22.576, 194.447),
+                Vec3::new(1249.451, -410.537, 194.447),
+                Vec3::new(1055.471, -410.840, 0.0),
+                Vec3::new(-397.918, -381.812, 0.0),
+                Vec3::new(-451.826, -367.366, 0.0),
+                Vec3::new(-247.718, -140.687, 4553.950),
+                Vec3::new(-15.203, 56.747, 0.0),
+            ]],
+            height: 100.0,
+            ..Default::default()
+        });
+        let mesh = tessellate_libgm_param(&param)
+            .expect("NXTR extreme-fillet profile must tessellate")
+            .expect("PrimExtrusion is a shape");
+        assert_solid_mesh(&mesh);
+        crate::fast_model::manifold_csg::plant_mesh_to_manifold(&mesh, glam::DMat4::IDENTITY)
+            .expect("NXTR mesh must remain a valid Manifold boolean operand");
+    }
+
+    /// AMS8000 目录薄片（`inst_geo:10270882317146613457`）只有 0.001 mm 宽，
+    /// 但仍是一个有面积的三角截面。libgeom 的点重合阈值是 1e-6，不得用 FRAD 的
+    /// 0.1 门槛把它误判为空轮廓。
+    #[test]
+    fn ams8000_sub_tenth_millimetre_extrusion_remains_renderable() {
+        let param = PdmsGeoParam::PrimExtrusion(aios_core::prim_geo::extrusion::Extrusion {
+            verts: vec![vec![
+                Vec3::new(-0.007, 51.5, 0.0),
+                Vec3::new(-0.007, 50.0, 0.0),
+                Vec3::new(-0.007, 50.0, 0.0),
+                Vec3::new(-0.006, 50.0, 0.0),
+            ]],
+            height: 100.0,
+            ..Default::default()
+        });
+        let mesh = tessellate_libgm_param(&param)
+            .expect("AMS8000 thin catalogue profile must tessellate")
+            .expect("PrimExtrusion is a renderable shape");
+        assert_solid_mesh(&mesh);
+        assert!(!mesh.vertices.is_empty());
+        assert!(!mesh.indices.is_empty());
     }
 
     /// OCC 权威实现只认恰好 3 个 SPINE 点；多一个少一个都是坏数据，必须响亮失败。

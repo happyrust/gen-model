@@ -697,9 +697,10 @@ pub fn gen_circular_torus(
 
 // ─── Rectangular Torus ──────────────────────────────────────────────────────
 
-/// 矩形截面环面：矩形截面绕 Z 轴旋转 `sweep_deg` 度。
+/// 矩形截面环面：按 E3D 导出的 RVM RTorus 局部坐标约定，矩形截面绕 Y 轴旋转
+/// `sweep_deg` 度（扫掠平面为 XZ，高度沿 Y）。
 ///
-/// 截面宽 `width = r_outside - r_inside`，高 `height`，居中于 Z=0。
+/// 截面宽 `width = r_outside - r_inside`，高 `height`，居中于 Y=0。
 pub fn gen_rectangular_torus(
     r_inside: f32,
     r_outside: f32,
@@ -718,7 +719,7 @@ pub fn gen_rectangular_torus(
     let mut normals = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
-    // 矩形截面 4 个角（径向-Z 平面内，逆时针）：
+    // 矩形截面 4 个角（径向-高度平面内，逆时针）：
     // 0: (r_inside, -h2)  1: (r_outside, -h2)  2: (r_outside, h2)  3: (r_inside, h2)
     let corners = [
         (r_inside, -h2),
@@ -726,7 +727,8 @@ pub fn gen_rectangular_torus(
         (r_outside, h2),
         (r_inside, h2),
     ];
-    // 4 个侧面：底(0→1)、外(1→2)、顶(2→3)、内(3→0)；法线写在 (径向, z) 分量上
+    // 4 个侧面：底(0→1)、外(1→2)、顶(2→3)、内(3→0)；法线写在
+    // (径向, y) 分量上。
     let faces = [
         (0usize, 1usize, (0.0f32, -1.0f32)),
         (1, 2, (1.0, 0.0)),
@@ -742,10 +744,10 @@ pub fn gen_rectangular_torus(
         let base = vertices.len() as u32;
         for i in 0..ring_count {
             let (sin_phi, cos_phi) = ring_phi(i).sin_cos();
-            let n = Vec3::new(nr * cos_phi, nr * sin_phi, nz);
+            let n = Vec3::new(nr * cos_phi, nz, nr * sin_phi);
             for &k in &[e0, e1] {
-                let (cr, cz) = corners[k];
-                vertices.push(Vec3::new(cr * cos_phi, cr * sin_phi, cz));
+                let (cr, cy) = corners[k];
+                vertices.push(Vec3::new(cr * cos_phi, cy, cr * sin_phi));
                 normals.push(n);
             }
         }
@@ -755,10 +757,11 @@ pub fn gen_rectangular_torus(
             let b = a + 1;
             let c = base + next * 2;
             let d = c + 1;
+            // 从旧的 XY/+Z 约定映射到 XZ/+Y 会翻转手性，因此三角绕向也要反转。
             if ccw {
-                indices.extend_from_slice(&[a, c, b, b, c, d]);
-            } else {
                 indices.extend_from_slice(&[a, b, c, b, d, c]);
+            } else {
+                indices.extend_from_slice(&[a, c, b, b, c, d]);
             }
         }
     }
@@ -773,8 +776,8 @@ pub fn gen_rectangular_torus(
                             flip: bool| {
             let (sin_phi, cos_phi) = phi.sin_cos();
             let base = verts.len() as u32;
-            for &(cr, cz) in &corners {
-                verts.push(Vec3::new(cr * cos_phi, cr * sin_phi, cz));
+            for &(cr, cy) in &corners {
+                verts.push(Vec3::new(cr * cos_phi, cy, cr * sin_phi));
                 norms.push(normal);
             }
             if flip {
@@ -789,25 +792,18 @@ pub fn gen_rectangular_torus(
         let phi_end = ring_phi(ring_count - 1);
         let (sin_end, cos_end) = phi_end.sin_cos();
         let (n_start, n_end) = if ccw {
-            (Vec3::new(0.0, -1.0, 0.0), Vec3::new(-sin_end, cos_end, 0.0))
+            (Vec3::new(0.0, 0.0, -1.0), Vec3::new(-sin_end, 0.0, cos_end))
         } else {
-            (Vec3::new(0.0, 1.0, 0.0), Vec3::new(sin_end, -cos_end, 0.0))
+            (Vec3::new(0.0, 0.0, 1.0), Vec3::new(sin_end, 0.0, -cos_end))
         };
-        add_rect_cap(
-            &mut vertices,
-            &mut normals,
-            &mut indices,
-            0.0,
-            n_start,
-            !ccw,
-        );
+        add_rect_cap(&mut vertices, &mut normals, &mut indices, 0.0, n_start, ccw);
         add_rect_cap(
             &mut vertices,
             &mut normals,
             &mut indices,
             phi_end,
             n_end,
-            ccw,
+            !ccw,
         );
     }
 
@@ -898,6 +894,76 @@ pub fn gen_pyramid(
     }
     push_face(&[b[0], b[3], b[2], b[1]]);
     push_face(&[t[0], t[1], t[2], t[3]]);
+
+    let aabb = compute_aabb(&vertices);
+    PlantMesh {
+        vertices,
+        normals,
+        indices,
+        wire_vertices: vec![],
+        aabb,
+    }
+}
+
+/// RVM/libgm CATA 棱台：轴向沿 Y，形体中心位于原点，矩形宽度沿 X/Z。
+///
+/// `xoff`/`zoff` 是顶面中心相对底面中心的完整偏移，因此底面中心为
+/// `-offset/2`，顶面中心为 `+offset/2`。这与 libgm 2.10/3.1
+/// `GM_Pyramid::calcFacets` 的顶点公式一致；CATA 关系变换已经放在上下端面的轴向中点，
+/// 这里再次从 Y=0 起步会把整个实体错移半高、并把偏移错移半量。
+pub fn gen_rvm_pyramid(
+    xbot: f32,
+    zbot: f32,
+    xtop: f32,
+    ztop: f32,
+    height: f32,
+    xoff: f32,
+    zoff: f32,
+) -> PlantMesh {
+    let snap = |v: f32| if v < DEGENERATE_EDGE { 0.0 } else { v };
+    let bx = snap(xbot / 2.0);
+    let bz = snap(zbot / 2.0);
+    let tx = snap(xtop / 2.0);
+    let tz = snap(ztop / 2.0);
+    let half_height = height / 2.0;
+    let half_xoff = xoff / 2.0;
+    let half_zoff = zoff / 2.0;
+    let b = [
+        Vec3::new(-half_xoff - bx, -half_height, -half_zoff - bz),
+        Vec3::new(-half_xoff + bx, -half_height, -half_zoff - bz),
+        Vec3::new(-half_xoff + bx, -half_height, -half_zoff + bz),
+        Vec3::new(-half_xoff - bx, -half_height, -half_zoff + bz),
+    ];
+    let t = [
+        Vec3::new(half_xoff - tx, half_height, half_zoff - tz),
+        Vec3::new(half_xoff + tx, half_height, half_zoff - tz),
+        Vec3::new(half_xoff + tx, half_height, half_zoff + tz),
+        Vec3::new(half_xoff - tx, half_height, half_zoff + tz),
+    ];
+
+    let mut vertices = Vec::new();
+    let mut normals = Vec::new();
+    let mut indices = Vec::new();
+    let mut push_face = |quad: [Vec3; 4]| {
+        for triangle in [[0usize, 1usize, 2usize], [0, 2, 3]] {
+            let [i0, i1, i2] = triangle;
+            let normal = (quad[i1] - quad[i0]).cross(quad[i2] - quad[i0]);
+            if normal.length() <= TRI_AREA_EPS {
+                continue;
+            }
+            let base = vertices.len() as u32;
+            vertices.extend_from_slice(&[quad[i0], quad[i1], quad[i2]]);
+            normals.extend_from_slice(&[normal.normalize(); 3]);
+            indices.extend_from_slice(&[base, base + 1, base + 2]);
+        }
+    };
+
+    push_face([b[0], b[1], b[2], b[3]]);
+    push_face([t[0], t[3], t[2], t[1]]);
+    push_face([b[1], b[0], t[0], t[1]]);
+    push_face([b[3], b[2], t[2], t[3]]);
+    push_face([b[2], b[1], t[1], t[2]]);
+    push_face([b[0], b[3], t[3], t[0]]);
 
     let aabb = compute_aabb(&vertices);
     PlantMesh {
@@ -1347,8 +1413,8 @@ mod tests {
         assert_solid_mesh(&mesh, "rtorus full");
         assert_bounds(
             &mesh,
-            Vec3::new(-4.0, -4.0, -0.75),
-            Vec3::new(4.0, 4.0, 0.75),
+            Vec3::new(-4.0, -0.75, -4.0),
+            Vec3::new(4.0, 0.75, 4.0),
             "rtorus full",
         );
         let exact = PI * (rout * rout - rins * rins) * h;
@@ -1362,8 +1428,8 @@ mod tests {
         assert_solid_mesh(&mesh, "rtorus quarter");
         assert_bounds(
             &mesh,
-            Vec3::new(0.0, 0.0, -0.75),
-            Vec3::new(4.0, 4.0, 0.75),
+            Vec3::new(0.0, -0.75, 0.0),
+            Vec3::new(4.0, 0.75, 4.0),
             "rtorus quarter",
         );
         let exact = PI * (rout * rout - rins * rins) * h / 4.0;
@@ -1376,11 +1442,126 @@ mod tests {
         assert_solid_mesh(&mesh, "rtorus negative sweep");
         assert_bounds(
             &mesh,
-            Vec3::new(0.0, -4.0, -0.75),
-            Vec3::new(4.0, 0.0, 0.75),
+            Vec3::new(0.0, -0.75, -4.0),
+            Vec3::new(4.0, 0.75, 0.0),
             "rtorus negative sweep",
         );
         assert_volume(&mesh, PI * 12.0 * 1.5 / 4.0, 0.02, "rtorus negative sweep");
+    }
+
+    #[test]
+    fn rectangular_torus_uses_rvm_xz_sweep_and_y_height_axes() {
+        let mesh = gen_rectangular_torus(100.0, 1100.0, 800.0, 9.5, 8);
+        assert_solid_mesh(&mesh, "rtorus RVM axes");
+        assert_bounds(
+            &mesh,
+            Vec3::new(98.629, -400.0, 0.0),
+            Vec3::new(1100.0, 400.0, 181.552),
+            "rtorus RVM axes",
+        );
+    }
+
+    #[test]
+    fn rectangular_torus_matches_7997_bend_world_bounds() {
+        use aios_core::prim_geo::rtorus::RTorus;
+        use aios_core::shape::pdms_shape::BrepShapeTrait;
+        use glam::{Mat4, Quat};
+
+        let torus = RTorus {
+            rins: 0.091,
+            rout: 1100.0273,
+            height: 800.0,
+            angle: 9.5,
+            ..Default::default()
+        };
+        let mesh = gen_rectangular_torus(torus.rins, 1.0, 1.0, torus.angle, 8);
+        let unit = torus.get_trans();
+        let cata = Mat4::from_scale_rotation_translation(
+            unit.scale,
+            Quat::from_xyzw(-0.05855423, 0.70467824, -0.70467824, -0.05855423),
+            Vec3::new(600.02734, 0.0, -49.86105),
+        );
+        let world = Mat4::from_scale_rotation_translation(
+            Vec3::new(0.99999994, 1.0, 0.99999994),
+            Quat::from_xyzw(0.33196658, 0.62433827, 0.62433827, 0.33196658),
+            Vec3::new(5593.5903, 4146.371, -2280.0),
+        );
+        let vertices = mesh
+            .vertices
+            .iter()
+            .map(|point| (world * cata).transform_point3(*point))
+            .collect::<Vec<_>>();
+        let transformed = PlantMesh {
+            aabb: compute_aabb(&vertices),
+            vertices,
+            normals: mesh.normals,
+            indices: mesh.indices,
+            wire_vertices: mesh.wire_vertices,
+        };
+
+        assert_bounds_tol(
+            &transformed,
+            Vec3::new(4994.4839, 3542.6607, -2461.5524),
+            Vec3::new(6264.0820, 4819.7136, -2280.0),
+            0.1,
+            "7997 BEND 24381/100818 RTorus",
+        );
+    }
+
+    #[test]
+    fn rvm_pyramid_matches_7997_bend_world_bounds() {
+        use glam::{Mat4, Quat};
+
+        let mesh = gen_rvm_pyramid(1000.0, 800.0, 1000.0, 800.0, 50.0, 0.0, 0.0);
+        assert_solid_mesh(&mesh, "RVM pyramid");
+        assert_bounds(
+            &mesh,
+            Vec3::new(-500.0, -25.0, -400.0),
+            Vec3::new(500.0, 25.0, 400.0),
+            "RVM pyramid axes",
+        );
+        let cata = Mat4::from_scale_rotation_translation(
+            Vec3::ONE,
+            Quat::from_xyzw(0.082808204, 0.0, 0.9965656, 0.0),
+            Vec3::new(12.35519, 0.0, 73.82914),
+        );
+        let world = Mat4::from_scale_rotation_translation(
+            Vec3::new(0.99999994, 1.0, 0.99999994),
+            Quat::from_xyzw(0.33196658, 0.62433827, 0.62433827, 0.33196658),
+            Vec3::new(5593.5903, 4146.371, -2280.0),
+        );
+        let vertices = mesh
+            .vertices
+            .iter()
+            .map(|point| (world * cata).transform_point3(*point))
+            .collect::<Vec<_>>();
+        let transformed = PlantMesh {
+            aabb: compute_aabb(&vertices),
+            vertices,
+            normals: mesh.normals,
+            indices: mesh.indices,
+            wire_vertices: mesh.wire_vertices,
+        };
+
+        assert_bounds_tol(
+            &transformed,
+            Vec3::new(5013.5622, 3559.8698, -2305.0),
+            Vec3::new(6282.2161, 4835.9280, -2255.0),
+            0.1,
+            "7997 BEND 24381/100818 LPyramid",
+        );
+    }
+
+    #[test]
+    fn rvm_pyramid_splits_7997_ofst_offset_about_the_cata_midpoint() {
+        let mesh = gen_rvm_pyramid(1000.0, 800.0, 1000.0, 800.0, 450.0, 0.0, 205.0);
+        assert_solid_mesh(&mesh, "7997 OFST 24381/100860 RVM pyramid");
+        assert_bounds(
+            &mesh,
+            Vec3::new(-500.0, -225.0, -502.5),
+            Vec3::new(500.0, 225.0, 502.5),
+            "7997 OFST centered offset",
+        );
     }
 
     #[test]

@@ -51,6 +51,8 @@ pub(crate) const PRIMITIVE: &str = "primitive";
 pub(crate) const MESH: &str = "mesh";
 /// 持久模型工作单已隔离到单个生成根，但该根仍无法完成生成。
 pub(crate) const GENERATION_ROOT: &str = "generation_root";
+/// CATA instance generation failed after the catalogue identity was resolved.
+pub(crate) const CATA_GENERATION: &str = "cata_generation";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GeometryFailurePolicy {
@@ -310,6 +312,56 @@ pub(crate) async fn clear_mesh_failure(geom: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn render_prune_orphan_mesh_failures() -> &'static str {
+    "BEGIN TRANSACTION;\
+     DELETE inst_geo WHERE bad = true AND count(<-geo_relate) = 0;\
+     DELETE geom_error WHERE kind = 'mesh' AND \
+       !record::exists(type::thing('inst_geo', target));\
+     COMMIT TRANSACTION;"
+}
+
+/// Collect failed unit geometries only after targeted replacement detached
+/// their final `geo_relate` edge. Referenced failures remain observable.
+pub(crate) async fn prune_orphan_mesh_failures() -> anyhow::Result<()> {
+    SUL_DB
+        .query(render_prune_orphan_mesh_failures())
+        .await?
+        .check()?;
+    // Entries deleted above may still be present in the process-local ledger
+    // cache. Reseed from the authoritative table on the next operation.
+    *known() = None;
+    Ok(())
+}
+
+/// A CATA instance completed in the current generation pass. Remove only its
+/// CATA diagnostic row; mesh/boolean/root failures for the same target remain.
+pub(crate) async fn clear_cata_generation_failures(targets: &[String]) -> anyhow::Result<()> {
+    seed().await?;
+    let keys = targets
+        .iter()
+        .filter(|target| {
+            known()
+                .as_ref()
+                .is_some_and(|set| set.contains(&known_key(CATA_GENERATION, target)))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if keys.is_empty() {
+        return Ok(());
+    }
+    let sql = keys
+        .iter()
+        .map(|target| render_clear_kind(CATA_GENERATION, target))
+        .collect::<String>();
+    SUL_DB.query(sql).await?.check()?;
+    if let Some(set) = known().as_mut() {
+        for target in keys {
+            set.remove(&known_key(CATA_GENERATION, &target));
+        }
+    }
+    Ok(())
+}
+
 /// 这个元素这一轮布尔做成了：销账。没在册的目标一个 DELETE 都不发。
 pub(crate) async fn note_success(target: &str) {
     if let Err(error) = seed().await {
@@ -476,6 +528,24 @@ mod tests {
         assert_eq!(
             render_clear_kind(MESH, "17028233407315457148"),
             "DELETE geom_error:['mesh', '17028233407315457148'];"
+        );
+    }
+
+    #[test]
+    fn orphan_mesh_cleanup_is_reference_guarded_and_atomic() {
+        let sql = render_prune_orphan_mesh_failures();
+        assert!(sql.starts_with("BEGIN TRANSACTION;"));
+        assert!(sql.contains("bad = true AND count(<-geo_relate) = 0"));
+        assert!(sql.contains("kind = 'mesh'"));
+        assert!(sql.contains("!record::exists(type::thing('inst_geo', target))"));
+        assert!(sql.ends_with("COMMIT TRANSACTION;"));
+    }
+
+    #[test]
+    fn cata_success_only_clears_the_cata_error() {
+        assert_eq!(
+            render_clear_kind(CATA_GENERATION, "24384_22403"),
+            "DELETE geom_error:['cata_generation', '24384_22403'];"
         );
     }
 

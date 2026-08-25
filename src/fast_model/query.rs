@@ -5,14 +5,26 @@ use aios_core::{RefU64, RefnoEnum};
 use std::str::FromStr;
 
 pub async fn query_gm_params(refno: RefnoEnum) -> anyhow::Result<Vec<GmParam>> {
+    query_gm_params_with_dependencies(refno)
+        .await
+        .map(|(params, _)| params)
+}
+
+/// Resolve a geometry set while retaining every catalogue node actually read.
+pub async fn query_gm_params_with_dependencies(
+    refno: RefnoEnum,
+) -> anyhow::Result<(Vec<GmParam>, Vec<RefnoEnum>)> {
     let mut gms = vec![];
     let mut children = vec![];
+    let mut dependencies = vec![refno];
     for c in aios_core::get_children_named_attmaps(refno).await? {
+        dependencies.push(c.get_refno_or_default());
         if TOTAL_CATA_GEO_NOUN_NAMES.contains(&c.get_type_str()) {
             children.push(c.clone());
         }
         //有可能嵌套负实体
         for cc in aios_core::get_children_named_attmaps(c.get_refno_or_default()).await? {
+            dependencies.push(cc.get_refno_or_default());
             if TOTAL_CATA_GEO_NOUN_NAMES.contains(&cc.get_type_str()) {
                 children.push(cc);
             }
@@ -27,12 +39,15 @@ pub async fn query_gm_params(refno: RefnoEnum) -> anyhow::Result<Vec<GmParam>> {
             continue;
         }
         let is_spro = geo_am.get_type_str() == "SPRO"; //todo add other types
-        let geom = query_gm_param(&geo_am, is_spro).await.unwrap_or_default();
+        let (geom, nested_dependencies) = query_gm_param(&geo_am, is_spro).await?;
+        dependencies.extend(nested_dependencies);
         // dbg!(&geom);
 
         gms.push(geom);
     }
-    Ok(gms)
+    dependencies.sort_unstable();
+    dependencies.dedup();
+    Ok((gms, dependencies))
 }
 
 #[inline]

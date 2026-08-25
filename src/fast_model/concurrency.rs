@@ -17,6 +17,10 @@ fn gate() -> &'static Semaphore {
     GATE.get_or_init(|| Semaphore::new(permits()))
 }
 
+pub fn is_geometry_task() -> bool {
+    NESTED.try_with(|_| ()).is_ok()
+}
+
 pub fn fan_out_width(work_items: usize) -> usize {
     fan_out_width_at(permits(), work_items)
 }
@@ -30,6 +34,20 @@ where
     F: std::future::Future<Output = T>,
 {
     run_geometry_on(gate(), future).await
+}
+
+/// Enter the process geometry budget unless the current task already owns a
+/// permit. Shared single-flight loaders use this to avoid a second semaphore
+/// and to remain safe when an on-demand miss originates inside geometry work.
+pub async fn run_geometry_shared<F, T>(future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    if NESTED.try_with(|_| ()).is_ok() {
+        future.await
+    } else {
+        run_geometry(future).await
+    }
 }
 
 async fn run_geometry_on<F, T>(gate: &Semaphore, future: F) -> T

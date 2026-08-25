@@ -1285,10 +1285,23 @@ impl IncrementPipeline {
         // 生成根级失效（ADR-010 残余关闭）：`QUERY_DEEP_CHILDREN_REFNOS` 按子树根
         // 为键，「变更元素 + 属主」的失效集够不着深层后代之上的高层根，同根下一次
         // 重生成会拿旧成员表静默漏算。计划层刚算出生成根，失效按根补齐；暂存路径
-        // 同一份集合随提交 / 废弃时机清（`commit_registered_to` / `drop_database`）。
+        // 同一份集合只在 `commit_registered_to` 成功后清；废弃窗口从未发布，
+        // `drop_database` 只销毁 staging，不能扰动 committed cache。
         cache_refnos.extend(model_plan.regen_root_refnos());
         warnings.extend(model_plan.warnings.iter().cloned());
         let staged = crate::data_interface::staging::active_staging_writes();
+        if db_type == "CATA"
+            && let Some(context) = staged.as_ref()
+        {
+            // A parsed CATA window may replace relation endpoints that are not
+            // present in cache_refnos. Until the dependency delta proves both
+            // endpoints, fail closed to a full authority publication.
+            context
+                .defer_cata_invalidation(
+                    crate::fast_model::cata_cache::CataInvalidation::FullAuthority,
+                )
+                .await;
+        }
         let staged_cache_refnos = staged
             .is_some()
             .then(|| cache_refnos.iter().copied().collect::<Vec<_>>());
@@ -1333,6 +1346,17 @@ impl IncrementPipeline {
                 "IncrementPipeline: invalidated {invalidated} PE/attribute cache entries \
                  and world-transform caches"
             );
+        }
+        if staged.is_none() && db_type == "CATA" {
+            // The emergency direct path is not an atomic staging commit: an
+            // earlier statement may have landed even when a later one fails.
+            // Therefore its authority must be fenced after every attempt.
+            crate::fast_model::cata_cache::global_cache()
+                .publish_invalidation(
+                    crate::fast_model::cata_cache::current_authority(),
+                    crate::fast_model::cata_cache::CataInvalidation::FullAuthority,
+                )
+                .await;
         }
         persist_result?;
 

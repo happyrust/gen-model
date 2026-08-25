@@ -12,7 +12,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 
 /// 快照文件格式版本。结构不兼容时递增，compare 侧据此拒绝旧快照。
-pub const SNAPSHOT_VERSION: u32 = 1;
+pub const SNAPSHOT_VERSION: u32 = 2;
 
 /// 基准 RVM 是按哪种口径导出的。
 ///
@@ -79,8 +79,7 @@ pub struct SnapshotMeta {
     /// 注意它只在**成员**粒度上有效：预留净空这类图元是寄生在真实构件内部的，
     /// 与实体几何同为 `Primitive`，靠这个分桶筛不掉，只能靠 `export_scope`。
     pub geo_type_counts: BTreeMap<String, usize>,
-    /// bbox_world 退化为一个点的几何数。rvm-rs 对部分带 transform 的原语
-    /// 会解出全零矩阵，这类包围盒不能用于空间对拍，只能记账。
+    /// 重新三角化后仍没有有效世界包围盒的几何数。
     pub degenerate_bbox_count: usize,
 }
 
@@ -107,7 +106,7 @@ pub struct RvmMember {
     /// CNTB 给出的世界平移（mm）。注意 E3D 导出的是绝对世界坐标，
     /// 不是相对父级的增量，逐级累加会把坐标乘上嵌套深度。
     pub translation_mm: [f32; 3],
-    /// 本组全部几何 bbox_world 的并集（mm），全退化时为 None。
+    /// 本组全部可渲染几何按 `geometry.transform` 变换后的包围盒并集（mm）。
     pub aabb_world_mm: Option<[f64; 6]>,
     /// ATT 属性（若提供了 .att 文件）。
     pub attrs: Option<serde_json::Value>,
@@ -126,7 +125,7 @@ pub struct RvmGeometry {
     /// 列主序 3x3 + 平移（mm）。
     pub transform: serde_json::Value,
     pub bbox_world_mm: Option<[f64; 6]>,
-    /// bbox 退化成一个点（零矩阵导致）时为 true，空间对拍需跳过。
+    /// 三角化后没有有效世界顶点时为 true，空间对拍需跳过。
     pub bbox_degenerate: bool,
     /// 颜色/透明度等非几何属性，保留供报告展示。
     pub extra: serde_json::Value,

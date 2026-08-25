@@ -19,8 +19,9 @@ use super::snapshot::{
     ExportScope, RvmGeometry, RvmMember, RvmSnapshot, SNAPSHOT_VERSION, SnapshotMeta,
 };
 
-/// rvm-rs 把**几何**坐标（bbox_world、geometry.transform.translation）换算成米，
-/// E3D world 与生成侧都是毫米，所以这两处要乘回去。
+/// rvm-rs 把几何坐标与 `geometry.transform.translation` 存成米，快照统一转回毫米。
+/// `Geometry::bbox_world` 对带旋转的 FacetGroup 使用了不同的矩阵约定，不能作为
+/// 空间基准；import 按与 OBJ/mesh 对拍相同的列主序变换重新计算世界包围盒。
 ///
 /// 唯一的例外是 `group.translation`（CNTB 记录）：RVM 原生就是毫米，rvm-rs 原样
 /// 透传，**不要**再乘——已用真实快照核对过（translation 与 aabb_world_mm 同量级，
@@ -291,23 +292,8 @@ impl Builder {
         let geo_type = geo_type_name(geometry.geo_type).to_string();
         *self.geo_type_counts.entry(geo_type.clone()).or_insert(0) += 1;
 
-        let bbox = geometry.bbox_world;
-        let (bbox_world_mm, degenerate) = if bbox.is_valid() {
-            let scaled = [
-                bbox.min.x as f64 * M_TO_MM,
-                bbox.min.y as f64 * M_TO_MM,
-                bbox.min.z as f64 * M_TO_MM,
-                bbox.max.x as f64 * M_TO_MM,
-                bbox.max.y as f64 * M_TO_MM,
-                bbox.max.z as f64 * M_TO_MM,
-            ];
-            let degenerate = (scaled[3] - scaled[0]).abs() < 1e-6
-                && (scaled[4] - scaled[1]).abs() < 1e-6
-                && (scaled[5] - scaled[2]).abs() < 1e-6;
-            (Some(scaled), degenerate)
-        } else {
-            (None, true)
-        };
+        let bbox_world_mm = geometry_world_bbox_mm(geometry);
+        let degenerate = bbox_world_mm.is_none();
         if degenerate {
             self.degenerate_bbox_count += 1;
         }
@@ -340,6 +326,81 @@ impl Builder {
                 "sample_start_angle": geometry.sample_start_angle,
             }),
         }
+    }
+}
+
+fn transformed_vertices_bbox_mm(vertices: &[f32], cols: &[f32; 12]) -> Option<[f64; 6]> {
+    let mut min = [f64::INFINITY; 3];
+    let mut max = [f64::NEG_INFINITY; 3];
+    let mut count = 0usize;
+    for vertex in vertices.chunks_exact(3) {
+        let world = [
+            (cols[0] * vertex[0] + cols[3] * vertex[1] + cols[6] * vertex[2] + cols[9]) as f64
+                * M_TO_MM,
+            (cols[1] * vertex[0] + cols[4] * vertex[1] + cols[7] * vertex[2] + cols[10]) as f64
+                * M_TO_MM,
+            (cols[2] * vertex[0] + cols[5] * vertex[1] + cols[8] * vertex[2] + cols[11]) as f64
+                * M_TO_MM,
+        ];
+        if !world.iter().all(|value| value.is_finite()) {
+            continue;
+        }
+        count += 1;
+        for axis in 0..3 {
+            min[axis] = min[axis].min(world[axis]);
+            max[axis] = max[axis].max(world[axis]);
+        }
+    }
+    (count > 0).then_some([min[0], min[1], min[2], max[0], max[1], max[2]])
+}
+
+fn geometry_world_bbox_mm(geometry: &Geometry) -> Option<[f64; 6]> {
+    use rvm_rs::export::Tessellate;
+    use rvm_rs::export::tessellator::get_scale;
+
+    let scale = get_scale(&geometry.transform.matrix3.into());
+    let tri = match &geometry.kind {
+        GeometryKind::FacetGroup(value) => value.tessellate(1.0e-3, scale),
+        GeometryKind::Cylinder(value) => value.tessellate(1.0e-3, scale),
+        GeometryKind::Sphere(value) => value.tessellate(1.0e-3, scale),
+        GeometryKind::Box(value) => value.tessellate(1.0e-3, scale),
+        GeometryKind::Pyramid(value) => value.tessellate(1.0e-3, scale),
+        GeometryKind::CircularTorus(value) => value.tessellate(1.0e-3, scale),
+        GeometryKind::RectangularTorus(value) => value.tessellate(1.0e-3, scale),
+        GeometryKind::EllipticalDish(value) => value.tessellate(1.0e-3, scale),
+        GeometryKind::SphericalDish(value) => value.tessellate(1.0e-3, scale),
+        GeometryKind::Snout(value) => value.tessellate(1.0e-3, scale),
+        GeometryKind::Line(_) => return None,
+    };
+    transformed_vertices_bbox_mm(&tri.vertices, &geometry.transform.to_cols_array())
+}
+
+#[cfg(test)]
+mod bbox_tests {
+    use super::transformed_vertices_bbox_mm;
+
+    #[test]
+    fn rotated_ftub_uses_rvm_column_major_transform_for_world_bbox() {
+        let vertices = [0.0, -151.5, 0.0, 1800.0, 151.5, 90.0];
+        let cols = [
+            0.0,
+            0.0,
+            0.001,
+            -0.0005,
+            -0.0008660254,
+            0.0,
+            0.0008660254,
+            -0.0005,
+            0.0,
+            21.3047,
+            -8.38021,
+            0.1,
+        ];
+        let bbox = transformed_vertices_bbox_mm(&vertices, &cols).unwrap();
+        assert!((bbox[2] - 100.0).abs() < 0.01, "{bbox:?}");
+        assert!((bbox[5] - 1900.0).abs() < 0.01, "{bbox:?}");
+        assert!(bbox[3] - bbox[0] < 250.0, "{bbox:?}");
+        assert!(bbox[4] - bbox[1] < 350.0, "{bbox:?}");
     }
 }
 

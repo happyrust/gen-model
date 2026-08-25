@@ -161,7 +161,10 @@ fn render_children_select(refnos: &[String]) -> String {
     format!("SELECT type::string(in) AS refno FROM {owners};")
 }
 
-async fn load_subtree_refnos(db: &Surreal<Any>, root_refno: &str) -> Result<Vec<String>> {
+pub(crate) async fn load_subtree_refnos(
+    db: &Surreal<Any>,
+    root_refno: &str,
+) -> Result<Vec<String>> {
     let root_refno = canonical_refno(root_refno)?;
     let mut all = HashSet::from([root_refno.clone()]);
     let mut frontier = vec![root_refno];

@@ -1,5 +1,43 @@
 # 变更记录
 
+## 2026-08-25
+
+### 修复
+
+- 修复 AMS8000 的 Plant UI 验收启动可能仍读取 UI 工作目录中 8009 配置的问题；新增
+  `Start-PlantUiAms8000.ps1`，固定使用 `.sites/8000` 的 RocksDB 配置、mesh 目录、
+  无旧项目配置的资产根及隔离设置文件。全量验收脚本默认端口同步改为 8000，并在报告中
+  记录实际 mesh 目录和文件数。
+- 修复同一 CATA hash 下只预取首个设计实例上下文的问题：分页预取现在覆盖组内全部
+  `refno`，AMS 8000 的 `/1RX03-EQUI` 定向重生成由 2904 个实例、165 个
+  `context_prefetch missing` 收敛为 3911 个实例、0 个上下文错误。
+- 将目录中的零体积 SBOX/LCYL、零面积 SEXT/SREV 识别为“无可渲染几何”，不再生成
+  注定失败的 `.mesh`；同时以引用保护的原子事务清理无 `geo_relate` 入边的历史坏网格和
+  对应 `geom_error`。保留带圆角或真实截面积的轮廓，避免误删有效几何。
+
+### 新增
+
+- 新增 `scripts/Verify-Ams8000LoadDisplay.ps1` 全库验收门：直接检查 8000 生成根终态与
+  元素覆盖、实例 AABB/世界变换，并从 RocksDB 动态枚举全部 SITE 后调用 Plant UI 的
+  真实模型查询和 mesh 加载路径逐一验证；完成判据不依赖轮询意义上的 `pending=0`。
+  验收同时要求 `生成根覆盖元素 + SITE/ZONE/PIPE/HVAC 层级容器 = 全部 PE`。无 AABB
+  的关系必须全部是
+  `ATTA` 数据节点，坏 mesh 必须与 `geom_error(kind='mesh')` 双向一致，出现未知错误类型
+  或未收口的坏 mesh 即令验收失败。AMS8000 空 RocksDB 实测 771/771 生成根终态、
+  6541/6541 元素完成；验收按 dbnum 动态覆盖 Ref0 24384 与 32576，共 2824 个模型记录、
+  9044 个网格实例，三个 SITE 的全部唯一 mesh 均可反序列化并转换。
+
+- `rvm_verify mesh-compare` 支持按显式 `RVM group=refno` 批量对拍生产网格，输出双向
+  表面距离、最远采样点、三角形数量、布尔状态与缺失网格诊断的 JSON 报告；命令现在强制传入
+  `--mesh-dir` 并把规范化目录写入报告，避免共享 SurrealDB 配合不同工作树的相对
+  `assets/meshes` 时把跨目录网格误判为不存在。AMS 1112 同一 CFLOOR 下 13 个 FLOOR
+  已完成显式资产根复核：FLOOR 11 的半径 3345 旧 NCYL 已迁到 caliber 184，最大偏差
+  从 15.85 mm 降到 9.29 mm；FLOOR 12 的 RTorus 缺文件与 `bad_bool` 已重生闭合。
+  FLOOR 1--6 通过 1/2 mm 模型目标门；比对器现将 E3D RVM 的约 10 mm 导出面片精度
+  作为显式基准误差预算，报告同时保留模型目标、RVM 预算、有效阈值和原始距离。
+  当前有效 p95/最大值门为 11/42 mm，13/13 FLOOR 通过；将 RVM 预算设为 0 可恢复
+  原 1/2 mm 严格门。
+
 ## 2026-08-24
 
 ### 修复
@@ -10,11 +48,13 @@
   无 owner 边的全局 TUBI/BOXI 单位网格调度，`2.mesh` 生成后同区显示 1996 个元素、
   4879 个网格实例且 ERROR 0。
 
-- CATA 初始化模型生成增加两级快照缓存：页面批量读取设计属性、CATR、世界变换与
-  表达式上下文，解析后的 `ScomInfo` 再按 SCOM 身份跨页复用；任一数据库变更会整体
-  失效解析缓存，避免 GMRE/GSTR/NGMR 子节点变化后读到旧几何。空 RocksDB 8000 完整
-  初始化从串行基线 1875.9s 降至 808.3s，CATA 页 p50/p95 分别下降 73.1%/69.6%，
-  3555 个 mesh 的路径和 SHA-256 全量一致。
+- CATA 初始化模型生成增加 committed authority 常驻缓存：页面批量读取设计属性、CATR、
+  世界变换与表达式上下文，静态 SCOM 以 `Arc<ScomInfo>`、single-flight 和 publication
+  epoch 跨页复用；staging 读强制绕过，提交失败与窗口丢弃不推进代次。缓存按 32 MiB/
+  16,384 条有界，记录实际目录依赖并支持精确失效；关系端点不完整时显式 full fallback。
+  旧 `SCOM_INFO_MAP` 与 SCOM redb 接线已删除，容量设为 0 可回到 RocksDB + 页内缓存。
+  三组独立空 RocksDB 的 cache-off/on 中位数为 791.511/810.796s，退化 2.436%（低于
+  3% 门），通过 848.728s 硬门；六轮规范化表与 3556 个 mesh 的路径/SHA-256 完全一致。
 
 - 修复空 RocksDB 初始化 8000 时 CATA 准备退化为“766 个生成根逐根重读 DESI/CATA”及
   已物化子树逐 PE 查询的问题。基线现以 `fn::sync_gen_roots` 的 766 个完整覆盖根建工作单，

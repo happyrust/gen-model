@@ -65,6 +65,18 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub geometry_permits: Option<usize>,
 
+    /// committed SCOM 常驻缓存总字节上限；0 关闭常驻准入。
+    #[serde(default)]
+    pub cata_cache_max_bytes: Option<u64>,
+
+    /// committed SCOM 常驻缓存条目上限。
+    #[serde(default)]
+    pub cata_cache_max_entries: Option<usize>,
+
+    /// 单个 SCOM 可准入常驻缓存的最大估算字节数。
+    #[serde(default)]
+    pub cata_cache_max_entry_bytes: Option<u64>,
+
     /// 启动即自动干活（默认 `true`，见 [`startup_autorun`]）。
     ///
     /// 显式关掉时：启动重扫照常发现并入队，但排出来的行挂起（`DataBatch::held`）、
@@ -131,6 +143,9 @@ impl From<DbOption> for DbOptionExt {
             http_api_cors: None,
             data_batch_workers: None,
             geometry_permits: None,
+            cata_cache_max_bytes: None,
+            cata_cache_max_entries: None,
+            cata_cache_max_entry_bytes: None,
             startup_autorun: None,
             data_incremental: None,
             model_incremental: None,
@@ -169,6 +184,12 @@ struct DbOptionExtFields {
     data_batch_workers: Option<usize>,
     #[serde(default)]
     geometry_permits: Option<usize>,
+    #[serde(default)]
+    cata_cache_max_bytes: Option<u64>,
+    #[serde(default)]
+    cata_cache_max_entries: Option<usize>,
+    #[serde(default)]
+    cata_cache_max_entry_bytes: Option<u64>,
     #[serde(default)]
     startup_autorun: Option<bool>,
     #[serde(default)]
@@ -345,6 +366,9 @@ pub fn get_db_option_ext() -> DbOptionExt {
         http_api_cors: ext.http_api_cors.clone(),
         data_batch_workers: ext.data_batch_workers,
         geometry_permits: ext.geometry_permits,
+        cata_cache_max_bytes: ext.cata_cache_max_bytes,
+        cata_cache_max_entries: ext.cata_cache_max_entries,
+        cata_cache_max_entry_bytes: ext.cata_cache_max_entry_bytes,
         startup_autorun: ext.startup_autorun,
         data_incremental: ext.data_incremental,
         model_incremental: ext.model_incremental,
@@ -426,6 +450,38 @@ fn effective_geometry_permits(configured: Option<usize>) -> Result<usize, String
 
 fn available_parallelism_or_one() -> usize {
     std::thread::available_parallelism().map_or(1, |value| value.get())
+}
+
+pub fn cata_cache_limits() -> crate::fast_model::cata_cache::CataCacheLimits {
+    effective_cata_cache_limits(
+        load_ext_fields().cata_cache_max_bytes,
+        load_ext_fields().cata_cache_max_entries,
+        load_ext_fields().cata_cache_max_entry_bytes,
+    )
+    .unwrap_or_else(|error| panic!("CATA cache 配置校验失败: {error}"))
+}
+
+fn effective_cata_cache_limits(
+    max_bytes: Option<u64>,
+    max_entries: Option<usize>,
+    max_entry_bytes: Option<u64>,
+) -> Result<crate::fast_model::cata_cache::CataCacheLimits, String> {
+    let defaults = crate::fast_model::cata_cache::CataCacheLimits::default();
+    let limits = crate::fast_model::cata_cache::CataCacheLimits {
+        max_bytes: max_bytes.unwrap_or(defaults.max_bytes),
+        max_entries: max_entries.unwrap_or(defaults.max_entries),
+        max_entry_bytes: max_entry_bytes.unwrap_or(defaults.max_entry_bytes),
+    };
+    if limits.max_entries == 0 {
+        return Err("cata_cache_max_entries 必须大于 0".into());
+    }
+    if limits.max_entry_bytes == 0 {
+        return Err("cata_cache_max_entry_bytes 必须大于 0".into());
+    }
+    if limits.max_bytes != 0 && limits.max_entry_bytes > limits.max_bytes {
+        return Err("cata_cache_max_entry_bytes 不得超过 cata_cache_max_bytes".into());
+    }
+    Ok(limits)
 }
 
 /// 环境变量名：一次性覆盖 [`startup_autorun`]，不必改配置文件。
@@ -715,6 +771,19 @@ mod tests {
         assert!(effective_geometry_permits(Some(0)).is_err());
         assert!(effective_geometry_permits(Some(MAX_GEOMETRY_PERMITS + 1)).is_err());
         assert_eq!(effective_geometry_permits(Some(4)).unwrap(), 4);
+    }
+
+    #[test]
+    fn cata_cache_defaults_and_zero_byte_rollback_are_explicit() {
+        let defaults = effective_cata_cache_limits(None, None, None).unwrap();
+        assert_eq!(defaults.max_bytes, 33_554_432);
+        assert_eq!(defaults.max_entries, 16_384);
+        assert_eq!(defaults.max_entry_bytes, 4_194_304);
+
+        let disabled = effective_cata_cache_limits(Some(0), None, None).unwrap();
+        assert_eq!(disabled.max_bytes, 0);
+        assert!(effective_cata_cache_limits(None, Some(0), None).is_err());
+        assert!(effective_cata_cache_limits(Some(10), None, Some(11)).is_err());
     }
 
     /// 缺配置就是「全范围」：这个字段的形状与坑过人的 `manual_db_nums` 一样，

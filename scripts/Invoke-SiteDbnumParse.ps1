@@ -80,6 +80,9 @@ $overrides = [ordered]@{
     v_port                  = "$Port"
     project_name            = "`"$Project`""
     manual_db_nums          = "[$Dbnum]"
+    # 单站点基线也必须激活同一限定域。否则 CATA locator 会把 included_projects
+    # 下全部 DESI 文件都建 Ref0 索引；7997 会在已落完 PE 后继续扫描范围外大库。
+    watch_dbnums            = "[$Dbnum]"
     included_db_files       = $dbFilesToml
     total_sync              = "false"
     incr_sync               = "false"

@@ -15,6 +15,8 @@
 5. 单件坏数据写入包含生成根、实例、CATA 身份、阶段和原因的 `geom_error`；数据库级失败
    使整页失败并保留重试。
 6. 不使用 Legacy、内存库、OCC 或 git rev 本地依赖，不改变初始化协议和持久格式。
+7. 页内快照可消费 ADR-045 的 committed `Arc<ScomInfo>`；staging 结果不得进入常驻缓存，
+   页内设计 context 与变换不得跨页复用。
 
 ## 验收标准
 

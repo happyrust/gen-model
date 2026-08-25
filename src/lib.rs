@@ -742,6 +742,10 @@ fn print_startup_complete_banner(db_option: &DbOption, sync_live: bool, started:
         fmt_elapsed(started.elapsed())
     );
     println!(
+        "  CATA cache: {:?}",
+        crate::fast_model::cata_cache::global_cache().snapshot()
+    );
+    println!(
         "  增量阶段：data={} model={} room={}（顺序：数据 → 模型 → 房间）",
         crate::options::data_incremental(),
         crate::options::model_incremental(),
@@ -788,11 +792,14 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
         .connect((format!("rocksdb://{}.rdb", db_option.project_name), config))
         .with_capacity(1000)
         .await?;
+    #[cfg(feature = "local")]
+    crate::fast_model::cata_cache::reset_authority().await;
     println!("数据库连接中...");
     #[cfg(feature = "ws")]
     {
         match init_surreal().await {
             Ok(_) => {
+                crate::fast_model::cata_cache::reset_authority().await;
                 println!(
                     "数据库已经连接到 {}, 站点: {}",
                     db_option.project_name,

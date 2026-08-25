@@ -11,9 +11,12 @@
 param(
     [int]$Dbnum      = 7997,
     [string]$Endpoint = "http://127.0.0.1:8021/api/v1/model/ensure",
+    [string]$SurrealEndpoint = "http://127.0.0.1:8009/sql",
     [int]$Throttle   = 8,
     [int]$TimeoutSec = 420,
     [int]$Limit      = 0,
+    # 只跑指定生成根 noun，例如 BRAN,HANG。留空保持原有全库行为。
+    [string[]]$Nouns = @(),
     # 全量重跑：忽略终态，取该 dbnum 的全部根。配 -Force 用于性能复测/基线重建。
     [switch]$All,
     # 服务端 force=true：已生成过的根也整根重来，否则 settled_status 会直接短路返回。
@@ -23,18 +26,35 @@ param(
 $ErrorActionPreference = "Stop"
 $invoke = Join-Path $PSScriptRoot "Invoke-Surreal8009.ps1"
 
+$normalizedNouns = @(
+    $Nouns |
+        ForEach-Object { $_ -split ',' } |
+        ForEach-Object { $_.Trim().ToUpperInvariant() } |
+        Where-Object { $_ } |
+        Sort-Object -Unique
+)
+foreach ($noun in $normalizedNouns) {
+    if ($noun -notmatch '^[A-Z][A-Z0-9_]*$') { throw "非法生成根 noun: $noun" }
+}
+$nounPredicate = if ($normalizedNouns.Count -gt 0) {
+    $quoted = ($normalizedNouns | ForEach-Object { "'$_'" }) -join ','
+    " AND type::thing('pe', record::id(pe)).noun IN [$quoted]"
+} else { '' }
+
 $listSql = if ($All) {
-    "RETURN (select pe, subtree from gen_root where dbnum = $Dbnum order by subtree desc).pe;"
+    "RETURN (select pe, subtree from gen_root where dbnum = $Dbnum$nounPredicate order by subtree desc).pe;"
+} elseif ($normalizedNouns.Count -gt 0) {
+    "RETURN (select pe, subtree from gen_root where dbnum = $Dbnum$nounPredicate AND status = NONE order by subtree desc).pe;"
 } else {
     "RETURN fn::gen_roots_todo($Dbnum);"
 }
-$todo = ((& $invoke -Sql $listSql | ConvertFrom-Json)[0].result)
+$todo = ((& $invoke -Endpoint $SurrealEndpoint -Sql $listSql | ConvertFrom-Json)[0].result)
 if ($null -eq $todo) { $todo = @() }
 $todo = @($todo)
 if ($Limit -gt 0 -and $todo.Count -gt $Limit) { $todo = $todo[0..($Limit - 1)] }
 
-$progress = (& $invoke -Sql "RETURN fn::gen_root_progress($Dbnum);" | ConvertFrom-Json)[0].result
-"总根数 $($progress.total)，已完成 $($progress.done)，本轮待跑 $($todo.Count)，并行度 $Throttle，全量=$($All.IsPresent)，force=$($Force.IsPresent)"
+$progress = (& $invoke -Endpoint $SurrealEndpoint -Sql "RETURN fn::gen_root_progress($Dbnum);" | ConvertFrom-Json)[0].result
+"总根数 $($progress.total)，已完成 $($progress.done)，本轮待跑 $($todo.Count)，noun=$($normalizedNouns -join ',')，并行度 $Throttle，全量=$($All.IsPresent)，force=$($Force.IsPresent)"
 if ($todo.Count -eq 0) { "SWEEP_DONE"; exit 0 }
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -44,6 +64,7 @@ $todo | ForEach-Object -ThrottleLimit $Throttle -Parallel {
     $peId    = $_
     $invoke  = $using:invoke
     $endpoint = $using:Endpoint
+    $dbEndpoint = $using:SurrealEndpoint
     $timeout = $using:TimeoutSec
     $counter = $using:counter
     $sw      = $using:sw
@@ -94,7 +115,7 @@ $todo | ForEach-Object -ThrottleLimit $Throttle -Parallel {
     }
 
     $payload = ([pscustomobject]$rec) | ConvertTo-Json -Depth 3 -Compress
-    & $invoke -Sql "RETURN fn::gen_root_report($peId, $payload);" | Out-Null
+    & $invoke -Endpoint $dbEndpoint -Sql "RETURN fn::gen_root_report($peId, $payload);" | Out-Null
 
     $n = 0
     $mutex = [System.Threading.Mutex]::new($false, 'Local\genrootsweepcnt')

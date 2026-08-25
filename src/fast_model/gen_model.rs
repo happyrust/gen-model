@@ -259,6 +259,9 @@ pub(crate) async fn gen_all_geos_data_with_policy(
         )
         .await
         .context("targeted model stage stale-row prune")?;
+        crate::data_interface::geom_error::prune_orphan_mesh_failures()
+            .await
+            .context("targeted model stage orphan mesh/error prune")?;
 
         if db_option.gen_mesh {
             // 错误必须向上传播（不再 .expect panic）：mesh 失败会让

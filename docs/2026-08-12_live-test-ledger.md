@@ -6,6 +6,30 @@
 **没有"最近通过"记录的用例视同未验资产**——本台账是唯一事实来源，动过 live 用例或
 点亮新批次必须同步更新。
 
+**2026-08-25 AMS 8000 全库加载与显示（最近通过）**：在 RocksDB/SurrealDB 2.x
+`127.0.0.1:8000` 上从空库重新解析并运行 `scripts/Verify-Ams8000LoadDisplay.ps1`，不以
+pending 清零为完成条件。`fn::gen_root_progress(8000)` 为 771/771 终态（Generated 646、
+NoRenderableGeometry 125），覆盖 6541/6541 个调度元素，`todo=0`、`refused=0`；6603 条
+PE 中 6541 条生成元素加 62 条 SITE/ZONE/PIPE/HVAC 层级容器恰好全覆盖；2676 条
+`inst_relate` 中缺 AABB/世界变换的 97 行全部是非渲染 `ATTA` DATUM 节点。
+Ref0 24384 全量路径验证 2815 个元素、11673 个网格实例、1986 个唯一 mesh 均可显示。
+三个 SITE 的实际模型查询、mesh 反序列化和 Bevy 转换也全部退出 0：EQUI 2123 元素/
+6627 实例/1549 唯一 mesh，HVACHB 156/198/29，PIPEBJ 545/4875/416。现场界面同时打开
+三层，设备、HVAC 风管和管系均可见。31 个确无可渲染输出的 CATA 目标和 14 个 libgm
+零段退化 mesh 均进入 `geom_error`；14 个 mesh 错误与 `inst_geo.bad=true` 身份双向一致，
+未知错误类型为 0。SITE 名称由 RocksDB 动态枚举，不再靠硬编码名单；统一 verifier
+字面输出 `AMS8000_LOAD_DISPLAY_VERIFY=PASS`。证据：
+`docs/evidence/2026-08-25-ams8000-full-load-display.md`。
+
+**2026-08-24 CATA 常驻缓存（最近通过）**：三组 cache-off 与三组 cache-on 均使用新进程、
+独立空 RocksDB、`geometry_permits=8`，按字面 `初始化完成：项目` 停止计时。off/on 中位数
+分别为 791.511/810.796s，cache-on 退化 2.436%，低于 3% 门且通过 848.728s 硬门；
+215,670,784 B 峰值内存低于 274,027,520 B。六轮规范化表哈希和 3556 个 mesh 的
+路径/SHA-256 完全一致，`geom_error=2593` 集合一致。cache-on 每轮 923 hit、168 leader，
+132 个成功值驻留 2,641,432 B，36 个缺陷不进入负缓存；无 DB error、重复 loader 或未结束
+flight。容量 0 每轮 1091 次 bypass、0 驻留。证据：
+`docs/evidence/2026-08-24-cata-resident-cache-live.md`。
+
 **2026-08-24 AMS 8000 世界变换与 Plant UI（最近通过）**：
 `fast_model::cata_model::world_transform_batch_tests::live_batch_preserves_non_identity_ftub_world_pose`
 在独立 RocksDB `world-transform-fixed-8` 上通过（1 passed、exit 0、2.47s）；FTUB
@@ -474,3 +498,16 @@ epoch barrier、几何双策略和硬分块单测通过；四个 CI 集成目标
 3/3，Release 构建通过。三个依赖仓库已发布固定 revision，工作区本地 `[patch]` 已关闭。
 本条只登记离线与构建结果；E3D 保存、tail 延迟注入和 staged NotManifold 尚未形成新的 live
 通过结论。命令、字面输出与退出码见 `docs/evidence/2026-08-19-oracle-review-correctness-closure.md`。
+
+**2026-08-25 AMS 8000 全库加载/显示门通过**：RocksDB `site-8000` 中 6603 条 PE，
+771/771 个生成根终态（Generated 646、NoRenderableGeometry 125），6541/6541 个生成元素
+完成，`parse_error=0`、`geom_error=0`、坏 mesh=0。121 条缺 AABB/变换关系全部为不渲染
+的 ATTA。Plant UI 真实加载路径验证 dbnum 8000 的 2824 个模型记录、9044 个实例、
+1519 个唯一 mesh，覆盖 Ref0 24384 与新增 Ref0 32576；三个 SITE 的全部唯一 mesh
+均能反序列化并转换。修复 Plant UI 忽略
+`DB_OPTION_FILE`、误连 8009 后，真实进程已确认连接 8000；逐一打开 `/1CSV-HVACHB`、
+`/1RX03-PIPEBJ`、`/1RX03-EQUI`，mesh instance 分别为 198/4235/4611，全部显示完成且
+界面 WARN=0、ERROR=0。RVM 对 `/1RX03-EQUI` 的 E3D→生产覆盖方向在显式
+10 mm 导出精度预算内（p95 2.14 mm、max 37.64 mm），生产→RVM 因附加表面仍不满足
+双向门，保留为后续几何差异项。证据：
+`docs/evidence/2026-08-25-ams8000-full-load-display.md`。

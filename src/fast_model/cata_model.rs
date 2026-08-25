@@ -3,9 +3,7 @@ use crate::data_interface::db_model::{TUBI_CONNECT_TOL, TUBI_TOL};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::structs::PlantAxisMap;
 use crate::fast_model;
-use crate::fast_model::{
-    SEND_INST_SIZE, get_generic_type, resolve_desi_comp, resolve_desi_comp_prefetched, shared,
-};
+use crate::fast_model::{SEND_INST_SIZE, resolve_desi_comp, resolve_desi_comp_prefetched, shared};
 use aios_core::consts::{CIVIL_TYPES, NGMR_OWN_TYPES};
 use aios_core::geometry::*;
 use aios_core::get_world_transforms_many;
@@ -34,7 +32,7 @@ use glam::{DMat4, DVec3, Vec3};
 use nalgebra::Point3;
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 use parry3d::bounding_volume::*;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::mem::take;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -914,10 +912,248 @@ pub fn cal_sjus_value(sjus: &str, height: f32) -> f32 {
 struct CataPageReads {
     attributes: HashMap<RefnoEnum, Option<NamedAttrMap>>,
     transforms: HashMap<RefnoEnum, Option<Transform>>,
+    generic_types: HashMap<RefnoEnum, PdmsGenericType>,
     catalogue_refs: HashMap<RefnoEnum, Option<RefnoEnum>>,
     geometry_refs: HashMap<RefnoEnum, Option<aios_core::CataGeometryRefs>>,
-    scom_infos: HashMap<RefnoEnum, Result<ScomInfo, String>>,
+    scom_infos: HashMap<RefnoEnum, Result<Arc<ScomInfo>, String>>,
     contexts: HashMap<RefnoEnum, Result<CataContext, String>>,
+}
+
+fn first_generic_type<'a>(nouns: impl IntoIterator<Item = &'a str>) -> PdmsGenericType {
+    nouns
+        .into_iter()
+        .find_map(|noun| noun.parse::<PdmsGenericType>().ok())
+        .unwrap_or_default()
+}
+
+fn grouped_design_refnos(target_cata_map: &DashMap<String, CataHashRefnoKV>) -> Vec<RefnoEnum> {
+    let mut design_refnos = target_cata_map
+        .iter()
+        .flat_map(|entry| entry.group_refnos.clone())
+        .collect::<Vec<_>>();
+    design_refnos.sort_unstable();
+    design_refnos.dedup();
+    design_refnos
+}
+
+/// Resolve the first generic ancestor for every CATA instance with page-local
+/// owner/attribute reads.  The old per-instance `fn::ancestor` call both
+/// repeated the same owner traversal and tried to decode the terminal NONE noun
+/// as `String`; AMS8000 therefore recorded hundreds of false geometry errors.
+async fn prefetch_generic_types(
+    refnos: &[RefnoEnum],
+    attributes: &mut HashMap<RefnoEnum, Option<NamedAttrMap>>,
+) -> anyhow::Result<HashMap<RefnoEnum, PdmsGenericType>> {
+    let mut resolved = HashMap::with_capacity(refnos.len());
+    let mut cursor = refnos
+        .iter()
+        .copied()
+        .map(|refno| (refno, refno))
+        .collect::<HashMap<_, _>>();
+    let mut seen = refnos
+        .iter()
+        .copied()
+        .map(|refno| (refno, HashSet::new()))
+        .collect::<HashMap<_, _>>();
+
+    for _ in 0..64 {
+        if cursor.is_empty() {
+            break;
+        }
+        let mut missing = cursor
+            .values()
+            .filter(|refno| !attributes.contains_key(refno))
+            .copied()
+            .collect::<Vec<_>>();
+        missing.sort_unstable();
+        missing.dedup();
+        if !missing.is_empty() {
+            attributes.extend(aios_core::get_named_attmaps_many(&missing).await?);
+        }
+
+        let active = cursor.keys().copied().collect::<Vec<_>>();
+        for origin in active {
+            let current = cursor[&origin];
+            let Some(att) = attributes.get(&current).and_then(Option::as_ref) else {
+                resolved.insert(origin, PdmsGenericType::UNKOWN);
+                cursor.remove(&origin);
+                continue;
+            };
+            let generic = first_generic_type([att.get_type_str()]);
+            if generic != PdmsGenericType::UNKOWN {
+                resolved.insert(origin, generic);
+                cursor.remove(&origin);
+                continue;
+            }
+
+            let owner = att.get_owner();
+            let visited = seen.entry(origin).or_default();
+            if owner == current || !visited.insert(owner) {
+                resolved.insert(origin, PdmsGenericType::UNKOWN);
+                cursor.remove(&origin);
+            } else {
+                cursor.insert(origin, owner);
+            }
+        }
+    }
+    for origin in cursor.into_keys() {
+        resolved.insert(origin, PdmsGenericType::UNKOWN);
+    }
+    Ok(resolved)
+}
+
+fn classify_page_scom_load(
+    result: Result<Arc<ScomInfo>, crate::fast_model::cata_cache::CataLoadError>,
+) -> anyhow::Result<Result<Arc<ScomInfo>, String>> {
+    match result {
+        Ok(info) => Ok(Ok(info)),
+        Err(crate::fast_model::cata_cache::CataLoadError::CatalogueDefect(error)) => {
+            Ok(Err(error.to_string()))
+        }
+        Err(error) => Err(anyhow::anyhow!("SCOM page prefetch failed: {error}")),
+    }
+}
+
+#[cfg(test)]
+mod cata_page_error_tests {
+    use super::*;
+    use crate::fast_model::cata_cache::CataLoadError;
+
+    #[test]
+    fn catalogue_defect_is_per_model_but_database_failure_aborts_the_page() {
+        let defect =
+            classify_page_scom_load(Err(CataLoadError::CatalogueDefect("bad catalogue".into())))
+                .expect("catalogue defects stay in the page result");
+        assert_eq!(defect.unwrap_err(), "bad catalogue");
+
+        let database = classify_page_scom_load(Err(CataLoadError::Database("offline".into())));
+        assert!(database.is_err(), "database failure must fail the page");
+    }
+
+    #[test]
+    fn generic_type_skips_specific_component_nouns_and_uses_the_owner_family() {
+        assert_eq!(
+            first_generic_type(["FTUB", "BRAN", "PIPE", "ZONE"]),
+            PdmsGenericType::PIPE
+        );
+        assert_eq!(
+            first_generic_type(["SCTN", "FRMW", "STRU", "ZONE"]),
+            PdmsGenericType::SCTN
+        );
+        assert_eq!(
+            first_generic_type(["UNKNOWN_COMPONENT", "ZONE", "SITE"]),
+            PdmsGenericType::UNKOWN
+        );
+    }
+
+    #[test]
+    fn cata_generation_consumes_the_page_local_generic_type_snapshot() {
+        let source = include_str!("cata_model.rs");
+        let body = source
+            .lines()
+            .skip_while(|line| !line.starts_with("pub async fn gen_cata_geos("))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(body.contains(".generic_types"));
+        assert!(
+            !body.contains("get_generic_type(ele_refno).await"),
+            "per-instance ancestor queries reintroduced the AMS8000 null-noun error"
+        );
+    }
+
+    #[test]
+    fn cata_context_prefetch_covers_every_member_of_a_hash_group() {
+        let first = RefnoEnum::from(RefU64::from_two_nums(24384, 22405));
+        let second = RefnoEnum::from(RefU64::from_two_nums(24384, 22408));
+        let groups = DashMap::new();
+        groups.insert(
+            "shared-cata".into(),
+            CataHashRefnoKV {
+                cata_hash: "shared-cata".into(),
+                group_refnos: vec![second, first, second],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(grouped_design_refnos(&groups), vec![first, second]);
+    }
+
+    #[test]
+    fn cata_success_set_excludes_every_target_with_a_current_error() {
+        let a = RefnoEnum::from(RefU64::from_two_nums(24384, 22403));
+        let b = RefnoEnum::from(RefU64::from_two_nums(24384, 22405));
+        let scheduled = BTreeSet::from([a, b]);
+        let failed = BTreeSet::from([b]);
+        assert_eq!(
+            successful_cata_targets(&scheduled, &failed),
+            vec![a.to_string()]
+        );
+    }
+
+    #[test]
+    fn invisible_catalogue_alternatives_are_skipped_before_shape_validation() {
+        let source = include_str!("cata_model.rs");
+        let loop_body = source
+            .rsplit_once("// libgm/E3D only consumes the active conditional branch.")
+            .expect("conditional catalogue validation guard exists")
+            .1
+            .split_once("let mut shape_trans")
+            .expect("catalogue shape loop validation boundary")
+            .0;
+        let hidden = loop_body
+            .find("if !visible")
+            .expect("invisible branch is skipped");
+        let validation = loop_body
+            .find("if !brep_shape.check_valid()")
+            .expect("visible geometry is validated");
+        assert!(
+            hidden < validation,
+            "inactive CATA alternatives must not become geom_error: {loop_body}"
+        );
+    }
+
+    #[test]
+    fn invalid_subshape_only_fails_a_target_without_a_renderable_shape() {
+        let source = include_str!("cata_model.rs");
+        let body = source
+            .rsplit_once("let mut shape_errors = vec![];")
+            .expect("per-target shape diagnostics exist")
+            .1
+            .split_once("let mut inst_key")
+            .expect("per-target shape diagnostic boundary")
+            .0;
+        assert!(body.contains("shape_errors.push(CataDataError::new("));
+        assert!(body.contains("let has_renderable_shape = geo_insts.iter().any"));
+        assert!(
+            body.contains("if !has_renderable_shape {\n                                    data_errors.extend(shape_errors);"),
+            "valid sibling shapes must suppress subshape-only diagnostics: {body}"
+        );
+    }
+
+    #[test]
+    fn empty_cata_identity_is_not_propagated_to_sibling_instances() {
+        let source = include_str!("cata_model.rs");
+        let body = source
+            .rsplit_once("let mut has_renderable_identity = target_cata.exist_inst;")
+            .expect("CATA identity starts from verified persistent state")
+            .1
+            .split_once("if shape_insts_data.inst_cnt() >= SEND_INST_SIZE")
+            .expect("CATA identity propagation boundary")
+            .0;
+        let verdict = body
+            .find("has_renderable_identity = has_renderable_shape;")
+            .expect("fresh prototype updates the reuse verdict");
+        let sibling_gate = body
+            .find("if has_renderable_identity {")
+            .expect("sibling instances are guarded by the renderable verdict");
+        let sibling_insert = body
+            .rfind("shape_insts_data.insert_info(ele_refno, geos_info);")
+            .expect("sibling identity insertion exists");
+        assert!(
+            verdict < sibling_gate && sibling_gate < sibling_insert,
+            "a zero-geometry prototype must not create empty sibling inst_relate rows"
+        );
+    }
 }
 
 async fn prefetch_cata_contexts(
@@ -1138,13 +1374,13 @@ async fn prefetch_cata_page(
     let mut attributes = attributes.into_iter().collect::<HashMap<_, _>>();
     let transforms = transforms.into_iter().collect::<HashMap<_, _>>();
     let catalogue_refs = catalogue_refs.into_iter().collect::<HashMap<_, _>>();
+    let generic_types = prefetch_generic_types(&refnos, &mut attributes).await?;
 
-    let mut design_refnos = target_cata_map
-        .iter()
-        .filter_map(|entry| entry.group_refnos.first().copied())
-        .collect::<Vec<_>>();
-    design_refnos.sort_unstable();
-    design_refnos.dedup();
+    // A hash group can contain hundreds of design instances.  Context is
+    // design-instance-specific (owner, CREF and parent catalogue fallback), so
+    // prefetching only `group_refnos.first()` leaves every sibling without a
+    // snapshot and turns valid repeated CATA into false geom_error rows.
+    let design_refnos = grouped_design_refnos(target_cata_map);
 
     // HREF/HSTU attributes are needed by tubing generation but are not members
     // of the CATA hash groups. Discover them from the already fetched branch
@@ -1191,16 +1427,20 @@ async fn prefetch_cata_page(
     // keeping the map page-local avoids stale catalogue data across rebuilds.
     let scom_started = Instant::now();
     let mut scom_infos = HashMap::with_capacity(cata_refnos.len());
-    let mut scom_cache_hits = 0usize;
+    let cache = crate::fast_model::cata_cache::global_cache();
+    let before_cache = cache.snapshot();
+    let scope = crate::fast_model::cata_cache::active_read_scope();
     for cata_refno in &cata_refnos {
-        if aios_core::expression::resolve::SCOM_INFO_MAP.contains_key(cata_refno) {
-            scom_cache_hits += 1;
-        }
-        let info = crate::fast_model::resolve::get_or_create_scom_info(*cata_refno)
-            .await
-            .map_err(|error| format!("{error:#}"));
+        let loaded = crate::fast_model::resolve::get_or_create_scom_info(scope, *cata_refno).await;
+        let info = classify_page_scom_load(loaded)
+            .map_err(|error| anyhow::anyhow!("SCOM {cata_refno}: {error:#}"))?;
         scom_infos.insert(*cata_refno, info);
     }
+    let after_cache = cache.snapshot();
+    let scom_cache_hits = after_cache.hits.saturating_sub(before_cache.hits);
+    let scom_cache_misses = after_cache
+        .miss_leaders
+        .saturating_sub(before_cache.miss_leaders);
     let scom_errors = scom_infos.values().filter(|value| value.is_err()).count();
 
     println!(
@@ -1211,7 +1451,7 @@ async fn prefetch_cata_page(
         context_errors,
         context_ms,
         scom_cache_hits,
-        cata_refnos.len() - scom_cache_hits,
+        scom_cache_misses,
         scom_errors,
         scom_started.elapsed().as_millis(),
         started.elapsed().as_millis()
@@ -1219,6 +1459,7 @@ async fn prefetch_cata_page(
     Ok(CataPageReads {
         attributes,
         transforms,
+        generic_types,
         catalogue_refs,
         geometry_refs,
         scom_infos,
@@ -1262,6 +1503,16 @@ fn sort_by_batch_id<T>(items: &mut [(usize, T)]) {
     items.sort_by_key(|(batch_id, _)| *batch_id);
 }
 
+fn successful_cata_targets(
+    scheduled: &BTreeSet<RefnoEnum>,
+    failed: &BTreeSet<RefnoEnum>,
+) -> Vec<String> {
+    scheduled
+        .difference(failed)
+        .map(ToString::to_string)
+        .collect()
+}
+
 /// 生成元件库的branch型几何体
 /// 动态修改tubi，还是要单独出来, 还是直接去修改整个bran？
 /// 先暂时整个重新生成？
@@ -1297,6 +1548,11 @@ pub async fn gen_cata_geos(
     let all_unique_keys = Arc::new(all_unique_keys);
 
     let unique_cata_cnt = all_unique_keys.len();
+    let scheduled_targets = target_cata_map
+        .iter()
+        .flat_map(|entry| entry.group_refnos.clone())
+        .collect::<BTreeSet<_>>();
+    let mut failed_targets = BTreeSet::new();
     // One task owns one stable CATA identity. The process-wide gate controls
     // how many tasks may execute geometry work at once.
     let batch_chunks_cnt = unique_cata_cnt;
@@ -1379,6 +1635,12 @@ pub async fn gen_cata_geos(
                         }
                         let mut process_refno = None;
                         let mut ptset_map = None;
+                        // `inst_info` existing is not enough to prove that this CATA identity is
+                        // drawable.  Historical rows can exist without any geo_relate edge (for
+                        // example a zero-radius/zero-angle BEND).  Only propagate the shared
+                        // identity to sibling design instances after a renderable prototype has
+                        // either been found in the database or produced in this task.
+                        let mut has_renderable_identity = target_cata.exist_inst;
 
                         //如果inst_info 已经存在了，可以直接跳过生成，直接指向过去就可以了
                         if gen_mesh || !target_cata.exist_inst {
@@ -1469,6 +1731,13 @@ pub async fn gen_cata_geos(
                             let valid_ngmr = ngmr_refno.is_some_and(|refno| refno.is_valid());
 
                             if !valid_gmse && !valid_ngmr {
+                                if crate::fast_model::resolve::scom_is_intentionally_non_renderable(
+                                    &scom_info.gtype,
+                                ) {
+                                    // ANCI catalogue components are connection anchors. They are
+                                    // valid data but have no independent renderable geometry.
+                                    continue;
+                                }
                                 data_errors.push(CataDataError::new(
                                     ele_refno,
                                     &cata_hash,
@@ -1678,18 +1947,11 @@ pub async fn gen_cata_geos(
                                     .unwrap_or_default();
 
                                 let t_get_generic_type = Instant::now();
-                                let generic_type = match get_generic_type(ele_refno).await {
-                                    Ok(generic_type) => generic_type,
-                                    Err(error) => {
-                                        data_errors.push(CataDataError::new(
-                                            ele_refno,
-                                            &cata_hash,
-                                            "generic_type",
-                                            &error,
-                                        ));
-                                        PdmsGenericType::UNKOWN
-                                    }
-                                };
+                                let generic_type = page_reads
+                                    .generic_types
+                                    .get(&ele_refno)
+                                    .copied()
+                                    .unwrap_or_default();
                                 db_time_get_generic_type +=
                                     t_get_generic_type.elapsed().as_millis();
 
@@ -1721,6 +1983,7 @@ pub async fn gen_cata_geos(
                                 };
 
                                 let mut geo_insts = vec![];
+                                let mut shape_errors = vec![];
                                 let mut visible_set = HashSet::new();
                                 for s in &shapes {
                                     if s.visible {
@@ -1739,16 +2002,36 @@ pub async fn gen_cata_geos(
                                         is_ngmr,
                                         ..
                                     } = shape;
+                                    // libgm/E3D only consumes the active conditional branch.
+                                    // Some catalogue alternatives deliberately carry incomplete
+                                    // geometry and are harmless while invisible; validating them
+                                    // first produced false AMS8000 `geom_error` rows even though
+                                    // the rendered branch was complete.
+                                    if !visible {
+                                        continue;
+                                    }
+                                    let Some(geo_param) = brep_shape.convert_to_geo_param() else {
+                                        shape_errors.push(CataDataError::new(
+                                            ele_refno,
+                                            &cata_hash,
+                                            "shape_parameter",
+                                            format!("unsupported catalogue geometry {geom_refno}"),
+                                        ));
+                                        continue;
+                                    };
+                                    if crate::fast_model::manifold_tessellate::catalogue_param_is_empty_geometry(&geo_param) {
+                                        // libgm does not emit facets for a finite zero-volume
+                                        // conditional shape.  It is absent geometry, not a bad
+                                        // model, and must never reach inst_geo/mesh scheduling.
+                                        continue;
+                                    }
                                     if !brep_shape.check_valid() {
-                                        data_errors.push(CataDataError::new(
+                                        shape_errors.push(CataDataError::new(
                                             ele_refno,
                                             &cata_hash,
                                             "shape_validation",
                                             format!("invalid catalogue geometry {geom_refno}"),
                                         ));
-                                        continue;
-                                    }
-                                    if !visible {
                                         continue;
                                     }
                                     let mut shape_trans = brep_shape.get_trans();
@@ -1764,7 +2047,7 @@ pub async fn gen_cata_geos(
                                         scale,
                                     };
                                     if transform.is_nan() {
-                                        data_errors.push(CataDataError::new(
+                                        shape_errors.push(CataDataError::new(
                                             ele_refno,
                                             &cata_hash,
                                             "shape_transform",
@@ -1788,15 +2071,6 @@ pub async fn gen_cata_geos(
                                         GeoBasicType::Compound
                                     } else {
                                         GeoBasicType::Pos
-                                    };
-                                    let Some(geo_param) = brep_shape.convert_to_geo_param() else {
-                                        data_errors.push(CataDataError::new(
-                                            ele_refno,
-                                            &cata_hash,
-                                            "shape_parameter",
-                                            format!("unsupported catalogue geometry {geom_refno}"),
-                                        ));
-                                        continue;
                                     };
                                     let geom_inst = EleInstGeo {
                                         geo_hash,
@@ -1828,6 +2102,14 @@ pub async fn gen_cata_geos(
                                     }
                                     geo_insts.push(geom_inst);
                                 }
+                                let has_renderable_shape = geo_insts.iter().any(|inst| {
+                                    inst.geo_type == GeoBasicType::Pos
+                                        || inst.geo_type == GeoBasicType::Compound
+                                });
+                                has_renderable_identity = has_renderable_shape;
+                                if !has_renderable_shape {
+                                    data_errors.extend(shape_errors);
+                                }
                                 {
                                     let mut inst_key = geos_info.get_inst_key();
                                     geos_info.is_solid = geo_insts.iter().any(|x| {
@@ -1851,91 +2133,87 @@ pub async fn gen_cata_geos(
                                 break;
                             }
                         }
-                        for ele_refno in group_refnos {
-                            if Some(ele_refno) == process_refno {
-                                continue;
-                            }
-                            let cur_ptset_map = ptset_map
-                                .as_ref()
-                                .or(target_cata.ptset.as_ref())
-                                .cloned()
-                                .unwrap_or_default();
-                            let Some(mut origin_trans) =
-                                page_reads.transforms.get(&ele_refno).copied().flatten()
-                            else {
-                                data_errors.push(CataDataError::new(
-                                    ele_refno,
-                                    &cata_hash,
-                                    "instance_transform",
-                                    "world transform is missing",
-                                ));
-                                continue;
-                            };
-
-                            let ele_att = page_reads
-                                .attributes
-                                .get(&ele_refno)
-                                .and_then(Option::as_ref)
-                                .cloned()
-                                .unwrap_or_default();
-                            if ele_att.is_empty() {
-                                data_errors.push(CataDataError::new(
-                                    ele_refno,
-                                    &cata_hash,
-                                    "instance_attributes",
-                                    "named attributes are missing",
-                                ));
-                                continue;
-                            }
-                            if let Some(sjus) = ele_att.get_str("SJUS") {
-                                let parent = ele_att.get_owner();
-                                if let Some(sjus_adjust) = sjus_map_clone.get(&parent) {
-                                    let height = sjus_adjust.value().1;
-                                    let off_z = cal_sjus_value(sjus, height);
-                                    origin_trans.translation += sjus_adjust.value().0
-                                        + origin_trans.rotation * Vec3::new(0.0, 0.0, off_z);
+                        if has_renderable_identity {
+                            for ele_refno in group_refnos {
+                                if Some(ele_refno) == process_refno {
+                                    continue;
                                 }
-                            }
-
-                            if ele_att.contains_key("ARRI") && !cur_ptset_map.is_empty() {
-                                let arrive = ele_att.get_i32("ARRI").unwrap_or(-1);
-                                let leave = ele_att.get_i32("LEAV").unwrap_or(-1);
-                                if let Some(a) = cur_ptset_map.values().find(|x| x.number == arrive)
-                                    && let Some(l) =
-                                        cur_ptset_map.values().find(|x| x.number == leave)
-                                {
-                                    alignment_outputs.push((ele_refno, [a.clone(), l.clone()]));
-                                }
-                            };
-                            let generic_type = match get_generic_type(ele_refno).await {
-                                Ok(generic_type) => generic_type,
-                                Err(error) => {
+                                let cur_ptset_map = ptset_map
+                                    .as_ref()
+                                    .or(target_cata.ptset.as_ref())
+                                    .cloned()
+                                    .unwrap_or_default();
+                                let Some(mut origin_trans) =
+                                    page_reads.transforms.get(&ele_refno).copied().flatten()
+                                else {
                                     data_errors.push(CataDataError::new(
                                         ele_refno,
                                         &cata_hash,
-                                        "instance_generic_type",
-                                        &error,
+                                        "instance_transform",
+                                        "world transform is missing",
                                     ));
-                                    PdmsGenericType::UNKOWN
+                                    continue;
+                                };
+
+                                let ele_att = page_reads
+                                    .attributes
+                                    .get(&ele_refno)
+                                    .and_then(Option::as_ref)
+                                    .cloned()
+                                    .unwrap_or_default();
+                                if ele_att.is_empty() {
+                                    data_errors.push(CataDataError::new(
+                                        ele_refno,
+                                        &cata_hash,
+                                        "instance_attributes",
+                                        "named attributes are missing",
+                                    ));
+                                    continue;
                                 }
-                            };
-                            let geos_info = EleGeosInfo {
-                                refno: ele_refno,
-                                sesno: ele_att.sesno(),
-                                cata_hash: Some(cata_hash.clone()),
-                                visible: true,
-                                generic_type,
-                                world_transform: origin_trans,
-                                ptset_map: cur_ptset_map,
-                                is_solid: true,
-                                ..Default::default()
-                            };
-                            if let Some(r_refno) = test_refno
-                                && r_refno == ele_refno
-                            {
-                                tracing::debug!("{:?}", &geos_info);
+                                if let Some(sjus) = ele_att.get_str("SJUS") {
+                                    let parent = ele_att.get_owner();
+                                    if let Some(sjus_adjust) = sjus_map_clone.get(&parent) {
+                                        let height = sjus_adjust.value().1;
+                                        let off_z = cal_sjus_value(sjus, height);
+                                        origin_trans.translation += sjus_adjust.value().0
+                                            + origin_trans.rotation * Vec3::new(0.0, 0.0, off_z);
+                                    }
+                                }
+
+                                if ele_att.contains_key("ARRI") && !cur_ptset_map.is_empty() {
+                                    let arrive = ele_att.get_i32("ARRI").unwrap_or(-1);
+                                    let leave = ele_att.get_i32("LEAV").unwrap_or(-1);
+                                    if let Some(a) =
+                                        cur_ptset_map.values().find(|x| x.number == arrive)
+                                        && let Some(l) =
+                                            cur_ptset_map.values().find(|x| x.number == leave)
+                                    {
+                                        alignment_outputs.push((ele_refno, [a.clone(), l.clone()]));
+                                    }
+                                };
+                                let generic_type = page_reads
+                                    .generic_types
+                                    .get(&ele_refno)
+                                    .copied()
+                                    .unwrap_or_default();
+                                let geos_info = EleGeosInfo {
+                                    refno: ele_refno,
+                                    sesno: ele_att.sesno(),
+                                    cata_hash: Some(cata_hash.clone()),
+                                    visible: true,
+                                    generic_type,
+                                    world_transform: origin_trans,
+                                    ptset_map: cur_ptset_map,
+                                    is_solid: true,
+                                    ..Default::default()
+                                };
+                                if let Some(r_refno) = test_refno
+                                    && r_refno == ele_refno
+                                {
+                                    tracing::debug!("{:?}", &geos_info);
+                                }
+                                shape_insts_data.insert_info(ele_refno, geos_info);
                             }
-                            shape_insts_data.insert_info(ele_refno, geos_info);
                         }
                         if shape_insts_data.inst_cnt() >= SEND_INST_SIZE {
                             #[cfg(feature = "profile")]
@@ -2009,6 +2287,7 @@ pub async fn gen_cata_geos(
             }
             data_errors.sort();
             for error in &data_errors {
+                failed_targets.insert(error.target);
                 persist_cata_data_error(error).await;
             }
             for batch in batches {
@@ -2022,6 +2301,16 @@ pub async fn gen_cata_geos(
         total_time_stats.lock().await.insert(
             "output_merge".to_string(),
             output_merge_started.elapsed().as_millis() as u64,
+        );
+    }
+
+    let successful_targets = successful_cata_targets(&scheduled_targets, &failed_targets);
+    if let Err(error) =
+        crate::data_interface::geom_error::clear_cata_generation_failures(&successful_targets).await
+    {
+        eprintln!(
+            "[geom_error] CATA 成功后的销账失败 targets={}: {error:#}",
+            successful_targets.len()
         );
     }
 

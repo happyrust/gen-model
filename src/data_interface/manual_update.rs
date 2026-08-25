@@ -3097,6 +3097,12 @@ struct MaterializedGenerationRootRow {
 /// residue roots whose disjoint subtrees cover every renderable element. Resolving
 /// every PE independently with the incremental "nearest significant owner" rule
 /// over-splits structures (8000 became 2228 jobs instead of 766).
+///
+/// `root_covers` is only a reverse-lookup accelerator. Building all of its edges in
+/// this transaction made a 7997 baseline wait on roughly 170k relation writes before
+/// the watermark could commit. `fn::gen_root_of` deliberately falls back to the owner
+/// chain when those edges are absent, so baseline correctness needs the materialized
+/// roots, not the optional accelerator.
 async fn baseline_model_plan(
     mgr: &AiosDBManager,
     dbnum: u32,
@@ -3109,7 +3115,6 @@ async fn baseline_model_plan(
     let mut response = SUL_DB
         .query(format!(
             "RETURN fn::sync_gen_roots({dbnum}); \
-             RETURN fn::sync_root_covers({dbnum}, NONE); \
              SELECT pe, noun FROM gen_root WHERE dbnum = {dbnum} ORDER BY pe;"
         ))
         .await
@@ -3121,7 +3126,7 @@ async fn baseline_model_plan(
             anyhow::anyhow!("dbnum={dbnum} 物化基线生成根语句失败: {error}; 不推进 applied_sesno")
         })?;
     let rows = response
-        .take::<Vec<MaterializedGenerationRootRow>>(2)
+        .take::<Vec<MaterializedGenerationRootRow>>(1)
         .map_err(|error| anyhow::anyhow!("解码 dbnum={dbnum} 物化生成根失败: {error}"))?;
     let roots = rows
         .into_iter()
@@ -6296,8 +6301,8 @@ mod tests {
             .0;
         assert!(body.contains("fn::sync_gen_roots({dbnum})"), "{body}");
         assert!(
-            body.contains("fn::sync_root_covers({dbnum}, NONE)"),
-            "{body}"
+            !body.contains("fn::sync_root_covers({dbnum}, NONE)"),
+            "root_covers 是可选查询加速索引，不得阻塞基线水位提交: {body}"
         );
         assert!(body.contains("SELECT pe, noun FROM gen_root"), "{body}");
         assert!(

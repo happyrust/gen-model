@@ -45,7 +45,7 @@ pub fn resolve_booled_mesh_id(booled_id: Option<&str>) -> Option<&str> {
 }
 
 /// 世界 mm 三角网格累加器：多几何 / 多实例合成一个网格。
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct MeshAccum {
     verts: Vec<Point<f32>>,
     idx: Vec<[u32; 3]>,
@@ -89,6 +89,17 @@ impl MeshAccum {
         for t in m.indices() {
             self.idx.push([base + t[0], base + t[1], base + t[2]]);
         }
+    }
+
+    fn append(&mut self, other: &Self) {
+        let base = self.verts.len() as u32;
+        self.verts.extend_from_slice(&other.verts);
+        self.idx.extend(
+            other
+                .idx
+                .iter()
+                .map(|triangle| triangle.map(|index| base + index)),
+        );
     }
 
     pub fn into_trimesh(self) -> Option<TriMesh> {
@@ -189,6 +200,88 @@ pub fn rvm_world_meshes_by_name(rvm_path: &Path) -> Result<HashMap<String, TriMe
     Ok(out)
 }
 
+/// 解析 RVM，并只为 `wanted` 中的 group 生成“自身 + 全部后代”的世界网格。
+///
+/// BRAN/HANG 本身通常没有直接几何，实体位于其子构件 group；根模型对拍必须使用
+/// 子树网格。显式传入目标集合可以避免为 SITE/ZONE 及每个中间节点长期保存整棵
+/// 子树的副本。与直接 group 模式一致，目标名称重复时视为歧义并剔除。
+pub fn rvm_world_subtree_meshes_by_name(
+    rvm_path: &Path,
+    wanted: &HashSet<String>,
+) -> Result<HashMap<String, TriMesh>> {
+    use rvm_rs::parse_rvm;
+    use rvm_rs::store::Store;
+    use rvm_rs::store::node::{NodeId, NodeKind};
+
+    let bytes = std::fs::read(rvm_path)
+        .with_context(|| format!("读取 RVM 失败: {}", rvm_path.display()))?;
+    let mut store = Store::new();
+    parse_rvm(&bytes, &mut store)
+        .with_context(|| format!("解析 RVM 失败: {}", rvm_path.display()))?;
+
+    fn walk(
+        store: &Store,
+        node_id: NodeId,
+        wanted: &HashSet<String>,
+        found: &mut HashMap<String, MeshAccum>,
+        seen: &mut HashSet<String>,
+        ambiguous: &mut HashSet<String>,
+    ) -> MeshAccum {
+        let Some(node) = store.get_node(node_id) else {
+            return MeshAccum::default();
+        };
+        let mut subtree = MeshAccum::default();
+        let mut name = None;
+        if let NodeKind::Group(group) = &node.kind {
+            let group_name = store.get_string(group.name).trim().to_string();
+            if wanted.contains(&group_name) {
+                if !seen.insert(group_name.clone()) {
+                    ambiguous.insert(group_name.clone());
+                }
+                name = Some(group_name);
+            }
+            let mut link = group.first_geometry;
+            while let Some(gid) = link {
+                if let Some(geometry) = store.get_geometry(gid) {
+                    add_geometry(&mut subtree, geometry);
+                    link = geometry.next;
+                } else {
+                    break;
+                }
+            }
+        }
+
+        let mut child = node.first_child;
+        while let Some(cid) = child {
+            let Some(cnode) = store.get_node(cid) else {
+                break;
+            };
+            let child_mesh = walk(store, cid, wanted, found, seen, ambiguous);
+            subtree.append(&child_mesh);
+            child = cnode.next;
+        }
+
+        if let Some(name) = name {
+            found.insert(name, subtree.clone());
+        }
+        subtree
+    }
+
+    let mut found = HashMap::new();
+    let mut seen = HashSet::new();
+    let mut ambiguous = HashSet::new();
+    for &root in store.roots() {
+        walk(&store, root, wanted, &mut found, &mut seen, &mut ambiguous);
+    }
+    for name in ambiguous {
+        found.remove(&name);
+    }
+    Ok(found
+        .into_iter()
+        .filter_map(|(name, mesh)| mesh.into_trimesh().map(|mesh| (name, mesh)))
+        .collect())
+}
+
 fn add_geometry(accum: &mut MeshAccum, geometry: &rvm_rs::store::geometry::Geometry) {
     use rvm_rs::export::Tessellate;
     use rvm_rs::export::tessellator::get_scale;
@@ -281,7 +374,11 @@ mod gen_side {
     /// geo_hash → param → 生产同款 `tessellate_libgm_param` → 网格，再乘
     /// `world_trans × inst.transform`。如果 libgm 语义实现不支持该参数，
     /// 只允许对已落盘的布尔/复合结果读取 `.mesh`，不切换几何后端。
-    pub async fn gen_world_mesh(db: &Surreal<Any>, pe_key: &str) -> Result<Option<TriMesh>> {
+    pub async fn gen_world_mesh_in_dir(
+        db: &Surreal<Any>,
+        pe_key: &str,
+        mesh_dir: &Path,
+    ) -> Result<Option<TriMesh>> {
         // 走这个 pe 的出边，不要 `WHERE in = {pe_key}`：`inst_relate` 没有
         // `(in, out)` 索引，谓词形式在真库上是整表扫，而对拍要逐件调用本函数。
         let sql = valid_insts_sql(pe_key);
@@ -293,7 +390,7 @@ mod gen_side {
         let wt = mat_from_trans(row.get("wt").unwrap_or(&serde_json::Value::Null));
         let booled_id = row.get("booled_id").and_then(|v| v.as_str());
         if let Some(booled_id) = super::resolve_booled_mesh_id(booled_id) {
-            let mesh_path = rvm_mesh_dir().join(format!("{booled_id}.mesh"));
+            let mesh_path = mesh_dir.join(format!("{booled_id}.mesh"));
             let unit = PlantMesh::des_mesh_file(&mesh_path).with_context(|| {
                 format!(
                     "{pe_key} 有 booled_id={booled_id} 但缺少 {}（布尔网格未落盘，不能回退到未开洞正挤出）",
@@ -324,7 +421,7 @@ mod gen_side {
                 continue;
             };
             if !unit_cache.contains_key(hash) {
-                let unit = build_unit_mesh(db, hash).await?;
+                let unit = build_unit_mesh(db, hash, mesh_dir).await?;
                 unit_cache.insert(hash.to_string(), unit);
             }
             let Some(unit) = unit_cache.get(hash).and_then(|m| m.as_ref()) else {
@@ -343,7 +440,32 @@ mod gen_side {
         Ok(accum.into_trimesh())
     }
 
-    async fn build_unit_mesh(db: &Surreal<Any>, geo_hash: &str) -> Result<Option<PlantMesh>> {
+    /// 按生产模型加载口径聚合一个生成根的完整 PE 子树。
+    ///
+    /// BRAN/HANG 根本身通常没有 `inst_relate`；可见实例记录在其成员构件上。
+    /// 子树枚举复用基准 AABB 对拍的索引化 `pe_owner` BFS，逐构件仍走
+    /// [`gen_world_mesh_in_dir`] 的生产可见实例谓词。
+    pub async fn gen_world_subtree_mesh_in_dir(
+        db: &Surreal<Any>,
+        root_refno: &str,
+        mesh_dir: &Path,
+    ) -> Result<Option<TriMesh>> {
+        let refnos = crate::rvm_baseline::compare::load_subtree_refnos(db, root_refno).await?;
+        let mut accum = MeshAccum::default();
+        for refno in refnos {
+            let pe_key = format!("pe:{}", refno.replace('/', "_"));
+            if let Some(mesh) = gen_world_mesh_in_dir(db, &pe_key, mesh_dir).await? {
+                accum.add_trimesh(&mesh);
+            }
+        }
+        Ok(accum.into_trimesh())
+    }
+
+    async fn build_unit_mesh(
+        db: &Surreal<Any>,
+        geo_hash: &str,
+        mesh_dir: &Path,
+    ) -> Result<Option<PlantMesh>> {
         let sql =
             format!("SELECT param FROM inst_geo WHERE record::id(id) = '{geo_hash}' LIMIT 1;");
         let mut resp = db.query(sql).await.context("查询 inst_geo.param 失败")?;
@@ -369,16 +491,20 @@ mod gen_side {
         }
         // param 为空或建不出形状 → 磁盘 .mesh（布尔/复合结果，如 BEND；CWD=仓库根，
         // meshes_path 默认 assets/meshes）。
-        let mesh_path = rvm_mesh_dir().join(format!("{geo_hash}.mesh"));
+        let mesh_path = mesh_dir.join(format!("{geo_hash}.mesh"));
         match PlantMesh::des_mesh_file(&mesh_path) {
             Ok(mesh) => Ok(Some(mesh)),
             Err(_) => Ok(None),
         }
     }
+
+    pub async fn gen_world_mesh(db: &Surreal<Any>, pe_key: &str) -> Result<Option<TriMesh>> {
+        gen_world_mesh_in_dir(db, pe_key, &rvm_mesh_dir()).await
+    }
 }
 
 #[cfg(feature = "manifold")]
-pub use gen_side::gen_world_mesh;
+pub use gen_side::{gen_world_mesh, gen_world_mesh_in_dir, gen_world_subtree_mesh_in_dir};
 
 #[cfg(all(test, feature = "manifold"))]
 mod mesh_wall_live {

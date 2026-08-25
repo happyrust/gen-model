@@ -29,7 +29,7 @@ pub(crate) use write_context::defer_staged_mysql_changes;
 pub(crate) use write_context::defer_staged_regen_settlement;
 pub(crate) use write_context::hold_staged_generation_root;
 pub(crate) use write_context::staged_spatial_removals;
-pub(crate) use write_context::{StagedFinalize, register_staged_finalize};
+pub(crate) use write_context::{StagedFinalize, defer_cata_invalidation, register_staged_finalize};
 pub(crate) use write_context::{
     active_staged_finalize_context, active_staged_finalize_plan, settle_staged_plan_items,
 };

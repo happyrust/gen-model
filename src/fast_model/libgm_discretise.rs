@@ -375,7 +375,11 @@ pub const FRAD_EPS: f64 = 0.1;
 pub const CROSS_EPS: f64 = 0.1;
 
 /// 重合点阈值：PDMS 的环常把同一个坐标写两遍，倒角半径要并到留下的那个点上。
-const DUP_EPS: f64 = 0.1;
+///
+/// 这不是 MDR_Point 对 FRAD / 叉积使用的 `0.1` 门槛。libgeom 3.1
+/// `mth::mthArcFillet` (`0x10043470`) 对相邻点距离的判据是 `1e-6`；把这里也写成
+/// `0.1` 会把 AMS8000 目录里合法的 0.001--0.05 mm 薄轮廓整环吞掉。
+const DUP_EPS: f64 = 1.0e-6;
 
 fn hypot2(a: [f64; 2], b: [f64; 2]) -> f64 {
     (a[0] - b[0]).hypot(a[1] - b[1])
@@ -1190,6 +1194,23 @@ mod tests {
         ]);
         assert_eq!(flat.len(), 4);
         assert!(flat.iter().all(|s| s.bulge == 0.0));
+    }
+
+    /// AMS8000 `inst_geo:10270882317146613457` 的目录截面包含一个精确重复点，
+    /// 但其余两点只相距 0.001 mm。libgeom 只合并前者；旧的 0.1 mm 去重阈值把
+    /// 四点全部吃完，最终报“轮廓展开倒角后只剩 0 段”。
+    #[test]
+    fn sub_tenth_millimetre_profile_points_are_not_coincident() {
+        let spans = profile_spans(&[
+            [-0.007, 51.5, 0.0],
+            [-0.007, 50.0, 0.0],
+            [-0.007, 50.0, 0.0],
+            [-0.006, 50.0, 0.0],
+        ]);
+        assert_eq!(spans.len(), 3, "only the exact duplicate may collapse");
+        assert_eq!(spans[0].point, [-0.007, 51.5]);
+        assert_eq!(spans[1].point, [-0.007, 50.0]);
+        assert_eq!(spans[2].point, [-0.006, 50.0]);
     }
 
     // ─── §7.9.2 轮廓那条路 ──────────────────────────────────────────────────

@@ -734,6 +734,31 @@ fn push_inst_relate_packets(packets: &mut Vec<SqlPacket>, rows: &BTreeMap<String
     }
 }
 
+fn canonicalize_unit_param_floats(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Number(number) if number.is_f64() => {
+            if let Some(raw) = number.as_f64() {
+                let rounded = (raw * 1000.0).round() / 1000.0;
+                let normalized = if rounded == 0.0 { 0.0 } else { rounded };
+                if let Some(number) = serde_json::Number::from_f64(normalized) {
+                    *value = serde_json::Value::Number(number);
+                }
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                canonicalize_unit_param_floats(value);
+            }
+        }
+        serde_json::Value::Object(fields) => {
+            for value in fields.values_mut() {
+                canonicalize_unit_param_floats(value);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn canonical_unit_param_json(inst: &EleInstGeo) -> anyhow::Result<String> {
     let param = match inst.geo_param.convert_to_unit_param() {
         // 普通 LCylinder 与非切角 SCylinder 在 caliber 相同的情况下仍共享单位圆柱身份。
@@ -745,7 +770,14 @@ fn canonical_unit_param_json(inst: &EleInstGeo) -> anyhow::Result<String> {
         }),
         param => param,
     };
-    serde_json::to_string(&param).map_err(Into::into)
+    // Geometry identity hashes float inputs at three decimal places. Persisting
+    // the unrounded unit parameter made two hash-equal CATA shapes render as
+    // different `inst_geo` rows inside one coalesced save batch (AMS7997 BRAN
+    // roots 24381/145800 and 24381/58384). Canonicalize the serialized value at
+    // the same boundary so one identity always has one durable representation.
+    let mut value = serde_json::to_value(&param)?;
+    canonicalize_unit_param_floats(&mut value);
+    serde_json::to_string(&value).map_err(Into::into)
 }
 
 fn build_canonical_save_plan(
@@ -1473,6 +1505,69 @@ mod tests {
         assert!(sql.contains("PrimLCylinder"), "{sql}");
         assert!(!sql.contains("PrimSCylinder"), "{sql}");
         assert!(!sql.contains("MERGE"), "{sql}");
+    }
+
+    #[test]
+    fn hash_equal_unit_params_have_one_rounded_durable_representation() {
+        use aios_core::prim_geo::{CTorus, FacetCaliber};
+        use aios_core::shape::pdms_shape::BrepShapeTrait;
+
+        fn torus_batch(rins: f32, refno_text: &str) -> ShapeInstancesData {
+            let refno = RefnoEnum::from(refno_text);
+            let torus = CTorus {
+                rins,
+                rout: 1.0,
+                angle: 89.714_005,
+                mesh_caliber: FacetCaliber {
+                    circumferential: 10,
+                    meridional: 12,
+                    secondary_meridional: 0,
+                },
+            };
+            let geo_hash = torus.hash_unit_mesh_params();
+            let inst = EleInstGeo {
+                geo_hash,
+                refno,
+                geo_param: PdmsGeoParam::PrimCTorus(torus),
+                transform: Transform::IDENTITY,
+                visible: true,
+                ..Default::default()
+            };
+            let data = EleInstGeosData {
+                inst_key: refno_text.into(),
+                refno,
+                insts: vec![inst],
+                type_name: "CTOR".into(),
+                ..Default::default()
+            };
+            let mut batch = ShapeInstancesData::default();
+            batch.inst_geos_map.insert(refno_text.into(), data);
+            batch
+        }
+
+        let first = torus_batch(0.818_181_5, "1/130");
+        let second = torus_batch(0.818_181_9, "1/131");
+        let first_hash = first.inst_geos_map["1/130"].insts[0].geo_hash;
+        let second_hash = second.inst_geos_map["1/131"].insts[0].geo_hash;
+        assert_eq!(
+            first_hash, second_hash,
+            "fixture must reproduce hash aliasing"
+        );
+
+        let plan = plan_for_test(vec![first, second])
+            .expect("hash-equal unit params must coalesce to one canonical inst_geo row");
+        let sql = plan_sql(&plan)
+            .into_iter()
+            .map(|(_, sql)| sql)
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            sql.matches(&format!("UPSERT inst_geo:⟨{first_hash}⟩"))
+                .count(),
+            1
+        );
+        assert!(sql.contains("\"rins\":0.818"), "{sql}");
+        assert!(sql.contains("\"angle\":89.714"), "{sql}");
     }
 
     fn snout_batch(param: LSnout, refno_text: &str) -> ShapeInstancesData {

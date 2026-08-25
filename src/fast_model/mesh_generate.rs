@@ -32,6 +32,18 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use surrealdb::sql::Thing;
 
+/// Persistent revision of the libgm-compatible tessellation semantics.
+///
+/// Geometry hashes describe PDMS parameters, not the implementation which
+/// turns those parameters into triangles.  Revision 1 includes the libgm
+/// NonZero resolution of self-crossing FRAD profiles.  Rows without this
+/// receipt must be rebuilt even when an old `.mesh` already exists.
+// rev 2: RTorus follows the E3D RVM XZ/+Y local-axis convention.
+// rev 3: LPyramid follows the RVM XZ/+Y bottom-origin convention.
+// Persisted older meshes must be regenerated because the geometry hash intentionally
+// describes shape identity rather than the tessellator implementation revision.
+const LIBGM_MESH_REV: u32 = 3;
+
 #[cfg(not(feature = "manifold"))]
 async fn apply_cata_neg_boolean_manifold(
     _refnos: &[RefnoEnum],
@@ -421,8 +433,9 @@ fn persist_libgm_plant_mesh(
     }
     let aabb_hash = gen_bytes_hash::<_, 64>(&mesh.aabb);
     update_sql.push_str(&format!(
-        "update inst_geo:⟨{id}⟩ set meshed = true, aabb = aabb:⟨{aabb_hash}⟩, pts=[{}];",
-        pt_hashes.into_iter().join(",")
+        "update inst_geo:⟨{id}⟩ set meshed = true, bad = false, mesh_rev = \
+         {LIBGM_MESH_REV}, aabb = aabb:⟨{aabb_hash}⟩, pts=[{}];",
+        pt_hashes.into_iter().join(","),
     ));
     aabb_map.entry(aabb_hash.to_string()).or_insert(aabb);
     chunk_aabbs.entry(aabb_hash.to_string()).or_insert(aabb);
@@ -454,7 +467,9 @@ async fn clear_mesh_failure(id: &str) {
 
 #[cfg(test)]
 mod occ_retire_source_guards {
-    use super::{BOXI_GEO_HASH, TUBI_GEO_HASH, include_basic_shape_mesh_candidates};
+    use super::{
+        BOXI_GEO_HASH, LIBGM_MESH_REV, TUBI_GEO_HASH, include_basic_shape_mesh_candidates,
+    };
     use surrealdb::sql::Thing;
 
     fn active_lines(source: &str) -> String {
@@ -585,6 +600,61 @@ mod occ_retire_source_guards {
             "the ownerless TUBI unit mesh must be scheduled explicitly"
         );
     }
+
+    #[test]
+    fn tessellation_revision_rebuilds_stale_meshes_and_persists_a_receipt() {
+        assert_eq!(LIBGM_MESH_REV, 3);
+        let source = include_str!("mesh_generate.rs");
+        let declaration = "pub async fn gen_inst_meshes(";
+        let start = source
+            .match_indices(declaration)
+            .find_map(|(offset, _)| {
+                let after = &source[offset + declaration.len()..];
+                (after.starts_with("\n    refnos:") || after.starts_with("\r\n    refnos:"))
+                    .then_some(offset)
+            })
+            .expect("gen_inst_meshes");
+        let tail = &source[start..];
+        let end = tail
+            .find("pub async fn existing_geometric_aabb_changes(")
+            .expect("gen_inst_meshes boundary");
+        let body = &tail[..end];
+        assert!(
+            body.contains("out.mesh_rev = NONE"),
+            "rows without a tessellator receipt must be selected again"
+        );
+        assert!(
+            body.contains("out.mesh_rev != {LIBGM_MESH_REV}"),
+            "rows produced by an older tessellator must be selected again"
+        );
+        assert!(
+            body.contains("from {inst_keys} where")
+                && body.contains(
+                    "(!out.bad or out.mesh_rev = NONE or out.mesh_rev != {LIBGM_MESH_REV})"
+                ),
+            "an old bad=true receipt must not hide a geometry fixed by a newer tessellator"
+        );
+        assert!(
+            body.contains("is_global_basic && EXIST_MESH_GEO_HASHES.contains_key(&id)"),
+            "the process cache may skip only immutable global unit assets, not stale DB rows"
+        );
+
+        let persist = source
+            .split_once("fn persist_libgm_plant_mesh(")
+            .expect("persist function")
+            .1
+            .split_once("async fn note_mesh_failure")
+            .expect("persist function boundary")
+            .0;
+        assert!(
+            persist.contains("mesh_rev ="),
+            "successful meshes need a revision receipt"
+        );
+        assert!(
+            persist.contains("bad = false"),
+            "a rebuilt mesh must clear stale failure state"
+        );
+    }
 }
 
 /// 生成实例的网格数据
@@ -620,8 +690,11 @@ pub async fn gen_inst_meshes(
             )
         } else {
             format!(
-                r#"array::group(select value (select value [out, ($parent<-neg_relate)[0] != none] from out->geo_relate where out.aabb.d=none and !out.meshed and !out.bad)
-            from {inst_keys})"#
+                r#"array::group(select value (select value [out, ($parent<-neg_relate)[0] != none] from out->geo_relate where
+                    out.mesh_rev = NONE or out.mesh_rev != {LIBGM_MESH_REV} or
+                    (out.aabb.d=none and !out.meshed and !out.bad))
+            from {inst_keys} where
+                (!out.bad or out.mesh_rev = NONE or out.mesh_rev != {LIBGM_MESH_REV}))"#
             )
         };
         //out.aabb.d == none and
@@ -639,7 +712,10 @@ pub async fn gen_inst_meshes(
                 if replace_exist {
                     true
                 } else {
-                    if EXIST_MESH_GEO_HASHES.contains_key(&t.id.to_raw()) {
+                    let id = t.id.to_raw();
+                    let is_global_basic =
+                        id == BOXI_GEO_HASH.to_string() || id == TUBI_GEO_HASH.to_string();
+                    if is_global_basic && EXIST_MESH_GEO_HASHES.contains_key(&id) {
                         // update_geos_by_meshes.insert(t.id.to_raw());
                         false
                     } else {
@@ -746,8 +822,10 @@ pub async fn gen_inst_meshes(
                             }
                             let mut update_sql = "".to_string();
                             for id in &unbuildable {
-                                update_sql
-                                    .push_str(&format!("update inst_geo:⟨{id}⟩ set bad = true;"));
+                                update_sql.push_str(&format!(
+                                    "update inst_geo:⟨{id}⟩ set bad = true, mesh_rev = \
+                                     {LIBGM_MESH_REV};"
+                                ));
                             }
 
                             for (id, mesh) in &libgm_meshes {

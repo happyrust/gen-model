@@ -20,6 +20,7 @@ pub(crate) struct StagingWriteContext {
     regen_settlements: Arc<Mutex<Vec<(String, u64)>>>,
     mysql_changes: Arc<Mutex<Option<BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>>>>,
     root_locks: Arc<Mutex<HeldRootLocks>>,
+    cata_invalidation: Arc<Mutex<crate::fast_model::cata_cache::CataInvalidation>>,
 }
 
 #[derive(Clone, Default)]
@@ -56,6 +57,7 @@ impl StagingWriteContext {
         regen_settlements: Arc<Mutex<Vec<(String, u64)>>>,
         mysql_changes: Arc<Mutex<Option<BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>>>>,
         root_locks: Arc<Mutex<HeldRootLocks>>,
+        cata_invalidation: Arc<Mutex<crate::fast_model::cata_cache::CataInvalidation>>,
     ) -> Self {
         Self {
             executor,
@@ -64,6 +66,7 @@ impl StagingWriteContext {
             regen_settlements,
             mysql_changes,
             root_locks,
+            cata_invalidation,
         }
     }
 
@@ -73,6 +76,30 @@ impl StagingWriteContext {
 
     pub async fn execute_scoped_delete(&self, sql: impl Into<String>) -> anyhow::Result<()> {
         self.executor.lock().await.execute_scoped_delete(sql).await
+    }
+
+    pub async fn defer_cata_invalidation(
+        &self,
+        next: crate::fast_model::cata_cache::CataInvalidation,
+    ) {
+        use crate::fast_model::cata_cache::CataInvalidation;
+        let mut current = self.cata_invalidation.lock().await;
+        match (&mut *current, next) {
+            (CataInvalidation::FullAuthority, _) | (_, CataInvalidation::None) => {}
+            (_, CataInvalidation::FullAuthority) => *current = CataInvalidation::FullAuthority,
+            (CataInvalidation::None, CataInvalidation::Selective(refnos)) => {
+                *current = CataInvalidation::Selective(refnos)
+            }
+            (CataInvalidation::Selective(existing), CataInvalidation::Selective(refnos)) => {
+                existing.extend(refnos);
+                existing.sort_unstable();
+                existing.dedup();
+            }
+        }
+    }
+
+    pub async fn cata_invalidation(&self) -> crate::fast_model::cata_cache::CataInvalidation {
+        self.cata_invalidation.lock().await.clone()
     }
 
     pub async fn defer_spatial_refresh(&self, refnos: &[aios_core::RefnoEnum]) {
@@ -194,6 +221,16 @@ where
 
 pub(crate) fn active_staging_writes() -> Option<StagingWriteContext> {
     STAGING_WRITES.try_with(Clone::clone).ok()
+}
+
+pub(crate) async fn defer_cata_invalidation(
+    invalidation: crate::fast_model::cata_cache::CataInvalidation,
+) -> bool {
+    let Some(context) = active_staging_writes() else {
+        return false;
+    };
+    context.defer_cata_invalidation(invalidation).await;
+    true
 }
 
 pub(crate) async fn register_staged_finalize(finalize: StagedFinalize) -> anyhow::Result<bool> {

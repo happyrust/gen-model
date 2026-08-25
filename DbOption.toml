@@ -242,6 +242,9 @@ room_key_word = ["-RM"]
 
 #debug_root_refnos = ["24381_46952"]
 gen_history_model = false
+cata_cache_max_bytes = 33554432
+cata_cache_max_entries = 16384
+cata_cache_max_entry_bytes = 4194304
 #debug_root_refnos = ["17496/201375"]
 # debug_root_refnos = []
 

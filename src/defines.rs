@@ -21,8 +21,6 @@ lazy_static! {
     pub static ref CACHED_MDB_SITE_MAP: RwLock<HashMap<RefU64, PdmsElementVec>> =
         RwLock::new(HashMap::new());
     pub static ref CACHED_PLIN_MAP: CacheMgr<RString> = CacheMgr::new("PLIN_CACHE", false);
-    pub static ref CACHED_SCOM_INFO_MAP: CacheMgr<ScomInfo> =
-        CacheMgr::new("SCOM_INFO_CACHE", true);
 }
 
 #[derive(Serialize, Deserialize, Deref, DerefMut, Clone, Default, Eq, Hash, PartialEq)]

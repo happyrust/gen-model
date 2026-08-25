@@ -70,6 +70,7 @@ pub struct ActiveStagedWindow {
         >,
     >,
     root_locks: Arc<tokio::sync::Mutex<HeldRootLocks>>,
+    cata_invalidation: Arc<tokio::sync::Mutex<crate::fast_model::cata_cache::CataInvalidation>>,
 }
 
 /// 建窗前的一次性写回兼容门（2026-08-19 phase-1 审计）。
@@ -197,6 +198,7 @@ pub async fn create_window_on(
     let regen_settlements = Arc::new(tokio::sync::Mutex::new(Vec::new()));
     let mysql_changes = Arc::new(tokio::sync::Mutex::new(None));
     let root_locks = Arc::new(tokio::sync::Mutex::new(HeldRootLocks::default()));
+    let cata_invalidation = Arc::new(tokio::sync::Mutex::new(Default::default()));
     Ok(ActiveStagedWindow {
         meta,
         db: instance.clone(),
@@ -207,6 +209,7 @@ pub async fn create_window_on(
         regen_settlements,
         mysql_changes,
         root_locks,
+        cata_invalidation,
     })
 }
 
@@ -346,6 +349,7 @@ impl ActiveStagedWindow {
             self.regen_settlements.clone(),
             self.mysql_changes.clone(),
             self.root_locks.clone(),
+            self.cata_invalidation.clone(),
         )
     }
 
@@ -452,7 +456,13 @@ impl ActiveStagedWindow {
             .await
             .context("staged window has no registered finalize state")?;
         let render = self.render_finalize_tail().await?;
-        self.commit_to(target, &render.window_batches, Some(&render.tail))
+        let invalidation = self.cata_invalidation.lock().await.clone();
+        crate::fast_model::cata_cache::global_cache()
+            .commit_and_publish(
+                crate::fast_model::cata_cache::current_authority(),
+                invalidation,
+                self.commit_to(target, &render.window_batches, Some(&render.tail)),
+            )
             .await?;
         if !finalize.cache_refnos.is_empty() {
             aios_core::clear_all_caches_batch(&finalize.cache_refnos).await;
@@ -552,11 +562,6 @@ impl ActiveStagedWindow {
 
     /// 终态清理（提交成功或废弃共用）：DROP 本窗口的 database 并出册。
     pub async fn drop_database(self) -> anyhow::Result<()> {
-        if let Some(finalize) = self.staged_finalize().await
-            && !finalize.cache_refnos.is_empty()
-        {
-            aios_core::clear_all_caches_batch(&finalize.cache_refnos).await;
-        }
         let label = self.meta.label.clone();
         let result = self
             .db
