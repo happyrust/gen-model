@@ -1,0 +1,933 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>AIOS 数据库 · 增量运行监控</title>
+<!-- 相对路径：从 /assets/ops.html 打过来正好是部署目录里那个 favicon，省掉每次开页面一条 404 -->
+<link rel="icon" href="favicon.ico">
+<style>
+:root{
+  --bg:#0A0B0C; --panel:#101315; --line:#1A1E22; --edge:#23282C; --head:#15191C;
+  --t1:#E9EDEF; --t2:#98A2A8; --t3:#646E74;
+  --blue:#4AA8D8; --red:#E0625E; --amber:#D2A34E; --green:#5CA97F;
+  --track:#FFFFFF0D;
+  --sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,"Cascadia Mono",Consolas,"SFMono-Regular",monospace;
+}
+*,::before,::after{box-sizing:border-box}
+html,body{margin:0;background:var(--bg)}
+body{
+  font-family:var(--sans); color:var(--t1);
+  -webkit-font-smoothing:antialiased;
+  font-size:13px;
+}
+.page{max-width:1440px;margin:0 auto;padding:26px 30px;display:flex;flex-direction:column;gap:18px}
+.mono{font-family:var(--mono)}
+.blue{color:var(--blue)} .red{color:var(--red)} .amber{color:var(--amber)}
+.green{color:var(--green)} .mut{color:var(--t3)} .sec{color:var(--t2)}
+
+/* ── header ─────────────────────────────────────────────── */
+.hdr{display:flex;align-items:center;justify-content:space-between;padding-bottom:4px;gap:20px;flex-wrap:wrap}
+.hdr h1{font-size:19px;font-weight:600;letter-spacing:.2px;margin:0 0 5px}
+.hdr .endpoint{font-family:var(--mono);font-size:11.5px;color:var(--t3)}
+.hdr-right{display:flex;align-items:center;gap:18px}
+.live{display:flex;align-items:center;gap:7px;font-size:12px;color:var(--t2)}
+.pulse{width:7px;height:7px;border-radius:50%;background:var(--blue);animation:beat 2s ease-in-out infinite}
+.pulse.bad{background:var(--red);animation:none}
+@keyframes beat{0%,100%{opacity:1}50%{opacity:.25}}
+@media(prefers-reduced-motion:reduce){.pulse{animation:none}}
+
+/* ── verdict ────────────────────────────────────────────── */
+.verdict{
+  display:flex;gap:20px;background:var(--panel);border-radius:8px;
+  border-left:3px solid var(--red);padding:20px 24px 20px 22px;
+}
+.verdict.lv-ok{border-left-color:var(--green)}
+.verdict.lv-run{border-left-color:var(--blue)}
+.verdict.lv-warn{border-left-color:var(--amber)}
+.verdict.lv-bad,.verdict.lv-down{border-left-color:var(--red)}
+.verdict-body{flex:1;display:flex;flex-direction:column;gap:10px;min-width:0}
+.verdict-meta{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.verdict-line{font-size:25px;font-weight:600;letter-spacing:-.2px;line-height:34px}
+.verdict-detail{font-size:13px;color:var(--t2);line-height:21px}
+.verdict-timer{display:flex;flex-direction:column;align-items:flex-end;gap:4px;padding-top:2px;white-space:nowrap}
+.verdict-timer .lbl{font-size:11px;letter-spacing:.6px;color:var(--t3)}
+.verdict-timer .val{font-family:var(--mono);font-size:30px;font-weight:500}
+.verdict-timer .since{font-family:var(--mono);font-size:11px;color:var(--t3)}
+.chip{display:inline-block;border-radius:4px;padding:3px 9px;font-size:11px;font-weight:600;letter-spacing:.6px}
+.chip.red{background:#E0625E1F;color:var(--red)}
+.chip.amber{background:#D2A34E1F;color:var(--amber)}
+.chip.blue{background:#4AA8D81F;color:var(--blue)}
+.chip.green{background:#5CA97F1F;color:var(--green)}
+.chip.mut{background:#646E7426;color:var(--t3)}
+.chip.sm{padding:3px 8px;font-size:10.5px;letter-spacing:.4px}
+
+/* ── actions ────────────────────────────────────────────── */
+.acts{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-top:4px}
+.btn{
+  font:inherit;font-size:12px;line-height:1;color:var(--t2);background:transparent;
+  border:1px solid var(--edge);border-radius:5px;padding:7px 13px;cursor:pointer;
+  transition:border-color .12s,color .12s,background-color .12s;
+}
+.btn:hover:not(:disabled){color:var(--t1);border-color:#3A4247;background:#FFFFFF08}
+.btn:disabled{opacity:.35;cursor:default}
+.btn.go{color:var(--blue);border-color:#4AA8D840}
+.btn.go:hover:not(:disabled){background:#4AA8D814;border-color:var(--blue)}
+.btn.warn{color:var(--amber);border-color:#D2A34E40}
+.btn.warn:hover:not(:disabled){background:#D2A34E14;border-color:var(--amber)}
+.acts .req{font-family:var(--mono);font-size:11.5px;color:var(--t2)}
+.acts .hint{font-size:11.5px;color:var(--t3)}
+.acts-msg{font-size:12px;line-height:19px;padding-top:2px;word-break:break-word}
+.acts-msg.ok{color:var(--green)} .acts-msg.err{color:var(--red)} .acts-msg.info{color:var(--t2)}
+
+/* ── kpi ────────────────────────────────────────────────── */
+.kpi{display:flex;padding:10px 0 12px}
+.kpi>div{flex:1 1 0;display:flex;flex-direction:column;gap:7px;min-width:0}
+.kpi>div+div{border-left:1px solid var(--line);padding-left:22px}
+.kpi .l{font-size:11px;letter-spacing:.7px;color:var(--t3)}
+.kpi .v{font-family:var(--mono);font-size:23px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.kpi .s{font-family:var(--mono);font-size:11px;color:var(--t3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* ── panels ─────────────────────────────────────────────── */
+.mid{display:flex;gap:20px;align-items:stretch}
+.mid>.col-l{flex:1 1 880px;min-width:0;display:flex}
+.mid>.col-l>.panel{flex:1;display:flex;flex-direction:column}
+.mid>.col-r{flex:0 1 480px;min-width:0;display:flex;flex-direction:column;gap:20px}
+.panel{background:var(--panel);border:1px solid var(--edge);border-radius:8px;overflow:hidden}
+.panel-head{display:flex;align-items:center;justify-content:space-between;gap:14px;padding:15px 18px 13px}
+.panel-head .t{font-size:13.5px;font-weight:600;letter-spacing:.4px}
+.panel-head .n{font-family:var(--mono);font-size:11px;color:var(--t3);margin-left:9px}
+.panel-head .src{font-family:var(--mono);font-size:10.5px;color:var(--t3);white-space:nowrap}
+.panel-head .sub{font-size:11.5px;color:var(--t3);margin-top:6px;line-height:17px}
+
+/* ── grid tables ────────────────────────────────────────── */
+.tbl{display:grid;font-size:12.5px}
+.tbl>.r{display:grid;grid-template-columns:inherit;grid-column:1/-1;align-items:center;padding:0 18px;border-bottom:1px solid var(--line)}
+.tbl>.r:last-child{border-bottom:0}
+.tbl>.r.h{background:var(--head);border-top:1px solid var(--line);height:29px}
+.tbl>.r.h>span{font-size:10.5px;font-weight:600;letter-spacing:.7px;color:var(--t3)}
+.tbl>.r>*{padding-right:12px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tbl>.r>*:last-child{padding-right:0}
+.q-tbl{grid-template-columns:86px minmax(84px,120px) 120px 100px 74px 66px minmax(200px,1fr)}
+.q-tbl>.r{height:44px}
+.t-tbl{grid-template-columns:minmax(90px,1fr) 62px 88px 52px}
+.t-tbl>.r{height:37px}
+.w-tbl{grid-template-columns:90px minmax(110px,140px) 84px 126px minmax(150px,1fr) 70px minmax(230px,360px)}
+.w-tbl>.r{height:46px}
+.dbn{font-family:var(--mono);font-size:13.5px;font-weight:500}
+.state{display:flex;align-items:center;gap:9px;min-width:0}
+.dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto}
+.note{font-size:11.5px;color:var(--t3);overflow:hidden;text-overflow:ellipsis}
+.empty{padding:26px 18px 30px;color:var(--t3);font-size:12.5px;text-align:center;line-height:20px}
+
+/* ── failure ledger ─────────────────────────────────────── */
+.fail{display:flex;flex-direction:column;gap:15px;padding:0 18px 16px}
+.fail+.fail{border-top:1px solid var(--line);padding-top:15px}
+.fail-id{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.fail-id .db{font-family:var(--mono);font-size:17px;font-weight:500}
+.streak-head{display:flex;justify-content:space-between;font-size:11.5px;color:var(--t3);margin-bottom:8px}
+.segs{display:flex;gap:4px;width:100%}
+.segs>i{flex:1;height:4px;border-radius:2px;background:var(--track)}
+.segs>i.on{background:var(--red)}
+.segs>i.on.amber{background:var(--amber)}
+.reason{font-size:12px;color:var(--t2);line-height:20px;word-break:break-word;white-space:normal}
+.times{display:flex}
+.times>div{flex:1;display:flex;flex-direction:column;gap:5px}
+.times .l{font-size:10.5px;letter-spacing:.5px;color:var(--t3)}
+.times .v{font-family:var(--mono);font-size:12.5px;color:var(--t2)}
+.unblock{border-top:1px solid var(--line);padding-top:14px;display:flex;flex-direction:column;gap:9px}
+.unblock .l{font-size:11px;letter-spacing:.6px;color:var(--t3)}
+.unblock .u{display:flex;gap:10px}
+.unblock .u .n{font-family:var(--mono);font-size:11px;color:var(--t3);width:18px;flex:0 0 auto}
+.unblock .u .x{font-size:12px;color:var(--t2);line-height:18px}
+
+/* ── watermark ──────────────────────────────────────────── */
+.track{display:block;height:5px;border-radius:3px;background:var(--track);overflow:hidden;max-width:480px}
+.track>i{display:block;height:100%;border-radius:3px;background:var(--green)}
+.track>i.red{background:var(--red)} .track>i.amber{background:var(--amber)}
+.track>i.blue{background:var(--blue)} .track>i.mut{background:var(--t3)}
+.marks{display:flex;align-items:center;gap:9px;min-width:0}
+.wm-toggle{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--t3);cursor:pointer;user-select:none}
+.wm-toggle input{accent-color:var(--blue);cursor:pointer;margin:0}
+
+/* ── system strip ───────────────────────────────────────── */
+.sysbar{display:flex;flex-wrap:wrap;gap:0 26px;padding:2px 0}
+.sysbar>span{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--t3);white-space:nowrap}
+.sysbar b{font-family:var(--mono);font-weight:400;color:var(--t2)}
+.sysbar .bad b,.sysbar .bad{color:var(--red)}
+.sysbar .warn b{color:var(--amber)}
+
+/* ── footer ─────────────────────────────────────────────── */
+.foot{display:flex;align-items:center;justify-content:space-between;gap:18px;padding-top:6px;flex-wrap:wrap}
+.legend{display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+.legend>span{display:flex;align-items:center;gap:7px;font-size:11.5px;color:var(--t3)}
+.foot-note{font-family:var(--mono);font-size:10.5px;color:var(--t3)}
+
+@media(max-width:1180px){
+  .mid{flex-direction:column}
+  .mid>.col-l,.mid>.col-r{flex:1 1 auto;width:100%}
+  .kpi{flex-wrap:wrap;gap:16px 0}
+  .kpi>div{flex:1 1 33%}
+  .verdict-line{font-size:21px;line-height:29px}
+}
+</style>
+</head>
+<body>
+<div class="page">
+
+  <div class="hdr">
+    <div>
+      <h1>AIOS 数据库 · 增量运行监控</h1>
+      <div class="endpoint" id="endpoint">—</div>
+    </div>
+    <div class="hdr-right">
+      <div class="live"><span class="pulse" id="pulse"></span><span id="poll-label">轮询 2s · 水位 6s</span></div>
+      <div class="endpoint" id="updated">连接中…</div>
+    </div>
+  </div>
+
+  <div class="verdict lv-run" id="verdict">
+    <div class="verdict-body">
+      <div class="verdict-meta">
+        <span class="chip mut" id="v-chip">连接中</span>
+        <span class="chip amber" id="v-warn" hidden></span>
+        <span class="mono mut" id="v-path" style="font-size:11.5px"></span>
+      </div>
+      <div class="verdict-line" id="v-line">正在读取 /api/v1/health …</div>
+      <div class="verdict-detail" id="v-detail"></div>
+      <div class="acts" id="acts" hidden></div>
+      <div class="acts-msg" id="acts-msg" hidden></div>
+    </div>
+    <div class="verdict-timer" id="v-timer" hidden>
+      <div class="lbl" id="v-tlabel">已阻断</div>
+      <div class="val mono" id="v-tval">—</div>
+      <div class="since" id="v-tsince"></div>
+    </div>
+  </div>
+
+  <div class="kpi" id="kpi"></div>
+
+  <div class="mid">
+    <div class="col-l">
+      <div class="panel">
+        <div class="panel-head">
+          <div style="display:flex;align-items:baseline">
+            <span class="t">队列</span><span class="n" id="q-count">—</span>
+          </div>
+          <span class="src">GET /api/v1/queue</span>
+        </div>
+        <div id="q-body"></div>
+      </div>
+    </div>
+    <div class="col-r">
+      <div class="panel">
+        <div class="panel-head">
+          <span class="t">熔断 · 连败账本</span>
+          <span class="src">GET /health → batch_failures</span>
+        </div>
+        <div id="f-body"></div>
+      </div>
+      <div class="panel">
+        <div class="panel-head">
+          <span class="t">最近任务</span>
+          <span class="src">GET /api/v1/tasks</span>
+        </div>
+        <div id="t-body"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head" style="align-items:flex-start">
+      <div style="min-width:0">
+        <div style="display:flex;align-items:baseline"><span class="t">水位 · 每库应用进度</span></div>
+        <div class="sub">applied_sesno 追平 file_latest_sesno 才算真落库——屏障解开、blockers 清空都证明不了数据到位。</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
+        <span class="src">GET /api/v1/dbnums</span>
+        <label class="wm-toggle"><input type="checkbox" id="wm-all"><span id="wm-all-label">显示范围外的库</span></label>
+      </div>
+    </div>
+    <div id="w-body"></div>
+  </div>
+
+  <div class="sysbar" id="sysbar"></div>
+
+  <div class="foot">
+    <div class="legend">
+      <span><i class="dot" style="background:var(--green)"></i>已追平</span>
+      <span><i class="dot" style="background:var(--blue)"></i>进行中</span>
+      <span><i class="dot" style="background:var(--amber)"></i>等待 / 异常</span>
+      <span><i class="dot" style="background:var(--red)"></i>阻断</span>
+      <span><i class="dot" style="background:var(--t3)"></i>已排除</span>
+    </div>
+    <div class="foot-note" id="foot-note"></div>
+  </div>
+
+</div>
+
+<script>
+"use strict";
+
+const qs = new URLSearchParams(location.search);
+const BASE = (qs.get("api") || "/api/v1").replace(/\/+$/, "");
+const FAST_MS = num(qs.get("interval"), 2000);
+const SLOW_EVERY = 3;            // /dbnums 每 3 个周期拉一次
+const REQ_TIMEOUT = 8000;
+const MAX_ATTEMPTS = 5;          // model_update_pending::MAX_ATTEMPTS
+
+const WRITE = !qs.has("readonly");
+
+const S = {
+  health:null, queue:null, dbnums:null, tasks:null,
+  lastOk:0, lastErr:"", errSince:0, tick:0, startedAt:null, blockedSince:0,
+  // 写操作：pending 是「已点、等二次确认」的那一条，msg 是上一次调用的回执。
+  act:{ pending:null, busy:false, msg:null, level:"", at:0 },
+};
+
+/* ── helpers ────────────────────────────────────────────── */
+function num(v, d){ const n = parseInt(v, 10); return Number.isFinite(n) && n > 0 ? n : d; }
+function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
+function $(id){ return document.getElementById(id); }
+
+// RFC3339 的小数秒可能有 9 位，超出 JS 解析约定，截到 3 位再交给 Date。
+function ts(s){
+  if(!s) return 0;
+  const t = Date.parse(String(s).replace(/(\.\d{3})\d+/, "$1"));
+  return Number.isFinite(t) ? t : 0;
+}
+function clock(s){
+  const t = typeof s === "number" ? s : ts(s);
+  if(!t) return "—";
+  return new Date(t).toTimeString().slice(0, 8);
+}
+function dur(ms){
+  if(!Number.isFinite(ms) || ms < 0) return "—";
+  const s = Math.floor(ms / 1000), h = Math.floor(s / 3600);
+  const m = String(Math.floor(s % 3600 / 60)).padStart(2, "0");
+  const ss = String(s % 60).padStart(2, "0");
+  return h ? `${h}:${m}:${ss}` : `${m}:${ss}`;
+}
+function n(v){ return Number(v || 0).toLocaleString("zh-CN"); }
+function pct(applied, latest){
+  if(!(latest > 0)) return applied > 0 ? 100 : 0;
+  return Math.max(0, Math.min(100, applied / latest * 100));
+}
+function phaseOf(dbType){
+  const t = String(dbType || "").trim().toUpperCase();
+  if(t === "SYST" || t === "DICT" || t === "GLB" || t === "GLOB") return "meta";
+  if(t === "CATA") return "catalogue";
+  return t ? "design" : "—";
+}
+// D:\AVEVA\Projects\E3D3.1\<项目>\<ams000>\<文件>
+function projOf(row){
+  const m = String(row.file_path || "").match(/[\\/]([^\\/]+)[\\/][^\\/]+[\\/][^\\/]+$/);
+  return m ? m[1] : (row.file_name || "—");
+}
+const ANOMALY = { rollback:"回退", path_migrated:"路径迁移", type_changed:"类型变更", duplicate:"重复文件", missing:"文件缺失" };
+
+async function get(path){
+  const c = new AbortController();
+  const timer = setTimeout(() => c.abort(), REQ_TIMEOUT);
+  try{
+    const r = await fetch(BASE + path, { signal:c.signal, cache:"no-store", headers:{ accept:"application/json" } });
+    if(!r.ok) throw new Error(`HTTP ${r.status}`);
+    return await r.json();
+  } finally { clearTimeout(timer); }
+}
+
+async function post(path, body){
+  const c = new AbortController();
+  const timer = setTimeout(() => c.abort(), 30000);
+  try{
+    const r = await fetch(BASE + path, {
+      method:"POST", signal:c.signal, cache:"no-store",
+      headers:{ "content-type":"application/json", accept:"application/json" },
+      body:JSON.stringify(body ?? {}),
+    });
+    const text = await r.text();
+    let data = null;
+    try{ data = text ? JSON.parse(text) : null; }catch{ /* 非 JSON 错误体照原文报 */ }
+    if(!r.ok){
+      // 服务端统一错误信封：{ code, message, detail }
+      throw new Error(data?.message ? `${data.code ?? r.status}: ${data.message}` : `HTTP ${r.status} ${text.slice(0, 200)}`);
+    }
+    return data;
+  } finally { clearTimeout(timer); }
+}
+
+/* ── write actions ──────────────────────────────────────── */
+// 每一条都自带二次确认要展示的那行请求，点第一下只是把它亮出来。
+const ACTIONS = {
+  pause:  { label:"暂停出队", req:"POST /api/v1/queue/pause", cls:"warn",
+            hint:"只挡出队；正在跑的那条会跑完",
+            run:async () => `队列已暂停（paused = ${(await post("/queue/pause")).paused}）。正在跑的批次不受影响。` },
+  resume: { label:"恢复出队", req:"POST /api/v1/queue/resume", cls:"go",
+            hint:"立即唤醒 worker",
+            run:async () => `队列已恢复（paused = ${(await post("/queue/resume")).paused}）。` },
+  execute:{ label:"立即执行", req:"POST /api/v1/update/execute", cls:"go",
+            hint:"全范围扫描 + 入队，顺带清掉连败账",
+            run:async () => {
+              const r = await post("/update/execute", {});
+              const n0 = a => Array.isArray(a) ? a.length : (a ?? 0);
+              const parts = [`扫描 ${r.scanned ?? 0}`, `入队 ${n0(r.enqueued)}`, `合并 ${n0(r.merged)}`,
+                `已覆盖 ${n0(r.already_covered)}`, `阻断 ${n0(r.blocked)}`, `已最新 ${n0(r.up_to_date)}`];
+              const warn = (r.warnings || []).length ? ` · warnings: ${r.warnings.join("；")}` : "";
+              const blocked = (r.blocked || []).map(b => `${b.dbnum}（${b.reason}）`).join("、");
+              return `202 入队回执 — ${parts.join(" · ")}${blocked ? `。阻断的库：${blocked}` : ""}${warn}`;
+            } },
+  retry:  { label:"重试模型死信", req:"POST /api/v1/update/pending-units/retry", cls:"warn",
+            hint:"model_update_pending：一次复活一行；目标从 /pending-units 取，不猜",
+            // 确认前先把真实目标取回来 —— health 的 blocking_samples 给的是记录 id
+            // 形态（24381_145800），retry 认的是 PDMS a/b（root_refno）。
+            resolve:async () => {
+              const units = (await get("/update/pending-units"))?.units || [];
+              const dead = units.filter(u => (u.attempts ?? 0) >= MAX_ATTEMPTS);
+              if(!dead.length) throw new Error(`/pending-units 里没有 attempts ≥ ${MAX_ATTEMPTS} 的行，没有可复活的死信`);
+              const u = dead[0];
+              return { target_refno:u.root_refno,
+                       note:`${dead.length} 条死信，先复活 ${u.root_refno}（${u.noun || "?"} · dbnum ${u.dbnum} · attempts ${u.attempts}）`,
+                       body:{ target_refno:u.root_refno } };
+            },
+            run:async (ctx) => {
+              const r = await post("/update/pending-units/retry", ctx.body);
+              return `已复活 ${r.target_refno}（action = ${r.action ?? "regen_root"}，status = ${r.status}）。revision +1、attempts 归零，等 worker 捡走。`;
+            } },
+  // 副作用补偿队列（SystDerived / RefRevMaintain）的到顶死信。跟上面那个不同：
+  // 服务端一次全捞，不用挑行，body 可空。spatial 无视上限、不在复活范围里。
+  sideRetry:{ label:"复活副作用死信", req:"POST /api/v1/update/side-effects/retry", cls:"warn",
+            hint:"side_effect_pending：一次全捞，attempts 归零回 pending；spatial 不动",
+            run:async () => {
+              const r = await post("/update/side-effects/retry", {});
+              const k = Number(r.revived || 0);
+              return k
+                ? `已复活 ${n(k)} 行副作用补偿 —— attempts 归零回 pending，worker 已叫醒，等下一轮 drain 取走。`
+                : "202，但一行都没复活 —— 当前没有 attempts 到顶的副作用死信。";
+            } },
+};
+
+function setMsg(text, level){ Object.assign(S.act, { msg:text, level, at:Date.now() }); }
+
+async function act(key){
+  const a = ACTIONS[key];
+  if(!a || S.act.busy) return;
+  if(S.act.pending?.key !== key){
+    // 第一下：只把要发的请求亮出来等确认。
+    S.act.pending = { key, ctx:null };
+    if(a.resolve){
+      S.act.busy = true; setMsg("正在取目标清单…", "info"); render();
+      try{ S.act.pending.ctx = await a.resolve(); setMsg(S.act.pending.ctx.note, "info"); }
+      catch(e){ S.act.pending = null; setMsg(String(e.message || e), "err"); }
+      finally{ S.act.busy = false; }
+    } else setMsg(null, "");
+    render();
+    return;
+  }
+  const ctx = S.act.pending.ctx;
+  S.act.pending = null; S.act.busy = true; setMsg("发送中…", "info"); render();
+  try{ setMsg(await a.run(ctx), "ok"); }
+  catch(e){ setMsg(String(e.message || e), "err"); }
+  finally{ S.act.busy = false; }
+  render();
+  try{ await cycle(); render(); }catch{ /* 下一轮轮询会补上 */ }
+}
+
+function renderActions(m){
+  const row = $("acts"), msg = $("acts-msg");
+  if(!WRITE){ row.hidden = true; msg.hidden = true; return; }
+  row.hidden = false;
+
+  const p = S.act.pending;
+  if(p && !S.act.busy){
+    const a = ACTIONS[p.key];
+    row.innerHTML = `<span class="req">${esc(a.req)}${p.ctx ? " " + esc(JSON.stringify(p.ctx.body)) : ""}</span>`
+      + `<button class="btn ${a.cls}" data-act="${esc(p.key)}">确认</button>`
+      + `<button class="btn" data-act="cancel">取消</button>`;
+  }else{
+    const paused = !!(m.h && m.h.queue_paused);
+    const dead = Number(m.mup.dead_letters || 0);
+    const sepDead = Number((m.h && m.h.side_effect_pending && m.h.side_effect_pending.dead_letters) || 0);
+    const live = !!m.h && !S.act.busy;
+    const btn = (key, on, extra) => {
+      const a = ACTIONS[key];
+      return `<button class="btn ${a.cls}" data-act="${key}"${on ? "" : " disabled"} title="${esc(a.req + " — " + a.hint)}">${esc(a.label)}${extra || ""}</button>`;
+    };
+    row.innerHTML = btn("pause", live && !paused) + btn("resume", live && paused)
+      + btn("execute", live)
+      + btn("retry", live && dead > 0, dead > 1 ? ` <span class="hint">${dead}</span>` : "")
+      + btn("sideRetry", live && sepDead > 0, sepDead > 1 ? ` <span class="hint">${sepDead}</span>` : "")
+      + `<span class="hint">${S.act.busy ? "处理中…" : "点一下亮出请求，再点确认才发"}</span>`;
+  }
+  // 回执留 25 秒，别在墙上一直挂着。
+  const fresh = S.act.msg && Date.now() - S.act.at < 25000;
+  msg.hidden = !fresh;
+  if(fresh){ msg.className = "acts-msg " + S.act.level; msg.textContent = S.act.msg; }
+}
+
+/* ── poll ───────────────────────────────────────────────── */
+async function cycle(){
+  const wantSlow = S.tick % SLOW_EVERY === 0 || !S.dbnums;
+  const jobs = [get("/health"), get("/queue"), get("/tasks?limit=12")];
+  if(wantSlow) jobs.push(get("/dbnums"));
+  const [h, q, t, d] = await Promise.allSettled(jobs);
+
+  if(h.status === "fulfilled"){
+    // 进程重启后队列是按水位重建的，队列里的「已等」要从重启起算。
+    const st = h.value?.started_at;
+    if(st && S.startedAt && st !== S.startedAt) S.blockedSince = 0;
+    S.startedAt = st || S.startedAt;
+    S.health = h.value; S.lastOk = Date.now(); S.errSince = 0; S.lastErr = "";
+  }else{
+    S.lastErr = String(h.reason?.message || h.reason || "请求失败");
+    if(!S.errSince) S.errSince = Date.now();
+  }
+  if(q.status === "fulfilled") S.queue = q.value;
+  if(t.status === "fulfilled") S.tasks = t.value;
+  if(d && d.status === "fulfilled") S.dbnums = d.value;
+  S.tick++;
+}
+
+async function loop(){
+  for(;;){
+    try{ await cycle(); }catch(e){ S.lastErr = String(e && e.message || e); if(!S.errSince) S.errSince = Date.now(); }
+    try{ render(); }catch(e){ console.error(e); }
+    await new Promise(r => setTimeout(r, FAST_MS));
+  }
+}
+
+/* ── derived ────────────────────────────────────────────── */
+function model(){
+  const h = S.health || null;
+  const init = (h && h.initialization) || {};
+  const rows = (S.queue && S.queue.rows) || [];
+  const tasks = (S.tasks && S.tasks.tasks) || [];
+  const dbs = (S.dbnums && S.dbnums.dbnums) || [];
+  const byTask = new Map(tasks.map(t => [t.task_id, t]));
+  const byDb = new Map(dbs.map(r => [r.dbnum, r]));
+
+  const failures = Object.entries((h && h.batch_failures) || {})
+    .map(([db, v]) => ({ dbnum:Number(db), ...v }))
+    .sort((a, b) => (b.parked - a.parked) || (b.streak - a.streak));
+  const parked = failures.filter(f => f.parked);
+
+  const inScope = dbs.filter(r => !r.excluded && !r.not_in_project);
+  const lagging = inScope.filter(r => r.file_latest_sesno > r.applied_sesno)
+    .sort((a, b) => (b.file_latest_sesno - b.applied_sesno) - (a.file_latest_sesno - a.applied_sesno));
+
+  const running = rows.filter(r => r.state === "running");
+  const queued  = rows.filter(r => r.state === "queued");
+  const held    = rows.filter(r => r.state === "held");
+  const blockedPhase = (S.queue && S.queue.blocked_by_phase) || init.current_phase || null;
+  const blockedRows = rows.filter(r => r.blocked_by_phase);
+
+  const mup = (h && h.model_update_pending) || {};
+  return { h, init, rows, tasks, dbs, byTask, byDb, failures, parked, inScope, lagging,
+           running, queued, held, blockedPhase, blockedRows, mup };
+}
+
+// 队列行的入队时刻只在 /tasks 里，靠 task_id 对回来。
+function enqueuedAt(m, row){ return ts(m.byTask.get(row.task_id)?.created_at); }
+
+function verdict(m){
+  const now = Date.now();
+  if(!m.h){
+    return { lv:"down", chip:["red","断连"], path:BASE + "/health",
+      line:"读不到 /api/v1/health —— 服务没起、端口不对，或这台机器过不去",
+      detail:esc(S.lastErr.replace(/[。.\s]+$/, "")) + "。页面会一直重试；确认端口后可以用 ?api=http://主机:端口/api/v1 指过去。",
+      timer:S.errSince ? { label:"已断连", val:dur(now - S.errSince), since:clock(S.errSince), cls:"red" } : null };
+  }
+  // SurrealDB 断了的话，下面所有数字都只是最后一次写成功时的样子——先说这个。
+  const sul = m.h.sul_db;
+  if(sul && sul.connected === false){
+    return { lv:"bad", chip:["red","库断连"], path:`sul_db.endpoint = ${sul.endpoint ?? "—"}`,
+      line:`SurrealDB 连不上 —— 水位、队列、pending 都写不进去`,
+      detail:esc(`累计断连 ${n(sul.disconnects_total)} 次${sul.last_disconnect_at ? `，最近一次 ${clock(sul.last_disconnect_at)}` : ""}${sul.last_disconnect_error ? `：${sul.last_disconnect_error}` : ""}。这一页下面的数字是最后一次读成功时的样子。`),
+      timer:sul.last_disconnect_at ? { label:"已断连", val:dur(now - ts(sul.last_disconnect_at)), since:clock(sul.last_disconnect_at), cls:"red" } : null };
+  }
+  const st = m.init.status;
+  const blockers = m.init.blockers || [];
+  const isBlocked = st === "blocked" || blockers.length > 0 || m.parked.length > 0;
+  const path = `initialization.status = ${st ?? "—"} · current_phase = ${m.init.current_phase ?? "null"}`;
+
+  if(isBlocked){
+    const phase = m.blockedPhase || "—";
+    const culprit = m.parked[0] || m.failures[0] || null;
+    const starved = m.blockedRows.slice().sort((a, b) => (enqueuedAt(m, a) || now) - (enqueuedAt(m, b) || now))[0];
+    const since = Math.min(
+      ...[culprit && ts(culprit.first_at), starved && enqueuedAt(m, starved)].filter(Boolean)
+    );
+    if(since && Number.isFinite(since) && (!S.blockedSince || since < S.blockedSince)) S.blockedSince = since;
+
+    const who = culprit ? `dbnum=${culprit.dbnum}` : (blockers[0] ? "blocker" : "未知来源");
+    const line = starved
+      ? `${phase} 阶段被 ${who} 焊住，${starved.dbnum} 的 ${starved.start_sesno}–${starved.end_sesno} 号会话饿死在屏障后面`
+      : `${phase} 阶段被 ${who} 焊住，屏障后面暂时没有排队的批次`;
+    const detail = culprit
+      ? `${culprit.dbnum} 连败 ${culprit.streak} 次，五次重跑期间文件右端 sesno 始终停在 ${culprit.end_sesno}，熔断已 park。周期对账不会自动解除——只有文件长出新会话、人工 POST /update/execute、或进程重启三条路。`
+      : (blockers[0] || "manifest 记了 blocker，阶段不就绪。");
+    return { lv:"bad", chip:["red","阻断"], path, line, detail:esc(detail),
+      timer:S.blockedSince ? { label:"已阻断", val:dur(now - S.blockedSince), since:clock(S.blockedSince), cls:"red" } : null };
+  }
+  S.blockedSince = 0;
+
+  if(m.h.queue_paused){
+    return { lv:"warn", chip:["amber","暂停"], path,
+      line:`队列已暂停 —— 不再出队，正在跑的 ${m.running.length} 条会跑完为止`,
+      detail:"标志持久化在 queue_control:main，活过重启。恢复：POST /api/v1/queue/resume。",
+      timer:null };
+  }
+  // 两个 stalled 不是一回事：spatial 无视 attempts 上限、会一直重放，等得起；
+  // 副作用队列到顶就成死信，被 drain 挡在候选集外，不人工复活永远回不来。
+  // 读库失败那一支也把 stalled 立成真、dead_letters 留 0 —— 那时「有没有死信」是未知，
+  // 不能当成「没有」。
+  const sep = m.h.side_effect_pending || {};
+  const sepDead = Number(sep.dead_letters || 0);
+  const spatial = m.h.spatial_reconcile || {};
+  if(sepDead > 0 || sep.stalled || spatial.stalled){
+    const kinds = Object.entries(sep.by_kind || {})
+      .filter(([, v]) => Number(v && v.dead_letters) > 0)
+      .map(([k, v]) => `${k} ${v.dead_letters} 条`);
+    // spatial 只在副作用队列当主角时才作为附注出现，不然就是它自己那一句。
+    const aside = spatial.stalled && (sepDead > 0 || sep.stalled)
+      ? `空间对账另有行重试超过 ${MAX_ATTEMPTS} 次；它无视上限、会一直重放，不在复活按钮的范围里。` : "";
+    const why = e => e ? `最近一条：${e}。` : "";
+    const line = sepDead > 0
+      ? `副作用队列有 ${sepDead} 条死信（attempts ≥ ${MAX_ATTEMPTS}）—— 数据批次照跑，派生结果不再更新`
+      : sep.stalled
+        ? "副作用队列这一段读不出来 —— 有没有死信现在是未知的"
+        : `空间对账有行重试超过 ${MAX_ATTEMPTS} 次 —— 房间指针还没收口`;
+    const detail = sepDead > 0
+      ? `${kinds.length ? kinds.join(" · ") + "。" : ""}到顶死信被 drain 挡在候选集外，周期重试不会把它们捡回来；复活 = attempts 归零回 pending。${why(sep.last_error)}${aside}`
+      : sep.stalled
+        ? `${why(sep.last_error) || "health 里只给了 stalled 标志，没给原因；去控制台翻日志。"}死信数这一轮读不到，不代表是零 —— 按钮先不亮，等下一轮读回来。${aside}`
+        : `${why(spatial.last_error)}空间对账无视 attempts 上限、会一直重放，复活按钮不管它；真卡住要去控制台翻日志。`;
+    return { lv:"warn", chip:["amber","停摆"], path, line, detail:esc(detail), timer:null };
+  }
+  const dl = Number(m.mup.dead_letters || 0);
+  if(dl > 0){
+    const sample = (m.mup.blocking_samples || [])[0];
+    return { lv:"warn", chip:["amber","降级"], path,
+      line:`模型持久工作有 ${dl} 条死信（attempts ≥ ${MAX_ATTEMPTS}），模型门关着`,
+      detail:esc(sample ? `样例 ${sample.action} ${sample.target_refno}：${sample.last_error}` : (m.h.blocking_conditions || []).join(" · ")),
+      timer:null };
+  }
+  if(m.running.length){
+    const r = m.running[0], t0 = ts(m.byTask.get(r.task_id)?.started_at) || enqueuedAt(m, r);
+    return { lv:"run", chip:["blue","进行中"], path,
+      line:`正在追平：${r.dbnum} 应用 ${r.start_sesno}–${r.end_sesno}${m.queued.length ? `，后面还排着 ${m.queued.length} 条` : "，队列里没有别的了"}`,
+      detail:`${m.lagging.length ? `范围内还有 ${m.lagging.length} 个库落后。` : "落后的库都在这一批里。"}水位追平前，屏障解开不代表数据到位。`,
+      timer:t0 ? { label:"已运行", val:dur(now - t0), since:clock(t0), cls:"blue" } : null };
+  }
+  if(m.lagging.length){
+    const w = m.lagging[0];
+    return { lv:"warn", chip:["amber","等待"], path,
+      line:`${m.lagging.length} 个库落后但队列是空的 —— 等下一轮对账把它们发现回来`,
+      detail:`落后最多的是 ${w.dbnum}（${w.applied_sesno} → ${w.file_latest_sesno}）。对账周期默认 300s；要立刻开跑就 POST /api/v1/update/execute。`,
+      timer:null };
+  }
+  if(m.held.length){
+    return { lv:"warn", chip:["amber","挂起"], path,
+      line:`${m.held.length} 条重扫积压挂在队里，等对应的库真的来一次增量`,
+      detail:"held 行不会被派发，它只是把「这个库有欠账」记在明面上。",
+      timer:null };
+  }
+  // 水位齐、队列空，引擎却还在跑模型阶段。模型阶段不进 /queue，上面那些判据一个
+  // 都碰不到它，落到绿灯就成了「全好了」——而 initialization 自己还写着 model_running。
+  if(m.init.model_in_flight || m.init.status === "model_running"){
+    return { lv:"run", chip:["blue","进行中"], path,
+      line:`水位已齐，模型还在生成 —— ${m.inScope.length} 个库全部追平，模型阶段没跑完`,
+      detail:`模型阶段不进 /queue、也没有自己的进度接口，这一行的依据只有 initialization.status；跑到哪了要去控制台看。待重试 ${n(m.mup.retryable)} 条、死信 ${n(m.mup.dead_letters)} 条。`,
+      timer:null };
+  }
+  return { lv:"ok", chip:["green","已追平"], path,
+    line:`范围内 ${m.inScope.length} 个库全部追平 —— applied_sesno == file_latest_sesno`,
+    detail:`待重试 ${n(m.mup.retryable)} 条、死信 ${n(m.mup.dead_letters)} 条。水位是唯一不会骗人的指标：重启会把 batch_failures 和 blockers 清空，但确定性失败会再来一遍。`,
+    timer:null };
+}
+
+/* ── render ─────────────────────────────────────────────── */
+function render(){
+  const m = model(), now = Date.now();
+  const stale = S.lastOk && now - S.lastOk > FAST_MS * 3;
+
+  $("endpoint").textContent = [location.host, `epoch ${m.init.epoch_id ?? "—"}`, BASE].filter(Boolean).join(" · ");
+  $("pulse").className = "pulse" + (S.errSince || stale ? " bad" : "");
+  $("updated").textContent = S.errSince
+    ? `断连 ${dur(now - S.errSince)}${S.lastOk ? " · 下方为最后一次成功读数" : ""}`
+    : (S.lastOk ? `最后刷新 ${clock(S.lastOk)}${S.startedAt ? ` · 服务 ${clock(S.startedAt)} 启动` : ""}` : "连接中…");
+
+  const v = verdict(m);
+  $("verdict").className = "verdict lv-" + v.lv;
+  $("v-chip").className = "chip " + v.chip[0];
+  $("v-chip").textContent = v.chip[1];
+  $("v-path").textContent = v.path;
+  $("v-line").textContent = v.line;
+  $("v-detail").innerHTML = v.detail;
+
+  // health 的子查询超时/失败时，页面上的数字可能是旧的——这条得跟判决同框，
+  // 因为它会和任何一种判决同时成立。
+  const degraded = (m.h && m.h.degraded_sections) || [];
+  const warnChip = $("v-warn");
+  warnChip.hidden = !(degraded.length || (stale && S.lastOk));
+  if(!warnChip.hidden){
+    warnChip.textContent = degraded.length
+      ? `health 有 ${degraded.length} 段读不出来：${degraded.join(" / ")}`
+      : `读数已停 ${dur(now - S.lastOk)}`;
+  }
+  const tm = $("v-timer");
+  tm.hidden = !v.timer;
+  if(v.timer){
+    $("v-tlabel").textContent = v.timer.label;
+    $("v-tval").textContent = v.timer.val;
+    $("v-tval").className = "val mono " + v.timer.cls;
+    $("v-tsince").textContent = "since " + v.timer.since;
+  }
+
+  renderKpi(m);
+  renderQueue(m, now);
+  renderFailures(m);
+  renderTasks(m, now);
+  renderWatermark(m);
+  renderSysbar(m);
+  renderActions(m);
+}
+
+// 一行「底层还活着吗」：这些字段平时全是灰的，出事时才有颜色。
+function renderSysbar(m){
+  if(!m.h){ $("sysbar").innerHTML = ""; return; }
+  const sul = m.h.sul_db || {};
+  const tree = m.h.spatial_tree || {};
+  const pe = m.h.parse_errors;
+  const sep = m.h.side_effect_pending || {};
+  const cell = (label, value, level) =>
+    `<span class="${level || ""}"><span>${esc(label)}</span><b>${esc(value)}</b></span>`;
+
+  $("sysbar").innerHTML = [
+    cell("SurrealDB", sul.connected === false ? "断连"
+      : `${sul.endpoint ?? "已连接"}${sul.ping_ms != null ? ` · ${sul.ping_ms}ms` : ""}`,
+      sul.connected === false ? "bad" : (sul.disconnects_total ? "warn" : "")),
+    sul.disconnects_total ? cell("累计断连", `${sul.disconnects_total} 次`, "warn") : "",
+    cell("worker", m.h.worker_alive === false ? "已停"
+      : `alive · idle ${m.h.worker_idle_secs ?? "—"}s`, m.h.worker_alive === false ? "bad" : ""),
+    tree.state || tree.drift ? cell("空间树", tree.drift ? `漂移 file ${tree.file_epoch} ≠ db ${tree.db_epoch}`
+      : `${tree.state} · ${n(tree.entries)} 条`, tree.drift ? "warn" : "") : "",
+    pe && pe.total ? cell("解析错误", `${n(pe.total)} 类 · ${n(pe.occurrences)} 次`, "warn") : "",
+    // 死信数会被别的判决盖过去（库断连、阻断都排在前面），这一格保证它始终露脸。
+    sep.dead_letters || sep.failed || sep.stalled
+      ? cell("副作用队列", sep.dead_letters ? `死信 ${n(sep.dead_letters)}`
+          : (sep.stalled ? "读不出来" : `failed ${n(sep.failed)}`),
+        sep.dead_letters || sep.stalled ? "bad" : "warn") : "",
+    m.h.queue_paused ? cell("队列", "已暂停", "warn") : "",
+    cell("epoch", `${m.init.epoch_id ?? "—"} · ${m.init.status ?? "—"}`),
+  ].filter(Boolean).join("");
+}
+
+function kpiCell(label, value, cls, sub){
+  return `<div><div class="l">${esc(label)}</div><div class="v ${cls}">${esc(value)}</div><div class="s">${esc(sub)}</div></div>`;
+}
+function renderKpi(m){
+  const lag = m.lagging[0];
+  const worst = m.parked[0] || m.failures[0];
+  $("kpi").innerHTML =
+    kpiCell("队列积压", m.rows.length || 0,
+      m.rows.length ? (m.blockedRows.length ? "red" : "amber") : "mut",
+      `${m.queued.length} queued · ${m.running.length} running${m.held.length ? ` · ${m.held.length} held` : ""}`) +
+    kpiCell("阶段屏障", m.blockedPhase || "无",
+      m.blockedPhase ? "red" : "mut", "Meta < Catalogue < Design") +
+    kpiCell("熔断 park", worst ? worst.dbnum : "无",
+      m.parked.length ? "red" : (m.failures.length ? "amber" : "mut"),
+      worst ? `streak ${worst.streak}/${MAX_ATTEMPTS}${m.failures.length > 1 ? ` · 共 ${m.failures.length} 库` : ""}` : "batch_failures = null") +
+    kpiCell("水位落后", m.lagging.length || 0,
+      m.lagging.length ? "amber" : "green",
+      lag ? `${lag.dbnum} ${lag.applied_sesno} → ${lag.file_latest_sesno}` : `${m.inScope.length} 个库在范围内`) +
+    kpiCell("待重试 / 死信", `${n(m.mup.retryable)} / ${n(m.mup.dead_letters)}`,
+      Number(m.mup.dead_letters || 0) ? "red" : (Number(m.mup.retryable || 0) ? "amber" : "mut"),
+      "model_update_pending");
+}
+
+const Q_STATE = {
+  running:{ cls:"blue",  note:() => "worker 执行中" },
+  queued: { cls:"amber", note:r => r.blocked_by_phase ? `blocked_by_phase: ${r.blocked_by_phase}` : "等待出队" },
+  held:   { cls:"amber", note:() => "重扫积压，等这个库真的来一次增量" },
+};
+function renderQueue(m, now){
+  $("q-count").textContent = `${m.rows.length} 条` + (S.queue && S.queue.paused ? " · 已暂停" : "");
+  if(!m.rows.length){
+    $("q-body").innerHTML = `<div class="empty">${S.queue ? "队列是空的 —— 没有待应用的数据批次。<br>下一轮对账（默认 300s）会重新扫描水位。" : "读不到 /queue"}</div>`;
+    return;
+  }
+  const head = `<div class="r h"><span>dbnum</span><span>项目</span><span>任务</span><span>会话区间</span><span>入队</span><span>已等</span><span>状态</span></div>`;
+  const body = m.rows.map(r => {
+    const task = m.byTask.get(r.task_id);
+    const db = m.byDb.get(r.dbnum);
+    const enq = enqueuedAt(m, r);
+    const blocked = !!r.blocked_by_phase;
+    const meta = Q_STATE[r.state] || { cls:"mut", note:() => r.state };
+    const cls = blocked ? "red" : meta.cls;
+    const waited = enq ? dur(now - enq) : "—";
+    return `<div class="r">
+      <span class="dbn">${esc(r.dbnum)}</span>
+      <span class="sec" title="${esc(db?.file_path || r.db_type || "")}">${esc(task?.project || (db && projOf(db)) || "—")}</span>
+      <span class="mono sec" style="font-size:11.5px">${esc(r.intent)}</span>
+      <span class="mono sec" style="font-size:12px">${esc(r.start_sesno)} – ${esc(r.end_sesno)}</span>
+      <span class="mono mut" style="font-size:11.5px">${esc(clock(enq))}</span>
+      <span class="mono ${cls}" style="font-size:12.5px">${esc(waited)}</span>
+      <span class="state"><i class="dot" style="background:var(--${cls})"></i><span class="mono ${cls}" style="font-size:12px">${esc(r.state)}</span><span class="note">${esc(meta.note(r))}</span></span>
+    </div>`;
+  }).join("");
+  $("q-body").innerHTML = `<div class="tbl q-tbl">${head}${body}</div>`;
+}
+
+const UNBLOCK = [
+  "文件右端长出新会话，账自动作废",
+  "POST /update/execute — 同时 reset_batch_failure",
+  "进程重启 — 账本在进程内，但确定性失败会重现",
+];
+function renderFailures(m){
+  if(!m.failures.length){
+    $("f-body").innerHTML = `<div class="empty">${S.health ? "batch_failures = null —— 本进程内没有连败记录。<br>注意：重启就会清空，它不是「从没失败过」的证据。" : "读不到 /health"}</div>`;
+    return;
+  }
+  const db = new Map(m.dbs.map(r => [r.dbnum, r]));
+  $("f-body").innerHTML = m.failures.slice(0, 2).map(f => {
+    const row = db.get(f.dbnum);
+    const cls = f.parked ? "red" : "amber";
+    const segs = Array.from({ length:MAX_ATTEMPTS }, (_, i) =>
+      `<i class="${i < f.streak ? "on " + (f.parked ? "" : "amber") : ""}"></i>`).join("");
+    const gap = ts(f.last_at) - ts(f.first_at);
+    return `<div class="fail">
+      <div class="fail-id">
+        <span class="db">dbnum ${esc(f.dbnum)}</span>
+        <span class="chip sm ${cls}">${f.parked ? "park" : "失败中"}</span>
+        <span class="mut" style="font-size:12px">${esc(row ? `${projOf(row)} · ${row.db_type || "?"} 库` : "不在当前项目清单里")}</span>
+      </div>
+      <div>
+        <div class="streak-head"><span>连续失败</span><span class="mono ${cls}">${esc(f.streak)} / ${MAX_ATTEMPTS}${f.parked ? " 已达 MAX_ATTEMPTS" : ""}</span></div>
+        <div class="segs">${segs}</div>
+      </div>
+      <div class="reason">原因 = ${esc(f.reason || "（未记录）")}${f.end_sesno != null ? `<br>连败期间文件右端 sesno 停在 ${esc(f.end_sesno)}。` : ""}</div>
+      <div class="times">
+        <div><span class="l">first_at</span><span class="v">${esc(clock(f.first_at))}</span></div>
+        <div><span class="l">last_at</span><span class="v">${esc(clock(f.last_at))}</span></div>
+        <div><span class="l">跨度</span><span class="v">${esc(gap > 0 ? dur(gap) : "—")}</span></div>
+      </div>
+      ${f.parked ? `<div class="unblock"><div class="l">解除路径（三选一）</div>${
+        UNBLOCK.map((t, i) => `<div class="u"><span class="n">0${i + 1}</span><span class="x">${esc(t)}</span></div>`).join("")
+      }</div>` : ""}
+    </div>`;
+  }).join("") + (m.failures.length > 2
+    ? `<div class="empty" style="padding:0 18px 16px">另有 ${m.failures.length - 2} 个库有连败记录，见 /health → batch_failures</div>` : "");
+}
+
+const T_STATE = { running:"blue", queued:"amber", succeeded:"green", partial:"amber", failed:"red", yielded:"mut" };
+function renderTasks(m, now){
+  // 排队中的行队列面板已经列了，这里只讲「跑过什么、结果如何」。
+  const rows = m.tasks.filter(t => t.state !== "queued")
+    .sort((a, b) => ts(b.started_at || b.created_at) - ts(a.started_at || a.created_at))
+    .slice(0, 5);
+  if(!rows.length){
+    $("t-body").innerHTML = `<div class="empty">${S.tasks
+      ? (m.tasks.length ? "还没有跑完的任务 —— 队列里的都在等出队。" : "任务表是空的。<br>它是进程内的 UI 视图，重启即清空。")
+      : "读不到 /tasks"}</div>`;
+    return;
+  }
+  const byTaskRow = new Map(m.rows.map(r => [r.task_id, r]));
+  $("t-body").innerHTML = `<div class="tbl t-tbl">` + rows.map(t => {
+    const cls = T_STATE[t.state] || "mut";
+    const t0 = ts(t.started_at || t.created_at);
+    const t1 = ts(t.finished_at) || (t.state === "running" ? now : 0);
+    const label = byTaskRow.get(t.task_id)?.intent || t.kind;
+    const span = t.start_sesno != null ? ` ${t.start_sesno}–${t.end_sesno}` : "";
+    return `<div class="r">
+      <span class="mono sec" style="font-size:11.5px" title="${esc(t.task_id + " · " + t.kind + span)}">${esc(label)}</span>
+      <span class="mono sec" style="font-size:12px">${esc(t.dbnum ?? "—")}</span>
+      <span class="state"><i class="dot" style="width:5px;height:5px;background:var(--${cls})"></i><span class="mono ${cls}" style="font-size:11.5px">${esc(t.state)}</span></span>
+      <span class="mono mut" style="font-size:11.5px">${esc(t0 && t1 ? dur(t1 - t0) : "—")}</span>
+    </div>`;
+  }).join("") + `</div>`;
+}
+
+function renderWatermark(m){
+  const showAll = $("wm-all").checked;
+  const out = m.dbs.filter(r => r.excluded || r.not_in_project);
+  $("wm-all-label").textContent = `显示范围外的库（${out.length}）`;
+  const running = new Set(m.running.map(r => r.dbnum));
+  const parked = new Map(m.failures.map(f => [f.dbnum, f]));
+
+  const rank = r => {
+    if(r.blocked) return 0;
+    if(r.anomaly || (!r.initialized && !r.not_in_project)) return 1;
+    if(running.has(r.dbnum)) return 2;
+    if(r.file_latest_sesno > r.applied_sesno) return 3;
+    if(r.excluded || r.not_in_project) return 5;
+    return 4;
+  };
+  const list = (showAll ? m.dbs : m.inScope).slice().sort((a, b) =>
+    rank(a) - rank(b) ||
+    (b.file_latest_sesno - b.applied_sesno) - (a.file_latest_sesno - a.applied_sesno) ||
+    a.dbnum - b.dbnum);
+
+  if(!list.length){
+    $("w-body").innerHTML = `<div class="empty">${S.dbnums ? "范围内没有库 —— 当前 MDB 没有声明任何 DESI。" : "读不到 /dbnums"}</div>`;
+    return;
+  }
+  const head = `<div class="r h"><span>dbnum</span><span>项目</span><span>阶段</span><span>applied / latest</span><span>进度</span><span>落后</span><span>标记</span></div>`;
+  const body = list.map(r => {
+    const lag = r.file_latest_sesno - r.applied_sesno;
+    const isRun = running.has(r.dbnum);
+    const outOfScope = r.excluded || r.not_in_project;
+    // 回退 / 缺失 / 重复 / 类型变更下 applied÷latest 没有意义，画满会被读成「已完成」。
+    const meaningful = !r.anomaly || r.anomaly.kind === "path_migrated";
+    const cls = r.blocked ? "red"
+      : isRun ? "blue"
+      : (r.anomaly || (!r.initialized && !r.not_in_project)) ? "amber"
+      : outOfScope ? "mut"
+      : lag > 0 ? "amber" : "green";
+
+    const chips = [];
+    if(r.blocked) chips.push(`<span class="chip sm red">阻断</span>`);
+    if(r.anomaly) chips.push(`<span class="chip sm amber">${esc(ANOMALY[r.anomaly.kind] || r.anomaly.kind)}</span>`);
+    if(r.excluded) chips.push(`<span class="chip sm mut">已排除</span>`);
+    if(r.not_in_project) chips.push(`<span class="chip sm mut">不在项目</span>`);
+    if(!r.initialized && !r.not_in_project) chips.push(`<span class="chip sm amber">未初始化</span>`);
+
+    const pk = parked.get(r.dbnum);
+    const note = pk ? `park · ${pk.reason || "连败到上限"}`
+      : isRun ? "worker 执行中"
+      : r.anomaly ? (r.anomaly.kind === "rollback"
+          ? `文件右端 ${r.file_latest_sesno} 落在水位 ${r.applied_sesno} 后面，下一轮按整库重建入队`
+          : "异常已判定，这个库不入队")
+      : !r.initialized && !r.not_in_project ? "从没导入过，等首次全量"
+      : r.not_in_project ? "登记表里有，项目里没有"
+      : r.excluded ? "当前 MDB 没有声明，不参与对账"
+      : lag > 0 ? `落后 ${lag} 个会话` : "已追平";
+
+    return `<div class="r">
+      <span class="dbn">${esc(r.dbnum)}</span>
+      <span class="sec" title="${esc(r.file_path || "")}">${esc(projOf(r))}</span>
+      <span class="mono mut" style="font-size:11.5px">${esc(phaseOf(r.db_type))}</span>
+      <span class="mono sec" style="font-size:12.5px">${esc(r.applied_sesno)} / ${esc(r.file_latest_sesno)}</span>
+      <span><span class="track"><i class="${cls}" style="width:${(meaningful ? pct(r.applied_sesno, r.file_latest_sesno) : 0).toFixed(1)}%"></i></span></span>
+      <span class="mono ${lag > 0 ? cls : "mut"}" style="font-size:12.5px">${lag > 0 ? esc(lag) : "—"}</span>
+      <span class="marks">${chips.join("")}<span class="note" title="${esc(note)}">${esc(note)}</span></span>
+    </div>`;
+  }).join("");
+  $("w-body").innerHTML = `<div class="tbl w-tbl">${head}${body}</div>`;
+}
+
+$("wm-all").addEventListener("change", () => { try{ render(); }catch(e){ console.error(e); } });
+$("acts").addEventListener("click", e => {
+  const key = e.target.closest("button")?.dataset.act;
+  if(!key) return;
+  if(key === "cancel"){ S.act.pending = null; setMsg(null, ""); render(); return; }
+  act(key);
+});
+$("poll-label").textContent = `轮询 ${FAST_MS / 1000}s · 水位 ${FAST_MS * SLOW_EVERY / 1000}s`;
+$("foot-note").textContent = (WRITE ? `${Object.keys(ACTIONS).length} 个写操作带二次确认 · 给客户看请加 ?readonly=1` : "只读视图 · 写操作已关闭")
+  + " · /assets/ops.html · 同源轮询，不改 Rust、不重启服务";
+loop();
+</script>
+</body>
+</html>
