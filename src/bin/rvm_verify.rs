@@ -654,11 +654,8 @@ mod tests {
     fn mesh_pair_file_is_loaded_into_the_runtime_pair_set() {
         let temp = tempfile::tempdir().expect("tempdir");
         let path = temp.path().join("pairs.json");
-        std::fs::write(
-            &path,
-            r#"[{"group":"/HVAC-BRANCH","refno":"24381/47000"}]"#,
-        )
-        .expect("write pair file");
+        std::fs::write(&path, r#"[{"group":"/HVAC-BRANCH","refno":"24381/47000"}]"#)
+            .expect("write pair file");
 
         let pairs = load_pairs(&[], Some(&path)).expect("load pair file");
         assert_eq!(

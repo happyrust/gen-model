@@ -79,7 +79,8 @@ pub fn gen_sphere(radius: f32, stacks: u32, slices: u32) -> PlantMesh {
 
 // ─── Snout (frustum / cone) ─────────────────────────────────────────────────
 
-/// 圆锥台（Snout），底面在 z = -h/2，顶面在 z = h/2。
+/// RVM/libgm 圆锥台（Snout）：底面在 y = -h/2，顶面在 y = h/2，
+/// 圆周位于 X/Z 平面。
 ///
 /// `r_bottom` / `r_top` 允许为 0（退化为圆锥）。
 ///
@@ -119,16 +120,16 @@ pub fn gen_snout(
         let (sin_t, cos_t) = theta.sin_cos();
 
         // 底面点（偏移的另一半，反号）
-        let pb = Vec3::new(r_bottom * cos_t - ox, r_bottom * sin_t - oy, -h2);
+        let pb = Vec3::new(r_bottom * cos_t - ox, -h2, r_bottom * sin_t - oy);
         // 顶面点
-        let pt = Vec3::new(r_top * cos_t + ox, r_top * sin_t + oy, h2);
+        let pt = Vec3::new(r_top * cos_t + ox, h2, r_top * sin_t + oy);
 
         // 侧面法线近似：沿径向，考虑锥角
         let dr = r_bottom - r_top;
         let lateral_len = (dr * dr + height * height).sqrt();
         let nx = height / lateral_len * cos_t;
-        let ny = height / lateral_len * sin_t;
-        let nz = dr / lateral_len;
+        let ny = dr / lateral_len;
+        let nz = height / lateral_len * sin_t;
         let n = Vec3::new(nx, ny, nz);
 
         vertices.push(pb);
@@ -145,48 +146,48 @@ pub fn gen_snout(
         let b1 = base + 2;
         let t1 = base + 3;
         if r_bottom > f32::EPSILON {
-            indices.extend_from_slice(&[b0, b1, t0]);
+            indices.extend_from_slice(&[b0, t0, b1]);
         }
         if r_top > f32::EPSILON {
-            indices.extend_from_slice(&[t0, b1, t1]);
+            indices.extend_from_slice(&[t0, t1, b1]);
         }
     }
 
     // 底面 cap（r_bottom > 0）
     if r_bottom > f32::EPSILON {
         let center_idx = vertices.len() as u32;
-        vertices.push(Vec3::new(-ox, -oy, -h2));
-        normals.push(Vec3::NEG_Z);
+        vertices.push(Vec3::new(-ox, -h2, -oy));
+        normals.push(Vec3::NEG_Y);
         for i in 0..segments {
             let theta = i as f32 * step;
             let (sin_t, cos_t) = theta.sin_cos();
-            vertices.push(Vec3::new(r_bottom * cos_t - ox, r_bottom * sin_t - oy, -h2));
-            normals.push(Vec3::NEG_Z);
-        }
-        for i in 0..segments {
-            let a = center_idx;
-            let b = center_idx + 1 + i;
-            let c = center_idx + 1 + (i + 1) % segments;
-            indices.extend_from_slice(&[a, c, b]);
-        }
-    }
-
-    // 顶面 cap（r_top > 0）
-    if r_top > f32::EPSILON {
-        let center_idx = vertices.len() as u32;
-        vertices.push(Vec3::new(ox, oy, h2));
-        normals.push(Vec3::Z);
-        for i in 0..segments {
-            let theta = i as f32 * step;
-            let (sin_t, cos_t) = theta.sin_cos();
-            vertices.push(Vec3::new(r_top * cos_t + ox, r_top * sin_t + oy, h2));
-            normals.push(Vec3::Z);
+            vertices.push(Vec3::new(r_bottom * cos_t - ox, -h2, r_bottom * sin_t - oy));
+            normals.push(Vec3::NEG_Y);
         }
         for i in 0..segments {
             let a = center_idx;
             let b = center_idx + 1 + i;
             let c = center_idx + 1 + (i + 1) % segments;
             indices.extend_from_slice(&[a, b, c]);
+        }
+    }
+
+    // 顶面 cap（r_top > 0）
+    if r_top > f32::EPSILON {
+        let center_idx = vertices.len() as u32;
+        vertices.push(Vec3::new(ox, h2, oy));
+        normals.push(Vec3::Y);
+        for i in 0..segments {
+            let theta = i as f32 * step;
+            let (sin_t, cos_t) = theta.sin_cos();
+            vertices.push(Vec3::new(r_top * cos_t + ox, h2, r_top * sin_t + oy));
+            normals.push(Vec3::Y);
+        }
+        for i in 0..segments {
+            let a = center_idx;
+            let b = center_idx + 1 + i;
+            let c = center_idx + 1 + (i + 1) % segments;
+            indices.extend_from_slice(&[a, c, b]);
         }
     }
 
@@ -205,7 +206,8 @@ pub fn gen_snout(
 /// 斜端柱：标准圆柱被底部/顶部斜切平面截断。
 ///
 /// `btm_angles[0]` = 绕 Y 的底面切角, `btm_angles[1]` = 绕 X 的底面切角（弧度）。
-/// `top_angles` 同理。底面在 z=0，顶面在 z=height。
+/// `top_angles` 同理。和 libgm `GM_SlopeEndCyl` 一样，底/顶轴心分别位于
+/// z=-height/2 与 z=+height/2；目录关系矩阵摆放的是原语中心，不是底面。
 pub fn gen_slope_ended_cylinder(
     radius: f32,
     height: f32,
@@ -220,8 +222,11 @@ pub fn gen_slope_ended_cylinder(
     let mut normals = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
-    // 底面 z = f(x,y) = -tan(a0)*x + tan(a1)*y  (切角平面截断)
-    // 顶面 z = height + tan(a0)*x - tan(a1)*y
+    // libgm 3.1 GM_SlopeEndCyl::calcRange (0x1009D910) and the vertex builder
+    // at 0x1009DA90 use +/-height/2 before adding the two shear planes.
+    let half_height = height * 0.5;
+    // 底面 z = -height/2 - tan(a0)*x + tan(a1)*y
+    // 顶面 z = +height/2 + tan(a0)*x - tan(a1)*y
     let btm_tan = [btm_angles[0].tan(), btm_angles[1].tan()];
     let top_tan = [top_angles[0].tan(), top_angles[1].tan()];
 
@@ -233,8 +238,8 @@ pub fn gen_slope_ended_cylinder(
         let x = radius * cos_t;
         let y = radius * sin_t;
 
-        let z_btm = -btm_tan[0] * x + btm_tan[1] * y;
-        let z_top = height + top_tan[0] * x - top_tan[1] * y;
+        let z_btm = -half_height - btm_tan[0] * x + btm_tan[1] * y;
+        let z_top = half_height + top_tan[0] * x - top_tan[1] * y;
 
         let n = Vec3::new(cos_t, sin_t, 0.0);
         vertices.push(Vec3::new(x, y, z_btm));
@@ -253,7 +258,7 @@ pub fn gen_slope_ended_cylinder(
     {
         let btm_n = Vec3::new(btm_tan[0], -btm_tan[1], -1.0).normalize();
         let center_idx = vertices.len() as u32;
-        let z_center = 0.0f32;
+        let z_center = -half_height;
         vertices.push(Vec3::new(0.0, 0.0, z_center));
         normals.push(btm_n);
         for i in 0..segments {
@@ -261,7 +266,7 @@ pub fn gen_slope_ended_cylinder(
             let (sin_t, cos_t) = theta.sin_cos();
             let x = radius * cos_t;
             let y = radius * sin_t;
-            let z = -btm_tan[0] * x + btm_tan[1] * y;
+            let z = -half_height - btm_tan[0] * x + btm_tan[1] * y;
             vertices.push(Vec3::new(x, y, z));
             normals.push(btm_n);
         }
@@ -277,7 +282,7 @@ pub fn gen_slope_ended_cylinder(
     {
         let top_n = Vec3::new(-top_tan[0], top_tan[1], 1.0).normalize();
         let center_idx = vertices.len() as u32;
-        let z_center = height;
+        let z_center = half_height;
         vertices.push(Vec3::new(0.0, 0.0, z_center));
         normals.push(top_n);
         for i in 0..segments {
@@ -285,7 +290,7 @@ pub fn gen_slope_ended_cylinder(
             let (sin_t, cos_t) = theta.sin_cos();
             let x = radius * cos_t;
             let y = radius * sin_t;
-            let z = height + top_tan[0] * x - top_tan[1] * y;
+            let z = half_height + top_tan[0] * x - top_tan[1] * y;
             vertices.push(Vec3::new(x, y, z));
             normals.push(top_n);
         }
@@ -905,12 +910,12 @@ pub fn gen_pyramid(
     }
 }
 
-/// RVM/libgm CATA 棱台：轴向沿 Y，形体中心位于原点，矩形宽度沿 X/Z。
+/// RVM CATA 棱台的 PlantMesh 适配坐标：底面位于 Y=0，顶面位于 Y=`height`，
+/// 矩形宽度沿 X/Z，`xoff`/`zoff` 是顶面中心相对底面中心的完整偏移。
 ///
-/// `xoff`/`zoff` 是顶面中心相对底面中心的完整偏移，因此底面中心为
-/// `-offset/2`，顶面中心为 `+offset/2`。这与 libgm 2.10/3.1
-/// `GM_Pyramid::calcFacets` 的顶点公式一致；CATA 关系变换已经放在上下端面的轴向中点，
-/// 这里再次从 Y=0 起步会把整个实体错移半高、并把偏移错移半量。
+/// libgm 内部 `GM_Pyramid` 使用中心化的 X/Y/Z 坐标，但 RVM/CATA 到 PlantMesh 的
+/// 关系矩阵还包含轴和原点适配。不能把 libgm 内部顶点公式直接重复套在这个适配层；
+/// 7997 的组件级 A/B 证明中心化适配会令通过数从 22/29 退化到 14/29。
 pub fn gen_rvm_pyramid(
     xbot: f32,
     zbot: f32,
@@ -925,20 +930,17 @@ pub fn gen_rvm_pyramid(
     let bz = snap(zbot / 2.0);
     let tx = snap(xtop / 2.0);
     let tz = snap(ztop / 2.0);
-    let half_height = height / 2.0;
-    let half_xoff = xoff / 2.0;
-    let half_zoff = zoff / 2.0;
     let b = [
-        Vec3::new(-half_xoff - bx, -half_height, -half_zoff - bz),
-        Vec3::new(-half_xoff + bx, -half_height, -half_zoff - bz),
-        Vec3::new(-half_xoff + bx, -half_height, -half_zoff + bz),
-        Vec3::new(-half_xoff - bx, -half_height, -half_zoff + bz),
+        Vec3::new(-bx, 0.0, -bz),
+        Vec3::new(bx, 0.0, -bz),
+        Vec3::new(bx, 0.0, bz),
+        Vec3::new(-bx, 0.0, bz),
     ];
     let t = [
-        Vec3::new(half_xoff - tx, half_height, half_zoff - tz),
-        Vec3::new(half_xoff + tx, half_height, half_zoff - tz),
-        Vec3::new(half_xoff + tx, half_height, half_zoff + tz),
-        Vec3::new(half_xoff - tx, half_height, half_zoff + tz),
+        Vec3::new(xoff - tx, height, zoff - tz),
+        Vec3::new(xoff + tx, height, zoff - tz),
+        Vec3::new(xoff + tx, height, zoff + tz),
+        Vec3::new(xoff - tx, height, zoff + tz),
     ];
 
     let mut vertices = Vec::new();
@@ -1040,8 +1042,8 @@ mod tests {
         assert_solid_mesh(&mesh, "snout frustum");
         assert_bounds(
             &mesh,
-            Vec3::new(-2.0, -2.0, -1.5),
-            Vec3::new(2.0, 2.0, 1.5),
+            Vec3::new(-2.0, -1.5, -2.0),
+            Vec3::new(2.0, 1.5, 2.0),
             "snout frustum",
         );
         let exact = PI * h * (rb * rb + rb * rt + rt * rt) / 3.0;
@@ -1054,8 +1056,8 @@ mod tests {
         assert_solid_mesh(&mesh, "snout cone");
         assert_bounds(
             &mesh,
-            Vec3::new(-2.0, -2.0, -1.5),
-            Vec3::new(2.0, 2.0, 1.5),
+            Vec3::new(-2.0, -1.5, -2.0),
+            Vec3::new(2.0, 1.5, 2.0),
             "snout cone",
         );
         assert_volume(&mesh, PI * 4.0 * 3.0 / 3.0, 0.02, "snout cone");
@@ -1071,8 +1073,8 @@ mod tests {
         // 顶圈半径 1 加半偏移仍落在底圈之内，包围盒由底圈决定。
         assert_bounds(
             &mesh,
-            Vec3::new(-rb - ox / 2.0, -rb - oy / 2.0, -h / 2.0),
-            Vec3::new(rb - ox / 2.0, rb - oy / 2.0, h / 2.0),
+            Vec3::new(-rb - ox / 2.0, -h / 2.0, -rb - oy / 2.0),
+            Vec3::new(rb - ox / 2.0, h / 2.0, rb - oy / 2.0),
             "snout eccentric",
         );
         // 卡瓦列里原理：偏心只平移每层截面，不改变体积
@@ -1096,14 +1098,14 @@ mod tests {
         // 环心取该端顶点的包围盒中点，不取形心：缝合线上的 θ=0 顶点与 cap 的中心点都是
         // 刻意复制出来的，形心会被它们带偏（实测偏 0.34 mm，够把这条断言变成噪声）。
         // 48 段能整除 4，cos/sin 的四个极值都恰好落在采样点上，中点就是精确环心。
-        let ring_center = |want_z: f32| -> Vec3 {
+        let ring_center = |want_y: f32| -> Vec3 {
             let pts: Vec<Vec3> = mesh
                 .vertices
                 .iter()
                 .copied()
-                .filter(|v| (v.z - want_z).abs() < 1e-3)
+                .filter(|v| (v.y - want_y).abs() < 1e-3)
                 .collect();
-            assert!(!pts.is_empty(), "z = {want_z} 这一端一个顶点都没有");
+            assert!(!pts.is_empty(), "y = {want_y} 这一端一个顶点都没有");
             let lo = pts.iter().copied().fold(Vec3::splat(f32::MAX), Vec3::min);
             let hi = pts.iter().copied().fold(Vec3::splat(f32::MIN), Vec3::max);
             (lo + hi) / 2.0
@@ -1114,26 +1116,40 @@ mod tests {
         let tol = 1e-2;
 
         assert!(
-            bottom.abs_diff_eq(Vec3::new(-ox / 2.0, -oy / 2.0, -h / 2.0), tol),
-            "底圈中心 {bottom} 不在 (-XOFF/2, -YOFF/2, -h/2)——偏移八成又整个压在顶面了"
+            bottom.abs_diff_eq(Vec3::new(-ox / 2.0, -h / 2.0, -oy / 2.0), tol),
+            "底圈中心 {bottom} 不在 (-XOFF/2, -h/2, -YOFF/2)——偏移八成又整个压在顶面了"
         );
         assert!(
-            top.abs_diff_eq(Vec3::new(ox / 2.0, oy / 2.0, h / 2.0), tol),
-            "顶圈中心 {top} 不在 (+XOFF/2, +YOFF/2, +h/2)"
+            top.abs_diff_eq(Vec3::new(ox / 2.0, h / 2.0, oy / 2.0), tol),
+            "顶圈中心 {top} 不在 (+XOFF/2, +h/2, +YOFF/2)"
         );
         // 上面两条已经蕴含它，但把「两端相对位移仍是整个偏移」单独钉住：
         // 改成各摊一半不是把偏心量减半，锥面的倾斜没变。
         assert!(
-            (top - bottom)
-                .truncate()
+            glam::Vec2::new((top - bottom).x, (top - bottom).z)
                 .abs_diff_eq(glam::Vec2::new(ox, oy), tol),
             "两端相对位移 {} 不等于整个 (XOFF, YOFF)",
-            (top - bottom).truncate()
+            glam::Vec2::new((top - bottom).x, (top - bottom).z)
         );
 
         // 摆位改了，体积不能跟着变（卡瓦列里）
         let exact = PI * h * (rb * rb + rb * rt + rt * rt) / 3.0;
         assert_volume(&mesh, exact, 0.01, "snout offset split");
+    }
+
+    /// 7997 TRNS 的四个 LSnout 使用 RVM 原语的 X/轴向-Y/Z 坐标约定。
+    /// 如果轴向误放回 Z，关系矩阵即使逐项匹配 E3D，模型仍会偏离数百毫米。
+    #[test]
+    fn trns_7997_snout_uses_rvm_axial_y_coordinates() {
+        let mesh = gen_snout(0.0, 400.0, 400.0, 640.312, 0.0, 36);
+        assert_solid_mesh(&mesh, "7997 TRNS Snout");
+        assert_bounds_tol(
+            &mesh,
+            Vec3::new(-320.156, -200.0, -400.0),
+            Vec3::new(720.156, 200.0, 400.0),
+            1e-3,
+            "7997 TRNS Snout RVM axes",
+        );
     }
 
     #[test]
@@ -1142,8 +1158,8 @@ mod tests {
         assert_solid_mesh(&mesh, "slope cyl straight");
         assert_bounds(
             &mesh,
-            Vec3::new(-1.0, -1.0, 0.0),
-            Vec3::new(1.0, 1.0, 2.0),
+            Vec3::new(-1.0, -1.0, -1.0),
+            Vec3::new(1.0, 1.0, 1.0),
             "slope cyl straight",
         );
         assert_volume(&mesh, PI * 2.0, 0.02, "slope cyl straight");
@@ -1154,11 +1170,12 @@ mod tests {
         let angle = 15.0f32.to_radians();
         let mesh = gen_slope_ended_cylinder(1.0, 2.0, [angle, 0.0], [0.0, 0.0], 32);
         assert_solid_mesh(&mesh, "slope cyl single shear");
-        // 底面绕 Y 倾斜 15°，最低点在 x=+1 一侧下沉 tan15°；顶面仍是平的
+        // 底面绕 Y 倾斜 15°，最低点在 x=+1 一侧从 -height/2 下沉 tan15°；
+        // 顶面轴心仍在 +height/2。
         assert_bounds(
             &mesh,
-            Vec3::new(-1.0, -1.0, -angle.tan()),
-            Vec3::new(1.0, 1.0, 2.0),
+            Vec3::new(-1.0, -1.0, -1.0 - angle.tan()),
+            Vec3::new(1.0, 1.0, 1.0),
             "slope cyl single shear",
         );
         // 斜切平面过轴心，切掉的和补上的体积相等
@@ -1516,8 +1533,8 @@ mod tests {
         assert_solid_mesh(&mesh, "RVM pyramid");
         assert_bounds(
             &mesh,
-            Vec3::new(-500.0, -25.0, -400.0),
-            Vec3::new(500.0, 25.0, 400.0),
+            Vec3::new(-500.0, 0.0, -400.0),
+            Vec3::new(500.0, 50.0, 400.0),
             "RVM pyramid axes",
         );
         let cata = Mat4::from_scale_rotation_translation(
@@ -1545,22 +1562,22 @@ mod tests {
 
         assert_bounds_tol(
             &transformed,
-            Vec3::new(5013.5622, 3559.8698, -2305.0),
-            Vec3::new(6282.2161, 4835.9280, -2255.0),
+            Vec3::new(5013.5622, 3559.8698, -2329.9999),
+            Vec3::new(6282.2161, 4835.9280, -2280.0),
             0.1,
             "7997 BEND 24381/100818 LPyramid",
         );
     }
 
     #[test]
-    fn rvm_pyramid_splits_7997_ofst_offset_about_the_cata_midpoint() {
+    fn rvm_pyramid_applies_7997_ofst_shift_at_the_top_face() {
         let mesh = gen_rvm_pyramid(1000.0, 800.0, 1000.0, 800.0, 450.0, 0.0, 205.0);
         assert_solid_mesh(&mesh, "7997 OFST 24381/100860 RVM pyramid");
         assert_bounds(
             &mesh,
-            Vec3::new(-500.0, -225.0, -502.5),
-            Vec3::new(500.0, 225.0, 502.5),
-            "7997 OFST centered offset",
+            Vec3::new(-500.0, 0.0, -400.0),
+            Vec3::new(500.0, 450.0, 605.0),
+            "7997 OFST RVM adapter offset",
         );
     }
 

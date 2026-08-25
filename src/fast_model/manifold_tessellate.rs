@@ -1201,7 +1201,23 @@ mod tests {
 
     #[test]
     fn unit_cylinder_is_non_empty() {
-        assert_solid_mesh(&tessellate_unit_cylinder(24));
+        let mesh = tessellate_unit_cylinder(24);
+        assert_solid_mesh(&mesh);
+        let min_z = mesh
+            .vertices
+            .iter()
+            .map(|point| point.z)
+            .fold(f32::INFINITY, f32::min);
+        let max_z = mesh
+            .vertices
+            .iter()
+            .map(|point| point.z)
+            .fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            (min_z - 0.0).abs() <= 1.0e-6,
+            "unit cylinder bottom={min_z}"
+        );
+        assert!((max_z - 1.0).abs() <= 1.0e-6, "unit cylinder top={max_z}");
     }
 
     #[test]

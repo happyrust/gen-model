@@ -161,11 +161,12 @@ pub fn rvm_world_meshes_by_name(rvm_path: &Path) -> Result<HashMap<String, TriMe
                 if !seen_group.insert(name.clone()) {
                     ambiguous.insert(name.clone());
                 }
+                let is_tubi = is_rvm_tubi_group_name(&name);
                 let entry = accum.entry(name).or_default();
                 let mut link = group.first_geometry;
                 while let Some(gid) = link {
                     if let Some(geometry) = store.get_geometry(gid) {
-                        add_geometry(entry, geometry);
+                        add_geometry(entry, geometry, is_tubi);
                         link = geometry.next;
                     } else {
                         break;
@@ -234,6 +235,7 @@ pub fn rvm_world_subtree_meshes_by_name(
         let mut name = None;
         if let NodeKind::Group(group) = &node.kind {
             let group_name = store.get_string(group.name).trim().to_string();
+            let is_tubi = is_rvm_tubi_group_name(&group_name);
             if wanted.contains(&group_name) {
                 if !seen.insert(group_name.clone()) {
                     ambiguous.insert(group_name.clone());
@@ -243,7 +245,7 @@ pub fn rvm_world_subtree_meshes_by_name(
             let mut link = group.first_geometry;
             while let Some(gid) = link {
                 if let Some(geometry) = store.get_geometry(gid) {
-                    add_geometry(&mut subtree, geometry);
+                    add_geometry(&mut subtree, geometry, is_tubi);
                     link = geometry.next;
                 } else {
                     break;
@@ -282,7 +284,36 @@ pub fn rvm_world_subtree_meshes_by_name(
         .collect())
 }
 
-fn add_geometry(accum: &mut MeshAccum, geometry: &rvm_rs::store::geometry::Geometry) {
+/// RVM 把隐含直管节点写成默认名 `TUBE n of BRANCH ...`。只有这类 TUBI
+/// Cylinder 使用 E3D 的“局部 Z、中心原点”原语约定；CATA 中的显式 Cylinder
+/// 仍必须保留 rvm-rs 的“局部 Y、底端原点”约定及其配套 transform。
+fn is_rvm_tubi_group_name(name: &str) -> bool {
+    crate::rvm_baseline::identity::noun_from_name(name).as_deref() == Some("TUBI")
+}
+
+fn tessellate_rvm_tubi_cylinder(
+    cylinder: &rvm_rs::store::geometry::Cylinder,
+    tol: f32,
+    scale: f32,
+) -> rvm_rs::export::Triangulation {
+    use rvm_rs::export::Tessellate;
+
+    let mut tri = cylinder.tessellate(tol, scale);
+    let half_height = cylinder.height * 0.5;
+    for point in tri.vertices.chunks_exact_mut(3) {
+        let parser_y = point[1];
+        let parser_z = point[2];
+        point[1] = parser_z;
+        point[2] = parser_y - half_height;
+    }
+    tri
+}
+
+fn add_geometry(
+    accum: &mut MeshAccum,
+    geometry: &rvm_rs::store::geometry::Geometry,
+    is_tubi: bool,
+) {
     use rvm_rs::export::Tessellate;
     use rvm_rs::export::tessellator::get_scale;
     use rvm_rs::store::geometry::GeometryKind;
@@ -294,6 +325,9 @@ fn add_geometry(accum: &mut MeshAccum, geometry: &rvm_rs::store::geometry::Geome
     let cols = geometry.transform.to_cols_array();
     let tri = match &geometry.kind {
         GeometryKind::FacetGroup(fg) => fg.tessellate(tol, scale),
+        GeometryKind::Cylinder(g) if is_tubi => tessellate_rvm_tubi_cylinder(g, tol, scale),
+        // 普通 CATA Cylinder 的局部 +Y / 底端原点与 geometry.transform 是一个整体；
+        // 只有 noun=TUBI 的隐含直管使用上面的 E3D 中心化 Z 约定。
         GeometryKind::Cylinder(g) => g.tessellate(tol, scale),
         GeometryKind::Sphere(g) => g.tessellate(tol, scale),
         GeometryKind::Box(g) => g.tessellate(tol, scale),
@@ -339,7 +373,7 @@ mod gen_side {
         v.get(idx).and_then(|x| x.as_f64()).unwrap_or(0.0) as f32
     }
 
-    fn mat_from_trans(t: &serde_json::Value) -> Mat4 {
+    pub(super) fn mat_from_trans(t: &serde_json::Value) -> Mat4 {
         let tr = t.get("translation").cloned().unwrap_or_default();
         let ro = t.get("rotation").cloned().unwrap_or_default();
         let sc = t.get("scale").cloned().unwrap_or_default();
@@ -365,6 +399,64 @@ mod gen_side {
                FROM {pe_key}->inst_relate
                WHERE aabb.d != NONE AND world_trans.d != NONE;"#
         )
+    }
+
+    /// BRAN/HANG 的隐含直管不在 PE 子树里；生产渲染从根的 `tubi_relate`
+    /// 单独加载。RVM 子树对拍必须合入同一组有效直管，否则会把每段 TUBE 都误报
+    /// 成生成侧缺失。`invalid=true` 是只画诊断中心线的坏段，不得伪装成实体圆柱。
+    pub(super) fn valid_tubis_sql(pe_key: &str) -> String {
+        format!(
+            r#"SELECT record::id(out) AS geo_hash, world_trans.d AS transform
+               FROM {pe_key}->tubi_relate
+               WHERE out.meshed && world_trans.d != NONE
+                 && (invalid = false OR invalid = NONE);"#
+        )
+    }
+
+    /// TUBI/BOXI 是固定 id 的特殊单位网格。生产 viewer 按 `out` 加载
+    /// `{id}.mesh`；`inst_geo.param` 可能由共享 cylinder 身份的另一个参数类型
+    /// 写入，不携带“底端原点”这个特殊身份语义。RVM 对拍必须重现
+    /// 生产读路，否则会把一份中心化的临时网格当成真实 TUBI。
+    pub(super) fn load_persisted_unit_mesh(mesh_dir: &Path, geo_hash: &str) -> Result<PlantMesh> {
+        let mesh_path = mesh_dir.join(format!("{geo_hash}.mesh"));
+        PlantMesh::des_mesh_file(&mesh_path)
+            .with_context(|| format!("读取生产单位网格失败: {}", mesh_path.display()))
+    }
+
+    async fn gen_world_tubi_mesh_in_dir(
+        db: &Surreal<Any>,
+        pe_key: &str,
+        mesh_dir: &Path,
+    ) -> Result<Option<TriMesh>> {
+        let mut response = db
+            .query(valid_tubis_sql(pe_key))
+            .await
+            .context("查询 tubi_relate 失败")?;
+        let rows: Vec<serde_json::Value> = response.take(0).context("解析 tubi_relate 结果失败")?;
+        let mut unit_cache: HashMap<String, PlantMesh> = HashMap::new();
+        let mut accum = MeshAccum::default();
+        for row in rows {
+            let Some(hash) = row.get("geo_hash").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            if !unit_cache.contains_key(hash) {
+                unit_cache.insert(hash.to_owned(), load_persisted_unit_mesh(mesh_dir, hash)?);
+            }
+            let unit = unit_cache
+                .get(hash)
+                .expect("TUBI unit mesh inserted immediately above");
+            let world = mat_from_trans(row.get("transform").unwrap_or(&serde_json::Value::Null));
+            let vertices = unit
+                .vertices
+                .iter()
+                .map(|vertex| {
+                    let point = world.transform_point3(*vertex);
+                    Point::new(point.x, point.y, point.z)
+                })
+                .collect::<Vec<_>>();
+            accum.add_world_points(&vertices, &unit.indices);
+        }
+        Ok(accum.into_trimesh())
     }
 
     /// 就地重建一个元素的 gen 世界三角网格。
@@ -452,6 +544,10 @@ mod gen_side {
     ) -> Result<Option<TriMesh>> {
         let refnos = crate::rvm_baseline::compare::load_subtree_refnos(db, root_refno).await?;
         let mut accum = MeshAccum::default();
+        let root_key = format!("pe:{}", root_refno.replace('/', "_"));
+        if let Some(mesh) = gen_world_tubi_mesh_in_dir(db, &root_key, mesh_dir).await? {
+            accum.add_trimesh(&mesh);
+        }
         for refno in refnos {
             let pe_key = format!("pe:{}", refno.replace('/', "_"));
             if let Some(mesh) = gen_world_mesh_in_dir(db, &pe_key, mesh_dir).await? {
@@ -461,7 +557,7 @@ mod gen_side {
         Ok(accum.into_trimesh())
     }
 
-    async fn build_unit_mesh(
+    pub(super) async fn build_unit_mesh(
         db: &Surreal<Any>,
         geo_hash: &str,
         mesh_dir: &Path,
@@ -525,6 +621,103 @@ mod mesh_wall_live {
             "{sql}"
         );
         assert!(!sql.contains("insts_flat"), "RVM 门不得读取派生平表: {sql}");
+    }
+
+    #[test]
+    fn bran_subtree_query_includes_only_renderable_tubi_relations() {
+        let sql = super::gen_side::valid_tubis_sql("pe:1_2");
+        assert!(sql.contains("FROM pe:1_2->tubi_relate"), "{sql}");
+        assert!(sql.contains("out.meshed"), "{sql}");
+        assert!(sql.contains("world_trans.d != NONE"), "{sql}");
+        assert!(sql.contains("invalid = false OR invalid = NONE"), "{sql}");
+        assert!(!sql.contains("inst_relate"), "{sql}");
+    }
+
+    #[test]
+    fn rvm_cylinder_keeps_parser_axis_and_bottom_origin() {
+        use rvm_rs::export::Tessellate;
+
+        let cylinder = rvm_rs::store::geometry::Cylinder {
+            radius: 2.0,
+            height: 10.0,
+        };
+        let tri = cylinder.tessellate(0.001, 1.0);
+        let points = tri.vertices.chunks_exact(3).collect::<Vec<_>>();
+        let min_y = points.iter().map(|point| point[1]).fold(f32::MAX, f32::min);
+        let max_y = points.iter().map(|point| point[1]).fold(f32::MIN, f32::max);
+        let min_z = points.iter().map(|point| point[2]).fold(f32::MAX, f32::min);
+        let max_z = points.iter().map(|point| point[2]).fold(f32::MIN, f32::max);
+        assert!(min_y.abs() < 1.0e-5, "min_y={min_y}");
+        assert!((max_y - 10.0).abs() < 1.0e-5, "max_y={max_y}");
+        assert!((min_z + 2.0).abs() < 1.0e-5, "min_z={min_z}");
+        assert!((max_z - 2.0).abs() < 1.0e-5, "max_z={max_z}");
+    }
+
+    #[test]
+    fn rvm_tubi_cylinder_uses_centered_z_axis_only_for_tube_members() {
+        let cylinder = rvm_rs::store::geometry::Cylinder {
+            radius: 2.0,
+            height: 10.0,
+        };
+        let tri = super::tessellate_rvm_tubi_cylinder(&cylinder, 0.001, 1.0);
+        let points = tri.vertices.chunks_exact(3).collect::<Vec<_>>();
+        let min_y = points.iter().map(|point| point[1]).fold(f32::MAX, f32::min);
+        let max_y = points.iter().map(|point| point[1]).fold(f32::MIN, f32::max);
+        let min_z = points.iter().map(|point| point[2]).fold(f32::MAX, f32::min);
+        let max_z = points.iter().map(|point| point[2]).fold(f32::MIN, f32::max);
+        assert!((min_y + 2.0).abs() < 1.0e-5, "min_y={min_y}");
+        assert!((max_y - 2.0).abs() < 1.0e-5, "max_y={max_y}");
+        assert!((min_z + 5.0).abs() < 1.0e-5, "min_z={min_z}");
+        assert!((max_z - 5.0).abs() < 1.0e-5, "max_z={max_z}");
+
+        assert!(super::is_rvm_tubi_group_name(
+            "TUBE 7 of BRANCH /Copy-of-1RCS011MN-TUBE/MAOXIGUAN"
+        ));
+        assert!(!super::is_rvm_tubi_group_name(
+            "CYLINDER 1 of EQUIPMENT /Copy-of-RCS601MT"
+        ));
+        assert!(!super::is_rvm_tubi_group_name("/1CUP202VAF"));
+    }
+
+    #[test]
+    fn tubi_subtree_uses_the_persisted_special_unit_mesh() {
+        use aios_core::shape::pdms_shape::BrepShapeTrait;
+
+        let temp = tempfile::tempdir().expect("temp mesh dir");
+        let mesh = aios_core::prim_geo::cylinder::SCylinder::default()
+            .gen_csg_mesh()
+            .expect("bottom-origin TUBI mesh");
+        mesh.ser_to_file(&temp.path().join("2.mesh"))
+            .expect("persist TUBI mesh");
+
+        let loaded = super::gen_side::load_persisted_unit_mesh(temp.path(), "2")
+            .expect("load persisted TUBI mesh");
+        let min_z = loaded
+            .vertices
+            .iter()
+            .map(|point| point.z)
+            .fold(f32::MAX, f32::min);
+        let max_z = loaded
+            .vertices
+            .iter()
+            .map(|point| point.z)
+            .fold(f32::MIN, f32::max);
+        assert!(min_z.abs() < 1.0e-5, "min_z={min_z}");
+        assert!((max_z - 1.0).abs() < 1.0e-5, "max_z={max_z}");
+
+        let source = include_str!("mesh_compare.rs");
+        let body = source
+            .split_once("async fn gen_world_tubi_mesh_in_dir(")
+            .expect("TUBI loader")
+            .1
+            .split_once("/// 就地重建一个元素")
+            .expect("TUBI loader boundary")
+            .0;
+        assert!(body.contains("load_persisted_unit_mesh(mesh_dir, hash)"));
+        assert!(
+            !body.contains("build_unit_mesh(db, hash, mesh_dir)"),
+            "TUBI must not be reconstructed from an origin-ambiguous shared parameter"
+        );
     }
 
     fn live_db_endpoint() -> String {
@@ -625,6 +818,812 @@ mod mesh_wall_live {
             .iter()
             .find(|(name, _)| name.as_str() == prefix || name.starts_with(&needle))
             .map(|(_, m)| m)
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AMS7997 plus the E3D TRNS RVM fixture"]
+    async fn ams7997_trns_reports_each_catalogue_primitive_distance() {
+        use rvm_rs::parse_rvm;
+        use rvm_rs::store::Store;
+        use rvm_rs::store::node::{NodeId, NodeKind};
+
+        fn find_group_geometry_meshes(
+            store: &Store,
+            node_id: NodeId,
+            wanted: &str,
+        ) -> Option<Vec<TriMesh>> {
+            let node = store.get_node(node_id)?;
+            if let NodeKind::Group(group) = &node.kind
+                && store.get_string(group.name).trim() == wanted
+            {
+                let is_tubi = is_rvm_tubi_group_name(wanted);
+                let mut meshes = Vec::new();
+                let mut link = group.first_geometry;
+                while let Some(geometry_id) = link {
+                    let geometry = store.get_geometry(geometry_id)?;
+                    let mut accum = MeshAccum::default();
+                    add_geometry(&mut accum, geometry, is_tubi);
+                    if let Some(mesh) = accum.into_trimesh() {
+                        meshes.push(mesh);
+                    }
+                    link = geometry.next;
+                }
+                return Some(meshes);
+            }
+            let mut child = node.first_child;
+            while let Some(child_id) = child {
+                let child_node = store.get_node(child_id)?;
+                if let Some(meshes) = find_group_geometry_meshes(store, child_id, wanted) {
+                    return Some(meshes);
+                }
+                child = child_node.next;
+            }
+            None
+        }
+
+        let rvm_path =
+            std::path::Path::new("output/rvm-7997-e3d/site-24381_100675-level6-current.rvm");
+        let bytes = std::fs::read(rvm_path).expect("read AMS7997 RVM");
+        let mut store = Store::new();
+        parse_rvm(&bytes, &mut store).expect("parse AMS7997 RVM");
+        let wanted = "TRNS 1 of BRANCH /-CUP-S-3-M-1401";
+        let rvm_meshes = store
+            .roots()
+            .iter()
+            .find_map(|root| find_group_geometry_meshes(&store, *root, wanted))
+            .expect("find TRNS group");
+        assert_eq!(rvm_meshes.len(), 14, "E3D TRNS primitive count changed");
+
+        let db = live_db().await;
+        let sql = super::gen_side::valid_insts_sql("pe:24381_100864").replace(
+            "record::id(out) AS geo_hash",
+            "record::id(out) AS geo_hash, <string> geom_refno AS geom_refno",
+        );
+        let mut response = db.query(sql).await.expect("query TRNS relations");
+        let rows: Vec<serde_json::Value> = response.take(0).expect("decode TRNS relations");
+        let row = rows.first().expect("TRNS relation row");
+        let wt = super::gen_side::mat_from_trans(&row["wt"]);
+        let insts = row["insts"].as_array().expect("TRNS insts");
+        assert_eq!(insts.len(), 14, "generated TRNS primitive count changed");
+
+        // E3D RVM 保存的原语顺序与 CATA GMSE 顺序一致；显式列出映射，任何目录
+        // 重排都会让测试先在缺失映射处报错，而不是把不同形状就近配成一个假结果。
+        let source_order = [
+            "15194_4142",
+            "15194_4144",
+            "15194_4145",
+            "15194_4146",
+            "15194_4148",
+            "15194_4149",
+            "15194_4150",
+            "15194_4152",
+            "15194_4154",
+            "15194_4156",
+            "15194_4158",
+            "15194_4160",
+            "15194_4162",
+            "15194_4164",
+        ];
+        let mesh_dir = std::path::Path::new(".sites/7997/assets/meshes");
+        for (rvm_index, source_refno) in source_order.iter().enumerate() {
+            let inst = insts
+                .iter()
+                .find(|inst| {
+                    inst.get("geom_refno")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|value| value.ends_with(source_refno))
+                })
+                .unwrap_or_else(|| panic!("missing generated relation for {source_refno}"));
+            let geo_hash = inst["geo_hash"].as_str().expect("geo_hash");
+            let unit = super::gen_side::build_unit_mesh(&db, geo_hash, mesh_dir)
+                .await
+                .expect("build generated primitive")
+                .unwrap_or_else(|| panic!("no unit mesh for {source_refno}"));
+            let world = wt * super::gen_side::mat_from_trans(&inst["transform"]);
+            let vertices = unit
+                .vertices
+                .iter()
+                .map(|vertex| {
+                    let point = world.transform_point3(*vertex);
+                    Point::new(point.x, point.y, point.z)
+                })
+                .collect::<Vec<_>>();
+            let mut accum = MeshAccum::default();
+            accum.add_world_points(&vertices, &unit.indices);
+            let generated = accum.into_trimesh().expect("generated primitive mesh");
+            let rvm = &rvm_meshes[rvm_index];
+            let g2r = crate::fast_model::shared::one_way_surface_distance(&generated, rvm, 4000)
+                .expect("primitive generated to RVM distance");
+            let r2g = crate::fast_model::shared::one_way_surface_distance(rvm, &generated, 4000)
+                .expect("primitive RVM to generated distance");
+            println!(
+                "TRNS_PRIMITIVE index={} ref={} rvm_tris={} gen_tris={} g2r_p95={:.4} g2r_max={:.4} r2g_p95={:.4} r2g_max={:.4}",
+                rvm_index + 1,
+                source_refno,
+                rvm.indices().len(),
+                generated.indices().len(),
+                g2r.p95,
+                g2r.hausdorff,
+                r2g.p95,
+                r2g.hausdorff,
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AMS7997 plus the E3D HVAC STRT RVM fixture"]
+    async fn ams7997_hvac_strt_reports_each_scylinder_distance() {
+        use rvm_rs::parse_rvm;
+        use rvm_rs::store::Store;
+        use rvm_rs::store::node::{NodeId, NodeKind};
+
+        fn find_group_geometry_meshes(
+            store: &Store,
+            node_id: NodeId,
+            wanted: &str,
+        ) -> Option<Vec<TriMesh>> {
+            let node = store.get_node(node_id)?;
+            if let NodeKind::Group(group) = &node.kind
+                && store.get_string(group.name).trim() == wanted
+            {
+                let mut meshes = Vec::new();
+                let mut link = group.first_geometry;
+                while let Some(geometry_id) = link {
+                    let geometry = store.get_geometry(geometry_id)?;
+                    let mut accum = MeshAccum::default();
+                    add_geometry(&mut accum, geometry, false);
+                    if let Some(mesh) = accum.into_trimesh() {
+                        meshes.push(mesh);
+                    }
+                    link = geometry.next;
+                }
+                return Some(meshes);
+            }
+            let mut child = node.first_child;
+            while let Some(child_id) = child {
+                let child_node = store.get_node(child_id)?;
+                if let Some(meshes) = find_group_geometry_meshes(store, child_id, wanted) {
+                    return Some(meshes);
+                }
+                child = child_node.next;
+            }
+            None
+        }
+
+        fn bounds(mesh: &TriMesh) -> ([f32; 3], [f32; 3]) {
+            let mut min = [f32::INFINITY; 3];
+            let mut max = [f32::NEG_INFINITY; 3];
+            for point in mesh.vertices() {
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(point[axis]);
+                    max[axis] = max[axis].max(point[axis]);
+                }
+            }
+            (min, max)
+        }
+
+        let rvm_path =
+            std::path::Path::new("output/rvm-7997-e3d/site-24381_46775-level6-current.rvm");
+        let bytes = std::fs::read(rvm_path).expect("read AMS7997 HVAC RVM");
+        let mut store = Store::new();
+        parse_rvm(&bytes, &mut store).expect("parse AMS7997 HVAC RVM");
+        let wanted = "STRT 1 of BRANCH /-CAM-E-2-H-5302";
+        let rvm_meshes = store
+            .roots()
+            .iter()
+            .find_map(|root| find_group_geometry_meshes(&store, *root, wanted))
+            .expect("find HVAC STRT group");
+        assert_eq!(rvm_meshes.len(), 5, "E3D STRT primitive count changed");
+
+        let db = live_db().await;
+        let sql = super::gen_side::valid_insts_sql("pe:24381_47067").replace(
+            "record::id(out) AS geo_hash",
+            "record::id(out) AS geo_hash, <string> geom_refno AS geom_refno",
+        );
+        let mut response = db.query(sql).await.expect("query STRT relations");
+        let rows: Vec<serde_json::Value> = response.take(0).expect("decode STRT relations");
+        let row = rows.first().expect("STRT relation row");
+        let wt = super::gen_side::mat_from_trans(&row["wt"]);
+        let insts = row["insts"].as_array().expect("STRT insts");
+        assert_eq!(insts.len(), 5, "generated STRT primitive count changed");
+
+        let source_order = [
+            "15194_413",
+            "15194_417",
+            "15194_419",
+            "15194_421",
+            "15194_423",
+        ];
+        let mesh_dir = std::path::Path::new(".sites/7997/assets/meshes");
+        for (rvm_index, source_refno) in source_order.iter().enumerate() {
+            let inst = insts
+                .iter()
+                .find(|inst| {
+                    inst.get("geom_refno")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|value| value.ends_with(source_refno))
+                })
+                .unwrap_or_else(|| panic!("missing generated relation for {source_refno}"));
+            let geo_hash = inst["geo_hash"].as_str().expect("geo_hash");
+            let unit = super::gen_side::build_unit_mesh(&db, geo_hash, mesh_dir)
+                .await
+                .expect("build generated primitive")
+                .unwrap_or_else(|| panic!("no unit mesh for {source_refno}"));
+            let world = wt * super::gen_side::mat_from_trans(&inst["transform"]);
+            let vertices = unit
+                .vertices
+                .iter()
+                .map(|vertex| {
+                    let point = world.transform_point3(*vertex);
+                    Point::new(point.x, point.y, point.z)
+                })
+                .collect::<Vec<_>>();
+            let mut accum = MeshAccum::default();
+            accum.add_world_points(&vertices, &unit.indices);
+            let generated = accum.into_trimesh().expect("generated primitive mesh");
+            let rvm = &rvm_meshes[rvm_index];
+            let g2r = crate::fast_model::shared::one_way_surface_distance(&generated, rvm, 4000)
+                .expect("primitive generated to RVM distance");
+            let r2g = crate::fast_model::shared::one_way_surface_distance(rvm, &generated, 4000)
+                .expect("primitive RVM to generated distance");
+            println!(
+                "HVAC_STRT_PRIMITIVE index={} ref={} rvm_bounds={:?} gen_bounds={:?} transform={} g2r_p95={:.4} g2r_max={:.4} r2g_p95={:.4} r2g_max={:.4}",
+                rvm_index + 1,
+                source_refno,
+                bounds(rvm),
+                bounds(&generated),
+                inst["transform"],
+                g2r.p95,
+                g2r.hausdorff,
+                r2g.p95,
+                r2g.hausdorff,
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires AMS7997 plus the E3D HVAC BEND RVM fixture"]
+    async fn ams7997_hvac_bend_reports_each_catalogue_primitive_distance() {
+        use rvm_rs::parse_rvm;
+        use rvm_rs::store::Store;
+        use rvm_rs::store::node::{NodeId, NodeKind};
+
+        fn find_group_geometry_meshes(
+            store: &Store,
+            node_id: NodeId,
+            wanted: &str,
+        ) -> Option<Vec<TriMesh>> {
+            let node = store.get_node(node_id)?;
+            if let NodeKind::Group(group) = &node.kind
+                && store.get_string(group.name).trim() == wanted
+            {
+                let mut meshes = Vec::new();
+                let mut link = group.first_geometry;
+                while let Some(geometry_id) = link {
+                    let geometry = store.get_geometry(geometry_id)?;
+                    let mut accum = MeshAccum::default();
+                    add_geometry(&mut accum, geometry, false);
+                    if let Some(mesh) = accum.into_trimesh() {
+                        meshes.push(mesh);
+                    }
+                    link = geometry.next;
+                }
+                return Some(meshes);
+            }
+            let mut child = node.first_child;
+            while let Some(child_id) = child {
+                let child_node = store.get_node(child_id)?;
+                if let Some(meshes) = find_group_geometry_meshes(store, child_id, wanted) {
+                    return Some(meshes);
+                }
+                child = child_node.next;
+            }
+            None
+        }
+
+        fn bounds(mesh: &TriMesh) -> ([f32; 3], [f32; 3]) {
+            let mut min = [f32::INFINITY; 3];
+            let mut max = [f32::NEG_INFINITY; 3];
+            for point in mesh.vertices() {
+                for axis in 0..3 {
+                    min[axis] = min[axis].min(point[axis]);
+                    max[axis] = max[axis].max(point[axis]);
+                }
+            }
+            (min, max)
+        }
+
+        let rvm_path =
+            std::path::Path::new("output/rvm-7997-e3d/site-24381_46775-level6-current.rvm");
+        let bytes = std::fs::read(rvm_path).expect("read AMS7997 HVAC RVM");
+        let mut store = Store::new();
+        parse_rvm(&bytes, &mut store).expect("parse AMS7997 HVAC RVM");
+        let wanted = "BEND 1 of BRANCH /-CAM-E-2-H-5302";
+        let rvm_meshes = store
+            .roots()
+            .iter()
+            .find_map(|root| find_group_geometry_meshes(&store, *root, wanted))
+            .expect("find HVAC BEND group");
+
+        let db = live_db().await;
+        let sql = super::gen_side::valid_insts_sql("pe:24381_47066").replace(
+            "record::id(out) AS geo_hash",
+            "record::id(out) AS geo_hash, <string> geom_refno AS geom_refno",
+        );
+        let mut response = db.query(sql).await.expect("query BEND relations");
+        let rows: Vec<serde_json::Value> = response.take(0).expect("decode BEND relations");
+        let row = rows.first().expect("BEND relation row");
+        let wt = super::gen_side::mat_from_trans(&row["wt"]);
+        let insts = row["insts"].as_array().expect("BEND insts");
+
+        // `resolve_desi_comp(24381/47066)` returns this GMSE order.  E3D emits a
+        // thirteenth RVM primitive for the zero-size 15194/5825 Snout, whereas
+        // production correctly omits it from persisted output; keep the slot so
+        // later primitives cannot silently compare against the wrong RVM geometry.
+        let source_order = [
+            "15194_5795",
+            "15194_5799",
+            "15194_5803",
+            "15194_5807",
+            "15194_5811",
+            "15194_5815",
+            "15194_5819",
+            "15194_5821",
+            "15194_5823",
+            "15194_5825",
+            "15194_5829",
+            "15194_5831",
+            "15194_5833",
+        ];
+        assert_eq!(
+            rvm_meshes.len(),
+            source_order.len(),
+            "E3D BEND primitive count changed"
+        );
+        assert_eq!(insts.len(), 12, "generated BEND primitive count changed");
+
+        let mesh_dir = std::path::Path::new(".sites/7997/assets/meshes");
+        for (rvm_index, source_refno) in source_order.iter().enumerate() {
+            let Some(inst) = insts
+                .iter()
+                .find(|inst| {
+                    inst.get("geom_refno")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|value| value.ends_with(source_refno))
+                })
+            else {
+                println!(
+                    "HVAC_BEND_PRIMITIVE index={} ref={} rvm_bounds={:?} rvm_tris={} generated=omitted",
+                    rvm_index + 1,
+                    source_refno,
+                    bounds(&rvm_meshes[rvm_index]),
+                    rvm_meshes[rvm_index].indices().len(),
+                );
+                continue;
+            };
+            let geo_hash = inst["geo_hash"].as_str().expect("geo_hash");
+            let unit = super::gen_side::build_unit_mesh(&db, geo_hash, mesh_dir)
+                .await
+                .expect("build generated primitive")
+                .unwrap_or_else(|| panic!("no unit mesh for {source_refno}"));
+            let world = wt * super::gen_side::mat_from_trans(&inst["transform"]);
+            let vertices = unit
+                .vertices
+                .iter()
+                .map(|vertex| {
+                    let point = world.transform_point3(*vertex);
+                    Point::new(point.x, point.y, point.z)
+                })
+                .collect::<Vec<_>>();
+            let mut accum = MeshAccum::default();
+            accum.add_world_points(&vertices, &unit.indices);
+            let generated = accum.into_trimesh().expect("generated primitive mesh");
+            let rvm = &rvm_meshes[rvm_index];
+            let g2r = crate::fast_model::shared::one_way_surface_distance(&generated, rvm, 4000)
+                .expect("primitive generated to RVM distance");
+            let r2g = crate::fast_model::shared::one_way_surface_distance(rvm, &generated, 4000)
+                .expect("primitive RVM to generated distance");
+            println!(
+                "HVAC_BEND_PRIMITIVE index={} ref={} rvm_bounds={:?} gen_bounds={:?} transform={} g2r_p95={:.4} g2r_max={:.4} r2g_p95={:.4} r2g_max={:.4}",
+                rvm_index + 1,
+                source_refno,
+                bounds(rvm),
+                bounds(&generated),
+                inst["transform"],
+                g2r.p95,
+                g2r.hausdorff,
+                r2g.p95,
+                r2g.hausdorff,
+            );
+        }
+    }
+
+    /// THREEWAY `/RBREECH` is exported by E3D as one FacetGroup rather than as
+    /// eleven independent RVM primitives.  This diagnostic compares the persisted
+    /// primitive adapter with libgm's centred `GM_Pyramid::calcFacets` coordinates;
+    /// it is deliberately ignored because it needs the AMS7997 RocksDB fixture.
+    #[tokio::test]
+    #[ignore = "requires AMS7997 plus the E3D THREEWAY RVM fixture"]
+    async fn ams7997_threeway_compares_bottom_and_centred_pyramid_adapters() {
+        use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+
+        let rvm_path =
+            std::path::Path::new("output/rvm-7997-e3d/site-24381_100675-level6-current.rvm");
+        let rvm = rvm_world_meshes_by_name(rvm_path)
+            .expect("parse AMS7997 RVM")
+            .remove("THREEWAY 1 of BRANCH /-CUP-S-3-M-1405")
+            .expect("find THREEWAY group");
+
+        let db = live_db().await;
+        let sql = super::gen_side::valid_insts_sql("pe:24381_100890").replace(
+            "record::id(out) AS geo_hash",
+            "record::id(geom_refno) AS geom_refno, record::id(out) AS geo_hash",
+        );
+        let mut response = db.query(sql).await.expect("query THREEWAY relations");
+        let rows: Vec<serde_json::Value> = response.take(0).expect("decode THREEWAY relations");
+        let row = rows.first().expect("THREEWAY relation row");
+        let wt = super::gen_side::mat_from_trans(&row["wt"]);
+        let inv_wt = wt.inverse();
+        let mut insts = row["insts"].as_array().expect("THREEWAY insts").clone();
+        insts.sort_by_key(|inst| {
+            inst["geom_refno"]
+                .as_str()
+                .unwrap_or_default()
+                .split('_')
+                .next_back()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or_default()
+        });
+        assert_eq!(insts.len(), 11, "THREEWAY primitive count changed");
+
+        let mesh_dir = std::path::Path::new(".sites/7997/assets/meshes");
+        let mut current = MeshAccum::default();
+        let mut libgm_centred = MeshAccum::default();
+        let mut libgm_solids = Vec::new();
+        let mut rvm_local_min = glam::Vec3::splat(f32::INFINITY);
+        let mut rvm_local_max = glam::Vec3::splat(f32::NEG_INFINITY);
+        for point in rvm.vertices() {
+            let local = inv_wt.transform_point3(glam::Vec3::new(point.x, point.y, point.z));
+            rvm_local_min = rvm_local_min.min(local);
+            rvm_local_max = rvm_local_max.max(local);
+        }
+        println!("THREEWAY_RVM_LOCAL min={rvm_local_min:?} max={rvm_local_max:?}");
+
+        // Preserve the original FacetGroup polygon boundaries as evidence.  The
+        // triangulated mesh alone cannot tell whether E3D performed a solid union
+        // or only cancelled selected catalogue facets.
+        {
+            use rvm_rs::parse_rvm;
+            use rvm_rs::store::Store;
+            use rvm_rs::store::geometry::GeometryKind;
+            use rvm_rs::store::node::{NodeId, NodeKind};
+
+            fn find_threeway(store: &Store, node_id: NodeId) -> Option<NodeId> {
+                let node = store.get_node(node_id)?;
+                if let NodeKind::Group(group) = &node.kind
+                    && store.get_string(group.name).trim()
+                        == "THREEWAY 1 of BRANCH /-CUP-S-3-M-1405"
+                {
+                    return Some(node_id);
+                }
+                let mut child = node.first_child;
+                while let Some(id) = child {
+                    let child_node = store.get_node(id)?;
+                    if let Some(found) = find_threeway(store, id) {
+                        return Some(found);
+                    }
+                    child = child_node.next;
+                }
+                None
+            }
+
+            let bytes = std::fs::read(rvm_path).expect("read THREEWAY RVM polygons");
+            let mut store = Store::new();
+            parse_rvm(&bytes, &mut store).expect("parse THREEWAY RVM polygons");
+            let node_id = store
+                .roots()
+                .iter()
+                .find_map(|root| find_threeway(&store, *root))
+                .expect("find THREEWAY polygon group");
+            let node = store.get_node(node_id).expect("THREEWAY node");
+            let NodeKind::Group(group) = &node.kind else {
+                unreachable!()
+            };
+            let geometry = store
+                .get_geometry(group.first_geometry.expect("THREEWAY geometry"))
+                .expect("THREEWAY geometry record");
+            let GeometryKind::FacetGroup(facets) = &geometry.kind else {
+                panic!("THREEWAY is not a FacetGroup")
+            };
+            let cols = geometry.transform.to_cols_array();
+            for (polygon_index, polygon) in facets.polygons.iter().enumerate() {
+                let mut lo = glam::Vec3::splat(f32::INFINITY);
+                let mut hi = glam::Vec3::splat(f32::NEG_INFINITY);
+                let mut local_vertices = Vec::new();
+                for contour in &polygon.contours {
+                    for vertex in &contour.vertices {
+                        let world = glam::Vec3::new(
+                            (cols[0] * vertex.x
+                                + cols[3] * vertex.y
+                                + cols[6] * vertex.z
+                                + cols[9])
+                                * M_TO_MM,
+                            (cols[1] * vertex.x
+                                + cols[4] * vertex.y
+                                + cols[7] * vertex.z
+                                + cols[10])
+                                * M_TO_MM,
+                            (cols[2] * vertex.x
+                                + cols[5] * vertex.y
+                                + cols[8] * vertex.z
+                                + cols[11])
+                                * M_TO_MM,
+                        );
+                        let local = inv_wt.transform_point3(world);
+                        lo = lo.min(local);
+                        hi = hi.max(local);
+                        local_vertices.push(local);
+                    }
+                }
+                println!(
+                    "THREEWAY_RVM_POLYGON index={} contours={} vertices={} local={lo:?}..{hi:?}",
+                    polygon_index + 1,
+                    polygon.contours.len(),
+                    polygon.total_vertices(),
+                );
+                if matches!(polygon_index + 1, 33 | 36 | 37 | 38) {
+                    println!(
+                        "THREEWAY_RVM_POLYGON_VERTICES index={} local={local_vertices:?}",
+                        polygon_index + 1
+                    );
+                }
+            }
+        }
+        for inst in &insts {
+            let geo_hash = inst["geo_hash"].as_str().expect("geo_hash");
+            let unit = super::gen_side::build_unit_mesh(&db, geo_hash, mesh_dir)
+                .await
+                .expect("build generated primitive")
+                .unwrap_or_else(|| panic!("no unit mesh for {geo_hash}"));
+            let world = wt * super::gen_side::mat_from_trans(&inst["transform"]);
+            let relation = super::gen_side::mat_from_trans(&inst["transform"]);
+
+            let mut libgm_adapter = None;
+            let mut libgm_unit = None;
+            let mut param_response = db
+                .query(format!(
+                    "SELECT VALUE param FROM ONLY inst_geo:`{geo_hash}` LIMIT 1;"
+                ))
+                .await
+                .expect("query THREEWAY unit param");
+            let params: Vec<serde_json::Value> =
+                param_response.take(0).expect("decode THREEWAY unit param");
+            if let Some(value) = params.first() {
+                let param: PdmsGeoParam =
+                    serde_json::from_value(value.clone()).expect("decode PdmsGeoParam");
+                if let PdmsGeoParam::PrimLPyramid(p) = param {
+                    let height = p.ptdi - p.pbdi;
+                    libgm_adapter = Some((height, p.pbof, p.pcof));
+                    libgm_unit = Some(crate::fast_model::mesh_primitives::gen_pyramid(
+                        p.pbbt, p.pcbt, p.pbtp, p.pctp, height, p.pbof, p.pcof,
+                    ));
+                }
+            }
+            let union_unit = libgm_unit.as_ref().unwrap_or(&unit);
+            libgm_solids.push(
+                crate::fast_model::manifold_csg::plant_mesh_to_manifold(
+                    union_unit,
+                    relation.as_dmat4(),
+                )
+                .unwrap_or_else(|error| panic!("THREEWAY manifold ingest {geo_hash}: {error:#}")),
+            );
+
+            let current_vertices = unit
+                .vertices
+                .iter()
+                .map(|vertex| {
+                    let point = world.transform_point3(*vertex);
+                    Point::new(point.x, point.y, point.z)
+                })
+                .collect::<Vec<_>>();
+            current.add_world_points(&current_vertices, &unit.indices);
+
+            let libgm_vertices = unit
+                .vertices
+                .iter()
+                .map(|vertex| {
+                    let adapted = if let Some((height, xoff, yoff)) = libgm_adapter {
+                        glam::Vec3::new(
+                            vertex.x - xoff / 2.0,
+                            vertex.z - yoff / 2.0,
+                            vertex.y - height / 2.0,
+                        )
+                    } else {
+                        *vertex
+                    };
+                    let point = world.transform_point3(adapted);
+                    Point::new(point.x, point.y, point.z)
+                })
+                .collect::<Vec<_>>();
+            libgm_centred.add_world_points(&libgm_vertices, &unit.indices);
+
+            let mut current_local_min = glam::Vec3::splat(f32::INFINITY);
+            let mut current_local_max = glam::Vec3::splat(f32::NEG_INFINITY);
+            let mut libgm_local_min = glam::Vec3::splat(f32::INFINITY);
+            let mut libgm_local_max = glam::Vec3::splat(f32::NEG_INFINITY);
+            for vertex in &unit.vertices {
+                let point =
+                    super::gen_side::mat_from_trans(&inst["transform"]).transform_point3(*vertex);
+                current_local_min = current_local_min.min(point);
+                current_local_max = current_local_max.max(point);
+                let adapted = if let Some((height, xoff, yoff)) = libgm_adapter {
+                    glam::Vec3::new(
+                        vertex.x - xoff / 2.0,
+                        vertex.z - yoff / 2.0,
+                        vertex.y - height / 2.0,
+                    )
+                } else {
+                    *vertex
+                };
+                let point =
+                    super::gen_side::mat_from_trans(&inst["transform"]).transform_point3(adapted);
+                libgm_local_min = libgm_local_min.min(point);
+                libgm_local_max = libgm_local_max.max(point);
+            }
+            println!(
+                "THREEWAY_PRIMITIVE hash={geo_hash} current_local={current_local_min:?}..{current_local_max:?} libgm_local={libgm_local_min:?}..{libgm_local_max:?} adapter={libgm_adapter:?}"
+            );
+        }
+
+        let current = current.into_trimesh().expect("current THREEWAY mesh");
+        let libgm_centred = libgm_centred
+            .into_trimesh()
+            .expect("libgm-centred THREEWAY mesh");
+        let batch_union = manifold_csg::Manifold::batch_union(&libgm_solids);
+        let sequential_union = libgm_solids
+            .iter()
+            .skip(1)
+            .fold(libgm_solids[0].clone(), |union, next| union.union(next));
+        let reverse_sequential_union = libgm_solids.iter().rev().skip(1).fold(
+            libgm_solids.last().expect("THREEWAY solids").clone(),
+            |union, next| union.union(next),
+        );
+        let gap_index = insts
+            .iter()
+            .position(|inst| inst["geom_refno"].as_str() == Some("15194_8523"))
+            .expect("THREEWAY GAP primitive");
+        let positives_without_gap = libgm_solids
+            .iter()
+            .enumerate()
+            .filter_map(|(index, solid)| (index != gap_index).then_some(solid.clone()))
+            .collect::<Vec<_>>();
+        let gap_difference = manifold_csg::Manifold::batch_union(&positives_without_gap)
+            .difference(&libgm_solids[gap_index]);
+        let inflated_gap_difference = crate::fast_model::manifold_csg::subtract_negatives(
+            manifold_csg::Manifold::batch_union(&positives_without_gap),
+            &[libgm_solids[gap_index].clone()],
+        );
+        let body_index = insts
+            .iter()
+            .position(|inst| inst["geom_refno"].as_str() == Some("15194_8527"))
+            .expect("THREEWAY BODY primitive");
+        let body_cut = crate::fast_model::manifold_csg::subtract_negatives(
+            libgm_solids[body_index].clone(),
+            &[libgm_solids[gap_index].clone()],
+        );
+        let union_then_gap_difference = batch_union.difference(&libgm_solids[gap_index]);
+        let manifold_world = |manifold: &manifold_csg::Manifold| {
+            assert!(manifold.num_tri() > 0, "THREEWAY union is empty");
+            let mesh = crate::fast_model::manifold_csg::manifold_to_plant_mesh(manifold);
+            let mut world = MeshAccum::default();
+            let vertices = mesh
+                .vertices
+                .iter()
+                .map(|vertex| {
+                    let point = wt.transform_point3(*vertex);
+                    Point::new(point.x, point.y, point.z)
+                })
+                .collect::<Vec<_>>();
+            world.add_world_points(&vertices, &mesh.indices);
+            world.into_trimesh().expect("THREEWAY union world mesh")
+        };
+        let batch_union_world = manifold_world(&batch_union);
+        let sequential_union_world = manifold_world(&sequential_union);
+        let reverse_sequential_union_world = manifold_world(&reverse_sequential_union);
+        let gap_difference_world = manifold_world(&gap_difference);
+        let inflated_gap_difference_world = manifold_world(&inflated_gap_difference);
+        let union_then_gap_difference_world = manifold_world(&union_then_gap_difference);
+        let mut body_cut_aggregate = MeshAccum::default();
+        for (index, solid) in libgm_solids.iter().enumerate() {
+            if index == gap_index || index == body_index {
+                continue;
+            }
+            let mesh = crate::fast_model::manifold_csg::manifold_to_plant_mesh(solid);
+            let points = mesh
+                .vertices
+                .iter()
+                .map(|point| Point::new(point.x, point.y, point.z))
+                .collect::<Vec<_>>();
+            body_cut_aggregate.add_world_points(&points, &mesh.indices);
+        }
+        let body_cut_mesh = crate::fast_model::manifold_csg::manifold_to_plant_mesh(&body_cut);
+        let body_cut_points = body_cut_mesh
+            .vertices
+            .iter()
+            .map(|point| Point::new(point.x, point.y, point.z))
+            .collect::<Vec<_>>();
+        body_cut_aggregate.add_world_points(&body_cut_points, &body_cut_mesh.indices);
+        let body_cut_local = body_cut_aggregate
+            .into_trimesh()
+            .expect("THREEWAY body-cut aggregate local mesh");
+        let mut body_cut_world = MeshAccum::default();
+        let body_cut_vertices = body_cut_local
+            .vertices()
+            .iter()
+            .map(|point| {
+                let point = wt.transform_point3(glam::Vec3::new(point.x, point.y, point.z));
+                Point::new(point.x, point.y, point.z)
+            })
+            .collect::<Vec<_>>();
+        let body_cut_indices = body_cut_local
+            .indices()
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        body_cut_world.add_world_points(&body_cut_vertices, &body_cut_indices);
+        let body_cut_world = body_cut_world
+            .into_trimesh()
+            .expect("THREEWAY body-cut aggregate world mesh");
+        for (label, generated) in [
+            ("rvm-primitive", current),
+            ("libgm-centred", libgm_centred),
+            ("libgm-batch-union", batch_union_world),
+            ("libgm-sequential-union", sequential_union_world),
+            (
+                "libgm-reverse-sequential-union",
+                reverse_sequential_union_world,
+            ),
+            ("libgm-gap-difference", gap_difference_world),
+            (
+                "libgm-inflated-gap-difference",
+                inflated_gap_difference_world,
+            ),
+            (
+                "libgm-union-then-gap-difference",
+                union_then_gap_difference_world,
+            ),
+            ("libgm-body-cut-aggregate", body_cut_world),
+        ] {
+            let g2r = crate::fast_model::shared::one_way_surface_distance(&generated, &rvm, 8000)
+                .expect("THREEWAY generated to RVM distance");
+            let r2g = crate::fast_model::shared::one_way_surface_distance(&rvm, &generated, 8000)
+                .expect("THREEWAY RVM to generated distance");
+            println!(
+                "THREEWAY_ADAPTER {label} gen_aabb={:?} rvm_aabb={:?} g2r_p95={:.4} g2r_max={:.4} r2g_p95={:.4} r2g_max={:.4}",
+                generated.local_aabb(),
+                rvm.local_aabb(),
+                g2r.p95,
+                g2r.hausdorff,
+                r2g.p95,
+                r2g.hausdorff,
+            );
+            if matches!(
+                label,
+                "libgm-sequential-union"
+                    | "libgm-gap-difference"
+                    | "libgm-union-then-gap-difference"
+            ) {
+                println!(
+                    "THREEWAY_{label}_G2R_FARTHEST={:?}",
+                    crate::fast_model::shared::farthest_from_surface(&generated, &rvm, 32_000, 8,)
+                );
+                println!(
+                    "THREEWAY_{label}_R2G_FARTHEST={:?}",
+                    crate::fast_model::shared::farthest_from_surface(&rvm, &generated, 32_000, 8,)
+                );
+            }
+        }
     }
 
     /// AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 4 堵 WALL，RVM FacetGroup vs 生产网格

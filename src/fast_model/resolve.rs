@@ -188,6 +188,119 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    #[ignore = "requires the AMS7997 RocksDB fixture"]
+    async fn ams7997_rrbend_resolves_all_visible_catalogue_primitives() {
+        use aios_core::prim_geo::category::convert_to_brep_shapes;
+
+        std::env::set_current_dir(env!("CARGO_MANIFEST_DIR")).unwrap();
+        aios_core::init_surreal().await.unwrap();
+
+        let scom = get_or_create_scom_info(active_read_scope(), "15194_2111".into())
+            .await
+            .expect("load /RRBEND SCOM");
+        println!("RRBEND_SCOM={scom:#?}");
+        assert_eq!(
+            scom.gm_params.len(),
+            7,
+            "RRBEND has seven renderable GMSE children after level/type filtering"
+        );
+
+        let resolved = resolve_desi_comp("24381_100848".into(), None)
+            .await
+            .expect("resolve AMS7997 BEND");
+        println!("RRBEND_RESOLVED={resolved:#?}");
+        assert!(
+            !resolved.geometries.is_empty(),
+            "a renderable RRBEND must not resolve to an empty geometry set"
+        );
+        let converted = resolved
+            .geometries
+            .iter()
+            .filter_map(convert_to_brep_shapes)
+            .collect::<Vec<_>>();
+        println!(
+            "RRBEND_CONVERTED=resolved:{} converted:{} refs:{:?}",
+            resolved.geometries.len(),
+            converted.len(),
+            converted
+                .iter()
+                .map(|shape| shape.refno)
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            converted.len(),
+            resolved.geometries.len(),
+            "every resolved RRBEND primitive must convert to a BREP shape"
+        );
+        assert_eq!(converted.len(), 7, "RRBEND must produce seven BREP shapes");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the AMS7997 RocksDB fixture"]
+    async fn ams7997_trns_reports_authoritative_scylinder_axes() {
+        std::env::set_current_dir(env!("CARGO_MANIFEST_DIR")).unwrap();
+        aios_core::init_surreal().await.unwrap();
+
+        for root in ["24381_100864", "24381_100872"] {
+            let resolved = resolve_desi_comp(root.into(), None)
+                .await
+                .unwrap_or_else(|err| panic!("resolve AMS7997 TRNS {root}: {err:#}"));
+            println!("TRNS_RESOLVED root={root} value={resolved:#?}");
+            let cylinders = resolved
+                .geometries
+                .iter()
+                .filter_map(|geometry| match geometry {
+                    aios_core::parsed_data::geo_params_data::CateGeoParam::SCylinder(param) => {
+                        Some(param)
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            println!("TRNS_SCYLINDERS root={root} cylinders={cylinders:#?}");
+            assert_eq!(
+                cylinders.len(),
+                3,
+                "TRNS must resolve three SCYL primitives"
+            );
+            assert!(
+                cylinders.iter().all(|cylinder| cylinder.axis.is_some()),
+                "every TRNS SCYL must retain its resolved source axis"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires the AMS7997 RocksDB fixture"]
+    async fn ams7997_threeway_reports_resolved_catalogue_composition() {
+        use aios_core::prim_geo::category::convert_to_brep_shapes;
+
+        std::env::set_current_dir(env!("CARGO_MANIFEST_DIR")).unwrap();
+        aios_core::init_surreal().await.unwrap();
+        let resolved = resolve_desi_comp("24381_100890".into(), None)
+            .await
+            .expect("resolve AMS7997 THREEWAY");
+        println!("THREEWAY_RESOLVED={resolved:#?}");
+        let converted = resolved
+            .geometries
+            .iter()
+            .map(|geometry| {
+                let converted = convert_to_brep_shapes(geometry);
+                println!("THREEWAY_CONVERT source={geometry:#?} converted={converted:#?}");
+                converted
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            resolved.geometries.len(),
+            11,
+            "THREEWAY source primitive count"
+        );
+        assert!(
+            converted.iter().all(Option::is_some),
+            "every THREEWAY source primitive must have an explicit conversion result"
+        );
+    }
+
     /// 目录把几何挂在哪一层，这套 ACP1000 电缆槽里有两种形态，两种都得解得出来。
     ///
     /// 槽体 `/ACP1000-TFVL` 的 CATE 与 SCOM 指向同一个几何集；带角度的弯头

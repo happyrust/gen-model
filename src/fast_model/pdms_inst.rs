@@ -6,8 +6,10 @@ use aios_core::geometry::EleInstGeo;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
 use aios_core::prim_geo::LCylinder;
+use aios_core::shape::pdms_shape::RsVec3;
 use aios_core::types::*;
 use bevy_transform::prelude::Transform;
+use glam::Vec3;
 use itertools::Itertools;
 
 use crate::data_interface::helper::delete_inst_relate_cascade;
@@ -41,6 +43,22 @@ pub(crate) fn render_inst_relate_replace(rows: &[(String, String)]) -> String {
         "BEGIN TRANSACTION;\n\
          DELETE {ids};\n\
          INSERT RELATION INTO inst_relate [{values}];\n\
+         COMMIT TRANSACTION;"
+    )
+}
+
+/// 用当前解析结果原子替换一个共享 CATA 身份的全部 `geo_relate`。
+///
+/// `inst_info` 会被同一 catalogue identity 的多个设计实例共享。定向重生成其中一个
+/// 实例时，级联删除不能移除仍被其他实例引用的 `inst_info`，也就不会清掉旧版几何代码
+/// 写入的关系。若随后只做 `INSERT RELATION`，旧、新关系会同时可见。7997 BEND
+/// `24381/100848` 因 RTorus 轴缩放修复留下两条同源关系，正是这个失效模式。
+fn render_geo_relate_replace(inst_info_id: &str, rows: &BTreeMap<String, String>) -> String {
+    let values = rows.values().join(",");
+    format!(
+        "BEGIN TRANSACTION;\n\
+         DELETE array::flatten(SELECT VALUE [id] FROM inst_info:⟨{inst_info_id}⟩->geo_relate);\n\
+         INSERT RELATION INTO geo_relate [{values}];\n\
          COMMIT TRANSACTION;"
     )
 }
@@ -611,6 +629,30 @@ pub(crate) async fn resolve_inst_meta_on(
     Ok(out)
 }
 
+/// 同一个 vec3 身份必须有同一份持久化内容：id 与 `d` 都从**同一个量化后的点**导出。
+///
+/// `RsVec3` 的 `Hash` 按三位小数折叠邻近点，此前 `d` 却存全精度原始点——第 4 位小数
+/// 不同的两个点会撞同一 id、内容不同，`insert_unique_record` fail-closed，regen_root
+/// 重试到顶进死信，模型门被扣死（2026-08-25 现场：`vec3:⟨11461842259910491032⟩
+/// 出现不同内容`）。先过 `f32_round_3`（与身份哈希同一量化域）再分别取 hash 与 JSON，
+/// 哈希相等 ⟺ 量化后位级相等 ⟹ JSON 相等。`-0.0` 归一成 `0.0`，避免同一格点分裂成
+/// 两条语义相同的记录。
+pub(crate) fn canonical_vec3_record(point: Vec3) -> anyhow::Result<(u64, String)> {
+    let quantize = |v: f32| {
+        let rounded = aios_core::tool::float_tool::f32_round_3(v);
+        if rounded == 0.0 { 0.0 } else { rounded }
+    };
+    let quantized = RsVec3(Vec3::new(
+        quantize(point.x),
+        quantize(point.y),
+        quantize(point.z),
+    ));
+    let json = serde_json::to_string(&quantized)?;
+    Ok((quantized.gen_hash(), json))
+}
+
+/// 冲突现场必须自带两份内容：2026-08-25 的两条死信只有 record id，是哪个 prim、哪个
+/// 字段在同一身份下渲染出两个值，全靠人肉复推。截断由 `SaveConflict` 的 Display 负责。
 fn insert_unique_record(
     records: &mut BTreeMap<String, String>,
     kind: &'static str,
@@ -619,7 +661,13 @@ fn insert_unique_record(
 ) -> anyhow::Result<()> {
     match records.get(&record_id) {
         Some(existing) if existing == &rendered => Ok(()),
-        Some(_) => Err(SaveConflict::RecordContent { kind, record_id }.into()),
+        Some(existing) => Err(SaveConflict::RecordContent {
+            kind,
+            record_id,
+            existing: existing.clone(),
+            incoming: rendered,
+        }
+        .into()),
         None => {
             records.insert(record_id, rendered);
             Ok(())
@@ -738,8 +786,16 @@ fn canonicalize_unit_param_floats(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Number(number) if number.is_f64() => {
             if let Some(raw) = number.as_f64() {
-                let rounded = (raw * 1000.0).round() / 1000.0;
-                let normalized = if rounded == 0.0 { 0.0 } else { rounded };
+                // 与身份哈希同一个量化域：`hash_f32` 用的是 `f32_round_3`。此前这里在
+                // f64 域独立 round，f32 表示不了的分辨率会留在 JSON 里——两个哈希相
+                // 等的参数渲染出不同内容，就是 inst_geo 死信的来路。先经 f32 量化，
+                // 再取回三位小数的十进制表示（对量化位形是纯函数，只为可读）。
+                let rounded = aios_core::tool::float_tool::f32_round_3(raw as f32);
+                let normalized = if rounded == 0.0 {
+                    0.0
+                } else {
+                    (rounded as f64 * 1000.0).round() / 1000.0
+                };
                 if let Some(number) = serde_json::Number::from_f64(normalized) {
                     *value = serde_json::Value::Number(number);
                 }
@@ -795,6 +851,7 @@ fn build_canonical_save_plan(
     let mut inst_geos = BTreeMap::new();
     let mut inst_infos = BTreeMap::new();
     let mut geo_relates = BTreeMap::new();
+    let mut geo_relates_by_inst_info: BTreeMap<String, BTreeMap<String, String>> = BTreeMap::new();
     let mut neg_relates = BTreeMap::new();
     let mut ngmr_relates = BTreeMap::new();
     let mut normal_inst_relates = BTreeMap::new();
@@ -826,8 +883,7 @@ fn build_canonical_save_plan(
 
                 let mut point_ids = Vec::new();
                 for point in inst.geo_param.key_points() {
-                    let point_hash = point.gen_hash();
-                    let point_json = serde_json::to_string(&point)?;
+                    let (point_hash, point_json) = canonical_vec3_record(*point)?;
                     let point_id = format!("vec3:⟨{point_hash}⟩");
                     insert_unique_record(
                         &mut vec3s,
@@ -858,11 +914,19 @@ fn build_canonical_save_plan(
                     cat_negs,
                 );
                 let relate_id = gen_bytes_hash::<_, 64>(&relate_body);
+                let relation_id = format!("geo_relate:{relate_id}");
+                let relation = format!("{{ {relate_body}, id: '{relate_id}' }}");
                 insert_unique_record(
                     &mut geo_relates,
                     "geo_relate",
-                    format!("geo_relate:{relate_id}"),
-                    format!("{{ {relate_body}, id: '{relate_id}' }}"),
+                    relation_id.clone(),
+                    relation.clone(),
+                )?;
+                insert_unique_record(
+                    geo_relates_by_inst_info.entry(data.id()).or_default(),
+                    "geo_relate for shared CATA identity",
+                    relation_id,
+                    relation,
                 )?;
 
                 let unit_param = canonical_unit_param_json(inst)?;
@@ -997,6 +1061,8 @@ fn build_canonical_save_plan(
                     return Err(SaveConflict::RecordContent {
                         kind: "neg relation sequence",
                         record_id: owner_key,
+                        existing: existing.join(","),
+                        incoming: sequence.join(","),
                     }
                     .into());
                 }
@@ -1102,13 +1168,28 @@ fn build_canonical_save_plan(
         "];",
         &inst_infos,
     );
-    push_array_packets(
-        &mut packets,
-        SavePhase::Relations,
-        "INSERT RELATION INTO geo_relate [",
-        "];",
-        &geo_relates,
-    );
+    if mode.replaces_existing() {
+        let mut replacements = BTreeMap::new();
+        for (inst_info_id, rows) in &geo_relates_by_inst_info {
+            let sql = render_geo_relate_replace(inst_info_id, rows);
+            anyhow::ensure!(
+                sql.len() <= SQL_PACKET_BYTES,
+                "shared CATA identity {inst_info_id} geo_relate replacement is {} bytes, exceeding the {} byte packet limit",
+                sql.len(),
+                SQL_PACKET_BYTES
+            );
+            replacements.insert(inst_info_id.clone(), sql);
+        }
+        push_statement_packets(&mut packets, SavePhase::Relations, &replacements);
+    } else {
+        push_array_packets(
+            &mut packets,
+            SavePhase::Relations,
+            "INSERT RELATION INTO geo_relate [",
+            "];",
+            &geo_relates,
+        );
+    }
     push_array_packets(
         &mut packets,
         SavePhase::Relations,
@@ -1627,6 +1708,8 @@ mod tests {
         assert_eq!(sql.matches("\"ptdm\":0.556").count(), 1, "{sql}");
     }
 
+    // 端面法向取 Core3D `setMitrePlanes` 的抑制形态（DRNS 朝内 = +tangent、
+    // DRNE 朝内 = -tangent）。朝外的写法在权威语义下是真斜切，实体不再可复用。
     fn reusable_linear_loft() -> SweepSolid {
         SweepSolid {
             profile: CateProfileParam::UNKOWN,
@@ -1635,8 +1718,8 @@ mod tests {
                 end: Vec3::X * 7.0,
                 is_spine: true,
             }),
-            drns: Some(DVec3::NEG_X),
-            drne: Some(DVec3::X),
+            drns: Some(DVec3::X),
+            drne: Some(DVec3::NEG_X),
             ..Default::default()
         }
     }
@@ -1667,8 +1750,10 @@ mod tests {
     fn reusable_linear_loft_aliases_emit_one_canonical_inst_geo() {
         let left = reusable_linear_loft();
         let mut right = left.clone();
-        right.drns = Some(DVec3::NEG_X);
-        right.drne = Some(DVec3::X);
+        // 与 left 不同、但同样被抑制的端面法向（垂直于切向）：别名间实例字段
+        // 可以任意漂移，只要不构成真斜切就必须坍缩到同一个规范行。
+        right.drns = Some(DVec3::Y);
+        right.drne = Some(DVec3::Z);
         right.bangle = 37.0;
         right.plax = Vec3::Y;
         right.extrude_dir = DVec3::X;
@@ -2198,6 +2283,52 @@ mod tests {
         // 删除集恰好覆盖本批：多一个会误删别人的行，少一个就退回「撞 id 静默保留旧行」。
         assert_eq!(sql.matches("inst_relate:7997_1").count(), 2, "{sql}");
         assert_eq!(sql.matches("inst_relate:7997_2").count(), 2, "{sql}");
+    }
+
+    #[test]
+    fn shared_cata_geo_relations_are_replaced_as_one_authoritative_set() {
+        let mut rows = BTreeMap::new();
+        rows.insert(
+            "geo_relate:new_a".to_string(),
+            "{id: 'new_a', in: inst_info:⟨shared⟩, out: inst_geo:⟨1⟩}".to_string(),
+        );
+        rows.insert(
+            "geo_relate:new_b".to_string(),
+            "{id: 'new_b', in: inst_info:⟨shared⟩, out: inst_geo:⟨2⟩}".to_string(),
+        );
+
+        let sql = render_geo_relate_replace("shared", &rows);
+        assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
+        assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");
+        let delete_at = sql
+            .find("DELETE array::flatten(SELECT VALUE [id] FROM inst_info:⟨shared⟩->geo_relate);")
+            .expect("先删除共享身份的旧关系全集");
+        let insert_at = sql
+            .find("INSERT RELATION INTO geo_relate [")
+            .expect("再插入当前权威关系全集");
+        assert!(delete_at < insert_at, "删必须排在插之前: {sql}");
+        assert_eq!(sql.matches("new_a").count(), 1, "{sql}");
+        assert_eq!(sql.matches("new_b").count(), 1, "{sql}");
+    }
+
+    #[test]
+    fn targeted_save_plan_does_not_append_geo_relations_to_shared_identity() {
+        let source = include_str!("pdms_inst.rs");
+        let body = source
+            .split_once("fn build_canonical_save_plan(")
+            .expect("canonical SavePlan builder 必须存在")
+            .1
+            .split_once("\npub(crate) async fn build_save_plan(")
+            .map(|(head, _)| head)
+            .expect("builder 边界");
+        assert!(
+            body.contains("render_geo_relate_replace(inst_info_id, rows)"),
+            "定向替换必须按共享 inst_info 原子重写 geo_relate 全集: {body}"
+        );
+        assert!(
+            body.contains("if mode.replaces_existing()"),
+            "定向替换分支必须显式存在: {body}"
+        );
     }
 
     /// 生产写入路径上不许再出现裸的 `INSERT RELATION INTO inst_relate`。

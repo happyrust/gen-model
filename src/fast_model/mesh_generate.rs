@@ -1,6 +1,7 @@
 #[cfg(feature = "manifold")]
 use crate::fast_model::manifold_bool::{
-    apply_cata_neg_boolean_manifold, apply_insts_boolean_manifold,
+    apply_cata_instance_boolean_manifold, apply_cata_neg_boolean_manifold,
+    apply_insts_boolean_manifold,
 };
 #[cfg(feature = "manifold")]
 use crate::fast_model::manifold_tessellate::tessellate_libgm_param;
@@ -11,7 +12,7 @@ use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::prim_geo::basic::{BOXI_GEO_HASH, TUBI_GEO_HASH};
 use aios_core::room::room::GLOBAL_AABB_TREE;
-use aios_core::shape::pdms_shape::{PlantMesh, RsVec3};
+use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::tool::float_tool::{dvec4_round_3, f64_round};
 use aios_core::{
     RefU64, RefnoEnum, gen_bytes_hash, get_inst_relate_keys, query_deep_neg_inst_refnos,
@@ -40,9 +41,11 @@ use surrealdb::sql::Thing;
 /// receipt must be rebuilt even when an old `.mesh` already exists.
 // rev 2: RTorus follows the E3D RVM XZ/+Y local-axis convention.
 // rev 3: LPyramid follows the RVM XZ/+Y bottom-origin convention.
+// rev 4: LSnout follows the RVM X/axial-Y/Z convention; LPyramid actually emits the
+//        bottom-origin adapter rev 3 declared (rev-3 code disagreed with its own note).
 // Persisted older meshes must be regenerated because the geometry hash intentionally
 // describes shape identity rather than the tessellator implementation revision.
-const LIBGM_MESH_REV: u32 = 3;
+pub(crate) const LIBGM_MESH_REV: u32 = 4;
 
 #[cfg(not(feature = "manifold"))]
 async fn apply_cata_neg_boolean_manifold(
@@ -52,6 +55,15 @@ async fn apply_cata_neg_boolean_manifold(
     _failure_policy: crate::data_interface::geom_error::GeometryFailurePolicy,
 ) -> anyhow::Result<()> {
     anyhow::bail!("catalogue boolean: no mesh backend (enable `manifold`)")
+}
+
+#[cfg(not(feature = "manifold"))]
+async fn apply_cata_instance_boolean_manifold(
+    _refnos: &[RefnoEnum],
+    _dir: PathBuf,
+    _failure_policy: crate::data_interface::geom_error::GeometryFailurePolicy,
+) -> anyhow::Result<()> {
+    anyhow::bail!("catalogue root boolean: no mesh backend (enable `manifold`)")
 }
 
 #[cfg(not(feature = "manifold"))]
@@ -135,6 +147,7 @@ pub async fn booleans_meshes_in_db(
         let time = std::time::Instant::now();
         //生成元件库内部几何体的负实体运算
         apply_cata_neg_boolean_manifold(chunk, replace_exist, dir.clone(), failure_policy).await?;
+        apply_cata_instance_boolean_manifold(chunk, dir.clone(), failure_policy).await?;
         apply_insts_boolean_manifold(chunk, replace_exist, dir.clone(), failure_policy).await?;
         // println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
     }
@@ -184,6 +197,7 @@ pub async fn process_meshes_update_db(
     let failure_policy =
         crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback;
     apply_cata_neg_boolean_manifold(&refnos, replace_exist, dir.clone(), failure_policy).await?;
+    apply_cata_instance_boolean_manifold(&refnos, dir.clone(), failure_policy).await?;
     apply_insts_boolean_manifold(&refnos, replace_exist, dir.clone(), failure_policy).await?;
     // println!("布尔运算花费时间: {} ms", time.elapsed().as_millis());
 
@@ -317,6 +331,13 @@ pub(crate) async fn process_meshes_update_db_deep_with_policy(
                 )
                 .await
                 .with_context(|| format!("root {refno} catalogue negative boolean"))?;
+                apply_cata_instance_boolean_manifold(
+                    &target_visible_refnos,
+                    dir.clone(),
+                    failure_policy,
+                )
+                .await
+                .with_context(|| format!("root {refno} catalogue root boolean"))?;
                 apply_insts_boolean_manifold(
                     &target_visible_refnos,
                     replace_exist,
@@ -418,14 +439,13 @@ fn persist_libgm_plant_mesh(
         .map_err(|error| anyhow!("save generated mesh {id} failed: {error}"))?;
     let mut pt_hashes = HashSet::new();
     for point in mesh_aabb_corner_pts(&aabb) {
-        let pts_hash = RsVec3(point).gen_hash();
+        // 与 shape_save 的 vec3 同一条铁律：id 与 `d` 都从同一个量化后的点导出，
+        // 否则同 id 不同内容（这里 INSERT IGNORE 不报错，但会留下内容漂移的行）。
+        let (pts_hash, point_json) = crate::fast_model::pdms_inst::canonical_vec3_record(point)
+            .map_err(|error| anyhow!("serialize mesh point failed: {error}"))?;
         pt_hashes.insert(format!("vec3:⟨{pts_hash}⟩"));
         if !chunk_pts.contains_key(&pts_hash) {
-            chunk_pts.insert(
-                pts_hash,
-                serde_json::to_string(&point)
-                    .map_err(|error| anyhow!("serialize mesh point failed: {error}"))?,
-            );
+            chunk_pts.insert(pts_hash, point_json);
         }
     }
     if pt_hashes.is_empty() {
@@ -553,14 +573,24 @@ mod occ_retire_source_guards {
     /// `inst_geo.bad=true` 是持久诊断状态，不得只写一行控制台后静默过滤。
     #[test]
     fn every_mesh_failure_path_records_geom_error_before_marking_bad() {
+        // 与 `tessellation_revision_rebuilds_stale_meshes_and_persists_a_receipt` 同款
+        // 提取：`split_once` 会先撞上本测试模块里的字符串字面量（模块排在真实函数
+        // 之前），必须用签名校验锚定列首的真实定义。
         let source = include_str!("mesh_generate.rs");
-        let body = source
-            .split_once("pub async fn gen_inst_meshes(")
-            .expect("gen_inst_meshes")
-            .1
-            .split_once("/// 生成模型的aabb数据")
-            .expect("gen_inst_meshes boundary")
-            .0;
+        let declaration = "pub async fn gen_inst_meshes(";
+        let start = source
+            .match_indices(declaration)
+            .find_map(|(offset, _)| {
+                let after = &source[offset + declaration.len()..];
+                (after.starts_with("\n    refnos:") || after.starts_with("\r\n    refnos:"))
+                    .then_some(offset)
+            })
+            .expect("gen_inst_meshes");
+        let tail = &source[start..];
+        let end = tail
+            .find("pub async fn existing_geometric_aabb_changes(")
+            .expect("gen_inst_meshes boundary");
+        let body = &tail[..end];
         assert!(
             body.contains("note_mesh_failure(&g.id, message).await"),
             "non-shape parameters must enter geom_error"
@@ -603,7 +633,7 @@ mod occ_retire_source_guards {
 
     #[test]
     fn tessellation_revision_rebuilds_stale_meshes_and_persists_a_receipt() {
-        assert_eq!(LIBGM_MESH_REV, 3);
+        assert_eq!(LIBGM_MESH_REV, 4);
         let source = include_str!("mesh_generate.rs");
         let declaration = "pub async fn gen_inst_meshes(";
         let start = source
@@ -1512,6 +1542,26 @@ pub struct CataNegGroup {
     pub refno: RefnoEnum,
     pub inst_info_id: Thing,
     pub boolean_group: Vec<Vec<RefnoEnum>>,
+}
+
+/// GMRE 根组合：先对全部可见 catalogue 正体求并集，再扣除实例级 void。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CataInstanceBooleanGroup {
+    pub refno: RefnoEnum,
+    pub inst_info_id: Thing,
+    pub positives: Vec<CataRootGeoData>,
+    pub negatives: Vec<CataRootGeoData>,
+    #[serde(default)]
+    pub already_booled: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct CataRootGeoData {
+    pub id: String,
+    pub geom_refno: RefnoEnum,
+    pub trans: Transform,
+    #[serde(default)]
+    pub param: Option<PdmsGeoParam>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

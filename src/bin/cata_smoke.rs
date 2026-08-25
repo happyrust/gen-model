@@ -38,6 +38,12 @@ async fn main() -> anyhow::Result<()> {
         .with_capacity(1000)
         .await?;
     SUL_DB
+        .signin(surrealdb::opt::auth::Root {
+            username: &db_option.v_user,
+            password: &db_option.v_password,
+        })
+        .await?;
+    SUL_DB
         .use_ns(&db_option.project_code)
         .use_db(&db_option.project_name)
         .await?;

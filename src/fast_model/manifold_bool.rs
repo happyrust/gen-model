@@ -1,12 +1,14 @@
 use crate::data_interface::geom_error::{self, BOOL_NEG, BOOL_POS};
 use crate::fast_model::manifold_csg::{
     boolean_mesh_requires_exact_coordinates, load_manifold, load_manifold_detect_exact,
-    manifold_to_plant_mesh, subtract_negatives,
+    manifold_to_plant_mesh, plant_mesh_to_manifold, subtract_negatives,
 };
-use crate::fast_model::{CataNegGroup, GmGeoData, ManiGeoTransQuery, NegInfo};
+use crate::fast_model::{
+    CataInstanceBooleanGroup, CataNegGroup, CataRootGeoData, GmGeoData, ManiGeoTransQuery, NegInfo,
+};
 use aios_core::error::{init_deserialize_error, init_query_error};
 use aios_core::shape::pdms_shape::PlantMesh;
-use aios_core::{RefnoEnum, get_inst_relate_keys, init_test_surreal};
+use aios_core::{RefnoEnum, gen_bytes_hash, get_inst_relate_keys, init_test_surreal};
 use anyhow::anyhow;
 use bevy_transform::prelude::Transform;
 use glam::DMat4;
@@ -28,12 +30,15 @@ fn render_catalogue_manifold_result_write(
     new_id: u64,
     aabb_id: impl Display,
     inst_info_id: impl Display,
-    geom_refno: impl Display,
+    source_geom_refno: impl Display,
 ) -> String {
+    let output_geom_refno = format!("{}_b", source_geom_refno);
     format!(
-        "upsert inst_geo:⟨{new_id}⟩ set meshed = true, aabb = {aabb_id};\
+        "UPDATE array::flatten(SELECT VALUE [id] FROM {inst_info_id}->geo_relate \
+         WHERE geom_refno = pe:⟨{source_geom_refno}⟩) SET visible=false;\
+         upsert inst_geo:⟨{new_id}⟩ set meshed = true, aabb = {aabb_id};\
          INSERT RELATION IGNORE INTO geo_relate [{{ id: geo_relate:[{inst_info_id}, inst_geo:⟨{new_id}⟩], \
-         in: {inst_info_id}, out: inst_geo:⟨{new_id}⟩, geom_refno: pe:⟨{geom_refno}⟩, \
+         in: {inst_info_id}, out: inst_geo:⟨{new_id}⟩, geom_refno: pe:⟨{output_geom_refno}⟩, \
          geo_type: 'Pos', trans: trans:⟨0⟩, visible: true }}];\
          update {inst_info_id}<-inst_relate set booled=true;"
     )
@@ -46,6 +51,14 @@ fn render_catalogue_manifold_result_write(
 /// * `refnos` - 参考号数组
 /// * `replace_exist` - 是否替换已存在的布尔运算结果
 /// * `dir` - 模型文件目录路径
+///
+/// # 重算语义
+///
+/// 成功写回时会把源 `geo_relate` 置 `visible=false`（否则后续根组合布尔会把
+/// 未切洞的原始正体 union 回来，把洞填死）。副作用是本组的 `boolean_group`
+/// 查询（只看 visible 行）此后为空：`replace_exist=true` 对**已算过**的组
+/// 不再触发重算。重算的唯一通道是定向重存——`render_geo_relate_replace`
+/// 按共享身份原子重写关系全集后，可见性与布尔状态一并归零。
 pub async fn apply_cata_neg_boolean_manifold(
     refnos: &[RefnoEnum],
     replace_exist: bool,
@@ -261,7 +274,7 @@ pub async fn apply_cata_neg_boolean_manifold(
                                     new_id,
                                     &pos.aabb_id,
                                     &g.inst_info_id,
-                                    format!("{}_b", bg[0]),
+                                    bg[0],
                                 ));
                                 // 做成了就把这一件的降级记录销掉：几何换过、目录修过
                                 // 之后清单还挂着旧行，比没有清单更误导人。
@@ -292,6 +305,304 @@ pub async fn apply_cata_neg_boolean_manifold(
     }
     #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
     println!("元件库的负实体计算{:?}完成", refnos);
+    Ok(())
+}
+
+/// `GM_ComplexCombination` 中的 LPYR 使用 libgm 内部 centered-Z 坐标；独立
+/// RVM primitive 仍使用 `gen_rvm_pyramid` 的 PlantMesh 适配坐标。只在根组合
+/// 布尔阶段切换，避免把已经通过的 TRNS/BEND primitive 一起翻转。
+fn load_cata_root_manifold(
+    dir: &std::path::Path,
+    geo: &CataRootGeoData,
+    more_precision: bool,
+    exact_coordinates: bool,
+) -> anyhow::Result<Manifold> {
+    if let Some(aios_core::parsed_data::geo_params_data::PdmsGeoParam::PrimLPyramid(pyramid)) =
+        &geo.param
+    {
+        let height = (pyramid.ptdi - pyramid.pbdi).abs();
+        let mesh = crate::fast_model::mesh_primitives::gen_pyramid(
+            pyramid.pbbt,
+            pyramid.pcbt,
+            pyramid.pbtp,
+            pyramid.pctp,
+            height,
+            pyramid.pbof,
+            pyramid.pcof,
+        );
+        return plant_mesh_to_manifold(&mesh, geo.trans.compute_matrix().as_dmat4());
+    }
+    load_manifold(
+        dir,
+        &geo.id,
+        geo.trans.compute_matrix().as_dmat4(),
+        more_precision,
+        exact_coordinates,
+    )
+}
+
+async fn record_cata_root_boolean_failure(
+    kind: &'static str,
+    roots: &[RefnoEnum],
+    inst_info_id: &surrealdb::sql::Thing,
+    geom: &str,
+    reason: &str,
+    failure_policy: geom_error::GeometryFailurePolicy,
+) -> anyhow::Result<()> {
+    for root in roots {
+        geom_error::note_skip(kind, &root.to_pdms_str(), geom, reason).await;
+    }
+    if failure_policy == geom_error::GeometryFailurePolicy::Required {
+        return Err(anyhow!(reason.to_owned()));
+    }
+
+    // Best-effort 只隔离这个共享 catalogue identity；查询/事务错误仍向上返回，
+    // 让分页保留重试，而不是把数据库故障伪装成一个坏模型。
+    let sql = format!("UPDATE {}<-inst_relate SET bad_bool=true;", inst_info_id);
+    crate::surreal_retry::execute_model_write(&sql, "mark catalogue root boolean failure").await?;
+    Ok(())
+}
+
+/// 按 libgm `GM_ComplexCombination` 语义生成 catalogue 根组合：全部可见正体先
+/// union，再统一扣除 `CataInstanceNeg`。结果作为共享 `inst_info` 唯一可见 Pos
+/// 关系写回；原 primitive 关系保留作可追溯输入，但不再直接交给渲染/RVM。
+///
+/// 本函数不接 `replace_exist`：`already_booled`（可见的 `cata_root_booled` 关系
+/// 存在）一律跳过。与 `apply_cata_neg_boolean_manifold` 一致，重算只能走定向
+/// 重存把关系全集换掉，让 `already_booled` 自然失效。
+pub async fn apply_cata_instance_boolean_manifold(
+    refnos: &[RefnoEnum],
+    dir: PathBuf,
+    failure_policy: geom_error::GeometryFailurePolicy,
+) -> anyhow::Result<()> {
+    if refnos.is_empty() {
+        return Ok(());
+    }
+    let inst_keys = get_inst_relate_keys(refnos);
+    let sql = format!(
+        r#"SELECT in AS refno, (->inst_info)[0] AS inst_info_id,
+            (SELECT record::id(out) AS id, geom_refno, trans.d AS trans,
+                    out.param AS param
+               FROM ->inst_info->geo_relate
+              WHERE visible AND !out.bad AND trans.d != NONE
+                AND geo_type IN ['Pos', 'Compound']) AS positives,
+            (SELECT record::id(out) AS id, geom_refno, trans.d AS trans,
+                    out.param AS param
+               FROM ->inst_info->geo_relate
+              WHERE !out.bad AND trans.d != NONE
+                AND geo_type = 'CataInstanceNeg') AS negatives,
+            array::len((SELECT VALUE id FROM ->inst_info->geo_relate
+                         WHERE visible AND cata_root_booled = true)) > 0 AS already_booled
+           FROM {inst_keys} WHERE in.id != NONE AND (->inst_info)[0] != NONE"#
+    );
+    let mut response = crate::data_interface::staging::active_data_db()
+        .query(&sql)
+        .await?
+        .check()?;
+    let mut queried_groups: Vec<CataInstanceBooleanGroup> = response.take(0)?;
+    queried_groups.retain(|group| !group.negatives.is_empty() && !group.already_booled);
+    queried_groups.sort_by_key(|group| (group.inst_info_id.to_string(), group.refno));
+
+    // 一个 catalogue identity 会被多个设计实例复用。几何只生成一次，但失败必须
+    // 记到每个生成根，不能因 dedup 只留下排序后的第一个实例。
+    let mut groups: Vec<(CataInstanceBooleanGroup, Vec<RefnoEnum>)> = Vec::new();
+    for group in queried_groups {
+        if let Some((shared, roots)) = groups.last_mut()
+            && shared.inst_info_id == group.inst_info_id
+        {
+            roots.push(group.refno);
+        } else {
+            let root = group.refno;
+            groups.push((group, vec![root]));
+        }
+    }
+
+    for (mut group, roots) in groups {
+        group.positives.sort_by_key(|geo| geo.geom_refno);
+        group.negatives.sort_by_key(|geo| geo.geom_refno);
+        if group.positives.is_empty() {
+            let reason = format!(
+                "catalogue root {} has instance negatives but no visible positives",
+                group.inst_info_id
+            );
+            record_cata_root_boolean_failure(
+                BOOL_POS,
+                &roots,
+                &group.inst_info_id,
+                &group.inst_info_id.to_string(),
+                &reason,
+                failure_policy,
+            )
+            .await?;
+            continue;
+        }
+
+        // centred-Z LPYR 展开属性顶点；同一布尔组因此统一保持精确坐标，不能让正负
+        // 两侧分别量化到不同网格。
+        let has_centred_pyramid = group.positives.iter().chain(&group.negatives).any(|geo| {
+            matches!(
+                &geo.param,
+                Some(aios_core::parsed_data::geo_params_data::PdmsGeoParam::PrimLPyramid(_))
+            )
+        });
+        let exact_coordinates_result = if has_centred_pyramid {
+            Ok(true)
+        } else {
+            group.positives.iter().try_fold(false, |exact, geo| {
+                Ok::<_, anyhow::Error>(
+                    exact || boolean_mesh_requires_exact_coordinates(&dir, &geo.id)?,
+                )
+            })
+        };
+        let exact_coordinates = match exact_coordinates_result {
+            Ok(exact) => exact,
+            Err(error) => {
+                let reason = format!(
+                    "catalogue root exact-coordinate inspection failed for {}: {error:#}",
+                    group.inst_info_id
+                );
+                record_cata_root_boolean_failure(
+                    BOOL_POS,
+                    &roots,
+                    &group.inst_info_id,
+                    &group.inst_info_id.to_string(),
+                    &reason,
+                    failure_policy,
+                )
+                .await?;
+                continue;
+            }
+        };
+
+        let mut positives = Vec::with_capacity(group.positives.len());
+        let mut failed_positive = false;
+        for geo in &group.positives {
+            match load_cata_root_manifold(&dir, geo, false, exact_coordinates) {
+                Ok(manifold) => positives.push(manifold),
+                Err(error) => {
+                    let reason = format!(
+                        "catalogue root positive failed for {} geom={}: {error:#}",
+                        group.inst_info_id, geo.geom_refno
+                    );
+                    record_cata_root_boolean_failure(
+                        BOOL_POS,
+                        &roots,
+                        &group.inst_info_id,
+                        &geo.id,
+                        &reason,
+                        failure_policy,
+                    )
+                    .await?;
+                    failed_positive = true;
+                    break;
+                }
+            }
+        }
+        if failed_positive {
+            continue;
+        }
+        let positive = if positives.len() == 1 {
+            positives.pop().expect("len==1")
+        } else {
+            Manifold::batch_union(&positives)
+        };
+        if positive.num_tri() == 0 {
+            let reason = format!("catalogue root positive union is empty for {}", group.refno);
+            record_cata_root_boolean_failure(
+                BOOL_POS,
+                &roots,
+                &group.inst_info_id,
+                &group.inst_info_id.to_string(),
+                &reason,
+                failure_policy,
+            )
+            .await?;
+            continue;
+        }
+
+        let mut negatives = Vec::with_capacity(group.negatives.len());
+        let mut failed_negative = false;
+        for geo in &group.negatives {
+            match load_cata_root_manifold(&dir, geo, true, exact_coordinates) {
+                Ok(manifold) => negatives.push(manifold),
+                Err(error) => {
+                    let reason = format!(
+                        "catalogue root negative failed for {} geom={}: {error:#}",
+                        group.inst_info_id, geo.geom_refno
+                    );
+                    record_cata_root_boolean_failure(
+                        BOOL_NEG,
+                        &roots,
+                        &group.inst_info_id,
+                        &geo.id,
+                        &reason,
+                        failure_policy,
+                    )
+                    .await?;
+                    failed_negative = true;
+                    break;
+                }
+            }
+        }
+        if failed_negative {
+            continue;
+        }
+        let final_manifold = subtract_negatives(positive, &negatives);
+        let mesh = manifold_to_plant_mesh(&final_manifold);
+        if mesh.indices.len() < 3 || mesh.vertices.len() < 3 {
+            let reason = format!("catalogue root difference is empty for {}", group.refno);
+            record_cata_root_boolean_failure(
+                BOOL_NEG,
+                &roots,
+                &group.inst_info_id,
+                &group.inst_info_id.to_string(),
+                &reason,
+                failure_policy,
+            )
+            .await?;
+            continue;
+        }
+
+        let output_id =
+            gen_bytes_hash::<_, 64>(&format!("libgm-cata-root-v1:{}", group.inst_info_id));
+        mesh.ser_to_file(&dir.join(format!("{output_id}.mesh")))?;
+        let aabb = mesh
+            .aabb
+            .ok_or_else(|| anyhow!("catalogue root mesh {} has no AABB", group.refno))?;
+        let aabb_hash = gen_bytes_hash::<_, 64>(&aabb);
+        let aabb_json = serde_json::to_string(&aabb)?;
+        let source_refno = group.positives[0].geom_refno;
+        let relation_id = format!(
+            "geo_relate:[{}, inst_geo:⟨{}⟩]",
+            group.inst_info_id, output_id
+        );
+        let update_sql = format!(
+            "BEGIN TRANSACTION;\
+             INSERT IGNORE INTO aabb [{{id:aabb:⟨{aabb_hash}⟩, d:{aabb_json}}}];\
+             UPSERT inst_geo:⟨{output_id}⟩ SET meshed=true, bad=false, \
+                    mesh_rev={}, aabb=aabb:⟨{aabb_hash}⟩;\
+             UPDATE array::flatten(SELECT VALUE [id] FROM {}->geo_relate \
+                    WHERE visible AND geo_type IN ['Pos','Compound']) SET visible=false;\
+             DELETE {relation_id};\
+             INSERT RELATION INTO geo_relate [{{id:{relation_id}, in:{}, \
+                    out:inst_geo:⟨{output_id}⟩, geom_refno:pe:⟨{source_refno}⟩, \
+                    geo_type:'Pos', trans:trans:⟨0⟩, visible:true, cata_root_booled:true}}];\
+             UPDATE {}<-inst_relate SET booled=true, bad_bool=false;\
+             COMMIT TRANSACTION;",
+            crate::fast_model::mesh_generate::LIBGM_MESH_REV,
+            group.inst_info_id,
+            group.inst_info_id,
+            group.inst_info_id,
+        );
+        crate::surreal_retry::execute_model_write(
+            &update_sql,
+            "persist catalogue root manifold result",
+        )
+        .await?;
+        for root in roots {
+            geom_error::note_success(&root.to_pdms_str()).await;
+        }
+    }
     Ok(())
 }
 
@@ -633,13 +944,92 @@ pub async fn apply_insts_boolean_manifold_single(
 }
 
 #[test]
+fn catalogue_root_lpyramid_is_rebuilt_centred_on_z_without_reading_legacy_mesh() {
+    use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+    use aios_core::prim_geo::lpyramid::LPyramid;
+
+    let pyramid = LPyramid {
+        pbbt: 8.0,
+        pcbt: 6.0,
+        pbtp: 4.0,
+        pctp: 2.0,
+        pbdi: 17.0,
+        ptdi: 27.0,
+        pbof: 1.0,
+        pcof: -2.0,
+        ..Default::default()
+    };
+    let geo = CataRootGeoData {
+        id: "this-mesh-must-not-be-read".to_owned(),
+        geom_refno: RefnoEnum::from("1/2"),
+        trans: Transform::IDENTITY,
+        param: Some(PdmsGeoParam::PrimLPyramid(pyramid)),
+    };
+
+    let manifold = load_cata_root_manifold(
+        std::path::Path::new("directory-does-not-exist"),
+        &geo,
+        false,
+        true,
+    )
+    .expect("explicit LPYR parameter must bypass the persisted primitive mesh");
+    let mesh = manifold_to_plant_mesh(&manifold);
+    let min_z = mesh
+        .vertices
+        .iter()
+        .map(|point| point.z)
+        .fold(f32::INFINITY, f32::min);
+    let max_z = mesh
+        .vertices
+        .iter()
+        .map(|point| point.z)
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    assert!((min_z + 5.0).abs() < 1.0e-5, "min_z={min_z}");
+    assert!((max_z - 5.0).abs() < 1.0e-5, "max_z={max_z}");
+}
+
+#[test]
+fn catalogue_root_boolean_has_observable_best_effort_and_database_failure_boundary() {
+    let source = include_str!("manifold_bool.rs");
+    let body = source
+        .split_once("async fn record_cata_root_boolean_failure(")
+        .expect("catalogue root failure handler")
+        .1
+        .split_once("/// 按 libgm `GM_ComplexCombination`")
+        .expect("catalogue root failure handler boundary")
+        .0;
+    assert!(body.contains("for root in roots"), "{body}");
+    assert!(body.contains("geom_error::note_skip("), "{body}");
+    assert!(body.contains("GeometryFailurePolicy::Required"), "{body}");
+    assert!(body.contains("bad_bool=true"), "{body}");
+    assert!(body.contains("execute_model_write"), "{body}");
+
+    let root_body = source
+        .split_once("pub async fn apply_cata_instance_boolean_manifold(")
+        .expect("catalogue root boolean")
+        .1
+        .split_once("pub async fn apply_insts_boolean_manifold(")
+        .expect("catalogue root boolean boundary")
+        .0;
+    assert!(
+        root_body.contains("geo_type = 'CataInstanceNeg'"),
+        "{root_body}"
+    );
+    assert!(root_body.contains("Manifold::batch_union"), "{root_body}");
+    assert!(root_body.contains("subtract_negatives"), "{root_body}");
+    assert!(root_body.contains("cata_root_booled:true"), "{root_body}");
+    assert!(root_body.contains("already_booled"), "{root_body}");
+}
+
+#[test]
 fn catalogue_manifold_inst_geo_write_is_idempotent() {
     let source = include_str!("manifold_bool.rs");
     let catalogue = source
         .split_once("pub async fn apply_cata_neg_boolean_manifold(")
         .expect("catalogue manifold function")
         .1
-        .split_once("pub async fn apply_insts_boolean_manifold(")
+        .split_once("fn load_cata_root_manifold(")
         .expect("catalogue manifold boundary")
         .0;
 
@@ -725,7 +1115,7 @@ fn manifold_io_uses_the_staged_router_and_propagates_worker_failures() {
         .split_once("pub async fn apply_cata_neg_boolean_manifold(")
         .expect("catalogue manifold function")
         .1
-        .split_once("pub async fn apply_insts_boolean_manifold(")
+        .split_once("fn load_cata_root_manifold(")
         .expect("catalogue manifold boundary")
         .0;
     assert!(catalogue.contains("active_data_db()"), "{catalogue}");
@@ -809,7 +1199,7 @@ fn empty_difference_is_bad_bool_not_a_silent_swallow() {
         .split_once("pub async fn apply_cata_neg_boolean_manifold(")
         .expect("catalogue manifold function")
         .1
-        .split_once("pub async fn apply_insts_boolean_manifold(")
+        .split_once("fn load_cata_root_manifold(")
         .expect("catalogue manifold boundary")
         .0;
     assert!(catalogue.contains("差集为空"), "目录路径同样不得静默吞件");
@@ -866,7 +1256,7 @@ fn manifold_ingest_failure_has_required_and_best_effort_paths() {
         .split_once("pub async fn apply_cata_neg_boolean_manifold(")
         .expect("catalogue manifold function")
         .1
-        .split_once("pub async fn apply_insts_boolean_manifold(")
+        .split_once("fn load_cata_root_manifold(")
         .expect("catalogue manifold boundary")
         .0;
     let design = source
@@ -907,7 +1297,7 @@ fn catalogue_exact_detection_is_inside_the_failure_policy_gate() {
         .split_once("pub async fn apply_cata_neg_boolean_manifold(")
         .expect("catalogue manifold function")
         .1
-        .split_once("pub async fn apply_insts_boolean_manifold(")
+        .split_once("fn load_cata_root_manifold(")
         .expect("catalogue manifold boundary")
         .0;
     assert!(

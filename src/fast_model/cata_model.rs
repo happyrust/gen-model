@@ -823,6 +823,7 @@ pub async fn gen_cata_single_geoms(
             refno,
             geometries,
             n_geometries,
+            instance_negative_refnos,
             axis_map,
         } = geoms_info;
 
@@ -830,7 +831,10 @@ pub async fn gen_cata_single_geoms(
         let t_convert_geo = std::time::Instant::now();
         let mut geo_count = 0;
         for geom in geometries {
-            if let Some(cate_shape) = convert_to_brep_shapes(&geom) {
+            if let Some(mut cate_shape) = convert_to_brep_shapes(&geom) {
+                cate_shape.is_instance_negative = instance_negative_refnos
+                    .binary_search(&cate_shape.refno)
+                    .is_ok();
                 brep_shape_map
                     .entry(design_refno)
                     .or_insert(Vec::new())
@@ -2000,6 +2004,7 @@ pub async fn gen_cata_geos(
                                         is_tubi,
                                         pts,
                                         is_ngmr,
+                                        is_instance_negative,
                                         ..
                                     } = shape;
                                     // libgm/E3D only consumes the active conditional branch.
@@ -2067,6 +2072,8 @@ pub async fn gen_cata_geos(
                                         GeoBasicType::CataCrossNeg
                                     } else if is_neg {
                                         GeoBasicType::CataNeg
+                                    } else if is_instance_negative {
+                                        GeoBasicType::CataInstanceNeg
                                     } else if !cata_neg_refnos.is_empty() {
                                         GeoBasicType::Compound
                                     } else {

@@ -15,6 +15,10 @@ pub(crate) enum SaveConflict {
     RecordContent {
         kind: &'static str,
         record_id: String,
+        /// 同一 id 下先后两份渲染内容。没有它们，2026-08-25 那两条死信只报了
+        /// record id，是哪个 prim 哪个字段在同一身份下漂移，全靠人肉复推。
+        existing: String,
+        incoming: String,
     },
     NormalTubiOverlap {
         record_id: String,
@@ -28,11 +32,31 @@ pub(crate) enum SaveConflict {
     },
 }
 
+/// 错误文本会进 attempts 账本与死信样本，整行 SQL 有 KB 级的，砍到够定位为止。
+fn conflict_excerpt(rendered: &str) -> String {
+    const MAX_CHARS: usize = 240;
+    if rendered.chars().count() <= MAX_CHARS {
+        return rendered.to_string();
+    }
+    let head: String = rendered.chars().take(MAX_CHARS).collect();
+    format!("{head}…[截断]")
+}
+
 impl std::fmt::Display for SaveConflict {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::RecordContent { kind, record_id } => {
-                write!(formatter, "持久化记录 {record_id} 出现不同内容（{kind}）")
+            Self::RecordContent {
+                kind,
+                record_id,
+                existing,
+                incoming,
+            } => {
+                write!(
+                    formatter,
+                    "持久化记录 {record_id} 出现不同内容（{kind}）：已有 {} ≠ 新到 {}",
+                    conflict_excerpt(existing),
+                    conflict_excerpt(incoming)
+                )
             }
             Self::NormalTubiOverlap { record_id } => write!(
                 formatter,
