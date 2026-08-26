@@ -140,6 +140,10 @@ http_api_cors = ["*"]
 # 给「要增量、不要 2 万面板重算」的场景（L3 夹具就用它）。
 startup_autorun = true
 
+# 文件名/文件头库号不一致、同项目同 dbnum 多文件：默认只记录并跳过冲突库，
+# 不再阻断其它库完成初始化。需要恢复严格阻断时设为 true。
+block_file_identity_conflicts = false
+
 #【新增 2026-08-19】三段增量执行控制，默认均为 true。
 # 顺序固定为数据 → 模型 → 房间；关闭阶段只停消费，不删除 durable 工作。
 # 环境变量 AIOS_DATA_INCREMENTAL / AIOS_MODEL_INCREMENTAL 可覆盖前两项。
@@ -246,3 +250,10 @@ gen_history_model = false
 # debug_root_refnos = []
 
 # debug_root_refnos = ["17496_195578"]
+# 模型生成保持单协调器；claim页只控制数据库预取，execution group 与根并发控制执行。
+model_concurrency_mode = "adaptive"
+model_regen_claim_page = 100
+model_post_regen_aabb_page = 256
+model_regen_execution_group = 16
+model_root_inflight_max = 2
+model_full_rebuild_enabled = true

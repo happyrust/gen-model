@@ -131,3 +131,9 @@ puhua_database_password = ""
 room_key_word = ["-RM"]
 
 gen_history_model = false
+model_concurrency_mode = "adaptive"
+model_regen_claim_page = 100
+model_post_regen_aabb_page = 256
+model_regen_execution_group = 16
+model_root_inflight_max = 2
+model_full_rebuild_enabled = true

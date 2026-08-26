@@ -97,6 +97,24 @@ pub struct DbOptionExt {
     /// 口径与全部护栏见 [`crate::data_interface::watch_scope`]。
     #[serde(default)]
     pub watch_dbnums: Option<Vec<u32>>,
+
+    /// 文件身份冲突是否阻断初始化；默认 `false` = 记录并跳过冲突库。
+    #[serde(default)]
+    pub block_file_identity_conflicts: Option<bool>,
+
+    /// 模型生成调度档位：`legacy` / `bounded` / `adaptive`。
+    #[serde(default)]
+    pub model_concurrency_mode: Option<String>,
+    #[serde(default)]
+    pub model_regen_claim_page: Option<usize>,
+    #[serde(default)]
+    pub model_post_regen_aabb_page: Option<usize>,
+    #[serde(default)]
+    pub model_regen_execution_group: Option<usize>,
+    #[serde(default)]
+    pub model_root_inflight_max: Option<usize>,
+    #[serde(default)]
+    pub model_full_rebuild_enabled: Option<bool>,
 }
 
 impl Deref for DbOptionExt {
@@ -132,6 +150,13 @@ impl From<DbOption> for DbOptionExt {
             room_incremental: None,
             catalogue_project_priority: None,
             watch_dbnums: None,
+            block_file_identity_conflicts: None,
+            model_concurrency_mode: None,
+            model_regen_claim_page: None,
+            model_post_regen_aabb_page: None,
+            model_regen_execution_group: None,
+            model_root_inflight_max: None,
+            model_full_rebuild_enabled: None,
         }
     }
 }
@@ -174,6 +199,20 @@ struct DbOptionExtFields {
     catalogue_project_priority: Option<Vec<String>>,
     #[serde(default)]
     watch_dbnums: Option<Vec<u32>>,
+    #[serde(default)]
+    block_file_identity_conflicts: Option<bool>,
+    #[serde(default)]
+    model_concurrency_mode: Option<String>,
+    #[serde(default)]
+    model_regen_claim_page: Option<usize>,
+    #[serde(default)]
+    model_post_regen_aabb_page: Option<usize>,
+    #[serde(default)]
+    model_regen_execution_group: Option<usize>,
+    #[serde(default)]
+    model_root_inflight_max: Option<usize>,
+    #[serde(default)]
+    model_full_rebuild_enabled: Option<bool>,
 }
 
 /// 读一次 `DbOption` 的扩展字段，把三种结局分开——它们要求的处置完全不同。
@@ -337,7 +376,80 @@ pub fn get_db_option_ext() -> DbOptionExt {
         room_incremental: ext.room_incremental,
         catalogue_project_priority: ext.catalogue_project_priority.clone(),
         watch_dbnums: ext.watch_dbnums.clone(),
+        block_file_identity_conflicts: ext.block_file_identity_conflicts,
+        model_concurrency_mode: ext.model_concurrency_mode.clone(),
+        model_regen_claim_page: ext.model_regen_claim_page,
+        model_post_regen_aabb_page: ext.model_post_regen_aabb_page,
+        model_regen_execution_group: ext.model_regen_execution_group,
+        model_root_inflight_max: ext.model_root_inflight_max,
+        model_full_rebuild_enabled: ext.model_full_rebuild_enabled,
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelConcurrencyMode {
+    Legacy,
+    Bounded,
+    Adaptive,
+}
+
+fn effective_model_concurrency_mode(configured: Option<&str>) -> ModelConcurrencyMode {
+    match configured
+        .map(str::trim)
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
+        Some("legacy") => ModelConcurrencyMode::Legacy,
+        Some("bounded") => ModelConcurrencyMode::Bounded,
+        Some("adaptive") | None => ModelConcurrencyMode::Adaptive,
+        Some(value) => {
+            log::warn!("model_concurrency_mode={value:?} 未识别，按 adaptive 运行");
+            ModelConcurrencyMode::Adaptive
+        }
+    }
+}
+
+pub fn model_concurrency_mode() -> ModelConcurrencyMode {
+    effective_model_concurrency_mode(load_ext_fields().model_concurrency_mode.as_deref())
+}
+
+pub fn model_regen_claim_page() -> usize {
+    load_ext_fields()
+        .model_regen_claim_page
+        .unwrap_or(100)
+        .clamp(1, 100)
+}
+
+pub fn model_post_regen_aabb_page() -> usize {
+    load_ext_fields()
+        .model_post_regen_aabb_page
+        .unwrap_or(256)
+        .clamp(1, 256)
+}
+
+pub fn model_regen_execution_group() -> usize {
+    let configured = load_ext_fields().model_regen_execution_group.unwrap_or(16);
+    match model_concurrency_mode() {
+        ModelConcurrencyMode::Legacy => model_regen_claim_page(),
+        ModelConcurrencyMode::Bounded | ModelConcurrencyMode::Adaptive => {
+            configured.clamp(1, model_regen_claim_page())
+        }
+    }
+}
+
+pub fn model_root_inflight_max() -> usize {
+    match model_concurrency_mode() {
+        ModelConcurrencyMode::Legacy => 1,
+        ModelConcurrencyMode::Bounded | ModelConcurrencyMode::Adaptive => load_ext_fields()
+            .model_root_inflight_max
+            .unwrap_or(2)
+            .clamp(1, 8),
+    }
+}
+
+pub fn model_full_rebuild_enabled() -> bool {
+    load_ext_fields().model_full_rebuild_enabled.unwrap_or(true)
 }
 
 /// 配置里的增量监听限定域（`DbOption.toml` 的 `watch_dbnums`，**默认空 = 全范围**）。
@@ -371,6 +483,19 @@ pub fn catalogue_project_priority() -> Vec<String> {
         .catalogue_project_priority
         .clone()
         .unwrap_or_default()
+}
+
+/// 文件名/文件头库号不一致、同项目同 dbnum 多文件等身份冲突是否阻断初始化。
+///
+/// 默认 `false`：冲突文件仍然不摄入、不写观察值，只把问题记入日志/人工回执，
+/// 其余库继续初始化。需要恢复严格 fail-closed 行为的部署可在 `DbOption.toml` 写
+/// `block_file_identity_conflicts = true`。
+pub fn block_file_identity_conflicts() -> bool {
+    effective_block_file_identity_conflicts(load_ext_fields().block_file_identity_conflicts)
+}
+
+fn effective_block_file_identity_conflicts(configured: Option<bool>) -> bool {
+    configured.unwrap_or(false)
 }
 
 /// 数据批次并发在飞数（`DbOption.toml` 的 `data_batch_workers`，默认 1 = 串行）。
@@ -702,6 +827,33 @@ mod tests {
         assert_eq!(effective_data_batch_workers(Some(0)), 1);
         assert_eq!(effective_data_batch_workers(Some(4)), 4);
         assert_eq!(effective_data_batch_workers(Some(32)), 8);
+    }
+
+    #[test]
+    fn model_concurrency_mode_defaults_to_adaptive_and_legacy_is_explicit() {
+        assert_eq!(
+            effective_model_concurrency_mode(None),
+            ModelConcurrencyMode::Adaptive
+        );
+        assert_eq!(
+            effective_model_concurrency_mode(Some("legacy")),
+            ModelConcurrencyMode::Legacy
+        );
+        assert_eq!(
+            effective_model_concurrency_mode(Some(" bounded ")),
+            ModelConcurrencyMode::Bounded
+        );
+        assert_eq!(
+            effective_model_concurrency_mode(Some("unknown")),
+            ModelConcurrencyMode::Adaptive
+        );
+    }
+
+    #[test]
+    fn file_identity_conflicts_are_record_only_by_default() {
+        assert!(!effective_block_file_identity_conflicts(None));
+        assert!(!effective_block_file_identity_conflicts(Some(false)));
+        assert!(effective_block_file_identity_conflicts(Some(true)));
     }
 
     /// 缺配置就是「全范围」：这个字段的形状与坑过人的 `manual_db_nums` 一样，

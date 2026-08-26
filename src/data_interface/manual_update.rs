@@ -4486,6 +4486,7 @@ impl AiosDBManager {
                 .map(|(phase, message)| format!("{} 阶段阻断: {message}", phase.as_str())),
         );
         receipt.scanned = by_dbnum.len();
+        let block_file_identity_conflicts = crate::options::block_file_identity_conflicts();
 
         // ADR-020 第 3 项：子集选择先过统一范围门。范围外的请求当场拒（警告 +
         // 不入队），范围内但项目目录里没有文件的请求也要说出来——静默吞掉的话，
@@ -4513,15 +4514,12 @@ impl AiosDBManager {
         let coordinator =
             crate::data_interface::initialization_phase::InitializationCoordinator::global();
         let epoch_id = coordinator.begin_discovery();
-        let manifest_totals = by_dbnum
-            .values()
-            .flatten()
-            .map(|candidate| {
-                crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                    &candidate.db_type,
-                )
-            })
-            .collect::<Vec<_>>();
+        // 「仅记录并跳过」的库要从阶段总数里摘掉——watcher 路径靠 `manifest_totals.retain`
+        // 做同一件事（increment_manager），这里不摘的话 /health 的阶段 total 会为一个
+        // 永远不会来的批次虚高一格。同号多文件在收集时按 `len() == 1` 过滤，身份异常
+        // 要到逐库裁决时才知道，先记进这个集合、收集总数时再排除。
+        let mut manifest_lenient_excluded: std::collections::BTreeSet<u32> =
+            std::collections::BTreeSet::new();
         let mut manifest_phases = Vec::new();
         let mut phase_blockers = manifest_blockers;
 
@@ -4549,13 +4547,19 @@ impl AiosDBManager {
                 }
                 .block_reason()
                 .expect("同号多文件是阻断类异常");
-                receipt.blocked.push(BlockedDbnum { dbnum, reason });
-                phase_blockers.push((
-                    crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                        &candidates[0].db_type,
-                    ),
-                    format!("dbnum={dbnum} 同号多文件"),
-                ));
+                if block_file_identity_conflicts {
+                    receipt.blocked.push(BlockedDbnum { dbnum, reason });
+                    phase_blockers.push((
+                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                            &candidates[0].db_type,
+                        ),
+                        format!("dbnum={dbnum} 同号多文件"),
+                    ));
+                } else {
+                    receipt.warnings.push(format!(
+                        "dbnum={dbnum}: {reason}；当前配置为仅记录并跳过，不阻断其余库初始化"
+                    ));
+                }
                 continue;
             }
             let cand = &candidates[0];
@@ -4618,13 +4622,20 @@ impl AiosDBManager {
                     .as_ref()
                     .is_some_and(FileAnomaly::requires_reinit)
                 {
-                    receipt.blocked.push(BlockedDbnum { dbnum, reason });
-                    phase_blockers.push((
-                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                            &cand.db_type,
-                        ),
-                        format!("dbnum={dbnum} 身份异常阻断"),
-                    ));
+                    if block_file_identity_conflicts {
+                        receipt.blocked.push(BlockedDbnum { dbnum, reason });
+                        phase_blockers.push((
+                            crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                                &cand.db_type,
+                            ),
+                            format!("dbnum={dbnum} 身份异常阻断"),
+                        ));
+                    } else {
+                        receipt.warnings.push(format!(
+                            "dbnum={dbnum}: {reason}；当前配置为仅记录并跳过，不阻断其余库初始化"
+                        ));
+                        manifest_lenient_excluded.insert(dbnum);
+                    }
                     continue;
                 }
                 receipt.warnings.push(format!(
@@ -4728,6 +4739,19 @@ impl AiosDBManager {
             }
         }
         coordinator.install_manifest(epoch_id, manifest_phases, false, phase_blockers);
+        let manifest_totals = by_dbnum
+            .iter()
+            .filter(|(dbnum, candidates)| {
+                (block_file_identity_conflicts || candidates.len() == 1)
+                    && !manifest_lenient_excluded.contains(dbnum)
+            })
+            .flat_map(|(_, candidates)| candidates)
+            .map(|candidate| {
+                crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                    &candidate.db_type,
+                )
+            })
+            .collect::<Vec<_>>();
         coordinator.set_phase_totals(epoch_id, manifest_totals);
         coordinator.set_shadowed(
             epoch_id,

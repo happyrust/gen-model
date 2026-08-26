@@ -1887,6 +1887,42 @@ mod tests {
         assert!(insertions >= 3, "三个阻断分支都得记到 blocked_dupes 里");
     }
 
+    /// 身份冲突的宽严策略必须同时覆盖 watcher 和人工执行；只改一条路径会让预览、
+    /// 人工回执与启动 `/health` 对同一份文件给出相反结论。
+    #[test]
+    fn file_identity_conflict_policy_is_shared_by_watcher_and_manual_paths() {
+        let watcher = include_str!("increment_manager.rs");
+        let manual = include_str!("manual_update.rs");
+        assert!(
+            watcher.contains("crate::options::block_file_identity_conflicts()"),
+            "watcher 必须读取统一配置"
+        );
+        assert!(
+            watcher.contains("仅记录并跳过，不阻断其余库初始化"),
+            "watcher 默认路径必须留可见记录"
+        );
+        assert!(
+            manual.contains("crate::options::block_file_identity_conflicts()"),
+            "人工执行必须读取统一配置"
+        );
+        assert!(
+            manual.contains("当前配置为仅记录并跳过，不阻断其余库初始化"),
+            "人工回执必须带出默认处置"
+        );
+        // 宽严档不只是「阻不阻断」，还包括阶段总数的账：仅记录跳过的库不会有批次，
+        // 计进 total 就是给 /health 留一格永远走不完的进度。两条路径各有各的摘法，
+        // 但都必须摘。
+        assert!(
+            watcher.contains("manifest_totals.retain"),
+            "watcher 路径必须把仅记录跳过的库从阶段总数里摘掉"
+        );
+        assert!(
+            manual.contains("manifest_lenient_excluded.insert(dbnum)")
+                && manual.contains("!manifest_lenient_excluded.contains(dbnum)"),
+            "人工路径必须把仅记录跳过的库从阶段总数里摘掉（与 watcher 的 retain 对齐）"
+        );
+    }
+
     /// 阻断裁决只能有一个权威，自动路径不许自己再列一份异常清单。
     ///
     /// 这里过去是 `match` 只列 `Rollback` / `PathMigrated`，其余走 `_ => true` 放行，
@@ -3117,8 +3153,9 @@ impl AiosDBManager {
 
         let mut params: IndexMap<PathBuf, crate::data_interface::batch_scheduler::DiscoveredBatch> =
             IndexMap::new();
-        // F6：同 dbnum 多文件检测（阻断不挑选，与手动路径一致）。按「归属项目 + dbnum」
-        // 判重，跨项目同号的 sys 库不算重复。
+        // F6：同 dbnum 多文件检测（不挑选，与手动路径一致）。冲突库始终跳过；
+        // 是否把阶段标成 blocker 由 `block_file_identity_conflicts` 统一裁决。
+        // 按「归属项目 + dbnum」判重，跨项目同号的 sys 库不算重复。
         let mut seen_dbnums: HashMap<(String, u32), PathBuf> = HashMap::new();
         // 值是这条冲突所属的数据阶段：同号多文件在 CATA/DICT 上一样会发生，
         // 记到 Design 头上会让阶段就绪判定失真（一个 CATA 副本能把 design 拽黑）。
@@ -3126,6 +3163,7 @@ impl AiosDBManager {
             (String, u32),
             crate::data_interface::initialization_phase::DataPhase,
         > = HashMap::new();
+        let block_file_identity_conflicts = crate::options::block_file_identity_conflicts();
         let extract_families = self.collapse_watch_dir_families();
         let extract_parents: HashSet<PathBuf> = extract_families
             .shadowed_parents
@@ -3266,7 +3304,12 @@ impl AiosDBManager {
                     );
                     println!(
                         "F6 文件名库号与文件头不一致（filename={filename_dbnum} header={header_dbnum}），\
-                         阻断项目 {} 的 dbnum={db_no}：{}",
+                         {}项目 {} 的 dbnum={db_no}：{}",
+                        if block_file_identity_conflicts {
+                            "阻断"
+                        } else {
+                            "仅记录并跳过"
+                        },
                         project,
                         path.display()
                     );
@@ -3280,16 +3323,23 @@ impl AiosDBManager {
                         ),
                     );
                     println!(
-                        "F6 发现项目 {} 内同 dbnum={} 的多个抽取/副本，阻断该 dbnum：{}",
+                        "F6 发现项目 {} 内同 dbnum={} 的多个抽取/副本，{}该 dbnum：{}",
                         project,
                         db_no,
+                        if block_file_identity_conflicts {
+                            "阻断"
+                        } else {
+                            "仅记录并跳过"
+                        },
                         path.display()
                     );
                     continue;
                 }
-                manifest_totals.push(
+                manifest_totals.push((
                     crate::data_interface::initialization_phase::DataPhase::of_db_type(&db_type),
-                );
+                    project.clone(),
+                    db_no,
+                ));
                 // 读不出最新会话号：跳过该文件**并记进阶段 blockers**。老写法
                 // `.unwrap_or_default()` 把读失败吞成 0：对 applied > 0 的库伪造出
                 // 「文件回退」，把假观察值（file_latest_sesno = 0）写进登记行，还让
@@ -3345,8 +3395,16 @@ impl AiosDBManager {
                         ),
                     );
                     println!(
-                        "F6 发现项目 {} 内同 dbnum={} 的多个文件，阻断该 dbnum：{:?} / {:?}",
-                        project, db_no, prev, path
+                        "F6 发现项目 {} 内同 dbnum={} 的多个文件，{}该 dbnum：{:?} / {:?}",
+                        project,
+                        db_no,
+                        if block_file_identity_conflicts {
+                            "阻断"
+                        } else {
+                            "仅记录并跳过"
+                        },
+                        prev,
+                        path
                     );
                     continue;
                 }
@@ -3363,12 +3421,22 @@ impl AiosDBManager {
                     )
                     .await;
                 if check.gate == ScanGate::Blocked {
-                    phase_blockers.push((
-                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                            &db_type,
-                        ),
-                        format!("dbnum={db_no} 文件身份/观察裁决阻断: {}", path.display()),
-                    ));
+                    if block_file_identity_conflicts {
+                        phase_blockers.push((
+                            crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                                &db_type,
+                            ),
+                            format!("dbnum={db_no} 文件身份/观察裁决阻断: {}", path.display()),
+                        ));
+                    } else {
+                        sweep_log::note(format!(
+                            "[{origin}] dbnum={db_no} 文件身份/观察异常仅记录并跳过，不阻断其余库初始化: {}",
+                            path.display()
+                        ));
+                        manifest_totals.retain(|(_, owner_project, manifest_dbnum)| {
+                            owner_project != &project || *manifest_dbnum != db_no
+                        });
+                    }
                     continue;
                 }
 
@@ -3499,16 +3567,33 @@ impl AiosDBManager {
             ));
         }
 
-        // F6：移除被判为「同 dbnum 多文件」的文件（阻断不挑选，阻断的库不入队）。
+        // F6：移除被判为「同 dbnum 多文件」的文件。冲突库始终不入队；严格模式
+        // 追加阶段 blocker，默认模式只把完整问题收进重扫日志。
         if !blocked_dupes.is_empty() {
-            phase_blockers.extend(blocked_dupes.iter().map(|((project, dbnum), phase)| {
-                (
-                    *phase,
-                    format!("项目 {project} 内 dbnum={dbnum} 同号多文件"),
-                )
-            }));
+            if block_file_identity_conflicts {
+                phase_blockers.extend(blocked_dupes.iter().map(|((project, dbnum), phase)| {
+                    (
+                        *phase,
+                        format!("项目 {project} 内 dbnum={dbnum} 同号多文件"),
+                    )
+                }));
+            } else {
+                let sample = blocked_dupes
+                    .keys()
+                    .take(12)
+                    .map(|(project, dbnum)| format!("{project}:{dbnum}"))
+                    .join("、");
+                sweep_log::note(format!(
+                    "[{origin}] {} 个文件身份冲突仅记录并跳过，不阻断其余库初始化：{sample}{}",
+                    blocked_dupes.len(),
+                    if blocked_dupes.len() > 12 { " …" } else { "" }
+                ));
+            }
             params.retain(|_p, found| {
                 !blocked_dupes.contains_key(&(found.project.clone(), found.dbnum))
+            });
+            manifest_totals.retain(|(_, project, dbnum)| {
+                !blocked_dupes.contains_key(&(project.clone(), *dbnum))
             });
         }
 
@@ -3522,7 +3607,10 @@ impl AiosDBManager {
             params,
             phase_blockers,
             shadowed,
-            manifest_totals,
+            manifest_totals
+                .into_iter()
+                .map(|(phase, _, _)| phase)
+                .collect(),
             cata_dependencies,
             dependency_identities,
         );
