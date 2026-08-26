@@ -303,6 +303,28 @@ fn profile_spans_of(
     Ok((spans, chord_tol))
 }
 
+fn distance2(a: &[f64; 2], b: &[f64; 2]) -> f64 {
+    (a[0] - b[0]).hypot(a[1] - b[1])
+}
+
+/// 相邻轮廓点并成一个点的门槛（ADR-049）。
+///
+/// 绝对量 [`POS_EPS`] 打底，再加一条**相对量**：`f32` 在坐标量级 `m` 上的分辨率是
+/// `m × 2⁻²³`，`m = 1250mm` 时约 `1.5e-4 mm`——比 `POS_EPS` 还粗。轮廓在 f64 里
+/// 刻意留下的 `1.2e-4 mm` 间隙，落盘成 f32 就被抹平：两个本该分开的顶点合成一个，
+/// `plant_mesh_to_manifold` 焊回去时多出一条三面共享的边，布尔报 NotManifold。
+///
+/// 换句话说，**留一条 f32 表达不出来的缝，等于留一个必然发作的雷**。宁可在 f64
+/// 这头就并掉——并掉的位移不超过一个 f32 ulp 的几倍，几何上看不见。
+///
+/// `1e-6` 相对量 ≈ 8 个 f32 ulp，给舍入留一点余量而不至于吃掉真实特征：E3D 的
+/// 坐标本身只到三位小数（`0.001mm`），比这条线粗一个量级。
+fn merge_eps(a: &[f64; 2], b: &[f64; 2]) -> f64 {
+    const F32_ULP_GUARD: f64 = 1e-6;
+    let scale = a[0].abs().max(a[1].abs()).max(b[0].abs()).max(b[1].abs());
+    POS_EPS.max(scale * F32_ULP_GUARD)
+}
+
 /// 逐 span 走 `getApproxPolyLineInSteps(n)` 铺点、去重、掐掉收尾重复点。
 ///
 /// 两条口径共用的后半段——**格子函数是同一个**，不同的只有传进来的 `steps`。
@@ -318,7 +340,7 @@ fn assemble_ring(
         for p in seg {
             if pts
                 .last()
-                .is_some_and(|last: &[f64; 2]| (last[0] - p[0]).hypot(last[1] - p[1]) < POS_EPS)
+                .is_some_and(|last: &[f64; 2]| distance2(last, &p) < merge_eps(last, &p))
             {
                 continue;
             }
@@ -327,7 +349,7 @@ fn assemble_ring(
     }
     while pts.len() >= 2 {
         let (first, last) = (pts[0], pts[pts.len() - 1]);
-        if (first[0] - last[0]).hypot(first[1] - last[1]) < POS_EPS {
+        if distance2(&first, &last) < merge_eps(&first, &last) {
             pts.pop();
         } else {
             break;
@@ -960,6 +982,216 @@ mod tests {
             assert!(
                 face.iter()
                     .all(|&index| mesh.normals[index as usize].abs_diff_eq(normal, 1e-6))
+            );
+        }
+    }
+
+    /// 复刻 `plant_mesh_to_manifold` 的焊接键，回答「读回失败是哪一种病」。
+    ///
+    /// 无向边被多于两个三角形共享 = 夹点，轮廓自己触到自己，要在填充层拆叶片；
+    /// 焊接后出现退化三角形 = f32 量化把两个不同顶点撞成一个，要动落盘精度。
+    /// 两者修法完全不同，失败信息必须把它们分开报，否则下一个人还得重新量一遍。
+    fn diagnose_weld(mesh: &PlantMesh) -> String {
+        use std::collections::{BTreeMap, HashMap};
+
+        let canonical = |value: f32| {
+            let value = value as f64;
+            if value == 0.0 { 0.0 } else { value }
+        };
+        let mut welded = HashMap::<[u64; 3], u32>::new();
+        let mut ids = Vec::with_capacity(mesh.vertices.len());
+        let mut positions: Vec<glam::DVec3> = Vec::new();
+        for v in &mesh.vertices {
+            let p = glam::DVec3::new(canonical(v.x), canonical(v.y), canonical(v.z));
+            let key = [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()];
+            let next = welded.len() as u32;
+            let id = *welded.entry(key).or_insert_with(|| {
+                positions.push(p);
+                next
+            });
+            ids.push(id);
+        }
+
+        let mut degenerate = 0usize;
+        let mut triangles = 0usize;
+        let mut undirected = HashMap::<(u32, u32), usize>::new();
+        let mut directed = HashMap::<(u32, u32), usize>::new();
+        for face in mesh.indices.chunks_exact(3) {
+            let [a, b, c] = [
+                ids[face[0] as usize],
+                ids[face[1] as usize],
+                ids[face[2] as usize],
+            ];
+            triangles += 1;
+            if a == b || b == c || c == a {
+                degenerate += 1;
+                continue;
+            }
+            for (from, to) in [(a, b), (b, c), (c, a)] {
+                *directed.entry((from, to)).or_default() += 1;
+                *undirected.entry((from.min(to), from.max(to))).or_default() += 1;
+            }
+        }
+
+        let mut share = BTreeMap::<usize, usize>::new();
+        for count in undirected.values() {
+            *share.entry(*count).or_default() += 1;
+        }
+        let reversed_missing = directed
+            .keys()
+            .filter(|(from, to)| !directed.contains_key(&(*to, *from)))
+            .count();
+        let same_direction_twice = directed.values().filter(|count| **count > 1).count();
+        let shortest = undirected
+            .keys()
+            .map(|(from, to)| positions[*from as usize].distance(positions[*to as usize]))
+            .fold(f64::INFINITY, f64::min);
+
+        format!(
+            "焊接后 {} 顶点 / {} 三角（退化 {}）；无向边共享度 {share:?}；\
+             有向边缺反向 {reversed_missing}、同向重复 {same_direction_twice}；最短边 {shortest:.6}mm",
+            welded.len(),
+            triangles,
+            degenerate,
+        )
+    }
+
+    /// 2026-08-24 现场：CFLOOR `/1RS-WF03-F-C-F002` 一带三个负体在布尔入口报
+    /// `manifold-csg ingest failed: manifold3d status: NotManifold`，FLOOR 少挖了刀、
+    /// RVM 因此不过。三件参数是从活库 `inst_geo` 原样取下来的
+    /// （`.surreal/ams-rvm-rebuild-20260824`，对应 `geom_error` 的三行 `bool_neg`）。
+    ///
+    /// 负体的合格标准不是「三角化出得来」——这三件的 `meshed` 都是 `true`——而是
+    /// 「出来的网格还能被布尔读回去」。落盘 `PlantMesh` 是 f32，且为硬边按面复制
+    /// 顶点，`plant_mesh_to_manifold` 再按精确坐标焊回一行；`load_manifold` 走的就是
+    /// 这条路。两段都走一遍，红在哪一段就报哪一段，不让「出了网格」冒充「能用」。
+    #[test]
+    fn field_floor_negatives_can_be_read_back_by_the_boolean() {
+        #[derive(serde::Deserialize)]
+        struct FieldGeom {
+            geom: String,
+            target: String,
+            param: PdmsGeoParam,
+        }
+
+        let cases: Vec<FieldGeom> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/floor_wf03_bool_neg_not_manifold.json"
+        ))
+        .expect("fixture parses");
+
+        // 对照组：往返本身是通的。没有这一段，上面三条红只能证明「有东西坏了」，
+        // 证明不了坏的是这三件几何。
+        for (what, mesh) in [
+            ("unit box", tessellate_unit_box()),
+            ("unit cylinder", tessellate_unit_cylinder(32)),
+            (
+                "square extrusion",
+                tessellate_extrusion(
+                    &[vec![
+                        Vec3::new(0.0, 0.0, 0.0),
+                        Vec3::new(10.0, 0.0, 0.0),
+                        Vec3::new(10.0, 10.0, 0.0),
+                        Vec3::new(0.0, 10.0, 0.0),
+                    ]],
+                    5.0,
+                    FACET_TOL_MM,
+                )
+                .expect("control square extrusion"),
+            ),
+        ] {
+            crate::fast_model::manifold_csg::plant_mesh_to_manifold(&mesh, glam::DMat4::IDENTITY)
+                .unwrap_or_else(|error| panic!("对照组 {what} 应当能读回，往返本身坏了: {error}"));
+        }
+
+        let mut failures = Vec::new();
+        for case in &cases {
+            let mesh = match tessellate_libgm_param(&case.param) {
+                Ok(Some(mesh)) => mesh,
+                Ok(None) => {
+                    failures.push(format!("{} ({}): 三角化判为非形状", case.geom, case.target));
+                    continue;
+                }
+                Err(error) => {
+                    failures.push(format!(
+                        "{} ({}): 三角化失败: {error}",
+                        case.geom, case.target
+                    ));
+                    continue;
+                }
+            };
+            if let Err(error) = crate::fast_model::manifold_csg::plant_mesh_to_manifold(
+                &mesh,
+                glam::DMat4::IDENTITY,
+            ) {
+                failures.push(format!(
+                    "{} ({}): 三角化出 {} 顶点 / {} 索引，布尔读回失败: {error}\n    {}",
+                    case.geom,
+                    case.target,
+                    mesh.vertices.len(),
+                    mesh.indices.len(),
+                    diagnose_weld(&mesh),
+                ));
+            }
+        }
+        assert!(
+            failures.is_empty(),
+            "负体必须能被布尔读回:\n{}",
+            failures.join("\n")
+        );
+    }
+
+    /// ADR-049：回转体的环向接缝必须**逐位**闭合，否则布尔读不回去。
+    ///
+    /// 现场取样是同一份夹具里的 `17496/79785`（CFLOOR `/1RS-WF03-F-C-F002` 一带的
+    /// 90° CTORUS 负体）。回退成 `theta = TAU * j as f32 / tube_segments as f32`
+    /// 就红：f32 的 TAU 比真 2π 大约 1.7e-7，`sin(TAU_f32) ≈ 1.75e-7` 而不是 0，
+    /// θ=0 与 θ=TAU 焊不到一起——管壁成了带缝的开片，端盖（`% tube_segments`）却缝在
+    /// 另一侧那个孪生顶点上，实测 10 条边界边。
+    ///
+    /// 球与碟走同一段代码形状，一并守住：这不是 CTORUS 一家的病。
+    #[test]
+    fn a_revolved_seam_closes_bit_exactly_so_the_boolean_can_read_it_back() {
+        #[derive(serde::Deserialize)]
+        struct FieldGeom {
+            geom: String,
+            target: String,
+            param: PdmsGeoParam,
+        }
+
+        let cases: Vec<FieldGeom> = serde_json::from_str(include_str!(
+            "../../tests/fixtures/floor_wf03_bool_neg_not_manifold.json"
+        ))
+        .expect("fixture parses");
+        let torus = cases
+            .iter()
+            .find(|case| matches!(case.param, PdmsGeoParam::PrimCTorus(_)))
+            .expect("夹具里必须还有那件 CTORUS 负体");
+        let mesh = tessellate_libgm_param(&torus.param)
+            .expect("CTORUS 三角化不该失败")
+            .expect("CTORUS 是形状");
+        if let Err(error) =
+            crate::fast_model::manifold_csg::plant_mesh_to_manifold(&mesh, glam::DMat4::IDENTITY)
+        {
+            panic!(
+                "{} ({}) 的 CTORUS 接缝没焊上: {error}\n    {}",
+                torus.geom,
+                torus.target,
+                diagnose_weld(&mesh)
+            );
+        }
+
+        // 同一段代码形状的另外两家。参数取活库量级（球/碟都是整圈环向）。
+        for (what, mesh) in [
+            ("sphere", mesh_primitives::gen_sphere(250.0, 12, 16)),
+            (
+                "spherical dish",
+                mesh_primitives::gen_spherical_dish(500.0, 120.0, 16, 6),
+            ),
+        ] {
+            let welded = diagnose_weld(&mesh);
+            assert!(
+                !welded.contains("1: "),
+                "{what} 的环向接缝留了边界边（ADR-049 同一类病）: {welded}"
             );
         }
     }

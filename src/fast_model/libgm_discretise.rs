@@ -31,6 +31,27 @@
 /// `the_facet_tolerance_has_a_single_source` 钉住了这一条。
 pub const FACET_TOL_MM: f64 = 0.5;
 
+/// libgm 的分辨率容差（mm，绝对量）——「两处东西离得多近就算同一处」。
+///
+/// 与 [`FACET_TOL_MM`] 同一处调用点定的：Core3D 建体前
+/// （`Core3D.dll` 3.1 `0x104da260`，MTR 标签 `adp_geometry/adp_gm_mk_body`；
+/// 另一处 `0x108e6a80` 同值）连着写四个——
+///
+/// ```text
+/// gm_SetResolutionTolerance(0.051);            // → GM_User::restol_
+/// gm_SetDefaultNormalisationTolerance(0.051);  // → GM_User::normtol_
+/// gm_SetDefaultTangentTolerance(0.0087266);    // 0.5°
+/// gm_SetDefaultFacetTolerance(0.5);            // → GM_User::arctol_，就是上面那个常量
+/// ```
+///
+/// `restol_` 是 libgm 面级布尔的判定容差：`GM_AggregateCombination::calcFacets`
+/// 把它传给 `GM_CompFacets::aggregateWith`，最终在 `GM_Facets::obscureFaces`
+/// （libgm 3.1 `0x10068710`）里既当切分线的 side 判定、又当
+/// `D2_PolySet::normalise` 的归一容差。所以近共面的两张面在 libgm 眼里先被塞成
+/// 真共面，再在面内做二维多边形相减。取证：
+/// `docs/evidence/2026-08-25-ida-libgm-coincidence-tolerances.md`。
+pub const RES_TOL_MM: f64 = 0.051;
+
 /// 收到的弦高容差能不能用。不能用的**必须报错**，不许兜一个默认值。
 ///
 /// 折线化那几处原先写的是 `let tol = if chord_tol > 0.0 { chord_tol } else { 1.0 };`，

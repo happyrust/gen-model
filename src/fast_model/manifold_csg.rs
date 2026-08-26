@@ -189,21 +189,38 @@ pub(crate) fn load_manifold(
     plant_mesh_to_manifold(&mesh, mat)
 }
 
-/// 负实体在做差之前按自身包围盒中心放大的相对量。
+/// 负实体在做差之前沿每根轴各向外让出的量（mm，绝对量）：
+/// [`libgm_discretise::RES_TOL_MM`]，也就是 libgm 的 `GM_User::restol_`。
 ///
-/// PDMS 里负体常常与母体**共壁**：`=24381/36945` 那颗穹顶的 NREV 就是跟 PANE 同一个
-/// 圆柱，只在内部多挖一个半球。两个圆柱各自离散出来的 484 边形只要不是逐位相同，
-/// 差集就会沿着那面共壁碎成一地薄片——实测那颗穹顶得到 **亏格 −131，也就是 132 个
-/// 互不相连的壳**：一个半球加 131 片碎屑。碎屑体积只有 1e-7，体积对拍根本发现不了，
-/// 但它们会进 `.mesh`、会 z-fighting、会让后续布尔更难收敛。
+/// 为什么要让：PDMS 里负体常常与母体**共壁**。
 ///
-/// 1e-6 是相对量（那颗穹顶上是 0.023mm）：足够让共面分开，又远小于任何真实特征。
-/// E3D 不需要这一步，它靠的是共面反向面逐面全等抵消（见
-/// `plant-4/libgm-boolean-algorithm.md` §6.11），而那条路要求两侧段数、相位完全一致。
-const NEGATIVE_INFLATE: f64 = 1e-6;
+/// - `=24381/36945` 那颗穹顶的 NREV 跟 PANE 是同一个圆柱，只在内部多挖一个半球。
+///   两个圆柱各自离散出来的 484 边形只要不是逐位相同，差集就会沿着那面共壁碎成一地
+///   薄片——实测 **亏格 −131，132 个互不相连的壳**：一个半球加 131 片碎屑。碎屑体积
+///   只有 1e-7，体积对拍根本发现不了，但会进 `.mesh`、会 z-fighting、会让后续布尔
+///   更难收敛。
+/// - `pe:17496_105828`（GWALL）那个穿透洞更直接：NXTR 的出口面与墙外表面共面到 f32
+///   分不开，门垛与过梁都切出来了，正对着的那张外表面还留着一层皮，RVM 对拍
+///   gen→gwall p95=753.9（洞半宽 1300 与墙厚 748 两个数都能对上）。
+///
+/// 为什么是 0.051 而不是原来那个 1e-6 相对量：相对量在薄方向上等于没有——那堵墙的负体
+/// 沿墙厚只有 750mm，1e-6 给出 0.000375mm，比实测的 0.01mm 缝还小一个量级。而 libgm
+/// 自己的口径是绝对的 `restol = 0.051mm`：**这个距离在它的世界里不存在**，
+/// `GM_Facets::obscureFaces` 先按它把近共面塞成真共面再在面内相减。让出正好一个
+/// `restol`，跨不过任何 libgm 分得清的界限。
+///
+/// E3D 不需要「让」这一步，因为它压根不做三维实体 CSG（见
+/// `docs/evidence/2026-08-25-ida-libgm-coincidence-tolerances.md`）；共面反向面逐面
+/// 全等抵消那条路（`plant-4/libgm-boolean-algorithm.md` §6.11）要求两侧段数、相位
+/// 完全一致，我们这条精确 CSG 的路给不出这个前提。
+const NEGATIVE_INFLATE_MM: f64 = crate::fast_model::libgm_discretise::RES_TOL_MM;
 
-/// 以自身包围盒中心为原点等比放大，位置不动。
-fn inflate_about_center(solid: &Manifold, rel: f64) -> Manifold {
+/// 以自身包围盒中心为原点放大，位置不动，每根轴向外各让 `grow` 毫米。
+///
+/// 逐轴换算成比例而不是整体等比：负体在三个方向上尺度常常差一两个数量级（穿墙洞
+/// 2600 × 750 × 2180），等比放大会让长轴让出几十毫米、薄轴仍然没让够。退化到零厚的
+/// 轴不缩放——那种负体本来就不是合法实体，放大它只会把 NaN 带进布尔。
+fn inflate_about_center(solid: &Manifold, grow: f64) -> Manifold {
     let Some(bb) = solid.bounding_box() else {
         return solid.clone();
     };
@@ -213,9 +230,21 @@ fn inflate_about_center(solid: &Manifold, rel: f64) -> Manifold {
         (lo[1] + hi[1]) * 0.5,
         (lo[2] + hi[2]) * 0.5,
     );
-    let s = 1.0 + rel;
+    let axis_scale = |min: f64, max: f64| {
+        let extent = max - min;
+        if extent > f64::EPSILON {
+            (extent + 2.0 * grow) / extent
+        } else {
+            1.0
+        }
+    };
+    let scale = glam::DVec3::new(
+        axis_scale(lo[0], hi[0]),
+        axis_scale(lo[1], hi[1]),
+        axis_scale(lo[2], hi[2]),
+    );
     let m = DMat4::from_translation(center)
-        * DMat4::from_scale(glam::DVec3::splat(s))
+        * DMat4::from_scale(scale)
         * DMat4::from_translation(-center);
     solid.transform(&dmat4_to_affine4x3(m))
 }
@@ -228,7 +257,7 @@ pub(crate) fn subtract_negatives(pos: Manifold, negs: &[Manifold]) -> Manifold {
     group.push(pos);
     group.extend(
         negs.iter()
-            .map(|neg| inflate_about_center(neg, NEGATIVE_INFLATE)),
+            .map(|neg| inflate_about_center(neg, NEGATIVE_INFLATE_MM)),
     );
     Manifold::batch_difference(&group)
 }
@@ -261,6 +290,36 @@ mod tests {
         );
         let mesh = manifold_to_plant_mesh(&cut);
         assert!(mesh.indices.len() >= 3, "写出的 PlantMesh 必须有三角");
+    }
+
+    /// 出口面差一根头发丝的负体，仍然必须把那张面挖开。
+    ///
+    /// 现场是 `pe:17496_105828`（GWALL，`1RS-WF03-W-C-RR001`）：NXTR 的门垛与过梁都
+    /// 切出来了，正对着的外表面还在，`mesh_gwall_extra_against_cwall_union` 量到
+    /// gen→gwall p95=753.9 / max=1296.9（正好是墙厚 748 与洞半宽 1300）。两张面的
+    /// 距离在 f32 下分不开，libgm 则明确当它们是同一张：Core3D 建体前
+    /// `gm_SetResolutionTolerance(0.051)`。
+    ///
+    /// 这里把缝做成 0.01mm——比 `RES_TOL_MM` 小一个量级，落在 libgm「同一处」的范围里。
+    /// 挖穿了是亏格 1，留一层皮是亏格 0，所以亏格就是红绿灯；回退到旧的 1e-6 相对量，
+    /// 这个负体只让出 0.000055mm，这条即红。
+    #[test]
+    fn a_negative_stopping_a_hair_short_still_opens_the_exit_face() {
+        // 200(x) × 100(y) × 200(z)，y ∈ [-50, 50]。
+        let block = Manifold::cube(200.0, 100.0, 200.0, true);
+        // 沿 -y 侧穿进来，出口停在 y = 49.99：差 0.01mm 没穿透。
+        let neg = Manifold::cube(80.0, 109.99, 80.0, true).transform(&dmat4_to_affine4x3(
+            DMat4::from_translation(DVec3::new(0.0, -5.005, 0.0)),
+        ));
+        let cut = subtract_negatives(block, &[neg]);
+        assert!(!cut.is_empty(), "差集不能变成空流形");
+        assert_eq!(
+            cut.genus(),
+            1,
+            "负体出口面与母体外表面近共面时必须挖穿（亏格 1）；亏格 0 说明外表面还留着一层皮，\
+             体积 {}",
+            cut.volume()
+        );
     }
 
     #[test]

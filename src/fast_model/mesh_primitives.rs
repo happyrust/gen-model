@@ -14,6 +14,24 @@ const TRI_AREA_EPS: f32 = 1e-9;
 /// 半边长低于这个值（PDMS 单位是 mm，即亚微米）就当作 0。
 const DEGENERATE_EDGE: f32 = 0.001;
 
+/// 整圈方位角的 `(sin, cos)` 表；`j == segments` 一格回用 `j == 0`，
+/// 让接缝两侧**逐位相同**（ADR-049）。
+///
+/// 回转体的环向要多铺一圈顶点（`0..=segments`）才能给接缝两侧各留一份法线，
+/// 最后一圈本该与第一圈落在同一个点上。可 `TAU * segments as f32 / segments as f32`
+/// 算出来就是 f32 的 `TAU`，而它比真 2π 大约 1.7e-7 —— `sin(TAU_f32) ≈ 1.75e-7`
+/// 而不是 `0.0`。差这一点点，渲染看不出来，`plant_mesh_to_manifold` 的**精确坐标
+/// 焊接**却把接缝两侧当成两个顶点：侧壁成了一张带缝的开片，而端盖按
+/// `% segments` 闭在另一侧那个孪生兄弟上，两边对不上，布尔入口报 NotManifold。
+///
+/// 这和 [`collapse_onto_axis`] 里「贴轴点的 z 按 eps 聚类」是同一类账：f32 的
+/// 三角函数噪声不会自己消失，要焊得上就得让它**根本不产生**。
+pub(crate) fn ring_angle_table(segments: u32) -> Vec<(f32, f32)> {
+    (0..segments.max(1))
+        .map(|j| (TAU * j as f32 / segments as f32).sin_cos())
+        .collect()
+}
+
 pub(crate) fn compute_aabb(vertices: &[Vec3]) -> Option<Aabb> {
     if vertices.is_empty() {
         return None;
@@ -38,12 +56,20 @@ pub fn gen_sphere(radius: f32, stacks: u32, slices: u32) -> PlantMesh {
     let mut vertices = Vec::with_capacity(vert_count);
     let mut normals = Vec::with_capacity(vert_count);
 
+    let slice_angles = ring_angle_table(slices);
     for i in 0..=stacks {
-        let phi = PI * i as f32 / stacks as f32;
-        let (sin_phi, cos_phi) = phi.sin_cos();
+        // 两极精确落在轴上。`sin(PI_f32) ≈ -8.7e-8`，照算的话南极会摊成一圈半径
+        // 约 `radius × 8.7e-8` 的针状面：渲染看不出来，精确焊接后却是 `2 × slices`
+        // 条边界边，布尔读回即 NotManifold（与环向接缝同一类账，ADR-049）。
+        let (sin_phi, cos_phi) = if i == 0 {
+            (0.0, 1.0)
+        } else if i == stacks {
+            (0.0, -1.0)
+        } else {
+            (PI * i as f32 / stacks as f32).sin_cos()
+        };
         for j in 0..=slices {
-            let theta = TAU * j as f32 / slices as f32;
-            let (sin_theta, cos_theta) = theta.sin_cos();
+            let (sin_theta, cos_theta) = slice_angles[(j % slices) as usize];
             let n = Vec3::new(cos_theta * sin_phi, sin_theta * sin_phi, cos_phi);
             normals.push(n);
             vertices.push(n * radius);
@@ -342,12 +368,12 @@ pub fn gen_spherical_dish(diameter: f32, height: f32, slices: u32, stacks: u32) 
         theta_max.abs()
     };
     // theta 范围：从 0（北极/顶部）到 theta_start（底面边缘）
+    let slice_angles = ring_angle_table(slices);
     for i in 0..=stacks {
         let phi = theta_start * i as f32 / stacks as f32;
         let (sin_phi, cos_phi) = phi.sin_cos();
         for j in 0..=slices {
-            let theta = TAU * j as f32 / slices as f32;
-            let (sin_theta, cos_theta) = theta.sin_cos();
+            let (sin_theta, cos_theta) = slice_angles[(j % slices) as usize];
 
             let x = sphere_r * sin_phi * cos_theta;
             let y = sphere_r * sin_phi * sin_theta;
@@ -494,10 +520,10 @@ pub fn gen_elliptical_dish(
     let mut normals = Vec::new();
     let mut indices: Vec<u32> = Vec::new();
 
+    let slice_angles = ring_angle_table(slices);
     for &(r, z, nr, nz) in &profile {
         for j in 0..=slices {
-            let angle = TAU * j as f32 / slices as f32;
-            let (sin_a, cos_a) = angle.sin_cos();
+            let (sin_a, cos_a) = slice_angles[(j % slices) as usize];
             let n = Vec3::new(nr * cos_a, nr * sin_a, nz);
             let n = if n.length() > f32::EPSILON {
                 n.normalize()
@@ -627,12 +653,15 @@ pub fn gen_circular_torus(
     };
     let ring_phi = |i: u32| sweep_rad * i as f32 / ring_segments as f32;
 
+    // 环向角度表：管壁最后一圈（j == tube_segments）与端盖（按 `% tube_segments`
+    // 闭环）必须落在**逐位相同**的坐标上，否则精确焊接后管壁是开片、端盖缝在
+    // 孪生顶点上，布尔读回即 NotManifold（ADR-049）。
+    let tube_angles = ring_angle_table(tube_segments);
     for i in 0..ring_count {
         let (sin_phi, cos_phi) = ring_phi(i).sin_cos();
 
         for j in 0..=tube_segments {
-            let theta = TAU * j as f32 / tube_segments as f32;
-            let (sin_theta, cos_theta) = theta.sin_cos();
+            let (sin_theta, cos_theta) = tube_angles[(j % tube_segments) as usize];
 
             let r = center_r + tube_r * cos_theta;
             let x = r * cos_phi;
@@ -682,8 +711,7 @@ pub fn gen_circular_torus(
             norms.push(normal);
 
             for j in 0..tube_segments {
-                let theta = TAU * j as f32 / tube_segments as f32;
-                let (sin_theta, cos_theta) = theta.sin_cos();
+                let (sin_theta, cos_theta) = tube_angles[j as usize];
                 let r = center_r + tube_r * cos_theta;
                 verts.push(Vec3::new(r * cos_phi, r * sin_phi, tube_r * sin_theta));
                 norms.push(normal);
