@@ -10,7 +10,7 @@ use aios_core::room::algorithm::*;
 use aios_core::room::room::{GLOBAL_AABB_TREE, load_aabb_tree};
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::{GeomInstQuery, GeomPtsQuery, ModelHashInst, RefU64, SUL_DB};
-use aios_core::{RefnoEnum, init_demo_test_surreal, init_test_surreal};
+use aios_core::{RefnoEnum, init_test_surreal};
 use bevy_transform::TransformPoint;
 use bevy_transform::components::Transform;
 use dashmap::{DashMap, DashSet};
@@ -2119,77 +2119,23 @@ pub(crate) async fn existing_members_of_panel(
     Ok(members.into_iter().collect())
 }
 
-#[tokio::test]
-#[ignore = "manual integration: mutates the configured Surreal project database"]
-async fn test_build_room_panels_relate_common() -> anyhow::Result<()> {
-    // Initialize test database
-    init_demo_test_surreal().await;
-
-    // Create test hierarchy data
-    let create_sql = r#"
-        -- Create FRMW node
-        CREATE FRMW SET 
-            id = "FRMW_AE_AC01_R",
-            NAME = "AE-AC01-R",
-            REFNO = "1000";
-
-        -- Create SBFR nodes under FRMW
-        CREATE SBFR SET 
-            id = "SBFR_AE01055A",
-            NAME = "AE-AC01-R-AE01055A",
-            REFNO = "1001";
-        CREATE SBFR SET
-            id = "SBFR_AE01911A", 
-            NAME = "AE-AC01-R-AE01911A",
-            REFNO = "1002";
-        CREATE SBFR SET
-            id = "SBFR_AE01945A",
-            NAME = "AE-AC01-R-AE01945A", 
-            REFNO = "1003";
-        CREATE SBFR SET
-            id = "SBFR_AE01907G",
-            NAME = "AE-AC01-R-AE01907G",
-            REFNO = "1004";
-        CREATE SBFR SET
-            id = "SBFR_AE01906G",
-            NAME = "AE-AC01-R-AE01906G",
-            REFNO = "1005";
-        CREATE SBFR SET
-            id = "SBFR_AE01910A",
-            NAME = "AE-AC01-R-AE01910A",
-            REFNO = "1006";
-
-        -- Create pe_owner relationships
-        RELATE FRMW:FRMW_AE_AC01_R->pe_owner->SBFR:SBFR_AE01055A;
-        RELATE FRMW:FRMW_AE_AC01_R->pe_owner->SBFR:SBFR_AE01911A;
-        RELATE FRMW:FRMW_AE_AC01_R->pe_owner->SBFR:SBFR_AE01945A;
-        RELATE FRMW:FRMW_AE_AC01_R->pe_owner->SBFR:SBFR_AE01907G;
-        RELATE FRMW:FRMW_AE_AC01_R->pe_owner->SBFR:SBFR_AE01906G;
-        RELATE FRMW:FRMW_AE_AC01_R->pe_owner->SBFR:SBFR_AE01910A;
-    "#;
-
-    SUL_DB.query(create_sql).await?;
-
-    // Test build_room_panels_relate_common
-    let room_key_words = vec!["AE-AC01-R".to_string()];
-    let match_room_fn = |room_num: &str| room_num.contains("AE");
-
-    let result = build_room_panels_relate_common(&room_key_words, match_room_fn).await?;
-
-    // Verify results
-    assert_eq!(result.rooms.len(), 6, "Should return 6 room relationships");
-
-    dbg!(&result);
-
-    // Clean up test data
-    // let cleanup_sql = r#"
-    //     DELETE FRMW;
-    //     DELETE SBFR;
-    // "#;
-    // SUL_DB.query(cleanup_sql).await?;
-
-    Ok(())
-}
+// 这里原先有一条 `test_build_room_panels_relate_common`（`#[ignore]` 集成用例）。
+// 2026-08-25 退役，理由不是它跑不过，而是它**跑什么都说明不了**：
+//
+// * 它的夹具建的是 `CREATE FRMW SET id = "FRMW_AE_AC01_R", REFNO = "1000"` 加
+//   `RELATE FRMW:…->pe_owner->SBFR:…`，而现行 hd 查询走的是
+//   `REFNO<-pe_owner<-pe`——`REFNO` 得是指向 `pe` 行的记录链接、`pe_owner` 得连在
+//   `pe` 之间。夹具写于这套形状定型之前，图遍历必然一条都捞不着。
+// * 它期望 6，那是 [`build_room_panels_relate_common`] 还返回一个扁平列表时的数字；
+//   现在返回 [`RoomPanelMap`]，`rooms` 是**每间房一项**，而夹具只有一间 FRMW。
+// * 它传的匹配函数是 `|room_num| room_num.contains("AE")`，可 `room_num` 取的是
+//   `NAME` 按 `-` 切开的最后一段，在它自己的夹具命名下永远是 `R` / `AE01055A` 这类
+//   ——两者从来就对不上。
+// * 收尾被注释掉，跑一次就在 demo 库里留一堆 FRMW/SBFR。
+//
+// 库侧那段图遍历现由 `room_fixture.rs` 的 live 夹具真跑（真实 `FRMW → CWALL → PANE`
+// 层级、真 `pe`/`pe_owner`、真 `.mesh`）。这里补上的是当时真正没人守的那一条纯逻辑：
+// 合规与不合规房间在 `rooms` 与 `all_panels` 上的分流（见下方 tests 模块）。
 
 /// 写入层的幂等性守护（ADR-010 §8）。
 ///
@@ -2221,6 +2167,59 @@ mod tests {
                 "拒绝信息必须点明需要 project 特性，实际: {message}"
             );
         }
+    }
+
+    /// 命名不合规的房间不参与归属计算，**但它的面板照样进排除集**。
+    ///
+    /// 这是 ADR-010 落地进度里那条修复的性质：`build_room_panels_relate_common` 早先
+    /// 只返回一个列表，命名没过校验的房间被整个丢掉，于是它名下的面板既不是任何房间的
+    /// 成员、也不在排除集里——反过来被当成**别的房间的构件**收编。拆成 `rooms` 与
+    /// `all_panels` 两个字段就是为了这个，而此前没有任何测试钉住这条分流：唯一沾边的
+    /// `test_build_room_panels_relate_common` 从夹具到期望值全部对不上现行实现，
+    /// 2026-08-25 已退役（理由见该函数原址的注释）。
+    #[test]
+    fn room_grouping_splits_compliant_rooms_from_the_panel_exclusion_set() {
+        let compliant = RefnoEnum::from("4000000001_1");
+        let noncompliant = RefnoEnum::from("4000000001_2");
+        let compliant_panels = vec![
+            RefnoEnum::from("4000000001_11"),
+            RefnoEnum::from("4000000001_12"),
+        ];
+        let noncompliant_panel = RefnoEnum::from("4000000001_21");
+
+        let map = room_panel_map_from_groups(
+            vec![
+                (compliant, "R301".to_string(), compliant_panels.clone()),
+                (noncompliant, "VOLU".to_string(), vec![noncompliant_panel]),
+            ],
+            match_room_name_hd,
+        );
+
+        assert_eq!(
+            map.rooms.len(),
+            1,
+            "只有命名合规的房间参与归属计算: {:?}",
+            map.rooms
+        );
+        assert_eq!(map.rooms[0].room, compliant);
+        assert_eq!(map.rooms[0].room_num, "R301");
+        assert_eq!(map.rooms[0].panels, compliant_panels);
+
+        // 排除集必须覆盖**所有**面板，包括那间不合规房间的：面板自己不该成为另一间房
+        // 的成员，漏掉它就是把一块墙板算进隔壁房间的物料表。
+        assert!(
+            map.all_panels.contains(&noncompliant_panel),
+            "不合规房间的面板也必须进排除集: {:?}",
+            map.all_panels
+        );
+        for panel in &compliant_panels {
+            assert!(map.all_panels.contains(panel));
+        }
+        assert_eq!(map.all_panels.len(), 3);
+
+        // 面板 → 房间号的反查只认在册房间，不合规那块必须拿不到号。
+        assert_eq!(map.room_num_of(compliant_panels[0]), Some("R301"));
+        assert_eq!(map.room_num_of(noncompliant_panel), None);
     }
 
     fn panel() -> RefnoEnum {

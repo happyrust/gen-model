@@ -6,6 +6,34 @@
 **没有"最近通过"记录的用例视同未验资产**——本台账是唯一事实来源，动过 live 用例或
 点亮新批次必须同步更新。
 
+**2026-08-25 AMS 7997 初始化模型有界消费（待隔离 live 收口）**：已锁定
+数据基线 170046 条 PE、水位 106 之后，18674 条 `regen_root` 被无界 drain
+合成单任务、`units_done=0` 的回归。离线实现固定 Regen 100 / AABB 256 页、
+Regen 二次屏障、忙锁退避和任务样本限界。只有在独立 SurrealDB 2.1.x
+数据目录上观察至少三页单调下降，并最终到 pending=0 / AABB=0 /
+`model_ready=true` 后，才回填为最近通过。
+
+**2026-08-25 AMS 7997 模型完整性 / 并发 / 重建 API（离线通过，live A/B 待验）**：
+生成根完成凭证已绑定水位序号和保存时刻，100 根认领页拆为默认 16 根执行组，根后半程
+采用自适应有界并发且保持单 Shape writer / 单 AABB 提交；指定 dbnum 重建端点只向原模型
+协调器排权威根。离线 `model_update_pending` 73/73、`on_demand_model` 11/11 通过；独立
+7997 快照的三轮 legacy / 三轮 adaptive、语义 hash 与最终 `model_ready=true` 尚待执行。
+同日 `test-worklspace` 现库启动验证发现并修复 SurrealDB 2.1 的覆盖查询投影错误；修正版
+识别当前根2720、当前凭证528、补种2192，连续观察 pending 下降且无失败/死信。adaptive
+从 K=1 升至2、3，16根组耗时约4.23s→2.17s→1.77s，随后按资源压力回落至1；记录位于
+`.codex-deploy/model-concurrency-20260825-132437/live-validation.txt`。该次不是独立快照三轮
+A/B，也未跑到最终收敛，因此不替代上面的正式性能门。
+
+**2026-08-25 E3D TTY × AMS 8000 增量更新复验通过**：TTY 对 FTUB
+`24384/23262` 执行 `POS.U 2900 -> 3400 -> 2900`，会话 `256 -> 257 -> 258`；apply / restore
+各得到 2 条 Modified，合并窗口业务变化抵消，仅剩 BRAN.CACHID 1 条、
+`model_affecting=0`。随后通过 8023 正常增量 API 提交窗口 `257..=258`，db8000 任务
+`db-20260825-075224-000007` succeeded，水位 `256 -> 258`；同轮共享 meta 任务计入后
+11/11 succeeded，最终 health `model_ready`、staging=0、side-effect pending=0、
+batch failures=null。restore driver exit 0，重新打开 dabacon 确认 POS.U=2900。
+证据：`docs/evidence/2026-08-25-e3d-tty-increment-update.md` 与
+`output/e3d-tty-net-window/20260825-075300/`。
+
 **2026-08-21 零尺寸 NCYL 死信恢复（执行中）**：已建立
 `specs/022-model-dead-letter-recovery/`，完成定向圆柱类错误尺寸、模型工作状态快照、
 死信公告去重与 health degraded 语义的离线实现。现场编排固定为
@@ -101,6 +129,50 @@ cargo test --lib --no-default-features --features ws,gen_model,manifold,project_
 > **顺带**：那唯一的 1 passed 是 `mesh_pipe_surface_distance`——它是取证型不硬断言，
 > 构件拿不到网格就 `continue`，在一件都没量到的库上照样报绿。它自己也需要一条
 > 「什么都没量到就红」的下限。
+
+**2026-08-25 八条 mesh 级对拍无 occ 口径重新取证**：`rvm_baseline::mesh_compare::mesh_wall_live::*`
+八条（live 8009 = `.surreal/ams-rvm-rebuild-20260824`，config `db_options/DbOption-rvm-rebuild`；
+跑法 `cargo test --lib --no-default-features --features ws,gen_model,manifold,project_hd,rvm_verify mesh_ -- --ignored --nocapture --test-threads=1`）。
+**2026-08-25 实测 7 passed / 1 failed**（上一轮 6/2），29.2s。这是上面那条 08-24 作废通告之后
+第一份带 occ 之外的可复现记录，取代 2026-08-14 那批。
+
+前置（缺一条 gen 侧就无从重建）：serve 以 `AIOS_STARTUP_AUTORUN=0` +
+`AIOS_SKIP_STARTUP_ROOM_BUILD=1` 起在 `db_options/DbOption-rvm-rebuild`，整库重生成
+498,726ms / `GLOBAL_AABB_TREE: 5293`；`POST /api/v1/model/ensure` 带 `force` 打三个根
+（`24384/23257` 9 件、`24384/22404` 35 件、`17496/105799` 解到 FRMW `17496/105689` 153 件）；
+再跑 `fast_model::pdms_inst::tests::live_sweep_inst_relate_flat_on_configured_db`
+物化平表（补 5207 行、复核无残留）——管系与墙的 `insts_flat` 不物化，`gen_world_mesh` 读到的是空。
+
+| 用例 | 结果 | 实测（mm） |
+|---|---|---|
+| `mesh_stwall_surface_distance` | **通过**（上一轮红） | 四堵 STWALL 双向 mean/p95/max 全 0.00 |
+| `mesh_branch_union_surface_distance` | 通过 | UNION(FTUBE1+BEND1+FTUBE2) both mean=0.61 p95=1.50 hausdorff=5.12 |
+| `mesh_full_branch_union_surface_distance` | 通过 | C-OR 9/9 missing=[]，both mean=0.61 p95=1.50 hausdorff=18.70 |
+| `mesh_c_iy_full_branch_union_surface_distance` | 通过 | C-IY 35/35，跳一个零表面 FTUBE 6（`pe:24384_22416`） |
+| `mesh_pipe_surface_distance` | 通过（取证型） | FTUBE 1 rvm_tris=12 / gen_tris=12；**两个 BEND 的 E3D 侧只有 12 三角，这条门在弯头上没量到真形状** |
+| `mesh_gwall_union_surface_distance` | 通过 | 20/20，both mean=10.53 p95=8.44 hausdorff=1286.31；20 堵里 13 堵 p95=0.0 |
+| `mesh_wall_surface_distance` | 通过 | WALL 1（`pe:17496_105912`）rvm_tris=184 / gen_tris=596 |
+| `mesh_gwall_extra_against_cwall_union` | **未通过** | 只卡 `pe:17496_105828`：gen→gwall p95=753.9 > 门槛 12（105880 p95=9.4、116569 p95=147.4 均在门内） |
+
+STWALL 4（`pe:17496_105816`）由红转绿的根因是直线扫掠体的 path 坐标系与实例旋转重复计，
+修在 aios-core `0e391ff1`（gen-model 跟进到 `0e391ff1` / `5344440b` / `257ea253`）：
+修前该墙整块绕 Z 转 90°、p95=2319.56 / 2511.17，修后 AABB 与 E3D 逐位相同。
+证据与逐步复现见 `docs/evidence/2026-08-25-sweep-path-frame-fix.md`。
+`mesh_gwall_extra_against_cwall_union` 的 105828 是另一条线，同日已定位并修复
+（ISSUE-022：负体 `pe:17496_105841` 的出口面与墙体外表面共面，布尔留成一层外皮；
+1296.9 ≈ 洞半宽 1300、753.9 ≈ 墙厚 748）。
+
+**2026-08-25 复跑：8 passed / 0 failed**（同一库、同一跑法，33.0s）。把负体做差前的「让量」
+从 `1e-6` 等比改成逐轴各让 `RES_TOL_MM = 0.051`（libgm 的 `GM_User::restol_`，
+取证 `docs/evidence/2026-08-25-ida-libgm-coincidence-tolerances.md`）之后：
+105828 gen→gwall p95 **753.9 → 0.1**、max 1296.9 → 65.2、三角数 188 → 184；
+105880 p95 9.4 → 8.9；116569 p95 147.4 → 137.3；
+GWALL union both mean/p95/hausdorff **10.53 / 8.44 / 1286.31 → 4.75 / 5.33 / 647.09**。
+
+复跑口径提醒：这一轮只删掉 8 堵带负体 GWALL 的 `booled` `.mesh` 让对拍就地重算布尔，
+没有整库重生成；且期间 8009 上另有一个别的会话的 `plant-ui-app` + debug `aios-database`
+在写（`inst_relate` 5110 → 6147 行），所以**管系那三条的数字（如单支 union both mean
+0.61 → 0.72）不能记到本次改动头上**，只有 GWALL 那几个是我们自己重算的、可归因。
 
 **2026-08-14 AMS 1112 WALL mesh 级对拍**：`rvm_baseline::mesh_compare::mesh_wall_live::mesh_wall_surface_distance`（live 8009 + occ；**口径失效，见上**，跑法 `cargo test --features rvm_verify --lib mesh_wall_surface_distance -- --ignored --nocapture`；`--features rvm_verify` 已含 occ）。**2026-08-14 通过**。实测（双向采样表面距离，单位 mm）：
 
@@ -320,6 +392,7 @@ ams8000 世代）+ 长跑专项 1（manual_update 二遍）+ 未跑 4（room mes
 | `both_catalogue_shapes_resolve_geometry_from_the_scom` | resolve.rs:132 | 同上 | 2026-08-13 补测 @8019 | **通过**（8.1s，六种形态全解出；与 scom_geometry 合进一个测试进程时有缓存干扰，批跑工具单进程无碍） |
 | `live_backfill_anc_on_configured_db` | pdms_inst.rs:947 | 基线在位 | 2026-08-13 补测 @8019 | **修复后通过**（3.6s）——回填跳过 ref0 超出 u64 打包上限的行并告警（7 行批次 1 魔术残留），复核口径同步收窄；溢出缺陷闭环 |
 | `live_sweep_inst_relate_flat_on_configured_db` | pdms_inst.rs:992 | 生成产物在位 | 2026-08-13 B2 @8019 | **通过**（32.7s） |
+| `live_shared_geo_bad_retry_must_refresh_sibling_insts_flat_on_disposable_db` | pdms_inst.rs:2042 | **可丢弃沙箱**（`Start-TestSurreal.ps1 -Memory`）；自建 zzflat/20260823 夹具，断言前自清理 | 2026-08-24 @8019(-Memory) | **按设计红**（2.55s）：共享 geo `bad→meshed` 后未被重写的 A 行 `insts_flat` 停在旧值 `[]`，坐实 ADR-043 缺口（spec 025 T01/T02，FR-6 定选项 P、FR-7 定路线 B）；T18 闭环后本行应改记「通过」，回退旧写法必须复红 |
 | `test_boolean_refno_parse_error` | manifold_bool.rs:670 | mesh 在位 | 2026-08-13 B2 @8019 | **通过**（3.1s） |
 | `test_gen_geos` | occ_generate.rs:37 | 基线 + mesh 目录 | 2026-08-13 B2 @8019 | **通过**（3.4s） |
 | `test_ancestor`（team_data.rs:166） | team_data.rs:166 | 项目数据在位 | 2026-08-13 B1 @8019 | **通过**（3.2s） |
@@ -331,8 +404,8 @@ ams8000 世代）+ 长跑专项 1（manual_update 二遍）+ 未跑 4（room mes
 |---|---|---|---|
 | `live_real_ftub_delete_move_and_reorder` | increment_pipeline.rs:3437 | AMS 文件里的真实 FTUB 会话史 | — |
 | `live_real_delete_session_cleans_up_model_and_regenerates_branch` | increment_pipeline.rs:4290 | `projams_incr_delete_apply.mac` 造的删除会话 | — |
-| `live_issue7_real_db_deleted_edges_come_back` | room_live_issue7.rs:204 | 真实项目库（7999 房间） | **2026-08-19 @8019 失败**：生产 drain 已先恢复位置并收口任务，测试末端仍期望消费 1 条，实得 0；日志 `output/live-batch/remaining-room-live-20260819-084116/01-live_issue7_real_db_deleted_edges_come_back.log` |
-| `live_issue13_c2_moving_out_of_the_room_clears_membership` | room_live_issue7.rs:356 | 真实项目库 | **2026-08-19 @8019 前置阻断**：起点无归属边，需先建立该房间基线；日志 `output/live-batch/remaining-room-live-20260819-084116/02-live_issue13_c2_moving_out_of_the_room_clears_membership.log` |
+| `live_issue7_real_db_deleted_edges_come_back` | room_live_issue7.rs | 真实项目库（7999 房间） | **2026-08-19 @8019 失败**：生产 drain 已先恢复位置并收口任务，测试末端仍期望消费 1 条，实得 0；日志 `output/live-batch/remaining-room-live-20260819-084116/01-live_issue7_real_db_deleted_edges_come_back.log`。**2026-08-25 修订后通过**（20.4s，@8029 = `rocksdb:python/testbed/.surreal/pytest-ams`，config `db_options/DbOption-room-live-8029`）：日志复现 08-06 的黄金形态 `[房间增量] 构件 24383_66460 归属: 无房间 -> R512`；收敛「本进程消费 1 行 / 等待 1 轮 / 已收口」。三处用例缺陷：① `done >= 1` 是本次 drain 的吞吐计数，与生产 worker 抢同一张队列表，且排在边集断言之前把唯一有意义的结论遮住 → 改 `wait_for_room_convergence`（等队列行消失、不问谁收的）＋ 边集断言前置；② 备料/全量基线抽成共享的 `build_room_baseline`；③ **重建范围与对拍范围不一致**——keyword 卡到 `-RM05-R512`（1 块面板）却拿构件全库归属边当基线，而这套库上靶件同时挂着 `24381_1391 -> R142`，元素分支会把范围外那条抹掉且不写回 → 断言收进范围内面板集、范围外的边收尾按原值写回。日志 `output/room-live-20260825/01-issue7.log` |
+| `live_issue13_c2_moving_out_of_the_room_clears_membership` | room_live_issue7.rs | 真实项目库（**自足**，不再依赖 issue7 先跑） | **2026-08-19 @8019 前置阻断**：起点无归属边，需先建立该房间基线；日志 `output/live-batch/remaining-room-live-20260819-084116/02-live_issue13_c2_moving_out_of_the_room_clears_membership.log`。**2026-08-25 修订后通过**（20.0s，环境同上一行）：`[房间增量] 构件 24383_66460 归属: R142, R512 -> 无房间` → 写回后 `无房间 -> R512`。原先直接把 `edges_of_element()` 当前值当基线，于是隐式依赖同批次 #01 先跑过，#01 一红它就报一个不属于自己的前置阻断；现共用 `build_room_baseline` 自己铸基线。**已按 c2 → issue7 反序各自独立进程复跑一遍，两条仍全绿**，顺序依赖确实断开（两条只能逐个跑：`SUL_DB` 进程级全局）。日志 `output/room-live-20260825/02-issue13-c2.log`、`rerun-*.log` |
 | `live_issue5_moving_the_fitting_moves_its_implicit_tubing` | room_live_issue7.rs:523 | 真实项目库 | **2026-08-19 修订后通过**（5.39s）：生产计划精确为 BRAN `RegenRoot` + 靶件 `PostRegenAabb`，位移与恢复均验证；日志 `output/live-batch/issue5-live-expectation-fix-20260819-084804/rerun.log` |
 | `live_issue13_c3_on_demand_pending_is_invisible_to_its_own_database` | room_live_issue7.rs:642 | 真实项目库 | **2026-08-19 @8019 通过**（14.8s） |
 | `live_issue7_probe` | room_live_issue7.rs:715 | 只读探针（真实项目） | **2026-08-19 @8019 通过**（14.0s） |

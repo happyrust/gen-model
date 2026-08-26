@@ -32,6 +32,7 @@
 mod tests {
     use std::collections::HashSet;
 
+    use aios_core::options::DbOption;
     use aios_core::room::room::{GLOBAL_AABB_TREE, load_aabb_tree};
     use aios_core::{RefnoEnum, SUL_DB, get_db_option};
     use serde::Deserialize;
@@ -47,9 +48,11 @@ mod tests {
     const ELEMENT: &str = "24383_66460";
     /// `ELEMENT` 所属的分支 `/1WCC1135/B1`——issue #5 里管段没画出来的那条。
     const BRANCH: &str = "24383_66459";
-    /// 被删的两条边里，在这套库上存在的那块面板（另一块 `24381_1391` 本库没有）。
+    /// 被删的两条边里，落在本用例重建范围内的那块面板。
     const PANEL: &str = "24381_35844";
-    /// 只让这一间房参与重建，别把库里 124 间真实房间一起卷进来。
+    /// `PANEL` 所属的房间节点（`/1RX-RM05-R512`），[`ROOM_KEY_WORD`] 圈的就是它。
+    const ROOM: &str = "24381_35842";
+    /// 只让这一间房参与重建，别把库里两百多间真实房间一起卷进来。
     const ROOM_KEY_WORD: &str = "-RM05-R512";
 
     /// 一条房间归属边，可直接相等比较。
@@ -182,6 +185,273 @@ mod tests {
             .expect("valid queue cleanup");
     }
 
+    /// [`ROOM`] 名下的 PANE（子 + 孙两层，与房间归属计算的层级覆盖同口径）。
+    ///
+    /// 这是本用例**真正重建的范围**：`ROOM_KEY_WORD` 把 `build_room_relations` 卡到这一间，
+    /// 元素分支的 `PanelIndex` 也只装得下这些面板。断言必须收在同一个范围里，否则就是拿
+    /// 「只重建了一间房」的结果去比「这个构件在全库的所有归属边」——两个东西。
+    ///
+    /// 这不是假想：2026-08-25 在 `python/testbed/.surreal/pytest-ams` 上实测，靶件 CAP
+    /// 同时挂着 `24381_35844 -> R512` 与 `24381_1391 -> R142`（后者在 `/1RX-RM01-R142`
+    /// 名下），范围内只有前一条。用例此前能过，是因为 2026-08-06 那套库里 `pe:24381_1391`
+    /// 压根不存在——验证报告把它记成了脚注，其实是个依赖。
+    async fn scoped_panels() -> HashSet<String> {
+        let panels: Vec<String> = SUL_DB
+            .query(format!(
+                "SELECT VALUE record::id(id) FROM pe WHERE noun = 'PANE' AND deleted != true \
+                 AND (owner = pe:⟨{ROOM}⟩ OR owner.owner = pe:⟨{ROOM}⟩);"
+            ))
+            .await
+            .expect("query the scoped panels")
+            .check()
+            .expect("valid scoped panel query")
+            .take(0)
+            .expect("decode the scoped panels");
+        let scope: HashSet<String> = panels.into_iter().collect();
+        assert!(
+            scope.contains(PANEL),
+            "重建范围里没有靶子面板 {PANEL}，后面比什么都没意义——先确认 {ROOM} 还是 \
+             /1RX-RM05-R512 且 {PANEL} 还挂在它名下"
+        );
+        scope
+    }
+
+    /// 只保留落在本次重建范围内的边。
+    fn within_scope(edges: &[Edge], scope: &HashSet<String>) -> Vec<Edge> {
+        edges
+            .iter()
+            .filter(|edge| scope.contains(&edge.panel))
+            .cloned()
+            .collect()
+    }
+
+    /// 一条 `room_relate` 边的完整载荷，够按原值写回。
+    #[derive(Debug, Clone, Deserialize)]
+    struct RoomEdgePayload {
+        panel: String,
+        part: String,
+        room_num: String,
+        inside_count: i64,
+        center_dist: f64,
+    }
+
+    /// 落在本次重建范围**之外**的归属边。
+    ///
+    /// 必须单独捞出来备份：元素分支发的是 `DELETE {element}<-room_relate`，只避开
+    /// `protected_panels`（在册但缺几何的面板）。范围外那间房的面板在这个 keyword 下压根
+    /// 不在册、不受保护，于是它的边会被一并抹掉，而用例的收尾只写回 `POS`——跑一次少一条，
+    /// 共享沙箱里没有任何东西会把它补回来。
+    async fn out_of_scope_edges(scope: &HashSet<String>) -> Vec<RoomEdgePayload> {
+        let edges: Vec<RoomEdgePayload> = SUL_DB
+            .query(format!(
+                "SELECT record::id(in) AS panel, record::id(out) AS part, room_num, \
+                        inside_count, center_dist \
+                 FROM pe:{ELEMENT}<-room_relate;"
+            ))
+            .await
+            .expect("query the element's full room edges")
+            .check()
+            .expect("valid full room edge query")
+            .take(0)
+            .expect("decode the element's full room edges");
+        edges
+            .into_iter()
+            .filter(|edge| !scope.contains(&edge.panel))
+            .collect()
+    }
+
+    /// 把范围外的边按原值写回。
+    ///
+    /// 这是收尾的**最后**一步数据操作：排在任何一次 drain 之前写回，等于把它再喂给元素
+    /// 分支抹一遍。
+    async fn restore_out_of_scope_edges(edges: &[RoomEdgePayload]) {
+        if edges.is_empty() {
+            return;
+        }
+        // 显式 id 用 `type::thing`：refno 形态的 id（`24381_1391`）写成裸字面量会被
+        // SurrealQL 当成带下划线分隔符的数字。
+        let rows = edges
+            .iter()
+            .map(|edge| {
+                format!(
+                    "{{ id: type::thing('room_relate', '{}_{}'), \
+                       in: type::thing('pe', '{}'), out: type::thing('pe', '{}'), \
+                       room_num: '{}', inside_count: {}, center_dist: {} }}",
+                    edge.panel,
+                    edge.part,
+                    edge.panel,
+                    edge.part,
+                    edge.room_num,
+                    edge.inside_count,
+                    edge.center_dist
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        SUL_DB
+            .query(format!("INSERT RELATION INTO room_relate [{rows}];"))
+            .await
+            .expect("restore the out-of-scope room edges")
+            .check()
+            .expect("valid out-of-scope restore");
+        println!("[房间基线] 已写回 {} 条范围外归属边", edges.len());
+    }
+
+    /// 备料 + 只重建 `/1RX-RM05-R512` 这一间，返回这个构件在**范围内**应有的归属边。
+    ///
+    /// 两条用例共用。此前只有 issue7 那条做这件事，issue13-c2 直接把 `edges_of_element()`
+    /// 的当前值当基线并要求它非空——于是它隐式依赖「issue7 先跑过」。2026-08-19 的批次里
+    /// #01（issue7）红了，#02（c2）随即以「起点无归属边」前置阻断，报的根本不是它自己要
+    /// 守的那条性质。备料与全量重建两侧都幂等，自足铸一次基线换来的是两条用例可以任意
+    /// 顺序、单独运行。
+    ///
+    /// `rebuild_tree_from_pointers` 不能省：`build_room_relations` 前面那道覆盖率门要求
+    /// 树的条目数达到库里可用包围盒指针数的 90%，只刷这两个 refno 的包围盒够不到。
+    async fn build_room_baseline(
+        mgr: &AiosDBManager,
+        db_option: &DbOption,
+        scope: &HashSet<String>,
+    ) -> Vec<Edge> {
+        for target in [PANEL, ELEMENT] {
+            let result = mgr
+                .ensure_model_generated(RefnoEnum::from(target), false)
+                .await
+                .unwrap_or_else(|error| panic!("按需生成 {target} 失败: {error:#}"));
+            println!(
+                "[房间基线] 备料 {target}: root={} status={:?} renderable={} written={}",
+                result.generation_root,
+                result.status,
+                result.model_instance_count,
+                result.generated_instance_count
+            );
+        }
+
+        load_aabb_tree().await.expect("load spatial tree");
+        rebuild_tree_from_pointers()
+            .await
+            .expect("rebuild complete spatial tree from persistent pointers");
+        update_inst_relate_aabbs_by_refnos(
+            &[RefnoEnum::from(PANEL), RefnoEnum::from(ELEMENT)],
+            true,
+        )
+        .await
+        .expect("refresh both aabbs into the tree");
+        assert!(
+            !GLOBAL_AABB_TREE.read().await.is_empty(),
+            "空间树是空的，全量重建会拒跑"
+        );
+
+        build_room_relations(db_option)
+            .await
+            .expect("full rebuild of /1RX-RM05-R512");
+        let baseline = within_scope(&edges_of_element().await, scope);
+        assert!(
+            !baseline.is_empty(),
+            "全量重建都算不出这个构件在 /1RX-RM05-R512 里的归属，两步复现无从谈起——\
+             先查面板与构件的几何、包围盒，以及它是不是真在这间房里"
+        );
+        baseline
+    }
+
+    /// 这个构件的元素任务在队列里的现状，渲染成 `[id, revision, attempts, status]`；
+    /// 已经被收走则 `None`。
+    async fn room_element_row() -> Option<String> {
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT VALUE <string>[record::id(id), revision, attempts, status] \
+                 FROM model_update_pending:room_recalc_element_{ELEMENT};"
+            ))
+            .await
+            .expect("query the element room task")
+            .check()
+            .expect("valid element room task query")
+            .take::<Vec<String>>(0)
+            .expect("decode the element room task");
+        response.pop()
+    }
+
+    const ROOM_CONVERGENCE_POLL: std::time::Duration = std::time::Duration::from_secs(2);
+    const ROOM_CONVERGENCE_ROUNDS: usize = 30;
+
+    /// 一次「等这条元素任务收口」的结果。判定只看 [`RoomConvergence::remaining`]，
+    /// 其余字段都是诊断用的。
+    struct RoomConvergence {
+        /// 进场时那行还在不在。**只作诊断**：共享实库上生产 worker 可能在我们看第一眼
+        /// 之前就把它收走了，拿它当判据等于把刚修掉的竞态换个地方再犯一次。
+        enqueued: bool,
+        /// 本进程自己的 `drain_rooms` 吃掉了几行。同样只作诊断。
+        consumed_here: usize,
+        rounds: usize,
+        /// 等满还在的话，它的现状；收口了则 `None`。
+        remaining: Option<String>,
+        /// 本进程 drain 期间报出来的失败（含 drain 调用本身失败）。
+        failures: Vec<String>,
+    }
+
+    impl RoomConvergence {
+        fn converged(&self) -> bool {
+            self.remaining.is_none()
+        }
+
+        fn describe(&self) -> String {
+            let mut text = format!(
+                "进场时{}见任务行；本进程消费 {} 行 / 等待 {} 轮；{}",
+                if self.enqueued { "" } else { "未" },
+                self.consumed_here,
+                self.rounds,
+                match &self.remaining {
+                    Some(row) => format!("仍在队列: {row}"),
+                    None => "已收口".to_string(),
+                }
+            );
+            if !self.failures.is_empty() {
+                text.push_str(&format!("；drain 报错: {}", self.failures.join(" | ")));
+            }
+            text
+        }
+    }
+
+    /// 等到这个构件的元素任务从队列里消失为止，**不关心是谁把它收走的**。
+    ///
+    /// 这里刻意不再断言 `drain_rooms(..).done >= 1`。`done` 是**本次调用**的吞吐计数，
+    /// 而共享实库上还跑着生产 worker——它的空闲轮 `room_round` 会先把这行收走，本用例
+    /// 随后拿到 0。2026-08-19 @8019 那次失败就是这么来的：引擎把边算对了，用例却红在一个
+    /// 与不变量无关的计数上，而且那条计数断言排在边集断言之前，把唯一有意义的结论一并
+    /// 遮住了（见 `docs/2026-08-12_live-test-ledger.md`）。
+    ///
+    /// 要守的性质是「这行最终被收口」——它对『谁收的』不敏感，因此独占实例与共享实例上
+    /// 都成立。本进程照旧每轮自己 drain 一次：没有 worker 时它就是唯一的消费者。
+    async fn wait_for_room_convergence(db_option: &DbOption) -> RoomConvergence {
+        let mut convergence = RoomConvergence {
+            enqueued: room_element_row().await.is_some(),
+            consumed_here: 0,
+            rounds: 0,
+            remaining: None,
+            failures: Vec::new(),
+        };
+        for round in 1..=ROOM_CONVERGENCE_ROUNDS {
+            convergence.rounds = round;
+            match drain_rooms(db_option).await {
+                Ok(report) => {
+                    convergence.consumed_here += report.done;
+                    convergence.failures.extend(report.failures);
+                }
+                Err(error) => convergence
+                    .failures
+                    .push(format!("drain_rooms 调用失败: {error:#}")),
+            }
+            match room_element_row().await {
+                None => {
+                    convergence.remaining = None;
+                    return convergence;
+                }
+                Some(row) => convergence.remaining = Some(row),
+            }
+            tokio::time::sleep(ROOM_CONVERGENCE_POLL).await;
+        }
+        convergence
+    }
+
     /// issue #7 的两步，跑在真库真构件上。
     ///
     /// 三段：
@@ -189,9 +459,13 @@ mod tests {
     /// 1. **备料**——按需生成面板与构件两侧的几何。这一步本身就是 ADR-010 §9 一直被卡住
     ///    的前提（「结构库从未生成、`inst_relate WHERE in.noun = 'PANE'` 为 0」）。
     /// 2. **全量基线**——只重建 `/1RX-RM05-R512` 这一间，拿到这个构件应有的归属边。
+    ///    两段都在 [`build_room_baseline`] 里，与 issue13-c2 共用。
     /// 3. **两步复现**——先 `DELETE` 掉它的归属边（报告人的第一步），再改它的 `POS.z`
     ///    并走生产上纯位姿变更那条链（`update_world_transforms` → 刷新包围盒 →
-    ///    `enqueue_room_recalc` → `drain_rooms` → 元素分支），断言边原样回来。
+    ///    `enqueue_room_recalc` → 房间队列 → 元素分支），等队列行收口后断言边原样回来。
+    ///
+    /// 收口用 [`wait_for_room_convergence`] 等，**不**断言本进程 drain 的吞吐计数：
+    /// 共享实库上生产 worker 会先把行收走，那个计数与要守的性质无关。
     ///
     /// 收尾把 `POS` 写回、清掉队列行。
     ///
@@ -205,53 +479,25 @@ mod tests {
         connect_live().await;
 
         let element = RefnoEnum::from(ELEMENT);
-        let panel = RefnoEnum::from(PANEL);
         let mut db_option = get_db_option().clone();
         db_option.room_key_word = Some(vec![ROOM_KEY_WORD.to_string()]);
 
         let original_z = pos_z().await;
         println!("[issue7] 构件 {ELEMENT} 当前 POS.z = {original_z}");
 
-        // ---- 1. 备料：两侧几何 ----
+        // ---- 1. 备料 + 2. 全量基线 ----
+        let scope = scoped_panels().await;
+        let outside = out_of_scope_edges(&scope).await;
+        println!(
+            "[issue7] 重建范围 {} 块面板；范围外归属边 {} 条（收尾写回）: {outside:?}",
+            scope.len(),
+            outside.len()
+        );
         let mgr = AiosDBManager::init_form_config()
             .await
             .expect("init db manager");
-        for target in [PANEL, ELEMENT] {
-            let result = mgr
-                .ensure_model_generated(RefnoEnum::from(target), false)
-                .await
-                .unwrap_or_else(|error| panic!("按需生成 {target} 失败: {error:#}"));
-            println!(
-                "[issue7] 备料 {target}: root={} status={:?} renderable={} written={}",
-                result.generation_root,
-                result.status,
-                result.model_instance_count,
-                result.generated_instance_count
-            );
-        }
-
-        // ---- 2. 全量基线 ----
-        load_aabb_tree().await.expect("load spatial tree");
-        rebuild_tree_from_pointers()
-            .await
-            .expect("rebuild complete spatial tree from persistent pointers");
-        update_inst_relate_aabbs_by_refnos(&[panel, element], true)
-            .await
-            .expect("refresh both aabbs into the tree");
-        assert!(
-            !GLOBAL_AABB_TREE.read().await.is_empty(),
-            "空间树是空的，全量重建会拒跑"
-        );
-        build_room_relations(&db_option)
-            .await
-            .expect("full rebuild of /1RX-RM05-R512");
-        let baseline = edges_of_element().await;
+        let baseline = build_room_baseline(&mgr, &db_option, &scope).await;
         println!("[issue7] 全量基线: {baseline:#?}");
-        assert!(
-            !baseline.is_empty(),
-            "全量重建都算不出这个构件的房间归属，两步复现无从谈起——\
-             先查面板与构件的几何、包围盒，以及它是不是真在这间房里"
-        );
 
         // ---- 3. 报告人的两步 ----
         // 先把主嫌隔离出来，与合成夹具那条同一个手法：业务库里的面板几何保持完整，只把
@@ -316,27 +562,47 @@ mod tests {
             .expect("valid target room priority update");
         println!("[issue7] 移动后队列: {:?}", room_queue_rows().await);
         println!("[issue7] 移动后 aabb: {:?}", element_aabb_json().await);
-        let done = drain_rooms(&db_option).await.expect("drain room work").done;
-        let after_move = edges_of_element().await;
+        let moved = wait_for_room_convergence(&db_option).await;
+        println!("[issue7] 移动后收敛: {}", moved.describe());
+        let after_move = within_scope(&edges_of_element().await, &scope);
 
-        // 收尾：位置写回原值，并把归属收敛回基线状态。
+        // 收尾：位置写回原值，并把归属收敛回基线状态。范围外的边最后写回——排在任何一次
+        // drain 之前写，等于把它再喂给元素分支抹一遍。
         set_pos_z(original_z).await;
         aios_core::clear_all_caches_batch(&[element]).await;
         mgr.update_world_transforms(&HashSet::from([element]))
             .await
             .expect("restore transform");
-        let _ = drain_rooms(&db_option).await;
-        let restored = edges_of_element().await;
+        let restore = wait_for_room_convergence(&db_option).await;
+        println!("[issue7] 写回后收敛: {}", restore.describe());
+        let restored = within_scope(&edges_of_element().await, &scope);
+        restore_out_of_scope_edges(&outside).await;
         clear_room_queue().await;
 
-        assert!(done >= 1, "那条元素任务必须被消费掉，实得 {done}");
+        // 不变量排在最前：删掉的边有没有回来。收敛诊断塞进失败信息，任务卡住时一眼看得见
+        // 是「没算」还是「算错」——反过来把收敛断言排在前面，一个与正确性无关的计数就能
+        // 把唯一有意义的那条结论遮住，2026-08-19 那次红的就是这个形态。
         assert_eq!(
-            after_move, baseline,
-            "\n删掉的边必须被增量建回来（issue #7）\n增量: {after_move:#?}\n基线: {baseline:#?}"
+            after_move,
+            baseline,
+            "\n删掉的边必须被增量建回来（issue #7）\n增量: {after_move:#?}\n基线: {baseline:#?}\n收敛: {}",
+            moved.describe()
         );
         assert_eq!(
-            restored, baseline,
-            "\n位置写回之后归属也要回到基线\n实得: {restored:#?}\n基线: {baseline:#?}"
+            restored,
+            baseline,
+            "\n位置写回之后归属也要回到基线\n实得: {restored:#?}\n基线: {baseline:#?}\n收敛: {}",
+            restore.describe()
+        );
+        assert!(
+            moved.converged(),
+            "那条元素任务必须被收口（谁收的不重要）: {}",
+            moved.describe()
+        );
+        assert!(
+            restore.converged(),
+            "写回之后排出的元素任务同样要收口: {}",
+            restore.describe()
         );
     }
 
@@ -346,6 +612,9 @@ mod tests {
     /// 人还在房间里，验的是「边能回来」。反方向没人测：把它挪到房间外，那条边必须被清掉。
     /// 这一半失手同样是静默的——元素分支先清后写，清那一步只覆盖本轮候选面板，漏了就留下
     /// 一条指向它早已离开的房间的陈旧边，而任务照样成功。
+    ///
+    /// 基线走 [`build_room_baseline`] 自己铸，与 issue7 那条**没有执行顺序依赖**，可以
+    /// 单独运行。
     ///
     /// ```text
     /// AIOS_LIVE_WS=ws://localhost:8009 cargo test --lib --features http_api \
@@ -357,27 +626,27 @@ mod tests {
         connect_live().await;
 
         let element = RefnoEnum::from(ELEMENT);
-        let panel = RefnoEnum::from(PANEL);
         let mut db_option = get_db_option().clone();
         db_option.room_key_word = Some(vec![ROOM_KEY_WORD.to_string()]);
 
         let original_z = pos_z().await;
-        let baseline = edges_of_element().await;
-        assert!(
-            !baseline.is_empty(),
-            "起点就没有归属边，这条用例无从谈起——先跑 \
-             live_issue7_real_db_deleted_edges_come_back，或按 -RM05-R512 重建一次这间房"
+
+        // 自足铸基线，不再要求「先跑 issue7 那条」：那个隐式顺序依赖让本用例在 2026-08-19
+        // 的批次里因为兄弟用例失败而连带阻断，报的不是它自己要守的性质。见
+        // [`build_room_baseline`]。
+        let scope = scoped_panels().await;
+        let outside = out_of_scope_edges(&scope).await;
+        println!(
+            "[issue13-c2] 重建范围 {} 块面板；范围外归属边 {} 条（收尾写回）: {outside:?}",
+            scope.len(),
+            outside.len()
         );
-        println!("[issue13-c2] 起点 POS.z={original_z} 归属={baseline:#?}");
-
-        load_aabb_tree().await.expect("load spatial tree");
-        update_inst_relate_aabbs_by_refnos(&[panel, element], true)
-            .await
-            .expect("refresh both aabbs into the tree");
-
         let mgr = AiosDBManager::init_form_config()
             .await
             .expect("init db manager");
+        let baseline = build_room_baseline(&mgr, &db_option, &scope).await;
+        println!("[issue13-c2] 起点 POS.z={original_z} 归属={baseline:#?}");
+
         clear_room_queue().await;
 
         // 真的挪出去：+100 是上面那条用例的量级，构件还在房间里。
@@ -388,27 +657,44 @@ mod tests {
             .expect("transform work item");
         println!("[issue13-c2] 移出后队列: {:?}", room_queue_rows().await);
         println!("[issue13-c2] 移出后 aabb: {:?}", element_aabb_json().await);
-        let done_out = drain_rooms(&db_option).await.expect("drain room work").done;
-        let after_out = edges_of_element().await;
+        let moved_out = wait_for_room_convergence(&db_option).await;
+        println!("[issue13-c2] 移出后收敛: {}", moved_out.describe());
+        let after_out = within_scope(&edges_of_element().await, &scope);
 
-        // 收尾：写回原位，把归属收敛回基线。
+        // 收尾：写回原位，把归属收敛回基线；范围外的边最后写回（理由同 issue7）。
         set_pos_z(original_z).await;
         aios_core::clear_all_caches_batch(&[element]).await;
         mgr.update_world_transforms(&HashSet::from([element]))
             .await
             .expect("restore transform");
-        let _ = drain_rooms(&db_option).await;
-        let restored = edges_of_element().await;
+        let restore = wait_for_room_convergence(&db_option).await;
+        println!("[issue13-c2] 写回后收敛: {}", restore.describe());
+        let restored = within_scope(&edges_of_element().await, &scope);
+        restore_out_of_scope_edges(&outside).await;
         clear_room_queue().await;
 
-        assert!(done_out >= 1, "那条元素任务必须被消费掉，实得 {done_out}");
+        // 「边空了」这条断言本身分不清「删干净了」和「压根没算」，所以收敛诊断必须跟着
+        // 一起报出来（房间自动化测试计划 RL2 的旁证要求）。
         assert!(
             after_out.is_empty(),
-            "\n构件已经挪出 R512，它的归属边必须被清掉\n实得: {after_out:#?}"
+            "\n构件已经挪出 R512，它的归属边必须被清掉\n实得: {after_out:#?}\n收敛: {}",
+            moved_out.describe()
         );
         assert_eq!(
-            restored, baseline,
-            "\n写回原位之后归属要回到基线\n实得: {restored:#?}\n基线: {baseline:#?}"
+            restored,
+            baseline,
+            "\n写回原位之后归属要回到基线\n实得: {restored:#?}\n基线: {baseline:#?}\n收敛: {}",
+            restore.describe()
+        );
+        assert!(
+            moved_out.converged(),
+            "那条元素任务必须被收口（谁收的不重要）: {}",
+            moved_out.describe()
+        );
+        assert!(
+            restore.converged(),
+            "写回之后排出的元素任务同样要收口: {}",
+            restore.describe()
         );
     }
 

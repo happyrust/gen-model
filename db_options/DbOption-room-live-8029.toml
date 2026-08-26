@@ -1,0 +1,150 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 房间归属真库 live 用例专用（room_live_issue7.rs 的 issue7 / issue13-c2）。
+#
+# 由 python/testbed/DbOption-pytest.toml 拷贝而来，只改两处：
+#   * v_port 8019 → 8029：8019 上当前跑着别人的一次性 memory 实例，不去动它；
+#     8029 由 scripts/Start-Surreal8009.ps1 起，数据后端仍是 testbed 那份
+#     rocksdb:python/testbed/.surreal/pytest-ams（台账里「@8019」指的就是它）。
+#   * room_incremental false → true：位姿刷新那一步要真的排出 room_recalc 行，
+#     关着的话用例等的那条队列行永远不会出现。
+#
+# 起库：
+#   powershell -File scripts\Start-Surreal8009.ps1 -Bind 127.0.0.1:8029 `
+#     -Datastore "rocksdb:python/testbed/.surreal/pytest-ams"
+#
+# 下面是拷贝来的原注释，端口一项以上面为准。
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Python 绑定专用测试沙箱配置（python/testbed/）
+#
+# 与生产/在跑服务的隔离手段（三条全部独立，谁也踩不到谁）：
+#   1. project_path 指向 testbed/projects 的项目副本
+#      → 单实例锁 <项目副本根>/.gen-model.instance.lock 是自己的，
+#        与 9099 服务锁的真实 AVEVA 项目目录互不相干；
+#   2. v_port=8019 连 testbed 专用 SurrealDB（Start-TestSurreal.ps1 起，
+#      数据目录 python/testbed/.surreal/pytest-ams），8009 的正式库碰不到；
+#   3. meshes_path 指向 testbed/meshes，文件产物不混入仓库 assets。
+#
+# 项目副本用 Sync-TestbedProjects.ps1 重灌（只镜像 *000 库文件目录）。
+# 其余键与仓库根 DbOption.toml 保持一致（2026-08-12 拷贝），差异仅上述三处
+# 加 http_api_addr 注释掉（测试沙箱不起 Web 服务）。
+# ─────────────────────────────────────────────────────────────────────────────
+
+#同步文件配置
+total_sync = false
+incr_sync = false
+sync_history = false
+enable_log = false
+sync_graph_db = false
+sync_versioned = false
+sync_tidb = false
+sync_live = false
+replace_dbs = true
+enable_index = false
+sync_chunk_size = 10_0000
+
+#项目设置：testbed 项目副本（Sync-TestbedProjects.ps1 维护）
+project_path = "D:/work/plant-code/old/gen-model/python/testbed/projects"
+included_projects = ["AvevaMarineSample", "AvevaCatalogue", "ZDJ"]
+catalogue_project_priority = ["AvevaMarineSample", "AvevaCatalogue", "ZDJ"]
+
+mdb_name = "ALL"
+project_name = "AvevaMarineSample"
+project_code = 1516
+surreal_ns = 1516
+module = "DESI"
+#是否生成模型数据（Python 脚本显式驱动生成；增量/按需路径内部自行强制打开）
+gen_model = false
+gen_mesh = false
+replace_mesh = false
+save_db = true
+apply_boolean_operation = true
+mesh_tol_ratio = 3.0
+#【死键】rs-core 仅定义未消费，字段必填删不得（与根配置同步）
+gen_spatial_tree = true
+load_spatial_tree = false
+save_spatial_tree_to_db = false
+gen_model_batch_size = 4
+
+build_cate_relate = false
+
+#mesh 文件产物隔离到 testbed 内
+meshes_path = "D:/work/plant-code/old/gen-model/python/testbed/meshes"
+
+#生成补充类型的graph，方便查询直接生成语句
+gen_noun_graph = false
+
+#arangodb 配置（默认 feature 不消费）
+arangodb_database = "ams"
+multi_threads = false
+only_sync_sys = false
+arangodb_url = "http://127.0.0.1:8529"
+rebuild_ssc_tree = false
+arangodb_user = "root"
+arangodb_password = ""
+
+#tidb 配置（默认 feature 不消费）
+ip = "127.0.0.1"
+user = "root"
+password = ""
+port = "3306"
+sql_threads_number = 10
+batch_insert_sql_cnt = 100
+
+#版本数据库服务配置：testbed 专用 SurrealDB（Start-TestSurreal.ps1）
+v_ip = "localhost"
+v_port = 8029
+v_user = "root"
+v_password = "root"
+pe_chunk = 300
+att_chunk = 200
+
+kv_ip = "localhost"
+kv_port = "8010"
+
+#mqtt 事件 ip（默认 feature 不消费）
+mqtt_host = "192.168.31.58"
+mqtt_port = 1883
+
+location = "SJZ"
+location_dbs = [1112]
+
+#服务器启动配置
+server_release_ip = "127.0.0.1:9099"
+
+# hash文件的站点
+remote_file_server_hosts = []
+file_server_host = "http://192.168.31.58:8000/assets/archives"
+
+# 测试沙箱不起 Web 服务（需要时再放开并选独立端口，勿用 8022/9099）
+# http_api_addr = "0.0.0.0:8122"
+http_api_cors = ["*"]
+
+startup_autorun = false
+data_incremental = true
+model_incremental = true
+room_incremental = true
+
+#调试选项
+save_model_mesh_to_graph_db = true
+need_sync_refno_basic = false
+reset_mdb_project = false
+only_update_dbinfo = false
+debug_print_world_transform = false
+only_rebuild_pdms_element = false
+
+debug_refno_types = ["LOOP", "PRIM"]
+# 全量模型生成与按需基线解析的库号窗口（增量范围只认 mdb_name 的 MDB 声明）
+manual_db_nums = [7997, 7998, 7999, 8000]
+plat_url = ""
+
+#puhua（默认 feature 不消费）
+puhua_database_ip = ""
+puhua_database_user = ""
+puhua_database_password = ""
+
+# 房间名关键词（AMS 房间名形如 /1RX-RM03-R301）
+room_key_word = ["-RM"]
+
+gen_history_model = false
