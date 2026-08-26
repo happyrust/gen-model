@@ -1494,6 +1494,75 @@ mod tests {
         assert_volume(&mesh, 100.0 * 50.0 * 200.0, 0.001, "straight gensec");
     }
 
+    /// 单位体那条路与直接建体必须落在同一处。
+    ///
+    /// `gen_unit_shape()` 把可复用的直线扫掠归一成「沿 +Z 长 10」，`get_trans()` 负责
+    /// 把归一化抹掉的东西补回来。生产读侧走的是「单位体 × 实例变换」，而这里的
+    /// `sweep_solid_mesh` 是同一份形状的另一条路——两条各错各的也能一起绿，因为没有
+    /// 任何用例把它们放在一起比过：`sweep_solid.rs` 里碰 `get_trans()` 的用例 path 全是
+    /// `Vec3::Z * k`，恰好是所有分歧点都退化的那一档。
+    ///
+    /// 分歧点曾有三个：`get_trans()` 曾按 path 切向补一个 `from_rotation_arc(Z, dir)`，而
+    /// 两台建体引擎（manifold 的本函数、历史上的 `gen_occ_shape`）一律沿 +Z 挤、只取
+    /// path 的长度——这就是 STWALL 4 整墙多转 90° 的根源，已随 aios-core 拿掉，本测试
+    /// 钉住不许回潮；`from_rotation_arc(Y, plax)` 只在截面 `na_axis` 恰是 +Y 时才等价于
+    /// `placement()` 的 `from_rotation_arc(na, plax)`；`bang` 无条件乘，而 `placement()`
+    /// 只对 `is_spine` 的线带 BANG。后两条同族还悬着，眼下没有用例喂过非 +Y 的
+    /// `na_axis` 或非零 BANG。
+    #[test]
+    fn a_reused_unit_lands_where_the_direct_build_lands() {
+        use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
+
+        fn reused(sweep: &SweepSolid) -> PlantMesh {
+            let PdmsGeoParam::PrimLoft(unit) =
+                PdmsGeoParam::PrimLoft(sweep.clone()).convert_to_unit_param()
+            else {
+                panic!("放样体的单位参数还得是放样体");
+            };
+            let mut mesh = sweep_solid_mesh(&unit).expect("unit mesh");
+            let t = sweep.get_trans();
+            let m = glam::Mat4::from_scale_rotation_translation(t.scale, t.rotation, t.translation);
+            for v in &mut mesh.vertices {
+                *v = m.transform_point3(*v);
+            }
+            mesh
+        }
+
+        for (label, dir) in [
+            ("沿 +Z", Vec3::Z),
+            ("沿 +X", Vec3::X),
+            ("斜向", Vec3::new(0.6, 0.0, 0.8)),
+        ] {
+            let mut sweep = straight_sweep(rect_profile(200.0, 250.0), 10.0);
+            sweep.path = SweepPath3D::Line(Line3D {
+                start: Vec3::ZERO,
+                end: dir.normalize() * 2600.0,
+                is_spine: false,
+            });
+            assert!(sweep.is_reuse_unit(), "{label}：这一档本该可复用");
+
+            let direct = sweep_solid_mesh(&sweep).expect("direct mesh");
+            let reused = reused(&sweep);
+            assert_eq!(
+                direct.vertices.len(),
+                reused.vertices.len(),
+                "{label}：两条路顶点数都对不上，先看截面离散"
+            );
+            let worst = direct
+                .vertices
+                .iter()
+                .zip(&reused.vertices)
+                .map(|(a, b)| a.distance(*b))
+                .fold(0.0f32, f32::max);
+            let (dmin, dmax) = mesh_bounds(&direct);
+            let (rmin, rmax) = mesh_bounds(&reused);
+            assert!(
+                worst <= 1e-2,
+                "{label}：单位体×实例变换偏离直接建体 {worst}mm\n  direct [{dmin}] .. [{dmax}]\n  reused [{rmin}] .. [{rmax}]"
+            );
+        }
+    }
+
     #[test]
     fn mitred_gensec_takes_the_ruled_branch_and_keeps_volume() {
         let mut sweep = straight_sweep(rect_profile(100.0, 50.0), 200.0);

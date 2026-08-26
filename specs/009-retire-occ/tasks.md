@@ -418,21 +418,130 @@
   必定判成硬边」，照抄时不要顺手归一化。
   开规格时连带一件：这个出参**一参两用**，`GM_Collar` 的侧壁归并走查拿 `|flags[k]|`
   当推进量（同上文件 §五），只实现法向那一半会让直纹面的三角/四边划分对不上。
-- [ ] T041（依赖 T038+T045）`../vendor/old-aios-core/src/prim_geo/cylinder.rs`、
-  `../vendor/old-aios-core/src/prim_geo/sphere.rs`、`src/fast_model/pdms_inst.rs`：
-  柱与球的 `hash_unit_mesh_params()` 混入
-  段数，`gen_unit_shape()` 相应带段数；`canonical_unit_param_json` 的
-  `CYLINDER_GEO_HASH` 特判改按新键走。
-  门：不同半径两根柱 `geo_hash` 不同且各自段数正确；同段数两根仍共享一行；
-  沿用 2026-08-13 的双键 `param` 回归测试。
-  **改身份 = 整库重建**（ADR-044 决策 6），必须与 T045 的爆炸半径结论一起决策。
-  **球的权威规则已钉（2026-08-24 IDA，`GM_Sphere::calcFacetsWithoutSurfaces`
-  `0x100A20F0`）**：绕轴 `n = circle(自身半径, tol)`、超 1000 报 warning 后硬截；
+- [ ] T041（依赖 T038 + T053；T045 的爆炸半径结论已被 T053 取代）
+  `../vendor/old-aios-core/src/prim_geo/{cylinder,sphere,snout,ctorus,rtorus,dish}.rs`、
+  `src/fast_model/pdms_inst.rs`、`src/fast_model/manifold_tessellate.rs`：
+  **五类**复用型曲面原语的 `hash_unit_mesh_params()` 混入段数，`gen_unit_shape()`
+  把段数**随参数带下去**，分发臂改读携带值而不是从单位半径现算；
+  `canonical_unit_param_json` 的 `CYLINDER_GEO_HASH` 特判改按新键走；
+  `manifold_tessellate::unit_mesh_identity` 整组删除。
+  **改身份 = 整库重建**（ADR-044 决策 6）；范围与代价见 T053（库 A 392 → 474）。
+
+  **为什么非带不可**：单位行的半径恒为 1（`rout`/`pdia`/`pbdm` 都被归一化），
+  真实尺寸只在实例变换的 `scale` 里。段数规则要真实半径，而单位参数里没有——
+  所以段数**必须在归一化之前算好、写进单位参数**。`hash_unit_mesh_params()` 与
+  `gen_unit_shape()` 都是在**原件**上调用的，两处都拿得到真实尺寸。
+
+  **每类混几个数（元数不同，这是本条最容易做错的地方）**：
+
+  | 变体 | 段数元组 | 规则（`libgm_discretise`） |
+  |---|---|---|
+  | `LCylinder` / 非 SSCL 的 `SCylinder` | `(n,)` | `cylinder_segments(pdia/2)` |
+  | `Sphere` | `(n,)` | `cylinder_segments(r)`；**stacks 恒 `n/2`，不是独立自由度** |
+  | `LSnout`（`poff == 0`） | `(n,)` | `snout_segments(pbdm/2, ptdm/2)` |
+  | `CTorus` | `(n_ring, n_tube)` | `torus_ring_segments(rout, angle)` + `circular_torus_tube_segments(rins, rout)` |
+  | `RTorus` | `(n_ring,)` | `torus_ring_segments(rout, angle)`；**矩形截面无管向，别照抄圆环面** |
+  | `Dish`（`prad ≤ 0`，球碟） | `(around, meridional)` | `spherical_dish_facets(a, h)` |
+  | `Dish`（`prad > 0`，椭圆碟） | `(around, hub, knuckle)` | `elliptical_dish_facets(a, h)` |
+
+  **两支不参与、不得重复混**：SSCL（`is_sscl()`）与偏心 Snout（`poff != 0`）的
+  `gen_unit_shape()` 返回的是**带真实尺寸的克隆**、`get_scaled_vec3()` 是单位阵，
+  段数本来就能从参数自身算出。给它们再加一个段数字段是冗余，还会让同一件出现两个键。
+
+  **球那一元的出处**（2026-08-24 IDA，`GM_Sphere::calcFacetsWithoutSurfaces`
+  `0x100A20F0`）：绕轴 `n = circle(自身半径, tol)`、超 1000 报 warning 后硬截；
   经向带数恒 = `n/2`（顶点 `n·(n/2−1)+2`，两极各一点，角步长两向同一个）。
-  所以球的身份键只需混入 **n 一个数**，stacks 不是独立自由度。现状
-  `unit_sphere()` 的 16×36 在 R=100/tol=0.5 的「幸运尺寸」下也不对——E3D 是
-  32 slices × 16 stacks，36 从来没对过。证据
+  所以球只混 **n 一个数**。现状 `unit_sphere()` 的 16×36 即便在 R=100/tol=0.5 的
+  「幸运尺寸」上也不对——E3D 是 32 slices × 16 stacks，**36 从来没对过**。证据
   `docs/evidence/2026-08-24-ida-occ-retire-audit.md`。
+
+  ### 门
+
+  **2026-08-25：下面 A / B 两组已经写成真单测**（`src/fast_model/pdms_inst.rs`，
+  `t041_` 前缀共 11 条），**判据先落地、实现随后**——6 条按设计红着，
+  逐条登记在本文件末尾的「既有红测」。绿的那 5 条是反向门，不许变红。
+
+  | 测试 | 组 | 今天 |
+  |---|---|---|
+  | `t041_a1_cylinders_in_different_segment_classes_need_their_own_rows` | A1 | 红 |
+  | `t041_a2_two_cylinders_in_one_segment_class_still_share_a_row` | A2 | 绿 |
+  | `t041_a_snout_splits_by_its_larger_end_segment_class` | A1+A2 | 红 |
+  | `t041_b1_a_dish_needs_all_three_segment_counts_in_its_key` | B1 | 绿（**绿得不作数**，见下） |
+  | `t041_b1b_geometrically_similar_dishes_in_one_segment_class_share_a_row` | B1/A2 | 红 |
+  | `t041_b2_the_two_dish_branches_must_not_collide_on_a_shared_prefix` | B2 | 绿 |
+  | `t041_b3_a_circular_torus_needs_both_the_ring_and_the_tube_count` | B3 | 红 |
+  | `t041_b4_a_rectangular_torus_key_ignores_height` | B4 | 绿 |
+  | `t041_b4b_a_rectangular_torus_splits_by_its_ring_segment_class` | B4 | 红 |
+  | `t041_b5_a_sphere_key_carries_exactly_one_segment_count` | B5 | 红 |
+  | `t041_b6_the_already_sized_variants_keep_their_keys` | B6 | 绿 |
+
+  两条要点，都是写测试时才看清的：
+
+  1. **配对必须是「同一形状比例、不同绝对尺寸」。** 单位行的半径恒为 1，
+     拿两个不同比例的件对比问不出「段数有没有进键」——它们的键本来就不同。
+  2. **`t041_b1` 今天绿得不作数。** 它现在之所以两键不同，是因为
+     `Dish::hash_unit_mesh_params` 哈希的是**未归一化**的 `prad`（16.4 与 18.4），
+     不是因为三元组起了作用。等 `b1b` 把 `prad` 收成比值，这条才开始真的量三元组
+     ——**`b1b` 是 `b1` 的前置，不是并列的两条**。这同时就是 T053 第 (3) 条那个
+     「读码所见、未构造用例」的双键疑点，现在有用例了：`prad` 进键的是原值、
+     `gen_unit_shape` 落库的是 `prad/dia`。
+
+  **A 组·每类各一份（判别性）**
+
+  - **A1 跨等价类必须分行**：同族两件，形状比例相同、真实尺寸跨过段数等价类边界
+    → `geo_hash` 不同，且各自 `gen_unit_shape()` 落库的段数与规则手算值相等。
+  - **A2 同等价类必须仍共享**：同族两件，真实尺寸不同但落进**同一**段数等价类
+    → 仍是同一个 `geo_hash`、同一行。这条比 A1 更要紧——丢了它，
+    392 → 474 会变成 392 → 上万，ADR-044 决策 2 的复用直接没了。
+    现成样本：`r = 1` 与 `r = 2` 的柱在 `tol = 0.5` 下都是 8 段（撞 45° 下限）。
+  - **A3 双键同源**：`hash_unit_mesh_params()` 与 `gen_unit_shape()` 取**同一个**
+    规范值。判别式照抄 T054：同键两件的 `convert_to_geo_param()` 序列化逐字节相同。
+    （这条已经踩过两次——T002 的 `f32_round_3`、T054 的剪切角折叠。）
+
+  **B 组·元数（本次新增，A 组盖不住）**
+
+  - **B1 碟的三元组不能只混绕轴**：**现成样本**（`tol = 0.5`）——
+    `a = 1000, h = 5` 与 `a = 1000, h = 20`，两者 `around` 同为 **100**，
+    而 `(hub, knuckle)` 是 **(2, 2)** 与 **(3, 3)**。只混 `around` 即红。
+  - **B2 碟的两个分支元数不同，而且真的会撞**：**现成样本**——
+    椭圆碟 `a = 1000, h = 5` 的三元组是 **(100, 2, 2)**，球碟 `a = 1000, h = 35`
+    的二元组是 **(100, 2)**；前者的前两位与后者逐位相同。
+    今天分支靠 `prad` 区分（`Dish::hash_unit_mesh_params` 已经在哈希它），
+    这条门要钉的是**加段数时别把它弄丢**：变长元组不许被摊平成「逐个哈希、不带长度/
+    不带分支」的写法，否则这一对就同键了。
+  - **B3 圆环面的二元组不能只混环向**：`n_ring` 与 `n_tube` 都是 `rout` 的函数，
+    但**量化粒度不同**。**现成样本**——`rins/rout = 0.5`、`angle = 360°` 下，
+    `rout = 104` 与 `rout = 105` 的 `n_ring` 同为 **36**，`n_tube` 却是 **16** 与 **20**。
+    只混环向即红。
+  - **B4 矩形环面只有一元**：两件 `RTorus` 只有 `height` 不同 → 段数元组必须**相同**
+    （`height` 走 `get_scaled_vec3` 的 z，本来就不进键）。加一个不存在的管向轴即红。
+  - **B5 球只混 n**：`stacks` 由 `n/2` 导出，键里段数分量恰好一个。
+    混两个数即红（IDA 已钉，`0x100A20F0`）。
+  - **B6 已带真实尺寸的两支键不变**：SSCL 与 `poff != 0` 的 Snout，
+    改动前后 `geo_hash` **逐位不变**。
+
+  **C 组·跨切面**
+
+  - **C1** `canonical_unit_param_json` 的 `CYLINDER_GEO_HASH` 特判改按新键走；
+    2026-08-13 的双键 `param` 回归照跑。注意库里那一行单位柱是
+    `PrimLCylinder + PrimSCylinder` **双键对象**（库 A 实测只此一行），
+    新键之后每个段数一行，**双键形态要保持**——塌成单键会让读侧按变体取 param 取空。
+  - **C2** 容差进不进键：`FACET_TOL_MM` 今天是常量，所以不进。
+    **若将来接成配置项，改容差 = 改身份 = 整库重建**，这句要写进常量文档。
+    同时把 T039 的 `every_segment_count_is_named_or_computed` 扩到 vendor 侧
+    新增的那几处：段数只许来自 `libgm_discretise` 规则。
+  - **C3** `unit_mesh_identity` 整组删除（其 doc 已写明「T041 换键时整组删」），
+    T039 的两条源码断言随之改判。
+  - **C4 整体门（唯一一次能验完五类的）**：改完在库 A 副本上重跑 T053 的脚本口径，
+    这五类的 `inst_geo` 行数应落在 **474**（392 + 82）。显著偏离就是键混错了元数——
+    **偏多 = 混了不该混的**（把 `height` / `scale` 之类带进了键），**偏少 = 漏了一维**。
+    脚本与口径见 `docs/evidence/2026-08-25-t053-segment-identity-scope.md`。
+
+  **发布前提**（不编字母，免得与 endgame plan 的决策点 D1–D4 撞名）
+
+  - 同批整库重建（endgame plan 决策 D1 已拍板不设独立窗口）。
+  - RVM 抽检（T049）在重建**之后**跑；现成样本两件——库 B `poff = 12.06`
+    的偏心 Snout（T052）、库 A `rins = 0` 的喇叭环面（负 RINS 盘点）。
 - [x] T042（2026-08-23 完成）`src/fast_model/libgm_discretise.rs`、
   `src/fast_model/manifold_tessellate.rs`、`src/fast_model/sweep_mesh.rs`：
   **不只是加了一条断言——写断言时发现生产路径上真有第二个容差来源。**
@@ -790,6 +899,25 @@
   实例少 6 行增量（`poff = 12.06` 那件查不到），结论只覆盖到快照点。
   证据 `docs/evidence/2026-08-24-negative-rins-census.md`。
   **仍欠**：vendor 未发布（Phase V 同批）。
+
+## 预期红测（T041 的判据先落地，实现随后）
+
+2026-08-25 起 `src/fast_model/pdms_inst.rs` 里有 **6 条按设计红着**的 `t041_` 测试。
+它们不是回归，是 T041 的验收判据——**每一条红都在正确地报告「段数还没进身份键」**，
+实现落地时逐条转绿。同 feature 全量因此从 0 失败变成 6 失败。
+
+| 测试 | 现在为什么红 | 转绿的条件 |
+|---|---|---|
+| `t041_a1_cylinders_in_different_segment_classes_need_their_own_rows` | `Cylinder::hash_unit_mesh_params()` 恒返回 `CYLINDER_GEO_HASH`（=2），32 段与 56 段的柱同键 | 柱的键混入 `cylinder_segments` |
+| `t041_a_snout_splits_by_its_larger_end_segment_class` | Snout 的键只有 `ptdm/pbdm` 与高度符号，是尺度无关量 | Snout 的键混入 `snout_segments` |
+| `t041_b1b_geometrically_similar_dishes_in_one_segment_class_share_a_row` | `Dish::hash_unit_mesh_params()` 哈希**原值** `prad`，而 `gen_unit_shape()` 落 `prad/dia`——比例相同、尺寸不同的两件碟被判成两行 | `prad` 收成比值（顺带关掉 T053 第 (3) 条的双键疑点） |
+| `t041_b3_a_circular_torus_needs_both_the_ring_and_the_tube_count` | CTorus 的键只有 `rins/rout` 与 `angle` | 键混入 `(n_ring, n_tube)` 二元组 |
+| `t041_b4b_a_rectangular_torus_splits_by_its_ring_segment_class` | RTorus 同上，只有 `rins/rout` 与 `angle` | 键混入 `n_ring` |
+| `t041_b5_a_sphere_key_carries_exactly_one_segment_count` | `Sphere::hash_unit_mesh_params()` 恒返回 `SPHERE_GEO_HASH`（=3） | 键混入 `n`（**只此一个**，stacks 恒 `n/2`） |
+
+同组还有 5 条**绿的反向门**（`a2` / `b1` / `b2` / `b4` / `b6`），实现过程中不许变红：
+它们钉的是「同等价类仍共享」「分支不撞键」「`height` 不进键」「已带真实尺寸的
+SSCL 与偏心 Snout 键逐位不变」。
 
 ## 既有红测（不是本规格引入的，记在这里免得每次重新排查）
 

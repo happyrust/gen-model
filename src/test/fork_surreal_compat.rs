@@ -960,8 +960,12 @@ async fn dual_inst_relate_flat_materialization_agrees() {
     );
     // 清扫（sweep_inst_relate_flat 同形，BATCH 缩到 10；2026-08-20 起值位带
     // booled_id 优先的 IF——UPDATE 记录上下文里的 IF/ELSE + 图遍历双分支）。
+    // 2026-08-23 起分支条件用的是 `VALID_BOOLED` 那份共享判据（空串与字面 'none'
+    // 按无成品处理），这里同步跟上——`string::lowercase(booled_id ?? '')` 在 UPDATE
+    // 记录上下文的 IF 条件位里能不能求值，正是双跑要证的事。
     let sweep = "LET $rows = SELECT VALUE id FROM inst_relate WHERE insts_flat = NONE AND aabb.d != none LIMIT 10;\n\
-         UPDATE $rows SET insts_flat = IF booled_id != NONE THEN \
+         UPDATE $rows SET insts_flat = IF booled_id != NONE AND booled_id != '' \
+         AND string::lowercase(booled_id ?? '') != 'none' THEN \
          [{ geo_hash: booled_id }] ELSE (SELECT trans.d AS transform, record::id(out) AS geo_hash \
          FROM out->geo_relate WHERE visible && out.meshed && trans.d != none && geo_type='Pos') END, \
          aabb_d = aabb.d, world_trans_d = world_trans.d RETURN NONE;\n\
@@ -1083,6 +1087,12 @@ async fn dual_booled_flat_repair_converges() {
          AND (insts_flat = NONE OR array::first(insts_flat ?? []).geo_hash != booled_id) LIMIT 10;\n\
          UPDATE $rows SET insts_flat = [{ geo_hash: booled_id }] RETURN NONE;\n\
          RETURN array::len($rows);";
+    // mismatch 存在性探针（migration 复核与启动探针共用的语句形态，谓词与修复
+    // 循环同一份共享判据 VALID_BOOLED + BOOLED_FLAT_MISMATCH 渲染后的样子）。
+    let mismatch_probe = "RETURN array::len((SELECT VALUE id FROM inst_relate \
+         WHERE booled_id != NONE AND booled_id != '' AND string::lowercase(booled_id ?? '') != 'none' \
+         AND (insts_flat = NONE OR array::first(insts_flat ?? []).geo_hash != booled_id) \
+         LIMIT 1)) > 0;";
     let read_untouched = "SELECT VALUE insts_flat FROM [inst_relate:⟨24383_201⟩, \
          inst_relate:⟨24383_202⟩, inst_relate:⟨24383_203⟩];";
     let read_hashes = "SELECT VALUE insts_flat.geo_hash FROM [inst_relate:⟨24383_200⟩, \
@@ -1092,6 +1102,12 @@ async fn dual_booled_flat_repair_converges() {
 
     for (engine, db) in [("mem", &mem), ("fork", &fork)] {
         let before = exec_capture(db, read_untouched).await;
+        let dirty = exec_capture(db, mismatch_probe).await;
+        assert_eq!(
+            dirty[0].as_deref(),
+            Ok(r#"{"Bool":true}"#),
+            "[{engine}] 修复前 mismatch 探针必须探到脏行"
+        );
         let round1 = exec_capture(db, repair).await;
         assert_eq!(
             round1[2].as_deref(),
@@ -1127,6 +1143,38 @@ async fn dual_booled_flat_repair_converges() {
             round2[2].as_deref(),
             Ok(r#"{"Number":{"Int":0}}"#),
             "[{engine}] 第二轮必须圈 0 行——修复段的自收敛终止条件"
+        );
+        let clean = exec_capture(db, mismatch_probe).await;
+        assert_eq!(
+            clean[0].as_deref(),
+            Ok(r#"{"Bool":false}"#),
+            "[{engine}] 收敛后 mismatch 探针必须探不到——复核与启动探针共用这形态"
+        );
+
+        // Spec 025 FR-9：修复段改一次性 migration 后新增的两个语句形态——
+        // 标记点查（record id SELECT 套 array::len，表尚不存在时也要稳定回 false）
+        // 与落标记 UPSERT。completed_at 是 time::now()，跨引擎必然不同，因此
+        // 不进 assert_dual_same，按引擎各自绝对断言。
+        let probe = "RETURN array::len((SELECT VALUE id \
+             FROM queue_control:booled_flat_repair_migration)) > 0;";
+        let absent = exec_capture(db, probe).await;
+        assert_eq!(
+            absent[0].as_deref(),
+            Ok(r#"{"Bool":false}"#),
+            "[{engine}] 表/行不存在时标记点查必须稳定回 false"
+        );
+        let landed = exec_capture(
+            db,
+            "UPSERT queue_control:booled_flat_repair_migration SET spec = 'dual', \
+             repaired = 3, completed_at = time::now() RETURN NONE;",
+        )
+        .await;
+        assert!(landed[0].is_ok(), "[{engine}] 落标记 UPSERT 必须可执行");
+        let present = exec_capture(db, probe).await;
+        assert_eq!(
+            present[0].as_deref(),
+            Ok(r#"{"Bool":true}"#),
+            "[{engine}] 标记落下后点查必须回 true"
         );
     }
 }

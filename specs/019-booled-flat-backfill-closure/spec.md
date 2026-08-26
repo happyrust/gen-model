@@ -2,6 +2,12 @@
 
 **Created**: 2026-08-20  
 **Status**: Proposed  
+**修订（2026-08-24，spec 025 FR-9 / T06）**: 修复段从「常驻热路径段（每轮清扫必跑全表）」
+改制为**带库上标记的一次性 migration**（`run_booled_flat_repair_migration_on`，标记
+`queue_control:booled_flat_repair_migration`，流程「标记不存在 → 修复 → 复核无残留 →
+落标记」）。FR-002 的两个挂点不变（migration 仍由清扫在启动序列与空闲轮驱动），变的
+只是门控：标记已落的库每轮只付一次 record id 点查。旧备份恢复/库拷贝会带回无标记
+状态、自动重跑。依据 `docs/adr/ADR-043-insts-flat-invalidation-protocol.md` 决策 6。
 **Input**: 对 gen-model `89f8b06b` 与 plant-ui `dbb348e25`（2026-08-20 布尔成品显示修复）的代码审核结论。该次修复只覆盖了「新布尔成功」与「`insts_flat = NONE` 的行」，而旧代码时代所有已布尔的行都是「先被清扫回填成正体、后写 `booled_id`」的形态——现场基线 `baseline-db.json` 即为铁证（`booled_id` 已在，`insts_flat` 仍是带 `scale=[1,1,234]` 的正体）。当次只对 `inst_relate:24381_36945` 一行做了手工 UPDATE。平表读 `query_insts_flat` 原样信任 `insts_flat`，三副本齐活就不落 slim 兜底，因此其他库/其他行的同型脏数据会继续把错误正体端给查看者。
 
 ## User Scenarios & Testing
