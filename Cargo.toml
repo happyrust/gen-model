@@ -104,16 +104,17 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "313ba91b7eac4a5254d36759cf28d8bf5ba0894a" }
-aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "f9f1bf0fbaea710ce4393958266bded6f4597da0", default-features = false }
+parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "5344440b01c2c12f6e919116e90c369985316f37" }
+aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "0e391ff12bd66aebfdab8e3d2684754f43389510", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "d2d9744ba9d27255b494a2addbbe7969fef8fa56" }
+pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "257ea253288314b0f4d07741c534fbd93cf4d61f" }
 
 clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }
 tokio = { version = "1.37.0", features = ["full", "test-util"] }
 serde = { version = "1.0.137", features = ["derive"] }
+sysinfo = "0.33.1"
 id_tree = { version = "1.8.0", features = ["serde_support"] }
 glam = { version = "0.29.3", features = ["serde", "rkyv"] }
 cached = "0.55.1"
@@ -183,9 +184,9 @@ rmcp = { version = "=3.1.1", features = ["server", "transport-io"] }
 #
 # 前提：下面三个 vendor 目录必须存在，且停在与上面 rev 对应的提交上。
 #
-#   ../vendor/old-aios-core      codex/libgm-snout-caliber = f9f1bf0f
-#   ../vendor/old-parse-pdms-db  codex/room-panel-wire-repair-deps = 313ba91b
-#   ../vendor/old-pdms-io        codex/room-panel-wire-repair-deps = d2d9744b
+#   ../vendor/old-aios-core      codex/libgm-snout-caliber = 0e391ff1
+#   ../vendor/old-parse-pdms-db  codex/room-panel-wire-repair-deps = 5344440b
+#   ../vendor/old-pdms-io        codex/room-panel-wire-repair-deps = 257ea253
 #
 # 同名克隆有好几份，别接错。plant-code/rs-core 在 codex/fix-refno-enum-cata-hash
 # 上（rkyv 0.8 那条线），engine-v2 在 plant-code/pdms-io，两者都不是这里要的。

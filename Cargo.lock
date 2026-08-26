@@ -141,6 +141,7 @@ dependencies = [
  "strum 0.27.2",
  "strum_macros 0.27.2",
  "surrealdb",
+ "sysinfo",
  "tempfile",
  "tokio",
  "toml",
@@ -175,7 +176,7 @@ dependencies = [
 [[package]]
 name = "aios_core"
 version = "0.2.0"
-source = "git+https://github.com/happyrust/old-aios-core.git?rev=f9f1bf0fbaea710ce4393958266bded6f4597da0#f9f1bf0fbaea710ce4393958266bded6f4597da0"
+source = "git+https://github.com/happyrust/old-aios-core.git?rev=0e391ff12bd66aebfdab8e3d2684754f43389510#0e391ff12bd66aebfdab8e3d2684754f43389510"
 dependencies = [
  "anyhow",
  "approx 0.5.1",
@@ -4810,7 +4811,7 @@ dependencies = [
 [[package]]
 name = "parse_pdms_db"
 version = "3.0.0"
-source = "git+https://github.com/happyrust/old-parse-pdms-db.git?rev=313ba91b7eac4a5254d36759cf28d8bf5ba0894a#313ba91b7eac4a5254d36759cf28d8bf5ba0894a"
+source = "git+https://github.com/happyrust/old-parse-pdms-db.git?rev=5344440b01c2c12f6e919116e90c369985316f37#5344440b01c2c12f6e919116e90c369985316f37"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -4900,7 +4901,7 @@ dependencies = [
 [[package]]
 name = "pdms_io"
 version = "0.1.0"
-source = "git+https://github.com/happyrust/old-pdms-io.git?rev=d2d9744ba9d27255b494a2addbbe7969fef8fa56#d2d9744ba9d27255b494a2addbbe7969fef8fa56"
+source = "git+https://github.com/happyrust/old-pdms-io.git?rev=257ea253288314b0f4d07741c534fbd93cf4d61f#257ea253288314b0f4d07741c534fbd93cf4d61f"
 dependencies = [
  "aios_core",
  "anyhow",
