@@ -208,10 +208,11 @@ pub struct BatchScheduler {
     paused: AtomicBool,
     /// 本进程是否已经被「真实触发」上过弦。
     ///
-    /// `startup_autorun` 关着时启动为 false，第一次非重扫入队（watch 事件 / 人工
-    /// 执行）把它扳成 true 且不再落回。它管的是 worker 空闲轮那侧的持久积压
-    /// （房间重算目标、模型单元）——那些行不按 dbnum 分，没法像队列行那样逐条挂起，
-    /// 只能整体等一个「有人在干活了」的信号。批次侧的挂起是逐行的，两者互不替代。
+    /// 起手取值见 [`initial_auto_work_armed`]；两个来源都不成立时启动为 false，
+    /// 第一次非重扫入队（watch 事件 / 人工执行）把它扳成 true 且不再落回。它管的是
+    /// worker 空闲轮那侧的持久积压（房间重算目标、模型单元）——那些行不按 dbnum 分，
+    /// 没法像队列行那样逐条挂起，只能整体等一个「有人在干活了」的信号。批次侧的挂起
+    /// 是逐行的，两者互不替代。
     auto_work_armed: AtomicBool,
     /// 入队 / 恢复时唤醒 worker。
     notify: Notify,
@@ -225,13 +226,36 @@ struct QueueState {
 
 static SCHEDULER: OnceLock<BatchScheduler> = OnceLock::new();
 
+/// 本进程起手就上弦吗（ADR-048）。
+///
+/// 两个来源，任一成立即上弦：
+///
+/// * `startup_autorun=true` —— 历史行为，「整库照常自动干活」。
+/// * 声明了监听限定域（`watch_dbnums` / `--watch-dbnum`）—— 这句话本身就是
+///   「本次跑就要这几个库」，比 `startup_autorun` 更窄也更明确。
+///
+/// 为什么必须把第二个来源接进来：`startup_autorun=false` 的本意是「别自作主张把
+/// 整库都跑了」，它的解封条件是「某个 dbnum 真的来一次增量」。可一旦同一份配置里
+/// `sync_live=false`（不起 watcher），那个条件永远不会发生——`model_update_pending`
+/// 里的持久积压于是既不可消费、也不可收口、也不会复活，三条出路一条都没有。
+/// 明明白白写了限定域却什么都不跑，是本仓最忌讳的静默失效。
+///
+/// **不覆盖启动全量房间重建**：那道门（`lib.rs` 的 `skip_startup_room_build`）
+/// 直读 `startup_autorun()`，与本函数无关。收窄到几个库的人要的正是「别为 2 万
+/// 面板的全量重建付十几秒」，让限定域把它一起拖回来是反的。
+pub(crate) fn initial_auto_work_armed(startup_autorun: bool, watch_scope_active: bool) -> bool {
+    startup_autorun || watch_scope_active
+}
+
 impl BatchScheduler {
     pub fn global() -> &'static BatchScheduler {
         SCHEDULER.get_or_init(|| BatchScheduler {
             inner: Mutex::new(QueueState::default()),
             paused: AtomicBool::new(false),
-            // `startup_autorun=true` 就是历史行为：一上来就是上过弦的。
-            auto_work_armed: AtomicBool::new(crate::options::startup_autorun()),
+            auto_work_armed: AtomicBool::new(initial_auto_work_armed(
+                crate::options::startup_autorun(),
+                crate::data_interface::watch_scope::active(),
+            )),
             notify: Notify::new(),
         })
     }
@@ -993,6 +1017,56 @@ mod tests {
         assert!(!scheduler.is_auto_work_armed(), "重扫不上弦");
         scheduler.enqueue_live(&registry, &found(8000, 34, 40));
         assert!(scheduler.is_auto_work_armed(), "真实触发上弦");
+    }
+
+    /// ADR-048：起手上弦有两个来源，任一成立即上弦。
+    ///
+    /// 第三行是本次要修的那格。回退成 `startup_autorun` 单来源就会红——而那正是
+    /// 现场那 7655 行 `model_update_pending` 无人认领的形状：配置里白纸黑字写了
+    /// `watch_dbnums`，进程却当作「没人要求我干活」。
+    #[test]
+    fn a_declared_watch_scope_arms_the_process_just_like_autorun_does() {
+        assert!(
+            initial_auto_work_armed(true, false),
+            "历史行为：整库自动干活"
+        );
+        assert!(initial_auto_work_armed(true, true), "两个都在照样上弦");
+        assert!(
+            initial_auto_work_armed(false, true),
+            "写了 watch_dbnums 就是「本次跑就要这几个库」，必须上弦"
+        );
+        assert!(
+            !initial_auto_work_armed(false, false),
+            "两个来源都没有才是「起来先看看」"
+        );
+    }
+
+    /// 起手取值必须**同时**取两个来源，不能只接一个就算改完。
+    ///
+    /// 纯函数那条只钉真值表；没有这条的话，把 `global()` 里的实参写死成
+    /// `false` 也能全绿。
+    #[test]
+    fn the_global_scheduler_feeds_both_arming_sources_in() {
+        let source = include_str!("batch_scheduler.rs");
+        let body = source
+            .split_once("pub fn global() -> &'static BatchScheduler {")
+            .expect("global 必须存在")
+            .1
+            .split_once("\n    /// 取队列锁")
+            .expect("global 之后是队列锁")
+            .0;
+        assert!(
+            body.contains("initial_auto_work_armed("),
+            "起手上弦必须走那个纯函数，不许就地拼条件: {body}"
+        );
+        assert!(
+            body.contains("crate::options::startup_autorun()"),
+            "第一个来源不能丢: {body}"
+        );
+        assert!(
+            body.contains("crate::data_interface::watch_scope::active()"),
+            "第二个来源不能丢（ADR-048）: {body}"
+        );
     }
 
     #[test]

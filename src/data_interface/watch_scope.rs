@@ -149,8 +149,9 @@ pub fn mode_notice() -> Option<String> {
     let (dbnums, origin) = resolved();
     (!dbnums.is_empty()).then(|| {
         format!(
-            "本进程处于监听限定模式：增量只处理 {WATCH_CONFIG_KEY} {} 里的数据批次，\
-             其余数据批次（DESI、CATA 等非 SYS meta）一律跳过；\
+            "本进程处于监听限定模式：增量数据批次与本进程模型工作单只处理 {WATCH_CONFIG_KEY} {} 里的库，\
+             其余数据批次与本进程模型工作单（DESI、CATA 等非 SYS meta）一律跳过；\
+             上次进程遗留的 model_update_pending 已在本次启动最前段统一清理；\
              SYS meta（SYST/DICT/GLB/GLOB）不受限制。限定来自{}——\
              这是被显式收窄的范围，不是完整运行状态。",
             render_dbnums(&dbnums),
