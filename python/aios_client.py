@@ -135,6 +135,10 @@ class AiosClient:
             body["force"] = True
         return self._request("POST", "/model/ensure", body)
 
+    def model_rebuild_dbnum(self, dbnum: int, project: str | None = None) -> dict:
+        body = {"project": project} if project else {}
+        return self._request("POST", f"/dbnums/{dbnum}/model/rebuild", body)
+
     def model_delete_subtree(self, refno: str) -> dict:
         return self._request(
             "DELETE",

@@ -135,6 +135,13 @@ class GenModelClient:
             body={**self.identity.as_dict(), "refno": refno, "force": force},
         )
 
+    def rebuild_dbnum_models(self, dbnum: int) -> Any:
+        return self._request(
+            "POST",
+            f"/api/v1/dbnums/{dbnum}/model/rebuild",
+            body=self.identity.as_dict(),
+        )
+
     def dbnums(self) -> Any:
         return self._request("GET", "/api/v1/dbnums", query=self.identity.as_dict())
 

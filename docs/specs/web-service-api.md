@@ -296,6 +296,22 @@
   `{ "requested_refno": "24381/100677", "scope": "exact_subtree", "status": "deleted" }`。
 - 本端点只清理。需要重建时，由调用方随后调用 §4.5，并显式传 `force=true`。
 
+### 4.5.1 `POST /api/v1/dbnums/{dbnum}/model/rebuild` — 指定库模型全量重建
+
+请求体复用 `ProjectReq` 的 `project` / `mdb` / `namespace` 身份字段；端点本身即表示
+强制重建，不接收 `force`。只有 `watch_scope::admits(dbnum)` 且
+`model_full_rebuild_enabled=true` 时建任务；范围外请求零任务、零 pending、零模型写入。
+
+成功返回 `202 Accepted`：
+
+```json
+{"task_id":"model-rebuild-7997-...","dbnum":7997,"expected_roots":2720,"state":"queued"}
+```
+
+相同 dbnum 已有活动重建时返回同一 `task_id`。任务调用权威生成根同步并把全部根投入
+既有模型协调器，不直调整库生成函数；不预删旧模型、不改变水位。重建期间同库
+`/model/ensure` 返回 409。任务仅进程内有效，重启后需重新调用本端点。
+
 ### 4.6 `GET /api/v1/update/pending-units` — 待重试模型单元
 - 映射：`load_pending_model_units()`，响应 `{ "units": [...] }`，元素为 `PendingModelUnit` 原样。
 

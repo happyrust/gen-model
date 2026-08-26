@@ -380,8 +380,11 @@ const ACTIONS = {
             } },
   retry:  { label:"重试模型死信", req:"POST /api/v1/update/pending-units/retry", cls:"warn",
             hint:"model_update_pending：一次复活一行；目标从 /pending-units 取，不猜",
-            // 确认前先把真实目标取回来 —— health 的 blocking_samples 给的是记录 id
-            // 形态（24381_145800），retry 认的是 PDMS a/b（root_refno）。
+            // 确认前先把真实目标取回来。retry 的 SQL 是 `WHERE target_refno = '…'`
+            // 字面匹配，所以这里必须把 root_refno 原样透传、一个字符都不许转换。
+            // （别信「health 给下划线、这儿给 PDMS a/b」那套说法：真机上两边都是
+            // `24381_145800`。用这个端点的真正理由是 blocking_samples 只是样例，
+            // 而且 health 那一段一超时就整段读不出来，这儿不吃那 2 秒预算。）
             resolve:async () => {
               const units = (await get("/update/pending-units"))?.units || [];
               const dead = units.filter(u => (u.attempts ?? 0) >= MAX_ATTEMPTS);
@@ -456,7 +459,11 @@ function renderActions(m){
     };
     row.innerHTML = btn("pause", live && !paused) + btn("resume", live && paused)
       + btn("execute", live)
-      + btn("retry", live && dead > 0, dead > 1 ? ` <span class="hint">${dead}</span>` : "")
+      // 死信数读不出来时按钮照亮：它不靠这个数干活，点下去先拉一轮 /pending-units
+      // （另一个端点，不吃 health 的 2 秒预算）把真目标摆到确认行上；真没有可复活的，
+      // resolve 会自己报「没有 attempts ≥ 5 的行」。这跟副作用那个按钮不同，那个是
+      // 一次全捞、没有目标可看，未知时只能压着不亮。
+      + btn("retry", live && (dead > 0 || m.mupBlind), dead > 1 ? ` <span class="hint">${dead}</span>` : "")
       + btn("sideRetry", live && sepDead > 0, sepDead > 1 ? ` <span class="hint">${sepDead}</span>` : "")
       + `<span class="hint">${S.act.busy ? "处理中…" : "点一下亮出请求，再点确认才发"}</span>`;
   }
@@ -523,8 +530,25 @@ function model(){
   const blockedRows = rows.filter(r => r.blocked_by_phase);
 
   const mup = (h && h.model_update_pending) || {};
+  // health 给每个分项 2 秒预算，超了就回一份零 + error。那时 0 是「没读到」，不是
+  // 「没有」。真机上就撞过：7997 的两条死信把模型门焊着，health 却报 0/0——判决从
+  // 降级那一级滑过去、复活按钮跟着变灰，而那个按钮偏偏是死信唯一的出口。
+  //
+  // 但同一台机器下一轮又把 60,098/2 读回来了，error 照旧挂着：超时是断续的，回来的
+  // 数是真的。所以只在「读不出来 + 死信看着是 0」时才认未知——那才是会骗人的那种零。
+  // 死信数一旦为正，它就是实数，照常显示、照常触发降级判决。
+  const mupDegraded = !!mup.error
+    || ((h && h.degraded_sections) || []).includes("model_update_pending");
+  const mupBlind = mupDegraded && !(Number(mup.dead_letters) > 0);
   return { h, init, rows, tasks, dbs, byTask, byDb, failures, parked, inScope, lagging,
-           running, queued, held, blockedPhase, blockedRows, mup };
+           running, queued, held, blockedPhase, blockedRows, mup, mupBlind };
+}
+
+// 判决副标题里那半句。读不出来时不许说「0 条」——死信正是靠这半句被人看见的。
+function mupPhrase(m){
+  return m.mupBlind
+    ? "待重试 / 死信这一段 health 读不出来（分项超 2 秒），当前是未知不是零 —— 真要确认就点「重试模型死信」，它会拉一轮 /pending-units 把实数摆出来。"
+    : `待重试 ${n(m.mup.retryable)} 条、死信 ${n(m.mup.dead_letters)} 条。`;
 }
 
 // 队列行的入队时刻只在 /tasks 里，靠 task_id 对回来。
@@ -633,17 +657,27 @@ function verdict(m){
       detail:"held 行不会被派发，它只是把「这个库有欠账」记在明面上。",
       timer:null };
   }
-  // 水位齐、队列空，引擎却还在跑模型阶段。模型阶段不进 /queue，上面那些判据一个
-  // 都碰不到它，落到绿灯就成了「全好了」——而 initialization 自己还写着 model_running。
-  if(m.init.model_in_flight || m.init.status === "model_running"){
+  // 水位齐、队列空，引擎却还没收口。模型阶段不进 /queue，上面那些判据一个都碰不到
+  // 它，落到绿灯就成了「全好了」。两个信号要分开看：in_flight / model_running 是
+  // 「正在生成」；而 end_full_model() 一跑就把 in_flight 抹掉、status 退回 data_ready，
+  // 此时持久工作单与 AABB 往往还没收敛，启动线程仍等在 wait_for_model_ready 上 ——
+  // 那一段只剩 model_ready 还钉着假，这是唯一没被抹掉的凭据。
+  // 严格比 false：老版本 health 没有这个字段时，别把页面永久钉在蓝灯上。
+  const gen = m.init.model_in_flight || m.init.status === "model_running";
+  if(gen || (m.init.data_ready && m.init.model_ready === false)){
     return { lv:"run", chip:["blue","进行中"], path,
-      line:`水位已齐，模型还在生成 —— ${m.inScope.length} 个库全部追平，模型阶段没跑完`,
-      detail:`模型阶段不进 /queue、也没有自己的进度接口，这一行的依据只有 initialization.status；跑到哪了要去控制台看。待重试 ${n(m.mup.retryable)} 条、死信 ${n(m.mup.dead_letters)} 条。`,
+      line:gen
+        ? `水位已齐，模型还在生成 —— ${m.inScope.length} 个库全部追平，模型阶段没跑完`
+        : `水位已齐，模型阶段还没收口 —— ${m.inScope.length} 个库全部追平，但模型工作单还没收敛`,
+      detail:(gen
+        ? "模型阶段不进 /queue、也没有自己的进度接口，这一行的依据只有 initialization.status。"
+        : "全量模型那一趟跑完了（model_in_flight 已落回 false），但持久模型工作单与 AABB 阶段还没收敛，model_ready 仍是 false —— 启动线程还等在这一步上。")
+        + `到顶的死信会一直把这道门焊着：它们被 attempts 上限挡在自动 drain 外，只能人工复活。${mupPhrase(m)}`,
       timer:null };
   }
   return { lv:"ok", chip:["green","已追平"], path,
     line:`范围内 ${m.inScope.length} 个库全部追平 —— applied_sesno == file_latest_sesno`,
-    detail:`待重试 ${n(m.mup.retryable)} 条、死信 ${n(m.mup.dead_letters)} 条。水位是唯一不会骗人的指标：重启会把 batch_failures 和 blockers 清空，但确定性失败会再来一遍。`,
+    detail:`${mupPhrase(m)}水位是唯一不会骗人的指标：重启会把 batch_failures 和 blockers 清空，但确定性失败会再来一遍。`,
     timer:null };
 }
 
@@ -742,9 +776,9 @@ function renderKpi(m){
     kpiCell("水位落后", m.lagging.length || 0,
       m.lagging.length ? "amber" : "green",
       lag ? `${lag.dbnum} ${lag.applied_sesno} → ${lag.file_latest_sesno}` : `${m.inScope.length} 个库在范围内`) +
-    kpiCell("待重试 / 死信", `${n(m.mup.retryable)} / ${n(m.mup.dead_letters)}`,
-      Number(m.mup.dead_letters || 0) ? "red" : (Number(m.mup.retryable || 0) ? "amber" : "mut"),
-      "model_update_pending");
+    kpiCell("待重试 / 死信", m.mupBlind ? "? / ?" : `${n(m.mup.retryable)} / ${n(m.mup.dead_letters)}`,
+      m.mupBlind ? "amber" : (Number(m.mup.dead_letters || 0) ? "red" : (Number(m.mup.retryable || 0) ? "amber" : "mut")),
+      m.mupBlind ? "这一段读不出来，不是 0" : "model_update_pending");
 }
 
 const Q_STATE = {
