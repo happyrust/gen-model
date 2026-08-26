@@ -224,6 +224,8 @@ namespace GenModel.E3D
         private static int WriteType(StringBuilder sb, DbElementType t, ref int attrCount)
         {
             sb.Append(" {\"noun\":\"").Append(Esc(t.Name)).Append("\"");
+            sb.Append(",\"short\":\"").Append(Esc(SafeShortName(t))).Append("\"");
+            sb.Append(",\"hash\":").Append(SafeNounHash(t).ToString(CultureInfo.InvariantCulture));
             sb.Append(",\"base\":\"").Append(Esc(SafeName(SafeBase(t)))).Append("\"");
             sb.Append(",\"hard\":\"").Append(Esc(SafeName(SafeHard(t)))).Append("\"");
             sb.Append(",\"isUdet\":").Append(SafeBool(SafeIsUdet(t)));
@@ -301,6 +303,16 @@ namespace GenModel.E3D
         private static DbElementType SafeBase(DbElementType t)
         {
             try { return t.BaseType; } catch { return null; }
+        }
+
+        private static string SafeShortName(DbElementType t)
+        {
+            try { return t.ShortName; } catch { return ""; }
+        }
+
+        private static int SafeNounHash(DbElementType t)
+        {
+            try { return t.GetHashCode(); } catch { return 0; }
         }
 
         private static DbElementType SafeHard(DbElementType t)

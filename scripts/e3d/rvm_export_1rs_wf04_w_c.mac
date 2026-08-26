@@ -1,0 +1,47 @@
+$(
+------------------------------------------------------------------------
+RVM 基准导出：FRMW /1RS-WF04-W-C
+  (dbnum 1112, pe:17496_105988)
+
+比 rvm_export_1rs_wf03_w_c_rr001.mac 高一层：那份的 CE 是单条 CWALL，
+这份是 FRMW，一次带出它下面 25 条 CWALL 的全部 82 堆墙
+（WALL 6 / STWALL 31 / GWALL 45）。
+
+导出到 CWALL 一层是有意的：RVM 里未命名成员的组名是
+`<NOUN> <n> of CWALL /<CWALL 名>`，序号在**各自 CWALL 内**从 1 起，
+所以对拍侧必须按全名配对，不能只按 `WALL 1` 前缀——25 条 CWALL 各有
+自己的 WALL 1。
+
+命令序列与窄口径理由见同目录 rvm_export_c_iy_1r330_b.mac。
+导出是只读：没有 SAVEWORK，不产生新会话号。
+不写 QUIT/FINISH——会话由 driver wrapper 拥有。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/rvm_export_1rs_wf04_w_c.log" OVER
+$P CODEX-DB1112-WF04-RVM-EXPORT-ALIVE
+
+$* ---- 表现设置：只导实体几何 ----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+$* ---- 驱动与输出 ----
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/test_data/rvm/1RS-WF04-W-C.rvm"
+export filenote 'RVM baseline for FRMW /1RS-WF04-W-C (dbnum 1112, 25 CWALL / 82 walls)'
+
+$* ---- 表现选项 ----
+export holes on
+export autocolour displayexport on
+export repr on
+
+$* ---- 包含列表：这一条 FRMW 及其全部子孙 ----
+export /1RS-WF04-W-C
+
+$* ---- 执行 ----
+export finish
+
+$P CODEX-DB1112-WF04-RVM-EXPORT-DONE
+ALPHA LOG END
