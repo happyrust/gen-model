@@ -5,10 +5,11 @@
 
 use aios_core::shape::pdms_shape::PlantMesh;
 use anyhow::anyhow;
-use glam::{DMat4, Vec3};
-use manifold_csg::{Manifold, MeshGL64};
+use glam::{DMat4, DVec3, Vec3};
+use manifold_csg::{Manifold, MeshGL64, MeshGL64Options};
 use parry3d::bounding_volume::Aabb;
 use parry3d::math::Point;
+use std::collections::HashMap;
 use std::path::Path;
 
 /// 两个顶点近到这个距离（mm）就当同一个点。与 `sweep_mesh` / `manifold_tessellate`
@@ -49,6 +50,7 @@ fn plant_mesh_to_manifold_quantized(
     // 每个渲染顶点都保留 position + normal 六个属性；同位置的重复顶点只通过 merge
     // metadata 焊接几何拓扑。这样硬边两侧仍是不同属性顶点，布尔插值也能传播这个分裂。
     let mut vert_props = Vec::with_capacity(mesh.vertices.len() * 6);
+    let mut positions = Vec::with_capacity(mesh.vertices.len());
     let normal_xform = mat.inverse().transpose();
     for (index, (v, normal)) in mesh.vertices.iter().zip(&mesh.normals).enumerate() {
         let mut p = mat.transform_point3(glam::DVec3::new(v.x as f64, v.y as f64, v.z as f64));
@@ -64,6 +66,7 @@ fn plant_mesh_to_manifold_quantized(
             ))
             .try_normalize()
             .ok_or_else(|| anyhow!("mesh vertex {index} has a zero/invalid transformed normal"))?;
+        positions.push(p);
         vert_props.extend([p.x, p.y, p.z, n.x, n.y, n.z]);
     }
     let tri = mesh
@@ -71,10 +74,60 @@ fn plant_mesh_to_manifold_quantized(
         .iter()
         .map(|&index| index as u64)
         .collect::<Vec<_>>();
-    let raw = MeshGL64::new(&vert_props, 6, &tri)
-        .map_err(|error| anyhow!("manifold-csg mesh construction failed: {error}"))?;
-    let merged = raw.merge();
-    Manifold::from_meshgl64(&merged).map_err(|error| anyhow!("manifold-csg ingest failed: {error}"))
+    let (merge_from, merge_to) = positional_merge_map(&positions, WELD_EPS as f64);
+    let raw = MeshGL64::new_with_options(
+        &vert_props,
+        6,
+        &tri,
+        MeshGL64Options::new().merge_vertices(&merge_from, &merge_to),
+    )
+    .map_err(|error| anyhow!("manifold-csg mesh construction failed: {error}"))?;
+    Manifold::from_meshgl64(&raw).map_err(|error| anyhow!("manifold-csg ingest failed: {error}"))
+}
+
+/// 为同位置的属性顶点显式声明几何焊接关系。端盖和侧壁必须保留各自法线，因而不能
+/// 先把 `PlantMesh` 顶点数组去重；Manifold 的 merge metadata 正是用来把属性分裂
+/// 与闭合拓扑同时表达。邻格搜索避免点恰好落在量化单元边界时漏焊。
+fn positional_merge_map(positions: &[DVec3], epsilon: f64) -> (Vec<u64>, Vec<u64>) {
+    let inv = 1.0 / epsilon;
+    let cell = |p: DVec3| {
+        (
+            (p.x * inv).floor() as i64,
+            (p.y * inv).floor() as i64,
+            (p.z * inv).floor() as i64,
+        )
+    };
+    let mut cells: HashMap<(i64, i64, i64), Vec<usize>> = HashMap::new();
+    let mut merge_from = Vec::new();
+    let mut merge_to = Vec::new();
+    let epsilon2 = epsilon * epsilon;
+
+    for (index, &position) in positions.iter().enumerate() {
+        let (cx, cy, cz) = cell(position);
+        let mut representative = None;
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if let Some(candidates) = cells.get(&(cx + dx, cy + dy, cz + dz)) {
+                        for &candidate in candidates {
+                            if positions[candidate].distance_squared(position) <= epsilon2
+                                && representative.is_none_or(|current| candidate < current)
+                            {
+                                representative = Some(candidate);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(representative) = representative {
+            merge_from.push(index as u64);
+            merge_to.push(representative as u64);
+        } else {
+            cells.entry((cx, cy, cz)).or_default().push(index);
+        }
+    }
+    (merge_from, merge_to)
 }
 
 pub(crate) fn manifold_to_plant_mesh(solid: &Manifold) -> PlantMesh {
@@ -335,6 +388,33 @@ mod tests {
     fn ingest_rejects_empty_mesh() {
         let err = plant_mesh_to_manifold(&PlantMesh::default(), DMat4::IDENTITY).unwrap_err();
         assert!(err.to_string().contains("no triangles"), "{err}");
+    }
+
+    #[test]
+    fn positional_merge_map_welds_attribute_splits_across_cell_boundaries() {
+        let points = vec![
+            DVec3::new(0.000099, 0.0, 0.0),
+            DVec3::new(0.000101, 0.0, 0.0),
+            DVec3::new(0.01, 0.0, 0.0),
+        ];
+        let (from, to) = positional_merge_map(&points, 1e-4);
+        assert_eq!(from, vec![1]);
+        assert_eq!(to, vec![0]);
+    }
+
+    #[test]
+    fn vtwa_half_torus_attribute_seams_are_valid_manifold_topology() {
+        // 7997 VTWA 24381/107641, SCTO 13246/522769：端盖与曲面在同位置使用
+        // 不同法线属性顶点。缺少显式 merge metadata 时会稳定报 NotManifold。
+        let mesh = crate::fast_model::mesh_primitives::gen_circular_torus(0.86, 1.0, 180.0, 10, 8);
+        let mat = DMat4::from_scale_rotation_translation(
+            DVec3::splat(37.625),
+            glam::DQuat::from_xyzw(1.0, -2.7247838e-8, 0.0, 0.0),
+            DVec3::new(28.5, -17.499998, 135.0),
+        );
+        let solid = plant_mesh_to_manifold(&mesh, mat)
+            .expect("VTWA 半环 SCTO 应能作为 catalogue SolidTree 正体");
+        assert!(solid.num_tri() > 0 && !solid.is_empty());
     }
 
     #[test]

@@ -1,5 +1,38 @@
 # 变更记录
 
+## 2026-08-26
+
+### 修复
+
+- 按 IDA 确认的 libgm/Core3D catalogue facet 语义停止把多正体 GMRE 和 `CataInstanceNeg` 做根级 Manifold solid-copy；DB7997 全量 RVM 从 580/942 恢复到 786/942。
+
+### 修复
+
+- 修复精确 CATA 闭包只展开 GMSE/SLOO 等容器、却不展开带嵌套负体的 SBOX 等
+  正几何体的问题；按 Core3D `CSG_TreeBuilderCat` 的逐图元差集语义，把全部正几何
+  noun 纳入 children 展开并将闭包缓存版本升至 6。AMS7997 `13246/522779` 现会从
+  `ams5054_0001` 落成 NSBO 与 PE 行，`24381/107641` 重生后恢复
+  `has_cata_neg=true` 和目录差集；该单件 RVM generated-to-RVM p95 已从约
+  96.05 mm 降至 67.04 mm，剩余偏差继续按独立几何差异处理。
+- 按 Core3D 3.1 `build/LIMPOK` 修复隐含 TUBI 的方向有效性判定：除 `0.001`
+  轴线正弦阈值外，同时执行 `cross_sine * length < 1 mm` 的横向误差门并校验
+  离开/到达端方向。AMS7997 四个最大偏差 BRAN 的 generated-to-RVM p95 从
+  409.24/300.48/157.76/138.17 mm 收敛到 0.30 mm 以内；原 158 个失败根定向
+  重生后有 8 项通过，剩余 150 项继续按其他几何差异处理。
+- 修复 CATA 条件几何的 `MAT(TRIM(STR(predicate)), 'true')` 数值掩码未求值，
+  以及 Cylinder `QSCYLI -> ORIMAT` 路径误消费连接点 `ref_dir` 的问题。
+  AMS7997 `24381/91465` 定向重生后恢复 3 个条件 Snout，并消除第二个
+  50 mm 圆柱的轴向翻转；E3D RVM 双向 p95 由 `34.287/0.383 mm`
+  收敛为 `0.155/0.149 mm`，双向最大值从 50 mm 降为 0.508/0.498 mm。
+  7997 全量 942 根重生批次 15/15 成功，RVM 通过项由 367 增至 781；
+  剩余 161 项继续作为显式几何差异处理。
+- 修复 CATA Snout 关系平移把 `QLSNOU` 的轴向中点误放到关系矩阵第二列的问题。
+  Core3D 2.10/3.1 均先构造 PB/正交向量/PA 三列矩阵，再变换
+  `(POFF/2, 0, (PBDI+PTDI)/2)`；生产现逐项遵循该顺序，同时保留 PlantMesh 的
+  X/轴向-Y/Z 顶点适配。AMS7997 两件 TRNS 的双向 p95 从 94.99/38.43 mm
+  收敛到 0.0028/0.0028 mm；942 个 HVAC/BRAN 现场对从 347 个通过提高到 367 个，
+  其余 575 个继续按独立几何差异处理。
+
 ## 2026-08-25
 
 ### 修复

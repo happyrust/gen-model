@@ -15,6 +15,14 @@ struct Args {
     /// Comma-separated PDMS refnos, for example 24384/22399.
     #[arg(long, value_delimiter = ',')]
     roots: Vec<String>,
+
+    /// Reparse and replace the roots' CATA dependency closure before generation.
+    #[arg(long)]
+    refresh_cata: bool,
+
+    /// Stop after refreshing CATA data; requires --refresh-cata.
+    #[arg(long, requires = "refresh_cata")]
+    cata_only: bool,
 }
 
 #[tokio::main]
@@ -23,20 +31,42 @@ async fn main() -> anyhow::Result<()> {
     if args.roots.is_empty() {
         bail!("--roots must contain at least one PDMS refno");
     }
+    let mut root_refnos = Vec::with_capacity(args.roots.len());
     for root in &args.roots {
         let Some((db, id)) = root.split_once('/') else {
             bail!("invalid refno {root}; expected db/id");
         };
-        db.parse::<u64>()
+        let db = db
+            .parse::<u32>()
             .with_context(|| format!("invalid refno database in {root}"))?;
-        id.parse::<u64>()
+        let id = id
+            .parse::<u32>()
             .with_context(|| format!("invalid refno element in {root}"))?;
+        root_refnos.push(aios_core::RefU64::from_two_nums(db, id));
     }
 
     aios_core::init_surreal()
         .await
         .context("connect existing SurrealDB")?;
     let mut option = aios_core::get_db_option().clone();
+    if args.refresh_cata {
+        println!("TARGETED_CATA_REFRESH|roots={}|start", args.roots.join(","));
+        let outcome = aios_database::data_interface::cata_closure::ensure_cata_parsed_for_roots(
+            &option.project_name,
+            &root_refnos,
+        )
+        .await
+        .context("refresh targeted CATA closure")?;
+        println!(
+            "TARGETED_CATA_REFRESH|roots={}|parsed={}|missing={}|done",
+            args.roots.join(","),
+            outcome.parsed,
+            outcome.missing
+        );
+        if args.cata_only {
+            return Ok(());
+        }
+    }
     option.gen_model = true;
     option.gen_mesh = true;
     option.replace_mesh = Some(true);

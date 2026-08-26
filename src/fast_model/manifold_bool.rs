@@ -363,8 +363,27 @@ async fn record_cata_root_boolean_failure(
     Ok(())
 }
 
-/// 按 libgm `GM_ComplexCombination` 语义生成 catalogue 根组合：全部可见正体先
-/// union，再统一扣除 `CataInstanceNeg`。结果作为共享 `inst_info` 唯一可见 Pos
+fn catalogue_root_needs_solid_copy(positive_count: usize, negative_count: usize) -> bool {
+    let _ = (positive_count, negative_count);
+    false
+}
+
+/// 兼容旧调用边界；libgm catalogue facet 语义下当前没有根级 solid-copy 工作。
+///
+/// 纯多正体 GMRE 保持为多条可见关系，不能在这里做布尔 union。Core3D 3.1
+/// `CSG_TreeBuilderCat::getCSGTree` (0x1072F5D0) 默认创建 operation=0 的
+/// `GM_AggregateCombination`；libgm 3.1
+/// `GM_AggregateCombination::calcFacets` (0x100297E0) 逐成员调用
+/// `GM_CompFacets::aggregateWith`，不会走 `GM_SolidCombination::calcFacets` 的集合运算。
+/// `getSolidCopy()` 返回 operation=1 只属于显式 solid-copy 路径，不能据此改变
+/// E3D/RVM 的普通 catalogue facet 语义。
+///
+/// Core3D 3.1 `CSG_TreeBuilderCat::addNegatives` (0x1072F480) 只遍历当前正体的
+/// direct members，并把这些子体加入该正体的 operation=3 组合；它没有“汇总全部
+/// 正体后再统一扣除根级负体”的阶段。已归属负体由
+/// `apply_cata_neg_boolean_manifold` 处理，`CataInstanceNeg` 保持不可见，不能触发
+/// catalogue 根 union/difference。
+/// 结果作为共享 `inst_info` 唯一可见 Pos
 /// 关系写回；原 primitive 关系保留作可追溯输入，但不再直接交给渲染/RVM。
 ///
 /// 本函数不接 `replace_exist`：`already_booled`（可见的 `cata_root_booled` 关系
@@ -400,7 +419,17 @@ pub async fn apply_cata_instance_boolean_manifold(
         .await?
         .check()?;
     let mut queried_groups: Vec<CataInstanceBooleanGroup> = response.take(0)?;
-    queried_groups.retain(|group| !group.negatives.is_empty() && !group.already_booled);
+    let queried_count = queried_groups.len();
+    queried_groups.retain(|group| {
+        catalogue_root_needs_solid_copy(group.positives.len(), group.negatives.len())
+            && !group.already_booled
+    });
+    println!(
+        "cata_solid_copy_summary refs={} queried={} pending={}",
+        refnos.len(),
+        queried_count,
+        queried_groups.len()
+    );
     queried_groups.sort_by_key(|group| (group.inst_info_id.to_string(), group.refno));
 
     // 一个 catalogue identity 会被多个设计实例复用。几何只生成一次，但失败必须
@@ -445,7 +474,10 @@ pub async fn apply_cata_instance_boolean_manifold(
                 Some(aios_core::parsed_data::geo_params_data::PdmsGeoParam::PrimLPyramid(_))
             )
         });
-        let exact_coordinates_result = if has_centred_pyramid {
+        // 纯正体组合只做 SolidTree union，不需要旧布尔栅格。截断到 0.1mm 会把
+        // VTWA 的薄 SCTO 端盖缝合线推到不同单元，反而把闭合正体变成 NotManifold。
+        // 有负体时才保留既有栅格策略，用于共面差集的稳定交线。
+        let exact_coordinates_result = if group.negatives.is_empty() || has_centred_pyramid {
             Ok(true)
         } else {
             group.positives.iter().try_fold(false, |exact, geo| {
@@ -1020,6 +1052,14 @@ fn catalogue_root_boolean_has_observable_best_effort_and_database_failure_bounda
     assert!(root_body.contains("subtract_negatives"), "{root_body}");
     assert!(root_body.contains("cata_root_booled:true"), "{root_body}");
     assert!(root_body.contains("already_booled"), "{root_body}");
+}
+
+#[test]
+fn catalogue_aggregate_keeps_multi_positive_roots_without_negatives() {
+    assert!(!catalogue_root_needs_solid_copy(0, 0));
+    assert!(!catalogue_root_needs_solid_copy(1, 0));
+    assert!(!catalogue_root_needs_solid_copy(2, 0));
+    assert!(!catalogue_root_needs_solid_copy(1, 1));
 }
 
 #[test]

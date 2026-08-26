@@ -1141,19 +1141,27 @@ impl Default for CataClosureConfig {
 }
 
 impl CataClosureConfig {
-    /// 精确模式（refno 级按需 / 惰性小闭包）：children 仅对几何与点集容器展开
-    /// （GMSE/GMSS/NGMS/PTSE/PSTR/SPRO/DTSE），不展开 SPEC/SELE 等规格容器。
+    /// 精确模式（refno 级按需 / 惰性小闭包）：children 仅对几何与点集容器展开，
+    /// 不展开 SPEC/SELE 等规格容器。
     ///
-    /// 挤出 / 回转体的轮廓是三层：`SEXT|NSEX|SREV|NSRE → SLOO → 顶点`。名单停在
-    /// 几何集这一层时闭包仍报 `missing=0`，落库的却是没有顶点的空壳几何。
+    /// 挤出 / 回转体的轮廓是三层：`SEXT|NSEX|SREV|NSRE → SLOO → 顶点`。此外，
+    /// libgm/Core3D 的 CSG tree builder 会把任何带 children 的正几何体包装成差集；
+    /// 因而 SBOX 等叶图元也必须展开其嵌套负体。名单停在几何集这一层时闭包仍会
+    /// 报 `missing=0`，但只落 `pe_owner` 边，不落负体本身，最终把实体尾部显示出来。
     pub fn precise() -> Self {
-        let container: HashSet<String> = [
+        let mut container: HashSet<String> = [
             "GMSE", "GMSS", "NGMS", "PTSE", "PSTR", "SPRO", "DTSE", "SEXT", "NSEX", "SREV", "NSRE",
             "SLOO",
         ]
         .iter()
         .map(|s| s.to_string())
         .collect();
+        container.extend(
+            aios_core::pdms_types::TOTAL_CATA_GEO_NOUN_NAMES
+                .iter()
+                .filter(|noun| !aios_core::pdms_types::TOTAL_NEG_NOUN_NAMES.contains(noun))
+                .map(|noun| (*noun).to_string()),
+        );
         let mut cata_db_types = HashSet::new();
         cata_db_types.insert("CATA".to_string());
         cata_db_types.insert("DESI".to_string());
@@ -2299,7 +2307,7 @@ struct CataDepCache {
     by_source_root: HashMap<(u32, u64), CataDepEntry>,
 }
 
-const CATA_CLOSURE_SCHEMA_VERSION: u32 = 5;
+const CATA_CLOSURE_SCHEMA_VERSION: u32 = 6;
 
 static DEFERRED_CATA_CACHE: Lazy<TokioMutex<HashMap<u32, (String, CataDepCache)>>> =
     Lazy::new(|| TokioMutex::new(HashMap::new()));
@@ -3504,6 +3512,16 @@ mod tests {
         let allow = cfg.container_subtree_nouns.expect("precise sets allowlist");
         assert!(allow.contains("GMSE"));
         assert!(allow.contains("GMSS"));
+        assert!(allow.contains("SBOX"));
+        for noun in aios_core::pdms_types::TOTAL_CATA_GEO_NOUN_NAMES
+            .into_iter()
+            .filter(|noun| !aios_core::pdms_types::TOTAL_NEG_NOUN_NAMES.contains(noun))
+        {
+            assert!(
+                allow.contains(noun),
+                "positive geometry {noun} may own nested negative geometry"
+            );
+        }
         assert!(!allow.contains("SPEC"));
     }
 

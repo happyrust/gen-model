@@ -94,13 +94,14 @@ pub fn gen_sphere(radius: f32, stacks: u32, slices: u32) -> PlantMesh {
 /// 2026-08-23 之前这里把偏移整个加在顶圈、底圈不动，相对 E3D 整体平移了
 /// `(XOFF/2, YOFF/2)`；aios-core 的 OCC 实现是同一个写法，两条后端互相一致，
 /// 所以此前任何双后端对比都发现不了。见 `specs/009-retire-occ/tasks.md` 的 T050。
-pub fn gen_snout(
+fn gen_snout_with_axis(
     r_bottom: f32,
     r_top: f32,
     height: f32,
     x_offset: f32,
     y_offset: f32,
     segments: u32,
+    axial_y: bool,
 ) -> PlantMesh {
     let segments = segments.max(3);
     let h2 = height / 2.0;
@@ -120,9 +121,19 @@ pub fn gen_snout(
         let (sin_t, cos_t) = theta.sin_cos();
 
         // 底面点（偏移的另一半，反号）
-        let pb = Vec3::new(r_bottom * cos_t - ox, -h2, r_bottom * sin_t - oy);
+        let radial_y_bottom = r_bottom * sin_t - oy;
+        let radial_y_top = r_top * sin_t + oy;
+        let pb = if axial_y {
+            Vec3::new(r_bottom * cos_t - ox, -h2, radial_y_bottom)
+        } else {
+            Vec3::new(r_bottom * cos_t - ox, radial_y_bottom, -h2)
+        };
         // 顶面点
-        let pt = Vec3::new(r_top * cos_t + ox, h2, r_top * sin_t + oy);
+        let pt = if axial_y {
+            Vec3::new(r_top * cos_t + ox, h2, radial_y_top)
+        } else {
+            Vec3::new(r_top * cos_t + ox, radial_y_top, h2)
+        };
 
         // 侧面法线近似：沿径向，考虑锥角
         let dr = r_bottom - r_top;
@@ -130,7 +141,11 @@ pub fn gen_snout(
         let nx = height / lateral_len * cos_t;
         let ny = dr / lateral_len;
         let nz = height / lateral_len * sin_t;
-        let n = Vec3::new(nx, ny, nz);
+        let n = if axial_y {
+            Vec3::new(nx, ny, nz)
+        } else {
+            Vec3::new(nx, nz, ny)
+        };
 
         vertices.push(pb);
         normals.push(n);
@@ -146,48 +161,80 @@ pub fn gen_snout(
         let b1 = base + 2;
         let t1 = base + 3;
         if r_bottom > f32::EPSILON {
-            indices.extend_from_slice(&[b0, t0, b1]);
+            if axial_y {
+                indices.extend_from_slice(&[b0, t0, b1]);
+            } else {
+                indices.extend_from_slice(&[b0, b1, t0]);
+            }
         }
         if r_top > f32::EPSILON {
-            indices.extend_from_slice(&[t0, t1, b1]);
+            if axial_y {
+                indices.extend_from_slice(&[t0, t1, b1]);
+            } else {
+                indices.extend_from_slice(&[t0, b1, t1]);
+            }
         }
     }
 
     // 底面 cap（r_bottom > 0）
     if r_bottom > f32::EPSILON {
         let center_idx = vertices.len() as u32;
-        vertices.push(Vec3::new(-ox, -h2, -oy));
-        normals.push(Vec3::NEG_Y);
+        vertices.push(if axial_y {
+            Vec3::new(-ox, -h2, -oy)
+        } else {
+            Vec3::new(-ox, -oy, -h2)
+        });
+        normals.push(if axial_y { Vec3::NEG_Y } else { Vec3::NEG_Z });
         for i in 0..segments {
             let theta = i as f32 * step;
             let (sin_t, cos_t) = theta.sin_cos();
-            vertices.push(Vec3::new(r_bottom * cos_t - ox, -h2, r_bottom * sin_t - oy));
-            normals.push(Vec3::NEG_Y);
+            vertices.push(if axial_y {
+                Vec3::new(r_bottom * cos_t - ox, -h2, r_bottom * sin_t - oy)
+            } else {
+                Vec3::new(r_bottom * cos_t - ox, r_bottom * sin_t - oy, -h2)
+            });
+            normals.push(if axial_y { Vec3::NEG_Y } else { Vec3::NEG_Z });
         }
         for i in 0..segments {
             let a = center_idx;
             let b = center_idx + 1 + i;
             let c = center_idx + 1 + (i + 1) % segments;
-            indices.extend_from_slice(&[a, b, c]);
+            if axial_y {
+                indices.extend_from_slice(&[a, b, c]);
+            } else {
+                indices.extend_from_slice(&[a, c, b]);
+            }
         }
     }
 
     // 顶面 cap（r_top > 0）
     if r_top > f32::EPSILON {
         let center_idx = vertices.len() as u32;
-        vertices.push(Vec3::new(ox, h2, oy));
-        normals.push(Vec3::Y);
+        vertices.push(if axial_y {
+            Vec3::new(ox, h2, oy)
+        } else {
+            Vec3::new(ox, oy, h2)
+        });
+        normals.push(if axial_y { Vec3::Y } else { Vec3::Z });
         for i in 0..segments {
             let theta = i as f32 * step;
             let (sin_t, cos_t) = theta.sin_cos();
-            vertices.push(Vec3::new(r_top * cos_t + ox, h2, r_top * sin_t + oy));
-            normals.push(Vec3::Y);
+            vertices.push(if axial_y {
+                Vec3::new(r_top * cos_t + ox, h2, r_top * sin_t + oy)
+            } else {
+                Vec3::new(r_top * cos_t + ox, r_top * sin_t + oy, h2)
+            });
+            normals.push(if axial_y { Vec3::Y } else { Vec3::Z });
         }
         for i in 0..segments {
             let a = center_idx;
             let b = center_idx + 1 + i;
             let c = center_idx + 1 + (i + 1) % segments;
-            indices.extend_from_slice(&[a, c, b]);
+            if axial_y {
+                indices.extend_from_slice(&[a, c, b]);
+            } else {
+                indices.extend_from_slice(&[a, b, c]);
+            }
         }
     }
 
@@ -199,6 +246,18 @@ pub fn gen_snout(
         wire_vertices: vec![],
         aabb,
     }
+}
+
+/// Full-size RVM CATA Snout coordinates: axial Y, radial X/Z.
+pub fn gen_snout(
+    r_bottom: f32,
+    r_top: f32,
+    height: f32,
+    x_offset: f32,
+    y_offset: f32,
+    segments: u32,
+) -> PlantMesh {
+    gen_snout_with_axis(r_bottom, r_top, height, x_offset, y_offset, segments, true)
 }
 
 // ─── Slope-Ended Cylinder ───────────────────────────────────────────────────
@@ -225,8 +284,10 @@ pub fn gen_slope_ended_cylinder(
     // libgm 3.1 GM_SlopeEndCyl::calcRange (0x1009D910) and the vertex builder
     // at 0x1009DA90 use +/-height/2 before adding the two shear planes.
     let half_height = height * 0.5;
-    // 底面 z = -height/2 - tan(a0)*x + tan(a1)*y
-    // 顶面 z = +height/2 + tan(a0)*x - tan(a1)*y
+    // libgm 3.1 `GM_SlopeEndCyl` getters identify +0x38/+0x40 as the top
+    // X/Y angles and +0x48/+0x50 as the base X/Y angles.  The vertex builder
+    // at 0x1009DA90 adds both tangent components with the same sign:
+    // z = plane_centre + tan(x_angle)*x + tan(y_angle)*y.
     let btm_tan = [btm_angles[0].tan(), btm_angles[1].tan()];
     let top_tan = [top_angles[0].tan(), top_angles[1].tan()];
 
@@ -238,13 +299,14 @@ pub fn gen_slope_ended_cylinder(
         let x = radius * cos_t;
         let y = radius * sin_t;
 
-        let z_btm = -half_height - btm_tan[0] * x + btm_tan[1] * y;
-        let z_top = half_height + top_tan[0] * x - top_tan[1] * y;
+        let z_btm = -half_height + btm_tan[0] * x + btm_tan[1] * y;
+        let z_top = half_height + top_tan[0] * x + top_tan[1] * y;
 
-        let n = Vec3::new(cos_t, sin_t, 0.0);
-        vertices.push(Vec3::new(x, y, z_btm));
+        // RVM Snout/SSLC stores libgm (x, y, z) as Plant (x, z, y): axial Y.
+        let n = Vec3::new(cos_t, 0.0, sin_t);
+        vertices.push(Vec3::new(x, z_btm, y));
         normals.push(n);
-        vertices.push(Vec3::new(x, y, z_top));
+        vertices.push(Vec3::new(x, z_top, y));
         normals.push(n);
     }
 
@@ -256,18 +318,19 @@ pub fn gen_slope_ended_cylinder(
 
     // 底面 cap
     {
-        let btm_n = Vec3::new(btm_tan[0], -btm_tan[1], -1.0).normalize();
+        let btm_n_libgm = Vec3::new(btm_tan[0], btm_tan[1], -1.0).normalize();
+        let btm_n = Vec3::new(btm_n_libgm.x, btm_n_libgm.z, btm_n_libgm.y);
         let center_idx = vertices.len() as u32;
         let z_center = -half_height;
-        vertices.push(Vec3::new(0.0, 0.0, z_center));
+        vertices.push(Vec3::new(0.0, z_center, 0.0));
         normals.push(btm_n);
         for i in 0..segments {
             let theta = i as f32 * step;
             let (sin_t, cos_t) = theta.sin_cos();
             let x = radius * cos_t;
             let y = radius * sin_t;
-            let z = -half_height - btm_tan[0] * x + btm_tan[1] * y;
-            vertices.push(Vec3::new(x, y, z));
+            let z = -half_height + btm_tan[0] * x + btm_tan[1] * y;
+            vertices.push(Vec3::new(x, z, y));
             normals.push(btm_n);
         }
         for i in 0..segments {
@@ -280,18 +343,19 @@ pub fn gen_slope_ended_cylinder(
 
     // 顶面 cap
     {
-        let top_n = Vec3::new(-top_tan[0], top_tan[1], 1.0).normalize();
+        let top_n_libgm = Vec3::new(-top_tan[0], -top_tan[1], 1.0).normalize();
+        let top_n = Vec3::new(top_n_libgm.x, top_n_libgm.z, top_n_libgm.y);
         let center_idx = vertices.len() as u32;
         let z_center = half_height;
-        vertices.push(Vec3::new(0.0, 0.0, z_center));
+        vertices.push(Vec3::new(0.0, z_center, 0.0));
         normals.push(top_n);
         for i in 0..segments {
             let theta = i as f32 * step;
             let (sin_t, cos_t) = theta.sin_cos();
             let x = radius * cos_t;
             let y = radius * sin_t;
-            let z = half_height + top_tan[0] * x - top_tan[1] * y;
-            vertices.push(Vec3::new(x, y, z));
+            let z = half_height + top_tan[0] * x + top_tan[1] * y;
+            vertices.push(Vec3::new(x, z, y));
             normals.push(top_n);
         }
         for i in 0..segments {
@@ -300,6 +364,12 @@ pub fn gen_slope_ended_cylinder(
             let c = center_idx + 1 + (i + 1) % segments;
             indices.extend_from_slice(&[a, b, c]);
         }
+    }
+
+    // Swapping libgm Y/Z is a reflection. Reverse every triangle so the
+    // existing outward normals and positive signed volume remain consistent.
+    for triangle in indices.chunks_exact_mut(3) {
+        triangle.swap(1, 2);
     }
 
     let aabb = compute_aabb(&vertices);
@@ -985,7 +1055,12 @@ pub fn gen_rvm_pyramid(
 /// 算出来的，生成器这一层无从知道半径，一个「默认值」在这里只会看着像个合理取值。
 /// 碟与环面的生成器 T038 已经这样改过，球是最后一个。
 pub fn unit_sphere(stacks: u32, slices: u32) -> PlantMesh {
-    gen_sphere(0.5, stacks, slices)
+    // libgm GM_Sphere stores and facets the supplied value as a radius
+    // (3.1 calcRange/calcFacetsWithoutSurfaces: 0x100A1FD0/0x100A20F0).
+    // Sphere::get_scaled_vec3() likewise scales the unit mesh by radius, so
+    // the canonical mesh must have radius 1 rather than the cylinder-style
+    // diameter-one radius 0.5.
+    gen_sphere(1.0, stacks, slices)
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
@@ -1028,11 +1103,11 @@ mod tests {
     }
 
     #[test]
-    fn unit_sphere_is_radius_half() {
+    fn unit_sphere_is_radius_one_for_radius_scaling() {
         let mesh = unit_sphere(16, 36);
         assert_solid_mesh(&mesh, "unit_sphere");
-        assert_bounds(&mesh, Vec3::splat(-0.5), Vec3::splat(0.5), "unit_sphere");
-        assert_volume(&mesh, 4.0 / 3.0 * PI * 0.125, 0.04, "unit_sphere");
+        assert_bounds(&mesh, Vec3::splat(-1.0), Vec3::splat(1.0), "unit_sphere");
+        assert_volume(&mesh, 4.0 / 3.0 * PI, 0.04, "unit_sphere");
     }
 
     #[test]
@@ -1137,8 +1212,8 @@ mod tests {
         assert_volume(&mesh, exact, 0.01, "snout offset split");
     }
 
-    /// 7997 TRNS 的四个 LSnout 使用 RVM 原语的 X/轴向-Y/Z 坐标约定。
-    /// 如果轴向误放回 Z，关系矩阵即使逐项匹配 E3D，模型仍会偏离数百毫米。
+    /// RVM 文件中的独立 Snout 原语使用 rvm-rs 的 X/轴向-Y/Z 坐标约定。
+    /// 这个导入坐标系与 libgm CATA 单位原语不同，必须保持为独立适配器。
     #[test]
     fn trns_7997_snout_uses_rvm_axial_y_coordinates() {
         let mesh = gen_snout(0.0, 400.0, 400.0, 640.312, 0.0, 36);
@@ -1170,16 +1245,29 @@ mod tests {
         let angle = 15.0f32.to_radians();
         let mesh = gen_slope_ended_cylinder(1.0, 2.0, [angle, 0.0], [0.0, 0.0], 32);
         assert_solid_mesh(&mesh, "slope cyl single shear");
-        // 底面绕 Y 倾斜 15°，最低点在 x=+1 一侧从 -height/2 下沉 tan15°；
-        // 顶面轴心仍在 +height/2。
+        // libgm 的底面 z=-height/2+tan(15°)*x 经 RVM 轴交换后落在 Plant Y。
         assert_bounds(
             &mesh,
-            Vec3::new(-1.0, -1.0, -1.0 - angle.tan()),
+            Vec3::new(-1.0, -1.0 - angle.tan(), -1.0),
             Vec3::new(1.0, 1.0, 1.0),
             "slope cyl single shear",
         );
         // 斜切平面过轴心，切掉的和补上的体积相等
         assert_volume(&mesh, PI * 2.0, 0.02, "slope cyl single shear");
+        let at_positive_x = mesh
+            .vertices
+            .iter()
+            .filter(|v| (v.x - 1.0).abs() < 1.0e-4)
+            .map(|v| v.y)
+            .fold(f32::INFINITY, f32::min);
+        let at_negative_x = mesh
+            .vertices
+            .iter()
+            .filter(|v| (v.x + 1.0).abs() < 1.0e-4)
+            .map(|v| v.y)
+            .fold(f32::INFINITY, f32::min);
+        assert!((at_positive_x - (-1.0 + angle.tan())).abs() < 1.0e-4);
+        assert!((at_negative_x - (-1.0 - angle.tan())).abs() < 1.0e-4);
     }
 
     #[test]

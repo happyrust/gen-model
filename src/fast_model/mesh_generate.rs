@@ -45,7 +45,7 @@ use surrealdb::sql::Thing;
 //        bottom-origin adapter rev 3 declared (rev-3 code disagreed with its own note).
 // Persisted older meshes must be regenerated because the geometry hash intentionally
 // describes shape identity rather than the tessellator implementation revision.
-pub(crate) const LIBGM_MESH_REV: u32 = 4;
+pub(crate) const LIBGM_MESH_REV: u32 = 5;
 
 #[cfg(not(feature = "manifold"))]
 async fn apply_cata_neg_boolean_manifold(
@@ -633,7 +633,7 @@ mod occ_retire_source_guards {
 
     #[test]
     fn tessellation_revision_rebuilds_stale_meshes_and_persists_a_receipt() {
-        assert_eq!(LIBGM_MESH_REV, 4);
+        assert_eq!(LIBGM_MESH_REV, 5);
         let source = include_str!("mesh_generate.rs");
         let declaration = "pub async fn gen_inst_meshes(";
         let start = source
@@ -734,6 +734,23 @@ pub async fn gen_inst_meshes(
             .await?
             .check()?;
         let mut inst_geo_ids: Vec<(Option<Thing>, bool)> = response.take(0)?;
+        let tubi_keys = refnos.iter().map(RefnoEnum::to_pe_key).join(",");
+        let tubi_filter = if replace_exist {
+            "out.param != NONE"
+        } else {
+            "out.param != NONE AND (out.mesh_rev = NONE OR out.mesh_rev != \
+             $libgm_mesh_rev OR (!out.meshed AND !out.bad))"
+        };
+        let mut tubi_response = crate::data_interface::staging::active_data_db()
+            .query(format!(
+                "SELECT VALUE [out, false] FROM tubi_relate WHERE in IN [{tubi_keys}] AND \
+                 {tubi_filter};"
+            ))
+            .bind(("libgm_mesh_rev", LIBGM_MESH_REV))
+            .await?
+            .check()?;
+        let mut tubi_geo_ids: Vec<(Option<Thing>, bool)> = tubi_response.take(0)?;
+        inst_geo_ids.append(&mut tubi_geo_ids);
         include_basic_shape_mesh_candidates(&mut inst_geo_ids);
         //todo 排除已经生成了的模型
         // let mut update_geos_by_meshes = HashSet::default();

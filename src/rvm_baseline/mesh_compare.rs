@@ -402,14 +402,21 @@ mod gen_side {
     }
 
     /// BRAN/HANG 的隐含直管不在 PE 子树里；生产渲染从根的 `tubi_relate`
-    /// 单独加载。RVM 子树对拍必须合入同一组有效直管，否则会把每段 TUBE 都误报
-    /// 成生成侧缺失。`invalid=true` 是只画诊断中心线的坏段，不得伪装成实体圆柱。
+    /// 单独加载。RVM 子树对拍必须合入同一组有实体尺寸的直管，否则会把每段 TUBE
+    /// 都误报成生成侧缺失。方向异常但两端都有真实连接的段仍对应 RVM 中的连接管；
+    /// 只有悬空头尾和缺口径诊断线必须排除，否则会制造远离 RVM 的巨大伪几何。
     pub(super) fn valid_tubis_sql(pe_key: &str) -> String {
         format!(
             r#"SELECT record::id(out) AS geo_hash, world_trans.d AS transform
                FROM {pe_key}->tubi_relate
                WHERE out.meshed && world_trans.d != NONE
-                 && (invalid = false OR invalid = NONE);"#
+                 && (
+                      invalid = false OR invalid = NONE
+                      OR (
+                          invalid_reason = 'direction'
+                          AND leave != pe:0_0 AND arrive != pe:0_0
+                      )
+                 );"#
         )
     }
 
@@ -624,12 +631,18 @@ mod mesh_wall_live {
     }
 
     #[test]
-    fn bran_subtree_query_includes_only_renderable_tubi_relations() {
+    fn bran_subtree_query_includes_valid_and_connected_direction_tubis() {
         let sql = super::gen_side::valid_tubis_sql("pe:1_2");
         assert!(sql.contains("FROM pe:1_2->tubi_relate"), "{sql}");
         assert!(sql.contains("out.meshed"), "{sql}");
         assert!(sql.contains("world_trans.d != NONE"), "{sql}");
         assert!(sql.contains("invalid = false OR invalid = NONE"), "{sql}");
+        assert!(sql.contains("invalid_reason = 'direction'"), "{sql}");
+        assert!(
+            sql.contains("leave != pe:0_0 AND arrive != pe:0_0"),
+            "{sql}"
+        );
+        assert!(!sql.contains("invalid_reason = 'no_bore'"), "{sql}");
         assert!(!sql.contains("inst_relate"), "{sql}");
     }
 
@@ -905,6 +918,8 @@ mod mesh_wall_live {
             "15194_4164",
         ];
         let mesh_dir = std::path::Path::new(".sites/7997/assets/meshes");
+        let mut generated_parts = MeshAccum::default();
+        let mut rvm_parts = MeshAccum::default();
         for (rvm_index, source_refno) in source_order.iter().enumerate() {
             let inst = insts
                 .iter()
@@ -932,6 +947,38 @@ mod mesh_wall_live {
             accum.add_world_points(&vertices, &unit.indices);
             let generated = accum.into_trimesh().expect("generated primitive mesh");
             let rvm = &rvm_meshes[rvm_index];
+            if (6..=9).contains(&rvm_index) {
+                let inverse = world.inverse();
+                let (rvm_lo, rvm_hi) = rvm.vertices().iter().fold(
+                    (
+                        glam::Vec3::splat(f32::INFINITY),
+                        glam::Vec3::splat(f32::NEG_INFINITY),
+                    ),
+                    |(lo, hi), point| {
+                        let local =
+                            inverse.transform_point3(glam::Vec3::new(point.x, point.y, point.z));
+                        (lo.min(local), hi.max(local))
+                    },
+                );
+                let (gen_lo, gen_hi) = unit.vertices.iter().fold(
+                    (
+                        glam::Vec3::splat(f32::INFINITY),
+                        glam::Vec3::splat(f32::NEG_INFINITY),
+                    ),
+                    |(lo, hi), point| (lo.min(*point), hi.max(*point)),
+                );
+                println!(
+                    "TRNS_LOCAL index={} ref={} rvm={:?}..{:?} generated={:?}..{:?}",
+                    rvm_index + 1,
+                    source_refno,
+                    rvm_lo,
+                    rvm_hi,
+                    gen_lo,
+                    gen_hi,
+                );
+            }
+            generated_parts.add_trimesh(&generated);
+            rvm_parts.add_trimesh(rvm);
             let g2r = crate::fast_model::shared::one_way_surface_distance(&generated, rvm, 4000)
                 .expect("primitive generated to RVM distance");
             let r2g = crate::fast_model::shared::one_way_surface_distance(rvm, &generated, 4000)
@@ -946,6 +993,38 @@ mod mesh_wall_live {
                 g2r.hausdorff,
                 r2g.p95,
                 r2g.hausdorff,
+            );
+        }
+
+        let generated_parts = generated_parts
+            .into_trimesh()
+            .expect("combined generated TRNS primitives");
+        let rvm_parts = rvm_parts
+            .into_trimesh()
+            .expect("combined RVM TRNS primitives");
+        let direct_generated =
+            super::gen_side::gen_world_mesh_in_dir(&db, "pe:24381_100864", mesh_dir)
+                .await
+                .expect("build direct generated TRNS")
+                .expect("direct generated TRNS mesh");
+        let by_name = rvm_world_meshes_by_name(rvm_path).expect("load RVM groups by name");
+        let direct_rvm = by_name.get(wanted).expect("direct RVM TRNS group");
+        for (label, from, to) in [
+            ("parts_g2r", &generated_parts, &rvm_parts),
+            ("parts_r2g", &rvm_parts, &generated_parts),
+            ("direct_g2r", &direct_generated, direct_rvm),
+            ("direct_r2g", direct_rvm, &direct_generated),
+            ("gen_path_delta", &direct_generated, &generated_parts),
+            ("rvm_path_delta", direct_rvm, &rvm_parts),
+        ] {
+            let distance = crate::fast_model::shared::one_way_surface_distance(from, to, 12000)
+                .unwrap_or_else(|| panic!("{label} distance"));
+            println!(
+                "TRNS_COMBINED label={label} from_tris={} to_tris={} p95={:.4} max={:.4}",
+                from.indices().len(),
+                to.indices().len(),
+                distance.p95,
+                distance.hausdorff,
             );
         }
     }
@@ -1078,6 +1157,18 @@ mod mesh_wall_live {
                 r2g.p95,
                 r2g.hausdorff,
             );
+            assert!(
+                g2r.p95 <= 0.5 && r2g.p95 <= 0.5,
+                "{source_refno} STRT p95 exceeds the E3D RVM export envelope: g2r={:.4} r2g={:.4}",
+                g2r.p95,
+                r2g.p95
+            );
+            assert!(
+                g2r.hausdorff <= 0.6 && r2g.hausdorff <= 0.6,
+                "{source_refno} STRT max distance exceeds the E3D RVM export envelope: g2r={:.4} r2g={:.4}",
+                g2r.hausdorff,
+                r2g.hausdorff
+            );
         }
     }
 
@@ -1138,6 +1229,28 @@ mod mesh_wall_live {
         let bytes = std::fs::read(rvm_path).expect("read AMS7997 HVAC RVM");
         let mut store = Store::new();
         parse_rvm(&bytes, &mut store).expect("parse AMS7997 HVAC RVM");
+        fn area_by_short_axis(mesh: &TriMesh) -> (usize, f32, f32) {
+            let (min, max) = bounds(mesh);
+            let short_axis = (0..3)
+                .min_by(|&lhs, &rhs| (max[lhs] - min[lhs]).total_cmp(&(max[rhs] - min[rhs])))
+                .expect("three axes");
+            let mut cap_area = 0.0_f32;
+            let mut other_area = 0.0_f32;
+            for triangle in mesh.indices() {
+                let a = mesh.vertices()[triangle[0] as usize];
+                let b = mesh.vertices()[triangle[1] as usize];
+                let c = mesh.vertices()[triangle[2] as usize];
+                let cross = (b - a).cross(&(c - a));
+                let double_area = cross.norm();
+                if double_area > f32::EPSILON && cross[short_axis].abs() / double_area >= 0.9 {
+                    cap_area += double_area * 0.5;
+                } else {
+                    other_area += double_area * 0.5;
+                }
+            }
+            (short_axis, cap_area, other_area)
+        }
+
         let wanted = "BEND 1 of BRANCH /-CAM-E-2-H-5302";
         let rvm_meshes = store
             .roots()
@@ -1148,7 +1261,7 @@ mod mesh_wall_live {
         let db = live_db().await;
         let sql = super::gen_side::valid_insts_sql("pe:24381_47066").replace(
             "record::id(out) AS geo_hash",
-            "record::id(out) AS geo_hash, <string> geom_refno AS geom_refno",
+            "record::id(out) AS geo_hash, record::id(geom_refno) AS geom_refno",
         );
         let mut response = db.query(sql).await.expect("query BEND relations");
         let rows: Vec<serde_json::Value> = response.take(0).expect("decode BEND relations");
@@ -1156,10 +1269,9 @@ mod mesh_wall_live {
         let wt = super::gen_side::mat_from_trans(&row["wt"]);
         let insts = row["insts"].as_array().expect("BEND insts");
 
-        // `resolve_desi_comp(24381/47066)` returns this GMSE order.  E3D emits a
-        // thirteenth RVM primitive for the zero-size 15194/5825 Snout, whereas
-        // production correctly omits it from persisted output; keep the slot so
-        // later primitives cannot silently compare against the wrong RVM geometry.
+        // `resolve_desi_comp(24381/47066)` returns this GMSE order.  The explicit
+        // DESP overrides on 15194/5825 make it a real thirteenth primitive; keep
+        // the source order pinned so a lost override cannot shift later pairings.
         let source_order = [
             "15194_5795",
             "15194_5799",
@@ -1180,18 +1292,26 @@ mod mesh_wall_live {
             source_order.len(),
             "E3D BEND primitive count changed"
         );
-        assert_eq!(insts.len(), 12, "generated BEND primitive count changed");
+        let catalogue_primitive_count = insts
+            .iter()
+            .filter(|inst| {
+                inst.get("geom_refno")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|value| source_order.iter().any(|source| value.ends_with(source)))
+            })
+            .count();
+        assert_eq!(
+            catalogue_primitive_count, 13,
+            "generated BEND catalogue primitive count changed"
+        );
 
         let mesh_dir = std::path::Path::new(".sites/7997/assets/meshes");
         for (rvm_index, source_refno) in source_order.iter().enumerate() {
-            let Some(inst) = insts
-                .iter()
-                .find(|inst| {
-                    inst.get("geom_refno")
-                        .and_then(|value| value.as_str())
-                        .is_some_and(|value| value.ends_with(source_refno))
-                })
-            else {
+            let Some(inst) = insts.iter().find(|inst| {
+                inst.get("geom_refno")
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|value| value.ends_with(source_refno))
+            }) else {
                 println!(
                     "HVAC_BEND_PRIMITIVE index={} ref={} rvm_bounds={:?} rvm_tris={} generated=omitted",
                     rvm_index + 1,
@@ -1224,9 +1344,13 @@ mod mesh_wall_live {
             let r2g = crate::fast_model::shared::one_way_surface_distance(rvm, &generated, 4000)
                 .expect("primitive RVM to generated distance");
             println!(
-                "HVAC_BEND_PRIMITIVE index={} ref={} rvm_bounds={:?} gen_bounds={:?} transform={} g2r_p95={:.4} g2r_max={:.4} r2g_p95={:.4} r2g_max={:.4}",
+                "HVAC_BEND_PRIMITIVE index={} ref={} rvm_tris={} gen_tris={} rvm_area={:?} gen_area={:?} rvm_bounds={:?} gen_bounds={:?} transform={} g2r_p95={:.4} g2r_max={:.4} r2g_p95={:.4} r2g_max={:.4}",
                 rvm_index + 1,
                 source_refno,
+                rvm.indices().len(),
+                generated.indices().len(),
+                area_by_short_axis(rvm),
+                area_by_short_axis(&generated),
                 bounds(rvm),
                 bounds(&generated),
                 inst["transform"],
@@ -1234,6 +1358,18 @@ mod mesh_wall_live {
                 g2r.hausdorff,
                 r2g.p95,
                 r2g.hausdorff,
+            );
+            assert!(
+                g2r.p95 <= 0.5 && r2g.p95 <= 0.5,
+                "{source_refno} BEND p95 exceeds the E3D RVM export envelope: g2r={:.4} r2g={:.4}",
+                g2r.p95,
+                r2g.p95
+            );
+            assert!(
+                g2r.hausdorff <= 0.6 && r2g.hausdorff <= 0.6,
+                "{source_refno} BEND max distance exceeds the E3D RVM export envelope: g2r={:.4} r2g={:.4}",
+                g2r.hausdorff,
+                r2g.hausdorff
             );
         }
     }
@@ -2609,5 +2745,75 @@ mod mesh_source_tests {
         assert_eq!(resolve_booled_mesh_id(Some("")), None);
         assert_eq!(resolve_booled_mesh_id(Some("NONE")), None);
         assert_eq!(resolve_booled_mesh_id(Some("none")), None);
+    }
+}
+
+#[cfg(test)]
+mod vtwa_polygon_diagnostic {
+    #[test]
+    #[ignore = "requires the AMS7997 E3D RVM fixture"]
+    fn print_vtwa_facet_polygon_local_bounds() {
+        use rvm_rs::parse_rvm;
+        use rvm_rs::store::Store;
+        use rvm_rs::store::geometry::GeometryKind;
+        use rvm_rs::store::node::{NodeId, NodeKind};
+
+        const NAME: &str = "VTWAY 1 of BRANCH /Copy-(2)-of-1TFM065LN-TUBE/HP";
+        fn find(store: &Store, id: NodeId) -> Option<NodeId> {
+            let node = store.get_node(id)?;
+            if let NodeKind::Group(group) = &node.kind
+                && store.get_string(group.name).trim() == NAME
+            {
+                return Some(id);
+            }
+            let mut child = node.first_child;
+            while let Some(id) = child {
+                let node = store.get_node(id)?;
+                if let Some(found) = find(store, id) {
+                    return Some(found);
+                }
+                child = node.next;
+            }
+            None
+        }
+
+        let path = std::path::Path::new("output/rvm-7997-e3d/site-24381_101405-level6-current.rvm");
+        let mut store = Store::new();
+        parse_rvm(&std::fs::read(path).expect("read RVM"), &mut store).expect("parse RVM");
+        let id = store
+            .roots()
+            .iter()
+            .find_map(|&root| find(&store, root))
+            .expect("find VTWA");
+        let node = store.get_node(id).expect("VTWA node");
+        let NodeKind::Group(group) = &node.kind else {
+            unreachable!()
+        };
+        let geometry = store
+            .get_geometry(group.first_geometry.expect("VTWA geometry"))
+            .expect("VTWA geometry record");
+        let GeometryKind::FacetGroup(facets) = &geometry.kind else {
+            panic!("VTWA is not a FacetGroup")
+        };
+        for (index, polygon) in facets.polygons.iter().enumerate() {
+            let mut lo = [f32::INFINITY; 3];
+            let mut hi = [f32::NEG_INFINITY; 3];
+            for vertex in polygon
+                .contours
+                .iter()
+                .flat_map(|contour| &contour.vertices)
+            {
+                for (axis, value) in [vertex.x, vertex.y, vertex.z].into_iter().enumerate() {
+                    lo[axis] = lo[axis].min(value);
+                    hi[axis] = hi[axis].max(value);
+                }
+            }
+            println!(
+                "VTWA_POLYGON index={} contours={} vertices={} local={lo:?}..{hi:?}",
+                index + 1,
+                polygon.contours.len(),
+                polygon.total_vertices(),
+            );
+        }
     }
 }

@@ -6402,7 +6402,6 @@ checksum = "eded382c5f5f786b989652c49544c4877d9f015cc22e145a5ea8ea66c2921cd2"
 [[package]]
 name = "rvm-rs"
 version = "0.1.0"
-source = "git+https://github.com/happyrust/rvm-rs#45470d2a0ddcabcd1f11958362e6440865bfc24e"
 dependencies = [
  "glam 0.30.10",
  "memmap2",

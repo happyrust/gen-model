@@ -3576,11 +3576,18 @@ async fn idle_round(
     // 唯一现场求值的 insts 子查询收口在持久层非 journal 路径。窗口写回在
     // 本函数更早的 drain 里完成，此刻持久层已有新行。失败保留脏位下轮重试；
     // 读侧对 NONE 行有 slim 兜底，清扫只买读速不背正确性。
-    match crate::fast_model::pdms_inst::sweep_inst_relate_flat_if_dirty().await {
-        Ok(0) => {}
-        Ok(swept) => println!("inst_relate 平表副本清扫：补 {swept} 行"),
-        Err(error) => {
-            println!("inst_relate 平表副本清扫失败（保留脏位，下一轮重试）: {error:#}")
+    //
+    // 但全量构建期间每一轮都会置脏，逐轮扫就是把整张表白扫一遍又一遍
+    // （2026-08-25 一次启动扫了 5 遍：3.0/5.0/8.2/15.1/4.6s）。既然它只买读速，
+    // 就等这一轮真的收敛了再扫；没收敛时脏位留着，收尾那一轮一次付清。
+    let build_settled = data_outcome == IdleOutcome::Settled && !spatial_pending;
+    if build_settled {
+        match crate::fast_model::pdms_inst::sweep_inst_relate_flat_if_dirty().await {
+            Ok(0) => {}
+            Ok(swept) => println!("inst_relate 平表副本清扫：补 {swept} 行"),
+            Err(error) => {
+                println!("inst_relate 平表副本清扫失败（保留脏位，下一轮重试）: {error:#}")
+            }
         }
     }
 }

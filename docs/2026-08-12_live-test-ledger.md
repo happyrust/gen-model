@@ -21,6 +21,17 @@ Ref0 24384 全量路径验证 2815 个元素、11673 个网格实例、1986 个�
 字面输出 `AMS8000_LOAD_DISPLAY_VERIFY=PASS`。证据：
 `docs/evidence/2026-08-25-ams8000-full-load-display.md`。
 
+**2026-08-26 AMS7997 QLSNOU 关系平移 RVM 通过**：IDA 对照 Core3D 2.10
+`QLSNOU@0x108C53B0` 与 3.1 `QLSNOU@0x103BFFC4`，确认关系平移向量固定为
+`(POFF/2, 0, (PBDI+PTDI)/2)`。修复后在独立冷进程从 RocksDB 回读 CATA 并重生成
+`24381/100854`、`24381/100865`；TRNS `24381/100864`、`24381/100872` 均通过
+RVM 门，双向 p95 都为 `0.0028049622 mm`，最大值分别不超过 `0.4344/0.2560 mm`。
+全量 942 根重生成 15/15 批成功；同一 RVM 集合由 347/942 提升为 367/942，剩余
+575 项不归入本修复的完成范围。忽略 live 测试
+`rvm_baseline::mesh_compare::mesh_wall_live::ams7997_trns_reports_each_catalogue_primitive_distance`
+通过（1/1）。完整命令、哈希和字面输出见
+`docs/evidence/2026-08-26-ams7997-qlsnou-translation.md`。
+
 **2026-08-24 CATA 常驻缓存（最近通过）**：三组 cache-off 与三组 cache-on 均使用新进程、
 独立空 RocksDB、`geometry_permits=8`，按字面 `初始化完成：项目` 停止计时。off/on 中位数
 分别为 791.511/810.796s，cache-on 退化 2.436%，低于 3% 门且通过 848.728s 硬门；
@@ -511,3 +522,12 @@ epoch barrier、几何双策略和硬分块单测通过；四个 CI 集成目标
 10 mm 导出精度预算内（p95 2.14 mm、max 37.64 mm），生产→RVM 因附加表面仍不满足
 双向门，保留为后续几何差异项。证据：
 `docs/evidence/2026-08-25-ams8000-full-load-display.md`。
+
+**2026-08-26 AMS7997 CATA/FLEX 定向 RVM 门通过**：生成根 `24381/91465`
+的 PDMS `MAT/TRIM/STR` 条件掩码与 `QSCYLI -> ORIMAT` 圆柱关系已按
+Core3D/libgm 行为修正；定向重生退出码 0，6 条正体关系全部持久。
+E3D RVM 双向 p95 `0.1552/0.1488 mm`，最大值 `0.5079/0.4981 mm`，
+`mesh-compare` 退出码 0。随后 942 根全量重生 15/15 批成功，全量 RVM
+由上一基线 367 项通过提高到 781 项，仍有 161 项明确几何差异。
+本条不代表 AMS 8000 全部模型已闭合。证据：
+`docs/evidence/2026-08-26-ams7997-cata-mat-orimat.md`。

@@ -124,20 +124,37 @@ impl DbModelInstRefnos {
         let db_option = db_option_arc.clone();
         handles.push(
             crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                for bran_refnos in bran_hanger_refnos.chunks(20) {
-                    let db_option_clone = db_option.clone();
-                    // let refnos_str = bran_refnos.iter().map(|r| r.to_string()).collect::<Vec<_>>().join(",");
-                    let target_refnos =
-                        query_multi_children_refnos(&bran_refnos)
+                // 前三路很快跑空，整段网格阶段的墙钟基本就是这一路的长度：20 根一组
+                // 串着消化，查子件与生成还互相堵着。组间彼此独立，按几何配额扇出；
+                // 用 `buffered` 而非 `buffer_unordered`，失败仍落在顺序上第一个坏组。
+                let chunks: Vec<Vec<RefnoEnum>> = bran_hanger_refnos
+                    .chunks(20)
+                    .map(<[RefnoEnum]>::to_vec)
+                    .collect();
+                let chunk_count = chunks.len();
+                let mut chunk_work = futures::stream::iter(chunks.into_iter().map(|bran_refnos| {
+                    let db_option = db_option.clone();
+                    async move {
+                        let mut target_refnos = query_multi_children_refnos(&bran_refnos)
                             .await
                             .map_err(|error| {
                                 anyhow::anyhow!("query BRAN/HANG mesh children failed: {error:#}")
                             })?;
-                    gen_meshes_in_db(db_option_clone, &target_refnos)
-                        .await
-                        .map_err(|error| {
-                            anyhow::anyhow!("generate BRAN/HANG meshes failed: {error:#}")
-                        })?;
+                        // TUBI relations are owned directly by BRAN/HANG. Keep the roots in
+                        // this mesh pass so caliber-specific ownerless unit meshes are found.
+                        target_refnos.extend(bran_refnos.iter().copied());
+                        target_refnos.sort_unstable();
+                        target_refnos.dedup();
+                        gen_meshes_in_db(db_option, &target_refnos)
+                            .await
+                            .map_err(|error| {
+                                anyhow::anyhow!("generate BRAN/HANG meshes failed: {error:#}")
+                            })
+                    }
+                }))
+                .buffered(crate::fast_model::concurrency::fan_out_width(chunk_count));
+                while let Some(result) = chunk_work.next().await {
+                    result?;
                 }
                 Ok(())
             }),
@@ -183,17 +200,32 @@ impl DbModelInstRefnos {
         let db_option = db_option_arc.clone();
         handles.push(
             crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                for chunk in bran_hanger_refnos.chunks(20) {
-                    let db_option_clone = db_option.clone();
-                    let target_refnos =
-                        query_multi_children_refnos(&chunk).await.map_err(|error| {
-                            anyhow::anyhow!("query BRAN/HANG boolean children failed: {error:#}")
-                        })?;
-                    booleans_meshes_in_db(db_option_clone, &target_refnos, failure_policy)
-                        .await
-                        .map_err(|error| {
-                            anyhow::anyhow!("boolean BRAN/HANG meshes failed: {error:#}")
-                        })?;
+                // 与网格阶段同一个形状、同一条理由：BRAN/HANG 这一路串行消化撑起了
+                // 整个布尔阶段的墙钟。
+                let chunks: Vec<Vec<RefnoEnum>> = bran_hanger_refnos
+                    .chunks(20)
+                    .map(<[RefnoEnum]>::to_vec)
+                    .collect();
+                let chunk_count = chunks.len();
+                let mut chunk_work = futures::stream::iter(chunks.into_iter().map(|chunk| {
+                    let db_option = db_option.clone();
+                    async move {
+                        let target_refnos =
+                            query_multi_children_refnos(&chunk).await.map_err(|error| {
+                                anyhow::anyhow!(
+                                    "query BRAN/HANG boolean children failed: {error:#}"
+                                )
+                            })?;
+                        booleans_meshes_in_db(db_option, &target_refnos, failure_policy)
+                            .await
+                            .map_err(|error| {
+                                anyhow::anyhow!("boolean BRAN/HANG meshes failed: {error:#}")
+                            })
+                    }
+                }))
+                .buffered(crate::fast_model::concurrency::fan_out_width(chunk_count));
+                while let Some(result) = chunk_work.next().await {
+                    result?;
                 }
                 Ok(())
             }),

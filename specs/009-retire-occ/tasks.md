@@ -624,7 +624,10 @@ ws,gen_model,manifold,project_hd`：T039 / T042 落地后是 **1062 通过 / 1 �
   29 个缺 caliber 身份 / 1,607 条旧引用，7997 副本为 392 / 24,573；两边均明确
   `ready=false`，证明维护窗口尚未执行。证据：
   `docs/evidence/2026-08-24-occ-retire-rebuild-readiness.md`。
-- [x] T050-code：Snout `±offset/2` 与规范化修复已发布；**现场 RVM 未完成。**
+- [x] T050-code：Snout `±offset/2` 与规范化修复已发布；AMS7997 目录 TRNS 的四件
+  偏心 Snout 已按 Core3D 2.10/3.1 `QLSNOU` 关系平移语义通过现场 RVM（双向 p95
+  0.0028 mm），证据见 `docs/evidence/2026-08-26-ams7997-qlsnou-translation.md`。
+  **T050 指定的 8009 `poff=12.06` 样本及双库总门仍未完成。**
 - [x] T051-code：XOFF/YOFF 两轴已贯通解析、hash、单位参数和 Manifold；旧 XOFF 仍映射 `poff`。
 - [x] T023-code：斜切延伸已进入 Manifold CSG；`sweep_mesh` 32 条单测全绿，T048 仍待现场 RVM。
 - [x] T026/T027/T028：源码护栏钉住退役 Core3D 操作、目录负体 Manifold 唯一入口，
