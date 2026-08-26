@@ -1,9 +1,284 @@
 # 变更记录
 
-## 2026-08-25
+## 2026-08-26
+
+### 修复
+
+- **启动模型覆盖核对补上未限定域的口子，且不再中止启动**（ADR-050 补偿闭环）。
+  ADR-050 的启动清空是无条件的，但补偿（生成根凭证核对与补种）此前只挂在监听
+  限定域上：未声明 `watch_dbnums` 的进程在模型积压期间重启，剩余工作单被清掉后
+  没有任何东西重建它们——watcher 重扫按水位比对不再排模型工作，`model_ready`
+  仍按 pending=0 判真，缺的模型静默消失。现在启动核对由
+  `reconcile_model_coverage_at_startup` 统一承担：限定域照旧逐库
+  `fn::sync_gen_roots` + 补种；未限定域改按 `gen_root` 凭证点查（`gen_root_dbnum`
+  索引，一次 GROUP BY 列清单），发现凭证过期才对那一个库做完整 sync + 补种——
+  全库跑 `fn::gen_root_cover` 在 448 库的现场付不起；没有凭证记录的库当面播报
+  「核不了」，不许静默当作完整。同时任何一库核对/补种失败都只告警不再 `?` 上抛：
+  原写法会把一个 watch dbnum 的配置手误（或 `sync_live=false` 空库首启）变成整个
+  服务的启动崩溃循环。内存库测试钉住清单查询跳过无归属行，源码测试钉住
+  「不得只挂限定域」与「不得中止启动」两条。
+
+- **人工执行在宽松身份冲突档下不再虚计阶段总数**。watcher 路径对「仅记录并跳过」
+  的库会 `manifest_totals.retain(..)` 摘掉阶段总数，人工路径此前不摘：默认配置
+  （`block_file_identity_conflicts=false`）下人工执行遇到身份异常文件，/health 的
+  阶段 total 会为一个永远不会来的批次虚高一格——正是此前修过的「阶段就绪显示失真」
+  形态。现在人工路径把这类库记入 `manifest_lenient_excluded`，收集总数时排除；
+  两路径共用性测试同步加严。
+
+- **模型生成的三处小收口**：根级失败摘要（「N model root(s) failed: 前三条」）三处
+  拷贝合并为 `occ_generate::summarize_root_failures`；按需 ensure 在没有在飞重建时
+  不再为 `reject_ensure_during_rebuild` 多付一次数据库往返；adaptive 并发额度裁决
+  抽成纯函数 `next_effective` 并把原来只断算术常量的测试换成对裁决本体的六条断言
+  （压力减半有下限、进展加一有封顶、空窗不抖动、压力优先于进展）。
+
+- **空闲模型页的进度簿记收进一个类型**。`drain_where_cooperative` 此前用一个
+  7 参自由函数在四个调用点重复上报任务 detail 与 telemetry，收口/让位/锁挡三种
+  终态又各自手拼 finish——现在认领时定死的 task_id / queue_total / page_claimed
+  钉进 `DrainPageProgress`，子阶段推进走 `report`、页终态走 `settle` /
+  `settle_deferred_for_lock` 一处收口。行为逐位不变（detail 缺失时整个跳过的旧
+  语义保留），既有源码钉（合批先于逐根循环、探测先于消费、锁覆盖结算顺序）与
+  全模块 76 条测试复跑通过。
 
 ### 新增
 
+- **新增属性描述双读对拍探针 `attr_info_compat_probe`**。它加载解析库生成的
+  `PdmsDatabaseInfo` 兼容文件，先逐项验证内嵌旧 schema 全部保留，再用新旧两份
+  schema 解析同一 Dabacon 文件的最新记录并逐属性比较，为逐步退役
+  `all_attr_info.json` 建立不切换生产路径的验收门。
+
+- **E3D TTY 与导出的 AMS Agent 使用教程**。集中说明当前权威入口宏通道、AMS 8000
+  FTUB apply/restore、RVM geometry-only、RVM+ATT 成对发布、全局 noun/属性字典导出、
+  证据与回滚判据，以及继续提交正常服务增量并检查 task、水位、staging、side effect、
+  worker 和 health 的完整退出门。
+
+## 2026-08-25
+
+### 修复
+
+- **`watch_dbnums` 同时收窄 `inst_relate` 缓存维护，启动不再被一次全表扫压住**
+  （ADR-048 决策 2 的延伸，specs/025 的一段前置）。`insts_flat` 上没有索引，命中
+  稀少时 `LIMIT` 一格也省不下来——引擎要把整张表走完才敢说「不足一批」，而
+  `aabb.d` 是记录链接，每条 `insts_flat = NONE` 的行还要多付一次 `aabb` 点查
+  （issue #21 在库 A 的普查：NONE 行里约 97% 是读者不可见的）。448 个 dbnum 的
+  现场库上，启动序列停在「正在清扫 inst_relate 平表副本」不再往下走。现在回填
+  圈行、脏值探测、RM13 修复循环与复核、老格式再现探针这五条全表谓词，在声明了
+  限定域时一律带 `dbnum = …` / `dbnum IN […]` 前缀走 `idx_inst_relate_dbnum`；
+  列名裸着出现，不套 `(dbnum?:0)`——那会把索引藏进表达式里让 planner 回落全表。
+  **收窄跑过的 RM13 migration 不落完成标记**：标记的含义是「这一库全表收敛过」，
+  域内干净担保不了它，落了域外那批老格式行就永远没人再看。收窄时启动日志点名
+  限定域、来源，以及「域外的行与 dbnum 为 NONE 的历史行这一轮不维护、读侧走 slim
+  兜底」。不声明限定域时逐位不变，全表扫照旧。
+- **`project_dirs` 恢复为项目目录的同位置映射**。`included_projects` 继续作为唯一项目
+  范围；提供 `project_dirs` 时，watcher、初始化解析、CATA 路径和进程单实例锁统一使用
+  其中同下标的真实文件夹名，不再错误拼成 `project_path/included_projects`。映射缺项或
+  非单层文件夹名会明确报错，名单外项目仍不会进入扫描范围。
+
+- **7997 并发版现场启动修正**。生成根覆盖查询把 `subtree` 加入投影，兼容
+  SurrealDB 2.1 对 `ORDER BY` 字段必须出现在 `SELECT` 中的限制；adaptive 的 RSS/写入
+  基线改为在整个 K=1 观测期累计峰值，避免用进程刚启动的低水位样本把并发永久误压为1。
+  `test-worklspace` 实测识别2720根、保留528个当前凭证、补种2192根，并观察到 K=1→2→3
+  后按 AABB/RSS 压力回落，期间零失败、零死信。
+
+- **7997 模型完整性与根级并发生成闭环**（ADR-011 / ADR-025）。启动数据阶段后用
+  `fn::sync_gen_roots` 对齐权威生成根，完成凭证必须与当前 `applied_sesno` 及保存时刻
+  一致；缺失根进入原有 `regen_root` 队列，`model_ready` 不再把 `pending=0` 当作模型
+  完整。每页仍预取 100 根，但只按 16 根 execution group 获取根锁，mesh/布尔后半程
+  有界并发、Shape writer 与 AABB 提交保持单路；健康接口新增模型、Shape 和 geometry
+  并发遥测。新增 `POST /api/v1/dbnums/{dbnum}/model/rebuild`，范围校验、幂等任务、旧模型
+  保留和水位不变均复用现有协调器；`legacy` 配置可即时退回串行并关闭端点。
+
+- **7997 首次初始化的模型工作恢复有界消费**（ADR-011 / ADR-025）。
+  自动空闲轮不再用无上限 `SELECT` 一次认领 18674 个 `regen_root`；Regen
+  固定每页 100 根、后置 AABB 每页 256 条，Regen 清空前的二次探测禁止
+  AABB 越过阶段。忙根锁原样延后且不消耗 attempts，全页忙时按 30s 退避。
+  `model_drain` 任务只保留 10 个根样本并报告页进度；启动等待日志改为
+  真实 Regen/AABB 阶段与剩余数，相同无进展信息最多每 300s 输出一次；
+  `/api/v1/tasks` 单次最多返回 160 条，最大响应保持在 256 KiB 内。
+- **模型开关不再导致每次启动整库全量生成**（ADR-051）。`gen_model` / `gen_mesh`
+  只表示允许增量批次进入模型与网格阶段；服务启动统一经 watcher 重扫，把文件最新
+  会话号与 `applied_sesno` 比对后，仅为首次导入、文件回退或真实增量建立工作。移除
+  `run_cli` 中对 `gen_all_geos_data` 的直达与延期全量分支；显式探针/工具的全量入口保留。
+  启动日志会明确播报当前是水位比对策略，源码回归测试禁止三个全量锚点重新进入启动路径。
+- **停止逐会话打印 `[paged_db] path=...` 分页读取统计**。按需读取及快照校验逻辑
+  保持不变，仅移除会话销毁时输出的页数、缓存命中和解析记录数明细，避免初始化阶段刷屏。
+- **`watch_dbnums` 同时约束持久模型工作单的自动消费**。此前它只挡新数据批次，
+  空闲轮仍会把 `model_update_pending` 里范围外的历史根全部捎进来；现场只监听 8000，
+  却继续生成 1112 的 5025 个根。现在自动 drain、是否还有活、死信门和 `/health`
+  共用 `(dbnum?:0) IN watch_dbnums`，本进程新建的范围外/无库号行不参与自动消费；
+  不声明限定域时行为不变，当前批次的精确键 scoped drain 与只读待重试清单不变。
+- **启动时先清空 `model_update_pending`**（ADR-050）。这张表只承载本进程内的模型
+  调度，不是跨重启恢复日志；增量解析数据与模型数据已从 kv-mem 作为一个整体写回
+  RocksDB，重启后重放旧工作单会把两个快照混在一起。现在数据库连接成功后立即全表
+  清理，且严格早于空间树、预加载、db manager、watcher、worker 与模型阶段；清理失败
+  直接阻断启动。启动日志报告实际删除数，定向内存库测试和源码顺序测试钉住该边界。
+- **停止逐批打印 `shape_save_flush` 控制台明细**。实例保存仍按原阈值执行并累计
+  `ShapeSaveRunOutcome`，每轮结束的 `shape_save_summary` 汇总保留，避免 MaxWait
+  小批次持续刷屏。
+- **启动数据身份冲突默认降级为“记录并跳过”**。文件名/文件头库号不一致、同项目
+  同 dbnum 多文件仍不摄入、不写观察值，控制台与人工执行回执保留完整告警；但冲突库
+  不再把 Meta/Catalogue/Design 阶段永久标成 blocker，其余库可以完成初始化。
+  watcher 与手动执行共用 `block_file_identity_conflicts`，默认 `false`；需要恢复旧的
+  严格阻断行为时在 `DbOption.toml` 设为 `true`。
+- **声明了 `watch_dbnums` 就算启动上弦**（ADR-048）。`startup_autorun=false` 与
+  `sync_live=false` 撞在一起时，重扫行挂起、持久积压不消化，而解封条件「某个 dbnum
+  真的来一次增量」永远不会发生——watcher 压根没起。现场
+  （`DbOption-rvm-rebuild` + `AIOS_STARTUP_AUTORUN=0`）`model_update_pending.retryable`
+  卡在 7655 一动不动，进程 33 分钟只吃 74.9s CPU（单核 2.1%），
+  `model_drain.last_claimed_epoch = null`：那 7655 行「可消费 / 可收口 / 可复活」
+  三条出路一条都没有，对外还长得像「在慢慢跑」。起手上弦改由纯函数
+  `batch_scheduler::initial_auto_work_armed(startup_autorun, watch_scope_active)`
+  裁决，两个来源任一成立即上弦；限定域仍然只收窄不放宽，**也不拖回启动全量房间重建**
+  （那道门直读 `startup_autorun()`，单独钉了测试）。两句启动播报补上第二条出路，
+  并在 `sync_live=false` 时额外喊明「不会有文件事件来解封任何一行」。三条回归
+  （真值表 / `global()` 源码断言 / 房间重建边界）均实测过「回退旧写法即红」。
+  `db_options/DbOption-rvm-rebuild.toml` 同步写上 `watch_dbnums = [1112, 8000]`，
+  重启实测：`model_in_flight` false→true、CPU 2.1%→14%，而 `startup_autorun` 仍为 false。
+- **网格里不许留一条 f32 表达不出来的缝**（ADR-049）。CFLOOR
+  `/1RS-WF03-F-C-F002` 一带三个负体在布尔入口报 NotManifold，三件三角化全成功、
+  全死在读回——同一本账的三个常数：① `sin(TAU_f32) ≈ 1.75e-7 ≠ 0` 让回转体环向
+  接缝两侧焊不到一起（CTORUS 实测 10 条边界边，与 `2RT+2T=64` 解出的 `T=8,R=3`
+  逐项对得上），改由 `ring_angle_table` 建表、`j == segments` 回用 `j == 0`，
+  `gen_circular_torus`（管壁与两个端盖共表）/ `gen_sphere` / `gen_spherical_dish` /
+  椭圆封头四处接上；② `sin(PI_f32) ≈ -8.7e-8` 把球的南极摊成一圈针状面
+  （`2 × slices` 条边界边），两极硬置 `(0, ±1)`——**这条是修 ① 时顺带查出来的，
+  现场还没人撞上**；③ `assemble_ring` 的合并门槛 `POS_EPS = 1e-4` 是绝对量，而 f32
+  在 1250mm 处的分辨率约 1.5e-4，f64 里刻意留的缝落盘即被抹平、焊回去多出三面共享边
+  （`99813` 那个 `{3: 1}`），改为 `POS_EPS.max(scale × 1e-6)`。新增
+  `a_revolved_seam_closes_bit_exactly_so_the_boolean_can_read_it_back` 钉 ①②，
+  ③ 由现场夹具 `field_floor_negatives_can_be_read_back_by_the_boolean` 直接钉——
+  该夹具三件现已全绿。
+- 房间归属两条真库 live 用例的断言漂移（`live_issue7_real_db_deleted_edges_come_back` /
+  `live_issue13_c2_moving_out_of_the_room_clears_membership`，2026-08-19 @8019 分别红在
+  「实得 0」与「起点无归属边」）。两条都不是引擎回归，是用例自己的问题，各修一条：
+  - **issue7 断言错了对象**：`drain_rooms(..).done >= 1` 是**本次调用**的吞吐计数，而共享
+    实库上还跑着生产 worker，它的空闲轮 `room_round` 会先把队列行收走；更糟的是这条计数
+    断言排在 `after_move == baseline` 之前，引擎即便完全做对，用例也说不出来。改为
+    `wait_for_room_convergence`——轮询到 `room_recalc_element_{ELEMENT}` 消失为止，
+    **不问是谁收的**，并把边集断言提到最前、收敛诊断塞进失败信息。判定刻意不看「进场时
+    队列行在不在」：worker 可能在第一眼之前就收走了，拿它当判据等于把同一个竞态换个地方
+    再犯一次。
+  - **issue13-c2 用例不自足**：它把 `edges_of_element()` 的当前值直接当基线并要求非空，
+    于是隐式依赖「issue7 先跑过」，同批次 #01 一红它就报一个不属于自己的前置阻断。新增
+    共用的 `build_room_baseline`（备料两侧几何 → `rebuild_tree_from_pointers` → 只重建
+    `-RM05-R512` 这一间）由两条用例各自铸基线，可任意顺序单独运行。指针重建不能省：
+    `build_room_relations` 前面那道覆盖率门要树的条目数达到库内可用包围盒指针数的 90%。
+
+  - **重建范围与对拍范围不一致**（跑之前没人发现，一连库就撞上）：两条用例都把
+    `ROOM_KEY_WORD` 卡到 `-RM05-R512`（那间房只有 1 块面板）以避开全库两百多间房的
+    重建，却把 `baseline` 取在靶件的**全库**归属边上。`python/testbed/.surreal/pytest-ams`
+    上那个 CAP 同时挂着 `24381_35844 -> R512` 与 `24381_1391 -> R142`，于是增量最多
+    只能复现一半，边集断言必红；更糟的是元素分支发的 `DELETE {element}<-room_relate`
+    只避开 `protected_panels`（在册但缺几何的面板），R142 那块在这个 keyword 下压根
+    不在册，它的边会被抹掉且收尾不写回——**跑一次少一条，共享沙箱里没人补得回来**。
+    2026-08-06 那次能过是因为当时库里 `pe:24381_1391` 不存在，验证报告把它记成了
+    脚注。现改为：断言收进 `scoped_panels()`（`24381_35842` 名下子 + 孙两层 PANE），
+    范围外的边进场时按完整载荷备份、收尾最后一步原值写回。
+
+  仓内已有同类先例（`live_shared_spco_expands_to_generation_roots` 改自足、
+  `live_shared_spco_cascade_regenerates_every_consumer` 把钉死计数拆成动态口径）。
+
+  验证：`db_options/DbOption-room-live-8029`（由 `DbOption-pytest` 拷贝，只改 v_port
+  与 `room_incremental`）+ 8029 上的 `rocksdb:python/testbed/.surreal/pytest-ams`。
+  两条各 20s 通过，日志复现 08-06 的黄金形态 `无房间 -> R512` 与反方向的
+  `R142, R512 -> 无房间`；又按 c2 → issue7 反序各自独立进程复跑一遍仍全绿，顺序依赖
+  确实断开。跑完核过：两条归属边载荷逐字回到进场值、`POS.z` 回到 5821.669921875、
+  房间队列零行。唯一的持久变化是那块面板的成员边收敛到 632 条（全库 `room_relate`
+  41370 → 41372），来自本轮的指针重建 + 定向全量重建，不是用例残留。
+  台账两行已更新，日志在 `output/room-live-20260825/`。
+
+- 直线扫掠体的 path 坐标系与实例旋转重复计（aios-core `0e391ff1`，本仓跟进三个 rev 到
+  `0e391ff1` / `5344440b` / `257ea253`）。两个各自独立的缺陷叠出 STWALL 4
+  （`pe:17496_105816`）整块墙绕 Z 转 90°：`create_profile_geos` 的 POSS→POSE 分支把
+  **世界系**的 `pose - poss` 直接存进局部系的 path 字段（同一处的 `DRNS` / `DRNE` 都过了
+  `inv_quat`，只有它没过；`height` 是标量所以长度一直对、只错方向）；`SweepSolid::get_trans()`
+  又把 path 切向折进实例旋转，而两台建体引擎（manifold 的 `sweep_solid_mesh`、f9f1bf0
+  删除前的 `gen_occ_shape`）对直线扫掠一律沿局部 +Z 挤、只取 `line.length()`——方向属于
+  元素的 `world_trans`，再带一次就是重复计。只有走复用单位体的件会炸：另外三堵 STWALL 带
+  `drns` / `drne`，`is_sloped()` 为真、`get_trans()` 返回单位阵，脏方向没人读。
+  修后 STWALL 4 的世界 AABB 与 E3D 逐位相同、四堵墙双向表面距离全 0.00mm，
+  带非单位实例旋转的行 63 → 61（消失的正是 STWALL 那 2 行）。
+  八条 mesh 级对拍 6/2 → **7 passed / 1 failed**，仅剩
+  `mesh_gwall_extra_against_cwall_union` 卡 105828（另一条线）。
+  证据 `docs/evidence/2026-08-25-sweep-path-frame-fix.md`，台账已更新。
+
+- 负体做差前的「让量」从 `1e-6` 等比改成**逐轴各向外让绝对 0.051mm**
+  （新常量 `libgm_discretise::RES_TOL_MM`，就是 libgm 的 `GM_User::restol_`），
+  收掉 ISSUE-022 那层外皮。`manifold_csg.rs` 里本来就有这一步，坏在量级与形状：
+  等比量在薄方向上等于没让——那堵墙的负体沿墙厚只有 750mm，`1e-6` 给出 0.000375mm，
+  比实测那道缝还小一个量级；而三个轴 2600 × 750 × 2180 差着一个数量级，等比放大
+  要么长轴让太多、要么薄轴让不够。退化到零厚的轴不缩放。
+  回归钉 `fast_model::manifold_csg::tests::a_negative_stopping_a_hair_short_still_opens_the_exit_face`
+  ——出口停在差 0.01mm 处，挖穿了亏格 1、留皮亏格 0；退回旧等效量（该负体上 0.000055mm）
+  实测即红（`genus=0`、`volume=3360061.89`，多出的约 62mm³ 正是那层皮）。
+  现场（8009，删掉 8 堵带负体 GWALL 的 booled `.mesh` 就地重算布尔）：105828 gen→gwall
+  p95 **753.9 → 0.1**、max 1296.9 → 65.2、三角数 188 → 184；105880 p95 9.4 → 8.9；
+  116569 p95 147.4 → 137.3；GWALL union both mean/p95/hausdorff
+  **10.53 / 8.44 / 1286.31 → 4.75 / 5.33 / 647.09**。八条 mesh 级对拍
+  **7/1 → 8 passed / 0 failed**，台账已更新。
+
+- 定位：八条对拍里剩下的那条红 `mesh_gwall_extra_against_cwall_union` 卡的
+  `pe:17496_105828`，**不是摆位也不是尺寸，是一张本该挖掉的外表面还在**。逐三角形对照
+  E3D GWALL 18：洞的两侧门垛（`[±1300, −17018, 1433]`）与过梁底面（z=2160）gen 都切出来了，
+  唯独 y ≈ −16651 那张外表面，E3D 在 x∈[−1300,1300]、z≤2160 一个三角形都没有，gen 铺满。
+  负体 `pe:17496_105841`（NXTR，HEIG=750）的出口面与墙体外表面共面（都在 y ≈ −16651.40，
+  f32 在这个量级的 ulp 约 0.001mm），布尔把它留成一层外皮。两个数因此都能对上：
+  max 1296.9 ≈ 洞半宽 1300、p95 753.9 ≈ 墙厚 748。`manifold_bool.rs` 里没有任何沿挤出轴
+  给负体加余量的处理。开 `issues/ISSUE-022-coplanar-negative-leaves-outer-skin.md`，
+  属 ADR-044「共面留一层壁」同族。
+
+- IDA 取证（同日续查 ISSUE-022 的 ε 口径）：**libgm 的「多近算同一个」是 0.051mm，
+  而 E3D 的负体根本不是三维实体 CSG**，证据
+  `docs/evidence/2026-08-25-ida-libgm-coincidence-tolerances.md`。Core3D 建体前
+  （`0x104da260`，MTR 标签 `adp_geometry/adp_gm_mk_body`；另一处 `0x108e6a80` 同值）
+  连调四次：`gm_SetResolutionTolerance(0.051)` / `gm_SetDefaultNormalisationTolerance(0.051)`
+  / `gm_SetDefaultTangentTolerance(0.0087266)`（0.5°）/ `gm_SetDefaultFacetTolerance(0.5)`
+  ——最后那个就是本仓 `FACET_TOL_MM`，说明这处调用点正是我们该抄的那处。负体侧：
+  `addStandAloneNegative` 建 `gm_CreateCombination(3)`，`GM_AggregateCombination::calcFacets`
+  把 `restol_` 传给 `GM_CompFacets::aggregateWith`，真正相减在 `GM_Facets::obscureFaces`
+  （libgm `0x10068710`）**面内做二维多边形相减**，切分 side 判定与 `D2_PolySet::normalise`
+  都吃 `restol`。所以 ISSUE-022 不是「有条共面规则没抄」，是**「libgm 有 0.051mm 的重合
+  容差，我们一个都没有」**——`plant_mesh_to_manifold` 焊顶点用的是 `to_bits()` 逐位相等。
+
+- 同上取证顺带纠正一条仓内注释：`libgm_discretise.rs` 的 `NORM_TOL = 1e-6` 写着
+  「没有人改它……运行期恒为初值」。成员写入器 `GM_User::normtol(double)` 确实零调用，
+  但 Core3D 走的是自由函数 `gm_SetDefaultNormalisationTolerance`（同一处调用点），
+  运行期真值是 **0.051**，差 51000 倍。`normtol_` 的读者是 `gm_CreateBody` /
+  `gm_CreateNormalisedItem` / `gm_CreateFacetStructure` / `gm_QueryMass`，还管回转轮廓的
+  轴心吸附。改它会动到所有回转体，**本次只记录、未动代码**。
+
+- 补上两条原本谁也拦不住这类漂移的钉子：aios-core 的
+  `world_path_direction_lives_in_instance_rotation` 直接断言的是旧行为，改写为
+  `path_direction_stays_out_of_instance_rotation`（+X 的 path 必须得到 `Quat::IDENTITY`）；
+  gen-model 新增 `fast_model::sweep_mesh::tests::a_reused_unit_lands_where_the_direct_build_lands`
+  —— +Z / +X / 斜向三档 path 下，`sweep_solid_mesh(单位体) × get_trans()` 必须逐顶点等于
+  `sweep_solid_mesh(原件)`。原有 `get_trans()` 用例的 path 全是 `Vec3::Z * k`，恰好是所有
+  分歧点都退化的那一档；这条等价性还顺带盖住同族两处潜伏偏差（非 +Y `na_axis` 时的 plax、
+  无条件乘 bang）。
+
+### 新增
+
+- T041 的 A / B 两组门**写成了真单测**（`src/fast_model/pdms_inst.rs`，`t041_` 前缀
+  11 条）：判据先落地、实现随后，**6 条按设计红着**，逐条登记在
+  `specs/009-retire-occ/tasks.md` 新增的「预期红测」一节（每条写明现在为什么红、
+  转绿的条件）；另 5 条是不许变红的反向门。CI 口径全量
+  **1119 passed / 6 failed / 85 ignored**，失败逐名就是那 6 条，无旁落。
+  写测试时看清两件事：(1) 配对必须是「**同一形状比例、不同绝对尺寸**」——单位行的
+  半径恒为 1，拿两个不同比例的件对比问不出「段数有没有进键」；(2) `t041_b1`（碟的
+  三元组）**今天绿得不作数**——两键不同只是因为 `Dish::hash_unit_mesh_params` 哈希的
+  是未归一化的 `prad`，等 `b1b` 把它收成比值这条才开始真的量三元组。`b1b` 顺带把
+  T053 第 (3) 条那个「读码所见、未构造用例」的双键疑点变成了有用例的红测。
+- T041 的门按 T053 的新范围写全（`specs/009-retire-occ/tasks.md`）：从「柱与球」扩到
+  **五类**，并把此前没有的**元数**一维补上——每类混几个段数是不同的
+  （柱 / 球 / Snout 一元，圆环面二元，矩形环面一元，球碟二元，椭圆碟三元），
+  只混第一个数的写法 A 组门盖不住。B 组四条各带一对**实算出来的判别样本**：
+  椭圆碟 `a=1000` 的 `h=5` 与 `h=20` 绕轴同为 100 而 `(hub,knuckle)` 是 (2,2) 与 (3,3)；
+  圆环面 `rins/rout=0.5` 下 `rout=104` 与 `105` 环向同为 36 而管向是 16 与 20；
+  球碟 `(100,2)` 与椭圆碟 `(100,2,2)` 前两位逐位相同（分支今天靠 `prad` 分，
+  加段数时不许把变长元组摊平成不带长度/不带分支的写法）。
+  另钉三条容易反向做错的：矩形环面**只有一元**（矩形截面无管向）、球**只混 n**
+  （stacks 恒 `n/2`，IDA 已钉）、SSCL 与偏心 Snout 两支本来就带真实尺寸，
+  **键必须逐位不变**、不得重复混。整体门 C4 用 T053 的脚本口径复核五类行数落在 474——
+  偏多是混了不该混的，偏少是漏了一维。
 - T053 范围盘点：**段数进身份键之后，五类复用曲面原语合计 392 行 → 474 行（+82）**，
   证据 `docs/evidence/2026-08-25-t053-segment-identity-scope.md`（库 A 一次性副本 @8039，
   `FACET_TOL_MM = 0.5`，规则逐行照抄 `libgm_discretise` 并先跑其单测对照表自检）。
@@ -35,15 +310,52 @@
 
 ## 2026-08-24
 
+### 新增
+
+- IDA 取证：**挤出轮廓在 libgm 侧没有清理层**，`docs/evidence/2026-08-24-ida-extrusion-profile-no-cleanup.md`。
+  `mth::mthArcFillet`（libgeom 3.1 `0x10043470`，Core3D 走同一份）只有五条早退——两条邻边
+  退化、`|R| ≤ 1e-6`、θ≈0°、θ≈180°——过了就按 `T = R/tan(θ/2)` 硬算切点，**从不把 T 与邻边
+  长度比较**，不夹取也不裁剪；`GM_Extrusion::calcFacets`（libgm 3.1 `0x10056f10`）的全部
+  过滤器只有「按存的标志翻绕向 / 起止点位级全等才跳过 span / `fabs(bulge) >= 0.0000306`
+  分弧直 / 圆面按 `normtol_` 去重」，不查自交、不查闭合，输出是「侧壁四边形 + 两个不三角化的
+  n 边形盖」——E3D 本就不把挤出当闭合实体。结论是否定式的：**没有可照搬的 libgm 规则**，
+  `flatten_profile_loop` / `extrude_flat_polygons` 现有注释与 `FillRule::NonZero` 选型至此
+  有反编译背书。顺带改写了现场三件参数的性质：`FRAD = 4553.95` 不是超发值，它在 172.336°
+  的近直角上算出 `T = 305.023`、邻边 305.030，是**故意做成弧接弧、直段长度为零**的轮廓，
+  残留 ±0.0007mm 只是坐标三位小数的舍入。
+- CFLOOR `/1RS-WF03-F-C-F002` 负体 NotManifold 的离线回归：
+  `field_floor_negatives_can_be_read_back_by_the_boolean`（`src/fast_model/manifold_tessellate.rs`）
+  + 夹具 `tests/fixtures/floor_wf03_bool_neg_not_manifold.json`（三件参数自
+  `.surreal/ams-rvm-rebuild-20260824` 的 `inst_geo` 原样取下）。它把失败切成「三角化」与
+  「布尔读回」两段分别报告：三件**三角化全部成功**、全部死在
+  `manifold_csg::plant_mesh_to_manifold`，而对照组（单位箱 / 单位柱 / 方形挤出）同一往返全绿
+  ——红的是几何本身而非往返。不连库、0.00s，进得了 CI。
+
+- spec 025 T06（FR-9）：RM13 布尔平表存量修复从「每轮清扫必跑的常驻全表段」改制为
+  **带库上标记的一次性 migration**（`run_booled_flat_repair_migration_on`，标记
+  `queue_control:booled_flat_repair_migration`，流程「标记不存在 → 修复到收敛 →
+  复核无残留 → 落标记」）。标记已落的库每轮只付一次 record id 点查；复核有残留不落
+  标记、下轮从头重跑；旧备份恢复/库拷贝带回无标记状态即自动重跑。源码顺序钉 +
+  mem 行为钉（标记落一次、再跑跳过、标记消失重跑）+ 双跑补标记语句形态；
+  spec 019 状态注记同步。
+- spec 025（`insts_flat` 失效协议）阶段 0 落地：共享 geo `bad→meshed` 反例 live 用例
+  `live_shared_geo_bad_retry_must_refresh_sibling_insts_flat_on_disposable_db`
+  （`src/fast_model/pdms_inst.rs`），在 8019 一次性内存沙箱按设计红——只对一行做定向
+  重生成后，共用同一 `inst_geo` 的另一行 `insts_flat` 停在旧值（非 NONE），现有清扫
+  两段都够不着（ADR-043 的缺口）。T02 判读「能复现」：FR-6 定持久 pending 表
+  （选项 P）、FR-7 定反向失效（路线 B）；结论入 `specs/025-insts-flat-invalidation/plan.md`
+  R1，留证 `docs/evidence/2026-08-23-insts-flat-invalidation/t01-shared-geo-counterexample.md`，
+  live 台账同步。双跑套件的清扫语句同步到 `VALID_BOOLED` 共享判据形态并双引擎复验
+  （T07）。
+
 ### 修复
 
 - 收口依赖追齐后暴露的两条纯函数红：T054 的 SSCL 三角化删除本地剪切角折叠副本，
   直接消费 aios-core `f9f1bf0f` 的规范折叠值，并让「折叠后仍出界」诊断先于 bool
   `check_valid()`，不再把 90° / 271° / NaN 误报成尺寸退化；specs/023 的元件库
   顺序分批与并行优化 fan-out 同步改由全局几何并发闸推导块宽，移除遗留的固定 4 路
-  和 1/2/4 分块，并扩展源码守护覆盖按输入规模选择固定 fan-out 块宽的写法。
-  同批把 `cata_closure` 的源码顺序守卫跟到 `scan_identity_ref0s` 新调用点，避免旧字符串
-  `unwrap()` 让全量在守卫自身先崩。提交暂存快照全量 **1102 passed / 0 failed / 85 ignored**。
+  和 1/2/4 分块，并扩展源码守护覆盖按输入规模选择固定 fan-out 块宽的写法。T054 三条定点门、
+  并发闸 6 条纯函数门及同 feature 全量 **1104 passed / 0 failed / 86 ignored**。
 
 - RVM mesh 对拍不再可能量到 OCC 的答案（specs/009 X1a 前半）。`mesh_compare` 的 gen 侧
   在 `tessellate_libgm_param` 返回 `Ok(None)`（非形状）或报错时会回退 `gen_occ_shape`
@@ -79,6 +391,32 @@
   名单外项目不再解析或扫描；`project_dirs` 不再重定向、扩大范围，也不再在空名单时
   充当回退名单（ADR-046 / specs/027）。
 
+- 曲面法向的分组改由**轮廓**说了算，不再拿夹角猜（ADR-047 / specs/028 Phase 1，
+  接替 specs/009 挂了一年的 T040b）。此前本仓两套做法都不是 E3D 的：`manifold_csg`
+  按「同位置夹角 ≤ 10° 才平均」（`d0088e93` 引入，10° 是猜的），`sweep_mesh` 的侧壁
+  干脆逐四边形写面法向、等价于**全是硬边**，弧墙 / 斜切墙 / 环形截面一律渲染成折面。
+  E3D 的判据在 `GM_Profile::getPolygonForFacet` 的第二出参上：相邻两段不切线连续就把
+  该顶点取负，判据 `D2_Span::leadsSmoothlyTo` 是 `|1 − 点积| ≤ 1e-6`（≈0.081°）。
+  **这跟夹角阈值不是精度差异，是判据类型不同**：粗弧（面片夹角 45°）在 E3D 是光顺
+  曲面、10° 会判成八棱柱；浅折角（5.7°）在 E3D 是硬边、10° 会抹平——一个阈值同时
+  回答「面片多粗」和「形状多折」，两头都会错，而且错法随离散密度漂移。
+  现在硬边在截面离散的同一趟里逐点算出，侧壁法向软点跨面片平均、硬点不平均、
+  扫掠方向永远平均。**拓扑一位不动**：顶点数、索引、绕向、体积、包围盒全不变，
+  变的只有 `normals`——所以看到弧墙从折面变光顺时，几何并没有动。
+  弧形墙（`CurveType::Spline`）同批从 `Manifold::extrude` 改走 `sweep_mesh` 的挤出
+  （specs/028 T06）：它的环是解析出来的四段、不可能自交，用不上 `CrossSection` 的
+  NonZero 填充；一般挤出（PLOO 带倒角）**要**那道填充来化解自交轮廓，所以留在
+  manifold 上等 Phase 2。半圆环的折痕自此正好是四个轮廓角 × 两个 z 层，八个，
+  不多不少。
+  布尔之后那一段仍走 10°（manifold 交回来的三角汤没有轮廓出处），这是 ADR-047
+  写明接受的过渡态，退役条件在 specs/028 的 Phase 2 / 3。
+  同批把**交线边**那一半也反完了（ADR-047 决策 6，证据
+  `docs/evidence/2026-08-24-ida-edge-types-and-smoothing-groups.md`）：硬边在 libgm 里
+  是边上的一个枚举值不是几何量，`normaliseStage2` 把布尔新建的边默认判硬、再用
+  `isTangentDiscontinuity` 把**相切的缝主动合回软的**。判据是法向弦长 0.8182 ＝夹角
+  **48.297°**——常量虽是 cos/sin 22.5°，但**有效阈值是 48.3° 不是 22.5°**，差一倍，
+  按 22.5° 抄会把一大批该软的缝判硬。这条同时修正了 plan 里原先那句「交线是硬边会
+  自然落出来、不需要额外规则」：自然落出来的只是硬的那一半。
 - 扫掠体的截面离散补上另外两套口径（specs/009 T056）。libgm 里挤出 / 回转 / 放样
   是三个类三条路，而 `sweep_mesh` 三支共用挤出那一套折线化——T040 当时只修了
   `manifold_tessellate::tessellate_revolution`，没往扫掠这条路上看，于是弧墙与斜切墙

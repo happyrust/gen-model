@@ -70,3 +70,9 @@
   `the_postcondition_counts_owner_edges_in_every_ref0_range`）+ 隔离库实测
   ——`src/data_interface/fast_delete.rs`、`docs/adr/ADR-021-watermark-must-be-data-backed.md`、
   `docs/evidence/pe-owner-range-fast-delete-20260820/`
+- [x] T019 初始化模型有界消费回归（FR-010a）：自动 Regen 页固定 100 根，
+  post-regen AABB 页固定 256 条；每页 Regen 后重新探测并在待办未清时禁止
+  AABB 越过。忙根锁延后不增加 attempts，任务详情限制为 10 个根样本，
+  单次任务列表最多 160 条且响应小于 256 KiB，启动等待日志按真实阶段与页进度播报
+  ——`src/data_interface/model_update_pending.rs`、`src/data_interface/batch_worker.rs`、
+  `src/web_service/handlers.rs`、`src/lib.rs`

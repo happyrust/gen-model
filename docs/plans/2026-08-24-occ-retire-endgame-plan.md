@@ -167,7 +167,7 @@ T004 后半、T008、T025–T028、T045a、T046–T049、T031、T032。
   全量 lib 测试里本批触碰模块（prim_geo / shape / test_shape）的红仍只有
   wire 那 3 条既有红（归属另一会话未提交的 wire.rs 改动）；`rg truck` 零命中。
   两处脚本清不掉的悬空文档注释（sweep_solid 尾部、pdms_shape trait 头）手工清除。
-- **X1a（T031 本体，依赖 R1–R4 全绿）** gen-model 摘 `occ`：
+- **X1a（T031 本体；2026-08-24 已做，先于 R1–R4——见执行注记）** gen-model 摘 `occ`：
   default / console 去 `occ`，`occ = ["aios_core/occ", "dep:opencascade"]` 与
   `dep:opencascade` 一并删除；mesh_compare 的 OCC 参照分支删除（R4 对拍时先开着
   occ 对照跑最后一轮留证，然后再摘）；occ_generate.rs 两个死布尔函数删除
@@ -176,12 +176,35 @@ T004 后半、T008、T025–T028、T045a、T046–T049、T031、T032。
   在 R1 直墙 RVM 绿后属重复覆盖、删除。CI 增加「无 occ 时失败闭合」测试。
   ADR-030 补决策 7 修订（回滚口径改 git revert）。
   门：`rg 'feature = "occ"'` 在 gen-model 零命中；CI 口径全量绿；失败闭合测试红转绿。
-- **X1b（vendor，X1a 合入且 rev bump 之后，单独一批）** vendor 摘 `occ`：
+
+  **执行注记（2026-08-24）**：实际落地为 `56ce58c6`（最后 11 处 cfg 门：死布尔
+  函数对删除、两个 occ 门控回归测试转 manifold 净增覆盖）+ `8cf820ab`（feature /
+  `dep:opencascade` / occt-rs `[patch]` 全删，脚本 feature 串同步）+ `e57cd3bc`
+  （注释追平）。**没有等 R1–R4**：GENSEC 用例转 manifold 零成本保住覆盖，而 R 门
+  本身被 8009 库损坏挡着（重建配置 `db_options/DbOption-rvm-rebuild.toml` 已备）。
+  代价记两条——RVM 验收欠账原样挂在 WP-J；「R4 最后一轮开着 occ 对照留证」不再可行，
+  对拍只剩 E3D 导出基准一条路。失败闭合：`not(manifold)` 即 bail +
+  `gen_inst_meshes_bails_without_backend_and_tries_libgm_first` 源码断言在位。
+  台账 2026-08-14 那 8 条带 occ 量出的 mesh 记录同批标作废。ADR-030 决策 7 修订
+  （回滚=git revert）随 X1b 批补入。
+- **X1b（vendor；2026-08-24 已做，随本批推上游）** vendor 摘 `occ`：
   default 去 `occ`、删 `occ` feature 与 opencascade 依赖、22 个文件的翻译层
   （`gen_occ_shape` 自 trait 摘除）。前置：X1a 已发布（vendor occ 自此零激活方）。
   门：vendor 全量 no-default 测试；gen-model 升 rev 后 CI 绿。
   本机 opencascade-sys 本来就编不过（T050 记录），vendor default 带 occ 实际上
   已经是「本地不可构建的默认值」——这一步同时把它治了。
+
+  **执行注记（2026-08-24）**：aios-core `b546648c`——80 处 cfg 门 / 22 文件整段
+  拆除（`gen_occ_shape` 自 trait 摘除、`OccSharedShape` 与三个常量形状、
+  `gen_occ_mesh` / `gen_occ_wires` / `gen_occ_spline_wire` / `gen_plant_geo_data`、
+  occ-only `test_wire` 模块），顺带清掉 wire.rs 里 14 个「正文只剩一行被注释的
+  `gen_occ_wires` 调用」的空壳测试、`gen_unit`/`gen_unit_occ_shape` 两个 todo husks
+  与 polyhedron.rs 一处从未定义过的 `feature = "opencascade"` 死门。
+  门已验：no-default `cargo check` lib 零警告；全量 lib 测试改前/改后 116/59 vs
+  102/59——59 条失败**逐名一致**（56 条要活库、3 条 wire 红归另一会话线），少的
+  14 条 pass 恰是删掉的空壳。rev bump 链一次推齐：parse-pdms-db `78cc3ca1` →
+  pdms-io `8f984ee0` → 本仓两个 Cargo.toml 同步（f835a9da 双份 crate 的教训），
+  只动各自 Cargo.toml、不携带兄弟仓工作区里另一条线的未提交改动。
 - **X2（T032）** `changelog.md`、live 台账、`cargo fmt` / `cargo check`、
   aios-core 解耦合上游（V4 已做即免）、`Toggle-LocalDeps -Off` 复核后推送。
 

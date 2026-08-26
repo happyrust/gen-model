@@ -35,5 +35,14 @@
 - [ ] T19 运行 `cargo fmt`、`cargo check --tests`、相关 feature 单测与 isolated live 测试。
 - [ ] T20 执行 `sigmap verify-plan`、`sigmap verify-ai-output`、`sigmap review-pr`，结果留证。
 
+- [x] T21 模型认领页与执行组解耦：100 根 claim、默认 16 根 execution group，根锁只覆盖
+      即将执行的小组；组间出现数据工作/epoch变化即停止接纳，未开始根不增加 attempts。
+- [x] T22 `occ_generate` 后半程改为有界根级流水，单根失败逐根回报，健康根直接收口；
+      Shape writer 与 AABB 串行纪律不变，并暴露 geometry/Shape 并发遥测。
+- [x] T23 当前水位生成根凭证接入启动与 `model_ready`，缺凭证根自动补入既有队列；新增
+      watch-scope 内指定 dbnum 的幂等全量模型重建 API。
+- [ ] T24 在独立 SurrealDB 2.1.x 7997 快照上完成三轮 legacy / 三轮 adaptive A/B、语义
+      hash、RSS/DB p99/写入量硬门和最终收敛；未完成前不得宣称性能发布门通过。
+
 `[P]` 仅表示文件所有权互不重叠时可并行。T05 必须先于 T06–T08：先在一处验证「额度 = 1 与
 改前等价」，再铺开。T02 必须先于 T17，否则加速比没有对照组。

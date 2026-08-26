@@ -171,6 +171,15 @@ libgm §7.9.1 的调用点表说明每个曲面原语喂进 `d2_numberOfSegments
     背景一节里「第二个抑留点」的说法自此作废，OCC 抑留点只剩扫掠体（PrimLoft）一处。
     浸水若重新立项，从 spec 起步，不要从 git 里捞这份（它的 STP 导出从未发布过）。
 
+12. **决策 7 作废：回滚口径改为 git revert。** 「回滚只加回 `occ=true`」自 T037 起
+    就不再成立——形状回退拆除后，带 `occ` 的构建形状也只走 manifold，把 feature
+    加回来什么都不会变。X1a（gen-model 摘 `occ` feature 与 `dep:opencascade`，
+    `56ce58c6` + `8cf820ab`）与 X1b（aios-core 摘 `occ` feature、opencascade 依赖
+    与 22 个文件的翻译层，aios-core `b546648c`）落地后，这个开关本身已不存在。
+    真回滚 = revert 对应提交并沿 rev bump 链回退。「后果」一节第二条
+    （aios-core / gen-model 仍保留 occ）自此成为历史陈述；RVM 门（WP-J）仍欠的
+    验收账不因摘除而免——见 specs/009 tasks T046–T049。
+
 分期（出口见 spec）：Phase 0 失败闭合；Phase 1 布尔（ADR-029，进行中）；Phase 2 可盖
 原语；Phase 3 扫掠体网格器；Phase 4 才从 default/release 删除 `occ`。
 

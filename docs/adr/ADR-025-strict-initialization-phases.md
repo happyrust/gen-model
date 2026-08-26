@@ -29,13 +29,14 @@ ADR-017（暂存窗口提交）、ADR-021（水位数据支撑）；`specs/006-s
    最前，其余按 `included_projects` 的书写顺序接着排。显式名单是覆盖层不是全部顺序——
    没点到名是「没意见」，不是「排不出主」。同项目重复、显式名单含未知或重复项目、
    头部不可读、目录不可达或 Ref0 归属冲突均阻断所在阶段。
-7. 数据批次只提交数据、水位与持久模型意图。模型 drain、启动全量生成及会产生新模型的
-   按需请求仅在 `data_ready` 后执行；房间保持在模型之后。
+7. 数据批次只提交数据、水位与模型意图。模型 drain、显式全量生成工具及会产生新模型的
+   按需请求仅在 `data_ready` 后执行；房间保持在模型之后。根据后续 ADR-051，服务启动
+   不再仅因 `gen_model` / `gen_mesh` 开启而隐式执行全量生成。
 8. 模型 drain 是阶段控制器的正式消费者而不是无条件空闲任务。每页可预取多个根，但必须
    逐根执行，并在认领前、每根前后重新检查当前 epoch、模型门及数据队列。新数据到达时，
    当前单根完成后立即让位；未执行的持久工作不记失败、不增加 attempts。
-9. `model_update_pending` 继续是重启可恢复的唯一工作真值。进程内 `model_drain` 任务只记录
-   一次消费尝试的 epoch、来源会话、根和结果；瞬态 epoch 不写回持久 pending 行。
+9. `model_update_pending` 记录一次消费尝试的 epoch、来源会话、根和结果。根据后续
+   ADR-050，它只属于当前进程，重启后的工作真值由文件会话号与 `applied_sesno` 重新比对。
 
 ## 后果
 
@@ -58,3 +59,13 @@ ADR-017（暂存窗口提交）、ADR-021（水位数据支撑）；`specs/006-s
 ## 2026-08-19 Oracle 审核修订
 
 manifest/epoch 安装与任务冻结共用 activation gate；锁序固定为 activation gate → scheduler queue → coordinator，下一 epoch 不得越过旧 epoch 的冻结边界。
+
+## 2026-08-25 实施说明：模型完整性与有界根级流水
+
+- 模型阶段打开前先调用既有 `fn::sync_gen_roots` 物化当前生成根；成功凭证同时记录
+  `source_end_sesno` 与 `source_end_sesno_time`，只有与当前数据水位快照一致才满足模型门。
+- 数据库认领页保持 100，但根锁和不可抢占实例生成按 execution group 获取；组间重新检查
+  epoch、数据队列和模型门。组内 Shape writer 单路，后半程根并发复用全局 geometry gate，
+  AABB 仍由 `SPATIAL_STATE_SERIAL` 单路发布。
+- 指定 dbnum 重建端点只强制重排权威根到同一 `model_update_pending` 消费器；不增加第二条
+  模型消费路径，不删除旧显示，不改变数据水位，进程重启后不自动恢复人工重建任务。

@@ -26,6 +26,16 @@ Rust edition 2024，**必须用 nightly**（`.cargo/config.toml` 带 `-Z threads
 - `rs_surreal/` —— 分专业物料清单 `.surql`；`teach/` —— core.dll 逆向学习材料
 - `bin/`、`vendor/` —— **未纳入 git**。`bin/surreal.exe` 是那份 fork 的 2.1.4，新克隆的仓库没有
 
+<important if="you need to use E3D TTY, export RVM or ATT, or export the live noun attribute dictionary">
+
+先读 `docs/2026-08-26_e3d-tty-ams-agent-usage-guide.md`。AMS 8000 增量的固化入口是
+`scripts/e3d/Test-TtyNetWindow.ps1`；必须从 apply 继续到 `parse.net_window`、finally
+restore、业务属性恢复和合并窗口净零。若还要验服务链，再提交 8000 并检查 task、水位、
+staging、side effect、worker、health 和最终文件重开，不能停在 E3D 宏 exit 0。RVM
+几何-only 走 TTY 宏；RVM+ATT 走 `GenModelRvmExport` pair；noun 属性字典是另一套导出，
+三者不得混称或只凭进程退出码验收。
+</important>
+
 <important if="you need to run commands to build, test, lint, clean, or start the database">
 
 **禁止 `cargo clean`**（宪法「运行环境」条）。`target-dir` 已指到仓库外的 `../target`，编译产物是共享的。
