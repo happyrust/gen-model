@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use aios_core::RefU64;
 use anyhow::Context;
-use parse_pdms_db::paged::{PageReadStats, PagedDbSession};
+use parse_pdms_db::paged::PagedDbSession;
 use parse_pdms_db::parse::{DbIndexData, EleData};
 
 const READ_MODE_ENV: &str = "AIOS_PDMS_ON_DEMAND_READ_MODE";
@@ -68,7 +68,6 @@ pub(crate) struct OnDemandDbSession {
     path: PathBuf,
     dbnum: u32,
     source: SessionSource,
-    parsed_records: usize,
     parent: Option<Box<OnDemandDbSession>>,
 }
 
@@ -143,7 +142,6 @@ impl OnDemandDbSession {
             path: path.to_path_buf(),
             dbnum: authoritative.token().dbnum() as u32,
             source,
-            parsed_records: 0,
             parent: None,
         })
     }
@@ -195,26 +193,7 @@ impl OnDemandDbSession {
                 Ok(paged_ele)
             }
         }?;
-        self.parsed_records += usize::from(result.is_some());
         Ok(result)
-    }
-}
-
-impl Drop for OnDemandDbSession {
-    fn drop(&mut self) {
-        let (snapshot, stats) = match &self.source {
-            SessionSource::Legacy(_) => return,
-            SessionSource::Paged(paged) | SessionSource::Compare { paged, .. } => {
-                (paged.snapshot(), paged.stats())
-            }
-        };
-        log_page_summary(
-            &self.path,
-            snapshot.sesno,
-            snapshot.page_size,
-            stats,
-            self.parsed_records,
-        );
     }
 }
 
@@ -283,10 +262,7 @@ fn scan_ref0s_paged(path: &Path) -> anyhow::Result<Vec<u32>> {
         authoritative.token().target_sesno()
     );
     authoritative.verify_path_identity()?;
-    let values = session.scan_ref0s()?;
-    let snapshot = session.snapshot();
-    log_page_summary(path, snapshot.sesno, snapshot.page_size, session.stats(), 0);
-    Ok(values)
+    session.scan_ref0s()
 }
 
 fn scan_ref0s_legacy(path: &Path, project: &str) -> anyhow::Result<Vec<u32>> {
@@ -448,32 +424,18 @@ fn read_dbnum(path: &Path) -> Option<u32> {
     (info.db_no != 0).then_some(info.db_no)
 }
 
-fn log_page_summary(
-    path: &Path,
-    sesno: u32,
-    page_size: usize,
-    stats: PageReadStats,
-    parsed_records: usize,
-) {
-    println!(
-        "[paged_db] path={} snapshot_sesno={} page_size={} physical_pages={} bytes_read={} cache_hits={} cache_misses={} prefetched_pages={} index_pages={} record_pages={} parsed_records={}",
-        path.display(),
-        sesno,
-        page_size,
-        stats.physical_pages_read,
-        stats.bytes_read,
-        stats.cache_hits,
-        stats.cache_misses,
-        stats.prefetched_pages,
-        stats.index_pages_read,
-        stats.record_pages_read,
-        parsed_records
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_session_paged_db_summary_is_absent() {
+        let source = include_str!("on_demand_db.rs");
+        assert!(
+            !source.contains(concat!("[paged_db] ", "path={} snapshot_sesno=")),
+            "按会话输出的分页读取统计不应打印到控制台"
+        );
+    }
 
     #[test]
     fn upgraded_file_snapshot_mismatch_is_detected() {

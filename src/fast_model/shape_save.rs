@@ -379,19 +379,6 @@ pub(crate) async fn run_shape_save_receiver(
 
         let outcome = flush_batch(frozen, mode, reason, first_at.elapsed()).await?;
         let channel_closed = reason == FlushReason::ChannelClosed;
-        println!(
-            "shape_save_flush mode={mode:?} reason={:?} source_batches={} instances={} geos={} wait_ms={} metadata_queries={} sql_packets={} sql_bytes={} scoped_deletes={} conflicts={}",
-            outcome.flush_reason,
-            outcome.source_batch_count,
-            outcome.instance_rows,
-            outcome.geo_occurrences,
-            outcome.coalesce_wait.as_millis(),
-            outcome.metadata_query_count,
-            outcome.sql_packet_count,
-            outcome.sql_bytes,
-            outcome.scoped_delete_count,
-            outcome.conflict_count,
-        );
         run.record(outcome);
         if channel_closed && pending.is_none() {
             break;
@@ -424,6 +411,19 @@ pub(crate) async fn run_shape_save_receiver(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn per_flush_console_spam_is_absent_but_run_summary_remains() {
+        let source = include_str!("shape_save.rs");
+        assert!(
+            !source.contains(concat!("shape_save_", "flush mode=")),
+            "每次 flush 不应逐条打印到控制台"
+        );
+        assert!(
+            source.contains(concat!("shape_save_", "summary mode=")),
+            "每轮汇总日志仍应保留"
+        );
+    }
 
     fn measure(instances: usize, geos: usize, bytes: usize) -> BatchMeasure {
         BatchMeasure {
