@@ -51,9 +51,10 @@ rustc-ice-*.txt
 /performance_trace.json
 
 # 逆向 / Agent 会话工作区与本地 agent 会话状态，仅本机有效
+# （.cursor/ 整目录：hooks、plans、mcp.json 与 KC-Chat 运行时都是本机产物）
 /.ida_scratch/
 /.context/
-/.cursor/rules/pchat.mdc
+/.cursor/
 /.codex/
 
 # 按 issue / 场次归档的一次性实测工作区（截图、抓取、备份 JSON、临时 exe）
@@ -135,9 +136,3 @@ __pycache__/
 /shot.png
 # run_ams_gui.bat 每次启动都重写这份 stderr 抓取，上面那条 `*.log` 盖不住 `.log.err`
 /scripts/e3d/*.log.err
-
-# KC-Chat 运行时产物（插件自动生成，请勿入库）
-.cursor/mcp.json
-.cursor/kc-mcp/
-.cursor/kc-mcp-messages/
-.cursor/kc-chat-exports/
