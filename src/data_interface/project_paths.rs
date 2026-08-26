@@ -1,7 +1,8 @@
 //! 项目目录与监控目录（watch dirs）的唯一解析口径。
 //!
-//! 当期扫描范围由 `included_projects` 唯一限定：其中每个值都是 `project_path` 下的
-//! 文件夹名。`project_dirs` 不参与范围判定，也不能把名单中的项目重定向到别处。
+//! 当期扫描范围由 `included_projects` 唯一限定；当 `project_dirs` 存在时，它按相同
+//! 下标提供 `project_path` 下的真实文件夹名。它只改变名单内项目的目录映射，不能把
+//! 名单外项目加入扫描范围。
 //!
 //! 这里取代 `aios_core::file_helper::collect_db_dirs`。那个实现把整批项目
 //! `collect::<io::Result<Vec<_>>>()`，于是**任何一个**项目 `read_dir` 失败
@@ -65,14 +66,23 @@ fn is_project_folder_name(raw: &str) -> bool {
 
 /// 解析当期名单中的项目根目录。
 ///
-/// `included_projects` 的值就是 `project_path` 下的文件夹名。名单外项目、空值、绝对
-/// 路径和多段相对路径都返回 `None`；`project_dirs` 不参与解析，避免它扩大或重定向
-/// 当期扫描范围。大小写不敏感地确认成员，但拼路径时保留配置中的真实文件夹名。
+/// `included_projects` 是逻辑项目名单；`project_dirs` 存在时按同一位置提供实际文件夹
+/// 名，不存在时逻辑项目名同时也是文件夹名。名单外项目、空值、绝对路径、多段相对
+/// 路径以及两份列表长度不匹配都返回 `None`。大小写不敏感地确认成员，但拼路径时
+/// 保留配置中的真实文件夹名。
 pub fn resolve_project_root(db_option: &DbOption, project: &str) -> Option<PathBuf> {
-    let folder = db_option
+    let index = db_option
         .included_projects
         .iter()
-        .find(|folder| folder.trim().eq_ignore_ascii_case(project.trim()))?;
+        .position(|name| name.trim().eq_ignore_ascii_case(project.trim()))?;
+    let logical_name = &db_option.included_projects[index];
+    if !is_project_folder_name(logical_name) {
+        return None;
+    }
+    let folder = match db_option.project_dirs.as_ref() {
+        Some(project_dirs) => project_dirs.get(index)?,
+        None => logical_name,
+    };
     if !is_project_folder_name(folder) {
         return None;
     }
@@ -233,7 +243,8 @@ pub fn plan_watch_dirs(db_option: &DbOption) -> WatchDirPlan {
                 root: None,
                 db_dirs: Vec::new(),
                 problem: Some(
-                    "included_projects 条目必须是 project_path 下的单个文件夹名".to_string(),
+                    "included_projects 与同位置 project_dirs 条目必须是 project_path 下的单个文件夹名"
+                        .to_string(),
                 ),
             });
             continue;
@@ -618,21 +629,41 @@ mod tests {
         );
     }
 
-    /// `project_dirs` 不能把 included_projects 中的文件夹重定向到扫描根之外。
+    /// `project_dirs` 按下标提供名单内项目的真实文件夹名，但不能扩大项目名单。
     #[test]
-    fn project_dirs_cannot_redirect_or_expand_the_scan_scope() {
+    fn project_dirs_select_the_folder_name_without_expanding_scope() {
         let fixture = Fixture::new("scope-root");
-        let elsewhere = Fixture::new("scope-elsewhere");
-        let allowed = fixture.dir("Allowed/allowed000");
-        let redirected = elsewhere.dir("Redirected/redirected000");
-        let option = fixture.options(&["Allowed"], Some(&[&redirected.to_string_lossy()]));
+        fixture.dir("Allowed/ignored000");
+        let selected = fixture.dir("PhysicalFolder/selected000");
+        let option = fixture.options(&["LogicalProject"], Some(&["PhysicalFolder"]));
 
         let plan = plan_watch_dirs(&option);
 
-        assert_eq!(identities(&plan.dirs()), identities(&[allowed]));
-        assert!(!identities(&plan.dirs()).contains(&path_identity(&redirected)));
-        assert!(resolve_project_root(&option, "Redirected").is_none());
+        assert_eq!(identities(&plan.dirs()), identities(&[selected]));
+        assert_eq!(
+            resolve_project_root(&option, "logicalproject"),
+            Some(fixture.root.join("PhysicalFolder"))
+        );
+        assert!(resolve_project_root(&option, "PhysicalFolder").is_none());
         assert!(plan.problems().is_empty(), "{:?}", plan.problems());
+    }
+
+    /// 映射表缺项必须有声失败，不能越界 panic，也不能悄悄退回逻辑项目名。
+    #[test]
+    fn a_short_project_dirs_list_is_reported_instead_of_falling_back() {
+        let fixture = Fixture::new("short-project-dirs");
+        fixture.dir("Second/second000");
+        let option = fixture.options(&["First", "Second"], Some(&["FirstFolder"]));
+
+        assert!(resolve_project_root(&option, "Second").is_none());
+        let plan = plan_watch_dirs(&option);
+        assert!(plan.dirs().is_empty());
+        assert_eq!(plan.problems().len(), 2, "{:?}", plan.problems());
+        assert!(
+            plan.problems()[1].contains("project_dirs"),
+            "{:?}",
+            plan.problems()
+        );
     }
 
     /// UNC 的两种写法（`//host/share` 与 `\\host\share`）必须归一到同一个路径，
