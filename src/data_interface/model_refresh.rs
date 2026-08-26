@@ -17,7 +17,7 @@ use aios_core::pdms_types::*;
 use anyhow::Context;
 
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::gen_model::gen_all_geos_data_with_policy;
+use crate::fast_model::gen_model::{TargetedGenerationReport, gen_targeted_geos_data_with_policy};
 
 fn dependency_stall_message() -> String {
     let seconds = crate::data_interface::batch_worker::DEPENDENCY_STALL_TIMEOUT.as_secs();
@@ -186,8 +186,23 @@ impl ModelRefreshPolicy {
         mgr: &AiosDBManager,
         roots: &[String],
     ) -> anyhow::Result<()> {
+        let report = Self::generate_roots_report(mgr, roots).await?;
+        if report.failures.is_empty() {
+            Ok(())
+        } else {
+            anyhow::bail!(crate::fast_model::occ_generate::summarize_root_failures(
+                "model",
+                &report.failures
+            ))
+        }
+    }
+
+    pub(crate) async fn generate_roots_report(
+        mgr: &AiosDBManager,
+        roots: &[String],
+    ) -> anyhow::Result<TargetedGenerationReport> {
         if roots.is_empty() {
-            return Ok(());
+            return Ok(TargetedGenerationReport::default());
         }
         crate::data_interface::initialization_phase::require_model_generation()?;
         #[cfg(test)]
@@ -292,8 +307,12 @@ impl ModelRefreshPolicy {
         } else {
             crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback
         };
-        gen_all_geos_data_with_policy(&db_option, failure_policy).await?;
-        Ok(())
+        gen_targeted_geos_data_with_policy(
+            &db_option,
+            failure_policy,
+            crate::data_interface::model_concurrency::effective_root_inflight(),
+        )
+        .await
     }
 
     /// F1/F3（T304）补偿路径专用：补偿只有 `changed_refnos`（不含操作类型），故按**当前

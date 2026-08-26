@@ -10,8 +10,6 @@
 
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
-#[cfg(feature = "gen_model")]
-use crate::fast_model::gen_all_geos_data;
 use crate::fast_model::room_model::{
     StartupRoomBuild, build_room_relations, reconcile_startup_room_build,
 };
@@ -83,15 +81,20 @@ fn open_process_instance_lock(path: &std::path::Path) -> std::io::Result<File> {
         .open(path)
 }
 
+#[cfg(windows)]
+fn process_instance_lock_path(db_option: &DbOption, project: &str) -> Option<PathBuf> {
+    crate::data_interface::project_paths::resolve_project_root(db_option, project)
+        .map(|root| root.join(".gen-model.instance.lock"))
+}
+
 /// pub：Python 调试绑定（python/aios-py）的 `full_init` 与 `run_app`/`run_cli`
 /// 共用同一把单实例锁——mutating 管线不允许有第二个进程并发驱动。
 #[cfg(windows)]
 pub fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()> {
     let project = db_option.project_name.clone();
     let held = PROCESS_INSTANCE_LOCK.get_or_init(|| {
-        let root = crate::data_interface::project_paths::resolve_project_root(db_option, &project)
+        let path = process_instance_lock_path(db_option, &project)
             .ok_or_else(|| format!("未解析到项目 {project} 的单实例锁目录"))?;
-        let path = root.join(".gen-model.instance.lock");
         let mut file = open_process_instance_lock(&path).map_err(|error| {
             format!(
                 "项目 {project} 已有 gen-model 实例，或单实例锁不可访问（{}）: {error}",
@@ -134,7 +137,24 @@ pub fn acquire_process_instance_lock(_db_option: &DbOption) -> anyhow::Result<()
 
 #[cfg(all(test, windows))]
 mod process_instance_lock_tests {
-    use super::open_process_instance_lock;
+    use super::{open_process_instance_lock, process_instance_lock_path};
+
+    #[test]
+    fn lock_path_uses_the_project_dirs_folder_mapping() {
+        let mut option = aios_core::get_db_option().clone();
+        option.project_path = r"D:\project-root".to_string();
+        option.included_projects = vec!["LogicalProject".to_string()];
+        option.project_dirs = Some(vec!["PhysicalFolder".to_string()]);
+
+        assert_eq!(
+            process_instance_lock_path(&option, "LogicalProject"),
+            Some(
+                std::path::Path::new(r"D:\project-root")
+                    .join("PhysicalFolder")
+                    .join(".gen-model.instance.lock")
+            )
+        );
+    }
 
     #[test]
     fn deny_share_handle_blocks_a_second_process_style_open_until_drop() {
@@ -411,6 +431,15 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if let Err(e) = crate::fast_model::pdms_inst::sweep_inst_relate_flat().await {
         eprintln!("inst_relate 平表副本清扫失败（下次启动重试）: {}", e);
     }
+    // 老格式再现探针（Spec 025 FR-9 盲区补口）：迁移标记已落的库上又出现
+    // booled_id 与 insts_flat 不符的行，只可能来自旧 writer 混跑——migration
+    // 按库上标记跳过、清扫两段也够不着，FR-8/T20 读侧自检落地前这里是唯一报告点。
+    // 只挂启动序列（FR-1：inst_relate 全表谓词只许启动序列与人工诊断入口）。
+    if let Err(e) =
+        crate::fast_model::pdms_inst::probe_booled_flat_regression_after_migration().await
+    {
+        eprintln!("布尔平表老格式再现探针失败（下次启动再探）: {}", e);
+    }
     println!(
         "启动预加载与自愈维护全部完成，总耗时 {}",
         fmt_elapsed(preload_started.elapsed())
@@ -460,8 +489,17 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     let scheduler = crate::data_interface::batch_scheduler::BatchScheduler::global();
     let initialization =
         crate::data_interface::initialization_phase::InitializationCoordinator::global();
-    let full_model_requested = db_option.is_gen_mesh_or_model();
-    initialization.configure_model_bootstrap(full_model_requested);
+    // `gen_model` / `gen_mesh` are model-stage capability switches, not a
+    // request to rebuild every root at each process start. Startup discovery
+    // has already compared file_latest_sesno with applied_sesno and queued only
+    // first-load/reinit/increment windows; let those batches create the exact
+    // model work for this process. Explicit full-build tools keep calling
+    // `gen_all_geos_data` directly outside this service-startup path.
+    initialization.configure_model_bootstrap(false);
+    println!(
+        "启动模型策略：gen_model={} gen_mesh={} 仅控制增量模型阶段；按文件会话号与 applied_sesno 比对结果执行，不启动整库全量生成",
+        db_option.gen_model, db_option.gen_mesh
+    );
     if !sync_live {
         initialization.mark_data_ready_without_manifest();
     }
@@ -477,9 +515,20 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     );
     if !scheduler.is_auto_work_armed() {
         println!(
-            "startup_autorun=false：本次启动不执行任何增量与全量房间重建；\
-             重扫照常发现并入队，但排出来的行挂起，等各自的 dbnum 真的来增量再跑"
+            "startup_autorun=false 且未声明 watch_dbnums：本次启动不执行任何增量与\
+             全量房间重建；重扫照常发现并入队，但排出来的行挂起，等各自的 dbnum \
+             真的来增量再跑（想只跑几个库就写 watch_dbnums，见 ADR-048）"
         );
+        if !sync_live {
+            // 解封条件是「某个 dbnum 真的来一次增量」，而增量只能由 watcher 或
+            // 人工执行送来。watcher 没起，就只剩人工那一条——这话必须当面说清楚，
+            // 否则队列里的行会安静地躺到下次重启。
+            println!(
+                "⚠ 同时 sync_live=false：watcher 没启动，不会有文件事件来解封任何一行。\
+                 除非走人工执行 / 按需生成，持久积压（model_update_pending）本次不会\
+                 有任何进展"
+            );
+        }
     }
     if sync_live {
         println!("正在启动监控目录 watcher（首轮重扫入队，含库文件存档压缩，可能较久）...");
@@ -539,6 +588,16 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         println!("数据初始化完成，模型阶段可以开始");
     }
 
+    // 数据基线完成后把权威生成根覆盖与当前水位快照对齐——run_app 里 ADR-050 那次
+    // 无条件清空的补偿路径，因此**不**只挂在监听限定域上：限定域逐库 sync + 补种，
+    // 未限定域按 gen_root 凭证点查、过期才补种（口径见函数注释）。仅看
+    // model_update_pending=0 会把“从未生成过的根”误判成完成；这里只补缺失工作，
+    // 不改水位、不删旧模型，也不越过 watch_dbnums。任何一库失败都告警后继续，
+    // 不把一个库的配置错变成整个服务的崩溃循环。
+    if startup_data_ready {
+        crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup().await;
+    }
+
     // 启动分层判据装载空间树（docs/2026-08-11_spatial-tree-startup-init-plan.md）：
     // 指纹（epoch 值 + 库侧时间戳）一致 → 直接复用；失配但有待重放空间意图 →
     // 复用文件交给重放自愈；失配且无意图 / 文件缺失损坏 → 只读指针重建。
@@ -560,79 +619,15 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 状态读取。
     crate::fast_model::spatial_state::spawn_spatial_revalidator();
     // progress_sender.send(10)?;
-    //todo 还有个问题，可能需要通过队列来排队任务
-    //如果没有生成完，需要等待
-    if full_model_requested && startup_data_ready {
-        println!("正在生成模型");
-        let mut time = Instant::now();
-        fs::create_dir_all("assets/meshes")?;
-        //统计一下assets mesh 目录下有多少个mesh，直接忽略去生成
-        let path: PathBuf = "assets/meshes".into();
-        //收集目录下的文件名
-        // let paths = fs::read_dir(path).unwrap();
-        // for entry in paths {
-        //     let entry = entry.unwrap();
-        //     let path = entry.path();
-        //     let geo_hash = path
-        //         .file_stem()
-        //         .unwrap()
-        //         .to_str()
-        //         .unwrap()
-        //         .to_string();
-        //     // 反序列成PlantMesh
-        //     if let Ok(mesh) = PlantMesh::des_mesh_file(&geo_hash) && let Some(aabb) = mesh.aabb{
-        //         EXIST_MESH_GEO_HASHES.insert(geo_hash, aabb);
-        //     }
-        // }
-        if !initialization.begin_full_model() {
-            anyhow::bail!("全量模型启动时数据阶段未就绪");
-        }
-        let full_model_result = gen_all_geos_data(&db_option).await;
-        initialization.end_full_model();
-        scheduler.wake();
-        full_model_result?;
-        // A watcher event may have installed a newer data epoch while the full
-        // model pass was running.  Let that epoch settle before opening durable
-        // model work or any room post-processing.
-        initialization.wait_for_data_ready().await;
-        //保存
-        // println!("生成完所有模型花费时间: {} ms", time.elapsed().as_millis());
-    } else if full_model_requested {
-        println!("数据初始化清单仍在 awaiting_trigger，保留全量模型工作直至真实触发释放清单");
-        let deferred_option = db_option.clone();
-        tokio::spawn(async move {
-            let initialization =
-                crate::data_interface::initialization_phase::InitializationCoordinator::global();
-            initialization.wait_for_data_ready().await;
-            println!("真实触发已完成全部数据前置阶段，开始延期的全量模型生成");
-            if !initialization.begin_full_model() {
-                return;
-            }
-            let result = gen_all_geos_data(&deferred_option).await;
-            initialization.end_full_model();
-            crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
-            match result {
-                Ok(_) => {
-                    initialization.wait_for_data_ready().await;
-                    if initialization.open_model_phase() {
-                        crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
-                    }
-                }
-                Err(error) => {
-                    log::error!("延期全量模型生成失败，模型门保持关闭: {error:#}");
-                    eprintln!("延期全量模型生成失败，模型门保持关闭: {error:#}");
-                }
-            }
-        });
-    }
-
     if startup_data_ready {
         if initialization.open_model_phase() {
             scheduler.wake();
             // 收敛发生在 worker 空闲轮里（模型积压分页消化、空间收敛、AABB 落盘，
             // 任一环失败都按 30s 退避重试），主线可能要等很久。干等会让启动看起来
-            // 像挂死——每分钟报一次还在等什么，进展与失败原因在空闲轮日志与 /health。
+            // 像挂死——数量/阶段变化时报实际进展，完全不变时最多每 300s 提醒一次。
             let mut waited_secs = 0u64;
+            let mut last_wait_fingerprint: Option<String> = None;
+            let mut last_wait_emitted_secs = 0u64;
             loop {
                 if tokio::time::timeout(
                     std::time::Duration::from_secs(60),
@@ -644,10 +639,71 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
                     break;
                 }
                 waited_secs += 60;
-                println!(
-                    "仍在等待持久模型工作单与 AABB 阶段收敛（已等 {waited_secs}s；\
-                     进展与失败原因见空闲轮日志与 /health 的 initialization / batch_failures）"
-                );
+                let pending =
+                    crate::data_interface::model_update_pending::model_pending_status().await;
+                let telemetry =
+                    crate::data_interface::model_update_pending::model_drain_telemetry_snapshot();
+                let (message, fingerprint) = match pending {
+                    Ok(status) => {
+                        let count = |action: &str| {
+                            status
+                                .by_action
+                                .get(action)
+                                .map_or(0, |counts| counts.retryable)
+                        };
+                        let non_regen =
+                            count("transform") + count("delete_cleanup") + count("cascade_expand");
+                        let regen = count("regen_root");
+                        let aabb = count("post_regen_aabb");
+                        let stage = telemetry
+                            .get("last_stage")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("waiting");
+                        let page_claimed = telemetry
+                            .get("last_page_claimed")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                        let page_completed = telemetry
+                            .get("last_page_completed")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                        let phase = if non_regen > 0 {
+                            "non_regen"
+                        } else if regen > 0 {
+                            "regen_root"
+                        } else if aabb > 0 {
+                            "post_regen_aabb"
+                        } else {
+                            "spatial_persist"
+                        };
+                        let message = if regen > 0 {
+                            format!(
+                                "初始化模型进行中：阶段={phase} regen_root剩余={regen} \
+                                 当前页={page_completed}/{page_claimed} 子阶段={stage} 已等={waited_secs}s；AABB尚未开始"
+                            )
+                        } else {
+                            format!(
+                                "初始化模型进行中：阶段={phase} non_regen剩余={non_regen} \
+                                 AABB剩余={aabb} 当前页={page_completed}/{page_claimed} \
+                                 子阶段={stage} 已等={waited_secs}s"
+                            )
+                        };
+                        let fingerprint = format!(
+                            "{phase}|{non_regen}|{regen}|{aabb}|{stage}|{page_completed}|{page_claimed}"
+                        );
+                        (message, fingerprint)
+                    }
+                    Err(error) => (
+                        format!("读取初始化模型进展失败（已等 {waited_secs}s）: {error:#}"),
+                        format!("status_error:{error:#}"),
+                    ),
+                };
+                let changed = last_wait_fingerprint.as_deref() != Some(fingerprint.as_str());
+                if changed || waited_secs.saturating_sub(last_wait_emitted_secs) >= 300 {
+                    println!("{message}");
+                    last_wait_fingerprint = Some(fingerprint);
+                    last_wait_emitted_secs = waited_secs;
+                }
             }
             println!("持久模型工作单与 AABB 阶段已收敛");
         }
@@ -811,6 +867,15 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
         }
     }
 
+    // ADR-050: this table is only a scheduler ledger for the current process.
+    // Clear it after the database connection exists but before spatial loading,
+    // preload, db-manager construction, watcher startup, or worker startup. A
+    // cleanup error is fatal: continuing would replay a prior process snapshot.
+    let cleared = crate::data_interface::model_update_pending::clear_stale_at_process_start()
+        .await
+        .map_err(|error| anyhow!("启动清理 model_update_pending 失败，拒绝继续：{error:#}"))?;
+    println!("启动清理 model_update_pending 完成：删除 {cleared} 条历史工作单");
+
     // 启动分层判据装载空间树，与 run_app 同一失败语义（方案决策 D3）：树是可
     // 重建的派生数据，加载失败告警降级空树，不阻断启动；降级两态交给后台复检。
     if let Err(error) = crate::fast_model::aabb_tree::load_project_tree_verified().await {
@@ -895,6 +960,33 @@ mod startup_room_build_gate_tests {
         );
     }
 
+    /// ADR-048 的边界：监听限定域给批次与持久积压上弦，**不许**把启动全量房间
+    /// 重建一起拖回来。
+    ///
+    /// 收窄到几个库的人要的正是「别为 2 万面板的全量重建付那十几秒」。这道门要是
+    /// 改读 `is_auto_work_armed()` 或 `watch_scope`，写一句 `watch_dbnums = [8000]`
+    /// 就会顺带把全量重建拉起来——而那与限定域的字面意思正好相反。
+    #[test]
+    fn the_watch_scope_arming_must_not_drag_in_the_full_room_rebuild() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("async fn skip_startup_room_build()")
+            .expect("门必须存在")
+            .1
+            .split_once("\npub mod api;")
+            .expect("门之后是模块声明")
+            .0;
+
+        assert!(
+            !body.contains("watch_scope"),
+            "启动全量房间重建这道门不得读监听限定域（ADR-048）: {body}"
+        );
+        assert!(
+            !body.contains("is_auto_work_armed"),
+            "启动全量房间重建这道门只认 startup_autorun，不许改读上弦位（ADR-048）: {body}"
+        );
+    }
+
     #[test]
     fn startup_waits_for_data_then_models_before_rooms() {
         let source = include_str!("lib.rs");
@@ -912,13 +1004,42 @@ mod startup_room_build_gate_tests {
         );
         let web = body.find("serve_if_configured(mgr)").unwrap();
         let data = body.find("wait_for_data_ready().await").unwrap();
-        let full_model = body.find("gen_all_geos_data(&db_option).await").unwrap();
         let open_model = body.find("initialization.open_model_phase()").unwrap();
         // 等待包在带周期播报的 timeout 循环里，锚点只认调用本身，不认 `.await`。
         let model_ready = body.find("wait_for_model_ready()").unwrap();
         let room = body.find("build_room_relations(&db_option).await").unwrap();
         assert!(worker < data && web < data);
-        assert!(data < full_model && full_model < open_model);
+        assert!(data < open_model);
         assert!(open_model < model_ready && model_ready < room);
+    }
+
+    /// ADR-051: enabling model/mesh processing must not become an implicit
+    /// whole-db rebuild on every service restart. Startup has one authority for
+    /// deciding work: the watcher scan comparing file sessions with watermarks.
+    #[test]
+    fn startup_model_switches_do_not_bypass_incremental_comparison() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli exists")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_cli end exists")
+            .0;
+
+        assert!(
+            body.contains("initialization.configure_model_bootstrap(false)"),
+            "service startup must open the model phase for increment-produced work"
+        );
+        for forbidden in [
+            "is_gen_mesh_or_model()",
+            "gen_all_geos_data(&db_option)",
+            "begin_full_model()",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "service startup bypassed watermark comparison through {forbidden}"
+            );
+        }
     }
 }

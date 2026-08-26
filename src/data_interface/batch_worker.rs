@@ -136,6 +136,27 @@ static MODEL_DEAD_LETTER_ANNOUNCEMENT: std::sync::Mutex<ModelDeadLetterAnnouncem
         last_emitted_at: None,
     });
 
+static MODEL_LOCK_DEFER_ANNOUNCEMENT: std::sync::Mutex<(Option<String>, i64)> =
+    std::sync::Mutex::new((None, 0));
+
+fn announce_model_lock_deferred(done: usize, busy: usize, sample: Option<&str>) {
+    let fingerprint = format!("{busy}|{}", sample.unwrap_or(""));
+    let now = Local::now().timestamp();
+    let mut announcement = MODEL_LOCK_DEFER_ANNOUNCEMENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let changed = announcement.0.as_deref() != Some(fingerprint.as_str());
+    if !changed && now.saturating_sub(announcement.1) < MODEL_DEAD_LETTER_REPEAT_SECS {
+        return;
+    }
+    *announcement = (Some(fingerprint), now);
+    println!(
+        "空闲模型页完成 {done} 个，{busy} 个根锁正忙，不增加 attempts，{}s 后重试：{}",
+        IDLE_WAKE.as_secs(),
+        sample.unwrap_or("未记录样例")
+    );
+}
+
 fn announce_model_dead_letters(status: &model_update_pending::ModelPendingStatus) {
     let notice = MODEL_DEAD_LETTER_ANNOUNCEMENT
         .lock()
@@ -708,8 +729,9 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
     }
     if !scheduler.is_auto_work_armed() {
         println!(
-            "startup_autorun=false：重扫排出的批次一律挂起，持久积压也先不消化；\
-             某个 dbnum 真的来了增量（文件事件 / 人工执行）就放行它那一条并合并执行"
+            "startup_autorun=false 且未声明 watch_dbnums：重扫排出的批次一律挂起，\
+             本进程积压也先不消化；某个 dbnum 真的来了增量（文件事件 / 人工执行）\
+             就放行它那一条并合并执行（想只跑几个库就写 watch_dbnums，见 ADR-048）"
         );
     }
     println!(
@@ -735,7 +757,7 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
         }
         // spatial 收敛已在 drain 的出队门前执行；暂停只挡新批次与普通积压。
         // 上弦门（`startup_autorun=false` 且本进程还没见过真实增量）挡的是同一
-        // 侧：持久积压不按 dbnum 分，没法像队列行那样逐条挂起，只能整体等信号。
+        // 侧：本进程积压不按 dbnum 分，没法像队列行那样逐条挂起，只能整体等信号。
         let parked = idle_panic_ledger().parked();
         if !scheduler.is_paused() && scheduler.is_auto_work_armed() && !parked {
             // 空闲轮同样要隔离：房间收敛与范围刷新重扫都跑在这里，它们 panic
@@ -3436,13 +3458,13 @@ async fn idle_round(
             }
         }
     }
-    let data_phase_failed = if model_phase_open {
+    let (data_phase_failed, model_lock_deferred) = if model_phase_open {
         match model_update_pending::drain_data_phases_disposition(mgr).await {
             Ok(model_update_pending::ModelDrainDisposition::Completed { done }) => {
                 if done > 0 {
                     println!("空闲模型积压消化完成 {done} 个任务");
                 }
-                false
+                (false, false)
             }
             Ok(model_update_pending::ModelDrainDisposition::YieldedForData {
                 done,
@@ -3454,19 +3476,27 @@ async fn idle_round(
                     "空闲模型积压完成 {done} 个后让位数据：reason={} claimed_epoch={claimed_epoch} current_epoch={current_epoch}",
                     reason.as_str()
                 );
-                false
+                (false, false)
             }
             Ok(model_update_pending::ModelDrainDisposition::Failed { done, message }) => {
                 println!("空闲模型积压完成 {done} 个后失败（保留待重试）: {message}");
-                true
+                (true, false)
+            }
+            Ok(model_update_pending::ModelDrainDisposition::DeferredForLock {
+                done,
+                busy,
+                sample,
+            }) => {
+                announce_model_lock_deferred(done, busy, sample.as_deref());
+                (false, true)
             }
             Err(error) => {
                 println!("空闲模型积压消化失败（保留待重试）: {error:#}");
-                true
+                (true, false)
             }
         }
     } else {
-        false
+        (false, false)
     };
 
     // 消化失败时不必再问「还有没有活」——这一轮已经在退避那条路上了。
@@ -3509,7 +3539,7 @@ async fn idle_round(
         drain_queue_until_empty(mgr).await
     };
 
-    let data_outcome = idle_outcome(failed, has_backlog, claimed_batches);
+    let data_outcome = idle_outcome(failed, model_lock_deferred, has_backlog, claimed_batches);
     let spatial_pending = if data_outcome == IdleOutcome::Settled {
         match SideEffectCompensator::has_pending_spatial_work().await {
             Ok(pending) => pending,
@@ -3549,10 +3579,27 @@ async fn idle_round(
             false
         }
     };
+    let model_coverage_current = if crate::data_interface::watch_scope::active() {
+        let mut current = true;
+        for dbnum in crate::data_interface::watch_scope::dbnums() {
+            match crate::data_interface::model_update_pending::model_coverage_current(dbnum).await {
+                Ok(true) => {}
+                Ok(false) => current = false,
+                Err(error) => {
+                    println!("模型完整性凭证检查失败 dbnum={dbnum}: {error:#}");
+                    current = false;
+                }
+            }
+        }
+        current
+    } else {
+        true
+    };
     let model_became_ready = crate::options::model_incremental()
         && data_outcome == IdleOutcome::Settled
         && !spatial_pending
         && aabb_persisted
+        && model_coverage_current
         && initialization.data_ready()
         && initialization.mark_model_ready();
     let outcome = if model_became_ready && outcome == IdleOutcome::Settled {
@@ -3592,13 +3639,22 @@ enum IdleOutcome {
     Settled,
     /// 还有下一页，或者消化期间又来了批次：立刻回主循环再来一轮。
     MoreWork,
+    /// 这一轮没有错，但前置资源正忙：不越过阶段，也不立即热循环。
+    Backoff,
     /// 这一轮出错了：不收房间轮，也不唤醒，交给 `IDLE_WAKE` 退避。
     Failed,
 }
 
-fn idle_outcome(failed: bool, has_backlog: bool, claimed_batches: usize) -> IdleOutcome {
+fn idle_outcome(
+    failed: bool,
+    backoff: bool,
+    has_backlog: bool,
+    claimed_batches: usize,
+) -> IdleOutcome {
     if failed {
         IdleOutcome::Failed
+    } else if backoff {
+        IdleOutcome::Backoff
     } else if has_backlog || claimed_batches > 0 {
         IdleOutcome::MoreWork
     } else {
@@ -3609,6 +3665,8 @@ fn idle_outcome(failed: bool, has_backlog: bool, claimed_batches: usize) -> Idle
 fn combine_idle_outcomes(data: IdleOutcome, room: IdleOutcome) -> IdleOutcome {
     if data == IdleOutcome::Failed || room == IdleOutcome::Failed {
         IdleOutcome::Failed
+    } else if data == IdleOutcome::Backoff || room == IdleOutcome::Backoff {
+        IdleOutcome::Backoff
     } else if data == IdleOutcome::MoreWork || room == IdleOutcome::MoreWork {
         IdleOutcome::MoreWork
     } else {
@@ -4453,6 +4511,60 @@ mod tests {
         );
     }
 
+    /// SYST 批次落库后必须做两件事：把 TEAM 派生同步记进补偿队列，把执行范围
+    /// 缓存作废。两件事各有各的失效方式，所以分开钉。
+    ///
+    /// 漏掉入队，TEAM 表从此不再跟着 SYST 变，而且没有任何东西会发现——派生同步
+    /// 不产模型工作，模型积压是空的，/health 也干净。漏掉作废，新加进 MDB 的库要
+    /// 等 `AIOS_SCOPE_CACHE_SECS`（默认 300s）过期或者等重启才进得了执行范围，
+    /// 现场只表现为「这个库怎么不更新」——issue #10 那种查不出所以然的形状。
+    ///
+    /// 入队点有两个，按写法路由二选一：直写路径在数据应用后立刻记（那一刻数据
+    /// 已经 durable），暂存路径得等窗口提交完才记。两边都记就是同一批次记两遍，
+    /// 都不记就丢账，所以直写那一支带着 `active_staging_writes().is_none()`。
+    #[test]
+    fn a_syst_batch_books_its_derived_sync_and_invalidates_the_scope_cache() {
+        let source = include_str!("batch_worker.rs");
+        let commit_tail = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("staged batch executor")
+            .1
+            .split_once("pub fn staged_commit_metrics()")
+            .expect("staged executor boundary")
+            .0;
+        let direct = source
+            .split_once("async fn execute_frozen_batch_body(")
+            .expect("direct batch body")
+            .1
+            .split_once("fn batch_regen_is_allowed(")
+            .expect("direct body boundary")
+            .0;
+
+        for (path, body) in [("提交尾", commit_tail), ("直写", direct)] {
+            assert!(
+                body.contains("SideEffectCompensator::enqueue_syst("),
+                "{path}路径必须把 SYST 派生同步记进补偿队列"
+            );
+            assert!(
+                body.contains("update_scope::invalidate_scope_cache()"),
+                "{path}路径必须作废执行范围缓存"
+            );
+            assert!(
+                body.contains("SCOPE_DIRTY.store(true, Ordering::SeqCst)"),
+                "{path}路径必须让空闲轮重扫：新进范围的库没有自己的文件事件"
+            );
+        }
+
+        assert!(
+            direct.contains("active_staging_writes().is_none()"),
+            "直写入队必须与提交尾互斥，否则同一批次记两遍"
+        );
+        assert!(
+            commit_tail.contains("SYST 派生任务入队失败"),
+            "入队失败要说出口，不能静默吞掉"
+        );
+    }
+
     /// 连败账本的三条出路（对齐队列纪律「可收口 / 可复活」）：
     /// 同右端连败计数、达上限 park、右端前进 / 显式清零即复活。
     #[test]
@@ -5141,10 +5253,11 @@ mod tests {
             .expect("房间轮前必须认领执行期间新到的批次");
         let room_at = body.find("room_round(").expect("数据清空后必须保留房间轮");
         assert!(backlog_at < claim_at && claim_at < room_at, "{body}");
-        assert_eq!(idle_outcome(false, false, 0), IdleOutcome::Settled);
-        assert_eq!(idle_outcome(true, false, 0), IdleOutcome::Failed);
-        assert_eq!(idle_outcome(false, true, 0), IdleOutcome::MoreWork);
-        assert_eq!(idle_outcome(false, false, 1), IdleOutcome::MoreWork);
+        assert_eq!(idle_outcome(false, false, false, 0), IdleOutcome::Settled);
+        assert_eq!(idle_outcome(true, false, false, 0), IdleOutcome::Failed);
+        assert_eq!(idle_outcome(false, true, true, 0), IdleOutcome::Backoff);
+        assert_eq!(idle_outcome(false, false, true, 0), IdleOutcome::MoreWork);
+        assert_eq!(idle_outcome(false, false, false, 1), IdleOutcome::MoreWork);
     }
 
     /// ADR-011 §8 把房间放在数据队列与积压全部跑空之后；持续保存导致的饥饿是
@@ -5284,10 +5397,11 @@ mod tests {
     /// 「空闲模型积压消化失败」，而 30 秒的 `IDLE_WAKE` 退避形同虚设。
     #[test]
     fn a_failed_idle_round_backs_off_instead_of_waking_itself() {
-        assert!(!wakes_immediately(idle_outcome(true, false, 0)));
-        assert!(!wakes_immediately(idle_outcome(true, true, 3)));
+        assert!(!wakes_immediately(idle_outcome(true, false, false, 0)));
+        assert!(!wakes_immediately(idle_outcome(true, false, true, 3)));
+        assert!(!wakes_immediately(idle_outcome(false, true, true, 0)));
         assert!(!wakes_immediately(IdleOutcome::Settled));
-        assert!(wakes_immediately(idle_outcome(false, true, 0)));
+        assert!(wakes_immediately(idle_outcome(false, false, true, 0)));
 
         // 房间失败压过数据侧 MoreWork；否则另一侧留下的 Notify permit 会绕开 30s 退避。
         assert_eq!(

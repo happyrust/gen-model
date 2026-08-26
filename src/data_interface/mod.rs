@@ -67,6 +67,10 @@ pub mod model_update_plan;
 
 pub mod model_update_pending;
 
+pub mod model_concurrency;
+
+pub mod model_rebuild;
+
 pub mod batch_queue;
 
 pub mod batch_scheduler;

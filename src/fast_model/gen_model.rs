@@ -1,6 +1,8 @@
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::occ_generate::process_meshes_update_db_deep_with_policy;
+use crate::fast_model::occ_generate::{
+    RootGenerationFailure, process_meshes_update_db_deep_report,
+};
 use crate::fast_model::shape_save::{SaveMode, run_shape_save_receiver};
 use crate::fast_model::{
     booleans_meshes_in_db, cata_model, coverage_audit, gen_meshes_in_db, loop_model, prim_model,
@@ -205,44 +207,17 @@ pub(crate) async fn gen_all_geos_data_with_policy(
     let targeted = db_option.debug_root_refnos.is_some();
     let time = Instant::now();
     if targeted {
-        let (sender, receiver) = flume::bounded(CHUNK_SIZE);
-        let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
-        let insert_task =
-            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
-                // 本轮产出过几何的元素（含隐含直管段）。收尾清理拿它与生成根子树求差，
-                // 认出「上一版画得出、这一版画不出」的旧行——`save_instance_data` 的替换
-                // 写入只覆盖得到这次也生成了的那些。
-                // 只有保存成功的 outcome 才进入 produced；NaN、渲染或数据库失败会在此
-                // 上抛，因此下面的 stale prune 不会建立在“收到过但没写成”的假事实之上。
-                let outcome = run_shape_save_receiver(receiver, SaveMode::TargetedReplace).await?;
-                anyhow::Ok(outcome.written_refnos)
-            });
-        let generation_result =
-            capture_generation(gen_geos_data(None, vec![], db_option, sender.clone())).await;
-        let (target_root_refnos, produced) =
-            finish_shape_writer(generation_result, sender, insert_task).await?;
-
-        // 收尾清理只在生成与写入都成功之后跑：这个差集分不清「真的不画了」与「本轮
-        // 生成没做出来」，它的正确性押在「生成成功 ⇒ 产物完整」上（2026-08-05 决策，
-        // ADR-014 的保留旧显示因此收窄为「生成失败时」）。收尾失败必须向上传播，让根
-        // pending 留待重试；否则 inst_relate 已删、房间/空间树未清的部分成功会永久残留。
-        crate::data_interface::helper::prune_roots_stale_model_rows(
-            &target_root_refnos,
-            &produced,
-            300,
+        let report = gen_targeted_geos_data_with_policy(
+            db_option,
+            failure_policy,
+            crate::data_interface::model_concurrency::effective_root_inflight(),
         )
         .await?;
-
-        if db_option.gen_mesh {
-            // 错误必须向上传播（不再 .expect panic）：mesh 失败会让
-            // ModelRefreshPolicy::generate_roots 返回 Err，从而保留 model_update_pending
-            // 根任务待重试，而不是把 async_watch 看门狗任务 panic 掉。
-            process_meshes_update_db_deep_with_policy(
-                db_option,
-                &target_root_refnos,
-                failure_policy,
-            )
-            .await?;
+        if !report.failures.is_empty() {
+            anyhow::bail!(crate::fast_model::occ_generate::summarize_root_failures(
+                "targeted model",
+                &report.failures
+            ));
         }
     } else {
         let dbnos = if db_option.manual_db_nums.is_some() {
@@ -317,6 +292,90 @@ pub(crate) async fn gen_all_geos_data_with_policy(
     println!("生成完所有模型时间: {}ms", time.elapsed().as_millis());
 
     Ok(true)
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TargetedGenerationReport {
+    pub completed: Vec<String>,
+    pub failures: Vec<RootGenerationFailure>,
+}
+
+/// 定向生成的单 Shape writer + 根级后半程入口。实例生成仍按整组执行，只有
+/// query/mesh/boolean/AABB 后半程按根并发，因而能逐根报告而不重跑健康根。
+pub(crate) async fn gen_targeted_geos_data_with_policy(
+    db_option: &DbOption,
+    failure_policy: crate::data_interface::geom_error::GeometryFailurePolicy,
+    root_inflight_max: usize,
+) -> anyhow::Result<TargetedGenerationReport> {
+    const CHUNK_SIZE: usize = 100;
+    let execution_started = Instant::now();
+    let spatial_before = crate::fast_model::spatial_state::spatial_serial_snapshot();
+    let (sender, receiver) = flume::bounded(CHUNK_SIZE);
+    let receiver: flume::Receiver<ShapeInstancesData> = receiver.clone();
+    let insert_task =
+        crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+            let outcome = run_shape_save_receiver(receiver, SaveMode::TargetedReplace).await?;
+            anyhow::Ok(outcome)
+        });
+    let generation_result =
+        capture_generation(gen_geos_data(None, vec![], db_option, sender.clone())).await;
+    let (target_root_refnos, shape_outcome) =
+        finish_shape_writer(generation_result, sender, insert_task).await?;
+    crate::data_interface::model_concurrency::record_shape_run(
+        shape_outcome
+            .producer_blocked
+            .as_micros()
+            .min(u128::from(u64::MAX)) as u64,
+        shape_outcome.sql_bytes,
+        shape_outcome.instance_rows,
+    );
+    let shape_blocked = shape_outcome.producer_blocked;
+    let produced = shape_outcome.written_refnos;
+
+    crate::data_interface::helper::prune_roots_stale_model_rows(
+        &target_root_refnos,
+        &produced,
+        300,
+    )
+    .await?;
+
+    if db_option.gen_mesh {
+        let report = process_meshes_update_db_deep_report(
+            db_option,
+            &target_root_refnos,
+            failure_policy,
+            root_inflight_max,
+        )
+        .await;
+        let geometry = crate::fast_model::concurrency::snapshot();
+        let spatial_after = crate::fast_model::spatial_state::spatial_serial_snapshot();
+        let aabb_wait = spatial_after
+            .wait_micros
+            .saturating_sub(spatial_before.wait_micros);
+        let aabb_held = spatial_after
+            .held_micros
+            .saturating_sub(spatial_before.held_micros);
+        let shape_pressure =
+            shape_blocked.as_micros() > execution_started.elapsed().as_micros().saturating_div(5);
+        let aabb_pressure = aabb_wait > aabb_held.saturating_div(2);
+        crate::data_interface::model_concurrency::record_window(
+            report.completed.len(),
+            report.failures.len(),
+            !report.failures.is_empty()
+                || shape_pressure
+                || aabb_pressure
+                || geometry.waiting > geometry.quota.saturating_mul(2),
+        );
+        Ok(TargetedGenerationReport {
+            completed: report.completed,
+            failures: report.failures,
+        })
+    } else {
+        Ok(TargetedGenerationReport {
+            completed: target_root_refnos.iter().map(ToString::to_string).collect(),
+            failures: Vec::new(),
+        })
+    }
 }
 
 /// 等生成与写入两侧都收尾，两边都成功才把结果交出去。

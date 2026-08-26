@@ -22,7 +22,10 @@
 //! - 顺序循环里的分批（SQL 写回攒批这种不并发的 chunk）只用 [`GeometryGate::chunk_size`]
 //!   派生批宽，**不拿许可**。
 
+use serde::Serialize;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// 几何并发闸：额度即同时执行的叶子任务数上限。
@@ -55,12 +58,20 @@ impl GeometryGate {
 
     /// 取一张许可（RAII，drop 即归还）。只准叶子任务调用，见模块级纪律。
     pub async fn acquire(&self) -> GeometryPermit {
+        WAITING.fetch_add(1, Ordering::Relaxed);
+        let started = Instant::now();
         let permit = self
             .semaphore
             .clone()
             .acquire_owned()
             .await
             .expect("geometry gate semaphore is never closed");
+        WAITING.fetch_sub(1, Ordering::Relaxed);
+        WAIT_MICROS.fetch_add(
+            started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+            Ordering::Relaxed,
+        );
+        ACTIVE.fetch_add(1, Ordering::Relaxed);
         GeometryPermit { _permit: permit }
     }
 }
@@ -68,6 +79,33 @@ impl GeometryGate {
 /// 闸的许可凭证；持有期间占一份额度。
 pub struct GeometryPermit {
     _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for GeometryPermit {
+    fn drop(&mut self) {
+        ACTIVE.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
+static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+static WAITING: AtomicUsize = AtomicUsize::new(0);
+static WAIT_MICROS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct GeometryConcurrencySnapshot {
+    pub quota: usize,
+    pub active: usize,
+    pub waiting: usize,
+    pub permit_wait_micros: u64,
+}
+
+pub fn snapshot() -> GeometryConcurrencySnapshot {
+    GeometryConcurrencySnapshot {
+        quota: geometry_gate().quota(),
+        active: ACTIVE.load(Ordering::Relaxed),
+        waiting: WAITING.load(Ordering::Relaxed),
+        permit_wait_micros: WAIT_MICROS.load(Ordering::Relaxed),
+    }
 }
 
 static GATE: OnceLock<GeometryGate> = OnceLock::new();

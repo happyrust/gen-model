@@ -290,6 +290,10 @@ pub async fn serve(
             delete(handlers::model_delete_subtree),
         )
         .route("/api/v1/model/ensure", post(handlers::model_ensure))
+        .route(
+            "/api/v1/dbnums/{dbnum}/model/rebuild",
+            post(handlers::dbnum_model_rebuild),
+        )
         .route("/api/v1/query", post(handlers::query))
         .route("/api/v1/dbnums", get(handlers::dbnums))
         .route(

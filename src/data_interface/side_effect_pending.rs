@@ -178,13 +178,19 @@ impl SideEffectCompensator {
         .await
     }
 
-    async fn upsert_pending(
+    /// 入队语句的纯渲染，返回 `(记录 id, SurrealQL)`。
+    ///
+    /// `attempts = attempts?:0` 是这条语句的要害。同一个 `(kind, dbnum, end_sesno)`
+    /// 会被重复 UPSERT——两个入队点按写法路由二选一，失败重试还会再来——保住已有的
+    /// 重试计数才让 [`MAX_ATTEMPTS`] 有意义；清零的话一条永远失败的作业每来一个批次
+    /// 就复活一次，死信这一档永远立不起来。
+    fn render_upsert_pending(
         kind: SideEffectKind,
         dbnum: u32,
         end_sesno: i32,
         db_type: &str,
         changed_refnos: &[RefU64],
-    ) -> anyhow::Result<()> {
+    ) -> (String, String) {
         let id = Self::record_id(kind, dbnum, end_sesno);
         let refno_json = serde_json::to_string(
             &changed_refnos
@@ -202,6 +208,18 @@ impl SideEffectCompensator {
              updated_at = time::now();",
             kind.as_str(),
         );
+        (id, sql)
+    }
+
+    async fn upsert_pending(
+        kind: SideEffectKind,
+        dbnum: u32,
+        end_sesno: i32,
+        db_type: &str,
+        changed_refnos: &[RefU64],
+    ) -> anyhow::Result<()> {
+        let (id, sql) =
+            Self::render_upsert_pending(kind, dbnum, end_sesno, db_type, changed_refnos);
         SUL_DB
             .query(sql)
             .await
@@ -714,6 +732,44 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    /// SYST 派生入队：行 id 只由 `(kind, dbnum, end_sesno)` 决定，重复入队保住
+    /// 已有 attempts，一个窗口右端一行。
+    ///
+    /// 这三条各自挡着一种失效。id 不稳定，两个入队点（直写路径与暂存提交尾）就
+    /// 记成两行、TEAM 同步白跑一遍；attempts 被清零，一条永远失败的派生作业每来
+    /// 一个批次复活一次，`MAX_ATTEMPTS` 与 /health 的死信计数一起失效；右端不进
+    /// id，一次初始化里的多个 SYST 窗口会互相覆盖，只剩最后一个留下账。
+    #[test]
+    fn syst_enqueue_is_idempotent_per_window_and_keeps_its_retry_budget() {
+        let (id, sql) = SideEffectCompensator::render_upsert_pending(
+            SideEffectKind::SystDerived,
+            8191,
+            169,
+            "SYST",
+            &[],
+        );
+        assert_eq!(id, "incr_side_effect_pending:syst_derived_8191_169");
+        assert!(sql.starts_with(&format!("UPSERT {id} SET")), "{sql}");
+        assert!(
+            sql.contains("attempts = attempts?:0"),
+            "重复入队必须保住重试计数: {sql}"
+        );
+        assert!(sql.contains("status = 'pending'"), "{sql}");
+        assert!(
+            sql.contains("changed_refnos = []"),
+            "SYST 派生按批次记账，不带引用者名单: {sql}"
+        );
+
+        let (next_window, _) = SideEffectCompensator::render_upsert_pending(
+            SideEffectKind::SystDerived,
+            8191,
+            170,
+            "SYST",
+            &[],
+        );
+        assert_ne!(id, next_window, "换一个窗口右端就是另一行");
     }
 
     #[test]

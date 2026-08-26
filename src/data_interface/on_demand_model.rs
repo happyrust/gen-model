@@ -96,6 +96,7 @@ impl AiosDBManager {
         force: bool,
     ) -> anyhow::Result<OnDemandModelResult> {
         let (root, root_noun) = resolve_generation_root(requested_refno).await?;
+        crate::data_interface::model_rebuild::reject_ensure_during_rebuild(root).await?;
         let root_refno = root.to_pdms_str();
         let _guard = try_generation_root(&root_refno)?;
 

@@ -19,6 +19,7 @@ use aios_core::{get_db_option, init_test_surreal};
 use anyhow::anyhow;
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
+use futures::{StreamExt, stream};
 use glam::DMat4;
 use itertools::Itertools;
 use parry3d::bounding_volume::*;
@@ -301,125 +302,207 @@ pub(crate) async fn process_meshes_update_db_deep_with_policy(
     refnos: &[RefnoEnum],
     failure_policy: crate::data_interface::geom_error::GeometryFailurePolicy,
 ) -> anyhow::Result<()> {
+    let report = process_meshes_update_db_deep_report(
+        dboption,
+        refnos,
+        failure_policy,
+        crate::options::model_root_inflight_max(),
+    )
+    .await;
+    if report.failures.is_empty() {
+        Ok(())
+    } else {
+        anyhow::bail!(summarize_root_failures("model", &report.failures))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RootGenerationFailure {
+    pub root: String,
+    pub error: String,
+}
+
+/// 根级失败的统一摘要：件数 + 前三个根的错误。三处 bail（本文件的兼容包装、
+/// `gen_model` 定向路径、`model_refresh::generate_roots`）共用这一份，别各拼各的。
+pub(crate) fn summarize_root_failures(kind: &str, failures: &[RootGenerationFailure]) -> String {
+    format!(
+        "{} {kind} root(s) failed: {}",
+        failures.len(),
+        failures
+            .iter()
+            .take(3)
+            .map(|failure| format!("{}: {}", failure.root, failure.error))
+            .collect::<Vec<_>>()
+            .join("; ")
+    )
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RootGenerationReport {
+    pub completed: Vec<String>,
+    pub failures: Vec<RootGenerationFailure>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct RootStageTiming {
+    query_ms: u128,
+    mesh_ms: u128,
+    aabb_ms: u128,
+    boolean_ms: u128,
+}
+
+pub(crate) async fn process_meshes_update_db_deep_report(
+    dboption: &DbOption,
+    refnos: &[RefnoEnum],
+    failure_policy: crate::data_interface::geom_error::GeometryFailurePolicy,
+    root_inflight_max: usize,
+) -> RootGenerationReport {
+    let mut report = RootGenerationReport::default();
     if !refnos.is_empty() {
-        let dir = dboption.get_meshes_path();
-        let replace_exist = dboption.is_replace_mesh();
-        // dbg!(refnos.len());
         println!("更新模型结点数量: {}", refnos.len());
         let time = std::time::Instant::now();
         // 分段累计。此前这里只有一个跨越整个循环的计时器，却挂着「布尔运算花费时间」
         // 的名字——它把两次深度查询、网格生成、AABB 落库、房间入队全算进了布尔运算，
         // 于是这项统计能超过整个进程的 CPU 总时间。四段分开记才知道该优化哪一步。
-        let mut query_ms = 0u128;
-        let mut mesh_ms = 0u128;
-        let mut aabb_ms = 0u128;
-        let mut boolean_ms = 0u128;
+        let mut timing = RootStageTiming::default();
         // 本窗口开始前先清零，免得把上一轮（或别的调用方）的读数算进来。
         let _ = take_stale_lookup_stats();
-        for &refno in refnos {
-            #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
-            println!("更新模型结点: {}", refno);
-            let t_query = std::time::Instant::now();
-            let mut target_visible_refnos = vec![];
-            let mut update_refnos = query_deep_visible_inst_refnos(refno)
-                .await
-                .unwrap_or_default();
-            target_visible_refnos.extend(update_refnos.clone());
-            // dbg!(&target_visible_refnos);
-
-            let neg_refnos = query_deep_neg_inst_refnos(refno).await.unwrap_or_default();
-            update_refnos.extend(neg_refnos);
-            query_ms += t_query.elapsed().as_millis();
-
-            // #[cfg(any(feture = "debug_model", feature = "debug_model_no_obj"))]
-            if update_refnos.is_empty() {
-                continue;
-            }
-
-            println!("实际需要更新模型结点数量: {}", update_refnos.len());
-            //缩小范围
-            if dboption.gen_mesh {
-                // dbg!(&target_refnos);
-                // 生成模型文件
-                let t_mesh = std::time::Instant::now();
-                gen_inst_meshes(&update_refnos, replace_exist, dir.clone()).await?;
-                mesh_ms += t_mesh.elapsed().as_millis();
-
-                let t_aabb = std::time::Instant::now();
-                // 更新aabb 到inst relate，geo relate。
-                //
-                // 这里必须强制 replace=true，不跟 `replace_mesh` 配置走（mesh 文件按内容
-                // 寻址，replace 与否只影响要不要重写同名文件；包围盒不是）：默认配置
-                // replace_mesh=false 会给刷新 SQL 追加 `and aabb=none`，凡是插入时就带
-                // aabb 指针的行（隐含直管段 TUBI/BOXI）被整体过滤——它们因此从未进过
-                // 空间树、从未触发过房间重算。与 `update_world_transforms` 强制 true
-                // 是同一个理由（ADR-010 D2）。
-                // 只在**定向**重生成时建立 durable 房间触发。直写路径由增量入口把
-                // AABB 指针、room pending 与 spatial epoch 放进同一事务，事务成功后才
-                // 推进内存树；暂存路径仍只写 journal 并把变化寄存在窗口里。全量生成
-                // 本来就以 `build_room_relations` 的整体重建收尾，不逐元素排房间任务。
-                if dboption.debug_root_refnos.is_some() {
-                    update_inst_relate_aabbs_by_refnos_incremental(&update_refnos, true).await?;
-                } else {
-                    update_inst_relate_aabbs_by_refnos(&update_refnos, true).await?;
+        let mut work = stream::iter(refnos.iter().copied().map(|refno| async move {
+            let root = refno.to_string();
+            (
+                root,
+                process_one_model_root(dboption, refno, failure_policy).await,
+            )
+        }))
+        .buffer_unordered(root_inflight_max.max(1));
+        while let Some((root, result)) = work.next().await {
+            match result {
+                Ok(root_timing) => {
+                    timing.query_ms += root_timing.query_ms;
+                    timing.mesh_ms += root_timing.mesh_ms;
+                    timing.aabb_ms += root_timing.aabb_ms;
+                    timing.boolean_ms += root_timing.boolean_ms;
+                    report.completed.push(root);
                 }
-                aabb_ms += t_aabb.elapsed().as_millis();
-            }
-
-            if target_visible_refnos.is_empty() {
-                continue;
-            }
-
-            if dboption.apply_boolean_operation {
-                // dbg!(target_visible_refnos.len());
-                let t_bool = std::time::Instant::now();
-                //生成元件库内部几何体的负实体运算
-                apply_cata_neg_boolean_manifold(
-                    &target_visible_refnos,
-                    replace_exist,
-                    dir.clone(),
-                    failure_policy,
-                )
-                .await?;
-                apply_insts_boolean_manifold(
-                    &target_visible_refnos,
-                    replace_exist,
-                    dir.clone(),
-                    failure_policy,
-                )
-                .await?;
-                boolean_ms += t_bool.elapsed().as_millis();
-
-                // 布尔阶段会新增/改指最终可见几何（例如 REDU 的 booled 关系）。上面的
-                // 第一次 AABB 刷新发生在布尔之前，只能描述原始正实体；若不在这里按
-                // 最终关系再刷一次，同一 session 会出现两种稳定结果：增量队列随后有
-                // post_regen_aabb 时得到布尔后包围盒，而按需 ensure 直接返回布尔前包围盒。
-                // 2026-08-11 AMS db8000 / 24384/24682 实证为 maxZ 3400 vs 3340。
-                let t_aabb = std::time::Instant::now();
-                if dboption.debug_root_refnos.is_some() {
-                    update_inst_relate_aabbs_by_refnos_incremental(&target_visible_refnos, true)
-                        .await?;
-                } else {
-                    update_inst_relate_aabbs_by_refnos(&target_visible_refnos, true).await?;
-                }
-                aabb_ms += t_aabb.elapsed().as_millis();
+                Err(error) => report.failures.push(RootGenerationFailure {
+                    root,
+                    error: format!("{error:#}"),
+                }),
             }
         }
         let stale = take_stale_lookup_stats();
         println!(
             "模型结点更新耗时: {} ms（深度查询 {} / 网格生成 {} / AABB落库 {} / 布尔运算 {}）\
-             ；其中按 refno 取旧条目 {} ms / {} 次，树最大 {} 条",
+             ；根并发 {}/{}，失败 {}；其中按 refno 取旧条目 {} ms / {} 次，树最大 {} 条",
             time.elapsed().as_millis(),
-            query_ms,
-            mesh_ms,
-            aabb_ms,
-            boolean_ms,
+            timing.query_ms,
+            timing.mesh_ms,
+            timing.aabb_ms,
+            timing.boolean_ms,
+            root_inflight_max.max(1).min(refnos.len()),
+            root_inflight_max.max(1),
+            report.failures.len(),
             stale.micros / 1000,
             stale.calls,
             stale.max_tree_entries
         );
     }
-    Ok(())
+    report
+}
+
+async fn process_one_model_root(
+    dboption: &DbOption,
+    refno: RefnoEnum,
+    failure_policy: crate::data_interface::geom_error::GeometryFailurePolicy,
+) -> anyhow::Result<RootStageTiming> {
+    let dir = dboption.get_meshes_path();
+    let replace_exist = dboption.is_replace_mesh();
+    let mut timing = RootStageTiming::default();
+    #[cfg(any(feature = "debug_model", feature = "debug_model_no_obj"))]
+    println!("更新模型结点: {}", refno);
+    let t_query = std::time::Instant::now();
+    let mut target_visible_refnos = vec![];
+    let mut update_refnos = query_deep_visible_inst_refnos(refno).await?;
+    target_visible_refnos.extend(update_refnos.clone());
+    // dbg!(&target_visible_refnos);
+
+    let neg_refnos = query_deep_neg_inst_refnos(refno).await?;
+    update_refnos.extend(neg_refnos);
+    timing.query_ms += t_query.elapsed().as_millis();
+
+    // #[cfg(any(feture = "debug_model", feature = "debug_model_no_obj"))]
+    if update_refnos.is_empty() {
+        return Ok(timing);
+    }
+
+    println!("实际需要更新模型结点数量: {}", update_refnos.len());
+    //缩小范围
+    if dboption.gen_mesh {
+        // dbg!(&target_refnos);
+        // 生成模型文件
+        let t_mesh = std::time::Instant::now();
+        gen_inst_meshes(&update_refnos, replace_exist, dir.clone()).await?;
+        timing.mesh_ms += t_mesh.elapsed().as_millis();
+
+        let t_aabb = std::time::Instant::now();
+        // 更新aabb 到inst relate，geo relate。
+        //
+        // 这里必须强制 replace=true，不跟 `replace_mesh` 配置走（mesh 文件按内容
+        // 寻址，replace 与否只影响要不要重写同名文件；包围盒不是）：默认配置
+        // replace_mesh=false 会给刷新 SQL 追加 `and aabb=none`，凡是插入时就带
+        // aabb 指针的行（隐含直管段 TUBI/BOXI）被整体过滤——它们因此从未进过
+        // 空间树、从未触发过房间重算。与 `update_world_transforms` 强制 true
+        // 是同一个理由（ADR-010 D2）。
+        // 只在**定向**重生成时建立 durable 房间触发。直写路径由增量入口把
+        // AABB 指针、room pending 与 spatial epoch 放进同一事务，事务成功后才
+        // 推进内存树；暂存路径仍只写 journal 并把变化寄存在窗口里。全量生成
+        // 本来就以 `build_room_relations` 的整体重建收尾，不逐元素排房间任务。
+        if dboption.debug_root_refnos.is_some() {
+            update_inst_relate_aabbs_by_refnos_incremental(&update_refnos, true).await?;
+        } else {
+            update_inst_relate_aabbs_by_refnos(&update_refnos, true).await?;
+        }
+        timing.aabb_ms += t_aabb.elapsed().as_millis();
+    }
+
+    if target_visible_refnos.is_empty() {
+        return Ok(timing);
+    }
+
+    if dboption.apply_boolean_operation {
+        // dbg!(target_visible_refnos.len());
+        let t_bool = std::time::Instant::now();
+        //生成元件库内部几何体的负实体运算
+        apply_cata_neg_boolean_manifold(
+            &target_visible_refnos,
+            replace_exist,
+            dir.clone(),
+            failure_policy,
+        )
+        .await?;
+        apply_insts_boolean_manifold(
+            &target_visible_refnos,
+            replace_exist,
+            dir.clone(),
+            failure_policy,
+        )
+        .await?;
+        timing.boolean_ms += t_bool.elapsed().as_millis();
+
+        // 布尔阶段会新增/改指最终可见几何（例如 REDU 的 booled 关系）。上面的
+        // 第一次 AABB 刷新发生在布尔之前，只能描述原始正实体；若不在这里按
+        // 最终关系再刷一次，同一 session 会出现两种稳定结果：增量队列随后有
+        // post_regen_aabb 时得到布尔后包围盒，而按需 ensure 直接返回布尔前包围盒。
+        // 2026-08-11 AMS db8000 / 24384/24682 实证为 maxZ 3400 vs 3340。
+        let t_aabb = std::time::Instant::now();
+        if dboption.debug_root_refnos.is_some() {
+            update_inst_relate_aabbs_by_refnos_incremental(&target_visible_refnos, true).await?;
+        } else {
+            update_inst_relate_aabbs_by_refnos(&target_visible_refnos, true).await?;
+        }
+        timing.aabb_ms += t_aabb.elapsed().as_millis();
+    }
+    Ok(timing)
 }
 
 /// 几何参数查询结构体
@@ -1760,6 +1843,24 @@ mod aabb_write_order_tests {
         assert!(
             !transform.contains("enqueue_room_recalc"),
             "transform 不得在指针提交后再单独入队"
+        );
+    }
+
+    #[test]
+    fn root_dependency_queries_fail_the_root_instead_of_becoming_empty_results() {
+        let body = include_str!("occ_generate.rs")
+            .split_once("async fn process_one_model_root(")
+            .expect("root pipeline exists")
+            .1
+            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .expect("root pipeline boundary")
+            .0;
+        assert!(body.contains("query_deep_visible_inst_refnos(refno).await?"));
+        assert!(body.contains("query_deep_neg_inst_refnos(refno).await?"));
+        assert!(
+            !body.contains("query_deep_visible_inst_refnos(refno).await.unwrap_or_default()")
+                && !body.contains("query_deep_neg_inst_refnos(refno).await.unwrap_or_default()"),
+            "深度查询失败不得静默伪装成无可生成根"
         );
     }
 

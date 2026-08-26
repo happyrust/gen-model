@@ -19,6 +19,8 @@ use serde::Serialize;
 pub const TASK_KIND_DATA_BATCH: &str = "data_batch";
 /// 一页持久模型工作单的消费尝试。真值仍在 `model_update_pending` 表；这行只供观察。
 pub const TASK_KIND_MODEL_DRAIN: &str = "model_drain";
+/// 人工触发的指定 dbnum 全量模型重建；工作仍落入同一 durable 模型队列。
+pub const TASK_KIND_MODEL_REBUILD: &str = "model_rebuild";
 /// 一轮房间归属收敛（ADR-011 §10：与数据批次同构的一种 kind）。
 pub const TASK_KIND_ROOM_RECALC: &str = "room_recalc";
 
@@ -324,6 +326,57 @@ impl TaskRegistry {
             detail: Some(detail),
             result: None,
         });
+    }
+
+    pub fn insert_running_model_rebuild(
+        &self,
+        task_id: &str,
+        project: &str,
+        dbnum: u32,
+        total: u32,
+        detail: serde_json::Value,
+    ) {
+        let now = Local::now().to_rfc3339();
+        self.insert_entry(TaskEntry {
+            task_id: task_id.to_string(),
+            kind: TASK_KIND_MODEL_REBUILD,
+            state: TaskState::Running,
+            project: project.to_string(),
+            created_at: now.clone(),
+            started_at: Some(now),
+            finished_at: None,
+            dbnum: Some(dbnum),
+            db_type: Some("DESI".to_string()),
+            start_sesno: None,
+            end_sesno: None,
+            start_sesno_time: None,
+            end_sesno_time: None,
+            units_done: Some(0),
+            total_units: Some(total),
+            events_seen: 0,
+            current_stage: Some("coverage_scan".to_string()),
+            stage_started_at: Some(Local::now().to_rfc3339()),
+            stage_last_progress_at: None,
+            dependency_dbnum: None,
+            dependency_path: None,
+            dependency_refnos_total: None,
+            dependency_refnos_parsed: None,
+            dependency_refnos_missing: None,
+            stall_deadline: None,
+            detail: Some(detail),
+            result: None,
+        });
+    }
+
+    pub fn set_units_done(&self, task_id: &str, done: u32) {
+        let mut inner = self.entries();
+        if let Some(entry) = inner.get_mut(task_id) {
+            if entry.units_done != Some(done) {
+                entry.units_done = Some(done);
+                entry.stage_last_progress_at = Some(Local::now().to_rfc3339());
+                entry.events_seen = entry.events_seen.saturating_add(1);
+            }
+        }
     }
 
     fn insert_entry(&self, entry: TaskEntry) {

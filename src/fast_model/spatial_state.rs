@@ -15,7 +15,8 @@
 //! ```
 
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::time::Instant;
 
 /// 空间树进程状态（方案 §2）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -86,12 +87,57 @@ impl SpatialTreeState {
 /// journal 写回与窗口尾事务**不**持本锁：尾事务不动树，崩溃安全靠 pending 行。
 pub(crate) static SPATIAL_STATE_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-pub(crate) type SpatialSerialGuard = tokio::sync::MutexGuard<'static, ()>;
+pub(crate) struct SpatialSerialGuard {
+    _guard: tokio::sync::MutexGuard<'static, ()>,
+    acquired_at: Instant,
+}
+
+impl Drop for SpatialSerialGuard {
+    fn drop(&mut self) {
+        SPATIAL_SERIAL_HELD_MICROS.fetch_add(
+            self.acquired_at
+                .elapsed()
+                .as_micros()
+                .min(u128::from(u64::MAX)) as u64,
+            Ordering::Relaxed,
+        );
+    }
+}
+
+static SPATIAL_SERIAL_WAITING: AtomicUsize = AtomicUsize::new(0);
+static SPATIAL_SERIAL_WAIT_MICROS: AtomicU64 = AtomicU64::new(0);
+static SPATIAL_SERIAL_HELD_MICROS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+pub struct SpatialSerialSnapshot {
+    pub waiting: usize,
+    pub wait_micros: u64,
+    pub held_micros: u64,
+}
+
+pub fn spatial_serial_snapshot() -> SpatialSerialSnapshot {
+    SpatialSerialSnapshot {
+        waiting: SPATIAL_SERIAL_WAITING.load(Ordering::Relaxed),
+        wait_micros: SPATIAL_SERIAL_WAIT_MICROS.load(Ordering::Relaxed),
+        held_micros: SPATIAL_SERIAL_HELD_MICROS.load(Ordering::Relaxed),
+    }
+}
 
 /// 取空间串行锁。锁序纪律：若同时需要 `STAGED_COMMIT_SERIAL`，必须先取它；
 /// 若随后要 `GLOBAL_AABB_TREE` 写锁，必须在本锁**之后**取。
 pub(crate) async fn lock_spatial_serial() -> SpatialSerialGuard {
-    SPATIAL_STATE_SERIAL.lock().await
+    SPATIAL_SERIAL_WAITING.fetch_add(1, Ordering::Relaxed);
+    let started = Instant::now();
+    let guard = SPATIAL_STATE_SERIAL.lock().await;
+    SPATIAL_SERIAL_WAITING.fetch_sub(1, Ordering::Relaxed);
+    SPATIAL_SERIAL_WAIT_MICROS.fetch_add(
+        started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
+        Ordering::Relaxed,
+    );
+    SpatialSerialGuard {
+        _guard: guard,
+        acquired_at: Instant::now(),
+    }
 }
 
 /// 进程内状态与诊断簿记（health 曝光用）。std Mutex，绝不跨 await 持有。

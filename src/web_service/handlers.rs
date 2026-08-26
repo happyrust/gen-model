@@ -326,6 +326,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 人工执行会解开；不摆出来的话它与「一直没增量」在外面看不出区别。
         "batch_failures": crate::data_interface::batch_worker::batch_failure_snapshot(),
         "model_drain": crate::data_interface::model_update_pending::model_drain_telemetry_snapshot(),
+        "model_concurrency": crate::data_interface::model_concurrency::snapshot(),
+        "geometry_concurrency": crate::fast_model::concurrency::snapshot(),
+        "spatial_serial": crate::fast_model::spatial_state::spatial_serial_snapshot(),
         "sul_db": sul_db,
         "staging_windows": crate::data_interface::staging::lifecycle::resource_snapshots(),
         "staging_window_blocks": window_blocks,
@@ -469,7 +472,9 @@ pub async fn tasks_list(
     let tasks = state.tasks.list(
         query.state.as_deref(),
         query.kind.as_deref(),
-        query.limit.unwrap_or(50).min(200),
+        // `model_drain` 每页保留 10 个根样本时，200 条任务会超过 256 KiB；
+        // 180 条保留足够查询窗口，同时守住单响应体积契约。默认 50 不变。
+        query.limit.unwrap_or(50).min(160),
     );
     Json(json!({ "tasks": tasks }))
 }
@@ -600,6 +605,27 @@ pub async fn model_ensure(
     serde_json::to_value(&result)
         .map(Json)
         .map_err(|e| ApiError::from_domain(e.into()))
+}
+
+/// POST /api/v1/dbnums/{dbnum}/model/rebuild — 强制把该库当前全部权威生成根投入
+/// 现有模型协调器。端点不直调全量生成器，不删旧模型，也不触碰数据水位。
+pub async fn dbnum_model_rebuild(
+    State(state): State<AppState>,
+    Path(dbnum): Path<u32>,
+    Json(identity): Json<ProjectReq>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    resolve_identity(&state, &identity)?;
+    if !crate::data_interface::watch_scope::admits(dbnum) {
+        return Err(ApiError::bad_request(
+            crate::data_interface::watch_scope::excluded_reason(dbnum),
+        ));
+    }
+    let receipt = crate::data_interface::model_rebuild::start(&state.mgr, dbnum)
+        .await
+        .map_err(ApiError::from_domain)?;
+    let body =
+        serde_json::to_value(receipt).map_err(|error| ApiError::from_domain(error.into()))?;
+    Ok((StatusCode::ACCEPTED, Json(body)))
 }
 
 /// 解不出生成根不是服务端的错，客户端对这三种的出路也各不相同——都压成
@@ -1275,5 +1301,23 @@ mod tests {
             scan < arm,
             "only a completed explicit scan may arm backlog: {body}"
         );
+    }
+
+    #[test]
+    fn dbnum_model_rebuild_checks_scope_before_creating_work() {
+        let body = include_str!("handlers.rs")
+            .split_once("pub async fn dbnum_model_rebuild(")
+            .expect("model rebuild handler exists")
+            .1
+            .split_once("/// 解不出生成根")
+            .expect("ensure error mapping follows rebuild")
+            .0;
+        let scope = body.find("watch_scope::admits(dbnum)").unwrap();
+        let start = body.find("model_rebuild::start").unwrap();
+        assert!(
+            scope < start,
+            "scope must be checked before task/pending creation: {body}"
+        );
+        assert!(body.contains("StatusCode::ACCEPTED"));
     }
 }
