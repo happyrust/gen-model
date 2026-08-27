@@ -1,0 +1,41 @@
+$(
+------------------------------------------------------------------------
+探针：ZONE =24383/91690（dbnum 7999）到底是什么、有多大。
+
+先探再导：这个 ZONE 的规模未知，直接 export 一整个 zone 可能拉出几十 MB
+的 RVM。这一趟只回答三件事——按 refno 导航在本会话成不成立、它叫什么、
+名下有多少成员。
+
+两条踩过的坑（见 db8000_zone_members_probe.mac 头注）：
+1. ALPHA LOG 的内容要到 ALPHA LOG END 才落盘，块内任一语句报错整块都没了。
+   所以稳的语句和不稳的语句分块写，A 块只放最稳的。
+2. `=24384/24776` 这种按 refno 导航在此前一次 TTY 会话里失败过。A 块能不能
+   落盘就是这件事的答案：落了说明语法成立，没落说明只能改走按名导航。
+
+跑法：run_ams_c_entrymacro.bat（AVEVA_DESIGN_ENTRYMACRO + 分离进程 +
+gen_model_test 影子装）。只读，无 SAVEWORK，末尾自己 QUIT。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db7999_zone_91690_probe_a.log" OVER
+$P PROBE-A-ALIVE
+=24383/91690
+Q CE
+Q TYPE
+Q NAME
+Q REF
+Q DBNAME
+Q DBNUM
+Q OWNER
+$P PROBE-A-DONE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db7999_zone_91690_probe_b.log" OVER
+$P PROBE-B-ALIVE
+Q MEMB
+$P PROBE-B-DONE
+ALPHA LOG END
+
+QUIT
+FINISH
+FINISH

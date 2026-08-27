@@ -97,7 +97,11 @@ impl From<RawUdaTable> for UdaTable {
                 table.alias_to_key.entry(old).or_insert(definition.ukey);
             }
             for noun in &definition.nouns {
-                table.by_noun.entry(*noun).or_default().push(definition.ukey);
+                table
+                    .by_noun
+                    .entry(*noun)
+                    .or_default()
+                    .push(definition.ukey);
             }
             table.by_key.insert(definition.ukey, definition);
         }
@@ -176,7 +180,6 @@ impl UdaTable {
         }
         added
     }
-
 }
 
 /// Every attribute an element has, the way `q att` lists them.
@@ -329,5 +332,4 @@ mod tests {
         assert_eq!(table.fill_defaults(641779, &mut map), 0);
         assert!(map.map.is_empty());
     }
-
 }

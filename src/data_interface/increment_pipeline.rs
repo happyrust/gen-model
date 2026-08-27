@@ -2631,9 +2631,9 @@ mod cache_tests {
             });
         assert!(path.is_file(), "找不到 ams8000 文件: {}", path.display());
 
-        let mut snapshot =
-            pdms_io::snapshot::DabaconSnapshot::open("", &path).expect("open ams8000 snapshot");
-        let latest = snapshot.token().target_sesno() as i32;
+        let mut io = PdmsIO::new("", path.clone(), true);
+        io.open().expect("open ams8000");
+        let latest = io.get_latest_sesno().expect("latest sesno") as i32;
         let starts: Vec<i32> = {
             let mut list = vec![1, latest / 2, (latest - 5).max(1), latest];
             list.dedup();
@@ -2727,9 +2727,9 @@ mod cache_tests {
             });
         assert!(path.is_file(), "找不到 ams8000 文件: {}", path.display());
 
-        let mut io = PdmsIO::new("", path.clone(), true);
-        io.open().expect("open ams8000");
-        let latest = io.get_latest_sesno().expect("latest sesno") as i32;
+        let mut snapshot =
+            pdms_io::snapshot::DabaconSnapshot::open("", &path).expect("open ams8000 snapshot");
+        let latest = snapshot.token().target_sesno() as i32;
 
         let mut add_compared = 0usize;
         let mut modified_compared = 0usize;
@@ -4893,7 +4893,9 @@ mod live_tests {
         for root in [old_branch, new_branch] {
             let subtree = crate::data_interface::helper::collect_pe_subtree_refnos(&[root])
                 .await
-                .expect("collect regenerated branch subtree");
+                .expect("collect regenerated branch subtree")
+                .into_iter()
+                .collect::<Vec<_>>();
             let inst_keys = aios_core::get_inst_relate_keys(&subtree);
             let mut response = SUL_DB
                 .query(format!("SELECT VALUE id FROM {inst_keys};"))
@@ -5067,7 +5069,9 @@ mod live_tests {
         let reordered_subtree =
             crate::data_interface::helper::collect_pe_subtree_refnos(&[new_branch])
                 .await
-                .expect("collect reordered branch subtree");
+                .expect("collect reordered branch subtree")
+                .into_iter()
+                .collect::<Vec<_>>();
         let reordered_inst_keys = aios_core::get_inst_relate_keys(&reordered_subtree);
         let mut response = SUL_DB
             .query(format!("SELECT VALUE id FROM {reordered_inst_keys};"))
