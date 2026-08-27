@@ -39,7 +39,9 @@ fn parse_args() -> anyhow::Result<Args> {
         match arg.as_str() {
             "--legacy" => legacy = Some(args.next().ok_or_else(|| anyhow::anyhow!(USAGE))?),
             "--limit" => limit = args.next().ok_or_else(|| anyhow::anyhow!(USAGE))?.parse()?,
-            "--examples" => examples = args.next().ok_or_else(|| anyhow::anyhow!(USAGE))?.parse()?,
+            "--examples" => {
+                examples = args.next().ok_or_else(|| anyhow::anyhow!(USAGE))?.parse()?
+            }
             "-h" | "--help" => anyhow::bail!(USAGE),
             _ => positional.push(arg),
         }

@@ -14,12 +14,30 @@
 //! the same file. That caution earned its keep: on the BRAN the two decoders
 //! disagree, and the bytes settle it (see the BRAN test).
 //!
-//! The UDA snapshot spans five Dictionary databases across three projects,
-//! because which dictionaries apply is a property of the MDB rather than of
-//! the database an element lives in. A snapshot of `AvevaMarineSample` alone
-//! is missing five of BRAN's UDAs: `:SCHrefHole` comes from `SCB`, and
-//! `:PFILoose` / `:PFILExcess` / `:PFIAExcess` / `:PFConsChk` from
-//! `AvevaCatalogue`.
+//! The UDA snapshot spans the six Dictionary databases MDB `/ALL` declares,
+//! across three projects — which dictionaries apply is a property of the MDB,
+//! not of the database an element lives in. A snapshot of
+//! `AvevaMarineSample` alone is missing five of BRAN's UDAs: `:SCHrefHole`
+//! comes from `SCB`, and `:PFILoose` / `:PFILExcess` / `:PFIAExcess` /
+//! `:PFConsChk` from `AvevaCatalogue`.
+//!
+//! Take the list from the MDB rather than from the directory listing. Both
+//! mistakes are otherwise silent — the first time this fixture was built by
+//! hand it both missed two dictionaries `/ALL` declares and included one it
+//! does not:
+//!
+//! ```text
+//! cargo run --release --bin mdb_dict_probe -- --project AvevaMarineSample --mdb /ALL
+//! ```
+//!
+//! It prints a ready `--dictionary-db-list`, in `CURD` order — which matters,
+//! because the first definition of a `UKEY` wins.
+//!
+//! One caveat that probe will show: `SCB` is not in `included_projects`, so
+//! `scb6002_0001` comes back as not on disk even though `/ALL` declares it and
+//! `q att` prints its `:SCHrefHole`. This fixture was built with that file
+//! included; a runtime built from the configured project list alone would be
+//! missing it.
 //!
 //! Three sources have to combine before the listing can be reproduced, and
 //! each one covers a part the others cannot:
@@ -182,15 +200,30 @@ const REPORT_TO_STORAGE: &[(&str, &str)] = &[
     ("NoHuMark", "NOHUMA"),
 ];
 
-/// Two UDAs the snapshot says apply but `q att` never prints, on either
-/// element. Both are `Psi*`, both come from the `AvevaCatalogue` dictionary —
-/// the same dictionary whose `:PFILoose` family E3D *does* print on BRAN, so
-/// this is not the dictionary being absent from the MDB. Nothing exported so
-/// far distinguishes them (`UPSEUD` false, static names, one REF and one
-/// TEXT), so the filter E3D applies is still unidentified. Asserted by name
-/// and by count: if a third one appears, or one of these starts printing, the
-/// tests say so.
-const UDAS_E3D_DOES_NOT_PRINT: &[&str] = &[":PsiSystem", ":PsiDate"];
+/// UDAs the snapshot says apply to these nouns but `q att` never prints.
+///
+/// They are not a dictionary that is absent from the MDB — `/ALL` declares
+/// every dictionary they come from, and `:PFILoose` out of the very same
+/// `acp7006_0001` *is* printed. Nothing this table exports separates them
+/// either: `UPSEUD` is false on all five, names are static for all five,
+/// types run REF / TEXT / LOG, and `:MDSComment` applies to 46 nouns where the
+/// printed `:PFILoose` applies to 30.
+///
+/// What they do share is an owning application — `PSI` stress and `MDS`
+/// multi-discipline supports — and E3D was in Design when this `q att` ran.
+/// A module scope would explain it, but nothing in the Dictionary element as
+/// currently decoded says so, and a guess in this list would be worse than an
+/// open question.
+///
+/// Asserted by name and by count, so a sixth appearing, or one of these
+/// starting to print, fails rather than drifts.
+const UDAS_E3D_DOES_NOT_PRINT: &[&str] = &[
+    ":MDSComment",
+    ":MDSDType",
+    ":MDSTrun",
+    ":PsiDate",
+    ":PsiSystem",
+];
 
 /// `q att` prints one line per definition, so a name with two definitions
 /// appears twice. The view is keyed by name and therefore holds one. Checked
@@ -205,15 +238,26 @@ fn assert_uda_view(
     let mut wrong = Vec::new();
     for (name, want) in expected {
         let got = view.get_as_string(name).unwrap_or_default();
-        let got = if got.is_empty() { "unset".to_owned() } else { got };
+        let got = if got.is_empty() {
+            "unset".to_owned()
+        } else {
+            got
+        };
         if got != *want {
             wrong.push(format!("{name}: q att={want} view={got}"));
         }
     }
-    assert!(wrong.is_empty(), "UDA values disagree with q att: {wrong:#?}");
+    assert!(
+        wrong.is_empty(),
+        "UDA values disagree with q att: {wrong:#?}"
+    );
 
-    let shown: std::collections::BTreeSet<&str> =
-        view.map.keys().filter(|k| k.starts_with(':')).map(String::as_str).collect();
+    let shown: std::collections::BTreeSet<&str> = view
+        .map
+        .keys()
+        .filter(|k| k.starts_with(':'))
+        .map(String::as_str)
+        .collect();
     let printed: std::collections::BTreeSet<&str> =
         expected.iter().map(|(name, _)| *name).collect();
     let extra: Vec<&str> = shown.difference(&printed).copied().collect();
@@ -356,7 +400,9 @@ fn comparable(att_type: &str, value: &str) -> String {
         .trim();
     match att_type {
         "ELEMENT" | "RefU64Vec" => {
-            if value.is_empty() || value.eq_ignore_ascii_case("nulref") || value == "0_0"
+            if value.is_empty()
+                || value.eq_ignore_ascii_case("nulref")
+                || value == "0_0"
                 || value == "0/0"
             {
                 return "Nulref".into();
@@ -405,7 +451,11 @@ fn every_q_att_line_is_reproduced_offline() {
         return;
     }
     let element = parse_element();
-    let view = aios_database::uda_table::full_attribute_view(&element, &load_schema(), &load_uda_snapshot());
+    let view = aios_database::uda_table::full_attribute_view(
+        &element,
+        &load_schema(),
+        &load_uda_snapshot(),
+    );
 
     // `EleData::name` stays empty on this path; NAME arrives through the
     // explicit stream, which is where the view picks it up.
@@ -560,8 +610,7 @@ fn a_stored_uda_resolves_to_its_name_and_beats_the_dictionary_default() {
         "the Dictionary gives ROOM_NO no default, so the stored value is the only source"
     );
 
-    let view =
-        aios_database::uda_table::full_attribute_view(&element, &load_schema(), &uda);
+    let view = aios_database::uda_table::full_attribute_view(&element, &load_schema(), &uda);
     assert_eq!(view.get_type_str(), "BRAN");
     assert_eq!(
         view.get_as_string("NAME").as_deref(),
