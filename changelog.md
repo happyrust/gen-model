@@ -4,6 +4,61 @@
 
 ### 新增
 
+- **内存模式：持久层可以整个换成进程内嵌的 kv-mem，rocksdb 不再出现在链路里**。
+  `DbOption.toml` 新增 `in_memory_db`（默认 `false`，环境变量 `AIOS_IN_MEMORY_DB` 压过它）。
+  开着时 `run_app` 不再连 `v_ip:v_port` 那台 SurrealDB，而是把进程全局 `SUL_DB`
+  接到 `mem://` 上：初始化解析、增量窗口写回、模型与房间派生数据全部走原来那条路，
+  只是落点从 rocksdb 变成内存。没有第二条代码路径——`SUL_DB` 是 `Surreal<Any>`，
+  引擎选择关在句柄里头，上层每一处查询与写入一个字都不用改。嵌入式引擎没有认证面，
+  因此不 `signin`；ns/db 仍取配置里那一对，同一份配置在两种介质下指向同一个逻辑库。
+  与 ADR-017 的暂存窗口不是一回事，也不冲突：窗口本来就各自占一个独立 `mem://` 实例，
+  这里连的是另一个实例，journal 分块重放与水位发布的语义原样保留。
+  **这是非正常运行状态，因此三处都要出声**：连接时打两行取舍、启动横幅点名、
+  `/health` 加 `in_memory_db` 栏。代价写在配置注释里，两条都不可逆——进程一退整库就没了
+  （崩溃现场只剩日志），库进了进程内也就没有端口可连（`rvm_verify`、`/sql` 探针、
+  `Capture-*Evidence.ps1` 全部够不着）。要留证据或要让别的进程读库，用部署脚本的
+  `-InMemory`：那是让**外部** surreal 进程换 memory 后端，端口还在。管不到的东西也说清楚：
+  `assets/meshes` 与 `accel_tree` 快照仍然落盘，它们是 aios-database 自己写的派生数据；
+  空间树启动判据照旧按库侧指纹裁决，空库走重建这条不变。
+
+- **运维面板内嵌进二进制，部署只剩一个 exe**。`ops.html` 由 `include_str!` 烘进
+  `aios-database`，`GET /ops.html` 走显式路由、压过底下那个 `ServeDir` 兜底，所以
+  现场不再需要跟着同步一个 `PLANT_UI_WEB_ROOT` 目录，也不会出现「后端升了、面板还是
+  上一版」这种两份东西各走各的。**磁盘副本仍然优先**：`ui_root/ops.html` 存在就用它，
+  且是每次请求现读——「改一句判决措辞、落个文件刷新就行」这条不能被内嵌收走，重编一次
+  是分钟级还得停服务换 exe；靠目录部署的机器因此行为一字不变。响应带
+  `x-ops-panel-source: embedded|disk`，两份内容不一致时这是唯一说得清的地方；另加
+  `Cache-Control: no-cache`——页面此后跟着 exe 版本走，而它恰恰是用来回答「现在是什么
+  状态」的，自己被缓存住最要命。启动时也把用的是哪一份打在控制台上。
+  测试 `the_embedded_panel_is_real_and_a_disk_copy_still_wins` 同时钉住两头：内嵌的
+  确实是那一页（`include_str!` 指错文件或 `web/ops.html` 被清空，编译照过，直到有人
+  打开一个白页才发现，而那多半发生在出事的时候），以及磁盘副本压过内嵌。
+  同批把 `http_api` 并进了 `default` feature：内嵌面板的意义就是「一个 exe 拷过去就能用」，
+  而 08-27 当天真踩过一次反例——默认 feature 编出的 exe 里根本没有 Web 端口，拿去部署，
+  面板和 REST 一起消失，且没有任何报错。现在裸 `cargo build --release` 与 CI 的显式清单
+  （`ws,gen_model,manifold,project_hd,http_api`）等价，`--no-default-features` 的场合才需要
+  自己点名；编没编进去（能力）与要不要监听（`DbOption.toml` 的 `http_api_addr`，注释掉即
+  不开端口）仍是两回事。web_service 的单测也从此跟着默认口径一起跑，不再要求单独点 feature。
+- **`/assets/ops.html` 加实时事件流，并把失败原因、当前阶段、撞号候选摊到页面上**。
+  轮询回答「现在是什么状态」，新的「实时事件」面板经 `WS /api/v1/ws → tasks` 回答
+  「刚才发生了什么」：批次起止与模型单元逐个完成按发生顺序各出现一次，失败带原话。
+  它与轮询各活各的——WS 连不上（老后端、代理不转 upgrade）只让这一块变灰，页面其余
+  部分照常；`seq` 只用来认掉帧（服务端跳帧时出提示条）而不当行 key，因为它由每条连接
+  自己编号、重连从头开始。按 `ws.rs` 的协议每 30 秒 ping 一次：服务端 90 秒收不到
+  **客户端**消息就断，广播出去的事件不算数，不心跳的连接每 91 秒必断一次，而空闲恰恰
+  是最该盯着这一块的时候，断口里的事件没有重放、补不回来；`pong` 也占一个 `seq` 号，
+  先记再退出，否则自己的心跳会被一条条数成服务端跳帧。同批三处是「数据一直都在、只是
+  没画出来」：失败任务的 `result.batch.message` 整段摊开（此前查一次失败要么开
+  devtools、要么另开窗口打 `/tasks/{id}`）；running 行接上 `current_stage` 与交付单元
+  计数，并单报**本阶段多久没有新进展**（「慢」和「卡住」在耗时那一列上长得一模一样）；
+  连败卡片改为并列展示「批次回执 —— 权威」与「`batch_failures.reason` —— 取的是
+  `warnings.last()`」，后者在净窗口硬失败时只剩「收集口径：净窗口 …」那条标注，照它
+  写卡片就成了一句正常统计。另外 `dbnum` 不是主键——SYS 库在每个项目里都是 8191，撞号
+  是常态，而水位、重试记录与连败账本三个键又都只认号，于是撞号时把候选按 `file_path`
+  全摆出来让人自己认。默认主题改为亮色：值班屏幕反光下深色那组红/琥珀拿到白底只有
+  2~3:1，三色重挑到 ≥5:1；深色加 `?theme=dark`，刻意不跟随 `prefers-color-scheme`
+  ——跟着操作系统走等于两台机器看到两个样子。
+
 - **`init_mdb` 不再是空壳：启动时从 SYS 库文件解出本 MDB 声明的库清单**。
   「哪些字典库适用」是 MDB 的属性而不是项目目录的属性——`/ALL` 声明的六个字典库
   有四个在 `AvevaCatalogue` 与 `SCB` 底下，靠扫目录猜会两头错（第一次手工建 UDA
@@ -89,6 +144,82 @@
   ——7999 库 44535 个元素里 1858 个真的存了 UDA 字节，所以那条路不是理论存在。
 
 ### 修复
+
+- **model_impact 对账快照跟上 descriptor 属性表**。339→1878 换表（d32b06ff）让六个此前
+  「字典有名、快照无属主」的属性有了属主——CACHID / LCHKDA（业务元数据表）、FSPREF / SCREF
+  （级联表）、PTOF / SIZE（直接几何表）——而
+  `curated_tables_are_reconciled_against_the_runtime_schema` 的钉死名单没跟着走，全量 lib
+  一跑就红。按新 schema 重钉：DATA_ONLY 只剩 FUNCTION，级联 13→11，直接几何 39→37。
+  这条测试的价值恰在于此：换表时逼着人把「哪些名字从此有主了」过目一遍，而不是让对账悄悄失真。
+
+- **RVM 对拍里那条「什么都没量到也报绿」的门补上了下限**。
+  `mesh_pipe_surface_distance` 是取证型用例，此前**一条断言都没有**：RVM 里找不到 group
+  就 `continue`、库里没有生成几何也 `continue`，于是「九件件件贴合」与「一件都没量到」
+  共用同一个退出码 0。2026-08-24 的作废通告里那唯一一条「1 passed」就是这么来的——在一个
+  没有 1112/8000 生成几何的库上，它是八条里唯一报绿的，而它恰恰什么都没量到。现在结尾
+  断言九件件件量到、跳过谁点谁的名。顺带把这条门的口径限制写进注释：C-OR 九件在 E3D 侧
+  全是 12 三角，两个 BEND 也一样（gen 侧 618 / 908 三角），所以它量的是「gen 细网格贴不
+  贴 E3D 粗替身」，量不到真实弯头形状；弯头的可信判据在
+  `mesh_branch_union_surface_distance` 与 `mesh_full_branch_union_surface_distance` 的整段
+  union 上（腿归属差在装配层自洽抵消）。同轮八条 mesh 对拍在
+  `.surreal/ams-rvm-rebuild-20260824` 上 **8 passed / 0 failed**（44.1s），GWALL 三个可归因
+  读数与 08-25 逐位相同——自那以来落地的改动没有动到几何。
+
+- **失败批次在控制台上自己说出原因，不再把人指向一个当时拿不到的回执**。完成行只报
+  `状态=failed`，真话在 `result.batch.message` 里，而那句话此前**只**进任务回执，屏幕
+  上唯一的提示是「失败原因见本批回执」——取回执要 HTTP，现场可能没开 `http_api`、端口
+  不通、或者人根本不在那台机器前面。2026-08-27 的 SYST 8191 就是这个形状：一整屏阶段
+  日志把「死在收集增量这一步」说得清清楚楚，唯独缺了「为什么」，而收集口十几个各自具名
+  的硬失败出口只能靠那一句分辨。现在 `render_failure_reason_lines` 紧跟完成行打印，三条
+  纪律各带一条测试：① `batch` 缺席（冻结重扫就失败、批次压根没建起来）时回落到
+  `warnings.last()`，并**报出这一句是从哪儿来的**——两个来源权威性不同，混成一句会让人
+  把净窗口的口径标注当成错误；② 伴随告警只出前 3 条并报剩余条数与 `/api/v1/tasks/{id}`
+  ——一条口径标注就上百字，整串打出来会把上方的阶段行冲掉，而阶段行正是判断死在哪一步
+  的依据；③ 一条都没有也仍留一行，点名「引擎缺陷」，静默失败比错误的原因更难查。成功
+  批次一行都不加。「初始化批次未收口」那句同步改口指向下方的原因行，源码顺序断言钉住它
+  不许与「见本批回执」并存。
+
+- **模型队列整页空转：生成器回报的根与队列行的 `target_refno` 拼法对不上**。
+  2026-08-27 现场 1462 个根连着 118 页 `page_claimed=100 / page_completed=0 /
+  remaining=1462` 烧掉 50 分钟，而每一页的任务都报 `succeeded`、`/health` 一路 `ok`、
+  `attempts` 全是 0、死信是空的、日志一个字都没有。根因是同一个身份的两种写法：队列
+  行存 E3D 的 `24381/100817`，而 `TargetedGenerationReport` 里那一串经 `RefnoEnum`
+  走了一趟、`Display` 打成 `24381_100817`。`run_regen_group` 拿两边直接比字符串，于是
+  `completed.contains(&job.target_refno)` 恒为 false（`settlements` 为空 →
+  `clear_regen_work_batch` 一行不删 → 队列行原样留着被下一页再认领），`failures` 里那
+  一串也配不上任何 job（`record_failure` 一次不调 → `attempts` 永远 0 →
+  `MAX_ATTEMPTS` 永远够不着 → 死信永远是空的）。「收不掉」与「没失败」同时成立，所以
+  它安静得跟正常跑完一模一样。这行比较由 `5f7ef21f`（08-26，合批生成那个特性）引入，
+  两侧同出一个提交，事故发生在 08-27——不是潜伏很久，是落地即坏，第一次跑大批就现形。
+  现在两边都过 `root_identity_key` 归一再比；解析不出来的
+  **原样返回**，不能 `unwrap_or_default()`——那会把所有坏值折成同一个零值，两个不同的
+  坏根反而被认成同一个。`settlements` 本身仍存队列行自己的写法：它要拿去寻址那一行，
+  不是拿去比（ADR-011 队列纪律：寻址按行内实际字段）。单测钉住两种拼法归一、不同根不
+  许归一、解析不出的原样留着，外加调用点守卫（改回直接比字符串即红）。
+  `live_bran_pending_is_actually_regenerated` 一比一复现了这个形状；归一后 @8019 六条
+  相关 live 全绿（BRAN / HANG / ZONE-EQUI / `live_generation_failure_keeps_pending_and_watermark`
+  / `live_failed_queue_cleanup_does_not_stall_the_rest` /
+  `live_non_regen_drain_consumes_the_whole_queue`）。证据
+  `docs/evidence/2026-08-27-model-drain-root-key-mismatch.md`。
+
+- **模型页整页空转不再无声：未回报的根按失败计次，页级停滞进 `/health` 与启动等待行**。
+  上一条那种「收不掉又没失败」此前没有任何东西会发现，两道兜底同批补上。①
+  `run_regen_group` 里生成没报错、根却既不在完成名单也不在失败名单时，那一行无声落地，
+  下一轮被原样认领、再无声落地一次。新增 `settle_unechoed_roots`：点名（有界样本）并走
+  `record_failure` 计次，撞满 `MAX_ATTEMPTS` 进死信。这与 2026-07-30 审计 C2「收口失败
+  不涨 attempts」是两回事——C2 防的是 flaky 的 DELETE（根已经进了收口集合，下一轮重试
+  就好），而这里根本没有 DELETE 可言，根压根没进得了收口集合，重跑一万次结果都一样；
+  `settlements` 因此必须先并进 `disposed` 再做清扫，源码顺序断言钉住，否则 C2 修掉的
+  那个 bug 会原样回来（`live_failed_queue_cleanup_does_not_stall_the_rest` 复验通过）。
+  ② `ModelDrainTelemetry` 那三个数（`last_page_claimed` / `last_page_completed` /
+  `last_remaining`）一直都在，却没有任何人拿它们做判断。新增 `starved_pages` 在认领下
+  一页时结算上一页，三个条件缺一不可（认领过、零收口、待办总数纹丝不动）——只看
+  `completed == 0` 会把「整页被根锁挡住」这种正常让位算进来，只看待办不变会把「收掉几个
+  又排进来几个」误判成停滞。连撞 `MODEL_DRAIN_STARVED_PAGES_ALERT = 3` 页（现场每页约
+  26 秒，≈80 秒）即判定停滞，推进 `/health` 的
+  `blocking_conditions.model_drain.page_starved`（`degraded`）。启动等待行的「数字不变
+  就退到 300 秒一行」这条退避在卡死时是反的，越卡越安静：现场前 19 分钟每 60 秒一行，
+  真卡住之后反而变成 300 秒一行。停滞一旦确认就按 60 秒照常出声，并把停滞页数带上。
 
 - **启动覆盖回填写进队列的根拼法与其余入队方不一致**（ISSUE-024 名单里扫出来的第三处）。
   `sync_and_seed_model_coverage` 用 `pe_thing_to_refno(..).to_string()` 落 `target_refno`，
