@@ -222,6 +222,7 @@ pub mod team_data;
 
 pub mod graph_db;
 pub mod noun_layout;
+pub mod uda_table;
 pub mod test;
 
 // RVM 基准对拍。注意与同名但无关的 `src/rvm/`（PDMS 元素遍历）区分。

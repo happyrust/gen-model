@@ -1,5 +1,37 @@
 # 变更记录
 
+## 2026-08-27
+
+### 新增
+
+- **属性 schema 换成描述符权威表，noun 从 339 涨到 1878，已有取值一条没变**。
+  `all_attr_info.json` 由 `e3d-descriptor emit-attr-info` 从 20 个 `*vir.dat` +
+  `attlib.dat` + 逻辑目录合成，`--legacy-attr-info` 把老表覆盖到的地方逐字照抄，
+  所以「不回退」是构造性的而不是靠测试兜：老表 6556 对在 `name` / `hash` /
+  `offset` / `att_type` / `default_val` 五个字段上逐条相等。规模落在计划靶心：
+  20 库 / 1875 noun / 35734 三元组 / `flat_conflicts` 恰好 14。产物 35655 对，
+  比 2026-08-26 那份中间件多 1023 对——那 1023 条是 `TYPE` / `LOCK` / `OWNER` /
+  `CLAIDB` / `UDNA` 这类描述符里没有的结构属性，中间件把它们丢了，新表按
+  「老表 ∪ 新表」保留。代价写在这里：`--legacy-attr-info` 保证不改值，也就保证
+  不纠错，`SLOREF`（表说 STRING、描述符说引用）与 `MDSYSF`（表说 ELEMENT、
+  描述符是 21 字的非引用）两条错误类型原样留着，测试里具名钉住。
+
+- **新增离线核对设施：一个元素的全属性（含 UDA）第一次能不连库复现 `q att`**。
+  `all_attr_info.json` 描述不了 UDA——UDA 不在 `*vir.dat` 里，E3D 把它存成字典库
+  下的 `UDA` 元素（`UKEY` / `ELEL` / `DFLT`）。新增 `src/uda_table.rs` 读
+  `e3d-descriptor emit-uda-table` 导出的字典快照，`full_attribute_view()` 把
+  schema 默认值、UDA 字典默认值与记录里真存的值三层叠成一张表。**运行时取 UDA 的
+  路径一行未动**：仍是每个项目自己的字典库同步进 `UDA` / `ATT_UDA`。快照是夹具不是
+  配置，两张表都作为参数显式传入，不设隐式默认——UDA 定义属于某一个 MDB，能被环境
+  悄悄替换的默认值在这里等于埋雷。夹具 `tests/fixtures/AvevaMarineSample_uda_info.json`
+  跨三个项目五个字典库：`:SCHrefHole` 来自 SCB、`:PFILoose` 一家来自 AvevaCatalogue，
+  只取 AMS 自己的字典会缺 BRAN 27 个 UDA 里的 5 个。
+  `tests/full_attributes_real.rs` 拿 E3D 实打实的 `q att` 当权威，覆盖两条路：
+  PIPE `=24383/73958` 79 行全部复现（20 个 UDA 全是字典默认值），BRAN
+  `=24383/85432` 覆盖存值那条（`:ROOM_NO = NB122`，`UKEY` 离线解名，不查
+  SurrealDB）。诊断入口 `src/bin/refno_attr_probe.rs`，另带 `--scan-uda` 全库扫描
+  ——7999 库 44535 个元素里 1858 个真的存了 UDA 字节，所以那条路不是理论存在。
+
 ## 2026-08-26
 
 ### 修复
