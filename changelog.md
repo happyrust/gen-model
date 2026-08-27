@@ -4,6 +4,22 @@
 
 ### 新增
 
+- **`init_mdb` 不再是空壳：启动时从 SYS 库文件解出本 MDB 声明的库清单**。
+  「哪些字典库适用」是 MDB 的属性而不是项目目录的属性——`/ALL` 声明的六个字典库
+  有四个在 `AvevaCatalogue` 与 `SCB` 底下，靠扫目录猜会两头错（第一次手工建 UDA
+  快照就漏两个、多一个），而且漏一个字典库跟「这个 UDA 没值」长得一模一样。新增
+  `src/data_interface/mdb_membership.rs`，在 manager 进 `Arc` 之前解析 `CURD` 并
+  登记进程级注册表，按 `STYP` 分类取用；它读文件而不是 SurrealDB，所以在任何东西
+  被同步之前就能回答（`UpdateScope` 那条查询要等 SYS 先同步，拿它定字典范围是
+  死结）。声明了却不在盘上的库逐条告警——那是部署缺件，不是「本 MDB 没有这个库」；
+  解析失败只告警不中止（尚无消费者）。DICT 的 `STYP` 按 AMS SYS 实测钉为 8，
+  aios_core 的 `DBType::DICT = 6` 在该库里一个都配不上。文件定位复用 extract-family
+  命名解析（ADR-028）而非后缀匹配：`ends_with("100_0001")` 会把 `ams8100_0001`
+  也吞进来无声配错库，无后缀主库与非 `_0001` 抽取又是同一逻辑库的合法身份、原先
+  永远配不上被误报缺件；抽取叶子压过主库，多命中先排序再取，两条回归测试各钉一个
+  缺陷。附 `mdb_dict_probe`：独立跑同一套解析，给 `e3d-descriptor emit-uda-table`
+  打印现成的 `--dictionary-db-list`（`CURD` 序，`UKEY` 首定义胜出）。
+
 - **`/health` 新增 tokio 调度延迟，CPU 段挤掉调度这件事第一次有数**（specs/033 T003）。
   ADR-052 说要把几何 CPU 段挪出 tokio worker，理由是三角化和布尔占住 worker 会挤掉
   shape receiver、SurrealDB response、watcher、`/health` 与 timer——但这句话在改动前
@@ -71,6 +87,18 @@
   `=24383/85432` 覆盖存值那条（`:ROOM_NO = NB122`，`UKEY` 离线解名，不查
   SurrealDB）。诊断入口 `src/bin/refno_attr_probe.rs`，另带 `--scan-uda` 全库扫描
   ——7999 库 44535 个元素里 1858 个真的存了 UDA 字节，所以那条路不是理论存在。
+
+### 修复
+
+- **UDA 快照的来源从「扫目录猜字典」换成 MDB 声明本身**。
+  `AvevaMarineSample_uda_info.json` 重建为 `/ALL` 声明的六个字典库（用
+  `mdb_dict_probe` 打印的 `CURD` 序清单），`all_attr_info.json` 同批刷新。「快照说
+  适用但 `q att` 不打印」的台账从 2 条 `Psi*` 扩到 5 条（补进 `:MDSComment` /
+  `:MDSDType` / `:MDSTrun`），按名字与数量双断言钉住；五条的共同点是归属应用
+  （PSI 应力 / MDS 综合支吊架）而 `q att` 跑在 Design 模块下——模块过滤能解释它，
+  但当前解码的字典元素里没有任何字段支持这个说法，先记为开放问题不猜。测试文档
+  同时写明部署警示：`SCB` 不在 `included_projects` 里，`scb6002_0001` 会被报成
+  不在盘上，而 `/ALL` 声明了它、`q att` 也真打印它的 `:SCHrefHole`。
 
 ## 2026-08-26
 
