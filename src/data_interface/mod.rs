@@ -41,6 +41,8 @@ pub mod fast_delete;
 
 pub mod manual_update;
 
+pub mod mdb_membership;
+
 pub mod update_scope;
 
 pub mod on_demand_model;

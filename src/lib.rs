@@ -486,7 +486,30 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
 
     println!("正在初始化 db manager（解析监控目录配置）...");
     let step_started = Instant::now();
-    let mgr = Arc::new(AiosDBManager::init_form_config().await?);
+    let mut manager = AiosDBManager::init_form_config().await?;
+    // 本 MDB 声明了哪些库，在这里解一次并登记。位置是有讲究的：它读的是 SYS 库
+    // 文件而不是 SurrealDB，所以能在任何东西被同步之前回答——而字典库名单恰恰
+    // 是初始化期就得知道的东西（`UpdateScope` 那条查询要等 SYS 库先解析完，
+    // 拿它来定字典范围会形成「要范围得先同步、要同步得先有范围」的死结）。
+    //
+    // 失败只告警不中止：目前还没有消费者，把一个新增的诊断变成启动阻断，
+    // 代价与收益完全不成比例。真正要人看的那一条是「MDB 声明了这个库、
+    // 但配置的项目目录里没有它」——`init_mdb` 内部逐条 warn。
+    if let Err(error) = manager
+        .init_mdb(
+            &db_option.project_name,
+            &db_option.mdb_name,
+            &db_option.module,
+        )
+        .await
+    {
+        log::warn!(
+            "解析 MDB {} / {} 的成员名单失败，按未登记继续：{error:#}",
+            db_option.project_name,
+            db_option.mdb_name
+        );
+    }
+    let mgr = Arc::new(manager);
     println!(
         "db manager 初始化完成，耗时 {}",
         fmt_elapsed(step_started.elapsed())
@@ -990,6 +1013,35 @@ mod startup_room_build_gate_tests {
         assert!(
             !body.contains("is_auto_work_armed"),
             "启动全量房间重建这道门只认 startup_autorun，不许改读上弦位（ADR-048）: {body}"
+        );
+    }
+
+    /// The MDB declaration has to be resolved while the manager is still owned
+    /// — `init_mdb` takes `&mut self`, and one line later the manager is behind
+    /// an `Arc` for the rest of the process. It also has to survive failing:
+    /// nothing consumes the declaration yet, so a missing SYS database must not
+    /// become a startup blocker.
+    #[test]
+    fn startup_resolves_the_mdb_before_the_manager_is_shared_and_survives_failure() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli exists")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_cli end exists")
+            .0;
+        let resolved = body.find(".init_mdb(").expect("启动链必须解一次 MDB");
+        let shared = body
+            .find("Arc::new(manager)")
+            .expect("manager 随后进 Arc");
+        assert!(
+            resolved < shared,
+            "init_mdb 要 &mut self，进 Arc 之后就没机会了"
+        );
+        assert!(
+            body[resolved..shared].contains("log::warn!"),
+            "解析失败只告警不中止：目前还没有消费者，阻断启动不成比例"
         );
     }
 

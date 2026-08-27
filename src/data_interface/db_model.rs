@@ -380,8 +380,43 @@ impl AiosDBManager {
             .map_err(|x| anyhow::anyhow!(x.to_string()))
     }
 
-    /// 初始化mdb
+    /// 初始化 mdb：把这个 MDB 声明了哪些库解出来并登记，供后续按类型取用。
+    ///
+    /// 之前这里是个空壳（只有 `Ok(())`），于是「哪些库属于本 MDB」在初始化期
+    /// 无人回答，字典库只能靠扫项目目录去猜——而 MDB 是**跨项目**的：
+    /// `AvevaMarineSample /ALL` 声明的六个字典库有四个在 `AvevaCatalogue`
+    /// 与 `SCB` 底下。猜错不报错，少一个字典库跟「这个 UDA 没值」长得一模一样。
+    ///
+    /// `module` 暂时只入日志。E3D 里 UDA 看起来是按模块过滤的（Design 下
+    /// `q att` 不打印 `PSI` / `MDS` 那几个应用的 UDA），但字典元素里目前解不出
+    /// 任何字段支持这个说法，没证据就不按它筛。
     pub async fn init_mdb(&mut self, project: &str, mdb: &str, module: &str) -> anyhow::Result<()> {
+        use crate::data_interface::mdb_membership;
+
+        let membership = mdb_membership::resolve(&self.db_option, project, mdb)?;
+        let counts = membership.counts_by_type();
+        let dictionaries = membership.dictionary_paths();
+        println!(
+            "MDB {} / {project} / module={module}：声明 {} 个库（按 STYP {counts:?}），\
+             其中字典库 {} 个",
+            membership.mdb(),
+            membership.databases().len(),
+            dictionaries.len()
+        );
+        for path in &dictionaries {
+            println!("  字典库 {}", path.display());
+        }
+        // 声明了却不在盘上的库要出声。它不是「本 MDB 没有这个库」，是部署缺件，
+        // 两者对下游的意思完全不同。
+        for database in membership.unresolved() {
+            log::warn!(
+                "MDB {} 声明了 dbnum={} ({})，但配置的项目目录里找不到对应文件",
+                membership.mdb(),
+                database.dbnum,
+                database.name
+            );
+        }
+        mdb_membership::install(membership);
         Ok(())
     }
 
