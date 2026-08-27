@@ -617,6 +617,17 @@ mod mesh_wall_live {
     /// 用来**定性**——BEND 是真 gen 缺陷（gen→rvm 大 = gen 面偏离 E3D），还是像墙那样
     /// 只是 E3D 侧附加/口径差。FTUB 作对照（AABB 一向过）。第一遍取证，不硬断言。
     ///
+    /// 取证归取证，**量到没量到得是硬的**：库里一件生成几何都没有时，下面每条路都是
+    /// `continue`，这条用例照样退出码 0——2026-08-24 就发生过，八条 mesh 对拍在一个
+    /// 没有 1112/8000 几何的库上跑出「1 passed」，那一条绿就是这么来的。所以结尾断言
+    /// 九件件件量到，跳过谁就点谁的名。
+    ///
+    /// 已知口径限制（不是本用例能修的）：C-OR 九件在 **E3D 侧全是 12 三角**，两个 BEND
+    /// 也一样，而 gen 侧弯头是 618 / 908 三角。所以这条门在弯头上比的是「gen 的细网格
+    /// 贴不贴 E3D 的粗替身」，量不到真实弯头形状；弯头的可信判据在
+    /// [`mesh_branch_union_surface_distance`] 与 [`mesh_full_branch_union_surface_distance`]
+    /// 的整段 union 上（腿归属差在装配层自洽抵消）。
+    ///
     /// 前置：8009 上有 dbnum 8000 的生成几何；`test_data/rvm/C-OR-1R345-C.rvm` 在位。
     /// 跑法（CI 口径，T043）：`cargo test --locked --lib --no-default-features
     /// --features ws,gen_model,manifold,project_hd,rvm_verify mesh_pipe_surface_distance -- --ignored --nocapture`
@@ -662,18 +673,23 @@ mod mesh_wall_live {
                 .map(|(_, m)| m)
         };
 
+        let mut skipped: Vec<String> = Vec::new();
+        let mut measured = 0usize;
         for (rvm_prefix, pe_key) in pairs {
             let Some(rvm) = find_mesh(rvm_prefix) else {
                 println!("{rvm_prefix}: RVM 无匹配 group，跳过");
+                skipped.push(format!("{rvm_prefix}(RVM 无匹配 group)"));
                 continue;
             };
             let gen_mesh = match gen_world_mesh(&db, pe_key).await.expect("gen mesh") {
                 Some(m) => m,
                 None => {
                     println!("{rvm_prefix} ({pe_key}): gen 无网格（TUBI 隐含直管？），跳过");
+                    skipped.push(format!("{rvm_prefix}({pe_key} 无生成几何)"));
                     continue;
                 }
             };
+            measured += 1;
             let r2g = one_way_surface_distance(rvm, &gen_mesh, 4000).expect("r2g");
             let g2r = one_way_surface_distance(&gen_mesh, rvm, 4000).expect("g2r");
             println!(
@@ -696,6 +712,12 @@ mod mesh_wall_live {
                 );
             }
         }
+        assert!(
+            skipped.is_empty(),
+            "C-OR 九件必须件件量到，本轮量到 {measured}/{}，跳过的是 {skipped:?}——\
+             这条门取证不判形状，但「什么都没量到」不许和「量了都对」共用一个退出码",
+            pairs.len()
+        );
     }
 
     /// 装配 union 验证：BEND 1 + 相邻 FTUBE 1/2 合并成一个网格，gen union vs E3D union。
