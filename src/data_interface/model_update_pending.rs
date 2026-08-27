@@ -1419,7 +1419,12 @@ pub async fn sync_and_seed_model_coverage(
         {
             continue;
         }
-        let root = crate::data_interface::helper::pe_thing_to_refno(row.pe.clone())?.to_string();
+        // 队列字段一律用斜杠拼法。`RefnoEnum` 的 `Display` 是下划线 `A_B`，与其余入队
+        // 方（`to_pdms_str()` 的 `A/B`）不同，而 `record_id_of` 把斜杠折成下划线，两种
+        // 拼法落在**同一行**上：不会长出重复行，但字段值变成「谁最后写谁说了算」。
+        // 拿字符串精确查这个字段的地方（`current_regen_revision`、`retry_pending_unit`）
+        // 于是会命中零行、返回 `Ok(None)`，与「本来就没有这行」无从区分。
+        let root = crate::data_interface::helper::pe_thing_to_refno(row.pe.clone())?.to_pdms_str();
         let item = ModelWorkItem {
             dbnum,
             db_type: "DESI".to_string(),
@@ -4616,6 +4621,48 @@ mod tests {
     /// 收口不能靠「再算一遍 record id」。存量表里同一个根还留着旧格式的行
     /// （`{dbnum}_regen_root_…`），按 id 寻址会命中零行——任务清不掉、每一轮重跑一次
     /// 完整生成，而日志里一切正常。谓词寻址只依赖行里实际存着的字段。
+    /// 入队方只准用一种拼法写 `target_refno`。
+    ///
+    /// 同一个根有两种字符串形态：`to_pdms_str()` 的斜杠 `A/B`，与 `Display` 的下划线
+    /// `A_B`。`record_id_of` 会把斜杠折成下划线，所以两种拼法**落在同一行上**——不会
+    /// 长出重复行，但字段值变成「谁最后 upsert 谁说了算」。而
+    /// [`current_regen_revision`] 与 [`retry_pending_unit`] 是拿字符串精确查这个字段
+    /// 的：拼法一换，查询命中零行、返回 `Ok(None)`，与「本来就没有这行」完全无从
+    /// 区分。`staged_settlement_revision` 拿到 `None` 就跳过收口，那个根在提交后的
+    /// 空闲轮里被原样重生成一遍，而日志里只有 `Err` 那一支会出声。
+    ///
+    /// `sync_and_seed_model_coverage` 曾经是唯一的例外（`pe_thing_to_refno(..).to_string()`）。
+    #[test]
+    fn every_enqueue_path_spells_target_refno_with_the_slash_form() {
+        // 先钉住前提：两种拼法真的不同。这条塌了说明上游改了 Display 或 to_pdms_str，
+        // 本测试连同它守的那个不变量都要重看。
+        let refno = RefnoEnum::from(RefU64::from_two_nums(24381, 100677));
+        assert_eq!(refno.to_pdms_str(), "24381/100677");
+        assert_eq!(refno.to_string(), "24381_100677");
+        assert_eq!(
+            record_id_of(ModelWorkAction::RegenRoot, &refno.to_pdms_str()),
+            record_id_of(ModelWorkAction::RegenRoot, &refno.to_string()),
+            "两种拼法折成同一个 record id——所以它们抢的是同一行，不是各占一行"
+        );
+
+        let source = include_str!("model_update_pending.rs");
+        let seeded = source
+            .split_once("pub async fn sync_and_seed_model_coverage(")
+            .expect("覆盖回填必须存在")
+            .1
+            .split_once("pub async fn model_coverage_current(")
+            .expect("它在 model_coverage_current 之前结束")
+            .0;
+        assert!(
+            seeded.contains("pe_thing_to_refno(row.pe.clone())?.to_pdms_str()"),
+            "覆盖回填写进 target_refno 的必须是斜杠拼法: {seeded}"
+        );
+        assert!(
+            !seeded.contains("pe_thing_to_refno(row.pe.clone())?.to_string()"),
+            "退回 Display 拼法即红：那会让这一批行与其余入队方各说各话: {seeded}"
+        );
+    }
+
     #[test]
     fn settlement_addresses_the_row_by_its_fields_not_by_a_recomputed_id() {
         let sql = render_delete_revision(ModelWorkAction::RegenRoot, "24381/100677", 3);
