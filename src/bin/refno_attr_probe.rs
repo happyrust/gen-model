@@ -45,6 +45,12 @@ struct Args {
     /// data at all", which one element cannot.
     #[arg(long)]
     scan_uda: bool,
+    /// Walk every indexed record and report, per noun, how many the schema
+    /// decodes and how many it refuses. A noun missing from the table fails
+    /// every one of its records with `UnknownNoun`, and nothing downstream
+    /// distinguishes that from an element that does not exist.
+    #[arg(long)]
+    census: bool,
     /// How many stored-UDA elements to list during a scan.
     #[arg(long, default_value_t = 10)]
     scan_examples: usize,
@@ -76,9 +82,10 @@ fn scan_uda(bytes: &[u8], schema: &PdmsDatabaseInfo, examples: usize) -> anyhow:
         if record.value().pos < 4 {
             continue;
         }
-        let Ok(ele) =
-            parse_pdms_db::parse::parse_raw_ele_data_with_info(&bytes[record.value().pos - 4..], schema)
-        else {
+        let Ok(ele) = parse_pdms_db::parse::parse_raw_ele_data_with_info(
+            &bytes[record.value().pos - 4..],
+            schema,
+        ) else {
             continue;
         };
         parsed += 1;
@@ -91,7 +98,11 @@ fn scan_uda(bytes: &[u8], schema: &PdmsDatabaseInfo, examples: usize) -> anyhow:
         *by_noun.entry(db1_dehash(ele.noun)).or_default() += 1;
         if shown < examples {
             shown += 1;
-            println!("{:?} {} stores {count} UDA:", ele.refno, db1_dehash(ele.noun));
+            println!(
+                "{:?} {} stores {count} UDA:",
+                ele.refno,
+                db1_dehash(ele.noun)
+            );
             for attr in ele.whole_attmap.uda_atts.iter() {
                 println!(
                     "    hash={:<12} short={:<10} {:?}",
@@ -107,6 +118,58 @@ fn scan_uda(bytes: &[u8], schema: &PdmsDatabaseInfo, examples: usize) -> anyhow:
         records.len()
     );
     println!("by noun: {by_noun:?}");
+    Ok(())
+}
+
+/// Per-noun decode census over a whole database.
+///
+/// The record header carries the noun, so a record whose noun the table does
+/// not cover can still be classified — [`parse_raw_element_identity`] exists
+/// for exactly that. Without it a missing noun would only show up as "this
+/// element failed", which is what makes the gap so quiet in the first place.
+fn census(bytes: &[u8], schema: &PdmsDatabaseInfo) -> anyhow::Result<()> {
+    use std::collections::BTreeMap;
+    let (records, _) = parse_pdms_db::parse::gen_ref_type_pos_table(bytes);
+    let mut decoded: BTreeMap<String, usize> = Default::default();
+    let mut refused: BTreeMap<String, (usize, RefU64, String)> = Default::default();
+    for record in records.iter() {
+        let pos = record.value().pos;
+        if pos < 4 {
+            continue;
+        }
+        let raw = &bytes[pos - 4..];
+        match parse_pdms_db::parse::parse_raw_ele_data_with_info(raw, schema) {
+            Ok(ele) => *decoded.entry(db1_dehash(ele.noun)).or_default() += 1,
+            Err(error) => {
+                let (noun, refno) = match parse_pdms_db::parse::parse_raw_element_identity(raw) {
+                    Ok(identity) => (identity.noun_name, identity.refno),
+                    Err(_) => ("<unreadable header>".to_string(), RefU64::default()),
+                };
+                let entry = refused
+                    .entry(noun)
+                    .or_insert_with(|| (0, refno, format!("{error}")));
+                entry.0 += 1;
+            }
+        }
+    }
+    let total_ok: usize = decoded.values().sum();
+    let total_bad: usize = refused.values().map(|(count, _, _)| *count).sum();
+    println!(
+        "\nindexed={} decoded={total_ok} refused={total_bad}",
+        records.len()
+    );
+    println!("\n--- decoded ({} nouns) ---", decoded.len());
+    for (noun, count) in &decoded {
+        println!("  {noun:<10} {count}");
+    }
+    println!("\n--- refused ({} nouns) ---", refused.len());
+    for (noun, (count, refno, message)) in &refused {
+        println!(
+            "  {noun:<10} {count:<6} e.g. {}/{}  {message}",
+            refno.0 >> 32,
+            refno.0 & 0xFFFF_FFFF
+        );
+    }
     Ok(())
 }
 
@@ -139,6 +202,9 @@ fn main() -> anyhow::Result<()> {
     if args.scan_uda {
         return scan_uda(&db.bytes, schema, args.scan_examples);
     }
+    if args.census {
+        return census(&db.bytes, schema);
+    }
 
     let entry = parse_pdms_db::refno_index::find_refno_entry(&db.bytes, target)
         .ok_or_else(|| anyhow::anyhow!("{} is not in the latest-session index", args.refno))?;
@@ -149,7 +215,8 @@ fn main() -> anyhow::Result<()> {
         db1_dehash(entry.noun_hash as u32)
     );
 
-    let ele = parse_pdms_db::parse::parse_raw_ele_data_with_info(&db.bytes[entry.pos - 4..], schema)?;
+    let ele =
+        parse_pdms_db::parse::parse_raw_ele_data_with_info(&db.bytes[entry.pos - 4..], schema)?;
     println!(
         "element: refno={:?} owner={:?} noun={} ({}) name={:?} children={}",
         ele.refno,
@@ -173,7 +240,10 @@ fn main() -> anyhow::Result<()> {
         println!("  {name:<12} {value:?}");
     }
 
-    println!("\n--- uda stored on the record ({}) ---", ele.whole_attmap.uda_atts.len());
+    println!(
+        "\n--- uda stored on the record ({}) ---",
+        ele.whole_attmap.uda_atts.len()
+    );
     for attr in ele.whole_attmap.uda_atts.iter() {
         println!(
             "  hash={:<12} short={:<10} parsed_name={:<8} {:?}",
@@ -202,7 +272,10 @@ fn main() -> anyhow::Result<()> {
         view.map.len()
     );
     for (name, value) in view.map.iter() {
-        println!("  {name:<20} {}", view.get_as_string(name).unwrap_or_default());
+        println!(
+            "  {name:<20} {}",
+            view.get_as_string(name).unwrap_or_default()
+        );
         let _ = value;
     }
     Ok(())

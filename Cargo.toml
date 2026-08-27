@@ -104,11 +104,11 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "5344440b01c2c12f6e919116e90c369985316f37" }
-aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "0e391ff12bd66aebfdab8e3d2684754f43389510", default-features = false }
+parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "2de7cd23eb5b701a2ad2b704ced8e583b992367e" }
+aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "d97586c795e72229a63921c04d46a5abb780e812", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
-pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "257ea253288314b0f4d07741c534fbd93cf4d61f" }
+pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "5e4e4d751615ab5e05f0eac3a28ab934284d3b84" }
 
 clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }
@@ -184,9 +184,9 @@ rmcp = { version = "=3.1.1", features = ["server", "transport-io"] }
 #
 # 前提：下面三个 vendor 目录必须存在，且停在与上面 rev 对应的提交上。
 #
-#   ../vendor/old-aios-core      codex/libgm-snout-caliber = 0e391ff1
-#   ../vendor/old-parse-pdms-db  codex/room-panel-wire-repair-deps = 5344440b
-#   ../vendor/old-pdms-io        codex/room-panel-wire-repair-deps = 257ea253
+#   ../vendor/old-aios-core      codex/libgm-snout-caliber = d97586c7
+#   ../vendor/old-parse-pdms-db  codex/room-panel-wire-repair-deps = 2de7cd23
+#   ../vendor/old-pdms-io        codex/room-panel-wire-repair-deps = 5e4e4d75
 #
 # 同名克隆有好几份，别接错。plant-code/rs-core 在 codex/fix-refno-enum-cata-hash
 # 上（rkyv 0.8 那条线），engine-v2 在 plant-code/pdms-io，两者都不是这里要的。
