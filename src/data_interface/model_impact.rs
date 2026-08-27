@@ -1459,7 +1459,8 @@ mod tests {
     /// 运行库均无同名属性），2026-07-26 已清理（推导见 `output/gen_dchc_fixture.py`）。
     /// 这里把每张表「对不上 schema 的条目」钉成明确名单：多一条会失败，清掉一条
     /// 也会失败，后者是提醒同步更新本快照。剩余对不上的条目多为字典有名、但
-    /// 339-noun schema 快照未含属主的真属性，保留。
+    /// schema 仍未含属主的真属性，保留（快照口径：d32b06ff 起的 1878-noun
+    /// descriptor 表；它比旧 339-noun 快照多收编了 6 个名字，名单已随之重钉）。
     #[test]
     fn curated_tables_are_reconciled_against_the_runtime_schema() {
         let runtime = runtime_attribute_names();
@@ -1482,23 +1483,26 @@ mod tests {
             "走便宜路径的属性必须真实存在，否则等于白写：{}",
             unmatched(TRANSFORM_ONLY_ATTR_NAMES)
         );
-        // CACHID 是项目 UDA；LCHKDA 来自 BRAN 检查元数据；FUNCTION 是历史遗留。
-        assert_eq!(unmatched(DATA_ONLY_ATTR_NAMES), "CACHID, FUNCTION, LCHKDA");
+        // FUNCTION 是历史遗留；CACHID（项目 UDA）与 LCHKDA（BRAN 检查元数据）
+        // 在 descriptor 表里有了属主，2026-08-27 起出列。
+        assert_eq!(unmatched(DATA_ONLY_ATTR_NAMES), "FUNCTION");
         // CHILDREN / NOUN 是元素元数据而非属性；LEVEL 是 LEVE 的别名写法。
         assert_eq!(unmatched(STRUCTURAL_ATTR_NAMES), "CHILDREN, LEVEL, NOUN");
-        // 目录/连接类短名：字典有名（如 ADIR/CONN/SPREF），339-noun 快照未含属主，保留。
+        // 目录/连接类短名：字典有名（如 ADIR/CONN/SPREF），descriptor 表仍未含属主，
+        // 保留；FSPREF / SCREF 已被 1878-noun 表收编（2026-08-27），不再在此名单。
         assert_eq!(
             unmatched(DEPENDENCY_CASCADE_ATTR_NAMES),
-            "ADIR, CONN, DDANGLE, DDHEIGHT, DDRADIUS, FSPREF, \
-             GMREF, IPARAM, LDIR, PVER, RDIR, SCREF, SPREF"
+            "ADIR, CONN, DDANGLE, DDHEIGHT, DDRADIUS, GMREF, \
+             IPARAM, LDIR, PVER, RDIR, SPREF"
         );
 
-        // DirectGeometry：31 条 noun 名死分支清理后剩 39 条，均为字典有名但
-        // 快照无属主的真属性（ABOR/ANGF/PARAM/…），钉住总数防再混入。
+        // DirectGeometry：31 条 noun 名死分支清理后剩 39 条；descriptor 表又收编
+        // PTOF / SIZE（2026-08-27），余 37 条字典有名但仍无属主的真属性
+        // （ABOR/ANGF/PARAM/…），钉住总数防再混入。
         let direct = unmatched(DIRECT_GEOMETRY_ATTR_NAMES);
         assert_eq!(
             direct.split(", ").count(),
-            39,
+            37,
             "DIRECT_GEOMETRY 对不上 schema 的条目数漂移：{direct}"
         );
         for noun_name in ["POHE", "POLYHE", "SEXT", "SPVE", "SCTN", "STWALL"] {
