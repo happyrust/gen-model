@@ -111,8 +111,17 @@ pub fn acquire_process_instance_lock(_db_option: &DbOption) -> anyhow::Result<()
 ### 立即行动
 
 - [ ] 确认现场 CentOS 部署当前靠什么保证单实例（systemd `Restart=` 策略、容器、还是人工）
-- [ ] 实现 Unix `flock` 分支并把守卫测试跨平台化
-- [ ] 补子进程级回归测试
+- [x] 实现 Unix `flock` 分支并把守卫测试跨平台化（2026-08-27，specs/033 T001）：
+      `open_advisory_process_instance_lock` 用 `File::try_lock`（Unix=flock、
+      Windows=LockFileEx），Unix 分支薄委托它；锁挂在 open file description 上，
+      SIGKILL 后内核回收，没有退化成「看文件存不存在」。冲突时读回持锁者写入的
+      project/pid/started_at 一起报。**advisory 函数体在所有平台编译**，守卫测试
+      三条改为跨平台（锁路径映射、平台原生打开器拒二开、advisory 路径
+      拿-拒-放全流程带「锁被占用」信息断言）——本 issue 的成因正是非 Windows 代码
+      在 Windows 机器上零编译零测试。尚欠：真机 Linux 上跑一遍（本机无 zigbuild，
+      交叉验证未做），发布前必须补。
+- [ ] 补子进程级回归测试（父进程持锁时 spawn 第二个实例，断言非零退出且 stderr
+      指出持锁者；适合放 e2e 而不是 lib 单测）
 
 ### 预防措施
 

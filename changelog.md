@@ -90,6 +90,19 @@
 
 ### 修复
 
+- **非 Windows 也有真实的进程单实例锁了**（ISSUE-023 / specs/033 T001）。
+  `acquire_process_instance_lock` 的非 Windows 分支曾是一个空 `Ok(())`：部署到
+  CentOS 后第二个进程直接放行，成为同一份 dabacon、同一个 SurrealDB、同一批 mesh
+  的第二个写入者，几何闸额度、暂存串行、启动清理这些「进程内全局即全局」的前提
+  一起失效。现在 Unix 走 `flock(LOCK_EX | LOCK_NB)`（`File::try_lock`）：锁挂在
+  open file description 上，与手柄同生共死，SIGKILL 后由内核回收——刻意不做
+  「看锁文件存不存在」那种会留陈旧锁的写法；冲突时读回持锁者写进文件的
+  project/pid/started_at 一起报。函数体抽成 advisory 辅助在**所有平台**编译
+  （Unix=flock、Windows=LockFileEx 同形），守卫测试从 `#[cfg(all(test, windows))]`
+  改为三条跨平台——这个缺口的成因正是非 Windows 代码在 Windows 机器上零编译
+  零测试。Windows 生产路径维持 deny-share 不变。真机 Linux 复跑仍待办（登记在
+  issue），在那之前性能结论照旧只按 Windows 单实例口径引用。
+
 - **UDA 快照的来源从「扫目录猜字典」换成 MDB 声明本身**。
   `AvevaMarineSample_uda_info.json` 重建为 `/ALL` 声明的六个字典库（用
   `mdb_dict_probe` 打印的 `CURD` 序清单），`all_attr_info.json` 同批刷新。「快照说

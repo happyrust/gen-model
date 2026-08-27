@@ -2,9 +2,15 @@
 
 ## P0：前置、基线与可归因
 
-- [ ] T001 `issues/ISSUE-023-no-process-instance-lock-off-windows.md`：确认现场 CentOS
+- [x] T001 `issues/ISSUE-023-no-process-instance-lock-off-windows.md`：确认现场 CentOS
       靠什么保证单实例，要么实现 Unix `flock` 分支并把守卫测试跨平台化，要么在 issue
       里登记发布阻断项。两者都没有则本规格停在 P0。依赖：无。
+      2026-08-27 完成（取「实现 flock 分支」这一支）：`File::try_lock` 挂在 open file
+      description 上、SIGKILL 由内核回收；函数体抽成 `open_advisory_process_instance_lock`
+      在**所有平台**编译（Unix=flock、Windows=LockFileEx 同形），守卫测试三条跨平台化，
+      Windows CI 从此天天跑到 CentOS 要跑的那段代码。两处保留项登记在 issue：现场
+      部署此前靠什么保证单实例仍待运维确认；真机 Linux 复跑（case 3 子进程级）未做，
+      仍是发布前必办——在那之前性能结论照旧只按 Windows 单实例口径引用。
 - [x] T002 [P] `src/fast_model/concurrency.rs`：新增许可**持有**时长累计
       （原有 `WAIT_MICROS` 只记等待），`GeometryConcurrencySnapshot` 增
       `active_permit_micros` / `observed_micros` 与区间利用率

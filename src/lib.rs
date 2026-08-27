@@ -56,15 +56,15 @@ use versioned_db::database::{define_dbnum_event, sync_pdms};
 use log::{LevelFilter, error};
 use simplelog::*;
 
-#[cfg(windows)]
 struct ProcessInstanceLock {
-    /// Keeping this handle alive keeps Windows' deny-share lock alive.
+    /// Keeping this handle alive keeps the lock alive: a deny-share open on
+    /// Windows, the kernel's `flock` on Unix. Both evaporate with the process
+    /// — `SIGKILL` included — so a stale lock never needs manual cleanup.
     _file: File,
     path: PathBuf,
     project: String,
 }
 
-#[cfg(windows)]
 static PROCESS_INSTANCE_LOCK: OnceLock<Result<ProcessInstanceLock, String>> = OnceLock::new();
 
 #[cfg(windows)]
@@ -81,7 +81,57 @@ fn open_process_instance_lock(path: &std::path::Path) -> std::io::Result<File> {
         .open(path)
 }
 
-#[cfg(windows)]
+/// The Unix branch's whole body, compiled on every platform on purpose: the
+/// development and CI machines are Windows, and ISSUE-023 happened precisely
+/// because the non-Windows code (`Ok(())`) and its tests never got built
+/// there. `File::try_lock` is `flock(LOCK_EX | LOCK_NB)` on Unix and
+/// `LockFileEx` on Windows — same acquire/refuse/release-on-drop shape — so a
+/// Windows test run type-checks and exercises the exact logic the CentOS
+/// deployment runs.
+#[cfg_attr(windows, allow(dead_code))] // Windows 生产路径走 deny-share；这里测试在用
+fn open_advisory_process_instance_lock(path: &std::path::Path) -> std::io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .open(path)?;
+    file.try_lock().map_err(|error| match error {
+        std::fs::TryLockError::WouldBlock => {
+            // The holder wrote its identity into the file (project / pid /
+            // started_at); read it back so the refusal names who is holding.
+            // On Windows the holder's exclusive range makes this read fail —
+            // acceptable, the advisory path is only a test vehicle there.
+            let mut owner = String::new();
+            let _ = std::io::Read::read_to_string(&mut (&file), &mut owner);
+            std::io::Error::new(
+                std::io::ErrorKind::WouldBlock,
+                format!("锁被占用：{}", owner.trim().replace('\n', "，")),
+            )
+        }
+        std::fs::TryLockError::Error(error) => error,
+    })?;
+    Ok(file)
+}
+
+/// Unix side of the same contract. ISSUE-023: this used to be a bare
+/// `Ok(())`, which let a second CentOS process become a second writer of the
+/// same dabacon files, SurrealDB and meshes — every "process-wide is
+/// global-wide" invariant (geometry gate, staged executor, pending cleanup)
+/// silently lost its premise.
+///
+/// The `flock` lives on the open file description, so it holds exactly as
+/// long as the handle and the kernel reclaims it after any exit, `SIGKILL`
+/// included. Deliberately not "does the lock file exist" — that shape leaves
+/// stale locks for an operator to clean up. One flock caveat stays real:
+/// network filesystems may not honour it, so a project directory on NFS
+/// weakens this to best-effort (the deployment guide's problem; the code must
+/// never turn that into a silent pass — a silent pass is exactly the shape
+/// this issue had).
+#[cfg(not(windows))]
+fn open_process_instance_lock(path: &std::path::Path) -> std::io::Result<File> {
+    open_advisory_process_instance_lock(path)
+}
+
 fn process_instance_lock_path(db_option: &DbOption, project: &str) -> Option<PathBuf> {
     crate::data_interface::project_paths::resolve_project_root(db_option, project)
         .map(|root| root.join(".gen-model.instance.lock"))
@@ -89,7 +139,6 @@ fn process_instance_lock_path(db_option: &DbOption, project: &str) -> Option<Pat
 
 /// pub：Python 调试绑定（python/aios-py）的 `full_init` 与 `run_app`/`run_cli`
 /// 共用同一把单实例锁——mutating 管线不允许有第二个进程并发驱动。
-#[cfg(windows)]
 pub fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()> {
     let project = db_option.project_name.clone();
     let held = PROCESS_INSTANCE_LOCK.get_or_init(|| {
@@ -130,14 +179,12 @@ pub fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()>
     }
 }
 
-#[cfg(not(windows))]
-pub fn acquire_process_instance_lock(_db_option: &DbOption) -> anyhow::Result<()> {
-    Ok(())
-}
-
-#[cfg(all(test, windows))]
+#[cfg(test)]
 mod process_instance_lock_tests {
-    use super::{open_process_instance_lock, process_instance_lock_path};
+    use super::{
+        open_advisory_process_instance_lock, open_process_instance_lock,
+        process_instance_lock_path,
+    };
 
     #[test]
     fn lock_path_uses_the_project_dirs_folder_mapping() {
@@ -156,8 +203,14 @@ mod process_instance_lock_tests {
         );
     }
 
+    /// 两个平台同一句守卫语义：第一把手柄活着时第二个打开者被拒，手柄一掉锁随之
+    /// 释放。Windows 靠 deny-share，Unix 靠 flock——flock 挂在 open file
+    /// description 上，同进程内第二次 `open` 就是一个新的 OFD，内核对它的裁决与
+    /// 第二个进程完全相同，所以这条测试在锁原语层面等价于双进程。ISSUE-023：
+    /// Unix 分支曾是空 `Ok(())`，而这条测试原先只在 Windows 下编译，缺口因此
+    /// 没有回归网；退回任何一种旧写法它都会红。
     #[test]
-    fn deny_share_handle_blocks_a_second_process_style_open_until_drop() {
+    fn the_project_lock_rejects_a_second_opener_until_the_handle_drops() {
         let path = std::env::temp_dir().join(format!(
             "gen-model-lock-test-{}-{}.lock",
             std::process::id(),
@@ -169,10 +222,38 @@ mod process_instance_lock_tests {
         let first = open_process_instance_lock(&path).expect("first lock open");
         assert!(
             open_process_instance_lock(&path).is_err(),
-            "share_mode(0) must reject a concurrent opener"
+            "第二个打开者必须被拒（Windows deny-share / Unix flock）"
         );
         drop(first);
         let reopened = open_process_instance_lock(&path).expect("lock releases with handle");
+        drop(reopened);
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// CentOS 真跑的那条 advisory 路径（Unix `flock`）在 Windows 上以
+    /// `LockFileEx` 同形复现：拿到即排他、第二个尝试立刻被拒且错误里带
+    /// 「锁被占用」、手柄一掉即释放。ISSUE-023 的教训就是非 Windows 代码在
+    /// Windows 机器上零编译零测试——这条让它至少天天被这台机器跑到。
+    #[test]
+    fn the_advisory_lock_used_on_unix_holds_refuses_and_releases() {
+        let path = std::env::temp_dir().join(format!(
+            "gen-model-advisory-lock-test-{}-{}.lock",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let first = open_advisory_process_instance_lock(&path).expect("first advisory lock");
+        let refused = open_advisory_process_instance_lock(&path)
+            .expect_err("advisory lock must reject a second opener");
+        assert!(
+            refused.to_string().contains("锁被占用"),
+            "拒绝信息要说明是锁冲突，而不是一个裸 IO 错误：{refused}"
+        );
+        drop(first);
+        let reopened =
+            open_advisory_process_instance_lock(&path).expect("advisory lock releases with handle");
         drop(reopened);
         let _ = std::fs::remove_file(path);
     }
