@@ -3576,7 +3576,7 @@ impl AiosDBManager {
         warnings.extend(
             phase_blockers
                 .iter()
-                .map(|(phase, message)| format!("{} 阶段阻断: {message}", phase.as_str())),
+                .map(|blocker| format!("{} 阶段阻断: {}", blocker.phase.as_str(), blocker.message)),
         );
         let observed_dbnums = by_dbnum.keys().copied().collect::<HashSet<_>>();
 
@@ -3910,10 +3910,7 @@ impl AiosDBManager {
     ) -> (
         IndexMap<u32, Vec<FileCandidate>>,
         Vec<ShadowedCandidate>,
-        Vec<(
-            crate::data_interface::initialization_phase::DataPhase,
-            String,
-        )>,
+        Vec<crate::data_interface::initialization_phase::PhaseBlocker>,
     ) {
         let mut projects = self.db_option.included_projects.clone();
         if !projects
@@ -3929,19 +3926,25 @@ impl AiosDBManager {
             else {
                 let message = format!("无法解析 included project 目录: {candidate_project}");
                 warnings.push(message.clone());
-                blockers.push((
-                    crate::data_interface::initialization_phase::DataPhase::Meta,
-                    message,
-                ));
+                blockers.push(
+                    crate::data_interface::initialization_phase::PhaseBlocker::new(
+                        crate::data_interface::initialization_phase::DataPhase::Meta,
+                        message,
+                    )
+                    .with_project(candidate_project.clone()),
+                );
                 continue;
             };
             if !candidate_dir.exists() {
                 let message = format!("included project 目录不存在: {}", candidate_dir.display());
                 warnings.push(message.clone());
-                blockers.push((
-                    crate::data_interface::initialization_phase::DataPhase::Meta,
-                    message,
-                ));
+                blockers.push(
+                    crate::data_interface::initialization_phase::PhaseBlocker::new(
+                        crate::data_interface::initialization_phase::DataPhase::Meta,
+                        message,
+                    )
+                    .with_project(candidate_project.clone()),
+                );
                 continue;
             }
             let mut ignored_out_of_scope = Vec::new();
@@ -4016,7 +4019,7 @@ impl AiosDBManager {
                 selection
                     .blockers
                     .into_iter()
-                    .map(|message| (phase, message)),
+                    .map(|blocker| blocker.into_phase(phase)),
             );
             by_dbnum.retain(|_, candidates| {
                 candidates.retain(|candidate| {
@@ -4483,7 +4486,7 @@ impl AiosDBManager {
         receipt.warnings.extend(
             manifest_blockers
                 .iter()
-                .map(|(phase, message)| format!("{} 阶段阻断: {message}", phase.as_str())),
+                .map(|blocker| format!("{} 阶段阻断: {}", blocker.phase.as_str(), blocker.message)),
         );
         receipt.scanned = by_dbnum.len();
         let block_file_identity_conflicts = crate::options::block_file_identity_conflicts();
@@ -4549,12 +4552,16 @@ impl AiosDBManager {
                 .expect("同号多文件是阻断类异常");
                 if block_file_identity_conflicts {
                     receipt.blocked.push(BlockedDbnum { dbnum, reason });
-                    phase_blockers.push((
-                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                            &candidates[0].db_type,
-                        ),
-                        format!("dbnum={dbnum} 同号多文件"),
-                    ));
+                    phase_blockers.push(
+                        crate::data_interface::initialization_phase::PhaseBlocker::new(
+                            crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                                &candidates[0].db_type,
+                            ),
+                            format!("dbnum={dbnum} 同号多文件"),
+                        )
+                        .with_dbnum(dbnum)
+                        .with_project(candidates[0].project.clone()),
+                    );
                 } else {
                     receipt.warnings.push(format!(
                         "dbnum={dbnum}: {reason}；当前配置为仅记录并跳过，不阻断其余库初始化"
@@ -4584,12 +4591,16 @@ impl AiosDBManager {
                     receipt
                         .warnings
                         .push(format!("dbnum={dbnum}: 读取水位失败，本次跳过: {error:#}"));
-                    phase_blockers.push((
-                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                            &cand.db_type,
-                        ),
-                        format!("dbnum={dbnum} 读取水位失败: {error:#}"),
-                    ));
+                    phase_blockers.push(
+                        crate::data_interface::initialization_phase::PhaseBlocker::new(
+                            crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                                &cand.db_type,
+                            ),
+                            format!("dbnum={dbnum} 读取水位失败: {error:#}"),
+                        )
+                        .with_dbnum(dbnum)
+                        .with_project(cand.project.clone()),
+                    );
                     continue;
                 }
             };
@@ -4601,12 +4612,16 @@ impl AiosDBManager {
                 receipt
                     .warnings
                     .push(format!("dbnum={dbnum}: 记录扫描观察失败: {error:#}"));
-                phase_blockers.push((
-                    crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                        &cand.db_type,
-                    ),
-                    format!("dbnum={dbnum} 记录扫描观察失败: {error:#}"),
-                ));
+                phase_blockers.push(
+                    crate::data_interface::initialization_phase::PhaseBlocker::new(
+                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                            &cand.db_type,
+                        ),
+                        format!("dbnum={dbnum} 记录扫描观察失败: {error:#}"),
+                    )
+                    .with_dbnum(dbnum)
+                    .with_project(cand.project.clone()),
+                );
                 continue;
             }
             let mut applied = verdict.applied_sesno();
@@ -4624,12 +4639,16 @@ impl AiosDBManager {
                 {
                     if block_file_identity_conflicts {
                         receipt.blocked.push(BlockedDbnum { dbnum, reason });
-                        phase_blockers.push((
-                            crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                                &cand.db_type,
-                            ),
-                            format!("dbnum={dbnum} 身份异常阻断"),
-                        ));
+                        phase_blockers.push(
+                            crate::data_interface::initialization_phase::PhaseBlocker::new(
+                                crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                                    &cand.db_type,
+                                ),
+                                format!("dbnum={dbnum} 身份异常阻断"),
+                            )
+                            .with_dbnum(dbnum)
+                            .with_project(cand.project.clone()),
+                        );
                     } else {
                         receipt.warnings.push(format!(
                             "dbnum={dbnum}: {reason}；当前配置为仅记录并跳过，不阻断其余库初始化"
@@ -4787,6 +4806,20 @@ impl AiosDBManager {
     /// 并入名单恒空（2026-08-16 pipeline-f5 现场，回归测试钉着）。
     /// `session_budget`：本批最多应用多少个真实会话（ADR-017 拆窗第一层，
     /// `None` = 不收窄）。余量留给下一批——水位本来就支持部分推进。
+    /// 一个执行子阶段：控制台一行 + 任务登记表一格，两者同源。
+    ///
+    /// 控制台那一串是现场唯一按顺序讲完「走到了哪一步」的东西；登记表那一格是
+    /// `/tasks` 上唯一说得出「死在哪一步」的字段——`TaskRegistry::finish` 从不清
+    /// `current_stage`，失败任务把最后一个阶段一直带到终态，面板照着它画。
+    ///
+    /// 两边必须一起写。只印不记，异机排查就只剩一张截图（2026-08-27 的 SYST 8191
+    /// 正是这个形状：屏幕上阶段行齐全，回执里却看不出死在哪一步）；只记不印，本机
+    /// 就没了顺序。而登记表这一格在批次上下文之外是空转，所以 `println!` 不能省。
+    fn stage(dbnum: u32, stage: &str, line: &str) {
+        crate::data_interface::batch_worker::set_active_task_stage_quiet(stage);
+        println!("dbnum={dbnum} 执行阶段: {line}");
+    }
+
     pub(crate) async fn execute_one_dbnum(
         &self,
         project: &str,
@@ -4838,7 +4871,7 @@ impl AiosDBManager {
         // 聚合里等于「无可执行工作」→ 任务终态 succeeded/up_to_date，一次持久层
         // 故障就把没应用的窗口伪装成已完成——水位不动、无人重试、面板全绿。
         // Skipped 只留给判得出结论的主动裁决（阻断异常、排除）。
-        println!("dbnum={dbnum} 执行阶段: 复核文件身份与水位");
+        Self::stage(dbnum, "identity_check", "复核文件身份与水位");
         let verdict = match DbnumState::classify_scan(&obs).await {
             Ok(verdict) => verdict,
             Err(error) => {
@@ -4864,7 +4897,7 @@ impl AiosDBManager {
                 );
             }
         };
-        println!("dbnum={dbnum} 执行阶段: 文件身份复核完成");
+        println!("dbnum={dbnum} 阶段完成: 文件身份复核");
         if let Err(e) = DbnumState::record_observation(&obs, &verdict).await {
             warnings.push(format!("dbnum={dbnum}: 记录扫描观察失败: {e}"));
         }
@@ -4886,7 +4919,11 @@ impl AiosDBManager {
             {
                 return skipped(reason);
             }
-            println!("dbnum={dbnum} 执行阶段: 检测到回退（{reason}），按 ADR-021 整库清空重建");
+            Self::stage(
+                dbnum,
+                "wipe_reinit",
+                &format!("检测到回退（{reason}），按 ADR-021 整库清空重建"),
+            );
             match crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await {
                 Ok(report) => {
                     let note = format!(
@@ -5015,6 +5052,7 @@ impl AiosDBManager {
             })
         });
         if initial_load {
+            Self::stage(dbnum, "initial_load", "首次按需初始化（全量基线）");
             return match self
                 .initialize_dbnum_baseline(
                     project,
@@ -5076,7 +5114,7 @@ impl AiosDBManager {
 
         // Resolve and FIX this batch's window now (sessions arriving during
         // execution stay out of the range and wait for the next run).
-        println!("dbnum={dbnum} 执行阶段: 解析固定会话窗口");
+        Self::stage(dbnum, "resolve_window", "解析固定会话窗口");
         let plan = match SesnoRangeResolver::new()
             .resolve(
                 &cand.path,
@@ -5161,9 +5199,10 @@ impl AiosDBManager {
             deleted_elements: 0,
         };
 
-        println!(
-            "dbnum={dbnum} 执行阶段: 收集增量 {}..={}",
-            start_sesno, end_sesno
+        Self::stage(
+            dbnum,
+            "collect_window",
+            &format!("收集增量 {start_sesno}..={end_sesno}"),
         );
         let collected = match IncrementPipeline::collect_window_for_candidate(
             &cand.project,
@@ -5238,11 +5277,11 @@ impl AiosDBManager {
         );
         let mut precollected = IndexMap::new();
         precollected.insert(cand.path.clone(), (plan.range.clone(), collected));
-        println!("dbnum={dbnum} 执行阶段: 增量收集完成，开始暂存应用");
+        Self::stage(dbnum, "stage_apply", "增量收集完成，开始暂存应用");
         let incr = IncrementPipeline::new()
             .apply_with_precollected(apply_map, precollected)
             .await;
-        println!("dbnum={dbnum} 执行阶段: 暂存应用返回");
+        println!("dbnum={dbnum} 阶段完成: 暂存应用返回");
         warnings.extend(incr.warnings.iter().map(|w| format!("dbnum={dbnum}: {w}")));
 
         let mut units = Vec::new();
@@ -8106,6 +8145,46 @@ mod tests {
         assert!(
             !match_block.contains("skipped("),
             "读失败不得复用 skipped 闭包: {match_block}"
+        );
+    }
+
+    /// `执行阶段:` 这个前缀专属于「进入了一个登记过的阶段」——控制台印一行、任务
+    /// 登记表记一格，两边一起写。
+    ///
+    /// 回退成裸 `println!` 等于「屏幕上有、回执里没有」：异机排查只剩一张截图，而
+    /// `/tasks` 上那个 failed 任务说不出自己死在哪一步。收集口有十几个各自具名的
+    /// 硬失败出口，回执里那句原话分不出它发生在收集还是写回。
+    ///
+    /// 走完一步的提示走 `阶段完成:`，**不登记**。它们不是可以死在里面的地方，登记
+    /// 了反而会盖掉真正该显示的那一格——「暂存应用返回」印在 apply 之后，把它记成
+    /// 阶段，apply 自己失败的批次就会显示成死在它的下一步。
+    ///
+    /// 另一半是次序：登记必须发生在真正开始收集**之前**，否则窗口在收集里炸掉时
+    /// 登记表停在上一个阶段，指向的是已经走完的那一步。
+    #[test]
+    fn every_execution_stage_is_registered_not_just_printed() {
+        let source = include_str!("manual_update.rs");
+        let body = source
+            .split_once("pub(crate) async fn execute_one_dbnum(")
+            .expect("execute_one_dbnum 必须存在")
+            .1
+            .split_once(concat!("async fn ", "build_transform_target_summaries("))
+            .expect("execute_one_dbnum 之后应当是 build_transform_target_summaries")
+            .0;
+
+        assert!(
+            !body.contains(concat!("println!(\"dbnum={dbnum} 执行", "阶段")),
+            "阶段行不得只印不记，走 Self::stage: {body}"
+        );
+        let registered = body
+            .find("\"collect_window\"")
+            .expect("收集这一步必须登记阶段");
+        let collecting = body
+            .find("IncrementPipeline::collect_window_for_candidate(")
+            .expect("执行体必须走候选收集入口");
+        assert!(
+            registered < collecting,
+            "阶段要在收集之前登记，否则炸在收集里时登记表指向上一步: {body}"
         );
     }
 

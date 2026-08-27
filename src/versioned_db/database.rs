@@ -756,7 +756,12 @@ fn full_sync_catalogue_files(
     if !selection.blockers.is_empty() {
         anyhow::bail!(
             "{db_type} 全量清单身份阻断: {}",
-            selection.blockers.join("; ")
+            selection
+                .blockers
+                .iter()
+                .map(|blocker| blocker.message.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
         );
     }
     let selected_project_by_dbnum = selection

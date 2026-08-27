@@ -18,7 +18,7 @@ path = "src/lib.rs"
 
 
 [features]
-default = ["ws", "gen_model", "manifold", "project_hd"]
+default = ["ws", "gen_model", "manifold", "project_hd", "http_api"]
 console = ["ws", "gen_model", "manifold", "project_hd", "mqtt"]
 local = []
 ws = []

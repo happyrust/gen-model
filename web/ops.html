@@ -3,18 +3,46 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="color-scheme" content="dark">
+<meta name="color-scheme" content="light dark">
 <title>AIOS 数据库 · 增量运行监控</title>
 <!-- 相对路径：从 /assets/ops.html 打过来正好是部署目录里那个 favicon，省掉每次开页面一条 404 -->
 <link rel="icon" href="favicon.ico">
+<!-- 主题在 head 里定死，免得亮色底上先闪一帧深色。刻意不跟随 prefers-color-scheme：
+     值班屏幕的默认得是可预期的同一种，跟着操作系统走等于两台机器看到两个样子。 -->
+<script>
+document.documentElement.dataset.theme =
+  new URLSearchParams(location.search).get("theme") === "dark" ? "dark" : "light";
+</script>
 <style>
+/* 亮色是默认。判决行、连败账本、失败回执全靠红/琥珀/绿三色分级，所以这三个色
+   在白底上都按 ≥5:1 重挑过一遍——深色主题里那组（#E0625E / #D2A34E / #5CA97F）
+   拿到白底只有 2~3:1，屏幕稍微反光就分不出红和琥珀。同理 --t3 那档小字（10.5px
+   的表头与脚注）压到 4.65:1，没有再淡。 */
 :root{
+  color-scheme:light;
+  --bg:#F4F5F6; --panel:#FFFFFF; --line:#E7E9EB; --edge:#D9DDE0; --head:#F7F8F9;
+  --t1:#14181B; --t2:#4C565D; --t3:#6B767D;
+  --blue:#1B6E97; --red:#C0322D; --amber:#8A6410; --green:#2F7B54;
+  --track:#0A0B0C12;
+  --tint-blue:#1B6E971A; --tint-red:#C0322D1A; --tint-amber:#8A64101A;
+  --tint-green:#2F7B541A; --tint-mut:#6B767D1F;
+  --hover-bg:#0A0B0C08; --hover-edge:#AEB6BB;
+  --go-edge:#1B6E9759; --go-bg:#1B6E9714;
+  --warn-edge:#8A641059; --warn-bg:#8A641014;
+  --sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+  --mono:"JetBrains Mono",ui-monospace,"Cascadia Mono",Consolas,"SFMono-Regular",monospace;
+}
+html[data-theme="dark"]{
+  color-scheme:dark;
   --bg:#0A0B0C; --panel:#101315; --line:#1A1E22; --edge:#23282C; --head:#15191C;
   --t1:#E9EDEF; --t2:#98A2A8; --t3:#646E74;
   --blue:#4AA8D8; --red:#E0625E; --amber:#D2A34E; --green:#5CA97F;
   --track:#FFFFFF0D;
-  --sans:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
-  --mono:"JetBrains Mono",ui-monospace,"Cascadia Mono",Consolas,"SFMono-Regular",monospace;
+  --tint-blue:#4AA8D81F; --tint-red:#E0625E1F; --tint-amber:#D2A34E1F;
+  --tint-green:#5CA97F1F; --tint-mut:#646E7426;
+  --hover-bg:#FFFFFF08; --hover-edge:#3A4247;
+  --go-edge:#4AA8D840; --go-bg:#4AA8D814;
+  --warn-edge:#D2A34E40; --warn-bg:#D2A34E14;
 }
 *,::before,::after{box-sizing:border-box}
 html,body{margin:0;background:var(--bg)}
@@ -57,11 +85,11 @@ body{
 .verdict-timer .val{font-family:var(--mono);font-size:30px;font-weight:500}
 .verdict-timer .since{font-family:var(--mono);font-size:11px;color:var(--t3)}
 .chip{display:inline-block;border-radius:4px;padding:3px 9px;font-size:11px;font-weight:600;letter-spacing:.6px}
-.chip.red{background:#E0625E1F;color:var(--red)}
-.chip.amber{background:#D2A34E1F;color:var(--amber)}
-.chip.blue{background:#4AA8D81F;color:var(--blue)}
-.chip.green{background:#5CA97F1F;color:var(--green)}
-.chip.mut{background:#646E7426;color:var(--t3)}
+.chip.red{background:var(--tint-red);color:var(--red)}
+.chip.amber{background:var(--tint-amber);color:var(--amber)}
+.chip.blue{background:var(--tint-blue);color:var(--blue)}
+.chip.green{background:var(--tint-green);color:var(--green)}
+.chip.mut{background:var(--tint-mut);color:var(--t3)}
 .chip.sm{padding:3px 8px;font-size:10.5px;letter-spacing:.4px}
 
 /* ── actions ────────────────────────────────────────────── */
@@ -71,12 +99,12 @@ body{
   border:1px solid var(--edge);border-radius:5px;padding:7px 13px;cursor:pointer;
   transition:border-color .12s,color .12s,background-color .12s;
 }
-.btn:hover:not(:disabled){color:var(--t1);border-color:#3A4247;background:#FFFFFF08}
+.btn:hover:not(:disabled){color:var(--t1);border-color:var(--hover-edge);background:var(--hover-bg)}
 .btn:disabled{opacity:.35;cursor:default}
-.btn.go{color:var(--blue);border-color:#4AA8D840}
-.btn.go:hover:not(:disabled){background:#4AA8D814;border-color:var(--blue)}
-.btn.warn{color:var(--amber);border-color:#D2A34E40}
-.btn.warn:hover:not(:disabled){background:#D2A34E14;border-color:var(--amber)}
+.btn.go{color:var(--blue);border-color:var(--go-edge)}
+.btn.go:hover:not(:disabled){background:var(--go-bg);border-color:var(--blue)}
+.btn.warn{color:var(--amber);border-color:var(--warn-edge)}
+.btn.warn:hover:not(:disabled){background:var(--warn-bg);border-color:var(--amber)}
 .acts .req{font-family:var(--mono);font-size:11.5px;color:var(--t2)}
 .acts .hint{font-size:11.5px;color:var(--t3)}
 .acts-msg{font-size:12px;line-height:19px;padding-top:2px;word-break:break-word}
@@ -114,12 +142,25 @@ body{
 .q-tbl>.r{height:44px}
 .t-tbl{grid-template-columns:minmax(90px,1fr) 62px 88px 52px}
 .t-tbl>.r{height:37px}
+.t-tbl>.r.wmsg{border-bottom:0}
+.t-msg{grid-column:1/-1;padding:0 18px 12px;font-size:11.5px;line-height:18px;word-break:break-word;white-space:normal;border-bottom:1px solid var(--line)}
+.t-msg:last-child{border-bottom:0}
+.t-msg .l{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.4px;color:var(--t3);margin-bottom:4px}
+.t-msg .v{color:var(--red)}
+.t-msg .p{display:block;margin-top:4px;font-family:var(--mono);font-size:10.5px;color:var(--t3);word-break:break-all}
+.t-msg.prog .pl{display:flex;gap:12px;flex-wrap:wrap;align-items:baseline;font-size:11.5px}
+.t-msg.prog .track{margin-top:7px;max-width:none}
 .w-tbl{grid-template-columns:90px minmax(110px,140px) 84px 126px minmax(150px,1fr) 70px minmax(230px,360px)}
 .w-tbl>.r{height:46px}
 .dbn{font-family:var(--mono);font-size:13.5px;font-weight:500}
 .state{display:flex;align-items:center;gap:9px;min-width:0}
 .dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto}
 .note{font-size:11.5px;color:var(--t3);overflow:hidden;text-overflow:ellipsis}
+/* 被挡住那行 → 肇事库的失败卡。人看完「被 meta 挡着」的下一句永远是「那它为什么
+   失败」，而答案在另一张卡里、要按 dbnum 筛才找得到。 */
+.jump{appearance:none;flex:0 0 auto;border:1px solid var(--line);background:transparent;border-radius:999px;
+  padding:2px 9px;font:inherit;font-size:10.5px;font-family:var(--mono);color:var(--red);cursor:pointer;line-height:16px}
+.jump:hover{border-color:currentColor}
 .empty{padding:26px 18px 30px;color:var(--t3);font-size:12.5px;text-align:center;line-height:20px}
 
 /* ── failure ledger ─────────────────────────────────────── */
@@ -133,6 +174,10 @@ body{
 .segs>i.on{background:var(--red)}
 .segs>i.on.amber{background:var(--amber)}
 .reason{font-size:12px;color:var(--t2);line-height:20px;word-break:break-word;white-space:normal}
+.reason .l{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.4px;color:var(--t3);margin-bottom:5px}
+.reason .v{display:block}
+.reason .v.err{color:var(--red)}
+.reason .p{display:block;margin-top:5px;font-family:var(--mono);font-size:10.5px;color:var(--t3);word-break:break-all}
 .times{display:flex}
 .times>div{flex:1;display:flex;flex-direction:column;gap:5px}
 .times .l{font-size:10.5px;letter-spacing:.5px;color:var(--t3)}
@@ -142,6 +187,37 @@ body{
 .unblock .u{display:flex;gap:10px}
 .unblock .u .n{font-family:var(--mono);font-size:11px;color:var(--t3);width:18px;flex:0 0 auto}
 .unblock .u .x{font-size:12px;color:var(--t2);line-height:18px}
+/* 伴随告警默认折起：一条净窗口口径标注就上百字，摊开会把原因那一行挤到屏幕外，
+   而原因才是这一屏要人第一眼看到的东西。 */
+.warns>summary{cursor:pointer;font-family:var(--mono);font-size:10.5px;letter-spacing:.4px;color:var(--t3)}
+.warns .p{display:block;margin-top:6px;font-family:var(--mono);font-size:10.5px;color:var(--t3);word-break:break-all;line-height:17px}
+.warns pre{margin:6px 0 0;padding:10px 12px;background:var(--track);border-radius:6px;font-family:var(--mono);font-size:10.5px;line-height:17px;color:var(--t2);white-space:pre-wrap;word-break:break-all}
+
+/* ── error log filter ───────────────────────────────────── */
+.bf-filter{display:flex;align-items:center;gap:7px;flex-wrap:wrap;justify-content:flex-end}
+.bf-filter button{appearance:none;border:1px solid var(--line);background:transparent;border-radius:999px;
+  padding:3px 11px;font:inherit;font-size:11px;color:var(--t3);cursor:pointer;line-height:18px}
+.bf-filter button:hover{color:var(--t2)}
+.bf-filter button.on{border-color:currentColor;color:var(--t1)}
+.bf-filter button.on.red{color:var(--red)}
+.bf-filter button.on.amber{color:var(--amber)}
+.bf-filter button b{font-weight:400;font-family:var(--mono);opacity:.7}
+.bf-filter input{width:96px;border:1px solid var(--line);background:transparent;border-radius:999px;
+  padding:3px 11px;font:inherit;font-size:11px;color:var(--t2);line-height:18px}
+.bf-filter input::placeholder{color:var(--t3)}
+.stall{display:grid;grid-template-columns:118px 96px 1fr;gap:0 14px;padding:9px 18px;align-items:baseline;border-bottom:1px solid var(--line)}
+.stall .tm{font-family:var(--mono);font-size:11px;color:var(--t3)}
+.stall .db{font-family:var(--mono);font-size:12px;color:var(--t2)}
+.stall .tx{font-size:12px;line-height:19px;color:var(--amber);word-break:break-word}
+
+/* ── live events ────────────────────────────────────────── */
+.ev{display:grid;grid-template-columns:60px 60px 1fr;gap:0 12px;padding:7px 18px;align-items:baseline;border-bottom:1px solid var(--line)}
+.ev:last-child{border-bottom:0}
+.ev .tm{font-family:var(--mono);font-size:11px;color:var(--t3)}
+.ev .ty{font-family:var(--mono);font-size:10.5px;letter-spacing:.3px}
+.ev .tx{font-size:12px;line-height:18px;color:var(--t2);word-break:break-word;white-space:normal}
+.ev.bad .tx{color:var(--red)}
+.ev-gap{padding:7px 18px;font-size:11.5px;color:var(--amber);border-bottom:1px solid var(--line)}
 
 /* ── watermark ──────────────────────────────────────────── */
 .track{display:block;height:5px;border-radius:3px;background:var(--track);overflow:hidden;max-width:480px}
@@ -242,6 +318,40 @@ body{
   <div class="panel">
     <div class="panel-head" style="align-items:flex-start">
       <div style="min-width:0">
+        <div style="display:flex;align-items:baseline"><span class="t">错误日志 · 落盘时间线</span><span class="n" id="bf-count">—</span></div>
+        <div class="sub">logs/ 下两个文件族并成一条按时刻排的线：批次失败与 park、队列停滞。判决行与连败账本都活在进程内存里、重启即清空，这一份落盘——拷走 logs/ 就能异机复核。</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
+        <span class="src">GET /api/v1/error-log</span>
+        <div class="bf-filter" id="bf-filter">
+          <button data-kind="">全部 <b>0</b></button>
+          <button data-kind="batch_failure" data-cls="red">批次失败 <b>0</b></button>
+          <button data-kind="batch_park" data-cls="red">已 park <b>0</b></button>
+          <button data-kind="queue_stall" data-cls="amber">队列停滞 <b>0</b></button>
+          <input id="bf-dbnum" placeholder="dbnum" inputmode="numeric">
+        </div>
+      </div>
+    </div>
+    <div id="bf-body"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head" style="align-items:flex-start">
+      <div style="min-width:0">
+        <div style="display:flex;align-items:baseline"><span class="t">实时事件</span><span class="n" id="e-count">—</span></div>
+        <div class="sub">轮询回答「现在是什么状态」，这里回答「刚才发生了什么」——批次起止与模型单元逐个完成，按发生顺序各出现一次。它不落盘，刷新页面就从这一刻重新攒。</div>
+      </div>
+      <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
+        <span class="src">WS /api/v1/ws → tasks</span>
+        <span class="chip sm mut" id="e-state">未连接</span>
+      </div>
+    </div>
+    <div id="e-body"></div>
+  </div>
+
+  <div class="panel">
+    <div class="panel-head" style="align-items:flex-start">
+      <div style="min-width:0">
         <div style="display:flex;align-items:baseline"><span class="t">水位 · 每库应用进度</span></div>
         <div class="sub">applied_sesno 追平 file_latest_sesno 才算真落库——屏障解开、blockers 清空都证明不了数据到位。</div>
       </div>
@@ -280,11 +390,18 @@ const MAX_ATTEMPTS = 5;          // model_update_pending::MAX_ATTEMPTS
 
 const WRITE = !qs.has("readonly");
 
+const EV_MAX = 60;               // 事件条留多少行；再多就只是滚动而不是可读了
+
 const S = {
-  health:null, queue:null, dbnums:null, tasks:null,
+  health:null, queue:null, dbnums:null, tasks:null, batchFailures:null,
+  // 错误日志卡的筛选：空 = 全部。筛选在前端做，切一下不用等一轮网络。
+  bfKind:"", bfDbnum:"",
   lastOk:0, lastErr:"", errSince:0, tick:0, startedAt:null, blockedSince:0,
   // 写操作：pending 是「已点、等二次确认」的那一条，msg 是上一次调用的回执。
   act:{ pending:null, busy:false, msg:null, level:"", at:0 },
+  // 事件流与轮询各活各的：WS 连不上（老后端、代理不转 upgrade）只让这一块变灰，
+  // 页面其余部分照常。dropped 记的是 seq 断层，慢消费者被服务端跳帧时才看得见。
+  ws:{ state:"init", events:[], lastSeq:null, dropped:0, backoff:1000, since:0, err:"" },
 };
 
 /* ── helpers ────────────────────────────────────────────── */
@@ -302,6 +419,13 @@ function clock(s){
   const t = typeof s === "number" ? s : ts(s);
   if(!t) return "—";
   return new Date(t).toTimeString().slice(0, 8);
+}
+// 带日期的时刻。落盘记录可以是好几天前的，只给 HH:MM:SS 会让人把上周那条当成刚才。
+function stamp(s){
+  const t = typeof s === "number" ? s : ts(s);
+  if(!t) return "—";
+  const d = new Date(t);
+  return `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${d.toTimeString().slice(0, 8)}`;
 }
 function dur(ms){
   if(!Number.isFinite(ms) || ms < 0) return "—";
@@ -327,6 +451,19 @@ function projOf(row){
   return m ? m[1] : (row.file_name || "—");
 }
 const ANOMALY = { rollback:"回退", path_migrated:"路径迁移", type_changed:"类型变更", duplicate:"重复文件", missing:"文件缺失" };
+
+// 稳定英文子阶段（batch_worker::set_active_task_stage 与 model_update_pending 写入）。
+// 认不出的原样显示：后端加一个新阶段名不该让这一格变空白。
+const STAGE = {
+  data_parse:"解析增量", identity_check:"复核文件身份", wipe_reinit:"整库清空重建",
+  initial_load:"首次全量基线", resolve_window:"解析会话窗口",
+  collect_window:"收集增量", stage_apply:"暂存应用",
+  dependency_index:"依赖索引", dependency_preload:"依赖预载",
+  model_generate:"生成模型", finalize:"收口", commit:"写回",
+  commit_tail:"收口事务", commit_reconcile:"提交对账",
+  claim:"认领", claimed:"已认领", settling:"结算",
+};
+function stageOf(s){ return s ? (STAGE[s] || s) : ""; }
 
 async function get(path){
   const c = new AbortController();
@@ -475,10 +612,13 @@ function renderActions(m){
 
 /* ── poll ───────────────────────────────────────────────── */
 async function cycle(){
-  const wantSlow = S.tick % SLOW_EVERY === 0 || !S.dbnums;
+  const wantSlow = S.tick % SLOW_EVERY === 0 || !S.dbnums || !S.batchFailures;
   const jobs = [get("/health"), get("/queue"), get("/tasks?limit=12")];
-  if(wantSlow) jobs.push(get("/dbnums"));
-  const [h, q, t, d] = await Promise.allSettled(jobs);
+  // 落盘的失败原因跟着慢轮走：它读磁盘，而失败是低频事件，没必要每 2 秒翻一次。
+  // 但它必须被读——/tasks 那份权威回执活在进程内存里，重启即清空，而人打开这一页
+  // 时往往已经重启过了。
+  if(wantSlow) jobs.push(get("/dbnums"), get("/error-log?limit=40"));
+  const [h, q, t, d, bf] = await Promise.allSettled(jobs);
 
   if(h.status === "fulfilled"){
     // 进程重启后队列是按水位重建的，队列里的「已等」要从重启起算。
@@ -493,6 +633,7 @@ async function cycle(){
   if(q.status === "fulfilled") S.queue = q.value;
   if(t.status === "fulfilled") S.tasks = t.value;
   if(d && d.status === "fulfilled") S.dbnums = d.value;
+  if(bf && bf.status === "fulfilled") S.batchFailures = bf.value;
   S.tick++;
 }
 
@@ -504,6 +645,130 @@ async function loop(){
   }
 }
 
+/* ── live events (WS) ───────────────────────────────────── */
+// `?api=` 可以指到别的主机，所以 ws 地址得从 BASE 推，不能拿 location 硬拼。
+function wsUrl(){
+  const u = new URL(BASE.replace(/\/+$/, "") + "/ws", location.href);
+  u.protocol = u.protocol === "https:" ? "wss:" : "ws:";
+  return u.toString();
+}
+
+// 服务端 90 秒收不到**客户端**消息就断（ws.rs IDLE_TIMEOUT）——广播出去的事件不
+// 算数，所以不心跳的连接每 91 秒必断一次，而空闲正是最该盯着这一块的时候。断口里
+// 的事件没有重放，重连回来也补不上。协议约定 30 秒一次（ws.rs 模块头）。
+const WS_PING_MS = 30000;
+
+// 事件可能成串到达（一个窗口几百个模型单元），逐条 render 会把主线程焊死。
+let evPaint = 0;
+function paintSoon(){
+  if(evPaint) return;
+  evPaint = setTimeout(() => {
+    evPaint = 0;
+    try{ render(); }catch(e){ console.error(e); }
+  }, 200);
+}
+
+function connectEvents(){
+  let sock, beat = 0;
+  try{ sock = new WebSocket(wsUrl()); }
+  catch(e){ S.ws.state = "error"; S.ws.err = String(e && e.message || e); return retryEvents(); }
+  S.ws.state = "connecting";
+  paintSoon();
+
+  sock.onopen = () => {
+    S.ws.state = "open"; S.ws.backoff = 1000; S.ws.since = Date.now(); S.ws.err = "";
+    // 服务端默认已订 tasks；显式再发一次，等以后多了主题这里不用改。
+    try{ sock.send(JSON.stringify({ type:"subscribe", topics:["tasks"] })); }catch{ /* 已断则 onclose 接手 */ }
+    beat = setInterval(() => {
+      try{ sock.send(JSON.stringify({ type:"ping" })); }catch{ /* 已断则 onclose 接手 */ }
+    }, WS_PING_MS);
+    paintSoon();
+  };
+  sock.onmessage = e => {
+    let msg = null;
+    try{ msg = JSON.parse(e.data); }catch{ return; }
+    if(!msg) return;
+    // seq 由每条连接自己编号，重连从头开始——只拿它认掉帧，不当作行 key。pong 也
+    // 占一个号，先记再退出：漏掉它就等于把自己的心跳一条条数成服务端跳帧。
+    if(S.ws.lastSeq != null && msg.seq > S.ws.lastSeq + 1) S.ws.dropped += msg.seq - S.ws.lastSeq - 1;
+    S.ws.lastSeq = msg.seq;
+    if(msg.type === "pong") return;
+    S.ws.events.unshift(msg);
+    if(S.ws.events.length > EV_MAX) S.ws.events.length = EV_MAX;
+    paintSoon();
+  };
+  // onerror 之后必定跟一个 onclose，重连与停搏只放一处，免得退避被清两次、
+  // 心跳在断掉的 socket 上空转到下一条连接。
+  sock.onclose = () => {
+    clearInterval(beat);
+    S.ws.state = "closed"; S.ws.lastSeq = null; paintSoon(); retryEvents();
+  };
+}
+function retryEvents(){
+  const wait = Math.min(S.ws.backoff, 15000);
+  S.ws.backoff = Math.min(wait * 2, 15000);
+  setTimeout(connectEvents, wait);
+}
+
+const EV_TYPE = { task_started:["blue", "start"], task_progress:["mut", "prog"], task_finished:["green", "end"] };
+// 事件正文：领域事件（payload.kind）优先，任务级信封兜底。失败要带上原话——
+// 这条流是唯一按发生顺序讲完整故事的地方，把 message 吞掉它就只剩节拍。
+function evText(msg){
+  const p = (msg && msg.payload) || {};
+  switch(p.kind){
+    case "data_batch_started":
+      return { text:`数据批次 dbnum ${p.dbnum} 开始 · 会话 ${p.start_sesno}–${p.end_sesno}`, bad:false };
+    case "data_batch_finished":
+      return { text:`数据批次 dbnum ${p.dbnum} ${p.success ? "成功" : "失败"}${p.message ? " · " + p.message : ""}`, bad:!p.success };
+    case "model_unit_started":
+      return { text:`模型单元 ${p.noun || ""} ${p.root_refno} 开始`, bad:false };
+    case "model_unit_finished":
+      return { text:`模型单元 ${p.root_refno} ${p.success ? "完成" : "失败"}${p.message ? " · " + p.message : ""}`, bad:!p.success };
+  }
+  if(msg.type === "task_started"){
+    const what = p.dbnum != null ? `dbnum ${p.dbnum}` : (p.total != null ? `${p.total} 个目标` : "");
+    return { text:`任务起 ${p.kind || ""}${what ? " · " + what : ""}${p.project ? " · " + p.project : ""}`, bad:false };
+  }
+  if(msg.type === "task_finished"){
+    const b = (p.result && p.result.batch) || null;
+    const why = (b && b.message) || ((p.result && p.result.warnings) || []).join("；");
+    const bad = p.state === "failed" || p.state === "partial";
+    return { text:`任务终态 ${p.state}${why ? " · " + why : ""}`, bad };
+  }
+  return { text:JSON.stringify(p).slice(0, 200), bad:false };
+}
+
+const WS_CHIP = {
+  open:["green", "已连接"], connecting:["amber", "连接中"],
+  closed:["amber", "断开 · 重连中"], error:["red", "打不开"], init:["mut", "未连接"],
+};
+function renderEvents(){
+  const [cls, label] = WS_CHIP[S.ws.state] || WS_CHIP.init;
+  const chip = $("e-state");
+  chip.className = "chip sm " + cls;
+  chip.textContent = label + (S.ws.state === "open" && S.ws.since ? ` · ${dur(Date.now() - S.ws.since)}` : "");
+  $("e-count").textContent = S.ws.events.length ? `${S.ws.events.length} 条` : "—";
+
+  if(!S.ws.events.length){
+    $("e-body").innerHTML = `<div class="empty">${S.ws.state === "open"
+      ? "已连上，还没有事件 —— 引擎这会儿没在跑批次。"
+      : "还没连上事件流。轮询不受影响；代理不转 WebSocket 升级时这一块会一直空着。" +
+        (S.ws.err ? `<br><span class="mono">${esc(S.ws.err)}</span>` : "")}</div>`;
+    return;
+  }
+  $("e-body").innerHTML =
+    (S.ws.dropped ? `<div class="ev-gap">服务端跳过了 ${S.ws.dropped} 帧（慢消费者滞后）—— 事件流有缺口，以轮询读数为准。</div>` : "")
+    + S.ws.events.map(msg => {
+      const [c, short] = EV_TYPE[msg.type] || ["mut", msg.type];
+      const { text, bad } = evText(msg);
+      return `<div class="ev${bad ? " bad" : ""}">
+        <span class="tm">${esc(clock(msg.ts))}</span>
+        <span class="ty ${bad ? "red" : c}">${esc(short)}</span>
+        <span class="tx" title="${esc(msg.task_id || "")}">${esc(text)}</span>
+      </div>`;
+    }).join("");
+}
+
 /* ── derived ────────────────────────────────────────────── */
 function model(){
   const h = S.health || null;
@@ -513,6 +778,46 @@ function model(){
   const dbs = (S.dbnums && S.dbnums.dbnums) || [];
   const byTask = new Map(tasks.map(t => [t.task_id, t]));
   const byDb = new Map(dbs.map(r => [r.dbnum, r]));
+
+  // dbnum 不是主键：SYS 库在每个项目里都是 8191，撞号是常态而不是异常。而水位
+  // （dbnum_watermark:N）、重试记录（increment_update_attempt:N）与连败账本三个键
+  // 又都只认号，所以按号取一行等于从几份 sys 文件里任意挑一个。撞号时把候选全摆
+  // 出来，让人自己按 file_path 认。
+  const dbsByNum = new Map();
+  for(const r of dbs){
+    const g = dbsByNum.get(r.dbnum);
+    if(g) g.push(r); else dbsByNum.set(r.dbnum, [r]);
+  }
+
+  // 批次为什么失败，只有 /tasks 的 result.batch.message 说得清，而 /tasks 本来就在
+  // 轮询里 —— TaskRegistry::list() 返回的是完整 TaskEntry，含 result。反过来
+  // batch_failures.reason 取的是 warnings.last()：净窗口收集硬失败时 warnings 里
+  // 只剩「收集口径：净窗口 …」那条口径标注，照它写卡片就成了一句正常统计。两边
+  // 都留着，但渲染时必须标明谁是权威。
+  const failedByDb = new Map();
+  const keepNewest = (db, cand) => {
+    if(db == null || !cand.msg) return;
+    const held = failedByDb.get(db);
+    if(!held || cand.at >= held.at) failedByDb.set(db, cand);
+  };
+  for(const t of tasks){
+    if(t.state !== "failed" && t.state !== "partial") continue;
+    const b = (t.result && t.result.batch) || null;
+    const db = (b && b.dbnum != null) ? b.dbnum : t.dbnum;
+    const msg = (b && b.message) || ((t.result && t.result.warnings) || []).join("；");
+    keepNewest(db, { at:ts(t.finished_at || t.started_at || t.created_at), msg, taskId:t.task_id,
+                     stage:t.current_stage, file:(b && b.file_path) || "", from:"tasks" });
+  }
+  // 落盘那份是同一句话的副本，唯一的区别是它活得过重启 —— 而重启恰恰是这一页最
+  // 常见的开场：人发现队列不动，先重启一次，再打开面板，此时 /tasks 已经空了。
+  // 两份都在时按时刻取新的，所以正常运行期间行为不变。
+  for(const r of ((S.batchFailures && S.batchFailures.records) || [])){
+    // park 记录只带 warnings.last() 口径那句，权威那句在同库的 batch_failure 记录
+    // 里。park 又必然比它晚，按时刻取新的会让判决行退回到那句更弱的话。
+    if(r.event === "batch_park") continue;
+    keepNewest(r.dbnum, { at:ts(r.at), msg:r.reason, taskId:r.task_id, stage:r.died_at,
+                          file:r.file_path || "", from:"logs" });
+  }
 
   const failures = Object.entries((h && h.batch_failures) || {})
     .map(([db, v]) => ({ dbnum:Number(db), ...v }))
@@ -528,6 +833,9 @@ function model(){
   const held    = rows.filter(r => r.state === "held");
   const blockedPhase = (S.queue && S.queue.blocked_by_phase) || init.current_phase || null;
   const blockedRows = rows.filter(r => r.blocked_by_phase);
+  // 结构化 blocker（ISSUE-025 §三）：相 + 肇事 dbnum + 项目 + 去哪儿取全文原因。
+  // 老 exe 只给渲染好的字符串数组，那时这里为空，判决行照旧退回 blockers[0]。
+  const blockedBy = init.blocked_by || (S.queue && S.queue.blockers) || [];
 
   const mup = (h && h.model_update_pending) || {};
   // health 给每个分项 2 秒预算，超了就回一份零 + error。那时 0 是「没读到」，不是
@@ -540,8 +848,17 @@ function model(){
   const mupDegraded = !!mup.error
     || ((h && h.degraded_sections) || []).includes("model_update_pending");
   const mupBlind = mupDegraded && !(Number(mup.dead_letters) > 0);
-  return { h, init, rows, tasks, dbs, byTask, byDb, failures, parked, inScope, lagging,
-           running, queued, held, blockedPhase, blockedRows, mup, mupBlind };
+  return { h, init, rows, tasks, dbs, byTask, byDb, dbsByNum, failedByDb,
+           failures, parked, inScope, lagging,
+           running, queued, held, blockedPhase, blockedRows, blockedBy, mup, mupBlind };
+}
+
+/// 挡住 `phase` 那一相的肇事库。
+///
+/// 同相多条时取第一条**带 dbnum** 的：不带 dbnum 的那种（目录清单不可读、整轮
+/// 重扫失败）本来就指不出某一个库，拿它当肇事者是替引擎编一个答案。
+function culpritOf(m, phase){
+  return (m.blockedBy || []).find(b => b && b.dbnum != null && (!phase || b.phase === phase)) || null;
 }
 
 // 判决副标题里那半句。读不出来时不许说「0 条」——死信正是靠这半句被人看见的。
@@ -584,14 +901,48 @@ function verdict(m){
     );
     if(since && Number.isFinite(since) && (!S.blockedSince || since < S.blockedSince)) S.blockedSince = since;
 
-    const who = culprit ? `dbnum=${culprit.dbnum}` : (blockers[0] ? "blocker" : "未知来源");
+    // 连败账本是进程内的，重启就空；而人往往正是重启一次之后才来开这一页。那时
+    // 肇事者还写在协调器的结构化 blocker 里（相 + dbnum），别退回「未知来源」。
+    const blocker = culpritOf(m, m.blockedPhase);
+    const culpritDb = culprit ? culprit.dbnum : (blocker && blocker.dbnum);
+    const who = culpritDb != null ? `dbnum=${culpritDb}` : (blockers[0] ? "blocker" : "未知来源");
     const line = starved
       ? `${phase} 阶段被 ${who} 焊住，${starved.dbnum} 的 ${starved.start_sesno}–${starved.end_sesno} 号会话饿死在屏障后面`
       : `${phase} 阶段被 ${who} 焊住，屏障后面暂时没有排队的批次`;
+    // 判决行说得出「谁焊住了它」，就必须同时说得出「那一位为什么失败」——否则这一
+    // 屏只回答了「找谁」，而人接着要问的是「怎么修」，得自己滚到下面的连败账本去凑。
+    // 权威那句只有 /tasks 的 result.batch.message 给得出；health 的 reason 取的是
+    // warnings.last()，硬失败路径上它是口径标注，读着像一切正常。
+    const why = culpritDb != null ? m.failedByDb.get(culpritDb) : null;
+    const diedAt = why && stageOf(why.stage);
+    const left = culprit ? MAX_ATTEMPTS - Number(culprit.streak || 0) : 0;
     const detail = culprit
-      ? `${culprit.dbnum} 连败 ${culprit.streak} 次，五次重跑期间文件右端 sesno 始终停在 ${culprit.end_sesno}，熔断已 park。周期对账不会自动解除——只有文件长出新会话、人工 POST /update/execute、或进程重启三条路。`
-      : (blockers[0] || "manifest 记了 blocker，阶段不就绪。");
-    return { lv:"bad", chip:["red","阻断"], path, line, detail:esc(detail),
+      ? [
+          `${culprit.dbnum} 连败 ${culprit.streak}/${MAX_ATTEMPTS} 次，期间文件右端 sesno 始终停在 ${culprit.end_sesno}。`
+            + (culprit.parked
+              ? "已达上限 park：重扫不再自动重跑它。"
+              : `还会自动重跑 ${left} 次，跑满才 park。`),
+          why
+            ? `失败原因${diedAt ? `（死在「${diedAt}」这一步）` : ""}：${why.msg}`
+              + (why.from === "logs" ? "（读自 logs/batch-failures-*.jsonl，本进程重启前那次）" : "")
+            : `两处都没有这个库的失败回执 —— /tasks 是进程内的、重启即清空，logs/batch-failures-*.jsonl 则要这个失败发生在带该功能的版本上${(S.batchFailures && S.batchFailures.error) ? `（这次读它还报了：${S.batchFailures.error}）` : ""}。原因只能回控制台翻「[增量] 失败原因」那一行。`,
+          // 解除 ≠ 修好。三条路清的都是账本，而这本账记的是「重试到此为止」，不是
+          // 病因；确定性失败重跑一次还是同一句话。不说清楚，park 一解人就以为好了。
+          "解除路径（文件长出新会话／人工 POST /update/execute／进程重启）清的是账本不是原因：上面那句不消失，下一轮照样失败。",
+        ].map(esc).join("<br>")
+      : blocker
+        ? [
+            `挡住 ${phase} 相的是 dbnum=${blocker.dbnum}${blocker.project ? `（项目 ${blocker.project}）` : ""}：${blocker.message}`,
+            why
+              ? `失败原因${diedAt ? `（死在「${diedAt}」这一步）` : ""}：${why.msg}`
+                + (why.from === "logs" ? "（读自 logs/batch-failures-*.jsonl，本进程重启前那次）" : "")
+              : (blocker.reason_ref
+                  ? `全文原因落在 logs/batch-failures-*.jsonl 里，键是 ${blocker.reason_ref}：GET /api/v1/batch-failures?dbnum=${blocker.dbnum}。`
+                  : "这条阻断记在扫描／重扫期，没有对应的批次失败记录 —— 上面那句就是全部原因。"),
+            "连败账本（/health → batch_failures）此刻是空的：它活在进程内、重启即清空，空不等于没失败过。",
+          ].map(esc).join("<br>")
+        : esc(blockers[0] || "manifest 记了 blocker，阶段不就绪。");
+    return { lv:"bad", chip:["red","阻断"], path, line, detail,
       timer:S.blockedSince ? { label:"已阻断", val:dur(now - S.blockedSince), since:clock(S.blockedSince), cls:"red" } : null };
   }
   S.blockedSince = 0;
@@ -722,7 +1073,9 @@ function render(){
   renderKpi(m);
   renderQueue(m, now);
   renderFailures(m);
+  renderBatchFailures();
   renderTasks(m, now);
+  renderEvents();
   renderWatermark(m);
   renderSysbar(m);
   renderActions(m);
@@ -782,8 +1135,23 @@ function renderKpi(m){
 }
 
 const Q_STATE = {
-  running:{ cls:"blue",  note:() => "worker 执行中" },
-  queued: { cls:"amber", note:r => r.blocked_by_phase ? `blocked_by_phase: ${r.blocked_by_phase}` : "等待出队" },
+  // running 那行「worker 执行中」什么都没说：同一句话既可能是在解析、也可能是
+  // 卡在写回。current_stage 一直在 /tasks 里，把它接过来。
+  running:{ cls:"blue",  note:(r, m) => {
+    const t = m.byTask.get(r.task_id);
+    const stage = stageOf(t && t.current_stage);
+    const total = Number((t && t.total_units) || 0), done = Number((t && t.units_done) || 0);
+    return stage ? `${stage}${total ? ` · 单元 ${done}/${total}` : ""}` : "worker 执行中";
+  } },
+  // `blocked_by_phase` 只说得出「在等哪一相」。挡住它的是哪个库，协调器的结构化
+  // blocker 里写着——不说的话人得自己回水位表里挨个找哪个 meta 库没追平，而 meta
+  // 库往往不止一个（ISSUE-025 §三）。
+  queued: { cls:"amber", note:(r, m) => {
+    if(!r.blocked_by_phase) return "等待出队";
+    const who = culpritOf(m, r.blocked_by_phase);
+    return `blocked_by_phase: ${r.blocked_by_phase}`
+      + (who ? ` —— 挡住它的是 dbnum=${who.dbnum}` : "");
+  } },
   held:   { cls:"amber", note:() => "重扫积压，等这个库真的来一次增量" },
 };
 function renderQueue(m, now){
@@ -801,6 +1169,7 @@ function renderQueue(m, now){
     const meta = Q_STATE[r.state] || { cls:"mut", note:() => r.state };
     const cls = blocked ? "red" : meta.cls;
     const waited = enq ? dur(now - enq) : "—";
+    const culprit = blocked ? culpritOf(m, r.blocked_by_phase) : null;
     return `<div class="r">
       <span class="dbn">${esc(r.dbnum)}</span>
       <span class="sec" title="${esc(db?.file_path || r.db_type || "")}">${esc(task?.project || (db && projOf(db)) || "—")}</span>
@@ -808,7 +1177,8 @@ function renderQueue(m, now){
       <span class="mono sec" style="font-size:12px">${esc(r.start_sesno)} – ${esc(r.end_sesno)}</span>
       <span class="mono mut" style="font-size:11.5px">${esc(clock(enq))}</span>
       <span class="mono ${cls}" style="font-size:12.5px">${esc(waited)}</span>
-      <span class="state"><i class="dot" style="background:var(--${cls})"></i><span class="mono ${cls}" style="font-size:12px">${esc(r.state)}</span><span class="note">${esc(meta.note(r))}</span></span>
+      <span class="state"><i class="dot" style="background:var(--${cls})"></i><span class="mono ${cls}" style="font-size:12px">${esc(r.state)}</span><span class="note">${esc(meta.note(r, m))}</span>${
+        culprit ? `<button class="jump" data-db="${esc(culprit.dbnum)}" title="${esc(culprit.message)}">→ ${esc(culprit.dbnum)} 的错误记录</button>` : ""}</span>
     </div>`;
   }).join("");
   $("q-body").innerHTML = `<div class="tbl q-tbl">${head}${body}</div>`;
@@ -824,9 +1194,9 @@ function renderFailures(m){
     $("f-body").innerHTML = `<div class="empty">${S.health ? "batch_failures = null —— 本进程内没有连败记录。<br>注意：重启就会清空，它不是「从没失败过」的证据。" : "读不到 /health"}</div>`;
     return;
   }
-  const db = new Map(m.dbs.map(r => [r.dbnum, r]));
   $("f-body").innerHTML = m.failures.slice(0, 2).map(f => {
-    const row = db.get(f.dbnum);
+    const files = m.dbsByNum.get(f.dbnum) || [];
+    const ev = m.failedByDb.get(f.dbnum);
     const cls = f.parked ? "red" : "amber";
     const segs = Array.from({ length:MAX_ATTEMPTS }, (_, i) =>
       `<i class="${i < f.streak ? "on " + (f.parked ? "" : "amber") : ""}"></i>`).join("");
@@ -835,13 +1205,30 @@ function renderFailures(m){
       <div class="fail-id">
         <span class="db">dbnum ${esc(f.dbnum)}</span>
         <span class="chip sm ${cls}">${f.parked ? "park" : "失败中"}</span>
-        <span class="mut" style="font-size:12px">${esc(row ? `${projOf(row)} · ${row.db_type || "?"} 库` : "不在当前项目清单里")}</span>
+        ${files.length > 1 ? `<span class="chip sm amber">${files.length} 份文件同号</span>` : ""}
+        <span class="mut" style="font-size:12px">${esc(files.length
+          ? files.map(r => `${projOf(r)} · ${r.db_type || "?"} 库`).join(" ／ ")
+          : "不在当前项目清单里")}</span>
       </div>
       <div>
         <div class="streak-head"><span>连续失败</span><span class="mono ${cls}">${esc(f.streak)} / ${MAX_ATTEMPTS}${f.parked ? " 已达 MAX_ATTEMPTS" : ""}</span></div>
         <div class="segs">${segs}</div>
       </div>
-      <div class="reason">原因 = ${esc(f.reason || "（未记录）")}${f.end_sesno != null ? `<br>连败期间文件右端 sesno 停在 ${esc(f.end_sesno)}。` : ""}</div>
+      <div class="reason">
+        <span class="l">${ev && ev.from === "logs"
+          ? "批次回执 · logs/batch-failures-*.jsonl —— 权威（落盘副本）"
+          : "批次回执 · result.batch.message —— 权威"}${
+          ev && stageOf(ev.stage) ? ` · 死在「${esc(stageOf(ev.stage))}」这一步` : ""}</span>
+        ${ev
+          ? `<span class="v err">${esc(ev.msg)}</span>
+             <span class="p">${esc(ev.taskId || "")}${ev.file ? " · " + esc(ev.file) : ""}</span>`
+          : `<span class="v mut">/tasks 与 logs/batch-failures-*.jsonl 都没有这个库的失败回执。任务表和这本账一样是进程内的，重启即清空；落盘那份要这次失败发生在带该功能的版本上 —— 两处都缺不代表没失败过。</span>`}
+        <span class="l" style="margin-top:12px">/health → batch_failures.reason —— 取的是 warnings.last()</span>
+        <span class="v">${esc(f.reason || "（未记录）")}</span>
+        <span class="p">收集在硬失败路径上产不出任何统计，warnings 里只剩「收集口径：净窗口 …」那条标注，于是这一行会读着像一切正常。以上面那句为准。</span>
+        ${f.end_sesno != null ? `<span class="p">连败期间文件右端 sesno 停在 ${esc(f.end_sesno)}。</span>` : ""}
+        ${files.length > 1 ? `<span class="p">这个号在各项目 sys 库里天然重复，而水位、重试记录与本账本都只按号存；只有上面那条 file_path 说得清失败的是哪一份。</span>` : ""}
+      </div>
       <div class="times">
         <div><span class="l">first_at</span><span class="v">${esc(clock(f.first_at))}</span></div>
         <div><span class="l">last_at</span><span class="v">${esc(clock(f.last_at))}</span></div>
@@ -855,7 +1242,185 @@ function renderFailures(m){
     ? `<div class="empty" style="padding:0 18px 16px">另有 ${m.failures.length - 2} 个库有连败记录，见 /health → batch_failures</div>` : "");
 }
 
+// 摊到多少条为止。失败卡含原因、窗口、告警，四条就占满一屏；停滞行只占一行，
+// 所以按「权重」算而不是按条数——否则一串停滞会把这张卡撑成一页滚动条。
+const BF_WEIGHT = 8;
+
+/// 落盘错误时间线。**不经过 `model()`**：上面那张连败账本卡以 `/health` 的进程内
+/// 账本为骨架，账本一清（重启、人工执行、文件长出新会话）整张卡就空了，而落盘记录
+/// 恰恰是为那一刻准备的。它必须能独立地把「这台机器上出过什么错」摆出来。
+///
+/// 筛选在前端做：一次取回 40 条，切类型不用再等一轮网络。
+function renderBatchFailures(){
+  const src = S.batchFailures;
+  const all = (src && src.records) || [];
+  const kind = S.bfKind || "";
+  const wanted = String(S.bfDbnum || "").trim();
+  const recs = all.filter(r =>
+    (!kind || r.event === kind) && (!wanted || String(r.dbnum) === wanted));
+
+  // 筛选条是**静态 markup**，这里只改计数与选中态。整条重画会在每 2 秒一轮的
+  // 渲染里把 dbnum 输入框连同焦点和光标一起换掉，人根本打不完一个库号。
+  const counts = new Map();
+  for(const r of all) counts.set(r.event, (counts.get(r.event) || 0) + 1);
+  for(const button of $("bf-filter").querySelectorAll("button[data-kind]")){
+    const id = button.dataset.kind;
+    button.querySelector("b").textContent = id ? (counts.get(id) || 0) : all.length;
+    button.className = id === kind ? "on " + (button.dataset.cls || "") : "";
+  }
+
+  $("bf-count").textContent = src
+    ? (kind || wanted ? `${recs.length} / ${all.length} 条` : `${all.length} 条`)
+    : "—";
+
+  // 空状态分四件事，混成一句「没有错误」是这一屏最会骗人的形态：端点不存在
+  // （旧 exe）、目录读不到、筛没了、真的一条都没有。
+  if(!src){
+    $("bf-body").innerHTML = `<div class="empty">读不到 GET /api/v1/error-log —— 落盘记录与这个端点是一起加的，跑旧 exe 的服务上它不存在。<br>那种版本上原因只在控制台，滚过去就没了。</div>`;
+    return;
+  }
+  const where = esc((src.sources || ["logs/*.jsonl"]).join(" ／ "));
+  if(!all.length){
+    $("bf-body").innerHTML = `<div class="empty">${src.error
+      ? `读不到 ${where}：${esc(src.error)}<br>这些文件在第一次出错时才被创建，所以「读不到」也可能就是「本机还没出过错」。`
+      : `${where} 里没有记录 —— 这一份落盘、重启不清，它为空是真的为空。`}</div>`;
+    return;
+  }
+  if(!recs.length){
+    $("bf-body").innerHTML = `<div class="empty">当前筛选下没有记录（共 ${all.length} 条）。清掉筛选即可看全部。</div>`;
+    return;
+  }
+
+  // 按权重截断，并如实报出剩下多少条——截断了却不说，等于让人以为就这些。
+  let weight = 0, shown = 0;
+  for(const r of recs){
+    const cost = r.event === "queue_stall" ? 1 : 2;
+    if(shown && weight + cost > BF_WEIGHT) break;
+    weight += cost; shown++;
+  }
+  $("bf-body").innerHTML = recs.slice(0, shown).map(errorCard).join("")
+    + (recs.length > shown
+      ? `<div class="empty" style="padding:0 18px 16px">另有 ${recs.length - shown} 条，见 ${where} 或 GET /api/v1/error-log?limit=200</div>`
+      : "");
+}
+
+function errorCard(r){
+  if(r.event === "batch_park") return parkCard(r);
+  if(r.event === "queue_stall") return stallRow(r);
+  return failureCard(r);
+}
+
+// 原始那一行 JSON。排查到最后总要把原话贴给别人，而人工从卡片上抄字段必抄漏。
+function rawLine(r){
+  return `<details class="warns"><summary>原始记录（${esc(r.event || "?")}）</summary><pre>${
+    esc(JSON.stringify(r, null, 2))}</pre></details>`;
+}
+
+function failureCard(r){
+  const died = stageOf(r.died_at);
+  const warns = r.warnings || [];
+  const cap = r.max_attempts || MAX_ATTEMPTS;
+  // `parked` 由引擎写在记录里，不在这儿按 streak 重算：两处各算一次，就会出现
+  // 「引擎说 park 了、页面说还会重试」，而这两句话的处置完全相反。
+  const parked = r.parked === true;
+  return `<div class="fail">
+    <div class="fail-id">
+      <span class="db">dbnum ${esc(r.dbnum)}</span>
+      <span class="chip sm red">${esc(r.state || "failed")}</span>
+      <span class="chip sm mut">${esc(r.db_type || "?")} · ${esc(r.phase || "?")} 阶段</span>
+      ${died ? `<span class="chip sm amber">死在「${esc(died)}」这一步</span>` : ""}
+      ${r.streak != null ? `<span class="chip sm ${parked ? "red" : "amber"}">连败 ${esc(r.streak)}/${esc(cap)}${
+        parked ? " · 已 park" : (r.auto_retry_left != null ? ` · 还会自动重跑 ${esc(r.auto_retry_left)} 次` : "")}</span>` : ""}
+      <span class="mut" style="font-size:12px">${esc(r.project || "")}</span>
+    </div>
+    <div class="reason">
+      <span class="l">reason —— 来源 ${esc(r.reason_from || "?")}</span>
+      <span class="v err">${esc(r.reason || "（未记录）")}</span>
+      <span class="p">${esc(r.task_id || "")}${r.file_path ? " · " + esc(r.file_path) : ""}</span>
+    </div>
+    ${warns.length ? `<details class="warns"><summary>伴随告警 ${warns.length} 条（控制台只印前 3 条，这里是全部）</summary>${
+      warns.map(w => `<span class="p">${esc(w)}</span>`).join("")}</details>` : ""}
+    <div class="times">
+      <div><span class="l">失败时刻</span><span class="v">${esc(stamp(r.at))}</span></div>
+      <div><span class="l">会话窗口</span><span class="v">${esc(r.start_sesno)}..=${esc(r.end_sesno)}</span></div>
+      <div><span class="l">保存时刻</span><span class="v">${esc(r.save_time ? stamp(r.save_time) : "—")}</span></div>
+      <div><span class="l">本批耗时</span><span class="v">${esc(n(r.elapsed_ms))} ms</span></div>
+    </div>
+    ${r.save_time && ts(r.at) - ts(r.save_time) > 86400000
+      ? `<div class="reason"><span class="p">保存时刻比失败时刻早了一天以上：这一批不是谁刚才 SAVEWORK 触发的，是重扫把旧窗口捡起来重跑。瞬态故障（共享盘抖动、库重启）在这种形状下可能性低，优先按「这段窗口必现解析不了」查。</span></div>`
+      : ""}
+    ${rawLine(r)}
+  </div>`;
+}
+
+// 队列停滞只占一行：它是**结果**不是病因（某个库倒了，它后面的批次跟着饿死）。
+// 画成和失败一样大的卡，一串停滞就会把真正该看的那条失败原因挤出屏幕。
+function stallRow(r){
+  const reasons = (r.reasons || []).join(" · ");
+  const waited = Number(r.wait_secs);
+  return `<div class="stall">
+    <span class="tm">${esc(stamp(r.at))}</span>
+    <span class="db">dbnum ${esc(r.dbnum)}</span>
+    <span class="tx">${esc(r.db_type || "?")} 的 ${esc(r.start_sesno)}–${esc(r.end_sesno)} 号会话排了${
+      Number.isFinite(waited) ? ` ${dur(waited * 1000)}` : ""}还没出队：${esc(reasons || "未分类")}${
+      r.blocked_by_phase ? `（在等 ${esc(r.blocked_by_phase)} 阶段收口）` : ""}
+      ${rawLine(r)}</span>
+  </div>`;
+}
+
+// park 是唯一必须人介入的状态，所以它在这一列里不能长得像「又失败了一次」。
+function parkCard(r){
+  return `<div class="fail">
+    <div class="fail-id">
+      <span class="db">dbnum ${esc(r.dbnum)}</span>
+      <span class="chip sm red">已 park · 不再自动重跑</span>
+      <span class="chip sm mut">${esc(r.db_type || "?")} · ${esc(r.phase || "?")} 阶段</span>
+      <span class="chip sm red">连败 ${esc(r.streak)}/${esc(r.max_attempts || MAX_ATTEMPTS)}</span>
+      <span class="mut" style="font-size:12px">${esc(r.project || "")}</span>
+    </div>
+    <div class="reason">
+      <span class="l">最近一句失败原因（warnings.last() 口径，权威那句在同库的 batch_failure 记录里）</span>
+      <span class="v err">${esc(r.last_reason || "（未记录）")}</span>
+      <span class="p">连败期间文件右端 sesno 始终停在 ${esc(r.end_sesno)}${r.file_path ? " · " + esc(r.file_path) : ""}</span>
+    </div>
+    <div class="times">
+      <div><span class="l">park 时刻</span><span class="v">${esc(stamp(r.at))}</span></div>
+      <div><span class="l">首次失败</span><span class="v">${esc(stamp(r.first_at))}</span></div>
+      <div><span class="l">末次失败</span><span class="v">${esc(stamp(r.last_at))}</span></div>
+    </div>
+    <div class="unblock">
+      <div class="l">解除路径（三选一）</div>
+      ${(r.unblock || UNBLOCK).map((t, i) =>
+        `<div class="u"><span class="n">0${i + 1}</span><span class="x">${esc(t)}</span></div>`).join("")}
+      ${r.unblock_note ? `<div class="u"><span class="n">!</span><span class="x">${esc(r.unblock_note)}</span></div>` : ""}
+    </div>
+    ${rawLine(r)}
+  </div>`;
+}
+
 const T_STATE = { running:"blue", queued:"amber", succeeded:"green", partial:"amber", failed:"red", yielded:"mut" };
+
+/// running 行的进度块。三样东西，最后一样才是重点：阶段名、交付单元计数，
+/// 以及**这个阶段已经多久没有新进展**——「慢」和「卡住」在耗时那一列上长得
+/// 一模一样，只有停滞时长分得开（stall_deadline 也是照着它判的）。
+/// total_units 缺席时只报已完成数、不画条：没有分母就没有百分比，不替它编一个。
+function progBlock(t, now){
+  const stage = stageOf(t.current_stage);
+  const done = Number(t.units_done || 0), total = Number(t.total_units || 0);
+  if(!stage && t.units_done == null) return "";
+  const last = ts(t.stage_last_progress_at) || ts(t.stage_started_at);
+  const idle = last ? now - last : 0;
+  const cold = idle > 60000;
+  return `<div class="t-msg prog">
+    <span class="l">current_stage${t.current_stage ? " · " + esc(t.current_stage) : ""}</span>
+    <span class="pl">
+      <span class="sec">${esc(stage || "—")}</span>
+      ${t.units_done != null ? `<span class="mono mut">交付单元 ${esc(done)}${total ? ` / ${esc(total)}` : ""}</span>` : ""}
+      <span class="mono ${cold ? "amber" : "mut"}">${idle ? `本阶段 ${dur(idle)} 无新进展` : "刚进入本阶段"}</span>
+    </span>
+    ${total ? `<span class="track"><i class="blue" style="width:${pct(done, total).toFixed(1)}%"></i></span>` : ""}
+  </div>`;
+}
 function renderTasks(m, now){
   // 排队中的行队列面板已经列了，这里只讲「跑过什么、结果如何」。
   const rows = m.tasks.filter(t => t.state !== "queued")
@@ -874,12 +1439,31 @@ function renderTasks(m, now){
     const t1 = ts(t.finished_at) || (t.state === "running" ? now : 0);
     const label = byTaskRow.get(t.task_id)?.intent || t.kind;
     const span = t.start_sesno != null ? ` ${t.start_sesno}–${t.end_sesno}` : "";
-    return `<div class="r">
+    // 失败原因整段摊开，不截断也不塞进 title：这是全页唯一说得清「为什么」的地方。
+    // 它一直都在轮询回来的数据里（TaskEntry.result），此前只是没画出来，于是查一次
+    // 失败要么开 devtools、要么另开一个窗口打 /tasks/{id}。
+    const b = (t.result && t.result.batch) || null;
+    const msg = (t.state === "failed" || t.state === "partial")
+      ? ((b && b.message) || ((t.result && t.result.warnings) || []).join("；"))
+      : "";
+    const file = (b && b.file_path) || "";
+    // 死在哪一步与为什么死是两件事，缺一件都不够定位：收集口有十几个具名硬失败
+    // 出口，光看原话分不出它发生在收集还是写回；而光有阶段名又说不出所以然。
+    // finish 不清 current_stage，所以终态任务这一格就是它停下的地方。
+    const diedAt = stageOf(t.current_stage);
+    const extra = msg
+      ? `<div class="t-msg">
+           <span class="l">${diedAt ? `死在「${esc(diedAt)}」这一步 · ` : ""}result.batch.message</span>
+           <span class="v">${esc(msg)}</span>
+           ${file ? `<span class="p">${esc(file)}</span>` : ""}
+         </div>`
+      : (t.state === "running" ? progBlock(t, now) : "");
+    return `<div class="r${extra ? " wmsg" : ""}">
       <span class="mono sec" style="font-size:11.5px" title="${esc(t.task_id + " · " + t.kind + span)}">${esc(label)}</span>
       <span class="mono sec" style="font-size:12px">${esc(t.dbnum ?? "—")}</span>
       <span class="state"><i class="dot" style="width:5px;height:5px;background:var(--${cls})"></i><span class="mono ${cls}" style="font-size:11.5px">${esc(t.state)}</span></span>
       <span class="mono mut" style="font-size:11.5px">${esc(t0 && t1 ? dur(t1 - t0) : "—")}</span>
-    </div>`;
+    </div>` + extra;
   }).join("") + `</div>`;
 }
 
@@ -952,6 +1536,30 @@ function renderWatermark(m){
 }
 
 $("wm-all").addEventListener("change", () => { try{ render(); }catch(e){ console.error(e); } });
+// 错误日志的筛选：委托绑定一次，因为计数每轮都在变，但这几个节点本身不重建。
+$("bf-filter").addEventListener("click", e => {
+  const button = e.target.closest("button[data-kind]");
+  if(!button) return;
+  S.bfKind = button.dataset.kind;
+  try{ render(); }catch(err){ console.error(err); }
+});
+$("bf-dbnum").addEventListener("input", e => {
+  S.bfDbnum = e.target.value;
+  try{ render(); }catch(err){ console.error(err); }
+});
+// 被挡住那行上的跳转：把错误日志按肇事库筛出来。人看完「被 meta 挡着」问的下一句
+// 永远是「那它为什么失败」，而答案在另一张卡里、要按 dbnum 筛才找得到。
+$("q-body").addEventListener("click", e => {
+  const button = e.target.closest("button[data-db]");
+  if(!button) return;
+  S.bfKind = "";
+  S.bfDbnum = button.dataset.db;
+  // 筛选框是静态 markup，渲染器故意不重写它（每轮重画会把焦点和光标一起换掉），
+  // 所以这里得自己把值同步进去，否则页面筛了、框里却是空的。
+  $("bf-dbnum").value = S.bfDbnum;
+  try{ render(); }catch(err){ console.error(err); }
+  $("bf-body").scrollIntoView({ behavior:"smooth", block:"center" });
+});
 $("acts").addEventListener("click", e => {
   const key = e.target.closest("button")?.dataset.act;
   if(!key) return;
@@ -960,8 +1568,9 @@ $("acts").addEventListener("click", e => {
 });
 $("poll-label").textContent = `轮询 ${FAST_MS / 1000}s · 水位 ${FAST_MS * SLOW_EVERY / 1000}s`;
 $("foot-note").textContent = (WRITE ? `${Object.keys(ACTIONS).length} 个写操作带二次确认 · 给客户看请加 ?readonly=1` : "只读视图 · 写操作已关闭")
-  + " · /assets/ops.html · 同源轮询，不改 Rust、不重启服务";
+  + " · 深色主题加 ?theme=dark · /assets/ops.html · 同源轮询，不改 Rust、不重启服务";
 loop();
+connectEvents();
 </script>
 </body>
 </html>

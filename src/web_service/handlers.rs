@@ -1,5 +1,6 @@
 //! REST handlers：领域结构体 JSON 原样透传，服务层不做二次映射（spec §3）。
 
+use std::borrow::Cow;
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -111,6 +112,53 @@ fn health_status(
     } else {
         "degraded"
     }
+}
+
+/// 运维面板的内嵌副本。
+///
+/// 内嵌是为了部署：一个 exe 拷到现场就有面板，不必再同步一个目录，也不会出现
+/// 「后端升了、面板还是上一版」这种两份东西各走各的。
+const OPS_PANEL_EMBEDDED: &str = include_str!("../../web/ops.html");
+
+/// 面板正文与它的来源。磁盘副本优先。
+///
+/// 内嵌不能把「换面板不用重编」这条一起收走：现场改一句判决措辞、加一格显示，
+/// 落一个文件刷新就行，而重编一次是分钟级、还得停服务换 exe。所以 `ui_root`
+/// 下真有 `ops.html` 时以它为准——这也让今天靠目录部署的机器行为一字不变。
+///
+/// 每次请求现读而不是启动时定死：热替换的价值全在「不重启」上。
+fn ops_panel_body(ui_root: &std::path::Path) -> (Cow<'static, str>, &'static str) {
+    match std::fs::read_to_string(ui_root.join("ops.html")) {
+        Ok(body) => (Cow::Owned(body), "disk"),
+        Err(_) => (Cow::Borrowed(OPS_PANEL_EMBEDDED), "embedded"),
+    }
+}
+
+/// `GET /ops.html` —— 增量运行监控面板。
+///
+/// `Cache-Control: no-cache` 是内嵌引入的新坑的解药：页面此后跟着 exe 版本走，
+/// 浏览器缓存住旧的，升级完看到的还是上一版——而这一页正是用来回答「现在是什么
+/// 状态」的，它自己过期最要命。`x-ops-panel-source` 让人一眼分得出手上这份是
+/// 内嵌的还是磁盘覆盖的；两份内容不一致时，这是唯一说得清的地方。
+pub async fn ops_panel(State(state): State<AppState>) -> impl IntoResponse {
+    let (body, source) = ops_panel_body(&state.ui_root);
+    (
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+            ),
+            (
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-cache"),
+            ),
+            (
+                axum::http::HeaderName::from_static("x-ops-panel-source"),
+                axum::http::HeaderValue::from_static(source),
+            ),
+        ],
+        body.into_owned(),
+    )
 }
 
 /// GET /api/v1/health
@@ -246,6 +294,12 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     if model_update_pending.has_room_dead_letters() {
         blocking_conditions.push("model_update_pending.room_dead_letters");
     }
+    // 页级停滞：模型页在认领、在烧 CPU，却一页都收不掉。它与死信是两种不同的卡死
+    // ——死信是「这些行认输了」，停滞是「这些行还在被无限重试」——但对外都是同一件
+    // 事：模型阶段不会自己走完。进程内读数，不套 within_health_budget。
+    if crate::data_interface::model_update_pending::model_drain_page_starved() {
+        blocking_conditions.push("model_drain.page_starved");
+    }
     let parse_errors = or_degraded(
         "parse_errors",
         within_health_budget(crate::data_interface::parse_error::snapshot()).await,
@@ -380,6 +434,48 @@ pub async fn trace(Query(query): Query<TraceQuery>) -> Json<serde_json::Value> {
 pub struct TraceQuery {
     pub dbnum: Option<u32>,
     pub limit: Option<usize>,
+}
+
+/// GET /api/v1/error-log — 落盘错误事件的统一时间线。
+///
+/// 合并 `logs/` 下两个文件族：批次失败与 park（`batch-failures-*.jsonl`）、队列
+/// 停滞（`queue-stalls-*.jsonl`）。合并是这个端点的全部意义——8191 批次失败与
+/// 30999 队列停滞是同一件事的两端，分成两个文件看，人得自己在脑子里按时刻并一遍。
+///
+/// 与 `/api/v1/tasks` 的分工：那边的回执更全（整份 `DataBatchTaskResult`），但它
+/// 活在进程内存里，重启即清空——而人发现「怎么一直不动」时，往往已经重启过一次
+/// 了。这个端点读磁盘，所以面板在重启之后仍答得出「上一次为什么失败」。
+///
+/// `limit` 缺省 40、上限 200：一条记录带全部 warnings，净窗口的口径标注一条就上
+/// 百字，放开了会把单响应体积契约撑破。
+pub async fn error_log(Query(query): Query<ErrorLogQuery>) -> Json<serde_json::Value> {
+    let kinds = query.kind.as_deref().map(|kind| vec![kind]).unwrap_or_default();
+    Json(crate::data_interface::batch_failure_log::recent(
+        &kinds,
+        query.dbnum,
+        query.limit.unwrap_or(40).min(200),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ErrorLogQuery {
+    /// 记录的 `event` 值：`batch_failure` / `batch_park` / `queue_stall`。
+    pub kind: Option<String>,
+    pub dbnum: Option<u32>,
+    pub limit: Option<usize>,
+}
+
+/// GET /api/v1/batch-failures — 只读同名那一族（`batch-failures-*.jsonl`）。
+///
+/// 与 [`error_log`] 的分界就是名字本身：这条只回答「批次失败与 park」，那条把队列
+/// 停滞也并进同一条时间线。留着窄的这条，是因为「给我这个库的失败记录」是个独立
+/// 且高频的问题，让调用方自己去 `error-log` 上拼两个 `kind` 是把口径推给了调用方。
+pub async fn batch_failures(Query(query): Query<ErrorLogQuery>) -> Json<serde_json::Value> {
+    Json(crate::data_interface::batch_failure_log::recent(
+        &["batch_failure", "batch_park"],
+        query.dbnum,
+        query.limit.unwrap_or(20).min(200),
+    ))
 }
 
 /// POST /api/v1/query — the fixed read-only MCP query contract over HTTP.
@@ -912,6 +1008,10 @@ pub async fn queue_snapshot(State(_state): State<AppState>) -> Json<serde_json::
         "rows": scheduler.snapshot(),
         "epoch_id": initialization.epoch_id,
         "blocked_by_phase": initialization.current_phase,
+        // 行上的 `blocked_by_phase` 只说得出「在等哪一相」。挡住它的是哪个库、
+        // 去哪儿取那个库的失败原因，都在这里——否则读队列的人得自己再取一趟
+        // /health 才拼得出因果（ISSUE-025 §三）。
+        "blockers": initialization.blocked_by,
         "shadowed": initialization.shadowed,
     }))
 }
@@ -1025,6 +1125,44 @@ mod tests {
         assert_eq!(payload["units"].as_array().unwrap().len(), 1);
         assert_eq!(payload["room_units"][0]["action"], "room_recalc_element");
         assert_eq!(payload["room_units"][0]["target_refno"], "24381/100677");
+    }
+
+    /// 面板内嵌进二进制之后，两件事都得钉住。
+    ///
+    /// 一是内嵌的确实是那一页：`include_str!` 指错文件、或者哪天 `web/ops.html`
+    /// 被清空，编译照过，直到有人打开一个白页才发现——而那多半发生在出事的时候。
+    ///
+    /// 二是磁盘副本仍然压过内嵌。这是「换面板不必重编」那条路，也是今天靠目录
+    /// 部署的机器行为不变的保证；反过来写（内嵌优先）会让现场落下去的文件毫无
+    /// 反应，且一点报错都没有。
+    #[test]
+    fn the_embedded_panel_is_real_and_a_disk_copy_still_wins() {
+        for marker in ["<title>AIOS 数据库", "id=\"verdict\"", "/api/v1/queue"] {
+            assert!(
+                OPS_PANEL_EMBEDDED.contains(marker),
+                "内嵌的不是运维面板，缺 {marker}"
+            );
+        }
+
+        let root = std::env::temp_dir().join(format!(
+            "aios-ops-panel-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("temp ui root");
+
+        let (body, source) = ops_panel_body(&root);
+        assert_eq!(source, "embedded");
+        assert_eq!(body, OPS_PANEL_EMBEDDED, "没有磁盘副本时用内嵌那份");
+
+        std::fs::write(root.join("ops.html"), "<html>现场改过的那一版</html>")
+            .expect("write override");
+        let (body, source) = ops_panel_body(&root);
+        assert_eq!(source, "disk", "磁盘副本必须压过内嵌");
+        assert!(body.contains("现场改过的那一版"), "{body}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// `/health` 的 `sul_db` 字段：形状 + 探活纪律。
@@ -1141,6 +1279,25 @@ mod tests {
         assert!(ensure.contains("initialization_not_ready"));
     }
 
+    /// 队列行只带 `blocked_by_phase`，说得出「在等哪一相」、说不出「是谁挡的」。
+    /// 结构化 blocker 必须跟着队列一起回，否则读队列的人得再取一趟 /health 才拼
+    /// 得出因果（ISSUE-025 §三）。
+    #[test]
+    fn the_queue_snapshot_names_who_is_holding_the_barrier() {
+        let queue = include_str!("handlers.rs")
+            .split_once("pub async fn queue_snapshot(")
+            .expect("queue_snapshot exists")
+            .1
+            .split_once("pub async fn queue_pause(")
+            .expect("queue_snapshot end exists")
+            .0;
+        assert!(queue.contains("\"blocked_by_phase\""));
+        assert!(
+            queue.contains("initialization.blocked_by"),
+            "结构化 blocker 没跟着队列快照一起回: {queue}"
+        );
+    }
+
     #[test]
     fn health_is_degraded_by_dead_letters_but_not_by_retryable_backlog() {
         assert_eq!(health_status(&[], &[]), "ok");
@@ -1171,6 +1328,14 @@ mod tests {
         assert!(
             body.contains("model_update_pending.room_dead_letters"),
             "{body}"
+        );
+        // 页级停滞与死信是两种不同的卡死，但对外是同一件事：模型阶段不会自己走完。
+        // 死信是「这些行认输了」，停滞是「这些行还在被无限重试」——2026-08-27 现场
+        // 只有后者，于是 118 页零收口烧了 50 分钟，而 /health 一路报 ok。
+        assert!(body.contains("model_drain.page_starved"), "{body}");
+        assert_eq!(
+            health_status(&[], &["model_drain.page_starved"]),
+            "degraded"
         );
     }
 

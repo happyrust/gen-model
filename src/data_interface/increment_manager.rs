@@ -2071,9 +2071,29 @@ mod tests {
             .expect("sweep_dirs 之后应当是 reinit_batch")
             .0;
         assert!(
-            sweep.contains("Err(error) => phase_blockers.push(("),
+            sweep.contains(concat!("Err(error) => phase_blockers", ".push(")),
             "窗口判断失败必须进入阶段 blocker: {sweep}"
         );
+        // 每一条阻断都得说得出是哪个库：只报「meta 相被挡着」的话，被卡在屏障
+        // 后面的那条任务还得自己回水位表里挨个找肇事者（ISSUE-025 §三）。
+        // 每一处的取值范围到下一次提到 `phase_blockers` 为止——固定字符窗会随
+        // 缩进和格式化漂移，长的那条 push 一换行就假红。
+        let pushes = sweep
+            .match_indices(concat!("phase_blockers", ".push("))
+            .map(|(at, _)| at)
+            .collect::<Vec<_>>();
+        assert!(pushes.len() >= 4, "重扫里的阻断出口不该少于四处");
+        for at in pushes {
+            let rest = &sweep[at + 1..];
+            let end = rest
+                .find("phase_blockers")
+                .map_or(sweep.len(), |next| at + 1 + next);
+            let region = &sweep[at..end];
+            assert!(
+                region.contains(".with_dbnum("),
+                "阶段 blocker 必须带上它自己的 dbnum: {region}"
+            );
+        }
 
         let discover = source
             .split_once(concat!("async fn ", "discover_batch("))
@@ -2811,16 +2831,13 @@ impl AiosDBManager {
         watch_dirs: &[PathBuf],
     ) -> (
         HashSet<PathBuf>,
-        Vec<(
-            crate::data_interface::initialization_phase::DataPhase,
-            String,
-        )>,
+        Vec<crate::data_interface::initialization_phase::PhaseBlocker>,
         Vec<String>,
         Vec<(String, u32, PathBuf)>,
         Vec<(String, u32, String, PathBuf)>,
     ) {
         use crate::data_interface::initialization_phase::{
-            CatalogueCandidate, DataPhase, select_catalogue_candidates,
+            CatalogueCandidate, DataPhase, PhaseBlocker, select_catalogue_candidates,
         };
 
         let mut by_type: HashMap<&'static str, Vec<CatalogueCandidate>> = HashMap::new();
@@ -2832,7 +2849,7 @@ impl AiosDBManager {
                 let entry = match entry {
                     Ok(entry) => entry,
                     Err(error) => {
-                        blockers.push((
+                        blockers.push(PhaseBlocker::new(
                             DataPhase::Meta,
                             format!("目录清单不可读 {}: {error}", watch_dir.display()),
                         ));
@@ -2843,7 +2860,8 @@ impl AiosDBManager {
                     continue;
                 }
                 let Some(info) = try_parse_db_basic_info(entry.path()) else {
-                    blockers.push((
+                    // 头读不出来就没有库号可挂：这条阻断只认得出文件，认不出库。
+                    blockers.push(PhaseBlocker::new(
                         DataPhase::Meta,
                         format!("候选数据库头不可读: {}", entry.path().display()),
                     ));
@@ -2928,7 +2946,12 @@ impl AiosDBManager {
                     candidate.path.display()
                 ));
             }
-            blockers.extend(result.blockers.into_iter().map(|message| (phase, message)));
+            blockers.extend(
+                result
+                    .blockers
+                    .into_iter()
+                    .map(|blocker| blocker.into_phase(phase)),
+            );
         }
         (
             selected,
@@ -3360,12 +3383,16 @@ impl AiosDBManager {
                             );
                             log::warn!("{msg}");
                             eprintln!("{msg}");
-                            phase_blockers.push((
-                                crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                                    &db_type,
-                                ),
-                                format!("dbnum={db_no} 最新会话号读取失败: {}", path.display()),
-                            ));
+                            phase_blockers.push(
+                                crate::data_interface::initialization_phase::PhaseBlocker::new(
+                                    crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                                        &db_type,
+                                    ),
+                                    format!("dbnum={db_no} 最新会话号读取失败: {}", path.display()),
+                                )
+                                .with_dbnum(db_no)
+                                .with_project(project.clone()),
+                            );
                             continue;
                         }
                     };
@@ -3422,12 +3449,16 @@ impl AiosDBManager {
                     .await;
                 if check.gate == ScanGate::Blocked {
                     if block_file_identity_conflicts {
-                        phase_blockers.push((
-                            crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                                &db_type,
-                            ),
-                            format!("dbnum={db_no} 文件身份/观察裁决阻断: {}", path.display()),
-                        ));
+                        phase_blockers.push(
+                            crate::data_interface::initialization_phase::PhaseBlocker::new(
+                                crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                                    &db_type,
+                                ),
+                                format!("dbnum={db_no} 文件身份/观察裁决阻断: {}", path.display()),
+                            )
+                            .with_dbnum(db_no)
+                            .with_project(project.clone()),
+                        );
                     } else {
                         sweep_log::note(format!(
                             "[{origin}] dbnum={db_no} 文件身份/观察异常仅记录并跳过，不阻断其余库初始化: {}",
@@ -3445,23 +3476,54 @@ impl AiosDBManager {
                 // 的节奏无上限重跑，大库一跑几十分钟。park 不是放行——记 blocker
                 // 让该阶段可见地不就绪；文件长出新会话（查询内部顺带清账）或人工
                 // 执行（显式清零）即恢复自动重试。对 Reinit 与普通窗口一视同仁。
-                if let Some(streak) = crate::data_interface::batch_worker::batch_failure_parked(
+                if let Some(parked) = crate::data_interface::batch_worker::batch_failure_parked(
                     db_no,
                     file_latest_sesno as i32,
                 ) {
                     println!(
-                        "[{origin}] dbnum={db_no} 数据批次连续失败 {streak} 次且右端未前进，\
-                         本轮不自动重跑（保存新会话或人工执行恢复）"
+                        "[{origin}] dbnum={db_no} 数据批次连续失败 {} 次且右端未前进，\
+                         本轮不自动重跑（保存新会话或人工执行恢复）",
+                        parked.streak
                     );
-                    phase_blockers.push((
-                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                            &db_type,
-                        ),
-                        format!(
-                            "dbnum={db_no} 数据批次连续失败 {streak} 次已暂停自动重试\
-                             （新会话或人工执行恢复）"
-                        ),
-                    ));
+                    // 落盘一次。「从此不再自动重跑」是整条链路上唯一必须人介入的
+                    // 状态，而它此前只活在这行控制台输出和进程内账本里——两样都
+                    // 撑不过一次重启，于是事后看只剩「这个库怎么不动了」。
+                    if parked.first_notice {
+                        crate::data_interface::batch_failure_log::record_park(
+                            &crate::data_interface::batch_failure_log::BatchPark {
+                                dbnum: db_no,
+                                db_type: &db_type,
+                                project: &project,
+                                phase:
+                                    crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                                        &db_type,
+                                    )
+                                    .as_str(),
+                                streak: parked.streak,
+                                max_attempts:
+                                    crate::data_interface::model_update_pending::MAX_ATTEMPTS,
+                                end_sesno: parked.end_sesno,
+                                file_path: path.to_str(),
+                                last_reason: &parked.last_reason,
+                                first_at: &parked.first_at,
+                                last_at: &parked.last_at,
+                            },
+                        );
+                    }
+                    phase_blockers.push(
+                        crate::data_interface::initialization_phase::PhaseBlocker::new(
+                            crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                                &db_type,
+                            ),
+                            format!(
+                                "dbnum={db_no} 数据批次连续失败 {} 次已暂停自动重试\
+                                 （新会话或人工执行恢复）",
+                                parked.streak
+                            ),
+                        )
+                        .with_dbnum(db_no)
+                        .with_project(project.clone()),
+                    );
                     continue;
                 }
 
@@ -3510,15 +3572,19 @@ impl AiosDBManager {
                         params.insert(path.to_path_buf(), found);
                     }
                     Ok(None) => {}
-                    Err(error) => phase_blockers.push((
-                        crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                            &db_type,
-                        ),
-                        format!(
-                            "dbnum={db_no} 判断初始化窗口失败（{}）: {error:#}",
-                            path.display()
-                        ),
-                    )),
+                    Err(error) => phase_blockers.push(
+                        crate::data_interface::initialization_phase::PhaseBlocker::new(
+                            crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                                &db_type,
+                            ),
+                            format!(
+                                "dbnum={db_no} 判断初始化窗口失败（{}）: {error:#}",
+                                path.display()
+                            ),
+                        )
+                        .with_dbnum(db_no)
+                        .with_project(project.clone()),
+                    ),
                 }
             }
         }
@@ -3572,10 +3638,12 @@ impl AiosDBManager {
         if !blocked_dupes.is_empty() {
             if block_file_identity_conflicts {
                 phase_blockers.extend(blocked_dupes.iter().map(|((project, dbnum), phase)| {
-                    (
+                    crate::data_interface::initialization_phase::PhaseBlocker::new(
                         *phase,
                         format!("项目 {project} 内 dbnum={dbnum} 同号多文件"),
                     )
+                    .with_dbnum(*dbnum)
+                    .with_project(project.clone())
                 }));
             } else {
                 let sample = blocked_dupes
@@ -3768,10 +3836,7 @@ impl AiosDBManager {
         origin: &str,
         hold: bool,
         mut params: IndexMap<PathBuf, crate::data_interface::batch_scheduler::DiscoveredBatch>,
-        mut phase_blockers: Vec<(
-            crate::data_interface::initialization_phase::DataPhase,
-            String,
-        )>,
+        mut phase_blockers: Vec<crate::data_interface::initialization_phase::PhaseBlocker>,
         shadowed: Vec<String>,
         manifest_totals: Vec<crate::data_interface::initialization_phase::DataPhase>,
         cata_dependencies: Vec<(String, u32, PathBuf)>,
@@ -3836,7 +3901,7 @@ impl AiosDBManager {
                 selection
                     .blockers
                     .into_iter()
-                    .map(|message| (phase, message)),
+                    .map(|blocker| blocker.into_phase(phase)),
             );
         }
         let _activation = crate::data_interface::batch_scheduler::epoch_activation_guard();

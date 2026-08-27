@@ -728,6 +728,37 @@ mod tests {
         assert!(registry.get("dep").unwrap().stall_deadline.is_none());
     }
 
+    /// 终态必须留着 `current_stage`：那是 `/tasks` 上唯一说得出「死在哪一步」的
+    /// 字段，面板照着它画。`stall_deadline` 相反——它是活着的任务才有的死线，留到
+    /// 终态就变成一个永远过期的时刻。两者同在 `finish` 里，很容易被一起清掉。
+    ///
+    /// 收集口有十几个各自具名的硬失败出口，回执那句原话分不出它发生在收集还是
+    /// 写回；2026-08-27 的 SYST 8191 现场就缺这一格。
+    #[test]
+    fn a_failed_task_keeps_the_stage_it_died_at() {
+        let registry = TaskRegistry::default();
+        queue_row(&registry, "batch", 8191, 36, 37);
+        registry.mark_started("batch");
+        registry.set_stage("batch", "data_parse");
+        registry.set_stage("batch", "collect_window");
+        registry.finish(
+            "batch",
+            TaskState::Failed,
+            serde_json::json!({"batch":{"message":"读取增量数据失败: 终稿合成: …"}}),
+        );
+
+        let entry = registry.get("batch").expect("failed batch stays listed");
+        assert_eq!(
+            entry.current_stage.as_deref(),
+            Some("collect_window"),
+            "终态丢了阶段，面板就只剩「失败了」三个字"
+        );
+        assert!(
+            entry.stage_started_at.is_some(),
+            "阶段起点要一起留下：它决定这一步走了多久"
+        );
+    }
+
     #[test]
     fn queued_and_running_rows_survive_eviction() {
         let registry = TaskRegistry::default();

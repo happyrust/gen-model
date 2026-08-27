@@ -20,6 +20,10 @@ const WARN_AFTER_SECS: i64 = 60;
 const REPEAT_AFTER_SECS: i64 = 300;
 const PREFIX: &str = "AIOS-QUEUE-STALL";
 
+/// 每日文件名前缀。`batch_failure_log` 的统一读取口要按它找文件——两处各写一遍
+/// 字面量，改名时只改得动一处，而读那一侧不会报错、只会永远读到空。
+pub const FILE_PREFIX: &str = "queue-stalls-";
+
 #[derive(Default)]
 struct WatchState {
     first_seen: HashMap<String, i64>,
@@ -163,12 +167,12 @@ fn classify(
 }
 
 fn daily_path(now: DateTime<Local>) -> PathBuf {
-    Path::new("logs").join(format!("queue-stalls-{}.jsonl", now.format("%Y-%m-%d")))
+    Path::new("logs").join(format!("{FILE_PREFIX}{}.jsonl", now.format("%Y-%m-%d")))
 }
 
 fn emit(directory: &Path, now: DateTime<Local>, record: &Value) {
     eprintln!("{PREFIX} {record}");
-    let path = directory.join(format!("queue-stalls-{}.jsonl", now.format("%Y-%m-%d")));
+    let path = directory.join(format!("{FILE_PREFIX}{}.jsonl", now.format("%Y-%m-%d")));
     if let Err(error) = append_json_line(&path, record) {
         eprintln!("{PREFIX} 写入离线诊断文件 {} 失败: {error}", path.display());
     }

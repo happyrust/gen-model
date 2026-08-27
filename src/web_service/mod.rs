@@ -85,6 +85,9 @@ pub struct AppState {
     /// 启动时资源目录是否存在（spec §4.1 的 `static_assets`）。缺失不是故障：
     /// `/assets` 返回 404，REST/WS 照常，这个旗子让 `/health` 能把降级说出来。
     pub static_assets: bool,
+    /// 前端静态根。`/ops.html` 每次请求都在这里找一次磁盘副本，找不到才用内嵌的
+    /// ——所以存的是目录而不是启动时定死的结论，热替换才谈得上「不重启」。
+    pub ui_root: PathBuf,
     pub queries: Arc<QueryService>,
 }
 
@@ -230,7 +233,9 @@ pub async fn serve(
     cors_origins: Option<Vec<String>>,
 ) -> anyhow::Result<()> {
     let db_option = aios_core::get_db_option();
-    let ui_root = std::env::var("PLANT_UI_WEB_ROOT").unwrap_or_else(|_| "../plant-ui/web".into());
+    let ui_root = PathBuf::from(
+        std::env::var("PLANT_UI_WEB_ROOT").unwrap_or_else(|_| "../plant-ui/web".into()),
+    );
     let asset_root = resolve_asset_root();
     // 静态前端资源是可选能力（spec §7）：目录缺失只告警一次，静态路径返回 404，
     // REST/WS 照常启动，不得因此终止服务。这里曾经是 `anyhow::bail!`，而
@@ -267,8 +272,21 @@ pub async fn serve(
         identity,
         sync_live: db_option.sync_live.unwrap_or(false),
         static_assets,
+        ui_root: ui_root.clone(),
         queries,
     };
+
+    // 面板有两份，说清这一次用的是哪一份。两份不一致时人只会相信屏幕上那一份，
+    // 而它到底从哪儿来，只有这里和响应头 `x-ops-panel-source` 讲得出。
+    let panel = ui_root.join("ops.html");
+    if panel.is_file() {
+        println!("运维面板：{}（磁盘副本，优先于内嵌版）", panel.display());
+    } else {
+        println!(
+            "运维面板：内嵌副本（http://{addr}/ops.html；在 {} 放一份即可覆盖，不必重编）",
+            panel.display()
+        );
+    }
 
     let app = Router::new()
         .route("/api/v1/health", get(handlers::health))
@@ -305,10 +323,18 @@ pub async fn serve(
             get(handlers::dbnum_prune_above_preview).delete(handlers::dbnum_prune_above),
         )
         .route("/api/v1/trace", get(handlers::trace))
+        // 落盘错误事件。`/tasks` 那份回执更全但活不过重启，这两条读 logs/，
+        // 面板靠它们回答「上一次为什么失败」。分界就是名字：`batch-failures`
+        // 只给同名那一族（失败 + park），`error-log` 把队列停滞也并进同一条线。
+        .route("/api/v1/batch-failures", get(handlers::batch_failures))
+        .route("/api/v1/error-log", get(handlers::error_log))
         .route("/api/v1/queue", get(handlers::queue_snapshot))
         .route("/api/v1/queue/pause", post(handlers::queue_pause))
         .route("/api/v1/queue/resume", post(handlers::queue_resume))
         .route("/api/v1/ws", get(ws::ws_handler))
+        // 显式路由压过下面的 ServeDir 兜底：磁盘上没有这个文件时也要有面板，
+        // 而它自己会先去 ServeDir 同一个目录里找一次，所以有文件时结果不变。
+        .route("/ops.html", get(handlers::ops_panel))
         .nest_service("/assets", ServeDir::new(asset_root))
         .fallback_service(ServeDir::new(ui_root).append_index_html_on_directories(true))
         .layer(build_cors(cors_origins))

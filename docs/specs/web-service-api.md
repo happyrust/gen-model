@@ -37,7 +37,7 @@
                                               （按需 ensure 也走这里）
 ```
 
-- 新增模块 `src/web_service/`，feature flag **`http_api`**（默认不启用，`console` feature 可包含它）。
+- 新增模块 `src/web_service/`，feature flag **`http_api`**（2026-08-27 起并入 `default`；`--no-default-features` 时需自行点名。是否真正监听仍由 `http_api_addr` 配置决定）。
 - 服务与 `async_watch` 在 `run_cli` 内并行：`tokio::join!(mgr.async_watch(), web_service::serve(state))`，互不阻塞；`http_api` 未启用时行为与现在完全一致。
 - **共享状态 `AppState`**：`Arc<AiosDBManager>` + `TaskRegistry` + `tokio::sync::broadcast::Sender<WsEvent>`（容量 1024，慢消费者掉线自补）。
 - 手动提交与自动 watcher 只负责把数据范围交给同一调度器；进度与终态统一由批次 worker
@@ -94,7 +94,7 @@
   "initialization": {
     "status": "running", "epoch_id": 7, "current_phase": "catalogue",
     "data_ready": false, "model_ready": false, "model_in_flight": false,
-    "phases": {}, "blockers": [], "shadowed": []
+    "phases": {}, "blockers": [], "blocked_by": [], "shadowed": []
   } }
 ```
 
@@ -105,6 +105,15 @@
 - `queue_paused`：随 §4.8 的暂停接口变化；重启后按持久化标志恢复。
 - `initialization`：ADR-025 的当前 epoch、严格数据阶段、数据/模型门、逐阶段计数、
   blocker 与被项目优先级遮蔽的 DICT/CATA。`data_ready=false` 时模型写保持待处理。
+- `initialization.blockers` / `initialization.blocked_by`：同一批阻断的两副面孔。
+  前者是渲染好的 `"<phase>: <message>"` 字符串数组，形状与结构化之前一字不差；
+  后者是结构化那份，每条形如
+  `{ "phase": "meta", "dbnum": 8191, "project": "JEU", "task_id": "db-…",
+  "reason_ref": "db-…", "message": "读取增量数据失败: …" }`。
+  `dbnum` 为 `null` 表示这条阻断本来就指不出某一个库（目录清单不可读、整轮重扫
+  失败），消费者不得替它挑一个。`reason_ref` 非空时，该 task 的全文原因可经
+  `GET /api/v1/batch-failures?dbnum=<dbnum>` 从磁盘取回（重启后仍在）；为 `null`
+  表示这条阻断没有对应的落盘失败记录，`message` 就是全部原因。
 - `static_assets`：当前是否找到可服务的前端资源目录。`false` 只表示 UI 静态资源不可用，
   不降低 REST/WS 与增量 worker 的健康状态。
 - `model_update_pending`：一次 SurrealQL 往返形成的持久工作快照，分别列出总量、
@@ -353,12 +362,16 @@
 
 ### 4.8 `GET /api/v1/queue`、`POST /api/v1/queue/pause`、`POST /api/v1/queue/resume`（ADR-011 §9）
 - `GET /queue` → `{ "paused": false, "epoch_id": 7, "blocked_by_phase": "catalogue",
-  "shadowed": [], "rows": [{ "task_id": "db-…", "dbnum": 7997,
+  "blockers": [], "shadowed": [], "rows": [{ "task_id": "db-…", "dbnum": 7997,
   "db_type": "DESI", "phase": "design", "epoch_id": 7,
   "blocked_by_phase": "catalogue", "intent": "apply_window", "state": "queued",
   "start_sesno": 85, "end_sesno": 92 }, …] }`：
   队列快照，行按队列序（运行中在前），经 `task_id` 与 §4.4 的任务行对得上。
   `intent` 取值同 §4.3；`reinitialize` 明示该行冻结点仍需复核回退后才清库。
+- 行上的 `blocked_by_phase` 只说得出「这行在等哪一相」。挡住那一相的是谁，在顶层
+  `blockers` 里——与 §4.1 `initialization.blocked_by` 同一份结构化清单，同相取第一条
+  带 `dbnum` 的那条即肇事库。带在这里是为了让「读队列」和「找肇事者」不必分两趟
+  请求：不这样的话消费者得再取一趟 `/health` 才拼得出因果。
 - `POST /queue/pause` → `{ "paused": true }`：**只挡出队与空闲轮**，正在跑的那条会
   跑完为止（服务端没有中止接口，界面文案只能说「不再出队」）。标志持久化在
   `queue_control:main`（与水位同库，不进队列表），**活过重启**：重启后 worker 起跑

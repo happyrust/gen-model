@@ -2195,6 +2195,13 @@ struct ModelDrainTelemetry {
     last_remaining: usize,
     last_deferred_lock_count: usize,
     last_deferred_lock_sample: Option<String>,
+    /// 连续几页「认领了整页、一个都没收口、待办总数纹丝不动」。
+    ///
+    /// 上面那三个数一直都在，却没有任何人拿它们做判断：2026-08-27 现场连着 118 页
+    /// `page_claimed=100 / page_completed=0 / remaining=1462`，每一页的任务状态都是
+    /// `succeeded`，`/health` 一路报 `ok`。这个计数就是那三个数的消费者。
+    /// 墙钟不在这里重复存一份——每页的 `created_at` 在 `/api/v1/tasks` 里。
+    starved_pages: u32,
 }
 
 static MODEL_DRAIN_TELEMETRY: OnceLock<Mutex<ModelDrainTelemetry>> = OnceLock::new();
@@ -2208,6 +2215,58 @@ fn model_drain_telemetry() -> MutexGuard<'static, ModelDrainTelemetry> {
 
 pub fn model_drain_telemetry_snapshot() -> serde_json::Value {
     serde_json::to_value(model_drain_telemetry().clone()).unwrap_or_default()
+}
+
+/// 连续多少页「整页认领、零收口、待办不动」就算停滞。
+///
+/// 3 页 ≈ 80 秒（现场每页约 26 秒）：够长，不会被一次寻常的根锁竞争或 epoch 让位
+/// 误触；够短，不至于像 2026-08-27 那样烧掉 50 分钟还得靠人去翻日志才看出来。
+pub const MODEL_DRAIN_STARVED_PAGES_ALERT: u32 = 3;
+
+/// 页级停滞是否已经够格阻断。`/health` 用它推 `blocking_conditions`，
+/// 启动等待循环用它决定还要不要按 300 秒的节奏闭嘴。
+pub fn model_drain_page_starved() -> bool {
+    model_drain_telemetry().starved_pages >= MODEL_DRAIN_STARVED_PAGES_ALERT
+}
+
+/// 当前连续停滞页数，给日志点名用。
+pub fn model_drain_starved_pages() -> u32 {
+    model_drain_telemetry().starved_pages
+}
+
+/// 上一页是不是白跑了：整页认领、零收口、一个根锁都没挡着，而待办总数到这一页还是
+/// 原样。
+///
+/// 四个条件缺一不可。只看 `completed == 0` 会把「本页全被根锁挡住」也算进来（那是
+/// 正常让位，行没动过是对的）；只看待办不变会把「收掉几个、又新排进来几个」误判成
+/// 停滞。根锁那一条必须**显式**挡掉，光靠前两条挡不住：整页 lock-busy 走
+/// [`DrainPageProgress::settle_deferred_for_lock`] 早退，telemetry 就停在「认领 N /
+/// 收口 0 / 待办不变」，与真正的停滞逐字段同形。而 specs/033 的前提正是单个布尔能
+/// 跑几分钟——队列里只剩一两个根、恰好都被按需生成占着时，三页 80 秒轻松跨过去，
+/// 那是让位不是收不掉。早退之前 `report("lock_deferred", …)` 已经把 deferred 数写
+/// 进 telemetry，判据拿得到它。
+fn page_was_starved(
+    previous_claimed: usize,
+    previous_completed: usize,
+    previous_deferred_lock_count: usize,
+    previous_remaining: usize,
+    queue_total: usize,
+) -> bool {
+    previous_claimed > 0
+        && previous_completed == 0
+        && previous_deferred_lock_count == 0
+        && previous_remaining == queue_total
+}
+
+/// 队列见底：连续停滞计数就地清零。
+///
+/// 计数只在认领新一页时结算，而队列一空 drain 就在「取到零行」那里直接返回、再也
+/// 不认领——最后一页若被计为停滞，读数会一直冻在那儿，`/health` degraded 到进程
+/// 重启为止。这条路不是假想：未回报的根撞满 [`MAX_ATTEMPTS`] 进死信之后队列正好
+/// 会空，`settle_unechoed_roots` 与页级停滞告警于是串成一条谁也清不掉的 degraded。
+/// 死信自己有 `blocking_conditions` 会喊，停滞这一条到此为止。
+fn clear_page_starvation() {
+    model_drain_telemetry().starved_pages = 0;
 }
 
 impl DrainReport {
@@ -2365,8 +2424,21 @@ async fn run_one(
 ///
 /// Keep this as a SQL predicate rather than filtering decoded rows: excluded
 /// durable work must never be claimed, executed, or have its retry counter
-/// touched by this process. `dbnum?:0` also makes legacy/unowned rows stay out
-/// of every explicit numeric scope instead of being admitted accidentally.
+/// touched by this process.
+///
+/// `dbnum = 0` means **「不属于任何库」**，不是「0 号库」，所以它落在每个数字域
+/// 之外而不是域外——两条产出路径是故意这么写的，各自都有注释与断言钉着：
+/// [`room_recalc_item`]（这一层拿不到 Ref0→dbnum 的反查结果，填 Ref0 会把行误挂到
+/// 某个恰好同号的库名下）与 [`ensure_regen_pending`]。把它们按数字域排除，等于让
+/// 一个带 `--watch-dbnum` 的进程**永远消费不掉自己刚排出来的房间任务**。
+///
+/// 2026-08-27 现场就是这样：模型阶段收工后，`count_room_targets`（没有这道过滤）
+/// 每轮报 2553 个目标，而 [`load_room_jobs`]（有这道过滤）一行都取不出来，于是
+/// 「完成 0、失败 0」以每秒一轮的节奏刷了 7697 轮、一小时二十五分钟，`/health`
+/// 全程 `ok`。过滤两侧对「哪些行算数」的答案必须是同一个。
+///
+/// 排除 legacy 行不再是这里的职责：ADR-050 之后 [`clear_stale_at_process_start`]
+/// 在任何生产者/消费者启动前整表清空，表里剩下的每一行都是本进程自己写的。
 fn render_automatic_scope_filter(dbnums: &[u32]) -> String {
     if dbnums.is_empty() {
         String::new()
@@ -2376,7 +2448,7 @@ fn render_automatic_scope_filter(dbnums: &[u32]) -> String {
             .map(u32::to_string)
             .collect::<Vec<_>>()
             .join(", ");
-        format!(" AND (dbnum?:0) IN [{members}]")
+        format!(" AND ((dbnum?:0) = 0 OR (dbnum?:0) IN [{members}])")
     }
 }
 
@@ -2504,6 +2576,20 @@ impl DrainPageProgress {
         registry.set_stage(&task_id, "claimed");
         {
             let mut telemetry = model_drain_telemetry();
+            // 认领新一页之前，telemetry 里还留着上一页的终值——正好用来判断上一页是不是
+            // 白跑了。一页一次，不多不少（`report` 一页会调好几次，放那里会重复计数）。
+            let previous_page_starved = page_was_starved(
+                telemetry.last_page_claimed,
+                telemetry.last_page_completed,
+                telemetry.last_deferred_lock_count,
+                telemetry.last_remaining,
+                queue_total,
+            );
+            if previous_page_starved {
+                telemetry.starved_pages = telemetry.starved_pages.saturating_add(1);
+            } else {
+                telemetry.starved_pages = 0;
+            }
             telemetry.last_attempts_delta = 0;
             telemetry.last_stage = Some("claimed");
             telemetry.last_page_claimed = jobs.len();
@@ -2763,6 +2849,9 @@ async fn drain_where_cooperative(
         .take(0)
         .map_err(|error| anyhow::anyhow!("decode pending model work failed: {error}"))?;
     if jobs.is_empty() {
+        // 队列见底，这一轮没有页可认领——停滞计数只在认领时结算，不在这儿清就再也
+        // 没机会清了（见 `clear_page_starvation`）。
+        clear_page_starvation();
         return Ok(ModelDrainDisposition::Completed { done: 0 });
     }
     let queue_total = count_pending_work(action_filter).await?;
@@ -3069,6 +3158,65 @@ async fn run_regen_batch(
     outcome
 }
 
+/// 生成器回报的根与队列行里的 `target_refno` 是同一个身份的两种拼法：队列存 E3D 的
+/// `24381/100817`，而报告里那一串经 `RefnoEnum` 走了一趟，`Display` 打出来是
+/// `24381_100817`。直接比字符串**一次都不会相等**——2026-08-27 现场整页 100 个根既
+/// 进不了收口集合、也配不上失败名单：队列行原样留着、`attempts` 永远是 0、
+/// `MAX_ATTEMPTS` 永远够不着、死信永远是空的，1462 个根空转 50 分钟，而每一轮任务
+/// 都报 `succeeded`。两边都过这一道再比。
+///
+/// 解析不出来的原样返回，**不能** `unwrap_or_default()`：那会把所有坏值折成同一个
+/// 零值，两个不同的坏根就被认成同一个，比不归一更糟。
+fn root_identity_key(refno: &str) -> String {
+    RefU64::from_str(refno).map_or_else(|_| refno.to_string(), |parsed| parsed.to_string())
+}
+
+/// 认领了却没有任何去向的根：生成没报错，可它既不在完成名单里也不在失败名单里，
+/// 于是进不了收口集合，队列行原样留到下一轮，再被同样地认领、同样地丢掉。
+///
+/// 这与 2026-07-30 审计 C2 那条「收口失败不是生成失败，attempts 不涨」是**两回事**。
+/// C2 防的是 flaky 的 DELETE：根已经进了收口集合，只是删的那一下抽风，下一轮重试就好，
+/// 给它记次数会把一整批健康的根冤枉进死信。这里根本没有 DELETE 可言——根压根没进得了
+/// 收口集合，重跑一万次结果都一样。确定性的收不掉必须计次：撞满 [`MAX_ATTEMPTS`] 就
+/// 进死信，让 `/health` 的 `blocking_conditions` 把它喊出来，而不是无声烧 CPU。
+async fn settle_unechoed_roots(
+    plain_jobs: &[PendingModelWork],
+    repair_jobs: &[PendingModelWork],
+    disposed: &HashSet<String>,
+    report: &mut DrainReport,
+) {
+    let unechoed = plain_jobs
+        .iter()
+        .chain(repair_jobs.iter())
+        .filter(|job| !disposed.contains(&root_identity_key(&job.target_refno)))
+        .collect::<Vec<_>>();
+    if unechoed.is_empty() {
+        return;
+    }
+    let samples = unechoed
+        .iter()
+        .take(MODEL_DRAIN_DETAIL_SAMPLE_SIZE)
+        .map(|job| format!("{}({})", job.target_refno, job.noun))
+        .collect::<Vec<_>>()
+        .join(", ");
+    println!(
+        "本组 {} 个根生成未报错，但生成器既没回报完成也没回报失败，队列行无法收口；\
+         按失败计次，连撞 {MAX_ATTEMPTS} 次后进死信（示例: {samples}）",
+        unechoed.len()
+    );
+    for job in unechoed {
+        record_failure(
+            job,
+            &anyhow::anyhow!(
+                "generator echoed neither success nor failure for this root, \
+                 so there was nothing to settle"
+            ),
+            report,
+        )
+        .await;
+    }
+}
+
 /// 一个不可抢占的实例生成小组。根锁只在本小组进入执行前获取，不再为整页100根
 /// 长时间占锁；小组之间自然形成数据优先级/epoch 的让位边界。
 async fn run_regen_group(
@@ -3167,29 +3315,42 @@ async fn run_regen_group(
                         .set_stage(task_id, "settling");
                     model_drain_telemetry().last_stage = Some("settling");
                 }
-                let completed = generation.completed.into_iter().collect::<HashSet<_>>();
+                // 报告侧一律按身份键收，队列侧查之前也过同一道（见 [`root_identity_key`]）。
+                // `settlements` 本身仍存队列行自己的写法——它要拿去寻址那一行，不是拿去比。
+                let completed = generation
+                    .completed
+                    .iter()
+                    .map(|root| root_identity_key(root))
+                    .collect::<HashSet<_>>();
                 let mut settlements = plain_jobs
                     .iter()
                     .filter(|job| {
                         skip_generation.contains(&job.target_refno)
-                            || completed.contains(&job.target_refno)
+                            || completed.contains(&root_identity_key(&job.target_refno))
                     })
                     .map(|job| (job.target_refno.clone(), job.revision))
                     .collect::<Vec<_>>();
+                // 本组每个根的去向都必须落进这个集合。留在集合外的根既没收口、也没记
+                // 失败、也没被锁挡住——它无声落地，下一轮被原样认领，再无声落地一次。
+                // 2026-08-27 现场就是这样：1462 个根空转 50 分钟，零日志、零 attempts、
+                // 零死信，而每一轮任务都报 succeeded。
+                let mut disposed: HashSet<String> = HashSet::new();
                 for failure in generation.failures {
+                    let root = root_identity_key(&failure.root);
                     if let Some(job) = plain_jobs
                         .iter()
                         .chain(repair_jobs.iter())
-                        .find(|job| job.target_refno == failure.root)
+                        .find(|job| root_identity_key(&job.target_refno) == root)
                     {
                         record_failure(job, &anyhow::anyhow!(failure.error), report).await;
                     }
+                    disposed.insert(root);
                 }
                 let completed_repair_jobs = repair_jobs
                     .iter()
                     .filter(|job| {
                         skip_generation.contains(&job.target_refno)
-                            || completed.contains(&job.target_refno)
+                            || completed.contains(&root_identity_key(&job.target_refno))
                     })
                     .collect::<Vec<_>>();
                 if !completed_repair_jobs.is_empty() {
@@ -3212,6 +3373,7 @@ async fn run_regen_group(
                                     report,
                                 )
                                 .await;
+                                disposed.insert(root_identity_key(&job_refs[index].target_refno));
                             }
                         }
                         Err(error) => {
@@ -3226,6 +3388,7 @@ async fn run_regen_group(
                             );
                             for job in &job_refs {
                                 report.failed_dbnums.insert(job.dbnum);
+                                disposed.insert(root_identity_key(&job.target_refno));
                             }
                             report.failures.push(message);
                         }
@@ -3256,6 +3419,10 @@ async fn run_regen_group(
                         report.failures.push(message);
                     }
                 }
+                for (root, _) in &settlements {
+                    disposed.insert(root_identity_key(root));
+                }
+                settle_unechoed_roots(&plain_jobs, &repair_jobs, &disposed, report).await;
             }
             Err(error) => {
                 // The per-root fallback acquires the same locks one by one, so
@@ -3635,6 +3802,19 @@ impl RoomTargetCounts {
     }
 }
 
+/// 这个计数是空闲轮「要不要收一轮房间」的唯一依据，所以它必须跟
+/// [`load_room_jobs`] 圈同一批行——两侧口径一旦分家，就是一个自己喂自己的空转环：
+/// 计数器说还有活、加载器一行都取不出来、本轮完成 0，下一轮再来一遍。
+fn render_room_target_counts_query(dbnums: &[u32]) -> String {
+    let scope_filter = render_automatic_scope_filter(dbnums);
+    format!(
+        "SELECT action, count() AS c FROM {TABLE} WHERE status IN ['pending', 'failed'] \
+         AND (attempts?:0) < {MAX_ATTEMPTS} {ROOM_ACTION_FILTER}{scope_filter} GROUP BY action;\
+         SELECT count() AS c FROM {TABLE} WHERE (attempts?:0) >= {MAX_ATTEMPTS} \
+         {ROOM_ACTION_FILTER}{scope_filter} GROUP ALL;"
+    )
+}
+
 /// 统计待重算房间目标，供空闲轮决定要不要收房间并给 `room_recalc` 任务当
 /// total 与详情。
 pub async fn count_room_targets() -> anyhow::Result<RoomTargetCounts> {
@@ -3648,11 +3828,8 @@ pub async fn count_room_targets() -> anyhow::Result<RoomTargetCounts> {
         c: usize,
     }
     let mut response = SUL_DB
-        .query(format!(
-            "SELECT action, count() AS c FROM {TABLE} WHERE status IN ['pending', 'failed'] \
-             AND (attempts?:0) < {MAX_ATTEMPTS} {ROOM_ACTION_FILTER} GROUP BY action;\
-             SELECT count() AS c FROM {TABLE} WHERE (attempts?:0) >= {MAX_ATTEMPTS} \
-             {ROOM_ACTION_FILTER} GROUP ALL;"
+        .query(render_room_target_counts_query(
+            &crate::data_interface::watch_scope::dbnums(),
         ))
         .await?
         .check()
@@ -4102,7 +4279,7 @@ mod tests {
     #[test]
     fn automatic_durable_drain_is_bounded_by_watch_dbnums() {
         let scope = [8000];
-        let predicate = "AND (dbnum?:0) IN [8000]";
+        let predicate = "AND ((dbnum?:0) = 0 OR (dbnum?:0) IN [8000])";
 
         let drain = render_drain_select_for_scope(REGEN_ACTION_FILTER, Some(16), &scope);
         assert!(
@@ -4128,6 +4305,67 @@ mod tests {
             3,
             "all health/status statements must share the watch predicate: {status}"
         );
+
+        // 排除仍然要真的排除：域外的库不能因为放行无主行而一起被放进来。
+        assert!(
+            drain.contains("(dbnum?:0) IN [8000]"),
+            "numeric scope must still exclude other dbnums: {drain}"
+        );
+    }
+
+    /// `dbnum = 0` 是「不属于任何库」，不是「0 号库」——它必须落在每个数字域**之内**。
+    ///
+    /// 房间重算与 `ensure_regen_pending` 都故意不认领来源库（各自有注释与断言钉着），
+    /// 于是按数字域排除它们，等于让带 `--watch-dbnum` 的进程永远消费不掉自己刚排出来
+    /// 的活。2026-08-27 现场：模型阶段收工后房间轮以每秒一轮的节奏空转了 7697 轮，
+    /// 每轮「完成 0、失败 0（开跑前 2553 个目标）」，而 `/health` 全程 `ok`。
+    #[test]
+    fn dbnum_less_work_is_inside_every_declared_scope() {
+        let scope = [8000];
+        for sql in [
+            render_drain_select_for_scope(ROOM_ACTION_FILTER, Some(256), &scope),
+            render_drain_select_for_scope(REGEN_ACTION_FILTER, Some(16), &scope),
+            render_room_target_counts_query(&scope),
+            render_has_pending_work_query(ROOM_ACTION_FILTER, "<", &scope),
+            render_model_pending_status_query_for_scope(&scope),
+        ] {
+            assert!(
+                sql.contains("(dbnum?:0) = 0 OR"),
+                "无主行被数字域挡在外面，这一行就永远没人消费: {sql}"
+            );
+        }
+    }
+
+    /// 空闲轮问的那个数与它随后能取到的行必须出自同一个谓词。
+    ///
+    /// 分家的代价是一个自己喂自己的环：`count_room_targets` 说 2553 个目标、
+    /// `load_room_jobs` 一行都取不出来、本轮完成 0，于是下一轮再问一次。它不报错、
+    /// 不计次、不进死信，`/health` 也看不见——只有 CPU 知道。
+    #[test]
+    fn the_room_counter_and_the_room_loader_share_one_predicate() {
+        let scope = [8000];
+        let counts = render_room_target_counts_query(&scope);
+        let loader = render_drain_select_for_scope(ROOM_ACTION_FILTER, Some(256), &scope);
+        let predicate = render_automatic_scope_filter(&scope);
+
+        assert!(
+            !predicate.is_empty(),
+            "这条断言只在声明了域时才有意义: {predicate}"
+        );
+        assert_eq!(
+            counts.matches(predicate.as_str()).count(),
+            2,
+            "活口与死信两句都必须带域: {counts}"
+        );
+        assert!(
+            loader.contains(predicate.as_str()),
+            "加载器必须与计数器同域: {loader}"
+        );
+        assert!(
+            counts.contains(&format!("(attempts?:0) < {MAX_ATTEMPTS}"))
+                && loader.contains(&format!("(attempts?:0) < {MAX_ATTEMPTS}")),
+            "重试上限也必须同口径: {counts}"
+        );
     }
 
     /// No declared scope is byte-for-byte compatible with the historical
@@ -4151,6 +4389,86 @@ mod tests {
     /// 多数用例只关心复活 / 覆盖那几条子句，与来源保存时刻无关。
     fn render_upsert_no_time(item: &ModelWorkItem) -> String {
         render_upsert(item, None)
+    }
+
+    /// 前两条断言的是 SQL 长什么样，这一条把它真的跑一遍：无主行取得回来，
+    /// 域外的库仍然取不回来，而且计数器与加载器给出同一个数。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_scoped_process_still_consumes_its_own_dbnum_less_room_work() {
+        use surrealdb::engine::any::connect;
+
+        #[derive(Debug, Deserialize)]
+        struct CountedAction {
+            action: String,
+            c: usize,
+        }
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("dbnum_less_scope")
+            .await
+            .expect("select fixture db");
+
+        // 房间任务：故意不认领来源库（`room_recalc_item` 写死 dbnum = 0）。
+        let room = room_recalc_item(&AabbChange {
+            refno: RefnoEnum::from(RefU64((24384u64 << 32) | 22403)),
+            noun: "FTUB".into(),
+        });
+        assert_eq!(room.dbnum, 0, "这条用例的前提就是房间任务无主");
+        // 域外的库：必须继续被挡住。
+        let stranger = ModelWorkItem {
+            dbnum: 9999,
+            db_type: "DESI".into(),
+            source_end_sesno: 0,
+            action: ModelWorkAction::RoomRecalcElement,
+            target_refno: "24999/1".into(),
+            noun: "EQUI".into(),
+        };
+        db.query(format!(
+            "{}\n{}",
+            render_upsert_no_time(&room),
+            render_upsert_no_time(&stranger)
+        ))
+        .await
+        .expect("seed rows")
+        .check()
+        .expect("seed statements");
+
+        let scope = [8000];
+        let mut response = db
+            .query(render_drain_select_for_scope(
+                ROOM_ACTION_FILTER,
+                Some(256),
+                &scope,
+            ))
+            .await
+            .expect("load room jobs")
+            .check()
+            .expect("load statement");
+        let loaded: Vec<PendingModelWork> = response.take(0).expect("decode room jobs");
+        assert_eq!(
+            loaded
+                .iter()
+                .map(|job| &job.target_refno)
+                .collect::<Vec<_>>(),
+            vec!["24384/22403"],
+            "无主行必须取得回来，域外的库必须取不回来"
+        );
+
+        let mut response = db
+            .query(render_room_target_counts_query(&scope))
+            .await
+            .expect("count room targets")
+            .check()
+            .expect("count statement");
+        let counted: Vec<CountedAction> = response.take(0).expect("decode room counts");
+        let live = counted.iter().map(|row| row.c).sum::<usize>();
+        assert_eq!(
+            live,
+            loaded.len(),
+            "计数器与加载器不同口径就是那个每秒一轮的空转环: {:?}",
+            counted.iter().map(|row| &row.action).collect::<Vec<_>>()
+        );
     }
 
     /// 缺失面板触发的模型补偿以“根 + 必需面板集合”为持久事实：同一缺口重复探测
@@ -4572,6 +4890,186 @@ mod tests {
         assert!(
             settlement_arm.contains("failures.push"),
             "收口失败仍要进 drain 汇总，让这一轮如实报错: {settlement_arm}"
+        );
+    }
+
+    /// 认领了却没有任何去向的根必须被点名、被计次（2026-08-27 现场）。
+    ///
+    /// 那天 1462 个根连着 118 页 `done=0/total=100`，每页都报 `succeeded`：生成不报错、
+    /// 收口集合里没有它们、`record_failure` 一次都没调过，于是 `attempts` 永远是 0、
+    /// `MAX_ATTEMPTS` 永远够不着、死信永远是空的，日志里一个字都没有。这条钉住三件事：
+    /// 点名要带样本、计次要走 `record_failure`、话里要说清撞满就进死信。
+    #[test]
+    fn unechoed_roots_are_named_and_counted_towards_the_dead_letter_ceiling() {
+        let source = include_str!("model_update_pending.rs");
+        // 定义在文件里排在测试模块之前，所以 `split_once` 命中的是定义而不是这里的
+        // 字面量——签名因此不许带泛型参数，否则这个锚点会滑到测试自己身上。
+        let body = source
+            .split_once("async fn settle_unechoed_roots(")
+            .expect("未回报根的处置函数必须存在")
+            .1
+            .split_once("async fn run_regen_group(")
+            .expect("它必须在 run_regen_group 之前结束")
+            .0;
+
+        assert!(
+            body.contains("record_failure("),
+            "确定性的收不掉必须计次，否则 MAX_ATTEMPTS 永远够不着: {body}"
+        );
+        assert!(
+            body.contains("MODEL_DRAIN_DETAIL_SAMPLE_SIZE"),
+            "点名必须带有界样本，只报个数等于没报: {body}"
+        );
+        assert!(
+            body.contains("println!"),
+            "这条路此前一行日志都没有，必须出声: {body}"
+        );
+        assert!(
+            body.contains("MAX_ATTEMPTS"),
+            "话要说清撞满几次进死信: {body}"
+        );
+    }
+
+    /// 收口失败的根**不得**被当成「未回报」二次处置。
+    ///
+    /// 两条路的处置正相反：收口失败按审计 C2 不涨 attempts，未回报必须涨。要是
+    /// `settlements` 没有先并进 `disposed`，一次 flaky 的 DELETE 就会让整批健康的根
+    /// 从 C2 那条路掉进这条路、白白吃一次 attempts——C2 修的那个 bug 就原样回来了。
+    #[test]
+    fn settlement_failures_are_disposed_before_the_unechoed_sweep() {
+        let source = include_str!("model_update_pending.rs");
+        let group = source
+            .split_once("async fn run_regen_group(")
+            .expect("run_regen_group 必须存在")
+            .1
+            .split_once("\n// 三个阶段的 action 白名单")
+            .expect("run_regen_group 必须在阶段白名单之前结束")
+            .0;
+
+        let folded = group
+            .find("for (root, _) in &settlements")
+            .expect("settlements 必须并进 disposed");
+        let swept = group
+            .find("settle_unechoed_roots(")
+            .expect("未回报清扫必须发生");
+        assert!(
+            folded < swept,
+            "settlements 要先并进 disposed，再做未回报清扫: {group}"
+        );
+        assert!(
+            group.find("match clear_regen_work_batch(&settlements).await") < Some(folded),
+            "并入发生在收口之后，Ok/Err 两条 arm 都要覆盖: {group}"
+        );
+    }
+
+    /// 生成器的回报与队列行必须先归一到同一个根键再比。
+    ///
+    /// 这条就是 2026-08-27 现场的成因：队列存 E3D 的 `24381/100817`，而报告那一串经
+    /// `RefnoEnum` 走了一趟、`Display` 打成 `24381_100817`，字符串直接比一次都不会
+    /// 相等。整页根既进不了收口集合也配不上失败名单，队列行原样留着被无限重认领，
+    /// 而 `attempts` 一次都不涨。改回直接比字符串即红。
+    #[test]
+    fn the_generator_report_and_the_queue_row_agree_on_one_root_key() {
+        assert_eq!(
+            root_identity_key("24381/100817"),
+            root_identity_key("24381_100817"),
+            "同一个根的两种拼法必须归一"
+        );
+        assert_eq!(
+            root_identity_key("=24381/100817"),
+            root_identity_key("24381_100817"),
+            "带 = 前缀的 RefU64 写法也是同一个根"
+        );
+        assert_ne!(
+            root_identity_key("24381/100817"),
+            root_identity_key("24381/100818"),
+            "不同的根不许被归一成同一个"
+        );
+        // 解析不出来的原样留着。`unwrap_or_default()` 会把所有坏值折成同一个零值，
+        // 两个不同的坏根于是被认成同一个——那比不归一更糟。
+        assert_eq!(root_identity_key("not-a-refno"), "not-a-refno");
+        assert_ne!(root_identity_key("bad-a"), root_identity_key("bad-b"));
+
+        // 调用点守卫：查 `completed` / `disposed` 之前必须过这一道。少一处就是少一批
+        // 收不掉的根，而它安静得跟正常跑完一模一样。
+        let source = include_str!("model_update_pending.rs");
+        let group = source
+            .split_once("async fn run_regen_group(")
+            .expect("run_regen_group 必须存在")
+            .1
+            .split_once("\n// 三个阶段的 action 白名单")
+            .expect("run_regen_group 必须在阶段白名单之前结束")
+            .0;
+        assert!(
+            !group.contains("completed.contains(&job.target_refno)"),
+            "队列行的写法不能直接拿去查生成器的回报: {group}"
+        );
+        assert!(
+            !group.contains("disposed.insert(job.target_refno.clone())"),
+            "进 disposed 的也得是身份键: {group}"
+        );
+    }
+
+    /// 页级停滞的判据：四个条件缺一不可。
+    #[test]
+    fn page_starvation_needs_a_claimed_page_zero_settled_and_a_frozen_backlog() {
+        // 现场形态：认领 100、收口 0、没有根锁挡着、待办 1462 一动不动。
+        assert!(page_was_starved(100, 0, 0, 1462, 1462));
+        // 收掉了一些 → 不是停滞。
+        assert!(!page_was_starved(100, 16, 0, 1462, 1446));
+        // 待办变了（收掉几个又排进来几个）→ 队列在动，不是停滞。
+        assert!(!page_was_starved(100, 0, 0, 1462, 1400));
+        // 上一页压根没认领到东西（首页、或队列本来就空）→ 无从判断，不算。
+        assert!(!page_was_starved(0, 0, 0, 0, 0));
+    }
+
+    /// 整页被根锁挡住是让位，不是停滞——而它与停滞在前三个数上逐字段同形。
+    ///
+    /// `settle_deferred_for_lock` 早退时 telemetry 停在「认领 N / 收口 0 / 待办不变」，
+    /// 光靠那三个数分不出来。specs/033 的前提就是单个布尔能跑几分钟：队列里只剩
+    /// 一两个根、恰好都被按需生成占着时，三页 80 秒轻松跨过去，`/health` 就会为一次
+    /// 正常让位报 degraded。去掉 deferred 那一条判据，这里立刻转红。
+    #[test]
+    fn a_page_fully_deferred_by_root_locks_is_yielding_not_starving() {
+        assert!(
+            !page_was_starved(2, 0, 2, 1462, 1462),
+            "整页 lock-busy 是让位：行没动过是对的，不该计进停滞"
+        );
+        assert!(
+            !page_was_starved(100, 0, 1, 1462, 1462),
+            "只要有根被锁挡着，这一页就没资格被判成「收不掉」"
+        );
+    }
+
+    /// 队列见底必须清零，否则停滞告警清不掉。
+    ///
+    /// 计数只在 `DrainPageProgress::claim` 里结算，而 drain 取到零行就直接返回、
+    /// 再也不认领：最后一页若被计为停滞，`/health` 会 degraded 到进程重启。这条路
+    /// 由新加的两件事自己铺出来——未回报的根撞满 `MAX_ATTEMPTS` 进死信之后队列正好
+    /// 会空。纯函数钉不住「有没有人在那条早退路径上清」，按仓内先例用源码断言。
+    #[test]
+    fn an_empty_queue_clears_the_starvation_counter_before_returning() {
+        let source = include_str!("model_update_pending.rs");
+        // 早退分支排在测试模块之前，`split_once` 命中的是它而不是这里的字面量。
+        let early_return = source
+            .split_once("if jobs.is_empty() {")
+            .expect("取到零行的早退分支必须在")
+            .1
+            .split_once("ModelDrainDisposition::Completed { done: 0 }")
+            .expect("它以 Completed{done:0} 收尾")
+            .0;
+        assert!(
+            early_return.contains("clear_page_starvation()"),
+            "队列见底要清零，否则告警冻在最后一页上: {early_return}"
+        );
+    }
+
+    /// 停滞阈值要够长到躲开一次寻常的锁竞争，又够短到不至于烧掉半小时。
+    #[test]
+    fn the_starvation_threshold_stays_in_the_useful_band() {
+        assert!(
+            (2..=10).contains(&MODEL_DRAIN_STARVED_PAGES_ALERT),
+            "3 页约 80 秒；调到 1 会被一次让位误触，调到几十页就又回到人肉发现了"
         );
     }
 
@@ -7472,6 +7970,7 @@ mod tests {
                     model_in_flight: false,
                     phases: Default::default(),
                     blockers: Vec::new(),
+                    blocked_by: Vec::new(),
                     shadowed: Vec::new(),
                 },
             },

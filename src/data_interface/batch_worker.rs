@@ -246,7 +246,6 @@ pub(crate) fn active_data_window() -> Option<(u32, i32)> {
 
 pub(crate) fn set_active_task_stage(stage: &str) {
     let _ = ACTIVE_DATA_TASK.try_with(|context| {
-        TaskRegistry::global().set_stage(&context.task_id, stage);
         println!(
             "[增量] 执行中 task={} dbnum={} 会话区间={}..={} 阶段={} 时间={}",
             context.task_id,
@@ -256,6 +255,20 @@ pub(crate) fn set_active_task_stage(stage: &str) {
             stage_label(stage),
             Local::now().format("%Y-%m-%d %H:%M:%S"),
         );
+    });
+    set_active_task_stage_quiet(stage);
+}
+
+/// 同 [`set_active_task_stage`]，但不印那一行——给自己已经印了一行更贴合本地
+/// 上下文的调用方（`manual_update` 的「执行阶段: …」序列就是这样）。
+///
+/// 登记表那一格必须照样更新：`TaskRegistry::finish` 从不清 `current_stage`，于是
+/// 它是 `/tasks` 上唯一说得出「死在哪一步」的字段，面板照着它画。只印不记，异机
+/// 排查就只剩一张截图；而在批次上下文之外（预览、CLI）两者都是空转，所以
+/// 调用方的 `println!` 不能挪进来——挪进来那些路径的阶段行就一起消失了。
+pub(crate) fn set_active_task_stage_quiet(stage: &str) {
+    let _ = ACTIVE_DATA_TASK.try_with(|context| {
+        TaskRegistry::global().set_stage(&context.task_id, stage);
         beat();
     });
 }
@@ -292,6 +305,12 @@ pub(crate) fn note_commit_progress(
 fn stage_label(stage: &str) -> &str {
     match stage {
         "data_parse" => "数据解析",
+        "identity_check" => "复核文件身份",
+        "wipe_reinit" => "整库清空重建",
+        "initial_load" => "首次全量基线",
+        "resolve_window" => "解析会话窗口",
+        "collect_window" => "收集增量",
+        "stage_apply" => "暂存应用",
         "dependency_index" => "依赖索引",
         "dependency_closure" => "依赖闭包",
         "dependency_write" => "依赖写入",
@@ -494,12 +513,30 @@ struct BatchFailureEntry {
     last_reason: String,
     first_at: String,
     last_at: String,
+    /// 本次 park 生效以来，「不再自动重跑」这件事有没有被落盘报过。
+    ///
+    /// 重扫每个对账周期（默认 300s）都会再问一次 park，而答案在解除之前恒为是：
+    /// 不记这一位，一个坏库一天能往 `logs/` 里灌近 300 行同样的话，真正要看的
+    /// 那条失败原因会被冲得找不着。
+    park_announced: bool,
 }
 
 impl BatchFailureEntry {
     fn parked(&self) -> bool {
         self.streak >= crate::data_interface::model_update_pending::MAX_ATTEMPTS
     }
+}
+
+/// 重扫问「这个库还自动重跑吗」时的回答。
+pub(crate) struct ParkedVerdict {
+    pub streak: u32,
+    /// 本轮是不是这次 park 的**第一次**报出。只有它为真时才该落盘，见
+    /// [`BatchFailureEntry::park_announced`]。
+    pub first_notice: bool,
+    pub end_sesno: i32,
+    pub last_reason: String,
+    pub first_at: String,
+    pub last_at: String,
 }
 
 /// 数据批次连续失败账本（进程内，dbnum → 连败详情）。
@@ -531,8 +568,11 @@ impl BatchFailureLedger {
             .entry(dbnum)
             .and_modify(|entry| {
                 if end_sesno > entry.end_sesno {
+                    // 右端前进 = 有人保存了新会话，这是新一轮：连败从 1 数起，
+                    // 「不再自动重跑」那句也要允许被重新报一次。
                     entry.streak = 0;
                     entry.first_at = now.to_string();
+                    entry.park_announced = false;
                 }
             })
             .or_insert_with(|| BatchFailureEntry {
@@ -541,6 +581,7 @@ impl BatchFailureLedger {
                 last_reason: String::new(),
                 first_at: now.to_string(),
                 last_at: now.to_string(),
+                park_announced: false,
             });
         entry.streak += 1;
         entry.end_sesno = end_sesno;
@@ -558,13 +599,24 @@ impl BatchFailureLedger {
     /// 右端前进说明有人在动这个库——旧账当场作废并放行，这正是「新触发到来时
     /// 清零重试」的兑现：watch 事件与对账重扫都汇入同一次整面扫描，能把 park
     /// 解开的不是事件本身，而是文件里真的多了会话。
-    fn parked_streak(&mut self, dbnum: u32, file_latest_sesno: i32) -> Option<u32> {
-        let entry = self.entries.get(&dbnum)?;
+    fn parked_streak(&mut self, dbnum: u32, file_latest_sesno: i32) -> Option<ParkedVerdict> {
+        let entry = self.entries.get_mut(&dbnum)?;
         if file_latest_sesno > entry.end_sesno {
             self.entries.remove(&dbnum);
             return None;
         }
-        entry.parked().then_some(entry.streak)
+        if !entry.parked() {
+            return None;
+        }
+        let first_notice = !std::mem::replace(&mut entry.park_announced, true);
+        Some(ParkedVerdict {
+            streak: entry.streak,
+            first_notice,
+            end_sesno: entry.end_sesno,
+            last_reason: entry.last_reason.clone(),
+            first_at: entry.first_at.clone(),
+            last_at: entry.last_at.clone(),
+        })
     }
 }
 
@@ -577,9 +629,13 @@ fn batch_failure_ledger() -> std::sync::MutexGuard<'static, BatchFailureLedger> 
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// 重扫侧的 park 查询（见 [`BatchFailureLedger`]）：返回 `Some(streak)` 表示该
-/// dbnum 连败到上限且文件右端没有前进，本轮不要再自动入队。
-pub(crate) fn batch_failure_parked(dbnum: u32, file_latest_sesno: i32) -> Option<u32> {
+/// 重扫侧的 park 查询（见 [`BatchFailureLedger`]）：返回 `Some(..)` 表示该 dbnum
+/// 连败到上限且文件右端没有前进，本轮不要再自动入队。
+///
+/// **这个查询有副作用**：它顺手把「已经报过 park 了」记下来，所以调用方拿到的
+/// `first_notice` 每次 park 只会为真一次。查询与记账合一是有意的——分成两步就会
+/// 出现「问了但没记」的路径，那时落盘要么每 300s 一条、要么一条都没有。
+pub(crate) fn batch_failure_parked(dbnum: u32, file_latest_sesno: i32) -> Option<ParkedVerdict> {
     batch_failure_ledger().parked_streak(dbnum, file_latest_sesno)
 }
 
@@ -640,7 +696,10 @@ fn batch_failure_blocks_data_phase(state: TaskState, batch_status: Option<BatchS
 ///
 /// 停跑是有代价的（该库的水位差在下一个新会话/人工执行之前不再有人追），
 /// 所以必须在控制台与 `/health` 都看得见，而不是只留一行滚走的日志。
-fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str) {
+///
+/// 返回同右端连败第几次：落盘记录要带上它，否则事后翻文件只看得见一串失败，
+/// 分不出哪一条是「还会自动重跑」、哪一条已经把这个库 park 住了。
+fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str) -> u32 {
     let streak =
         batch_failure_ledger().record(dbnum, end_sesno, reason, &Local::now().to_rfc3339());
     let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
@@ -657,6 +716,7 @@ fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str) {
              达上限后重扫停止自动重跑（新会话或人工执行清零）"
         );
     }
+    streak
 }
 
 struct WorkerLiveGuard;
@@ -928,6 +988,7 @@ async fn run_one_batch_isolated(
 ) {
     let dbnum = job.dbnum;
     let task_id = job.task_id.clone();
+    let project = job.project.clone();
     let phase = job.phase;
     let epoch_id = job.epoch_id;
     let end_sesno = job.end_sesno;
@@ -942,10 +1003,15 @@ async fn run_one_batch_isolated(
     );
     log::error!("{message}");
     eprintln!("{message}");
+    // `reason_ref` 留空：`batch_failure_log::record` 在 `run_one_batch` 的尾巴上，
+    // panic 展开时它没跑到，`logs/batch-failures-*.jsonl` 里没有这个 task。指向
+    // 一条不存在的记录，比不给更费人时间——原因就在 message 里。
     crate::data_interface::initialization_phase::InitializationCoordinator::global().mark_failed(
         epoch_id,
-        phase,
-        message.clone(),
+        crate::data_interface::initialization_phase::PhaseBlocker::new(phase, message.clone())
+            .with_dbnum(dbnum)
+            .with_project(project.clone())
+            .with_task(task_id.clone()),
     );
     // panic = 数据窗口没收口，与普通 Failed 记同一本连败账（park 判定见
     // `BatchFailureLedger`）。右端用入队快照——冻结重扫后的真值这里已经拿不到，
@@ -1091,6 +1157,7 @@ async fn run_one_batch(
         ManualUpdateStatus::Failed => TaskState::Failed,
     };
     let batch_status = result.batch.as_ref().map(|batch| batch.status.clone());
+    let mut failure_streak = None;
     if matches!(state, TaskState::Failed | TaskState::Partial)
         && batch_failure_blocks_data_phase(state, batch_status)
     {
@@ -1099,9 +1166,21 @@ async fn run_one_batch(
             .last()
             .cloned()
             .unwrap_or_else(|| format!("dbnum={} 数据批次未完整收口", job.dbnum));
+        // `reason_ref` 指向本函数尾巴上那条 `batch_failure` 记录——两者同一个
+        // task_id，且这个分支的条件是 `record` 那个分支的子集，不会指空。
         crate::data_interface::initialization_phase::InitializationCoordinator::global()
-            .mark_failed(job.epoch_id, job.phase, message.clone());
-        note_batch_failure(job.dbnum, observed_end_sesno, &message);
+            .mark_failed(
+                job.epoch_id,
+                crate::data_interface::initialization_phase::PhaseBlocker::new(
+                    job.phase,
+                    message.clone(),
+                )
+                .with_dbnum(job.dbnum)
+                .with_project(job.project.clone())
+                .with_task(task_id.clone())
+                .with_failure_record(task_id.clone()),
+            );
+        failure_streak = Some(note_batch_failure(job.dbnum, observed_end_sesno, &message));
     } else {
         // 数据窗口收口了（Applied / UpToDate / 模型侧才有失败的 Partial）：
         // 连败账清零。模型失败自有 durable pending 的重试账与死信门槛。
@@ -1145,6 +1224,50 @@ async fn run_one_batch(
             Local::now(),
         )
     );
+    // 紧跟完成行：人在控制台上找的锚点是「执行完毕 … 状态=failed」，原因就该
+    // 挨着它，而不是要人再去别处取一趟。
+    if matches!(state, TaskState::Failed | TaskState::Partial) {
+        let batch_message = result
+            .batch
+            .as_ref()
+            .and_then(|batch| batch.message.as_deref());
+        for line in
+            render_failure_reason_lines(job.dbnum, &task_id, batch_message, &result.warnings)
+        {
+            println!("{line}");
+        }
+        // 控制台那份会被下一轮冷启动的阶段日志冲掉，回执活不过重启。同一句话
+        // 再往 `logs/` 落一条，面板与异机复核都读它（见 `batch_failure_log`）。
+        // `current_stage` 从注册表现取：`finish` 不清它，终态那一格就是死在哪一步。
+        let (reason, reason_from) = failure_reason(batch_message, &result.warnings);
+        let died_at = registry
+            .get(&task_id)
+            .and_then(|entry| entry.current_stage.clone());
+        crate::data_interface::batch_failure_log::record(
+            &crate::data_interface::batch_failure_log::BatchFailure {
+                task_id: &task_id,
+                project: &job.project,
+                dbnum: job.dbnum,
+                db_type: &job.db_type,
+                phase: job.phase.as_str(),
+                epoch_id: job.epoch_id,
+                state: state.as_str(),
+                window: applied_window,
+                save_time,
+                file_path: result
+                    .batch
+                    .as_ref()
+                    .map(|batch| batch.file_path.as_str())
+                    .or_else(|| job.path.to_str()),
+                died_at: died_at.as_deref(),
+                reason: &reason,
+                reason_from,
+                warnings: &result.warnings,
+                streak: failure_streak,
+                elapsed_ms: started.elapsed().as_millis(),
+            },
+        );
+    }
 }
 
 /// 显式布尔环境变量的三态解析（2026-08-08 审核 P2-1 确立的纪律，供所有
@@ -2689,7 +2812,7 @@ async fn execute_frozen_batch_body(
             );
         } else {
             println!(
-                "dbnum={} 初始化批次未收口（水位未推进），模型工作不领取；失败原因见本批回执",
+                "dbnum={} 初始化批次未收口（水位未推进），模型工作不领取；原因见下方「[增量] 失败原因」行",
                 job.dbnum
             );
         }
@@ -3366,6 +3489,64 @@ where
     )
 }
 
+/// 失败批次的原因行。
+///
+/// 完成行只报 `状态=failed`；真话在 `result.batch.message` 里，而那句话此前**只**
+/// 进任务回执，控制台上唯一的提示是「失败原因见本批回执」——把人指向一个当时未
+/// 必拿得到的地方。回执要 HTTP：现场可能没开 `http_api`、端口不通、或者人根本不
+/// 在那台机器前面。2026-08-27 的 SYST 8191 就是这个形状：屏幕上一整屏阶段日志把
+/// 「死在收集增量这一步」说得清清楚楚，却唯独缺了「为什么」，而收集口有十几个各
+/// 自具名的硬失败出口，光靠阶段行分不出是哪一个。
+///
+/// 三条纪律：
+/// - `batch` 缺席（冻结重扫就失败、批次压根没建起来）时回落到 warnings，不许空手
+///   而归；并且**报出这一句是从哪儿来的**——两个来源的权威性不一样。
+/// - warnings 截断并报剩余条数：净窗口的口径标注一条就一百多字，整串打出来会把
+///   上方的阶段行冲掉，而阶段行正是判断死在哪一步的依据。
+/// - 只在非成功终态调用，成功批次一行都不加。
+fn render_failure_reason_lines(
+    dbnum: u32,
+    task_id: &str,
+    batch_message: Option<&str>,
+    warnings: &[String],
+) -> Vec<String> {
+    const SHOWN: usize = 3;
+    let head = format!("[增量] 失败原因 task={task_id} dbnum={dbnum}");
+    let (reason, from) = failure_reason(batch_message, warnings);
+
+    let mut out = vec![format!("{head} 来源={from} {reason}")];
+    for warning in warnings.iter().take(SHOWN) {
+        out.push(format!("{head} 伴随告警 {warning}"));
+    }
+    if let Some(rest) = warnings.len().checked_sub(SHOWN).filter(|rest| *rest > 0) {
+        out.push(format!(
+            "{head} 伴随告警 …另有 {rest} 条，见 /api/v1/tasks/{task_id}"
+        ));
+    }
+    out
+}
+
+/// 这一批失败的那句原话，以及它是从哪儿来的。
+///
+/// 控制台行与落盘记录必须念同一句：两处各自挑一次来源，就会出现「屏幕上说 A、
+/// 文件里说 B」，而这两句的权威性本来就不一样——`batch.message` 是收集/写回口
+/// 自己抛的原话，`warnings.last()` 在硬失败路径上很可能只是一条口径标注。
+fn failure_reason(batch_message: Option<&str>, warnings: &[String]) -> (String, &'static str) {
+    match batch_message {
+        Some(message) => (message.to_string(), "result.batch.message"),
+        None => match warnings.last() {
+            Some(warning) => (
+                warning.clone(),
+                "warnings.last()（本批没有 batch，多半是冻结重扫阶段就失败了）",
+            ),
+            None => (
+                "本批既无回执消息也无告警——这是引擎缺陷，请带走 logs/ 整个目录".to_string(),
+                "无",
+            ),
+        },
+    }
+}
+
 /// 生成根列表的日志渲染：多到刷屏时只留前若干个。
 ///
 /// 一次批量重生成可以带上百个根，整串打出来会把它前后的阶段行冲掉——而排查时
@@ -3415,8 +3596,14 @@ async fn idle_round(
                 "design" => Some(crate::data_interface::initialization_phase::DataPhase::Design),
                 _ => None,
             }) {
+                // 整轮重扫失败，没有哪个库是肇事者：dbnum 留空是实话。
                 crate::data_interface::initialization_phase::InitializationCoordinator::global()
-                    .mark_failed(snapshot.epoch_id, phase, message);
+                    .mark_failed(
+                        snapshot.epoch_id,
+                        crate::data_interface::initialization_phase::PhaseBlocker::new(
+                            phase, message,
+                        ),
+                    );
             }
         }
     }
@@ -4579,19 +4766,16 @@ mod tests {
                 "同右端连败逐次计数"
             );
         }
-        assert_eq!(
-            ledger.parked_streak(7997, 1034),
-            Some(cap),
-            "达上限且右端未前进：park"
-        );
-        assert_eq!(
-            ledger.parked_streak(8000, 1034),
-            None,
-            "没失败过的库不受影响"
-        );
+        let parked = ledger
+            .parked_streak(7997, 1034)
+            .expect("达上限且右端未前进：park");
+        assert_eq!(parked.streak, cap);
+        assert_eq!(parked.end_sesno, 1034);
+        assert_eq!(parked.last_reason, "injected failure");
+        assert!(ledger.parked_streak(8000, 1034).is_none(), "没失败过的库不受影响");
 
         // 右端前进 = 有人保存了新会话：账当场作废，本轮放行。
-        assert_eq!(ledger.parked_streak(7997, 1035), None);
+        assert!(ledger.parked_streak(7997, 1035).is_none());
         assert_eq!(
             ledger.record(7997, 1035, "injected failure", "t"),
             1,
@@ -4599,7 +4783,7 @@ mod tests {
         );
 
         // 未达上限不 park：瞬态失败靠对账重扫自动重试。
-        assert_eq!(ledger.parked_streak(7997, 1035), None);
+        assert!(ledger.parked_streak(7997, 1035).is_none());
 
         // 人工执行显式清零（POST /update/execute 的复活出口）。
         for _ in 0..cap {
@@ -4607,7 +4791,42 @@ mod tests {
         }
         assert!(ledger.parked_streak(7997, 1035).is_some());
         ledger.clear(7997);
-        assert_eq!(ledger.parked_streak(7997, 1035), None);
+        assert!(ledger.parked_streak(7997, 1035).is_none());
+    }
+
+    /// 「不再自动重跑」每次 park 只报一遍。
+    ///
+    /// 重扫每个对账周期（默认 300s）都会再问一次，而答案在解除之前恒为是：不去重
+    /// 的话一个坏库一天往 `logs/` 灌近 300 行同一句话，真正要看的那条失败原因会被
+    /// 冲得找不着。另一半是复活之后要能重新报——右端前进是一次全新的 park 机会，
+    /// 沿用旧标记就会让第二次 park 悄无声息。
+    #[test]
+    fn a_park_announces_itself_once_per_episode() {
+        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+        let mut ledger = BatchFailureLedger::default();
+        for _ in 0..cap {
+            ledger.record(7997, 1034, "injected failure", "t");
+        }
+
+        assert!(
+            ledger.parked_streak(7997, 1034).expect("park").first_notice,
+            "第一次问必须是首报"
+        );
+        for _ in 0..3 {
+            assert!(
+                !ledger.parked_streak(7997, 1034).expect("park").first_notice,
+                "同一次 park 只首报一遍"
+            );
+        }
+
+        // 右端前进后重新连败到上限：这是新一轮 park，必须重新报一次。
+        for _ in 0..cap {
+            ledger.record(7997, 1040, "injected failure", "t");
+        }
+        assert!(
+            ledger.parked_streak(7997, 1040).expect("park").first_notice,
+            "复活后再 park 是新一轮，不能沿用旧标记"
+        );
     }
 
     /// 失败中途右端前进过一次：record 自己也要把旧账作废重数，
@@ -4624,7 +4843,7 @@ mod tests {
             1,
             "右端前进的失败按新一轮从 1 数"
         );
-        assert_eq!(ledger.parked_streak(7997, 1040), None);
+        assert!(ledger.parked_streak(7997, 1040).is_none());
     }
 
     /// mark_failed 的判据是数据窗口本身，不是任务终态标签（回退到旧写法
@@ -5108,6 +5327,109 @@ mod tests {
         assert!(
             body.contains("render_batch_finished_line("),
             "完成行必须经 render_batch_finished_line 渲染: {body}"
+        );
+    }
+
+    /// 失败批次必须在控制台上自己说出原因。
+    ///
+    /// 回退到「见本批回执」就等于要求现场能打 HTTP——2026-08-27 的 SYST 8191
+    /// 现场恰恰不能：屏幕上阶段行齐全、`状态=failed` 也在，唯独没有那一句，而
+    /// 收集口十几个硬失败出口只能靠那一句分辨。
+    #[test]
+    fn a_failed_batch_says_why_on_the_console() {
+        // 收集口硬失败的真实形状：`manual_update` 的 `读取增量数据失败: {e}` 套
+        // `NetWindowError` 的 `dabacon 窗口在 {阶段} 阶段不完整: {source:#}`，内层
+        // 是那个出口自己的原话（这条取 `collect_net_window` 的冻结会话校验）。8191
+        // 那次的原话没有任何人拿到过——本次改动要的正是下次能拿到，所以这里钉的是
+        // 格式，不冒充一句现场记录。
+        let lines = render_failure_reason_lines(
+            8191,
+            "db-20260827-114844-000000",
+            Some(
+                "读取增量数据失败: dabacon 窗口在 冻结会话校验 阶段不完整: \
+                 窗口终点 37 与快照冻结会话 36 不一致",
+            ),
+            &[],
+        );
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0].contains("来源=result.batch.message") && lines[0].contains("冻结会话校验"),
+            "{:?}",
+            lines[0]
+        );
+
+        // batch 缺席（冻结重扫就失败）：回落到 warnings，并且说清这一句的出处——
+        // 两个来源的权威性不一样，混成一句会让人把口径标注当成错误。
+        let fallback = render_failure_reason_lines(
+            8191,
+            "t",
+            None,
+            &["冻结批次重扫失败: 文件身份与冻结 token 不一致".to_string()],
+        );
+        assert!(fallback[0].contains("warnings.last()"), "{:?}", fallback[0]);
+        assert!(fallback[0].contains("文件身份"), "{:?}", fallback[0]);
+
+        // 一条都没有仍要留一行：静默失败比错误的原因更难查。
+        let empty = render_failure_reason_lines(8191, "t", None, &[]);
+        assert_eq!(empty.len(), 1);
+        assert!(empty[0].contains("引擎缺陷"), "{:?}", empty[0]);
+    }
+
+    /// 告警截断：净窗口口径标注一条上百字，整串打出来会把上方的阶段行冲掉，
+    /// 而阶段行正是判断死在哪一步的依据。截断了就必须报剩余条数与取全的地方。
+    #[test]
+    fn accompanying_warnings_are_truncated_but_still_report_the_rest() {
+        let warnings = (0..5).map(|i| format!("w{i}")).collect::<Vec<_>>();
+        let lines = render_failure_reason_lines(8191, "t", Some("boom"), &warnings);
+        assert_eq!(lines.len(), 1 + 3 + 1, "原因 1 行 + 前 3 条 + 剩余提示");
+        assert!(lines.last().unwrap().contains("另有 2 条"), "{lines:?}");
+        assert!(
+            lines.last().unwrap().contains("/api/v1/tasks/t"),
+            "截断了就得指出去哪儿取全: {lines:?}"
+        );
+
+        let exact = render_failure_reason_lines(8191, "t", Some("boom"), &warnings[..3]);
+        assert_eq!(exact.len(), 4, "正好三条时不该冒出「另有 0 条」");
+    }
+
+    /// 调用点守卫：完成行之后必须跟原因行，且成功批次不加料。
+    ///
+    /// 这条同时钉死那句旧文案——「失败原因见本批回执」与「原因就在下一行」不能
+    /// 同时为真，留着它就是把人往拿不到的地方指。
+    #[test]
+    fn the_finished_line_is_followed_by_the_reason_and_only_for_failures() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn run_one_batch(")
+            .expect("run_one_batch 必须存在")
+            .1
+            .split_once("fn use_staged_increment_window(")
+            .expect("run_one_batch 之后是 use_staged_increment_window")
+            .0;
+
+        let finished = body
+            .find("render_batch_finished_line(")
+            .expect("完成行必须在");
+        let reason = body
+            .find("render_failure_reason_lines(")
+            .expect("原因行必须在");
+        assert!(finished < reason, "原因行要紧跟完成行之后: {body}");
+        assert!(
+            body.contains("matches!(state, TaskState::Failed | TaskState::Partial)"),
+            "成功批次不得追加原因行: {body}"
+        );
+        // 未收口那一行必须指向就地打印的原因，而不是把人打发去取回执。断言只圈
+        // 那一条 println 的实参——整文件扫描会被讲这段历史的注释自己绊倒。
+        let unsettled = source
+            .split_once("初始化批次未收口")
+            .expect("未收口分支必须在")
+            .1
+            .split_once(");")
+            .expect("println 有结尾")
+            .0;
+        assert!(
+            unsettled.contains("原因见下方") && !unsettled.contains("见本批回执"),
+            "未收口那一行得指向下方的原因行: {unsettled}"
         );
     }
 

@@ -72,6 +72,66 @@ pub struct PhaseCounts {
     pub blocked: usize,
 }
 
+/// 一条阶段阻断，带上「是谁挡的」。
+///
+/// 过去它是 `(DataPhase, String)`：相知道，dbnum 从来没进去过，对外快照连相也压掉
+/// 了。2026-08-27 现场那条 DESI 任务因此只看得见「被 meta 挡着」，看不见挡它的是
+/// 8191——meta 库不止一个，人得自己回水位表里挨个找哪个没追平（ISSUE-025 §三）。
+///
+/// 记 blocker 的那几处本来就握着 dbnum，只是在拼字符串时把它拌进去了。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PhaseBlocker {
+    pub phase: DataPhase,
+    pub dbnum: Option<u32>,
+    pub project: Option<String>,
+    /// 记下这条阻断的批次任务。扫描期的阻断（目录不可读、清单歧义）没有任务。
+    pub task_id: Option<String>,
+    /// 去 `/api/v1/batch-failures` 取全文原因的键。只有确实落过一条失败记录才给
+    /// ——指向一个不存在的记录比不给更费人时间。
+    pub reason_ref: Option<String>,
+    pub message: String,
+}
+
+impl PhaseBlocker {
+    pub fn new(phase: DataPhase, message: impl Into<String>) -> Self {
+        Self {
+            phase,
+            dbnum: None,
+            project: None,
+            task_id: None,
+            reason_ref: None,
+            message: message.into(),
+        }
+    }
+
+    pub fn with_dbnum(mut self, dbnum: u32) -> Self {
+        self.dbnum = Some(dbnum);
+        self
+    }
+
+    pub fn with_project(mut self, project: impl Into<String>) -> Self {
+        self.project = Some(project.into());
+        self
+    }
+
+    pub fn with_task(mut self, task_id: impl Into<String>) -> Self {
+        self.task_id = Some(task_id.into());
+        self
+    }
+
+    /// 这条阻断的全文原因已经落进 `logs/batch-failures-*.jsonl`，键是同一个 task_id。
+    pub fn with_failure_record(mut self, task_id: impl Into<String>) -> Self {
+        self.reason_ref = Some(task_id.into());
+        self
+    }
+
+    /// 兼容旧消费者的那一行字符串。形状不许变：`/health` 的 `blockers` 与
+    /// `InitializationNotReady` 的错误串都念它。
+    pub fn rendered(&self) -> String {
+        format!("{}: {}", self.phase.as_str(), self.message)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct InitializationSnapshot {
     pub epoch_id: u64,
@@ -81,7 +141,10 @@ pub struct InitializationSnapshot {
     pub model_ready: bool,
     pub model_in_flight: bool,
     pub phases: BTreeMap<&'static str, PhaseCounts>,
+    /// 渲染好的那份，形状与结构化之前一字不差。
     pub blockers: Vec<String>,
+    /// 同一批阻断的结构化形态：相 + dbnum + 项目 + 任务 + 失败记录键。
+    pub blocked_by: Vec<PhaseBlocker>,
     pub shadowed: Vec<String>,
 }
 
@@ -96,7 +159,7 @@ struct CoordinatorState {
     model_phase_open: bool,
     model_in_flight: bool,
     phases: BTreeMap<DataPhase, PhaseCounts>,
-    blockers: Vec<(DataPhase, String)>,
+    blockers: Vec<PhaseBlocker>,
     shadowed: Vec<String>,
     needs_rescan: bool,
 }
@@ -162,7 +225,7 @@ impl InitializationCoordinator {
         epoch_id: u64,
         phases: impl IntoIterator<Item = DataPhase>,
         held: bool,
-        blockers: impl IntoIterator<Item = (DataPhase, String)>,
+        blockers: impl IntoIterator<Item = PhaseBlocker>,
     ) -> bool {
         let mut state = self.state();
         if epoch_id != state.epoch_id {
@@ -179,7 +242,7 @@ impl InitializationCoordinator {
         let blocked_phases = state
             .blockers
             .iter()
-            .map(|(phase, _)| *phase)
+            .map(|blocker| blocker.phase)
             .collect::<Vec<_>>();
         for phase in blocked_phases {
             state.phases.entry(phase).or_default().blocked += 1;
@@ -187,15 +250,18 @@ impl InitializationCoordinator {
         state.current_phase = state
             .blockers
             .iter()
-            .map(|(phase, _)| *phase)
+            .map(|blocker| blocker.phase)
             .chain(state.phases.keys().copied())
             .min();
         state.data_ready = state.current_phase.is_none();
         state.model_ready = false;
         state.model_phase_open = state.data_ready && !state.full_model_required;
-        let current_is_blocked = state
-            .current_phase
-            .is_some_and(|current| state.blockers.iter().any(|(phase, _)| *phase == current));
+        let current_is_blocked = state.current_phase.is_some_and(|current| {
+            state
+                .blockers
+                .iter()
+                .any(|blocker| blocker.phase == current)
+        });
         state.status = if current_is_blocked {
             InitializationStatus::Blocked
         } else if state.data_ready {
@@ -230,7 +296,7 @@ impl InitializationCoordinator {
             && !state
                 .blockers
                 .iter()
-                .any(|(blocked_phase, _)| *blocked_phase == phase)
+                .any(|blocker| blocker.phase == phase)
     }
 
     /// Recompute the active barrier from the queue after a row settles.  The
@@ -264,7 +330,7 @@ impl InitializationCoordinator {
         state.current_phase = state
             .current_phase
             .into_iter()
-            .chain(state.blockers.iter().map(|(phase, _)| *phase))
+            .chain(state.blockers.iter().map(|blocker| blocker.phase))
             .min();
         if state.current_phase != previous_phase {
             // A barrier transition is not complete merely because the current
@@ -273,10 +339,12 @@ impl InitializationCoordinator {
             state.status = InitializationStatus::Discovering;
             state.data_ready = false;
             state.needs_rescan = true;
-        } else if state
-            .current_phase
-            .is_some_and(|current| state.blockers.iter().any(|(phase, _)| *phase == current))
-        {
+        } else if state.current_phase.is_some_and(|current| {
+            state
+                .blockers
+                .iter()
+                .any(|blocker| blocker.phase == current)
+        }) {
             state.status = InitializationStatus::Blocked;
             state.data_ready = false;
         }
@@ -287,17 +355,20 @@ impl InitializationCoordinator {
         std::mem::take(&mut state.needs_rescan)
     }
 
-    pub fn mark_failed(&self, epoch_id: u64, phase: DataPhase, message: String) {
+    /// 相取自 `blocker` 自己：一条阻断的相与它的肇事者是同一件事的两半，分两个
+    /// 参数传就允许它们对不上。
+    pub fn mark_failed(&self, epoch_id: u64, blocker: PhaseBlocker) {
         let mut state = self.state();
         if epoch_id != state.epoch_id {
             return;
         }
+        let phase = blocker.phase;
         state.status = InitializationStatus::Blocked;
         state.current_phase = Some(phase);
         state.data_ready = false;
         state.model_ready = false;
         state.phases.entry(phase).or_default().failed += 1;
-        state.blockers.push((phase, message));
+        state.blockers.push(blocker);
     }
 
     pub fn set_shadowed(&self, epoch_id: u64, shadowed: Vec<String>) {
@@ -455,8 +526,9 @@ impl InitializationCoordinator {
             blockers: state
                 .blockers
                 .iter()
-                .map(|(phase, message)| format!("{}: {message}", phase.as_str()))
+                .map(PhaseBlocker::rendered)
                 .collect(),
+            blocked_by: state.blockers.clone(),
             shadowed: state.shadowed.clone(),
         }
     }
@@ -512,11 +584,53 @@ pub struct CatalogueCandidate {
     pub path: PathBuf,
 }
 
+/// [`select_catalogue_candidates`] 的一条阻断。
+///
+/// 它跨 DICT（meta 相）与 CATA（catalogue 相）复用，所以自己不知道相；相由调用方
+/// 在 [`Self::into_phase`] 时补上。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogueBlocker {
+    pub dbnum: Option<u32>,
+    pub project: Option<String>,
+    pub message: String,
+}
+
+impl CatalogueBlocker {
+    fn new(message: impl Into<String>) -> Self {
+        Self {
+            dbnum: None,
+            project: None,
+            message: message.into(),
+        }
+    }
+
+    fn with_dbnum(mut self, dbnum: u32) -> Self {
+        self.dbnum = Some(dbnum);
+        self
+    }
+
+    fn with_project(mut self, project: impl Into<String>) -> Self {
+        self.project = Some(project.into());
+        self
+    }
+
+    pub fn into_phase(self, phase: DataPhase) -> PhaseBlocker {
+        PhaseBlocker {
+            phase,
+            dbnum: self.dbnum,
+            project: self.project,
+            task_id: None,
+            reason_ref: None,
+            message: self.message,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CatalogueSelection {
     pub selected: Vec<CatalogueCandidate>,
     pub shadowed: Vec<CatalogueCandidate>,
-    pub blockers: Vec<String>,
+    pub blockers: Vec<CatalogueBlocker>,
 }
 
 /// Resolve the repository's naked-dbnum limitation before any observation is
@@ -546,11 +660,17 @@ pub fn select_catalogue_candidates(
     for (index, project) in priority.iter().enumerate() {
         let key = project.trim().to_ascii_lowercase();
         if key.is_empty() || !included.contains(&key) {
-            blockers.push(format!("catalogue_project_priority 含未知项目 {project:?}"));
+            blockers.push(
+                CatalogueBlocker::new(format!("catalogue_project_priority 含未知项目 {project:?}"))
+                    .with_project(project.clone()),
+            );
             continue;
         }
         if rank.insert(key.clone(), index).is_some() {
-            blockers.push(format!("catalogue_project_priority 重复项目 {project:?}"));
+            blockers.push(
+                CatalogueBlocker::new(format!("catalogue_project_priority 重复项目 {project:?}"))
+                    .with_project(project.clone()),
+            );
         }
     }
     // Offsets start past the explicit list so a named project always outranks an
@@ -572,10 +692,14 @@ pub fn select_catalogue_candidates(
         .filter_map(|candidate| {
             let project_key = candidate.project.trim().to_ascii_lowercase();
             if !included.contains(&project_key) {
-                blockers.push(format!(
-                    "元件库候选归属项目不在 included_projects: {} dbnum={}",
-                    candidate.project, candidate.dbnum
-                ));
+                blockers.push(
+                    CatalogueBlocker::new(format!(
+                        "元件库候选归属项目不在 included_projects: {} dbnum={}",
+                        candidate.project, candidate.dbnum
+                    ))
+                    .with_dbnum(candidate.dbnum)
+                    .with_project(candidate.project.clone()),
+                );
                 return None;
             }
             Some(candidate)
@@ -591,12 +715,17 @@ pub fn select_catalogue_candidates(
         }),
     );
     for mismatch in &collapsed.mismatches {
-        blockers.push(format!(
-            "CATA/DICT 文件名库号与文件头不一致: {} filename={} header={}",
-            mismatch.path.display(),
-            mismatch.filename_dbnum,
-            mismatch.header_dbnum
-        ));
+        // 两个号本来就对不上，挂哪个都是挑边。挂 header：`collapse_extract_families`
+        // 把它记进 `duplicate_keys` 用的就是 header，管线其余部分也按它认库。
+        blockers.push(
+            CatalogueBlocker::new(format!(
+                "CATA/DICT 文件名库号与文件头不一致: {} filename={} header={}",
+                mismatch.path.display(),
+                mismatch.filename_dbnum,
+                mismatch.header_dbnum
+            ))
+            .with_dbnum(mismatch.header_dbnum),
+        );
     }
     let mut by_path: HashMap<PathBuf, CatalogueCandidate> = included_candidates
         .into_iter()
@@ -620,12 +749,16 @@ pub fn select_catalogue_candidates(
             })
             .map(|candidate| candidate.path.display().to_string())
             .collect();
-        blockers.push(format!(
-            "项目 {} 内 CATA/DICT dbnum={} 有多个抽取或副本: {}",
-            key.0,
-            key.1,
-            paths.join(" / ")
-        ));
+        blockers.push(
+            CatalogueBlocker::new(format!(
+                "项目 {} 内 CATA/DICT dbnum={} 有多个抽取或副本: {}",
+                key.0,
+                key.1,
+                paths.join(" / ")
+            ))
+            .with_dbnum(key.1)
+            .with_project(key.0.clone()),
+        );
     }
     for sel in collapsed.selected {
         if collapsed
@@ -641,13 +774,17 @@ pub fn select_catalogue_candidates(
         if let Some(previous) =
             seen_project_dbnum.insert((project_key, candidate.dbnum), candidate.path.clone())
         {
-            blockers.push(format!(
-                "项目 {} 内 CATA/DICT dbnum={} 有多个文件: {} / {}",
-                candidate.project,
-                candidate.dbnum,
-                previous.display(),
-                candidate.path.display()
-            ));
+            blockers.push(
+                CatalogueBlocker::new(format!(
+                    "项目 {} 内 CATA/DICT dbnum={} 有多个文件: {} / {}",
+                    candidate.project,
+                    candidate.dbnum,
+                    previous.display(),
+                    candidate.path.display()
+                ))
+                .with_dbnum(candidate.dbnum)
+                .with_project(candidate.project.clone()),
+            );
         }
         by_dbnum.entry(candidate.dbnum).or_default().push(candidate);
     }
@@ -668,10 +805,13 @@ pub fn select_catalogue_candidates(
             .get(&group[0].project.trim().to_ascii_lowercase())
             .copied()
         else {
-            blockers.push(format!(
-                "跨项目 CATA/DICT dbnum={dbnum} 冲突，但候选归属项目名为空，\
-                 排不进 included_projects 顺序"
-            ));
+            blockers.push(
+                CatalogueBlocker::new(format!(
+                    "跨项目 CATA/DICT dbnum={dbnum} 冲突，但候选归属项目名为空，\
+                     排不进 included_projects 顺序"
+                ))
+                .with_dbnum(dbnum),
+            );
             continue;
         };
         let tied = group.iter().filter(|candidate| {
@@ -680,7 +820,10 @@ pub fn select_catalogue_candidates(
                 == Some(winner_rank)
         });
         if tied.count() != 1 {
-            blockers.push(format!("跨项目 CATA/DICT dbnum={dbnum} 优先级仍有歧义"));
+            blockers.push(
+                CatalogueBlocker::new(format!("跨项目 CATA/DICT dbnum={dbnum} 优先级仍有歧义"))
+                    .with_dbnum(dbnum),
+            );
             continue;
         }
         selected.push(group.remove(0));
@@ -745,7 +888,7 @@ mod tests {
             epoch,
             [DataPhase::Design],
             false,
-            [(DataPhase::Meta, "DICT unreadable".into())],
+            [PhaseBlocker::new(DataPhase::Meta, "DICT unreadable")],
         );
         assert!(!coordinator.allows(DataPhase::Design, epoch));
         assert_eq!(coordinator.snapshot().current_phase, Some("meta"));
@@ -759,7 +902,7 @@ mod tests {
             epoch,
             [DataPhase::Meta, DataPhase::Catalogue, DataPhase::Design],
             false,
-            [(DataPhase::Catalogue, "duplicate CATA".into())],
+            [PhaseBlocker::new(DataPhase::Catalogue, "duplicate CATA")],
         );
         assert!(coordinator.allows(DataPhase::Meta, epoch));
         assert!(!coordinator.allows(DataPhase::Catalogue, epoch));
@@ -906,10 +1049,11 @@ mod tests {
         );
         assert_eq!(result.blockers.len(), 1, "{:?}", result.blockers);
         assert!(
-            result.blockers[0].contains("含未知项目"),
+            result.blockers[0].message.contains("含未知项目"),
             "{:?}",
             result.blockers
         );
+        assert_eq!(result.blockers[0].project.as_deref(), Some("Typo"));
     }
 
     #[test]
@@ -945,6 +1089,9 @@ mod tests {
         );
         assert!(result.selected.is_empty());
         assert_eq!(result.blockers.len(), 1);
+        // 归属说得出来，被挡住的人才跳得过去（ISSUE-025 §三）。
+        assert_eq!(result.blockers[0].dbnum, Some(9990));
+        assert_eq!(result.blockers[0].project.as_deref(), Some("AMS"));
     }
 
     #[test]
@@ -966,5 +1113,62 @@ mod tests {
             result.shadowed,
             vec![candidate("ZDJ", 7200, "ZDJ000/zdj7210")]
         );
+    }
+
+    /// 8191 现场：meta 相被一个失败批次焊住，DESI 在屏障后面排着。快照要说得出
+    /// **是哪个库**挡的、去哪儿取它的全文原因，而不是只丢一句「被 meta 挡着」。
+    #[test]
+    fn a_failed_batch_names_its_culprit_in_the_snapshot() {
+        let coordinator = coordinator();
+        let epoch = coordinator.begin_discovery();
+        coordinator.install_manifest(epoch, [DataPhase::Meta, DataPhase::Design], false, []);
+        coordinator.mark_failed(
+            epoch,
+            PhaseBlocker::new(DataPhase::Meta, "读取增量数据失败: 打开 dabacon 冻结快照失败")
+                .with_dbnum(8191)
+                .with_project("JEU")
+                .with_task("db-20260827-114844-000000")
+                .with_failure_record("db-20260827-114844-000000"),
+        );
+
+        let snapshot = coordinator.snapshot();
+        assert_eq!(snapshot.current_phase, Some("meta"));
+        assert!(!coordinator.allows(DataPhase::Design, epoch));
+
+        let blocker = snapshot.blocked_by.first().expect("one blocker");
+        assert_eq!(blocker.phase, DataPhase::Meta);
+        assert_eq!(blocker.dbnum, Some(8191));
+        assert_eq!(blocker.project.as_deref(), Some("JEU"));
+        assert_eq!(
+            blocker.reason_ref.as_deref(),
+            Some("db-20260827-114844-000000")
+        );
+    }
+
+    /// 渲染串是旧消费者（`/health` 的 `blockers`、`InitializationNotReady` 的错误
+    /// 串）唯一读的东西，结构化不许把它的形状改掉。
+    #[test]
+    fn the_rendered_string_keeps_its_pre_structuring_shape() {
+        let coordinator = coordinator();
+        let epoch = coordinator.begin_discovery();
+        coordinator.install_manifest(
+            epoch,
+            [DataPhase::Design],
+            false,
+            [PhaseBlocker::new(DataPhase::Meta, "dbnum=8191 同号多文件").with_dbnum(8191)],
+        );
+        assert_eq!(
+            coordinator.snapshot().blockers,
+            vec!["meta: dbnum=8191 同号多文件".to_string()]
+        );
+    }
+
+    /// 扫描期的阻断没有任务，也就没有落盘的失败记录。`reason_ref` 这时必须为空
+    /// ——指向一条不存在的记录，比不给更费人时间。
+    #[test]
+    fn a_scan_time_blocker_points_at_no_failure_record() {
+        let blocker = CatalogueBlocker::new("目录清单不可读").into_phase(DataPhase::Meta);
+        assert_eq!(blocker.task_id, None);
+        assert_eq!(blocker.reason_ref, None);
     }
 }
