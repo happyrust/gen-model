@@ -49,7 +49,9 @@ target_refno: root.root.to_pdms_str(),      // "24381/100677"
 completed.contains(&job.target_refno)       // 恒 false
 ```
 
-这不是「有时候对不上」，是**每一个进合批路径的 regen 根百分之百对不上**。连锁反应：
+失配率取决于**行的来源**（见下面「已扫结果」第 1 条）：三条主要入队路径写的是斜杠，
+它们的行一个都配不上；只有启动覆盖回填那一条当时写的是下划线，它的行反而配得上。现场
+那 1462 个根落在前者。连锁反应：
 `settlements` 恒为空 → `clear_regen_work_batch` 没行可删 → `record_failure` 一次都不调 →
 `attempts` 永远 0 → `MAX_ATTEMPTS` 永远够不着 → 死信永远是空的。于是现场看到的是
 118 页 `page_claimed=100 / page_completed=0 / remaining=1462`、每一页任务都报 `succeeded`、
@@ -74,18 +76,33 @@ completed.contains(&job.target_refno)       // 恒 false
 这挡住了第二次事故，但它仍然是一个**靠自觉调用**的归一函数：新写一处比较、或者在别的
 文件里跨同一条边界，编译器不会拦。守卫断言只覆盖 `run_regen_group` 一个函数体。
 
-### 影响范围（待逐处核）
+### 影响范围（2026-08-27 已逐处扫过）
 
-跨「生成器报告 ↔ 队列行 ↔ record id」边界的地方都在名单上，至少：
+跨「生成器报告 ↔ 队列行 ↔ record id」边界的地方全部过了一遍，**又找到一处已经在错的**：
 
-- `model_update_pending.rs`：`run_regen_group` 的四处比较（已归一）、`settle_unechoed_roots`
-  的过滤（已归一）、`busy_roots`／`skip_generation`／`roots` 三个集合（两侧同为队列拼法，
-  当前一致，但没有任何机制保证它继续一致）；
-- `verify_repair_jobs_page` 与 `required_panels`（面板 refno 走的是同一套 `to_pdms_str`）；
-- `increment_pipeline.rs` 里生成 `target_refno` 的各处 `to_pdms_str()`；
-- `room_model` 的房间任务寻址（ADR-010 §7 说它本来就按 `(action, target)` 寻址）；
-- HTTP 面：`retry_pending_unit` / `current_regen_revision` 的入参由人手输入，两种拼法都可能
-  被打进来。
+1. 🔴 **`sync_and_seed_model_coverage`（`:1422`）写进 `target_refno` 的是下划线**——
+   `pe_thing_to_refno(..).to_string()` 是 `RefnoEnum` 的 `Display`，而增量（`:561`）、
+   房间（`:591`）、级联（`:1787`）、按需生成（`on_demand_model.rs:100`）四条路都用
+   `to_pdms_str()` 的斜杠。`record_id_of` 折斜杠为下划线，两种拼法算出同一个 record id，
+   `render_upsert` 又是 `UPSERT {id} SET … target_refno = '…'`，所以它们**抢同一行**：
+   不长重复行，但字段值取决于最后一个 upsert 的人。代价落在精确查这个字段的两处——
+   `staged_settlement_revision`（`batch_worker.rs:2963`）经 `current_regen_revision` 查
+   `target_refno = '<斜杠>'`，撞上下划线行就命中零行、返回 `Ok(None)`，与「本来就没有
+   这行」无从区分，于是本窗口跳过收口、那个根在空闲轮里被重生成一遍，而只有 `Err`
+   那一支会 warn；`retry_pending_unit` 同样按精确字段寻址，拼法不对读起来就是 404。
+   **已修**：`eef945bf`（统一成斜杠 + 前提断言 + 源码守卫）。库里已存的行不迁移，
+   `record_id_of` 归一保证下次入队会改写字段，从此不再被入队的行仍是旧拼法。
+2. ✅ `verify_repair_jobs_page` / `verify_required_panel_geometry`：`available` 与
+   `required_now` 两侧同为 `to_pdms_str()`，且 `registered_required_panels` 先过
+   `RefU64::from_str` 解析（两种拼法都吃）。一致。
+3. ✅ `increment_pipeline.rs`：读侧一律 `RefnoEnum::from(unit.root_refno.as_str())` 先解析，
+   写侧一律 `to_pdms_str()`。一致。
+4. ✅ 房间任务寻址：`to_pdms_str()`，与 ADR-010 §7 的 `(action, target)` 口径一致。
+5. ✅ `record_id_of` 的两个调用点（`:287`、`:2998`）：都过归一，拼法无关。
+6. ✅ `run_regen_group` 内的 `busy_roots` / `skip_generation` / `roots` 三个集合：两侧同为
+   队列拼法。当前一致——但**没有任何机制保证它继续一致**，这正是本 issue 要根治的形态。
+7. ⚠️ HTTP 面 `retry_pending_unit` / `current_regen_revision` 的入参由人手打进来，两种拼法
+   都可能出现。第 1 条修完后行里只会存斜杠，暴露面收窄，但类型上仍然挡不住。
 
 ## 🛠️ 解决方案
 
@@ -146,7 +163,9 @@ impl RootKey {
 
 ### 立即行动
 
-- [ ] 逐处核上面「影响范围」名单，确认还有没有第三处已经在错的比较
+- [x] 逐处核上面「影响范围」名单（2026-08-27）：扫出第三处已经在错的（覆盖回填写的是
+      下划线拼法），已修于 `eef945bf`；其余五处当前一致，第 6、7 条只是「碰巧一致」，
+      没有机制保证
 - [ ] `RootKey` 落地，先只在 `model_update_pending` ↔ `occ_generate` 这条边界上换掉
 - [ ] 换完删掉 `root_identity_key` 与它那条调用点守卫断言（类型接管之后它们是死重）
 
