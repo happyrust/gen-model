@@ -95,6 +95,23 @@ v_ip = "localhost"
 v_port = 8009
 v_user = "root"
 v_password = "root"
+
+#【新增 2026-08-27】in_memory_db —— 调试用，默认不写 = 连上面那台 SurrealDB
+# true：持久层换成**进程内嵌的 kv-mem 引擎**，上面 v_ip / v_port / v_user /
+#       v_password 整个不再使用。初始化解析、增量窗口写回、模型与房间派生数据
+#       全部照原路走，只是落点从 rocksdb 变成内存——SUL_DB 是 Surreal<Any>，
+#       引擎选择对上层不可见，没有第二条代码路径。
+# 【这是非正常运行状态】两条代价都不可逆：
+#   1. 进程一退整库就没了，崩溃现场只剩日志，事后取证做不了；
+#   2. 库在进程内，外面没有端口可连——rvm_verify、/sql 探针、Capture-*Evidence.ps1
+#      这类靠 ws 连库的工具全部够不着。
+# 要留证据或要让别的进程读库，用部署脚本的 -InMemory（外部 surreal 进程换 memory
+# 后端，端口还在），别用这个键。
+# 管不到的东西：assets/meshes 与 accel_tree 快照仍然落盘，那是 aios-database 自己
+# 写的派生数据；空间树启动判据照旧按库侧指纹裁决，空库会走重建。
+# 环境变量 AIOS_IN_MEMORY_DB 压过本键（取值规则同 AIOS_STARTUP_AUTORUN）。
+# /health 有 in_memory_db 栏，启动横幅也会点名。
+# in_memory_db = true
 pe_chunk = 300
 att_chunk = 200
 

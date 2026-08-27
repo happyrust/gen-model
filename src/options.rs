@@ -115,6 +115,11 @@ pub struct DbOptionExt {
     pub model_root_inflight_max: Option<usize>,
     #[serde(default)]
     pub model_full_rebuild_enabled: Option<bool>,
+
+    /// 持久层换成进程内嵌的 kv-mem 引擎（默认 `false` = 连 `v_ip:v_port` 的
+    /// SurrealDB 服务）。详见 [`in_memory_db`]。
+    #[serde(default)]
+    pub in_memory_db: Option<bool>,
 }
 
 impl Deref for DbOptionExt {
@@ -157,6 +162,7 @@ impl From<DbOption> for DbOptionExt {
             model_regen_execution_group: None,
             model_root_inflight_max: None,
             model_full_rebuild_enabled: None,
+            in_memory_db: None,
         }
     }
 }
@@ -213,6 +219,8 @@ struct DbOptionExtFields {
     model_root_inflight_max: Option<usize>,
     #[serde(default)]
     model_full_rebuild_enabled: Option<bool>,
+    #[serde(default)]
+    in_memory_db: Option<bool>,
 }
 
 /// 读一次 `DbOption` 的扩展字段，把三种结局分开——它们要求的处置完全不同。
@@ -383,6 +391,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_regen_execution_group: ext.model_regen_execution_group,
         model_root_inflight_max: ext.model_root_inflight_max,
         model_full_rebuild_enabled: ext.model_full_rebuild_enabled,
+        in_memory_db: ext.in_memory_db,
     }
 }
 
@@ -450,6 +459,38 @@ pub fn model_root_inflight_max() -> usize {
 
 pub fn model_full_rebuild_enabled() -> bool {
     load_ext_fields().model_full_rebuild_enabled.unwrap_or(true)
+}
+
+/// 环境变量名：一次性覆盖 [`in_memory_db`]，不必改配置文件。
+pub const IN_MEMORY_DB_ENV: &str = "AIOS_IN_MEMORY_DB";
+
+/// 持久层用进程内嵌的 kv-mem 引擎，而不是 `v_ip:v_port` 那台 SurrealDB
+/// （`DbOption.toml` 的 `in_memory_db`，**默认 false**）。
+///
+/// 换掉的只是介质：`SUL_DB` 是 `Surreal<Any>`，引擎选择对上层不可见，因此初始化
+/// 解析、增量窗口写回、模型与房间派生数据全部照原路走，只是落在 kv-mem 而不是
+/// rocksdb。ADR-017 的暂存窗口本来就是 `mem://`，开着这个开关之后写回目标也成了
+/// mem——两者仍是两个独立实例，窗口语义（journal、分块重放、水位发布）一个字
+/// 都没变。
+///
+/// **代价有两条，都不可逆**：进程一退整库就没了，崩溃现场只剩日志；而且库进了
+/// 进程内，外面没有端口可连，`rvm_verify`、`/sql` 探针、`Capture-*Evidence.ps1`
+/// 这类靠 ws 连库的工具全部够不着。要留证据或要让别的进程读库，就别开——那时
+/// 该用的是部署脚本的 `-InMemory`（外部 surreal 进程换 memory 后端，端口还在）。
+///
+/// 环境变量 [`IN_MEMORY_DB_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
+pub fn in_memory_db() -> bool {
+    effective_in_memory_db(
+        load_ext_fields().in_memory_db,
+        std::env::var(IN_MEMORY_DB_ENV).ok().as_deref(),
+    )
+}
+
+fn effective_in_memory_db(configured: Option<bool>, env_override: Option<&str>) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(false)
 }
 
 /// 配置里的增量监听限定域（`DbOption.toml` 的 `watch_dbnums`，**默认空 = 全范围**）。
@@ -918,6 +959,27 @@ mod tests {
         assert!(effective_incremental_stage(Some(true), Some("ture")));
         assert!(!effective_incremental_stage(Some(false), Some("ture")));
         assert!(effective_incremental_stage(None, Some("ture")));
+    }
+
+    /// 缺配置就是连外部 SurrealDB。内存模式会把整库关进进程里，进程一退就没了，
+    /// 外部工具也连不上——这种取舍不能靠「没写就当开」拿到。
+    #[test]
+    fn the_persistent_store_stays_external_unless_someone_asks_for_memory() {
+        assert!(!effective_in_memory_db(None, None));
+        assert!(effective_in_memory_db(Some(true), None));
+        assert!(!effective_in_memory_db(Some(false), None));
+    }
+
+    /// 两个方向都要能压：配置里写死内存模式的调试部署，也得有办法这一次跑回
+    /// 外部库去留证据。拼错的值退回配置值，理由同 [`effective_startup_autorun`]。
+    #[test]
+    fn the_in_memory_db_env_override_wins_in_both_directions() {
+        assert!(effective_in_memory_db(Some(false), Some("on")));
+        assert!(!effective_in_memory_db(Some(true), Some("0")));
+        assert!(effective_in_memory_db(None, Some("yes")));
+        assert!(effective_in_memory_db(Some(true), Some("ture")));
+        assert!(!effective_in_memory_db(Some(false), Some("ture")));
+        assert!(!effective_in_memory_db(None, Some("ture")));
     }
 
     /// 缺配置就是「算增量房间」（2026-08-12 起）：关着时房间归属只在删除路径被

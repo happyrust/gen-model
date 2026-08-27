@@ -182,8 +182,7 @@ pub fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()>
 #[cfg(test)]
 mod process_instance_lock_tests {
     use super::{
-        open_advisory_process_instance_lock, open_process_instance_lock,
-        process_instance_lock_path,
+        open_advisory_process_instance_lock, open_process_instance_lock, process_instance_lock_path,
     };
 
     #[test]
@@ -303,8 +302,8 @@ pub mod team_data;
 
 pub mod graph_db;
 pub mod noun_layout;
-pub mod uda_table;
 pub mod test;
+pub mod uda_table;
 
 // RVM 基准对拍。注意与同名但无关的 `src/rvm/`（PDMS 元素遍历）区分。
 #[cfg(feature = "rvm_verify")]
@@ -808,8 +807,22 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
                         format!("status_error:{error:#}"),
                     ),
                 };
+                // 「数字不变就退到 300 秒一行」这条退避在卡死时是反的：越卡越安静。
+                // 2026-08-27 现场前 19 分钟每 60 秒一行，真卡住之后反而变成 300 秒一行。
+                // 页级停滞一旦确认，就按 60 秒照常出声，并把停滞页数带上。
+                let starved =
+                    crate::data_interface::model_update_pending::model_drain_page_starved();
+                let message = if starved {
+                    format!(
+                        "{message}；模型页已连续 {} 页整页认领、零收口——这不是慢是收不掉，\
+                         看日志里点名的根与 /health 的 blocking_conditions",
+                        crate::data_interface::model_update_pending::model_drain_starved_pages()
+                    )
+                } else {
+                    message
+                };
                 let changed = last_wait_fingerprint.as_deref() != Some(fingerprint.as_str());
-                if changed || waited_secs.saturating_sub(last_wait_emitted_secs) >= 300 {
+                if starved || changed || waited_secs.saturating_sub(last_wait_emitted_secs) >= 300 {
                     println!("{message}");
                     last_wait_fingerprint = Some(fingerprint);
                     last_wait_emitted_secs = waited_secs;
@@ -922,6 +935,14 @@ fn print_startup_complete_banner(db_option: &DbOption, sync_live: bool, started:
     if let Some(notice) = crate::data_interface::watch_scope::mode_notice() {
         println!("  *** {notice}");
     }
+    if crate::options::in_memory_db() {
+        println!(
+            "  *** 内存模式（in_memory_db）：持久层是进程内嵌 kv-mem，进程一退整库即消失，\
+             外部无端口可连"
+        );
+    } else {
+        println!("  存储介质：{}", db_option.get_version_db_conn_str());
+    }
     #[cfg(feature = "http_api")]
     {
         let ext = crate::get_db_option_ext();
@@ -935,6 +956,43 @@ fn print_startup_complete_banner(db_option: &DbOption, sync_live: bool, started:
         println!("sync_live=false：不进文件监听，增量只能由 HTTP preview/execute 手动触发。");
     }
     println!("{RULE}");
+}
+
+/// 把进程全局 `SUL_DB` 接到进程内嵌的 kv-mem 引擎上（[`options::in_memory_db`]）。
+///
+/// 换掉的只是介质。`SUL_DB` 是 `Surreal<Any>`，引擎选择对调用方不可见，所以初始化
+/// 解析、增量窗口写回、模型与房间派生数据全部走原来那条路，只是落点从 rocksdb 变成
+/// kv-mem。ADR-017 的暂存窗口本来就各自占一个 `mem://` 实例，这里连的是**另一个**
+/// 实例：窗口与持久层仍是两个库，journal 分块重放与水位发布一个字都没改。
+///
+/// 嵌入式引擎没有认证面，因此不 `signin`——对着它调 `Root` 登录会直接失败。
+/// 命名空间与库名仍取配置里的那一对，让同一份 `DbOption.toml` 在两种介质下指向
+/// 同一个逻辑库。
+///
+/// 函数集在这里先灌一遍，与 ws 路径的 `init_surreal` 对齐：`run_app` 到 `run_cli`
+/// 之间还有清理与空间树装载要跑。灌不动不在这里定罪——`run_cli` 随后会用磁盘脚本
+/// 加内置快照再灌一遍并自检，那才是权威的那道门。
+#[cfg(feature = "ws")]
+async fn connect_in_memory_store(db_option: &DbOption) -> anyhow::Result<()> {
+    SUL_DB.connect("mem://").with_capacity(1000).await?;
+    SUL_DB
+        .use_ns(&db_option.surreal_ns)
+        .use_db(&db_option.project_name)
+        .await?;
+    if let Err(error) = aios_core::function::define_common_functions().await {
+        eprintln!("内存库预装磁盘 surql 函数未成（{error:#}），等 run_cli 的内置快照兜底");
+    }
+    println!(
+        "*** 内存模式：持久层是进程内嵌 kv-mem，ns={} db={}（未连 {}）",
+        db_option.surreal_ns,
+        db_option.project_name,
+        db_option.get_version_db_conn_str()
+    );
+    println!(
+        "*** 进程一退整库即消失，外部没有端口可连（rvm_verify / /sql 探针 / \
+         Capture-*Evidence 都够不着）。要留证据请关掉 in_memory_db。"
+    );
+    Ok(())
 }
 
 /// 运行app
@@ -963,16 +1021,22 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     println!("数据库连接中...");
     #[cfg(feature = "ws")]
     {
-        match init_surreal().await {
-            Ok(_) => {
-                println!(
-                    "数据库已经连接到 {}, 站点: {}",
-                    db_option.project_name,
-                    db_option.get_version_db_conn_str()
-                );
-            }
-            Err(e) => {
-                dbg!(&e.to_string());
+        // 内存模式换掉的只是介质：下面这条 ws 连接与它连的那台服务器整个不出现，
+        // 持久层改为进程内嵌 kv-mem，其余每一步照原样跑。
+        if crate::options::in_memory_db() {
+            connect_in_memory_store(&db_option).await?;
+        } else {
+            match init_surreal().await {
+                Ok(_) => {
+                    println!(
+                        "数据库已经连接到 {}, 站点: {}",
+                        db_option.project_name,
+                        db_option.get_version_db_conn_str()
+                    );
+                }
+                Err(e) => {
+                    dbg!(&e.to_string());
+                }
             }
         }
     }
@@ -1113,9 +1177,7 @@ mod startup_room_build_gate_tests {
             .expect("run_cli end exists")
             .0;
         let resolved = body.find(".init_mdb(").expect("启动链必须解一次 MDB");
-        let shared = body
-            .find("Arc::new(manager)")
-            .expect("manager 随后进 Arc");
+        let shared = body.find("Arc::new(manager)").expect("manager 随后进 Arc");
         assert!(
             resolved < shared,
             "init_mdb 要 &mut self，进 Arc 之后就没机会了"
