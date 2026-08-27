@@ -6,6 +6,36 @@
 **没有"最近通过"记录的用例视同未验资产**——本台账是唯一事实来源，动过 live 用例或
 点亮新批次必须同步更新。
 
+**2026-08-27 八条 mesh 级 RVM 对拍复验通过（8 passed / 0 failed，44.1s）**：同库同跑法
+（live 8009 = `.surreal/ams-rvm-rebuild-20260824`，config `db_options/DbOption-rvm-rebuild`，
+`cargo test --lib --no-default-features --features ws,gen_model,manifold,project_hd,rvm_verify mesh_ -- --ignored --nocapture --test-threads=1`）。
+GWALL 三个可归因读数与 08-25 复跑**逐位相同**（105828 p95=0.1 / 105880 p95=8.9 /
+116569 p95=137.3；union both mean/p95/hausdorff = 4.75 / 5.33 / 647.09），STWALL 四堵仍
+全 0.00，C-OR 整段 union 9/9 `both mean=0.69 p95=1.50 hausdorff=18.67`，C-IY 35/35
+`both mean=11.01 p95=98.01 hausdorff=111.62`（gen→rvm 0.74 / 3.62 / 24.99，大头在
+rvm→gen 那一侧，与墙上「E3D 侧附加几何」同类）。自 08-25 以来落地的改动（属性表换成
+描述符权威表等）没有动到几何。日志 `output/rvm-verify/20260827-162112/mesh-compare.log`。
+
+同轮补上 08-24 通告点名要的那条下限：`mesh_pipe_surface_distance` 此前**一条断言都
+没有**，每条失败路径都是 `continue`——库里一件生成几何都没有时它照样报绿（08-24 那个
+「1 passed」就是这么来的）。现在结尾断言九件件件量到、跳过谁点谁的名，复跑 5.00s 通过。
+顺带把这条门的口径限制写进注释：C-OR 九件在 **E3D 侧全是 12 三角**，两个 BEND 也一样
+（gen 侧 618 / 908 三角），所以它量的是「gen 细网格贴不贴 E3D 粗替身」，量不到真实弯头
+形状；弯头的可信判据在整段 union 上。
+
+**2026-08-27 模型队列整页空转的根因已定位并 live 收口**：生成器回报的根
+（`24381_100817`，经 `RefnoEnum` 的 `Display`）与队列行的 `target_refno`
+（`24381/100817`，E3D 写法）拼法不一致，字符串直接比一次都不会相等——于是整页根
+既进不了收口集合、也配不上失败名单，队列行原样留着被无限重认领而 `attempts` 一次
+不涨。`live_bran_pending_is_actually_regenerated` 一比一复现了这个形状。归一后
+@8019 六条全绿：BRAN 18.44s / HANG 15.98s / ZONE-EQUI 12.82s /
+`live_generation_failure_keeps_pending_and_watermark` 2.48s /
+`live_failed_queue_cleanup_does_not_stall_the_rest` 2.73s /
+`live_non_regen_drain_consumes_the_whole_queue` 6.36s。跑通前先把沙箱自 08-25 攒下的
+2256 行房间积压清到 0（20 轮，面板 32/轮、元素 256/轮，「面板先于元素」的让位在
+前 13 轮上元素数一动不动，直接可见）。证据
+`docs/evidence/2026-08-27-model-drain-root-key-mismatch.md`。
+
 **2026-08-25 AMS 7997 初始化模型有界消费（待隔离 live 收口）**：已锁定
 数据基线 170046 条 PE、水位 106 之后，18674 条 `regen_root` 被无界 drain
 合成单任务、`units_done=0` 的回归。离线实现固定 Regen 100 / AABB 256 页、
@@ -128,7 +158,8 @@ cargo test --lib --no-default-features --features ws,gen_model,manifold,project_
 >
 > **顺带**：那唯一的 1 passed 是 `mesh_pipe_surface_distance`——它是取证型不硬断言，
 > 构件拿不到网格就 `continue`，在一件都没量到的库上照样报绿。它自己也需要一条
-> 「什么都没量到就红」的下限。
+> 「什么都没量到就红」的下限。**2026-08-27 已补**：结尾断言九件件件量到，跳过谁点谁
+> 的名（见本文顶部 08-27 条）。
 
 **2026-08-25 八条 mesh 级对拍无 occ 口径重新取证**：`rvm_baseline::mesh_compare::mesh_wall_live::*`
 八条（live 8009 = `.surreal/ams-rvm-rebuild-20260824`，config `db_options/DbOption-rvm-rebuild`；
@@ -324,9 +355,9 @@ cargo test --lib --features http_api <测试名> -- --ignored --exact --nocaptur
 | `live_blocked_observation_keeps_the_verdict_evidence_intact` | dbnum_state.rs:1500 | 魔术 dbnum | 2026-08-12 批次1 @8019 | **通过**（3.4s） |
 | `live_finalize_is_crash_safe_and_idempotent` | model_update_pending.rs:4326 | 魔术 dbnum | 2026-08-12 批次1 @8019 | **通过**（3.4s） |
 | `live_os_kill_preserves_prepared_attempt` | model_update_pending.rs:4410 | 魔术 dbnum + 杀助手进程 | 2026-08-12 批次1 @8019 | **通过**（5.8s） |
-| `live_non_regen_drain_consumes_the_whole_queue` | model_update_pending.rs:4525 | 魔术 dbnum | 2026-08-12 批次1 @8019 | **通过**（11s） |
-| `live_failed_queue_cleanup_does_not_stall_the_rest` | model_update_pending.rs:4590 | 魔术 dbnum | 2026-08-12 批次1 @8019 | **通过**（4.1s） |
-| `live_generation_failure_keeps_pending_and_watermark` | model_update_pending.rs:4661 | 魔术 dbnum；**前置：目标库 regen 积压已出清**（drain 会先消化整个存量队列） | 2026-08-13 B0 @8019 | **通过**（145.2s，B0 出清后；先消化了 48 个顽固重试再跑自身场景） |
+| `live_non_regen_drain_consumes_the_whole_queue` | model_update_pending.rs:4525 | 魔术 dbnum | 2026-08-27 @8019 | **复验通过**（6.36s；根键归一后重跑，见 `docs/evidence/2026-08-27-model-drain-root-key-mismatch.md`）。2026-08-12 批次1 首次点亮（11s）。 |
+| `live_failed_queue_cleanup_does_not_stall_the_rest` | model_update_pending.rs:4590 | 魔术 dbnum | 2026-08-27 @8019 | **复验通过**（2.73s；钉的是审计 C2 那条路——`settlements` 先并进 `disposed`，再做未回报清扫）。2026-08-12 批次1 首次点亮（4.1s）。 |
+| `live_generation_failure_keeps_pending_and_watermark` | model_update_pending.rs:4661 | 魔术 dbnum；**前置：目标库 regen 积压已出清**（drain 会先消化整个存量队列） | 2026-08-27 @8019 | **复验通过**（2.48s；队列清零后跑，不必再陪整个存量）。2026-08-13 B0 首次点亮（145.2s，先消化了 48 个顽固重试）。 |
 | `live_incomplete_room_panels_enqueue_targeted_repairs` | model_update_pending.rs:5351 | **数据依赖：库里须有缺陷面板**（探针型，改归 B 组口径） | 2026-08-19 @8019 | **前置阻断复现**：当前 testbed 缺陷面板计数为 0，目标修复队列未入行；日志 `output/live-batch/remaining-room-and-panel-20260819-083240/01-live_incomplete_room_panels_enqueue_targeted_repairs.log` |
 | `live_finalize_capacity_is_atomic_and_idempotent` | model_update_pending.rs:5038 | 5k+5k 容量验证 | 2026-08-12 批次1 @8019 | **通过**（12.2s） |
 | `resolves_the_real_mdb_declaration` | update_scope.rs:358 | SYS meta 已解析（`execute_manual` 引导一遍）；精确计数走 `AIOS_EXPECT_DESI_COUNT` | 2026-08-13 B1重测 @8019 | **通过**（3.2s；断言已拆结构层+计数层，testbed /ALL 同样解出 29 个 DESI，`AIOS_EXPECT_DESI_COUNT=29` 全绿） |
@@ -377,10 +408,10 @@ ams8000 世代）+ 长跑专项 1（manual_update 二遍）+ 未跑 4（room mes
 | `live_projams_real_attribute_sessions_plan_and_execute_distinctly` | 历史位置 model_update_plan.rs:1945 | **一份本机不存在的 ams8000 世代**（见批次 2 补测段） | 2026-08-19 @8019 | **现行源码已退役**：按全名执行匹配 0 项；保留本行作为历史数据绑定记录，不计当前可执行用例 |
 | `live_projams_nested_created_routes_and_generates_delivery_roots` | 历史位置 model_update_plan.rs:2119 | 同上 | 2026-08-19 @8019 | **现行源码已退役**：按全名执行匹配 0 项；原 sesno 21/GENSEC 数据绑定记录保留 |
 | `live_projams_negative_geometry_change_regenerates_owning_equi` | model_update_plan.rs:2205 | NCYL 负几何 EQUI | 2026-08-13 B2 @8019 | **通过**（5.1s；BREP 缺陷不影响其目标 EQUI） |
-| `live_bran_pending_is_actually_regenerated` | model_update_pending.rs:4805 | 既有 BRAN + CATA 闭包在位 | 2026-08-13 补测 @8019 | **通过**（15.9s；闭包收集器 object::values 修复后 SPRE→23274 规格按需入店，子树出模型） |
-| `live_hang_pending_is_actually_regenerated` | model_update_pending.rs:4852 | 既有 HANG + CATA 闭包在位 | 2026-08-13 补测 @8019 | **通过**（10.9s） |
+| `live_bran_pending_is_actually_regenerated` | model_update_pending.rs:4805 | 既有 BRAN + CATA 闭包在位；**前置：目标库房间积压已出清**（`drain` 一轮跑四段，房间那段消化多少都算进同一个返回值，`assert_eq!(…, 1)` 只在队列此外为空时成立） | 2026-08-27 @8019 | **复验通过**（18.44s）。同日先用它复现出生成器回报与队列行的根键拼法不一致（`24381_100817` vs `24381/100817`）——整页根既收不了口也记不上失败，正是 2026-08-27 现场 1462 个根空转 50 分钟的成因；归一后该根的队列行确实被删除。跑通前先把沙箱自 08-25 攒下的 2256 行房间积压清到 0（20 轮，面板 32/轮、元素 256/轮，与页大小逐字对得上）。证据 `docs/evidence/2026-08-27-model-drain-root-key-mismatch.md`。 |
+| `live_hang_pending_is_actually_regenerated` | model_update_pending.rs:4852 | 既有 HANG + CATA 闭包在位 | 2026-08-27 @8019 | **复验通过**（15.98s；根键归一后同批复跑）。2026-08-13 补测首次点亮（10.9s）。 |
 | `live_suppo_pending_is_actually_regenerated` | model_update_pending.rs:5269 | SUPPO `24384/25725` | 2026-08-19 @8019 | **前置阻断复现**：夹具查询得到 `None`，期望 `Some("SUPPO")`；该 SUPPO 世代仍不在当前文件与店中；日志 `output/live-batch/remaining-b-data-bound-20260819-083041/03-live_suppo_pending_is_actually_regenerated.log` |
-| `live_zone_owned_equi_pending_is_actually_regenerated` | model_update_pending.rs:4870 | 既有 ZONE-owned EQUI；空间树就绪 | 2026-08-13 重测2 @8019 | **通过**（10.5s，空间门前置修复后点亮） |
+| `live_zone_owned_equi_pending_is_actually_regenerated` | model_update_pending.rs:4870 | 既有 ZONE-owned EQUI；空间树就绪 | 2026-08-27 @8019 | **复验通过**（12.82s；根键归一后同批复跑）。2026-08-13 重测2 首次点亮（10.5s，空间门前置修复后）。 |
 | `live_shared_spco_cascade_regenerates_every_consumer` | model_update_pending.rs:4957 | SPCO `23274/295504`（规格行按需入店）；自足重建 ref_rev | 2026-08-13 补测 @8019 | **通过**（钉死 1+67 拆为动态口径：先用同一展开器算本店切面根数再对 drain；两个并行实例互扰下仍全绿） |
 | `live_generates_a_missing_model` | on_demand_model.rs:447 | `AIOS_ON_DEMAND_TEST_REFNO=24384/24777`（先删该行 `inst_relate` 走真缺失恢复） | 2026-08-13 重测 @8019 | **通过**（4.2s，BOX 按需再生） |
 | `test_cal_rooms` | room_model.rs:33 | 房间 mesh 在位 | 2026-08-19 @8019 | **修订后通过**（227.06s）：空间树验真后从库指针重建 42343 条，识别 214 间房/229 块面板，写入 41370 条成员边；旧 124/147 硬编码改为非空门，精确切面可用 `AIOS_EXPECT_ROOM_COUNT` / `AIOS_EXPECT_ROOM_PANEL_COUNT` 钉住；日志 `output/live-batch/room-count-live-fix-20260819-084920/rerun2.log` |

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-`aios-database` —— 把 AVEVA E3D / PDMS 的 dabacon 库**增量**解析进 SurrealDB，并据此增量生成 / 更新三维几何的 Rust 服务；可选 axum REST+WebSocket 接口（feature `http_api`）与 PyO3 调试绑定（`python/`）。
+`aios-database` —— 把 AVEVA E3D / PDMS 的 dabacon 库**增量**解析进 SurrealDB，并据此增量生成 / 更新三维几何的 Rust 服务；axum REST+WebSocket 接口（feature `http_api`，已在 default 内，是否监听由 `DbOption.toml` 的 `http_api_addr` 决定）与 PyO3 调试绑定（`python/`）。
 
 Rust edition 2024，**必须用 nightly**（`.cargo/config.toml` 带 `-Z threads=8`，源码用了 `#![feature(...)]`）；主库是 fork 版 SurrealDB 2.1.4；开发机是 Windows / PowerShell。
 
@@ -43,12 +43,12 @@ staging、side effect、worker、health 和最终文件重开，不能停在 E3D
 | 场景 | 命令 |
 |---|---|
 | 装工具链 | `rustup toolchain install nightly-2026-08-02 --profile minimal; rustup default nightly-2026-08-02` |
-| Release 构建（CI 口径） | `cargo build --release --locked --bin aios-database --no-default-features --features ws,gen_model,manifold,project_hd,http_api` |
+| Release 构建（CI 口径） | `cargo build --release --locked --bin aios-database`（default 即 `ws,gen_model,manifold,project_hd,http_api`，与 CI 的显式清单一致） |
 | CentOS 7 交叉编译 | `cargo zigbuild --release --target x86_64-unknown-linux-gnu.2.17` |
 | 快速质量门 | `cargo check` |
-| 单测（CI 口径） | `cargo test --locked --lib <测试名> --no-default-features --features ws,gen_model,manifold,project_hd -- --nocapture` |
+| 单测（CI 口径） | `cargo test --locked --lib <测试名> -- --nocapture`（default 已含 `http_api`，web_service 的测试从此一起跑） |
 | 集成测试（CI 跑这四个） | 同上，把 `--lib <测试名>` 换成 `--test db8000_two_delete_fixture` / `db_session_fixture_selfcheck` / `db8000_session_pairs` / `pdms_record_boundary` |
-| 单条 live 用例 | `$env:DB_OPTION_FILE = 'python/testbed/DbOption-pytest'` 然后 `cargo test --lib --features http_api <测试名> -- --ignored --exact --nocapture` |
+| 单条 live 用例 | `$env:DB_OPTION_FILE = 'python/testbed/DbOption-pytest'` 然后 `cargo test --lib <测试名> -- --ignored --exact --nocapture` |
 | 批量 live | `powershell -File scripts\Run-LiveBatch.ps1 -Manifest scripts\live-batches\<批次>.json` |
 | 纯 Python 用例 | `python -m unittest discover -s tests/python -p "test_*.py" -v` |
 | 装绑定（日常调试） | `cd python; uv venv .venv; uv pip install maturin --python .venv; $env:VIRTUAL_ENV = (Resolve-Path .venv).Path; .venv\Scripts\maturin.exe develop` |
