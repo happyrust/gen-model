@@ -1,0 +1,2495 @@
+{
+  "meta": {
+    "version": 2,
+    "dbnum": 8000,
+    "root_name": "/1RX03-MSUP-E0110-V1",
+    "rvm_file": "test_data/rvm/1RX03-MSUP-E0110.rvm",
+    "att_files": [],
+    "imported_at": "2026-08-27 16:28:52",
+    "member_count": 51,
+    "geometry_count": 41,
+    "resolved": 1,
+    "unresolved": 50,
+    "export_scope": "narrow",
+    "geo_type_counts": {
+      "Primitive": 41
+    },
+    "degenerate_bbox_count": 41
+  },
+  "members": [
+    {
+      "path": "/AMS/1RX03-PIPEBJ",
+      "name": "/1RX03-PIPEBJ",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 5946462735302882362,
+      "parent_stable_id": null,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP",
+      "name": "/1RX03-MSUP",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 5433336077671764957,
+      "parent_stable_id": 5946462735302882362,
+      "translation_mm": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110",
+      "name": "/1RX03-MSUP-E0110",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 13507818395803114580,
+      "parent_stable_id": 5433336077671764957,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1",
+      "name": "/1RX03-MSUP-E0110-FRMW1",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 5304328553233075093,
+      "parent_stable_id": 13507818395803114580,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-BAR-1",
+      "name": "/1RX03-MSUP-E0110-BAR-1",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 9744904995347046070,
+      "parent_stable_id": 5304328553233075093,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 680.0
+          },
+          "transform": {
+            "matrix3": [
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.000906307774130255,
+              -0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -21012.68768310547,
+              -8390.676498413086,
+              1960.0000381469727
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-BAR-3",
+      "name": "/1RX03-MSUP-E0110-BAR-3",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 9744902796323789648,
+      "parent_stable_id": 5304328553233075093,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 680.0
+          },
+          "transform": {
+            "matrix3": [
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.000906307774130255,
+              -0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -21012.68768310547,
+              -8390.676498413086,
+              2160.0000858306885
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-BAR-5",
+      "name": "/1RX03-MSUP-E0110-BAR-5",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 9744909393393558914,
+      "parent_stable_id": 5304328553233075093,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 680.0
+          },
+          "transform": {
+            "matrix3": [
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.000906307774130255,
+              -0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -21012.68768310547,
+              -8390.676498413086,
+              2359.999895095825
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-BAR-7",
+      "name": "/1RX03-MSUP-E0110-BAR-7",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 9744907194370302492,
+      "parent_stable_id": 5304328553233075093,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 680.0
+          },
+          "transform": {
+            "matrix3": [
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.000906307774130255,
+              -0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -21012.68768310547,
+              -8390.676498413086,
+              2559.999942779541
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-BAR-9",
+      "name": "/1RX03-MSUP-E0110-BAR-9",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 9744913791440071758,
+      "parent_stable_id": 5304328553233075093,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 680.0
+          },
+          "transform": {
+            "matrix3": [
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.000906307774130255,
+              -0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -21012.68768310547,
+              -8390.676498413086,
+              2759.999990463257
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-BAR-8",
+      "name": "/1RX03-MSUP-E0110-BAR-8",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 9744914890951699969,
+      "parent_stable_id": 5304328553233075093,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 680.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0004226182645652443,
+              -0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -20251.39045715332,
+              -8035.677909851074,
+              2759.999990463257
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-BAR-2",
+      "name": "/1RX03-MSUP-E0110-BAR-2",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 9744903895835417859,
+      "parent_stable_id": 5304328553233075093,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 680.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0004226182645652443,
+              -0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -20251.39045715332,
+              -8035.677909851074,
+              2960.0000381469727
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1",
+      "name": "/1RX03-MSUP-E0110-V1",
+      "noun": null,
+      "owner_desc": null,
+      "ordinal": null,
+      "refno": "24384/995",
+      "identity_source": "cli_root",
+      "resolved": true,
+      "stable_id": 15951281219923172778,
+      "parent_stable_id": 5304328553233075093,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 1328.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2523.9999294281006
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 1 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SNODE 1 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SNOD",
+      "owner_desc": "SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 12395886013564318895,
+      "parent_stable_id": 15951281219923172778,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0004226182645652443,
+              -0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              1960.0000381469727
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 2,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              1960.0000381469727
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 3,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              1960.0000381469727
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 1 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 1 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SCOJOINT 1 of SNODE 1 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SCOJ",
+      "owner_desc": "SNODE 1 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 17838185993102577449,
+      "parent_stable_id": 12395886013564318895,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        1960.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 1 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 1 of SCTN /1RX03-MSUP-E0110-V1/SUBJOINT 1 of SCOJOINT 1 of SNODE 1 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SUBJOINT 1 of SCOJOINT 1 of SNODE 1 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SUBJ",
+      "owner_desc": "SCOJOINT 1 of SNODE 1 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 1236610368359574921,
+      "parent_stable_id": 17838185993102577449,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        1960.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 2 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SNODE 2 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SNOD",
+      "owner_desc": "SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 2,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 10199903262255717368,
+      "parent_stable_id": 15951281219923172778,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0004226182645652443,
+              -0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2160.0000858306885
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 2,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2160.0000858306885
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 3,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2160.0000858306885
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 2 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 2 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SCOJOINT 1 of SNODE 2 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SCOJ",
+      "owner_desc": "SNODE 2 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 7484810667066701171,
+      "parent_stable_id": 10199903262255717368,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2160.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 2 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 2 of SCTN /1RX03-MSUP-E0110-V1/SUBJOINT 1 of SCOJOINT 1 of SNODE 2 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SUBJOINT 1 of SCOJOINT 1 of SNODE 2 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SUBJ",
+      "owner_desc": "SCOJOINT 1 of SNODE 2 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 453721026595863588,
+      "parent_stable_id": 7484810667066701171,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2160.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 3 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SNODE 3 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SNOD",
+      "owner_desc": "SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 3,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 16396086506894755033,
+      "parent_stable_id": 15951281219923172778,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0004226182645652443,
+              -0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2359.999895095825
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 2,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2359.999895095825
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 3,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2359.999895095825
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 3 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 3 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SCOJOINT 1 of SNODE 3 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SCOJ",
+      "owner_desc": "SNODE 3 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 11779705977980305025,
+      "parent_stable_id": 16396086506894755033,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2360.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 3 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 3 of SCTN /1RX03-MSUP-E0110-V1/SUBJOINT 1 of SCOJOINT 1 of SNODE 3 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SUBJOINT 1 of SCOJOINT 1 of SNODE 3 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SUBJ",
+      "owner_desc": "SCOJOINT 1 of SNODE 3 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 12550012929076764295,
+      "parent_stable_id": 11779705977980305025,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2360.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 4 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SNODE 4 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SNOD",
+      "owner_desc": "SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 4,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 8690203422177554250,
+      "parent_stable_id": 15951281219923172778,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0004226182645652443,
+              -0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2559.999942779541
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 2,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2559.999942779541
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 3,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2559.999942779541
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 4 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 4 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SCOJOINT 1 of SNODE 4 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SCOJ",
+      "owner_desc": "SNODE 4 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 18222321866303616767,
+      "parent_stable_id": 8690203422177554250,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2560.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 4 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 4 of SCTN /1RX03-MSUP-E0110-V1/SUBJOINT 1 of SCOJOINT 1 of SNODE 4 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SUBJOINT 1 of SCOJOINT 1 of SNODE 4 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SUBJ",
+      "owner_desc": "SCOJOINT 1 of SNODE 4 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 6531358689056972130,
+      "parent_stable_id": 18222321866303616767,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2560.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 5 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SNODE 5 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SNOD",
+      "owner_desc": "SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 5,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 11664776679079293475,
+      "parent_stable_id": 15951281219923172778,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0004226182645652443,
+              -0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2359.999895095825
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 2,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2359.999895095825
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 3,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2359.999895095825
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 5 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 5 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SCOJOINT 1 of SNODE 5 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SCOJ",
+      "owner_desc": "SNODE 5 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 36441369588859913,
+      "parent_stable_id": 11664776679079293475,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2360.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 5 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 5 of SCTN /1RX03-MSUP-E0110-V1/SUBJOINT 1 of SCOJOINT 1 of SNODE 5 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SUBJOINT 1 of SCOJOINT 1 of SNODE 5 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SUBJ",
+      "owner_desc": "SCOJOINT 1 of SNODE 5 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 15146763923383911981,
+      "parent_stable_id": 36441369588859913,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2360.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 6 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SNODE 6 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SNOD",
+      "owner_desc": "SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 6,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 16013406608730061628,
+      "parent_stable_id": 15951281219923172778,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0004226182645652443,
+              -0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2160.0000858306885
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 2,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2160.0000858306885
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 3,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2160.0000858306885
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 6 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 6 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SCOJOINT 1 of SNODE 6 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SCOJ",
+      "owner_desc": "SNODE 6 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 920932847502499963,
+      "parent_stable_id": 16013406608730061628,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2160.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 6 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 6 of SCTN /1RX03-MSUP-E0110-V1/SUBJOINT 1 of SCOJOINT 1 of SNODE 6 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SUBJOINT 1 of SCOJOINT 1 of SNODE 6 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SUBJ",
+      "owner_desc": "SCOJOINT 1 of SNODE 6 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 10085863536638747512,
+      "parent_stable_id": 920932847502499963,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2160.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 7 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SNODE 7 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SNOD",
+      "owner_desc": "SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 7,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 11021007522480173725,
+      "parent_stable_id": 15951281219923172778,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0004226182645652443,
+              -0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2759.999990463257
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 2,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2759.999990463257
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 3,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2759.999990463257
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 7 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 7 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SCOJOINT 1 of SNODE 7 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SCOJ",
+      "owner_desc": "SNODE 7 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 8449195937477878433,
+      "parent_stable_id": 11021007522480173725,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2760.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 7 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 7 of SCTN /1RX03-MSUP-E0110-V1/SUBJOINT 1 of SCOJOINT 1 of SNODE 7 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SUBJOINT 1 of SCOJOINT 1 of SNODE 7 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SUBJ",
+      "owner_desc": "SCOJOINT 1 of SNODE 7 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 15581612421737762299,
+      "parent_stable_id": 8449195937477878433,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2760.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 8 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SNODE 8 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SNOD",
+      "owner_desc": "SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 8,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 13375009600633652222,
+      "parent_stable_id": 15951281219923172778,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0004226182645652443,
+              -0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2359.999895095825
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 2,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2359.999895095825
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 3,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2359.999895095825
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 8 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 8 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SCOJOINT 1 of SNODE 8 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SCOJ",
+      "owner_desc": "SNODE 8 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 7679617421107159519,
+      "parent_stable_id": 13375009600633652222,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2360.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 8 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 8 of SCTN /1RX03-MSUP-E0110-V1/SUBJOINT 1 of SCOJOINT 1 of SNODE 8 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SUBJOINT 1 of SCOJOINT 1 of SNODE 8 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SUBJ",
+      "owner_desc": "SCOJOINT 1 of SNODE 8 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 13256355989192368806,
+      "parent_stable_id": 7679617421107159519,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2360.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 9 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SNODE 9 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SNOD",
+      "owner_desc": "SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 9,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 13011273671172662903,
+      "parent_stable_id": 15951281219923172778,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0004226182645652443,
+              -0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2759.999990463257
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 2,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2759.999990463257
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 3,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2759.999990463257
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 9 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 9 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SCOJOINT 1 of SNODE 9 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SCOJ",
+      "owner_desc": "SNODE 9 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 6051800540035420041,
+      "parent_stable_id": 13011273671172662903,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2760.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 9 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 9 of SCTN /1RX03-MSUP-E0110-V1/SUBJOINT 1 of SCOJOINT 1 of SNODE 9 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SUBJOINT 1 of SCOJOINT 1 of SNODE 9 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SUBJ",
+      "owner_desc": "SCOJOINT 1 of SNODE 9 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 14839756911555509233,
+      "parent_stable_id": 6051800540035420041,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2760.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 9 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 9 of SCTN /1RX03-MSUP-E0110-V1/SUBJOINT 2 of SCOJOINT 1 of SNODE 9 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SUBJOINT 2 of SCOJOINT 1 of SNODE 9 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SUBJ",
+      "owner_desc": "SCOJOINT 1 of SNODE 9 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 2,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 14748584478220722020,
+      "parent_stable_id": 6051800540035420041,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2760.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 10 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SNODE 10 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SNOD",
+      "owner_desc": "SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 10,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 15081221028835167641,
+      "parent_stable_id": 15951281219923172778,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0004226182645652443,
+              -0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2559.999942779541
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 2,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2559.999942779541
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 3,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2559.999942779541
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 10 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 10 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SCOJOINT 1 of SNODE 10 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SCOJ",
+      "owner_desc": "SNODE 10 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 6170709094515036785,
+      "parent_stable_id": 15081221028835167641,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2560.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 10 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 10 of SCTN /1RX03-MSUP-E0110-V1/SUBJOINT 1 of SCOJOINT 1 of SNODE 10 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SUBJOINT 1 of SCOJOINT 1 of SNODE 10 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SUBJ",
+      "owner_desc": "SCOJOINT 1 of SNODE 10 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 15924505307245648687,
+      "parent_stable_id": 6170709094515036785,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2560.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 11 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SNODE 11 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SNOD",
+      "owner_desc": "SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 11,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 16315249942401152184,
+      "parent_stable_id": 15951281219923172778,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": [
+        {
+          "index": 1,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0004226182645652443,
+              -0.000906307774130255,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2960.0000381469727
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 2,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.000906307774130255,
+              0.0004226182645652443,
+              0.0,
+              0.0,
+              0.0,
+              -0.0010000000474974513,
+              -0.0004226182645652443,
+              0.000906307774130255,
+              0.0
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2960.0000381469727
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        },
+        {
+          "index": 3,
+          "kind": "Line",
+          "geo_type": "Primitive",
+          "detail": {
+            "start_radius": 5.0,
+            "end_radius": 20.0
+          },
+          "transform": {
+            "matrix3": [
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513,
+              0.0,
+              0.0,
+              0.0,
+              0.0010000000474974513
+            ],
+            "translation_mm": [
+              -20496.09375,
+              -8149.784088134766,
+              2960.0000381469727
+            ]
+          },
+          "bbox_world_mm": null,
+          "bbox_degenerate": true,
+          "extra": {
+            "color": 0,
+            "color_rgb": 0,
+            "transparency": 0,
+            "sample_start_angle": 0.0
+          }
+        }
+      ]
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 11 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 11 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SCOJOINT 1 of SNODE 11 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SCOJ",
+      "owner_desc": "SNODE 11 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 11365667040224088297,
+      "parent_stable_id": 16315249942401152184,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2960.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 11 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 11 of SCTN /1RX03-MSUP-E0110-V1/SUBJOINT 1 of SCOJOINT 1 of SNODE 11 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SUBJOINT 1 of SCOJOINT 1 of SNODE 11 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SUBJ",
+      "owner_desc": "SCOJOINT 1 of SNODE 11 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 7691938449914017102,
+      "parent_stable_id": 11365667040224088297,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2960.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/1RX03-MSUP-E0110-V1/SNODE 11 of SCTN /1RX03-MSUP-E0110-V1/SCOJOINT 1 of SNODE 11 of SCTN /1RX03-MSUP-E0110-V1/SUBJOINT 2 of SCOJOINT 1 of SNODE 11 of SCTN /1RX03-MSUP-E0110-V1",
+      "name": "SUBJOINT 2 of SCOJOINT 1 of SNODE 11 of SCTN /1RX03-MSUP-E0110-V1",
+      "noun": "SUBJ",
+      "owner_desc": "SCOJOINT 1 of SNODE 11 of SCTN /1RX03-MSUP-E0110-V1",
+      "ordinal": 2,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 13166461775582198233,
+      "parent_stable_id": 11365667040224088297,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        2960.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/PNODE 1 of FRMWORK /1RX03-MSUP-E0110-FRMW1",
+      "name": "PNODE 1 of FRMWORK /1RX03-MSUP-E0110-FRMW1",
+      "noun": "PNOD",
+      "owner_desc": "FRMWORK /1RX03-MSUP-E0110-FRMW1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 148875637476504241,
+      "parent_stable_id": 5304328553233075093,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/PNODE 1 of FRMWORK /1RX03-MSUP-E0110-FRMW1/PJOINT 1 of PNODE 1 of FRMWORK /1RX03-MSUP-E0110-FRMW1",
+      "name": "PJOINT 1 of PNODE 1 of FRMWORK /1RX03-MSUP-E0110-FRMW1",
+      "noun": "PJOI",
+      "owner_desc": "PNODE 1 of FRMWORK /1RX03-MSUP-E0110-FRMW1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 5420184091957629409,
+      "parent_stable_id": 148875637476504241,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        1860.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/PNODE 2 of FRMWORK /1RX03-MSUP-E0110-FRMW1",
+      "name": "PNODE 2 of FRMWORK /1RX03-MSUP-E0110-FRMW1",
+      "noun": "PNOD",
+      "owner_desc": "FRMWORK /1RX03-MSUP-E0110-FRMW1",
+      "ordinal": 2,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 17494727872657960138,
+      "parent_stable_id": 5304328553233075093,
+      "translation_mm": [
+        -21017.22,
+        -8392.79,
+        2000.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    },
+    {
+      "path": "/AMS/1RX03-PIPEBJ/1RX03-MSUP/1RX03-MSUP-E0110/1RX03-MSUP-E0110-FRMW1/PNODE 2 of FRMWORK /1RX03-MSUP-E0110-FRMW1/PJOINT 1 of PNODE 2 of FRMWORK /1RX03-MSUP-E0110-FRMW1",
+      "name": "PJOINT 1 of PNODE 2 of FRMWORK /1RX03-MSUP-E0110-FRMW1",
+      "noun": "PJOI",
+      "owner_desc": "PNODE 2 of FRMWORK /1RX03-MSUP-E0110-FRMW1",
+      "ordinal": 1,
+      "refno": null,
+      "identity_source": "stable_hash",
+      "resolved": false,
+      "stable_id": 6123678225085847719,
+      "parent_stable_id": 17494727872657960138,
+      "translation_mm": [
+        -20496.094,
+        -8149.7847,
+        3188.0
+      ],
+      "aabb_world_mm": null,
+      "attrs": null,
+      "geometries": []
+    }
+  ]
+}

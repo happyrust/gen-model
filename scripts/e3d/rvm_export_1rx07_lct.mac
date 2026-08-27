@@ -1,0 +1,55 @@
+$(
+------------------------------------------------------------------------
+RVM 基准导出：ZONE /1RX07-LCT
+  (dbnum 7999 / MASTER/DESIGN，=24383/91690，owner /1RX-ELECBJ，10 个 PIPE)
+
+这一份同时干两件事：
+
+1. 给 7999 这个区留一份 AVEVA 侧的几何基准，供 rvm_verify compare 对拍；
+2. 顺带把导出通道本身验一遍。2026-08-27 那份 /1RX03-MSUP-E0110 的 RVM
+   里 41 个几何**全是 `kind: Line`**（中心线，没有表面，mesh_compare 里
+   直接 `GeometryKind::Line(_) => return` 跳过）。那批 SCTN 的 SPRE 是
+   0/0，没有型材，E3D 画不出实体是合理的——但「合理」和「导出把实体丢了」
+   在那一份数据上分不开。这个区是管道，E3D 必然出实体：这里要是还只有
+   Line，问题就在导出设置，不在数据。
+
+表现设置照 rvm_export_1rs_wf04_w_c.mac 的窄口径：只要实体几何，不要保温/
+障碍体。导出是只读，没有 SAVEWORK，不产生新会话号。
+
+跑法是 run_ams_c_entrymacro.bat（AVEVA_DESIGN_ENTRYMACRO + 分离进程 +
+gen_model_test 影子装）。喂 stdin 那条路走 aps_all 影子装，会卡在 PML 载入
+之后不动，别用。末尾自己 QUIT，不耗满 wrapper 超时。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/rvm_export_1rx07_lct.log" OVER
+$P CODEX-DB7999-1RX07-LCT-RVM-EXPORT-ALIVE
+
+$* ---- 表现设置：只导实体几何 ----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+$* ---- 驱动与输出 ----
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/test_data/rvm/1RX07-LCT.rvm"
+export filenote 'RVM baseline for ZONE /1RX07-LCT (dbnum 7999, 10 PIPE)'
+
+$* ---- 表现选项 ----
+export holes on
+export autocolour displayexport on
+export repr on
+
+$* ---- 包含列表：这一个 ZONE 及其全部子孙 ----
+export /1RX07-LCT
+
+$* ---- 执行 ----
+export finish
+
+$P CODEX-DB7999-1RX07-LCT-RVM-EXPORT-DONE
+ALPHA LOG END
+
+QUIT
+FINISH
+FINISH

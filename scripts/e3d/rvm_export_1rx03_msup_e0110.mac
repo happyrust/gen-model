@@ -1,0 +1,60 @@
+$(
+------------------------------------------------------------------------
+RVM 基准导出：STRU /1RX03-MSUP-E0110
+  (dbnum 8000, pe:24384_995 → FRMW pe:24384_996 → 8 根 SCTN)
+
+这一份回答的是一个是非题，不是精度题：**AVEVA 自己给不给这批 SCTN 画实体。**
+
+现场（2026-08-27 watch8000 全新空库）：库里 526 个 SCTN 只有 4 个有
+inst_relate，SNOD / SCOJ / PNOD / FRMW 一个都没有；而这个 STRU 的
+gen_root 是 `kind=residue, subtree=49, status=Generated`——它数过 49 个
+子结点，却一条 geo_relate 都没建。两种可能：residue 根本来就不该出几何
+（那是最小交付单元名词表漏配，delivery_unit_types 现在是 BRAN/HANG/
+SUPPO/EQUI，一个结构名词都没有），或者该出而没出（那是生成器的洞）。
+
+RVM 里有这 8 根 SCTN 的实体 → 是后者，而且这份 RVM 顺手就是修完之后的
+验收基准。没有 → 问题在更上游的型材目录，改生成器白搭。
+
+命令序列与窄口径理由见同目录 rvm_export_1rs_wf04_w_c.mac。
+导出是只读：没有 SAVEWORK，不产生新会话号。
+
+跑法是 run_ams_c_entrymacro.bat（AVEVA_DESIGN_ENTRYMACRO + 分离进程），不是
+run_rvm_export_*_nogfx.bat 那条喂 stdin 的路——那条走 aps_all 影子装，
+run_ams_c_entrymacro.bat 的头注已经写明它「exits before the L3-ALIVE marker」，
+2026-08-27 实测就是卡在 PML 载入之后不动、日志一字不长。所以这份自己收尾：
+末尾的 QUIT 让会话在导出完成后立刻退出，而不是耗满 wrapper 那 1200 秒超时。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/rvm_export_1rx03_msup_e0110.log" OVER
+$P CODEX-DB8000-1RX03-RVM-EXPORT-ALIVE
+
+$* ---- 表现设置：只导实体几何 ----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+$* ---- 驱动与输出 ----
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/test_data/rvm/1RX03-MSUP-E0110.rvm"
+export filenote 'RVM baseline for STRU /1RX03-MSUP-E0110 (dbnum 8000, 1 FRMW / 8 SCTN)'
+
+$* ---- 表现选项 ----
+export holes on
+export autocolour displayexport on
+export repr on
+
+$* ---- 包含列表：这一条 STRU 及其全部子孙 ----
+export /1RX03-MSUP-E0110
+
+$* ---- 执行 ----
+export finish
+
+$P CODEX-DB8000-1RX03-RVM-EXPORT-DONE
+ALPHA LOG END
+
+$* ---- 自己收尾 ----
+QUIT
+FINISH
+FINISH
