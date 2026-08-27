@@ -328,6 +328,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "model_drain": crate::data_interface::model_update_pending::model_drain_telemetry_snapshot(),
         "model_concurrency": crate::data_interface::model_concurrency::snapshot(),
         "geometry_concurrency": crate::fast_model::concurrency::snapshot(),
+        // tokio 调度延迟（specs/033 T003）：定时器「该醒」与「真醒」的差。CPU 密集段
+        // 占住 worker 时它先涨，而此前这件事只有「/health 感觉有点卡」这种印象。
+        // `sampling: false` = 采样任务没起来，与「延迟为 0」不是一回事。
+        "runtime_lag": crate::runtime_lag::snapshot(),
         "spatial_serial": crate::fast_model::spatial_state::spatial_serial_snapshot(),
         "sul_db": sul_db,
         "staging_windows": crate::data_interface::staging::lifecycle::resource_snapshots(),

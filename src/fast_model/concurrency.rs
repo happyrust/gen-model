@@ -21,17 +21,56 @@
 //! - 编排层继续用 `spawn_with_staged_io`，不碰闸;
 //! - 顺序循环里的分批（SQL 写回攒批这种不并发的 chunk）只用 [`GeometryGate::chunk_size`]
 //!   派生批宽，**不拿许可**。
+//!
+//! # 计量（specs/033 T002）
+//!
+//! 闸自己记四个量：在飞、在等、累计等待时长、累计**持有**时长。前三个原来就有，
+//! 持有时长是新的——没有它就算不出利用率，也就无从判断「额度开到 8 到底兑现了几路」。
+//!
+//! 读数有一条现在必须说清的边界：许可当前罩着整个 `Future`（数据库查询、跨 `.await`
+//! 的暂存锁、同步文件写都在里面），所以持有时长现在读作**「许可被占住多久」**，
+//! 不是「CPU 忙了多久」。两者要到 ADR-052 的执行域切换落地之后才重合。改动前采到的
+//! 利用率只能作为「许可被谁占着」的证据，不得当成 CPU 利用率写进 A/B 结论。
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 /// 几何并发闸：额度即同时执行的叶子任务数上限。
 pub struct GeometryGate {
     quota: usize,
     semaphore: Arc<Semaphore>,
+    metrics: Arc<GateMetrics>,
+}
+
+/// 闸的计量。挂在闸实例上而不是模块级 static：闸本身是进程单例，而单测里的临时闸
+/// 各记各的，读数不会被同一个测试二进制里并行跑的其他用例污染。
+#[derive(Debug)]
+struct GateMetrics {
+    /// 观测起点 = 闸建立的时刻。利用率的分母来自它，因此必须与计数同生共死。
+    epoch: Instant,
+    active: AtomicUsize,
+    waiting: AtomicUsize,
+    wait_micros: AtomicU64,
+    held_micros: AtomicU64,
+}
+
+impl GateMetrics {
+    fn new() -> Self {
+        Self {
+            epoch: Instant::now(),
+            active: AtomicUsize::new(0),
+            waiting: AtomicUsize::new(0),
+            wait_micros: AtomicU64::new(0),
+            held_micros: AtomicU64::new(0),
+        }
+    }
+}
+
+fn saturating_micros(elapsed: Duration) -> u64 {
+    elapsed.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 impl GeometryGate {
@@ -40,6 +79,7 @@ impl GeometryGate {
         Self {
             quota,
             semaphore: Arc::new(Semaphore::new(quota)),
+            metrics: Arc::new(GateMetrics::new()),
         }
     }
 
@@ -57,8 +97,11 @@ impl GeometryGate {
     }
 
     /// 取一张许可（RAII，drop 即归还）。只准叶子任务调用，见模块级纪律。
+    ///
+    /// 等待时长在拿到许可的那一刻结算，持有时长从那一刻起算：排队的时间既不算
+    /// 在飞，也不算持有——否则额度 1 的串行执行会算出超过 100% 的利用率。
     pub async fn acquire(&self) -> GeometryPermit {
-        WAITING.fetch_add(1, Ordering::Relaxed);
+        self.metrics.waiting.fetch_add(1, Ordering::Relaxed);
         let started = Instant::now();
         let permit = self
             .semaphore
@@ -66,30 +109,35 @@ impl GeometryGate {
             .acquire_owned()
             .await
             .expect("geometry gate semaphore is never closed");
-        WAITING.fetch_sub(1, Ordering::Relaxed);
-        WAIT_MICROS.fetch_add(
-            started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64,
-            Ordering::Relaxed,
-        );
-        ACTIVE.fetch_add(1, Ordering::Relaxed);
-        GeometryPermit { _permit: permit }
+        self.metrics.waiting.fetch_sub(1, Ordering::Relaxed);
+        self.metrics
+            .wait_micros
+            .fetch_add(saturating_micros(started.elapsed()), Ordering::Relaxed);
+        self.metrics.active.fetch_add(1, Ordering::Relaxed);
+        GeometryPermit {
+            _permit: permit,
+            metrics: self.metrics.clone(),
+            acquired_at: Instant::now(),
+        }
     }
 }
 
 /// 闸的许可凭证；持有期间占一份额度。
 pub struct GeometryPermit {
     _permit: OwnedSemaphorePermit,
+    metrics: Arc<GateMetrics>,
+    acquired_at: Instant,
 }
 
 impl Drop for GeometryPermit {
     fn drop(&mut self) {
-        ACTIVE.fetch_sub(1, Ordering::Relaxed);
+        self.metrics.held_micros.fetch_add(
+            saturating_micros(self.acquired_at.elapsed()),
+            Ordering::Relaxed,
+        );
+        self.metrics.active.fetch_sub(1, Ordering::Relaxed);
     }
 }
-
-static ACTIVE: AtomicUsize = AtomicUsize::new(0);
-static WAITING: AtomicUsize = AtomicUsize::new(0);
-static WAIT_MICROS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct GeometryConcurrencySnapshot {
@@ -97,14 +145,46 @@ pub struct GeometryConcurrencySnapshot {
     pub active: usize,
     pub waiting: usize,
     pub permit_wait_micros: u64,
+    /// 累计许可持有时长。配合 `observed_micros` 求利用率，见
+    /// [`GeometryConcurrencySnapshot::utilization_since`]。
+    pub active_permit_micros: u64,
+    /// 闸建立至今的墙钟。利用率的分母，单独暴露是为了让调用方能对两次快照做差，
+    /// 算某一段（而不是进程一辈子）的利用率。
+    pub observed_micros: u64,
+}
+
+impl GeometryConcurrencySnapshot {
+    /// 本快照与 `before` 之间那一段的闸利用率：持有时长增量 ÷（额度 × 墙钟增量）。
+    ///
+    /// 只给区间值、不给「进程至今」的平均值，是因为后者会把等死信、等 AABB 收敛这类
+    /// 大段空闲摊进分母——现场恰好就有这种形态（模型本体 258s，之后干等 22 分钟），
+    /// 平均下来是个既真实又毫无意义的小数。墙钟增量为 0 时返回 `None`，不编一个 0。
+    pub fn utilization_since(&self, before: &Self) -> Option<f64> {
+        gate_utilization(
+            self.active_permit_micros
+                .saturating_sub(before.active_permit_micros),
+            self.quota,
+            self.observed_micros.saturating_sub(before.observed_micros),
+        )
+    }
+}
+
+/// 利用率本体。不夹到 1.0：大于 1 只可能是计量本身错了（等待被算进了持有），
+/// 那种时候要的是看见它，不是把它藏成 100%。
+fn gate_utilization(held_micros: u64, quota: usize, wall_micros: u64) -> Option<f64> {
+    let capacity = (quota as u64).checked_mul(wall_micros)?;
+    (capacity > 0).then(|| held_micros as f64 / capacity as f64)
 }
 
 pub fn snapshot() -> GeometryConcurrencySnapshot {
+    let gate = geometry_gate();
     GeometryConcurrencySnapshot {
-        quota: geometry_gate().quota(),
-        active: ACTIVE.load(Ordering::Relaxed),
-        waiting: WAITING.load(Ordering::Relaxed),
-        permit_wait_micros: WAIT_MICROS.load(Ordering::Relaxed),
+        quota: gate.quota(),
+        active: gate.metrics.active.load(Ordering::Relaxed),
+        waiting: gate.metrics.waiting.load(Ordering::Relaxed),
+        permit_wait_micros: gate.metrics.wait_micros.load(Ordering::Relaxed),
+        active_permit_micros: gate.metrics.held_micros.load(Ordering::Relaxed),
+        observed_micros: saturating_micros(gate.metrics.epoch.elapsed()),
     }
 }
 
@@ -331,5 +411,86 @@ mod tests {
                 assert_eq!(peak, 1, "额度 1 必须真的串行");
             }
         }
+    }
+
+    /// specs/033 T002：利用率是「持有 ÷（额度 × 墙钟）」，且分母为 0 时不编数。
+    /// 超过 1 不夹回去——那是计量出错的信号，藏起来等于把 bug 变成 100% 健康。
+    #[test]
+    fn gate_utilization_is_a_ratio_and_refuses_to_invent_one() {
+        assert_eq!(gate_utilization(800, 8, 1_000), Some(0.1));
+        assert_eq!(gate_utilization(8_000, 8, 1_000), Some(1.0));
+        assert_eq!(gate_utilization(0, 8, 1_000), Some(0.0));
+        assert_eq!(
+            gate_utilization(500, 8, 0),
+            None,
+            "墙钟为 0 时没有利用率可言"
+        );
+        assert_eq!(
+            gate_utilization(2_000, 1, 1_000),
+            Some(2.0),
+            "大于 1 必须原样露出来"
+        );
+    }
+
+    /// specs/033 T002：区间利用率对两次快照做差，不受进程早先那些空闲段影响；
+    /// 计数器反向（只可能是快照传反了）按 0 处理，不产生负利用率。
+    #[test]
+    fn utilization_is_taken_between_two_snapshots_not_over_the_whole_process() {
+        let before = GeometryConcurrencySnapshot {
+            quota: 4,
+            active: 0,
+            waiting: 0,
+            permit_wait_micros: 0,
+            active_permit_micros: 1_000_000,
+            observed_micros: 9_000_000,
+        };
+        let after = GeometryConcurrencySnapshot {
+            active_permit_micros: 1_000_000 + 3_200_000,
+            observed_micros: 9_000_000 + 1_000_000,
+            ..before
+        };
+        assert_eq!(after.utilization_since(&before), Some(0.8));
+        assert_eq!(
+            before.utilization_since(&after),
+            None,
+            "墙钟增量被 saturating 夹成 0，不许倒着算出个数来"
+        );
+    }
+
+    /// specs/033 T002：排队的时间既不算在飞也不算持有。额度 1 时两个任务串行各持
+    /// 30ms，第二个要等第一个——若等待被计进持有，持有时长就会超过闸自己的墙钟。
+    /// 这条上界是结构性的，不依赖机器快慢。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn held_time_counts_the_permit_not_the_queue() {
+        let gate = Arc::new(GeometryGate::with_quota(1));
+
+        let mut handles = Vec::new();
+        for _ in 0..2 {
+            let gate = gate.clone();
+            handles.push(tokio::spawn(async move {
+                let _permit = gate.acquire().await;
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }));
+        }
+        for handle in handles {
+            handle.await.expect("leaf task joins");
+        }
+
+        let wall = saturating_micros(gate.metrics.epoch.elapsed());
+        let held = gate.metrics.held_micros.load(Ordering::Relaxed);
+        let waited = gate.metrics.wait_micros.load(Ordering::Relaxed);
+
+        assert!(held >= 55_000, "两段真持有没记全：{held}us");
+        assert!(
+            held <= wall,
+            "额度 1 时持有 {held}us 不可能超过墙钟 {wall}us"
+        );
+        assert!(waited >= 20_000, "第二个任务确实排过队：{waited}us");
+        assert_eq!(
+            gate.metrics.active.load(Ordering::Relaxed),
+            0,
+            "许可全部归还后在飞必须归零"
+        );
+        assert_eq!(gate.metrics.waiting.load(Ordering::Relaxed), 0);
     }
 }

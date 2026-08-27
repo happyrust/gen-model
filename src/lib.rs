@@ -240,6 +240,8 @@ pub mod mqtt_service;
 
 pub mod options;
 
+pub mod runtime_lag;
+
 #[cfg(feature = "http_api")]
 pub mod web_service;
 
@@ -323,6 +325,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         crate::fast_model::concurrency::validate_geometry_concurrency_config()
             .map_err(|error| anyhow::anyhow!("几何并发闸配置非法，拒绝启动：{error}"))?;
     println!("几何并发闸额度 = {geometry_workers}（geometry_workers 未配置时取物理核数）");
+    // 调度延迟采样（specs/033 T003）：只观测、不改行为。放在这里是因为它要量的正是
+    // 后面这一整段启动与生成期间 runtime 有多挤，起晚了就错过了最拥挤的那一段。
+    crate::runtime_lag::spawn_sampler();
     // 监听限定域（`watch_dbnums` / `--watch-dbnum`）：配置里的那份能躺一个月，
     // 所以它必须在启动时就自报家门，而不是等人从「怎么只有一个库在动」倒推。
     if let Some(notice) = crate::data_interface::watch_scope::mode_notice() {

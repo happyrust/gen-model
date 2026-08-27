@@ -1,8 +1,8 @@
 # ADR-052：几何并发额度只覆盖 CPU 执行段
 
-- 状态：Proposed
+- 状态：Accepted（决策已定，实现未开始；2026-08-27 接受）
 - 日期：2026-08-26
-- 关联：ADR-011（唯一批次队列与单协调器）、ADR-017（暂存窗口提交）、ADR-041（第 3 条：统一几何并发口径）、ADR-050（进程级模型工作单）、`specs/023-parallel-root-generation-pipeline`（几何闸落地）、`specs/032-model-generation-throughput-closure`（CATA / Shape / AABB 吞吐）
+- 关联：ADR-011（唯一批次队列与单协调器）、ADR-017（暂存窗口提交）、ADR-041（第 3 条：统一几何并发口径）、ADR-050（进程级模型工作单）、`specs/023-parallel-root-generation-pipeline`（几何闸落地）、`specs/032-model-generation-throughput-closure`（CATA / Shape / AABB 吞吐）、`specs/033-geometry-execution-domain`（本决策的落地规格 / 计划 / 任务）、`issues/ISSUE-023`（前置条件兼发布阻断项）
 
 ## 背景
 

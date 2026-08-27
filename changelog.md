@@ -4,6 +4,46 @@
 
 ### 新增
 
+- **`/health` 新增 tokio 调度延迟，CPU 段挤掉调度这件事第一次有数**（specs/033 T003）。
+  ADR-052 说要把几何 CPU 段挪出 tokio worker，理由是三角化和布尔占住 worker 会挤掉
+  shape receiver、SurrealDB response、watcher、`/health` 与 timer——但这句话在改动前
+  无法证伪，手上只有「/health 感觉有点卡」这种印象。新增 `src/runtime_lag.rs`：一个
+  只睡觉的采样任务，量自己「睡 100ms」实际睡了多久，超出的部分就是它排队等 worker
+  的时间，在 `run_cli` 定死几何额度之后立即起（`run_app` 转手调 `run_cli`，`OnceLock`
+  保证只起一次）。每轮独立计时、不补追落后的轮次：一次 3 秒卡顿应当留下一个 3 秒的
+  样本，而不是三十个越来越小的样本把 p50 拉回正常。512 样本的滚动窗口之外单独保留
+  进程期最坏值——现场最狠的那次卡顿常常发生在几十分钟前，只留滚动窗口等于没留。
+  `sampling: false`（采样没起来）与「延迟为 0」在 `/health` 上分得开；分位数复用
+  `model_concurrency::percentile`，两个区块的 p95 是同一把尺子。测试里顺带钉住一件
+  容易误读的事：五个样本撑不起 p99，最坏值只能看 `max_micros`。
+
+- **几何闸开始记许可持有时长，闸利用率第一次算得出来**（specs/033 T002）。原来只有
+  在飞、在等和累计**等待**时长，没有累计**持有**时长——于是「额度开到 8 到底兑现了
+  几路」这个问题在现场无法回答，只能靠 CPU/wall 事后倒推。现在许可从拿到手那一刻起
+  算持有，`GeometryConcurrencySnapshot` 多出 `active_permit_micros` 与
+  `observed_micros`，利用率由 `utilization_since` 对两次快照做差得到。刻意不提供
+  「进程至今」的平均利用率：现场的形态是模型本体 258s 跑完、之后等死信干耗 22 分钟，
+  把空闲摊进分母得到的是一个既真实又没有意义的小数。计量同时从模块级 static 收进闸
+  实例，单测里的临时闸各记各的，读数不再被同一个测试二进制里并行跑的用例污染。
+  三条新测试钉住：利用率大于 1 不夹回去（那是计量出错的信号，藏起来等于把 bug 显示成
+  100% 健康）、墙钟增量为 0 时返回 `None` 而不是编个 0、排队时间不计进持有（额度 1
+  时持有不得超过闸自己的墙钟，这条上界是结构性的，不看机器快慢）。当前许可仍罩着
+  整个 `Future`，所以这个读数现在是「许可被占住多久」而不是「CPU 忙了多久」，两者要
+  到 ADR-052 的执行域切换落地之后才重合——模块文档里写明了，免得被当成 CPU 利用率
+  写进结论。
+
+- **ADR-052 转 Accepted，`specs/033-geometry-execution-domain` 补齐计划与任务**。
+  几何并发额度此前装在整个 `Future` 上，一张许可里同时罩着 SurrealDB 查询、跨
+  `.await` 持有的暂存 mutex 和同步文件写，于是 `active` 与真实 CPU 占用脱钩、
+  16 张许可可以全在等同一把暂存锁（容量倒置），现场 `permits = 8` 只兑现约 2.3 路。
+  plan 按 ADR-052 六条决策拆成六个阶段（可归因基线 → 执行域地基 `run_gated_cpu`
+  → `manifold_bool` 首站 → 其余叶子与动态领取 → SQL 攒批解耦与 shape 观测
+  → 控制器归位与正式 A/B），tasks 三十三条逐条带文件路径与并行标注。Constitution
+  Check 记下两处偏离：新增专用有界执行域与 `model_concurrency` 模块头「不创建新线程池」
+  的措辞冲突，以及 ISSUE-023 未闭合时「进程内全局额度」在 CentOS 7 上不成立——
+  后者登记为发布阻断项，不是可以边做边看的风险项。与 `specs/032` 的排他也写进计划：
+  `cata_model.rs` 与 `gen_model.rs` 同一时间只允许一条线在改。
+
 - **属性 schema 换成描述符权威表，noun 从 339 涨到 1878，已有取值一条没变**。
   `all_attr_info.json` 由 `e3d-descriptor emit-attr-info` 从 20 个 `*vir.dat` +
   `attlib.dat` + 逻辑目录合成，`--legacy-attr-info` 把老表覆盖到的地方逐字照抄，

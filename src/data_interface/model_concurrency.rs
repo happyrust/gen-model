@@ -82,7 +82,9 @@ pub(crate) fn record_surreal_write(elapsed: Duration, retried: bool) {
     latency.retries += u64::from(retried);
 }
 
-fn percentile(samples: &VecDeque<u64>, percentile: usize) -> Option<u64> {
+/// 最近邻分位数（不插值）。`runtime_lag` 也用它：两个 /health 区块的 p95 必须是
+/// 同一种 p95，否则拿它们对照就是在比两把不同的尺子。
+pub(crate) fn percentile(samples: &VecDeque<u64>, percentile: usize) -> Option<u64> {
     let mut values = samples.iter().copied().collect::<Vec<_>>();
     values.sort_unstable();
     (!values.is_empty()).then(|| {
