@@ -27,6 +27,13 @@
 //! 闸自己记四个量：在飞、在等、累计等待时长、累计**持有**时长。前三个原来就有，
 //! 持有时长是新的——没有它就算不出利用率，也就无从判断「额度开到 8 到底兑现了几路」。
 //!
+//! 持有时长在**读的那一刻**结算，而不是只在归还时结算：一个 BRAN 布尔能攥着许可
+//! 跑几分钟，若只在 `Drop` 里累加，快照落在这种长段中间时正被占着的那几张许可读数
+//! 是 0，利用率被系统性低估——T004 的基线采集与 T013 的 0.7 验收线恰好都要在 CPU
+//! 密集段内取样，读小了会把达标的配置误判成不达标。账本因此记两笔：已归还许可的
+//! 持有之和，与在飞许可各自的取得时刻之和；读数时用「在飞张数 × 当下 − 取得时刻
+//! 之和」把在飞那截补出来。
+//!
 //! 读数有一条现在必须说清的边界：许可当前罩着整个 `Future`（数据库查询、跨 `.await`
 //! 的暂存锁、同步文件写都在里面），所以持有时长现在读作**「许可被占住多久」**，
 //! 不是「CPU 忙了多久」。两者要到 ADR-052 的执行域切换落地之后才重合。改动前采到的
@@ -34,7 +41,7 @@
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
@@ -51,21 +58,56 @@ pub struct GeometryGate {
 struct GateMetrics {
     /// 观测起点 = 闸建立的时刻。利用率的分母来自它，因此必须与计数同生共死。
     epoch: Instant,
-    active: AtomicUsize,
     waiting: AtomicUsize,
     wait_micros: AtomicU64,
-    held_micros: AtomicU64,
+    hold: Mutex<HoldLedger>,
+}
+
+/// 「持有」的账本。在飞张数与在飞许可的取得时刻是**一对**耦合读数：补在飞那截要拿
+/// 张数乘当下、再减去取得时刻之和，两个数各自用原子量读会撕（读到张数已加一而时刻
+/// 和还没加，就补出一整段凭空的持有）。所以放进同一把 std `Mutex`：取还许可的频次
+/// 就是几何叶子任务的频次（一件几毫秒到几分钟），这把锁不可能成为热点，锁内只有几
+/// 条整数运算、绝不跨 `.await`。
+#[derive(Debug, Default)]
+struct HoldLedger {
+    /// 当下攥着许可的任务数。
+    active: usize,
+    /// 已归还的那些许可，持有时长之和。
+    settled_micros: u64,
+    /// 在飞许可各自的取得时刻（相对 `epoch` 的微秒偏移）之和。
+    in_flight_offset_sum: u64,
+}
+
+impl HoldLedger {
+    /// 截至 `now_micros`（同为相对 `epoch` 的偏移）的累计持有时长，含在飞未结算部分。
+    ///
+    /// 调用方必须在**同一次持锁内**取 `now_micros`：取得时刻是先落账本、后被读到的，
+    /// 锁内取时刻才能保证每张在飞许可的取得时刻都早于它，`in_flight` 那一项不会算成
+    /// 负数被 saturating 抹平成 0（那正是本函数要修的低估形态）。
+    fn held_micros_at(&self, now_micros: u64) -> u64 {
+        let in_flight = (self.active as u64)
+            .saturating_mul(now_micros)
+            .saturating_sub(self.in_flight_offset_sum);
+        self.settled_micros.saturating_add(in_flight)
+    }
 }
 
 impl GateMetrics {
     fn new() -> Self {
         Self {
             epoch: Instant::now(),
-            active: AtomicUsize::new(0),
             waiting: AtomicUsize::new(0),
             wait_micros: AtomicU64::new(0),
-            held_micros: AtomicU64::new(0),
+            hold: Mutex::new(HoldLedger::default()),
         }
+    }
+
+    /// 账本锁。中毒（持锁线程 panic）时读回内层数据接着记账：读数不准是小事，让几何
+    /// 管线因为一个计数器 panic 才是大事。
+    fn ledger(&self) -> MutexGuard<'_, HoldLedger> {
+        self.hold
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -113,11 +155,32 @@ impl GeometryGate {
         self.metrics
             .wait_micros
             .fetch_add(saturating_micros(started.elapsed()), Ordering::Relaxed);
-        self.metrics.active.fetch_add(1, Ordering::Relaxed);
+        let acquired_offset = saturating_micros(self.metrics.epoch.elapsed());
+        {
+            let mut ledger = self.metrics.ledger();
+            ledger.active += 1;
+            ledger.in_flight_offset_sum =
+                ledger.in_flight_offset_sum.saturating_add(acquired_offset);
+        }
         GeometryPermit {
             _permit: permit,
             metrics: self.metrics.clone(),
-            acquired_at: Instant::now(),
+            acquired_offset,
+        }
+    }
+
+    /// 当下这一刻的读数。挂在实例上而不是只有全局自由函数版本，单测里的临时闸才读
+    /// 得到自己的账（读全局闸会被同一个测试二进制里并行跑的其他用例污染）。
+    pub(crate) fn snapshot(&self) -> GeometryConcurrencySnapshot {
+        let ledger = self.metrics.ledger();
+        let observed_micros = saturating_micros(self.metrics.epoch.elapsed());
+        GeometryConcurrencySnapshot {
+            quota: self.quota,
+            active: ledger.active,
+            waiting: self.metrics.waiting.load(Ordering::Relaxed),
+            permit_wait_micros: self.metrics.wait_micros.load(Ordering::Relaxed),
+            active_permit_micros: ledger.held_micros_at(observed_micros),
+            observed_micros,
         }
     }
 }
@@ -126,16 +189,22 @@ impl GeometryGate {
 pub struct GeometryPermit {
     _permit: OwnedSemaphorePermit,
     metrics: Arc<GateMetrics>,
-    acquired_at: Instant,
+    /// 取得时刻，相对闸的 `epoch`。存偏移而不是 `Instant`：结算与快照补在飞都要拿它
+    /// 跟同一根时间轴上的「当下」做差，两处用同一个量纲才不会各算各的。
+    acquired_offset: u64,
 }
 
 impl Drop for GeometryPermit {
     fn drop(&mut self) {
-        self.metrics.held_micros.fetch_add(
-            saturating_micros(self.acquired_at.elapsed()),
-            Ordering::Relaxed,
-        );
-        self.metrics.active.fetch_sub(1, Ordering::Relaxed);
+        let released_offset = saturating_micros(self.metrics.epoch.elapsed());
+        let mut ledger = self.metrics.ledger();
+        ledger.active = ledger.active.saturating_sub(1);
+        ledger.in_flight_offset_sum = ledger
+            .in_flight_offset_sum
+            .saturating_sub(self.acquired_offset);
+        ledger.settled_micros = ledger
+            .settled_micros
+            .saturating_add(released_offset.saturating_sub(self.acquired_offset));
     }
 }
 
@@ -177,15 +246,7 @@ fn gate_utilization(held_micros: u64, quota: usize, wall_micros: u64) -> Option<
 }
 
 pub fn snapshot() -> GeometryConcurrencySnapshot {
-    let gate = geometry_gate();
-    GeometryConcurrencySnapshot {
-        quota: gate.quota(),
-        active: gate.metrics.active.load(Ordering::Relaxed),
-        waiting: gate.metrics.waiting.load(Ordering::Relaxed),
-        permit_wait_micros: gate.metrics.wait_micros.load(Ordering::Relaxed),
-        active_permit_micros: gate.metrics.held_micros.load(Ordering::Relaxed),
-        observed_micros: saturating_micros(gate.metrics.epoch.elapsed()),
-    }
+    geometry_gate().snapshot()
 }
 
 static GATE: OnceLock<GeometryGate> = OnceLock::new();
@@ -476,21 +537,100 @@ mod tests {
             handle.await.expect("leaf task joins");
         }
 
-        let wall = saturating_micros(gate.metrics.epoch.elapsed());
-        let held = gate.metrics.held_micros.load(Ordering::Relaxed);
-        let waited = gate.metrics.wait_micros.load(Ordering::Relaxed);
-
-        assert!(held >= 55_000, "两段真持有没记全：{held}us");
+        let snapshot = gate.snapshot();
         assert!(
-            held <= wall,
-            "额度 1 时持有 {held}us 不可能超过墙钟 {wall}us"
+            snapshot.active_permit_micros >= 55_000,
+            "两段真持有没记全：{}us",
+            snapshot.active_permit_micros
         );
-        assert!(waited >= 20_000, "第二个任务确实排过队：{waited}us");
+        assert!(
+            snapshot.active_permit_micros <= snapshot.observed_micros,
+            "额度 1 时持有 {}us 不可能超过墙钟 {}us",
+            snapshot.active_permit_micros,
+            snapshot.observed_micros
+        );
+        assert!(
+            snapshot.permit_wait_micros >= 20_000,
+            "第二个任务确实排过队：{}us",
+            snapshot.permit_wait_micros
+        );
+        assert_eq!(snapshot.active, 0, "许可全部归还后在飞必须归零");
+        assert_eq!(snapshot.waiting, 0);
+    }
+
+    /// specs/033 T002：快照落在长持有段**中间**时，正被攥着的许可也要算数。只在
+    /// `Drop` 里结算的旧写法在这里读回 0——单个 BRAN 布尔能占住许可跑几分钟，T004
+    /// 的基线快照大概率就落在这种段里，读 0 就是把利用率系统性压低。
+    ///
+    /// 顺带钉住归还侧的对账：闸空着时累计持有不许再涨（在飞张数没减），下一张许可
+    /// 的在飞增量仍要准（上一张的取得时刻没从和里减掉，就会一直吃掉后来者的读数）。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn held_time_includes_the_permit_that_is_still_in_flight() {
+        let gate = Arc::new(GeometryGate::with_quota(2));
+
+        let permit = gate.acquire().await;
+        let before = gate.snapshot();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let during = gate.snapshot();
+        assert_eq!(during.active, 1, "许可还攥在手里");
+        let in_flight = during
+            .active_permit_micros
+            .saturating_sub(before.active_permit_micros);
+        assert!(
+            in_flight >= 35_000,
+            "在飞的这 40ms 没被算进持有：{in_flight}us"
+        );
+
+        drop(permit);
+        let settled = gate.snapshot();
+        assert_eq!(settled.active, 0);
+        assert!(
+            settled.active_permit_micros >= during.active_permit_micros,
+            "归还只是把在飞那截转成已结算，累计不许倒退：{} < {}",
+            settled.active_permit_micros,
+            during.active_permit_micros
+        );
+
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let idle = gate.snapshot();
         assert_eq!(
-            gate.metrics.active.load(Ordering::Relaxed),
-            0,
-            "许可全部归还后在飞必须归零"
+            idle.active_permit_micros, settled.active_permit_micros,
+            "闸空着的 30ms 里没人持有，累计持有不许涨"
         );
-        assert_eq!(gate.metrics.waiting.load(Ordering::Relaxed), 0);
+
+        let _second = gate.acquire().await;
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let again = gate.snapshot();
+        let second_in_flight = again
+            .active_permit_micros
+            .saturating_sub(idle.active_permit_micros);
+        assert!(
+            second_in_flight >= 25_000,
+            "第二张许可的在飞时长被上一张的残留取得时刻吃掉了：{second_in_flight}us"
+        );
+    }
+
+    /// specs/033 T004/T013 的采样形态：额度 1、一段 CPU 密集布尔从窗口头占到窗口尾，
+    /// 区间利用率必须读作满载。旧写法在这一段读 0.0，0.7 的验收线会把达标的配置判成
+    /// 不达标。这里的 1.0 是恒等式不是掐表：两次快照的持有增量与墙钟增量由同一个
+    /// 「当下」算出，同一张许可全程在飞，两者逐微秒相等。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn utilization_reads_full_when_one_hold_spans_the_whole_window() {
+        let gate = Arc::new(GeometryGate::with_quota(1));
+        let _permit = gate.acquire().await;
+
+        let before = gate.snapshot();
+        tokio::time::sleep(Duration::from_millis(60)).await;
+        let after = gate.snapshot();
+
+        assert_eq!(
+            after.utilization_since(&before),
+            Some(1.0),
+            "整段被同一张许可占满，利用率就该是 1.0：持有 {}us 墙钟 {}us",
+            after
+                .active_permit_micros
+                .saturating_sub(before.active_permit_micros),
+            after.observed_micros.saturating_sub(before.observed_micros)
+        );
     }
 }
