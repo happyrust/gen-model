@@ -109,6 +109,13 @@ aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "d97
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
 pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "14e2836cbad5949f3e09365ab75c01328b1eab2e" }
+# ADR-053 direct 模式的取数底座（t-354）。**路径依赖，不是 git+rev**：两个仓都还在
+# `old/vendor/` 下当场演进，没有可钉的上游。稳定后按 pdms_io 的样子换成 git+rev。
+# e3d-io 自己 path 依赖 ../e3d-attlib，两者必须并排放在 old/vendor/ 下。
+# e3d-attlib 这里也直列一份：direct 转换器要用它的 base-27 反哈希把词属性还原成
+# WordType 字符串（ADR-053 P0 残差分类第 1 条），那是转换语义的一部分，不是传递依赖。
+e3d-io = { path = "../vendor/e3d-io" }
+e3d-attlib = { path = "../vendor/e3d-attlib" }
 
 clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }

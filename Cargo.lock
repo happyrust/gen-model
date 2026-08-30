@@ -98,6 +98,8 @@ dependencies = [
  "dashmap 7.0.0-rc2",
  "derive_more",
  "downcast-rs 1.2.1",
+ "e3d-attlib",
+ "e3d-io",
  "earcutr",
  "flume",
  "futures",
@@ -2417,6 +2419,26 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "e3d-attlib"
+version = "0.1.0"
+dependencies = [
+ "nom 8.0.0",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "e3d-io"
+version = "0.1.0"
+dependencies = [
+ "e3d-attlib",
+ "encoding_rs",
+ "nom 8.0.0",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.19",
 ]
 
 [[package]]

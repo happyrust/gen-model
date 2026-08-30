@@ -57,6 +57,17 @@ pub mod helper;
 
 pub mod cata_closure;
 
+/// ADR-053 direct 模式的取数底座：按 dbnum 池化 e3d-io 引擎、钉在各库
+/// `applied_sesno` 上，直接从 db 文件取元素属性，不经 SurrealDB。
+pub mod direct_store;
+
+/// e3d-io 的 `ElementExtraction` → 生成链消费的 `NamedAttrMap`（ADR-053 Q4）。
+pub mod direct_attmap;
+
+/// ADR-053 D3：type / name / backref 三个派生索引，一次全树扫描预建，
+/// 磁盘缓存 + 指纹失效。
+pub mod direct_index;
+
 pub mod parse_error;
 
 pub mod geom_error;
