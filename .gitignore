@@ -1,4 +1,6 @@
 /target
+# 并发验证用的隔离 CARGO_TARGET_DIR（共享 target 会给出 stale rlib）。
+/target-*
 .idea/
 /assets/
 /asset/
