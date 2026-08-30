@@ -27,6 +27,7 @@ use std::sync::{Arc, Mutex};
 use aios_core::{NamedAttrMap, RefU64};
 use dashmap::DashMap;
 use e3d_io::ReadOnlyEngine;
+use e3d_io::record::element::ParsedElement;
 use e3d_io::record::template::TemplateProvider;
 use e3d_io::refno::RefNo;
 
@@ -429,6 +430,53 @@ impl DirectStore {
         Ok(self.attrs(refno)?.map.clone())
     }
 
+    /// 一个元素的直接成员，**按记录里存的原序**。
+    ///
+    /// 顺序是语义的一部分，不是展示细节：BRAN 的成员序就是管路走向。所以这里交的是
+    /// `ParsedElement.members` 原样——**不排序、不去重、不从索引反向重建**
+    /// （`docs/specs/direct-mode-query-surface.md` §6.5.1）。实测 ams8000_0001 的 2332 个
+    /// 带成员表的元素里，有 6 个的成员顺序不等于 refno 序；按 refno 排一遍会让对拍
+    /// 照样绿，而模型已经错了。
+    ///
+    /// 空引用槽位在这里滤掉：那是没写过的槽，不是指向 0 号元素。
+    pub fn members(&self, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError> {
+        let dbnum = self.dbnum_of(refno)?;
+        if self.pinned(dbnum).is_none() {
+            self.pin_from_locator(dbnum)?;
+        }
+        self.members_in(dbnum, refno)
+    }
+
+    /// 直接成员，库由调用方指定。
+    pub fn members_in(&self, dbnum: i32, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError> {
+        let session = self.session_of(dbnum)?;
+        let mut session = session
+            .lock()
+            .map_err(|_| DirectStoreError::Poisoned { slot: "session" })?;
+        let parsed = self.parse(&mut session, dbnum, refno)?;
+
+        Ok(parsed
+            .members
+            .iter()
+            .filter(|member| member.is_valid())
+            .map(|member| RefU64::from_two_nums(member.word0, member.word1))
+            .collect())
+    }
+
+    /// 一个元素的直接子元素属性表，成员原序。
+    ///
+    /// 与 DB 模式 `get_children_named_attmaps` 同形。逐个子元素读，读不出来的那个
+    /// 直接上浮——生成链拿到一份少了一个孩子的列表，比拿到错误更难查。
+    pub fn children_named_attmaps(
+        &self,
+        refno: RefU64,
+    ) -> Result<Vec<NamedAttrMap>, DirectStoreError> {
+        self.members(refno)?
+            .into_iter()
+            .map(|member| self.named_attmap(member))
+            .collect()
+    }
+
     /// 转换之前的原始描述符抽取。
     ///
     /// 给探针用：定形规则（哪个存储形状对应哪个 `NamedAttrValue`）必须从真库里的实际
@@ -494,6 +542,35 @@ impl DirectStore {
         direct_attmap::to_named_attmap(&extraction).map_err(|source| DirectStoreError::Convert {
             refno: refno.to_string(),
             source,
+        })
+    }
+
+    /// 整条记录。成员表只在这一层出现——描述符抽取（[`DirectStore::extract`]）不带成员。
+    fn parse(
+        &self,
+        session: &mut DbSession,
+        dbnum: i32,
+        refno: RefU64,
+    ) -> Result<ParsedElement, DirectStoreError> {
+        let target = RefNo::new(refno.get_0(), refno.get_1());
+        let sesno = session.pin.sesno;
+
+        let view = session
+            .engine
+            .find_element(target)
+            .map_err(|error| DirectStoreError::Extract {
+                refno: refno.to_string(),
+                detail: error.to_string(),
+            })?
+            .ok_or(DirectStoreError::NoSuchElement {
+                refno: refno.to_string(),
+                dbnum,
+                sesno,
+            })?;
+
+        ParsedElement::parse(&view.raw_bytes).map_err(|detail| DirectStoreError::Extract {
+            refno: refno.to_string(),
+            detail,
         })
     }
 

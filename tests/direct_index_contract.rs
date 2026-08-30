@@ -328,6 +328,74 @@ fn repinning_to_another_session_invalidates_the_indexes() {
     );
 }
 
+/// **成员顺序是记录里存的那个顺序，不是 refno 顺序。**
+///
+/// `docs/specs/direct-mode-query-surface.md` §6.5.1：BRAN 的成员序就是管路走向，
+/// 排一遍序会让对拍照样绿而模型已经错了。这道门逐元素拿独立引擎扫出来的
+/// `parsed.members` 复核 [`DirectStore::members_in`]，并且**要求语料里确实存在
+/// 成员序不等于 refno 序的元素**——否则这条断言等于没断，谁加一句 `sort()` 都测不出来。
+#[test]
+fn members_come_back_in_the_order_the_record_stores_them() {
+    let Some((db, templates)) = fixtures() else {
+        return;
+    };
+    let _gate = env_gate();
+    let cache_dir = tempfile::tempdir().unwrap();
+    let store = store_for(&db, &templates, cache_dir.path());
+
+    // 「文件说的」：另开一份引擎全量扫，成员表原样留着。
+    let mut engine = ReadOnlyEngine::open(&db).expect("sample database opens");
+    let mut expected: Vec<(RefNo, Vec<RefNo>)> = Vec::new();
+    for element in engine.scan_elements(ScanTier::Full).expect("scans") {
+        let element = element.expect("every element reads");
+        let members: Vec<RefNo> = element
+            .parsed
+            .as_ref()
+            .expect("full tier")
+            .members
+            .iter()
+            .copied()
+            .filter(RefNo::is_valid)
+            .collect();
+        if !members.is_empty() {
+            expected.push((element.refno, members));
+        }
+    }
+    assert!(
+        !expected.is_empty(),
+        "the sample has no element with members; this gate would prove nothing"
+    );
+
+    let mut order_differs_from_refno_order = 0usize;
+    for (owner, members) in &expected {
+        let got = store
+            .members_in(8000, RefU64::from_two_nums(owner.word0, owner.word1))
+            .unwrap_or_else(|error| panic!("members of {owner:?}: {error}"));
+        let want: Vec<RefU64> = members
+            .iter()
+            .map(|m| RefU64::from_two_nums(m.word0, m.word1))
+            .collect();
+        assert_eq!(got, want, "member order of {owner:?}");
+
+        let mut sorted = want.clone();
+        sorted.sort();
+        if sorted != want {
+            order_differs_from_refno_order += 1;
+        }
+    }
+
+    // t-357 实测 ams8000_0001 上是 6 个。数字随语料走，但「至少有一个」是这道门的前提。
+    assert!(
+        order_differs_from_refno_order > 0,
+        "no element stores its members out of refno order, so sorting them would still pass"
+    );
+    println!(
+        "{} elements with members, {} of them stored out of refno order",
+        expected.len(),
+        order_differs_from_refno_order
+    );
+}
+
 /// Surreal 对拍探针（D3 验收原文的三道）：需要活的 SUL_DB 与已入库的 ams 工程，
 /// 有环境时手动跑。这里不自动跳过——跑了但连不上库就该红，免得「绿了」其实
 /// 是「没跑」。

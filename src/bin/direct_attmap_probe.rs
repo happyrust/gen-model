@@ -12,6 +12,10 @@
 //! 为了把差异抹平**：每一类都要能回答「为什么它不是错」，回答不了的就是真值冲突，
 //! 退出码 1。
 //!
+//! 「值不匹配」「仅 DB 有」两类都再按 `model_impact::attribute_affects_model` 切一刀：
+//! 生成链不消费的键两侧不一致不影响产物，不计冲突——但**照样逐键打印**，因为这条豁免
+//! 兜住的可能是库的缺陷（如 `CRFA`，见 `issues/ISSUE-027`），不是「没事」。
+//!
 //! 用法：
 //! ```text
 //! cargo run --release --bin direct_attmap_probe -- --dbnum 8000 --sample 200
@@ -145,6 +149,7 @@ struct RefnoDiff {
     normalized_keys: usize,
     lossy_keys: Vec<String>,
     mismatches: Vec<(String, String, String)>,
+    neutral_mismatches: Vec<(String, String, String)>,
     only_db: Vec<String>,
     only_db_neutral: Vec<String>,
     only_direct: Vec<String>,
@@ -166,8 +171,24 @@ fn diff_maps(direct: &NamedAttrMap, db: &NamedAttrMap) -> RefnoDiff {
                     d.normalized_keys += 1;
                 } else if db_lossy_view(dv, bv) {
                     d.lossy_keys.push(k.clone());
-                } else {
+                } else if aios_database::data_interface::model_impact::attribute_affects_model(k) {
                     d.mismatches
+                        .push((k.clone(), format!("{dv:?}"), format!("{bv:?}")));
+                } else {
+                    // 模型中立键两侧值不同：生成链不消费它，产物不受影响，所以不构成
+                    // 生成期等价性冲突——与下面「仅 DB 有」用的是同一条判据。
+                    //
+                    // 注意这条判据里「中立」含 `Unknown`（`attribute_affects_model` 把
+                    // 未登记的名字也判 false）。所以落进这个桶的键分两种：真的 data-only，
+                    // 和**还没人定性过**。后者的豁免是假设，不是结论——这正是必须打印的原因。
+                    //
+                    // **这条豁免必须限死在 `attribute_affects_model` 上，并且逐键打印。**
+                    // 已知的第一例是 `CRFA`：DB 写侧被 schema 的标量 ELEMENT 声明逼住，
+                    // 把引用数组的槽位数当成 refno 的 word0 写了进去（3 槽 → `pe:3_0`，
+                    // 4 槽 → `pe:4_0`，两个 id 在 pe 表里都不存在）。direct 读的是文件里
+                    // 的真引用，两边对不上是**库里错了**，不是 direct 读错了。
+                    // 详见 `issues/ISSUE-027`。悄悄吞掉它等于把库的缺陷洗成绿灯。
+                    d.neutral_mismatches
                         .push((k.clone(), format!("{dv:?}"), format!("{bv:?}")));
                 }
             }
@@ -201,6 +222,7 @@ struct Tally {
     only_direct_hist: BTreeMap<String, usize>,
     lossy_hist: BTreeMap<String, usize>,
     mismatch_hist: BTreeMap<String, usize>,
+    neutral_mismatch_hist: BTreeMap<String, usize>,
     read_fail_hist: BTreeMap<String, usize>,
     read_fail_samples: Vec<String>,
     noun_hist: BTreeMap<String, usize>,
@@ -347,6 +369,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut tally = Tally::default();
     let mut detail_budget = args.max_detail;
+    let mut neutral_detail_budget = args.max_detail;
     let mut direct_us = 0u128;
     let mut db_us = 0u128;
     let mut cross_db_owners = 0usize;
@@ -458,6 +481,13 @@ async fn main() -> anyhow::Result<()> {
         for k in &d.only_db_neutral {
             *tally.only_db_neutral_hist.entry(k.clone()).or_default() += 1;
         }
+        for (k, dv, bv) in &d.neutral_mismatches {
+            *tally.neutral_mismatch_hist.entry(k.clone()).or_default() += 1;
+            if neutral_detail_budget > 0 {
+                neutral_detail_budget -= 1;
+                println!("  [neutral-diff] {refno} {k}: direct={dv} db={bv}");
+            }
+        }
         for k in &d.only_direct {
             *tally.only_direct_hist.entry(k.clone()).or_default() += 1;
         }
@@ -471,6 +501,7 @@ async fn main() -> anyhow::Result<()> {
             } else if d.normalized_keys > 0
                 || !d.lossy_keys.is_empty()
                 || !d.only_db_neutral.is_empty()
+                || !d.neutral_mismatches.is_empty()
             {
                 tally.normalized_only += 1;
             } else {
@@ -540,6 +571,12 @@ async fn main() -> anyhow::Result<()> {
     }
     if !tally.mismatch_hist.is_empty() {
         println!("值不匹配键（次数）：{:?}", tally.mismatch_hist);
+    }
+    if !tally.neutral_mismatch_hist.is_empty() {
+        println!(
+            "值不匹配但模型中立的键（不计冲突，但**每个都得有账**——CRFA 见 ISSUE-027）：{:?}",
+            tally.neutral_mismatch_hist
+        );
     }
     println!("\n--- 转换器回执 ---");
     if !tally.outside_schema_hist.is_empty() {

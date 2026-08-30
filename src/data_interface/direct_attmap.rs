@@ -56,12 +56,19 @@ pub struct DirectAttrs {
     /// `raw` 是 i32 的百分之一度（`4294958296` = −9000 → DB 的 −90.0）。那是 e3d-io
     /// 描述符定型的缺口，该在那边修，不该在这里按一个样本编一条缩放规则。
     pub shape_conflicts: Vec<ShapeConflict>,
-    /// schema 声明成文本、文件里却是字/整数的键。
+    /// schema 声明与文件形状对不上，但**DB 读侧拿同一份声明也读不出来**的键。
     ///
-    /// 与上面一类分开，因为**它们不是同一种风险**。这些都是 DB 读侧自己也读不出来的
-    /// 簿记键（`TYPEX` / `UNIPAR` / `SPAMAP`），DB 视图上是空串或干脆没这个键，生成链
-    /// 不消费它们的值（P0 残差分类第 2、3 条）。这里按文件原样交出去——direct 是超集，
-    /// 超集无害；抹成空串反倒是把信息扔了。
+    /// 与上面一类分开，因为它们不是同一种风险：两侧同样读不出，就谈不上 direct 读错。
+    /// 两种来源：
+    ///
+    /// 1. 声明成文本、文件里是字/整数——`TYPEX` / `UNIPAR` / `SPAMAP` 这些簿记键，
+    ///    DB 视图上是空串或干脆没这个键，生成链不消费它们的值（P0 残差分类第 2、3 条）。
+    /// 2. 声明成单个引用、文件里是多个非空引用——吊架件家族的 `CRFA` 多接头情形。
+    ///    schema 自己在 21 个 noun 上声明标量、24 个 noun 上声明数组，标量那份连 DB
+    ///    自己写进去的数组都读不回来。
+    ///
+    /// 两种都按文件原样交出去——direct 是超集，超集无害；抹成空串或只留一个引用，
+    /// 反倒是把信息扔了。
     pub view_divergence: Vec<ShapeConflict>,
     /// 描述符在场但没解出值，且原因不是「本就没有值」。
     pub undecoded: Vec<Undecoded>,
@@ -231,6 +238,17 @@ fn convert_one(
         return;
     }
 
+    // schema 声明单个引用、文件里是多个非空引用：标量装不下，DB 读侧拿这份声明同样
+    // 读不出数组。交自然数组、记一笔——抹成其中一个才是编数据。
+    if is_ref_declaration(&declared)
+        && matches!(value, DescriptorValue::RefNoArray(_))
+        && let Some(natural) = natural(value)
+    {
+        map.insert(name.to_string(), natural);
+        out.view_divergence.push(conflict);
+        return;
+    }
+
     out.shape_conflicts.push(conflict);
 }
 
@@ -242,6 +260,11 @@ fn is_text_declaration(declared: &AttrVal) -> bool {
     )
 }
 
+/// 声明成**单个**引用的类型。数组声明不在其列——那一支 `coerce` 本来就转得过去。
+fn is_ref_declaration(declared: &AttrVal) -> bool {
+    matches!(declared, AttrVal::RefU64Type(_) | AttrVal::ElementType(_))
+}
+
 /// 文件在说「这里什么都没有」。
 ///
 /// 空引用（`0/0`）与全零字都是未写入的槽位，不是值为零。真库上 `SLOREF` 解出
@@ -250,8 +273,8 @@ fn is_nothing(value: &DescriptorValue) -> bool {
     use DescriptorValue as D;
     match value {
         D::Unset => true,
-        D::RefNo(r) => r.word0 == 0 && r.word1 == 0,
-        D::RefNoArray(v) => v.iter().all(|r| r.word0 == 0 && r.word1 == 0),
+        D::RefNo(r) => is_null_ref(r),
+        D::RefNoArray(v) => v.iter().all(is_null_ref),
         D::RawWords(v) => v.iter().all(|w| *w == 0),
         D::WordArray(v) => v.iter().all(|w| *w == 0),
         D::IntArray(v) => v.is_empty(),
@@ -261,7 +284,13 @@ fn is_nothing(value: &DescriptorValue) -> bool {
     }
 }
 
-/// 文件自己的形状，不问 schema。只在 [`is_text_declaration`] 那一类上用。
+/// 空引用（`0/0`）：槽位没写过，不是「指向 0 号元素」。
+fn is_null_ref(refno: &RefNo) -> bool {
+    refno.word0 == 0 && refno.word1 == 0
+}
+
+/// 文件自己的形状，不问 schema。只在 [`is_text_declaration`] 与
+/// [`is_ref_declaration`] 那两类上用。
 fn natural(value: &DescriptorValue) -> Option<NamedAttrValue> {
     use DescriptorValue as D;
     Some(match value {
@@ -355,6 +384,18 @@ fn coerce(value: &DescriptorValue, declared: &AttrVal) -> Option<NamedAttrValue>
         (AttrVal::RefU64Type(_) | AttrVal::ElementType(_), D::RefNo(r)) => {
             NamedAttrValue::RefU64Type(refu64(*r))
         }
+        // 吊架件家族（VSPR/CLEV/HNUT/HROD/…）的 `CRFA`：schema 在这 21 个 noun 上声明
+        // 标量 `ELEMENT`，另 24 个 noun 上声明 `RefU64Vec`，而文件与 DB 写侧存的都是
+        // 引用数组、槽位大多为空。恰好一个非空槽 = 标量声明想要的就是它，投影不是猜。
+        // 全空落 [`is_nothing`] 收成 unset；多个非空标量装不下，由调用方记视图分歧。
+        (AttrVal::RefU64Type(_) | AttrVal::ElementType(_), D::RefNoArray(v)) => {
+            let mut live = v.iter().filter(|r| !is_null_ref(r));
+            let only = live.next()?;
+            if live.next().is_some() {
+                return None;
+            }
+            NamedAttrValue::RefU64Type(refu64(*only))
+        }
         (AttrVal::RefU64Array(_), D::RefNoArray(v)) => {
             NamedAttrValue::RefU64Array(v.iter().map(|r| RefnoEnum::from(refu64(*r))).collect())
         }
@@ -444,6 +485,38 @@ fn declared_name(declared: &AttrVal) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use e3d_io::record::template::{EncodedLocation, StorageDescriptor, StorageLayout};
+
+    /// 一个解码成功的属性。存储布局字段与本模块无关，给最小值即可。
+    fn decoded(name: &str, value: DescriptorValue) -> ExtractedAttribute {
+        ExtractedAttribute {
+            hash: 0,
+            name: name.to_string(),
+            storage_type_code: 0,
+            semantic_type_code: None,
+            semantic_size: None,
+            layout: StorageLayout::Compact,
+            storage: StorageDescriptor {
+                storage_words: 0,
+                location: EncodedLocation { raw: 0 },
+                flags: 0,
+            },
+            status: AttributeExtractionStatus::Decoded,
+            value: Some(value),
+        }
+    }
+
+    /// 在一个只认识这一个键的 schema 下转一个属性，看它落进哪个桶。
+    fn convert(
+        attribute: ExtractedAttribute,
+        declared: AttrVal,
+    ) -> (BTreeMap<String, NamedAttrValue>, DirectAttrs) {
+        let declared_type = move |_: &str| Some(declared.clone());
+        let mut map = BTreeMap::new();
+        let mut out = DirectAttrs::default();
+        convert_one(&attribute, &declared_type, &mut map, &mut out);
+        (map, out)
+    }
 
     #[test]
     fn a_word_of_zero_is_the_empty_string_not_the_name_of_zero() {
@@ -492,6 +565,73 @@ mod tests {
         assert_eq!(
             coerce(&full, &AttrVal::Vec3Type([0.0; 3])),
             Some(NamedAttrValue::Vec3Type(Vec3::new(1.0, 2.0, 3.0)))
+        );
+    }
+
+    /// 吊架件家族的 `CRFA`：schema 在这 21 个 noun 上声明标量，文件里却是引用数组，
+    /// 而数组只有一个槽有值。那一个就是标量声明要的东西，投影过去不是猜。
+    #[test]
+    fn a_reference_array_with_one_live_slot_projects_onto_the_declared_scalar() {
+        let value = DescriptorValue::RefNoArray(vec![
+            RefNo::new(0, 0),
+            RefNo::new(7_333, 2_048),
+            RefNo::new(0, 0),
+        ]);
+        assert_eq!(
+            coerce(&value, &AttrVal::ElementType(String::new())),
+            Some(NamedAttrValue::RefU64Type(refu64(RefNo::new(7_333, 2_048))))
+        );
+    }
+
+    /// 全空槽位说的是「这里什么都没有」，不是「指向 0 号元素」——记 unset，不进表。
+    #[test]
+    fn a_reference_array_with_no_live_slot_is_unset_not_a_zero_reference() {
+        let value = DescriptorValue::RefNoArray(vec![RefNo::new(0, 0), RefNo::new(0, 0)]);
+        let (map, out) = convert(decoded("CRFA", value), AttrVal::ElementType(String::new()));
+
+        assert!(map.is_empty());
+        assert_eq!(out.unset, vec!["CRFA".to_string()]);
+        assert!(out.shape_conflicts.is_empty());
+        assert!(out.view_divergence.is_empty());
+    }
+
+    /// **多个非空槽不许挑一个交差。** 标量声明装不下两个引用，扔掉其中一个就是编数据；
+    /// 交自然数组、记一笔视图分歧——DB 读侧拿这份标量声明本来也读不出数组。
+    #[test]
+    fn a_reference_array_the_scalar_declaration_cannot_hold_is_handed_over_whole() {
+        let value =
+            DescriptorValue::RefNoArray(vec![RefNo::new(7_333, 1), RefNo::new(7_333, 2)]);
+        assert!(coerce(&value, &AttrVal::ElementType(String::new())).is_none());
+
+        let (map, out) = convert(
+            decoded("CRFA", value),
+            AttrVal::ElementType(String::new()),
+        );
+
+        assert_eq!(
+            map.get("CRFA"),
+            Some(&NamedAttrValue::RefU64Array(vec![
+                RefnoEnum::from(refu64(RefNo::new(7_333, 1))),
+                RefnoEnum::from(refu64(RefNo::new(7_333, 2))),
+            ]))
+        );
+        assert!(out.shape_conflicts.is_empty());
+        assert_eq!(out.view_divergence.len(), 1);
+        assert_eq!(out.view_divergence[0].found, "RefNoArray[2]");
+        assert_eq!(out.view_divergence[0].declared, "ElementType");
+    }
+
+    /// 另外 24 个 noun 把同一个 `CRFA` 声明成数组，那一支不受投影臂影响：原样成数组，
+    /// 空槽也留着——文件说有十个槽就是十个槽。
+    #[test]
+    fn an_array_declaration_still_keeps_every_slot() {
+        let value = DescriptorValue::RefNoArray(vec![RefNo::new(0, 0), RefNo::new(7_333, 9)]);
+        assert_eq!(
+            coerce(&value, &AttrVal::RefU64Array(Default::default())),
+            Some(NamedAttrValue::RefU64Array(vec![
+                RefnoEnum::from(refu64(RefNo::new(0, 0))),
+                RefnoEnum::from(refu64(RefNo::new(7_333, 9))),
+            ]))
         );
     }
 
