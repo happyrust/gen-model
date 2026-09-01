@@ -100,6 +100,7 @@ dependencies = [
  "downcast-rs 1.2.1",
  "e3d-attlib",
  "e3d-io",
+ "e3d-model",
  "earcutr",
  "flume",
  "futures",
@@ -2438,6 +2439,21 @@ dependencies = [
  "nom 8.0.0",
  "serde_json",
  "sha2",
+ "thiserror 2.0.19",
+]
+
+[[package]]
+name = "e3d-model"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "e3d-attlib",
+ "e3d-io",
+ "earcutr",
+ "glam 0.29.3",
+ "manifold-csg",
+ "serde",
+ "serde_json",
  "thiserror 2.0.19",
 ]
 

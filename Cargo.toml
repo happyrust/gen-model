@@ -66,6 +66,7 @@ path = "tests/db8000_session_pairs.rs"
 [dependencies]
 config = "0.14.1"
 bincode = "1.3.3"
+e3d-model = { path = "../vendor/e3d-model" }
 # RVM 基准对拍：解析 AVEVA E3D 导出的 RVM/ATT（仅 rvm_verify feature 用）
 rvm-rs = { git = "https://github.com/happyrust/rvm-rs", optional = true }
 anyhow = "1.0.57"

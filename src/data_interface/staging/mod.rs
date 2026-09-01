@@ -56,6 +56,11 @@ pub async fn query_valid_insts(
         return Ok(Vec::new());
     }
     let keys = aios_core::get_inst_relate_keys(refnos);
+    let derived_inputs = refnos
+        .iter()
+        .map(|refno| refno.to_pe_key().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
     let mut response = active_data_db()
         .query(format!(
             r#"SELECT
@@ -69,11 +74,26 @@ pub async fn query_valid_insts(
                    AS insts,
                    booled_id != NONE AS has_neg, dt AS date
                FROM {keys}
-               WHERE aabb.d != NONE AND world_trans.d != NONE"#
+               WHERE aabb.d != NONE AND world_trans.d != NONE;
+               SELECT
+                   in AS refno, in.old_pe AS old_refno, in.owner AS owner,
+                   generic, aabb.d AS world_aabb, world_trans.d AS world_trans,
+                   out.ptset.d.pt AS pts,
+                   IF booled_id != NONE {{ [{{ "geo_hash": booled_id }}] }}
+                   ELSE {{ (SELECT trans.d AS transform, record::id(out) AS geo_hash
+                            FROM out->geo_relate
+                            WHERE visible && out.meshed && trans.d != NONE && geo_type = 'Pos') }}
+                   AS insts,
+                   booled_id != NONE AS has_neg, dt AS date
+               FROM inst_relate
+               WHERE in IN [{derived_inputs}] AND id NOT IN [{keys}]
+                 AND aabb.d != NONE AND world_trans.d != NONE"#
         ))
         .await?
         .check()?;
-    Ok(response.take(0)?)
+    let mut rows: Vec<aios_core::GeomInstQuery> = response.take(0)?;
+    rows.extend(response.take::<Vec<aios_core::GeomInstQuery>>(1)?);
+    Ok(rows)
 }
 
 /// 读路由 seam 的验收（T0.2）：上下文在场 → 被接线的读入口只看暂存库；
@@ -193,6 +213,9 @@ mod routing_tests {
                  CREATE inst_info:valid; CREATE inst_info:dangling;\
                  RELATE pe:⟨4000000001_1⟩->inst_relate:⟨4000000001_1⟩->inst_info:valid \
                      SET aabb = aabb:valid, world_trans = trans:identity, generic = 'PANE';\
+                 UPSERT inst_relate:derived_tube SET in = pe:⟨4000000001_1⟩, \
+                     out = inst_info:valid, aabb = aabb:valid, world_trans = trans:identity, \
+                     generic = 'TUBI', booled_id = 'tube_mesh';\
                  RELATE pe:⟨4000000001_2⟩->inst_relate:⟨4000000001_2⟩->inst_info:dangling \
                      SET aabb = aabb:valid, world_trans = trans:missing, generic = 'PANE';",
             )
@@ -207,7 +230,12 @@ mod routing_tests {
         let rows = with_staging_reads(ctx, super::query_valid_insts(&[good, dangling]))
             .await
             .expect("dangling transform must not poison the batch");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].refno, good);
+        assert_eq!(
+            rows.len(),
+            2,
+            "direct instance and derived TUBI must both load"
+        );
+        assert!(rows.iter().all(|row| row.refno == good));
+        assert!(rows.iter().any(|row| row.generic == "TUBI"));
     }
 }

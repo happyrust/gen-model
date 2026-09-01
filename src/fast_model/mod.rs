@@ -1,3 +1,5 @@
+pub mod e3d_mesh_store;
+pub mod e3d_model_service;
 pub mod gen_model;
 
 pub mod concurrency;
