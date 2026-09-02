@@ -293,7 +293,7 @@ durable 落定」（直写路径 `applied` ⇒ 尾事务已提交），`model_st
       与 `GEN/src/data_interface/mod.rs` 的 `pub mod staging`；删 `batch_worker.rs` 剩余 staged 护栏、
       `model_update_pending.rs::run_staged_non_regen_work` / `defer_staged_regen_settlement`、`increment_pipeline.rs` 残留 doc。
       依赖：T302。
-- [ ] T304 删 `GEN/tests/staged_regen_e2e.rs`、`staged_transform_e2e.rs`、`staged_pane_replay_probe.rs`；issue #10「连续增量新增分支
+- [x] T304 删 `GEN/tests/staged_regen_e2e.rs`、`staged_transform_e2e.rs`、`staged_pane_replay_probe.rs`；issue #10「连续增量新增分支
       落进模型树」在直写路径补一条对应用例。依赖：T171、T303。
       **2026-09-02 16:30 前半完成**（fable-5-1-7，用户指令）：新增 `src/data_interface/issue10_direct_add_node.rs`（cfg(test)）
       `added_branches_land_in_the_model_tree_across_consecutive_direct_increments`——生产同一份渲染直打 `table_parity` 起的生产 schema
@@ -303,6 +303,11 @@ durable 落定」（直写路径 `applied` ⇒ 尾事务已提交），`model_st
       改调 `ActiveStagedWindow::stage_parsed_window(&mut self, …)`（cfg(test)，搬进 `staging/lifecycle.rs`，P3 随目录删），
       `increment_pipeline.rs` 从此零 `staging::` 引用。lib 串行 1407 = 1303 绿 / 8 红（基线同名）/ 96 ignored。
       **后半未做**：三个 `tests/staged_*.rs`（现 `#![cfg(any())]`）的物理删除仍依赖 T303。
+      **2026-09-02 17:57 后半完成**（fable-5-1-12，用户指令「现在就删，参考从 git 历史拿」）：三文件已物理删除，与本追记
+      单独一笔提交 `chore(tests): remove retired staged e2e tests (spec 035 T304)`。对 T303 的依赖解除——三文件自 `#![cfg(any())]` 起就不参与编译，
+      替身 `issue10_direct_add_node.rs` 16:30 已在。要抄场景搭建从历史拿：退役前原文 `git show 27f27f15^:tests/staged_regen_e2e.rs`
+      （另两个同法），`#![cfg(any())]` 版在 `27f27f15`。删后 `cargo check --all-targets` 绿。`docs/specs/core3d-partial-update-test-cases.md:261`
+      仍把 `tests/staged_regen_e2e.rs` 写成「落点」，该落点应改指直写侧用例，未在本步改。
 - [ ] T308 **新增（清理清单 A 桶，2026-09-02）**：`manual_update::expand_staged_reverse_cascade` 删；`room_fixture.rs:729` ignored live
       用例改直写形态或删；`stage_parsed_window` 随 T303 一并删（T112 第二步）。依赖：T303。
       **2026-09-02 15:50 提前做掉一半**（fable-5-1-7，用户「继续删除其他不需要的逻辑」）——`active_staging_writes()` 恒 `None` 后的
