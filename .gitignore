@@ -92,6 +92,13 @@ __pycache__/
 # 会话草稿工作区（仓库根与 python/ 下都会出现，只在本机有意义）
 .scratch/
 
+# 进程与 agent 会话在仓库根留下的本机产物（都能重建，不反映代码状态）：
+# 单实例锁、根目录草稿探针输出、会话恢复导出、落盘的失败/停滞记录
+/.gen-model.instance.lock
+.scratch-*.txt
+/.session-restore/
+/logs/
+
 # Python 绑定测试沙箱的重型/可再生数据（配置与脚本入库；数据用
 # python/testbed/Sync-TestbedProjects.ps1 重灌，SurrealDB 数据目录可随时重基线）
 /python/testbed/projects/
