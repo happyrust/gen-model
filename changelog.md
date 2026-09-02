@@ -18,6 +18,29 @@
 
 ### 变更
 
+- **五类复用曲面原语的身份键带上段数，单位行携带段数落库（specs/009 T041，ADR-044 决策 2；
+  改身份 = 整库重建）。** 单位行的半径恒为 1、真实尺寸只在实例变换里，所以 `hash_unit_mesh_params()`
+  与 `gen_unit_shape()` 都在**原件**上按真实半径把段数算好：柱 `unit_cylinder_identity(n)`
+  （`LCylinder` 与非切角 `SCylinder` 同函数同行）、球只混 `n`（`stacks` 恒 `n/2` 不进键）、同心
+  Snout 混大端段数、`CTorus` 混 `(ring, tube)` 二元组、`RTorus` 只混 `ring`、碟把 raw `prad` 换成
+  `f32_round_3(prad/pdia)`（落库同一个量化值）再混 `DishSegments` 枚举（球碟二元 / 椭圆碟三元，
+  分支自带，前缀撞不上）。段数随单位参数携带（`segments` / `ring_segments`，
+  `skip_serializing_if = None`，原件与旧行都不带），分发臂经 vendor 访问器读携带值、原件按同一条
+  规则现算；`manifold_tessellate::unit_mesh_identity`（写死 32 / 16×36）整组删除。为此把
+  `libgm_discretise` 进键的那一半（容差、整圆 / 部分回转公式、§7.9.1 调用点表、两种碟母线）搬进
+  aios-core `prim_geo::libgm_discretise`，本仓原样 `pub use`——定义仍只有一处，只是住到了算键的
+  crate。`SCylinder` / `LSnout` **不改 bincode 字节**（SSCL 与偏心 Snout 的键逐位不变，`t041_b6`
+  钉住）：非切角柱的单位形状直接是 `LCylinder::unit_with_segments(n)`，`convert_to_unit_param`
+  按实际类型落变体，`canonical_unit_param_json` 不再按 id 特判柱；`CYLINDER_GEO_HASH` /
+  `SPHERE_GEO_HASH` 删除，`TUBI_GEO_HASH`（`inst_geo:⟨2⟩`）保留为**唯一**按固定 id 寻址的曲面行，
+  其段数 32 收成具名欠账 `pdms_inst::TUBI_UNIT_SEGMENTS`（原状，管段共用一行带不了口径）。
+  T039 源码门改判：不再接受 `unit_mesh_identity::`，接受携带值访问器。顺带修 `t041_b1` 的夹具
+  （`dish_of` 第二参相对直径，`0.25` 得到的是 `h/a = 0.5`，与自检不是同一件碟；改 `0.125`
+  并钉断言）。验证：`cargo test --lib` **1328 通过 / 0 失败 / 99 ignored**（此前 1308 / 8 红），
+  `t041_*` 11/11、`aabb_tree` 白名单、T039 / T042 源码扫描全绿；vendor `prim_geo` 六模块 22/22；
+  `cargo check --lib --bins --tests` 绿。**仍欠**：整库重建（endgame plan D1 同批）、C4 整体门
+  （库 A 副本五类应 474 行）、vendor 推上游 + `Cargo.toml` 升 rev（提交态钉的仍是 `d97586c7`，
+  升 rev 前提交态编不过）、T049 RVM 抽检在重建后跑。
 - **未指定时点的模型生成一律取文件最新会话（ADR-054，取代 ADR-053 Q3）。**
   用户拍板原话「如果没有指定时间，默认就是要使用最新的数据去生成模型」。当前投影的时点
   与库文件权威换源：`E3dModelService::from_current` 的 pin 来自 MDB 成员、时点留空，生成时
@@ -34,6 +57,18 @@
   已知代价：`ModelTarget` 带 `(file, session)` 摘要，切换后存量凭证全部失效一次，首显整片
   重生成。验证：`cargo check --lib --bins` 绿；lib 单测 1297 绿，8 红均为本变更之外的在飞
   工作（`aabb_tree` 白名单、`pdms_inst` t041 段数分行），与本条无关。
+
+### 修复
+
+- **`aabb_tree` 树写点白名单跟上 `aabb_refresh.rs` 的搬家。** AABB 直写刷新
+  （`update_inst_relate_aabbs_by_refnos*`）已从 `occ_generate.rs` 搬到 `fast_model/aabb_refresh.rs`
+  （旧生成器退到 `legacy_model` feature 后面），可 `tree_write_sites_stay_on_the_audited_whitelist`
+  的白名单仍写着 `occ_generate.rs`、源码钉也还留在那边——新文件写树却没登记，门红得正确。
+  白名单条目换成 `aabb_refresh.rs`，`aabb_write_order_tests` 那组源码钉（记录先于指针、锁跨
+  判定→事务→同步、串行锁先于树锁、每次变化同事务 bump epoch、崩溃注入点位置）连同
+  `aabb_change_tests` / `flexible_geometry_deserialize_tests` / live 用例一起搬进 `aabb_refresh.rs`，
+  钉的边界改为「函数签名起到紧随其后的 `tree_box_changed`」；`occ_generate.rs` 里只留
+  生成器自己的钉，边界改成 `pub(crate) use super::aabb_refresh::*;` 那条 re-export 接缝。
 
 ## 2026-08-30
 

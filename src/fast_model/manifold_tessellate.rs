@@ -14,7 +14,7 @@ use crate::fast_model::libgm_discretise;
 use crate::fast_model::manifold_csg::manifold_to_plant_mesh;
 use crate::fast_model::mesh_primitives;
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
-use aios_core::prim_geo::Revolution;
+use aios_core::prim_geo::{CircularTorusSegments, DishSegments, Revolution};
 // `prim_geo` 下 `facet` 与 `polyhedron` 各有一个 `Polygon`，走模块路径点名，别用 glob 重导出。
 use aios_core::prim_geo::polyhedron::{Polygon, Polyhedron};
 use aios_core::prim_geo::wire::CurveType;
@@ -34,22 +34,15 @@ const AXIS_IN_PLANE_EPS: f32 = 1e-4;
 /// 一起，否则「唯一一份」只是句注释。
 use crate::fast_model::libgm_discretise::FACET_TOL_MM;
 
-/// 单位网格身份（ADR-026）当前锁死的段数——**按构造就是错的，欠 T041**。
-///
-/// 柱与球走一份缓存的单位网格给所有半径复用，所以这份网格带不了一个随半径变的段数：
-/// `libgm_discretise::cylinder_segments` 在这两处根本用不上。活库实测这有多离谱：
-/// 写死的 32 段只有 **2.0%** 的圆柱实例是对的，90.8% 过细，而 r ≥ 295mm 的柱在 32 段
-/// 下弦高 1.42mm、超 [`FACET_TOL_MM`] 三倍（`docs/evidence/2026-08-23-occ-retire-census.md`）。
-///
-/// 收成一处命名常量而不是散在三个 match 臂里的裸字面量（T039），是为了让下一个人
-/// 一眼看见这是笔债而不是一个取值。**值一个都不许改**：身份键不变而网格内容变了，
-/// 等于在稳定的 `geo_hash` 底下悄悄换掉几何。ADR-044 决策 2 把段数混进身份键之后
-/// （T041），这一整组随两处调用一起删掉，改按真实半径算。
-mod unit_mesh_identity {
-    pub const CYLINDER_SEGMENTS: i32 = 32;
-    pub const SPHERE_STACKS: u32 = 16;
-    pub const SPHERE_SLICES: u32 = 36;
-}
+// 单位网格的段数从哪来（T041，ADR-044 决策 2）：
+//
+// 柱 / 球 / 同心 Snout / 两种环面 / 碟走一份共享的单位网格，单位行的半径恒为 1，
+// 段数不能从它身上算——所以段数在**原件**上按真实半径算好、随单位参数一起落库
+// （`LCylinder::segments` 一类字段），并且是 `geo_hash` 的一部分：同段数等价类共享
+// 一行，跨等价类分行。下面的分发臂一律通过 vendor 的 `segment_count()` /
+// `segment_counts()` / `ring_segment_count()` 读**携带值**；同一个访问器对没带段数的
+// 原件（RVM 对拍、单测直接喂真实尺寸）按同一条 `libgm_discretise` 规则现算，两条路
+// 只有一份规则。此前那组写死的 `unit_mesh_identity`（32 / 16×36）随 T041 整组删除。
 
 /// 对齐 `Shape::box_centered(1,1,1)`。
 pub fn tessellate_unit_box() -> PlantMesh {
@@ -57,7 +50,9 @@ pub fn tessellate_unit_box() -> PlantMesh {
 }
 
 /// 对齐 `Shape::cylinder_radius_height(0.5, 1.0)`：底在 z=0，顶在 z=1。
-pub fn tessellate_unit_cylinder(circular_segments: i32) -> PlantMesh {
+/// 段数与其余生成器同走 `segs()` 的 `u32`；manifold 那边要 `i32`，在这里转。
+pub fn tessellate_unit_cylinder(circular_segments: u32) -> PlantMesh {
+    let circular_segments = i32::try_from(circular_segments).unwrap_or(i32::MAX);
     manifold_to_plant_mesh(&Manifold::cylinder(1.0, 0.5, 0.5, circular_segments, false))
 }
 
@@ -695,8 +690,10 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             if !c.check_valid() {
                 return Err(anyhow!("PrimLCylinder is degenerate"));
             }
+            // 单位行读携带的段数；原件按 `libgm_discretise::cylinder_segments` 现算。
+            let cylinder_segments = c.segment_count();
             covered(
-                tessellate_unit_cylinder(unit_mesh_identity::CYLINDER_SEGMENTS),
+                tessellate_unit_cylinder(segs(cylinder_segments)),
                 "PrimLCylinder",
             )
         }
@@ -717,6 +714,11 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             if !c.check_valid() {
                 return Err(anyhow!("PrimSCylinder size is degenerate"));
             }
+            // 切角柱带真实尺寸落库，段数按自己的半径算（`GM_SlopeEndCyl` 与 `GM_Cylinder`
+            // 同一条规则）；非切角柱的单位行按 `PrimLCylinder` 落库（vendor
+            // `SCylinder::gen_unit_shape` 返回 LCylinder 的单位行），这里读到的
+            // `PrimSCylinder` 非切角只剩旧行与直接喂真实尺寸的调用，同一个访问器现算。
+            let cylinder_segments = c.segment_count();
             if c.is_sscl() {
                 let r = c.pdia / 2.0;
                 let h = c.phei.abs();
@@ -728,13 +730,13 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
                         h,
                         btm,
                         top,
-                        segs(libgm_discretise::cylinder_segments(r as f64, FACET_TOL_MM)),
+                        segs(cylinder_segments),
                     ),
                     "PrimSCylinder(SSCL)",
                 );
             }
             covered(
-                tessellate_unit_cylinder(unit_mesh_identity::CYLINDER_SEGMENTS),
+                tessellate_unit_cylinder(segs(cylinder_segments)),
                 "PrimSCylinder",
             )
         }
@@ -764,10 +766,12 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             if !s.check_valid() {
                 return Err(anyhow!("PrimSphere is degenerate"));
             }
+            // 键里只有 `n` 一个数（B5）；经向带数恒为 `n/2`，由规则模块给，不在这里除。
+            let sphere_segments = s.segment_count();
             covered(
                 mesh_primitives::unit_sphere(
-                    unit_mesh_identity::SPHERE_STACKS,
-                    unit_mesh_identity::SPHERE_SLICES,
+                    segs(libgm_discretise::sphere_stacks(sphere_segments)),
+                    segs(sphere_segments),
                 ),
                 "PrimSphere",
             )
@@ -779,6 +783,9 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             let height = (s.ptdi - s.pbdi).abs();
             let r_top = s.ptdm / 2.0;
             let r_bottom = s.pbdm / 2.0;
+            // 同心单位行读携带值；偏心 Snout 带真实尺寸，按两端半径的大者现算
+            // （`libgm_discretise::snout_segments`）。
+            let snout_segments = s.segment_count();
             covered(
                 mesh_primitives::gen_snout(
                     r_bottom,
@@ -786,11 +793,7 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
                     height,
                     s.poff,
                     0.0,
-                    segs(libgm_discretise::snout_segments(
-                        r_bottom as f64,
-                        r_top as f64,
-                        FACET_TOL_MM,
-                    )),
+                    segs(snout_segments),
                 ),
                 "PrimLSnout",
             )
@@ -799,69 +802,74 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             if !d.check_valid() {
                 return Err(anyhow!("PrimDish is degenerate"));
             }
-            if d.prad > 0.0 {
-                // 「椭圆碟」是托里球形封头（球冠 + 相切的环面拐角），形状与两段的
-                // 经向段数一起由权威规则给；`prad` 只是「椭圆还是球」的开关，
-                // 它的数值 Core3D 自己也丢掉（`CSG_BasicDIS` `0x10726D10`）。
-                let facets = libgm_discretise::elliptical_dish_facets(
-                    (d.pdia / 2.0) as f64,
-                    d.pheig as f64,
-                    FACET_TOL_MM,
-                )
-                .ok_or_else(|| anyhow!("PrimDish(elliptical) 尺寸退化，算不出母线与离散参数"))?;
-                let arc = mesh_primitives::TorisphericalArc {
-                    base_radius: d.pdia / 2.0,
-                    height: d.pheig,
-                    hub_radius: facets.hub_radius as f32,
-                    knuckle_radius: facets.knuckle_radius as f32,
-                    transition_angle: facets.transition_angle as f32,
-                };
-                covered(
-                    mesh_primitives::gen_elliptical_dish(
-                        arc,
-                        segs(facets.around),
-                        segs(facets.hub),
-                        segs(facets.knuckle),
-                    ),
-                    "PrimDish(elliptical)",
-                )
-            } else {
-                let facets = libgm_discretise::spherical_dish_facets(
-                    (d.pdia / 2.0) as f64,
-                    d.pheig as f64,
-                    FACET_TOL_MM,
-                )
-                .ok_or_else(|| anyhow!("PrimDish(spherical) 尺寸退化，算不出离散参数"))?;
-                covered(
+            // 段数元组：单位行携带（分支由枚举自带），原件按规则现算。母线形状参数
+            // （`hub_radius` / `knuckle_radius` / `transition_angle`）是尺度无关比值，
+            // 在单位尺寸上重算与真实尺寸等比，所以形状仍从 `libgm_discretise` 现解。
+            let segments = d
+                .segment_counts()
+                .ok_or_else(|| anyhow!("PrimDish 尺寸退化，算不出离散参数"))?;
+            match segments {
+                DishSegments::Elliptical {
+                    around,
+                    hub,
+                    knuckle,
+                } => {
+                    // 「椭圆碟」是托里球形封头（球冠 + 相切的环面拐角）；`prad` 只是
+                    // 「椭圆还是球」的开关，它的数值 Core3D 自己也丢掉
+                    // （`CSG_BasicDIS` `0x10726D10`）。
+                    let facets = libgm_discretise::elliptical_dish_facets(
+                        (d.pdia / 2.0) as f64,
+                        d.pheig as f64,
+                        FACET_TOL_MM,
+                    )
+                    .ok_or_else(|| {
+                        anyhow!("PrimDish(elliptical) 尺寸退化，算不出母线与离散参数")
+                    })?;
+                    let arc = mesh_primitives::TorisphericalArc {
+                        base_radius: d.pdia / 2.0,
+                        height: d.pheig,
+                        hub_radius: facets.hub_radius as f32,
+                        knuckle_radius: facets.knuckle_radius as f32,
+                        transition_angle: facets.transition_angle as f32,
+                    };
+                    covered(
+                        mesh_primitives::gen_elliptical_dish(
+                            arc,
+                            segs(around),
+                            segs(hub),
+                            segs(knuckle),
+                        ),
+                        "PrimDish(elliptical)",
+                    )
+                }
+                DishSegments::Spherical { around, meridional } => covered(
                     mesh_primitives::gen_spherical_dish(
                         d.pdia,
                         d.pheig,
-                        segs(facets.around),
-                        segs(facets.meridional),
+                        segs(around),
+                        segs(meridional),
                     ),
                     "PrimDish(spherical)",
-                )
+                ),
             }
         }
         PdmsGeoParam::PrimCTorus(t) => {
             if !t.check_valid() {
                 return Err(anyhow!("PrimCTorus is degenerate"));
             }
+            // 二元组（环向 / 管截面）：单位行携带，原件按 `libgm_discretise::torus_ring_segments`
+            // 与 `circular_torus_tube_segments` 现算。
+            let CircularTorusSegments {
+                ring: ring_segments,
+                tube: tube_segments,
+            } = t.segment_counts();
             covered(
                 mesh_primitives::gen_circular_torus(
                     t.rins,
                     t.rout,
                     t.angle,
-                    segs(libgm_discretise::torus_ring_segments(
-                        t.rout as f64,
-                        FACET_TOL_MM,
-                        t.angle as f64,
-                    )),
-                    segs(libgm_discretise::circular_torus_tube_segments(
-                        t.rins as f64,
-                        t.rout as f64,
-                        FACET_TOL_MM,
-                    )),
+                    segs(ring_segments),
+                    segs(tube_segments),
                 ),
                 "PrimCTorus",
             )
@@ -870,17 +878,15 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
             if !t.check_valid() {
                 return Err(anyhow!("PrimRTorus is degenerate"));
             }
+            // 只有环向一元（B4）：单位行携带，原件按 `libgm_discretise::torus_ring_segments` 现算。
+            let ring_segments = t.ring_segment_count();
             covered(
                 mesh_primitives::gen_rectangular_torus(
                     t.rins,
                     t.rout,
                     t.height,
                     t.angle,
-                    segs(libgm_discretise::torus_ring_segments(
-                        t.rout as f64,
-                        FACET_TOL_MM,
-                        t.angle as f64,
-                    )),
+                    segs(ring_segments),
                 ),
                 "PrimRTorus",
             )
@@ -1678,8 +1684,10 @@ mod tests {
         );
     }
 
-    /// 段数只许有两个出处：`libgm_discretise` 的权威规则，或那一处点了名的
-    /// [`unit_mesh_identity`] 欠账。裸字面量一个都不许有（T039）。
+    /// 段数只许有两个出处：`libgm_discretise` 的权威规则，或单位行**携带**的段数
+    /// （vendor 的 `segment_count()` / `segment_counts()` / `ring_segment_count()`，
+    /// 它们对原件按同一条规则现算）。裸字面量一个都不许有（T039），点名欠账的
+    /// `unit_mesh_identity` 也随 T041 整组删除、不许再回来。
     ///
     /// 这条防的是回流。三个 `32` / `16` / `36` 散在 match 臂里的时候，它们跟旁边那些
     /// 真算出来的段数长得一模一样，没有任何东西说明其中三处是错的——而它们错得很
@@ -1693,23 +1701,30 @@ mod tests {
             .expect("dispatch exists")
             .1;
 
+        // T041 C3：欠账常量整组删除，生产半区里连名字都不许再出现。
+        assert!(
+            !production.contains(concat!("unit_mesh_", "identity::")),
+            "写死段数的欠账常量不许回来——段数要么携带、要么按规则算"
+        );
+
+        // 单位柱与单位球的段数必须经 `segs(...)` 喂进去（携带值或规则），三处一个都不少。
         let mut checked = 0;
         for call in ["tessellate_unit_cylinder(", "unit_sphere("] {
             for (at, _) in dispatch.match_indices(call) {
                 let tail = &dispatch[at + call.len()..];
                 let args = tail.split_once(')').map(|(head, _)| head).unwrap_or(tail);
                 assert!(
-                    args.contains("unit_mesh_identity::"),
-                    "{call} 的段数必须点名到欠账常量，不许退回裸数字: {args}"
+                    args.contains("segs("),
+                    "{call} 的段数必须经 segs() 从携带值或规则来，不许退回裸数字: {args}"
                 );
                 checked += 1;
             }
         }
         assert_eq!(checked, 3, "两处单位柱加一处单位球，少一处说明有人绕开了");
 
-        // 其余曲面原语的段数一律现算：`segs(...)` 是它们唯一的入口，实参不许是常数，
-        // 且用到它的那一臂必须自己从 `libgm_discretise` 取规则（碟那两臂先把规则算进
-        // 局部变量再喂，所以按臂看而不是按实参看）。
+        // `segs(...)` 是所有曲面原语段数的唯一入口，实参不许是常数；用到它的那一臂必须
+        // 自己从 `libgm_discretise` 取规则，或读单位行携带的段数（vendor 访问器）——
+        // 碟 / 环面那几臂先把携带值解进局部变量再喂，所以按臂看而不是按实参看。
         for (at, _) in dispatch.match_indices("segs(") {
             let tail = &dispatch[at + "segs(".len()..];
             let args = tail.split_once(')').map(|(head, _)| head).unwrap_or(tail);
@@ -1718,13 +1733,15 @@ mod tests {
                 "段数不许写成常数: segs({args})"
             );
         }
+        let carried_accessors = [".segment_count()", ".segment_counts()", ".ring_segment_count()"];
         for arm in dispatch.split("PdmsGeoParam::").skip(1) {
             if !arm.contains("segs(") {
                 continue;
             }
             assert!(
-                arm.contains("libgm_discretise::"),
-                "用了 segs() 的臂必须自己从 libgm_discretise 取规则: {arm}"
+                arm.contains("libgm_discretise::")
+                    || carried_accessors.iter().any(|accessor| arm.contains(accessor)),
+                "用了 segs() 的臂必须自己从 libgm_discretise 取规则或读单位行携带的段数: {arm}"
             );
         }
 

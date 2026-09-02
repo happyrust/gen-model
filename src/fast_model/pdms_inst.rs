@@ -65,7 +65,8 @@ fn render_geo_relate_replace(inst_info_id: &str, rows: &BTreeMap<String, String>
 ///
 /// `geo_hash` 相同意味着记录 id 相同——而**不同的 `PdmsGeoParam` 变体可以合法地
 /// 共享同一个 id**：普通 LCylinder 与非切角 SCylinder 的单位网格同为单位圆柱，
-/// `hash_unit_mesh_params` 按设计都返回 `CYLINDER_GEO_HASH`。因此 `param` 绝不能
+/// `hash_unit_mesh_params` 按设计对同一段数等价类返回同一个键（T041 之前是常量
+/// `CYLINDER_GEO_HASH`，之后是 `unit_cylinder_identity(段数)`）。因此 `param` 绝不能
 /// 走对象深合并：`UPSERT … MERGE { param: … }`（第一版 `INSERT IGNORE` 的替换写法）
 /// 会把先后两个变体并成 `{ PrimLCylinder: …, PrimSCylinder: … }` 双键对象，enum
 /// 反序列化从此永久失败，**所有**引用该共享行的根一个都生成不出来（2026-08-13
@@ -997,12 +998,29 @@ fn push_inst_relate_packets(packets: &mut Vec<SqlPacket>, rows: &BTreeMap<String
     }
 }
 
+/// 隐含直管段共用的那一行单位圆柱（`inst_geo:⟨2⟩` = `TUBI_GEO_HASH`）落库时带的段数。
+///
+/// **这是 T041 之后唯一一处不按真实半径算的段数，是笔具名的债。** 五类复用曲面原语
+/// 的段数从 2026-09 起在原件上按真实半径算好、随单位参数携带、并进身份键；管段做不到：
+/// 全项目所有 TUBI 共用 `TUBI_GEO_HASH` 这一个固定 id（`cata_model` 按常量写边，
+/// `resource/surreal/gy_common.surql` 按 `inst_geo:⟨2⟩` 汇总管长），口径只在实例变换
+/// 的 `scale` 里，一行带不了随口径变的段数。要让管段也按口径分段，得先给 TUBI 按段数
+/// 等价类分行并改掉那几处按常量寻址的地方——另开任务，不在 T041 里。
+///
+/// 取值就是 T041 之前 `unit_mesh_identity::CYLINDER_SEGMENTS` 写死的 32：管段的渲染
+/// 与此前逐位相同，**这个数不是「合理取值」，只是原状**（32 段只对 R=100 一个尺寸对）。
+const TUBI_UNIT_SEGMENTS: i32 = 32;
+
 fn canonical_unit_param_json(inst: &EleInstGeo) -> anyhow::Result<String> {
-    let param = if inst.geo_hash == aios_core::prim_geo::basic::CYLINDER_GEO_HASH {
-        // LCylinder 与非切角 SCylinder 共用单位圆柱 id；统一为一个单键 enum，
-        // 不能让先后顺序决定 `param` 的变体，更不能 MERGE 成双键对象。
-        PdmsGeoParam::PrimLCylinder(LCylinder::default())
+    let param = if inst.geo_hash == aios_core::prim_geo::basic::TUBI_GEO_HASH {
+        // 隐含直管段：`fill_basic_shapes` 按常量 id 写这一行，param 是 `SCylinder::default()`；
+        // 统一成单键 `PrimLCylinder`，段数是上面那笔具名的债。不能让先后顺序决定
+        // `param` 的变体，更不能 MERGE 成双键对象。
+        PdmsGeoParam::PrimLCylinder(LCylinder::unit_with_segments(TUBI_UNIT_SEGMENTS))
     } else {
+        // 其余一律取单位形状：非切角 SCylinder 的单位形状就是 LCylinder 的单位行
+        // （vendor `SCylinder::gen_unit_shape` / `convert_to_unit_param`），同键的两个
+        // 变体因此落成同一份 `PrimLCylinder` 规范 param，段数随单位参数携带（T041）。
         inst.geo_param.convert_to_unit_param()
     };
     serde_json::to_string(&param).map_err(Into::into)
@@ -2180,10 +2198,10 @@ mod tests {
         assert!(error.downcast_ref::<SaveConflict>().is_some(), "{error:#}");
     }
 
-    fn cylinder_batch(param: PdmsGeoParam) -> ShapeInstancesData {
+    fn cylinder_batch(geo_hash: u64, param: PdmsGeoParam) -> ShapeInstancesData {
         let refno = RefnoEnum::from("1/120");
         let inst = EleInstGeo {
-            geo_hash: aios_core::prim_geo::basic::CYLINDER_GEO_HASH,
+            geo_hash,
             refno,
             geo_param: param,
             transform: Transform::IDENTITY,
@@ -2202,13 +2220,54 @@ mod tests {
         batch
     }
 
+    /// 同一段数等价类的 LCylinder 与非切角 SCylinder 同键同行（T041 C1）：规范 param
+    /// 必须是**单变体** `PrimLCylinder`、携带同一个段数，不能让先后顺序决定变体，
+    /// 更不能 MERGE 成双键对象。
     #[test]
     fn shared_cylinder_id_has_one_canonical_single_variant_param() {
+        let lcyl = LCylinder {
+            pdia: 590.0,
+            ..Default::default()
+        };
+        let scyl = SCylinder {
+            pdia: 590.0,
+            phei: 3000.0,
+            ..Default::default()
+        };
+        let geo_hash = lcyl.hash_unit_mesh_params();
+        assert_eq!(geo_hash, scyl.hash_unit_mesh_params(), "夹具：两个变体本该同键");
+
         let plan = plan_for_test(vec![
-            cylinder_batch(PdmsGeoParam::PrimLCylinder(LCylinder::default())),
-            cylinder_batch(PdmsGeoParam::PrimSCylinder(SCylinder::default())),
+            cylinder_batch(geo_hash, PdmsGeoParam::PrimLCylinder(lcyl)),
+            cylinder_batch(geo_hash, PdmsGeoParam::PrimSCylinder(scyl)),
         ])
         .expect("shared unit cylinder variants normalize");
+        let sql = plan
+            .packets
+            .iter()
+            .map(|packet| packet.sql.as_str())
+            .join("\n");
+        assert_eq!(
+            sql.matches(&format!("UPSERT inst_geo:⟨{geo_hash}⟩")).count(),
+            1,
+            "{sql}"
+        );
+        assert!(sql.contains("PrimLCylinder"), "{sql}");
+        assert!(!sql.contains("PrimSCylinder"), "{sql}");
+        assert!(sql.contains("\"segments\":56"), "单位行必须携带段数: {sql}");
+        assert!(!sql.contains("MERGE"), "{sql}");
+    }
+
+    /// 隐含直管段那一行仍按常量 `TUBI_GEO_HASH` 寻址（`fill_basic_shapes` 写的是
+    /// `SCylinder::default()`），规范 param 是带 `TUBI_UNIT_SEGMENTS` 的单变体
+    /// `PrimLCylinder`——渲染与 T041 之前逐位相同，段数是那笔具名的债。
+    #[test]
+    fn the_tubi_row_keeps_its_constant_id_and_named_segment_debt() {
+        let plan = plan_for_test(vec![cylinder_batch(
+            aios_core::prim_geo::basic::TUBI_GEO_HASH,
+            PdmsGeoParam::PrimSCylinder(SCylinder::default()),
+        )])
+        .expect("tubi row normalizes");
         let sql = plan
             .packets
             .iter()
@@ -2217,7 +2276,10 @@ mod tests {
         assert_eq!(sql.matches("UPSERT inst_geo:⟨2⟩").count(), 1, "{sql}");
         assert!(sql.contains("PrimLCylinder"), "{sql}");
         assert!(!sql.contains("PrimSCylinder"), "{sql}");
-        assert!(!sql.contains("MERGE"), "{sql}");
+        assert!(
+            sql.contains(&format!("\"segments\":{TUBI_UNIT_SEGMENTS}")),
+            "{sql}"
+        );
     }
 
     fn snout_batch(param: LSnout, refno_text: &str) -> ShapeInstancesData {
@@ -2281,9 +2343,11 @@ mod tests {
 
     // ─── T041 身份键带段数：五类复用曲面原语的门 ────────────────────────────
     //
-    // **这一组里带 `t041_` 前缀的都还是红的，红得是对的**——段数今天根本没进
-    // `hash_unit_mesh_params()`。它们是 T041 的验收判据先落地，实现随后；
-    // 每一条的红都写在 `specs/009-retire-occ/tasks.md` 的「既有红测」里。
+    // 这一组带 `t041_` 前缀的是 T041 的验收判据（2026-08-25 先落地、按设计红着，
+    // 2026-09-02 实现落地后全绿）：段数在原件上按真实半径算好，进
+    // `hash_unit_mesh_params()`、随 `gen_unit_shape()` 携带落库；碟的 raw `prad` 收成
+    // `prad/pdia`。实现在 aios-core `prim_geo::{cylinder,sphere,snout,ctorus,rtorus,dish}`，
+    // 规则在 `prim_geo::libgm_discretise`（本仓 `libgm_discretise` 重导出）。
     //
     // 判据的形状统一是「**同一个形状比例、不同绝对尺寸**」：单位行的半径恒为 1，
     // 真实尺寸只在实例变换的 `scale` 里，所以只有这种配对才问得出「段数有没有进键」。
@@ -2306,6 +2370,7 @@ mod tests {
             rins: rout * ratio,
             rout,
             angle,
+            ..Default::default()
         }
     }
 
@@ -2315,6 +2380,7 @@ mod tests {
             rout,
             height,
             angle: 90.0,
+            ..Default::default()
         }
     }
 
@@ -2387,9 +2453,13 @@ mod tests {
     /// `a = 41` 与 `a = 46` 的**绕轴同为 24**，而 `(hub, knuckle)` 是 (2,2) 与 (2,3)。
     /// 只把 `around` 混进键的实现会让这两件共用一份经向划分不同的网格。
     ///
-    /// **今天它绿，但绿得不作数**：现在两个键之所以不同，是因为 `hash_unit_mesh_params`
-    /// 哈希的是未归一化的 `prad`（16.4 与 18.4）。等下面那条 `b1b` 把 `prad` 收成比值，
-    /// 这两件的其余分量就全相同了，这条才开始真的量三元组。
+    /// 2026-08-25 写下时它绿得不作数：两个键不同只是因为 `hash_unit_mesh_params`
+    /// 哈希的是未归一化的 `prad`（16.4 与 18.4）。`b1b` 把 `prad` 收成比值之后，这两件的
+    /// 其余分量全相同，这条才真的量三元组——**也才暴露出夹具本身写错了**：`dish_of` 的
+    /// 第二个参数是相对**直径**的高度比，写 `0.25` 得到的是 `h/a = 0.5`（a=41 / 46 都是
+    /// (24, 3, 3)，同键），与上面自检那一行的 `h = 0.25·a` 不是同一件碟。2026-09-02 实现
+    /// 落地时把夹具改成 `0.125`（`h = 0.125·2a = 0.25·a`），并把「夹具与自检是同一件碟」
+    /// 也钉成断言，免得再绿得不作数。
     #[test]
     fn t041_b1_a_dish_needs_all_three_segment_counts_in_its_key() {
         let (small, large) = (82.0_f32, 92.0_f32); // pdia = 2a
@@ -2401,9 +2471,15 @@ mod tests {
         assert_eq!((fl.around, fl.hub, fl.knuckle), (24, 2, 3));
         assert_eq!(fs.around, fl.around, "夹具失效：绕轴本该相同");
 
+        let (a, b) = (dish_of(small, 0.125, 0.2), dish_of(large, 0.125, 0.2));
+        assert_eq!(
+            (a.pdia / 2.0, a.pheig, b.pdia / 2.0, b.pheig),
+            (41.0, 41.0 * 0.25, 46.0, 46.0 * 0.25),
+            "夹具失效：两件碟必须就是上面自检的那两件（h/a = 0.25）"
+        );
         assert_ne!(
-            dish_of(small, 0.25, 0.2).hash_unit_mesh_params(),
-            dish_of(large, 0.25, 0.2).hash_unit_mesh_params(),
+            a.hash_unit_mesh_params(),
+            b.hash_unit_mesh_params(),
             "绕轴相同而拐角段数不同的两件碟不能共用一行"
         );
     }

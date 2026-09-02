@@ -843,16 +843,9 @@ fn round_dmat4(m: DMat4) -> DMat4 {
 
 #[cfg(test)]
 mod aabb_write_order_tests {
-    #[test]
-    fn targeted_geometry_remains_a_room_target_when_aabb_is_identical() {
-        assert!(super::room_target_required(false, true));
-        assert!(super::room_target_required(true, true));
-        assert!(super::room_target_required(true, false));
-        assert!(
-            !super::room_target_required(false, false),
-            "普通全量/维护重刷不得按处理集制造全库房间任务"
-        );
-    }
+    /// 生成器代码到这一行为止。AABB 刷新（`update_inst_relate_aabbs_by_refnos*`）连同
+    /// 它的源码钉已搬到 `aabb_refresh.rs`，留在这里的只有这个 re-export 接缝。
+    const GENERATOR_TAIL: &str = "\npub(crate) use super::aabb_refresh::*;";
 
     #[test]
     fn mesh_workers_propagate_query_write_and_join_failures() {
@@ -861,7 +854,7 @@ mod aabb_write_order_tests {
             .split_once("pub async fn gen_inst_meshes(")
             .expect("gen_inst_meshes exists")
             .1
-            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .split_once(GENERATOR_TAIL)
             .expect("gen_inst_meshes boundary")
             .0;
         assert!(body.contains(".check()?"), "{body}");
@@ -890,7 +883,7 @@ mod aabb_write_order_tests {
             .split_once("pub async fn gen_inst_meshes(")
             .expect("gen_inst_meshes exists")
             .1
-            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .split_once(GENERATOR_TAIL)
             .expect("gen_inst_meshes boundary")
             .0;
 
@@ -921,7 +914,7 @@ mod aabb_write_order_tests {
             .split_once("pub async fn gen_inst_meshes(")
             .expect("gen_inst_meshes exists")
             .1
-            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .split_once(GENERATOR_TAIL)
             .expect("gen_inst_meshes boundary")
             .0;
         assert!(
@@ -952,7 +945,7 @@ mod aabb_write_order_tests {
             .split_once("pub async fn gen_inst_meshes(")
             .expect("gen_inst_meshes exists")
             .1
-            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .split_once(GENERATOR_TAIL)
             .expect("gen_inst_meshes boundary")
             .0;
         assert!(
@@ -980,246 +973,13 @@ mod aabb_write_order_tests {
         assert!(corners.iter().any(|p| *p == glam::Vec3::new(4.0, 5.0, 6.0)));
     }
 
-    /// `aabb:⟨hash⟩` 记录必须先于 `inst_relate.aabb` 指针落库（与 `trans` 记录同一条
-    /// D9 教训）。顺序一旦被整理代码时悄悄换回去，不会有任何编译或运行报错——只会在
-    /// 崩溃/并发窗口里让 `aabb.d` 读者取到 none。这里把书写顺序钉成断言。
-    #[test]
-    fn aabb_records_persist_before_the_pointers_that_reference_them() {
-        let source = include_str!("occ_generate.rs");
-        let body = source
-            .split_once("async fn update_inst_relate_aabbs_by_refnos_mode(")
-            .expect("update_inst_relate_aabbs_by_refnos_mode must exist")
-            .1
-            .split_once("\n#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]")
-            .map(|(body, _)| body)
-            .unwrap_or(source);
-
-        assert!(
-            body.contains("aabb_z_revolve_apply_transform"),
-            "SpineArc 世界包围盒必须按环扇取样，不能退回盒子 8 角变换"
-        );
-        assert!(
-            body.contains("SpineArc.angle as revolve_sweep"),
-            "AABB 输入查询必须带上 PrimLoft SpineArc 扫掠角"
-        );
-
-        let records_at = body
-            .find("save_aabb_to_surreal(&chunk_aabbs)")
-            .expect("per-chunk aabb record insert missing");
-        let pointers_at = body
-            .find("update inst_relate aabb pointers")
-            .expect("pointer update missing");
-        let tree_at = body
-            .find("tree.sync_refnos(rstar_objs.clone())")
-            .expect("tree update missing");
-
-        assert!(
-            records_at < pointers_at,
-            "aabb 记录必须先于指针落库，否则指针会指向缺位记录"
-        );
-        assert!(
-            pointers_at < tree_at,
-            "内存树必须在本块 DB 写入全部成功之后才动，失败块不得留下树新库旧的半掺状态"
-        );
-    }
-
-    #[test]
-    fn direct_increment_publishes_pointer_room_trigger_and_epoch_before_tree_sync() {
-        let source = include_str!("occ_generate.rs");
-        let body = source
-            .split_once("async fn update_inst_relate_aabbs_by_refnos_mode(")
-            .expect("update_inst_relate_aabbs_by_refnos_mode must exist")
-            .1
-            .split_once("\n#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]")
-            .map(|(body, _)| body)
-            .unwrap_or(source);
-
-        let classify_at = body
-            .find("let chunk_changes =")
-            .expect("old-tree change classification missing");
-        let lock_at = body
-            .find("Some(GLOBAL_AABB_TREE.write().await)")
-            .expect("direct tree lock missing");
-        let input_at = body
-            .find("查询 inst_relate 包围盒输入失败")
-            .expect("aabb input query missing");
-        let records_at = body
-            .find("save_aabb_to_surreal(&chunk_aabbs)")
-            .expect("aabb record insert missing");
-        let pointer_at = body
-            .find("statements.push(update_sql.clone())")
-            .expect("pointer statement is not part of the direct transaction");
-        assert!(
-            body.contains("render_room_recalc_upserts"),
-            "durable room upsert renderer missing"
-        );
-        let room_at = body
-            .find("statements.push(room_upserts)")
-            .expect("room upserts are not part of the direct transaction");
-        let epoch_at = body
-            .find("render_spatial_epoch_bump")
-            .expect("spatial epoch bump missing");
-        let commit_at = body
-            .find("execute_surreal_checked(")
-            .expect("direct transaction execution missing");
-        let tree_at = body
-            .find("tree.sync_refnos(rstar_objs.clone())")
-            .expect("tree sync missing");
-
-        assert!(
-            lock_at < input_at,
-            "直写锁必须先于本块输入查询，禁止提交陈旧快照"
-        );
-        assert!(classify_at < records_at, "变化判定必须发生在任何持久写之前");
-        assert!(records_at < pointer_at, "AABB 内容记录必须先于指针事务");
-        assert!(
-            pointer_at < room_at && room_at < epoch_at,
-            "指针、房间任务、epoch 顺序漂移"
-        );
-        assert!(
-            epoch_at < commit_at && commit_at < tree_at,
-            "事务成功之前不得推进内存树"
-        );
-        assert!(body.contains("wrap_in_transaction(&statements)"));
-    }
-
-    /// 直写路径凡使「树应有内容」发生变化的已提交变更，必在同一事务内 bump spatial
-    /// epoch（2026-08-12 方案 G1）。
-    ///
-    /// 门控一旦退回 `durable_room_trigger && ...`，全量生成与 `manual_update_aabbs`
-    /// 的提交又会变成无痕迹变更：它们不产生 `spatial_reconcile` 意图行，落盘前崩溃
-    /// 的重启于是看到 sidecar 与库指纹相等、按 Reuse 复用一棵陈旧的树，而 /health
-    /// 的 drift 恒为 false，没有人看得见。回退即红。
-    #[test]
-    fn every_direct_box_change_bumps_the_spatial_epoch_in_the_same_transaction() {
-        let source = include_str!("occ_generate.rs");
-        let body = source
-            .split_once("async fn update_inst_relate_aabbs_by_refnos_mode(")
-            .expect("update_inst_relate_aabbs_by_refnos_mode must exist")
-            .1
-            .split_once("\n#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]")
-            .map(|(body, _)| body)
-            .unwrap_or(source);
-
-        assert!(
-            !body.contains("durable_room_trigger && !chunk_changes.is_empty()"),
-            "事务与 bump 不得再由 durable_room_trigger 门控: {body}"
-        );
-        assert!(
-            body.contains("if !chunk_changes.is_empty() {"),
-            "本块确有包围盒变化就必须走事务 + bump: {body}"
-        );
-        // durable_room_trigger 从此只决定「要不要随事务发布房间任务」。
-        assert!(
-            body.contains("durable_room_trigger && crate::options::room_incremental()"),
-            "room_upserts 的门控漂移: {body}"
-        );
-
-        let bump_at = body
-            .find("render_spatial_epoch_bump")
-            .expect("spatial epoch bump missing");
-        let plain_at = body
-            .find("} else if !update_sql.is_empty() {")
-            .expect("无变化的普通写分支必须存在");
-        assert!(
-            bump_at < plain_at,
-            "唯一允许不 bump 的直写是「重算值与树上旧值逐位相等」那一支: {body}"
-        );
-    }
-
-    /// 普通直写分支必须在「变更判定 → 事务 → 树同步」之前拿到写锁并一直持有。
-    ///
-    /// 只在同步那一瞬取锁有两个交错窗口：空闲轮可以在「epoch 已递增、树尚未同步」
-    /// 之间把旧树盖上新章；并发的删除清理可以挤在事务与同步之间，让刚摘掉的条目又
-    /// 被这里同步回树上，成为要等下次指针重建才自愈的幽灵。回退即红。
-    #[test]
-    fn the_plain_direct_branch_holds_the_tree_lock_across_its_transaction() {
-        let source = include_str!("occ_generate.rs");
-        let body = source
-            .split_once("async fn update_inst_relate_aabbs_by_refnos_mode(")
-            .expect("update_inst_relate_aabbs_by_refnos_mode must exist")
-            .1
-            .split_once("\n#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]")
-            .map(|(body, _)| body)
-            .unwrap_or(source);
-
-        let lock_at = body
-            .find("direct_tree = Some(GLOBAL_AABB_TREE.write().await)")
-            .expect("普通直写分支必须补上写锁");
-        let classify_at = body
-            .find("let chunk_changes =")
-            .expect("old-tree change classification missing");
-        let commit_at = body
-            .find("execute_surreal_checked(")
-            .expect("direct transaction execution missing");
-        let sync_at = body
-            .find("tree.sync_refnos(rstar_objs.clone())")
-            .expect("tree sync missing");
-
-        assert!(lock_at < classify_at, "变更判定必须在锁下: {body}");
-        assert!(
-            classify_at < commit_at && commit_at < sync_at,
-            "判定 / 事务 / 同步的次序漂移: {body}"
-        );
-        assert!(
-            !body.contains("let mut tree = GLOBAL_AABB_TREE.write().await;"),
-            "同步时才临时取锁等于把锁纪律退回原样: {body}"
-        );
-    }
-
-    /// 锁序（一致性闭环方案 D6）：`SPATIAL_STATE_SERIAL` 必须先于 `GLOBAL_AABB_TREE`
-    /// 写锁取得——durable 与普通直写两个获取点都是。次序反过来会与「持串行锁再取
-    /// 树锁」的收敛/重建/落盘路径互相等待，形成死锁。崩溃窗口 ① 的注入点必须落在
-    /// 「事务提交后、树同步前」。回退即红。
-    #[test]
-    fn direct_paths_take_the_spatial_serial_lock_before_the_tree_lock() {
-        let source = include_str!("occ_generate.rs");
-        let body = source
-            .split_once("async fn update_inst_relate_aabbs_by_refnos_mode(")
-            .expect("update_inst_relate_aabbs_by_refnos_mode must exist")
-            .1
-            .split_once("\n#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]")
-            .map(|(body, _)| body)
-            .unwrap_or(source);
-
-        let mut cursor = 0usize;
-        let mut lock_pairs = 0usize;
-        while let Some(offset) =
-            body[cursor..].find("direct_tree = Some(GLOBAL_AABB_TREE.write().await)")
-        {
-            let tree_at = cursor + offset;
-            assert!(
-                body[cursor..tree_at].contains("lock_spatial_serial().await"),
-                "第 {} 个树写锁获取点之前必须先取空间串行锁: {body}",
-                lock_pairs + 1
-            );
-            lock_pairs += 1;
-            cursor = tree_at + 1;
-        }
-        assert_eq!(lock_pairs, 2, "durable 与普通直写应各有一个取锁点: {body}");
-
-        let commit_at = body
-            .find("execute_surreal_checked(")
-            .expect("direct transaction execution missing");
-        let fail_at = body
-            .find("failpoint(\"spatial_direct_after_db_commit\")")
-            .expect("崩溃窗口 ① 注入点缺失");
-        let sync_at = body
-            .find("tree.sync_refnos(rstar_objs.clone())")
-            .expect("tree sync missing");
-        assert!(
-            commit_at < fail_at && fail_at < sync_at,
-            "崩溃注入点必须落在事务提交后、树同步前: {body}"
-        );
-    }
-
     #[test]
     fn targeted_regen_and_transform_use_the_incremental_aabb_entrypoint() {
         let regen = include_str!("occ_generate.rs")
             .split_once("pub async fn process_meshes_update_db_deep(")
             .expect("process_meshes_update_db_deep exists")
             .1
-            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .split_once(GENERATOR_TAIL)
             .expect("aabb refresh boundary")
             .0;
         assert!(
@@ -1254,7 +1014,7 @@ mod aabb_write_order_tests {
             .split_once("async fn process_one_model_root(")
             .expect("root pipeline exists")
             .1
-            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .split_once(GENERATOR_TAIL)
             .expect("root pipeline boundary")
             .0;
         assert!(body.contains("query_deep_visible_inst_refnos(refno).await?"));
@@ -1274,7 +1034,7 @@ mod aabb_write_order_tests {
             .split_once("pub async fn process_meshes_update_db_deep(")
             .expect("process_meshes_update_db_deep exists")
             .1
-            .split_once("pub async fn update_inst_relate_aabbs_by_refnos(")
+            .split_once(GENERATOR_TAIL)
             .expect("aabb refresh boundary")
             .0;
         // 只认函数名：调用一旦被 rustfmt 拆成多行，带实参的针就再也扎不中，
@@ -1287,259 +1047,5 @@ mod aabb_write_order_tests {
             .map(|offset| boolean_at + offset)
             .expect("targeted generation must refresh after boolean relations");
         assert!(boolean_at < final_refresh_at, "{body}");
-    }
-
-    /// 2026-08-12 epoch 痕迹方案 §6 场景 2/5 的 live 验收：普通直写刷新
-    /// （全量生成 / `manual_update_aabbs` 走的 H2 分支）的三段语义——
-    /// 树上缺该条目时刷新必 bump、逐位相等的重刷不 bump、落盘前「崩溃」后
-    /// 重启按指针重建且树追上库。
-    ///
-    /// 崩溃用「清空内存树 + 重新走启动加载」模拟，语义等价性与
-    /// `helper.rs::live_direct_delete_crash_before_persist_recovers_by_rebuild`
-    /// 的注释同一论证；真杀进程的剧本归 W5 门禁故障注入轮。用 testbed 沙箱跑
-    /// （先 `run_full_loop.py` 完成基线+生成），会推进 epoch 并重建项目树文件。
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "manual live: 用已跑过基线+生成的 testbed 沙箱库（见 python/testbed/README.md）"]
-    async fn live_direct_refresh_crash_before_persist_recovers_by_rebuild() {
-        use aios_core::accel_tree::acceleration_tree::AccelerationTree;
-        use aios_core::room::room::GLOBAL_AABB_TREE;
-
-        aios_core::init_test_surreal()
-            .await
-            .expect("connect surreal");
-        // 本用例经直写刷新自己喂树、不走启动装载：按状态机的测试装载模式显式
-        // 声明，否则进程态停在 Uninitialized，基线 persist 会被发布门拒绝
-        // （一致性闭环方案 §2 步骤 0；用例写于状态机落地之前，2026-08-12 补）。
-        crate::fast_model::spatial_state::mark_spatial_tree_fixture_preloaded();
-        let pending =
-            crate::data_interface::side_effect_pending::SideEffectCompensator::has_pending_spatial_work()
-                .await
-                .expect("query pending spatial work");
-        assert!(
-            !pending,
-            "沙箱库还有未收敛的空间意图（会走 HealByReplay 而不是本用例要验的 Rebuild）"
-        );
-
-        // 采一个已生成、带双指针的普通实例（TUBI 走指针回退分支，不在本用例口径）。
-        let mut response = aios_core::SUL_DB
-            .query(
-                "SELECT VALUE in FROM inst_relate \
-                 WHERE generic != 'TUBI' AND aabb.d != none AND world_trans.d != none LIMIT 1;",
-            )
-            .await
-            .expect("sample query transport")
-            .check()
-            .expect("sample query");
-        let sample: Option<aios_core::RefnoEnum> = response
-            .take::<Vec<aios_core::RefnoEnum>>(0)
-            .expect("decode sample refno")
-            .into_iter()
-            .next();
-        let refno = sample.expect("沙箱库里没有带指针的实例——先跑 python/testbed/run_full_loop.py");
-
-        // 基线：树上还没有它 → 第一次刷新必须 bump（first sighting counts as changed），
-        // 随后落盘，文件与库指纹自洽。
-        super::update_inst_relate_aabbs_by_refnos(&[refno], true)
-            .await
-            .expect("baseline refresh");
-        assert!(
-            GLOBAL_AABB_TREE
-                .read()
-                .await
-                .iter()
-                .any(|entry| entry.refno == refno.refno()),
-            "样本元素必须能算出包围盒并进树——换个样本或先跑生成"
-        );
-        crate::fast_model::aabb_tree::persist_aabb_tree()
-            .await
-            .expect("baseline persist");
-        let baseline = crate::fast_model::aabb_tree::spatial_tree_status().await;
-        assert_eq!(baseline["drift"], false, "基线必须自洽: {baseline}");
-        let epoch_baseline = baseline["db_epoch"].as_u64().expect("baseline db epoch");
-
-        // 逐位相等的重刷：库侧「树应有内容」没变，不得 bump、不得作废树文件。
-        super::update_inst_relate_aabbs_by_refnos(&[refno], true)
-            .await
-            .expect("no-op refresh");
-        let unchanged = crate::fast_model::aabb_tree::spatial_tree_status().await;
-        assert_eq!(
-            unchanged["db_epoch"].as_u64(),
-            Some(epoch_baseline),
-            "逐位相等的重刷不得 bump: {unchanged}"
-        );
-        assert_eq!(
-            unchanged["drift"], false,
-            "无变化重刷不得制造漂移: {unchanged}"
-        );
-
-        // 树落后于库（全量生成中途的形态）：刷新必须 bump 并把树追上。
-        GLOBAL_AABB_TREE
-            .write()
-            .await
-            .remove_by_refnos(&std::collections::HashSet::from([refno.refno()]));
-        super::update_inst_relate_aabbs_by_refnos(&[refno], true)
-            .await
-            .expect("catch-up refresh");
-        let bumped = crate::fast_model::aabb_tree::spatial_tree_status().await;
-        assert_eq!(
-            bumped["db_epoch"].as_u64(),
-            Some(epoch_baseline + 1),
-            "树上缺条目的刷新必须恰好 bump 一次: {bumped}"
-        );
-        assert_eq!(
-            bumped["drift"], true,
-            "落盘前的漂移必须在 /health 可见: {bumped}"
-        );
-
-        // 模拟崩溃重启：进程态丢失，文件陈旧 → 指纹失配且无意图 → 指针重建。
-        *GLOBAL_AABB_TREE.write().await = AccelerationTree::load(Vec::new());
-        crate::fast_model::aabb_tree::load_project_tree_verified()
-            .await
-            .expect("startup load");
-        let recovered = crate::fast_model::aabb_tree::spatial_tree_status().await;
-        assert_eq!(
-            recovered["startup_verdict"], "rebuilt",
-            "指纹失配且无意图必须走指针重建: {recovered}"
-        );
-        assert!(
-            GLOBAL_AABB_TREE
-                .read()
-                .await
-                .iter()
-                .any(|entry| entry.refno == refno.refno()),
-            "重建后的树必须追上库指针（样本元素回到树上）"
-        );
-        assert_eq!(
-            recovered["drift"], false,
-            "重建落盘后指纹必须追平: {recovered}"
-        );
-    }
-}
-
-#[cfg(test)]
-mod aabb_change_tests {
-    use super::tree_box_changed;
-    use parry3d::bounding_volume::Aabb;
-    use parry3d::math::Point;
-
-    fn cube(min: f32, max: f32) -> Aabb {
-        Aabb::new(Point::new(min, min, min), Point::new(max, max, max))
-    }
-
-    /// 变更基线是树上的旧值：恰有一条且逐位相等才算「没变」。定向重生成走「先删行再
-    /// 重插」，行内 old_aabb 恒为 none/新值，若拿它作基线，根下每个元素每次重生成都
-    /// 会白排一次房间任务（ADR-010 §4 的差异信号被结构性摧毁）。
-    #[test]
-    fn unchanged_only_when_exactly_one_equal_entry() {
-        let unchanged = [cube(0.0, 10.0)];
-        assert!(!tree_box_changed(&unchanged, &cube(0.0, 10.0)));
-        assert!(
-            tree_box_changed(&unchanged, &cube(0.0, 11.0)),
-            "盒子动了必须算变"
-        );
-    }
-
-    /// 树上没有条目 = 房间系统从没见过它，必须回填一次——隐含直管段此前从未进树，
-    /// 靠的正是这条语义完成一次性补账。
-    #[test]
-    fn first_sighting_counts_as_changed() {
-        assert!(tree_box_changed(&[], &cube(0.0, 10.0)));
-    }
-
-    /// 历史堆叠的重复条目（update_aabbs 写反的去重条件留下的）说明状态已经坏了，
-    /// 即使其中一条与新值相等也要重算一次才能收敛。
-    #[test]
-    fn historic_duplicates_force_a_recalc() {
-        let stacked = [cube(0.0, 10.0), cube(5.0, 15.0)];
-        assert!(tree_box_changed(&stacked, &cube(0.0, 10.0)));
-    }
-}
-
-#[cfg(test)]
-mod flexible_geometry_deserialize_tests {
-    use super::{deserialize_aabb_flexible, deserialize_transform_flexible};
-    use bevy_transform::prelude::Transform;
-    use parry3d::bounding_volume::Aabb;
-
-    #[derive(serde::Deserialize)]
-    struct Row {
-        #[serde(deserialize_with = "deserialize_aabb_flexible")]
-        aabb: Aabb,
-        #[serde(deserialize_with = "deserialize_transform_flexible")]
-        transform: Transform,
-    }
-
-    /// Surreal keeps mathematically integral coordinates as `i64` even when
-    /// neighboring coordinates are floats. The EQUI move regression contained
-    /// exactly `-48340i64` inside an otherwise floating-point AABB.
-    #[test]
-    fn aabb_and_transform_accept_mixed_integer_and_float_coordinates() {
-        let row: Row = serde_json::from_value(serde_json::json!({
-            "aabb": {
-                "mins": [-16390, -48900.023, -1640.3],
-                "maxs": [-16240.0, -48340, -1600.0002]
-            },
-            "transform": {
-                "translation": [-16315, -48900, -1640.3],
-                "rotation": [0, 0.0, -0.70710677, 0.70710677],
-                "scale": [1, 1.0, 1]
-            }
-        }))
-        .expect("mixed Surreal numeric kinds must deserialize");
-
-        assert_eq!(row.aabb.mins.y, -48900.023);
-        assert_eq!(row.aabb.maxs.y, -48340.0);
-        assert_eq!(row.transform.translation.x, -16315.0);
-        assert_eq!(row.transform.scale, glam::Vec3::ONE);
-    }
-
-    #[test]
-    fn geo_aabb_trans_treats_null_revolve_fields_as_linear() {
-        let row: super::GeoAabbTrans = serde_json::from_value(serde_json::json!({
-            "trans": {
-                "translation": [0, 0, 0],
-                "rotation": [0, 0, 0, 1],
-                "scale": [1, 1, 1]
-            },
-            "aabb": {
-                "mins": [0, 0, 0],
-                "maxs": [1, 1, 1]
-            },
-            "revolve_sweep": null,
-            "revolve_cw": null
-        }))
-        .expect("Line loft must deserialize with null SpineArc fields");
-        assert_eq!(row.revolve_sweep, None);
-        assert!(!row.revolve_cw);
-    }
-}
-
-#[cfg(test)]
-mod live_cwall_rr001_aabb_tests {
-    use super::update_inst_relate_aabbs_by_refnos;
-    use aios_core::RefnoEnum;
-
-    /// 刷新 AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 WALL/STWALL 世界包围盒。
-    /// 圆弧墙必须走环扇取样；随后用 Python `rvm_aabb_compare.py --fixture 1rs-wf03-w-c-rr001` 对拍。
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "live 8009: 刷新 1RS-WF03-W-C-RR001 WALL/STWALL aabb_d；需 DB_OPTION_FILE=DbOption"]
-    async fn live_8009_refresh_cwall_rr001_wall_aabbs() {
-        aios_core::init_surreal().await.expect("connect 8009");
-        let refnos: Vec<RefnoEnum> = [
-            "17496/105912",
-            "17496/105930",
-            "17496/105935",
-            "17496/105940",
-            "17496/105812",
-            "17496/105813",
-            "17496/105815",
-            "17496/105816",
-        ]
-        .into_iter()
-        .map(RefnoEnum::from)
-        .collect();
-        update_inst_relate_aabbs_by_refnos(&refnos, true)
-            .await
-            .expect("refresh WALL/STWALL aabb");
     }
 }

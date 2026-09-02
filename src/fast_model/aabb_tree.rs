@@ -2074,10 +2074,12 @@ mod tests {
         let whitelist = [
             // 直写删除：锁下探测 → 边删除+bump 同事务 → 摘树 → 标脏。
             "data_interface/helper.rs",
+            // 直写/durable 刷新：指针+bump 同事务，锁跨 [判定 → 事务 → 同步]
+            // （源码钉在同文件的 `aabb_write_order_tests`；2026-09 自 occ_generate.rs
+            // 搬出，旧生成器退到 legacy_model feature 后面后不再写树）。
+            "fast_model/aabb_refresh.rs",
             // 启动加载/指针重建与提交后收敛：本身即自愈动作，落盘自带盖章。
             "fast_model/aabb_tree.rs",
-            // 直写/durable 刷新：指针+bump 同事务，锁跨 [判定 → 事务 → 同步]。
-            "fast_model/occ_generate.rs",
             // 房间测试夹具（#[cfg(test)]，不在生产路径）。
             "fast_model/room_fixture.rs",
         ]

@@ -418,7 +418,8 @@
   必定判成硬边」，照抄时不要顺手归一化。
   开规格时连带一件：这个出参**一参两用**，`GM_Collar` 的侧壁归并走查拿 `|flags[k]|`
   当推进量（同上文件 §五），只实现法向那一半会让直纹面的三角/四边划分对不上。
-- [ ] T041（依赖 T038 + T053；T045 的爆炸半径结论已被 T053 取代）
+- [x] T041（依赖 T038 + T053；T045 的爆炸半径结论已被 T053 取代；**2026-09-02 代码落地**，
+  整库重建与 vendor rev 升级仍欠，见末段）
   `../vendor/old-aios-core/src/prim_geo/{cylinder,sphere,snout,ctorus,rtorus,dish}.rs`、
   `src/fast_model/pdms_inst.rs`、`src/fast_model/manifold_tessellate.rs`：
   **五类**复用型曲面原语的 `hash_unit_mesh_params()` 混入段数，`gen_unit_shape()`
@@ -426,6 +427,56 @@
   `canonical_unit_param_json` 的 `CYLINDER_GEO_HASH` 特判改按新键走；
   `manifold_tessellate::unit_mesh_identity` 整组删除。
   **改身份 = 整库重建**（ADR-044 决策 6）；范围与代价见 T053（库 A 392 → 474）。
+
+  **2026-09-02 落地（e3d-direct 分支，vendor `codex/libgm-snout-caliber` 工作树）。**
+  1. **规则搬家，定义仍只有一处。** 进身份键的那一半 `libgm_discretise`（`FACET_TOL_MM` /
+     `MAX_SEGMENTS` / 整圆与部分回转公式 / §7.9.1 调用点表 / 两种碟的母线解）搬到 aios-core
+     `prim_geo::libgm_discretise`，本仓 `fast_model::libgm_discretise` **原样 `pub use`**，调用方
+     一字不改；不进键的截面 / 轮廓那一半（`span_*` / `profile_*`、`RES_TOL_MM`）留在本仓。
+     `the_facet_tolerance_has_a_single_source` 改钉「本仓不得再定义、只许重导出一次」。
+     为什么非搬不可：算键的是 vendor 的 `prim_geo::*`，段数得在**原件**上按真实半径算，
+     规则只能住在它够得着的 crate。新增 `sphere_stacks(n) = n/2`（`0x100A20F0`）供生成器用。
+  2. **单位行携带段数**（`#[serde(default, skip_serializing_if = "Option::is_none")]`，原件上恒
+     `None`，读旧行不因缺字段失败）：`LCylinder.segments` / `Sphere.segments` /
+     `LSnout.segments`（同心才带）/ `RTorus.ring_segments`（一元）/
+     `CTorus.segments: Option<CircularTorusSegments{ring, tube}>`（二元组）/
+     `Dish.segments: Option<DishSegments>`（枚举：`Spherical{around, meridional}` |
+     `Elliptical{around, hub, knuckle}`，分支与元数自带，B2 的前缀撞键不可能发生）。
+     每类一个访问器 `segment_count()` / `segment_counts()` / `ring_segment_count()`：
+     单位行读携带值，原件按同一条规则现算——哈希与落库同源（A3），分发臂只读它。
+  3. **键**：柱 `unit_cylinder_identity(段数)`（LCylinder 与非切角 SCylinder 同函数，同段数
+     同行）；球只混 `n`；同心 Snout 在 `alpha` + 高度符号之外混大端段数；CTorus 混
+     `(ring, tube)`；RTorus 只混 `ring`；碟把 raw `prad` 换成 `unit_prad() = f32_round_3(prad/pdia)`
+     （落库同一个量化值）再混段数枚举。`CYLINDER_GEO_HASH` / `SPHERE_GEO_HASH` 从 vendor
+     `basic.rs` 删除，`TUBI_GEO_HASH`（= 2）保留并写明它是唯一按固定 id 寻址的曲面行。
+  4. **SCylinder 不加字段**（B6：SSCL 的键是 bincode 字节）：非切角的 `gen_unit_shape()` 直接
+     返回 `LCylinder::unit_with_segments(n)`，`convert_to_unit_param` 的 `PrimSCylinder` 臂按
+     实际类型落回变体——同键两个变体的规范 param 从此在 vendor 就是单变体 `PrimLCylinder`，
+     `canonical_unit_param_json` 不再需要按 id 特判柱。LSnout 的 `segments` 同样靠 `None`
+     不写出保住偏心那支的 bincode 字节，`t041_b6` 两个钉死的值逐位未动。
+  5. **TUBI 是唯一留下的具名欠账**：`inst_geo:⟨2⟩` 全项目管段共用一行、按常量寻址
+     （`cata_model` 写边、`gy_common.surql` 汇总管长），一行带不了随口径变的段数。
+     `canonical_unit_param_json` 对 `TUBI_GEO_HASH` 写 `PrimLCylinder{segments: 32}`
+     （`pdms_inst::TUBI_UNIT_SEGMENTS`，就是 T041 之前写死的 32——原状，不是「合理取值」）。
+     要让管段按口径分段得先给 TUBI 分行并改掉按常量寻址的几处，另开任务。
+  6. **T039 改判**（C3）：`every_segment_count_is_named_or_computed` 不再接受
+     `unit_mesh_identity::`（生产半区连名字都不许出现），改接受 vendor 携带值访问器；
+     `segs()` / 裸数字 / 局部名三道判据不变，生成器调用点仍是 9 处。
+  7. **夹具修正一处**：`t041_b1` 的 `dish_of(…, 0.25, …)` 第二参是相对**直径**的比，得到的是
+     `h/a = 0.5`（a=41 / 46 都是 (24, 3, 3)，同键），与它自己那行自检的 `h = 0.25·a` 不是同一件
+     碟——`b1b` 收掉 raw `prad` 之后它才第一次真的量三元组，也才露出这个错。改成 `0.125`
+     并把「夹具就是自检那两件」钉成断言。
+
+  **验证**：`cargo test --lib` 全量 **1328 通过 / 0 失败 / 99 ignored**（此前 1308 / 8 红）；
+  `t041_*` 11 条全绿（含 `b6` 两个钉死的 SSCL / 偏心 Snout 键逐位不变、`a2` `b2` `b4` 反向门），
+  `aabb_tree` 白名单、T039 / T042 源码扫描、`libgm_discretise` 对照表经重导出全绿；
+  vendor `prim_geo::{cylinder,sphere,snout,ctorus,rtorus,dish,libgm_discretise}` 22/22
+  （每类新增「跨等价类分行 / 同等价类共享 / 单位行携带并重哈希同键」三件）；
+  `cargo check --lib --bins --tests` 绿。
+  **仍欠**：(a) **整库重建未做**——键已变，存量 `inst_geo` 行按旧键寻址，重建按 endgame plan D1
+  同批；(b) **C4 整体门未跑**——库 A 副本上五类应落 474 行，偏多 = 混了不该混的、偏少 = 漏了
+  一维；(c) vendor 改动只在本地 patch，`Cargo.toml` 钉的 rev 还是 `d97586c7`，**推上游 + 升 rev
+  之前提交态编不过**（既有「上游提交 → 升 rev」纪律）；(d) RVM 抽检（T049）在重建之后跑。
 
   **为什么非带不可**：单位行的半径恒为 1（`rout`/`pdia`/`pbdm` 都被归一化），
   真实尺寸只在实例变换的 `scale` 里。段数规则要真实半径，而单位参数里没有——
@@ -465,20 +516,21 @@
   **2026-08-25：下面 A / B 两组已经写成真单测**（`src/fast_model/pdms_inst.rs`，
   `t041_` 前缀共 11 条），**判据先落地、实现随后**——6 条按设计红着，
   逐条登记在本文件末尾的「既有红测」。绿的那 5 条是反向门，不许变红。
+  **2026-09-02：实现落地，11 条全绿**（「今天」列记的是 08-25 的状态，留作对照）。
 
-  | 测试 | 组 | 今天 |
-  |---|---|---|
-  | `t041_a1_cylinders_in_different_segment_classes_need_their_own_rows` | A1 | 红 |
-  | `t041_a2_two_cylinders_in_one_segment_class_still_share_a_row` | A2 | 绿 |
-  | `t041_a_snout_splits_by_its_larger_end_segment_class` | A1+A2 | 红 |
-  | `t041_b1_a_dish_needs_all_three_segment_counts_in_its_key` | B1 | 绿（**绿得不作数**，见下） |
-  | `t041_b1b_geometrically_similar_dishes_in_one_segment_class_share_a_row` | B1/A2 | 红 |
-  | `t041_b2_the_two_dish_branches_must_not_collide_on_a_shared_prefix` | B2 | 绿 |
-  | `t041_b3_a_circular_torus_needs_both_the_ring_and_the_tube_count` | B3 | 红 |
-  | `t041_b4_a_rectangular_torus_key_ignores_height` | B4 | 绿 |
-  | `t041_b4b_a_rectangular_torus_splits_by_its_ring_segment_class` | B4 | 红 |
-  | `t041_b5_a_sphere_key_carries_exactly_one_segment_count` | B5 | 红 |
-  | `t041_b6_the_already_sized_variants_keep_their_keys` | B6 | 绿 |
+  | 测试 | 组 | 08-25 | 09-02 |
+  |---|---|---|---|
+  | `t041_a1_cylinders_in_different_segment_classes_need_their_own_rows` | A1 | 红 | 绿 |
+  | `t041_a2_two_cylinders_in_one_segment_class_still_share_a_row` | A2 | 绿 | 绿 |
+  | `t041_a_snout_splits_by_its_larger_end_segment_class` | A1+A2 | 红 | 绿 |
+  | `t041_b1_a_dish_needs_all_three_segment_counts_in_its_key` | B1 | 绿（**绿得不作数**，见下） | 绿（夹具修正后真的量三元组） |
+  | `t041_b1b_geometrically_similar_dishes_in_one_segment_class_share_a_row` | B1/A2 | 红 | 绿 |
+  | `t041_b2_the_two_dish_branches_must_not_collide_on_a_shared_prefix` | B2 | 绿 | 绿 |
+  | `t041_b3_a_circular_torus_needs_both_the_ring_and_the_tube_count` | B3 | 红 | 绿 |
+  | `t041_b4_a_rectangular_torus_key_ignores_height` | B4 | 绿 | 绿 |
+  | `t041_b4b_a_rectangular_torus_splits_by_its_ring_segment_class` | B4 | 红 | 绿 |
+  | `t041_b5_a_sphere_key_carries_exactly_one_segment_count` | B5 | 红 | 绿 |
+  | `t041_b6_the_already_sized_variants_keep_their_keys` | B6 | 绿 | 绿（两个钉死的值未动） |
 
   两条要点，都是写测试时才看清的：
 
@@ -936,14 +988,16 @@
   证据 `docs/evidence/2026-08-24-negative-rins-census.md`。
   **仍欠**：vendor 未发布（Phase V 同批）。
 
-## 预期红测（T041 的判据先落地，实现随后）
+## 预期红测（T041 的判据先落地，实现随后）——**2026-09-02 已全部转绿**
 
 2026-08-25 起 `src/fast_model/pdms_inst.rs` 里有 **7 条按设计红着**的 `t041_` 测试
 （2026-08-28 从 6 条加到 7 条，见下表 `b1c`）。它们不是回归，是 T041 的验收判据
 ——**每一条红都在正确地报告「段数还没进身份键」**，实现落地时逐条转绿。
 同 feature 全量因此从 0 失败变成 7 失败。
+**2026-09-02 T041 落地，下表 7 条按各自「转绿的条件」逐条转绿，全量回到 0 失败**
+（1328 通过 / 99 ignored）；本节留作 08-25 → 09-02 的对照，「现在为什么红」说的是 08-25。
 
-| 测试 | 现在为什么红 | 转绿的条件 |
+| 测试 | 08-25 为什么红 | 转绿的条件（09-02 已满足） |
 |---|---|---|
 | `t041_a1_cylinders_in_different_segment_classes_need_their_own_rows` | `Cylinder::hash_unit_mesh_params()` 恒返回 `CYLINDER_GEO_HASH`（=2），32 段与 56 段的柱同键 | 柱的键混入 `cylinder_segments` |
 | `t041_a_snout_splits_by_its_larger_end_segment_class` | Snout 的键只有 `ptdm/pbdm` 与高度符号，是尺度无关量 | Snout 的键混入 `snout_segments` |
