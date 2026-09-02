@@ -255,6 +255,11 @@ durable 落定」（直写路径 `applied` ⇒ 尾事务已提交），`model_st
       `roots_S \ roots_T` → `DeleteCleanup`，`roots_T \ roots_S` 首次进 `gen_root`；`regenerate ∪ regenerate_derived` 经
       `touches_roots` 归到生成根；`remove` 中根自身 → `DeleteCleanup`；`ledger.Reparented(el, old, new)` 两端根都排 `RegenRoot`；
       PANE/CWALL/CFLOOR/FRMW → `RoomRecalcPanel`。**不经 `fn::sync_gen_roots`**（F10）。依赖：T200。
+      **2026-09-02 对拍加一条纪律（db8000 BRAN 增删改链五窗，`docs/evidence/2026-09-02-planner-parity.md` §7.1）**：
+      非交付单元容器（PIPE / ZONE 一类）的 `members_changed` **不得让容器自己成为 regen 根**——今天 G 的
+      `resolve_change_unit` 在增 / 删一条支管的窗口里各多出一个 `RegenRoot(PIPE 24384/23225)`，等于整棵 PIPE
+      16 条支管 91 个单元重算，是 E 计划（10 单元）的 9 倍；新增 / 删除的子树按 `created_subtree_roots` /
+      `deleted_subtree_roots` 落到子树顶那个交付单元即可，PIPE 既无几何也无根级 manifest。
 - [ ] T202 [P] `E3DM/src/increment.rs`：`UpdatePlan::touches_roots(&[RefNo], base, target) -> BTreeSet<RefNo>`
       （判据 = `GEN/src/bin/increment_planner_parity.rs` 的 `ancestors_inclusive`）。依赖：无。
 - [ ] T203 [P] D7-B：`Transform` 判据改吃 `ElementDiff`（`attributes ⊆ PLACEMENT_ATTRIBUTES ∧ !owner_changed ∧ !type_changed ∧ !opaque`
@@ -267,6 +272,11 @@ durable 落定」（直写路径 `applied` ⇒ 尾事务已提交），`model_st
       `visited` 提到 `plan_update` 作用域、`UpdatePlan::FullRebuild{reason}`、`graphicsBehaviour == 1` 守卫。依赖：无。
 - [ ] T207 [P] `increment_planner_parity` 进 CI（五窗 + 一个 CATA 窗，`unexplained == 0`）；`model_impact.rs` 降为 oracle 不删。
       依赖：T201。
+      **2026-09-02 补两条口径（同上 §7）**：(a) 加 `over_coverage` 桶——G 根不是交付单元、或 G 根名下单元数远大于
+      E 计划（PIPE 那种 9× 多算今天算 `covered`，三桶看不见）；(b) `only_e3d_model` 的归因把「容器记录 `opaque`、
+      成员表与属性逐项相等」的保守级联单列 `E_opaque_cascade`，别再混进 `E_cascade_world_bake`（净空窗 266→271 的
+      91 条就是它，G 收集器按解析后内容判 `原样重写跳过`、0 根才是对的）。db8000 BRAN 链五窗 266→271 可作 CI 语料
+      （文件已在 271，会话不会再动）。
 - [ ] T208 `E3DM/tests/increment_real.rs` 新门「前移后的凭证集 ≡ 两端全量生成差集的根集」；`only_e3d_model` 桶不得被前移。
       依赖：T204。
 - [ ] T209 验收：P0-3 场景 `cached_root_count = N − 1`；启动 `reconcile_model_coverage_at_startup` `新排队 ≈ 变化根数`；
