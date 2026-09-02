@@ -104,6 +104,11 @@ pub struct ModelUpdatePlan {
     pub room_rebuild_required: bool,
     #[serde(default)]
     pub room_rebuild_reason: Option<String>,
+    /// 凭证可以直接前移到窗口右端的生成根（`a/b`）：两端都是根、且 e3d-model 的祖先闭包
+    /// 判它子树这一窗没被波及（ADR-056 P2-2，`window_root_plan`）。不动几何、manifest、
+    /// revision，只 `UPDATE gen_root SET source_end_sesno = T`。旧恢复记录没有该字段。
+    #[serde(default)]
+    pub credential_advance: Vec<String>,
 }
 
 impl ModelUpdatePlan {
@@ -300,12 +305,9 @@ pub(crate) fn partition_operation_impacts(
 /// 第 2 条不是假想：ZONE 位姿变更走 `Transform` 刷整棵子树是实测路径
 /// （2026-08-04 AMS 会话 35，见 `docs/2026-08-04_container-transform-cascade-gap.md`），
 /// 而子树收集恰恰排除管段行——容器一动，脚下每条分支的管段全部停在旧位置。
-const DERIVED_GEOMETRY_UNIT_NOUNS: [&str; 2] = ["BRAN", "HANG"];
-
-/// 这个交付单元的几何是否由成员位置派生（见 [`DERIVED_GEOMETRY_UNIT_NOUNS`]）。
+/// 这个交付单元的几何是否由成员位置派生。
 fn unit_derives_geometry_from_member_positions(noun: &str) -> bool {
-    let noun = noun.trim().to_ascii_uppercase();
-    DERIVED_GEOMETRY_UNIT_NOUNS.contains(&noun.as_str())
+    e3d_model::category::is_derived_unit(noun)
 }
 
 /// 一次位姿改判的产出。
@@ -322,7 +324,7 @@ pub(crate) struct DerivedGeometryReroute {
     pub(crate) warnings: Vec<String>,
 }
 
-/// 纯裁决：哪些位姿目标自己就该整根重生成（[`DERIVED_GEOMETRY_UNIT_NOUNS`] 第 1 条）。
+/// 纯裁决：哪些位姿目标自己就该整根重生成（派生单元判据第 1 条）。
 ///
 /// 生成根解析失败时保持原判并告警：那只让该分支的管段滞后到下次重生成，而让整个
 /// 数据窗口失败是数据缺口——与本文件里房间面板枚举失败的处置同一口径。粗层级容器
@@ -369,7 +371,7 @@ fn pose_targets_regenerating_themselves(
 }
 
 /// 纯裁决：一棵子树快照里，哪些节点是几何由成员位置派生的交付单元
-/// （[`DERIVED_GEOMETRY_UNIT_NOUNS`] 第 2 条）。
+/// （派生单元判据第 2 条）。
 fn select_derived_geometry_units<'a>(
     nodes: impl IntoIterator<Item = (RefnoEnum, &'a str)>,
 ) -> BTreeMap<String, String> {
@@ -397,7 +399,7 @@ async fn derived_geometry_units_under(
         noun: String,
     }
 
-    let noun_list = DERIVED_GEOMETRY_UNIT_NOUNS
+    let noun_list = e3d_model::category::DERIVED_ROUTE_CONTAINER_NOUNS
         .iter()
         .map(|noun| format!("'{noun}'"))
         .collect::<Vec<_>>()
@@ -776,25 +778,8 @@ async fn panels_under_containers(containers: &[RefnoEnum]) -> anyhow::Result<Vec
 /// The `CascadeExpand` executor re-queries `ref_rev` live and enqueues the
 /// derived `RegenRoot` items idempotently.
 ///
-/// Net `Added` elements are skipped: a brand-new catalogue element can only
-/// become referenced through design-side edits, and those plan their own
-/// regeneration in the DESI window that records them.
-///
-/// # 当前不可达（2026-07-31 决策，spec 001 · US5）
-///
-/// **生产路径上没有任何 CATA 窗口会走到这里。** 入队要过 `AiosDBManager::in_scope`，
-/// 而 [`crate::data_interface::update_scope::UpdateScope::admits`] 对 CATA 恒返回
-/// `false`（唯一的例外 `UpdateScope::unrestricted()` 只被按 dbnum 点名的按需初始化
-/// 用）。所以目录改动目前**不会**经这条链触发设计实例重生成。
-///
-/// 保留这段代码与它的单测是有意的：判定逻辑已经写好并钉住，缺的只是范围那道门。
-///
-/// **启用条件**：`UpdateScope::admits` 放行 CATA。届时要一并补：
-/// 新 ADR（纳入的动机与影响面）、以及一条端到端 live 测试
-/// （CATA 会话 → 入队 → `CascadeExpand` → 设计根重生成）。
-///
-/// 下面那两条 `cata_*` 单测验的是**这个规划函数**，不是端到端行为——
-/// 它们绿着不代表目录级联在跑。
+/// `Added` 也必须成为种子：设计侧可能早已保存了一个当时无法解析的目录 refno，
+/// `ref_rev` 仍保留这条引用。目录元素后来出现时，live 反查会唤醒这些 unresolved 根。
 fn build_cata_cascade_plan(
     dbnum: u32,
     end_sesno: i32,
@@ -803,7 +788,9 @@ fn build_cata_cascade_plan(
 ) -> ModelUpdatePlan {
     let mut items = BTreeMap::new();
     for detail in merge_net_change_details(range_eles) {
-        if !detail.model_affecting || !matches!(detail.net, NetOp::Modified | NetOp::Deleted) {
+        if !detail.model_affecting
+            || !matches!(detail.net, NetOp::Added | NetOp::Modified | NetOp::Deleted)
+        {
             continue;
         }
         insert_item(
@@ -825,6 +812,7 @@ fn build_cata_cascade_plan(
         units: Vec::new(),
         room_rebuild_required: false,
         room_rebuild_reason: None,
+        credential_advance: Vec::new(),
     }
 }
 
@@ -836,8 +824,6 @@ pub(crate) async fn build_model_update_plan(
     db_type: &str,
     range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
 ) -> anyhow::Result<ModelUpdatePlan> {
-    // CATA 分支当前不可达：范围门（`UpdateScope::admits`）不放行 CATA，
-    // 所以没有 CATA 窗口能走到这个函数。详见 `build_cata_cascade_plan` 的文档。
     if db_type == "CATA" {
         return Ok(build_cata_cascade_plan(
             dbnum, end_sesno, db_type, range_eles,
@@ -1016,6 +1002,7 @@ pub(crate) async fn build_model_update_plan(
         units,
         room_rebuild_required: room_rebuild_reason.is_some(),
         room_rebuild_reason,
+        credential_advance: Vec::new(),
     })
 }
 
@@ -1196,9 +1183,12 @@ mod tests {
     /// 是管段继续停在旧位置，而且没有任何测试会红。
     #[test]
     fn only_units_with_implicit_tubing_regenerate_on_a_member_move() {
-        // 隐含直管段挂在 BRAN/HANG 名下，几何由成员的 arrive/leave 点推导。
+        // 隐含直管段挂在 E3D 确认的路由容器名下，几何由成员的 arrive/leave 点推导。
         assert!(unit_derives_geometry_from_member_positions("BRAN"));
-        assert!(unit_derives_geometry_from_member_positions("HANG"));
+        assert!(!unit_derives_geometry_from_member_positions("HANG"));
+        for noun in ["LUG", "SUPC", "TRUNNI"] {
+            assert!(unit_derives_geometry_from_member_positions(noun));
+        }
         assert!(unit_derives_geometry_from_member_positions(" bran "));
         // 这些单元没有派生几何，移动它们只需刷新实例变换。
         for noun in ["EQUI", "SUPPO", "PANE", "STRU", ""] {
@@ -1398,8 +1388,8 @@ mod tests {
         expect(12, true, false); // ELBO：issue #5 报的就是这一条
         expect(13, true, false); // FTUB：不是交付单元，上溯到 BRAN
         expect(11, true, false); // BRAN 自己被整条挪走
-        expect(23, true, false); // ATTA：支吊架成员
-        expect(22, true, false); // HANG 自己
+        expect(23, false, false); // ATTA：HANG 成员实体只刷新自身变换
+        expect(22, false, false); // HANG 不派生跨成员管身
         // 在派生几何单元**之上** → 保留便宜路径，由子树扫描兜底，不告警。
         expect(10, false, false); // PIPE
         expect(20, false, false); // STRU
@@ -1432,14 +1422,13 @@ mod tests {
     fn the_subtree_scan_picks_exactly_the_units_with_implied_tubing() {
         let graph = sample_hierarchy();
         let bran = node_refno(11).to_pdms_str();
-        let hang = node_refno(22).to_pdms_str();
 
         assert_eq!(
             derived_units_in_subtree(&graph, node_refno(3))
                 .into_keys()
                 .collect::<Vec<_>>(),
-            vec![bran.clone(), hang.clone()],
-            "挪 ZONE：脚下的 BRAN 与 HANG 都得重生成"
+            vec![bran.clone()],
+            "挪 ZONE：只重生成 E3D 确认会派生管身的 BRAN"
         );
         assert_eq!(
             derived_units_in_subtree(&graph, node_refno(10))
@@ -1452,8 +1441,8 @@ mod tests {
             derived_units_in_subtree(&graph, node_refno(20))
                 .into_keys()
                 .collect::<Vec<_>>(),
-            vec![hang],
-            "挪 STRU：牵动它名下的支吊架"
+            Vec::<String>::new(),
+            "挪 STRU：HANG 子件走常规变换，不生成跨成员管身"
         );
         assert!(
             derived_units_in_subtree(&graph, node_refno(30)).is_empty(),
@@ -2391,28 +2380,26 @@ mod tests {
         assert_eq!(state, vec![serde_json::json!(1), serde_json::json!(true)]);
     }
 
-    /// ADR-008 / F8：CATA 窗口只落 `CascadeExpand` 种子——几何性 Modified 与
-    /// Deleted 元素各一枚，由执行器 live 反查 `ref_rev` 展开为设计根重生成。
-    ///
-    /// **验的是规划器本身，不是端到端行为**：范围门当前不放行 CATA，生产路径上
-    /// 没有 CATA 窗口能走到 `build_cata_cascade_plan`（见它的文档与
-    /// `UpdateScope::admits`）。这条绿着**不代表**目录级联在跑。
+    /// CATA Added/Modified/Deleted 都落 `CascadeExpand` 种子；Added 用于唤醒
+    /// 设计侧已经存在、此前因为目录缺失而生成失败的 unresolved 根。
     #[tokio::test]
     async fn the_cata_planner_seeds_deferred_cascade_expansion() {
         let deleted = aios_core::RefU64((1u64 << 32) | 7);
         let modified = aios_core::RefU64((1u64 << 32) | 8);
+        let added = aios_core::RefU64((1u64 << 32) | 9);
         let range_eles = BTreeMap::from([(
             42,
             vec![
                 EleOperationData::new(deleted, 42, EleOperationDetail::Deleted),
                 modified_op(modified, 42, "PARA"),
+                EleOperationData::new(added, 42, EleOperationDetail::Add(Default::default())),
             ],
         )]);
 
         let plan = build_model_update_plan(1, 42, "CATA", &range_eles)
             .await
             .expect("build CATA cascade plan");
-        assert_eq!(plan.work_items.len(), 2, "{:?}", plan.work_items);
+        assert_eq!(plan.work_items.len(), 3, "{:?}", plan.work_items);
         assert!(
             plan.work_items
                 .iter()
@@ -2426,15 +2413,12 @@ mod tests {
             .map(|item| item.target_refno.as_str())
             .collect();
         assert!(
-            targets.contains(&"1/7") && targets.contains(&"1/8"),
+            targets.contains(&"1/7") && targets.contains(&"1/8") && targets.contains(&"1/9"),
             "{targets:?}"
         );
     }
 
-    /// CATA 净新增（含窗口内加删抵消）与纯业务元数据修改不产生任何模型工作：
-    /// 新目录元件只能经设计侧编辑被引用，而那次 DESI 编辑自会规划重生成。
-    ///
-    /// 同上：这是规划器单测，CATA 窗口当前进不了执行范围。
+    /// CATA 净新增会唤醒 unresolved 引用；窗口内加删抵消与纯业务元数据修改仍无工作。
     #[tokio::test]
     async fn the_cata_planner_seeds_nothing_for_added_neutral_and_cancelled_changes() {
         let added = aios_core::RefU64((1u64 << 32) | 3);
@@ -2464,7 +2448,9 @@ mod tests {
         let plan = build_model_update_plan(1, 42, "CATA", &range_eles)
             .await
             .expect("build neutral CATA plan");
-        assert!(plan.work_items.is_empty(), "{:?}", plan.work_items);
+        assert_eq!(plan.work_items.len(), 1, "{:?}", plan.work_items);
+        assert_eq!(plan.work_items[0].target_refno, "1/3");
+        assert_eq!(plan.work_items[0].action, ModelWorkAction::CascadeExpand);
     }
 
     #[tokio::test]

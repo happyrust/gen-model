@@ -120,6 +120,24 @@ pub struct DbOptionExt {
     /// SurrealDB 服务）。详见 [`in_memory_db`]。
     #[serde(default)]
     pub in_memory_db: Option<bool>,
+
+    /// XGEOMETRY 子树整体排除的入口门（T2.2 / 核对表 R2，**默认 false = 关**）。
+    ///
+    /// 开着时，计划层把「元素自身或任一祖先是 XGEOM」的变更整个挡在模型工作之外
+    /// （不排 RegenRoot / Transform / DeleteCleanup）——core 对显式几何走另一条路，
+    /// 我们今天把它卷进增量属于错做。数据侧不受影响（ATT 回填照走）。
+    /// 详见 [`model_xgeometry_gate`]。
+    #[serde(default)]
+    pub model_xgeometry_gate: Option<bool>,
+
+    /// significant 位压过 point 容器跳过（T2b / 核对表 R9，**默认 false = 关**）。
+    ///
+    /// 开着时，core 位表判显著的 noun 即使字典 `point = true` 也能当生成根。
+    /// 按 E3D 3.1 快照这只影响一个 noun（`AIDTEX`），关掉的是「AIDTEX 直接挂
+    /// SITE/ZONE/WORL 下时一个工作项都不产生」这条已确认的漏。
+    /// 详见 [`model_significant_over_point`]。
+    #[serde(default)]
+    pub model_significant_over_point: Option<bool>,
 }
 
 impl Deref for DbOptionExt {
@@ -163,6 +181,8 @@ impl From<DbOption> for DbOptionExt {
             model_root_inflight_max: None,
             model_full_rebuild_enabled: None,
             in_memory_db: None,
+            model_xgeometry_gate: None,
+            model_significant_over_point: None,
         }
     }
 }
@@ -221,6 +241,10 @@ struct DbOptionExtFields {
     model_full_rebuild_enabled: Option<bool>,
     #[serde(default)]
     in_memory_db: Option<bool>,
+    #[serde(default)]
+    model_xgeometry_gate: Option<bool>,
+    #[serde(default)]
+    model_significant_over_point: Option<bool>,
 }
 
 /// 读一次 `DbOption` 的扩展字段，把三种结局分开——它们要求的处置完全不同。
@@ -392,6 +416,8 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_root_inflight_max: ext.model_root_inflight_max,
         model_full_rebuild_enabled: ext.model_full_rebuild_enabled,
         in_memory_db: ext.in_memory_db,
+        model_xgeometry_gate: ext.model_xgeometry_gate,
+        model_significant_over_point: ext.model_significant_over_point,
     }
 }
 
@@ -599,6 +625,17 @@ fn probe_geometry_workers_config(configured: Option<OsString>) -> Result<Option<
 /// 环境变量名：一次性覆盖 [`startup_autorun`]，不必改配置文件。
 pub const STARTUP_AUTORUN_ENV: &str = "AIOS_STARTUP_AUTORUN";
 
+/// Select the service read substrate. `direct` keeps the HTTP/UI service and
+/// MDB initialization, but does not start the legacy incremental watcher or
+/// worker; request-scoped reads are served by e3d-io.
+pub const DATA_READ_MODE_ENV: &str = "AIOS_DATA_READ_MODE";
+
+pub fn direct_read_mode() -> bool {
+    std::env::var(DATA_READ_MODE_ENV)
+        .ok()
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("direct"))
+}
+
 /// 启动是否自动干活（`DbOption.toml` 的 `startup_autorun`，**默认 true**）。
 ///
 /// 关着时启动只做「让库能用」的那些幂等自愈，不消费队列、不做全量房间重建：
@@ -750,6 +787,133 @@ fn effective_room_incremental(configured: Option<bool>, env_override: Option<&st
         .and_then(parse_bool_flag)
         .or(configured)
         .unwrap_or(true)
+}
+
+/// 环境变量名：一次性覆盖 [`model_xgeometry_gate`]，不必改配置文件。
+pub const MODEL_XGEOMETRY_GATE_ENV: &str = "AIOS_MODEL_XGEOMETRY_GATE";
+
+/// XGEOMETRY 入口门开不开（`DbOption.toml` 的 `model_xgeometry_gate`，**默认 false**）。
+///
+/// 这是核对表 R2（T2.2）的灰度开关：core 对「自身或任一祖先是 XGEOM」的元素一律
+/// 不进局部更新（显式几何走另一条路），我们此前把它卷进增量。开着时计划层在入口
+/// 把这类变更从 regen / transform / delete-cleanup 三个集合里摘掉；关着时行为与
+/// 引入前逐字相同。默认关，按计划灰度打开（每一步单独可回滚）。
+///
+/// 环境变量 [`MODEL_XGEOMETRY_GATE_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
+pub fn model_xgeometry_gate() -> bool {
+    #[cfg(test)]
+    match MODEL_XGEOMETRY_GATE_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    effective_default_off_switch(
+        load_ext_fields().model_xgeometry_gate,
+        std::env::var(MODEL_XGEOMETRY_GATE_ENV).ok().as_deref(),
+    )
+}
+
+/// 环境变量名：一次性覆盖 [`model_significant_over_point`]，不必改配置文件。
+pub const MODEL_SIGNIFICANT_OVER_POINT_ENV: &str = "AIOS_MODEL_SIGNIFICANT_OVER_POINT";
+
+/// significant 位压过 point 跳过（`DbOption.toml` 的 `model_significant_over_point`，
+/// **默认 false**）。
+///
+/// 这是核对表 R9 第二步（T2b）的灰度开关：core 位表判显著的 noun 即使字典
+/// `point = true` 也能当生成根。按 E3D 3.1 快照，44 个 point noun 里 core 判显著的
+/// 只有 `AIDTEX` 一个（`the_significant_over_point_override_only_moves_aidtex` 钉着），
+/// 所以开关只改变 AIDTEX 的归属；关着时行为与引入前逐字相同。
+///
+/// 环境变量 [`MODEL_SIGNIFICANT_OVER_POINT_ENV`] 压过配置，取值规则同
+/// [`startup_autorun`]。
+pub fn model_significant_over_point() -> bool {
+    #[cfg(test)]
+    match MODEL_SIGNIFICANT_OVER_POINT_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    effective_default_off_switch(
+        load_ext_fields().model_significant_over_point,
+        std::env::var(MODEL_SIGNIFICANT_OVER_POINT_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+/// 默认关的灰度开关的统一取值规则：环境变量（严格布尔，双向可压）> 配置 > `false`。
+/// 拼错的环境变量退回配置值，理由同 [`effective_startup_autorun`]。
+fn effective_default_off_switch(configured: Option<bool>, env_override: Option<&str>) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(false)
+}
+
+/// 单测里摁住 [`model_xgeometry_gate`] 的进程内覆盖（0 = 按配置来）。
+/// 形状与理由同 [`RoomIncrementalOverride`]：两条分支都得有用例走到，而测试进程
+/// 里 `set_var` 是数据竞争。
+#[cfg(test)]
+static MODEL_XGEOMETRY_GATE_OVERRIDE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+static MODEL_XGEOMETRY_GATE_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct XgeometryGateOverride {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl XgeometryGateOverride {
+    pub(crate) fn set(on: bool) -> Self {
+        let lock = MODEL_XGEOMETRY_GATE_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        MODEL_XGEOMETRY_GATE_OVERRIDE
+            .store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for XgeometryGateOverride {
+    fn drop(&mut self) {
+        MODEL_XGEOMETRY_GATE_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 单测里摁住 [`model_significant_over_point`] 的进程内覆盖（0 = 按配置来）。
+#[cfg(test)]
+static MODEL_SIGNIFICANT_OVER_POINT_OVERRIDE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+static MODEL_SIGNIFICANT_OVER_POINT_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct SignificantOverPointOverride {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl SignificantOverPointOverride {
+    pub(crate) fn set(on: bool) -> Self {
+        let lock = MODEL_SIGNIFICANT_OVER_POINT_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        MODEL_SIGNIFICANT_OVER_POINT_OVERRIDE
+            .store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for SignificantOverPointOverride {
+    fn drop(&mut self) {
+        MODEL_SIGNIFICANT_OVER_POINT_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// 已退役的环境变量名（ADR-031）。曾经一次性覆盖收集口径，现在没有口径可覆盖。
@@ -1003,6 +1167,43 @@ mod tests {
         assert!(effective_room_incremental(Some(true), Some("ture")));
         assert!(!effective_room_incremental(Some(false), Some("ture")));
         assert!(effective_room_incremental(None, Some("ture")));
+    }
+
+    /// 两个 P2 灰度开关（T2.2 XGEOMETRY 门、T2b significant 压过 point）都必须
+    /// 默认关：它们各自改变一类工作项的产生，「没人点头就跟引入前一字不差」是
+    /// 计划（每步单独可上线、单独可回滚）的前提。环境变量双向可压、拼错回落配置，
+    /// 与其余布尔开关同一套规则。
+    #[test]
+    fn the_p2_switches_stay_off_until_someone_turns_them_on() {
+        assert!(!effective_default_off_switch(None, None));
+        assert!(effective_default_off_switch(Some(true), None));
+        assert!(!effective_default_off_switch(Some(false), None));
+        assert!(effective_default_off_switch(Some(false), Some("on")));
+        assert!(!effective_default_off_switch(Some(true), Some("0")));
+        assert!(effective_default_off_switch(None, Some("yes")));
+        assert!(effective_default_off_switch(Some(true), Some("ture")));
+        assert!(!effective_default_off_switch(None, Some("ture")));
+    }
+
+    /// 测试覆盖守卫的两个方向都要真的压得住取值函数，且离开作用域即恢复。
+    #[test]
+    fn the_p2_switch_test_overrides_win_and_reset() {
+        {
+            let _on = XgeometryGateOverride::set(true);
+            assert!(model_xgeometry_gate());
+        }
+        {
+            let _off = XgeometryGateOverride::set(false);
+            assert!(!model_xgeometry_gate());
+        }
+        {
+            let _on = SignificantOverPointOverride::set(true);
+            assert!(model_significant_over_point());
+        }
+        {
+            let _off = SignificantOverPointOverride::set(false);
+            assert!(!model_significant_over_point());
+        }
     }
 
     /// 缺配置文件走默认值，而且不出声。单测环境与最小部署都没有 `DbOption.toml`，

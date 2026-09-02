@@ -1,14 +1,14 @@
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::fast_model::occ_generate::process_meshes_update_db_deep;
 use crate::fast_model::occ_generate::{
     RootGenerationFailure, process_meshes_update_db_deep_report,
 };
+use crate::fast_model::occ_generate::{booleans_meshes_in_db, gen_meshes_in_db};
 use crate::fast_model::shape_save::{SaveMode, run_shape_save_receiver};
 use crate::fast_model::{
-    booleans_meshes_in_db, cata_model, coverage_audit, gen_meshes_in_db, loop_model, prim_model,
-    resolve_desi_comp, shared,
+    cata_model, coverage_audit, loop_model, prim_model, resolve_desi_comp, shared,
 };
-use crate::process_meshes_update_db_deep;
 use aios_core::geometry::{EleInstGeo, PlantGeoData, ShapeInstancesData};
 use aios_core::options::DbOption;
 use aios_core::parsed_data::geo_params_data::CateGeoParam::{BoxImplied, TubeImplied};
@@ -22,6 +22,7 @@ use aios_core::{RefU64, RefnoEnum, pdms_types::*};
 use aios_core::{
     query_multi_children_refnos, query_type_refnos_by_dbnum, query_use_cate_refnos_by_dbnum,
 };
+use anyhow::Context as _;
 use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
 use futures::stream::FuturesUnordered;
@@ -236,7 +237,10 @@ pub(crate) async fn gen_all_geos_data_with_policy(
             dbnos
         };
 
-        dbg!(&dbnos);
+        println!(
+            "整库全量生成 dbnum 名单（共 {} 个）: {dbnos:?}",
+            dbnos.len()
+        );
         let db_option_arc = Arc::new(db_option.clone());
         for dbno in dbnos.clone() {
             println!("开始{}的模型生成", dbno);
@@ -432,7 +436,10 @@ async fn capture_generation<T>(
 /// # 返回值
 ///
 /// 返回 `anyhow::Result<()>` 表示处理是否成功
-pub async fn process_meshes_by_dbnos(dbnos: &[u32], db_option: &DbOption) -> anyhow::Result<()> {
+pub(crate) async fn process_meshes_by_dbnos(
+    dbnos: &[u32],
+    db_option: &DbOption,
+) -> anyhow::Result<()> {
     let mut time = Instant::now();
     let include_history = db_option.is_gen_history_model();
 
@@ -474,20 +481,31 @@ pub async fn gen_geos_data_by_dbnum(
     sender: flume::Sender<ShapeInstancesData>,
 ) -> anyhow::Result<DbModelInstRefnos> {
     let gen_history = db_option_arc.is_gen_history_model();
-    //判断有空的层级，不用去生成
+    // 判断有空的层级，不用去生成。查询失败必须上抛：此前是 `unwrap_or_default()`，
+    // 一次查询抖动会把「查不出来」折成「空库」，整个 dbnum 静默跳过生成且无人知晓
+    // ——下同，本函数判定链上的查询失败一律等于本库生成失败，不是空集。
     let zones = query_type_refnos_by_dbnum(&["ZONE"], dbno, Some(true), gen_history)
         .await
-        .unwrap_or_default();
+        .with_context(|| format!("查询 dbnum={dbno} 的 ZONE 层级失败，本库模型生成中止"))?;
     if zones.is_empty() {
         return Ok(Default::default());
     }
     // let mut all_handles = FuturesUnordered::new();
 
     println!("gen_geos_data_by_dbnum 处理db: {}", dbno);
+    // 三类目开关与调试旋钮解耦（审计 F3）：`debug_refno_types` 是「调试期只跑某几类」
+    // 的过滤器，此前它为空（生产常态）时三类 flag 全 false——整库全量什么都不生成，
+    // 且无任何输出，调试旋钮支配了生产行为。现语义：留空 = 三类全开（生产默认）；
+    // 写了名单 = 按名单过滤（调试用途保留）。定向路径不受影响（generate_roots_report
+    // 显式强设三类后才进来）。
     let d_types = db_option_arc.debug_refno_types.clone();
-    let mut gen_cata_flag = d_types.iter().any(|x| x == "CATA");
-    let mut gen_loop_flag = d_types.iter().any(|x| x == "LOOP");
-    let mut gen_prim_flag = d_types.iter().any(|x| x == "PRIM");
+    let debug_type_filter_active = !d_types.is_empty();
+    if debug_type_filter_active {
+        println!("debug_refno_types 过滤生效，仅生成 {d_types:?}（调试旋钮；生产全量请留空配置）");
+    }
+    let gen_cata_flag = !debug_type_filter_active || d_types.iter().any(|x| x == "CATA");
+    let gen_loop_flag = !debug_type_filter_active || d_types.iter().any(|x| x == "LOOP");
+    let gen_prim_flag = !debug_type_filter_active || d_types.iter().any(|x| x == "PRIM");
     let gen_model = db_option_arc.gen_model;
     let test_refno = db_option_arc.get_test_refno();
 
@@ -501,7 +519,7 @@ pub async fn gen_geos_data_by_dbnum(
         let target_ploo_refnos =
             query_type_refnos_by_dbnum(&["PLOO"], dbno, Some(true), gen_history)
                 .await
-                .unwrap_or_default();
+                .with_context(|| format!("查询 dbnum={dbno} 的 PLOO 失败，本库模型生成中止"))?;
         #[cfg(debug_assertions)]
         if !target_ploo_refnos.is_empty() {
             println!("target_ploo_refnos: {:?}", target_ploo_refnos.len());
@@ -532,6 +550,13 @@ pub async fn gen_geos_data_by_dbnum(
     }
     let loop_sjus_map_arc = Arc::new(loop_sjus_map);
 
+    // 类目生成任务集（审计 F2：恢复被注释掉的历史并发设计）。判定查询保持顺序执行，
+    // 生成阶段 spawn 并发——单 Shape writer 从有界 flume 通道消费，天然承接多生产者
+    // 并提供背压；`spawn_with_staged_io` 传播暂存读写上下文（无上下文时等价普通
+    // spawn）。收口在函数尾：join 完全部任务再上抛第一个失败，不留 detached 任务
+    // 往通道里继续发。
+    let mut generation_tasks: Vec<(String, tokio::task::JoinHandle<anyhow::Result<()>>)> = vec![];
+
     //Step 2、按类目先逐个分好类的参考号集合
     //2.1 管道或者支吊架的分类
     let target_bran_hanger_refnos =
@@ -547,7 +572,9 @@ pub async fn gen_geos_data_by_dbnum(
         let mut branch_refnos_map = DashMap::new();
         let mut bran_comp_eles = HashSet::new();
         for &refno in target_bran_hanger_refnos.as_slice() {
-            let children = aios_core::get_children_pes(refno).await.unwrap_or_default();
+            let children = aios_core::get_children_pes(refno).await.with_context(|| {
+                format!("查询 dbnum={dbno} BRAN/HANG {refno:?} 的子节点失败，本库模型生成中止")
+            })?;
             bran_comp_eles.extend(children.iter().map(|x| x.refno));
             //求出元件对应的outside bore
             branch_refnos_map.insert(refno, children);
@@ -556,7 +583,9 @@ pub async fn gen_geos_data_by_dbnum(
         let target_bran_reuse_cata_map: DashMap<String, CataHashRefnoKV> = {
             let map = aios_core::query_group_by_cata_hash(target_bran_hanger_refnos.as_slice())
                 .await
-                .unwrap_or_default();
+                .with_context(|| {
+                    format!("查询 dbnum={dbno} BRAN/HANG 的元件库分组失败，本库模型生成中止")
+                })?;
             if let Some(t_refno) = test_refno {
                 if bran_comp_eles.contains(&t_refno) {
                     for kv in &map {
@@ -575,22 +604,25 @@ pub async fn gen_geos_data_by_dbnum(
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let db_option = db_option_arc.clone();
             let sender = sender.clone();
-            // let handle = tokio::spawn(async move {
-            let start_time = Instant::now();
-            cata_model::gen_cata_geos(
-                db_option,
-                Arc::new(target_bran_reuse_cata_map),
-                Arc::new(branch_refnos_map),
-                sjus_map_clone,
-                sender,
-            )
-            .await?;
-            println!(
-                "BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms",
-                start_time.elapsed().as_millis()
-            );
-            // });
-            // all_handles.push(handle);
+            generation_tasks.push((
+                "BRAN/HANG 元件库".to_string(),
+                crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                    let start_time = Instant::now();
+                    cata_model::gen_cata_geos(
+                        db_option,
+                        Arc::new(target_bran_reuse_cata_map),
+                        Arc::new(branch_refnos_map),
+                        sjus_map_clone,
+                        sender,
+                    )
+                    .await?;
+                    println!(
+                        "BRAN/HANG cata_model::gen_cata_geos执行时间: {}ms",
+                        start_time.elapsed().as_millis()
+                    );
+                    Ok(())
+                }),
+            ));
         }
     }
     let mut use_cate_refnos = vec![];
@@ -607,7 +639,9 @@ pub async fn gen_geos_data_by_dbnum(
             //要过滤掉owner是BRAN 和 HANG的
             let map = aios_core::query_group_by_cata_hash(cur_cate_refnos.as_slice())
                 .await
-                .unwrap_or_default();
+                .with_context(|| {
+                    format!("查询 dbnum={dbno} 单用元件库分组失败，本库模型生成中止")
+                })?;
             map
         };
 
@@ -616,29 +650,32 @@ pub async fn gen_geos_data_by_dbnum(
             let sjus_map_clone = loop_sjus_map_arc.clone();
             let db_option = db_option_arc.clone();
             let sender = sender.clone();
-            // let handle = tokio::spawn(async move {
-            let start_time = Instant::now();
-            cata_model::gen_cata_geos(
-                db_option,
-                Arc::new(target_single_cata_map),
-                Arc::new(Default::default()),
-                sjus_map_clone,
-                sender,
-            )
-            .await?;
-            println!(
-                "单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms",
-                start_time.elapsed().as_millis()
-            );
-            // });
-            // all_handles.push(handle);
+            generation_tasks.push((
+                format!("单用元件库 {cate_names:?}"),
+                crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                    let start_time = Instant::now();
+                    cata_model::gen_cata_geos(
+                        db_option,
+                        Arc::new(target_single_cata_map),
+                        Arc::new(Default::default()),
+                        sjus_map_clone,
+                        sender,
+                    )
+                    .await?;
+                    println!(
+                        "单个使用元件库 cata_model::gen_cata_geos执行时间: {}ms",
+                        start_time.elapsed().as_millis()
+                    );
+                    Ok(())
+                }),
+            ));
         }
     }
 
     let target_loop_owner_refnos = Arc::new(
         query_type_refnos_by_dbnum(&GNERAL_LOOP_OWNER_NOUN_NAMES, dbno, Some(true), gen_history)
             .await
-            .unwrap_or_default(),
+            .with_context(|| format!("查询 dbnum={dbno} 的 LOOP owner 失败，本库模型生成中止"))?,
     );
     println!("当前分段使用LOOP的数量: {}", target_loop_owner_refnos.len());
     if gen_model && gen_loop_flag && !target_loop_owner_refnos.is_empty() {
@@ -646,22 +683,25 @@ pub async fn gen_geos_data_by_dbnum(
         let sender = sender.clone();
         let db_option = db_option_arc.clone();
         let target_loop_owner_refnos_arc = target_loop_owner_refnos.clone();
-        // let handle = tokio::spawn(async move {
-        loop_model::gen_loop_geos(
-            db_option,
-            &target_loop_owner_refnos_arc,
-            sjus_map_clone,
-            sender,
-        )
-        .await?;
-        // });
-        // all_handles.push(handle);
+        generation_tasks.push((
+            "LOOP".to_string(),
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                loop_model::gen_loop_geos(
+                    db_option,
+                    &target_loop_owner_refnos_arc,
+                    sjus_map_clone,
+                    sender,
+                )
+                .await?;
+                Ok(())
+            }),
+        ));
     }
 
     let target_prim_refnos = Arc::new(exclude_loop_owned_primitives(
         query_type_refnos_by_dbnum(&GNERAL_PRIM_NOUN_NAMES, dbno, None, gen_history)
             .await
-            .unwrap_or_default(),
+            .with_context(|| format!("查询 dbnum={dbno} 的基本体失败，本库模型生成中止"))?,
         target_loop_owner_refnos.as_slice(),
     ));
 
@@ -672,16 +712,36 @@ pub async fn gen_geos_data_by_dbnum(
         let db_option = db_option_arc.clone();
         let sender = sender.clone();
         let target_prim_refnos_arc = target_prim_refnos.clone();
-        // let hand le = tokio::spawn(async move {
-        prim_model::gen_prim_geos(db_option, target_prim_refnos_arc.as_slice(), sender).await?;
-        // });
-        // all_handles.push(handle);
+        generation_tasks.push((
+            "基本体".to_string(),
+            crate::data_interface::staging::write_context::spawn_with_staged_io(async move {
+                prim_model::gen_prim_geos(db_option, target_prim_refnos_arc.as_slice(), sender)
+                    .await?;
+                Ok(())
+            }),
+        ));
     }
 
-    //Ok::<_, anyhow::Error>(())
-    // while let Some(result) = all_handles.next().await {
-    //     // 处理每个完成的 future 的结果
-    // }
+    // 并发生成统一收口：先 join 完全部任务（不留 detached 任务往写通道里继续发），
+    // 逐个报告失败，再上抛第一个——任一类目失败 = 本库生成失败，与判定链同一语义。
+    let mut first_generation_error: Option<anyhow::Error> = None;
+    for (label, handle) in generation_tasks {
+        let result = match handle.await {
+            Ok(result) => result.with_context(|| format!("dbnum={dbno} {label} 生成失败")),
+            Err(join_error) => Err(anyhow::anyhow!(
+                "dbnum={dbno} {label} 生成任务崩溃: {join_error}"
+            )),
+        };
+        if let Err(error) = result {
+            eprintln!("{error:#}");
+            if first_generation_error.is_none() {
+                first_generation_error = Some(error);
+            }
+        }
+    }
+    if let Some(error) = first_generation_error {
+        return Err(error);
+    }
 
     let db_refnos = DbModelInstRefnos {
         bran_hanger_refnos: target_bran_hanger_refnos,

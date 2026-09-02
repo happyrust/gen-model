@@ -11,7 +11,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use chrono::Local;
+use chrono::{DateTime, Local};
 use indexmap::IndexMap;
 use serde::Serialize;
 
@@ -21,6 +21,8 @@ pub const TASK_KIND_DATA_BATCH: &str = "data_batch";
 pub const TASK_KIND_MODEL_DRAIN: &str = "model_drain";
 /// 人工触发的指定 dbnum 全量模型重建；工作仍落入同一 durable 模型队列。
 pub const TASK_KIND_MODEL_REBUILD: &str = "model_rebuild";
+/// A read-only source session rebuilt into the dedicated historical kv-mem.
+pub const TASK_KIND_MODEL_HISTORY: &str = "model_history";
 /// 一轮房间归属收敛（ADR-011 §10：与数据批次同构的一种 kind）。
 pub const TASK_KIND_ROOM_RECALC: &str = "room_recalc";
 
@@ -28,6 +30,36 @@ pub const TASK_KIND_ROOM_RECALC: &str = "room_recalc";
 /// 首轮放宽 `manual_db_nums` 后 287 条排队 + 287 条终态就要 ≥574，
 /// 200 差了一个量级；1000 = 574 打底 + 全局最近终态的余量。
 const MAX_TASKS: usize = 1000;
+
+/// 分步账的环形上限（ISSUE-025 §一）。正常批次十来个阶段远用不满；能用满的是
+/// 阶段来回横跳的病态现场，而那正是最需要「最近脚印」的时候——所以挤掉最老的、
+/// 保留最新的，并把挤掉的条数记在 [`TaskEntry::steps_dropped`] 里（「悄悄丢比
+/// 丢本身更糟」，沿用 `debug_scope` 环形缓存那条口径）。
+const MAX_TASK_STEPS: usize = 32;
+
+/// 分步账的一行：一个阶段从进入到被替换（或任务收尾）的结算。
+///
+/// 阶段行原本全是 `println!`，一个字都不进 JSONL——于是「死在收集」与「收集正常、
+/// 跑了 40 分钟之后写回才死」在失败记录里长得一模一样（ISSUE-025 §一）。这一行
+/// 就是那条阶段行的落盘形态：`at` 是进入时刻，`ms` 是这一步占用的时长。
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskStep {
+    /// 阶段的稳定英文值（与 `current_stage` 同一本字典，面板同一份 `STAGE` 翻译）。
+    pub name: String,
+    /// 进入该阶段的时刻（RFC3339）。
+    pub at: String,
+    /// 该阶段占用的毫秒数。进入时刻解析不动（不该发生）时记 0 而不是丢整步——
+    /// 「耗时未知」至少还答得出「走到了哪一步」，步骤缺席连这个都答不了。
+    pub ms: u64,
+    /// 这一步是不是正常走完了。换阶段结算的恒为 `true`（任务走过去了）；
+    /// 终态结算的按终态定，见 [`TaskRegistry::finish`]。
+    pub ok: bool,
+}
+
+/// `steps_dropped` 为 0 时不序列化：账是全的，这一格没话要说。
+fn step_count_is_zero(count: &u64) -> bool {
+    *count == 0
+}
 
 /// 任务状态机：`queued -> running -> succeeded | partial | failed`；冻结重扫完全覆盖
 /// 后继行时，该后继按 ADR-011 §5 直接 `queued -> succeeded`（`absorbed_by_running`）。
@@ -138,6 +170,41 @@ pub struct TaskEntry {
     /// 终态结果 JSON；queued / running 时为 None。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub result: Option<serde_json::Value>,
+    /// 有界分步账（ISSUE-025 §一）：每次阶段切换结算上一步，`finish` 结算最后
+    /// 一步。`current_stage` 只说得出「现在在哪」，这本账说得出「一路怎么走的、
+    /// 哪一步慢」——失败记录落盘时原样带走（`batch_failure_log`）。
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub steps: Vec<TaskStep>,
+    /// 被 [`MAX_TASK_STEPS`] 挤掉的更早步数；0 = 账是全的。
+    #[serde(skip_serializing_if = "step_count_is_zero")]
+    pub steps_dropped: u64,
+}
+
+/// 把当前阶段结算成一步账。任务还没报过阶段时什么都不记。
+///
+/// 独立函数而不是 `TaskRegistry` 的方法：调用点都已持有 `entries()` 锁内的
+/// `&mut TaskEntry`，方法形态会撞二次取锁。
+fn settle_step(entry: &mut TaskEntry, now: DateTime<Local>, ok: bool) {
+    let Some(name) = entry.current_stage.clone() else {
+        return;
+    };
+    let Some(at) = entry.stage_started_at.clone() else {
+        return;
+    };
+    let ms = DateTime::parse_from_rfc3339(&at)
+        .ok()
+        .and_then(|started| {
+            now.signed_duration_since(started)
+                .num_milliseconds()
+                .try_into()
+                .ok()
+        })
+        .unwrap_or(0);
+    if entry.steps.len() >= MAX_TASK_STEPS {
+        entry.steps.remove(0);
+        entry.steps_dropped += 1;
+    }
+    entry.steps.push(TaskStep { name, at, ms, ok });
 }
 
 /// 进程启动时刻（RFC3339）。`ensure_batch_worker` 启动时触发初始化，因此它
@@ -242,6 +309,8 @@ impl TaskRegistry {
             stall_deadline: None,
             detail: None,
             result: None,
+            steps: Vec::new(),
+            steps_dropped: 0,
         });
     }
 
@@ -284,6 +353,8 @@ impl TaskRegistry {
             stall_deadline: None,
             detail: Some(detail),
             result: None,
+            steps: Vec::new(),
+            steps_dropped: 0,
         });
     }
 
@@ -325,6 +396,8 @@ impl TaskRegistry {
             stall_deadline: None,
             detail: Some(detail),
             result: None,
+            steps: Vec::new(),
+            steps_dropped: 0,
         });
     }
 
@@ -365,6 +438,49 @@ impl TaskRegistry {
             stall_deadline: None,
             detail: Some(detail),
             result: None,
+            steps: Vec::new(),
+            steps_dropped: 0,
+        });
+    }
+
+    pub fn insert_running_model_history(
+        &self,
+        task_id: &str,
+        project: &str,
+        dbnum: u32,
+        detail: serde_json::Value,
+    ) {
+        let now = Local::now().to_rfc3339();
+        self.insert_entry(TaskEntry {
+            task_id: task_id.to_string(),
+            kind: TASK_KIND_MODEL_HISTORY,
+            state: TaskState::Running,
+            project: project.to_string(),
+            created_at: now.clone(),
+            started_at: Some(now.clone()),
+            finished_at: None,
+            dbnum: Some(dbnum),
+            db_type: Some("DESI".to_string()),
+            start_sesno: None,
+            end_sesno: None,
+            start_sesno_time: None,
+            end_sesno_time: None,
+            units_done: Some(0),
+            total_units: Some(1),
+            events_seen: 0,
+            current_stage: Some("historical_generation".to_string()),
+            stage_started_at: Some(now),
+            stage_last_progress_at: None,
+            dependency_dbnum: None,
+            dependency_path: None,
+            dependency_refnos_total: None,
+            dependency_refnos_parsed: None,
+            dependency_refnos_missing: None,
+            stall_deadline: None,
+            detail: Some(detail),
+            result: None,
+            steps: Vec::new(),
+            steps_dropped: 0,
         });
     }
 
@@ -536,16 +652,18 @@ impl TaskRegistry {
         }
     }
 
-    /// 记录数据批次的可观测子阶段。重复报告同一阶段只刷新进展时刻，不重置起点。
+    /// 记录数据批次的可观测子阶段。重复报告同一阶段只刷新进展时刻，不重置起点；
+    /// 真换了阶段时先把上一步结算进分步账（走过去了即 `ok`）。
     pub fn set_stage(&self, task_id: &str, stage: &str) {
         let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
-            let now = Local::now().to_rfc3339();
+            let now = Local::now();
             if entry.current_stage.as_deref() != Some(stage) {
+                settle_step(entry, now, true);
                 entry.current_stage = Some(stage.to_string());
-                entry.stage_started_at = Some(now.clone());
+                entry.stage_started_at = Some(now.to_rfc3339());
             }
-            entry.stage_last_progress_at = Some(now);
+            entry.stage_last_progress_at = Some(now.to_rfc3339());
         }
     }
 
@@ -577,6 +695,9 @@ impl TaskRegistry {
     }
 
     /// 更新当前依赖定位但不把它算作实质进展；用于进入一个可能卡住的文件/块之前。
+    ///
+    /// 它是 `set_stage` 之外唯一会翻 `current_stage` 的口，所以分步账的结算也得
+    /// 在这儿挂一份——漏掉它，依赖阶段之间的切换就从账本上消失了。
     pub fn set_dependency_location(
         &self,
         task_id: &str,
@@ -588,8 +709,10 @@ impl TaskRegistry {
         let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
             if entry.current_stage.as_deref() != Some(stage) {
+                let now = Local::now();
+                settle_step(entry, now, true);
                 entry.current_stage = Some(stage.to_string());
-                entry.stage_started_at = Some(Local::now().to_rfc3339());
+                entry.stage_started_at = Some(now.to_rfc3339());
             }
             entry.dependency_dbnum = dbnum;
             entry.dependency_path = path;
@@ -625,8 +748,18 @@ impl TaskRegistry {
     pub fn finish(&self, task_id: &str, state: TaskState, result: serde_json::Value) {
         let mut inner = self.entries();
         if let Some(entry) = inner.get_mut(task_id) {
+            let now = Local::now();
+            // 最后一步在这儿结算。`current_stage` 照旧不清（它是「死在哪一步」那
+            // 一格），但它占用的时长到此为止。`ok` 按终态定：Succeeded / Partial
+            // 算走完了——Partial 的失败在交付单元层，不在阶段层；Failed / Yielded
+            // 算没走完——前者死在这一步，后者是门在这一步中途关了。
+            settle_step(
+                entry,
+                now,
+                matches!(state, TaskState::Succeeded | TaskState::Partial),
+            );
             entry.state = state;
-            entry.finished_at = Some(Local::now().to_rfc3339());
+            entry.finished_at = Some(now.to_rfc3339());
             entry.stall_deadline = None;
             entry.result = Some(result);
         }
@@ -683,6 +816,8 @@ mod tests {
             stall_deadline: None,
             detail: None,
             result: None,
+            steps: Vec::new(),
+            steps_dropped: 0,
         });
     }
 
@@ -756,6 +891,88 @@ mod tests {
         assert!(
             entry.stage_started_at.is_some(),
             "阶段起点要一起留下：它决定这一步走了多久"
+        );
+    }
+
+    /// 分步账（ISSUE-025 §一）：换阶段结算上一步，`finish` 按终态结算最后一步。
+    ///
+    /// `died_at` 只有一格，回答不了「死在收集」与「收集正常、写回才死」的区别；
+    /// 这本账要能回答的正是「一路怎么走的、每步多久、最后一步走完没有」。
+    /// 依赖定位（`set_dependency_location`）是 `set_stage` 之外唯一翻阶段的口，
+    /// 走它切的阶段也必须入账。
+    #[test]
+    fn stage_switches_settle_a_bounded_step_ledger() {
+        let registry = TaskRegistry::default();
+        queue_row(&registry, "batch", 8191, 36, 37);
+        registry.mark_started("batch");
+        registry.set_stage("batch", "identity_check");
+        registry.set_stage("batch", "identity_check"); // 同阶段重复报告不产生新步
+        registry.set_stage("batch", "collect_window");
+        registry.set_dependency_location("batch", "dependency_index", Some(7355), None, 3);
+        registry.finish("batch", TaskState::Failed, serde_json::json!({}));
+
+        let entry = registry.get("batch").expect("entry");
+        let names = entry
+            .steps
+            .iter()
+            .map(|step| step.name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            ["identity_check", "collect_window", "dependency_index"],
+            "每个阶段一步，重复报告不加步: {names:?}"
+        );
+        let oks = entry.steps.iter().map(|step| step.ok).collect::<Vec<_>>();
+        assert_eq!(
+            oks,
+            [true, true, false],
+            "走过去的步是 ok，死在手里的那步不是"
+        );
+        assert!(
+            entry.steps.iter().all(|step| !step.at.is_empty()),
+            "每步都要带进入时刻"
+        );
+        assert_eq!(entry.steps_dropped, 0, "没挤掉就不许谎报");
+        assert_eq!(
+            entry.current_stage.as_deref(),
+            Some("dependency_index"),
+            "账本不替代 died_at 那一格，两者要说同一句话"
+        );
+
+        // 成功收尾的最后一步是走完了的。
+        queue_row(&registry, "good", 30999, 1, 2);
+        registry.mark_started("good");
+        registry.set_stage("good", "collect_window");
+        registry.finish("good", TaskState::Succeeded, serde_json::json!({}));
+        let good = registry.get("good").expect("entry");
+        assert_eq!(good.steps.len(), 1);
+        assert!(good.steps[0].ok, "成功任务的最后一步不该画成没走完");
+    }
+
+    /// 环上限挤掉最老的、留最新的，并把挤掉的条数说出来——最需要看「最近脚印」的
+    /// 恰恰是阶段来回横跳把账挤爆的病态现场（「悄悄丢比丢本身更糟」）。
+    #[test]
+    fn the_step_ring_keeps_the_newest_and_counts_the_dropped() {
+        let registry = TaskRegistry::default();
+        queue_row(&registry, "ring", 8191, 1, 2);
+        registry.mark_started("ring");
+        let total = MAX_TASK_STEPS + 4;
+        for index in 0..total {
+            registry.set_stage("ring", &format!("stage_{index}"));
+        }
+        registry.finish("ring", TaskState::Failed, serde_json::json!({}));
+
+        let entry = registry.get("ring").expect("entry");
+        assert_eq!(entry.steps.len(), MAX_TASK_STEPS);
+        assert_eq!(
+            entry.steps_dropped,
+            (total - MAX_TASK_STEPS) as u64,
+            "挤掉几条要照实说"
+        );
+        assert_eq!(
+            entry.steps.last().map(|step| step.name.as_str()),
+            Some(format!("stage_{}", total - 1).as_str()),
+            "留下的必须是最新的一段"
         );
     }
 

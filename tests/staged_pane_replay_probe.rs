@@ -18,6 +18,11 @@
 //! $env:RUST_MIN_STACK = "134217728"
 //! cargo test --features http_api --test staged_pane_replay_probe -- --ignored --exact --nocapture
 //! ```
+//!
+//! **已随 kv-mem 暂存窗口退役（ADR-056 P1，spec 035）**：它探的暂存窗口重放、W1 祖先
+//! 预载与 `active_staging_writes` 路由都已不存在，整文件停编译；P3 T304 随 `staging/`
+//! 目录一起删除。
+#![cfg(any())]
 
 mod common;
 

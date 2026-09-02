@@ -256,15 +256,32 @@ pub fn farthest_from_surface(
     samples: usize,
     k: usize,
 ) -> Vec<([f32; 3], f32)> {
+    farthest_surface_pairs(from, to, samples, k)
+        .into_iter()
+        .map(|(point, _, distance)| (point, distance))
+        .collect()
+}
+
+/// 与 [`farthest_from_surface`] 相同，但同时返回目标表面的最近点。
+pub fn farthest_surface_pairs(
+    from: &TriMesh,
+    to: &TriMesh,
+    samples: usize,
+    k: usize,
+) -> Vec<([f32; 3], [f32; 3], f32)> {
     let pts = sample_surface_points(from, samples);
-    let mut scored: Vec<([f32; 3], f32)> = pts
+    let mut scored: Vec<([f32; 3], [f32; 3], f32)> = pts
         .iter()
         .map(|p| {
             let proj = to.project_local_point(p, false);
-            ([p.x, p.y, p.z], (p.coords - proj.point.coords).norm())
+            (
+                [p.x, p.y, p.z],
+                [proj.point.x, proj.point.y, proj.point.z],
+                (p.coords - proj.point.coords).norm(),
+            )
         })
         .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
     scored.truncate(k);
     scored
 }

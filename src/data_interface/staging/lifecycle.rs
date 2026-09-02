@@ -219,37 +219,36 @@ pub async fn create_window_on(
 /// 该索引已随 P3 退役——生产与这里共用 `INST_RELATE_INDEX_SQL`（含摘除它的
 /// 迁移语句），错误显式上抛。
 pub async fn init_staging_schema(db: &Surreal<Any>) -> anyhow::Result<()> {
-    // 磁盘脚本（CWD 的 resource/surreal，站点扩展）＋内置快照收尾——与 run_cli
-    // 同一顺序，同名函数以内置版为准。内置序列自带 D11 的 hd/hh 矫正；这里原先
-    // 按 CARGO_MANIFEST_DIR 读 hd 文件，那是编译机路径，部署机上一开窗口就会失败。
-    if std::path::Path::new("resource/surreal").is_dir() {
-        aios_core::function::define_common_functions_on(db).await?;
-    } else {
-        aios_core::function::ensure_inst_meta_functions_on(db).await?;
-    }
-    crate::data_interface::embedded_surql::define_embedded_functions_on(db).await?;
-    // 刻意不装 update_dbnum_event（F4，见 findings 文档）：该事件体假定 pe 的
-    // record id 是数组（历史行形制），对字符串 id 的最新行（`pe:24381_100677`，
-    // fork 解析为字符串）任何 UPSERT/UPDATE 都会因 `array::at` 类型错误而**整条
-    // 语句失败**——窗口的解析写入在暂存库里会全军覆没。它服务的
-    // `dbnum_info_table` 是遗留水位迁移的记账面（dbnum_state 本就容忍其缺失/
-    // 陈旧），不属于窗口数据语义。生产 `run_cli` 对 SUL_DB 的定义不动，留待
-    // F4 与业主对齐后统一处置。
-    aios_core::create_geom_index_on(db).await?;
-    aios_core::define_room_index_on(db).await?;
-    aios_core::define_owner_index_on(db).await?;
-    aios_core::define_fullname_index_on(db).await?;
-    aios_core::define_pe_index_on(db).await?;
-    aios_core::define_ses_index_on(db).await?;
-    // gen-model 侧唯一的启动期 DEFINE（init_inst_relate_indices）——与生产同一组
-    // 语句（F1 已修 + anc/dbnum 索引，见常量文档）。
-    db.query(crate::fast_model::pdms_inst::INST_RELATE_INDEX_SQL)
-        .await?
-        .check()?;
-    Ok(())
+    // 本体已抽到与暂存无关的 `table_parity::init_schema_on`（spec 035 T171），P3 删本
+    // 目录时那一份留下；这里只剩委托，调用点随 P3 逐个改指。
+    crate::data_interface::table_parity::init_schema_on(db).await
 }
 
 impl ActiveStagedWindow {
+    /// 测试载体：把一批解析产物按**生产同一份渲染**（`render_persist_statements` +
+    /// 反向索引语句）写进本窗口并记 journal。ADR-056 P1 之后生产增量不再开窗口，它只
+    /// 服务 `parity.rs` / `room_fixture.rs` 那几条借 `mem://` 窗口当载体的用例，P3 随
+    /// 本目录一起删（前身 `IncrementPipeline::stage_parsed_window`）。
+    #[cfg(test)]
+    pub(crate) async fn stage_parsed_window(
+        &mut self,
+        range_eles: &std::collections::BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>,
+        dbnum: u32,
+    ) -> anyhow::Result<usize> {
+        use super::ExecMode;
+        use crate::data_interface::increment_pipeline::IncrementPipeline;
+
+        self.activate().await?;
+        let statements = IncrementPipeline::render_persist_statements(range_eles, dbnum as i32)
+            .into_iter()
+            .chain(crate::data_interface::manual_update::build_reverse_index_statements(range_eles))
+            .collect::<Vec<_>>();
+        for sql in &statements {
+            self.execute(sql, ExecMode::Both).await?;
+        }
+        Ok(statements.len())
+    }
+
     pub fn meta(&self) -> &StagingWindowMeta {
         &self.meta
     }
@@ -590,25 +589,40 @@ pub fn resource_snapshots() -> Vec<serde_json::Value> {
         .lock()
         .expect("registry lock")
         .values()
-        .map(|entry| {
-            let snapshot = entry.gauge.snapshot();
-            serde_json::json!({
-                "dbnum": entry.meta.dbnum,
-                "window_id": entry.meta.window_id,
-                "label": entry.meta.label,
-                "start_sesno": entry.meta.start_sesno,
-                "end_sesno": entry.meta.end_sesno,
-                "state": if entry.writeback_stalled.is_some() { "writeback_stalled" } else { "active" },
-                "writeback_error": entry.writeback_stalled,
-                "band": format!("{:?}", snapshot.band).to_lowercase(),
-                "staged_sql_bytes": snapshot.staged_sql_bytes,
-                "journal_bytes": snapshot.journal_bytes,
-                "estimated_write_rows": snapshot.estimated_write_rows,
-                "journal_entries": snapshot.journal_entries,
-                "staged_statements": snapshot.staged_statements,
-            })
-        })
+        .map(window_snapshot)
         .collect()
+}
+
+/// 同一份快照按 dbnum 收窄——失败记录落盘时带走的那一份（ISSUE-025 §四 4a 的
+/// 记录一半）。与 [`resource_snapshots`] 共用同一个成形函数，不许出现第二种形状：
+/// 面板上那张卡与失败记录里那一格说的必须是同一句话。
+pub fn resource_snapshots_for(dbnum: u32) -> Vec<serde_json::Value> {
+    REGISTRY
+        .lock()
+        .expect("registry lock")
+        .values()
+        .filter(|entry| entry.meta.dbnum == dbnum)
+        .map(window_snapshot)
+        .collect()
+}
+
+fn window_snapshot(entry: &RegisteredWindow) -> serde_json::Value {
+    let snapshot = entry.gauge.snapshot();
+    serde_json::json!({
+        "dbnum": entry.meta.dbnum,
+        "window_id": entry.meta.window_id,
+        "label": entry.meta.label,
+        "start_sesno": entry.meta.start_sesno,
+        "end_sesno": entry.meta.end_sesno,
+        "state": if entry.writeback_stalled.is_some() { "writeback_stalled" } else { "active" },
+        "writeback_error": entry.writeback_stalled,
+        "band": format!("{:?}", snapshot.band).to_lowercase(),
+        "staged_sql_bytes": snapshot.staged_sql_bytes,
+        "journal_bytes": snapshot.journal_bytes,
+        "estimated_write_rows": snapshot.estimated_write_rows,
+        "journal_entries": snapshot.journal_entries,
+        "staged_statements": snapshot.staged_statements,
+    })
 }
 
 #[cfg(test)]

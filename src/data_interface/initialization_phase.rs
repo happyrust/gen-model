@@ -293,10 +293,7 @@ impl InitializationCoordinator {
             && state.status == InitializationStatus::Running
             && state.current_phase == Some(phase)
             && !state.model_in_flight
-            && !state
-                .blockers
-                .iter()
-                .any(|blocker| blocker.phase == phase)
+            && !state.blockers.iter().any(|blocker| blocker.phase == phase)
     }
 
     /// Recompute the active barrier from the queue after a row settles.  The
@@ -523,11 +520,7 @@ impl InitializationCoordinator {
                 .iter()
                 .map(|(phase, counts)| (phase.as_str(), counts.clone()))
                 .collect(),
-            blockers: state
-                .blockers
-                .iter()
-                .map(PhaseBlocker::rendered)
-                .collect(),
+            blockers: state.blockers.iter().map(PhaseBlocker::rendered).collect(),
             blocked_by: state.blockers.clone(),
             shadowed: state.shadowed.clone(),
         }
@@ -1124,11 +1117,14 @@ mod tests {
         coordinator.install_manifest(epoch, [DataPhase::Meta, DataPhase::Design], false, []);
         coordinator.mark_failed(
             epoch,
-            PhaseBlocker::new(DataPhase::Meta, "读取增量数据失败: 打开 dabacon 冻结快照失败")
-                .with_dbnum(8191)
-                .with_project("JEU")
-                .with_task("db-20260827-114844-000000")
-                .with_failure_record("db-20260827-114844-000000"),
+            PhaseBlocker::new(
+                DataPhase::Meta,
+                "读取增量数据失败: 打开 dabacon 冻结快照失败",
+            )
+            .with_dbnum(8191)
+            .with_project("JEU")
+            .with_task("db-20260827-114844-000000")
+            .with_failure_record("db-20260827-114844-000000"),
         );
 
         let snapshot = coordinator.snapshot();

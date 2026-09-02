@@ -7,9 +7,7 @@ use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 use surrealdb::sql::Thing;
 
-use crate::surreal_retry::{
-    execute_model_scoped_delete, execute_model_write, execute_surreal_checked,
-};
+use crate::surreal_retry::{execute_model_write, execute_surreal_checked};
 
 /// 图端点查询只拼 record id；256 个仍远低于 ws 消息上限，同时避免大子树产生数百次往返。
 const SUBTREE_QUERY_BATCH: usize = 256;
@@ -174,11 +172,7 @@ pub async fn delete_inst_relate_cascade(
                 &refno.to_pe_key(),
             ));
         }
-        if crate::data_interface::staging::active_staging_writes().is_some() {
-            for sql in delete_sql_vec {
-                execute_model_scoped_delete(&sql, "delete model relations").await?;
-            }
-        } else if !delete_sql_vec.is_empty() {
+        if !delete_sql_vec.is_empty() {
             execute_surreal_checked(&delete_sql_vec.join("\n"), "delete model relations").await?;
         }
     }
@@ -327,7 +321,7 @@ pub async fn prune_roots_stale_model_rows(
 /// 决定，ReplaySafe R1 整类拒绝，而暂存窗口里这道校验在执行之前——语句连跑都不会跑，
 /// 于是 staged 模式下**每一次**删除清理都必然失败、整窗口零落盘（2026-08-11 现场）。
 /// `<->` 与 `array::concat(->, <-)` 覆盖的方向完全相同。
-fn render_room_membership_delete(pe_keys: &[String]) -> String {
+pub(crate) fn render_room_membership_delete(pe_keys: &[String]) -> String {
     let targets = |table: &str| {
         pe_keys
             .iter()
@@ -373,21 +367,8 @@ fn render_room_membership_delete_transaction(pe_keys: &[String]) -> String {
 async fn delete_room_membership(refnos: &[RefnoEnum], chunk_size: usize) -> anyhow::Result<()> {
     // 树上留着已删元素的包围盒，`locate_intersecting_bounds` 会继续把它当候选返回，
     // 于是重算时一个已经不存在的构件仍会被算进某间房（缺陷 D4）。
-    if let Some(context) = crate::data_interface::staging::active_staging_writes() {
-        for chunk in refnos.chunks(chunk_size) {
-            let pe_keys = chunk.iter().map(RefnoEnum::to_pe_key).collect::<Vec<_>>();
-            execute_model_write(
-                &render_room_membership_delete(&pe_keys),
-                "delete room membership",
-            )
-            .await?;
-        }
-        // 窗口内不动树：摘除意图寄存进上下文，随尾事务连同 epoch bump 一起提交，
-        // 提交后由 `apply_deferred_spatial_mutations` 收敛。
-        context.defer_spatial_remove(refnos).await;
-        return Ok(());
-    }
-
+    // ADR-056 P1：暂存窗口退役，「窗口内不动树、摘除意图寄存到尾事务」那一臂随之消失，
+    // 只剩直写分支——锁下探测 → 边删除与 epoch bump 同事务 → 摘树 → 标脏。
     for chunk in refnos.chunks(chunk_size) {
         let pe_keys = chunk.iter().map(RefnoEnum::to_pe_key).collect::<Vec<_>>();
         let stale: HashSet<aios_core::RefU64> = chunk.iter().map(RefnoEnum::refno).collect();
@@ -496,13 +477,11 @@ mod tests {
             .map(|(body, _)| body)
             .unwrap_or(source);
 
-        let staged = body
-            .split_once("defer_spatial_remove")
-            .expect("暂存分支必须把摘除寄存进窗口")
-            .0;
+        // ADR-056 P1：暂存分支（`defer_spatial_remove` 把摘除寄存进窗口尾事务）已退役，
+        // 房间边删除只剩直写这一条路——任何一处把窗口寄存接回来，这里就红。
         assert!(
-            !staged.contains("render_room_membership_delete_transaction"),
-            "暂存分支不得自行 bump，epoch 归窗口尾事务: {staged}"
+            !body.contains("defer_spatial_remove") && !body.contains("active_staging_writes"),
+            "delete_room_membership 不得再有暂存寄存分支: {body}"
         );
 
         let serial_at = body

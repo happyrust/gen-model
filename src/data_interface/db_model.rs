@@ -396,25 +396,94 @@ impl AiosDBManager {
         let membership = mdb_membership::resolve(&self.db_option, project, mdb)?;
         let counts = membership.counts_by_type();
         let dictionaries = membership.dictionary_paths();
+        let missing_dicts: Vec<&mdb_membership::MdbDatabase> = membership
+            .unresolved()
+            .filter(|database| database.styp == mdb_membership::DICT_STYP)
+            .collect();
+        // 两个数一起报。过去这一行左边写「按 STYP {8: 6}」、右边写「字典库 5 个」，
+        // 矛盾摆在同一行上却没人看得出来，因为唯一解释它的那句话走 `log::warn!`
+        // ——而 `enable_log = false` 时 logger 压根没初始化（2026-08-27 沙箱：
+        // stdout 与 stderr 两份日志零命中）。
         println!(
             "MDB {} / {project} / module={module}：声明 {} 个库（按 STYP {counts:?}），\
-             其中字典库 {} 个",
+             其中字典库 {} 个：盘上 {} 个，缺 {} 个",
             membership.mdb(),
             membership.databases().len(),
-            dictionaries.len()
+            membership.of_type(mdb_membership::DICT_STYP).count(),
+            dictionaries.len(),
+            missing_dicts.len()
         );
-        for path in &dictionaries {
-            println!("  字典库 {}", path.display());
+        for database in membership.of_type(mdb_membership::DICT_STYP) {
+            if let (Some(path), Some(owner)) = (&database.path, &database.project) {
+                println!("  字典库 [{owner}] {}", path.display());
+            }
+        }
+        // 缺的那一份要自己站出来点名，不能让人拿两个计数去减：它定义的 UDA 之后
+        // 一律读成「没值」，而那跟「这个属性本来就没填」在下游长得一模一样。
+        for database in &missing_dicts {
+            let line = format!(
+                "字典库缺件 dbnum={} ({}) PROJ={}：MDB 声明了它，配置的项目目录里没有\
+                 对应文件；它定义的 UDA 之后一律读成「没值」",
+                database.dbnum, database.name, database.proj
+            );
+            println!("  {line}");
+            log::warn!("MDB {} {line}", membership.mdb());
+        }
+        // 选主是这次唯一说得出「为什么是这个文件」的地方，而 dbnum 只在项目内唯一
+        // ——同号在别的项目里还有文件、或声明的 PROJ 与实际落点不符，两件事都只有
+        // 在这里出声才看得见。
+        for database in membership.databases() {
+            let (Some(path), Some(owner)) = (&database.path, &database.project) else {
+                continue;
+            };
+            if database.off_declared_project(project) {
+                println!(
+                    "  dbnum={} ({}) 声明 PROJ={}，却在项目 {owner} 找到：{}",
+                    database.dbnum,
+                    database.name,
+                    database.proj,
+                    path.display()
+                );
+            }
+            if !database.shadowed.is_empty() {
+                println!(
+                    "  dbnum={} 同号另有 {} 份被选主遮蔽（选中 [{owner}] {}）：{}",
+                    database.dbnum,
+                    database.shadowed.len(),
+                    path.display(),
+                    database
+                        .shadowed
+                        .iter()
+                        .map(|other| other.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                );
+            }
+        }
+        for problem in membership.problems() {
+            println!("  MDB 成员选主：{problem}");
         }
         // 声明了却不在盘上的库要出声。它不是「本 MDB 没有这个库」，是部署缺件，
-        // 两者对下游的意思完全不同。
-        for database in membership.unresolved() {
-            log::warn!(
-                "MDB {} 声明了 dbnum={} ({})，但配置的项目目录里找不到对应文件",
-                membership.mdb(),
-                database.dbnum,
-                database.name
+        // 两者对下游的意思完全不同。非字典的缺件合成一行：它们不像字典那样会把
+        // 缺失伪装成一个合法的空值，逐条铺开只会把上面那几行冲掉。
+        let missing_others: Vec<String> = membership
+            .unresolved()
+            .filter(|database| database.styp != mdb_membership::DICT_STYP)
+            .map(|database| {
+                format!(
+                    "{}({} STYP={})",
+                    database.dbnum, database.name, database.styp
+                )
+            })
+            .collect();
+        if !missing_others.is_empty() {
+            let line = format!(
+                "声明了却不在盘上的非字典库 {} 个：{}",
+                missing_others.len(),
+                missing_others.join("、")
             );
+            println!("  {line}");
+            log::warn!("MDB {} {line}", membership.mdb());
         }
         mdb_membership::install(membership);
         Ok(())
@@ -634,4 +703,38 @@ fn test_compute_distance() {
     dbg!(&inst_dis);
     dbg!(&arrive);
     dbg!(&leave);
+}
+
+/// 缺一个字典库的后果是「这个 UDA 没值」，所以它必须跟报数走同一个出口。
+///
+/// 2026-08-27 的沙箱：`init_mdb` 打出「按 STYP {8: 6}……其中字典库 5 个」，
+/// 而解释这 6→5 的那一句走 `log::warn!`；配置里 `enable_log = false`，logger
+/// 从未初始化，stdout 与 stderr 两份日志搜下来零命中。差额就这么在同一行里
+/// 自相矛盾地摆了一整天。`log::warn!` 可以留着给有 logger 的部署，但
+/// **`println!` 不能少**。
+#[test]
+fn a_missing_dictionary_is_printed_not_only_logged() {
+    let source = include_str!("db_model.rs");
+    let body = source
+        .split_once("pub async fn init_mdb(")
+        .expect("init_mdb 还在")
+        .1
+        .split_once("pub async fn init(")
+        .expect("init_mdb 收尾在 init 之前")
+        .0;
+
+    let counted = body
+        .find("缺 {} 个")
+        .expect("报数那一行要同时给出盘上几个、缺几个，不能只报一个数让人自己减");
+    let listed = body
+        .find("字典库缺件")
+        .expect("缺的那一份要点名，光有计数说不出是哪一个");
+    assert!(counted < listed, "先报数、再逐条点名");
+
+    let block = &body[listed..];
+    let end = block.find("\n        }").expect("缺件那段有结尾");
+    assert!(
+        block[..end].contains("println!"),
+        "缺件必须走 println!：enable_log = false 时 log::warn! 一个字都不会出现"
+    );
 }

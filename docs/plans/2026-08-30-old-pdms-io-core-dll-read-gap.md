@@ -11,7 +11,8 @@
 > 关联：ADR-053（direct 模式生成读）、ADR-055、`docs/plans/pdms-io-v2-core3d-alignment.md`、
 > `tests/pdms_record_boundary.rs`、`specs/003-net-window-collection`、
 > `docs/evidence/2026-08-30-e3d-io-index-node-aos-layout.md`（**本计划 db1/db3 结论的指令级补证**）、
-> `docs/plans/2026-08-30-e3d-io-core-aligned-rewrite.md`（姊妹计划：clean 重写路线）。
+> `docs/evidence/2026-08-30-e3d-io-record-self-addressing.md`（**本计划 db4 返工的依据：记录层自寻址实测**）、
+> `docs/plans/2026-08-30-e3d-io-core-aligned-rewrite.md`（姊妹计划：clean 重写路线；其 §9 是本次路线重估的落点）。
 
 > **2026-08-30 IDA 补证（复用实例 `idalib-48392`，指令级）—— 本计划核心判断获独立坐实**：
 > 直接读 `sub_5AFFCB0` 指令流，确认索引结点是 **AoS**（条目步进 = `游标 + key_dwords + value_dwords`，
@@ -26,8 +27,28 @@
 >   V1（文件态 `>>12/&0xFFF` vs 内存态 `>>13/&0x1FFF`）仍按原计划走 FFI oracle。
 >
 > 顺带：这轮 IDA 也**推翻了姊妹计划（clean 重写）的头号前提**「core.dll 是 SoA、现存实现全错」——
-> 实测 AoS 恰恰说明**本计划「就地硬化」的路线更站得住**（旧栈读模型本就对，只需修 count/stride/extent）。
-> 详见该证据文件与姊妹计划顶部订正框。
+> 实测 AoS 恰恰说明**本计划「就地硬化」在索引层（db1–db3）更站得住**（旧栈读模型本就对，
+> 只需修 count/stride/extent）。详见该证据文件与姊妹计划顶部订正框。
+> **但同日的记录层补证把 db4 这一半翻了回去，见下框。**
+
+> **⚠️ 2026-08-30 记录层补证（`docs/evidence/2026-08-30-e3d-io-record-self-addressing.md`，
+> 438 库 / 2 923 428 条记录全量统计）—— 本计划 db4 部分需实质返工**：
+> **记录写着它自己各部分在哪。** 元素头是 **11 个 dword**（不是 6 个）：第 6/7 字是显式属性流
+> 起始地址、第 8/9 字是成员表起始地址、第 10 字是格式字；每个尾块头 20 字节，其中 +12..+20 是
+> **续接地址**。三者都用索引叶值那套 `(page_no, packed)` 编码（`offset_words = packed >> 12`）。
+> 全量统计：这些地址够到 3 195 015 个块，**指空 0 个、类型对不上 0 个**；相邻性够不到其中
+> **46 566** 个（分布在 40 263 条记录上），且「跳 0/7 填充继续找」在 **36 106** 条记录上跨出本页、
+> 把同一元素的**后来副本**接了上去；另有 **5 444** 个块压在页边界却**不**声明续接——
+> 「压在页边界」不等于「有后续」，只有那个地址说了算。
+>
+> 对本计划的三点影响（**逐条落在 §1 与 §2**）：
+> ① **新增 D4-4 / D4-5 两行**（记录头地址槽、块续接地址），等级〖高〗，**P0–P4 原文一条都没盖到**；
+> ② **P4 必须重写**：原文「优先转调 engine v2 `RecordReaderV2`」的补救对象**本身就是同一形状的
+>    搜索式读法**，只是窗口从 2 KiB 换成 16 KiB→1 MiB（核实见 §1 D4-4 注与姊妹计划 §9.2）；
+> ③ **P1 的尺子不覆盖记录层**：`src/bin/legacy_v2_read_parity.rs` 全部 1126 行零处读记录，
+>    所以 db4 这一半**现在没有验收面**，必须先造门。
+> 路线层面的重估（三选一、带行号的改动量）已写进姊妹计划
+> `docs/plans/2026-08-30-e3d-io-core-aligned-rewrite.md` §9，**本计划不重复，只落自己的阶段改动**。
 
 ## 0. 审计范围与生产消费面
 
@@ -49,6 +70,14 @@
 配套开发状态——是**工作副本目录丢了/被移走**，不是 patch 加错。处置：恢复该工作副本
 （或从 `pdms-io.git` 重新检出到该路径），不能简单注释掉两行了事。
 
+> **2026-08-30 现状核实**：`Cargo.toml` 那两行**已改回注释态**（现在在 229–230 行，
+> 带一条 2026-08-30 的说明），`d:\work\plant-code\pdms-io-fork-engine-v2` 确不存在。
+> 也就是说 **W0/P0 事实上按「注释 patch」这条落地了**，engine-v2 回到 git rev
+> `13a17e1`（源码在 `D:\Rust\.cargo\git\checkouts\pdms-io-565ad9bfb921054d\13a17e1`，可只读查阅）。
+> 计划正文仍写着「默认恢复工作副本」，与现状不符——**决策点 1 请按现状重新确认**：
+> 若接受现状，`old-parse-pdms-db/src/paged.rs` 是否还在用只有工作副本才有的
+> `page_size_bytes_hint` / `open_read_at` 需一并核（当时是「退版本会连带退功能」的理由）。
+
 ## 1. 逐层差异矩阵
 
 标注：〖高〗直接影响读取正确性；〖中〗有触发条件或有补偿层；〖低〗行为等价性问题。
@@ -60,7 +89,7 @@
 |---|---|---|---|---|
 | D1-1 | 页大小来源 | 头部 `0x34` 按 **4 字节字**存页大小（512 字 → 2048 字节），运行时从头部取（ida-3.1 §1、§13.5） | `PAGE_SIZE = 0x800` 编译期硬编码（`defines.rs:14`），`PdmsHeader` 只解析到 `0x2C`，**根本不读 `0x34`**，也无任何断言 | 〖高〗静默前提 |
 | D1-2 | 页读取健壮性 | `FHDBRN` 失败（error 11）→ `SYWAIT 0.5s` 重试 → `FHSWIT` 关闭/重开切模式再试 → `FLFINI ABORT`（ida-3.1 §10）；页缓存读头页+目标页 | 裸 `seek + read_exact`，零重试（`io.rs:1442`）；元素页每次直读磁盘无缓存，仅索引页/会话页有缓存 | 〖中〗并发写撕裂由 `DabaconSnapshot` 的 4 次稳定捕获在**打开时刻**补偿，打开后无防护 |
-| D1-3 | 页头校验 | 页型/type_id 入口硬校验：表页搜索 `*page != 5` 直接置错 659（engine v2 `db3/index.rs:8-10` 引证）；数据页 `0x7434F9`、索引页 `0xCC47DF` 常量比对 | 索引页仅 deku `assert_eq noun==0xCC47DF`（**不看 page_type**）；会话页、元素页完全无校验，坏页号会被硬解成垃圾数据 | 〖中〗 |
+| D1-3 | 页头校验 | 页型/type_id 入口硬校验：表页搜索 `*page != 5` 直接置错 659（engine v2 `db3/index.rs:8-10` 引证）；数据页 `0x743F49`、索引页 `0xCC47DF` 常量比对 | 索引页仅 deku `assert_eq noun==0xCC47DF`（**不看 page_type**）；会话页、元素页完全无校验，坏页号会被硬解成垃圾数据 | 〖中〗 |
 | D1-4 | 扩展文件（extent） | 页地址是 `(ext_no, page_no)` 二元组；per-DB 状态 216B 里有多文件一致性链接页（ida-3.1 §8） | 结构里有 `ext_no` 字段（`SessionPageData.last_ses_extno`、`RefnoIndexPgId.ext_no`）但**所有读取路径一律无视**，多 extent 库会拿主文件页号硬读主文件 | 〖高〗须显式拒绝（与 `on_demand_db.rs:87-90` 已定姿势对齐） |
 
 ### db2 · 头 / 会话
@@ -86,7 +115,10 @@
 
 | # | 维度 | core.dll 3.1 | 旧版 pdms-io + old-parse-pdms-db | 等级 |
 |---|---|---|---|---|
-| D4-1 | **记录读取窗口** | 页感知窗口 16KB 起、×2 增长至 1MB；起始页页型必须 5/7；结构化判端（impl_len + 0/7 填充 + `00 01/02` 块 + **`00 00 00 07 00 01/02 len` 跨页续段协议**）（engine v2 `db4/record_reader.rs` 全文） | `read_raw_element_record` 固定 **2KB 平面窗口**（`io.rs:3047-3053`），无页型校验；段合并 `get_merged_data`（同一续段协议，但只在窗口内）；显式属性流靠 `collect_explict_data` **启发式跳过嵌入的索引页头** + `MAX_RESYNC=64` 重同步（`parse.rs:784-830`），跳过量不记账 | 〖高〗从记录起点算 >2KB 的记录（大 members / 大显式区）**静默截断**：children 不全 → `member_alive_at` 误判 Deleted 的通路存在。`tests/pdms_record_boundary.rs` 只钉了「不越界读」，没钉「跨页完整性」 |
+| D4-1 | **记录读取窗口** | ~~页感知窗口 16KB 起、×2 增长至 1MB~~ **（2026-08-30 订正：这一列填的不是 core.dll，是 engine v2 自己的做法，而它也是搜索式的，见 D4-4）**；起始页页型必须 5/7 是对的 | `read_raw_element_record` 固定 **2KB 平面窗口**（`io.rs:3047-3053`），且 `parse_element`（`io.rs:3002-3006`）另有**同一段读的第二份拷贝**；无页型校验；段合并 `get_merged_data`（相邻性续接，只在窗口内）；显式属性流靠 `collect_explict_data` **启发式跳过嵌入的索引页头** + `MAX_RESYNC=64` 重同步（`parse.rs:784-898`），跳过量不记账 | 〖高〗从记录起点算 >2KB 的一切**静默不可见**：children 不全 → `member_alive_at` 误判 Deleted 的通路存在。`tests/pdms_record_boundary.rs` 只钉了「不越界读」，没钉「跨页完整性」 |
+| **D4-4** | **记录头的两个地址槽**（2026-08-30 新增） | 头是 **11 dword**：`[6..7]` 显式属性流地址、`[8..9]` 成员表地址、`[10]` 格式字，编码同索引叶值 `(page_no, packed)`。语料 3 195 015 个块指空 0 / 类型错 0 | **四个解析入口一个都不读**，读完 `input[16..24]`（owner）就跳 `padded_implicit_end`：`parse_raw_element_identity`（`parse.rs:363-388`）、`parse_ele_membs`（`438-473`）、`parse_ele_children`（`485-524`）、`parse_raw_ele_data_with_info`（`541-725`，关键 `580`/`592-600`/`602`）。`parse.rs` 全文对 `input[24..44]` **零处按地址读**。块靠相邻性找（`padded_implicit_end` `527-539` 跳 0/7 填充；`602` 的 `explicit_start = actual_impl_len + memb_bytes_len` 是「成员在前显式在后」的第二重假设） | 〖高〗**静默少读**。相邻性够不到 46 566 个块 / 40 263 条记录；「跳填充继续找」在 36 106 条记录上接到同元素的后来副本。**注意量的归属**：这批数是在**已删 e3d-io 那版读法**上量的，旧栈机制同源但 2KB 窗口会让两个方向的数都变，**必须由旧栈自己的探针重量**（见 P1b） |
+| **D4-5** | **块头布局与续接地址**（2026-08-30 新增） | 块头 **20 字节**：`[kind:u16][words:u16][owner.w0][owner.w1][cont_pgno][cont_packed]`，**payload 恒从 +20 起**；`cont_*` 两字全零表示不续接。语料 158 526 个声明续接的块 100% 落在本元素的块上；另有 5 444 个块压在页边界却不声明续接 | 分两套不一致的口径：成员侧 `get_merged_data`（`parse.rs:3177-3206`）payload 从 **+20** ✓ 但续接靠扫紧邻的 `00 00 00 07 00 02`（`3190`）✗；显式侧 `collect_explicit_segmented_payload`（`902-949`）`MEMBERS_BASE_PAYLOAD_OFFSET = 12`（`907`）——**把两个续接字当属性流字节读了**，于是逼出两层兜底：「drain 8 还是 drain 12」自适应（`875-891`）与 `has_unfinished_packed_expression_entry`（`953-977`） | 〖高〗证据文件里 BRAN 24383/85432 的幽灵成员 18010/8193、「payload 起点 0 和 8 都试一遍」，对应的就是这几行。5 444 个「压边界不续接」的块是相邻性会**误接**的地方 |
+| **D4-6** | **块头 payload 起点三方不一致**（2026-08-30 新增，此前未记账） | e3d-io 实测 **+20**（`old/vendor/e3d-io/src/record/block.rs:117-133`） | 旧栈成员侧 **+20**、显式侧 **+12**；engine v2 **+16**（`db4/explicit_attrs.rs:47-59`：`hash@4..8`、`self_ref@8..16`、`payload@16`，即把 e3d-io 口径下的 `owner.w0` 叫 hash、把 `owner.w1 + cont_pgno` 当 self_ref）；engine v2 写侧同款（`db4/element.rs:107-127`） | 〖高〗**转调 engine v2 等于用第三种口径换掉一个对了一半的口径**。P4 决策前必须先裁这一格 |
 | D4-2 | 属性解码的 schema 来源 | noun 模板从 `%AVEVA_DESIGN_EXE%/<db>vir.dat` 官方 schema 文件加载（GALFE，511+1 链式读，ida-3.1 §14.7），槽位偏移由 attlib ATGTDF 全局位置决定 | 手工维护的 info 字典（`get_default_pdms_db_info()`），f32/f64 布局靠「末属性偏移+步长 vs impl_len」**启发式猜**（`parse.rs:611-625`），未知 noun 直接 `UnknownNoun` 拒解 | 〖高〗但**归 engine v2 D 线管**（specs/034 / e3d31-attribute-parsing），旧栈不再投入，只记录 |
 | D4-3 | 元素使用语义（noun 位表 / members 三模 / climb / significant_owner / CE 栈） | Core3D 层 | 旧栈不承担 | 引 `specs/034-core3d-semantics/`，**不在本计划** |
 
@@ -120,6 +152,15 @@
 - 验收：`cargo check` 通过；`git -C ../vendor/old-parse-pdms-db status` 干净。
 
 ### P1 · 对拍尺子：legacy↔v2 读取对拍探针（1~2 天）
+
+> **2026-08-30 已完成**。探针落在 `src/bin/legacy_v2_read_parity.rs`，批跑 ams000
+> 语料 431 库全绿（错误 0、探针自检 0），证据见
+> `docs/evidence/2026-08-30-legacy-v2-read-parity.md`。要点：活叶页尾部多读
+> 779,558 条（168 库，D3-1 坐实）、纯幽灵键 8,807 个、抽样幽灵 35.6% 可被旧栈
+> 点查够到（含 ams8000_0001 上 64 个）；点查位置不一致 0（D3-4 印证）；
+> 键数与 e3d-io 429 库门 789,831 逐键吻合。与原方案的两点偏差：
+> ① 探针进了 gen-model `src/bin/` 而非独立仓；② 逐页双口径解码取代
+> 「两树各走各的再比键集」（自由走查降级为观察项，理由见证据 §6）。
 
 没有尺子，P2~P4 每一步都是「我觉得对」。两条栈已在同一依赖图里，对拍零基建成本。
 
@@ -156,6 +197,8 @@
 
 **门条件**：P1 报告显示零终止口径存在「多读」（陈旧槽位）或「少读」实例。多读已有 ams8000
 实测记账佐证，预期开门。
+**→ 2026-08-30 门已开（实测）**：P1 批跑 431 库测得多读 779,558 条/168 库、少读 0，
+见 `docs/evidence/2026-08-30-legacy-v2-read-parity.md` §4。
 
 - `IndexPageData` 解析改为 free_dwords 反推条目数 + 页头键值宽（0 回退 2+2、内部节点值宽恒 2），
   与 engine v2 `db3/index.rs` 同一公式；**过渡期双口径**：保留零终止读法作对照字段，
@@ -168,19 +211,70 @@
   db8000_session_pairs / pdms_record_boundary` 四件套绿；
   `scripts\Run-LiveBatch.ps1` ams8000 批次绿并更新 live 台账（`docs/2026-08-12_live-test-ledger.md`）。
 
-### P4 · db4 记录窗口对齐 core.dll（语义修正，2~3 天，**P1/实锤门**）
+### P1b · 记录层的尺子（2026-08-30 新增，**db4 一切改动的前置**，1~2 天）
 
-**门条件**：真库找到「从记录起点到记录尾 >2KB」的记录实例（大 members/大显式区），
-或对拍出现 children 截断。找不到实例则只做防御性断言版（窗口读满 2KB 仍未判端时**报错**而非
-静默截断），全量窗口改造降级为 backlog。
+P1 造的尺子只量索引层：`src/bin/legacy_v2_read_parity.rs` 全部 1126 行里，`v2_walk`(317)、
+`free_walk`(403)、`sample_entry`(453)、`read_raw_header`(462)、`process_file_inner`(481)
+**零处读记录**。所以 db4 现在没有验收面，P4 改完无从证伪。
 
-- `read_raw_element_record` 从固定 2KB 改为页感知增长窗口；**优先转调 engine v2
-  `RecordReaderV2`**（两栈同图，避免第二实现——对齐 K5「语义层不复制解码逻辑」精神），
-  仅在依赖方向不允许时才在旧栈内复刻 find_record_end。
+- 新增记录层探针（旧栈侧，只读）：对同一语料，逐个索引键读记录，输出——
+  1. **地址够到、相邻性够不到**的块数（D4-4 的旧栈版本，不能直接搬 46 566）；
+  2. **落在 2 KB 窗口之外**的块数（这是旧栈独有的，e3d-io 那版读法没有对应项）；
+  3. **相邻性会误接**的记录数（块压在页边界却不声明续接，语料级 5 444 的旧栈版本）；
+  4. 显式 payload 起点按 12 / 16 / 20 三种口径解出的属性条数差（D4-6）。
+- 参照实现与对照基准：`old/vendor/e3d-io/src/record/{mod,block,explicit}.rs`（`522a252`）与
+  它的门 `tests/record_l3_contract.rs`（429 库 **789 831 / 789 831**）。
+- 验收：报告落 `docs/evidence/2026-08-3x-legacy-record-layer-gap.md`；每个非零差异归到
+  D4-1/D4-4/D4-5/D4-6 之一，出现新类别即扩矩阵。
+
+### P4 · db4 记录读取改为地址驱动（语义修正，**P1b 门**）
+
+> **2026-08-30 重写。** 原文是「2 KB 平窗 → 页感知增长窗口，优先转调 engine v2
+> `RecordReaderV2`」。记录层补证之后这条**整体作废**，原因是实读
+> `pdms-io.git@13a17e1 crates/pdmsdb_engine_v2/src/db4/` 的结果：
+> `record_reader.rs` `find_record_end`（`105-173`）**仍是搜索式判端**——跳 0/7 填充
+> （`skip_padding_len` `175-186`、`extend_impl_len` `188-198`），再找 `00000000`+`00000007` 对
+> （`128-133`）或不跟 `00 01/02` 的裸 `00000007`（`135-143`）；它读的唯一头字段是 `impl_len`（`111`）；
+> `element.rs:3` 的 `ELEMENT_HEADER_WORDS = 6` 说明**它的头模型里根本没有那两个地址槽**；
+> `advance_over_segments`（`200-217`）与 `explicit_attrs.rs`（`62-81`）的续接同样靠相邻性；
+> 窗口 16 KiB→1 MiB（`9-10`），超限报 `record 超出上限 1048576B`（`57-61`）——
+> 就是「把完好记录报成截断」那一类，只是阈值更大；`read_window` `96` 行硬编 `ext_no: 1`。
+> **换过去只是把同一缺陷放到更大的窗口里，还附送一个第三种块头口径（D4-6）。**
+
+**门条件**：P1b 报告在旧栈上量出①②③任一非零。（②几乎必然非零——2 KB 窗口是硬边界。）
+
+- **改法（分层）**：记录装配**上移到 `pdms_io`**（它才有文件句柄），装配出一段**连续字节**
+  再交给现有的 `parse_raw_ele_data(&[u8])`。不要给 `parse_pdms_db` 加 `PageSource` trait：
+  依赖方向是 `pdms_io → parse_pdms_db`，反过来吃 I/O 要穿过 4 个入口，而
+  `parse_ele_membs`/`parse_ele_children` 的调用方手上只有字节切片。e3d-io 也是这么切的
+  （`record::read_record` 交连续字节，`record::explicit::parse_tail` 在连续缓冲上走查）。
+- **`old-pdms-io/src/io.rs`**：`read_raw_element_record`（`3047-3053`）与 `parse_element`
+  （`3002-3006`）两份平窗读合并成一处地址驱动装配；`raw_element_payload`（`1432-1438`）退役；
+  `PdmsIO`（`1402-1430`）加**数据页缓存**（今天只有 `index_page_cache` @`1425`，数据页每次直读磁盘，
+  地址驱动会反复取同一页）——照 `read_index_data`（`3283-3296`）的样子；
+  失败一律结构化报错（指空 / 类型错 / 成环 / 越页 / 声明续接接不上），**不得降级成「属性少几条」**。
+- **`old-parse-pdms-db/src/parse.rs`**：`padded_implicit_end`（`527-539`）、`get_merged_data`
+  （`3177-3206`）、`collect_explict_data`（`784-898`）、`collect_explicit_segmented_payload`
+  （`902-949`）、`has_unfinished_packed_expression_entry`（`953-977`）、
+  `collect_explict_data_legacy`（`981-1038`）、`take_off_007_explicit`（`1040-1056`）
+  **整体删除**（约 306 行），换成「按块自报 kind 分派的一次走查」（约 110 行）；
+  `parse_ele_membs`（`438-473`）、`parse_ele_children`（`485-524`）、
+  `parse_raw_ele_data_with_info`（`580-604`）三处原地重写（约 101 行）。
+  顺带修掉今天连「一个元素有两个成员块」都处理不了的问题。
+- **`old-pdms-io/src/snapshot.rs`**：跨页取页必须受**冻结前缀长度**约束——`io.rs:3050`
+  今天是裸 `seek + read_exact`，绕过了 `DabaconSnapshot`。
+- **调用点**：`net_window.rs`（`217`/`454`/`458`）、`session_index_diff.rs`（`586`）
+  今天把解析失败当「跳过 / warn」，新错误要上浮，不得吞。
 - 起始页页型校验（5/7）随手补上（D1-3 收尾）。
-- 造跨页大 members fixture（真库提取，脱敏进 `tests/fixtures/`），钉死
-  `member_alive_at`/`parse_ele_children` 在该 fixture 上与 v2 读数一致的回归测试。
-- 验收：fixture 测试绿；`pdms_record_boundary` 扩展用例绿；net_window live 复跑绿。
+- 造跨页大 members fixture 与「块不相邻」fixture（真库提取，脱敏进 `tests/fixtures/`；
+  语料里最干净的病例是 `ams5100_0001` 的 ROOM_NO 定义 **13292/122**，头第 6/7 字写着 `(60, 0x2001)`）。
+- **验收**：P1b 的①②③在新读法下归零；fixture 测试绿；`pdms_record_boundary` 扩展用例绿
+  （现有 3 条建立在「168 字节末尾填充即记录尾」上，前提变了，要一并改）；
+  net_window live 复跑绿并更新 live 台账。
+- **改动量参考**（供排期，含上面全部条目）：6 个文件、删约 341 行、增约 385 行、原地重写约 101 行、
+  **7 处结构性改动**；逐项拆解见姊妹计划
+  `docs/plans/2026-08-30-e3d-io-core-aligned-rewrite.md` §9.3。**该节同时给出一条成本更低的
+  替代路线（转调 e3d-io 已过门的记录层，只留约 110 行）**，选哪条属路线决策，见本文 §5 决策点 5。
 
 ### 验证项（不改代码，出证据）
 
@@ -208,10 +302,31 @@
 | R3 | 2048 页大小断言在未知库型上误伤 | 断言信息点名文件与 0x34 实值，出现即是 D1-1 的真实触发案例，按 fail-loud 原则这正是想要的 |
 | R4 | vendor 三仓 rev 漂移（改 vendored 代码但忘了升 rev） | 沿用 pre-push 守卫 + `Toggle-LocalDeps.ps1 -Status` 检查，验收清单里加一条 |
 | R5 | P1 批跑 490 库耗时 | 只读、可并行（rayon per-file）、可断点续跑；探针带 `--limit` 抽样档 |
+| R6 | P4 改地址驱动后，某些元素**多出**今天读不到的属性与成员（D4-4 的 46 566 个块那一类） | 这是修复的证明不是回归，但会实打实改变 `model_impact` 分类与 `member_alive_at` 结果：P1b 先出「改前 vs 改后」的属性/成员差异清单逐库留 evidence，再跑 live 批次；差异非零的库单独列出，不允许一句「符合预期」带过 |
+| R7 | 把「量的归属」搞混：拿 e3d-io 那版读法上量的 46 566 / 36 106 / 1 033 当旧栈的数 | P1b 的存在就是为了避免这件事。文档里凡引用这批数必须标明**是在哪一版读法上量的**；旧栈的数出来之前，D4-4/D4-5 的「量」列一律写「同机制，未在旧栈上单独量过」 |
 
 ## 5. 决策点（plannotator 审阅时请重点批注）
 
-1. **P0 二选一**：恢复 engine-v2 工作副本（默认） vs 注释 patch 退 rev。
-2. **P3/P4 的门**：接受「P1 证据开门」的节奏，还是直接排期？
-3. **P4 转调 v2** 是否可接受（旧栈引 v2 的记录读取，依赖方向 pdms_io → parse_pdms_db → engine_v2 已存在，无新边）。
+1. **P0 二选一**：恢复 engine-v2 工作副本（原默认） vs 注释 patch 退 rev。
+   → **2026-08-30 现状已是后者**（`Cargo.toml:229-230` 注释态，工作副本目录不存在）。
+   请确认「就这样」还是仍要恢复；确认前先核 `paged.rs` 有没有在用工作副本独有 API。
+2. **P3/P4 的门**：接受「P1 / P1b 证据开门」的节奏，还是直接排期？
+3. ~~**P4 转调 v2** 是否可接受~~ → **2026-08-30 撤回**。实读 `13a17e1` 的
+   `db4/record_reader.rs` / `element.rs` / `explicit_attrs.rs` 后确认：`RecordReaderV2` 是同一形状的
+   搜索式读法（`find_record_end` `105-173`）、头模型只有 6 字（`element.rs:3`，没有地址槽）、
+   续接靠相邻性（`200-217`）、块头 payload 起点是第三种口径（D4-6）。**这条不再是候选**，
+   P4 已按地址驱动重写。
 4. flag==1 认领扫描口径（D3-5）现阶段只记账不裁决，是否同意。
+5. **【新】记录层走哪条路**（本计划最大的未决项）：
+   - **B · 纯就地硬化**：按重写后的 P4 在旧栈里实现地址驱动，6 个文件、增约 385 行、7 处结构性改动，
+     且必须先做 P1b 造门；
+   - **C · 分层收口**：`PdmsIO::read_raw_element_record` 转调 `old/vendor/e3d-io` 的
+     `record::read_record`（已过 429 库 789 831/789 831 门），旧栈只留约 110 行的 kind 分派走查，
+     省掉 `io.rs` 那约 210 行装配。代价是新依赖边 `pdms_io → e3d_io`，动工前须核 e3d-io 的依赖面
+     与 `PageCache` 能否接受外部句柄/冻结前缀。
+   两条的完整对照与推荐（推荐 C）在姊妹计划
+   `docs/plans/2026-08-30-e3d-io-core-aligned-rewrite.md` §9.4/§9.5。**本计划不代拍**，
+   选定后回填到 P4。
+6. **【新】D4-6 块头 payload 起点**：旧栈 +20/+12、engine v2 +16、e3d-io 实测 +20。
+   建议直接采 e3d-io 口径（它是 438 库全量统计得出、且有门），但这一格属于「改解码结果」，
+   请明确拍板而不是随 P4 顺手带过。

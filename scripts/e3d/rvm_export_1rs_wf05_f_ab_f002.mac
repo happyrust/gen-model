@@ -1,0 +1,31 @@
+$(
+------------------------------------------------------------------------
+RVM 基准导出：CFLOOR /1RS-WF05-F-AB-F002
+  (dbnum 1112; 以 PANE 子件为主)
+
+用于 e3d-model 直读生成的 PANE RVM 真值验收。导出只读：没有 SAVEWORK，
+不产生新 dabacon 会话；不写 QUIT/FINISH，会话由 driver wrapper 管理。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/rvm_export_1rs_wf05_f_ab_f002.log" OVER
+$P CODEX-DB1112-PANE-RVM-EXPORT-ALIVE
+
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/test_data/rvm/1RS-WF05-F-AB-F002.rvm"
+export filenote 'RVM baseline for CFLOOR /1RS-WF05-F-AB-F002 (dbnum 1112, PANE acceptance)'
+
+export holes on
+export autocolour displayexport on
+export repr on
+
+export /1RS-WF05-F-AB-F002
+export finish
+
+$P CODEX-DB1112-PANE-RVM-EXPORT-DONE
+ALPHA LOG END

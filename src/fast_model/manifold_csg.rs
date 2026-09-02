@@ -70,7 +70,11 @@ pub(crate) fn plant_mesh_to_manifold(mesh: &PlantMesh, mat: DMat4) -> anyhow::Re
         .map_err(|error| anyhow!("manifold-csg ingest failed: {error}"))
 }
 
-pub(crate) fn manifold_to_plant_mesh(solid: &Manifold) -> PlantMesh {
+/// 把 libgm/Core3D 兼容的 Manifold 实体转成 Plant UI 旧版 `.mesh` 格式。
+///
+/// 直读生成器和原有参数化生成器必须共用这一个转换口径，否则硬边
+/// 法线、f32 退化三角形和 AABB 处理会漂移。
+pub fn manifold_to_plant_mesh(solid: &Manifold) -> PlantMesh {
     let (props, n_props, tri) = solid.to_mesh_f64();
     if n_props < 3 || tri.len() < 3 || props.len() < n_props {
         return PlantMesh::default();
@@ -177,6 +181,36 @@ pub(crate) fn manifold_to_plant_mesh(solid: &Manifold) -> PlantMesh {
         wire_vertices: vec![],
         aabb: Some(aabb),
     }
+}
+
+/// Convert and concatenate independent display parts without a boolean union.
+/// This preserves E3D RVM component boundaries for touching CLFL primitives.
+pub fn manifolds_to_plant_mesh(solids: &[Manifold]) -> PlantMesh {
+    manifolds_to_transformed_plant_mesh(solids, DMat4::IDENTITY)
+}
+
+/// Apply one placement to every independent part, then concatenate their
+/// triangles without a boolean union.  Persistence uses this with the inverse
+/// world matrix so content addressing remains local and reusable.
+pub fn manifolds_to_transformed_plant_mesh(solids: &[Manifold], transform: DMat4) -> PlantMesh {
+    let mut out = PlantMesh::default();
+    let mut aabb = Aabb::new_invalid();
+    for solid in solids {
+        let transformed = solid.transform(&dmat4_to_affine4x3(transform));
+        let part = manifold_to_plant_mesh(&transformed);
+        let base = out.vertices.len() as u32;
+        for vertex in &part.vertices {
+            aabb.take_point(Point::new(vertex.x, vertex.y, vertex.z));
+        }
+        out.vertices.extend(part.vertices);
+        out.normals.extend(part.normals);
+        out.indices
+            .extend(part.indices.into_iter().map(|index| index + base));
+    }
+    if !out.vertices.is_empty() {
+        out.aabb = Some(aabb);
+    }
+    out
 }
 
 pub(crate) fn load_manifold(
@@ -290,6 +324,48 @@ mod tests {
         );
         let mesh = manifold_to_plant_mesh(&cut);
         assert!(mesh.indices.len() >= 3, "写出的 PlantMesh 必须有三角");
+    }
+
+    #[test]
+    fn independent_parts_are_concatenated_without_boolean_union() {
+        let left = Manifold::cube(20.0, 20.0, 20.0, true);
+        let right = Manifold::cube(20.0, 20.0, 20.0, true).transform(&dmat4_to_affine4x3(
+            DMat4::from_translation(DVec3::new(10.0, 0.0, 0.0)),
+        ));
+
+        let mesh = manifolds_to_plant_mesh(&[left, right]);
+
+        // Two independent cubes have 12 triangles each.  A boolean union would
+        // remove their overlapping interior and therefore change this count.
+        assert_eq!(mesh.indices.len() / 3, 24);
+        assert_eq!(mesh.vertices.len(), mesh.normals.len());
+        let bounds = mesh.aabb.expect("concatenated mesh must have bounds");
+        assert_eq!([bounds.mins.x, bounds.mins.y, bounds.mins.z], [-10.0; 3]);
+        assert_eq!(
+            [bounds.maxs.x, bounds.maxs.y, bounds.maxs.z],
+            [20.0, 10.0, 10.0]
+        );
+    }
+
+    #[test]
+    fn independent_parts_are_localised_before_content_addressing() {
+        let world = DMat4::from_translation(DVec3::new(100.0, 200.0, 300.0));
+        let parts = [
+            Manifold::cube(20.0, 20.0, 20.0, true).transform(&dmat4_to_affine4x3(world)),
+            Manifold::cube(10.0, 10.0, 10.0, true).transform(&dmat4_to_affine4x3(
+                world * DMat4::from_translation(DVec3::new(20.0, 0.0, 0.0)),
+            )),
+        ];
+
+        let mesh = manifolds_to_transformed_plant_mesh(&parts, world.inverse());
+
+        assert_eq!(mesh.indices.len() / 3, 24);
+        let bounds = mesh.aabb.expect("localised mesh must have bounds");
+        assert_eq!([bounds.mins.x, bounds.mins.y, bounds.mins.z], [-10.0; 3]);
+        assert_eq!(
+            [bounds.maxs.x, bounds.maxs.y, bounds.maxs.z],
+            [25.0, 10.0, 10.0]
+        );
     }
 
     /// 出口面差一根头发丝的负体，仍然必须把那张面挖开。

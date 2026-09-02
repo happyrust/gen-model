@@ -1,6 +1,6 @@
 use crate::data_interface::geom_error::{self, BOOL_NEG, BOOL_POS};
 use crate::fast_model::manifold_csg::{load_manifold, manifold_to_plant_mesh, subtract_negatives};
-use crate::fast_model::{CataNegGroup, GmGeoData, ManiGeoTransQuery, NegInfo};
+use crate::fast_model::manifold_types::{CataNegGroup, GmGeoData, ManiGeoTransQuery, NegInfo};
 use aios_core::error::{init_deserialize_error, init_query_error};
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::{RefnoEnum, get_inst_relate_keys, init_test_surreal};

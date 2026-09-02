@@ -468,8 +468,57 @@
     删除事务渲染必须把两个方向的边删除与 bump 包进同一事务；删除路径的探测必须在
     锁下、bump 必须先于 `remove_by_refnos`、暂存分支一条 bump 都不许有。
 
+- 2026-09-02 增补（**e3d-model 接管生成后触发链断裂，房间副作用并回 e3d 发布事务**；
+  ADR-056 / ADR-057 D2 下的房间面）——
+  - 背景：第 4 条「AABB 真的变了」的实现一直住在旧生成器的 AABB 刷新里
+    （`aabb_refresh.rs::update_inst_relate_aabbs_by_refnos_mode` → `render_room_recalc_upserts`，
+    ADR-040 §1/§3 的保守口径与同事务纪律也在那里）。`RegenRoot` 的执行端换成
+    `ModelRefreshPolicy::generate_roots` → `E3dModelService` 之后，e3d 发布事务直写 `aabb` 行、
+    bump spatial epoch、同步空间树，却**从不排 `RoomRecalc*`**，也不清被移除几何的
+    `room_relate` / `room_panel_relate`（`append_geometry_representation_cleanup` 只删
+    `geo_relate` / `inst_info` / `inst_relate` / `aabb` / `trans`）。于是稳态下房间几乎只剩启动
+    全量重建一条路，而被 e3d 移除的元素（尤其是 PANE）留下悬空边，`fn::room_relate_of`
+    照样把它取出来（`helper.rs` 早已写明的缺陷形态）。
+  - 修法（`src/fast_model/room_publication.rs`，gen-model 侧——ADR-057 D2「房间/空间树归
+    gen-model」）：`room_publication_effects(upserts, removals, pre_e3d_sources)` 把一次发布折成
+    两笔，`render_room_publication_effects` 渲染进**同一个发布事务**（ADR-040 §3）：
+    ① **重算**——upsert 的每个 `GeometryId::Element` 来源按 noun 分流 `RoomRecalcPanel`（PANE）/
+    `RoomRecalcElement`，AABB 变没变都排（ADR-040 §1 定向保守口径）；隐式管身不排（房间系统
+    不读 `tubi_relate`，对容器排元素任务只会把容器的存量入边清成空集）。② **清边**——被移除的
+    `Element` 几何、以及 pre-e3d 清理删掉行却没拿到新几何的旧来源，两个方向一并删
+    （`render_room_membership_delete`，每 300 个来源一条）；清边**不看** `room_incremental`
+    （删除例外，与 `delete_inst_relate_subtree` 同口径）。挂点：`generate_refs`（每根，
+    `generate_roots` 定向 → 重算+清边；`generate_dbnum` 全库 → 只清边，第 4 条收窄 1 不变）与
+    `apply_geometry_delta`（窗口 / 删根路径）。
+  - 回退即红：`room_publication::tests` 6 条——分流/去重/管身跳过、移除与孤儿旧来源清边而
+    重写来源不清、开关与全库策略只关重算不关清边、300 分块、`mem://` 真引擎门
+    `deleting_a_pane_leaves_no_dangling_room_edges`（删一块 PANE：出边 / `room_panel_relate`
+    入边 / 被移除成员入边全清，未碰的面板与成员原样，重写的成员排进 `room_recalc_element`
+    行，库里没有 pe 记录的来源清边不报错）、源码钉 `both_publication_paths_carry_the_room_effects`
+    （两个入口都在 `prepare_geometry_delta` 之前折算、`publication_transaction` 之前渲染）。
+  - **房间拓扑的文件侧替身（同日 R3）**：`src/fast_model/room_topology.rs`——
+    `collect_room_groups(roots, hierarchy, lookup)` 是与生成根枚举同形状的纯遍历（只认
+    `SubtreeElement{noun,name,members}`，每元素恰一次 lookup，成环/重复/跨库成员不挂死、
+    读不到整体报错），hd 口径 `FRMW` → 子 + **任何中间 noun 下的**孙 `PANE`、hh 口径 `SBFR` →
+    直接子 `PANE`，逐字对齐 `load_room_panel_groups` 那两条 SQL；`room_panel_groups` 做关键字
+    过滤（**空关键字不匹配**，与触发侧同口径）与房间号（NAME 按 `-` 切的最后一段），产物直接
+    喂既有的 `room_panel_map_from_groups`（命名校验、`all_panels` 排除集语义不变）。
+    `load_room_panel_map_from_files` 遍历 `E3dModelService::design_sources()`（每个设计库在
+    其生成会话上 `scan_index` + `build_set`），原始分组按 `(dbnum, sesno, 层级)` 进程内缓存。
+    `room_model::load_room_panel_groups_by_mode` 按 `direct_read_mode()` 路由，
+    `load_room_panel_map`（增量两条分支、`RegenRoot` 缺陷修复）与 `build_room_panels_relate_common`
+    （启动全量重建）都走它——direct 模式下房间子系统从「0 间房、静默盖章」变成能算。
+    回退即红：`room_topology::tests` 4 条纯测 + 源码钉 `room_model_routes_both_topology_entries_by_read_mode`
+    + 真文件门 `live_ams8000_room_groups_are_structurally_sound`（ignored）。
+    **DB 读模式不变**：仍读 noun 表 + `pe_owner`；零解析库在 DB 模式下仍是 0 间房（合并两源要
+    先定去重口径，另议）。`panels_under_rooms`（规划器结构触发）仍读 `pe`，随 P2-1 尾巴换源。
+  - **仍未闭合（同日审核 F3 / F5 / F6，见 ADR-056 计划 P2-7 追记）**：第二轮逐点兜底读
+    `inst_geo.pts`，e3d 发布不写 `pts`，跨界构件对 e3d 几何一律判不在（要么改读 `.mesh`
+    顶点，要么发布补 `pts`）；scoped 房间 drain 随暂存路径拆掉，只剩空闲轮；
+    启动重建凭据以 spatial epoch 对账，每个 e3d 根发布都 bump，重启必全量。
+
 日期：2026-07-27（2026-07-28 两轮增补，2026-08-05 三轮增补，2026-08-06 一轮增补，
-2026-08-11 一轮增补，2026-08-12 一轮增补）
+2026-08-11 一轮增补，2026-08-12 一轮增补，2026-09-02 一轮增补）
 关联：`docs/2026-07-27_room-incremental-audit-report.md`（缺陷取证 D1–D7）；
 `docs/2026-07-27_room-incremental-implementation-report.md`（变更清单、验证证据、残留风险）；
 `src/fast_model/room_model.rs`；`src/data_interface/model_update_pending.rs`；

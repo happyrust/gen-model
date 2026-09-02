@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shutil
 import socket
 import subprocess
@@ -48,11 +49,17 @@ sys.stdout.reconfigure(encoding="utf-8")
 
 TESTBED = Path(__file__).resolve().parent
 REPO_ROOT = TESTBED.parents[1]
-CONFIG = TESTBED / "DbOption-spatial8000"
+RUN_DIR = Path(os.environ.get("SPATIAL8000_RUN_DIR", REPO_ROOT))
+CONFIG = Path(os.environ.get("SPATIAL8000_CONFIG", TESTBED / "DbOption-spatial8000"))
 # 双库对拍的 B 侧（对照库）：第二个一次性内存实例，直接在 final-26 上建基线。
 ORACLE_CONFIG = TESTBED / "DbOption-spatial8000-oracle"
 ORACLE_PORT = 8073
-PROJECT_DB = TESTBED / "projects" / "AvevaMarineSample" / "ams000" / "ams8000_0001"
+PROJECT_DB = Path(
+    os.environ.get(
+        "SPATIAL8000_PROJECT_DB",
+        TESTBED / "projects" / "AvevaMarineSample" / "ams000" / "ams8000_0001",
+    )
+)
 DB_BACKUP = PROJECT_DB.with_name(PROJECT_DB.name + ".spatial8000-backup")
 FIXTURE = (
     REPO_ROOT / "tests" / "fixtures" / "issues" / "issue-019-cross-session-parent-child-delete"
@@ -72,9 +79,9 @@ BASELINE_SESNO = 24
 
 # full_init / persist 写在仓库根（cwd）的空间树快照产物：V2 单文件 + 遗留两件。
 TREE_ARTIFACTS = [
-    REPO_ROOT / "accel_tree_AvevaMarineSample.snapshot",
-    REPO_ROOT / "accel_tree_AvevaMarineSample.bin",
-    REPO_ROOT / "accel_tree_AvevaMarineSample.meta.json",
+    RUN_DIR / "accel_tree_AvevaMarineSample.snapshot",
+    RUN_DIR / "accel_tree_AvevaMarineSample.bin",
+    RUN_DIR / "accel_tree_AvevaMarineSample.meta.json",
 ]
 SHELVE_SUFFIX = ".bak-spatial8000"
 RESULT_PREFIX = "@@SPATIAL8000-RESULT "
@@ -89,6 +96,45 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1 << 20), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def publish_session_snapshot(source: Path, sesno: int, target: Path) -> None:
+    """Publish the append-only PDMS file exactly as it looked at ``sesno``.
+
+    Page zero points at the latest session page.  Each session page stores its
+    predecessor, sesno and final page; following that chain and rewriting the
+    header pointer is the same cut used by ``db_session_fixture``.
+    """
+    page_size = 0x800
+    header_session_page_offset = 40
+    data = source.read_bytes()
+    if len(data) < page_size or len(data) % page_size:
+        raise RuntimeError(f"PDMS file is not page aligned: {source} ({len(data)} bytes)")
+
+    def be_u32(offset: int) -> int:
+        return int.from_bytes(data[offset:offset + 4], "big")
+
+    page = be_u32(header_session_page_offset)
+    seen: set[int] = set()
+    while page not in (0, 0xFFFFFFFF) and page not in seen:
+        seen.add(page)
+        start = page * page_size
+        if start + page_size > len(data):
+            raise RuntimeError(f"session page {page} is outside {source}")
+        current = be_u32(start + 12)
+        if current == sesno:
+            latest_page = be_u32(start + 20)
+            end = (latest_page + 1) * page_size
+            if end > len(data):
+                raise RuntimeError(f"snapshot end {end} is outside {source}")
+            snapshot = bytearray(data[:end])
+            snapshot[header_session_page_offset:header_session_page_offset + 4] = (
+                page.to_bytes(4, "big")
+            )
+            target.write_bytes(snapshot)
+            return
+        page = be_u32(start + 4)
+    raise RuntimeError(f"session {sesno} is absent from {source}")
 
 
 def port_in_use(port: int) -> bool:
@@ -149,7 +195,7 @@ def _init_full(params: dict):
     aios_db.set_config(params.get("config") or str(CONFIG))
     # force=True：互踩探测对老部署包（无 sul_db.endpoint 的 /health）走保守拒绝，
     # 与 pytest 房间档的 conftest 同一处置；本驱动连的是自己的一次性实例。
-    aios_db.full_init(cwd=str(REPO_ROOT), force=True)
+    aios_db.full_init(cwd=str(RUN_DIR), force=True)
     return aios_db
 
 
@@ -290,6 +336,20 @@ def worker_prepare(params: dict) -> dict:
     checks.add(f"baseline 水位 = {expect_watermark}", watermark == expect_watermark,
                f"watermark={watermark}, report={json.dumps(baseline, default=str)[:160]}")
 
+    # 聚焦增量管道时，先清掉 baseline 刚登记的全库生成积压。
+    # 必须位于 ensure 之前，否则会把目标根新产生的 post_regen_aabb
+    # 一并删掉，导致“几何指针已更新、空间树未更新”。
+    if params.get("skip_baseline_backlog"):
+        pending_before = aios_db.db.query(
+            "RETURN count(SELECT * FROM model_update_pending WHERE dbnum = 8000);"
+        )[0]
+        aios_db.db.query("DELETE model_update_pending WHERE dbnum = 8000;")
+        pending_after = aios_db.db.query(
+            "RETURN count(SELECT * FROM model_update_pending WHERE dbnum = 8000);"
+        )[0]
+        checks.add("聚焦模式清除基线全库积压", pending_after == 0,
+                   f"before={pending_before}, after={pending_after}")
+
     generated: list[str] = []
     if params.get("ensure_equi", True):
         for refno, label in ((EQUI, "EQUI"), (BOX_CHILD, "BOX child")):
@@ -334,9 +394,17 @@ def worker_prepare(params: dict) -> dict:
         checks.add("对照库按 A 侧清单生成", not gen_failures,
                    f"generated={generated}, failures={gen_failures}")
 
-    # 基线登记的 durable 模型积压在这里出清（两侧同一生成口径：全部单元）。
+    # 正常模式出清全库基线积压；聚焦模式只会出清上面 ensure
+    # 重新产生的目标 pending。后续窗口也仍走同一 drain_data 入口。
     backlog = aios_db.incr.drain_data()
-    checks.add("基线模型积压出清", True, f"drain_data={backlog}")
+    checks.add("目标模型积压出清" if params.get("skip_baseline_backlog") else "基线模型积压出清",
+               True, f"drain_data={backlog}")
+
+    # 按需 ensure 是直写几何路径，不会为已被清除的 baseline regen
+    # 补造窗口级 spatial_reconcile 意图。聚焦夹具在基线结束时从
+    # 已提交指针重建一次树；被测的 25/26 窗口仍走真实增量收敛。
+    if params.get("skip_baseline_backlog"):
+        aios_db.spatial.rebuild()
 
     aios_db.spatial.persist(force=True)
     summary = _tree_summary(aios_db)
@@ -365,7 +433,8 @@ def worker_restart(params: dict) -> dict:
 
     checks.add(f"startup_verdict == {params['expect_verdict']}",
                summary["verdict"] == params["expect_verdict"], str(summary))
-    checks.add("state == ready", summary["state"] == "ready", str(summary))
+    expected_state = "ready_empty" if params.get("expect_entries") == 0 else "ready"
+    checks.add(f"state == {expected_state}", summary["state"] == expected_state, str(summary))
     checks.add("pending == 0", (summary["pending"] or 0) == 0, str(summary))
     _check_tree_matches_pointers(checks, aios_db)
     if params.get("expect_entries") is not None:
@@ -384,6 +453,13 @@ def worker_apply_window(params: dict) -> dict:
                startup["verdict"] == "reused", str(startup))
 
     end = int(params["end"])
+    # 夹具把完整增量源放在 WORK/full，MDB 路径则先换成 sesno-24
+    # 基线。真实 watcher 现场是同一 MDB 文件先被发布新会话，再执行
+    # apply。因此在 full_init 完成快照复用裁决后，再将源发布到
+    # MDB 路径，使后续 pending drain 能按已推进水位钉住 sesno。
+    source_path = Path(params["source"])
+    if source_path.resolve() != PROJECT_DB.resolve():
+        publish_session_snapshot(source_path, end, PROJECT_DB)
     applied = aios_db.incr.apply_file(params["source"], end=end)
     drained = aios_db.incr.drain_data()
     side_effects = aios_db.incr.drain_side_effects()
@@ -402,7 +478,8 @@ def worker_apply_window(params: dict) -> dict:
                f"drain_data={drained}, side_effects={side_effects}, reconciled={reconciled}")
 
     summary = _tree_summary(aios_db)
-    checks.add("state == ready", summary["state"] == "ready", str(summary))
+    checks.add("state ∈ {ready, ready_empty}",
+               summary["state"] in ("ready", "ready_empty"), str(summary))
     rows = _check_tree_matches_pointers(checks, aios_db)
     checks.add("pending == 0（收尾后无滞留意图）", (summary["pending"] or 0) == 0, str(summary))
 
@@ -472,9 +549,21 @@ class Driver:
         command = [sys.executable, str(Path(__file__).resolve()),
                    "--worker", phase, "--params", json.dumps(params, ensure_ascii=False)]
         try:
+            # uv/venv launchers can replace the interpreter environment for a
+            # spawned worker.  Pin the editable package and Rust DLL directory
+            # explicitly so every phase imports the same freshly built aios_db.
+            worker_env = os.environ.copy()
+            pysrc = TESTBED.parent / "pysrc"
+            rust_debug = Path(r"D:\Rust\target\debug")
+            worker_env["PYTHONPATH"] = os.pathsep.join(
+                str(path)
+                for path in (pysrc, rust_debug)
+                if path.exists()
+            )
             proc = subprocess.run(
                 command, cwd=str(REPO_ROOT), capture_output=True, text=True,
                 encoding="utf-8", errors="replace", timeout=timeout,
+                env=worker_env,
             )
             output = (proc.stdout or "") + "\n--- stderr ---\n" + (proc.stderr or "")
             result = None
@@ -746,7 +835,8 @@ class Driver:
             prepare = self.run_phase("P0 prepare（基线 + 生成 + 落快照）", "prepare",
                                      {**cfg, "gen_roots": self.args.gen_roots,
                                       "expect_watermark": BASELINE_SESNO,
-                                      "ensure_equi": True},
+                                      "ensure_equi": True,
+                                      "skip_baseline_backlog": self.args.skip_baseline_backlog},
                                      timeout=3600)
             if not prepare.get("ok"):
                 return 1
@@ -837,6 +927,10 @@ def main() -> int:
                         help="最多回放多少个增量窗口（默认 6）")
     parser.add_argument("--gen-roots", type=int, default=3,
                         help="基线阶段额外生成多少个抽样 EQUI 根（默认 3）")
+    parser.add_argument(
+        "--skip-baseline-backlog", action="store_true",
+        help="只保留显式 ensure 的基线根，清除基线全库 pending；窗口 pending 仍正常 drain",
+    )
     parser.add_argument("--skip-windows", action="store_true", help="只跑启动裁决矩阵")
     parser.add_argument("--skip-oracle", action="store_true",
                         help="跳过双库对拍（B 侧 final-26 基线 @8073）")

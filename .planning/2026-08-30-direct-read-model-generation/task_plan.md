@@ -2,7 +2,7 @@
 
 > 计划 ID:`2026-08-30-direct-read-model-generation`
 > 创建:2026-08-30
-> 状态:**proposed**（待 plannotator 门禁批注）
+> 状态:**in-progress**（plannotator 门禁 2026-08-30 approved,见 gate_result.json;Phase 1 执行中）
 > 拍板前提:**gen-model 直读 E3D `.dat` 库文件生成模型,经 `vendor/e3d-io` + `vendor/e3d-attlib`,不对接 pdms-io**（用户 2026-08-30 拍板）
 > 权威:ADR-053(生成期查询面/direct 模式)、ADR-055、
 > `docs/plans/2026-08-30-e3d-io-gen-model-gap.md`(G1–G13 实测缺口体检)、
@@ -38,25 +38,48 @@
 - [ ] 双跑对拍门:同批元素 direct vs DB 模式,①NamedAttrMap 一致(children 比**序列**);②几何产物(CSG 参数/mesh)一致。
 - [ ] 目录表达式差分门全绿:DB 模式表达式串 vs e3d-io 渲染串逐条并排,方言差异归成有限规则并收口(或升级修法 B 后求值结果一致)。
 - [x] BANG/角度类属性正确(raw −9000 ↔ −90.0)。
-- [ ] t-327 / t-354 / BANG 全部改动落成提交,不再裸奔在工作区。
+- [x] t-327 / t-354 / BANG 全部改动落成提交,不再裸奔在工作区（2026-08-30,九笔提交,
+      清单见 Phase 1 与上下文档案）。
 - [ ] 覆盖矩阵(G1–G13)逐条写终态,不留「还没看」。
 
 ## Phase 1 — 落盘与对拍收口
 
-状态:proposed。**防丢优先,最便宜,先做。**
+状态:**执行中**(2026-08-30 会话 e551ae48)。**防丢优先,最便宜,先做。**
 
-- [ ] 与并行 agent 协调后分仓提交:e3d-io(index/diff + engine open_at + descriptor 角度)、
-      e3d-attlib(角度表三件套)、gen-model(Cargo path 依赖 + direct_store + direct_attmap + 探针)。
-      工作区多 agent 在飞,提交前逐文件核对归属,不打包别人的中间态。
-- [ ] 复跑 `direct_attmap_probe` dbnum 8000:200 样本 + 7333 全量。预期:t-354 那 44 条 BANG
-      真值冲突消失,残差只剩 CACHID/DESC 各 1(逐条归因记账)。
-- [ ] e3d-attlib / e3d-io / gen-model 三仓测试基线记进 progress。
+- [x] 与并行 agent 协调后分仓提交(2026-08-30):e3d-attlib `f9c1dfd`;e3d-io
+      `b981319`(t-327 差分)/`6d79d59`(open_at)/`6de83ec`(BANG 角度)+ 并行工作流
+      checkpoint `138fbf7`/`80c37ae`/`c8aca10`(record header 守卫、scan_elements、
+      extent 挂接——direct_store→direct_index→scan_elements 是硬依赖链,不入库则
+      两仓提交态互相不自洽;全部带绿验证入库);gen-model `290ff90d`(direct 三模块+
+      探针+path 依赖)/`b2b954ae`(计划+上下文档案)。混合文件(engine.rs/mod.rs/
+      Cargo.toml/Cargo.lock)逐 hunk 部分暂存;他人开发开关(LOCAL-DEPS patch 掀开态)、
+      examples、core3d_reference 等未随行。
+- [x] 复跑 `direct_attmap_probe` dbnum 8000:200 样本(前会话 16:0x):真值冲突 46→2,
+      44 条 BANG 全消,残差 CACHID/DESC 各 1 已逐条归因(t-354 已知,与角度无关);
+      7333 全量:2026-08-30 21:34-22:27 会话 DR6W 补跑,199094 样本
+      **零真值冲突、零两侧缺失**;等价门未过,卡在 2985 处形状冲突——
+      CRFA 2984(RefNoArray[3]/[4] vs 声明 ElementType)+ TYPEX 1(RawWords[2] vs WordType)。
+      归因(非文件读错,是 schema 方言):`all_attr_info.json` 里 CRFA 在吊架件家族
+      21 个 noun(PCLA/CLEV/VSPR/HROD/HNUT/HPIN/SLUG/RCPL/TRNB/HELE 等)声明成标量
+      ELEMENT,另 24 个 noun 声明 RefU64Vec;文件真身是引用数组,DB 写侧也存数组
+      (VSPR 实测 array[10])。转换器 `coerce` 无 `(ElementType, RefNoArray)` 臂 →
+      按设计拒猜入 shape_conflicts。修法候选:转换器加投影臂(局部,推荐)或改 schema
+      声明(动全局)。TYPEX 单例待查 noun。处置待用户拍板(见对标矩阵/上下文档案)。
+- [x] e3d-attlib / e3d-io / gen-model 三仓测试基线:attlib 全套绿;e3d-io lib 170 绿
+      + 已入库集成测试(cursor 10/l3 3/scan 4/extent 2)全绿;gen-model direct 系
+      43 绿 + direct_index_contract 3 绿(1 ignored 需活库摄入)。
 
 验收:对拍零未归因真值冲突;三仓提交落地;基线全绿。
 
 ## Phase 2 — 生成期查询面切直读(ADR-053 收口清单)
 
 状态:proposed。依赖 Phase 1 的提交基线。
+
+**载体已落**（2026-08-30 21:4x,会话 DR6W）:S1 `DbElement` 句柄门面按用户 19:38 拍板
+落在 **e3d-io**(`vendor/e3d-io/src/db_element.rs`,`DbSet`+`DbElement`+`DbFileResolver`;
+真语料集成测 6 绿、lib 174 绿;对标矩阵与落点取舍见
+`docs/plans/2026-08-30-core-dll-api-alignment.md` §5)。下面七项改写成门面/DirectStore
+用法,DB 版保留开关切换:
 
 fast_model/resolve 消费的每个查询,给出 DirectStore 直读版(DB 版保留,开关切换):
 

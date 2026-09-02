@@ -76,11 +76,7 @@ pub struct IndexFingerprint {
 }
 
 impl IndexFingerprint {
-    pub fn of(
-        file: &Path,
-        dbnum: i32,
-        pinned_sesno: u32,
-    ) -> std::io::Result<Self> {
+    pub fn of(file: &Path, dbnum: i32, pinned_sesno: u32) -> std::io::Result<Self> {
         let meta = std::fs::metadata(file)?;
         Ok(Self {
             format_version: FORMAT_VERSION,

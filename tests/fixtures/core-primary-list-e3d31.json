@@ -1,255 +1,20 @@
 {
   "schema": 1,
-  "source": "core.dll!db_get_element_info(noun_hash, 297853135)",
+  "source": "core.dll!DB_Noun::getField(297853135, &out) via findNoun(noun_hash)",
   "field_id": 297853135,
   "core_file": "core.dll",
   "core_file_bytes": 50071544,
-  "core_sha256": "e4600d050a908f281d207bad52507dcbb82d4d8036c8d4d71e6e72eb290476d8",
+  "core_sha256": "668783707a924c343759e99e8676fa8482d14987f4d83f10a83246001a7f5c18",
   "noun_source": "noun_flags.json",
   "noun_source_bytes": 370702,
   "noun_source_sha256": "965ab9d34387a59b43b9f063e57d085653a880a027aa0cf0a80dade93844a768",
   "count": 1931,
-  "resolved_count": 1879,
-  "unknown_count": 52,
+  "resolved_count": 1931,
+  "unknown_count": 0,
   "true_count": 1142,
-  "false_count": 737,
-  "non_binary_values": [
-    {
-      "noun": "MDB",
-      "hash": 533020,
-      "value": 2
-    },
-    {
-      "noun": "USLI",
-      "hash": 717870,
-      "value": 2
-    },
-    {
-      "noun": "CAST",
-      "hash": 938982,
-      "value": 2
-    },
-    {
-      "noun": "GROU",
-      "hash": 956212,
-      "value": 2
-    },
-    {
-      "noun": "DBALL",
-      "hash": 7145716,
-      "value": 2
-    }
-  ],
-  "unknown": [
-    {
-      "noun": "ROD",
-      "hash": 534780
-    },
-    {
-      "noun": "LRLB",
-      "hash": 580053
-    },
-    {
-      "noun": "NTUB",
-      "hash": 586670
-    },
-    {
-      "noun": "TRAC",
-      "hash": 591725
-    },
-    {
-      "noun": "PRMF",
-      "hash": 659518
-    },
-    {
-      "noun": "DPLI",
-      "hash": 717772
-    },
-    {
-      "noun": "MSLI",
-      "hash": 717862
-    },
-    {
-      "noun": "ACTI",
-      "hash": 723250
-    },
-    {
-      "noun": "NBXI",
-      "hash": 726152
-    },
-    {
-      "noun": "HOOK",
-      "hash": 759302
-    },
-    {
-      "noun": "TCOM",
-      "hash": 798356
-    },
-    {
-      "noun": "ACTN",
-      "hash": 821665
-    },
-    {
-      "noun": "ACTO",
-      "hash": 841348
-    },
-    {
-      "noun": "ALLP",
-      "hash": 855442
-    },
-    {
-      "noun": "ASET",
-      "hash": 929260
-    },
-    {
-      "noun": "INSU",
-      "hash": 959022
-    },
-    {
-      "noun": "MNOZ",
-      "hash": 1054525
-    },
-    {
-      "noun": "SPMEB",
-      "hash": 1702666
-    },
-    {
-      "noun": "DGPDD",
-      "hash": 2747794
-    },
-    {
-      "noun": "CBSEG",
-      "hash": 4363851
-    },
-    {
-      "noun": "DRAEL",
-      "hash": 7008367
-    },
-    {
-      "noun": "PADEL",
-      "hash": 7010107
-    },
-    {
-      "noun": "DESEL",
-      "hash": 7021138
-    },
-    {
-      "noun": "AUXFN",
-      "hash": 8107777
-    },
-    {
-      "noun": "CUTBR",
-      "hash": 10151895
-    },
-    {
-      "noun": "AUXPR",
-      "hash": 10430371
-    },
-    {
-      "noun": "DGDLT",
-      "hash": 11399566
-    },
-    {
-      "noun": "DTEXT",
-      "hash": 11636842
-    },
-    {
-      "noun": "SKTXT",
-      "hash": 11647549
-    },
-    {
-      "noun": "SRFTRA",
-      "hash": 24844825
-    },
-    {
-      "noun": "SKSYMB",
-      "hash": 36644230
-    },
-    {
-      "noun": "DGPDDD",
-      "hash": 60143422
-    },
-    {
-      "noun": "DGWELD",
-      "hash": 64419736
-    },
-    {
-      "noun": "PRTYPE",
-      "hash": 81286189
-    },
-    {
-      "noun": "KSUSVE",
-      "hash": 84357488
-    },
-    {
-      "noun": "MPLCTH",
-      "hash": 126019759
-    },
-    {
-      "noun": "MIAUXI",
-      "hash": 142840516
-    },
-    {
-      "noun": "HOLDEL",
-      "hash": 175463423
-    },
-    {
-      "noun": "HOLDFL",
-      "hash": 175994864
-    },
-    {
-      "noun": "ENVLIM",
-      "hash": 192102818
-    },
-    {
-      "noun": "HOLDLN",
-      "hash": 207881324
-    },
-    {
-      "noun": "SKINFO",
-      "hash": 219236131
-    },
-    {
-      "noun": "COLMAP",
-      "hash": 230910429
-    },
-    {
-      "noun": "DGLTYP",
-      "hash": 243802579
-    },
-    {
-      "noun": "SPMOPR",
-      "hash": 267619996
-    },
-    {
-      "noun": "KSUFAS",
-      "hash": 273826046
-    },
-    {
-      "noun": "HYLOCS",
-      "hash": 275059673
-    },
-    {
-      "noun": "KSUEDS",
-      "hash": 275400686
-    },
-    {
-      "noun": "KSUNDS",
-      "hash": 275577833
-    },
-    {
-      "noun": "DGTXAT",
-      "hash": 288528187
-    },
-    {
-      "noun": "STRSET",
-      "hash": 290554444
-    },
-    {
-      "noun": "MPLCQU",
-      "hash": 310961227
-    }
-  ],
+  "false_count": 789,
+  "non_binary_values": [],
+  "unknown": [],
   "nouns": {
     "DB": true,
     "TP": false,
@@ -257,6 +22,7 @@
     "MDB": false,
     "LOC": true,
     "ARC": true,
+    "ROD": false,
     "TEE": true,
     "LUG": true,
     "LNK": false,
@@ -306,13 +72,16 @@
     "DLLB": true,
     "PLLB": true,
     "RPLB": true,
+    "LRLB": false,
     "TRLB": true,
     "SYLB": true,
     "SYMB": true,
     "TRNB": false,
     "SNUB": false,
     "FTUB": true,
+    "NTUB": false,
     "SPAC": false,
+    "TRAC": false,
     "HVAC": true,
     "HACC": false,
     "SPEC": true,
@@ -386,6 +155,7 @@
     "LAYE": true,
     "UDEF": false,
     "STIF": false,
+    "PRMF": false,
     "CINF": false,
     "RUNF": true,
     "CMPF": true,
@@ -421,6 +191,8 @@
     "ELLI": true,
     "TMLI": true,
     "SOLI": true,
+    "DPLI": false,
+    "MSLI": false,
     "USLI": false,
     "ATLI": false,
     "CYLI": true,
@@ -434,9 +206,11 @@
     "TPOI": true,
     "PORI": false,
     "ETRI": true,
+    "ACTI": false,
     "FLUI": true,
     "EQUI": true,
     "REVI": true,
+    "NBXI": false,
     "BOXI": false,
     "SUBJ": true,
     "PALJ": true,
@@ -444,6 +218,7 @@
     "PCOJ": true,
     "SCOJ": true,
     "BACK": true,
+    "HOOK": false,
     "GASK": false,
     "TASK": true,
     "TABL": true,
@@ -504,6 +279,7 @@
     "COMM": false,
     "PCOM": true,
     "SCOM": false,
+    "TCOM": false,
     "ROOM": true,
     "TXTM": true,
     "SYTM": true,
@@ -524,6 +300,7 @@
     "NCON": false,
     "SCON": true,
     "NLSN": false,
+    "ACTN": false,
     "SCTN": true,
     "BOUN": true,
     "ELBO": true,
@@ -548,6 +325,7 @@
     "SPRO": true,
     "GRSO": true,
     "HRSO": true,
+    "ACTO": false,
     "NCTO": false,
     "SCTO": true,
     "NRTO": false,
@@ -559,6 +337,7 @@
     "HTAP": false,
     "PTAP": true,
     "MRKP": true,
+    "ALLP": false,
     "DAMP": true,
     "TANP": false,
     "CMOP": false,
@@ -636,6 +415,7 @@
     "UDET": false,
     "WDET": false,
     "OLET": true,
+    "ASET": false,
     "MSET": true,
     "PFIT": true,
     "SFIT": false,
@@ -684,6 +464,7 @@
     "SYOU": false,
     "TYOU": true,
     "STRU": true,
+    "INSU": false,
     "DATU": false,
     "CLEV": false,
     "NREV": true,
@@ -726,6 +507,7 @@
     "NSCY": false,
     "NLPY": false,
     "DBTY": false,
+    "MNOZ": false,
     "NOZZ": true,
     "PIPCA": false,
     "HIBEA": false,
@@ -745,6 +527,7 @@
     "TATTA": false,
     "SCCAB": true,
     "BRTAB": true,
+    "SPMEB": false,
     "ISOLB": true,
     "DTSLB": true,
     "DTJOB": true,
@@ -765,6 +548,7 @@
     "HBEAD": false,
     "TREAD": true,
     "DGRAD": true,
+    "DGPDD": false,
     "OBJHD": true,
     "ATTHD": true,
     "FIELD": false,
@@ -816,6 +600,7 @@
     "GSURF": true,
     "PSURF": true,
     "INSUF": false,
+    "CBSEG": false,
     "SCSEG": true,
     "GENNG": true,
     "GENPG": true,
@@ -844,6 +629,9 @@
     "BVTBL": true,
     "EXTBL": true,
     "DINCL": false,
+    "DRAEL": false,
+    "PADEL": false,
+    "DESEL": false,
     "BEVEL": true,
     "HIPIL": false,
     "DBALL": false,
@@ -874,6 +662,7 @@
     "HIPAN": true,
     "RBRAN": true,
     "PIGEN": false,
+    "AUXFN": false,
     "PULLN": false,
     "MBURN": false,
     "XCLTN": true,
@@ -897,6 +686,7 @@
     "TMGRP": true,
     "DCURP": true,
     "PEXSP": false,
+    "CUTBR": false,
     "DPODR": false,
     "ORDER": false,
     "CUTFR": true,
@@ -904,6 +694,7 @@
     "ACTOR": false,
     "ARTOR": false,
     "RAWPR": false,
+    "AUXPR": false,
     "TRNRR": false,
     "STSTR": false,
     "AEXTR": true,
@@ -920,6 +711,7 @@
     "RLSET": true,
     "GPSET": true,
     "JWSET": true,
+    "DGDLT": false,
     "PAINT": false,
     "STINT": false,
     "DEPNT": true,
@@ -930,6 +722,8 @@
     "ACRST": true,
     "UNTST": true,
     "HICUT": false,
+    "DTEXT": false,
+    "SKTXT": false,
     "HIBOU": false,
     "SPBOU": false,
     "HIDOU": false,
@@ -994,6 +788,7 @@
     "HSTBRA": true,
     "HANDRA": true,
     "RDFGRA": true,
+    "SRFTRA": false,
     "DCLTRA": true,
     "CTSTRA": true,
     "SPMBSA": false,
@@ -1039,6 +834,7 @@
     "VSINLB": true,
     "ELEVLB": false,
     "DTASMB": true,
+    "SKSYMB": false,
     "NOMINB": false,
     "SPMGOB": true,
     "HYPROB": true,
@@ -1087,6 +883,7 @@
     "TOPICD": true,
     "SUBSCD": false,
     "HVSADD": false,
+    "DGPDDD": false,
     "LSWIDD": false,
     "DTWLDD": false,
     "SCREED": true,
@@ -1101,6 +898,7 @@
     "DTGRID": false,
     "REVBLD": true,
     "FAWELD": true,
+    "DGWELD": false,
     "FMWELD": true,
     "DTWELD": true,
     "STWELD": true,
@@ -1232,6 +1030,7 @@
     "SPMOPE": true,
     "TNASPE": true,
     "ECTYPE": true,
+    "PRTYPE": false,
     "FNCARE": true,
     "RSTARE": true,
     "MNRCRE": false,
@@ -1279,6 +1078,7 @@
     "CCURVE": true,
     "GCURVE": true,
     "HCURVE": false,
+    "KSUSVE": false,
     "DSLAYE": true,
     "DTCSDF": true,
     "STADEF": true,
@@ -1359,6 +1159,7 @@
     "SPMSPH": false,
     "ECCSSH": true,
     "MNPATH": true,
+    "MPLCTH": false,
     "MRESTH": true,
     "CMTSTH": true,
     "MNSTTH": true,
@@ -1394,6 +1195,7 @@
     "HBRSTI": true,
     "SCEQUI": true,
     "MPLRWI": false,
+    "MIAUXI": false,
     "MOGOBJ": true,
     "ILPOBJ": false,
     "DTBMFJ": true,
@@ -1440,6 +1242,7 @@
     "SPMCEL": true,
     "TRNCEL": true,
     "GRIDEL": true,
+    "HOLDEL": false,
     "FESHEL": false,
     "TTSKEL": false,
     "TWFLEL": false,
@@ -1456,6 +1259,7 @@
     "DTSTEL": true,
     "BLEVEL": true,
     "STRWEL": true,
+    "HOLDFL": false,
     "GPKGFL": true,
     "MPKGFL": true,
     "DTBMFL": true,
@@ -1568,6 +1372,7 @@
     "FMWDIM": false,
     "FNCLIM": true,
     "SRFLIM": false,
+    "ENVLIM": false,
     "UDYLIM": false,
     "SUBCOM": false,
     "MIECOM": false,
@@ -1620,6 +1425,7 @@
     "COATIN": false,
     "CNPTIN": true,
     "GRIDLN": false,
+    "HOLDLN": false,
     "REFGLN": false,
     "FMBPLN": false,
     "FACONN": true,
@@ -1671,6 +1477,7 @@
     "ECTGEO": true,
     "EXTGEO": false,
     "IDINFO": true,
+    "SKINFO": false,
     "SUPNFO": true,
     "GSUPFO": true,
     "XPOSNO": true,
@@ -1695,6 +1502,7 @@
     "CMTCAP": true,
     "BRNGAP": true,
     "DTSHAP": true,
+    "COLMAP": false,
     "TYPMAP": true,
     "MBRMAP": false,
     "ECSMAP": false,
@@ -1758,6 +1566,7 @@
     "DOFSTP": true,
     "CTCOUP": true,
     "DGROUP": true,
+    "DGLTYP": false,
     "CNGREQ": false,
     "SEGSEQ": true,
     "NAMSEQ": false,
@@ -1812,6 +1621,7 @@
     "IMSTOR": false,
     "SEQWOR": true,
     "FPRJPR": true,
+    "SPMOPR": false,
     "DGMLTR": true,
     "RLCNTR": true,
     "SRCNTR": true,
@@ -1840,9 +1650,13 @@
     "BOUSUR": true,
     "FIXTUR": true,
     "STRTWR": true,
+    "KSUFAS": false,
     "LNCLAS": false,
+    "HYLOCS": false,
     "TREADS": true,
+    "KSUEDS": false,
     "DTBLDS": true,
+    "KSUNDS": false,
     "COCDES": false,
     "SCPDES": false,
     "OLINES": false,
@@ -1913,6 +1727,7 @@
     "DTPLAT": true,
     "INSMAT": false,
     "DTSTAT": false,
+    "DGTXAT": false,
     "PLTACT": false,
     "DENDCT": true,
     "DEDGCT": true,
@@ -1936,6 +1751,7 @@
     "FPLSET": false,
     "PANSET": false,
     "EDRSET": true,
+    "STRSET": false,
     "LASSET": true,
     "DRSSET": true,
     "NOTSET": false,
@@ -2054,6 +1870,7 @@
     "ECGROU": true,
     "SCGROU": true,
     "STGROU": true,
+    "MPLCQU": false,
     "ASREQU": true,
     "TABHQU": false,
     "MNSTQU": true,

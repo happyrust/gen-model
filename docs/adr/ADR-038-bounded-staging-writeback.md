@@ -2,7 +2,10 @@
 
 ## 状态
 
-已接受（2026-08-19）。补充 ADR-017；引用 ADR-001、ADR-011、ADR-025、ADR-034。
+**Superseded by ADR-056（2026-09-02）**：随 kv-mem 暂存与 journal 写回退役而失效；直写路径的分块纪律
+由 `persist_latest_main_data` 的 TX_CHUNK 承担。实施 P1 落地前本文仍描述运行中的行为。
+
+原状态：已接受（2026-08-19）。补充 ADR-017；引用 ADR-001、ADR-011、ADR-025、ADR-034。
 
 ## 背景
 

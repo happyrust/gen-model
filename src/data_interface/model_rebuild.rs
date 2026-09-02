@@ -16,6 +16,8 @@ pub struct ModelRebuildReceipt {
     pub task_id: String,
     pub dbnum: u32,
     pub expected_roots: usize,
+    /// 本次重建开工时作废掉的陈旧增量行数（R6）。
+    pub discarded_pending: u64,
     pub state: &'static str,
 }
 
@@ -71,6 +73,7 @@ pub async fn start(mgr: &AiosDBManager, dbnum: u32) -> anyhow::Result<ModelRebui
         task_id: task_id.clone(),
         dbnum,
         expected_roots: 0,
+        discarded_pending: 0,
         state: "queued",
     };
     {
@@ -87,12 +90,21 @@ pub async fn start(mgr: &AiosDBManager, dbnum: u32) -> anyhow::Result<ModelRebui
         0,
         serde_json::json!({"dbnum": dbnum, "stage": "coverage_scan"}),
     );
-    let coverage = match crate::data_interface::model_update_pending::sync_and_seed_model_coverage(
-        dbnum, true,
-    )
-    .await
-    {
-        Ok(coverage) => coverage,
+    // 先作废旧队列再回填覆盖，顺序是硬的：排着的增量是照重建前那份模型算的，
+    // 而非 regen 阶段跑在 regen 前面——留到重建之后，它们会先拿旧结论改一遍
+    // 马上要被替换的行。core 的 `Refresh(当前 VIEW)` 在同一处清空整条队列。
+    let prepared = async {
+        let discarded =
+            crate::data_interface::model_update_pending::discard_pending_for_full_rebuild(dbnum)
+                .await?;
+        let coverage =
+            crate::data_interface::model_update_pending::sync_and_seed_model_coverage(dbnum, true)
+                .await?;
+        anyhow::Ok((discarded, coverage))
+    }
+    .await;
+    let (discarded_pending, coverage) = match prepared {
+        Ok(prepared) => prepared,
         Err(error) => {
             active().remove(&dbnum);
             registry.finish(
@@ -111,6 +123,7 @@ pub async fn start(mgr: &AiosDBManager, dbnum: u32) -> anyhow::Result<ModelRebui
             "dbnum": dbnum,
             "expected_roots": coverage.expected_roots,
             "pending": coverage.enqueued_roots,
+            "discarded_pending": discarded_pending,
             "completed": 0,
             "failed": 0,
             "dead": 0,
@@ -123,6 +136,7 @@ pub async fn start(mgr: &AiosDBManager, dbnum: u32) -> anyhow::Result<ModelRebui
         task_id: task_id.clone(),
         dbnum,
         expected_roots: coverage.expected_roots,
+        discarded_pending,
         state: "queued",
     };
     active().insert(dbnum, receipt.clone());
@@ -232,5 +246,28 @@ mod tests {
         assert!(!start.contains("advance_applied"));
         assert!(!start.contains("wipe_dbnum"));
         assert!(!start.contains("delete_model"));
+    }
+
+    /// R6 / T3.4 —— 作废旧队列必须在回填覆盖**之前**。
+    ///
+    /// 反过来写就把重建自己刚排下的那批 regen 一起删了，重建立刻变成空转；
+    /// 而两条都不做，非 regen 阶段会先拿旧窗口的结论改一遍马上要被替换的行。
+    #[test]
+    fn stale_queue_is_discarded_before_the_rebuild_seeds_its_own_work() {
+        let source = include_str!("model_rebuild.rs");
+        let start = source
+            .split_once("pub async fn start(")
+            .expect("start exists")
+            .1
+            .split_once("fn spawn_monitor")
+            .expect("monitor follows start")
+            .0;
+        let discard = start
+            .find("discard_pending_for_full_rebuild(dbnum)")
+            .expect("整库重建必须先作废陈旧增量");
+        let seed = start
+            .find("sync_and_seed_model_coverage(dbnum, true)")
+            .expect("覆盖回填仍在");
+        assert!(discard < seed, "作废要排在回填之前: {start}");
     }
 }

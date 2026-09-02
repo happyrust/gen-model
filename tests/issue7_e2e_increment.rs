@@ -97,7 +97,6 @@ impl Case {
             Err(_) => by_name(ROOM_FRAME, Some(ROOM_DBNUM)).await,
         };
         let change = std::env::var("AIOS_ROOM_CHANGE").unwrap_or_else(|_| "element".into());
-        let direct_increment = env_flag("GEN_MODEL_DIRECT_INCREMENT", false);
         let (default_dbnum, action, target) = match change.as_str() {
             "element" => (ELEMENT_DBNUM, "room_recalc_element", element.clone()),
             "room" => (ROOM_DBNUM, "room_recalc_panel", panel.clone()),
@@ -131,10 +130,9 @@ impl Case {
                 .ok()
                 .map(|value| serde_json::from_str(&value).expect("AIOS_ROOM_EXPECT_EDGES JSON")),
             expect_geometry: env_flag("AIOS_ROOM_EXPECT_GEOMETRY", true),
-            expect_postcommit_drain: env_flag(
-                "AIOS_ROOM_EXPECT_POSTCOMMIT_DRAIN",
-                !direct_increment,
-            ),
+            // 缺省沿用直写路径一直在跑的值（脚本此前把 GEN_MODEL_DIRECT_INCREMENT 钉成 1，
+            // 该开关随 ADR-056 P1 退役）；要断言提交后就地消化房间工作，显式置 1。
+            expect_postcommit_drain: env_flag("AIOS_ROOM_EXPECT_POSTCOMMIT_DRAIN", false),
             baseline_file: std::env::var_os("AIOS_ROOM_BASELINE_FILE").map(Into::into),
             panel,
             room_ref,

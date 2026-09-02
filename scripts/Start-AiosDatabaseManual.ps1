@@ -19,7 +19,7 @@ if ($listener) {
 }
 
 $env:DB_OPTION_FILE = $Config
-$env:GEN_MODEL_DIRECT_INCREMENT = '1'
+# GEN_MODEL_DIRECT_INCREMENT 随 kv-mem 暂存窗口退役（ADR-056 P1）：稳态增量只有直写一条路。
 $env:RUST_MIN_STACK = '134217728'
 $env:RUST_BACKTRACE = '1'
 

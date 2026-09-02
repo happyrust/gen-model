@@ -207,8 +207,8 @@ async fn load_gen_side(
             "SELECT type::string(in) AS refno, \
                     aabb.d AS aabb, \
                     world_trans.d AS world_trans, \
-                    array::len(out->geo_relate[WHERE visible = true]) AS visible_geos, \
-                    array::len(out->geo_relate) AS total_geos \
+                    array::len(out->geo_relate[WHERE visible = true] ?? []) AS visible_geos, \
+                    array::len(out->geo_relate ?? []) AS total_geos \
              FROM {ids};"
         );
 

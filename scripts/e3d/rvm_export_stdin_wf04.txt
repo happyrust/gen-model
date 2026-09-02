@@ -1,0 +1,9 @@
+$P RVM-PROBE-ALIVE
+/1RS-WF04-W-C
+q name
+q type
+$M "D:/work/plant-code/old/gen-model/scripts/e3d/rvm_export_1rs_wf04_w_c.mac"
+$P RVM-EXPORT-EXIT
+QUIT
+FINISH
+FINISH

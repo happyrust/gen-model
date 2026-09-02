@@ -7,7 +7,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-use aios_core::{NamedAttrValue, RefU64};
+use aios_core::{NamedAttrMap, NamedAttrValue, RefU64};
 use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement};
 use serde_json::{Value, json};
 
@@ -169,5 +169,89 @@ pub fn ele_data_to_json(data: &parse_pdms_db::parse::EleData, found_sesno: u32) 
         "children": data.children.0.iter().map(|r| refno_str(*r)).collect::<Vec<_>>(),
         "attrs": serde_json::to_value(data.att_map()).unwrap_or(Value::Null),
         "explicit_attrs": serde_json::to_value(data.explicit_attmap()).unwrap_or(Value::Null),
+    })
+}
+
+/// `NamedAttrValue` → 平面 JSON 值（`parse.attmap` 的生成期语义视图用）。
+///
+/// 只做结构转换、不做语义归一：Int/Long → int、F32 → float、Vec3 → `[x,y,z]`、
+/// 数组 → list、refno 一律 `a_b`、Invalid → None。词属性在 direct 原始视图里是
+/// 词哈希整数——按 schema 反哈希对齐 DB 视图是 D2 同源转换器（Q4）的职责
+/// （`docs/plans/direct-dbelement-read-api.md`），这里不做第二实现。
+pub fn plain_attr_value(value: &NamedAttrValue) -> Value {
+    match value {
+        NamedAttrValue::InvalidType => Value::Null,
+        NamedAttrValue::IntegerType(v) => json!(v),
+        NamedAttrValue::LongType(v) => json!(v),
+        NamedAttrValue::BoolType(v) => json!(v),
+        NamedAttrValue::F32Type(v) => json!(v),
+        NamedAttrValue::F32VecType(v) => json!(v),
+        NamedAttrValue::Vec3Type(v) => json!([v.x, v.y, v.z]),
+        NamedAttrValue::StringType(v)
+        | NamedAttrValue::WordType(v)
+        | NamedAttrValue::ElementType(v) => json!(v),
+        NamedAttrValue::StringArrayType(v) => json!(v),
+        NamedAttrValue::BoolArrayType(v) => json!(v),
+        NamedAttrValue::IntArrayType(v) => json!(v),
+        NamedAttrValue::RefU64Type(v) => json!(refno_str(*v)),
+        NamedAttrValue::RefnoEnumType(v) => json!(refno_str(v.refno())),
+        NamedAttrValue::RefU64Array(v) => {
+            Value::Array(v.iter().map(|e| json!(refno_str(e.refno()))).collect())
+        }
+    }
+}
+
+/// 合并 attmap → `{属性名: 平面值}`（BTreeMap，键序稳定）。
+pub fn named_attr_map_to_plain(map: &NamedAttrMap) -> Value {
+    Value::Object(
+        map.map
+            .iter()
+            .map(|(k, v)| (k.clone(), plain_attr_value(v)))
+            .collect(),
+    )
+}
+
+/// 生成期语义视图 dump（`parse.attmap`）：`WholeAttMap::merge()` 后的平面形态。
+///
+/// 与 [`ele_data_to_json`]（原始两段 tagged dump）的差别：attrs 是「常规 attmap
+/// 打底、显式属性补缺」的合并结果 + 平面值；另给 `explicit_keys`（哪些键来自
+/// 显式段）与 `uda_count`（UDA 显式属性条数，merge 不含它们）便于测试对账。
+pub fn ele_data_to_merged_json(data: &parse_pdms_db::parse::EleData, found_sesno: u32) -> Value {
+    let merged = data.whole_attmap.merge();
+    let explicit_keys: Vec<&String> = data.whole_attmap.explicit_attmap().map.keys().collect();
+    // 直接从文件属性构造可复用的几何参数；这里不落库，也不调用 aios_core 查询接口。
+    // 容器节点通常为 Unknown，基本体节点则带有 PdmsGeoParam，供后续 direct 生成器消费。
+    let (geo_param, mesh, rvm_primitive) = merged
+        .create_brep_shape(None)
+        .map(|shape| {
+            let mesh = shape
+                .gen_csg_mesh()
+                .and_then(|mesh| serde_json::to_value(mesh).ok());
+            let rvm_primitive = shape
+                .convert_to_geo_param()
+                .and_then(|param| param.convert_rvm_pri_data())
+                .and_then(|bytes| String::from_utf8(bytes).ok());
+            let param = shape
+                .convert_to_geo_param()
+                .and_then(|param| serde_json::to_value(param).ok());
+            (param, mesh, rvm_primitive)
+        })
+        .unwrap_or((None, None, None));
+    let geo_valid = geo_param.is_some();
+    json!({
+        "refno": refno_str(data.refno),
+        "found_sesno": found_sesno,
+        "noun_hash": data.noun,
+        "noun": aios_core::tool::db_tool::db1_dehash(data.noun),
+        "name": data.name,
+        "owner": refno_str(data.owner),
+        "children": data.children.0.iter().map(|r| refno_str(*r)).collect::<Vec<_>>(),
+        "attrs": named_attr_map_to_plain(&merged),
+        "explicit_keys": explicit_keys,
+        "uda_count": data.whole_attmap.uda_atts().len(),
+        "geo_param": geo_param,
+        "geo_valid": geo_valid,
+        "mesh": mesh,
+        "rvm_primitive": rvm_primitive,
     })
 }

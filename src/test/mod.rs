@@ -8,6 +8,7 @@
 #[cfg(test)]
 mod fork_surreal_compat;
 mod test_gen_model;
+#[cfg(feature = "legacy_model")]
 pub mod test_performance;
 // mod test_incr_update;
 
@@ -16,6 +17,7 @@ pub mod test_performance;
 // mod test_query;
 
 // 重新导出性能测试函数，方便外部调用
+#[cfg(feature = "legacy_model")]
 pub use test_performance::{
     GenGeosDataMetrics, GenGeosDataPerformanceStats, ParallelCataPerformanceStats,
     PerformanceStats, StageAnalysis, analyze_performance_bottlenecks,

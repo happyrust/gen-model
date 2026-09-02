@@ -133,7 +133,6 @@ pub struct DependencyCacheContext {
 }
 
 fn explicit_cache_sesno(
-    staged_window: bool,
     context: Option<DependencyCacheContext>,
     source_dbnum: u32,
 ) -> anyhow::Result<Option<i32>> {
@@ -144,9 +143,6 @@ fn explicit_cache_sesno(
         Some(context) => anyhow::bail!(
             "CATA dependency cache context source mismatch: expected dbnum={source_dbnum}, got dbnum={}",
             context.source_dbnum
-        ),
-        None if staged_window => anyhow::bail!(
-            "staged CATA dependency missing effective cache context for source dbnum={source_dbnum}"
         ),
         None => Ok(None),
     }
@@ -442,15 +438,14 @@ impl InMemoryCataLocator {
         );
         locator.ref0_conflicts = ref0_conflicts;
 
-        // A project may have only its DESI dbnum parsed. In that state the
-        // watermark cannot locate catalogue references yet, so discover CATA
-        // files from the project itself and configured dependency projects on
-        // the first on-demand request.
-        if !locator
-            .dbnum_files
-            .values()
-            .any(|entry| entry.db_type.eq_ignore_ascii_case("CATA"))
-        {
+        // Outside the watcher lifecycle there is no installed priority manifest.
+        // Watermarks may still contain a handful of stale/foreign CATA identities;
+        // treating their mere presence as a complete dependency set selected the
+        // wrong same-dbnum file (AMS8000 ref0 23984 lives in ZDJ/zdj7600, not
+        // AvevaPlantSample/aps7600).  In standalone Python/HTTP generation, scan
+        // every configured dependency project and merge the deterministic CATA
+        // selection.  Watcher mode keeps using its authoritative manifest.
+        if manifest.is_empty() {
             let option = get_db_option();
             let mut projects = vec![project.to_string()];
             projects.extend(option.included_projects.iter().cloned());
@@ -720,38 +715,10 @@ fn should_eager_index_identity(dbnum: u32, db_type: &str, selected_cata: &HashSe
     db_type.eq_ignore_ascii_case("PROP")
 }
 
-fn scan_identity_ref0s(path: &Path, db_type: &str, project: &str) -> anyhow::Result<Vec<u32>> {
-    if db_type.eq_ignore_ascii_case("CATA") || db_type.eq_ignore_ascii_case("DESI") {
-        match scan_db_ref0s(path, project) {
-            Ok(ref0s) => return Ok(ref0s),
-            Err(error) => eprintln!(
-                "[cata_locator] paged Ref0 身份扫描失败，改用权威索引: db_type={db_type} path={} error={error:#}",
-                path.display()
-            ),
-        }
-    }
-    scan_authoritative_identity_ref0s(path, db_type)
-}
-
-fn scan_authoritative_identity_ref0s(path: &Path, db_type: &str) -> anyhow::Result<Vec<u32>> {
-    let bytes =
-        std::fs::read(path).with_context(|| format!("读取依赖身份文件失败: {}", path.display()))?;
-    let index = parse_pdms_db::parse::parse_db_index_data(bytes);
-    let mut ref0s = index
-        .refno_table_map
-        .iter()
-        .map(|entry| entry.key().get_0())
-        .filter(|ref0| is_valid_ref0(*ref0))
-        .collect::<Vec<_>>();
-    ref0s.sort_unstable();
-    ref0s.dedup();
-    if ref0s.is_empty() {
-        anyhow::bail!(
-            "依赖身份 Ref0 扫描返回空集合: db_type={db_type} path={}",
-            path.display()
-        );
-    }
-    Ok(ref0s)
+fn scan_identity_ref0s(path: &Path, _db_type: &str, project: &str) -> anyhow::Result<Vec<u32>> {
+    // Every dependency identity comes from the selected e3d-io live index.
+    // A whole-file fallback would also see obsolete copy-on-write index pages.
+    scan_db_ref0s(path, project)
 }
 
 /// 扫描单个 db 文件的 `ref0` 集（供 `ref0→dbnum` 反查）。
@@ -786,11 +753,12 @@ fn scan_db_ref0s(path: &Path, project: &str) -> anyhow::Result<Vec<u32>> {
 }
 
 fn scan_db_header(path: &Path) -> Option<parse_pdms_db::parse::DbBasicInfo> {
-    let snapshot = pdms_io::snapshot::DabaconSnapshot::open("", path).ok()?;
+    let engine = e3d_io::ReadOnlyEngine::open(path).ok()?;
+    let db_type = e3d_attlib::db1_dehash(engine.descriptor().noun)?;
     let info = parse_pdms_db::parse::DbBasicInfo {
-        db_type: snapshot.token().db_type().to_owned(),
-        ses_pgno: snapshot.token().latest_ses_pgno(),
-        db_no: snapshot.token().dbnum() as u32,
+        db_type,
+        ses_pgno: engine.descriptor().latest_ses_pgno,
+        db_no: engine.descriptor().db_mark,
     };
     (info.db_no != 0 && !info.db_type.is_empty()).then_some(info)
 }
@@ -983,7 +951,7 @@ async fn parse_refnos_with_session(
     for &refno in refnos {
         match session.parse_element(refno).await {
             Ok(Some(ele)) => {
-                let merged = ele.whole_attmap.merge();
+                let merged = ele.att;
                 let outbound = outbound_refs_of(&merged);
                 let children = dedupe_members(refno, &ele.children);
                 if let Some(sink) = attmap_sink.as_deref_mut() {
@@ -2144,8 +2112,9 @@ pub async fn preload_cata_for_roots(
         return Ok(LazyFallbackOutcome::default());
     }
     let locator = InMemoryCataLocator::build_for_project(project).await?;
-    let staged_window = crate::data_interface::staging::active_staging_writes().is_some();
-    let required = staged_window || cache_context.is_some();
+    // ADR-056 D8-A：暂存窗口的「必需依赖」语义退役；带缓存上下文的调用（补偿队列
+    // `cata_ref_rev`）仍要求根全部可定位，缺了就是数据问题而不是静默跳过。
+    let required = cache_context.is_some();
 
     // 按源 dbnum 分组生成根。
     let mut by_src: HashMap<u32, Vec<RefU64>> = HashMap::new();
@@ -2165,7 +2134,7 @@ pub async fn preload_cata_for_roots(
     let manifest_fingerprint = dependency_manifest_fingerprint();
 
     for (src_dbnum, src_roots) in by_src {
-        let sesno = match explicit_cache_sesno(staged_window, cache_context, src_dbnum)? {
+        let sesno = match explicit_cache_sesno(cache_context, src_dbnum)? {
             Some(sesno) => sesno,
             None => crate::data_interface::dbnum_state::DbnumState::applied_sesno(src_dbnum)
                 .await
@@ -2383,18 +2352,20 @@ mod tests {
         assert!(cache.get_fresh(8000, root, 232, "manifest-b").is_none());
     }
 
+    /// ADR-056 D8-A 之后没有「暂存窗口里缺上下文就报错」这一档：上下文缺席 = 按需
+    /// 路径（`None`），带上下文则库号必须对得上。
     #[test]
-    fn explicit_cache_context_is_authoritative_without_ambient_staging() {
+    fn explicit_cache_context_is_authoritative_and_optional() {
         let context = DependencyCacheContext {
             source_dbnum: 8000,
             effective_end_sesno: 232,
         };
         assert_eq!(
-            explicit_cache_sesno(false, Some(context), 8000).unwrap(),
+            explicit_cache_sesno(Some(context), 8000).unwrap(),
             Some(232)
         );
-        assert!(explicit_cache_sesno(true, None, 8000).is_err());
-        assert!(explicit_cache_sesno(false, Some(context), 7997).is_err());
+        assert_eq!(explicit_cache_sesno(None, 8000).unwrap(), None);
+        assert!(explicit_cache_sesno(Some(context), 7997).is_err());
     }
 
     #[test]

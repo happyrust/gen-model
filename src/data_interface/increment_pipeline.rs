@@ -131,6 +131,25 @@ pub(crate) fn wrap_in_transaction(statements: &[String]) -> Option<String> {
     ))
 }
 
+/// 直写窗口每块事务的语句数。
+///
+/// 原实现把整窗口拼成「单个事务」，大型系统库（如 amssys 冷启动 168 会话 ~4000+ 元素）
+/// 会撑爆 SurrealDB ws 通道上限，报「receiving from an empty and closed channel」而整体
+/// 失败。改为按本常量分块、每块自身原子提交：配合幂等 UPSERT 与「失败不推进水位、按
+/// 同一窗口重试」，重试仍从可收敛状态开始，不会半写卡死。
+pub(crate) const PERSIST_TX_CHUNK: usize = 500;
+
+/// 把窗口语句按 `chunk` 条一块包成独立事务，语句顺序不变——跨块引用与单事务同样是
+/// 前向依赖。生产直写（[`IncrementPipeline::persist_latest_main_data`]）与崩溃重放对拍
+/// （`direct_window_replay_parity`）共用这一份分块，对拍里的「中途 kill」就是在这些块的
+/// 边界上停：块内原子，所以块边界是崩溃能落在的全部位置。
+pub(crate) fn persist_transaction_batches(statements: &[String], chunk: usize) -> Vec<String> {
+    statements
+        .chunks(chunk.max(1))
+        .filter_map(wrap_in_transaction)
+        .collect()
+}
+
 /// Where one key's value came from last, while folding a run of `Modified` ops.
 ///
 /// `to_modify_surql` renders `added` and `modified` identically (the new value)
@@ -435,43 +454,6 @@ fn validate_prepared_attempt(
         );
     }
     Ok(())
-}
-
-/// 过时的暂存恢复记录要不要并入新会话、按全区间重建计划（而不是原样重放）？
-///
-/// 文件已经走在恢复记录前面（`attempt_end_sesno < requested_end_sesno`）时，暂存
-/// 模式下必须重建。不并的代价是死循环——窗口停在 25、文件已到 26，25 里还活着的
-/// 元素被 26 删掉之后，祖先解析必然断在它身上，每次重试都在重演同一幕；现场
-/// dbnum=8000 就这么卡了三轮，直到人手工删掉记录才过去。
-///
-/// **重建安全不是因为「持久层一个字都没落」**——写回并非单事务：
-/// `staging::executor::StagedExecutor::commit_to` 先按 `TX_CHUNK` 分块重放
-/// journal（每块各自一个事务），之后才跑尾事务，所以崩在某一块之后、尾事务之前
-/// 会留下半提交行。安全的真正来源是写回计划 T4.1
-/// （`docs/plans/2026-08-05-staged-increment-kvmem-write-back-plan.md`）：journal
-/// 只活在内存，进程一崩它就没了，唯一恢复路径是整窗口重算，重算的 regen 删除集
-/// 覆盖先前的半提交行、幂等收敛。
-///
-/// 「整窗口」这件事是结构上成立的，不是巧合：请求区间左端取 `applied_sesno + 1`，
-/// 而水位推进与恢复记录的删除同在一条尾事务里（`render_finalize_tail_with_effects`）。
-/// 记录还在 ⇒ 水位一定没动过 ⇒ 重建出来的区间必然从老记录那个 `start_sesno` 起步，
-/// 半提交的那几个会话一个都跑不掉。
-///
-/// 原样重放在直写模式下是对的：那条路上 PE 块可能已经写了一半而水位故意没动，
-/// 而它没有 journal、也没有「整窗口重算」这条退路，只能照先前备好的计划走。
-///
-/// 判据取「**这一次**是不是跑在暂存窗口里」（`in_staged_window`），而不是进程级的
-/// increment_mode：基线（start_sesno == 1）即便进程是 staged 也走直写，问的是进程
-/// 就会答错。
-///
-/// 恢复记录**超前**于文件（回退/换文件）不归它管：返回 false 落回重放分支，由
-/// [`validate_prepared_attempt`] 拒绝并给出人话诊断。
-fn should_rebuild_stale_staged_attempt(
-    attempt_end_sesno: Option<i32>,
-    requested_end_sesno: i32,
-    in_staged_window: bool,
-) -> bool {
-    in_staged_window && attempt_end_sesno.is_some_and(|end| end < requested_end_sesno)
 }
 
 /// 交入窗口的采信判定（纯函数）：调用方交出的预收集结果只有与本次要应用的区间
@@ -848,26 +830,6 @@ impl IncrementPipeline {
         Self
     }
 
-    /// 把解析产物写进活动窗口，并把同一批主数据/ref_rev语句收入唯一 journal。
-    /// 此阶段刻意不生成收口语句：水位与 pending 只能在模型生成也成功后提交。
-    pub(crate) async fn stage_parsed_window(
-        window: &mut crate::data_interface::staging::ActiveStagedWindow,
-        range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
-        dbnum: u32,
-    ) -> anyhow::Result<usize> {
-        use crate::data_interface::staging::ExecMode;
-
-        window.activate().await?;
-        let statements = Self::render_persist_statements(range_eles, dbnum as i32)
-            .into_iter()
-            .chain(crate::data_interface::manual_update::build_reverse_index_statements(range_eles))
-            .collect::<Vec<_>>();
-        for sql in &statements {
-            window.execute(sql, ExecMode::Both).await?;
-        }
-        Ok(statements.len())
-    }
-
     /// **LEGACY 诊断入口**（ADR-031）：逐会话回放收集，**生产路径不得调用**。
     ///
     /// 它逐个会话认领本会话新写的记录，再对每个 refno 付
@@ -1175,28 +1137,11 @@ impl IncrementPipeline {
         // no longer trustworthy, so reuse the durable fixed range + model plan
         // prepared before the first write.
         let prepared = crate::data_interface::model_update_pending::load_attempt(dbnum).await?;
-        // 文件已经走在这条恢复记录前面时，暂存模式下要**并掉新会话重建计划**，而
-        // 不是原样重放；判据与它为什么安全见 `should_rebuild_stale_staged_attempt`。
-        //
-        // 判据问的是「**这一次**是不是跑在暂存窗口里」，而不是进程级的
-        // increment_mode：基线（start_sesno == 1）即便进程是 staged 也走直写，
-        // 问的是进程就会答错。
-        let merge_newer_sessions = should_rebuild_stale_staged_attempt(
-            prepared.as_ref().map(|attempt| attempt.end_sesno),
-            *requested_range.end(),
-            crate::data_interface::staging::active_staging_writes().is_some(),
-        );
-        if merge_newer_sessions {
-            let attempt = prepared.as_ref().expect("guarded above");
-            warnings.push(format!(
-                "dbnum={dbnum}: 恢复记录停在 {}..={}，文件已到 {}；本次按整窗口重算并入新会话，\
-                 上一轮写回若留下半提交行由本次的删除集覆盖",
-                attempt.start_sesno,
-                attempt.end_sesno,
-                *requested_range.end()
-            ));
-        }
-        let prepared = prepared.filter(|_| !merge_newer_sessions);
+        // 恢复记录一律按持久化的固定区间**原样重放**（ADR-056 P1 之后只有直写这一条路）：
+        // PE 块可能已经写了一半而水位故意没动，这条路上没有 journal、也没有「整窗口
+        // 重算」那条退路，只能照先前备好的计划走。记录超前于文件（回退 / 换文件）由
+        // `validate_prepared_attempt` 拒绝并给出人话诊断；记录落后于文件时先把它重放完，
+        // 水位推进后下一轮再追新会话——直写路径从不丢弃一份持久化计划。
         let (sesno_range, mut model_plan, collected) = if let Some(attempt) = prepared {
             validate_prepared_attempt(&attempt, db_type, &path_text, *requested_range.end())?;
             warnings.push(format!(
@@ -1284,50 +1229,22 @@ impl IncrementPipeline {
         let mut cache_refnos = Self::collect_cache_invalidation_refnos(&range_eles);
         // 生成根级失效（ADR-010 残余关闭）：`QUERY_DEEP_CHILDREN_REFNOS` 按子树根
         // 为键，「变更元素 + 属主」的失效集够不着深层后代之上的高层根，同根下一次
-        // 重生成会拿旧成员表静默漏算。计划层刚算出生成根，失效按根补齐；暂存路径
-        // 同一份集合随提交 / 废弃时机清（`commit_registered_to` / `drop_database`）。
+        // 重生成会拿旧成员表静默漏算。计划层刚算出生成根，失效按根补齐。
         cache_refnos.extend(model_plan.regen_root_refnos());
         warnings.extend(model_plan.warnings.iter().cloned());
-        let staged = crate::data_interface::staging::active_staging_writes();
-        let staged_cache_refnos = staged
-            .is_some()
-            .then(|| cache_refnos.iter().copied().collect::<Vec<_>>());
 
         // 只保留最新数据：仅写入 pe 主数据（最新状态），不再写 sessions / element_changes 历史表
         //
         // Cache invalidation must run after every attempted persist, including a
         // partially failed batch: earlier Surreal statements may already have
         // changed data even though the watermark must remain unchanged.
-        let persist_result = if let Some(context) = staged.as_ref() {
-            let statements = Self::render_persist_statements(&range_eles, dbnum as i32)
-                .into_iter()
-                .chain(
-                    crate::data_interface::manual_update::build_reverse_index_statements(
-                        &range_eles,
-                    ),
-                )
-                .collect::<Vec<_>>();
-            StageTimings::measure(&mut timings.persist, async {
-                for sql in statements {
-                    context
-                        .execute(sql, crate::data_interface::staging::ExecMode::Both)
-                        .await?;
-                }
-                Ok::<(), anyhow::Error>(())
-            })
-            .await
-        } else {
-            StageTimings::measure(
-                &mut timings.persist,
-                Self::persist_latest_main_data(&range_eles, dbnum as i32),
-            )
-            .await
-        };
-        let invalidated = if staged.is_some() {
-            0
-        } else {
-            StageTimings::measure(&mut timings.cache, Self::invalidate_caches(cache_refnos)).await
-        };
+        let persist_result = StageTimings::measure(
+            &mut timings.persist,
+            Self::persist_latest_main_data(&range_eles, dbnum as i32),
+        )
+        .await;
+        let invalidated =
+            StageTimings::measure(&mut timings.cache, Self::invalidate_caches(cache_refnos)).await;
         if invalidated > 0 {
             println!(
                 "IncrementPipeline: invalidated {invalidated} PE/attribute cache entries \
@@ -1342,12 +1259,11 @@ impl IncrementPipeline {
         // 就是某个设计实例静默不重生成；而「靠后续触及 / 全量重建自愈」里没有任何一步是
         // 自动发生的——那条边可能到下一次有人手工跑全量重建为止都不存在。所以把这批引用者
         // 记进持久补偿队列，走与其它副作用同一条重试通道。
-        if staged.is_none()
-            && let Err(e) = StageTimings::measure(
-                &mut timings.reverse_index,
-                Self::maintain_reverse_index(&range_eles),
-            )
-            .await
+        if let Err(e) = StageTimings::measure(
+            &mut timings.reverse_index,
+            Self::maintain_reverse_index(&range_eles),
+        )
+        .await
         {
             warnings.push(format!(
                 "reverse-index maintain (non-fatal) {}: {}",
@@ -1386,46 +1302,46 @@ impl IncrementPipeline {
             crate::data_interface::manual_update::session_time_rfc3339("", path, end_sesno);
 
         // Recheck the stable file generation immediately before publishing the
-        // staged finalize / watermark tail. Same-file append is accepted;
-        // atomic path replacement is not.
+        // watermark tail. Same-file append is accepted; atomic path replacement
+        // is not.
         pdms_io::snapshot::DabaconSnapshot::open_verified("", &snapshot_token)
             .map_err(|error| anyhow::anyhow!("提交前冻结快照身份复核失败: {error:#}"))?;
 
-        if staged.is_some() {
-            // Register the complete durable plan, including RegenRoot. In the
-            // ordinary staged path, roots generated successfully before commit
-            // are removed by `settle_staged_plan_items`. During an initialization
-            // epoch the model phase is deliberately deferred, so stripping roots
-            // here would advance the data watermark while permanently losing the
-            // only durable request to generate them.
-            let finalize_plan = model_plan.clone();
-            StageTimings::measure(
-                &mut timings.finalize,
-                crate::data_interface::staging::register_staged_finalize(
-                    crate::data_interface::staging::StagedFinalize {
-                        dbnum,
-                        start_sesno,
-                        end_sesno,
-                        end_sesno_time,
-                        plan: finalize_plan,
-                        window_statements,
-                        cache_refnos: staged_cache_refnos.unwrap_or_default(),
-                    },
-                ),
-            )
-            .await?;
-        } else {
-            StageTimings::measure(
-                &mut timings.finalize,
-                crate::data_interface::model_update_pending::finalize_attempt(
-                    dbnum,
-                    end_sesno,
-                    end_sesno_time.as_deref(),
-                    &model_plan,
-                    &window_statements,
-                ),
-            )
-            .await?;
+        // The tail receives the complete durable plan, including RegenRoot: the
+        // model phase runs after the watermark (ADR-025 §7 / ADR-056 D1), so
+        // stripping roots here would advance the data watermark while
+        // permanently losing the only durable request to generate them.
+        StageTimings::measure(
+            &mut timings.finalize,
+            crate::data_interface::model_update_pending::finalize_attempt(
+                dbnum,
+                end_sesno,
+                end_sesno_time.as_deref(),
+                &model_plan,
+                &window_statements,
+            ),
+        )
+        .await?;
+
+        // D8-A（ADR-056 / spec 035 T126）：本窗口生成根的 CATA 闭包解析进 Surreal 只为
+        // `ref_rev` 反向索引与 UI 目录属性服务，挂在水位之后的补偿队列上——不拦模型、
+        // 不拦水位；水位已经推进，入队失败也只记 warning，本批不再回头判失败。
+        if db_type.eq_ignore_ascii_case("DESI") {
+            let roots = model_plan
+                .regen_root_refnos()
+                .into_iter()
+                .map(|root| root.refno())
+                .collect::<Vec<_>>();
+            if let Err(error) =
+                crate::data_interface::side_effect_pending::SideEffectCompensator::enqueue_cata_ref_rev(
+                    dbnum, end_sesno, db_type, &roots,
+                )
+                .await
+            {
+                warnings.push(format!(
+                    "dbnum={dbnum}: CATA ref_rev 补偿任务入队失败（不拦水位，下一窗口再登记）: {error:#}"
+                ));
+            }
         }
 
         timings.report(
@@ -1626,34 +1542,26 @@ impl IncrementPipeline {
         // 不会出现「半写 + 重试反复撞已存在记录失败 → dbnum 水位卡死」。
         let statements = Self::render_persist_statements(range_eles, dbnum);
         let total = statements.len();
-        // 分块事务提交：原实现把整窗口拼成「单个事务」，大型系统库（如 amssys 冷启动
-        // 168 会话 ~4000+ 元素）会撑爆 SurrealDB ws 通道上限，报「receiving from an
-        // empty and closed channel」而整体失败。改为按 TX_CHUNK 条语句一块、每块自身
-        // 原子提交：配合幂等 UPSERT 与「失败不推进水位、按同一窗口重试」，重试仍从可
-        // 收敛状态开始，不会半写卡死。语句顺序保持不变，跨块引用与单事务同样是前向依赖。
-        const TX_CHUNK: usize = 500;
-        for chunk in statements.chunks(TX_CHUNK) {
-            if let Some(tx_sql) = wrap_in_transaction(chunk) {
-                // `.check()`：把事务内被取消/失败的语句错误上浮为 Err。原实现只 map_err
-                // 传输错误、未 check 语句级错误，事务被取消时仍可能返回 Ok → 水位误推进。
-                SUL_DB
-                    .query(&tx_sql)
-                    .await
-                    .map_err(|e| anyhow::anyhow!("增量主数据落库失败(事务提交): {e}"))?
-                    .check()
-                    .map_err(|e| anyhow::anyhow!("增量主数据落库失败(事务内语句): {e}"))?;
-            }
+        for tx_sql in persist_transaction_batches(&statements, PERSIST_TX_CHUNK) {
+            // `.check()`：把事务内被取消/失败的语句错误上浮为 Err。原实现只 map_err
+            // 传输错误、未 check 语句级错误，事务被取消时仍可能返回 Ok → 水位误推进。
+            SUL_DB
+                .query(&tx_sql)
+                .await
+                .map_err(|e| anyhow::anyhow!("增量主数据落库失败(事务提交): {e}"))?
+                .check()
+                .map_err(|e| anyhow::anyhow!("增量主数据落库失败(事务内语句): {e}"))?;
         }
 
         println!(
-            "增量主数据落库完成，共 {total} 条（分块事务提交 chunk={TX_CHUNK}，仅最新状态，不写历史）"
+            "增量主数据落库完成，共 {total} 条（分块事务提交 chunk={PERSIST_TX_CHUNK}，仅最新状态，不写历史）"
         );
         Ok(())
     }
 
-    /// 渲染本窗口的全部落库语句（折叠后）。纯函数：直写路径
-    /// （[`Self::persist_latest_main_data`]）与暂存路径
-    /// （[`Self::apply_window_staged`]）共用同一份渲染，两边不可能漂移。
+    /// 渲染本窗口的全部落库语句（折叠后）。纯函数：生产直写路径
+    /// （[`Self::persist_latest_main_data`]）与维护纠正 `window_repair` / 测试载体
+    /// 共用同一份渲染，两边不可能漂移；P4 换收集器底座时继续复用它，换的只是输入。
     ///
     /// 窗口内同一 refno 被连续改 N 次就写 N 次，而本模块只保留最新状态，中间态
     /// 全部会被最后一次覆盖。折叠掉它们（见 `fold_window`）既减语句数也减 SQL
@@ -2007,7 +1915,7 @@ mod cache_tests {
     /// 失效集必须在「元素 + 属主」之外并入计划层算出的生成根（ADR-010 残余）：
     /// `QUERY_DEEP_CHILDREN_REFNOS` 按子树根为键，漏掉根键的失效等于同根下一次
     /// 重生成拿旧成员表静默漏算。钉住书写顺序：collect → extend(regen roots) →
-    /// 才轮到暂存快照捕获与直写失效。
+    /// 才轮到直写失效。
     #[test]
     fn cache_invalidation_extends_to_the_plans_regen_roots() {
         let source = include_str!("increment_pipeline.rs");
@@ -2017,33 +1925,70 @@ mod cache_tests {
         let extend_at = source
             .find("cache_refnos.extend(model_plan.regen_root_refnos())")
             .expect("失效集必须并入生成根");
-        let staged_capture_at = source
-            .find("let staged_cache_refnos")
-            .expect("暂存路径的失效快照必须存在");
+        let invalidate_at = source
+            .find("Self::invalidate_caches(cache_refnos)")
+            .expect("直写路径的失效必须存在");
         assert!(
-            collect_at < extend_at && extend_at < staged_capture_at,
-            "顺序必须是 collect → extend(regen roots) → 暂存快照捕获"
+            collect_at < extend_at && extend_at < invalidate_at,
+            "顺序必须是 collect → extend(regen roots) → 直写失效"
         );
     }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn staged_parse_keeps_one_journal_and_does_not_finalize() {
-        use crate::data_interface::staging::{
-            ExecMode, ResourceThresholds, lifecycle::create_window_on,
-        };
-        use surrealdb::engine::any::connect;
+    /// ADR-056 P1（spec 035 成功标准 1）：`apply_one` 只剩直写这一条路——函数体里
+    /// 不得再出现任何 `staging::` 引用，也不得再按窗口模式丢弃持久化的恢复记录。
+    /// 顺序纪律一并钉住：persist → invalidate → reverse_index → datacenter 语句批 →
+    /// `finalize_attempt`（水位最后）。
+    #[test]
+    fn apply_one_has_no_staging_fork() {
+        let source = include_str!("increment_pipeline.rs");
+        let body = source
+            .split_once("async fn apply_one(")
+            .expect("apply_one must exist")
+            .1
+            .split_once("fn anc_repair_statements_for_window(")
+            .expect("anc_repair_statements_for_window must follow apply_one")
+            .0;
+        assert!(
+            !body.contains("staging::"),
+            "apply_one 不得再引用 staging（ADR-056 P1）"
+        );
+        assert!(
+            !body.contains("prepared.filter(") && !body.contains("should_rebuild_stale"),
+            "直写路径从不丢弃一份持久化的恢复记录"
+        );
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("缺 {needle}"));
+        let persist = at("Self::persist_latest_main_data(&range_eles, dbnum as i32)");
+        let invalidate = at("Self::invalidate_caches(cache_refnos)");
+        let reverse_index = at("Self::maintain_reverse_index(&range_eles)");
+        let datacenter = at("Self::datacenter_statements(&range_eles, db_type)");
+        let finalize = at("model_update_pending::finalize_attempt(");
+        assert!(
+            persist < invalidate
+                && invalidate < reverse_index
+                && reverse_index < datacenter
+                && datacenter < finalize,
+            "直写顺序纪律：persist → invalidate → reverse_index → datacenter → finalize"
+        );
+    }
 
-        let instance = connect("mem://").await.expect("mem boots");
-        let mut window = create_window_on(&instance, 7996, 1, 1, ResourceThresholds::default())
+    /// 直写路径的持久化语句（主数据 + 反向索引）与水位是两回事：一条 Deleted 渲染出
+    /// **恰好两条**语句（`pe` 软删 + `ref_rev` 清理），打在生产 schema 的一次性实例上之后
+    /// `dbnum_watermark` 仍为空——水位只属于 `finalize_attempt` 的尾事务。
+    /// （前身 `staged_parse_keeps_one_journal_and_does_not_finalize` 借 kv-mem 暂存窗口当
+    /// 载体断言 journal 条数；ADR-056 P1 后 journal 没有对象，改成直起实例断言直写渲染。）
+    #[tokio::test(flavor = "multi_thread")]
+    async fn persist_statements_never_touch_the_watermark() {
+        use crate::data_interface::table_parity::{apply_all, fresh_mem_db, init_schema_on};
+
+        let db = fresh_mem_db("aios", "persist_no_watermark")
             .await
-            .expect("create window");
-        window
-            .execute(
-                "UPSERT pe:⟨7996_10⟩ SET noun = 'PIPE'",
-                ExecMode::StagingOnly,
-            )
+            .expect("mem boots");
+        init_schema_on(&db).await.expect("production schema");
+        db.query("UPSERT pe:⟨7996_10⟩ SET noun = 'PIPE', dbnum = 7996")
             .await
-            .expect("seed staging only");
+            .expect("seed pe row")
+            .check()
+            .expect("seeded");
 
         let mut range = BTreeMap::new();
         range.insert(
@@ -2054,14 +1999,17 @@ mod cache_tests {
                 EleOperationDetail::Deleted,
             )],
         );
+        let statements = IncrementPipeline::render_persist_statements(&range, 7996)
+            .into_iter()
+            .chain(crate::data_interface::manual_update::build_reverse_index_statements(&range))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            statements.len(),
+            2,
+            "主数据软删 + ref_rev 清理: {statements:?}"
+        );
+        apply_all(&db, &statements).await.expect("direct persist");
 
-        let staged = IncrementPipeline::stage_parsed_window(&mut window, &range, 7996)
-            .await
-            .expect("stage parsed window");
-        assert_eq!(staged, 2, "主数据删除 + ref_rev 清理");
-        assert_eq!(window.journal().await.len(), 2, "必须沿用同一 journal");
-
-        let db = window.staging_db().clone();
         let mut response = db
             .query("SELECT * FROM dbnum_watermark")
             .await
@@ -2070,27 +2018,32 @@ mod cache_tests {
         assert_eq!(
             serde_json::to_string(&rows).expect("serialize"),
             "{\"Array\":[]}",
-            "解析阶段不得提前推进水位"
+            "持久化阶段不得提前推进水位"
         );
-
-        window.drop_database().await.expect("cleanup");
+        let mut response = db
+            .query("RETURN pe:⟨7996_10⟩.deleted")
+            .await
+            .expect("query tombstone");
+        assert_eq!(
+            response.take::<Option<bool>>(0).expect("take deleted"),
+            Some(true),
+            "Deleted 渲染成软删 UPDATE，而不是硬删"
+        );
     }
 
-    /// 解析阶段过后，暂存里**依然没有**删除/修改目标的 `pe` 行。
-    ///
-    /// 两类操作渲染出来的主数据语句都是 `UPDATE pe:…`，而 SurrealDB 2.x 的 `UPDATE`
-    /// 命不中记录就是空操作；暂存库起点是空的，这两类目标的 `pe` 行只存在于持久层。
-    /// 于是任何在窗口上下文里解析生成根的调用都只会拿到 `None`——「一次性持有全部
-    /// 生成根锁」在暂存世界里会静默退化成一把都不持有。
+    /// 删除 / 修改目标的主数据语句都是 `UPDATE pe:…`：SurrealDB 2.x 的 `UPDATE` 命不中记录
+    /// 就是空操作，所以持久层**缺行**时它们不会凭空造出半行 `pe`——直写路径上这一条同样
+    /// 重要（老收集器幻删 / 漏增时 Modified 打在不存在的行上不得留下残迹，F8）。
+    /// （前身 `the_window_cannot_see_the_ownership_of_deleted_or_modified_targets` 在暂存世界里
+    /// 断言同一性质并推到「暂存态选根为 None」；暂存半边没有对象，只留下这一半。）
     #[tokio::test(flavor = "multi_thread")]
-    async fn the_window_cannot_see_the_ownership_of_deleted_or_modified_targets() {
-        use crate::data_interface::staging::{ResourceThresholds, lifecycle::create_window_on};
-        use surrealdb::engine::any::connect;
+    async fn deleted_and_modified_targets_never_materialise_pe_rows() {
+        use crate::data_interface::table_parity::{apply_all, fresh_mem_db, init_schema_on};
 
-        let instance = connect("mem://").await.expect("mem boots");
-        let mut window = create_window_on(&instance, 7995, 1, 1, ResourceThresholds::default())
+        let db = fresh_mem_db("aios", "no_pe_materialisation")
             .await
-            .expect("create window");
+            .expect("mem boots");
+        init_schema_on(&db).await.expect("production schema");
 
         let deleted = RefU64((7995_u64 << 32) | 10);
         let modified = RefU64((7995_u64 << 32) | 11);
@@ -2120,34 +2073,27 @@ mod cache_tests {
             ],
         );
 
-        IncrementPipeline::stage_parsed_window(&mut window, &range, 7995)
-            .await
-            .expect("stage parsed window");
-
-        let unit_types = vec!["BRAN".to_string()];
+        let statements = IncrementPipeline::render_persist_statements(&range, 7995);
         for refno in [deleted, modified] {
-            let refno = RefnoEnum::from(refno);
-            let pe = window
-                .scope(aios_core::get_pe(refno))
-                .await
-                .expect("staged read");
-            assert!(pe.is_none(), "暂存里不该凭空出现 {refno} 的 pe 行: {pe:?}");
-            let root = window
-                .scope(
-                    crate::data_interface::generation_root::resolve_live_element_generation_root(
-                        refno,
-                        &unit_types,
-                    ),
-                )
-                .await
-                .expect("staged root resolution");
+            let pe = RefnoEnum::from(refno).to_pe_key();
             assert!(
-                root.is_none(),
-                "暂存态解析不出 {refno} 的生成根，锁范围会静默漏掉它: {root:?}"
+                !statements
+                    .iter()
+                    .any(|sql| sql.contains(&format!("UPSERT {pe}"))
+                        || sql.contains(&format!("CREATE {pe}"))),
+                "删除 / 修改目标只能是 UPDATE，不得 UPSERT/CREATE 出 {pe}: {statements:?}"
             );
         }
+        apply_all(&db, &statements)
+            .await
+            .expect("direct persist on an empty instance");
 
-        window.drop_database().await.expect("cleanup");
+        let mut response = db
+            .query("SELECT VALUE <string>record::id(id) FROM pe")
+            .await
+            .expect("list pe rows");
+        let rows: Vec<String> = response.take(0).expect("take pe ids");
+        assert!(rows.is_empty(), "持久层缺行时不得凭空长出 pe 行: {rows:?}");
     }
 
     #[test]
@@ -2253,30 +2199,6 @@ mod cache_tests {
             196,
         )
         .expect("separator and drive-letter casing must not change file identity");
-    }
-
-    /// 暂存窗口里碰上落后于文件的恢复记录：重建，不重放。
-    ///
-    /// 这是 dbnum=8000 那一幕的唯一出口——照旧重放的话，窗口停在 25 而 26 已经把 25
-    /// 里还活着的元素删掉，祖先解析每一轮都断在同一个元素上，永不自愈。
-    #[test]
-    fn a_stale_staged_attempt_is_rebuilt_into_the_newer_sessions() {
-        assert!(should_rebuild_stale_staged_attempt(Some(25), 26, true));
-    }
-
-    /// 其余三种情形一律不许丢弃这份持久化计划。
-    #[test]
-    fn nothing_else_discards_a_prepared_attempt() {
-        // 直写模式：PE 块可能已写了一半而水位故意没动，更新前的 OWNER 图不再可信，
-        // 而这条路上没有 journal、也没有整窗口重算那条退路。
-        assert!(!should_rebuild_stale_staged_attempt(Some(25), 26, false));
-        // 记录与文件持平：本来就是原样重放那条路。
-        assert!(!should_rebuild_stale_staged_attempt(Some(26), 26, true));
-        // 记录超前于文件（回退 / 换文件）：落回重放分支，让
-        // `validate_prepared_attempt` 出人话诊断，不在这里悄悄吞掉。
-        assert!(!should_rebuild_stale_staged_attempt(Some(27), 26, true));
-        // 压根没有恢复记录：这是一次全新的窗口。
-        assert!(!should_rebuild_stale_staged_attempt(None, 26, true));
     }
 
     /// IU-S3-04：交入窗口只有与请求区间**完全一致**才被采信，其余一律回退
@@ -3054,23 +2976,27 @@ mod fold_tests {
         );
     }
 
+    /// 尾事务拿到的是**完整**的窗口前计划（含 RegenRoot）：模型阶段在水位之后跑
+    /// （ADR-025 §7 / ADR-056 D1），在这里剥掉根就等于推进了数据水位却永久丢掉了
+    /// 唯一一份「请生成它」的持久请求。
     #[test]
-    fn staged_finalize_keeps_regen_roots_until_generation_settles_them() {
+    fn the_finalize_tail_receives_the_full_pre_persist_plan() {
         let source = include_str!("increment_pipeline.rs");
         let block = source
-            .split_once("// Register the complete durable plan")
-            .expect("staged finalize registration must document durable roots")
+            .split_once("// The tail receives the complete durable plan")
+            .expect("finalize tail must document the durable plan")
             .1
-            .split_once("} else {")
-            .expect("direct finalize branch must follow")
+            .split_once("timings.report(")
+            .expect("timing report must follow the finalize tail")
             .0;
         assert!(
-            block.contains("let finalize_plan = model_plan.clone();"),
-            "the full pre-persist plan must enter the staged finalize tail: {block}"
+            block.contains("model_update_pending::finalize_attempt(")
+                && block.contains("&model_plan,"),
+            "the full pre-persist plan must enter the finalize tail: {block}"
         );
         assert!(
             !block.contains("ModelWorkAction::RegenRoot") && !block.contains("work_items.retain"),
-            "RegenRoot may only be removed after successful generation, never at registration: {block}"
+            "RegenRoot may only be removed after successful generation, never at finalize: {block}"
         );
     }
 

@@ -742,7 +742,7 @@ impl RoomPanelMap {
 /// 只在启用了某个 project 特性时才存在——无 project 构建下房间子系统的入口全部
 /// 响亮拒绝（见各 loader / builder 的 `cfg(not(any(...)))` 分支），永远走不到这里。
 #[cfg(any(feature = "project_hd", feature = "project_hh"))]
-fn configured_match_room_fn() -> fn(&str) -> bool {
+pub(crate) fn configured_match_room_fn() -> fn(&str) -> bool {
     #[cfg(feature = "project_hd")]
     return match_room_name_hd;
 
@@ -765,7 +765,8 @@ pub async fn load_room_panel_map(db_option: &DbOption) -> anyhow::Result<RoomPan
     }
     #[cfg(any(feature = "project_hd", feature = "project_hh"))]
     {
-        load_room_panel_groups(&db_option.get_room_key_word(), configured_match_room_fn()).await
+        load_room_panel_groups_by_mode(&db_option.get_room_key_word(), configured_match_room_fn())
+            .await
     }
 }
 
@@ -938,10 +939,33 @@ where
     }
     #[cfg(any(feature = "project_hd", feature = "project_hh"))]
     {
-        let map = load_room_panel_groups(room_key_word, match_room_fn).await?;
+        let map = load_room_panel_groups_by_mode(room_key_word, match_room_fn).await?;
         write_room_panel_relate(&map).await?;
         Ok(map)
     }
+}
+
+/// 房间 → 面板现状的来源按读模式选（ADR-053 / ADR-056 N7 的房间面）：direct 读模式
+/// 从 MDB 的设计库文件读（`room_topology`，一行 SurrealDB 不读——不跑数据解析的部署与
+/// 零解析库此前在这里拿到的是 0 间房），否则照旧读 noun 表 + `pe_owner`。
+async fn load_room_panel_groups_by_mode<F>(
+    room_key_word: &Vec<String>,
+    match_room_fn: F,
+) -> anyhow::Result<RoomPanelMap>
+where
+    F: Fn(&str) -> bool,
+{
+    if crate::options::direct_read_mode() {
+        let hierarchy = crate::fast_model::room_topology::RoomHierarchy::configured()
+            .ok_or_else(|| anyhow::anyhow!("房间子系统需要 project_hd 或 project_hh 特性"))?;
+        return crate::fast_model::room_topology::load_room_panel_map_from_files(
+            room_key_word,
+            hierarchy,
+            match_room_fn,
+        )
+        .await;
+    }
+    load_room_panel_groups(room_key_word, match_room_fn).await
 }
 
 /// 从库里读出房间 → 面板的现状，不写任何东西。
@@ -994,7 +1018,7 @@ where
     }
 }
 
-fn room_panel_map_from_groups<F>(
+pub(crate) fn room_panel_map_from_groups<F>(
     room_groups: Vec<(RefnoEnum, String, Vec<RefnoEnum>)>,
     match_room_fn: F,
 ) -> RoomPanelMap
@@ -1331,14 +1355,11 @@ pub async fn recalc_panel_membership(
     ensure_room_tree_coverage().await.map_err(|error| {
         anyhow::anyhow!("面板 {panel} 的成员判不了，不改写它的房间归属（任务保留重试）: {error:#}")
     })?;
-    // 候选取自空间树，而窗口内的删除是**推迟到提交后**才从树上摘的
-    // （`defer_spatial_remove`）：此刻树上还留着这些构件的旧包围盒。不排除的话，
-    // 同一个窗口里 DeleteCleanup 刚清掉的归属边，会被这块面板按旧位置原样写回，
-    // 而且面板任务算成功、边要等下一次这块面板被触发才清得掉。移动的构件不在此列
-    // ——「面板先、元素后」的同轮元素任务会把它收敛回来，纯删除没有元素任务兜底。
-    // 窗口外这个集合恒为空，直写路径的行为不变。
-    let mut exclude = rooms.all_panels.clone();
-    exclude.extend(crate::data_interface::staging::staged_spatial_removals().await);
+    // 排除集只有在册面板：直写路径上 DeleteCleanup 在提交时就已把被删构件从空间树上
+    // 摘掉（`delete_room_membership` 锁下摘树），候选里不会再出现它们。ADR-056 P1 之前
+    // 暂存窗口把摘树推迟到提交后，这里还要并入窗口内的待摘构件集；那条路退役后该集合
+    // 恒空，一并删去。
+    let exclude = rooms.all_panels.clone();
     // 没有几何同样是「判不了」，在这里要比全量那一侧更响：整间任务的入队条件是这块
     // 面板的包围盒确实变过，能变就说明它刚才还有几何，此刻却查不到，本身就是信号。
     // 上抛让任务保留重试，而不是写一个空集把这间房清掉。
@@ -2867,13 +2888,11 @@ mod tests {
 
     /// 窗口内被删掉的构件不得被整间分支按旧位置重新收编。
     ///
-    /// 摘树推迟到提交之后（`defer_spatial_remove`），所以窗口内树上还留着这些构件的旧
-    /// 包围盒。同一个窗口里 DeleteCleanup 刚清掉它们的归属边，紧随其后的面板目标又会
-    /// 把它们按旧位置写回 `room_relate`——journal 顺序保证这个错误终态被提交，面板任务
-    /// 还算成功，垃圾边要等下次这块面板被触发才清得掉。移动的构件不在此列：同轮的元素
-    /// 任务会把它收敛回来；纯删除没有元素任务兜底，是唯一漏网的形态。
+    /// ADR-056 P1 之后整间分支的排除集只有在册面板：被删构件由 `delete_room_membership`
+    /// 在提交时锁下摘树，候选里不会再有它们；暂存窗口「摘树推迟到提交后、排除集并入
+    /// `staged_spatial_removals()`」那一臂随暂存层退役。任何一处把暂存寄存接回来，这里就红。
     #[test]
-    fn the_panel_branch_excludes_elements_this_window_already_deleted() {
+    fn the_panel_branch_excludes_only_registered_panels_after_staging_retired() {
         let source = include_str!("room_model.rs");
         let body = source
             .split_once("pub async fn recalc_panel_membership(")
@@ -2883,17 +2902,15 @@ mod tests {
             .expect("整间分支之后是 PanelIndex")
             .0;
 
-        let extend_at = body
-            .find("staged_spatial_removals()")
-            .expect("排除集必须并入窗口内的待摘构件");
-        let recalc_at = body.find("cal_room_refnos(").expect("整间分支必须算成员");
-        assert!(extend_at < recalc_at, "{body}");
         assert!(
-            !body.contains(
-                "cal_room_refnos(&db_option.get_meshes_path(), panel, &rooms.all_panels)"
-            ),
-            "排除集不能退回只有在册面板那一份: {body}"
+            !body.contains("staged_spatial_removals") && !body.contains("active_staging_writes"),
+            "整间分支不得再并入暂存窗口的待摘构件: {body}"
         );
+        let exclude_at = body
+            .find("let exclude = rooms.all_panels.clone();")
+            .expect("排除集必须是在册面板");
+        let recalc_at = body.find("cal_room_refnos(").expect("整间分支必须算成员");
+        assert!(exclude_at < recalc_at, "{body}");
     }
 
     /// 「没有几何」不得被折成「没有成员」写下去。

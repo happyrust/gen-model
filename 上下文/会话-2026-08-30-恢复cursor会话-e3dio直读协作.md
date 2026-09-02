@@ -16,7 +16,7 @@
 ### 计划步骤
 1. [ ] 审核 e3d-io 实现（index/diff、engine、record/descriptor、provider trait）
 2. [ ] 审核 gen-model 直读实现（direct_store / direct_attmap / 探针）
-3. [ ] 核查 ida-bridge 服务与既有 core.dll / core3d.dll 逆向资产
+3. [ ] 核查 ida-bridge 服务与既有 core.dll / core3d.dll 资产
 4. [ ] ida-bridge 分析 core.dll 模型生成全流程（取数点/语义）
 5. [ ] 覆盖矩阵：生成链数据接口需求 vs 现有直读实现
 6. [ ] 产出完整开发计划（docs/plans/）
@@ -34,7 +34,7 @@
   - `idalib-32268` → `D:\AVEVA\Everything3D3.1\Core3D.dll.i64`
   - `idalib-32872` → `D:\AVEVA\Everything3D2.10\Core3D.dll.i64`
   - 另有 libgm/libgeom（3.1 与 2.10）各一
-- `.ida_scratch/` 有 7 月做的大量逆向资产：`_routines_core3d.json`(87K)、`_core3d_funcs.json`、
+- `.ida_scratch/` 有 7 月做的大量资产：`_routines_core3d.json`(87K)、`_core3d_funcs.json`、
   `_imports_core3d-retrace.json`(747K)、`out_dbelem*/out_attr*/out_noun*`、`e3d_dbelem_api.txt`(35K) 等
 - 用法：`ida-bridge exec <client_id> --sql "..."`（优先 SQL）；写 IDAPython 前先加载 ida-docs skill
 
@@ -79,10 +79,10 @@
 - BANG（G/descriptor 定型）：e3d-io record 层缺口，未修
 
 ### 待办（本任务重点）
-- core.dll 模型生成**全流程**逆向（gap 文档只覆盖了「读」，没覆盖「生成算法怎么把数据变几何」）
+- core.dll 模型生成**全流程**（gap 文档只覆盖了「读」，没覆盖「生成算法怎么把数据变几何」）
 - 产出覆盖矩阵 + 完整开发计划
 
-## core.dll / Core3D 生成流程逆向（本会话 14:xx，活体 3.1 二进制核实）
+## core.dll / Core3D 生成流程（本会话 14:xx，活体 3.1 二进制核实）
 
 ### GMDRAW 跳过的 5 个 noun 已解码
 `PNOD`/`SNOD`（管道节点）、`JLDATU`/`PLDATU`/`ENDATU`（J 线/P 线/端点基准点）——全是**非几何的连接/基准点**，无可见几何，GMDRAW 跳过合理。闭合 teach/0009 §六 一条遗留项。

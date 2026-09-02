@@ -2060,66 +2060,6 @@ pub(crate) async fn expand_live_reverse_cascade(
     Ok(roots.into_values().collect())
 }
 
-/// Expand against persistent state plus this window's overlay. Keeping removed old edges is
-/// conservative: it can over-regenerate, while new staged references can no longer be missed.
-pub(crate) async fn expand_staged_reverse_cascade(
-    seed: RefnoEnum,
-) -> anyhow::Result<Vec<crate::data_interface::generation_root::GenerationRoot>> {
-    use crate::data_interface::generation_root::{
-        GenerationNode, configured_delivery_unit_types, resolve_element_generation_root,
-    };
-
-    let staged = crate::data_interface::staging::active_data_db();
-    let (reversal, _) = collect_ref_reversal_closure_with_limit(
-        &HashSet::from([seed]),
-        usize::MAX,
-        None,
-        |frontier| {
-            let staged = staged.clone();
-            async move {
-                let mut edges = fetch_ref_rev_edges_on(&SUL_DB, &frontier).await?;
-                edges.extend(fetch_ref_rev_edges_on(&staged, &frontier).await?);
-                edges.sort_unstable();
-                edges.dedup();
-                Ok(edges)
-            }
-        },
-    )
-    .await?;
-    let referrers = reversal.values().flatten().copied().collect::<HashSet<_>>();
-    let graph = collect_base_graph(referrers.clone(), |frontier| {
-        let staged = staged.clone();
-        async move {
-            let persistent = fetch_base_graph_nodes_on(&SUL_DB, frontier.clone()).await?;
-            let overlay = fetch_base_graph_nodes_on(&staged, frontier).await?;
-            let mut nodes = persistent.into_iter().collect::<HashMap<_, _>>();
-            nodes.extend(overlay);
-            Ok(nodes.into_iter().collect())
-        }
-    })
-    .await?;
-    let mut referrer_dbnums = load_referrer_dbnums(&referrers).await?;
-    referrer_dbnums.extend(load_referrer_dbnums_on(&staged, &referrers).await?);
-    let non_design_dbnums = load_non_design_dbnums().await?;
-    let unit_types = configured_delivery_unit_types();
-    let mut roots = BTreeMap::new();
-    for referrer in referrers {
-        if !referrer_is_design(referrer_dbnums.get(&referrer).copied(), &non_design_dbnums) {
-            continue;
-        }
-        if let Some(root) = resolve_element_generation_root(referrer, &unit_types, |candidate| {
-            graph.get(&candidate).map(|node| GenerationNode {
-                owner: node.owner,
-                noun: node.noun.clone(),
-                name: node.name.clone(),
-            })
-        }) {
-            roots.insert(root.root.to_pdms_str(), root);
-        }
-    }
-    Ok(roots.into_values().collect())
-}
-
 // ---------------------------------------------------------------------------
 // Manual execution + per-unit pending retry (spec §失败与重试, plan 阶段 4)
 // ---------------------------------------------------------------------------
@@ -5315,15 +5255,10 @@ impl AiosDBManager {
             // 与旧口径一致（不回滚水位）。
             #[cfg(feature = "sql")]
             if let Some(success) = incr.successes.first() {
-                if !crate::data_interface::staging::defer_staged_mysql_changes(
-                    success.range_eles.clone(),
-                )
-                .await
-                {
-                    match self.update_mysql_pdms_elements(&success.range_eles).await {
-                        Ok(_) => println!("MySQL pdms_element 更新成功: dbnum={dbnum}"),
-                        Err(e) => warnings
-                            .push(format!("dbnum={dbnum}: MySQL pdms_element 更新失败: {e}")),
+                match self.update_mysql_pdms_elements(&success.range_eles).await {
+                    Ok(_) => println!("MySQL pdms_element 更新成功: dbnum={dbnum}"),
+                    Err(e) => {
+                        warnings.push(format!("dbnum={dbnum}: MySQL pdms_element 更新失败: {e}"))
                     }
                 }
             }

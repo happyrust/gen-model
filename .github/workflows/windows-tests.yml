@@ -89,6 +89,18 @@ jobs:
           --no-default-features
           --features ws,gen_model,manifold,project_hd,http_api
 
+      - name: Reject production references to legacy model generation
+        shell: pwsh
+        run: ./scripts/check-production-no-legacy.ps1
+
+      - name: Compile the explicit legacy model CLI
+        shell: pwsh
+        run: >-
+          cargo check --locked
+          --bin legacy_model_gen
+          --no-default-features
+          --features ws,gen_model,manifold,project_hd,legacy_model
+
       - name: Prove legacy replay API is absent from production docs build
         shell: pwsh
         run: >-

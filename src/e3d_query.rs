@@ -469,11 +469,39 @@ pub fn parse_members(raw: &str) -> Result<Vec<MemberRow>> {
             continue;
         };
         let noun = parts.next().context("member noun missing")?.to_string();
-        let value = parts.collect::<Vec<_>>().join(" ");
-        let refno = value
-            .split_whitespace()
-            .find_map(|v| v.strip_prefix('='))
-            .and_then(|v| validate_refno(v).ok());
+        let mut values = parts.map(str::to_string).collect::<Vec<_>>();
+        // E3D 3.1's `Q MEMBERS` repeats the row number after the noun in
+        // ordinary TTY output (`1 SITE 1 /NAME`).  Marker-based query output
+        // and older captures may omit it, so remove it only when it matches.
+        if values.first().and_then(|v| v.parse::<u32>().ok()).is_some() {
+            values.remove(0);
+        }
+        if let Some(first) = values.first_mut() {
+            let prefix = first.bytes().take_while(|b| b.is_ascii_digit()).count();
+            let suffix = &first[prefix..];
+            // The fixed-width listing can glue the repeated row number to a
+            // slash-prefixed name: row 13 and name /31 becomes `13/31`.  That
+            // spelling also happens to be a valid RefNo, so validation alone
+            // cannot disambiguate it.  A prefix equal to this row's index is
+            // the repeated ordinal; remove it before looking for RefNos.
+            let glued_repeated_index = prefix > 0
+                && suffix.starts_with('/')
+                && first[..prefix].parse::<u32>().ok() == Some(index);
+            if glued_repeated_index
+                || (validate_refno(first.trim_start_matches('=')).is_err()
+                    && prefix > 0
+                    && (suffix.starts_with('/') || suffix.starts_with('=')))
+            {
+                *first = suffix.to_string();
+            }
+        }
+        let value = values.join(" ");
+        // Unnamed members are printed both as `=24381/35845` and as the bare
+        // `24381/35845` depending on noun/output width.
+        let refno = values.iter().find_map(|token| {
+            let candidate = token.strip_prefix('=').unwrap_or(token);
+            validate_refno(candidate).ok()
+        });
         rows.push(MemberRow {
             index,
             noun,
@@ -657,6 +685,22 @@ mod tests {
         let rows = parse_members(raw).unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].refno.as_deref(), Some("24381/35845"));
+    }
+
+    #[test]
+    fn members_remove_repeated_index_and_accept_bare_refno() {
+        let raw = "MCP-MEMBERS-BEGIN\nMembers\n 1 SITE 1 /AREA\n 2 PNOD 24381/42\nMCP-MEMBERS-END";
+        let rows = parse_members(raw).unwrap();
+        assert_eq!(rows[0].value, "/AREA");
+        assert_eq!(rows[1].refno.as_deref(), Some("24381/42"));
+    }
+
+    #[test]
+    fn members_split_glued_repeated_index_from_slash_name() {
+        let raw = "MCP-MEMBERS-BEGIN\nMembers\n 13 FLOOR 13/31\nMCP-MEMBERS-END";
+        let rows = parse_members(raw).unwrap();
+        assert_eq!(rows[0].value, "/31");
+        assert_eq!(rows[0].refno, None);
     }
 
     #[test]

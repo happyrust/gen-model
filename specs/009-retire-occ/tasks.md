@@ -448,6 +448,11 @@
   `gen_unit_shape()` 返回的是**带真实尺寸的克隆**、`get_scaled_vec3()` 是单位阵，
   段数本来就能从参数自身算出。给它们再加一个段数字段是冗余，还会让同一件出现两个键。
 
+  **碟还有一处不是段数的改动，同批做掉**：`Dish` 的键里那个 raw `prad` 要收成
+  `prad/pdia`，且 `gen_unit_shape()` 落库的要是同一个规范值。它与段数无关，但同样
+  改身份，分两次改就是两次整库重建。完整依据、两个方向的实测用例（`t041_b1b` /
+  `t041_b1c`）与量化口径的坑，见 T053 的「2026-08-28」一段。
+
   **球那一元的出处**（2026-08-24 IDA，`GM_Sphere::calcFacetsWithoutSurfaces`
   `0x100A20F0`）：绕轴 `n = circle(自身半径, tol)`、超 1000 报 warning 后硬截；
   经向带数恒 = `n/2`（顶点 `n·(n/2−1)+2`，两极各一点，角步长两向同一个）。
@@ -763,9 +768,11 @@
   (2) **T038 / T038a 的「已完成」要加限定语**：规则正确、单测全绿，但生产路径上还没有
       一个复用型曲面原语真按真实半径分段。真值表里那些 ✅ 说的是「规则对」，不是
       「现场生效」；
-  (3) 顺带一个**未验证**的可疑点：`Dish::hash_unit_mesh_params` 哈希的是未归一化的
+  (3) 顺带一个可疑点：`Dish::hash_unit_mesh_params` 哈希的是未归一化的
       `prad`，而 `gen_unit_shape` 落库的是 `prad/dia`——与 snout 那条 T002 已修的
-      双键问题同一形状。只是读码所见，没构造用例，别当结论用。
+      双键问题同一形状。~~只是读码所见，没构造用例，别当结论用。~~
+      **2026-08-28 已构造用例，两个方向都实测，是缺陷不是疑点**，见本文件末
+      「预期红测」表的 `b1b` / `b1c` 两行与下面的「碟这一处怎么修」。
   证据：`docs/evidence/2026-08-24-unit-normalised-curved-primitives.md`。
   **先做的是把范围写清楚，不是急着改键**：改身份 = 整库重建（ADR-044 决策 6），
   五类一起改和只改柱是两个量级的决策。
@@ -810,7 +817,36 @@
   **T041 的门要跟着扩到五类**（现在只写了「不同半径两柱 `geo_hash` 不同」）：
   碟的段数是**三元组**（绕轴 / 球冠 / 拐角）、圆环面是**二元组**（环向 / 管截面），
   只混绕轴或只混环向那一个，形状相同而另一向不同的两件会共用一行。
-  第 (3) 条 `Dish::hash_unit_mesh_params` 的双键疑点本次仍未构造用例，原样挂着。
+  ~~第 (3) 条 `Dish::hash_unit_mesh_params` 的双键疑点本次仍未构造用例，原样挂着。~~
+
+  **2026-08-28：第 (3) 条已构造用例，从「疑点」升级为「缺陷」，而且修法比原先写的多一半。**
+
+  键的三个分量是 `theta` / `prad` / `beta`。`theta` 与 `beta` 只由 `pheig/(pdia/2)`
+  决定，是尺度无关量；夹在中间的 `prad` 是**唯一一个带真实长度的分量**。缺陷因此
+  同时朝两个方向发作，两条测试各钉一头：
+
+  - **多占一行**（`t041_b1b`）：`pdia` 10 与 12、两个比值都相同的两件相似碟，
+    raw `prad` 是 2.0 与 2.4，被判成两行。只是浪费。
+  - **少落一行**（`t041_b1c`，新）：`pdia` 10 与 12、高径比相同、raw `prad` 都取
+    2.0，键三个分量逐位相同（实测同为 `14102884463458579411`），可
+    `gen_unit_shape()` 落的是 `prad/dia` = 0.2 与 0.167 两份不同的单位几何。
+    **后写的顶掉先写的，另一件的实例照着别人的碟渲染，且 `geo_hash` 一路都对得上，
+    没有任何一处会报错。** 这一头才是要紧的。
+
+  **碟这一处怎么修（两半，缺一半等于没修）**——按 T002 在 snout 上已经走过的那条路：
+
+  1. 键改哈希 `prad/pdia`，把那个真实长度换成比值；
+  2. `gen_unit_shape()` 落库的也要是**同一个规范值** `f32_round_3(prad/pdia)`。
+     `hash_f32` 是 `f32_round_3` 之后再哈希的，只改第 1 步的话，键按 0.001 量化、
+     落库值不量化，T002 那个「同一个 id 两份 param」会原样在碟上复现一遍，
+     只是尺度变小。snout.rs `gen_unit_shape` 那段注释（"Persist the very same
+     canonical value"）说的就是这件事，照抄即可。
+
+  顺带记一个量化口径的坑，实现时要量：`f32_round_3` 是**三位小数**（`(v*1000).round()/1000`），
+  不是三位有效数字。换成比值之后，`prad` 这一维的分辨率就从「毫米」变成「`pdia/1000`」。
+  库 A 的碟 scale 跨到 48,900 mm（T053 表），那一头的量化格子是 48.9 mm，
+  是 `FACET_TOL_MM = 0.5` 的近百倍。要么接受，要么这一维单独换更细的舍入——
+  但两处必须仍取同一个规范值。
 
 - [ ] T052a（新，从 T052 拆出）**YOFF 要不要接，`inst_geo` 上问不出来。**
   `LSnout` 结构里只有一个 `poff`，源数据的 YOFF 是多少都会在落库时消失——查出 0
@@ -902,15 +938,17 @@
 
 ## 预期红测（T041 的判据先落地，实现随后）
 
-2026-08-25 起 `src/fast_model/pdms_inst.rs` 里有 **6 条按设计红着**的 `t041_` 测试。
-它们不是回归，是 T041 的验收判据——**每一条红都在正确地报告「段数还没进身份键」**，
-实现落地时逐条转绿。同 feature 全量因此从 0 失败变成 6 失败。
+2026-08-25 起 `src/fast_model/pdms_inst.rs` 里有 **7 条按设计红着**的 `t041_` 测试
+（2026-08-28 从 6 条加到 7 条，见下表 `b1c`）。它们不是回归，是 T041 的验收判据
+——**每一条红都在正确地报告「段数还没进身份键」**，实现落地时逐条转绿。
+同 feature 全量因此从 0 失败变成 7 失败。
 
 | 测试 | 现在为什么红 | 转绿的条件 |
 |---|---|---|
 | `t041_a1_cylinders_in_different_segment_classes_need_their_own_rows` | `Cylinder::hash_unit_mesh_params()` 恒返回 `CYLINDER_GEO_HASH`（=2），32 段与 56 段的柱同键 | 柱的键混入 `cylinder_segments` |
 | `t041_a_snout_splits_by_its_larger_end_segment_class` | Snout 的键只有 `ptdm/pbdm` 与高度符号，是尺度无关量 | Snout 的键混入 `snout_segments` |
 | `t041_b1b_geometrically_similar_dishes_in_one_segment_class_share_a_row` | `Dish::hash_unit_mesh_params()` 哈希**原值** `prad`，而 `gen_unit_shape()` 落 `prad/dia`——比例相同、尺寸不同的两件碟被判成两行 | `prad` 收成比值（顺带关掉 T053 第 (3) 条的双键疑点） |
+| `t041_b1c_dishes_that_are_not_similar_must_not_collide_on_one_row` | 同一个缺陷的**另一头**：`theta` / `beta` 只看高径比，raw `prad` 又相等，于是不相似的两件同键、却各落一份不同的单位几何 | 同上一行的同一处改动 |
 | `t041_b3_a_circular_torus_needs_both_the_ring_and_the_tube_count` | CTorus 的键只有 `rins/rout` 与 `angle` | 键混入 `(n_ring, n_tube)` 二元组 |
 | `t041_b4b_a_rectangular_torus_splits_by_its_ring_segment_class` | RTorus 同上，只有 `rins/rout` 与 `angle` | 键混入 `n_ring` |
 | `t041_b5_a_sphere_key_carries_exactly_one_segment_count` | `Sphere::hash_unit_mesh_params()` 恒返回 `SPHERE_GEO_HASH`（=3） | 键混入 `n`（**只此一个**，stacks 恒 `n/2`） |

@@ -5,6 +5,7 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use aios_core::pdms_types::{RefU64, RefnoEnum};
+use anyhow::Context;
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
@@ -214,9 +215,16 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     // （/health 不报库端点），同名工程的隔离沙箱一律被误伤；有了这个键，探测端
     // 能放行「同工程、不同库」，只拦真共享一个库的（探测端做 localhost↔127.0.0.1
     // 归一，这里不做）。
+    // 内存模式下报的是 `embedded:mem` 而不是配置里那对 v_ip:v_port：库在进程里，
+    // 那个地址根本没被连过。照抄配置会把这一栏变成谎话，而互踩探测正是照它决定
+    // 「要不要拦」——一个谁都不共享的进程内库反而会被当成共享库拦下别人。
     {
         let db_option = aios_core::get_db_option();
-        sul_db["endpoint"] = json!(format!("{}:{}", db_option.v_ip, db_option.v_port));
+        sul_db["endpoint"] = if crate::options::in_memory_db() {
+            json!("embedded:mem")
+        } else {
+            json!(format!("{}:{}", db_option.v_ip, db_option.v_port))
+        };
     }
     // 调试限定常驻一栏（D7 护栏三的第二个落点）：跛着的服务必须一眼看得出来，
     // 而不是等人从满屏日志里发现「怎么只有一个库在动」。空列表 = 正常全范围。
@@ -334,6 +342,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "mdb": state.identity.mdb,
         "namespace": state.identity.namespace,
         "sync_live": state.sync_live,
+        "data_read_mode": if crate::options::direct_read_mode() { "direct" } else { "db" },
         "version": env!("CARGO_PKG_VERSION"),
         "started_at": crate::data_interface::task_registry::process_started_at(),
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
@@ -357,7 +366,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "auto_work_armed": crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed(),
         "increment_mode": crate::data_interface::batch_worker::increment_mode(),
         "initialization": crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot(),
-        "worker_alive": worker_alive,
+        "worker_alive": if crate::options::direct_read_mode() { serde_json::Value::Null } else { json!(worker_alive) },
         "worker_idle_secs": worker_idle_secs,
         // 数据批次内部最昂贵、过去完全不可见的 CATA 依赖阶段。字段为空表示当前
         // 没有依赖闭包在跑；非空时携带任务、文件、计数与 300s 停滞截止时间。
@@ -388,9 +397,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "runtime_lag": crate::runtime_lag::snapshot(),
         "spatial_serial": crate::fast_model::spatial_state::spatial_serial_snapshot(),
         "sul_db": sul_db,
-        "staging_windows": crate::data_interface::staging::lifecycle::resource_snapshots(),
+        // 数据侧确定性失败的终态（attempts.rs `window_block`）。kv-mem 暂存窗口退役
+        // （ADR-056 P1）后 `staging_windows` / `staging_commit` 两个 gauge 不再有来源，
+        // 已摘；这一键 P3 随文件搬家改名 `window_blocks`。
         "staging_window_blocks": window_blocks,
-        "staging_commit": crate::data_interface::batch_worker::staged_commit_metrics(),
         "spatial_reconcile": spatial_reconcile,
         // 可 drain 副作用队列（SystDerived / RefRevMaintain）的待处理/死信计数
         // （P2-4）。到顶死信此前只在库里、/health 看不见，也没有复活出口——现在
@@ -416,6 +426,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // `watch_dbnums_origin` 说清是配置写的还是这次命令行给的。
         "watch_dbnums": watch_dbnums,
         "watch_dbnums_origin": watch_dbnums_origin,
+        // true = 持久层是进程内嵌 kv-mem（`in_memory_db`），不是 v_ip:v_port 那台
+        // 服务器。这一栏必须在场：内存模式下库随进程消失、外部也连不上，看见
+        // 数据「不见了」的人得能一眼分清是没写进去还是根本没落盘。
+        "in_memory_db": crate::options::in_memory_db(),
     }))
 }
 
@@ -448,10 +462,19 @@ pub struct TraceQuery {
 ///
 /// `limit` 缺省 40、上限 200：一条记录带全部 warnings，净窗口的口径标注一条就上
 /// 百字，放开了会把单响应体积契约撑破。
-pub async fn error_log(Query(query): Query<ErrorLogQuery>) -> Json<serde_json::Value> {
-    let kinds = query.kind.as_deref().map(|kind| vec![kind]).unwrap_or_default();
+pub async fn error_log(
+    State(state): State<AppState>,
+    Query(query): Query<ErrorLogQuery>,
+) -> Json<serde_json::Value> {
+    let kinds = query
+        .kind
+        .as_deref()
+        .map(|kind| vec![kind])
+        .unwrap_or_default();
+    let project = query.project_filter(&state);
     Json(crate::data_interface::batch_failure_log::recent(
         &kinds,
+        project.as_deref(),
         query.dbnum,
         query.limit.unwrap_or(40).min(200),
     ))
@@ -463,6 +486,22 @@ pub struct ErrorLogQuery {
     pub kind: Option<String>,
     pub dbnum: Option<u32>,
     pub limit: Option<usize>,
+    /// 缺省 = 只看本服务登录的项目；`all` = 不筛；其余值 = 指定项目。
+    pub project: Option<String>,
+}
+
+impl ErrorLogQuery {
+    /// 默认只给本服务这个项目的记录：这本账落在进程工作目录下、跨配置改动活着，
+    /// 同一个目录先后跑过两个 `project_name` 时，`?dbnum=8191` 会把上一份配置留下
+    /// 的记录一并端出来——而库号空间只在项目内唯一（ISSUE-025 §五 5a）。服务自己
+    /// 知道它登录的是哪个项目，这件事不该问人；要看全部显式 `?project=all`。
+    fn project_filter(&self, state: &AppState) -> Option<String> {
+        match self.project.as_deref() {
+            Some("all") => None,
+            Some(explicit) => Some(explicit.to_string()),
+            None => Some(state.identity.project.clone()),
+        }
+    }
 }
 
 /// GET /api/v1/batch-failures — 只读同名那一族（`batch-failures-*.jsonl`）。
@@ -470,9 +509,14 @@ pub struct ErrorLogQuery {
 /// 与 [`error_log`] 的分界就是名字本身：这条只回答「批次失败与 park」，那条把队列
 /// 停滞也并进同一条时间线。留着窄的这条，是因为「给我这个库的失败记录」是个独立
 /// 且高频的问题，让调用方自己去 `error-log` 上拼两个 `kind` 是把口径推给了调用方。
-pub async fn batch_failures(Query(query): Query<ErrorLogQuery>) -> Json<serde_json::Value> {
+pub async fn batch_failures(
+    State(state): State<AppState>,
+    Query(query): Query<ErrorLogQuery>,
+) -> Json<serde_json::Value> {
+    let project = query.project_filter(&state);
     Json(crate::data_interface::batch_failure_log::recent(
         &["batch_failure", "batch_park"],
+        project.as_deref(),
         query.dbnum,
         query.limit.unwrap_or(20).min(200),
     ))
@@ -490,6 +534,85 @@ pub async fn query(
         .await
         .map(Json)
         .map_err(ApiError::from_query)
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct TreeReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    #[serde(default)]
+    pub refno: Option<String>,
+}
+
+fn tree_refno(request: &TreeReq) -> Result<RefU64, ApiError> {
+    let raw = request
+        .refno
+        .as_deref()
+        .ok_or_else(|| ApiError::bad_request("缺少 refno"))?;
+    RefU64::from_str(raw).map_err(|_| {
+        ApiError::bad_request(format!(
+            "refno 格式非法（应为 a/b，如 24381/100677）: {raw}"
+        ))
+    })
+}
+
+/// GET /api/v1/tree/roots — SITE roots decoded from DESI files by e3d-io.
+pub async fn tree_roots(
+    State(state): State<AppState>,
+    Query(request): Query<TreeReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let nodes = service.roots().map_err(ApiError::from_domain)?;
+    Ok(Json(json!({
+        "source": "direct",
+        "project": service.project(),
+        "mdb": service.mdb(),
+        "nodes": nodes,
+    })))
+}
+
+/// GET /api/v1/tree/children?refno=a/b — exact stored member order.
+pub async fn tree_children(
+    State(state): State<AppState>,
+    Query(request): Query<TreeReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let parent = tree_refno(&request)?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let nodes = service.children(parent).map_err(ApiError::from_domain)?;
+    Ok(Json(json!({
+        "source": "direct",
+        "parent": RefnoEnum::from(parent).to_pdms_str(),
+        "nodes": nodes,
+    })))
+}
+
+/// GET /api/v1/tree/ancestors?refno=a/b — self first, then OWNER chain.
+pub async fn tree_ancestors(
+    State(state): State<AppState>,
+    Query(request): Query<TreeReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let start = tree_refno(&request)?;
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let refnos = service.ancestors(start).map_err(ApiError::from_domain)?;
+    Ok(Json(json!({
+        "source": "direct",
+        "refnos": refnos,
+    })))
 }
 
 /// POST /api/v1/update/preview — 映射 `preview_manual_update`（spec §4.2）。
@@ -594,6 +717,145 @@ pub async fn task_get(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct HistoricalGenerateReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub dbnum: u32,
+    pub refno: String,
+    #[serde(default)]
+    pub sesno: Option<u32>,
+    #[serde(default)]
+    pub time: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct HistoricalQueryReq {
+    pub snapshot_key: String,
+    pub tool: String,
+    #[serde(default)]
+    pub arguments: Value,
+}
+
+fn historical_error(error: crate::fast_model::historical_model::HistoricalModelError) -> ApiError {
+    let status = match error.code {
+        "INVALID_SELECTOR" => StatusCode::BAD_REQUEST,
+        "SESSION_NOT_FOUND" | "REFNO_NOT_FOUND_AT_SESSION" => StatusCode::NOT_FOUND,
+        "TIME_BEFORE_OLDEST_SESSION" => StatusCode::UNPROCESSABLE_ENTITY,
+        "GENERATION_LIMIT_EXCEEDED" => StatusCode::PAYLOAD_TOO_LARGE,
+        "GENERATION_CANCELLED" => StatusCode::REQUEST_TIMEOUT,
+        "SESSION_TIME_UNAVAILABLE" | "SOURCE_NOT_FOUND" | "SOURCE_CHANGED" => {
+            StatusCode::SERVICE_UNAVAILABLE
+        }
+        _ => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    ApiError {
+        status,
+        code: error.code,
+        message: error.message,
+    }
+}
+
+/// POST /api/v1/model/history/generate — rebuild one source session into kv-mem.
+pub async fn model_history_generate(
+    State(state): State<AppState>,
+    Json(req): Json<HistoricalGenerateReq>,
+) -> Result<(StatusCode, Json<Value>), ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = crate::fast_model::e3d_model_service::parse_refno(&req.refno)
+        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    let selector =
+        crate::fast_model::historical_model::parse_selector(req.sesno, req.time.as_deref())
+            .map_err(historical_error)?;
+    let task_id = crate::data_interface::task_registry::TaskRegistry::new_task_id("model-history");
+    state.tasks.insert_running_model_history(
+        &task_id,
+        &state.identity.project,
+        req.dbnum,
+        json!({"refno": req.refno, "sesno": req.sesno, "time": req.time}),
+    );
+    let registry = state.tasks;
+    let worker_id = task_id.clone();
+    tokio::spawn(async move {
+        let request = crate::fast_model::historical_model::HistoricalModelRequest {
+            dbnum: req.dbnum,
+            refno,
+            selector,
+            failure_policy: crate::data_interface::geom_error::GeometryFailurePolicy::Required,
+        };
+        let result = tokio::time::timeout(
+            Duration::from_secs(300),
+            crate::fast_model::historical_model::generate_historical(request),
+        )
+        .await;
+        match result {
+            Ok(Ok(report)) => {
+                registry.set_units_done(&worker_id, 1);
+                registry.finish(
+                    &worker_id,
+                    crate::data_interface::task_registry::TaskState::Succeeded,
+                    serde_json::to_value(report).unwrap_or_else(|error| json!({"error": error.to_string()})),
+                );
+            }
+            Ok(Err(error)) => registry.finish(
+                &worker_id,
+                crate::data_interface::task_registry::TaskState::Failed,
+                json!({"code": error.code, "message": error.message}),
+            ),
+            Err(_) => registry.finish(
+                &worker_id,
+                crate::data_interface::task_registry::TaskState::Failed,
+                json!({"code": "GENERATION_CANCELLED", "message": "historical generation exceeded 300 seconds"}),
+            ),
+        }
+    });
+    Ok((StatusCode::ACCEPTED, Json(json!({"task_id": task_id}))))
+}
+
+/// GET /api/v1/model/history/{snapshot_key}
+pub async fn model_history_get(Path(snapshot_key): Path<String>) -> Result<Json<Value>, ApiError> {
+    let store = crate::fast_model::historical_model::HistoricalModelStore::global()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let value = store
+        .snapshot(&snapshot_key)
+        .await
+        .map_err(ApiError::from_domain)?
+        .ok_or_else(|| ApiError::not_found(format!("snapshot 不存在: {snapshot_key}")))?;
+    Ok(Json(value))
+}
+
+/// POST /api/v1/model/history/query
+pub async fn model_history_query(
+    Json(req): Json<HistoricalQueryReq>,
+) -> Result<Json<Value>, ApiError> {
+    let _ = req.arguments;
+    let store = crate::fast_model::historical_model::HistoricalModelStore::global()
+        .await
+        .map_err(ApiError::from_domain)?;
+    store
+        .query(&req.snapshot_key, &req.tool)
+        .await
+        .map(Json)
+        .map_err(ApiError::from_domain)
+}
+
+/// DELETE /api/v1/model/history/{snapshot_key}; shared meshes are retained.
+pub async fn model_history_delete(
+    Path(snapshot_key): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let store = crate::fast_model::historical_model::HistoricalModelStore::global()
+        .await
+        .map_err(ApiError::from_domain)?;
+    store
+        .drop_snapshot(&snapshot_key)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(
+        json!({"snapshot_key": snapshot_key, "status": "deleted"}),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct DeleteModelSubtreeReq {
     pub refno: String,
     #[serde(default)]
@@ -666,7 +928,7 @@ where
     }
 }
 
-/// POST /api/v1/model/ensure — 映射 `ensure_model_generated`（幂等同步，spec §4.5）。
+/// POST /api/v1/model/ensure — 确保节点范围全部生成根为最新模型（幂等同步，spec §4.5）。
 pub async fn model_ensure(
     State(state): State<AppState>,
     Json(req): Json<EnsureModelReq>,
@@ -682,8 +944,23 @@ pub async fn model_ensure(
     let mgr = state.mgr.clone();
     let force = req.force;
     let worker_refno = req.refno.clone();
+    let direct_tree = state.direct_tree.clone();
     let task_result = await_background_without_cancelling(Duration::from_secs(120), async move {
-        let result = mgr.ensure_model_generated(refno, force).await;
+        let result = if crate::options::direct_read_mode() {
+            let tree = direct_tree.get().await?;
+            let root = refno.refno();
+            let unit_types =
+                crate::data_interface::generation_root::configured_delivery_unit_types();
+            let roots = tokio::task::spawn_blocking(move || {
+                tree.generation_roots_in_subtree(root, &unit_types)
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("direct generation-root task failed: {error}"))??;
+            mgr.ensure_model_scope_generated_from_roots(refno, roots, force)
+                .await
+        } else {
+            mgr.ensure_model_scope_generated(refno, force).await
+        };
         if let Err(error) = &result {
             log::error!("按需生成后台失败 refno={worker_refno}: {error:#}");
         }
@@ -702,9 +979,74 @@ pub async fn model_ensure(
             ApiError::from_domain(anyhow::anyhow!("按需生成后台任务异常结束: {error}"))
         })?
         .map_err(ensure_error)?;
-    serde_json::to_value(&result)
-        .map(Json)
-        .map_err(|e| ApiError::from_domain(e.into()))
+    let mut payload = serde_json::to_value(&result).map_err(|e| ApiError::from_domain(e.into()))?;
+    append_publication_state(&mut payload, &result.generation_root)
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok(Json(payload))
+}
+
+async fn append_publication_state(
+    payload: &mut serde_json::Value,
+    generation_root: &str,
+) -> anyhow::Result<()> {
+    let root_id = generation_root.trim_start_matches('=').replace('/', "_");
+    let mut response = aios_core::SUL_DB
+        .query(format!(
+            "SELECT desired_revision, published_revision, desired_target, published_target, \
+                    publication_status, last_error \
+             FROM ONLY type::thing('gen_root', '{}');",
+            root_id.replace('\\', "\\\\").replace('\'', "\\'")
+        ))
+        .await?
+        .check()?;
+    let state: Option<serde_json::Value> = response.take(0)?;
+    let object = payload
+        .as_object_mut()
+        .context("model ensure response is not an object")?;
+    let mut summary = state.unwrap_or_else(|| serde_json::json!({}));
+    let summary_object = summary
+        .as_object_mut()
+        .context("generation root state is not an object")?;
+    summary_object.insert(
+        "root_refno".into(),
+        serde_json::Value::String(generation_root.to_string()),
+    );
+    let fallback = if object
+        .get("model_available")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+    {
+        "ready"
+    } else {
+        "empty"
+    };
+    let publication_status = summary_object
+        .get("publication_status")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(fallback)
+        .to_string();
+    summary_object.insert(
+        "publication_status".into(),
+        serde_json::Value::String(publication_status.clone()),
+    );
+    for field in [
+        "desired_revision",
+        "published_revision",
+        "desired_target",
+        "published_target",
+        "last_error",
+    ] {
+        if let Some(value) = summary_object.get(field).cloned() {
+            object.insert(field.into(), value);
+        }
+    }
+    object.insert(
+        "publication_status".into(),
+        serde_json::Value::String(publication_status),
+    );
+    object.insert("root_summaries".into(), serde_json::json!([summary]));
+    Ok(())
 }
 
 /// POST /api/v1/dbnums/{dbnum}/model/rebuild — 强制把该库当前全部权威生成根投入
@@ -905,15 +1247,6 @@ fn ensure_dbnum_mutation_idle(dbnum: u32) -> Result<(), ApiError> {
             row.state, row.task_id
         )));
     }
-    if let Some(window) = crate::data_interface::staging::lifecycle::registered_windows()
-        .into_iter()
-        .find(|window| window.dbnum == dbnum)
-    {
-        return Err(ApiError::conflict(format!(
-            "dbnum {dbnum} still has active staged window {}; wait for it before cleanup",
-            window.label
-        )));
-    }
     Ok(())
 }
 
@@ -921,7 +1254,7 @@ fn ensure_dbnum_mutation_idle(dbnum: u32) -> Result<(), ApiError> {
 ///
 /// Operational contract:
 /// 1. pause the queue;
-/// 2. wait until this DBNUM has no queued/running batch or staged window;
+/// 2. wait until this DBNUM has no queued/running batch;
 /// 3. call with `?confirm={dbnum}`.
 ///
 /// The queue remains paused after success. Reparse/resume is an explicit

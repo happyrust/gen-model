@@ -34,12 +34,7 @@ use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::{build_cate_relate, get_db_option};
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
-#[cfg(feature = "gen_model")]
-use aios_database::fast_model::gen_all_geos_data;
 use aios_database::fast_model::room_model::build_room_relations;
-use aios_database::fast_model::{
-    EXIST_MESH_GEO_HASHES, gen_inst_meshes, process_meshes_update_db_deep,
-};
 use aios_database::team_data::sync_team_data;
 use aios_database::versioned_db::database::*;
 use aios_database::{run_app, run_cli};

@@ -1,0 +1,806 @@
+{
+  "source": "e3d-io/catalog/e3d31/noun_layout.json (live-E3D 3.1 export)",
+  "derivation": {
+    "route_member": "noun owns both ARRI and LEAV",
+    "route_container": "noun owns both HPOS and TPOS"
+  },
+  "crossCheckGTTUBE": {
+    "BRAN": {
+      "gttube_code": 808220,
+      "in_container_set": true
+    },
+    "TRUNNI": {
+      "gttube_code": 137403155,
+      "in_container_set": true
+    },
+    "LUG": {
+      "gttube_code": 537123,
+      "in_container_set": true
+    }
+  },
+  "routeContainers": [
+    {
+      "short": "BRAN",
+      "noun": "BRANCH",
+      "hash": 808220,
+      "isPseudo": false,
+      "attrCount": 86
+    },
+    {
+      "short": "HANG",
+      "noun": "HANGER",
+      "hash": 679463,
+      "isPseudo": false,
+      "attrCount": 26
+    },
+    {
+      "short": "LUG",
+      "noun": "LUG",
+      "hash": 537123,
+      "isPseudo": false,
+      "attrCount": 31
+    },
+    {
+      "short": "SUPC",
+      "noun": "SUPCOMP",
+      "hash": 602740,
+      "isPseudo": false,
+      "attrCount": 26
+    },
+    {
+      "short": "TRUNNI",
+      "noun": "TRUNNION",
+      "hash": 137403155,
+      "isPseudo": false,
+      "attrCount": 34
+    }
+  ],
+  "routeMembers": [
+    {
+      "short": "AHU",
+      "noun": "AHU",
+      "hash": 546967,
+      "isPseudo": false,
+      "attrCount": 53
+    },
+    {
+      "short": "ANCI",
+      "noun": "ANCILLARY",
+      "hash": 711154,
+      "isPseudo": false,
+      "attrCount": 59
+    },
+    {
+      "short": "ATTA",
+      "noun": "ATTACHMENT",
+      "hash": 566245,
+      "isPseudo": false,
+      "attrCount": 59
+    },
+    {
+      "short": "BATT",
+      "noun": "BATTERY",
+      "hash": 939710,
+      "isPseudo": false,
+      "attrCount": 53
+    },
+    {
+      "short": "BBLT",
+      "noun": "BBOLT",
+      "hash": 933905,
+      "isPseudo": false,
+      "attrCount": 19
+    },
+    {
+      "short": "BEND",
+      "noun": "BEND",
+      "hash": 620516,
+      "isPseudo": false,
+      "attrCount": 60
+    },
+    {
+      "short": "BRCO",
+      "noun": "BRCO",
+      "hash": 829361,
+      "isPseudo": false,
+      "attrCount": 54
+    },
+    {
+      "short": "BWLD",
+      "noun": "BWLD",
+      "hash": 619544,
+      "isPseudo": false,
+      "attrCount": 19
+    },
+    {
+      "short": "CAP",
+      "noun": "CAP",
+      "hash": 543135,
+      "isPseudo": false,
+      "attrCount": 50
+    },
+    {
+      "short": "CLEV",
+      "noun": "CLEVIS",
+      "hash": 968439,
+      "isPseudo": false,
+      "attrCount": 21
+    },
+    {
+      "short": "CLOS",
+      "noun": "CLOSURE",
+      "hash": 916680,
+      "isPseudo": false,
+      "attrCount": 52
+    },
+    {
+      "short": "COUP",
+      "noun": "COUPLING",
+      "hash": 862086,
+      "isPseudo": false,
+      "attrCount": 52
+    },
+    {
+      "short": "COWL",
+      "noun": "COWL",
+      "hash": 784812,
+      "isPseudo": false,
+      "attrCount": 47
+    },
+    {
+      "short": "CROS",
+      "noun": "CROSS",
+      "hash": 916842,
+      "isPseudo": false,
+      "attrCount": 58
+    },
+    {
+      "short": "DAMP",
+      "noun": "DAMPER",
+      "hash": 855877,
+      "isPseudo": false,
+      "attrCount": 53
+    },
+    {
+      "short": "DUCT",
+      "noun": "DUCTING",
+      "hash": 927859,
+      "isPseudo": false,
+      "attrCount": 48
+    },
+    {
+      "short": "ELBO",
+      "noun": "ELBOW",
+      "hash": 828473,
+      "isPseudo": false,
+      "attrCount": 56
+    },
+    {
+      "short": "EYNT",
+      "noun": "EYENUT",
+      "hash": 935987,
+      "isPseudo": false,
+      "attrCount": 21
+    },
+    {
+      "short": "EYRD",
+      "noun": "EYRD",
+      "hash": 623975,
+      "isPseudo": false,
+      "attrCount": 21
+    },
+    {
+      "short": "FBLI",
+      "noun": "FBLIND",
+      "hash": 717396,
+      "isPseudo": false,
+      "attrCount": 51
+    },
+    {
+      "short": "FILT",
+      "noun": "FILTER",
+      "hash": 934098,
+      "isPseudo": false,
+      "attrCount": 55
+    },
+    {
+      "short": "FLAN",
+      "noun": "FLANGE",
+      "hash": 808062,
+      "isPseudo": false,
+      "attrCount": 55
+    },
+    {
+      "short": "FLEX",
+      "noun": "FLEXIBLE",
+      "hash": 1007808,
+      "isPseudo": false,
+      "attrCount": 53
+    },
+    {
+      "short": "FTUB",
+      "noun": "FTUBE",
+      "hash": 586662,
+      "isPseudo": false,
+      "attrCount": 52
+    },
+    {
+      "short": "GASK",
+      "noun": "GASKET",
+      "hash": 761839,
+      "isPseudo": false,
+      "attrCount": 51
+    },
+    {
+      "short": "GRIL",
+      "noun": "GRILLE",
+      "hash": 774691,
+      "isPseudo": false,
+      "attrCount": 47
+    },
+    {
+      "short": "HACC",
+      "noun": "HACC",
+      "hash": 592712,
+      "isPseudo": false,
+      "attrCount": 54
+    },
+    {
+      "short": "HANCI",
+      "noun": "HANCILLARY",
+      "hash": 5383700,
+      "isPseudo": false,
+      "attrCount": 23
+    },
+    {
+      "short": "HELE",
+      "noun": "HELEMENT",
+      "hash": 638747,
+      "isPseudo": false,
+      "attrCount": 21
+    },
+    {
+      "short": "HFAN",
+      "noun": "HFAN",
+      "hash": 807902,
+      "isPseudo": false,
+      "attrCount": 53
+    },
+    {
+      "short": "HNUT",
+      "noun": "HNUT",
+      "hash": 940796,
+      "isPseudo": false,
+      "attrCount": 21
+    },
+    {
+      "short": "HPIN",
+      "noun": "HPIN",
+      "hash": 814004,
+      "isPseudo": false,
+      "attrCount": 21
+    },
+    {
+      "short": "HROD",
+      "noun": "HROD",
+      "hash": 621602,
+      "isPseudo": false,
+      "attrCount": 21
+    },
+    {
+      "short": "HSAD",
+      "noun": "HSADDLE",
+      "hash": 611423,
+      "isPseudo": false,
+      "attrCount": 54
+    },
+    {
+      "short": "IDAM",
+      "noun": "IDAM",
+      "hash": 788166,
+      "isPseudo": false,
+      "attrCount": 54
+    },
+    {
+      "short": "INST",
+      "noun": "INSTRUMENT",
+      "hash": 939339,
+      "isPseudo": false,
+      "attrCount": 57
+    },
+    {
+      "short": "LJSE",
+      "noun": "LJSE",
+      "hash": 643989,
+      "isPseudo": false,
+      "attrCount": 52
+    },
+    {
+      "short": "LUANCI",
+      "noun": "LUANCILLARY",
+      "hash": 131542797,
+      "isPseudo": false,
+      "attrCount": 59
+    },
+    {
+      "short": "MESH",
+      "noun": "MESH",
+      "hash": 702904,
+      "isPseudo": false,
+      "attrCount": 47
+    },
+    {
+      "short": "OFST",
+      "noun": "OFST",
+      "hash": 939129,
+      "isPseudo": false,
+      "attrCount": 48
+    },
+    {
+      "short": "OLET",
+      "noun": "OLET",
+      "hash": 929085,
+      "isPseudo": false,
+      "attrCount": 60
+    },
+    {
+      "short": "PCLA",
+      "noun": "PCLAMP",
+      "hash": 559969,
+      "isPseudo": false,
+      "attrCount": 20
+    },
+    {
+      "short": "PCLI",
+      "noun": "PCLIP",
+      "hash": 717433,
+      "isPseudo": false,
+      "attrCount": 20
+    },
+    {
+      "short": "PCOM",
+      "noun": "PCOMPONENT",
+      "hash": 798352,
+      "isPseudo": false,
+      "attrCount": 58
+    },
+    {
+      "short": "PEXSP",
+      "noun": "PEXSP",
+      "hash": 9426121,
+      "isPseudo": false,
+      "attrCount": 13
+    },
+    {
+      "short": "PGBOX",
+      "noun": "PGBOX",
+      "hash": 13582933,
+      "isPseudo": false,
+      "attrCount": 13
+    },
+    {
+      "short": "PIACT",
+      "noun": "PIACT",
+      "hash": 11220298,
+      "isPseudo": false,
+      "attrCount": 13
+    },
+    {
+      "short": "PIBLK",
+      "noun": "PIBLK",
+      "hash": 6615205,
+      "isPseudo": false,
+      "attrCount": 13
+    },
+    {
+      "short": "PIGEN",
+      "noun": "PIGEN",
+      "hash": 8075392,
+      "isPseudo": false,
+      "attrCount": 13
+    },
+    {
+      "short": "PLAT",
+      "noun": "PLATE",
+      "hash": 926170,
+      "isPseudo": false,
+      "attrCount": 49
+    },
+    {
+      "short": "PLEN",
+      "noun": "PLENUM",
+      "hash": 810988,
+      "isPseudo": false,
+      "attrCount": 48
+    },
+    {
+      "short": "PLUG",
+      "noun": "PLUG",
+      "hash": 684871,
+      "isPseudo": false,
+      "attrCount": 20
+    },
+    {
+      "short": "POST",
+      "noun": "POST",
+      "hash": 939373,
+      "isPseudo": false,
+      "attrCount": 20
+    },
+    {
+      "short": "PTAP",
+      "noun": "PTAPPING",
+      "hash": 847654,
+      "isPseudo": false,
+      "attrCount": 55
+    },
+    {
+      "short": "PWCHA",
+      "noun": "PWCHA",
+      "hash": 1223170,
+      "isPseudo": false,
+      "attrCount": 13
+    },
+    {
+      "short": "PWMAN",
+      "noun": "PWMAN",
+      "hash": 8001412,
+      "isPseudo": false,
+      "attrCount": 13
+    },
+    {
+      "short": "RCPL",
+      "noun": "RCPL",
+      "hash": 779400,
+      "isPseudo": false,
+      "attrCount": 21
+    },
+    {
+      "short": "REDU",
+      "noun": "REDUCER",
+      "hash": 947853,
+      "isPseudo": false,
+      "attrCount": 52
+    },
+    {
+      "short": "SCACTU",
+      "noun": "SCACTUATOR",
+      "hash": 312547186,
+      "isPseudo": false,
+      "attrCount": 37
+    },
+    {
+      "short": "SCDUCT",
+      "noun": "SCDUCT",
+      "hash": 289520263,
+      "isPseudo": false,
+      "attrCount": 24
+    },
+    {
+      "short": "SCFITT",
+      "noun": "SCFITTING",
+      "hash": 298320022,
+      "isPseudo": false,
+      "attrCount": 32
+    },
+    {
+      "short": "SCHVFI",
+      "noun": "SCHVFITTING",
+      "hash": 133299208,
+      "isPseudo": false,
+      "attrCount": 33
+    },
+    {
+      "short": "SCINST",
+      "noun": "SCINSTRUMENT",
+      "hash": 297889183,
+      "isPseudo": false,
+      "attrCount": 34
+    },
+    {
+      "short": "SCLA",
+      "noun": "SCLAMP",
+      "hash": 559972,
+      "isPseudo": false,
+      "attrCount": 19
+    },
+    {
+      "short": "SCOINS",
+      "noun": "SCOINSTRUMENT",
+      "hash": 280789030,
+      "isPseudo": false,
+      "attrCount": 38
+    },
+    {
+      "short": "SCOPCI",
+      "noun": "SCOPCI",
+      "hash": 131591890,
+      "isPseudo": false,
+      "attrCount": 10
+    },
+    {
+      "short": "SCOPCO",
+      "noun": "SCOPCO",
+      "hash": 217685332,
+      "isPseudo": false,
+      "attrCount": 10
+    },
+    {
+      "short": "SCPDES",
+      "noun": "SCPDESTINATION",
+      "hash": 275908375,
+      "isPseudo": false,
+      "attrCount": 14
+    },
+    {
+      "short": "SCTUB",
+      "noun": "SCTUBING",
+      "hash": 2022346,
+      "isPseudo": false,
+      "attrCount": 23
+    },
+    {
+      "short": "SCVALV",
+      "noun": "SCVALV",
+      "hash": 322620508,
+      "isPseudo": false,
+      "attrCount": 33
+    },
+    {
+      "short": "SHOE",
+      "noun": "SHOE",
+      "hash": 641026,
+      "isPseudo": false,
+      "attrCount": 20
+    },
+    {
+      "short": "SHU",
+      "noun": "SHU",
+      "hash": 546985,
+      "isPseudo": false,
+      "attrCount": 56
+    },
+    {
+      "short": "SILE",
+      "noun": "SILENCER",
+      "hash": 638866,
+      "isPseudo": false,
+      "attrCount": 52
+    },
+    {
+      "short": "SKIR",
+      "noun": "SKIR",
+      "hash": 892612,
+      "isPseudo": false,
+      "attrCount": 54
+    },
+    {
+      "short": "SLUG",
+      "noun": "SLUG",
+      "hash": 684874,
+      "isPseudo": false,
+      "attrCount": 19
+    },
+    {
+      "short": "SNUB",
+      "noun": "SNUB",
+      "hash": 586513,
+      "isPseudo": false,
+      "attrCount": 21
+    },
+    {
+      "short": "SOST",
+      "noun": "SOST",
+      "hash": 939376,
+      "isPseudo": false,
+      "attrCount": 19
+    },
+    {
+      "short": "SPAC",
+      "noun": "SPACER",
+      "hash": 591670,
+      "isPseudo": false,
+      "attrCount": 19
+    },
+    {
+      "short": "SPLR",
+      "noun": "SPLR",
+      "hash": 894934,
+      "isPseudo": false,
+      "attrCount": 54
+    },
+    {
+      "short": "SSREFE",
+      "noun": "SSREFELEMENT",
+      "hash": 75576691,
+      "isPseudo": false,
+      "attrCount": 12
+    },
+    {
+      "short": "STIF",
+      "noun": "STIFFENER",
+      "hash": 656659,
+      "isPseudo": false,
+      "attrCount": 54
+    },
+    {
+      "short": "STLS",
+      "noun": "STLS",
+      "hash": 914725,
+      "isPseudo": false,
+      "attrCount": 19
+    },
+    {
+      "short": "STRT",
+      "noun": "STRT",
+      "hash": 938782,
+      "isPseudo": false,
+      "attrCount": 49
+    },
+    {
+      "short": "SWBR",
+      "noun": "SWBR",
+      "hash": 887833,
+      "isPseudo": false,
+      "attrCount": 21
+    },
+    {
+      "short": "TAPE",
+      "noun": "TAPER",
+      "hash": 641567,
+      "isPseudo": false,
+      "attrCount": 49
+    },
+    {
+      "short": "TEE",
+      "noun": "TEE",
+      "hash": 535241,
+      "isPseudo": false,
+      "attrCount": 59
+    },
+    {
+      "short": "THRE",
+      "noun": "THREEWAY",
+      "hash": 643214,
+      "isPseudo": false,
+      "attrCount": 54
+    },
+    {
+      "short": "TP",
+      "noun": "TP",
+      "hash": 531893,
+      "isPseudo": false,
+      "attrCount": 54
+    },
+    {
+      "short": "TRANCI",
+      "noun": "TRANCILLARY",
+      "hash": 131542724,
+      "isPseudo": false,
+      "attrCount": 60
+    },
+    {
+      "short": "TRAP",
+      "noun": "TRAP",
+      "hash": 847604,
+      "isPseudo": false,
+      "attrCount": 55
+    },
+    {
+      "short": "TRNB",
+      "noun": "TRNB",
+      "hash": 581519,
+      "isPseudo": false,
+      "attrCount": 21
+    },
+    {
+      "short": "TRNN",
+      "noun": "TRNN",
+      "hash": 817715,
+      "isPseudo": false,
+      "attrCount": 20
+    },
+    {
+      "short": "TRNS",
+      "noun": "TRNS",
+      "hash": 916130,
+      "isPseudo": false,
+      "attrCount": 49
+    },
+    {
+      "short": "TRREDU",
+      "noun": "TRREDUCER",
+      "hash": 304096295,
+      "isPseudo": false,
+      "attrCount": 52
+    },
+    {
+      "short": "UBOL",
+      "noun": "UBOLT",
+      "hash": 778647,
+      "isPseudo": false,
+      "attrCount": 20
+    },
+    {
+      "short": "UNIO",
+      "noun": "UNION",
+      "hash": 833646,
+      "isPseudo": false,
+      "attrCount": 51
+    },
+    {
+      "short": "VALV",
+      "noun": "VALVE",
+      "hash": 973264,
+      "isPseudo": false,
+      "attrCount": 56
+    },
+    {
+      "short": "VENT",
+      "noun": "VENT",
+      "hash": 935464,
+      "isPseudo": false,
+      "attrCount": 51
+    },
+    {
+      "short": "VFWA",
+      "noun": "VFWAY",
+      "hash": 568075,
+      "isPseudo": false,
+      "attrCount": 56
+    },
+    {
+      "short": "VSPR",
+      "noun": "VSPR",
+      "hash": 897934,
+      "isPseudo": false,
+      "attrCount": 21
+    },
+    {
+      "short": "VTWA",
+      "noun": "VTWAY",
+      "hash": 568453,
+      "isPseudo": false,
+      "attrCount": 56
+    },
+    {
+      "short": "WASH",
+      "noun": "WASH",
+      "hash": 702806,
+      "isPseudo": false,
+      "attrCount": 21
+    },
+    {
+      "short": "WELD",
+      "noun": "WELD",
+      "hash": 619079,
+      "isPseudo": false,
+      "attrCount": 56
+    },
+    {
+      "short": "WPAD",
+      "noun": "WPAD",
+      "hash": 611357,
+      "isPseudo": false,
+      "attrCount": 19
+    }
+  ],
+  "ams8000UnknownCoverage": {
+    "FTUB": "route_member",
+    "BEND": "route_member",
+    "ATTA": "route_member",
+    "ELBO": "route_member",
+    "TEXT": "not_a_route_noun",
+    "HVAC": "not_a_route_noun",
+    "STRT": "route_member",
+    "REDU": "route_member",
+    "VALV": "route_member",
+    "WELD": "route_member"
+  },
+  "hashSelfTest": {
+    "TUBE": 631901,
+    "PDIA": 557809,
+    "BRAN": 808220,
+    "CLIN": 813891
+  }
+}

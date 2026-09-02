@@ -1,4 +1,9 @@
 //! 已提交净窗口的维护纠正（ADR-036）。
+//!
+//! 2026-09-02（ADR-056 P1 / spec 035 T112）：从「开 kv-mem 暂存窗口 → 预载 → 暂存 → journal 写回」
+//! 改为直写持久层重放，语句与生产直写路径同一份渲染；水位守卫与空间 epoch 推进仍在一个尾事务里。
+//! 注意：本模块的收集器仍是 old-pdms-io（P4 换底座前 F8 幻删 / 漏增照样进来），成员审计
+//! （`orphan_candidates` + `expand_deleted_membership_roots`）是 ADR-036 的补删仲裁，P4 收口后一并退役。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -24,6 +29,8 @@ pub struct WindowRepairReport {
     pub unreachable_rows: usize,
     pub watermark_before: i32,
     pub watermark_after: i32,
+    /// 恒为 0：kv-mem 暂存窗口已退役（ADR-056 P1），纠正直写持久层。字段保留一版给
+    /// `db_window_repair` 的回执格式，P5 随口径收口删除。
     pub staging_windows: usize,
     pub cleaned_refnos: Vec<String>,
     pub verification: String,
@@ -142,10 +149,6 @@ pub async fn repair_committed_window(
     file: &Path,
 ) -> anyhow::Result<WindowRepairReport> {
     anyhow::ensure!(from_sesno > 0 && from_sesno <= to_sesno, "纠正会话区间非法");
-    anyhow::ensure!(
-        super::staging::lifecycle::registered_windows().is_empty(),
-        "存在活动 staging window，终止维护纠正"
-    );
     let state = DbnumState::read(dbnum)
         .await?
         .ok_or_else(|| anyhow::anyhow!("dbnum={dbnum} 没有水位记录"))?;
@@ -211,78 +214,59 @@ pub async fn repair_committed_window(
         .map(|operation| RefnoEnum::from(operation.refno))
         .collect::<Vec<_>>();
     let hard_delete_rows = deleted_nouns(&deleted_refnos).await?;
-    let mut window = super::staging::lifecycle::create_window(dbnum, from_sesno, to_sesno).await?;
-    let preload_result = window
-        .scope(async {
-            super::staging::preload::preload_dbnum_state(&state).await?;
-            let preload =
-                super::staging::preload::plan_model_mutation_preload(&[], &deleted_refnos).await?;
-            super::staging::preload::apply_model_mutation_preload(&preload).await
-        })
-        .await;
-    if let Err(error) = preload_result {
-        let _ = window.drop_database().await;
-        return Err(error.context("纠正窗口预载失败"));
+
+    // 直写重放（ADR-056 P1 / spec 035 T112）：纠正的是一个**已提交**窗口，水位不动，
+    // 语句与生产直写路径同一份渲染（`render_persist_statements` + 反向索引），逐条幂等
+    // 重放到持久层；此前借 kv-mem 暂存窗口 + journal 写回只是为了让旧生成器读到预载行，
+    // 暂存层退役后没有替代物也不需要替代物。本工具在服务停止后运行，不与批次并发。
+    let statements =
+        IncrementPipeline::render_persist_statements(&collected.range_eles, dbnum as i32)
+            .into_iter()
+            .chain(super::manual_update::build_reverse_index_statements(
+                &collected.range_eles,
+            ))
+            .collect::<Vec<_>>();
+    for sql in &statements {
+        crate::surreal_retry::execute_surreal_checked(sql, "纠正窗口数据重放")
+            .await
+            .context("纠正窗口数据重放失败")?;
     }
-    if let Err(error) =
-        IncrementPipeline::stage_parsed_window(&mut window, &collected.range_eles, dbnum).await
-    {
-        let _ = window.drop_database().await;
-        return Err(error.context("纠正窗口数据暂存失败"));
-    }
-    if let Err(error) = window
-        .scope(super::helper::delete_inst_relate_subtree(
-            &deleted_refnos,
-            100,
-        ))
+    super::helper::delete_inst_relate_subtree(&deleted_refnos, 100)
         .await
-    {
-        let _ = window.drop_database().await;
-        return Err(error.context("纠正窗口模型清理暂存失败"));
-    }
-    if let Err(error) = window
-        .scope(async {
-            let context = super::staging::active_staging_writes()
-                .ok_or_else(|| anyhow::anyhow!("纠正硬删除缺少 staging 写上下文"))?;
-            for (refno, noun) in &hard_delete_rows {
-                let pe = refno.to_pe_key();
-                // 两个方向都要清：作为成员走边目标（`{pe}->pe_owner`），作为属主走
-                // 复合 id 前缀范围。谓词形式的 `WHERE in = {pe}` 在 SurrealDB 2.1 的
-                // DELETE 里拿不到 `unique_pe_owner`，退化成边表全扫
-                // （`increment_pipeline::render_persist_statements` 同一对语句）。
-                context
-                    .execute(
-                        format!(
-                            "DELETE {pe}->pe_owner;\n\
-                             DELETE pe_owner:[{pe}, NONE]..=[{pe}, ..];\n\
-                             DELETE {};\nDELETE {noun}:{};\nDELETE {pe};",
-                            refno.refno().to_table_key("ATT_UDA"),
-                            refno.refno()
-                        ),
-                        super::staging::ExecMode::Both,
-                    )
-                    .await?;
-            }
-            Ok::<_, anyhow::Error>(())
-        })
+        .context("纠正窗口模型清理失败")?;
+    for (refno, noun) in &hard_delete_rows {
+        let pe = refno.to_pe_key();
+        // 两个方向都要清：作为成员走边目标（`{pe}->pe_owner`），作为属主走
+        // 复合 id 前缀范围。谓词形式的 `WHERE in = {pe}` 在 SurrealDB 2.1 的
+        // DELETE 里拿不到 `unique_pe_owner`，退化成边表全扫
+        // （`increment_pipeline::render_persist_statements` 同一对语句）。
+        crate::surreal_retry::execute_surreal_checked(
+            &format!(
+                "DELETE {pe}->pe_owner;\n\
+                 DELETE pe_owner:[{pe}, NONE]..=[{pe}, ..];\n\
+                 DELETE {};\nDELETE {noun}:{};\nDELETE {pe};",
+                refno.refno().to_table_key("ATT_UDA"),
+                refno.refno()
+            ),
+            "纠正窗口主数据硬删除",
+        )
         .await
-    {
-        let _ = window.drop_database().await;
-        return Err(error.context("纠正窗口主数据硬删除暂存失败"));
+        .context("纠正窗口主数据硬删除失败")?;
     }
 
+    // 尾事务：水位守卫 + 空间 epoch 推进，一个事务；水位值原样写回（纠正不推进水位）。
     let tail = format!(
-        "LET $wm = (SELECT VALUE applied_sesno FROM ONLY dbnum_watermark:{dbnum});\n\
+        "BEGIN TRANSACTION;\n\
+         LET $wm = (SELECT VALUE applied_sesno FROM ONLY dbnum_watermark:{dbnum});\n\
          IF $wm != {expect_watermark} {{ THROW '纠正提交时水位已变化'; }};\n\
          UPDATE dbnum_watermark:{dbnum} SET applied_sesno = {expect_watermark}, sesno = {expect_watermark};\n\
-         {}",
+         {}\n\
+         COMMIT TRANSACTION;",
         crate::fast_model::aabb_tree::render_spatial_epoch_bump()
     );
-    if let Err(error) = window.commit_to(&SUL_DB, &[], Some(&tail)).await {
-        let _ = window.drop_database().await;
-        return Err(error.context("纠正窗口写回失败"));
-    }
-    window.drop_database().await?;
+    crate::surreal_retry::execute_surreal_checked(&tail, "纠正窗口尾事务")
+        .await
+        .context("纠正窗口尾事务失败")?;
 
     let watermark_after = DbnumState::applied_sesno(dbnum).await?;
     anyhow::ensure!(
@@ -307,7 +291,7 @@ pub async fn repair_committed_window(
         unreachable_rows: audit_deleted.len(),
         watermark_before: state.applied_sesno,
         watermark_after,
-        staging_windows: super::staging::lifecycle::registered_windows().len(),
+        staging_windows: 0,
         cleaned_refnos,
         verification: "watermark unchanged; deleted pe/noun/UDA/owner/model rows absent"
             .to_string(),

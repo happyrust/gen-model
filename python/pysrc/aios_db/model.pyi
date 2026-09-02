@@ -9,6 +9,25 @@ def gen(refnos: list[str]) -> None:
 def gen_dbnum(dbnum: int) -> None:
     """整库模型生成。"""
 
+def gen_history(
+    dbnum: int,
+    refno: str,
+    *,
+    sesno: int | None = None,
+    time: str | None = None,
+) -> dict[str, Any]:
+    """按精确 sesno 或 RFC3339 时间实时重建到进程内历史快照库。"""
+
+def query_history(
+    snapshot_key: str,
+    tool: str,
+    arguments: dict[str, Any] | None = None,
+) -> Any:
+    """查询历史快照；tool 为 snapshot/instances/tubes/geometry。"""
+
+def drop_history(snapshot_key: str) -> None:
+    """删除 kv-mem 快照；共享 meshes 文件保持不变。"""
+
 def update_aabbs(
     refnos: list[str], replace: bool = False, durable: bool = False
 ) -> list[dict[str, Any]]:

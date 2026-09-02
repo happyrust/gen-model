@@ -311,7 +311,7 @@ async fn parse_ancestor_element(
     else {
         return Ok(None);
     };
-    let att = ele.whole_attmap.merge();
+    let att = ele.att;
     let children = dedupe_members(refno, &ele.children);
     Ok(Some(AncestorElement {
         refno,
@@ -656,6 +656,7 @@ mod tests {
     /// 同时钉 D3 的 StagingOnly：预载行绝不进 journal（journal 里只允许出现
     /// Transform 刷新自己的 Both 写）。
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
     async fn staged_transform_composes_ancestor_positions_after_parse_preload() {
         let (map, worl, equi_ref) = world_fixture();
         let equi = RefnoEnum::from(equi_ref);
@@ -749,6 +750,7 @@ mod tests {
     /// 的位移静默当 (0,0,0)——这是 W1 修的那个洞的活体标本。哪天 rs-core 把
     /// 「祖先名词行缺失」改成响亮失败，本用例会翻红提醒重新审视预载的失败面。
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
     async fn without_ancestor_preload_the_offsets_are_silently_zero() {
         let equi_ref = refu(782004);
         let equi = RefnoEnum::from(equi_ref);
@@ -939,6 +941,7 @@ mod tests {
     /// 永远开不了工）。修后：逻辑边已在（任意槽位）→ 跳过不写、不重槽、不报错；
     /// 链上其余缺失的边照常补齐；owner 字段正确性验证不受影响。
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
     async fn an_edge_parked_at_an_old_slot_is_skipped_not_a_unique_index_hit() {
         let (map, worl, equi) = world_chain(786500);
         let closure = resolve_ancestor_closure(&[equi], worl, 3, lookup_from(map))
@@ -1015,6 +1018,7 @@ mod tests {
     /// ORI/POS 会被窗口内读取当默认值——静默错模型从祖先挪到目标自己。
     /// 补齐同时不得动窗口写下的新值（同一份文件字节 + sesno 封口，值恒等）。
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
     async fn a_partial_noun_row_from_the_window_merge_is_backfilled_not_ignored() {
         let (map, worl, equi) = world_chain(787500);
         let closure = resolve_ancestor_closure(&[equi], worl, 3, lookup_from(map))

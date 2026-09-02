@@ -11,7 +11,8 @@
   （`set_active_task_stage` / `render_failure_reason_lines` / `failure_reason`）、
   `data_interface/task_registry.rs`（`current_stage`）、`data_interface/debug_scope.rs`、
   `data_interface/staging/lifecycle.rs`、`web_service/handlers.rs`（`/health`、
-  `/api/v1/batch-failures`）、`web/ops.html`
+  `/api/v1/batch-failures`）、`web/ops.html`；缺口五另涉
+  `data_interface/mdb_membership.rs`、`data_interface/db_model.rs`（`init_mdb`）
 
 ## 🔍 问题描述
 
@@ -121,6 +122,25 @@ dbnum，现在是在拼字符串时把它拌进去了。面板上把被挡住那
 重跑会不会踩同一堵墙，也是资源泄漏的第一现场。建议：失败记录带 `staging`
 （窗口名 + 存活状态 + 区间），面板把 `staging_windows` 摆在熔断卡旁边。
 
+**面板那一半已落地**（`web/ops.html` 的「暂存窗口」卡，摆在熔断卡正下方）。一行一个窗口：
+dbnum、窗口名、会话区间、档位、体量（暂存 SQL + journal 合计，分量在 title 里），
+`state = writeback_stalled` 的另起一行摊开写回原话。同屏还带两样东西：`staging_window_blocks`
+（`increment_update_attempt` / `window_block`，**跨重启活着**，是内存窗口清空后唯一还说得出话的
+证据）和 `staging_commit`（上次提交耗时与重试次数，窗口没了它还在，所以摆脚注不摆表里）。
+
+三条不许省的免责声明也钉在卡上，否则这一屏会骗人：**空不等于干净**（没有批次在跑、这一批走
+直写没建窗口、窗口刚被废弃，在这一栏上是同一个空白）；**这一份活在进程内**，重启必然为空，
+那时该问的是水位表而不是这张卡；**档位阈值来自 `AIOS_STAGING_*` 环境变量**，面板不知道数值，
+所以只报档位、不画进度条（编一个百分比比不画更糟）。字段缺席（老后端）与空列表分开渲染。
+
+**记录那一半也已落地**：`BatchFailure` 带 `staging` 一格，落记录那一刻从
+`staging::lifecycle::resource_snapshots_for(dbnum)` 取该库名下还挂着的窗口原样写进
+JSONL——与 `/health` 的 `staging_windows` 共用同一个成形函数，不许出现第二种形状。
+语义钉死：`[]` = 记录时已无窗口（回滚干净或走直写），非空 = 残留（重跑多半撞同一堵墙），
+字段缺席 = 老版本记录答不了这一问。面板失败卡照此三分渲染（残留行红字带写回原话，
+空写一句「已无窗口挂着」，老记录不画）。测试
+`a_record_carries_the_staging_leftovers_at_write_time` 钉住空数组不许藏格。
+
 **4b 水位判定输入**：「水位未推进」的判据（收集出的会话页清单、并入名单、旧→新水位）
 只在 `debug_scope` 的 `TracePoint::Collect` / `Terminal` 里，而
 `debug_scope::trace()` 在限定域为空或不含该 dbnum 时**直接 return，连载荷闭包都不执行**。
@@ -137,35 +157,57 @@ dbnum，现在是在拼字符串时把它拌进去了。面板上把被挡住那
 
 残留的两处都在**展示与记录层**，共同的病是「明明知道登录的是哪个项目，却还按裸号取」。
 
-**5a `batch_failure_log::recent()` 只按 `dbnum` 筛，不按项目。**
+**5a `batch_failure_log::recent()` 只按 `dbnum` 筛，不按项目（已落地）。**
 这本账落在**进程工作目录**下的 `logs/`，跨重启、跨配置改动都活着。同一个工作目录先后
 跑过两个 `project_name`（切项目、切站点、e2e 夹具复用同一个 bin 目录）时，
 `?dbnum=8191` 会把上一份配置留下的记录一并端出来。而记录里**本来就写着 `project`**，
-判据是现成的，只是没用上：
+判据是现成的，只是没用上。
 
-```rust
-// handlers.rs —— 默认只给本服务这个项目；要看全部显式 ?project=all
-let project = match query.project.as_deref() {
-    Some("all") => None,
-    Some(explicit) => Some(explicit.to_string()),
-    None => Some(state.identity.project.clone()),
-};
-Json(batch_failure_log::recent(kind, project.as_deref(), dbnum, limit))
-```
+**已改**：`recent()` 增加 `project` 参数，`/api/v1/error-log` 与 `/api/v1/batch-failures`
+都认 `?project=`——缺省 = 只回本服务登录的项目（`state.identity.project`），`all` = 不筛，
+其余值 = 指定项目（`ErrorLogQuery::project_filter`）。回执带 `"project_filter"`
+（字符串 = 用了哪个筛子，`null` = 没筛），否则「这个库没失败过」与「被筛掉了」又长成
+同一副样子。**没有 `project` 字段的行不筛掉**——`queue_stall` 记录与老版本记录本来就
+不带这一格，按项目筛把它们静默滤没，「这台机器没停滞过」就成了筛出来的假话。
+面板错误日志卡加「全部项目」开关（发 `?project=all` 服务端重取），口径以**已取回那份**
+回执的 `project_filter` 为准展示在计数旁；空列表的空状态分「本项目名下没有」与
+「真的没有」两句话。测试 `the_project_filter_keeps_own_and_unattributed_rows` 钉住
+「本项目 + 无归属留下、别的项目滤掉、回执报筛子」。
 
-回执里要把**用了哪个筛子**一起回出来（如 `"project_filter": "AvevaMarineSample"`），
-否则「这个库没失败过」与「被筛掉了」又长成同一副样子——本文件通篇在防的就是这件事。
-
-**5b 面板的 `byDb` 是「任意挑一个」。**
+**5b 面板的 `byDb` 是「任意挑一个」（已落地）。**
 `new Map(dbs.map(r => [r.dbnum, r]))` 同号时后来者静默覆盖前者，代码注释自己也承认
 「按号取一行等于从几份 sys 文件里任意挑一个」。当前后端不会给出重复行，所以它今天是对
-的——但它的正确性依赖一个不写在这里的前提。改成显式择优：同号时取
-`projOf(r) === S.health.project` 的那一行，取不到再退回第一行；「撞号候选按 `file_path`
-摆出来让人自己认」那段只在**当前项目一个都对不上**时才出现。一句话理由：
-**服务自己知道它登录的是哪个项目，这件事不该问人。**
+的——但它的正确性依赖一个不写在这里的前提。
+
+**已改**：同号显式择优——取 `projOf(r) === h.project` 的那一行，一行都对不上再退回
+头一行；连败卡上的候选表同口径收窄：登录项目那一份就是答案时只画它，「撞号候选按
+`file_path` 摆出来让人自己认」（`N 份文件同号 · 无一属本项目` 那块）只在**当前项目
+一个都对不上**时才出现。一句话理由：**服务自己知道它登录的是哪个项目，这件事不该问人。**
 
 **验证**：往同一个 `logs/` 里手工塞一条别的 `project` 的 `batch_failure` 记录，
 `?dbnum=8191` 默认取不到它、`?project=all` 取得到；面板上 8191 那一行恒为 `amssys`。
+
+**5c 初始化解 MDB 声明时，同号选主根本不知道有项目这回事（已落地）。**
+上面两条都在展示层，而同一个病在**初始化**里更早发作一次，且后果更重。
+`mdb_membership::locate` 把所有配置项目的库目录混成一个列表、只按 dbnum 匹配，靠
+**路径字典序**决胜——两个分支方向还相反：抽取叶子取字典序最大的路径，无后缀主库取
+最小的。摄入侧那边 `select_catalogue_candidates` 早就按
+`catalogue_project_priority` → `included_projects` 选主并打
+`[manifest] … 被项目优先级遮蔽`，**一个进程里对「7000 是哪个文件」有两个答案**。
+沙箱里 AMS 那份 7000 能被选中，纯粹因为 `AvevaMarineSample` > `AvevaCatalogue`。
+而这份名单正是 UDA 字典的来源。
+
+**已改**：`locate` 拆成「项目内按 ADR-028 挑」+「跨项目按同一套排名选主」，`PROJ` 压在
+排名之上只排先后不做排除，落选候选与文件归属项目分别记进 `MdbDatabase::shadowed` /
+`::project`。改的是 `mdb_membership.rs`、`db_model.rs`（`init_mdb` 的报数行与缺件点名）、
+`mdb_dict_probe.rs`；口径与取舍见 `changelog.md` 2026-08-27「修复」头两条。
+**验证**：`mdb_membership` 11/11 绿，五条是新的——跨项目按排名不按路径字母、主库与抽取
+两条分支给同一个项目、`PROJ` 压在排名之上（两个方向各验一次）、外项目声明在只有本项目有
+文件时仍解得出（7355 那道防线）、以及 `the_ranking_agrees_with_the_ingest_side_adjudicator`
+与摄入侧裁决同答案；`db_model` 另加一条源码顺序断言。`cargo test --lib` 1230 过、6 红全是
+那组故意红的 `t041_*`。clippy 对这三个文件零告警。
+
+五的三条（5a / 5b / 5c）至此全部关闭。
 
 ### 小尾巴：日志目录在哪，`/health` 没有这一格
 
@@ -175,11 +217,19 @@ Json(batch_failure_log::recent(kind, project.as_deref(), dbnum, limit))
 
 ## 🛠️ 落地顺序建议
 
-1. **五**（按登录项目筛）——两处各几行，判据都是现成字段，先做；
-2. **三**（blocker 结构化）——改动小，直接解掉 8191 现场「跳不过去」那一步；
-3. **一**（分步账）——收益最大，`set_active_task_stage` 是现成的单一汇流点；
-4. **四**（暂存窗口 + 水位输入）——都是「把已有事实塞进已有记录」；
-5. **二**（`reason_code`）——要碰错误类型，面最宽，放最后。
+0. ~~**5c**（初始化选主按项目排名）~~——**已完成**并入账 `changelog.md`；
+0. ~~**三**（blocker 结构化）~~——**已完成**。`PhaseBlocker` 带
+   `phase / dbnum / project / task_id / reason_ref`（`initialization_phase.rs`），
+   `/queue` 与 `/health` 都回结构化那份，面板 `culpritOf` 把「被 meta 挡着」渲染成
+   「挡住它的是 dbnum=8191」并给出取全文原因的 URL。上面「三」那一节的**现状段已过期**，
+   留着是为了记住这个缺口长什么样；
+0. ~~**4a**（暂存窗口：面板卡 + 失败记录带 `staging`）~~——**两半都已完成**，见上；
+0. ~~**五**（5a/5b，按登录项目筛）~~——**已完成**，见上；
+1. **一**（分步账）——收益最大，`set_active_task_stage` 是现成的单一汇流点；
+2. **4b**（水位判定输入）——非成功终态时无条件把 Collect / Terminal 裁决摘要塞进
+   失败记录，与 `--debug-dbnum` 是否开启无关。与分步账同属一条纪律：**面板上新加的
+   任何一格都活在进程内，落盘那一份才是异机能看到的**；
+3. **二**（`reason_code`）——要碰错误类型，面最宽，放最后。
 
 ## 🧪 验证标准
 

@@ -5,6 +5,12 @@
 //! TUBI plus boolean geometry). The target must be a disposable project copy.
 //! Run with:
 //! `cargo test --features http_api --test staged_regen_e2e -- --ignored --exact --nocapture`
+//!
+//! **已随 kv-mem 暂存窗口退役（ADR-056 P1，spec 035）**：它验证的暂存写回路径、
+//! `staged_commit_metrics` 与 `active_staging_writes` 路由都已不存在，整文件停编译；
+//! P3 T304 随 `staging/` 目录一起删除，issue #10「连续增量新增分支落进模型树」的
+//! 直写替身在那一步补。
+#![cfg(any())]
 
 use std::sync::Arc;
 use std::time::Instant;

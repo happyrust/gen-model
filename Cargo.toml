@@ -31,6 +31,13 @@ viewer = []                                                           #是否开
 gen_model = ["aios_core/gen_model"]
 manifold = ["dep:manifold-csg"]
 sql = ["dep:sqlx"]
+# `pdms_io` 仍是生产增量窗口/快照读取底座，不属于旧几何生成器。
+# 只有 OCC/gen_model 的可运行入口受 `legacy_model` 控制。
+legacy_pdms_io = []
+legacy_model = []
+# Historical developer probes are deliberately not unlocked by
+# `legacy_model`; that feature exposes only `legacy_model_gen`.
+legacy_diagnostics = []
 debug_parse = ["pdms_io/debug_parse"]
 legacy_session_replay = ["pdms_io/legacy_session_replay"] # 逐会话实体回放，仅诊断/对拍
 surreal_v2 = []
@@ -46,6 +53,11 @@ path = "src/bin/rvm_verify.rs"
 required-features = ["rvm_verify"]
 
 [[bin]]
+name = "rvm_generated_obj_compare"
+path = "src/bin/rvm_generated_obj_compare.rs"
+required-features = ["rvm_verify"]
+
+[[bin]]
 name = "incr_fold_probe"
 path = "src/bin/incr_fold_probe.rs"
 required-features = ["legacy_session_replay"]
@@ -54,6 +66,41 @@ required-features = ["legacy_session_replay"]
 name = "db8000_copy_probe"
 path = "src/bin/db8000_copy_probe.rs"
 required-features = ["legacy_session_replay"]
+
+[[bin]]
+name = "legacy_model_gen"
+path = "src/bin/legacy_model_gen.rs"
+required-features = ["legacy_model"]
+
+[[bin]]
+name = "performance_test"
+path = "src/bin/performance_test.rs"
+required-features = ["legacy_model", "legacy_diagnostics"]
+
+[[bin]]
+name = "test_gen_geos_data"
+path = "src/bin/test_gen_geos_data.rs"
+required-features = ["legacy_model", "legacy_diagnostics"]
+
+[[bin]]
+name = "node_gen_room_probe"
+path = "src/bin/node_gen_room_probe.rs"
+required-features = ["legacy_model", "legacy_diagnostics"]
+
+[[example]]
+name = "performance_test_example"
+path = "examples/performance_test_example.rs"
+required-features = ["legacy_model", "legacy_diagnostics"]
+
+[[example]]
+name = "stage_analysis_example"
+path = "examples/stage_analysis_example.rs"
+required-features = ["legacy_model", "legacy_diagnostics"]
+
+[[example]]
+name = "test_gen_geos_data_example"
+path = "examples/test_gen_geos_data_example.rs"
+required-features = ["legacy_model", "legacy_diagnostics"]
 
 [[test]]
 name = "db8000_two_delete_fixture"
@@ -66,10 +113,10 @@ path = "tests/db8000_session_pairs.rs"
 [dependencies]
 config = "0.14.1"
 bincode = "1.3.3"
-e3d-model = { path = "../vendor/e3d-model" }
 # RVM 基准对拍：解析 AVEVA E3D 导出的 RVM/ATT（仅 rvm_verify feature 用）
 rvm-rs = { git = "https://github.com/happyrust/rvm-rs", optional = true }
 anyhow = "1.0.57"
+e3d-model = { path = "../vendor/e3d-model" }
 serde_json = "1.0.81"
 hex = "0.4.3"
 sha2 = "0.10.9"
@@ -215,6 +262,27 @@ rmcp = { version = "=3.1.1", features = ["server", "transport-io"] }
 # [patch."https://github.com/happyrust/old-pdms-io.git"]
 # pdms_io = { path = "../vendor/old-pdms-io" }
 # LOCAL-DEPS PATCH END
+#
+# ── 第四路（手动）：pdms-io.git 的 pdmsdb_engine_v2 ─────────────────────────
+#
+# 上面三仓之外还有一条链：parse_pdms_db → pdmsdb_engine_v2
+# （git = https://github.com/happyrust/pdms-io.git，rev 钉在 old-parse-pdms-db
+# 的 Cargo.toml 里，当前 13a17e1f）。Toggle-LocalDeps.ps1 不管这一路，所以
+# engine-v2 工作副本（../../pdms-io-fork-engine-v2）里已落地但未上游的改动
+# （specs/034 的 db4 语义层、open_at、页大小根因修复）gen-model 默认看不到。
+#
+# 开发期要现场消费 engine-v2 时，手动取消下面两行注释即可（core3d_model 经
+# pdmsdb_engine_v2 的 path 依赖传递进图，不必单列 patch）。纪律与上面三仓相同：
+# 验收前重新注释掉，等上游提交后升 rev（specs/034 T501），不得带 patch 推 main。
+# 注意：**不要**把这两行挪进 BEGIN/END 标记之间——engine-v2 工作副本上常有他人
+# 在飞改动，不应随 Toggle 脚本 -On 一键连带激活，开关必须是显式的手动动作。
+#
+# 2026-08-30：`../../pdms-io-fork-engine-v2` 已从磁盘上消失，带着 patch 连
+# manifest 都解析不了，所以这两行改回注释态。要现场消费 engine-v2 时，先确认
+# 工作副本还在，再取消注释。
+#
+# [patch."https://github.com/happyrust/pdms-io.git"]
+# pdmsdb_engine_v2 = { path = "../../pdms-io-fork-engine-v2/crates/pdmsdb_engine_v2" }
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }

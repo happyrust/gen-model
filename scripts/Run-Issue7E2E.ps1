@@ -49,7 +49,8 @@ try {
     $env:AIOS_LIVE_DB = 'AvevaMarineSample'
     $env:AIOS_ISSUE7_DB_FILE = Join-Path $ProjectDir 'ams000\ams7999_0001'
     $env:DB_OPTION_FILE = 'db_options/DbOption-issue7-e2e'
-    $env:GEN_MODEL_DIRECT_INCREMENT = '1'
+    # GEN_MODEL_DIRECT_INCREMENT 随 kv-mem 暂存窗口退役（ADR-056 P1）：稳态增量只有直写一条路，
+    # 二进制不再读这个变量。
 
     & cargo build --bin l3_suite -j 1
     if ($LASTEXITCODE) { throw 'l3_suite build failed' }

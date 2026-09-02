@@ -20,6 +20,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
+use crate::data_interface::direct_tree::DirectTreeProvider;
 use crate::data_interface::task_registry::TaskRegistry;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::query_service::{QueryError, QueryService};
@@ -89,6 +90,8 @@ pub struct AppState {
     /// ——所以存的是目录而不是启动时定死的结论，热替换才谈得上「不重启」。
     pub ui_root: PathBuf,
     pub queries: Arc<QueryService>,
+    /// e3d-io backed tree reader. It stays lazy until a tree endpoint is used.
+    pub direct_tree: DirectTreeProvider,
 }
 
 /// 统一错误响应：`{ "code": ..., "message": ..., "detail": null }`（spec §3）。
@@ -266,6 +269,7 @@ pub async fn serve(
         &identity.project,
         &identity.mdb,
     )?);
+    let direct_tree = DirectTreeProvider::new(identity.project.clone(), identity.mdb.clone());
     let state = AppState {
         mgr,
         tasks: TaskRegistry::global(),
@@ -274,6 +278,7 @@ pub async fn serve(
         static_assets,
         ui_root: ui_root.clone(),
         queries,
+        direct_tree,
     };
 
     // 面板有两份，说清这一次用的是哪一份。两份不一致时人只会相信屏幕上那一份，
@@ -309,10 +314,25 @@ pub async fn serve(
         )
         .route("/api/v1/model/ensure", post(handlers::model_ensure))
         .route(
+            "/api/v1/model/history/generate",
+            post(handlers::model_history_generate),
+        )
+        .route(
+            "/api/v1/model/history/query",
+            post(handlers::model_history_query),
+        )
+        .route(
+            "/api/v1/model/history/{snapshot_key}",
+            get(handlers::model_history_get).delete(handlers::model_history_delete),
+        )
+        .route(
             "/api/v1/dbnums/{dbnum}/model/rebuild",
             post(handlers::dbnum_model_rebuild),
         )
         .route("/api/v1/query", post(handlers::query))
+        .route("/api/v1/tree/roots", get(handlers::tree_roots))
+        .route("/api/v1/tree/children", get(handlers::tree_children))
+        .route("/api/v1/tree/ancestors", get(handlers::tree_ancestors))
         .route("/api/v1/dbnums", get(handlers::dbnums))
         .route(
             "/api/v1/dbnums/{dbnum}/data",
@@ -467,6 +487,28 @@ mod tests {
             ),
             "model subtree cleanup must be a DELETE route: {serve}"
         );
+    }
+
+    #[test]
+    fn direct_tree_routes_are_read_only_get_endpoints() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("pub async fn serve(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        for route in [
+            ".route(\"/api/v1/tree/roots\", get(handlers::tree_roots))",
+            ".route(\"/api/v1/tree/children\", get(handlers::tree_children))",
+            ".route(\"/api/v1/tree/ancestors\", get(handlers::tree_ancestors))",
+        ] {
+            assert!(
+                serve.contains(route),
+                "missing direct tree GET route: {route}"
+            );
+        }
     }
 
     #[test]

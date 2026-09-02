@@ -1,0 +1,44 @@
+$(
+------------------------------------------------------------------------
+RVM 基准导出：BRAN /1RCV0101-60.3-VMB-R23-R342/B1   (dbnum 7999, =24383/73948)
+
+目的（2026-09-01 BRAN/HANG router 收口·RVM 对拍输入）：拿 E3D 自己的几何当真值，
+逐件对拍 e3d-model `gen_ams --root 24383/73948` 的产物（out/bran-73948）：
+- 隐式管身：数量、半径（bore/2 还是 OD/2——G1 的最终裁决）、长度、零长取舍；
+- ELBO（SCTO 弯头体）/ TEE（含 NLPY 负体）/ VALV（LSNO+SCON）/ ATTA 的实体与 AABB。
+
+命令序列与窄口径的理由见同目录 rvm_export_c_iy_1r330_b.mac 的头注（照搬，
+只换了元素、输出文件与备注）。窄口径（insu/obst off）是刻意的。
+
+导出是只读动作：本宏没有 SAVEWORK，不产生新会话号，不影响水位。
+不写 QUIT/FINISH——会话由 l3_suite 的 driver wrapper 拥有。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/rvm_export_1rcv0101_b1.log" OVER
+$P CODEX-DB7999-RVM-EXPORT-ALIVE
+
+$* ---- 表现设置：只导实体几何；管子照旧，隐含管段各自独立容器 ----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+$* ---- 驱动与输出 ----
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/test_data/rvm/1RCV0101-B1.rvm"
+export filenote 'RVM baseline for BRAN /1RCV0101-60.3-VMB-R23-R342/B1 (dbnum 7999, router core parity)'
+
+$* ---- 表现选项 ----
+export holes on
+export autocolour displayexport on
+export repr on
+
+$* ---- 包含列表：只导这一条 BRAN 及其成员 ----
+export /1RCV0101-60.3-VMB-R23-R342/B1
+
+$* ---- 执行 ----
+export finish
+
+$P CODEX-DB7999-RVM-EXPORT-DONE
+ALPHA LOG END

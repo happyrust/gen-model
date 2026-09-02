@@ -43,6 +43,7 @@ use crate::data_interface::sweep_log;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_interface::update_scope::UpdateScope;
 use crate::data_interface::watch_scope;
+use crate::fast_model::aabb_refresh::update_inst_relate_aabbs_by_refnos_incremental;
 use crate::fast_model::*;
 use tracing_subscriber::fmt::format;
 
@@ -2343,7 +2344,7 @@ pub(crate) fn is_foreign_runtime_sys(db_option: &DbOption, project: &str, db_typ
 /// issue #10 卡的正是这个：7999 被 `manual_db_nums` 挡着，watcher 每 30 秒发现一次
 /// 增量、每次都跳过，而模型树看起来只是「不更新」。范围现在只由 MDB 定，手写名单
 /// 不再参与增量判定（`manual_db_nums` / `exclude_db_nums` 仍供全量模型生成与按需
-/// 基线解析使用，见 `fast_model::gen_model` 与 `manual_update::baseline_sync_options`）。
+/// 基线解析使用，见 legacy 基线解析模块与 `manual_update::baseline_sync_options`）。
 pub(crate) fn in_scope_with(
     db_option: &DbOption,
     scope: &UpdateScope,
@@ -3384,15 +3385,15 @@ impl AiosDBManager {
                             log::warn!("{msg}");
                             eprintln!("{msg}");
                             phase_blockers.push(
-                                crate::data_interface::initialization_phase::PhaseBlocker::new(
-                                    crate::data_interface::initialization_phase::DataPhase::of_db_type(
-                                        &db_type,
-                                    ),
-                                    format!("dbnum={db_no} 最新会话号读取失败: {}", path.display()),
-                                )
-                                .with_dbnum(db_no)
-                                .with_project(project.clone()),
-                            );
+                            crate::data_interface::initialization_phase::PhaseBlocker::new(
+                                crate::data_interface::initialization_phase::DataPhase::of_db_type(
+                                    &db_type,
+                                ),
+                                format!("dbnum={db_no} 最新会话号读取失败: {}", path.display()),
+                            )
+                            .with_dbnum(db_no)
+                            .with_project(project.clone()),
+                        );
                             continue;
                         }
                     };
@@ -4879,6 +4880,7 @@ mod staged_transform_write_routing_tests {
     /// 3. **房间触发**：位姿位移导致包围盒变化时，房间重算意图必须寄存进窗口
     ///    （D1 不复活）。
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
     async fn staged_transform_routes_pointer_updates_through_the_journal() {
         let root = RefnoEnum::from(refu(777001));
         let equi = RefnoEnum::from(refu(777002));

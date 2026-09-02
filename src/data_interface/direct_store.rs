@@ -2,17 +2,17 @@
 //!
 //! 三件事各有一处权威，别处不得再有第二份：
 //!
-//! * **读哪个时点**——按 dbnum 钉在该库的 `applied_sesno` 上（ADR-053 Q3）。索引是
-//!   copy-on-write，会话页各自携带当时的索引根，所以「按会话号打开」不是事后过滤，
-//!   而是选哪棵树下降；`ReadOnlyEngine::open_at` 就是这一步。钉住它，direct 与 DB 两
-//!   条路读的是同一个逻辑时点，对拍才有意义。**水位是承诺**：`applied_sesno` 说数据
-//!   落库了，direct 读的就是那一刻的文件态。
+//! * **读哪个时点**——调用方显式钉了就是它，没钉就是开库那一刻文件自报的最新会话
+//!   （ADR-054：未指定时点一律取文件最新；`applied_sesno` 是摄入水位，不是时点来源）。
+//!   索引是 copy-on-write，会话页各自携带当时的索引根，所以「按会话号打开」不是事后
+//!   过滤，而是选哪棵树下降；`ReadOnlyEngine::open_at` 就是这一步。要与 DB 模式对拍
+//!   读同一逻辑时点，用 [`pins_from_watermark`] 显式钉到 `applied_sesno`。
 //! * **ref0 属于哪个库**——走 [`CataDbLocator`] 反查。`Ref0` 不是 `dbnum`，
 //!   `RefU64::get_0()` 顶不了它；反查不到就报错，不凑一个看着像真的。跨库 owner 上溯
 //!   （DESI 元素的 owner 在 SITE 库）全靠这一步。
 //! * **属性长什么形状**——[`super::direct_attmap`]，它查 DB 读侧的同一张 schema。
 //!
-//! 没钉水位的 dbnum、反查不到的 ref0、打不开的文件，一律 `Err` 并说出是哪个。
+//! 定位器登记不出的 dbnum、反查不到的 ref0、打不开的文件，一律 `Err` 并说出是哪个。
 //! 生成期一个静默的空 attmap，下游会当成「这个元素没有属性」照常出图。
 //!
 //! **并发**：`DashMap<dbnum, Arc<Mutex<DbSession>>>`（ADR-053 R4 起步形态）。
@@ -59,8 +59,9 @@ pub struct DbPin {
     /// 第一轮拿旧 SCOM、第四轮拿新 SPRE，各自自洽，合起来是个不存在的元件，而且
     /// 不报错，只会长出一个形状不对的模型。
     ///
-    /// 冻结点解出来之后可以从 [`DirectStore::pinned_sesno`] 读回。水位库（DESI）一律
-    /// 带 `Some(applied_sesno)`，不走这条。
+    /// 冻结点解出来之后可以从 [`DirectStore::pinned_sesno`] 读回。这就是**未指定时点**
+    /// 的默认（ADR-054）；`Some(sesno)` 只在调用方显式钉时点时出现——历史投影、
+    /// 或对拍探针经 [`pins_from_watermark`] 钉到 `applied_sesno`。
     pub sesno: Option<u32>,
 }
 
@@ -87,12 +88,6 @@ impl FileIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectStoreError {
-    /// 没登记文件与时点。**不回落到「读文件最新会话」**：那读的是另一个时点，
-    /// 与 DB 模式分叉，而分叉出来的属性看上去完全正常。
-    NotPinned {
-        dbnum: i32,
-    },
-
     UnresolvedRef0 {
         ref0: u32,
         refno: String,
@@ -138,10 +133,6 @@ pub enum DirectStoreError {
 impl std::fmt::Display for DirectStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NotPinned { dbnum } => write!(
-                f,
-                "dbnum {dbnum} 没有登记文件与 applied_sesno，direct 读不了它"
-            ),
             Self::UnresolvedRef0 { ref0, refno } => {
                 write!(f, "ref0 {ref0} 反查不到 dbnum，{refno} 未解析")
             }
@@ -515,12 +506,13 @@ impl DirectStore {
             ..
         } = &mut *session;
 
-        let fingerprint = IndexFingerprint::of(&pin.file, dbnum, *pinned_sesno).map_err(
-            |error| DirectStoreError::Session {
-                dbnum,
-                detail: format!("stat {}: {error}", pin.file.display()),
-            },
-        )?;
+        let fingerprint =
+            IndexFingerprint::of(&pin.file, dbnum, *pinned_sesno).map_err(|error| {
+                DirectStoreError::Session {
+                    dbnum,
+                    detail: format!("stat {}: {error}", pin.file.display()),
+                }
+            })?;
         let built = DbIndexes::load_or_build(engine, provider, &self.schema.attlib, fingerprint)
             .map_err(|error| DirectStoreError::Session {
                 dbnum,
@@ -611,6 +603,9 @@ impl DirectStore {
 
     /// 拿到（必要时打开）一个库的会话。
     ///
+    /// 没登记过的库从定位器补 pin（时点 = 开库那一刻的最新，ADR-054）；定位器也不认识
+    /// 的库照样 `NoFileForDbnum`。点名库的 `*_in` 入口与靠 ref0 反查的入口因此同一口径。
+    ///
     /// 打开动作在 DashMap 之外完成，插入时只碰 `sessions`——见模块头「并发」一段。
     /// 两个线程同时开同一个库时会各开一次，后到的那份直接丢掉：多读几页，换不会
     /// 在文件 I/O 期间攥着分片锁。
@@ -618,11 +613,10 @@ impl DirectStore {
         if let Some(hit) = self.sessions.get(&dbnum) {
             return Ok(hit.clone());
         }
-        let pin = self
-            .pins
-            .get(&dbnum)
-            .map(|entry| entry.clone())
-            .ok_or(DirectStoreError::NotPinned { dbnum })?;
+        let pin = match self.pinned(dbnum) {
+            Some(pin) => pin,
+            None => self.pin_from_locator(dbnum)?,
+        };
 
         let opened = Arc::new(Mutex::new(self.open_session(&pin)?));
         Ok(self.sessions.entry(dbnum).or_insert(opened).clone())
@@ -711,10 +705,11 @@ impl std::fmt::Debug for DirectStore {
     }
 }
 
-/// 从 `dbnum_watermark` 读各库的文件与 `applied_sesno`。
+/// 从 `dbnum_watermark` 读各库的文件与 `applied_sesno`，**显式**钉到已应用水位。
 ///
-/// 这是 direct 模式**唯一**还要连 SurrealDB 的地方，而且读的是元数据（文件在哪、
-/// 时点是几），不是元素数据——ADR-053 Q1 的范围就画在这里。
+/// 这是对拍探针（`direct_attmap_probe`）与 DB 模式读同一逻辑时点的工具，不是生成的
+/// 默认时点来源：当前投影按 ADR-054 取文件最新会话（`model_source`），且库文件的权威
+/// 是 MDB 成员而不是这张表。这里读的只是元数据（文件在哪、时点是几），不是元素数据。
 pub async fn pins_from_watermark() -> anyhow::Result<Vec<DbPin>> {
     #[derive(serde::Deserialize)]
     struct Row {
@@ -803,19 +798,18 @@ mod tests {
         assert!(!error.to_string().contains("99999_7 read from dbnum"));
     }
 
-    /// **改成「没钉水位就读文件最新会话」会让这条红。** 那读到的是另一个时点，
-    /// 与 DB 模式分叉，而分叉出来的属性看上去完全正常。
+    /// ADR-054：定位器**不认识**的库才是错误。**改回「没钉 pin 就报错」会让下一条红。**
     ///
-    /// 两条入口都要堵：点名库的 `attrs_in` 直接说没登记；靠 ref0 反查的 `attrs` 会先去
-    /// 定位器补 pin（目录库不入水位表，只能这么来），定位器也拿不出文件时同样报错。
+    /// 两条入口同一口径：点名库的 `attrs_in` 与靠 ref0 反查的 `attrs` 都先去定位器补 pin，
+    /// 定位器也拿不出文件时才报 `NoFileForDbnum`——不凑一个看着像真的。
     #[test]
-    fn a_dbnum_with_no_pin_is_an_error_not_the_newest_session() {
+    fn a_dbnum_the_locator_does_not_know_is_an_error_not_a_guess() {
         let store = store_without_files();
         let refno = RefU64::from_two_nums(24_384, 18_447);
 
         let error = store.attrs_in(8000, refno).unwrap_err();
         assert!(
-            matches!(error, DirectStoreError::NotPinned { dbnum: 8000 }),
+            matches!(error, DirectStoreError::NoFileForDbnum { dbnum: 8000 }),
             "{error}"
         );
 
@@ -824,6 +818,43 @@ mod tests {
             matches!(error, DirectStoreError::NoFileForDbnum { dbnum: 8000 }),
             "{error}"
         );
+    }
+
+    /// ADR-054 Q1：定位器认识、却没人钉时点的库，pin 出来就是「开库那一刻的最新」
+    /// （`sesno: None`），不是错误，也不去水位表找 `applied_sesno`。
+    #[test]
+    fn an_unpinned_dbnum_the_locator_knows_is_pinned_to_the_latest_session() {
+        struct LocatorWithFile;
+        impl CataDbLocator for LocatorWithFile {
+            fn dbnum_of_ref0(&self, _ref0: u32) -> Option<u32> {
+                Some(8000)
+            }
+            fn db_type_of(&self, _dbnum: u32) -> Option<String> {
+                Some("DESI".to_string())
+            }
+            fn file_of(&self, dbnum: u32) -> Option<(String, PathBuf)> {
+                (dbnum == 8000).then(|| ("proj".to_string(), PathBuf::from("ams8000")))
+            }
+        }
+        let schema = Arc::new(DirectSchema {
+            attlib: e3d_attlib::AttlibData::default(),
+            template_dir: PathBuf::from("nowhere"),
+        });
+        let store = DirectStore::new(schema, Arc::new(LocatorWithFile));
+        assert!(store.pinned(8000).is_none());
+
+        // 文件并不存在，所以走到开库会报 Session；但 pin 必须先落下来，且没有时点。
+        let error = store
+            .attrs_in(8000, RefU64::from_two_nums(24_384, 1))
+            .unwrap_err();
+        assert!(
+            matches!(error, DirectStoreError::Session { dbnum: 8000, .. }),
+            "{error}"
+        );
+        let pin = store.pinned(8000).expect("定位器认识的库要被自动登记");
+        assert_eq!(pin.sesno, None, "未指定时点 = 开库时解一次最新");
+        assert_eq!(pin.db_type, "DESI");
+        assert_eq!(pin.file, PathBuf::from("ams8000"));
     }
 
     #[test]

@@ -11,7 +11,7 @@
 //! 锁序（源码钉在 `batch_worker` / `occ_generate` / 本模块测试）：
 //!
 //! ```text
-//! STAGED_COMMIT_SERIAL → SPATIAL_STATE_SERIAL → GLOBAL_AABB_TREE
+//! DATA_COMMIT_SERIAL → SPATIAL_STATE_SERIAL → GLOBAL_AABB_TREE
 //! ```
 
 use std::sync::Mutex;
@@ -77,8 +77,8 @@ impl SpatialTreeState {
 /// 空间写入全局串行段（方案 D6）。
 ///
 /// 持锁方（获取点见各调用处注释）：
-/// - staged 提交后的空间收敛与发布（`reconcile_spatial_pending`，经
-///   `STAGED_COMMIT_SERIAL` → 本锁）；
+/// - 数据批次提交后的空间收敛与发布（`reconcile_spatial_pending`，经
+///   `DATA_COMMIT_SERIAL` → 本锁）；
 /// - direct/non-staged 指针事务到内存树同步（`occ_generate` 直写、
 ///   `helper::delete_room_membership` 直写删除）；
 /// - 全量指针重建的换树/发布段（分页读在锁外，D4）；
@@ -123,7 +123,7 @@ pub fn spatial_serial_snapshot() -> SpatialSerialSnapshot {
     }
 }
 
-/// 取空间串行锁。锁序纪律：若同时需要 `STAGED_COMMIT_SERIAL`，必须先取它；
+/// 取空间串行锁。锁序纪律：若同时需要 `DATA_COMMIT_SERIAL`，必须先取它；
 /// 若随后要 `GLOBAL_AABB_TREE` 写锁，必须在本锁**之后**取。
 pub(crate) async fn lock_spatial_serial() -> SpatialSerialGuard {
     SPATIAL_SERIAL_WAITING.fetch_add(1, Ordering::Relaxed);

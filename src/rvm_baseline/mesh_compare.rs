@@ -229,9 +229,22 @@ mod gen_side {
     use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
     use aios_core::shape::pdms_shape::PlantMesh;
     use glam::{Mat4, Quat, Vec3};
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
     use surrealdb::Surreal;
     use surrealdb::engine::any::Any;
+
+    /// Resolve the same mesh root used by the deployed Plant UI/backend.
+    ///
+    /// Live RVM tests often run from the repository root while the active
+    /// content-addressed meshes live beside the deployed binaries.  Falling
+    /// back to `assets/meshes` preserves the local developer workflow, but an
+    /// explicit `PLANT_MESH_DIR` always wins so validation cannot silently read
+    /// a stale copy from a different deployment.
+    fn mesh_root() -> PathBuf {
+        std::env::var_os("PLANT_MESH_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("assets/meshes"))
+    }
 
     fn vec3_at(v: &serde_json::Value) -> Vec3 {
         Vec3::new(f_at(v, 0), f_at(v, 1), f_at(v, 2))
@@ -262,20 +275,37 @@ mod gen_side {
     /// geo_hash → param → 生产同款 `tessellate_libgm_param` → 网格，再乘
     /// `world_trans × inst.transform`。
     pub async fn gen_world_mesh(db: &Surreal<Any>, pe_key: &str) -> Result<Option<TriMesh>> {
-        // 走这个 pe 的出边，不要 `WHERE in = {pe_key}`：`inst_relate` 没有
-        // `(in, out)` 索引，谓词形式在真库上是整表扫，而对拍要逐件调用本函数。
-        let sql = format!(
-            "SELECT world_trans.d AS wt, insts_flat, booled_id FROM {pe_key}->inst_relate;"
-        );
-        let mut resp = db.query(sql).await.context("查询 inst_relate 失败")?;
-        let rows: Vec<serde_json::Value> = resp.take(0).context("解析 inst_relate 结果失败")?;
+        // e3d-model 的 Element relation ID 就是 refno；按 ID 精确读与 Plant UI 的
+        // flat projection 同口径。旧数据未遵守此身份时再兼容出边，不做 `WHERE in`
+        // 整表扫。
+        let relation_key = pe_key.replacen("pe:", "inst_relate:", 1);
+        let columns =
+            "world_trans.d AS wt, insts_flat, booled_id, direct_model.source AS model_source";
+        let mut resp = db
+            .query(format!("SELECT {columns} FROM {relation_key};"))
+            .await
+            .context("按 GeometryId 查询 inst_relate 失败")?;
+        let mut rows: Vec<serde_json::Value> = resp.take(0).context("解析 inst_relate 结果失败")?;
+        if rows.is_empty() {
+            let mut resp = db
+                .query(format!("SELECT {columns} FROM {pe_key}->inst_relate;"))
+                .await
+                .context("按旧出边查询 inst_relate 失败")?;
+            rows = resp.take(0).context("解析旧 inst_relate 结果失败")?;
+        }
         let Some(row) = rows.into_iter().next() else {
             return Ok(None);
         };
+        let model_source = row.get("model_source").and_then(|value| value.as_str());
+        anyhow::ensure!(
+            model_source == Some("e3d-model"),
+            "{pe_key} geometry source is {:?}, RVM acceptance only admits e3d-model output",
+            model_source
+        );
         let wt = mat_from_trans(row.get("wt").unwrap_or(&serde_json::Value::Null));
         let booled_id = row.get("booled_id").and_then(|v| v.as_str());
         if let Some(booled_id) = super::resolve_booled_mesh_id(booled_id) {
-            let mesh_path = Path::new("assets/meshes").join(format!("{booled_id}.mesh"));
+            let mesh_path = mesh_root().join(format!("{booled_id}.mesh"));
             let unit = PlantMesh::des_mesh_file(&mesh_path).with_context(|| {
                 format!(
                     "{pe_key} 有 booled_id={booled_id} 但缺少 {}（布尔网格未落盘，不能回退到未开洞正挤出）",
@@ -351,7 +381,7 @@ mod gen_side {
         }
         // param 为空或建不出形状 → 磁盘 .mesh（布尔/复合结果，如 BEND；CWD=仓库根，
         // meshes_path 默认 assets/meshes）。
-        let mesh_path = Path::new("assets/meshes").join(format!("{geo_hash}.mesh"));
+        let mesh_path = mesh_root().join(format!("{geo_hash}.mesh"));
         match PlantMesh::des_mesh_file(&mesh_path) {
             Ok(mesh) => Ok(Some(mesh)),
             Err(_) => Ok(None),
@@ -546,6 +576,238 @@ mod mesh_wall_live {
         assert!(
             guard_failures.is_empty(),
             "WALL 1/2/3 的 gen 表面必须贴 E3D（gen->rvm p95 ≤ {GEN_TO_RVM_P95_TOL}mm）：{guard_failures:?}"
+        );
+    }
+
+    /// WF04 WALL 6 (`17496/106253`) 是墙体隐式 OBOW/IBOW 基准帧的现场回归件。
+    /// 只检查外轮廓会漏掉本次缺陷：FIXING 落到墙外时正体仍然贴合，但所有开孔消失。
+    /// 因此这里要求双向表面距离同时收敛；RVM -> gen 专门守住 E3D 有孔边/孔壁而
+    /// 生成侧退化成实心墙的方向。
+    #[tokio::test]
+    #[ignore = "live 8009 + WF04 RVM：WALL 6 开孔布尔的双向 mesh 对拍"]
+    async fn mesh_wf04_wall6_openings_match_rvm() {
+        use crate::fast_model::shared::one_way_surface_distance;
+
+        let rvm_path = std::path::Path::new(
+            "output/rvm-1rs-civi-zone-verify/20260821-012202/batch-export/1RS-WF04.rvm",
+        );
+        let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse WF04 RVM");
+        let rvm_name = "WALL 6 of CWALL /1RS-WF04-W-C-RR001";
+        let rvm = rvm_meshes
+            .get(rvm_name)
+            .unwrap_or_else(|| panic!("RVM 缺 group {rvm_name}"));
+        let db = live_8009().await;
+        let generated = gen_world_mesh(&db, "pe:17496_106253")
+            .await
+            .expect("query generated WALL 6")
+            .expect("generated WALL 6 mesh exists");
+
+        let g2r = one_way_surface_distance(&generated, rvm, 12_000).expect("gen->rvm");
+        let r2g = one_way_surface_distance(rvm, &generated, 12_000).expect("rvm->gen");
+        let signed_volume = |mesh: &TriMesh| {
+            mesh.indices()
+                .iter()
+                .map(|tri| {
+                    let a = mesh.vertices()[tri[0] as usize].coords;
+                    let b = mesh.vertices()[tri[1] as usize].coords;
+                    let c = mesh.vertices()[tri[2] as usize].coords;
+                    a.dot(&b.cross(&c)) as f64 / 6.0
+                })
+                .sum::<f64>()
+                .abs()
+        };
+        let rvm_volume = signed_volume(rvm);
+        let generated_volume = signed_volume(&generated);
+        println!(
+            "WF04 WALL 6: rvm_tris={} gen_tris={} rvm_volume={:.3e} gen_volume={:.3e} volume_delta={:.4}% | gen->rvm mean={:.2} p95={:.2} max={:.2} | rvm->gen mean={:.2} p95={:.2} max={:.2}",
+            rvm.indices().len(),
+            generated.indices().len(),
+            rvm_volume,
+            generated_volume,
+            (generated_volume - rvm_volume).abs() / rvm_volume * 100.0,
+            g2r.mean,
+            g2r.p95,
+            g2r.hausdorff,
+            r2g.mean,
+            r2g.p95,
+            r2g.hausdorff,
+        );
+
+        const P95_TOL_MM: f32 = 12.0;
+        assert!(
+            g2r.p95 <= P95_TOL_MM,
+            "WF04 WALL 6 生成表面偏离 E3D：gen->rvm p95={}mm",
+            g2r.p95
+        );
+        assert!(
+            r2g.p95 <= P95_TOL_MM,
+            "WF04 WALL 6 的 E3D 孔边/孔壁在生成模型中缺失：rvm->gen p95={}mm",
+            r2g.p95
+        );
+    }
+
+    /// 新截图中的 WF04 GWALL 3 (`17496/106258`)：直接以 E3D RVM FacetGroup
+    /// 检查当前生成网格，避免把树选择串项和真实几何缺口混为一谈。
+    #[tokio::test]
+    #[ignore = "live 8009 + WF04 RVM：GWALL 3 诊断对拍"]
+    async fn mesh_wf04_gwall3_matches_rvm() {
+        use crate::fast_model::shared::one_way_surface_distance;
+
+        let rvm_path = std::path::Path::new(
+            "output/rvm-1rs-civi-zone-verify/20260821-012202/batch-export/1RS-WF04.rvm",
+        );
+        let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse WF04 RVM");
+        let rvm_name = "GWALL 3 of CWALL /1RS-WF04-W-C-RR001";
+        let rvm = rvm_meshes
+            .get(rvm_name)
+            .unwrap_or_else(|| panic!("RVM 缺 group {rvm_name}"));
+        let db = live_8009().await;
+        ensure_booled_mesh_files(&db, &["pe:17496_106258"]).await;
+        let generated = gen_world_mesh(&db, "pe:17496_106258")
+            .await
+            .expect("query generated GWALL 3")
+            .expect("generated GWALL 3 mesh exists");
+        let g2r = one_way_surface_distance(&generated, rvm, 12_000).expect("gen->rvm");
+        let r2g = one_way_surface_distance(rvm, &generated, 12_000).expect("rvm->gen");
+        let write_obj = |path: &std::path::Path, mesh: &TriMesh| {
+            let mut text = String::new();
+            for v in mesh.vertices() {
+                text.push_str(&format!("v {} {} {}\n", v.x, v.y, v.z));
+            }
+            for tri in mesh.indices() {
+                text.push_str(&format!("f {} {} {}\n", tri[0] + 1, tri[1] + 1, tri[2] + 1));
+            }
+            std::fs::write(path, text).expect("write diagnostic obj");
+        };
+        let diagnostic_dir =
+            std::path::Path::new(".codex-artifacts/wf04-gwall3-fix-20260831/experiments");
+        std::fs::create_dir_all(diagnostic_dir).expect("create diagnostic dir");
+        write_obj(&diagnostic_dir.join("rvm-gwall3.obj"), rvm);
+        write_obj(&diagnostic_dir.join("gen-gwall3.obj"), &generated);
+        println!(
+            "WF04 GWALL 3: rvm_tris={} gen_tris={} | gen->rvm mean={:.2} p95={:.2} max={:.2} | rvm->gen mean={:.2} p95={:.2} max={:.2}",
+            rvm.indices().len(),
+            generated.indices().len(),
+            g2r.mean,
+            g2r.p95,
+            g2r.hausdorff,
+            r2g.mean,
+            r2g.p95,
+            r2g.hausdorff,
+        );
+        println!(
+            "    rvm_aabb={:?} gen_aabb={:?}",
+            rvm.local_aabb(),
+            generated.local_aabb()
+        );
+        for (point, distance) in
+            crate::fast_model::shared::farthest_from_surface(&generated, rvm, 12_000, 12)
+        {
+            println!(
+                "    worst gen->rvm [{:.1},{:.1},{:.1}] d={distance:.2}",
+                point[0], point[1], point[2]
+            );
+        }
+        for (point, distance) in
+            crate::fast_model::shared::farthest_from_surface(rvm, &generated, 12_000, 12)
+        {
+            println!(
+                "    worst rvm->gen [{:.1},{:.1},{:.1}] d={distance:.2}",
+                point[0], point[1], point[2]
+            );
+        }
+    }
+
+    /// WF04 GWALL 3 下的 SBFI `17496/152095`：核对 Plant UI 当前实例网格与
+    /// E3D 导出的同名 RVM group，诊断目录同时保留两侧 OBJ。
+    #[tokio::test]
+    #[ignore = "live 8009 + WF04 RVM：SBFI 17496/152095 诊断对拍"]
+    async fn mesh_wf04_sbfi_152095_matches_rvm() {
+        use crate::fast_model::shared::one_way_surface_distance;
+
+        let rvm_path = std::path::Path::new(
+            "output/rvm-1rs-civi-zone-verify/20260821-012202/batch-export/1RS-WF04.rvm",
+        );
+        let rvm_meshes = rvm_world_meshes_by_name(rvm_path).expect("parse WF04 RVM");
+        let rvm_name = "SBFITTING 1 of CMPFITTING /1RS04KK1012T";
+        let rvm = rvm_meshes
+            .get(rvm_name)
+            .unwrap_or_else(|| panic!("RVM missing group {rvm_name}"));
+        {
+            use rvm_rs::parse_rvm;
+            use rvm_rs::store::Store;
+            use rvm_rs::store::node::{NodeId, NodeKind};
+            fn dump(store: &Store, id: NodeId, wanted: &str) {
+                let Some(node) = store.get_node(id) else {
+                    return;
+                };
+                if let NodeKind::Group(group) = &node.kind
+                    && store.get_string(group.name).trim() == wanted
+                {
+                    let mut link = group.first_geometry;
+                    while let Some(gid) = link {
+                        let geometry = store.get_geometry(gid).expect("RVM geometry");
+                        println!(
+                            "    RVM_GEOMETRY kind={:?} transform={:?}",
+                            geometry.kind, geometry.transform
+                        );
+                        link = geometry.next;
+                    }
+                }
+                let mut child = node.first_child;
+                while let Some(cid) = child {
+                    let child_node = store.get_node(cid).expect("RVM child");
+                    dump(store, cid, wanted);
+                    child = child_node.next;
+                }
+            }
+            let bytes = std::fs::read(rvm_path).expect("read WF04 RVM");
+            let mut store = Store::new();
+            parse_rvm(&bytes, &mut store).expect("parse WF04 RVM details");
+            for &root in store.roots() {
+                dump(&store, root, rvm_name);
+            }
+        }
+        let db = live_8009().await;
+        let generated = gen_world_mesh(&db, "pe:17496_152095")
+            .await
+            .expect("query generated SBFI")
+            .expect("generated SBFI mesh exists");
+        let g2r = one_way_surface_distance(&generated, rvm, 12_000).expect("gen->rvm");
+        let r2g = one_way_surface_distance(rvm, &generated, 12_000).expect("rvm->gen");
+        let write_obj = |path: &std::path::Path, mesh: &TriMesh| {
+            let mut text = String::new();
+            for v in mesh.vertices() {
+                text.push_str(&format!("v {} {} {}\n", v.x, v.y, v.z));
+            }
+            for tri in mesh.indices() {
+                text.push_str(&format!("f {} {} {}\n", tri[0] + 1, tri[1] + 1, tri[2] + 1));
+            }
+            std::fs::write(path, text).expect("write diagnostic obj");
+        };
+        let diagnostic_dir =
+            std::path::Path::new(".codex-artifacts/wf04-sbfi-152095-verify/mesh-compare");
+        std::fs::create_dir_all(diagnostic_dir).expect("create diagnostic dir");
+        write_obj(&diagnostic_dir.join("rvm-sbfi-17496-152095.obj"), rvm);
+        write_obj(
+            &diagnostic_dir.join("live-sbfi-17496-152095.obj"),
+            &generated,
+        );
+        println!(
+            "WF04 SBFI 17496/152095: rvm_tris={} live_tris={} | live->rvm mean={:.3} p95={:.3} max={:.3} | rvm->live mean={:.3} p95={:.3} max={:.3}",
+            rvm.indices().len(),
+            generated.indices().len(),
+            g2r.mean,
+            g2r.p95,
+            g2r.hausdorff,
+            r2g.mean,
+            r2g.p95,
+            r2g.hausdorff,
+        );
+        println!(
+            "    rvm_aabb={:?} live_aabb={:?}",
+            rvm.local_aabb(),
+            generated.local_aabb()
         );
     }
 
@@ -1057,38 +1319,10 @@ mod mesh_wall_live {
         if missing_pe.is_empty() {
             return;
         }
-        aios_core::init_test_surreal()
-            .await
-            .expect("init_test_surreal 连 8009");
-        let dir = std::path::PathBuf::from("assets/meshes");
-        let mut mesh_refnos = Vec::new();
-        let mut bool_refnos = Vec::new();
-        for pe_key in &missing_pe {
-            let r: aios_core::RefnoEnum = pe_key.trim_start_matches("pe:").into();
-            bool_refnos.push(r);
-            mesh_refnos.push(r);
-            let negs = aios_core::query_deep_neg_inst_refnos(r)
-                .await
-                .unwrap_or_else(|e| panic!("query_deep_neg_inst_refnos {pe_key}: {e}"));
-            println!("{pe_key} neg insts={}", negs.len());
-            mesh_refnos.extend(negs);
-        }
-        println!(
-            "gen_inst_meshes {} refnos (replace) then boolean {}",
-            mesh_refnos.len(),
-            bool_refnos.len()
+        panic!(
+            "RVM verification requires pre-generated e3d-model meshes; missing: {}",
+            missing_pe.join(", ")
         );
-        crate::fast_model::occ_generate::gen_inst_meshes(&mesh_refnos, true, dir.clone())
-            .await
-            .expect("gen_inst_meshes");
-        crate::fast_model::manifold_bool::apply_insts_boolean_manifold(
-            &bool_refnos,
-            true,
-            dir,
-            crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback,
-        )
-        .await
-        .expect("apply_insts_boolean_manifold");
     }
 
     /// AMS 1112 CWALL `/1RS-WF03-W-C-RR001` 的 20 堵 GWALL（挤出）合成 union。

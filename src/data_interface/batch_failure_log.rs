@@ -19,7 +19,7 @@
 //! |---|---|---|
 //! | `/health` 的 `batch_failures` | 连败次数与最近一句 `warnings.last()` | 进程内 |
 //! | `logs/queue-stalls-*.jsonl` | 队列**姿态**（谁在等、被哪道门挡着） | 落盘 |
-//! | 本模块 | 批次**为什么**失败：原话、出处、死在哪一步、全部告警 | 落盘 |
+//! | 本模块 | 批次**为什么**失败：原话、出处、死在哪一步、分步账、全部告警 | 落盘 |
 //!
 //! 三者互不替代：停滞记录说得出 30999 被 meta 焊住，但说不出 8191 为什么失败。
 
@@ -29,6 +29,8 @@ use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Local};
 use serde_json::{Value, json};
+
+use super::task_registry::TaskStep;
 
 /// 落盘目录。与停滞看门狗同一个，相对进程工作目录——现场拷走 `logs/` 就是全部证据。
 const DIRECTORY: &str = "logs";
@@ -66,6 +68,25 @@ pub struct BatchFailure<'a> {
     /// 同右端连败第几次；数据窗口收口了（失败只在模型侧）时为 `None`。
     pub streak: Option<u32>,
     pub elapsed_ms: u128,
+    /// 落记录这一刻，该 dbnum 名下还挂着的暂存窗口（`staging::lifecycle::
+    /// resource_snapshots_for` 的原样输出，与 `/health` 的 `staging_windows` 同形）。
+    ///
+    /// 语义是「失败之后窗口回滚了还是残留着」：空数组 = 记录时已无窗口（回滚干净，
+    /// 或这一批走直写根本没建窗口）；非空 = 残留，重跑多半撞同一堵墙。面板那张
+    /// 「暂存窗口」卡活在进程内、重启即清空，而人来问的时候往往已经重启过了——
+    /// 这一格是它落盘的那一半（ISSUE-025 §四 4a）。
+    pub staging: &'a [Value],
+    /// 分步账（ISSUE-025 §一）：任务经过的每个阶段各一行 `{name, at, ms, ok}`，
+    /// `TaskRegistry::finish` 已结算完最后一步。`died_at` 只答得出「死在哪」，
+    /// 这本账答的是「怎么走到那儿的、哪一步慢」——「死在收集」与「收集正常、
+    /// 跑了 40 分钟之后写回才死」在这一格上终于长得不一样。
+    ///
+    /// 空数组 = 这次执行从没报过阶段（死在建行与第一个阶段之间）；字段缺席 =
+    /// 老版本记录，答不了这一问。与 `staging` 那格同一条口径。
+    pub steps: &'a [TaskStep],
+    /// 被环形上限（32 步）挤掉的更早步数；0 = 账是全的。挤掉了多少必须随记录
+    /// 说出来，读的人才知道自己看的是尾巴还是全程。
+    pub steps_dropped: u64,
 }
 
 /// 「这个库从此不再自动重跑」——park 生效的那一刻。
@@ -168,9 +189,7 @@ fn to_record(failure: &BatchFailure<'_>, now: DateTime<Local>) -> Value {
     // 这一条是不是压垮它的那一次。翻文件的人第一个要分的就是「还会自己再试」与
     // 「从此不动了」——只给一个 streak 数字，等于要他自己去记 MAX_ATTEMPTS 是几。
     let max_attempts = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
-    let parked = failure
-        .streak
-        .is_some_and(|streak| streak >= max_attempts);
+    let parked = failure.streak.is_some_and(|streak| streak >= max_attempts);
     json!({
         "event": "batch_failure",
         "at": now.to_rfc3339(),
@@ -196,6 +215,9 @@ fn to_record(failure: &BatchFailure<'_>, now: DateTime<Local>) -> Value {
             .streak
             .map(|streak| max_attempts.saturating_sub(streak)),
         "elapsed_ms": failure.elapsed_ms,
+        "staging": failure.staging,
+        "steps": failure.steps,
+        "steps_dropped": failure.steps_dropped,
     })
 }
 
@@ -235,14 +257,31 @@ const SOURCES: [&str; 2] = [
 /// 与 park」是一个天然的组合（`/api/v1/batch-failures` 要的正是这两种）——只给单值
 /// 的话调用方得读两遍再自己按时刻并一次，那份归并逻辑就有了第二个副本。
 /// `dbnum` 为 `None` 时不筛。
-pub fn recent(kinds: &[&str], dbnum: Option<u32>, limit: usize) -> Value {
-    read_recent(Path::new(DIRECTORY), kinds, dbnum, limit)
+///
+/// `project`：这本账落在**进程工作目录**下，跨配置改动活着——同一个目录先后跑过
+/// 两个 `project_name` 时，`dbnum=8191` 会把上一份配置留下的记录一并端出来（库号
+/// 空间只在项目内唯一，ISSUE-025 §五 5a）。`Some(名字)` 只留该项目；`None` 不筛。
+/// **没有 `project` 字段的行不筛掉**：`queue_stall` 记录与老版本记录本来就不带这一
+/// 格，按项目筛把它们静默滤没，「这台机器没停滞过」就成了筛出来的假话。
+pub fn recent(kinds: &[&str], project: Option<&str>, dbnum: Option<u32>, limit: usize) -> Value {
+    read_recent(Path::new(DIRECTORY), kinds, project, dbnum, limit)
 }
 
-fn read_recent(directory: &Path, kinds: &[&str], dbnum: Option<u32>, limit: usize) -> Value {
+fn read_recent(
+    directory: &Path,
+    kinds: &[&str],
+    project: Option<&str>,
+    dbnum: Option<u32>,
+    limit: usize,
+) -> Value {
     let sources = SOURCES
         .iter()
-        .map(|prefix| directory.join(format!("{prefix}*{FILE_SUFFIX}")).display().to_string())
+        .map(|prefix| {
+            directory
+                .join(format!("{prefix}*{FILE_SUFFIX}"))
+                .display()
+                .to_string()
+        })
         .collect::<Vec<_>>();
     let mut files = match daily_files(directory) {
         Ok(files) => files,
@@ -265,7 +304,7 @@ fn read_recent(directory: &Path, kinds: &[&str], dbnum: Option<u32>, limit: usiz
     let mut records: Vec<Value> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
     for path in files {
-        match read_one(&path, kinds, dbnum) {
+        match read_one(&path, kinds, project, dbnum) {
             Ok(mut day) => records.append(&mut day),
             Err(error) => errors.push(format!("{}: {error}", path.display())),
         }
@@ -277,7 +316,9 @@ fn read_recent(directory: &Path, kinds: &[&str], dbnum: Option<u32>, limit: usiz
         records.truncate(limit);
     }
 
-    let mut payload = json!({ "records": records, "sources": sources });
+    // 用了哪个筛子必须随回执一起回去（`null` = 没筛）：「这个库没失败过」与
+    // 「被项目筛掉了」在一张空列表上长得一模一样，本文件通篇在防的就是这件事。
+    let mut payload = json!({ "records": records, "sources": sources, "project_filter": project });
     if !errors.is_empty()
         && let Some(object) = payload.as_object_mut()
     {
@@ -310,7 +351,12 @@ fn daily_files(directory: &Path) -> std::io::Result<Vec<PathBuf>> {
 ///
 /// 认不出的行**跳过而不是整份放弃**：进程被强杀会留下半行，为了一行残句丢掉
 /// 那一天全部证据是本末倒置。
-fn read_one(path: &Path, kinds: &[&str], dbnum: Option<u32>) -> std::io::Result<Vec<Value>> {
+fn read_one(
+    path: &Path,
+    kinds: &[&str],
+    project: Option<&str>,
+    dbnum: Option<u32>,
+) -> std::io::Result<Vec<Value>> {
     let file = fs::File::open(path)?;
     let mut records = Vec::new();
     for line in BufReader::new(file).lines() {
@@ -323,10 +369,18 @@ fn read_one(path: &Path, kinds: &[&str], dbnum: Option<u32>) -> std::io::Result<
                 .get("event")
                 .and_then(Value::as_str)
                 .is_some_and(|event| kinds.contains(&event));
+        // 只筛「带 project 且对不上」的行：没有这一格的（queue_stall、老版本记录）
+        // 归不了属，留下让人看见，比替它猜一个项目再滤掉诚实。
+        let project_matches = project.is_none_or(|wanted| {
+            value
+                .get("project")
+                .and_then(Value::as_str)
+                .is_none_or(|recorded| recorded == wanted)
+        });
         let dbnum_matches = dbnum.is_none_or(|wanted| {
             value.get("dbnum").and_then(Value::as_u64) == Some(u64::from(wanted))
         });
-        if kind_matches && dbnum_matches {
+        if kind_matches && project_matches && dbnum_matches {
             records.push(value);
         }
     }
@@ -365,6 +419,9 @@ mod tests {
             warnings: &[],
             streak: Some(1),
             elapsed_ms: 3449,
+            staging: &[],
+            steps: &[],
+            steps_dropped: 0,
         }
     }
 
@@ -416,7 +473,10 @@ mod tests {
         model_side.streak = None;
         let record = to_record(&model_side, Local::now());
         assert_eq!(record["parked"], false);
-        assert!(record["auto_retry_left"].is_null(), "没有账就不该编一个数出来");
+        assert!(
+            record["auto_retry_left"].is_null(),
+            "没有账就不该编一个数出来"
+        );
     }
 
     /// park 记录是独立的一条 `event`，而且自带解除路径。
@@ -483,17 +543,154 @@ mod tests {
         let last = base_at + chrono::Duration::seconds(9);
         append_json_line(&path, &to_record(&failure("o", 30999, "别的库"), last)).expect("append");
 
-        let all = read_recent(&dir, &[], None, 0);
+        let all = read_recent(&dir, &[], None, None, 0);
         assert_eq!(all["records"].as_array().map(Vec::len), Some(4));
         assert_eq!(all["records"][0]["dbnum"], 30999, "最新的在最前");
         assert!(all.get("error").is_none(), "读成功不该有 error: {all}");
 
-        let one = read_recent(&dir, &[], Some(8191), 2);
+        let one = read_recent(&dir, &[], None, Some(8191), 2);
         assert_eq!(one["records"].as_array().map(Vec::len), Some(2));
         assert_eq!(one["records"][0]["reason"], "第三次");
         assert_eq!(one["records"][1]["reason"], "第二次");
 
         fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 项目筛只滤「带 project 且对不上」的行；没这一格的行（queue_stall、老版本
+    /// 记录）必须留下，回执要说出用了哪个筛子。
+    ///
+    /// 这本账落在进程工作目录下、跨配置改动活着：同一个目录先后跑过两个项目时，
+    /// `dbnum=8191` 会把上一份配置的记录一并端出来——库号空间只在项目内唯一
+    /// （ISSUE-025 §五 5a）。而 stall 记录本来就不带 project，按项目筛把它静默滤没，
+    /// 「这台机器没停滞过」就成了筛出来的假话。
+    #[test]
+    fn the_project_filter_keeps_own_and_unattributed_rows() {
+        let dir = fixture("project-filter");
+        let base_at = Local::now();
+        let path = daily_path(&dir, base_at);
+        append_json_line(
+            &path,
+            &to_record(&failure("own", 8191, "本项目的"), base_at),
+        )
+        .expect("append own");
+        let mut foreign = failure("foreign", 8191, "上一份配置留下的");
+        foreign.project = "ACP";
+        append_json_line(
+            &path,
+            &to_record(&foreign, base_at + chrono::Duration::seconds(1)),
+        )
+        .expect("append foreign");
+        append_json_line(
+            &path,
+            &json!({
+                "event": "queue_stall",
+                "at": (base_at + chrono::Duration::seconds(2)).to_rfc3339(),
+                "dbnum": 30999,
+                "reasons": ["blocked_by_phase:meta"],
+            }),
+        )
+        .expect("append stall");
+
+        let own = read_recent(&dir, &[], Some("JEU"), None, 0);
+        assert_eq!(
+            own["project_filter"], "JEU",
+            "用了哪个筛子要随回执回去: {own}"
+        );
+        let records = own["records"].as_array().expect("records");
+        assert_eq!(records.len(), 2, "本项目 + 无归属，别的项目滤掉: {own}");
+        assert_eq!(
+            records[0]["event"], "queue_stall",
+            "不带 project 的行不许静默消失"
+        );
+        assert_eq!(records[1]["reason"], "本项目的");
+
+        let all = read_recent(&dir, &[], None, None, 0);
+        assert_eq!(all["records"].as_array().map(Vec::len), Some(3));
+        assert!(all["project_filter"].is_null(), "没筛就说没筛: {all}");
+
+        fs::remove_dir_all(&dir).expect("cleanup");
+    }
+
+    /// 失败记录带走整本分步账（ISSUE-025 §一）。
+    ///
+    /// 阶段行原本全是 `println!`，控制台一滚就没：「死在收集」与「收集正常、跑了
+    /// 40 分钟之后写回才死」在记录里长得一模一样。这一格要能分开它们——每步带名字、
+    /// 进入时刻、毫秒数、走完没有；挤掉过几步也得照实说，读的人才知道自己看的是
+    /// 尾巴还是全程。空数组与字段缺席是两句话，同 `staging` 那格的口径。
+    #[test]
+    fn a_record_carries_the_step_ledger_with_durations() {
+        let steps = [
+            TaskStep {
+                name: "identity_check".into(),
+                at: "2026-08-27T11:48:44+08:00".into(),
+                ms: 120,
+                ok: true,
+            },
+            TaskStep {
+                name: "collect_window".into(),
+                at: "2026-08-27T11:48:44+08:00".into(),
+                ms: 41_233,
+                ok: true,
+            },
+            TaskStep {
+                name: "stage_apply".into(),
+                at: "2026-08-27T11:49:25+08:00".into(),
+                ms: 8,
+                ok: false,
+            },
+        ];
+        let mut with = failure("t", 8191, "boom");
+        with.steps = &steps;
+        with.steps_dropped = 2;
+        let record = to_record(&with, Local::now());
+        assert_eq!(record["steps"].as_array().map(Vec::len), Some(3));
+        assert_eq!(record["steps"][1]["name"], "collect_window");
+        assert_eq!(record["steps"][1]["ms"], 41_233);
+        assert_eq!(record["steps"][1]["ok"], true);
+        assert_eq!(
+            record["steps"][2]["ok"], false,
+            "死在手里的那步要自己说出来"
+        );
+        assert_eq!(record["steps_dropped"], 2, "挤掉了多少不许瞒");
+
+        let bare = to_record(&failure("t", 8191, "boom"), Local::now());
+        assert!(
+            bare["steps"].as_array().is_some_and(Vec::is_empty),
+            "没报过阶段要写成空数组，不是把这一格藏起来: {bare}"
+        );
+        assert_eq!(bare["steps_dropped"], 0);
+    }
+
+    /// 失败记录带走落盘那一刻的暂存窗口残留（ISSUE-025 §四 4a 的记录一半）。
+    ///
+    /// 面板那张「暂存窗口」卡活在进程内、重启即清空，而 8191 现场恰恰是重启之后来
+    /// 问「`staging_8191_1` 回滚了没有」。空数组与字段缺席是两句话：`[]` = 记录时
+    /// 已无窗口挂着（回滚干净或走直写），缺席 = 老版本记录压根答不了这一问。
+    #[test]
+    fn a_record_carries_the_staging_leftovers_at_write_time() {
+        let leftovers = [json!({
+            "dbnum": 8191,
+            "window_id": 1,
+            "label": "staging_8191_1",
+            "start_sesno": 36,
+            "end_sesno": 37,
+            "state": "writeback_stalled",
+            "writeback_error": "写回卡住的原话",
+            "band": "warn",
+        })];
+        let mut with = failure("t", 8191, "boom");
+        with.staging = &leftovers;
+        let record = to_record(&with, Local::now());
+        assert_eq!(record["staging"][0]["label"], "staging_8191_1");
+        assert_eq!(record["staging"][0]["state"], "writeback_stalled");
+        assert_eq!(record["staging"][0]["start_sesno"], 36);
+        assert_eq!(record["staging"][0]["end_sesno"], 37);
+
+        let clean = to_record(&failure("t", 8191, "boom"), Local::now());
+        assert!(
+            clean["staging"].as_array().is_some_and(Vec::is_empty),
+            "记录时没有残留要写成空数组，不是把这一格藏起来: {clean}"
+        );
     }
 
     /// 两个文件族并成**一条**按时刻排的线，并且按 `event` 筛得动。
@@ -528,7 +725,7 @@ mod tests {
         )
         .expect("append stall");
 
-        let all = read_recent(&dir, &[], None, 0);
+        let all = read_recent(&dir, &[], None, None, 0);
         assert_eq!(all["records"].as_array().map(Vec::len), Some(2));
         assert_eq!(all["records"][0]["event"], "queue_stall", "晚的排前面");
         assert_eq!(all["records"][1]["event"], "batch_failure");
@@ -539,14 +736,14 @@ mod tests {
         );
 
         assert_eq!(
-            read_recent(&dir, &["batch_failure"], None, 0)["records"]
+            read_recent(&dir, &["batch_failure"], None, None, 0)["records"]
                 .as_array()
                 .map(Vec::len),
             Some(1),
             "按 event 筛"
         );
         assert_eq!(
-            read_recent(&dir, &[], Some(30999), 0)["records"][0]["event"],
+            read_recent(&dir, &[], None, Some(30999), 0)["records"][0]["event"],
             "queue_stall",
             "按 dbnum 筛要能跨文件族"
         );
@@ -566,7 +763,7 @@ mod tests {
         writeln!(file, "{{\"event\":\"batch_fail").expect("torn line");
         drop(file);
 
-        let read = read_recent(&dir, &[], None, 0);
+        let read = read_recent(&dir, &[], None, None, 0);
         assert_eq!(read["records"].as_array().map(Vec::len), Some(1));
         assert_eq!(read["records"][0]["reason"], "完整的");
 
@@ -577,7 +774,7 @@ mod tests {
     /// 但都必须带 `error`——把读失败画成「没有失败记录」是这一页最会骗人的形态。
     #[test]
     fn an_unreadable_directory_is_reported_not_rendered_as_no_failures() {
-        let read = read_recent(&fixture("absent"), &[], None, 0);
+        let read = read_recent(&fixture("absent"), &[], None, None, 0);
         assert_eq!(read["records"].as_array().map(Vec::len), Some(0));
         assert!(read["error"].is_string(), "{read}");
         let sources = read["sources"].as_array().expect("读不到也要说清去哪儿找");

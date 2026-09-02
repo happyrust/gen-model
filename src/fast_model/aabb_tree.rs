@@ -4,7 +4,7 @@ use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBo
 use aios_core::room::room::GLOBAL_AABB_TREE;
 use aios_core::{RefnoEnum, SUL_DB};
 
-use crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos;
+use crate::fast_model::aabb_refresh::update_inst_relate_aabbs_by_refnos;
 
 /// 写回成功后应用窗口计算期间延迟的空间树变化（提交后收敛专用）。
 ///
@@ -62,7 +62,9 @@ impl PointerRow {
 /// 进树口径与刷新层一致（`world_trans.d != none and aabb.d != none`）；库里已经
 /// 没有可用指针的 refno 不进树——对应「从未刷新过 / 几何不可用」的行，它们本来
 /// 也不在树上。查询失败上抛：提交后收敛失败必须阻断出队（I7），不能静默放行。
-async fn sync_tree_from_committed_pointers(refnos: &[RefnoEnum]) -> anyhow::Result<usize> {
+pub(crate) async fn sync_tree_from_committed_pointers(
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<usize> {
     const CHUNK: usize = 500;
     let mut synced = 0usize;
     for chunk in refnos.chunks(CHUNK) {
@@ -652,6 +654,39 @@ pub async fn load_project_tree_verified() -> anyhow::Result<()> {
 
 async fn load_project_tree_verified_locked() -> anyhow::Result<()> {
     use crate::fast_model::spatial_state::{self, SpatialTreeState};
+
+    // 同进程重复装载短路（启动链 run_app 与 run_cli 各调一次装载，快照 3.5-21MB 的
+    // 读盘+解码白付一遍）。判据是 [`startup_action`] 的 Reuse 那组原样：本进程已
+    // 收敛到 Ready/ReadyEmpty、库侧指纹与进程内缓存的快照头一致、且无待重放意图
+    // ——不是「内存树非空即信」的盲信短路，指纹与意图两问一个不少；另要求状态与
+    // 树条目自洽（崩溃模拟测试会清树不清状态，两者矛盾时走完整装载）。任何一问
+    // 读不到（指纹/意图查询失败、头缺失）都不短路；强制重建与夹具预载优先级更高。
+    let short_circuit_state = spatial_state::current_state();
+    if !force_spatial_rebuild_enabled()
+        && !spatial_state::fixture_preload_requested()
+        && short_circuit_state.is_ready()
+    {
+        let entries = GLOBAL_AABB_TREE.read().await.size();
+        let state_matches_tree = (entries > 0) == (short_circuit_state == SpatialTreeState::Ready);
+        if state_matches_tree {
+            if let Some(header) = snapshot_header() {
+                if let Ok((db_epoch, db_epoch_updated_at)) = read_db_spatial_epoch_stamp().await {
+                    let has_pending = crate::data_interface::side_effect_pending::SideEffectCompensator::has_pending_spatial_work()
+                        .await
+                        .unwrap_or(true);
+                    if !has_pending
+                        && header.epoch == db_epoch
+                        && header.db_epoch_updated_at == db_epoch_updated_at
+                    {
+                        println!(
+                            "空间树本进程已装载且库侧指纹一致（{entries} 条，epoch {db_epoch}），跳过重复装载"
+                        );
+                        return Ok(());
+                    }
+                }
+            }
+        }
+    }
 
     spatial_state::set_state(SpatialTreeState::Loading);
     if spatial_state::fixture_preload_requested() && !GLOBAL_AABB_TREE.read().await.is_empty() {

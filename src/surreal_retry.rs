@@ -177,43 +177,23 @@ pub async fn execute_surreal_checked(sql: &str, context: &str) -> anyhow::Result
     result
 }
 
-/// 模型生成的数据面写入口。活动窗口在场时写暂存并进入 journal；普通生成路径
-/// 继续使用持久层冲突重试。控制面不得调用此函数。
+/// 模型生成的数据面写入口：持久层直写 + 冲突重试。控制面不得调用此函数。
 ///
-/// 错误一律 `.context()` 包装而不是 format 拍平：journal 准入拒绝
-/// （`ReplayUnsafeRejection`）要沿错误链传到生成重试循环判死。
+/// kv-mem 暂存窗口退役（ADR-056 P1）后这里不再按 `active_staging_writes()` 分流：
+/// 稳态增量只有直写一条路，模型发布事务本来就一直直写 `SUL_DB`（09-02 审核 S1）。
+/// 下面三个入口此刻语义相同，名字保留是为了不让 ~30 处调用点随 P1 一起动；
+/// P3 拆暂存目录时合并回 [`execute_surreal_checked`]。
 pub async fn execute_model_write(sql: &str, context: &str) -> anyhow::Result<()> {
-    use anyhow::Context;
-    if let Some(staging) = crate::data_interface::staging::active_staging_writes() {
-        return staging
-            .execute(sql, crate::data_interface::staging::ExecMode::Both)
-            .await
-            .with_context(|| context.to_string());
-    }
     execute_surreal_checked(sql, context).await
 }
 
-/// 生成工作集预载入口。窗口内只写暂存且不进 journal；普通生成沿用历史持久层写入。
+/// 生成工作集预载入口；与 [`execute_model_write`] 同路（见其说明）。
 pub async fn execute_generation_preload(sql: &str, context: &str) -> anyhow::Result<()> {
-    use anyhow::Context;
-    if let Some(staging) = crate::data_interface::staging::active_staging_writes() {
-        return staging
-            .execute(sql, crate::data_interface::staging::ExecMode::StagingOnly)
-            .await
-            .with_context(|| context.to_string());
-    }
     execute_surreal_checked(sql, context).await
 }
 
-/// 已审计的模型级联删除事务；普通路径仍走原有持久层重试。
+/// 已审计的模型级联删除事务；与 [`execute_model_write`] 同路（见其说明）。
 pub async fn execute_model_scoped_delete(sql: &str, context: &str) -> anyhow::Result<()> {
-    use anyhow::Context;
-    if let Some(staging) = crate::data_interface::staging::active_staging_writes() {
-        return staging
-            .execute_scoped_delete(sql)
-            .await
-            .with_context(|| context.to_string());
-    }
     execute_surreal_checked(sql, context).await
 }
 
@@ -407,38 +387,33 @@ fn conflict_retry_backoff_grows_exponentially_and_caps() {
     assert!(conflict_retry_backoff(4).as_millis() >= conflict_retry_backoff(1).as_millis() * 2);
 }
 
-#[tokio::test(flavor = "multi_thread")]
-async fn generation_preload_is_staging_only_inside_a_window() {
-    use crate::data_interface::staging::ResourceThresholds;
-    use crate::data_interface::staging::lifecycle::create_window_on;
-    use surrealdb::engine::any::connect;
-
-    let instance = connect("mem://").await.expect("mem boots");
-    let window = create_window_on(&instance, 7993, 1, 1, ResourceThresholds::default())
-        .await
-        .expect("create window");
-
-    window
-        .scope(execute_generation_preload(
-            "UPSERT pe:preloaded SET noun = 'SITE'",
-            "test preload",
-        ))
-        .await
-        .expect("preload into staging");
-
-    assert!(
-        window.journal().await.is_empty(),
-        "preload must not be replayed"
-    );
-    let mut response = window
-        .staging_db()
-        .query("RETURN pe:preloaded.noun")
-        .await
-        .expect("read staged preload");
-    assert_eq!(
-        response.take::<Option<String>>(0).expect("take noun"),
-        Some("SITE".into())
-    );
-
-    window.drop_database().await.expect("cleanup");
+/// ADR-056 P1（spec 035 T122）：模型面的三个写入口不再按暂存上下文分流——前身
+/// `generation_preload_is_staging_only_inside_a_window` 钉的是相反的性质。任何一处把
+/// `active_staging_writes` / `ExecMode` 路由重新接回来，这里就红。
+#[test]
+fn model_write_entry_points_never_route_through_staging() {
+    let source = include_str!("surreal_retry.rs");
+    let production = source
+        .split_once("fn model_write_entry_points_never_route_through_staging()")
+        .expect("this test must exist")
+        .0;
+    for entry in [
+        "pub async fn execute_model_write(",
+        "pub async fn execute_generation_preload(",
+        "pub async fn execute_model_scoped_delete(",
+    ] {
+        let body = production
+            .split_once(entry)
+            .unwrap_or_else(|| panic!("{entry} must exist"))
+            .1
+            .split_once("\n}")
+            .expect("entry body must close")
+            .0;
+        assert!(
+            body.contains("execute_surreal_checked(sql, context).await")
+                && !body.contains("active_staging_writes")
+                && !body.contains("ExecMode"),
+            "{entry} 必须直写持久层：{body}"
+        );
+    }
 }

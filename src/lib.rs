@@ -13,7 +13,6 @@ use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 use crate::fast_model::room_model::{
     StartupRoomBuild, build_room_relations, reconcile_startup_room_build,
 };
-use crate::fast_model::{EXIST_MESH_GEO_HASHES, gen_inst_meshes, process_meshes_update_db_deep};
 use crate::versioned_db::database::*;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::options::DbOption;
@@ -132,21 +131,61 @@ fn open_process_instance_lock(path: &std::path::Path) -> std::io::Result<File> {
     open_advisory_process_instance_lock(path)
 }
 
-fn process_instance_lock_path(db_option: &DbOption, project: &str) -> Option<PathBuf> {
-    crate::data_interface::project_paths::resolve_project_root(db_option, project)
-        .map(|root| root.join(".gen-model.instance.lock"))
+const INSTANCE_LOCK_FILE_NAME: &str = ".gen-model.instance.lock";
+
+/// 锁落在**运行目录**（进程 CWD），不落在项目文件夹。
+///
+/// 项目树是甲方的数据，我们的运行期文件不该往里写；运行目录本来就归这一次运行
+/// 所有——`DbOption.toml`、`accel_tree` 快照、日志都在那儿，锁跟它们同处一地。
+///
+/// 换锚点也换了这把锁挡的是什么：过去是「一个项目文件树只许一个进程」，现在是
+/// 「一个运行目录只许一个进程」。两个运行目录指着同一个工程不再被它拦下，这正是
+/// 并排跑两个实例所需要的。它并没有交出一条原本成立的保证：按项目根隔离的旧锁
+/// 同样挡不住两个部署包（各自的 `project_path`）写同一台 SurrealDB，那种互踩一直
+/// 由 `full_init` 的同工程活服务探测兜着（`python/src/exec_api.rs`
+/// `conflicting_services`），锚点换了它照旧管用。
+fn process_instance_lock_path() -> Option<PathBuf> {
+    std::env::current_dir()
+        .ok()
+        .map(|run_dir| run_dir.join(INSTANCE_LOCK_FILE_NAME))
+}
+
+static NO_INSTANCE_LOCK_NOTICE: std::sync::Once = std::sync::Once::new();
+
+/// 这一趟要不要拿锁；不拿时返回那句给人看的理由。
+///
+/// 内存模式（`options::in_memory_db`）不拿。锁挡的是「两个进程驱动同一份持久
+/// 状态」，而内存模式下持久层就在进程里：两个实例各连各的 kv-mem，谁也读不到谁
+/// 写的字节，锁没有保护对象。放开它正是为了让两个实例并排跑起来。
+///
+/// 放开不是白送的。盘上还有东西是共享的：`meshes_path` 指的网格目录首当其冲——
+/// 增量路径内部会强制落网格，`gen_mesh=false` 拦不住它。运行目录相对的那些
+/// （`accel_tree` 快照、日志、`cata_dep_cache.bin`）天然分开，绝对路径的不会。
+/// 所以并排跑之前得先让两份配置的 `meshes_path` 分家。
+fn instance_lock_skip_reason(in_memory_db: bool) -> Option<&'static str> {
+    in_memory_db.then_some(
+        "in_memory_db=true，持久层在进程内，两个实例不共享库（meshes_path 仍是共享的，先让它分家）",
+    )
 }
 
 /// pub：Python 调试绑定（python/aios-py）的 `full_init` 与 `run_app`/`run_cli`
 /// 共用同一把单实例锁——mutating 管线不允许有第二个进程并发驱动。
+///
+/// 两处例外写在 [`instance_lock_skip_reason`] 与 [`process_instance_lock_path`]：
+/// 内存模式整个不拿，拿的时候按运行目录而不是项目根隔离。
 pub fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()> {
+    if let Some(reason) = instance_lock_skip_reason(crate::options::in_memory_db()) {
+        // run_app 与 run_cli 会各调一次，这句只该出现一遍。
+        NO_INSTANCE_LOCK_NOTICE.call_once(|| println!("*** 不拿单实例锁：{reason}"));
+        return Ok(());
+    }
     let project = db_option.project_name.clone();
     let held = PROCESS_INSTANCE_LOCK.get_or_init(|| {
-        let path = process_instance_lock_path(db_option, &project)
-            .ok_or_else(|| format!("未解析到项目 {project} 的单实例锁目录"))?;
+        let path = process_instance_lock_path()
+            .ok_or_else(|| "未解析到运行目录（CWD），单实例锁无处可放".to_string())?;
         let mut file = open_process_instance_lock(&path).map_err(|error| {
             format!(
-                "项目 {project} 已有 gen-model 实例，或单实例锁不可访问（{}）: {error}",
+                "这个运行目录已有 gen-model 实例，或单实例锁不可访问（{}）: {error}",
                 path.display()
             )
         })?;
@@ -182,23 +221,38 @@ pub fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()>
 #[cfg(test)]
 mod process_instance_lock_tests {
     use super::{
-        open_advisory_process_instance_lock, open_process_instance_lock, process_instance_lock_path,
+        INSTANCE_LOCK_FILE_NAME, instance_lock_skip_reason, open_advisory_process_instance_lock,
+        open_process_instance_lock, process_instance_lock_path,
     };
 
+    /// 锁落在运行目录，不落在项目树里。把锚点改回项目根这条就红。
     #[test]
-    fn lock_path_uses_the_project_dirs_folder_mapping() {
-        let mut option = aios_core::get_db_option().clone();
-        option.project_path = r"D:\project-root".to_string();
-        option.included_projects = vec!["LogicalProject".to_string()];
-        option.project_dirs = Some(vec!["PhysicalFolder".to_string()]);
+    fn the_lock_file_sits_in_the_run_directory_not_the_project_tree() {
+        let run_dir = std::env::current_dir().expect("运行目录总该拿得到");
+        let path = process_instance_lock_path().expect("运行目录能解析出锁路径");
 
         assert_eq!(
-            process_instance_lock_path(&option, "LogicalProject"),
-            Some(
-                std::path::Path::new(r"D:\project-root")
-                    .join("PhysicalFolder")
-                    .join(".gen-model.instance.lock")
-            )
+            path.parent(),
+            Some(run_dir.as_path()),
+            "锁必须就在运行目录下，不能跟着 project_path 走"
+        );
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(INSTANCE_LOCK_FILE_NAME)
+        );
+    }
+
+    /// 内存模式一把锁都不拿——两个实例并排跑靠的就是这一句。外部持久层照旧要拿。
+    #[test]
+    fn memory_mode_needs_no_single_instance_lock() {
+        assert!(
+            instance_lock_skip_reason(false).is_none(),
+            "持久层在进程外时锁仍有保护对象，不许跳过"
+        );
+        let reason = instance_lock_skip_reason(true).expect("不拿锁必须说出为什么");
+        assert!(
+            reason.contains("in_memory_db"),
+            "理由要点名是哪个开关放开的，否则日志里只是一句没有出处的「不拿锁」：{reason}"
         );
     }
 
@@ -391,8 +445,10 @@ pub(crate) fn fmt_elapsed(elapsed: std::time::Duration) -> String {
 pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     let startup_started = mark_process_start();
     // Must precede logging, schema repair, watcher startup and every model/
-    // room write. A second process exits here instead of becoming another
-    // consumer of the same durable pending table.
+    // room write. A second process started from the same run directory exits
+    // here instead of becoming another consumer of the same durable pending
+    // table. In-memory mode takes no lock at all — see
+    // `instance_lock_skip_reason`, there is no shared durable state to guard.
     acquire_process_instance_lock(&db_option)?;
     // 退役的收集口径开关（ADR-031）：留着它的部署以为自己关着净收集，实际相反。
     // 配置层吃掉未知键是静默的，这里把它变成有声的。
@@ -531,16 +587,24 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         fmt_elapsed(preload_started.elapsed())
     );
 
-    let sync_live = db_option.sync_live.unwrap_or(false);
+    let configured_sync_live = db_option.sync_live.unwrap_or(false);
+    let direct_read_mode = crate::options::direct_read_mode();
+    let sync_live = configured_sync_live && !direct_read_mode;
+    if direct_read_mode {
+        println!(
+            "数据读取模式：direct（e3d-io）；保留 MDB 初始化与 Web API，跳过旧增量 watcher/worker"
+        );
+    }
     let db_option = Arc::new(db_option.clone());
     // initialize_global_db_sender().await;
 
     // start_sync_task(db_option.clone(), progress_sender.clone()).await?;
     //如果是解析任务，运行完就应该跳出
-    if db_option.total_sync
-        || db_option.incr_sync
-        || db_option.only_sync_sys
-        || db_option.is_sync_history()
+    if !direct_read_mode
+        && (db_option.total_sync
+            || db_option.incr_sync
+            || db_option.only_sync_sys
+            || db_option.is_sync_history())
     {
         let step_started = Instant::now();
         // println!("开始同步解析数据。");
@@ -562,6 +626,25 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             );
         }
         // progress_sender.send(100)?;
+        // 遗留路径断点当面说清（审计 2026-08-29 F6）：`sync_pdms` 只解析数据，
+        // 全程不写 dbnum_state 水位、不产模型工作单、不建 gen_root 凭证。这个
+        // 脱钩在两种组合下各有一个坑，以前一个字都不说，出了事只能翻代码。
+        if db_option.total_sync {
+            if sync_live {
+                eprintln!(
+                    "*** total_sync + sync_live=true：全量解析不建立增量水位，watcher 首扫会把\
+                     这些库判成「有数据、水位 0」并按首次导入 wipe+重解析——整库将被解析两遍。\
+                     只想全量导数据请改 sync_live=false；想直接服务化请去掉 total_sync，\
+                     由首载批次一次完成解析+建模+水位"
+                );
+            } else {
+                eprintln!(
+                    "*** total_sync 完成：数据已入库，但增量水位未建立、模型未生成（本分支与\
+                     水位/模型完全脱钩）。模型生成的出口：下次以 sync_live=true 启动（启动播种\
+                     回填水位后按首载批次收口），或对目标库人工触发 POST /model/rebuild"
+                );
+            }
+        }
     }
 
     println!("正在初始化 db manager（解析监控目录配置）...");
@@ -602,8 +685,8 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // request to rebuild every root at each process start. Startup discovery
     // has already compared file_latest_sesno with applied_sesno and queued only
     // first-load/reinit/increment windows; let those batches create the exact
-    // model work for this process. Explicit full-build tools keep calling
-    // `gen_all_geos_data` directly outside this service-startup path.
+    // model work for this process. Explicit full-build tools enter through
+    // `E3dModelService::generate_dbnum`.
     initialization.configure_model_bootstrap(false);
     println!(
         "启动模型策略：gen_model={} gen_mesh={} 仅控制增量模型阶段；按文件会话号与 applied_sesno 比对结果执行，不启动整库全量生成",
@@ -651,7 +734,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
 
     // Worker is started as soon as the immutable manifest is installed.  The
     // coordinator keeps it data-only until Meta -> Catalogue -> Design settles.
-    crate::data_interface::batch_worker::ensure_batch_worker(mgr.clone());
+    if !direct_read_mode {
+        crate::data_interface::batch_worker::ensure_batch_worker(mgr.clone());
+    }
 
     // Expose initialization progress before waiting for data/model readiness.
     #[cfg(feature = "http_api")]
@@ -703,7 +788,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // model_update_pending=0 会把“从未生成过的根”误判成完成；这里只补缺失工作，
     // 不改水位、不删旧模型，也不越过 watch_dbnums。任何一库失败都告警后继续，
     // 不把一个库的配置错变成整个服务的崩溃循环。
-    if startup_data_ready {
+    if startup_data_ready && !direct_read_mode {
         crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup().await;
     }
 
@@ -728,113 +813,148 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 状态读取。
     crate::fast_model::spatial_state::spawn_spatial_revalidator();
     // progress_sender.send(10)?;
-    if startup_data_ready {
+    if direct_read_mode {
+        initialization.open_model_phase();
+        initialization.mark_model_ready();
+        println!("direct 模式初始化门已打开：按需模型请求可直接进入 e3d-io 读取与缓存判定");
+    } else if startup_data_ready {
         if initialization.open_model_phase() {
             scheduler.wake();
-            // 收敛发生在 worker 空闲轮里（模型积压分页消化、空间收敛、AABB 落盘，
-            // 任一环失败都按 30s 退避重试），主线可能要等很久。干等会让启动看起来
-            // 像挂死——数量/阶段变化时报实际进展，完全不变时最多每 300s 提醒一次。
-            let mut waited_secs = 0u64;
-            let mut last_wait_fingerprint: Option<String> = None;
-            let mut last_wait_emitted_secs = 0u64;
-            loop {
-                if tokio::time::timeout(
-                    std::time::Duration::from_secs(60),
-                    initialization.wait_for_model_ready(),
-                )
-                .await
-                .is_ok()
-                {
-                    break;
-                }
-                waited_secs += 60;
-                let pending =
-                    crate::data_interface::model_update_pending::model_pending_status().await;
-                let telemetry =
-                    crate::data_interface::model_update_pending::model_drain_telemetry_snapshot();
-                let (message, fingerprint) = match pending {
-                    Ok(status) => {
-                        let count = |action: &str| {
-                            status
-                                .by_action
-                                .get(action)
-                                .map_or(0, |counts| counts.retryable)
-                        };
-                        let non_regen =
-                            count("transform") + count("delete_cleanup") + count("cascade_expand");
-                        let regen = count("regen_root");
-                        let aabb = count("post_regen_aabb");
-                        let stage = telemetry
-                            .get("last_stage")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("waiting");
-                        let page_claimed = telemetry
-                            .get("last_page_claimed")
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(0);
-                        let page_completed = telemetry
-                            .get("last_page_completed")
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(0);
-                        let phase = if non_regen > 0 {
-                            "non_regen"
-                        } else if regen > 0 {
-                            "regen_root"
-                        } else if aabb > 0 {
-                            "post_regen_aabb"
-                        } else {
-                            "spatial_persist"
-                        };
-                        let message = if regen > 0 {
-                            format!(
-                                "初始化模型进行中：阶段={phase} regen_root剩余={regen} \
-                                 当前页={page_completed}/{page_claimed} 子阶段={stage} 已等={waited_secs}s；AABB尚未开始"
-                            )
-                        } else {
-                            format!(
-                                "初始化模型进行中：阶段={phase} non_regen剩余={non_regen} \
-                                 AABB剩余={aabb} 当前页={page_completed}/{page_claimed} \
-                                 子阶段={stage} 已等={waited_secs}s"
-                            )
-                        };
-                        let fingerprint = format!(
-                            "{phase}|{non_regen}|{regen}|{aabb}|{stage}|{page_completed}|{page_claimed}"
-                        );
-                        (message, fingerprint)
-                    }
-                    Err(error) => (
-                        format!("读取初始化模型进展失败（已等 {waited_secs}s）: {error:#}"),
-                        format!("status_error:{error:#}"),
-                    ),
-                };
-                // 「数字不变就退到 300 秒一行」这条退避在卡死时是反的：越卡越安静。
-                // 2026-08-27 现场前 19 分钟每 60 秒一行，真卡住之后反而变成 300 秒一行。
-                // 页级停滞一旦确认，就按 60 秒照常出声，并把停滞页数带上。
-                let starved =
-                    crate::data_interface::model_update_pending::model_drain_page_starved();
-                let message = if starved {
-                    format!(
-                        "{message}；模型页已连续 {} 页整页认领、零收口——这不是慢是收不掉，\
-                         看日志里点名的根与 /health 的 blocking_conditions",
-                        crate::data_interface::model_update_pending::model_drain_starved_pages()
+            if !crate::options::model_incremental() {
+                // worker 空闲轮的模型消费与 mark_model_ready 都挂在
+                // `model_incremental()` 上（batch_worker 的空闲模型门），开关关着时
+                // model_ready 在本进程内永远不会置位——这里若照常等待就是无限期挂死：
+                // watcher/web 已经起了，启动序列却永远走不到房间阶段与完成横幅。
+                // 模型门照开（按需生成沿用 require_model_generation 那道门），durable
+                // 积压原样留存，只跳过等待；房间阶段由下方同一开关一并跳过。
+                println!(
+                    "模型增量阶段已关闭（model_incremental=false）：durable 模型积压留存不消化，\
+                     跳过启动模型收敛等待（重新开启后由空闲轮回补；按需生成不受影响）"
+                );
+            } else {
+                // 收敛发生在 worker 空闲轮里（模型积压分页消化、空间收敛、AABB 落盘，
+                // 任一环失败都按 30s 退避重试），主线可能要等很久。干等会让启动看起来
+                // 像挂死——数量/阶段变化时报实际进展，完全不变时最多每 300s 提醒一次。
+                let mut waited_secs = 0u64;
+                let mut last_wait_fingerprint: Option<String> = None;
+                let mut last_wait_emitted_secs = 0u64;
+                loop {
+                    if tokio::time::timeout(
+                        std::time::Duration::from_secs(60),
+                        initialization.wait_for_model_ready(),
                     )
-                } else {
-                    message
-                };
-                let changed = last_wait_fingerprint.as_deref() != Some(fingerprint.as_str());
-                if starved || changed || waited_secs.saturating_sub(last_wait_emitted_secs) >= 300 {
-                    println!("{message}");
-                    last_wait_fingerprint = Some(fingerprint);
-                    last_wait_emitted_secs = waited_secs;
+                    .await
+                    .is_ok()
+                    {
+                        break;
+                    }
+                    waited_secs += 60;
+                    let pending =
+                        crate::data_interface::model_update_pending::model_pending_status().await;
+                    let telemetry =
+                        crate::data_interface::model_update_pending::model_drain_telemetry_snapshot(
+                        );
+                    let (message, fingerprint) = match pending {
+                        Ok(status) => {
+                            let count = |action: &str| {
+                                status
+                                    .by_action
+                                    .get(action)
+                                    .map_or(0, |counts| counts.retryable)
+                            };
+                            let non_regen = count("transform")
+                                + count("delete_cleanup")
+                                + count("cascade_expand");
+                            let regen = count("regen_root");
+                            let aabb = count("post_regen_aabb");
+                            let stage = telemetry
+                                .get("last_stage")
+                                .and_then(serde_json::Value::as_str)
+                                .unwrap_or("waiting");
+                            let page_claimed = telemetry
+                                .get("last_page_claimed")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0);
+                            let page_completed = telemetry
+                                .get("last_page_completed")
+                                .and_then(serde_json::Value::as_u64)
+                                .unwrap_or(0);
+                            let phase = if non_regen > 0 {
+                                "non_regen"
+                            } else if regen > 0 {
+                                "regen_root"
+                            } else if aabb > 0 {
+                                "post_regen_aabb"
+                            } else {
+                                "spatial_persist"
+                            };
+                            let message = if regen > 0 {
+                                format!(
+                                    "初始化模型进行中：阶段={phase} regen_root剩余={regen} \
+                                     当前页={page_completed}/{page_claimed} 子阶段={stage} 已等={waited_secs}s；AABB尚未开始"
+                                )
+                            } else {
+                                format!(
+                                    "初始化模型进行中：阶段={phase} non_regen剩余={non_regen} \
+                                     AABB剩余={aabb} 当前页={page_completed}/{page_claimed} \
+                                     子阶段={stage} 已等={waited_secs}s"
+                                )
+                            };
+                            let fingerprint = format!(
+                                "{phase}|{non_regen}|{regen}|{aabb}|{stage}|{page_completed}|{page_claimed}"
+                            );
+                            (message, fingerprint)
+                        }
+                        Err(error) => (
+                            format!("读取初始化模型进展失败（已等 {waited_secs}s）: {error:#}"),
+                            format!("status_error:{error:#}"),
+                        ),
+                    };
+                    // 「数字不变就退到 300 秒一行」这条退避在卡死时是反的：越卡越安静。
+                    // 2026-08-27 现场前 19 分钟每 60 秒一行，真卡住之后反而变成 300 秒一行。
+                    // 页级停滞一旦确认，就按 60 秒照常出声，并把停滞页数带上。
+                    let starved =
+                        crate::data_interface::model_update_pending::model_drain_page_starved();
+                    let message = if starved {
+                        format!(
+                            "{message}；模型页已连续 {} 页整页认领、零收口——这不是慢是收不掉，\
+                             看日志里点名的根与 /health 的 blocking_conditions",
+                            crate::data_interface::model_update_pending::model_drain_starved_pages(
+                            )
+                        )
+                    } else {
+                        message
+                    };
+                    let changed = last_wait_fingerprint.as_deref() != Some(fingerprint.as_str());
+                    if starved
+                        || changed
+                        || waited_secs.saturating_sub(last_wait_emitted_secs) >= 300
+                    {
+                        println!("{message}");
+                        last_wait_fingerprint = Some(fingerprint);
+                        last_wait_emitted_secs = waited_secs;
+                    }
                 }
+                println!("持久模型工作单与 AABB 阶段已收敛");
             }
-            println!("持久模型工作单与 AABB 阶段已收敛");
         }
     }
 
     println!("房间关键字为: {:?}", db_option.get_room_key_word());
     if !startup_data_ready {
         println!("数据初始化尚未释放，跳过启动房间重建");
+    } else if direct_read_mode {
+        println!("direct 模式跳过启动房间重建；按需模型由 Web API 独立生成");
+    } else if !crate::options::model_incremental() {
+        // 房间归属只在「数据与模型都已写入 RocksDB」之后才整体重算（ADR-010 §7 /
+        // ADR-011 §8：房间依赖几何与 AABB 都已收敛）。模型开关关着时 durable 模型
+        // 积压不消化，此刻全量重建就是在缺模型的空间树上算归属——先清后写还会把
+        // 存量归属边改坏。跳过；重新开启模型阶段后由凭据对账（stamp 失配→启动全量
+        // 重建）与模型收敛链派生的房间目标回补。
+        println!(
+            "模型增量阶段已关闭（model_incremental=false）：模型积压未收敛，跳过启动房间重建\
+             （房间只在数据与模型都落库后才整体重算，重新开启模型阶段后回补）"
+        );
     } else if let Some(reason) = skip_startup_room_build().await {
         println!("跳过启动全量房间重建（{reason}）：房间归属由增量队列收敛");
     } else {
@@ -851,7 +971,12 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         }
         println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
         // update_cal_equip().await?;
-        update_cal_bran_component().await?;
+        // 支管部件派生量（阀门距楼板高度）与房间同姿态：可事后重建的派生数据。
+        // 此前用 `?` 上抛，一次查询抖动就把整个服务打死在启动尾段——与上面
+        // build_room_relations 的降级口径自相矛盾。
+        if let Err(error) = update_cal_bran_component().await {
+            eprintln!("支管部件派生量计算未完全成功（可由下次启动或手动重算回补）: {error:#}");
+        }
     }
 
     // `run_app` has already connected the process-global `SUL_DB`.  Calling
@@ -877,13 +1002,13 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
                 println!("TEAM DATA生成完成");
             }
             Err(e) => {
-                dbg!(&e.to_string());
+                eprintln!("TEAM DATA生成失败: {e:#}");
             }
         }
     }
 
     if db_option.rebuild_ssc_tree {
-        dbg!("生成pbs节点");
+        println!("生成PBS节点...");
         set_pdms_major_code(&aios_mgr).await?;
         let mut handles = vec![];
         set_pbs_fixed_node(&mut handles).await?;
@@ -932,6 +1057,9 @@ fn print_startup_complete_banner(db_option: &DbOption, sync_live: bool, started:
         crate::options::model_incremental(),
         crate::options::room_incremental()
     );
+    if crate::options::direct_read_mode() {
+        println!("  数据读取：direct / e3d-io（旧增量 watcher/worker 未启动）");
+    }
     if let Some(notice) = crate::data_interface::watch_scope::mode_notice() {
         println!("  *** {notice}");
     }
@@ -1035,7 +1163,13 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
                     );
                 }
                 Err(e) => {
-                    dbg!(&e.to_string());
+                    // 此前只 `dbg!` 一下就继续跑：连接失败被吞掉，进程一直走到
+                    // 后面第一次真正用库的地方才炸，报错点漂移、根因难找。
+                    // 连接是后续一切步骤的前提，失败就地退出。
+                    return Err(anyhow!(
+                        "SurrealDB 连接失败（{}）: {e:#}",
+                        db_option.get_version_db_conn_str()
+                    ));
                 }
             }
         }

@@ -2432,6 +2432,40 @@ mod tests {
         );
     }
 
+    /// B1 的第三面·碟：raw `prad` 进键的**另一头**——不相似的两件撞成同一行。
+    ///
+    /// T053 第 (3) 条一直只是读码所见（`tasks.md` 记「本次仍未构造用例，原样挂着」）。
+    /// 这就是那个用例。构造法：`theta` 与 `beta` 只看 `pheig/(pdia/2)`，是尺度无关量,
+    /// 所以两件取同一个高径比就逐位相同；再让两件的 **raw** `prad` 都落在 2.0，
+    /// 键的三个分量就全撞上了。可归一化之后 `prad/dia` 是 0.2 与 0.167,
+    /// `gen_unit_shape()` 落的是两份不同的单位几何。
+    ///
+    /// 这个方向比 `b1b` 那头坏：`b1b` 只是多占一行，这里是**少落一行**——两件共用
+    /// 一个 `geo_hash`，后写的顶掉先写的，另一件的实例照着别人的碟渲染，而
+    /// `geo_hash` 从头到尾都对得上，没有任何一处会报错。
+    #[test]
+    fn t041_b1c_dishes_that_are_not_similar_must_not_collide_on_one_row() {
+        let a = dish_of(10.0, 0.25, 0.2);
+        let b = dish_of(12.0, 0.25, 2.0 / 12.0);
+        let unit_prad =
+            |d: &aios_core::prim_geo::Dish| match d.gen_unit_shape().convert_to_geo_param() {
+                Some(PdmsGeoParam::PrimDish(unit)) => unit.prad,
+                _ => panic!("夹具失效：单位形状本该还是碟"),
+            };
+        assert_eq!(a.prad, b.prad, "夹具失效：两件的 raw prad 本该相同");
+        assert_ne!(
+            unit_prad(&a),
+            unit_prad(&b),
+            "夹具失效：两件落库的单位几何本该不同，否则这条测的不是撞键"
+        );
+
+        assert_ne!(
+            a.hash_unit_mesh_params(),
+            b.hash_unit_mesh_params(),
+            "prad/dia 不同的两件碟不能共用一行（今天红在 raw prad 进了键）"
+        );
+    }
+
     /// B2·碟的两个分支元数不同，而且元组真的会撞：椭圆碟 `a=1000, h=5` 是
     /// `(100, 2, 2)`，球碟 `a=1000, h=35` 是 `(100, 2)`——前者的前两位与后者逐位相同。
     /// 分支今天靠 `prad` 分；加段数时把变长元组摊平成「逐个哈希、不带长度、不带分支」
@@ -2802,6 +2836,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
     async fn staged_save_packets_execute_serially_and_replay_idempotently() {
         use crate::data_interface::staging::ResourceThresholds;
         use crate::data_interface::staging::lifecycle::create_window_on;
@@ -2860,6 +2895,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
     async fn staged_save_failure_stops_later_packets_without_detaching_work() {
         use crate::data_interface::staging::ResourceThresholds;
         use crate::data_interface::staging::lifecycle::create_window_on;

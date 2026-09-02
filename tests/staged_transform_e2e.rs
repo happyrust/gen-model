@@ -30,6 +30,11 @@
 //! $env:RUST_MIN_STACK = "134217728"
 //! cargo test --features http_api --test staged_transform_e2e -- --ignored --exact --nocapture
 //! ```
+//!
+//! **已随 kv-mem 暂存窗口退役（ADR-056 P1，spec 035）**：它验证的暂存 Transform 写路由
+//! 与 `staged_commit_metrics` 都已不存在，整文件停编译；P3 T304 随 `staging/` 目录一起
+//! 删除，Transform 便宜路径的判据改吃 e3d-model `ElementDiff`（P2 T203）另配用例。
+#![cfg(any())]
 
 mod common;
 

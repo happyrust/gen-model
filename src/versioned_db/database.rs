@@ -839,8 +839,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
 
     let mut dbno_set = Arc::new(DashSet::new());
     let mut create_tables_elapse = 0;
-    // 执行多线程解析
-    dbg!("执行多线程解析");
+    println!("执行多线程解析");
     let proj_progress_chunk = 80 / db_option.included_projects.len();
     // ADR-025: full synchronization is global-by-phase, never project-by-project.
     let debug_refnos: Vec<RefU64> = db_option

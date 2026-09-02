@@ -195,6 +195,15 @@
   `children_changed` 与公开 DTO 不变。证据：
   `docs/evidence/2026-08-18-core-primary-list-snapshot.md`。
 
+  - **2026-08-28 更正**：那 52 个 unknown 是读取通道的假象，不是 core 不知道。
+    `db_get_element_info` 只认五个写死的 field id，且 noun 查不到时直接报错返回。
+    改走 core 自己导出的 `DB_Noun::findNoun` + `getField` 后 1931 个**全部解析**
+    （true 1142 / false 789 / unknown 0），52 个全为 `false`，已按 ADR-002 改判。
+    快照与三处测试同步更新；`tests/python/test_dump_core_primary_list.py` 这个文件
+    从未落地，采集器的口径改由 `.ida_scratch/probes/verify_dump_payload_identical.py`
+    与快照完整性测试共同钉住。证据：
+    `docs/evidence/2026-08-28-core-noun-granularity-export.md`。
+
 ## P5 跨仓编译隔离（ADR-031，2026-08-19）
 
 - ✅ T28 编译边界与依赖卫生：`old-pdms-io` 增加默认关闭的

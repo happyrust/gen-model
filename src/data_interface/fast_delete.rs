@@ -229,7 +229,7 @@ pub async fn prune_above_watermark(
     target_watermark: i32,
 ) -> anyhow::Result<PruneAboveWatermarkResult> {
     let started = Instant::now();
-    let _commit_guard = crate::data_interface::batch_worker::STAGED_COMMIT_SERIAL
+    let _commit_guard = crate::data_interface::batch_worker::DATA_COMMIT_SERIAL
         .lock()
         .await;
     let _state_guard = crate::data_interface::dbnum_state::DBNUM_STATE_WRITE_GATE
@@ -455,7 +455,7 @@ async fn wipe_dbnum_rows(
         bail!("dbnum must be greater than zero");
     }
     let started = Instant::now();
-    let _commit_guard = crate::data_interface::batch_worker::STAGED_COMMIT_SERIAL
+    let _commit_guard = crate::data_interface::batch_worker::DATA_COMMIT_SERIAL
         .lock()
         .await;
     let _state_guard = crate::data_interface::dbnum_state::DBNUM_STATE_WRITE_GATE

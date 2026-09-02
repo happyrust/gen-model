@@ -32,106 +32,35 @@ pub(crate) struct MiniWindowScript {
     pub tail: Option<String>,
 }
 
+// 快照 / diff / 载体助手的本体已抽到与暂存无关的 `table_parity`（spec 035 T171），
+// 这里只剩 panic 风格的薄包装，P3 删本文件时随之消失。
+
 async fn fresh_db(ns: &str, db: &str) -> Surreal<Any> {
-    let handle = connect("mem://").await.expect("mem boots");
-    handle.use_ns(ns).use_db(db).await.expect("use db");
-    handle
+    crate::data_interface::table_parity::fresh_mem_db(ns, db)
+        .await
+        .expect("mem boots")
 }
 
 async fn apply_all(db: &Surreal<Any>, statements: &[String]) {
-    for sql in statements {
-        db.query(sql)
-            .await
-            .expect("apply transport")
-            .check()
-            .unwrap_or_else(|e| panic!("apply failed: {sql}\n{e}"));
-    }
+    crate::data_interface::table_parity::apply_all(db, statements)
+        .await
+        .unwrap_or_else(|error| panic!("{error:#}"));
 }
-
-/// 数据面逐表快照（T5.1 精简版探针的口径）：排除控制面白名单后，表名 → 该表
-/// 全部行的序列化文本。窗口计算**中途**对持久层做本快照的 diff，必须为空——
-/// 控制面（恢复记录、水位观察、队列控制、durable pending、side-effect pending）
-/// 是 I1 明文豁免的落库，不属于「窗口数据」。
-pub(crate) const CONTROL_PLANE_TABLES: [&str; 5] = [
-    "dbnum_watermark",
-    "increment_update_attempt",
-    "queue_control",
-    "model_update_pending",
-    "incr_side_effect_pending",
-];
 
 pub(crate) async fn snapshot_data_tables(
     db: &Surreal<Any>,
 ) -> std::collections::BTreeMap<String, String> {
-    let mut response = db.query("INFO FOR DB").await.expect("info");
-    let info: surrealdb::Value = response.take(0).expect("take info");
-    let info_json = serde_json::to_value(&info).expect("serialize info");
-    let mut tables: Vec<String> = info_json
-        .pointer("/Object/tables/Object")
-        .and_then(|v| v.as_object())
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default();
-    tables.sort();
-
-    let mut out = std::collections::BTreeMap::new();
-    for table in tables {
-        if CONTROL_PLANE_TABLES.contains(&table.as_str()) {
-            continue;
-        }
-        let mut response = db
-            .query(format!("SELECT * FROM `{table}` ORDER BY id"))
-            .await
-            .expect("select table");
-        let rows: surrealdb::Value = response.take(0).expect("take rows");
-        out.insert(table, serde_json::to_string(&rows).expect("serialize rows"));
-    }
-    out
+    crate::data_interface::table_parity::snapshot_data_tables(db)
+        .await
+        .expect("data snapshot")
 }
 
-/// 两份数据面快照里内容不同（或只在一边存在）的表名集合。
-pub(crate) fn changed_data_tables(
-    before: &std::collections::BTreeMap<String, String>,
-    after: &std::collections::BTreeMap<String, String>,
-) -> std::collections::BTreeSet<String> {
-    before
-        .iter()
-        .filter(|(table, rows)| after.get(*table) != Some(*rows))
-        .map(|(table, _)| table.clone())
-        .chain(
-            after
-                .keys()
-                .filter(|table| !before.contains_key(*table))
-                .cloned(),
-        )
-        .collect()
-}
+pub(crate) use crate::data_interface::table_parity::changed_data_tables;
 
-/// 逐表快照：INFO FOR DB 枚举表名，逐表 `SELECT * ORDER BY id` 后序列化拼接。
-/// 两个引擎、两条路径产出的文本相等 ⇔ 终态相等（serde 结构化序列化，F3 口径）。
 pub(crate) async fn snapshot_tables(db: &Surreal<Any>) -> String {
-    let mut response = db.query("INFO FOR DB").await.expect("info");
-    let info: surrealdb::Value = response.take(0).expect("take info");
-    let info_json = serde_json::to_value(&info).expect("serialize info");
-    let mut tables: Vec<String> = info_json
-        .pointer("/Object/tables/Object")
-        .and_then(|v| v.as_object())
-        .map(|m| m.keys().cloned().collect())
-        .unwrap_or_default();
-    tables.sort();
-
-    let mut out = String::new();
-    for table in tables {
-        let mut response = db
-            .query(format!("SELECT * FROM `{table}` ORDER BY id"))
-            .await
-            .expect("select table");
-        let rows: surrealdb::Value = response.take(0).expect("take rows");
-        let rendered = serde_json::to_string(&rows).expect("serialize rows");
-        // 空表是「表定义残留」，两条路径都可能有（DEFINE 集），跳过内容为空的表
-        // 会掩盖「一边有行一边没有」吗？不会——那种情况 rendered 不同。
-        out.push_str(&format!("== {table} ==\n{rendered}\n"));
-    }
-    out
+    crate::data_interface::table_parity::snapshot_tables(db)
+        .await
+        .expect("snapshot")
 }
 
 /// 跑双路径并返回（暂存路径终态, 直写路径终态, 写回前的持久层快照, 基态快照）。
@@ -365,6 +294,7 @@ async fn mini_window_staged_write_back_equals_direct_write() {
 /// 要么打在刻意不连接的 `SUL_DB` 上当场报错，要么落在持久层实例上被中途 diff
 /// 抓住。live 版 T5.1（对真实 fork 服务器的执行中途快照）仍留在 P5。
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123）；直写版「中途 kill → 重放 → 逐表一致」对拍见 T171，落地后本文件随 P3 删除"]
 async fn a_real_window_touches_the_persistent_layer_only_at_write_back() {
     use super::lifecycle::create_window_on;
     use super::resources::ResourceThresholds;
@@ -459,7 +389,8 @@ async fn a_real_window_touches_the_persistent_layer_only_at_write_back() {
             EleOperationDetail::Add(ele),
         )],
     )]);
-    let staged = IncrementPipeline::stage_parsed_window(&mut window, &range, DBNUM)
+    let staged = window
+        .stage_parsed_window(&range, DBNUM)
         .await
         .expect("stage parsed window");
     assert!(staged > 0, "解析必须检测到变化并进 journal");
@@ -540,6 +471,7 @@ async fn a_real_window_touches_the_persistent_layer_only_at_write_back() {
 /// 暂存库的新 hash；暂存库随窗口一起蒸发之后，它从 viewer / 几何查询 / 包围盒
 /// 刷新 / 房间判定**全部**读者里消失，且无人能修（D9 形态）。
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123）；直写版「中途 kill → 重放 → 逐表一致」对拍见 T171，落地后本文件随 P3 删除"]
 async fn an_abandoned_window_leaves_the_persistent_world_trans_resolvable() {
     use super::lifecycle::create_window_on;
     use super::resources::ResourceThresholds;
@@ -664,6 +596,7 @@ async fn an_abandoned_window_leaves_the_persistent_world_trans_resolvable() {
 ///    （trans / aabb / inst_relate），祖先设计数据表（pe / WORL / SITE / ZONE /
 ///    EQUI / pe_owner）零变化——StagingOnly 的旧态没混进写回。
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123）；直写版「中途 kill → 重放 → 逐表一致」对拍见 T171，落地后本文件随 P3 删除"]
 async fn staged_transform_with_a_pos_ancestor_writes_back_the_absolute_position() {
     use super::ancestor_preload::fixtures::world_chain;
     use super::ancestor_preload::{

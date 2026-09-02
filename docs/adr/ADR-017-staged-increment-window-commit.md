@@ -1,5 +1,9 @@
 # ADR-017：稳态增量窗口在 kv-mem 暂存、整窗口写回 RocksDB
 
+> **Superseded by ADR-056（2026-09-02 拍板）**：kv-mem 暂存层退役，稳态增量窗口改为直写 RocksDB，
+> 模型增量由 e3d-model 按文件窗口规划。本文连同下方全部修订仅描述**实施 P1–P3 落地之前**仍在运行的行为；
+> 新口径与实施顺序见 `ADR-056` 与 `docs/plans/2026-09-02-e3d-model-increment-direct-rocksdb-plan.md`。
+
 > 2026-08-19 补充：写回分块不能只按 journal 条数计算；多维上限、块级进展和
 > 单查询停滞边界由 ADR-038 规定。
 

@@ -44,6 +44,11 @@ pub enum SideEffectKind {
     RefRevMaintain,
     /// 水位提交后必须完成的空间树刷新/删除与文件持久化。
     SpatialReconcile,
+    /// 某个 DESI 窗口触及的生成根，其 CATA 引用闭包要解析进 Surreal——**只**为
+    /// `ref_rev` 反向索引与 UI 目录属性服务（ADR-056 D8-A）。模型面经 e3d-io 从文件读
+    /// CATA，不等这一步；水位也不等。前身是 `prepare_required_dependencies` 那道
+    /// 「必需依赖」门，随 kv-mem 暂存窗口一起退役。
+    CataRefRev,
 }
 
 impl SideEffectKind {
@@ -52,8 +57,19 @@ impl SideEffectKind {
             Self::SystDerived => "syst_derived",
             Self::RefRevMaintain => "ref_rev_maintain",
             Self::SpatialReconcile => "spatial_reconcile",
+            Self::CataRefRev => "cata_ref_rev",
         }
     }
+}
+
+/// [`SideEffectKind::CataRefRev`] 一次 drain 的收口口径（纯函数，供 drain 与单测共用）：
+/// `missing > 0` **不是失败**——缺的是目录清单里没有 / 定位不到的元件，重试也不会长出来，
+/// 记 warning 让人看见即可；只有 `preload_cata_for_roots` 本身报错才走 `mark_failed` 重试。
+fn cata_ref_rev_summary(parsed: usize, missing: usize) -> (bool, String) {
+    (
+        missing > 0,
+        format!("[cata_ref_rev] 目录闭包解析完成: parsed={parsed} missing={missing}"),
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -178,6 +194,24 @@ impl SideEffectCompensator {
         .await
     }
 
+    /// 数据窗口提交后登记一条「CATA 闭包解析进 Surreal」任务（ADR-056 D8-A，spec 035 T126）。
+    ///
+    /// 挂在 `apply_one` 的 `finalize_attempt` 之后：水位已经推进，这里**不拦模型、不拦水位**，
+    /// 只是让 `ref_rev` 反向索引与 UI 目录属性迟一拍追上。与 [`Self::enqueue_ref_rev`]
+    /// 同一张表、同一条 `MAX_ATTEMPTS` 重试通道；行 id 带 `end_sesno`，下一个窗口是新的一行，
+    /// 上一窗口的死信不会挡住它。`AIOS_CATA_CLOSURE_MODE=off` 或没有生成根时不入队。
+    pub async fn enqueue_cata_ref_rev(
+        dbnum: u32,
+        end_sesno: i32,
+        db_type: &str,
+        roots: &[RefU64],
+    ) -> anyhow::Result<()> {
+        if roots.is_empty() || !crate::data_interface::cata_closure::cata_closure_enabled() {
+            return Ok(());
+        }
+        Self::upsert_pending(SideEffectKind::CataRefRev, dbnum, end_sesno, db_type, roots).await
+    }
+
     /// 入队语句的纯渲染，返回 `(记录 id, SurrealQL)`。
     ///
     /// `attempts = attempts?:0` 是这条语句的要害。同一个 `(kind, dbnum, end_sesno)`
@@ -272,7 +306,7 @@ impl SideEffectCompensator {
     /// Spatial jobs deliberately ignore [`MAX_ATTEMPTS`]: abandoning one would publish a
     /// watermark whose global spatial state can never catch up.
     ///
-    /// 公开入口负责取空间串行锁（锁序 `STAGED_COMMIT_SERIAL → SPATIAL_STATE_SERIAL
+    /// 公开入口负责取空间串行锁（锁序 `DATA_COMMIT_SERIAL → SPATIAL_STATE_SERIAL
     /// → GLOBAL_AABB_TREE`：worker 提交路径与派发门先持前者再进来，Python
     /// `spatial.reconcile` 直接进来——这把锁把此前不设防的 Python 并发收敛也串行化了）。
     pub async fn reconcile_spatial_pending(_mgr: &AiosDBManager) -> anyhow::Result<usize> {
@@ -513,6 +547,7 @@ impl SideEffectCompensator {
             "by_kind": {
                 "syst_derived": kind_counts(SideEffectKind::SystDerived.as_str()),
                 "ref_rev_maintain": kind_counts(SideEffectKind::RefRevMaintain.as_str()),
+                "cata_ref_rev": kind_counts(SideEffectKind::CataRefRev.as_str()),
             },
             "last_error": jobs.iter().find_map(|job| job.last_error.as_deref()),
             "stalled": dead_letters > 0,
@@ -531,6 +566,7 @@ impl SideEffectCompensator {
             "by_kind": {
                 "syst_derived": { "pending": 0, "dead_letters": 0 },
                 "ref_rev_maintain": { "pending": 0, "dead_letters": 0 },
+                "cata_ref_rev": { "pending": 0, "dead_letters": 0 },
             },
             "last_error": format!("读取副作用补偿状态失败: {error:#}"),
             "stalled": true,
@@ -578,6 +614,7 @@ impl SideEffectCompensator {
             let kind = match job.kind.as_str() {
                 "syst_derived" => SideEffectKind::SystDerived,
                 "ref_rev_maintain" => SideEffectKind::RefRevMaintain,
+                "cata_ref_rev" => SideEffectKind::CataRefRev,
                 other => {
                     let reason = format!("unsupported legacy side-effect kind: {other}");
                     if let Err(error) = Self::mark_abandoned(&job.id, &reason).await {
@@ -615,6 +652,35 @@ impl SideEffectCompensator {
                 SideEffectKind::SpatialReconcile => {
                     unreachable!("spatial jobs are drained before dequeue")
                 }
+                // 只维护 ref_rev / UI 目录属性：`missing > 0` 记 warning 仍算完成
+                // （见 `cata_ref_rev_summary`），只有解析本身报错才进重试。
+                SideEffectKind::CataRefRev => match parse_ref_rev_payload(&job.changed_refnos) {
+                    Ok(roots) => {
+                        let roots = roots.iter().map(|root| root.refno()).collect::<Vec<_>>();
+                        crate::data_interface::cata_closure::preload_cata_for_roots(
+                            &mgr.db_option.project_name,
+                            &roots,
+                            Some(crate::data_interface::cata_closure::DependencyCacheContext {
+                                source_dbnum: job.dbnum,
+                                effective_end_sesno: job.end_sesno,
+                            }),
+                        )
+                        .await
+                        .map(|outcome| {
+                            let (warn, summary) =
+                                cata_ref_rev_summary(outcome.parsed, outcome.missing);
+                            if warn {
+                                log::warn!(
+                                    "{summary} dbnum={} sesno={}（缺失不重试，只影响 ref_rev / UI 目录属性）",
+                                    job.dbnum,
+                                    job.end_sesno
+                                );
+                            }
+                            println!("{summary}");
+                        })
+                    }
+                    Err(error) => Err(error),
+                },
             };
 
             let outcome = match result {
@@ -789,6 +855,80 @@ mod tests {
         assert_eq!(
             SideEffectKind::SpatialReconcile.as_str(),
             "spatial_reconcile"
+        );
+    }
+
+    /// ADR-056 D8-A / spec 035 T126，出路一：入队行走同一张表、同一条 `MAX_ATTEMPTS`
+    /// 通道——`attempts = attempts?:0` 保住计数，id 带 `end_sesno` 让下一个窗口是新的一行
+    /// （上一窗口的死信挡不住它），payload 是生成根。
+    #[test]
+    fn cata_ref_rev_upsert_carries_roots_and_keeps_the_retry_budget() {
+        use super::TABLE;
+        use aios_core::pdms_types::RefU64;
+
+        let roots = [RefU64((8000u64 << 32) | 10), RefU64((8000u64 << 32) | 11)];
+        let (id, sql) = SideEffectCompensator::render_upsert_pending(
+            SideEffectKind::CataRefRev,
+            8000,
+            26,
+            "DESI",
+            &roots,
+        );
+        assert_eq!(id, format!("{TABLE}:cata_ref_rev_8000_26"));
+        assert!(sql.contains("kind = 'cata_ref_rev'"), "{sql}");
+        assert!(sql.contains("attempts = attempts?:0"), "{sql}");
+        assert!(
+            sql.contains("\"8000/10\"") && sql.contains("\"8000/11\""),
+            "{sql}"
+        );
+        let (next_window, _) = SideEffectCompensator::render_upsert_pending(
+            SideEffectKind::CataRefRev,
+            8000,
+            27,
+            "DESI",
+            &roots,
+        );
+        assert_ne!(id, next_window, "新窗口必须是新的一行");
+    }
+
+    /// 出路二：drain 的候选过滤只挡 spatial 与到顶死信，`cata_ref_rev` 在候选集里且有
+    /// 自己的派发臂——否则这一行会被当成「unsupported legacy kind」直接 abandoned。
+    #[test]
+    fn drain_dispatches_cata_ref_rev_instead_of_abandoning_it() {
+        let source = include_str!("side_effect_pending.rs");
+        let drain = source
+            .split_once("pub async fn drain(")
+            .expect("drain must exist")
+            .1
+            .split_once("pub async fn revive_dead_letters(")
+            .expect("revive must follow drain")
+            .0;
+        assert!(drain.contains("kind != 'spatial_reconcile'"), "{drain}");
+        assert!(!drain.contains("kind != 'cata_ref_rev'"), "{drain}");
+        assert!(
+            drain.contains("\"cata_ref_rev\" => SideEffectKind::CataRefRev"),
+            "drain 必须认得 cata_ref_rev"
+        );
+        assert!(
+            drain.contains("SideEffectKind::CataRefRev => match parse_ref_rev_payload"),
+            "cata_ref_rev 必须有自己的派发臂"
+        );
+    }
+
+    /// 出路三：`missing > 0` 只是 warning，作业仍按成功收口（不会进 `mark_failed`、不会
+    /// 成死信）——缺的元件重试也不会长出来，D8-A 说它不拦模型、不拦水位。
+    #[test]
+    fn cata_ref_rev_missing_is_a_warning_not_a_failure() {
+        let (warn, summary) = super::cata_ref_rev_summary(12, 0);
+        assert!(!warn);
+        assert!(summary.contains("parsed=12 missing=0"), "{summary}");
+        let (warn, summary) = super::cata_ref_rev_summary(10, 2);
+        assert!(warn, "缺失要响");
+        assert!(summary.contains("missing=2"), "{summary}");
+        let status = SideEffectCompensator::render_side_effect_status(&[]);
+        assert!(
+            status["by_kind"]["cata_ref_rev"].is_object(),
+            "/health by_kind 必须报 cata_ref_rev：{status}"
         );
     }
 

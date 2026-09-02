@@ -58,16 +58,48 @@ fn main() -> anyhow::Result<()> {
 
     println!("\n{} databases:", styp_name(args.styp));
     for database in membership.of_type(args.styp) {
+        // A dbnum is unique inside a project only, so the owning project is
+        // part of the answer rather than decoration.
         println!(
-            "  dbnum={:<8} {:<28} {}",
+            "  dbnum={:<8} PROJ={:<3} {:<28} [{}] {}{}",
             database.dbnum,
+            database.proj,
             database.name,
+            database.project.as_deref().unwrap_or("-"),
             database
                 .path
                 .as_ref()
                 .map(|path| path.display().to_string())
-                .unwrap_or_else(|| "<not found on disk>".into())
+                .unwrap_or_else(|| "<not found on disk>".into()),
+            if database.shadowed.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "  (同号遮蔽 {}: {})",
+                    database.shadowed.len(),
+                    database
+                        .shadowed
+                        .iter()
+                        .map(|other| other.display().to_string())
+                        .collect::<Vec<_>>()
+                        .join(" / ")
+                )
+            }
         );
+    }
+    for database in membership
+        .of_type(args.styp)
+        .filter(|database| database.off_declared_project(membership.project()))
+    {
+        println!(
+            "  ! dbnum={} 声明 PROJ={}，实际落在项目 {}",
+            database.dbnum,
+            database.proj,
+            database.project.as_deref().unwrap_or("-")
+        );
+    }
+    for problem in membership.problems() {
+        println!("  ! {problem}");
     }
 
     let paths: Vec<String> = membership

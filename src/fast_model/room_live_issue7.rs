@@ -40,8 +40,8 @@ mod tests {
 
     use crate::data_interface::model_update_pending::drain_rooms;
     use crate::data_interface::tidb_manager::AiosDBManager;
+    use crate::fast_model::aabb_refresh::update_inst_relate_aabbs_by_refnos;
     use crate::fast_model::aabb_tree::rebuild_tree_from_pointers;
-    use crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos;
     use crate::fast_model::room_model::build_room_relations;
 
     /// 报告人改的那个构件。issue #5 截图里那条分支的 CAP 也是它。

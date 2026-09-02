@@ -8,13 +8,21 @@
 //! not — and neither mistake reports anything. A UDA whose dictionary was left
 //! out reads exactly like a UDA with no value.
 //!
+//! "Across projects" is why a declaration cannot be resolved on the bare number:
+//! a dbnum is unique inside a project only, and `AvevaMarineSample` and
+//! `AvevaCatalogue` in one configuration both carry a 7000. The SYS record's
+//! `PROJ` says whether a declaration is this project's or another's but not
+//! which other one — `AvevaCatalogue`'s dictionaries and the undeployed `SCB`
+//! block (`6000`–`6003`) all read 3 — so ranking, not `PROJ`, decides between
+//! two projects that answer the same number.
+//!
 //! [`crate::data_interface::update_scope::UpdateScope`] answers the same
 //! question for `STYP = DESI` through SurrealDB, which needs the SYS database
 //! parsed and synced first. This reads the file, so it is available during
 //! initialization — before anything has been synced — which is the point at
 //! which the Dictionary set has to be known.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
@@ -36,12 +44,48 @@ pub const DESI_STYP: i64 = 1;
 pub struct MdbDatabase {
     pub dbnum: u32,
     pub styp: i64,
+    /// The SYS record's `PROJ`: `0` is a database of the project that declares
+    /// it, anything else is another project's.
+    ///
+    /// It does not name that project. The SYS database holds no element type
+    /// mapping the number back to a name, and one value covers several
+    /// projects: in AMS's `/ALL` the `AvevaCatalogue` databases and the
+    /// undeployed `SCB` block (`6000`–`6003`) all read 3. So it decides which
+    /// project to look in *first* and never which path to build. Of the
+    /// declarations that do resolve to a file, all 58 `PROJ = 0` sit in
+    /// `AvevaMarineSample` and all 34 `PROJ = 3` in `AvevaCatalogue`.
+    pub proj: i64,
     /// The SYS element's name, e.g. `*MASTER/DICT`.
     pub name: String,
     /// `None` when the declaration names a database with no file under any
     /// configured project directory. Kept rather than dropped: a declared
     /// database that is not on disk is a deployment problem worth seeing.
     pub path: Option<PathBuf>,
+    /// Which project `path` came out of.
+    pub project: Option<String>,
+    /// The other files carrying this dbnum: layers this project's own
+    /// extract family put underneath (ADR-028), plus whatever another project
+    /// numbers the same. A dbnum is unique inside a project only, so losing
+    /// these silently is how a declaration binds to a foreign file unnoticed.
+    pub shadowed: Vec<PathBuf>,
+}
+
+impl MdbDatabase {
+    /// The declaration says one project and the file came out of the other.
+    ///
+    /// Not an error — `*MDU/CATA` (7355) declares `PROJ = 3` while
+    /// `AvevaMarineSample` holds the only file — but it is the one thing worth
+    /// saying out loud, because everything downstream reads the resolved path
+    /// as if the declaration had pointed straight at it.
+    pub fn off_declared_project(&self, declaring_project: &str) -> bool {
+        let Some(project) = self.project.as_deref() else {
+            return false;
+        };
+        let own = project
+            .trim()
+            .eq_ignore_ascii_case(declaring_project.trim());
+        (self.proj == 0) != own
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -51,6 +95,11 @@ pub struct MdbMembership {
     /// In `CURD` order. Order decides which definition wins a duplicated
     /// `UKEY`, so it is preserved rather than sorted.
     databases: Vec<MdbDatabase>,
+    /// Things that went wrong while resolving this list and that a person
+    /// should see. They deliberately do not live only in `log::warn!`: the
+    /// sandbox and plenty of deployments run `enable_log = false`, the logger
+    /// is then never initialised, and not one of those lines ever appears.
+    problems: Vec<String>,
 }
 
 impl MdbMembership {
@@ -64,6 +113,10 @@ impl MdbMembership {
 
     pub fn databases(&self) -> &[MdbDatabase] {
         &self.databases
+    }
+
+    pub fn problems(&self) -> &[String] {
+        &self.problems
     }
 
     pub fn of_type(&self, styp: i64) -> impl Iterator<Item = &MdbDatabase> {
@@ -104,22 +157,50 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
     if own_dirs.is_empty() {
         anyhow::bail!("项目 {project} 没有解析出任何库目录，无从读取它的 SYS 库");
     }
-    let all_dirs = plan.dirs();
+    // Kept per project rather than flattened into one directory list: a dbnum
+    // is unique inside a project only, so "which file" cannot be answered
+    // before "which project".
+    let projects: Vec<(String, Vec<PathBuf>)> = plan
+        .projects
+        .iter()
+        .map(|entry| (entry.project.clone(), entry.db_dirs.clone()))
+        .collect();
+    let priority = crate::options::catalogue_project_priority();
+    let rank = project_rank(&db_option.included_projects, &priority);
+    let mut problems: Vec<String> = priority
+        .iter()
+        .filter(|named| {
+            !db_option
+                .included_projects
+                .iter()
+                .any(|included| included.trim().eq_ignore_ascii_case(named.trim()))
+        })
+        .map(|named| {
+            format!(
+                "catalogue_project_priority 含未知项目 {named:?}，同号选主本轮只按 \
+                 included_projects 的书写顺序排"
+            )
+        })
+        .collect();
     let wanted = format!("/{}", mdb.trim_start_matches('/'));
 
     let mut tried = Vec::new();
     for sys in sys_candidates(&own_dirs) {
         tried.push(sys.display().to_string());
-        match read_declaration(&sys, project, &wanted, &all_dirs) {
+        match read_declaration(&sys, project, &wanted, &projects, &rank) {
             Ok(Some(databases)) => {
                 return Ok(MdbMembership {
                     mdb: wanted,
                     project: project.to_string(),
                     databases,
+                    problems,
                 });
             }
             Ok(None) => continue,
-            Err(error) => log::warn!("读取 {} 失败，继续找下一个：{error:#}", sys.display()),
+            Err(error) => {
+                log::warn!("读取 {} 失败，继续找下一个：{error:#}", sys.display());
+                problems.push(format!("读取 {} 失败，已跳过：{error:#}", sys.display()));
+            }
         }
     }
     anyhow::bail!(
@@ -162,7 +243,8 @@ fn read_declaration(
     sys: &Path,
     project: &str,
     wanted: &str,
-    all_dirs: &[PathBuf],
+    projects: &[(String, Vec<PathBuf>)],
+    rank: &HashMap<String, usize>,
 ) -> anyhow::Result<Option<Vec<MdbDatabase>>> {
     let file_name = sys
         .file_name()
@@ -225,31 +307,107 @@ fn read_declaration(
         let Some(dbnum) = number("DBNO").and_then(|value| u32::try_from(value).ok()) else {
             continue;
         };
+        // Absent `PROJ` reads as "this project": that is what the attribute
+        // means when it is written, and it keeps a SYS dialect that omits it
+        // resolving against the project whose SYS database this is.
+        let proj = number("PROJ").unwrap_or(0);
+        let located = locate(projects, rank, project, proj, dbnum);
         databases.push(MdbDatabase {
             dbnum,
             styp: number("STYP").unwrap_or(-1),
+            proj,
             name: merged
                 .get_as_string("NAME")
                 .unwrap_or_default()
                 .trim()
                 .to_string(),
-            path: locate(all_dirs, dbnum),
+            path: located.as_ref().map(|found| found.path.clone()),
+            project: located.as_ref().map(|found| found.project.clone()),
+            shadowed: located.map(|found| found.shadowed).unwrap_or_default(),
         });
     }
     Ok(Some(databases))
 }
 
-/// A dbnum names its file but not its directory, and an MDB reaches across
-/// projects, so every configured directory is searched.
+/// Where a declared dbnum resolved to.
+struct Located {
+    project: String,
+    path: PathBuf,
+    shadowed: Vec<PathBuf>,
+}
+
+/// A dbnum names its file but neither its directory nor its project, and an
+/// MDB reaches across projects — so "which file" has to answer "which project"
+/// first. `AvevaMarineSample` and `AvevaCatalogue` in one configuration both
+/// carry a 7000.
 ///
-/// Matching goes through the extract-family parser (ADR-028) rather than a
-/// name-suffix check. The first cut here was `ends_with("{dbnum}_0001")`,
-/// which is wrong twice over: dbnum 100's suffix also tails `ams8100_0001`,
-/// handing dbnum 100 another database's file without a sound; and a master
-/// with no `_NNNN` suffix — or an extract other than `_0001` — is a legal
-/// identity for the same logical database, yet never matched at all and got
-/// reported as a deployment gap.
-fn locate(dirs: &[PathBuf], dbnum: u32) -> Option<PathBuf> {
+/// Ranking is [`project_rank`], the same order the ingest side adjudicates
+/// with, and the SYS `PROJ` presses one layer on top of it: `PROJ = 0` looks in
+/// the declaring project first, anything else looks elsewhere first. `PROJ`
+/// only orders, it never excludes — `*MDU/CATA` (7355) declares `PROJ = 3`
+/// while `AvevaMarineSample` holds the only file, and bucketing strictly would
+/// report a database that does resolve as a deployment gap.
+///
+/// What this replaced pooled every project's directories into one list, matched
+/// on the bare number and settled ties by path string — in opposite directions
+/// per branch: the extract-leaf branch took the lexicographically last path,
+/// the unsuffixed-master branch the first. AMS winning 7000 was the alphabet
+/// (`AvevaM` > `AvevaC`), nothing else: rename a project, hand the foreign one
+/// an `_0002`, or deploy masters without extracts, and the same declaration
+/// binds to another project's file without a sound. This list is what the UDA
+/// dictionaries are read from, and a dictionary taken from the wrong project
+/// reads exactly like a UDA with no value.
+fn locate(
+    projects: &[(String, Vec<PathBuf>)],
+    rank: &HashMap<String, usize>,
+    declaring_project: &str,
+    proj: i64,
+    dbnum: u32,
+) -> Option<Located> {
+    let mut ranked: Vec<(bool, usize, &str, PathBuf, Vec<PathBuf>)> = Vec::new();
+    for (project, dirs) in projects {
+        let Some((path, rest)) = pick_within_project(dirs, dbnum) else {
+            continue;
+        };
+        let own = project
+            .trim()
+            .eq_ignore_ascii_case(declaring_project.trim());
+        let against_declaration = if proj == 0 { !own } else { own };
+        let place = rank
+            .get(&project.trim().to_ascii_lowercase())
+            .copied()
+            .unwrap_or(usize::MAX);
+        ranked.push((against_declaration, place, project.as_str(), path, rest));
+    }
+    // The project name is the last resort rather than the first, and it now
+    // breaks ties in one direction for masters and leaves alike.
+    ranked.sort_by(|left, right| (left.0, left.1, left.2).cmp(&(right.0, right.1, right.2)));
+
+    let mut ranked = ranked.into_iter();
+    let (_, _, project, path, mut shadowed) = ranked.next()?;
+    for (_, _, _, other, rest) in ranked {
+        shadowed.push(other);
+        shadowed.extend(rest);
+    }
+    Some(Located {
+        project: project.to_string(),
+        path,
+        shadowed,
+    })
+}
+
+/// ADR-028 inside one project: the highest extract leaf is the working file,
+/// the unsuffixed master is the parent layer and only answers when no extract
+/// exists. Everything it did not pick comes back rather than being dropped.
+///
+/// Matching goes through the extract-family parser rather than a name-suffix
+/// check. The first cut here was `ends_with("{dbnum}_0001")`, which is wrong
+/// twice over: dbnum 100's suffix also tails `ams8100_0001`, handing dbnum 100
+/// another database's file without a sound; and a master with no `_NNNN`
+/// suffix — or an extract other than `_0001` — is a legal identity for the
+/// same logical database, yet never matched at all and got reported as a
+/// deployment gap.
+fn pick_within_project(dirs: &[PathBuf], dbnum: u32) -> Option<(PathBuf, Vec<PathBuf>)> {
     let mut masters: Vec<PathBuf> = Vec::new();
     let mut leaves: Vec<(u32, PathBuf)> = Vec::new();
     for dir in dirs {
@@ -278,15 +436,66 @@ fn locate(dirs: &[PathBuf], dbnum: u32) -> Option<PathBuf> {
         }
     }
     // `read_dir` order is not a contract; sorting pins the pick when several
-    // directories answer. Per ADR-028 the highest extract leaf is the working
-    // file, and the unsuffixed master is the parent layer — it only answers
-    // when no extract exists at all.
+    // directories answer.
     leaves.sort();
     masters.sort();
-    leaves
-        .pop()
-        .map(|(_, path)| path)
-        .or_else(|| masters.into_iter().next())
+
+    let mut rest: Vec<PathBuf> = Vec::new();
+    let Some(top) = leaves.last().map(|(extract, _)| *extract) else {
+        let mut masters = masters.into_iter();
+        let winner = masters.next()?;
+        rest.extend(masters);
+        return Some((winner, rest));
+    };
+    let (working, older): (Vec<_>, Vec<_>) =
+        leaves.into_iter().partition(|(extract, _)| *extract == top);
+    let mut working = working.into_iter().map(|(_, path)| path);
+    let winner = working
+        .next()
+        .expect("the top extract has at least one file");
+    rest.extend(working);
+    rest.extend(older.into_iter().map(|(_, path)| path));
+    rest.extend(masters);
+    Some((winner, rest))
+}
+
+/// Which project outranks which when a bare dbnum answers twice.
+///
+/// `catalogue_project_priority` first, then every remaining `included_projects`
+/// entry in the order it is written — the explicit list is an override layer,
+/// so leaving a project out of it means "no opinion", not "unrankable".
+///
+/// This is the same order
+/// [`crate::data_interface::initialization_phase::select_catalogue_candidates`]
+/// adjudicates with, held to it by
+/// `the_ranking_agrees_with_the_ingest_side_adjudicator`. It is a second copy
+/// rather than a call because that function answers a wider question: it reads
+/// the header dbnum its caller scanned, and it turns a same-project duplicate
+/// into a blocker. Blocking is right when deciding what to ingest and wrong
+/// here, where the same verdict would report a declared database as absent.
+fn project_rank(included_projects: &[String], priority: &[String]) -> HashMap<String, usize> {
+    let included: HashSet<String> = included_projects
+        .iter()
+        .map(|project| project.trim().to_ascii_lowercase())
+        .collect();
+    let mut rank = HashMap::new();
+    for (index, project) in priority.iter().enumerate() {
+        let key = project.trim().to_ascii_lowercase();
+        if key.is_empty() || !included.contains(&key) {
+            continue;
+        }
+        rank.insert(key, index);
+    }
+    // Offsets start past the explicit list so a named project always outranks
+    // an unnamed one.
+    for (offset, project) in included_projects.iter().enumerate() {
+        let key = project.trim().to_ascii_lowercase();
+        if key.is_empty() {
+            continue;
+        }
+        rank.entry(key).or_insert(priority.len() + offset);
+    }
+    rank
 }
 
 type Cache = Vec<(String, String, Arc<MdbMembership>)>;
@@ -328,8 +537,11 @@ mod tests {
         MdbDatabase {
             dbnum,
             styp,
+            proj: 0,
             name: name.into(),
             path: on_disk.then(|| PathBuf::from(format!("/somewhere/x{dbnum}_0001"))),
+            project: on_disk.then(|| "AvevaMarineSample".to_string()),
+            shadowed: Vec::new(),
         }
     }
 
@@ -343,6 +555,7 @@ mod tests {
                 db(5100, DICT_STYP, "*CNPESTD/DICT", true),
                 db(7323, DICT_STYP, "*MASTER/MDSDICT", false),
             ],
+            problems: Vec::new(),
         }
     }
 
@@ -399,10 +612,14 @@ mod tests {
         let dir = dir_with(&["ams8100_0001"]);
         let dirs = vec![dir.path().to_path_buf()];
 
-        assert_eq!(locate(&dirs, 100), None, "8100 的文件不属于 100");
         assert_eq!(
-            locate(&dirs, 8100).as_deref(),
-            Some(dir.path().join("ams8100_0001").as_path())
+            pick_within_project(&dirs, 100),
+            None,
+            "8100 的文件不属于 100"
+        );
+        assert_eq!(
+            pick_within_project(&dirs, 8100).map(|(path, _)| path),
+            Some(dir.path().join("ams8100_0001"))
         );
     }
 
@@ -414,17 +631,168 @@ mod tests {
         let dir = dir_with(&["scb100", "scb100_0002", "scb100_0002 copy"]);
         let dirs = vec![dir.path().to_path_buf()];
 
+        let (winner, shadowed) = pick_within_project(&dirs, 100).expect("解得出");
         assert_eq!(
-            locate(&dirs, 100).as_deref(),
-            Some(dir.path().join("scb100_0002").as_path()),
+            winner,
+            dir.path().join("scb100_0002"),
             "抽取叶子是工作文件，压过无后缀主库"
+        );
+        assert_eq!(
+            shadowed,
+            vec![dir.path().join("scb100")],
+            "被压在下面的主库要交出来，不能静默丢掉"
         );
 
         let master_only = dir_with(&["scb100"]);
         assert_eq!(
-            locate(&[master_only.path().to_path_buf()], 100).as_deref(),
-            Some(master_only.path().join("scb100").as_path()),
+            pick_within_project(&[master_only.path().to_path_buf()], 100).map(|(path, _)| path),
+            Some(master_only.path().join("scb100")),
             "没有抽取时主库本身就是答案，不该被报成缺件"
         );
+    }
+
+    fn two_projects(
+        main_dir: &Path,
+        other_dir: &Path,
+    ) -> (Vec<(String, Vec<PathBuf>)>, Vec<String>) {
+        (
+            vec![
+                ("Main".to_string(), vec![main_dir.to_path_buf()]),
+                ("Catalogue".to_string(), vec![other_dir.to_path_buf()]),
+            ],
+            vec!["Main".into(), "Catalogue".into()],
+        )
+    }
+
+    /// The pick has to come from the project ranking, not from how the two
+    /// paths happen to sort. AMS winning 7000 on the live sandbox was
+    /// `AvevaM` > `AvevaC` and nothing else, so the directories here are
+    /// deliberately handed over in whichever order contradicts the ranking.
+    #[test]
+    fn a_cross_project_collision_follows_project_rank_not_the_path_alphabet() {
+        let one = dir_with(&["ams7000_0001"]);
+        let two = dir_with(&["acp7000_0001"]);
+        // Give `Main` the path that sorts *first*: the replaced code took the
+        // last, so an alphabet-driven pick lands on `Catalogue` here.
+        let (main_dir, other_dir) = if one.path() < two.path() {
+            (one.path(), two.path())
+        } else {
+            (two.path(), one.path())
+        };
+        let (projects, included) = two_projects(main_dir, other_dir);
+        let rank = project_rank(&included, &[]);
+
+        let found = locate(&projects, &rank, "Main", 0, 7000).expect("同号两份也要选得出主");
+        assert_eq!(found.project, "Main");
+        assert!(found.path.starts_with(main_dir));
+        assert_eq!(
+            found.shadowed,
+            vec![other_dir.join(if one.path() < two.path() {
+                "acp7000_0001"
+            } else {
+                "ams7000_0001"
+            })],
+            "另一个项目的同号文件要交出来"
+        );
+    }
+
+    /// The two branches used to sort in opposite directions — leaves took the
+    /// last path, masters the first — so one and the same declaration flipped
+    /// to the other project depending on whether the site deploys extracts.
+    #[test]
+    fn masters_and_leaves_answer_with_the_same_project() {
+        let leaves = (dir_with(&["ams7000_0001"]), dir_with(&["acp7000_0001"]));
+        let masters = (dir_with(&["ams7000"]), dir_with(&["acp7000"]));
+        for (main, other) in [&leaves, &masters] {
+            let (projects, included) = two_projects(main.path(), other.path());
+            let rank = project_rank(&included, &[]);
+            let found = locate(&projects, &rank, "Main", 0, 7000).expect("解得出");
+            assert_eq!(found.project, "Main", "抽取与主库两条分支必须同一个答案");
+        }
+    }
+
+    /// `PROJ = 0` means "a database of the project declaring it". It presses on
+    /// top of the ranking, which is the only thing that can pull a declaration
+    /// back when an explicit priority puts another project first.
+    #[test]
+    fn proj_orders_the_search_before_the_ranking_does() {
+        let own = dir_with(&["ams7000_0001"]);
+        let other = dir_with(&["acp7000_0001"]);
+        let (projects, included) = two_projects(own.path(), other.path());
+        let rank = project_rank(&included, &["Catalogue".into()]);
+
+        assert_eq!(
+            locate(&projects, &rank, "Main", 0, 7000)
+                .expect("PROJ=0")
+                .project,
+            "Main"
+        );
+        assert_eq!(
+            locate(&projects, &rank, "Main", 3, 7000)
+                .expect("PROJ=3")
+                .project,
+            "Catalogue"
+        );
+    }
+
+    /// `*MDU/CATA` (7355) declares `PROJ = 3` while `AvevaMarineSample` holds
+    /// the only file. `PROJ` therefore orders the search and never restricts
+    /// it: bucketing strictly would turn a database that does resolve into a
+    /// reported deployment gap.
+    #[test]
+    fn a_foreign_declaration_still_resolves_when_only_the_declaring_project_has_it() {
+        let own = dir_with(&["ams7355_0001"]);
+        let empty = dir_with(&[]);
+        let (projects, included) = two_projects(own.path(), empty.path());
+        let rank = project_rank(&included, &[]);
+
+        let found = locate(&projects, &rank, "Main", 3, 7355).expect("外项目声明也要解出来");
+        assert_eq!(found.project, "Main");
+        assert!(found.shadowed.is_empty());
+    }
+
+    /// Two answers to "which file is dbnum 7000" inside one process is the
+    /// defect this ranking exists to close, so the ingest-side adjudicator is
+    /// asked the same question here. `PROJ` is kept out of it — the declaring
+    /// project owns neither candidate — to leave the ranking alone under test.
+    #[test]
+    fn the_ranking_agrees_with_the_ingest_side_adjudicator() {
+        use crate::data_interface::initialization_phase::{
+            CatalogueCandidate, select_catalogue_candidates,
+        };
+
+        let one = dir_with(&["ams7000_0001"]);
+        let two = dir_with(&["acp7000_0001"]);
+        let (projects, included) = two_projects(one.path(), two.path());
+        let priority: Vec<String> = vec!["Catalogue".into()];
+
+        let mine = locate(
+            &projects,
+            &project_rank(&included, &priority),
+            "Elsewhere",
+            0,
+            7000,
+        )
+        .expect("解得出");
+        let theirs = select_catalogue_candidates(
+            [
+                CatalogueCandidate {
+                    project: "Main".into(),
+                    dbnum: 7000,
+                    path: one.path().join("ams7000_0001"),
+                },
+                CatalogueCandidate {
+                    project: "Catalogue".into(),
+                    dbnum: 7000,
+                    path: two.path().join("acp7000_0001"),
+                },
+            ],
+            &included,
+            &priority,
+        );
+        let winner = theirs.selected.first().expect("摄入侧也要选出一个");
+
+        assert_eq!(mine.project, winner.project);
+        assert_eq!(mine.path, winner.path);
     }
 }

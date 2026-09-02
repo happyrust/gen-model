@@ -1,6 +1,8 @@
 pub mod e3d_mesh_store;
 pub mod e3d_model_service;
-pub mod gen_model;
+#[cfg(feature = "legacy_model")]
+pub(crate) mod gen_model;
+pub mod historical_model;
 
 pub mod concurrency;
 
@@ -12,7 +14,10 @@ pub mod loop_model;
 
 pub mod shared;
 
-pub mod occ_generate;
+#[cfg(feature = "legacy_model")]
+pub(crate) mod occ_generate;
+
+pub mod aabb_refresh;
 
 pub mod libgm_discretise;
 
@@ -24,6 +29,7 @@ pub mod sweep_mesh;
 pub mod mesh_assert;
 
 pub mod manifold_bool;
+pub(crate) mod manifold_types;
 
 #[cfg(feature = "manifold")]
 pub mod manifold_csg;
@@ -38,6 +44,10 @@ pub mod room_live_issue7;
 pub mod room_predicate;
 
 pub mod room_model;
+
+pub(crate) mod room_publication;
+
+pub(crate) mod room_topology;
 
 pub mod cal_model;
 
@@ -59,8 +69,14 @@ pub mod coverage_audit;
 
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};
-pub use gen_model::*;
-pub use occ_generate::*;
+#[cfg(feature = "legacy_model")]
+pub mod legacy {
+    use aios_core::options::DbOption;
+
+    pub async fn generate_dbnums(dbnums: &[u32], db_option: &DbOption) -> anyhow::Result<()> {
+        super::gen_model::process_meshes_by_dbnos(dbnums, db_option).await
+    }
+}
 use once_cell::sync::Lazy;
 use parry3d::bounding_volume::Aabb;
 pub use query::*;

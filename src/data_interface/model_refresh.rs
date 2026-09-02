@@ -1,7 +1,7 @@
 //! ModelRefreshPolicy — 增量落库后的模型重生成执行端。
 //!
 //! 这里只负责「执行」，不负责「决策」：生成根由调用方选定，本模块把它们喂给
-//! `gen_all_geos_data`（[`ModelRefreshPolicy::generate_roots`]），另外提供按
+//! `E3dModelService`（[`ModelRefreshPolicy::generate_roots`]），另外提供按
 //! `pe.deleted` 状态清理被删元素旧几何的入口
 //! （[`ModelRefreshPolicy::cleanup_deleted_by_pe_state`]）。
 //!
@@ -10,76 +10,23 @@
 //! `manual_update::generate_unit_model`；补偿路径 `side_effect_pending::drain`。
 //! 「变更元素 → 生成根」的归一策略只有一份，在 `generation_root.rs`。
 
-use std::str::FromStr;
-
 use aios_core::RefnoEnum;
 use aios_core::pdms_types::*;
 use anyhow::Context;
 
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::gen_model::{TargetedGenerationReport, gen_targeted_geos_data_with_policy};
+use crate::fast_model::e3d_model_service::E3dModelService;
 
-fn dependency_stall_message() -> String {
-    let seconds = crate::data_interface::batch_worker::DEPENDENCY_STALL_TIMEOUT.as_secs();
-    let Some(task) =
-        crate::data_interface::task_registry::TaskRegistry::global().active_dependency_snapshot()
-    else {
-        return format!("CATA 依赖准备连续 {seconds} 秒没有实质进展");
-    };
-    format!(
-        "CATA 依赖准备连续 {seconds} 秒没有实质进展：stage={} dbnum={} path={} parsed={} missing={}",
-        task.current_stage.as_deref().unwrap_or("dependency_index"),
-        task.dependency_dbnum
-            .map_or_else(|| "未解析".to_string(), |value| value.to_string()),
-        task.dependency_path.as_deref().unwrap_or("未解析"),
-        task.dependency_refnos_parsed.unwrap_or(0),
-        task.dependency_refnos_missing.unwrap_or(0),
-    )
+#[derive(Debug, Clone)]
+pub(crate) struct RootGenerationFailure {
+    pub root: String,
+    pub error: String,
 }
 
-async fn await_required_dependency<F, T>(future: F) -> anyhow::Result<T>
-where
-    F: std::future::Future<Output = anyhow::Result<T>>,
-{
-    let timeout = crate::data_interface::batch_worker::DEPENDENCY_STALL_TIMEOUT;
-    await_dependency_with_timeout(
-        future,
-        timeout,
-        crate::data_interface::batch_worker::active_dependency_progress_receiver(),
-    )
-    .await
-}
-
-async fn await_dependency_with_timeout<F, T>(
-    future: F,
-    timeout: std::time::Duration,
-    progress: Option<tokio::sync::watch::Receiver<u64>>,
-) -> anyhow::Result<T>
-where
-    F: std::future::Future<Output = anyhow::Result<T>>,
-{
-    let Some(mut progress) = progress else {
-        return tokio::time::timeout(timeout, future)
-            .await
-            .map_err(|_| anyhow::anyhow!(dependency_stall_message()))?;
-    };
-    tokio::pin!(future);
-    let timer = tokio::time::sleep(timeout);
-    tokio::pin!(timer);
-    loop {
-        tokio::select! {
-            result = &mut future => return result,
-            changed = progress.changed() => {
-                if changed.is_err() {
-                    anyhow::bail!("CATA 依赖进度通道提前关闭");
-                }
-                timer.as_mut().reset(tokio::time::Instant::now() + timeout);
-            }
-            _ = &mut timer => {
-                anyhow::bail!(dependency_stall_message());
-            }
-        }
-    }
+#[derive(Debug, Clone, Default)]
+pub(crate) struct TargetedGenerationReport {
+    pub completed: Vec<String>,
+    pub failures: Vec<RootGenerationFailure>,
 }
 
 #[cfg(test)]
@@ -94,90 +41,40 @@ pub(crate) fn fail_generations_for_test(count: usize) {
 pub struct ModelRefreshPolicy;
 
 impl ModelRefreshPolicy {
-    /// Prepare every CATA input required by a staged DESI window without
-    /// forcing model generation to run in the data phase.
+    /// Apply one already-frozen source session window through e3d-model's
+    /// incremental API. The data pipeline owns window selection; this method
+    /// only validates it and persists the resulting GeometryId delta.
     ///
-    /// Cold-start epochs deliberately defer geometry until all data batches
-    /// have settled.  The dependency rows are different: they belong to the
-    /// source window's atomic journal and therefore must be present before the
-    /// watermark can commit even when geometry is deferred.
-    pub(crate) async fn prepare_required_dependencies(
-        mgr: &AiosDBManager,
-        roots: &[String],
-        cache_context: crate::data_interface::cata_closure::DependencyCacheContext,
+    /// ADR-056 P2-1 改造对象：暂存窗口退役后它失去生产调用点（直写路径一直是
+    /// `run_unit_worklist(…, None, …)` → 根级 `generate_roots`，D3）。P2 用它的
+    /// `collect_window` + `plan_update` 半边做选根与凭证前移，`execute_plan` 半边
+    /// （单元级落库，D3 已否）届时摘除；在那之前不删。
+    #[allow(dead_code)]
+    pub(crate) async fn apply_window(
+        dbnum: u32,
+        start_sesno: i32,
+        end_sesno: i32,
     ) -> anyhow::Result<()> {
-        if roots.is_empty() {
-            return Ok(());
-        }
-        let root_refnos = roots
-            .iter()
-            .map(|root| RefnoEnum::from(root.as_str()))
-            .collect::<Vec<_>>();
-        let root_refus = roots
-            .iter()
-            .filter_map(|root| RefU64::from_str(root).ok())
-            .collect::<Vec<_>>();
-        if root_refus.len() != roots.len() {
-            anyhow::bail!(
-                "CATA 必需依赖包含未解析生成根：total={} parsed={}",
-                roots.len(),
-                root_refus.len()
-            );
-        }
-
-        crate::data_interface::batch_worker::set_active_task_stage("dependency_index");
-        let project = mgr.db_option.project_name.clone();
-        await_required_dependency(async move {
-            crate::data_interface::batch_worker::note_dependency_progress(
-                "dependency_index",
-                None,
-                None,
-                roots.len() as u64,
-                0,
-                0,
-            );
-            crate::data_interface::staging::preload::preload_generation_root_closure(
-                &project,
-                &root_refnos,
-            )
-            .await
-            .context("暂存 DESI 窗口的生成根闭包准备失败")?;
-            crate::data_interface::batch_worker::note_dependency_progress(
-                "dependency_closure",
-                None,
-                None,
-                root_refus.len() as u64,
-                0,
-                0,
-            );
-            if !crate::data_interface::cata_closure::cata_closure_enabled() {
-                return Ok(());
-            }
-            let outcome = crate::data_interface::cata_closure::preload_cata_for_roots(
-                &project,
-                &root_refus,
-                Some(cache_context),
-            )
-            .await
-            .context("暂存 DESI 窗口的 CATA 必需依赖准备失败")?;
-            if outcome.missing > 0 {
-                anyhow::bail!(
-                    "CATA 必需依赖未收口：parsed={} missing={}",
-                    outcome.parsed,
-                    outcome.missing
-                );
-            }
-            println!(
-                "[cata_closure] 必需依赖预加载完成: parsed={} missing={}",
-                outcome.parsed, outcome.missing
-            );
-            crate::data_interface::parse_error::note_preload_success(&project);
-            if let Err(error) = crate::data_interface::parse_error::flush().await {
-                log::warn!("{error:#}");
-            }
+        let target_sesno = u32::try_from(end_sesno).context("invalid target session")?;
+        let first_sesno = u32::try_from(start_sesno).context("invalid start session")?;
+        let base_sesno = first_sesno.saturating_sub(1);
+        // D1（ADR-056）：根级失败进 `model_update_pending` 重试账，不再有窗口级
+        // `Required` 阻断——这就是今天直写路径一直在用的值。
+        let failure_policy =
+            crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback;
+        crate::data_interface::batch_worker::set_active_task_stage("model_increment");
+        let report = E3dModelService::from_current()
+            .await?
+            .apply_window(dbnum, base_sesno, target_sesno, failure_policy)
+            .await?;
+        if report.failed == 0 {
             Ok(())
-        })
-        .await
+        } else {
+            anyhow::bail!(
+                "e3d-model incremental generation reported {} failed geometry unit(s)",
+                report.failed
+            )
+        }
     }
 
     /// Execute explicit, already-planned generation roots. The pending-work
@@ -190,10 +87,17 @@ impl ModelRefreshPolicy {
         if report.failures.is_empty() {
             Ok(())
         } else {
-            anyhow::bail!(crate::fast_model::occ_generate::summarize_root_failures(
-                "model",
-                &report.failures
-            ))
+            let examples = report
+                .failures
+                .iter()
+                .take(3)
+                .map(|failure| format!("{}: {}", failure.root, failure.error))
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::bail!(
+                "e3d-model generation failed for {} root(s): {examples}",
+                report.failures.len()
+            )
         }
     }
 
@@ -216,103 +120,34 @@ impl ModelRefreshPolicy {
         {
             anyhow::bail!("injected model generation failure");
         }
-        let mut db_option = mgr.db_option.clone();
-        db_option.gen_model = true;
-        db_option.gen_mesh = true;
-        db_option.debug_refno_types = vec!["CATA".into(), "LOOP".into(), "PRIM".into()];
-        db_option.debug_root_refnos = Some(roots.to_vec());
-        let root_refnos = roots
-            .iter()
-            .map(|root| RefnoEnum::from(root.as_str()))
-            .collect::<Vec<_>>();
-        // W2（2026-08-07 方案 D2）：暂存窗口内，根**之上**的祖先链（到 WORL）由
-        // batch_worker prereq 的 `staging::ancestor_preload` 解析式预载并验证
-        // （种子含 RegenRoot 与本批新单元根）；下面的子树重解析 + CATA 闭包只
-        // 负责根自身与根以下，惰性闭包退回本职——兜 CATA 漏边，不再承担 DESI
-        // 祖先正确性。窗口外（直写/手动/补偿路径）读的是持久层，祖先本就在场。
-        let required = crate::data_interface::staging::active_staging_writes().is_some();
-        if required {
-            let (source_dbnum, effective_end_sesno) =
-                crate::data_interface::staging::active_staged_finalize_context()
-                    .await
-                    .ok_or_else(|| {
-                        anyhow::anyhow!("staged model generation missing finalize context")
-                    })?;
-            Self::prepare_required_dependencies(
-                mgr,
-                roots,
-                crate::data_interface::cata_closure::DependencyCacheContext {
-                    source_dbnum,
-                    effective_end_sesno,
-                },
-            )
-            .await?;
-        } else {
-            crate::data_interface::staging::preload::preload_generation_root_closure(
-                &db_option.project_name,
-                &root_refnos,
-            )
-            .await?;
-        }
-        // 暂存 DESI 窗口把 CATA 闭包视为提交单元的必需输入；窗口外的独立按需生成
-        // 保留历史 best-effort + 惰性兜底。两种策略必须在这一处显式分叉，不能再让
-        // 暂存路径的错误落进 warning 后照常推进水位。
-        if !required && crate::data_interface::cata_closure::cata_closure_enabled() {
-            let root_refus: Vec<RefU64> = db_option
-                .debug_root_refnos
-                .as_ref()
-                .map(|v| v.iter().filter_map(|s| RefU64::from_str(s).ok()).collect())
-                .unwrap_or_default();
-            crate::data_interface::batch_worker::set_active_task_stage("dependency_index");
-            let preload = crate::data_interface::cata_closure::preload_cata_for_roots(
-                &db_option.project_name,
-                &root_refus,
-                None,
-            );
-            let preload = preload.await;
-            match preload {
-                Ok(outcome) => {
-                    println!(
-                        "[cata_closure] 按需预加载完成: parsed={} missing={}",
-                        outcome.parsed, outcome.missing
-                    );
-                    crate::data_interface::parse_error::note_preload_success(
-                        &db_option.project_name,
-                    );
-                }
-                Err(e) => {
-                    eprintln!("[cata_closure] 按需预加载失败: {e:#}");
-                    log::warn!("[cata_closure] 依赖缓存预加载失败（回退惰性兜底）: {}", e);
-                    // 回退惰性兜底不报错、不阻断，于是这条在现场刷了 788 次也没人知道
-                    // 它一直在失败。按项目归行，次数就是它退了多少次兜底。
-                    crate::data_interface::parse_error::note_preload_failure(
-                        &db_option.project_name,
-                        &format!("{e:#}"),
-                    );
-                }
-            }
-            if let Err(error) = crate::data_interface::parse_error::flush().await {
-                log::warn!("{error:#}");
-            }
-        }
+        // D1（ADR-056）：模型失败不阻断水位，根级失败进重试账；`Required` 只属于
+        // 已退役的暂存窗口。
+        let failure_policy =
+            crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback;
         crate::data_interface::batch_worker::set_active_task_stage("model_generate");
-        crate::data_interface::staging::preload::preload_existing_generation_products(&root_refnos)
-            .await?;
-        println!(
-            "ModelRefreshPolicy: 生成模型，根数量: {}",
-            db_option.debug_root_refnos.as_ref().unwrap().len()
-        );
-        let failure_policy = if required {
-            crate::data_interface::geom_error::GeometryFailurePolicy::Required
+        let dbnum = E3dModelService::dbnum_for_roots(roots).await?;
+        let service = E3dModelService::from_current().await?;
+        let persisted = service.generate_roots(dbnum, roots, failure_policy).await?;
+        if persisted.failed == 0 {
+            Ok(TargetedGenerationReport {
+                completed: roots.to_vec(),
+                failures: Vec::new(),
+            })
         } else {
-            crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback
-        };
-        gen_targeted_geos_data_with_policy(
-            &db_option,
-            failure_policy,
-            crate::data_interface::model_concurrency::effective_root_inflight(),
-        )
-        .await
+            Ok(TargetedGenerationReport {
+                completed: Vec::new(),
+                failures: roots
+                    .iter()
+                    .map(|root| RootGenerationFailure {
+                        root: root.clone(),
+                        error: format!(
+                            "e3d-model reported {} failed geometry unit(s)",
+                            persisted.failed
+                        ),
+                    })
+                    .collect(),
+            })
+        }
     }
 
     /// F1/F3（T304）补偿路径专用：补偿只有 `changed_refnos`（不含操作类型），故按**当前
@@ -349,25 +184,29 @@ impl ModelRefreshPolicy {
 mod tests {
     use super::*;
 
-    #[tokio::test(start_paused = true)]
-    async fn dependency_watchdog_resets_only_on_progress_and_times_out_after_silence() {
-        let (progress, receiver) = tokio::sync::watch::channel(0u64);
-        let pending = std::future::pending::<anyhow::Result<()>>();
-        let watchdog = tokio::spawn(await_dependency_with_timeout(
-            pending,
-            std::time::Duration::from_secs(300),
-            Some(receiver),
-        ));
-
-        tokio::time::advance(std::time::Duration::from_secs(299)).await;
-        assert!(!watchdog.is_finished());
-        progress.send_replace(1);
-        tokio::task::yield_now().await;
-        tokio::time::advance(std::time::Duration::from_secs(299)).await;
-        assert!(!watchdog.is_finished(), "实质进展应重置停滞时钟");
-        tokio::time::advance(std::time::Duration::from_secs(1)).await;
-        let error = watchdog.await.expect("watchdog task").unwrap_err();
-        assert!(format!("{error:#}").contains("300 秒"), "{error:#}");
+    /// ADR-056 D8-A（spec 035 T121）：CATA 必需依赖门 `prepare_required_dependencies`
+    /// 与它的停滞看门狗整个退场——模型面经 `E3dDbResolver` 从文件读 CATA，
+    /// `cata_closure` 入 Surreal 只服务 `ref_rev` / UI（补偿队列，T126）。
+    /// 任何一处把「CATA 行必须先落库」重新立成模型或水位的前置，这里就红。
+    #[test]
+    fn the_cata_dependency_gate_is_gone() {
+        let source = include_str!("model_refresh.rs");
+        let production = source
+            .split_once("mod tests {")
+            .expect("test module must follow production code")
+            .0;
+        for needle in [
+            "fn prepare_required_dependencies",
+            "await_required_dependency",
+            "DEPENDENCY_STALL_TIMEOUT",
+            "GeometryFailurePolicy::Required",
+            "active_staging_writes",
+        ] {
+            assert!(
+                !production.contains(needle),
+                "model_refresh.rs 生产代码不得再含 `{needle}`（ADR-056 D1 / D8-A）"
+            );
+        }
     }
 
     /// F1 · T106（live）：按 `pe.deleted` 反推的清理必须扫净整棵子树，且**只**动被删的那棵。

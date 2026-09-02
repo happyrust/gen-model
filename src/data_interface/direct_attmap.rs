@@ -253,10 +253,17 @@ fn convert_one(
 }
 
 /// 声明成文本的类型。数值与引用不在其列——那两类错了会算出错的几何。
+///
+/// `WordType` 在列：词签渲染成文本、不进几何。全 schema 只有 APPLDWORLD 一个 noun
+/// 把 `TYPEX` 声明成 WORD（其余 1169 个声明 STRING），文件侧一律存 `RawWords[2]`——
+/// 同一个值，不该因为声明措辞不同就从「视图分歧」变成「形状冲突」。
 fn is_text_declaration(declared: &AttrVal) -> bool {
     matches!(
         declared,
-        AttrVal::StringType(_) | AttrVal::StringArrayType(_) | AttrVal::StringHashType(_)
+        AttrVal::StringType(_)
+            | AttrVal::StringArrayType(_)
+            | AttrVal::StringHashType(_)
+            | AttrVal::WordType(_)
     )
 }
 
@@ -599,14 +606,10 @@ mod tests {
     /// 交自然数组、记一笔视图分歧——DB 读侧拿这份标量声明本来也读不出数组。
     #[test]
     fn a_reference_array_the_scalar_declaration_cannot_hold_is_handed_over_whole() {
-        let value =
-            DescriptorValue::RefNoArray(vec![RefNo::new(7_333, 1), RefNo::new(7_333, 2)]);
+        let value = DescriptorValue::RefNoArray(vec![RefNo::new(7_333, 1), RefNo::new(7_333, 2)]);
         assert!(coerce(&value, &AttrVal::ElementType(String::new())).is_none());
 
-        let (map, out) = convert(
-            decoded("CRFA", value),
-            AttrVal::ElementType(String::new()),
-        );
+        let (map, out) = convert(decoded("CRFA", value), AttrVal::ElementType(String::new()));
 
         assert_eq!(
             map.get("CRFA"),
@@ -619,6 +622,28 @@ mod tests {
         assert_eq!(out.view_divergence.len(), 1);
         assert_eq!(out.view_divergence[0].found, "RefNoArray[2]");
         assert_eq!(out.view_divergence[0].declared, "ElementType");
+    }
+
+    /// **词声明对上生字与文本声明同权。** APPLDWORLD 是全 schema 唯一把 `TYPEX`
+    /// 声明成 WORD 的 noun（其余 1169 个声明 STRING），文件侧同样存 `RawWords[2]`。
+    /// 7333 全量对拍（199094 样本）里它是唯一的形状冲突——同一个值不该因为声明
+    /// 措辞不同就从「视图分歧」升格成「算错」。
+    #[test]
+    fn a_word_declaration_over_raw_words_is_a_view_divergence_not_a_conflict() {
+        let value = DescriptorValue::RawWords(vec![0x0102_0304, 0x0506_0708]);
+        let (map, out) = convert(decoded("TYPEX", value), AttrVal::WordType(String::new()));
+
+        assert_eq!(
+            map.get("TYPEX"),
+            Some(&NamedAttrValue::IntArrayType(vec![
+                0x0102_0304_u32 as i32,
+                0x0506_0708_u32 as i32,
+            ]))
+        );
+        assert!(out.shape_conflicts.is_empty());
+        assert_eq!(out.view_divergence.len(), 1);
+        assert_eq!(out.view_divergence[0].found, "RawWords[2]");
+        assert_eq!(out.view_divergence[0].declared, "WordType");
     }
 
     /// 另外 24 个 noun 把同一个 `CRFA` 声明成数组，那一支不受投影臂影响：原样成数组，

@@ -51,5 +51,31 @@ def net_window(
 def element(path: str, refno: str, sesno: int | None = None) -> dict[str, Any]:
     """从文件直读单元素属性 dump；sesno 给定时读该会话或之前的最后版本。"""
 
+def attmap(path: str, refno: str, sesno: int | None = None) -> dict[str, Any]:
+    """读取生成期语义属性视图（PdmsIO 直读、合并默认与显式属性）。"""
+
+def subtree(path: str, refno: str, sesno: int | None = None) -> dict[str, Any]:
+    """通过 PdmsIO 递归直读指定元素及其全部后代（父节点优先 DFS）。"""
+
+def generate_all_model(
+    path: str, output: str, sesno: int | None = None
+) -> dict[str, Any]:
+    """通过 PdmsIO 直读当前索引中的全部元素并写出模型快照。"""
+
+def generate_model(
+    path: str, refno: str, output: str, sesno: int | None = None
+) -> dict[str, Any]:
+    """将 direct 子树元素、PdmsGeoParam、PlantMesh 和 RVM primitive 片段写成 JSON。"""
+
+def generate_obj(
+    path: str, refno: str, output: str, sesno: int | None = None
+) -> dict[str, Any]:
+    """将 direct 子树中的 PlantMesh 写成 OBJ 可视化产物。"""
+
+def generate_rvm(
+    path: str, refno: str, output: str, sesno: int | None = None
+) -> dict[str, Any]:
+    """将 direct primitive 组装为可被 rvm-rs 回读的 RVM smoke 文件。"""
+
 def noun_dict(attlib_path: str) -> dict[str, Any]:
     """attlib 字典：{noun_count, field_count, nouns: [NounCapabilities...]}。"""

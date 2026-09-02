@@ -11,12 +11,12 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use aios_core::RefU64;
 use aios_database::data_interface::cata_closure::CataDbLocator;
 use aios_database::data_interface::direct_index::BackRefVia;
 use aios_database::data_interface::direct_store::{
     DbPin, DirectSchema, DirectStore, TEMPLATE_DIR_ENV,
 };
-use aios_core::RefU64;
 use e3d_io::refno::RefNo;
 use e3d_io::{ReadOnlyEngine, ScanTier};
 
@@ -156,10 +156,10 @@ fn every_index_answer_survives_a_single_element_recheck() {
         for element in engine.scan_elements(ScanTier::Named).expect("scans") {
             let element = element.expect("every element reads");
             if let Some(name) = element.name {
-                names
-                    .entry(name)
-                    .or_default()
-                    .push(RefU64::from_two_nums(element.refno.word0, element.refno.word1));
+                names.entry(name).or_default().push(RefU64::from_two_nums(
+                    element.refno.word0,
+                    element.refno.word1,
+                ));
             }
         }
         names.into_iter().collect()
@@ -173,8 +173,7 @@ fn every_index_answer_survives_a_single_element_recheck() {
         );
     }
     assert_eq!(
-        named_total,
-        indexes.stats.named as usize,
+        named_total, indexes.stats.named as usize,
         "named totals disagree"
     );
     // 抽样再走一遍单元素路径：find_element → stored_name 回到同一个名字。

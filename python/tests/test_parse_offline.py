@@ -145,6 +145,61 @@ def test_element_rejects_unparsable_refno(configured, snapshots):
         configured.parse.element(str(snapshots["baseline"]), "not-a-refno")
 
 
+def test_attmap_and_subtree_read_zone_without_database(configured, snapshots, manifest):
+    """生成期属性视图及父子闭包均由 PdmsIO 直读，且不依赖数据库连接。"""
+    zone = manifest["refs"]["zone"]
+    one = configured.parse.attmap(str(snapshots["baseline"]), zone)
+    assert one["refno"] == zone
+    assert isinstance(one["attrs"], dict)
+    tree = configured.parse.subtree(str(snapshots["baseline"]), zone)
+    assert tree["root"] == zone
+    assert tree["count"] == len(tree["elements"])
+    assert tree["count"] >= 1
+    assert tree["elements"][0]["refno"] == zone
+    # direct 解析同时产出生成器可消费的 PdmsGeoParam；ZONE 自身通常无实体，
+    # 其后代至少应有一个带几何参数的基本体。
+    primitive_models = [item for item in tree["elements"] if item["geo_valid"]]
+    assert primitive_models
+    assert all(item["geo_param"] is not None for item in primitive_models)
+    assert any(item["mesh"] is not None for item in primitive_models)
+
+
+def test_generate_model_writes_direct_zone_artifact(configured, snapshots, manifest, tmp_path):
+    zone = manifest["refs"]["zone"]
+    output = tmp_path / "zone-model.json"
+    result = configured.parse.generate_model(str(snapshots["baseline"]), zone, str(output))
+    assert result["format"] == "direct-model-v1"
+    assert result["root"] == zone
+    assert result["count"] > 0
+    assert result["mesh_count"] > 0
+    assert output.exists()
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert payload["root"] == zone
+    assert payload["count"] == len(payload["elements"])
+    assert any(item["geo_valid"] for item in payload["elements"])
+    assert sum(1 for item in payload["elements"] if item["rvm_primitive"]) > 0
+
+
+def test_generate_obj_writes_direct_zone_mesh(configured, snapshots, manifest, tmp_path):
+    zone = manifest["refs"]["zone"]
+    output = tmp_path / "zone-model.obj"
+    result = configured.parse.generate_obj(str(snapshots["baseline"]), zone, str(output))
+    assert result["format"] == "obj"
+    assert result["mesh_count"] > 0
+    text = output.read_text(encoding="utf-8")
+    assert text.startswith("# aios direct-model-v1 OBJ")
+    assert "\nv " in text and "\nf " in text
+
+
+def test_generate_rvm_writes_direct_zone_smoke(configured, snapshots, manifest, tmp_path):
+    zone = manifest["refs"]["zone"]
+    output = tmp_path / "zone-model.rvm"
+    result = configured.parse.generate_rvm(str(snapshots["baseline"]), zone, str(output))
+    assert result["format"] == "rvm-direct-v1"
+    assert result["geometry_count"] > 0
+    assert output.stat().st_size == result["bytes"]
+
+
 def _net_classes(result: dict) -> dict[str, str]:
     return {
         entry["refno"]: kind

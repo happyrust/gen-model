@@ -8,6 +8,7 @@ use aios_core::consts::{CIVIL_TYPES, NGMR_OWN_TYPES};
 use aios_core::geometry::*;
 use aios_core::options::DbOption;
 use aios_core::parsed_data::CateGeomsInfo;
+use aios_core::parsed_data::geo_params_data::CateGeoParam::{BoxImplied, TubeImplied};
 use aios_core::parsed_data::geo_params_data::PdmsGeoParam;
 use aios_core::pdms_types::*;
 use aios_core::pe::SPdmsElement;
@@ -25,6 +26,36 @@ use bevy_transform::components::Transform;
 use dashmap::DashMap;
 use futures::StreamExt;
 use futures::future::join_all;
+
+/// Resolve the effective tubing section without depending on the retired model generator.
+///
+/// This is catalogue interpretation shared by the e3d-model path and tubing consumers; it is
+/// deliberately kept outside `gen_model`, whose entire module is legacy-feature gated.
+async fn query_tubi_size(
+    refno: RefnoEnum,
+    tubi_cat_ref: RefnoEnum,
+    is_hang: bool,
+) -> anyhow::Result<TubiSize> {
+    let tubi_geoms_info = resolve_desi_comp(refno, Some(tubi_cat_ref))
+        .await
+        .unwrap_or_default();
+    for geom in &tubi_geoms_info.geometries {
+        if let BoxImplied(d) = geom {
+            return Ok(TubiSize::BoxSize((d.height, d.width)));
+        }
+        if let TubeImplied(d) = geom {
+            return Ok(TubiSize::BoreSize(d.diameter));
+        }
+    }
+
+    if let Ok(cat_att) = aios_core::get_named_attmap(tubi_cat_ref).await {
+        let params = cat_att.get_f32_vec("PARA").unwrap_or_default();
+        if params.len() >= 2 {
+            return Ok(TubiSize::BoreSize(params[if is_hang { 0 } else { 1 }]));
+        }
+    }
+    Ok(TubiSize::None)
+}
 use futures::stream::FuturesUnordered;
 use glam::{DMat4, DVec3, Vec3};
 use nalgebra::Point3;
@@ -177,6 +208,7 @@ mod staged_write_routing_tests {
     }
 
     #[tokio::test]
+    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
     async fn tubi_relation_stays_in_staging_until_commit() {
         use crate::data_interface::staging::ResourceThresholds;
         use crate::data_interface::staging::lifecycle::create_window_on;
@@ -1424,8 +1456,7 @@ pub async fn gen_cata_geos(
 
         let tubi_att = aios_core::get_named_attmap(h_ref).await.unwrap_or_default();
         let tubi_cat_ref = tubi_att.get_foreign_refno("CATR").unwrap_or_default();
-        let mut h_tubi_size =
-            fast_model::query_tubi_size(branch_refno, tubi_cat_ref, is_hang).await?;
+        let mut h_tubi_size = query_tubi_size(branch_refno, tubi_cat_ref, is_hang).await?;
         let mut tubi_geo_hash = if matches!(h_tubi_size, TubiSize::BoxSize(_)) {
             BOXI_GEO_HASH
         } else {
@@ -1560,7 +1591,7 @@ pub async fn gen_cata_geos(
                                     .await
                                     .map(|x| x.get_refno_or_default())
                                     .unwrap_or_default();
-                                    current_tubing.tubi_size = fast_model::query_tubi_size(
+                                    current_tubing.tubi_size = query_tubi_size(
                                         current_tubing.leave_refno,
                                         lstube_cat_ref,
                                         is_hang,
@@ -1647,12 +1678,9 @@ pub async fn gen_cata_geos(
                         .await
                         .map(|x| x.get_refno_or_default())
                         .unwrap_or_default();
-                        current_tubing.tubi_size = fast_model::query_tubi_size(
-                            current_tubing.leave_refno,
-                            lstube_cat_ref,
-                            is_hang,
-                        )
-                        .await?;
+                        current_tubing.tubi_size =
+                            query_tubi_size(current_tubing.leave_refno, lstube_cat_ref, is_hang)
+                                .await?;
                     }
                     #[cfg(feature = "debug_model")]
                     if !current_tubing.is_dir_ok() {

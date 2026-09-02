@@ -6,13 +6,14 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::Instant;
 
 use aios_core::{RefU64, RefnoEnum, SUL_DB};
+use anyhow::Context;
 use serde::{Deserialize, Serialize};
 use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::occ_generate::AabbChange;
+use crate::fast_model::aabb_refresh::AabbChange;
 use crate::fast_model::room_model;
 
 pub const TABLE: &str = "model_update_pending";
@@ -64,6 +65,37 @@ async fn clear_stale_at_process_start_on(db: &Surreal<Any>) -> anyhow::Result<u6
     Ok(counts.first().map_or(0, |row| row.count))
 }
 
+/// 整库重建开工前作废这个库排着的增量工作，返回丢弃的行数。
+///
+/// 排在队列里的每一条都是照**重建之前**那份模型算出来的。重建要把这个库的根整个
+/// 重画一遍，这些行于是既没用又有害：`transform` 与 `delete_cleanup` 排在 regen
+/// 之前，会先拿旧窗口的结论去改一遍马上就要被替换的行；`cascade_expand` 会派生出
+/// 一批同样过期的 regen 工作。core 的 `Refresh(当前 VIEW)` 在同一个位置把整条队列
+/// 丢掉（`m_queue.end = m_queue.begin`），理由一模一样——视图自己要重画了。
+///
+/// **房间任务不在此列。** 清的是 `DATA_ACTION_FILTER` 那五种；
+/// `room_recalc_*` 由 ADR-010 §7 的房间轮自己收敛，重建不会替它们重新入队，
+/// 一起删掉就是真丢工作。
+///
+/// `dbnum = 0` 的行同样留着：按需生成（[`ensure_regen_pending`]）落的行认领不了来源库，
+/// 它是人当场点的，不属于任何一次窗口的陈旧结论。
+pub async fn discard_pending_for_full_rebuild(dbnum: u32) -> anyhow::Result<u64> {
+    discard_pending_for_full_rebuild_on(&SUL_DB, dbnum).await
+}
+
+async fn discard_pending_for_full_rebuild_on(db: &Surreal<Any>, dbnum: u32) -> anyhow::Result<u64> {
+    let mut response = db
+        .query(format!(
+            "SELECT count() AS count FROM {TABLE} \
+             WHERE dbnum = {dbnum} {DATA_ACTION_FILTER} GROUP ALL; \
+             DELETE {TABLE} WHERE dbnum = {dbnum} {DATA_ACTION_FILTER};"
+        ))
+        .await?
+        .check()?;
+    let counts: Vec<PendingRowCount> = response.take(0)?;
+    Ok(counts.first().map_or(0, |row| row.count))
+}
+
 /// Retry ceiling per work item (same policy as `side_effect_pending`). A job
 /// that keeps failing stays in the table as an inspectable dead letter instead
 /// of burning a generator run every watcher cycle forever; it revives
@@ -73,6 +105,7 @@ async fn clear_stale_at_process_start_on(db: &Surreal<Any>) -> anyhow::Result<u6
 /// Public because the manual run enforces the same ceiling: reading the table
 /// without it is how you INSPECT a dead letter, not how you re-run one.
 pub const MAX_ATTEMPTS: u32 = 5;
+const MODEL_WORK_LEASE: &str = "10m";
 
 /// Short-lived recovery record written before any PE mutation. A retry reuses
 /// this exact range and pre-update model plan instead of recomputing ownership
@@ -639,14 +672,10 @@ pub(crate) async fn refresh_post_regen_aabbs(refnos: &[RefnoEnum]) -> anyhow::Re
     if refnos.is_empty() {
         return Ok(0);
     }
-    crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos_incremental(refnos, true)
+    crate::fast_model::aabb_refresh::update_inst_relate_aabbs_by_refnos_incremental(refnos, true)
         .await?;
-    let changes = crate::fast_model::occ_generate::existing_geometric_aabb_changes(refnos).await?;
-    if let Some(context) = crate::data_interface::staging::active_staging_writes() {
-        context.defer_room_changes(&changes).await;
-    } else {
-        enqueue_room_recalc(&changes).await?;
-    }
+    let changes = crate::fast_model::aabb_refresh::existing_geometric_aabb_changes(refnos).await?;
+    enqueue_room_recalc(&changes).await?;
     Ok(changes.len())
 }
 
@@ -683,6 +712,19 @@ fn source_time_for<'a>(
     window_end_time
 }
 
+/// A positive DESI save is the smallest durable publication cohort available at
+/// this layer. Every root produced by that window must publish together; work
+/// without a comparable source target stays independently schedulable.
+fn publication_cohort(dbnum: u32, source_end_sesno: i32) -> Option<String> {
+    (dbnum > 0 && source_end_sesno > 0).then(|| format!("{dbnum}:{source_end_sesno}"))
+}
+
+fn pending_publication_cohort(job: &PendingModelWork) -> Option<String> {
+    (job.action == ModelWorkAction::RegenRoot)
+        .then(|| publication_cohort(job.dbnum, job.source_end_sesno))
+        .flatten()
+}
+
 /// `source_end_sesno_time` 是**那条来源保存的写入时刻**（RFC3339），待重试卡上的
 /// `来源保存 08-05 18:24`（plant-ui ADR-0019 Q7）。与水位那一列同一把尺子、同一种
 /// 写法：跟着 `source_end_sesno` 的单调条件走，读不到就整条子句都不写。
@@ -690,6 +732,7 @@ fn render_upsert(item: &ModelWorkItem, source_end_sesno_time: Option<&str>) -> S
     let id = record_id(item);
     let db_type = escape_surql_str(&item.db_type);
     let target = escape_surql_str(&item.target_refno);
+    let root_id = escape_surql_str(&item.target_refno.replace('/', "_"));
     let noun = escape_surql_str(&item.noun);
     let end_sesno = item.source_end_sesno;
     let dbnum = item.dbnum;
@@ -743,6 +786,14 @@ fn render_upsert(item: &ModelWorkItem, source_end_sesno_time: Option<&str>) -> S
         format!("target_refno = '{target}'"),
         format!("noun = '{noun}'"),
     ];
+    if item.action == ModelWorkAction::RegenRoot
+        && let Some(cohort) = publication_cohort(dbnum, end_sesno)
+    {
+        clauses.push(format!(
+            "cohort_id = IF {end_sesno} >= (source_end_sesno?:0) \
+             THEN '{cohort}' ELSE cohort_id END"
+        ));
+    }
     clauses.extend(revival_clauses);
     // 时刻跟着序号那条单调写入走：本次来源没有比行上已知的更新时，时刻不许退回去
     // （与水位那一列同一个坑）。它读的同样是 `source_end_sesno` 的**旧值**，所以
@@ -754,14 +805,53 @@ fn render_upsert(item: &ModelWorkItem, source_end_sesno_time: Option<&str>) -> S
             escape_surql_str(time)
         ));
     }
-    // 复活子句读的是 `source_end_sesno` 的**旧值**，所以必须排在它被覆盖之前。
+    if item.action == ModelWorkAction::RegenRoot {
+        // A revision identifies an immutable source target, not the number of
+        // duplicate notifications for it. Replaying the same target is idempotent.
+        clauses.push(format!(
+            "revision = IF $previous_revision = NONE OR {end_sesno} > ($previous_target?:-1) \
+             THEN ($previous_revision?:0) + 1 ELSE $previous_revision END"
+        ));
+    } else {
+        clauses.push("revision = (revision?:0) + 1".to_string());
+    }
+    // Revision and revival clauses read the old source target, so the monotonic
+    // source assignment must remain after both of them.
     clauses.push(format!(
         "source_end_sesno = math::max([source_end_sesno?:0, {end_sesno}])"
     ));
-    clauses.push("revision = (revision?:0) + 1".to_string());
     clauses.push("updated_at = time::now()".to_string());
 
-    format!("UPSERT {id} SET {};", clauses.join(", "))
+    let pending_upsert = if item.action == ModelWorkAction::RegenRoot {
+        format!(
+            "LET $previous = (SELECT * FROM {id} LIMIT 1)[0];\n\
+             LET $root_previous = (SELECT * FROM type::thing('gen_root', '{root_id}') LIMIT 1)[0];\n\
+             LET $previous_revision = math::max([$previous.revision?:0, $root_previous.desired_revision?:0]);\n\
+             LET $previous_target = math::max([$previous.source_end_sesno?:-1, $root_previous.desired_target.source_end_sesno?:-1]);\n\
+             UPSERT {id} SET {};",
+            clauses.join(", ")
+        )
+    } else {
+        format!("UPSERT {id} SET {};", clauses.join(", "))
+    };
+    if item.action != ModelWorkAction::RegenRoot {
+        return pending_upsert;
+    }
+
+    let desired_target = if source_end_sesno_time.is_some() {
+        "{dbnum: $desired.dbnum?:0, source_end_sesno: $desired.source_end_sesno?:0, source_end_sesno_time: $desired.source_end_sesno_time}"
+    } else {
+        "{dbnum: $desired.dbnum?:0, source_end_sesno: $desired.source_end_sesno?:0}"
+    };
+    format!(
+        "{pending_upsert}\n\
+         LET $desired = (SELECT * FROM ONLY {id});\n\
+         UPSERT type::thing('gen_root', '{root_id}') SET\n\
+           desired_revision = $desired.revision,\n\
+           desired_target = {desired_target},\n\
+           publication_status = IF (published_revision?:0) > 0 THEN 'stale' ELSE 'pending' END,\n\
+           last_error = NONE, updated_at = time::now();"
+    )
 }
 
 pub async fn load_attempt(dbnum: u32) -> anyhow::Result<Option<IncrementUpdateAttempt>> {
@@ -1091,6 +1181,11 @@ fn render_baseline_transaction(
 /// gating) the watermark was the historical bug this ordering exists to
 /// prevent — a lost status write was unrepairable because no later window
 /// revisits an element that did not change again.
+///
+/// After the tail commits, `plan.credential_advance` (ADR-056 P2-2) moves the
+/// untouched roots' `gen_root` credentials to `end_sesno` on a best-effort
+/// basis — outside the transaction on purpose, so a model-side failure can
+/// neither roll back nor block the watermark (N4).
 pub async fn finalize_attempt(
     dbnum: u32,
     end_sesno: i32,
@@ -1144,6 +1239,31 @@ pub(crate) async fn finalize_attempt_on(
     .map_err(|error| {
         anyhow::anyhow!("finalize increment attempt dbnum={dbnum} statement failed: {error}")
     })?;
+
+    // ADR-056 P2-2 凭证前移：挂在尾事务**之后**（水位已落，模型面的事不许再拦它，N4）、
+    // 模型 drain 之前。成败只记日志——前移省的是算，不是正确性：没前移的根照旧按
+    // ADR-054 单调判据过期，等按需 `ensure`。名单来自 `window_root_plan`（P2-1），旧计划
+    // 与 CATA / SYST 窗口名单为空，这里一步不走。
+    if !plan.credential_advance.is_empty() {
+        match crate::data_interface::window_root_plan::advance_root_credentials_on(
+            db,
+            dbnum,
+            end_sesno,
+            end_sesno_time,
+            &plan.credential_advance,
+        )
+        .await
+        {
+            Ok(outcome) => println!(
+                "[凭证前移] dbnum={dbnum} 窗口右端 {end_sesno}：名单 {} 根，前移 {} 根",
+                outcome.requested, outcome.advanced
+            ),
+            Err(error) => println!(
+                "[凭证前移] dbnum={dbnum} 窗口右端 {end_sesno} 失败，名单上的根保持过期、\
+                 等按需重生成: {error:#}"
+            ),
+        }
+    }
     Ok(())
 }
 
@@ -1222,8 +1342,13 @@ fn render_complete_regen_revision(root_refno: &str, revision: u64) -> String {
          IF $work != NONE {{\n\
            UPDATE type::thing('gen_root', '{root_id}') SET\n\
              status = 'Generated',\n\
+             publication_status = 'ready',\n\
+             desired_revision = $work.revision,\n\
+             published_revision = $work.revision,\n\
+             published_target = {{dbnum: $work.dbnum?:0, source_end_sesno: $work.source_end_sesno?:0, source_end_sesno_time: $work.source_end_sesno_time}},\n\
              source_end_sesno = $work.source_end_sesno?:0,\n\
              source_end_sesno_time = $work.source_end_sesno_time,\n\
+             last_error = NONE,\n\
              updated_at = time::now();\n\
            DELETE {TABLE} WHERE {predicate};\n\
          }};"
@@ -1265,11 +1390,22 @@ fn render_mark_failed_revision(
     error: &str,
 ) -> String {
     let error = escape_surql_str(error);
-    format!(
+    let pending = format!(
         "UPDATE {TABLE} SET status = 'failed', attempts = (attempts?:0) + 1, \
          last_error = '{error}', updated_at = time::now() \
          WHERE {};",
         settle_predicate(action, target_refno, revision)
+    );
+    if action != ModelWorkAction::RegenRoot {
+        return pending;
+    }
+    let root_id = escape_surql_str(&target_refno.replace('/', "_"));
+    format!(
+        "{pending}\n\
+         UPDATE type::thing('gen_root', '{root_id}') SET\n\
+           publication_status = IF (published_revision?:0) > 0 THEN 'stale' ELSE 'failed' END,\n\
+           last_error = '{error}', updated_at = time::now()\n\
+           WHERE desired_revision = {revision};"
     )
 }
 
@@ -1322,6 +1458,103 @@ pub async fn ensure_regen_pending(root_refno: &str, noun: &str) -> anyhow::Resul
         .ok_or_else(|| anyhow::anyhow!("ensure 落 pending 之后读不到行: {root_refno}"))
 }
 
+#[derive(Debug, Deserialize)]
+struct RootCompletionCredentialRow {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    source_end_sesno: Option<i32>,
+}
+
+/// 生成根在当前投影下的生成源版本（ADR-054）：所在库由 MDB 的 DESI 文件按索引点查得出，
+/// 时点是该文件此刻的最新会话。**不经 `pe`、不经 `dbnum_watermark`**——零解析项目也要能
+/// 点看即生成，而文件比库新的那段时间用户要的是文件那一版。
+async fn root_model_source(
+    root_refno: &str,
+) -> anyhow::Result<crate::data_interface::model_source::SourceVersion> {
+    let root = crate::fast_model::e3d_model_service::parse_refno(root_refno)?;
+    tokio::task::spawn_blocking(move || {
+        crate::data_interface::model_source::root_source_version(root)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("resolve model source {root_refno} task failed: {error}"))?
+    .map_err(|error| error.context(format!("生成根 {root_refno} 无法判定生成源版本")))
+}
+
+/// 这个生成根的完成凭证是否覆盖当前生成源版本。
+///
+/// 仅有 `inst_relate` 行不构成缓存命中：它可能属于较早会话。生成根必须处于完成终态，
+/// 且凭证会话号**不早于**文件最新会话（ADR-054 实施约束 4：单调，不判等值）；旧行缺
+/// 会话号按未命中处理。文件被换回更旧版本时凭证会显得「超前」，那是文件异常，由重建
+/// 批次（ADR-021）清凭证，不在这里猜。
+pub async fn generation_root_cache_current(root_refno: &str) -> anyhow::Result<bool> {
+    let version = root_model_source(root_refno).await?;
+    let root_id = escape_surql_str(&root_refno.replace('/', "_"));
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT status, source_end_sesno \
+             FROM ONLY type::thing('gen_root', '{root_id}') LIMIT 1;"
+        ))
+        .await
+        .map_err(|error| anyhow::anyhow!("load model credential {root_refno} failed: {error}"))?
+        .check()
+        .map_err(|error| {
+            anyhow::anyhow!("load model credential {root_refno} statement failed: {error}")
+        })?;
+    let row: Option<RootCompletionCredentialRow> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("decode model credential {root_refno} failed: {error}"))?;
+    Ok(row.is_some_and(|row| {
+        matches!(
+            row.status.as_deref(),
+            Some("Generated" | "AlreadyAvailable" | "NoRenderableGeometry")
+        ) && crate::data_interface::model_source::credential_covers(
+            row.source_end_sesno,
+            version.sesno as i32,
+        )
+    }))
+}
+
+/// 为按需生成落一条认领**当前生成源版本**（文件最新会话，ADR-054）的 durable 工作。
+///
+/// 旧的 [`ensure_regen_pending`] 是人工强制重试语义，故意写 `source_end_sesno=0`；
+/// 自动按需显示不能沿用它，否则生成完成后凭证仍是 0，下一次显示永远判成过期。
+pub async fn ensure_regen_pending_current(root_refno: &str, noun: &str) -> anyhow::Result<u64> {
+    let version = root_model_source(root_refno).await?;
+    let dbnum = version.dbnum;
+    let item = ModelWorkItem {
+        dbnum,
+        db_type: "DESI".to_string(),
+        source_end_sesno: version.sesno as i32,
+        action: ModelWorkAction::RegenRoot,
+        target_refno: root_refno.to_string(),
+        noun: noun.to_string(),
+    };
+    let root_id = escape_surql_str(&root_refno.replace('/', "_"));
+    let noun = escape_surql_str(noun);
+    let transaction = format!(
+        "BEGIN TRANSACTION;\n\
+         UPSERT type::thing('gen_root', '{root_id}') SET \
+           pe = type::thing('pe', '{root_id}'), noun = '{noun}', dbnum = {dbnum};\n\
+         {}\n\
+         COMMIT TRANSACTION;",
+        render_upsert(&item, version.session_time.as_deref())
+    );
+    SUL_DB
+        .query(transaction)
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("persist current ensure pending {root_refno} failed: {error}")
+        })?
+        .check()
+        .map_err(|error| {
+            anyhow::anyhow!("persist current ensure pending {root_refno} statement failed: {error}")
+        })?;
+    current_regen_revision(root_refno)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("ensure 落当前水位 pending 之后读不到行: {root_refno}"))
+}
+
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ModelCoverageReport {
     pub dbnum: u32,
@@ -1344,16 +1577,15 @@ struct GenRootCoverageRow {
     source_end_sesno_time: Option<String>,
 }
 
-fn gen_root_credential_is_current(
-    row: &GenRootCoverageRow,
-    source_end_sesno: i32,
-    source_end_sesno_time: Option<&str>,
-) -> bool {
+/// 凭证是否覆盖要求的会话号（ADR-054 实施约束 4：单调，不判等值；时刻只记不比）。
+fn gen_root_credential_is_current(row: &GenRootCoverageRow, source_end_sesno: i32) -> bool {
     matches!(
         row.status.as_deref(),
         Some("Generated" | "AlreadyAvailable" | "NoRenderableGeometry")
-    ) && row.source_end_sesno == Some(source_end_sesno)
-        && row.source_end_sesno_time.as_deref() == source_end_sesno_time
+    ) && crate::data_interface::model_source::credential_covers(
+        row.source_end_sesno,
+        source_end_sesno,
+    )
 }
 
 /// 用权威 `fn::sync_gen_roots` 重算当前根覆盖，并把当前水位快照下缺少完成凭证的根
@@ -1397,26 +1629,16 @@ pub async fn sync_and_seed_model_coverage(
     let rows: Vec<GenRootCoverageRow> = response
         .take(0)
         .map_err(|error| anyhow::anyhow!("decode gen_root dbnum={dbnum} failed: {error}"))?;
+    // 管线路径的「要求时点」是窗口右端 = 已应用水位（ADR-054 Q2：显式时点照用）；
+    // 判据单调，所以 ensure 已按更新的文件会话生成过的根在这里算完成，不重排。
     let completed_roots = rows
         .iter()
-        .filter(|row| {
-            gen_root_credential_is_current(
-                row,
-                state.applied_sesno,
-                state.applied_sesno_time.as_deref(),
-            )
-        })
+        .filter(|row| gen_root_credential_is_current(row, state.applied_sesno))
         .count();
     let mut statements = Vec::new();
     let mut enqueued_roots = 0usize;
     for row in &rows {
-        if !force_all
-            && gen_root_credential_is_current(
-                row,
-                state.applied_sesno,
-                state.applied_sesno_time.as_deref(),
-            )
-        {
+        if !force_all && gen_root_credential_is_current(row, state.applied_sesno) {
             continue;
         }
         // 队列字段一律用斜杠拼法。`RefnoEnum` 的 `Display` 是下划线 `A_B`，与其余入队
@@ -1470,22 +1692,21 @@ pub async fn sync_and_seed_model_coverage(
     })
 }
 
+/// ADR-025 模型门：这个库的每个生成根是否都有覆盖已应用水位的完成凭证。
+///
+/// 与 [`gen_root_credential_is_current`] 同一口径（ADR-054 实施约束 4）：凭证会话号**不早于**
+/// 水位即算覆盖，`0`（未认领）永不算；时刻列只记不比。
 pub async fn model_coverage_current(dbnum: u32) -> anyhow::Result<bool> {
     let state = crate::data_interface::dbnum_state::DbnumState::read(dbnum)
         .await?
         .ok_or_else(|| anyhow::anyhow!("dbnum={dbnum} has no applied watermark"))?;
-    let expected_time = state
-        .applied_sesno_time
-        .as_deref()
-        .map(escape_surql_str)
-        .unwrap_or_default();
     let started = Instant::now();
     let coverage_result = SUL_DB
         .query(format!(
             "SELECT count() AS count FROM gen_root WHERE dbnum = {dbnum} AND (\
              (status?:'') NOT IN ['Generated','AlreadyAvailable','NoRenderableGeometry'] OR \
-             (source_end_sesno?:-1) != {} OR (source_end_sesno_time?:'') != '{}') GROUP ALL;",
-            state.applied_sesno, expected_time
+             (source_end_sesno?:0) <= 0 OR (source_end_sesno?:0) < {}) GROUP ALL;",
+            state.applied_sesno
         ))
         .await;
     crate::data_interface::model_concurrency::record_surreal_read(started.elapsed());
@@ -2018,69 +2239,6 @@ async fn verify_repair_jobs_page(
     Ok(page)
 }
 
-#[derive(Debug, Default)]
-pub(crate) struct StagedNonRegenReport {
-    pub derived_roots: Vec<crate::data_interface::generation_root::GenerationRoot>,
-    pub succeeded_plan_items: BTreeSet<(ModelWorkAction, String)>,
-    pub failures: Vec<String>,
-}
-
-/// Execute this window's prerequisites without touching the durable pending queue.
-pub(crate) async fn run_staged_non_regen_work(
-    mgr: &AiosDBManager,
-    plan_items: &[ModelWorkItem],
-) -> StagedNonRegenReport {
-    let mut report = StagedNonRegenReport::default();
-    for action in [
-        ModelWorkAction::Transform,
-        ModelWorkAction::DeleteCleanup,
-        ModelWorkAction::CascadeExpand,
-    ] {
-        for item in plan_items.iter().filter(|item| item.action == action) {
-            let refno = match RefU64::from_str(&item.target_refno).map(RefnoEnum::from) {
-                Ok(refno) => refno,
-                Err(_) => {
-                    report.failures.push(format!(
-                        "{} 目标 {} 无效",
-                        action.as_str(),
-                        item.target_refno
-                    ));
-                    continue;
-                }
-            };
-            let outcome = match action {
-                ModelWorkAction::Transform => {
-                    mgr.update_world_transforms(&HashSet::from([refno])).await
-                }
-                ModelWorkAction::DeleteCleanup => {
-                    crate::data_interface::helper::delete_inst_relate_subtree(&[refno], 300).await
-                }
-                ModelWorkAction::CascadeExpand => {
-                    crate::data_interface::manual_update::expand_staged_reverse_cascade(refno)
-                        .await
-                        .map(|roots| report.derived_roots.extend(roots))
-                }
-                _ => unreachable!(),
-            };
-            match outcome {
-                Ok(()) => {
-                    report
-                        .succeeded_plan_items
-                        .insert((action, item.target_refno.clone()));
-                }
-                Err(error) => report.failures.push(format!(
-                    "{} 目标 {} 暂存执行失败: {error:#}",
-                    action.as_str(),
-                    item.target_refno
-                )),
-            }
-        }
-    }
-    report.derived_roots.sort_by_key(|root| root.root);
-    report.derived_roots.dedup_by_key(|root| root.root);
-    report
-}
-
 /// 执行一个房间重算任务，返回本次写入了归属边的构件集合。
 async fn run_room_task(
     db_option: &aios_core::options::DbOption,
@@ -2464,11 +2622,109 @@ fn render_drain_select_for_scope(
     format!(
         "SELECT *, source_end_sesno_time IS NONE AS legacy_source_time, \
          updated_at IS NONE AS legacy_timestamp FROM {TABLE} \
-         WHERE status IN ['pending', 'failed'] \
+         WHERE (status IN ['pending', 'failed'] OR \
+          (status = 'running' AND (lease_until IS NONE OR lease_until < time::now()))) \
+         AND (cohort_id IS NONE OR cohort_id NOT IN \
+          (SELECT VALUE cohort_id FROM {TABLE} WHERE status = 'running' \
+           AND lease_until >= time::now() AND cohort_id IS NOT NONE)) \
          AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter}{scope_filter} \
          ORDER BY legacy_source_time ASC, source_end_sesno_time DESC, \
          legacy_timestamp ASC, updated_at DESC, id ASC{limit};"
     )
+}
+
+fn render_drain_claim_for_scope(
+    action_filter: &str,
+    limit: Option<usize>,
+    dbnums: &[u32],
+    lease_owner: &str,
+) -> String {
+    let select = render_drain_select_for_scope(action_filter, limit, dbnums);
+    let select = select.trim_end_matches(';');
+    format!(
+        "UPDATE ({select}) SET status='running', lease_owner='{}', \
+         lease_until=time::now() + {MODEL_WORK_LEASE} RETURN AFTER;",
+        escape_surql_str(lease_owner)
+    )
+}
+
+fn render_cohort_mate_claim_for_scope(
+    action_filter: &str,
+    dbnums: &[u32],
+    lease_owner: &str,
+    cohort_ids: &[String],
+) -> Option<String> {
+    if cohort_ids.is_empty() {
+        return None;
+    }
+    let cohorts = cohort_ids
+        .iter()
+        .map(|cohort| format!("'{}'", escape_surql_str(cohort)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let scope_filter = render_automatic_scope_filter(dbnums);
+    Some(format!(
+        "UPDATE {TABLE} SET status='running', lease_owner='{}', \
+         lease_until=time::now() + {MODEL_WORK_LEASE} \
+         WHERE cohort_id IN [{cohorts}] \
+         AND (status IN ['pending', 'failed'] OR \
+          (status = 'running' AND (lease_until IS NONE OR lease_until < time::now()))) \
+         AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter}{scope_filter} RETURN AFTER;",
+        escape_surql_str(lease_owner)
+    ))
+}
+
+async fn claim_page_with_cohorts_on(
+    db: &Surreal<Any>,
+    action_filter: &str,
+    limit: Option<usize>,
+    dbnums: &[u32],
+    lease_owner: &str,
+) -> anyhow::Result<Vec<PendingModelWork>> {
+    let mut response = db
+        .query(render_drain_claim_for_scope(
+            action_filter,
+            limit,
+            dbnums,
+            lease_owner,
+        ))
+        .await?
+        .check()?;
+    let mut jobs: Vec<PendingModelWork> = response.take(0)?;
+    let cohort_ids = jobs
+        .iter()
+        .filter_map(pending_publication_cohort)
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Some(sql) =
+        render_cohort_mate_claim_for_scope(action_filter, dbnums, lease_owner, &cohort_ids)
+    {
+        let mut response = db.query(sql).await?.check()?;
+        let mates: Vec<PendingModelWork> = response.take(0)?;
+        let already_claimed = jobs
+            .iter()
+            .map(|job| (job.action.as_str(), job.target_refno.clone()))
+            .collect::<HashSet<_>>();
+        jobs.extend(mates.into_iter().filter(|job| {
+            !already_claimed.contains(&(job.action.as_str(), job.target_refno.clone()))
+        }));
+    }
+    Ok(jobs)
+}
+
+fn drain_lease_owner() -> &'static str {
+    static OWNER: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    OWNER.get_or_init(|| {
+        format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        )
+    })
 }
 
 fn render_drain_select(action_filter: &str, limit: Option<usize>) -> String {
@@ -2483,7 +2739,7 @@ fn render_pending_count_query(action_filter: &str, dbnums: &[u32]) -> String {
     let scope_filter = render_automatic_scope_filter(dbnums);
     format!(
         "SELECT count() AS count FROM {TABLE} \
-         WHERE status IN ['pending', 'failed'] \
+         WHERE status IN ['pending', 'failed', 'running'] \
          AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter}{scope_filter} GROUP ALL;"
     )
 }
@@ -2840,14 +3096,15 @@ async fn drain_where_cooperative(
     action_filter: &str,
     limit: Option<usize>,
 ) -> anyhow::Result<ModelDrainDisposition> {
-    let mut response = SUL_DB
-        .query(render_drain_select(action_filter, limit))
-        .await?
-        .check()
-        .map_err(|error| anyhow::anyhow!("load pending model work statement failed: {error}"))?;
-    let jobs: Vec<PendingModelWork> = response
-        .take(0)
-        .map_err(|error| anyhow::anyhow!("decode pending model work failed: {error}"))?;
+    let jobs = claim_page_with_cohorts_on(
+        &SUL_DB,
+        action_filter,
+        limit,
+        &crate::data_interface::watch_scope::dbnums(),
+        drain_lease_owner(),
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!("claim pending model work failed: {error}"))?;
     if jobs.is_empty() {
         // 队列见底，这一轮没有页可认领——停滞计数只在认领时结算，不在这儿清就再也
         // 没机会清了（见 `clear_page_starvation`）。
@@ -3126,6 +3383,41 @@ async fn drain_where_report(
 /// 返回仍需逐根执行的作业：房间映射预检读失败的修复根，以及合批失败后整页回退的
 /// 根。逐根怎么跑由调用方定——[`drain_where_report`] 一口气跑完，
 /// [`drain_where_cooperative`] 每根之间还要查一次 epoch。
+fn regen_execution_groups(
+    batchable: Vec<PendingModelWork>,
+    group_size: usize,
+) -> Vec<Vec<PendingModelWork>> {
+    let mut cohorts = BTreeMap::<String, Vec<PendingModelWork>>::new();
+    let mut independent = Vec::new();
+    for job in batchable {
+        if let Some(cohort) = pending_publication_cohort(&job) {
+            cohorts.entry(cohort).or_default().push(job);
+        } else {
+            independent.push(job);
+        }
+    }
+    let mut groups = cohorts.into_values().collect::<Vec<_>>();
+    let group_size = group_size.max(1);
+    while !independent.is_empty() {
+        let remainder = independent.split_off(independent.len().min(group_size));
+        groups.push(std::mem::replace(&mut independent, remainder));
+    }
+    groups
+}
+
+fn is_atomic_publication_cohort(jobs: &[PendingModelWork]) -> bool {
+    jobs.first()
+        .and_then(pending_publication_cohort)
+        .is_some_and(|cohort| {
+            jobs.iter()
+                .all(|job| pending_publication_cohort(job).as_deref() == Some(cohort.as_str()))
+        })
+}
+
+fn should_defer_publication_cohort(jobs: &[PendingModelWork], has_busy_root: bool) -> bool {
+    has_busy_root && is_atomic_publication_cohort(jobs)
+}
+
 async fn run_regen_batch(
     mgr: &AiosDBManager,
     batchable: Vec<PendingModelWork>,
@@ -3139,9 +3431,8 @@ async fn run_regen_batch(
         crate::data_interface::initialization_phase::InitializationCoordinator::global()
             .snapshot()
             .epoch_id;
-    for group in batchable.chunks(group_size) {
-        let group_outcome =
-            run_regen_group(mgr, group.to_vec(), report, lock_policy, task_id).await;
+    for group in regen_execution_groups(batchable, group_size) {
+        let group_outcome = run_regen_group(mgr, group, report, lock_policy, task_id).await;
         outcome.fallback.extend(group_outcome.fallback);
         outcome.deferred_lock_count += group_outcome.deferred_lock_count;
         for root in group_outcome.deferred_locks {
@@ -3237,9 +3528,11 @@ async fn run_regen_group(
         lock_roots.sort_unstable();
         lock_roots.dedup();
         let (root_guards, busy_roots) = acquire_regen_page_locks(&lock_roots, lock_policy).await;
+        let defer_whole_cohort =
+            should_defer_publication_cohort(&batchable, !busy_roots.is_empty());
         let (batchable, deferred): (Vec<_>, Vec<_>) = batchable
             .into_iter()
-            .partition(|job| !busy_roots.contains(&job.target_refno));
+            .partition(|job| !defer_whole_cohort && !busy_roots.contains(&job.target_refno));
         outcome.deferred_lock_count = deferred.len();
         outcome.deferred_locks = deferred
             .into_iter()
@@ -3647,9 +3940,14 @@ fn render_has_pending_work_query(
     dbnums: &[u32],
 ) -> String {
     let scope_filter = render_automatic_scope_filter(dbnums);
+    let statuses = if attempt_operator == "<" {
+        "['pending', 'failed', 'running']"
+    } else {
+        "['pending', 'failed']"
+    };
     format!(
         "RETURN array::len((SELECT VALUE id FROM {TABLE} \
-         WHERE status IN ['pending', 'failed'] AND (attempts?:0) {attempt_operator} {MAX_ATTEMPTS} \
+         WHERE status IN {statuses} AND (attempts?:0) {attempt_operator} {MAX_ATTEMPTS} \
          {action_filter}{scope_filter} LIMIT 1)) > 0;"
     )
 }
@@ -3741,7 +4039,7 @@ fn render_model_pending_status_query_for_scope(dbnums: &[u32]) -> String {
     let scope_filter = render_automatic_scope_filter(dbnums);
     format!(
         "SELECT action, count() AS c FROM {TABLE} \
-             WHERE status IN ['pending', 'failed'] AND (attempts?:0) < {MAX_ATTEMPTS}{scope_filter} \
+             WHERE status IN ['pending', 'failed', 'running'] AND (attempts?:0) < {MAX_ATTEMPTS}{scope_filter} \
              GROUP BY action;\
              SELECT action, count() AS c FROM {TABLE} \
              WHERE status IN ['pending', 'failed'] AND (attempts?:0) >= {MAX_ATTEMPTS}{scope_filter} \
@@ -4243,6 +4541,59 @@ mod tests {
             .unwrap();
         let rows: Vec<Count> = response.take(0).unwrap();
         assert_eq!(rows.first().map_or(0, |row| row.count), 0);
+    }
+
+    /// C2-4 / R6 —— 整库重建作废这个库排着的增量，但只作废数据五种。
+    ///
+    /// 三类必须活下来，各自的理由不同：房间任务重建不会替它们重排；别的库跟这次
+    /// 重建无关；`dbnum = 0` 是按需生成当场落的行，不是任何窗口的陈旧结论。
+    #[tokio::test]
+    async fn full_rebuild_drops_pending_incremental_work() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("full_rebuild_discard")
+            .await
+            .unwrap();
+        db.query(
+            "CREATE model_update_pending:stale_transform SET dbnum = 8000, action = 'transform';\
+             CREATE model_update_pending:stale_delete SET dbnum = 8000, action = 'delete_cleanup';\
+             CREATE model_update_pending:stale_cascade SET dbnum = 8000, action = 'cascade_expand';\
+             CREATE model_update_pending:stale_regen SET dbnum = 8000, action = 'regen_root';\
+             CREATE model_update_pending:stale_aabb SET dbnum = 8000, action = 'post_regen_aabb';\
+             CREATE model_update_pending:room_element SET dbnum = 8000, action = 'room_recalc_element';\
+             CREATE model_update_pending:room_panel SET dbnum = 8000, action = 'room_recalc_panel';\
+             CREATE model_update_pending:other_db SET dbnum = 1112, action = 'transform';\
+             CREATE model_update_pending:on_demand SET dbnum = 0, action = 'regen_root';",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        assert_eq!(
+            discard_pending_for_full_rebuild_on(&db, 8000)
+                .await
+                .unwrap(),
+            5,
+            "数据五种全清"
+        );
+
+        let mut response = db
+            .query("SELECT VALUE record::id(id) FROM model_update_pending;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        // 排序留在 Rust 这边：`SELECT VALUE` 投出的是裸值，投影里已经没有 `id` 这个
+        // 字段了，跟一句 `ORDER BY id` 会被 SurrealDB 直接拒掉（Missing order idiom）。
+        let mut survivors: Vec<String> = response.take(0).unwrap();
+        survivors.sort();
+        assert_eq!(
+            survivors,
+            vec!["on_demand", "other_db", "room_element", "room_panel"]
+        );
     }
 
     /// Cleanup ordering is a behavioral invariant: moving the call into
@@ -5099,8 +5450,9 @@ mod tests {
         };
 
         assert!(
-            render_upsert_no_time(&item).contains("revision = (revision?:0) + 1"),
-            "every trigger must create a new settlement revision"
+            render_upsert_no_time(&item)
+                .contains("revision = IF $previous_revision = NONE OR 42 > ($previous_target?:-1)"),
+            "only a new immutable target may create a settlement revision"
         );
         let expected = "WHERE action = 'regen_root' AND target_refno = '16777216/5' \
                         AND (revision?:0) = 7";
@@ -5114,6 +5466,107 @@ mod tests {
             "old failure must not overwrite a newer trigger: {}",
             render_mark_failed(&work, "boom")
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn regen_root_target_is_idempotent_and_stale_completion_cannot_publish_it() {
+        use surrealdb::engine::any::connect;
+
+        #[derive(Debug, Deserialize)]
+        struct PendingRevision {
+            revision: u64,
+            cohort_id: String,
+        }
+        #[derive(Debug, Deserialize)]
+        struct RootRevision {
+            desired_revision: u64,
+            #[serde(default)]
+            published_revision: u64,
+            publication_status: String,
+        }
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("root_revision_v2")
+            .await
+            .expect("select fixture db");
+        let item = |sesno: i32| ModelWorkItem {
+            dbnum: 8191,
+            db_type: "DESI".into(),
+            source_end_sesno: sesno,
+            action: ModelWorkAction::RegenRoot,
+            target_refno: "16777216/5".into(),
+            noun: "BRAN".into(),
+        };
+
+        db.query(format!(
+            "{}\n{}",
+            render_upsert_no_time(&item(42)),
+            render_upsert_no_time(&item(42))
+        ))
+        .await
+        .expect("duplicate enqueue transport")
+        .check()
+        .expect("duplicate enqueue statements");
+        let mut response = db
+            .query("SELECT revision, cohort_id FROM model_update_pending WHERE target_refno = '16777216/5';")
+            .await
+            .expect("read pending")
+            .check()
+            .expect("read pending statement");
+        let rows: Vec<PendingRevision> = response.take(0).expect("decode pending");
+        assert_eq!(rows[0].revision, 1, "same target must be idempotent");
+        assert_eq!(rows[0].cohort_id, "8191:42");
+
+        db.query(render_complete_regen_revision("16777216/5", 1))
+            .await
+            .expect("publish revision one")
+            .check()
+            .expect("publish revision one statements");
+        db.query(render_upsert_no_time(&item(43)))
+            .await
+            .expect("enqueue next target")
+            .check()
+            .expect("enqueue next target statements");
+        db.query(render_complete_regen_revision("16777216/5", 1))
+            .await
+            .expect("stale completion transport")
+            .check()
+            .expect("stale completion statement");
+
+        let mut response = db
+            .query("SELECT desired_revision, published_revision, publication_status FROM ONLY type::thing('gen_root', '16777216_5');")
+            .await
+            .expect("read root state")
+            .check()
+            .expect("read root state statement");
+        let root: Option<RootRevision> = response.take(0).expect("decode root state");
+        let root = root.expect("root state exists");
+        assert_eq!((root.desired_revision, root.published_revision), (2, 1));
+        assert_eq!(root.publication_status, "stale");
+
+        db.query(render_mark_failed_revision(
+            ModelWorkAction::RegenRoot,
+            "16777216/5",
+            2,
+            "candidate failed",
+        ))
+        .await
+        .expect("mark failed transport")
+        .check()
+        .expect("mark failed statements");
+        let mut response = db
+            .query("SELECT publication_status FROM ONLY type::thing('gen_root', '16777216_5');")
+            .await
+            .expect("read stale state")
+            .check()
+            .expect("read stale state statement");
+        #[derive(Deserialize)]
+        struct StatusRow {
+            publication_status: String,
+        }
+        let row: Option<StatusRow> = response.take(0).expect("decode stale state");
+        assert_eq!(row.expect("stale state exists").publication_status, "stale");
     }
 
     /// 收口不能靠「再算一遍 record id」。存量表里同一个根还留着旧格式的行
@@ -6181,8 +6634,10 @@ mod tests {
         );
     }
 
+    /// ADR-054 实施约束 4：凭证判据是单调的。**改回 `== 水位` 会让「107 覆盖 106」那一句红。**
+    /// 等值判据会把 ensure 按文件最新会话生成过的根，在管线按窗口右端复核时判成过期。
     #[test]
-    fn generation_root_completion_requires_the_same_watermark_snapshot() {
+    fn generation_root_completion_covers_the_required_session_monotonically() {
         let mut row = GenRootCoverageRow {
             pe: surrealdb::sql::Thing::from(("pe", "24381_1")),
             noun: "EQUI".into(),
@@ -6190,24 +6645,43 @@ mod tests {
             source_end_sesno: Some(106),
             source_end_sesno_time: Some("2026-08-14T05:21:19+00:00".into()),
         };
-        assert!(gen_root_credential_is_current(
-            &row,
-            106,
-            Some("2026-08-14T05:21:19+00:00")
-        ));
+        assert!(gen_root_credential_is_current(&row, 106));
+        row.source_end_sesno = Some(107);
+        assert!(
+            gen_root_credential_is_current(&row, 106),
+            "按更新的文件会话生成过的根覆盖更旧的窗口右端"
+        );
         row.source_end_sesno = Some(105);
-        assert!(!gen_root_credential_is_current(
-            &row,
-            106,
-            Some("2026-08-14T05:21:19+00:00")
-        ));
+        assert!(!gen_root_credential_is_current(&row, 106));
+        // 人工强制重试行的 0 是「未认领」，不是第 0 版。
+        row.source_end_sesno = Some(0);
+        assert!(!gen_root_credential_is_current(&row, 0));
+        row.source_end_sesno = None;
+        assert!(!gen_root_credential_is_current(&row, 106));
         row.source_end_sesno = Some(106);
         row.status = Some("Failed".into());
-        assert!(!gen_root_credential_is_current(
-            &row,
-            106,
-            Some("2026-08-14T05:21:19+00:00")
-        ));
+        assert!(!gen_root_credential_is_current(&row, 106));
+    }
+
+    /// 模型门的 SQL 与内存判据必须是同一口径：不早于水位即覆盖，未认领永不覆盖，时刻不比。
+    #[test]
+    fn model_gate_sql_is_monotone_and_ignores_the_time_column() {
+        let body = include_str!("model_update_pending.rs")
+            .split_once("pub async fn model_coverage_current(")
+            .expect("model gate exists")
+            .1
+            .split_once("#[derive(Debug, Deserialize)]")
+            .expect("model gate ends before the next row type")
+            .0;
+        assert!(body.contains("(source_end_sesno?:0) <= 0 OR (source_end_sesno?:0) < {}"));
+        assert!(
+            !body.contains("source_end_sesno_time"),
+            "时刻列只记不比（ADR-054）: {body}"
+        );
+        assert!(
+            !body.contains("!= {}"),
+            "等值判据会让 ensure 生成的更新版本被门判成缺口: {body}"
+        );
     }
 
     /// 未限定域启动核对的清单来自 gen_root 的 GROUP BY；`dbnum` 缺失的历史行核对
@@ -6511,6 +6985,77 @@ mod tests {
             .unwrap();
         let aabb_page: Vec<PendingModelWork> = aabb.take(0).unwrap();
         assert_eq!(aabb_page.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn one_cohort_is_claimed_whole_even_when_it_crosses_the_page_limit() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test").use_db("cohort_claim").await.unwrap();
+        db.query(
+            "CREATE model_update_pending:first SET dbnum=7997, db_type='DESI', \
+             source_end_sesno=106, cohort_id='7997:106', action='regen_root', \
+             target_refno='24381/1', noun='BRAN', status='pending', attempts=0, revision=1; \
+             CREATE model_update_pending:second SET dbnum=7997, db_type='DESI', \
+             source_end_sesno=106, cohort_id='7997:106', action='regen_root', \
+             target_refno='24381/2', noun='BRAN', status='pending', attempts=0, revision=1; \
+             CREATE model_update_pending:other SET dbnum=7997, db_type='DESI', \
+             source_end_sesno=105, cohort_id='7997:105', action='regen_root', \
+             target_refno='24381/3', noun='BRAN', status='pending', attempts=0, revision=1;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let jobs =
+            claim_page_with_cohorts_on(&db, REGEN_ACTION_FILTER, Some(1), &[7997], "test-worker")
+                .await
+                .unwrap();
+        assert_eq!(
+            jobs.len(),
+            2,
+            "the page boundary must expand to the whole cohort"
+        );
+        assert!(jobs.iter().all(|job| job.source_end_sesno == 106));
+    }
+
+    #[test]
+    fn execution_groups_never_split_a_cohort() {
+        let job = |target: &str, sesno| PendingModelWork {
+            dbnum: 7997,
+            db_type: "DESI".into(),
+            source_end_sesno: sesno,
+            source_end_sesno_time: None,
+            action: ModelWorkAction::RegenRoot,
+            target_refno: target.into(),
+            noun: "BRAN".into(),
+            status: "running".into(),
+            attempts: 0,
+            last_error: None,
+            revision: 1,
+            required_panels: Vec::new(),
+        };
+        let groups = regen_execution_groups(
+            vec![
+                job("24381/1", 106),
+                job("24381/9", 105),
+                job("24381/2", 106),
+            ],
+            1,
+        );
+        assert!(groups.iter().any(|group| {
+            group.len() == 2 && group.iter().all(|job| job.source_end_sesno == 106)
+        }));
+        let cohort = groups
+            .iter()
+            .find(|group| group.len() == 2)
+            .expect("cohort group");
+        assert!(
+            should_defer_publication_cohort(cohort, true),
+            "one busy root must defer the entire atomic cohort"
+        );
     }
 
     /// 空闲页也要合批，不能一根一根地调生成。
@@ -8203,6 +8748,68 @@ mod tests {
             rejected.is_err(),
             "ORDER BY 的 idiom 不在投影里就该被引擎拒绝: {rejected:?}"
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn durable_claim_excludes_a_second_worker_until_the_lease_expires() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("model_pending_claim")
+            .await
+            .expect("select fixture db");
+        db.query(format!(
+            "CREATE {TABLE}:one SET dbnum=8000, db_type='DESI', source_end_sesno=42, \
+             cohort_id='8000:42', \
+             action='regen_root', target_refno='1/2', noun='BRAN', status='pending', \
+             attempts=0, revision=1, updated_at=time::now(); \
+             CREATE {TABLE}:two SET dbnum=8000, db_type='DESI', source_end_sesno=42, \
+             cohort_id='8000:42', \
+             action='regen_root', target_refno='1/3', noun='BRAN', status='pending', \
+             attempts=0, revision=1, updated_at=time::now();"
+        ))
+        .await
+        .expect("seed claim row")
+        .check()
+        .expect("valid seed");
+
+        let mut first = db
+            .query(render_drain_claim_for_scope("", Some(1), &[], "worker-a"))
+            .await
+            .expect("first claim")
+            .check()
+            .expect("valid first claim");
+        let claimed: Vec<PendingModelWork> = first.take(0).expect("decode first claim");
+        assert_eq!(claimed.len(), 1);
+
+        let mut second = db
+            .query(render_drain_claim_for_scope("", Some(1), &[], "worker-b"))
+            .await
+            .expect("second claim")
+            .check()
+            .expect("valid second claim");
+        let duplicate: Vec<PendingModelWork> = second.take(0).expect("decode second claim");
+        assert!(
+            duplicate.is_empty(),
+            "a live lease on one member must reserve the whole cohort"
+        );
+
+        db.query(format!(
+            "UPDATE {TABLE} SET lease_until=time::now() - 1s WHERE status='running';"
+        ))
+        .await
+        .expect("expire lease")
+        .check()
+        .expect("valid lease expiry");
+        let mut reclaimed = db
+            .query(render_drain_claim_for_scope("", Some(1), &[], "worker-b"))
+            .await
+            .expect("reclaim")
+            .check()
+            .expect("valid reclaim");
+        let reclaimed: Vec<PendingModelWork> = reclaimed.take(0).expect("decode reclaim");
+        assert_eq!(reclaimed.len(), 1);
     }
 
     #[test]

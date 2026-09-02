@@ -322,8 +322,8 @@ pub async fn drop_room_fixture(mesh_dir: &Path) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fast_model::aabb_refresh::update_inst_relate_aabbs_by_refnos;
     use crate::fast_model::aabb_tree::rebuild_tree_from_pointers;
-    use crate::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos;
     use crate::fast_model::room_model::build_room_relations;
     use aios_core::room::room::load_aabb_tree;
     use aios_core::{RefnoEnum, get_db_option};
@@ -726,7 +726,8 @@ mod tests {
         assert_eq!(plan.work_items.len(), 2, "{:?}", plan.work_items);
 
         // 再解析入暂存：改名渲染为 `UPDATE pe SET name`，更新的正是预载拷进来的旧行。
-        let staged = IncrementPipeline::stage_parsed_window(&mut window, &ops, dbnum)
+        let staged = window
+            .stage_parsed_window(&ops, dbnum)
             .await
             .expect("stage parsed rename");
         assert!(staged > 0, "改名会话必须进 journal");
@@ -1146,7 +1147,7 @@ mod tests {
     #[ignore = "manual live: writes fixture records, queue rows and .mesh files"]
     async fn live_room_panel_task_absorbs_element_task_in_the_same_round() {
         use crate::data_interface::model_update_pending::{drain_rooms, enqueue_room_recalc};
-        use crate::fast_model::occ_generate::AabbChange;
+        use crate::fast_model::aabb_refresh::AabbChange;
 
         connect_live().await;
         let db_option = fixture_baseline().await;

@@ -1,0 +1,1 @@
+{"decision":"annotated","feedback":"# File Feedback\n\nI've reviewed this file and have 1 piece of feedback:\n\n## 1. General feedback about the file\n> 还要设计一套，可以复用基本体的方案，可以方便减少mesh 的生成，通过transform 来缩放已有的 mesh\n\n---\n"}

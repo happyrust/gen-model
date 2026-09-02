@@ -11,8 +11,13 @@ fn core_primary_list_snapshot_drives_the_public_gate() {
     assert!(!primary_list_hint("TP"));
     assert!(gated_children_delta("TP", &old, &reordered).is_none());
     assert!(
-        primary_list_hint("ROD"),
-        "unknown nouns remain conservative"
+        !primary_list_hint("ROD"),
+        "ROD read as unknown until 2026-08-28 only because the old channel could not \
+         look the noun up; core answers false"
+    );
+    assert!(
+        primary_list_hint("NOT-A-NOUN"),
+        "nouns outside the snapshot remain conservative"
     );
 }
 

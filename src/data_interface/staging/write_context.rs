@@ -98,7 +98,7 @@ impl StagingWriteContext {
 
     pub async fn defer_room_changes(
         &self,
-        changes: &[crate::fast_model::occ_generate::AabbChange],
+        changes: &[crate::fast_model::aabb_refresh::AabbChange],
     ) {
         let mut spatial = self.spatial.lock().await;
         for change in changes {
@@ -293,6 +293,7 @@ mod tests {
     use surrealdb::engine::any::connect;
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
     async fn spawned_model_writes_share_the_window_journal() {
         let instance = connect("mem://").await.expect("mem boots");
         let window = create_window_on(&instance, 7995, 1, 1, ResourceThresholds::default())
@@ -504,7 +505,7 @@ mod tests {
             .scope(async {
                 active_staging_writes()
                     .expect("context")
-                    .defer_room_changes(&[crate::fast_model::occ_generate::AabbChange {
+                    .defer_room_changes(&[crate::fast_model::aabb_refresh::AabbChange {
                         refno: target,
                         noun: "EQUI".into(),
                     }])

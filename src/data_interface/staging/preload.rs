@@ -684,6 +684,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
     async fn staged_window_sees_the_persistent_watermark() {
         let instance = connect("mem://").await.expect("staging mem");
         let window = create_window_on(&instance, 7999, 43, 43, ResourceThresholds::default())
@@ -775,6 +776,7 @@ mod tests {
     /// 删除级联在暂存里走不到后代，`status = OK` 地少删一片。夹具用 `RELATE` 的话
     /// 这个区别测不出来。
     #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "ADR-056 P1：暂存写路由已退役（spec 035 T122/T123），窗口内写一律直达持久层；P3 随 staging 目录删除"]
     async fn copies_only_the_root_product_closure_without_journaling() {
         let source = connect("mem://").await.expect("source mem");
         source

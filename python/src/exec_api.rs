@@ -3,9 +3,12 @@
 //! `room.code` / `spatial.status` 放宽为连接层可用）。
 //!
 //! 三层守护的最后一层：这些函数在 `full_init` 之前一律报错。`full_init` 拿的是
-//! 与 `run_app`/`run_cli` 同一把项目单实例锁——服务在跑时 `full_init` 直接失败，
-//! 这不是缺陷而是防线（两个进程并发驱动同一批 staging 窗口 / 队列 / pending
-//! 表会互踩）。初始化序列严格对齐 `run_cli` 前置段，不自创第二套。
+//! 与 `run_app`/`run_cli` 同一把单实例锁——同一个运行目录里服务还在跑时
+//! `full_init` 直接失败，这不是缺陷而是防线（两个进程并发驱动同一批 staging
+//! 窗口 / 队列 / pending 表会互踩）。锁按运行目录隔离，跨运行目录的同工程互踩
+//! 由下面的 `conflicting_services` 探测拦；内存模式整个不拿锁（各连各的
+//! kv-mem，没有共享的持久状态）。初始化序列严格对齐 `run_cli` 前置段，不自创
+//! 第二套。
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -136,9 +139,11 @@ fn conflict_reason(
 
 /// 找出真会与本进程互踩的活服务，返回 `(端口, 理由)`。
 ///
-/// 存在的理由：单实例锁按「项目根」隔离，而两个部署包（各自的仓库/发布目录）
+/// 存在的理由：单实例锁按「运行目录」隔离，而两个部署包（各自的仓库/发布目录）
 /// 各持各的锁，却可以写同一个 SurrealDB、同一个工程——锁根本挡不住这种互踩。
 /// 实测踩过：`test-worklspace` 的部署包在 9099，本仓库在 8022，两把锁互不相干。
+/// 锚点从项目根挪到运行目录之后这道门更吃重了：以前「同一个项目树」还能被锁兜
+/// 一层，现在那一层也归它管。
 ///
 /// 端口被别的程序占用不算冲突——误伤比漏报更烦人。
 fn conflicting_services(db_option: &aios_core::options::DbOption) -> Vec<(u16, String)> {
@@ -224,9 +229,9 @@ pub fn full_init(
                     .map_err(|error| anyhow::anyhow!("几何并发闸配置非法，拒绝初始化：{error}"))?;
             println!("几何并发闸额度 = {geometry_workers}（geometry_workers 未配置时取物理核数）");
 
-            // 1b. 锁挡不住跨部署互踩（锁按项目根隔离，两个部署包各持各的锁却写
-            //     同一个工程），所以再探一次同工程活服务。放在锁之后：锁能挡的
-            //     场景不必付探测的几百毫秒。锁是 OnceLock 且同工程幂等，这里报错
+            // 1b. 锁挡不住跨运行目录的互踩（锁按运行目录隔离，两个部署包各持各的
+            //     锁却写同一个工程），所以再探一次同工程活服务。放在锁之后：锁能挡
+            //     的场景不必付探测的几百毫秒。锁是 OnceLock 且同工程幂等，这里报错
             //     退出不影响修好后在同进程里重试。
             if !force {
                 let conflicts = conflicting_services(&db_option);
@@ -613,7 +618,7 @@ pub fn ensure(py: Python<'_>, refno: String, force: bool) -> PyResult<Py<PyAny>>
     pythonized(py, &result)
 }
 
-/// 对指定 refno 集重建深层网格数据（`process_meshes_update_db_deep`）。
+/// 对指定 refno 集使用唯一生产生成器 `e3d-model` 重建网格数据。
 #[pyfunction]
 #[pyo3(name = "gen")]
 pub fn gen_models(py: Python<'_>, refnos: Vec<String>) -> PyResult<()> {
@@ -621,27 +626,111 @@ pub fn gen_models(py: Python<'_>, refnos: Vec<String>) -> PyResult<()> {
     py.detach(|| {
         runtime().block_on(async {
             aios_database::data_interface::initialization_phase::require_model_generation()?;
-            let db_option = db_option().await?;
-            aios_database::fast_model::occ_generate::process_meshes_update_db_deep(
-                &db_option,
-                &parse_refnos(refnos),
-            )
-            .await
+            let dbnum =
+                aios_database::fast_model::e3d_model_service::E3dModelService::dbnum_for_roots(
+                    &refnos,
+                )
+                .await?;
+            let service =
+                aios_database::fast_model::e3d_model_service::E3dModelService::from_current()
+                    .await?;
+            service
+                .generate_roots(
+                    dbnum,
+                    &refnos,
+                    aios_database::data_interface::geom_error::GeometryFailurePolicy::Required,
+                )
+                .await?;
+            anyhow::Ok(())
         })
     })
     .map_err(anyhow_to_py)
 }
 
-/// 整库模型生成（`process_meshes_by_dbnos`）。
+/// 使用唯一生产生成器 `e3d-model` 执行整库模型生成。
 #[pyfunction]
 pub fn gen_dbnum(py: Python<'_>, dbnum: u32) -> PyResult<()> {
     ensure_full()?;
     py.detach(|| {
         runtime().block_on(async {
             aios_database::data_interface::initialization_phase::require_model_generation()?;
-            let db_option = db_option().await?;
-            aios_database::fast_model::gen_model::process_meshes_by_dbnos(&[dbnum], &db_option)
-                .await
+            let service =
+                aios_database::fast_model::e3d_model_service::E3dModelService::from_current()
+                    .await?;
+            service
+                .generate_dbnum(
+                    dbnum,
+                    aios_database::data_interface::geom_error::GeometryFailurePolicy::Required,
+                )
+                .await?;
+            anyhow::Ok(())
+        })
+    })
+    .map_err(anyhow_to_py)
+}
+
+/// Rebuild one historical source session into the dedicated process-local kv-mem.
+#[pyfunction]
+#[pyo3(signature = (dbnum, refno, *, sesno=None, time=None))]
+pub fn gen_history(
+    py: Python<'_>,
+    dbnum: u32,
+    refno: String,
+    sesno: Option<u32>,
+    time: Option<String>,
+) -> PyResult<Py<PyAny>> {
+    ensure_connected()?;
+    let selector =
+        aios_database::fast_model::historical_model::parse_selector(sesno, time.as_deref())
+            .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let refno = aios_database::fast_model::e3d_model_service::parse_refno(&refno)
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    let result = py
+        .detach(|| {
+            runtime().block_on(aios_database::fast_model::historical_model::generate_historical(
+                aios_database::fast_model::historical_model::HistoricalModelRequest {
+                    dbnum,
+                    refno,
+                    selector,
+                    failure_policy: aios_database::data_interface::geom_error::GeometryFailurePolicy::Required,
+                },
+            ))
+        })
+        .map_err(|error| PyRuntimeError::new_err(error.to_string()))?;
+    pythonized(py, &result)
+}
+
+#[pyfunction]
+#[pyo3(signature = (snapshot_key, tool, arguments=None))]
+pub fn query_history(
+    py: Python<'_>,
+    snapshot_key: String,
+    tool: String,
+    arguments: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    ensure_connected()?;
+    let _ = arguments;
+    let value = py
+        .detach(|| {
+            runtime().block_on(async {
+                let store =
+                    aios_database::fast_model::historical_model::HistoricalModelStore::global()
+                        .await?;
+                store.query(&snapshot_key, &tool).await
+            })
+        })
+        .map_err(anyhow_to_py)?;
+    pythonized(py, &value)
+}
+
+#[pyfunction]
+pub fn drop_history(py: Python<'_>, snapshot_key: String) -> PyResult<()> {
+    ensure_connected()?;
+    py.detach(|| {
+        runtime().block_on(async {
+            let store =
+                aios_database::fast_model::historical_model::HistoricalModelStore::global().await?;
+            store.drop_snapshot(&snapshot_key).await
         })
     })
     .map_err(anyhow_to_py)
@@ -672,11 +761,11 @@ pub fn update_aabbs(
                 aios_database::data_interface::initialization_phase::require_model_generation()?;
                 let refnos = parse_refnos(refnos);
                 let changes = if durable {
-                    aios_database::fast_model::occ_generate::
+                    aios_database::fast_model::aabb_refresh::
                         update_inst_relate_aabbs_by_refnos_incremental(&refnos, replace)
                     .await?
                 } else {
-                    aios_database::fast_model::occ_generate::update_inst_relate_aabbs_by_refnos(
+                    aios_database::fast_model::aabb_refresh::update_inst_relate_aabbs_by_refnos(
                         &refnos, replace,
                     )
                     .await?
@@ -963,10 +1052,10 @@ pub fn enqueue(py: Python<'_>, changes: Bound<'_, PyAny>) -> PyResult<usize> {
         noun: String,
     }
     let changes: Vec<ChangeIn> = pythonize::depythonize(&changes)?;
-    let changes: Vec<aios_database::fast_model::occ_generate::AabbChange> = changes
+    let changes: Vec<aios_database::fast_model::aabb_refresh::AabbChange> = changes
         .into_iter()
         .map(
-            |change| aios_database::fast_model::occ_generate::AabbChange {
+            |change| aios_database::fast_model::aabb_refresh::AabbChange {
                 refno: parse_refno(&change.refno),
                 noun: change.noun,
             },
@@ -1279,6 +1368,9 @@ pub fn register(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     model.add_function(wrap_pyfunction!(ensure, &model)?)?;
     model.add_function(wrap_pyfunction!(gen_models, &model)?)?;
     model.add_function(wrap_pyfunction!(gen_dbnum, &model)?)?;
+    model.add_function(wrap_pyfunction!(gen_history, &model)?)?;
+    model.add_function(wrap_pyfunction!(query_history, &model)?)?;
+    model.add_function(wrap_pyfunction!(drop_history, &model)?)?;
     model.add_function(wrap_pyfunction!(update_aabbs, &model)?)?;
     model.add_function(wrap_pyfunction!(delete_subtree, &model)?)?;
     model.add_function(wrap_pyfunction!(export_obj, &model)?)?;
