@@ -153,7 +153,7 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
 parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "005936a6767bd92f733aa4a7d113a07391487eef" }
-aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "d97586c795e72229a63921c04d46a5abb780e812", default-features = false }
+aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "4a7a00f93f3afa4069922ea52fab174cbbbddcde", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
 pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "14e2836cbad5949f3e09365ab75c01328b1eab2e" }
@@ -239,7 +239,7 @@ rmcp = { version = "=3.1.1", features = ["server", "transport-io"] }
 #
 # 前提：下面三个 vendor 目录必须存在，且停在与上面 rev 对应的提交上。
 #
-#   ../vendor/old-aios-core      codex/libgm-snout-caliber = d97586c7
+#   ../vendor/old-aios-core      codex/libgm-snout-caliber = 4a7a00f9
 #   ../vendor/old-parse-pdms-db  codex/room-panel-wire-repair-deps = 2de7cd23
 #   ../vendor/old-pdms-io        codex/room-panel-wire-repair-deps = 5e4e4d75
 #

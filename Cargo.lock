@@ -179,7 +179,7 @@ dependencies = [
 [[package]]
 name = "aios_core"
 version = "0.2.0"
-source = "git+https://github.com/happyrust/old-aios-core.git?rev=d97586c795e72229a63921c04d46a5abb780e812#d97586c795e72229a63921c04d46a5abb780e812"
+source = "git+https://github.com/happyrust/old-aios-core.git?rev=4a7a00f93f3afa4069922ea52fab174cbbbddcde#4a7a00f93f3afa4069922ea52fab174cbbbddcde"
 dependencies = [
  "anyhow",
  "approx 0.5.1",
