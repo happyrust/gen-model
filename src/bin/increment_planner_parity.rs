@@ -18,6 +18,11 @@
 //! `unchanged` / TUBI 门）、L4 口径不同（`model_impact` 三态 vs `is_model_unit` +
 //! 世界系级联）。每一条 `only_*` 都要有归因，`unexplained` 为 0 才算过门。
 //!
+//! 第四桶 **`over_coverage`**（2026-09-02，specs/035 T207 (a)）量的是「一致」底下的多算：
+//! G 根名下确有 E 单元、算 `covered`，但根不是交付单元（容器自己成了根）或根子树里的
+//! 模型单元数多于被覆盖的 E 单元数——增 / 删一条支管时 G 的 `RegenRoot(PIPE)` 是 E 计划的
+//! 9 倍，三桶看不见。它不计入 `unexplained`；T201 落地后 `over_coverage_units` 应为 0。
+//!
 //! 用法：
 //! ```text
 //! cargo run --bin increment_planner_parity -- \
@@ -45,7 +50,7 @@ use e3d_attlib::AttlibData;
 use e3d_io::db_element::{DbFilePin, DbSet, template_file_for};
 use e3d_io::index::IndexCandidate;
 use e3d_io::refno::RefNo;
-use e3d_model::category::is_derived_unit;
+use e3d_model::category::{is_derived_unit, is_model_unit};
 use e3d_model::element_diff::diff_element;
 use e3d_model::increment::{collect_window, plan_update};
 use e3d_model::ledger::ChangeKind;
@@ -705,6 +710,10 @@ struct E3dSide {
     candidate_refnos: HashSet<RefnoEnum>,
     #[serde(skip)]
     ledger_refnos: HashSet<RefnoEnum>,
+    /// L3 记成 `OpaqueRecordChange` 的元素：记录字节变了、L2 逐属性 / 成员表 / 属主 / 类型
+    /// 都比不出差别。它们引发的级联要单列归因（`E_opaque_cascade`），别混进位姿 / 改挂级联。
+    #[serde(skip)]
+    opaque_refnos: HashSet<RefnoEnum>,
     #[serde(skip)]
     cascade_sources: Vec<(RefnoEnum, String)>,
     /// 原始索引候选（kind, refno, noun@target|base, exists@base, exists@target），落盘取证用。
@@ -854,6 +863,9 @@ fn e3d_model_side(
     for entry in plan.ledger.entries() {
         let refno = to_enum(entry.refno);
         side.ledger_refnos.insert(refno);
+        if entry.kind == ChangeKind::OpaqueRecordChange {
+            side.opaque_refnos.insert(refno);
+        }
         let mut graphs: Vec<&IoGraph> = match entry.kind {
             ChangeKind::Deleted => vec![base_graph],
             ChangeKind::Reparented | ChangeKind::TypeChanged => vec![target_graph, base_graph],
@@ -923,6 +935,27 @@ struct BucketRow {
     refnos: Vec<String>,
 }
 
+/// 一个 G 根名下确有 E 单元（算 `covered`），但 G 整根重算的范围比 E 的计划大：
+/// 根不是交付单元（PIPE / ZONE 一类容器自己成了根），或根子树里的模型单元数多于
+/// 被它覆盖的 E 单元数。三桶口径下这是「一致」，实际是 G 多算——db8000 BRAN 链上
+/// 增 / 删一条支管，G 的 `RegenRoot(PIPE)` 是 E 计划的 9 倍（specs/035 T207 (a)）。
+#[derive(Debug, Serialize)]
+struct OverCoverageRow {
+    root: String,
+    noun: String,
+    kind: String,
+    is_delivery_unit: bool,
+    /// 名下被覆盖的 E 单元数。
+    e3d_units_covered: usize,
+    /// 根子树里的模型单元数（`is_model_unit` + `is_derived_unit`，与 E 的单元口径一致；
+    /// 根在 target 端不存在时按 base 端数）。
+    subtree_units: usize,
+    /// `subtree_units − e3d_units_covered`：G 会多重算的单元数。
+    excess: usize,
+    reason: String,
+    gen_model_tags: Vec<String>,
+}
+
 #[derive(Debug, Default, Serialize)]
 struct Summary {
     e3d_units: usize,
@@ -932,6 +965,10 @@ struct Summary {
     gen_roots: usize,
     gen_roots_with_e3d_unit: usize,
     only_gen_model: usize,
+    /// `over_coverage` 桶里的 G 根数（不计入 `unexplained`：它是多算的度量，不是漏算）。
+    over_covered_roots: usize,
+    /// 这些根合计会多重算的单元数。T201 落地后应为 0。
+    over_coverage_units: usize,
     unexplained: usize,
     reasons: BTreeMap<String, usize>,
 }
@@ -947,7 +984,33 @@ struct Report {
     covered: Vec<BucketRow>,
     only_gen_model: Vec<BucketRow>,
     only_e3d_model: Vec<BucketRow>,
+    over_coverage: Vec<OverCoverageRow>,
     summary: Summary,
+}
+
+/// 根子树里按 E 的单元口径数出来的模型单元数：`is_model_unit`（正体 / 路由成员）加
+/// `is_derived_unit`（隐式管身的派生容器）。G 的 `RegenRoot` 整棵子树重算，这就是它
+/// 真正要重建的单元数；与 `covered` 里被它覆盖的 E 单元数相减就是多算量。
+fn subtree_unit_count(set: &Arc<DbSet>, root: RefnoEnum) -> usize {
+    let mut count = 0usize;
+    let mut frontier = vec![to_refno(root)];
+    let mut seen: HashSet<RefnoEnum> = HashSet::new();
+    while let Some(current) = frontier.pop() {
+        if !seen.insert(to_enum(current)) {
+            continue;
+        }
+        let el = set.element(current);
+        let Ok(noun) = el.element_type() else {
+            continue;
+        };
+        if is_model_unit(&noun) || is_derived_unit(&noun) {
+            count += 1;
+        }
+        if let Ok(members) = el.member_refnos() {
+            frontier.extend(members.into_iter().filter(|m| m.is_valid()));
+        }
+    }
+    count
 }
 
 fn refnos_of(attribution_refnos: &BTreeSet<String>) -> Vec<RefnoEnum> {
@@ -958,12 +1021,21 @@ fn refnos_of(attribution_refnos: &BTreeSet<String>) -> Vec<RefnoEnum> {
         .collect()
 }
 
-fn explain_only_e3d(unit: &UnitAttribution, gside: &GenSide) -> String {
+fn explain_only_e3d(unit: &UnitAttribution, gside: &GenSide, e3d: &E3dSide) -> String {
     if let Some(error) = &gside.collect_error {
         let head: String = error.chars().take(80).collect();
         return format!("G_collect_window_failed(生产收集器整窗报错：{head}…)");
     }
     if unit.tags.iter().any(|t| t.starts_with("cascade:")) {
+        // 级联源是 `OpaqueRecordChange`（记录字节变了、L2 逐属性 / 成员表比不出差别）时
+        // 单列：这不是位姿 / 改挂的世界系重建，是 E 的保守级联；同一窗 G 的收集器按
+        // 解析后内容判「原样重写跳过」、0 根，是 G 对 E 多算（db8000 净空窗 266→271）。
+        let opaque_source = refnos_of(&unit.refnos)
+            .into_iter()
+            .any(|r| e3d.opaque_refnos.contains(&r) && e3d.cascade_sources.iter().any(|(s, _)| *s == r));
+        if opaque_source {
+            return "E_opaque_cascade(容器记录字节变了但成员表/属性逐项相等，E 保守级联整棵子树；G 按解析后内容判无变化)".into();
+        }
         return "E_cascade_world_bake(容器位姿/改挂→世界系子树重建，G 只刷变换或不刷)".into();
     }
     if unit.kind == UnitKind::Derived {
@@ -1266,7 +1338,7 @@ fn main() -> anyhow::Result<()> {
                 refnos: unit.refnos.iter().cloned().collect(),
             });
         } else {
-            let reason = explain_only_e3d(unit, &gside);
+            let reason = explain_only_e3d(unit, &gside, &e3d);
             *summary
                 .reasons
                 .entry(format!("only_e3d_model/{reason}"))
@@ -1325,6 +1397,67 @@ fn main() -> anyhow::Result<()> {
     }
     summary.only_gen_model = only_g.len();
 
+    // G 根正向：名下有 E 单元的 RegenRoot，整根重算的范围比 E 计划大多少。
+    // Transform 目标不算——它只刷子树变换，不重建单元，多覆盖没有代价。
+    let mut covered_per_root: BTreeMap<String, usize> = BTreeMap::new();
+    for row in &covered {
+        if row.reason.starts_with("covered(") {
+            for root in &row.covered_by {
+                *covered_per_root.entry(root.clone()).or_default() += 1;
+            }
+        }
+    }
+    let mut over_coverage = Vec::new();
+    for (root, attribution) in &gside.regen_roots {
+        let Some(&e3d_units_covered) = covered_per_root.get(root) else {
+            continue;
+        };
+        let Some(root_refno) = parse_pdms(root).map(to_enum) else {
+            continue;
+        };
+        let set = if target_graph.exists(root_refno) {
+            &target_set
+        } else {
+            &base_set
+        };
+        let subtree_units = subtree_unit_count(set, root_refno);
+        let is_delivery_unit = unit_types.iter().any(|u| u == &attribution.noun);
+        let excess = subtree_units.saturating_sub(e3d_units_covered);
+        if excess == 0 {
+            // 整根重算的范围恰好就是 E 的计划（PANE 一类「significant owner」根也在此列）。
+            continue;
+        }
+        // 两种多算要分开看：容器自己成了根是 T201 要改掉的判据；交付单元整根重算比 E 的
+        // 单元多，是 gen-model 根级 manifest 的粒度（改一个 FTUB 重算整条 BRAN），按设计。
+        let reason = if !is_delivery_unit {
+            format!(
+                "G_root_not_delivery_unit(容器 {} 自己成了 regen 根，整棵子树 {subtree_units} 个单元重算，E 只计划 {e3d_units_covered} 个)",
+                attribution.noun
+            )
+        } else {
+            format!(
+                "G_root_regenerates_more_than_E(根子树 {subtree_units} 个单元，E 计划 {e3d_units_covered} 个)"
+            )
+        };
+        *summary
+            .reasons
+            .entry(format!("over_coverage/{}", reason.split('(').next().unwrap_or(&reason)))
+            .or_default() += 1;
+        summary.over_covered_roots += 1;
+        summary.over_coverage_units += excess;
+        over_coverage.push(OverCoverageRow {
+            root: root.clone(),
+            noun: attribution.noun.clone(),
+            kind: "RegenRoot".into(),
+            is_delivery_unit,
+            e3d_units_covered,
+            subtree_units,
+            excess,
+            reason,
+            gen_model_tags: attribution.tags.clone(),
+        });
+    }
+
     println!();
     print_rows(
         "covered（E 单元被 G 根覆盖）",
@@ -1341,9 +1474,22 @@ fn main() -> anyhow::Result<()> {
         &only_g,
         args.samples,
     );
+    println!(
+        "== over_coverage（G 根名下有 E 单元，但整根重算比 E 计划多） == {} 条",
+        over_coverage.len()
+    );
+    for r in over_coverage.iter().take(args.samples) {
+        println!(
+            "  {} ({}) [{}] delivery_unit={} covered_E={} subtree_units={} excess={} reason={}",
+            r.root, r.noun, r.kind, r.is_delivery_unit, r.e3d_units_covered, r.subtree_units, r.excess, r.reason
+        );
+        for t in r.gen_model_tags.iter().take(3) {
+            println!("      G  {t}");
+        }
+    }
     println!();
     println!(
-        "== 汇总 == E 单元={} 被 RegenRoot 覆盖={} 仅被 Transform 覆盖={} only_e3d_model={} | G 根={} 名下有 E 单元={} only_gen_model={} | unexplained={}",
+        "== 汇总 == E 单元={} 被 RegenRoot 覆盖={} 仅被 Transform 覆盖={} only_e3d_model={} | G 根={} 名下有 E 单元={} only_gen_model={} | over_coverage 根={} 多算单元={} | unexplained={}",
         summary.e3d_units,
         summary.e3d_units_covered_by_regen_root,
         summary.e3d_units_covered_only_by_transform,
@@ -1351,6 +1497,8 @@ fn main() -> anyhow::Result<()> {
         summary.gen_roots,
         summary.gen_roots_with_e3d_unit,
         summary.only_gen_model,
+        summary.over_covered_roots,
+        summary.over_coverage_units,
         summary.unexplained
     );
     for (reason, n) in &summary.reasons {
@@ -1379,6 +1527,7 @@ fn main() -> anyhow::Result<()> {
             covered: cap(covered),
             only_gen_model: cap(only_g),
             only_e3d_model: cap(only_e),
+            over_coverage,
             summary,
         };
         std::fs::write(out, serde_json::to_string_pretty(&report)?)?;
