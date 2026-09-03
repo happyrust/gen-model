@@ -13,11 +13,23 @@ publish = false
 name = "_aios_db"
 crate-type = ["cdylib"]
 
+[features]
+default = []
+# 只有直读 / 对拍入口用 old-pdms-io + old-parse-pdms-db，默认依赖图里没有它们
+# （`docs/plans/2026-09-03-old-pdms-io-retirement-inventory.md`）。aios-database 的
+# 逐会话回放入口（`IncrementPipeline::collect_changes`）也只在它的 `legacy_session_replay`
+# 后面，所以那个 feature 挂在这道门上——挂到无条件依赖上会把 pdms_io 拖进整个工作区的默认图。
+legacy_pdms_io = [
+    "dep:pdms_io",
+    "dep:parse_pdms_db",
+    "aios-database/legacy_session_replay",
+]
+
 [dependencies]
-aios-database = { path = "..", features = ["legacy_session_replay"] }
-aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "d97586c795e72229a63921c04d46a5abb780e812", default-features = false }
-pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "14e2836cbad5949f3e09365ab75c01328b1eab2e" }
-parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "005936a6767bd92f733aa4a7d113a07391487eef" }
+aios-database = { path = ".." }
+aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "4a7a00f93f3afa4069922ea52fab174cbbbddcde", default-features = false }
+pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "14e2836cbad5949f3e09365ab75c01328b1eab2e", optional = true }
+parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "005936a6767bd92f733aa4a7d113a07391487eef", optional = true }
 
 anyhow = "1.0.57"
 serde_json = "1.0.81"

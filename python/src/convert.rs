@@ -7,8 +7,12 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 
-use aios_core::{NamedAttrMap, NamedAttrValue, RefU64};
-use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement};
+#[cfg(feature = "legacy_pdms_io")]
+use aios_core::NamedAttrMap;
+use aios_core::{NamedAttrValue, RefU64};
+use aios_database::data_interface::ele_ops::{
+    EleOperationData, EleOperationDetail, ModifiedElement,
+};
 use serde_json::{Value, json};
 
 pub fn window_to_json(window: &BTreeMap<u32, Vec<EleOperationData>>, detail: bool) -> Value {
@@ -158,6 +162,7 @@ fn refno_str(refno: RefU64) -> String {
 
 /// 单元素文件直读 dump（`parse.element`）。`found_sesno` 是命中的版本所在会话号
 /// （元素最后一次被写入的会话，不一定等于查询给的上限）。
+#[cfg(feature = "legacy_pdms_io")]
 pub fn ele_data_to_json(data: &parse_pdms_db::parse::EleData, found_sesno: u32) -> Value {
     json!({
         "refno": refno_str(data.refno),
@@ -178,6 +183,7 @@ pub fn ele_data_to_json(data: &parse_pdms_db::parse::EleData, found_sesno: u32) 
 /// 数组 → list、refno 一律 `a_b`、Invalid → None。词属性在 direct 原始视图里是
 /// 词哈希整数——按 schema 反哈希对齐 DB 视图是 D2 同源转换器（Q4）的职责
 /// （`docs/plans/direct-dbelement-read-api.md`），这里不做第二实现。
+#[cfg(feature = "legacy_pdms_io")]
 pub fn plain_attr_value(value: &NamedAttrValue) -> Value {
     match value {
         NamedAttrValue::InvalidType => Value::Null,
@@ -202,6 +208,7 @@ pub fn plain_attr_value(value: &NamedAttrValue) -> Value {
 }
 
 /// 合并 attmap → `{属性名: 平面值}`（BTreeMap，键序稳定）。
+#[cfg(feature = "legacy_pdms_io")]
 pub fn named_attr_map_to_plain(map: &NamedAttrMap) -> Value {
     Value::Object(
         map.map
@@ -216,6 +223,7 @@ pub fn named_attr_map_to_plain(map: &NamedAttrMap) -> Value {
 /// 与 [`ele_data_to_json`]（原始两段 tagged dump）的差别：attrs 是「常规 attmap
 /// 打底、显式属性补缺」的合并结果 + 平面值；另给 `explicit_keys`（哪些键来自
 /// 显式段）与 `uda_count`（UDA 显式属性条数，merge 不含它们）便于测试对账。
+#[cfg(feature = "legacy_pdms_io")]
 pub fn ele_data_to_merged_json(data: &parse_pdms_db::parse::EleData, found_sesno: u32) -> Value {
     let merged = data.whole_attmap.merge();
     let explicit_keys: Vec<&String> = data.whole_attmap.explicit_attmap().map.keys().collect();

@@ -324,24 +324,15 @@ pub fn apply_file(
     let value = py
         .detach(|| {
             runtime().block_on(async {
-                use std::io::Read;
-                let mut file = std::fs::File::open(&path)
-                    .with_context(|| format!("打开 {} 失败", path.display()))?;
-                let mut head = [0u8; 60];
-                file.read_exact(&mut head).context("读取文件头失败")?;
-                let basic = parse_pdms_db::parse::parse_file_basic_info(&head);
-
-                let mut io = pdms_io::io::PdmsIO::new("", path.clone(), true);
-                io.open()
-                    .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
-                let info = io
-                    .get_page_basic_info()
-                    .map_err(|error| anyhow::anyhow!("读取页级基础信息失败: {error}"))?;
-                let latest = info.latest_ses_data.sesno;
+                let info = aios_database::data_interface::db_file_header::DbFileHeader::read(&path)
+                    .map_err(|error| anyhow::anyhow!("读取库文件头失败: {error}"))?;
+                let dbnum = info.dbnum as u32;
+                let db_type = info.db_type.clone();
+                let latest = info.latest_sesno() as i32;
 
                 let watermark =
                     aios_database::data_interface::sesno_range::SesnoRangeResolver::query_watermark(
-                        basic.db_no,
+                        dbnum,
                     )
                     .await? as i32;
                 let start = start.unwrap_or(watermark + 1);
@@ -349,14 +340,14 @@ pub fn apply_file(
                 if start > end {
                     return anyhow::Ok(json!({
                         "up_to_date": true,
-                        "dbnum": basic.db_no,
+                        "dbnum": dbnum,
                         "applied_sesno": watermark,
                         "file_latest_sesno": latest,
                     }));
                 }
 
                 let mut ranges = indexmap::IndexMap::new();
-                ranges.insert(path.clone(), (info, start..=end, basic.db_type.clone()));
+                ranges.insert(path.clone(), (info, start..=end, db_type));
                 let result =
                     aios_database::data_interface::increment_pipeline::IncrementPipeline::new()
                         .apply(ranges)
@@ -466,39 +457,25 @@ pub fn resolve_window(py: Python<'_>, path: PathBuf, skip_cata: bool) -> PyResul
     let value = py
         .detach(|| {
             runtime().block_on(async {
-                use std::io::Read;
-                let mut file = std::fs::File::open(&path)
-                    .with_context(|| format!("打开 {} 失败", path.display()))?;
-                let mut head = [0u8; 60];
-                file.read_exact(&mut head).context("读取文件头失败")?;
-                let basic = parse_pdms_db::parse::parse_file_basic_info(&head);
-
-                let mut io = pdms_io::io::PdmsIO::new("", path.clone(), true);
-                io.open()
-                    .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
-                let latest = io
-                    .get_page_basic_info()
-                    .map_err(|error| anyhow::anyhow!("读取页级基础信息失败: {error}"))?
-                    .latest_ses_data
-                    .sesno;
+                let header = aios_database::data_interface::db_file_header::DbFileHeader::read(
+                    &path,
+                )
+                .map_err(|error| anyhow::anyhow!("读取库文件头失败: {error}"))?;
+                let dbnum = header.dbnum as u32;
+                let db_type = header.db_type.clone();
+                let latest = header.latest_sesno() as i32;
 
                 let mgr = crate::db_api::manager().await?;
                 let project = mgr.db_option.project_name.clone();
+                // 头已经在手，走 `resolve_with_header`（`resolve` 会为同一个文件再开一次）；
+                // 预览侧本就不传会话预算，两者其余判定逐行相同。
                 let plan = aios_database::data_interface::sesno_range::SesnoRangeResolver::new()
-                    .resolve(
-                        &path,
-                        &project,
-                        basic.db_no,
-                        latest,
-                        skip_cata,
-                        &basic.db_type,
-                        None,
-                    )
+                    .resolve_with_header(&path, &project, header, skip_cata, &db_type)
                     .await?;
                 anyhow::Ok(match plan {
                     Some(plan) => json!({
                         "up_to_date": false,
-                        "dbnum": basic.db_no,
+                        "dbnum": dbnum,
                         "db_type": plan.db_type,
                         "window": [*plan.range.start(), *plan.range.end()],
                         "cold_start": plan.cold_start,
@@ -507,8 +484,8 @@ pub fn resolve_window(py: Python<'_>, path: PathBuf, skip_cata: bool) -> PyResul
                     }),
                     None => json!({
                         "up_to_date": true,
-                        "dbnum": basic.db_no,
-                        "db_type": basic.db_type,
+                        "dbnum": dbnum,
+                        "db_type": db_type,
                         "file_latest_sesno": latest,
                     }),
                 })

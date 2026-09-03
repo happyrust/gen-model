@@ -146,26 +146,13 @@ fn header(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
 }
 
 fn header_impl(path: &Path) -> anyhow::Result<serde_json::Value> {
-    use std::io::Read;
-    let mut file =
-        std::fs::File::open(path).with_context(|| format!("打开 {} 失败", path.display()))?;
-    let mut head = [0u8; 60];
-    file.read_exact(&mut head)
-        .with_context(|| format!("读取 {} 前 60 字节文件头失败", path.display()))?;
-    let basic = parse_pdms_db::parse::parse_file_basic_info(&head);
-
-    let mut io = pdms_io::io::PdmsIO::new("", path.to_path_buf(), true);
-    io.open()
-        .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
-    let info = io
-        .get_page_basic_info()
-        .map_err(|error| anyhow::anyhow!("读取页级基础信息失败: {error}"))?;
+    let info = aios_database::data_interface::db_file_header::DbFileHeader::read(path)?;
     Ok(serde_json::json!({
-        "db_type": basic.db_type,
-        "dbnum": basic.db_no,
-        "latest_sesno": info.latest_ses_data.sesno,
-        "latest_ses_time": info.latest_ses_data.get_dt().to_rfc3339(),
-        "latest_ses_pageno": info.latest_ses_pageno,
+        "db_type": info.db_type,
+        "dbnum": info.dbnum,
+        "latest_sesno": info.latest_session.sesno,
+        "latest_ses_time": info.latest_session.rfc3339(),
+        "latest_ses_pageno": info.latest_ses_pgno,
         "file_size": info.file_size,
     }))
 }
@@ -223,11 +210,7 @@ fn sessions(py: Python<'_>, path: PathBuf) -> PyResult<Py<PyAny>> {
 }
 
 fn sessions_impl(path: &Path) -> anyhow::Result<serde_json::Value> {
-    let mut io = pdms_io::io::PdmsIO::new("", path.to_path_buf(), true);
-    io.open()
-        .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
-    let mut sessions: Vec<_> = io.ses_data_map.values().collect();
-    sessions.sort_by_key(|session| session.sesno);
+    let sessions = aios_database::data_interface::db_file_header::session_chain(path)?;
     let rows = sessions
         .into_iter()
         .map(|session| {
@@ -235,11 +218,11 @@ fn sessions_impl(path: &Path) -> anyhow::Result<serde_json::Value> {
                 "sesno": session.sesno,
                 "pgno": session.pgno,
                 "end_pgno": session.end_pgno,
-                "index_root_pageno": session.index_root_pageno,
-                "claim_pageno": session.claim_pageno,
-                "computer_name": session.get_computer_name(),
-                "comments": session.get_comments_name(),
-                "date": session.get_dt().to_rfc3339(),
+                "index_root_pageno": session.index_root_pgno,
+                "claim_pageno": serde_json::Value::Null,
+                "computer_name": session.machine,
+                "comments": session.comment,
+                "date": session.rfc3339(),
             })
         })
         .collect::<Vec<_>>();
@@ -250,6 +233,7 @@ fn sessions_impl(path: &Path) -> anyhow::Result<serde_json::Value> {
 ///
 /// `sesno` 缺省读最新版本；给定时读「该会话或之前」可见的最后版本（做历史对比）。
 /// 返回的 `found_sesno` 是命中的版本真正所在的会话号。原始解析、不处理 UDA。
+#[cfg(feature = "legacy_pdms_io")]
 #[pyfunction]
 #[pyo3(signature = (path, refno, sesno=None))]
 fn element(
@@ -264,6 +248,7 @@ fn element(
     Ok(pythonize(py, &value)?.unbind())
 }
 
+#[cfg(feature = "legacy_pdms_io")]
 fn element_impl(path: &Path, refno: &str, sesno: Option<u32>) -> anyhow::Result<serde_json::Value> {
     let (mut io, found_sesno, offset) = locate_element(path, refno, sesno)?;
     let data = io
@@ -284,6 +269,7 @@ fn element_impl(path: &Path, refno: &str, sesno: Option<u32>) -> anyhow::Result<
 /// explicit_keys, uda_count}`；`attrs` 为合并后的平面视图（数值/字符串/布尔/列表，
 /// refno 一律 `a_b`）。词属性保持 direct 原始的词哈希整数——按 schema 反哈希对齐
 /// DB 视图是 D2 同源转换器的职责（`direct-dbelement-read-api.md`），此处不做第二实现。
+#[cfg(feature = "legacy_pdms_io")]
 #[pyfunction]
 #[pyo3(signature = (path, refno, sesno=None))]
 fn attmap(py: Python<'_>, path: PathBuf, refno: String, sesno: Option<u32>) -> PyResult<Py<PyAny>> {
@@ -293,6 +279,7 @@ fn attmap(py: Python<'_>, path: PathBuf, refno: String, sesno: Option<u32>) -> P
     Ok(pythonize(py, &value)?.unbind())
 }
 
+#[cfg(feature = "legacy_pdms_io")]
 fn attmap_impl(path: &Path, refno: &str, sesno: Option<u32>) -> anyhow::Result<serde_json::Value> {
     let (mut io, found_sesno, offset) = locate_element(path, refno, sesno)?;
     // SESNO 戳需要会话页范围映射（parse_element 内 get_sesno），探针同款前置。
@@ -305,6 +292,7 @@ fn attmap_impl(path: &Path, refno: &str, sesno: Option<u32>) -> anyhow::Result<s
 
 /// 递归直读指定元素及其所有后代。遍历只使用 PdmsIO 的 refno 索引和
 /// `parse_element`，不连接 SurrealDB；返回父节点优先的稳定 DFS。
+#[cfg(feature = "legacy_pdms_io")]
 #[pyfunction]
 #[pyo3(signature = (path, refno, sesno=None))]
 fn subtree(
@@ -319,6 +307,7 @@ fn subtree(
     Ok(pythonize(py, &value)?.unbind())
 }
 
+#[cfg(feature = "legacy_pdms_io")]
 fn subtree_impl(path: &Path, refno: &str, sesno: Option<u32>) -> anyhow::Result<serde_json::Value> {
     use std::collections::HashSet;
     use std::str::FromStr;
@@ -356,6 +345,7 @@ fn subtree_impl(path: &Path, refno: &str, sesno: Option<u32>) -> anyhow::Result<
 }
 
 /// 直读文件当前索引中的全部元素。索引由 PdmsIO 构建，绝不经过数据库。
+#[cfg(feature = "legacy_pdms_io")]
 fn all_elements_impl(path: &Path, sesno: Option<u32>) -> anyhow::Result<serde_json::Value> {
     let mut io = pdms_io::io::PdmsIO::new("", path.to_path_buf(), true);
     io.open()
@@ -379,6 +369,7 @@ fn all_elements_impl(path: &Path, sesno: Option<u32>) -> anyhow::Result<serde_js
 }
 
 /// 生成整个 db 文件的 direct 模型快照（当前索引的全部 refno）。
+#[cfg(feature = "legacy_pdms_io")]
 #[pyfunction]
 #[pyo3(signature = (path, output, sesno=None))]
 fn generate_all_model(
@@ -402,6 +393,7 @@ fn generate_all_model(
 
 /// 将 direct 子树模型数据写成可复现的 JSON 产物。该产物是几何生成器的输入边界：
 /// 所有元素、属性和 `PdmsGeoParam` 均来自同一次 PdmsIO 读取，不经过数据库缓存。
+#[cfg(feature = "legacy_pdms_io")]
 #[pyfunction]
 #[pyo3(signature = (path, refno, output, sesno=None))]
 fn generate_model(
@@ -455,6 +447,7 @@ fn generate_model(
 
 /// 将 direct 子树中的 PlantMesh 写成 OBJ，便于在没有服务/数据库的情况下检查模型。
 /// OBJ 只是交付/可视化副产物，权威输入仍是同一次 PdmsIO 读取的元素数据。
+#[cfg(feature = "legacy_pdms_io")]
 #[pyfunction]
 #[pyo3(signature = (path, refno, output, sesno=None))]
 fn generate_obj(
@@ -505,6 +498,7 @@ fn generate_obj(
 
 /// 生成最小可回读 RVM 容器（Direct primitive smoke 文件）。每个带 RVM primitive
 /// 片段的后代独立成为 group；该文件用于验证 writer/parser 互操作，不依赖数据库。
+#[cfg(feature = "legacy_pdms_io")]
 #[pyfunction]
 #[pyo3(signature = (path, refno, output, sesno=None))]
 fn generate_rvm(
@@ -574,6 +568,7 @@ fn generate_rvm(
     Ok(pythonize(py, &value)?.unbind())
 }
 
+#[cfg(feature = "legacy_pdms_io")]
 fn rvm_chunk(tag: [u8; 4], data: Vec<u8>) -> Vec<u8> {
     let mut out = vec![0u8; 20];
     for i in 0..4 {
@@ -582,6 +577,7 @@ fn rvm_chunk(tag: [u8; 4], data: Vec<u8>) -> Vec<u8> {
     out.extend(data);
     out
 }
+#[cfg(feature = "legacy_pdms_io")]
 fn rvm_named_chunk(tag: [u8; 4], name: &str) -> Vec<u8> {
     let mut d = vec![0u8; 12];
     let b = name.as_bytes();
@@ -594,6 +590,7 @@ fn rvm_named_chunk(tag: [u8; 4], name: &str) -> Vec<u8> {
 }
 
 /// 打开库文件并按（可选 pin 的）会话定位单个 refno：`element` / `attmap` 共用。
+#[cfg(feature = "legacy_pdms_io")]
 fn locate_element(
     path: &Path,
     refno: &str,
@@ -620,6 +617,7 @@ fn locate_element(
 ///
 /// 与 E3D `core.dll` 的 `ATTOPE`/`ATGTIX`/`ATNLOG` 读取链同源（`parse_pdms_db::dict`），
 /// 含 base_type 继承与默认表兜底——替代手写复刻的 `gm_noun_caps_probe.py`。
+#[cfg(feature = "legacy_pdms_io")]
 #[pyfunction]
 fn noun_dict(py: Python<'_>, attlib_path: PathBuf) -> PyResult<Py<PyAny>> {
     let value = py
@@ -643,6 +641,7 @@ fn noun_dict(py: Python<'_>, attlib_path: PathBuf) -> PyResult<Py<PyAny>> {
 ///
 /// 返回 `{sesno: [op, ...]}`；`detail=False` 时属性只给名字列表，`detail=True`
 /// 给完整旧值/新值。
+#[cfg(feature = "legacy_pdms_io")]
 #[pyfunction]
 #[pyo3(signature = (path, start, end, detail=false))]
 fn collect_changes(
@@ -670,12 +669,13 @@ fn collect_changes(
 ///
 /// 与 `parse.collect_changes`（逐会话回放）互为对拍：回放给出每会话操作明细，
 /// 差分给出净三态（窗口内加了又删不出现，删了又建判 modified）。实现见
-/// `pdms_io::session_index_diff`（存在性口径与生产 B+ 树点查逐字对齐）。
+/// legacy `pdms_io::session_index_diff` 对拍接口（生产数据读取走 e3d-io）。
 ///
 /// 返回 `{requested_start, requested_end, base_sesno, target_sesno,
 /// added/deleted/modified: [{refno, record_pgno, record_offset,
 /// last_touch_sesno, noun}], counts, stats}`；`with_noun=True` 时按记录位置
 /// 解析记录头补类型名（Deleted 解析的是旧记录，每 refno 一次，显式付费）。
+#[cfg(feature = "legacy_pdms_io")]
 #[pyfunction]
 #[pyo3(signature = (path, start, end, with_noun=false))]
 fn net_changes(
@@ -725,21 +725,28 @@ fn net_window(
             // ——净窗口对冻结点有硬校验，事后取证与回归夹具首当其冲。
             let target =
                 u32::try_from(end).map_err(|_| anyhow::anyhow!("窗口终点会话号非法: {end}"))?;
-            let mut snapshot =
-                pdms_io::snapshot::DabaconSnapshot::open_at("", path.clone(), target)
-                    .map_err(|error| anyhow::anyhow!("冻结 Dabacon 快照失败: {error}"))?;
-            let outcome = pdms_io::net_window::collect_net_window(&mut snapshot, start..=end)?;
+            // 与生产同一份收集器（e3d-io 底座）：冻结源钉在窗口终点，再做两端索引差分。
+            let frozen = aios_database::data_interface::frozen_source::FrozenSource::capture_at(
+                &path, target,
+            )
+            .map_err(|error| anyhow::anyhow!("冻结 dabacon 源失败: {error}"))?;
+            let outcome = aios_database::data_interface::e3d_collector::collect_net_window(
+                &frozen,
+                start..=end,
+                frozen.db_type(),
+            )?;
             let mut counts = serde_json::Map::from_iter([
                 ("added".into(), serde_json::json!(0usize)),
                 ("deleted".into(), serde_json::json!(0usize)),
                 ("modified".into(), serde_json::json!(0usize)),
             ]);
             for operation in outcome.window.values().flatten() {
+                use aios_database::data_interface::ele_ops::EleOperationDetail;
                 let key = match &operation.detail {
-                    pdms_io::io::EleOperationDetail::Add(_) => "added",
-                    pdms_io::io::EleOperationDetail::Deleted => "deleted",
-                    pdms_io::io::EleOperationDetail::Modified(_) => "modified",
-                    pdms_io::io::EleOperationDetail::None => continue,
+                    EleOperationDetail::Add(_) => "added",
+                    EleOperationDetail::Deleted => "deleted",
+                    EleOperationDetail::Modified(_) => "modified",
+                    EleOperationDetail::None => continue,
                 };
                 let count = counts[key].as_u64().unwrap_or_default() + 1;
                 counts.insert(key.into(), serde_json::json!(count));
@@ -769,17 +776,20 @@ fn _aios_db(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     parse.add_function(wrap_pyfunction!(collapse_extract_files, &parse)?)?;
     parse.add_function(wrap_pyfunction!(parent_gap_refno_count, &parse)?)?;
     parse.add_function(wrap_pyfunction!(sessions, &parse)?)?;
-    parse.add_function(wrap_pyfunction!(collect_changes, &parse)?)?;
-    parse.add_function(wrap_pyfunction!(net_changes, &parse)?)?;
     parse.add_function(wrap_pyfunction!(net_window, &parse)?)?;
-    parse.add_function(wrap_pyfunction!(element, &parse)?)?;
-    parse.add_function(wrap_pyfunction!(attmap, &parse)?)?;
-    parse.add_function(wrap_pyfunction!(subtree, &parse)?)?;
-    parse.add_function(wrap_pyfunction!(generate_all_model, &parse)?)?;
-    parse.add_function(wrap_pyfunction!(generate_model, &parse)?)?;
-    parse.add_function(wrap_pyfunction!(generate_obj, &parse)?)?;
-    parse.add_function(wrap_pyfunction!(generate_rvm, &parse)?)?;
-    parse.add_function(wrap_pyfunction!(noun_dict, &parse)?)?;
+    #[cfg(feature = "legacy_pdms_io")]
+    {
+        parse.add_function(wrap_pyfunction!(collect_changes, &parse)?)?;
+        parse.add_function(wrap_pyfunction!(net_changes, &parse)?)?;
+        parse.add_function(wrap_pyfunction!(element, &parse)?)?;
+        parse.add_function(wrap_pyfunction!(attmap, &parse)?)?;
+        parse.add_function(wrap_pyfunction!(subtree, &parse)?)?;
+        parse.add_function(wrap_pyfunction!(generate_all_model, &parse)?)?;
+        parse.add_function(wrap_pyfunction!(generate_model, &parse)?)?;
+        parse.add_function(wrap_pyfunction!(generate_obj, &parse)?)?;
+        parse.add_function(wrap_pyfunction!(generate_rvm, &parse)?)?;
+        parse.add_function(wrap_pyfunction!(noun_dict, &parse)?)?;
+    }
     m.add_submodule(&parse)?;
 
     let db = PyModule::new(py, "db")?;
