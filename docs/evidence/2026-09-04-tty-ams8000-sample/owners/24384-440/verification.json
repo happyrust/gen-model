@@ -1,0 +1,10 @@
+{
+  "baseline_command": "E3D TTY: =<parent>; Q MEMBERS (one read-only session)",
+  "modified_command": "direct_tree_tty_compare --tty (e3d-io DirectStore)",
+  "direct_nodes": 15,
+  "parents_compared": 15,
+  "mismatch_count": 0,
+  "mismatches": [],
+  "direct_exit_status": 0,
+  "tty_exit_status": 0
+}

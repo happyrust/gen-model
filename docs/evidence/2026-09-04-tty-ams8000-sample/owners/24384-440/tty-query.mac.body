@@ -1,0 +1,165 @@
+!dtselected = TRUE
+=24384/440
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-0-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-0-END
+!dtselected = TRUE
+=24384/441
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-1-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-1-END
+!dtselected = TRUE
+=24384/442
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-2-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-2-END
+!dtselected = TRUE
+=24384/443
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-3-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-3-END
+!dtselected = TRUE
+=24384/444
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-4-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-4-END
+!dtselected = TRUE
+=24384/445
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-5-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-5-END
+!dtselected = TRUE
+=24384/446
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-6-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-6-END
+!dtselected = TRUE
+=24384/447
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-7-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-7-END
+!dtselected = TRUE
+=24384/448
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-8-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-8-END
+!dtselected = TRUE
+=24384/449
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-9-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-9-END
+!dtselected = TRUE
+=24384/450
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-10-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-10-END
+!dtselected = TRUE
+=24384/451
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-11-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-11-END
+!dtselected = TRUE
+=24384/452
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-12-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-12-END
+!dtselected = TRUE
+=24384/453
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-13-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-13-END
+!dtselected = TRUE
+=24384/454
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-14-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-14-END

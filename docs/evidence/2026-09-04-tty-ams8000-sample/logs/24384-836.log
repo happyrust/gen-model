@@ -1,0 +1,38 @@
+MCP-BEGIN
+SNODE 2 of SCTN /1RX03-MSUP-E0101-V1
+NOUN-ALL-ATTRIBUTES-BEGIN
+SNODE 2 of SCTN /1RX03-MSUP-E0101-V1
+Ref =24384/836
+Type SNOD
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name SNODE 2 of SCTN /1RX03-MSUP-E0101-V1
+ZZA Type
+Type SNOD
+ZZA Lock
+Lock false
+ZZA Owner
+Owner /1RX03-MSUP-E0101-V1
+ZZA Description
+Description unset
+ZZA Function
+Function unset
+ZZA Purpose
+Purpose unset
+ZZA Number
+Number 0
+ZZA Zdistance
+Zdistance 500mm
+ZZA Level
+Level 0 10
+ZZA Fixity
+Fixity FREE
+ZZA Orrf
+Orrf Nulref
+ZZA Tmrref
+Tmrref Nulref
+ZZA RepCount
+RepCount 0
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END

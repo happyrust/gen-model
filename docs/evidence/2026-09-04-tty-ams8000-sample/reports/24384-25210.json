@@ -1,0 +1,624 @@
+﻿{
+  "attributes": [
+    {
+      "binary_name": "NAME",
+      "binary_status": {
+        "kind": "decoded_explicit"
+      },
+      "binary_value": "/-SR-CSV-S5004/BOLT5",
+      "comparison": "equivalent",
+      "name": "Name",
+      "ordinal": 0,
+      "rendered_value": "/-SR-CSV-S5004/BOLT5",
+      "resolved_reference_name": null,
+      "source": "binary_explicit"
+    },
+    {
+      "binary_name": "noun",
+      "binary_status": null,
+      "binary_value": "SUBS",
+      "comparison": "equivalent",
+      "name": "Type",
+      "ordinal": 1,
+      "rendered_value": "SUBS",
+      "resolved_reference_name": null,
+      "source": "structural"
+    },
+    {
+      "binary_name": null,
+      "binary_status": null,
+      "binary_value": null,
+      "comparison": "equivalent",
+      "name": "Lock",
+      "ordinal": 2,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "structural"
+    },
+    {
+      "binary_name": "owner",
+      "binary_status": null,
+      "binary_value": {
+        "display": "24384/25130",
+        "word0": 24384,
+        "word1": 25130
+      },
+      "comparison": "equivalent",
+      "name": "Owner",
+      "ordinal": 3,
+      "rendered_value": "/-SR-CSV-S5004",
+      "resolved_reference_name": "/-SR-CSV-S5004",
+      "source": "structural"
+    },
+    {
+      "binary_name": "DESC",
+      "binary_status": {
+        "kind": "decoded_explicit"
+      },
+      "binary_value": "M8X50",
+      "comparison": "equivalent",
+      "name": "Description",
+      "ordinal": 4,
+      "rendered_value": "M8X50",
+      "resolved_reference_name": null,
+      "source": "binary_explicit"
+    },
+    {
+      "binary_name": "FUNC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Function",
+      "ordinal": 5,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "PURP",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "raw": 0,
+        "text": null
+      },
+      "comparison": "equivalent",
+      "name": "Purpose",
+      "ordinal": 6,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "NUMB",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "raw": 0,
+        "text": null
+      },
+      "comparison": "equivalent",
+      "name": "Number",
+      "ordinal": 7,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "AREA",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "raw": 0,
+        "text": null
+      },
+      "comparison": "equivalent",
+      "name": "Area",
+      "ordinal": 8,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "USRWEI",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Usrweight",
+      "ordinal": 9,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "USRWWE",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Usrwweight",
+      "ordinal": 10,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "USRCOG",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Usrcogravity",
+      "ordinal": 11,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "USRWCO",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Usrwcogravity",
+      "ordinal": 12,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "UWMTXT",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Uwmtxt",
+      "ordinal": 13,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "POS",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": [
+        -504.5,
+        0.0,
+        354.5
+      ],
+      "comparison": "equivalent",
+      "name": "Position",
+      "ordinal": 14,
+      "rendered_value": "W 505mm N 0mm U 355mm",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "ORI",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": [
+        -90.0,
+        0.0,
+        0.0
+      ],
+      "comparison": "equivalent",
+      "name": "Orientation",
+      "ordinal": 15,
+      "rendered_value": "Y is D and Z is N",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "BUIL",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": "Built",
+      "ordinal": 16,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "SHOP",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": "Shop",
+      "ordinal": 17,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "LENG",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": 0.0,
+      "comparison": "equivalent",
+      "name": "Length",
+      "ordinal": 18,
+      "rendered_value": "0mm",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "DUNIO",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 0,
+      "comparison": "equivalent",
+      "name": "DUnion",
+      "ordinal": 19,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "PRFL",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Prfl",
+      "ordinal": 20,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "SKEY",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Skey",
+      "ordinal": 21,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "ORRF",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Orrf",
+      "ordinal": 22,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "STMF",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Stmf",
+      "ordinal": 23,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "INVF",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Invfarray",
+      "ordinal": 24,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "UUIDIA",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Uuidia",
+      "ordinal": 25,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "PROPST",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Propst",
+      "ordinal": 26,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "OPTBLO",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Optblo",
+      "ordinal": 27,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "PDNAME",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Pdname",
+      "ordinal": 28,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "IMPVC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 0,
+      "comparison": "equivalent",
+      "name": "Impvcount",
+      "ordinal": 29,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "IMPSTC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 0,
+      "comparison": "equivalent",
+      "name": "Impstchange",
+      "ordinal": 30,
+      "rendered_value": "Undefined",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "IMPRC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": "Imprchange",
+      "ordinal": 31,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "IMPRPC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": "Imprpchange",
+      "ordinal": 32,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "IMPDC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": "Impdchange",
+      "ordinal": 33,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":SCRoomNo",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":SCRoomNo",
+      "ordinal": 34,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSConfigA",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "unset",
+      "comparison": "equivalent",
+      "name": ":MDSConfigA",
+      "ordinal": 35,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSConfigB",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "unset",
+      "comparison": "equivalent",
+      "name": ":MDSConfigB",
+      "ordinal": 36,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSCp1",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "unset",
+      "comparison": "equivalent",
+      "name": ":MDSCp1",
+      "ordinal": 37,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSCp2",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "unset",
+      "comparison": "equivalent",
+      "name": ":MDSCp2",
+      "ordinal": 38,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSCp3",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "unset",
+      "comparison": "equivalent",
+      "name": ":MDSCp3",
+      "ordinal": 39,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    }
+  ],
+  "catalog_comparison": {
+    "catalog_missing_from_tty": [
+      {
+        "hash": 545713,
+        "name": "POS",
+        "report_name": "PositonEditor"
+      }
+    ],
+    "enabled": true,
+    "logical_attribute_count": 31,
+    "noun_present": true,
+    "tty_not_in_catalog": [
+      "Type",
+      "Lock",
+      "Owner",
+      "Position",
+      ":SCRoomNo",
+      ":MDSConfigA",
+      ":MDSConfigB",
+      ":MDSCp1",
+      ":MDSCp2",
+      ":MDSCp3"
+    ]
+  },
+  "comparison_counts": {
+    "equivalent": 40
+  },
+  "deferred_uda_row_count": 0,
+  "deferred_uda_rows": [],
+  "noun_hash": 907462,
+  "noun_name": "SUBS",
+  "omitted_row_count": 0,
+  "owner": "24384/25130",
+  "refno": {
+    "display": "24384/25210",
+    "word0": 24384,
+    "word1": 25210
+  },
+  "source_counts": {
+    "binary_explicit": 2,
+    "binary_implicit": 8,
+    "catalog_default": 27,
+    "structural": 3
+  },
+  "tty_row_count": 40,
+  "tty_unique_count": 40,
+  "uda_enabled": true
+}

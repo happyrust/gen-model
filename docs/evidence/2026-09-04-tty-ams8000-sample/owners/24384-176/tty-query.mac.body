@@ -1,0 +1,33 @@
+!dtselected = TRUE
+=24384/176
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-0-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-0-END
+!dtselected = TRUE
+=24384/177
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-1-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-1-END
+!dtselected = TRUE
+=24384/178
+handle any
+!dtselected = FALSE
+elsehandle none
+endhandle
+$P DT-2-BEGIN
+if (!dtselected) then
+Q MEMBERS
+endif
+$P DT-2-END

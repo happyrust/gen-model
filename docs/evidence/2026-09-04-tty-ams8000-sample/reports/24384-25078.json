@@ -1,0 +1,351 @@
+﻿{
+  "attributes": [
+    {
+      "binary_name": "NAME",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "EXTRUSION 1 of SUBSTRUCTURE /-SR-CSV-S5003/BOLT6",
+      "comparison": "equivalent",
+      "name": "Name",
+      "ordinal": 0,
+      "rendered_value": "EXTRUSION 1 of SUBSTRUCTURE /-SR-CSV-S5003/BOLT6",
+      "resolved_reference_name": null,
+      "source": "runtime_derived"
+    },
+    {
+      "binary_name": "noun",
+      "binary_status": null,
+      "binary_value": "EXTR",
+      "comparison": "equivalent",
+      "name": "Type",
+      "ordinal": 1,
+      "rendered_value": "EXTR",
+      "resolved_reference_name": null,
+      "source": "structural"
+    },
+    {
+      "binary_name": null,
+      "binary_status": null,
+      "binary_value": null,
+      "comparison": "equivalent",
+      "name": "Lock",
+      "ordinal": 2,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "structural"
+    },
+    {
+      "binary_name": "owner",
+      "binary_status": null,
+      "binary_value": {
+        "display": "24384/25076",
+        "word0": 24384,
+        "word1": 25076
+      },
+      "comparison": "equivalent",
+      "name": "Owner",
+      "ordinal": 3,
+      "rendered_value": "/-SR-CSV-S5003/BOLT6",
+      "resolved_reference_name": "/-SR-CSV-S5003/BOLT6",
+      "source": "structural"
+    },
+    {
+      "binary_name": "PURP",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "raw": 0,
+        "text": null
+      },
+      "comparison": "equivalent",
+      "name": "Purpose",
+      "ordinal": 4,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "POS",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": [
+        0.0,
+        0.0,
+        12.0
+      ],
+      "comparison": "equivalent",
+      "name": "Position",
+      "ordinal": 5,
+      "rendered_value": "E 0mm N 0mm U 12mm",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "ORI",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "comparison": "equivalent",
+      "name": "Orientation",
+      "ordinal": 6,
+      "rendered_value": "Y is N and Z is U",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "LEVE",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": [
+        0,
+        10
+      ],
+      "comparison": "equivalent",
+      "name": "Level",
+      "ordinal": 7,
+      "rendered_value": "0 10",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "OBST",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "raw": 2,
+        "text": null
+      },
+      "comparison": "equivalent",
+      "name": "Obstruction",
+      "ordinal": 8,
+      "rendered_value": "2",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "HEIG",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": 4.0,
+      "comparison": "equivalent",
+      "name": "Height",
+      "ordinal": 9,
+      "rendered_value": "4mm",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "ORRF",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Orrf",
+      "ordinal": 10,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "TMRREF",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Tmrref",
+      "ordinal": 11,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "REPCOU",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 0,
+      "comparison": "equivalent",
+      "name": "RepCount",
+      "ordinal": 12,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":SCRoomNo",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":SCRoomNo",
+      "ordinal": 13,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":CNPEOPENITEM",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "UNSET",
+      "comparison": "equivalent",
+      "name": ":CNPEOPENITEM",
+      "ordinal": 14,
+      "rendered_value": "UNSET",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":JGOBJBASE",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "UNSET",
+      "comparison": "equivalent",
+      "name": ":JGOBJBASE",
+      "ordinal": 15,
+      "rendered_value": "UNSET",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":JGOBJMAT",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "UNSET",
+      "comparison": "equivalent",
+      "name": ":JGOBJMAT",
+      "ordinal": 16,
+      "rendered_value": "UNSET",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":JGOBJZL",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "UNSET",
+      "comparison": "equivalent",
+      "name": ":JGOBJZL",
+      "ordinal": 17,
+      "rendered_value": "UNSET",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":JGOBJNOTE",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "UNSET",
+      "comparison": "equivalent",
+      "name": ":JGOBJNOTE",
+      "ordinal": 18,
+      "rendered_value": "UNSET",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSConfigA",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "unset",
+      "comparison": "equivalent",
+      "name": ":MDSConfigA",
+      "ordinal": 19,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSConfigB",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "unset",
+      "comparison": "equivalent",
+      "name": ":MDSConfigB",
+      "ordinal": 20,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    }
+  ],
+  "catalog_comparison": {
+    "catalog_missing_from_tty": [
+      {
+        "hash": 545713,
+        "name": "POS",
+        "report_name": "PositonEditor"
+      }
+    ],
+    "enabled": true,
+    "logical_attribute_count": 10,
+    "noun_present": true,
+    "tty_not_in_catalog": [
+      "Type",
+      "Lock",
+      "Owner",
+      "Position",
+      ":SCRoomNo",
+      ":CNPEOPENITEM",
+      ":JGOBJBASE",
+      ":JGOBJMAT",
+      ":JGOBJZL",
+      ":JGOBJNOTE",
+      ":MDSConfigA",
+      ":MDSConfigB"
+    ]
+  },
+  "comparison_counts": {
+    "equivalent": 21
+  },
+  "deferred_uda_row_count": 0,
+  "deferred_uda_rows": [],
+  "noun_hash": 900968,
+  "noun_name": "EXTR",
+  "omitted_row_count": 0,
+  "owner": "24384/25076",
+  "refno": {
+    "display": "24384/25078",
+    "word0": 24384,
+    "word1": 25078
+  },
+  "source_counts": {
+    "binary_implicit": 5,
+    "catalog_default": 12,
+    "runtime_derived": 1,
+    "structural": 3
+  },
+  "tty_row_count": 21,
+  "tty_unique_count": 21,
+  "uda_enabled": true
+}

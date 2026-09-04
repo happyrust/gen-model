@@ -1,0 +1,90 @@
+MCP-BEGIN
+SUBSTRUCTURE /-SR-CSV-S5004/BOLT5
+NOUN-ALL-ATTRIBUTES-BEGIN
+/-SR-CSV-S5004/BOLT5
+Ref =24384/25210
+Type SUBS
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name /-SR-CSV-S5004/BOLT5
+ZZA Type
+Type SUBS
+ZZA Lock
+Lock false
+ZZA Owner
+Owner /-SR-CSV-S5004
+ZZA Description
+Description M8X50
+ZZA Function
+Function unset
+ZZA Purpose
+Purpose unset
+ZZA Number
+Number 0
+ZZA Area
+Area 0
+ZZA Usrweight
+Usrweight unset
+ZZA Usrwweight
+Usrwweight unset
+ZZA Usrcogravity
+Usrcogravity unset
+ZZA Usrwcogravity
+Usrwcogravity unset
+ZZA Uwmtxt
+Uwmtxt unset
+ZZA Position
+Position W 505mm N 0mm U 355mm
+ZZA Orientation
+Orientation Y is D and Z is N
+ZZA Built
+Built false
+ZZA Shop
+Shop false
+ZZA Length
+Length 0mm
+ZZA DUnion
+DUnion 0
+ZZA Prfl
+Prfl unset
+ZZA Skey
+Skey unset
+ZZA Orrf
+Orrf Nulref
+ZZA Stmf
+Stmf Nulref
+ZZA Invfarray
+Invfarray unset
+ZZA Uuidia
+Uuidia unset
+ZZA Propst
+Propst unset
+ZZA Optblo
+Optblo Nulref
+ZZA Pdname
+Pdname unset
+ZZA Impvcount
+Impvcount 0
+ZZA Impstchange
+Impstchange Undefined
+ZZA Imprchange
+Imprchange false
+ZZA Imprpchange
+Imprpchange false
+ZZA Impdchange
+Impdchange false
+ZZA :SCRoomNo
+:SCRoomNo unset
+ZZA :MDSConfigA
+:MDSConfigA unset
+ZZA :MDSConfigB
+:MDSConfigB unset
+ZZA :MDSCp1
+:MDSCp1 unset
+ZZA :MDSCp2
+:MDSCp2 unset
+ZZA :MDSCp3
+:MDSCp3 unset
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END

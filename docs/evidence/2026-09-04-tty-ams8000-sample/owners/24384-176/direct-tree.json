@@ -1,0 +1,46 @@
+{
+  "source": "direct",
+  "project": "AvevaMarineSample",
+  "mdb": "/ALL",
+  "dbnum": null,
+  "node_count": 3,
+  "parent_count": 3,
+  "nodes": [
+    {
+      "refno": "24384_176",
+      "noun": "SNOD",
+      "name": "SNOD",
+      "owner": "24384_172",
+      "order": 1,
+      "children_count": 1,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    },
+    {
+      "refno": "24384_177",
+      "noun": "SCOJ",
+      "name": "SCOJ",
+      "owner": "24384_176",
+      "order": 0,
+      "children_count": 1,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    },
+    {
+      "refno": "24384_178",
+      "noun": "SUBJ",
+      "name": "SUBJ",
+      "owner": "24384_177",
+      "order": 0,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    }
+  ]
+}

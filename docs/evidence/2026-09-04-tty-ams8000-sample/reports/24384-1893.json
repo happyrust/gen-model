@@ -1,0 +1,370 @@
+﻿{
+  "attributes": [
+    {
+      "binary_name": "NAME",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "SCOJOINT 1 of SNODE 3 of SCTN /1RX03-MSUP-E0018-V1",
+      "comparison": "equivalent",
+      "name": "Name",
+      "ordinal": 0,
+      "rendered_value": "SCOJOINT 1 of SNODE 3 of SCTN /1RX03-MSUP-E0018-V1",
+      "resolved_reference_name": null,
+      "source": "runtime_derived"
+    },
+    {
+      "binary_name": "noun",
+      "binary_status": null,
+      "binary_value": "SCOJ",
+      "comparison": "equivalent",
+      "name": "Type",
+      "ordinal": 1,
+      "rendered_value": "SCOJ",
+      "resolved_reference_name": null,
+      "source": "structural"
+    },
+    {
+      "binary_name": null,
+      "binary_status": null,
+      "binary_value": null,
+      "comparison": "equivalent",
+      "name": "Lock",
+      "ordinal": 2,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "structural"
+    },
+    {
+      "binary_name": "owner",
+      "binary_status": null,
+      "binary_value": {
+        "display": "24384/1892",
+        "word0": 24384,
+        "word1": 1892
+      },
+      "comparison": "equivalent",
+      "name": "Owner",
+      "ordinal": 3,
+      "rendered_value": "SNODE 3 of SCTN /1RX03-MSUP-E0018-V1",
+      "resolved_reference_name": "SNODE 3 of SCTN /1RX03-MSUP-E0018-V1",
+      "source": "structural"
+    },
+    {
+      "binary_name": "DESC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Description",
+      "ordinal": 4,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "FUNC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Function",
+      "ordinal": 5,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "GTYP",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "raw": 0,
+        "text": null
+      },
+      "comparison": "equivalent",
+      "name": "Gtype",
+      "ordinal": 6,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "NUMB",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "raw": 0,
+        "text": null
+      },
+      "comparison": "equivalent",
+      "name": "Number",
+      "ordinal": 7,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "DESP",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Desparam",
+      "ordinal": 8,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "BUIL",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": "Built",
+      "ordinal": 9,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "SHOP",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": "Shop",
+      "ordinal": 10,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "POSL",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "raw": 531482,
+        "text": "NA"
+      },
+      "comparison": "equivalent",
+      "name": "Posline",
+      "ordinal": 11,
+      "rendered_value": "NA",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "DELP",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": [
+        0.0,
+        0.0,
+        0.0
+      ],
+      "comparison": "equivalent",
+      "name": "Delposition",
+      "ordinal": 12,
+      "rendered_value": "E 0mm N 0mm U 0mm",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "BANG",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": 0.0,
+      "comparison": "equivalent",
+      "name": "Bangle",
+      "ordinal": 13,
+      "rendered_value": "0degree",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "GRAD",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": 0.0,
+      "comparison": "equivalent",
+      "name": "Grade",
+      "ordinal": 14,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "ISPE",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Ispec",
+      "ordinal": 15,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "FIRE",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": 0.0,
+      "comparison": "equivalent",
+      "name": "Firesistance",
+      "ordinal": 16,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "INRE",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Inref",
+      "ordinal": 17,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "SPRE",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Spref",
+      "ordinal": 18,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "MATR",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Matref",
+      "ordinal": 19,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "ORRF",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Orrf",
+      "ordinal": 20,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "INVF",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Invfarray",
+      "ordinal": 21,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    }
+  ],
+  "catalog_comparison": {
+    "catalog_missing_from_tty": [
+      {
+        "hash": 679457,
+        "name": "BANG",
+        "report_name": "BangleDoubleConverter"
+      }
+    ],
+    "enabled": true,
+    "logical_attribute_count": 19,
+    "noun_present": true,
+    "tty_not_in_catalog": [
+      "Type",
+      "Lock",
+      "Owner",
+      "Bangle"
+    ]
+  },
+  "comparison_counts": {
+    "equivalent": 22
+  },
+  "deferred_uda_row_count": 0,
+  "deferred_uda_rows": [],
+  "noun_hash": 739306,
+  "noun_name": "SCOJ",
+  "omitted_row_count": 0,
+  "owner": "24384/1892",
+  "refno": {
+    "display": "24384/1893",
+    "word0": 24384,
+    "word1": 1893
+  },
+  "source_counts": {
+    "binary_implicit": 12,
+    "catalog_default": 6,
+    "runtime_derived": 1,
+    "structural": 3
+  },
+  "tty_row_count": 22,
+  "tty_unique_count": 22,
+  "uda_enabled": true
+}

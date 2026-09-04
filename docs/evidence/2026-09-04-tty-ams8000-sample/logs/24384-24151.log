@@ -1,0 +1,143 @@
+MCP-BEGIN
+FTUBE 1 of BRANCH /M-CO-1R310-N
+NOUN-ALL-ATTRIBUTES-BEGIN
+FTUBE 1 of BRANCH /M-CO-1R310-N
+Ref =24384/24151
+Type FTUB
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name FTUBE 1 of BRANCH /M-CO-1R310-N
+ZZA Type
+Type FTUB
+ZZA Lock
+Lock false
+ZZA Owner
+Owner /M-CO-1R310-N
+ZZA Position
+Position E 17593mm N 13261mm U 2988mm
+ZZA Orientation
+Orientation Y is S 40 E and Z is W 40 S
+ZZA Desparam
+Desparam 0 0 1 0 1
+0
+ZZA Built
+Built false
+ZZA Shop
+Shop false
+ZZA Isohidden
+Isohidden false
+ZZA Spref
+Spref /ACP1000-Trough/ACP1000-TFVL:100
+ZZA Lstube
+Lstube /ACP1000-Trough/ACP1000-TUBE:100
+ZZA Arrive
+Arrive 1
+ZZA Leave
+Leave 2
+ZZA Oriflag
+Oriflag true
+ZZA Posflag
+Posflag true
+ZZA Ispec
+Ispec Nulref
+ZZA Tspec
+Tspec Nulref
+ZZA Height
+Height 1000mm
+ZZA Csfbreak
+Csfbreak false
+ZZA Tsfbreak
+Tsfbreak false
+ZZA Asfbreak
+Asfbreak false
+ZZA Lsfbreak
+Lsfbreak false
+ZZA Spln
+Spln unset
+ZZA Splt
+Splt unset
+ZZA Mtoref
+Mtoref unset
+ZZA Cmpx
+Cmpx unset
+ZZA Ptno
+Ptno 0
+ZZA Ptntube
+Ptntube 0
+ZZA Ptnbarray
+Ptnbarray unset
+ZZA Jnumber
+Jnumber unset
+ZZA Joiprefix
+Joiprefix unset
+ZZA Mtocomponent
+Mtocomponent unset
+ZZA Mtotube
+Mtotube unset
+ZZA Mtoxarray
+Mtoxarray unset
+ZZA Spsp
+Spsp unset
+ZZA Dpfname
+Dpfname unset
+ZZA Dpgridref
+Dpgridref 0
+ZZA Nwelds
+Nwelds 0
+ZZA Orrf
+Orrf Nulref
+ZZA Invfarray
+Invfarray unset
+ZZA Bselector
+Bselector unset
+ZZA MATN
+MATN unset
+ZZA Rlock
+Rlock -1
+ZZA Rlinclude
+Rlinclude unset
+ZZA Rlexclude
+Rlexclude unset
+ZZA Hrelative
+Hrelative true
+ZZA Spkchg
+Spkchg Nulref
+ZZA Deldsg
+Deldsg FALS
+ZZA Inprtref
+Inprtref Nulref
+ZZA Ouprtref
+Ouprtref Nulref
+ZZA Aexcess
+Aexcess 0mm
+ZZA Lexcess
+Lexcess 0mm
+ZZA Loose
+Loose false
+ZZA SloDirection
+SloDirection unset
+ZZA :SCRoomNo
+:SCRoomNo unset
+ZZA :ISOBRANNO
+:ISOBRANNO unset
+ZZA :PFILoose
+:PFILoose unset
+ZZA :PFILExcess
+:PFILExcess unset
+ZZA :PFIAExcess
+:PFIAExcess unset
+ZZA :PSIWEIGHT
+:PSIWEIGHT 0kg
+ZZA :MDSComment
+:MDSComment unset
+ZZA :MDSCp1
+:MDSCp1 unset
+ZZA :MDSCp2
+:MDSCp2 unset
+ZZA :MDSCp3
+:MDSCp3 unset
+ZZA :MDSVprmMto
+:MDSVprmMto true
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END
