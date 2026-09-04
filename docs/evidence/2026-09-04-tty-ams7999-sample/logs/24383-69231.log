@@ -1,0 +1,48 @@
+MCP-BEGIN
+PAVERT 4 of PLOOP 1 of PANEL 1 of FRMWORK 1 of STRUCTURE /1WCC-R522.014
+NOUN-ALL-ATTRIBUTES-BEGIN
+PAVERT 4 of PLOOP 1 of PANEL 1 of FRMWORK 1 of STRUCTURE /1WCC-R522.014
+Ref =24383/69231
+Type PAVE
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name PAVERT 4 of PLOOP 1 of PANEL 1 of FRMWORK 1 of STRUCTURE /1WCC-R522.014
+ZZA Type
+Type PAVE
+ZZA Lock
+Lock false
+ZZA Owner
+Owner PLOOP 1 of PANEL 1 of FRMWORK 1 of STRUCTURE /1WCC-R522.014
+ZZA Gtype
+Gtype unset
+ZZA Number
+Number 0
+ZZA Position
+Position W 60mm N 25mm U 10mm
+ZZA Desparam
+Desparam unset
+ZZA Built
+Built false
+ZZA Shop
+Shop false
+ZZA Spref
+Spref Nulref
+ZZA Ctyattached
+Ctyattached unset
+ZZA Fradius
+Fradius 0mm
+ZZA Bangle
+Bangle 0degree
+ZZA Matref
+Matref Nulref
+ZZA Date
+Date unset
+ZZA Mvertex
+Mvertex Nulref
+ZZA Lnfarray
+Lnfarray unset
+ZZA Orrf
+Orrf Nulref
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END

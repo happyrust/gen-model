@@ -22,3 +22,37 @@ status `3221225477`. Its TTY log contains complete end markers for samples
 `24383/75484`, which e3d-io physically decodes as noun `VALV`. No parity result
 is claimed for this run. The next run must isolate samples in smaller sessions
 and retain this refno as an explicit failing witness.
+
+## First isolated chunk
+
+Samples `0..9` were captured in one E3D session using
+`chunk-00-refnos.txt`. Literal result, exit status `0`:
+
+```text
+TTY_ATTLIST_OK refno=16191/0
+TTY_ATTLIST_OK refno=24383/67149
+TTY_ATTLIST_OK refno=24383/67843
+TTY_ATTLIST_OK refno=24383/68537
+TTY_ATTLIST_OK refno=24383/69231
+TTY_ATTLIST_OK refno=24383/69925
+TTY_ATTLIST_OK refno=24383/70619
+TTY_ATTLIST_OK refno=24383/71313
+TTY_ATTLIST_OK refno=24383/72008
+TTY_ATTLIST_OK refno=24383/72702
+TTY_ATTLIST_BATCH_OK count=10
+```
+
+Each log was compared with e3d-io using the complete `schema/e3d31` pack,
+the same six DICT databases recorded by the batch smoke, and physical reference
+databases selected by ref0. Final aggregate:
+
+```text
+reports=10 tty_rows=379 equivalent=379 different=0 deferred=0 omitted=0
+```
+
+One real comparison defect was found and fixed during this chunk. SCTN
+`24383/71313` has system `SPRE=23984/110872` and also multiple UDA rows named
+`:SPREF`. The reconciler previously let the UDA overwrite the system heading.
+Vendor commit `9d74754` separates the two name indexes. Adding the physical
+ref0 owner `ZDJ/zdj7600_0001` resolves the system reference to the TTY value
+`/CHINA-SPEC/[22b`, closing that element at `105/105`.
