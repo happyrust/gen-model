@@ -31,6 +31,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     let raw = driver.run_source(&repo, "tty-attlist-capture", &tty_source(&refno))?;
+    anyhow::ensure!(!raw.contains("NOUN-NOT-FOUND"), "E3D TTY 找不到 {refno}");
     if let Some(parent) = args.out.parent() {
         std::fs::create_dir_all(parent)?;
     }

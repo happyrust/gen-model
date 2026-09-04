@@ -166,9 +166,25 @@ exit_status=0
 
 原始 TTY 与修复后报告在 `docs/evidence/2026-09-04-dict5100-uda-13292-58/`；e3d-io 回归 `tests/e3d-descriptor.rs::dictionary_runtime_attributes_match_the_e3d_tty_capture` 同时钉住 `uda_default_unit_falls_back_to_dimension` 与 `uda_name_from_element_name` 两个 evaluator。
 
+## SYST 世界对 E3D TTY
+
+`amssys` 的物理采样覆盖 42 个 noun 桶。`MDB 24575/1308` 与已知的 `DTWL 24575/13` 都不能从 `/ALL` 按 RefNo 导航；系统世界 `WORL 24575/3` 可导航，并包含一个项目 UDA。以 `amssys + sysvir.dat + attlib.dat + DICT` 对账结果为：
+
+```text
+tty_row_count=5
+tty_unique_count=5
+comparison_counts.equivalent=5
+omitted_row_count=0
+deferred_uda_row_count=0
+mismatch=0
+exit_status=0
+```
+
+原始 TTY 与 JSON 报告在 `docs/evidence/2026-09-04-syst-worl-24575-3/`，回归固化为 e3d-io 的 `tests/e3d-descriptor.rs::system_world_attributes_match_the_e3d_tty_capture`。不可导航的内部元素没有混入外部裁决。
+
 ## 未关闭边界
 
 - 本样本的普通属性、引用名、UDA 和 e3d-io 直读成员序已闭合：115 个 TTY 属性行全部等价，18 个父节点成员序差异为 0。
 - CATA 已有一组 46/46 的 TTY 外部裁决。
-- DICT 已有一组 45/45 的 TTY 外部裁决；仍需扩大到 SYST/GLB-GLOB，并验证持久化后的 `pe_owner` 边。
+- DICT 已有一组 45/45、SYST 世界已有一组 5/5 的 TTY 外部裁决；仍需 GLB-GLOB，并验证持久化后的 `pe_owner` 边。
 - `DTWL 24575/13` 是内部 SYST 元素，不能从 E3D `/ALL` 导航，因此其结论只属于 e3d-io 物理读取与 SYST 持久化闭合，不冒充 TTY 外部等价。

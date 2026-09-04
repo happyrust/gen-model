@@ -6,7 +6,7 @@
   宪法 II（一条规则只有一份实现）、III（静默失效是最高级别缺陷）、VI（不变量由可执行的守护看住）。
 - 用户 2026-09-04 原话：「继续退役 old-pdms-io 和 old parse，全面改成对接 e3d-io」。
 - 状态（2026-09-04 晚间复核，见 §0.1 / §0.2）：**B8.0–B8.4 已落进工作树**；B8.5 已完成单测、7997 真库基线、
-  SYS meta 实跑，一组含 UDA 的 BRAN **E3D TTY 115/115 属性对照、18/18 父节点成员序对照**，最大 CATA 库 **46/46**、最大 DICT 库 **45/45 属性对照**；**B9 六条全部落地**（依赖 / 探针 / 护栏 / CI / 脚本 / `Cargo.lock`
+  SYS meta 实跑，一组含 UDA 的 BRAN **E3D TTY 115/115 属性对照、18/18 父节点成员序对照**，最大 CATA **46/46**、最大 DICT **45/45**、SYST 世界 **5/5 属性对照**；**B9 六条全部落地**（依赖 / 探针 / 护栏 / CI / 脚本 / `Cargo.lock`
   重解 / 文档 / changelog），只剩 B8.5 的真库外部裁决与整棵工作树的提交拆分。Q2 / Q3 / Q4 按建议落地，
   Q6 落在「乙的兜底」。Q5 已明确为“e3d-io 物理读取对 E3D TTY”，旧 parser 不参与对比。
   §1 的 F 表与 §4 的行号是**方案落笔时**的，实施后的现状看 §0.1 与 §1.1，别拿旧行号去找代码。
@@ -31,7 +31,7 @@ old-pdms-io 已经退干净（`Check-LegacyPdmsIo.ps1` 四判全绿，本轮实�
 | B8.2 `stream_baseline` | ✅ | `e3d_collector.rs:517-581`；与 `collect_net_window` 共用 `open_frozen_target(:439) / enumerate_target_index(:461) / read_element / allowed_ignored_final`，`None` 分支 :639-647 改调同一枚举；源码钉 `the_baseline_and_the_net_window_share_one_enumeration`（:957）；chunk 上限的夹具断言在 `tests/baseline_stream_8000.rs`（`CHUNK_SIZE = 64`，issue-019 db8000 归档） |
 | B8.3 基线写者 | ✅（写路按「保留 `INSERT IGNORE` 批」落，与方案第 2 条不同，见 §4 B8.3 落地记） | 新模块 `versioned_db/baseline.rs::render_baseline_batches`（:25-72）；`database.rs:1194-1354` 解析段整段换成 `FrozenSource::capture → UdaKeyMap::load → spawn_blocking(stream_baseline → render_baseline_batches → sender.send)`；`member_prune.rs`、`pe.rs` 两个文件删除；`read_full_basic_data / legacy_session_ranges / preserve_unparsed_pe_metadata` 删（:247-249 留一句）；源码钉 `mod.rs::the_baseline_orchestration_has_no_legacy_parser_intermediates`（`DbBasicData / member_prune` 不许回到 `database.rs`） |
 | B8.4 接线 | ✅ | 签名不变（`database.rs:997`）；六个调用点 `database.rs:729 / 768 / 817 / 830`、`manual_update.rs:3385 / 3426` 一个未动；`manual_update.rs:6414` 源码钉仍成立 |
-| B8.5 门 | 第 1 / 2 条 ✅；第 3 条已有含 UDA 的 BRAN、CATA、DICT 样本 ✅；第 4–6 条及扩大样本 ⏳ | 本轮实跑：`cargo check --workspace --all-targets --locked` 过（既有 2 条 warning）；`cargo test --lib -- ele_ops e3d_collector versioned_db legacy_parse_pdms_db_guard uda_keys baseline` **76 passed / 0 failed / 6 ignored**；`cargo test --locked --test baseline_stream_8000` **6 passed**；`Check-LegacyParsePdmsDb.ps1` 五判、`Check-LegacyPdmsIo.ps1` 四判全绿；BRAN `24383/73930` 对 E3D TTY 为 **115 equivalent / 0 mismatch / 0 omitted / 0 deferred UDA**，其直读树为 **18 parents / 0 mismatch**；最大 CATA 库 `CATE 23735/3` 为 **46 equivalent**；最大 DICT 库 `UDA 13292/58` 首轮发现 `TUNIt / Udname` 两项运行时派生缺口，修复后为 **45 equivalent / 0 mismatch / 0 omitted / 0 deferred UDA**，三组回归均已固化 |
+| B8.5 门 | 第 1 / 2 条 ✅；第 3 条已有含 UDA 的 BRAN、CATA、DICT、SYST 样本 ✅；第 4–6 条及扩大样本 ⏳ | 本轮实跑：`cargo check --workspace --all-targets --locked` 过（既有 2 条 warning）；`cargo test --lib -- ele_ops e3d_collector versioned_db legacy_parse_pdms_db_guard uda_keys baseline` **76 passed / 0 failed / 6 ignored**；`cargo test --locked --test baseline_stream_8000` **6 passed**；`Check-LegacyParsePdmsDb.ps1` 五判、`Check-LegacyPdmsIo.ps1` 四判全绿；BRAN `24383/73930` 对 E3D TTY 为 **115 equivalent**，其直读树为 **18 parents / 0 mismatch**；最大 CATA `CATE 23735/3` 为 **46 equivalent**；最大 DICT `UDA 13292/58` 首轮发现并修复 `TUNIt / Udname`，达到 **45 equivalent**；SYST `WORL 24575/3` 为 **5 equivalent**；所有样本均为 0 mismatch / omitted / deferred UDA，四组回归已固化 |
 | B9 依赖收口 | ✅ 六条全落（2026-09-04 收口，会话 opus-5-35 补完 `Cargo.lock` 与文档半边） | 1 `Cargo.toml` 依赖 / `[patch]` / feature / 8 bin / 2 test 全删；`ele_data.rs` 的 `From<legacy>` 删；`Cargo.lock` 重解后少 5 个包（`parse_pdms_db`、`pdmsdb_engine_v2`、`dynfmt`、`hash32-derive`、`erased-serde 0.3.31`），**只少不多**（唯一 `+` 行是 `erased-serde` 去重名消歧）。2 §4 发现 5 的死代码 `frozen_source::read_frozen_bytes` 一并删。3 护栏翻面 + `Check-LegacyParsePdmsDb.ps1` 五判进 CI（`windows-tests.yml`）。4 `Toggle-LocalDeps.ps1` 只剩 aios_core、`Assert-NoLocalPatch.ps1` 白名单清空；**另补** `Check-LegacyPdmsIo.ps1` 第 1 条同时认连字符 `pdms-io`——它原先只扫 `pdms_io`，`pdmsdb_engine_v2 v0.1.0 (…/pdms-io.git?rev=…)` 两个字符串都不匹配，那条尾巴就是这么在「四判全绿」下藏住的。5 `CONTEXT.md`「分块解析基线」重写 + 新增「pe_owner 边」词条；`changelog.md` B8.2–B9 一条已落。6 共识已记（`record_decision` → `d-31`）。验收：`cargo tree -i parse_pdms_db` / `-i pdms_io` 均 `did not match any packages` |
 
 **复核发现（方案没写到、与方案不同、或仍欠着的）**：
@@ -78,7 +78,8 @@ old-pdms-io 已经退干净（`Check-LegacyPdmsIo.ps1` 四判全绿，本轮实�
   总计 **115/115 equivalent，0 deferred UDA**。同一 BRAN 的 e3d-io 直读树又与 TTY `Q MEMBERS` 对照 18 个父节点，`mismatch=0`，
   根节点 17 个成员逐槽一致。最大 CATA 库 `ams7351_0001` 的 `CATE 23735/3` 又完成 46/46（含 UDA）对照，差异、遗漏、延期均为 0。
   最大 DICT 库 `ams5100_0001` 的 `UDA 13292/58` 首轮发现 `TUNIt / Udname` 两个 runtime-derived 缺口，修复后 45/45，差异、遗漏、延期均为 0。
-  这些样本已关闭对应普通属性、引用名、UDA 和直读成员序，不代表 SYST/GLB-GLOB、扩大抽样或持久化 `pe_owner` 已经完成。
+  SYST 世界 `WORL 24575/3` 可由 `/ALL` 导航并完成 5/5；`MDB 24575/1308`、`DTWL 24575/13` 等内部元素仍不可导航，不冒充 TTY 裁决。
+  这些样本已关闭对应普通属性、引用名、UDA 和直读成员序，不代表 GLB-GLOB、扩大抽样或持久化 `pe_owner` 已经完成。
 
 ## 1. 现状核实（方案落笔时，2026-09-04 上午实测，工作树 `e3d-direct` @ `9c849a86` + 未提交改动；**实施前快照**，现状见 §1.1）
 
