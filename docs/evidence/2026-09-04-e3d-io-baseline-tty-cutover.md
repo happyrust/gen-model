@@ -182,9 +182,27 @@ exit_status=0
 
 原始 TTY 与 JSON 报告在 `docs/evidence/2026-09-04-syst-worl-24575-3/`，回归固化为 e3d-io 的 `tests/e3d-descriptor.rs::system_world_attributes_match_the_e3d_tty_capture`。不可导航的内部元素没有混入外部裁决。
 
+## 持久化 `pe_owner` 对 E3D TTY 成员序
+
+本机 `127.0.0.1:8010` 的 AMS 持久库共有 9,125,814 条 `pe_owner` 边。以已完成 TTY `Q MEMBERS` 裁决的 `BRAN 24383/73930` 为见证：TTY 与 e3d-io 直读树先前已达到 18 个父节点、0 mismatch；持久库再按边 ID 查询该 BRAN，得到 17 条边，槽位为 `0..16`，`in` 依次为 `24383/73931..73947`，`out` 全部为 `24383/73930`。自动比较结果：
+
+```text
+edge_count=17
+expected_count=17
+sequence_mismatch_count=0
+wrong_out_count=0
+wrong_edge_id_count=0
+sampled=1000
+matching_in_owner_equals_out=1000
+exit_status=0
+```
+
+查询原文、逐边结果和验证记录在 `docs/evidence/2026-09-04-bran-24383-73930-members/persisted-pe-owner*.json`。这条链的参照顺序为 E3D TTY `Q MEMBERS`，候选成员与 owner 来自 e3d-io 直读；没有引入旧 parser 输出。
+
 ## 未关闭边界
 
 - 本样本的普通属性、引用名、UDA 和 e3d-io 直读成员序已闭合：115 个 TTY 属性行全部等价，18 个父节点成员序差异为 0。
 - CATA 已有一组 46/46 的 TTY 外部裁决。
-- DICT 已有一组 45/45、SYST 世界已有一组 5/5 的 TTY 外部裁决。e3d-io 对 1,067 个项目目录文件的头扫描未发现物理 `GLB/GLOB`，实际全局类型为 `COMM/MISC`；两类已按 `comvir/misvir + attlib` 解码并修复纳入 Meta，但 Design `/ALL` 不能导航其 refno，TTY 属性裁决仍保持未关闭。另需验证持久化后的 `pe_owner` 边。
+- DICT 已有一组 45/45、SYST 世界已有一组 5/5 的 TTY 外部裁决。e3d-io 对 1,067 个项目目录文件的头扫描未发现物理 `GLB/GLOB`，实际全局类型为 `COMM/MISC`；两类已按 `comvir/misvir + attlib` 解码并修复纳入 Meta，但 Design `/ALL` 不能导航其 refno，TTY 属性裁决仍保持未关闭。
+- 持久化 `pe_owner` 已由同一 BRAN 闭合：TTY/e3d-io 成员序 0 mismatch，持久边 17/17 同序、方向全为 `in=child/out=owner`；另有 1,000/1,000 条固定抽样满足 `in.owner == out`。
 - `DTWL 24575/13` 是内部 SYST 元素，不能从 E3D `/ALL` 导航，因此其结论只属于 e3d-io 物理读取与 SYST 持久化闭合，不冒充 TTY 外部等价。
