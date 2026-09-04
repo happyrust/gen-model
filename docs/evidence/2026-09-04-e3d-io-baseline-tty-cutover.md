@@ -134,8 +134,24 @@ tty_exit_status=0
 
 根 BRAN 的 17 个直接成员逐槽相同；带 RefNo 的成员按 RefNo 比较，命名成员按 noun 与名称比较。TTY 原文已固化为 `tests/fixtures/bran_24383_73930_members_tty.log`，回归测试 `tests/direct_index_contract.rs::bran_members_match_the_e3d_tty_capture_in_order` 已通过。
 
+## 最大 CATA 库对 E3D TTY
+
+`/ALL` 声明的最大库为 `CATA 7351`（`ams7351_0001`，1,238,308,864 bytes）。e3d-io 的 `(noun, layout)` 采样器从中选出 10 个桶；首个样本为 `CATE 23735/3`。`e3d_tty_attlist_capture` 在只读 E3D TTY 会话导出完整 `ATTLIST`，e3d-io 以该库、`catvir.dat`、`attlib.dat` 及 MDB 顺序的六个 DICT 库对账：
+
+```text
+tty_row_count=46
+tty_unique_count=37
+comparison_counts.equivalent=46
+omitted_row_count=0
+deferred_uda_row_count=0
+mismatch=0
+exit_status=0
+```
+
+原始 TTY 与 JSON 报告在 `docs/evidence/2026-09-04-cata7351-cate-23735-3/`；TTY fixture 和命令行回归已固化为 e3d-io 的 `tests/fixtures/cate_23735_3_attlist_tty.log` 与 `tests/e3d-descriptor.rs::cata_binary_and_dictionary_attributes_match_the_e3d_tty_capture`。
+
 ## 未关闭边界
 
 - 本样本的普通属性、引用名、UDA 和 e3d-io 直读成员序已闭合：115 个 TTY 属性行全部等价，18 个父节点成员序差异为 0。
-- 仍需按 B8.5 扩大到 SYST/DICT/CATA/GLB-GLOB 库样本，并验证持久化后的 `pe_owner` 边。
+- CATA 已有一组 46/46 的 TTY 外部裁决；仍需扩大到 SYST/DICT/GLB-GLOB，并验证持久化后的 `pe_owner` 边。
 - `DTWL 24575/13` 是内部 SYST 元素，不能从 E3D `/ALL` 导航，因此其结论只属于 e3d-io 物理读取与 SYST 持久化闭合，不冒充 TTY 外部等价。
