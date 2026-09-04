@@ -76,6 +76,7 @@ namespace GenModel.E3D.Rvm
                 cmds.Add("repre lev pipe " + level);
                 cmds.Add("repre lev nozz " + level);
                 cmds.Add("repre lev struc " + level);
+                cmds.Add("repre lev hvac " + level);
             }
             cmds.Add("repre insu " + insu);
             cmds.Add("repre obst " + obst);
