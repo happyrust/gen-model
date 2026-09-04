@@ -120,8 +120,22 @@ mismatch=0
 
 该结果已经固化为 e3d-io 的真实 CLI 回归测试 `tests/e3d-descriptor.rs::bran_binary_and_dictionary_attributes_match_the_e3d_tty_capture`。字典集合属于 TTY 运行时 MDB 身份的一部分，后续样本必须显式记录，不能按目录中的“最新”或同名库猜测。
 
+## BRAN 成员序对 E3D TTY
+
+同一目标 `BRAN 24383/73930` 由 `DirectTreeService` 从 e3d-io 直读，并在同一只读 E3D TTY 会话执行 `Q MEMBERS`。证据目录为 `docs/evidence/2026-09-04-bran-24383-73930-members/`：
+
+```text
+direct_nodes=18
+parents_compared=18
+mismatch_count=0
+direct_exit_status=0
+tty_exit_status=0
+```
+
+根 BRAN 的 17 个直接成员逐槽相同；带 RefNo 的成员按 RefNo 比较，命名成员按 noun 与名称比较。TTY 原文已固化为 `tests/fixtures/bran_24383_73930_members_tty.log`，回归测试 `tests/direct_index_contract.rs::bran_members_match_the_e3d_tty_capture_in_order` 已通过。
+
 ## 未关闭边界
 
-- 本样本的普通属性、引用名和 UDA 已全部闭合；115 个 TTY 行全部等价。
-- 仍需按 B8.5 扩大到 SYST/DICT/CATA/GLB-GLOB 库样本，并补 owner 成员序对照。
+- 本样本的普通属性、引用名、UDA 和 e3d-io 直读成员序已闭合：115 个 TTY 属性行全部等价，18 个父节点成员序差异为 0。
+- 仍需按 B8.5 扩大到 SYST/DICT/CATA/GLB-GLOB 库样本，并验证持久化后的 `pe_owner` 边。
 - `DTWL 24575/13` 是内部 SYST 元素，不能从 E3D `/ALL` 导航，因此其结论只属于 e3d-io 物理读取与 SYST 持久化闭合，不冒充 TTY 外部等价。

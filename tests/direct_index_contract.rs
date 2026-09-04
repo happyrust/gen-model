@@ -11,16 +11,19 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use aios_core::RefU64;
+use aios_core::{RefU64, RefnoEnum};
 use aios_database::data_interface::cata_closure::CataDbLocator;
 use aios_database::data_interface::direct_index::BackRefVia;
 use aios_database::data_interface::direct_store::{
     DbPin, DirectSchema, DirectStore, TEMPLATE_DIR_ENV,
 };
+use aios_database::data_interface::direct_tree::DirectTreeService;
+use aios_database::e3d_query::parse_members;
 use e3d_io::refno::RefNo;
 use e3d_io::{ReadOnlyEngine, ScanTier};
 
 const AMS8000: &str = r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001";
+const AMS7999: &str = r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7999_0001";
 const TEMPLATE_DIR_DEFAULT: &str = r"E:\reverse\e3d\shadow_e3d31_aps_all";
 
 struct NoLocator;
@@ -393,6 +396,37 @@ fn members_come_back_in_the_order_the_record_stores_them() {
         expected.len(),
         order_differs_from_refno_order
     );
+}
+
+/// e3d-io 的二进制成员块必须逐槽等于同一元素的 E3D TTY `Q MEMBERS`。
+#[test]
+fn bran_members_match_the_e3d_tty_capture_in_order() {
+    let db = Path::new(AMS7999);
+    if !db.is_file() {
+        eprintln!("SKIP: fixture not present ({db:?})");
+        return;
+    }
+
+    let service = DirectTreeService::open("AvevaMarineSample", "ALL")
+        .expect("e3d-io direct tree opens");
+    let binary = service
+        .children(RefU64::from_two_nums(24_383, 73_930))
+        .expect("BRAN children load");
+    let tty = parse_members(include_str!(
+        "fixtures/bran_24383_73930_members_tty.log"
+    ))
+    .expect("saved E3D TTY Q MEMBERS parses");
+
+    assert_eq!(binary.len(), 17);
+    assert_eq!(binary.len(), tty.len());
+    for (node, row) in binary.iter().zip(&tty) {
+        assert_eq!(node.noun, row.noun);
+        if let Some(refno) = row.refno.as_deref() {
+            assert_eq!(node.refno.to_pdms_str(), refno);
+        } else {
+            assert_eq!(node.name, row.value);
+        }
+    }
 }
 
 /// Surreal 对拍探针（D3 验收原文的三道）：需要活的 SUL_DB 与已入库的 ams 工程，
