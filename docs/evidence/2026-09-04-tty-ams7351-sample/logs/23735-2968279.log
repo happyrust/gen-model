@@ -1,0 +1,42 @@
+MCP-BEGIN
+DATA /MDS/ATTA/DEFAULTS/BT565/1250/DESPAR/15
+NOUN-ALL-ATTRIBUTES-BEGIN
+/MDS/ATTA/DEFAULTS/BT565/1250/DESPAR/15
+Ref =23735/2968279
+Type DATA
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name /MDS/ATTA/DEFAULTS/BT565/1250/DESPAR/15
+ZZA Type
+Type DATA
+ZZA Lock
+Lock false
+ZZA Owner
+Owner /MDS/ATTA/DEFAULTS/BT565/1250/DESPAR
+ZZA Description
+Description BT565
+ZZA Dkey
+Dkey unset
+ZZA Ptype
+Ptype unset
+ZZA Pproperty
+Pproperty ( '0' )
+ZZA Dproperty
+Dproperty 0
+ZZA Purpose
+Purpose DESP
+ZZA Number
+Number 15
+ZZA Dtitle
+Dtitle unset
+ZZA Punits
+Punits unset
+ZZA Ruse
+Ruse 0
+ZZA Lhide
+Lhide false
+ZZA Rulref
+Rulref Nulref
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END

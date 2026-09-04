@@ -1,0 +1,42 @@
+MCP-BEGIN
+DATA /MDS/ATTA/DEFAULTS/AN583/1450/MATREF
+NOUN-ALL-ATTRIBUTES-BEGIN
+/MDS/ATTA/DEFAULTS/AN583/1450/MATREF
+Ref =23735/2098357
+Type DATA
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name /MDS/ATTA/DEFAULTS/AN583/1450/MATREF
+ZZA Type
+Type DATA
+ZZA Lock
+Lock false
+ZZA Owner
+Owner /MDS/ATTA/DEFAULTS/AN583/1450/MATERIAL
+ZZA Description
+Description AN583
+ZZA Dkey
+Dkey MATR
+ZZA Ptype
+Ptype unset
+ZZA Pproperty
+Pproperty ( ' ' )
+ZZA Dproperty
+Dproperty 0
+ZZA Purpose
+Purpose PROP
+ZZA Number
+Number 0
+ZZA Dtitle
+Dtitle Propcon - MDS Ancillary Material
+ZZA Punits
+Punits unset
+ZZA Ruse
+Ruse 0
+ZZA Lhide
+Lhide false
+ZZA Rulref
+Rulref Nulref
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END

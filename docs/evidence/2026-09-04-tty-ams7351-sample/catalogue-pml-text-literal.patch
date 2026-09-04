@@ -1,0 +1,81 @@
+diff --git a/src/record/catalogue_pml.rs b/src/record/catalogue_pml.rs
+index 1ec18bf..0076c62 100644
+--- a/src/record/catalogue_pml.rs
++++ b/src/record/catalogue_pml.rs
+@@ -42,6 +42,7 @@ use crate::record::catalogue_eval::{AttribRef, ParamEnv};
+ const PROGRAM_MARKER: i32 = 1;
+ const OP_PUSH_NUMBER: i32 = 101;
+ const OP_ATTRIBUTE: i32 = 106;
++const OP_PUSH_TEXT: i32 = 118;
+ const OP_NEGATE: i32 = 801;
+ const OP_ADD: i32 = 802;
+ const OP_SUBTRACT: i32 = 803;
+@@ -148,6 +149,7 @@ impl Term {
+ #[derive(Debug, Clone, PartialEq)]
+ enum Step {
+     Number(f64),
++    Text(String),
+     Attribute(Attribute),
+     Operator(i32),
+ }
+@@ -174,6 +176,7 @@ fn parse(words: &[i32]) -> Option<Vec<Step>> {
+         let (step, consumed) = match program[cursor] {
+             OP_PUSH_NUMBER => parse_number(&program[cursor..])?,
+             OP_ATTRIBUTE => parse_attribute(&program[cursor..])?,
++            OP_PUSH_TEXT => parse_text(&program[cursor..])?,
+             OP_NEGATE | OP_ADD | OP_SUBTRACT | OP_MULTIPLY | OP_DIVIDE | OP_SIN | OP_COS
+             | OP_TAN | OP_ASIN | OP_ATANT => (Step::Operator(program[cursor]), 1),
+             // An opcode this has never seen used is a program it has not read.
+@@ -196,6 +199,7 @@ pub fn render(words: &[i32]) -> Option<String> {
+                 precedence: PRECEDENCE_ATOM,
+                 number: Some(value),
+             }),
++            Step::Text(value) => stack.push(Term::atom(format!("'{value}'"))),
+             Step::Attribute(attribute) => {
+                 let text = render_attribute(&attribute, &mut stack)?;
+                 stack.push(Term::atom(text));
+@@ -244,6 +248,7 @@ pub fn evaluate_words(words: &[i32], env: &dyn ParamEnv) -> Option<f64> {
+     for step in parse(words)? {
+         match step {
+             Step::Number(value) => stack.push(value),
++            Step::Text(_) => return None,
+             Step::Attribute(attribute) => {
+                 let subscript = match attribute.subscript_from_stack {
+                     true => Some(stack.pop()?),
+@@ -335,6 +340,21 @@ fn program_of(words: &[i32]) -> Option<&[i32]> {
+     }
+ }
+ 
++/// `118 <count> <character>...` pushes a text literal. Catalogue DATA rows use
++/// this form for PPRO values such as `( '484' )`.
++fn parse_text(words: &[i32]) -> Option<(Step, usize)> {
++    let [OP_PUSH_TEXT, count, rest @ ..] = words else {
++        return None;
++    };
++    let count = usize::try_from(*count).ok()?;
++    let chars = rest.get(..count)?;
++    let value: String = chars
++        .iter()
++        .map(|word| u8::try_from(*word).ok().map(char::from))
++        .collect::<Option<_>>()?;
++    Some((Step::Text(value), count + 2))
++}
++
+ fn parse_number(words: &[i32]) -> Option<(Step, usize)> {
+     let [OP_PUSH_NUMBER, NUMBER_SHAPE, first, second, third, fourth, end, ..] = words else {
+         return None;
+@@ -1020,4 +1040,14 @@ mod tests {
+             assert_eq!(evaluate_words(words, &env), None, "numbers {words:?}");
+         }
+     }
++
++    #[test]
++    fn renders_text_literal_programs() {
++        assert_eq!(
++            render(&[7, 1, 118, 3, 52, 56, 52]).as_deref(),
++            Some("( '484' )")
++        );
++        assert_eq!(render(&[5, 1, 118, 1, 32]).as_deref(), Some("( ' ' )"));
++        assert!(render(&[6, 1, 118, 3, 52, 56]).is_none());
++    }
+ }

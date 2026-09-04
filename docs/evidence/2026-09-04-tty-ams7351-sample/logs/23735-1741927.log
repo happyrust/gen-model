@@ -1,0 +1,42 @@
+MCP-BEGIN
+DATA /MDS/ATTA/DEFAULTS/ST592/200/DESPAR/13
+NOUN-ALL-ATTRIBUTES-BEGIN
+/MDS/ATTA/DEFAULTS/ST592/200/DESPAR/13
+Ref =23735/1741927
+Type DATA
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name /MDS/ATTA/DEFAULTS/ST592/200/DESPAR/13
+ZZA Type
+Type DATA
+ZZA Lock
+Lock false
+ZZA Owner
+Owner /MDS/ATTA/DEFAULTS/ST592/200/DESPAR
+ZZA Description
+Description ST592
+ZZA Dkey
+Dkey unset
+ZZA Ptype
+Ptype unset
+ZZA Pproperty
+Pproperty ( '0' )
+ZZA Dproperty
+Dproperty 0
+ZZA Purpose
+Purpose DESP
+ZZA Number
+Number 13
+ZZA Dtitle
+Dtitle unset
+ZZA Punits
+Punits unset
+ZZA Ruse
+Ruse 0
+ZZA Lhide
+Lhide false
+ZZA Rulref
+Rulref Nulref
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END

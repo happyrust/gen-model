@@ -1,0 +1,145 @@
+﻿{
+  "attributes": [
+    {
+      "binary_name": "NAME",
+      "binary_status": {
+        "kind": "decoded_explicit"
+      },
+      "binary_value": "/MDS/ATTA/DEFAULTS/AN569/200/MATERIAL",
+      "comparison": "equivalent",
+      "name": "Name",
+      "ordinal": 0,
+      "rendered_value": "/MDS/ATTA/DEFAULTS/AN569/200/MATERIAL",
+      "resolved_reference_name": null,
+      "source": "binary_explicit"
+    },
+    {
+      "binary_name": "noun",
+      "binary_status": null,
+      "binary_value": "DTSE",
+      "comparison": "equivalent",
+      "name": "Type",
+      "ordinal": 1,
+      "rendered_value": "DTSE",
+      "resolved_reference_name": null,
+      "source": "structural"
+    },
+    {
+      "binary_name": null,
+      "binary_status": null,
+      "binary_value": null,
+      "comparison": "equivalent",
+      "name": "Lock",
+      "ordinal": 2,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "structural"
+    },
+    {
+      "binary_name": "owner",
+      "binary_status": null,
+      "binary_value": {
+        "display": "23735/335609",
+        "word0": 23735,
+        "word1": 335609
+      },
+      "comparison": "equivalent",
+      "name": "Owner",
+      "ordinal": 3,
+      "rendered_value": "/MDS/ATTA/DEFAULTS/AN569/200",
+      "resolved_reference_name": "/MDS/ATTA/DEFAULTS/AN569/200",
+      "source": "structural"
+    },
+    {
+      "binary_name": "DESC",
+      "binary_status": {
+        "kind": "decoded_explicit"
+      },
+      "binary_value": "AN569",
+      "comparison": "equivalent",
+      "name": "Description",
+      "ordinal": 4,
+      "rendered_value": "AN569",
+      "resolved_reference_name": null,
+      "source": "binary_explicit"
+    },
+    {
+      "binary_name": "FUNC",
+      "binary_status": {
+        "kind": "decoded_explicit"
+      },
+      "binary_value": "200",
+      "comparison": "equivalent",
+      "name": "Function",
+      "ordinal": 5,
+      "rendered_value": "200",
+      "resolved_reference_name": null,
+      "source": "binary_explicit"
+    },
+    {
+      "binary_name": "GTYP",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "raw": 566245,
+        "text": "ATTA"
+      },
+      "comparison": "equivalent",
+      "name": "Gtype",
+      "ordinal": 6,
+      "rendered_value": "ATTA",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "PURP",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "raw": 857806,
+        "text": "PROP"
+      },
+      "comparison": "equivalent",
+      "name": "Purpose",
+      "ordinal": 7,
+      "rendered_value": "PROP",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    }
+  ],
+  "catalog_comparison": {
+    "catalog_missing_from_tty": [],
+    "enabled": true,
+    "logical_attribute_count": 5,
+    "noun_present": true,
+    "tty_not_in_catalog": [
+      "Type",
+      "Lock",
+      "Owner"
+    ]
+  },
+  "comparison_counts": {
+    "equivalent": 8
+  },
+  "deferred_uda_row_count": 0,
+  "deferred_uda_rows": [],
+  "noun_hash": 644251,
+  "noun_name": "DTSE",
+  "omitted_row_count": 0,
+  "owner": "23735/335609",
+  "refno": {
+    "display": "23735/335640",
+    "word0": 23735,
+    "word1": 335640
+  },
+  "source_counts": {
+    "binary_explicit": 3,
+    "binary_implicit": 2,
+    "structural": 3
+  },
+  "tty_row_count": 8,
+  "tty_unique_count": 8,
+  "uda_enabled": true
+}

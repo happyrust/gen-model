@@ -1,0 +1,42 @@
+MCP-BEGIN
+DATA /MDS/ATTA/DEFAULTS/LT605/2800/SHOP
+NOUN-ALL-ATTRIBUTES-BEGIN
+/MDS/ATTA/DEFAULTS/LT605/2800/SHOP
+Ref =23735/3235947
+Type DATA
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name /MDS/ATTA/DEFAULTS/LT605/2800/SHOP
+ZZA Type
+Type DATA
+ZZA Lock
+Lock false
+ZZA Owner
+Owner /MDS/ATTA/DEFAULTS/LT605/2800/ISOFLAG
+ZZA Description
+Description LT605
+ZZA Dkey
+Dkey SHOP
+ZZA Ptype
+Ptype unset
+ZZA Pproperty
+Pproperty ( ' true' )
+ZZA Dproperty
+Dproperty 0
+ZZA Purpose
+Purpose ISOF
+ZZA Number
+Number 0
+ZZA Dtitle
+Dtitle Ancillary Material Destination
+ZZA Punits
+Punits unset
+ZZA Ruse
+Ruse 0
+ZZA Lhide
+Lhide false
+ZZA Rulref
+Rulref Nulref
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END

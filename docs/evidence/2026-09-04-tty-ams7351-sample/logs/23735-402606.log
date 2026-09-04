@@ -1,0 +1,42 @@
+MCP-BEGIN
+DATA /MDS/ATTA/DEFAULTS/AN618/150/DESPAR/5
+NOUN-ALL-ATTRIBUTES-BEGIN
+/MDS/ATTA/DEFAULTS/AN618/150/DESPAR/5
+Ref =23735/402606
+Type DATA
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name /MDS/ATTA/DEFAULTS/AN618/150/DESPAR/5
+ZZA Type
+Type DATA
+ZZA Lock
+Lock false
+ZZA Owner
+Owner /MDS/ATTA/DEFAULTS/AN618/150/DESPAR
+ZZA Description
+Description AN618
+ZZA Dkey
+Dkey unset
+ZZA Ptype
+Ptype unset
+ZZA Pproperty
+Pproperty ( '0' )
+ZZA Dproperty
+Dproperty 0
+ZZA Purpose
+Purpose DESP
+ZZA Number
+Number 5
+ZZA Dtitle
+Dtitle unset
+ZZA Punits
+Punits unset
+ZZA Ruse
+Ruse 0
+ZZA Lhide
+Lhide false
+ZZA Rulref
+Rulref Nulref
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END

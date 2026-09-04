@@ -1,0 +1,42 @@
+MCP-BEGIN
+DATA /MDS/TRUNNION/DEFAULTS/TT20/150/MINLENGTH
+NOUN-ALL-ATTRIBUTES-BEGIN
+/MDS/TRUNNION/DEFAULTS/TT20/150/MINLENGTH
+Ref =23735/201571
+Type DATA
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name /MDS/TRUNNION/DEFAULTS/TT20/150/MINLENGTH
+ZZA Type
+Type DATA
+ZZA Lock
+Lock false
+ZZA Owner
+Owner /MDS/TRUNNION/DEFAULTS/TT20/150/DTSE
+ZZA Description
+Description TT20
+ZZA Dkey
+Dkey MINL
+ZZA Ptype
+Ptype unset
+ZZA Pproperty
+Pproperty ( '484' )
+ZZA Dproperty
+Dproperty 0
+ZZA Purpose
+Purpose unset
+ZZA Number
+Number 0
+ZZA Dtitle
+Dtitle Minimum Trunnion Length
+ZZA Punits
+Punits unset
+ZZA Ruse
+Ruse 0
+ZZA Lhide
+Lhide false
+ZZA Rulref
+Rulref Nulref
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END

@@ -1,0 +1,34 @@
+{
+  "input": {
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams7351_0001",
+    "sha256": "1208f44e1a822a60df63ed8d897b9944cd4993ba0e884a78194abb0f2a7feac0",
+    "sample_count": 50,
+    "tty_project": "AMS",
+    "tty_mdb": "/ALL"
+  },
+  "baseline": {
+    "command": "rtk powershell -NoProfile -ExecutionPolicy Bypass -File docs\\evidence\\2026-09-04-tty-ams7351-sample\\verify.ps1",
+    "runner_exit_status": 0,
+    "literal_output": "reports=50 tty_rows=737 equivalent=706 mismatch=31 deferred=0 omitted=0"
+  },
+  "modified": {
+    "artifact": "D:\\work\\plant-code\\old\\vendor\\e3d-io\\src\\record\\catalogue_pml.rs",
+    "commit": "958b5194fae51a604c87ac6234ed476f28d9da6e",
+    "command": "rtk powershell -NoProfile -ExecutionPolicy Bypass -File docs\\evidence\\2026-09-04-tty-ams7351-sample\\verify.ps1",
+    "exit_status": 0,
+    "literal_output": "reports=50 tty_rows=737 equivalent=737 mismatch=0 deferred=0 omitted=0"
+  },
+  "tests": [
+    "cargo test --lib: 222 passed",
+    "cargo test --test e3d-descriptor: 6 passed",
+    "cargo test --lib record::catalogue_pml::tests::renders_text_literal_programs: 1 passed"
+  ],
+  "rollback": {
+    "command": "rtk powershell -NoProfile -ExecutionPolicy Bypass -File docs\\evidence\\2026-09-04-tty-ams7351-sample\\rollback.ps1",
+    "exit_status": 0,
+    "restore_command": "rtk git -C D:\\work\\plant-code\\old\\vendor\\e3d-io apply D:\\work\\plant-code\\old\\gen-model\\docs\\evidence\\2026-09-04-tty-ams7351-sample\\catalogue-pml-text-literal.patch",
+    "restore_exit_status": 0,
+    "post_restore_diff_command": "rtk git -C D:\\work\\plant-code\\old\\vendor\\e3d-io diff --exit-code HEAD -- src/record/catalogue_pml.rs",
+    "post_restore_diff_exit_status": 0
+  }
+}
