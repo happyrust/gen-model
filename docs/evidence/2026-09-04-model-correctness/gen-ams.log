@@ -1,0 +1,20 @@
+project-dir 诊断 D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000\acp7000_0001: 库 7000 有 2 个候选主文件（D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000\acp7000_0001、D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7000_0001），按命名约定分不出正身，整组不外交
+project-dir 诊断 D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7000_0001: 库 7000 有 2 个候选主文件（D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000\acp7000_0001、D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7000_0001），按命名约定分不出正身，整组不外交
+project-dir 诊断 D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7355: 同号库 7355 的非常规命名副本，让位给 D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7355_0001
+project-dir 诊断 D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7997_0001.codex-before-d03-delete-20260727: 同号库 7997 的非常规命名副本，让位给 D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7997_0001
+project-dir 诊断 D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001.codex-before-move-20260724: 同号库 8000 的非常规命名副本，让位给 D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001
+project-dir 诊断 D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000\acpmis: 库 8189 有 2 个候选主文件（D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000\acpmis、D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amsmis），按命名约定分不出正身，整组不外交
+project-dir 诊断 D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amsmis: 库 8189 有 2 个候选主文件（D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000\acpmis、D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amsmis），按命名约定分不出正身，整组不外交
+project-dir 诊断 D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000\acpcom: 库 8190 有 3 个候选主文件（D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000\acpcom、D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amscom、D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amscom.codex-before-d03-relaunch-20260727），按命名约定分不出正身，整组不外交
+project-dir 诊断 D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amscom: 库 8190 有 3 个候选主文件（D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000\acpcom、D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amscom、D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amscom.codex-before-d03-relaunch-20260727），按命名约定分不出正身，整组不外交
+project-dir 诊断 D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amscom.codex-before-d03-relaunch-20260727: 库 8190 有 3 个候选主文件（D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000\acpcom、D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amscom、D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amscom.codex-before-d03-relaunch-20260727），按命名约定分不出正身，整组不外交
+project-dir 诊断 D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000\acpsys: 库 8191 有 2 个候选主文件（D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000\acpsys、D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amssys），按命名约定分不出正身，整组不外交
+project-dir 诊断 D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amssys: 库 8191 有 2 个候选主文件（D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000\acpsys、D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amssys），按命名约定分不出正身，整组不外交
+project-dir 扫到 484 个库（ALYS×1 CATA×27 DESI×299 DICT×8 ISOD×3 MANU×102 NSEQ×4 PADD×23 PROP×5 SCHE×5 XPRD×7），12 个可疑文件进诊断，1 个非库文件略过
+库 D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001 打开为 dbno=8000，钉在会话 Some(281)
+目录库 D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7000_0001 打开为 dbno=7000
+目录库 D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000\aps7600_0001 打开为 dbno=7600
+visited=37 consumed=0 generated=35 skipped=0 failed=0 catalog=0 route_containers=1 route_members=36 implied_tubes=37 tubes_measured=0 tubes_built=0 tubes_catalogue_od=35 tubes_bore_fallback=0 tubes_no_ppoint=2 tubes_misaligned=0 tubes_reversed=0 unsupported=0 unknown=0 orphans=0 neg_skipped=0
+按 noun 生成: {"BEND": 18, "FTUB": 17}
+基本体实例缓存: PrimitiveCacheStats { hits: 0, misses: 0, bypasses: 0, baked_operands: 0, unique_meshes: 0 }
+产物: D:\work\plant-code\old\gen-model\docs\evidence\2026-09-04-model-correctness\c-iy\model.obj / D:\work\plant-code\old\gen-model\docs\evidence\2026-09-04-model-correctness\c-iy\elements.json / D:\work\plant-code\old\gen-model\docs\evidence\2026-09-04-model-correctness\c-iy\report.json（81 ms）

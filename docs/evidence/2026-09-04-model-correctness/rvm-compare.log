@@ -1,0 +1,15 @@
+基准 /C-IY-1R330-B (dbnum=Some(8000) scope="narrow")  AABB 来源: 面片实算 0 / 快照字段 35
+BEND: 两侧都有 18 (exact 0 / chord 0 / reference_artifact 0 / off 18)，只在基准 0，只在生成 0
+FTUB: 两侧都有 17 (exact 0 / chord 0 / reference_artifact 0 / off 17)，只在基准 0，只在生成 0
+                 off raw= 251.1561 mm sig=        -  BEND 8 /C-IY-1R330-B  (24384/22418, 基准=snapshot)
+                 off raw= 251.1561 mm sig=        -  BEND 9 /C-IY-1R330-B  (24384/22419, 基准=snapshot)
+                 off raw= 246.0041 mm sig=        -  BEND 4 /C-IY-1R330-B  (24384/22412, 基准=snapshot)
+                 off raw= 246.0041 mm sig=        -  BEND 5 /C-IY-1R330-B  (24384/22413, 基准=snapshot)
+                 off raw= 241.7573 mm sig=        -  BEND 15 /C-IY-1R330-B  (24384/22431, 基准=snapshot)
+                 off raw= 241.7573 mm sig=        -  BEND 16 /C-IY-1R330-B  (24384/22433, 基准=snapshot)
+                 off raw= 100.0000 mm sig=        -  BEND 1 /C-IY-1R330-B  (24384/22406, 基准=snapshot)
+                 off raw= 100.0000 mm sig=        -  BEND 2 /C-IY-1R330-B  (24384/22408, 基准=snapshot)
+                 off raw= 100.0000 mm sig=        -  BEND 3 /C-IY-1R330-B  (24384/22410, 基准=snapshot)
+                 off raw= 100.0000 mm sig=        -  BEND 6 /C-IY-1R330-B  (24384/22414, 基准=snapshot)
+明细写到 D:\work\plant-code\old\gen-model\docs\evidence\2026-09-04-model-correctness\rvm-compare.json
+Error: 35/35 件超出弦高容差，看上面的 off 明细
