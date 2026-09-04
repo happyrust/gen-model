@@ -30,5 +30,20 @@
     "restore_exit_status": 0,
     "post_restore_diff_command": "rtk git -C D:\\work\\plant-code\\old\\vendor\\e3d-io diff --exit-code HEAD -- src/record/catalogue_pml.rs",
     "post_restore_diff_exit_status": 0
+  },
+  "cata_owner_members": {
+    "command": "rtk D:\\Rust\\target\\release\\e3d_tty_cata_members_compare.exe --db D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams7351_0001 --root 15543/0 --count 10 --candidate-parents 100 --out docs\\evidence\\2026-09-04-tty-ams7351-sample\\owners",
+    "exit_status": 0,
+    "literal_output": "CATA_MEMBERS_TTY parents=10 members=108 mismatches=0"
+  },
+  "cata_explicit_uda": {
+    "command": "rtk powershell -NoProfile -ExecutionPolicy Bypass -File docs\\evidence\\2026-09-04-tty-ams7351-sample\\verify-uda.ps1",
+    "exit_status": 0,
+    "literal_output": "elements=10 elements_with_explicit_uda=10 explicit_uda_rows=10 explicit_uda_equivalent=10 mismatch=0 deferred=0 omitted=0"
+  },
+  "incremental_model": {
+    "command": "rtk powershell -NoProfile -ExecutionPolicy Bypass -File docs\\evidence\\2026-09-04-pipeline-increment-atta\\verify-window.ps1 -BaseSesno 189 -TargetSesno 190 -Label post-cata-189-190",
+    "exit_status": 0,
+    "literal_output": "upserts=3 removals=3 mismatch counters=0 verdict=PASS"
   }
 }

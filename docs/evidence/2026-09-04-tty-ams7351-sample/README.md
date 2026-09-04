@@ -39,7 +39,20 @@ deferred   : 0
 omitted    : 0
 ```
 
-The 50-attribute CATA gate is closed. The broader per-database 10-UDA and
-10-owner/member gates remain separate: this uniform sample contains UDA rows
-on only three elements, and the existing direct-tree comparator is DESI-only.
+The 50-attribute CATA gate is closed.
 
+`e3d_tty_cata_members_compare` then walked physical stored members below
+`15543/0`, excluded the MDB-aggregated `WORL`, sampled 10 of 100 parent
+candidates, and compared 108 ordered children with TTY: 0 mismatches. A second
+run on ATTA catalogue root `23735/166` compared all 1,788 direct children with
+TTY, also with 0 mismatches.
+
+`select-uda-refnos.ps1` selected 10 equidistant `SECT` elements from that
+verified 1,788-member list. `verify-uda.ps1` found one physical explicit UDA on
+each: 10 rows, 10 equivalent, 0 mismatch/deferred/omitted. Thus this CATA
+database's 50 ATT / 10 UDA / 10 owner gate is closed.
+
+After rebuilding `update_ams` and `gen_ams` against the fixed e3d-io, the
+ams7999 model window 189 to 190 was rerun as `post-cata-189-190`: 3 upserts and
+3 removals exactly matched the full target model, all six mismatch counters
+were zero, and the verification verdict was `PASS`.

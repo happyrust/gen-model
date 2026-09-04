@@ -1,0 +1,110 @@
+!selected = TRUE
+=23735/1
+handle any
+!selected = FALSE
+elsehandle none
+endhandle
+$P CM-0-BEGIN
+if (!selected) then
+Q MEMBERS
+endif
+$P CM-0-END
+!selected = TRUE
+=23735/1963847
+handle any
+!selected = FALSE
+elsehandle none
+endhandle
+$P CM-1-BEGIN
+if (!selected) then
+Q MEMBERS
+endif
+$P CM-1-END
+!selected = TRUE
+=23735/66
+handle any
+!selected = FALSE
+elsehandle none
+endhandle
+$P CM-2-BEGIN
+if (!selected) then
+Q MEMBERS
+endif
+$P CM-2-END
+!selected = TRUE
+=23735/106
+handle any
+!selected = FALSE
+elsehandle none
+endhandle
+$P CM-3-BEGIN
+if (!selected) then
+Q MEMBERS
+endif
+$P CM-3-END
+!selected = TRUE
+=23735/146
+handle any
+!selected = FALSE
+elsehandle none
+endhandle
+$P CM-4-BEGIN
+if (!selected) then
+Q MEMBERS
+endif
+$P CM-4-END
+!selected = TRUE
+=23735/1890529
+handle any
+!selected = FALSE
+elsehandle none
+endhandle
+$P CM-5-BEGIN
+if (!selected) then
+Q MEMBERS
+endif
+$P CM-5-END
+!selected = TRUE
+=23735/203
+handle any
+!selected = FALSE
+elsehandle none
+endhandle
+$P CM-6-BEGIN
+if (!selected) then
+Q MEMBERS
+endif
+$P CM-6-END
+!selected = TRUE
+=23735/263
+handle any
+!selected = FALSE
+elsehandle none
+endhandle
+$P CM-7-BEGIN
+if (!selected) then
+Q MEMBERS
+endif
+$P CM-7-END
+!selected = TRUE
+=23735/323
+handle any
+!selected = FALSE
+elsehandle none
+endhandle
+$P CM-8-BEGIN
+if (!selected) then
+Q MEMBERS
+endif
+$P CM-8-END
+!selected = TRUE
+=23735/383
+handle any
+!selected = FALSE
+elsehandle none
+endhandle
+$P CM-9-BEGIN
+if (!selected) then
+Q MEMBERS
+endif
+$P CM-9-END

@@ -1,0 +1,279 @@
+{
+  "visited": 10,
+  "generated": 10,
+  "skipped": [],
+  "failed": [
+    {
+      "refno": "24383/73952",
+      "noun": "ATTA",
+      "detail": "db 7600 会话 12 的索引里没有 23984/105633"
+    },
+    {
+      "refno": "24383/73953",
+      "noun": "ATTA",
+      "detail": "db 7600 会话 12 的索引里没有 23984/105633"
+    }
+  ],
+  "catalog_pending": {},
+  "centreline_only": {},
+  "catalogue_chain_broken": [],
+  "route_containers": {
+    "BRAN": 1
+  },
+  "primitive_containers": {},
+  "host_negatives": {},
+  "route_members": {
+    "ATTA": 4,
+    "ELBO": 3,
+    "TEE": 1,
+    "VALV": 1
+  },
+  "catalogue_mesh_cache": {
+    "source_sext": 0,
+    "evaluated_sext": 0,
+    "source_sbox": 4,
+    "evaluated_sbox": 4,
+    "source_nscy": 0,
+    "evaluated_nscy": 0,
+    "source_nsbo": 0,
+    "evaluated_nsbo": 0,
+    "source_nlcy": 0,
+    "evaluated_nlcy": 0,
+    "source_nsex": 0,
+    "evaluated_nsex": 0,
+    "source_srev": 0,
+    "evaluated_srev": 0,
+    "source_scyl": 2,
+    "evaluated_scyl": 2,
+    "source_lcyl": 12,
+    "evaluated_lcyl": 12,
+    "source_lpyr": 0,
+    "evaluated_lpyr": 0,
+    "source_scto": 5,
+    "evaluated_scto": 5,
+    "source_srto": 0,
+    "evaluated_srto": 0,
+    "source_ssph": 0,
+    "evaluated_ssph": 0,
+    "source_sslc": 0,
+    "evaluated_sslc": 0,
+    "source_sdsh": 0,
+    "evaluated_sdsh": 0,
+    "source_sdis": 0,
+    "evaluated_sdis": 0,
+    "local_mesh_hits": 8,
+    "local_mesh_misses": 21,
+    "unique_placed_parts": 29,
+    "duplicate_placed_parts": 0
+  },
+  "extrusion_mesh_cache": {
+    "hits": 0,
+    "misses": 0,
+    "non_finite_bypasses": 0,
+    "boolean_operand_bypasses": 0
+  },
+  "implied_tubes": {
+    "count": 6,
+    "built": 3,
+    "total_length": null,
+    "measured": 3,
+    "measured_length_mm": 1486.6653248420603,
+    "catalogue_od": 5,
+    "bore_fallback": 0,
+    "by_owner_noun": {
+      "BRAN": 6
+    },
+    "degenerate": {
+      "zero_length": 2,
+      "missing_ppoint": 0,
+      "ppoint_db_not_open": 0,
+      "ppoint_db_not_open_by_dbno": {},
+      "ppoint_target_not_found": 0,
+      "ppoint_target_not_found_by_dbno": {},
+      "bore_mismatch": 0,
+      "unbuildable": 0,
+      "misaligned": 0,
+      "reversed": 1
+    }
+  },
+  "geometry_sets": {},
+  "geometry_set_negatives": {},
+  "unsupported": {},
+  "unknown_nouns": {},
+  "proven_non_graphic": {},
+  "evidence_pending": {
+    "ATTA": 4,
+    "BRAN": 1,
+    "ELBO": 3,
+    "TEE": 1,
+    "VALV": 1
+  },
+  "composites_built": {},
+  "noun_evidence": {
+    "ATTA": "E3D 3.1 noun_layout structural attributes; Core route semantics",
+    "BRAN": "E3D 3.1 noun_layout structural attributes; Core route semantics",
+    "ELBO": "E3D 3.1 noun_layout structural attributes; Core route semantics",
+    "TEE": "E3D 3.1 noun_layout structural attributes; Core route semantics",
+    "VALV": "E3D 3.1 noun_layout structural attributes; Core route semantics"
+  },
+  "consumed": {},
+  "orphans": {},
+  "negatives_skipped": [],
+  "notes": [
+    {
+      "refno": "24383/73948",
+      "noun": "BRAN",
+      "detail": "2 只 ATTA 的目录链走不到 SCOM，按穿过处理；若是 ANCI 型支撑，管身会比 E3D 少几段"
+    },
+    {
+      "refno": "24383/73949",
+      "noun": "ELBO",
+      "detail": "catalogue primitive 15192/338262 noun SSPH display-filtered by centreline-only (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73949",
+      "noun": "ELBO",
+      "detail": "catalogue primitive 15192/338263 noun SSPH display-filtered by centreline-only (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73949",
+      "noun": "ELBO",
+      "detail": "catalogue assembly: built=1 sext_total=0 sext_zero_height=0 degenerate_other=0 failed=0 centre_lines=1 display_filtered=2 duplicate_placements=0 component=15192/338273"
+    },
+    {
+      "refno": "24383/73950",
+      "noun": "ELBO",
+      "detail": "catalogue primitive 15192/338262 noun SSPH display-filtered by centreline-only (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73950",
+      "noun": "ELBO",
+      "detail": "catalogue primitive 15192/338263 noun SSPH display-filtered by centreline-only (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73950",
+      "noun": "ELBO",
+      "detail": "catalogue assembly: built=1 sext_total=0 sext_zero_height=0 degenerate_other=0 failed=0 centre_lines=1 display_filtered=2 duplicate_placements=0 component=15192/338273"
+    },
+    {
+      "refno": "24383/73951",
+      "noun": "ATTA",
+      "detail": "catalogue assembly: built=2 sext_total=0 sext_zero_height=0 degenerate_other=0 failed=0 centre_lines=0 display_filtered=0 duplicate_placements=0 component=13244/142150"
+    },
+    {
+      "refno": "24383/73954",
+      "noun": "ELBO",
+      "detail": "catalogue primitive 15192/338262 noun SSPH display-filtered by centreline-only (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73954",
+      "noun": "ELBO",
+      "detail": "catalogue primitive 15192/338263 noun SSPH display-filtered by centreline-only (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73954",
+      "noun": "ELBO",
+      "detail": "catalogue assembly: built=1 sext_total=0 sext_zero_height=0 degenerate_other=0 failed=0 centre_lines=1 display_filtered=2 duplicate_placements=0 component=15192/338273"
+    },
+    {
+      "refno": "24383/73955",
+      "noun": "TEE",
+      "detail": "catalogue primitive 13245/519878 noun LCYL display-filtered by centreline-only (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73955",
+      "noun": "TEE",
+      "detail": "catalogue assembly: built=3 sext_total=0 sext_zero_height=0 degenerate_other=0 failed=0 centre_lines=2 display_filtered=1 duplicate_placements=0 component=13245/519887"
+    },
+    {
+      "refno": "24383/73956",
+      "noun": "ATTA",
+      "detail": "catalogue assembly: built=2 sext_total=0 sext_zero_height=0 degenerate_other=0 failed=0 centre_lines=0 display_filtered=0 duplicate_placements=0 component=13244/142150"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548246 noun SSPH display-filtered by obst (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548247 noun SCTO display-filtered by obst (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548248 noun SCTO display-filtered by obst (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548249 noun LCYL display-filtered by leve (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548251 noun LCYL display-filtered by leve (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548252 noun SCON display-filtered by obst (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548253 noun SCON display-filtered by obst (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548256 noun LCYL display-filtered by leve (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548257 noun SCYL display-filtered by leve (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548258 noun SCYL display-filtered by leve (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548264 noun LCYL display-filtered by obst (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548266 noun LCYL display-filtered by obst (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548268 noun SCTO display-filtered by obst (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548270 noun SCTO display-filtered by obst (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548276 noun SCYL display-filtered by leve (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue primitive 13245/548277 noun SCYL display-filtered by leve (repre LEVEL PIPE 0, obst off)"
+    },
+    {
+      "refno": "24383/73957",
+      "noun": "VALV",
+      "detail": "catalogue assembly: built=19 sext_total=0 sext_zero_height=0 degenerate_other=0 failed=0 centre_lines=1 display_filtered=16 duplicate_placements=0 component=13245/548288"
+    }
+  ]
+}
