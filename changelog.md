@@ -97,6 +97,64 @@
   `noun_dict` 段。python 离线用例加两条 `element` 用例（baseline 读得到 BOX、final 读不到、钉回 24 读回同一份属性）：
   `pytest -m offline` **12 passed**。
 
+- **`parse_pdms_db` 整体退出本仓：基线全量解析换成 e3d-io 的退化窗口，两条数据路从此一份收集、一份渲染
+  （退役收口方案 `docs/plans/2026-09-04-legacy-parser-retirement-endgame-plan.md` B8.2–B9，Q1 = A「整体删」，
+  用户 2026-09-04 08:44 拍板）。** 这条同时结掉上一条「old-pdms-io 退出」里那句「**没做**：`parse_pdms_db` 仍是
+  aios-database 的依赖」——它就是 old-pdms-io 那个仓留在依赖图里的最后一条尾巴（`parse_pdms_db → pdmsdb_engine_v2`，
+  git = `pdms-io.git`），本条一起断。
+  **基线换底座（B8.2–B8.4）**：新收集器 `e3d_collector::stream_baseline`——把基线当成 base 为空、target = 冻结目标
+  会话的**退化窗口**，与 `collect_net_window` 共用 `open_frozen_target / enumerate_target_index / read_element /
+  allowed_ignored_final`（源码钉 `the_baseline_and_the_net_window_share_one_enumeration`），每 `sync_chunk_size`
+  个元素交一块、块交出去就释放，峰值内存随块不随库；新模块 `versioned_db::baseline::render_baseline_batches` 把一块
+  渲成写者消息，行形状（`pe` / `ATT_<noun>` / `ATT_UDA` / `pe_owner`）与增量路共用 `ele_ops::ElementRows`。
+  `database.rs` 的解析段整段换成 `FrozenSource::capture → UdaKeyMap::load → spawn_blocking(stream_baseline →
+  render_baseline_batches → sender.send)`，`sync_total_async_threaded` 的签名与六个调用点（`database.rs:729 / 768 /
+  817 / 830`、`manual_update.rs` 两处）一个未动。**与方案写法不同的两处，理由记这里**：① 写路**保留** `SenderJsonsData`
+  三种消息与 `INSERT IGNORE` 批，没有改成逐行 `UPSERT`——`manual_update` 的父层补缺把 extract 母库整库再同步进同一个
+  dbnum（`replace_dbs = false`），靠的就是「已有行赢」，叶子 extract 里正在改的版本不许被母库旧版本覆盖，`UPSERT` 会把
+  这条语义改掉（B8.5 第 4 条那个「逐行超基线 1.5× 就加批量写者」的触发对象因此不存在，该条改成单纯量耗时与峰值内存）；
+  ② WORL 按普通元素写全三样行（legacy 只写 `ATT_WORL` + `pe_owner`，不写它的 `pe` 行），`BaselineStats::elements`
+  不计它，形状 diff 的「预期差」要加这一条。
+  **删掉的**：`Cargo.toml` 的 `parse_pdms_db` 依赖、old-parse-pdms-db 的 `[patch]`、`legacy_parse_pdms_db` feature
+  与它那段已经过期的注释；8 个取证探针 bin（`attr_info_compat_probe` / `cata_closure_probe` / `cata_parse_probe` /
+  `curd_parse_probe` / `noun_layout_parse_probe` / `refno_attr_probe` / `refno_index_probe` / `world_probe`）与 2 个
+  门后集成测试（`tests/full_attributes_real.rs` / `tests/pdms_record_boundary.rs`）；`ele_data.rs` 的
+  `From<legacy EleData>`（`LIB_ALLOWLIST` 随之空掉）；`versioned_db/member_prune.rs`（成员事后裁——目标索引差分本身
+  就是终态）与 `versioned_db/pe.rs`（`save_pes` / `save_pes_mysql` / `save_pe_relates`，整个文件即这三个函数，上一条
+  B8.1 的取证链里点到的 `pe.rs::save_pe_relates` 指的就是它）；`read_full_basic_data` / `legacy_session_ranges` /
+  `preserve_unparsed_pe_metadata`，以及唯一调用方随之消失的 `FrozenSource::read_frozen_bytes`（基线不再把冻结前缀
+  整个读成一个 `Vec<u8>`）。`Cargo.lock` 少 5 个包（`parse_pdms_db`、`pdmsdb_engine_v2`、`dynfmt`、`hash32-derive`、
+  `erased-serde 0.3.31`），**只少不多**——唯一一行 `+` 是 `erased-serde 0.4.6` 去掉重名消歧后的 `"erased-serde"`。
+  **护栏收紧**：`data_interface::mod.rs::legacy_parse_pdms_db_guard` 从「必须在 legacy 门后」翻成「manifest 与源码
+  一处都不许有」，另加 `the_baseline_orchestration_has_no_legacy_parser_intermediates`（`DbBasicData` / `member_prune`
+  不许回到 `database.rs`）；`scripts/Check-LegacyParsePdmsDb.ps1` 改成依赖图 / `-i parse_pdms_db` 无包 / 两份 manifest /
+  扫描器自检 / 源码扫描 / 基线无 legacy 中间态六判，CI（`windows-tests.yml`）新增一步跑它；`Toggle-LocalDeps.ps1` 只剩 aios_core，
+  `Assert-NoLocalPatch.ps1` 白名单去掉 `parse_pdms_db` / `pdms_io`。**顺手补一个洞**：`Check-LegacyPdmsIo.ps1` 第 1 条
+  原先只扫下划线的 `pdms_io`，而 `pdmsdb_engine_v2 v0.1.0 (…/pdms-io.git?rev=…)` 这一行两个字符串都不匹配——
+  上面那条尾巴就是这么在「四判全绿」下挂了一整天的；判据改成同时认连字符 `pdms-io`（本轮反例验证：旧模式漏、新模式抓）。
+  **文档**：`CONTEXT.md`「分块解析基线」词条按新底座重写（退化窗口 / 无 `mem://` 暂存实例 / 无 `member_prune` /
+  `pe.sesno` 从链头 0 变成真实 last-touch 会话），并从「已退役词条」小节下面挪回现行词条区；新增「pe_owner 边」词条
+  （`in = child, out = owner`，读侧与 `unique_pe_owner (in, out)` 索引定权威）。
+  **验证（本轮实跑）**：`cargo check --workspace --all-targets --locked` 通过（只剩 3 条既有 warning）；
+  `cargo test --locked --lib -- legacy_parse_pdms_db_guard legacy_pdms_io_guard ele_ops e3d_collector versioned_db
+  uda_keys baseline manual_update noun_dict db_file_header frozen_source` **195 passed / 0 failed / 12 ignored**；
+  `cargo test --locked --test baseline_stream_8000` **6 passed**（issue-019 db8000 归档夹具，`CHUNK_SIZE = 64`）；
+  `Check-LegacyParsePdmsDb.ps1` 六判、`Check-LegacyPdmsIo.ps1` 四判全绿；
+  `cargo tree --workspace -e normal --locked -i parse_pdms_db`、`-i pdmsdb_engine_v2` 与 `-i pdms_io` 三条均报
+  `did not match any packages`。
+  **`Assert-NoLocalPatch.ps1` 这一轮是红的，与本条无关，也没有顺手关掉**：`aios_core` 的 LOCAL-DEPS PATCH 在
+  `60691756` 及更早都是注释态，是上一条提交（`014ddb0b`）把生效态的 `[patch]` 连同去掉 `source` 的 `Cargo.lock`
+  一起提了进去。关掉它要让 cargo 把 `aios_core` 重新解析回 git rev，而此刻同一棵工作树上另有一条会话正拿
+  `../vendor/old-aios-core` 编译——那等于在别人脚下换掉依赖来源。留作单独一条提交。
+  **真库进度（B8.5，前几轮实跑，见方案 §0.2）**：`ams7997_0001` 由 e3d-io 完成基线（`170048` 行 `pe` / `dbnum_info`，
+  文件最新会话与应用水位同为 `106`，排入 `18675` 个生成根）；SYS/DICT meta 阶段完成（SYST 8191 写入 `1205` 行 `pe`，
+  `DTWL` 这种 `attribute_count = 0` 的合法零属性 noun 返回空属性提取）。
+  **未做 / 未验证**：B8.5 第 3–6 条的外部裁决——5 库形状 diff、448 库耗时与峰值内存、E3D TTY `Q ATT` / `Q MEMBERS`
+  抽样、`live_ams8000_*` 回归；**TTY 值 / 成员序对照完成之前不宣称外部等价**（当前实跑只证明 e3d-io 自洽与持久化闭合）。
+  另：`docs/adr/ADR-004`、`ADR-021`、`docs/plans/on-demand-cata-parsing-port.md`、`docs/diagrams/data-parse-pipeline.drawio`
+  与 `.github/context-cold.md` 里指向已删的 `pe.rs` / `save_pes` 的取证引用**没动**——ADR 是历史决策记录，改写它们要单独决定。
+  **（用户当日拍板改写，见下条。）**
+
 - **悬空取证引用重指：ADR-004 / ADR-021 / 数据解析流程图**（用户 2026-09-04 指定这三处）。改的一律是**指针不是决策**：
   三份文件的结论、不变量与状态行一个字未动，动的只是「拿哪段代码作证」。
   - `ADR-004`：关联行删掉 `src/versioned_db/pe.rs` 与 `vendor/aios-parse-pdms/src/parse.rs`（后者不被任何 manifest

@@ -101,6 +101,9 @@ jobs:
           --no-default-features
           --features ws,gen_model,manifold,project_hd,legacy_model
 
+      # old-pdms-io 2026-09-04 整体退出：既没有 feature 门也没有参照臂。这一步是 compile-fail
+      # doctest（`collect_changes` 在任何构建里都不存在），下一步是护栏脚本（依赖图 / manifest /
+      # 源码三处都不许再提 pdms_io）。
       - name: Prove legacy replay API is absent from production docs build
         shell: pwsh
         run: >-
@@ -108,6 +111,17 @@ jobs:
           --no-default-features
           --features ws,gen_model,manifold,project_hd
           LegacySessionReplayUnavailableInProduction
+
+      - name: Prove old-pdms-io is gone from the workspace
+        shell: pwsh
+        run: powershell -NoProfile -File scripts\Check-LegacyPdmsIo.ps1
+
+      # old-parse-pdms-db 2026-09-04 随 B9 整体退出：依赖、[patch]、legacy_parse_pdms_db feature、
+      # 8 个取证探针与 2 个门后测试一起删。这一步钉的是「不许回来」：依赖图里没有这个包、两份
+      # manifest 与源码一处都不许提它、基线编排不含 DbBasicData / member_prune。
+      - name: Prove the baseline no longer runs on old-parse-pdms-db
+        shell: pwsh
+        run: powershell -NoProfile -File scripts\Check-LegacyParsePdmsDb.ps1
 
       - name: Run portable db8000 model-increment cases
         shell: pwsh

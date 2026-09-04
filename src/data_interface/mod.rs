@@ -248,3 +248,142 @@ mod legacy_pdms_io_guard {
         );
     }
 }
+
+/// old-parse-pdms-db 退出护栏（`docs/plans/2026-09-04-parse-pdms-db-retirement-inventory.md` B9；
+/// 2026-09-04 从「只许在 legacy 门后」收紧为「一处都不许有」）：
+///
+/// 1. 根 `Cargo.toml` 与 `python/Cargo.toml` 不得声明 `parse_pdms_db` 依赖、`[patch]` 或
+///    `legacy_parse_pdms_db` feature；
+/// 2. `src/`、`tests/`、`python/src/` 的**代码行**不得出现 `parse_pdms_db::` / `use parse_pdms_db`，
+///    也不得再挂 `feature = "legacy_parse_pdms_db"` 门；
+/// 3. 基线编排全文不含 legacy 解析器的中间态。
+///
+/// 依赖图那一条（`cargo tree -e normal -i parse_pdms_db` 必须匹配不到任何包）由
+/// `scripts/Check-LegacyParsePdmsDb.ps1` 判。基线全量解析已收敛成 e3d-io 退化窗口
+/// （`e3d_collector::stream_baseline` + `versioned_db::baseline`），`member_prune` 整个文件删除；
+/// 夹具的验证闸走 `db_file_header::snapshot_presence`，差分 oracle 走 `e3d_collector::read_ele_data`。
+/// 对拍以 E3D TTY 为准（共识 d-6），所以 legacy 解析器连「参照臂」这个身份也不再有。
+#[cfg(test)]
+mod legacy_parse_pdms_db_guard {
+    use std::path::{Path, PathBuf};
+
+    fn rust_files(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read source dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                rust_files(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    fn code_mentions_any(line: &str, needles: &[&str]) -> bool {
+        let code = line.trim_start();
+        !code.starts_with("//")
+            && needles.iter().any(|needle| {
+                code.match_indices(needle)
+                    .any(|(at, _)| !code[..at].ends_with('"'))
+            })
+    }
+
+    fn relative(root: &Path, file: &Path) -> String {
+        file.strip_prefix(root)
+            .unwrap_or(file)
+            .display()
+            .to_string()
+            .replace('\\', "/")
+    }
+
+    fn manifest_lines_mentioning(manifest: &str, needles: &[&str]) -> Vec<String> {
+        manifest
+            .lines()
+            .filter(|line| !line.trim_start().starts_with('#'))
+            .filter(|line| needles.iter().any(|needle| line.contains(needle)))
+            .map(str::to_owned)
+            .collect()
+    }
+
+    #[test]
+    fn no_manifest_declares_old_parse_pdms_db_or_its_feature_gate() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for manifest in ["Cargo.toml", "python/Cargo.toml"] {
+            let text = std::fs::read_to_string(root.join(manifest)).expect(manifest);
+            let hits = manifest_lines_mentioning(
+                &text,
+                &["parse_pdms_db", "old-parse-pdms-db", "legacy_parse_pdms_db"],
+            );
+            assert!(
+                hits.is_empty(),
+                "{manifest} 仍声明 old-parse-pdms-db 或它的 feature 门（2026-09-04 起一处都不许有）：{hits:#?}"
+            );
+        }
+    }
+
+    #[test]
+    fn no_source_mentions_old_parse_pdms_db_even_behind_a_feature_gate() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut files = Vec::new();
+        for dir in ["src", "tests", "python/src"] {
+            rust_files(&root.join(dir), &mut files);
+        }
+        assert!(
+            files.len() > 50,
+            "源码枚举失败，只找到 {} 个 .rs",
+            files.len()
+        );
+
+        const NEEDLES: [&str; 3] = [
+            "parse_pdms_db::",
+            "use parse_pdms_db",
+            "feature = \"legacy_parse_pdms_db\"",
+        ];
+        let mut leaks = Vec::new();
+        for file in files {
+            let source = std::fs::read_to_string(&file).expect("read source");
+            let hit = source
+                .lines()
+                .enumerate()
+                .find(|(_, line)| code_mentions_any(line, &NEEDLES));
+            if let Some((index, line)) = hit {
+                leaks.push(format!(
+                    "{}:{}: {}",
+                    relative(root, &file),
+                    index + 1,
+                    line.trim()
+                ));
+            }
+        }
+        assert!(
+            leaks.is_empty(),
+            "这些文件仍引用 old-parse-pdms-db 或它的 feature 门（文件头走 db_file_header::DbBasicInfo、\
+             元素记录走 data_interface::ele_data::EleData、noun 字典走 noun_dict、索引 / 属性走 e3d-io；\
+             对拍以 E3D TTY 为准）：{leaks:#?}"
+        );
+    }
+
+    /// 基线编排不许再出现 legacy 解析器的中间态（退役收口方案 B8.3 第 7 条）。
+    ///
+    /// `DbBasicData` 是 `parse_db_basic_data` 的产物，`member_prune` 是补链轮的事后裁决——
+    /// 两样都只有旧基线有。e3d-io 退化窗口一个都不经过（收集走 `e3d_collector::stream_baseline`，
+    /// 行形状走 `versioned_db::baseline::render_baseline_batches`），任何一个写回来都意味着
+    /// 又开了第二条收集路，而那正是宪法 II 不许的。
+    #[test]
+    fn the_baseline_orchestration_has_no_legacy_parser_intermediates() {
+        const INTERMEDIATES: [&str; 2] = ["DbBasicData", "member_prune"];
+        const FILE: &str = "src/versioned_db/database.rs";
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let source = std::fs::read_to_string(root.join(FILE)).expect("read database.rs");
+        let leaks: Vec<String> = source
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| code_mentions_any(line, &INTERMEDIATES))
+            .map(|(index, line)| format!("{FILE}:{}: {}", index + 1, line.trim()))
+            .collect();
+        assert!(
+            leaks.is_empty(),
+            "基线编排退回了 legacy 解析器的中间态：{leaks:#?}"
+        );
+    }
+
+}

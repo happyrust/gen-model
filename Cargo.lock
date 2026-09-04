@@ -126,7 +126,6 @@ dependencies = [
  "once_cell",
  "parry2d",
  "parry3d",
- "parse_pdms_db",
  "petgraph 0.8.3",
  "pollster",
  "rand 0.9.5",
@@ -170,7 +169,6 @@ dependencies = [
  "anyhow",
  "glam 0.29.3",
  "indexmap 2.14.0",
- "parse_pdms_db",
  "pyo3",
  "pythonize",
  "serde",
@@ -1175,7 +1173,7 @@ dependencies = [
  "derive_more",
  "disqualified",
  "downcast-rs 2.0.2",
- "erased-serde 0.4.6",
+ "erased-serde",
  "foldhash",
  "glam 0.29.3",
  "serde",
@@ -2380,20 +2378,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c7a8fb8a9fbf66c1f703fe16184d10ca0ee9d23be5b4436400408ba54a95005"
 
 [[package]]
-name = "dynfmt"
-version = "0.1.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b1c298552016db86f0d49e5de09818dd86c536f66095013cc415f4f85744033f"
-dependencies = [
- "erased-serde 0.3.31",
- "lazy_static",
- "regex",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "e3d-attlib"
 version = "0.1.0"
 dependencies = [
@@ -2476,15 +2460,6 @@ name = "equivalent"
 version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
-
-[[package]]
-name = "erased-serde"
-version = "0.3.31"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c138974f9d5e7fe373eb04df7cae98833802ae4b11c24ac7039a21d5af4b26c"
-dependencies = [
- "serde",
-]
 
 [[package]]
 name = "erased-serde"
@@ -3042,17 +3017,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
 dependencies = [
  "byteorder",
-]
-
-[[package]]
-name = "hash32-derive"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59d2aba832b60be25c1b169146b27c64115470981b128ed84c8db18c1b03c6ff"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 1.0.109",
 ]
 
 [[package]]
@@ -4677,49 +4641,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "parse_pdms_db"
-version = "3.0.0"
-source = "git+https://github.com/happyrust/old-parse-pdms-db.git?rev=005936a6767bd92f733aa4a7d113a07391487eef#005936a6767bd92f733aa4a7d113a07391487eef"
-dependencies = [
- "aios_core",
- "anyhow",
- "approx 0.5.1",
- "async-trait",
- "bincode",
- "bitflags 2.9.1",
- "cached 0.54.0",
- "clap",
- "concurrent-queue",
- "config",
- "dashmap 7.0.0-rc2",
- "derivative",
- "dynfmt",
- "futures",
- "hash32 0.3.1",
- "hash32-derive",
- "hex",
- "id_tree 1.8.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "instant",
- "itertools 0.13.0",
- "lazy_static",
- "log",
- "memchr",
- "nom 7.1.3",
- "once_cell",
- "pdmsdb_engine_v2",
- "phf 0.11.3",
- "pretty-hex",
- "rayon",
- "regex",
- "serde",
- "serde_derive",
- "serde_json",
- "smol_str 0.3.2",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
 name = "password-hash"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4764,17 +4685,6 @@ dependencies = [
  "hmac",
  "password-hash",
  "sha2",
-]
-
-[[package]]
-name = "pdmsdb_engine_v2"
-version = "0.1.0"
-source = "git+https://github.com/happyrust/pdms-io.git?rev=13a17e1f3a8ed8d18c1dcecdf10642c28654d4bb#13a17e1f3a8ed8d18c1dcecdf10642c28654d4bb"
-dependencies = [
- "anyhow",
- "chrono",
- "serde_json",
- "thiserror 2.0.19",
 ]
 
 [[package]]

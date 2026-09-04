@@ -43,12 +43,15 @@ legacy_model = []
 # Historical developer probes are deliberately not unlocked by
 # `legacy_model`; that feature exposes only `legacy_model_gen`.
 legacy_diagnostics = []
-# old-parse-pdms-db（`parse_pdms_db`）的生产路径 B1–B7 已经搬走：文件头走
-# `db_file_header::DbBasicInfo`、元素记录是本仓 `data_interface::ele_data::EleData`、
+# old-parse-pdms-db（`parse_pdms_db`）已整体退出本仓（2026-09-04，第二张退役清单
+# `docs/plans/2026-09-04-parse-pdms-db-retirement-inventory.md` 的 B9；B1–B7 先把生产路径搬走：
+# 文件头走 `db_file_header::DbBasicInfo`、元素记录是本仓 `data_interface::ele_data::EleData`、
 # noun 字典快照在 `noun_dict`、抽取树 / MDB 声明走 e3d-io 索引，B8 又把基线全量解析收敛成
-# e3d-io 退化窗口 `e3d_collector::stream_baseline` + `versioned_db::baseline`。
-# 还留着这条依赖的只剩 8 个取证探针 bin 与 2 个门后测试，B9 会连依赖一起摘掉
-# （`docs/plans/2026-09-04-parse-pdms-db-retirement-inventory.md`）。
+# e3d-io 退化窗口 `e3d_collector::stream_baseline` + `versioned_db::baseline`）。
+# 依赖、`[patch]`、`legacy_parse_pdms_db` feature、8 个取证探针 bin 与 2 个门后测试一起删——
+# 共识 d-6 定了「不拿第二套解析器当参照臂」，那批探针存在的唯一理由也就没有了。
+# `parse_pdms_db` 不许再出现在任何 manifest / 源码里——`scripts/Check-LegacyParsePdmsDb.ps1` +
+# `data_interface::mod.rs::legacy_parse_pdms_db_guard` 两道护栏钉死。
 surreal_v2 = []
 project_hd = []
 project_hh = []
@@ -151,8 +154,6 @@ parry3d = { git = "https://gitee.com/happydpc/parry.git", package = "parry3d", f
     "rkyv",
 ] }
 parry2d = { git = "https://gitee.com/happydpc/parry.git", package = "parry2d" }
-# old-parse-pdms-db：生产路径已全部搬走，只剩 8 个取证探针 bin 与 2 个门后测试还引用它，B9 一并摘除。
-parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "005936a6767bd92f733aa4a7d113a07391487eef" }
 aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "4a7a00f93f3afa4069922ea52fab174cbbbddcde", default-features = false }
 bevy_transform = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_transform" }
 bevy_reflect = { git = "https://gitee.com/happydpc/bevy.git", package = "bevy_reflect" }
@@ -247,9 +248,9 @@ rmcp = { version = "=3.1.1", features = ["server", "transport-io"] }
 #
 #   ../vendor/old-aios-core      codex/libgm-snout-caliber = 4a7a00f9
 #
-# old-pdms-io 那一条 2026-09-04 随 `pdms_io` 依赖一起摘掉了（不再是任何 crate 的依赖，
-# 留着 patch 只会得到 cargo 的 "patch was not used" 警告）。old-parse-pdms-db 还在
-# [dependencies] 里，但只有那批探针在用，B9 就要整条摘掉，所以不再把它接回 Toggle 段。
+# old-pdms-io 与 old-parse-pdms-db 的那两条分别在 2026-09-04 随 `pdms_io` / `parse_pdms_db`
+# 依赖一起摘掉了（不再是任何 crate 的依赖，留着 patch 只会得到 cargo 的
+# "patch was not used" 警告）。
 #
 # 同名克隆有好几份，别接错：plant-code/rs-core 在 codex/fix-refno-enum-cata-hash 上
 # （rkyv 0.8 那条线），不是这里要的。
@@ -262,17 +263,9 @@ rmcp = { version = "=3.1.1", features = ["server", "transport-io"] }
 aios_core = { path = "../vendor/old-aios-core" }
 # LOCAL-DEPS PATCH END
 #
-# ── 第四路（手动）：pdms-io.git 的 pdmsdb_engine_v2 ─────────────────────────
-#
-# 上面之外还有一条链：parse_pdms_db → pdmsdb_engine_v2
-# （git = https://github.com/happyrust/pdms-io.git，rev 钉在 old-parse-pdms-db
-# 的 Cargo.toml 里，当前 13a17e1f）。Toggle-LocalDeps.ps1 不管这一路。
-#
-# 2026-08-30：`../../pdms-io-fork-engine-v2` 已从磁盘上消失，带着 patch 连
-# manifest 都解析不了，所以这两行是注释态。
-#
-# [patch."https://github.com/happyrust/pdms-io.git"]
-# pdmsdb_engine_v2 = { path = "../../pdms-io-fork-engine-v2/crates/pdmsdb_engine_v2" }
+# 曾经还有第四路：parse_pdms_db → pdmsdb_engine_v2（git = pdms-io.git）。它是
+# old-pdms-io 那个仓留在依赖图里的最后一条尾巴，2026-09-04 随 parse_pdms_db 一起断了，
+# 手动 patch 那两行注释也一并删除——图里没有这个包，patch 无处可打。
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }

@@ -15,16 +15,13 @@ crate-type = ["cdylib"]
 
 [features]
 default = []
-# old-pdms-io 已从本 crate 整体退出（2026-09-04；此前 2026-09-03 先降为 `legacy_pdms_io` 门后的
-# 直读 / 对拍入口）。窗口语义只剩 `parse.net_window`——生产收集器 `e3d_collector` 的绑定；
-# 判据是 E3D TTY 录下的会话，不是第二套解析器。
-# old-parse-pdms-db 这一侧已经没有调用点，依赖留到 B9 与主 crate 一起摘。
-legacy_parse_pdms_db = ["dep:parse_pdms_db"]
+# old-pdms-io / old-parse-pdms-db 已从本 crate 整体退出（2026-09-04；此前 2026-09-03 先降为
+# `legacy_pdms_io` 门后的直读 / 对拍入口）。窗口语义只剩 `parse.net_window`——生产收集器
+# `e3d_collector` 的绑定；判据是 E3D TTY 录下的会话，不是第二套解析器。
 
 [dependencies]
 aios-database = { path = ".." }
 aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "4a7a00f93f3afa4069922ea52fab174cbbbddcde", default-features = false }
-parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "005936a6767bd92f733aa4a7d113a07391487eef", optional = true }
 
 anyhow = "1.0.57"
 serde_json = "1.0.81"

@@ -30,11 +30,11 @@ for ($i = $bodyStart; $i -le $bodyEnd; $i++) {
 
 if ($Status -or (-not $On -and -not $Off)) {
     if ($isOn) {
-        Write-Output "local deps patch: ON  (Cargo.toml redirects aios_core / parse_pdms_db / pdms_io to local clones)"
+        Write-Output "local deps patch: ON  (Cargo.toml redirects aios_core to a local clone)"
         Write-Output "                     do NOT push this state to main - run this script with -Off first"
     }
     else {
-        Write-Output "local deps patch: OFF (all three crates come from their git sources)"
+        Write-Output "local deps patch: OFF (aios_core comes from its git source)"
     }
     exit 0
 }
@@ -60,7 +60,7 @@ else {
 Write-Output "local deps patch: $verb"
 
 # Cargo.lock has to follow: turning the patch on drops the `source` lines for the
-# three crates, turning it off puts them back. Leaving the lock stale would make
+# two crates, turning it off puts them back. Leaving the lock stale would make
 # the next build (or the pre-push guard) disagree with the manifest.
 Push-Location (Split-Path $manifest -Parent)
 try {

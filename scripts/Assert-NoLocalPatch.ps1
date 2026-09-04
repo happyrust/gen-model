@@ -6,7 +6,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$patchedCrates = @('aios_core', 'parse_pdms_db', 'pdms_io')
+$patchedCrates = @('aios_core')
 $problems = @()
 
 function Get-Blob([string]$path) {
