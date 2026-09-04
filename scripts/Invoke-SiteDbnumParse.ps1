@@ -148,8 +148,15 @@ function Invoke-SiteBin {
 
     Push-Location $SiteDir
     try {
-        & $path @BinArgs *>&1 | Tee-Object -FilePath (Join-Path $SiteDir $LogName) | Out-Null
-        if ($LASTEXITCODE -ne 0) { throw "$Exe 退出码 $LASTEXITCODE，看 $SiteDir\$LogName" }
+        $previousErrorActionPreference = $ErrorActionPreference
+        $ErrorActionPreference = "Continue"
+        try {
+            & $path @BinArgs *>&1 | Tee-Object -FilePath (Join-Path $SiteDir $LogName) | Out-Null
+            $exitCode = $LASTEXITCODE
+        } finally {
+            $ErrorActionPreference = $previousErrorActionPreference
+        }
+        if ($exitCode -ne 0) { throw "$Exe 退出码 $exitCode，看 $SiteDir\$LogName" }
     } finally {
         Pop-Location
     }

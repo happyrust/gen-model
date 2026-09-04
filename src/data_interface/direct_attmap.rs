@@ -1,16 +1,9 @@
 //! ADR-053 Q4：把 e3d-io 直读出来的元素属性转成生成链消费的 `NamedAttrMap`。
 //!
-//! **形状的权威是 DB 读侧的 schema，不是文件。** `aios_core` 的
-//! `From<SurlValue> for NamedAttrMap` 决定每个键落成哪个 `NamedAttrValue` 变体：
-//! 它拿 `PdmsDatabaseInfo::named_attr_info_map[noun][key].default_val` 的变体去套
-//! Surreal 值，`REFNO`/`OWNER`/`TYPE`/`PGNO`/`SESNO` 先走特判，schema 不认识的键
-//! 直接 `continue` 跳过。生成链上那些 `if let NamedAttrValue::Vec3Type(v)` 就是照这
-//! 张表写的，所以 direct 侧必须查**同一张表**——各自按文件里的存储类型自由发挥，
-//! POS 会变成 `F32VecType`，一个 `if let` 就静默失配了。
-//!
-//! 于是本模块只做一件事：拿 e3d-io 的 `DescriptorValue`（文件说这个值**是什么**），
-//! 按 schema 说的**该是什么**去转。转不过去的不猜——记进
-//! [`DirectAttrs::shape_conflicts`] 由调用方处置。
+//! **形状与值的权威是 e3d-io 从物理描述符和库记录读出的
+//! `DescriptorValue`。** `aios_core` schema 只是兼容投影提示：对得上时保留生成链
+//! 已消费的 `Vec3Type` / `WordType` / 引用变体；对不上时保留文件的完整
+//! 自然值并记入 [`DirectAttrs::view_divergence`]，由 E3D TTY 对拍裁决。
 //!
 //! P0（`docs/plans/direct-mode-model-generation.md`）定下的四类残差，本模块的处置：
 //!
@@ -43,18 +36,14 @@ use glam::Vec3;
 #[derive(Debug, Clone, Default)]
 pub struct DirectAttrs {
     pub map: NamedAttrMap,
-    /// schema 不认识的键。DB 读侧对它们 `continue`，所以生成期本来就看不见；
-    /// direct 侧同样不放进 `map`，只在这里留名。
+    /// 应用 schema 不认识的键。普通属性仍按 e3d-io 自然值进 `map`；
+    /// `:UDA` 由上层的专用 UDA 通道落表。
     pub outside_schema: Vec<String>,
     /// 文件说这个属性是 E3D 的逻辑 `unset`——它与 0 / 空串 / Nulref 都不是一回事。
     /// 不编一个默认值塞进去；DB 行在这些键上放的是什么，由对拍量出来再定。
     pub unset: Vec<String>,
-    /// 文件里的存储形状与 schema 声明的**数值/引用**类型对不上。**不猜**，列出来。
-    ///
-    /// 这一类必须当错处理：声明成数字的属性生成链会拿去算几何，按错的读法解出来的
-    /// 数字长得和对的一模一样。已知一例是 `BANG`——e3d-io 把它解成 `Word`，真库上
-    /// `raw` 是 i32 的百分之一度（`4294958296` = −9000 → DB 的 −90.0）。那是 e3d-io
-    /// 描述符定型的缺口，该在那边修，不该在这里按一个样本编一条缩放规则。
+    /// e3d-io 给出了非 `Unset` 值，但当前 `NamedAttrValue` 仍无法表达的形状。
+    /// 已解码的标量和数组都能按自然值表达，所以该列表正常应为空。
     pub shape_conflicts: Vec<ShapeConflict>,
     /// schema 声明与文件形状对不上，但**DB 读侧拿同一份声明也读不出来**的键。
     ///
@@ -195,6 +184,11 @@ fn convert_one(
     }
 
     let Some(declared) = declared_type(name) else {
+        if !name.starts_with(':')
+            && let Some(natural) = natural(value)
+        {
+            map.insert(name.to_string(), natural);
+        }
         out.outside_schema.push(name.to_string());
         return;
     };
@@ -229,47 +223,16 @@ fn convert_one(
         return;
     }
 
-    // schema 声明文本、文件里是字/整数：DB 读侧同样读不出来，交原样、记一笔。
-    if is_text_declaration(&declared)
-        && let Some(natural) = natural(value)
-    {
-        map.insert(name.to_string(), natural);
-        out.view_divergence.push(conflict);
-        return;
-    }
-
-    // schema 声明单个引用、文件里是多个非空引用：标量装不下，DB 读侧拿这份声明同样
-    // 读不出数组。交自然数组、记一笔——抹成其中一个才是编数据。
-    if is_ref_declaration(&declared)
-        && matches!(value, DescriptorValue::RefNoArray(_))
-        && let Some(natural) = natural(value)
-    {
+    // e3d-io 的物理描述符与库记录是读侧权威；应用 schema 只是兼容投影提示。
+    // 投影失败时保留文件里的完整自然值，把分歧交给 TTY 对拍，不截断数组、
+    // 不把浮点改成整数，也不用旧 parser 的 schema 阻断整库。
+    if let Some(natural) = natural(value) {
         map.insert(name.to_string(), natural);
         out.view_divergence.push(conflict);
         return;
     }
 
     out.shape_conflicts.push(conflict);
-}
-
-/// 声明成文本的类型。数值与引用不在其列——那两类错了会算出错的几何。
-///
-/// `WordType` 在列：词签渲染成文本、不进几何。全 schema 只有 APPLDWORLD 一个 noun
-/// 把 `TYPEX` 声明成 WORD（其余 1169 个声明 STRING），文件侧一律存 `RawWords[2]`——
-/// 同一个值，不该因为声明措辞不同就从「视图分歧」变成「形状冲突」。
-fn is_text_declaration(declared: &AttrVal) -> bool {
-    matches!(
-        declared,
-        AttrVal::StringType(_)
-            | AttrVal::StringArrayType(_)
-            | AttrVal::StringHashType(_)
-            | AttrVal::WordType(_)
-    )
-}
-
-/// 声明成**单个**引用的类型。数组声明不在其列——那一支 `coerce` 本来就转得过去。
-fn is_ref_declaration(declared: &AttrVal) -> bool {
-    matches!(declared, AttrVal::RefU64Type(_) | AttrVal::ElementType(_))
 }
 
 /// 文件在说「这里什么都没有」。
@@ -296,8 +259,13 @@ fn is_null_ref(refno: &RefNo) -> bool {
     refno.word0 == 0 && refno.word1 == 0
 }
 
-/// 文件自己的形状，不问 schema。只在 [`is_text_declaration`] 与
-/// [`is_ref_declaration`] 那两类上用。
+/// 文件自己的形状，不问 schema——给 UDA 用（schema 表里没有 UDA，它们只能按文件形状走）。
+/// 数据面收集器（`e3d_collector`）把 `:UDA` 属性装进 `uda_atts` 时走这里。
+pub(crate) fn natural_value(value: &DescriptorValue) -> Option<NamedAttrValue> {
+    natural(value)
+}
+
+/// 文件自己的形状，不问 schema。UDA 与 schema 投影失败都走这里。
 fn natural(value: &DescriptorValue) -> Option<NamedAttrValue> {
     use DescriptorValue as D;
     Some(match value {
@@ -573,6 +541,21 @@ mod tests {
             coerce(&full, &AttrVal::Vec3Type([0.0; 3])),
             Some(NamedAttrValue::Vec3Type(Vec3::new(1.0, 2.0, 3.0)))
         );
+    }
+
+    #[test]
+    fn decoded_physical_value_wins_when_the_projection_schema_disagrees() {
+        let (map, out) = convert(
+            decoded("MAXMIN", DescriptorValue::RealArray(vec![45.0, 35.0])),
+            AttrVal::DoubleType(0.0),
+        );
+
+        assert_eq!(
+            map.get("MAXMIN"),
+            Some(&NamedAttrValue::F32VecType(vec![45.0, 35.0]))
+        );
+        assert!(out.shape_conflicts.is_empty());
+        assert_eq!(out.view_divergence.len(), 1);
     }
 
     /// 吊架件家族的 `CRFA`：schema 在这 21 个 noun 上声明标量，文件里却是引用数组，
