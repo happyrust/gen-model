@@ -1,0 +1,336 @@
+{
+  "attributes": [
+    {
+      "binary_name": "NAME",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "CYLINDER 1 of EQUIPMENT /ZZZL779",
+      "comparison": "equivalent",
+      "name": "Name",
+      "ordinal": 0,
+      "rendered_value": "CYLINDER 1 of EQUIPMENT /ZZZL779",
+      "resolved_reference_name": null,
+      "source": "runtime_derived"
+    },
+    {
+      "binary_name": "noun",
+      "binary_status": null,
+      "binary_value": "CYLI",
+      "comparison": "equivalent",
+      "name": "Type",
+      "ordinal": 1,
+      "rendered_value": "CYLI",
+      "resolved_reference_name": null,
+      "source": "structural"
+    },
+    {
+      "binary_name": null,
+      "binary_status": null,
+      "binary_value": null,
+      "comparison": "equivalent",
+      "name": "Lock",
+      "ordinal": 2,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "structural"
+    },
+    {
+      "binary_name": "owner",
+      "binary_status": null,
+      "binary_value": {
+        "display": "24383/83813",
+        "word0": 24383,
+        "word1": 83813
+      },
+      "comparison": "equivalent",
+      "name": "Owner",
+      "ordinal": 3,
+      "rendered_value": "/ZZZL779",
+      "resolved_reference_name": "/ZZZL779",
+      "source": "structural"
+    },
+    {
+      "binary_name": "PURP",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "raw": 0,
+        "text": null
+      },
+      "comparison": "equivalent",
+      "name": "Purpose",
+      "ordinal": 4,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "POS",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": [
+        0.0,
+        -550.0,
+        0.0
+      ],
+      "comparison": "equivalent",
+      "name": "Position",
+      "ordinal": 5,
+      "rendered_value": "E 0mm S 550mm U 0mm",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "ORI",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": [
+        90.0,
+        0.0,
+        0.0
+      ],
+      "comparison": "equivalent",
+      "name": "Orientation",
+      "ordinal": 6,
+      "rendered_value": "Y is U and Z is S",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "LEVE",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": [
+        2,
+        10
+      ],
+      "comparison": "equivalent",
+      "name": "Level",
+      "ordinal": 7,
+      "rendered_value": "2 10",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "OBST",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "raw": 2,
+        "text": null
+      },
+      "comparison": "equivalent",
+      "name": "Obstruction",
+      "ordinal": 8,
+      "rendered_value": "2",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "DIAM",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": 380.0,
+      "comparison": "equivalent",
+      "name": "Diameter",
+      "ordinal": 9,
+      "rendered_value": "380mm",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "HEIG",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": 1000.0,
+      "comparison": "equivalent",
+      "name": "Height",
+      "ordinal": 10,
+      "rendered_value": "1000mm",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "ORRF",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Orrf",
+      "ordinal": 11,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "TMRREF",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Tmrref",
+      "ordinal": 12,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "REPCOU",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 0,
+      "comparison": "equivalent",
+      "name": "RepCount",
+      "ordinal": 13,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":SCRoomNo",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":SCRoomNo",
+      "ordinal": 14,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":CNPEOPENITEM",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "UNSET",
+      "comparison": "equivalent",
+      "name": ":CNPEOPENITEM",
+      "ordinal": 15,
+      "rendered_value": "UNSET",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":JGOBJBASE",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "UNSET",
+      "comparison": "equivalent",
+      "name": ":JGOBJBASE",
+      "ordinal": 16,
+      "rendered_value": "UNSET",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":JGOBJMAT",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "UNSET",
+      "comparison": "equivalent",
+      "name": ":JGOBJMAT",
+      "ordinal": 17,
+      "rendered_value": "UNSET",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":JGOBJZL",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "UNSET",
+      "comparison": "equivalent",
+      "name": ":JGOBJZL",
+      "ordinal": 18,
+      "rendered_value": "UNSET",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":JGOBJNOTE",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "UNSET",
+      "comparison": "equivalent",
+      "name": ":JGOBJNOTE",
+      "ordinal": 19,
+      "rendered_value": "UNSET",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    }
+  ],
+  "catalog_comparison": {
+    "catalog_missing_from_tty": [
+      {
+        "hash": 545713,
+        "name": "POS",
+        "report_name": "PositonEditor"
+      }
+    ],
+    "enabled": true,
+    "logical_attribute_count": 11,
+    "noun_present": true,
+    "tty_not_in_catalog": [
+      "Type",
+      "Lock",
+      "Owner",
+      "Position",
+      ":SCRoomNo",
+      ":CNPEOPENITEM",
+      ":JGOBJBASE",
+      ":JGOBJMAT",
+      ":JGOBJZL",
+      ":JGOBJNOTE"
+    ]
+  },
+  "comparison_counts": {
+    "equivalent": 20
+  },
+  "deferred_uda_row_count": 0,
+  "deferred_uda_rows": [],
+  "noun_hash": 718014,
+  "noun_name": "CYLI",
+  "omitted_row_count": 0,
+  "owner": "24383/83813",
+  "refno": {
+    "display": "24383/83814",
+    "word0": 24383,
+    "word1": 83814
+  },
+  "source_counts": {
+    "binary_implicit": 6,
+    "catalog_default": 10,
+    "runtime_derived": 1,
+    "structural": 3
+  },
+  "tty_row_count": 20,
+  "tty_unique_count": 20,
+  "uda_enabled": true
+}

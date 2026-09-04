@@ -56,3 +56,46 @@ One real comparison defect was found and fixed during this chunk. SCTN
 Vendor commit `9d74754` separates the two name indexes. Adding the physical
 ref0 owner `ZDJ/zdj7600_0001` resolves the system reference to the TTY value
 `/CHINA-SPEC/[22b`, closing that element at `105/105`.
+
+## Completed sample
+
+The remaining non-crashing refs were captured in `chunk-01-refnos.txt` through
+`chunk-05-refnos.txt`. All five E3D sessions exited `0`, so the completed set is
+49 of the 50 deterministic samples. Refno `24383/75484` remains isolated in
+`crash-witness-refnos.txt`: E3D itself exits `3221225477` while querying this
+`VALV`, and no attribute-parity result is assigned to it.
+
+Every successful capture was regenerated with vendor commit `3e40c31`, the
+e3d-io E3D 3.1 schema pack, and the six physical DICT databases used by the
+batch smoke. Reference names were resolved from the physical databases selected
+by each ref0:
+
+```text
+13244 -> AvevaMarineSample/ams5052_0001
+13245 -> AvevaMarineSample/ams5053_0001
+15512 -> AvevaCatalogue/acp7320_0001
+21438 -> AvevaMarineSample/ams5054_0001
+23984 -> ZDJ/zdj7600_0001
+```
+
+Literal aggregate over the 49 JSON reports:
+
+```text
+reports=49 tty_rows=3123 equivalent=3119 mismatch=4
+```
+
+The four non-equivalent rows have explicit boundaries:
+
+- `:CutLength` on ELBO `24383/76178` and `24383/85896`: the physical DICT
+  defines dynamic pseudo UDA `/PFCutLengthForBend`, while the binary catalog
+  default is unset. E3D runtime PML renders `41mm` and `50mm`. These are two
+  runtime-derived values, not persisted binary decoder disagreements.
+- `:Room` on STRU `24383/88673` and `24383/97697`: E3D returns the different
+  heading `:Roomfloor unset` for `Q :Room`. The parser now preserves that full
+  returned heading rather than incorrectly stripping the `:Room` prefix. These
+  two rows are invalid abbreviated TTY queries, not parity claims.
+
+The same vendor change closes five typed `IMPSTC` defaults (`INTEGER 0` in the
+attlib-backed layout, rendered `Undefined` by E3D) and three multi-stage E3D
+directions such as `W 5 S 0.0083 D`. Focused results were `20` TTY unit tests
+and `6` `e3d-descriptor` integration tests, all passing.

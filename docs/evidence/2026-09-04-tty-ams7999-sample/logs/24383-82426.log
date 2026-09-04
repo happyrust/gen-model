@@ -1,0 +1,46 @@
+MCP-BEGIN
+PNODE 1 of FRMWORK 1 of STRUCTURE 110 of ZONE 1 of SITE /1RX-ELECBJ
+NOUN-ALL-ATTRIBUTES-BEGIN
+PNODE 1 of FRMWORK 1 of STRUCTURE 110 of ZONE 1 of SITE /1RX-ELECBJ
+Ref =24383/82426
+Type PNOD
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name PNODE 1 of FRMWORK 1 of STRUCTURE 110 of ZONE 1 of SITE /1RX-ELECBJ
+ZZA Type
+Type PNOD
+ZZA Lock
+Lock false
+ZZA Owner
+Owner FRMWORK 1 of STRUCTURE 110 of ZONE 1 of SITE /1RX-ELECBJ
+ZZA Description
+Description unset
+ZZA Function
+Function unset
+ZZA Purpose
+Purpose unset
+ZZA Number
+Number 0
+ZZA Nposition
+Nposition E 365mm N 0mm D 340mm
+ZZA Level
+Level 0 10
+ZZA Fixity
+Fixity FREE
+ZZA Orrf
+Orrf Nulref
+ZZA Tmrref
+Tmrref Nulref
+ZZA RepCount
+RepCount 0
+ZZA :BNAME
+:BNAME Nulref
+ZZA :BNAME
+:BNAME Nulref
+ZZA :MDSConfigA
+:MDSConfigA unset
+ZZA :MDSConfigB
+:MDSConfigB unset
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END

@@ -1,0 +1,54 @@
+MCP-BEGIN
+SCOJOINT 1 of SNODE 2 of SCTN /1RB05-MSUP-E0013-V1
+NOUN-ALL-ATTRIBUTES-BEGIN
+SCOJOINT 1 of SNODE 2 of SCTN /1RB05-MSUP-E0013-V1
+Ref =24383/94226
+Type SCOJ
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name SCOJOINT 1 of SNODE 2 of SCTN /1RB05-MSUP-E0013-V1
+ZZA Type
+Type SCOJ
+ZZA Lock
+Lock false
+ZZA Owner
+Owner SNODE 2 of SCTN /1RB05-MSUP-E0013-V1
+ZZA Description
+Description unset
+ZZA Function
+Function unset
+ZZA Gtype
+Gtype unset
+ZZA Number
+Number 0
+ZZA Desparam
+Desparam unset
+ZZA Built
+Built false
+ZZA Shop
+Shop false
+ZZA Posline
+Posline NA
+ZZA Delposition
+Delposition E 0mm N 0mm U 0mm
+ZZA Bangle
+Bangle 0degree
+ZZA Grade
+Grade 0
+ZZA Ispec
+Ispec Nulref
+ZZA Firesistance
+Firesistance 0
+ZZA Inref
+Inref Nulref
+ZZA Spref
+Spref /ACP1000-ELEC-JT2-180
+ZZA Matref
+Matref Nulref
+ZZA Orrf
+Orrf Nulref
+ZZA Invfarray
+Invfarray unset
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END

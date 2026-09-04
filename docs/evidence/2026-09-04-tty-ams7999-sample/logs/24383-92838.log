@@ -1,0 +1,46 @@
+MCP-BEGIN
+PNODE 2 of FRMWORK /1RB04-MSUP-E0005-FRMW1
+NOUN-ALL-ATTRIBUTES-BEGIN
+PNODE 2 of FRMWORK /1RB04-MSUP-E0005-FRMW1
+Ref =24383/92838
+Type PNOD
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name PNODE 2 of FRMWORK /1RB04-MSUP-E0005-FRMW1
+ZZA Type
+Type PNOD
+ZZA Lock
+Lock false
+ZZA Owner
+Owner /1RB04-MSUP-E0005-FRMW1
+ZZA Description
+Description unset
+ZZA Function
+Function unset
+ZZA Purpose
+Purpose unset
+ZZA Number
+Number 0
+ZZA Nposition
+Nposition E 345mm N 0mm U 160mm
+ZZA Level
+Level 0 10
+ZZA Fixity
+Fixity FREE
+ZZA Orrf
+Orrf Nulref
+ZZA Tmrref
+Tmrref Nulref
+ZZA RepCount
+RepCount 0
+ZZA :BNAME
+:BNAME Nulref
+ZZA :BNAME
+:BNAME Nulref
+ZZA :MDSConfigA
+:MDSConfigA unset
+ZZA :MDSConfigB
+:MDSConfigB unset
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END
