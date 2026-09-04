@@ -205,7 +205,7 @@ impl UdaTable {
 /// this works offline. A hash with no definition keeps a `UDA:<hash>` key
 /// instead of being dropped — the async runtime path silently discarded those.
 pub fn full_attribute_view(
-    element: &parse_pdms_db::parse::EleData,
+    element: &crate::data_interface::ele_data::EleData,
     schema: &PdmsDatabaseInfo,
     uda: &UdaTable,
 ) -> NamedAttrMap {

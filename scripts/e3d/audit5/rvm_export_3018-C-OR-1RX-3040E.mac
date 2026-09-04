@@ -1,0 +1,36 @@
+$(
+------------------------------------------------------------------------
+RVM 导出（HDIR/TDIR 朝向约定 + 对齐阈值边界复核，2026-09-02）：BRAN /C-OR-1RX-3040E  (dbnum 8000, =24384/3018)
+挑它的理由：tail tube 26.4mm at 2.99deg: boundary case
+窄口径同 rvm_export_1rcv0101_b1.mac。只读：没有 SAVEWORK；不写 QUIT/FINISH——会话归 l3_suite driver。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/audit5/rvm_export_3018-C-OR-1RX-3040E.log" OVER
+$P CODEX-AUDIT5-RVM-EXPORT-ALIVE
+/C-OR-1RX-3040E
+Q CE
+Q REF
+Q NAME
+Q HPOS
+Q HDIR
+Q TPOS
+Q TDIR
+Q MEMB
+
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/rvm-audit5/3018-C-OR-1RX-3040E.rvm"
+export filenote 'audit5 3018-C-OR-1RX-3040E: tail tube 26.4mm at 2.99deg: boundary case'
+export holes on
+export autocolour displayexport on
+export repr on
+export /C-OR-1RX-3040E
+export finish
+
+$P CODEX-AUDIT5-RVM-EXPORT-DONE
+ALPHA LOG END

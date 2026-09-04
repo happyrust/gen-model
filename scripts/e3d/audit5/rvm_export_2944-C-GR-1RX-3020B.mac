@@ -1,0 +1,33 @@
+$(
+------------------------------------------------------------------------
+RVM 导出（bran-audit §5 待定项复核，2026-09-02）：BRAN /C-GR-1RX-3020B  (dbnum 8000, =24384/2944)
+挑它的理由：backtrack 180deg r=150 500mm LEAVE->TAIL
+窄口径同 rvm_export_1rcv0101_b1.mac：insu/obst off、tube on、隐含管段独立容器。
+导出是只读动作：没有 SAVEWORK，不产生新会话号。不写 QUIT/FINISH——会话归 l3_suite driver。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/audit5/rvm_export_2944-C-GR-1RX-3020B.log" OVER
+$P CODEX-AUDIT5-RVM-EXPORT-ALIVE
+/C-GR-1RX-3020B
+Q CE
+Q REF
+Q NAME
+Q MEMB
+
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/rvm-audit5/2944-C-GR-1RX-3020B.rvm"
+export filenote 'audit5 2944-C-GR-1RX-3020B: backtrack 180deg r=150 500mm LEAVE->TAIL'
+export holes on
+export autocolour displayexport on
+export repr on
+export /C-GR-1RX-3020B
+export finish
+
+$P CODEX-AUDIT5-RVM-EXPORT-DONE
+ALPHA LOG END

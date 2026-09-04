@@ -1,6 +1,6 @@
 # aios-py：aios-database 的 Python 调试绑定（maturin 构建，产物模块名 aios_db）。
 #
-# 三个自研 git 依赖必须与主 crate 的声明逐字一致（同 URL + 同 rev），根 Cargo.toml
+# 自研 git 依赖（aios_core）必须与主 crate 的声明逐字一致（同 URL + 同 rev），根 Cargo.toml
 # 的 [patch]（vendor 本地重定向）才能把整张图收敛到同一份源码。
 [package]
 name = "aios-py"
@@ -15,20 +15,15 @@ crate-type = ["cdylib"]
 
 [features]
 default = []
-# 只有直读 / 对拍入口用 old-pdms-io + old-parse-pdms-db，默认依赖图里没有它们
-# （`docs/plans/2026-09-03-old-pdms-io-retirement-inventory.md`）。aios-database 的
-# 逐会话回放入口（`IncrementPipeline::collect_changes`）也只在它的 `legacy_session_replay`
-# 后面，所以那个 feature 挂在这道门上——挂到无条件依赖上会把 pdms_io 拖进整个工作区的默认图。
-legacy_pdms_io = [
-    "dep:pdms_io",
-    "dep:parse_pdms_db",
-    "aios-database/legacy_session_replay",
-]
+# old-pdms-io 已从本 crate 整体退出（2026-09-04；此前 2026-09-03 先降为 `legacy_pdms_io` 门后的
+# 直读 / 对拍入口）。窗口语义只剩 `parse.net_window`——生产收集器 `e3d_collector` 的绑定；
+# 判据是 E3D TTY 录下的会话，不是第二套解析器。
+# old-parse-pdms-db 这一侧已经没有调用点，依赖留到 B9 与主 crate 一起摘。
+legacy_parse_pdms_db = ["dep:parse_pdms_db"]
 
 [dependencies]
 aios-database = { path = ".." }
 aios_core = { git = "https://github.com/happyrust/old-aios-core.git", rev = "4a7a00f93f3afa4069922ea52fab174cbbbddcde", default-features = false }
-pdms_io = { git = "https://github.com/happyrust/old-pdms-io.git", rev = "14e2836cbad5949f3e09365ab75c01328b1eab2e", optional = true }
 parse_pdms_db = { git = "https://github.com/happyrust/old-parse-pdms-db.git", rev = "005936a6767bd92f733aa4a7d113a07391487eef", optional = true }
 
 anyhow = "1.0.57"

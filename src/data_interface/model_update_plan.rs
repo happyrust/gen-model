@@ -3,9 +3,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use aios_core::{RefnoEnum, SUL_DB};
-use pdms_io::io::{EleOperationData, EleOperationDetail};
 use serde::{Deserialize, Serialize};
 
+use crate::data_interface::ele_ops::{EleOperationData, EleOperationDetail, ModifiedElement};
 use crate::data_interface::manual_update::{
     DeliveryUnitSummary, NetChangeDetail, NetOp, OwnerNode, merge_net_change_details,
     resolve_unit_rollup,
@@ -109,6 +109,23 @@ pub struct ModelUpdatePlan {
     /// revision，只 `UPDATE gen_root SET source_end_sesno = T`。旧恢复记录没有该字段。
     #[serde(default)]
     pub credential_advance: Vec<String>,
+    /// 规划器放弃凭证前移的原因（`credential_advance_degraded`：候选占比超阈、`unresolved`
+    /// 非空一类护栏）。此时 `credential_advance` 为空、全部持久根按过期处理；回执
+    /// （`DataBatchResult.credential_advance.degraded`）从这里取，不再从 warnings 文本反解析。
+    /// 旧恢复记录没有该字段。
+    #[serde(default)]
+    pub credential_advance_degraded: Option<String>,
+    /// 这份计划出自 `window_root_plan` 的窗口规划器（`direct_read_mode() && DESI`），
+    /// 根集来自 `enumerate_generation_roots(DbSet@T)`。
+    ///
+    /// 它决定要不要跑 old-pdms-io 的「计划目标 T 端存活复核」
+    /// （`reconcile_plan_final_presence`，spec 035 T412）：文件枚举出来的根**本身就是
+    /// T 端存活证明**，再拿老读法复核一遍是多余的。老规划器的根从 Surreal `pe_owner`
+    /// 图上溯而来，那张图是窗口之前的，所以仍要复核。
+    ///
+    /// 旧恢复记录没有该字段——反序列化成 `false`，正是老规划器的行为。
+    #[serde(default)]
+    pub window_planned: bool,
 }
 
 impl ModelUpdatePlan {
@@ -613,10 +630,7 @@ impl RoomStructuralTriggers {
 /// 只看新名会漏「改出房间」（房间名改成普通框架名，旧边该清）；只看旧名会漏
 /// 「改成房间」（普通框架改成房间名，成员该建）。关键字未配置时判不了房间性，
 /// 不触发——房间功能本身（`build_room_relations`）也依赖同一份关键字。
-fn name_change_hits_room_keyword(
-    modified: &pdms_io::io::ModifiedElement,
-    keywords: &[String],
-) -> bool {
+fn name_change_hits_room_keyword(modified: &ModifiedElement, keywords: &[String]) -> bool {
     let hits = |value: &aios_core::NamedAttrValue| -> bool {
         use aios_core::NamedAttrValue;
         let name = match value {
@@ -813,6 +827,9 @@ fn build_cata_cascade_plan(
         room_rebuild_required: false,
         room_rebuild_reason: None,
         credential_advance: Vec::new(),
+        credential_advance_degraded: None,
+        // CATA 反向级联计划走 `ref_rev` 反查，不是文件窗口枚举——存活复核照旧（T412）。
+        window_planned: false,
     }
 }
 
@@ -1003,6 +1020,10 @@ pub(crate) async fn build_model_update_plan(
         room_rebuild_required: room_rebuild_reason.is_some(),
         room_rebuild_reason,
         credential_advance: Vec::new(),
+        credential_advance_degraded: None,
+        // 这是 PE 图上溯的老规划器：它的根来自窗口**之前**的 `pe_owner`，所以
+        // `apply_one` 仍要对它跑 T 端存活复核（T412）。
+        window_planned: false,
     })
 }
 
@@ -1671,7 +1692,6 @@ mod tests {
 
     fn modified_op(refno: aios_core::RefU64, sesno: u32, attr: &str) -> EleOperationData {
         use aios_core::NamedAttrValue;
-        use pdms_io::io::ModifiedElement;
         let mut modified_attrs = std::collections::HashMap::new();
         modified_attrs.insert(
             attr.to_string(),
@@ -2065,184 +2085,11 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "legacy_session_replay")]
+    /// 会话 21 由 E3D TTY 宏产生（真实嵌套 GENSEC 新建）；TTY 做过的事就是判据。
+    /// 2026-09-04：收集改走生产入口 `collect_window`（单会话窗口，净口径与逐会话回放同解）；
+    /// old-pdms-io 回放臂已删。改口径后**未在 live 现场复跑**。
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "manual live: verifies real ProjAMS direct, transform and data-only sessions"]
-    async fn live_projams_real_attribute_sessions_plan_and_execute_distinctly() {
-        use crate::data_interface::increment_pipeline::IncrementPipeline;
-        use crate::data_interface::model_refresh::ModelRefreshPolicy;
-        use crate::data_interface::tidb_manager::AiosDBManager;
-        use std::path::PathBuf;
-
-        aios_core::init_test_surreal()
-            .await
-            .expect("connect surreal");
-        let manager = AiosDBManager::init_form_config()
-            .await
-            .expect("init manager");
-
-        let design_file = PathBuf::from(
-            std::env::var("AIOS_PROJAMS_GEOMETRY_FILE").unwrap_or_else(|_| {
-                r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into()
-            }),
-        );
-        let direct = IncrementPipeline::collect_changes(&design_file, 25..=26)
-            .expect("collect real BOX.XLEN sessions");
-        let direct_plan = build_model_update_plan(8000, 26, "DESI", &direct)
-            .await
-            .expect("build direct model plan");
-        assert_eq!(
-            direct_plan
-                .work_items
-                .iter()
-                .map(|item| (item.action, item.target_refno.as_str()))
-                .collect::<Vec<_>>(),
-            vec![(ModelWorkAction::RegenRoot, "24384/24776")]
-        );
-        ModelRefreshPolicy::generate_roots(&manager, &["24384/24776".into()])
-            .await
-            .expect("regenerate EQUI for real BOX.XLEN sessions");
-
-        let transform = IncrementPipeline::collect_changes(&design_file, 27..=28)
-            .expect("collect real FTUB.POS sessions");
-        let transform_impacts = transform
-            .iter()
-            .flat_map(|(sesno, operations)| {
-                operations.iter().map(|operation| {
-                    (
-                        *sesno,
-                        classify_operation_impact(operation),
-                        crate::data_interface::model_impact::classify_operation_effects(operation),
-                    )
-                })
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            transform_impacts
-                .iter()
-                .all(|(_, impact, _)| *impact != OperationImpact::Regen),
-            "{transform_impacts:#?}"
-        );
-        assert_eq!(
-            transform_impacts
-                .iter()
-                .filter(|(_, impact, _)| *impact == OperationImpact::TransformOnly)
-                .count(),
-            2,
-            "{transform_impacts:#?}"
-        );
-        // FTUB 是管件：属性级判定仍是纯位姿（上面两条断言），但计划层按生成根改判成
-        // 整根重生成——隐含直管段的几何是分支成员位置的函数，便宜路径算不出它
-        // （issue #5）。这里只断言动作与根的 noun，不写死根 refno：根由属主链解析，
-        // 钉死它会让这条真实会话用例绑在一次特定的建模结果上。
-        let transform_plan = build_model_update_plan(8000, 28, "DESI", &transform)
-            .await
-            .expect("build transform model plan");
-        let actions = transform_plan
-            .work_items
-            .iter()
-            .map(|item| item.action)
-            .collect::<Vec<_>>();
-        assert_eq!(
-            actions,
-            vec![ModelWorkAction::RegenRoot],
-            "管件移动必须排整根重生成，不能是 Transform: {:#?}",
-            transform_plan.work_items
-        );
-        let root = transform_plan.work_items[0].target_refno.clone();
-        assert!(
-            unit_derives_geometry_from_member_positions(&transform_plan.work_items[0].noun),
-            "生成根应当是带隐含直管段的单元: {:#?}",
-            transform_plan.work_items
-        );
-        ModelRefreshPolicy::generate_roots(&manager, &[root])
-            .await
-            .expect("regenerate the branch for real FTUB.POS sessions");
-
-        let data_file = PathBuf::from(std::env::var("AIOS_PROJAMS_DATA_ONLY_FILE").unwrap_or_else(
-            |_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7997_0001".into(),
-        ));
-        let equi_transform = IncrementPipeline::collect_changes(&data_file, 77..=80)
-            .expect("collect real EQUI.POS sessions");
-        let equi_transform_plan = build_model_update_plan(7997, 80, "DESI", &equi_transform)
-            .await
-            .expect("build EQUI transform model plan");
-        assert_eq!(
-            equi_transform_plan
-                .work_items
-                .iter()
-                .map(|item| (item.action, item.target_refno.as_str()))
-                .collect::<Vec<_>>(),
-            vec![(ModelWorkAction::Transform, "24381/100677")]
-        );
-        manager
-            .update_world_transforms(&HashSet::from([RefnoEnum::from("24381/100677")]))
-            .await
-            .expect("refresh EQUI transform for real POS sessions");
-
-        let data_only = IncrementPipeline::collect_changes(&data_file, 82..=82)
-            .expect("collect real ProjAMS NAME session");
-        let operations = data_only.get(&82).expect("sesno 82 exists");
-        assert_eq!(operations.len(), 1, "{operations:?}");
-        let operation = &operations[0];
-        assert_eq!(
-            RefnoEnum::from(operation.refno),
-            RefnoEnum::from("24381/100823")
-        );
-        let EleOperationDetail::Modified(modified) = &operation.detail else {
-            panic!("sesno 82 must contain one Modified operation: {operation:?}");
-        };
-        assert_eq!(modified.noun, "DAMP");
-        let effects = crate::data_interface::model_impact::classify_operation_effects(operation);
-        assert_eq!(effects.changed_attributes, vec!["NAME"]);
-
-        let plan = build_model_update_plan(7997, 82, "DESI", &data_only)
-            .await
-            .expect("build data-only model plan");
-        assert!(
-            plan.work_items.is_empty(),
-            "real NAME-only session must not schedule model work: {plan:?}"
-        );
-
-        let mut response = SUL_DB
-            .query(
-                "RETURN [
-                    (SELECT VALUE name FROM pe:24381_100823)[0],
-                    (SELECT VALUE applied_sesno FROM dbnum_watermark:7997)[0]
-                ];",
-            )
-            .await
-            .expect("query applied NAME session")
-            .check()
-            .expect("valid applied-session query");
-        let state: Vec<serde_json::Value> = response.take(0).expect("decode applied session");
-        assert_eq!(state[0], serde_json::json!("/1CUP002VAI_INC"));
-        assert!(
-            state[1].as_i64().is_some_and(|sesno| sesno >= 82),
-            "{state:?}"
-        );
-
-        let structural = IncrementPipeline::collect_changes(&data_file, 75..=75)
-            .expect("collect real WALL.JUSL session");
-        let structural_plan = build_model_update_plan(7997, 75, "DESI", &structural)
-            .await
-            .expect("build structural model plan");
-        assert_eq!(
-            structural_plan
-                .work_items
-                .iter()
-                .map(|item| (item.action, item.target_refno.as_str()))
-                .collect::<Vec<_>>(),
-            vec![(ModelWorkAction::RegenRoot, "24381/44413")]
-        );
-        ModelRefreshPolicy::generate_roots(&manager, &["24381/44413".into()])
-            .await
-            .expect("regenerate CWALL for real WALL.JUSL session");
-    }
-
-    #[cfg(feature = "legacy_session_replay")]
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "manual live: verifies real nested Created operations regenerate their SUPPO roots"]
+    #[ignore = "manual live: verifies real nested Created operations regenerate their SUPPO roots (collect_window 口径 2026-09-04 起，未复跑)"]
     async fn live_projams_nested_created_routes_and_generates_delivery_roots() {
         use crate::data_interface::generation_root::{
             configured_delivery_unit_types, resolve_live_element_generation_root,
@@ -2263,8 +2110,9 @@ mod tests {
                 r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into()
             }),
         );
-        let session = IncrementPipeline::collect_changes(&design_file, 21..=21)
-            .expect("collect real nested GENSEC Add session");
+        let session = IncrementPipeline::collect_window(&design_file, 21..=21)
+            .expect("collect real nested GENSEC Add session")
+            .range_eles;
         let operations = session.get(&21).expect("sesno 21 exists");
         let expected = [
             ("24384/25743", "24384/25742", "24384/25725"),

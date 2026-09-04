@@ -7,9 +7,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use aios_core::{SUL_DB, get_db_option};
-use pdms_io::sync::compress::{CompressOptions, execute_compress};
 use rumqttc::{AsyncClient, QoS};
 
+use crate::data_interface::file_sync::compress::{CompressOptions, execute_compress};
 use crate::data_interface::increment_pipeline::IncrResult;
 use crate::mqtt_service::SyncE3dFileMsg;
 

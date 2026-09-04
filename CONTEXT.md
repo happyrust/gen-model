@@ -1,6 +1,6 @@
 # 增量模型生成（Incremental Model Generation）
 
-本上下文描述：当 E3D/PDMS 设计数据发生增量变化（新增 / 修改 / 删除 / 搬迁）后，如何以**尽量小而正确**的范围重新生成受影响的三维模型，而不是全量重算。术语在此统一，实现见 `src/data_interface/` 与 `src/fast_model/`。
+本上下文描述：当 E3D/PDMS 设计数据发生增量变化（新增 / 修改 / 删除 / 搬迁）后，如何以**尽量小而正确**的范围重新生成受影响的三维模型，而不是全量重算。术语在此统一，实现见 `src/data_interface/`（数据面、队列、模型面状态）、`src/fast_model/`（发布、空间树、房间归属）与 `vendor/e3d-model`（模型面纯函数层，经 `e3d-io` 直读库文件）。
 
 > 本文件仅为词汇表（glossary），不含实现决策与流程；决策见 `docs/adr/`，规格见 `docs/specs/`，计划见 `docs/plans/`。
 
@@ -95,7 +95,7 @@ _Avoid_: 合并变化、final op
 _Avoid_: 移动、迁移
 
 **应用水位 (applied_sesno)**：
-某 `dbnum` 已整体落库的会话号上界，只承诺数据已提交，不承诺模型或房间派生已经完成。稳态暂存窗口将数据、水位与 durable 模型计划原子收口；模型/房间阶段可随后消费。数据提交失败不推进也不回退，与扫描观察值 `file_latest_sesno` 严格区分、互不替代。
+某 `dbnum` 已整体落库的会话号上界，只承诺数据已提交，不承诺模型或房间派生已经完成。稳态增量窗口的尾事务将数据、水位与模型窗口意图原子收口；模型/房间阶段可随后消费。数据提交失败不推进也不回退，与扫描观察值 `file_latest_sesno` 严格区分、互不替代。
 _Avoid_: 水位、sesno 水位（泛指时）
 
 **生成源版本 (Model Source Version)**：
@@ -119,8 +119,8 @@ _Avoid_: 假水位、虚水位、水位漂移
 _Avoid_: 重建任务、对齐批次、realign 批次
 
 **监听限定域 (Watch Scope)**：
-把增量摄入的主 DESI 数据批次收窄到指定 dbnum 的调试开关（`DbOption.toml` 的 `watch_dbnums`，命令行 `serve --watch-dbnum` 压过它）。SYS meta（SYST/DICT/GLB/GLOB）不受限；两者都没给时判定与引入前逐位相同。监听限定域不是依赖隔离域：被监听 DESI 的生成根实际引用到的 CATA 文件仍参与身份与项目优先级裁决，并以元素级引用闭包随该 DESI 窗口解析；这类部分解析不建立或推进 CATA 的完整应用水位。与**调试限定域 (Debug Scope)**（`--debug-dbnum`，只能从命令行来、额外带六个裁决点的链路追踪）是两个独立开关，与已被剥夺增量否决权的 `manual_db_nums` / `exclude_db_nums` 无关。三种「跳过」（MDB 范围判定 / 调试限定 / 监听限定）在日志、回执与 `/health` 上各有各的嗓音，不得混同。
-_Avoid_: 监听白名单、dbnum 过滤、增量范围（指 MDB 声明范围时）、watch 名单
+把增量摄入的主 DESI 数据批次收窄到指定 dbnum 的调试开关（`DbOption.toml` 的 `watch_dbnums`，命令行 `serve --watch-dbnum` 压过它）。它限制的是范围、便于调试，不是生产形态的服务边界；但**初始化启动同样受它约束**——限定时启动的数据摄入、模型凭证复核与派生工作只覆盖域内的库，未限定时启动照常覆盖全部候选库。SYS meta（SYST/DICT/GLB/GLOB）不受限；两者都没给时判定与引入前逐位相同。监听限定域不是依赖隔离域：被监听 DESI 的生成根实际引用到的 CATA 文件仍参与身份与项目优先级裁决，但 CATA 只从文件读（`ModelTarget.catalogue` 文件身份摘要与 `E3dDbResolver`），不解析进持久层。与**调试限定域 (Debug Scope)**（`--debug-dbnum`，只能从命令行来、额外带六个裁决点的链路追踪）是两个独立开关，与已被剥夺增量否决权的 `manual_db_nums` / `exclude_db_nums` 无关。三种「跳过」（MDB 范围判定 / 调试限定 / 监听限定）在日志、回执与 `/health` 上各有各的嗓音，不得混同。
+_Avoid_: 监听白名单、dbnum 过滤、增量范围（指 MDB 声明范围时）、watch 名单、服务边界（它不是）
 
 **候选库文件 (Candidate Database File)**：
 监控目录里被认可为「一个 AVEVA 库文件」的物理文件：既不在扩展名/系统文件黑名单里，文件名又合 AVEVA 库命名（三位项目前缀 + 库号[ + 四位序号]，或 `<前缀>sys/com/mis`）。判定只看名字，不读文件头。人手复制的副本（`… copy`、`…_old`、带日期后缀的备份）与正本头部一字不差，只有命名规则分得开它们；把副本当候选会让同一个 `dbnum` 拿到多个候选而整库被判「同号重复」阻断。同项目主库（无后缀）与唯一 `_NNNN` 抽取是抽取树的父层与叶子，归并成一个逻辑库，不是同号重复；多个 `_NNNN` 仍是 Duplicate。自动发现与手动扫描必须共用同一个判定。
@@ -135,7 +135,7 @@ _Avoid_: 文件事件、变更消息、notify 事件
 _Avoid_: 最近扫描文件、观察到的文件身份
 
 **待重试单元 (Pending Model Unit)**：
-持久化保存的独立模型任务：按需生成的保护记录、跨窗口派生工作与房间任务积压。稳态增量窗口内部成功完成的生成根不会成为待重试单元；只有窗口未收敛的工作随提交单元持久化。任务以动作与目标为唯一身份，新触发以 revision 收口。
+持久化保存的独立模型任务：按需生成的保护记录、跨窗口派生工作与房间任务积压。稳态增量窗口内成功完成的生成根不会成为待重试单元；只有窗口未收敛的工作随尾事务持久化。任务以动作与目标为唯一身份，新触发以 revision 收口。
 _Avoid_: 重试任务、pending task
 
 **冻结吸收 (Freeze-time Absorption)**：
@@ -179,7 +179,7 @@ _Avoid_: 模型元数据、gen_root 表（当指概念时）、模型缓存
 _Avoid_: 生成任务状态、pending 终态、实例计数
 
 **分支原子替换 (Branch-Atomic Replacement)**：
-单个 BRAN 的模型关系替换要么完整保留旧版本，要么完整提交新版本；已删除 BRAN 的新版本是空关系集，仍存在但暂时无法生成的 BRAN 继续保留旧版本。在稳态增量窗口中它是写回内部与基线/全量路径的实现单位，窗口对外的原子边界见「提交单元」。
+单个 BRAN 的模型关系替换要么完整保留旧版本，要么完整提交新版本；已删除 BRAN 的新版本是空关系集，仍存在但暂时无法生成的 BRAN 继续保留旧版本。在 e3d-model 生成路径上它以根级 CAS 发布的形态成立（ADR-056 N3）：一个根一次发布，`ensure_not_older_than_persisted` 保证旧窗口不覆盖新版本。
 _Avoid_: 生成根快照事务、先删后补
 
 **合批重生成 (Batched Root Regeneration)**：
@@ -214,49 +214,62 @@ _Avoid_: ZONE 并行、按片并行、分片并发
 维护 `inst_relate.insts_flat` 这份图遍历缓存的规则：**开销与变更量成正比，不与库规模成正比**。它取代的是不带 dbnum、谓词不可索引的全表清扫——那种形态对生成根数是平方级的，实测维护开销达到它所服务的那件事的 2.9 倍。缓存本身不容置疑（它把加载从 253.3s 压到 2.73s），被否掉的是维护方式。
 _Avoid_: 平表清扫、缓存刷新、sweep（泛指时）
 
-## 暂存与写回（Staging & Write-back）
-
-**提交单元 (Commit Unit)**：
-一次性整体写回持久层的工作范围。稳态增量窗口的提交单元 = 该窗口的解析数据 + 其全部生成根的模型产物 +（当轮算成的）房间归属；写回成功之前，持久层看不到其中任何一笔。
-_Avoid_: 批次事务、整体落盘（泛指时）
+## 数据窗口写回（Window Write-back）
 
 **稳态增量窗口 (Steady-state Increment Window)**：
-在已有基线之上按会话区间推进的常规数据批次（dbnum × 会话区间），是暂存与整窗口写回的适用范围；基线 / 冷启动 / 全量生成路径豁免暂存。
-_Avoid_: 增量批次（泛指时）
+在已有基线之上按会话区间推进的常规数据批次（dbnum × 会话区间）；它走数据窗口直写，也是模型凭证前移与模型窗口意图的适用范围。基线 / 冷启动 / 全量生成路径不是稳态窗口（见「分块解析基线」）。
+_Avoid_: 增量批次（泛指时）、暂存窗口
 
-**暂存库 (Staging Database)**：
-常驻内存数据库实例中按提交单元建立的独立 database；承载该单元的暂存工作集。批内生成失败可在原工作集重试，跨批次或进程崩溃后重新构造完整窗口；提交或废弃后整库删除。
-_Avoid_: 内存库（泛指）、镜像库
+**冻结源 (Frozen Source)**：
+一次收集冻住的「哪个文件、哪一代、哪个会话」（`data_interface::frozen_source::FrozenSource`）：稳定文件身份（Windows 卷序列号 + 文件索引 / Unix dev + inode）、`dbnum` 与库类型、冻住的目标会话与打开长度。收集与持久化之间它必须还是同一个——同文件追加接受，原子替换 / dbnum 漂移 / 会话或长度回退一律拒绝；纯数据窗口（零模型候选）同样过这道门。它是 e3d-io 底座上的商品，2026-09-03 起取代 old-pdms-io 的 `SnapshotToken` / `DabaconSnapshot`。
+_Avoid_: 快照 token、冻结快照（指 `DabaconSnapshot` 时）、文件指纹（那是 `direct_store::FileIdentity` 的 len+mtime）
 
-**暂存工作集 (Staged Working Set)**：
-一个提交单元在暂存库里的全部数据：按需解析出的设计 / 目录数据（含 CATA 引用闭包与祖先链）、按工作项预载的既有模型产物行、本单元新产出的产物。数据来源是增量解析与其 CATA 依赖解析，不从持久层复制设计数据。
-_Avoid_: 工作集缓存、快照
+**净窗口收集器 (Net Window Collector)**：
+数据面稳态增量窗口**唯一**的收集器（`data_interface::e3d_collector`，2026-09-03 起为 e3d-io 底座）：`IndexDiff(base@S, target@T)` 给每个 refno 的净三态，两端记录经 `to_named_attmap` 定形后 `diff_ele_data` 合成，每 refno 恰一条 `Add / Deleted / Modified`，挂 last-touch 会话。同一 refno 换了 noun 按 `Add` 写终稿并显式删旧 noun 行（`RetiredTypeRow`）；`shape_conflicts` 非空整窗阻断；不做任何成员关系仲裁——两根索引差分本身就是终态。old-pdms-io 的同名实现 2026-09-04 已整体删除（连 `legacy_pdms_io` 门都没了）；收集器对不对的**判据是 E3D TTY**——TTY 宏录下的会话链（`db8000_session_pairs` 夹具、issue-019 快照）与 TTY 现场往返（`Test-TtyNetWindow.ps1` / `verify_db8000_bran_window.ps1`），`shadow_collector_parity` 的 e3d-model L2 臂只是两条 e3d-io 合成路径互查，不是判据。
+_Avoid_: 会话回放（`collect_changes`，已删）、拿第二套解析器当对拍参照、`net_window`（指 old-pdms-io 模块时）、成员补删
 
-**语句日志 (Statement Journal)**：
-提交单元内按执行顺序累积的全部持久层写语句。写回 = 按原序分块事务重放，水位收口排在最后一个尾事务；任何一块失败整单元不生效，按窗口幂等重放。
-_Avoid_: redo log、写缓冲
+**数据窗口直写 (Direct Window Write-back)**：
+稳态增量窗口唯一的数据写回路径（ADR-056）：`persist_latest_main_data` 按 TX_CHUNK 分块事务写属性行（幂等 UPSERT / 先删后插 / 软删 UPDATE）→ `invalidate_caches` → `maintain_reverse_index`（失败入补偿队列）→ 窗口语句批 → `finalize_attempt` 尾事务最后推进应用水位。任一块失败水位不动、整窗口按同一区间幂等重放；非水位读者可见秒级中间态，以水位为准的读者把「半个写回」视为不存在。不经任何暂存介质。
+_Avoid_: 暂存写回、journal 重放、应急直写（它已是唯一路径）、direct 模式（那是 `AIOS_DATA_READ_MODE=direct` 的生成读侧，见 ADR-053）
 
-**水位门控写回 (Watermark-gated Write-back)**：
-写回的原子性口径：重放过程可中断，但应用水位只在全部块成功后的尾事务里推进；以水位为准的读者把「半个写回」视为不存在。
-_Avoid_: 硬原子写回、单事务写回
+**模型凭证前移 (Credential Advance)**：
+数据窗口 S→T 提交后，对 e3d-model `plan_update(S→T)` 判定**未被触到**、已安定且落后于 T 的生成根，一条语句批量把 `gen_root.source_end_sesno` 推到 T（行上记 `credential_advanced_from`），不重生成、不动几何 / manifest / revision。护栏：候选数超过索引键数的 30%，或 `plan_update` 报 `unresolved` 非空，即整窗放弃前移、全部根照旧过期，回执记 `credential_advance_degraded`。
+_Avoid_: 凭证刷新、水位前移、模型水位、跳过生成
+
+**模型窗口意图 (Model Window Intent)**：
+数据窗口尾事务与应用水位同事务写下的模型侧工作声明：本窗口受影响根集（`plan_update` 经 `touches_roots` 判定，含搬迁两端根与被删根的 `DeleteCleanup`）及其 revision，随尾事务 upsert 进 `model_update_pending`（进程本地账本，ADR-050）。它只说「这一窗要生成什么」，不承诺已生成；eager 生成的范围就是它，其余根前移凭证后懒生成、等按需 `ensure`（ADR-056 D9）。
+_Avoid_: 模型任务（泛指时）、全库过期入队、模型计划（当指 e3d-model 的 `UpdatePlan` 时）
 
 **提交后收敛 (Post-commit Reconciliation)**：
 水位与派生意图已经共同提交，但全局空间状态尚未持久化完成的过渡阶段。该阶段可跨重启恢复，并在完成前阻止下一数据批次进入。
 _Avoid_: 普通积压、空闲轮副作用
 
-**commit-time-only 语句 (Commit-time-only Statement)**：
-只在写回时对持久层全库执行、不在暂存库执行（或仅对工作集行执行）的全局扫描 / 修补语句；暂存库只需对本单元的读正确，终态正确性由写回时的全库执行保证。
-_Avoid_: 延迟语句、异步语句
-
 **窗口阻断 (Window Block)**：
-稳态增量窗口内任一生成根重试穷尽仍失败时的终态：整个 `dbnum` 的水位停止推进、该窗口在持久层零痕迹、告警常驻；唯一解除方式是修复源数据后重存，新会话并入同一窗口重算。不存在自动或人工的降级提交。
-_Avoid_: 死信降级、跳过坏根
+稳态增量窗口**数据侧**确定性失败的终态（收集器报错、写回被持久层确定性拒绝）：该 `dbnum` 的水位停止推进、告警常驻，直到源数据或持久层修复后按同一区间重放。模型生成失败**不阻断窗口**（ADR-056 D1）：根级失败进 `model_update_pending` 重试账，水位照常推进。
+_Avoid_: 死信降级、跳过坏根、模型阻断
+
+**pe_owner 边 (Owner Edge)**：
+父子关系在库里的唯一形状：`{ id: pe_owner:[owner, 槽位], in: child, out: owner }`（`ele_ops::pe_owner_edge`）。方向以读侧为准——rs-core `{owner}<-pe_owner` 取 `in` 当 children、`->pe_owner.out` 取 owner，唯一索引 `n` 也建在 `(in, out)` 上。全仓只此一个写法：基线路 2026-09-04 换成 e3d-io 退化窗口后经 `ElementRows` 调同一个函数，`cata_closure` 的成员块渲染与之逐字节同形（有源码钉对比两者的 INSERT）。2026-09-04 之前增量路的终态渲染器写反成 `in = owner, out = child`，写出的子树在树面板上读不到、`DELETE {pe}->pe_owner` 清的也不是自己的 children 边；受影响的库靠 `POST /model/rebuild` 重建，不手改数据。
+_Avoid_: 父子边（泛指时）、`owner` 字段（`pe` 行上没有这个字段）、按 `out` 取 children
 
 **分块解析基线 (Chunked Baseline Parsing)**：
-基线解析按遍历分批装入 `mem://` 实例、整批写回后释放，而不是把冻结前缀整个读成一个 `Vec<u8>` 常驻内存。它只取「实例 + 读路由」这一半（`init_staging_schema` + `StagingReadContext` + `with_staging_reads`），**不走提交协议**——基线不开窗口，窗口买的是原子提交与崩溃恢复，不是内存有界。
-_Avoid_: 暂存窗口（基线不开窗口）、流式解析、按需解析（那是元件库的）
+基线是 e3d-io 的**退化窗口**（base 为空、target = 冻结目标会话），不是第二条解析路：`e3d_collector::stream_baseline` 枚举目标索引，每 `sync_chunk_size`（默认 10 万）个元素交一块给 `versioned_db::baseline::render_baseline_batches` 渲成写者消息，经有界队列交单写者 `INSERT IGNORE` 批量落库；块交出去就释放，峰值内存随块不随库。行形状（`pe` / `ATT_<noun>` / `ATT_UDA` / `pe_owner`）与增量路共用 `ElementRows`，语句动词沿用 legacy 基线的 `INSERT IGNORE`——`manual_update` 的父层补缺靠「已有行赢」保住叶子 extract 里正在改的版本，换 `UPSERT` 会改掉这条语义。它**不走提交协议**：基线不开窗口，窗口买的是原子提交与崩溃恢复，不是内存有界。2026-09-04 随 `parse_pdms_db` 退役消失的三件事：把冻结前缀整个读成一个 `Vec<u8>`（`FrozenSource::read_frozen_bytes`）、`mem://` 暂存实例与它的读路由、`member_prune` 事后裁成员（目标索引差分本身就是终态）；`pe.sesno` 从链头 0 变成元素真实的 last-touch 会话。
+_Avoid_: 暂存窗口（基线不开窗口）、全量解析 / `DbBasicData`（随 `parse_pdms_db` 退役）、按需解析（那是元件库的）
 
-## 按需解析元件库（On-demand CATA）
+### 已退役词条（retired，ADR-056）
+
+以下词条只为读 2026-08-05 ～ 2026-09-02 之间的 ADR / 计划 / 证据时对照使用，**现行代码与文档不得再用**：
+
+- **提交单元 (Commit Unit)**、**暂存库 (Staging Database)**、**暂存工作集 (Staged Working Set)**、**语句日志 (Statement Journal)**、**水位门控写回 (Watermark-gated Write-back)**、**commit-time-only 语句 (Commit-time-only Statement)**——ADR-017 kv-mem 暂存窗口的构件，随暂存层退役；现行口径见上方「数据窗口直写」。
+- **窗口阻断的模型侧含义**（生成根重试穷尽 → 整窗口水位停止、持久层零痕迹）——被 ADR-056 D1 取代，模型失败与水位解耦。
+- **成员关系仲裁补删 (ADR-036 Membership Reconciliation)**、**幽灵新增丢弃**——old-pdms-io 净窗口收集器在索引差分之外按成员表补判的删除 / 丢弃；2026-09-03 收集器换成 e3d-io 底座后随之退役（两根索引差分即终态，`membership_deleted` 恒 0）。现行口径见上方「净窗口收集器」。
+
+## 按需解析元件库（On-demand CATA）——已整章退役（retired，ADR-058 D1）
+
+> CATA 不再解析进持久层：模型面经 `E3dDbResolver` 从文件读，级联判据用 CATA 文件的会话索引差分加
+> `ref_rev` 反查。本章六个词条只为读 2026-07-27 ～ 2026-09-03 之间的 ADR / 计划 / 证据时对照使用，
+> **现行代码与文档不得再用**。CATA 的**文件身份裁决**（项目优先级、同号选主、`CataDbLocator`）不在退役之列
+> ——那是 `E3dDbResolver` 的输入，不是解析。
 
 **按需解析（元件库 / CATA）(On-demand CATA Parsing)**：
 只解析「本次生成真正引用到」的元件库元素，而非整库解析 CATA；与「整库解析」相对。
@@ -375,12 +388,26 @@ _Avoid_: 宏日志（泛指时）、输出文件
 _Avoid_: 数据校验（泛指时）、一致性检查（泛指时）
 # 严格初始化阶段（Strict Initialization Phase）
 
-无监听限定域时，增量初始化与同轮稳态更新的固定顺序是 Meta（SYS/DICT）→ Catalogue
-（CATA）→ Design（DESI）→ Model。监听限定域非空时，不建立全量 Catalogue 批次，顺序是
-Meta → Design（内部先完成该窗口所需的 CATA 引用闭包）→ Model。阶段完成以 manifest、
-水位和数据支撑为准，不以队列暂时为空为准。
+初始化不是一条链，是**两条并行链**：模型面在文件身份解析完成后即可开工，数据面走
+Meta（SYS/DICT）→ Design（DESI）。Catalogue 阶段已取消——CATA 不入持久层，模型面从文件读；
+模型面也不再等 `data_ready`，串行那一版的唯一理由是「生成器要读 `pe`」，那个理由已经不在了。
+房间仍排在模型之后。阶段完成以 manifest、水位和数据支撑为准，不以队列暂时为空为准。
 
-_Avoid_: 类型排序、启动排序、初始化优先级（这些说法没有表达阶段屏障与失败阻断）。
+实施状态（2026-09-03）：**门的部分已落地**（`model_generation_allowed` 不再看 `data_ready`，
+`install_manifest` 装好清单即开模型门，启动模型复核排在数据等待之前）；**尚未落地**的是
+`Catalogue` 相删除 / CATA 退出持久层（refactor plan S3）与第二车道——worker 仍是单消费者，
+模型积压只在数据队列空隙消化（`DataQueued` 让位），字面意义的双链同时跑挂 D10-B。
+
+_Avoid_: 类型排序、启动排序、初始化优先级（这些说法没有表达阶段屏障与失败阻断）、
+Catalogue 阶段（已取消）、Meta → CATA → DESI → Model（已退役的五段顺序）。
+
+# 启动退化窗口（Startup Degenerate Window）
+
+启动时对一个库做的一次窗口选根：左端取该库生成根凭证的下限，右端取文件最新会话，其余与稳态增量窗口
+共用同一套选根、分桶与护栏——**启动没有自己的选根判据**。它只产生模型侧工作，不摄入数据、不推进应用水位；
+凭证已经不早于文件最新的库连窗都不开。
+
+_Avoid_: 启动复核、覆盖扫描、模型完整性扫描（这些说法没有表达它就是一次窗口）。
 
 # 阶段纪元（Phase Epoch）
 
@@ -397,14 +424,14 @@ _Avoid_: 队列空、初始化尝试完成。
 
 # 提交回执 (Commit Receipt)
 
-暂存窗口稳定生成的 `commit_token`。尾事务以它为幂等保护，并与水位写入同一事务；客户端
+稳态增量窗口稳定生成的 `commit_token`。尾事务以它为幂等保护，并与水位写入同一事务；客户端
 超时时用该值区分“服务端已提交”和“尚未提交”。
 
 _Avoid_: 请求 ID、重试 ID。
 
 # 依赖缓存上下文 (Dependency Cache Context)
 
-暂存 CATA 闭包缓存的显式来源边界：源 dbnum 与本窗口实际 `effective_end_sesno`。不得以文件
+窗口内 CATA 闭包缓存的显式来源边界：源 dbnum 与本窗口实际 `effective_end_sesno`。不得以文件
 最新会话或活动窗口全局状态代替。
 
 _Avoid_: 最新会话缓存、活动窗口缓存。

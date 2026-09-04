@@ -59,16 +59,15 @@ aios_db.set_config(str(repo / "DbOption"))     # ① 永远第一句
 f = r"D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams7997_0001"
 aios_db.parse.header(f)                        # 头/最新会话
 aios_db.parse.sessions(f)                      # 会话页列表
-aios_db.parse.collect_changes(f, 100, 102, detail=True)   # LEGACY 逐会话回放（aios-py 显式 feature；对拍/取证）
-aios_db.parse.net_changes(f, 100, 102, with_noun=True)    # 窗口净增删改（会话索引差分，
-                                               # 不逐会话解析、与会话数解耦；对拍脚本
-                                               # 见 testbed/net_changes_probe.py）
-aios_db.parse.net_window(f, 100, 102, detail=True)        # 正式口径：语义净窗口（两端
+aios_db.parse.net_window(f, 100, 102, detail=True)        # 唯一的窗口口径：语义净窗口（两端
                                                # 属性 diff，过滤原样重写；生产预览/
-                                               # 执行同实现）
-aios_db.parse.element(f, "24381_100677")       # 单元素属性（文件直读）
-aios_db.parse.element(f, "24381_100677", sesno=97)        # 历史版本
-aios_db.parse.noun_dict(r"D:/AVEVA/Everything3D2.10/attlib.dat")  # noun 能力矩阵
+                                               # 执行同实现，e3d-io 底座）
+aios_db.parse.element(f, "24381_100677")       # 单元素持久属性（e3d-io 直读，同收集器读法）
+aios_db.parse.element(f, "24381_100677", sesno=97)        # 钉在会话 97 的历史版本
+# old-pdms-io 底座的 collect_changes / net_changes / attmap / subtree / generate_* /
+# noun_dict 2026-09-04 已随 old-pdms-io 一起删除。窗口对不对，判据是 E3D TTY 录下的会话
+# （scripts/e3d/Test-TtyNetWindow.ps1、tests/fixtures/issues/issue-019-*），不是第二套解析器；
+# 子树 / 合并视图走 web-service 的 direct 读 API（docs/plans/direct-dbelement-read-api.md）。
 
 # ── 连接层：只读（服务可以在跑）────────────────────────────────────
 aios_db.connect(cwd=str(repo))                 # cwd=仓库根（resource/surreal 按 CWD 找）
@@ -122,9 +121,8 @@ for ev in c.watch_tasks():        # WebSocket 任务事件（需 pip install web
 
 | 脚本 | 用途 |
 |---|---|
-| `scripts/smoke_m1..m5.py` | **历史验收记录，不可复跑**——钉在 8009 正式库 + `D:/AVEVA/...` 真实工程上，那个数据目录已退役不修。等价物见各脚本头注（多数已被 `pytest` 两档覆盖；`parse.noun_dict` 例外，仍需手跑 m4） |
-| `scripts/demo_noun_caps.py` | 示范：noun 能力矩阵（替代 `gm_noun_caps_probe.py`） |
-| `scripts/demo_element_diff.py` | 示范：单元素「文件 vs 库」一致性 + 历史回放 |
+| `scripts/smoke_m1..m5.py` | **历史验收记录，不可复跑**——钉在 8009 正式库 + `D:/AVEVA/...` 真实工程上，那个数据目录已退役不修。等价物见各脚本头注（已被 `pytest` 两档覆盖）。2026-09-04 起窗口一律 `parse.net_window`，`parse.element` 为 e3d-io 底座；`demo_noun_caps.py`（`parse.noun_dict`，old-parse-pdms-db 字典）与 `testbed/net_changes_probe.py`（old-pdms-io 两口径对拍）已随 old-pdms-io 删除 |
+| `scripts/demo_element_diff.py` | 示范：单元素「文件 vs 库」一致性 + 净窗口内的变化 |
 | `scripts/demo_export_obj.py` | 示范：按名字定位构件并导出 OBJ 目视 |
 | `scripts/baseline_with_cata.py` | 基线一个 DESI 库；CATA 默认按需读取，`--eager` 才整库预热 |
 | `testbed/run_full_loop.py` | 沙箱全链路：解析 → 基线 → 生成 → 导出 → 房间收尾（见 `testbed/README.md`） |
@@ -177,7 +175,7 @@ v_port=8071）；`full_init` 拿的是 testbed 项目副本的锁，测试期间
   批次闭环那样自动收尾提交后副作用——收工前依次调 `incr.drain_side_effects()`
   与 `spatial.reconcile()`（`execute_manual` 的队列闭环内置这些，无需手调）。
 - `db.query` 返回干净 JSON（`Thing` 转简单形态），与 HTTP API 字段同源。
-- `parse.element` 是原始解析（不处理 UDA）；`name` 字段以文件内记录为准，可能为空。
+- `parse.element` 读的是文件里真存了的持久属性（e3d-io 直读，不补模板默认值）；`sesno` 字段是这次读取钉住的会话，`name` 以文件内记录为准，可能为空。
 - SurrealDB 服务端必须用仓库自带的 fork 2.1.4（`scripts/Start-Surreal8009.ps1`），
   **不要**用 PATH 上 cargo install 的 3.x 打开数据目录——它的 RocksDB 会把 SST
   升级到旧版读不回的 format_version（见脚本头注释）。

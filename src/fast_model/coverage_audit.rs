@@ -50,8 +50,8 @@ fn uncovered_nouns() -> &'static [String] {
     static UNCOVERED: OnceLock<Vec<String>> = OnceLock::new();
     UNCOVERED
         .get_or_init(|| {
-            let clf = parse_pdms_db::dict::default_noun_classifier();
-            parse_pdms_db::dict::uncovered_geometry_nouns(clf)
+            let clf = crate::noun_dict::default_noun_classifier();
+            crate::noun_dict::uncovered_geometry_nouns(clf)
                 .into_iter()
                 .collect()
         })

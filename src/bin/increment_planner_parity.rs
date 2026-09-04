@@ -36,6 +36,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use aios_core::{RefU64, RefnoEnum};
+use aios_database::data_interface::ele_ops::{EleOperationData, EleOperationDetail};
 use aios_database::data_interface::generation_root::resolve_delivery_unit_types;
 use aios_database::data_interface::increment_pipeline::IncrementPipeline;
 use aios_database::data_interface::manual_update::{
@@ -54,7 +55,6 @@ use e3d_model::category::{is_derived_unit, is_model_unit};
 use e3d_model::element_diff::diff_element;
 use e3d_model::increment::{collect_window, plan_update};
 use e3d_model::ledger::ChangeKind;
-use pdms_io::io::{EleOperationData, EleOperationDetail};
 use serde::Serialize;
 
 const DEFAULT_ATTLIB: &str = r"E:\reverse\e3d\shadow_e3d31_aps_all\attlib.dat";
@@ -95,66 +95,10 @@ struct Args {
     /// 逐条打印两侧的原始变更（G 的操作流 / E 的索引候选 + 两端存在性），超过该条数则省略。
     #[arg(long, default_value_t = 60)]
     dump_changes_up_to: usize,
-    /// 对指定 refno（逗号分隔 `a/b`）做两读法交叉核对：e3d-io 与 old-pdms-io 各自在
-    /// base / target / 最新会话上能不能点查到它。给 L1 分歧裁决用。
-    #[arg(long)]
-    probe: Option<String>,
 }
 
-/// 两读法交叉核对：同一个 refno 在同一文件、同一会话上，e3d-io 与 old-pdms-io 各说什么。
-fn probe_readers(
-    db_file: &Path,
-    base: u32,
-    target: u32,
-    refnos: &[RefnoEnum],
-    base_graph: &IoGraph,
-    target_graph: &IoGraph,
-) -> anyhow::Result<()> {
-    let mut io = pdms_io::io::PdmsIO::new("", db_file, true);
-    io.open()
-        .map_err(|e| anyhow::anyhow!("old-pdms-io 打开失败: {e}"))?;
-    let latest = io.get_latest_sesno()?;
-    println!("== probe == 文件最新会话 {latest}；base={base} target={target}");
-    for &refno in refnos {
-        let raw = refno.refno();
-        let e_base = base_graph.node(refno);
-        let e_target = target_graph.node(refno);
-        let fmt = |node: &Option<OwnerNode>| match node {
-            Some(n) => format!(
-                "{}(owner={})",
-                n.noun,
-                n.owner
-                    .map(|o| o.to_pdms_str())
-                    .unwrap_or_else(|| "-".into())
-            ),
-            None => "absent".into(),
-        };
-        let p_base = io
-            .search_latest_refno(raw, Some(base))
-            .map(|(s, off)| format!("ses{s}@{off:#x}"));
-        let p_target = io
-            .search_latest_refno(raw, Some(target))
-            .map(|(s, off)| format!("ses{s}@{off:#x}"));
-        let p_latest = io
-            .search_latest_refno(raw, None)
-            .map(|(s, off)| format!("ses{s}@{off:#x}"));
-        let p_noun = io
-            .auto_get_raw_element(raw)
-            .map(|ele| ele.att_map().get_type())
-            .unwrap_or_else(|e| format!("err:{e}"));
-        println!(
-            "  {:<14} e3d-io: base={} target={} | old-pdms-io: base={} target={} latest={} noun@latest={}",
-            refno.to_pdms_str(),
-            fmt(&e_base),
-            fmt(&e_target),
-            p_base.unwrap_or_else(|| "absent".into()),
-            p_target.unwrap_or_else(|| "absent".into()),
-            p_latest.unwrap_or_else(|| "absent".into()),
-            p_noun
-        );
-    }
-    Ok(())
-}
+// `--probe`（e3d-io 与 old-pdms-io 两读法交叉点查）2026-09-04 随 old-pdms-io 一起删了：
+// L1 分歧的裁决人从此是 E3D TTY（`Q ATT` / `Q MEMBERS` 现场读数），不是另一套解析器。
 
 // ---------------------------------------------------------------------------
 // refno 互转：gen-model 用 aios_core::RefnoEnum，e3d 栈用 e3d_io::RefNo。
@@ -1030,9 +974,9 @@ fn explain_only_e3d(unit: &UnitAttribution, gside: &GenSide, e3d: &E3dSide) -> S
         // 级联源是 `OpaqueRecordChange`（记录字节变了、L2 逐属性 / 成员表比不出差别）时
         // 单列：这不是位姿 / 改挂的世界系重建，是 E 的保守级联；同一窗 G 的收集器按
         // 解析后内容判「原样重写跳过」、0 根，是 G 对 E 多算（db8000 净空窗 266→271）。
-        let opaque_source = refnos_of(&unit.refnos)
-            .into_iter()
-            .any(|r| e3d.opaque_refnos.contains(&r) && e3d.cascade_sources.iter().any(|(s, _)| *s == r));
+        let opaque_source = refnos_of(&unit.refnos).into_iter().any(|r| {
+            e3d.opaque_refnos.contains(&r) && e3d.cascade_sources.iter().any(|(s, _)| *s == r)
+        });
         if opaque_source {
             return "E_opaque_cascade(容器记录字节变了但成员表/属性逐项相等，E 保守级联整棵子树；G 按解析后内容判无变化)".into();
         }
@@ -1166,22 +1110,6 @@ fn main() -> anyhow::Result<()> {
     )?;
     let base_graph = IoGraph::new(base_set.clone());
     let target_graph = IoGraph::new(target_set.clone());
-
-    if let Some(list) = &args.probe {
-        let refnos: Vec<RefnoEnum> = list
-            .split(',')
-            .filter_map(parse_pdms)
-            .map(to_enum)
-            .collect();
-        probe_readers(
-            &args.db_file,
-            args.base,
-            args.target,
-            &refnos,
-            &base_graph,
-            &target_graph,
-        )?;
-    }
 
     let gside = gen_model_side(
         &args.db_file,
@@ -1441,7 +1369,10 @@ fn main() -> anyhow::Result<()> {
         };
         *summary
             .reasons
-            .entry(format!("over_coverage/{}", reason.split('(').next().unwrap_or(&reason)))
+            .entry(format!(
+                "over_coverage/{}",
+                reason.split('(').next().unwrap_or(&reason)
+            ))
             .or_default() += 1;
         summary.over_covered_roots += 1;
         summary.over_coverage_units += excess;
@@ -1481,7 +1412,14 @@ fn main() -> anyhow::Result<()> {
     for r in over_coverage.iter().take(args.samples) {
         println!(
             "  {} ({}) [{}] delivery_unit={} covered_E={} subtree_units={} excess={} reason={}",
-            r.root, r.noun, r.kind, r.is_delivery_unit, r.e3d_units_covered, r.subtree_units, r.excess, r.reason
+            r.root,
+            r.noun,
+            r.kind,
+            r.is_delivery_unit,
+            r.e3d_units_covered,
+            r.subtree_units,
+            r.excess,
+            r.reason
         );
         for t in r.gen_model_tags.iter().take(3) {
             println!("      G  {t}");

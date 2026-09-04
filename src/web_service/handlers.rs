@@ -237,7 +237,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     // degraded_sections，绝不让任何一项把整个端点拖住。
     let mut degraded: Vec<&'static str> = Vec::new();
     let window_blocks = or_degraded(
-        "staging_window_blocks",
+        "window_blocks",
         within_health_budget(crate::data_interface::staging::attempts::load_window_blocks())
             .await
             .and_then(Result::ok),
@@ -366,7 +366,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "auto_work_armed": crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed(),
         "increment_mode": crate::data_interface::batch_worker::increment_mode(),
         "initialization": crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot(),
-        "worker_alive": if crate::options::direct_read_mode() { serde_json::Value::Null } else { json!(worker_alive) },
+        // direct 形态自 2026-09-02 起也起 worker（只不起 watcher），这里一律报真值。
+        // 客户端（plant-ui M1）把 `data_read_mode == "direct"` 且本字段为 `null` 判成
+        // 「服务不消化执行请求」并灰掉执行入口——老版本服务端就是那个形状。
+        "worker_alive": worker_alive,
         "worker_idle_secs": worker_idle_secs,
         // 数据批次内部最昂贵、过去完全不可见的 CATA 依赖阶段。字段为空表示当前
         // 没有依赖闭包在跑；非空时携带任务、文件、计数与 300s 停滞截止时间。
@@ -397,10 +400,15 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "runtime_lag": crate::runtime_lag::snapshot(),
         "spatial_serial": crate::fast_model::spatial_state::spatial_serial_snapshot(),
         "sul_db": sul_db,
-        // 数据侧确定性失败的终态（attempts.rs `window_block`）。kv-mem 暂存窗口退役
-        // （ADR-056 P1）后 `staging_windows` / `staging_commit` 两个 gauge 不再有来源，
-        // 已摘；这一键 P3 随文件搬家改名 `window_blocks`。
-        "staging_window_blocks": window_blocks,
+        // 数据侧确定性失败的终态（attempts.rs `window_block`），**跨重启活着**。
+        // kv-mem 暂存窗口退役（ADR-056 P1）后 `staging_windows` / `staging_commit`
+        // 两个 gauge 不再有来源，已摘；这一键随之从 `staging_window_blocks` 改名
+        // （spec 035 T301）——它记的是数据窗口直写路径上的确定性失败，跟暂存没关系，
+        // 顶着旧名字会让人以为暂存窗口还在。
+        //
+        // ADR-056 D1 要求原始错误可见：每条带 `reason` 原话与 `bad_roots`，面板把它
+        // 升成数据面独立一级判决，不再埋在别的卡的尾巴里。
+        "window_blocks": window_blocks,
         "spatial_reconcile": spatial_reconcile,
         // 可 drain 副作用队列（SystDerived / RefRevMaintain）的待处理/死信计数
         // （P2-4）。到顶死信此前只在库里、/health 看不见，也没有复活出口——现在
@@ -1542,6 +1550,34 @@ mod tests {
     /// 分项全是裸 await，SDK 把它们挂在自动重连上永不返回，于是整个端点跟着库
     /// 一起没了声音——而它本该正是那一刻唯一还答得出话的地方：`worker_alive`、
     /// `worker_idle_secs`、队列姿态、断连账本全在进程内，一个都不需要库。
+    /// `/health.worker_alive` 在 direct 形态下也报真值（2026-09-02 起 direct 也起 worker）。
+    /// 此前 direct 下恒为 `null`，plant-ui 据此把「direct 且 worker_alive 为空」判成
+    /// 「服务不消化执行请求」——那是老版本服务端的形状，新版本不许再造出来。
+    #[test]
+    fn health_reports_worker_liveness_in_every_read_mode() {
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn health(")
+            .expect("health handler must exist")
+            .1
+            .split_once("pub async fn trace(")
+            .expect("health 之后是 trace")
+            .0;
+        let at = body
+            .find("\"worker_alive\":")
+            .expect("health 必须暴露 worker_alive");
+        let line_end = body[at..].find('\n').map(|n| at + n).unwrap_or(body.len());
+        let line = &body[at..line_end];
+        assert!(
+            !line.contains("direct_read_mode") && !line.contains("Value::Null"),
+            "worker_alive 不许再按读取模式置空: {line}"
+        );
+        assert!(
+            body.contains("\"data_read_mode\":"),
+            "读取模式仍要单独暴露，客户端靠它分辨老服务端"
+        );
+    }
+
     #[test]
     fn every_health_db_section_runs_on_a_budget() {
         let source = include_str!("handlers.rs");

@@ -93,6 +93,6 @@ TUBI 本身不是独立最小交付单元（`BRAN` 下的 `TUBI`/`FTUB` 归一�
 
 ## 关联
 
-- [`../../issues/ISSUE-001-TUBI-inst-relate-missing.md`](../../issues/ISSUE-001-TUBI-inst-relate-missing.md) · `TUBI_inst_relate修复说明.md`
+- [`../../issues/ISSUE-001-TUBI-inst-relate-missing.md`](../../issues/ISSUE-001-TUBI-inst-relate-missing.md)（原根目录 `TUBI_inst_relate修复说明.md` 已随旧生成器文档清理）
 - 案例 [04 生成根归一](case-04-generation-root-must-be-one-rule.md)（TUBI 是字典级伪类型，不做交付单元）
 - 案例 [08](case-08-deleted-element-orphan-geometry.md)、[09](case-09-cascade-delete-transaction.md)（清理为什么依赖 `inst_relate`）

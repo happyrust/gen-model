@@ -22,11 +22,10 @@ use indexmap::{IndexMap, IndexSet};
 use itertools::Itertools;
 use notify::{Config, PollWatcher, RecursiveMode, Watcher};
 
-// PDMS相关模块导入
-use parse_pdms_db::parse::{DbBasicInfo, parse_file_basic_info};
-use pdms_io::defines::DbPageBasicInfo;
-use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
-use pdms_io::watch::PdmsWatcher;
+use crate::data_interface::db_file_header;
+use crate::data_interface::db_file_header::DbBasicInfo;
+use crate::data_interface::db_file_registry::DbFileRegistry;
+use crate::data_interface::ele_ops::{EleOperationData, EleOperationDetail, ModifiedElement};
 
 // 其他依赖导入
 use petgraph::visit::Walker;
@@ -796,7 +795,7 @@ mod tests {
         // 判重集合恒为空。dbnum 来自文件头，两个不同序号映射到同一个库号）。
         fs::write(fixture.join("ams9990_0001"), header).expect("write first header");
         fs::write(fixture.join("ams9990_0002"), header).expect("write second header");
-        manager.watcher = Arc::new(PdmsWatcher::new(vec![fixture.clone()]));
+        manager.watcher = Arc::new(DbFileRegistry::new(vec![fixture.clone()]));
 
         // 判重键是 (归属项目, dbnum)；夹具目录不在任何监控目录的归属登记里，
         // `owning_project` 按约定退回配置里的主项目名。
@@ -845,7 +844,7 @@ mod tests {
         let leaf_name = format!("ams{}_0001", source.1.db_no);
         fs::write(fixture.join(&master_name), header).expect("write master header");
         fs::write(fixture.join(&leaf_name), header).expect("write leaf header");
-        manager.watcher = Arc::new(PdmsWatcher::new(vec![fixture.clone()]));
+        manager.watcher = Arc::new(DbFileRegistry::new(vec![fixture.clone()]));
 
         assert!(
             manager.duplicate_dbnums_across_watch_dirs().is_empty(),
@@ -1016,16 +1015,15 @@ mod tests {
             .and_then(|stem| stem.to_str())
             .expect("target file name")
             .to_string();
-        let file_latest = PdmsIO::new(&project, real_path.clone(), true)
-            .get_latest_sesno()
-            .expect("read file latest sesno") as i32;
+        let file_latest =
+            db_file_header::latest_sesno(&real_path).expect("read file latest sesno") as i32;
         assert!(file_latest > 0, "fixture db must contain sessions");
 
         let fixture =
             std::env::temp_dir().join(format!("aios-never-parsed-{}", std::process::id()));
         fs::create_dir_all(&fixture).expect("create fixture directory");
         fs::copy(&real_path, fixture.join(&file_name)).expect("copy target db file");
-        manager.watcher = Arc::new(PdmsWatcher::new(vec![fixture.clone()]));
+        manager.watcher = Arc::new(DbFileRegistry::new(vec![fixture.clone()]));
         let mgr = Arc::new(manager);
 
         crate::data_interface::fast_delete::delete_dbnum_fast(dbnum)
@@ -1138,8 +1136,7 @@ mod tests {
             .and_then(|stem| stem.to_str())
             .expect("target file name")
             .to_string();
-        let file_latest_sesno = PdmsIO::new(project, path.clone(), true)
-            .get_latest_sesno()
+        let file_latest_sesno = db_file_header::latest_sesno(&path)
             .unwrap_or_else(|error| panic!("读 dbnum={dbnum} 的最新会话号失败: {error}"))
             as i32;
         assert!(file_latest_sesno > 0, "夹具库 dbnum={dbnum} 必须含会话");
@@ -1360,7 +1357,7 @@ mod tests {
         );
 
         let fixture = isolated_watch_dir("startup-new-beside-applied", &[&applied_file, &new_file]);
-        manager.watcher = Arc::new(PdmsWatcher::new(vec![fixture.clone()]));
+        manager.watcher = Arc::new(DbFileRegistry::new(vec![fixture.clone()]));
         let mgr = Arc::new(manager);
 
         // 模拟生产缺省 startup_autorun=true：重扫排出来的行不挂起。
@@ -1466,7 +1463,7 @@ mod tests {
             .expect("wipe the new dbnum to a never-parsed state");
 
         let fixture = isolated_watch_dir("scope-refresh-new-db", &[&applied_file, &new_file]);
-        manager.watcher = Arc::new(PdmsWatcher::new(vec![fixture.clone()]));
+        manager.watcher = Arc::new(DbFileRegistry::new(vec![fixture.clone()]));
         let mgr = Arc::new(manager);
         BatchScheduler::global().arm_auto_work();
 
@@ -1695,7 +1692,7 @@ mod tests {
         assert!(watch.contains("is_candidate_db_file("));
         assert!(watch.contains("self.sweep_watch_dirs(\"watch\", false).await"));
         assert!(
-            !watch.contains("PdmsWatcher::scan_db_headers(&filtered_paths)"),
+            !watch.contains("scan_db_headers(&filtered_paths)"),
             "watcher 事件不得重新长出一条局部清单消费路径"
         );
     }
@@ -1981,7 +1978,7 @@ mod tests {
             .expect("sweep_dirs 之后是 reinit_batch")
             .0;
         let read_at = body
-            .find(".get_latest_sesno()")
+            .find("db_file_header::latest_sesno(path)")
             .expect("sweep_dirs 必须读文件最新会话号");
         let rest = &body[read_at..];
         // 1200 字节窗口（Err 分支含 blocker 登记后变长了），向后走到字符边界
@@ -2656,11 +2653,9 @@ fn dirs_under(watch_dirs: &[PathBuf], project_dir: &std::path::Path) -> Vec<Path
         .collect()
 }
 
+/// 头 60 字节读不到、或不是 dabacon 描述符页，都是 `None`（`DbBasicInfo::read` 的口径）。
 fn try_parse_db_basic_info(path: &std::path::Path) -> Option<DbBasicInfo> {
-    let mut file = fs::File::open(path).ok()?;
-    let mut header = [0u8; 60];
-    file.read_exact(&mut header).ok()?;
-    Some(parse_file_basic_info(&header))
+    DbBasicInfo::read(path)
 }
 
 /// 一次 F6 扫描裁决在自动路径上的处置（ADR-021）。
@@ -3373,18 +3368,17 @@ impl AiosDBManager {
                 // 会在缺着这个库的情况下宣告 data_ready、模型门照开，而 DICT/CATA
                 // 头不可读是阻断 Meta 的（§6）——同一种「观察不完整」不能两副面孔。
                 // 读失败多为共享盘瞬态，周期对账重扫（默认 300s）恢复即解。
-                let file_latest_sesno =
-                    match PdmsIO::new(&project, path.to_path_buf(), true).get_latest_sesno() {
-                        Ok(sesno) => sesno,
-                        Err(error) => {
-                            let msg = format!(
-                                "[{origin}] 无法读取最新会话的数据库文件 {}（本轮不入队，\
+                let file_latest_sesno = match db_file_header::latest_sesno(path) {
+                    Ok(sesno) => sesno,
+                    Err(error) => {
+                        let msg = format!(
+                            "[{origin}] 无法读取最新会话的数据库文件 {}（本轮不入队，\
                                  该阶段保持未就绪）: {error}",
-                                path.display()
-                            );
-                            log::warn!("{msg}");
-                            eprintln!("{msg}");
-                            phase_blockers.push(
+                            path.display()
+                        );
+                        log::warn!("{msg}");
+                        eprintln!("{msg}");
+                        phase_blockers.push(
                             crate::data_interface::initialization_phase::PhaseBlocker::new(
                                 crate::data_interface::initialization_phase::DataPhase::of_db_type(
                                     &db_type,
@@ -3394,9 +3388,9 @@ impl AiosDBManager {
                             .with_dbnum(db_no)
                             .with_project(project.clone()),
                         );
-                            continue;
-                        }
-                    };
+                        continue;
+                    }
+                };
                 log::debug!("扫描 {path:?}: file_latest_sesno={file_latest_sesno}");
 
                 // 建立文件名到完整路径的映射
@@ -4432,7 +4426,7 @@ impl AiosDBManager {
     async fn process_mysql_insert_elements(
         &self,
         pool: &sqlx::Pool<sqlx::MySql>,
-        insert_elements: &[(RefU64, u32, &parse_pdms_db::parse::EleData)],
+        insert_elements: &[(RefU64, u32, &crate::data_interface::ele_data::EleData)],
     ) -> anyhow::Result<()> {
         if insert_elements.is_empty() {
             return Ok(());
@@ -4509,7 +4503,7 @@ impl AiosDBManager {
     async fn process_mysql_update_elements(
         &self,
         pool: &sqlx::Pool<sqlx::MySql>,
-        update_elements: &[(RefU64, u32, &pdms_io::io::ModifiedElement)],
+        update_elements: &[(RefU64, u32, &ModifiedElement)],
     ) -> anyhow::Result<()> {
         use crate::consts::PDMS_ELEMENTS_TABLE;
 

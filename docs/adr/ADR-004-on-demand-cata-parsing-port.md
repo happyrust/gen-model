@@ -2,7 +2,7 @@
 
 状态：已接受；Q5a 已修订（见文末「修订记录」——默认值落地时由 Off 改为 On）
 日期：2026-07-23（修订 2026-07-27）
-关联：ADR-002（core.dll 权威范围）、ADR-003（反向级联索引）；参考项目 `../../plant-model-gen` 的 spec `002-on-demand-cata-closure`、`src/data_interface/cata_closure.rs`、`src/fast_model/gen_model/resolve.rs`；本仓 `src/fast_model/resolve.rs`、`src/fast_model/cata_model.rs`、`src/versioned_db/pe.rs`、`src/versioned_db/database.rs`、`src/data_interface/increment_pipeline.rs`、`vendor/aios-parse-pdms/src/parse.rs`
+关联：ADR-002（core.dll 权威范围）、ADR-003（反向级联索引）；参考项目 `../../plant-model-gen` 的 spec `002-on-demand-cata-closure`、`src/data_interface/cata_closure.rs`、`src/fast_model/gen_model/resolve.rs`；本仓 `src/fast_model/resolve.rs`、`src/fast_model/cata_model.rs`、`src/versioned_db/database.rs`、`src/data_interface/increment_pipeline.rs`、`src/data_interface/ele_ops.rs`（`ATT_*` / `pe_owner` 行渲染，2026-09-04 起的写口）
 
 ## 背景
 
@@ -12,13 +12,15 @@
 
 本仓已具备关键地基：解析器 `parse_file_db_basic_data` / `refno_table_map`（refno→文件偏移）/ `parse_db_basic_info`（部分解析可行）；SurrealDB 写原语现成（`INSERT IGNORE INTO pe` + `gen_sur_json` / `gen_sur_json_uda`，见 `versioned_db/database.rs`、`versioned_db/pe.rs`）；`get_named_attmap` 读 `SUL_DB`。缺口：**无 ref0→dbnum 定位器**（无 sqlite `db_index`）、**无 `cata_closure`**、`resolve` cache-miss **无兜底**。
 
+> 上面这段描述的是 2026-07-23 当天的地基。**`parse_pdms_db` 那一侧的四个名字（`parse_file_db_basic_data` / `refno_table_map` / `parse_db_basic_info` / `versioned_db/pe.rs`）2026-09-04 已不在仓里**，今天的对应物见文末「2026-09-04 · 取证引用重指」；`INSERT IGNORE INTO pe` + `gen_sur_json*` + `get_named_attmap` 三条仍成立，一个字不改。
+
 ## 决策（grill Q1–Q5）
 
 | # | 决策 | 结论 |
 |---|------|------|
 | Q1 | 移植范围 | **运行期 / refno 级按需**：给定生成根解析其 CATA 闭包 + resolve 惰性兜底；**不**移植项目级整库 sync 过滤 / manifest 前置 pass |
 | Q2 | ref0→dbnum 定位器 | **分阶段权威**：元素尚未解析时使用就地内存 `CataDbLocator` + 轻量 json/bincode 缓存（按 db 目录指纹失效）；元素落库后以 `pe.dbnum` 为权威；不另建持久映射表，不引 `sqlite-index`。同一 Ref0 若映射到不同 dbnum，记录冲突并只阻断该 Ref0，不做后写覆盖或全项目失败 |
-| Q3 | 解析结果存储 | **INSERT IGNORE 落 SurrealDB `pe`/`ATT_*`**（复用 `save_pes` + `gen_sur_json*` + `SUL_DB`） |
+| Q3 | 解析结果存储 | **INSERT IGNORE 落 SurrealDB `pe`/`ATT_*`**（当时复用 `save_pes` + `gen_sur_json*` + `SUL_DB`；`save_pes` 已于 2026-09-04 随 `pe.rs` 删除，动词与落点不变，见文末重指表） |
 | Q4 | 触发/接入点 | **主动预解析（生成根闭包）+ 惰性兜底（resolve cache-miss）** 并用 |
 | Q5a | 开关/默认 | 默认 **Off**（既有整库行为，零回归），env `AIOS_CATA_CLOSURE_MODE` opt-in ⚠️ **已修订为默认 On，见文末** |
 | Q5b | 正确性证据 | **`cache_miss_report` + 单根几何 diff 冒烟**；完整离线校验模式留 Phase 2 |
@@ -34,7 +36,7 @@
 ## 后果（Consequences）
 
 - 新增 `src/data_interface/cata_closure.rs`（移植版：`CataDbLocator` trait + 内存实现 + `CataClosureResolver` + `parse_db_refnos` + `ensure_cata_refnos_parsed`）；改 `src/fast_model/resolve.rs`（惰性兜底）+ 生成根重生成入口（主动预解析）。
-- 解析器可能需薄封装「按偏移解析单元素」入口（参考用 `parse_ele_data_with_info_sync`，本仓有 `refno_table_map`+`pos` 但无同名函数）。
+- 解析器可能需薄封装「按偏移解析单元素」入口（参考用 `parse_ele_data_with_info_sync`，本仓有 `refno_table_map`+`pos` 但无同名函数）。⚠️ `refno_table_map` 已随 `parse_pdms_db` 退役，见文末重指表。
 - 落库用 `INSERT IGNORE` 幂等；并发 miss 全局互斥串行化（对齐参考 `LAZY_CATA_FALLBACK_LOCK`）。
 - 合法 Ref0 没有可用库归属时，不猜测、不静默跳过：当前模型单元失败并保留 durable pending，映射恢复后重试；已经成功的数据落库与 `applied_sesno` 不回滚。按需生成把它作为可重试服务错误返回，不映射成元素不存在或生成成功。
 - 同一 Ref0 出现在多个 `dbnum` 时，仅该 Ref0 及命中它的引用闭包失败并保留 pending；
@@ -43,6 +45,25 @@
 - Off 默认下零行为变化；开启前提是 `get_named_attmap` 读 `SUL_DB`（已确认）。⚠️ 默认已改为 On，「零行为变化」不再是默认路径的描述，见文末修订记录。
 
 ## 修订记录
+
+### 2026-09-04 · 取证引用重指（`parse_pdms_db` / `pe.rs` 退役）
+
+**改的是指针，不是决策。** `parse_pdms_db` 整体退出本仓（退役收口方案 B8.2–B9），`src/versioned_db/pe.rs` 与
+`member_prune.rs` 两个文件删除，基线改成 e3d-io 的退化窗口。本 ADR 正文当年拿来作证的几处代码位置随之悬空——
+它们指的文件今天打不开，读的人会以为自己找错了地方。下表把每一条重指到今天的落点；**Q1–Q5 的结论、语义红线、
+Q5a 的默认 On 一个字未改**。
+
+| 正文里的引用 | 今天（2026-09-04） |
+|---|---|
+| `src/versioned_db/pe.rs` | 文件已删。`pe` / `ATT_<noun>` / `ATT_UDA` / `pe_owner` 四种行统一由 `data_interface/ele_ops.rs::ElementRows::render` 渲染，**基线与增量共用这一份**（宪法 II）：增量走 `render_terminal_element_state` 的 `UPSERT`，基线走 `versioned_db/baseline.rs::render_baseline_batches` 的 `INSERT IGNORE` 批 |
+| `save_pes`（Q3） | `versioned_db/baseline.rs::render_baseline_batches` 攒批 → `SenderJsonsData::PEJson` → `versioned_db/database.rs` 单写者 `INSERT IGNORE INTO pe`。**Q3 的结论没变**：动词仍是 `INSERT IGNORE`，落点仍是 `pe` / `ATT_*`，换的只是谁来渲染这批行 |
+| `parse_file_db_basic_data` / `refno_table_map` | **无对应物，是被取消而不是被改名。** 基线不再「整文件读进内存 + refno→偏移表」：`frozen_source::FrozenSource::capture` 取 dbnum / 库类型 / 目标会话，`data_interface/e3d_collector.rs::stream_baseline` 按目标会话索引分块枚举，块交出去就释放（ADR-042 的 2026-09-04 实施注记） |
+| `parse_db_basic_info` | `data_interface/db_file_header.rs::DbBasicInfo::read`——同文件注释就写着「`parse_db_basic_info(path)` 的替身，但不 panic」；调用侧包一层 `increment_manager.rs::try_parse_db_basic_info` |
+| `vendor/aios-parse-pdms/src/parse.rs`（关联行） | **已从关联清单删除**：该目录不被任何 manifest 引用、也不在 git 里，只是本机残留的旧解析器副本，拿它当取证入口会指错人 |
+
+**对本 ADR 决策面的影响：一处也没有。** 按需 CATA 闭包吃的是 `cata_closure.rs` 自己那条部分解析路，从来不经过基线
+全量解析；`CataDbLocator` / `cata_closure_enabled` / `ensure_cata_refnos_parsed` 都还在。真正会动本 ADR 的是
+ADR-058 D1（「CATA 不解析进持久层」），那是另一条线，本次不碰。
 
 ### 2026-08-14 · 初始化主路径改为全量 CATA 阶段
 

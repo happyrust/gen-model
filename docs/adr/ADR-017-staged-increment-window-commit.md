@@ -7,7 +7,14 @@
 > 2026-08-19 补充：写回分块不能只按 journal 条数计算；多维上限、块级进展和
 > 单查询停滞边界由 ADR-038 规定。
 
-状态：Accepted（2026-08-05）
+> **2026-09-03 文档清理**：本 ADR 引用的暂存期开发方案与审核报告——
+> `docs/plans/2026-08-05-staged-increment-kvmem-write-back-plan.md`、`2026-08-06-staged-increment-five-defect-closure-plan.md`、
+> `2026-08-07-staged-ancestor-parse-preload-plan.md`、`2026-08-07-staged-transform-write-routing-fix-plan.md`、
+> `2026-08-19-staged-window-sesno-splitting-plan.md`、`docs/2026-08-05_kvmem-staged-increment-oracle-review.md`、
+> `docs/2026-08-07_three-chain-audit.md`、`docs/2026-08-08_increment-kvmem-rocksdb-current-audit.md`、`specs/014-bounded-staging-writeback/`
+> ——已随暂存层退役从工作树清理；需要时从 git 历史（`27f27f15` 之前）取。
+
+状态：**Superseded by ADR-056（2026-09-02）**；原状态 Accepted（2026-08-05）。实施进度：spec 035 P1 已落地（`27f27f15`，直写成为唯一数据路径、暂存分叉与回退开关删除），P3 删 `staging/` 目录待办——目录删除前本文描述的代码仍可编译，但不再是运行路径。
 关联：ADR-001（水位）、ADR-010（房间归属）、ADR-011（数据批次队列）、ADR-012（合批重生成，不受影响）、ADR-013（生成结果与 pending 分离）、ADR-014（BRAN 原子替换，被本 ADR 部分取代）；CONTEXT.md「暂存与写回」章节；开发方案 `docs/plans/2026-08-05-staged-increment-kvmem-write-back-plan.md`
 
 ## 背景

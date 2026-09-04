@@ -592,7 +592,10 @@ mod tests {
             "FACET_TOL_MM 的定义在 aios-core::prim_geo::libgm_discretise，本模块不得再写一份"
         );
         let reexport = here
-            .split_once(concat!("pub use aios_core::prim_geo::libgm_", "discretise::{"))
+            .split_once(concat!(
+                "pub use aios_core::prim_geo::libgm_",
+                "discretise::{"
+            ))
             .map(|(_, tail)| tail.split_once("};").map(|(body, _)| body).unwrap_or(tail))
             .expect("本模块必须原样重导出 aios-core 那一半规则");
         assert!(

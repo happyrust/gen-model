@@ -38,7 +38,10 @@ bin\surreal.exe start --user root --pass root --bind 127.0.0.1:8009 `
 $fs=[System.IO.File]::Open("$dir\000004.log",'Open','Read','ReadWrite'); $fs.Length; $fs.Close()
 ```
 
-## release 产物先补 DLL
+## release 产物先补 DLL（仅链接 OCCT 的旧构建）
+
+> OCC 曲面离散已按 ADR-030 退役、旧生成器退到 `legacy_model` feature 之后；默认构建若不再链接 OCCT，
+> 本节整段跳过。只有 `--features legacy_model` 一类还带 OCCT 的构建才需要补 DLL。
 
 `scripts/extract_3rdparty.ps1` 把 OCCT 的第三方 DLL 只铺到 `D:\Rust\target\debug`，
 release 下的 exe 因此启动即退、错误码 `-1073741515`（`STATUS_DLL_NOT_FOUND`），

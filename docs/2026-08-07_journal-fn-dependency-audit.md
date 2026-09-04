@@ -1,6 +1,8 @@
 # journal / 收口事务的 `fn::` 依赖审计（2026-08-07，W6）
 
-> 出处：`docs/plans/2026-08-07-staged-ancestor-parse-preload-plan.md` §4 W6。
+> 出处：暂存期方案 `2026-08-07-staged-ancestor-parse-preload-plan.md` §4 W6（该方案已随 ADR-056 暂存层退役清理，见 git 历史）。
+> **现行价值**：journal 半边已随暂存层退役；§4 的 `fn::` 预检口径（`selfcheck_surreal_functions` 探 `fn::anc_u64` / `fn::find_ancestor_type`）
+> 仍是直写路径尾事务的 as-built 依据，`increment_pipeline.rs` 的注释引用本文。
 > 口径：W3（datacenter resolve-then-render）与 W4（生成字面量已解值渲染）落地后，
 > 逐语句渲染器盘点。**「硬依赖」= 该语句在写回重放或收口尾事务里对持久层求值
 > `fn::`，函数缺失 ⇒ 水位推进确定性失败（issue #16 形态）。**

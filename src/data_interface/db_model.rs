@@ -19,9 +19,6 @@ use once_cell::sync::Lazy;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::math::Vector;
 use parry3d::query::{Ray, RayCast};
-use pdms_io::sync::clone::{CloneOptions, execute_clone};
-// use pdms_io::sync::clone::{execute_clone, CloneOptions};
-use pdms_io::watch::PdmsWatcher;
 use rayon::prelude::*;
 use rumqttc::Event::Incoming;
 use rumqttc::{Packet, QoS};
@@ -32,6 +29,8 @@ use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
 use tokio::sync::Mutex;
 
 use crate::consts::*;
+use crate::data_interface::db_file_registry::DbFileRegistry;
+use crate::data_interface::file_sync::clone::{CloneOptions, execute_clone};
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::defines::{CACHED_MDB_SITE_MAP, CACHED_REFNO_BASIC_MAP};
@@ -119,7 +118,7 @@ impl AiosDBManager {
 
     //增量从服务器里的数据clone到本地
     pub async fn exec_delta_clone_remotes(
-        watcher: &PdmsWatcher,
+        watcher: &DbFileRegistry,
         sync_msg: SyncE3dFileMsg,
     ) -> anyhow::Result<bool> {
         if sync_msg.file_names.is_empty() {
@@ -223,7 +222,7 @@ impl AiosDBManager {
 
     ///另外将里面可能有关联的db，也要同步检查后一下？？
     ///处理mqtt的消息, 通知需要处理的db 文件名，然后对应的归属地也需要发送
-    pub async fn poll_sync_e3d_mqtt_events(watcher: Arc<PdmsWatcher>) {
+    pub async fn poll_sync_e3d_mqtt_events(watcher: Arc<DbFileRegistry>) {
         let db_option = get_db_option();
         let location = db_option.location.clone();
         let f = tokio::spawn(async move {
@@ -537,7 +536,7 @@ impl AiosDBManager {
         if let Err(error) = crate::data_interface::parse_error::flush().await {
             log::warn!("{error:#}");
         }
-        let mut watcher = PdmsWatcher::new(db_paths);
+        let mut watcher = DbFileRegistry::new(db_paths);
         #[cfg(feature = "debug_watch")]
         {
             dbg!(&watcher.watch_dirs);

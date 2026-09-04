@@ -51,12 +51,13 @@ def main() -> None:
     # 一致性：文件头的最新会话号 == 会话页里最大的会话号
     assert sessions[-1]["sesno"] == header["latest_sesno"], "header 与会话页的最新会话号不一致"
 
-    print("== parse.collect_changes ==")
+    print("== parse.net_window ==")
+    # old-pdms-io 的 collect_changes（逐会话回放）2026-09-04 已删；净窗口每 refno 一条。
     start = max(2, header["latest_sesno"] - 2)
     end = header["latest_sesno"]
-    window = aios_db.parse.collect_changes(db_file, start, end)
+    window = aios_db.parse.net_window(db_file, start, end)["window"]
     total = sum(len(ops) for ops in window.values())
-    print(f"  窗口 [{start}, {end}] 共 {total} 条元素操作，分布:")
+    print(f"  窗口 [{start}, {end}] 共 {total} 条净元素操作，分布:")
     for sesno, ops in window.items():
         kinds = {}
         for op in ops:

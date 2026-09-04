@@ -16,8 +16,7 @@
 use std::ops::RangeInclusive;
 use std::path::{Path, PathBuf};
 
-use pdms_io::defines::DbPageBasicInfo;
-use pdms_io::io::PdmsIO;
+use super::db_file_header::{DbFileHeader, SessionStamp, session_chain};
 
 /// Meta / config DB types eligible for watermark-0 cold start (aligned with
 /// [`crate::data_interface::increment_pipeline::SYS_META_DB_TYPES`]).
@@ -27,7 +26,7 @@ pub const COLD_START_DB_TYPES: &[&str] = &["SYST", "DICT", "GLB", "GLOB"];
 #[derive(Debug, Clone)]
 pub struct SesnoUpdatePlan {
     pub path: PathBuf,
-    pub basic_info: DbPageBasicInfo,
+    pub basic_info: DbFileHeader,
     /// PDMS db type from file header (`SYST` / `DESI` / …).
     pub db_type: String,
     pub range: RangeInclusive<i32>,
@@ -107,23 +106,25 @@ impl SesnoRangeResolver {
     ///
     /// 走真实会话而不是按 sesno 号算术切分：会话号是稀疏的，`100..=100000` 里可能
     /// 只有三次保存，按号切会切出几百个空窗口，每个都白付一趟解析与提交。
-    fn sessions_in_window(io: &mut PdmsIO, start: i32, end: i32, limit: usize) -> Vec<i32> {
-        let mut sessions = Vec::new();
-        let mut seek = start;
-        while sessions.len() <= limit && seek <= end {
-            let Some(next) = io.get_nearest_large_sesno(seek) else {
-                break;
-            };
-            if next < seek || next > end {
-                break;
-            }
-            sessions.push(next);
-            let Some(advanced) = next.checked_add(1) else {
-                break;
-            };
-            seek = advanced;
-        }
+    fn sessions_in_window(chain: &[SessionStamp], start: i32, end: i32, limit: usize) -> Vec<i32> {
+        let mut sessions: Vec<i32> = chain
+            .iter()
+            .filter_map(|stamp| i32::try_from(stamp.sesno).ok())
+            .filter(|sesno| (start..=end).contains(sesno))
+            .collect();
+        sessions.sort_unstable();
+        sessions.dedup();
+        sessions.truncate(limit + 1);
         sessions
+    }
+
+    /// 会话链上 `>= seek` 的最近会话号（old-pdms-io `PdmsIO::get_nearest_large_sesno` 的替身）。
+    fn nearest_large_sesno(chain: &[SessionStamp], seek: i32) -> Option<i32> {
+        chain
+            .iter()
+            .filter_map(|stamp| i32::try_from(stamp.sesno).ok())
+            .filter(|sesno| *sesno >= seek)
+            .min()
     }
 
     /// 会话预算收窄后的右端（纯函数）。`sessions` 是窗口内真实会话号（升序，
@@ -184,12 +185,12 @@ impl SesnoRangeResolver {
                 Admission::Open { cold_start } => cold_start,
             };
 
-        let mut io = PdmsIO::new(project, path, true);
-        io.open()?;
-        let basic_info = io.get_page_basic_info()?;
+        let _ = project;
+        let basic_info = DbFileHeader::read(path)?;
+        let chain = session_chain(path)?;
 
         Ok(Self::build_plan(
-            &mut io,
+            &chain,
             path,
             basic_info,
             db_type,
@@ -199,17 +200,17 @@ impl SesnoRangeResolver {
         ))
     }
 
-    /// Convenience when caller already has `DbPageBasicInfo` (watch path).
+    /// Convenience when caller already has `DbFileHeader` (watch path).
     pub async fn resolve_with_header(
         &self,
         path: &Path,
         project: &str,
-        basic_info: DbPageBasicInfo,
+        basic_info: DbFileHeader,
         skip_cata: bool,
         db_type: &str,
     ) -> anyhow::Result<Option<SesnoUpdatePlan>> {
-        let dbnum = basic_info.pdms_header.db_num as u32;
-        let file_latest_sesno = basic_info.latest_ses_data.sesno;
+        let dbnum = basic_info.dbnum as u32;
+        let file_latest_sesno = basic_info.latest_sesno() as i32;
         // 快速短路：同 `resolve`，跳过件不打水位查询。
         if skip_cata && db_type == "CATA" {
             return Ok(None);
@@ -222,10 +223,10 @@ impl SesnoRangeResolver {
                 Admission::Open { cold_start } => cold_start,
             };
 
-        let mut io = PdmsIO::new(project, path, true);
-        io.open()?;
+        let _ = project;
+        let chain = session_chain(path)?;
         Ok(Self::build_plan(
-            &mut io,
+            &chain,
             path,
             basic_info,
             db_type,
@@ -236,24 +237,24 @@ impl SesnoRangeResolver {
         ))
     }
 
-    /// 在**已打开**的文件上跳最近会话号并组装计划。水位、CATA 门与冷启动资格
+    /// 在**已读出的会话链**上跳最近会话号并组装计划。水位、CATA 门与冷启动资格
     /// 都已由 [`Self::admission`] 判定；这里用 header 的 `file_latest_sesno`
     /// 复核右端（[`Self::window`]）——文件在预检与打开之间被换过时，跳出来的
     /// `nearest` 超过右端即安静放弃，与老形态的双重守卫同一结局。
     fn build_plan(
-        io: &mut PdmsIO,
+        chain: &[SessionStamp],
         path: &Path,
-        basic_info: DbPageBasicInfo,
+        basic_info: DbFileHeader,
         db_type: &str,
         db_latest_sesno: u32,
         cold_start: bool,
         max_sessions: Option<usize>,
     ) -> Option<SesnoUpdatePlan> {
-        let dbnum = basic_info.pdms_header.db_num as u32;
-        let file_latest_sesno = basic_info.latest_ses_data.sesno;
+        let dbnum = basic_info.dbnum as u32;
+        let file_latest_sesno = basic_info.latest_sesno() as i32;
 
         let seek = Self::seek_from(db_latest_sesno, cold_start);
-        let nearest = io.get_nearest_large_sesno(seek).unwrap_or(seek);
+        let nearest = Self::nearest_large_sesno(chain, seek).unwrap_or(seek);
         let full_range = Self::window(nearest, file_latest_sesno)?;
 
         // 会话预算收窄。`file_latest_sesno` 字段保持文件的真实值——它要进
@@ -261,7 +262,7 @@ impl SesnoRangeResolver {
         let range = match max_sessions.filter(|limit| *limit > 0) {
             Some(limit) => {
                 let sessions =
-                    Self::sessions_in_window(io, *full_range.start(), *full_range.end(), limit);
+                    Self::sessions_in_window(chain, *full_range.start(), *full_range.end(), limit);
                 let end = Self::budget_end(&sessions, *full_range.end(), Some(limit));
                 if end < *full_range.end() {
                     println!(
@@ -345,7 +346,7 @@ mod tests {
             .expect("build_plan 之后是测试模块")
             .0;
         assert!(
-            build_plan.contains("let file_latest_sesno = basic_info.latest_ses_data.sesno;"),
+            build_plan.contains("let file_latest_sesno = basic_info.latest_sesno() as i32;"),
             "file_latest_sesno 必须直接取自文件 header"
         );
         let narrowed_at = build_plan
@@ -431,7 +432,7 @@ mod tests {
     }
 
     /// IU-S2-01 的「不开文件」半边（L1 源码钉）：两个 resolve 入口的顺序必须是
-    /// 「CATA 快速短路 → 水位查询 → admission 裁决 → 才 PdmsIO::new」。裁决挪到
+    /// 「CATA 快速短路 → 水位查询 → admission 裁决 → 才开文件读会话链」。裁决挪到
     /// 开文件之后，Skip 件就白开一遍文件；快速短路挪到水位查询之后，跳过的
     /// CATA 就白打一趟 DB。回退即红。
     #[test]
@@ -460,7 +461,7 @@ mod tests {
                 .expect("CATA 快速短路缺失");
             let watermark_at = body.find("query_watermark(").expect("水位查询缺失");
             let admission_at = body.find("Self::admission(").expect("准入裁决缺失");
-            let open_at = body.find("PdmsIO::new(").expect("开文件缺失");
+            let open_at = body.find("session_chain(path)").expect("开文件缺失");
             assert!(
                 cata_at < watermark_at,
                 "{open_marker}: 跳过的 CATA 不得打水位查询: {body}"

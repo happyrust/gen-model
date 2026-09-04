@@ -678,14 +678,15 @@ fn batch_failure_blocks_data_phase(state: TaskState, batch_status: Option<BatchS
     }
 }
 
-/// 记一次数据侧失败进连败账，达到上限时把「停跑自动重试」喊出来。
+/// 记一次数据侧失败进连败账，达到上限时把「停跑自动重试」喊出来，并落一条
+/// 持久的 `window_block` 终态。
 ///
 /// 停跑是有代价的（该库的水位差在下一个新会话/人工执行之前不再有人追），
 /// 所以必须在控制台与 `/health` 都看得见，而不是只留一行滚走的日志。
 ///
 /// 返回同右端连败第几次：落盘记录要带上它，否则事后翻文件只看得见一串失败，
 /// 分不出哪一条是「还会自动重跑」、哪一条已经把这个库 park 住了。
-fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str) -> u32 {
+async fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str) -> u32 {
     let streak =
         batch_failure_ledger().record(dbnum, end_sesno, reason, &Local::now().to_rfc3339());
     let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
@@ -696,6 +697,7 @@ fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str) -> u32 {
         );
         log::error!("{message}");
         eprintln!("{message}");
+        record_data_window_block(dbnum, end_sesno, reason).await;
     } else {
         println!(
             "dbnum={dbnum} 数据批次失败记账：同右端连续第 {streak}/{cap} 次，\
@@ -703,6 +705,34 @@ fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str) -> u32 {
         );
     }
     streak
+}
+
+/// 连败触顶 ⇒ 这一窗的数据侧失败是确定性的（同一右端连撞 `MAX_ATTEMPTS` 次同一堵
+/// 墙），按 spec 035 功能要求 2（D1）落一条**带原始错误**的 `window_block` 终态。
+///
+/// 为什么连败账不够：它活在进程内、重启即清空，而「不再自动重跑」这件事要对外
+/// 可见得能跨重启、跨机器——这条记录在持久层，`/health.window_blocks`
+/// 与事后异机复核读的都是它。ADR-017 的窗口阻断作为**模型侧**概念已随暂存层退役，
+/// 数据侧这一半是 spec 保留下来的，这里就是它今天唯一的生产写入点。
+///
+/// 坏根清单留空：这是整窗的数据侧失败，不归咎某个生成根。解除沿用 ADR-017 §8
+/// 既有的两条出路，本函数不另开——窗口成功提交时尾事务的 `render_clear_window_attempts`
+/// 清掉，冻结吸收扩窗时 `reset_roots_on_absorb` 清掉（坏根为空 ⇒ 一次吸收即解除，
+/// 与连败账「右端前进即复活」同一口径）。
+async fn record_data_window_block(dbnum: u32, end_sesno: i32, reason: &str) {
+    // 写不进去只喊一句：这条是可观测性记录，不能反过来把批次收尾再拖失败一次。
+    if let Err(error) = crate::data_interface::staging::attempts::record_window_block_at(
+        dbnum,
+        end_sesno,
+        reason,
+        &[],
+    )
+    .await
+    {
+        let message = format!("dbnum={dbnum} 数据窗口阻断终态落库失败: {error:#}");
+        log::error!("{message}");
+        eprintln!("{message}");
+    }
 }
 
 struct WorkerLiveGuard;
@@ -781,7 +811,8 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
         );
     }
     println!(
-        "增量阶段控制：data={} model={} room={}（顺序：数据 → 模型 → 房间）",
+        "增量阶段控制：data={} model={} room={}（模型门随清单装好即开、不等数据相清零；\
+         单消费者每轮先数据批次、再模型积压、再房间）",
         crate::options::data_incremental(),
         crate::options::model_incremental(),
         crate::options::room_incremental()
@@ -1003,7 +1034,7 @@ async fn run_one_batch_isolated(
     // panic = 数据窗口没收口，与普通 Failed 记同一本连败账（park 判定见
     // `BatchFailureLedger`）。右端用入队快照——冻结重扫后的真值这里已经拿不到，
     // 偏小只会让「新会话解 park」更容易成立，方向保守。
-    note_batch_failure(dbnum, end_sesno, &message);
+    note_batch_failure(dbnum, end_sesno, &message).await;
     scheduler.finish(dbnum);
     registry.finish(
         &task_id,
@@ -1165,7 +1196,7 @@ async fn run_one_batch(
                 .with_task(task_id.clone())
                 .with_failure_record(task_id.clone()),
             );
-        failure_streak = Some(note_batch_failure(job.dbnum, observed_end_sesno, &message));
+        failure_streak = Some(note_batch_failure(job.dbnum, observed_end_sesno, &message).await);
     } else {
         // 数据窗口收口了（Applied / UpToDate / 模型侧才有失败的 Partial）：
         // 连败账清零。模型失败自有 durable pending 的重试账与死信门槛。
@@ -2604,27 +2635,27 @@ fn progress_sink(registry: &'static TaskRegistry, task_id: &str) -> Option<Manua
 
 /// 冻结点重扫候选文件：路径 / 类型不变（F6 已在入队前把关），会话号与大小取现值。
 fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
-    let snapshot = pdms_io::snapshot::DabaconSnapshot::open(&job.project, &job.path)
-        .map_err(|e| anyhow::anyhow!("打开冻结点 dabacon 快照失败 {}: {e}", job.path.display()))?;
-    let file_latest_sesno = snapshot.token().target_sesno() as i32;
+    let frozen =
+        crate::data_interface::frozen_source::FrozenSource::capture(&job.path).map_err(|e| {
+            anyhow::anyhow!("打开冻结点 dabacon 冻结源失败 {}: {e}", job.path.display())
+        })?;
+    let file_latest_sesno = frozen.target_sesno() as i32;
     let file_name = job
         .path
         .file_name()
         .and_then(|s| s.to_str())
         .unwrap_or(&job.file_name)
         .to_string();
-    let db_type = snapshot.token().db_type().to_owned();
-    let snapshot_token = snapshot.token().clone();
     Ok(FileCandidate {
         project: job.project.clone(),
         path: job.path.clone(),
         file_name,
-        db_type,
-        db_num: snapshot.token().dbnum() as u32,
+        db_type: frozen.db_type().to_owned(),
+        db_num: frozen.dbnum() as u32,
         file_latest_sesno,
-        file_size: snapshot.token().opened_len(),
+        file_size: frozen.opened_len(),
         file_modified_at: None,
-        snapshot_token: Some(snapshot_token),
+        frozen: Some(frozen),
         extract_parent: crate::data_interface::extract_family::parent_path_of(&job.path)
             .filter(|path| path.is_file()),
     })
@@ -2641,8 +2672,8 @@ fn assert_refresh_candidate_snapshot_contract() {
         .split_once("pub(crate) async fn publish_success")
         .map(|(body, _)| body)
         .unwrap_or(source);
-    assert!(body.contains("DabaconSnapshot::open"));
-    assert!(body.contains("snapshot_token: Some(snapshot_token)"));
+    assert!(body.contains("FrozenSource::capture(&job.path)"));
+    assert!(body.contains("frozen: Some(frozen)"));
 }
 
 /// 数据批次成功后的异地同步发布（与旧 `execute_incr_update` 成功路径对齐）。
@@ -3033,6 +3064,76 @@ mod tests {
         assert!(ledger.parked_streak(7997, 1035).is_some());
         ledger.clear(7997);
         assert!(ledger.parked_streak(7997, 1035).is_none());
+    }
+
+    /// D1 数据侧半边：连败触顶才落 `window_block` 终态，未触顶不落。
+    ///
+    /// 只在触顶落是有意的——一次失败可能是瞬态的，落了终态就要有人来解；
+    /// 同右端连撞 `MAX_ATTEMPTS` 次才叫确定性。这条钉的是那个条件本身：
+    /// 挪进 else 臂或提到 `if` 之外，都会让终态变成「失败一次就阻断」。
+    #[test]
+    fn only_a_capped_out_data_failure_records_the_window_block() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn note_batch_failure(")
+            .expect("note_batch_failure")
+            .1
+            .split_once("\nasync fn record_data_window_block(")
+            .expect("note_batch_failure boundary")
+            .0;
+        let (capped, below_cap) = body.split_once("    } else {").expect("触顶与未触顶两臂");
+        assert!(
+            capped.contains("record_data_window_block(dbnum, end_sesno, reason).await"),
+            "触顶臂必须落一条带原始错误的 window_block 终态（spec 035 D1）: {capped}"
+        );
+        assert!(
+            !below_cap.contains("record_data_window_block"),
+            "未触顶不得落终态——瞬态失败靠对账重扫自动重试: {below_cap}"
+        );
+    }
+
+    /// 终态的解除只走既有的两条出路，别再长第三条。
+    ///
+    /// 落终态容易，解除才是会悄悄坏掉的那一半：`window_block` 在持久层，没人清
+    /// 就是这个库永远显示阻断。这里钉住「窗口成功提交 ⇒ 尾事务清掉」这条主出路
+    /// ——尾事务的清除语句由 `finalize_attempt` 拼进去，改了那边这条会红。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_committed_window_clears_the_data_side_block() {
+        use crate::data_interface::staging::attempts::{
+            load_window_block_on, record_window_block_at_on, render_clear_window_attempts,
+        };
+
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem");
+        db.use_ns("main").use_db("main").await.expect("use db");
+
+        record_window_block_at_on(&db, 7995, Some(1034), "冻结批次重扫失败: boom", &[])
+            .await
+            .expect("block");
+        let block = load_window_block_on(&db, 7995)
+            .await
+            .expect("load")
+            .expect("已阻断");
+        assert_eq!(
+            block.reason, "冻结批次重扫失败: boom",
+            "终态必须带原始错误，不能只留一句「批次失败」"
+        );
+        assert_eq!(block.end_sesno, Some(1034));
+        assert!(block.bad_roots.is_empty(), "整窗数据侧失败不归咎某个生成根");
+
+        db.query(render_clear_window_attempts(7995))
+            .await
+            .expect("clear")
+            .check()
+            .expect("cleared");
+        assert!(
+            load_window_block_on(&db, 7995)
+                .await
+                .expect("load")
+                .is_none(),
+            "窗口成功提交的尾事务必须解除数据侧阻断"
+        );
     }
 
     /// 「不再自动重跑」每次 park 只报一遍。

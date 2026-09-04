@@ -6,9 +6,10 @@
 ## 接口
 
 - `GenModelClient`：覆盖健康检查、查询、preview/execute、任务、队列、模型生成、pending unit、DBNUM 状态与清理接口。
-- `RustTools`：调用 `incr_fold_probe`、`l3_suite`，也可用上下文管理器启动并自动关闭 `aios-database`。
+- `RustTools`：调用 `net_window_probe`（生产收集器在窗口上看到的操作流；不带 `--tty` 只记账，带 `--tty` 由现场 `Q TYPE` 逐 refno 判死活）、`l3_suite`，也可用上下文管理器启动并自动关闭 `aios-database`。
+  （`incr_fold_probe` 是 old-pdms-io 逐会话回放，`shadow_collector_parity` 是拿 old-pdms-io 当参照臂的对拍，2026-09-04 一并删除。）
 - `E3dTtyRunner`：复制 E3D macro 到证据目录，移除会关闭 TTY 的 `FINISH/QUIT`，重定向 `ALPHA LOG`，再交给 Rust `l3_suite`。
-- `run_db8000_increment.py`：组合 E3D 变更、Rust 折叠、HTTP preview/execute、水位等待与 finally 恢复。
+- `run_db8000_increment.py`：组合 E3D TTY 变更、生产收集器记账、HTTP preview/execute、水位等待与 finally 恢复——判据是 TTY 宏做过的事，不是另一套解析器。
 
 ## 本地验证
 

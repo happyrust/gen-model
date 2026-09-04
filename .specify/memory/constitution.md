@@ -75,10 +75,12 @@
 （feature `sql`）+ MQTT（feature `mqtt`）+ axum（feature `http_api`）。
 
 **并发模型**：一个进程一条数据批次队列、一个派发器，至多 `data_batch_workers` 个在飞批次
-（默认 1 = 单消费者行为，上限 8；ADR-011 2026-08-09 修订）。并发仅限稳态 DESI 暂存窗口，
-同 dbnum 恒串行；非 DESI、基线/冷启动与应急直写批次独占执行，journal 写回与水位尾事务经
-`STAGED_COMMIT_SERIAL` 一次一个。合并、冻结、FIFO 语义建立在「单队列 + 单派发器」前提上；
-任何引入第二条数据批次消费路径的改动都要先改 ADR-011。
+（上限 8；ADR-011 2026-08-09 修订）。数据批次只有一条路径——直写 RocksDB（ADR-056，kv-mem
+暂存窗口已退役）——且**一律独占车道**（spec 035 D10-A：`batch_needs_exclusive_lane` 恒真，
+`data_batch_workers > 1` 暂不产生并发；放开稳态 DESI 直写并发是 D10-B，前提是 `apply_one` 的
+尾事务与提交后空间收敛改在 `DATA_COMMIT_SERIAL` 下一次一个）。派发门的空间收敛经
+`DATA_COMMIT_SERIAL`（前身 `STAGED_COMMIT_SERIAL`）串行。合并、冻结、FIFO 语义建立在
+「单队列 + 单派发器」前提上；任何引入第二条数据批次消费路径的改动都要先改 ADR-011。
 
 **SurrealQL 拼接**：所有进入语句字面量的外部字符串必须过
 `dbnum_state::escape_surql_str`（Windows 路径的反斜杠会破坏字面量）。
@@ -109,6 +111,16 @@ DCHC 快照为准（ADR-002 / ADR-004）；分类原则是「宁多勿漏」—�
 
 ### 修订记录
 
+- **v1.1.1（2026-09-03）**：附加约束「并发模型」段 PATCH 修订（spec 035 T503）。
+  - **动机**：ADR-056 退役 kv-mem 暂存窗口与 journal 写回，数据批次改为直写 RocksDB 的唯一路径；
+    原文「并发仅限稳态 DESI 暂存窗口」「journal 写回与水位尾事务经 `STAGED_COMMIT_SERIAL`」描述的
+    是被取代的架构。按 spec 035 D10-A 改写：数据批次一律独占车道，派发门空间收敛经
+    `DATA_COMMIT_SERIAL` 串行。
+  - **受影响 ADR**：ADR-056（新增，取代 ADR-017 / ADR-038）、ADR-017（Superseded）、ADR-011
+    （单队列 + 单派发器前提不变，`data_batch_workers` 并发在 D10-B 前不生效）。
+  - **迁移路径**：实现已先行合规（spec 035 P1：`STAGED_COMMIT_SERIAL → DATA_COMMIT_SERIAL`、
+    `batch_needs_exclusive_lane` 恒真、直写开关族删除，`27f27f15`），本次为文本追认；
+    `CONTEXT.md`「数据窗口写回」章、ADR-050 背景段、ADR-053 R6 同批对齐；无代码迁移项。
 - **v1.1.0（2026-08-13）**：I 条回退处置与数据支撑对偶、附加约束「并发模型」两处修订。
   - **动机**：ADR-021 把文件回退的默认处置从「阻断等人」改为「整库重建」，并给水位承诺
     补上读侧对偶（幽灵水位按首次导入重建）；ADR-011 的 2026-08-09 修订把「一个消费者」
@@ -122,4 +134,4 @@ DCHC 快照为准（ADR-002 / ADR-004）；分类原则是「宁多勿漏」—�
     AGENTS.md 水位段、`docs/specs/web-service-api.md` §2/§4.3/§6、
     `specs/002-watermark-data-backing/spec.md` Assumptions 同批对齐；无代码迁移项。
 
-**Version**: 1.1.0 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-08-13
+**Version**: 1.1.1 | **Ratified**: 2026-07-31 | **Last Amended**: 2026-09-03

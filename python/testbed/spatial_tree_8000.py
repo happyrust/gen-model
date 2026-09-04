@@ -290,20 +290,25 @@ def worker_probe(params: dict) -> dict:
     lineage_ok = all(sesno in sessions for sesno in (24, 25, 26))
     deletes_ok = False
     if lineage_ok:
-        changes = aios_db.parse.collect_changes(source, 25, 26)
-        ses25 = changes.get("25", []) or changes.get(25, [])
-        ses26 = changes.get("26", []) or changes.get(26, [])
+        # 生产收集器的净窗口（e3d-io）：25..26 里 BOX 子件与 EQUI 父件都是 deleted。净口径每 refno
+        # 一条、墓碑挂窗口终点，不再按会话分区判「25 删子、26 删父」——那是逐会话回放
+        # （old-pdms-io `collect_changes`，2026-09-04 已删）的分区语义。
+        net_ops = [
+            op
+            for ops in aios_db.parse.net_window(source, 25, 26)["window"].values()
+            for op in ops
+        ]
         deletes_ok = any(
-            op.get("refno") == BOX_CHILD and op.get("op") == "deleted" for op in ses25
-        ) and any(op.get("refno") == EQUI and op.get("op") == "deleted" for op in ses26)
+            op.get("refno") == BOX_CHILD and op.get("op") == "deleted" for op in net_ops
+        ) and any(op.get("refno") == EQUI and op.get("op") == "deleted" for op in net_ops)
 
-    # 待回放窗口的 op 统计（add/modified/deleted/none 各几条），让 E3D 追加的
+    # 待回放窗口的 op 统计（add/modified/deleted 各几条，按净窗口分区键），让 E3D 追加的
     # 会话在报告里不再是黑盒。
     window_ops: dict[str, dict] = {}
     stat_upto = int(params.get("stat_upto") or 0)
     if lineage_ok and stat_upto > BASELINE_SESNO:
         upto = min(stat_upto, max(sessions))
-        changes = aios_db.parse.collect_changes(source, BASELINE_SESNO + 1, upto)
+        changes = aios_db.parse.net_window(source, BASELINE_SESNO + 1, upto)["window"]
         for sesno, ops in changes.items():
             counts: dict[str, int] = {}
             for op in ops:

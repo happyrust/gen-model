@@ -1,0 +1,36 @@
+$(
+------------------------------------------------------------------------
+RVM 导出（HDIR/TDIR 朝向约定 + 对齐阈值边界复核，2026-09-02）：BRAN /M-CO-1RX-3051C  (dbnum 8000, =24384/2579)
+挑它的理由：head tube 37.5mm at 3.16deg: boundary case
+窄口径同 rvm_export_1rcv0101_b1.mac。只读：没有 SAVEWORK；不写 QUIT/FINISH——会话归 l3_suite driver。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/audit5/rvm_export_2579-M-CO-1RX-3051C.log" OVER
+$P CODEX-AUDIT5-RVM-EXPORT-ALIVE
+/M-CO-1RX-3051C
+Q CE
+Q REF
+Q NAME
+Q HPOS
+Q HDIR
+Q TPOS
+Q TDIR
+Q MEMB
+
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/rvm-audit5/2579-M-CO-1RX-3051C.rvm"
+export filenote 'audit5 2579-M-CO-1RX-3051C: head tube 37.5mm at 3.16deg: boundary case'
+export holes on
+export autocolour displayexport on
+export repr on
+export /M-CO-1RX-3051C
+export finish
+
+$P CODEX-AUDIT5-RVM-EXPORT-DONE
+ALPHA LOG END

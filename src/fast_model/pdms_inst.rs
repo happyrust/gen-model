@@ -2235,7 +2235,11 @@ mod tests {
             ..Default::default()
         };
         let geo_hash = lcyl.hash_unit_mesh_params();
-        assert_eq!(geo_hash, scyl.hash_unit_mesh_params(), "夹具：两个变体本该同键");
+        assert_eq!(
+            geo_hash,
+            scyl.hash_unit_mesh_params(),
+            "夹具：两个变体本该同键"
+        );
 
         let plan = plan_for_test(vec![
             cylinder_batch(geo_hash, PdmsGeoParam::PrimLCylinder(lcyl)),
@@ -2248,7 +2252,8 @@ mod tests {
             .map(|packet| packet.sql.as_str())
             .join("\n");
         assert_eq!(
-            sql.matches(&format!("UPSERT inst_geo:⟨{geo_hash}⟩")).count(),
+            sql.matches(&format!("UPSERT inst_geo:⟨{geo_hash}⟩"))
+                .count(),
             1,
             "{sql}"
         );

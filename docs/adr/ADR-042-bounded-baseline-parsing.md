@@ -5,6 +5,26 @@
   ADR-025（严格初始化阶段）、ADR-038（有界写回）、ADR-041（并行生成与切片流水线）
 - 取代：ADR-041 关于「ZONE 作为内存分片单位」的表述由本 ADR 细化并部分改写（见 §9）
 
+> **2026-09-03 对照（ADR-056）**：本 ADR 只借 `mem://` 实例与读路由、明确不走 ADR-017 提交协议（§2），因此不在 ADR-056
+> 的取代范围内，「基线不开窗口」的口径反而与 ADR-056 一致。但 §2 的 `init_staging_schema` / `StagingReadContext` /
+> `with_staging_reads` 与 §10「写回走 journal + 分块重放」（`StagedExecutor` / `replay_journal_chunked` / `ResourceGauge`）
+> 复用的都是 spec 035 P3 T303（本仓 `staging/` 目录）与 T305（aios_core `active_staging_reads` 路由）的删除对象，
+> spec 035 未提及基线路径。截至 2026-09-03 本 ADR **尚未落地**（`versioned_db/database.rs` 仍 `read_full_basic_data`
+> 整文件读入，`baseline_shard_noun_types` 未出现在 `options.rs`；`specs/024` T19 未勾）。P3 动手前要先决定：
+> 按直写分块（`increment_pipeline::persist_transaction_batches`）重写 §2 / §10 的载体，或把本 ADR 标 Superseded。
+> `init_staging_schema` 的本体已搬到 `data_interface/table_parity.rs::init_schema_on`（spec 035 T171），lifecycle 只剩委托。
+
+> **2026-09-04 实施注记（`parse_pdms_db` 退役收口，B8.2–B9）**：本 ADR 要解决的问题**已经解决了，但不是按本 ADR 的
+> 办法**。基线不再有「整文件塞进内存」这一步——`parse_pdms_db` 整体退出本仓，`DabaconSnapshot::read_full_basic_data`、
+> `DbBasicData`、`FrozenSource::read_frozen_bytes` 与 `member_prune` 全部删除；基线改成 e3d-io 的**退化窗口**
+> （`e3d_collector::stream_baseline` 按目标索引枚举，每 `sync_chunk_size` 个元素交一块给
+> `versioned_db::baseline::render_baseline_batches`，经有界队列交单写者），**块交出去就释放，峰值内存随块不随库**。
+> 也就是说：§1「有界」的目标达成，§2 的载体（`mem://` 实例 + `init_staging_schema` / `StagingReadContext` /
+> `with_staging_reads`）与 §10（journal + 分块重放）**一样都没用上**，基线这一侧与 `staging/` 再无关系，
+> spec 035 P3 拆 `staging` 时不必为基线搬家（ADR-058 新不变量 6 已同步）。
+> **状态行没动**（仍是「已接受 2026-08-22」）：把它改成 Superseded、还是改写成「目标达成，载体换成流式块」，
+> 是一次决策而不是一次记录，留给下一次 ADR 评审拍。
+
 ## 背景
 
 全量基线解析今天是「整文件塞进内存」：`DabaconSnapshot::read_full_basic_data` 一次
@@ -160,7 +180,8 @@ AMS 7999 的 `/1WCC-PIPEBJ` 出了两棵一样的子树）那块已修好的死�
 
 ## 被否决的选项
 
-- **改 `old-pdms-io` 加按需入口**：能力已存在且默认开启。
+- **历史方案：改 `old-pdms-io` 加按需入口**。该方案已被 e3d-io 读取路线取代，
+  不应作为当前生产实现依据。
 - **纯按需、零预扫**（从 ZONE 记录出发递归下降，不建全量拓扑）：每个元素一次 B-tree 下降
   加一次随机 seek，无页局部性；且不先扫一遍就不知道有几个分块节点、各多大，批切不均匀，
   而「每批可控」正是目标。

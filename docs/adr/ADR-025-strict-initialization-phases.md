@@ -3,7 +3,28 @@
 状态：Accepted（2026-08-14）
 
 关联：ADR-004（按需 CATA）、ADR-007（SYS 数据域）、ADR-011（单数据队列）、
-ADR-017（暂存窗口提交）、ADR-021（水位数据支撑）；`specs/006-strict-initialization-order/`
+ADR-017（暂存窗口提交，已被 ADR-056 取代）、ADR-021（水位数据支撑）；`specs/006-strict-initialization-order/`
+
+> **2026-09-03 对照（ADR-056 / spec 035 D10-A）**：决策 3 末句「只有稳态 Design 暂存窗口可以并发」失效——
+> 暂存窗口退役，数据批次一律独占车道（并发放开是 D10-B）。阶段顺序、manifest / epoch、§7「数据批次只提交
+> 数据 + 水位 + 模型意图」等其余决策不变；§7 正是 ADR-056 N1 的现行口径。
+>
+> **2026-09-03 对照（ADR-058 D1 / D7）**：五段顺序 `Meta → Catalogue → Design → Model → Room` 收缩为
+> **两条并行链**。决策 2 的 `Catalogue` 一句失效——CATA 不入持久层，模型面经 `E3dDbResolver` 从文件读，
+> 整库 CATA 基线与按需闭包一并退役（ADR-004 / ADR-034 随之退役）。决策 1 的串行也失效：模型面在文件身份
+> 解析完成后即可开工，**不等 `data_ready`**，串行那一版的唯一理由「生成器要读 `pe`」已被 ADR-056 N7 拆掉。
+> 房间仍排在模型之后。manifest / epoch / 纪元激活门、决策 4 的回退与关门、决策 5 的「阶段状态不另建表」、
+> §7 与决策 8/9 全部不变；启动的模型工作从此由「启动退化窗口」产生（ADR-058 D4），不再走
+> 决策「2026-08-25 实施说明」第一条的 `fn::sync_gen_roots` 物化——那一条随 ADR-058 D5 失效。
+>
+> **实施状态（2026-09-03，D7-lite）**：上面这段是目标态；码上已成立的是**门**——
+> `InitializationCoordinator::model_generation_allowed` 不再看 `data_ready`，`install_manifest` 装好清单即开
+> `model_phase_open`，`run_cli` 的启动模型复核排在 `wait_for_data_ready` 之前（护栏
+> `startup_reconciles_models_before_waiting_for_data_and_keeps_rooms_last`）。**尚未成立**的是 D1 的
+> `Catalogue` 相删除（`DataPhase::Catalogue` 仍在，refactor plan S3）与第二车道：worker 仍是单消费者，
+> 模型积压只在数据队列空隙消化（`model_drain_yield_reason` 的 `DataQueued` 让位），真正双链同时跑挂
+> D10-B。决策 7「模型 drain 仅在 `data_ready` 后执行」已失效；决策 8「模型 drain 是阶段控制器的正式消费者」
+> 不变，只是它听的门换成了 `model_phase_open`。
 
 ## 背景
 

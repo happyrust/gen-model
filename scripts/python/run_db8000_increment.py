@@ -58,13 +58,17 @@ def main() -> int:
             applied = runner.run(args.macro, label="apply")
             summary["e3d_apply"] = {"returncode": applied.returncode, "stdout": applied.stdout}
 
-        folded = tools.run_increment_fold(
-            args.db_file, args.from_sesno, args.to_sesno, dbnum=args.dbnum
+        # 生产收集器在这一窗看到了什么（e3d_collector，只记账；判据是上面 TTY 宏做过的事）。
+        collected = tools.run_production_window(
+            args.db_file,
+            args.from_sesno,
+            args.to_sesno,
+            json_out=evidence / "production-window.json",
         )
-        summary["fold"] = {
-            "returncode": folded.returncode,
-            "stdout": folded.stdout,
-            "stderr": folded.stderr,
+        summary["production_window"] = {
+            "returncode": collected.returncode,
+            "stdout": collected.stdout,
+            "stderr": collected.stderr,
         }
         client.wait_for_health()
         summary["preview"] = client.preview()

@@ -46,18 +46,19 @@ mod pipeline;
 #[allow(dead_code)]
 mod issue019_recording;
 
-use aios_core::NamedAttrValue;
 use aios_core::RefnoEnum;
 use aios_core::pdms_types::RefU64;
+use aios_database::data_interface::db_file_header::DbFileHeader;
+use aios_database::data_interface::direct_store::DirectSchema;
+use aios_database::data_interface::e3d_collector::{open_pinned_set, read_ele_data};
+use aios_database::data_interface::ele_data::EleData;
+use aios_database::data_interface::ele_ops::{EleOperationData, EleOperationDetail};
 use aios_database::data_interface::increment_pipeline::IncrementPipeline;
 use aios_database::data_interface::manual_update::{NetOp, merge_net_changes};
-use aios_database::data_interface::model_impact::classify_operation_effects;
 use format::{CaseSpec, SessionFixtureManifest};
-use parse_pdms_db::paged::PagedDbSession;
-use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement, PdmsIO};
-use pdms_io::net_window;
-use pdms_io::session_index_diff;
-use pdms_io::snapshot::DabaconSnapshot;
+// 性质 h / i（old-pdms-io 的会话索引差分 / 净窗口收集器当参照臂）2026-09-04 随 old-pdms-io 一起删了。
+// 判据从此只有一个：E3D TTY 录下的会话链本身（manifest 里每个案例声明的期望，性质 e）与
+// 时点快照的字段差分（性质 c / f）——两条都不是第二套解析器。
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -276,8 +277,9 @@ struct ElementView {
     attrs: BTreeMap<String, String>,
 }
 
-fn element_view(raw: &[u8]) -> ElementView {
-    let ele = parse_pdms_db::parse::parse_raw_ele_data(raw).expect("parse raw element record");
+/// 输入是数据面自己的 `EleData`（e3d-io 底座 `e3d_collector::read_ele_data` 读出来的那份，
+/// 与生产持久化写 `Add / Modified` 时拿到的同一形状）——差分 oracle 比的就是持久层会看见的东西。
+fn element_view(ele: &EleData) -> ElementView {
     let attrs = match serde_json::to_value(ele.att_map()).expect("att_map to json") {
         serde_json::Value::Object(map) => map
             .into_iter()
@@ -307,15 +309,28 @@ enum FileChange {
     Unchanged,
 }
 
+/// 在时点快照上按显式 refno 清单读元素视图；快照里没有的 refno 不出现在结果里（存在性信号）。
+///
+/// 读法与生产窗口同一底座：`DbSet` 钉在快照头指针会话上（模板与 attlib 来自
+/// `AIOS_E3D_TEMPLATE_DIR`，`collect_window` 本来就要它），逐元素走 `read_ele_data`。
 fn read_views(snapshot: &Path, refnos: &[RefU64]) -> BTreeMap<String, ElementView> {
     if refnos.is_empty() {
         return BTreeMap::new();
     }
-    let mut db = PagedDbSession::open(snapshot)
+    let schema = DirectSchema::open_from_env().expect("open the e3d template schema");
+    let header = DbFileHeader::read(snapshot)
         .unwrap_or_else(|error| panic!("打开 {}: {error:#}", snapshot.display()));
-    let raw = db.read_raw_records(refnos).expect("read raw records");
-    raw.into_iter()
-        .map(|(refno, bytes)| (pdms_str(refno), element_view(&bytes)))
+    let set = open_pinned_set(&schema, snapshot, &header.db_type, header.latest_sesno())
+        .unwrap_or_else(|error| panic!("钉住 {}: {error:#}", snapshot.display()));
+    refnos
+        .iter()
+        .filter_map(|refno| {
+            read_ele_data(&set, *refno)
+                .unwrap_or_else(|error| {
+                    panic!("读 {} 于 {}: {error:#}", pdms_str(*refno), snapshot.display())
+                })
+                .map(|ele| (pdms_str(*refno), element_view(&ele)))
+        })
         .collect()
 }
 
@@ -595,280 +610,6 @@ fn snapshot_diff_corroborates_the_net_result() {
     assert!(checked > 0, "差分 oracle 一个 refno 都没核对到");
 }
 
-// ── 性质 h)：会话索引差分对拍 ───────────────────────────────────────────────
-
-/// 把净窗口操作归一成「存在性终态三类」，与会话索引差分同口径可比。
-///
-/// 规则：首 op 是 Add = 起点不在场，末 op 是 Deleted = 终点不在场；
-/// (不在场→在场)=added，(在场→不在场)=deleted，(在场→在场)=modified，
-/// (不在场→不在场)=窗口内自我抵消（不出现）。两处措辞差异在这一层归一：
-/// `fold_net_op` 把「删了又建」叫 `Added`、把「加了又删」留成 `Cancelled`，
-/// 而差分只知道两端状态——分别对应 modified 与不出现。
-fn terminal_presence_classes(window: &Window) -> BTreeMap<String, &'static str> {
-    struct Ends {
-        first_is_add: bool,
-        last_is_delete: bool,
-    }
-    let mut ends: BTreeMap<String, Ends> = BTreeMap::new();
-    // `Window` 是 BTreeMap<sesno, ops>，迭代天然按会话升序。
-    for operations in window.values() {
-        for operation in operations {
-            let (is_add, is_delete) = match operation.detail {
-                EleOperationDetail::Add(_) => (true, false),
-                EleOperationDetail::Modified(_) => (false, false),
-                EleOperationDetail::Deleted => (false, true),
-                EleOperationDetail::None => continue,
-            };
-            ends.entry(pdms_str(operation.refno))
-                .and_modify(|entry| entry.last_is_delete = is_delete)
-                .or_insert(Ends {
-                    first_is_add: is_add,
-                    last_is_delete: is_delete,
-                });
-        }
-    }
-    ends.into_iter()
-        .filter_map(|(refno, entry)| {
-            let class = match (!entry.first_is_add, !entry.last_is_delete) {
-                (false, true) => Some("added"),
-                (true, false) => Some("deleted"),
-                (true, true) => Some("modified"),
-                (false, false) => None,
-            };
-            class.map(|class| (refno, class))
-        })
-        .collect()
-}
-
-/// 会话索引差分（`session_index_diff`，不逐会话解析记录、不查库）在每个案例
-/// 窗口上必须与生产净窗口给出**逐 refno 相同**的终态三类。台账那一腿由
-/// 性质 e（净窗口 ≡ 台账）闭环——e 与本条同时绿，三方即相等。
-///
-/// 与真实 ams8000 live 对拍（`session_index_diff` 模块里的 `#[ignore]` 用例，
-/// 仲裁人是生产 B+ 点查）互为补充：这里是 CI 里永远在跑的那一份。
-#[test]
-fn index_diff_matches_net_window_on_every_case_window() {
-    let fixture = fixture();
-    let mut windows: Vec<(String, u32, u32)> = fixture
-        .cases()
-        .iter()
-        .map(|case| {
-            let window = case_window(case);
-            (window.id, window.apply, window.end)
-        })
-        .collect();
-    // 整链宽窗口（最早案例起点..最终会话）：跨案例合并的形状也要对上。
-    if let Some(min_apply) = windows.iter().map(|(_, apply, _)| *apply).min() {
-        windows.push((
-            "whole-chain".to_owned(),
-            min_apply,
-            fixture.manifest.final_snapshot.sesno,
-        ));
-    }
-
-    let mut compared = 0usize;
-    for (id, apply, end) in windows {
-        let mut io = PdmsIO::new("", fixture.final_path.clone(), true);
-        let diff =
-            session_index_diff::collect_net_changes(&mut io, apply as i32..=end as i32, false)
-                .unwrap_or_else(|error| panic!("窗口 {id} 差分失败: {error:#}"));
-
-        let mut diff_classes: BTreeMap<String, &'static str> = BTreeMap::new();
-        for entry in &diff.added {
-            diff_classes.insert(pdms_str(entry.refno), "added");
-        }
-        for entry in &diff.deleted {
-            diff_classes.insert(pdms_str(entry.refno), "deleted");
-        }
-        for entry in &diff.modified {
-            diff_classes.insert(pdms_str(entry.refno), "modified");
-        }
-
-        let net_window = terminal_presence_classes(&fixture.collect(apply, end));
-        assert_eq!(
-            diff_classes, net_window,
-            "窗口 {id}（{apply}..={end}）：索引差分与净窗口的终态三类不一致"
-        );
-        compared += 1;
-    }
-    assert!(compared > 0, "一个窗口都没对拍到");
-}
-
-// ── 性质 i)：净窗口收集器对拍（ADR-022，引擎经 collect_window 切换的实现体）──
-
-/// `NamedAttrValue` 桶归一成可比较形态（HashMap → BTreeMap + JSON 值），
-/// 避开渲染路径里引用型条目的 HashMap 迭代顺序不确定性。
-fn normalized_bucket(
-    map: &std::collections::HashMap<String, NamedAttrValue>,
-) -> BTreeMap<String, String> {
-    map.iter()
-        .map(|(key, value)| {
-            (
-                key.clone(),
-                serde_json::to_string(value).expect("attr json"),
-            )
-        })
-        .collect()
-}
-
-fn normalized_pair_bucket(
-    map: &std::collections::HashMap<String, (NamedAttrValue, NamedAttrValue)>,
-) -> BTreeMap<String, (String, String)> {
-    map.iter()
-        .map(|(key, (old, new))| {
-            (
-                key.clone(),
-                (
-                    serde_json::to_string(old).expect("attr json"),
-                    serde_json::to_string(new).expect("attr json"),
-                ),
-            )
-        })
-        .collect()
-}
-
-/// `ModifiedElement` 的九个差量桶 + children 两端 + noun 的规范形态。
-/// `current_data` 刻意不比：持久化语义由九个差量桶、children 与 noun 决定；
-/// 原始终稿记录字节由性质 c/f 的时点快照与字段差分负责。
-fn normalized_modified(modified: &ModifiedElement) -> Vec<String> {
-    let children = modified.children_changed.as_ref().map(|(old, new)| {
-        (
-            old.0.iter().copied().map(pdms_str).collect::<Vec<_>>(),
-            new.0.iter().copied().map(pdms_str).collect::<Vec<_>>(),
-        )
-    });
-    let uda = |map: &std::collections::HashMap<i32, NamedAttrValue>| -> BTreeMap<i32, String> {
-        map.iter()
-            .map(|(hash, value)| (*hash, serde_json::to_string(value).expect("uda json")))
-            .collect()
-    };
-    let uda_pairs = |map: &std::collections::HashMap<i32, (NamedAttrValue, NamedAttrValue)>| -> BTreeMap<i32, (String, String)> {
-        map.iter()
-            .map(|(hash, (old, new))| {
-                (
-                    *hash,
-                    (
-                        serde_json::to_string(old).expect("uda json"),
-                        serde_json::to_string(new).expect("uda json"),
-                    ),
-                )
-            })
-            .collect()
-    };
-    vec![
-        format!("noun={}", modified.noun),
-        format!("children={children:?}"),
-        format!("added={:?}", normalized_bucket(&modified.added_attrs)),
-        format!("deleted={:?}", normalized_bucket(&modified.deleted_attrs)),
-        format!(
-            "modified={:?}",
-            normalized_pair_bucket(&modified.modified_attrs)
-        ),
-        format!(
-            "added_explicit={:?}",
-            normalized_bucket(&modified.added_explicit_attrs)
-        ),
-        format!(
-            "deleted_explicit={:?}",
-            normalized_bucket(&modified.deleted_explicit_attrs)
-        ),
-        format!(
-            "modified_explicit={:?}",
-            normalized_pair_bucket(&modified.modified_explicit_attrs)
-        ),
-        format!("added_uda={:?}", uda(&modified.added_uda_attrs)),
-        format!("deleted_uda={:?}", uda(&modified.deleted_uda_attrs)),
-        format!("modified_uda={:?}", uda_pairs(&modified.modified_uda_attrs)),
-    ]
-}
-
-/// 生产包装 `IncrementPipeline::collect_window` 在每个案例窗口上必须保持 vendor
-/// 净窗口的终态三类与 Modified 负载（九桶 + children + noun），不得重新引入逐会话
-/// 回放或在包装层二次折叠。同一批 refno 再比一次 impact qualifier。
-/// 顺带钉住：真实会话链上净收集不出现降级警告。
-#[test]
-fn pipeline_window_matches_vendor_net_window_on_every_case_window() {
-    let fixture = fixture();
-    let mut payloads_compared = 0usize;
-    for case in fixture.cases() {
-        let window = case_window(case);
-        let mut snapshot = DabaconSnapshot::open("", fixture.cut(window.end))
-            .unwrap_or_else(|error| panic!("案例 {} 冻结快照失败: {error:#}", window.id));
-        let outcome =
-            net_window::collect_net_window(&mut snapshot, window.apply as i32..=window.end as i32)
-                .unwrap_or_else(|error| panic!("案例 {} 净收集失败: {error:#}", window.id));
-        assert!(
-            outcome.warnings.is_empty(),
-            "案例 {} 净收集出现降级警告: {:?}",
-            window.id,
-            outcome.warnings
-        );
-
-        let pipeline_window = fixture.collect(window.apply, window.end);
-
-        let mut net_classes: BTreeMap<String, &'static str> = BTreeMap::new();
-        let mut net_modified: BTreeMap<String, (u32, &ModifiedElement, &EleOperationData)> =
-            BTreeMap::new();
-        for operation in outcome.window.values().flatten() {
-            let key = pdms_str(operation.refno);
-            let class = match &operation.detail {
-                EleOperationDetail::Add(_) => "added",
-                EleOperationDetail::Deleted => "deleted",
-                EleOperationDetail::Modified(modified) => {
-                    net_modified.insert(key.clone(), (operation.sesno, modified, operation));
-                    "modified"
-                }
-                EleOperationDetail::None => continue,
-            };
-            net_classes.insert(key, class);
-        }
-        assert_eq!(
-            net_classes,
-            terminal_presence_classes(&pipeline_window),
-            "案例 {}：生产包装与 vendor 净窗口的终态三类不一致",
-            window.id
-        );
-
-        // 生产包装不得改写 vendor 已合成的 Modified 九桶、children 或 qualifier。
-        for (sesno, operations) in &pipeline_window {
-            for pipeline_op in operations {
-                let EleOperationDetail::Modified(pipeline_modified) = &pipeline_op.detail else {
-                    continue;
-                };
-                let key = pdms_str(pipeline_op.refno);
-                let Some((net_sesno, net_payload, net_op)) = net_modified.get(&key) else {
-                    panic!(
-                        "案例 {}：生产包装有 Modified {key}，vendor 净窗口没有",
-                        window.id
-                    );
-                };
-                assert_eq!(
-                    *net_sesno, *sesno,
-                    "案例 {}：{key} 的终态会话不一致",
-                    window.id
-                );
-                assert_eq!(
-                    normalized_modified(net_payload),
-                    normalized_modified(pipeline_modified),
-                    "案例 {}：{key} 的 Modified 负载被生产包装改写",
-                    window.id
-                );
-                assert_eq!(
-                    classify_operation_effects(net_op).qualified_changes,
-                    classify_operation_effects(pipeline_op).qualified_changes,
-                    "案例 {}：{key} 的 qualifier 恢复结果不一致",
-                    window.id
-                );
-                payloads_compared += 1;
-            }
-        }
-    }
-    assert!(
-        payloads_compared > 0,
-        "一个 Modified 负载都没对拍到——夹具形状变了？"
-    );
-}
-
 #[test]
 fn frozen_snapshot_accepts_same_file_growth_and_rejects_same_sesno_replacement() {
     let fixture = fixture();
@@ -877,13 +618,13 @@ fn frozen_snapshot_accepts_same_file_growth_and_rejects_same_sesno_replacement()
         .tempdir()
         .expect("snapshot tempdir");
 
+    use aios_database::data_interface::e3d_collector::collect_net_window;
+    use aios_database::data_interface::frozen_source::FrozenSource;
+
     let append_path = work.path().join("append-db");
     fs::copy(fixture.cut(25), &append_path).expect("seed sesno 25");
-    let append_token = {
-        let snapshot = DabaconSnapshot::open("", &append_path).expect("freeze sesno 25");
-        assert_eq!(snapshot.token().target_sesno(), 25);
-        snapshot.token().clone()
-    };
+    let append_token = FrozenSource::capture(&append_path).expect("freeze sesno 25");
+    assert_eq!(append_token.target_sesno(), 25);
     // E3D append updates the header in place and extends the same file object.
     // Rewriting the final fixture into the existing path preserves the stable
     // file identity while advancing the authoritative session to 26.
@@ -892,27 +633,26 @@ fn frozen_snapshot_accepts_same_file_growth_and_rejects_same_sesno_replacement()
         fs::read(fixture.cut(26)).expect("read sesno 26"),
     )
     .expect("advance same file to sesno 26");
-    let mut reopened =
-        DabaconSnapshot::open_verified("", &append_token).expect("same file generation may grow");
+    let reopened = append_token
+        .reopen_verified()
+        .expect("same file generation may grow");
     assert_eq!(
-        reopened.token().target_sesno(),
+        reopened.target_sesno(),
         25,
         "verified reopen must preserve the frozen target instead of adopting latest"
     );
-    net_window::collect_net_window(&mut reopened, 25..=25)
+    collect_net_window(&reopened, 25..=25, reopened.db_type())
         .expect("collect the frozen target after same-file growth");
 
     let replace_path = work.path().join("replace-db");
     let replacement = work.path().join("replacement-db");
     fs::copy(fixture.cut(25), &replace_path).expect("seed original sesno 25");
     fs::copy(fixture.cut(25), &replacement).expect("seed replacement with same sesno");
-    let replace_token = {
-        let snapshot = DabaconSnapshot::open("", &replace_path).expect("freeze original");
-        snapshot.token().clone()
-    };
+    let replace_token = FrozenSource::capture(&replace_path).expect("freeze original");
     fs::remove_file(&replace_path).expect("unlink original path");
     fs::rename(&replacement, &replace_path).expect("install same-sesno replacement");
-    let error = DabaconSnapshot::open_verified("", &replace_token)
+    let error = replace_token
+        .reopen_verified()
         .err()
         .expect("same sesno replacement must fail stable identity verification");
     assert!(error.to_string().contains("文件身份"), "{error:#}");

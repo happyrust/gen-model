@@ -1,6 +1,9 @@
 # ADR-053：direct 模式——生成期数据读取直走 pdms-io 解析（不查数据库）
 
-状态：**已接受**（2026-08-29 grill 确认：Q1–Q6 全采推荐项）；**Q3 已被 ADR-054 取代**（2026-09-02：未指定时点一律取文件最新会话，`applied_sesno` 不再是生成时点的默认来源）
+状态：**已接受**（2026-08-29 grill 确认：Q1–Q6 全采推荐项）；**Q3 已被 ADR-054 取代**（2026-09-02：未指定时点一律取文件最新会话，`applied_sesno` 不再是生成时点的默认来源）；
+**追记（2026-09-02，plant-ui 计划 D1）**：direct 形态「不起 watcher / worker」收窄为**只不起 watcher**——数据批次 worker 照常启动，
+只消化人工执行（`POST /update/execute`）排进来的批次；`/health.worker_alive` 在 direct 下报真值。理由：执行请求一律 202 入队、
+服务端不拒绝，没有消费者那一行就永远「排队中」，而 worker 是队列的唯一消费者、与读取底座无关（`changelog.md` 2026-09-02）。
 日期：2026-08-29
 关联：ADR-002（core.dll 权威范围）、ADR-004（按需解析 CATA）、ADR-005（refno 索引定位）、`docs/plans/scope-a-full-crate-swap-feasibility.md`（fork 整库替换评估，未采）、`teach/learning-records/0002/0004/0009`（core.dll RE 实证）；产出计划 `docs/plans/direct-mode-model-generation.md`。
 
@@ -69,4 +72,5 @@ pdms-io 解析栈已把这套机制全部复刻：
 - **R3 查询面盘点遗漏**（espec/管件特化查询等长尾）→ P1 以「收口函数清单 + 编译期 deny 直连 SUL_DB」双保险；漏网走 fallback：direct 上下文内未覆盖查询显式报错（fail loud），不静默回落 DB。
 - **R4 PdmsIO 并发争用** → 会话池分 dbnum 锁；对拍阶段量化锁等待，超阈值再优化。
 - **R5 文件与水位竞态**：direct 读文件时 watcher 可能正写入新会话 → pin sesno 天然免疫「读到未应用会话」；文件替换（reinit）场景沿用现有文件身份守卫。
-- **R6 与 staging 读上下文叠加**：direct 与 staging 互斥（生成期不在暂存窗口内），入口断言二者不同时在场。
+- ~~**R6 与 staging 读上下文叠加**：direct 与 staging 互斥（生成期不在暂存窗口内），入口断言二者不同时在场。~~
+  **已失效（ADR-056，2026-09-02）**：kv-mem 暂存与 staging 读上下文退役，direct 是生成期唯一的读上下文，不再有互斥对象。

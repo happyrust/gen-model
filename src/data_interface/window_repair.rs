@@ -2,8 +2,13 @@
 //!
 //! 2026-09-02（ADR-056 P1 / spec 035 T112）：从「开 kv-mem 暂存窗口 → 预载 → 暂存 → journal 写回」
 //! 改为直写持久层重放，语句与生产直写路径同一份渲染；水位守卫与空间 epoch 推进仍在一个尾事务里。
-//! 注意：本模块的收集器仍是 old-pdms-io（P4 换底座前 F8 幻删 / 漏增照样进来），成员审计
-//! （`orphan_candidates` + `expand_deleted_membership_roots`）是 ADR-036 的补删仲裁，P4 收口后一并退役。
+//!
+//! 2026-09-03 底座换成 e3d-io（`e3d_collector`）之后，ADR-036 的「成员关系仲裁补删」
+//! （old-pdms-io `expand_deleted_membership_roots`：把 base 会话成员表里的子树整枝判删）
+//! 一并退役——两根索引差分本身就是终态：base 有、target 无的记录**每一条**都已是 `Deleted`，
+//! 按 base 成员表再扩一遍只会把 target 端仍在场的元素误杀（evidence `2026-09-02-planner-parity.md`
+//! §3 的幻删就是这么来的）。这里保留的审计只剩一半：持久层里没有 OWNER 入边的活行，
+//! 若在冻结目标会话的索引里**已不存在**，补一条 `Deleted`；仍在场的一律不动。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -11,10 +16,10 @@ use std::path::Path;
 use aios_core::pdms_types::RefU64;
 use aios_core::{RefnoEnum, SUL_DB};
 use anyhow::Context;
-use pdms_io::io::{EleOperationData, EleOperationDetail};
 use serde::Serialize;
 
 use super::dbnum_state::DbnumState;
+use super::ele_ops::{EleOperationData, EleOperationDetail};
 use super::increment_pipeline::IncrementPipeline;
 
 #[derive(Debug, Clone, Serialize)]
@@ -161,18 +166,14 @@ pub async fn repair_committed_window(
 
     let mut collected = IncrementPipeline::collect_window(file, from_sesno..=to_sesno)?;
     let original_membership_deleted = collected.membership_deleted;
-    let snapshot_token = collected
-        .snapshot_token
+    let frozen = collected
+        .frozen
         .clone()
-        .ok_or_else(|| anyhow::anyhow!("纠正窗口缺少冻结 SnapshotToken"))?;
-    let mut snapshot = pdms_io::snapshot::DabaconSnapshot::open_verified_at(
-        "",
-        &snapshot_token,
-        u32::try_from(to_sesno).context("纠正目标会话非法")?,
-    )
-    .context("纠正成员审计重开冻结快照失败")?;
+        .ok_or_else(|| anyhow::anyhow!("纠正窗口缺少冻结源 FrozenSource"))?
+        .reopen_verified_at(u32::try_from(to_sesno).context("纠正目标会话非法")?)
+        .context("纠正成员审计重开冻结源失败")?;
 
-    // 只对持久层已经没有 OWNER 入边的活行做文件成员复核；
+    // 只对持久层已经没有 OWNER 入边的活行做文件存活复核；
     // 普通索引记录不会被这个审计面扩大成删除。
     let already_deleted = collected
         .range_eles
@@ -193,17 +194,22 @@ pub async fn repair_committed_window(
         })
         .map(|operation| operation.refno)
         .collect::<BTreeSet<_>>();
-    let mut unreachable_roots = BTreeSet::new();
-    for refno in orphan_candidates(dbnum, &affected_owners).await? {
-        if !already_deleted.contains(&refno) && !snapshot.member_alive_at(refno, to_sesno)? {
-            unreachable_roots.insert(refno);
-        }
-    }
-    let audit_deleted = if unreachable_roots.is_empty() {
+    let orphans = orphan_candidates(dbnum, &affected_owners)
+        .await?
+        .into_iter()
+        .filter(|refno| !already_deleted.contains(refno))
+        .collect::<BTreeSet<_>>();
+    let live_at_target = if orphans.is_empty() {
         BTreeSet::new()
     } else {
-        snapshot.expand_deleted_membership_roots(&unreachable_roots, from_sesno - 1, to_sesno)?
+        super::e3d_collector::contains_refnos_at(&frozen, &orphans)
+            .context("纠正成员审计查冻结目标会话索引失败")?
     };
+    // 索引差分是终态：不再按 base 成员表扩枝（见模块头）。
+    let audit_deleted = orphans
+        .difference(&live_at_target)
+        .copied()
+        .collect::<BTreeSet<_>>();
     merge_deleted(&mut collected.range_eles, to_sesno, &audit_deleted)?;
 
     let deleted_refnos = collected
@@ -215,16 +221,25 @@ pub async fn repair_committed_window(
         .collect::<Vec<_>>();
     let hard_delete_rows = deleted_nouns(&deleted_refnos).await?;
 
-    // 直写重放（ADR-056 P1 / spec 035 T112）：纠正的是一个**已提交**窗口，水位不动，
-    // 语句与生产直写路径同一份渲染（`render_persist_statements` + 反向索引），逐条幂等
-    // 重放到持久层；此前借 kv-mem 暂存窗口 + journal 写回只是为了让旧生成器读到预载行，
-    // 暂存层退役后没有替代物也不需要替代物。本工具在服务停止后运行，不与批次并发。
+    // 纠正的是一个已提交窗口，水位不动；重新投影审计补出的删除后，使用与生产相同的
+    // 终态渲染逐条幂等重放。本工具在服务停止后运行，不与批次并发。
+    let persist_changes = crate::data_interface::ele_ops::terminal_persist_changes(
+        &collected.range_eles,
+    );
+    let uda_keys = crate::data_interface::uda_keys::UdaKeyMap::load().await?;
     let statements =
-        IncrementPipeline::render_persist_statements(&collected.range_eles, dbnum as i32)
+        IncrementPipeline::render_terminal_persist_statements(&persist_changes, dbnum as i32, &uda_keys)
             .into_iter()
             .chain(super::manual_update::build_reverse_index_statements(
                 &collected.range_eles,
             ))
+            // refno 复用：旧 noun 行随窗口一起删（与生产尾事务同一份语句）。
+            .chain(
+                collected
+                    .retired_type_rows
+                    .iter()
+                    .map(|row| row.delete_statement(&row.refno.to_string())),
+            )
             .collect::<Vec<_>>();
     for sql in &statements {
         crate::surreal_retry::execute_surreal_checked(sql, "纠正窗口数据重放")
@@ -280,6 +295,8 @@ pub async fn repair_committed_window(
         .map(RefnoEnum::to_pdms_str)
         .collect::<Vec<_>>();
     cleaned_refnos.sort_unstable();
+    let mut warnings = collected.warnings;
+    warnings.extend(uda_keys.misses_warning(dbnum));
     Ok(WindowRepairReport {
         dbnum,
         from_sesno,
@@ -295,6 +312,6 @@ pub async fn repair_committed_window(
         cleaned_refnos,
         verification: "watermark unchanged; deleted pe/noun/UDA/owner/model rows absent"
             .to_string(),
-        warnings: collected.warnings,
+        warnings,
     })
 }

@@ -257,6 +257,19 @@ pub fn full_init(
                 CONNECTED.store(true, Ordering::SeqCst);
             }
 
+            // 2b. ADR-050：model_update_pending 只是本进程的调度账本。连接建立后、
+            //     任何生产者/消费者可能动手之前，清掉上一进程留下的数据动作工作单
+            //     （room_recalc_* 保留，由房间轮收敛）；本进程的 incr.apply_file /
+            //     drain_data 稍后会消费同一张表，不清就是把两个进程的快照混着回放。
+            //     失败按 ADR-050 §3 上抛——继续跑等于拿陈旧账本当恢复输入。
+            let cleared =
+                aios_database::data_interface::model_update_pending::clear_stale_at_process_start()
+                    .await
+                    .context("启动清理 model_update_pending 失败，拒绝继续")?;
+            if cleared > 0 {
+                println!("启动清理 model_update_pending 完成：删除 {cleared} 条历史数据工作单");
+            }
+
             // 3. 收口事务依赖的自定义函数自检 + 增量状态表兼容检查 + dbnum 事件。
             //    与 run_cli 同款：自检失败中止初始化（函数缺失时跑 mutating 必炸）。
             aios_database::data_interface::increment_pipeline::selfcheck_surreal_functions()

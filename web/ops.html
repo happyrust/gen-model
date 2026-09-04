@@ -92,6 +92,32 @@ body{
 .chip.mut{background:var(--tint-mut);color:var(--t3)}
 .chip.sm{padding:3px 8px;font-size:10.5px;letter-spacing:.4px}
 
+/* ── two lanes ──────────────────────────────────────────── */
+/* 数据面与模型面等宽并排：宽度上分不出主次，才不会被读成「上面那条要紧、下面那条
+   顺带」。判决行比单条时小一号——两条并排时它们要一起被扫过，25px 两列会顶到换行。 */
+.lanes{display:flex;gap:20px;align-items:stretch}
+.lanes>.verdict{flex:1 1 0;min-width:0;padding:18px 20px 18px 19px}
+.lane-name{font-size:10.5px;font-weight:600;letter-spacing:1.4px;color:var(--t3)}
+.lanes .verdict-line{font-size:20px;line-height:28px}
+.lanes .verdict-timer .val{font-size:24px}
+/* 房间接在模型面下面而不是自成一列：它吃的是模型产物，同级摆三列等于说它与两枚
+   凭证一样是根判据，而它只是派生。 */
+.seg{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);
+  display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.seg .l{flex:0 0 auto;font-size:10.5px;font-weight:600;letter-spacing:1.4px;color:var(--t3)}
+.seg .x{flex:1 1 200px;min-width:0;font-size:12.5px;line-height:19px;color:var(--t2)}
+.seg .x b{font-weight:500;color:var(--t1)}
+.seg .x .dot{display:inline-block;vertical-align:1px;margin-right:3px}
+.ctl{display:flex;flex-direction:column;gap:8px}
+/* 「已关闭」「这版后端不报」不是绿也不是黄：它们说的是「这一面判不出来 / 不适用」，
+   给它们一个灰边，免得被读成任何一种健康度。 */
+.verdict.lv-mut{border-left-color:var(--t3)}
+/* hidden 属性在 UA 样式表里，作者规则 display:flex 会压过它。 */
+.lanes[hidden],#halt[hidden]{display:none}
+/* health 分项降级 / 读数停摆的那一句。它会和任何一种判决同时成立，所以不进泳道、
+   单独一行摆在泳道上方。 */
+.notice{font-size:12px;line-height:18px;color:var(--amber);padding:0 2px}
+
 /* ── actions ────────────────────────────────────────────── */
 .acts{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding-top:4px}
 .btn{
@@ -174,35 +200,31 @@ body{
 .acts-row .hint{font-size:11.5px;color:var(--t3);line-height:17px}
 a.jump{text-decoration:none}
 .jump.mut{color:var(--t3)}
-.w-tbl{grid-template-columns:90px minmax(110px,140px) 84px 126px minmax(150px,1fr) 70px minmax(230px,360px)}
-.w-tbl>.r{height:46px}
+/* 每库两枚凭证：dbnum · 项目 · 类型 · 文件最新 · 应用水位 · 生成源版本 · 标记。
+   两枚凭证各占一格、等宽并排，格内摞两行（上行「值 → 文件最新」，下行落后量与进度条）。
+   只画一根合并进度条会把两件事捏成一件——ADR-056 D2 之后它们本来就常常不同步。 */
+.w-tbl{grid-template-columns:86px minmax(96px,124px) 84px 72px minmax(170px,1fr) minmax(210px,1.25fr) minmax(200px,320px)}
+.w-tbl>.r{height:52px}
+.w-tbl .stk{display:flex;flex-direction:column;justify-content:center;gap:3px;min-width:0;
+  font-size:11.5px;line-height:15px}
+.w-tbl .stk>*{overflow:hidden;text-overflow:ellipsis;font-style:normal;font-weight:400}
+.w-tbl .stk .row{display:flex;align-items:center;gap:8px;min-width:0}
+.w-tbl .stk .track{flex:1 1 60px;max-width:150px;height:4px}
+.w-tbl .stk .sub{color:var(--t3);flex:0 0 auto}
 /* 这一列的宽度是按 480px 排的：`.page` 封顶 1440，`.col-r` 的 basis 就是 480，
-   所以任何 ≥1440 的屏幕上这张卡都恰好这么宽——它是常态而不是极端情形。五列在这个
-   宽度下必截字，所以成对的两格各自摞成两行，换回四列。 */
-.s-tbl{grid-template-columns:58px minmax(120px,1fr) 74px 86px}
+   所以任何 ≥1440 的屏幕上这张卡都恰好这么宽——它是常态而不是极端情形。原话与坏根
+   清单在这个宽度下必截字，所以它们不进列，各自另起一行（.sw-msg）。 */
+.s-tbl{grid-template-columns:58px 104px minmax(96px,1fr) minmax(96px,1fr)}
 .s-tbl>.r{height:42px}
 .s-tbl>.r.wmsg{border-bottom:0}
-/* 摞成两行的格子。两处各有各的理由，但都不是「排版好看」：
-   - 窗口名 + 会话区间：一行时先被省略号吃掉的是 `staging_8191_1` 的尾巴，而那一截
-     恰恰是区分同库两个窗口的全部信息；
-   - 体量的字节 + 行数：`ResourceThresholds` 里 `*_bytes` 与 `*_rows` 是两组各自判档、
-     取高者的阈值，两根配额轴谁都不能省，一行摆不下就会截掉数量级那一头。 */
-.s-tbl .stk{display:flex;flex-direction:column;justify-content:center;gap:1px;
-  font-size:11.5px;line-height:15px}
-.s-tbl .stk>*{overflow:hidden;text-overflow:ellipsis;font-weight:400;font-style:normal}
-.s-tbl .stk i{color:var(--t3)}
 .sw-msg{grid-column:1/-1;padding:0 18px 12px;font-size:11.5px;line-height:18px;
   white-space:normal;word-break:break-word;border-bottom:1px solid var(--line)}
 .sw-msg:last-child{border-bottom:0}
 .sw-msg .l{display:block;font-family:var(--mono);font-size:10.5px;letter-spacing:.4px;color:var(--t3);margin-bottom:4px}
 .sw-msg .v{color:var(--red)}
+.sw-msg .p{display:block;margin-top:4px;font-family:var(--mono);font-size:10.5px;color:var(--t3);word-break:break-all}
 .sw-note{padding:0 18px 14px;font-size:11.5px;line-height:18px;color:var(--t3)}
 .sw-note b{font-weight:400;color:var(--amber)}
-/* 上次提交的耗时与重试。它与窗口列表不是一回事——窗口没了它还在，所以摆在脚注
-   而不是表里，免得被读成「还有一个窗口」。 */
-.sw-foot{display:flex;gap:20px;flex-wrap:wrap;padding:11px 18px 13px;
-  border-top:1px solid var(--line);font-size:11.5px;color:var(--t3)}
-.sw-foot .v{font-family:var(--mono);color:var(--t2)}
 .dbn{font-family:var(--mono);font-size:13.5px;font-weight:500}
 .state{display:flex;align-items:center;gap:9px;min-width:0}
 .dot{width:6px;height:6px;border-radius:50%;flex:0 0 auto}
@@ -299,9 +321,10 @@ a.jump{text-decoration:none}
 @media(max-width:1180px){
   .mid{flex-direction:column}
   .mid>.col-l,.mid>.col-r{flex:1 1 auto;width:100%}
+  .lanes{flex-direction:column}
   .kpi{flex-wrap:wrap;gap:16px 0}
   .kpi>div{flex:1 1 33%}
-  .verdict-line{font-size:21px;line-height:29px}
+  .verdict-line,.lanes .verdict-line{font-size:21px;line-height:29px}
 }
 </style>
 </head>
@@ -319,23 +342,21 @@ a.jump{text-decoration:none}
     </div>
   </div>
 
-  <div class="verdict lv-run" id="verdict">
-    <div class="verdict-body">
-      <div class="verdict-meta">
-        <span class="chip mut" id="v-chip">连接中</span>
-        <span class="chip amber" id="v-warn" hidden></span>
-        <span class="mono mut" id="v-path" style="font-size:11.5px"></span>
-      </div>
-      <div class="verdict-line" id="v-line">正在读取 /api/v1/health …</div>
-      <div class="verdict-detail" id="v-detail"></div>
-      <div class="acts" id="acts" hidden></div>
-      <div class="acts-msg" id="acts-msg" hidden></div>
-    </div>
-    <div class="verdict-timer" id="v-timer" hidden>
-      <div class="lbl" id="v-tlabel">已阻断</div>
-      <div class="val mono" id="v-tval">—</div>
-      <div class="since" id="v-tsince"></div>
-    </div>
+  <!-- 共享前置。读不到 /health、或 SurrealDB 断了，两面的数字就都只是最后一次读
+       成功时的样子——那时并排摆两条判决只会让人把旧读数当现状，所以这一档在场时
+       泳道整个让位。 -->
+  <div id="halt"></div>
+
+  <!-- 数据面与模型面并排。ADR-056 D1 之后模型失败不再阻断水位，D2 又把「水位齐、
+       模型没追平」定成承认且可观测的常态；把两面压进一条判决梯，那个常态只能被讲
+       成「进行中」或者干脆被数据面盖掉。所以它们各说各的，谁也不压谁。
+       底层（SurrealDB / worker / 空间树 / 副作用队列）是两面共享的一条，在页脚
+       那道 sysbar 上。 -->
+  <div class="lanes" id="lanes"></div>
+
+  <div class="ctl">
+    <div class="acts" id="acts" hidden></div>
+    <div class="acts-msg" id="acts-msg" hidden></div>
   </div>
 
   <div class="kpi" id="kpi"></div>
@@ -363,10 +384,10 @@ a.jump{text-decoration:none}
       <div class="panel">
         <div class="panel-head" style="align-items:flex-start">
           <div style="min-width:0">
-            <div style="display:flex;align-items:baseline"><span class="t">暂存窗口</span><span class="n" id="sw-count">—</span></div>
-            <div class="sub">ADR-017：一段会话先攒在内存里，整段提交才落库。失败之后窗口是回滚了还是残留着，直接决定重跑会不会撞同一堵墙，也是资源泄漏的第一现场。</div>
+            <div style="display:flex;align-items:baseline"><span class="t">窗口阻断 · 数据侧终态</span><span class="n" id="sw-count">—</span></div>
+            <div class="sub">同一右端连撞 MAX_ATTEMPTS 次同一堵墙 = 这一窗的失败是确定性的，落一条带原始错误的终态（ADR-056 D1）。它在持久层，跨重启、跨机器都还在——连败账本清空之后，这里是唯一还说得出话的证据。</div>
           </div>
-          <span class="src">GET /health → staging_windows</span>
+          <span class="src">GET /health → window_blocks</span>
         </div>
         <div id="sw-body"></div>
       </div>
@@ -431,8 +452,8 @@ a.jump{text-decoration:none}
   <div class="panel">
     <div class="panel-head" style="align-items:flex-start">
       <div style="min-width:0">
-        <div style="display:flex;align-items:baseline"><span class="t">水位 · 每库应用进度</span></div>
-        <div class="sub">applied_sesno 追平 file_latest_sesno 才算真落库——屏障解开、blockers 清空都证明不了数据到位。</div>
+        <div style="display:flex;align-items:baseline"><span class="t">每库两枚凭证</span></div>
+        <div class="sub">数据那一枚是<b>应用水位</b>（applied_sesno），模型那一枚是<b>生成源版本</b>（安定生成根的凭证下限，ADR 里叫模型凭证）。两枚各自与文件最新会话比，谁落后是谁的事：模型失败不阻断水位，水位追平也不代表模型跟上了。</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
         <span class="src">GET /api/v1/dbnums</span>
@@ -447,7 +468,7 @@ a.jump{text-decoration:none}
   <div class="foot">
     <div class="legend">
       <span><i class="dot" style="background:var(--green)"></i>已追平</span>
-      <span><i class="dot" style="background:var(--blue)"></i>进行中</span>
+      <span><i class="dot" style="background:var(--blue)"></i>进行中 / 按需（不是告警）</span>
       <span><i class="dot" style="background:var(--amber)"></i>等待 / 异常</span>
       <span><i class="dot" style="background:var(--red)"></i>阻断</span>
       <span><i class="dot" style="background:var(--t3)"></i>已排除</span>
@@ -545,11 +566,23 @@ function pct(applied, latest){
   if(!(latest > 0)) return applied > 0 ? 100 : 0;
   return Math.max(0, Math.min(100, applied / latest * 100));
 }
+// 数据相的名字与顺序都从 /health 的 initialization.phases 取——面板不替后端宣布哪些相
+// 存在。ADR-058 D7 已取消 Catalogue 相，但 DataPhase 枚举要到 S3 才删，过渡期后端可能还
+// 报它；这里只按后端此刻报的键排，键没了这一格就自然消失，不用再改面板。
+const PHASE_ORDER = ["meta", "catalogue", "design"];
+let PHASES = [];                 // 最近一轮 /health 报的相名，model() 每轮刷新
+function phaseKeys(init){
+  const keys = Object.keys((init && init.phases) || {});
+  return PHASE_ORDER.filter(k => keys.includes(k)).concat(keys.filter(k => !PHASE_ORDER.includes(k)));
+}
 function phaseOf(dbType){
   const t = String(dbType || "").trim().toUpperCase();
+  if(!t) return "—";
   if(t === "SYST" || t === "DICT" || t === "GLB" || t === "GLOB") return "meta";
-  if(t === "CATA") return "catalogue";
-  return t ? "design" : "—";
+  // CATA 不入持久层（ADR-058 D1）：后端还在报 catalogue 相时照它的键叫；不报了就说清它
+  // 是模型面从文件直读的，不占任何数据相。
+  if(t === "CATA") return PHASES.includes("catalogue") ? "catalogue" : "cata · 文件直读";
+  return "design";
 }
 // D:\AVEVA\Projects\E3D3.1\<项目>\<ams000>\<文件>
 function projOf(row){
@@ -560,12 +593,18 @@ const ANOMALY = { rollback:"回退", path_migrated:"路径迁移", type_changed:
 
 // 稳定英文子阶段（batch_worker::set_active_task_stage 与 model_update_pending 写入）。
 // 认不出的原样显示：后端加一个新阶段名不该让这一格变空白。
+//
+// `stage_apply` 这个键是暂存时代起的名字，后端没改（落盘的分步账里全是它）；它此刻做
+// 的事是数据窗口直写——分块事务写属性行 → 反向索引 → 尾事务推应用水位（ADR-056）。
+// 键照旧认，中文按现行词条叫；「暂存应用」「写回」两个退役词不再出现在这张表上。
 const STAGE = {
   data_parse:"解析增量", identity_check:"复核文件身份", wipe_reinit:"整库清空重建",
   initial_load:"首次全量基线", resolve_window:"解析会话窗口",
-  collect_window:"收集增量", stage_apply:"暂存应用",
+  collect_window:"收集增量", stage_apply:"窗口直写",
   dependency_index:"依赖索引", dependency_preload:"依赖预载",
-  model_generate:"生成模型", finalize:"收口", commit:"写回",
+  dependency_closure:"依赖闭包", dependency_write:"依赖写入",
+  model_generate:"生成模型", model_increment:"模型增量",
+  finalize:"提交准备", commit:"持久化提交",
   commit_tail:"收口事务", commit_reconcile:"提交对账",
   claim:"认领", claimed:"已认领", settling:"结算",
 };
@@ -611,22 +650,26 @@ const ACTIONS = {
             hint:"立即唤醒 worker",
             run:async () => `队列已恢复（paused = ${(await post("/queue/resume")).paused}）。` },
   execute:{ label:"立即执行", req:"POST /api/v1/update/execute", cls:"go",
-            hint:"全范围扫描 + 入队，顺带清掉连败账",
+            hint:"全范围扫描 + 入队数据批次，顺带清掉连败账；推的是应用水位，不承诺模型追平",
             run:async () => enqueueReceipt(await post("/update/execute", {})) },
   // 只推一个库。ADR-020 第 3 项的 `dbnums[]` 子集选择服务端早就认，面板此前只会
   // 全范围地推——而人在连败卡上想做的事从来只是「把这一个再试一次」。
   //
   // 名字叫「重扫」不叫「重跑这一批」：它不是把那一段冻住的会话窗口原样重放，而是
-  // 从水位重新扫一遍再入队。文件没变的话算出来的还是同一个窗口，于是**确定性失败
-  // 会一字不差地再来一遍**——这句话必须写在确认行上，否则点完看到同样的报错，人
-  // 会以为按钮没生效。
+  // 从应用水位重新扫一遍再入队。文件没变的话算出来的还是同一个窗口，于是**确定性
+  // 失败会一字不差地再来一遍**——这句话必须写在确认行上，否则点完看到同样的报错，
+  // 人会以为按钮没生效。
+  //
+  // 它推的只是数据那一枚凭证。模型那一枚（生成源版本）在窗口尾事务之后靠凭证前移
+  // 与按需 ensure 追（ADR-056 D9），这个按钮不承诺、也管不到；模型面自己的出口是
+  // 「重试模型死信」。两面分开说，否则人点完看模型那栏还落后，会以为没生效。
   rerun:{  label:"重扫这个库", req:"POST /api/v1/update/execute", cls:"warn",
-            hint:"只推这一个 dbnum；顺带清掉它的连败账，park 立即解除",
+            hint:"只推这一个 dbnum 的应用水位；顺带清掉它的连败账，park 立即解除；不承诺模型追平",
             resolve:async (dbnum) => ({
-              note:`只推 dbnum ${dbnum}：清掉它的连败账（park 立即解除）后重新扫描入队。`
-                 + `注意两件事——SYS meta（SYST/DICT/GLB/GLOB）不是可勾选对象、永远随批；`
-                 + `以及这是从水位重扫而不是重放那段窗口，文件没长出新会话的话，`
-                 + `确定性失败会原样再来一遍。`,
+              note:`只推 dbnum ${dbnum} 的数据面：清掉它的连败账（park 立即解除）后重新扫描入队。`
+                 + `三件事先说清——SYS meta（SYST/DICT/GLB/GLOB）不是可勾选对象、永远随批；`
+                 + `这是从应用水位重扫而不是重放那段窗口，文件没长出新会话的话确定性失败会原样再来一遍；`
+                 + `它只推应用水位，模型那一枚凭证要等窗口尾事务之后的前移与按需 ensure，这里不承诺。`,
               body:{ dbnums:[Number(dbnum)] } }),
             run:async (ctx) => enqueueReceipt(await post("/update/execute", ctx.body)) },
   retry:  { label:"重试模型死信", req:"POST /api/v1/update/pending-units/retry", cls:"warn",
@@ -994,18 +1037,51 @@ function model(){
     || ((h && h.degraded_sections) || []).includes("model_update_pending");
   const mupBlind = mupDegraded && !(Number(mup.dead_letters) > 0);
 
-  // 暂存窗口三件套都挂在 /health 上（ISSUE-025 §四 4a）。这里**故意不给 `|| []`
-  // 兜底**：字段缺席（老 exe 不报这一栏）与空数组（没有窗口在飞）处置完全不同，
-  // 兜一下两者就长成同一个空白，而这张卡的全部意义就是分开它们。
-  const staging = h ? h.staging_windows : undefined;
-  const stagingBlocks = h ? h.staging_window_blocks : undefined;
+  // 窗口阻断：数据侧确定性失败的终态（ADR-056 D1），落库、跨重启活着。键 2026-09-04 起叫
+  // `window_blocks`（spec 035 T301）；P1 到 T301 之间的 exe 叫 `staging_window_blocks`，形状
+  // 一样，两个名字都认、但记下读的是哪个。这里**故意不给 `|| []` 兜底**：字段缺席（老 exe
+  // 不报这一栏）与空数组（没有阻断）处置完全不同，兜一下两者就长成同一个空白。
+  const wbKey = !h ? null
+    : ("window_blocks" in h ? "window_blocks" : ("staging_window_blocks" in h ? "staging_window_blocks" : null));
+  const windowBlocks = wbKey ? h[wbKey] : undefined;
   // 阻断记录读库，读不出来会走 health 的降级形状（空数组 + 记进 degraded_sections）。
   // 那时的「0 条」是没读到，不是没有。
-  const stagingBlocksBlind = ((h && h.degraded_sections) || []).includes("staging_window_blocks");
+  const windowBlocksBlind = ((h && h.degraded_sections) || [])
+    .some(s => s === "window_blocks" || s === "staging_window_blocks");
+  const wbByDb = new Map((Array.isArray(windowBlocks) ? windowBlocks : []).map(b => [b.dbnum, b]));
+
+  // 模型那一枚凭证：/dbnums 每行的 model_settled_floor / model_settled_roots /
+  // model_unsettled_roots（ADR-058 D5 口径，与启动一级过滤同一条聚合）。三列同进同出，
+  // 取数失败整行缺席并在 warnings 里留一句——所以「缺席」有两种来历：老后端不报这几列
+  // （永远缺席），或这一轮 gen_root 聚合失败（warnings 有话）。null 在 floor 这一列有确切
+  // 含义（一条安定行都没有），不拿它兼表「读不到」。
+  const credOf = r => (r && ("model_settled_floor" in r || "model_unsettled_roots" in r))
+    ? { floor:r.model_settled_floor == null ? null : Number(r.model_settled_floor),
+        settled:Number(r.model_settled_roots || 0), unsettled:Number(r.model_unsettled_roots || 0) }
+    : null;
+  const credWarn = ((S.dbnums && S.dbnums.warnings) || []).find(w => /模型凭证|gen_root/.test(String(w))) || "";
+  // 三态：null = 还没拉到 /dbnums；"absent" = 这版后端不报这几列；"failed" = 本轮聚合失败；
+  // "" = 在。范围内一行都没有时按「在」处理——没有库不等于不报。
+  const credBlind = !S.dbnums ? null
+    : ((dbs.some(r => credOf(r)) || !dbs.length) ? "" : (credWarn ? "failed" : "absent"));
+  // 无凭证记录的库：一条安定行都没有、也没有未安定行。等按需 ensure，**不统计根数**
+  // （ADR-058 D6 / 实施约束 7）——它不是落后，是还没人读过。
+  const noCred = r => { const c = credOf(r); return !!c && c.floor == null && c.unsettled === 0 && c.settled === 0; };
+  // 模型落后：有未安定根，或安定下限落在文件最新之前。凭证 ≥ 文件最新即追平——ADR-054 是
+  // 单调判据，不判等值（凭证前移可以把它推到比文件还新的时刻）。
+  const modelBehind = r => { const c = credOf(r); return (c && c.floor != null) ? Math.max(0, Number(r.file_latest_sesno) - c.floor) : 0; };
+  const modelLagging = inScope.filter(r => {
+    const c = credOf(r);
+    return !!c && !noCred(r) && (c.unsettled > 0 || (c.floor != null && c.floor < Number(r.file_latest_sesno)));
+  }).sort((a, b) => (modelBehind(b) - modelBehind(a)) || (credOf(b).unsettled - credOf(a).unsettled) || (a.dbnum - b.dbnum));
+  const coldDbs = inScope.filter(noCred);
+
+  PHASES = phaseKeys(init);
   return { h, init, rows, tasks, dbs, byTask, byDb, dbsByNum, failedByDb,
            failures, parked, inScope, lagging,
            running, queued, held, blockedPhase, blockedRows, blockedBy, mup, mupBlind,
-           staging, stagingBlocks, stagingBlocksBlind, stagingCommit:(h && h.staging_commit) || null };
+           wbKey, windowBlocks, windowBlocksBlind, wbByDb,
+           credOf, credWarn, credBlind, noCred, modelBehind, modelLagging, coldDbs, phaseKeys:PHASES };
 }
 
 /// 挡住 `phase` 那一相的肇事库。
@@ -1026,7 +1102,15 @@ function mupPhrase(m){
 // 队列行的入队时刻只在 /tasks 里，靠 task_id 对回来。
 function enqueuedAt(m, row){ return ts(m.byTask.get(row.task_id)?.created_at); }
 
-function verdict(m){
+/* ── verdicts ───────────────────────────────────────────── */
+// 三段判决：共享前置（halt）→ 数据面 → 模型面，房间挂在模型面尾巴上。每一段都是一把
+// 「上一级成立就不看下一级」的梯子；两面互不压制——ADR-056 D1 之后模型失败不再阻断
+// 应用水位，D2 又把「水位齐、模型没追平」定成承认且可观测的常态，压成一条梯子那个常态
+// 只能被讲成「进行中」或者被数据面盖掉。
+
+/// 共享前置。成立时两面都不画：那时所有数字都只是最后一次读成功时的样子，并排摆两条
+/// 判决只会让人把旧读数当现状。
+function halt(m){
   const now = Date.now();
   if(!m.h){
     return { lv:"down", chip:["red","断连"], path:BASE + "/health",
@@ -1034,14 +1118,27 @@ function verdict(m){
       detail:esc(S.lastErr.replace(/[。.\s]+$/, "")) + "。页面会一直重试；确认端口后可以用 ?api=http://主机:端口/api/v1 指过去。",
       timer:S.errSince ? { label:"已断连", val:dur(now - S.errSince), since:clock(S.errSince), cls:"red" } : null };
   }
-  // SurrealDB 断了的话，下面所有数字都只是最后一次写成功时的样子——先说这个。
   const sul = m.h.sul_db;
   if(sul && sul.connected === false){
     return { lv:"bad", chip:["red","库断连"], path:`sul_db.endpoint = ${sul.endpoint ?? "—"}`,
-      line:`SurrealDB 连不上 —— 水位、队列、pending 都写不进去`,
+      line:"SurrealDB 连不上 —— 应用水位、模型凭证、队列、pending 都写不进去",
       detail:esc(`累计断连 ${n(sul.disconnects_total)} 次${sul.last_disconnect_at ? `，最近一次 ${clock(sul.last_disconnect_at)}` : ""}${sul.last_disconnect_error ? `：${sul.last_disconnect_error}` : ""}。这一页下面的数字是最后一次读成功时的样子。`),
       timer:sul.last_disconnect_at ? { label:"已断连", val:dur(now - ts(sul.last_disconnect_at)), since:clock(sul.last_disconnect_at), cls:"red" } : null };
   }
+  return null;
+}
+
+/// 一条窗口阻断的人话：停在哪一号、原话是什么、坏根几个、从何时起。
+function windowBlockText(b){
+  return `dbnum ${b.dbnum} ${b.end_sesno == null ? "（没记会话号）" : `停在 ${b.end_sesno} 号会话`} —— ${b.reason || "未记原因"}`
+    + (Array.isArray(b.bad_roots) && b.bad_roots.length ? `；坏根 ${b.bad_roots.length} 个（${b.bad_roots.slice(0, 3).join("、")}${b.bad_roots.length > 3 ? "…" : ""}）` : "")
+    + (b.first_blocked_at ? `（首次 ${stamp(b.first_blocked_at)}）` : "");
+}
+
+/// 数据面：应用水位那一枚凭证。梯子——阶段阻断 → 窗口阻断 → 队列暂停 → 副作用死信
+/// → 批次运行中 → 水位落后但队列空 → held → 已追平。
+function dataLane(m){
+  const now = Date.now();
   const st = m.init.status;
   const blockers = m.init.blockers || [];
   const isBlocked = st === "blocked" || blockers.length > 0 || m.parked.length > 0;

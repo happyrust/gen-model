@@ -1589,17 +1589,20 @@ fn ensure_current_scenario_refnos(path: &Path, required: &[&str]) -> Result<()> 
     if required.is_empty() {
         return Ok(());
     }
-    let file_name = path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .context("scenario target DB has no file name")?;
-    let path_buf = path.to_path_buf();
-    let index = parse_pdms_db::parse::parse_file_db_basic_data(&path_buf, file_name, PROJECT)?;
+    // e3d-io: look each refno up in the latest session's live index instead of
+    // parsing the whole file (the legacy index also counted entries of trees no
+    // session can reach; "present today" is what a scenario precondition means).
+    let mut engine = e3d_io::ReadOnlyEngine::open(path)
+        .with_context(|| format!("open scenario target DB {}", path.display()))?;
     let mut missing = Vec::new();
     for text in required {
         let refno = aios_core::RefU64::from_str(text)
             .map_err(|_| anyhow!("invalid required scenario refno {text}"))?;
-        if !index.refno_table_map.contains_key(&refno) {
+        let present = engine
+            .search_index(e3d_io::RefNo::new(refno.get_0(), refno.get_1()))
+            .with_context(|| format!("search {text} in {}", path.display()))?
+            .is_some();
+        if !present {
             missing.push(*text);
         }
     }

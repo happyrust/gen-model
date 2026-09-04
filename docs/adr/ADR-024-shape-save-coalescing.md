@@ -2,7 +2,11 @@
 
 状态：Accepted（2026-08-14）
 
-关联：ADR-012（合批重生成）、ADR-014（分支原子替换）、ADR-017（稳态增量窗口暂存写回）；`specs/005-shape-save-coalescing/`
+关联：ADR-012（合批重生成）、ADR-014（分支原子替换）、ADR-017（稳态增量窗口暂存写回，已被 ADR-056 取代）；`specs/005-shape-save-coalescing/`
+
+> **2026-09-03 对照（ADR-056）**：暂存窗口退役后只剩「直写模式」一条保存路径——背景段的 `StagedExecutor` mutex
+> 争用、决策 4 的「暂存模式按计划串行执行 SQL packet」与决策 5 的「暂存窗口也不会提交」不再有对象；
+> 合批阈值、`SavePlan` 先计划后修改、`SaveMode` 二分、执行顺序与「只按成功 `SaveOutcome` 计产出」**全部不变**。
 
 ## 背景
 

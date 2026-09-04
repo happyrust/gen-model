@@ -9,9 +9,8 @@ use archive::{
     ARCHIVE_NAME, ArchiveSpec, ElementState, FixtureManifest, IssueSpec, MAX_ARCHIVE_BYTES,
     RefSpec, SnapshotSpec, WindowSpec, sha256_file, verify_and_extract, write_archive,
 };
+use aios_database::data_interface::db_file_header::snapshot_presence;
 use clap::Parser;
-use parse_pdms_db::paged::PagedDbSession;
-use pdms_io::io::PdmsIO;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -108,28 +107,26 @@ fn write_snapshot(source: &[u8], cut: SessionCut, path: &Path) -> anyhow::Result
 }
 
 fn require_presence(path: &Path, present: &[RefU64], absent: &[RefU64]) -> anyhow::Result<u32> {
-    let mut db = PagedDbSession::open(path)
-        .with_context(|| format!("open paged snapshot {}", path.display()))?;
-    let sesno = db.snapshot().sesno;
     let mut all = Vec::with_capacity(present.len() + absent.len());
     all.extend_from_slice(present);
     all.extend_from_slice(absent);
-    let found = db.read_raw_records(&all)?;
+    let found = snapshot_presence(path, &all)
+        .with_context(|| format!("open snapshot {}", path.display()))?;
     for refno in present {
         ensure!(
-            found.contains_key(refno),
+            found.contains(refno),
             "{refno} must exist in {}",
             path.display()
         );
     }
     for refno in absent {
         ensure!(
-            !found.contains_key(refno),
+            !found.contains(refno),
             "{refno} must be absent in {}",
             path.display()
         );
     }
-    Ok(sesno)
+    Ok(found.sesno)
 }
 
 fn snapshot_spec(
@@ -157,10 +154,23 @@ fn element(refno: RefU64, noun: &str, present: bool) -> ElementState {
     }
 }
 
+/// 最新会话里这个 refno 的 noun（e3d-io 点查 + 记录头第 3 字反哈希）。
 fn noun_at(path: &Path, refno: RefU64) -> anyhow::Result<String> {
-    let mut io = PdmsIO::new("issue019", path, true);
-    io.open()?;
-    Ok(io.auto_get_raw_element(refno)?.att_map().get_type())
+    let mut engine = e3d_io::ReadOnlyEngine::open(path)
+        .map_err(|error| anyhow::anyhow!("打开 {} 失败: {error}", path.display()))?;
+    let view = engine
+        .find_element(e3d_io::RefNo::new(refno.get_0(), refno.get_1()))
+        .map_err(|error| anyhow::anyhow!("点查 {refno} 失败: {error}"))?
+        .ok_or_else(|| anyhow::anyhow!("{refno} 不在 {} 的最新索引里", path.display()))?;
+    let noun_hash = u32::from_be_bytes(
+        view.raw_bytes
+            .get(12..16)
+            .ok_or_else(|| anyhow::anyhow!("{refno} 的记录头不足 16 字节"))?
+            .try_into()?,
+    );
+    e3d_attlib::db1_dehash(noun_hash)
+        .map(|noun| noun.to_ascii_uppercase())
+        .ok_or_else(|| anyhow::anyhow!("{refno} 的 noun 哈希 {noun_hash:#x} 反不出名字"))
 }
 
 fn write_text_assets(root: &Path, manifest: &FixtureManifest) -> anyhow::Result<()> {

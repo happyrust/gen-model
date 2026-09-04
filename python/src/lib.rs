@@ -4,7 +4,7 @@
 //!
 //! - `aios_db.connect(config=None)` —— 连接层（连 `SUL_DB`，**不拿**单实例锁）
 //! - `aios_db.db.query(sql, binds=None)` —— SurrealQL 直通
-//! - `aios_db.parse.header / is_db_file / sessions / collect_changes` —— 纯文件解析
+//! - `aios_db.parse.header / is_db_file / sessions / net_window / element` —— 纯文件解析（e3d-io 底座）
 //!
 //! 异步桥：进程级 tokio 多线程 Runtime + `block_on`，等待期间释放 GIL。
 //! 数据形态：serde → dict（pythonize），refno 输出 `a_b`（同 `pe:` record id）。
@@ -56,7 +56,7 @@ pub(crate) fn pythonized<T: serde::Serialize>(py: Python<'_>, value: &T) -> PyRe
 /// 指定 DbOption 配置文件路径（等价设置环境变量 `DB_OPTION_FILE`，可省略 `.toml` 后缀）。
 ///
 /// 配置是进程级 OnceCell，第一次被读到之后不可更换，所以本调用必须发生在任何
-/// 会触碰配置的函数（`connect`、`parse.collect_changes` 等）之前。解析层看似
+/// 会触碰配置的函数（`connect`、`parse.net_window` 等）之前。解析层看似
 /// 纯文件操作，但深处也读全局 DbOption（debug 选项等），配置不可达时会直接 panic。
 #[pyfunction]
 fn set_config(path: String) -> PyResult<()> {
@@ -229,11 +229,16 @@ fn sessions_impl(path: &Path) -> anyhow::Result<serde_json::Value> {
     Ok(serde_json::Value::Array(rows))
 }
 
-/// 从库文件直读单个元素的属性 dump（不进库、不需要连接）。
+/// 从库文件直读单个元素在某个会话时点的持久属性（不进库、不需要连接）。
 ///
-/// `sesno` 缺省读最新版本；给定时读「该会话或之前」可见的最后版本（做历史对比）。
-/// 返回的 `found_sesno` 是命中的版本真正所在的会话号。原始解析、不处理 UDA。
-#[cfg(feature = "legacy_pdms_io")]
+/// 与生产收集器同一条读法（`FrozenSource` 身份门 → e3d-io 钉住会话的 `DbSet` →
+/// `to_named_attmap`，`e3d_collector::read_element_at`）。`sesno` 缺省读文件最新会话；
+/// 给定时把文件钉在该会话（做历史对比 / TTY 往返前后读数）。元素在该会话索引里不存在
+/// 时抛 `RuntimeError`（「最新索引里没有」不等于「从未存在」，读历史版本传 `sesno`）。
+///
+/// 返回 `{refno, sesno, noun_hash, noun, name, owner, children, attrs, explicit_attrs}`；
+/// `attrs` / `explicit_attrs` 是 `NamedAttrMap` 的 serde 形态（值带类型标签）。
+/// 这是 old-pdms-io `parse.element`（`PdmsIO::parse_raw_element`）的 e3d-io 替身，2026-09-04 起。
 #[pyfunction]
 #[pyo3(signature = (path, refno, sesno=None))]
 fn element(
@@ -248,462 +253,29 @@ fn element(
     Ok(pythonize(py, &value)?.unbind())
 }
 
-#[cfg(feature = "legacy_pdms_io")]
 fn element_impl(path: &Path, refno: &str, sesno: Option<u32>) -> anyhow::Result<serde_json::Value> {
-    let (mut io, found_sesno, offset) = locate_element(path, refno, sesno)?;
-    let data = io
-        .parse_raw_element(offset)
-        .map_err(|error| anyhow::anyhow!("解析元素 {refno} 失败: {error}"))?;
-    Ok(convert::ele_data_to_json(&data, found_sesno))
-}
-
-/// 生成期语义形态的单元素直读（ADR-053 P0 探针同款链路，纯文件、不连库）。
-///
-/// 与 [`element`]（`parse_raw_element` 原始 dump、serde tagged 值）不同，本入口走
-/// `parse_element` 全量属性解码（含 SESNO 戳），再 `WholeAttMap::merge()`（常规
-/// attmap 打底、显式属性补缺）——正是生成期 direct 读消费、经 dbnum 8000/7333
-/// 共 200 样本对拍 0 真值冲突的属性形态。`sesno` 缺省读文件最新版本；传入
-/// `dbnum_watermark.applied_sesno` 即可复现 DB 模式同一逻辑时点（ADR-053 Q3=A）。
-///
-/// 返回 `{refno, found_sesno, noun_hash, noun, name, owner, children, attrs,
-/// explicit_keys, uda_count}`；`attrs` 为合并后的平面视图（数值/字符串/布尔/列表，
-/// refno 一律 `a_b`）。词属性保持 direct 原始的词哈希整数——按 schema 反哈希对齐
-/// DB 视图是 D2 同源转换器的职责（`direct-dbelement-read-api.md`），此处不做第二实现。
-#[cfg(feature = "legacy_pdms_io")]
-#[pyfunction]
-#[pyo3(signature = (path, refno, sesno=None))]
-fn attmap(py: Python<'_>, path: PathBuf, refno: String, sesno: Option<u32>) -> PyResult<Py<PyAny>> {
-    let value = py
-        .detach(|| attmap_impl(&path, &refno, sesno))
-        .map_err(anyhow_to_py)?;
-    Ok(pythonize(py, &value)?.unbind())
-}
-
-#[cfg(feature = "legacy_pdms_io")]
-fn attmap_impl(path: &Path, refno: &str, sesno: Option<u32>) -> anyhow::Result<serde_json::Value> {
-    let (mut io, found_sesno, offset) = locate_element(path, refno, sesno)?;
-    // SESNO 戳需要会话页范围映射（parse_element 内 get_sesno），探针同款前置。
-    io.init_ses_range_map()?;
-    let data = runtime()
-        .block_on(io.parse_element(offset))
-        .map_err(|error| anyhow::anyhow!("解析元素 {refno} 失败: {error}"))?;
-    Ok(convert::ele_data_to_merged_json(&data, found_sesno))
-}
-
-/// 递归直读指定元素及其所有后代。遍历只使用 PdmsIO 的 refno 索引和
-/// `parse_element`，不连接 SurrealDB；返回父节点优先的稳定 DFS。
-#[cfg(feature = "legacy_pdms_io")]
-#[pyfunction]
-#[pyo3(signature = (path, refno, sesno=None))]
-fn subtree(
-    py: Python<'_>,
-    path: PathBuf,
-    refno: String,
-    sesno: Option<u32>,
-) -> PyResult<Py<PyAny>> {
-    let value = py
-        .detach(|| subtree_impl(&path, &refno, sesno))
-        .map_err(anyhow_to_py)?;
-    Ok(pythonize(py, &value)?.unbind())
-}
-
-#[cfg(feature = "legacy_pdms_io")]
-fn subtree_impl(path: &Path, refno: &str, sesno: Option<u32>) -> anyhow::Result<serde_json::Value> {
-    use std::collections::HashSet;
-    use std::str::FromStr;
-    let root = aios_core::RefU64::from_str(refno.trim())
-        .map_err(|_| anyhow::anyhow!("refno 形态不认识: {refno}"))?;
-    let mut io = pdms_io::io::PdmsIO::new("", path.to_path_buf(), true);
-    io.open()
-        .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
-    io.init_ses_range_map()?;
-    let mut seen = HashSet::new();
-    let mut rows = Vec::new();
-    fn visit(
-        io: &mut pdms_io::io::PdmsIO,
-        refno: aios_core::RefU64,
-        sesno: Option<u32>,
-        seen: &mut std::collections::HashSet<aios_core::RefU64>,
-        rows: &mut Vec<serde_json::Value>,
-    ) -> anyhow::Result<()> {
-        if !seen.insert(refno) {
-            return Ok(());
-        }
-        let (found_sesno, offset) = io
-            .search_latest_refno(refno, sesno)
-            .ok_or_else(|| anyhow::anyhow!("后代 refno 不存在: {refno}"))?;
-        let data = runtime().block_on(io.parse_element(offset))?;
-        let children = data.children.clone();
-        rows.push(convert::ele_data_to_merged_json(&data, found_sesno));
-        for child in children.iter() {
-            visit(io, *child, sesno, seen, rows)?;
-        }
-        Ok(())
-    }
-    visit(&mut io, root, sesno, &mut seen, &mut rows)?;
-    Ok(serde_json::json!({"root": refno, "count": rows.len(), "elements": rows}))
-}
-
-/// 直读文件当前索引中的全部元素。索引由 PdmsIO 构建，绝不经过数据库。
-#[cfg(feature = "legacy_pdms_io")]
-fn all_elements_impl(path: &Path, sesno: Option<u32>) -> anyhow::Result<serde_json::Value> {
-    let mut io = pdms_io::io::PdmsIO::new("", path.to_path_buf(), true);
-    io.open()
-        .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
-    io.init_ses_range_map()?;
-    let index = io.build_index_map_default()?;
-    let mut rows = Vec::with_capacity(index.len());
-    for (refno, offsets) in index {
-        let offset = if let Some(limit) = sesno {
-            io.search_latest_refno(refno, Some(limit))
-                .map(|(_, offset)| offset)
-        } else {
-            offsets.iter().next_back().copied()
-        };
-        let Some(offset) = offset else { continue };
-        let found_sesno = io.get_sesno((offset / 0x800) as u32).unwrap_or_default();
-        let data = runtime().block_on(io.parse_element(offset))?;
-        rows.push(convert::ele_data_to_merged_json(&data, found_sesno));
-    }
-    Ok(serde_json::json!({"count": rows.len(), "elements": rows}))
-}
-
-/// 生成整个 db 文件的 direct 模型快照（当前索引的全部 refno）。
-#[cfg(feature = "legacy_pdms_io")]
-#[pyfunction]
-#[pyo3(signature = (path, output, sesno=None))]
-fn generate_all_model(
-    py: Python<'_>,
-    path: PathBuf,
-    output: PathBuf,
-    sesno: Option<u32>,
-) -> PyResult<Py<PyAny>> {
-    let value = py.detach(|| {
-        let tree = all_elements_impl(&path, sesno)?;
-        let bytes = serde_json::to_vec_pretty(&tree)?;
-        if let Some(parent) = output.parent() { std::fs::create_dir_all(parent)?; }
-        let tmp = output.with_extension("json.tmp");
-        std::fs::write(&tmp, &bytes)?;
-        std::fs::rename(&tmp, &output)?;
-        let primitive_count = tree["elements"].as_array().map(|es| es.iter().filter(|e| e["rvm_primitive"].is_string()).count()).unwrap_or_default();
-        anyhow::Ok(serde_json::json!({"format":"direct-model-v1","count":tree["count"],"primitive_count":primitive_count,"output":output,"bytes":bytes.len()}))
-    }).map_err(anyhow_to_py)?;
-    Ok(pythonize(py, &value)?.unbind())
-}
-
-/// 将 direct 子树模型数据写成可复现的 JSON 产物。该产物是几何生成器的输入边界：
-/// 所有元素、属性和 `PdmsGeoParam` 均来自同一次 PdmsIO 读取，不经过数据库缓存。
-#[cfg(feature = "legacy_pdms_io")]
-#[pyfunction]
-#[pyo3(signature = (path, refno, output, sesno=None))]
-fn generate_model(
-    py: Python<'_>,
-    path: PathBuf,
-    refno: String,
-    output: PathBuf,
-    sesno: Option<u32>,
-) -> PyResult<Py<PyAny>> {
-    let value = py
-        .detach(|| {
-            let tree = subtree_impl(&path, &refno, sesno)?;
-            let bytes = serde_json::to_vec_pretty(&tree)?;
-            if let Some(parent) = output.parent() {
-                std::fs::create_dir_all(parent)?;
-            }
-            let tmp = output.with_extension("json.tmp");
-            std::fs::write(&tmp, &bytes)?;
-            std::fs::rename(&tmp, &output)?;
-            let mesh_count = tree["elements"]
-                .as_array()
-                .map(|elements| {
-                    elements
-                        .iter()
-                        .filter(|element| element["mesh"].is_object())
-                        .count()
-                })
-                .unwrap_or_default();
-            let primitive_count = tree["elements"]
-                .as_array()
-                .map(|elements| {
-                    elements
-                        .iter()
-                        .filter(|element| element["rvm_primitive"].is_string())
-                        .count()
-                })
-                .unwrap_or_default();
-            anyhow::Ok(serde_json::json!({
-                "format": "direct-model-v1",
-                "root": refno,
-                "count": tree["count"],
-                "mesh_count": mesh_count,
-                "primitive_count": primitive_count,
-                "output": output,
-                "bytes": bytes.len(),
-            }))
-        })
-        .map_err(anyhow_to_py)?;
-    Ok(pythonize(py, &value)?.unbind())
-}
-
-/// 将 direct 子树中的 PlantMesh 写成 OBJ，便于在没有服务/数据库的情况下检查模型。
-/// OBJ 只是交付/可视化副产物，权威输入仍是同一次 PdmsIO 读取的元素数据。
-#[cfg(feature = "legacy_pdms_io")]
-#[pyfunction]
-#[pyo3(signature = (path, refno, output, sesno=None))]
-fn generate_obj(
-    py: Python<'_>,
-    path: PathBuf,
-    refno: String,
-    output: PathBuf,
-    sesno: Option<u32>,
-) -> PyResult<Py<PyAny>> {
-    let value = py
-        .detach(|| {
-            let tree = subtree_impl(&path, &refno, sesno)?;
-            let mut text = String::from("# aios direct-model-v1 OBJ\n");
-            let mut vertex_base = 1usize;
-            let mut mesh_count = 0usize;
-            for element in tree["elements"].as_array().into_iter().flatten() {
-                let Some(mesh) = element["mesh"].as_object() else { continue };
-                let Some(vertices) = mesh.get("vertices").and_then(serde_json::Value::as_array) else { continue };
-                let Some(indices) = mesh.get("indices").and_then(serde_json::Value::as_array) else { continue };
-                let name = element["refno"].as_str().unwrap_or("element");
-                text.push_str(&format!("g {name}\n"));
-                for vertex in vertices {
-                    let Some(values) = vertex.as_array() else { continue };
-                    if values.len() >= 3 {
-                        text.push_str(&format!("v {} {} {}\n", values[0], values[1], values[2]));
-                    }
-                }
-                for face in indices.chunks(3) {
-                    if face.len() == 3 {
-                        let a = face[0].as_u64().unwrap_or(0) as usize + vertex_base;
-                        let b = face[1].as_u64().unwrap_or(0) as usize + vertex_base;
-                        let c = face[2].as_u64().unwrap_or(0) as usize + vertex_base;
-                        text.push_str(&format!("f {a} {b} {c}\n"));
-                    }
-                }
-                vertex_base += vertices.len();
-                mesh_count += 1;
-            }
-            if let Some(parent) = output.parent() { std::fs::create_dir_all(parent)?; }
-            let tmp = output.with_extension("obj.tmp");
-            std::fs::write(&tmp, text.as_bytes())?;
-            std::fs::rename(&tmp, &output)?;
-            anyhow::Ok(serde_json::json!({"format":"obj", "root":refno, "mesh_count":mesh_count, "output":output, "bytes":text.len()}))
-        })
-        .map_err(anyhow_to_py)?;
-    Ok(pythonize(py, &value)?.unbind())
-}
-
-/// 生成最小可回读 RVM 容器（Direct primitive smoke 文件）。每个带 RVM primitive
-/// 片段的后代独立成为 group；该文件用于验证 writer/parser 互操作，不依赖数据库。
-#[cfg(feature = "legacy_pdms_io")]
-#[pyfunction]
-#[pyo3(signature = (path, refno, output, sesno=None))]
-fn generate_rvm(
-    py: Python<'_>,
-    path: PathBuf,
-    refno: String,
-    output: PathBuf,
-    sesno: Option<u32>,
-) -> PyResult<Py<PyAny>> {
-    let value = py.detach(|| {
-        let tree = subtree_impl(&path, &refno, sesno)?;
-        let mut chunks: Vec<Vec<u8>> = Vec::new();
-        chunks.push(rvm_chunk(*b"HEAD", { let mut d=vec![0;12]; d.extend_from_slice(b"aios direct-model-v1\0\0\0\0"); d }));
-        chunks.push(rvm_named_chunk(*b"MODL", "DIRECT"));
-        // 保留一层真实 root 容器，使 primitive members 在 RVM 树中属于输入 refno；
-        // 文件尾再写同名 root 供无 ATT 的身份 fallback 使用。
-        chunks.push(rvm_named_chunk(*b"CNTB", &refno));
-        let mut count = 0usize;
-        for element in tree["elements"].as_array().into_iter().flatten() {
-            let Some(fragment) = element["rvm_primitive"].as_str() else { continue };
-            let Some(param) = element["geo_param"].as_object() else { continue };
-            let kind = match param.keys().next().map(String::as_str) {
-                Some("PrimPyramid") => 1, Some("PrimBox") => 2, Some("PrimRTorus") => 3,
-                Some("PrimCTorus") => 4, Some("PrimDish") => 6, Some("PrimSphere") => 9,
-                Some("PrimLSnout") => 7, Some("PrimSCylinder") | Some("PrimLCylinder") => 8,
-                _ => continue,
-            };
-            chunks.push(rvm_named_chunk(*b"CNTB", element["refno"].as_str().unwrap_or("ELEMENT")));
-            let values: Vec<f32> = fragment.split_whitespace().filter_map(|v| v.parse().ok()).collect();
-            let (mut bmin, mut bmax) = ([0.0f32; 3], [0.0f32; 3]);
-            if let Some(vertices) = element["mesh"]["vertices"].as_array() {
-                if let Some(first) = vertices.first().and_then(serde_json::Value::as_array) {
-                    for i in 0..3 { bmin[i] = first.get(i).and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32; bmax[i] = bmin[i]; }
-                }
-                for vertex in vertices.iter().skip(1).filter_map(serde_json::Value::as_array) {
-                    for i in 0..3 { let value = vertex.get(i).and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32; bmin[i] = bmin[i].min(value); bmax[i] = bmax[i].max(value); }
-                }
-            }
-            if bmin == bmax && !values.is_empty() {
-                // 某些 PlantMesh 序列化路径不带顶点 AABB；用 primitive 尺寸建立非退化
-                // 局部包围盒，仍保持 Direct 数据来源，不引入数据库补查。
-                bmax[0] = values.first().copied().unwrap_or(1.0).abs().max(1.0);
-                bmax[1] = values.get(1).copied().unwrap_or(bmax[0]).abs().max(1.0);
-                bmax[2] = values.get(2).copied().unwrap_or(bmax[1]).abs().max(1.0);
-            }
-            let mut d = Vec::with_capacity(84 + values.len()*4);
-            d.extend_from_slice(&1u32.to_be_bytes()); d.extend_from_slice(&0u32.to_be_bytes()); d.extend_from_slice(&(kind as u32).to_be_bytes());
-            let mut matrix = [0.0f32; 12]; matrix[0] = 1.0; matrix[4] = 1.0; matrix[8] = 1.0;
-            if let Some(pos) = element["attrs"]["POS"].as_array() {
-                for i in 0..3 { matrix[9 + i] = pos.get(i).and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32; }
-            }
-            for value in matrix { d.extend_from_slice(&value.to_be_bytes()); }
-            for value in bmin.iter().chain(bmax.iter()) { d.extend_from_slice(&value.to_be_bytes()); }
-            for v in values { d.extend_from_slice(&v.to_be_bytes()); }
-            chunks.push(rvm_chunk(*b"PRIM", d)); chunks.push(rvm_chunk(*b"CNTE", Vec::new())); count += 1;
-        }
-        // 将 root group 放在最后，使 rvm_verify 无 ATT 时的 fallback root 明确指向
-        // 输入 refno，而不是最后一个 primitive member。
-        chunks.push(rvm_named_chunk(*b"CNTB", &refno));
-        chunks.push(rvm_chunk(*b"CNTE", Vec::new()));
-        chunks.push(rvm_chunk(*b"END\0", Vec::new()));
-        let mut bytes=Vec::new(); let mut offset=0usize;
-        for mut chunk in chunks { let next=offset+chunk.len(); chunk[16..20].copy_from_slice(&(next as u32).to_be_bytes()); offset=next; bytes.extend_from_slice(&chunk); }
-        if let Some(parent)=output.parent(){std::fs::create_dir_all(parent)?;} let tmp=output.with_extension("rvm.tmp"); std::fs::write(&tmp,&bytes)?; std::fs::rename(&tmp,&output)?;
-        anyhow::Ok(serde_json::json!({"format":"rvm-direct-v1","root":refno,"geometry_count":count,"output":output,"bytes":bytes.len()}))
-    }).map_err(anyhow_to_py)?;
-    Ok(pythonize(py, &value)?.unbind())
-}
-
-#[cfg(feature = "legacy_pdms_io")]
-fn rvm_chunk(tag: [u8; 4], data: Vec<u8>) -> Vec<u8> {
-    let mut out = vec![0u8; 20];
-    for i in 0..4 {
-        out[i * 4..i * 4 + 4].copy_from_slice(&(tag[i] as u32).to_be_bytes());
-    }
-    out.extend(data);
-    out
-}
-#[cfg(feature = "legacy_pdms_io")]
-fn rvm_named_chunk(tag: [u8; 4], name: &str) -> Vec<u8> {
-    let mut d = vec![0u8; 12];
-    let b = name.as_bytes();
-    d[8..12].copy_from_slice(&((b.len().div_ceil(4)) as u32).to_be_bytes());
-    d.extend_from_slice(b);
-    while d.len() % 4 != 0 {
-        d.push(0);
-    }
-    rvm_chunk(tag, d)
-}
-
-/// 打开库文件并按（可选 pin 的）会话定位单个 refno：`element` / `attmap` 共用。
-#[cfg(feature = "legacy_pdms_io")]
-fn locate_element(
-    path: &Path,
-    refno: &str,
-    sesno: Option<u32>,
-) -> anyhow::Result<(pdms_io::io::PdmsIO, u32, u64)> {
     use std::str::FromStr;
     let parsed = aios_core::RefU64::from_str(refno.trim())
         .map_err(|_| anyhow::anyhow!("refno 形态不认识: {refno}（要 a_b / a/b / pe:a_b）"))?;
-    let mut io = pdms_io::io::PdmsIO::new("", path.to_path_buf(), true);
-    io.open()
-        .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
-    let (found_sesno, offset) = io.search_latest_refno(parsed, sesno).ok_or_else(|| {
-        anyhow::anyhow!(
-            "库文件里找不到元素 {refno}{}",
-            sesno
-                .map(|sesno| format!("（会话 <= {sesno}）"))
-                .unwrap_or_default()
-        )
-    })?;
-    Ok((io, found_sesno, offset))
-}
-
-/// 解析 attlib 字典（Attribute Data File），返回全部 noun 的能力矩阵。
-///
-/// 与 E3D `core.dll` 的 `ATTOPE`/`ATGTIX`/`ATNLOG` 读取链同源（`parse_pdms_db::dict`），
-/// 含 base_type 继承与默认表兜底——替代手写复刻的 `gm_noun_caps_probe.py`。
-#[cfg(feature = "legacy_pdms_io")]
-#[pyfunction]
-fn noun_dict(py: Python<'_>, attlib_path: PathBuf) -> PyResult<Py<PyAny>> {
-    let value = py
-        .detach(|| {
-            let dict = parse_pdms_db::dict::AttrDataFile::open(&attlib_path)?;
-            anyhow::Ok(serde_json::json!({
-                "noun_count": dict.noun_count(),
-                "field_count": dict.field_count(),
-                "nouns": dict.all_noun_capabilities(),
-            }))
-        })
-        .map_err(anyhow_to_py)?;
-    Ok(pythonize(py, &value)?.unbind())
-}
-
-/// **LEGACY** 逐会话回放收集（ADR-031）：按窗口内每个会话认领本会话新写记录再
-/// 做属性 diff。纯函数、不写库、不动水位。
-///
-/// 生产预览 / 执行走的是 [`net_window`]（`IncrementPipeline::collect_window`），
-/// **不是**本入口。这里只给跨结构对拍和「哪个会话动的」取证用。
-///
-/// 返回 `{sesno: [op, ...]}`；`detail=False` 时属性只给名字列表，`detail=True`
-/// 给完整旧值/新值。
-#[cfg(feature = "legacy_pdms_io")]
-#[pyfunction]
-#[pyo3(signature = (path, start, end, detail=false))]
-fn collect_changes(
-    py: Python<'_>,
-    path: PathBuf,
-    start: i32,
-    end: i32,
-    detail: bool,
-) -> PyResult<Py<PyAny>> {
-    let value = py
-        .detach(|| {
-            let window =
-                aios_database::data_interface::increment_pipeline::IncrementPipeline::collect_changes(
-                    &path,
-                    start..=end,
-                )?;
-            anyhow::Ok(convert::window_to_json(&window, detail))
-        })
-        .map_err(anyhow_to_py)?;
-    Ok(pythonize(py, &value)?.unbind())
-}
-
-/// 会话索引差分：给定 sesno 窗口，**只靠文件本身**判定窗口内的净增删改——
-/// 不查任何数据库、不逐会话解析记录，复杂度与窗口内会话数解耦。
-///
-/// 与 `parse.collect_changes`（逐会话回放）互为对拍：回放给出每会话操作明细，
-/// 差分给出净三态（窗口内加了又删不出现，删了又建判 modified）。实现见
-/// legacy `pdms_io::session_index_diff` 对拍接口（生产数据读取走 e3d-io）。
-///
-/// 返回 `{requested_start, requested_end, base_sesno, target_sesno,
-/// added/deleted/modified: [{refno, record_pgno, record_offset,
-/// last_touch_sesno, noun}], counts, stats}`；`with_noun=True` 时按记录位置
-/// 解析记录头补类型名（Deleted 解析的是旧记录，每 refno 一次，显式付费）。
-#[cfg(feature = "legacy_pdms_io")]
-#[pyfunction]
-#[pyo3(signature = (path, start, end, with_noun=false))]
-fn net_changes(
-    py: Python<'_>,
-    path: PathBuf,
-    start: i32,
-    end: i32,
-    with_noun: bool,
-) -> PyResult<Py<PyAny>> {
-    let value = py
-        .detach(|| {
-            let mut io = pdms_io::io::PdmsIO::new("", path.clone(), true);
-            io.open()
-                .map_err(|error| anyhow::anyhow!("打开 PDMS IO 失败: {error}"))?;
-            let set =
-                pdms_io::session_index_diff::collect_net_changes(&mut io, start..=end, with_noun)?;
-            anyhow::Ok(set.to_json())
-        })
-        .map_err(anyhow_to_py)?;
-    Ok(pythonize(py, &value)?.unbind())
+    let frozen = match sesno {
+        Some(sesno) => aios_database::data_interface::frozen_source::FrozenSource::capture_at(path, sesno),
+        None => aios_database::data_interface::frozen_source::FrozenSource::capture(path),
+    }
+    .map_err(|error| anyhow::anyhow!("冻结 dabacon 源失败: {error}"))?;
+    let data = aios_database::data_interface::e3d_collector::read_element_at(&frozen, parsed)?;
+    Ok(convert::ele_data_to_json(&data, frozen.target_sesno()))
 }
 
 /// **正式口径**（ADR-031）：解析器语义净窗口。会话索引差分先圈出两端记录位置，
 /// 再在文件内解析 base / 终稿并做一次属性 diff。与增量管线 / 手动预览共用同一
 /// 实现（`IncrementPipeline::collect_window` → `collect_net_window`）。
 ///
-/// 与 [`net_changes`] 的索引触达三态不同，本入口会过滤“换页但内容相同”的原样
-/// 重写。E3D 自己推进的显式元数据（例如 BRAN.CACHID）仍会如实返回。
+/// 与只看索引触达三态的读法不同，本入口会过滤“换页但内容相同”的原样重写。
+/// E3D 自己推进的显式元数据（例如 BRAN.CACHID）仍会如实返回。
+///
+/// 这是 `aios_db.parse` 里**唯一**的窗口入口：old-pdms-io 底座的 `collect_changes`（逐会话回放）
+/// 与 `net_changes`（老索引差分）2026-09-04 已删。判它对不对的是 E3D TTY 录下的会话
+/// （`scripts/e3d/Test-TtyNetWindow.ps1`、`tests/fixtures/issues/issue-019-*`），不是另一套解析器。
 ///
 /// 返回 `{requested_start/end, window: {sesno: [op, ...]}, counts,
 /// warnings, unchanged_rewrites, unparseable_finals}`。`detail=True` 时 Modified 携带
@@ -777,19 +349,11 @@ fn _aios_db(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     parse.add_function(wrap_pyfunction!(parent_gap_refno_count, &parse)?)?;
     parse.add_function(wrap_pyfunction!(sessions, &parse)?)?;
     parse.add_function(wrap_pyfunction!(net_window, &parse)?)?;
-    #[cfg(feature = "legacy_pdms_io")]
-    {
-        parse.add_function(wrap_pyfunction!(collect_changes, &parse)?)?;
-        parse.add_function(wrap_pyfunction!(net_changes, &parse)?)?;
-        parse.add_function(wrap_pyfunction!(element, &parse)?)?;
-        parse.add_function(wrap_pyfunction!(attmap, &parse)?)?;
-        parse.add_function(wrap_pyfunction!(subtree, &parse)?)?;
-        parse.add_function(wrap_pyfunction!(generate_all_model, &parse)?)?;
-        parse.add_function(wrap_pyfunction!(generate_model, &parse)?)?;
-        parse.add_function(wrap_pyfunction!(generate_obj, &parse)?)?;
-        parse.add_function(wrap_pyfunction!(generate_rvm, &parse)?)?;
-        parse.add_function(wrap_pyfunction!(noun_dict, &parse)?)?;
-    }
+    parse.add_function(wrap_pyfunction!(element, &parse)?)?;
+    // old-pdms-io 底座的绑定（`collect_changes` / `net_changes` / `attmap` / `subtree` /
+    // `generate_*` / `noun_dict`）2026-09-04 随 old-pdms-io 一起删了。窗口语义只剩 `net_window`
+    // 一个入口（生产收集器 `e3d_collector`）；`element` 换成同一底座的单元素直读；子树 /
+    // 合并视图走 web-service 的 direct 读 API。
     m.add_submodule(&parse)?;
 
     let db = PyModule::new(py, "db")?;

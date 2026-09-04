@@ -1,0 +1,45 @@
+-- db8000 BRAN 增删改链 / 第 4 腿「删·成员」：删掉 scratch 支管里的 FTUB 4。
+--
+-- 预期：索引差分 -1（FTUB），e3d-model 该单元进 remove、BRAN 派生管身重算
+-- （原 FTUB 3→4、4→5 两根管身键消失，新出一根 3→5 直连或零长）。
+-- Q REF / Q NAME 在 DELETE 之前查——删完元素就没了，日志里读不到它的 refno。
+--
+-- 纪律同第 1 腿：恰好一个 SAVEWORK；不写 QUIT/FINISH；SAVEWORK 之前先导 RVM。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bran_scratch_delete_member.log" OVER
+$P CODEX-DB8000-BRAN-SCRATCH-DELETE-MEMBER-ALIVE
+/CODEX_DB8000_BRAN_SCRATCH
+Q CE
+Q REF
+Q NAME
+FTUB 4
+Q CE
+Q REF
+Q OWNE
+Q POS
+DELETE FTUB
+Q CE
+Q REF
+Q NAME
+Q MEMB
+
+$* ---- RVM 导出（状态 4：member-deleted）----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/db8000-bran-scratch/rvm/4-member-deleted.rvm"
+export filenote 'CODEX db8000 scratch BRAN state 4 FTUB 4 deleted'
+export holes on
+export autocolour displayexport on
+export repr on
+export /CODEX_DB8000_BRAN_SCRATCH
+export finish
+
+/CODEX_DB8000_BRAN_SCRATCH
+Q REF
+Q NAME
+SAVEWORK 'CODEX db8000 scratch BRAN delete FTUB 4'
+$P CODEX-DB8000-BRAN-SCRATCH-DELETE-MEMBER-DONE
+ALPHA LOG END

@@ -1,0 +1,36 @@
+$(
+------------------------------------------------------------------------
+RVM 导出（HDIR/TDIR 朝向约定 + 对齐阈值边界复核，2026-09-02）：BRAN /C-CO-1RX-3AH0A  (dbnum 8000, =24384/2500)
+挑它的理由：tail tube 2000mm r=12.5 leave 0.06deg, TDIR anti-parallel
+窄口径同 rvm_export_1rcv0101_b1.mac。只读：没有 SAVEWORK；不写 QUIT/FINISH——会话归 l3_suite driver。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/audit5/rvm_export_2500-C-CO-1RX-3AH0A.log" OVER
+$P CODEX-AUDIT5-RVM-EXPORT-ALIVE
+/C-CO-1RX-3AH0A
+Q CE
+Q REF
+Q NAME
+Q HPOS
+Q HDIR
+Q TPOS
+Q TDIR
+Q MEMB
+
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/rvm-audit5/2500-C-CO-1RX-3AH0A.rvm"
+export filenote 'audit5 2500-C-CO-1RX-3AH0A: tail tube 2000mm r=12.5 leave 0.06deg, TDIR anti-parallel'
+export holes on
+export autocolour displayexport on
+export repr on
+export /C-CO-1RX-3AH0A
+export finish
+
+$P CODEX-AUDIT5-RVM-EXPORT-DONE
+ALPHA LOG END

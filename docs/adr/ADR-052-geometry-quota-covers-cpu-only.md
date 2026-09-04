@@ -2,7 +2,10 @@
 
 - 状态：Accepted（决策已定，实现未开始；2026-08-27 接受）
 - 日期：2026-08-26
-- 关联：ADR-011（唯一批次队列与单协调器）、ADR-017（暂存窗口提交）、ADR-041（第 3 条：统一几何并发口径）、ADR-050（进程级模型工作单）、`specs/023-parallel-root-generation-pipeline`（几何闸落地）、`specs/032-model-generation-throughput-closure`（CATA / Shape / AABB 吞吐）、`specs/033-geometry-execution-domain`（本决策的落地规格 / 计划 / 任务）、`issues/ISSUE-023`（前置条件兼发布阻断项）
+- 对照（2026-09-03，ADR-056）：背景第 2 条「暂存写在一把 mutex 后面串行」的 convoy 随 `staging/write_context.rs`
+  退役消失（P3 删目录）；决策本体——额度只覆盖 CPU 段、等库 / 等锁不占额度、SQL 攒批宽度与并发额度解耦——与暂存无关，
+  原样有效。
+- 关联：ADR-011（唯一批次队列与单协调器）、ADR-017（暂存窗口提交，已被 ADR-056 取代）、ADR-041（第 3 条：统一几何并发口径）、ADR-050（进程级模型工作单）、`specs/023-parallel-root-generation-pipeline`（几何闸落地）、`specs/032-model-generation-throughput-closure`（CATA / Shape / AABB 吞吐）、`specs/033-geometry-execution-domain`（本决策的落地规格 / 计划 / 任务）、`issues/ISSUE-023`（前置条件兼发布阻断项）
 
 ## 背景
 

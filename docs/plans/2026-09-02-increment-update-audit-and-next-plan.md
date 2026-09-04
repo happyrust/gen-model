@@ -19,7 +19,7 @@
 
 增量链路现在是**两套规划器并存、只有一套在生产路上跑**：
 
-- **gen-model 侧**（生产主路）：数据窗口经 old-pdms-io 回放落 `pe` → `model_impact` /
+- **gen-model 侧**（历史生产主路，已进入退役）：数据窗口经 old-pdms-io 回放落 `pe` → `model_impact` /
   `generation_root` 选根 → durable `model_update_pending`（v2 起带 `cohort_id = dbnum:sesno`）
   → drain 逐根 **整根重生成**（`E3dModelService::generate_roots`，靶标缓存 + manifest 哈希去重）。
 - **e3d-model 侧**（core 对齐的 L0–L4 单元级增量 `increment_update`）：只从 `batch_worker::run_unit_worklist`

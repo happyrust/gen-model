@@ -1,0 +1,25 @@
+-- db8000 BRAN 增删改链 / 第 5 腿「删·容器」：删掉整条 scratch 支管，库在逻辑上回到原样。
+--
+-- 预期：索引差分 -9（BRAN + 8 个成员），e3d-model 报 deleted_subtree_roots=1，
+-- 8 个成员单元全部 remove、BRAN 派生管身全部 retire；对该根再做全量生成应报不存在。
+-- 这也是 direct 按需路径的已知缺口现场：`ensure` 只遍历 T 时刻还在的根，
+-- 被删根的 gen_root / inst_relate / tubi_relate 旧行没人清。
+-- Q REF / Q NAME 在 DELETE 之前查。本腿没有 RVM 导出（元素没了）。
+--
+-- 纪律同第 1 腿：恰好一个 SAVEWORK；不写 QUIT/FINISH。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bran_scratch_delete.log" OVER
+$P CODEX-DB8000-BRAN-SCRATCH-DELETE-ALIVE
+/CODEX_DB8000_BRAN_SCRATCH
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q MEMB
+DELETE BRAN
+Q CE
+Q REF
+Q NAME
+SAVEWORK 'CODEX db8000 delete scratch BRAN /CODEX_DB8000_BRAN_SCRATCH'
+$P CODEX-DB8000-BRAN-SCRATCH-DELETE-DONE
+ALPHA LOG END

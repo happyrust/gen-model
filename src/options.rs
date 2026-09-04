@@ -78,6 +78,16 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_incremental: Option<bool>,
 
+    /// **调试用**：模型增量只消费这些类型的生成根（默认空 = 不限类型）。
+    ///
+    /// 例如 `["BRAN", "EQUI"]`：数据增量照常摄入、水位照常推进、模型工作照常入队，
+    /// 但本进程只领取 `noun` 在名单内的 `regen_root` / `delete_cleanup` 行，其余类型
+    /// 的行留在 `model_update_pending` 里不消费。环境变量
+    /// [`MODEL_INCREMENTAL_TYPES_ENV`] 压过它。口径与全部护栏见
+    /// [`crate::data_interface::model_type_scope`]。
+    #[serde(default)]
+    pub model_incremental_types: Option<Vec<String>>,
+
     /// 房间归属的**增量**重算（默认 `true` = 照排照收）。
     ///
     /// 只管增量这一条链，启动全量重建与人工重建不受它影响。详见
@@ -170,6 +180,7 @@ impl From<DbOption> for DbOptionExt {
             startup_autorun: None,
             data_incremental: None,
             model_incremental: None,
+            model_incremental_types: None,
             room_incremental: None,
             catalogue_project_priority: None,
             watch_dbnums: None,
@@ -219,6 +230,8 @@ struct DbOptionExtFields {
     data_incremental: Option<bool>,
     #[serde(default)]
     model_incremental: Option<bool>,
+    #[serde(default)]
+    model_incremental_types: Option<Vec<String>>,
     #[serde(default)]
     room_incremental: Option<bool>,
     #[serde(default)]
@@ -405,6 +418,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         startup_autorun: ext.startup_autorun,
         data_incremental: ext.data_incremental,
         model_incremental: ext.model_incremental,
+        model_incremental_types: ext.model_incremental_types.clone(),
         room_incremental: ext.room_incremental,
         catalogue_project_priority: ext.catalogue_project_priority.clone(),
         watch_dbnums: ext.watch_dbnums.clone(),
@@ -694,6 +708,62 @@ fn effective_incremental_stage(configured: Option<bool>, env_override: Option<&s
         .and_then(parse_bool_flag)
         .or(configured)
         .unwrap_or(true)
+}
+
+/// 环境变量名：一次性覆盖 [`model_incremental_types`]（逗号分隔，如 `BRAN,EQUI`）。
+pub const MODEL_INCREMENTAL_TYPES_ENV: &str = "AIOS_MODEL_INCREMENTAL_TYPES";
+
+/// 模型增量类型限定（`DbOption.toml` 的 `model_incremental_types`，**默认空 = 不限类型**）。
+///
+/// 只读扩展字段、不触发 `aios_core::get_db_option()` 的完整配置装载，因此在没有完整
+/// 配置的单测环境里也能安全调用（缺文件时回空表 = 不限定）。
+///
+/// 环境变量 [`MODEL_INCREMENTAL_TYPES_ENV`] 非空时压过配置；两者都没给就是全类型，
+/// 判定与引入前逐位相同。生效取值、来源与全部护栏统一由
+/// [`crate::data_interface::model_type_scope`] 裁决，别的地方不要直接读这个函数来做
+/// 放行判定——那样会绕开「暂扣了要有声」的护栏。
+pub fn model_incremental_types() -> Vec<String> {
+    model_incremental_types_resolved().0
+}
+
+/// 同 [`model_incremental_types`]，并说出名单是从哪儿来的：`true` = 环境变量
+/// [`MODEL_INCREMENTAL_TYPES_ENV`]，`false` = 配置文件（含「两边都没给」的空表）。
+/// 回执与横幅要点名来源——配置里的名单可能是一个月前写的，环境变量是这一次跑的意图。
+pub fn model_incremental_types_resolved() -> (Vec<String>, bool) {
+    effective_model_incremental_types(
+        load_ext_fields().model_incremental_types.as_deref(),
+        std::env::var(MODEL_INCREMENTAL_TYPES_ENV).ok().as_deref(),
+    )
+}
+
+/// 环境变量里给了非空名单就用它，否则用配置。空白的环境变量当没设——`AIOS_MODEL_INCREMENTAL_TYPES=`
+/// 不该把配置里的名单静默清空，也不该被当成「什么都不放行」。第二个返回值 = 是否取自环境变量。
+fn effective_model_incremental_types(
+    configured: Option<&[String]>,
+    env_override: Option<&str>,
+) -> (Vec<String>, bool) {
+    let from_env = env_override
+        .map(|raw| raw.split(',').map(str::to_string).collect::<Vec<_>>())
+        .map(|raw| normalise_model_incremental_types(Some(&raw)))
+        .filter(|types| !types.is_empty());
+    match from_env {
+        Some(types) => (types, true),
+        None => (normalise_model_incremental_types(configured), false),
+    }
+}
+
+/// trim + 大写 + 去空 + 去重（保序）。E3D noun 全是大写，配置里写 `bran` 的意图毫无歧义；
+/// 写重了不是错误，但回执与 `/health` 里的名单不该看着像两个类型。
+fn normalise_model_incremental_types(configured: Option<&[String]>) -> Vec<String> {
+    let mut normalised: Vec<String> = Vec::new();
+    for raw in configured.unwrap_or_default() {
+        let noun = raw.trim().to_ascii_uppercase();
+        if noun.is_empty() || normalised.contains(&noun) {
+            continue;
+        }
+        normalised.push(noun);
+    }
+    normalised
 }
 
 /// 环境变量名：一次性覆盖 [`room_incremental`]，不必改配置文件。
@@ -1123,6 +1193,59 @@ mod tests {
         assert!(effective_incremental_stage(Some(true), Some("ture")));
         assert!(!effective_incremental_stage(Some(false), Some("ture")));
         assert!(effective_incremental_stage(None, Some("ture")));
+    }
+
+    fn owned(values: &[&str]) -> Vec<String> {
+        values.iter().map(|value| value.to_string()).collect()
+    }
+
+    /// 缺配置就是「不限类型」：这个键收窄的是模型消费，一旦默认值不是空表，
+    /// 服务看起来一切正常，只是某些类型的模型永远不更新。显式空表同样是不限定。
+    #[test]
+    fn a_missing_model_type_list_narrows_nothing() {
+        assert_eq!(
+            effective_model_incremental_types(None, None),
+            (vec![], false)
+        );
+        assert_eq!(
+            effective_model_incremental_types(Some(&[]), None),
+            (vec![], false)
+        );
+        assert_eq!(
+            effective_model_incremental_types(Some(&owned(&["", "  "])), None),
+            (vec![], false)
+        );
+    }
+
+    /// 配置里的名单 trim + 大写 + 去重、保序：`bran` 与 `BRAN` 是同一个意图。
+    #[test]
+    fn a_configured_model_type_list_is_normalised_in_order() {
+        assert_eq!(
+            effective_model_incremental_types(Some(&owned(&[" bran ", "EQUI", "Bran", ""])), None),
+            (owned(&["BRAN", "EQUI"]), false)
+        );
+    }
+
+    /// 环境变量非空时压过配置（逗号分隔、允许空白）并自报来源；空白的环境变量当没设，
+    /// 既不清空配置名单，也不被当成「什么都不放行」。
+    #[test]
+    fn the_model_type_env_override_wins_only_when_it_names_something() {
+        assert_eq!(
+            effective_model_incremental_types(Some(&owned(&["BRAN"])), Some(" hang , suppo ")),
+            (owned(&["HANG", "SUPPO"]), true)
+        );
+        assert_eq!(
+            effective_model_incremental_types(None, Some("EQUI,EQUI")),
+            (owned(&["EQUI"]), true)
+        );
+        assert_eq!(
+            effective_model_incremental_types(Some(&owned(&["BRAN"])), Some("")),
+            (owned(&["BRAN"]), false)
+        );
+        assert_eq!(
+            effective_model_incremental_types(Some(&owned(&["BRAN"])), Some(" , ")),
+            (owned(&["BRAN"]), false)
+        );
     }
 
     /// 缺配置就是连外部 SurrealDB。内存模式会把整库关进进程里，进程一退就没了，

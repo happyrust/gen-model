@@ -97,7 +97,7 @@ SELECT world_trans, aabb FROM inst_relate WHERE in = pe:tubi_refno;
 
 ## 📚 相关文档
 
-- **修复说明**: `TUBI_inst_relate修复说明.md`
+- **修复说明**: 原根目录 `TUBI_inst_relate修复说明.md`（2026-09-03 随旧生成器文档清理，见 git 历史；修复内容已在上文）
 - **测试程序**: `src/bin/test_tubi_inst_relate.rs`
 - **提交记录**: `b338a6a - fix: 修复BRAN的TUBI对应的aabb和world_trans保存问题`
 

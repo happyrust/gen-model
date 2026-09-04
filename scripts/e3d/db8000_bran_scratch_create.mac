@@ -1,0 +1,63 @@
+-- db8000 BRAN 增删改链 / 第 1 腿「增」：在 PIPE /1RX-345 下复制整条支管
+-- /C-OR-1R345-C（24384/23257，7 FTUB + 2 BEND）成 /CODEX_DB8000_BRAN_SCRATCH。
+--
+-- 为什么复制而不是 NEW 一条空 BRAN：空 BRAN 没有成员就没有几何，增量侧只会看到一个
+-- no_model 的容器；复制出来的支管带 9 个路由成员，一个窗口里同时出现
+-- created_subtree_roots=1 + 9 个新单元 + 派生管身，才是「新增一条管道」的真实形态。
+--
+-- 后续腿（各自恰好一个 SAVEWORK，链式不重叠）：
+--   2 db8000_bran_scratch_move.mac        整条支管 BY U 2000mm（改·容器级）
+--   3 db8000_bran_scratch_ftub_move.mac   FTUB 4 再抬 500mm（改·成员级，复刻生产案例 23262）
+--   4 db8000_bran_scratch_delete_member.mac 删 FTUB 4（删·成员）
+--   5 db8000_bran_scratch_delete.mac      删整条 scratch BRAN（删·容器），库在逻辑上回到原样
+-- 生产支管 /C-OR-1R345-C 全程不动。
+--
+-- 每腿在 SAVEWORK 之前顺手把 scratch BRAN 的 RVM 导出到
+-- output/db8000-bran-scratch/rvm/<state>.rvm（窄口径，同 rvm_export_1rcv0101_b1.mac），
+-- 给 rvm_compare 逐件对拍用；导出失败宏会在 SAVEWORK 之前中止，库不会半改。
+--
+-- 纪律：恰好一个 SAVEWORK；不写 QUIT/FINISH（会话归 l3_suite driver 的 wrapper）；
+-- Q REF 与 Q NAME 成对，便于从日志回读 refno。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bran_scratch_create.log" OVER
+$P CODEX-DB8000-BRAN-SCRATCH-CREATE-ALIVE
+/1RX-345
+Q CE
+Q REF
+Q NAME
+NEW BRAN /CODEX_DB8000_BRAN_SCRATCH
+COPY /C-OR-1R345-C
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q HPOS
+Q TPOS
+Q MEMB
+FTUB 4
+Q CE
+Q REF
+Q POS
+OWNER
+Q CE
+
+$* ---- RVM 导出（状态 1：created）----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/db8000-bran-scratch/rvm/1-created.rvm"
+export filenote 'CODEX db8000 scratch BRAN state 1 created (copy of /C-OR-1R345-C)'
+export holes on
+export autocolour displayexport on
+export repr on
+export /CODEX_DB8000_BRAN_SCRATCH
+export finish
+
+/CODEX_DB8000_BRAN_SCRATCH
+Q REF
+Q NAME
+SAVEWORK 'CODEX db8000 create scratch BRAN /CODEX_DB8000_BRAN_SCRATCH (copy of /C-OR-1R345-C)'
+$P CODEX-DB8000-BRAN-SCRATCH-CREATE-DONE
+ALPHA LOG END

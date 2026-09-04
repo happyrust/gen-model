@@ -1,6 +1,5 @@
 use aios_database::data_interface::dbnum_state::{DbnumState, FileAnomaly};
 use aios_database::data_interface::tidb_manager::AiosDBManager;
-use pdms_io::io::PdmsIO;
 use std::path::PathBuf;
 
 #[tokio::main]
@@ -24,12 +23,19 @@ async fn main() -> anyhow::Result<()> {
             .into_iter()
             .filter(|state| state.db_type == "DESI")
         {
-            let previous = PdmsIO::new(
-                project_dir.to_string_lossy().as_ref(),
+            // 文件最新会话之前最近的一次保存（old `get_nearest_less_sesno` 的替身）。
+            let _ = &project_dir;
+            let previous = aios_database::data_interface::db_file_header::session_chain(
                 PathBuf::from(&state.file_path),
-                true,
             )
-            .get_nearest_less_sesno(state.file_latest_sesno);
+            .ok()
+            .and_then(|chain| {
+                chain
+                    .iter()
+                    .filter_map(|stamp| i32::try_from(stamp.sesno).ok())
+                    .filter(|sesno| *sesno < state.file_latest_sesno)
+                    .max()
+            });
             println!(
                 "SESSION|{}|{}|{}|{:?}|{}",
                 state.dbnum, state.file_name, state.file_latest_sesno, previous, state.file_size,

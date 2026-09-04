@@ -74,7 +74,7 @@
 | 能力 | 位置 | 状态 |
 |---|---|---|
 | 会话 B-tree 单点定位（2 KB 页、`0x28`→会话页、`+0x1C`→索引根、16 B 索引项） | `parse_pdms_db/src/refno_index.rs` | ✅ 与 core.dll 逐字段一致 |
-| 页式引擎（只读索引页+命中记录页） | `parse_pdms_db/src/paged.rs` + `pdmsdb_engine_v2` | ✅ 生产默认；实测 ref0 全扫 `record_pages_read=0`、`bytes_read ≤ 15%` 文件 |
+| 页式引擎（只读索引页+命中记录页） | `parse_pdms_db/src/paged.rs` + `pdmsdb_engine_v2` | 历史实现；目标是迁移到 e3d-io，未作为 parse_pdms_db 退役完成证据 |
 | 带 sesno pin 的定位 + 页缓存 | `pdms_io/src/io.rs::search_latest_refno` / `index_page_cache` | ✅ 唯一支持任意历史时点的入口 |
 | 记录→元素（属性/UDA/children/owner） | `parse_pdms_db::parse::parse_ele_data_with_info` → `EleData{refno,owner,noun,children,whole_attmap}` | ✅ |
 | attlib 字典（noun/属性 schema、词哈希） | `parse_pdms_db::dict::NounClassifier` | ✅ 1931 noun 交叉验证 |

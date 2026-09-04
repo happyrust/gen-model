@@ -1,0 +1,14 @@
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/audit5/probe_bisect_B-bend-attrs.log" OVER
+$P BISECT-B-bend-attrs-ALIVE
+/C-GR-1RX-3020B
+BEND 1
+Q CE
+Q REF
+Q SPRE
+Q LSTU
+Q ARRI
+Q LEAV
+Q POS
+OWNER
+$P BISECT-B-bend-attrs-DONE
+ALPHA LOG END

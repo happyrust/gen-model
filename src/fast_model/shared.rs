@@ -14,7 +14,7 @@ use std::sync::OnceLock;
 pub fn negative_noun_names() -> &'static [String] {
     static NAMES: OnceLock<Vec<String>> = OnceLock::new();
     NAMES.get_or_init(|| {
-        let mut names = parse_pdms_db::dict::default_noun_capabilities()
+        let mut names = crate::noun_dict::default_noun_capabilities()
             .positive_equivalents()
             .into_iter()
             .map(|(negative, _)| negative)

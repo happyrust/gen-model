@@ -4,8 +4,8 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use aios_core::{RefU64, RefnoEnum};
 use aios_core::shape::pdms_shape::PlantMesh;
+use aios_core::{RefU64, RefnoEnum};
 use anyhow::{Context, bail};
 use e3d_io::db_element::{DbFilePin, DbFileResolver, DbSet, template_file_for};
 use e3d_io::engine::{ReadOnlyEngine, ScanTier};
@@ -570,7 +570,13 @@ impl E3dModelService {
         self.pins
             .iter()
             .filter(|pin| pin.db_type.eq_ignore_ascii_case("DESI"))
-            .map(|pin| Ok((pin.dbnum as u32, pin.file.clone(), self.source_session(pin)?)))
+            .map(|pin| {
+                Ok((
+                    pin.dbnum as u32,
+                    pin.file.clone(),
+                    self.source_session(pin)?,
+                ))
+            })
             .collect()
     }
 
@@ -661,7 +667,7 @@ impl E3dModelService {
                 0,
             )?,
             generator_fingerprint: format!(
-                "e3d-model:{};aios-database:{};route-atta-pass-through-v1;catalogue-atta-clfl-frame-v1",
+                "e3d-model:{};aios-database:{};route-atta-pass-through-v1;route-atta-anci-only-v1;catalogue-atta-clfl-frame-v1",
                 env!("CARGO_PKG_VERSION"),
                 env!("CARGO_PKG_VERSION")
             ),
@@ -1534,10 +1540,7 @@ async fn pre_e3d_relation_count(dbnum: u32, root: RefNo) -> anyhow::Result<usize
 /// Source PE keys whose current-projection rows are about to be removed by the
 /// pre-e3d root cleanup.  They have no GeometryId manifest, so this query must
 /// run before publication and feed the post-commit spatial mirror sync.
-async fn pre_e3d_spatial_refnos(
-    dbnum: u32,
-    root: RefNo,
-) -> anyhow::Result<BTreeSet<RefnoEnum>> {
+async fn pre_e3d_spatial_refnos(dbnum: u32, root: RefNo) -> anyhow::Result<BTreeSet<RefnoEnum>> {
     pre_e3d_spatial_refnos_on(&aios_core::SUL_DB, dbnum, root).await
 }
 
@@ -1797,9 +1800,8 @@ fn spatial_refnos_for_delta(
         .map(|element| &element.geometry_id)
         .chain(removals.iter())
         .map(|geometry_id| {
-            geometry_source_refno(geometry_id).map(|refno| {
-                RefnoEnum::from(RefU64::from_two_nums(refno.word0, refno.word1))
-            })
+            geometry_source_refno(geometry_id)
+                .map(|refno| RefnoEnum::from(RefU64::from_two_nums(refno.word0, refno.word1)))
         })
         .collect()
 }

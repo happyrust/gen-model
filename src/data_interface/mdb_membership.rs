@@ -246,28 +246,22 @@ fn read_declaration(
     projects: &[(String, Vec<PathBuf>)],
     rank: &HashMap<String, usize>,
 ) -> anyhow::Result<Option<Vec<MdbDatabase>>> {
-    let file_name = sys
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default();
-    let db =
-        parse_pdms_db::parse::parse_file_db_basic_data(&sys.to_path_buf(), file_name, project)?;
-    let (table, _) = parse_pdms_db::parse::gen_ref_type_pos_table(&db.bytes);
+    // e3d-io 读法（parse_pdms_db 退役清单 §B5）：SYS 库按最新会话钉成一个单库 `DbSet`
+    // （模板 `sysvir.dat`），MDB 元素按存储的 NAME 找（`find_named` 是一次 Named 档全树扫，
+    // 与旧读法整库 `gen_ref_type_pos_table` 同量级），属性经 `direct_attmap::to_named_attmap`
+    // 落成与旧 `whole_attmap.merge()` 同一形状的 `NamedAttrMap`——下面对 `CURD` / `DBNO` /
+    // `PROJ` / `STYP` / `NAME` 的读法逐字不变。
+    let sys_db = SysDb::open(sys)?;
 
     // Design and catalogue SYS databases both declare `/ALL`, and the
     // catalogue one's CURD is often nearly empty. `UpdateScope` takes the
     // longest for the same reason; picking either is otherwise a coin flip
     // that silently shrinks the scope.
     let mut best: Option<Vec<RefU64>> = None;
-    for entry in table.iter() {
-        let pos = entry.value().pos;
-        if pos < 4 {
-            continue;
-        }
-        let Ok(element) = parse_pdms_db::parse::parse_raw_ele_data(&db.bytes[pos - 4..]) else {
+    for refno in sys_db.named(wanted)? {
+        let Some(merged) = sys_db.attrs(refno) else {
             continue;
         };
-        let merged = element.whole_attmap.merge();
         if merged.get_as_string("TYPE").unwrap_or_default().trim() != "MDB"
             || merged.get_as_string("NAME").unwrap_or_default().trim() != wanted
         {
@@ -287,18 +281,11 @@ fn read_declaration(
 
     let mut databases = Vec::with_capacity(members.len());
     for refno in members {
-        let Some(entry) = table.get(&refno) else {
+        // A `CURD` entry the SYS index does not hold, or a record that will not
+        // decode, is skipped exactly as the legacy byte reader skipped it.
+        let Some(merged) = sys_db.attrs(refno) else {
             continue;
         };
-        let pos = entry.value().pos;
-        drop(entry);
-        if pos < 4 {
-            continue;
-        }
-        let Ok(element) = parse_pdms_db::parse::parse_raw_ele_data(&db.bytes[pos - 4..]) else {
-            continue;
-        };
-        let merged = element.whole_attmap.merge();
         let number = |key: &str| -> Option<i64> {
             merged
                 .get_as_string(key)
@@ -327,6 +314,56 @@ fn read_declaration(
         });
     }
     Ok(Some(databases))
+}
+
+/// One SYS database file, pinned at its latest session and read through e3d-io.
+struct SysDb {
+    set: Arc<e3d_io::DbSet>,
+    dbno: u32,
+}
+
+impl SysDb {
+    fn open(sys: &Path) -> anyhow::Result<Self> {
+        let schema = crate::data_interface::direct_store::DirectSchema::open_from_env()?;
+        let header = crate::data_interface::db_file_header::DbFileHeader::read(sys)?;
+        let set = crate::data_interface::e3d_collector::open_pinned_set(
+            &schema,
+            sys,
+            &header.db_type,
+            header.latest_sesno(),
+        )?;
+        Ok(Self {
+            set,
+            dbno: header.dbnum as u32,
+        })
+    }
+
+    /// Elements whose stored `NAME` is exactly `name` (leading `/` included).
+    fn named(&self, name: &str) -> anyhow::Result<Vec<RefU64>> {
+        Ok(self
+            .set
+            .find_named(self.dbno, name)
+            .map_err(|error| anyhow::anyhow!("scan SYS database names: {error}"))?
+            .into_iter()
+            .map(|refno| RefU64::from_two_nums(refno.word0, refno.word1))
+            .collect())
+    }
+
+    /// The element's attributes in the shape the legacy `whole_attmap.merge()`
+    /// produced; `None` when the SYS index has no such element or the record
+    /// does not decode (the byte reader skipped both the same way).
+    fn attrs(&self, refno: RefU64) -> Option<aios_core::NamedAttrMap> {
+        let element = self
+            .set
+            .element(e3d_io::RefNo::new(refno.get_0(), refno.get_1()));
+        if !element.exists().ok()? {
+            return None;
+        }
+        let extraction = element.extraction().ok()?;
+        crate::data_interface::direct_attmap::to_named_attmap(&extraction)
+            .ok()
+            .map(|attrs| attrs.map)
+    }
 }
 
 /// Where a declared dbnum resolved to.

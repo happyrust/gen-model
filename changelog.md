@@ -1,5 +1,363 @@
 # 变更记录
 
+## 2026-09-04
+
+### 修复
+
+- **增量路终态渲染器的两处既有缺陷：不写 `ATT_UDA`、`pe_owner` 边方向写反（退役收口方案
+  `docs/plans/2026-09-04-legacy-parser-retirement-endgame-plan.md` F5 / F6，阶段 B8.1；与基线换底座无关，单独可回滚）。**
+  起因是给 `parse_pdms_db` 退役做 B8.0 核实时对了一遍两条写路：`ele_ops::render_terminal_element_state`（生产直写
+  `persist_latest_main_data → render_terminal_persist_statements → PersistElementChange::to_surql` 的唯一渲染器）只出
+  `pe / ATT_<noun> / pe_owner`，e3d-io 收集器装进 `uda_atts` 的 UDA 值到库里就没了；同一函数把 `pe_owner` 写成
+  `in = owner, out = child`，而仓里其它所有写口（基线 `pe.rs::save_pe_relates`、`cata_closure::render_pe_owner_statements`、
+  legacy `EleOperationDetail::to_surql`、rs-core `export_data`）与全部读口（rs-core `{owner}<-pe_owner` 取 `in` 当 children、
+  `->pe_owner.out` 取 owner、`unique_pe_owner (in, out)`）都是 `in = child, out = owner`——增量路写出的子树在树面板上读不到，
+  `DELETE pe:{id}<-pe_owner` 清的也不是它自己刚写的边。对拍 `direct_window_replay_parity` 没抓到，是因为它跑的是兼容路
+  `render_persist_statements`（legacy `to_surql`），不是生产渲染器。
+  **改动**：新模块 `data_interface::uda_keys::UdaKeyMap`——一次 `SELECT id, UKEY, UDNA FROM UDA` 建表，`resolve()` 与
+  `aios_core::get_uda_refno` 同判据（`UKEY == hash`，查不到按 dehash 四字名 + 序号回退），查不到的键记账
+  （`misses_warning` 进回执 `warnings`，不静默丢、不拦水位）；`render_terminal_element_state` 增写 `ATT_UDA:{id}`，CONTENT
+  由 legacy 基线同一个 `NamedAttrMap::gen_sur_json_uda` 产出（`{ id, TYPE, refno: <TYPE>:<id>, udas: [{ u: UDA:<def>, v }] }`，
+  标量 `v` 是 NamedAttrValue 带标签形——现库就是这个形状，rs-core `NamedAttrValue::from((utype, Object))` 取首字段解回），
+  `Modified` 无 UDA 值时 `DELETE ATT_UDA:{id}`；`Add` 的前置清理多一条 `DELETE ATT_UDA:{pe}`（refno 复用旧世代行）；
+  `pe_owner` 边改经 `ele_ops::pe_owner_edge`（`{ id: pe_owner:[owner, slot], in: child, out: owner }`，与 `cata_closure`
+  逐字节同形）。`PersistElementChange::to_surql` / `render_terminal_persist_statements` 多一个 `&UdaKeyMap` 入参
+  （`persist_latest_main_data` 与 `window_repair` 两个调用点各读一次表）。
+  **护栏**：`ele_ops::terminal_render_guard_tests` 四条——ATT_UDA CONTENT 与 legacy `gen_sur_json_uda` 逐字节同、Modified
+  清空删行 / Add 不发、查不到的 UKEY 记账不编链接、`pe_owner` INSERT 与 `cata_closure::render_pe_owner_replace` 同一份
+  children 逐字节同且 owner 不出现在 `in` 端；`uda_keys::tests` 三条（精确键 / 回退 / 记账）。
+  **验证（本轮实跑）**：`cargo check --lib --tests` 通过；`cargo test --lib -- ele_ops uda_keys direct_window_replay_parity`
+  33 passed / 0 failed。**未 live**：已受影响的库（增量路写过反向边的窗口）要走一次 `POST /model/rebuild` 而不是手改数据；
+  UDA 的 TTY 抽样对拍（方案 B8.5 第 5 条）等真库机器。
+
+### 变更
+
+- **启动形态合一（ADR-058 D8 / refactor plan S5-1～3）：direct 形态也起 watcher，`direct_read_mode` 在启动序列里只回答
+  「数据面读哪儿」。** 起因是 2026-09-04 对增量更新启动流程的审核（`docs/plans/2026-09-04-startup-increment-audit-and-next-plan.md`
+  #1 / #3 / #14）：`sync_live = configured_sync_live && !direct_read_mode` 让生产形态启动后没有数据链、没有 manifest、
+  没有文件事件，模型只靠人工执行与按需 `ensure`，「改元素 → SAVEWORK → 自动更新」做不到；direct 分支又在复核落地后
+  立刻 `mark_model_ready()`，`/health.model_ready=true` 时复核排出的行还在跑，并跳过启动房间重建。
+  **改动（全部在 `src/lib.rs` `run_cli`）**：`let sync_live = db_option.sync_live.unwrap_or(false);`（watcher 只听这一个开关）；
+  删 direct 专用的「开门 + 立刻宣告收敛 + 跳过房间」两处分支，direct 与 db 形态同走 `wait_for_data_ready → open_model_phase →
+  wait_for_model_ready → skip_startup_room_build 三门`，收敛由 worker 空闲轮宣告；direct 下 `total_sync / incr_sync /
+  only_sync_sys / sync_history` 不再静默忽略，打一行「direct 形态不跑 sync_pdms…」（legacy `sync_pdms` 分支本身不动）；
+  播报与完成横幅的 direct 标签改口。护栏 `direct_mode_starts_the_batch_worker_but_not_the_watcher` 翻成
+  `direct_read_mode_only_selects_the_data_read_route`（worker 之前 `direct_read_mode` 只许在绑定 / 一行播报 / 两条 legacy
+  sync 门四行出现，worker 之后到 `run_cli` 结束零出现，主线无 `mark_model_ready()`）。
+  **验证**：`rustfmt --check`（仅 `lib.rs`）/ `cargo check --lib --tests` 通过；
+  `cargo test --lib -- startup direct_read_mode initialization model_coverage` 59 passed / 0 failed / 3 ignored；
+  全量 `cargo test --lib` 1414 passed / 1 failed / 103 ignored——那 1 条 `the_embedded_panel_is_real_and_a_disk_copy_still_wins`
+  是另一会话同时在改的 `web/ops.html` 丢了 `id="verdict"` 锚点，与本条无关。**未 live**：direct + watcher 第一次面对真实文件事件流，按 refactor plan §4 风险行
+  先在 `watch_dbnums` 限定到一两个库下起一次；direct 从此也走 `wait_for_data_ready`，它没有超时退出口（审核 #10）。
+  **未做**：S5-4 db 形态退役 / git tag。同日回填 refactor plan S2 状态（`/health` 半边已落地）与 ADR-058 状态行。
+
+### 移除
+
+- **old-pdms-io 连「对拍参照臂」这个身份也摘了：`pdms_io` 从整个工作区退出，对拍以 E3D TTY 的数据为准
+  （用户 2026-09-03 23:57 拍板「对拍要以 e3d tty 的数据为准，删除和 pdms-io 的对拍」）。** 09-03 把它降成 legacy 时
+  留了一句「对拍尺子要活到两边合一为止」（退役清单 §2.H）——今天把这句话撤回：判一个窗口收得对不对的，是 E3D TTY
+  真做过的事（TTY 宏录下的会话链 / 现场 `Q ATT` 读数），不是另一套解析器；old-pdms-io 自己就是 09-02 那 22 条漏
+  Add、两条幽灵删除的出处，拿它当尺子只会把尺子的缺陷判成被测方的分歧。
+  **删掉的**：`Cargo.toml` 的 `legacy_pdms_io` / `debug_parse` / `legacy_session_replay` 三个 feature、`pdms_io`
+  optional 依赖、old-pdms-io 的 `[patch]`（`Toggle-LocalDeps.ps1` 从此只管 aios_core / parse_pdms_db 两仓）；
+  bin `legacy_v2_read_parity` / `incr_fold_probe` / `db8000_copy_probe`；`increment_planner_parity --probe`
+  （两读法交叉点查）；`ele_ops::legacy`（`From<pdms_io::io::*>` 桥）；`IncrementPipeline::collect_changes` /
+  `collect_changes_from_open_io` 与三条只为回放存在的终态补丁 `retain_finally_live_adds` /
+  `restore_finally_live_deletes` / `final_record_payload`（连它们的 4 条单测）；`increment_pipeline` 的两条 live
+  对拍（`live_ams8000_net_diff_agrees_with_point_lookups_and_covers_replay` /
+  `…_payloads_match_replay_on_single_touch_refnos`）、`folding_a_real_window_preserves_final_state`、`bench_tests`
+  整个模块、`live_real_ftub_delete_move_and_reorder`（它的核心断言「保留 Add→Deleted 序列」是逐会话回放的前提，净口径
+  按设计丢弃瞬态 refno，ADR-031）；`model_update_plan` 的 `live_projams_real_attribute_sessions_plan_and_execute_distinctly`
+  （多会话窗口按「每会话一条」写死期望，同理）；`tests/db8000_session_pairs` 性质 h / i；aios-py 的
+  `collect_changes` / `net_changes` / `element` / `attmap` / `subtree` / `generate_*` / `noun_dict` 绑定及其
+  `legacy_pdms_io` feature（`parse_pdms_db` 随之从 python crate 退出）与对应离线用例。
+  **改口径而不是删的**（TTY 会话本来就是它们的判据，只是收集换走生产入口 `collect_window`，均为 `#[ignore]`
+  手动 live、**改后未复跑**）：`live_real_delete_session_cleans_up_model_and_regenerates_branch`（单会话窗口）、
+  `live_projams_nested_created_routes_and_generates_delivery_roots`（单会话窗口）、
+  `live_ams8000_single_caliber_release_timing`（只剩生产臂计时）。python 离线用例把 `net_changes` 那三条判据
+  （净三态、单会话窗口 base 落前一会话、越界响亮报错）搬到 `net_window` 上，另加「分区键 = TTY 动它的那个会话」。
+  **护栏收紧**：`data_interface::mod.rs::legacy_pdms_io_guard` 从「`pdms_io::` 必须在 legacy 门后」改成两条
+  「manifest 与源码一处都不许有」；`scripts/Check-LegacyPdmsIo.ps1` 同款四判（工作区依赖图 / `-i pdms_io` 无包 /
+  两份 manifest / 三处源码），CI 新增一步跑它，`db8000_two_delete_fixture` / `db8000_session_pairs` 的 CI 命令去掉
+  `legacy_session_replay`。
+  **验证（本轮实跑）**：`cargo check --lib --bins --tests` 默认档通过（只剩既有 2 条 warning）；
+  `cargo check -p aios-py --all-targets` 通过；`cargo test --lib -- legacy_pdms_io_guard` 2 passed；
+  `cargo test --test db8000_session_pairs` **19 passed**（性质 a–g 全绿，夹具即 TTY 会话链）；其余见本条下方补记。
+  **没做**：`parse_pdms_db` 仍是 aios-database 的依赖（清单 §6，另一会话在摘）；T404 第三条 429 库行级对拍与 T416 现场不变。
+  **补记（同日，开发脚本清理）**：`aios_db.parse.element` 以 e3d-io 底座**重生**——新增
+  `e3d_collector::read_element_at(frozen, refno)`（`open_pinned_set` → `read_element`，与生产收集器同一条读法，
+  不查库不动水位），绑定返回 `{refno, sesno, noun_hash, noun, name, owner, children, attrs, explicit_attrs}`
+  （`sesno` 是钉住的会话，old-pdms-io 版的 `found_sesno` 语义不再有；`attrs` 里 POS 是 `{"Vec3Type": [...]}`
+  而非老版的 `F32VecType`）。靠它活着的 TTY 往返门 `scripts/e3d/Test-TtyNetWindow.ps1` 只改了 `pos()`
+  取值方式（按标签取值、不认死标签名），**未在 E3D 现场复跑**。开发脚本：`python/testbed/net_changes_probe.py`
+  （old-pdms-io 两口径对拍）与 `python/scripts/demo_noun_caps.py`（`parse.noun_dict`）删除；
+  `testbed/run_full_loop.py` / `testbed/spatial_tree_8000.py` / `scripts/smoke_m1.py` / `scripts/smoke_m4.py` /
+  `scripts/demo_element_diff.py` 的 `collect_changes` 改走 `net_window`（`spatial_tree_8000` 的血统判定不再按
+  「25 删子、26 删父」分区，改判两条 deleted 都在净窗口里——墓碑挂窗口终点是净口径的语义），`smoke_m4` 去掉
+  `noun_dict` 段。python 离线用例加两条 `element` 用例（baseline 读得到 BOX、final 读不到、钉回 24 读回同一份属性）：
+  `pytest -m offline` **12 passed**。
+
+- **悬空取证引用重指：ADR-004 / ADR-021 / 数据解析流程图**（用户 2026-09-04 指定这三处）。改的一律是**指针不是决策**：
+  三份文件的结论、不变量与状态行一个字未动，动的只是「拿哪段代码作证」。
+  - `ADR-004`：关联行删掉 `src/versioned_db/pe.rs` 与 `vendor/aios-parse-pdms/src/parse.rs`（后者不被任何 manifest
+    引用、也不在 git 里，是本机残留的旧解析器副本，拿它当取证入口会指错人），换成 `data_interface/ele_ops.rs`；
+    背景段与 Q3 就地标注哪几个名字已不在仓里；文末新增「2026-09-04 · 取证引用重指」一张对照表（`pe.rs` →
+    `ele_ops::ElementRows::render`（基线与增量共用一份，宪法 II）；`save_pes` → `baseline::render_baseline_batches`，
+    Q3 的动词与落点不变；`parse_file_db_basic_data` / `refno_table_map` → **无对应物，是被取消不是被改名**，
+    改走 `FrozenSource::capture` + `stream_baseline`；`parse_db_basic_info` → `db_file_header::DbBasicInfo::read`）。
+    按需 CATA 闭包那条路不经过基线全量解析，本 ADR 决策面一处未受影响。
+  - `ADR-021` §4：`pe_owner` 边 id 形状 `[OWNER_PE, 槽位]` 的两个「同形写口」证据由 `versioned_db/pe.rs:174` 与
+    `cata_closure.rs:1574`（前者已删、后者行号已漂）重指为 `ele_ops::pe_owner_edge` 与
+    `cata_closure::render_pe_owner_replace`，并**把举证从行号换成可执行守护**——单测
+    `pe_owner_edges_point_child_to_owner_exactly_like_cata_closure` 对两处输出逐字节 `assert_eq!`（宪法 VI）。
+  - `docs/diagrams/data-parse-pipeline.drawio`：`save_pes` / `save_pe_relates` 两个节点重写成今天的
+    `render_baseline_batches` / `ElementRows.owner_edges` → `SenderJsonsData` → `INSERT IGNORE`。
+    **顺带查出这张图的腐坏远不止 `pe.rs`**：逐标识符核对后，图中 193 个代码标识符有 **58 个不同的名字在 `src/` 里
+    已查无此名**；横幅上「页 1 十二个、页 2 四十二个、页 3 二十六个」是**按页各自计数**，合计 80 处而不是 58——
+    `DuckLake` / `hierarchy_release` / `hierarchy_node` / `release_id` / `locator_hash` 这一族跨页反复出现，
+    去重后才是 58（两个数都对，别把 12+42+26≠58 当成笔误；换一套分词器独立重数是 61 个 / 按页 81 处，差在
+    要不要把 `db_basic` 这类两字段名算作标识符，结论不变）。整条 **DuckLake 层级投影 / locator 三段发布**支路
+    （`HierarchyRowV1`、`BaselineProjection`、门 A/B/C、`hierarchy_release` 一族）连同 DuckLake 本身早已移除——
+    这张图与它的导出图是**全仓最后一处还在描述它**的地方。改一半会让没标注的节点显得可信，因此三页各加一条
+    带日期与计数的过期横幅、标题加「（历史形态）」，并**重新导出 3 SVG / 3 PNG（scale 2）/ PDF**——横幅只写进
+    `.drawio` 而读图的人看的是导出图，等于没写（宪法 III）。**整图重画尚未做，待定。**
+  - `docs/plans/on-demand-cata-parsing-port.md`（4 处；这条原先记的是「未动、不在本次指定范围」，当日已一并改完，
+    此处按事实改回）：「依据」清单删掉 `src/versioned_db/pe.rs` 与 `vendor/aios-parse-pdms/src/parse.rs`、
+    换成 `data_interface/ele_ops.rs`；文首加一张与 ADR-004 同口径的重指表；阶段 0 与「文件清单」两处就地划掉
+    失效路径；「关键适配」段补一条——`pe_owner` 的「对齐 `save_pe_relates`」从「照着抄」升级成单测钉住同形。
+    **决策、阶段状态与实施记录一个字未改。**
+  - `.github/context-cold.md`（3 处）**没手改，也已经干净**：它是 SigMap `gen-context.js` 的生成物、标着
+    DO NOT EDIT，那 3 处就是 `### src\versioned_db\pe.rs` 这个标题下的 `save_pes` / `save_pes_mysql` /
+    `save_pe_relates` 三条签名；文件重新生成（v8.22.0 → v8.28.1）后整个标题段随源文件一起消失。
+    **生成物就该走重新生成这条路**——手改它下一次生成就被冲掉，等于没改。
+
+## 2026-09-03
+
+### 变更
+
+- **old-pdms-io 设为 legacy：默认不启用、不编译；数据面解析全部换到 e3d-io，模型面继续 e3d-model
+  （用户 2026-09-03 拍板；`docs/plans/2026-09-03-old-pdms-io-retirement-inventory.md` §0 三条完成判据今天全部成立）。**
+  `Cargo.toml` 里 `pdms_io` 改 `optional = true`，只由 `legacy_pdms_io`（`debug_parse` / `legacy_session_replay`
+  叠在其上）打开；`cargo tree -e normal` 默认图里再无 `pdms_io`（`scripts/Check-LegacyPdmsIo.ps1` 三条护栏 +
+  `data_interface::mod.rs::legacy_pdms_io_guard` 源码钉）。**数据面按 API 面逐组换底座**：
+  ① 类型与渲染 `EleOperationData / EleOperationDetail / ModifiedElement` 及 `to_surql / to_modify_surql /
+  diff_ele_data` 等纯函数**原样搬入** `data_interface/ele_ops.rs`（约 1400 行连测试），`pe` / `ATT_*` 语句逐字节不变；
+  ② 收集器换成 `data_interface/e3d_collector.rs`：`IndexDiff(base@S, target@T)` + 两端 `to_named_attmap` →
+  `diff_ele_data`，每 refno 恰一条、挂 last-touch 会话；refno 复用（换 noun）按 `Add` 写终稿并在尾事务
+  `DELETE {old_noun}:{id}`（`RetiredTypeRow`，关掉清单 §8 第 2 条今天就有的残留漏洞）；`shape_conflicts` 非空整窗阻断；
+  **不再做 ADR-036 成员仲裁补删**（索引差分即终态，`membership_deleted` 恒 0，evidence 09-02 §3 坐实旧仲裁幻删）；
+  ③ 身份门 `SnapshotToken` / `DabaconSnapshot::open_verified*` → `data_interface/frozen_source.rs::FrozenSource`
+  （Windows 卷序列号 + 文件索引，nightly `windows_by_handle`；`capture / capture_at / reopen_verified /
+  reopen_verified_at / verify_path_identity / read_frozen_bytes`），`apply_one` 无条件复核、尾事务前再复核一次；
+  T 端存活复核改 `e3d_collector::contains_refnos_at`（仍只给老规划器）；
+  ④ 文件头 `DbPageBasicInfo` / `PdmsIO` → `data_interface/db_file_header.rs`（`DbFileHeader` / `SessionStamp` /
+  `latest_sesno` / `session_at` / `session_chain`，会话时刻与旧 `get_dt` 同一条解法；`legacy_session_ranges` 逐字复刻旧
+  `ses_range_map` 喂基线全量解析），`apply*` / `SesnoUpdatePlan` 签名随之换；
+  ⑤ `PdmsWatcher` → `data_interface/db_file_registry.rs::DbFileRegistry`——核对发现它在本仓只是状态壳
+  （`init_local_watcher` / `async_watcher` / `scan_db_headers` 零调用，真 watcher 一直是 `increment_manager::async_watch`
+  的 `notify::PollWatcher`），所以**清单 §0.1 第 1 条「在 e3d-io 侧新写 watcher」实际无事可写**，按事实修正；
+  ⑥ `sync::clone / compress` 原样搬入 `data_interface/file_sync/`（`dpcsync` / `blake2` / `reqwest` / `url` 直列，
+  `atty` 换 `std::io::IsTerminal`）；⑦ 基线全量解析（`sync_total_async_threaded`）改 `FrozenSource::read_frozen_bytes`
+  + `parse_pdms_db::parse_db_basic_data`（`parse_pdms_db` 留到清单阶段 8）；`window_repair` 的成员审计收成
+  「持久层孤儿 ∧ 冻结目标索引里不存在 → Deleted」。**门后**：`increment_planner_parity --probe`、
+  `legacy_v2_read_parity`（`required-features`）、`db8000_session_pairs` 性质 h / i、`increment_pipeline` 三条 live 对拍
+  进 `legacy_pdms_io`；`ele_ops::legacy` 提供 `From<pdms_io::io::*>` 桥让参照臂继续对拍。T401 影子收集器保留，从此
+  是「同一根索引差分上两条合成路径互查」（`e3d_collector` vs e3d-model L2）。`cargo check --lib` 默认 / `legacy_session_replay`
+  两档通过；`cargo tree` 护栏通过。**未做**：T404 三条硬门与 429 库行级对拍没在切换前跑（用户要求直接切换）；
+  `db8000_session_pairs` 默认档实跑见本条下方补记。
+  **补记（当日晚，切换后补跑 T404 前两条）**：在生产收集入口 `IncrementPipeline::collect_window` →
+  `e3d_collector::collect_net_window` 上，ams7999 45→46 出 **22 Add**（`24383/101198`–`101219` 连号子树：
+  STRU/FRMW/SCTN/PANE/PLOO/PAVE）+ 1 Modified（ZONE `24383/68481` 只变 `MEMBERS`）+ **0 Delete**——
+  老收集器在这一窗幽灵删的 `24383/72318` / `72319` 与 ghost key `24383/101122` 现在**一条删除操作都不产生**；
+  ams1112 721→722（老收集器整窗报错的那一窗）出 **24673 Delete** + 1 Modified，353 ms、读页 638。
+  两窗与 e3d-model L2 臂逐 refno 零分歧（硬 0 软 0），期望写在命令行上、不满足退出码 1，含负向对照。
+  三个 ams8000 窗口同路复跑也零差，且 T401 那几条 `CACHID` **软**分歧随之清零——代价是 255→256 的
+  PANE `24384/26250`（只变 `CACHID`）从「原样重写跳过」变成一条真的生产 `Modified`，`ATT_*` 会多这一列的写
+  （退役清单 §8 ⑤ 说的回执重定基线，别当回归）。
+  `shadow_collector_parity` 第一臂的标签随之改回事实（`[prod]`，切换后它就是 e3d_collector），
+  并补上判生产臂的 `--expect-prod-add/-delete/-modified`，`--must-not-delete` 改成两臂都判。
+  evidence `docs/evidence/2026-09-03-t404-production-gate.md`。**仍未做**：T404 第三条 429 库全量基线行级对拍
+  （渲染层，归 T406）与落库 / 水位 / 批次编排的 live 现场（T416）。
+
+### 新增
+
+- **T401 影子收集器落地：old-pdms-io 净窗口旁并行跑 e3d-io 索引差分 + e3d-model L2，同窗逐 refno 对拍，只记账
+  （spec 035 P4 的长杆；用户 2026-09-03 拍板「先开长杆」）。** 起因是核对「解析是否已切到 e3d-io」：模型面已全走
+  e3d-io，数据面（`collect_window` → `pe` / `ATT_*`）仍是 old-pdms-io，且 direct DESI 窗口**同一窗读两遍**
+  （退役清单 F4）。新模块 `data_interface/shadow_collector.rs`：把 `IndexDiff(base@S, target@T)` 的候选折成
+  「每 refno 一条 `Add / Deleted / Modified`」（`Modified` 候选过 `diff_element`，逐字节相同记 `unchanged` 不算操作；
+  读不出记 `unresolved`；候选账 `ops + unchanged + unresolved = candidates` 必须闭合），与 old-pdms-io 的
+  `range_eles` 逐 refno 比**种类**、`Modified` 再比**属性名集**；分歧沿 09-02 planner-parity evidence §3/§4 的词归桶——
+  硬桶 `phantom_delete`（old 删了、e3d 说 T 端还在）/ `ghost_key`（两端都没有）/ `missed_insert|delete|modify`
+  （e3d 有、old 无）/ `old_only_*` / `l2_unchanged` / `kind_mismatch` / `shadow_unresolved`，软桶 `attr_set_differs`、
+  `missed_modify_data_only`（e3d 只看见 `CACHID` 一类 DataOnly 属性变了）。**生产接线骑在双读的 e3d 半边上**：
+  `apply_one` 在 direct DESI 分支把刚收好的 old 窗口折成 `LegacyWindowOps` 交给
+  `build_model_update_plan_from_window(.., Some(legacy))`，`WindowRootSources::collect_shadowed` 用同一次
+  `collect_window` 的 `WindowDiff` 折影子窗口——**不开第三次文件**；对拍在阻塞任务里做（`phantom_delete` 归因要对两端
+  `DbSet` 点查），结果只有两条出口：回执 `warnings` 一行、`logs/shadow-collector-<日期>.jsonl` 一条（`report_parity`）。
+  不改计划、不拦窗口、不动水位；启动复核路传 `None` 不开影子。离线探针 `src/bin/shadow_collector_parity.rs`
+  （`--expect-shadow-add/-delete/-modified`、`--must-not-delete`、`--expect-clean` 不满足退出码 1，JSON 明细按
+  `--json-rows-cap` 截断）。**五窗 evidence** `docs/evidence/2026-09-03-shadow-collector-parity.md`：ams8000 三窗硬分歧 0
+  （软分歧全是 e3d 多报 CACHID）；ams7999 45→46 e3d 出 22 Add / 0 Delete，old 侧 `phantom_delete`=2（REST 72318 /
+  HANG 72319）`ghost_key`=1（101122）`missed_insert`=22（STRU 101198 子树）；ams1112 721→722 old 整窗报错
+  （vendor 前进后死法变成「记录页 11526 无法反查 last-touch 会话」）、e3d 655 ms 出 24673 Delete——**T404 前两条硬门
+  在 e3d 侧已量得出且通过**。T403「零差」口径随之写进 tasks.md：要为零的是反方向四桶（`old_only_*` / `l2_unchanged` /
+  `kind_mismatch` / `shadow_missed_insert`），五窗今天全零。**口径收窄两处**：没做「→ `EleOperationData` 全量转换」
+  （属性值层对拍已由 `direct_attmap_probe` 覆盖、写回换源归 T406）；`Reparented` 不单立 `Moved`（两侧都是
+  `Modified` + `OWNER`）。护栏：`shadow_collector` 九条单测（含 ams7999 形状回放、桶归因、落盘截断、
+  「不碰持久层」源码钉）、`window_root_plan::the_shadow_parity_only_reaches_warnings_and_the_log`
+  （对拍留在阻塞任务里、规划器不得直接消费对拍结果、启动路不开影子）。`cargo test --lib -- window_root_plan
+  increment_pipeline shadow_collector` 76 passed。生产接线**未 live 验证**（要 8009 + direct 服务 + 一次真 TTY 窗口，
+  与 T416 同一现场）。
+
+- **ADR-058（已接受）：初始化启动收敛为退化窗口；CATA 不入持久层；监听限定域约束启动。**
+  起因是审核「当前的增量更新，初始化启动时按新架构要如何重构」，四条发现：生产（direct）启动
+  跳过全部模型复核（`lib.rs:795` 的 `!direct_read_mode`）、ADR-050 承诺的「重启靠凭证 vs 文件最新
+  重新发现」没有实现者（比较代码 `model_source_floor_by_dbnum` 只喂 `/dbnums`）、非 direct 那条
+  复核路的标尺是水位不是文件（与 ADR-054 冲突）、覆盖物化仍是 `pe` 打头的全表遍历
+  （`gen_root.surql:44`）。稳态窗口早已搬到新架构（`window_root_plan.rs`「一行 `pe` 都不读」），
+  启动一步没动。ADR 定九条：D1 持久层只剩模型面状态与增量摄入的 DESI，**CATA 不解析进库**
+  （`ModelTarget.catalogue` 本就是文件身份摘要、`ref_rev` 的边从引用侧建，两者都不需要 CATA 行）；
+  D3 保留 DESI 基线（放弃它要重写 `applied_sesno` 语义与 ADR-021 三条判据）；D4 启动 = 退化窗口
+  （`S` = 凭证下限、`T` = 文件最新，与稳态共用 `WindowRootPlan`，`fn::sync_gen_roots` 退出启动路径）；
+  D5 两级过滤（一条 GROUP BY + 只对落后库开窗）；D6 冷库一根不排；D7 阶段屏障塌成两条并行链、
+  Catalogue 阶段取消、模型面不等 `data_ready`；D8 `direct` 只管数据面读哪儿、watcher 接回来持续追新；
+  D9 监听限定域仍是调试开关但约束启动，且收窄不在扫描层（`dbnum` 要读文件头才知道）。
+  实施见 `docs/plans/2026-09-03-startup-initialization-refactor-plan.md` S1–S5。**未实施。**
+- **`docs/plans/2026-09-03-old-pdms-io-retirement-inventory.md`：按 crate API 面清点 old-pdms-io 的退役清单。**
+  既有两份文档（09-02 模块归属清单、spec 035 T401–T411）都沿「增量」那一段数，本文换一根轴——沿
+  `pdms_io` 暴露的 API 逐个点——因为 ADR-056 Q2 问的是依赖图问题，只有沿 API 面数才数得全。数出
+  **三组既没有替身、也不在任何计划里**的用法：① **watcher**（`PdmsWatcher` 是仓里唯一实现，而
+  ADR-058 D8 刚把它从「direct 下不起」改成「一直起」，份量正在变重，方向与退役相反）；
+  ② **`sync::clone` / `sync::compress`**（MQTT 远端库文件增量 clone 与 `.cba` 归档发布，是文件分发
+  功能，与增量和 dabacon 解析都无关）；③ **`legacy_pdms_io` 是个空门**（feature 在 `Cargo.toml:36`
+  声明，`src/` 里零消费者——T403 的「只留 feature 后探针」进度是 0%，不是差最后一步）。
+  按用户 2026-09-03 拍板「watcher 在 e3d-io 侧新写一个」「全面采用 e3d-io，数据的解析存储也接入
+  e3d-io 的解析结果」补了 §7 / §8 两节设计，阶段 0–3 登记为 spec 035 **T412–T415**（四条都不依赖
+  T403，可并行开）。§8 记了一条容易漏的：`direct_attmap::to_named_attmap` 已经把
+  `outside_schema` / `unset` / `shape_conflicts` 当回执交出来，而今天的消费者只有探针、处置是记一笔；
+  数据面接上之后 `shape_conflicts` 必须**阻断窗口**而不是告警——`BANG` 那种按错读法解出来的数字
+  长得和对的一模一样，写进 `ATT_*` 之后没有任何东西会报。
+
+### 变更
+
+- **模型门不再等 `data_ready`：数据链与模型链并行（ADR-058 D7 门的部分，从计划 S3 拆出提前落地，
+  用户 2026-09-03 拍板）。** 起因是问「现在的启动是否已按需要让解析与模型生成并行」——核对下来没有：
+  `model_generation_allowed` 要 `data_ready && model_phase_open`、`install_manifest` 只在数据相全部清零时
+  开门、`run_cli` 主线先阻塞在「等待 Meta → Catalogue → Design 数据清单完成」再跑启动模型复核、护栏
+  `startup_waits_for_data_then_models_before_rooms` 把 `data < open_model` 钉死；而 `CONTEXT.md`「严格
+  初始化阶段」与 ADR-025 的 2026-09-03 对照块已按目标态写成「两条并行链」，读文档会以为做完了。
+  现在：`install_manifest` 装好清单（文件身份解析完成）即置 `model_phase_open = !full_model_required`；
+  `model_generation_allowed` = `!model_in_flight && (epoch 0 旁路 ‖ model_phase_open)`，去掉 `data_ready`；
+  `configure_model_bootstrap` 只按策略关门 / 非发现期开门；`reconcile_model_coverage_at_startup()` 从数据
+  等待之后提到 `watch_task` 之后、数据等待之前（它只读文件与 `gen_root`，仍是 `run_cli` 顶层无条件）。
+  **仍等数据的两处一字不改**：`mark_model_ready`（收敛宣告——数据尾事务还会往模型积压添行）与
+  `postprocess_allowed`（房间吃模型产物）；`open_model_phase` 也仍要 `data_ready`，因为它把 `status` 拨到
+  `ModelRunning`，`allows()` 会因此拒掉未完的数据相。实际收益：启动模型复核不再等数据基线；数据摄入期间
+  按需生成不再返回 `initialization_not_ready`；数据相被挡不再连带关模型门。**如实说没做到的**：worker
+  仍是单消费者，`drain_queue_until_empty` 跑空才进空闲轮、`model_drain_yield_reason` 的 `DataQueued` 让位
+  照旧——模型积压只在数据队列空隙消化，字面意义的两条车道同时跑是 D10-B；`Catalogue` 相仍在（S3）；
+  direct 仍不起 watcher（S5）。护栏：`startup_waits_for_data_then_models_before_rooms` 改为
+  `startup_reconciles_models_before_waiting_for_data_and_keeps_rooms_last`（钉 `worker < reconcile < data`、
+  `data < model_ready < room`）；协调器新增 `model_gate_opens_with_the_manifest_not_with_data_ready` /
+  `a_blocked_data_phase_does_not_close_the_model_gate` / `a_required_full_model_pass_still_closes_the_gate_after_the_manifest`。
+  `CONTEXT.md`、ADR-025 对照块、ADR-058 状态行、refactor plan S3 第 3 条同步补「实施状态」。
+  `cargo test --lib` 1351 passed / 0 failed / 100 ignored。**未 live 验证**。
+- **启动的模型复核换成退化窗口，两级过滤（ADR-058 D4 / D5，计划 S1）。** 此前它是自己一套：
+  `fn::sync_gen_roots` 物化根覆盖（`gen_root.surql:44` 第一句就是 `select value id from pe`）、
+  拿 `applied_sesno` 当「要求时点」（与 ADR-054「生成时点是文件最新」冲突）、限定域逐库跑完整 sync /
+  未限定域只核有凭证记录的库。现在：`startup_coverage_floors()` 一次请求两条 GROUP BY 拿全部库的
+  **安定凭证下限**与**未安定根数**，与 `latest_source_version` 给的文件最新会话比，追平的库连窗都不开；
+  落后的库各调一次 `window_root_plan::reconcile_startup_window`，`S` = 凭证下限、`T` = 文件最新，
+  选根整条转调稳态的 `build_model_update_plan_from_window`——**一条选根判据都没新增**（ADR-058 S1）。
+  启动特有的只有三件：左端从凭证取、未安定的行无条件重排（上一进程的积压刚被 ADR-050 清掉，
+  不排就没人再排）、结果自己 `enqueue_plan` + `advance_root_credentials`（稳态那条由数据尾事务带走）。
+  开窗失败退到「全部持久根按过期处理」，与比例护栏同一去向。`sync_and_seed_model_coverage` 与
+  `fn::sync_gen_roots` 退出启动路径，前者仍服务人工 `POST /model/rebuild`。四条护栏：函数全文不含
+  `sync_gen_roots` / `applied_sesno`、书写顺序钉「取下限 → 不落后就跳过 → 才开窗」、两条聚合对
+  `mem://` 真跑一遍、「安定」判据的三处用户共用同一份名单与同一条 `> 0`。
+  同批把 `lib.rs` 上那道 `if startup_data_ready && !direct_read_mode` 的 direct 门删掉（S5 的第一行
+  提前落地）：核对读的是文件与 `gen_root`、不需要任何数据摄入，而 direct 正是它的主场——门在的时候
+  生产形态启动一根都不核，ADR-050 承诺的「重启靠凭证 vs 文件最新重新发现」于是没有实现者
+  （审核 A1 / A2）。护栏用与 worker 那条同一个手法：往前找最近的 `if`，断言它不含 `direct_read_mode`。
+  `cargo test --lib` 1335 passed / 0 failed。**未 live 验证**（零解析库门与「新旧口径差集」要真库）。
+- **初始化编排层修复：「模型已收敛」横幅只在它为真时打出来（审核 P1–P4，计划
+  `docs/plans/2026-09-03-startup-orchestration-p1-p3-fix-plan.md` T1–T9）。** 审核发现
+  `run_cli` 编排层有四条缝，本批全部收口：
+  ①（P1）`if initialization.open_model_phase() {…}` 返回 false 时整段模型等待被静默跳过——
+  重扫刚发现新会话、数据阶段回到未就绪的那一刻正是这种情况。现改为返回值只用于播报，
+  之后照常叫醒调度器并进入收敛等待；门由 `install_manifest` 在清单就绪时自动打开。
+  ②（P1）协调器新增 `startup_reconcile_pending` 位：`run_cli` 在配好模型门之后、worker
+  起来之前调 `begin_startup_reconcile()`，此后到复核落地为止 `mark_model_ready` 恒 false；
+  `reconcile_model_coverage_at_startup` 拆成外壳 + 内函数，内函数每条出口之后外壳统一
+  `settle_startup_reconcile()` 并唤醒调度器（`reconcile_startup_window` 入队非空也唤醒）。
+  修的是「复核还在逐库读文件头、空闲轮已宣告收敛」的竞态。
+  ③（P2，ADR-050 修订）`clear_stale_at_process_start` 从整表 DELETE 收窄为五种数据动作，
+  `room_recalc_*` 保留并当面播报行数——房间任务没有凭证补偿路径，direct / env /
+  `autorun=false` / `model_incremental=false` 下连唯一的整库房间重建补偿都不跑，删了即真丢工作。
+  补偿核对同时改为 `run_cli` 顶层无条件执行（此前被 `startup_data_ready` 把门）。
+  ④（P2）`model_coverage_current` 的标尺从 `applied_sesno` 换成文件最新会话
+  （`spawn_blocking(latest_source_version)`），与启动复核同尺——此前会出现复核判「落后已排队」
+  而空闲轮同刻判「覆盖完整」的双尺并存。
+  ⑤（P3）`wait_for_data_ready` 包进与模型等待同款的 60s 超时播报循环（快照 status / 阶段计数 /
+  blockers，指纹不变退 300s、Blocked 保持 60s）；Web 服务提前到 watcher 首扫之前启动；
+  `latest_source_version` 与 `build_set` 等同步文件 I/O 全部进 `spawn_blocking`；
+  开窗失败的退化文案明说「T 端已删的根将生成失败进死信，需人工 pending-units/retry 或
+  model/rebuild」。
+  ⑥（P4）python `full_init` 连接成功后立即执行同一道启动清空，失败上抛。
+  护栏：协调器两条单测（pending 期间 `mark_model_ready` 恒 false / begin 打回已置位）、
+  外壳必落地的源码顺序断言、清理与整库重建共用同一份动作清单的源码断言、模型门 SQL
+  「含 `latest_source_version`、不含 `applied_sesno」、退化文案必带死信后果。
+- **`gen_root` 行在建行时就写顶层 `dbnum`，并回填只有嵌套归属的历史行。** 2026-09-03 在 ams 现场
+  查启动数据时发现的：2245 行 `gen_root` 里 **2244 行 `dbnum = NONE`**，库归属只躺在
+  `desired_target.dbnum` 这个嵌套字段里——`render_upsert` 建行时从来不写顶层那一列，历史上只有
+  `fn::sync_gen_roots` 写它。而按库取数的每一处（启动凭证下限 `startup_coverage_floors`、覆盖清单
+  `coverage_tracked_dbnums`、`/dbnums` 的 `model_source_floor_by_dbnum`）都是 `WHERE dbnum != NONE`，
+  于是这些行**当面消失**，不报错、只是少算。`fn::sync_gen_roots` 随 ADR-058 D4 退出启动路径之后，
+  这个洞会从「历史行看不见」变成「新根永远看不见」。现在 `render_upsert` 的 `gen_root` UPSERT 加
+  `dbnum = {dbnum}`，启动核对开头跑一次幂等回填
+  （`UPDATE gen_root SET dbnum = desired_target.dbnum WHERE dbnum = NONE AND (desired_target.dbnum ?: 0) > 0`，
+  失败只告警，下次启动再试）。两条测试：建行语句必须带顶层 `dbnum`；回填只动「只有嵌套归属」的行，
+  已有归属的不碰、两处都没有的也不碰（没有可信归属可补，硬写就是编一个），跑第二遍零命中。
+- **`CONTEXT.md`：「按需解析元件库（On-demand CATA）」整章标 retired（ADR-058 D1）**——按需解析 /
+  引用闭包 / 部分解析 / 生成根闭包 / 惰性兜底 / 闭包漏边六条只作读旧文档用；CATA 的**文件身份裁决**
+  （项目优先级、同号选主、`CataDbLocator`）不在退役之列。「严格初始化阶段」改写为两条并行链、
+  删掉 Catalogue 一段；新增「启动退化窗口」词条。「监听限定域」补两句：**初始化启动同样受它约束**
+  （限定时只盖域内库，未限定时盖全部候选库），CATA 只从文件读；`_Avoid_` 加「服务边界（它不是）」
+  ——它的性质仍是调试开关，只是到达面扩到了启动。
+- **`ADR-025` 加 2026-09-03 对照块**：五段顺序收缩为两条并行链，决策 2 的 `Catalogue` 一句与
+  「2026-08-25 实施说明」第一条的 `fn::sync_gen_roots` 物化失效；manifest / epoch / 纪元激活门、
+  决策 4/5、§7 与决策 8/9 全部不变。
+
+### 修复
+
+- **窗口规划器的计划不再拿 old-pdms-io 复核一遍——那条复核能把库水位永久打死（spec 035 T412）。**
+  `apply_one` 此前对每一份模型计划都调 `reconcile_plan_final_presence`，用
+  `DabaconSnapshot::contains_refnos_at(T, 根集)` 问「这些根在 T 还在不在」。对 PE 图上溯出来的老规划器
+  这是必要的（那张图是窗口**之前**的状态），但对 `window_root_plan` 的根**完全多余**：它们本来就是
+  `enumerate_generation_roots(DbSet@T)` 从 target 端枚举出来的，自身即存活证明。而且它是个硬失败
+  向量——ams7999 45→46 上 `contains_refnos_at(46, {24383/101198})` 报
+  `IndexPageData.noun == 0xCC47DF`（0830 坐实的「`0x18` 是 `free_dwords` 不是条目数」那一族解码 bug），
+  而 `24383/101198` 正是 46 新建的那棵 STRU 子树的顶。一报错整窗 `Err` → 批次 Failed →
+  `prepare_attempt` 行已落 → 下一轮进 replay 分支按固定区间重放同一份计划 → 同一页再报错 →
+  **该库水位永久卡在 45**，只能手删 attempt 行。
+  修法按 T407 的拆分口径落：函数一分为二——`verify_frozen_source`（冻结源身份门，`apply_one`
+  **无条件**调，纯数据窗口也不许在收集与持久化之间被换掉文件）与 `reconcile_plan_final_presence`
+  （存活复核，只在 `!model_plan.window_planned` 时调）。`ModelUpdatePlan` 新增
+  `#[serde(default)] window_planned`，由 `WindowRootPlan::into_model_update_plan` 置 `true`，老规划器的
+  两处构造点显式 `false`——旧 durable attempt 没有这个字段，反序列化成 `false` 正是老规划器的行为。
+  整块放进同步作用域：`DabaconSnapshot` 不是 `Send`，跨 `.await` 持有会让 `apply_one` 的 future 失去
+  `Send`，而 `drain_queue_until_empty` 要求它 Send。
+  验证：`cargo test --lib` **1338 通过 / 0 失败 / 100 ignored**；新增两条源码钉
+  `every_window_verifies_the_frozen_source_before_any_planner_branch`（身份门必须排在任何规划器分支之前）
+  与 `window_planned_plans_skip_the_legacy_liveness_recheck`（存活复核只有一个调用点、且挂在标记后面）；
+  **新增真库验收门 `live_ams7999_45_to_46_plans_the_new_stru_roots_without_the_legacy_recheck` 通过**——
+  同一窗 e3d-io 侧索引差分 `+22 ~1 -0`、`unresolved=0`、闭包完整，4431 个根里只排出
+  `24383/101198 STRU` 与 `24383/101199 FRMW` 两个 regen 根、4429 个凭证前移、`degraded=None`，
+  老读法报错的 101198 / 101201 都在账本里；ams8000 九窗门复跑仍绿。
+  **未 live 验证**：真起服务把 ams7999 45→46 跑到水位 46（本轮那台服务 `--watch-dbnum 8000`，
+  7999 不在监听域内）。
+
 ## 2026-09-02
 
 ### 新增
@@ -18,6 +376,17 @@
 
 ### 变更
 
+- **direct 形态也启动数据批次 worker（只不起 watcher）；`/health.worker_alive` 在 direct 下报真值。**
+  此前 `AIOS_DATA_READ_MODE=direct` 把 watcher 与 worker 一起跳过，而 `POST /update/execute` 没有
+  任何 direct 守卫、一律 202 入队——人工执行的批次进了队列没人出队，永远「排队中」，`/health` 又把
+  `worker_alive` 报成 `null`，客户端连「不会被处理」都无从得知（plant-ui 计划
+  `docs/plans/manual-update-and-get-work-on-direct-mode.md` §二、拍板 D1）。现在 `run_cli` 无条件
+  `ensure_batch_worker`，direct 分支开完模型门顺手 `scheduler.wake()`；`sync_live` 仍
+  `configured && !direct`，自动追新照旧不开。worker 本来就是队列的唯一消费者、与读取底座无关：
+  数据面走直写路径（ADR-056 P1），模型面走 `generate_roots`（e3d-io 读文件）。ADR-053 里「跳过
+  watcher/worker」那句自此只剩 watcher 一半。源码钉两条：`direct_mode_starts_the_batch_worker_but_not_the_watcher`
+  （lib.rs）、`health_reports_worker_liveness_in_every_read_mode`（handlers.rs）。**未 live 验证**
+  （要 direct 形态起服务 + 真库 + 人工执行一次）。
 - **五类复用曲面原语的身份键带上段数，单位行携带段数落库（specs/009 T041，ADR-044 决策 2；
   改身份 = 整库重建）。** 单位行的半径恒为 1、真实尺寸只在实例变换里，所以 `hash_unit_mesh_params()`
   与 `gen_unit_shape()` 都在**原件**上按真实半径把段数算好：柱 `unit_cylinder_identity(n)`

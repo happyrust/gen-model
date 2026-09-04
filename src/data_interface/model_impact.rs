@@ -18,10 +18,11 @@ use std::sync::{LazyLock, OnceLock};
 
 use aios_core::pdms_types::{DbAttributeType, TOTAL_LOOP_NOUN_NAMES, TOTAL_VERT_NOUN_NAMES};
 use aios_core::{NamedAttrValue, RefU64Vec, RefnoEnum};
-use pdms_io::io::{
+use serde::Deserialize;
+
+use super::ele_ops::{
     ChildrenDelta, EleOperationData, EleOperationDetail, ModifiedElement, classify_children_delta,
 };
-use serde::Deserialize;
 
 /// 属性对模型生成输入的影响（三态，保留作向后兼容 / 粗判）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -409,7 +410,7 @@ pub fn classify_operation_impact(op: &EleOperationData) -> OperationImpact {
 pub fn is_loop_container_noun(noun: &str) -> bool {
     let n = noun.trim().to_ascii_uppercase();
     matches!(n.as_str(), "JLDATU" | "PLDATU" | "ENDATU")
-        || parse_pdms_db::dict::default_noun_capabilities()
+        || crate::noun_dict::default_noun_capabilities()
             .get(&n)
             .map(|caps| caps.point)
             // Keep the established lists as a safe fallback for custom nouns absent
@@ -1025,7 +1026,7 @@ mod tests {
     /// 的 `sub_5986450(this+24, owner)`）。
     #[test]
     fn b_evt_02_created_element_records_owner_membership() {
-        use parse_pdms_db::parse::EleData;
+        use crate::data_interface::ele_data::EleData;
         let elem = aios_core::RefU64((7997u64 << 32) | 7);
         let owner = aios_core::RefU64((7997u64 << 32) | 55);
         let mut ele = EleData::default();
@@ -1239,7 +1240,7 @@ mod tests {
 
     #[test]
     fn all_dictionary_geometry_nouns_follow_the_same_update_contract() {
-        let classifier = parse_pdms_db::dict::default_noun_classifier();
+        let classifier = crate::noun_dict::default_noun_classifier();
         let geometry_nouns: BTreeSet<String> = classifier
             .primitive_nouns()
             .into_iter()
@@ -1340,7 +1341,7 @@ mod tests {
 
     #[test]
     fn all_dictionary_nouns_have_a_total_incremental_update_policy() {
-        let capabilities = parse_pdms_db::dict::default_noun_capabilities();
+        let capabilities = crate::noun_dict::default_noun_capabilities();
         let nouns = capabilities
             .iter()
             .filter_map(|caps| {
@@ -1392,7 +1393,7 @@ mod tests {
 
     #[test]
     fn every_dictionary_point_container_is_skipped_as_a_generation_root() {
-        let point_nouns = parse_pdms_db::dict::default_noun_capabilities().point_nouns();
+        let point_nouns = crate::noun_dict::default_noun_capabilities().point_nouns();
         assert_eq!(point_nouns.len(), 44, "dabacon point capability drifted");
         for noun in point_nouns {
             assert!(

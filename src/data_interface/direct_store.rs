@@ -524,6 +524,65 @@ impl DirectStore {
         Ok(self.indexes.entry(dbnum).or_insert(fresh).clone())
     }
 
+    /// 谁经 `attribute` 指向 `target`——**读库文件自带的反向引用表**，不是自建索引。
+    ///
+    /// dabacon 的会话页除了索引根，还挂着一份表目录，其中大部分表以引用属性命名
+    /// （`SPRE` / `CATR` / `PRTREF` / `GOBREF`…），每条记录就是一对
+    /// `(目标 refno, 引用者 refno)`，按目标排序。core.dll 的
+    /// `DB_RefTableIterator::startSearch(dbno, attId, targetRef, handle)` 查的就是它，
+    /// `BREF`/`SPBREF` 那一族伪属性也从它取值。取证与语料门见
+    /// `docs/evidence/2026-09-03-dabacon-named-tables-and-reference-tables.md`。
+    ///
+    /// **一张表只答它自己那个库。** 表存在**引用方**的库里，按目标做键：ams8000 的
+    /// 设计件把自己的 `SPRE` 记进 ams8000 自己的 `SPRE` 表、键是目录件的 refno。所以
+    /// 「谁引用这个目录件」的完整答案是范围内各库的并集（core 侧同理，那是
+    /// `DB_MDB::findElements` 逐库迭代的原因），单库入口不代表全局答案。
+    ///
+    /// 空结果 = 这个库里没有这样的引用者；读不动会 `Err`，不会退化成空。
+    pub fn referrers_of(
+        &self,
+        dbnum: i32,
+        attribute: &str,
+        target: RefU64,
+    ) -> Result<Vec<RefU64>, DirectStoreError> {
+        let session = self.session_of(dbnum)?;
+        let mut session = session
+            .lock()
+            .map_err(|_| DirectStoreError::Poisoned { slot: "session" })?;
+        let found = session
+            .engine
+            .referrers_of(
+                e3d_attlib::db1_hash(attribute),
+                RefNo::new(target.get_0(), target.get_1()),
+            )
+            .map_err(|error| DirectStoreError::Session {
+                dbnum,
+                detail: format!("反向引用表 {attribute}：{error}"),
+            })?;
+        Ok(found
+            .into_iter()
+            .map(|refno| RefU64((u64::from(refno.word0) << 32) | u64::from(refno.word1)))
+            .collect())
+    }
+
+    /// 这个库在当前时点声明了哪几张具名表。
+    ///
+    /// 名字是 base-27 反哈希出来的，解不出的照原样报哈希——目录里的名字不全是引用
+    /// 属性（`NAME` / `TYPEX` / `SPAMAP` 也在里面），哪几张算引用表由字典裁决，
+    /// 不由本方法猜。
+    pub fn table_names(&self, dbnum: i32) -> Result<Vec<String>, DirectStoreError> {
+        let session = self.session_of(dbnum)?;
+        let session = session
+            .lock()
+            .map_err(|_| DirectStoreError::Poisoned { slot: "session" })?;
+        Ok(session
+            .engine
+            .tables()
+            .iter()
+            .map(|table| table.name().unwrap_or_else(|| table.name_hash.to_string()))
+            .collect())
+    }
+
     fn read_attrs(&self, dbnum: i32, refno: RefU64) -> Result<DirectAttrs, DirectStoreError> {
         let session = self.session_of(dbnum)?;
         let mut session = session

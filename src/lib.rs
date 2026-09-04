@@ -4,6 +4,8 @@
 #![feature(slice_take)]
 #![feature(const_async_blocks)]
 #![feature(type_alias_impl_trait)]
+// `FrozenSource` 的稳定文件身份（Windows 卷序列号 + 文件索引）要它，见 `frozen_source.rs`。
+#![cfg_attr(windows, feature(windows_by_handle))]
 // 暂时屏蔽warnings
 #![allow(warnings)]
 #![recursion_limit = "256"]
@@ -355,6 +357,8 @@ pub mod defines;
 pub mod team_data;
 
 pub mod graph_db;
+/// dabacon noun 字典快照（分类 flag + 能力矩阵），原 `parse_pdms_db::dict` 的消费面。
+pub mod noun_dict;
 pub mod noun_layout;
 pub mod test;
 pub mod uda_table;
@@ -587,12 +591,16 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         fmt_elapsed(preload_started.elapsed())
     );
 
-    let configured_sync_live = db_option.sync_live.unwrap_or(false);
+    // watcher 只听 `sync_live` 一个开关（ADR-058 D8 / refactor plan S5-1）。此前这里还
+    // `&& !direct_read_mode`：生产形态启动后没有数据链、没有 manifest、没有文件事件，
+    // 模型只靠人工执行与按需 ensure——「改元素 → SAVEWORK → 自动更新」在生产上做不到。
+    // `direct_read_mode` 从此只回答「数据面读哪儿」，watcher / 模型复核 / 房间与 db 形态同一条路。
+    let sync_live = db_option.sync_live.unwrap_or(false);
     let direct_read_mode = crate::options::direct_read_mode();
-    let sync_live = configured_sync_live && !direct_read_mode;
     if direct_read_mode {
         println!(
-            "数据读取模式：direct（e3d-io）；保留 MDB 初始化与 Web API，跳过旧增量 watcher/worker"
+            "数据读取模式：direct（e3d-io）；watcher / 模型复核 / 房间与 db 形态同一条启动路，\
+             监控目录 watcher 由 sync_live 决定（当前 sync_live={sync_live}）"
         );
     }
     let db_option = Arc::new(db_option.clone());
@@ -600,12 +608,22 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
 
     // start_sync_task(db_option.clone(), progress_sender.clone()).await?;
     //如果是解析任务，运行完就应该跳出
-    if !direct_read_mode
-        && (db_option.total_sync
-            || db_option.incr_sync
-            || db_option.only_sync_sys
-            || db_option.is_sync_history())
-    {
+    let legacy_sync_requested = db_option.total_sync
+        || db_option.incr_sync
+        || db_option.only_sync_sys
+        || db_option.is_sync_history();
+    if direct_read_mode && legacy_sync_requested {
+        // 静默忽略配置项是最高级别缺陷之一：此前这几个开关在 direct 下什么都不做、也不说。
+        println!(
+            "direct 形态不跑 sync_pdms（legacy 全量 / 历史解析走 db 读路由）：忽略 total_sync={} \
+             incr_sync={} only_sync_sys={} sync_history={}；数据面由 watcher 首扫与增量窗口经 e3d-io 摄入",
+            db_option.total_sync,
+            db_option.incr_sync,
+            db_option.only_sync_sys,
+            db_option.is_sync_history()
+        );
+    }
+    if !direct_read_mode && legacy_sync_requested {
         let step_started = Instant::now();
         // println!("开始同步解析数据。");
         // tokio::spawn(async move {
@@ -688,6 +706,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // model work for this process. Explicit full-build tools enter through
     // `E3dModelService::generate_dbnum`.
     initialization.configure_model_bootstrap(false);
+    // 清单就绪会自动打开模型门，worker 第一圈空闲轮随即可能宣告 model_ready。
+    // 启动凭证复核必须先占住这道完成门，再允许唯一消费者起来。
+    initialization.begin_startup_reconcile();
     println!(
         "启动模型策略：gen_model={} gen_mesh={} 仅控制增量模型阶段；按文件会话号与 applied_sesno 比对结果执行，不启动整库全量生成",
         db_option.gen_model, db_option.gen_mesh
@@ -721,7 +742,21 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
                  有任何进展"
             );
         }
+        println!("启动模型凭证复核仍照常执行；发现的缺口只入队，不越过上弦门消费");
     }
+
+    // 先把健康接口起起来，再做 watcher 的首次全目录扫描。扫描慢或阻断时，外部仍能
+    // 从 /health 看到初始化快照，而不是只能等到扫描结束才连得上服务。
+    #[cfg(feature = "http_api")]
+    let web_task = {
+        let mgr = mgr.clone();
+        tokio::spawn(async move {
+            if let Err(e) = crate::web_service::serve_if_configured(mgr).await {
+                eprintln!("Web 服务异常退出: {e:?}");
+            }
+        })
+    };
+
     if sync_live {
         println!("正在启动监控目录 watcher（首轮重扫入队，含库文件存档压缩，可能较久）...");
         let step_started = Instant::now();
@@ -733,21 +768,17 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     }
 
     // Worker is started as soon as the immutable manifest is installed.  The
-    // coordinator keeps it data-only until Meta -> Catalogue -> Design settles.
-    if !direct_read_mode {
-        crate::data_interface::batch_worker::ensure_batch_worker(mgr.clone());
-    }
-
-    // Expose initialization progress before waiting for data/model readiness.
-    #[cfg(feature = "http_api")]
-    let web_task = {
-        let mgr = mgr.clone();
-        tokio::spawn(async move {
-            if let Err(e) = crate::web_service::serve_if_configured(mgr).await {
-                eprintln!("Web 服务异常退出: {e:?}");
-            }
-        })
-    };
+    // model gate opens with that manifest (ADR-058 D7: file identity resolved,
+    // not data settled), so the data chain and the model chain run side by
+    // side from here on.  The worker is still a single consumer: the idle-round
+    // model drain only runs while no data batch is queued (`DataQueued` yield),
+    // and the convergence banner (`mark_model_ready`) still waits for `data_ready`.
+    //
+    // direct 形态也起（2026-09-02，plant-ui 计划 D1）：worker 是队列的唯一消费者，与读取
+    // 底座无关；数据面走直写路径（ADR-056 P1），模型面走 `generate_roots`（e3d-io 读文件）。
+    // 2026-09-04（S5）起 direct 的 watcher 也照 `sync_live` 起，人工执行（`POST /update/execute`）
+    // 与文件事件排进同一个队列。
+    crate::data_interface::batch_worker::ensure_batch_worker(mgr.clone());
 
     // Watcher events are dirtiness signals only; `async_watch` debounces them
     // into the same full manifest scan used by startup and reconciliation.
@@ -775,21 +806,74 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         None
     };
 
+    // 把生成根凭证与**文件最新会话**对齐——run_app 里 ADR-050 那次无条件清空的补偿路径
+    // （ADR-058 D4）：一级取全部库的凭证下限，只有落后的库才开一次退化窗口，选根整条来自
+    // 稳态那条路。它读的是文件与 gen_root，不需要任何数据摄入，所以排在数据等待**之前**
+    // （ADR-058 D7：模型面不等 data_ready）——此前它压在 Meta → Catalogue → Design 摄完之后，
+    // Design 基线跑多久模型面就干等多久。direct 也跑，而且 direct 才是它的主场；此前那道
+    // `!direct_read_mode` 让生产形态启动时一根都不核，ADR-050 承诺的「重启靠凭证 vs 文件
+    // 最新重新发现」于是没有实现者（审核 A1 / A2）。仅看 model_update_pending=0 会把
+    // “从未生成过的根”误判成完成；这里只补缺失工作，不改水位、不删旧模型，也不越过
+    // watch_dbnums。任何一库失败都告警后继续，不把一个库的配置错变成整个服务的崩溃循环。
+    crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup().await;
+
     let startup_data_ready = !sync_live || scheduler.is_auto_work_armed();
     if sync_live && startup_data_ready {
-        println!("等待 Meta → Catalogue → Design 数据清单完成...");
-        initialization.wait_for_data_ready().await;
-        println!("数据初始化完成，模型阶段可以开始");
-    }
-
-    // 数据基线完成后把权威生成根覆盖与当前水位快照对齐——run_app 里 ADR-050 那次
-    // 无条件清空的补偿路径，因此**不**只挂在监听限定域上：限定域逐库 sync + 补种，
-    // 未限定域按 gen_root 凭证点查、过期才补种（口径见函数注释）。仅看
-    // model_update_pending=0 会把“从未生成过的根”误判成完成；这里只补缺失工作，
-    // 不改水位、不删旧模型，也不越过 watch_dbnums。任何一库失败都告警后继续，
-    // 不把一个库的配置错变成整个服务的崩溃循环。
-    if startup_data_ready && !direct_read_mode {
-        crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup().await;
+        println!(
+            "等待 Meta → Catalogue → Design 数据清单完成...（模型面已并行开工：门随清单装好即开，\
+             积压在数据队列空隙消化，按需生成不受数据阶段阻挡）"
+        );
+        let mut waited_secs = 0u64;
+        let mut last_wait_fingerprint: Option<String> = None;
+        let mut last_wait_emitted_secs = 0u64;
+        loop {
+            if tokio::time::timeout(std::time::Duration::from_secs(60), async {
+                initialization.wait_for_data_ready().await;
+            })
+            .await
+            .is_ok()
+            {
+                break;
+            }
+            waited_secs += 60;
+            let snapshot = initialization.snapshot();
+            let phases = snapshot
+                .phases
+                .iter()
+                .map(|(phase, counts)| {
+                    format!(
+                        "{phase}:total={} pending={} running={} failed={} blocked={}",
+                        counts.total, counts.pending, counts.running, counts.failed, counts.blocked
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let blockers = if snapshot.blockers.is_empty() {
+                "无".to_string()
+            } else {
+                snapshot.blockers.join(" | ")
+            };
+            let fingerprint = format!(
+                "{}|{:?}|{:?}|{:?}",
+                snapshot.status, snapshot.current_phase, snapshot.phases, snapshot.blockers
+            );
+            let blocked = snapshot.status == "blocked" || !snapshot.blockers.is_empty();
+            let changed = last_wait_fingerprint.as_deref() != Some(fingerprint.as_str());
+            if blocked || changed || waited_secs.saturating_sub(last_wait_emitted_secs) >= 300 {
+                println!(
+                    "数据初始化仍在等待：status={} current_phase={} phases=[{}] \
+                     blockers=[{}] 已等={}s",
+                    snapshot.status,
+                    snapshot.current_phase.unwrap_or("—"),
+                    phases,
+                    blockers,
+                    waited_secs
+                );
+                last_wait_fingerprint = Some(fingerprint);
+                last_wait_emitted_secs = waited_secs;
+            }
+        }
+        println!("数据链已就绪；模型面自清单装好起已在跑，下面等模型积压收敛");
     }
 
     // 启动分层判据装载空间树（docs/2026-08-11_spatial-tree-startup-init-plan.md）：
@@ -813,138 +897,133 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 状态读取。
     crate::fast_model::spatial_state::spawn_spatial_revalidator();
     // progress_sender.send(10)?;
-    if direct_read_mode {
-        initialization.open_model_phase();
-        initialization.mark_model_ready();
-        println!("direct 模式初始化门已打开：按需模型请求可直接进入 e3d-io 读取与缓存判定");
-    } else if startup_data_ready {
-        if initialization.open_model_phase() {
-            scheduler.wake();
-            if !crate::options::model_incremental() {
-                // worker 空闲轮的模型消费与 mark_model_ready 都挂在
-                // `model_incremental()` 上（batch_worker 的空闲模型门），开关关着时
-                // model_ready 在本进程内永远不会置位——这里若照常等待就是无限期挂死：
-                // watcher/web 已经起了，启动序列却永远走不到房间阶段与完成横幅。
-                // 模型门照开（按需生成沿用 require_model_generation 那道门），durable
-                // 积压原样留存，只跳过等待；房间阶段由下方同一开关一并跳过。
-                println!(
-                    "模型增量阶段已关闭（model_incremental=false）：durable 模型积压留存不消化，\
-                     跳过启动模型收敛等待（重新开启后由空闲轮回补；按需生成不受影响）"
-                );
-            } else {
-                // 收敛发生在 worker 空闲轮里（模型积压分页消化、空间收敛、AABB 落盘，
-                // 任一环失败都按 30s 退避重试），主线可能要等很久。干等会让启动看起来
-                // 像挂死——数量/阶段变化时报实际进展，完全不变时最多每 300s 提醒一次。
-                let mut waited_secs = 0u64;
-                let mut last_wait_fingerprint: Option<String> = None;
-                let mut last_wait_emitted_secs = 0u64;
-                loop {
-                    if tokio::time::timeout(
-                        std::time::Duration::from_secs(60),
-                        initialization.wait_for_model_ready(),
-                    )
-                    .await
-                    .is_ok()
-                    {
-                        break;
-                    }
-                    waited_secs += 60;
-                    let pending =
-                        crate::data_interface::model_update_pending::model_pending_status().await;
-                    let telemetry =
-                        crate::data_interface::model_update_pending::model_drain_telemetry_snapshot(
-                        );
-                    let (message, fingerprint) = match pending {
-                        Ok(status) => {
-                            let count = |action: &str| {
-                                status
-                                    .by_action
-                                    .get(action)
-                                    .map_or(0, |counts| counts.retryable)
-                            };
-                            let non_regen = count("transform")
-                                + count("delete_cleanup")
-                                + count("cascade_expand");
-                            let regen = count("regen_root");
-                            let aabb = count("post_regen_aabb");
-                            let stage = telemetry
-                                .get("last_stage")
-                                .and_then(serde_json::Value::as_str)
-                                .unwrap_or("waiting");
-                            let page_claimed = telemetry
-                                .get("last_page_claimed")
-                                .and_then(serde_json::Value::as_u64)
-                                .unwrap_or(0);
-                            let page_completed = telemetry
-                                .get("last_page_completed")
-                                .and_then(serde_json::Value::as_u64)
-                                .unwrap_or(0);
-                            let phase = if non_regen > 0 {
-                                "non_regen"
-                            } else if regen > 0 {
-                                "regen_root"
-                            } else if aabb > 0 {
-                                "post_regen_aabb"
-                            } else {
-                                "spatial_persist"
-                            };
-                            let message = if regen > 0 {
-                                format!(
-                                    "初始化模型进行中：阶段={phase} regen_root剩余={regen} \
-                                     当前页={page_completed}/{page_claimed} 子阶段={stage} 已等={waited_secs}s；AABB尚未开始"
-                                )
-                            } else {
-                                format!(
-                                    "初始化模型进行中：阶段={phase} non_regen剩余={non_regen} \
-                                     AABB剩余={aabb} 当前页={page_completed}/{page_claimed} \
-                                     子阶段={stage} 已等={waited_secs}s"
-                                )
-                            };
-                            let fingerprint = format!(
-                                "{phase}|{non_regen}|{regen}|{aabb}|{stage}|{page_completed}|{page_claimed}"
-                            );
-                            (message, fingerprint)
-                        }
-                        Err(error) => (
-                            format!("读取初始化模型进展失败（已等 {waited_secs}s）: {error:#}"),
-                            format!("status_error:{error:#}"),
-                        ),
-                    };
-                    // 「数字不变就退到 300 秒一行」这条退避在卡死时是反的：越卡越安静。
-                    // 2026-08-27 现场前 19 分钟每 60 秒一行，真卡住之后反而变成 300 秒一行。
-                    // 页级停滞一旦确认，就按 60 秒照常出声，并把停滞页数带上。
-                    let starved =
-                        crate::data_interface::model_update_pending::model_drain_page_starved();
-                    let message = if starved {
-                        format!(
-                            "{message}；模型页已连续 {} 页整页认领、零收口——这不是慢是收不掉，\
-                             看日志里点名的根与 /health 的 blocking_conditions",
-                            crate::data_interface::model_update_pending::model_drain_starved_pages(
-                            )
-                        )
-                    } else {
-                        message
-                    };
-                    let changed = last_wait_fingerprint.as_deref() != Some(fingerprint.as_str());
-                    if starved
-                        || changed
-                        || waited_secs.saturating_sub(last_wait_emitted_secs) >= 300
-                    {
-                        println!("{message}");
-                        last_wait_fingerprint = Some(fingerprint);
-                        last_wait_emitted_secs = waited_secs;
-                    }
+    // 2026-09-04（S5-2）之前这里有一条 direct 专用分支：复核落地后立刻 `mark_model_ready()`
+    // 并跳过收敛等待，`/health.model_ready=true` 时复核排出的行还在跑，而且不看数据链。
+    // direct 从此与 db 形态走同一条等待：门随清单开，收敛由 worker 空闲轮宣告。
+    if startup_data_ready {
+        if !initialization.open_model_phase() {
+            println!(
+                "模型门未能立即打开（重扫刚发现新会话，数据阶段回到未就绪）：\
+                 照常等待模型收敛，门由清单就绪后自动打开"
+            );
+        }
+        scheduler.wake();
+        if !crate::options::model_incremental() {
+            // worker 空闲轮的模型消费与 mark_model_ready 都挂在
+            // `model_incremental()` 上（batch_worker 的空闲模型门），开关关着时
+            // model_ready 在本进程内永远不会置位——这里若照常等待就是无限期挂死：
+            // watcher/web 已经起了，启动序列却永远走不到房间阶段与完成横幅。
+            // 模型门照开（按需生成沿用 require_model_generation 那道门），durable
+            // 积压原样留存，只跳过等待；房间阶段由下方同一开关一并跳过。
+            println!(
+                "模型增量阶段已关闭（model_incremental=false）：durable 模型积压留存不消化，\
+                 跳过启动模型收敛等待（重新开启后由空闲轮回补；按需生成不受影响）"
+            );
+        } else {
+            // 收敛发生在 worker 空闲轮里（模型积压分页消化、空间收敛、AABB 落盘，
+            // 任一环失败都按 30s 退避重试），主线可能要等很久。干等会让启动看起来
+            // 像挂死——数量/阶段变化时报实际进展，完全不变时最多每 300s 提醒一次。
+            let mut waited_secs = 0u64;
+            let mut last_wait_fingerprint: Option<String> = None;
+            let mut last_wait_emitted_secs = 0u64;
+            loop {
+                if tokio::time::timeout(
+                    std::time::Duration::from_secs(60),
+                    initialization.wait_for_model_ready(),
+                )
+                .await
+                .is_ok()
+                {
+                    break;
                 }
-                println!("持久模型工作单与 AABB 阶段已收敛");
+                waited_secs += 60;
+                let pending =
+                    crate::data_interface::model_update_pending::model_pending_status().await;
+                let telemetry =
+                    crate::data_interface::model_update_pending::model_drain_telemetry_snapshot();
+                let (message, fingerprint) = match pending {
+                    Ok(status) => {
+                        let count = |action: &str| {
+                            status
+                                .by_action
+                                .get(action)
+                                .map_or(0, |counts| counts.retryable)
+                        };
+                        let non_regen =
+                            count("transform") + count("delete_cleanup") + count("cascade_expand");
+                        let regen = count("regen_root");
+                        let aabb = count("post_regen_aabb");
+                        let stage = telemetry
+                            .get("last_stage")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("waiting");
+                        let page_claimed = telemetry
+                            .get("last_page_claimed")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                        let page_completed = telemetry
+                            .get("last_page_completed")
+                            .and_then(serde_json::Value::as_u64)
+                            .unwrap_or(0);
+                        let phase = if non_regen > 0 {
+                            "non_regen"
+                        } else if regen > 0 {
+                            "regen_root"
+                        } else if aabb > 0 {
+                            "post_regen_aabb"
+                        } else {
+                            "spatial_persist"
+                        };
+                        let message = if regen > 0 {
+                            format!(
+                                "初始化模型进行中：阶段={phase} regen_root剩余={regen} \
+                                 当前页={page_completed}/{page_claimed} 子阶段={stage} 已等={waited_secs}s；AABB尚未开始"
+                            )
+                        } else {
+                            format!(
+                                "初始化模型进行中：阶段={phase} non_regen剩余={non_regen} \
+                                 AABB剩余={aabb} 当前页={page_completed}/{page_claimed} \
+                                 子阶段={stage} 已等={waited_secs}s"
+                            )
+                        };
+                        let fingerprint = format!(
+                            "{phase}|{non_regen}|{regen}|{aabb}|{stage}|{page_completed}|{page_claimed}"
+                        );
+                        (message, fingerprint)
+                    }
+                    Err(error) => (
+                        format!("读取初始化模型进展失败（已等 {waited_secs}s）: {error:#}"),
+                        format!("status_error:{error:#}"),
+                    ),
+                };
+                // 「数字不变就退到 300 秒一行」这条退避在卡死时是反的：越卡越安静。
+                // 2026-08-27 现场前 19 分钟每 60 秒一行，真卡住之后反而变成 300 秒一行。
+                // 页级停滞一旦确认，就按 60 秒照常出声，并把停滞页数带上。
+                let starved =
+                    crate::data_interface::model_update_pending::model_drain_page_starved();
+                let message = if starved {
+                    format!(
+                        "{message}；模型页已连续 {} 页整页认领、零收口——这不是慢是收不掉，\
+                         看日志里点名的根与 /health 的 blocking_conditions",
+                        crate::data_interface::model_update_pending::model_drain_starved_pages()
+                    )
+                } else {
+                    message
+                };
+                let changed = last_wait_fingerprint.as_deref() != Some(fingerprint.as_str());
+                if starved || changed || waited_secs.saturating_sub(last_wait_emitted_secs) >= 300 {
+                    println!("{message}");
+                    last_wait_fingerprint = Some(fingerprint);
+                    last_wait_emitted_secs = waited_secs;
+                }
             }
+            println!("持久模型工作单与 AABB 阶段已收敛");
         }
     }
 
     println!("房间关键字为: {:?}", db_option.get_room_key_word());
     if !startup_data_ready {
         println!("数据初始化尚未释放，跳过启动房间重建");
-    } else if direct_read_mode {
-        println!("direct 模式跳过启动房间重建；按需模型由 Web API 独立生成");
     } else if !crate::options::model_incremental() {
         // 房间归属只在「数据与模型都已写入 RocksDB」之后才整体重算（ADR-010 §7 /
         // ADR-011 §8：房间依赖几何与 AABB 都已收敛）。模型开关关着时 durable 模型
@@ -1052,13 +1131,15 @@ fn print_startup_complete_banner(db_option: &DbOption, sync_live: bool, started:
         fmt_elapsed(started.elapsed())
     );
     println!(
-        "  增量阶段：data={} model={} room={}（顺序：数据 → 模型 → 房间）",
+        "  增量阶段：data={} model={} room={}（数据链与模型链并行，房间排在模型之后）",
         crate::options::data_incremental(),
         crate::options::model_incremental(),
         crate::options::room_incremental()
     );
     if crate::options::direct_read_mode() {
-        println!("  数据读取：direct / e3d-io（旧增量 watcher/worker 未启动）");
+        println!(
+            "  数据读取：direct / e3d-io（只决定数据面读哪儿；watcher / 模型复核 / 房间与 db 形态同一条路）"
+        );
     }
     if let Some(notice) = crate::data_interface::watch_scope::mode_notice() {
         println!("  *** {notice}");
@@ -1322,8 +1403,12 @@ mod startup_room_build_gate_tests {
         );
     }
 
+    /// ADR-058 D7：数据链与模型链并行。启动模型复核只读文件与 `gen_root`，必须排在
+    /// 数据等待**之前**；主线仍按「数据就绪 → 模型收敛 → 房间」的顺序等，因为房间吃
+    /// 模型产物、收敛宣告要等数据尾事务不再往积压里添行。2026-09-03 之前这里钉的是
+    /// `data < open_model`（模型面等数据），那正是 D7 要拆掉的串行。
     #[test]
-    fn startup_waits_for_data_then_models_before_rooms() {
+    fn startup_reconciles_models_before_waiting_for_data_and_keeps_rooms_last() {
         let source = include_str!("lib.rs");
         let body = source
             .split_once("pub async fn run_cli(")
@@ -1338,14 +1423,172 @@ mod startup_room_build_gate_tests {
             "任一全局数据阶段失败必须终止启动，不能继续打开模型门"
         );
         let web = body.find("serve_if_configured(mgr)").unwrap();
+        let reconcile = body
+            .find("reconcile_model_coverage_at_startup().await")
+            .unwrap();
         let data = body.find("wait_for_data_ready().await").unwrap();
-        let open_model = body.find("initialization.open_model_phase()").unwrap();
         // 等待包在带周期播报的 timeout 循环里，锚点只认调用本身，不认 `.await`。
         let model_ready = body.find("wait_for_model_ready()").unwrap();
         let room = body.find("build_room_relations(&db_option).await").unwrap();
-        assert!(worker < data && web < data);
-        assert!(data < open_model);
-        assert!(open_model < model_ready && model_ready < room);
+        assert!(
+            worker < reconcile,
+            "复核排出的工作项由 worker 消化，worker 先起"
+        );
+        assert!(
+            reconcile < data,
+            "启动模型复核不等数据摄入（ADR-058 D7）：它读的是文件与 gen_root"
+        );
+        assert!(
+            web < data,
+            "健康接口先起，数据等待期间外部要看得见初始化快照"
+        );
+        assert!(
+            data < model_ready && model_ready < room,
+            "主线仍按 数据就绪 → 模型收敛 → 房间 等：房间吃模型产物"
+        );
+    }
+
+    /// 启动凭证复核必须先占住模型完成门，再让唯一消费者（batch worker）起来；
+    /// 补偿核对在 `run_cli` 顶层无条件执行（ADR-050：清空无条件，补偿也无条件），
+    /// 不许再躲回任何 `if startup_data_ready` 块里（审核 P1/P2）。
+    #[test]
+    fn startup_reconcile_is_armed_before_the_worker_and_runs_unconditionally() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli exists")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_cli end exists")
+            .0;
+        let configure = body
+            .find("initialization.configure_model_bootstrap(false)")
+            .expect("模型门配置必须存在");
+        let begin = body
+            .find("initialization.begin_startup_reconcile();")
+            .expect("启动复核必须先占住完成门");
+        let worker = body.find("ensure_batch_worker(mgr.clone())").unwrap();
+        assert!(
+            configure < begin && begin < worker,
+            "顺序必须是 配置模型门 → 占住完成门 → 起 worker，否则第一圈空闲轮可能抢先宣告收敛"
+        );
+        assert!(
+            body.contains(
+                "\n    crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup().await;\n"
+            ),
+            "覆盖核对必须在 run_cli 顶层（4 空格缩进、不在任何 if 内）无条件执行（ADR-050）"
+        );
+        let reconcile = body
+            .find("reconcile_model_coverage_at_startup().await")
+            .unwrap();
+        assert!(
+            worker < reconcile,
+            "worker 必须先起来：复核落地后排出的工作项由它消化"
+        );
+    }
+
+    /// 模型门返回 false 只能说明「此刻还开不了」（重扫刚发现新会话、数据回到未就绪），
+    /// 不许再把整段模型等待连同收敛横幅一起跳过（审核 P1）。返回值只用于播报，
+    /// 之后照常叫醒调度器并进入等待循环；门由 `install_manifest` 在清单就绪时自动打开。
+    #[test]
+    fn the_model_gate_open_result_is_never_used_as_a_skip() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli exists")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_cli end exists")
+            .0;
+        assert!(
+            !body.contains("if initialization.open_model_phase() {"),
+            "open_model_phase 的返回值不得再把模型等待整段跳过（P1）"
+        );
+        let gate = body
+            .find("if !initialization.open_model_phase() {")
+            .expect("模型门返回值只用于播报");
+        let after = &body[gate..];
+        let wake = after
+            .find("scheduler.wake();")
+            .expect("开门尝试之后必须叫醒调度器");
+        let wait = after
+            .find("wait_for_model_ready()")
+            .expect("模型收敛等待必须无条件可达");
+        assert!(
+            wake < wait,
+            "无论门此刻开没开，都要叫醒调度器并进入收敛等待"
+        );
+    }
+
+    /// ADR-058 D8 / refactor plan S5（2026-09-04）：`direct_read_mode` 在启动序列里只回答
+    /// 「数据面读哪儿」。watcher 只听 `sync_live`——此前 `&& !direct_read_mode` 让生产形态
+    /// 启动后没有数据链、没有文件事件，「改元素 → SAVEWORK → 自动更新」做不到；模型门 /
+    /// 收敛等待 / 房间也不再有 direct 专用分支（direct 曾在复核落地后立刻 `mark_model_ready`，
+    /// 积压还在跑就宣告收敛，并跳过房间）。2026-09-02 那条「direct 也起 worker」的钉留在
+    /// 本测试里：worker 启动不由 direct 把门。
+    #[test]
+    fn direct_read_mode_only_selects_the_data_read_route() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli exists")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_cli end exists")
+            .0;
+        assert!(
+            body.contains("let sync_live = db_option.sync_live.unwrap_or(false);"),
+            "watcher 只听 sync_live 一个开关（S5-1）"
+        );
+        assert!(
+            !body.contains("&& !direct_read_mode;"),
+            "sync_live 不得再被 direct_read_mode 钉成 false（S5-1）"
+        );
+        let worker = body
+            .find("ensure_batch_worker(mgr.clone())")
+            .expect("worker 必须在启动序列里起");
+        // 注释行里可以提历史，代码行不行。
+        let code_lines = |text: &str| -> Vec<String> {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .filter(|line| line.contains("direct_read_mode"))
+                .map(|line| line.trim().to_string())
+                .collect()
+        };
+        assert_eq!(
+            code_lines(&body[..worker]),
+            vec![
+                "let direct_read_mode = crate::options::direct_read_mode();".to_string(),
+                "if direct_read_mode {".to_string(),
+                "if direct_read_mode && legacy_sync_requested {".to_string(),
+                "if !direct_read_mode && legacy_sync_requested {".to_string(),
+            ],
+            "worker 之前 direct_read_mode 只许出现在：绑定、一行播报、legacy sync_pdms 读路由的选择"
+        );
+        // `body` 一直延到 `run_app`，中间夹着完成横幅那个函数：它只把读模式当标签打一行，
+        // 不在本条的管辖内，启动序列到 `run_cli` 的 `Ok(())` 为止。
+        let run_cli_tail = body[worker..]
+            .split_once("\nfn print_startup_complete_banner(")
+            .expect("完成横幅函数紧跟 run_cli")
+            .0;
+        assert!(
+            code_lines(run_cli_tail).is_empty(),
+            "worker 起来之后的启动序列（模型门 / 收敛等待 / 房间）不得再看 direct_read_mode（S5-2）: {:?}",
+            code_lines(run_cli_tail)
+        );
+        let guard = body[..worker].rfind("if ").unwrap();
+        assert!(
+            !body[guard..worker].contains("direct_read_mode"),
+            "worker 启动不得由 direct_read_mode 把门: {}",
+            &body[guard..worker]
+        );
+        assert!(
+            !body
+                .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .any(|line| line.contains("mark_model_ready()")),
+            "启动主线不得自己宣告模型收敛；收敛由 worker 空闲轮判定（S5-2）"
+        );
     }
 
     /// ADR-051: enabling model/mesh processing must not become an implicit

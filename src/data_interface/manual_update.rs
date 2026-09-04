@@ -50,15 +50,16 @@ use walkdir::WalkDir;
 
 use aios_core::pdms_types::RefU64;
 use aios_core::{NamedAttrMap, NamedAttrValue, RefnoEnum, SUL_DB};
-use parse_pdms_db::parse::{DbBasicInfo, parse_file_basic_info, parse_file_db_basic_data};
-use pdms_io::io::{EleOperationData, EleOperationDetail, PdmsIO};
 use surrealdb::sql::Thing;
+
+use crate::data_interface::db_file_header::DbBasicInfo;
 
 use crate::data_interface::batch_scheduler::{ManualEnqueueReceipt, ShadowedCandidate};
 use crate::data_interface::dbnum_state::{
     DbnumState, FileAnomaly, FileObservation, check_file_against_state, escape_surql_str,
 };
 use crate::data_interface::debug_scope;
+use crate::data_interface::ele_ops::{EleOperationData, EleOperationDetail};
 use crate::data_interface::helper::pe_thing_to_refno;
 use crate::data_interface::increment_manager::{
     INGEST_MAX_DEPTH, ScanGate, duplicate_dbnums, in_scope_with, is_candidate_db_file,
@@ -100,9 +101,13 @@ pub fn configured_delivery_unit_types() -> Vec<String> {
 ///
 /// 早先这里把 `SYST / DICT / GLB / GLOB` 排除在外，让它们改走
 /// [`SesnoRangeResolver`] 的 cold start——水位缺失时从 0 起、用增量窗口把历史会话重放一遍。
-/// 问题在于两条路用的不是同一个解析器：基线走 `parse_pdms_db`，而重放走 `pdms_io`，
+/// 当时的理由是两条路用的不是同一个解析器：基线走 `parse_pdms_db`，而重放走 `pdms_io`，
 /// 而 ADR-006 那个跨块引用列表（`CURD` / `DBLS`）的解析修复只落在前者。设计 MDB 的 `CURD`
 /// 恰恰是这类属性，它决定模型树能不能解析到设计库——靠重放建起来的 SYS 元数据可能缺它。
+///
+/// **这条理由 2026-09-04 已经不成立**：基线换成 `e3d_collector::stream_baseline`、重放走
+/// `collect_net_window`，两条路同一个收集器、同一份解码（退役收口方案 B8.2–B8.4）。行为
+/// 保留——基线在目标会话上一次枚举完，重放要从 0 把整条会话链走一遍。
 ///
 /// cold start 没有失效，只是让位：本函数在 `SesnoRangeResolver` 之前判，全新的 SYS 库走基线，
 /// 而水位记录被删、数据还在的情形仍由 cold start 兜住。
@@ -924,7 +929,7 @@ pub fn extract_reverse_ref_edges(op: &EleOperationData) -> ReverseRefEdges {
 
 /// One `referrer → referenced` graph edge, keyed by a deterministic composite id
 /// so re-emitting the same edge is idempotent. Same shape as the `pe_owner`
-/// edges written by `cata_closure` / `versioned_db::pe`.
+/// edges written by `cata_closure` / `ele_ops::pe_owner_edge`.
 fn render_ref_rev_edge(referrer: &str, referenced: RefnoEnum) -> String {
     let referenced = referenced.to_pe_key();
     format!("{{ id: ref_rev:[{referrer}, {referenced}], in: {referrer}, out: {referenced} }}")
@@ -2785,6 +2790,30 @@ pub struct DbnumStatus {
     /// 在 MDB 声明的 DESI 名单里、既没登记过也没扫到。不阻断也不执行。
     #[serde(default)]
     pub not_in_project: bool,
+    /// 模型那一枚凭证（ADR-058 D5 口径）。整体缺席 = 这次取数失败，见 `warnings`。
+    #[serde(flatten)]
+    pub model_credential: Option<ModelCredentialColumns>,
+}
+
+/// `/dbnums` 每行的模型凭证两列（ADR-058 D5 口径，取自
+/// [`startup_coverage_floors`](crate::data_interface::model_update_pending::startup_coverage_floors)）。
+///
+/// 它与同一行的 `applied_sesno` 是**两枚各自独立的凭证**（ADR-056 N5）：数据那一枚
+/// 承诺行已落库，模型这一枚承诺模型按哪一版数据生成。ADR-056 D1 之后模型失败不再
+/// 阻断水位，「水位齐、模型没追平」于是成了常态而不是异常——两枚都摆出来，界面才
+/// 说得清落后的是哪一面。
+///
+/// 三个数**同进同出**：取数失败时整格缺席并在 `warnings` 里留一句，不给 `null` 假装
+/// 「无凭证」。`model_settled_floor: null` 有确切含义——一条安定行都没有的冷库，等按
+/// 需生成（ADR-058 D6）——拿它兼表「读不到」会把冷库和故障混成同一栏。
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct ModelCredentialColumns {
+    /// 安定生成根里最小的 `source_end_sesno`；`null` = 一条安定行都没有。
+    pub model_settled_floor: Option<i32>,
+    /// 有可用凭证的生成根数。
+    pub model_settled_roots: usize,
+    /// 没有可用凭证、必然要重排的生成根数。一个库只要有一行未安定就没追平。
+    pub model_unsettled_roots: usize,
 }
 
 /// [`AiosDBManager::dbnum_statuses`] 的整体结果。
@@ -2810,7 +2839,7 @@ pub(crate) struct FileCandidate {
     pub(crate) file_modified_at: Option<String>,
     /// Worker freeze point. Manual/preview scans leave this empty and freeze at
     /// the shared collector entry instead.
-    pub(crate) snapshot_token: Option<pdms_io::snapshot::SnapshotToken>,
+    pub(crate) frozen: Option<crate::data_interface::frozen_source::FrozenSource>,
     /// Unsuffixed master next to a `_NNNN` leaf (ADR-028). Overlay reads only.
     pub(crate) extract_parent: Option<PathBuf>,
 }
@@ -3132,22 +3161,38 @@ fn subset_selects(
     selection.contains(&dbnum)
 }
 
-/// 一个会话在 E3D 里被写入的时刻（RFC3339，`SessionPageData::get_dt`），
-/// ADR-020 第 2 项。读一页会话页；读不到（会话号缺失、文件被截断等）→ `None`，
+/// 一个会话在 E3D 里被写入的时刻（RFC3339，与 old-pdms-io `SessionPageData::get_dt`
+/// 同一条解法，见 [`crate::data_interface::db_file_header::SessionStamp::local_time`]），
+/// ADR-020 第 2 项。读第 0 页 + 一页会话页；读不到（会话号缺失、文件被截断等）→ `None`，
 /// 界面按「从未应用」处理，不把一次 IO 失败升级成整行预览失败。
 pub(crate) fn session_time_rfc3339(
-    project: &str,
+    _project: &str,
     path: &std::path::Path,
     sesno: i32,
 ) -> Option<String> {
     if sesno <= 0 {
         return None;
     }
-    let mut io = PdmsIO::new(project, path, true);
-    io.open().ok()?;
-    io.get_ses_data(sesno as u32)
+    crate::data_interface::db_file_header::session_at(path, sesno as u32)
         .ok()
-        .map(|ses| ses.get_dt().to_rfc3339())
+        .and_then(|stamp| stamp.rfc3339())
+}
+
+/// 会话号 → 写入时刻的一次性查表：一次开文件读整条会话链，之后逐号查询不再 IO。
+/// 文件打不开 / 链读不出 → 空表，每一个号都答 `None`。
+fn session_times_lookup(path: &std::path::Path) -> std::collections::HashMap<i32, Option<String>> {
+    crate::data_interface::db_file_header::session_chain(path)
+        .map(|chain| {
+            chain
+                .iter()
+                .filter_map(|stamp| {
+                    i32::try_from(stamp.sesno)
+                        .ok()
+                        .map(|sesno| (sesno, stamp.rfc3339()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// 一个保存窗口两端的写入时刻，一次开文件读两页（plant-ui ADR-0019 Q3 的时间对）。
@@ -3155,26 +3200,19 @@ pub(crate) fn session_time_rfc3339(
 /// 与 [`session_time_rfc3339`] 同一把尺子。两端各自降级：任一端读不到就只是那一端
 /// `None`，界面把整格留空——**绝不回落成 sesno，也绝不拿挂钟时刻顶替**。
 pub(crate) fn window_times_rfc3339(
-    project: &str,
+    _project: &str,
     path: &std::path::Path,
     start_sesno: i32,
     end_sesno: i32,
 ) -> (Option<String>, Option<String>) {
-    let mut io = PdmsIO::new(project, path, true);
-    if io.open().is_err() {
-        return (None, None);
-    }
-    let mut read = |sesno: i32| {
+    let times = session_times_lookup(path);
+    let read = |sesno: i32| {
         if sesno <= 0 {
             return None;
         }
-        io.get_ses_data(sesno as u32)
-            .ok()
-            .map(|ses| ses.get_dt().to_rfc3339())
+        times.get(&sesno).cloned().flatten()
     };
-    let start = read(start_sesno);
-    let end = read(end_sesno);
-    (start, end)
+    (read(start_sesno), read(end_sesno))
 }
 
 /// 一个数据批次露给人看的**全部**保存时刻，一次开文件读完（plant-ui ADR-0019 Q3 的
@@ -3189,26 +3227,16 @@ pub(crate) fn window_times_rfc3339(
 /// 回落成 sesno）。
 pub(crate) fn fill_batch_session_times(
     batch: &mut DataBatchResult,
-    project: &str,
+    _project: &str,
     path: &std::path::Path,
     merged_sesnos: Vec<u32>,
 ) {
-    let mut io = PdmsIO::new(project, path, true);
-    let opened = io.open().is_ok();
-    let mut seen: std::collections::HashMap<i32, Option<String>> = std::collections::HashMap::new();
-    let mut read = |sesno: i32| -> Option<String> {
-        if !opened || sesno <= 0 {
+    let times = session_times_lookup(path);
+    let read = |sesno: i32| -> Option<String> {
+        if sesno <= 0 {
             return None;
         }
-        if let Some(hit) = seen.get(&sesno) {
-            return hit.clone();
-        }
-        let time = io
-            .get_ses_data(sesno as u32)
-            .ok()
-            .map(|ses| ses.get_dt().to_rfc3339());
-        seen.insert(sesno, time.clone());
-        time
+        times.get(&sesno).cloned().flatten()
     };
 
     batch.start_sesno_time = read(batch.start_sesno);
@@ -3722,6 +3750,8 @@ impl AiosDBManager {
                 blocked,
                 excluded,
                 not_in_project: false,
+                // 凭证两列在函数尾部一次聚合贴上，不逐行点查。
+                model_credential: None,
             });
         }
 
@@ -3751,6 +3781,7 @@ impl AiosDBManager {
                 blocked,
                 excluded: false,
                 not_in_project: false,
+                model_credential: None,
             });
         }
 
@@ -3767,6 +3798,29 @@ impl AiosDBManager {
                 not_in_project: true,
                 ..Default::default()
             });
+        }
+
+        // 模型那一枚凭证一次聚合问完全部库（ADR-058 D5），逐行贴上。逐库点查会把
+        // 这个每 6 秒轮询一次的端点变成 448 次查询；而这一份与启动一级过滤、覆盖清单
+        // 共用同一条聚合，口径也就只有一套。
+        //
+        // 失败**不影响这个端点的本职**（登记状态 + 文件异常），只是那两列整体不发：
+        // 数据面的判决不该因为模型面读不出来而失声。
+        match crate::data_interface::model_update_pending::startup_coverage_floors().await {
+            Ok(floors) => {
+                for row in &mut report.dbnums {
+                    let floor = floors.get(&row.dbnum).copied().unwrap_or_default();
+                    row.model_credential = Some(ModelCredentialColumns {
+                        model_settled_floor: floor.settled_floor,
+                        model_settled_roots: floor.settled_roots,
+                        model_unsettled_roots: floor.unsettled_roots,
+                    });
+                }
+            }
+            Err(error) => report.warnings.push(format!(
+                "读不到模型凭证下限（gen_root 聚合失败），本次不报每库的生成源版本\
+                 ——是未知，不是「无凭证记录」: {error:#}"
+            )),
         }
 
         report.dbnums.sort_by_key(|d| d.dbnum);
@@ -4050,13 +4104,21 @@ impl AiosDBManager {
                 ));
                 continue;
             }
-            let DbBasicInfo { db_type, db_no, .. } = parse_file_basic_info(&header);
+            let Some(DbBasicInfo { db_type, db_no, .. }) =
+                DbBasicInfo::from_header_bytes(&header)
+            else {
+                warnings.push(format!(
+                    "跳过头 60 字节不是 dabacon 描述符页的文件 {}",
+                    path.display()
+                ));
+                continue;
+            };
             if !self.in_scope(scope, project, &db_type, db_no) {
                 // 范围外 CATA：先收齐全部候选，扫描完成后再复用 watcher 的同项目
                 // duplicate_dbnums 权威判定。不能在这里首见取一，否则第二份同号
                 // 文件会被静默抹掉，手动路径反而登记任意一份。
                 if db_type.eq_ignore_ascii_case("CATA") {
-                    match PdmsIO::new(project, path.to_path_buf(), true).get_latest_sesno() {
+                    match crate::data_interface::db_file_header::latest_sesno(path) {
                         Ok(sesno) => out_of_scope_cata.push(FileCandidate {
                             project: project.to_string(),
                             path: path.to_path_buf(),
@@ -4066,7 +4128,7 @@ impl AiosDBManager {
                             file_latest_sesno: sesno as i32,
                             file_size: metadata.as_ref().map(|m| m.len()).unwrap_or_default(),
                             file_modified_at: metadata.as_ref().and_then(file_modified_rfc3339),
-                            snapshot_token: None,
+                            frozen: None,
                             extract_parent: None,
                         }),
                         Err(error) => warnings.push(format!(
@@ -4078,17 +4140,17 @@ impl AiosDBManager {
                 continue;
             }
 
-            let file_latest_sesno =
-                match PdmsIO::new(project, path.to_path_buf(), true).get_latest_sesno() {
-                    Ok(sesno) => sesno as i32,
-                    Err(error) => {
-                        warnings.push(format!(
-                            "跳过无法读取最新会话的数据库文件 {}: {error}",
-                            path.display()
-                        ));
-                        continue;
-                    }
-                };
+            let file_latest_sesno = match crate::data_interface::db_file_header::latest_sesno(path)
+            {
+                Ok(sesno) => sesno as i32,
+                Err(error) => {
+                    warnings.push(format!(
+                        "跳过无法读取最新会话的数据库文件 {}: {error}",
+                        path.display()
+                    ));
+                    continue;
+                }
+            };
             let file_size = metadata.as_ref().map(|m| m.len()).unwrap_or_default();
             let file_modified_at = metadata.as_ref().and_then(file_modified_rfc3339);
 
@@ -4101,7 +4163,7 @@ impl AiosDBManager {
                 file_latest_sesno,
                 file_size,
                 file_modified_at,
-                snapshot_token: None,
+                frozen: None,
                 extract_parent: None,
             });
         }
@@ -4275,8 +4337,7 @@ impl AiosDBManager {
                     // ADR-020 第 2 项：两个时间都是「那个会话在 E3D 里被写入的时刻」。
                     // 文件最新会话的时间在解析头里现成就有（零额外 IO）；已应用会话的
                     // 时间读一页会话页。
-                    preview.file_latest_sesno_time =
-                        Some(plan.basic_info.latest_ses_data.get_dt().to_rfc3339());
+                    preview.file_latest_sesno_time = plan.basic_info.latest_session.rfc3339();
                     preview.applied_sesno_time = session_time_rfc3339(project, &cand.path, applied);
                     // plant-ui ADR-0019 Q3：确认页的保存窗口取窗口自身两端，左端是
                     // 第一条待应用保存——取 `plan.range` 的左端而不是 `applied + 1`，
@@ -5145,10 +5206,9 @@ impl AiosDBManager {
             &format!("收集增量 {start_sesno}..={end_sesno}"),
         );
         let collected = match IncrementPipeline::collect_window_for_candidate(
-            &cand.project,
             &cand.path,
             plan.range.clone(),
-            cand.snapshot_token.as_ref(),
+            cand.frozen.as_ref(),
         ) {
             Ok(collected) => collected,
             Err(e) => {
@@ -5777,7 +5837,7 @@ mod tests {
             file_latest_sesno: 7,
             file_size: 60,
             file_modified_at: None,
-            snapshot_token: None,
+            frozen: None,
             extract_parent: None,
         };
         let by_dbnum =
@@ -6117,8 +6177,9 @@ mod tests {
     }
 
     /// 判据只看水位、文件会话号与数据支撑，**不按 db_type 分叉**：SYS meta 曾被排除
-    /// 在外、改走 cold start 重放，而重放用的 `pdms_io` 没有 ADR-006 的跨块 `CURD`
-    /// 解析修复。
+    /// 在外、改走 cold start 重放，而当时重放走的 legacy `pdms_io` 没有 ADR-006 的跨块
+    /// `CURD` 解析修复。解析器差异 2026-09-04 随退役消失（两条路同走 `e3d_collector`），
+    /// 判据不分叉这一条照旧。
     #[test]
     fn uninitialized_files_are_detected_for_on_demand_baseline() {
         assert!(needs_initial_load(0, 76, true, None));
@@ -7948,7 +8009,7 @@ mod tests {
                 EleOperationData::new(
                     r(2).into(),
                     235,
-                    EleOperationDetail::Modified(pdms_io::io::ModifiedElement {
+                    EleOperationDetail::Modified(crate::data_interface::ele_ops::ModifiedElement {
                         current_data: Default::default(),
                         added_attrs: Default::default(),
                         deleted_attrs: Default::default(),

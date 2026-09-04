@@ -8,7 +8,8 @@ ADR-036（成员删除对账）；`specs/013-dabacon-snapshot-completeness/`
 
 ## 背景
 
-生产增删改已经统一到 `pdms_io::net_window`，但一次数据批次仍会由多个 reader
+历史版本的生产增删改曾统一到 `pdms_io::net_window`；该路径现已降为 legacy 参照，
+当前生产收集由 e3d-io 提供。一次数据批次仍会由多个 reader
 分别重开同一路径。更严重的是，终稿解析失败、选中子索引页读取失败和基线 chunk
 失败都可能降为 warning/局部成功，随后仍建立 `applied_sesno`。水位承诺的是窗口
 完整落库，不是已生成的那部分 SQL 执行成功。

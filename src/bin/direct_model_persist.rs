@@ -383,30 +383,36 @@ async fn main() -> anyhow::Result<()> {
         serde_json::to_vec_pretty(&report)?,
     )?;
 
-    aios_core::init_surreal()
-        .await
-        .context("连接兼容目标 SurrealDB")?;
-    let db = aios_core::SUL_DB.clone();
+    let db = if args.persist {
+        aios_core::init_surreal()
+            .await
+            .context("连接兼容目标 SurrealDB")?;
+        Some(aios_core::SUL_DB.clone())
+    } else {
+        None
+    };
     let mut backups = BTreeMap::<String, Value>::new();
-    for chunk in generated.chunks(250) {
-        let keys = chunk
-            .iter()
-            .map(|element| {
-                format!(
-                    "type::thing('inst_relate', '{}')",
-                    geometry_record_raw_id(&element.geometry_id, element.refno)
-                )
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = backup_query(&keys);
-        let mut response = db.query(sql).await?.check()?;
-        for row in response.take::<Vec<Value>>(0)? {
-            let raw = row
-                .get("raw_id")
-                .and_then(Value::as_str)
-                .context("inst_relate backup 缺 raw_id")?;
-            backups.insert(raw.to_string(), row);
+    if let Some(db) = db.as_ref() {
+        for chunk in generated.chunks(250) {
+            let keys = chunk
+                .iter()
+                .map(|element| {
+                    format!(
+                        "type::thing('inst_relate', '{}')",
+                        geometry_record_raw_id(&element.geometry_id, element.refno)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = backup_query(&keys);
+            let mut response = db.query(sql).await?.check()?;
+            for row in response.take::<Vec<Value>>(0)? {
+                let raw = row
+                    .get("raw_id")
+                    .and_then(Value::as_str)
+                    .context("inst_relate backup 缺 raw_id")?;
+                backups.insert(raw.to_string(), row);
+            }
         }
     }
     let backup_path = args.evidence_dir.join("inst-relation-backup.json");
@@ -593,6 +599,7 @@ async fn main() -> anyhow::Result<()> {
     )?;
 
     if args.persist {
+        let db = db.as_ref().context("持久化模式缺少 SurrealDB 连接")?;
         for statement_chunk in update_sql.lines().collect::<Vec<_>>().chunks(300) {
             db.query(statement_chunk.join("\n")).await?.check()?;
         }

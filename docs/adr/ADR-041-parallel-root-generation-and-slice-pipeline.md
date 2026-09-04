@@ -5,6 +5,14 @@
 提议（2026-08-21）。实质修订 ADR-017、ADR-021、ADR-025、ADR-038；引用 ADR-010、
 ADR-011、ADR-012、ADR-018、ADR-029。
 
+> **2026-09-03 对照（ADR-056）**：ADR-017 / ADR-038 已被 ADR-056 取代——稳态增量窗口不再暂存、不再 journal 写回，
+> `STAGED_COMMIT_SERIAL` 现名 `DATA_COMMIT_SERIAL`（背景第 1 条、第 5 条、「加速比上限」段按此读）。本 ADR 的对象是
+> **基线初始化**，不在 ADR-056 的取代范围内，第 1 / 3 条（并行单位是生成根、统一几何并发闸）与暂存无关、原样有效；
+> 但第 2 / 4 / 8 条（一片一个 `mem://` 实例、每根 journal buffer、一条 channel = 一整本切片 journal）复用的是
+> `staging/{lifecycle,executor,resources}.rs`，它们在 spec 035 P3 T303 的删除清单上，且 spec 035 未提及基线路径。
+> **P3 动手前须先给本 ADR 第 2 / 4 / 8 条定替代物（直写分块 `persist_transaction_batches` 或另立 ADR），否则要把这三条改成
+> Superseded**；`specs/023` T24 / `specs/024` T19 至今未勾，本 ADR 尚未落地为运行行为。
+
 落地拆为两个规格：`specs/023-parallel-root-generation-pipeline/`（并行与收口提速，
 不改依赖仓、不引入 ZONE）与后一轮的 `specs/024-*`（ZONE 分片、冻结源与内存有界）。
 

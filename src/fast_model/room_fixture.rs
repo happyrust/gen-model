@@ -449,9 +449,11 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "manual live: writes fixture records and .mesh files"]
     async fn live_room_structural_triggers_enqueue_panel_recalc() {
+        use crate::data_interface::ele_ops::{
+            EleOperationData, EleOperationDetail, ModifiedElement,
+        };
         use crate::data_interface::model_update_plan::{ModelWorkAction, build_model_update_plan};
         use aios_core::NamedAttrValue;
-        use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement};
         use std::collections::BTreeMap;
 
         fn fixture_modified_op(
@@ -589,6 +591,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[ignore = "manual live: writes fixture records, a watermark row and .mesh files"]
     async fn live_room_rename_into_compliance_recomputes_membership() {
+        use crate::data_interface::ele_ops::{
+            EleOperationData, EleOperationDetail, ModifiedElement,
+        };
         use crate::data_interface::increment_pipeline::IncrementPipeline;
         use crate::data_interface::model_update_pending::{RoomDrainScope, drain_rooms_scoped};
         use crate::data_interface::model_update_plan::{ModelWorkAction, build_model_update_plan};
@@ -598,7 +603,6 @@ mod tests {
         };
         use crate::fast_model::room_model::load_room_panel_map;
         use aios_core::NamedAttrValue;
-        use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement};
         use std::collections::BTreeMap;
         use surrealdb::engine::any::connect;
 

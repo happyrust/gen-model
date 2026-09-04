@@ -13,9 +13,14 @@ use aios_core::data_center::DataCenterRecordOperate;
 use aios_core::pdms_types::*;
 use aios_core::{RefnoEnum, SUL_DB, clear_all_caches_batch};
 use indexmap::IndexMap;
-use pdms_io::defines::DbPageBasicInfo;
-use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement, PdmsIO};
 
+use crate::data_interface::db_file_header::DbFileHeader;
+use crate::data_interface::e3d_collector::RetiredTypeRow;
+use crate::data_interface::ele_ops::{
+    EleOperationData, EleOperationDetail, ModifiedElement, PersistElementChange, UdaKeyMap,
+    terminal_persist_changes,
+};
+use crate::data_interface::frozen_source::FrozenSource;
 use crate::data_interface::sesno_range::COLD_START_DB_TYPES;
 
 const DATACENTER_VERSION: &str = "datacenter_version";
@@ -34,21 +39,26 @@ pub const SYS_META_DB_TYPES: &[&str] = COLD_START_DB_TYPES;
 #[derive(Debug, Clone)]
 pub struct CollectedWindow {
     pub range_eles: BTreeMap<u32, Vec<EleOperationData>>,
+    pub persist_changes: Vec<PersistElementChange>,
     pub session_sesnos: Vec<u32>,
     pub warnings: Vec<String>,
-    /// ADR-036 成员关系仲裁补出的删除数。
+    /// ADR-036 成员关系仲裁补出的删除数。e3d-io 收集器不做成员仲裁（索引差分本身即终态），
+    /// 恒为 0；字段留着是回执契约的一部分。
     pub membership_deleted: usize,
-    /// 同一打开句柄产生的冻结身份；执行前必须用它复核目标 root。
-    pub snapshot_token: Option<pdms_io::snapshot::SnapshotToken>,
+    /// 收集时冻住的文件世代与目标会话；执行前必须用它复核目标 root。
+    pub frozen: Option<FrozenSource>,
+    /// refno 复用（窗口内换了 noun）的条目：终稿已按 `Add` 进 `range_eles`，旧 noun 行
+    /// 由持久化尾事务按此删除（清单 §8 第 2 条）。
+    pub retired_type_rows: Vec<RetiredTypeRow>,
 }
 
-/// 生产构建中 legacy 逐会话实体回放入口必须在类型层面不存在。
+/// 逐会话实体回放入口（`collect_changes`，old-pdms-io 底座）2026-09-04 已随 old-pdms-io 一起删除，
+/// 不再有 feature 门——任何构建里都不存在。
 ///
 /// ```compile_fail
 /// use aios_database::data_interface::increment_pipeline::IncrementPipeline;
 /// let _ = IncrementPipeline::collect_changes;
 /// ```
-#[cfg(not(feature = "legacy_session_replay"))]
 pub struct LegacySessionReplayUnavailableInProduction;
 
 /// One file that completed Surreal persist + watermark advance.
@@ -74,6 +84,11 @@ pub struct IncrFileSuccess {
     /// run's per-unit reporting) read it here instead of resolving the rollup a
     /// second time — it can only be resolved before the window persists anyway.
     pub model_plan: crate::data_interface::model_update_plan::ModelUpdatePlan,
+    /// 尾事务之后那次凭证前移的账（ADR-056 P2-2；plant-ui 计划 G3）。只有窗口规划器
+    /// （direct DESI）给了名单或退化原因时才有；老规划器与 CATA / SYST 窗口是 `None`，
+    /// 回执上整格不出现。
+    pub credential_advance:
+        Option<crate::data_interface::window_root_plan::CredentialAdvanceReceipt>,
 }
 
 /// One file that failed before watermark advance.
@@ -433,7 +448,7 @@ fn validate_prepared_attempt(
     db_type: &str,
     file_path: &str,
     current_file_latest_sesno: i32,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<FrozenSource> {
     if attempt.db_type != db_type || !same_attempt_file_path(&attempt.file_path, file_path) {
         anyhow::bail!(
             "unfinished increment attempt dbnum={} belongs to type={} path={}, \
@@ -453,7 +468,27 @@ fn validate_prepared_attempt(
             attempt.end_sesno,
         );
     }
-    Ok(())
+    let token_json = attempt.commit_token.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "unfinished increment attempt dbnum={} has no durable source commit token; drain or rebuild it before automatic recovery",
+            attempt.dbnum
+        )
+    })?;
+    let frozen = FrozenSource::from_commit_token_json(token_json)?;
+    anyhow::ensure!(
+        frozen.matches_path(std::path::Path::new(file_path)),
+        "unfinished increment attempt dbnum={} token path {} does not match current path {file_path}",
+        attempt.dbnum,
+        frozen.path().display()
+    );
+    anyhow::ensure!(
+        frozen.dbnum() == attempt.dbnum as i32
+            && frozen.db_type().eq_ignore_ascii_case(db_type)
+            && frozen.target_sesno() == attempt.end_sesno as u32,
+        "unfinished increment attempt dbnum={} token identity/range does not match attempt",
+        attempt.dbnum
+    );
+    frozen.reopen_verified_at(attempt.end_sesno as u32)
 }
 
 /// 交入窗口的采信判定（纯函数）：调用方交出的预收集结果只有与本次要应用的区间
@@ -487,30 +522,36 @@ fn session_sesnos_in_range(
 
 /// 净口径标注——第一条 warning 的固定形状（预览断言与证据文档都认这个前缀）。
 ///
-/// 三种容忍形状的计数**必须在这里露面**：`unreadable_child_pages` / `level_anomalies`
-/// 只活在 `NetChangeStats` 里，而 stats 在 `collect_window` 拼完这条 warning 之后
-/// 即被丢弃——不并进回执，批次路径上「跳过整枝」就是静默的，只有 python 探针的
-/// `to_json` 能看见（spec-003 FR-8：任何一种容忍都不许静默；2026-08-18 审核 P2）。
-/// t/b = target/base 两端各自的计数，与台账叙述口径一致。
+/// 全部容忍形状的计数**必须在这里露面**：`unchanged_rewrites` / `unparseable_finals` /
+/// 类型改变（refno 复用）只活在 `NetWindowOutcome` 里，而它在 `collect_window` 拼完这条
+/// warning 之后即被拆散——不并进回执，批次路径上「跳过」就是静默的
+/// （spec-003 FR-8：任何一种容忍都不许静默；2026-08-18 审核 P2）。
+///
+/// 底座换成 e3d-io 之后（2026-09-03）成员补删 / 幽灵新增两项恒为 0——两根索引差分本身即
+/// 终态，没有仲裁这一步；字段保留，让证据文档里新旧两代 warning 能逐字段对读。
 fn net_caliber_warning(
     added: usize,
     deleted: usize,
     modified: usize,
-    outcome: &pdms_io::net_window::NetWindowOutcome,
+    outcome: &crate::data_interface::e3d_collector::NetWindowOutcome,
 ) -> String {
     format!(
-        "收集口径：净窗口（会话索引差分，ADR-031/036 单一口径）——added={added} deleted={deleted} \
-         modified={modified} 成员补删={} 幽灵新增丢弃={} 原样重写跳过={} 终稿不可解析={} \
-         不可读子页(t/b)={}/{} 层级异常(t/b)={}/{} 目标侧读页={} 差分 {}ms",
-        outcome.membership_deleted,
-        outcome.dropped_phantom_adds,
+        "收集口径：净窗口（会话索引差分，ADR-031/036 单一口径；e3d-io 底座）——added={added} deleted={deleted} \
+         modified={modified} 成员补删=0 幽灵新增丢弃=0 原样重写跳过={} 终稿不可解析={} 类型改变={} \
+         索引候选={}（ins/mod/del={}/{}/{}）基会话={} 读页={} 差分 {}ms",
         outcome.unchanged_rewrites,
         outcome.unparseable_finals,
-        outcome.stats.target.unreadable_child_pages,
-        outcome.stats.base.unreadable_child_pages,
-        outcome.stats.target.level_anomalies,
-        outcome.stats.base.level_anomalies,
-        outcome.stats.target.pages_read,
+        outcome.retired_type_rows.len(),
+        outcome.stats.candidates,
+        outcome.stats.inserted,
+        outcome.stats.modified,
+        outcome.stats.deleted,
+        outcome
+            .stats
+            .base_sesno
+            .map(|sesno| sesno.to_string())
+            .unwrap_or_else(|| "无（全量）".into()),
+        outcome.stats.pages_read,
         outcome.stats.elapsed_ms
     )
 }
@@ -642,87 +683,6 @@ fn dedup_statements_keep_last(statements: Vec<String>) -> Vec<String> {
         .collect()
 }
 
-/// PDMS session logs may contain provisional `Add` operations whose records are
-/// no longer present when Save Work publishes the final file. Treating those
-/// entries as live creates phantom PE rows and makes file-backed ancestor
-/// preload chase refnos which the final record index cannot resolve.
-///
-/// **LEGACY 终态补丁**（ADR-031）：只有回放会造出这种临时 Add，净路径两端都不在场
-/// 时什么都不发，构造性地没有这里要修的输入。随 [`IncrementPipeline::collect_changes`]
-/// 一起留在诊断路径上。
-#[cfg(any(test, feature = "legacy_session_replay"))]
-fn retain_finally_live_adds(
-    range_eles: &mut BTreeMap<u32, Vec<EleOperationData>>,
-    mut is_live: impl FnMut(RefU64) -> bool,
-) -> usize {
-    let before = range_eles.values().map(Vec::len).sum::<usize>();
-    for ops in range_eles.values_mut() {
-        ops.retain(|op| !matches!(&op.detail, EleOperationDetail::Add(_)) || is_live(op.refno));
-    }
-    before - range_eles.values().map(Vec::len).sum::<usize>()
-}
-
-/// A PDMS owner move can leave a `Deleted` entry in the session stream even
-/// though the same refno is present in the Save Work final index.  Persisting
-/// that provisional delete marks the live element deleted and loses its final
-/// OWNER.  Replace only those exact-window, finally-live deletes with a full
-/// final-record upsert; genuine deletes (absent from the final index) remain
-/// untouched.
-///
-/// **LEGACY 终态补丁**（ADR-031）：同 [`retain_finally_live_adds`]——孤儿 Deleted 腿
-/// 是逐会话回放的产物（它按 owner.children 包含性推断删除），净路径按两端索引键集差
-/// 判删（与 core.dll `elementsDeletedBetween` 同判据），根本不产生这种腿。
-#[cfg(any(test, feature = "legacy_session_replay"))]
-fn restore_finally_live_deletes(
-    range_eles: &mut BTreeMap<u32, Vec<EleOperationData>>,
-    final_elements: &HashMap<RefU64, parse_pdms_db::parse::EleData>,
-) -> usize {
-    let mut restored = 0;
-    for operations in range_eles.values_mut() {
-        for operation in operations {
-            if !matches!(operation.detail, EleOperationDetail::Deleted) {
-                continue;
-            }
-            let Some(element) = final_elements.get(&operation.refno) else {
-                continue;
-            };
-            operation.detail = EleOperationDetail::Add(element.clone());
-            restored += 1;
-        }
-    }
-    restored
-}
-
-/// `PagedDbSession::read_raw_records` returns the physical record, which may
-/// start with page padding/continuation words.  The element parser expects the
-/// declared implicit-length word.  Keep this boundary check equivalent to the
-/// paged parser instead of handing it an unbounded file tail.
-#[cfg(any(test, feature = "legacy_session_replay"))]
-fn final_record_payload(raw: &[u8]) -> anyhow::Result<&[u8]> {
-    let mut prefix = 0usize;
-    while prefix + 4 <= raw.len() {
-        let word = &raw[prefix..prefix + 4];
-        if word == [0, 0, 0, 0] || word == [0, 0, 0, 7] {
-            prefix += 4;
-        } else {
-            break;
-        }
-    }
-    anyhow::ensure!(raw.len().saturating_sub(prefix) >= 24, "元素记录长度不足");
-    let impl_words = i32::from_be_bytes(
-        raw[prefix..prefix + 4]
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("读取 impl_len 失败"))?,
-    );
-    anyhow::ensure!(impl_words > 0, "impl_len 非法: {impl_words}");
-    anyhow::ensure!(
-        (impl_words as usize).saturating_mul(4) <= raw.len() - prefix,
-        "impl_len 超出记录边界: words={impl_words}, bytes={}",
-        raw.len() - prefix
-    );
-    Ok(&raw[prefix..])
-}
-
 fn retain_finally_live_design_refnos(
     plan: &mut crate::data_interface::model_update_plan::ModelUpdatePlan,
     mut is_live: impl FnMut(RefU64) -> bool,
@@ -766,24 +726,46 @@ fn reconcile_plan_with_live_set(
     removed + before - plan.work_items.len()
 }
 
+/// 冻结源复核（commit-generation gate）：收集时冻住的那个文件世代，持久化之前必须还是它。
+///
+/// **这不是模型侧的优化。** 纯数据窗口（零模型候选）同样必须验：收集与持久化之间文件被
+/// 原子替换或回拨，同号会话在新文件里是另一件事，写进去的就是另一个工程的数据。所以
+/// `apply_one` 无条件调它，与计划出自哪个规划器无关——这是 spec 035 T407 拆出来要**保留**
+/// 的那一半（另一半见 [`reconcile_plan_final_presence`]）。
+///
+/// 返回已验证的冻结源，供存活复核复用同一次打开。
+fn verify_frozen_source(frozen: &FrozenSource, end_sesno: i32) -> anyhow::Result<FrozenSource> {
+    anyhow::ensure!(end_sesno >= 0, "模型计划复核会话非法: {end_sesno}");
+    anyhow::ensure!(
+        frozen.target_sesno() == end_sesno as u32,
+        "模型计划复核 target={} 与冻结 token target={} 不一致",
+        end_sesno,
+        frozen.target_sesno()
+    );
+    frozen
+        .reopen_verified()
+        .map_err(|error| anyhow::anyhow!("重开 Save Work 冻结快照失败: {error:#}"))
+}
+
+/// 计划目标 T 端存活复核——**只给老规划器**（spec 035 T412 / T407 的另一半）。
+///
+/// 老规划器的根是从 Surreal `pe_owner` 图上溯来的，而那张图是窗口**之前**的状态，
+/// 所以要回文件问一句「这些根在 T 还在不在」。
+///
+/// 窗口规划器（`ModelUpdatePlan::window_planned`）的计划**不走这里**：它的根来自
+/// `enumerate_generation_roots(DbSet@T)`，本身就是 T 端存活证明。再拿 old-pdms-io 复核
+/// 一遍不但多余，还是个硬失败向量——ams7999 45→46 上
+/// `contains_refnos_at(46, {24383/101198})` 报
+/// `IndexPageData.noun == 0xCC47DF`（0830 坐实的「`0x18` 是 `free_dwords` 不是条目数」
+/// 那一族解码 bug），而 `24383/101198` 正是 e3d-io 在 `DbSet@46` 上刚读到的新建 STRU 子树。
+/// 整窗 `Err` → 批次 Failed → attempt 行已落 → replay 分支按固定区间重放同一份计划 →
+/// 同一页再报错 → **该库水位永久卡死**，只能手删 attempt 行。
 fn reconcile_plan_final_presence(
-    snapshot_token: &pdms_io::snapshot::SnapshotToken,
+    frozen: &FrozenSource,
     end_sesno: i32,
     plan: &mut crate::data_interface::model_update_plan::ModelUpdatePlan,
 ) -> anyhow::Result<usize> {
     use crate::data_interface::model_update_plan::ModelWorkAction;
-
-    anyhow::ensure!(end_sesno >= 0, "模型计划复核会话非法: {end_sesno}");
-    anyhow::ensure!(
-        snapshot_token.target_sesno() == end_sesno as u32,
-        "模型计划复核 target={} 与冻结 token target={} 不一致",
-        end_sesno,
-        snapshot_token.target_sesno()
-    );
-    // This is a commit-generation gate, not a model-only optimization. Even a
-    // data-only window with no model candidates must reject path replacement.
-    let mut snapshot = pdms_io::snapshot::DabaconSnapshot::open_verified("", snapshot_token)
-        .map_err(|error| anyhow::anyhow!("重开 Save Work 冻结快照失败: {error:#}"))?;
 
     let mut candidates = plan
         .design_refnos
@@ -817,8 +799,12 @@ fn reconcile_plan_final_presence(
     if candidates.is_empty() {
         return Ok(retain_finally_live_design_refnos(plan, |_| false));
     }
-    let live = snapshot
-        .contains_refnos_at(end_sesno as u32, &candidates)
+    anyhow::ensure!(
+        end_sesno >= 0 && frozen.target_sesno() == end_sesno as u32,
+        "存活复核 target={end_sesno} 与冻结源目标会话 {} 不一致",
+        frozen.target_sesno()
+    );
+    let live = crate::data_interface::e3d_collector::contains_refnos_at(frozen, &candidates)
         .map_err(|error| anyhow::anyhow!("读取模型计划冻结目标 root 失败: {error:#}"))?
         .into_iter()
         .collect::<std::collections::HashSet<_>>();
@@ -830,175 +816,14 @@ impl IncrementPipeline {
         Self
     }
 
-    /// **LEGACY 诊断入口**（ADR-031）：逐会话回放收集，**生产路径不得调用**。
-    ///
-    /// 它逐个会话认领本会话新写的记录，再对每个 refno 付
-    /// 「latest + prev + owner 三场解析 + 一次全属性 diff」
-    /// （`pdms_io::collect_increment_eles` → `get_refno_operation_status`，那些
-    /// `collect sesno: N` 日志就是它打的）。成本 O(会话数 × 每会话触达 × 3 次解析)，
-    /// 与净变更量无关；口径上也不是 core.dll 的算法——核内
-    /// `elementsChangedBetween` 对整个区间只做一次双根 B+ 归并。
-    ///
-    /// 生产收集一律走 [`Self::collect_window`]（净窗口，与核内同思想）。这里保留
-    /// 它只为两件事：
-    ///
-    /// 1. **跨结构交叉验证**——净路径唯一的独立参照臂。`db8000_session_pairs` 的
-    ///    性质 h / i、`net_window` 与 `session_index_diff` 的 live 负载对拍都直接
-    ///    调它；删了它，等价性验证就退化成自证。
-    /// 2. **逐会话取证**——净口径每 refno 只给一条，要看「哪个会话动的」时用它
-    ///    （`aios_db.parse.collect_changes`、`incr_fold_probe`）。
-    ///
-    /// 该入口只在 `legacy_session_replay` feature 下存在；默认生产依赖图不编译它。
-    /// 无副作用：不写 `pe`、不动 datacenter meta、不推水位。
-    #[cfg(feature = "legacy_session_replay")]
-    pub fn collect_changes(
-        path: &std::path::Path,
-        sesno_range: RangeInclusive<i32>,
-    ) -> anyhow::Result<BTreeMap<u32, Vec<EleOperationData>>> {
-        let mut io = PdmsIO::new("", path.to_path_buf(), true);
-        io.open()
-            .map_err(|e| anyhow::anyhow!("打开 PDMS IO 失败: {}", e))?;
-        Self::collect_changes_from_open_io(path, &mut io, sesno_range)
-    }
-
-    /// LEGACY 回放内层：调用方持有已打开的 [`PdmsIO`]，操作流与调用方的其余读取
-    /// 来自同一文件快照。唯一调用方是 [`Self::collect_changes`]（ADR-031 之前
-    /// `collect_window` 的回放臂也走这里）。
-    #[cfg(feature = "legacy_session_replay")]
-    fn collect_changes_from_open_io(
-        path: &std::path::Path,
-        io: &mut PdmsIO,
-        sesno_range: RangeInclusive<i32>,
-    ) -> anyhow::Result<BTreeMap<u32, Vec<EleOperationData>>> {
-        let fixed_end_sesno = *sesno_range.end();
-        let mut range_eles = io.collect_increment_eles(Some(sesno_range))?;
-        let add_refnos = range_eles
-            .values()
-            .flatten()
-            .filter(|op| matches!(&op.detail, EleOperationDetail::Add(_)))
-            .map(|op| op.refno)
-            .collect::<Vec<_>>();
-        let deleted_refnos = range_eles
-            .values()
-            .flatten()
-            .filter(|op| matches!(&op.detail, EleOperationDetail::Deleted))
-            .map(|op| op.refno)
-            .collect::<Vec<_>>();
-        let mut final_candidates = add_refnos.clone();
-        final_candidates.extend(deleted_refnos.iter().copied());
-        final_candidates.sort_unstable();
-        final_candidates.dedup();
-
-        let final_state = if final_candidates.is_empty() {
-            None
-        } else {
-            let authoritative_sesno = io
-                .get_latest_sesno()
-                .map_err(|error| anyhow::anyhow!("读取 Save Work 最终会话号失败: {error:#}"))?;
-            if authoritative_sesno != fixed_end_sesno as u32 {
-                println!(
-                    "增量最终文件对账跳过：窗口末 sesno={fixed_end_sesno}，最终文件 sesno={authoritative_sesno}，path={}",
-                    path.display()
-                );
-                None
-            } else {
-                let mut final_file =
-                    parse_pdms_db::paged::PagedDbSession::open(path).map_err(|error| {
-                        anyhow::anyhow!("打开 Save Work 最终页式索引失败: {error:#}")
-                    })?;
-                let final_snapshot_sesno = final_file.snapshot().sesno;
-                if final_snapshot_sesno == fixed_end_sesno as u32 {
-                    let final_records =
-                        final_file
-                            .read_raw_records(&final_candidates)
-                            .map_err(|error| {
-                                anyhow::anyhow!("读取 Save Work 最终记录存在性失败: {error:#}")
-                            })?;
-                    let live_refnos = final_records.keys().copied().collect::<HashSet<_>>();
-                    let mut final_deleted_elements = HashMap::new();
-                    for refno in &deleted_refnos {
-                        let Some(raw) = final_records.get(refno) else {
-                            continue;
-                        };
-                        let payload = final_record_payload(raw).map_err(|error| {
-                            anyhow::anyhow!(
-                                "读取 Save Work 最终存活记录 {} 边界失败: {error:#}",
-                                RefnoEnum::from(*refno).to_pdms_str()
-                            )
-                        })?;
-                        let element =
-                            parse_pdms_db::parse::parse_raw_ele_data(payload).map_err(|error| {
-                                anyhow::anyhow!(
-                                    "解析 Save Work 最终存活记录 {} 失败: {error:#}",
-                                    RefnoEnum::from(*refno).to_pdms_str()
-                                )
-                            })?;
-                        anyhow::ensure!(
-                            element.refno == *refno,
-                            "Save Work 最终记录 refno 不匹配: 期望 {}, 实际 {}",
-                            RefnoEnum::from(*refno).to_pdms_str(),
-                            RefnoEnum::from(element.refno).to_pdms_str()
-                        );
-                        final_deleted_elements.insert(*refno, element);
-                    }
-                    Some((live_refnos, final_deleted_elements))
-                } else {
-                    println!(
-                        "增量最终页式索引失配，回退 legacy 最终索引：窗口末 sesno={fixed_end_sesno}，paged sesno={final_snapshot_sesno}，path={}",
-                        path.display()
-                    );
-                    let live_refnos = final_candidates
-                        .iter()
-                        .copied()
-                        .filter(|refno| io.search_latest_refno(*refno, None).is_some())
-                        .collect::<HashSet<_>>();
-                    let mut final_deleted_elements = HashMap::new();
-                    for refno in deleted_refnos.iter().copied() {
-                        if !live_refnos.contains(&refno) {
-                            continue;
-                        }
-                        let element = io.auto_get_raw_element(refno).map_err(|error| {
-                            anyhow::anyhow!(
-                                "legacy 解析 Save Work 最终存活记录 {} 失败: {error:#}",
-                                RefnoEnum::from(refno).to_pdms_str()
-                            )
-                        })?;
-                        final_deleted_elements.insert(refno, element);
-                    }
-                    Some((live_refnos, final_deleted_elements))
-                }
-            }
-        };
-
-        if let Some((live_refnos, final_deleted_elements)) = final_state {
-            let removed =
-                retain_finally_live_adds(&mut range_eles, |refno| live_refnos.contains(&refno));
-            if removed > 0 {
-                println!(
-                    "增量窗口剔除 {removed} 条 Save Work 后无最终记录的临时 Add: {}",
-                    path.display()
-                );
-            }
-
-            let restored = restore_finally_live_deletes(&mut range_eles, &final_deleted_elements);
-            if restored > 0 {
-                println!(
-                    "增量窗口恢复 {restored} 条 Save Work 后仍存活的临时 Deleted: {}",
-                    path.display()
-                );
-            }
-        }
-        Ok(range_eles)
-    }
-
     /// 收集一个增量窗口的操作流——预览与执行体共用的**唯一**入口（ADR-011 同
     /// 谓词纪律）。
     ///
     /// 口径只有一种：净窗口（会话索引双根差分 + 两端版本合成，
-    /// [`pdms_io::net_window::collect_net_window`]），与 core.dll
+    /// [`crate::data_interface::e3d_collector::collect_net_window`]，e3d-io 底座），与 core.dll
     /// `DB_IndexTableCompare` 同思想。ADR-031 之后**没有分支**——逐会话回放
-    /// （[`Self::collect_changes`]）已退出生产路径，只作 legacy 诊断，并由默认关闭的
-    /// `legacy_session_replay` feature 挡在生产依赖图之外。
+    /// （`collect_changes`，old-pdms-io 底座）先退出生产路径，2026-09-04 随 old-pdms-io 整体删除，
+    /// 连诊断门都不再有。对拍的判据是 E3D TTY 录下的会话链，不是另一套解析器。
     ///
     /// 返回完整 [`CollectedWindow`]；第一条 warning 固定为口径标注 + 全部容忍计数，
     /// `session_sesnos` 则始终从冻结区间内的会话页映射提取，不能从操作 key 反推。
@@ -1006,31 +831,39 @@ impl IncrementPipeline {
         path: &std::path::Path,
         sesno_range: RangeInclusive<i32>,
     ) -> anyhow::Result<CollectedWindow> {
-        Self::collect_window_for_candidate("", path, sesno_range, None)
+        Self::collect_window_for_candidate(path, sesno_range, None)
     }
 
     pub(crate) fn collect_window_for_candidate(
-        project: &str,
         path: &std::path::Path,
         sesno_range: RangeInclusive<i32>,
-        frozen: Option<&pdms_io::snapshot::SnapshotToken>,
+        frozen: Option<&FrozenSource>,
     ) -> anyhow::Result<CollectedWindow> {
         let target = u32::try_from(*sesno_range.end())
             .map_err(|_| anyhow::anyhow!("dabacon 窗口终点非法: {}", sesno_range.end()))?;
-        let mut snapshot = if let Some(token) = frozen {
+        let frozen = if let Some(token) = frozen {
             anyhow::ensure!(
-                token.path() == path,
+                token.matches_path(path),
                 "候选路径 {} 与冻结 token 路径 {} 不一致",
                 path.display(),
                 token.path().display()
             );
-            pdms_io::snapshot::DabaconSnapshot::open_verified_at(project, token, target)
+            token.reopen_verified_at(target)
         } else {
-            pdms_io::snapshot::DabaconSnapshot::open_at(project, path, target)
+            FrozenSource::capture_at(path, target)
         }
-        .map_err(|e| anyhow::anyhow!("打开 dabacon 冻结快照失败: {e}"))?;
-        let session_sesnos = snapshot.session_sesnos_in_range(sesno_range.clone());
-        let outcome = pdms_io::net_window::collect_net_window(&mut snapshot, sesno_range)?;
+        .map_err(|e| anyhow::anyhow!("打开 dabacon 冻结源失败: {e}"))?;
+        // 会话页清单与操作流共用**同一个**冻结源：`session_chain` 先验文件身份再读链，
+        // 双开会允许同路径在两次读取之间被替换，拼出 A 文件的会话清单 + B 文件的操作流。
+        let session_sesnos = crate::data_interface::db_file_header::session_sesnos_in_range(
+            &frozen.session_chain()?,
+            &sesno_range,
+        );
+        let outcome = crate::data_interface::e3d_collector::collect_net_window(
+            &frozen,
+            sesno_range,
+            frozen.db_type(),
+        )?;
         ensure_unique_terminal_operations(&outcome.window)?;
         let (mut added, mut deleted, mut modified) = (0usize, 0usize, 0usize);
         for operation in outcome.window.values().flatten() {
@@ -1044,11 +877,13 @@ impl IncrementPipeline {
         let mut warnings = vec![net_caliber_warning(added, deleted, modified, &outcome)];
         warnings.extend(outcome.warnings);
         Ok(CollectedWindow {
-            snapshot_token: outcome.snapshot_token,
+            frozen: Some(outcome.frozen),
+            persist_changes: terminal_persist_changes(&outcome.window),
             range_eles: outcome.window,
             session_sesnos,
             warnings,
-            membership_deleted: outcome.membership_deleted,
+            membership_deleted: 0,
+            retired_type_rows: outcome.retired_type_rows,
         })
     }
 
@@ -1062,7 +897,7 @@ impl IncrementPipeline {
     /// - Watermark key is **dbnum** (dedicated `dbnum_watermark:{dbnum}` record)
     pub async fn apply(
         &self,
-        increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>, String)>,
+        increment_ranges_map: IndexMap<PathBuf, (DbFileHeader, RangeInclusive<i32>, String)>,
     ) -> IncrResult {
         self.apply_with_precollected(increment_ranges_map, IndexMap::new())
             .await
@@ -1080,7 +915,7 @@ impl IncrementPipeline {
     /// 的固定区间，可能与 `requested_range` 不同，那种情况永远重新收集。
     pub async fn apply_with_precollected(
         &self,
-        increment_ranges_map: IndexMap<PathBuf, (DbPageBasicInfo, RangeInclusive<i32>, String)>,
+        increment_ranges_map: IndexMap<PathBuf, (DbFileHeader, RangeInclusive<i32>, String)>,
         mut precollected: IndexMap<PathBuf, (RangeInclusive<i32>, CollectedWindow)>,
     ) -> IncrResult {
         let mut result = IncrResult::default();
@@ -1121,7 +956,7 @@ impl IncrementPipeline {
     async fn apply_one(
         &self,
         path: &PathBuf,
-        basic_info: &DbPageBasicInfo,
+        basic_info: &DbFileHeader,
         requested_range: RangeInclusive<i32>,
         db_type: &str,
         precollected: Option<(RangeInclusive<i32>, CollectedWindow)>,
@@ -1129,7 +964,7 @@ impl IncrementPipeline {
         let mut warnings = Vec::new();
         let outcome = async {
         let mut timings = StageTimings::default();
-        let dbnum = basic_info.pdms_header.db_num as u32;
+        let dbnum = basic_info.dbnum as u32;
         let path_text = path.to_string_lossy().into_owned();
 
         // A crash may leave PE chunks partially applied while the watermark is
@@ -1142,13 +977,23 @@ impl IncrementPipeline {
         // 重算」那条退路，只能照先前备好的计划走。记录超前于文件（回退 / 换文件）由
         // `validate_prepared_attempt` 拒绝并给出人话诊断；记录落后于文件时先把它重放完，
         // 水位推进后下一轮再追新会话——直写路径从不丢弃一份持久化计划。
-        let (sesno_range, mut model_plan, collected) = if let Some(attempt) = prepared {
-            validate_prepared_attempt(&attempt, db_type, &path_text, *requested_range.end())?;
+        let (sesno_range, mut model_plan, collected, recovery_frozen) = if let Some(attempt) = prepared {
+            let frozen = validate_prepared_attempt(
+                &attempt,
+                db_type,
+                &path_text,
+                *requested_range.end(),
+            )?;
             warnings.push(format!(
                 "dbnum={dbnum}: replay unfinished range {}..={} after an interrupted persist",
                 attempt.start_sesno, attempt.end_sesno
             ));
-            (attempt.start_sesno..=attempt.end_sesno, attempt.plan, None)
+            (
+                attempt.start_sesno..=attempt.end_sesno,
+                attempt.plan,
+                None,
+                Some(frozen),
+            )
         } else {
             // 采信判定见 `accept_handed_in_window`；复用时 `timings.collect`
             // 自然为 0，收集成本记在调用方那一侧。
@@ -1166,16 +1011,40 @@ impl IncrementPipeline {
             warnings.extend(collected.warnings.iter().cloned());
 
             let end_sesno = *requested_range.end();
-            let model_plan = StageTimings::measure(
-                &mut timings.plan,
-                crate::data_interface::model_update_plan::build_model_update_plan(
-                    dbnum,
-                    end_sesno,
-                    db_type,
-                    &collected.range_eles,
-                ),
-            )
-            .await?;
+            // Direct DESI uses the same file-pinned S→T root planner as the
+            // live e3d-model parity test.  Other modes retain the established
+            // PE-backed planner until their migration is complete.
+            let model_plan = if crate::options::direct_read_mode()
+                && db_type.eq_ignore_ascii_case("DESI")
+            {
+                let base_sesno = requested_range.start().saturating_sub(1) as u32;
+                StageTimings::measure(
+                    &mut timings.plan,
+                    crate::data_interface::window_root_plan::build_model_update_plan_from_window(
+                        dbnum,
+                        db_type,
+                        base_sesno,
+                        end_sesno as u32,
+                    ),
+                )
+                .await?
+            } else {
+                StageTimings::measure(
+                    &mut timings.plan,
+                    crate::data_interface::model_update_plan::build_model_update_plan(
+                        dbnum,
+                        end_sesno,
+                        db_type,
+                        &collected.range_eles,
+                    ),
+                )
+                .await?
+            };
+            let commit_token = collected
+                .frozen
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("增量窗口缺冻结源，不能准备 durable attempt"))?
+                .commit_token_json()?;
             StageTimings::measure(
                 &mut timings.plan,
                 crate::data_interface::model_update_pending::prepare_attempt(
@@ -1186,13 +1055,13 @@ impl IncrementPipeline {
                         start_sesno: *requested_range.start(),
                         end_sesno,
                         plan: model_plan.clone(),
-                                            commit_token: None,
+                        commit_token: Some(commit_token),
                         status: "prepared".into(),
-},
+                    },
                 ),
             )
             .await?;
-            (requested_range, model_plan, Some(collected))
+            (requested_range, model_plan, Some(collected), None)
         };
         let start_sesno = *sesno_range.start();
         let end_sesno = *sesno_range.end();
@@ -1208,19 +1077,34 @@ impl IncrementPipeline {
             Some(collected) => collected,
             None => {
                 let start = Instant::now();
-                let collected = Self::collect_window(path, sesno_range)?;
+                let token = recovery_frozen.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("prepared attempt recovery is missing its verified frozen source")
+                })?;
+                let collected = Self::collect_window_for_candidate(path, sesno_range, Some(token))?;
                 timings.collect += start.elapsed();
                 warnings.extend(collected.warnings.iter().cloned());
                 collected
             }
         };
-        let snapshot_token = collected.snapshot_token.ok_or_else(|| {
-            anyhow::anyhow!("增量窗口缺冻结 SnapshotToken，拒绝持久化和推进水位")
+        let frozen = collected.frozen.ok_or_else(|| {
+            anyhow::anyhow!("增量窗口缺冻结源 FrozenSource，拒绝持久化和推进水位")
         })?;
         let session_sesnos = collected.session_sesnos;
+        let persist_changes = collected.persist_changes;
         let range_eles = collected.range_eles;
-        let removed_plan_refnos =
-            reconcile_plan_final_presence(&snapshot_token, end_sesno, &mut model_plan)?;
+        let retired_type_rows = collected.retired_type_rows;
+        // 整块在一个同步作用域里跑完：复核与存活点查都是文件 I/O，不跨 `.await` 持有引擎。
+        let removed_plan_refnos = {
+            // 冻结源复核无条件跑：纯数据窗口也不许在收集与持久化之间被换掉文件。
+            let verified = verify_frozen_source(&frozen, end_sesno)?;
+            // 存活复核只给老规划器。窗口规划器的根是 `DbSet@T` 枚举出来的，自身即 T 端
+            // 存活证明；再问一遍是多余的，而且曾把整窗打死（T412）。
+            if model_plan.window_planned {
+                0
+            } else {
+                reconcile_plan_final_presence(&verified, end_sesno, &mut model_plan)?
+            }
+        };
         if removed_plan_refnos > 0 {
             warnings.push(format!(
                 "dbnum={dbnum}: 从持久模型计划收敛 {removed_plan_refnos} 个 Save Work 后不存在的设计目标"
@@ -1240,7 +1124,7 @@ impl IncrementPipeline {
         // changed data even though the watermark must remain unchanged.
         let persist_result = StageTimings::measure(
             &mut timings.persist,
-            Self::persist_latest_main_data(&range_eles, dbnum as i32),
+            Self::persist_latest_main_data(&persist_changes, dbnum as i32),
         )
         .await;
         let invalidated =
@@ -1251,7 +1135,9 @@ impl IncrementPipeline {
                  and world-transform caches"
             );
         }
-        persist_result?;
+        if let Some(uda_warning) = persist_result? {
+            warnings.push(uda_warning);
+        }
 
         // ADR-003 B1-emit: 维护失败可进持久补偿队列；补偿也落不下时不推进水位。
         //
@@ -1289,6 +1175,10 @@ impl IncrementPipeline {
         // OWNER 搬迁的定点 anc 重算先于水位提交、失败即拦住水位
         // （窗口重放时随窗口语句批重算，幂等收敛）。
         window_statements.extend(Self::anc_repair_statements_for_window(&range_eles, db_type));
+        // refno 复用（窗口内换了 noun）：终稿已按 `Add` 写进新 noun 表，旧 noun 的
+        // `ATT_<old>:{id}` 行要显式删掉，否则永久残留（退役清单 §8 第 2 条）。跟窗口语句
+        // 一起进尾事务：幂等，重放收敛。
+        window_statements.extend(Self::retired_type_row_statements(&retired_type_rows));
 
         // Finalization publishes this window's delivery-status updates as ordered
         // chunked batches, then one tail transaction establishes durable model
@@ -1304,14 +1194,15 @@ impl IncrementPipeline {
         // Recheck the stable file generation immediately before publishing the
         // watermark tail. Same-file append is accepted; atomic path replacement
         // is not.
-        pdms_io::snapshot::DabaconSnapshot::open_verified("", &snapshot_token)
-            .map_err(|error| anyhow::anyhow!("提交前冻结快照身份复核失败: {error:#}"))?;
+        frozen
+            .reopen_verified()
+            .map_err(|error| anyhow::anyhow!("提交前冻结源身份复核失败: {error:#}"))?;
 
         // The tail receives the complete durable plan, including RegenRoot: the
         // model phase runs after the watermark (ADR-025 §7 / ADR-056 D1), so
         // stripping roots here would advance the data watermark while
         // permanently losing the only durable request to generate them.
-        StageTimings::measure(
+        let credential_advance = StageTimings::measure(
             &mut timings.finalize,
             crate::data_interface::model_update_pending::finalize_attempt(
                 dbnum,
@@ -1322,6 +1213,13 @@ impl IncrementPipeline {
             ),
         )
         .await?;
+        // 前移的账只是回执材料（`DataBatchResult.credential_advance`）：水位已经落了，
+        // 这里成败都不回头；名单为空且规划器没退化时整格没有。
+        let credential_advance =
+            crate::data_interface::window_root_plan::CredentialAdvanceReceipt::from_window(
+                credential_advance,
+                &model_plan,
+            );
 
         // D8-A（ADR-056 / spec 035 T126）：本窗口生成根的 CATA 闭包解析进 Surreal 只为
         // `ref_rev` 反向索引与 UI 目录属性服务，挂在水位之后的补偿队列上——不拦模型、
@@ -1362,6 +1260,7 @@ impl IncrementPipeline {
                 session_sesnos,
                 range_eles,
                 model_plan,
+                credential_advance,
             })
         }
         .await;
@@ -1393,6 +1292,18 @@ impl IncrementPipeline {
             moved.len()
         );
         Self::render_anc_repair_statements(&moved)
+    }
+
+    /// refno 复用条目的旧 noun 行删除语句（随收口窗口语句批提交）。
+    ///
+    /// 同一 refno 在窗口内从 noun A 变成 noun B：终稿已按 `Add` `UPSERT B:{id}`，
+    /// `A:{id}` 那行没有任何语句会碰——不删就永久残留，并让「按 noun 表扫」的消费者
+    /// 读到一个不存在的元素。id 形制与 [`Self::render_persist_statements`] 相同
+    /// （`RefU64` 的 `Display`，`w0_w1`）。
+    fn retired_type_row_statements(rows: &[RetiredTypeRow]) -> Vec<String> {
+        rows.iter()
+            .map(|row| row.delete_statement(&row.refno.to_string()))
+            .collect()
     }
 
     /// 本窗口里发生 OWNER 搬迁的元素（`ChangeBucket::Moved` 口径）。
@@ -1533,14 +1444,18 @@ impl IncrementPipeline {
     /// advance the watermark unless the whole batch persisted. Swallowing errors
     /// here would let `applied_sesno` run ahead of the data actually stored.
     async fn persist_latest_main_data(
-        range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
+        changes: &[PersistElementChange],
         dbnum: i32,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<String>> {
         // 收集本文件本窗口的全部落库语句，随后分块提交（提交策略见下方 TX_CHUNK 处）。
         // ADR-001「失败批次不推进水位、按同一窗口重试」的安全性并不依赖「整窗口一个
         // 事务」，而是靠 Add 改用幂等 UPSERT：重试撞上上一轮已写入的记录也能覆盖收敛，
         // 不会出现「半写 + 重试反复撞已存在记录失败 → dbnum 水位卡死」。
-        let statements = Self::render_persist_statements(range_eles, dbnum);
+        //
+        // `ATT_UDA` 的 `u` 链接要把 UKEY 换成 `UDA:<refno>`：每窗口读一次 `UDA` 表，
+        // 查不到的键随返回值进回执 `warnings`（不静默丢，也不拦水位——元素其它属性照常落库）。
+        let uda_keys = UdaKeyMap::load().await?;
+        let statements = Self::render_terminal_persist_statements(changes, dbnum, &uda_keys);
         let total = statements.len();
         for tx_sql in persist_transaction_batches(&statements, PERSIST_TX_CHUNK) {
             // `.check()`：把事务内被取消/失败的语句错误上浮为 Err。原实现只 map_err
@@ -1556,12 +1471,32 @@ impl IncrementPipeline {
         println!(
             "增量主数据落库完成，共 {total} 条（分块事务提交 chunk={PERSIST_TX_CHUNK}，仅最新状态，不写历史）"
         );
-        Ok(())
+        Ok(uda_keys.misses_warning(dbnum as u32))
     }
 
-    /// 渲染本窗口的全部落库语句（折叠后）。纯函数：生产直写路径
-    /// （[`Self::persist_latest_main_data`]）与维护纠正 `window_repair` / 测试载体
-    /// 共用同一份渲染，两边不可能漂移；P4 换收集器底座时继续复用它，换的只是输入。
+    /// 生产终态语句：每个 `Add` 先清 refno 复用可能留下的旧世代行（自己指向旧 owner 的边、
+    /// 自己名下的子槽位、旧 `ATT_UDA` 行），再按元素渲染 `pe / ATT_<noun> / ATT_UDA / pe_owner`。
+    pub(crate) fn render_terminal_persist_statements(
+        changes: &[PersistElementChange],
+        dbnum: i32,
+        uda_keys: &UdaKeyMap,
+    ) -> Vec<String> {
+        let mut statements = Vec::new();
+        for change in changes.iter().filter(|change| change.is_add()) {
+            let pe = format!("pe:{}", change.refno);
+            statements.push(format!("DELETE {pe}->pe_owner;"));
+            statements.push(format!("DELETE pe_owner:[{pe}, NONE]..=[{pe}, ..];"));
+            statements.push(format!("DELETE ATT_UDA:{};", change.refno));
+        }
+        statements.extend(
+            changes
+                .iter()
+                .map(|change| change.to_surql(dbnum, uda_keys)),
+        );
+        statements
+    }
+
+    /// 渲染差分操作的兼容语句，供尚未迁移的诊断与测试载体使用。
     ///
     /// 窗口内同一 refno 被连续改 N 次就写 N 次，而本模块只保留最新状态，中间态
     /// 全部会被最后一次覆盖。折叠掉它们（见 `fold_window`）既减语句数也减 SQL
@@ -1957,7 +1892,8 @@ mod cache_tests {
             "直写路径从不丢弃一份持久化的恢复记录"
         );
         let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("缺 {needle}"));
-        let persist = at("Self::persist_latest_main_data(&range_eles, dbnum as i32)");
+        // 09-03 退役后主数据按 `PersistElementChange` 终态写（`terminal_persist_changes`），入参不再是 `range_eles`。
+        let persist = at("Self::persist_latest_main_data(&persist_changes, dbnum as i32)");
         let invalidate = at("Self::invalidate_caches(cache_refnos)");
         let reverse_index = at("Self::maintain_reverse_index(&range_eles)");
         let datacenter = at("Self::datacenter_statements(&range_eles, db_type)");
@@ -2173,32 +2109,18 @@ mod cache_tests {
         let error = validate_prepared_attempt(&attempt, "DESI", "D:/project/desi", 41)
             .expect_err("rollback must be rejected");
         assert!(error.to_string().contains("only covers through 41"));
-        validate_prepared_attempt(&attempt, "DESI", "D:/project/desi", 42)
-            .expect("complete fixed range is replayable");
+        let error = validate_prepared_attempt(&attempt, "DESI", "D:/project/desi", 42)
+            .expect_err("old attempts without a durable token must fail closed");
+        assert!(error.to_string().contains("no durable source commit token"));
     }
 
     #[cfg(windows)]
     #[test]
     fn prepared_attempt_accepts_equivalent_windows_path_spelling() {
-        let attempt = crate::data_interface::model_update_pending::IncrementUpdateAttempt {
-            dbnum: 8000,
-            db_type: "DESI".to_string(),
-            file_path: "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001"
-                .to_string(),
-            start_sesno: 196,
-            end_sesno: 196,
-            plan: Default::default(),
-            commit_token: None,
-            status: "prepared".into(),
-        };
-
-        validate_prepared_attempt(
-            &attempt,
-            "DESI",
+        assert!(same_attempt_file_path(
+            "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
             "d:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams8000_0001",
-            196,
-        )
-        .expect("separator and drive-letter casing must not change file identity");
+        ));
     }
 
     /// IU-S3-04：交入窗口只有与请求区间**完全一致**才被采信，其余一律回退
@@ -2206,11 +2128,13 @@ mod cache_tests {
     #[test]
     fn handed_in_window_is_only_accepted_on_an_exact_range_match() {
         let collected = || CollectedWindow {
-            snapshot_token: None,
+            frozen: None,
             range_eles: BTreeMap::from([(25u32, Vec::<EleOperationData>::new())]),
+            persist_changes: Vec::new(),
             session_sesnos: vec![25, 26],
             warnings: vec!["收集口径：净窗口（Net）".to_string()],
             membership_deleted: 0,
+            retired_type_rows: Vec::new(),
         };
 
         assert!(
@@ -2236,40 +2160,51 @@ mod cache_tests {
         assert_eq!(session_sesnos_in_range(&pages, &(2..=8)), vec![3, 6]);
 
         let collected = CollectedWindow {
-            snapshot_token: None,
+            frozen: None,
             // 会话 3 是空保存，会话 6 的操作在净窗口内自抵消：最终操作集为空。
             range_eles: BTreeMap::new(),
+            persist_changes: Vec::new(),
             session_sesnos: session_sesnos_in_range(&pages, &(2..=8)),
             warnings: vec!["收集口径：净窗口（Net）".to_string()],
             membership_deleted: 0,
+            retired_type_rows: Vec::new(),
         };
         assert!(collected.range_eles.is_empty());
         assert_eq!(collected.session_sesnos, vec![3, 6]);
         assert!(collected.warnings[0].contains("净窗口"));
     }
 
-    /// 净口径标注必须携带全部三种容忍形状的计数。`unreadable_child_pages` /
-    /// `level_anomalies` 只活在 stats 里，而 stats 在 `collect_window` 之后即被
-    /// 丢弃——从这条 warning 里删掉它们，批次回执上「跳过整枝」就退回静默
+    /// 净口径标注必须携带全部容忍形状的计数。`unchanged_rewrites` / `unparseable_finals` /
+    /// 类型改变只活在 `NetWindowOutcome` 里，而它在 `collect_window` 之后即被
+    /// 拆散——从这条 warning 里删掉它们，批次回执上「跳过」就退回静默
     /// （spec-003 FR-8：任何一种容忍都不许静默；2026-08-18 审核 P2）。
     #[test]
     fn the_net_caliber_warning_carries_the_tolerated_shape_counts() {
-        let mut outcome = pdms_io::net_window::NetWindowOutcome {
-            snapshot_token: None,
+        use crate::data_interface::e3d_collector::{NetWindowOutcome, RetiredTypeRow, WindowStats};
+
+        let outcome = NetWindowOutcome {
+            frozen: FrozenSource::synthetic("D:/proj/ams8000_0001", 8000, "DESI", 46),
             window: BTreeMap::new(),
             warnings: Vec::new(),
             unchanged_rewrites: 4,
             unparseable_finals: 3,
             ignored_finals: Vec::new(),
-            membership_deleted: 6,
-            dropped_phantom_adds: 2,
-            stats: pdms_io::session_index_diff::NetChangeStats::default(),
+            retired_type_rows: vec![RetiredTypeRow {
+                refno: RefU64::from_two_nums(24383, 10),
+                old_noun: "BOX".into(),
+                new_noun: "NOZZ".into(),
+            }],
+            stats: WindowStats {
+                base_sesno: Some(45),
+                target_sesno: 46,
+                candidates: 26,
+                inserted: 22,
+                deleted: 1,
+                modified: 3,
+                pages_read: 40,
+                elapsed_ms: 12,
+            },
         };
-        outcome.stats.target.unreadable_child_pages = 2;
-        outcome.stats.base.unreadable_child_pages = 1;
-        outcome.stats.target.level_anomalies = 5;
-        outcome.stats.target.pages_read = 40;
-        outcome.stats.elapsed_ms = 12;
 
         let line = net_caliber_warning(7, 8, 9, &outcome);
 
@@ -2281,13 +2216,15 @@ mod cache_tests {
             "added=7",
             "deleted=8",
             "modified=9",
-            "成员补删=6",
-            "幽灵新增丢弃=2",
+            "成员补删=0",
+            "幽灵新增丢弃=0",
             "原样重写跳过=4",
             "终稿不可解析=3",
-            "不可读子页(t/b)=2/1",
-            "层级异常(t/b)=5/0",
-            "目标侧读页=40",
+            "类型改变=1",
+            "索引候选=26（ins/mod/del=22/3/1）",
+            "基会话=45",
+            "读页=40",
+            "差分 12ms",
         ] {
             assert!(line.contains(needle), "{needle} 不在口径标注里: {line}");
         }
@@ -2310,7 +2247,8 @@ mod cache_tests {
             }
         }
         assert_eq!((added, modified, deleted), (0, 1, 1));
-        assert_eq!(collected.membership_deleted, 1);
+        // e3d-io 底座没有成员仲裁补删：那条删除必须由索引差分本身给出。
+        assert_eq!(collected.membership_deleted, 0);
         assert!(collected.range_eles.values().flatten().any(|operation| {
             operation.refno == RefU64::from_two_nums(24384, 26201)
                 && matches!(operation.detail, EleOperationDetail::Deleted)
@@ -2318,8 +2256,8 @@ mod cache_tests {
     }
 
     /// 收集入口不许再长出第二个口径（ADR-031）：`collect_window` 只走净窗口——
-    /// 没有开关、没有分支、不碰 legacy 回放。会话页清单仍与操作流共用**同一次**
-    /// 打开的 `DabaconSnapshot`：双开会允许同路径在两次读取之间被替换，拼出 A 文件的会话
+    /// 没有开关、没有分支、不碰 legacy 回放。会话页清单仍与操作流共用**同一个**
+    /// 冻结源：双开会允许同路径在两次读取之间被替换，拼出 A 文件的会话
     /// 清单 + B 文件的操作流。
     #[test]
     fn the_collector_has_no_caliber_branch() {
@@ -2333,22 +2271,22 @@ mod cache_tests {
             .0;
 
         assert!(
-            body.contains("net_window::collect_net_window(&mut snapshot"),
-            "唯一口径必须是净窗口收集器: {body}"
+            body.contains("e3d_collector::collect_net_window(") && !body.contains("pdms_io::"),
+            "唯一口径必须是 e3d-io 净窗口收集器: {body}"
         );
         assert!(
-            body.contains("snapshot.session_sesnos_in_range"),
-            "会话页清单必须来自同一次打开的 DabaconSnapshot: {body}"
+            body.contains("&frozen.session_chain()?"),
+            "会话页清单必须来自同一个冻结源: {body}"
         );
         assert!(
-            body.contains("DabaconSnapshot::open_verified")
-                && body.contains("DabaconSnapshot::open_at"),
-            "候选冻结 token 与普通预览都必须汇入同一 snapshot collector: {body}"
+            body.contains("token.reopen_verified_at(target)")
+                && body.contains("FrozenSource::capture_at(path, target)"),
+            "候选冻结 token 与普通预览都必须汇入同一个冻结源收集器: {body}"
         );
         assert_eq!(
-            body.matches("DabaconSnapshot::open(").count(),
+            body.matches("FrozenSource::capture(").count(),
             0,
-            "收集入口必须选择 open_at/open_verified，不能绕回无目标冻结的 direct open: {body}"
+            "收集入口必须选择 capture_at/reopen_verified_at，不能绕回无目标冻结的 capture: {body}"
         );
         // 三个曾经的口径符号：开关、legacy 收集器、口径枚举。任一回到这个函数体，
         // 「同谓词」就重新退回约定而不是结构。
@@ -2359,20 +2297,6 @@ mod cache_tests {
             );
         }
         assert!(!source.contains(concat!("fn collect_session", "_sesnos(")));
-    }
-
-    /// feature 打开时，legacy 回放诊断入口必须保持可用（ADR-031 决策 2）。
-    ///
-    /// 回放留着是为了给净路径当独立参照臂（性质 h/i、两条 live 负载对拍）和逐会话
-    /// 取证，不是为了给执行体当后备口径。它一旦爬回执行链，就同时带回两样东西：
-    /// 第二个口径决定点，和 O(会话数 × 每会话触达 × 3 次解析) 的成本。
-    ///
-    /// 反向证明由模块顶层的 compile-fail doctest 和无 feature 生产 check 承担；
-    /// 不再扫描几个函数体的字面文本，因为 helper 间接调用可绕过字符串护栏。
-    #[cfg(feature = "legacy_session_replay")]
-    #[test]
-    fn legacy_session_replay_feature_exports_the_diagnostic_collector() {
-        let _ = IncrementPipeline::collect_changes;
     }
 
     /// 收集口径是故障回执的一部分：fresh 收集后要先保存 warning 再做模型计划，
@@ -2413,8 +2337,8 @@ mod cache_tests {
         );
     }
 
-    /// IU-S3-03（L1 源码钉）：崩溃重放分支**永远重新收集**——prepared 命中时
-    /// 三元组的 collected 位恒为 None，交入窗口只在 prepared 落空的 fresh 分支
+    /// IU-S3-03（L1 源码钉）：崩溃重放分支**永远按 durable token 重新收集**——prepared 命中时
+    /// collected 位恒为 None、冻结源为 Some，交入窗口只在 prepared 落空的 fresh 分支
     /// 被询问。把交入结果喂给重放分支，就是把「按持久化固定区间重放」偷换成
     /// 「按调用方本次窗口重放」，`validate_prepared_attempt` 挡的正是这种错位。
     /// 回退即红。
@@ -2429,14 +2353,20 @@ mod cache_tests {
             .expect("invalidate_caches follows apply_one in this file")
             .0;
 
-        // prepared 分支的产物：固定区间 + 持久化计划 + **None**（不带收集结果）。
+        // prepared 分支的产物：固定区间 + 持久化计划 + None 收集结果 + durable frozen source。
         assert!(
-            body.contains(concat!("attempt.plan, ", "None)")),
-            "重放分支必须以 None 进入收集阶段: {body}"
+            body.contains("attempt.plan,")
+                && body.contains("None,")
+                && body.contains("Some(frozen)"),
+            "重放分支必须携带 durable frozen source 进入收集阶段: {body}"
+        );
+        assert!(
+            body.contains("collect_window_for_candidate(path, sesno_range, Some(token))"),
+            "重放收集必须复用 durable frozen source: {body}"
         );
         // 交入窗口的唯一询问点在 prepared 校验之后（即 fresh 分支里）。
         let replay_at = body
-            .find(concat!("validate_prepared_attempt", "(&attempt"))
+            .find("let frozen = validate_prepared_attempt(")
             .expect("重放校验缺失");
         let handed_at = body
             .find(concat!(
@@ -2515,274 +2445,10 @@ mod cache_tests {
         );
     }
 
-    // ── 跨结构 live 对拍（2026-08-19 收集器下沉时迁入）────────────────────
-    //
-    // 收集器本身已下沉 pdms-io，纯单测跟着走了；下面三条留在这一层，因为它们的
-    // 参照臂 / 计时对象都在这一层：`collect_changes` 是 legacy 回放外加两个
-    // Save Work 终稿补丁的包装，`collect_window` 含批次口径拼装。放到 pdms-io
-    // 里够不着，放在这里才是「对拍的两臂在同一处可见」。
-
-    /// live 对拍的独立仲裁：对同一 refno 用**生产 B+ 树点查**在窗口两端各查一次，
-    /// 由「在场与否 + 记录位置」推出期望三态。刻意不用 `fold_net_op` 当 oracle——
-    /// 回放折叠与净差分在「删了又建 → Added vs Modified」「临时删除」上有已知的
-    /// 措辞差异，拿它仲裁会把两套口径的措辞差异误判成缺陷。
-    #[cfg(feature = "legacy_session_replay")]
-    fn expected_class(start_loc: Option<u64>, end_loc: Option<u64>) -> Option<&'static str> {
-        match (start_loc, end_loc) {
-            (None, Some(_)) => Some("added"),
-            (Some(_), None) => Some("deleted"),
-            (Some(start), Some(end)) if start != end => Some("modified"),
-            _ => None, // 位置未变 = 未动；两端都不在场 = 窗口内自我抵消
-        }
-    }
-
-    /// live：真实 ams8000 上，净差分对「回放触达集 ∪ 差分结果集」逐 refno 与
-    /// 生产点查仲裁一致，且回放触达的每个 refno 都被差分正确处置。
-    /// 前置：本机存在 AvevaMarineSample 的 ams8000_0001（`AIOS_AMS8000_FILE`
-    /// 可覆盖路径）；从仓库根运行（属性字典按 CWD 相对路径装载）。
-    #[cfg(feature = "legacy_session_replay")]
-    #[test]
-    #[ignore = "manual live: needs the real ams8000_0001 file on this machine"]
-    fn live_ams8000_net_diff_agrees_with_point_lookups_and_covers_replay() {
-        use std::path::PathBuf;
-
-        let path = std::env::var_os("AIOS_AMS8000_FILE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001")
-            });
-        assert!(path.is_file(), "找不到 ams8000 文件: {}", path.display());
-
-        let mut io = PdmsIO::new("", path.clone(), true);
-        io.open().expect("open ams8000");
-        let latest = io.get_latest_sesno().expect("latest sesno") as i32;
-        let starts: Vec<i32> = {
-            let mut list = vec![1, latest / 2, (latest - 5).max(1), latest];
-            list.dedup();
-            list
-        };
-
-        for start in starts {
-            let window = start..=latest;
-            let diff_started = Instant::now();
-            let diff =
-                pdms_io::session_index_diff::collect_net_changes(&mut io, window.clone(), false)
-                    .expect("net diff");
-            let diff_ms = diff_started.elapsed().as_millis();
-
-            let replay_started = Instant::now();
-            let replay =
-                IncrementPipeline::collect_changes(&path, window.clone()).expect("replay collect");
-            let replay_ms = replay_started.elapsed().as_millis();
-
-            let mut diff_class: HashMap<RefU64, &'static str> = HashMap::new();
-            for entry in &diff.added {
-                diff_class.insert(entry.refno, "added");
-            }
-            for entry in &diff.deleted {
-                diff_class.insert(entry.refno, "deleted");
-            }
-            for entry in &diff.modified {
-                diff_class.insert(entry.refno, "modified");
-            }
-
-            let mut union: HashSet<RefU64> = diff_class.keys().copied().collect();
-            let mut replay_touched = 0usize;
-            for ops in replay.values() {
-                for op in ops {
-                    if !matches!(op.detail, EleOperationDetail::None) {
-                        union.insert(op.refno);
-                        replay_touched += 1;
-                    }
-                }
-            }
-
-            for refno in &union {
-                let start_loc = diff
-                    .base_sesno
-                    .and_then(|base| io.search_latest_refno(*refno, Some(base as u32)))
-                    .map(|(_, offset)| offset);
-                let end_loc = io
-                    .search_latest_refno(*refno, Some(diff.target_sesno as u32))
-                    .map(|(_, offset)| offset);
-                let expected = expected_class(start_loc, end_loc);
-                let got = diff_class.get(refno).copied();
-                assert_eq!(
-                    got, expected,
-                    "refno {refno} 在窗口 {start}..={latest} 的净判定与生产点查仲裁不一致\
-                     （start_loc={start_loc:?} end_loc={end_loc:?}）"
-                );
-            }
-
-            println!(
-                "[live] 窗口 {start}..={latest}: diff {}ms（added={} deleted={} modified={} \
-                 目标侧读页 {} / 剪枝 {}） vs 回放 {}ms（触达 {} 条 op）；仲裁 {} 个 refno 全一致",
-                diff_ms,
-                diff.added.len(),
-                diff.deleted.len(),
-                diff.modified.len(),
-                diff.stats.target.pages_read,
-                diff.stats.shared_subtree_prunes,
-                replay_ms,
-                replay_touched,
-                union.len()
-            );
-        }
-    }
-
-    /// live：真实 ams8000 上净窗口收集器与逐会话回放对拍。三态在差分层已由点查
-    /// 仲裁（上一条），这里验的是**负载合成**：单触达 refno 的 Add 渲染逐字符相等
-    /// （Add 无引用型条目乱序问题，`to_surql` 全程确定性），Modified 三桶键集 +
-    /// children 两端 + noun 相等。
-    /// 前置：本机存在 ams8000_0001（`AIOS_AMS8000_FILE` 可覆盖）；仓库根运行。
-    #[cfg(feature = "legacy_session_replay")]
-    #[test]
-    #[ignore = "manual live: needs the real ams8000_0001 file on this machine"]
-    fn live_ams8000_net_window_payloads_match_replay_on_single_touch_refnos() {
-        use std::collections::BTreeSet;
-        use std::path::PathBuf;
-
-        let path = std::env::var_os("AIOS_AMS8000_FILE")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| {
-                PathBuf::from(r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001")
-            });
-        assert!(path.is_file(), "找不到 ams8000 文件: {}", path.display());
-
-        let mut snapshot =
-            pdms_io::snapshot::DabaconSnapshot::open("", &path).expect("open ams8000 snapshot");
-        let latest = snapshot.token().target_sesno() as i32;
-
-        let mut add_compared = 0usize;
-        let mut modified_compared = 0usize;
-        for start in [1, latest / 2, (latest - 5).max(1)] {
-            let window = start..=latest;
-            let net_started = Instant::now();
-            let outcome = pdms_io::net_window::collect_net_window(&mut snapshot, window.clone())
-                .expect("net window");
-            let net_ms = net_started.elapsed().as_millis();
-
-            let replay_started = Instant::now();
-            let replay =
-                IncrementPipeline::collect_changes(&path, window.clone()).expect("replay collect");
-            let replay_ms = replay_started.elapsed().as_millis();
-
-            let mut net_ops: HashMap<RefU64, &EleOperationData> = HashMap::new();
-            for operation in outcome.window.values().flatten() {
-                net_ops.insert(operation.refno, operation);
-            }
-            let mut touch_counts: HashMap<RefU64, usize> = HashMap::new();
-            for operation in replay.values().flatten() {
-                if !matches!(operation.detail, EleOperationDetail::None) {
-                    *touch_counts.entry(operation.refno).or_default() += 1;
-                }
-            }
-
-            let mut window_adds = 0usize;
-            let mut window_modified = 0usize;
-            for (sesno, operations) in &replay {
-                for replay_op in operations {
-                    if touch_counts.get(&replay_op.refno) != Some(&1) {
-                        continue;
-                    }
-                    let Some(net_op) = net_ops.get(&replay_op.refno) else {
-                        continue; // 类别分歧属回放盲区，由上一条差分层仲裁用例管
-                    };
-                    if net_op.sesno != *sesno {
-                        continue;
-                    }
-                    match (&replay_op.detail, &net_op.detail) {
-                        (EleOperationDetail::Add(_), EleOperationDetail::Add(_)) => {
-                            let id = replay_op.refno.to_string();
-                            assert_eq!(
-                                net_op.to_surql(&id, 8000, *sesno),
-                                replay_op.to_surql(&id, 8000, *sesno),
-                                "Add {} 的渲染不一致（终稿合成漂移）",
-                                replay_op.refno
-                            );
-                            window_adds += 1;
-                        }
-                        (
-                            EleOperationDetail::Modified(replay_modified),
-                            EleOperationDetail::Modified(net_modified),
-                        ) => {
-                            let keys = |map: &HashMap<String, aios_core::NamedAttrValue>| {
-                                map.keys().cloned().collect::<BTreeSet<_>>()
-                            };
-                            let pair_keys = |map: &HashMap<
-                                String,
-                                (aios_core::NamedAttrValue, aios_core::NamedAttrValue),
-                            >| {
-                                map.keys().cloned().collect::<BTreeSet<_>>()
-                            };
-                            assert_eq!(
-                                keys(&net_modified.added_attrs),
-                                keys(&replay_modified.added_attrs),
-                                "Modified {} 的 added 键集不一致",
-                                replay_op.refno
-                            );
-                            assert_eq!(
-                                pair_keys(&net_modified.modified_attrs),
-                                pair_keys(&replay_modified.modified_attrs),
-                                "Modified {} 的 modified 键集不一致",
-                                replay_op.refno
-                            );
-                            assert_eq!(
-                                keys(&net_modified.deleted_attrs),
-                                keys(&replay_modified.deleted_attrs),
-                                "Modified {} 的 deleted 键集不一致",
-                                replay_op.refno
-                            );
-                            assert_eq!(
-                                net_modified.noun, replay_modified.noun,
-                                "Modified {} 的 noun 不一致",
-                                replay_op.refno
-                            );
-                            assert_eq!(
-                                net_modified
-                                    .children_changed
-                                    .as_ref()
-                                    .map(|(old, new)| (old.0.clone(), new.0.clone())),
-                                replay_modified
-                                    .children_changed
-                                    .as_ref()
-                                    .map(|(old, new)| (old.0.clone(), new.0.clone())),
-                                "Modified {} 的 children 两端不一致",
-                                replay_op.refno
-                            );
-                            window_modified += 1;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            add_compared += window_adds;
-            modified_compared += window_modified;
-            println!(
-                "[live] 窗口 {start}..={latest}: 净收集 {net_ms}ms vs 回放 {replay_ms}ms；\
-                 负载对拍 Add {window_adds} / Modified {window_modified}，原样重写跳过 {}，\
-                 收集警告 {} 条",
-                outcome.unchanged_rewrites,
-                outcome.warnings.len()
-            );
-            for warning in &outcome.warnings {
-                println!("[live]   收集警告: {warning}");
-            }
-        }
-        assert!(
-            add_compared > 1000,
-            "Add 负载对拍样本太少（{add_compared}），窗口选择失效"
-        );
-        // Modified 允许为 0：真实文件当前形状下单触达修改稀少（多触达的回放
-        // 逐会话 diff 与净端两端 diff 合法不同，不可逐桶比对）；Modified 负载
-        // 等价由 db8000_session_pairs 性质 i 在 CI 常驻钉住。
-        println!("[live] 合计负载对拍：Add {add_compared} / Modified {modified_compared}");
-    }
-
     /// T18 记录项（ADR-031，非门）：release 下按协议计时完整收集。
     /// 1 warmup + 5 次，报 median / min / p95；冷启动另报；两类窗口。
     /// 计时对象刻意是生产入口 `collect_window`（含打开文件），不是内层合成器。
-    #[cfg(feature = "legacy_session_replay")]
+    /// 2026-09-04 起只剩这一臂：old-pdms-io 回放的对照计时随 `collect_changes` 一起删了。
     #[test]
     #[ignore = "manual live: release timing for the single-caliber collector"]
     fn live_ams8000_single_caliber_release_timing() {
@@ -2801,11 +2467,7 @@ mod cache_tests {
             });
         assert!(path.is_file(), "找不到计时文件: {}", path.display());
 
-        let latest = {
-            let mut io = PdmsIO::new("", path.clone(), true);
-            io.open().expect("open");
-            io.get_latest_sesno().expect("latest") as i32
-        };
+        let latest = DbFileHeader::read(&path).expect("read header").latest_sesno() as i32;
         let windows = [
             ("high-retouch", (latest / 2).max(1)..=latest),
             ("add-floor", 1..=latest),
@@ -2832,48 +2494,21 @@ mod cache_tests {
         );
         for (name, window) in windows {
             let mut net_samples = Vec::new();
-            let mut replay_samples = Vec::new();
             let cold_net = Instant::now();
             let net0 = IncrementPipeline::collect_window(&path, window.clone()).expect("net cold");
             let cold_net_ms = cold_net.elapsed().as_millis();
-            let cold_replay = Instant::now();
-            let replay0 =
-                IncrementPipeline::collect_changes(&path, window.clone()).expect("replay cold");
-            let cold_replay_ms = cold_replay.elapsed().as_millis();
 
             for _ in 0..5 {
                 let started = Instant::now();
                 let _ = IncrementPipeline::collect_window(&path, window.clone()).expect("net warm");
                 net_samples.push(started.elapsed().as_millis());
-                let started = Instant::now();
-                let _ =
-                    IncrementPipeline::collect_changes(&path, window.clone()).expect("replay warm");
-                replay_samples.push(started.elapsed().as_millis());
             }
 
             let net_ops = net0.range_eles.values().flatten().count();
-            let replay_ops = replay0
-                .values()
-                .flatten()
-                .filter(|op| !matches!(op.detail, EleOperationDetail::None))
-                .count();
-            let retouch = if net_ops == 0 {
-                0.0
-            } else {
-                replay_ops as f64 / net_ops as f64
-            };
             let (n_med, n_min, n_p95) = stats(&net_samples);
-            let (r_med, r_min, r_p95) = stats(&replay_samples);
-            let ratio = if n_med == 0 {
-                f64::INFINITY
-            } else {
-                r_med as f64 / n_med as f64
-            };
             println!(
-                "[T18] {name} {window:?} sessions~{} net_ops={net_ops} replay_ops={replay_ops} \
-                 retouch={retouch:.2} cold_net={cold_net_ms}ms cold_replay={cold_replay_ms}ms \
-                 net median/min/p95={n_med}/{n_min}/{n_p95}ms \
-                 replay median/min/p95={r_med}/{r_min}/{r_p95}ms ratio≈{ratio:.1}×",
+                "[T18] {name} {window:?} sessions~{} net_ops={net_ops} cold_net={cold_net_ms}ms \
+                 net median/min/p95={n_med}/{n_min}/{n_p95}ms",
                 *window.end() - *window.start() + 1
             );
         }
@@ -2934,7 +2569,7 @@ mod fold_tests {
     fn added_refno_clears_every_previous_owner_edge_before_upsert() {
         let added = refno(30);
         let owner = refno(20);
-        let mut element = parse_pdms_db::parse::EleData {
+        let mut element = crate::data_interface::ele_data::EleData {
             refno: added,
             owner,
             ..Default::default()
@@ -3120,100 +2755,6 @@ mod fold_tests {
     }
 
     #[test]
-    fn phantom_adds_absent_from_the_post_save_file_are_removed() {
-        let mut changes = window(vec![
-            EleOperationData::new(refno(1), 20, EleOperationDetail::Add(Default::default())),
-            EleOperationData::new(refno(2), 20, EleOperationDetail::Add(Default::default())),
-            op(3, 20, blank()),
-        ]);
-
-        let removed = retain_finally_live_adds(&mut changes, |candidate| candidate == refno(2));
-
-        assert_eq!(removed, 1);
-        let ops = changes.get(&20).expect("session remains present");
-        assert!(!ops.iter().any(|op| op.refno == refno(1)));
-        assert!(ops.iter().any(|op| op.refno == refno(2)));
-        assert!(ops.iter().any(|op| op.refno == refno(3)));
-    }
-
-    #[test]
-    fn finally_live_deleted_record_is_replaced_with_final_state_upsert() {
-        let child = refno(11);
-        let final_owner = refno(22);
-        let mut final_element = parse_pdms_db::parse::EleData {
-            refno: child,
-            owner: final_owner,
-            noun: 123,
-            ..Default::default()
-        };
-        final_element
-            .whole_attmap
-            .attmap
-            .insert("OWNER".into(), NamedAttrValue::RefU64Type(final_owner));
-        final_element
-            .whole_attmap
-            .attmap
-            .insert("REFNO".into(), NamedAttrValue::RefU64Type(child));
-        final_element
-            .whole_attmap
-            .attmap
-            .insert("TYPE".into(), NamedAttrValue::StringType("BOX".into()));
-        let mut changes = window(vec![EleOperationData::new(
-            child,
-            47,
-            EleOperationDetail::Deleted,
-        )]);
-        let final_elements = HashMap::from([(child, final_element)]);
-
-        assert_eq!(
-            restore_finally_live_deletes(&mut changes, &final_elements),
-            1
-        );
-        let operation = &changes[&47][0];
-        let EleOperationDetail::Add(restored) = &operation.detail else {
-            panic!("finally-live delete must become a full final-state upsert");
-        };
-        assert_eq!(restored.refno, child);
-        assert_eq!(restored.owner, final_owner);
-        let sql = operation.to_surql("7997_11", 7997, 47);
-        assert!(
-            sql.contains("\"deleted\": false"),
-            "final-state upsert must clear a previous tombstone: {sql}"
-        );
-    }
-
-    #[test]
-    fn finally_absent_deleted_record_remains_a_true_delete() {
-        let child = refno(11);
-        let mut changes = window(vec![EleOperationData::new(
-            child,
-            47,
-            EleOperationDetail::Deleted,
-        )]);
-
-        assert_eq!(
-            restore_finally_live_deletes(&mut changes, &HashMap::new()),
-            0
-        );
-        assert!(matches!(
-            changes[&47][0].detail,
-            EleOperationDetail::Deleted
-        ));
-    }
-
-    #[test]
-    fn final_record_payload_strips_page_markers_and_checks_declared_boundary() {
-        let mut raw = vec![0, 0, 0, 7, 0, 0, 0, 0];
-        raw.extend_from_slice(&6i32.to_be_bytes());
-        raw.extend_from_slice(&[0; 20]);
-        assert_eq!(final_record_payload(&raw).unwrap(), &raw[8..]);
-
-        let mut truncated = vec![0, 0, 0, 8];
-        truncated.extend_from_slice(&[0; 20]);
-        assert!(final_record_payload(&truncated).is_err());
-    }
-
-    #[test]
     fn crash_replay_drops_phantom_design_refnos_from_the_durable_plan() {
         let mut plan = crate::data_interface::model_update_plan::ModelUpdatePlan {
             design_refnos: vec![
@@ -3233,25 +2774,77 @@ mod fold_tests {
         );
     }
 
+    /// 冻结源复核是 commit-generation gate，不是模型侧优化：它必须**无条件**跑在
+    /// `apply_one` 里，纯数据窗口（零模型候选）与窗口规划器的计划都不例外。
+    ///
+    /// T412 把「计划目标 T 端存活复核」摘到 `window_planned` 后面之后，这条钉子改盯
+    /// 顺序：`verify_frozen_source` 要出现在第一处 `window_planned` 分支**之前**，
+    /// 否则身份门就跟着规划器一起被跳过了。
     #[test]
-    fn empty_model_plan_cannot_bypass_snapshot_generation_verification() {
+    fn every_window_verifies_the_frozen_source_before_any_planner_branch() {
         let source = include_str!("increment_pipeline.rs");
-        let body = source
-            .split_once("fn reconcile_plan_final_presence(")
-            .expect("reconcile function")
+        let one = source
+            .split_once("    async fn apply_one(")
+            .expect("apply_one")
             .1
-            .split_once("impl IncrementPipeline")
-            .expect("reconcile boundary")
+            .split_once("\n    async fn ")
+            .expect("apply_one boundary")
             .0;
-        let verify = body
-            .find("DabaconSnapshot::open_verified")
+        let verify = one
+            .find("verify_frozen_source(&frozen, end_sesno)")
             .expect("stable generation gate");
-        let empty = body
-            .find("if candidates.is_empty()")
-            .expect("empty candidate branch");
+        let branch = one
+            .find("model_plan.window_planned")
+            .expect("planner branch");
         assert!(
-            verify < empty,
-            "data-only/空模型计划也必须先验证冻结文件世代: {body}"
+            verify < branch,
+            "冻结源复核必须先于任何规划器分支，纯数据窗口也要验: {one}"
+        );
+
+        // 门本体仍在被保留的那一半里，没有随存活复核一起被摘掉。
+        let gate = source
+            .split_once("fn verify_frozen_source(")
+            .expect("verify_frozen_source")
+            .1
+            .split_once("\nfn ")
+            .expect("verify_frozen_source boundary")
+            .0;
+        assert!(
+            gate.contains(".reopen_verified()")
+                && gate.contains("target_sesno() == end_sesno as u32"),
+            "身份门要同时验文件世代与 target 会话: {gate}"
+        );
+    }
+
+    /// T412：窗口规划器的计划不得再走 old-pdms-io 的 `contains_refnos_at`。
+    ///
+    /// 它的根来自 `enumerate_generation_roots(DbSet@T)`，自身即 T 端存活证明；老读法
+    /// 在 ams7999 45→46 这类窗口上会对新建子树报 `IndexPageData.noun == 0xCC47DF`，
+    /// 把整窗打成 Failed 并让水位永久卡死。
+    #[test]
+    fn window_planned_plans_skip_the_legacy_liveness_recheck() {
+        let source = include_str!("increment_pipeline.rs");
+        let one = source
+            .split_once("    async fn apply_one(")
+            .expect("apply_one")
+            .1
+            .split_once("\n    async fn ")
+            .expect("apply_one boundary")
+            .0;
+        let branch = one
+            .find("if model_plan.window_planned")
+            .expect("存活复核必须挂在 window_planned 后面");
+        let call = one
+            .find("reconcile_plan_final_presence(&verified")
+            .expect("存活复核调用点");
+        assert!(
+            branch < call,
+            "`reconcile_plan_final_presence` 只能在老规划器分支里调: {one}"
+        );
+        assert_eq!(
+            one.matches("reconcile_plan_final_presence(").count(),
+            1,
+            "存活复核不得有第二个调用点绕过 window_planned: {one}"
         );
     }
 
@@ -3397,282 +2990,11 @@ mod fold_tests {
 
         assert_eq!(merged, replayed);
     }
-
-    /// The state one refno ends in after a window, modelled independently of how
-    /// [`fold_window`] detects runs: an `Add` replaces the record wholesale, a
-    /// `Deleted` lays a tombstone without clearing attributes, and a `Modified`
-    /// applies its three delta maps in the order `to_modify_surql` resolves them.
-    #[derive(Default, Clone, PartialEq, Debug)]
-    struct FinalState {
-        attrs: std::collections::BTreeMap<String, Option<NamedAttrValue>>,
-        explicit: std::collections::BTreeMap<String, Option<NamedAttrValue>>,
-        uda: std::collections::BTreeMap<i32, Option<NamedAttrValue>>,
-        children: Option<Vec<RefU64>>,
-        tombstoned: bool,
-        recreated: usize,
-    }
-
-    impl FinalState {
-        fn apply(&mut self, detail: &EleOperationDetail) {
-            match detail {
-                EleOperationDetail::Add(_) => {
-                    let recreated = self.recreated + 1;
-                    *self = FinalState::default();
-                    self.recreated = recreated;
-                }
-                EleOperationDetail::Deleted => self.tombstoned = true,
-                EleOperationDetail::None => {}
-                EleOperationDetail::Modified(m) => {
-                    for (k, v) in &m.added_attrs {
-                        self.attrs.insert(k.clone(), Some(v.clone()));
-                    }
-                    for (k, (_, v)) in &m.modified_attrs {
-                        self.attrs.insert(k.clone(), Some(v.clone()));
-                    }
-                    for k in m.deleted_attrs.keys() {
-                        self.attrs.insert(k.clone(), None);
-                    }
-                    for (k, v) in &m.added_explicit_attrs {
-                        self.explicit.insert(k.clone(), Some(v.clone()));
-                    }
-                    for (k, (_, v)) in &m.modified_explicit_attrs {
-                        self.explicit.insert(k.clone(), Some(v.clone()));
-                    }
-                    for k in m.deleted_explicit_attrs.keys() {
-                        self.explicit.insert(k.clone(), None);
-                    }
-                    for (k, v) in &m.added_uda_attrs {
-                        self.uda.insert(*k, Some(v.clone()));
-                    }
-                    for (k, (_, v)) in &m.modified_uda_attrs {
-                        self.uda.insert(*k, Some(v.clone()));
-                    }
-                    for k in m.deleted_uda_attrs.keys() {
-                        self.uda.insert(*k, None);
-                    }
-                    if let Some((_, new)) = &m.children_changed {
-                        self.children = Some(new.to_vec());
-                    }
-                }
-            }
-        }
-    }
-
-    /// Folding is only safe if a real window ends in exactly the state its
-    /// unfolded replay would. Ten hand-built cases cannot cover the attribute
-    /// sequences a 169-session cold start actually produces, so this replays both
-    /// forms over a real E3D file and compares them refno by refno.
-    ///
-    /// Needs only the file — no SurrealDB. Run it in release; a debug build parses
-    /// the same window roughly 90x slower.
-    ///
-    /// ```text
-    /// $env:AIOS_FOLD_TEST_FILE = "D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\amssys"
-    /// cargo test --release --lib -- folding_a_real_window_preserves_final_state --ignored --nocapture
-    /// ```
-    #[cfg(feature = "legacy_session_replay")]
-    #[test]
-    #[ignore = "manual: folds a real E3D window and checks it against an unfolded replay"]
-    fn folding_a_real_window_preserves_final_state() {
-        use std::collections::BTreeMap as Map;
-
-        let file = std::env::var("AIOS_FOLD_TEST_FILE").expect("set AIOS_FOLD_TEST_FILE");
-        let to: i32 = std::env::var("AIOS_FOLD_TEST_TO")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(169);
-
-        let range_eles = IncrementPipeline::collect_changes(std::path::Path::new(&file), 1..=to)
-            .expect("collect changes");
-
-        let mut before: Map<RefU64, FinalState> = Map::new();
-        let mut raw_ops = 0usize;
-        for elements in range_eles.values() {
-            for op in elements {
-                raw_ops += 1;
-                before.entry(op.refno).or_default().apply(&op.detail);
-            }
-        }
-
-        let planned = fold_window(&range_eles);
-        let mut after: Map<RefU64, FinalState> = Map::new();
-        for write in &planned {
-            let entry = after.entry(write.op.refno).or_default();
-            match &write.folded {
-                Some(folded) => entry.apply(&EleOperationDetail::Modified(folded.clone())),
-                None => entry.apply(&write.op.detail),
-            }
-        }
-
-        println!(
-            "折叠 {} 个操作 → {} 个（省 {:.1}%），覆盖 {} 个 refno",
-            raw_ops,
-            planned.len(),
-            (raw_ops - planned.len()) as f64 / raw_ops.max(1) as f64 * 100.0,
-            before.len()
-        );
-
-        assert_eq!(
-            before.len(),
-            after.len(),
-            "a refno went missing while folding"
-        );
-        for (refno, expected) in &before {
-            assert_eq!(
-                after.get(refno),
-                Some(expected),
-                "refno {refno:?} ends in a different state after folding"
-            );
-        }
-        assert!(planned.len() < raw_ops, "this window folded nothing");
-    }
-}
-
-#[cfg(test)]
-mod bench_tests {
-    use super::*;
-    use surrealdb::Surreal;
-    use surrealdb::engine::any::Any;
-    use surrealdb::opt::auth::Root;
-
-    /// Exactly what `persist_latest_main_data` used to emit, before folding.
-    fn render_unfolded(
-        range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
-        dbnum: i32,
-    ) -> Vec<String> {
-        let mut statements = Vec::new();
-        for (&sesno, elements) in range_eles {
-            for element in elements {
-                let surql = element.to_surql(&element.refno.to_string(), dbnum, sesno);
-                if !surql.is_empty() {
-                    statements.push(surql);
-                }
-            }
-        }
-        statements
-    }
-
-    /// What it emits now.
-    fn render_folded(range_eles: &BTreeMap<u32, Vec<EleOperationData>>, dbnum: i32) -> Vec<String> {
-        let mut statements = Vec::new();
-        for write in fold_window(range_eles) {
-            let id = write.op.refno.to_string();
-            let surql = match &write.folded {
-                Some(folded) => folded.to_modify_surql(&id, write.sesno),
-                None => write.op.to_surql(&id, dbnum, write.sesno),
-            };
-            if !surql.is_empty() {
-                statements.push(surql);
-            }
-        }
-        statements
-    }
-
-    async fn throwaway(endpoint: &str, db_name: &str) -> Surreal<Any> {
-        let db: Surreal<Any> = Surreal::init();
-        db.connect(endpoint)
-            .with_capacity(1000)
-            .await
-            .expect("connect throwaway instance");
-        db.signin(Root {
-            username: "root",
-            password: "root",
-        })
-        .await
-        .expect("sign in");
-        db.use_ns("bench").use_db(db_name).await.expect("use ns/db");
-        db
-    }
-
-    /// Replay the statements the way the pipeline does: 500 per atomic
-    /// transaction, awaited in order.
-    async fn replay(db: &Surreal<Any>, statements: &[String]) -> Duration {
-        const TX_CHUNK: usize = 500;
-        let start = Instant::now();
-        for chunk in statements.chunks(TX_CHUNK) {
-            if let Some(tx_sql) = wrap_in_transaction(chunk) {
-                db.query(&tx_sql)
-                    .await
-                    .expect("bench transport")
-                    .check()
-                    .expect("bench statements");
-            }
-        }
-        start.elapsed()
-    }
-
-    /// What folding is actually worth at the database, measured by replaying one
-    /// real window in both forms.
-    ///
-    /// Deliberately NOT `SUL_DB`: that global points at the configured working
-    /// project and a benchmark must never write there. This opens its own client
-    /// against a throwaway instance and refuses to run against the configured port.
-    ///
-    /// ```text
-    /// bin\surreal.exe start --user root --pass root --bind 127.0.0.1:8099 memory
-    /// $env:AIOS_FOLD_TEST_FILE = "…\ams000\amssys"
-    /// cargo test --release --lib -- persist_ab_on_a_throwaway_instance --ignored --nocapture
-    /// ```
-    ///
-    /// An empty in-memory instance has no existing rows and no indexes, so read
-    /// the ratio between the two runs, not the absolute milliseconds.
-    #[cfg(feature = "legacy_session_replay")]
-    #[tokio::test]
-    #[ignore = "manual bench: needs a throwaway SurrealDB on 127.0.0.1:8099"]
-    async fn persist_ab_on_a_throwaway_instance() {
-        let file = std::env::var("AIOS_FOLD_TEST_FILE").expect("set AIOS_FOLD_TEST_FILE");
-        let endpoint = std::env::var("AIOS_BENCH_ENDPOINT")
-            .unwrap_or_else(|_| "ws://127.0.0.1:8099".to_string());
-        assert!(
-            !endpoint.contains(":8009"),
-            "refusing to benchmark against the configured working database"
-        );
-        let to: i32 = std::env::var("AIOS_FOLD_TEST_TO")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(169);
-        let dbnum: i32 = std::env::var("AIOS_FOLD_TEST_DBNUM")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(8191);
-
-        let range_eles = IncrementPipeline::collect_changes(std::path::Path::new(&file), 1..=to)
-            .expect("collect changes");
-
-        let unfolded = render_unfolded(&range_eles, dbnum);
-        let folded = render_folded(&range_eles, dbnum);
-        let bytes =
-            |s: &[String]| s.iter().map(String::len).sum::<usize>() as f64 / 1024.0 / 1024.0;
-
-        println!(
-            "未折叠 {} 条 / {:.2} MB   折叠后 {} 条 / {:.2} MB",
-            unfolded.len(),
-            bytes(&unfolded),
-            folded.len(),
-            bytes(&folded)
-        );
-
-        // Alternate the two forms so a warm-up or ordering effect shows up as a
-        // gap between the two rounds rather than hiding inside one of them.
-        for round in 1..=2 {
-            let db = throwaway(&endpoint, &format!("unfolded_{round}")).await;
-            let a = replay(&db, &unfolded).await;
-            let db = throwaway(&endpoint, &format!("folded_{round}")).await;
-            let b = replay(&db, &folded).await;
-            println!(
-                "第 {round} 轮: 未折叠 {}ms  折叠后 {}ms  省 {:.1}%",
-                a.as_millis(),
-                b.as_millis(),
-                (a.as_secs_f64() - b.as_secs_f64()) / a.as_secs_f64() * 100.0
-            );
-        }
-    }
 }
 
 #[cfg(test)]
 mod datacenter_tests {
     use super::*;
-    use pdms_io::io::ModifiedElement;
 
     fn modified(noun: &str) -> EleOperationData {
         EleOperationData::new(
@@ -4225,8 +3547,7 @@ mod live_tests {
     #[ignore = "manual live: requires the configured Surreal database"]
     async fn live_add_pe_owner_replay_is_idempotent() {
         use aios_core::NamedAttrValue;
-        use parse_pdms_db::parse::EleData;
-        use pdms_io::io::EleOperationDetail;
+        use crate::data_interface::ele_data::EleData;
 
         aios_core::init_test_surreal()
             .await
@@ -4304,860 +3625,21 @@ mod live_tests {
         assert_eq!(count, 2, "重放后 children 关系应恰好各一条，不得重复累积");
     }
 
-    /// Real-file E2E: load the backup baseline, apply the current file's real
-    /// FTUB + transient Add→Deleted window, skip the net-zero model work, then
-    /// generate every affected root. The E3D source files are read-only.
-    #[cfg(feature = "legacy_session_replay")]
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "manual live: requires isolated Surreal on :8009 and local AMS files"]
-    async fn live_real_ftub_delete_move_and_reorder() {
-        use crate::data_interface::dbnum_state::{DbnumState, FileObservation};
-        use crate::data_interface::generation_root::{
-            configured_delivery_unit_types, resolve_live_element_generation_root,
-        };
-        use crate::data_interface::manual_update::load_pending_model_units;
-        use crate::data_interface::model_refresh::ModelRefreshPolicy;
-        use crate::data_interface::model_update_pending::{drain, drain_non_regen};
-        use crate::data_interface::model_update_plan::ModelWorkAction;
-        use crate::versioned_db::database::sync_total_async_threaded;
-        use aios_core::NamedAttrValue;
-        use dashmap::DashSet;
-        use std::sync::Arc;
-        use std::time::{SystemTime, UNIX_EPOCH};
-
-        let current = PathBuf::from(std::env::var("AIOS_FTUB_CURRENT_FILE").unwrap_or_else(|_| {
-            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into()
-        }));
-        let backup = PathBuf::from(std::env::var("AIOS_FTUB_BASELINE_FILE").unwrap_or_else(|_| {
-            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001.codex-before-move-20260724"
-                .into()
-        }));
-        assert!(
-            current.is_file(),
-            "missing current fixture: {}",
-            current.display()
-        );
-        assert!(
-            backup.is_file(),
-            "missing baseline fixture: {}",
-            backup.display()
-        );
-
-        aios_core::init_test_surreal()
-            .await
-            .expect("connect isolated surreal");
-        let manager = AiosDBManager::init_form_config()
-            .await
-            .expect("init current-project manager");
-
-        let fixture_project = "AiosFtubIncrementFixture";
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("system clock")
-            .as_nanos();
-        let fixture_root = std::env::temp_dir().join(format!(
-            "aios-ftub-increment-{}-{unique}",
-            std::process::id()
-        ));
-        let fixture_db_dir = fixture_root
-            .join(fixture_project)
-            .join(format!("{fixture_project}000"));
-        std::fs::create_dir_all(&fixture_db_dir).expect("create baseline fixture directory");
-        std::fs::copy(&backup, fixture_db_dir.join("ams8000_0001"))
-            .expect("copy read-only baseline fixture");
-
-        let mut baseline_options = manager.db_option.clone();
-        baseline_options.project_path = fixture_root.to_string_lossy().into_owned();
-        baseline_options.included_projects = vec![fixture_project.into()];
-        baseline_options.project_dirs = None;
-        baseline_options.total_sync = true;
-        baseline_options.replace_dbs = false;
-        baseline_options.included_db_files = Some(vec!["ams8000_0001".into()]);
-        baseline_options.manual_db_nums = Some(vec![8000]);
-        baseline_options.gen_model = false;
-        baseline_options.gen_mesh = false;
-
-        let parsed = sync_total_async_threaded(
-            &baseline_options,
-            fixture_project,
-            Arc::new(DashSet::new()),
-            &["DESI"],
-            100,
-        )
-        .await
-        .expect("load sesno-15 baseline");
-        assert!(
-            parsed.get(&8000).copied().unwrap_or_default() > 0,
-            "baseline dbnum=8000 must contain elements"
-        );
-
-        let branch = "24384/22402";
-        let deleted = RefnoEnum::from("24384/30939");
-        let baseline_root =
-            resolve_live_element_generation_root(deleted, &configured_delivery_unit_types())
-                .await
-                .expect("inspect element before applying its tombstone")
-                .expect("baseline FTUB must resolve to its owning BRAN");
-        assert_eq!(
-            (
-                baseline_root.root.to_pdms_str(),
-                baseline_root.noun.as_str()
-            ),
-            (branch.to_string(), "BRAN"),
-            "an Add→Deleted window only cancels when the element did not exist at baseline"
-        );
-        let mut baseline_io = PdmsIO::new("", backup.clone(), true);
-        baseline_io.open().expect("open baseline file");
-        let baseline_sesno = i32::try_from(baseline_io.get_latest_sesno().expect("baseline sesno"))
-            .expect("baseline sesno fits i32");
-        let mut current_io = PdmsIO::new("", current.clone(), true);
-        current_io.open().expect("open current file");
-        let current_sesno = i32::try_from(current_io.get_latest_sesno().expect("current sesno"))
-            .expect("current sesno fits i32");
-        let basic_info = current_io.get_page_basic_info().expect("current header");
-        assert_eq!(basic_info.pdms_header.db_num, 8000);
-        assert!(
-            current_sesno > baseline_sesno,
-            "fixture must contain a real incremental window"
-        );
-
-        let current_meta = std::fs::metadata(&current).expect("current file metadata");
-        // 夹具专用的强写：这个 live 用例故意重放更旧的基线，走正门会被判成回退
-        // 而只写观察值，前置身份就摆不进去。
-        DbnumState::force_scan_identity_for_test(&FileObservation {
-            dbnum: 8000,
-            project: manager.db_option.project_name.clone(),
-            db_type: "DESI".into(),
-            file_name: current
-                .file_name()
-                .expect("current file name")
-                .to_string_lossy()
-                .into_owned(),
-            file_path: current.to_string_lossy().into_owned(),
-            file_size: current_meta.len(),
-            file_latest_sesno: current_sesno,
-            file_modified_at: None,
-        })
-        .await
-        .expect("record current-file identity");
-        // This ignored live test deliberately replays an older baseline in the
-        // isolated :8009 database. Production watermarks remain monotonic; only
-        // the fixture is rewound so a previous interrupted test is rerunnable.
-        SUL_DB
-            .query(format!(
-                "UPDATE dbnum_watermark:8000 SET applied_sesno = {baseline_sesno}, \
-                 sesno = {baseline_sesno}; \
-                 DELETE increment_update_attempt:8000; \
-                 DELETE model_update_pending WHERE dbnum = 8000;"
-            ))
-            .await
-            .expect("rewind isolated fixture watermark")
-            .check()
-            .expect("valid fixture rewind");
-        let recovery_range = (baseline_sesno + 1)..=current_sesno;
-        let recovery_changes = IncrementPipeline::collect_changes(&current, recovery_range.clone())
-            .expect("collect fixed recovery range");
-        let recovery_plan = crate::data_interface::model_update_plan::build_model_update_plan(
-            8000,
-            current_sesno,
-            "DESI",
-            &recovery_changes,
-        )
-        .await
-        .expect("build recovery model plan");
-        crate::data_interface::model_update_pending::prepare_attempt(
-            &crate::data_interface::model_update_pending::IncrementUpdateAttempt {
-                dbnum: 8000,
-                db_type: "DESI".into(),
-                file_path: current.to_string_lossy().into_owned(),
-                start_sesno: baseline_sesno + 1,
-                end_sesno: current_sesno,
-                plan: recovery_plan,
-                commit_token: None,
-                status: "prepared".into(),
-            },
-        )
-        .await
-        .expect("simulate crash after durable prepare and before PE writes");
-        let ranges = IndexMap::from([(
-            current.clone(),
-            (basic_info.clone(), recovery_range.clone(), "DESI".into()),
-        )]);
-        let result = IncrementPipeline::new().apply(ranges).await;
-        assert!(
-            result.errors.is_empty(),
-            "increment failed: {:?}",
-            result.errors
-        );
-        assert!(
-            result
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("replay unfinished range")),
-            "apply must recover the durable pre-write attempt: {:?}",
-            result.warnings
-        );
-        assert_eq!(result.successes.len(), 1);
-        let mut response = SUL_DB
-            .query("RETURN count(SELECT * FROM model_update_pending WHERE dbnum = 8000);")
-            .await
-            .expect("count pending before replay")
-            .check()
-            .expect("valid pending-count query");
-        let pending_before_replay = response
-            .take::<Option<usize>>(0)
-            .expect("decode pending count")
-            .unwrap_or_default();
-        let replay = IncrementPipeline::new()
-            .apply(IndexMap::from([(
-                current.clone(),
-                (basic_info, recovery_range, "DESI".into()),
-            )]))
-            .await;
-        assert!(
-            replay.errors.is_empty(),
-            "same-range replay failed: {:?}",
-            replay.errors
-        );
-        assert_eq!(replay.successes.len(), 1);
-        let mut response = SUL_DB
-            .query("RETURN count(SELECT * FROM model_update_pending WHERE dbnum = 8000);")
-            .await
-            .expect("count pending after replay")
-            .check()
-            .expect("valid replay pending-count query");
-        assert_eq!(
-            response
-                .take::<Option<usize>>(0)
-                .expect("decode replay pending count")
-                .unwrap_or_default(),
-            pending_before_replay,
-            "replaying one fixed session range must not duplicate durable model work"
-        );
-        let transient = result.successes[0]
-            .range_eles
-            .values()
-            .flatten()
-            .filter(|op| op.refno == deleted.refno())
-            .collect::<Vec<_>>();
-        assert!(
-            transient
-                .iter()
-                .any(|op| matches!(&op.detail, EleOperationDetail::Add(_)))
-                && transient
-                    .iter()
-                    .any(|op| matches!(&op.detail, EleOperationDetail::Deleted)),
-            "real fixture must retain the Add→Deleted sequence: {transient:?}"
-        );
-        assert_eq!(
-            DbnumState::applied_sesno(8000)
-                .await
-                .expect("read final watermark"),
-            current_sesno
-        );
-
-        let fitting = "24384/22403";
-        let pending = load_pending_model_units()
-            .await
-            .expect("load generation roots");
-        assert!(
-            pending
-                .iter()
-                .any(|job| job.dbnum == 8000 && job.root_refno == branch),
-            "FTUB/member changes must schedule owning BRAN {branch}: {pending:?}"
-        );
-        assert!(
-            !pending
-                .iter()
-                .any(|job| job.dbnum == 8000 && job.root_refno == fitting),
-            "FTUB is a component, never a delivery-unit generation root"
-        );
-        let mut response = SUL_DB
-            .query(format!(
-                "RETURN count(SELECT * FROM model_update_pending \
-                 WHERE action = 'delete_cleanup' AND target_refno = '{}');",
-                deleted.to_pdms_str()
-            ))
-            .await
-            .expect("query transient-delete work")
-            .check()
-            .expect("valid transient-delete work query");
-        assert_eq!(
-            response
-                .take::<Option<usize>>(0)
-                .expect("decode transient-delete work")
-                .unwrap_or_default(),
-            1,
-            "an element that existed at baseline must retain delete cleanup despite Add→Deleted"
-        );
-        assert!(
-            drain_non_regen(&manager)
-                .await
-                .expect("execute non-regeneration work")
-                >= 1,
-            "real window must execute the FTUB transform work"
-        );
-        let mut response = SUL_DB
-            .query(format!(
-                "RETURN {}.id != none;",
-                deleted.to_inst_relate_key()
-            ))
-            .await
-            .expect("query transient deleted model state")
-            .check()
-            .expect("valid transient deleted-model query");
-        assert!(
-            !response
-                .take::<Option<bool>>(0)
-                .expect("decode transient deleted-model query")
-                .unwrap_or(false),
-            "same-window Add→Deleted must not materialize a model"
-        );
-
-        let mut roots = pending
-            .iter()
-            .filter(|job| job.dbnum == 8000)
-            .map(|job| job.root_refno.clone())
-            .collect::<Vec<_>>();
-        roots.sort_unstable();
-        roots.dedup();
-        ModelRefreshPolicy::generate_roots(&manager, &roots)
-            .await
-            .expect("generate every affected root");
-        // BRAN is the delivery/generation root; its FTUB remains the concrete
-        // component that owns the generated instance relation.
-        let key = RefnoEnum::from(fitting).to_inst_relate_key();
-        let mut response = SUL_DB
-            .query(format!("RETURN {key}.id != none;"))
-            .await
-            .expect("query generated fitting")
-            .check()
-            .expect("valid generated-fitting query");
-        assert!(
-            response
-                .take::<Option<bool>>(0)
-                .expect("decode generated-fitting query")
-                .unwrap_or(false),
-            "owning BRAN generation must materialize its FTUB component geometry"
-        );
-        let mut response = SUL_DB
-            .query(format!(
-                "RETURN {}.id != none;",
-                deleted.to_inst_relate_key()
-            ))
-            .await
-            .expect("query deleted model after root regeneration")
-            .check()
-            .expect("valid post-regeneration deleted-model query");
-        assert!(
-            !response
-                .take::<Option<bool>>(0)
-                .expect("decode post-regeneration deleted-model query")
-                .unwrap_or(false),
-            "regenerating the surviving BRAN must not create the transient deleted element"
-        );
-
-        // Synthetic OWNER edit over real PE/CATA data: plan before persist, then
-        // move the real FTUB from BRAN A to BRAN B and regenerate both sides.
-        let old_branch = RefnoEnum::from(branch);
-        let new_branch = RefnoEnum::from("24384/22404");
-        let fitting_refno = RefnoEnum::from(fitting);
-        SUL_DB
-            .query(format!(
-                "DELETE {}->pe_owner WHERE out != {};",
-                fitting_refno.to_pe_key(),
-                old_branch.to_pe_key()
-            ))
-            .await
-            .expect("remove stale owner edge from an interrupted prior run")
-            .check()
-            .expect("valid stale-owner cleanup");
-        IncrementPipeline::invalidate_caches(HashSet::from([
-            fitting_refno,
-            old_branch,
-            new_branch,
-        ]))
-        .await;
-        let mut move_op = result.successes[0]
-            .range_eles
-            .values()
-            .flatten()
-            .find(|op| {
-                op.refno == fitting_refno.refno()
-                    && matches!(&op.detail, EleOperationDetail::Modified(_))
-            })
-            .expect("real FTUB modification")
-            .clone();
-        let mut source_fitting_op = move_op.clone();
-        let EleOperationDetail::Modified(source_modified) = &mut source_fitting_op.detail else {
-            unreachable!("filtered above")
-        };
-        source_modified.modified_explicit_attrs.insert(
-            "OWNER".into(),
-            (
-                NamedAttrValue::RefU64Type(new_branch.refno()),
-                NamedAttrValue::RefU64Type(old_branch.refno()),
-            ),
-        );
-        let EleOperationDetail::Modified(modified) = &mut move_op.detail else {
-            unreachable!("filtered above")
-        };
-        modified.current_data.owner = new_branch.refno();
-        modified.modified_explicit_attrs.insert(
-            "OWNER".into(),
-            (
-                NamedAttrValue::RefU64Type(old_branch.refno()),
-                NamedAttrValue::RefU64Type(new_branch.refno()),
-            ),
-        );
-        let old_children = RefU64Vec(
-            aios_core::get_children_pes(old_branch)
-                .await
-                .expect("load old BRAN children")
-                .into_iter()
-                .map(|child| child.refno.refno())
-                .collect(),
-        );
-        let new_children = RefU64Vec(
-            aios_core::get_children_pes(new_branch)
-                .await
-                .expect("load new BRAN children")
-                .into_iter()
-                .map(|child| child.refno.refno())
-                .collect(),
-        );
-        let original_old_children = old_children.clone();
-        let original_new_children = new_children.clone();
-        let mut old_children_after = old_children.clone();
-        old_children_after
-            .0
-            .retain(|child| *child != fitting_refno.refno());
-        let mut new_children_after = new_children.clone();
-        if !new_children_after.0.contains(&fitting_refno.refno()) {
-            new_children_after.0.push(fitting_refno.refno());
-        }
-        let parent_op = |root: RefnoEnum, sesno: u32, before: RefU64Vec, after: RefU64Vec| {
-            EleOperationData::new(
-                root.refno(),
-                sesno,
-                EleOperationDetail::Modified(ModifiedElement {
-                    current_data: Default::default(),
-                    added_attrs: Default::default(),
-                    deleted_attrs: Default::default(),
-                    modified_attrs: Default::default(),
-                    added_explicit_attrs: Default::default(),
-                    deleted_explicit_attrs: Default::default(),
-                    modified_explicit_attrs: Default::default(),
-                    added_uda_attrs: Default::default(),
-                    deleted_uda_attrs: Default::default(),
-                    modified_uda_attrs: Default::default(),
-                    noun: "BRAN".into(),
-                    children_changed: Some((before, after)),
-                }),
-            )
-        };
-        let move_sesno = u32::try_from(current_sesno + 1).expect("synthetic sesno fits u32");
-        let move_range = BTreeMap::from([(
-            move_sesno,
-            vec![
-                move_op,
-                parent_op(old_branch, move_sesno, old_children, old_children_after),
-                parent_op(new_branch, move_sesno, new_children, new_children_after),
-            ],
-        )]);
-        let move_plan = crate::data_interface::model_update_plan::build_model_update_plan(
-            8000,
-            current_sesno + 1,
-            "DESI",
-            &move_range,
-        )
-        .await
-        .expect("build move model plan");
-        let mut move_roots = move_plan
-            .work_items
-            .iter()
-            .filter(|item| item.action == ModelWorkAction::RegenRoot)
-            .map(|item| item.target_refno.clone())
-            .collect::<Vec<_>>();
-        move_roots.sort_unstable();
-        move_roots.dedup();
-        let mut expected_move_roots = vec![old_branch.to_pdms_str(), new_branch.to_pdms_str()];
-        expected_move_roots.sort_unstable();
-        assert_eq!(
-            move_roots, expected_move_roots,
-            "cross-BRAN OWNER move must regenerate both membership sides"
-        );
-
-        IncrementPipeline::persist_latest_main_data(&move_range, 8000)
-            .await
-            .expect("persist synthetic OWNER move");
-        IncrementPipeline::invalidate_caches(HashSet::from([
-            fitting_refno,
-            old_branch,
-            new_branch,
-        ]))
-        .await;
-        let mut response = SUL_DB
-            .query(format!(
-                "SELECT VALUE out FROM {}->pe_owner;",
-                fitting_refno.to_pe_key()
-            ))
-            .await
-            .expect("query moved FTUB owner")
-            .check()
-            .expect("valid moved-owner query");
-        assert_eq!(
-            response
-                .take::<Vec<surrealdb::sql::Thing>>(0)
-                .expect("decode moved owner"),
-            vec![new_branch.to_pe_key().parse().expect("new owner thing")]
-        );
-
-        ModelRefreshPolicy::generate_roots(&manager, &move_roots)
-            .await
-            .expect("regenerate both sides of OWNER move");
-        for root in [old_branch, new_branch] {
-            let subtree = crate::data_interface::helper::collect_pe_subtree_refnos(&[root])
-                .await
-                .expect("collect regenerated branch subtree")
-                .into_iter()
-                .collect::<Vec<_>>();
-            let inst_keys = aios_core::get_inst_relate_keys(&subtree);
-            let mut response = SUL_DB
-                .query(format!("SELECT VALUE id FROM {inst_keys};"))
-                .await
-                .expect("query regenerated branch models")
-                .check()
-                .expect("valid regenerated-branch query");
-            assert!(
-                !response
-                    .take::<Vec<surrealdb::sql::Thing>>(0)
-                    .expect("decode regenerated branch models")
-                    .is_empty(),
-                "both old and new BRAN must contain generated model instances after move"
-            );
-        }
-        let mut response = SUL_DB
-            .query(format!(
-                "RETURN {}.id != none;",
-                fitting_refno.to_inst_relate_key()
-            ))
-            .await
-            .expect("query moved FTUB model")
-            .check()
-            .expect("valid moved-FTUB query");
-        assert!(
-            response
-                .take::<Option<bool>>(0)
-                .expect("decode moved-FTUB model")
-                .unwrap_or(false),
-            "receiving BRAN generation must materialize the moved FTUB"
-        );
-
-        // Same members, different order: persist indexed pe_owner edges and
-        // regenerate only the affected receiving BRAN.
-        let reorder_before = RefU64Vec(
-            aios_core::get_children_pes(new_branch)
-                .await
-                .expect("load moved BRAN children")
-                .into_iter()
-                .map(|child| child.refno.refno())
-                .collect(),
-        );
-        assert!(
-            reorder_before.0.len() >= 2,
-            "real receiving BRAN needs at least two children for reorder coverage"
-        );
-        let mut reorder_after = reorder_before.clone();
-        reorder_after.0.swap(0, 1);
-        let reorder_sesno = u32::try_from(current_sesno + 2).expect("reorder sesno fits u32");
-        let reorder_range = BTreeMap::from([(
-            reorder_sesno,
-            vec![parent_op(
-                new_branch,
-                reorder_sesno,
-                reorder_before.clone(),
-                reorder_after.clone(),
-            )],
-        )]);
-        // A malformed ref_rev endpoint exercises the production read/decode
-        // failure path without a test-only injection switch.
-        const BAD_REFERRER: &str = "pe:codex_bad_ref_rev";
-        SUL_DB
-            .query(format!(
-                "DELETE {BAD_REFERRER}->ref_rev; \
-                 RELATE {BAD_REFERRER}->ref_rev->{};",
-                new_branch.to_pe_key()
-            ))
-            .await
-            .expect("inject malformed reverse edge")
-            .check()
-            .expect("valid malformed-edge fixture");
-        let reorder_plan = crate::data_interface::model_update_plan::build_model_update_plan(
-            8000,
-            current_sesno + 2,
-            "DESI",
-            &reorder_range,
-        )
-        .await
-        .expect("build reorder model plan");
-        let reorder_roots = reorder_plan
-            .work_items
-            .iter()
-            .filter(|item| item.action == ModelWorkAction::RegenRoot)
-            .map(|item| item.target_refno.clone())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            reorder_roots,
-            vec![new_branch.to_pdms_str()],
-            "same-set reorder must regenerate only its owning BRAN"
-        );
-        assert!(
-            reorder_plan
-                .work_items
-                .iter()
-                .any(|item| item.action == ModelWorkAction::CascadeExpand
-                    && item.target_refno == new_branch.to_pdms_str()),
-            "reverse-index failure must persist a deferred cascade seed: {reorder_plan:?}"
-        );
-        assert!(
-            reorder_plan
-                .warnings
-                .iter()
-                .any(|warning| warning.contains("reverse-reference lookup failed")),
-            "reverse-index failure must remain visible: {:?}",
-            reorder_plan.warnings
-        );
-
-        IncrementPipeline::persist_latest_main_data(&reorder_range, 8000)
-            .await
-            .expect("persist BRAN child reorder");
-        crate::data_interface::model_update_pending::finalize_attempt(
-            8000,
-            current_sesno + 2,
-            None,
-            &reorder_plan,
-            &[],
-        )
-        .await
-        .expect("persist reorder work and advance watermark");
-        SUL_DB
-            .query(format!("DELETE {BAD_REFERRER}->ref_rev;"))
-            .await
-            .expect("repair reverse index")
-            .check()
-            .expect("valid reverse-index repair");
-        IncrementPipeline::invalidate_caches(HashSet::from([new_branch])).await;
-        #[derive(serde::Deserialize)]
-        struct OrderedChild {
-            child: surrealdb::sql::Thing,
-        }
-        let mut response = SUL_DB
-            .query(format!(
-                "SELECT id, in AS child FROM {}<-pe_owner ORDER BY id;",
-                new_branch.to_pe_key()
-            ))
-            .await
-            .expect("query persisted child order")
-            .check()
-            .expect("valid child-order query");
-        let persisted_order = response
-            .take::<Vec<OrderedChild>>(0)
-            .expect("decode persisted child order");
-        let persisted_order = persisted_order
-            .into_iter()
-            .map(|row| row.child)
-            .collect::<Vec<_>>();
-        let expected_order = reorder_after
-            .0
-            .iter()
-            .map(|child| {
-                RefnoEnum::from(*child)
-                    .to_pe_key()
-                    .parse()
-                    .expect("child thing")
-            })
-            .collect::<Vec<surrealdb::sql::Thing>>();
-        assert_eq!(
-            persisted_order, expected_order,
-            "pe_owner compound ids must retain the new child order"
-        );
-        drain(&manager)
-            .await
-            .expect("recover deferred cascade and regenerate reordered BRAN");
-        assert!(
-            load_pending_model_units()
-                .await
-                .expect("load recovered pending work")
-                .is_empty(),
-            "repaired reverse index must let deferred cascade and root work converge"
-        );
-        let reordered_subtree =
-            crate::data_interface::helper::collect_pe_subtree_refnos(&[new_branch])
-                .await
-                .expect("collect reordered branch subtree")
-                .into_iter()
-                .collect::<Vec<_>>();
-        let reordered_inst_keys = aios_core::get_inst_relate_keys(&reordered_subtree);
-        let mut response = SUL_DB
-            .query(format!("SELECT VALUE id FROM {reordered_inst_keys};"))
-            .await
-            .expect("query reordered branch models")
-            .check()
-            .expect("valid reordered-model query");
-        assert!(
-            !response
-                .take::<Vec<surrealdb::sql::Thing>>(0)
-                .expect("decode reordered branch models")
-                .is_empty(),
-            "reordered BRAN must still have generated model instances"
-        );
-
-        // Restore the shared :8009 ProjAMS state to the actual file. The MOVE
-        // and ORDER cases above are synthetic and must not leak sesno+1/+2 or
-        // altered ownership into later manual-preview tests.
-        std::fs::copy(&current, fixture_db_dir.join("ams8000_0001"))
-            .expect("replace fixture with current source file");
-        let restored = sync_total_async_threaded(
-            &baseline_options,
-            fixture_project,
-            Arc::new(DashSet::new()),
-            &["DESI"],
-            100,
-        )
-        .await
-        .expect("restore current ProjAMS dbnum=8000");
-        assert!(
-            restored.get(&8000).copied().unwrap_or_default() > 0,
-            "restored dbnum=8000 must contain elements"
-        );
-        SUL_DB
-            .query(format!(
-                "UPDATE dbnum_watermark:8000 SET applied_sesno = {current_sesno}, \
-                 sesno = {current_sesno}, file_latest_sesno = {current_sesno}; \
-                 DELETE increment_update_attempt:8000; \
-                 DELETE model_update_pending WHERE dbnum = 8000;"
-            ))
-            .await
-            .expect("restore isolated fixture watermark")
-            .check()
-            .expect("valid fixture restore");
-        let restored_old_children = RefU64Vec(
-            aios_core::get_children_pes(old_branch)
-                .await
-                .expect("read synthetic old BRAN children")
-                .into_iter()
-                .map(|child| child.refno.refno())
-                .collect(),
-        );
-        let restored_new_children = RefU64Vec(
-            aios_core::get_children_pes(new_branch)
-                .await
-                .expect("read synthetic new BRAN children")
-                .into_iter()
-                .map(|child| child.refno.refno())
-                .collect(),
-        );
-        let restore_sesno = u32::try_from(current_sesno).expect("current sesno fits u32");
-        IncrementPipeline::persist_latest_main_data(
-            &BTreeMap::from([(
-                restore_sesno,
-                vec![
-                    source_fitting_op,
-                    parent_op(
-                        old_branch,
-                        restore_sesno,
-                        restored_old_children,
-                        original_old_children.clone(),
-                    ),
-                    parent_op(
-                        new_branch,
-                        restore_sesno,
-                        restored_new_children,
-                        original_new_children.clone(),
-                    ),
-                ],
-            )]),
-            8000,
-        )
-        .await
-        .expect("restore synthetic OWNER and child-order edits");
-        SUL_DB
-            .query(format!(
-                "DELETE {}->pe_owner WHERE out != {};",
-                fitting_refno.to_pe_key(),
-                old_branch.to_pe_key()
-            ))
-            .await
-            .expect("remove synthetic owner edge")
-            .check()
-            .expect("valid synthetic-owner cleanup");
-        IncrementPipeline::invalidate_caches(HashSet::from([
-            fitting_refno,
-            old_branch,
-            new_branch,
-        ]))
-        .await;
-        let mut response = SUL_DB
-            .query(format!(
-                "SELECT VALUE out FROM {}->pe_owner;",
-                fitting_refno.to_pe_key()
-            ))
-            .await
-            .expect("query restored fitting owner")
-            .check()
-            .expect("valid restored-owner query");
-        assert_eq!(
-            response
-                .take::<Vec<surrealdb::sql::Thing>>(0)
-                .expect("decode restored fitting owner"),
-            vec![old_branch.to_pe_key().parse().expect("old owner thing")],
-            "restore exactly one FTUB owner from source"
-        );
-        assert_eq!(
-            aios_core::get_children_pes(old_branch)
-                .await
-                .expect("read restored old BRAN children")
-                .into_iter()
-                .map(|child| child.refno.refno())
-                .collect::<Vec<_>>(),
-            original_old_children.0,
-            "restore old BRAN membership and order"
-        );
-        assert_eq!(
-            aios_core::get_children_pes(new_branch)
-                .await
-                .expect("read restored new BRAN children")
-                .into_iter()
-                .map(|child| child.refno.refno())
-                .collect::<Vec<_>>(),
-            original_new_children.0,
-            "restore new BRAN membership and order"
-        );
-        ModelRefreshPolicy::generate_roots(
-            &manager,
-            &[old_branch.to_pdms_str(), new_branch.to_pdms_str()],
-        )
-        .await
-        .expect("restore affected BRAN models");
-
-        std::fs::remove_dir_all(&fixture_root).expect("remove temporary baseline fixture");
-    }
-
     /// D-03（live）：ProjAMS 上一次**真实** E3D 删除会话。
     ///
-    /// 六个变化桶里 Deleted 是唯一还没有真实文件会话的一个。上面那个 FTUB 用例走的是
-    /// 备份基线对当前文件的瞬态 Add→Deleted，而 FTUB 是伪类型、BRAN 内的组件，覆盖不到
-    /// 「元素自身带模型被删」的清理路径。这里的 VTWA 24381/107146 自带 `inst_relate`
+    /// 六个变化桶里 Deleted 是唯一还没有真实文件会话的一个。FTUB 是伪类型、BRAN 内的组件，
+    /// 覆盖不到「元素自身带模型被删」的清理路径。这里的 VTWA 24381/107146 自带 `inst_relate`
     /// 与 `SPRE`，且属于 `INLINE` 变化等价类——此前没有任何用例覆盖过该类。
     ///
-    /// 会话由 `scripts/e3d/projams_incr_delete_apply.mac` 产生。删除不可逆、refno 不会
-    /// 被重新发放，回滚只能靠删除前的文件备份
+    /// 会话由 `scripts/e3d/projams_incr_delete_apply.mac`（E3D TTY）产生——TTY 做过的事就是
+    /// 本用例的判据。删除不可逆、refno 不会被重新发放，回滚只能靠删除前的文件备份
     /// `ams7997_0001.codex-before-d03-delete-20260727`。
     /// 执行前基线见 `docs/evidence/2026-07-27-d03-delete-session-baseline.md`。
-    #[cfg(feature = "legacy_session_replay")]
+    ///
+    /// 2026-09-04：收集改走生产入口 `collect_window`（单会话窗口，净口径与逐会话回放给的
+    /// 是同一条墓碑）；old-pdms-io 回放臂已删。改口径后**未在 live 现场复跑**。
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "manual live: needs the real delete session from scripts/e3d/projams_incr_delete_apply.mac"]
+    #[ignore = "manual live: needs the real delete session from scripts/e3d/projams_incr_delete_apply.mac (collect_window 口径 2026-09-04 起，未复跑)"]
     async fn live_real_delete_session_cleans_up_model_and_regenerates_branch() {
         use crate::data_interface::generation_root::{
             configured_delivery_unit_types, resolve_live_element_generation_root,
@@ -5221,8 +3703,9 @@ mod live_tests {
             .expect("read BRAN children before the delete")
             .len();
 
-        let changes = IncrementPipeline::collect_changes(&design_file, sesno..=sesno)
-            .expect("collect the real delete session");
+        let changes = IncrementPipeline::collect_window(&design_file, sesno..=sesno)
+            .expect("collect the real delete session")
+            .range_eles;
         let operations = changes
             .get(&u32::try_from(sesno).expect("sesno fits u32"))
             .expect("the delete session must exist in the file");
@@ -5253,10 +3736,8 @@ mod live_tests {
             "the owning BRAN must be replanned after losing a component: {actions:?}"
         );
 
-        let mut io = PdmsIO::new("", design_file.clone(), true);
-        io.open().expect("open design file");
-        let basic_info = io.get_page_basic_info().expect("design file header");
-        assert_eq!(basic_info.pdms_header.db_num, 7997);
+        let basic_info = DbFileHeader::read(&design_file).expect("design file header");
+        assert_eq!(basic_info.dbnum, 7997);
 
         let result = IncrementPipeline::new()
             .apply(IndexMap::from([(

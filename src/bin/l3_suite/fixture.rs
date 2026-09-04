@@ -1,8 +1,6 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
-use pdms_io::io::PdmsIO;
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct FixtureManifest {
     pub version: u32,
@@ -307,9 +305,11 @@ fn run_idempotent_macro(
     }
 }
 
-fn file_latest_sesno(path: &Path, project: &str) -> Result<i32> {
-    i32::try_from(PdmsIO::new(project, path.to_path_buf(), true).get_latest_sesno()?)
-        .context("E3D file latest sesno exceeds i32")
+fn file_latest_sesno(path: &Path, _project: &str) -> Result<i32> {
+    i32::try_from(aios_database::data_interface::db_file_header::latest_sesno(
+        path,
+    )?)
+    .context("E3D file latest sesno exceeds i32")
 }
 
 fn classify_mutation(
@@ -851,23 +851,46 @@ pub(super) fn run_fixture_bin(
     Ok(())
 }
 
-pub(super) fn inspect_target_db(path: &Path, project: &str) -> Result<(u32, String, String)> {
+/// `(dbnum, db_type, world refno as "dbno/id")` of a target database, read through e3d-io.
+///
+/// Header words come from the page-0 descriptor; the WORL refno from one Header-tier
+/// walk of the latest session's live index (the legacy `parse_file_db_basic_data` walked
+/// every page of the file for the same answer). A database without a WORL (CATA and
+/// friends) reports the default refno, as the legacy index did.
+pub(super) fn inspect_target_db(path: &Path, _project: &str) -> Result<(u32, String, String)> {
     ensure!(
         path.is_file(),
         "target DB file is missing: {}",
         path.display()
     );
-    let header = parse_pdms_db::parse::parse_db_basic_info(path.to_path_buf());
-    let file_name = path
-        .file_name()
-        .and_then(|s| s.to_str())
-        .context("target DB has no file name")?;
-    let path = path.to_path_buf();
-    let index = parse_pdms_db::parse::parse_file_db_basic_data(&path, file_name, project)?;
+    let header = aios_database::data_interface::db_file_header::DbBasicInfo::read(path)
+        .with_context(|| {
+            format!(
+                "target DB {} has no dabacon descriptor page",
+                path.display()
+            )
+        })?;
+    let mut engine = e3d_io::ReadOnlyEngine::open(path)
+        .with_context(|| format!("open target DB {}", path.display()))?;
+    let world_hash = e3d_attlib::db1_hash("WORL");
+    let mut world_refno = aios_core::RefU64::default();
+    for element in engine
+        .scan_elements(e3d_io::ScanTier::Header)
+        .with_context(|| format!("walk the refno index of {}", path.display()))?
+    {
+        let Ok(element) = element else {
+            continue;
+        };
+        if element.noun_hash == world_hash {
+            world_refno =
+                aios_core::RefU64::from_two_nums(element.refno.word0, element.refno.word1);
+            break;
+        }
+    }
     Ok((
         header.db_no,
         header.db_type,
-        index.world_refno.to_string().replace('_', "/"),
+        world_refno.to_string().replace('_', "/"),
     ))
 }
 

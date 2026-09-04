@@ -386,17 +386,13 @@ fn select_session_at(
 }
 
 fn session_times(path: &Path) -> Result<HashMap<u32, String>, HistoricalModelError> {
-    let mut io = pdms_io::io::PdmsIO::new("", path.to_path_buf(), true);
-    io.open()
+    // 整条会话链一次读完（e3d-io `DbView::walk_sessions`），时刻解法与旧 `get_dt` 相同；
+    // 解不出时刻的会话页（字段全零）不进候选，与旧实现按 `get_dt` 必成功的假设相比更保守。
+    let chain = crate::data_interface::db_file_header::session_chain(path)
         .map_err(|e| HistoricalModelError::new("SESSION_TIME_UNAVAILABLE", e))?;
-    Ok(io
-        .ses_data_map
-        .values()
-        .filter_map(|session| {
-            u32::try_from(session.sesno)
-                .ok()
-                .map(|sesno| (sesno, session.get_dt().to_rfc3339()))
-        })
+    Ok(chain
+        .iter()
+        .filter_map(|stamp| stamp.rfc3339().map(|time| (stamp.sesno, time)))
         .collect())
 }
 

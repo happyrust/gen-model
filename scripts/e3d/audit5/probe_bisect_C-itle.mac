@@ -1,0 +1,9 @@
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/audit5/probe_bisect_C-itle.log" OVER
+$P BISECT-C-itle-ALIVE
+/C-GR-1RX-3020B
+BEND 1
+Q CE
+Q ITLE
+OWNER
+$P BISECT-C-itle-DONE
+ALPHA LOG END

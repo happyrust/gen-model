@@ -1,0 +1,32 @@
+$(
+------------------------------------------------------------------------
+RVM 导出（对齐阈值边界复核，2026-09-02）：BRAN /LV-CO-1R330-A  (dbnum 8000, =24384/22726)
+挑它的理由：49.3mm at 0.010deg: angular threshold probe
+窄口径同 rvm_export_1rcv0101_b1.mac。只读：没有 SAVEWORK；不写 QUIT/FINISH——会话归 l3_suite driver。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/audit5/rvm_export_22726-LV-CO-1R330-A.log" OVER
+$P CODEX-AUDIT5-RVM-EXPORT-ALIVE
+/LV-CO-1R330-A
+Q CE
+Q REF
+Q NAME
+Q MEMB
+
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/rvm-audit5/22726-LV-CO-1R330-A.rvm"
+export filenote 'audit5 22726-LV-CO-1R330-A: 49.3mm at 0.010deg: angular threshold probe'
+export holes on
+export autocolour displayexport on
+export repr on
+export /LV-CO-1R330-A
+export finish
+
+$P CODEX-AUDIT5-RVM-EXPORT-DONE
+ALPHA LOG END

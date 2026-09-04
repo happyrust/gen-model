@@ -86,22 +86,33 @@ class RustTools:
             raise RustToolError(result)
         return result
 
-    def run_increment_fold(
-        self, db_file: Path, from_sesno: int, to_sesno: int, *, dbnum: int = 8000
+    def run_production_window(
+        self,
+        db_file: Path,
+        from_sesno: int,
+        to_sesno: int,
+        *,
+        json_out: Path | None = None,
     ) -> ToolResult:
-        return self.run(
-            "incr_fold_probe",
-            [
-                "--file",
-                db_file,
-                "--from",
-                str(from_sesno),
-                "--to",
-                str(to_sesno),
-                "--dbnum",
-                str(dbnum),
-            ],
-        )
+        """把生产收集器（`IncrementPipeline::collect_window` → `e3d_collector`）在窗口
+        `from_sesno..=to_sesno` 上看到的操作流记进 evidence。
+
+        2026-09-04 之前这里先后跑过 `incr_fold_probe`（old-pdms-io 逐会话回放）与
+        `shadow_collector_parity`（拿 old-pdms-io 当参照臂对拍），都随 old-pdms-io 删了。
+        `net_window_probe` 的 `--base` 是 e3d 口径的基会话（= from - 1），窗口按
+        `base+1..=target` 取。这一步只是记账，不是判据——判据是 TTY 宏自己做过的事
+        （apply / restore 两条腿）；要让探针自己判，给它 `--tty`（现场 `Q TYPE` 逐 refno 验死活）。"""
+        args: list[str | Path] = [
+            "--db-file",
+            db_file,
+            "--base",
+            str(from_sesno - 1),
+            "--target",
+            str(to_sesno),
+        ]
+        if json_out is not None:
+            args += ["--json-out", json_out]
+        return self.run("net_window_probe", args)
 
     def run_l3_driver(
         self,

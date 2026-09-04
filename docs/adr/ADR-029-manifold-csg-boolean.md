@@ -49,3 +49,6 @@ manifold 的 3588 字节结果。
 ## 2026-08-19 Oracle 审核修订
 
 布尔失败采用显式 `GeometryFailurePolicy`：活动暂存窗口为 `Required` 并阻断水位；窗口外按需、延迟及基线后补为 `BestEffortFallback`，保留诊断和旧几何而不形成永久死信。
+
+> **2026-09-03 对照（ADR-056 D1 / spec 035 T121）**：「活动暂存窗口为 `Required` 并阻断水位」一档随暂存层退役消失，
+> `failure_policy` 在增量路径上固定为 `BestEffortFallback`——模型生成失败进 `model_update_pending` 重试账，不阻断水位。

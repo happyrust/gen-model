@@ -6,6 +6,10 @@
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
 
+        <mxCell id="p1_stale" value="&lt;b&gt;⚠ 部分过期 —— 2026-09-04 逐标识符核对&lt;/b&gt;&lt;br&gt;本页 12 个代码标识符在 &lt;b&gt;src/ 里已查无此名&lt;/b&gt;，全部属于已从仓里移除的 &lt;b&gt;DuckLake 层级投影 / locator 发布&lt;/b&gt;支路：&lt;br&gt;current_hierarchy、current_release、release_id、hierarchy_release(_id)、baseline_hierarchy_release、hierarchy_node、locator_hash、finalize_baseline_with_hierarchy、finalize_attempt_with_hierarchy、DuckLake。&lt;br&gt;「触发 → 解析 → 模型生成」这条主干仍然成立；凡是提到 DuckLake / hierarchy release 的框一律&lt;b&gt;按历史资料读，不要照着改代码&lt;/b&gt;。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontFamily=Microsoft YaHei;fontSize=13;align=left;spacingLeft=14;verticalAlign=top;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="-190" width="1560" height="130" as="geometry" />
+        </mxCell>
+
         <mxCell id="p1_title" value="aios-database 数据解析总流程：从触发到模型生成" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=20;fontStyle=1" vertex="1" parent="1">
           <mxGeometry x="260" y="-40" width="840" height="40" as="geometry" />
         </mxCell>
@@ -183,7 +187,11 @@
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
 
-        <mxCell id="p2_title" value="解析核心：一次解析，两条互不相干的写路径" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=20;fontStyle=1" vertex="1" parent="1">
+        <mxCell id="p2_stale" value="&lt;b&gt;⚠ 本页整体已过期 —— 2026-09-04 逐标识符核对：42 个代码标识符在 src/ 里已查无此名&lt;/b&gt;&lt;br&gt;画的是 &lt;b&gt;parse_pdms_db 时代&lt;/b&gt;的基线全量解析路，那条路已经整体退役（退役收口方案 B8.2–B9）。&lt;br&gt;· &lt;b&gt;写口&lt;/b&gt;：save_pes / save_pe_relates 随 src/versioned_db/pe.rs 整个文件删除 → 今天由 versioned_db/baseline.rs::render_baseline_batches 攒批，行形状取自 data_interface/ele_ops.rs::ElementRows（&lt;b&gt;基线与增量共用同一份&lt;/b&gt;，宪法 II）。&lt;br&gt;· &lt;b&gt;解析核心&lt;/b&gt;：parse_file_db_basic_data / refno_table_map / parse_file_with_chunk / total_attr_map / type_ele_map / ses_range_map 全部删除 → 今天走 frozen_source::FrozenSource::capture + e3d_collector::stream_baseline（e3d-io &lt;b&gt;退化窗口&lt;/b&gt;，按目标会话索引分块枚举，块交出去就释放，峰值内存随块不随库）。&lt;br&gt;· &lt;b&gt;整条 DuckLake / 层级投影支路&lt;/b&gt;（HierarchyRowV1、BaselineProjection、门 A / B / C、hierarchy_rows、sibling_orders、locator 三段发布）连同 DuckLake 本身已从仓里移除——本图与它的三张导出图是&lt;b&gt;全仓最后一处还在描述它&lt;/b&gt;的地方。&lt;br&gt;下面只有标了「今天」的两个框是现行的，&lt;b&gt;其余一律按历史资料读，不要照着改代码&lt;/b&gt;。现行口径见 ADR-042 / ADR-058 的 2026-09-04 实施注记与 docs/plans/2026-09-04-legacy-parser-retirement-endgame-plan.md。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontFamily=Microsoft YaHei;fontSize=13;align=left;spacingLeft=14;verticalAlign=top;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="-260" width="1920" height="190" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p2_title" value="解析核心：一次解析，两条互不相干的写路径（历史形态）" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=20;fontStyle=1" vertex="1" parent="1">
           <mxGeometry x="700" y="-50" width="880" height="40" as="geometry" />
         </mxCell>
 
@@ -217,7 +225,7 @@
           <mxGeometry x="920" y="610" width="440" height="140" as="geometry" />
         </mxCell>
 
-        <mxCell id="p2_b1" value="save_pe_relates(db_basic)&#xa;→ SenderJsonsData::PERelateJson" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+        <mxCell id="p2_b1" value="&lt;b&gt;今天（2026-09-04）&lt;/b&gt;：ElementRows.owner_edges，500 条一批&lt;br&gt;→ SenderJsonsData::PERelateJson&lt;br&gt;→ INSERT RELATION IGNORE INTO pe_owner&lt;br&gt;&lt;i&gt;此前：save_pe_relates(db_basic)，随 pe.rs 删除&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
           <mxGeometry x="440" y="650" width="400" height="80" as="geometry" />
         </mxCell>
 
@@ -225,8 +233,8 @@
           <mxGeometry x="920" y="800" width="440" height="110" as="geometry" />
         </mxCell>
 
-        <mxCell id="p2_b2" value="save_pes(db_basic, total_attr_map, db_no, ...)&#xa;→ SenderJsonsData::PEJson" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
-          <mxGeometry x="440" y="940" width="400" height="80" as="geometry" />
+        <mxCell id="p2_b2" value="&lt;b&gt;今天（2026-09-04）&lt;/b&gt;：baseline::render_baseline_batches(chunk, dbnum, uda_keys, pe_chunk, att_chunk)&lt;br&gt;→ SenderJsonsData::PEJson / AttJson&lt;br&gt;→ INSERT IGNORE INTO pe / ATT_*&lt;br&gt;&lt;i&gt;此前：save_pes(db_basic, total_attr_map, db_no, ...)，随 pe.rs 删除&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#d5e8d4;strokeColor=#82b366;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
+          <mxGeometry x="440" y="940" width="400" height="100" as="geometry" />
         </mxCell>
         <mxCell id="p2_b3" value="按 noun 分表逐条生成 JSON&#xa;att.gen_sur_json() → 属性表&#xa;att.gen_sur_json_uda() → normalize_sql_string → ATT_UDA&#xa;→ SenderJsonsData::AttJson((表名, jsons))" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#dae8fc;strokeColor=#6c8ebf;fontFamily=Microsoft YaHei;fontSize=12;" vertex="1" parent="1">
           <mxGeometry x="440" y="1070" width="400" height="100" as="geometry" />
@@ -413,7 +421,11 @@
         <mxCell id="0" />
         <mxCell id="1" parent="0" />
 
-        <mxCell id="p3_title" value="存储职责边界、locator 三段发布协议与就绪门" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=20;fontStyle=1" vertex="1" parent="1">
+        <mxCell id="p3_stale" value="&lt;b&gt;⚠ 本页大半已过期 —— 2026-09-04 逐标识符核对：26 个代码标识符在 src/ 里已查无此名&lt;/b&gt;&lt;br&gt;&lt;b&gt;locator 三段发布协议整体不存在了&lt;/b&gt;（prepare_locator / stage_locator / bind_baseline_locator_publication / begin_/finish_locator_publication / active_locator / locator_hash / release_id / hierarchy_release 一族），&lt;b&gt;DuckLake / DuckDB 存储侧&lt;/b&gt;也已从仓里移除。&lt;br&gt;现行口径：存储职责见 &lt;b&gt;ADR-058 D1&lt;/b&gt;（Surreal 只存两样——模型面自己的状态与增量摄入的 DESI 属性数据；CATA 不解析进持久层）；水位与就绪门见 &lt;b&gt;ADR-021&lt;/b&gt;（本页「不写水位就不就绪」的结论仍然成立）。其余框&lt;b&gt;按历史资料读，不要照着改代码&lt;/b&gt;。" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f8cecc;strokeColor=#b85450;fontFamily=Microsoft YaHei;fontSize=13;align=left;spacingLeft=14;verticalAlign=top;spacingTop=8;" vertex="1" parent="1">
+          <mxGeometry x="40" y="-220" width="1840" height="150" as="geometry" />
+        </mxCell>
+
+        <mxCell id="p3_title" value="存储职责边界、locator 三段发布协议与就绪门（历史形态）" style="text;html=1;align=center;verticalAlign=middle;fontFamily=Microsoft YaHei;fontSize=20;fontStyle=1" vertex="1" parent="1">
           <mxGeometry x="500" y="-50" width="880" height="40" as="geometry" />
         </mxCell>
 

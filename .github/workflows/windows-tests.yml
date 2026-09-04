@@ -115,7 +115,7 @@ jobs:
           cargo test --locked
           --test db8000_two_delete_fixture
           --no-default-features
-          --features ws,gen_model,manifold,project_hd,legacy_session_replay
+          --features ws,gen_model,manifold,project_hd
           -- --nocapture
 
       # Reuses the issue-019 archive: the generic cutter must reproduce its
@@ -142,7 +142,7 @@ jobs:
           cargo test --locked `
             --test db8000_session_pairs `
             --no-default-features `
-            --features ws,gen_model,manifold,project_hd,legacy_session_replay `
+            --features ws,gen_model,manifold,project_hd `
             -- --nocapture 2>&1 |
             Tee-Object -FilePath "$env:GITHUB_WORKSPACE\artifacts\session-pairs.log"
           if ($LASTEXITCODE -ne 0) { throw "db8000_session_pairs failed ($LASTEXITCODE)" }

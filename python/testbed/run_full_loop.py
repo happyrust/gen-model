@@ -74,9 +74,10 @@ def main() -> int:
     check("sessions", len(sessions) > 0, f"{len(sessions)} 个会话，最新 {header.get('latest_sesno')}")
     latest = header.get("latest_sesno") or 0
     if latest >= 2:
-        changes = aios_db.parse.collect_changes(str(db_file), latest - 1, latest)
-        check("collect_changes", isinstance(changes, (list, dict)),
-              f"窗口 {latest - 1}..{latest} → {brief(changes, 120)}")
+        # 生产收集器同一口径（e3d-io 净窗口）；old-pdms-io 的 collect_changes 2026-09-04 已删。
+        net = aios_db.parse.net_window(str(db_file), latest - 1, latest)
+        check("net_window", isinstance(net.get("window"), dict) and "counts" in net,
+              f"窗口 {latest - 1}..{latest} → {brief(net['counts'], 120)}")
 
     if args.parse_only:
         print("\n[parse-only] 到此为止。")

@@ -14,8 +14,6 @@ use futures::StreamExt;
 use futures::channel::mpsc::unbounded;
 use futures::stream::FuturesUnordered;
 use itertools::Itertools;
-use parse_pdms_db::parse::*;
-use pdms_io::io::PdmsIO;
 use pe::SPdmsElement;
 use petgraph::prelude::DiGraph;
 use serde::Deserialize;
@@ -44,8 +42,6 @@ use crate::data_interface::tidb_manager::AiosDBManager;
 // use crate::graph_db::pdms_arango::*;
 use crate::surreal_retry::retry_surreal_write_operation;
 use crate::tables::*;
-use crate::versioned_db::member_prune;
-use crate::versioned_db::pe::*;
 use crate::versioned_db::task::get_global_db_sender;
 
 const BASELINE_QUEUE_CAPACITY: usize = 100;
@@ -247,55 +243,9 @@ fn record_write_error(
     }
 }
 
-/// Keep the structural PE row when the full attribute decoder rejects one indexed element.
-///
-/// `parse_file_db_basic_data` has already validated the record index and extracted its noun plus
-/// record-level owner. Dropping the row here makes every live descendant's persisted `owner` chain
-/// dangle, so later incremental model generation cannot calculate `anc`. The fallback is
-/// deliberately PE-only: it supplies identity/topology metadata without pretending that the
-/// element's failed explicit attributes were decoded successfully.
-fn preserve_unparsed_pe_metadata(
-    db_basic: &aios_core::db::DbBasicData,
-    chunk_refnos: &[RefU64],
-    ses_range_map: &BTreeMap<i32, std::ops::Range<u32>>,
-    total_attr_map: &DashMap<RefU64, NamedAttrMap>,
-) -> Vec<RefU64> {
-    let mut preserved = Vec::new();
-    for &refno in chunk_refnos {
-        if total_attr_map.contains_key(&refno) {
-            continue;
-        }
-        let Some(entry) = db_basic.refno_table_map.get(&refno) else {
-            continue;
-        };
-        let pos = entry.pos;
-        if pos < 4 || pos + 20 > db_basic.bytes.len() {
-            continue;
-        }
-
-        let owner = RefU64::from(&db_basic.bytes[pos + 12..pos + 20]);
-        let noun = db_basic.get_type(refno);
-        let pgno = (pos / 0x800) as u32;
-        let sesno = ses_range_map
-            .iter()
-            .find_map(|(sesno, range)| range.contains(&pgno).then_some(*sesno))
-            .unwrap_or_default();
-        let mut attributes = NamedAttrMap::default();
-        attributes
-            .map
-            .insert("TYPE".to_string(), NamedAttrValue::StringType(noun));
-        attributes
-            .map
-            .insert("REFNO".to_string(), NamedAttrValue::RefU64Type(refno));
-        attributes
-            .map
-            .insert("OWNER".to_string(), NamedAttrValue::RefU64Type(owner));
-        attributes.set_sesno(sesno);
-        total_attr_map.insert(refno, attributes);
-        preserved.push(refno);
-    }
-    preserved
-}
+// `preserve_unparsed_pe_metadata`（属性解不出来就只留 `pe` 拓扑行）2026-09-04 随 legacy 基线
+// 一起删除：e3d-io 基线与增量同一条失败闸——白名单外的解码失败让这一库的基线失败、清库、
+// 不推水位（退役收口方案 Q3 甲），不再有「拓扑在、属性残」的中间态。
 
 /// 按 Ref0 聚合一个 dbnum 的 pe 统计。**回归测试与生产共用这一份文本。**
 ///
@@ -363,11 +313,7 @@ struct PeStatGroup {
 
 #[cfg(test)]
 mod pe_stat_row_tests {
-    use super::{PeStatGroup, preserve_unparsed_pe_metadata};
-    use aios_core::db::{DbBasicData, EleDataEntry};
-    use aios_core::pdms_types::RefU64;
-    use dashmap::DashMap;
-    use std::collections::BTreeMap;
+    use super::PeStatGroup;
 
     /// 会话号缺失是历史 pe 行的常态（早于逐元素会话跟踪）。投影里的 `sesno ?? 0`
     /// 已经把它折平，但聚合列本身仍可能整列缺席（空组、旧引擎），解码不许因此失败。
@@ -385,93 +331,6 @@ mod pe_stat_row_tests {
         assert_eq!(group.count, 3);
         assert_eq!(group.max_sesno.unwrap_or_default(), 0);
         assert_eq!(group.max_ref1.unwrap_or_default(), 0);
-    }
-
-    #[test]
-    fn parse_failure_keeps_minimal_pe_metadata_for_owner_chain() {
-        let refno = RefU64::from(0x0000_0002_0000_0003_u64);
-        let owner = RefU64::from(0x0000_0001_0000_0009_u64);
-        let mut bytes = vec![0_u8; 64];
-        let pos = 8_usize;
-        bytes[pos + 12..pos + 20].copy_from_slice(&owner.0.to_be_bytes());
-
-        let refno_table_map = DashMap::new();
-        refno_table_map.insert(
-            refno,
-            EleDataEntry {
-                pos,
-                noun_hash: aios_core::tool::db_tool::db1_hash("STRU") as i32,
-            },
-        );
-        let db_basic = DbBasicData {
-            bytes,
-            refno_table_map,
-            ..Default::default()
-        };
-        let parsed = DashMap::new();
-        let sessions = BTreeMap::from([(17, 0_u32..1_u32)]);
-
-        let preserved = preserve_unparsed_pe_metadata(&db_basic, &[refno], &sessions, &parsed);
-
-        assert_eq!(preserved, vec![refno]);
-        let attributes = parsed.get(&refno).expect("minimal metadata row");
-        assert_eq!(attributes.get_type(), "STRU");
-        assert_eq!(attributes.get_refno_or_default().refno(), refno);
-        assert_eq!(
-            attributes.get_refno_by_att_or_default("OWNER").refno(),
-            owner
-        );
-        assert_eq!(attributes.sesno(), 17);
-    }
-
-    #[tokio::test]
-    #[ignore = "manual live: requires the AMS 7324 fixture"]
-    async fn live_7324_parse_failure_is_preserved_as_pe_metadata() {
-        use std::path::PathBuf;
-        use std::str::FromStr;
-        use std::sync::Arc;
-
-        let path = PathBuf::from(
-            std::env::var("GEN_MODEL_OWNER_FIXTURE")
-                .expect("GEN_MODEL_OWNER_FIXTURE points to ams7324_0001"),
-        );
-        let file_name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let required_owner = RefU64::from_str("23708_48798").unwrap();
-        let db_basic = Arc::new(
-            parse_pdms_db::parse::parse_file_db_basic_data(&path, &file_name, "AvevaMarineSample")
-                .unwrap(),
-        );
-        let parsed = parse_pdms_db::parse::parse_file_with_chunk(
-            db_basic.clone(),
-            &file_name,
-            "AvevaMarineSample",
-            &[required_owner],
-            &BTreeMap::new(),
-            true,
-        )
-        .await
-        .unwrap();
-
-        assert!(
-            !parsed.total_attr_map.contains_key(&required_owner),
-            "fixture must continue to exercise the full-decoder failure"
-        );
-        let preserved = preserve_unparsed_pe_metadata(
-            &db_basic,
-            &[required_owner],
-            &BTreeMap::new(),
-            &parsed.total_attr_map,
-        );
-        assert_eq!(preserved, vec![required_owner]);
-        let metadata = parsed.total_attr_map.get(&required_owner).unwrap();
-        assert_eq!(metadata.get_refno_or_default().refno(), required_owner);
-        assert!(
-            metadata
-                .get_refno_by_att_or_default("OWNER")
-                .refno()
-                .is_valid()
-        );
-        assert_ne!(metadata.get_type(), "unset");
     }
 }
 
@@ -732,11 +591,16 @@ fn full_sync_catalogue_files(
             crate::data_interface::project_paths::resolve_project_root(db_option, project)
                 .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
         for path in collect_project_db_files(&project_dir, None)? {
-            let mut header = [0u8; 60];
+            let mut header = [0u8; crate::data_interface::db_file_header::BASIC_INFO_HEADER_BYTES];
             std::fs::File::open(&path)
                 .and_then(|mut file| file.read_exact(&mut header))
                 .with_context(|| format!("读取候选数据库头失败: {}", path.display()))?;
-            let info = parse_file_basic_info(&header);
+            // 不是 dabacon 描述符页的文件旧读法会给空 `db_type`、落不进任何类型；这里直接跳过。
+            let Some(info) =
+                crate::data_interface::db_file_header::DbBasicInfo::from_header_bytes(&header)
+            else {
+                continue;
+            };
             if info.db_type.eq_ignore_ascii_case(db_type) {
                 candidates.push(
                     crate::data_interface::initialization_phase::CatalogueCandidate {
@@ -1325,19 +1189,21 @@ pub async fn sync_total_async_threaded(
                     // progress_sender_clone.send(db_file_progress_chunk).await.unwrap();
                 }
                 // dbg!(&file_name);
-                let mut baseline_snapshot =
-                    match pdms_io::snapshot::DabaconSnapshot::open(project.as_str(), &path) {
-                        Ok(snapshot) => snapshot,
+                // 基线冻结源（e3d-io 底座）：dbnum / 库类型 / 目标会话 / 冻结长度都从它取，
+                // 收集与解码走 `stream_baseline`（与增量同一个 e3d-io 收集器）。
+                let baseline_frozen =
+                    match crate::data_interface::frozen_source::FrozenSource::capture(&path) {
+                        Ok(frozen) => frozen,
                         Err(error) => {
                             log::error!(
-                                "打开基线 dabacon 快照失败 {}: {error:#}",
+                                "打开基线 dabacon 冻结源失败 {}: {error:#}",
                                 path.display()
                             );
                             continue;
                         }
                     };
-                let db_type = baseline_snapshot.token().db_type().to_owned();
-                let db_no = baseline_snapshot.token().dbnum() as u32;
+                let db_type = baseline_frozen.db_type().to_owned();
+                let db_no = baseline_frozen.dbnum() as u32;
                 //如果不是全部解析，需要检查类型，全部解析一定要解析syst等配置文件数据库
                 if !db_types_clone.contains(&db_type) {
                     continue;
@@ -1354,68 +1220,16 @@ pub async fn sync_total_async_threaded(
                 dbno_set.insert(db_no);
                 // 如果需要解析的文件列表为空或包含当前文件名，则执行以下代码块
                 println!("path={:?}", &file_name); // 打印文件路径
-                let sesno = baseline_snapshot.token().target_sesno();
+                let sesno = baseline_frozen.target_sesno();
                 if sesno == 0 {
                     continue;
                 }
-                let ses_range_map = baseline_snapshot.session_ranges();
 
-                let project_name = project.as_str().to_string(); // 获取项目名称的字符串
-                // 解析失败绝不能退化成“空库”：`unwrap_or_default()` 会让本文件以 0 元素
-                // 计入 parsed_db_infos，基线层据此认定合法空库并推进 applied_sesno，
-                // 于是整个 dbnum 被静默跳过。跳过本文件、不登记结果，让基线层以
-                // “解析未返回目标文件结果”显式失败。
-                let mut db_basic = match baseline_snapshot.read_full_basic_data(
-                    &file_name,
-                    project_name.clone().as_str(),
-                ) {
-                    Ok(db_basic) => db_basic,
-                    Err(error) => {
-                        println!("解析 {file_name} 失败，跳过该文件: {error:#}");
-                        continue;
-                    }
-                };
-                // issue #10：解析的补链轮按记录自带的 owner 把「owner 成员表里没列出
-                // 它」的父子边补回去，而那正是 E3D 表达删除的方式，于是已删子树被整棵
-                // 复活、和重建出来的同名子树在库里并存。按元素自己的成员块把多挂的边
-                // 摘掉，随之不可达的元素一并丢弃（判据与取舍见 `member_prune`）。
-                {
-                    let world = db_basic.world_refno;
-                    let bytes = &db_basic.bytes;
-                    let refno_table_map = &db_basic.refno_table_map;
-                    let report = member_prune::prune_resurrected_members(
-                        world,
-                        &mut db_basic.children_map,
-                        |refno| member_prune::authoritative_members(bytes, refno_table_map, refno),
-                    );
-                    if report.skipped_no_root_authority {
-                        println!("{file_name}: 根成员表为空，跳过已删元素裁剪，保持解析原样");
-                    } else if !report.is_empty() {
-                        println!(
-                            "{file_name}: 裁掉补链多挂的父子边 {} 条、随之不可达的元素 {} 个",
-                            report.dropped_edges, report.dropped_elements
-                        );
-                    }
-                }
-
-                let all_refnos = db_basic
-                    .children_map
-                    .keys()
-                    .filter(|refno| **refno != db_basic.world_refno)
-                    .cloned()
-                    .collect::<Vec<_>>();
-
-                let db_basic = Arc::new(db_basic);
-                if is_save_db {
-                    scheduled_baseline_dbnums_for_parser.insert(db_no);
-                    if let Err(error) = save_pe_relates(&db_basic, sender_clone.clone()).await {
-                        log::error!(
-                            "baseline relation dispatch failed: file={file_name} dbnum={db_no}: {error:#}"
-                        );
-                        failed_baseline_dbnums_for_parser.insert(db_no);
-                        continue;
-                    }
-                }
+                // 基线 = 每个元素都是 `Add` 的退化窗口（ADR-058 D3 / D4；退役收口方案 §2）：
+                // 收集走与增量同一个 e3d-io 收集器（`stream_baseline`），行形状走同一份
+                // `ElementRows`，写者仍是下面那条有界队列 + 单写者的 `INSERT IGNORE` 批。
+                // 解析失败绝不能退化成“空库”：不登记 parsed_db_infos、记进失败集，让基线层以
+                // “解析未返回目标文件结果”显式失败并清库。
                 let debug_refnos: Vec<RefU64> = db_option_arc
                     .debug_root_refnos
                     .as_ref()
@@ -1425,210 +1239,120 @@ pub async fn sync_total_async_threaded(
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default();
-                //debug 不保存数据，只复杂查看属性值
+                //debug 不保存数据，只查看属性值
                 let is_debug = !debug_refnos.is_empty();
-                if is_debug {
-                    let debug_refno = debug_refnos[0];
-                    if let Some(children) = db_basic.children_map.get(&debug_refno) {
-                        dbg!(children);
-                    }
+                let save_rows = is_save_db && !is_debug;
+                if is_save_db {
+                    scheduled_baseline_dbnums_for_parser.insert(db_no);
                 }
-                let debug_refnos = Arc::new(debug_refnos);
-                //按照SITE划分？
-                let mut total_cnt = 0;
-                let mut chunk_failed = false;
-                'chunks: for (chunk_index, chunk) in
-                    all_refnos.chunks(chunk_size).enumerate()
-                {
-                    let db_option_clone = db_option_arc.clone();
-                    let file_name_clone = file_name.clone();
-                    let chunk_refnos = chunk.to_vec();
-                    let project_name_clone = project_name.clone();
-                    let db_basic_clone = db_basic.clone();
+                // `ATT_UDA` 的 `u` 链接要把 UKEY 换成 `UDA:<refno>`；DICT 相先于 DESI 相，
+                // 定义此时已在库里。查不到的键记账、随文件回执打一行，不静默丢。
+                let uda_keys = match crate::data_interface::uda_keys::UdaKeyMap::load().await {
+                    Ok(keys) => Arc::new(keys),
+                    Err(error) => {
+                        log::error!(
+                            "baseline UDA key table failed: file={file_name} dbnum={db_no}: {error:#}"
+                        );
+                        failed_baseline_dbnums_for_parser.insert(db_no);
+                        continue;
+                    }
+                };
+                let outcome = {
+                    let frozen = baseline_frozen.clone();
+                    let db_type = db_type.clone();
+                    let sender = sender_clone.clone();
+                    let uda_keys = uda_keys.clone();
                     let debug_refnos = debug_refnos.clone();
-                    let ses_range_map_clone = ses_range_map.clone();
-                    let ignore_world_refno = true;
-                    match parse_file_with_chunk(
-                        db_basic_clone.clone(),
-                        &file_name_clone,
-                        project_name_clone.as_str(),
-                        &chunk_refnos,
-                        &ses_range_map_clone,
-                        ignore_world_refno,
-                    )
-                    .await
-                    {
-                        Ok(PdmsDbData {
-                            total_attr_map,
-                            type_ele_map,
-                            db_no,
-                            ..
-                        }) => {
-                            let preserved = preserve_unparsed_pe_metadata(
-                                &db_basic_clone,
-                                &chunk_refnos,
-                                &ses_range_map_clone,
-                                &total_attr_map,
-                            );
-                            if preserved.is_empty() {
-                                crate::data_interface::parse_error::note_attrs_success(
-                                    &file_name_clone,
-                                );
-                            } else {
-                                let samples = preserved
-                                    .iter()
-                                    .take(5)
-                                    .map(ToString::to_string)
-                                    .join(", ");
-                                println!(
-                                    "{file_name_clone}: {} 个元素完整属性解析失败，已保留 PE 拓扑元数据（样例: {samples}）",
-                                    preserved.len()
-                                );
-                                // 只打一行的话，这批元素属性缺失事后无从查起：拓扑还在，
-                                // 所以它们照常出现在树上、照常被引用，只是属性是残的。
-                                crate::data_interface::parse_error::note_attrs_failure(
-                                    &file_name_clone,
-                                    preserved.len() as u64,
-                                    &samples,
-                                );
-                            }
-                            //类型暂时不多线程
-                            let total_attr_map_arc = Arc::new(total_attr_map);
-                            total_cnt += total_attr_map_arc.len();
-                            //开始执行保存数据
-                            println!("开始保存pe数量: {}", total_attr_map_arc.len());
-                            if !is_debug && is_save_db {
-                                if let Err(error) = save_pes(
-                                    &db_basic_clone,
-                                    &total_attr_map_arc,
-                                    db_no as i32,
-                                    &file_name_clone,
-                                    &db_type,
-                                    &db_option_clone,
-                                    sender_clone.clone(),
-                                )
-                                .await
-                                {
-                                    log::error!(
-                                        "baseline chunk PE dispatch failed: file={file_name_clone} dbnum={db_no} chunk={chunk_index}: {error:#}"
-                                    );
-                                    failed_baseline_dbnums_for_parser.insert(db_no);
-                                    chunk_failed = true;
-                                    break;
-                                }
-                            }
-                            if b_save_mysql {
-                                #[cfg(feature = "sql")]
-                                save_pes_mysql(
-                                    &db_basic_clone,
-                                    &project_name,
-                                    &total_attr_map_arc,
-                                    &pool,
-                                    &db_option_clone,
-                                    db_no as i32,
-                                )
-                                .await;
-                            }
-                            for kv in type_ele_map.iter() {
-                                let noun: i32 = *kv.key() as _;
-                                let type_name = db1_dehash(noun as _);
-                                let refnos = kv.value().iter().copied().collect::<Vec<_>>();
-                                drop(kv);
-                                if type_name.is_empty() {
-                                    continue;
-                                }
-                                //UDA 还是要单独存，不然数据很容易混乱
-                                for refnos in refnos.chunks(db_option_clone.att_chunk as _) {
-                                    let mut json_vec = vec![];
-                                    let mut uda_json_vec = vec![];
-                                    for refno in refnos {
-                                        let att = total_attr_map_arc.get(refno).unwrap();
-                                        //调试时，只解析这个单独的refno
-                                        if is_debug {
-                                            if debug_refnos
-                                                .contains(&att.get_refno_or_default().refno())
-                                            {
-                                                dbg!(att.value());
-                                            } else {
-                                                continue;
-                                            }
-                                        }
-                                        if !is_save_db {
-                                            continue;
-                                        }
-                                        let Some(json) = att.gen_sur_json() else {
-                                            continue;
-                                        };
-                                        json_vec.push(json);
-                                        let Some(json) = att.gen_sur_json_uda(&[]) else {
-                                            continue;
-                                        };
-                                        uda_json_vec.push(normalize_sql_string(&json));
-                                    }
-                                    if is_save_db {
-                                        if !json_vec.is_empty() {
-                                            if let Err(error) = sender_clone
-                                                .send_async(SenderJsonsData::AttJson((
-                                                    type_name.clone(),
-                                                    json_vec,
-                                                )))
-                                                .await
-                                            {
-                                                log::error!(
-                                                    "baseline chunk attribute dispatch failed: file={file_name_clone} dbnum={db_no} chunk={chunk_index}: {error}"
-                                                );
-                                                failed_baseline_dbnums_for_parser.insert(db_no);
-                                                chunk_failed = true;
-                                                break 'chunks;
-                                            }
-                                        }
-
-                                        if !uda_json_vec.is_empty() {
-                                            // dbg!(&uda_json_vec);
-                                            if let Err(error) = sender_clone
-                                                .send_async(SenderJsonsData::AttJson((
-                                                    "ATT_UDA".to_string(),
-                                                    uda_json_vec,
-                                                )))
-                                                .await
-                                            {
-                                                log::error!(
-                                                    "baseline chunk UDA dispatch failed: file={file_name_clone} dbnum={db_no} chunk={chunk_index}: {error}"
-                                                );
-                                                failed_baseline_dbnums_for_parser.insert(db_no);
-                                                chunk_failed = true;
-                                                break 'chunks;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            log::error!(
-                                "baseline chunk failed: file={file_name_clone} dbnum={db_no} chunk={chunk_index}: {e:#}"
-                            );
-                            failed_baseline_dbnums_for_parser.insert(db_no);
-                            chunk_failed = true;
-                            break;
-                        }
-                    }
-                }
-
-                if chunk_failed {
-                    println!(
-                        "{file_name}: 基线 chunk 失败，停止该文件后续调度；等待写入收口后清理 dbnum={db_no}"
+                    let (pe_chunk, att_chunk) = (
+                        db_option_arc.pe_chunk as usize,
+                        db_option_arc.att_chunk as usize,
                     );
-                    continue;
+                    // 文件 I/O + 解码是同步的 CPU 活，放阻塞池；有界队列的同步 `send` 只阻塞
+                    // 这条阻塞线程，写者任务照常在运行时上消费。
+                    tokio::task::spawn_blocking(move || {
+                        crate::data_interface::e3d_collector::stream_baseline(
+                            &frozen,
+                            &db_type,
+                            chunk_size,
+                            |chunk| {
+                                for ignored in &chunk.ignored {
+                                    crate::data_interface::parse_error::note_element_failure(
+                                        &ignored.refno.to_string(),
+                                        &ignored.reason,
+                                    );
+                                }
+                                if is_debug {
+                                    for (_, element) in &chunk.elements {
+                                        if debug_refnos.contains(&element.refno) {
+                                            dbg!(element);
+                                        }
+                                    }
+                                }
+                                if !save_rows {
+                                    return Ok(());
+                                }
+                                for message in crate::versioned_db::baseline::render_baseline_batches(
+                                    &chunk,
+                                    db_no as i32,
+                                    &uda_keys,
+                                    pe_chunk,
+                                    att_chunk,
+                                ) {
+                                    sender.send(message).map_err(|error| {
+                                        anyhow::anyhow!("baseline dispatch failed: {error}")
+                                    })?;
+                                }
+                                Ok(())
+                            },
+                        )
+                    })
+                    .await
+                };
+                let stats = match outcome {
+                    Ok(Ok(stats)) => stats,
+                    Ok(Err(error)) => {
+                        log::error!("baseline failed: file={file_name} dbnum={db_no}: {error:#}");
+                        failed_baseline_dbnums_for_parser.insert(db_no);
+                        println!(
+                            "{file_name}: 基线失败，停止该文件后续调度；等待写入收口后清理 dbnum={db_no}: {error:#}"
+                        );
+                        continue;
+                    }
+                    Err(join_error) => {
+                        log::error!(
+                            "baseline task panicked: file={file_name} dbnum={db_no}: {join_error}"
+                        );
+                        failed_baseline_dbnums_for_parser.insert(db_no);
+                        println!(
+                            "{file_name}: 基线任务异常终止；等待写入收口后清理 dbnum={db_no}: {join_error}"
+                        );
+                        continue;
+                    }
+                };
+                // 新路没有「属性残、拓扑在」的中间态（Q3 甲）：跑到这里就是这一文件的
+                // 完整属性都解出来了，销掉旧进程可能留下的 ATTRS 账。
+                crate::data_interface::parse_error::note_attrs_success(&file_name);
+                if let Some(warning) = uda_keys.misses_warning(db_no) {
+                    log::warn!("{file_name}: {warning}");
+                    println!("{file_name}: {warning}");
                 }
-
+                if stats.ignored > 0 {
+                    println!(
+                        "{file_name}: {} 条字典无属性 schema 的系统记录跳过（已记进解析失败账本）",
+                        stats.ignored
+                    );
+                }
                 println!(
-                    "解析任务完成, 耗时: {} s, 总数量: {}",
+                    "解析任务完成, 耗时: {} s, 总数量: {}（索引 {} 条，WORL {} 个，{} 块，读页 {}）",
                     time.elapsed().as_secs_f32(),
-                    total_cnt
+                    stats.elements,
+                    stats.indexed,
+                    stats.worlds,
+                    stats.chunks,
+                    stats.pages_read
                 );
                 parsed_db_infos_for_parser
-                    .insert(db_no, (file_name.clone(), db_type.clone(), total_cnt));
+                    .insert(db_no, (file_name.clone(), db_type.clone(), stats.elements));
             }
             //单个文件多线程
             // if !handles.is_empty() {
@@ -1691,65 +1415,6 @@ pub async fn sync_total_async_threaded(
         .map(|entry| (*entry.key(), entry.value().2))
         .collect())
 }
-
-/// 给对应类型的参考号赋上 uda 默认值
-fn set_uda_attr(
-    type_ele_map: &DashMap<u32, HashSet<RefU64>>,
-    total_attr_map: &DashMap<RefU64, WholeAttMap>,
-    uda_map: &mut HashMap<i32, AttrMap>,
-) -> anyhow::Result<()> {
-    // if let Some(uda_refnos) = type_ele_map.get(&db1_hash("UDA")) {
-    //     // 获取每个 uda 的 ELEL , DFLT , UDNA属性
-    //     for uda_refno in uda_refnos.value() {
-    //         let uda_att = total_attr_map.get(uda_refno);
-    //         if uda_att.is_none() {
-    //             continue;
-    //         }
-    //         let uda_att = uda_att.unwrap();
-    //         let uda_implicit_att = &uda_att.implicit_attmap;
-    //         let uda_explicit_att = &uda_att.explicit_attmap;
-
-    //         let ukey = uda_implicit_att.get_i32("UKEY");
-    //         if ukey.is_none() {
-    //             continue;
-    //         }
-    //         let ukey = ukey.unwrap();
-    //         // 若udna中没有值，则可能在显式属性的dyudna中
-    //         let mut udna = uda_implicit_att.get_str("UDNA");
-    //         if udna == Some("") {
-    //             udna = uda_explicit_att.get_str("DYUDNA");
-    //         }
-    //         let elel = uda_explicit_att.get_i32_vec("ELEL");
-    //         let default = uda_explicit_att.get_val("DFLT");
-    //         if elel.is_none() || default.is_none() {
-    //             continue;
-    //         }
-    //         // let udna = udna.unwrap();
-    //         let elel = elel.unwrap();
-    //         let default = default.unwrap();
-    //         for noun in elel {
-    //             uda_map
-    //                 .entry(noun)
-    //                 .or_insert_with(AttrMap::default)
-    //                 .entry((ukey as u32))
-    //                 .or_insert(default.clone());
-    //         }
-    //     }
-    // }
-    Ok(())
-}
-
-// pub fn gen_pdms_element_insert_sql(att: &WholeAttMap, name: &str, dbno: u32, order: usize, children_count: usize) -> String {
-//     let attmap = &att.att_map();
-//     let refno = attmap.get_refno().unwrap();
-//     let type_name = attmap.get_type();
-//     let owner = attmap.get_owner();
-//
-//     let mut sql = String::new();
-//     sql.push_str(&format!(r#"({}, '{}', '{}', {},'{}' , {} , {} , {} ,0 ) ,"#,
-//                           refno.0, refno.to_pdms_str(), type_name, owner.0, name, dbno, order, children_count));
-//     sql
-// }
 
 #[tokio::test]
 async fn test_threads() {
@@ -1960,30 +1625,40 @@ fn baseline_writer_failure_cleans_every_scheduled_dbnum() {
     );
 }
 
+/// 基线失败不许静默（宪法 III）。legacy 解析段用一个 `chunk_failed` 标志收口，
+/// e3d-io 退化窗口（B8.3）改成「每条失败路登记失败 dbnum 后立刻 `continue`」——
+/// 钉的仍是同三件事：失败被归因到具体 dbnum、失败文件不登记 parsed result、
+/// 清库只发生在已派发写入收口之后。
 #[test]
-fn baseline_chunk_failure_stops_scheduling_and_wipes_only_after_writers_finish() {
+fn baseline_failure_registers_the_dbnum_and_wipes_only_after_writers_finish() {
     let source = include_str!("database.rs");
-    let parser = source
-        .split_once("let mut chunk_failed = false;")
-        .expect("chunk failure state")
+    let scheduled = source
+        .split_once("scheduled_baseline_dbnums_for_parser.insert(db_no);")
+        .expect("baseline scheduling site")
         .1
         .split_once("parsed_db_infos_for_parser")
         .expect("parsed result boundary")
         .0;
-    assert!(parser.contains("chunk_failed = true;"));
-    assert!(parser.contains("break;"), "失败后必须停止后续 chunk 调度");
+
+    let registered = scheduled
+        .matches("failed_baseline_dbnums_for_parser.insert(db_no);")
+        .count();
     assert!(
-        !parser.contains("expect(\"send attmap sql failed\")"),
-        "属性发送失败也必须进入 chunk 硬门，不能 panic 后绕过失败库登记"
+        registered >= 3,
+        "UDA 键表、基线收集、收集任务 panic 三条失败路各要登记一次失败 dbnum，实得 {registered}"
+    );
+    assert_eq!(
+        scheduled.matches("continue;").count(),
+        registered,
+        "登记了失败就必须 continue：失败文件不得再往下登记 parsed result"
     );
     assert!(
-        !include_str!("pe.rs").contains("expect(\"send pes error\")")
-            && !include_str!("pe.rs").contains("expect(\"send pe_relates error\")"),
-        "PE 与关系发送失败必须返回 Result 给基线清理路径"
+        scheduled.contains("sender.send(message).map_err("),
+        "队列满 / 写者退出必须作为 Err 冒出 chunk sink，让 stream_baseline 中止并归因到本库"
     );
     assert!(
-        parser.contains("if chunk_failed") && parser.contains("continue;"),
-        "失败文件不得登记 parsed result"
+        !scheduled.contains(".expect("),
+        "基线调度段不许 panic：panic 绕过失败 dbnum 登记，会留下一个半写的库"
     );
 
     let finish_at = source

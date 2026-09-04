@@ -22,8 +22,9 @@
 
 ## C. 本仓资源
 - `vendor/aios-parse-pdms/`：PDMS 数据库解析（udtype、属性表）。
-- `src/fast_model/`：几何生成（cata_model / prim_model / gen_model / occ_generate）。
-- `元数据接口.txt`、`all_attr_info.json`：属性/类型元数据。
+- `vendor/e3d-model/`（`../vendor/e3d-model`）：现行模型面纯函数层，经 `e3d-io` 直读库文件生成几何（ADR-053 / ADR-057）。
+- `src/fast_model/`：发布、空间树、房间归属与 manifold CSG 后处理；`gen_model` / `occ_generate` 是 `legacy_model` feature 后面的旧生成器（ADR-030）。
+- `all_attr_info.json`：属性/类型元数据快照（noun → 属性布局，不含分类 flag）。
 
 ## D. 社区（获取"智慧"）
 - AVEVA 官方社区论坛（Connect / AVEVA Communities），可核对 GMSET/SPREF/DESPARAM 语义与边缘情况。

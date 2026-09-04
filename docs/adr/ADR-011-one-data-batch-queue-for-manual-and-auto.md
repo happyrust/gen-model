@@ -1,5 +1,20 @@
 # ADR-011：手动与自动合流到一条数据批次队列
 
+> **2026-09-03 修订（ADR-056 / spec 035 D10-A，文本追认）**：kv-mem 暂存窗口退役，数据批次只有一条路径——直写
+> RocksDB（`persist_latest_main_data` 分块 → `invalidate_caches` → `maintain_reverse_index` → 窗口语句批 →
+> `finalize_attempt` 尾事务推进水位）。由此对下文各修订的对照读法：
+>
+> - 2026-08-05 修订（ADR-017）**作废**：§7 回到「数据批次只提交数据 + 水位 + 模型窗口意图」（ADR-025 §7 现行口径），
+>   模型生成失败进 `model_update_pending` 重试账、不阻断水位（ADR-056 D1）；§8 房间仍在提交后按本任务 scope 收敛，
+>   顺序是尾事务 → 空间收敛 → scoped room drain。
+> - 2026-08-09 修订里「并发仅限稳态 DESI 暂存窗口」「journal 写回」「`STAGED_COMMIT_SERIAL`」「应急直写批次」
+>   「暂存资源三级阈值」全部失效：数据批次**一律独占车道**（`batch_needs_exclusive_lane` 恒真，`data_batch_workers > 1`
+>   暂不产生并发；放开稳态 DESI 直写并发是 D10-B / spec 035 T210，前提是 `apply_one` 的尾事务与提交后空间收敛
+>   改在 `DATA_COMMIT_SERIAL` 下一次一个）；派发门的空间收敛经 `DATA_COMMIT_SERIAL`（前身 `STAGED_COMMIT_SERIAL`）串行。
+> - 2026-08-14 修订「稳态增量仍遵守 ADR-017 的窗口内模型提交纪律」一句随 ADR-017 退役失效，其余不变。
+> - 单队列 + 单派发器、合并 / 冻结 / 吸收 / FIFO、「引入第二条数据批次消费路径要先改本 ADR」——**全部不变**。
+>   宪法「附加约束 · 并发模型」段已同批改写（v1.1.1）。
+>
 > **2026-08-14 修订（初始化两阶段）**：冷启动、首次导入与回退重建先只完成全部
 > dbnum 的数据解析、水位和持久模型工作登记；不得在每个初始化数据批次后立即领取
 > 本库模型任务。数据队列清空后，统一由空闲轮 `drain_data_phases` 分页执行模型阶段。

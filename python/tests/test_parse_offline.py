@@ -5,6 +5,11 @@
 夹具（db8000 的 sesno 24 / 25 / 26 三份快照）就躺在 `tests/fixtures/issues` 里。
 断言与 Rust 侧 `tests/db8000_two_delete_fixture.rs` 同源：同一份数据，两条链路
 必须读出同一串删除序列，谁漂移了都会在这里红。
+
+判据只有一个：这三份快照是 E3D TTY 真做过的两次删除（子件在 25 删、父件在 26 删，
+manifest 里记着），不是另一套解析器的读数。old-pdms-io 底座的 `collect_changes` /
+`net_changes` / `element` / `attmap` / `subtree` / `generate_*` 及其用例 2026-09-04 已随
+old-pdms-io 一起删除；窗口口径只剩生产收集器的 `net_window`。
 """
 
 from __future__ import annotations
@@ -81,63 +86,51 @@ def test_sessions_ascend_to_snapshot_sesno(configured, snapshots, by_role):
         assert sesnos[-1] == by_role[role]["sesno"], role
 
 
-def test_collect_changes_reports_both_deletes(configured, snapshots, manifest):
-    """窗口 25..26：子件在 25 删、父件在 26 删——issue-019 的病灶序列本体。"""
-    window = manifest["window"]
-    start, end = window["start_sesno"], window["end_sesno"]
-    changes = configured.parse.collect_changes(
-        str(snapshots["parent_deleted"]), start, end
-    )
-    assert set(changes) == {str(start), str(end)}, changes.keys()
-
-    deleted_at = {
-        sesno: {op["refno"] for op in ops if op["op"] == "deleted"}
-        for sesno, ops in changes.items()
-    }
-    assert manifest["refs"]["child"] in deleted_at[str(start)]
-    assert manifest["refs"]["parent_equi"] in deleted_at[str(end)]
-
-    for sesno, ops in changes.items():
-        for op in ops:
-            assert op["sesno"] == int(sesno), f"操作要落在自己的会话分区: {op}"
+def test_parse_exposes_exactly_one_window_entry(configured):
+    """old-pdms-io 底座的绑定不许再回来：窗口只剩 `net_window` 一个口径，单元素直读只剩
+    e3d-io 底座的 `element`。"""
+    for retired in (
+        "collect_changes",
+        "net_changes",
+        "attmap",
+        "subtree",
+        "generate_all_model",
+        "generate_model",
+        "generate_obj",
+        "generate_rvm",
+        "noun_dict",
+    ):
+        assert not hasattr(configured.parse, retired), f"parse.{retired} 是 old-pdms-io 的绑定，2026-09-04 已删"
+    assert callable(configured.parse.net_window)
+    assert callable(configured.parse.element)
 
 
-def test_collect_changes_detail_expands_attributes(configured, snapshots, manifest):
-    """detail=False 只给属性名列表，detail=True 给具体值——两种形态都得成立。"""
-    window = manifest["window"]
-    path = str(snapshots["parent_deleted"])
-    brief = configured.parse.collect_changes(path, window["start_sesno"], window["end_sesno"])
-    full = configured.parse.collect_changes(
-        path, window["start_sesno"], window["end_sesno"], detail=True
-    )
-    assert set(brief) == set(full)
-    for sesno in brief:
-        assert len(brief[sesno]) == len(full[sesno])
-    modified = [
-        op for ops in full.values() for op in ops if op["op"] == "modified"
-    ]
-    for op in modified:
-        assert isinstance(op["added"], dict), "detail=True 的 added 应是 {名: 值}"
-
-
-def test_element_dump_and_history_replay(configured, snapshots, manifest):
-    """被删元素在最新索引里读不到，但给 sesno 能读回历史版本（M4 记过的坑：
-    「最新索引里没有」不等于「从未存在」）。"""
+def test_element_reads_the_snapshot_tty_left_behind(configured, snapshots, manifest):
+    """被删元素在最新索引里读不到，但把文件钉回 baseline 会话就能读回历史版本
+    （M4 记过的坑：「最新索引里没有」不等于「从未存在」）。三份快照都是 TTY 真做过的删除留下的。"""
     child = manifest["refs"]["child"]
     baseline_sesno = manifest["window"]["baseline_sesno"]
 
     dump = configured.parse.element(str(snapshots["baseline"]), child)
     assert dump["refno"] == child
+    assert dump["sesno"] == baseline_sesno
     assert dump["noun"].strip().upper() == "BOX"
-    assert dump["found_sesno"] <= baseline_sesno
     assert dump["owner"] == manifest["refs"]["parent_equi"]
+    assert isinstance(dump["attrs"], dict) and dump["attrs"]
 
     final = str(snapshots["parent_deleted"])
-    with pytest.raises(RuntimeError):
+    with pytest.raises(RuntimeError, match="找不到元素"):
         configured.parse.element(final, child)
     revived = configured.parse.element(final, child, sesno=baseline_sesno)
     assert revived["refno"] == child
+    assert revived["sesno"] == baseline_sesno
     assert revived["noun"].strip().upper() == "BOX"
+    assert revived["attrs"] == dump["attrs"], "同一会话时点从两份快照读出的持久属性必须逐字相同"
+
+    zone = manifest["refs"]["zone"]
+    parent = configured.parse.element(str(snapshots["baseline"]), manifest["refs"]["parent_equi"])
+    assert parent["owner"] == zone
+    assert child in parent["children"]
 
 
 def test_element_rejects_unparsable_refno(configured, snapshots):
@@ -145,132 +138,19 @@ def test_element_rejects_unparsable_refno(configured, snapshots):
         configured.parse.element(str(snapshots["baseline"]), "not-a-refno")
 
 
-def test_attmap_and_subtree_read_zone_without_database(configured, snapshots, manifest):
-    """生成期属性视图及父子闭包均由 PdmsIO 直读，且不依赖数据库连接。"""
-    zone = manifest["refs"]["zone"]
-    one = configured.parse.attmap(str(snapshots["baseline"]), zone)
-    assert one["refno"] == zone
-    assert isinstance(one["attrs"], dict)
-    tree = configured.parse.subtree(str(snapshots["baseline"]), zone)
-    assert tree["root"] == zone
-    assert tree["count"] == len(tree["elements"])
-    assert tree["count"] >= 1
-    assert tree["elements"][0]["refno"] == zone
-    # direct 解析同时产出生成器可消费的 PdmsGeoParam；ZONE 自身通常无实体，
-    # 其后代至少应有一个带几何参数的基本体。
-    primitive_models = [item for item in tree["elements"] if item["geo_valid"]]
-    assert primitive_models
-    assert all(item["geo_param"] is not None for item in primitive_models)
-    assert any(item["mesh"] is not None for item in primitive_models)
-
-
-def test_generate_model_writes_direct_zone_artifact(configured, snapshots, manifest, tmp_path):
-    zone = manifest["refs"]["zone"]
-    output = tmp_path / "zone-model.json"
-    result = configured.parse.generate_model(str(snapshots["baseline"]), zone, str(output))
-    assert result["format"] == "direct-model-v1"
-    assert result["root"] == zone
-    assert result["count"] > 0
-    assert result["mesh_count"] > 0
-    assert output.exists()
-    payload = json.loads(output.read_text(encoding="utf-8"))
-    assert payload["root"] == zone
-    assert payload["count"] == len(payload["elements"])
-    assert any(item["geo_valid"] for item in payload["elements"])
-    assert sum(1 for item in payload["elements"] if item["rvm_primitive"]) > 0
-
-
-def test_generate_obj_writes_direct_zone_mesh(configured, snapshots, manifest, tmp_path):
-    zone = manifest["refs"]["zone"]
-    output = tmp_path / "zone-model.obj"
-    result = configured.parse.generate_obj(str(snapshots["baseline"]), zone, str(output))
-    assert result["format"] == "obj"
-    assert result["mesh_count"] > 0
-    text = output.read_text(encoding="utf-8")
-    assert text.startswith("# aios direct-model-v1 OBJ")
-    assert "\nv " in text and "\nf " in text
-
-
-def test_generate_rvm_writes_direct_zone_smoke(configured, snapshots, manifest, tmp_path):
-    zone = manifest["refs"]["zone"]
-    output = tmp_path / "zone-model.rvm"
-    result = configured.parse.generate_rvm(str(snapshots["baseline"]), zone, str(output))
-    assert result["format"] == "rvm-direct-v1"
-    assert result["geometry_count"] > 0
-    assert output.stat().st_size == result["bytes"]
+def _operations(result: dict) -> list[dict]:
+    return [operation for session in result["window"].values() for operation in session]
 
 
 def _net_classes(result: dict) -> dict[str, str]:
-    return {
-        entry["refno"]: kind
-        for kind in ("added", "deleted", "modified")
-        for entry in result[kind]
-    }
-
-
-def test_net_changes_reports_the_recorded_net_tristate(configured, snapshots, manifest):
-    """窗口 25..26 的净三态（会话索引差分，不逐会话解析）：ZONE=modified、
-    EQUI 与子件=deleted——与 Rust 侧 db8000_session_pairs 性质 h 同一份 ground
-    truth。with_noun 时删除条目从旧记录（不可变页）解出类型名。"""
-    window = manifest["window"]
-    refs = manifest["refs"]
-    result = configured.parse.net_changes(
-        str(snapshots["parent_deleted"]),
-        window["start_sesno"],
-        window["end_sesno"],
-        with_noun=True,
-    )
-
-    assert result["base_sesno"] == window["baseline_sesno"]
-    assert result["target_sesno"] == window["end_sesno"]
-    assert _net_classes(result) == {
-        refs["zone"]: "modified",
-        refs["parent_equi"]: "deleted",
-        refs["child"]: "deleted",
-    }
-
-    nouns = {
-        entry["refno"]: (entry["noun"] or "").strip().upper()
-        for kind in ("added", "deleted", "modified")
-        for entry in result[kind]
-    }
-    assert nouns[refs["zone"]] == "ZONE"
-    assert nouns[refs["parent_equi"]] == "EQUI"
-    assert nouns[refs["child"]] == "BOX"
-
-
-def test_net_changes_bases_each_window_on_the_previous_session(
-    configured, snapshots, manifest
-):
-    """单会话窗口 26..26：base 落在 25，子件（25 删、两端都不在场）不出现——
-    净口径「窗口内自我抵消不出现」的直接检验。"""
-    window = manifest["window"]
-    refs = manifest["refs"]
-    result = configured.parse.net_changes(
-        str(snapshots["parent_deleted"]), window["end_sesno"], window["end_sesno"]
-    )
-
-    assert result["base_sesno"] == window["start_sesno"]
-    assert _net_classes(result) == {
-        refs["zone"]: "modified",
-        refs["parent_equi"]: "deleted",
-    }
-
-
-def test_net_changes_refuses_windows_beyond_the_latest_session(
-    configured, snapshots, manifest
-):
-    """窗口终点超出文件最新会话必须响亮报错（窗口与文件对不上，不猜）。"""
-    with pytest.raises(RuntimeError):
-        configured.parse.net_changes(
-            str(snapshots["parent_deleted"]), 1, manifest["window"]["end_sesno"] + 10
-        )
+    return {operation["refno"]: operation["op"] for operation in _operations(result)}
 
 
 def test_net_window_returns_semantic_operations_without_a_database(
     configured, snapshots, manifest
 ):
-    """公开语义入口必须接到生产净窗口合成器，而不是只回传记录位置触达集。"""
+    """窗口 25..26 的净三态：ZONE=modified、EQUI 与子件=deleted——TTY 在这两个会话里
+    真做过的两次删除，与 Rust 侧 db8000_session_pairs 夹具是同一份 ground truth。"""
     window = manifest["window"]
     refs = manifest["refs"]
     result = configured.parse.net_window(
@@ -280,14 +160,84 @@ def test_net_window_returns_semantic_operations_without_a_database(
         detail=True,
     )
 
-    operations = [
-        operation
-        for session in result["window"].values()
-        for operation in session
-    ]
-    by_refno = {operation["refno"]: operation for operation in operations}
+    assert result["requested_start"] == window["start_sesno"]
+    assert result["requested_end"] == window["end_sesno"]
     assert result["counts"] == {"added": 0, "deleted": 2, "modified": 1}
-    assert by_refno[refs["zone"]]["op"] == "modified"
-    assert by_refno[refs["parent_equi"]]["op"] == "deleted"
-    assert by_refno[refs["child"]]["op"] == "deleted"
+    assert _net_classes(result) == {
+        refs["zone"]: "modified",
+        refs["parent_equi"]: "deleted",
+        refs["child"]: "deleted",
+    }
+    by_refno = {operation["refno"]: operation for operation in _operations(result)}
+    assert by_refno[refs["zone"]]["noun"].strip().upper() == "ZONE"
     assert result["unparseable_finals"] == 0
+
+
+def test_net_window_keys_operations_inside_the_window_and_tombstones_at_its_end(
+    configured, snapshots, manifest
+):
+    """子件在 25 删、父件在 26 删（issue-019 的病灶序列本体）。净口径**不**复刻逐会话回放的
+    「每会话一条」分区：每 refno 恰一条，分区键落在窗口内且等于操作自己的 `sesno`；
+    墓碑在终点索引里没有记录，一律挂在窗口终点——两次删除都在 26 这一格里出现。"""
+    window = manifest["window"]
+    refs = manifest["refs"]
+    start, end = window["start_sesno"], window["end_sesno"]
+    result = configured.parse.net_window(str(snapshots["parent_deleted"]), start, end)
+
+    assert result["window"], "窗口不该为空"
+    for sesno, ops in result["window"].items():
+        assert start <= int(sesno) <= end, f"分区键跑出窗口: {sesno}"
+        for op in ops:
+            assert op["sesno"] == int(sesno), f"操作要落在自己的会话分区: {op}"
+    deleted = {op["refno"]: op["sesno"] for op in _operations(result) if op["op"] == "deleted"}
+    assert deleted == {refs["child"]: end, refs["parent_equi"]: end}
+    refnos = [op["refno"] for op in _operations(result)]
+    assert len(refnos) == len(set(refnos)), "净窗口每 refno 恰一条"
+
+
+def test_net_window_detail_expands_attributes(configured, snapshots, manifest):
+    """detail=False 只给属性名列表，detail=True 给具体值——两种形态都得成立。"""
+    window = manifest["window"]
+    path = str(snapshots["parent_deleted"])
+    brief = configured.parse.net_window(path, window["start_sesno"], window["end_sesno"])
+    full = configured.parse.net_window(
+        path, window["start_sesno"], window["end_sesno"], detail=True
+    )
+    assert set(brief["window"]) == set(full["window"])
+    for sesno in brief["window"]:
+        assert len(brief["window"][sesno]) == len(full["window"][sesno])
+    modified_brief = [op for op in _operations(brief) if op["op"] == "modified"]
+    modified_full = [op for op in _operations(full) if op["op"] == "modified"]
+    assert modified_brief and len(modified_brief) == len(modified_full)
+    for op in modified_brief:
+        assert isinstance(op["added"], list), "detail=False 的 added 应是属性名列表"
+    for op in modified_full:
+        assert isinstance(op["added"], dict), "detail=True 的 added 应是 {名: 值}"
+
+
+def test_net_window_bases_a_single_session_window_on_the_previous_session(
+    configured, snapshots, manifest
+):
+    """单会话窗口 26..26：base 落在 25，子件（25 删、两端都不在场）不出现——
+    净口径「窗口内自我抵消不出现」的直接检验。"""
+    window = manifest["window"]
+    refs = manifest["refs"]
+    result = configured.parse.net_window(
+        str(snapshots["parent_deleted"]), window["end_sesno"], window["end_sesno"]
+    )
+
+    assert result["counts"] == {"added": 0, "deleted": 1, "modified": 1}
+    assert _net_classes(result) == {
+        refs["zone"]: "modified",
+        refs["parent_equi"]: "deleted",
+    }
+
+
+def test_net_window_refuses_windows_beyond_the_latest_session(
+    configured, snapshots, manifest
+):
+    """窗口终点超出文件最新会话必须响亮报错（窗口与文件对不上，不猜）。"""
+    with pytest.raises(RuntimeError):
+        configured.parse.net_window(
+            str(snapshots["parent_deleted"]), 1, manifest["window"]["end_sesno"] + 10
+        )

@@ -5,7 +5,7 @@
 > （pe 按 noun×页分布、inst_relate 按页分布、页→dbnum 映射）。
 > 关联：`docs/2026-08-06_e3d-l3-automation-test-plan.md`（l3_suite 变更形态场景表）、
 > ADR-019（E3D TTY 无人值守通道）、ADR-010（房间归属增量）、ADR-018（金基线成对恢复）、
-> `docs/plans/2026-08-07-staged-transform-write-routing-fix-plan.md`（P0：暂存 Transform 写路由）。
+> 暂存 Transform 写路由修复方案（`2026-08-07-staged-transform-write-routing-fix-plan.md`，已随 ADR-056 暂存层退役清理，见 git 历史）。
 > 本文只写「验什么、按什么顺序、怎么算验完」。
 
 ## 0. 现行方式（不变，作为所有新增用例的骨架）

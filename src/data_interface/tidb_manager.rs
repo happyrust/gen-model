@@ -25,7 +25,6 @@ use futures::StreamExt;
 use glam::Vec3;
 use itertools::Itertools;
 use parry3d::bounding_volume::BoundingVolume;
-use pdms_io::watch::PdmsWatcher;
 use rumqttc::AsyncClient;
 #[cfg(feature = "sql")]
 use sqlx::{MySql, Pool, Row};
@@ -51,7 +50,8 @@ pub struct AiosDBManager {
 
     pub db_option: DbOption,
 
-    pub watcher: Arc<PdmsWatcher>,
+    /// 监控目录清单 + 文件名→全路径 + 文件头缓存（启动快照；摄入侧读 [`Self::watch_dirs`]）。
+    pub watcher: Arc<crate::data_interface::db_file_registry::DbFileRegistry>,
 
     pub mqtt_client: Arc<AsyncClient>,
 

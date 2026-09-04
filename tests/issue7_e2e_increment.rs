@@ -29,7 +29,6 @@ use aios_database::fast_model::room_model::{
     ElementRoomHistory, load_panel_index, load_room_panel_map, recalc_element_membership,
     recalc_panel_membership,
 };
-use pdms_io::io::PdmsIO;
 use serde::{Deserialize, Serialize};
 use surrealdb::opt::{Config, auth::Root};
 
@@ -289,9 +288,9 @@ async fn assert_second_pass_is_a_no_op(mgr: &Arc<AiosDBManager>, case: &Case) {
         vec![case.expected_noun.clone()],
         "幂等轮：E3D 模型类型基线漂移"
     );
-    let file_latest_sesno = PdmsIO::new(PROJECT, &case.db_file, true)
-        .get_latest_sesno()
-        .expect("read live file sesno") as i32;
+    let file_latest_sesno =
+        aios_database::data_interface::db_file_header::latest_sesno(&case.db_file)
+            .expect("read live file sesno") as i32;
     let applied_sesno = scalar_i32(&format!(
         "SELECT VALUE applied_sesno FROM ONLY dbnum_watermark:{};",
         case.dbnum
@@ -526,9 +525,9 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     // session，只负责强制刷新并保存权威基线。真正 apply 轮会关闭本标志、复用
     // baseline_file，然后才消费 E3D 新会话。
     if env_flag("AIOS_ROOM_PREPARE_ONLY", false) {
-        let file_latest_sesno = PdmsIO::new(PROJECT, &case.db_file, true)
-            .get_latest_sesno()
-            .expect("read live file sesno before E3D apply") as i32;
+        let file_latest_sesno =
+            aios_database::data_interface::db_file_header::latest_sesno(&case.db_file)
+                .expect("read live file sesno before E3D apply") as i32;
         let applied_sesno = scalar_i32(&format!(
             "SELECT VALUE applied_sesno FROM ONLY dbnum_watermark:{};",
             case.dbnum
@@ -543,9 +542,9 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     }
 
     // 只把宏命中的这一批放进队列。不能把现场会话号写死：每次 E3D SAVEWORK 都会递增。
-    let file_latest_sesno = PdmsIO::new(PROJECT, &case.db_file, true)
-        .get_latest_sesno()
-        .expect("read live file sesno") as i32;
+    let file_latest_sesno =
+        aios_database::data_interface::db_file_header::latest_sesno(&case.db_file)
+            .expect("read live file sesno") as i32;
     let applied_sesno = scalar_i32(&format!(
         "SELECT VALUE applied_sesno FROM ONLY dbnum_watermark:{};",
         case.dbnum
@@ -635,9 +634,9 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         case.dbnum
     ))
     .await;
-    let file_latest_after = PdmsIO::new(PROJECT, &case.db_file, true)
-        .get_latest_sesno()
-        .expect("read live file sesno after batch") as i32;
+    let file_latest_after =
+        aios_database::data_interface::db_file_header::latest_sesno(&case.db_file)
+            .expect("read live file sesno after batch") as i32;
     assert!(
         applied_after >= file_latest_sesno && applied_after <= file_latest_after,
         "批次成功后必须至少推进到捕获会话且不得越过当前文件: captured={file_latest_sesno} applied={applied_after} file={file_latest_after}"

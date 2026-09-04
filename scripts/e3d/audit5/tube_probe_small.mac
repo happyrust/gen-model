@@ -1,0 +1,47 @@
+$(
+------------------------------------------------------------------------
+E3D 侧管身规则取证·小样（bran-audit §5 复核，2026-09-02）：先在 /C-GR-1RX-3020B 的
+一个 BEND 与一个 ATTA 上试 Q LSTU / ITLE / ARRI / LEAV / POS 这几条查询能不能用，
+能用再铺到全部成员（PML 循环版在 TTY 里把 des.exe 打崩了，退出码 0xC0000005）。
+只读：没有 SAVEWORK；不写 QUIT/FINISH——会话归 l3_suite driver。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/audit5/tube_probe_small.log" OVER
+$P CODEX-AUDIT5-TUBE-PROBE-SMALL-ALIVE
+/C-GR-1RX-3020B
+Q REF
+Q HSTU
+Q TSTU
+Q HBOR
+Q TBOR
+BEND 1
+Q CE
+Q REF
+Q SPRE
+Q LSTU
+Q ARRI
+Q LEAV
+Q POS
+Q ITLE
+OWNER
+ATTA 1
+Q CE
+Q REF
+Q SPRE
+Q LSTU
+Q ARRI
+Q LEAV
+Q POS
+Q ITLE
+OWNER
+FTUB 1
+Q CE
+Q REF
+Q SPRE
+Q LSTU
+Q POS
+Q ITLE
+OWNER
+$P CODEX-AUDIT5-TUBE-PROBE-SMALL-DONE
+ALPHA LOG END

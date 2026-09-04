@@ -1733,14 +1733,20 @@ mod tests {
                 "段数不许写成常数: segs({args})"
             );
         }
-        let carried_accessors = [".segment_count()", ".segment_counts()", ".ring_segment_count()"];
+        let carried_accessors = [
+            ".segment_count()",
+            ".segment_counts()",
+            ".ring_segment_count()",
+        ];
         for arm in dispatch.split("PdmsGeoParam::").skip(1) {
             if !arm.contains("segs(") {
                 continue;
             }
             assert!(
                 arm.contains("libgm_discretise::")
-                    || carried_accessors.iter().any(|accessor| arm.contains(accessor)),
+                    || carried_accessors
+                        .iter()
+                        .any(|accessor| arm.contains(accessor)),
                 "用了 segs() 的臂必须自己从 libgm_discretise 取规则或读单位行携带的段数: {arm}"
             );
         }

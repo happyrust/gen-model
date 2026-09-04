@@ -2,7 +2,14 @@
 
 日期：2026-08-19
 
-关联：ADR-004（按需解析元件库）、ADR-011（统一数据批次队列）、ADR-017（暂存窗口提交）、ADR-025（严格初始化阶段）。
+关联：ADR-004（按需解析元件库）、ADR-011（统一数据批次队列）、ADR-017（暂存窗口提交，已被 ADR-056 取代）、ADR-025（严格初始化阶段）。
+
+> **2026-09-03 对照（ADR-056 D8）**：「解析产物与 DESI 数据同属 ADR-017 提交单元」「依赖缺失 / 300 秒无进展 ⇒ 整个窗口
+> 失败、DESI 水位不推进」「fail-closed 前置」三处失效。模型面经 `E3dDbResolver` 直接从文件读 CATA，不再以「CATA 行先落库」
+> 为前置；`cata_closure` 解析进 SurrealDB 只服务 `ref_rev` 反向索引与 UI 目录属性，改为 `finalize_attempt` 之后的补偿任务
+> `SideEffectCompensator::enqueue_cata_ref_rev`（spec 035 T126），`missing > 0` 记 warning，不拦模型、不拦水位；
+> `prepare_required_dependencies` 看门狗已删（T121）。监听限定域的**阶段顺序**（`Meta → Design（内含 CATA 引用闭包）→ Model`）、
+> 权威依赖清单、部分解析不推进 CATA 水位、缓存新鲜度与 epoch 纪律不变。
 
 ## 决策
 

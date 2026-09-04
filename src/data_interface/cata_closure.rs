@@ -752,14 +752,13 @@ fn scan_db_ref0s(path: &Path, project: &str) -> anyhow::Result<Vec<u32>> {
     }
 }
 
-fn scan_db_header(path: &Path) -> Option<parse_pdms_db::parse::DbBasicInfo> {
-    let engine = e3d_io::ReadOnlyEngine::open(path).ok()?;
-    let db_type = e3d_attlib::db1_dehash(engine.descriptor().noun)?;
-    let info = parse_pdms_db::parse::DbBasicInfo {
-        db_type,
-        ses_pgno: engine.descriptor().latest_ses_pgno,
-        db_no: engine.descriptor().db_mark,
-    };
+fn scan_db_header(
+    path: &Path,
+) -> Option<crate::data_interface::db_file_header::DbBasicInfo> {
+    // 库类型取 `+0x20` 的类型字（`DbDescriptor::db_type_hash`），与另外三条读头路径
+    // （自动重扫 / 手动候选扫描 / CATA 候选枚举）同一口径。此前这里反哈希的是
+    // `descriptor().noun`——e3d-io 现版里那是 `+0x04` 第 0 页自身的 noun 字，不是库类型。
+    let info = crate::data_interface::db_file_header::DbBasicInfo::read(path)?;
     (info.db_no != 0 && !info.db_type.is_empty()).then_some(info)
 }
 
@@ -1766,7 +1765,7 @@ pub async fn ensure_cata_refnos_parsed(
             let Some((att, children)) = retained.get(refno) else {
                 continue;
             };
-            // pe 行（与 versioned_db::pe::save_pes 同构）。
+            // pe 行（与 ele_ops::ElementRows 的 pe 行同构）。
             let pe_data = att.pe(*dbnum as i32);
             let pe_key = refno.to_pe_key();
             pe_jsons.push((pe_key.clone(), pe_data.gen_sur_json(Some(pe_key))));

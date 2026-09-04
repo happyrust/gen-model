@@ -740,9 +740,11 @@ mod tests {
         refno: RefnoEnum,
         owner: RefnoEnum,
         noun: &str,
-    ) -> pdms_io::io::EleOperationData {
+    ) -> crate::data_interface::ele_ops::EleOperationData {
+        use crate::data_interface::ele_ops::{
+            EleOperationData, EleOperationDetail, ModifiedElement,
+        };
         use aios_core::NamedAttrValue;
-        use pdms_io::io::{EleOperationData, EleOperationDetail, ModifiedElement};
 
         let mut modified_attrs = std::collections::HashMap::new();
         modified_attrs.insert(

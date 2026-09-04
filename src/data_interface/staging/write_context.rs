@@ -18,7 +18,8 @@ pub(crate) struct StagingWriteContext {
     spatial: Arc<Mutex<DeferredSpatialMutations>>,
     finalize: Arc<Mutex<Option<StagedFinalize>>>,
     regen_settlements: Arc<Mutex<Vec<(String, u64)>>>,
-    mysql_changes: Arc<Mutex<Option<BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>>>>,
+    mysql_changes:
+        Arc<Mutex<Option<BTreeMap<u32, Vec<crate::data_interface::ele_ops::EleOperationData>>>>>,
     root_locks: Arc<Mutex<HeldRootLocks>>,
 }
 
@@ -54,7 +55,9 @@ impl StagingWriteContext {
         spatial: Arc<Mutex<DeferredSpatialMutations>>,
         finalize: Arc<Mutex<Option<StagedFinalize>>>,
         regen_settlements: Arc<Mutex<Vec<(String, u64)>>>,
-        mysql_changes: Arc<Mutex<Option<BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>>>>,
+        mysql_changes: Arc<
+            Mutex<Option<BTreeMap<u32, Vec<crate::data_interface::ele_ops::EleOperationData>>>>,
+        >,
         root_locks: Arc<Mutex<HeldRootLocks>>,
     ) -> Self {
         Self {
@@ -157,7 +160,7 @@ impl StagingWriteContext {
 
     pub async fn defer_mysql_changes(
         &self,
-        changes: BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>,
+        changes: BTreeMap<u32, Vec<crate::data_interface::ele_ops::EleOperationData>>,
     ) {
         *self.mysql_changes.lock().await = Some(changes);
     }
@@ -253,7 +256,7 @@ pub(crate) async fn defer_staged_regen_settlement(root_refno: String, revision: 
 }
 
 pub(crate) async fn defer_staged_mysql_changes(
-    changes: BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>,
+    changes: BTreeMap<u32, Vec<crate::data_interface::ele_ops::EleOperationData>>,
 ) -> bool {
     let Some(context) = active_staging_writes() else {
         return false;

@@ -4,9 +4,15 @@
 本次汇总：2026-08-13
 状态：现行主文档
 
+> **2026-09-03 口径更新（ADR-056 / spec 035）**：kv-mem 暂存窗口已退役（P1 落地 `27f27f15`，P3 删目录待办）。
+> 本文中 U6「暂存窗口」分组、「暂存窗口不变量」I1–I9、RI-2 与所有 `src/data_interface/staging/**` 落点均为
+> **退役中条目**：P3 删除代码前它们仍能编译运行，但不再是门禁、也不得新增；替代物是直写窗口的
+> 中途 kill → 重放 → 终态逐表对拍（`direct_window_replay_parity.rs`，spec 035 T171）。「进程内 kv-mem」
+> 仍是合法的**测试介质**（ADR-056 D5：`mem://` 单测保留，退役的只是「暂存」这一用法）。
+>
 > **重要口径**
 >
-> - 本文是增量模型生成测试的统一入口，汇总数据、模型、暂存、队列、空间树与房间归属相关的单元测试工作。
+> - 本文是增量模型生成测试的统一入口，汇总数据、模型、队列、空间树与房间归属相关的单元测试工作。
 > - “单元测试”严格指不依赖外部 SurrealDB / E3D 的纯函数、源码契约和进程内 kv-mem 测试。离线文件夹具、live / ignored、真实 E3D 与视觉验收只在本文登记边界和入口，不冒充单元测试。
 > - 测试是否存在以当前源码为准；live 是否验证过以
 >   `docs/2026-08-12_live-test-ledger.md` 为唯一事实来源。
@@ -45,7 +51,7 @@
 | 单队列单消费者 | `docs/adr/ADR-011-one-data-batch-queue-for-manual-and-auto.md` | 自动与手动路径共用准入、队列和 worker |
 | 合批与待重试单元 | `docs/adr/ADR-012-batched-root-regeneration.md`、`docs/adr/ADR-013-generation-outcome-separate-from-pending.md`、`docs/adr/ADR-015-pending-work-identity.md` | fresh 根合批、生成结果与待重试单元分离、revision 收口 |
 | 分支原子替换 | `docs/adr/ADR-014-branch-atomic-model-replacement.md` | 一个生成根的新旧模型不得形成外部可见的半状态 |
-| 暂存窗口 | `docs/adr/ADR-017-staged-increment-window-commit.md` | 提交单元、ReplaySafe、应用水位门控写回、窗口阻断 |
+| 数据窗口直写（暂存窗口已退役） | `docs/adr/ADR-056-increment-writes-rocksdb-directly-e3d-model-plans.md`（取代 ADR-017） | 分块直写 + 水位尾事务、模型失败不阻断水位、凭证前移、只有一套变更检测 |
 | 单测是否存在 | `src/**` 当前源码 + `cargo test --lib -- --list` | 文档旧计数不得覆盖源码事实 |
 | 离线 CI | `.github/workflows/windows-tests.yml` | 机器实际执行步骤优先于文字描述 |
 | live 最近结果 | `docs/2026-08-12_live-test-ledger.md` | 不在本文复制逐项结果 |
@@ -209,7 +215,7 @@ S0–S13 是需求阶段编号；U1–U13 是便于选择测试的模块分组�
 | IU-INV-05 | 折叠终态等价于逐条重放 | `merging_is_equivalent_to_replaying_the_sequence` | 纯函数绿；真实窗口由离线夹具补 |
 | IU-INV-06 | 一次执行对同一窗口只收集一次 | `execute_one_dbnum_collects_the_window_exactly_once` | 源码契约绿；可补注入计数行为半边 |
 
-### 暂存窗口不变量
+### 暂存窗口不变量（退役中，ADR-056；spec 035 P3 删代码后整组作废）
 
 | ID | 不变量 | 主要覆盖 |
 |---|---|---|
@@ -254,7 +260,7 @@ S0–S13 是需求阶段编号；U1–U13 是便于选择测试的模块分组�
 | U3 生成根与级联 | `src/data_interface/generation_root.rs`、`src/data_interface/manual_update.rs`、`src/data_interface/cata_closure.rs` | 最小交付单元、搬迁双端、反向引用闭包、环安全、CATA locator 与依赖缓存 | 健康；保留 gap 测试成对翻转纪律 |
 | U4 模型工作计划 | `src/data_interface/model_update_plan.rs` | Transform / Regen / Delete / Room / CATA 分派、排序去重、取消、派生直管段 | 健康；新离线快照再扩展真实形态 |
 | U5 durable pending | `src/data_interface/model_update_pending.rs` | 三条出路、revision 收口、死信复活、尾事务、scoped room drain | 健康；空间跨行净变化仍缺行为专测 |
-| U6 暂存窗口 | `src/data_interface/staging/**`、`src/surreal_retry.rs` | ReplaySafe、生命周期、预载、分块重放、断点收敛、资源状态机、parity | 当前最强的一组 |
+| U6 暂存窗口（退役中） | `src/data_interface/staging/**`、`src/surreal_retry.rs` | ReplaySafe、生命周期、预载、分块重放、断点收敛、资源状态机、parity | 随 ADR-056 退役：不再是门禁，P3 删目录后整组消失；`attempts.rs` 搬家保留 |
 | U7 队列与 worker | `src/data_interface/batch_*.rs`、`src/data_interface/task_registry.rs`、`src/data_interface/side_effect_pending.rs` | FIFO、暂停、panic 隔离、提交后空间门、退避、空闲轮 | 源码顺序多，暂停/失败行为半边仍需下沉 |
 | U8 模型生成与空间树 | `src/fast_model/gen_model.rs`、`src/fast_model/cata_model.rs`、`src/fast_model/occ_generate.rs`、`src/fast_model/aabb_tree.rs` | 失败汇聚、AABB 写序、空间版本号、十五键 health、持久化失败保脏 | 新增 5mm 连接容差缺回归测试 |
 | U9 删除清理 | `src/data_interface/helper.rs`、`src/data_interface/model_refresh.rs` | 级联删除、共享模型保留、房间双向清边、直写 epoch | 单测健康，真实产物由 live 补 |
@@ -651,7 +657,7 @@ cargo test --lib --features http_api
 
 - `docs/2026-07-27_increment-update-complete-test-plan.md`：S0–S13 历史逐阶段矩阵；
 - `docs/2026-08-04_data-model-queue-test-plan.md`：数据 → 模型 → 队列三阶段与视觉边界；
-- `docs/plans/2026-08-06-staged-increment-five-defect-closure-plan.md`：I7–I9 与五缺陷验收；
+- 暂存期五缺陷闭环方案（`2026-08-06-staged-increment-five-defect-closure-plan.md`，I7–I9）：已随 ADR-056 暂存层退役清理，见 git 历史；
 - `docs/2026-08-06_room-incremental-automation-test-plan.md`：RS/RF/RL 与 RI-1…RI-15；
 - `docs/2026-08-12_room-test-plan-oracle-review.md`：房间场景可证伪判据、假红 / 假绿与恢复合同；
 - `docs/plans/2026-08-12-db8000-session-snapshot-fixture-test-plan.md`：离线会话夹具与七类性质断言；

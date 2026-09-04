@@ -66,7 +66,12 @@ pub struct ActiveStagedWindow {
     regen_settlements: Arc<tokio::sync::Mutex<Vec<(String, u64)>>>,
     mysql_changes: Arc<
         tokio::sync::Mutex<
-            Option<std::collections::BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>>,
+            Option<
+                std::collections::BTreeMap<
+                    u32,
+                    Vec<crate::data_interface::ele_ops::EleOperationData>,
+                >,
+            >,
         >,
     >,
     root_locks: Arc<tokio::sync::Mutex<HeldRootLocks>>,
@@ -232,7 +237,10 @@ impl ActiveStagedWindow {
     #[cfg(test)]
     pub(crate) async fn stage_parsed_window(
         &mut self,
-        range_eles: &std::collections::BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>,
+        range_eles: &std::collections::BTreeMap<
+            u32,
+            Vec<crate::data_interface::ele_ops::EleOperationData>,
+        >,
         dbnum: u32,
     ) -> anyhow::Result<usize> {
         use super::ExecMode;
@@ -395,7 +403,9 @@ impl ActiveStagedWindow {
 
     pub(crate) async fn take_deferred_mysql_changes(
         &self,
-    ) -> Option<std::collections::BTreeMap<u32, Vec<pdms_io::io::EleOperationData>>> {
+    ) -> Option<
+        std::collections::BTreeMap<u32, Vec<crate::data_interface::ele_ops::EleOperationData>>,
+    > {
         self.mysql_changes.lock().await.take()
     }
 

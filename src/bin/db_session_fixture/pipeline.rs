@@ -7,8 +7,8 @@
 //! 同级模块经 `crate::` 引用：bin 根与测试根都按同名声明这三个模块，同一份
 //! 代码在两个 crate 里都能编。
 
+use aios_database::data_interface::db_file_header::snapshot_presence;
 use anyhow::{Context, ensure};
-use parse_pdms_db::paged::PagedDbSession;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -350,18 +350,14 @@ pub fn verify_fixture(root: &Path) -> anyhow::Result<VerifyReport> {
     })
 }
 
-/// 验证闸（方案 §1 第 4 条）：打开切割快照读回 sesno，并逐条核对存在性探针。
+/// 验证闸（方案 §1 第 4 条）：打开切割快照读回 sesno，并逐条核对存在性探针（e3d-io 活索引）。
 fn probe_snapshot(path: &Path, probes: &[SnapshotProbe]) -> anyhow::Result<u32> {
-    let mut db = PagedDbSession::open(path)
-        .with_context(|| format!("open cut snapshot {}", path.display()))?;
-    let sesno = db.snapshot().sesno;
-    if probes.is_empty() {
-        return Ok(sesno);
-    }
     let refnos: Vec<_> = probes.iter().map(|probe| probe.refno).collect();
-    let found = db.read_raw_records(&refnos)?;
+    let found = snapshot_presence(path, &refnos)
+        .with_context(|| format!("open cut snapshot {}", path.display()))?;
+    let sesno = found.sesno;
     for probe in probes {
-        let present = found.contains_key(&probe.refno);
+        let present = found.contains(&probe.refno);
         ensure!(
             present == probe.present,
             "案例 {} 的元素 {}（{}）在 sesno={sesno} 应当{}，实际{}",

@@ -66,7 +66,13 @@ fn needs_initial_load(applied_sesno: i32, file_latest_sesno: i32) -> bool {
 
 入队与执行之间文件可能被换掉，所以 wipe 必须以冻结点的**新鲜裁决**为前提（源码顺序测试钉住）。
 
-与 ADR-017 的衔接（2026-08-13 live 首跑实测补充）：**暂存窗口只属于真正的增量重放**。按增量形状（`start_sesno > 1`）入队的批次，若冻结点的权威状态已经是「会改走首次导入」（applied 归零 / 回退 / 幽灵水位），必须**不开** kv-mem 暂存窗口、直接走执行体——基线不走窗口协议，开了窗口也等不来 finalize plan，只会以「暂存窗口缺少 finalize plan」失败收场。该预判（`batch_worker::batch_reroutes_to_initial_load`）与执行体路由共用同一个数据支撑探针；预判读不出来时按入队形状开窗，由执行体复核给出响亮终态。
+> **2026-09-03 对照（ADR-056）**：下一段与 ADR-017 的衔接随暂存窗口退役失效——不再有「开窗 / 不开窗」的分叉，
+> `batch_worker::batch_reroutes_to_initial_load` 预判已删（spec 035 T104）；「基线还是增量」的路由仍由冻结点的
+> 数据支撑探针裁决，直写执行体对幽灵水位 / 回退照旧给出响亮终态。§4 里的 `STAGED_COMMIT_SERIAL` 现名
+> `DATA_COMMIT_SERIAL`；`staging::replay_safe::is_owner_scoped_range` 随 `staging/` 目录退役（P3），
+> 快删「不走重放路径」的边界改由 `fast_delete.rs` 就地说明与两条回归测试守住。
+
+与 ADR-017 的衔接（2026-08-13 live 首跑实测补充，**已失效**）：**暂存窗口只属于真正的增量重放**。按增量形状（`start_sesno > 1`）入队的批次，若冻结点的权威状态已经是「会改走首次导入」（applied 归零 / 回退 / 幽灵水位），必须**不开** kv-mem 暂存窗口、直接走执行体——基线不走窗口协议，开了窗口也等不来 finalize plan，只会以「暂存窗口缺少 finalize plan」失败收场。该预判（`batch_worker::batch_reroutes_to_initial_load`）与执行体路由共用同一个数据支撑探针；预判读不出来时按入队形状开窗，由执行体复核给出响亮终态。
 
 ### 4. `wipe_dbnum_for_reinit` 的口径
 
@@ -77,8 +83,8 @@ fn needs_initial_load(applied_sesno: i32, file_latest_sesno: i32) -> bool {
 - 同一元数据阶段**递增 spatial epoch**：清库删掉了 `room_relate` / `inst_relate` 行却不 bump，崩溃重启会按指纹相等复用一棵还留着被删构件包围盒的树（ADR-010 D4 的幽灵形态）。
 - 元数据阶段（统计与持久队列清理、spatial epoch、水位清零）必须包在一个显式 SurrealDB 事务中，且水位更新位于事务末尾；任一语句失败时整组回滚。关系删除与大区间删除继续作为前置的独立幂等阶段，失败后由下一轮重放。
 - **（2026-08-13 补记，逆向核实确认漏删后修复）** Ref0 区间表清单补入 `room_panel_relate`，与 `room_relate` 成对清理：其 id 形态 `room_panel_relate:{room_refno}_{panel}`（`room_model.rs:698/724`）可按 Ref0 区间寻址；房间重算只对现存实体先清后写、从不整表清空，整库重建后的孤儿边无人回收，属 ADR-010 D4 幽灵同类。修复落点 `fast_delete.rs:25`（`RANGE_TABLES` 增表），回归测试 `the_wipe_deletes_room_panel_relate_alongside_room_relate` 钉住；跨 dbnum 边界与 `room_relate` 对称，未扩大也未缩小。
-- **（2026-08-20 补记，清库耗时定位后修复）** 关系边阶段的 `pe_owner` 改按 OWNER 复合 id 区间删除：每个权威 Ref0 一条 `DELETE pe_owner:[pe:{ref0}_0, NONE]..=[pe:{ref0}_9999999999, ..]`，取代原来 `array::flatten(SELECT VALUE ->/<-pe_owner FROM pe:{ref0}_0..)` 那两句图遍历。边 id 固定是 `[OWNER_PE, 槽位]`（`versioned_db/pe.rs:174` 与 `cata_closure.rs:1574` 两个写口同形），owner 落在 Ref0 区间内的边天然是 id 连续的一段，不必先把边 id 全捞进内存——百万级 PE 的库上那正是清库耗时的大头。随之明确两条口径：
-  - 少掉的 `->pe_owner` 方向（child 在本 Ref0、owner 在别处）在**整库**清理里是空扫，因此不做悬空入边扫描：所有权链不跨库（`manual_update.rs:658`），而本 dbnum 解析出的每个 Ref0 都各出一条本语句，同库跨 Ref0 的边由 owner 自己那条兜住。**部分裁剪不满足这个前提**——`prune_above_watermark` 只删水位之上的部分元素，继续走逐元素双向删除，一行未动。
+- **（2026-08-20 补记，清库耗时定位后修复）** 关系边阶段的 `pe_owner` 改按 OWNER 复合 id 区间删除：每个权威 Ref0 一条 `DELETE pe_owner:[pe:{ref0}_0, NONE]..=[pe:{ref0}_9999999999, ..]`，取代原来 `array::flatten(SELECT VALUE ->/<-pe_owner FROM pe:{ref0}_0..)` 那两句图遍历。边 id 固定是 `[OWNER_PE, 槽位]`（**2026-09-04 取证重指**：原文举证的两个写口写作 `versioned_db/pe.rs:174` 与 `cata_closure.rs:1574`，前者已随 `parse_pdms_db` 整体退役而删除、后者行号也已漂走。今天同形的两个写口是 `data_interface/ele_ops.rs::pe_owner_edge`（`:1439`，基线与增量共用同一份 `ElementRows` 渲染）与 `data_interface/cata_closure.rs::render_pe_owner_replace`（`:1557`，内部 `render_pe_owner_statements`）；**「同形」这条不再靠行号自证**，由单测 `pe_owner_edges_point_child_to_owner_exactly_like_cata_closure` 逐字节 `assert_eq!` 钉住，见宪法 VI），owner 落在 Ref0 区间内的边天然是 id 连续的一段，不必先把边 id 全捞进内存——百万级 PE 的库上那正是清库耗时的大头。随之明确两条口径：
+  - 少掉的 `->pe_owner` 方向（child 在本 Ref0、owner 在别处）在**整库**清理里是空扫，因此不做悬空入边扫描：所有权链不跨库（今天写在 `fast_delete.rs:114` 的空扫注释与 `manual_update.rs:663`；原文记的 `manual_update.rs:658` 只是行号漂了，claim 与文件都还在），而本 dbnum 解析出的每个 Ref0 都各出一条本语句，同库跨 Ref0 的边由 owner 自己那条兜住。**部分裁剪不满足这个前提**——`prune_above_watermark` 只删水位之上的部分元素，继续走逐元素双向删除，一行未动。
   - 这个**跨 owner** 的区间形状正是 `staging::replay_safe::is_owner_scoped_range` 明令拒绝的写法，该限制**不放宽**：快删不走 staging，安全性来自「两端 Ref0 同源、由权威 Ref0 集合导出、整段区间本就要全删」，只在整库清理成立。`fast_delete.rs` 就地写明这条边界，防止被抄进重放路径。
 
   顺带换来一项图遍历没有的幂等性：新语句不读 `pe`，上一轮清库半途失败、`pe` 行已没而边还在时，下一轮仍能把边清掉（遍历从空区间出发永远够不着它们）。后置条件同步加严——验证阶段除 PE 归零外，逐 Ref0 数 `pe_owner` 区间残留必须为 0，删边语句写歪时清库当场报错而不是报成功。回归测试 `the_owner_edges_go_by_id_range_not_by_graph_traversal`、`the_owner_range_is_ref0_scoped_and_never_open_ended`（钉住 `replay_safe` 拦下过的上界漏写与跨 Ref0 两发）、`the_postcondition_counts_owner_edges_in_every_ref0_range` 钉住；隔离库实测（目标区间 3 → 0，上下两侧相邻 Ref0 与前缀延长型 Ref0 全部保留）见 `docs/evidence/pe-owner-range-fast-delete-20260820/`。

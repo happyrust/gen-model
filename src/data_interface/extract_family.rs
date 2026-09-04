@@ -220,14 +220,30 @@ pub fn collapse_extract_families(
     }
 }
 
+/// Every refno the file's latest session indexes (e3d-io walks the one live
+/// refno tree). The legacy `parse_file_db_index_data` scan this replaced took
+/// the leaf entries of every index page in the file, live or not — on the
+/// 429-database corpus 16% of what it returned belonged to trees no session
+/// can reach. The gap count is about elements the leaf is missing *today*, so
+/// the live set is the one that answers it.
+fn indexed_refno_set(path: &Path) -> anyhow::Result<HashSet<e3d_io::RefNo>> {
+    let mut engine = e3d_io::ReadOnlyEngine::open(path)
+        .map_err(|error| anyhow::anyhow!("open {}: {error}", path.display()))?;
+    Ok(engine
+        .indexed_refnos()
+        .map_err(|error| anyhow::anyhow!("walk refno index of {}: {error}", path.display()))?
+        .into_iter()
+        .map(|(refno, _page, _offset)| refno)
+        .collect())
+}
+
 /// Count refnos present in the parent index but missing from the leaf.
 pub fn parent_gap_refno_count(leaf: &Path, parent: &Path) -> anyhow::Result<usize> {
-    let leaf_index = parse_pdms_db::parse::parse_file_db_index_data(&leaf.to_path_buf())?;
-    let parent_index = parse_pdms_db::parse::parse_file_db_index_data(&parent.to_path_buf())?;
+    let leaf_index = indexed_refno_set(leaf)?;
+    let parent_index = indexed_refno_set(parent)?;
     Ok(parent_index
-        .refno_table_map
         .iter()
-        .filter(|entry| !leaf_index.refno_table_map.contains_key(entry.key()))
+        .filter(|refno| !leaf_index.contains(refno))
         .count())
 }
 
@@ -394,24 +410,32 @@ mod tests {
             eprintln!("skip: AMS 7355 pair not on this machine");
             return;
         }
-        let leaf_index = parse_pdms_db::parse::parse_file_db_index_data(&leaf).expect("leaf index");
-        let parent_index =
-            parse_pdms_db::parse::parse_file_db_index_data(&parent).expect("parent index");
+        let leaf_index = indexed_refno_set(&leaf).expect("leaf index");
+        let parent_index = indexed_refno_set(&parent).expect("parent index");
         let gap = parent_index
-            .refno_table_map
             .iter()
-            .filter(|entry| !leaf_index.refno_table_map.contains_key(entry.key()))
+            .filter(|refno| !leaf_index.contains(refno))
             .count();
+        assert_eq!(
+            gap,
+            parent_gap_refno_count(&leaf, &parent).expect("gap count"),
+            "the public counter must agree with the raw set difference"
+        );
+        let ses_pgno = |path: &Path| {
+            crate::data_interface::db_file_header::DbBasicInfo::read(path)
+                .map(|info| info.ses_pgno)
+                .unwrap_or_default()
+        };
         eprintln!(
             "ams7355 refnos={} ses_pgno={} | ams7355_0001 refnos={} ses_pgno={} | parent_only={}",
-            parent_index.refno_table_map.len(),
-            parent_index.ses_pgno,
-            leaf_index.refno_table_map.len(),
-            leaf_index.ses_pgno,
+            parent_index.len(),
+            ses_pgno(&parent),
+            leaf_index.len(),
+            ses_pgno(&leaf),
             gap
         );
         assert!(
-            !leaf_index.refno_table_map.is_empty() && !parent_index.refno_table_map.is_empty(),
+            !leaf_index.is_empty() && !parent_index.is_empty(),
             "both indexes must contain refnos"
         );
     }

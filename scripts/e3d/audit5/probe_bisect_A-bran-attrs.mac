@@ -1,0 +1,10 @@
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/audit5/probe_bisect_A-bran-attrs.log" OVER
+$P BISECT-A-bran-attrs-ALIVE
+/C-GR-1RX-3020B
+Q REF
+Q HSTU
+Q TSTU
+Q HBOR
+Q TBOR
+$P BISECT-A-bran-attrs-DONE
+ALPHA LOG END

@@ -1,4 +1,8 @@
-//! Strict data-initialization ordering (ADR-025).
+//! Strict data-initialization ordering (ADR-025), amended by ADR-058 D7: the
+//! data chain (Meta → Design) and the model chain run in parallel.  The model
+//! gate opens when the manifest is installed (file identity resolved) instead
+//! of when every data phase has settled; only the convergence banner
+//! (`mark_model_ready`) and room post-processing still wait for `data_ready`.
 //!
 //! The queue itself is deliberately non-durable.  This coordinator therefore
 //! keeps only reconstructible process state; watermarks and durable model work
@@ -132,6 +136,64 @@ impl PhaseBlocker {
     }
 }
 
+/// 本次启动核对了多大一片模型覆盖面（ADR-058 S2）。
+///
+/// 这些数此前只在控制台印一行「模型凭证核对完成：…」，滚过去就没了——而「模型面
+/// 为什么还没追平」恰恰要回头看那一行。
+///
+/// 与 `/dbnums` 上那两列凭证的分工：这里是**启动那一刻的快照**，那边是活值。启动
+/// 之后被按需 ensure 过的库会从 `no_credential_dbnums` 里「消失」而这份快照不变，
+/// 两者可以合法地不同，界面上分开说。
+#[derive(Debug, Clone, Serialize)]
+pub struct StartupCoverage {
+    /// `watch` = 本进程被监听限定域收窄，只核对了名单内的库；`all` = 全范围。
+    pub scope: &'static str,
+    /// 真正逐库核对过的库数（有凭证记录、且在本进程范围内）。
+    pub in_scope: usize,
+    /// `gen_root` 里有凭证记录的库数，不分范围。
+    pub candidates: usize,
+    /// 启动那一刻登记了、却一条凭证记录都没有的库（ADR-058 D6：这些根等按需
+    /// ensure，启动一根不排）。
+    ///
+    /// `null` = 这次连登记表都没读到，说不出有没有——它与空列表（每个登记库都有
+    /// 凭证）是两句话，合成一句就是拿「不知道」冒充绿灯。
+    pub no_credential_dbnums: Option<Vec<u32>>,
+    pub reconcile: StartupReconcile,
+}
+
+/// 启动复核的结果。[`StartupCoverage`] 的一格。
+#[derive(Debug, Clone, Serialize)]
+pub struct StartupReconcile {
+    /// `pending` 还没落地 · `ok` 逐库核完 · `floors_failed` 连凭证下限都没读到
+    /// （覆盖状态整体未知）· `unreadable` 有库取不到文件最新会话 · `window_failed`
+    /// 有库开了退化窗口却没收口。
+    ///
+    /// 几种同时成立时取最重的那个（`floors_failed` > `window_failed` >
+    /// `unreadable` > `ok`）：这一格是给人决定「要不要动手」的，不是统计。
+    pub result: &'static str,
+    /// 取不到文件最新会话、按「未确认」跳过的库数。
+    pub unreadable: usize,
+    /// 开了退化窗口但收口失败的库数。人工出口是
+    /// `POST /api/v1/dbnums/{dbnum}/model/rebuild`。
+    pub window_failed: usize,
+    /// 一级过滤判定落后、需要开窗的库数。
+    pub lagging: usize,
+    /// 真正开成了退化窗口的库数（`lagging - window_failed`）。
+    pub windows_opened: usize,
+}
+
+impl Default for StartupReconcile {
+    fn default() -> Self {
+        Self {
+            result: "pending",
+            unreadable: 0,
+            window_failed: 0,
+            lagging: 0,
+            windows_opened: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct InitializationSnapshot {
     pub epoch_id: u64,
@@ -140,6 +202,18 @@ pub struct InitializationSnapshot {
     pub data_ready: bool,
     pub model_ready: bool,
     pub model_in_flight: bool,
+    /// 模型写入准入门（ADR-058 D7）。`false` = 清单还没装好，或本次要求全量模型前置
+    /// ——模型链此刻一根都不许生成。
+    ///
+    /// 它与 `data_ready` 分家之后，「模型面为什么不动」有了两个完全不同的答案：门
+    /// 关着（等清单）与门开着但没活。少了这一位，外面只能拿 `data_ready` 猜，而
+    /// ADR-058 D7 之后那个猜法恒错——两条链现在是并行的。
+    pub model_phase_open: bool,
+    /// 启动模型凭证复核（ADR-058 D4）还没落地：为真时 `model_ready` 不可能置位。
+    pub startup_reconcile_pending: bool,
+    /// 本次启动的模型覆盖面。`null` = 本进程没跑过启动复核（python 绑定、测试与
+    /// 不经 `run_cli` 的入口都没有这一步），不是「覆盖为空」。
+    pub startup: Option<StartupCoverage>,
     pub phases: BTreeMap<&'static str, PhaseCounts>,
     /// 渲染好的那份，形状与结构化之前一字不差。
     pub blockers: Vec<String>,
@@ -156,8 +230,24 @@ struct CoordinatorState {
     data_ready: bool,
     model_ready: bool,
     full_model_required: bool,
+    /// 模型门。ADR-058 D7：它只等「文件身份解析完成」（清单装好），**不等**数据相
+    /// 清零——`begin_discovery` 关、`install_manifest` 开（`full_model_required` 除外）。
+    /// 数据链与模型链从此并行；仍然排在数据之后的只剩两处：`mark_model_ready`
+    /// （收敛宣告要 `data_ready`，因为数据批次的尾事务还会往模型积压里添行）与
+    /// `postprocess_allowed`（房间吃模型产物）。
     model_phase_open: bool,
     model_in_flight: bool,
+    /// 服务启动的模型凭证复核（`reconcile_model_coverage_at_startup`）尚未落地。
+    ///
+    /// 清单一就绪模型门就自动开，worker 空闲轮随即可能把 `model_ready` 置位——而此刻
+    /// 启动复核还在逐库读文件头，它随后入队的启动窗口工作项不会再把 `model_ready`
+    /// 打回去。于是「持久模型工作单已收敛」会在积压刚被重新排出来的那一刻打出来。
+    /// 这一位让 `model_ready` 在复核落地前不可能为真。默认 false：python 绑定、测试
+    /// 与不经 `run_cli` 的入口没有这一步，不该被它拦住。
+    startup_reconcile_pending: bool,
+    /// 本次启动核对到的覆盖面。进程级事实，**不随 `begin_discovery` 清**：重扫开
+    /// 一个新 epoch，但启动那一刻核了多少库不会因此改变。
+    startup_coverage: Option<StartupCoverage>,
     phases: BTreeMap<DataPhase, PhaseCounts>,
     blockers: Vec<PhaseBlocker>,
     shadowed: Vec<String>,
@@ -175,6 +265,8 @@ impl Default for CoordinatorState {
             full_model_required: false,
             model_phase_open: true,
             model_in_flight: false,
+            startup_reconcile_pending: false,
+            startup_coverage: None,
             phases: BTreeMap::new(),
             blockers: Vec::new(),
             shadowed: Vec::new(),
@@ -255,7 +347,9 @@ impl InitializationCoordinator {
             .min();
         state.data_ready = state.current_phase.is_none();
         state.model_ready = false;
-        state.model_phase_open = state.data_ready && !state.full_model_required;
+        // 清单装好 = 文件身份解析完成，模型面即刻开工（ADR-058 D7）；此前这里还要
+        // `data_ready`，那是「生成器要读 pe」时代的前置，ADR-056 N7 之后已不成立。
+        state.model_phase_open = !state.full_model_required;
         let current_is_blocked = state.current_phase.is_some_and(|current| {
             state
                 .blockers
@@ -399,7 +493,14 @@ impl InitializationCoordinator {
     pub fn configure_model_bootstrap(&self, required: bool) {
         let mut state = self.state();
         state.full_model_required = required;
-        state.model_phase_open = state.data_ready && !required;
+        // 门的另一半「文件身份已解析」由 `install_manifest` / `mark_data_ready_without_manifest`
+        // 负责；这里只按策略关门，或在清单已装好时开门。发现期（含 epoch 0 的初态）
+        // 不开：epoch 0 靠 `model_generation_allowed` 的旁路，清单期等 `install_manifest`。
+        if required {
+            state.model_phase_open = false;
+        } else if state.status != InitializationStatus::Discovering {
+            state.model_phase_open = true;
+        }
         state.model_ready = false;
     }
 
@@ -439,7 +540,10 @@ impl InitializationCoordinator {
 
     /// Release durable model work after the configured startup-wide full model
     /// pass.  For deployments without that pass, the manifest opens this gate
-    /// automatically as soon as all data phases are ready.
+    /// automatically as soon as it is installed (ADR-058 D7: file identity
+    /// resolved, not data settled), so this explicit call is a no-op there.
+    /// It still requires `data_ready`: it also moves `status` to `ModelRunning`,
+    /// and `allows()` would then refuse every data phase still pending.
     pub fn open_model_phase(&self) -> bool {
         let mut state = self.state();
         if !state.data_ready || state.model_in_flight {
@@ -469,11 +573,13 @@ impl InitializationCoordinator {
         }
     }
 
+    /// 模型写入准入。ADR-058 D7：不看 `data_ready`——数据链（Meta → Design 摄入）与
+    /// 模型链并行，模型面只等清单装好（`model_phase_open`）。仍然挡它的只有进行中的
+    /// 全量模型（`model_in_flight`）与启动策略要求的全量前置（`full_model_required`）。
     pub fn model_generation_allowed(&self) -> bool {
         let state = self.state();
         !state.model_in_flight
-            && ((state.epoch_id == 0 && !state.full_model_required)
-                || (state.data_ready && state.model_phase_open))
+            && ((state.epoch_id == 0 && !state.full_model_required) || state.model_phase_open)
     }
 
     /// Room/spatial post-processing is one barrier later than model writes.
@@ -496,7 +602,7 @@ impl InitializationCoordinator {
 
     pub fn mark_model_ready(&self) -> bool {
         let mut state = self.state();
-        if state.data_ready && state.model_phase_open {
+        if state.data_ready && state.model_phase_open && !state.startup_reconcile_pending {
             let changed = !state.model_ready;
             state.status = InitializationStatus::ModelReady;
             state.model_ready = true;
@@ -504,6 +610,36 @@ impl InitializationCoordinator {
         } else {
             false
         }
+    }
+
+    /// 服务启动宣告「模型凭证复核还没跑完」：从此到 [`Self::settle_startup_reconcile`]
+    /// 之间 `model_ready` 置不上，worker 空闲轮照常消化积压，只是不能宣告收敛。
+    /// 必须在 worker 起来之前调，否则第一圈空闲轮就可能抢先置位。
+    pub fn begin_startup_reconcile(&self) {
+        let mut state = self.state();
+        state.startup_reconcile_pending = true;
+        state.model_ready = false;
+        // 上一份覆盖面在这一刻作废：复核重跑期间摆着上一轮的数，比什么都不摆更糟。
+        state.startup_coverage = None;
+    }
+
+    /// 落地本次启动核到的覆盖面。与 [`Self::settle_startup_reconcile`] 分开两步：
+    /// 落地覆盖面是「核出了什么」，settle 是「已经排过了」——后者哪条出口都得走到，
+    /// 前者只有复核函数自己给得出。
+    pub fn record_startup_coverage(&self, coverage: StartupCoverage) {
+        self.state().startup_coverage = Some(coverage);
+    }
+
+    /// 启动复核落地（成功、取数失败、无凭证记录都算落地——它是「已经排过了」，不是
+    /// 「排成功了」）。不调这一下 `model_ready` 永远起不来，所以复核函数的每条出口都
+    /// 得走到它。
+    pub fn settle_startup_reconcile(&self) {
+        let mut state = self.state();
+        state.startup_reconcile_pending = false;
+    }
+
+    pub fn startup_reconcile_pending(&self) -> bool {
+        self.state().startup_reconcile_pending
     }
 
     pub fn snapshot(&self) -> InitializationSnapshot {
@@ -515,6 +651,9 @@ impl InitializationCoordinator {
             data_ready: state.data_ready,
             model_ready: state.model_ready,
             model_in_flight: state.model_in_flight,
+            model_phase_open: state.model_phase_open,
+            startup_reconcile_pending: state.startup_reconcile_pending,
+            startup: state.startup_coverage.clone(),
             phases: state
                 .phases
                 .iter()
@@ -931,6 +1070,118 @@ mod tests {
         assert!(coordinator.model_generation_allowed());
         assert!(coordinator.mark_model_ready());
         assert!(coordinator.snapshot().model_ready);
+    }
+
+    /// ADR-058 D7：模型门跟着清单开，不跟着数据相清零开。清单里还压着 Meta / Design
+    /// 行时模型写入已准入；仍等数据的只有收敛宣告（`mark_model_ready`）与房间。
+    #[test]
+    fn model_gate_opens_with_the_manifest_not_with_data_ready() {
+        let coordinator = coordinator();
+        let epoch = coordinator.begin_discovery();
+        assert!(
+            !coordinator.model_generation_allowed(),
+            "发现期（身份还没解析完）模型门必须关着"
+        );
+        coordinator.install_manifest(epoch, [DataPhase::Meta, DataPhase::Design], false, []);
+        assert!(!coordinator.data_ready());
+        assert!(coordinator.allows(DataPhase::Meta, epoch), "数据链照常放行");
+        assert!(
+            coordinator.model_generation_allowed(),
+            "清单装好即开模型门，不等 Meta → Design 摄完"
+        );
+        assert!(
+            !coordinator.mark_model_ready(),
+            "收敛宣告仍要 data_ready：数据尾事务还会往模型积压添行"
+        );
+        assert!(
+            !coordinator.postprocess_allowed(),
+            "房间仍排在数据与模型之后"
+        );
+        assert_eq!(coordinator.snapshot().status, "running");
+
+        // 数据链全部落地后收敛才可宣告；模型门自始至终没有关过。
+        let settled = coordinator.begin_discovery();
+        coordinator.install_manifest(settled, [], false, []);
+        assert!(coordinator.data_ready());
+        assert!(coordinator.model_generation_allowed());
+        assert!(coordinator.mark_model_ready());
+        assert!(coordinator.postprocess_allowed());
+    }
+
+    /// 数据相被挡（头部不可读、同号重复）不是模型面的事：模型门保持打开，
+    /// 只有收敛被打回。
+    #[test]
+    fn a_blocked_data_phase_does_not_close_the_model_gate() {
+        let coordinator = coordinator();
+        let epoch = coordinator.begin_discovery();
+        coordinator.install_manifest(
+            epoch,
+            [DataPhase::Design],
+            false,
+            [PhaseBlocker::new(DataPhase::Meta, "DICT unreadable")],
+        );
+        assert_eq!(coordinator.snapshot().status, "blocked");
+        assert!(!coordinator.data_ready());
+        assert!(coordinator.model_generation_allowed());
+
+        coordinator.mark_failed(
+            epoch,
+            PhaseBlocker::new(DataPhase::Design, "DESI header unreadable").with_dbnum(8191),
+        );
+        assert!(coordinator.model_generation_allowed());
+        assert!(!coordinator.snapshot().model_ready);
+        assert!(!coordinator.mark_model_ready());
+    }
+
+    /// 策略要求的全量前置仍是硬门：清单装好也不开，直到显式 `open_model_phase`。
+    #[test]
+    fn a_required_full_model_pass_still_closes_the_gate_after_the_manifest() {
+        let coordinator = coordinator();
+        let epoch = coordinator.begin_discovery();
+        coordinator.install_manifest(epoch, [DataPhase::Meta], false, []);
+        assert!(coordinator.model_generation_allowed());
+        coordinator.configure_model_bootstrap(true);
+        assert!(!coordinator.model_generation_allowed());
+        let next = coordinator.begin_discovery();
+        coordinator.install_manifest(next, [], false, []);
+        assert!(coordinator.data_ready());
+        assert!(!coordinator.model_generation_allowed());
+        assert!(coordinator.open_model_phase());
+        assert!(coordinator.model_generation_allowed());
+    }
+
+    #[test]
+    fn model_ready_waits_for_the_startup_reconcile_to_settle() {
+        let coordinator = coordinator();
+        let epoch = coordinator.begin_discovery();
+        coordinator.install_manifest(epoch, [], false, []);
+        assert!(coordinator.data_ready());
+        assert!(coordinator.model_generation_allowed());
+
+        coordinator.begin_startup_reconcile();
+        assert!(coordinator.startup_reconcile_pending());
+        assert!(coordinator.model_generation_allowed());
+        assert!(!coordinator.mark_model_ready());
+        assert!(!coordinator.snapshot().model_ready);
+        assert!(coordinator.snapshot().startup_reconcile_pending);
+
+        coordinator.settle_startup_reconcile();
+        assert!(!coordinator.startup_reconcile_pending());
+        assert!(coordinator.mark_model_ready());
+        assert!(coordinator.snapshot().model_ready);
+        assert!(!coordinator.snapshot().startup_reconcile_pending);
+    }
+
+    #[test]
+    fn beginning_the_startup_reconcile_retracts_an_early_model_ready() {
+        let coordinator = coordinator();
+        let epoch = coordinator.begin_discovery();
+        coordinator.install_manifest(epoch, [], false, []);
+        assert!(coordinator.mark_model_ready());
+
+        coordinator.begin_startup_reconcile();
+        assert!(!coordinator.snapshot().model_ready);
+        assert!(!coordinator.postprocess_allowed());
     }
 
     #[test]

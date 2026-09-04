@@ -18,7 +18,8 @@ FROM out->geo_relate
 WHERE visible && out.meshed && trans.d != none && geo_type = 'Pos'
 ```
 
-写路径是 journal（ADR-038），journal 里只能是纯字面量，这个子查询必须现场对图求值，
+写路径是 journal（ADR-038；**已随 ADR-056 退役**——稳态增量现直写持久层，「纯字面量」约束不再存在，
+但本 ADR 的结论「维护开销与变更量成正比」与 `insts_flat` 的失效协议不依赖 journal，原样有效），journal 里只能是纯字面量，这个子查询必须现场对图求值，
 写不成字面量。P4 因此把它放到「持久层非 journal 路径」上事后收口：
 `pdms_inst::sweep_inst_relate_flat`，挂在启动序列与 batch worker 空闲轮两处，
 空闲轮那处由一个进程级 `AtomicBool` 脏位门控。

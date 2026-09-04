@@ -1,0 +1,32 @@
+$(
+------------------------------------------------------------------------
+RVM 导出（对齐阈值边界复核，2026-09-02）：BRAN /M-OR-1R323-A  (dbnum 8000, =24384/24049)
+挑它的理由：tiny stubs 1.7-3.5mm at 0.029-0.139deg: angular threshold probe
+窄口径同 rvm_export_1rcv0101_b1.mac。只读：没有 SAVEWORK；不写 QUIT/FINISH——会话归 l3_suite driver。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/audit5/rvm_export_24049-M-OR-1R323-A.log" OVER
+$P CODEX-AUDIT5-RVM-EXPORT-ALIVE
+/M-OR-1R323-A
+Q CE
+Q REF
+Q NAME
+Q MEMB
+
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/rvm-audit5/24049-M-OR-1R323-A.rvm"
+export filenote 'audit5 24049-M-OR-1R323-A: tiny stubs 1.7-3.5mm at 0.029-0.139deg: angular threshold probe'
+export holes on
+export autocolour displayexport on
+export repr on
+export /M-OR-1R323-A
+export finish
+
+$P CODEX-AUDIT5-RVM-EXPORT-DONE
+ALPHA LOG END

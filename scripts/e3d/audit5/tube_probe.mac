@@ -1,0 +1,40 @@
+$(
+------------------------------------------------------------------------
+E3D 侧管身规则取证（bran-audit §5 复核，2026-09-02）：逐成员查 LSTU（离开侧管材规格）、
+ITLE（E3D 自己算的隐式管身长度）、ARRI/LEAV、POS，看 E3D 在哪些槽位「认」有管身：
+  /C-GR-1RX-3020B  E3D 导了 6 根 TUBE、我们只建 1 根（ATTA 处是否断管）
+  /Copy-of-1RCV0101-60.3-VMB-R90-R332]R333  E3D 4 根 / 我们 6 根（后两根偏轴 31°/47°）
+  /C-GR-1RX-3000A  E3D 1 根 / 我们 4 根
+  /M-YE-1R320-C    E3D 0 根 / 我们 3 根
+只读：没有 SAVEWORK；不写 QUIT/FINISH——会话归 l3_suite driver。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/audit5/tube_probe.log" OVER
+$P CODEX-AUDIT5-TUBE-PROBE-ALIVE
+
+do !bran values |/C-GR-1RX-3020B| |/Copy-of-1RCV0101-60.3-VMB-R90-R332]R333| |/C-GR-1RX-3000A| |/M-YE-1R320-C|
+  $!bran
+  $P ======== BRAN $!bran
+  Q REF
+  Q HSTU
+  Q TSTU
+  Q HPOS
+  Q TPOS
+  !members = !!ce.members
+  do !m values !members
+    !!ce = !m
+    $P -------- member
+    Q CE
+    Q REF
+    Q SPRE
+    Q LSTU
+    Q ARRI
+    Q LEAV
+    Q ITLE
+    Q POS
+  enddo
+enddo
+
+$P CODEX-AUDIT5-TUBE-PROBE-DONE
+ALPHA LOG END

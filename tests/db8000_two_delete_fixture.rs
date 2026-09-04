@@ -11,11 +11,11 @@ mod archive;
 
 use aios_core::RefnoEnum;
 use aios_core::pdms_types::RefU64;
+use aios_database::data_interface::ele_ops::{EleOperationData, EleOperationDetail};
 use aios_database::data_interface::increment_pipeline::IncrementPipeline;
 use aios_database::data_interface::manual_update::{NetOp, merge_net_changes};
+use aios_database::data_interface::db_file_header::snapshot_presence;
 use archive::{ExtractedFixture, verify_and_extract};
-use parse_pdms_db::paged::PagedDbSession;
-use pdms_io::io::{EleOperationData, EleOperationDetail};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -72,8 +72,8 @@ fn fixture_root() -> PathBuf {
 }
 
 fn assert_session(path: &Path, expected: u32) {
-    let session = PagedDbSession::open(path).expect("open extracted snapshot");
-    assert_eq!(session.snapshot().sesno, expected, "{}", path.display());
+    let session = snapshot_presence(path, &[]).expect("open extracted snapshot");
+    assert_eq!(session.sesno, expected, "{}", path.display());
 }
 
 fn refs() -> (RefU64, RefU64, RefU64) {

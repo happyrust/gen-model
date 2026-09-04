@@ -21,6 +21,10 @@
    `EleOperationDetail::Deleted`。
 4. 元素、OWNER 或成员块仲裁失败阻断窗口。补出的删除与父修改进入同一 staging
    journal，与水位原子提交。
+   > **2026-09-03 对照（ADR-056）**：staging journal 已退役；补出的删除与父修改现在进入同一直写窗口的
+   > `persist_latest_main_data` 语句批，水位仍只在其后的 `finalize_attempt` 尾事务推进（任一块失败水位不动、整窗口重放）。
+   > 本 ADR 的仲裁本身是 spec 035 P4 收集器换 e3d-io 前的过渡对策（ADR-056 实施约束 8）：P4 落地后随 `session_index_diff`
+   > 消费点一并退役。
 5. 已经错误提交的窗口使用停服维护命令纠正重放；纠正前后水位相等，不通过回退水位
    伪装成未执行窗口。
 

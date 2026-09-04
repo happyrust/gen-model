@@ -1,0 +1,47 @@
+-- db8000 BRAN 增删改链 / 第 3 腿「改·成员级」：scratch 支管里的 FTUB 4 再抬 500mm。
+--
+-- 复刻生产案例 db8000_bran_ftub_move_apply.mac（FTUBE 4 of /C-OR-1R345-C = 24384/23262，
+-- 会话 264→265 已由 e3d-model update_ams 实测：upsert 4 / remove 7、与全量逐件相同），
+-- 只是换到 scratch 支管上做，生产支管不动。预期：只有这一个 FTUB 单元 regen，
+-- BRAN 派生管身只有它两侧的两根变长（约 25mm 短接头 → 500mm 竖管）。
+--
+-- 纪律同第 1 腿：恰好一个 SAVEWORK；不写 QUIT/FINISH；SAVEWORK 之前先导 RVM。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bran_scratch_ftub_move.log" OVER
+$P CODEX-DB8000-BRAN-SCRATCH-FTUB-MOVE-ALIVE
+/CODEX_DB8000_BRAN_SCRATCH
+Q CE
+Q REF
+Q NAME
+FTUB 4
+Q CE
+Q REF
+Q OWNE
+Q POS
+BY U 500mm
+Q CE
+Q REF
+Q POS
+OWNER
+Q CE
+
+$* ---- RVM 导出（状态 3：ftub-moved）----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/db8000-bran-scratch/rvm/3-ftub-moved.rvm"
+export filenote 'CODEX db8000 scratch BRAN state 3 FTUB 4 BY U 500mm'
+export holes on
+export autocolour displayexport on
+export repr on
+export /CODEX_DB8000_BRAN_SCRATCH
+export finish
+
+/CODEX_DB8000_BRAN_SCRATCH
+Q REF
+Q NAME
+SAVEWORK 'CODEX db8000 scratch BRAN FTUB 4 BY U 500mm'
+$P CODEX-DB8000-BRAN-SCRATCH-FTUB-MOVE-DONE
+ALPHA LOG END

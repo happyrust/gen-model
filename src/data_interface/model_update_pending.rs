@@ -11,8 +11,10 @@ use serde::{Deserialize, Serialize};
 use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
+use crate::data_interface::initialization_phase::{StartupCoverage, StartupReconcile};
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
 use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::data_interface::window_root_plan::CredentialAdvanceOutcome;
 use crate::fast_model::aabb_refresh::AabbChange;
 use crate::fast_model::room_model;
 
@@ -42,14 +44,21 @@ struct PendingRowCount {
     count: u64,
 }
 
-/// Remove work left by an earlier service process before any startup producer or
-/// consumer is allowed to run.
+/// Remove data-derived work left by an earlier service process before any startup
+/// producer or consumer is allowed to run.
 ///
 /// `model_update_pending` is a scheduling ledger for the current process. The
 /// authoritative restart boundary is the atomic kv-mem data/model writeback to
 /// RocksDB, so replaying rows from a previous process would mix two snapshots.
 /// Counting and deleting share one ordered SurrealDB request; at this point the
 /// process-instance lock is held and no watcher/worker has started yet.
+///
+/// **房间任务不在此列**（ADR-050 修订 2026-09-03）。清的是 `DATA_ACTION_FILTER` 那五种，
+/// 它们全都能由启动复核（[`reconcile_model_coverage_at_startup`]）从凭证重新排出来；
+/// `room_recalc_*` 由 ADR-010 §7 的房间轮自己收敛，唯一的补偿是启动整库房间重建，而
+/// 那一步在 direct / env 禁用 / `autorun=false` / `model_incremental=false` 下都不跑——
+/// 这些形态下把房间行一起删掉就是真丢工作，且没有任何东西会报。与
+/// [`discard_pending_for_full_rebuild`] 同一口径。
 pub async fn clear_stale_at_process_start() -> anyhow::Result<u64> {
     clear_stale_at_process_start_on(&SUL_DB).await
 }
@@ -57,11 +66,21 @@ pub async fn clear_stale_at_process_start() -> anyhow::Result<u64> {
 async fn clear_stale_at_process_start_on(db: &Surreal<Any>) -> anyhow::Result<u64> {
     let mut response = db
         .query(format!(
-            "SELECT count() AS count FROM {TABLE} GROUP ALL; DELETE {TABLE};"
+            "SELECT count() AS count FROM {TABLE} WHERE true {DATA_ACTION_FILTER} GROUP ALL; \
+             DELETE {TABLE} WHERE true {DATA_ACTION_FILTER}; \
+             SELECT count() AS count FROM {TABLE} WHERE true {ROOM_ACTION_FILTER} GROUP ALL;"
         ))
         .await?
         .check()?;
     let counts: Vec<PendingRowCount> = response.take(0)?;
+    let rooms: Vec<PendingRowCount> = response.take(2)?;
+    let kept_rooms = rooms.first().map_or(0, |row| row.count);
+    if kept_rooms > 0 {
+        println!(
+            "启动清理保留 {kept_rooms} 行上一进程的房间任务（room_recalc_*）：\
+             它们不从凭证补偿，由房间轮自行收敛"
+        );
+    }
     Ok(counts.first().map_or(0, |row| row.count))
 }
 
@@ -204,6 +223,12 @@ pub struct ModelPendingStatus {
     pub room_phase: ModelPendingPhaseStatus,
     pub by_action: BTreeMap<String, ModelPendingPhaseStatus>,
     pub blocking_samples: Vec<ModelPendingBlockingSample>,
+    /// 被模型类型限定（`model_incremental_types`）暂扣、本进程不消费的活口行数。
+    /// 上面的 `retryable` / `data_phase` **不含**它们——那两个数说的是「本进程还会
+    /// 去做的活」，与 worker 的 `has_pending_work` 同一谓词；这一格单独摆出来，
+    /// 「名单外的根为什么一直不生成」在 `/health` 上就有答案，不必翻启动日志。
+    /// 没限定时恒为 0。
+    pub held_by_model_incremental_types: usize,
     pub error: Option<String>,
 }
 
@@ -843,10 +868,17 @@ fn render_upsert(item: &ModelWorkItem, source_end_sesno_time: Option<&str>) -> S
     } else {
         "{dbnum: $desired.dbnum?:0, source_end_sesno: $desired.source_end_sesno?:0}"
     };
+    // 顶层 `dbnum` 必须在这里写：它是 `gen_root` 行**唯一**的库归属列，启动的凭证下限
+    // （`startup_coverage_floors`）、覆盖清单与 `/dbnums` 的模型凭证下限全按 `WHERE dbnum != NONE`
+    // 取数。历史上只有 `fn::sync_gen_roots` 写它，而这条路创建的行一直没有——2026-09-03 实测
+    // ams 现场 2245 行 `gen_root` 里 2244 行 `dbnum = NONE`，库归属只藏在 `desired_target.dbnum`
+    // 这个嵌套字段里。`fn::sync_gen_roots` 随 ADR-058 D4 退出启动路径之后，不在这里补，
+    // 新根就永远归属不明，而按 dbnum 取数的每一处都会静默少算（不报错，只是看不见）。
     format!(
         "{pending_upsert}\n\
          LET $desired = (SELECT * FROM ONLY {id});\n\
          UPSERT type::thing('gen_root', '{root_id}') SET\n\
+           dbnum = {dbnum},\n\
            desired_revision = $desired.revision,\n\
            desired_target = {desired_target},\n\
            publication_status = IF (published_revision?:0) > 0 THEN 'stale' ELSE 'pending' END,\n\
@@ -891,6 +923,14 @@ pub async fn load_attempt(dbnum: u32) -> anyhow::Result<Option<IncrementUpdateAt
 }
 
 pub async fn prepare_attempt(attempt: &IncrementUpdateAttempt) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        attempt
+            .commit_token
+            .as_deref()
+            .is_some_and(|token| !token.trim().is_empty()),
+        "increment attempt dbnum={} requires a durable source commit token",
+        attempt.dbnum
+    );
     let plan_json = escape_surql_str(&serde_json::to_string(&attempt.plan)?);
     let db_type = escape_surql_str(&attempt.db_type);
     let file_path = escape_surql_str(&attempt.file_path);
@@ -1188,13 +1228,16 @@ fn render_baseline_finalize(
 /// untouched roots' `gen_root` credentials to `end_sesno` on a best-effort
 /// basis — outside the transaction on purpose, so a model-side failure can
 /// neither roll back nor block the watermark (N4).
+///
+/// 返回那次前移的账（名单为空则 `None`）：它只是回执材料（`DataBatchResult.credential_advance`，
+/// plant-ui 计划 G3），前移失败也不是错误——账上 `advanced = 0`，日志里说了原因。
 pub async fn finalize_attempt(
     dbnum: u32,
     end_sesno: i32,
     end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
     window_statements: &[String],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<CredentialAdvanceOutcome>> {
     finalize_attempt_on(
         &SUL_DB,
         dbnum,
@@ -1213,7 +1256,7 @@ pub(crate) async fn finalize_attempt_on(
     end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
     window_statements: &[String],
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Option<CredentialAdvanceOutcome>> {
     let render = render_finalize_tail(dbnum, end_sesno, end_sesno_time, plan, window_statements);
     for (index, batch) in render.window_batches.iter().enumerate() {
         db.query(batch)
@@ -1246,27 +1289,37 @@ pub(crate) async fn finalize_attempt_on(
     // 模型 drain 之前。成败只记日志——前移省的是算，不是正确性：没前移的根照旧按
     // ADR-054 单调判据过期，等按需 `ensure`。名单来自 `window_root_plan`（P2-1），旧计划
     // 与 CATA / SYST 窗口名单为空，这里一步不走。
-    if !plan.credential_advance.is_empty() {
-        match crate::data_interface::window_root_plan::advance_root_credentials_on(
-            db,
-            dbnum,
-            end_sesno,
-            end_sesno_time,
-            &plan.credential_advance,
-        )
-        .await
-        {
-            Ok(outcome) => println!(
+    if plan.credential_advance.is_empty() {
+        return Ok(None);
+    }
+    let outcome = match crate::data_interface::window_root_plan::advance_root_credentials_on(
+        db,
+        dbnum,
+        end_sesno,
+        end_sesno_time,
+        &plan.credential_advance,
+    )
+    .await
+    {
+        Ok(outcome) => {
+            println!(
                 "[凭证前移] dbnum={dbnum} 窗口右端 {end_sesno}：名单 {} 根，前移 {} 根",
                 outcome.requested, outcome.advanced
-            ),
-            Err(error) => println!(
+            );
+            outcome
+        }
+        Err(error) => {
+            println!(
                 "[凭证前移] dbnum={dbnum} 窗口右端 {end_sesno} 失败，名单上的根保持过期、\
                  等按需重生成: {error:#}"
-            ),
+            );
+            CredentialAdvanceOutcome {
+                requested: plan.credential_advance.len(),
+                advanced: 0,
+            }
         }
-    }
-    Ok(())
+    };
+    Ok(Some(outcome))
 }
 
 /// Establish a freshly parsed `dbnum`'s model work before advancing its watermark.
@@ -1710,21 +1763,30 @@ pub async fn sync_and_seed_model_coverage(
     })
 }
 
-/// ADR-025 模型门：这个库的每个生成根是否都有覆盖已应用水位的完成凭证。
+/// ADR-025 模型门：这个库的每个生成根是否都有覆盖**文件最新会话**的完成凭证。
+///
+/// 标尺是文件最新，不是 `applied_sesno`（ADR-054：水位只承诺数据落库，不是生成时点；
+/// ADR-058 D4 的启动复核也以文件最新为右端）。两边若不同尺，会出现启动复核刚判定
+/// 「落后、已开窗排队」而空闲轮同一刻判定「覆盖完整、模型就绪」——两个都对，只是
+/// 各拿一把尺。文件读取是同步 I/O（stat + 会话页），扔进阻塞线程。
 ///
 /// 与 [`gen_root_credential_is_current`] 同一口径（ADR-054 实施约束 4）：凭证会话号**不早于**
-/// 水位即算覆盖，`0`（未认领）永不算；时刻列只记不比。
+/// 标尺即算覆盖，`0`（未认领）永不算；时刻列只记不比。
 pub async fn model_coverage_current(dbnum: u32) -> anyhow::Result<bool> {
-    let state = crate::data_interface::dbnum_state::DbnumState::read(dbnum)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("dbnum={dbnum} has no applied watermark"))?;
+    let target = tokio::task::spawn_blocking(move || {
+        crate::data_interface::model_source::latest_source_version(dbnum)
+    })
+    .await
+    .map_err(|error| {
+        anyhow::anyhow!("model coverage dbnum={dbnum} source read panicked: {error}")
+    })??;
     let started = Instant::now();
     let coverage_result = SUL_DB
         .query(format!(
             "SELECT count() AS count FROM gen_root WHERE dbnum = {dbnum} AND (\
              (status?:'') NOT IN ['Generated','AlreadyAvailable','NoRenderableGeometry'] OR \
              (source_end_sesno?:0) <= 0 OR (source_end_sesno?:0) < {}) GROUP ALL;",
-            state.applied_sesno
+            target.sesno
         ))
         .await;
     crate::data_interface::model_concurrency::record_surreal_read(started.elapsed());
@@ -1760,95 +1822,324 @@ async fn coverage_tracked_dbnums_on(db: &Surreal<Any>) -> anyhow::Result<Vec<u32
     Ok(dbnums)
 }
 
-/// 启动期把生成根凭证与当前水位对齐——[`clear_stale_at_process_start`]（ADR-050）
-/// 的补偿路径。清空之后，凭证（`gen_root.source_end_sesno[_time]`）是上一进程模型
-/// 进度唯一活下来的记录；不在这里核对，重启就会把「积压被清掉」静默判成「模型完整」。
+/// 每个库的**模型凭证下限**（ADR-058 D5）：安定生成根里最小的 `source_end_sesno`，
+/// 外加没有可用凭证的根数。
 ///
-/// 两种口径：
+/// 模型那一枚凭证（ADR-056 N5；数据那一枚是 `dbnum_watermark.applied_sesno`）。与
+/// 文件最新会话一比就答得出「这个库的模型按哪一版数据生成」——启动一级过滤、覆盖
+/// 清单与 `/dbnums` 的凭证两列全部照这一份取数，**不另开第二套口径**：同一个库在
+/// 启动日志与接口上给出两个不同的「落后到哪一版」，看的人分不出哪个是真的。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StartupCoverageFloor {
+    /// 已安定行里最小的 `source_end_sesno`；一条安定行都没有时是 `None`。
+    pub settled_floor: Option<i32>,
+    pub settled_roots: usize,
+    pub unsettled_roots: usize,
+}
+
+/// 把只有嵌套归属的历史 `gen_root` 行补上顶层 `dbnum`，返回补了几行。
 ///
-/// - **监听限定域**（ADR-048）：对声明的每个库跑完整 `fn::sync_gen_roots` + 补种。
-/// - **未限定域**：不能对全库跑 `fn::sync_gen_roots`——`fn::gen_root_cover` 按库遍历
-///   `pe` 与祖先链，448 库的现场付不起。改为只核对已有凭证记录的库（`gen_root_dbnum`
-///   索引点查），发现过期才对那一个库做完整 sync + 补种；没有凭证记录的库当面说
-///   「核不了」，不许静默当作完整。
+/// `render_upsert` 从 2026-09-03 起在建行时就写顶层 `dbnum`；在那之前由模型队列创建的行只有
+/// `desired_target.dbnum`，顶层是 `NONE`。而启动的凭证下限、覆盖清单与 `/dbnums` 的模型凭证
+/// 下限**全部**按 `WHERE dbnum != NONE` 取数——不补，这些行就一直看不见，而且不会报错，
+/// 只是每一处按库取数的地方都少算（ams 现场实测 2245 行里 2244 行如此）。
 ///
-/// 任何一库失败都**不中止启动**：告警并按「覆盖未确认」处理。限定域模式下空闲轮的
-/// 凭证门（`model_coverage_current`）会继续把 model_ready 拉住；未限定域下补种成功的
-/// 行走普通 pending 门，补种失败的库在日志里点名人工出口（`POST /model/rebuild`）。
-pub async fn reconcile_model_coverage_at_startup() {
-    if crate::data_interface::watch_scope::active() {
-        for dbnum in crate::data_interface::watch_scope::dbnums() {
-            match sync_and_seed_model_coverage(dbnum, false).await {
-                Ok(coverage) => println!(
-                    "模型完整性扫描 dbnum={}: 当前根={} 当前凭证={} 新排队={} 水位={}",
-                    dbnum,
-                    coverage.expected_roots,
-                    coverage.completed_roots,
-                    coverage.enqueued_roots,
-                    coverage.source_end_sesno
-                ),
-                Err(error) => println!(
-                    "模型完整性扫描失败 dbnum={dbnum}（启动继续；空闲轮凭证门会把 \
-                     model_ready 拉住，直到该库核对通过）: {error:#}"
-                ),
-            }
-        }
-        return;
+/// 幂等，补完就不再命中。全表谓词，只挂启动序列（与 [`coverage_tracked_dbnums`] 同一口径）。
+/// 失败只告警：它是补齐不是前提，下一次启动还会再试。
+pub(crate) async fn backfill_gen_root_dbnum_on(db: &Surreal<Any>) -> anyhow::Result<usize> {
+    #[derive(Debug, Deserialize)]
+    struct Backfilled {
+        #[allow(dead_code)]
+        id: surrealdb::sql::Thing,
     }
-    let tracked = match coverage_tracked_dbnums().await {
-        Ok(tracked) => tracked,
+    let mut response = db
+        .query(
+            "UPDATE gen_root SET dbnum = desired_target.dbnum \
+             WHERE dbnum = NONE AND (desired_target.dbnum ?: 0) > 0 RETURN id;",
+        )
+        .await?
+        .check()?;
+    let rows: Vec<Backfilled> = response.take(0)?;
+    Ok(rows.len())
+}
+
+/// 一次请求两条聚合语句问完全部库——不是逐库点查，更不是逐库开窗（ADR-058 D5）。
+///
+/// 「安定」= 状态在 [`SETTLED_ROOT_STATUSES`] 里且凭证大于 0，与
+/// `window_root_plan::PersistedRootState::is_settled` 同一口径。未安定的行没有可用的凭证，
+/// 它们既进不了下限、也一定要重排，所以单独计数——一个库只要有一行未安定就得开窗，
+/// 哪怕其余凭证全都追平了。
+pub async fn startup_coverage_floors() -> anyhow::Result<BTreeMap<u32, StartupCoverageFloor>> {
+    startup_coverage_floors_on(&SUL_DB).await
+}
+
+pub(crate) async fn startup_coverage_floors_on(
+    db: &Surreal<Any>,
+) -> anyhow::Result<BTreeMap<u32, StartupCoverageFloor>> {
+    #[derive(Debug, Deserialize)]
+    struct SettledRow {
+        #[serde(default)]
+        dbnum: Option<u32>,
+        #[serde(default)]
+        floor: Option<i32>,
+        #[serde(default)]
+        roots: usize,
+    }
+    #[derive(Debug, Deserialize)]
+    struct UnsettledRow {
+        #[serde(default)]
+        dbnum: Option<u32>,
+        #[serde(default)]
+        roots: usize,
+    }
+    let settled = crate::data_interface::window_root_plan::SETTLED_ROOT_STATUSES
+        .iter()
+        .map(|status| format!("'{status}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let started = Instant::now();
+    let mut response = db
+        .query(format!(
+            "SELECT dbnum, math::min(source_end_sesno ?: 0) AS floor, count() AS roots \
+             FROM gen_root WHERE dbnum != NONE AND (status ?: '') IN [{settled}] \
+             AND (source_end_sesno ?: 0) > 0 GROUP BY dbnum;\
+             SELECT dbnum, count() AS roots FROM gen_root WHERE dbnum != NONE \
+             AND ((status ?: '') NOT IN [{settled}] OR (source_end_sesno ?: 0) <= 0) \
+             GROUP BY dbnum;"
+        ))
+        .await?
+        .check()?;
+    crate::data_interface::model_concurrency::record_surreal_read(started.elapsed());
+    let mut floors: BTreeMap<u32, StartupCoverageFloor> = BTreeMap::new();
+    for row in response.take::<Vec<SettledRow>>(0)? {
+        let Some(dbnum) = row.dbnum else { continue };
+        let entry = floors.entry(dbnum).or_default();
+        entry.settled_floor = row.floor;
+        entry.settled_roots = row.roots;
+    }
+    for row in response.take::<Vec<UnsettledRow>>(1)? {
+        let Some(dbnum) = row.dbnum else { continue };
+        floors.entry(dbnum).or_default().unsettled_roots = row.roots;
+    }
+    Ok(floors)
+}
+
+/// 启动期把生成根凭证与**文件最新会话**对齐——[`clear_stale_at_process_start`]（ADR-050）
+/// 的补偿路径。清空之后，凭证（`gen_root.source_end_sesno[_time]`）是上一进程模型进度唯一
+/// 活下来的记录；不在这里核对，重启就会把「积压被清掉」静默判成「模型完整」。
+///
+/// 两级（ADR-058 D5）：
+///
+/// 1. [`startup_coverage_floors`] 一次问完全部库的凭证下限，与文件最新会话比。追平的库
+///    **连窗都不开**；
+/// 2. 落后的库各开一次[启动退化窗口][crate::data_interface::window_root_plan::reconcile_startup_window]。
+///
+/// 标尺是文件最新，不是 `applied_sesno`（ADR-054：水位只承诺数据，生成时点从文件取）。
+/// 选根判据整条来自稳态窗口，这里一条都不新增（ADR-058 S1）；`fn::sync_gen_roots` 不在这条
+/// 路上——它的 `fn::gen_root_cover` 第一句就是查 `pe`，而 ADR-056 N7 要求模型面不以 `pe` 为前置。
+///
+/// `gen_root` 一行都没有的库不在这里出现，也不该出现：从未生成过的根按需生成（ADR-058 D6），
+/// 启动一根不排。
+///
+/// 任何一库失败都**不中止启动**：告警并按「覆盖未确认」处理，人工出口是
+/// `POST /api/v1/dbnums/{dbnum}/model/rebuild`。
+///
+/// 外壳只做两件事：把内层核出来的覆盖面
+/// [落地][crate::data_interface::initialization_phase::InitializationCoordinator::record_startup_coverage]
+/// 到协调器，然后无论内层从哪条出口返回，都把
+/// [`begin_startup_reconcile`](crate::data_interface::initialization_phase::InitializationCoordinator::begin_startup_reconcile)
+/// 落地。落地的含义是「已经排过了」——排出来的工作项由 worker 空闲轮照常消化，
+/// `model_ready` 从此刻起才允许置位。漏掉任何一条出口，`model_ready` 就永远起不来。
+///
+/// 内层**返回**覆盖面而不是自己写进协调器，理由与 settle 同一条：这个函数有五条
+/// 出口，靠每条自己记得写一次，迟早会漏掉一条，而漏掉的表现是 `/health` 上那一格
+/// 停在 `pending` ——看着像复核卡住了。
+pub async fn reconcile_model_coverage_at_startup() {
+    let coordinator =
+        crate::data_interface::initialization_phase::InitializationCoordinator::global();
+    let coverage = reconcile_model_coverage_at_startup_inner().await;
+    coordinator.record_startup_coverage(coverage);
+    coordinator.settle_startup_reconcile();
+    // 复核可能刚排进一批工作项；调度器的空闲等待是 30 秒一圈，不叫醒就白等一圈。
+    crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
+}
+
+/// 启动那一刻**登记了、却一条凭证记录都没有**的库（ADR-058 D6：等按需 ensure，
+/// 启动一根不排）。
+///
+/// 读不到登记表时回 `None`：「没有无凭证的库」与「不知道有没有」在这一栏上长得一
+/// 模一样，而前者是绿灯、后者要人去翻日志。
+async fn dbnums_without_credentials(
+    floors: &BTreeMap<u32, StartupCoverageFloor>,
+) -> Option<Vec<u32>> {
+    match crate::data_interface::dbnum_state::DbnumState::list_registered().await {
+        Ok(states) => {
+            let mut missing: Vec<u32> = states
+                .into_iter()
+                .map(|state| state.dbnum)
+                .filter(|dbnum| {
+                    crate::data_interface::watch_scope::admits(*dbnum)
+                        && !floors.contains_key(dbnum)
+                })
+                .collect();
+            missing.sort_unstable();
+            missing.dedup();
+            Some(missing)
+        }
         Err(error) => {
             println!(
-                "模型完整性扫描失败：读 gen_root 凭证清单失败，本次启动无法核对模型覆盖\
+                "模型凭证核对：读不到 DBNUM 登记表，本次说不出哪些库还没有凭证记录\
+                 ——是未知，不是「都有」: {error:#}"
+            );
+            None
+        }
+    }
+}
+
+async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
+    let mut coverage = StartupCoverage {
+        scope: if crate::data_interface::watch_scope::active() {
+            "watch"
+        } else {
+            "all"
+        },
+        in_scope: 0,
+        candidates: 0,
+        no_credential_dbnums: None,
+        reconcile: StartupReconcile::default(),
+    };
+    // 先补归属再取下限：只有嵌套 `desired_target.dbnum` 的历史行不补就取不到，
+    // 而取不到的表现不是报错，是那个库当面消失。
+    match backfill_gen_root_dbnum_on(&SUL_DB).await {
+        Ok(0) => {}
+        Ok(rows) => println!("生成根库归属回填：{rows} 行只有嵌套归属的历史行补上了顶层 dbnum"),
+        Err(error) => {
+            println!("生成根库归属回填失败（本次核对可能少算若干库，下次启动再试）: {error:#}")
+        }
+    }
+    let floors = match startup_coverage_floors().await {
+        Ok(floors) => floors,
+        Err(error) => {
+            println!(
+                "模型凭证核对失败：读 gen_root 凭证下限失败，本次启动无法核对模型覆盖\
                  ——覆盖状态是未知，不是完整: {error:#}"
             );
-            return;
+            coverage.reconcile.result = "floors_failed";
+            return coverage;
         }
     };
-    if tracked.is_empty() {
+    coverage.candidates = floors.len();
+    coverage.no_credential_dbnums = dbnums_without_credentials(&floors).await;
+    if floors.is_empty() {
         println!(
-            "模型完整性扫描：gen_root 尚无凭证记录，本次启动无法核对模型覆盖\
-             （库首次经过带凭证的生成、监听限定域启动或人工 rebuild 后自动纳入）"
+            "模型凭证核对：gen_root 尚无凭证记录，本次启动不排任何模型工作\
+             ——从未生成过的根等按需 ensure（ADR-058 D6）"
         );
-        return;
+        coverage.reconcile.result = "ok";
+        return coverage;
     }
-    let mut stale = 0usize;
-    for dbnum in tracked.iter().copied() {
-        let current = match model_coverage_current(dbnum).await {
-            Ok(current) => current,
-            Err(error) => {
+
+    let mut examined = 0usize;
+    let mut windows = 0usize;
+    let mut enqueued = 0usize;
+    let mut advanced = 0usize;
+    let mut unreadable = 0usize;
+    let mut window_failed = 0usize;
+    for (dbnum, floor) in floors {
+        if !crate::data_interface::watch_scope::admits(dbnum) {
+            continue;
+        }
+        examined += 1;
+        let target = match tokio::task::spawn_blocking(move || {
+            crate::data_interface::model_source::latest_source_version(dbnum)
+        })
+        .await
+        {
+            Ok(Ok(target)) => target,
+            Ok(Err(error)) => {
+                unreadable += 1;
                 println!(
-                    "模型完整性凭证核对失败 dbnum={dbnum}（按未确认处理，启动继续）: {error:#}"
+                    "模型凭证核对跳过 dbnum={dbnum}（取不到文件最新会话，按未确认处理，\
+                     启动继续）: {error:#}"
+                );
+                continue;
+            }
+            Err(error) => {
+                unreadable += 1;
+                println!(
+                    "模型凭证核对跳过 dbnum={dbnum}（读取文件最新会话的阻塞任务异常，\
+                     按未确认处理，启动继续）: {error}"
                 );
                 continue;
             }
         };
-        if current {
+        // 一级过滤：安定凭证已不早于文件最新，且没有未安定的行 —— 这个库连窗都不用开。
+        let behind = floor.unsettled_roots > 0
+            || floor
+                .settled_floor
+                .is_none_or(|settled| settled < target.sesno as i32);
+        if !behind {
             continue;
         }
-        stale += 1;
-        match sync_and_seed_model_coverage(dbnum, false).await {
-            Ok(coverage) => println!(
-                "模型完整性扫描 dbnum={}: 当前根={} 当前凭证={} 新排队={} 水位={}\
-                 （上一进程被启动清理的模型积压按凭证重建，ADR-050）",
-                dbnum,
-                coverage.expected_roots,
-                coverage.completed_roots,
-                coverage.enqueued_roots,
-                coverage.source_end_sesno
-            ),
-            Err(error) => println!(
-                "模型完整性补种失败 dbnum={dbnum}：该库模型覆盖有缺口且本次未能补种，\
-                 需人工 POST /api/v1/dbnums/{dbnum}/model/rebuild 收口: {error:#}"
-            ),
+        windows += 1;
+        match crate::data_interface::window_root_plan::reconcile_startup_window(
+            dbnum,
+            &target.db_type,
+            floor.settled_floor,
+            &target,
+        )
+        .await
+        {
+            Ok(report) => {
+                enqueued += report.enqueued;
+                advanced += report.advanced;
+                println!(
+                    "启动退化窗口 dbnum={dbnum} {}→{} 根={} 未安定={} 排队={} 前移={}{}",
+                    report
+                        .base_sesno
+                        .map_or_else(|| "—".to_string(), |base| base.to_string()),
+                    report.target_sesno,
+                    report.roots_s,
+                    report.unsettled,
+                    report.enqueued,
+                    report.advanced,
+                    report
+                        .degraded
+                        .as_deref()
+                        .map(|reason| format!(" degraded={reason}"))
+                        .unwrap_or_default(),
+                );
+            }
+            Err(error) => {
+                window_failed += 1;
+                println!(
+                    "启动退化窗口失败 dbnum={dbnum}：该库模型覆盖有缺口且本次未能收口，\
+                     需人工 POST /api/v1/dbnums/{dbnum}/model/rebuild 收口（启动继续）: {error:#}"
+                )
+            }
         }
     }
-    if stale == 0 {
-        println!(
-            "模型完整性扫描：{} 个有凭证记录的库全部与当前水位一致",
-            tracked.len()
-        );
-    }
+    println!(
+        "模型凭证核对完成：核对 {examined} 库，开窗 {windows} 库，排队 {enqueued} 项，\
+         前移凭证 {advanced} 根，取不到文件最新 {unreadable} 库，开窗失败 {window_failed} 库"
+    );
+    coverage.in_scope = examined;
+    coverage.reconcile = StartupReconcile {
+        // 最重的那一档说了算：开窗失败要人动手，取不到文件最新只是这一轮没确认。
+        result: if window_failed > 0 {
+            "window_failed"
+        } else if unreadable > 0 {
+            "unreadable"
+        } else {
+            "ok"
+        },
+        unreadable,
+        window_failed,
+        lagging: windows,
+        windows_opened: windows - window_failed,
+        ..StartupReconcile::default()
+    };
+    coverage
 }
 
 /// 取该生成根当前的收口令牌。存量表里同一个根可能还留着一条旧 id 的行，取较大的
@@ -2064,7 +2355,17 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
         }
         ModelWorkAction::Transform => mgr.update_world_transforms(&HashSet::from([refno])).await,
         ModelWorkAction::DeleteCleanup => {
-            crate::data_interface::helper::delete_inst_relate_subtree(&[refno], 300).await
+            crate::data_interface::helper::delete_inst_relate_subtree(&[refno], 300).await?;
+            if item.noun.trim().is_empty() {
+                let key = item.target_refno.replace('/', "_");
+                SUL_DB
+                    .query(format!(
+                        "DELETE gen_root:{key} WHERE pe = NONE AND noun = NONE;"
+                    ))
+                    .await?
+                    .check()?;
+            }
+            Ok(())
         }
         ModelWorkAction::CascadeExpand => {
             let roots =
@@ -2628,15 +2929,70 @@ fn render_automatic_scope_filter(dbnums: &[u32]) -> String {
     }
 }
 
+/// 模型增量类型限定（`model_incremental_types`，见 [`super::model_type_scope`]）的 SQL 谓词。
+///
+/// 与 [`render_automatic_scope_filter`] 同一条纪律：留在 SQL 里而不是过滤解码后的行——
+/// 名单外的 durable 行不得被本进程认领、执行或碰 attempts；计数与加载两侧也必须给出同
+/// 一个答案（否则空闲轮会像 2026-08-27 那样自己喂自己空转）。
+///
+/// 只圈 `regen_root` / `delete_cleanup`（[`super::model_type_scope::GATED_ACTIONS`]）：
+/// `transform`（老规划器的便宜路径）、`cascade_expand`（CATA 元素，展开后的派生根另有
+/// 自己的 regen 行）、`post_regen_aabb` 与房间任务不看名单。**noun 为空的行放行**——
+/// 老规划器的 Transform / DeleteCleanup 行不带 noun，挡不准的不挡。名单已在配置层
+/// 归一成大写，行上的 noun 再在 SQL 里 uppercase 一次，别让一处小写写法把根静默扣住。
+fn render_automatic_type_filter(nouns: &[String]) -> String {
+    if nouns.is_empty() {
+        return String::new();
+    }
+    format!(
+        " AND (action NOT IN [{gated}] OR (noun?:'') = '' OR \
+         string::uppercase(noun?:'') IN [{members}])",
+        gated = render_gated_actions(),
+        members = render_noun_members(nouns)
+    )
+}
+
+/// [`render_automatic_type_filter`] 的补集：被类型限定**暂扣**的行。只给 `/health` 的
+/// `held_by_model_incremental_types` 计数用——它与放行谓词必须严格互补，否则一行会
+/// 同时出现在「待消费」与「被暂扣」两边，或者两边都不见。
+fn render_automatic_type_holdback(nouns: &[String]) -> Option<String> {
+    (!nouns.is_empty()).then(|| {
+        format!(
+            " AND action IN [{gated}] AND (noun?:'') != '' AND \
+             string::uppercase(noun?:'') NOT IN [{members}]",
+            gated = render_gated_actions(),
+            members = render_noun_members(nouns)
+        )
+    })
+}
+
+fn render_gated_actions() -> String {
+    crate::data_interface::model_type_scope::GATED_ACTIONS
+        .iter()
+        .map(|action| format!("'{}'", action.as_str()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn render_noun_members(nouns: &[String]) -> String {
+    nouns
+        .iter()
+        .map(|noun| format!("'{}'", escape_surql_str(noun)))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 fn render_drain_select_for_scope(
     action_filter: &str,
     limit: Option<usize>,
     dbnums: &[u32],
+    nouns: &[String],
 ) -> String {
     let limit = limit
         .map(|value| format!(" LIMIT {value}"))
         .unwrap_or_default();
     let scope_filter = render_automatic_scope_filter(dbnums);
+    let type_filter = render_automatic_type_filter(nouns);
     format!(
         "SELECT *, source_end_sesno_time IS NONE AS legacy_source_time, \
          updated_at IS NONE AS legacy_timestamp FROM {TABLE} \
@@ -2645,7 +3001,7 @@ fn render_drain_select_for_scope(
          AND (cohort_id IS NONE OR cohort_id NOT IN \
           (SELECT VALUE cohort_id FROM {TABLE} WHERE status = 'running' \
            AND lease_until >= time::now() AND cohort_id IS NOT NONE)) \
-         AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter}{scope_filter} \
+         AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter}{scope_filter}{type_filter} \
          ORDER BY legacy_source_time ASC, source_end_sesno_time DESC, \
          legacy_timestamp ASC, updated_at DESC, id ASC{limit};"
     )
@@ -2655,9 +3011,10 @@ fn render_drain_claim_for_scope(
     action_filter: &str,
     limit: Option<usize>,
     dbnums: &[u32],
+    nouns: &[String],
     lease_owner: &str,
 ) -> String {
-    let select = render_drain_select_for_scope(action_filter, limit, dbnums);
+    let select = render_drain_select_for_scope(action_filter, limit, dbnums, nouns);
     let select = select.trim_end_matches(';');
     format!(
         "UPDATE ({select}) SET status='running', lease_owner='{}', \
@@ -2669,6 +3026,7 @@ fn render_drain_claim_for_scope(
 fn render_cohort_mate_claim_for_scope(
     action_filter: &str,
     dbnums: &[u32],
+    nouns: &[String],
     lease_owner: &str,
     cohort_ids: &[String],
 ) -> Option<String> {
@@ -2681,13 +3039,14 @@ fn render_cohort_mate_claim_for_scope(
         .collect::<Vec<_>>()
         .join(", ");
     let scope_filter = render_automatic_scope_filter(dbnums);
+    let type_filter = render_automatic_type_filter(nouns);
     Some(format!(
         "UPDATE {TABLE} SET status='running', lease_owner='{}', \
          lease_until=time::now() + {MODEL_WORK_LEASE} \
          WHERE cohort_id IN [{cohorts}] \
          AND (status IN ['pending', 'failed'] OR \
           (status = 'running' AND (lease_until IS NONE OR lease_until < time::now()))) \
-         AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter}{scope_filter} RETURN AFTER;",
+         AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter}{scope_filter}{type_filter} RETURN AFTER;",
         escape_surql_str(lease_owner)
     ))
 }
@@ -2697,6 +3056,7 @@ async fn claim_page_with_cohorts_on(
     action_filter: &str,
     limit: Option<usize>,
     dbnums: &[u32],
+    nouns: &[String],
     lease_owner: &str,
 ) -> anyhow::Result<Vec<PendingModelWork>> {
     let mut response = db
@@ -2704,6 +3064,7 @@ async fn claim_page_with_cohorts_on(
             action_filter,
             limit,
             dbnums,
+            nouns,
             lease_owner,
         ))
         .await?
@@ -2716,7 +3077,7 @@ async fn claim_page_with_cohorts_on(
         .into_iter()
         .collect::<Vec<_>>();
     if let Some(sql) =
-        render_cohort_mate_claim_for_scope(action_filter, dbnums, lease_owner, &cohort_ids)
+        render_cohort_mate_claim_for_scope(action_filter, dbnums, nouns, lease_owner, &cohort_ids)
     {
         let mut response = db.query(sql).await?.check()?;
         let mates: Vec<PendingModelWork> = response.take(0)?;
@@ -2750,15 +3111,17 @@ fn render_drain_select(action_filter: &str, limit: Option<usize>) -> String {
         action_filter,
         limit,
         &crate::data_interface::watch_scope::dbnums(),
+        &crate::data_interface::model_type_scope::nouns(),
     )
 }
 
-fn render_pending_count_query(action_filter: &str, dbnums: &[u32]) -> String {
+fn render_pending_count_query(action_filter: &str, dbnums: &[u32], nouns: &[String]) -> String {
     let scope_filter = render_automatic_scope_filter(dbnums);
+    let type_filter = render_automatic_type_filter(nouns);
     format!(
         "SELECT count() AS count FROM {TABLE} \
          WHERE status IN ['pending', 'failed', 'running'] \
-         AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter}{scope_filter} GROUP ALL;"
+         AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter}{scope_filter}{type_filter} GROUP ALL;"
     )
 }
 
@@ -2767,6 +3130,7 @@ async fn count_pending_work(action_filter: &str) -> anyhow::Result<usize> {
         .query(render_pending_count_query(
             action_filter,
             &crate::data_interface::watch_scope::dbnums(),
+            &crate::data_interface::model_type_scope::nouns(),
         ))
         .await?
         .check()?;
@@ -3119,6 +3483,7 @@ async fn drain_where_cooperative(
         action_filter,
         limit,
         &crate::data_interface::watch_scope::dbnums(),
+        &crate::data_interface::model_type_scope::nouns(),
         drain_lease_owner(),
     )
     .await
@@ -3956,8 +4321,10 @@ fn render_has_pending_work_query(
     action_filter: &str,
     attempt_operator: &str,
     dbnums: &[u32],
+    nouns: &[String],
 ) -> String {
     let scope_filter = render_automatic_scope_filter(dbnums);
+    let type_filter = render_automatic_type_filter(nouns);
     let statuses = if attempt_operator == "<" {
         "['pending', 'failed', 'running']"
     } else {
@@ -3966,7 +4333,7 @@ fn render_has_pending_work_query(
     format!(
         "RETURN array::len((SELECT VALUE id FROM {TABLE} \
          WHERE status IN {statuses} AND (attempts?:0) {attempt_operator} {MAX_ATTEMPTS} \
-         {action_filter}{scope_filter} LIMIT 1)) > 0;"
+         {action_filter}{scope_filter}{type_filter} LIMIT 1)) > 0;"
     )
 }
 
@@ -3976,6 +4343,7 @@ async fn has_pending_work(action_filter: &str) -> anyhow::Result<bool> {
             action_filter,
             "<",
             &crate::data_interface::watch_scope::dbnums(),
+            &crate::data_interface::model_type_scope::nouns(),
         ))
         .await?
         .check()?;
@@ -3995,6 +4363,7 @@ pub async fn has_dead_data_work() -> anyhow::Result<bool> {
             DATA_ACTION_FILTER,
             ">=",
             &crate::data_interface::watch_scope::dbnums(),
+            &crate::data_interface::model_type_scope::nouns(),
         ))
         .await?
         .check()?;
@@ -4053,29 +4422,45 @@ fn build_model_pending_status(
 /// Read all model/room pending counts and a bounded terminal sample in one
 /// database round trip. This is shared by the idle worker and `/health`, so the
 /// console and API cannot disagree about whether the model gate is blocked.
-fn render_model_pending_status_query_for_scope(dbnums: &[u32]) -> String {
+/// 类型限定生效时多出第四条语句：被暂扣的行数。名单为空时**不渲染**这条——
+/// 三条语句的形状与引入前逐字相同，解码侧按名单是否为空决定要不要取第四格。
+fn render_model_pending_status_query_for_scope(dbnums: &[u32], nouns: &[String]) -> String {
     let scope_filter = render_automatic_scope_filter(dbnums);
+    let type_filter = render_automatic_type_filter(nouns);
+    let held = render_automatic_type_holdback(nouns)
+        .map(|holdback| {
+            format!(
+                "SELECT count() AS count FROM {TABLE} \
+                 WHERE status IN ['pending', 'failed', 'running'] AND (attempts?:0) < {MAX_ATTEMPTS}\
+                 {holdback}{scope_filter} GROUP ALL;"
+            )
+        })
+        .unwrap_or_default();
     format!(
         "SELECT action, count() AS c FROM {TABLE} \
-             WHERE status IN ['pending', 'failed', 'running'] AND (attempts?:0) < {MAX_ATTEMPTS}{scope_filter} \
+             WHERE status IN ['pending', 'failed', 'running'] AND (attempts?:0) < {MAX_ATTEMPTS}{scope_filter}{type_filter} \
              GROUP BY action;\
              SELECT action, count() AS c FROM {TABLE} \
-             WHERE status IN ['pending', 'failed'] AND (attempts?:0) >= {MAX_ATTEMPTS}{scope_filter} \
+             WHERE status IN ['pending', 'failed'] AND (attempts?:0) >= {MAX_ATTEMPTS}{scope_filter}{type_filter} \
              GROUP BY action;\
              SELECT id, action, target_refno, noun, attempts, last_error, revision, updated_at \
              FROM {TABLE} WHERE status IN ['pending', 'failed'] \
-             AND (attempts?:0) >= {MAX_ATTEMPTS}{scope_filter} \
-             ORDER BY updated_at DESC, id ASC LIMIT 10;"
+             AND (attempts?:0) >= {MAX_ATTEMPTS}{scope_filter}{type_filter} \
+             ORDER BY updated_at DESC, id ASC LIMIT 10;{held}"
     )
 }
 
-fn render_model_pending_status_query() -> String {
-    render_model_pending_status_query_for_scope(&crate::data_interface::watch_scope::dbnums())
+fn render_model_pending_status_query(nouns: &[String]) -> String {
+    render_model_pending_status_query_for_scope(
+        &crate::data_interface::watch_scope::dbnums(),
+        nouns,
+    )
 }
 
 pub async fn model_pending_status() -> anyhow::Result<ModelPendingStatus> {
+    let nouns = crate::data_interface::model_type_scope::nouns();
     let mut response = SUL_DB
-        .query(render_model_pending_status_query())
+        .query(render_model_pending_status_query(&nouns))
         .await
         .map_err(|error| anyhow::anyhow!("read model pending status failed: {error}"))?
         .check()
@@ -4091,7 +4476,20 @@ pub async fn model_pending_status() -> anyhow::Result<ModelPendingStatus> {
     let samples = response
         .take::<Vec<ModelPendingBlockingSample>>(2)
         .map_err(|error| anyhow::anyhow!("decode model dead-letter samples failed: {error}"))?;
-    Ok(build_model_pending_status(retryable, dead, samples))
+    let held = if nouns.is_empty() {
+        0
+    } else {
+        response
+            .take::<Vec<PendingRowCount>>(3)
+            .map_err(|error| {
+                anyhow::anyhow!("decode model rows held by model_incremental_types failed: {error}")
+            })?
+            .first()
+            .map_or(0, |row| row.count as usize)
+    };
+    let mut status = build_model_pending_status(retryable, dead, samples);
+    status.held_by_model_incremental_types = held;
+    Ok(status)
 }
 
 /// 待重算房间目标的分项计数（ADR-011 §10：随 `room_recalc` 任务详情带出）。
@@ -4528,37 +4926,73 @@ mod tests {
     use std::sync::mpsc;
     use std::time::{Duration, Instant};
 
-    /// ADR-050: rows from a previous process are not recovery input. The
-    /// startup barrier must remove every action/dbnum, not just the watch scope.
+    /// ADR-050（2026-09-03 修订）: rows from a previous process are not recovery input.
+    /// The startup barrier removes the five data actions for every dbnum (not just the
+    /// watch scope, and `dbnum = 0` on-demand rows too), and keeps `room_recalc_*`:
+    /// data work is re-derived from `gen_root` credentials by the startup reconcile,
+    /// room work has no such compensation outside the full room rebuild.
     #[tokio::test]
-    async fn startup_cleanup_removes_all_previous_process_work() {
+    async fn startup_cleanup_removes_previous_data_work_and_keeps_room_work() {
         use surrealdb::engine::any::connect;
 
         let db = connect("mem://").await.expect("mem boots");
         db.use_ns("test").use_db("startup_cleanup").await.unwrap();
         db.query(
-            "CREATE model_update_pending:first SET dbnum = 8000, action = 'regen_root';\
-             CREATE model_update_pending:second SET dbnum = 1112, action = 'cata';",
+            "CREATE model_update_pending:transform SET dbnum = 8000, action = 'transform';\
+             CREATE model_update_pending:delete SET dbnum = 8000, action = 'delete_cleanup';\
+             CREATE model_update_pending:cascade SET dbnum = 8000, action = 'cascade_expand';\
+             CREATE model_update_pending:regen SET dbnum = 1112, action = 'regen_root';\
+             CREATE model_update_pending:aabb SET dbnum = 1112, action = 'post_regen_aabb';\
+             CREATE model_update_pending:on_demand SET dbnum = 0, action = 'regen_root';\
+             CREATE model_update_pending:room_element SET dbnum = 8000, action = 'room_recalc_element';\
+             CREATE model_update_pending:room_panel SET dbnum = 1112, action = 'room_recalc_panel';",
         )
         .await
         .unwrap()
         .check()
         .unwrap();
 
-        assert_eq!(clear_stale_at_process_start_on(&db).await.unwrap(), 2);
+        assert_eq!(
+            clear_stale_at_process_start_on(&db).await.unwrap(),
+            6,
+            "数据五种不分库全清，dbnum=0 的按需行也清"
+        );
 
-        #[derive(Debug, Deserialize)]
-        struct Count {
-            count: u64,
-        }
         let mut response = db
-            .query("SELECT count() AS count FROM model_update_pending GROUP ALL;")
+            .query("SELECT VALUE record::id(id) FROM model_update_pending;")
             .await
             .unwrap()
             .check()
             .unwrap();
-        let rows: Vec<Count> = response.take(0).unwrap();
-        assert_eq!(rows.first().map_or(0, |row| row.count), 0);
+        let mut survivors: Vec<String> = response.take(0).unwrap();
+        survivors.sort();
+        assert_eq!(
+            survivors,
+            vec!["room_element".to_string(), "room_panel".to_string()],
+            "房间任务原样留下，由房间轮收敛"
+        );
+    }
+
+    /// 启动清理与整库重建作废用的是同一份数据动作清单：任何一边改了口径，另一边
+    /// 必须一起改，否则「什么算可从凭证补偿的工作」会有两个答案。
+    #[test]
+    fn startup_cleanup_uses_the_same_data_action_filter_as_full_rebuild_discard() {
+        let source = include_str!("model_update_pending.rs");
+        let cleanup = source
+            .split_once("async fn clear_stale_at_process_start_on(")
+            .expect("startup cleanup exists")
+            .1
+            .split_once("/// 整库重建开工前作废")
+            .expect("cleanup ends before the rebuild discard")
+            .0;
+        assert!(
+            cleanup.contains("DELETE {TABLE} WHERE true {DATA_ACTION_FILTER};"),
+            "启动清理只删数据五种: {cleanup}"
+        );
+        assert!(
+            !cleanup.contains("DELETE {TABLE};"),
+            "回到整表 DELETE 即红——房间任务没有补偿路径: {cleanup}"
+        );
     }
 
     /// C2-4 / R6 —— 整库重建作废这个库排着的增量，但只作废数据五种。
@@ -4650,25 +5084,25 @@ mod tests {
         let scope = [8000];
         let predicate = "AND ((dbnum?:0) = 0 OR (dbnum?:0) IN [8000])";
 
-        let drain = render_drain_select_for_scope(REGEN_ACTION_FILTER, Some(16), &scope);
+        let drain = render_drain_select_for_scope(REGEN_ACTION_FILTER, Some(16), &scope, &[]);
         assert!(
             drain.contains(predicate),
             "drain escaped watch scope: {drain}"
         );
 
-        let retryable = render_has_pending_work_query(DATA_ACTION_FILTER, "<", &scope);
+        let retryable = render_has_pending_work_query(DATA_ACTION_FILTER, "<", &scope, &[]);
         assert!(
             retryable.contains(predicate),
             "readiness escaped watch scope: {retryable}"
         );
 
-        let dead = render_has_pending_work_query(DATA_ACTION_FILTER, ">=", &scope);
+        let dead = render_has_pending_work_query(DATA_ACTION_FILTER, ">=", &scope, &[]);
         assert!(
             dead.contains(predicate),
             "dead-letter gate escaped watch scope: {dead}"
         );
 
-        let status = render_model_pending_status_query_for_scope(&scope);
+        let status = render_model_pending_status_query_for_scope(&scope, &[]);
         assert_eq!(
             status.matches(predicate).count(),
             3,
@@ -4692,11 +5126,11 @@ mod tests {
     fn dbnum_less_work_is_inside_every_declared_scope() {
         let scope = [8000];
         for sql in [
-            render_drain_select_for_scope(ROOM_ACTION_FILTER, Some(256), &scope),
-            render_drain_select_for_scope(REGEN_ACTION_FILTER, Some(16), &scope),
+            render_drain_select_for_scope(ROOM_ACTION_FILTER, Some(256), &scope, &[]),
+            render_drain_select_for_scope(REGEN_ACTION_FILTER, Some(16), &scope, &[]),
             render_room_target_counts_query(&scope),
-            render_has_pending_work_query(ROOM_ACTION_FILTER, "<", &scope),
-            render_model_pending_status_query_for_scope(&scope),
+            render_has_pending_work_query(ROOM_ACTION_FILTER, "<", &scope, &[]),
+            render_model_pending_status_query_for_scope(&scope, &[]),
         ] {
             assert!(
                 sql.contains("(dbnum?:0) = 0 OR"),
@@ -4714,7 +5148,7 @@ mod tests {
     fn the_room_counter_and_the_room_loader_share_one_predicate() {
         let scope = [8000];
         let counts = render_room_target_counts_query(&scope);
-        let loader = render_drain_select_for_scope(ROOM_ACTION_FILTER, Some(256), &scope);
+        let loader = render_drain_select_for_scope(ROOM_ACTION_FILTER, Some(256), &scope, &[]);
         let predicate = render_automatic_scope_filter(&scope);
 
         assert!(
@@ -4744,15 +5178,194 @@ mod tests {
     fn empty_watch_scope_keeps_the_durable_drain_unrestricted() {
         assert_eq!(render_automatic_scope_filter(&[]), "");
         for sql in [
-            render_drain_select_for_scope(REGEN_ACTION_FILTER, Some(16), &[]),
-            render_has_pending_work_query(DATA_ACTION_FILTER, "<", &[]),
-            render_model_pending_status_query_for_scope(&[]),
+            render_drain_select_for_scope(REGEN_ACTION_FILTER, Some(16), &[], &[]),
+            render_has_pending_work_query(DATA_ACTION_FILTER, "<", &[], &[]),
+            render_model_pending_status_query_for_scope(&[], &[]),
         ] {
             assert!(
                 !sql.contains("dbnum?:0"),
                 "empty scope narrowed work: {sql}"
             );
         }
+    }
+
+    /// 模型类型限定（`model_incremental_types`）与监听限定同款：它是 durable 队列的
+    /// **执行边界**，不是过滤解码后的行。谓词必须进 drain / claim / cohort mate / 计数 /
+    /// 就绪探测 / `/health` 每一条语句，两侧对「哪些行算数」的答案必须是同一个。
+    #[test]
+    fn automatic_durable_drain_is_bounded_by_model_incremental_types() {
+        let nouns = vec!["BRAN".to_string(), "EQUI".to_string()];
+        let predicate = render_automatic_type_filter(&nouns);
+        assert_eq!(
+            predicate,
+            " AND (action NOT IN ['regen_root', 'delete_cleanup'] OR (noun?:'') = '' OR \
+             string::uppercase(noun?:'') IN ['BRAN', 'EQUI'])"
+        );
+
+        let drain = render_drain_select_for_scope(REGEN_ACTION_FILTER, Some(16), &[], &nouns);
+        assert!(
+            drain.contains(&predicate),
+            "drain escaped type scope: {drain}"
+        );
+        let claim = render_drain_claim_for_scope(REGEN_ACTION_FILTER, Some(16), &[], &nouns, "w");
+        assert!(
+            claim.contains(&predicate),
+            "claim escaped type scope: {claim}"
+        );
+        let mates = render_cohort_mate_claim_for_scope(
+            REGEN_ACTION_FILTER,
+            &[],
+            &nouns,
+            "w",
+            &["8000:12".to_string()],
+        )
+        .expect("cohort mates are claimed when a cohort was opened");
+        assert!(
+            mates.contains(&predicate),
+            "cohort mates escaped type scope: {mates}"
+        );
+        let count = render_pending_count_query(REGEN_ACTION_FILTER, &[], &nouns);
+        assert!(
+            count.contains(&predicate),
+            "queue_total escaped type scope: {count}"
+        );
+        let retryable = render_has_pending_work_query(DATA_ACTION_FILTER, "<", &[], &nouns);
+        assert!(
+            retryable.contains(&predicate),
+            "readiness escaped type scope: {retryable}"
+        );
+        let dead = render_has_pending_work_query(DATA_ACTION_FILTER, ">=", &[], &nouns);
+        assert!(
+            dead.contains(&predicate),
+            "dead-letter gate escaped type scope: {dead}"
+        );
+
+        // 监听限定与类型限定同时在场时两个谓词都得在：库域之内、类型之外的行同样不消费。
+        let both = render_drain_select_for_scope(REGEN_ACTION_FILTER, Some(16), &[8000], &nouns);
+        assert!(
+            both.contains("(dbnum?:0) IN [8000]") && both.contains(&predicate),
+            "{both}"
+        );
+    }
+
+    /// `/health` 那条查询：三条既有语句都带放行谓词，且**多出一条**互补的暂扣计数——
+    /// 一行只能落在「待消费」与「被暂扣」之一，`retryable` 与 worker 的就绪探测同口径。
+    #[test]
+    fn health_status_reports_rows_held_by_model_incremental_types_separately() {
+        let nouns = vec!["BRAN".to_string()];
+        let status = render_model_pending_status_query_for_scope(&[], &nouns);
+        let admit = render_automatic_type_filter(&nouns);
+        let hold = render_automatic_type_holdback(&nouns).expect("a scope has a complement");
+        assert_eq!(
+            status.matches(admit.as_str()).count(),
+            3,
+            "all health/status statements must share the type predicate: {status}"
+        );
+        assert_eq!(
+            status.matches(hold.as_str()).count(),
+            1,
+            "held rows are counted by exactly one extra statement: {status}"
+        );
+        assert_eq!(status.matches(';').count(), 4, "{status}");
+        assert_eq!(
+            hold,
+            " AND action IN ['regen_root', 'delete_cleanup'] AND (noun?:'') != '' AND \
+             string::uppercase(noun?:'') NOT IN ['BRAN']"
+        );
+    }
+
+    /// 没限定时每一条语句都与引入前逐字相同，`/health` 也不多出那条暂扣计数。
+    #[test]
+    fn empty_type_scope_keeps_the_durable_drain_unrestricted() {
+        assert_eq!(render_automatic_type_filter(&[]), "");
+        assert_eq!(render_automatic_type_holdback(&[]), None);
+        for sql in [
+            render_drain_select_for_scope(REGEN_ACTION_FILTER, Some(16), &[], &[]),
+            render_drain_claim_for_scope(REGEN_ACTION_FILTER, Some(16), &[], &[], "w"),
+            render_pending_count_query(REGEN_ACTION_FILTER, &[], &[]),
+            render_has_pending_work_query(DATA_ACTION_FILTER, "<", &[], &[]),
+            render_model_pending_status_query_for_scope(&[], &[]),
+        ] {
+            assert!(
+                !sql.contains("string::uppercase(noun"),
+                "empty type scope narrowed work: {sql}"
+            );
+        }
+        assert_eq!(
+            render_model_pending_status_query_for_scope(&[], &[])
+                .matches(';')
+                .count(),
+            3
+        );
+    }
+
+    /// 谓词真跑一遍：名单外的 regen 根取不回来、名单内的取得回来，noun 为空的
+    /// Transform 行与房间行不受名单影响，`/health` 的暂扣计数与放行计数互补。
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_type_scoped_process_leaves_other_model_types_untouched_in_the_queue() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem surreal");
+        db.use_ns("type_scope")
+            .use_db("type_scope")
+            .await
+            .expect("select fixture database");
+        let item = |action: ModelWorkAction, target: &str, noun: &str| ModelWorkItem {
+            dbnum: 8000,
+            db_type: "DESI".into(),
+            source_end_sesno: 12,
+            action,
+            target_refno: target.into(),
+            noun: noun.into(),
+        };
+        let items = [
+            item(ModelWorkAction::RegenRoot, "24384/1", "BRAN"),
+            item(ModelWorkAction::RegenRoot, "24384/2", "HANG"),
+            item(ModelWorkAction::RegenRoot, "24384/3", "bran"),
+            item(ModelWorkAction::DeleteCleanup, "24384/4", "SUPPO"),
+            item(ModelWorkAction::DeleteCleanup, "24384/5", ""),
+            item(ModelWorkAction::Transform, "24384/6", ""),
+            item(ModelWorkAction::RoomRecalcElement, "24384/7", "HANG"),
+        ];
+        db.query(
+            items
+                .iter()
+                .map(render_upsert_no_time)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .await
+        .expect("seed rows")
+        .check()
+        .expect("seed statements");
+
+        let nouns = vec!["BRAN".to_string()];
+        let claimed = claim_page_with_cohorts_on(&db, "", None, &[], &nouns, "type-worker")
+            .await
+            .expect("claim within type scope");
+        let mut targets = claimed
+            .iter()
+            .map(|job| job.target_refno.as_str())
+            .collect::<Vec<_>>();
+        targets.sort_unstable();
+        assert_eq!(
+            targets,
+            vec!["24384/1", "24384/3", "24384/5", "24384/6", "24384/7"],
+            "只有名单外且 noun 已知的 regen/delete 行留在队列里: {claimed:#?}"
+        );
+
+        let mut response = db
+            .query(render_model_pending_status_query_for_scope(&[], &nouns))
+            .await
+            .expect("status query")
+            .check()
+            .expect("status statements");
+        let held: Vec<PendingRowCount> = response.take(3).expect("held count");
+        assert_eq!(
+            held.first().map(|row| row.count),
+            Some(2),
+            "HANG regen + SUPPO delete"
+        );
     }
 
     /// 多数用例只关心复活 / 覆盖那几条子句，与来源保存时刻无关。
@@ -4809,6 +5422,7 @@ mod tests {
                 ROOM_ACTION_FILTER,
                 Some(256),
                 &scope,
+                &[],
             ))
             .await
             .expect("load room jobs")
@@ -6681,7 +7295,8 @@ mod tests {
         assert!(!gen_root_credential_is_current(&row, 106));
     }
 
-    /// 模型门的 SQL 与内存判据必须是同一口径：不早于水位即覆盖，未认领永不覆盖，时刻不比。
+    /// 模型门的 SQL 与内存判据必须是同一口径：不早于文件最新会话即覆盖，
+    /// 未认领永不覆盖，时刻不比。
     #[test]
     fn model_gate_sql_is_monotone_and_ignores_the_time_column() {
         let body = include_str!("model_update_pending.rs")
@@ -6699,6 +7314,14 @@ mod tests {
         assert!(
             !body.contains("!= {}"),
             "等值判据会让 ensure 生成的更新版本被门判成缺口: {body}"
+        );
+        assert!(
+            body.contains("latest_source_version(dbnum)"),
+            "模型门必须与启动复核共用文件最新会话标尺: {body}"
+        );
+        assert!(
+            !body.contains("applied_sesno"),
+            "数据应用水位不代表模型生成时点（ADR-054）: {body}"
         );
     }
 
@@ -6725,41 +7348,252 @@ mod tests {
         assert_eq!(tracked, vec![1112, 8000]);
     }
 
-    /// ADR-050 的补偿路径必须两头都接上：
-    /// 1. 覆盖核对**不得**只在监听限定域下运行——启动清空是无条件的，补偿也得是；
-    /// 2. 核对/补种失败**不得**中止启动（`?` 上抛就是把一个库的配置错变成整个服务
-    ///    的崩溃循环），失败按「覆盖未确认」处理并当面播报。
+    /// 一级过滤的取数（ADR-058 D5）真的跑一遍。`include_str!` 护栏钉得住调用顺序，
+    /// 钉不住这两条聚合本身——而它们一旦算错，落后的库会被静默跳过，谁都不会报错。
+    ///
+    /// 三件事一起验：安定行取**最小**凭证当下限、未安定行（失败态与 `source_end_sesno = 0`
+    /// 的未认领行）不进下限但要计数、`dbnum` 缺失的历史行整行跳过。
+    #[tokio::test]
+    async fn startup_floors_take_the_settled_minimum_and_count_the_unsettled_separately() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test").use_db("startup_floors").await.unwrap();
+        db.query(
+            "CREATE gen_root:a SET dbnum = 8000, status = 'Generated', source_end_sesno = 106;\
+             CREATE gen_root:b SET dbnum = 8000, status = 'AlreadyAvailable', source_end_sesno = 100;\
+             CREATE gen_root:c SET dbnum = 8000, status = 'Failed', source_end_sesno = 120;\
+             CREATE gen_root:d SET dbnum = 8000, status = 'Generated', source_end_sesno = 0;\
+             CREATE gen_root:e SET dbnum = 1112, status = 'NoRenderableGeometry', source_end_sesno = 45;\
+             CREATE gen_root:f SET dbnum = 7998, status = 'Pending';\
+             CREATE gen_root:g SET status = 'Generated', source_end_sesno = 9;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let floors = startup_coverage_floors_on(&db).await.unwrap();
+
+        assert_eq!(
+            floors.keys().copied().collect::<Vec<_>>(),
+            vec![1112, 7998, 8000]
+        );
+        let ams = floors[&8000];
+        assert_eq!(
+            ams.settled_floor,
+            Some(100),
+            "下限取安定行的最小值，失败态那条 120 不算数"
+        );
+        assert_eq!(ams.settled_roots, 2);
+        assert_eq!(
+            ams.unsettled_roots, 2,
+            "Failed 与未认领的 source_end_sesno = 0 都算未安定"
+        );
+
+        let single = floors[&1112];
+        assert_eq!(single.settled_floor, Some(45));
+        assert_eq!(single.unsettled_roots, 0);
+
+        // 一条安定行都没有的库：下限是 None（不是 0），一级过滤据此判它必须开窗。
+        let never = floors[&7998];
+        assert_eq!(never.settled_floor, None);
+        assert_eq!(never.settled_roots, 0);
+        assert_eq!(never.unsettled_roots, 1);
+    }
+
+    /// `gen_root` 行的库归属只有顶层 `dbnum` 一处真值。建行时不写，按库取数的每一处
+    /// （启动凭证下限、覆盖清单、`/dbnums` 的模型凭证下限）都会静默少算这一行。
     #[test]
-    fn startup_coverage_reconcile_covers_unscoped_and_never_aborts_startup() {
-        let source = include_str!("model_update_pending.rs");
-        let body = source
+    fn a_regen_upsert_stamps_the_gen_root_row_with_its_dbnum() {
+        let statement = render_upsert_no_time(&ModelWorkItem {
+            dbnum: 8000,
+            db_type: "DESI".into(),
+            source_end_sesno: 276,
+            action: ModelWorkAction::RegenRoot,
+            target_refno: "24384/1004".into(),
+            noun: "BRAN".into(),
+        });
+        let gen_root = statement
+            .split_once("UPSERT type::thing('gen_root'")
+            .expect("regen 必须同时落 gen_root 行")
+            .1;
+        assert!(
+            gen_root.contains("dbnum = 8000"),
+            "顶层 dbnum 必须在建行时就写: {gen_root}"
+        );
+    }
+
+    /// 回填只动「只有嵌套归属」的历史行：已有顶层归属的不碰，两处都没有的也不碰
+    /// （没有可信的归属可补，硬写就是编一个）。跑第二遍必须一行都不再命中。
+    #[tokio::test]
+    async fn the_dbnum_backfill_fixes_only_the_nested_only_rows_and_is_idempotent() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test").use_db("gen_root_backfill").await.unwrap();
+        db.query(
+            "CREATE gen_root:nested SET desired_target = { dbnum: 8000, source_end_sesno: 271 };\
+             CREATE gen_root:already SET dbnum = 1112, \
+                 desired_target = { dbnum: 1112, source_end_sesno: 45 };\
+             CREATE gen_root:orphan SET desired_revision = 1;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        assert_eq!(backfill_gen_root_dbnum_on(&db).await.unwrap(), 1);
+        assert_eq!(
+            backfill_gen_root_dbnum_on(&db).await.unwrap(),
+            0,
+            "补完就不该再命中"
+        );
+
+        #[derive(Debug, Deserialize)]
+        struct Row {
+            #[allow(dead_code)]
+            id: surrealdb::sql::Thing,
+            #[serde(default)]
+            dbnum: Option<u32>,
+        }
+        // SurrealDB 2.1 要求 ORDER BY 的字段也出现在投影里（同 `gen_root` 覆盖查询那条）。
+        let mut response = db
+            .query("SELECT id, dbnum FROM gen_root ORDER BY id;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let rows: Vec<Row> = response.take(0).unwrap();
+        assert_eq!(
+            rows.iter().map(|row| row.dbnum).collect::<Vec<_>>(),
+            vec![Some(1112), Some(8000), None],
+            "already / nested / orphan 三行分别是：不动、补上、仍然没有"
+        );
+    }
+
+    fn startup_reconcile_body() -> &'static str {
+        include_str!("model_update_pending.rs")
             .split_once("pub async fn reconcile_model_coverage_at_startup()")
             .expect("startup reconcile exists")
             .1
             .split_once("/// 取该生成根当前的收口令牌")
             .expect("reconcile boundary")
-            .0;
+            .0
+    }
+
+    /// ADR-050 的补偿路径必须两头都接上：
+    /// 1. 覆盖核对**不得**只在监听限定域下运行——启动清空是无条件的，补偿也得是；
+    /// 2. 核对失败**不得**中止启动（`?` 上抛就是把一个库的配置错变成整个服务的崩溃
+    ///    循环），失败按「覆盖未确认」处理并当面播报。
+    #[test]
+    fn startup_coverage_reconcile_covers_unscoped_and_never_aborts_startup() {
+        let body = startup_reconcile_body();
         assert!(
             !body.contains(".await?"),
             "启动覆盖核对不许把错误上抛中止启动，逐库告警后继续: {body}"
         );
         assert!(
-            body.contains("coverage_tracked_dbnums()"),
-            "未限定域也要核对已有凭证记录的库: {body}"
+            body.contains("startup_coverage_floors()"),
+            "一级过滤必须一次问完全部库的凭证下限: {body}"
         );
         assert!(
-            body.contains("sync_and_seed_model_coverage(dbnum, false)"),
-            "发现过期凭证必须补种，不能只报数: {body}"
+            body.contains("reconcile_startup_window("),
+            "发现落后必须开退化窗口收口，不能只报数: {body}"
         );
 
         let startup = include_str!("../lib.rs");
-        assert!(
-            startup.contains("reconcile_model_coverage_at_startup()"),
-            "启动序列必须接入覆盖核对"
-        );
+        let call = startup
+            .find("reconcile_model_coverage_at_startup().await")
+            .expect("启动序列必须接入覆盖核对");
         assert!(
             !startup.contains("startup_data_ready && crate::data_interface::watch_scope::active()"),
             "覆盖核对不得只挂在监听限定域上（ADR-050 的清空是无条件的，补偿也得是）"
+        );
+        // 调用必须在 run_cli 顶层：4 空格缩进意味着它不在任何 `if` 块内，compensation
+        // 才真正无条件（2026-09-03 之前它被 `startup_data_ready` 把门，`autorun=false`
+        // 且无 watcher 的形态下一次都不跑，与本测试第一半直接矛盾）。
+        assert!(
+            startup.contains(
+                "\n    crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup().await;\n"
+            ),
+            "覆盖核对必须在 run_cli 顶层无条件执行，不在任何 if 块内"
+        );
+        // 顶层缩进这一条同时排除了两道历史门：任何 `if !direct_read_mode` /
+        // `if startup_data_ready` 包裹都会把调用行压到 8 空格。核对读的是文件与
+        // `gen_root`，不需要任何数据摄入，direct 正是它的主场（ADR-058 D8 / 审核 A1）。
+        let call_line = startup[..call]
+            .rfind('\n')
+            .map(|line| &startup[line + 1..call]);
+        assert_eq!(
+            call_line,
+            Some("    crate::data_interface::model_update_pending::"),
+            "覆盖核对调用必须顶格在 run_cli 函数体层级"
+        );
+    }
+
+    #[test]
+    fn startup_reconcile_always_settles_the_coordinator() {
+        let body = startup_reconcile_body();
+        let run = body
+            .find("reconcile_model_coverage_at_startup_inner().await;")
+            .expect("outer shell must run the reconcile");
+        let settle = body
+            .find("coordinator.settle_startup_reconcile();")
+            .expect("outer shell must settle the coordinator");
+        let inner = body
+            .find("async fn reconcile_model_coverage_at_startup_inner()")
+            .expect("inner reconcile exists");
+        assert!(
+            run < settle && settle < inner,
+            "settlement must stay in the outer shell so every inner return reaches it: {body}"
+        );
+        assert!(
+            body[run..inner].contains("BatchScheduler::global().wake();"),
+            "settling startup reconcile must wake the worker immediately: {body}"
+        );
+    }
+
+    /// ADR-058 实施约束 1：启动的选根不得再经 `pe`，标尺不得再是水位。
+    ///
+    /// `fn::sync_gen_roots` → `fn::gen_root_cover` 第一句就是
+    /// `select value id from pe where dbnum = …`（ADR-056 N7 点名的那一处），
+    /// 而 `applied_sesno` 只承诺数据落库、不是生成时点（ADR-054）。两者任一回到这条
+    /// 函数里，启动就又变回旧架构，而且不会有任何东西报错。
+    #[test]
+    fn startup_reconcile_reads_neither_pe_backed_coverage_nor_the_watermark() {
+        let body = startup_reconcile_body();
+        assert!(
+            !body.contains("sync_gen_roots") && !body.contains("sync_and_seed_model_coverage"),
+            "启动路径不得再经 pe 打头的覆盖物化（ADR-058 D4 / ADR-056 约束 9）: {body}"
+        );
+        assert!(
+            !body.contains("applied_sesno"),
+            "启动的标尺是文件最新会话，不是应用水位（ADR-054 / 审核 A3）: {body}"
+        );
+        assert!(
+            body.contains("latest_source_version(dbnum)"),
+            "右端必须取文件最新会话: {body}"
+        );
+    }
+
+    /// ADR-058 实施约束 2：两级必须真的是两级。
+    ///
+    /// 一级是一次聚合取数，二级才开窗；「不落后就跳过」这一步必须排在开窗之前，否则
+    /// 448 库全都要开一次 `collect_window`——而那正是这次重构要省掉的那笔钱。
+    #[test]
+    fn startup_reconcile_opens_a_window_only_for_the_libraries_that_lag() {
+        let body = startup_reconcile_body();
+        let floors = body
+            .find("startup_coverage_floors()")
+            .expect("一级取数必须存在");
+        let skip = body.find("if !behind {").expect("一级过滤的跳过必须存在");
+        let window = body
+            .find("reconcile_startup_window(")
+            .expect("二级开窗必须存在");
+        assert!(
+            floors < skip && skip < window,
+            "顺序必须是 一次取下限 → 不落后就跳过 → 才开窗: {body}"
         );
     }
 
@@ -6957,6 +7791,7 @@ mod tests {
                 REGEN_ACTION_FILTER,
                 Some(REGEN_DRAIN_PAGE_SIZE),
                 &[7997],
+                &[],
             ))
             .await
             .unwrap()
@@ -6983,6 +7818,7 @@ mod tests {
                 REGEN_ACTION_FILTER,
                 Some(REGEN_DRAIN_PAGE_SIZE),
                 &[7997],
+                &[],
             ))
             .await
             .unwrap()
@@ -6996,6 +7832,7 @@ mod tests {
                 POST_REGEN_AABB_ACTION_FILTER,
                 Some(POST_REGEN_AABB_PAGE_SIZE),
                 &[7997],
+                &[],
             ))
             .await
             .unwrap()
@@ -7027,10 +7864,16 @@ mod tests {
         .check()
         .unwrap();
 
-        let jobs =
-            claim_page_with_cohorts_on(&db, REGEN_ACTION_FILTER, Some(1), &[7997], "test-worker")
-                .await
-                .unwrap();
+        let jobs = claim_page_with_cohorts_on(
+            &db,
+            REGEN_ACTION_FILTER,
+            Some(1),
+            &[7997],
+            &[],
+            "test-worker",
+        )
+        .await
+        .unwrap();
         assert_eq!(
             jobs.len(),
             2,
@@ -7682,7 +8525,7 @@ mod tests {
             start_sesno: 40,
             end_sesno: 42,
             plan: plan.clone(),
-            commit_token: None,
+            commit_token: Some("test-source-token-v1".into()),
             status: "prepared".into(),
         };
         let work_id = record_id(&plan.work_items[0]);
@@ -7773,7 +8616,7 @@ mod tests {
             start_sesno: 50,
             end_sesno: 52,
             plan: plan.clone(),
-            commit_token: None,
+            commit_token: Some("test-source-token-v1".into()),
             status: "prepared".into(),
         };
 
@@ -8473,7 +9316,7 @@ mod tests {
             start_sesno: 42,
             end_sesno: 42,
             plan: plan.clone(),
-            commit_token: None,
+            commit_token: Some("test-source-token-v1".into()),
             status: "prepared".into(),
         };
 
@@ -8575,6 +9418,9 @@ mod tests {
                     data_ready: false,
                     model_ready: false,
                     model_in_flight: false,
+                    model_phase_open: false,
+                    startup_reconcile_pending: false,
+                    startup: None,
                     phases: Default::default(),
                     blockers: Vec::new(),
                     blocked_by: Vec::new(),
@@ -8683,7 +9529,7 @@ mod tests {
             body.contains("\">=\""),
             "dead-work probe must use >= operator for terminal attempts: {body}"
         );
-        let query = render_has_pending_work_query(DATA_ACTION_FILTER, ">=", &[]);
+        let query = render_has_pending_work_query(DATA_ACTION_FILTER, ">=", &[], &[]);
         assert!(query.contains("status IN ['pending', 'failed']"));
         assert!(query.contains(&format!("(attempts?:0) >= {MAX_ATTEMPTS}")));
         assert!(query.contains(DATA_ACTION_FILTER));
@@ -8691,7 +9537,7 @@ mod tests {
 
     #[test]
     fn model_pending_status_splits_retryable_and_dead_work_by_phase() {
-        let query = render_model_pending_status_query();
+        let query = render_model_pending_status_query(&[]);
         assert!(
             query.contains("(attempts?:0) < 5"),
             "attempts=4 is retryable"
@@ -8782,7 +9628,7 @@ mod tests {
         .expect("seed statements");
 
         let mut response = db
-            .query(render_model_pending_status_query())
+            .query(render_model_pending_status_query(&[]))
             .await
             .expect("status query")
             .check()
@@ -8801,7 +9647,7 @@ mod tests {
 
         // 上面那几条断言只有在引擎真会拒绝旧写法时才说明问题：把 `id` 从投影里去掉
         // 必须报错，否则这条回归是空的。
-        let stale = render_model_pending_status_query().replace(
+        let stale = render_model_pending_status_query(&[]).replace(
             "SELECT id, action, target_refno",
             "SELECT action, target_refno",
         );
@@ -8837,7 +9683,13 @@ mod tests {
         .expect("valid seed");
 
         let mut first = db
-            .query(render_drain_claim_for_scope("", Some(1), &[], "worker-a"))
+            .query(render_drain_claim_for_scope(
+                "",
+                Some(1),
+                &[],
+                &[],
+                "worker-a",
+            ))
             .await
             .expect("first claim")
             .check()
@@ -8846,7 +9698,13 @@ mod tests {
         assert_eq!(claimed.len(), 1);
 
         let mut second = db
-            .query(render_drain_claim_for_scope("", Some(1), &[], "worker-b"))
+            .query(render_drain_claim_for_scope(
+                "",
+                Some(1),
+                &[],
+                &[],
+                "worker-b",
+            ))
             .await
             .expect("second claim")
             .check()
@@ -8865,7 +9723,13 @@ mod tests {
         .check()
         .expect("valid lease expiry");
         let mut reclaimed = db
-            .query(render_drain_claim_for_scope("", Some(1), &[], "worker-b"))
+            .query(render_drain_claim_for_scope(
+                "",
+                Some(1),
+                &[],
+                &[],
+                "worker-b",
+            ))
             .await
             .expect("reclaim")
             .check()

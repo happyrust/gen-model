@@ -1,0 +1,53 @@
+-- db8000 BRAN 增删改链 / 第 2 腿「改·容器级」：整条 scratch 支管 BY U 2000mm。
+--
+-- 目标：/CODEX_DB8000_BRAN_SCRATCH（第 1 腿复制出来的，refno 见其日志）。
+-- 抬 2000mm 有两个用意：① 让它离开与生产支管 /C-OR-1R345-C 重叠的位置，plant-ui 里
+-- 一眼能分开；② 一个窗口里 BRAN 的 HPOS/TPOS 与成员 POS 同时变，是「容器级位姿变更」
+-- 的形态——e3d-model 应把 9 个成员单元都判 regen、派生管身随之重算。
+-- 日志里 Q HPOS / Q TPOS / FTUB 4 的 Q POS 前后各查一次：E3D 的 BY 对 BRAN 是否连带
+-- 成员一起搬，以日志为准，不靶预设。
+--
+-- 纪律同第 1 腿：恰好一个 SAVEWORK；不写 QUIT/FINISH；SAVEWORK 之前先导 RVM。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_bran_scratch_move.log" OVER
+$P CODEX-DB8000-BRAN-SCRATCH-MOVE-ALIVE
+/CODEX_DB8000_BRAN_SCRATCH
+Q CE
+Q REF
+Q NAME
+Q HPOS
+Q TPOS
+FTUB 4
+Q REF
+Q POS
+OWNER
+BY U 2000mm
+Q CE
+Q HPOS
+Q TPOS
+FTUB 4
+Q REF
+Q POS
+OWNER
+Q CE
+
+$* ---- RVM 导出（状态 2：moved）----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/db8000-bran-scratch/rvm/2-moved.rvm"
+export filenote 'CODEX db8000 scratch BRAN state 2 moved BY U 2000mm'
+export holes on
+export autocolour displayexport on
+export repr on
+export /CODEX_DB8000_BRAN_SCRATCH
+export finish
+
+/CODEX_DB8000_BRAN_SCRATCH
+Q REF
+Q NAME
+SAVEWORK 'CODEX db8000 scratch BRAN /CODEX_DB8000_BRAN_SCRATCH BY U 2000mm'
+$P CODEX-DB8000-BRAN-SCRATCH-MOVE-DONE
+ALPHA LOG END

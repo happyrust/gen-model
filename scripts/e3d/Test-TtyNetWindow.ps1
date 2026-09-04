@@ -54,10 +54,14 @@ def header() -> dict:
     return aios_db.parse.header(str(db_file))
 
 def element(sesno: int) -> dict:
+    # e3d-io 直读（与生产收集器同一读法），把文件钉在 sesno；old-pdms-io 版 2026-09-04 已删。
     return aios_db.parse.element(str(db_file), refno, sesno=sesno)
 
 def pos(row: dict) -> list[float]:
-    return list(row["attrs"]["POS"]["F32VecType"])
+    # NamedAttrMap 的 serde 形态是 {标签: 值}：e3d-io 直读给 {"Vec3Type": [x, y, z]}
+    # （老 old-pdms-io 版是 {"F32VecType": [...]}）——取标签下的那个值，不认死标签名。
+    value = row["attrs"]["POS"]
+    return [float(component) for component in next(iter(value.values()))]
 
 def semantic(start: int, end: int) -> dict:
     return aios_db.parse.net_window(str(db_file), start, end, detail=True)

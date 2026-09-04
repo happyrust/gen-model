@@ -103,7 +103,7 @@ fn range_of(table: &str, ref0: &str) -> String {
 
 /// 本 Ref0 下全部 owner 的成员块，按 `pe_owner` 的复合 record id 一段区间圈住。
 ///
-/// 边 id 固定是 `[OWNER_PE, 槽位]`（`versioned_db::pe` 与 `cata_closure` 两个写口
+/// 边 id 固定是 `[OWNER_PE, 槽位]`（`ele_ops::pe_owner_edge` 与 `cata_closure` 两个写口
 /// 同形），所以 owner 落在 Ref0 区间内的边天然是 id 连续的一段，不必再从 `pe` 侧
 /// 图遍历把边 id 全捞进内存——百万级 PE 的库上，那两句 `array::flatten(SELECT
 /// VALUE ->/<-pe_owner …)` 正是整库清理的耗时大头。顺带换来幂等：本语句不读

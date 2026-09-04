@@ -37,8 +37,8 @@ mod pipeline;
 #[allow(dead_code)]
 mod issue019_recording;
 
+use aios_database::data_interface::db_file_header::snapshot_presence;
 use issue019_recording::{issue019_fixture_root as fixture_root, issue019_recording};
-use parse_pdms_db::paged::PagedDbSession;
 use std::fs;
 use std::path::Path;
 
@@ -67,25 +67,24 @@ fn generic_cutter_replays_issue019_snapshots_byte_for_byte() {
         let out = temp.path().join(format!("sesno-{:03}", spec.sesno));
         session_cut::write_snapshot(&final_bytes, cut, &out).expect("cut snapshot");
 
-        // 验证闸（方案 §1 第 4 条）：切出的文件自称的 sesno 必须是它自己。
-        let mut db = PagedDbSession::open(&out).expect("open cut snapshot");
-        assert_eq!(
-            db.snapshot().sesno,
-            spec.sesno,
-            "sesno {} 的切割快照打开后必须坐在自己的会话上",
-            spec.sesno
-        );
-        // 存在性探针沿用 issue-019 manifest 里逐快照声明的元素终态。
+        // 存在性探针沿用 issue-019 manifest 里逐快照声明的元素终态（e3d-io 活索引）。
         let refnos: Vec<_> = spec
             .elements
             .iter()
             .map(|element| format::parse_refno(&element.refno).expect("manifest refno"))
             .collect();
-        let found = db.read_raw_records(&refnos).expect("probe records");
+        let found = snapshot_presence(&out, &refnos).expect("open cut snapshot");
+        // 验证闸（方案 §1 第 4 条）：切出的文件自称的 sesno 必须是它自己。
+        assert_eq!(
+            found.sesno,
+            spec.sesno,
+            "sesno {} 的切割快照打开后必须坐在自己的会话上",
+            spec.sesno
+        );
         for element in &spec.elements {
             let refno = format::parse_refno(&element.refno).expect("manifest refno");
             assert_eq!(
-                found.contains_key(&refno),
+                found.contains(&refno),
                 element.present,
                 "sesno {} 上 {}（{}）的存在性与台账不符",
                 spec.sesno,

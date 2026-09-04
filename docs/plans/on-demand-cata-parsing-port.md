@@ -4,7 +4,23 @@
 
 - 参考项目 `../../plant-model-gen`：`specs/002-on-demand-cata-closure/{spec,plan}.md`、`src/data_interface/cata_closure.rs`、`src/data_interface/db_index.rs`、`src/fast_model/gen_model/resolve.rs`
 - 本仓 `docs/adr/ADR-004-on-demand-cata-parsing-port.md`（本次 grill 决策）
-- 本仓 `src/fast_model/resolve.rs`、`src/fast_model/cata_model.rs`、`src/versioned_db/pe.rs`、`src/versioned_db/database.rs`、`src/data_interface/increment_pipeline.rs`、`vendor/aios-parse-pdms/src/parse.rs`
+- 本仓 `src/fast_model/resolve.rs`、`src/fast_model/cata_model.rs`、`src/versioned_db/database.rs`、`src/data_interface/increment_pipeline.rs`、`src/data_interface/ele_ops.rs`
+
+> **2026-09-04 · 取证引用重指（`parse_pdms_db` / `pe.rs` 退役）。** `parse_pdms_db` 整体退出本仓（退役收口方案 B8.2–B9），
+> 本文正文引到的下列名字**今天在 `src/` 里已查无此名**，读的时候一律按 2026-07 的历史资料看；决策与实施状态一个字未改。
+> 同一批重指的还有 `docs/adr/ADR-004`（文末有完整对照表）与 `ADR-021`。
+>
+> | 正文里的名字 | 今天 |
+> |---|---|
+> | `src/versioned_db/pe.rs` / `save_pes` / `save_pe_relates` | 文件已删。`pe` / `ATT_<noun>` / `ATT_UDA` / `pe_owner` 四种行统一由 `data_interface/ele_ops.rs::ElementRows::render` 渲染，基线与增量共用一份（宪法 II）；基线攒批在 `versioned_db/baseline.rs::render_baseline_batches`。**`INSERT IGNORE` 这个动词和 `pe` / `ATT_*` 这个落点没变**，Q3 与「实施原则」第 3 条照旧成立 |
+> | `parse_file_db_basic_data` / `refno_table_map` | **无对应物，是被取消不是被改名**：不再有「整文件读进内存 + refno→偏移表」这一步。今天用 `frozen_source::FrozenSource::capture` 取 dbnum / 库类型 / 目标会话，`e3d_collector::stream_baseline` 按目标会话索引分块枚举 |
+> | `parse_db_basic_info` | `data_interface/db_file_header.rs::DbBasicInfo::read`（函数注释自称「`parse_db_basic_info(path)` 的替身，但不 panic」） |
+> | `DbBasicData` | 已删除；`ElementRows::render` 直接吃 `EleData`，不再有这个中间结构 |
+> | `vendor/aios-parse-pdms/src/parse.rs` | **已从「依据」与「文件清单」删除**：该目录不被任何 manifest 引用、`git ls-files` 也是 0 条，是本机残留的旧解析器副本 |
+>
+> **按需 CATA 闭包这条路本身没受影响**——它走 `cata_closure.rs` 自己的部分解析，从不经过基线全量解析；
+> `CataDbLocator` / `cata_closure_enabled` / `ensure_cata_refnos_parsed` / `preload_cata_for_roots` 都还在。
+> 真正会动本文的是 ADR-058 D1（「CATA 不解析进持久层」），那是另一条线。
 
 ## 决策速查表
 
@@ -38,7 +54,7 @@
 状态：待办
 - 确认解析器「按偏移解析单元素」入口：本仓有 `refno_table_map`（refno→`pos`），需确认/薄封装一个等价于参考 `parse_ele_data_with_info_sync(&bytes[pos-4..], &db_info)` 的入口。
 - 确认 `get_named_attmap` 读 `SUL_DB`（已确认）。
-- 确认 `pe`/`ATT_*` 写原语可复用（已确认：`versioned_db/database.rs` 的 `INSERT IGNORE INTO pe` + `gen_sur_json*`、`versioned_db/pe.rs::save_pes`）。
+- 确认 `pe`/`ATT_*` 写原语可复用（已确认：`versioned_db/database.rs` 的 `INSERT IGNORE INTO pe` + `gen_sur_json*`、`versioned_db/pe.rs::save_pes` ⚠️ 后者已删，见顶部重指表）。
 
 ### 阶段 1：内存定位器（Q2）
 状态：待办
@@ -69,8 +85,8 @@
 - 新增：`src/data_interface/cata_closure.rs`（trait + 内存 locator + 闭包引擎 + 部分解析 + 兜底）。
 - 改：`src/fast_model/resolve.rs`（cache-miss 惰性兜底 + miss 记录）。
 - 改：生成根重生成入口（`src/data_interface/model_refresh.rs` 或生成驱动，精确行阶段 0/4 定位）。
-- 可能改：`vendor/aios-parse-pdms/src/parse.rs`（补按偏移单元素解析薄封装）。
-- 复用：`src/versioned_db/pe.rs`（`save_pes`）、`src/versioned_db/database.rs`（写原语参考）。
+- 可能改：~~`vendor/aios-parse-pdms/src/parse.rs`（补按偏移单元素解析薄封装）~~ ⚠️ 该路径已失效，见顶部重指表；实施状态记的 Phase 0 结论是「无需改解析器」。
+- 复用：~~`src/versioned_db/pe.rs`（`save_pes`）~~ ⚠️ 已删，今天是 `data_interface/ele_ops.rs::ElementRows`、`src/versioned_db/database.rs`（写原语参考）。
 - 缓存落盘：`output/<project>/scene_tree/`（或本仓等价目录）下的 locator 缓存文件。
 
 ## 验证
@@ -109,6 +125,11 @@
 单测：locator（ref0→dbnum / type / file / 计数）、`is_valid_ref0`、`precise` 配置，共 5 个（仓库规则不编译 test 目标，单测随源码留存）。
 
 关键适配（与参考项目差异，编译期发现并修正）：`DbBasicData` = `aios_core::db::DbBasicData`；`EleData.children/owner` = `RefU64`；`NamedAttrValue::RefU64Array` 内层是 `Vec<RefnoEnum>`（需 `.refno()`）；写库走 `SUL_DB` 而非 `project_primary_db()`；`pe_owner` 关系格式对齐 `save_pe_relates`。
+
+> ⚠️ **2026-09-04**：上一段的 `DbBasicData` 与 `save_pe_relates` 都已删除（见顶部重指表）。`pe_owner` 的边形状本身没变，
+> 今天由 `ele_ops::pe_owner_edge` 与 `cata_closure::render_pe_owner_replace` 两个写口保持同形，并由单测
+> `pe_owner_edges_point_child_to_owner_exactly_like_cata_closure` 逐字节钉住——也就是说「对齐」这件事从「照着抄」
+> 升级成了「测试不许它们分家」（ADR-021 §4 同批重指）。
 
 未接主动预取的 gen 入口（`owner_regen` 回退路径 / `compensate_owners` 侧效补偿）：正确性由 Phase 3 惰性兜底保证；如需其也主动预取，同样调 `ensure_cata_parsed_for_roots` 即可。
 
