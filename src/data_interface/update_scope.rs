@@ -266,7 +266,7 @@ impl UpdateScope {
 
     /// 这个库进不进本期执行范围。
     ///
-    /// SYS meta（SYST / DICT / GLB / GLOB）**不受 MDB 门控**：MDB 的成员名单本身
+    /// SYS meta（SYST / DICT / COMM / MISC / GLB / GLOB）**不受 MDB 门控**：MDB 的成员名单本身
     /// 就存在这些库里，[`UpdateScope::resolve`] 读的就是它们。把它们挡在外面，
     /// 以后往 MDB 里加一个库，范围表永远看不见这个新成员——范围定义会自己冻住。
     ///

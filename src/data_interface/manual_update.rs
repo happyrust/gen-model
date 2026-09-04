@@ -99,7 +99,7 @@ pub fn configured_delivery_unit_types() -> Vec<String> {
 
 /// 从未解析过的库（没有水位、文件里却有会话）都要先补一次全量基线，**SYS meta 也算**。
 ///
-/// 早先这里把 `SYST / DICT / GLB / GLOB` 排除在外，让它们改走
+/// 早先这里把 `SYST / DICT / COMM / MISC / GLB / GLOB` 排除在外，让它们改走
 /// [`SesnoRangeResolver`] 的 cold start——水位缺失时从 0 起、用增量窗口把历史会话重放一遍。
 /// 当时的理由是两条路用的不是同一个解析器：基线走 `parse_pdms_db`，而重放走 `pdms_io`，
 /// 而 ADR-006 那个跨块引用列表（`CURD` / `DBLS`）的解析修复只落在前者。设计 MDB 的 `CURD`
@@ -4423,7 +4423,7 @@ impl AiosDBManager {
     /// `selected_dbnums`（ADR-020 第 3 项）是**范围内的子集选择**：`None` = 全范围，
     /// 行为与没有这个参数时完全一致；`Some` 时未勾选的常规库不入队、水位不动
     /// （回执 `unselected`），不在当前 MDB 声明名单里的请求直接拒（回执 `warnings`，
-    /// 不给绕过 ADR-0013 统一范围门的第二条路）。SYS meta（SYST/DICT/GLB/GLOB）
+    /// 不给绕过 ADR-0013 统一范围门的第二条路）。SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）
     /// 不是可勾选对象，永远随批——S2-H「会一并处理」段。
     ///
     /// Never returns `Err`: precondition and per-dbnum problems land in the
@@ -6745,7 +6745,7 @@ mod tests {
         assert!(subset_selects(Some(&selection), "DESI", 8000));
         assert!(!subset_selects(Some(&selection), "DESI", 8005));
         // Meta/Catalogue 不是勾选对象，子集再窄也释放完整前置阶段。
-        for db_type in ["SYST", "DICT", "GLB", "GLOB", "CATA"] {
+        for db_type in ["SYST", "DICT", "COMM", "MISC", "GLB", "GLOB", "CATA"] {
             assert!(subset_selects(Some(&selection), db_type, 7001));
         }
     }

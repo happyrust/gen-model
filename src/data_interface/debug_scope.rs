@@ -166,7 +166,7 @@ pub fn mode_notice() -> Option<String> {
     (!dbnums.is_empty()).then(|| {
         format!(
             "本进程处于调试限定模式：数据批次只处理 --debug-dbnum {}，其余数据批次\
-             （DESI、CATA 等非 SYS meta）一律跳过；SYS meta（SYST/DICT/GLB/GLOB）\
+             （DESI、CATA 等非 SYS meta）一律跳过；SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）\
              不受限制。这不是正常运行状态。",
             render_dbnums(&dbnums)
         )

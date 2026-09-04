@@ -34,7 +34,7 @@ impl DataPhase {
 
     pub fn of_db_type(db_type: &str) -> Self {
         match db_type.trim().to_ascii_uppercase().as_str() {
-            "SYST" | "DICT" | "GLB" | "GLOB" => Self::Meta,
+            "SYST" | "DICT" | "COMM" | "MISC" | "GLB" | "GLOB" => Self::Meta,
             "CATA" => Self::Catalogue,
             _ => Self::Design,
         }
@@ -994,6 +994,8 @@ mod tests {
         assert!(DataPhase::Meta < DataPhase::Catalogue);
         assert!(DataPhase::Catalogue < DataPhase::Design);
         assert_eq!(DataPhase::of_db_type("DICT"), DataPhase::Meta);
+        assert_eq!(DataPhase::of_db_type("COMM"), DataPhase::Meta);
+        assert_eq!(DataPhase::of_db_type("MISC"), DataPhase::Meta);
         assert_eq!(DataPhase::of_db_type("CATA"), DataPhase::Catalogue);
         assert_eq!(DataPhase::of_db_type("DESI"), DataPhase::Design);
     }

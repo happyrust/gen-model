@@ -1,4 +1,4 @@
-//! Seed the configured project's SYS metadata (DICT/SYST/GLB/GLOB) into the
+//! Seed the configured project's SYS metadata (DICT/SYST/COMM/MISC/GLB/GLOB) into the
 //! SurrealDB named by the current working directory's `DbOption.toml`.
 //!
 //! DESI parsing resolves its world refno through the `MDB`/`WORL` tables, so a

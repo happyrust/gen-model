@@ -1,0 +1,9 @@
+﻿{
+  "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\amscom",
+  "db_type": "COMM",
+  "db_type_hash": 797205,
+  "dbnum": 8190,
+  "extent": 1,
+  "latest_ses_pgno": 4,
+  "page_size": 2048
+}

@@ -9,7 +9,7 @@
 //! consistency is pinned by `production_call_sites_pass_skip_cata_false`).
 //!
 //! Special case: when watermark is 0, DESI/CATA stay skipped (unsafe to guess
-//! history). **SYS meta** (`SYST`/`DICT`/`GLB`/`GLOB`) may cold-start: range from
+//! history). **SYS meta** (`SYST`/`DICT`/`COMM`/`MISC`/`GLB`/`GLOB`) may cold-start: range from
 //! the first available sesno through `file_latest_sesno`, so never-parsed config
 //! DBs can bootstrap via the same IncrementPipeline path.
 
@@ -20,7 +20,7 @@ use super::db_file_header::{DbFileHeader, SessionStamp, session_chain};
 
 /// Meta / config DB types eligible for watermark-0 cold start (aligned with
 /// [`crate::data_interface::increment_pipeline::SYS_META_DB_TYPES`]).
-pub const COLD_START_DB_TYPES: &[&str] = &["SYST", "DICT", "GLB", "GLOB"];
+pub const COLD_START_DB_TYPES: &[&str] = &["SYST", "DICT", "COMM", "MISC", "GLB", "GLOB"];
 
 /// Resolved incremental window for one DB file.
 #[derive(Debug, Clone)]

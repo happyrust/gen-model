@@ -730,11 +730,11 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
             db_option,
             main_project,
             dbno_set.clone(),
-            &["SYST", "GLB", "GLOB"],
+            &["SYST", "COMM", "MISC", "GLB", "GLOB"],
             proj_progress_chunk,
         )
         .await
-        .with_context(|| format!("同步 {main_project} 的 SYST/GLB/GLOB 数据失败"))?;
+        .with_context(|| format!("同步 {main_project} 的 SYST/COMM/MISC/GLB/GLOB 数据失败"))?;
 
         // DICT belongs to Meta, including DICT supplied by dependency projects.
         // Process projects in explicit priority order so the shared naked-dbnum
@@ -777,7 +777,7 @@ pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
         }
 
         if db_option.only_sync_sys {
-            println!("全局 Meta 阶段完成（SYST/GLB/GLOB + included DICT）");
+            println!("全局 Meta 阶段完成（SYST/COMM/MISC/GLB/GLOB + included DICT）");
         }
     }
 
@@ -1171,7 +1171,7 @@ pub async fn sync_total_async_threaded(
             let dbno_set = cur_dbno_set.clone();
             let mut time = Instant::now();
             // dbg!(&file_name);
-            // gen-model-9 / ADR-007：SYS 元数据(SYST/DICT/GLB/GLOB)必须从其专属文件(amssys 等)解析，
+            // gen-model-9 / ADR-007：SYS 元数据(SYST/DICT/COMM/MISC/GLB/GLOB)必须从其专属文件(amssys 等)解析，
             // 不应受 included_db_files 过滤——它列的是 DESI/CATA 数据库文件，从不含 SYS 文件。
             // 旧条件 `is_parse_sys && is_total_sync` 使得 only_sync_sys(非 total_sync) 下 SYS 文件被
             // included_db_files 过滤掉、静默跳过 → 设计 MDB/CURD/DB 建不起来。改为 is_parse_sys 即可：
@@ -1684,7 +1684,9 @@ fn sync_pdms_awaits_global_meta_then_catalogue_then_design() {
         .split_once("pub async fn define_dbnum_event")
         .expect("sync_pdms end exists")
         .0;
-    let syst = body.find("&[\"SYST\", \"GLB\", \"GLOB\"]").unwrap();
+    let syst = body
+        .find("&[\"SYST\", \"COMM\", \"MISC\", \"GLB\", \"GLOB\"]")
+        .unwrap();
     let dict = body.find("&[\"DICT\"]").unwrap();
     let cata = body.find("&[\"CATA\"]").unwrap();
     let desi = body.find("&[\"DESI\"]").unwrap();

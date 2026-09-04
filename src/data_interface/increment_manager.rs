@@ -685,7 +685,7 @@ mod tests {
         );
     }
 
-    /// 一个 Surreal 库只服务一个主项目：别的项目的运行态系统库（SYST/GLB/GLOB）
+    /// 一个 Surreal 库只服务一个主项目：别的项目的运行态系统库（SYST/COMM/MISC/GLB/GLOB）
     /// 压根不该进摄入范围。
     ///
     /// dbnum 在 AVEVA 里只在**项目内**唯一 —— 三个项目的 sys 库都是 8191，而本库的
@@ -2311,11 +2311,11 @@ pub fn is_candidate_db_file(path: &std::path::Path) -> bool {
 /// 「项目运行态」系统库：MDB / DB / CURD 这些**项目自身**的结构数据。
 ///
 /// 与 DICT 目录库的区别是数据域，不是类型高低：DICT 是被主项目依赖的数据，
-/// 跨项目引用是正常业务；SYST/GLB/GLOB 描述的是「那个项目自己怎么组织」，
+/// 跨项目引用是正常业务；SYST/COMM/MISC/GLB/GLOB 描述的是「那个项目自己怎么组织」，
 /// 对本库毫无意义。而且 dbnum 在 AVEVA 里只在**项目内**唯一 —— 三个项目的
 /// sys 库都是 8191，本库的状态层（`dbnum_watermark` 记录 id、`dbnum_info_table`、
 /// `pe.dbnum` 聚合）却全部按裸 dbnum 做键，放进来就是三份数据抢同一行。
-pub const PROJECT_RUNTIME_SYS_TYPES: [&str; 3] = ["SYST", "GLB", "GLOB"];
+pub const PROJECT_RUNTIME_SYS_TYPES: [&str; 5] = ["SYST", "COMM", "MISC", "GLB", "GLOB"];
 
 /// 这个库是不是「别的项目的运行态系统库」。
 pub(crate) fn is_foreign_runtime_sys(db_option: &DbOption, project: &str, db_type: &str) -> bool {
@@ -2329,10 +2329,10 @@ pub(crate) fn is_foreign_runtime_sys(db_option: &DbOption, project: &str, db_typ
 ///
 /// 只剩两条判据：
 ///
-/// 1. 别的项目的运行态系统库（SYST/GLB/GLOB）永远不进——这不是可配的口味，
+/// 1. 别的项目的运行态系统库（SYST/COMM/MISC/GLB/GLOB）永远不进——这不是可配的口味，
 ///    dbnum 在 AVEVA 里只在项目内唯一，三个项目的 sys 库都是 8191，而本库的状态层
 ///    全部按裸 dbnum 做键，放进来就是三份数据抢同一行；
-/// 2. [`UpdateScope::admits`]——SYS meta（SYST/DICT/GLB/GLOB）放行，因为 MDB 的成员
+/// 2. [`UpdateScope::admits`]——SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）放行，因为 MDB 的成员
 ///    名单本身就存在这些库里；其余只认本 MDB 声明过的 DESI。
 ///
 /// 从前这里还串着一道 `should_process_database`：类型白名单 + `only_sync_sys` +
@@ -2370,7 +2370,7 @@ pub(crate) fn in_scope_with(
 /// 放不放行。
 ///
 /// SYS meta 永不受限，理由与 [`debug_scope_admits`] 逐字相同：MDB 的成员名单就存在
-/// SYST/DICT/GLB/GLOB 里，圈掉它们只会得到一个「什么都没发现」的假现场。
+/// SYST/DICT/COMM/MISC/GLB/GLOB 里，圈掉它们只会得到一个「什么都没发现」的假现场。
 ///
 /// 排在调试限定**之前**：两道门都关着时，人该先听见能跨重启活下去的那一道
 /// ——命令行参数进程一停就没了，配置里的名单能躺一个月（issue #10 就是这么来的）。
@@ -2382,7 +2382,7 @@ pub(crate) fn watch_scope_admits(db_type: &str, db_num: u32) -> bool {
 
 /// 命令行调试限定（`--debug-dbnum`）对这个库放不放行。
 ///
-/// SYS meta 永不受限：MDB 的成员名单就存在 SYST/DICT/GLB/GLOB 里，圈掉它们就解不出
+/// SYS meta 永不受限：MDB 的成员名单就存在 SYST/DICT/COMM/MISC/GLB/GLOB 里，圈掉它们就解不出
 /// 「目标库在不在范围内」，只会得到一个「什么都没发现」的假现场（计划
 /// `2026-08-17-dbnum-increment-trace-plan.md` D3）。
 ///

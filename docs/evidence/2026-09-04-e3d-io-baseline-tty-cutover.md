@@ -186,5 +186,5 @@ exit_status=0
 
 - 本样本的普通属性、引用名、UDA 和 e3d-io 直读成员序已闭合：115 个 TTY 属性行全部等价，18 个父节点成员序差异为 0。
 - CATA 已有一组 46/46 的 TTY 外部裁决。
-- DICT 已有一组 45/45、SYST 世界已有一组 5/5 的 TTY 外部裁决；仍需 GLB-GLOB，并验证持久化后的 `pe_owner` 边。
+- DICT 已有一组 45/45、SYST 世界已有一组 5/5 的 TTY 外部裁决。e3d-io 对 1,067 个项目目录文件的头扫描未发现物理 `GLB/GLOB`，实际全局类型为 `COMM/MISC`；两类已按 `comvir/misvir + attlib` 解码并修复纳入 Meta，但 Design `/ALL` 不能导航其 refno，TTY 属性裁决仍保持未关闭。另需验证持久化后的 `pe_owner` 边。
 - `DTWL 24575/13` 是内部 SYST 元素，不能从 E3D `/ALL` 导航，因此其结论只属于 e3d-io 物理读取与 SYST 持久化闭合，不冒充 TTY 外部等价。
