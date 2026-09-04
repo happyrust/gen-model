@@ -98,8 +98,30 @@ source_counts={binary_explicit:7,binary_implicit:40,catalog_default:29,runtime_d
 | Pspec | `13245/846025` | `/VMB1` | `/VMB1` |
 | Ispec | `13245/918008` | `/I100-HL` | `/I100-HL` |
 
+开启 UDA 后，最小 DICT 集合为：
+
+```text
+ams5100_0001
+acp7006_0001
+scb6002_0001
+```
+
+`ams5100` 提供项目 UDA；`acp7006` 提供 `PFILoose/PFILExcess/PFIAExcess/PFConsChk`；`scb6002` 提供 TTY 中两个同名但不同定义的 `SCHrefHole`。完整对照结果：
+
+```text
+tty_row_count=115
+tty_unique_count=112
+uda_enabled=true
+deferred_uda_row_count=0
+comparison_counts.equivalent=115
+omitted_row_count=0
+mismatch=0
+```
+
+该结果已经固化为 e3d-io 的真实 CLI 回归测试 `tests/e3d-descriptor.rs::bran_binary_and_dictionary_attributes_match_the_e3d_tty_capture`。字典集合属于 TTY 运行时 MDB 身份的一部分，后续样本必须显式记录，不能按目录中的“最新”或同名库猜测。
+
 ## 未关闭边界
 
-- 本次 `--uda` 为关闭状态；TTY 中 30 个 UDA 行被明确记为 deferred，不计入 85 行普通属性对照。
-- 仍需按 B8.5 扩大到 DESI/SYST/DICT/CATA/GLB-GLOB 五类库样本，并单列 UDA 对照。
+- 本样本的普通属性、引用名和 UDA 已全部闭合；115 个 TTY 行全部等价。
+- 仍需按 B8.5 扩大到 SYST/DICT/CATA/GLB-GLOB 库样本，并补 owner 成员序对照。
 - `DTWL 24575/13` 是内部 SYST 元素，不能从 E3D `/ALL` 导航，因此其结论只属于 e3d-io 物理读取与 SYST 持久化闭合，不冒充 TTY 外部等价。
