@@ -1134,39 +1134,41 @@ pub(crate) fn render_finalize_tail_with_effects(
     })
 }
 
-/// Render the transaction that closes a freshly parsed baseline.
+/// Render the ordered batches that close a freshly parsed baseline.
 ///
-/// Same collar as [`render_finalize_transaction`] minus the recovery-record
-/// removal: a baseline is not a replayable window, so it never has an
-/// `increment_update_attempt` row, and deleting one here could only discard
-/// another path's crash-recovery state.
-fn render_baseline_transaction(
+/// Generation work is idempotent and executes in bounded transactions before
+/// the watermark tail. A failed batch therefore leaves the watermark in place;
+/// replaying the baseline only upserts the same deterministic work again. A
+/// baseline has no `increment_update_attempt` row, so the tail never removes
+/// one that may belong to another path.
+fn render_baseline_finalize(
     dbnum: u32,
     end_sesno: i32,
     end_sesno_time: Option<&str>,
     plan: &ModelUpdatePlan,
     confirmed_empty: bool,
-) -> String {
-    let mut statements: Vec<String> = plan
+) -> FinalizeRender {
+    let work_statements: Vec<String> = plan
         .work_items
         .iter()
         .map(|item| render_upsert(item, source_time_for(item, end_sesno, end_sesno_time)))
         .collect();
+    let mut tail = Vec::new();
     if plan.room_rebuild_required {
-        statements.push(crate::fast_model::room_model::render_room_rebuild_required(
+        tail.push(crate::fast_model::room_model::render_room_rebuild_required(
             plan.room_rebuild_reason.as_deref(),
         ));
     }
-    statements.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
-    statements.push(if confirmed_empty {
+    tail.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
+    tail.push(if confirmed_empty {
         format!("UPDATE dbnum_watermark:{dbnum} SET confirmed_empty_baseline_sesno = {end_sesno};")
     } else {
         format!("UPDATE dbnum_watermark:{dbnum} SET confirmed_empty_baseline_sesno = NONE;")
     });
-    format!(
-        "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
-        statements.join("\n")
-    )
+    FinalizeRender {
+        window_batches: render_window_statement_batches(&work_statements),
+        tail: tail.join("\n"),
+    }
 }
 
 /// Establish durable model work, advance the authoritative watermark, and
@@ -1267,14 +1269,16 @@ pub(crate) async fn finalize_attempt_on(
     Ok(())
 }
 
-/// Atomically establish a freshly parsed `dbnum`'s model work and its watermark.
+/// Establish a freshly parsed `dbnum`'s model work before advancing its watermark.
 ///
 /// A baseline full-parse writes element data but no geometry, and every later
 /// incremental window only regenerates the roots that window itself touched. So
 /// a watermark that advances without its generation work leaves the database
 /// permanently modelless — nothing revisits a root that never changes again.
-/// Binding the two into one transaction makes that state unreachable: either
-/// the baseline is both applied and scheduled for generation, or it replays.
+/// Work upserts run in bounded, idempotent batches before the small watermark
+/// transaction. Any failure returns before the watermark moves, so a retry
+/// converges on the same work and a modelless watermarked baseline remains
+/// unreachable.
 pub async fn finalize_baseline(
     dbnum: u32,
     end_sesno: i32,
@@ -1282,13 +1286,27 @@ pub async fn finalize_baseline(
     plan: &ModelUpdatePlan,
     confirmed_empty: bool,
 ) -> anyhow::Result<()> {
+    let render = render_baseline_finalize(dbnum, end_sesno, end_sesno_time, plan, confirmed_empty);
+    for (index, batch) in render.window_batches.iter().enumerate() {
+        SUL_DB
+            .query(batch)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "finalize baseline dbnum={dbnum} model work batch {index} failed: {error}"
+                )
+            })?
+            .check()
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "finalize baseline dbnum={dbnum} model work batch {index} statement failed: {error}"
+                )
+            })?;
+    }
     SUL_DB
-        .query(render_baseline_transaction(
-            dbnum,
-            end_sesno,
-            end_sesno_time,
-            plan,
-            confirmed_empty,
+        .query(format!(
+            "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+            render.tail
         ))
         .await
         .map_err(|error| anyhow::anyhow!("finalize baseline dbnum={dbnum} failed: {error}"))?
@@ -7524,11 +7542,10 @@ mod tests {
         assert!(plan.work_items.is_empty(), "{:?}", plan.work_items);
     }
 
-    /// A baseline that advanced its watermark without queueing generation work
-    /// would leave the dbnum modelless forever, so the two must share one
-    /// transaction. It must NOT drop an `increment_update_attempt` row: a
-    /// baseline never owns one, and another path's recovery record is not its
-    /// to discard.
+    /// A baseline that advanced its watermark without durable generation work
+    /// would leave the dbnum modelless forever. Work batches must therefore be
+    /// complete before the watermark tail. The tail must NOT drop an
+    /// `increment_update_attempt` row: a baseline never owns one.
     #[test]
     fn baseline_transaction_pairs_generation_work_with_the_watermark() {
         let plan = ModelUpdatePlan {
@@ -7543,28 +7560,73 @@ mod tests {
             ..Default::default()
         };
 
-        let sql =
-            render_baseline_transaction(7997, 76, Some("2026-08-01T09:12:00+08:00"), &plan, false);
-        assert!(sql.starts_with("BEGIN TRANSACTION;\n"), "{sql}");
-        assert!(sql.ends_with("COMMIT TRANSACTION;"), "{sql}");
-        let work_at = sql
-            .find("UPSERT model_update_pending:regen_root_24381_2")
-            .unwrap_or_else(|| panic!("baseline generation work missing: {sql}"));
-        let watermark_at = sql
-            .find("applied_sesno = math::max([applied_sesno?:0, 76])")
-            .unwrap_or_else(|| panic!("baseline watermark advance missing: {sql}"));
-        assert!(work_at < watermark_at, "{sql}");
+        let render =
+            render_baseline_finalize(7997, 76, Some("2026-08-01T09:12:00+08:00"), &plan, false);
+        assert_eq!(render.window_batches.len(), 1);
+        let work = &render.window_batches[0];
+        assert!(work.starts_with("BEGIN TRANSACTION;\n"), "{work}");
+        assert!(work.ends_with("COMMIT TRANSACTION;"), "{work}");
         assert!(
-            sql.contains("confirmed_empty_baseline_sesno = NONE"),
-            "非空基线必须清除空基线凭据: {sql}"
+            work.contains("UPSERT model_update_pending:regen_root_24381_2"),
+            "baseline generation work missing: {work}"
         );
-        assert!(!sql.contains(ATTEMPT_TABLE), "{sql}");
+        assert!(!work.contains("applied_sesno = math::max"), "{work}");
+        assert!(
+            render
+                .tail
+                .contains("applied_sesno = math::max([applied_sesno?:0, 76])"),
+            "baseline watermark advance missing: {}",
+            render.tail
+        );
+        assert!(
+            render
+                .tail
+                .contains("confirmed_empty_baseline_sesno = NONE"),
+            "非空基线必须清除空基线凭据: {}",
+            render.tail
+        );
+        assert!(!render.tail.contains(ATTEMPT_TABLE), "{}", render.tail);
 
-        let empty = render_baseline_transaction(7997, 76, None, &ModelUpdatePlan::default(), true);
+        let empty = render_baseline_finalize(7997, 76, None, &ModelUpdatePlan::default(), true);
+        assert!(empty.window_batches.is_empty());
         assert!(
-            empty.contains("confirmed_empty_baseline_sesno = 76"),
-            "合法空基线必须与同一水位原子记录凭据: {empty}"
+            empty.tail.contains("confirmed_empty_baseline_sesno = 76"),
+            "合法空基线必须与同一水位原子记录凭据: {}",
+            empty.tail
         );
+    }
+
+    #[test]
+    fn baseline_generation_work_is_split_into_bounded_batches() {
+        let plan = ModelUpdatePlan {
+            work_items: (0..=FINALIZE_WINDOW_TX_CHUNK)
+                .map(|index| ModelWorkItem {
+                    dbnum: 7997,
+                    db_type: "DESI".into(),
+                    source_end_sesno: 76,
+                    action: ModelWorkAction::RegenRoot,
+                    target_refno: format!("24381/{index}"),
+                    noun: "SITE".into(),
+                })
+                .collect(),
+            ..Default::default()
+        };
+
+        let render = render_baseline_finalize(7997, 76, None, &plan, false);
+        assert_eq!(render.window_batches.len(), 2);
+        assert_eq!(
+            render.window_batches[0]
+                .matches("UPSERT model_update_pending:")
+                .count(),
+            500
+        );
+        assert_eq!(
+            render.window_batches[1]
+                .matches("UPSERT model_update_pending:")
+                .count(),
+            1
+        );
+        assert!(!render.tail.contains("UPSERT model_update_pending:"));
     }
 
     #[test]
