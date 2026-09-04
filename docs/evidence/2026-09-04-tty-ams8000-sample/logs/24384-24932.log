@@ -1,0 +1,118 @@
+MCP-BEGIN
+SITE /1CSV-HVACHB
+NOUN-ALL-ATTRIBUTES-BEGIN
+/1CSV-HVACHB
+Ref =24384/24932
+Type SITE
+NOUN-ATTLIST-BEGIN
+ZZA Name
+Name /1CSV-HVACHB
+ZZA Type
+Type SITE
+ZZA Lock
+Lock false
+ZZA Owner
+Owner /*
+ZZA Description
+Description 安全壳通风换气系统
+ZZA Function
+Function HVAC
+ZZA Purpose
+Purpose NI
+ZZA Number
+Number 0
+ZZA Area
+Area 0
+ZZA Position
+Position E 0mm N 0mm U 0mm
+ZZA Orientation
+Orientation Y is N and Z is U
+ZZA Module
+Module unset
+ZZA Orrf
+Orrf Nulref
+ZZA Stmf
+Stmf Nulref
+ZZA Uuidia
+Uuidia unset
+ZZA Rlstored
+Rlstored unset
+ZZA :CNPEspco
+:CNPEspco unset
+ZZA :3D_SJJD
+:3D_SJJD C
+ZZA :3D_FAZT
+:3D_FAZT unset
+ZZA :3D_SJZT
+:3D_SJZT Designing
+ZZA :3D_WCZT
+:3D_WCZT 0
+ZZA :3D_THZT
+:3D_THZT unset
+ZZA :3D_SJRY
+:3D_SJRY huangzhuo
+ZZA :3D_JDRY
+:3D_JDRY unset
+ZZA :3D_SHRY
+:3D_SHRY unset
+ZZA :3D_SDRY
+:3D_SDRY unset
+ZZA :3D_PZRY
+:3D_PZRY unset
+ZZA :3D_SJBG
+:3D_SJBG unset
+ZZA :3D_GCBG
+:3D_GCBG unset
+ZZA :3D_PZJC
+:3D_PZJC unset
+ZZA :3D_GXZH
+:3D_GXZH unset
+ZZA :3D_MXGH
+:3D_MXGH unset
+ZZA :3D_FAMX
+:3D_FAMX unset
+ZZA :3D_KKZT
+:3D_KKZT unset
+ZZA :G_Export
+:G_Export false
+ZZA :FABELIST
+:FABELIST unset
+ZZA :FABMODNR
+:FABMODNR 1
+ZZA :FABTARGET
+:FABTARGET Target Contractor
+ZZA :FABSOURCE
+:FABSOURCE unset
+ZZA :FABDECODE
+:FABDECODE Design Code
+ZZA :FABPRID
+:FABPRID Object
+ZZA :FABSTID
+:FABSTID Project Number
+ZZA :FABCLID
+:FABCLID Customer
+ZZA :FABEFID
+:FABEFID Project Leader
+ZZA :FABTRRVNO
+:FABTRRVNO _.0
+ZZA :FABTRANO
+:FABTRANO 1
+ZZA :FABREVNO
+:FABREVNO 0
+ZZA :FABITIME
+:FABITIME unset
+ZZA :FABIDATE
+:FABIDATE unset
+ZZA :FABETIME
+:FABETIME unset
+ZZA :FABEDATE
+:FABEDATE unset
+ZZA :MDSCp1
+:MDSCp1 unset
+ZZA :MDSCp2
+:MDSCp2 unset
+ZZA :MDSCp3
+:MDSCp3 unset
+NOUN-ATTLIST-END
+NOUN-ALL-ATTRIBUTES-END
+MCP-END

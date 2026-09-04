@@ -1,0 +1,1867 @@
+﻿{
+  "attributes": [
+    {
+      "binary_name": "NAME",
+      "binary_status": {
+        "kind": "decoded_explicit"
+      },
+      "binary_value": "/1RX03-MSUP-E0006",
+      "comparison": "equivalent",
+      "name": "Name",
+      "ordinal": 0,
+      "rendered_value": "/1RX03-MSUP-E0006",
+      "resolved_reference_name": null,
+      "source": "binary_explicit"
+    },
+    {
+      "binary_name": "noun",
+      "binary_status": null,
+      "binary_value": "STRU",
+      "comparison": "equivalent",
+      "name": "Type",
+      "ordinal": 1,
+      "rendered_value": "STRU",
+      "resolved_reference_name": null,
+      "source": "structural"
+    },
+    {
+      "binary_name": null,
+      "binary_status": null,
+      "binary_value": null,
+      "comparison": "equivalent",
+      "name": "Lock",
+      "ordinal": 2,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "structural"
+    },
+    {
+      "binary_name": "owner",
+      "binary_status": null,
+      "binary_value": {
+        "display": "24384/47",
+        "word0": 24384,
+        "word1": 47
+      },
+      "comparison": "equivalent",
+      "name": "Owner",
+      "ordinal": 3,
+      "rendered_value": "/1RX03-MSUP",
+      "resolved_reference_name": "/1RX03-MSUP",
+      "source": "structural"
+    },
+    {
+      "binary_name": "DESC",
+      "binary_status": {
+        "kind": "decoded_explicit"
+      },
+      "binary_value": "S2-82-550-HSS160X160X20-YMJ750X750X50",
+      "comparison": "equivalent",
+      "name": "Description",
+      "ordinal": 4,
+      "rendered_value": "S2-82-550-HSS160X160X20-YMJ750X750X50",
+      "resolved_reference_name": null,
+      "source": "binary_explicit"
+    },
+    {
+      "binary_name": "FUNC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Function",
+      "ordinal": 5,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "PURP",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "raw": 0,
+        "text": null
+      },
+      "comparison": "equivalent",
+      "name": "Purpose",
+      "ordinal": 6,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "NUMB",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "raw": 0,
+        "text": null
+      },
+      "comparison": "equivalent",
+      "name": "Number",
+      "ordinal": 7,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "AREA",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": {
+        "raw": 0,
+        "text": null
+      },
+      "comparison": "equivalent",
+      "name": "Area",
+      "ordinal": 8,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "POS",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": [
+        -6761.28,
+        20918.54,
+        2400.0
+      ],
+      "comparison": "equivalent",
+      "name": "Position",
+      "ordinal": 9,
+      "rendered_value": "W 6761mm N 20919mm U 2400mm",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "ORI",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": [
+        0.0,
+        0.0,
+        106.4791
+      ],
+      "comparison": "equivalent",
+      "name": "Orientation",
+      "ordinal": 10,
+      "rendered_value": "Y is W 16.479 S and Z is U",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "GRDREF",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "GrdRef",
+      "ordinal": 11,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "USRWEI",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Usrweight",
+      "ordinal": 12,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "USRWWE",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Usrwweight",
+      "ordinal": 13,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "USRCOG",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Usrcogravity",
+      "ordinal": 14,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "USRWCO",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Usrwcogravity",
+      "ordinal": 15,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "UWMTXT",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Uwmtxt",
+      "ordinal": 16,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "DESP",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Desparam",
+      "ordinal": 17,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "BUIL",
+      "binary_status": {
+        "kind": "decoded"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": "Built",
+      "ordinal": 18,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "binary_implicit"
+    },
+    {
+      "binary_name": "DUNIO",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 0,
+      "comparison": "equivalent",
+      "name": "DUnion",
+      "ordinal": 19,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "SKEY",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Skey",
+      "ordinal": 20,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "ORRF",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Orrf",
+      "ordinal": 21,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "STMF",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Stmf",
+      "ordinal": 22,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "INVF",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Invfarray",
+      "ordinal": 23,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "UUIDIA",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Uuidia",
+      "ordinal": 24,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "PROPST",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Propst",
+      "ordinal": 25,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "FSTAT",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Fstatus",
+      "ordinal": 26,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "INPRTR",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Inprtref",
+      "ordinal": 27,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "OUPRTR",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Ouprtref",
+      "ordinal": 28,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "OPTBLO",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "display": "0/0",
+        "word0": 0,
+        "word1": 0
+      },
+      "comparison": "equivalent",
+      "name": "Optblo",
+      "ordinal": 29,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "PDNAME",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": "Pdname",
+      "ordinal": 30,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "NOHUMA",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": "NoHuMark",
+      "ordinal": 31,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "IMPVC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 0,
+      "comparison": "equivalent",
+      "name": "Impvcount",
+      "ordinal": 32,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "IMPSTC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 0,
+      "comparison": "equivalent",
+      "name": "Impstchange",
+      "ordinal": 33,
+      "rendered_value": "Undefined",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "IMPRC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": "Imprchange",
+      "ordinal": 34,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "IMPRPC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": "Imprpchange",
+      "ordinal": 35,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": "IMPDC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": "Impdchange",
+      "ordinal": 36,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":StandNum",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":StandNum",
+      "ordinal": 37,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":RoomNum",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":RoomNum",
+      "ordinal": 38,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":AreaNum",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":AreaNum",
+      "ordinal": 39,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":KZGrad",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":KZGrad",
+      "ordinal": 40,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":Roomfloor",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":Roomfloor",
+      "ordinal": 41,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_SJJD",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "C",
+      "comparison": "equivalent",
+      "name": ":3D_SJJD",
+      "ordinal": 42,
+      "rendered_value": "C",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_FAZT",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_FAZT",
+      "ordinal": 43,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_SJZT",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "Designing",
+      "comparison": "equivalent",
+      "name": ":3D_SJZT",
+      "ordinal": 44,
+      "rendered_value": "Designing",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_WCZT",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "0",
+      "comparison": "equivalent",
+      "name": ":3D_WCZT",
+      "ordinal": 45,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_THZT",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_THZT",
+      "ordinal": 46,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_SJRY",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_SJRY",
+      "ordinal": 47,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_JDRY",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_JDRY",
+      "ordinal": 48,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_SHRY",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_SHRY",
+      "ordinal": 49,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_SDRY",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_SDRY",
+      "ordinal": 50,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_PZRY",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_PZRY",
+      "ordinal": 51,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_SJBG",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_SJBG",
+      "ordinal": 52,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_GCBG",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_GCBG",
+      "ordinal": 53,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_PZJC",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_PZJC",
+      "ordinal": 54,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_GXZH",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_GXZH",
+      "ordinal": 55,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_MXGH",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_MXGH",
+      "ordinal": 56,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_FAMX",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_FAMX",
+      "ordinal": 57,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":3D_KKZT",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":3D_KKZT",
+      "ordinal": 58,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":PLANREF1",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":PLANREF1",
+      "ordinal": 59,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":PLANREF2",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":PLANREF2",
+      "ordinal": 60,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":PLANREF3",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":PLANREF3",
+      "ordinal": 61,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":SPCL",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "NA",
+      "comparison": "equivalent",
+      "name": ":SPCL",
+      "ordinal": 62,
+      "rendered_value": "NA",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":Room",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "mismatch",
+      "name": ":Room",
+      "ordinal": 63,
+      "rendered_value": ":Roomfloor unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":G_STATUS",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "DESIGN",
+      "comparison": "equivalent",
+      "name": ":G_STATUS",
+      "ordinal": 64,
+      "rendered_value": "DESIGN",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":NphsAsr",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":NphsAsr",
+      "ordinal": 65,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":NphsCheckStatus",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":NphsCheckStatus",
+      "ordinal": 66,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":NphsCheckDate",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":NphsCheckDate",
+      "ordinal": 67,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":NphsCheckFile",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":NphsCheckFile",
+      "ordinal": 68,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":NOTE",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":NOTE",
+      "ordinal": 69,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":PAINT",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":PAINT",
+      "ordinal": 70,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":REVNO",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":REVNO",
+      "ordinal": 71,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":STAGE",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":STAGE",
+      "ordinal": 72,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":BLOCK",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":BLOCK",
+      "ordinal": 73,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABELIST",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":FABELIST",
+      "ordinal": 74,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABMODNR",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 1,
+      "comparison": "equivalent",
+      "name": ":FABMODNR",
+      "ordinal": 75,
+      "rendered_value": "1",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABTARGET",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "Target Contractor",
+      "comparison": "equivalent",
+      "name": ":FABTARGET",
+      "ordinal": 76,
+      "rendered_value": "Target Contractor",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABSOURCE",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":FABSOURCE",
+      "ordinal": 77,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABDECODE",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "Design Code",
+      "comparison": "equivalent",
+      "name": ":FABDECODE",
+      "ordinal": 78,
+      "rendered_value": "Design Code",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABPRID",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "Object",
+      "comparison": "equivalent",
+      "name": ":FABPRID",
+      "ordinal": 79,
+      "rendered_value": "Object",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABSTID",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "Project Number",
+      "comparison": "equivalent",
+      "name": ":FABSTID",
+      "ordinal": 80,
+      "rendered_value": "Project Number",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABCLID",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "Customer",
+      "comparison": "equivalent",
+      "name": ":FABCLID",
+      "ordinal": 81,
+      "rendered_value": "Customer",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABEFID",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "Project Leader",
+      "comparison": "equivalent",
+      "name": ":FABEFID",
+      "ordinal": 82,
+      "rendered_value": "Project Leader",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABTRRVNO",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "_.0",
+      "comparison": "equivalent",
+      "name": ":FABTRRVNO",
+      "ordinal": 83,
+      "rendered_value": "_.0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABTRANO",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 1,
+      "comparison": "equivalent",
+      "name": ":FABTRANO",
+      "ordinal": 84,
+      "rendered_value": "1",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABREVNO",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 0,
+      "comparison": "equivalent",
+      "name": ":FABREVNO",
+      "ordinal": 85,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABITIME",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":FABITIME",
+      "ordinal": 86,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABIDATE",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":FABIDATE",
+      "ordinal": 87,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABETIME",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":FABETIME",
+      "ordinal": 88,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":FABEDATE",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":FABEDATE",
+      "ordinal": 89,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSBuildStyl",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "raw": 74593125,
+        "text": "INSIDE"
+      },
+      "comparison": "equivalent",
+      "name": ":MDSBuildStyl",
+      "ordinal": 90,
+      "rendered_value": "INSIDE",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSTmplOri",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 0,
+      "comparison": "equivalent",
+      "name": ":MDSTmplOri",
+      "ordinal": 91,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSAdp",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":MDSAdp",
+      "ordinal": 92,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSAdpRem",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":MDSAdpRem",
+      "ordinal": 93,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSAdpLoc",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":MDSAdpLoc",
+      "ordinal": 94,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MdsAncRef",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":MdsAncRef",
+      "ordinal": 95,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSBars",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": true,
+      "comparison": "equivalent",
+      "name": ":MDSBars",
+      "ordinal": 96,
+      "rendered_value": "true",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSBpref1",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":MDSBpref1",
+      "ordinal": 97,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSBpref2",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":MDSBpref2",
+      "ordinal": 98,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSCheck",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": ":MDSCheck",
+      "ordinal": 99,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSComment",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "unset",
+      "comparison": "equivalent",
+      "name": ":MDSComment",
+      "ordinal": 100,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSDType",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "unset",
+      "comparison": "equivalent",
+      "name": ":MDSDType",
+      "ordinal": 101,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSFrameDir",
+      "binary_status": {
+        "kind": "decoded_explicit"
+      },
+      "binary_value": [
+        0.9589232724360779,
+        0.2836655734848406,
+        0.0
+      ],
+      "comparison": "equivalent",
+      "name": ":MDSFrameDir",
+      "ordinal": 102,
+      "rendered_value": "E 16.479 N",
+      "resolved_reference_name": null,
+      "source": "binary_explicit"
+    },
+    {
+      "binary_name": ":MDSFraMirror",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": true,
+      "comparison": "equivalent",
+      "name": ":MDSFraMirror",
+      "ordinal": 103,
+      "rendered_value": "true",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSHv",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "BOTH",
+      "comparison": "equivalent",
+      "name": ":MDSHv",
+      "ordinal": 104,
+      "rendered_value": "BOTH",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSHVACType",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "unset",
+      "comparison": "equivalent",
+      "name": ":MDSHVACType",
+      "ordinal": 105,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSMaxBore",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 1200.0,
+      "comparison": "equivalent",
+      "name": ":MDSMaxBore",
+      "ordinal": 106,
+      "rendered_value": "1200",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSMinBore",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 0.0,
+      "comparison": "equivalent",
+      "name": ":MDSMinBore",
+      "ordinal": 107,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSOrigin",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "unset",
+      "comparison": "equivalent",
+      "name": ":MDSOrigin",
+      "ordinal": 108,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSPosNumMax",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "0",
+      "comparison": "equivalent",
+      "name": ":MDSPosNumMax",
+      "ordinal": 109,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSProjSpec",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":MDSProjSpec",
+      "ordinal": 110,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSRange",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "unset",
+      "comparison": "equivalent",
+      "name": ":MDSRange",
+      "ordinal": 111,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSShopweld",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 0.0,
+      "comparison": "equivalent",
+      "name": ":MDSShopweld",
+      "ordinal": 112,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSSiteweld",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": 0.0,
+      "comparison": "equivalent",
+      "name": ":MDSSiteweld",
+      "ordinal": 113,
+      "rendered_value": "0",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSSpecialNo",
+      "binary_status": {
+        "kind": "decoded_explicit"
+      },
+      "binary_value": "SPS",
+      "comparison": "equivalent",
+      "name": ":MDSSpecialNo",
+      "ordinal": 114,
+      "rendered_value": "SPS",
+      "resolved_reference_name": null,
+      "source": "binary_explicit"
+    },
+    {
+      "binary_name": ":MDSSplRot",
+      "binary_status": {
+        "kind": "decoded_explicit"
+      },
+      "binary_value": 180.0,
+      "comparison": "equivalent",
+      "name": ":MDSSplRot",
+      "ordinal": 115,
+      "rendered_value": "180",
+      "resolved_reference_name": null,
+      "source": "binary_explicit"
+    },
+    {
+      "binary_name": ":MDSSref",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": {
+        "kind": "unset"
+      },
+      "comparison": "equivalent",
+      "name": ":MDSSref",
+      "ordinal": 116,
+      "rendered_value": "Nulref",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSStdSupp",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": "unset",
+      "comparison": "equivalent",
+      "name": ":MDSStdSupp",
+      "ordinal": 117,
+      "rendered_value": "unset",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSSuppType",
+      "binary_status": {
+        "kind": "decoded_explicit"
+      },
+      "binary_value": "SPECIAL",
+      "comparison": "equivalent",
+      "name": ":MDSSuppType",
+      "ordinal": 118,
+      "rendered_value": "SPECIAL",
+      "resolved_reference_name": null,
+      "source": "binary_explicit"
+    },
+    {
+      "binary_name": ":MDSTrimmer",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": ":MDSTrimmer",
+      "ordinal": 119,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    },
+    {
+      "binary_name": ":MDSViewFlip",
+      "binary_status": {
+        "kind": "catalog_default"
+      },
+      "binary_value": false,
+      "comparison": "equivalent",
+      "name": ":MDSViewFlip",
+      "ordinal": 120,
+      "rendered_value": "false",
+      "resolved_reference_name": null,
+      "source": "catalog_default"
+    }
+  ],
+  "catalog_comparison": {
+    "catalog_missing_from_tty": [
+      {
+        "hash": 545713,
+        "name": "POS",
+        "report_name": "PositonEditor"
+      }
+    ],
+    "enabled": true,
+    "logical_attribute_count": 34,
+    "noun_present": true,
+    "tty_not_in_catalog": [
+      "Type",
+      "Lock",
+      "Owner",
+      "Position",
+      ":StandNum",
+      ":RoomNum",
+      ":AreaNum",
+      ":KZGrad",
+      ":Roomfloor",
+      ":3D_SJJD",
+      ":3D_FAZT",
+      ":3D_SJZT",
+      ":3D_WCZT",
+      ":3D_THZT",
+      ":3D_SJRY",
+      ":3D_JDRY",
+      ":3D_SHRY",
+      ":3D_SDRY",
+      ":3D_PZRY",
+      ":3D_SJBG",
+      ":3D_GCBG",
+      ":3D_PZJC",
+      ":3D_GXZH",
+      ":3D_MXGH",
+      ":3D_FAMX",
+      ":3D_KKZT",
+      ":PLANREF1",
+      ":PLANREF2",
+      ":PLANREF3",
+      ":SPCL",
+      ":Room",
+      ":G_STATUS",
+      ":NphsAsr",
+      ":NphsCheckStatus",
+      ":NphsCheckDate",
+      ":NphsCheckFile",
+      ":NOTE",
+      ":PAINT",
+      ":REVNO",
+      ":STAGE",
+      ":BLOCK",
+      ":FABELIST",
+      ":FABMODNR",
+      ":FABTARGET",
+      ":FABSOURCE",
+      ":FABDECODE",
+      ":FABPRID",
+      ":FABSTID",
+      ":FABCLID",
+      ":FABEFID",
+      ":FABTRRVNO",
+      ":FABTRANO",
+      ":FABREVNO",
+      ":FABITIME",
+      ":FABIDATE",
+      ":FABETIME",
+      ":FABEDATE",
+      ":MDSBuildStyl",
+      ":MDSTmplOri",
+      ":MDSAdp",
+      ":MDSAdpRem",
+      ":MDSAdpLoc",
+      ":MdsAncRef",
+      ":MDSBars",
+      ":MDSBpref1",
+      ":MDSBpref2",
+      ":MDSCheck",
+      ":MDSComment",
+      ":MDSDType",
+      ":MDSFrameDir",
+      ":MDSFraMirror",
+      ":MDSHv",
+      ":MDSHVACType",
+      ":MDSMaxBore",
+      ":MDSMinBore",
+      ":MDSOrigin",
+      ":MDSPosNumMax",
+      ":MDSProjSpec",
+      ":MDSRange",
+      ":MDSShopweld",
+      ":MDSSiteweld",
+      ":MDSSpecialNo",
+      ":MDSSplRot",
+      ":MDSSref",
+      ":MDSStdSupp",
+      ":MDSSuppType",
+      ":MDSTrimmer",
+      ":MDSViewFlip"
+    ]
+  },
+  "comparison_counts": {
+    "equivalent": 120,
+    "mismatch": 1
+  },
+  "deferred_uda_row_count": 0,
+  "deferred_uda_rows": [],
+  "noun_hash": 958465,
+  "noun_name": "STRU",
+  "omitted_row_count": 0,
+  "owner": "24384/47",
+  "refno": {
+    "display": "24384/108",
+    "word0": 24384,
+    "word1": 108
+  },
+  "source_counts": {
+    "binary_explicit": 6,
+    "binary_implicit": 6,
+    "catalog_default": 106,
+    "structural": 3
+  },
+  "tty_row_count": 121,
+  "tty_unique_count": 121,
+  "uda_enabled": true
+}

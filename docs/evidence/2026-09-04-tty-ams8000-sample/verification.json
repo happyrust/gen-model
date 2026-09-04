@@ -6,10 +6,10 @@
                       "references":  "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams5052_0001;D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams5053_0001;D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams5054_0001;D:\\AVEVA\\Projects\\E3D3.1\\AvevaCatalogue\\acp000\\acp7320_0001;D:\\AVEVA\\Projects\\E3D3.1\\ZDJ\\zdj000\\zdj7600_0001"
                   },
     "authority":  "E3D TTY ATTLIST from AMS /ALL",
-    "reports":  49,
-    "tty_rows":  3163,
-    "equivalent":  3155,
-    "mismatch":  8,
+    "reports":  68,
+    "tty_rows":  5131,
+    "equivalent":  5093,
+    "mismatch":  23,
     "deferred":  0,
     "omitted":  0,
     "results":  [
@@ -23,11 +23,29 @@
                         "omitted":  0
                     },
                     {
+                        "refno":  "24384/108",
+                        "exit_status":  0,
+                        "tty_rows":  121,
+                        "equivalent":  120,
+                        "mismatch":  1,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
                         "refno":  "24384/1100",
                         "exit_status":  0,
                         "tty_rows":  14,
                         "equivalent":  14,
                         "mismatch":  0,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
+                        "refno":  "24384/123",
+                        "exit_status":  0,
+                        "tty_rows":  121,
+                        "equivalent":  120,
+                        "mismatch":  1,
                         "deferred":  0,
                         "omitted":  0
                     },
@@ -50,6 +68,15 @@
                         "omitted":  0
                     },
                     {
+                        "refno":  "24384/138",
+                        "exit_status":  0,
+                        "tty_rows":  121,
+                        "equivalent":  120,
+                        "mismatch":  1,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
                         "refno":  "24384/1497",
                         "exit_status":  0,
                         "tty_rows":  22,
@@ -59,7 +86,25 @@
                         "omitted":  0
                     },
                     {
+                        "refno":  "24384/153",
+                        "exit_status":  0,
+                        "tty_rows":  121,
+                        "equivalent":  120,
+                        "mismatch":  1,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
                         "refno":  "24384/1629",
+                        "exit_status":  0,
+                        "tty_rows":  121,
+                        "equivalent":  120,
+                        "mismatch":  1,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
+                        "refno":  "24384/168",
                         "exit_status":  0,
                         "tty_rows":  121,
                         "equivalent":  120,
@@ -108,6 +153,15 @@
                         "exit_status":  0,
                         "tty_rows":  105,
                         "equivalent":  105,
+                        "mismatch":  0,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
+                        "refno":  "24384/22400",
+                        "exit_status":  0,
+                        "tty_rows":  75,
+                        "equivalent":  75,
                         "mismatch":  0,
                         "deferred":  0,
                         "omitted":  0
@@ -293,11 +347,83 @@
                         "omitted":  0
                     },
                     {
+                        "refno":  "24384/24828",
+                        "exit_status":  0,
+                        "tty_rows":  75,
+                        "equivalent":  75,
+                        "mismatch":  0,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
+                        "refno":  "24384/24932",
+                        "exit_status":  0,
+                        "tty_rows":  54,
+                        "equivalent":  54,
+                        "mismatch":  0,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
+                        "refno":  "24384/24935",
+                        "exit_status":  0,
+                        "tty_rows":  123,
+                        "equivalent":  118,
+                        "mismatch":  2,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
+                        "refno":  "24384/24936",
+                        "exit_status":  0,
+                        "tty_rows":  108,
+                        "equivalent":  104,
+                        "mismatch":  1,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
+                        "refno":  "24384/24939",
+                        "exit_status":  0,
+                        "tty_rows":  63,
+                        "equivalent":  60,
+                        "mismatch":  0,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
+                        "refno":  "24384/24942",
+                        "exit_status":  0,
+                        "tty_rows":  123,
+                        "equivalent":  118,
+                        "mismatch":  2,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
+                        "refno":  "24384/24943",
+                        "exit_status":  0,
+                        "tty_rows":  108,
+                        "equivalent":  104,
+                        "mismatch":  1,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
                         "refno":  "24384/24946",
                         "exit_status":  0,
                         "tty_rows":  121,
                         "equivalent":  120,
                         "mismatch":  1,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
+                        "refno":  "24384/2498",
+                        "exit_status":  0,
+                        "tty_rows":  75,
+                        "equivalent":  75,
+                        "mismatch":  0,
                         "deferred":  0,
                         "omitted":  0
                     },
@@ -419,11 +545,38 @@
                         "omitted":  0
                     },
                     {
+                        "refno":  "24384/47",
+                        "exit_status":  0,
+                        "tty_rows":  75,
+                        "equivalent":  75,
+                        "mismatch":  0,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
+                        "refno":  "24384/48",
+                        "exit_status":  0,
+                        "tty_rows":  121,
+                        "equivalent":  120,
+                        "mismatch":  1,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
                         "refno":  "24384/572",
                         "exit_status":  0,
                         "tty_rows":  14,
                         "equivalent":  14,
                         "mismatch":  0,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
+                        "refno":  "24384/63",
+                        "exit_status":  0,
+                        "tty_rows":  121,
+                        "equivalent":  120,
+                        "mismatch":  1,
                         "deferred":  0,
                         "omitted":  0
                     },
@@ -437,11 +590,29 @@
                         "omitted":  0
                     },
                     {
+                        "refno":  "24384/78",
+                        "exit_status":  0,
+                        "tty_rows":  121,
+                        "equivalent":  120,
+                        "mismatch":  1,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
                         "refno":  "24384/836",
                         "exit_status":  0,
                         "tty_rows":  14,
                         "equivalent":  14,
                         "mismatch":  0,
+                        "deferred":  0,
+                        "omitted":  0
+                    },
+                    {
+                        "refno":  "24384/93",
+                        "exit_status":  0,
+                        "tty_rows":  121,
+                        "equivalent":  120,
+                        "mismatch":  1,
                         "deferred":  0,
                         "omitted":  0
                     },
@@ -454,5 +625,73 @@
                         "deferred":  0,
                         "omitted":  0
                     }
-                ]
+                ],
+    "explicit_uda":  {
+                         "elements":  10,
+                         "rows":  35,
+                         "equivalent":  35,
+                         "mismatch":  0,
+                         "results":  [
+                                         {
+                                             "refno":  "24384/47",
+                                             "rows":  1,
+                                             "equivalent":  1,
+                                             "mismatch":  0
+                                         },
+                                         {
+                                             "refno":  "24384/48",
+                                             "rows":  4,
+                                             "equivalent":  4,
+                                             "mismatch":  0
+                                         },
+                                         {
+                                             "refno":  "24384/63",
+                                             "rows":  4,
+                                             "equivalent":  4,
+                                             "mismatch":  0
+                                         },
+                                         {
+                                             "refno":  "24384/78",
+                                             "rows":  4,
+                                             "equivalent":  4,
+                                             "mismatch":  0
+                                         },
+                                         {
+                                             "refno":  "24384/93",
+                                             "rows":  4,
+                                             "equivalent":  4,
+                                             "mismatch":  0
+                                         },
+                                         {
+                                             "refno":  "24384/108",
+                                             "rows":  4,
+                                             "equivalent":  4,
+                                             "mismatch":  0
+                                         },
+                                         {
+                                             "refno":  "24384/123",
+                                             "rows":  4,
+                                             "equivalent":  4,
+                                             "mismatch":  0
+                                         },
+                                         {
+                                             "refno":  "24384/138",
+                                             "rows":  4,
+                                             "equivalent":  4,
+                                             "mismatch":  0
+                                         },
+                                         {
+                                             "refno":  "24384/153",
+                                             "rows":  3,
+                                             "equivalent":  3,
+                                             "mismatch":  0
+                                         },
+                                         {
+                                             "refno":  "24384/168",
+                                             "rows":  3,
+                                             "equivalent":  3,
+                                             "mismatch":  0
+                                         }
+                                     ]
+                     }
 }

@@ -59,7 +59,29 @@ $summary = [pscustomobject]@{
     omitted = ($results | Measure-Object omitted -Sum).Sum
     results = $results
 }
+$explicitResults = foreach ($refno in Get-Content -LiteralPath (Join-Path $here 'explicit-uda-refnos.txt')) {
+    $report = Join-Path $reports (($refno -replace '/', '-') + '.json')
+    $json = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+    $rows = @($json.attributes | Where-Object { $_.name -like ':*' -and $_.source -eq 'binary_explicit' })
+    [pscustomobject]@{
+        refno = [string]$refno
+        rows = $rows.Count
+        equivalent = @($rows | Where-Object comparison -eq 'equivalent').Count
+        mismatch = @($rows | Where-Object comparison -eq 'mismatch').Count
+    }
+}
+$explicitSummary = [pscustomobject]@{
+    elements = $explicitResults.Count
+    rows = ($explicitResults | Measure-Object rows -Sum).Sum
+    equivalent = ($explicitResults | Measure-Object equivalent -Sum).Sum
+    mismatch = ($explicitResults | Measure-Object mismatch -Sum).Sum
+    results = $explicitResults
+}
+$summary | Add-Member -NotePropertyName explicit_uda -NotePropertyValue $explicitSummary
 $summary | ConvertTo-Json -Depth 6 | Out-File -LiteralPath (Join-Path $here 'verification.json') -Encoding utf8
+$explicitSummary | ConvertTo-Json -Depth 4 | Out-File -LiteralPath (Join-Path $here 'explicit-uda-verification.json') -Encoding utf8
 $summary | Select-Object reports, tty_rows, equivalent, mismatch, deferred, omitted | Format-List
+$explicitSummary | Select-Object elements, rows, equivalent, mismatch | Format-List
 
-if ($summary.mismatch -or $summary.deferred -or $summary.omitted) { exit 2 }
+if ($summary.mismatch -or $summary.deferred -or $summary.omitted -or
+    $explicitSummary.elements -ne 10 -or $explicitSummary.mismatch) { exit 2 }
