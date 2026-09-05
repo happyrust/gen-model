@@ -954,6 +954,87 @@ mod tests {
         );
     }
 
+    /// U-H2：通风构件的属性变化分类，背书 H-01（DESP）与 H-02（POS）两条 TTY 宏。
+    ///
+    /// - `DESP`（DAMP/STRT 的设计参数，`DESPAR NUMn` 落在 `DESP` 上）→ `DependencyCascade` → Regen；
+    /// - HVAC 构件（都不是点容器）的 `POS`/`ORI` → `TransformOnly`（只更新 world transform）；
+    /// - `NAME` → Skip（DataOnly）。
+    #[test]
+    fn hvac_component_attribute_changes_follow_the_update_contract() {
+        assert_eq!(
+            classify_attribute_effect("DESP"),
+            AttributeEffect::DependencyCascade,
+            "DESP 是设计参数依赖，改它要重生成"
+        );
+        for noun in ["DAMP", "STRT", "TRNS", "BATT", "BEND"] {
+            assert!(
+                !is_loop_container_noun(noun),
+                "{noun} 不是点容器，POS 应走便宜的 transform 路径"
+            );
+
+            let mut desp = modified_operation("DESP");
+            set_operation_noun(&mut desp, noun);
+            assert_eq!(
+                classify_operation_impact(&desp),
+                OperationImpact::Regen,
+                "{noun} DESP 改动必须重生成"
+            );
+
+            for attr in ["POS", "ORI"] {
+                let mut moved = modified_operation(attr);
+                set_operation_noun(&mut moved, noun);
+                assert_eq!(
+                    classify_operation_impact(&moved),
+                    OperationImpact::TransformOnly,
+                    "{noun} {attr} 只需更新 world transform"
+                );
+            }
+
+            let mut renamed = modified_operation("NAME");
+            set_operation_noun(&mut renamed, noun);
+            assert_eq!(
+                classify_operation_impact(&renamed),
+                OperationImpact::Skip,
+                "{noun} 改名是 DataOnly"
+            );
+        }
+    }
+
+    /// U-T3：电缆桥架路由/材料的变化分类。`POINTR`/`RPATH` 是点容器（noun_caps `point=true`），
+    /// 它们的 `POS` 是属主几何的输入，必须 Regen（不是 TransformOnly、更不是 Skip）——对应 T-02
+    /// POINTR 位移；`CTMTRL` 成员表变化（NEW/DELETE CTSTRA，T-03/T-04）也必须 Regen。
+    #[test]
+    fn cable_tray_route_and_material_changes_regenerate() {
+        for noun in ["POINTR", "RPATH"] {
+            assert!(
+                is_loop_container_noun(noun),
+                "{noun} 应是点容器（其 POS 是属主几何输入）"
+            );
+            let mut moved = modified_operation("POS");
+            set_operation_noun(&mut moved, noun);
+            assert_eq!(
+                classify_operation_impact(&moved),
+                OperationImpact::Regen,
+                "{noun} POS 必须重生成属主几何"
+            );
+        }
+
+        use aios_core::pdms_types::{RefU64, RefU64Vec};
+        let mut members = modified_operation_with_attrs(&[]);
+        set_operation_noun(&mut members, "CTMTRL");
+        if let EleOperationDetail::Modified(modified) = &mut members.detail {
+            modified.children_changed = Some((
+                RefU64Vec(vec![RefU64(1), RefU64(2)]),
+                RefU64Vec(vec![RefU64(1), RefU64(2), RefU64(3)]),
+            ));
+        }
+        assert_eq!(
+            classify_operation_impact(&members),
+            OperationImpact::Regen,
+            "CTMTRL 成员表增减（增删 CTSTRA）必须重生成"
+        );
+    }
+
     #[test]
     fn child_list_change_distinguishes_reorder_from_membership() {
         use aios_core::pdms_types::{RefU64, RefU64Vec};
