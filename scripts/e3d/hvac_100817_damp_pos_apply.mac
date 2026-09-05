@@ -1,0 +1,44 @@
+-- 通风增量 H-02「移动管件·成员位移」apply：DAMP /1CUP001VAR (24381/100819, 属主 HVAC BRAN /-CUP-S-3-M-1201
+-- = 24381/100817) 的 POS +100mm E (E -6704.58984375 to E -6604.58984375)。
+--
+-- 取代 projams_incr_pos_apply/restore.mac：那对宏假定基线 POS E -6154.59，而库里现在
+-- （ams7997_0001@106，aios_db 只读探针）是 E -6704.58984375 N 2224.10009765625 D 2280——照它恢复会把
+-- DAMP 放到离真基线 550 mm 的地方。本对宏：apply = 基线 +100 mm E，restore = 写回基线完整终态。
+-- POS 不带 WRT，与 dabacon 里存的属主系 POS 同一口径（Q POS 打出来的就是它）。
+--
+-- 纪律同 db8000_bran_scratch_*：恰好一个 SAVEWORK；不写 QUIT/FINISH；SAVEWORK 之前先导窄口径 RVM；
+-- ATTLIST 不在宏内做（首跑崩在逐属性 Q 上），属性对拍由只读的 e3d_tty_attlist_capture 另开会话完成。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/hvac_100817_damp_pos_apply.log" OVER
+$P CODEX-HVAC-100817-POS-APPLY-ALIVE
+=24381/100819
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q POS
+POS E -6604.58984375 N 2224.10009765625 D 2280
+Q POS
+
+$* ---- RVM 导出（状态 h02-pos-plus100e，SAVEWORK 之前）----
+repre insu off
+repre obst off
+repre tube on
+repre lev hvac 6
+export implied tube into separate containers
+Q REPRE
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/hvac-100817-increment/rvm/h02-pos-plus100e.rvm"
+export filenote 'CODEX hvac 100817 H-02 apply: DAMP /1CUP001VAR POS +100mm E (E -6704.58984375 to E -6604.58984375)'
+export holes on
+export autocolour displayexport on
+export repr on
+export /-CUP-S-3-M-1201
+export finish
+
+=24381/100819
+Q REF
+Q POS
+SAVEWORK 'CODEX hvac 100817 H-02 apply: DAMP /1CUP001VAR POS +100mm E (E -6704.58984375 to E -6604.58984375)'
+$P CODEX-HVAC-100817-POS-APPLY-DONE
+ALPHA LOG END

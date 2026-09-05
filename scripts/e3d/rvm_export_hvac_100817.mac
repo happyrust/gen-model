@@ -1,0 +1,60 @@
+$(
+------------------------------------------------------------------------
+RVM 基准导出：HVAC BRAN /-CUP-S-3-M-1201   (dbnum 7997, pe:24381_100817)
+
+通风线的第一份 RVM 真值（增量测试矩阵 H-10 / 缺口 G1）。这条支管是 H 组全部用例的靶：
+  HVAC 24381/100816 → BRAN 24381/100817 → 14 个路由成员
+  （BEND 100818、DAMP /1CUP001VAR 100819、STRT 100820 … BATT 100825 …；
+   gen_ams@106 出几何 8 件：BATT 1 / BEND 2 / DAMP 2 / STRT 3）。
+
+口径与 rvm_export_c_or_1r345_c.mac 逐行相同（窄口径：insu/obst off、tube on、隐含管段分容器），
+只换目标与输出，外加一行 `repre lev hvac 6`：
+  这套 -tty 运行时（shadow_e3d31_gen_model_test）的 `Q REPRE` 全部是 0（LEVEL / PIPE / NOZZ /
+  STRU / CABLE / HVAC 都停在 LEVINI），不是 e3d-model `catalogue.rs::repre_level_for` 注释里说的
+  「TTY 缺省 LEVEL HVAC 6」。2026-09-06 实测：HVAC 0 级导出的 STRT 只有 1 个图元、BEND 3 个——
+  LEVE ≥ 6 的法兰片被滤掉，与 gen_ams（默认 E3D_REPRE_LEVEL_HVAC=6，STRT 5 件 / BEND 7 件）
+  对拍 5/8 off、每侧差正好 50 mm（法兰宽 DESP NUM21/24 = 50）；DAMP / BATT 不受影响、exact。
+  显式设 6 与 gen-model 默认、以及 GenModelRvmExport addin 的 `repre lev hvac <level>` 同口径。
+  `Q REPRE` 落日志留证。
+
+导出是只读动作：本宏没有 SAVEWORK，不产生新会话号，不影响水位。
+不写 QUIT/FINISH——会话由 l3_suite 的 driver wrapper 拥有。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/rvm_export_hvac_100817.log" OVER
+$P CODEX-DB7997-HVAC-100817-RVM-EXPORT-ALIVE
+
+/-CUP-S-3-M-1201
+Q CE
+Q REF
+Q TYPE
+Q OWNE
+Q MEMBERS
+
+$* ---- 表现设置：只导实体几何；管子照旧，隐含管段各自独立容器 ----
+repre insu off
+repre obst off
+repre tube on
+repre lev hvac 6
+export implied tube into separate containers
+Q REPRE
+
+$* ---- 驱动与输出 ----
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/test_data/rvm/CUP-S-3-M-1201.rvm"
+export filenote 'RVM baseline for HVAC BRAN /-CUP-S-3-M-1201 (dbnum 7997, narrow scope)'
+
+$* ---- 表现选项 ----
+export holes on
+export autocolour displayexport on
+export repr on
+
+$* ---- 包含列表：只导这一条 BRAN 及其成员 ----
+export /-CUP-S-3-M-1201
+
+$* ---- 执行 ----
+export finish
+
+$P CODEX-DB7997-HVAC-100817-RVM-EXPORT-DONE
+ALPHA LOG END

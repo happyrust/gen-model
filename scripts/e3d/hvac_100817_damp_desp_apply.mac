@@ -1,0 +1,44 @@
+-- 通风增量 H-01「改·几何参数」apply：DAMP /1CUP001VAR (24381/100819, 属主 HVAC BRAN /-CUP-S-3-M-1201
+-- = 24381/100817) 的 DESP NUM2 1000 → 1400。
+--
+-- 取代 projams_damp_desp_apply.mac：那对宏的 restore 写的是 2026-08 的 DESP 全态
+-- （NUM32 = 531967），而库里现在是 540721——照它恢复会把参数改坏。本对宏的基线值
+-- 全部来自 2026-09-06 对 ams7997_0001@106 的只读探针（aios_db.parse.element explicit_attrs.DESP）。
+--
+-- 纪律同 db8000_bran_scratch_*：恰好一个 SAVEWORK；不写 QUIT/FINISH；SAVEWORK 之前先导窄口径 RVM；
+-- ATTLIST 不在宏内做（2026-09-06 01:48 首跑 des.exe 0xC0000005 崩在 ATTLIST 逐属性 Q 上，与 09-04 TTY 采样的崩溃形态相同）；
+-- 属性对拍改由只读的 e3d_tty_attlist_capture 另开会话完成。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/hvac_100817_damp_desp_apply.log" OVER
+$P CODEX-HVAC-100817-DESP-APPLY-ALIVE
+=24381/100819
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q DESP
+DESPAR NUM2 1400
+Q DESP
+
+$* ---- RVM 导出（状态 h01-desp-1400，SAVEWORK 之前）----
+repre insu off
+repre obst off
+repre tube on
+repre lev hvac 6
+export implied tube into separate containers
+Q REPRE
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/hvac-100817-increment/rvm/h01-desp-1400.rvm"
+export filenote 'CODEX hvac 100817 H-01 apply: DAMP /1CUP001VAR DESP NUM2 1400'
+export holes on
+export autocolour displayexport on
+export repr on
+export /-CUP-S-3-M-1201
+export finish
+
+=24381/100819
+Q REF
+Q DESP
+SAVEWORK 'CODEX hvac 100817 H-01 apply: DAMP /1CUP001VAR DESP NUM2 1000 to 1400'
+$P CODEX-HVAC-100817-DESP-APPLY-DONE
+ALPHA LOG END
