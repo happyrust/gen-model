@@ -81,6 +81,10 @@ pub struct ModelWorkItem {
 pub struct ModelUpdatePlan {
     pub work_items: Vec<ModelWorkItem>,
     pub warnings: Vec<String>,
+    /// 窗口规划器在 T 端观察到、但尚无持久 `gen_root` 行的根数。
+    /// `None` 表示旧记录或尚未开过窗口，不能解释成零（ADR-060 M5）。
+    #[serde(default)]
+    pub lazy_roots: Option<u32>,
     /// Live design elements touched by the window.  Staged ATT rows are sparse;
     /// these ids are file-parsed before model work to restore unchanged fields.
     #[serde(default)]
@@ -822,6 +826,7 @@ fn build_cata_cascade_plan(
     ModelUpdatePlan {
         work_items: items.into_values().collect(),
         warnings: Vec::new(),
+        lazy_roots: None,
         design_refnos: Vec::new(),
         units: Vec::new(),
         room_rebuild_required: false,
@@ -904,7 +909,37 @@ pub(crate) async fn build_model_update_plan(
     });
     let regen_details = mask_details_to_regen(&details, &regen_refnos);
 
-    let rollup = resolve_unit_rollup(dbnum, range_eles, &regen_details).await?;
+    // XGEOMETRY 门（核对表 R2）的候选：位姿目标与删除目标。它们不在 `regen_details` 里
+    // （已被掩掉），所以要单独交给 rollup——那里的 `OwnershipSnapshot` 是唯一不额外打库
+    // 就有完整 pre/post owner 链的地方。**门只筛模型工作项，不碰 `details`**：`details`
+    // 还驱动 `design_refnos`（生成前的文件补参），那是数据层不是模型层。
+    let gate_candidates: HashSet<RefnoEnum> = transform_refnos
+        .iter()
+        .chain(deleted_refnos.iter())
+        .copied()
+        .collect();
+    let rollup = resolve_unit_rollup(dbnum, range_eles, &regen_details, &gate_candidates).await?;
+    let (transform_refnos, deleted_refnos) = if crate::options::model_xgeometry_gate() {
+        let gated = &rollup.xgeometry_gated;
+        if !gated.is_empty() {
+            baseline_warnings.push(format!(
+                "dbnum={dbnum}: XGEOMETRY 门挡下 {} 个模型工作目标（显式几何走另一条路，核对表 R2）",
+                gated.len()
+            ));
+        }
+        (
+            transform_refnos
+                .into_iter()
+                .filter(|refno| !gated.contains(refno))
+                .collect::<HashSet<_>>(),
+            deleted_refnos
+                .into_iter()
+                .filter(|refno| !gated.contains(refno))
+                .collect::<HashSet<_>>(),
+        )
+    } else {
+        (transform_refnos, deleted_refnos)
+    };
     let mut units = rollup.units;
     // 容器动了 → 它脚下的派生几何单元跟着重生成。必须在 `work_items_from_units`
     // 之前并进来：`units` 是 `RegenRoot` 工作项与执行阶段生成工作单的共同来源。
@@ -1015,6 +1050,7 @@ pub(crate) async fn build_model_update_plan(
     Ok(ModelUpdatePlan {
         work_items,
         warnings,
+        lazy_roots: None,
         design_refnos,
         units,
         room_rebuild_required: room_rebuild_reason.is_some(),
@@ -1218,6 +1254,41 @@ mod tests {
                 "{noun} 没有由成员位置派生的几何，不该被升级成整根重生成"
             );
         }
+    }
+
+    /// U-E3：设备子件位移走便宜路径——EQUI 不带隐含管身，挪它的子件（NOZZ/BOX/CYLI/SUBE）
+    /// 既不改判整根重生成（第 1 条：子件的生成根 EQUI 不是派生几何单元），也不牵出任何
+    /// 子树派生单元（第 2 条），因此只留 `TransformOnly` + 其 `PostRegenAabb` 伴随项。
+    /// 与管道对照：BRAN 是派生几何单元，挪它的 FTUB 会把 BRAN 拉进整根重生成。
+    #[test]
+    fn equipment_sub_element_move_stays_cheap_without_implied_tubing() {
+        let graph = sample_hierarchy();
+        let unit_types = default_unit_types();
+
+        // 设备侧：NOZZ 是 EQUI 的子件；两条判据都判「无派生几何」。
+        let nozz = node_refno(31);
+        assert_eq!(
+            derived_unit_at_or_above(&graph, nozz),
+            None,
+            "NOZZ 之上没有派生几何单元（EQUI 不派生管身），便宜路径足够"
+        );
+        assert!(
+            derived_units_in_subtree(&graph, nozz).is_empty(),
+            "NOZZ 脚下也没有派生几何单元"
+        );
+        let (rerouted, _) = pose_targets_regenerating_themselves(&[nozz], &graph, &unit_types);
+        assert!(
+            rerouted.is_empty(),
+            "挪 NOZZ 不该把自己（或 EQUI 根）改判成整根重生成：{rerouted:?}"
+        );
+
+        // 管道侧对照：FTUB 之上就是派生几何单元 BRAN，挪它必须把 BRAN 拉进重生成。
+        let ftub = node_refno(13);
+        assert_eq!(
+            derived_unit_at_or_above(&graph, ftub),
+            Some(node_refno(11).to_pdms_str()),
+            "FTUB 之上的 BRAN 派生管身，挪成员要整根重推"
+        );
     }
 
     /// 改判必须排在 `mask_details_to_regen` 之前。
