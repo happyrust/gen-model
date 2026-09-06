@@ -24,6 +24,14 @@
 
 > **本轮（2026-08-28）用 ida-bridge 复核指令流，改了证据文档三处、新增六条它没有的规则。**
 > 更正见 §7，逐条在正文里标 `★更正` / `★新增`。
+>
+> **2026-09-04 二次复核**（`docs/evidence/2026-09-04-ida-core3d-partial-update-recheck.md`，
+> ida-bridge `idalib-25128`）。四处改动，逐条标 `★0904`：
+> **R23 离线结案**（不必再找 live 进程，`PDMS_Idlist_base` 的构造函数写死了那一位）；
+> **R6 补第三个队列作废点**（视图切换，`LoadSheet`）；
+> **§1.3 补两个有语义的方法**（`ExistsIDList` / `LoadSheet`）与 §1.5 一节新增（这个类的宿主是
+> DRAFT 图纸，决定哪半边规则能往服务端搬）；
+> **§9 R22 的判词作废**——我方落库侧一直有按根对账，孤儿行不是「只能等整库重建」。
 
 ## 1. 对象与地址（重定位的起点）
 
@@ -32,7 +40,7 @@
 | 偏移 | 名字 | 类型 | 读出处 |
 |---|---|---|---|
 | `+0x05` | `m_inDraw` | bool | `Update` 重入保护；pass 2 置 1，`Finish` 后清 0 |
-| `+0x08` | `m_view` | `DB_Element`(20B) | 当前视图，`SetView`/`ResetView` |
+| `+0x08` | `m_view` | `DB_Element`(20B) | 当前视图，`SetView`/`ResetView`。★0904 只能是**图纸里的 `NOUN_VIEW`**，见 §1.5 |
 | `+0x1C` | `m_enabled` | bool | `UpdateOn` |
 | `+0x1D` | `m_muted` | bool | `Mute` / `UnMute` |
 | `+0x20` | `m_granularityMode` | int | **恒 0**，全类无 setter（§4.8） |
@@ -71,6 +79,7 @@ push 走 `sub_1047BA50`。stride 证据：`IsPresent` 的 `v4 += 24`、`Ancestor
 | `0x1047CF00` | `EraseSignificant(DB_Ref&)` | |
 | `0x1047D050` | `Exists` | "还有没有可画的东西"（递归） |
 | `0x1047D230` | `ExistsCPS` | 查已绘制段 |
+| `0x1047D360` | `ExistsIDList` ★0904 | `if (!idlist[+0x18]) return false; return idlist->exists(e)`——R22/R23 那句 `idlist.active && idlist.exists(p)` 的本体 |
 | `0x1047D380` | `Finish` | 清空队列 + 通知 |
 | `0x1047D650` | `GetIDList` | 取视图 ID 清单 |
 | `0x1047D8C0` | `GranularityExpansion` | **粒度中心算法** |
@@ -83,6 +92,7 @@ push 走 `sub_1047BA50`。stride 证据：`IsPresent` 的 `v4 += 24`、`Ancestor
 | `0x1047E020` | `IsPresent` | 队列里有无 `(elem, state)` |
 | `0x1047E070` | `IsPrimitive` | `0xA103E` ∨ `0xBBD5ADC` |
 | `0x1047E0D0` | `IsSignificant` | `0x5657A0A` |
+| `0x1047E110` | `LoadSheet` ★0904 | 换视图的唯一真入口；**视图变了就清空队列**（R6）；随后走 `DLL_draft` 那一串 |
 | `0x1047E240` | `Members` | 三模遍历 |
 | `0x1047E590` | `ModelToUpdate` | **内部总入口** |
 | `0x1047E650` | `NegativeMembers` | `Members(mode=2)` |
@@ -115,6 +125,24 @@ ida-bridge exec <client> --sql "SELECT '0x5657A0A' AS id, address, name_at(func_
 > （`0x1047D91A` 的 `jz`）在伪码里根本不存在；`Exists` 丢了递归那一半；`IsNegative` 直接反编译失败。
 > 判定这类函数是否被坑，看伪码里有没有孤零零的 `DB_Noun::getField(vN);` 后跟 `return 0`。
 
+### 1.5 这个类的宿主是 DRAFT 图纸 ★0904
+
+`SetView`（`0x1047E890`）只在参数是 `NOUN_SHEE` 且 `ATT_PICORF` 有效时，经 `LoadSheet` 真正换视图；
+传别的元素直接把 `m_view` 赋成默认构造的无效元素（与 `ResetView` `0x1047E840` 同一段代码）。
+`LoadSheet` 随后走 `DLL_draft::cmfdsh` → `cmcrsh` → `cmrgob` → `cmldpc` → `WWPicture::makeCurrent`。
+`DrawModel` 发的 `PUPDES` 也是往这条路上发。
+
+**这决定了这份核对表哪半边能往我们的服务端搬**：
+
+- **能搬**：R9–R21 那半边——两个 noun 位、`GranularityExpansion`、`SignificantOwner`、
+  `AncestorDeletes`、`IsPending`。它们是 DB 级的联动规则，与宿主无关，继续当 oracle。
+- **搬之前要先答一个问题**：R6 / R8 / R27 / R29 那半边（队列生命周期、`m_inDraw` 重入、三遍消费、
+  `Finish`）以及 R7/R22/R23 的 `PDMS_Idlist2`，都是**图纸视图**语境的产物。
+  往服务端搬之前得先说清楚「我们这边什么东西扮演 VIEW、什么东西扮演 ID 清单」——
+  R7 已经提过这个问题，这里补上它的出处。
+  ★0906 两个问题今天的答案：「什么算切换视图」的三个候选与判词见 R6（开发计划 W2.2，建议登记「无对应物」）；
+  「什么扮演 ID 清单」由 R22 回答——对账源是库里实际存着的行，不是一份清单，所以 R23 那一档在我们这边不存在。
+
 ## 2. 判据：两个 bool 位
 
 | 判据 | 地址 | 字段 id | 取值 |
@@ -144,6 +172,31 @@ ida-bridge exec <client> --sql "SELECT '0x5657A0A' AS id, address, name_at(func_
   `generation_root::core_primitive_bits` 也返回 `(a, b)` 而不是一个布尔，
   `noun_is_primitive` 才取或——想知道"是哪一位说了算"永远问得出来（T2a）。
 
+**R0-3 ★0904 还有第三个位，这份表里没有：`toplevel`（`0xA187C` / 661628）。**
+
+`significant` 在 `Core3D.dll` 里 8 个读点，**7 个在本类里**，第 8 个是 `sub_104C7000`——
+**`DES_DrawList` 一次都不读它**。3D 绘制侧用的是 `toplevel`，它有自己一整族消费者
+（`getAncestorTOPFElement` / `getChildTOPFElements` / `getPromotedTOPFElement` /
+`getTOPFElements` / `isAtOrBelowTOPF` / `promoteElements` / `wantToAddRemoveTopf`）。
+`getAncestorTOPFElement`（`0x10515FC0`）的形状与 `SignificantOwner`（R14）一模一样
+——含自身、沿 owner 链上行、无深度上限、命中即返回——**只是问的位不同**。
+
+离线对账（`output/noun_caps_full.json` × 位表快照）：`toplevel` 211 / `significant` 127 /
+交集 93 / 只 toplevel 118（其中 68 个同时是 primitive：`GENSEC` `SCTN` `PANE` `WALL` `FLOOR`
+`STWALL` `DOOR` `CT*` `HR*` `WL*` …）/ 只 significant 34（其中 8 个是 gb==2 容器，含 `ROOM`）。
+四个 MDU：`BRAN`/`HANG`/`EQUI` 两位都真，`SUPPO` 两位都假。
+
+**★0904 晚追完：两个位管的不是同一件事，我们用 `significant` 选根是对的。**
+`ExistsCPS`（`0x1047D230`）里「已绘制段」是按 `SignificantOwner`（`0x1047D286`）找的
+——**core 自己的几何段就按 significant 索引**；而 `getAncestorTOPFElement` 的 19 个调用方里
+13 个是 `get/setPrimitiveOrTOPF{Colour,Edges,Transparency,Visibility,VisProps,…}`，
+**TOPF 管的是绘制清单成员与显示属性归属，没有一个几何重算的消费者**。
+
+三层：已绘制段（`significant`）／局部更新块（`significant`）／绘制清单项（`toplevel`）。
+`toplevel` 位仍然导进了快照（离线字典字段，`old-parse-pdms-db::dict::FIELD_TOPLEVEL`），
+但它是**显示属性那一层的**账，不是几何粒度缺口。对账（211/127/交集 93）、486 个真库的普查
+与「不许当已证」见 `docs/evidence/2026-09-04-noun-toplevel-reconciliation.md`（§0' 是改判那一节）。
+
 ## 3. 入口与门（R1–R8）
 
 ### R1 只处理 DESI 库 ✅
@@ -162,7 +215,30 @@ ida-bridge exec <client> --sql "SELECT '0x5657A0A' AS id, address, name_at(func_
 `ModelToUpdate` 再查一遍——这是唯一被重复检查的门。`ChangedModelToUpdate` 不查：
 它的每一条都来自 QCHGLS，逐条转交 `ModelToUpdate` 时才过门。
 
-- 我方：**无**。计划 T2.2。
+- ~~我方：**无**。计划 T2.2。~~
+- **★0904 已接线（默认关）。** 落点就是计划 §3 定的那个：
+  `manual_update::xgeometry_gates(&OwnershipSnapshot, candidates)`——那里是唯一**不额外打库**
+  就有完整 pre/post owner 链的地方。`ResolvedUnitRollup` 带 `xgeometry_gated` 出来，
+  `build_model_update_plan` 与**预览**（`manual_update` 的 preview 分支）**共用同一道门**
+  ——少走一边就回到 2026-08-04 那个「预览说的不是执行要做的」的老毛病。
+  候选是位姿目标 ∪ 删除目标，它们不在 `regen_details` 里（已被掩掉），所以单独传进去、
+  也单独种进 `load_base_graph` 的 seeds；不种就是静默漏门。
+  **门只筛模型工作项，不碰 `details`**（`details` 还驱动 `design_refnos`，那是数据层）。
+  pre/post 口径：新建看 post、删除看 pre、**修改两态都在 XGEOM 底下才挡**
+  ——搬进搬出的那一次必须照常处理。两条测试钉着：
+  `the_xgeometry_gate_lets_a_move_across_the_boundary_through`（四种两态组合各一条）与
+  `the_xgeometry_gate_climbs_the_whole_owner_chain`。
+  **开关 `DbOption.model_xgeometry_gate` 默认 false，关着时行为一字不变**，可灰度。
+- **★0904 真库普查：这批语料里 `XGEOM` 一个实例都没有。**
+  5 个真项目、486 个 DESI 库全扫（`noun_census_probe --nouns XGEOM`，产物
+  `docs/evidence/2026-09-04-xgeom-census.json`），**实例 0**。两条推论，方向相反，都要记住：
+  1. **开这个开关在本语料上零风险**——它一次都不会触发，行为与关着完全一样。
+     「灰度」在这里没有实际内容，可以直接默认开。
+  2. **也正因如此，开了不等于验证过**——没有正样本。唯一的正样本是那两条单测
+     （`the_xgeometry_gate_lets_a_move_across_the_boundary_through` 覆盖四种两态组合）。
+     要真验，得在 E3D 里造一棵 XGEOMETRY 子树（挂几个 BOX，再搬进搬出一次），
+     或者拿一个真用显式几何的项目来跑。
+  这也顺带解释了这条缺口为什么一直没咬人：**这批项目根本不用显式几何。**
 
 ### R3 元素必须 `isValid` ★新增 ◐
 
@@ -203,7 +279,7 @@ ModelToUpdate(e, state):
   但不该让它调节重生成范围。`TransformOnly` 是我们**主动多留**的便宜路径（省不是漏），
   按计划 §1 不取消。
 
-### R6 `Refresh(当前 VIEW)` 清空整个待办队列 ★新增 ❌
+### R6 `Refresh(当前 VIEW)` 清空整个待办队列 ★新增 ★0904 改判 ◐
 
 ```
 Refresh(e):                                     # 0x1047E800
@@ -213,9 +289,35 @@ Refresh(e):                                     # 0x1047E800
 
 视图自己被刷新时，所有排着的增量工作项**作废**——反正整个视图要重画。
 
-- 我方：**无**。我们做整库重建 / 全量重生成时，`model_update_pending` 里的待办
-  不会因此清空，可能在重建后又跑一遍已经不需要的增量。**这是一条真缺口**，
-  而且比 P3.3 那种"多做"更值钱——它是"做无用功 + 可能覆盖新结果"。
+**★0904 队列作废其实有三个点，不是两个。** 除 `Refresh` 与 `Finish`（R29）之外，
+**视图切换**也整队丢弃，在 `LoadSheet`（`0x1047E110`）里：
+
+```
+0x1047E143  call DB_Element::operator!=      # 传进来的 picture 与当前 m_view 不同才继续
+0x1047E174  cmp  eax, [NOUN_VIEW]
+0x1047E185  mov  eax, [ebx+24h]              # m_queue.begin
+0x1047E188  mov  [ebx+28h], eax              # m_queue.end = begin —— 整队丢弃
+```
+
+所以队列的生命周期是三条边：一次 `Update`、一次 `Refresh`、一次**视图切换**。
+
+- 我方：**`Refresh` 那一条已落地**（T3.4，2026-08-28）——
+  `model_update_pending::discard_pending_for_full_rebuild(dbnum)`，由 `model_rebuild::start`
+  在 `sync_and_seed_model_coverage` **之前**调用，`stale_queue_is_discarded_before_the_rebuild_seeds_its_own_work`
+  钉着顺序，三条边界（`room_recalc_*` / 别的 dbnum / `dbnum = 0`）有意留下。
+  **视图切换那一条没有对应物**，而且我们这边「什么算切换视图」本身还没定义（见 §1.5）。
+  **登记为待议，不是缺口**。
+
+★0906 「什么算切换视图」的三个候选与判词（开发计划 W2.2；建议登记「无对应物」、不落代码，待拍板）：
+
+| 候选 | 我方动作 | 判词 |
+|---|---|---|
+| a. 切 MDB | `UpdateScope::resolve` 换 MDB | 换 MDB 必然整库重建，已被上面 `Refresh` 那条（`discard_pending_for_full_rebuild`）覆盖，不必另立 |
+| b. 收窄 watch scope | `watch_scope::admits(dbnum)`（`watch_scope.rs:126`）收窄（ADR-058 D9 的调试准入开关） | **不采**。core 敢整队丢弃是因为新视图会从头画；我们收窄后**没有任何东西替被丢掉的 pending 补种**，再扩域时那些库的模型静默陈旧。要采得先证两件事——在途窗口与收窄互不干扰、再扩域有补窗——今天两条都没有 |
+| c. 切投影域 | `ModelMemoryStore` 进程内投影 → 重启 | 重启本来就清（ADR-050 `clear_stale_at_process_start`），不必另立 |
+
+三个候选要么已被 R6 的 `Refresh` 对应物覆盖（a、c），要么前置不成立（b）。
+`narrowing_the_watch_scope_discards_out_of_scope_pending` 那条测试**不写**；若日后 b 的两个前置补齐，另开一条。
 
 ### R7 新建元素会被并进视图 ID 清单并写库 ★新增 ⚪
 
@@ -287,14 +389,39 @@ GranularityExpansion(e, state):
   （`docs/evidence/2026-08-29-noun-granularity-reconciliation.md`）：方向几乎全是多做，
   真漏只有 `AIDTEX` 一个 noun，故分叉点判为**加层**而不是换判据。
   T2a 已把位表接进生产（`noun_is_significant` / `noun_is_primitive`，快照外保守取真），
-  **但还没有消费者**——第一个是 T2b。
+  ~~**但还没有消费者**——第一个是 T2b。~~ ★0906 第一个消费者已落：T2b
+  （`generation_root.rs::significant_point_container_is_its_own_root`，`model_significant_over_point` 默认关，
+  判据 `core_significant_bit == Some(true)`）。契约测试 C1-1 / C1-2 / C1-3 与「恰好只差 AIDTEX」已落，见 §9 本行。
 
-### R10 significant 变化 → 整块重画 + 块内 significant 后代逐个抹掉 ❌
+### R10 significant 变化 → 整块重画 + 块内 significant 后代逐个抹掉 ~~❌~~ ★0904 改判 ⚪
 
 块内后代入队时的 state 是 `state == Deleted ? 3 : 4`，两者在 `Update` 里**都只 Erase 不 Draw**。
 "块级颗粒"的确切含义：不是"重画子树里每一个"，是"**重画块，顺手删掉块内那些自己也曾单独成块的行**"。
 
-- 我方：**无**。同一几何可能在模型里出现两份。计划 T3.2。
+- ~~我方：**无**。同一几何可能在模型里出现两份。计划 T3.2。~~
+- **★0904 改判 ⚪ 不可比：这条重复在我们这边结构上不可能。**
+
+  先看 core 抹的到底是什么。`EraseSignificant(DB_Ref& ref)`（`0x1047CF00`）：
+
+  ```
+  root = GetDesiCPS()                    # 0x1047CF3F
+  seg  = root.findSegment(ref, …)        # 0x1047CF64  ← 按这个 ref 找它自己的段
+  if seg.isOK(): seg.deleteSegment()     # 0x1047CF7A  ← 整段删掉
+  ```
+
+  **core 的绘制段是按 ref 建的**（§4.2）：一个 significant 后代 X 单独被画过时，
+  库里有一个键为 X 的段。祖先块 A 重画时，A 的段会把整棵子树的图元都装进去——
+  **X 的段不删，同一份几何就同时躺在两个段里**。R10 就是删这个。
+
+  **我们没有这个问题，因为键的形状不同。** ADR-060 D1/N1：行 id **就是元素的记录 id**
+  （`<word0>_<word1>`，隐式管身是身份摘要），**不带根**——D1 那一轮正是把
+  `direct_` / `derived_` 这些前缀全去掉了。所以不论 X 的几何是被 A 的投影产出的
+  还是被 X 自己的投影产出的，**写的都是同一行**（先删后插，`INSERT IGNORE`），
+  一个元素在每张表最多一行。**「同一几何两份」需要键里带根才可能发生。**
+
+  **这条判词的有效期 = 「记录 id 与根无关」这条不变量的有效期。** 谁哪天为了按根
+  scoped delete 方便，把根塞回 id 里（那正是 ADR-060 之前的形状），R10 立刻从
+  「不可比」变回「缺」。ADR-060 的 N1 就是守这个的。
 
 ### R11 `SignificantMembers` 只穿过 significant 链 ★精确化 ❌
 
@@ -328,8 +455,12 @@ mode 2 的"收集了就不再下潜"是本轮新看清的（`0x1047E48C jmp` 直
 
 **连 `AncestorDeletes` 都不做**（`0x1047DA55` 的 `jz` 直接跳到函数尾）。
 
-- 我方：◐ 我们是 `Unknown → Regen` 保守兜底，**多做不是漏做**。
-  在两张位表拿到并验证完之前不能改成丢弃——那才是漏判。
+- 我方：◐ 已落默认关闭的 `model_entry_drop_no_geometry` 第一批门，只丢 1272 个
+  字典无 `geomset` / `extrusion` / 非零 `graphics_behaviour` 的已知普通根 noun；未知、
+  删除、类型变化保守保留，数据明细不动。另 223 个带几何代理的 noun 尚未评审，因此
+  尚未达到 core 的全量丢弃口径。真实 ams8000 266→267 基准中 legacy 为 2→1 work
+  items、91→0 额外重算单元；direct 该窗本来就是 1→1，九个固定窗在开关两态均通过。
+  见 `docs/evidence/2026-09-06-no-geometry-entry-gate/README.md`。
 
 ### R14 `SignificantOwner` 含自身、无深度上限 ◐
 
@@ -446,7 +577,7 @@ primitive-或-significant 的祖先都会被标记**，不是只标最近的那�
 
 - 我方：❌ 无对应物。计划 T3.3 引用的是错的那一版，已同步更正。
 
-### R22 `AbsentPrimitives`：缺失图元回收 ❌
+### R22 `AbsentPrimitives`：缺失图元回收 ~~❌~~ ★0904 改判 ◐
 
 ```
 AbsentPrimitives(e, state):                       # 0x1047BE10
@@ -461,9 +592,21 @@ AbsentPrimitives(e, state):                       # 0x1047BE10
 即：**重画一个块之前，把块内"模型里有、当前 ID 清单里没有"的图元行清掉。**
 这是线上偶发"孤儿 mesh 行"该由谁负责的答案。
 
-- 我方：**无**。计划 T3.1，最高优先。
+- ~~我方：**无**。计划 T3.1，最高优先。~~
+- **★0904 我方有，而且口径比 core 强。** `model_db_adapter::persist_root_in_chunks`
+  落一根之前先做一次**按根对账**：`projected_geometry_ids_on(db, root)`（库里挂在这根下的已投影几何）
+  减去本轮投影出的 `record_id` 集合，差集就是 `removals`，连房间边一起清
+  （清边排在删几何那一块、排重算排在盖章那一块，源码里有注释钉着为什么不能对调）。
+  `a_reprojected_root_resets_its_branch_tubes_and_drops_stale_geometry`（`e3d_model_service.rs`）
+  钉着这条形状。**比 core 强在对账源**：core 比的是一份可能不活跃的 ID 清单（R23 那个坑），
+  我们比的是库里实际存着的行，没有「清单不可用」这一档。
+- **真正的待办不是实现它，是接线**：ADR-060「未做」第三条写着
+  「适配器还没有生产调用点——什么时候落库、按根还是按批，由上层编排决定」，
+  而旧发布事务那套 `existing_geometry_ids` 已经从 `e3d_model_service.rs` 撤掉。
+  也就是说落库侧此刻在切换中间态。**T3.1 应当从「实现缺失图元回收」重述为
+  「把适配器接上生产编排，并验按根对账在真库上确实删掉了孤儿行」。**
 
-### R23 ID 清单不活跃时，全部 primitive 判为缺失 ★新增 ⚠ 待确认
+### R23 ID 清单不活跃时，全部 primitive 判为缺失 ★新增 ★0904 已结案 ⚪
 
 `idlist.active`（`PDMS_Idlist2 +0x18`）为假时 `present` 直接取 0——
 于是**整棵子树的 primitive 全部入队 state 5**，在 pass 3 被逐个擦掉。
@@ -472,9 +615,25 @@ AbsentPrimitives(e, state):                       # 0x1047BE10
 `GetIDList`（`0x1047D650`）在视图没有绑定清单元素时返回一个"空清单"对象，
 `+0x18` 应当就是这个"有没有绑定"的位。
 
-**这条不下判词。** 它要么是 core 依赖"视图必有清单"这个前置、要么是一条有意的
-"没清单就别留图元行"规则。移植 R22 之前必须在 live 进程上看一眼实际取值，
-否则我们会照抄一条把刚画好的东西擦掉的逻辑。
+~~**这条不下判词。** 移植 R22 之前必须在 live 进程上看一眼实际取值。~~
+**★0904 静态就判死了，不必找 live 进程**（证据
+`docs/evidence/2026-09-04-ida-core3d-partial-update-recheck.md` §1）：
+
+```
+PDMS_Idlist_base::isValid()          0x1041AE10:  mov al, [ecx+18h]; retn   ← +0x18 就是 isValid
+PDMS_Idlist_base::PDMS_Idlist_base() 0x10479192:  mov word ptr [esi+18h], 100h
+                                                  ← 默认构造：+0x18 = 0（假）
+PartialUpdateDesiMgr::ExistsIDList() 0x1047D364:  cmp byte ptr [ecx+18h], 0 → 假就直接返回 false
+```
+
+两个 `PDMS_Idlist2` 构造（`0x104C5930` 带元素 / `0x104C5AC0` 默认）本身都不写 `+0x18`，
+只清 `+0x1C/+0x20/+0x24` 后转交基类——那一位完全由基类的两个构造决定。
+所以 `GetIDList` 走 else 分支（VIEW 无有效 `IDLN`）时返回的清单 `isValid` **恒为假**，
+`AbsentPrimitives` 于是把整棵子树的 primitive 全判缺失。**是构造函数写死的，不是概率问题。**
+
+**给移植的纪律**：照抄这条 = 照抄一个会把刚画好的东西擦掉的分支。
+我们这边的对应物应当把「清单不可用」当成**前置条件失败**（不做回收、出声），
+而不是当成「全部缺失」。
 
 ### R24 `AncestorDelete(2)` 有**两个**消费者 ★更正 ❌
 
@@ -556,13 +715,14 @@ DLL_PMLCommand::Run("PUPDES " + <view ref> + " MODEL " + <element ref> + " FORCE
 - 我方：⚪ 我们跑自研生成管线，重画动作不可比、也不需要比。
   **但三遍的顺序是可比的**：先全擦、再全画、最后清缺失图元。
 
-### R28 pass 1 的"擦不动且不存在 → 从队列删除" ⚪→❌
+### R28 pass 1 的"擦不动且不存在 → 从队列删除" ⚪→✅
 
 `!EraseModel(rec) && !Exists(rec, idlist)` 同时成立时，**该条被就地移出队列**，
 于是 pass 2 不会画它。意思是：**不画本来就不在视图里的东西。**
 
-- 我方：❌ 概念上对应"重生成前先确认目标还在范围内"。我们没有这一步——
-  目标在窗口内被删掉时，`RegenRoot` 仍会执行一次空生成。不是正确性问题，是白跑。
+- 我方：✅ direct 文件窗口从 target 侧 `roots_T` 枚举生成根，窗口内已经消失的目标不会进入
+  `RegenRoot`；兼容 PE 路径继续保留执行前终态存活复核。因此两条生产路径都不会为已消失目标
+  执行空生成。
 
 ### R29 `Finish` 清空队列 ⚪
 
@@ -592,7 +752,62 @@ Finish():                                          # 0x1047D380
 ## 8. 仍未钉死的
 
 - `IsPrimitive` 两个位各自的**字典名**未知——只知道 `0xA103E` 跨版本稳定。
-- R23 的 `idlist.active == false` 语义，必须在 live 进程上看。
+- ~~R23 的 `idlist.active == false` 语义，必须在 live 进程上看。~~ ★0904 已结案，见 R23。
+- ★0904 **`graphicsBehaviour` 的消费面已经查完，并且带出一条我们没梳理过的通道。**
+
+  字段 `0x4DCE6F` 在 `Core3D.dll` 里四处 `push`、三个函数，`core.dll` 里**零命中**：
+  `DES_DrawList::isGraphicsIgnoredBetween`（已记）、`DES_DrawList::hasGraphicsIgnoreFlag`
+  （`0x1051A920`，逐元素判 `== 1`、不上行）、`sub_1052F2E0`。比较值只有 `1` 与 `2`，
+  **没有一处比 3**——`gb == 3` 那 72 个 noun 在 Core3D 里没有代码读。
+
+  `sub_1052F2E0` 是 **`DDES_GraphicsMngr` 的变更过滤器**：`sub_1052E9F0` 里三个 `MTR_Entry`
+  名字串与三次调用一一对应——`postGetWork`（`0x1052EA35` → `0x1052EAF5`）、
+  `postUndo`（`0x1052EB7B` → `0x1052EB9D`）、`preRedo`（`0x1052EBAC` → `0x1052EBCE`）。
+  它遍历一个 `std::set<DB_Element>` 变更集，**gb==2 的层级容器整个跳过**，
+  **gb==1 的数据容器只留最上面那个**（属主也是 gb 1/2 就跳），再过 `WORL`/`MNUM` 与
+  「`db_go_to_element` 切不切得到 CE」，剩下的插进一个有序结果集。
+  `0x1052F486` 不是分支语义，就是 `std::_Tree` 迭代器 `++`（= 跳过这一条）。
+
+  **新缺口**：核对表整份讲的是 `PartialUpdateDesiMgr`（DRAFT 图纸侧，§1.5）。
+  `DDES_GraphicsMngr` + `DES_DrawListRefresh` + `DES_DrawList` 的 TOPF 家族
+  （`getAncestorTOPFElement` / `getChildTOPFElements` / `getElementsAtOrBelowTOPF` /
+  `getPromotedTOPFElement` / `getPrimitiveOrTOPF*`，加 `DES_DrawListManager::findTopLevelElement`
+  与 `promoteElement(s)`）是**3D 模型视图侧**，而 **`GETWORK` 正是「别人 SAVEWORK 了，
+  我把变更收进来」——跟 gen-model 干的事最像的就是它**。这条通道一次都没梳理过。
+  细节见 `docs/evidence/2026-09-04-ida-core3d-partial-update-recheck.md` §3.1–3.3。
+- ★0904 **R10 的反向风险已验：今天不咬人，但它靠两个互不相干的事实撑着。护栏已补两条。**
+
+  问的是：按根对账（R22）会不会把**嵌套生成根**的行当孤儿删掉？
+  （`enumerate_generation_roots_in_subtree` 是会出嵌套根的——显著节点名下的显著节点也是根。）
+
+  两边都读过了，**答案是不会**，理由是这两条：
+
+  | # | 事实 | 出处 |
+  |---|---|---|
+  | 1 | 祖先链是**全库**的：`scan_index` 扫整库建 `owners`，`ancestor_chain` 一路走到库顶。所以嵌套根 D 的记录，`anc` 里**带着**祖先根 A | `e3d_model_service.rs::scan_index` / `ancestor_chain` |
+  | 2 | 生成是**整棵子树**的：`generate_subtree_with_cache` 从根 DFS 到底，**没有「遇到嵌套根就停」这回事** | `vendor/e3d-model/src/pipeline.rs` |
+
+  两条合起来：重投影 A 会把 D 名下的元素**一并重新产出**，于是 `records_of_root(A)`
+  与库里 `anc CONTAINS A` 的集合口径一致，差集里只剩真孤儿。
+
+  **但这个安全是巧合出来的，不是设计出来的**：
+
+  - 事实 2 一旦被「优化」掉（**「祖先根生成时跳过嵌套根，省重复计算」是个太自然的想法**，
+    而且 core 的 R10 干的正是这件事），`persist_root(A)` 立刻开始静默删掉 D 的行；
+  - 事实 1 一旦改成按根子树建 owners（省内存），D 的记录就不再挂在 A 下，对账反过来**漏删**。
+  - `ModelMemoryStore` 仍是进程内投影，但生产启动已有 `restore_projection_on` 从持久模型行与
+    `gen_root` 回灌。恢复不完整或回执缺失时，2026-09-06 的完整性门会禁止差集删除。
+
+  **护栏已补**（★0904 晚，`model_db_adapter::tests::reconciling_an_ancestor_root_does_not_delete_a_nested_roots_rows`）：
+  一个 A ⊃ D 的嵌套根形状，提交 A 的整子树投影，`persist_root_on(A)` 之后断言 **D 名下的行还在**、
+  只有真孤儿进 `removals`；反方向 `persist_root_on(D)` 同样一行不许删。它盯的是**两边同一个口径**
+  ——库那边 `anc CONTAINS <根>`、存储那边 `records_of_root`（同一张祖先索引）。任一边收窄成
+  「只算直属这一根的」，这条立刻红。
+
+  **完整性门测试**（`model_db_adapter::tests::an_unreceipted_partial_projection_does_not_delete_nested_root_rows`）：
+  投影收窄且没有匹配回执时，不查询差集、不删除 D 的行。另由
+  `reconciliation_requires_a_matching_receipt_and_accepts_a_complete_empty_projection` 钉住错配回执失败与
+  完整空投影清理两条边界。
 - `ExistsCPS` / `WWSegment` / `PDMS_Idlist2` 的内部结构——core 自己的绘制存储，
   移植时只需知道它们是"已绘制段"和"应绘制清单"两个集合，内部布局不必抄。
 - §4 末尾登记的同族字段（`847458`、`606263`、`602413`、`595979`、`599813`）语义未追。
@@ -602,13 +817,47 @@ Finish():                                          # 0x1047D380
 
 ## 9. 缺口汇总（按"缺了会不会导致模型错"排序）
 
+**★0904 整表按现码 + 活桥重核过一遍。改判的理由都写在对应规则里。**
+
+**「错」这一档现在是空的。** 原来的四条各自有了去处：R22 是已实现（卡接线）、
+R6 已落地、R2 已接线、R10 判为不可比（键的形状让它不可能发生）。
+剩下的都是「慢」「判据」「待议」，没有一条是「缺了会导致模型错」。
+
 | 级别 | 规则 | 缺口 | 计划项 |
 |---|---|---|---|
-| **错** | R22 | 缺失图元回收——孤儿 mesh 行只能等整库重建 | T3.1 |
-| **错** | R10 | 块内成员清理——同一几何可能出现两份 | T3.2 |
-| **错** | R2 | XGEOMETRY 门——显式几何被卷进增量 | T2.2 |
-| **错** | R6 | `Refresh` 不清队列——重建后跑无用增量，可能覆盖新结果 | **计划里没有，需新增** |
+| ~~错~~ ⚪ | R10 | ~~块内成员清理——同一几何可能出现两份~~ **★0904 改判不可比**：core 的段按 ref 建、祖先段与后代段会装同一份几何；我们的行 id 不带根，一个元素最多一行，重复结构上不可能（ADR-060 D1/N1） | T3.2 撤销；改成守住「记录 id 与根无关」这条不变量 |
+| ~~错~~ ✅ | R2 | ~~XGEOMETRY 门——显式几何被卷进增量~~ **★0904 已接线**：`xgeometry_gates` 挂在 rollup 的 `OwnershipSnapshot` 上，计划层与预览共用；`model_xgeometry_gate` 默认关，可灰度 | T2.2 完成，待 live 灰度 |
 | 慢 | R17–R20 | 祖先抢占去重——多做不是漏做 | T3.3（含 R21 更正） |
-| 慢 | R28 | 目标已消失仍跑一次空生成 | 未立项 |
-| 判据 | R9/R12/R14 | 名单 vs 位表 | P0 / P1 / T2.1 |
-| 已实现未启用 | — | CATA 反向级联（`UpdateScope::admits` 不放行） | P5 |
+| ~~慢~~ ✅ | R28 | ~~目标已消失仍跑一次空生成~~ direct 由 target 根枚举排除，兼容路径由终态复核排除 | 已完成 |
+| 判据 | R9/R12/R14 | 名单 vs 位表 | ★0906 `model_significant_over_point` 已接入旧选根路径（`generation_root.rs::significant_point_container_is_its_own_root`，由 `resolve_element_generation_root` 调用）；默认关，开启时 core 判显著的 point 容器自己成根。**判据已换成 `core_significant_bit(noun) == Some(true)`**（W1.2）：快照外的 noun 开关开着也走名单兜底。契约测试已落（`generation_root.rs` tests）：C1-1 `significant_bit_resolves_to_itself_and_to_nearest_significant_owner`、C1-2 `delivery_unit_outranks_the_significant_bit`、C1-3 `unknown_noun_falls_back_to_the_hand_written_list`（含「开关开 + 快照外」一态）、`the_significant_over_point_override_only_moves_aidtex`（44 point noun + 3 `*DATU` × 两形状，两态对称差恰好 = {AIDTEX}）。**direct 文件窗口不看这个开关**：`enumerate_generation_roots_in_subtree` 按 `noun_is_significant` 枚举，`AIDTEX` 直接挂 ZONE 下本来就是一个 Normal 根（`direct_enumeration_already_lists_aidtex_under_zone_as_exactly_one_root`）——P1 的「AIDTEX 零工作项」只在旧 PE 路径成立。R12/R14 的深度上限 32 与 owner 环：W2.4 先量真库再定立不立项 |
+| ~~错~~ ~~接线~~ ✅ | R22 | ~~孤儿 mesh 行只能等整库重建~~ **按根对账已实现且比 core 强**；两个生产调用点及 RocksDB testbed 真库删除闭环均已验证 | T3.1 完成 |
+| ~~错~~ ✅ | R6 | ~~`Refresh` 不清队列~~ **已落地**（`discard_pending_for_full_rebuild`）。视图切换那一条：三个候选（切 MDB / 收窄 watch scope / 切投影域）的判词见 R6 正文 ★0906 表 | T3.4 已完成；视图切换按开发计划 W2.2 建议登记「无对应物」、不落代码，待拍板 |
+| 设计而非缺口 ⚪ | R1 | ★0906 CATA **不进** `UpdateScope::admits`（`update_scope.rs:291` 只认 `DESI \| ISOD` 且须本 MDB 声明；`:330` 测试钉着 `!admits("CATA", …)`；`unrestricted` 点名入口除外）——这是 ADR-058 S3「CATA 永不进持久层」的**设计**，不是待开的闸；`:280` 注释与代码一致、引用 ADR-058 D1。CATA 变更的反向级联按 ADR-058 D2 走**文件侧会话索引差分 → `ref_rev` → `cascade_expand`**，触发源不在 `admits` | 本轮不重开 CATA 入库。D2 那条链今天有没有生产入口，由开发计划 W2.3 核实后回填 R1 注记；若未实施，另开 ADR-058 实施计划，不并进核对表 |
+
+## 10. 2026-09-06 生产链收尾复核
+
+- 预览与执行通过 `build_effective_model_update_plan` 共用规划器分派：direct DESI 均走文件
+  `S→T` 窗口规划器，兼容数据模式继续走 PE 规划器。预览不再为 direct DESI 复刻旧 rollup。
+- 文件窗口已加入 XGEOMETRY 双端观察：新建看 target、删除看 base、修改必须两端都在
+  XGEOM 内才算命中；断链单列 `unreadable`。本轮只输出 warning，不筛工作项、不前移凭证，
+  `model_xgeometry_gate` 仍默认关闭。
+- R22 的删除对账增加完整性门：有匹配根回执、记录数与来源会话一致、记录祖先范围正确时，
+  才能把“本轮投影缺席”解释为删除。无回执的部分投影只允许安全 upsert；带回执的完整空投影
+  仍可清除旧行。
+- `ModelMemoryStore` 已有 `restore_projection_on` 回灌入口，旧文中“没有从库回灌路径”的描述失效。
+  嵌套根仍依赖完整祖先链与整棵子树生成；本轮不实施 R17–R20 的跨根任务压缩。窗口 warning
+  记录 `nested_roots` 与 `duplicate_coverage_elements`，执行耗时沿用模型 drain 的
+  `last_root_duration_ms`，先取得重复成本基线，避免压缩时遗漏后代根的凭证、manifest 和发布结算。
+- R28 在 direct 窗口路径由 `roots_T` 枚举提供目标存活证明；兼容路径保留既有终态存活复核，
+  不新增第二次文件查询。
+
+### 10.1 真实文件验收（2026-09-06）
+
+- ams8000 九个钉死窗口全部通过：嵌套显著根修改、EQUI 位姿、BOX 改挂、EQUI 子树删除，
+  以及 BRAN 新建、整根移动、成员移动、成员删除、整根删除。
+- ams7999 45→46 通过：direct 文件窗口可规划新建 STRU 根，不触发旧读取器的终态复核故障。
+- 录制 E3D 窗口矩阵通过；ams8000 255→256 同时验证 `nested_roots >= 2` 且
+  `duplicate_coverage_elements > 0`，观测指标在真实嵌套根结构上有信号。
+- 8019 RocksDB testbed 的独立临时数据库通过 R22/R23 闭环：无回执部分投影删除数为零；
+  匹配回执完整投影恰好回收一条缺席 primitive，被删来源在模型表和 `geo_relate` 中均无残留，
+  保留投影仍在；测试结束自动删除临时数据库。

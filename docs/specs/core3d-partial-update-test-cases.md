@@ -32,18 +32,17 @@
 | 层 | 前置 | 现在能不能写 |
 |---|---|---|
 | L0 快照自洽 | 一份导出的位表 fixture | ✅ 已落 3 条（C0-1/2/3） |
-| L1 纯函数 | 无 | ✅ 已落 6 条（C1-4/5/6/7/8/9/10） |
+| L1 纯函数 | 无 | ✅ 已落 10 条（C1-1/2/3/3b/4/5/6/7/8/9/10；C1-1/2/3/3b 是 2026-09-06 的 T2b 契约） |
 | L2 计划层 | 内存 DB + 窗口 | ✅ 已落 C2-4，其余待写 |
 | L3 live E2E | 开着项目的 E3D | 需要机器 |
 | L4 对账报告 | 位表 + 字典 | P0 完成后 |
 
 **排序原则和计划一致：按"缺了会不会导致模型错"排，不按实现难度排。**
 
-L1 里 **C1-1/C1-2/C1-3 还没落**，它们和另外六条不同：判的是**我们的**
-`resolve_element_generation_root`。已落的那六条判的是 core 参考模型自己，零依赖。
-**它们不再缺前置**：位表 T2a 已经进生产，`noun_is_significant` 现在就能调；
-缺的是判定链里那个消费者——今天 `resolve_element_generation_root` 一个位都不读，
-现在写这三条只能断言一个还不存在的耦合。它们是 T2b 的验收，不是 T2b 的前置。
+L1 里 ~~**C1-1/C1-2/C1-3 还没落**~~ ★0906 **已落**（同日晚，开发计划 W1.2）。它们和另外六条不同：
+判的是**我们的** `resolve_element_generation_root`，而不是 core 参考模型。它们能落是因为消费者到位了：
+T2b（`generation_root.rs::significant_point_container_is_its_own_root`，开关默认关）读位表，判据
+`core_significant_bit == Some(true)`。三条加 C1-3b 一起是 T2b 的验收。
 
 ## 1. 已有的同规格测试（照着这些写）
 
@@ -80,7 +79,7 @@ let tree = TestTree::build(&[
 - **输入**：快照本身
 - **期望**：三张表各自 `resolved_count == 1931`、`true + false == resolved`、
   `unknown` 与 `not_found` 全为 0；`unknown` 名单里的 noun 一个都不出现在
-  `nouns` 映射里；`core_sha256` 钉死
+  `nouns` 映射里；`core_sha256` 钉死（★0906：W4.2 加 `toplevel` 表时扩成四张，见 C0-3 预告）
 - **多钉了一样**：每张表连 `field_id` 和 `field_type` 一起断言。
   `fieldType` 是 core 自己的判词（0 = bool 重载），**用错重载是静默的**——
   不断言它，换版本重导时读成 int 也不会有人发现
@@ -105,6 +104,9 @@ let tree = TestTree::build(&[
   没有叫 `primitive` 的合成键；来源版本由 `core_sha256` 钉住（快照里没有
   `source_version` 这个键，用 sha256 更硬）；生产查询 `core_primitive_bits` 返回
   `(a, b)` 而不是一个布尔
+- **★0906 预告**：开发计划 W4.2 重导快照时会加第四张表 `toplevel`（`0xA187C` / 661628，核对表 R0-3）。
+  **落地那一次**把「恰好三个键」同一提交改成「恰好四个键」，C0-1 的三表自洽断言同步扩到四张表——
+  不然重导那天 C0-3 先红。今天不改断言
 - **理由**：`0xA103E` 的搭档跨版本会换（2.10 是 `0xA18B8`，3.1 里不存在）
 - **落点**：✅ 同上 → `core_noun_granularity_snapshot_is_complete_and_self_consistent`
   （键的形状）+ `is_primitive_ors_both_bits_and_keeps_them_separate`（两位分开可查，
@@ -112,25 +114,45 @@ let tree = TestTree::build(&[
 
 ## 3. L1 —— 纯函数用例（今天就能写）
 
-### C1-1 significant 位说是根，就必须返回它自己 · 覆盖 R9、R14
+### C1-1 significant 位说是根，就必须返回它自己 · 覆盖 R9、R14 ✅ 已落（2026-09-06，T2b 契约）
 
-- **输入**：链 `NOZZ(9) → EQUI(8) → ZONE(3)`，位表 `EQUI` significant、`NOZZ` 不
-- **期望**：`resolve(r(9)).root == r(8)`；`resolve(r(8)).root == r(8)`（**含自身**）
-- **落点**：`generation_root.rs` → `significant_bit_resolves_to_itself_and_to_nearest_significant_owner`
+- **输入**（开关开）：`AIDTEX(1) → ZONE(2) → WORL(3)`——位表判 `AIDTEX` 显著、字典判它 point 容器；
+  `BOX(9) → EQUI(8) → ZONE(3)`，无 MDU，位表 `EQUI` 显著、`BOX` 不
+- **期望**：`resolve(r(1)) == (r(1), AIDTEX, Normal)`（**含自身**）；`resolve(r(9)) == (r(8), EQUI, Normal)`、
+  `resolve(r(8)) == (r(8), EQUI, Normal)`，且测试同时断 `core_significant_bit("EQUI") == Some(true)`——
+  名单解出的 owner 与 core 位表说的显著 owner 是同一个（位表当 oracle）
+- **落点**：✅ `generation_root.rs` → `significant_bit_resolves_to_itself_and_to_nearest_significant_owner`
 
-### C1-2 MDU 压过位表 · 覆盖 R9
+### C1-2 MDU 压过位表 · 覆盖 R9 ✅ 已落（2026-09-06）
 
-- **输入**：同上，但位表把 `NOZZ` 也标成 significant，`delivery_unit_types = ["EQUI"]`
-- **期望**：`resolve(r(9)).root == r(8)`、`kind == DeliveryUnit`
+- **输入**（开关开）：`AIDTEX(1)` 与 `NOZZ(9)` 都挂在 `EQUI(8) → ZONE(3)` 下，`delivery_unit_types = ["EQUI"]`
+- **期望**：两者都解到 `(r(8), EQUI, DeliveryUnit)`；对照：拿掉 MDU 配置，`AIDTEX` 才解到自己
 - **理由**：MDU 是**项目交付语义**，不是 core 语义，不能被位表覆盖（计划 T2.1）
-- **落点**：同上 → `delivery_unit_outranks_the_significant_bit`
+- **落点**：✅ 同上 → `delivery_unit_outranks_the_significant_bit`
 
-### C1-3 位表未知的 noun 走名单兜底 · 覆盖 R9
+### C1-3 位表未知的 noun 走名单兜底 · 覆盖 R9 ✅ 已落（2026-09-06，含「开关开 + 快照外」一态）
 
-- **输入**：位表里没有的 noun `FOOB`
-- **期望**：解析结果与位表引入**之前**逐位相同（拿同一份 fixture 跑新旧两条路径对比）
-- **理由**：灰度开关关着时行为必须一字不变
-- **落点**：同上 → `unknown_noun_falls_back_to_the_hand_written_list`
+- **输入**：位表里没有的 noun `FOOB`，两种形状（直挂 ZONE / 挂在非 MDU 的 EQUI 下），开关两态各解一次
+- **期望**：两态结果逐位相同且不为 `None`（名单兜底仍给它根）。
+  **第二段**：「字典判 point、快照却没导到」这一态今天用真 noun 构造不出来（1931 个 noun unknown = 0，
+  名单兜底的 LOOP/PLOO/VERT/PAVE 与三个 `*DATU` 全在快照里），所以直接钉 T2b 谓词
+  `significant_point_container_is_its_own_root(noun, significant_bit)`：位表答 `None` 或 `Some(false)`
+  时**不抬根**，哪怕开关开着、noun 是 point 容器；非 point 容器即使 `Some(true)` 也不走这条
+- **理由**：判据必须是 `core_significant_bit == Some(true)`，不能用保守取真的 `noun_is_significant`——
+  否则换版本重导后 unknown > 0 的那天，开关会把没导到的 point noun 静默抬成根
+- **落点**：✅ 同上 → `unknown_noun_falls_back_to_the_hand_written_list`
+
+### C1-3b 开关恰好只动 `AIDTEX` · 覆盖 R9 ✅ 已落（2026-09-06）
+
+- **输入**：44 个字典 point noun + `JLDATU` / `PLDATU` / `ENDATU`，每个两种形状，开关两态
+- **期望**：两态结果不同的 noun 集合**恰好 = {AIDTEX}**；位表侧同一句话：47 个里 `core_significant_bit == Some(true)` 的恰好只有 `AIDTEX`
+- **落点**：✅ 同上 → `the_significant_over_point_override_only_moves_aidtex`；
+  `model_impact.rs` → `every_non_significant_point_container_is_skipped_as_a_generation_root`（原
+  `every_dictionary_point_container_is_skipped_as_a_generation_root` 改口径：44 个仍全判 point 容器，
+  且显著的恰好只有 AIDTEX）
+- **附带钉住的一件事**：direct 文件窗口（`enumerate_generation_roots_in_subtree`）**不看**这个开关，
+  `AIDTEX` 直接挂 ZONE 下两态都恰好一个 Normal 根（`direct_enumeration_already_lists_aidtex_under_zone_as_exactly_one_root`）
+  ——P1 的「AIDTEX 零工作项」只在旧 PE 路径成立
 
 ### C1-4 `SignificantMembers` 被非 significant 子节点挡住 · 覆盖 R11
 
@@ -153,16 +175,15 @@ let tree = TestTree::build(&[
 - **理由**：与 C1-4 成对，两条规则的差别就在"下潜"这一栏。R22 用的是这一个
 - **落点**：✅ 同上 → `c1_5_primitive_member_walk_covers_the_whole_subtree`
 
-### C1-6 既非 significant 又非 primitive → core 丢弃，我们保守 · 覆盖 R13
+### C1-6 既非 significant 又非 primitive → core 丢弃；我方第一批门 · 覆盖 R13
 
 - **输入**：两个位都为假的元素，三个 state 各来一次
 - **期望**：参考模型的队列**全空**——连 `AncestorDeletes` 都不打
-- **理由**：钉住"我们知道 core 会丢，但我们有意多做"这条取舍。
-  哪天要改成丢弃，这个测试就是那次改动的入口
+- **理由**：core 全量规则保持参考契约；生产只开放字典无几何代理的 1272 项第一批，
+  223 项继续保守。
 - **落点**：✅ `core3d_reference.rs` → `c1_6_core_discards_elements_that_are_neither_significant_nor_primitive`
-- **还差半条**：落地的只断言了 core 侧丢弃。"同一输入下我们的生产路径仍返回 `Regen`"
-  那一半要等 P2 把位表接进 `resolve_element_generation_root` 才有地方断言——
-  今天生产路径根本不读位，写出来只是在断言一个还不存在的耦合
+- **生产侧**：✅ `model_update_plan.rs` → `no_geometry_entry_gate_only_removes_model_work`；
+  同一输入关门保持 `Regen`，开门后模型分区为空，数据层 `details` 原样保留。
 
 ### C1-7 祖先删除标记打满整条链 · 覆盖 R21 ★这条最容易写错
 
@@ -220,12 +241,22 @@ let tree = TestTree::build(&[
   没有量化收益就不该做（计划把它排在最后就是这个理由）
 - **落点**：同上 → `ancestor_regen_absorbs_descendant_work_items`
 
-### C2-3 删除路径的去重依赖祖先标记 · 覆盖 R21 + R19
+### C2-3 删除路径**不做**祖先吸收；验的是删行效果等价 · 覆盖 R19 + R24 ★2026-09-06 改写
 
-- **输入**：删掉 EQUI 下的一个 NOZZ 和 EQUI 自己
-- **期望**：NOZZ 的删除被 EQUI 的祖先标记吸收，不单独排项
-- **依赖**：这条**必须**在 C1-7 通过之后才有意义——祖先标记打不满，这里就是假绿
-- **落点**：同上 → `delete_dedup_depends_on_ancestor_marks`
+- **原稿写反了**。原期望「NOZZ 的删除被 EQUI 的祖先标记吸收，不单独排项」**不是 core 的行为**：
+  R19 `IsPending(e, Deleted)` = `IsPresent(key, 3) ∨ IsPresent(key, 4)`，**只看 key 自身、不上行**；
+  R24 state 2（祖先标记）**只有** `IsPending(·, Changed)` 一个读者，Deleted 不看它。
+  所以 core 会把 `(EQUI, 3)` 与 `(NOZZ, 3)` **两条都留在队列里**——参考模型侧这一点已由
+  C1-9 第三行钉住（`IsPending(NOZZ, Deleted) == false`）。这条从此**不再当 core 契约**。
+- **输入**：同一窗口删掉 EQUI 下的一个 NOZZ 和 EQUI 自己
+- **期望（我方生产计划的不变量，不是 core 契约）**：两条 `DeleteCleanup`（EQUI、NOZZ）执行后的
+  **最终模型行集合**，与只有一条 `DeleteCleanup(EQUI)` 执行后的集合**相同**——多出的那条是重复劳动，
+  不是错误；也不许多删（NOZZ 之外的行）或少删
+- **不断言**：工作项条数。祖先抢占去重（T3.3 / 开发计划 W3.2）若立项，只对 `RegenRoot` 类做吸收，
+  删除路径按 core 口径**不吸收**
+- **依赖**：C1-7 / C1-9 已落；不再依赖「祖先标记打满」
+- **落点**：同上 → `delete_cleanup_rows_are_equivalent_with_or_without_the_descendant_item`
+  （原名 `delete_dedup_depends_on_ancestor_marks` 作废，它断言的是一条不存在的规则）
 
 ### C2-4 全量重建清空待办队列 · 覆盖 R6 ✅ 已落
 
@@ -330,30 +361,30 @@ let tree = TestTree::build(&[
 | R0-1 取出参不取返回值 | C0-1、C0-2 | ✅ 已落 |
 | R0-2 primitive 不合成 | C0-3 | ✅ 已落 |
 | R1 DESI 库门 | —（`UpdateScope::admits` 已有测试） | ✅ 已覆盖 |
-| R2 XGEOMETRY 门 | C2-1 | 待写 |
+| R2 XGEOMETRY 门 | C2-1 | ◐ 旧路径执行门已有；文件窗口双端观察已落，执行过滤待正样本 |
 | R3 `isValid` | —（形状等价，不单独立用例） | ◐ |
 | R4 门顺序 | —（无副作用，不可观测） | ⚪ |
 | R5 丢弃 DCHC 码 | C3-5 | 待写 |
 | R6 `Refresh` 清队列 | C2-4 | ✅ 已落（T3.4） |
 | R7 新建并进 ID 清单 | —（不可比） | ⚪ |
 | R8 重入保护 | —（不可比） | ⚪ |
-| R9 位表判据 | C1-1、C1-2、C1-3、C4-1、C4-2 | ◐ 位表可查（T2a），判定链未接 |
+| R9 位表判据 | C1-1、C1-2、C1-3、C1-3b、C4-1、C4-2 | ◐ direct 枚举与旧路径 `significant_over_point` 已接；C1-1/2/3/3b ✅（2026-09-06）；开关默认关，默认开的前置就是这四条绿 |
 | R10 块内成员清理 | C3-2 | ◐ 参考模型侧两条已落，我方侧待 live |
 | R11 三个 SearchMode | C1-4、C1-5 | ✅ 已落 |
 | R12 primitive 上卷 | C1-1 | ◐ 参考模型侧已落，我方侧待 P0 |
-| R13 双假丢弃 | C1-6 | ◐ core 侧已落，我方"有意多做"那半条待 P2 |
+| R13 双假丢弃 | C1-6 | ◐ core 侧全量已落；我方 1272 项第一批门与真实窗口基准已落，223 项待评审 |
 | R14 含自身无深度限 | C1-1 | ◐ 同 R12 |
-| R15 删除不上卷 | C2-3 | ◐ 同 R12 |
+| R15 删除不上卷 | C2-3（★0906 改写为「删行效果等价」，同时覆盖 R19 / R24 的「删除不吸收」） | ◐ 同 R12 |
 | R16 死代码 | —（不实现） | ⚪ |
 | R17–R20 去重 | C1-9、C1-10、C2-2 | ✅ C1-9 / C1-10 已落；C2-2 随 T3.3 |
 | R21 祖先标记 | C1-7、C1-8 | ✅ 已落 · **本轮最值钱的一条** |
-| R22 缺失图元回收 | C3-1 | ◐ 参考模型侧已落，我方侧待 live |
-| R23 清单不活跃 | C3-4 | ◐ 边界已有名有姓，live 取证仍欠 |
+| R22 缺失图元回收 | C3-1 | ✅ 按根对账、回执完整性、完整空投影、嵌套根及 RocksDB testbed 真库删除均已验证 |
+| R23 清单不活跃 | C3-4 | ✅ 静态构造函数取证已结案；我方按前置条件失败处理，不移植全删除语义 |
 | R24 state 2 双消费者 | C1-8、C3-3 | ◐ C1-8 已落，R24 第二个消费者待 T3.1 |
 | R25 擦除双路径 | C3-3 | 待写 |
 | R26 `Exists` 递归 | —（core 内部存储，不移植） | ⚪ |
 | R27 三遍顺序 | —（不可比） | ⚪ |
-| R28 目标消失不空跑 | C2-5 | 待写 |
+| R28 目标消失不空跑 | C2-5 | ✅ direct 根来自 target 枚举；兼容路径保留终态存活复核 |
 | R29 `Finish` 清队列 | C2-4 | ◐ 与 R6 同一条实现；`Update` 收尾侧未单独立用例 |
 
 > **◐ 的统一含义**：core 侧的规则已经在 `core3d_reference.rs` 里钉住了，
@@ -370,13 +401,34 @@ let tree = TestTree::build(&[
 
 ~~**C0-1、C0-2、C0-3**~~ ✅ **已完成（2026-08-29）**，随 T2a 落进 `generation_root.rs`。
 
-还剩下的，顺序不变：
+后续顺序按当前完成度收敛为：
 
-1. **C1-1、C1-2、C1-3**——P2 的形状契约，判的是我们自己的
-   `resolve_element_generation_root`。位表已经在手（T2a），**跟 T2b 同一次改动写**：
-   先接消费者再写断言，否则断言的是一个还不存在的耦合。
-2. **C2-1**（R2 XGEOMETRY 门）——落点选在计划层还是采集层要看 owner 链在该点可不可得：
-   计划层有 `OwnerNode` 图，采集层没有。
-3. **C4-1 / C4-2 对账** —— P0 完成之后立刻做，因为 C4-3 是整条线唯一的真分叉点。
-4. **C3-1 / C3-2 / C3-3** —— 需要 live，且依赖前面的结论。
+1. ~~**C1-1、C1-2、C1-3**~~ ✅ **已完成（2026-09-06 晚，W1.2）**，连同 C1-3b「恰好只差 AIDTEX」。
+   T2b 判据已换成 `core_significant_bit == Some(true)`；开关仍默认关。
+2. **C2-1**（R2 XGEOMETRY 门）——双端观察已经进入文件窗口规划器；取得稳定正样本后再灰度开启
+   工作项过滤与凭证推进。
+3. **C4-1 / C4-2 对账**——补齐 direct 与兼容路径的 live 输出对账。
+4. **C3-1 / C3-2 / C3-3**——需要 live；优先验证真库孤儿行删除和图元替换顺序。
    C3-1 开工前先补 C3-4 的 live 取证。
+
+### 2026-09-06 新增自动验收
+
+- `significant_over_point_only_promotes_aidtex_when_enabled`：锁定 T2b 默认兼容与开启后的 AIDTEX 根。
+- （晚，W1.2）`significant_bit_resolves_to_itself_and_to_nearest_significant_owner` /
+  `delivery_unit_outranks_the_significant_bit` / `unknown_noun_falls_back_to_the_hand_written_list` /
+  `the_significant_over_point_override_only_moves_aidtex` /
+  `direct_enumeration_already_lists_aidtex_under_zone_as_exactly_one_root`：T2b 契约（C1-1/2/3/3b），
+  判据换成 `core_significant_bit == Some(true)`；`model_impact.rs` 的 point 容器测试改口径为
+  `every_non_significant_point_container_is_skipped_as_a_generation_root`。
+- `xgeometry_observation_uses_the_correct_window_side`：锁定新增/删除/修改/跨界/断链的双端口径。
+- `nested_root_observation_counts_roots_and_repeated_subtree_coverage`：只记录嵌套根和重复覆盖规模，
+  不改变工作项。
+- `preview_and_execution_share_the_effective_planner_dispatch`：防止 direct 预览重新长出独立规划器。
+- `an_unreceipted_partial_projection_does_not_delete_nested_root_rows`：无完整回执不得做差集删除。
+- `reconciliation_requires_a_matching_receipt_and_accepts_a_complete_empty_projection`：错配回执无副作用，
+  完整空投影可以合法清旧行。
+- `live_testbed_complete_projection_reclaims_only_the_absent_primitive`：8019 RocksDB 独立临时库中，
+  无回执部分投影不删；完整投影只回收缺席 primitive，并清除其模型行与关系边。
+
+同日只读真实文件验收已通过：ams8000 九窗口、ams7999 45→46 旧读取器故障窗口，以及录制
+E3D 窗口矩阵。ams8000 255→256 还作为嵌套根重复覆盖指标的真实正样本。
