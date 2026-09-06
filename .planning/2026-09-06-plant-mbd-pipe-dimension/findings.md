@@ -165,6 +165,37 @@ Tail 位置一律 `tpos of $!this.branname wrt/*`。`BranchQueryResult` 新增 `
 `branch_query`）。候选 `24381_177565`（BEND 12 + COUP 4 + TEE + VALV，17 尺寸含 19.68 / 29.88 / 30 三条小尺寸）、
 `24383_74307`、`24383_100161`、`24383_75574`、`24383_98772` 都能出图，暂不入批次。
 
+### 发现 4（进 Phase 4 前必须拍板）：rs-mbd 线性 MVP 的**尺寸点模型**不是 PML 的
+
+读 PML 非 Polar 路径（`isoline.getIsoDims` L388 → `isoDim(branname, mems, pipedir…)` L129 →
+`addmem` L464-728 → `lindim(points…)`），主尺寸的口径是：
+
+- **每条直段一条 running dimension**（`lindim` 多点：`points[1..n]`，`do !x from 1 to size-1` 逐段出值，
+  `sepSmallDim` 处理小段），不是「每根管一条 + 一条总长」。
+- **尺寸点 = 构件原点投影到直段轴上**（`pos of $!mem wrt/*`，L533），Head→`hpos`、Tail→`tpos`；
+  `exceptTypes = ATTA TUBI GASK`（L133）**不进点**；WELD 只在不贴着相邻构件端口时进点（L199-221）；
+  PCOM / INST / 名字 `*DI` 有专用取点（L477-535）；点去重 `possunique`；`considerTee`。
+  所以一段 ELBO–管–VALV–管–ELBO 的 PML 尺寸是 **[弯头拐点→阀中心, 阀中心→弯头拐点]**，
+  rs-mbd MVP 出的是 **[管 1 长, 管 2 长, 总长]**——数值不同、点不同。
+- **行位**（`isoDim.drawDim` L1298-1316）：沿 dimdir 取最远点，偏 `od/2 + od/2 + 1.2·cheight·(dimtimes−1)`；
+  主尺寸 `dimtimes = 2`（有 ATTA 子尺寸 `twoormoredims` 时）否则 1；ATTA 子尺寸（`getAttaDims`）行 1。
+  rs-mbd 的 `MEMBER_OFFSET 500 / STACK_STEP 800`（每条成员尺寸再叠一行）是自造的。
+- **方向**（`isoDim.CalculateDimChardirs` L1131-1170）：`dir` = 直段中点 → BRAN 包围盒中心（`volume $bran`）；
+  E/N/W/S 按与 `dir` 夹角排序，`gooddimdirs = [最近两个的反向, U]`（从内往外看），`chardirs = [U, 最近, 次近]`；
+  再经 `isoori(pipedir, gooddimdirs, chardirs, usedDirs, 60)` → `isoGetHandleDimDir`（已迁为 `direction.rs`）。
+  `usedDirs` 来自 `getIsoUsedDirs`（L439-528）：有「手柄」的构件（P3 不在 P1–P2 轴线上，L452-473）
+  贡献 P3 方向（TEE/OLET 按 P1 与 pipedir 是否垂直取 P3 或 P1+P2），占位角 60。
+- **cheight**：表单默认 `cheightbili 0.3`（字高 = 0.3 × od）、`autocheight true`、`sepSmallDim true`、
+  `firstDimTimes 0.5 / secondDimTimes 1.7`（Polar 路径用）。
+
+**含义**：Phase 3 金样固化的是 rs-mbd MVP 的口径（tube lengths + chain），PML 图纸对照一定对不上。
+ADR-0002「语义精确」要的是尺寸点与数值一致——**Phase 4 应改成「线性尺寸对齐 PML isoDim 模型」**，
+方向系统与 cheight 行位是它的一部分，而不是先在错的尺寸点上接方向。宿主侧要补三样数据：
+BRAN 包围盒中心（`volume_center`）、每个成员的 P1/P2/P3（位置 + 方向，`CataloguePoints::leave(member, Some(n))`
+就能解）、od 已有。求解器侧：新建 `isodim.rs`（取点 / 投影 / 去重 / WELD·PCOM·INST 规则）替掉
+`layout.rs` 的 member/chain 装配，`direction.rs` 接线，行位按 od + 1.2·cheight·(dimtimes−1)。
+金样重录（基线变更显式审阅）。是否按此改，等用户拍板。
+
 ### 待人工对照 PML 图纸（ADR-0005 的那一遍审阅还没做）
 
 - 14–26 mm 短管（`24383_100028`）PML 是否出尺寸：`getcuttubi` 有没有最短阈值。

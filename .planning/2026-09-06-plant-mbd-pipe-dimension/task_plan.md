@@ -148,15 +148,19 @@ old/vendor/plant-mbd ── 纯求解器 ──►  old/gen-model  src/mbd/ (e3d
 - [ ] 每条金样对照 PML 图纸：`isobran.getisolines` 切段数与拐点、`lindim` 尺寸点与数值；14–26 mm 短管与「E3D 不画」槽位的 PML 处理——需要在 E3D 里开同一批 BRAN，人工审阅。
 - 验收：`golden diff` 6/6 OK、`cargo test --workspace` 56 通过（已过）；PML 对照结论待写。
 
-### Phase 4 — 方向系统接线与 cheight 驱动（≈3 人日）
+### Phase 4 — 线性尺寸对齐 PML `isoDim` 模型（含方向系统与 cheight 行位）（≈4–5 人日，**待拍板**）
 
-状态：pending（前置 Phase 3 至少 1 条金样）
+状态：**proposed（重定范围）**——读 PML 非 Polar 路径后发现 rs-mbd 线性 MVP 的尺寸点模型不是 PML 的（`findings.md`「发现 4」）：PML 每条直段一条 running dimension，尺寸点是**构件原点投影**（ATTA/TUBI/GASK 不进点），不是「每根管一条 + 总长」。原 Phase 4「在 MVP 上接方向」会把方向接在错的尺寸点上。
 
-- [ ] `DirOccupancy` 输入契约：`isoline.getIsoUsedDirs`（`isoline.pmlobj` L439）等价物——需要成员端口方向 + 相邻构件包围盒；gen-model 适配层补 `neighbor_extents`（e3d-model AABB 能力在 `elmodl` / `mesh` 侧确认后再定字段名）。
-- [ ] `layout.rs`：`deterministic_normal` → `get_handle_dim_dir(pipe_dir, occupancies, min_gap, good_dim_dirs)`；`good_dim_dirs` 按 PML `CalculateDimChardirs`（最近两水平反向 + U）。
-- [ ] 偏移常量 `MEMBER_OFFSET_MM / STACK_STEP_MM / SMALL_DIM_THRESHOLD_MM` 改由 `cheight_mm` 派生（PML `firstDimTimes / secondDimTimes / cheightbili`），`meta.cheight_mm` 开始下发；`layout_mode` 升为 `linear_directed`（前端 `PARTIAL_LAYOUT_MODES` 只含 `linear_mvp`，警示条自然消失）。
-- [ ] 重录金样（基线变更显式审阅）。
-- 验收：`rg deterministic_normal crates/plant-mbd/src` 无命中；toy + 金样 diff 仅偏移方向按预期变化。
+拍板项：**(A) 推荐**：按下面重做线性尺寸；**(B)**：保留 MVP 尺寸点只接方向（明知与 PML 图纸对不上）。
+
+- [ ] 宿主补数据（两个方案都要）：`BranchQueryResult.volume_center`（BRAN 包围盒中心，成员 P 点 bbox 近似 `volume $bran`）；`BranchMember.ppoints: Vec<{number, pos, dir}>`（P1/P2/P3，`CataloguePoints::leave(member, Some(n))`）；`mbd_branch_dump` 随之带出，fixtures 重导。
+- [ ] (A) plant-mbd 新建 `isodim.rs`：按 `isoDim.addmem`（L464-728）取点——Head `hpos` / Tail `tpos` / 构件 `pos` 投影到直段轴；`exceptTypes = ATTA TUBI GASK`；WELD 贴端口不进点（L199-221）；PCOM / INST / `*DI` 专用取点；`possunique` 去重；`considerTee`。每条直段一条 running dimension → N−1 条 `linear_dim`（`sub_kind = "main"`，同一行位）。
+- [ ] (A) 行位：`od/2 + od/2 + 1.2·cheight·(dimtimes−1)`（`drawDim` L1310），主尺寸 `dimtimes = 2` 若有 ATTA 子尺寸否则 1；`cheight = cheightbili(0.3) × od`（表单默认），`meta.cheight_mm` 下发；`sepSmallDim` 小段处理对齐 `lindim.sepSmallDim`。
+- [ ] 方向：`CalculateDimChardirs`（L1131-1170，需要 `volume_center`）→ `good_dim_dirs = [最近两水平反向, U]`；`getIsoUsedDirs`（L439-528）由 P1/P2/P3 判「手柄」→ `DirOccupancy{dir: P3 dir, angle: 60}`（TEE/OLET 按 P1⊥pipedir 取 P3 或 P1+P2）；`layout.rs` 的 `deterministic_normal` → `get_handle_dim_dir(pipe_dir, occupancies, 60, good_dim_dirs)`。
+- [ ] `layout_mode` 升为 `isodim_main`（或与前端约定的名字），前端 `PARTIAL_LAYOUT_MODES` 只含 `linear_mvp`，警示条自然消失；ATTA 子尺寸（`getAttaDims`）留 Phase 5。
+- [ ] 重录六条金样（基线变更显式审阅，每条写清尺寸点从 tube 端点变为构件原点）。
+- 验收：`rg deterministic_normal crates/plant-mbd/src` 无命中；`24383_91813`（5 根共线 FTUB）PML 口径下应是 Head→Tail 一条 13500（FTUB 不进点）——拿它做第一条对照；其余金样 diff 逐条审阅。
 
 ### Phase 5 — 几何伴生符号与非尺寸图元（分期立项，每项到时细化）
 
