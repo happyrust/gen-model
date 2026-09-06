@@ -149,7 +149,7 @@ ida-bridge exec <client> --sql "SELECT '0x5657A0A' AS id, address, name_at(func_
 |---|---|---|---|
 | `IsSignificant(e)` | `0x1047E0D0` | `0x5657A0A` / `90536458` | bool |
 | `IsPrimitive(e)` | `0x1047E070` | `0xA103E` / `659518`，为假再试 `0xBBD5ADC` / `196958940` | bool ∨ bool |
-| ~~`IsNegative(e)`~~ | `0x1047DD90` | `0x92663` / `599651` | int ≠ 0，**本链无活的消费者** |
+| ~~`IsNegative(e)`~~ | `0x1047DD90` | `0x92663` / `599651`，字段名 **`HOLC`**（逆 hash，★0907 补） | int ≠ 0，**本链无活的消费者**；但 core.dll `nounlib/INCOMP`（`0x561C1B0`）读的是**同一个位**，`change/EVALAT` 规则 J / P 与 §2.3 第 3 条（孔洞联动）靠它——见 `docs/evidence/2026-09-06-ida-core3d-change-evalat-cascade.md` §2.2a。这个位仍未导出快照；0907 真库普查用字典 `positive_equivalent != 0`（12 个负实体 noun）代理 |
 
 **R0-1 取值走出参，不走返回值。**
 三个判据都是"把栈上 out 清零 → `getField(id, &out)` → 读 out"，`getField` 自己的 bool 返回值
@@ -196,6 +196,18 @@ ida-bridge exec <client> --sql "SELECT '0x5657A0A' AS id, address, name_at(func_
 `toplevel` 位仍然导进了快照（离线字典字段，`old-parse-pdms-db::dict::FIELD_TOPLEVEL`），
 但它是**显示属性那一层的**账，不是几何粒度缺口。对账（211/127/交集 93）、486 个真库的普查
 与「不许当已证」见 `docs/evidence/2026-09-04-noun-toplevel-reconciliation.md`（§0' 是改判那一节）。
+
+**★0906 一个补充：`toplevel` 在 3D 侧确有一个几何相关的消费者——GETWORK 的重画单位。**
+`sub_1052F2E0` 对每个变更元素先 `desdblib/FNDTOP`（按 `nounlib/LISTOP` = `toplevel` 位上卷到顶层可画件），
+再把顶层件交给 `change/EVALAT` 进 QCHGLS；`significant` 要到 DRAFT 侧 `GranularityExpansion` 消费队列时才出场
+（`docs/evidence/2026-09-06-ida-core3d-change-evalat-cascade.md` §4 / §5）。这不改上面的判词：重画单位是 TOPF，
+几何段索引仍是 `significant`，两者都在 owner 链上、TOPF 更粗——按 `significant` 选根只会比 core 更细，不会漏。
+
+**★0907 按真库元素对拍完了（联动对齐计划 C5，`docs/evidence/2026-09-07-cross-root-reference-census.md` §5）：**
+486 库 1,961,172 个元素里，按 `LISTOP` 口径 core 会单独重画、而 direct 枚举下**一个根祖先都没有**且 core 判 primitive 的，
+只有 **268 个**——成簇的只有船体族 `BLOCK → CPANEL`（160）/ `CSURPX → CPROF`（82）/ `BLEVEL → BNDLIN`（5），
+全在 AvevaMarineSample；W1.2 顺带看到的「BOX 直挂 ZONE 不出根」在语料里没有实例（primitive 直挂 ZONE 只有 `RPLA`×2、`CNODE`×3）。
+**判：不改判据、不加白名单**；船体族登记为几何覆盖度议题（今天根本不生成，不是增量问题）。
 
 ## 3. 入口与门（R1–R8）
 
@@ -274,6 +286,12 @@ ModelToUpdate(e, state):
 
 **推论**：DCHC 码的全部作用发生在上游——决定元素**进不进** QCHGLS；
 一旦进了，重画范围只由 noun 位决定。**core 这一层没有 `TransformOnly`。**
+
+★0906 那个「上游」找到了：**`change/EVALAT`**（Core3D `0x1022C679`），DCHC 的读点是 `change/IDCHNG`（`0x1022E302`）
+→ core.dll `ATAINT(属性)`；类别 0 根本不进队列（= R13「双假丢弃」的上游），类别 1 = INTUBE 还会连带前一个元件。
+`EVALAT` 同时是 noun 专项联动规则表（上卷 / owner / 正向引用 `CLIST`·`ELCXRF` / 反向引用 `DFIND` / 结构连接 `ADSTCH`），
+写 QCHGLS 的是 `change/EVALST`（步长 3、同键取 max 类别）。全表见 `docs/evidence/2026-09-06-ida-core3d-change-evalat-cascade.md` §2–§3；
+对我方的意义（direct 路径缺引用类联动）归 `docs/plans/2026-09-06-core3d-cascade-parity-dev-plan.md`，不在本核对表里重复。
 
 - 我方：✅ 分层等价。`OperationEffectSummary.max_dchc` 保留原始码没问题，
   但不该让它调节重生成范围。`TransformOnly` 是我们**主动多留**的便宜路径（省不是漏），
@@ -773,8 +791,12 @@ Finish():                                          # 0x1047D380
   （`getAncestorTOPFElement` / `getChildTOPFElements` / `getElementsAtOrBelowTOPF` /
   `getPromotedTOPFElement` / `getPrimitiveOrTOPF*`，加 `DES_DrawListManager::findTopLevelElement`
   与 `promoteElement(s)`）是**3D 模型视图侧**，而 **`GETWORK` 正是「别人 SAVEWORK 了，
-  我把变更收进来」——跟 gen-model 干的事最像的就是它**。这条通道一次都没梳理过。
+  我把变更收进来」——跟 gen-model 干的事最像的就是它**。~~这条通道一次都没梳理过。~~
   细节见 `docs/evidence/2026-09-04-ida-core3d-partial-update-recheck.md` §3.1–3.3。
+  **★0906 已梳理**（`docs/evidence/2026-09-06-ida-core3d-change-evalat-cascade.md` §5）：过滤器第二段对每个存活元素
+  `FNDTOP` 折叠到 `toplevel` 顶层件，owner 不在集合里的直接调 `change/EVALAT(top, noun, REDRAW=4)`；
+  `postGetWork` / `postUndo` / `preRedo` 三入口同一条路。重画单位 = TOPF（R0-3 ★0906 补充），联动规则 = `EVALAT`（R5 ★0906）；
+  与我方逐条对表见 `docs/plans/2026-09-06-core3d-cascade-parity-dev-plan.md` §1。
 - ★0904 **R10 的反向风险已验：今天不咬人，但它靠两个互不相干的事实撑着。护栏已补两条。**
 
   问的是：按根对账（R22）会不会把**嵌套生成根**的行当孤儿删掉？
@@ -810,7 +832,10 @@ Finish():                                          # 0x1047D380
   完整空投影清理两条边界。
 - `ExistsCPS` / `WWSegment` / `PDMS_Idlist2` 的内部结构——core 自己的绘制存储，
   移植时只需知道它们是"已绘制段"和"应绘制清单"两个集合，内部布局不必抄。
-- §4 末尾登记的同族字段（`847458`、`606263`、`602413`、`595979`、`599813`）语义未追。
+- ~~§4 末尾登记的同族字段（`847458`、`606263`、`602413`、`595979`、`599813`）语义未追。~~ ★0906 已解（逆 hash + core.dll 谓词实读）：
+  `606263` = `EQUC` 设备子件（`IECOMP`）、`602413` = `PIPC` 管道元件（`IPCOMP`）、`595979` = `HNGC` 支吊架元件（`IHCOMP`）、
+  `599813` = `HULC` 船体构件、`847458` = `IMAP`（后两个本轮无消费者）。`0x92663` = `HOLC`（`INCOMP`）。
+  见 `docs/evidence/2026-09-06-ida-core3d-change-evalat-cascade.md` §2.2a。
 - 2.10 `sub_102C25F0` 里 `*(this+9) == 779672` 那条早退——它属于另一个类，
   但同样在读 significant 位，可能是一条例外规则。
 - `PostSetRefListAttribute`（core.dll `0x5EAA7A3`）的 back-ref 表结构——ADR-003 那条线。
