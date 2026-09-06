@@ -890,9 +890,12 @@ pub const MODEL_SIGNIFICANT_OVER_POINT_ENV: &str = "AIOS_MODEL_SIGNIFICANT_OVER_
 /// **默认 false**）。
 ///
 /// 这是核对表 R9 第二步（T2b）的灰度开关：core 位表判显著的 noun 即使字典
-/// `point = true` 也能当生成根。按 E3D 3.1 快照，44 个 point noun 里 core 判显著的
-/// 只有 `AIDTEX` 一个（`the_significant_over_point_override_only_moves_aidtex` 钉着），
-/// 所以开关只改变 AIDTEX 的归属；关着时行为与引入前逐字相同。
+/// `point = true` 也能当生成根。按 E3D 3.1 快照的离线对账，44 个 point noun 里 core 判显著的
+/// 只有 `AIDTEX` 一个，所以开关只改变 AIDTEX 的归属；关着时行为与引入前逐字相同。
+/// 两态各一条断言在 `generation_root::tests::significant_over_point_only_promotes_aidtex_when_enabled`；
+/// 「44 个 point noun 逐个跑、两态恰好只差 AIDTEX」由
+/// `generation_root::tests::the_significant_over_point_override_only_moves_aidtex` 钉着。
+/// 判据是 `core_significant_bit(noun) == Some(true)`——快照外的 noun 开关开着也不抬根（C1-3）。
 ///
 /// 环境变量 [`MODEL_SIGNIFICANT_OVER_POINT_ENV`] 压过配置，取值规则同
 /// [`startup_autorun`]。

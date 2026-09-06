@@ -1473,12 +1473,13 @@ mod tests {
     }
 
     #[test]
-    fn every_dictionary_point_container_is_skipped_as_a_generation_root() {
+    fn every_non_significant_point_container_is_skipped_as_a_generation_root() {
         let point_nouns = crate::noun_dict::default_noun_capabilities().point_nouns();
         assert_eq!(point_nouns.len(), 44, "dabacon point capability drifted");
-        for noun in point_nouns {
+        let mut core_significant = Vec::new();
+        for noun in &point_nouns {
             assert!(
-                is_loop_container_noun(&noun),
+                is_loop_container_noun(noun),
                 "{noun}: point container must roll up to its real geometry owner"
             );
         }
@@ -1519,6 +1520,11 @@ mod tests {
         let info = aios_core::get_default_pdms_db_info();
         let mut names = BTreeSet::new();
         for noun in info.named_attr_info_map.iter() {
+    /// 字典里 44 个 point 容器全部按 loop 容器上卷、自身不是生成根——**唯一例外**是 `AIDTEX`：
+    /// core 位表判它显著，`model_significant_over_point` 开着时它自己成根（T2b，
+    /// `generation_root::tests::the_significant_over_point_override_only_moves_aidtex` 钉「恰好一个」）。
+    /// 这里钉两件事：分类器仍把 44 个都判成 point 容器（上卷判据没变），且 44 个里 core 判显著的
+    /// 恰好只有 AIDTEX——多出一个，例外名单就得跟着改。
             for ai in noun.value().iter() {
                 let name = ai.name.trim().to_ascii_uppercase();
                 if !name.is_empty() {
@@ -1528,7 +1534,15 @@ mod tests {
         }
         names
     }
+            if crate::data_interface::generation_root::core_significant_bit(noun) == Some(true) {
+                core_significant.push(noun.clone());
+            }
 
+        assert_eq!(
+            core_significant,
+            vec!["AIDTEX".to_string()],
+            "AIDTEX is the only point container core calls significant"
+        );
     /// E3D 属性字典的 per-attribute 设计变化码，来自随源码入库的嵌入快照
     /// （见 [`raw_dchc_code`] / `dchc_change_classes.json`）。快照入库后本函数
     /// 恒返回 `Some`——保留 `Option` 签名只为不动既有调用方的解构写法；

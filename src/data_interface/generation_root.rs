@@ -350,11 +350,29 @@ fn normal_root(root: RefnoEnum, node: &GenerationNode) -> GenerationRoot {
     }
 }
 
+/// T2b / Core3D R9：字典判 point 容器、core 位表却**明确**判显著的 noun，开关
+/// `model_significant_over_point` 开着时自己就是生成根（E3D 3.1 快照里只有 `AIDTEX`，
+/// `the_significant_over_point_override_only_moves_aidtex` 钉着「恰好一个」）。
+///
+/// 判据是 `significant_bit(noun) == Some(true)`，**不是** [`noun_is_significant`]：后者对快照外的
+/// noun 保守取真，开关开着时会把一个没导到的 point noun 抬成根——「未知 noun 走名单兜底」
+/// 这条边界（C1-3）就被改了。今天快照 unknown = 0，两种写法行为相同；换版本重导那天才分开。
+/// `significant_bit` 作参数只为让 C1-3 能构造「快照外」那一态，生产调用方传 [`core_significant_bit`]。
+fn significant_point_container_is_its_own_root(
+    noun: &str,
+    significant_bit: impl Fn(&str) -> Option<bool>,
+) -> bool {
+    crate::options::model_significant_over_point()
+        && is_loop_container_noun(noun)
+        && significant_bit(noun) == Some(true)
+}
+
 /// Resolve a changed element:
 /// 1. nearest MDU self/ancestor;
 /// 2. otherwise its significant owner, crossing loop containers;
 /// 3. if the owner is SITE/ZONE/WORL (or missing), the element itself;
-/// 4. hierarchy/loop containers themselves are never fallback roots.
+/// 4. hierarchy/loop containers themselves are never fallback roots — except a
+///    core-significant point container behind `model_significant_over_point` (T2b).
 pub fn resolve_element_generation_root(
     refno: RefnoEnum,
     unit_types: &[String],
@@ -366,6 +384,9 @@ pub fn resolve_element_generation_root(
     }
 
     let (self_refno, self_node) = chain.first()?;
+    if significant_point_container_is_its_own_root(&self_node.noun, core_significant_bit) {
+        return Some(normal_root(*self_refno, self_node));
+    }
     if is_coarse_hierarchy_noun(&self_node.noun) {
         return None;
     }
@@ -1405,6 +1426,255 @@ mod tests {
     /// 正好用来扮演「非交付单元的显著 noun」。
     fn tree(nodes: &[(u32, &str, &str, &[u32])]) -> HashMap<RefnoEnum, SubtreeElement> {
         nodes
+    #[test]
+    fn significant_over_point_only_promotes_aidtex_when_enabled() {
+        let nodes = HashMap::from([
+            (
+                r(1),
+                GenerationNode {
+                    owner: Some(r(2)),
+                    noun: "AIDTEX".into(),
+                    name: "/AID-TEXT".into(),
+                },
+            ),
+            (
+                r(2),
+                GenerationNode {
+                    owner: Some(r(3)),
+                    noun: "ZONE".into(),
+                    name: "/ZONE".into(),
+                },
+            ),
+            (
+                r(3),
+                GenerationNode {
+                    owner: None,
+                    noun: "WORL".into(),
+                    name: "/*".into(),
+                },
+            ),
+        ]);
+
+        {
+            let _override = crate::options::SignificantOverPointOverride::set(false);
+            assert!(
+                resolve_element_generation_root(r(1), &[], |id| nodes.get(&id).cloned()).is_none(),
+                "the compatibility-off path keeps point containers out of the root set"
+            );
+        }
+        {
+            let _override = crate::options::SignificantOverPointOverride::set(true);
+            let root = resolve_element_generation_root(r(1), &[], |id| nodes.get(&id).cloned())
+                .expect("the significant bit promotes AIDTEX");
+            assert_eq!((root.root, root.noun.as_str()), (r(1), "AIDTEX"));
+        }
+    }
+
+    // ---- T2b 契约（用例集 C1-1 / C1-2 / C1-3 + 「恰好只差 AIDTEX」） ----
+
+    /// `(refno, owner, noun)` 摆成一条 owner 链，省掉每条用例里的 `GenerationNode` 样板。
+    fn owner_chain(nodes: &[(u32, Option<u32>, &str)]) -> HashMap<RefnoEnum, GenerationNode> {
+        nodes
+            .iter()
+            .map(|(id, owner, noun)| {
+                (
+                    r(*id),
+                    GenerationNode {
+                        owner: owner.map(r),
+                        noun: (*noun).into(),
+                        name: format!("/{noun}-{id}"),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn resolve_in(
+        nodes: &HashMap<RefnoEnum, GenerationNode>,
+        refno: RefnoEnum,
+        unit_types: &[String],
+    ) -> Option<(RefnoEnum, String, GenerationRootKind)> {
+        resolve_element_generation_root(refno, unit_types, |id| nodes.get(&id).cloned())
+            .map(|root| (root.root, root.noun, root.kind))
+    }
+
+    /// 同一形状在开关两态下各解一次。
+    fn resolve_both_states(
+        nodes: &HashMap<RefnoEnum, GenerationNode>,
+        refno: RefnoEnum,
+    ) -> (
+        Option<(RefnoEnum, String, GenerationRootKind)>,
+        Option<(RefnoEnum, String, GenerationRootKind)>,
+    ) {
+        let off = {
+            let _off = crate::options::SignificantOverPointOverride::set(false);
+            resolve_in(nodes, refno, &[])
+        };
+        let on = {
+            let _on = crate::options::SignificantOverPointOverride::set(true);
+            resolve_in(nodes, refno, &[])
+        };
+        (off, on)
+    }
+
+    /// C1-1（R9 / R14）：位表说 `AIDTEX` 显著，开关开着它就是自己的根——**含自身**；
+    /// 一个 primitive 的根是最近的显著 owner，且那个 owner 在 core 位表里确实显著（位表当 oracle）。
+    #[test]
+    fn significant_bit_resolves_to_itself_and_to_nearest_significant_owner() {
+        let _on = crate::options::SignificantOverPointOverride::set(true);
+
+        let aid = owner_chain(&[(1, Some(2), "AIDTEX"), (2, Some(3), "ZONE"), (3, None, "WORL")]);
+        assert_eq!(core_significant_bit("AIDTEX"), Some(true));
+        assert_eq!(
+            resolve_in(&aid, r(1), &[]),
+            Some((r(1), "AIDTEX".into(), GenerationRootKind::Normal)),
+            "a core-significant point container is its own root"
+        );
+
+        let equi = owner_chain(&[(9, Some(8), "BOX"), (8, Some(3), "EQUI"), (3, None, "ZONE")]);
+        assert_eq!(core_significant_bit("BOX"), Some(false));
+        assert_eq!(core_significant_bit("EQUI"), Some(true));
+        assert_eq!(
+            resolve_in(&equi, r(9), &[]),
+            Some((r(8), "EQUI".into(), GenerationRootKind::Normal)),
+            "a primitive rolls up to its nearest significant owner"
+        );
+        assert_eq!(
+            resolve_in(&equi, r(8), &[]),
+            Some((r(8), "EQUI".into(), GenerationRootKind::Normal)),
+            "SignificantOwner includes the element itself (R14)"
+        );
+    }
+
+    /// C1-2（R9）：MDU 是项目交付语义，压过位表——`AIDTEX` 位表显著、开关开着，挂在 EQUI（MDU）下
+    /// 仍归到 EQUI 且 kind 是 DeliveryUnit；拿掉 MDU 配置，位表那一层才说话。
+    #[test]
+    fn delivery_unit_outranks_the_significant_bit() {
+        let _on = crate::options::SignificantOverPointOverride::set(true);
+        let nodes = owner_chain(&[
+            (1, Some(8), "AIDTEX"),
+            (9, Some(8), "NOZZ"),
+            (8, Some(3), "EQUI"),
+            (3, None, "ZONE"),
+        ]);
+        let units = owned(&["EQUI"]);
+        assert_eq!(
+            resolve_in(&nodes, r(1), &units),
+            Some((r(8), "EQUI".into(), GenerationRootKind::DeliveryUnit))
+        );
+        assert_eq!(
+            resolve_in(&nodes, r(9), &units),
+            Some((r(8), "EQUI".into(), GenerationRootKind::DeliveryUnit))
+        );
+        assert_eq!(
+            resolve_in(&nodes, r(1), &[]),
+            Some((r(1), "AIDTEX".into(), GenerationRootKind::Normal)),
+            "without an MDU the significant bit decides"
+        );
+    }
+
+    /// C1-3（R9）：位表未知的 noun 走名单兜底，**开关开着也一样**。
+    ///
+    /// 「字典判 point、快照却没导到」这一态今天用真 noun 构造不出来（1931 个 noun unknown = 0；
+    /// 名单兜底的 LOOP/PLOO/VERT/PAVE 与三个 *DATU 全在快照里），所以第二段直接钉 T2b 谓词：
+    /// 位表答 `None` 时不抬根——这正是不能用保守取真的 `noun_is_significant` 的原因。
+    #[test]
+    fn unknown_noun_falls_back_to_the_hand_written_list() {
+        assert_eq!(core_significant_bit("FOOB"), None);
+        assert!(
+            noun_is_significant("FOOB"),
+            "the conservative query says true for unknown nouns — which is why T2b must not use it"
+        );
+        for nodes in [
+            owner_chain(&[(1, Some(2), "FOOB"), (2, Some(3), "ZONE"), (3, None, "WORL")]),
+            owner_chain(&[(1, Some(8), "FOOB"), (8, Some(3), "EQUI"), (3, None, "ZONE")]),
+        ] {
+            let (off, on) = resolve_both_states(&nodes, r(1));
+            assert_eq!(off, on, "an unknown noun must resolve identically in both states");
+            assert!(off.is_some(), "the hand-written list still gives it a root");
+        }
+
+        let _on = crate::options::SignificantOverPointOverride::set(true);
+        assert!(is_loop_container_noun("AIDTEX"));
+        assert!(significant_point_container_is_its_own_root(
+            "AIDTEX",
+            core_significant_bit
+        ));
+        assert!(
+            !significant_point_container_is_its_own_root("AIDTEX", |_| None),
+            "outside the snapshot: never promoted, even with the switch on"
+        );
+        assert!(!significant_point_container_is_its_own_root(
+            "AIDTEX",
+            |_| Some(false)
+        ));
+        assert!(
+            !significant_point_container_is_its_own_root("BOX", |_| Some(true)),
+            "the override only touches point containers"
+        );
+    }
+
+    /// R9 / T2b 的「恰好一个」：44 个字典 point noun 加三个 `*DATU` 逐个在两种形状下跑，
+    /// 开关开与关的结果对称差**恰好 = {AIDTEX}**。换版本重导后位表若多翻转一个 noun，这条先红。
+    #[test]
+    fn the_significant_over_point_override_only_moves_aidtex() {
+        let mut point_nouns = crate::noun_dict::default_noun_capabilities().point_nouns();
+        assert_eq!(point_nouns.len(), 44, "dabacon point capability drifted");
+        point_nouns.extend(["JLDATU", "PLDATU", "ENDATU"].map(String::from));
+
+        let mut moved = std::collections::BTreeSet::new();
+        for noun in &point_nouns {
+            assert!(is_loop_container_noun(noun), "{noun} must classify as a point container");
+            for nodes in [
+                owner_chain(&[(1, Some(2), noun), (2, Some(3), "ZONE"), (3, None, "WORL")]),
+                owner_chain(&[(1, Some(8), noun), (8, Some(3), "EQUI"), (3, None, "ZONE")]),
+            ] {
+                let (off, on) = resolve_both_states(&nodes, r(1));
+                if off != on {
+                    moved.insert(noun.clone());
+                }
+            }
+        }
+        assert_eq!(
+            moved,
+            std::collections::BTreeSet::from(["AIDTEX".to_string()]),
+            "the switch may move exactly one noun"
+        );
+
+        let significant_points: Vec<&String> = point_nouns
+            .iter()
+            .filter(|noun| core_significant_bit(noun) == Some(true))
+            .collect();
+        assert_eq!(
+            significant_points,
+            vec![&"AIDTEX".to_string()],
+            "the bit table agrees: AIDTEX is the only core-significant point container"
+        );
+    }
+
+    /// direct 文件窗口那一侧（`enumerate_generation_roots_in_subtree`）**不看**这个开关：
+    /// 它按 `noun_is_significant` 枚举，`AIDTEX` 直接挂 ZONE 下本来就是恰好一个 Normal 根。
+    /// P1 判出的「AIDTEX 零工作项」只发生在旧 PE 路径（`resolve_element_generation_root`）。
+    #[test]
+    fn direct_enumeration_already_lists_aidtex_under_zone_as_exactly_one_root() {
+        let nodes = tree(&[
+            (1, "WORL", "/*", &[2]),
+            (2, "ZONE", "/Z", &[3, 4]),
+            (3, "AIDTEX", "/AID-TEXT", &[]),
+            (4, "PTSE", "/PTSE", &[]),
+        ]);
+        for on in [false, true] {
+            let _guard = crate::options::SignificantOverPointOverride::set(on);
+            let roots = enumerate_generation_roots_in_subtree(r(1), &[], lookup_in(&nodes))
+                .expect("enumerate");
+            assert_eq!(
+                keys(&roots),
+                vec![(r(3), "AIDTEX".to_string(), GenerationRootKind::Normal)],
+                "switch={on}: AIDTEX is a root, the non-significant point container PTSE is not"
+            );
+        }
+    }
+
             .iter()
             .map(|(id, noun, name, members)| {
                 (
