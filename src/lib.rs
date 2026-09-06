@@ -370,6 +370,10 @@ pub mod rvm_baseline;
 #[cfg(feature = "gen_model")]
 pub mod fast_model;
 
+/// MBD 管道尺寸标注宿主侧：e3d-model Route → plant-mbd 成员结点视图 → V2 契约
+/// （`.planning/2026-09-06-plant-mbd-pipe-dimension`）。
+pub mod mbd;
+
 pub mod surreal_retry;
 
 pub mod versioned_db;

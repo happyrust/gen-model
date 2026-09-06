@@ -172,6 +172,10 @@ futures-util = "0.3"
 # WordType 字符串（ADR-053 P0 残差分类第 1 条），那是转换语义的一部分，不是传递依赖。
 e3d-io = { path = "../vendor/e3d-io" }
 e3d-attlib = { path = "../vendor/e3d-attlib" }
+# MBD 管道尺寸标注求解器（`.planning/2026-09-06-plant-mbd-pipe-dimension` D1/D4）：纯库，不读库不 HTTP，
+# 与 e3d-model 同款 path 依赖并排放在 old/vendor/ 下。本仓 `src/mbd/` 把 e3d-model 的 Route 读成
+# 它要的 BranchQueryResult，`web_service` 挂 `GET /api/mbd/v2/pipe/{refno}`。
+plant-mbd = { path = "../vendor/plant-mbd/crates/plant-mbd" }
 
 clap = { version = "4.3.5", features = ["derive"] }
 dashmap = { version = "=7.0.0-rc2", features = ["serde", "rayon"] }
