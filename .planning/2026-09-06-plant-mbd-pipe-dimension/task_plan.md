@@ -2,7 +2,7 @@
 
 > 计划 ID：`2026-09-06-plant-mbd-pipe-dimension`
 > 创建：2026-09-06
-> 状态：**in-progress**（plannotator 门禁 2026-09-06 approved，见 `gate_result.json`；Phase 0、Phase 1 已完成，Phase 2 待开工；事实与裁决见 `findings.md`）
+> 状态：**in-progress**（plannotator 门禁 2026-09-06 approved，见 `gate_result.json`；Phase 0/1 complete，Phase 2 端点与 HTTP 门已过、浏览器目测待用户起服务；事实与裁决见 `findings.md`）
 > 需求（用户 2026-09-06）：新建库 `plant-mbd`，实现 `old/vendor/MBD` 里的 MBD 尺寸标注能力；**第一目标：管道尺寸标注**；经本仓（gen-model）API 提供 JSON，由 `old/plant3d-web` 加载显示。
 > 权威：PML 事实源 `old/vendor/MBD/markpipe/**`、`old/vendor/MBD/object/mbd/**`；前端契约 `old/plant3d-web/src/dimension/adapters/mbdV2Contract.ts`（plant3d-web ADR 0041/0043/0046）；先行 Rust 实现 `D:\work\plant-code\rs-mbd`（`contract.rs` / `split_isolines.rs` / `direction.rs` / `layout.rs` + fixtures，HEAD `b6b1027`）；本仓 ADR-053（direct 读）、ADR-054（默认时点 = 文件最新）、ADR-057（e3d-model 纯模型面，gen-model 持状态与副作用）、ADR-059（池级元素缓存）。
 > 范围：`old/vendor/plant-mbd`（新仓）+ `old/gen-model`（数据适配层 + HTTP 端点）+ `old/plant3d-web`（首发零代码，只用 URL 参数；契约扩展期才改映射）。
@@ -129,12 +129,13 @@ old/vendor/plant-mbd ── 纯求解器 ──►  old/gen-model  src/mbd/ (e3d
 
 ### Phase 2 — HTTP 端点 + 前端联调（≈1 人日）
 
-状态：pending（前置 Phase 1）
+状态：**端点与 HTTP 门 complete（2026-09-06），浏览器目测待用户起服务**（命令见 `findings.md`「Phase 2」）
 
-- [ ] `src/web_service/mod.rs`：`.route("/api/mbd/v2/pipe/{refno}", get(handlers::mbd_v2_pipe))`；`handlers.rs::mbd_v2_pipe(State, Path<String>)`：`parse_refno` → `E3dModelService::from_current()`（惰性缓存进 `AppState`，一次）→ `build_set(refno.dbno(), None)` → `spawn_blocking(branch_query + plant_mbd::layout_branch)` → `Json<MbdV2PipeData>`；错误按 D6 映射到 `ApiError`。
-- [ ] `LayoutRequest`：`source_to_design = diag(0.001)` 列主序、`cheight_mm` 暂 `None`、`layout_mode = "linear_mvp"`、`input_refno` 原样回填、`branch_refno` 归一化为 `w0_w1`（前端 `mbd_refno` 习惯写法）。
-- [ ] 联调：启动本仓服务（`http_api` 默认开）→ `curl` 三条路径（200 / 404 / 422）→ 浏览器 D7 URL 目测；截图存本目录。
-- 验收：§3 第 3、4 条。
+- [x] `src/web_service/mod.rs`：`pub mod mbd;` + `.route("/api/mbd/v2/pipe/{refno}", get(mbd::mbd_v2_pipe))`；新文件 `src/web_service/mbd.rs`（不改 WIP 重灾区 `handlers.rs`）：`parse_refno` → 进程内 `OnceCell<Arc<E3dModelService>>` → `build_set(refno.dbno(), None)` → `spawn_blocking(layout_pipe)` → `Json<MbdV2PipeData>`；错误按 D6 映射（`RootError` 422 且 `detail.issues` 带定位）。
+- [x] `LayoutRequest`：`source_to_design = diag(0.001)` 列主序、`cheight_mm` 暂 `None`、`layout_mode = "linear_mvp"`、`input_refno` 原样回填（`24383/99996` 写法也原样）、`branch_refno` 归一化为 `w0_w1`。
+- [x] `tests/mbd_http_endpoint.rs`：真 axum 回环服务 + reqwest，200（两种 refno 写法）/ 404 / 422 / 400 全过——等价于 §5 三条 `curl`；wire 体经前端 `parseMbdV2PipeData` **ACCEPTED**（10 linear_dim，0 diagnostics）。
+- [ ] 浏览器目测（D7 URL）：需要停掉现网旧构建（PID 60444）、起带端点的新构建——用户终端操作，命令在 `findings.md`；截图存本目录。
+- 验收：§3 第 3 条已过；第 4 条待浏览器。
 
 ### Phase 3 — 真实金样与 PML 语义裁决（≈2 人日，可与 Phase 4 并行开工）
 

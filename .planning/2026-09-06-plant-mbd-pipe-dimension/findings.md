@@ -67,3 +67,51 @@
 - **端到端**：`layout_pipe` → 12 直段，尺寸文本 2500 / 1000 / 3500(chain) / 500 / 1600 / 500 / 350 / 850 / 400 / 300
   ——与 plant-mbd 在 fixture 上的结果**逐条相同**；`meta.source_to_design` 到位、`layout_mode = linear_mvp`。
 - 结论：**§3 第 2 条完成判据达成**；Phase 2 可以直接挂端点。
+
+## Phase 2（2026-09-06）
+
+### 实现
+
+- `src/web_service/mbd.rs`：`mbd_v2_pipe(State, Path<String>)` → `parse_refno` → 进程内 `OnceCell<Arc<E3dModelService>>`
+  （`from_current()` 只建一次，失败下次重试）→ `build_set(dbnum, None)`（目标库文件最新会话，ADR-054）→
+  `spawn_blocking(layout_pipe)`。主体 `respond(set, refno, input_refno)` 与 `AppState` 无关，测试直接喂库。
+- 状态映射（D6）：`Ok` → 200（零尺寸也 200，抑制原因在 issues）；`NotFound` → 404 `not_found`；
+  `NotRouteContainer` / `Solver` → 422 `precondition`；`RootError` → 422 `precondition` + `detail.issues`
+  （同一信封，`detail` 不再是 null，前端能说清「为什么整条没出图」）；`Db` → 500 `internal`；refno 写法不对 → 400。
+- 路由挂在 `serve()` 的 Router 上（`/api/v1/ws` 之后），路径 `/api/mbd/v2/pipe/{refno}` 是前端 `mbdV2Api.ts`
+  写死的契约，不在 `/api/v1` 下。
+
+### 验收（真库，worktree + `D:\Rust\target-mbd-wt`）
+
+- `tests/mbd_http_endpoint.rs`：起真 axum 服务在回环随机端口，reqwest 打——
+  `24383_99996` → **200**，`version=v2`、`branch_refno=24383_99996`、`source_mm` + 16 元素矩阵、10 条 `linear_dim`、
+  `layout_mode=linear_mvp`；`24383%2F99996`（斜杠写法）→ 200 且 `input_refno` 原样回填 `24383/99996`；
+  `24383_999999999` → **404** `not_found`；BRAN 的属主 PIPE → **422** `precondition`；`not-a-refno` → **400** `bad_request`。
+  等价于计划 §5 的三条 `curl`。
+- **前端契约真身校验**：把 200 的 wire 体落盘，用 `node --experimental-strip-types` 直接跑 plant3d-web 的
+  `src/dimension/adapters/mbdV2Contract.ts::parseMbdV2PipeData`（fail-closed 门）→ **ACCEPTED**：
+  10 primitives（全 `linear_dim`）、1 issue、0 diagnostics。这就是浏览器里 `useMbdExternalSync` 会走的那道门。
+
+### 浏览器联调——需要用户在自己的终端做（规则：不起长驻进程）
+
+主工作树暂因他人 WIP 编不过，且现网 `aios-database.exe`（PID 60444）是 02:05 的旧构建、占着 8022 与实例锁。
+可用 worktree 构建替换：
+
+```powershell
+# 1) 用 worktree 出一个带端点的 debug 二进制（deps 已全量编好，只编本仓）
+cd D:\work\plant-code\old\gen-model-mbd-wt
+$env:CARGO_TARGET_DIR = "D:\Rust\target-mbd-wt"; cargo build
+# 2) 停掉旧服务（PID 60444），在 gen-model 目录用同一份 DbOption.toml 起新构建
+cd D:\work\plant-code\old\gen-model
+D:\Rust\target-mbd-wt\debug\aios-database.exe          # http_api_addr = 0.0.0.0:8022
+# 3) 三条 curl
+curl    http://127.0.0.1:8022/api/mbd/v2/pipe/24383_99996
+curl -i http://127.0.0.1:8022/api/mbd/v2/pipe/24383_999999999   # 404
+curl -i http://127.0.0.1:8022/api/mbd/v2/pipe/not-a-refno       # 400
+# 4) 前端
+cd D:\work\plant-code\old\plant3d-web; npm run dev
+# http://127.0.0.1:3101/?output_project=AvevaMarineSample&show_dbnum=7999&show_refno=24383_99996&mbd_refno=24383_99996&data_source=backend&backendPort=3100&mbdBackendPort=8022
+```
+
+预期：尺寸随相机跟随、尺寸面板 `layout_mode=linear_mvp` 触发「本分支标注不完整」警示条、1 条 Suppress issue
+（`24383_100019` 偏轴）。

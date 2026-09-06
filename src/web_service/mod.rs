@@ -7,6 +7,8 @@
 
 pub mod events;
 mod handlers;
+/// MBD 管道尺寸标注端点（`/api/mbd/v2/pipe/{refno}`，前端契约路径，不在 `/api/v1` 下）。
+pub mod mbd;
 mod ws;
 
 use std::path::PathBuf;
@@ -352,6 +354,9 @@ pub async fn serve(
         .route("/api/v1/queue/pause", post(handlers::queue_pause))
         .route("/api/v1/queue/resume", post(handlers::queue_resume))
         .route("/api/v1/ws", get(ws::ws_handler))
+        // MBD 管道尺寸标注：路径是 plant3d-web `mbdV2Api.ts` 写死的契约（不在 /api/v1 下），
+        // 返回冻结的 V2 `MbdV2PipeData`；状态语义见 `web_service::mbd`。
+        .route("/api/mbd/v2/pipe/{refno}", get(mbd::mbd_v2_pipe))
         // 显式路由压过下面的 ServeDir 兜底：磁盘上没有这个文件时也要有面板，
         // 而它自己会先去 ServeDir 同一个目录里找一次，所以有文件时结果不变。
         .route("/ops.html", get(handlers::ops_panel))
