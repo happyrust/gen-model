@@ -90,8 +90,9 @@ fn member_node_view_of_a_real_branch_is_ordered_outward_facing_and_bendy() {
         eprintln!("  [{}] {} {}", issue.rule_id.as_deref().unwrap_or("-"), issue.object_refno.as_deref().unwrap_or("-"), issue.message);
     }
 
-    // Head 取真实 HPOS/HDIR，不是兜底。
+    // Head 取真实 HPOS/HDIR，不是兜底；Tail 带 TPOS/TDIR（PML 对 Tail 一律取 tpos）。
     assert!(query.head_pos.is_some() && query.head_dir.is_some(), "BRAN has HPOS/HDIR");
+    assert!(query.tail_pos.is_some() && query.tail_dir.is_some(), "BRAN has TPOS/TDIR");
     assert!(
         !query.issues.iter().any(|issue| issue.rule_id.as_deref() == Some("adapter.head_attrs_missing")),
         "Head must come from HPOS/HDIR on this branch"

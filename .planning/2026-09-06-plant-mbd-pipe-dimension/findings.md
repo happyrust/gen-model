@@ -115,3 +115,58 @@ cd D:\work\plant-code\old\plant3d-web; npm run dev
 
 预期：尺寸随相机跟随、尺寸面板 `layout_mode=linear_mvp` 触发「本分支标注不完整」警示条、1 条 Suppress issue
 （`24383_100019` 偏轴）。
+
+## Phase 3（2026-09-06）
+
+### 裁决 1：隐式管身是宿主的事，按 E3D 槽位规则合成
+
+- **事实**：E3D 库里两个管件之间的直管不是成员（只有 FTUB 这种定长管是），`coll all bran mem` 收不到；rs-mbd
+  时期 Surreal 把管跨物化成了 `PIPE` 成员，所以线性 MVP 只给 `MemberKind::Tubi` 出尺寸也够用。直读 `.dat` 后，
+  13 条候选 BRAN 里 5 条（`24381_145018`、`24381_177565`、`24383_74307`、`24383_76191`、`24384_26229`）**一条尺寸
+  都没有**——它们没有 FTUB，直管全是隐式的。而 PML 的直管长度（`getcuttubi`）与线性尺寸量的正是构件之间这段管。
+- **先试了求解器侧按空隙补管**（`branch_to_split_members` 里相邻站空隙 ≥ 1 mm 就合成）——`verify_mapping` 立刻在
+  `toy-bridge-and-stick` 上翻红：fixture 刻意留的 EB→T3 9.95 mm 空隙长出一根管。求解器不该猜数据里没有的成员。
+- **落点**：gen-model 适配层 `push_implied_tube`，按 E3D 画隐式管身的同一套门（e3d-model `walk_route` 槽位：
+  上一站离开点 → 本站到达点，含 Head→首站、末站→Tail；长度 ≥ `ZERO_LENGTH_TOL_MM` 1 mm；两端共轴
+  `slot_alignment`，尾管缺 TDIR 只判离开侧）合成 `TUBI` 成员（refno `A~B`，`leave_axis` 顺流、`arrive_axis` 朝外、
+  `pos` 中点、aod 回落到达侧通径），插在前一站之后。E3D 不画的槽位（反向 / 偏轴）不合成，≥ 10 mm 的记
+  `adapter.implied_tube_not_drawn`（< 10 mm 的装配余量 / P 点错位是噪声，不出声）。
+- **效果**：13 条全部出尺寸；`24383_99996` 的 10 条尺寸文本一个没变（它的隙全被共轴门拒掉：Head 80 mm 90° 偏、
+  `100018→100019` 50 mm 85°、尾管 80 mm 反向）；`24384_26229` 的 TUBE 2 = **312.11 mm** 与 e3d-model `route.rs`
+  引用的 E3D 证据（312.1 mm 穿过三只 ATTA 到 VALV）一致——隐式管身的口径就是 E3D 的口径。
+
+### 裁决 2：Tail 取 `tpos of bran`
+
+PML `getisolines` L1499-1505 对 Tail 只收袋、`tpos` 那行注释掉了（切段不读）；但 L1812 / L1901 / L4255 凡取
+Tail 位置一律 `tpos of $!this.branname wrt/*`。`BranchQueryResult` 新增 `tail_pos / tail_dir`，
+`branch_to_split_members` 的 Tail 优先 tpos、缺则退回最后成员 lpos；宿主从 `TPOS/TDIR` 直读。有尾管时链尺寸终点
+因此落在 TPOS。plant-mbd `ec7e880`。
+
+### 裁决 3：ATTA 的目录链走不到 SCOM 时出声
+
+`24384_2944`（`/C-GR-1RX-3020B`，route.rs 证据里「六根 TUBE 全以 ANCI 为端点」）在本次 DbSet（ams000 目录扫描）
+里 14 个 ATTA 全被判成穿过件——MDS 梯架支撑的目录库不在扫描范围（加扫 `AvevaCatalogue` 目录也没解出），
+`walk_route` 的 `PassThroughUnresolved` 静默降级。适配层新增 `adapter.atta_catalogue_unresolved`（带计数），
+`24383_99996` 的 14 个 ATTA 也是这一档（它们本就是穿过件，结果不变）。生产路径经 `E3dModelService` 的 MDB 定位器
+开对目录库后再收 `24384_2944 / 3277` 为金样。
+
+### 金样批次（plant-mbd `ec7e880`，`fixtures/golden/`，`cargo test` 逐字段重放）
+
+| 金样 | 库 / sesno | 覆盖 | 直段 / 尺寸 |
+|---|---|---|---|
+| `24383_99996` | ams7999 / 191 | 混排；源模型断点 → `linear.member_off_axis` | 12 / 10 |
+| `24383_76191` | ams7999 / 191 | 17 ELBO、零 FTUB，14 根隐式 TUBI | 21 / 14 |
+| `24383_91813` | ams7999 / 191 | 5 共线 FTUB，单直段，chain 13500 | 1 / 6 |
+| `24383_100028` | ams7999 / 191 | BEND 8 + ELBO 4，含 14–26 mm 短管走 small_dim | 23 / 23 |
+| `24381_145018` | ams7997 / 114 | rs-mbd 时期的「空壳分支」，直读 28 成员 | 11 / 12 |
+| `24384_26229` | ams8000 / 323 | VALV/WELD/ATTA，TUBE 2 = 312.11 mm 对上 E3D 证据 | 6 / 5 |
+
+来源 fixture 由 gen-model `examples/mbd_branch_dump.rs` 直读导出（`fixtures/field/*.json`，带 `$schema_comment` 与原始
+`branch_query`）。候选 `24381_177565`（BEND 12 + COUP 4 + TEE + VALV，17 尺寸含 19.68 / 29.88 / 30 三条小尺寸）、
+`24383_74307`、`24383_100161`、`24383_75574`、`24383_98772` 都能出图，暂不入批次。
+
+### 待人工对照 PML 图纸（ADR-0005 的那一遍审阅还没做）
+
+- 14–26 mm 短管（`24383_100028`）PML 是否出尺寸：`getcuttubi` 有没有最短阈值。
+- 隐式管身两端「E3D 不画」的槽位 PML 怎么处理（`24383_76191` Head 侧 638.9 mm 偏 40° 的那段）。
+- 六条金样的切段数与拐点对照 `isobran.getisolines`——这一遍需要 E3D 里开同一批 BRAN。

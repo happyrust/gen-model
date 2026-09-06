@@ -2,7 +2,7 @@
 
 > 计划 ID：`2026-09-06-plant-mbd-pipe-dimension`
 > 创建：2026-09-06
-> 状态：**in-progress**（plannotator 门禁 2026-09-06 approved，见 `gate_result.json`；Phase 0/1 complete，Phase 2 端点与 HTTP 门已过、浏览器目测待用户起服务；事实与裁决见 `findings.md`）
+> 状态：**in-progress**（plannotator 门禁 2026-09-06 approved，见 `gate_result.json`；Phase 0/1 complete，Phase 2 端点与 HTTP 门已过、浏览器目测待用户起服务，Phase 3 金样六条已固化、PML 图纸人工对照待做；事实与裁决见 `findings.md`）
 > 需求（用户 2026-09-06）：新建库 `plant-mbd`，实现 `old/vendor/MBD` 里的 MBD 尺寸标注能力；**第一目标：管道尺寸标注**；经本仓（gen-model）API 提供 JSON，由 `old/plant3d-web` 加载显示。
 > 权威：PML 事实源 `old/vendor/MBD/markpipe/**`、`old/vendor/MBD/object/mbd/**`；前端契约 `old/plant3d-web/src/dimension/adapters/mbdV2Contract.ts`（plant3d-web ADR 0041/0043/0046）；先行 Rust 实现 `D:\work\plant-code\rs-mbd`（`contract.rs` / `split_isolines.rs` / `direction.rs` / `layout.rs` + fixtures，HEAD `b6b1027`）；本仓 ADR-053（direct 读）、ADR-054（默认时点 = 文件最新）、ADR-057（e3d-model 纯模型面，gen-model 持状态与副作用）、ADR-059（池级元素缓存）。
 > 范围：`old/vendor/plant-mbd`（新仓）+ `old/gen-model`（数据适配层 + HTTP 端点）+ `old/plant3d-web`（首发零代码，只用 URL 参数；契约扩展期才改映射）。
@@ -139,12 +139,14 @@ old/vendor/plant-mbd ── 纯求解器 ──►  old/gen-model  src/mbd/ (e3d
 
 ### Phase 3 — 真实金样与 PML 语义裁决（≈2 人日，可与 Phase 4 并行开工）
 
-状态：pending（前置 Phase 2）
+状态：**金样已固化（2026-09-06，plant-mbd `ec7e880`）；PML 图纸人工对照待做**（三条裁决见 `findings.md`「Phase 3」）
 
-- [ ] 从当前 `DbOption.toml` 钉住的 `AvevaMarineSample` 库挑 3–5 条 BRAN：直段链、90° 弯、近 180° 修正、非轴对齐斜管、含 ATTA 穿过件、含 ANCI 站点。候选（以当前库实测为准）：rs-mbd 首选 `24383_99996`（31 成员）、`24381_177565`、`24383_100028`；本仓 `route.rs:230-241` 证据里的 ams8000 `24384/2944`（`/C-GR-1RX-3020B`，六根 TUBE 全以 ANCI 为端点）、`24384/3277`。
-- [ ] 求解器不开库，成员视图由 gen-model 侧导出：新增门后 bin `mbd_branch_dump -- <refno>`（`legacy_diagnostics` 同款 `required-features`，或 `examples/`）写 `BranchQueryResult` JSON 进 `plant-mbd/fixtures/field/`，再由 CLI 求解并固化 `fixtures/golden/`。
-- [ ] 每条金样对照 PML：`isobran.getisolines` 切段数与拐点、`lindim` 尺寸点与数值（`string('D2')` 格式）；差异按 rs-mbd CONTEXT「语义对齐 / 布局容差（≤ 1 mm、≤ 0.1°）」裁决并写 `findings.md`。
-- 验收：`plant-mbd-cli golden diff` 为零；`findings.md` 每条金样有裁决。
+- [x] 从 `AvevaMarineSample` 挑 6 条 BRAN 入批次：`24383_99996`（混排 + 源模型断点）、`24383_76191`（17 ELBO 零 FTUB，纯隐式管身）、`24383_91813`（5 共线 FTUB 单直段）、`24383_100028`（BEND 8 + ELBO 4 + 短管 small_dim）、`24381_145018`（rs-mbd 时期「空壳」，直读 28 成员）、`24384_26229`（TUBE 2 = 312.11 mm 对上 E3D 证据）。`24384_2944 / 3277` 因 MDS 支撑 ATTA 目录链在本次 DbSet 走不到 SCOM 暂不收（`adapter.atta_catalogue_unresolved` 出声）。
+- [x] gen-model `examples/mbd_branch_dump.rs`（`--db --scan-dir --refno… --out-dir`）直读导出 `BranchQueryResult` → plant-mbd fixture（`$schema_comment` + `cases` + 原始 `branch_query`）；`plant-mbd-cli golden record` 固化；`tests/golden_regression.rs` 让 `cargo test` 逐字段重放。
+- [x] **裁决 1 隐式管身**：直读后 13 条候选里 5 条零尺寸（没有 FTUB）——按 E3D 槽位规则在**宿主侧**合成 `TUBI`（长度 ≥ 1 mm、两端共轴门；不画的 ≥ 10 mm 记 `adapter.implied_tube_not_drawn`）；求解器不按空隙猜（`toy-bridge-and-stick` 的 9.95 mm 空隙翻红教训）。`24383_99996` 十条尺寸不变；`24384_26229` 312.11 mm 与 E3D 一致。
+- [x] **裁决 2 Tail**：取 `tpos of bran`（PML L1812/L1901/L4255），`BranchQueryResult.tail_pos/tail_dir`。
+- [ ] 每条金样对照 PML 图纸：`isobran.getisolines` 切段数与拐点、`lindim` 尺寸点与数值；14–26 mm 短管与「E3D 不画」槽位的 PML 处理——需要在 E3D 里开同一批 BRAN，人工审阅。
+- 验收：`golden diff` 6/6 OK、`cargo test --workspace` 56 通过（已过）；PML 对照结论待写。
 
 ### Phase 4 — 方向系统接线与 cheight 驱动（≈3 人日）
 
