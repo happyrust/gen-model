@@ -2,7 +2,7 @@
 
 > 计划 ID：`2026-09-06-plant-mbd-pipe-dimension`
 > 创建：2026-09-06
-> 状态：**in-progress**（plannotator 门禁 2026-09-06 approved，见 `gate_result.json`；Phase 0/1 complete，Phase 2 端点与 HTTP 门已过、浏览器目测待用户起服务，Phase 3 金样六条已固化、PML 图纸人工对照待做；事实与裁决见 `findings.md`）
+> 状态：**in-progress**（plannotator 门禁 2026-09-06 approved，见 `gate_result.json`；Phase 0/1 complete，Phase 2 端点与 HTTP 门已过、浏览器目测待用户起服务，Phase 3 金样六条已固化，Phase 4 线性尺寸已按 PML isoDim 模型重做并重录金样（2026-09-07），PML 图纸人工对照待做；事实与裁决见 `findings.md`）
 > 需求（用户 2026-09-06）：新建库 `plant-mbd`，实现 `old/vendor/MBD` 里的 MBD 尺寸标注能力；**第一目标：管道尺寸标注**；经本仓（gen-model）API 提供 JSON，由 `old/plant3d-web` 加载显示。
 > 权威：PML 事实源 `old/vendor/MBD/markpipe/**`、`old/vendor/MBD/object/mbd/**`；前端契约 `old/plant3d-web/src/dimension/adapters/mbdV2Contract.ts`（plant3d-web ADR 0041/0043/0046）；先行 Rust 实现 `D:\work\plant-code\rs-mbd`（`contract.rs` / `split_isolines.rs` / `direction.rs` / `layout.rs` + fixtures，HEAD `b6b1027`）；本仓 ADR-053（direct 读）、ADR-054（默认时点 = 文件最新）、ADR-057（e3d-model 纯模型面，gen-model 持状态与副作用）、ADR-059（池级元素缓存）。
 > 范围：`old/vendor/plant-mbd`（新仓）+ `old/gen-model`（数据适配层 + HTTP 端点）+ `old/plant3d-web`（首发零代码，只用 URL 参数；契约扩展期才改映射）。
@@ -94,7 +94,7 @@ old/vendor/plant-mbd ── 纯求解器 ──►  old/gen-model  src/mbd/ (e3d
 - [ ] `curl http://127.0.0.1:8022/api/mbd/v2/pipe/<refno>` → 200，`primitives` 含 ≥ 2 条逐段 `linear_dim`，`meta.notes` 含 isoline 计数；404 / 422 语义按 D6。
 - [ ] `old/plant3d-web` 以 D7 URL 打开，尺寸随相机跟随真实锚点，尺寸面板显示 `layout_mode` 与 issues；`npx vitest run src/dimension src/api/mbdV2Api.test.ts src/composables/useMbdExternalSync.test.ts` 保持全绿（不改前端代码）。
 - [ ] 3–5 条真实 BRAN 求解结果固化为 `plant-mbd/fixtures/golden/*.json`，一键重放 diff 为零；每条附 PML 逐行对照结论（切段数、尺寸点、数值）。
-- [ ] Phase 4 后：`layout.rs` 无 `deterministic_normal`，偏移由 `cheight_mm` 派生，`layout_mode` 升级（前端警示条消失）。
+- [x] Phase 4 后：`layout.rs` 无 `deterministic_normal`，偏移由 `od` / `cheight_mm` 派生，`layout_mode` 升级为 `isodim_main`（前端警示条消失）。
 - [ ] 本仓 `docs/adr/` 新增一条 ADR（MBD 求解在 vendor 纯库、数据适配与 HTTP 在 gen-model），`CONTEXT.md` 增补「管道尺寸标注 / 直段 / 抑制 / 成员结点视图」词条（自 rs-mbd `CONTEXT.md` 迁入并按本仓口径改写）。
 
 ## 4. 分阶段
@@ -148,19 +148,20 @@ old/vendor/plant-mbd ── 纯求解器 ──►  old/gen-model  src/mbd/ (e3d
 - [ ] 每条金样对照 PML 图纸：`isobran.getisolines` 切段数与拐点、`lindim` 尺寸点与数值；14–26 mm 短管与「E3D 不画」槽位的 PML 处理——需要在 E3D 里开同一批 BRAN，人工审阅。
 - 验收：`golden diff` 6/6 OK、`cargo test --workspace` 56 通过（已过）；PML 对照结论待写。
 
-### Phase 4 — 线性尺寸对齐 PML `isoDim` 模型（含方向系统与 cheight 行位）（≈4–5 人日，**待拍板**）
+### Phase 4 — 线性尺寸对齐 PML `isoDim` 模型（含方向系统与 cheight 行位）（≈4–5 人日）
 
-状态：**proposed（重定范围）**——读 PML 非 Polar 路径后发现 rs-mbd 线性 MVP 的尺寸点模型不是 PML 的（`findings.md`「发现 4」）：PML 每条直段一条 running dimension，尺寸点是**构件原点投影**（ATTA/TUBI/GASK 不进点），不是「每根管一条 + 总长」。原 Phase 4「在 MVP 上接方向」会把方向接在错的尺寸点上。
+状态：**complete（2026-09-07，用户拍板 A；plant-mbd `287b1f0` ADR-0006、e3d-model `3c5ee02`、gen-model 本提交；口径与对照见 `findings.md`「Phase 4」）**——读 PML 非 Polar 路径后发现 rs-mbd 线性 MVP 的尺寸点模型不是 PML 的（`findings.md`「发现 4」）：PML 每条直段一条 running dimension，尺寸点是**构件原点投影**（ATTA/TUBI/GASK 不进点），不是「每根管一条 + 总长」。
 
-拍板项：**(A) 推荐**：按下面重做线性尺寸；**(B)**：保留 MVP 尺寸点只接方向（明知与 PML 图纸对不上）。
+拍板：**(A)** 按 PML isoDim 重做线性尺寸（2026-09-07 用户选定）；(B) 保留 MVP 尺寸点只接方向——否决。
 
-- [ ] 宿主补数据（两个方案都要）：`BranchQueryResult.volume_center`（BRAN 包围盒中心，成员 P 点 bbox 近似 `volume $bran`）；`BranchMember.ppoints: Vec<{number, pos, dir}>`（P1/P2/P3，`CataloguePoints::leave(member, Some(n))`）；`mbd_branch_dump` 随之带出，fixtures 重导。
-- [ ] (A) plant-mbd 新建 `isodim.rs`：按 `isoDim.addmem`（L464-728）取点——Head `hpos` / Tail `tpos` / 构件 `pos` 投影到直段轴；`exceptTypes = ATTA TUBI GASK`；WELD 贴端口不进点（L199-221）；PCOM / INST / `*DI` 专用取点；`possunique` 去重；`considerTee`。每条直段一条 running dimension → N−1 条 `linear_dim`（`sub_kind = "main"`，同一行位）。
-- [ ] (A) 行位：`od/2 + od/2 + 1.2·cheight·(dimtimes−1)`（`drawDim` L1310），主尺寸 `dimtimes = 2` 若有 ATTA 子尺寸否则 1；`cheight = cheightbili(0.3) × od`（表单默认），`meta.cheight_mm` 下发；`sepSmallDim` 小段处理对齐 `lindim.sepSmallDim`。
-- [ ] 方向：`CalculateDimChardirs`（L1131-1170，需要 `volume_center`）→ `good_dim_dirs = [最近两水平反向, U]`；`getIsoUsedDirs`（L439-528）由 P1/P2/P3 判「手柄」→ `DirOccupancy{dir: P3 dir, angle: 60}`（TEE/OLET 按 P1⊥pipedir 取 P3 或 P1+P2）；`layout.rs` 的 `deterministic_normal` → `get_handle_dim_dir(pipe_dir, occupancies, 60, good_dim_dirs)`。
-- [ ] `layout_mode` 升为 `isodim_main`（或与前端约定的名字），前端 `PARTIAL_LAYOUT_MODES` 只含 `linear_mvp`，警示条自然消失；ATTA 子尺寸（`getAttaDims`）留 Phase 5。
-- [ ] 重录六条金样（基线变更显式审阅，每条写清尺寸点从 tube 端点变为构件原点）。
-- 验收：`rg deterministic_normal crates/plant-mbd/src` 无命中；`24383_91813`（5 根共线 FTUB）PML 口径下应是 Head→Tail 一条 13500（FTUB 不进点）——拿它做第一条对照；其余金样 diff 逐条审阅。
+- [x] 宿主补数据：`BranchMember.ppoints`（P1/P2/P3，`CataloguePoints::leave(member, Some(n))`）、`arrive_ppoint / leave_ppoint`、**真外径**（e3d-model 新开 `route::departure_tube_outer_diameter`，取不到按 PML `getod` 回落 `min(bore×1.1, bore+10)`）；`BranchQueryResult.volume_center` 可选（宿主不算，求解器取成员坐标包围盒中心近似）；`mbd_branch_dump` 随之带出，六份 field fixtures 重导（ams7997/ams8000 `--sesno` 钉回 114/323）。
+- [x] plant-mbd 新建 `isodim.rs`：按 `isoDim.addmem`（L464-942）取点——Head `hpos` / Tail `tpos` / 构件 `pos` 投影到直段轴；`exceptTypes = ATTA TUBI GASK`；WELD 贴端口不进点（L199-221 / L738-768）；`FLAN/FBLI/REDU` 两端进点；`considerTee`；`possunique` 去重；PML 的偏轴检查（L635-677）→ `isodim.member_off_axis`。每条直段一条 running dimension → N−1 条 `linear_dim`（`sub_kind = "main"`，同一行位）。PCOM / INST / `*DI` 专用取点**未迁**（本批金样没有这类构件，记在 ADR-0006）。
+- [x] 行位 `od + 1.2·cheight·(dimtimes−1)`（`drawDim` L1310），`dimtimes` 暂 1（有 ATTA 子尺寸时 PML 走 2，Phase 5 接 `MAIN_DIM_ROW`）；字高按 `isoline.draw` L1689-1691 的真公式 `int(od·0.3·(1−0.5·(od−50)/(|od−50|+100)))` + `changeCheightAuto`，`meta.cheight_mm` 下发（多直段取最大）；小段按 `lindim.sepSmallDim`（缩字 → 往外叠行，`sub_kind = "small"`）。
+- [x] 方向：`CalculateDimChardirs`（L1131-1170）→ `good_dim_dirs = [最近两水平反向, U]`；`getIsoUsedDirs`（L439-528）由 P1/P2/P3 判「手柄」→ `DirOccupancy{angle: 60}`（TEE/OLET 按 P1∥pipedir 取 P3 或 P1+P2）+ `addUsedDirToNext` 邻段占位（90°，起点 ±od/2）→ `getusedDirs` 区间过滤（`cutlen`）→ `get_handle_dim_dir(pipe_dir, occupancies, 60, good_dim_dirs)`；`deterministic_normal` 删除（`rg deterministic_normal crates/plant-mbd/src` 无命中 ✓）。
+- [x] `layout_mode` 升为 `isodim_main`（`plant_mbd::LAYOUT_MODE_ISODIM_MAIN`），前端 `PARTIAL_LAYOUT_MODES` 只含 `linear_mvp`，警示条自然消失（wire 体经 `parseMbdV2PipeData` ACCEPTED）；ATTA 子尺寸（`getAttaDims`）留 Phase 5。
+- [x] 重录六条金样（`plant-mbd/fixtures/golden/README.md`「2026-09-07 基线变更」逐条）；`24383_91813` = Head→Tail 一条 **13500** ✓（第一条对照）。
+- [ ] PML 图纸人工对照（ADR-0005）：六条金样的尺寸点与数值 vs E3D 里同一批 BRAN 跑 `markpipe`——需要 E3D。特别看两条：Head 比首根管低 80 mm 的支管 PML 是否真的不给第一袋尺寸；Polar 生产路径（`usepolarsystem = true`）选出的方向与本期非 Polar 选向差多少。
+- 验收（已过）：plant-mbd `cargo test --workspace` 71 通过、`golden diff` 6/6、`verify_mapping` 6/6；gen-model worktree `mbd_branch_query` 4/4（含新 `real_branch_members_carry_ppoints_and_catalogue_od`）、`mbd_http_endpoint` 1/1。
 
 ### Phase 5 — 几何伴生符号与非尺寸图元（分期立项，每项到时细化）
 

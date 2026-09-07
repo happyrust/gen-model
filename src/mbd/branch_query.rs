@@ -13,8 +13,11 @@
 //!   `next.arrive_axis == -prev.leave_axis`。这与 e3d-model `slot_alignment` 的
 //!   `ArriveCheck::Member`（拿 `−to.dir` 与槽位向量比）是同一口径。
 //! - `pos` = 构件世界原点（PML `pos of $!mem wrt/*`）：`world_matrix` 的平移列。
-//! - `outside_diameter`：暂只回落到到达侧通径（`tube_outer_diameter(None, None, bore)`）；目录
-//!   `PARA[2]` 外径的读法在 e3d-model 里是 `pub(crate)`，等 Phase 4 偏移量真正用到 aod 时再开口。
+//! - `outside_diameter`（PML `aod of $!mem`）：到达这一站的那条槽位按 `CGETOD` 取管子目录件
+//!   `PARA[2]`（e3d-model `departure_tube_outer_diameter`），取不到时按 PML `isoline.getod` 的回落
+//!   `min(bore × 1.1, bore + 10)` 用到达侧通径折算。Phase 4 起尺寸行位与字高都从它派生。
+//! - `ppoints` = P1 / P2 / P3（`CataloguePoints` 逐号解，世界系）：PML `getIsoUsedDirs` 判手柄、
+//!   `considerTee` 补点要用；`arrive_ppoint` / `leave_ppoint` 是 `walk_route` 给的到达 / 离开口编号。
 //! - **隐式管身**：E3D 里两个管件之间的直管不是成员（只有 FTUB 这种定长管才是），成员表收不到，
 //!   而管道尺寸标注量的主要就是这些管长（PML `getcuttubi` / 线性尺寸）。这里按 E3D 画隐式管身的
 //!   同一套规则（e3d-model `walk_route` 的槽位：上一站离开点 → 本站到达点，含 Head→首站、末站→Tail；
@@ -35,12 +38,15 @@ use e3d_io::refno::RefNo;
 use e3d_model::CataloguePoints;
 use e3d_model::category::derives_implied_tubes;
 use e3d_model::route::{
-    ArriveCheck, RouteEnd, RoutePoint, SlotAlignment, ZERO_LENGTH_TOL_MM, resolve_end,
-    slot_alignment, tube_length, tube_outer_diameter, walk_route,
+    ArriveCheck, PPointResolver, RouteEnd, RoutePoint, SlotAlignment, ZERO_LENGTH_TOL_MM,
+    departure_tube_outer_diameter, resolve_end, slot_alignment, tube_length, tube_outer_diameter,
+    walk_route,
 };
 use e3d_model::transform::world_matrix;
 use glam::DVec3;
-use plant_mbd::{BranchMember, BranchQueryResult, MbdV2Issue, root_error_issue, suppress_issue};
+use plant_mbd::{
+    BranchMember, BranchQueryResult, MbdV2Issue, PPoint, root_error_issue, suppress_issue,
+};
 
 /// 前端 `mbd_refno` 与 plant-mbd fixtures 的 refno 写法：`w0_w1`。
 pub fn wire_refno(refno: RefNo) -> String {
@@ -202,6 +208,12 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
             None => (None, None),
         };
 
+        // CGETOD：到达这一站的槽位（Head→首站也算）离开侧选中的管子目录件外径。
+        let slot_od = match station {
+            Some(k) => catalogue_od(&route.tubes[k].from)?,
+            None => None,
+        };
+
         if let (Some(_), Some(arrive_point), Some((from_refno, from, from_dir_known))) =
             (station, arrive, last_leave.as_ref())
         {
@@ -215,6 +227,7 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
                 &object_refno,
                 &arrive_point,
                 ArriveCheck::Member,
+                slot_od,
             );
         }
 
@@ -222,6 +235,15 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
             Ok(matrix) => Some(matrix.w_axis.truncate()),
             Err(DbElementError::DbNotRegistered { .. } | DbElementError::NotFound { .. }) => None,
             Err(error) => return Err(error.into()),
+        };
+        // P1 / P2 / P3：isoDim 的手柄判定与 TEE 补点要它们；解不出的号就不填。
+        let ppoints = catalogue_ppoints(&member, &resolver)?;
+        let (arrive_ppoint, leave_ppoint) = match station {
+            Some(k) => (
+                route_end_ppoint(&route.tubes[k].to),
+                route_end_ppoint(&route.tubes[k + 1].from),
+            ),
+            None => (None, None),
         };
 
         let start = arrive.map(|point| point.pos).or(pos);
@@ -256,8 +278,11 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
             pos: pos.map(|origin: DVec3| origin.to_array()),
             arrive_refno: None,
             order: members.len() as u32,
-            outside_diameter: tube_outer_diameter(None, None, arrive.and_then(|point| point.bore)),
+            outside_diameter: outside_diameter(slot_od, arrive.and_then(|point| point.bore)),
             arrive_noun: None,
+            ppoints,
+            arrive_ppoint,
+            leave_ppoint,
         });
 
         if station.is_some() {
@@ -279,6 +304,12 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
         } else {
             ArriveCheck::Skip
         };
+        let tail_slot_od = route
+            .tubes
+            .last()
+            .map(|slot| catalogue_od(&slot.from))
+            .transpose()?
+            .flatten();
         push_implied_tube(
             &mut members,
             &mut issues,
@@ -289,6 +320,7 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
             "Tail",
             &tail_point,
             arrive_check,
+            tail_slot_od,
         );
     }
 
@@ -342,6 +374,8 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
 
     // Tail：PML 对 Tail 的位置一律取 `tpos of bran`（L1812/L1901/L4255）；切段不读它（L1504 注释掉了），
     // 只影响链尺寸终点。缺了不兜底——`branch_to_split_members` 会退回最后一个成员的 lpos。
+    // `volume $!bran` 的中心不在这里算：那要建整条 BRAN 的几何。求解器按成员坐标的包围盒中心近似，
+    // 它只决定 E/N/W/S 的排序（`CalculateDimChardirs`）。
     Ok(BranchQueryResult {
         branch_refno,
         members,
@@ -349,6 +383,7 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
         head_dir,
         tail_pos,
         tail_dir,
+        volume_center: None,
         split_members: None,
         issues,
     })
@@ -358,13 +393,62 @@ fn refno_key(refno: RefNo) -> (u32, u32) {
     (refno.word0, refno.word1)
 }
 
+/// `RouteEnd` 上的 P 点编号（`LEAV` / `ARRI`）；容器头尾没有。
+fn route_end_ppoint(end: &RouteEnd) -> Option<u32> {
+    match end {
+        RouteEnd::MemberLeave { ppoint, .. } | RouteEnd::MemberArrive { ppoint, .. } => *ppoint,
+        RouteEnd::ContainerHead(_) | RouteEnd::ContainerTail(_) => None,
+    }
+}
+
+/// 槽位离开侧的管子目录件外径（`CGETOD` 的 A 段）。目录库没开 / 目标不在所钉会话都算「取不到」。
+fn catalogue_od(from: &RouteEnd) -> Result<Option<f64>, BranchQueryError> {
+    match departure_tube_outer_diameter(from) {
+        Ok(od) => Ok(od),
+        Err(DbElementError::DbNotRegistered { .. } | DbElementError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// PML `aod`：目录外径优先；只有通径时按 `isoline.getod` 的回落 `min(bore × 1.1, bore + 10)` 折算成外径。
+fn outside_diameter(catalogue_od: Option<f64>, arrive_bore: Option<f64>) -> Option<f64> {
+    match tube_outer_diameter(catalogue_od, None, None) {
+        Some(od) => Some(od),
+        None => arrive_bore
+            .filter(|bore| bore.is_finite() && *bore > 0.0)
+            .map(|bore| (bore * 1.1).min(bore + 10.0)),
+    }
+}
+
+/// P1 / P2 / P3（世界系）。目录链走不到 / 点不存在 / 方向解不出都不填，不算错。
+fn catalogue_ppoints(
+    member: &e3d_io::db_element::DbElement,
+    resolver: &CataloguePoints,
+) -> Result<Vec<PPoint>, BranchQueryError> {
+    let mut points = Vec::with_capacity(3);
+    for number in 1..=3 {
+        match resolver.leave(member, Some(number)) {
+            Ok(Some(point)) => points.push(PPoint {
+                number,
+                pos: point.pos.to_array(),
+                dir: point.dir.to_array(),
+            }),
+            Ok(None) => {}
+            Err(DbElementError::DbNotRegistered { .. } | DbElementError::NotFound { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(points)
+}
+
 /// E3D 不画的槽位短于这个长度就不记诊断（建模噪声）；达到它的断口记 `adapter.implied_tube_not_drawn`。
 pub const IMPLIED_TUBE_DIAGNOSTIC_MIN_MM: f64 = 10.0;
 
 /// 一段隐式管身：按 E3D 画管的两道门（长度 ≥ 1 mm、两端共轴）决定合成还是留痕。
 ///
 /// 合成的 `TUBI` 成员方向按几何取——`leave_axis` 顺流、`arrive_axis` 朝外（逆流），与真实成员
-/// 的口径一致；`pos` 取中点；`outside_diameter` 按 `CGETOD` 回落到到达侧通径。
+/// 的口径一致；`pos` 取中点；`outside_diameter` 按 `CGETOD`：槽位管子目录件外径 `catalogue_od`，
+/// 取不到回落到到达侧通径。
 #[allow(clippy::too_many_arguments)]
 fn push_implied_tube(
     members: &mut Vec<BranchMember>,
@@ -376,6 +460,7 @@ fn push_implied_tube(
     to_refno: &str,
     to: &RoutePoint,
     arrive_check: ArriveCheck,
+    catalogue_od: Option<f64>,
 ) {
     let refno = format!("{from_refno}~{to_refno}");
     let length = tube_length(from.pos, to.pos);
@@ -417,8 +502,11 @@ fn push_implied_tube(
         pos: Some(((from.pos + to.pos) * 0.5).to_array()),
         arrive_refno: None,
         order: members.len() as u32,
-        outside_diameter: tube_outer_diameter(None, None, to.bore),
+        outside_diameter: outside_diameter(catalogue_od, to.bore),
         arrive_noun: None,
+        ppoints: Vec::new(),
+        arrive_ppoint: None,
+        leave_ppoint: None,
     });
 }
 

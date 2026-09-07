@@ -198,6 +198,80 @@ BRAN 包围盒中心（`volume_center`）、每个成员的 P1/P2/P3（位置 + 
 
 ### 待人工对照 PML 图纸（ADR-0005 的那一遍审阅还没做）
 
-- 14–26 mm 短管（`24383_100028`）PML 是否出尺寸：`getcuttubi` 有没有最短阈值。
-- 隐式管身两端「E3D 不画」的槽位 PML 怎么处理（`24383_76191` Head 侧 638.9 mm 偏 40° 的那段）。
+- ~~14–26 mm 短管（`24383_100028`）PML 是否出尺寸~~：Phase 4 读 `isoDim` 后已知——它们是弯头间的短管，
+  PML 不量管长，量拐点到拐点，短管长度本来就不是尺寸点（见 Phase 4）。
+- 隐式管身两端「E3D 不画」的槽位 PML 怎么处理（`24383_76191` Head 侧 638.9 mm 偏 40° 的那段）：Phase 4 已知
+  ——`isoDim.addmem` 的偏轴检查把远端弯头跳掉、打「请检查该元件在 Bran 中的顺序或坐标」，那一袋无尺寸。
 - 六条金样的切段数与拐点对照 `isobran.getisolines`——这一遍需要 E3D 里开同一批 BRAN。
+
+## Phase 4（2026-09-07）：线性尺寸对齐 PML `isoDim` 模型（用户拍板 A）
+
+plant-mbd `287b1f0`（ADR-0006），e3d-model `3c5ee02`，gen-model 本提交。
+
+### 落地口径（对照 PML 行号，全部写在 plant-mbd `isodim.rs` 模块文档）
+
+- **尺寸点**（`isoDim` 构造 L164-240、`addmem` L464-681 / L728-942、`addpos` L944-968、`considerTee` L258-302、
+  `possunique` L431-458）：Head→`hpos`、Tail→`tpos`、构件→`pos of $!mem`（原点）投影到直段轴；
+  `exceptTypes = ATTA TUBI GASK` 不进点；`FLAN / FBLI / REDU` 两端口进点；贴着相邻构件进出口 1 mm 内的 WELD
+  不进点、管中间的进；首末 TEE 不走 P3 时补另一直通口；0.01 mm 去重，lindim 再 1 mm 去重。
+- **行位**（`isoDim.drawDim` L1299-1311 = `isoline.drawdim` L1869 的 radius）：`od + 1.2·cheight·(dimtimes−1)`，
+  `dimtimes` 暂 1（PML 有 ATTA 子尺寸时主尺寸走第 2 行，`drawOneObjectNew` L4179-4186；Phase 5 接）。
+  `drawDim` 的 `goodpos` 循环里 `mindis` 从不更新、落下的是最后一个点的投影——照抄。
+- **字高**（`isoline.draw` L1689-1691）：`int(od × 0.3 × (1 − 0.5·(od−50)/(|od−50|+100)))`，不是简单的 0.3·od
+  （Phase 3 findings 里那句「cheight = 0.3 × od」不准）；再按 `changeCheightAuto`（isoline 级 nint、lindim 级不取整，
+  文字总宽 ≤ 70% 尺寸长，最低缩到 50%）。`meta.cheight_mm` 取各直段最大。
+- **小段**（`lindim.sepSmallDim` L282-446，表单默认 `sepSmallDim true` / `autocheight true`）：文字（`mbdtextlen`
+  字宽表：数字 ≈ 0.576、`.` 0.2969）装不下时先缩字（`getgoodcheight` 0.8、最低 50%），缩了还装不下就往外叠一行
+  `1.2·cheight·level`；这类段 `sub_kind = "small"`（前端箭头外置）。契约没有逐图元字高，缩字只体现在位置上。
+- **方向**：`CalculateDimChardirs`（L1131-1170，从直段中点看 `volume $!bran` 中心，E/N/W/S 稳定升序，
+  `gooddimdirs = [最近两个的反向, U]`）→ `getIsoUsedDirs`（L439-528：P3 不在 P1 轴线上且 P2 与 P1 重合或在 P1
+  轴线上 = 手柄，TEE/OLET 按 P1 是否平行管轴取 P3 或 P1+P2，占位角 60）+ `addUsedDirToNext`（isobran L3288-3336：
+  上一段 `dimdir.bisect(−pipedir)`、占位角 90、落在本段起点 ±od/2；尺寸方向与本段管轴几乎平行时不加）
+  → `getusedDirs` 区间过滤（`drawOneObject` L4247-4256：主尺寸范围两端各收 `cutlen = min(od/2+1, 长度/10)`，
+  所以邻段占位只在长度 < 5·od+10 的短直段上起作用）→ `isoori.getori` L74 `isoGetHandleDimDir(pipedir, used, 60,
+  dimdirs)`（`direction.rs` 已有）。`deterministic_normal` 删除。
+- **PML 自己的偏轴检查照搬**（`addmem` L635-677）：水平直段（`flowDirtoUangle eq 90`）上构件原点与两端口都偏离
+  轴线超过 `od·2/3` → 跳过、`isodim.member_off_axis`（PML `$p 请检查该元件在 Bran 中的顺序或坐标`）。
+- **本库保留的口径**（PML 没有）：跨过偏轴直管（> 10° 主切角）的那一段抑制、`linear.member_off_axis`——
+  竖直直段上 PML 不做偏轴检查、会无声画出压短的假数（ADR-0002）。
+- **未迁**：PCOM / INST / 按名字（`*DI` / `*FL` / `*JH` / `RJ`）的专用取点；ATTA 子尺寸；Polar 路径。
+  注意 `isoline` 构造 L134 写死 `usepolarsystem = true`——PML **生产路径是 Polar**（`drawOneObjectNew` →
+  `isoline.drawdim` → `polarsystem.getBestPosAndOri`），行位公式与非 Polar 相同，选向不同。本期按用户拍板走
+  `CalculateDimChardirs` + `isoGetHandleDimDir`（非 Polar 路径）；Polar 的 `getBestPosAndOri` 留 Phase 5 ⑤。
+
+### 宿主补的数据（`src/mbd/branch_query.rs`）
+
+- `ppoints` P1/P2/P3：`CataloguePoints::leave(&member, Some(n))` 逐号解（站点与穿过件都解——MDS 支撑 ATTA 的
+  P3 就是支架方向，PML 也把它算手柄）；解不出不填。真库 `24383/99996` 全部 17 个站点成员 P1/P2 都解出。
+- `arrive_ppoint / leave_ppoint`：`RouteEnd::MemberArrive/Leave{ppoint}`。
+- **真外径**：e3d-model 新开 `route::departure_tube_outer_diameter(&RouteEnd)`（`CGETOD` A 段：HSTU/HSRO、LSTU/LSRO
+  → SCOM `PARA[2]`；纯转发 `pub(crate) tube_outer_diameter_from_stub`，只加不改，e3d-model `3c5ee02` 只带这一个 hunk）。
+  取不到按 PML `isoline.getod` 回落 `min(bore×1.1, bore+10)`。`24383/99996` 的 FTUB 外径 25（DN20），Phase 1
+  时用通径回落给的是 20。
+- `volume_center` 不在宿主算（要建整条几何），求解器取成员坐标包围盒中心近似。
+
+### 金样重录（plant-mbd `fixtures/golden/README.md` 逐条）
+
+| 金样 | MVP → isoDim | 要点 |
+|---|---|---|
+| `24383_91813` | 6 → **1**（13500） | 第一条对照：5 根共线 FTUB 不进点，Head→Tail 一条 ✓ |
+| `24383_99996` | 10 → 6 | 值含弯头切线（847.76 = 350 切线 + 500 FTUB − 1.4 间隙）；Head 低 80 mm → BEND `100005` 被 PML 偏轴检查跳过（第一袋无尺寸）；`100020` 同理（断点袋无尺寸）——`87.16` 假数不再需要本库守卫拦 |
+| `24383_76191` | 14 → 17 | 拐点到拐点；ELBO `76192` 因 Head 偏 638.9 mm / 40° 跳过 |
+| `24383_100028` | 23 → 12 | 14–26 mm 短管都在弯头切线里，不是点；BEND `100031` 因 80 mm Head 偏移跳过 |
+| `24381_145018` | 12 → 12 | OLET / VALV 原点是点；VALV P3 手轮 60° 占位 |
+| `24384_26229` | 5 → 6 | 管中间 WELD `26236` 进点；312.11 mm 管长不再单独成尺寸 |
+
+AvevaMarineSample 里 Head 比首根管低 80 mm 的支管不止一条（`99996` / `100028`）——E3D 不画那段头管，PML 也不给
+第一袋尺寸；这是数据的事，不是求解器的事。ams7997 / ams8000 的库文件今天已长出新会话（155 / 379），导出时
+`--sesno 114 / 323` 钉回原谱系。
+
+### 验证
+
+- plant-mbd `cargo test --workspace` **71 通过**（66 lib + 4 contract_guard + 1 golden）；`verify_mapping` 6/6；
+  `golden diff` 6/6；clippy 新代码零告警（4 条 rs-mbd 继承告警未动）。
+- gen-model worktree：`mbd_branch_query` **4/4**（新增 `real_branch_members_carry_ppoints_and_catalogue_od`：站点
+  成员 P1/P2 与到达 / 离开口编号齐、外径来自目录；`layout_pipe` 6 条尺寸、`layout_mode = isodim_main`、
+  `cheight_mm = 8`、无 `isodim.outside_diameter_unknown`）、`mbd_http_endpoint` 1/1。
+- 三条金样 wire 体经 plant3d-web `parseMbdV2PipeData`：**ACCEPTED**（`sub_kind main` / `layout_mode isodim_main`
+  / `cheight_mm` 都是自由字段，0 diagnostics）。前端 `PARTIAL_LAYOUT_MODES` 只含 `linear_mvp`，警示条不再触发。
+- **未验证**：PML 图纸人工对照仍待 E3D 开同一批 BRAN（ADR-0005）；浏览器目测仍待用户起服务（Phase 2）。

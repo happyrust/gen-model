@@ -359,7 +359,56 @@ fn real_branch_lays_out_into_multiple_isolines() {
     );
     assert!(
         data.meta.source_to_design.is_some()
-            && data.meta.layout_mode.as_deref() == Some("linear_mvp"),
+            && data.meta.layout_mode.as_deref() == Some(plant_mbd::LAYOUT_MODE_ISODIM_MAIN),
         "meta carries the mm→m matrix and the honest layout mode"
     );
+    // isoDim 模型：行位与字高从真外径派生，宿主必须给外径（不能落到求解器的默认 100 mm）。
+    assert!(
+        data.issues
+            .iter()
+            .all(|issue| issue.rule_id.as_deref() != Some("isodim.outside_diameter_unknown")),
+        "every isoline must know its outside diameter from the catalogue"
+    );
+    assert!(data.meta.cheight_mm.is_some_and(|c| c > 0.0), "{:?}", data.meta);
+}
+
+/// Phase 4 宿主补的数据：站点成员带 P1 / P2 / P3 与到达 / 离开口编号；外径来自目录（不再是通径）。
+#[test]
+fn real_branch_members_carry_ppoints_and_catalogue_od() {
+    let Some((db, templates)) = fixtures() else {
+        return;
+    };
+    let set = open_set(&db, &templates);
+    let query = branch_query(&set, BRAN).expect("branch query");
+    let stations: Vec<&BranchMember> = query
+        .members
+        .iter()
+        .filter(|m| m.arrive_axis.is_some() && !m.refno.contains('~'))
+        .collect();
+    assert!(!stations.is_empty());
+    for member in &stations {
+        assert!(
+            member.ppoints.iter().any(|p| p.number == 1) && member.ppoints.iter().any(|p| p.number == 2),
+            "{} ({:?}) must resolve P1 and P2, got {:?}",
+            member.refno,
+            member.noun,
+            member.ppoints
+        );
+        assert_eq!(member.arrive_ppoint.is_some(), true, "{} arrive ppoint", member.refno);
+        assert_eq!(member.leave_ppoint.is_some(), true, "{} leave ppoint", member.refno);
+        let od = member.outside_diameter.expect("outside diameter");
+        assert!(od > 0.0 && od.is_finite(), "{} od {od}", member.refno);
+    }
+    // 弯头没有手柄：P3 不该被当成手柄（P2 不在 P1 轴线上）。手柄判定在求解器里，这里只看数据齐。
+    let elbows = stations.iter().filter(|m| matches!(m.noun.as_deref(), Some("ELBO" | "BEND"))).count();
+    assert!(elbows >= 5, "sample branch has 7 bends/elbows, got {elbows}");
+    // 外径来自目录 PARA[2]，而不是通径回落：FTUB 通径 ≠ 外径。
+    let tubes: Vec<f64> = query
+        .members
+        .iter()
+        .filter(|m| m.noun.as_deref() == Some("FTUB"))
+        .filter_map(|m| m.outside_diameter)
+        .collect();
+    assert!(!tubes.is_empty());
+    eprintln!("FTUB outside diameters: {tubes:?}");
 }

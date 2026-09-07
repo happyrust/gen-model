@@ -129,7 +129,7 @@ async fn three_curl_paths_plus_bad_request() {
     }
     let parsed: plant_mbd::MbdV2PipeData =
         serde_json::from_value(body).expect("body is MbdV2PipeData");
-    assert_eq!(parsed.meta.layout_mode.as_deref(), Some("linear_mvp"));
+    assert_eq!(parsed.meta.layout_mode.as_deref(), Some(plant_mbd::LAYOUT_MODE_ISODIM_MAIN));
 
     // 同一 refno 用斜杠写法（URL 编码）也要通，且 input_refno 原样回填。
     let slash = client
