@@ -25,6 +25,16 @@ const RANGE_TABLES: &[&str] = &[
     "room_panel_relate",
     "ref_rev",
     "geo_relate",
+    // 几何行的另外三张表（2026-09-07）：record id 与 `inst_relate` 同为 `<ref0>_<ref1>`
+    // （`model_db_adapter::collect_record`：`type::thing('aabb', id)` / `trans` / `inst_info`），
+    // 此前不在清单里，清库后留成孤儿——旧发布路每根先删后插把它们顺手盖掉，看不出来。
+    // 空库初始化改走 `WriteMode::Initial`（只插不删）之后，「`inst_relate` / `tubi_relate`
+    // 为空」这枚证据必须真的意味着没有任何几何行，否则 `INSERT IGNORE` 让旧盒 / 旧变换赢。
+    // `aabb:<mesh id>` 共享本地盒是 64 位十六进制、不含下划线，落不进 `<ref0>_0..<ref0>_9999999999`
+    // 这个字符串区间（第 len(ref0) 位是 `_`，十六进制字符排在它两侧），照旧只增不删（ADR-060 D2）。
+    "inst_info",
+    "aabb",
+    "trans",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -218,8 +228,8 @@ pub async fn preview_prune_above_watermark(
 }
 
 /// Remove partial/latest-state rows whose per-element session is newer than
-/// the selected authoritative watermark, then lower the durable watermark and
-/// rebuild the legacy Ref0 statistics from the surviving PE snapshot.
+/// the selected authoritative watermark, maintaining statistics in each delete
+/// transaction before lowering the durable watermark. No full rescan is needed.
 ///
 /// This is a residue cleanup operation, not a historical-version restore: PE
 /// stores one latest row per refno. The normal watcher replays the now-pending
@@ -240,6 +250,7 @@ pub async fn prune_above_watermark(
     let mut statements = Vec::with_capacity(rows.len() * 6 + 4);
     let mut sample_refnos = Vec::new();
     for row in &rows {
+        let start = statements.len();
         if !valid_table_name(&row.noun) {
             bail!("invalid noun table name for dbnum {dbnum}: {}", row.noun);
         }
@@ -258,6 +269,9 @@ pub async fn prune_above_watermark(
         }
         statements.push(format!("DELETE {}:{key};", row.noun));
         statements.push(format!("DELETE pe:{key};"));
+        let writes = statements.drain(start..).collect::<Vec<_>>().join(";\n");
+        let sql = super::dbnum_stats::transaction(dbnum, &[key], &writes)?;
+        super::dbnum_stats::execute_on(&SUL_DB, &sql).await?;
     }
     statements.push(format!(
         "DELETE model_update_pending WHERE dbnum = {dbnum} AND <int>source_end_sesno > {target_watermark};"
@@ -278,16 +292,10 @@ pub async fn prune_above_watermark(
     let (rebuilt_info_rows, remaining_rows_above_watermark) = if rows.is_empty() {
         (0, 0)
     } else {
-        let rebuilt = crate::versioned_db::database::rebuild_dbnum_info_from_pe(
-            dbnum,
-            state.file_name.as_deref().unwrap_or_default(),
-            state.db_type.as_deref().unwrap_or_default(),
-        )
-        .await?;
         let remaining = preview_prune_above_watermark(dbnum, target_watermark)
             .await?
             .pe_rows;
-        (rebuilt, remaining)
+        (0, remaining)
     };
     if remaining_rows_above_watermark != 0 {
         bail!(
@@ -320,6 +328,7 @@ pub async fn prune_above_watermark(
 pub(crate) enum WatermarkDisposal {
     DropRow,
     ResetForReinit,
+    RestartInitializationData,
 }
 
 /// Render separate checked phases. A giant optimistic transaction conflicts
@@ -339,6 +348,9 @@ fn render_delete_phases(
     for ref0 in ref0s {
         relations.push(format!("DELETE {};", owner_range_of(ref0)));
         for table in RANGE_TABLES.iter().filter(|table| **table != "pe") {
+            if watermark == WatermarkDisposal::RestartInitializationData && *table != "ref_rev" {
+                continue;
+            }
             ranges.push(format!("DELETE {};", range_of(table, ref0)));
         }
         for table in noun_tables {
@@ -351,12 +363,19 @@ fn render_delete_phases(
         format!("DELETE increment_update_attempt WHERE dbnum = {dbnum};"),
         format!("DELETE incr_side_effect_pending WHERE dbnum = {dbnum};"),
         format!("DELETE dbnum_info_table WHERE dbnum = {dbnum};"),
+        format!("DELETE dbnum_stats_state:{dbnum};"),
     ];
+    if watermark == WatermarkDisposal::RestartInitializationData {
+        metadata.retain(|sql| {
+            !sql.starts_with("DELETE model_update_pending")
+                && !sql.starts_with("DELETE incr_side_effect_pending")
+        });
+    }
     match watermark {
         WatermarkDisposal::DropRow => {
             metadata.push(format!("DELETE dbnum_watermark:{dbnum};"));
         }
-        WatermarkDisposal::ResetForReinit => {
+        WatermarkDisposal::ResetForReinit | WatermarkDisposal::RestartInitializationData => {
             // 清库删掉了 room_relate / inst_relate 行：epoch 不递增的话，崩溃
             // 重启会按指纹相等复用一棵还留着被删构件包围盒的树（ADR-010 D4 的
             // 幽灵形态借崩溃复活）。放在水位处置之前、同一元数据阶段提交。
@@ -364,9 +383,17 @@ fn render_delete_phases(
             // 同时抹掉指向旧历史的 applied_sesno_time（那条保存在当前文件里已
             // 不存在），基线收口会写上新的；legacy `sesno` 字段与 applied 同步
             // 归零，读侧迁移才不会把旧值当水位捞回来。
+            //
+            // 模型水位那一组同一句归零（ADR-060 D8）：清库把这个库的模型产物一并
+            // 删了，水位留着就是「水位说模型追平过、模型面一行都没有」的幽灵形态。
+            // 四格计数回到 NONE 而不是 0——清完还没观察过，「未观察」不是「观察到
+            // 零个」（M5）。
             metadata.push(format!(
                 "UPDATE dbnum_watermark:{dbnum} SET applied_sesno = 0, sesno = 0, \
-                 applied_sesno_time = NONE, confirmed_empty_baseline_sesno = NONE;"
+                 applied_sesno_time = NONE, confirmed_empty_baseline_sesno = NONE, \
+                 model_sesno = 0, model_sesno_time = NONE, model_settled_at = NONE, \
+                 model_lazy_roots = NONE, model_dead_roots = NONE, \
+                 model_roots_observed_at = NONE;"
             ));
         }
     }
@@ -444,7 +471,23 @@ pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResu
 /// 失败时水位处置尚未执行（它是元数据阶段的最后一句），下一轮仍判回退、
 /// 幂等重放。
 pub(crate) async fn wipe_dbnum_for_reinit(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
-    wipe_dbnum_rows(dbnum, WatermarkDisposal::ResetForReinit).await
+    let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::ResetForReinit).await?;
+    // 反向翻面（plan 2026-09-06 §8 R5）：水位清零后这个库在 rocksdb 里又「没准备好」了，
+    // 按需请求改由进程内投影供数，直到重建的初始化 run 收口。
+    crate::data_interface::model_read_route::announce_source_changed(
+        dbnum,
+        crate::data_interface::model_read_route::ModelReadSource::Memory,
+    );
+    Ok(result)
+}
+pub(crate) async fn wipe_uncommitted_initialization_data(
+    dbnum: u32,
+) -> anyhow::Result<FastDeleteDbnumResult> {
+    anyhow::ensure!(
+        crate::data_interface::model_publish_queue::preparing_dbnum(dbnum),
+        "no prepared initialization owns this database"
+    );
+    wipe_dbnum_rows(dbnum, WatermarkDisposal::RestartInitializationData).await
 }
 
 async fn wipe_dbnum_rows(
@@ -454,6 +497,7 @@ async fn wipe_dbnum_rows(
     if dbnum == 0 {
         bail!("dbnum must be greater than zero");
     }
+    super::dbnum_stats::require_no_event_on(&SUL_DB).await?;
     let started = Instant::now();
     let _commit_guard = crate::data_interface::batch_worker::DATA_COMMIT_SERIAL
         .lock()
@@ -565,11 +609,38 @@ mod tests {
         );
         assert!(ranges.contains(&"DELETE EQUI:24381_0..24381_9999999999;".into()));
         assert!(ranges.contains(&"DELETE inst_relate:24381_0..24381_9999999999;".into()));
+        // 几何行的三张伴生表同样按 Ref0 区间清（空库初始化 `Initial` 只插不删的前提）。
+        for table in ["inst_info", "aabb", "trans"] {
+            assert!(
+                ranges.contains(&format!("DELETE {table}:24381_0..24381_9999999999;")),
+                "{table} 必须随清库一起走: {ranges:?}"
+            );
+        }
         assert_eq!(
             ranges.last().unwrap(),
             "DELETE pe:24381_0..24381_9999999999;"
         );
         assert_eq!(metadata.last().unwrap(), "DELETE dbnum_watermark:7997;");
+    }
+
+    /// 重启初始化数据（`RestartInitializationData`）只清数据面与 `ref_rev`，模型面的六张表
+    /// （含新加的 aabb / trans / inst_info）一张都不碰——那一档下初始化发布 run 还活着、几何行归它管。
+    #[test]
+    fn restarting_initialization_data_leaves_every_model_table_alone() {
+        let (_, ranges, _) = render_delete_phases(
+            7997,
+            &["24381".into()],
+            &["EQUI".into()],
+            WatermarkDisposal::RestartInitializationData,
+        );
+        for table in ["inst_relate", "tubi_relate", "geo_relate", "inst_info", "aabb", "trans"] {
+            assert!(
+                !ranges.iter().any(|sql| sql.starts_with(&format!("DELETE {table}:"))),
+                "{table} 不该在 RestartInitializationData 里被清: {ranges:?}"
+            );
+        }
+        assert!(ranges.contains(&"DELETE ref_rev:24381_0..24381_9999999999;".into()));
+        assert!(ranges.contains(&"DELETE EQUI:24381_0..24381_9999999999;".into()));
     }
 
     /// owner 边走复合 id 区间，整库清理的 SQL 里不该再剩任何图遍历。
@@ -694,8 +765,17 @@ mod tests {
         assert_eq!(
             metadata.last().unwrap(),
             "UPDATE dbnum_watermark:7997 SET applied_sesno = 0, sesno = 0, \
-             applied_sesno_time = NONE, confirmed_empty_baseline_sesno = NONE;",
+             applied_sesno_time = NONE, confirmed_empty_baseline_sesno = NONE, \
+             model_sesno = 0, model_sesno_time = NONE, model_settled_at = NONE, \
+             model_lazy_roots = NONE, model_dead_roots = NONE, \
+             model_roots_observed_at = NONE;",
             "水位清值必须是元数据阶段的最后一句（清库的提交点）"
+        );
+        // ADR-060 D8：模型水位与数据水位同一句、同一事务归零。分开写就有半清状态，
+        // 而两枚水位「相等」正是一致性判据本身——一枚归零一枚没归，判出来的一致是假的。
+        assert!(
+            metadata.last().unwrap().contains("model_sesno = 0"),
+            "模型水位必须与数据水位同一句归零: {metadata:?}"
         );
     }
 

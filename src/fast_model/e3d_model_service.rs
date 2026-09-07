@@ -1,4 +1,8 @@
-//! 生产环境唯一的 `e3d-model` 生成、增量和 Plant UI 兼容持久化入口。
+//! 生产环境唯一的 `e3d-model` 生成与增量入口。
+//!
+//! 生成出来的几何只落进程内投影存储（[`crate::fast_model::model_memory_store`]）。
+//! **本模块不认识数据库**：没有 SurrealDB 句柄，不拼 SQL，不开发布事务。把投影搬进库里
+//! 是另一层适配器的事，它从存储里读结构化记录，不必回头再算一遍几何。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
@@ -21,9 +25,6 @@ use glam::DMat4;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use surrealdb::Surreal;
-use surrealdb::engine::any::Any;
-use surrealdb::sql::Thing;
 use tokio::sync::Mutex;
 
 use crate::data_interface::cata_closure::{CataDbLocator, InMemoryCataLocator};
@@ -31,37 +32,21 @@ use crate::data_interface::direct_store::{DbPin, DirectSchema};
 use crate::data_interface::geom_error::GeometryFailurePolicy;
 use crate::data_interface::mdb_membership;
 use crate::data_interface::model_source;
-use crate::fast_model::room_publication::RoomEffectPolicy;
+use crate::fast_model::model_memory_store::{
+    ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectedTube, ProjectionCommit,
+    ProjectionScope, RootReceipt, packed_refno,
+};
 
+/// 一个生成根这一轮的投影决策：现在要投的目标是什么，上一轮投成了什么。
+///
+/// 它取代了旧的根凭证库行。跟过来的是「目标没变就不必重算」那条判据；没跟过来的是
+/// revision CAS——那把锁护的是多个进程抢同一个库行，进程内投影没有那个竞争。
 #[derive(Debug, Clone)]
-struct RootPublishClaim {
+struct RootPublication {
     root: RefNo,
-    revision: u64,
-    desired_source_sesno: u32,
     model_target: Option<ModelTarget>,
-    published_model_target: Option<ModelTarget>,
-    published_manifest_hash: Option<String>,
-    published_geometry_count: Option<usize>,
-    published_projection_complete: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct RootPublishClaimRow {
-    desired_revision: u64,
-    #[serde(default)]
-    desired_target: Option<RootDesiredTargetRow>,
-    #[serde(default)]
-    published_model_target: Option<ModelTarget>,
-    #[serde(default)]
-    published_manifest_hash: Option<String>,
-    #[serde(default)]
-    published_geometry_count: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct RootDesiredTargetRow {
-    #[serde(default)]
-    source_end_sesno: u32,
+    published: Option<RootReceipt>,
+    projection_complete: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,10 +76,13 @@ use crate::fast_model::e3d_mesh_store::{
 /// (owner missing, self, or not indexed — normally the WORL) and the owner of
 /// every indexed element.  `roots` is also the entry set for the file-side
 /// generation-root enumeration (`generation_root::enumerate_generation_roots`).
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SourceIndex {
     pub(crate) roots: Vec<RefNo>,
-    pub(crate) owners: BTreeMap<(u32, u32), RefNo>,
+    /// Shared, never mutated after the scan: one in-memory batch holds as many
+    /// `GeneratedSnapshot`s as it has roots, and each used to carry its own copy
+    /// of this whole-database table.
+    pub(crate) owners: Arc<BTreeMap<(u32, u32), RefNo>>,
 }
 
 /// Pure, session-pinned generation result.  It contains no database handle and
@@ -102,11 +90,310 @@ pub(crate) struct SourceIndex {
 /// in-memory projection.
 pub struct GeneratedSnapshot {
     pub elements: Vec<GeneratedElement>,
-    pub owners: BTreeMap<(u32, u32), RefNo>,
+    pub owners: Arc<BTreeMap<(u32, u32), RefNo>>,
     pub report: Report,
+    /// e3d-model DFS 访问到的子树元素（含根、含不出几何的容器）。读透形态下这就是
+    /// 「生成一根要顺手写透哪些元素」的名单（`GenerationOutcome::visited`）。
+    pub visited: Vec<RefNo>,
+}
+
+/// A source-session-pinned batch of generated roots.  Generation fills this
+/// structure without touching the persisted model projection; a later
+/// consumer may publish its snapshots in bounded transactions.
+pub struct GeneratedMemoryBatch {
+    pub(crate) dbnum: u32,
+    pub(crate) source_sesno: u32,
+    pub(crate) set: Arc<DbSet>,
+    pub(crate) index: Arc<SourceIndex>,
+    dependency_sessions: Arc<std::sync::Mutex<BTreeMap<u32, u32>>>,
+    pub(crate) snapshots: Vec<(RefNo, BakedSnapshot)>,
+    /// Roots whose generation raised a hard error, kept as dead letters instead
+    /// of aborting the batch (ADR-041 §6).  The consumer counts them as failed.
+    pub(crate) failures: Vec<(RefNo, String)>,
+}
+
+/// An initialization producer outcome. Success is a frozen projection, not a
+/// database completion and not a mutation of the process Current projection.
+pub struct FrozenGeneration {
+    pub root: RefNo,
+    pub outcome: Result<ProjectionCommit, String>,
+}
+
+/// The run's catalogue mesh caches, one per resident worker, checked out for
+/// the length of a wave and returned afterwards.  Only the checkout touches the
+/// mutex; evaluation never runs inside it (ADR-052 background 2).
+type CachePool = Arc<std::sync::Mutex<Vec<CatalogueMeshCache>>>;
+
+fn checkout_cache(pool: &CachePool) -> CatalogueMeshCache {
+    pool.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .pop()
+        .unwrap_or_default()
+}
+
+fn return_cache(pool: &CachePool, cache: CatalogueMeshCache) {
+    pool.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .push(cache);
+}
+
+/// The roots of one production run, and the sliding window that keeps their
+/// generated geometry bounded.
+///
+/// Workers claim by index and write back **into their own slot**; the assembler
+/// takes them off the front in source order.  Order is not decoration: it is
+/// what makes slice boundaries and the `Required` verdict reproducible, and it
+/// is why `geometry_workers = 1` replays the old sequential run exactly.
+///
+/// The window is what replaces a per-cohort barrier.  Waiting for a whole
+/// cohort to finish before starting the next one costs the slowest root of
+/// every cohort, and geometry load is long-tailed; here a worker may run up to
+/// `window` roots ahead of the last one the assembler took, so only the head of
+/// the line can stall anyone.
+struct RootQueue {
+    roots: Vec<RefNo>,
+    /// Next index a worker may claim.
+    next: std::sync::atomic::AtomicUsize,
+    /// How many roots the assembler has taken off the front.
+    committed: std::sync::atomic::AtomicUsize,
+    window: usize,
+    slots: std::sync::Mutex<Vec<Option<anyhow::Result<BakedSnapshot>>>>,
+}
+
+impl RootQueue {
+    fn new(roots: Vec<RefNo>, window: usize) -> Self {
+        let slots = std::sync::Mutex::new((0..roots.len()).map(|_| None).collect());
+        Self {
+            roots,
+            next: std::sync::atomic::AtomicUsize::new(0),
+            committed: std::sync::atomic::AtomicUsize::new(0),
+            window,
+            slots,
+        }
+    }
+
+    /// How many roots a worker could still start right now.  The assembler uses
+    /// it to decide how many workers to keep resident.
+    fn claimable(&self) -> usize {
+        let next = self.next.load(std::sync::atomic::Ordering::Acquire);
+        let ceiling = self
+            .roots
+            .len()
+            .min(self.committed.load(std::sync::atomic::Ordering::Acquire) + self.window);
+        ceiling.saturating_sub(next)
+    }
+
+    /// Claim the next root, or `None` when the run is done or the window is
+    /// full.  Returning `None` is how a worker hands its permit back rather
+    /// than waiting on the assembler: a permit holder that waits is exactly the
+    /// capacity inversion ADR-052 opens with.
+    fn claim(&self) -> Option<(usize, RefNo)> {
+        let mut next = self.next.load(std::sync::atomic::Ordering::Acquire);
+        loop {
+            let ceiling = self
+                .roots
+                .len()
+                .min(self.committed.load(std::sync::atomic::Ordering::Acquire) + self.window);
+            if next >= ceiling {
+                return None;
+            }
+            match self.next.compare_exchange_weak(
+                next,
+                next + 1,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => return Some((next, self.roots[next])),
+                Err(observed) => next = observed,
+            }
+        }
+    }
+
+    fn store(&self, slot: usize, outcome: anyhow::Result<BakedSnapshot>) {
+        self.slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)[slot] = Some(outcome);
+    }
+
+    /// Take the next root in source order, if its worker has finished.  Taking
+    /// it is also what slides the window forward.
+    fn take_ready(&self) -> Option<(RefNo, anyhow::Result<BakedSnapshot>)> {
+        let committed = self.committed.load(std::sync::atomic::Ordering::Acquire);
+        let outcome = self
+            .slots
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_mut(committed)?
+            .take()?;
+        self.committed
+            .store(committed + 1, std::sync::atomic::Ordering::Release);
+        Some((self.roots[committed], outcome))
+    }
+}
+
+/// One resident worker: one permit, one catalogue cache, and a loop that keeps
+/// claiming until the run is done or the window is full.
+///
+/// Dropping the returned future does not cancel the closure — a synchronous CPU
+/// segment cannot be interrupted.  An abandoned worker stops on its own within
+/// at most `window` roots, because nothing is advancing `committed` any more.
+fn spawn_generation_worker(
+    set: Arc<DbSet>,
+    index: Arc<SourceIndex>,
+    queue: Arc<RootQueue>,
+    caches: CachePool,
+    mesh_dir: PathBuf,
+) -> impl std::future::Future<Output = anyhow::Result<()>> {
+    crate::fast_model::concurrency::run_gated_cpu(move || {
+        let mut cache = checkout_cache(&caches);
+        while let Some((slot, root)) = queue.claim() {
+            // Bake here, not on the consumer: triangulation, the SHA-256 and
+            // the mesh file write are the rest of this root's CPU cost, and
+            // doing them here is what lets the `Manifold` die on this thread
+            // instead of riding into the serial publication step.
+            let outcome = generate_snapshot_from_set(&set, &index, root, &mut cache)
+                .and_then(|snapshot| bake_snapshot(snapshot, &mesh_dir));
+            queue.store(slot, outcome);
+        }
+        return_cache(&caches, cache);
+        Ok(())
+    })
+}
+
+/// One slice under construction on the producer side.  It exists so that the
+/// element budget is counted where the elements are produced, not recovered by
+/// walking a finished batch.
+#[derive(Default)]
+struct MemorySlice {
+    snapshots: Vec<(RefNo, BakedSnapshot)>,
+    failures: Vec<(RefNo, String)>,
+    elements: usize,
+}
+
+impl MemorySlice {
+    fn push(&mut self, root: RefNo, snapshot: BakedSnapshot) {
+        self.elements += snapshot.elements.len();
+        self.snapshots.push((root, snapshot));
+    }
+
+    fn is_full(&self, root_budget: usize, element_budget: usize) -> bool {
+        self.snapshots.len() >= root_budget || self.elements >= element_budget
+    }
+
+    /// Hand the sealed slice over and start an empty one.  A slice carrying
+    /// nothing but dead letters still goes: the consumer is where they are
+    /// counted.  Returns false once the consumer is gone — the producer stops
+    /// quietly then, so that the consumer's error is the one that surfaces.
+    async fn deliver(
+        &mut self,
+        dbnum: u32,
+        source_sesno: u32,
+        input: &GenerationInput,
+        sink: &tokio::sync::mpsc::Sender<GeneratedMemoryBatch>,
+    ) -> bool {
+        if self.snapshots.is_empty() && self.failures.is_empty() {
+            return true;
+        }
+        self.elements = 0;
+        let batch = GeneratedMemoryBatch {
+            dbnum,
+            source_sesno,
+            set: input.set.clone(),
+            index: input.index.clone(),
+            dependency_sessions: input.dependency_sessions.clone(),
+            snapshots: std::mem::take(&mut self.snapshots),
+            failures: std::mem::take(&mut self.failures),
+        };
+        sink.send(batch).await.is_ok()
+    }
 }
 
 static DB_GENERATION_LOCKS: OnceLock<dashmap::DashMap<u32, Arc<Mutex<()>>>> = OnceLock::new();
+
+#[derive(Clone)]
+struct GenerationInput {
+    set: Arc<DbSet>,
+    index: Arc<SourceIndex>,
+    dependency_sessions: Arc<std::sync::Mutex<BTreeMap<u32, u32>>>,
+}
+
+type GenerationInputKey = (u32, u32, String);
+
+static GENERATION_INPUT_CACHE: OnceLock<
+    std::sync::Mutex<HashMap<GenerationInputKey, GenerationInput>>,
+> = OnceLock::new();
+
+fn generation_input(
+    service: &E3dModelService,
+    dbnum: u32,
+    source_sesno: u32,
+) -> anyhow::Result<GenerationInput> {
+    let cache = GENERATION_INPUT_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()));
+    let identity = service.generation_identity.clone().unwrap_or_else(|| {
+        let pin = service
+            .pin(dbnum)
+            .expect("generation db pin checked by caller");
+        std::fs::canonicalize(&pin.file)
+            .unwrap_or_else(|_| pin.file.clone())
+            .to_string_lossy()
+            .into_owned()
+    });
+    let key = (dbnum, source_sesno, identity);
+    if let Some(value) = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(&key)
+        .cloned()
+    {
+        return Ok(value);
+    }
+    let pin = service.pin(dbnum)?;
+    let index = Arc::new(scan_index(&pin.file, Some(source_sesno))?);
+    let set = service.build_set(dbnum, Some(source_sesno))?;
+    let mut guard = cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    guard.retain(|(cached_dbnum, _, _), _| *cached_dbnum != dbnum);
+    let input = GenerationInput {
+        set,
+        index,
+        dependency_sessions: service.dependency_sessions.clone(),
+    };
+    guard.insert(key, input.clone());
+    Ok(input)
+}
+
+/// Drop every cached generation input of one database.
+///
+/// The cache is keyed by `(dbnum, sesno, identity)` and only ever evicts the
+/// *same* dbnum's older entry when a new one is inserted, so an entry outlives
+/// the run that built it for as long as the process lives.  An initialization
+/// run keys its entry by the digest of its frozen tokens — a key no later
+/// service (`from_current`, `from_frozen_source`) asks for again — which makes
+/// the entry dead weight once the run has finished: one parsed `attlib.dat`,
+/// one open `DbSet` over every MDB design file, and one whole-database owner
+/// table per initialized dbnum, held until exit.
+///
+/// Callers still holding an `Arc` clone keep their input alive; the next
+/// `generation_input` for the dbnum rebuilds from the file.  The removed values
+/// are dropped outside the cache lock.  Returns how many entries were removed.
+pub(crate) fn forget_generation_input(dbnum: u32) -> usize {
+    let Some(cache) = GENERATION_INPUT_CACHE.get() else {
+        return 0;
+    };
+    let removed: Vec<GenerationInput> = {
+        let mut guard = cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let keys = guard
+            .keys()
+            .filter(|(cached_dbnum, _, _)| *cached_dbnum == dbnum)
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.iter().filter_map(|key| guard.remove(key)).collect()
+    };
+    removed.len()
+}
 
 fn db_generation_lock(dbnum: u32) -> Arc<Mutex<()>> {
     DB_GENERATION_LOCKS
@@ -122,7 +409,18 @@ pub struct E3dModelService {
     locator: InMemoryCataLocator,
     dependency_sessions: Arc<std::sync::Mutex<BTreeMap<u32, u32>>>,
     mesh_dir: PathBuf,
+    /// Digest of the durable file-generation token for a file update round.
+    /// It prevents a replaced file at the same path/dbnum/session from reusing
+    /// another generation's cached DbSet and index.
+    generation_identity: Option<String>,
+    /// Initialization reuses the verified, durable source token, not mutable
+    /// file length/mtime that may advance while the pinned session is generated.
+    frozen_file_digests: BTreeMap<(u32, u32), String>,
 }
+
+#[cfg(test)]
+#[path = "initialization_target_tests.rs"]
+mod initialization_target_tests;
 
 #[derive(Clone)]
 struct E3dDbResolver {
@@ -181,7 +479,116 @@ impl E3dModelService {
             locator,
             dependency_sessions: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             mesh_dir: option.get_meshes_path(),
+            generation_identity: None,
+            frozen_file_digests: BTreeMap::new(),
         })
+    }
+
+    /// Build the normal MDB-aware service while pinning one DESI input to the
+    /// exact file generation and session captured by the data file round.
+    pub async fn from_frozen_source(
+        source: &crate::data_interface::frozen_source::FrozenSource,
+    ) -> anyhow::Result<Self> {
+        Self::from_frozen_sources(std::slice::from_ref(source), false).await
+    }
+
+    /// Initialization pins the entire resolver inventory before the manifest
+    /// becomes active. A dependency can never fall back to a later session.
+    pub async fn from_initialization_sources(
+        source: &crate::data_interface::frozen_source::FrozenSource,
+        dependencies: &[String],
+    ) -> anyhow::Result<Self> {
+        use crate::data_interface::frozen_source::FrozenSource;
+        let mut service = Self::from_frozen_source(source).await?;
+        let mut files = HashMap::new();
+        let mut tokens = vec![source.commit_token_json()?];
+        for token in dependencies.iter().chain(tokens.clone().iter()) {
+            let frozen = FrozenSource::from_commit_token_json(token)?.reopen_verified()?;
+            service.frozen_file_digests.insert(
+                (frozen.dbnum() as u32, frozen.target_sesno()),
+                hex::encode(Sha256::digest(frozen.commit_token_json()?.as_bytes())),
+            );
+            let project = service
+                .locator
+                .file_of(frozen.dbnum() as u32)
+                .map(|(project, _)| project)
+                .context("frozen dependency is no longer in MDB")?;
+            files.insert(
+                frozen.dbnum() as u32,
+                (
+                    frozen.db_type().to_string(),
+                    project,
+                    frozen.path().to_path_buf(),
+                ),
+            );
+            service
+                .dependency_sessions
+                .lock()
+                .unwrap()
+                .insert(frozen.dbnum() as u32, frozen.target_sesno());
+            if let Some(pin) = service.pins.iter_mut().find(|p| p.dbnum == frozen.dbnum()) {
+                pin.file = frozen.path().to_path_buf();
+                pin.sesno = Some(frozen.target_sesno());
+            }
+        }
+        service.locator = InMemoryCataLocator::from_parts(HashMap::new(), files);
+        tokens.extend_from_slice(dependencies);
+        tokens.sort_unstable();
+        service.generation_identity =
+            Some(hex::encode(Sha256::digest(tokens.join("\n").as_bytes())));
+        Ok(service)
+    }
+
+    pub fn initialization_target_hash(&self, dbnum: u32, session: u32) -> anyhow::Result<String> {
+        let target = self.model_target(dbnum, session, &self.dependency_sessions)?;
+        Ok(hex::encode(Sha256::digest(serde_json::to_vec(&Some(
+            target,
+        ))?)))
+    }
+
+    /// Build one service whose selected DESI inputs are all pinned to their
+    /// durable file generations. Room topology passes `published_only=true`
+    /// so an MDB file without a successful published version cannot leak in at
+    /// its live latest session.
+    pub(crate) async fn from_frozen_sources(
+        sources: &[crate::data_interface::frozen_source::FrozenSource],
+        published_only: bool,
+    ) -> anyhow::Result<Self> {
+        let sources = sources
+            .iter()
+            .map(|source| source.reopen_verified())
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut service = Self::from_current().await?;
+        if published_only {
+            let published = sources
+                .iter()
+                .map(|source| source.dbnum())
+                .collect::<std::collections::HashSet<_>>();
+            service.pins.retain(|pin| {
+                !pin.db_type.eq_ignore_ascii_case("DESI") || published.contains(&pin.dbnum)
+            });
+        }
+        let mut tokens = Vec::with_capacity(sources.len());
+        for source in &sources {
+            let pin = service
+                .pins
+                .iter_mut()
+                .find(|pin| pin.dbnum == source.dbnum())
+                .with_context(|| format!("current MDB has no DESI dbnum {}", source.dbnum()))?;
+            anyhow::ensure!(
+                pin.db_type.eq_ignore_ascii_case(source.db_type()),
+                "frozen source type {} differs from MDB pin {}",
+                source.db_type(),
+                pin.db_type
+            );
+            pin.file = source.path().to_path_buf();
+            pin.sesno = Some(source.target_sesno());
+            tokens.push(source.commit_token_json()?);
+        }
+        tokens.sort_unstable();
+        service.generation_identity =
+            Some(hex::encode(Sha256::digest(tokens.join("\n").as_bytes())));
+        Ok(service)
     }
 
     /// The DESI database that owns a batch of generation roots.
@@ -207,8 +614,7 @@ impl E3dModelService {
         let pin = self.pin(dbnum)?;
         let source_sesno = self.source_session(pin)?;
         ensure_not_older_than_persisted(dbnum, source_sesno).await?;
-        let index = scan_index(&pin.file, Some(source_sesno))?;
-        let set = self.build_set(dbnum, Some(source_sesno))?;
+        let input = generation_input(self, dbnum, source_sesno)?;
         let roots = roots
             .iter()
             .map(|value| parse_refno(value))
@@ -216,13 +622,299 @@ impl E3dModelService {
         self.generate_refs(
             dbnum,
             source_sesno,
-            &set,
-            &index,
+            &input.set,
+            &input.index,
             &roots,
             failure_policy,
-            RoomEffectPolicy::Directed,
+            &input.dependency_sessions,
+            None,
         )
         .await
+    }
+
+    /// Producer half of the Core.dll-style split: read the source, evaluate the
+    /// geometry, and hand the consumer one **bounded** slice at a time.  It
+    /// performs no model writes.
+    ///
+    /// A slice is sealed as soon as it reaches either budget:
+    /// `model_regen_execution_group` roots (the publication cohort width, which
+    /// is what decided transaction boundaries before) or
+    /// `model_memory_slice_elements` generated elements.  Root count alone is
+    /// not a memory budget — a BRAN and an EQUI differ by two orders of
+    /// magnitude, and what sits in the slice is `GeneratedElement`, the fattest
+    /// representation on the chain.  A root is never split across slices: it is
+    /// the atomic publication unit.
+    ///
+    /// Generation runs continuously: `min(quota, claimable)` resident workers
+    /// keep claiming roots off a shared queue, and may run up to
+    /// `model_regen_execution_group` roots ahead of the last one folded into a
+    /// slice.  That run-ahead is what decouples generation from publication —
+    /// the workers do not stop at every cohort boundary waiting for the slowest
+    /// root in it — and it is also the memory bound: the peak is one window of
+    /// generated roots plus the partial slice.  Under parallel workers the
+    /// element budget can only seal *publication* slices, not cap the in-flight
+    /// set: N workers means N roots being built no matter what the budget says.
+    /// Projects whose roots are unusually fat should lower
+    /// `model_regen_execution_group`, which narrows the window and the cohort
+    /// together.
+    ///
+    /// The producer takes no `db_generation_lock`: reading the source file and
+    /// evaluating geometry touches neither the projection store nor the root
+    /// receipts that lock protects.  What each slice carries out of here is the
+    /// pinned `source_sesno`; the consumer re-checks it under the lock before it
+    /// commits anything.
+    async fn produce_slices(
+        &self,
+        dbnum: u32,
+        roots: &[String],
+        failure_policy: GeometryFailurePolicy,
+        sink: &tokio::sync::mpsc::Sender<GeneratedMemoryBatch>,
+    ) -> anyhow::Result<()> {
+        let pin = self.pin(dbnum)?;
+        let source_sesno = self.source_session(pin)?;
+        let input = generation_input(self, dbnum, source_sesno)?;
+        let roots = roots
+            .iter()
+            .map(|value| parse_refno(value))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let root_budget = crate::options::model_regen_execution_group().max(1);
+        let element_budget = crate::options::model_memory_slice_elements();
+        // A production run is one catalogue reuse window: identical evaluated
+        // primitives across different delivery roots must share their local
+        // mesh.  One cache per worker rather than one shared behind a mutex —
+        // evaluating inside that mutex is the convoy ADR-052 opens with — and
+        // the pool outlives the waves so the window is the whole run.
+        let caches = CachePool::default();
+        let queue = Arc::new(RootQueue::new(roots, root_budget));
+        let mut workers = futures::stream::FuturesUnordered::new();
+        let mut slice = MemorySlice::default();
+        loop {
+            // Top the pool back up: a worker that hit the window returned its
+            // permit rather than sit on it, so it has to be re-launched once
+            // the assembler slid the window forward.
+            let wanted = crate::fast_model::concurrency::resident_workers(queue.claimable());
+            while workers.len() < wanted {
+                workers.push(spawn_generation_worker(
+                    input.set.clone(),
+                    input.index.clone(),
+                    queue.clone(),
+                    caches.clone(),
+                    self.mesh_dir.clone(),
+                ));
+            }
+            let Some(finished) = futures::StreamExt::next(&mut workers).await else {
+                break;
+            };
+            finished?;
+            while let Some((root, outcome)) = queue.take_ready() {
+                // A root that cannot be read or evaluated is one dead letter,
+                // not a reason to drop the whole page: a single permanently
+                // broken component would otherwise wedge every batch that
+                // contains it.  The verdict stays sequential and in root order,
+                // so `geometry_workers = 1` reproduces the old run exactly.
+                match outcome {
+                    Ok(snapshot) => {
+                        if !snapshot.report.failed.is_empty()
+                            && matches!(failure_policy, GeometryFailurePolicy::Required)
+                        {
+                            bail!(
+                                "e3d-model root {root} has {} failed element(s)",
+                                snapshot.report.failed.len()
+                            );
+                        }
+                        slice.push(root, snapshot);
+                    }
+                    Err(error) if !matches!(failure_policy, GeometryFailurePolicy::Required) => {
+                        log::error!("e3d-model root {root} failed: {error:#}");
+                        slice.failures.push((root, format!("{error:#}")));
+                    }
+                    Err(error) => {
+                        return Err(error).with_context(|| format!("generate root {root}"));
+                    }
+                }
+                if slice.is_full(root_budget, element_budget)
+                    && !slice.deliver(dbnum, source_sesno, &input, sink).await
+                {
+                    return Ok(());
+                }
+            }
+        }
+        slice.deliver(dbnum, source_sesno, &input, sink).await;
+        Ok(())
+    }
+
+    /// Consume an in-memory batch without re-reading or re-generating any
+    /// root.  Only this phase commits into the projection store.
+    pub async fn persist_memory_batch(
+        &self,
+        mut batch: GeneratedMemoryBatch,
+        failure_policy: GeometryFailurePolicy,
+    ) -> anyhow::Result<E3dPersistReport> {
+        let _generation_guard = db_generation_lock(batch.dbnum).lock_owned().await;
+        ensure_not_older_than_persisted(batch.dbnum, batch.source_sesno).await?;
+        let chunk_size = crate::options::model_regen_execution_group().max(1);
+        let snapshots = std::mem::take(&mut batch.snapshots);
+        let mut total = E3dPersistReport::default();
+        // Producer-side dead letters are failures of this publication too: the
+        // roots they name keep their previously published geometry, and the
+        // caller must still see a non-zero `failed`.
+        for (root, error) in std::mem::take(&mut batch.failures) {
+            log::error!("e3d-model root {root} was not generated: {error}");
+            total.failed += 1;
+        }
+        let mut snapshots = snapshots;
+        while !snapshots.is_empty() {
+            let take = snapshots.len().min(chunk_size);
+            let mut memory_chunk = snapshots.drain(..take).collect::<Vec<_>>();
+            let roots = memory_chunk
+                .iter()
+                .map(|(root, _)| *root)
+                .collect::<Vec<_>>();
+            let report = self
+                .generate_refs(
+                    batch.dbnum,
+                    batch.source_sesno,
+                    &batch.set,
+                    &batch.index,
+                    &roots,
+                    failure_policy,
+                    &batch.dependency_sessions,
+                    Some(&mut memory_chunk),
+                )
+                .await?;
+            total.merge_counts(report);
+        }
+        Ok(total)
+    }
+
+    /// Generate `roots` and publish them slice by slice, producer and consumer
+    /// running concurrently across a **depth-1 bounded** channel (ADR-041 §8).
+    ///
+    /// The channel does not make the write side faster — publication is
+    /// serial by construction — it moves the producer's wait from "the whole
+    /// page is published" to "there is room for one more slice", which is the
+    /// `(P + C) × N → max(P, C) × N` the ADR costs out.  Its depth is the whole
+    /// point: an unbounded channel would not block either, at the price of
+    /// unbounded memory, and that is the trade the ADR rejected.  At most three
+    /// slices are alive at once — one being published, one buffered, one under
+    /// construction — instead of the entire page.
+    pub async fn generate_frozen_roots(
+        &self,
+        dbnum: u32,
+        roots: &[String],
+        sink: tokio::sync::mpsc::Sender<FrozenGeneration>,
+    ) -> anyhow::Result<()> {
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<GeneratedMemoryBatch>(1);
+        let produce = async {
+            let result = self
+                .produce_slices(dbnum, roots, GeometryFailurePolicy::BestEffortFallback, &tx)
+                .await;
+            drop(tx);
+            result
+        };
+        let freeze = async move {
+            while let Some(batch) = rx.recv().await {
+                for (root, error) in batch.failures {
+                    sink.send(FrozenGeneration {
+                        root,
+                        outcome: Err(error),
+                    })
+                    .await
+                    .map_err(|_| anyhow::anyhow!("initialization journal receiver closed"))?;
+                }
+                for (root, snapshot) in batch.snapshots {
+                    let outcome = (|| -> anyhow::Result<ProjectionCommit> {
+                        anyhow::ensure!(
+                            snapshot.report.failed.is_empty(),
+                            "root {root} has {} failed geometry elements: {}",
+                            snapshot.report.failed.len(),
+                            summarize_geometry_incidents(&snapshot.report.failed)
+                        );
+                        let publication = RootPublication {
+                            root,
+                            model_target: Some(self.model_target(
+                                dbnum,
+                                batch.source_sesno,
+                                &batch.dependency_sessions,
+                            )?),
+                            published: None,
+                            projection_complete: false,
+                        };
+                        let (projection, _) = project_geometry_delta(
+                            dbnum,
+                            batch.source_sesno,
+                            snapshot.elements,
+                            Vec::new(),
+                            Some(&publication),
+                            &batch.index.owners,
+                        )?;
+                        // Mesh files are content addressed. Flush dependencies before
+                        // the queue may acknowledge this envelope after a crash.
+                        for mesh in projection
+                            .upserts
+                            .iter()
+                            .map(|g| g.mesh_id.as_str())
+                            .collect::<BTreeSet<_>>()
+                        {
+                            let path = self.mesh_dir.join(format!("{mesh}.mesh"));
+                            std::fs::OpenOptions::new()
+                                .read(true)
+                                .write(true)
+                                .open(&path)
+                                .with_context(|| {
+                                    format!("missing handed-off mesh {}", path.display())
+                                })?
+                                .sync_all()?;
+                        }
+                        Ok(projection)
+                    })()
+                    .map_err(|e| format!("{e:#}"));
+                    sink.send(FrozenGeneration { root, outcome })
+                        .await
+                        .map_err(|_| anyhow::anyhow!("initialization journal receiver closed"))?;
+                }
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        futures::future::try_join(produce, freeze).await?;
+        Ok(())
+    }
+
+    pub async fn generate_and_persist_roots(
+        &self,
+        dbnum: u32,
+        roots: &[String],
+        failure_policy: GeometryFailurePolicy,
+    ) -> anyhow::Result<E3dPersistReport> {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel::<GeneratedMemoryBatch>(1);
+        let produce = async move {
+            let outcome = self
+                .produce_slices(dbnum, roots, failure_policy, &sender)
+                .await;
+            // Closing the last sender is what ends the consumer's loop.
+            drop(sender);
+            outcome
+        };
+        let consume = async move {
+            let mut total = E3dPersistReport::default();
+            while let Some(slice) = receiver.recv().await {
+                match self.persist_memory_batch(slice, failure_policy).await {
+                    Ok(report) => total.merge_counts(report),
+                    Err(error) => {
+                        // Stop the producer at its next hand-off rather than
+                        // let it keep filling memory for a consumer that is
+                        // already done; its error is the one worth reporting.
+                        receiver.close();
+                        return Err(error);
+                    }
+                }
+            }
+            Ok(total)
+        };
+        let (produced, consumed) = futures::future::join(produce, consume).await;
+        let total = consumed?;
+        produced?;
+        Ok(total)
     }
 
     pub async fn generate_dbnum(
@@ -234,16 +926,16 @@ impl E3dModelService {
         let pin = self.pin(dbnum)?;
         let source_sesno = self.source_session(pin)?;
         ensure_not_older_than_persisted(dbnum, source_sesno).await?;
-        let index = scan_index(&pin.file, Some(source_sesno))?;
-        let set = self.build_set(dbnum, Some(source_sesno))?;
+        let input = generation_input(self, dbnum, source_sesno)?;
         self.generate_refs(
             dbnum,
             source_sesno,
-            &set,
-            &index,
-            &index.roots,
+            &input.set,
+            &input.index,
+            &input.index.roots,
             failure_policy,
-            RoomEffectPolicy::FullDatabase,
+            &input.dependency_sessions,
+            None,
         )
         .await
     }
@@ -258,15 +950,9 @@ impl E3dModelService {
         failure_policy: GeometryFailurePolicy,
     ) -> anyhow::Result<GeneratedSnapshot> {
         let _generation_guard = db_generation_lock(dbnum).lock_owned().await;
-        let pin = self
-            .pins
-            .iter()
-            .find(|pin| pin.dbnum == dbnum as i32)
-            .with_context(|| format!("MDB has no source file for dbnum {dbnum}"))?;
-        let index = scan_index(&pin.file, Some(source_sesno))?;
-        let set = self.build_set(dbnum, Some(source_sesno))?;
+        let input = generation_input(self, dbnum, source_sesno)?;
         let mut cache = CatalogueMeshCache::default();
-        let snapshot = generate_snapshot_from_set(&set, &index, root, &mut cache)?;
+        let snapshot = generate_snapshot_from_set(&input.set, &input.index, root, &mut cache)?;
         if !snapshot.report.failed.is_empty()
             && matches!(failure_policy, GeometryFailurePolicy::Required)
         {
@@ -297,6 +983,8 @@ impl E3dModelService {
             locator,
             dependency_sessions: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             mesh_dir,
+            generation_identity: None,
+            frozen_file_digests: BTreeMap::new(),
         })
     }
 
@@ -370,42 +1058,88 @@ impl E3dModelService {
         index: &SourceIndex,
         roots: &[RefNo],
         failure_policy: GeometryFailurePolicy,
-        room_policy: RoomEffectPolicy,
+        dependency_sessions: &Arc<std::sync::Mutex<BTreeMap<u32, u32>>>,
+        mut memory_snapshots: Option<&mut Vec<(RefNo, BakedSnapshot)>>,
     ) -> anyhow::Result<E3dPersistReport> {
-        let mut total = E3dPersistReport::default();
+        let store = ModelMemoryStore::global();
+        let mut total = E3dPersistReport {
+            source_sesno: Some(source_sesno),
+            ..E3dPersistReport::default()
+        };
         let mut generation = Report::default();
-        let mut publication = String::new();
+        let mut commits = Vec::new();
         let mut prepared_reports = Vec::new();
-        let mut spatial_refnos = BTreeSet::new();
-        let room_incremental = crate::options::room_incremental();
-        let (mut room_recalc_targets, mut room_cleared_sources) = (0usize, 0usize);
+        // 上一轮的回执要先读齐、依赖会话要先补齐，本轮的目标才算得准——目标里带着每个
+        // CATA 依赖的文件身份，逐根现算会让先算的那几根少看见后面才发现的依赖。
+        let published = roots
+            .iter()
+            .copied()
+            .map(|root| store.receipt(ProjectionScope::Current, root))
+            .collect::<Vec<_>>();
+        for receipt in published.iter().flatten() {
+            self.hydrate_published_dependencies(receipt, dependency_sessions)?;
+        }
+        let model_target = self.model_target(dbnum, source_sesno, dependency_sessions)?;
+        let publications = roots
+            .iter()
+            .copied()
+            .zip(published)
+            .map(|(root, published)| {
+                let mut publication = RootPublication {
+                    root,
+                    model_target: Some(model_target.clone()),
+                    published,
+                    projection_complete: false,
+                };
+                publication.projection_complete =
+                    cached_root_target_matches(&publication, source_sesno)
+                        && store.root_projection_complete(
+                            ProjectionScope::Current,
+                            root,
+                            &self.mesh_dir,
+                        );
+                publication
+            })
+            .collect::<Vec<_>>();
+        let cached = publications
+            .iter()
+            .map(|publication| publication.projection_complete)
+            .collect::<Vec<_>>();
+        let prior = roots
+            .iter()
+            .copied()
+            .zip(cached.iter().copied())
+            .map(|(root, cached)| {
+                if cached {
+                    Vec::new()
+                } else {
+                    store.geometry_ids_of_root(ProjectionScope::Current, dbnum, root)
+                }
+            })
+            .collect::<Vec<_>>();
         // A production batch is one reuse window: identical evaluated catalogue
         // primitives across different delivery roots must share their local mesh.
         let mut catalogue_mesh_cache = CatalogueMeshCache::default();
-        for &root in roots {
-            // Capture the durable revision before any expensive source or CATA
-            // evaluation. The publication transaction re-checks this token.
-            let mut publish_claim = load_root_publish_claim(root).await?;
-            if let Some(claim) = publish_claim.as_mut() {
-                self.hydrate_published_dependencies(claim)?;
-                claim.model_target = Some(self.model_target(dbnum, source_sesno)?);
-                claim.published_projection_complete =
-                    published_root_projection_complete(claim, &self.mesh_dir).await?;
-                if cached_root_target_matches(claim, source_sesno)
-                    && claim.published_projection_complete
-                {
-                    publication.push_str(&prepare_cached_root_publication(claim, source_sesno)?);
-                    prepared_reports.push(E3dPersistReport::default());
-                    continue;
-                }
+        for (root_index, &root) in roots.iter().enumerate() {
+            let mut publication = publications[root_index].clone();
+            if cached[root_index] {
+                // 目标与上一轮逐位相同，投影也还完整：只重盖一次章，几何一条都不动。
+                commits.push(cached_root_commit(&publication, source_sesno)?);
+                prepared_reports.push(E3dPersistReport::default());
+                continue;
             }
-            let snapshot =
-                match generate_snapshot_from_set(set, index, root, &mut catalogue_mesh_cache) {
+            let snapshot = if let Some(snapshots) = memory_snapshots.as_deref_mut() {
+                let index = snapshots
+                    .iter()
+                    .position(|(candidate, _)| *candidate == root)
+                    .with_context(|| format!("memory batch missing root {root}"))?;
+                snapshots.swap_remove(index).1
+            } else {
+                match generate_snapshot_from_set(set, index, root, &mut catalogue_mesh_cache)
+                    .and_then(|snapshot| bake_snapshot(snapshot, &self.mesh_dir))
+                {
                     Ok(outcome) => outcome,
                     Err(error) if !matches!(failure_policy, GeometryFailurePolicy::Required) => {
-                        // A failed candidate is not an empty candidate. Keep the
-                        // last complete published root visible until a complete
-                        // replacement is available.
                         total.failed += 1;
                         log::error!("e3d-model root {root} failed: {error:#}");
                         continue;
@@ -413,12 +1147,17 @@ impl E3dModelService {
                     Err(error) => {
                         return Err(error).with_context(|| format!("generate root {root}"));
                     }
-                };
+                }
+            };
             let root_failed = snapshot.report.failed.len();
             if root_failed > 0 && matches!(failure_policy, GeometryFailurePolicy::Required) {
                 bail!("e3d-model root {root} has {root_failed} failed element(s)");
             }
             if root_failed > 0 {
+                eprintln!(
+                    "e3d-model root {root} failed geometry details: {:?}",
+                    snapshot.report.failed
+                );
                 // Best-effort generation may report successful siblings next to
                 // failed elements. Publishing that partial manifest would delete
                 // the missing GeometryIds, so retain the previous complete root.
@@ -432,6 +1171,9 @@ impl E3dModelService {
                 continue;
             }
             let root_skipped = snapshot.report.skipped.len();
+            // 子树访问名单只报出去，不在这里写库：读透形态下编排层拿它在发布模型行之前
+            // 把子树元素写透（`docs/plans/2026-09-05-kv-mem-zero-ingest-read-through-plan.md` §3.2）。
+            total.visited_by_root.insert(root, snapshot.visited);
             let generated_ids = snapshot
                 .elements
                 .iter()
@@ -442,111 +1184,38 @@ impl E3dModelService {
                     ))
                 })
                 .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
-            let mut removals = existing_geometry_ids(dbnum, root)
-                .await?
-                .into_iter()
+            let existing_ids = &prior[root_index];
+            let removals = existing_ids
+                .iter()
+                .cloned()
                 .filter_map(|geometry_id| {
                     let key = serde_json::to_string(&geometry_id).ok()?;
                     (!generated_ids.contains_key(&key)).then_some(geometry_id)
                 })
                 .collect::<BTreeSet<_>>();
-            // A root generated by e3d-model owns its complete visible geometry.
-            // Pre-GeometryId rows are old OCC/gen_model projections; leaving
-            // descendants behind makes consumed cutters visible as positive
-            // Plant UI meshes.  Remove only ordinary PE-backed legacy rows in
-            // this regenerated root.  Shared inst_geo/mesh content is retained.
-            let pre_e3d_removal_count = pre_e3d_relation_count(dbnum, root).await?;
-            // The legacy root cleanup below deletes rows that do not carry a
-            // GeometryId, so `removal_vec` cannot name their source PE keys.
-            // Capture those committed AABB owners before the transaction; they
-            // must be removed from the in-process spatial mirror afterwards.
-            let pre_e3d_spatial_refnos = if pre_e3d_removal_count == 0 {
-                BTreeSet::new()
-            } else {
-                pre_e3d_spatial_refnos(dbnum, root).await?
-            };
             generation.merge(snapshot.report);
-            ensure_not_older_than_persisted(dbnum, source_sesno).await?;
-            if let Some(claim) = publish_claim.as_mut() {
-                // Catalogue resolution during generation may have discovered
-                // cross-database dependencies that were not in watermark pins.
-                claim.model_target = Some(self.model_target(dbnum, source_sesno)?);
-            }
-            let removal_vec = removals.into_iter().collect::<Vec<_>>();
-            // 房间派生面（ADR-010 §4 / ADR-040 §3）跟着这个根的几何进同一个发布事务：
-            // 重写的元素排重算，移除的与失去几何的旧来源清边。折算要在
-            // `snapshot.elements` 被搬进 `prepare_geometry_delta` 之前做。
-            let room_effects = crate::fast_model::room_publication::room_publication_effects(
-                snapshot
-                    .elements
-                    .iter()
-                    .map(|element| (&element.geometry_id, element.refno, element.noun.as_str())),
-                &removal_vec,
-                &pre_e3d_spatial_refnos,
-            )?;
-            let mut root_spatial_refnos =
-                spatial_refnos_for_delta(&snapshot.elements, &removal_vec)?;
-            root_spatial_refnos.extend(pre_e3d_spatial_refnos);
-            let (statements, mut persisted) = prepare_geometry_delta(
-                ProjectionScope::Current,
+            // Catalogue resolution during generation may have discovered
+            // cross-database dependencies that were not in watermark pins.
+            publication.model_target =
+                Some(self.model_target(dbnum, source_sesno, dependency_sessions)?);
+            let (commit, mut projected) = project_geometry_delta(
                 dbnum,
                 source_sesno,
                 snapshot.elements,
-                removal_vec,
-                Some((root, pre_e3d_removal_count)),
-                publish_claim.as_ref(),
+                removals.into_iter().collect(),
+                Some(&publication),
                 &index.owners,
-                &self.mesh_dir,
             )?;
-            persisted.skipped += root_skipped;
-            persisted.failed += root_failed;
-            publication.push_str(&statements);
-            if persisted.upserted > 0 || persisted.removed > 0 {
-                spatial_refnos.extend(root_spatial_refnos);
-                publication.push_str(
-                    &crate::fast_model::room_publication::render_room_publication_effects(
-                        &room_effects,
-                        room_policy,
-                        room_incremental,
-                    ),
-                );
-                if room_policy == RoomEffectPolicy::Directed && room_incremental {
-                    room_recalc_targets += room_effects.recalc.len();
-                }
-                room_cleared_sources += room_effects.cleared.len();
-            }
-            prepared_reports.push(persisted);
+            projected.skipped += root_skipped;
+            projected.failed += root_failed;
+            commits.push(commit);
+            prepared_reports.push(projected);
         }
-        if total.failed == 0 && !publication.is_empty() {
-            // One generate_roots call is one publication cohort. This makes an
-            // OWNER move (old root cleanup + new root takeover), and a PIPE
-            // expansion containing several BRANs, visible in one commit.
-            let _spatial_serial = if spatial_refnos.is_empty() {
-                None
-            } else {
-                Some(crate::fast_model::spatial_state::lock_spatial_serial().await)
-            };
-            if !spatial_refnos.is_empty() {
-                publication.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
-            }
-            aios_core::SUL_DB
-                .query(publication_transaction(&publication))
-                .await?
-                .check()?;
-            if !spatial_refnos.is_empty() {
-                let refnos = spatial_refnos.into_iter().collect::<Vec<_>>();
-                crate::fast_model::aabb_tree::sync_tree_from_committed_pointers(&refnos).await?;
-                // A window may also remove PE-backed legacy rows for roots that
-                // produce no GeometryId work item.  Re-scan the committed pointer
-                // set once per publication cohort so those non-geometry deletes
-                // cannot leave stale entries in the process mirror.
-                crate::fast_model::aabb_tree::rebuild_tree_from_pointers().await?;
-            }
-            if room_recalc_targets > 0 || room_cleared_sources > 0 {
-                log::info!(
-                    "e3d-model publication for dbnum {dbnum}: {room_recalc_targets} room recalc target(s) queued, {room_cleared_sources} removed source(s) cleared of room edges"
-                );
-            }
+        if total.failed == 0 {
+            // One generate_roots call is one projection cohort: an OWNER move
+            // (old root cleanup + new root takeover) and a PIPE expansion
+            // containing several BRANs land in the store together.
+            store.commit(ProjectionScope::Current, commits);
             for report in prepared_reports {
                 total.merge_counts(report);
             }
@@ -560,6 +1229,13 @@ impl E3dModelService {
             .iter()
             .find(|pin| pin.dbnum == dbnum as i32)
             .with_context(|| format!("current MDB has no source file for dbnum {dbnum}"))
+    }
+
+    /// 当前 MDB 里 `dbnum` 那份设计文件的路径与库类型。读透（`data_interface::read_through`）
+    /// 要拿它反查 last-touch 会话——与生成读的是同一个文件。
+    pub(crate) fn source_pin(&self, dbnum: u32) -> anyhow::Result<(PathBuf, String)> {
+        let pin = self.pin(dbnum)?;
+        Ok((pin.file.clone(), pin.db_type.clone()))
     }
 
     /// Every design database of the current MDB as `(dbnum, file, source session)`,
@@ -594,10 +1270,14 @@ impl E3dModelService {
         }
     }
 
-    fn model_target(&self, dbnum: u32, source_sesno: u32) -> anyhow::Result<ModelTarget> {
+    fn model_target(
+        &self,
+        dbnum: u32,
+        source_sesno: u32,
+        dependency_sessions: &Arc<std::sync::Mutex<BTreeMap<u32, u32>>>,
+    ) -> anyhow::Result<ModelTarget> {
         let design_pin = self.pin(dbnum)?;
-        let sessions = self
-            .dependency_sessions
+        let sessions = dependency_sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let file_target = |dbnum: u32,
@@ -610,7 +1290,10 @@ impl E3dModelService {
                 db_type: db_type.to_string(),
                 file: file.to_string_lossy().into_owned(),
                 session,
-                digest: model_file_identity_digest(file, session)?,
+                digest: match self.frozen_file_digests.get(&(dbnum, session)) {
+                    Some(digest) => digest.clone(),
+                    None => model_file_identity_digest(file, session)?,
+                },
             })
         };
         let design = file_target(
@@ -667,7 +1350,7 @@ impl E3dModelService {
                 0,
             )?,
             generator_fingerprint: format!(
-                "e3d-model:{};aios-database:{};route-atta-pass-through-v1;route-atta-anci-only-v1;catalogue-atta-clfl-frame-v1",
+                "e3d-model:{};aios-database:{};route-atta-pass-through-v1;route-atta-anci-only-v1;catalogue-atta-paxi-frame-v2;catalogue-route-scyl-paxi-frame-v1;catalogue-pml-sqrt-atan-v1;catalogue-pml-flex-mask-v1;catalogue-lpyr-negative-pbax-v1;section-fitt-posl-frame-v1;catalogue-cylinder-cuts-v1;design-cyli-centered-z-v1;design-snout-revolution-facets-v1;design-negative-ctor-grid-v2;polyhedron-member-order-v1;pohe-polygon-panels-v1",
                 env!("CARGO_PKG_VERSION"),
                 env!("CARGO_PKG_VERSION")
             ),
@@ -675,12 +1358,15 @@ impl E3dModelService {
         })
     }
 
-    fn hydrate_published_dependencies(&self, claim: &RootPublishClaim) -> anyhow::Result<()> {
-        let Some(published) = claim.published_model_target.as_ref() else {
+    fn hydrate_published_dependencies(
+        &self,
+        receipt: &RootReceipt,
+        dependency_sessions: &Arc<std::sync::Mutex<BTreeMap<u32, u32>>>,
+    ) -> anyhow::Result<()> {
+        let Some(published) = receipt.model_target.as_ref() else {
             return Ok(());
         };
-        let mut sessions = self
-            .dependency_sessions
+        let mut sessions = dependency_sessions
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for dependency in &published.catalogue {
@@ -800,8 +1486,159 @@ fn generate_snapshot_from_set(
         .with_context(|| format!("generate root {root}"))?;
     Ok(GeneratedSnapshot {
         elements: outcome.elements,
-        owners: index.owners.clone(),
+        owners: Arc::clone(&index.owners),
         report: outcome.report,
+        visited: outcome.visited,
+    })
+}
+
+/// One evaluated element, reduced to what publication actually needs.
+///
+/// Triangulation, the SHA-256 content id and the mesh file write all happen
+/// while building this, so the `Manifold` — a world-space f64 CSG solid, the
+/// fattest representation on the chain — dies where it was computed instead of
+/// riding into the serial publication step.  What is left is a mesh id, two
+/// boxes and the element's own metadata.
+pub struct BakedElement {
+    pub geometry_id: GeometryId,
+    pub refno: RefNo,
+    pub noun: String,
+    pub is_invalid_tubi: bool,
+    pub world: DMat4,
+    pub primitive_instance: Option<e3d_model::primitive_instance::PrimitiveInstance>,
+    /// Content-addressed id; the file is already published under it.
+    pub mesh_id: String,
+    pub mesh_write: MeshWrite,
+    pub world_bounds: [[f32; 3]; 2],
+    /// Only a canonical primitive persists a local box.
+    pub local_bounds: Option<[[f32; 3]; 2]>,
+}
+
+/// A generated root after baking.  It carries no `owners`: publication reads
+/// the batch's own source index, and the single-root historical path keeps
+/// using [`GeneratedSnapshot`].
+pub struct BakedSnapshot {
+    pub elements: Vec<BakedElement>,
+    pub report: Report,
+    /// 随 [`GeneratedSnapshot::visited`] 原样带过来；烤制不改子树。
+    pub visited: Vec<RefNo>,
+}
+
+/// Triangulate, hash and publish one element's mesh.
+///
+/// Baking here means a root that later fails its `Required` check — or whose
+/// publication transaction rolls back — leaves its mesh on disk.  That is the
+/// content-addressed contract rather than a new risk: the id *is* the content
+/// hash, so an orphan is simply unreferenced and waits for reachability GC.
+fn bake_element(element: GeneratedElement, mesh_dir: &Path) -> anyhow::Result<BakedElement> {
+    let world_bounds = {
+        let world_mesh = element.parts.as_deref().map_or_else(
+            || crate::fast_model::manifold_csg::manifold_to_plant_mesh(&element.solid),
+            crate::fast_model::manifold_csg::manifolds_to_plant_mesh,
+        );
+        let aabb = world_mesh.aabb.context("world PlantMesh missing AABB")?;
+        [point3(&aabb.mins), point3(&aabb.maxs)]
+    };
+    let (mesh_id, mesh_write, local_bounds) = match element.primitive_instance.as_ref() {
+        Some(instance) => {
+            let canonical = canonical_primitive_mesh(instance.key)?;
+            let mesh = crate::fast_model::manifold_csg::manifold_to_plant_mesh(&canonical);
+            let mesh_id = canonical_mesh_id(instance.key, &mesh);
+            let aabb = mesh.aabb.context("canonical PlantMesh missing AABB")?;
+            let bounds = [point3(&aabb.mins), point3(&aabb.maxs)];
+            let write = ensure_mesh_file(&mesh_dir.join(format!("{mesh_id}.mesh")), &mesh)?;
+            (mesh_id, write, Some(bounds))
+        }
+        None => {
+            let mesh = local_generated_mesh(&element);
+            let mesh_id = baked_mesh_id(&mesh);
+            let write = ensure_mesh_file(&mesh_dir.join(format!("{mesh_id}.mesh")), &mesh)?;
+            (mesh_id, write, None)
+        }
+    };
+    Ok(BakedElement {
+        geometry_id: element.geometry_id,
+        refno: element.refno,
+        noun: element.noun,
+        is_invalid_tubi: element.is_invalid_tubi,
+        world: element.world,
+        primitive_instance: element.primitive_instance,
+        mesh_id,
+        mesh_write,
+        world_bounds,
+        local_bounds,
+    })
+}
+
+/// 失败元素的有界摘要：按 noun 聚合，再带前几条的 refno / noun / detail。
+///
+/// 整份 `{:?}` 在 7022（CABLETMPL）那种一根 4548 个失败元素的库上会把一行日志和
+/// 失败账本条目撑到几百 KB；而只写「N 个失败」又定位不了任何东西——run-ad 的 4,089 个
+/// FailedHold 就是这样查不下去的。
+pub(crate) fn summarize_geometry_incidents(failed: &[e3d_model::pipeline::Incident]) -> String {
+    const SAMPLES: usize = 5;
+    const NOUNS: usize = 8;
+    const DETAIL_CHARS: usize = 160;
+    let mut by_noun = BTreeMap::<&str, usize>::new();
+    for incident in failed {
+        *by_noun.entry(incident.noun.as_str()).or_default() += 1;
+    }
+    let mut nouns: Vec<(&str, usize)> = by_noun.into_iter().collect();
+    nouns.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(b.0)));
+    let more = nouns.len().saturating_sub(NOUNS);
+    let mut nouns = nouns
+        .iter()
+        .take(NOUNS)
+        .map(|(noun, count)| format!("{noun}×{count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if more > 0 {
+        nouns.push_str(&format!(", +{more} nouns"));
+    }
+    let samples = failed
+        .iter()
+        .take(SAMPLES)
+        .map(|incident| {
+            let mut detail: String = incident.detail.chars().take(DETAIL_CHARS).collect();
+            if incident.detail.chars().count() > DETAIL_CHARS {
+                detail.push('…');
+            }
+            format!("{} {}: {detail}", incident.refno, incident.noun)
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    format!(
+        "by noun [{nouns}]; first {}: {samples}",
+        failed.len().min(SAMPLES)
+    )
+}
+
+fn bake_elements(
+    elements: Vec<GeneratedElement>,
+    mesh_dir: &Path,
+) -> anyhow::Result<Vec<BakedElement>> {
+    elements
+        .into_iter()
+        .map(|element| bake_element(element, mesh_dir))
+        .collect()
+}
+
+/// Bake a generated root for publication.
+///
+/// An incomplete root is not baked at all.  Publishing a partial manifest would
+/// delete the GeometryIds that failed, so the consumer keeps the previously
+/// published snapshot instead — baking those meshes would only leave orphans
+/// for the reachability GC.
+fn bake_snapshot(snapshot: GeneratedSnapshot, mesh_dir: &Path) -> anyhow::Result<BakedSnapshot> {
+    let elements = if snapshot.report.failed.is_empty() {
+        bake_elements(snapshot.elements, mesh_dir)?
+    } else {
+        Vec::new()
+    };
+    Ok(BakedSnapshot {
+        elements,
+        report: snapshot.report,
+        visited: snapshot.visited,
     })
 }
 
@@ -817,6 +1654,8 @@ impl E3dPersistReport {
         self.mesh_written += other.mesh_written;
         self.mesh_ids.extend(other.mesh_ids);
         self.unique_meshes = self.mesh_ids.len();
+        self.source_sesno = self.source_sesno.or(other.source_sesno);
+        self.visited_by_root.extend(other.visited_by_root);
     }
 }
 
@@ -828,311 +1667,97 @@ pub async fn apply_geometry_delta(
     owners: &BTreeMap<(u32, u32), RefNo>,
     mesh_dir: &Path,
 ) -> anyhow::Result<E3dPersistReport> {
-    let spatial_refnos = spatial_refnos_for_delta(&upserts, &removals)?;
-    // 窗口 / 删根路径都是定向的：重写的元素排房间重算，移除的清边（ADR-010 §4 / ADR-040 §3）。
-    let room_effects = crate::fast_model::room_publication::room_publication_effects(
-        upserts
-            .iter()
-            .map(|element| (&element.geometry_id, element.refno, element.noun.as_str())),
-        &removals,
-        &BTreeSet::new(),
-    )?;
-    let _spatial_serial = if spatial_refnos.is_empty() {
-        None
-    } else {
-        Some(crate::fast_model::spatial_state::lock_spatial_serial().await)
-    };
-    let (mut statements, mut report) = prepare_geometry_delta(
+    apply_geometry_delta_on(
         ProjectionScope::Current,
         dbnum,
         source_sesno,
         upserts,
         removals,
-        None,
-        None,
-        owners,
-        mesh_dir,
-    )?;
-    let changed = report.upserted > 0 || report.removed > 0;
-    if changed {
-        statements.push_str(
-            &crate::fast_model::room_publication::render_room_publication_effects(
-                &room_effects,
-                RoomEffectPolicy::Directed,
-                crate::options::room_incremental(),
-            ),
-        );
-    }
-    if changed && !spatial_refnos.is_empty() {
-        statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
-    }
-    if changed {
-        aios_core::SUL_DB
-            .query(publication_transaction(&statements))
-            .await?
-            .check()?;
-    }
-    if changed && !spatial_refnos.is_empty() {
-        let refnos = spatial_refnos.into_iter().collect::<Vec<_>>();
-        crate::fast_model::aabb_tree::sync_tree_from_committed_pointers(&refnos).await?;
-    }
-    report.unique_meshes = report.mesh_ids.len();
-    Ok(report)
-}
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum ProjectionScope<'a> {
-    Current,
-    Historical(&'a str),
-}
-
-impl ProjectionScope<'_> {
-    fn id(self, raw: &str) -> String {
-        match self {
-            Self::Current => raw.to_string(),
-            Self::Historical(snapshot) => format!("hist_{snapshot}_{raw}"),
-        }
-    }
-
-    fn object_field(self) -> String {
-        match self {
-            Self::Current => String::new(),
-            Self::Historical(snapshot) => format!(",snapshot_key:'{snapshot}'"),
-        }
-    }
-
-    fn set_assignment(self) -> String {
-        match self {
-            Self::Current => String::new(),
-            Self::Historical(snapshot) => format!(",snapshot_key='{snapshot}'"),
-        }
-    }
-
-    fn direct_field(self) -> String {
-        match self {
-            Self::Current => String::new(),
-            Self::Historical(snapshot) => format!(",snapshot_key:'{snapshot}'"),
-        }
-    }
-}
-
-fn append_root_dependency_receipt(statements: &mut String, claim: &RootPublishClaim) {
-    let Some(target) = claim.model_target.as_ref() else {
-        return;
-    };
-    statements.push_str(&format!(
-        "DELETE root_dependency WHERE root_refno='{}';\n",
-        claim.root
-    ));
-    for dependency in &target.catalogue {
-        statements.push_str(&format!(
-            "UPSERT type::thing('root_dependency','{}_{}_{}') SET \
-             root_refno='{}', dependency_kind='CATA', dependency_dbnum={}, \
-             dependency_session={}, dependency_digest='{}', updated_at=time::now();\n",
-            claim.root.word0,
-            claim.root.word1,
-            dependency.dbnum,
-            claim.root,
-            dependency.dbnum,
-            dependency.session,
-            dependency.digest,
-        ));
-    }
-}
-
-fn prepare_cached_root_publication(
-    claim: &RootPublishClaim,
-    source_sesno: u32,
-) -> anyhow::Result<String> {
-    let target = claim
-        .model_target
-        .as_ref()
-        .context("cached publication has no current ModelTarget")?;
-    let manifest_hash = claim
-        .published_manifest_hash
-        .as_deref()
-        .context("cached publication has no manifest hash")?;
-    let geometry_count = claim
-        .published_geometry_count
-        .context("cached publication has no geometry count")?;
-    let root_id = format!("{}_{}", claim.root.word0, claim.root.word1);
-    let model_target = sql_value(&serde_json::to_value(target)?);
-    let mut statements = format!(
-        "LET $publish_root = (SELECT * FROM type::thing('gen_root', '{root_id}') LIMIT 1)[0];\n\
-         IF $publish_root = NONE OR ($publish_root.desired_revision?:0) != {revision} {{ THROW 'stale root publication revision'; }};\n\
-         IF {desired_sesno} > 0 AND {source_sesno} != {desired_sesno} {{ THROW 'mixed model target publication'; }};\n\
-         UPDATE type::thing('gen_root', '{root_id}') SET \
-          status='Generated', publication_status='ready', \
-          published_revision={revision}, published_target=desired_target, \
-          desired_model_target={model_target}, published_model_target={model_target}, \
-          published_manifest_hash='{}', published_geometry_count={geometry_count}, \
-          source_end_sesno={source_sesno}, last_error=NONE, updated_at=time::now();\n",
-        manifest_hash,
-        revision = claim.revision,
-        desired_sesno = claim.desired_source_sesno,
-    );
-    append_root_dependency_receipt(&mut statements, claim);
-    Ok(statements)
-}
-
-async fn cached_root_projection_complete(
-    claim: &RootPublishClaim,
-    source_sesno: u32,
-    mesh_dir: &Path,
-) -> anyhow::Result<bool> {
-    cached_root_projection_complete_on(&aios_core::SUL_DB, claim, source_sesno, mesh_dir).await
-}
-
-async fn cached_root_projection_complete_on(
-    db: &Surreal<Any>,
-    claim: &RootPublishClaim,
-    source_sesno: u32,
-    mesh_dir: &Path,
-) -> anyhow::Result<bool> {
-    if !cached_root_target_matches(claim, source_sesno) {
-        return Ok(false);
-    }
-    published_root_projection_complete_on(db, claim, mesh_dir).await
-}
-
-fn cached_root_target_matches(claim: &RootPublishClaim, source_sesno: u32) -> bool {
-    if claim.desired_source_sesno > 0 && claim.desired_source_sesno != source_sesno {
-        return false;
-    }
-    let Some(current) = claim.model_target.as_ref() else {
-        return false;
-    };
-    if claim.published_model_target.as_ref() != Some(current)
-        || claim.published_manifest_hash.is_none()
-    {
-        return false;
-    }
-    true
-}
-
-async fn published_root_projection_complete(
-    claim: &RootPublishClaim,
-    mesh_dir: &Path,
-) -> anyhow::Result<bool> {
-    published_root_projection_complete_on(&aios_core::SUL_DB, claim, mesh_dir).await
-}
-
-async fn published_root_projection_complete_on(
-    db: &Surreal<Any>,
-    claim: &RootPublishClaim,
-    mesh_dir: &Path,
-) -> anyhow::Result<bool> {
-    let Some(expected_count) = claim.published_geometry_count else {
-        return Ok(false);
-    };
-    let packed = (((claim.root.word0 as u64) << 32) | claim.root.word1 as u64) as i64;
-    let mut response = db
-        .query(format!(
-            "SELECT VALUE direct_model.mesh_id FROM inst_relate \
-             WHERE direct_model.source='e3d-model' AND anc CONTAINS {packed};\
-             SELECT VALUE direct_model.mesh_id FROM tubi_relate \
-             WHERE direct_model.source='e3d-model' AND anc CONTAINS {packed};"
-        ))
-        .await?
-        .check()?;
-    let mut mesh_ids: Vec<Option<String>> = response.take(0)?;
-    mesh_ids.extend(response.take::<Vec<Option<String>>>(1)?);
-    Ok(mesh_ids.len() == expected_count
-        && mesh_ids.iter().all(|mesh_id| {
-            mesh_id
-                .as_ref()
-                .is_some_and(|mesh_id| mesh_dir.join(format!("{mesh_id}.mesh")).is_file())
-        }))
-}
-
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn apply_geometry_delta_on(
-    db: &Surreal<Any>,
-    scope: ProjectionScope<'_>,
-    dbnum: u32,
-    source_sesno: u32,
-    upserts: Vec<GeneratedElement>,
-    removals: Vec<GeometryId>,
-    owners: &BTreeMap<(u32, u32), RefNo>,
-    mesh_dir: &Path,
-) -> anyhow::Result<E3dPersistReport> {
-    apply_geometry_delta_on_with_pre_e3d(
-        db,
-        scope,
-        dbnum,
-        source_sesno,
-        upserts,
-        removals,
-        None,
-        None,
         owners,
         mesh_dir,
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
-async fn apply_geometry_delta_on_with_pre_e3d(
-    db: &Surreal<Any>,
+/// 目标没变、投影也还完整时这一根的全部改动：只重盖一次章。
+///
+/// 旧版这里要发一条根凭证的 `published_*` 更新，外加一批依赖收据行；现在收据就是回执本身，
+/// 依赖清单在 `model_target.catalogue` 里带着。
+fn cached_root_commit(
+    publication: &RootPublication,
+    source_sesno: u32,
+) -> anyhow::Result<ProjectionCommit> {
+    let published = publication
+        .published
+        .as_ref()
+        .context("cached projection has no receipt")?;
+    Ok(ProjectionCommit {
+        receipt: Some((
+            publication.root,
+            RootReceipt {
+                source_sesno,
+                model_target: publication.model_target.clone(),
+                manifest_hash: published.manifest_hash.clone(),
+                geometry_count: published.geometry_count,
+            },
+        )),
+        ..ProjectionCommit::default()
+    })
+}
+
+/// 这一根能不能走「不必重算」那条路：源会话与不可变目标都必须与上一轮逐位相同。
+fn cached_root_target_matches(publication: &RootPublication, source_sesno: u32) -> bool {
+    let Some(published) = publication.published.as_ref() else {
+        return false;
+    };
+    if published.source_sesno != source_sesno {
+        return false;
+    }
+    let Some(current) = publication.model_target.as_ref() else {
+        return false;
+    };
+    published.model_target.as_ref() == Some(current)
+}
+
+/// 把一次增量投进指定投影域。历史快照与当前投影共用这一条。
+pub(crate) async fn apply_geometry_delta_on(
     scope: ProjectionScope<'_>,
     dbnum: u32,
     source_sesno: u32,
     upserts: Vec<GeneratedElement>,
     removals: Vec<GeometryId>,
-    pre_e3d_cleanup: Option<(RefNo, usize)>,
-    publish_claim: Option<&RootPublishClaim>,
     owners: &BTreeMap<(u32, u32), RefNo>,
     mesh_dir: &Path,
 ) -> anyhow::Result<E3dPersistReport> {
-    let (statements, mut report) = prepare_geometry_delta(
-        scope,
+    let (commit, mut report) = project_geometry_delta(
         dbnum,
         source_sesno,
-        upserts,
+        bake_elements(upserts, mesh_dir)?,
         removals,
-        pre_e3d_cleanup,
-        publish_claim,
+        None,
         owners,
-        mesh_dir,
     )?;
-    if report.upserted > 0 || report.removed > 0 || publish_claim.is_some() {
-        db.query(publication_transaction(&statements))
-            .await?
-            .check()?;
-    }
+    ModelMemoryStore::global().commit(scope, vec![commit]);
     report.unique_meshes = report.mesh_ids.len();
     Ok(report)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn prepare_geometry_delta(
-    scope: ProjectionScope<'_>,
+/// 把一次增量折成投影存储要的一笔改动。
+///
+/// 这里点名的每个 mesh 都已经在盘上了（见 [`bake_element`]），所以这一步只做结构化与记账，
+/// 可以留在串行的消费端而不把几何 CPU 压在它后面。
+fn project_geometry_delta(
     dbnum: u32,
     source_sesno: u32,
-    upserts: Vec<GeneratedElement>,
+    upserts: Vec<BakedElement>,
     removals: Vec<GeometryId>,
-    pre_e3d_cleanup: Option<(RefNo, usize)>,
-    publish_claim: Option<&RootPublishClaim>,
+    publication: Option<&RootPublication>,
     owners: &BTreeMap<(u32, u32), RefNo>,
-    mesh_dir: &Path,
-) -> anyhow::Result<(String, E3dPersistReport)> {
+) -> anyhow::Result<(ProjectionCommit, E3dPersistReport)> {
     let mut report = E3dPersistReport::default();
-    let mut statements = String::new();
-    if let Some(claim) = publish_claim {
-        let root_id = format!("{}_{}", claim.root.word0, claim.root.word1);
-        statements.push_str(&format!(
-            "LET $publish_root = (SELECT * FROM type::thing('gen_root', '{root_id}') LIMIT 1)[0];\n\
-             IF $publish_root = NONE OR ($publish_root.desired_revision?:0) != {revision} {{ THROW 'stale root publication revision'; }};\n\
-             IF {desired_sesno} > 0 AND {source_sesno} != {desired_sesno} {{ THROW 'mixed model target publication'; }};\n",
-            revision = claim.revision,
-            desired_sesno = claim.desired_source_sesno,
-        ));
-    }
-    let publication_guard_len = statements.len();
-    let object_field = scope.object_field();
-    let set_assignment = scope.set_assignment();
-    let direct_field = scope.direct_field();
-    let touched_tube_branches = removals
+    let mut commit = ProjectionCommit::default();
+    // 一条 BRAN 的隐式管身是整段重写的：碰到的分支先清空旧管身，再插这一轮的。
+    commit.tube_branch_resets = removals
         .iter()
         .chain(upserts.iter().map(|element| &element.geometry_id))
         .filter_map(|geometry_id| match geometry_id {
@@ -1142,245 +1767,145 @@ fn prepare_geometry_delta(
             GeometryId::Element { .. } => None,
         })
         .map(|value| parse_refno(value).map(|refno| (refno.word0, refno.word1)))
-        .collect::<anyhow::Result<BTreeSet<_>>>()?;
-    for &(word0, word1) in &touched_tube_branches {
-        match scope {
-            ProjectionScope::Current => {
-                statements.push_str(&format!("DELETE pe:⟨{}_{}⟩->tubi_relate;\n", word0, word1))
-            }
-            ProjectionScope::Historical(snapshot) => statements.push_str(&format!(
-                "DELETE tubi_relate WHERE snapshot_key='{snapshot}' AND source_refno='{}_{}';\n",
-                word0, word1
-            )),
-        }
-    }
+        .collect::<anyhow::Result<BTreeSet<_>>>()?
+        .into_iter()
+        .map(|(word0, word1)| RefNo::new(word0, word1))
+        .collect();
 
     for geometry_id in &removals {
-        let source = geometry_source_refno(&geometry_id)?;
-        let id = scope.id(&geometry_record_id(&geometry_id, source));
-        append_geometry_removal(&mut statements, &id);
+        let source = geometry_source_refno(geometry_id)?;
+        commit
+            .removals
+            .push(geometry_record_id(geometry_id, source));
         report.removed += 1;
     }
 
-    if let Some((root, expected_count)) = pre_e3d_cleanup {
-        anyhow::ensure!(
-            matches!(scope, ProjectionScope::Current),
-            "pre-e3d cleanup is valid only for the current production projection"
-        );
-        append_pre_e3d_root_cleanup(&mut statements, dbnum, root);
-        report.removed += expected_count;
-    }
-
-    let mut tube_indices = BTreeMap::<(u32, u32), usize>::new();
     let mut manifest_entries = BTreeMap::<String, Value>::new();
     for element in upserts {
         let source_refno = geometry_source_refno(&element.geometry_id)?;
-        let source_id = format!("{}_{}", source_refno.word0, source_refno.word1);
-        let id = scope.id(&geometry_record_id(&element.geometry_id, source_refno));
+        let record_id = geometry_record_id(&element.geometry_id, source_refno);
         let geometry_value = serde_json::to_value(&element.geometry_id)?;
         let geometry_key = serde_json::to_string(&element.geometry_id)?;
-        let geometry_json = sql_value(&geometry_value);
-        let anc = ancestor_chain(source_refno, owners)?;
-        let world_mesh = element.parts.as_deref().map_or_else(
-            || crate::fast_model::manifold_csg::manifold_to_plant_mesh(&element.solid),
-            crate::fast_model::manifold_csg::manifolds_to_plant_mesh,
-        );
-        let world_aabb = world_mesh.aabb.context("world PlantMesh missing AABB")?;
-        let world_bounds = [point3(&world_aabb.mins), point3(&world_aabb.maxs)];
-        // TUBI relations expose only one transform to Plant UI. A canonical
-        // tube therefore needs the element placement and the canonical local
-        // scale/centering composed into that single stored transform.
-        let persisted_world = persisted_world_transform(
+        let ancestors = ancestor_chain(source_refno, owners)?;
+        // 隐式管身只向 Plant UI 暴露一个变换，所以标准管身要把元素摆放与标准网格的
+        // 缩放 / 居中折进同一个存下来的世界变换里。
+        let world_transform = persisted_world_transform(
             &element.geometry_id,
             element.primitive_instance.as_ref(),
             element.world,
         );
-        let world_transform = transform_value(persisted_world);
+        note_mesh_write(&mut report, element.mesh_write);
+        report.mesh_ids.insert(element.mesh_id.clone());
 
-        append_geometry_representation_cleanup(&mut statements, &id);
-        statements.push_str(&format!(
-            "UPSERT type::thing('aabb','direct_world_{id}') CONTENT {{d:{{mins:{},maxs:{}}}{object_field}}};\n\
-             UPSERT type::thing('trans','direct_world_{id}') CONTENT {{d:{}{object_field}}};\n",
-            sql_value(&json!(world_bounds[0])),
-            sql_value(&json!(world_bounds[1])),
-            sql_value(&world_transform),
-        ));
-
-        if let GeometryId::ImpliedTube {
-            route_ordinal,
-            from_refno,
-            to_refno,
-            ..
-        } = &element.geometry_id
-        {
-            let from = parse_refno(from_refno)?;
-            let to = parse_refno(to_refno)?;
-            let (mesh_id, mesh, format, primitive_key) =
-                if let Some(instance) = element.primitive_instance.as_ref() {
-                    let canonical = canonical_primitive_mesh(instance.key)?;
-                    let mesh = crate::fast_model::manifold_csg::manifold_to_plant_mesh(&canonical);
-                    (
-                        canonical_mesh_id(instance.key, &mesh),
-                        mesh,
-                        "canonical-primitive-v1",
-                        Some(sql_value(&serde_json::to_value(instance.key)?)),
-                    )
-                } else {
-                    let mesh = local_generated_mesh(&element);
-                    (baked_mesh_id(&mesh), mesh, "baked-v2", None)
-                };
-            note_mesh_write(
-                &mut report,
-                ensure_mesh_file(&mesh_dir.join(format!("{mesh_id}.mesh")), &mesh)?,
-            );
-            report.mesh_ids.insert(mesh_id.clone());
-            manifest_entries.insert(
-                geometry_key,
-                json!({
-                    "geometry_id": geometry_value,
-                    "mesh": mesh_id,
-                    "world": world_transform,
-                    "noun": element.noun,
-                    "solid": true,
-                    "route_ordinal": route_ordinal,
-                }),
-            );
-            // `route_ordinal` belongs to one `(from, to)` pair, so unrelated
-            // route segments commonly both carry zero. The legacy relation id,
-            // however, is branch-global; give every emitted segment its own slot.
-            let index = next_tube_relation_slot(&mut tube_indices, source_refno);
-            statements.push_str(&legacy_tubi_relation_sql(
-                &source_id,
-                index,
-                &mesh_id,
-                &id,
-                from,
-                to,
-                &sql_value(&json!(anc)),
-                dbnum,
-                source_sesno,
-                &geometry_json,
-                format,
-                primitive_key.as_deref(),
-                scope,
-            ));
-            if primitive_key.is_some() {
+        let shape = match element.primitive_instance.as_ref() {
+            Some(instance) => {
                 report.shared_instances += 1;
-            } else {
-                report.baked_instances += 1;
+                ProjectedShape::Canonical {
+                    key: instance.key,
+                    local_transform: instance.local_transform,
+                    local_bounds: element
+                        .local_bounds
+                        .context("canonical primitive baked without local bounds")?,
+                }
             }
-            report.upserted += 1;
-            continue;
-        }
+            None => {
+                report.baked_instances += 1;
+                ProjectedShape::Baked
+            }
+        };
+        let tube = match &element.geometry_id {
+            GeometryId::ImpliedTube {
+                route_ordinal,
+                from_refno,
+                to_refno,
+                ..
+            } => Some(ProjectedTube {
+                route_ordinal: *route_ordinal,
+                from: parse_refno(from_refno)?,
+                to: parse_refno(to_refno)?,
+                invalid: element.is_invalid_tubi,
+            }),
+            GeometryId::Element { .. } => None,
+        };
 
-        if let Some(instance) = element.primitive_instance {
-            let canonical = canonical_primitive_mesh(instance.key)?;
-            let mesh = crate::fast_model::manifold_csg::manifold_to_plant_mesh(&canonical);
-            let mesh_id = canonical_mesh_id(instance.key, &mesh);
-            note_mesh_write(
-                &mut report,
-                ensure_mesh_file(&mesh_dir.join(format!("{mesh_id}.mesh")), &mesh)?,
-            );
-            report.mesh_ids.insert(mesh_id.clone());
-            let local_aabb = mesh.aabb.context("canonical PlantMesh missing AABB")?;
-            let local_transform = transform_value(instance.local_transform);
-            let key = sql_value(&serde_json::to_value(instance.key)?);
-            manifest_entries.insert(
-                geometry_key,
-                json!({
-                    "geometry_id": geometry_value,
-                    "mesh": mesh_id,
-                    "world": world_transform,
-                    "local": local_transform,
-                    "noun": element.noun,
-                    "solid": true,
-                    "primitive_key": instance.key,
-                }),
-            );
-            statements.push_str(&format!(
-                "UPSERT type::thing('aabb','direct_shared_{mesh_id}') CONTENT {{d:{{mins:{},maxs:{}}}}};\n\
-                 UPSERT type::thing('trans','direct_local_{id}') CONTENT {{d:{}{object_field}}};\n\
-                 UPSERT inst_geo:⟨{mesh_id}⟩ SET meshed=true,visible=true,bad=false,aabb=type::thing('aabb','direct_shared_{mesh_id}'),direct_model={{source:'e3d-model',format:'canonical-primitive-v1'}};\n\
-                 UPSERT type::thing('inst_info','direct_{id}') SET dbnum={dbnum},noun='{}'{set_assignment},direct_model={{source:'e3d-model',sesno:{source_sesno},geometry_id:{geometry_json}{direct_field}}};\n\
-                 RELATE inst_info:⟨direct_{id}⟩->geo_relate->inst_geo:⟨{mesh_id}⟩ SET geom_refno=type::thing('pe','{source_id}'),trans=type::thing('trans','direct_local_{id}'),visible=true,geo_type='Pos'{set_assignment};\n\
-                 UPSERT type::thing('inst_relate','{id}') SET in=type::thing('pe','{source_id}'),out=type::thing('inst_info','direct_{id}'),booled_id=NONE,booled=false,bad_bool=false,solid=true,generic='{}',dbnum={dbnum},anc={},aabb=type::thing('aabb','direct_world_{id}'),world_trans=type::thing('trans','direct_world_{id}'),insts_flat=[{{geo_hash:'{mesh_id}',transform:{}}}]{set_assignment},direct_model={{source:'e3d-model',format:'canonical-primitive-v1',sesno:{source_sesno},geometry_id:{geometry_json},mesh_id:'{mesh_id}',primitive_key:{key}{direct_field}}};\n",
-                sql_value(&json!(point3(&local_aabb.mins))),
-                sql_value(&json!(point3(&local_aabb.maxs))),
-                sql_value(&local_transform),
-                element.noun,
-                element.noun,
-                sql_value(&json!(anc)),
-                sql_value(&local_transform),
-            ));
-            report.shared_instances += 1;
-        } else {
-            let mesh = local_generated_mesh(&element);
-            let mesh_id = baked_mesh_id(&mesh);
-            note_mesh_write(
-                &mut report,
-                ensure_mesh_file(&mesh_dir.join(format!("{mesh_id}.mesh")), &mesh)?,
-            );
-            report.mesh_ids.insert(mesh_id.clone());
-            manifest_entries.insert(
-                geometry_key,
-                json!({
-                    "geometry_id": geometry_value,
-                    "mesh": mesh_id,
-                    "world": world_transform,
-                    "noun": element.noun,
-                    "solid": true,
-                    "booled": true,
-                }),
-            );
-            statements.push_str(&format!(
-                "UPSERT type::thing('inst_relate','{id}') SET in=type::thing('pe','{source_id}'),booled_id='{mesh_id}',booled=true,bad_bool=false,solid=true,generic='{}',dbnum={dbnum},anc={},aabb=type::thing('aabb','direct_world_{id}'),world_trans=type::thing('trans','direct_world_{id}'),insts_flat=[{{geo_hash:'{mesh_id}'}}]{set_assignment},direct_model={{source:'e3d-model',format:'baked-v2',sesno:{source_sesno},geometry_id:{geometry_json},mesh_id:'{mesh_id}'{direct_field}}};\n",
-                element.noun,
-                sql_value(&json!(anc)),
-            ));
-            report.baked_instances += 1;
+        // 这一根「看得见的清单」：目标变了但清单逐位没变时，几何一条都不必重写。
+        let mut entry = json!({
+            "geometry_id": geometry_value,
+            "mesh": element.mesh_id,
+            "world": transform_value(world_transform),
+            "noun": element.noun,
+            "solid": true,
+        });
+        match (&tube, &shape) {
+            (Some(tube), _) => {
+                entry["route_ordinal"] = json!(tube.route_ordinal);
+                entry["invalid"] = json!(tube.invalid);
+            }
+            (
+                None,
+                ProjectedShape::Canonical {
+                    key,
+                    local_transform,
+                    ..
+                },
+            ) => {
+                entry["local"] = transform_value(*local_transform);
+                entry["primitive_key"] = serde_json::to_value(key)?;
+            }
+            (None, ProjectedShape::Baked) => entry["booled"] = json!(true),
         }
+        manifest_entries.insert(geometry_key, entry);
+
+        commit.upserts.push(ProjectedGeometry {
+            record_id,
+            geometry_id: element.geometry_id,
+            source_refno,
+            dbnum,
+            source_sesno,
+            noun: element.noun,
+            mesh_id: element.mesh_id,
+            world_transform,
+            world_bounds: element.world_bounds,
+            ancestors,
+            shape,
+            tube,
+        });
         report.upserted += 1;
     }
-    if let Some(claim) = publish_claim {
-        let root_id = format!("{}_{}", claim.root.word0, claim.root.word1);
-        let model_target = claim
-            .model_target
-            .as_ref()
-            .map(serde_json::to_value)
-            .transpose()?
-            .map(|value| sql_value(&value))
-            .unwrap_or_else(|| "NONE".to_string());
-        let manifest_json = serde_json::to_vec(&manifest_entries)?;
-        let manifest_hash = hex::encode(Sha256::digest(&manifest_json));
+
+    if let Some(publication) = publication {
+        let manifest_hash = hex::encode(Sha256::digest(serde_json::to_vec(&manifest_entries)?));
         let geometry_count = manifest_entries.len();
-        if claim.published_projection_complete
-            && claim.published_manifest_hash.as_deref() == Some(manifest_hash.as_str())
+        if publication.projection_complete
+            && publication
+                .published
+                .as_ref()
+                .is_some_and(|published| published.manifest_hash == manifest_hash)
         {
-            // The immutable target changed, but this root's visible manifest did
-            // not. Keep the revision/receipt transition and omit every geometry
-            // DELETE/UPSERT from the publication transaction.
-            statements.truncate(publication_guard_len);
+            // 不可变目标变了，但这一根看得见的清单没变：只留回执，几何一条都不动。
+            commit.tube_branch_resets.clear();
+            commit.removals.clear();
+            commit.upserts.clear();
             report.upserted = 0;
             report.removed = 0;
         }
-        statements.push_str(&format!(
-            "UPDATE type::thing('gen_root', '{root_id}') SET \
-             status='Generated', publication_status='ready', \
-             published_revision={revision}, published_target=desired_target, \
-             desired_model_target={model_target}, published_model_target={model_target}, \
-             published_manifest_hash='{manifest_hash}', published_geometry_count={geometry_count}, \
-             source_end_sesno={source_sesno}, last_error=NONE, updated_at=time::now();\n",
-            revision = claim.revision,
+        commit.receipt = Some((
+            publication.root,
+            RootReceipt {
+                source_sesno,
+                model_target: publication.model_target.clone(),
+                manifest_hash,
+                geometry_count,
+            },
         ));
-        append_root_dependency_receipt(&mut statements, claim);
     }
     report.unique_meshes = report.mesh_ids.len();
-    Ok((statements, report))
+    Ok((commit, report))
 }
 
 fn local_generated_mesh(element: &GeneratedElement) -> PlantMesh {
     let inverse_world = element.world.inverse();
-    element.parts.as_deref().map_or_else(
+    let mut mesh = element.parts.as_deref().map_or_else(
         || {
             let local = element.solid.transform(&dmat4_to_affine4x3(inverse_world));
             crate::fast_model::manifold_csg::manifold_to_plant_mesh(&local)
@@ -1391,33 +1916,24 @@ fn local_generated_mesh(element: &GeneratedElement) -> PlantMesh {
                 inverse_world,
             )
         },
-    )
-}
-
-async fn load_root_publish_claim(root: RefNo) -> anyhow::Result<Option<RootPublishClaim>> {
-    let root_id = format!("{}_{}", root.word0, root.word1);
-    let mut response = aios_core::SUL_DB
-        .query(format!(
-            "SELECT desired_revision, desired_target, published_model_target, \
-             published_manifest_hash, published_geometry_count \
-             FROM ONLY type::thing('gen_root', '{root_id}');"
-        ))
-        .await?
-        .check()?;
-    let row: Option<RootPublishClaimRow> = response.take(0)?;
-    Ok(row.map(|row| RootPublishClaim {
-        root,
-        revision: row.desired_revision,
-        desired_source_sesno: row
-            .desired_target
-            .map(|target| target.source_end_sesno)
-            .unwrap_or_default(),
-        model_target: None,
-        published_model_target: row.published_model_target,
-        published_manifest_hash: row.published_manifest_hash,
-        published_geometry_count: row.published_geometry_count,
-        published_projection_complete: false,
-    }))
+    );
+    // Catalogue parts are evaluated in world coordinates and localized here.
+    // A pure element translation can leave ~1e-14 cancellation residue where
+    // the catalogue-local coordinate is exactly zero. PlantMesh stores f32, so
+    // canonicalizing only this numerical noise keeps its content id invariant
+    // without changing any CAD-scale feature.
+    for vertex in &mut mesh.vertices {
+        if vertex.x.abs() < 1e-10 {
+            vertex.x = 0.0;
+        }
+        if vertex.y.abs() < 1e-10 {
+            vertex.y = 0.0;
+        }
+        if vertex.z.abs() < 1e-10 {
+            vertex.z = 0.0;
+        }
+    }
+    mesh
 }
 
 fn model_file_identity_digest(path: &Path, session: u32) -> anyhow::Result<String> {
@@ -1452,151 +1968,19 @@ fn persisted_world_transform(
     }
 }
 
-fn next_tube_relation_slot(slots: &mut BTreeMap<(u32, u32), usize>, source_refno: RefNo) -> usize {
-    let next = slots
-        .entry((source_refno.word0, source_refno.word1))
-        .or_default();
-    let current = *next;
-    *next += 1;
-    current
-}
-
-#[allow(clippy::too_many_arguments)]
-fn legacy_tubi_relation_sql(
-    source_id: &str,
-    index: usize,
-    mesh_id: &str,
-    representation_id: &str,
-    from: RefNo,
-    to: RefNo,
-    anc_literal: &str,
-    dbnum: u32,
-    source_sesno: u32,
-    geometry_json: &str,
-    format: &str,
-    primitive_key: Option<&str>,
-    scope: ProjectionScope<'_>,
-) -> String {
-    let object_field = scope.object_field();
-    let direct_field = scope.direct_field();
-    let source_assignment = match scope {
-        ProjectionScope::Current => String::new(),
-        ProjectionScope::Historical(_) => format!(",source_refno:'{source_id}'"),
-    };
-    let relation_id = match scope {
-        ProjectionScope::Current => format!("tubi_relate:[pe:⟨{source_id}⟩,{index}]"),
-        ProjectionScope::Historical(_) => {
-            format!("tubi_relate:⟨{representation_id}_{index}⟩")
-        }
-    };
-    let primitive_field = primitive_key
-        .map(|key| format!(",primitive_key:{key}"))
-        .unwrap_or_default();
-    format!(
-        "UPSERT inst_geo:⟨{mesh_id}⟩ SET meshed=true,visible=true,bad=false,direct_model={{source:'e3d-model',format:'{format}'{primitive_field}}};\n\
-         INSERT RELATION INTO tubi_relate [{{id:{relation_id},in:pe:⟨{source_id}⟩,out:inst_geo:⟨{mesh_id}⟩,leave:pe:⟨{}_{}⟩,arrive:pe:⟨{}_{}⟩,aabb:aabb:⟨direct_world_{representation_id}⟩,world_trans:trans:⟨direct_world_{representation_id}⟩,bore_size:0,invalid:false,anc:{anc_literal},dbnum:{dbnum}{source_assignment}{object_field},direct_model:{{source:'e3d-model',format:'{format}',sesno:{source_sesno},geometry_id:{geometry_json},mesh_id:'{mesh_id}'{primitive_field}{direct_field}}}}}];\n",
-        from.word0, from.word1, to.word0, to.word1,
-    )
-}
-
-fn append_geometry_representation_cleanup(statements: &mut String, id: &str) {
-    statements.push_str(&format!(
-        "DELETE geo_relate WHERE in=type::thing('inst_info','direct_{id}');\n\
-         DELETE type::thing('inst_info','direct_{id}');\n\
-         DELETE type::thing('trans','direct_local_{id}');\n\
-         DELETE type::thing('inst_relate','{id}');\n"
-    ));
-}
-
-fn append_geometry_removal(statements: &mut String, id: &str) {
-    append_geometry_representation_cleanup(statements, id);
-    statements.push_str(&format!(
-        "DELETE type::thing('aabb','direct_world_{id}');\n\
-         DELETE type::thing('trans','direct_world_{id}');\n"
-    ));
-}
-
-fn append_pre_e3d_root_cleanup(statements: &mut String, dbnum: u32, root: RefNo) {
-    // Candidate selection and deletion deliberately live in the same database
-    // transaction as the e3d replacement.  Re-checking source/table/ancestry at
-    // mutation time prevents a row that was concurrently replaced by e3d-model
-    // from being deleted.  Only visibility-owning relations are removed here;
-    // legacy inst_info/geo_relate/mesh objects are left for reachability GC.
-    statements.push_str(&pre_e3d_delete_query(dbnum, root));
-}
-
-async fn existing_geometry_ids(dbnum: u32, root: RefNo) -> anyhow::Result<Vec<GeometryId>> {
-    let query = existing_geometry_ids_query(dbnum, root);
-    let mut response = aios_core::SUL_DB.query(query).await?.check()?;
-    let mut rows: Vec<GeometryId> = response.take(0)?;
-    rows.extend(response.take::<Vec<GeometryId>>(1)?);
-    Ok(rows)
-}
-
-async fn pre_e3d_relation_count(dbnum: u32, root: RefNo) -> anyhow::Result<usize> {
-    pre_e3d_relation_count_on(&aios_core::SUL_DB, dbnum, root).await
-}
-
-/// Source PE keys whose current-projection rows are about to be removed by the
-/// pre-e3d root cleanup.  They have no GeometryId manifest, so this query must
-/// run before publication and feed the post-commit spatial mirror sync.
-async fn pre_e3d_spatial_refnos(dbnum: u32, root: RefNo) -> anyhow::Result<BTreeSet<RefnoEnum>> {
-    pre_e3d_spatial_refnos_on(&aios_core::SUL_DB, dbnum, root).await
-}
-
-async fn pre_e3d_spatial_refnos_on(
-    db: &Surreal<Any>,
-    dbnum: u32,
-    root: RefNo,
-) -> anyhow::Result<BTreeSet<RefnoEnum>> {
-    let mut response = db
-        .query(pre_e3d_spatial_refnos_query(dbnum, root))
-        .await?
-        .check()?;
-    let mut values = response.take::<Vec<Thing>>(0)?;
-    values.extend(response.take::<Vec<Thing>>(1)?);
-    values
-        .into_iter()
-        .map(crate::data_interface::helper::pe_thing_to_refno)
-        .collect()
-}
-
-async fn pre_e3d_relation_count_on(
-    db: &Surreal<Any>,
-    dbnum: u32,
-    root: RefNo,
-) -> anyhow::Result<usize> {
-    let mut response = db
-        .query(pre_e3d_relation_count_query(dbnum, root))
-        .await?
-        .check()?;
-    let inst = response.take::<Option<usize>>(0)?.unwrap_or_default();
-    let tubi = response.take::<Option<usize>>(1)?.unwrap_or_default();
-    Ok(inst + tubi)
-}
-
-/// Remove every persisted e3d-model geometry owned by one generation root.
+/// Remove every projected e3d-model geometry owned by one generation root.
 ///
-/// Derived geometry (for example implied tubes) has a content-addressed
-/// `inst_relate:derived_*` id, so deleting only the PE subtree's ordinary
-/// `inst_relate:<refno>` rows leaves it behind.  Use the same geometry-id
-/// cleanup path as regeneration so all representations are removed together.
+/// Derived geometry (for example implied tubes) has a content-addressed record
+/// id, so removing only the PE subtree's ordinary `<refno>` records would leave
+/// it behind.  Go through the same geometry-id path as regeneration so every
+/// representation of the root is dropped together.
 pub async fn delete_persisted_geometry_root(root: RefNo) -> anyhow::Result<usize> {
-    #[derive(serde::Deserialize)]
-    struct PersistedGeometryRow {
-        dbnum: u32,
-        geometry_id: GeometryId,
-    }
-
-    let mut response = aios_core::SUL_DB
-        .query(persisted_geometry_rows_query(root))
-        .await?
-        .check()?;
-    let mut rows: Vec<PersistedGeometryRow> = response.take(0)?;
-    rows.extend(response.take::<Vec<PersistedGeometryRow>>(1)?);
     let mut by_dbnum = BTreeMap::<u32, Vec<GeometryId>>::new();
-    for row in rows {
-        by_dbnum.entry(row.dbnum).or_default().push(row.geometry_id);
+    for record in ModelMemoryStore::global().records_of_root(ProjectionScope::Current, root) {
+        by_dbnum
+            .entry(record.dbnum)
+            .or_default()
+            .push(record.geometry_id);
     }
 
     let mut removed = 0;
@@ -1615,113 +1999,28 @@ pub async fn delete_persisted_geometry_root(root: RefNo) -> anyhow::Result<usize
     Ok(removed)
 }
 
-fn persisted_geometry_rows_query(root: RefNo) -> String {
-    let packed = (((root.word0 as u64) << 32) | root.word1 as u64) as i64;
-    format!(
-        "SELECT dbnum, direct_model.geometry_id AS geometry_id FROM inst_relate \
-         WHERE direct_model.source='e3d-model' \
-         AND direct_model.geometry_id != NONE AND anc CONTAINS {packed};\
-         SELECT dbnum, direct_model.geometry_id AS geometry_id FROM tubi_relate \
-         WHERE direct_model.source='e3d-model' \
-         AND direct_model.geometry_id != NONE AND anc CONTAINS {packed};"
-    )
-}
-
-fn existing_geometry_ids_query(dbnum: u32, root: RefNo) -> String {
-    let packed = (((root.word0 as u64) << 32) | root.word1 as u64) as i64;
-    format!(
-        "SELECT VALUE direct_model.geometry_id FROM inst_relate \
-         WHERE dbnum={dbnum} AND direct_model.source='e3d-model' \
-         AND direct_model.geometry_id != NONE AND anc CONTAINS {packed};\
-         SELECT VALUE direct_model.geometry_id FROM tubi_relate \
-         WHERE dbnum={dbnum} AND direct_model.source='e3d-model' \
-         AND direct_model.geometry_id != NONE AND anc CONTAINS {packed};"
-    )
-}
-
-fn pre_e3d_predicates(dbnum: u32, root: RefNo) -> (String, String) {
-    let packed = (((root.word0 as u64) << 32) | root.word1 as u64) as i64;
-    let common = format!(
-        "dbnum={dbnum} AND anc CONTAINS {packed} \
-         AND (direct_model.source = NONE OR direct_model.source = 'legacy') \
-         AND record::tb(in) = 'pe'"
-    );
-    let inst = format!(
-        "{common} AND type::is::string(record::id(id)) \
-         AND <string>record::id(id) = <string>record::id(in)"
-    );
-    (inst, common)
-}
-
-fn pre_e3d_relation_count_query(dbnum: u32, root: RefNo) -> String {
-    let (inst, tubi) = pre_e3d_predicates(dbnum, root);
-    format!(
-        "RETURN array::len((SELECT VALUE id FROM inst_relate WHERE {inst}));\
-         RETURN array::len((SELECT VALUE id FROM tubi_relate WHERE {tubi}));"
-    )
-}
-
-fn pre_e3d_spatial_refnos_query(dbnum: u32, root: RefNo) -> String {
-    let (inst, tubi) = pre_e3d_predicates(dbnum, root);
-    format!(
-        "SELECT VALUE in FROM inst_relate WHERE {inst};\
-         SELECT VALUE in FROM tubi_relate WHERE {tubi};"
-    )
-}
-
-fn pre_e3d_delete_query(dbnum: u32, root: RefNo) -> String {
-    let (inst, tubi) = pre_e3d_predicates(dbnum, root);
-    format!(
-        "DELETE inst_relate WHERE {inst};\n\
-         DELETE tubi_relate WHERE {tubi};\n"
-    )
-}
-
-/// The newest e3d-model source session already published for `dbnum`, if any.
-async fn persisted_e3d_session(dbnum: u32) -> anyhow::Result<Option<u32>> {
-    let mut response = aios_core::SUL_DB
-        .query(format!(
-            "SELECT VALUE direct_model.sesno FROM inst_relate \
-             WHERE dbnum={dbnum} AND direct_model.source='e3d-model' \
-             AND direct_model.sesno != NONE \
-             ORDER BY direct_model.sesno DESC LIMIT 1;\
-             SELECT VALUE direct_model.sesno FROM tubi_relate \
-             WHERE dbnum={dbnum} AND direct_model.source='e3d-model' \
-             AND direct_model.sesno != NONE \
-             ORDER BY direct_model.sesno DESC LIMIT 1;"
-        ))
-        .await?
-        .check()?;
-    Ok(response
-        .take::<Vec<u32>>(0)?
-        .into_iter()
-        .chain(response.take::<Vec<u32>>(1)?)
-        .max())
-}
-
-/// Full generation must never regress the published projection. With the
-/// source pinned to the file's latest session this only trips when the file
-/// itself was rolled back or replaced, which is a file anomaly, not a window
-/// to skip.
+/// Full generation must never regress the projection. With the source pinned to
+/// the file's latest session this only trips when the file itself was rolled
+/// back or replaced, which is a file anomaly, not a window to skip.
 async fn ensure_not_older_than_persisted(dbnum: u32, source_sesno: u32) -> anyhow::Result<()> {
-    let persisted = persisted_e3d_session(dbnum).await?;
+    let projected = ModelMemoryStore::global().published_sesno(ProjectionScope::Current, dbnum);
     anyhow::ensure!(
-        session_not_stale(persisted, source_sesno),
-        "stale e3d-model session {source_sesno} cannot overwrite persisted session {}",
-        persisted.unwrap_or_default()
+        session_not_stale(projected, source_sesno),
+        "stale e3d-model session {source_sesno} cannot overwrite projected session {}",
+        projected.unwrap_or_default()
     );
     Ok(())
 }
 
-/// An explicit window target that is older than what is already published has
+/// An explicit window target that is older than what is already projected has
 /// been superseded (ADR-054 constraint 5): the caller settles it as covered.
 async fn persisted_session_newer_than(
     dbnum: u32,
     target_sesno: u32,
 ) -> anyhow::Result<Option<u32>> {
-    Ok(persisted_e3d_session(dbnum)
-        .await?
-        .filter(|persisted| *persisted > target_sesno))
+    Ok(ModelMemoryStore::global()
+        .published_sesno(ProjectionScope::Current, dbnum)
+        .filter(|projected| *projected > target_sesno))
 }
 
 fn session_not_stale(persisted: Option<u32>, source_sesno: u32) -> bool {
@@ -1733,10 +2032,6 @@ fn increment_failure_count(report: &IncrementReport) -> usize {
         + report.derived_failed.len()
         + report.unresolved.len()
         + report.derived_stale_unreadable.len()
-}
-
-fn publication_transaction(statements: &str) -> String {
-    format!("BEGIN TRANSACTION;\n{statements}COMMIT TRANSACTION;\n")
 }
 
 fn note_mesh_write(report: &mut E3dPersistReport, outcome: MeshWrite) {
@@ -1766,7 +2061,10 @@ pub(crate) fn scan_index(path: &Path, sesno: Option<u32>) -> anyhow::Result<Sour
                 .then_some(refno)
         })
         .collect();
-    Ok(SourceIndex { roots, owners })
+    Ok(SourceIndex {
+        roots,
+        owners: Arc::new(owners),
+    })
 }
 
 pub fn parse_refno(value: &str) -> anyhow::Result<RefNo> {
@@ -1777,33 +2075,13 @@ pub fn parse_refno(value: &str) -> anyhow::Result<RefNo> {
     Ok(RefNo::new(word0.parse()?, word1.parse()?))
 }
 
-fn geometry_source_refno(id: &GeometryId) -> anyhow::Result<RefNo> {
+pub(crate) fn geometry_source_refno(id: &GeometryId) -> anyhow::Result<RefNo> {
     match id {
         GeometryId::Element { refno } => parse_refno(refno),
         GeometryId::ImpliedTube {
             container_refno, ..
         } => parse_refno(container_refno),
     }
-}
-
-/// Current-projection AABB rows are keyed by the geometry source PE.  Collect
-/// the exact keys whose committed pointers must be mirrored into the process
-/// spatial tree after publication.  Historical projections deliberately do
-/// not call this helper: their namespaced kv-mem rows never affect the current
-/// tree or its epoch.
-fn spatial_refnos_for_delta(
-    upserts: &[GeneratedElement],
-    removals: &[GeometryId],
-) -> anyhow::Result<BTreeSet<RefnoEnum>> {
-    upserts
-        .iter()
-        .map(|element| &element.geometry_id)
-        .chain(removals.iter())
-        .map(|geometry_id| {
-            geometry_source_refno(geometry_id)
-                .map(|refno| RefnoEnum::from(RefU64::from_two_nums(refno.word0, refno.word1)))
-        })
-        .collect()
 }
 
 fn ancestor_chain(refno: RefNo, owners: &BTreeMap<(u32, u32), RefNo>) -> anyhow::Result<Vec<i64>> {
@@ -1829,7 +2107,7 @@ fn ancestor_chain(refno: RefNo, owners: &BTreeMap<(u32, u32), RefNo>) -> anyhow:
     Ok(chain)
 }
 
-fn transform_value(matrix: DMat4) -> Value {
+pub(crate) fn transform_value(matrix: DMat4) -> Value {
     let (scale, rotation, translation) = matrix.to_scale_rotation_translation();
     json!({
         "translation": [translation.x as f32, translation.y as f32, translation.z as f32],
@@ -1842,14 +2120,100 @@ fn point3(point: &parry3d::math::Point<f32>) -> [f32; 3] {
     [point.x, point.y, point.z]
 }
 
-fn sql_value(value: &Value) -> String {
-    serde_json::to_string(value).expect("JSON value")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fast_model::model_memory_store::packed_refno;
     use std::collections::HashMap;
+
+    fn baked_element(refno: RefNo, mesh_id: &str) -> BakedElement {
+        BakedElement {
+            geometry_id: GeometryId::Element {
+                refno: refno.to_string(),
+            },
+            refno,
+            noun: "EQUI".into(),
+            is_invalid_tubi: false,
+            world: DMat4::IDENTITY,
+            primitive_instance: None,
+            mesh_id: mesh_id.into(),
+            mesh_write: MeshWrite::Reused,
+            world_bounds: [[0.0; 3], [1.0; 3]],
+            local_bounds: None,
+        }
+    }
+
+    fn baked_tube(branch: RefNo, route_ordinal: u32, mesh_id: &str) -> BakedElement {
+        BakedElement {
+            geometry_id: GeometryId::ImpliedTube {
+                container_refno: branch.to_string(),
+                route_ordinal,
+                from_refno: "24383/10".into(),
+                to_refno: "24383/20".into(),
+            },
+            refno: branch,
+            noun: "TUBI".into(),
+            is_invalid_tubi: false,
+            world: DMat4::IDENTITY,
+            primitive_instance: None,
+            mesh_id: mesh_id.into(),
+            mesh_write: MeshWrite::Reused,
+            world_bounds: [[0.0; 3], [1.0; 3]],
+            local_bounds: None,
+        }
+    }
+
+    #[test]
+    fn an_invalid_implied_tube_survives_projection_for_the_ui() {
+        let root = RefNo::new(24383, 100);
+        let branch = RefNo::new(24383, 73948);
+        let owners = BTreeMap::from([
+            ((root.word0, root.word1), root),
+            ((branch.word0, branch.word1), root),
+        ]);
+        let mut tube = baked_tube(branch, 0, "diagnostic_tube");
+        tube.is_invalid_tubi = true;
+
+        let (commit, _) = project_geometry_delta(7997, 42, vec![tube], Vec::new(), None, &owners)
+            .expect("project invalid tube");
+
+        assert!(commit.upserts[0].tube.as_ref().unwrap().invalid);
+    }
+
+    /// 本文件的正文，行尾归一。护栏测试按文本形状判定，`core.autocrlf` 决定的检出行尾
+    /// 不该让它们时红时绿。
+    fn service_source() -> String {
+        include_str!("e3d_model_service.rs").replace("\r\n", "\n")
+    }
+
+    fn production_half(source: &str) -> &str {
+        source.split_once("mod tests {").expect("test module").0
+    }
+
+    /// 本模块只生成、只写进程内投影。任何一处库句柄、SQL 片段或事务都是回退：
+    /// 落库是另一层适配器的事，从这里长回来的第一行 SQL 就是那条边界破了。
+    #[test]
+    fn the_generation_service_never_reaches_for_a_database() {
+        let source = service_source();
+        let production = production_half(&source);
+        for forbidden in [
+            "SUL_DB",
+            "surrealdb",
+            "type::thing",
+            "UPSERT",
+            "INSERT RELATION",
+            "BEGIN TRANSACTION",
+            "publication_transaction",
+            "gen_root",
+            "inst_relate",
+            "tubi_relate",
+        ] {
+            assert!(
+                !production.contains(forbidden),
+                "生成入口不许认识数据库，却出现了 {forbidden}"
+            );
+        }
+    }
 
     #[test]
     fn baked_persistence_keeps_independent_parts_in_local_coordinates() {
@@ -1868,6 +2232,7 @@ mod tests {
             },
             refno: RefNo::new(1, 2),
             noun: "HELE".into(),
+            is_invalid_tubi: false,
             name: None,
             solid: manifold_csg::Manifold::compose(&parts),
             parts: Some(parts),
@@ -1894,6 +2259,38 @@ mod tests {
     }
 
     #[test]
+    fn pure_translation_keeps_baked_catalogue_mesh_id() {
+        fn element_at(translation: glam::DVec3) -> GeneratedElement {
+            let world =
+                DMat4::from_translation(translation) * DMat4::from_rotation_z(30_f64.to_radians());
+            let local = manifold_csg::Manifold::cube(20.0, 20.0, 20.0, true);
+            let parts = vec![local.transform(&dmat4_to_affine4x3(world))];
+            GeneratedElement {
+                geometry_id: GeometryId::Element {
+                    refno: "1/2".into(),
+                },
+                refno: RefNo::new(1, 2),
+                noun: "VALV".into(),
+                is_invalid_tubi: false,
+                name: None,
+                solid: manifold_csg::Manifold::compose(&parts),
+                parts: Some(parts),
+                world,
+                primitive_instance: None,
+                negatives_applied: 0,
+                negatives_skipped: vec![],
+                notes: vec![],
+            }
+        }
+
+        let before =
+            local_generated_mesh(&element_at(glam::DVec3::new(-2685.11, -8478.79, 334.34)));
+        let after = local_generated_mesh(&element_at(glam::DVec3::new(-2685.11, -8478.79, 659.34)));
+
+        assert_eq!(baked_mesh_id(&before), baked_mesh_id(&after));
+    }
+
+    #[test]
     fn every_incomplete_increment_bucket_blocks_publication() {
         let incident = e3d_model::pipeline::Incident {
             refno: "1/2".into(),
@@ -1908,107 +2305,159 @@ mod tests {
         assert_eq!(increment_failure_count(&report), 4);
     }
 
-    #[tokio::test]
-    async fn cohort_publication_rolls_back_every_root_when_one_claim_is_stale() {
-        let db = surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(())
-            .await
-            .expect("mem surreal");
-        db.use_ns("cohort")
-            .use_db("cohort")
-            .await
-            .expect("select fixture database");
-        db.query("CREATE gen_root:a SET published_revision=0; CREATE gen_root:b SET published_revision=0;")
-            .await
-            .expect("seed roots")
-            .check()
-            .expect("valid seed");
+    /// 一根重投影的完整形状：碰过的分支先清管身，上一轮留下、这一轮没再生成的几何被删，
+    /// 新几何带着祖先链进存储，回执盖在根上。
+    #[test]
+    fn a_reprojected_root_resets_its_branch_tubes_and_drops_stale_geometry() {
+        let store = ModelMemoryStore::default();
+        let root = RefNo::new(24383, 100);
+        let branch = RefNo::new(24383, 73948);
+        // 祖先链走到「owner 不在索引里」为止，所以根自己也要在表里（指向自身）。
+        let owners = BTreeMap::from([
+            ((root.word0, root.word1), root),
+            ((branch.word0, branch.word1), root),
+            ((24383, 5), root),
+            ((24383, 6), root),
+        ]);
 
-        let result = db
-            .query(publication_transaction(
-                "UPDATE gen_root:a SET published_revision=1; \
-                 THROW 'stale root publication revision'; \
-                 UPDATE gen_root:b SET published_revision=1;",
-            ))
-            .await
-            .and_then(|response| response.check());
-        assert!(result.is_err(), "stale cohort must reject the commit");
+        let (first, _) = project_geometry_delta(
+            7997,
+            42,
+            vec![
+                baked_element(RefNo::new(24383, 5), "mesh_five"),
+                baked_element(RefNo::new(24383, 6), "mesh_six"),
+                baked_tube(branch, 0, "mesh_tube_a"),
+            ],
+            Vec::new(),
+            None,
+            &owners,
+        )
+        .expect("first projection");
+        store.commit(ProjectionScope::Current, vec![first]);
+        assert_eq!(
+            store
+                .geometry_ids_of_root(ProjectionScope::Current, 7997, root)
+                .len(),
+            3
+        );
 
-        let mut response = db
-            .query("RETURN [gen_root:a.published_revision, gen_root:b.published_revision];")
-            .await
-            .expect("read roots")
-            .check()
-            .expect("valid read");
-        let revisions: Vec<u64> = response.take(0).expect("decode revisions");
-        assert_eq!(revisions, vec![0, 0]);
+        // 第二轮：5 还在、6 没了、分支上换了一段新管身。
+        let stale = store
+            .geometry_ids_of_root(ProjectionScope::Current, 7997, root)
+            .into_iter()
+            .filter(|geometry_id| {
+                matches!(geometry_id, GeometryId::Element { refno } if refno.contains("/6"))
+            })
+            .collect::<Vec<_>>();
+        let (second, report) = project_geometry_delta(
+            7997,
+            43,
+            vec![
+                baked_element(RefNo::new(24383, 5), "mesh_five"),
+                baked_tube(branch, 1, "mesh_tube_b"),
+            ],
+            stale,
+            None,
+            &owners,
+        )
+        .expect("second projection");
+        assert_eq!((report.upserted, report.removed), (2, 1));
+        assert_eq!(
+            second.tube_branch_resets,
+            vec![branch],
+            "碰过的分支要整段重置，而不是逐段增删"
+        );
+        store.commit(ProjectionScope::Current, vec![second]);
+
+        let records = store.records_of_root(ProjectionScope::Current, root);
+        let mut meshes = records
+            .iter()
+            .map(|record| record.mesh_id.as_str())
+            .collect::<Vec<_>>();
+        meshes.sort_unstable();
+        assert_eq!(meshes, vec!["mesh_five", "mesh_tube_b"]);
+        assert!(
+            records
+                .iter()
+                .all(|record| record.ancestors.contains(&packed_refno(root))),
+            "每条记录都要带着到根的祖先链，按根查才捞得回来"
+        );
+        assert_eq!(
+            store.published_sesno(ProjectionScope::Current, 7997),
+            Some(43)
+        );
     }
 
+    /// 目标变了但这一根看得见的清单逐位没变：只留回执，几何一条都不写。
     #[test]
-    fn unchanged_manifest_emits_only_revision_and_receipt_sql() {
+    fn an_unchanged_manifest_commits_only_the_receipt() {
         let root = RefNo::new(1, 2);
         let empty_manifest = serde_json::to_vec(&BTreeMap::<String, Value>::new()).unwrap();
-        let claim = RootPublishClaim {
+        let publication = RootPublication {
             root,
-            revision: 7,
-            desired_source_sesno: 42,
             model_target: None,
-            published_model_target: None,
-            published_manifest_hash: Some(hex::encode(Sha256::digest(empty_manifest))),
-            published_geometry_count: Some(0),
-            published_projection_complete: true,
+            published: Some(RootReceipt {
+                source_sesno: 42,
+                model_target: None,
+                manifest_hash: hex::encode(Sha256::digest(empty_manifest)),
+                geometry_count: 0,
+            }),
+            projection_complete: true,
         };
-        let (sql, report) = prepare_geometry_delta(
-            ProjectionScope::Current,
+        let (commit, report) = project_geometry_delta(
             8000,
             42,
             Vec::new(),
-            Vec::new(),
-            Some((root, 5)),
-            Some(&claim),
+            vec![GeometryId::Element {
+                refno: "8000/9".into(),
+            }],
+            Some(&publication),
             &BTreeMap::new(),
-            Path::new("."),
         )
         .expect("prepare unchanged root");
 
-        assert_eq!(report.upserted, 0);
-        assert_eq!(report.removed, 0);
-        assert!(!sql.contains("DELETE inst_relate"), "{sql}");
-        assert!(!sql.contains("UPSERT inst_relate"), "{sql}");
-        assert!(sql.contains("published_revision=7"), "{sql}");
-        assert!(sql.contains("published_geometry_count=0"), "{sql}");
+        assert_eq!((report.upserted, report.removed), (0, 0));
+        assert!(commit.removals.is_empty(), "{commit:?}");
+        assert!(commit.upserts.is_empty(), "{commit:?}");
+        let (receipt_root, receipt) = commit.receipt.expect("receipt still lands");
+        assert_eq!(receipt_root, root);
+        assert_eq!(receipt.geometry_count, 0);
     }
 
+    /// 上一轮的投影不完整（比如 mesh 文件被删过）时，同一份清单必须照旧重写一遍。
     #[test]
-    fn unchanged_manifest_repairs_an_incomplete_published_projection() {
+    fn an_unchanged_manifest_still_repairs_an_incomplete_projection() {
         let root = RefNo::new(24383, 73948);
         let empty_manifest = serde_json::to_vec(&BTreeMap::<String, Value>::new()).unwrap();
-        let claim = RootPublishClaim {
+        let publication = RootPublication {
             root,
-            revision: 7,
-            desired_source_sesno: 42,
             model_target: None,
-            published_model_target: None,
-            published_manifest_hash: Some(hex::encode(Sha256::digest(empty_manifest))),
-            published_geometry_count: Some(0),
-            published_projection_complete: false,
+            published: Some(RootReceipt {
+                source_sesno: 42,
+                model_target: None,
+                manifest_hash: hex::encode(Sha256::digest(empty_manifest)),
+                geometry_count: 0,
+            }),
+            projection_complete: false,
         };
-        let (sql, _) = prepare_geometry_delta(
-            ProjectionScope::Current,
+        let (commit, report) = project_geometry_delta(
             8000,
             42,
             Vec::new(),
-            Vec::new(),
-            Some((root, 1)),
-            Some(&claim),
+            vec![GeometryId::Element {
+                refno: "8000/9".into(),
+            }],
+            Some(&publication),
             &BTreeMap::new(),
-            Path::new("."),
         )
-        .expect("prepare repair publication");
-        assert!(sql.contains("DELETE inst_relate"), "{sql}");
+        .expect("prepare repair projection");
+        assert_eq!(report.removed, 1);
+        assert_eq!(commit.removals, vec!["8000_9".to_string()]);
     }
 
+    /// 不可变目标与源会话都没变，投影也完整：这一根连几何都不必求值，只重盖一次章。
     #[test]
-    fn identical_immutable_target_republishes_before_any_geometry_build() {
+    fn an_identical_immutable_target_reprojects_before_any_geometry_build() {
         let target = ModelTarget {
             project: "fixture".into(),
             design: ModelFileTarget {
@@ -2023,111 +2472,77 @@ mod tests {
             generator_fingerprint: "generator".into(),
             tessellation_profile: "tessellation".into(),
         };
-        let claim = RootPublishClaim {
+        let publication = RootPublication {
             root: RefNo::new(1, 2),
-            revision: 8,
-            desired_source_sesno: 42,
             model_target: Some(target.clone()),
-            published_model_target: Some(target),
-            published_manifest_hash: Some("manifest".into()),
-            published_geometry_count: Some(3),
-            published_projection_complete: true,
+            published: Some(RootReceipt {
+                source_sesno: 42,
+                model_target: Some(target),
+                manifest_hash: "manifest".into(),
+                geometry_count: 3,
+            }),
+            projection_complete: true,
         };
-        let sql = prepare_cached_root_publication(&claim, 42).expect("cached publication SQL");
-        assert!(sql.contains("published_revision=8"), "{sql}");
-        assert!(sql.contains("published_manifest_hash='manifest'"), "{sql}");
-        assert!(!sql.contains("DELETE inst_relate"), "{sql}");
-        assert!(!sql.contains("UPSERT inst_relate"), "{sql}");
-        assert!(!sql.contains("inst_geo"), "{sql}");
+        assert!(cached_root_target_matches(&publication, 42));
+        assert!(
+            !cached_root_target_matches(&publication, 43),
+            "源会话变了就不算命中"
+        );
+
+        let commit = cached_root_commit(&publication, 42).expect("cached commit");
+        assert!(commit.upserts.is_empty());
+        assert!(commit.removals.is_empty());
+        assert!(commit.tube_branch_resets.is_empty());
+        let (_, receipt) = commit.receipt.expect("receipt");
+        assert_eq!(receipt.manifest_hash, "manifest");
+        assert_eq!(receipt.geometry_count, 3);
     }
 
-    #[tokio::test]
-    async fn cached_target_requires_every_published_mesh_file() {
-        let db = surrealdb::engine::any::connect("mem://")
-            .await
-            .expect("mem surreal");
-        db.use_ns("cached_target")
-            .use_db("cached_target")
-            .await
-            .expect("namespace");
-        db.query(
-            "CREATE inst_relate:a SET anc=[4294967298], \
-             direct_model={source:'e3d-model',mesh_id:'mesh-a'};",
-        )
-        .await
-        .expect("seed relation")
-        .check()
-        .expect("valid relation");
-        let target = ModelTarget {
-            project: "fixture".into(),
-            design: ModelFileTarget {
-                dbnum: 8000,
-                db_type: "DESI".into(),
-                file: "design.db".into(),
-                session: 42,
-                digest: "design".into(),
-            },
-            catalogue: Vec::new(),
-            template_attlib_digest: "attlib".into(),
-            generator_fingerprint: "generator".into(),
-            tessellation_profile: "tessellation".into(),
-        };
-        let claim = RootPublishClaim {
+    /// 上一轮没投过、或者投的是另一个目标，都不许走「不必重算」那条路。
+    #[test]
+    fn a_missing_or_different_target_never_hits_the_cache() {
+        let mut publication = RootPublication {
             root: RefNo::new(1, 2),
-            revision: 8,
-            desired_source_sesno: 42,
-            model_target: Some(target.clone()),
-            published_model_target: Some(target),
-            published_manifest_hash: Some("manifest".into()),
-            published_geometry_count: Some(1),
-            published_projection_complete: true,
+            model_target: None,
+            published: None,
+            projection_complete: false,
         };
-        let mesh_dir = std::env::temp_dir().join(format!(
-            "e3d-model-cache-test-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&mesh_dir).unwrap();
-        let mesh = mesh_dir.join("mesh-a.mesh");
-        std::fs::write(&mesh, b"fixture").unwrap();
+        assert!(!cached_root_target_matches(&publication, 42));
+
+        publication.published = Some(RootReceipt {
+            source_sesno: 42,
+            model_target: None,
+            manifest_hash: "manifest".into(),
+            geometry_count: 0,
+        });
         assert!(
-            cached_root_projection_complete_on(&db, &claim, 42, &mesh_dir)
-                .await
-                .unwrap()
+            !cached_root_target_matches(&publication, 42),
+            "本轮算不出目标就不能声称命中"
         );
-        std::fs::remove_file(&mesh).unwrap();
-        assert!(
-            !cached_root_projection_complete_on(&db, &claim, 42, &mesh_dir)
-                .await
-                .unwrap(),
-            "missing mesh must fall back to full generation"
-        );
-        std::fs::remove_dir_all(mesh_dir).unwrap();
     }
 
     #[test]
-    fn immutable_target_cache_gate_precedes_snapshot_generation() {
-        let source = include_str!("e3d_model_service.rs");
-        let body = source
-            .split_once("async fn generate_refs(")
-            .expect("generate_refs")
-            .1
-            .split_once("fn pin(&self")
-            .expect("generate_refs end")
-            .0;
-        let cache_gate = body
-            .find("published_root_projection_complete(")
-            .expect("cache gate");
-        let generation = body
-            .find("generate_snapshot_from_set(")
-            .expect("snapshot generation");
-        assert!(
-            cache_gate < generation,
-            "the immutable-target hit must return before geometry evaluation"
+    fn model_file_target_digest_pins_file_identity_and_session() {
+        let path = std::env::temp_dir().join(format!("e3d-model-target-{}.db", std::process::id()));
+        std::fs::write(&path, b"fixture-v1").expect("write fixture");
+        let first = model_file_identity_digest(&path, 41).expect("first digest");
+        assert_eq!(
+            first,
+            model_file_identity_digest(&path, 41).expect("repeat digest"),
+            "the same immutable target must serialize deterministically"
         );
+        assert_ne!(
+            first,
+            model_file_identity_digest(&path, 42).expect("new session digest"),
+            "session is part of target identity"
+        );
+        std::fs::write(&path, b"fixture-v2-longer").expect("replace fixture");
+        assert_ne!(
+            first,
+            model_file_identity_digest(&path, 41).expect("replacement digest"),
+            "same path with replaced content identity is a new target"
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -2158,92 +2573,7 @@ mod tests {
     }
 
     #[test]
-    fn current_projection_spatial_targets_follow_geometry_sources_and_deduplicate() {
-        let element = GeometryId::Element {
-            refno: "24384/25729".into(),
-        };
-        let tube = GeometryId::ImpliedTube {
-            container_refno: "24384/25729".into(),
-            route_ordinal: 0,
-            from_refno: "24384/1".into(),
-            to_refno: "24384/2".into(),
-        };
-        let targets = spatial_refnos_for_delta(&[], &[element, tube]).expect("spatial targets");
-        assert_eq!(targets.len(), 1);
-        assert_eq!(targets.iter().next().unwrap().to_pdms_str(), "24384/25729");
-    }
-
-    #[test]
-    fn exact_removal_never_deletes_a_shared_mesh() {
-        let mut sql = String::new();
-        append_geometry_removal(&mut sql, "derived_deadbeef");
-        assert!(sql.contains("inst_relate','derived_deadbeef"));
-        assert!(sql.contains("inst_info','direct_derived_deadbeef"));
-        assert!(!sql.contains("DELETE inst_geo"));
-        assert!(!sql.contains(".mesh"));
-        assert!(!sql.contains("booled_id"));
-    }
-
-    #[test]
-    fn implied_tube_uses_the_legacy_tubi_relate_contract() {
-        let sql = legacy_tubi_relation_sql(
-            "24383_73948",
-            4,
-            "e3d_baked_v2_deadbeef",
-            "derived_deadbeef",
-            RefNo::new(24383, 10),
-            RefNo::new(24383, 20),
-            "[104724187652316]",
-            7997,
-            42,
-            "{\"kind\":\"implied_tube\"}",
-            "baked-v2",
-            None,
-            ProjectionScope::Current,
-        );
-        assert!(sql.contains("INSERT RELATION INTO tubi_relate"));
-        assert!(sql.contains("id:tubi_relate:[pe:⟨24383_73948⟩,4]"));
-        assert!(sql.contains("leave:pe:⟨24383_10⟩"));
-        assert!(sql.contains("arrive:pe:⟨24383_20⟩"));
-        assert!(sql.contains("out:inst_geo:⟨e3d_baked_v2_deadbeef⟩"));
-        assert!(!sql.contains("UPSERT inst_relate"));
-    }
-
-    #[test]
-    fn pair_local_route_ordinals_do_not_collide_in_branch_relation_slots() {
-        let mut slots = BTreeMap::new();
-        let branch = RefNo::new(24383, 73948);
-        assert_eq!(next_tube_relation_slot(&mut slots, branch), 0);
-        assert_eq!(next_tube_relation_slot(&mut slots, branch), 1);
-        assert_eq!(next_tube_relation_slot(&mut slots, RefNo::new(24383, 1)), 0);
-    }
-
-    #[test]
-    fn implied_tube_can_reference_the_existing_cylinder_v3_canonical_mesh() {
-        let key = r#"{"family":"cylinder_v3","segments":32}"#;
-        let sql = legacy_tubi_relation_sql(
-            "24383_73948",
-            0,
-            "123456789",
-            "derived_deadbeef",
-            RefNo::new(24383, 10),
-            RefNo::new(24383, 20),
-            "[104724187652316]",
-            7997,
-            42,
-            "{\"kind\":\"implied_tube\"}",
-            "canonical-primitive-v1",
-            Some(key),
-            ProjectionScope::Current,
-        );
-        assert!(sql.contains("out:inst_geo:⟨123456789⟩"));
-        assert!(sql.contains("format:'canonical-primitive-v1'"));
-        assert!(sql.contains("primitive_key:{\"family\":\"cylinder_v3\",\"segments\":32}"));
-        assert!(!sql.contains("format:'baked-v2'"));
-    }
-
-    #[test]
-    fn implied_tube_flattens_canonical_local_transform_into_legacy_world_transform() {
+    fn implied_tube_flattens_canonical_local_transform_into_the_stored_world_transform() {
         let geometry_id = GeometryId::ImpliedTube {
             container_refno: "24383/73948".into(),
             route_ordinal: 0,
@@ -2267,69 +2597,8 @@ mod tests {
         assert_eq!(
             persisted_world_transform(&element, Some(&primitive), world),
             world,
-            "ordinary element relations retain the separate local-transform branch"
+            "ordinary elements keep the separate local-transform branch"
         );
-    }
-
-    #[tokio::test]
-    async fn legacy_tubi_sql_executes_without_touching_inst_relate() {
-        let db = surrealdb::Surreal::new::<surrealdb::engine::local::Mem>(())
-            .await
-            .expect("mem surreal");
-        db.use_ns("legacy_layout")
-            .use_db("legacy_layout")
-            .await
-            .expect("namespace");
-        db.query(
-            "CREATE pe:⟨24383_73948⟩; CREATE pe:⟨24383_10⟩; CREATE pe:⟨24383_20⟩;\
-             CREATE aabb:⟨direct_world_derived_deadbeef⟩;\
-             CREATE trans:⟨direct_world_derived_deadbeef⟩;",
-        )
-        .await
-        .expect("seed")
-        .check()
-        .expect("seed statements");
-        let sql = legacy_tubi_relation_sql(
-            "24383_73948",
-            0,
-            "e3d_baked_v2_deadbeef",
-            "derived_deadbeef",
-            RefNo::new(24383, 10),
-            RefNo::new(24383, 20),
-            "[104724187652316]",
-            7997,
-            42,
-            "{\"kind\":\"implied_tube\",\"container_refno\":\"24383/73948\",\"from_refno\":\"24383/10\",\"to_refno\":\"24383/20\"}",
-            "baked-v2",
-            None,
-            ProjectionScope::Current,
-        );
-        db.query(sql)
-            .await
-            .expect("legacy tubi write")
-            .check()
-            .expect("legacy tubi statements");
-        let mut response = db
-            .query(
-                "RETURN array::len((SELECT VALUE id FROM tubi_relate));\
-                 RETURN array::len((SELECT VALUE id FROM inst_relate));",
-            )
-            .await
-            .expect("counts")
-            .check()
-            .expect("count statements");
-        assert_eq!(response.take::<Option<i64>>(0).unwrap(), Some(1));
-        assert_eq!(response.take::<Option<i64>>(1).unwrap(), Some(0));
-    }
-
-    #[test]
-    fn representation_switch_clears_the_old_branch_before_upsert() {
-        let mut sql = String::new();
-        append_geometry_representation_cleanup(&mut sql, "17496_152095");
-        assert!(sql.contains("DELETE geo_relate"));
-        assert!(sql.contains("DELETE type::thing('inst_info'"));
-        assert!(sql.contains("DELETE type::thing('trans','direct_local_17496_152095')"));
-        assert!(sql.contains("DELETE type::thing('inst_relate','17496_152095')"));
     }
 
     #[test]
@@ -2345,7 +2614,8 @@ mod tests {
     /// projection must not read its timepoint from `dbnum_watermark`.
     #[test]
     fn the_current_projection_reads_neither_pe_nor_the_watermark_table() {
-        let source = include_str!("e3d_model_service.rs");
+        let source = service_source();
+        let source = source.as_str();
         let body = source
             .split_once("pub async fn from_current(")
             .expect("from_current")
@@ -2356,16 +2626,16 @@ mod tests {
         assert!(body.contains("current_mdb_sources()"));
         assert!(body.contains("model_source::dbnum_of_root("));
         assert!(!body.contains("dbnum_watermark"), "{body}");
-        assert!(!body.contains("type::thing('pe'"), "{body}");
         assert!(!body.contains("pins_from_watermark"), "{body}");
     }
 
     /// ADR-054 constraint 5: an explicit window target is opened as such; the
-    /// current pin is never required to equal it, and a newer published session
+    /// current pin is never required to equal it, and a newer projected session
     /// settles the window as covered instead of failing it.
     #[test]
     fn apply_window_opens_the_explicit_target_and_yields_to_newer_publications() {
-        let source = include_str!("e3d_model_service.rs");
+        let source = service_source();
+        let source = source.as_str();
         let body = source
             .split_once("pub async fn apply_window(")
             .expect("apply_window")
@@ -2379,321 +2649,318 @@ mod tests {
         assert!(body.contains("scan_index(&pin.file, Some(target_sesno))"));
     }
 
-    #[test]
-    fn stale_geometry_scan_excludes_pre_geometry_id_rows() {
-        let query = existing_geometry_ids_query(7997, RefNo::new(17496, 152094));
-        assert!(query.contains("direct_model.source='e3d-model'"));
-        assert!(query.contains("direct_model.geometry_id != NONE"));
-        assert!(query.contains("anc CONTAINS 75144747962910"));
-        assert!(query.contains("FROM inst_relate"));
-        assert!(query.contains("FROM tubi_relate"));
+    fn memory_producer_body(source: &str) -> &str {
+        source
+            .split_once("async fn produce_slices(")
+            .expect("memory producer")
+            .1
+            .split_once("pub async fn persist_memory_batch(")
+            .expect("memory producer end")
+            .0
+    }
+
+    fn memory_consumer_body(source: &str) -> &str {
+        source
+            .split_once("pub async fn persist_memory_batch(")
+            .expect("memory consumer")
+            .1
+            .split_once("pub async fn generate_and_persist_roots(")
+            .expect("memory consumer end")
+            .0
     }
 
     #[test]
-    fn regenerated_root_cleanup_rechecks_both_legacy_relation_tables() {
-        let query = pre_e3d_relation_count_query(1112, RefNo::new(17496, 106253));
-        let delete = pre_e3d_delete_query(1112, RefNo::new(17496, 106253));
-        assert!(query.contains("dbnum=1112"));
-        assert!(query.contains("anc CONTAINS 75144747917069"));
-        assert!(query.contains("direct_model.source = NONE"));
-        assert!(query.contains("direct_model.source = 'legacy'"));
-        assert!(query.contains("record::tb(in) = 'pe'"));
-        assert!(query.contains("FROM inst_relate"));
-        assert!(query.contains("FROM tubi_relate"));
-        assert!(delete.contains("DELETE inst_relate WHERE"));
-        assert!(delete.contains("DELETE tubi_relate WHERE"));
-    }
-
-    #[tokio::test]
-    async fn cleanup_spatial_scan_returns_only_legacy_source_pe_keys() {
-        let db = surrealdb::engine::any::connect("mem://")
-            .await
-            .expect("mem surreal");
-        db.use_ns("pre_e3d_spatial_keys")
-            .use_db("pre_e3d_spatial_keys")
-            .await
-            .expect("namespace");
-        let root = RefNo::new(17496, 106253);
-        let packed = (((root.word0 as u64) << 32) | root.word1 as u64) as i64;
-        db.query(format!(
-            "CREATE pe:17496_106253; CREATE pe:17496_125194; CREATE pe:17496_125197;\
-             CREATE inst_info:legacy;\
-             CREATE inst_relate:17496_125194 SET in=pe:17496_125194,out=inst_info:legacy,dbnum=1112,anc=[{packed}],direct_model=NONE;\
-             RELATE pe:17496_125197->tubi_relate->inst_geo:legacy SET dbnum=1112,anc=[{packed}],direct_model={{source:'e3d-model',geometry_id:{{kind:'element',refno:'17496/125197'}}}};"
-        ))
-        .await
-        .expect("seed")
-        .check()
-        .expect("seed statements");
-
-        let keys = pre_e3d_spatial_refnos_on(&db, 1112, root)
-            .await
-            .expect("scan source keys");
-        assert_eq!(keys.len(), 1);
-        assert_eq!(keys.iter().next().unwrap().to_pdms_str(), "17496/125194");
-    }
-
-    #[tokio::test]
-    async fn regenerated_root_removes_stale_legacy_child_but_keeps_e3d_rows() {
-        let db = surrealdb::engine::any::connect("mem://")
-            .await
-            .expect("mem surreal");
-        db.use_ns("pre_e3d_cleanup")
-            .use_db("pre_e3d_cleanup")
-            .await
-            .expect("namespace");
-        let root = RefNo::new(17496, 106253);
-        let packed = (((root.word0 as u64) << 32) | root.word1 as u64) as i64;
-        db.query(format!(
-            "CREATE pe:17496_106253; CREATE pe:17496_125194; CREATE pe:17496_125197;\
-             CREATE inst_info:legacy_fixing; CREATE inst_geo:legacy_tube;\
-             CREATE inst_relate:17496_125194 SET in=pe:17496_125194,out=inst_info:legacy_fixing,dbnum=1112,anc=[{packed}],direct_model=NONE;\
-             RELATE pe:17496_125194->tubi_relate->inst_geo:legacy_tube SET dbnum=1112,anc=[{packed}],direct_model={{source:'legacy'}};\
-             CREATE inst_relate:17496_125197 SET in=pe:17496_125197,dbnum=1112,anc=[{packed}],direct_model={{source:'e3d-model',geometry_id:{{kind:'element',refno:'17496/125197'}}}};"
-        ))
-        .await
-        .expect("seed")
-        .check()
-        .expect("seed statements");
-
-        let removal_count = pre_e3d_relation_count_on(&db, 1112, root)
-            .await
-            .expect("scan stale pre-e3d rows");
-        assert_eq!(removal_count, 2);
-
-        let report = apply_geometry_delta_on_with_pre_e3d(
-            &db,
-            ProjectionScope::Current,
-            1112,
-            1,
-            Vec::new(),
-            Vec::new(),
-            Some((root, removal_count)),
-            None,
-            &BTreeMap::new(),
-            Path::new("."),
-        )
-        .await
-        .expect("remove stale pre-e3d row");
-        assert_eq!(report.removed, 2);
-
-        let mut response = db
-            .query(
-                "RETURN record::exists(inst_relate:17496_125194);\
-                 RETURN record::exists(inst_info:legacy_fixing);\
-                 RETURN record::exists(inst_relate:17496_125197);\
-                 RETURN array::len((SELECT VALUE id FROM tubi_relate));",
-            )
-            .await
-            .expect("verify")
-            .check()
-            .expect("verify statements");
-        assert_eq!(response.take::<Option<bool>>(0).unwrap(), Some(false));
-        assert_eq!(response.take::<Option<bool>>(1).unwrap(), Some(true));
-        assert_eq!(response.take::<Option<bool>>(2).unwrap(), Some(true));
-        assert_eq!(response.take::<Option<i64>>(3).unwrap(), Some(0));
-    }
-
-    #[tokio::test]
-    async fn cleanup_scan_cannot_delete_a_row_replaced_by_e3d_before_commit() {
-        let db = surrealdb::engine::any::connect("mem://")
-            .await
-            .expect("mem surreal");
-        db.use_ns("pre_e3d_race")
-            .use_db("pre_e3d_race")
-            .await
-            .expect("namespace");
-        let root = RefNo::new(17496, 106253);
-        let packed = (((root.word0 as u64) << 32) | root.word1 as u64) as i64;
-        db.query(format!(
-            "CREATE pe:17496_125194;\
-             CREATE inst_relate:17496_125194 SET in=pe:17496_125194,dbnum=1112,anc=[{packed}],direct_model=NONE;"
-        ))
-        .await
-        .expect("seed")
-        .check()
-        .expect("seed statements");
-        let observed = pre_e3d_relation_count_on(&db, 1112, root)
-            .await
-            .expect("initial legacy scan");
-        assert_eq!(observed, 1);
-        db.query(
-            "UPDATE inst_relate:17496_125194 SET direct_model={source:'e3d-model',geometry_id:{kind:'element',refno:'17496/125194'}};",
-        )
-        .await
-        .expect("replace")
-        .check()
-        .expect("replace row");
-
-        apply_geometry_delta_on_with_pre_e3d(
-            &db,
-            ProjectionScope::Current,
-            1112,
-            1,
-            Vec::new(),
-            Vec::new(),
-            Some((root, observed)),
-            None,
-            &BTreeMap::new(),
-            Path::new("."),
-        )
-        .await
-        .expect("transactional predicate recheck");
-        let mut response = db
-            .query("RETURN record::exists(inst_relate:17496_125194);")
-            .await
-            .expect("verify")
-            .check()
-            .expect("verify statements");
-        assert_eq!(response.take::<Option<bool>>(0).unwrap(), Some(true));
-    }
-
-    #[test]
-    fn root_delete_scan_includes_derived_e3d_geometry() {
-        let query = persisted_geometry_rows_query(RefNo::new(24383, 73948));
-        assert!(query.contains("direct_model.source='e3d-model'"));
-        assert!(query.contains("direct_model.geometry_id != NONE"));
-        assert!(query.contains("anc CONTAINS 104724187652316"));
-        assert!(query.contains("FROM inst_relate"));
-        assert!(query.contains("FROM tubi_relate"));
-        assert!(!query.contains("inst_relate:24383_73948"));
-    }
-
-    #[tokio::test]
-    async fn publication_cas_rejects_an_old_revision_and_a_mixed_target() {
-        let db = surrealdb::engine::any::connect("mem://")
-            .await
-            .expect("mem surreal");
-        db.use_ns("publish_cas")
-            .use_db("publish_cas")
-            .await
-            .expect("namespace");
-        let root = RefNo::new(24383, 73948);
-        db.query(
-            "CREATE gen_root:24383_73948 SET desired_revision=1, \
-             desired_target={source_end_sesno:43}, publication_status='pending';",
-        )
-        .await
-        .expect("seed root")
-        .check()
-        .expect("seed root statements");
-
-        let claim = RootPublishClaim {
-            root,
-            revision: 1,
-            desired_source_sesno: 43,
-            model_target: None,
-            published_model_target: None,
-            published_manifest_hash: None,
-            published_geometry_count: None,
-            published_projection_complete: false,
-        };
-        apply_geometry_delta_on_with_pre_e3d(
-            &db,
-            ProjectionScope::Current,
-            8191,
-            43,
-            Vec::new(),
-            Vec::new(),
-            None,
-            Some(&claim),
-            &BTreeMap::new(),
-            Path::new("."),
-        )
-        .await
-        .expect("current claim publishes even when manifest is unchanged");
-
-        db.query(
-            "UPDATE gen_root:24383_73948 SET desired_revision=2, \
-             desired_target={source_end_sesno:44}, publication_status='stale';",
-        )
-        .await
-        .expect("advance target")
-        .check()
-        .expect("advance target statements");
-        let stale = apply_geometry_delta_on_with_pre_e3d(
-            &db,
-            ProjectionScope::Current,
-            8191,
-            43,
-            Vec::new(),
-            Vec::new(),
-            None,
-            Some(&claim),
-            &BTreeMap::new(),
-            Path::new("."),
-        )
-        .await;
-        assert!(stale.is_err(), "old worker must lose the publication CAS");
-
-        let mixed_claim = RootPublishClaim {
-            root,
-            revision: 2,
-            desired_source_sesno: 44,
-            model_target: None,
-            published_model_target: None,
-            published_manifest_hash: None,
-            published_geometry_count: None,
-            published_projection_complete: false,
-        };
-        let mixed = apply_geometry_delta_on_with_pre_e3d(
-            &db,
-            ProjectionScope::Current,
-            8191,
-            43,
-            Vec::new(),
-            Vec::new(),
-            None,
-            Some(&mixed_claim),
-            &BTreeMap::new(),
-            Path::new("."),
-        )
-        .await;
-        assert!(
-            mixed.is_err(),
-            "a source session cannot publish into another target"
-        );
-
-        #[derive(Deserialize)]
-        struct RootRow {
-            published_revision: u64,
-            desired_revision: u64,
-            publication_status: String,
+    fn memory_generation_reads_only_the_e3d_source_projection() {
+        let source = service_source();
+        let source = source.as_str();
+        let body = memory_producer_body(source);
+        for forbidden in [
+            "ModelMemoryStore",
+            "ensure_not_older_than_persisted",
+            "root_projection_complete",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "memory producer must get model input only from e3d-io/e3d-model, found {forbidden}"
+            );
         }
-        let mut response = db
-            .query("SELECT published_revision, desired_revision, publication_status FROM ONLY gen_root:24383_73948;")
-            .await
-            .expect("read root")
-            .check()
-            .expect("read root statements");
-        let row: Option<RootRow> = response.take(0).expect("decode root");
-        let row = row.expect("root exists");
-        assert_eq!((row.published_revision, row.desired_revision), (1, 2));
-        assert_eq!(row.publication_status, "stale");
+        assert!(body.contains("spawn_generation_worker("));
     }
 
+    /// 生产端读源文件、算几何，碰不到已投影的那一份，也碰不到根回执——
+    /// `db_generation_lock` 护的是投影侧那条单调链，拿在生产端只会把纯读串起来。
+    /// 单根硬错是一条死信，不是整批的死因（ADR-041 §6）：必现失败的坏构件不许
+    /// 把整页永久卡死。
     #[test]
-    fn model_file_target_digest_pins_file_identity_and_session() {
-        let path = std::env::temp_dir().join(format!("e3d-model-target-{}.db", std::process::id()));
-        std::fs::write(&path, b"fixture-v1").expect("write fixture");
-        let first = model_file_identity_digest(&path, 41).expect("first digest");
+    fn the_memory_producer_neither_locks_publication_nor_drops_a_page_for_one_root() {
+        let source = service_source();
+        let source = source.as_str();
+        let producer = memory_producer_body(source);
+        assert!(
+            !producer.contains("db_generation_lock"),
+            "the publication lock belongs to the consumer; generation is pure source reading"
+        );
+        assert!(
+            producer.contains("Err(error) if !matches!(failure_policy,")
+                && producer.contains("slice.failures.push("),
+            "a root that cannot be generated must become a dead letter, not abort the batch"
+        );
+        let consumer = memory_consumer_body(source);
+        for required in [
+            "db_generation_lock",
+            "ensure_not_older_than_persisted",
+            "batch.failures",
+        ] {
+            assert!(
+                consumer.contains(required),
+                "the consumer projects under the dbnum lock, re-checks the pinned session and \
+                 counts producer dead letters; missing {required}"
+            );
+        }
+    }
+
+    /// ADR-041 §8：生产与消费之间那条 channel 必须**有界**，深度 1。无界 channel
+    /// 一样不阻塞，代价是内存无界——那正是 ADR 的否决方案。整页一次性产进内存
+    /// （2720 根的 7997 就是 GB 级）与它是同一个形态。
+    #[test]
+    fn the_generation_pipeline_hands_over_bounded_slices() {
+        let source = service_source();
+        let source = source.as_str();
+        let pipeline = source
+            .split_once("pub async fn generate_and_persist_roots(")
+            .expect("generation pipeline")
+            .1
+            .split_once("pub async fn generate_dbnum(")
+            .expect("generation pipeline end")
+            .0;
+        assert!(
+            pipeline.contains("mpsc::channel::<GeneratedMemoryBatch>(1)"),
+            "producer and consumer must meet over a depth-1 bounded channel"
+        );
+        assert!(
+            pipeline.contains("futures::future::join(produce, consume)"),
+            "the two halves must overlap; running them in sequence is the (P + C) × N shape"
+        );
+        let producer = memory_producer_body(source);
+        assert!(
+            producer.contains("crate::options::model_memory_slice_elements()")
+                && producer.contains("crate::options::model_regen_execution_group()"),
+            "a slice is sealed on the element budget as well as the cohort width: root count \
+             alone is not a memory budget"
+        );
+        assert!(
+            !production_half(source).contains("fn generate_dbnum_in_memory("),
+            "producing a whole dbnum into one batch is the unbounded shape ADR-041 §8 rejected"
+        );
+    }
+
+    /// ADR-052 第 4 条：常驻 worker 从共享队列动态领取，宽度 `min(额度, 件数)`。
+    /// 静态均分正是被取代的形态（几何负载长尾，一块里摆两个重 BRAN 就把其余 worker
+    /// 空在那儿）；「每件一个 task 再去挤信号量」同样被禁；每个 worker 一份 catalogue
+    /// 缓存，共享一把 Mutex 并在锁内求值就是 ADR-052 开篇那个 convoy。
+    #[test]
+    fn generation_workers_claim_dynamically_and_never_share_one_catalogue_cache() {
+        let source = service_source();
+        let source = source.as_str();
+        let worker = source
+            .split_once("fn spawn_generation_worker(")
+            .expect("generation worker")
+            .1
+            .split_once("\n}\n")
+            .expect("generation worker end")
+            .0;
+        assert!(
+            worker.contains("concurrency::run_gated_cpu(")
+                && worker.contains("while let Some((slot, root)) = queue.claim()")
+                && worker.contains("queue.store(slot, outcome)"),
+            "worker 是「一张许可 + 一个领取循环」，写回按领取序号落槽"
+        );
+        assert!(
+            worker.contains("checkout_cache(&caches)") && worker.contains("return_cache(&caches"),
+            "每个 worker 一份缓存，从跨波存活的池里借还"
+        );
+        let producer = memory_producer_body(source);
+        assert!(
+            producer.contains("concurrency::resident_workers(queue.claimable())"),
+            "常驻 worker 数只能是 min(额度, 还能领的件数)"
+        );
+        for forbidden in ["chunk_size(", "tokio::spawn(", "roots.chunks("] {
+            assert!(
+                !producer.contains(forbidden),
+                "静态均分 / 每件一个 task / 按批设栏都是被取代的形态，找到 {forbidden}"
+            );
+        }
+    }
+
+    /// 窗口是「无栏并行」与「内存有界」之间那根绳子：worker 最多跑在装配端前面
+    /// 一个窗口，再多就得先把许可还回去（攥着许可等装配端正是 ADR-052 开篇那个
+    /// 容量倒置）。
+    #[test]
+    fn the_generation_window_bounds_how_far_workers_may_run_ahead() {
+        let roots = (0..5).map(|index| RefNo::new(7, index)).collect::<Vec<_>>();
+        let queue = RootQueue::new(roots.clone(), 2);
+
+        assert_eq!(queue.claimable(), 2);
+        assert_eq!(queue.claim(), Some((0, roots[0])));
+        assert_eq!(queue.claim(), Some((1, roots[1])));
+        assert_eq!(queue.claim(), None, "窗口满了就不许再领");
+        assert_eq!(queue.claimable(), 0);
+
+        // 装配端还没拿到 0 号，窗口就滑不动——先算完的 1 号不能把它顶过去。
+        queue.store(1, Ok(snapshot_with_elements(1)));
+        assert!(queue.take_ready().is_none(), "队头没好，后面的不许插队");
+        assert_eq!(queue.claim(), None);
+
+        queue.store(0, Ok(snapshot_with_elements(1)));
+        assert_eq!(queue.take_ready().map(|(root, _)| root), Some(roots[0]));
+        assert_eq!(queue.claimable(), 1, "取走一个，窗口向前滑一格");
+        assert_eq!(queue.claim(), Some((2, roots[2])));
+    }
+
+    /// 装配端只按源顺序取：切片边界与 `Required` 裁决因此与「谁先算完」无关，
+    /// `geometry_workers = 1` 才能逐字节复现改前那条串行路径。
+    #[test]
+    fn finished_roots_are_assembled_in_source_order_not_completion_order() {
+        let roots = (0..4).map(|index| RefNo::new(9, index)).collect::<Vec<_>>();
+        let queue = RootQueue::new(roots.clone(), 4);
+        for _ in 0..4 {
+            queue.claim().expect("窗口容得下全部四根");
+        }
+        assert_eq!(queue.claim(), None, "领完就没有了");
+
+        for slot in [3_usize, 1, 2] {
+            queue.store(slot, Ok(snapshot_with_elements(slot)));
+        }
+        assert!(queue.take_ready().is_none());
+
+        queue.store(0, Ok(snapshot_with_elements(0)));
+        let assembled = std::iter::from_fn(|| queue.take_ready())
+            .map(|(root, _)| root)
+            .collect::<Vec<_>>();
+        assert_eq!(assembled, roots, "完成序是 3/1/2/0，交出去的必须是 0/1/2/3");
+        assert!(queue.take_ready().is_none());
+        assert_eq!(queue.claimable(), 0);
+    }
+
+    /// 封片是「够了就交」，不是「攒满整页」：两条预算任一到线即封，只有死信的
+    /// 尾片也要交出去（计数在消费端），空片不交。单根不拆——根是投影的原子单位。
+    #[test]
+    fn a_slice_seals_on_either_budget_and_never_splits_a_root() {
+        let mut slice = MemorySlice::default();
+        assert!(!slice.is_full(2, 100), "空片不算满");
+        slice.failures.push((RefNo::new(1, 1), "boom".into()));
+        assert!(
+            !slice.is_full(2, 100),
+            "死信不占元素预算，也不该单独把片顶满"
+        );
+
+        let mut by_roots = MemorySlice::default();
+        by_roots.push(RefNo::new(1, 2), snapshot_with_elements(1));
+        assert!(!by_roots.is_full(2, 100));
+        by_roots.push(RefNo::new(1, 3), snapshot_with_elements(1));
+        assert!(by_roots.is_full(2, 100), "到达 cohort 宽度即封片");
+        assert_eq!(by_roots.elements, 2);
+
+        let mut by_elements = MemorySlice::default();
+        by_elements.push(RefNo::new(1, 4), snapshot_with_elements(150));
+        assert!(
+            by_elements.is_full(16, 100),
+            "一根就撑破预算时立刻封片，而不是等够 16 根"
+        );
         assert_eq!(
-            first,
-            model_file_identity_digest(&path, 41).expect("repeat digest"),
-            "the same immutable target must serialize deterministically"
+            by_elements.snapshots.len(),
+            1,
+            "根是投影的原子单位，超预算也不拆"
         );
-        assert_ne!(
-            first,
-            model_file_identity_digest(&path, 42).expect("new session digest"),
-            "session is part of target identity"
+    }
+
+    fn snapshot_with_elements(count: usize) -> BakedSnapshot {
+        BakedSnapshot {
+            elements: (0..count)
+                .map(|index| baked_element(RefNo::new(9, index as u32), &format!("mesh_{index}")))
+                .collect(),
+            report: Report::default(),
+            visited: Vec::new(),
+        }
+    }
+
+    /// 一页 100 根就是 100 份同一张 owner 表同时在内存里，而拼记录读的一直是批自己
+    /// 带的那份索引。快照只借用扫描期的那一份，不再各自复制。
+    #[test]
+    fn every_snapshot_in_a_batch_shares_one_owner_index() {
+        let source = service_source();
+        let source = source.as_str();
+        for declaration in [
+            "pub(crate) owners: Arc<BTreeMap<(u32, u32), RefNo>>,",
+            "pub owners: Arc<BTreeMap<(u32, u32), RefNo>>,",
+        ] {
+            assert!(
+                source.contains(declaration),
+                "the owner index is shared, not owned per snapshot; missing {declaration}"
+            );
+        }
+        let body = source
+            .split_once("fn generate_snapshot_from_set(")
+            .expect("snapshot builder")
+            .1
+            .split_once("impl E3dPersistReport {")
+            .expect("snapshot builder end")
+            .0;
+        assert!(
+            body.contains("Arc::clone(&index.owners)") && !body.contains("index.owners.clone()"),
+            "每个快照复制一份整库 owner 表，一页就是百 MB 级的纯重复"
         );
-        std::fs::write(&path, b"fixture-v2-longer").expect("replace fixture");
-        assert_ne!(
-            first,
-            model_file_identity_digest(&path, 41).expect("replacement digest"),
-            "same path with replaced content identity is a new target"
+    }
+
+    fn generate_refs_body(source: &str) -> &str {
+        source
+            .split_once("async fn generate_refs(")
+            .expect("generate_refs")
+            .1
+            .split_once("fn pin(&self")
+            .expect("generate_refs end")
+            .0
+    }
+
+    /// 存储状态一次读齐再进根循环。逐根现读会把「一次投影一批根」摊成 N 次往返，
+    /// 也会让先算的那几根看不到后面才补上的依赖会话。
+    #[test]
+    fn projection_reads_the_store_once_before_the_root_loop() {
+        let source = service_source();
+        let source = source.as_str();
+        let body = generate_refs_body(source);
+        let (prefetch, root_loop) = body
+            .split_once("for (root_index, &root) in roots.iter().enumerate()")
+            .expect("root preparation loop");
+        for read in [
+            "store.receipt(",
+            "store.root_projection_complete(",
+            "store.geometry_ids_of_root(",
+            "hydrate_published_dependencies(",
+        ] {
+            assert!(prefetch.contains(read), "missing batch prefetch for {read}");
+            assert!(
+                !root_loop.contains(read),
+                "root loop must consume prefetched state instead of calling {read}"
+            );
+        }
+    }
+
+    /// 命中缓存要在求几何之前判掉——判在后面等于白算一遍。
+    #[test]
+    fn immutable_target_cache_gate_precedes_snapshot_generation() {
+        let source = service_source();
+        let body = generate_refs_body(&source);
+        let cache_gate = body
+            .find("store.root_projection_complete(")
+            .expect("cache gate");
+        let generation = body
+            .find("generate_snapshot_from_set(")
+            .expect("snapshot generation");
+        assert!(
+            cache_gate < generation,
+            "the immutable-target hit must return before geometry evaluation"
         );
-        let _ = std::fs::remove_file(path);
     }
 
     #[test]

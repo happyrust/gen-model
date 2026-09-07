@@ -39,6 +39,9 @@ use aios_core::types::named_attvalue::NamedAttrValue;
 /// MDB declares no dictionaries".
 pub const DICT_STYP: i64 = 8;
 pub const DESI_STYP: i64 = 1;
+/// Isometric element database.  It participates in the source model exactly
+/// like DESI; CATA remains catalogue-only and is deliberately excluded.
+pub const ISOD_STYP: i64 = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdbDatabase {
@@ -121,6 +124,12 @@ impl MdbMembership {
 
     pub fn of_type(&self, styp: i64) -> impl Iterator<Item = &MdbDatabase> {
         self.databases.iter().filter(move |db| db.styp == styp)
+    }
+
+    pub fn element_databases(&self) -> impl Iterator<Item = &MdbDatabase> {
+        self.databases
+            .iter()
+            .filter(|db| matches!(db.styp, DESI_STYP | ISOD_STYP))
     }
 
     /// Declared Dictionary databases that exist on disk, in `CURD` order —

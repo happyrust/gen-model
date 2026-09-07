@@ -182,6 +182,61 @@ pub fn render_nouns(nouns: &[String]) -> String {
     nouns.join(",")
 }
 
+/// 一份模型计划里会被本进程暂扣的工作项，按类型计数（类型名按字典序，输出稳定）。
+///
+/// 只数 [`GATED_ACTIONS`] 两种行且 noun 不在名单内的；`Transform` / `CascadeExpand` /
+/// `PostRegenAabb` / 房间任务与 noun 为空的行不算——它们本来就不受限，算进去就是
+/// 谎报。判据是 [`admits_with`]，与 SQL 谓词同一口径。未限定时恒为空表。
+pub fn held_counts_with(
+    allowed: &[String],
+    items: &[crate::data_interface::model_update_plan::ModelWorkItem],
+) -> std::collections::BTreeMap<String, usize> {
+    let mut counts = std::collections::BTreeMap::new();
+    if allowed.is_empty() {
+        return counts;
+    }
+    for item in items {
+        if !GATED_ACTIONS.contains(&item.action) {
+            continue;
+        }
+        let noun = item.noun.trim();
+        if admits_with(allowed, noun) {
+            continue;
+        }
+        *counts.entry(noun.to_ascii_uppercase()).or_insert(0) += 1;
+    }
+    counts
+}
+
+/// 数据窗口计划的 warnings 里那一句：本窗规划出来、但本进程不会生成 / 清理的根，
+/// 按类型点名。
+///
+/// 工作项本身**原样入队**，这里只是把「入队了但不会动」说出来——摘掉工作项就是给
+/// 陈旧几何前移凭证（见模块文档「为什么是消费门，不是计划门」）。未限定、或本窗一个
+/// 都没扣住时返回 `None`，回执一个字都不多。
+pub fn window_plan_notice(
+    dbnum: u32,
+    items: &[crate::data_interface::model_update_plan::ModelWorkItem],
+) -> Option<String> {
+    let (types, origin) = resolved();
+    let held = held_counts_with(&types, items);
+    if held.is_empty() {
+        return None;
+    }
+    let total: usize = held.values().sum();
+    let breakdown = held
+        .iter()
+        .map(|(noun, count)| format!("{noun}×{count}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Some(format!(
+        "dbnum={dbnum}: 本窗 {total} 个生成根因 {MODEL_TYPE_CONFIG_KEY} [{}] 暂扣不生成（{breakdown}；\
+         来自{}）——行照常入队、gen_root 标 stale、凭证不前移，名单一撤即照常消费；数据增量不受影响",
+        render_nouns(&types),
+        origin.describe()
+    ))
+}
+
 #[cfg(test)]
 pub(crate) fn set_types_for_tests(types: Vec<String>, origin: Origin) {
     state().resolved = Some((types, origin));
@@ -196,9 +251,21 @@ pub(crate) fn clear_for_tests() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_interface::model_update_plan::{ModelWorkAction, ModelWorkItem};
 
     fn owned(values: &[&str]) -> Vec<String> {
         values.iter().map(|value| value.to_string()).collect()
+    }
+
+    fn item(action: ModelWorkAction, noun: &str) -> ModelWorkItem {
+        ModelWorkItem {
+            dbnum: 8000,
+            db_type: "DESI".into(),
+            source_end_sesno: 7,
+            action,
+            target_refno: "8000/1".into(),
+            noun: noun.into(),
+        }
     }
 
     /// 拿下串行闸并清空进程级状态；闸随返回值的生命周期持有到用例结束。
@@ -265,6 +332,74 @@ mod tests {
             assert!(reason.contains(needle), "暂扣理由要点名来源: {reason}");
             assert!(reason.contains("HANG"), "暂扣理由要点名类型: {reason}");
         }
+        clear_for_tests();
+    }
+
+    /// 窗口计划的暂扣计数只数受限的两种行、只数名单外的 noun，且与放行判定同一口径：
+    /// Transform / CascadeExpand / 房间任务 / 空 noun 一个都不算，算进去就是谎报。
+    #[test]
+    fn the_plan_holdback_counts_only_gated_rows_outside_the_scope() {
+        let allowed = owned(&["BRAN", "EQUI"]);
+        let items = vec![
+            item(ModelWorkAction::RegenRoot, "BRAN"),
+            item(ModelWorkAction::RegenRoot, "HANG"),
+            item(ModelWorkAction::RegenRoot, "hang"),
+            item(ModelWorkAction::DeleteCleanup, "SUPPO"),
+            item(ModelWorkAction::DeleteCleanup, ""),
+            item(ModelWorkAction::Transform, "HANG"),
+            item(ModelWorkAction::CascadeExpand, "HANG"),
+            item(ModelWorkAction::PostRegenAabb, "HANG"),
+            item(ModelWorkAction::RoomRecalcPanel, "PANE"),
+        ];
+        let held = held_counts_with(&allowed, &items);
+        assert_eq!(
+            held.into_iter().collect::<Vec<_>>(),
+            vec![("HANG".to_string(), 2), ("SUPPO".to_string(), 1)]
+        );
+        assert!(
+            held_counts_with(&[], &items).is_empty(),
+            "未限定时不得报任何暂扣"
+        );
+    }
+
+    /// 窗口 warnings 那一句：未限定或一个都没扣住时一个字都不多；扣住了就点名库号、
+    /// 总数、按类型的分项、名单与来源，并说清行仍在队列里、数据增量不受影响。
+    #[test]
+    fn the_window_plan_notice_names_what_this_window_will_not_generate() {
+        let _lease = fresh();
+        set_types_for_tests(owned(&["BRAN"]), Origin::Env);
+        let only_admitted = vec![
+            item(ModelWorkAction::RegenRoot, "BRAN"),
+            item(ModelWorkAction::Transform, "HANG"),
+        ];
+        assert_eq!(window_plan_notice(8000, &only_admitted), None);
+        assert_eq!(window_plan_notice(8000, &[]), None);
+
+        let held = vec![
+            item(ModelWorkAction::RegenRoot, "HANG"),
+            item(ModelWorkAction::RegenRoot, "HANG"),
+            item(ModelWorkAction::DeleteCleanup, "EQUI"),
+        ];
+        let notice = window_plan_notice(8000, &held).expect("扣住了就必须出声");
+        for needle in [
+            "dbnum=8000",
+            "3 个生成根",
+            "EQUI×1",
+            "HANG×2",
+            MODEL_TYPE_CONFIG_KEY,
+            MODEL_TYPE_ENV,
+            "照常入队",
+            "数据增量不受影响",
+        ] {
+            assert!(notice.contains(needle), "缺 {needle:?}: {notice}");
+        }
+
+        set_types_for_tests(Vec::new(), Origin::Config);
+        assert_eq!(
+            window_plan_notice(8000, &held),
+            None,
+            "未限定时回执一个字都不该多"
+        );
         clear_for_tests();
     }
 

@@ -77,41 +77,9 @@ pub struct ActiveStagedWindow {
     root_locks: Arc<tokio::sync::Mutex<HeldRootLocks>>,
 }
 
-/// 建窗前的一次性写回兼容门（2026-08-19 phase-1 审计）。
-///
-/// 暂存库刻意不装 `update_dbnum_event`、持久库装，这道不对称本身是有意的
-/// （理由见 [`init_staging_schema`]），代价是存在一类「暂存全绿、写回被持久层
-/// **确定性**拒绝」的语句：pe 上一旦生效的是那版对数组形制 record id 用
-/// `array::at` 的旧实现，窗口里每一条 pe 写在重放时都会整条打死。等到写回那
-/// 一刻才发现是最贵的——一窗口的解析与生成已经白跑。
-///
-/// 好版的指纹是 `string::split`（它按字符串 id 解析），坏版没有。只缓存成功：
-/// 排毒（重跑 `define_dbnum_event`）之后下一次开窗自动放行。读不到不算证伪——
-/// 那是持久层瞬时故障，写回自己的传输重试会处理。
-static WRITEBACK_SCHEMA_GATE: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
-
+/// Event absence is the compatible schema; never cache a previous success.
 async fn ensure_writeback_schema_compatible() -> anyhow::Result<()> {
-    WRITEBACK_SCHEMA_GATE
-        .get_or_try_init(|| async {
-            match crate::versioned_db::database::verify_dbnum_event_definition().await {
-                Ok(true) => Ok(()),
-                Ok(false) => bail!(
-                    "持久层 pe 上的 update_dbnum_event 不是本进程的实现（读回的定义不含 \
-                     string::split 指纹）。暂存库不装该事件，窗口 journal 重放会被它逐条\
-                     拒绝、整窗口写不回去；先让本进程重跑 define_dbnum_event 覆盖回好版\
-                     再开窗"
-                ),
-                Err(error) => {
-                    eprintln!(
-                        "开窗前读取 update_dbnum_event 定义失败，按瞬时故障放行\
-                         （写回自带传输重试）: {error:#}"
-                    );
-                    Ok(())
-                }
-            }
-        })
-        .await
-        .map(|_| ())
+    crate::data_interface::dbnum_stats::require_no_event_on(&aios_core::SUL_DB).await
 }
 
 /// 在独立的生产内存实例上开一个新窗口。
@@ -645,9 +613,17 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn production_windows_have_independent_sessions() {
-        let mut first = create_window(7900, 2, 3).await.expect("first window");
-        let mut second = create_window(7901, 4, 5).await.expect("second window");
+    async fn windows_on_independent_instances_have_independent_sessions() {
+        let first_instance = own_instance().await;
+        let second_instance = own_instance().await;
+        let mut first =
+            create_window_on(&first_instance, 7900, 2, 3, ResourceThresholds::default())
+                .await
+                .expect("first window");
+        let mut second =
+            create_window_on(&second_instance, 7901, 4, 5, ResourceThresholds::default())
+                .await
+                .expect("second window");
 
         let (first_write, second_write) = tokio::join!(
             first.execute(

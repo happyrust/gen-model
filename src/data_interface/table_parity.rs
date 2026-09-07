@@ -19,12 +19,18 @@ use surrealdb::Surreal;
 use surrealdb::engine::any::{Any, connect};
 
 /// 中途 diff 时排除的控制面表（I1 豁免面）。
-pub const CONTROL_PLANE_TABLES: [&str; 5] = [
+///
+/// `dbnum_info_table` / `dbnum_stats_state` 是 pe 统计（与 PE 写同事务维护，行上带 `updated_at =
+/// time::now()`），逐字节对拍天然不等；它们的正确性由 `dbnum_stats` 自己的测试与
+/// `terminal_production_batches_replay_statistics_before_watermark`（pe 行数 == 统计和）查证。
+pub const CONTROL_PLANE_TABLES: [&str; 7] = [
     "dbnum_watermark",
     "increment_update_attempt",
     "queue_control",
     "model_update_pending",
     "incr_side_effect_pending",
+    "dbnum_info_table",
+    "dbnum_stats_state",
 ];
 
 /// 起一个全新的 `mem://` 实例并切到 `ns`/`db`。**不装 schema**——要生产 schema
@@ -50,10 +56,7 @@ pub async fn fresh_mem_db(ns: &str, db: &str) -> anyhow::Result<Surreal<Any>> {
 /// F1（`idx_inst_relate_zone_refno` 的 `TYPE BTREE` 语法非法 + 吞错）已修，且该索引已随
 /// P3 退役——生产与这里共用 `INST_RELATE_INDEX_SQL`（含摘除它的迁移语句），错误显式上抛。
 ///
-/// 刻意不装 `update_dbnum_event`（F4）：该事件体假定 `pe` 的 record id 是数组（历史行
-/// 形制），对字符串 id 的最新行（`pe:24381_100677`，fork 解析为字符串）任何 UPSERT/UPDATE
-/// 都会因 `array::at` 类型错误而**整条语句失败**。它服务的 `dbnum_info_table` 是遗留
-/// 水位迁移的记账面（`dbnum_state` 本就容忍其缺失/陈旧），不属于窗口数据语义。
+/// PE 统计由写入批次显式维护；schema 不安装数据库事件。
 pub async fn init_schema_on(db: &Surreal<Any>) -> anyhow::Result<()> {
     // 磁盘脚本（CWD 的 resource/surreal，站点扩展）＋内置快照收尾——与 run_cli
     // 同一顺序，同名函数以内置版为准。内置序列自带 D11 的 hd/hh 矫正；这里原先

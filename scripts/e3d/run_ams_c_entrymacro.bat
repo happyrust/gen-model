@@ -12,6 +12,8 @@ rem   L3_E3D_MDB           MDB name (default: /ALL)
 rem   L3_E3D_INSTALL_DIR   E3D install (default: known-good L3 shadow 3.1)
 rem   L3_E3D_PROJECT_EVAR  project evars batch (default: AMS under project root)
 rem   L3_E3D_TIMEOUT_SECONDS / L3_E3D_PID_FILE
+rem   L3_E3D_CONSOLE_MODE  set to show to let core.dll expose its console host
+rem   L3_E3D_LAUNCH_MODE   set to attached to inherit the caller's std handles
 rem
 rem Why this exists: redirected stdin is ignored, because core.dll spawns
 rem pdmsconsole.exe and re-points its own std handles at that pipe; and
@@ -75,16 +77,24 @@ call set_aveva_design.bat
 if errorlevel 1 exit /b %ERRORLEVEL%
 set PDMS_SHOWCONSOLE=
 set PDMS_HIDECONSOLE=1
+if /I "%L3_E3D_CONSOLE_MODE%"=="show" (
+    set PDMS_SHOWCONSOLE=1
+    set PDMS_HIDECONSOLE=
+)
 set "E3D_MACRO=%E3D_MACRO:\=/%"
 set AVEVA_DESIGN_ENTRYMACRO=$M "%E3D_MACRO%"
 set "E3D_LAUNCHER=%~dp0launch_detached.ps1"
 
 echo === E3D TTY project=%L3_E3D_PROJECT% mdb=%L3_E3D_MDB% macro=%E3D_MACRO% ===
+if /I "%L3_E3D_LAUNCH_MODE%"=="attached" goto launch_attached
 if not defined L3_E3D_PID_FILE goto launch_without_pid_file
 powershell -NoProfile -ExecutionPolicy Bypass -File "%E3D_LAUNCHER%" -Exe "%E3DC%\des.exe" -WorkingDirectory "%E3DC%" -Arguments "-tty %L3_E3D_PROJECT% %L3_E3D_LOGIN% %L3_E3D_MDB%" -Wait -TimeoutSeconds %L3_E3D_TIMEOUT_SECONDS% -PidFile "%L3_E3D_PID_FILE%"
 goto launch_finished
 :launch_without_pid_file
 powershell -NoProfile -ExecutionPolicy Bypass -File "%E3D_LAUNCHER%" -Exe "%E3DC%\des.exe" -WorkingDirectory "%E3DC%" -Arguments "-tty %L3_E3D_PROJECT% %L3_E3D_LOGIN% %L3_E3D_MDB%" -Wait -TimeoutSeconds %L3_E3D_TIMEOUT_SECONDS%
+goto launch_finished
+:launch_attached
+"%E3DC%\des.exe" -tty %L3_E3D_PROJECT% %L3_E3D_LOGIN% %L3_E3D_MDB%
 :launch_finished
 set "E3D_EXIT=%ERRORLEVEL%"
 echo === E3D TTY EXIT CODE: %E3D_EXIT% ===

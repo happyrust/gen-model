@@ -50,13 +50,24 @@ pub fn wire_refno(refno: RefNo) -> String {
 #[derive(Debug)]
 pub enum BranchQueryError {
     /// refno 在所钉会话里不存在。
-    NotFound { refno: RefNo },
+    NotFound {
+        refno: RefNo,
+    },
     /// 元素存在，但不是派生隐式管身的路由容器（`derives_implied_tubes` 为假，如 HVAC 下的 BRAN）。
-    NotRouteContainer { refno: RefNo, noun: String },
+    NotRouteContainer {
+        refno: RefNo,
+        noun: String,
+    },
     /// 根错误：整条 BRAN 无法建立可信的成员结点视图；`issues` 带全部已收集的定位信息。
-    RootError { refno: RefNo, issues: Vec<MbdV2Issue> },
+    RootError {
+        refno: RefNo,
+        issues: Vec<MbdV2Issue>,
+    },
     /// 求解器拒绝（`layout_branch` 的 `Err`，目前只有「查不到分支」一种，理论上不会到这里）。
-    Solver { refno: RefNo, message: String },
+    Solver {
+        refno: RefNo,
+        message: String,
+    },
     Db(DbElementError),
 }
 
@@ -131,7 +142,8 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
             ),
         ));
     }
-    let mut members: Vec<BranchMember> = Vec::with_capacity(route.members.len() + route.non_route_members.len());
+    let mut members: Vec<BranchMember> =
+        Vec::with_capacity(route.members.len() + route.non_route_members.len());
 
     // 站点成员在链上的下标：成员 k 的到达端 = tubes[k].to，离开端 = tubes[k+1].from。
     let station_index: HashMap<(u32, u32), usize> = route
@@ -170,8 +182,22 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
 
         let (arrive, leave) = match station {
             Some(k) => (
-                resolve_port(&route.tubes[k].to, &resolver, &branch_refno, &object_refno, "arrive", &mut issues)?,
-                resolve_port(&route.tubes[k + 1].from, &resolver, &branch_refno, &object_refno, "leave", &mut issues)?,
+                resolve_port(
+                    &route.tubes[k].to,
+                    &resolver,
+                    &branch_refno,
+                    &object_refno,
+                    "arrive",
+                    &mut issues,
+                )?,
+                resolve_port(
+                    &route.tubes[k + 1].from,
+                    &resolver,
+                    &branch_refno,
+                    &object_refno,
+                    "leave",
+                    &mut issues,
+                )?,
             ),
             None => (None, None),
         };
@@ -241,13 +267,18 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
     }
 
     // 末站→Tail 的尾管（TPOS；TDIR 缺时只判离开侧，同 e3d-model `build_route_tubes`）。
-    if let (Some(tail), Some((from_refno, from, from_dir_known))) = (tail_pos, last_leave.as_ref()) {
+    if let (Some(tail), Some((from_refno, from, from_dir_known))) = (tail_pos, last_leave.as_ref())
+    {
         let tail_point = RoutePoint {
             pos: DVec3::from_array(tail),
             dir: tail_dir.map(DVec3::from_array).unwrap_or(DVec3::Z),
             bore: container.get_double("TBOR").ok().flatten(),
         };
-        let arrive_check = if tail_dir.is_some() { ArriveCheck::Member } else { ArriveCheck::Skip };
+        let arrive_check = if tail_dir.is_some() {
+            ArriveCheck::Member
+        } else {
+            ArriveCheck::Skip
+        };
         push_implied_tube(
             &mut members,
             &mut issues,
@@ -355,7 +386,8 @@ fn push_implied_tube(
     if from_dir_known {
         match slot_alignment(from, to, arrive_check) {
             SlotAlignment::Aligned { .. } | SlotAlignment::Indeterminate => {}
-            SlotAlignment::Misaligned { deviation_deg } | SlotAlignment::Reversed { deviation_deg } => {
+            SlotAlignment::Misaligned { deviation_deg }
+            | SlotAlignment::Reversed { deviation_deg } => {
                 // 几毫米的装配余量 / 目录 P 点与构件端面的错位（现场 1.4 mm 偏 0.33°、15 mm 反向重叠）
                 // 是建模噪声，E3D 不画也没人在意；只有够长的断口才值得在诊断里出声。
                 if length >= IMPLIED_TUBE_DIAGNOSTIC_MIN_MM {

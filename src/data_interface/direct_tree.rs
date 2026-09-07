@@ -3,6 +3,11 @@
 //! This module deliberately does not query `pe`, `pe_owner`, or any other
 //! SurrealDB element table.  MDB membership comes from the SYS file, and every
 //! displayed node is decoded from the selected DESI database by [`DirectStore`].
+//!
+//! 骨架（哪个 ref0 属于哪个库、谁是谁的属主、每个元素是什么 noun）来自进程级的
+//! [`MdbMemoryStore`]，启动时预热好；本模块只在需要**属性**（NAME、成员表）时才
+//! 落到 [`DirectStore`]。此前这三样是本模块自己在第一次树请求时逐库
+//! `indexed_refnos()` 现扫的，而且 owner 链每上一级要抽一整条记录。
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -14,9 +19,11 @@ use anyhow::Context;
 use super::cata_closure::InMemoryCataLocator;
 use super::direct_store::{DbPin, DirectSchema, DirectStore};
 use super::generation_root::{
-    GenerationRoot, SubtreeElement, enumerate_generation_roots_in_subtree,
+    GenerationNode, GenerationRoot, SubtreeElement, enumerate_generation_roots_in_subtree,
+    resolve_element_generation_root,
 };
-use super::mdb_membership::{DESI_STYP, MdbMembership};
+use super::mdb_membership::{ISOD_STYP, MdbMembership};
+use super::mdb_memory_store::MdbMemoryStore;
 
 /// One process-local, immutable view of the current MDB model tree.
 ///
@@ -28,11 +35,16 @@ pub struct DirectTreeService {
     mdb: String,
     membership: Arc<MdbMembership>,
     store: Arc<DirectStore>,
+    skeleton: Arc<MdbMemoryStore>,
+    skeleton_fingerprint: Vec<(u32, std::path::PathBuf, u32)>,
 }
 
 impl DirectTreeService {
-    /// Resolve the MDB from its SYS file and build the e3d-io ref0 locator from
-    /// the configured project directory.  No element row is read from SurrealDB.
+    /// Resolve the MDB from its SYS file and take the e3d-io ref0 locator from
+    /// the process-level skeleton.  No element row is read from SurrealDB.
+    ///
+    /// 骨架预热过就是一次 `Arc` 克隆；没预热过（预热失败、或探针 / 单测这类不走
+    /// 启动链的进程）由 `ensure` 现建一份，代价就是此前每次 open 都要付的那一遍扫描。
     pub fn open(project: &str, mdb: &str) -> anyhow::Result<Self> {
         let option = aios_core::get_db_option();
         let membership = super::mdb_membership::get(project, mdb)
@@ -40,33 +52,12 @@ impl DirectTreeService {
             .unwrap_or_else(|| {
                 super::mdb_membership::resolve(option, project, mdb).map(Arc::new)
             })?;
-        // Build the affiliation map from the same e3d-io live indexes that the
-        // tree reads.  The generic directory locator uses the legacy pdms-io
-        // scanner and also walks unrelated project databases; tree direct mode
-        // must neither depend on that parser nor scan outside the MDB's CURD.
-        let mut affiliations = HashMap::new();
-        let mut files = HashMap::new();
-        for db in membership.of_type(DESI_STYP) {
-            let Some(path) = db.path.clone() else {
-                continue;
-            };
-            let mut engine = e3d_io::ReadOnlyEngine::open(&path)
-                .with_context(|| format!("e3d-io 打开 DESI {} ({})", db.dbnum, path.display()))?;
-            for (refno, _, _) in engine.indexed_refnos()? {
-                let ref0 = refno.word0;
-                if let Some(previous) = affiliations.insert(ref0, db.dbnum) {
-                    anyhow::ensure!(
-                        previous == db.dbnum,
-                        "MDB {} 的 ref0 {} 同时属于 DESI {} 和 {}",
-                        membership.mdb(),
-                        ref0,
-                        previous,
-                        db.dbnum
-                    );
-                }
-            }
-            files.insert(db.dbnum, ("DESI".to_string(), project.to_string(), path));
-        }
+        let skeleton = super::mdb_memory_store::ensure(project, mdb)?;
+        // The generic directory locator uses a project-wide scan and also walks
+        // unrelated project databases; tree direct mode must neither depend on
+        // that nor scan outside the MDB's CURD — so the locator is built from
+        // the skeleton, which was itself built from the CURD's DESI files.
+        let (affiliations, files) = skeleton.locator_parts();
         let locator = Arc::new(InMemoryCataLocator::from_parts(affiliations, files));
         anyhow::ensure!(
             locator.ref0_count() > 0,
@@ -77,13 +68,13 @@ impl DirectTreeService {
         let store = Arc::new(DirectStore::new(schema, locator));
 
         let mut pinned = 0usize;
-        for db in membership.of_type(DESI_STYP) {
+        for db in membership.element_databases() {
             let Some(file) = db.path.clone() else {
                 continue;
             };
             store.pin(DbPin {
                 dbnum: db.dbnum as i32,
-                db_type: "DESI".to_string(),
+                db_type: if db.styp == ISOD_STYP { "ISOD" } else { "DESI" }.to_string(),
                 file,
                 // Direct tree is compared with the current E3D TTY view.  None
                 // resolves the file's latest session once, then freezes it.
@@ -98,7 +89,19 @@ impl DirectTreeService {
             mdb: format!("/{}", mdb.trim_start_matches('/')),
             membership,
             store,
+            skeleton_fingerprint: skeleton.session_fingerprint(),
+            skeleton,
         })
+    }
+
+    /// 这次服务背后的骨架。
+    pub fn skeleton(&self) -> anyhow::Result<Arc<MdbMemoryStore>> {
+        Ok(self.skeleton.clone())
+    }
+
+    fn is_current(&self) -> bool {
+        super::mdb_memory_store::get(&self.project, &self.mdb)
+            .is_some_and(|current| current.session_fingerprint() == self.skeleton_fingerprint)
     }
 
     pub fn project(&self) -> &str {
@@ -109,20 +112,21 @@ impl DirectTreeService {
         &self.mdb
     }
 
-    pub fn dbnum_of(&self, refno: RefU64) -> anyhow::Result<i32> {
-        self.store.dbnum_of(refno).map_err(Into::into)
-    }
-
     /// SITE rows in MDB CURD order, then in each WORL's stored member order.
+    ///
+    /// WORL 从骨架查，不再触发 [`DirectStore::indexes`]——那是每库一次全树扫描加
+    /// 描述符抽取，而这里只要「哪些元素是 WORL」。骨架看不到「成员表非空」这一格
+    /// （头扫描不解析成员表），少这一格结果不变：成员表空的 WORL 下面一个 SITE 都
+    /// 没有，过不过滤都贡献零行。两边都按 refno 升序交，顺序也不变。
     pub fn roots(&self) -> anyhow::Result<Vec<EleTreeNode>> {
+        let skeleton = self.skeleton()?;
         let mut out = Vec::new();
-        for db in self.membership.of_type(DESI_STYP) {
+        for db in self.membership.element_databases() {
             if db.path.is_none() {
                 continue;
             }
             let dbnum = db.dbnum as i32;
-            let indexes = self.store.indexes(dbnum)?;
-            for world in indexes.refnos_of_noun("WORL", Some(true)) {
+            for world in skeleton.refnos_of_noun(db.dbnum, "WORL") {
                 for (order, child) in self.store.members_in(dbnum, world)?.into_iter().enumerate() {
                     let node = self.node(child, Some(world), order)?;
                     if node.noun.eq_ignore_ascii_case("SITE") {
@@ -175,24 +179,107 @@ impl DirectTreeService {
         root: RefU64,
         unit_types: &[String],
     ) -> anyhow::Result<Vec<GenerationRoot>> {
+        // Give the HTTP layer the same typed absence signal as direct attribute reads.
+        // `MdbMemoryStore::ancestors` carries a diagnostic-rich anyhow message, but that
+        // erased the category and `/model/ensure` exposed a deleted element as HTTP 500.
+        if !self.skeleton.contains(root) {
+            let dbnum = self
+                .skeleton
+                .dbnum_of_ref0(root.get_0())
+                .map(|value| value as i32)
+                .unwrap_or_default();
+            return Err(super::direct_store::DirectStoreError::NoSuchElement {
+                refno: RefnoEnum::from(root).to_string(),
+                dbnum,
+                sesno: None,
+            }
+            .into());
+        }
+        let requested = RefnoEnum::from(root);
+        let nodes = self
+            .ancestors(root)?
+            .into_iter()
+            .map(|refno| {
+                let attrs = self.store.named_attmap(refno.refno())?;
+                let owner = attrs
+                    .get_refu64("OWNER")
+                    .filter(|owner| owner.0 != 0 && *owner != refno.refno())
+                    .map(RefnoEnum::from);
+                Ok((
+                    refno,
+                    GenerationNode {
+                        owner,
+                        noun: attrs.get_as_string("TYPE").unwrap_or_default(),
+                        name: attrs.get_as_string("NAME").unwrap_or_default(),
+                    },
+                ))
+            })
+            .collect::<anyhow::Result<HashMap<_, _>>>()?;
+        if let Some(ancestor) = resolve_element_generation_root(requested, unit_types, |refno| {
+            nodes.get(&refno).cloned()
+        }) && ancestor.root != requested
+        {
+            return Ok(vec![ancestor]);
+        }
         generation_roots_in_subtree_on(&self.store, root, unit_types)
     }
 
     /// Self -> OWNER -> ... chain, matching Plant UI's existing contract.
+    ///
+    /// 走骨架里的属主表，全程零解析。此前每上一级要抽一整条记录再转一张属性表，
+    /// 只为读一个 `OWNER`——而这条链是 `generation_roots_in_subtree` 每次按需生成
+    /// 都要先走一遍的东西。
     pub fn ancestors(&self, start: RefU64) -> anyhow::Result<Vec<RefnoEnum>> {
+        Ok(self
+            .skeleton()?
+            .ancestors(start)?
+            .into_iter()
+            .map(RefnoEnum::from)
+            .collect())
+    }
+
+    /// 这个元素归属的库号（骨架的 `ref0 → dbnum`）。`None` = 它的 Ref0 不在本 MDB 里。
+    ///
+    /// 给 HTTP 层往树节点上外包 `dbnum` 用：refno 前半段只是 Ref0，浏览器端拿它当库号
+    /// 分桶会分错，库号只有这里答得出。
+    pub fn dbnum_of(&self, refno: RefU64) -> Option<u32> {
+        self.skeleton.dbnum_of(refno)
+    }
+
+    /// 这个元素的 noun（`TYPE`），与 [`Self::children`] 节点上的 `noun` 同一来源。
+    ///
+    /// 名称索引里没有类型，搜索结果要带 noun 只能回记录读一次；调用方按页调，别对
+    /// 全集调。
+    pub fn noun_of(&self, refno: RefU64) -> anyhow::Result<String> {
+        let attrs = self.store.named_attmap(refno)?;
+        Ok(attrs
+            .get_as_string("TYPE")
+            .unwrap_or_default()
+            .trim()
+            .to_string())
+    }
+
+    /// Search the NAME indexes of every DESI/ISOD member in this snapshot.
+    pub fn search_names(&self, query: &str) -> anyhow::Result<Vec<(String, RefnoEnum, u32)>> {
         let mut out = Vec::new();
-        let mut seen = HashSet::new();
-        let mut current = start;
-        for _ in 0..256 {
-            anyhow::ensure!(seen.insert(current), "OWNER 链成环于 {current}");
-            out.push(RefnoEnum::from(current));
-            let attrs = self.store.named_attmap(current)?;
-            let Some(owner) = attrs.get_refu64("OWNER").filter(|owner| owner.0 != 0) else {
-                return Ok(out);
-            };
-            current = owner;
+        for db in self.membership.element_databases() {
+            if db.path.is_none() {
+                continue;
+            }
+            out.extend(
+                self.store
+                    .indexes(db.dbnum as i32)?
+                    .search_names(query)
+                    .into_iter()
+                    .map(|(name, refno)| (name, RefnoEnum::from(refno), db.dbnum)),
+            );
         }
-        anyhow::bail!("OWNER 链超过 256 层，起点 {start}")
+        out.sort_by(|left, right| {
+            left.0
+                .cmp(&right.0)
+                .then(left.1.to_pdms_str().cmp(&right.1.to_pdms_str()))
+        });
+        Ok(out)
     }
 
     fn node(
@@ -271,7 +358,8 @@ pub fn generation_roots_in_subtree_on(
 pub struct DirectTreeProvider {
     project: String,
     mdb: String,
-    service: Arc<tokio::sync::OnceCell<Arc<DirectTreeService>>>,
+    service: Arc<tokio::sync::RwLock<Option<Arc<DirectTreeService>>>>,
+    reload: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl DirectTreeProvider {
@@ -279,21 +367,35 @@ impl DirectTreeProvider {
         Self {
             project: project.into(),
             mdb: mdb.into(),
-            service: Arc::new(tokio::sync::OnceCell::new()),
+            service: Arc::new(tokio::sync::RwLock::new(None)),
+            reload: Arc::new(tokio::sync::Mutex::new(())),
         }
     }
 
     pub async fn get(&self) -> anyhow::Result<Arc<DirectTreeService>> {
+        if let Some(reason) = super::mdb_memory_store::stale_reason(&self.project, &self.mdb) {
+            anyhow::bail!(
+                "MDB_SNAPSHOT_STALE: latest file session could not be installed: {reason}"
+            );
+        }
+        if let Some(service) = self.service.read().await.clone()
+            && service.is_current()
+        {
+            return Ok(service);
+        }
+        let _reload = self.reload.lock().await;
+        if let Some(service) = self.service.read().await.clone()
+            && service.is_current()
+        {
+            return Ok(service);
+        }
         let project = self.project.clone();
         let mdb = self.mdb.clone();
-        self.service
-            .get_or_try_init(|| async move {
-                tokio::task::spawn_blocking(move || DirectTreeService::open(&project, &mdb))
-                    .await
-                    .context("direct tree 初始化任务异常结束")?
-                    .map(Arc::new)
-            })
+        let service = tokio::task::spawn_blocking(move || DirectTreeService::open(&project, &mdb))
             .await
-            .cloned()
+            .context("direct tree 初始化任务异常结束")?
+            .map(Arc::new)?;
+        *self.service.write().await = Some(service.clone());
+        Ok(service)
     }
 }

@@ -1,0 +1,57 @@
+$(
+------------------------------------------------------------------------
+RVM 基准导出：带弧 SPINE 的 GENSEC（曲线扫掠 G1-1b），一次导五条容器
+
+  db 251183  SITE /OUTSTEEL_4DK_FWD
+    STRU /401_HAND-001   GENSEC 弧型 CENT / CENT,CENT（栏杆弯头，圆心式弧）
+    STRU /401_HAND-002   GENSEC 弧型 FILL / FILL,FILL（栏杆转角，倒圆式弧）
+    STRU /401_LADD-001   GENSEC 弧型 THRU,THRU,THRU（护笼，过点式弧）
+    STRU /403_ELEC-029   GENSEC 弧型 THRU（单段 225° 过点弧）
+  db 251115  SITE /EQUIP_2DK_FWD
+    EQUI /LGTE2033       TMPL 下 GENSEC：THRU 半圆环（FUNC RING）+ FILL,FILL,CENT,FILL,FILL 卡子
+
+全项目 7564 只 GENSEC 里 2024 只带弧（FILL 825 / THRU 434 / CENT,CENT 294 / FILL,FILL 245 /
+FILL,FILL,CENT,FILL,FILL 146 / …），上面五条把每一种弧型都覆盖到。
+rvm_compare 按名字配对，一份文件里放多条容器不影响逐件对拍。
+
+表现口径与 rvm_export_gensec_ct01.mac 逐行相同。
+导出是只读：没有 SAVEWORK，不产生新会话号。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/rvm_export_gensec_curved_251183.log" OVER
+$P CODEX-GENSEC-CURVED-RVM-EXPORT-ALIVE
+
+$* ---- 表现设置：只导实体几何 ----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+$* ---- 驱动与输出 ----
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/test_data/rvm/GENSEC-CURVED-251183.rvm"
+export filenote 'RVM baseline for curved-spine GENSEC: STRU /401_HAND-001 /401_HAND-002 /401_LADD-001 /403_ELEC-029 (db 251183) + EQUI /LGTE2033 (db 251115)'
+
+$* ---- 表现选项 ----
+export holes on
+export autocolour displayexport on
+export repr on
+
+$* ---- 包含列表：五条容器及其全部子孙 ----
+export /401_HAND-001
+export /401_HAND-002
+export /401_LADD-001
+export /403_ELEC-029
+export /LGTE2033
+
+$* ---- 执行 ----
+export finish
+
+$P CODEX-GENSEC-CURVED-RVM-EXPORT-DONE
+ALPHA LOG END
+
+$* ---- 自己收尾 ----
+QUIT
+FINISH
+FINISH

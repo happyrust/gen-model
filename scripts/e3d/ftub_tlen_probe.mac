@@ -1,0 +1,91 @@
+-- FTUB 的 `RPRO TLEN` 到底该取哪个数：拿 E3D 自己的属性视图当判据（2026-09-04）。
+--
+-- 背景：目录 `/ACP1000-VFVL-100` 的 SBOX 一律 `PXLE = ( ATTRIB RPRO TLEN )`，
+-- 而 TLEN 库里没有存值。e3d-io 现在读设计件 `HEIG` 顶上；ams8000 `=24384/24178`
+-- 的 HEIG=3300，E3D 导出的 RVM 面片却只有 3000，而该 SCOM 的 `PARA[3]`（标准段长）
+-- 正好 3000。本探针问 E3D：这几只 FTUB 的属性它自己怎么答。
+--
+-- 只读：全部是 Q，没有 SAVEWORK，不写 QUIT/FINISH，会话归 driver。
+-- 逐元素单独一个 ALPHA LOG 块——2026-08-12 有过一条非法查询让 des.exe 访问违例、
+-- 整块日志没落盘的先例，分块后已完成的部分先落盘。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/ftub-tlen-tty/24178.log" OVER
+$P CODEX-FTUB-TLEN-24178-ALIVE
+=24384/24178
+Q CE
+Q REF
+Q TYPE
+Q POS
+Q ORI
+Q HEIG
+Q ARRI
+Q LEAV
+Q SPRE
+Q ATT
+$P CODEX-FTUB-TLEN-24178-DONE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/ftub-tlen-tty/24179.log" OVER
+$P CODEX-FTUB-TLEN-24179-ALIVE
+=24384/24179
+Q CE
+Q REF
+Q TYPE
+Q POS
+Q ORI
+Q HEIG
+Q ARRI
+Q LEAV
+Q SPRE
+Q ATT
+$P CODEX-FTUB-TLEN-24179-DONE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/ftub-tlen-tty/scom-52161.log" OVER
+$P CODEX-FTUB-TLEN-SCOM-ALIVE
+=13244/52161
+Q CE
+Q REF
+Q NAME
+Q GTYP
+Q PARA
+Q ATT
+$P CODEX-FTUB-TLEN-SCOM-DONE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/ftub-tlen-tty/23547.log" OVER
+$P CODEX-FTUB-TLEN-23547-ALIVE
+=24384/23547
+Q CE
+Q REF
+Q TYPE
+Q POS
+Q ORI
+Q HEIG
+Q SPRE
+$P CODEX-FTUB-TLEN-23547-DONE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/ftub-tlen-tty/24439.log" OVER
+$P CODEX-FTUB-TLEN-24439-ALIVE
+=24384/24439
+Q CE
+Q REF
+Q TYPE
+Q POS
+Q ORI
+Q HEIG
+Q SPRE
+$P CODEX-FTUB-TLEN-24439-DONE
+ALPHA LOG END
+
+-- 别再往下加 `Q TLEN`：2026-09-04 实测它让 des.exe 直接 0xC0000005，连块首的
+-- `$P ...-ALIVE` 都没落盘（driver exit=3221225477）。TLEN 不是设计件上可查的属性，
+-- 它是 core.dll 在求目录表达式时现算的内部量，TTY 这一侧问不出来；要它的值只能看
+-- 求值结果，也就是 E3D 导出的 RVM 几何。`Q RPRO TLEN` / `Q ( ATTRIB RPRO TLEN )`
+-- 两种写法排在它后面，因此还没验证过——要试就单开一个宏，别拖累上面几块。
+
+-- 最后这块写在宏同名日志上：l3 driver 跑完就读它，读到了才算整条宏走通。
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/ftub_tlen_probe.log" OVER
+$P CODEX-FTUB-TLEN-ALL-BLOCKS-DONE
+ALPHA LOG END

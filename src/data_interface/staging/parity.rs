@@ -126,12 +126,12 @@ pub(crate) async fn run_both_paths(script: &MiniWindowScript) -> (String, String
 /// 渲染是同一份，差异只可能来自执行介质。
 #[tokio::test(flavor = "multi_thread")]
 async fn staged_parse_window_with_real_rendering_matches_direct_write() {
+    use crate::data_interface::ele_data::EleData;
     use crate::data_interface::ele_ops::{EleOperationData, EleOperationDetail};
     use crate::data_interface::increment_pipeline::IncrementPipeline;
     use crate::data_interface::model_update_pending::render_finalize_tail;
     use crate::data_interface::model_update_plan::ModelUpdatePlan;
     use aios_core::{NamedAttrValue, RefU64};
-    use crate::data_interface::ele_data::EleData;
     use std::collections::BTreeMap;
 
     let added_refno = RefU64((7997u64 << 32) | 11);
@@ -299,12 +299,12 @@ async fn a_real_window_touches_the_persistent_layer_only_at_write_back() {
     use super::lifecycle::create_window_on;
     use super::resources::ResourceThresholds;
     use super::{StagedFinalize, register_staged_finalize};
+    use crate::data_interface::ele_data::EleData;
     use crate::data_interface::ele_ops::{EleOperationData, EleOperationDetail};
     use crate::data_interface::increment_manager::refresh_world_transform_products;
     use crate::data_interface::increment_pipeline::IncrementPipeline;
     use aios_core::options::DbOption;
     use aios_core::{NamedAttrValue, RefU64, RefnoEnum};
-    use crate::data_interface::ele_data::EleData;
     use std::collections::BTreeMap;
 
     const DBNUM: u32 = 7985;

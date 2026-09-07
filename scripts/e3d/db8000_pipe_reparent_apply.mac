@@ -1,0 +1,64 @@
+-- 管道 P-08「移动管件·跨 BRAN 改挂」apply：把 scratch A 的 FTUB 4 改挂到 scratch B。
+--
+-- 需要先建好 A（db8000_pipe_scratch_a_create.mac）与 B（db8000_pipe_scratch_b_create.mac）。
+-- 用 member-index 定位（FTUB 4），避免硬编码每次 create 重分配的 refno。
+--
+-- 改挂用 E3D 原生的 `INCLUDE`：到 B 下 `INCLUDE =<FTUB 4>`，同一元素换属主、refno 不变，
+-- 成为 B 的末位成员。**不要写 `OWNER /B`**：2026-09-06 13:24 live 实测（ams8000 会话 321），
+-- E3D 把它当两条导航命令（`OWNER` 上跳到属主、`/B` 跳到 B）静默执行——不报错、不改挂，
+-- FTUB 4 仍在 A，那一会话只剩 dabacon 的 DBMDAT 记账。OWNER 在 Design 里是导航词、不可设。
+--
+-- 预期（模型面）：owner 变化 → 元素记 Reparented，旧属主 A 与新属主 B 都记 MemberChanged →
+-- 两根都 regen（纯函数契约 `reparented_fitting_regenerates_both_old_and_new_branches` 已钉）。
+-- 数据面：net_window 里 FTUB 4 应是 modified 且 modified_attrs 含 OWNER；A / B 各带 children_changed。
+--
+-- 纪律：一个 SAVEWORK、无 QUIT/FINISH、SAVEWORK 前导窄口径 RVM（A、B 各一份）。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_pipe_reparent_apply.log" OVER
+$P CODEX-DB8000-PIPE-REPARENT-APPLY-ALIVE
+/CODEX_DB8000_PIPE_SCR_A
+Q CE
+Q REF
+Q MEMB
+FTUB 4
+!ftub = !!CE
+Q CE
+Q REF
+Q OWNE
+Q POS
+/CODEX_DB8000_PIPE_SCR_B
+INCLUDE $!ftub
+$P CODEX-DB8000-PIPE-REPARENT-VIA-INCLUDE
+$!ftub
+Q CE
+Q REF
+Q OWNE
+Q POS
+
+$* ---- RVM 导出（A、B 两端；状态 reparented）----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/db8000-pipe-scratch/rvm/reparented-A.rvm"
+export filenote 'CODEX db8000 pipe P-08 apply: FTUB 4 reparented A->B (source A)'
+export holes on
+export autocolour displayexport on
+export repr on
+export /CODEX_DB8000_PIPE_SCR_A
+export finish
+export file "D:/work/plant-code/old/gen-model/output/db8000-pipe-scratch/rvm/reparented-B.rvm"
+export filenote 'CODEX db8000 pipe P-08 apply: FTUB 4 reparented A->B (target B)'
+export /CODEX_DB8000_PIPE_SCR_B
+export finish
+
+/CODEX_DB8000_PIPE_SCR_A
+Q REF
+Q MEMB
+/CODEX_DB8000_PIPE_SCR_B
+Q REF
+Q MEMB
+SAVEWORK 'CODEX db8000 pipe P-08 apply: reparent FTUB 4 from scratch A to scratch B (INCLUDE)'
+$P CODEX-DB8000-PIPE-REPARENT-APPLY-DONE
+ALPHA LOG END

@@ -124,7 +124,6 @@ async fn main() -> anyhow::Result<()> {
         #[derive(Debug, serde::Deserialize)]
         struct TubiBasicInfo {
             refno: RefnoEnum,
-            noun: String,
             inst_relate_count: i64,
         }
 

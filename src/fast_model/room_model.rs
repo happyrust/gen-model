@@ -28,6 +28,69 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
+/// Revision guard and settlement statements supplied by the durable room queue.
+/// Geometry code owns the edge mutations; queue code owns task identity. Keeping
+/// the textual seam here lets both sets of statements share one transaction.
+pub(crate) struct RoomWriteGuard {
+    pub select_work: String,
+    pub settle_statements: Vec<String>,
+}
+
+/// Geometry source used by one room calculation. Incremental room tasks use
+/// the immutable per-file publication view; maintenance/full rebuild callers
+/// keep an explicit live entry point.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum RoomGeometryView {
+    #[default]
+    Live,
+    Published,
+}
+
+async fn query_room_insts(
+    view: RoomGeometryView,
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<Vec<GeomInstQuery>> {
+    match view {
+        RoomGeometryView::Live => crate::data_interface::staging::query_valid_insts(refnos).await,
+        RoomGeometryView::Published => {
+            crate::fast_model::room_publication::query_published_room_insts(refnos).await
+        }
+    }
+}
+
+pub(crate) fn render_room_write(mutations: &[String], guard: Option<&RoomWriteGuard>) -> String {
+    let statements = match guard {
+        None => mutations.to_vec(),
+        Some(guard) => {
+            let mut guarded = mutations.to_vec();
+            guarded.extend(guard.settle_statements.iter().cloned());
+            vec![
+                format!("LET $room_work = {}", guard.select_work),
+                format!(
+                    "IF $room_work != NONE {{\n{}\n}}",
+                    guarded
+                        .iter()
+                        .map(|statement| format!("{statement};"))
+                        .join("\n")
+                ),
+            ]
+        }
+    };
+    wrap_in_transaction(&statements).unwrap_or_default()
+}
+
+pub(crate) async fn execute_guarded_room_write(
+    mutations: &[String],
+    guard: &RoomWriteGuard,
+    description: &str,
+) -> anyhow::Result<()> {
+    crate::surreal_retry::execute_model_write(
+        &render_room_write(mutations, Some(guard)),
+        description,
+    )
+    .await
+}
+
 #[tokio::test]
 #[ignore = "manual integration: requires the configured Surreal project and room mesh files"]
 pub async fn test_cal_rooms() -> anyhow::Result<()> {
@@ -430,6 +493,26 @@ async fn stamp_room_build(stamp: RoomBuildStamp) -> anyhow::Result<()> {
         .check()
         .map_err(|error| anyhow::anyhow!("写入房间重建凭据语句失败: {error}"))?;
     Ok(())
+}
+
+/// 空世界的全量重建是平凡的，但照样盖章。
+///
+/// 空间树校验为空（`ReadyEmpty`：库里 0 条可用几何指针）时，每块在册面板都会算成
+/// `NoGeometry`、一条边都写不出，`build_room_relations` 走一遍只是白扫全部 DESI 的房间
+/// 拓扑——启动那道门（`lib.rs::skip_startup_room_build` 第三道）因此跳过它。但凭据说的是
+/// 「上次成功重建看到的世界」，空世界也是一个世界：不盖的话 `/health.room_build` 在
+/// spawned-mem 下永远是「没有成功的全量房间重建凭据」，下次启动的对账也没有比较对象。
+/// 随后每一次几何发布都 bump spatial epoch，重启时凭据失配照样判「跑」，什么都没放松。
+///
+/// 只对空树成立：树非空时拒绝盖章——那不是平凡重建，是想绕过覆盖率闸门。
+pub(crate) async fn stamp_vacuous_room_build() -> anyhow::Result<()> {
+    let stamp = current_room_build_stamp().await?;
+    anyhow::ensure!(
+        stamp.tree_entries == 0,
+        "空间树有 {} 条，不是空世界，不按平凡重建盖章",
+        stamp.tree_entries
+    );
+    stamp_room_build(stamp).await
 }
 
 /// 窗口可以提交、但结构枚举已不足以建立精确面板任务时的持久恢复信号。
@@ -902,10 +985,19 @@ fn render_panel_state_write(
     members: &HashMap<RefnoEnum, RoomMember>,
     room: Option<&RoomPanels>,
 ) -> String {
+    render_panel_state_write_guarded(panel, members, room, None)
+}
+
+fn render_panel_state_write_guarded(
+    panel: RefnoEnum,
+    members: &HashMap<RefnoEnum, RoomMember>,
+    room: Option<&RoomPanels>,
+    guard: Option<&RoomWriteGuard>,
+) -> String {
     let room_num = room.map(|room| room.room_num.as_str()).unwrap_or("");
     let mut statements = render_room_relate_statements(panel, members, room_num);
     statements.extend(render_panel_room_topology_statements(panel, room));
-    wrap_in_transaction(&statements).unwrap_or_default()
+    render_room_write(&statements, guard)
 }
 
 async fn save_panel_state(
@@ -913,8 +1005,17 @@ async fn save_panel_state(
     members: &HashMap<RefnoEnum, RoomMember>,
     room: Option<&RoomPanels>,
 ) -> anyhow::Result<()> {
+    save_panel_state_guarded(panel, members, room, None).await
+}
+
+async fn save_panel_state_guarded(
+    panel: RefnoEnum,
+    members: &HashMap<RefnoEnum, RoomMember>,
+    room: Option<&RoomPanels>,
+    guard: Option<&RoomWriteGuard>,
+) -> anyhow::Result<()> {
     crate::surreal_retry::execute_model_write(
-        &render_panel_state_write(panel, members, room),
+        &render_panel_state_write_guarded(panel, members, room, guard),
         &format!("原子写入 {panel} 的房间成员与面板拓扑"),
     )
     .await
@@ -955,9 +1056,19 @@ async fn load_room_panel_groups_by_mode<F>(
 where
     F: Fn(&str) -> bool,
 {
+    let hierarchy = crate::fast_model::room_topology::RoomHierarchy::configured()
+        .ok_or_else(|| anyhow::anyhow!("房间子系统需要 project_hd 或 project_hh 特性"))?;
+    if let Some(published) =
+        crate::fast_model::room_topology::load_room_panel_map_from_published_files(
+            room_key_word,
+            hierarchy,
+            &match_room_fn,
+        )
+        .await?
+    {
+        return Ok(published);
+    }
     if crate::options::direct_read_mode() {
-        let hierarchy = crate::fast_model::room_topology::RoomHierarchy::configured()
-            .ok_or_else(|| anyhow::anyhow!("房间子系统需要 project_hd 或 project_hh 特性"))?;
         return crate::fast_model::room_topology::load_room_panel_map_from_files(
             room_key_word,
             hierarchy,
@@ -1142,15 +1253,29 @@ pub async fn cal_room_refnos(
     panel_refno: RefnoEnum,
     exclude_refnos: &HashSet<RefnoEnum>,
 ) -> anyhow::Result<PanelMembers> {
+    cal_room_refnos_from(
+        mesh_dir,
+        panel_refno,
+        exclude_refnos,
+        RoomGeometryView::Live,
+    )
+    .await
+}
+
+async fn cal_room_refnos_from(
+    mesh_dir: &PathBuf,
+    panel_refno: RefnoEnum,
+    exclude_refnos: &HashSet<RefnoEnum>,
+    view: RoomGeometryView,
+) -> anyhow::Result<PanelMembers> {
     //查询到aabb直接完全在这个房间里的mesh里，就不用做点的检查
     // 这里曾经是 `unwrap_or_default()`：面板实例只要有一个字段形状不对
     //（`GeomInstQuery` 的 `pe.owner` / `inst_relate.generic` 都是非 Option 字符串），
     // 反序列化错误就被吞成空 Vec，紧接着下面的 `is_empty()` 让整间房**无声地**算成
     // 0 个成员，日志里一行都没有。合成夹具首跑就是被它藏了半天。
-    let geom_insts: Vec<GeomInstQuery> =
-        crate::data_interface::staging::query_valid_insts(&[panel_refno])
-            .await
-            .map_err(|error| anyhow::anyhow!("查询面板 {panel_refno} 的实例失败: {error}"))?;
+    let geom_insts: Vec<GeomInstQuery> = query_room_insts(view, &[panel_refno])
+        .await
+        .map_err(|error| anyhow::anyhow!("查询面板 {panel_refno} 的实例失败: {error}"))?;
     // dbg!(&geom_insts);
     // 此前这里 `return Ok(Default::default())`——把「没有几何」当成「没有成员」交出去，
     // 调用方紧接着先清后写，于是这块面板的存量归属边被静默清空。它与下面「网格一个都
@@ -1250,9 +1375,11 @@ pub async fn cal_room_refnos(
                     .keys()
                     .map(|refno| RefnoEnum::from(*refno))
                     .collect();
-                let geom_pts = query_geom_pts(&candidates).await.map_err(|error| {
-                    anyhow::anyhow!("面板 {panel_refno} 的候选几何点: {error:#}")
-                })?;
+                let geom_pts = query_geom_pts_for_view(view, &candidates, mesh_dir)
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("面板 {panel_refno} 的候选几何点: {error:#}")
+                    })?;
                 // dbg!(&geom_pts);
                 // Aabb 既不是 Eq 也不是 Hash，所以按 refno 建映射而不是塞进 Set。
                 let intersect_set: DashMap<RefnoEnum, Aabb> = DashMap::new();
@@ -1327,6 +1454,74 @@ pub async fn recalc_panel_membership(
     rooms: &RoomPanelMap,
     panel: RefnoEnum,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
+    recalc_panel_membership_inner(db_option, rooms, panel, None, RoomGeometryView::Live).await
+}
+
+pub(crate) async fn recalc_panel_membership_published(
+    db_option: &DbOption,
+    rooms: &RoomPanelMap,
+    panel: RefnoEnum,
+) -> anyhow::Result<HashSet<RefnoEnum>> {
+    recalc_panel_membership_inner(db_option, rooms, panel, None, RoomGeometryView::Published).await
+}
+
+async fn query_geom_pts_for_view(
+    view: RoomGeometryView,
+    refnos: &[RefnoEnum],
+    mesh_dir: &Path,
+) -> anyhow::Result<Vec<GeomPtsQuery>> {
+    if view == RoomGeometryView::Live {
+        return query_geom_pts(refnos).await;
+    }
+    let mut rows = Vec::new();
+    for inst in query_room_insts(view, refnos).await? {
+        if inst.has_neg {
+            continue;
+        }
+        let mut pts_group = Vec::with_capacity(inst.insts.len());
+        for geo in &inst.insts {
+            let path = mesh_dir.join(format!("{}.mesh", geo.geo_hash));
+            let mesh = PlantMesh::des_mesh_file(&path).map_err(|error| {
+                anyhow::anyhow!("读取已发布网格 {} 失败: {error}", path.display())
+            })?;
+            pts_group.push((
+                geo.transform,
+                Some(mesh.vertices.iter().map(|point| point.as_dvec3()).collect()),
+            ));
+        }
+        rows.push(GeomPtsQuery {
+            refno: inst.refno,
+            world_trans: inst.world_trans,
+            world_aabb: inst.world_aabb,
+            pts_group,
+        });
+    }
+    Ok(rows)
+}
+
+pub(crate) async fn recalc_panel_membership_guarded(
+    db_option: &DbOption,
+    rooms: &RoomPanelMap,
+    panel: RefnoEnum,
+    guard: &RoomWriteGuard,
+) -> anyhow::Result<HashSet<RefnoEnum>> {
+    recalc_panel_membership_inner(
+        db_option,
+        rooms,
+        panel,
+        Some(guard),
+        RoomGeometryView::Published,
+    )
+    .await
+}
+
+async fn recalc_panel_membership_inner(
+    db_option: &DbOption,
+    rooms: &RoomPanelMap,
+    panel: RefnoEnum,
+    guard: Option<&RoomWriteGuard>,
+    view: RoomGeometryView,
+) -> anyhow::Result<HashSet<RefnoEnum>> {
     let Some(room) = rooms.room_of_panel(panel) else {
         // 面板已不在册：房间改名后不再合规、面板被挪出房间、或房间本身没了。
         // 旧边仍要清，否则它会一直挂着上一次的归属，且没有任何人会再来碰它。
@@ -1336,7 +1531,7 @@ pub async fn recalc_panel_membership(
                 println!("[房间增量] 读取面板 {panel} 旧成员失败（仅日志受影响）: {error:#}");
                 HashSet::new()
             });
-        save_panel_state(panel, &HashMap::new(), None).await?;
+        save_panel_state_guarded(panel, &HashMap::new(), None, guard).await?;
         if !old_members.is_empty() {
             println!(
                 "[房间增量] 面板 {panel} 已不在册，清空其房间归属（原 {} 个成员掉出）",
@@ -1363,13 +1558,14 @@ pub async fn recalc_panel_membership(
     // 没有几何同样是「判不了」，在这里要比全量那一侧更响：整间任务的入队条件是这块
     // 面板的包围盒确实变过，能变就说明它刚才还有几何，此刻却查不到，本身就是信号。
     // 上抛让任务保留重试，而不是写一个空集把这间房清掉。
-    let members = match cal_room_refnos(&db_option.get_meshes_path(), panel, &exclude).await? {
-        PanelMembers::Computed(members) => members,
-        PanelMembers::NoGeometry => anyhow::bail!(
-            "面板 {panel} 查不到任何几何实例，不改写它的房间归属（任务保留重试）。\
+    let members =
+        match cal_room_refnos_from(&db_option.get_meshes_path(), panel, &exclude, view).await? {
+            PanelMembers::Computed(members) => members,
+            PanelMembers::NoGeometry => anyhow::bail!(
+                "面板 {panel} 查不到任何几何实例，不改写它的房间归属（任务保留重试）。\
              它的包围盒刚变过才排的这次重算，此刻却没有几何——先确认结构库是否被清过"
-        ),
-    };
+            ),
+        };
     let new_members: HashSet<RefnoEnum> = members.keys().copied().collect();
     let old_members = existing_members_of_panel(panel)
         .await
@@ -1377,7 +1573,7 @@ pub async fn recalc_panel_membership(
             println!("[房间增量] 读取面板 {panel} 旧成员失败（仅日志受影响）: {error:#}");
             HashSet::new()
         });
-    save_panel_state(panel, &members, Some(room)).await?;
+    save_panel_state_guarded(panel, &members, Some(room), guard).await?;
     log_panel_membership_change(panel, &room_num, &old_members, &new_members);
     Ok(new_members)
 }
@@ -1406,6 +1602,7 @@ pub struct PanelIndex {
     mesh_dir: PathBuf,
     /// 在册、但没能进索引的面板：`query_insts` 没返回行，或世界包围盒不可用。
     missing: Vec<RefnoEnum>,
+    view: RoomGeometryView,
 }
 
 /// 一块在册面板的一条实例（同一个 refno 可能有多条 `inst_relate` 行）。
@@ -1554,8 +1751,24 @@ pub async fn load_panel_index(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
 ) -> anyhow::Result<PanelIndex> {
+    load_panel_index_from(db_option, rooms, RoomGeometryView::Live).await
+}
+
+pub(crate) async fn load_published_panel_index(
+    db_option: &DbOption,
+    rooms: &RoomPanelMap,
+) -> anyhow::Result<PanelIndex> {
+    load_panel_index_from(db_option, rooms, RoomGeometryView::Published).await
+}
+
+async fn load_panel_index_from(
+    db_option: &DbOption,
+    rooms: &RoomPanelMap,
+    view: RoomGeometryView,
+) -> anyhow::Result<PanelIndex> {
     let mut index = PanelIndex {
         mesh_dir: db_option.get_meshes_path(),
+        view,
         ..Default::default()
     };
     let registered: Vec<RefnoEnum> = rooms
@@ -1567,11 +1780,9 @@ pub async fn load_panel_index(
     if registered.is_empty() {
         return Ok(index);
     }
-    let insts: Vec<GeomInstQuery> = crate::data_interface::staging::query_valid_insts(&registered)
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("查询 {} 块在册面板的实例失败: {error}", registered.len())
-        })?;
+    let insts: Vec<GeomInstQuery> = query_room_insts(view, &registered).await.map_err(|error| {
+        anyhow::anyhow!("查询 {} 块在册面板的实例失败: {error}", registered.len())
+    })?;
 
     let mut indexed: HashSet<RefnoEnum> = HashSet::new();
     let mut invalid: HashSet<RefnoEnum> = HashSet::new();
@@ -1723,11 +1934,12 @@ pub async fn element_candidate_panels(
     if !panels.missing_panels().is_empty() {
         return Ok(out);
     }
-    let insts: Vec<GeomInstQuery> = crate::data_interface::staging::query_valid_insts(elements)
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!("查询 {} 个吸收候选构件的实例失败: {error}", elements.len())
-        })?;
+    let insts: Vec<GeomInstQuery> =
+        query_room_insts(panels.view, elements)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("查询 {} 个吸收候选构件的实例失败: {error}", elements.len())
+            })?;
     let mut invalid: HashSet<RefnoEnum> = HashSet::new();
     for inst in insts {
         // 任一实例不可用时整项候选未知：不能拿其余实例的部分候选去吸收该元素任务。
@@ -1781,9 +1993,32 @@ pub async fn recalc_element_membership(
     history: &ElementRoomHistory,
     element: RefnoEnum,
 ) -> anyhow::Result<()> {
+    recalc_element_membership_inner(rooms, panels, history, element, None).await
+}
+
+pub(crate) async fn recalc_element_membership_guarded(
+    rooms: &RoomPanelMap,
+    panels: &PanelIndex,
+    history: &ElementRoomHistory,
+    element: RefnoEnum,
+    guard: &RoomWriteGuard,
+) -> anyhow::Result<()> {
+    recalc_element_membership_inner(rooms, panels, history, element, Some(guard)).await
+}
+
+async fn recalc_element_membership_inner(
+    rooms: &RoomPanelMap,
+    panels: &PanelIndex,
+    history: &ElementRoomHistory,
+    element: RefnoEnum,
+    guard: Option<&RoomWriteGuard>,
+) -> anyhow::Result<()> {
     // 面板本身不参与归属。整间分支把**所有**面板排除在成员之外，反向路径必须同口径，
     // 否则一块面板在两条路径下会得到不同答案。PANE 自身变更按 ADR §2 走整间分支。
     if rooms.all_panels.contains(&element) {
+        if let Some(guard) = guard {
+            execute_guarded_room_write(&[], guard, &format!("结算面板元素任务 {element}")).await?;
+        }
         return Ok(());
     }
 
@@ -1797,22 +2032,22 @@ pub async fn recalc_element_membership(
     // 取自本轮那份整页快照（[`ElementRoomHistory`]），不再按元素各查一次。
     let old_rooms = history.room_nums_of(element);
 
-    let element_insts: Vec<GeomInstQuery> =
-        crate::data_interface::staging::query_valid_insts(&[element])
-            .await
-            .map_err(|error| anyhow::anyhow!("查询构件 {element} 的实例失败: {error}"))?;
+    let element_insts: Vec<GeomInstQuery> = query_room_insts(panels.view, &[element])
+        .await
+        .map_err(|error| anyhow::anyhow!("查询构件 {element} 的实例失败: {error}"))?;
     // 没有几何、或包围盒不可用的构件不可能属于任何房间——但旧边照样要清掉：全量重建
     // 也捞不到它（进不了空间树就不是任何面板的候选），空集才是与全量一致的结果。
     // 打一行日志是因为这条路本不该走到：元素任务的入队条件是「包围盒确实变了」，能变
     // 就说明刚才还算得出来，此刻却查不到，本身就是要查的信号。
     if element_insts.is_empty() {
         println!("构件 {element} 查不到几何实例，房间归属按空集收敛（存量入边已清）");
-        return write_element_room_relate_logged(
+        return write_element_room_relate_logged_guarded(
             element,
             &[],
             &old_rooms,
             protected_panels,
             &preserved_rooms,
+            guard,
         )
         .await;
     }
@@ -1890,7 +2125,7 @@ pub async fn recalc_element_membership(
     // 只有跨界构件才需要实际几何点，而取点是一次库往返。此前无论第一轮判成什么都先
     // 取一遍，八顶点全在内或全在外的构件（绝大多数）白付一次查询。
     if !pending_point_checks.is_empty() {
-        let world_points = element_world_points(element)
+        let world_points = element_world_points(element, panels.view, mesh_dir)
             .await
             .map_err(|error| anyhow::anyhow!("构件 {element} 的几何点: {error:#}"))?;
         for (element_slot, candidate, mesh_slot, inside_count) in pending_point_checks {
@@ -1908,12 +2143,13 @@ pub async fn recalc_element_membership(
     }
 
     let edges: Vec<ElementRoomEdge> = edges.into_values().collect();
-    write_element_room_relate_logged(
+    write_element_room_relate_logged_guarded(
         element,
         &edges,
         &old_rooms,
         protected_panels,
         &preserved_rooms,
+        guard,
     )
     .await
 }
@@ -1929,9 +2165,13 @@ fn same_world_aabb(left: &Aabb, right: &Aabb) -> bool {
 }
 
 /// 构件各实例在世界坐标系下的实际几何点，与正向第二轮取的是同一批。
-async fn element_world_points(element: RefnoEnum) -> anyhow::Result<Vec<ElementWorldPoints>> {
+async fn element_world_points(
+    element: RefnoEnum,
+    view: RoomGeometryView,
+    mesh_dir: &Path,
+) -> anyhow::Result<Vec<ElementWorldPoints>> {
     let mut rows = Vec::new();
-    for geom_pts in query_geom_pts(&[element]).await? {
+    for geom_pts in query_geom_pts_for_view(view, &[element], mesh_dir).await? {
         let mut points = Vec::new();
         for (trans, pts) in &geom_pts.pts_group {
             let Some(pts) = pts else {
@@ -1979,6 +2219,15 @@ fn render_element_relate_write(
     edges: &[ElementRoomEdge],
     protected_panels: &[RefnoEnum],
 ) -> String {
+    render_element_relate_write_guarded(element, edges, protected_panels, None)
+}
+
+fn render_element_relate_write_guarded(
+    element: RefnoEnum,
+    edges: &[ElementRoomEdge],
+    protected_panels: &[RefnoEnum],
+    guard: Option<&RoomWriteGuard>,
+) -> String {
     let element_key = element.to_pe_key();
     let mut delete = format!("DELETE {element_key}<-room_relate");
     if !protected_panels.is_empty() {
@@ -2014,7 +2263,7 @@ fn render_element_relate_write(
         ));
     }
 
-    wrap_in_transaction(&statements).unwrap_or_default()
+    render_room_write(&statements, guard)
 }
 
 async fn write_element_room_relate(
@@ -2022,7 +2271,16 @@ async fn write_element_room_relate(
     edges: &[ElementRoomEdge],
     protected_panels: &[RefnoEnum],
 ) -> anyhow::Result<()> {
-    let sql = render_element_relate_write(element, edges, protected_panels);
+    write_element_room_relate_guarded(element, edges, protected_panels, None).await
+}
+
+async fn write_element_room_relate_guarded(
+    element: RefnoEnum,
+    edges: &[ElementRoomEdge],
+    protected_panels: &[RefnoEnum],
+    guard: Option<&RoomWriteGuard>,
+) -> anyhow::Result<()> {
+    let sql = render_element_relate_write_guarded(element, edges, protected_panels, guard);
     crate::surreal_retry::execute_model_write(&sql, &format!("写入 {element} 的房间归属")).await
 }
 
@@ -2039,10 +2297,29 @@ async fn write_element_room_relate_logged(
     protected_panels: &[RefnoEnum],
     preserved_rooms: &BTreeSet<String>,
 ) -> anyhow::Result<()> {
+    write_element_room_relate_logged_guarded(
+        element,
+        edges,
+        old_rooms,
+        protected_panels,
+        preserved_rooms,
+        None,
+    )
+    .await
+}
+
+async fn write_element_room_relate_logged_guarded(
+    element: RefnoEnum,
+    edges: &[ElementRoomEdge],
+    old_rooms: &BTreeSet<String>,
+    protected_panels: &[RefnoEnum],
+    preserved_rooms: &BTreeSet<String>,
+    guard: Option<&RoomWriteGuard>,
+) -> anyhow::Result<()> {
     let mut new_rooms: BTreeSet<String> = edges.iter().map(|edge| edge.room_num.clone()).collect();
     new_rooms.extend(preserved_rooms.iter().cloned());
     log_room_membership_change("构件", element, old_rooms, &new_rooms);
-    write_element_room_relate(element, edges, protected_panels).await
+    write_element_room_relate_guarded(element, edges, protected_panels, guard).await
 }
 
 /// 增量房间归属变化的控制台日志：只在归属真的变了时说一句，把「从哪到哪」讲清楚
@@ -2858,7 +3135,7 @@ mod tests {
     fn the_panel_branch_uses_the_shared_tree_coverage_gate() {
         let source = include_str!("room_model.rs");
         let body = source
-            .split_once("pub async fn recalc_panel_membership(")
+            .split_once("async fn recalc_panel_membership_inner(")
             .expect("recalc_panel_membership 必须存在")
             .1
             .split_once("/// 一轮 drain 复用的在册面板几何")
@@ -2866,14 +3143,16 @@ mod tests {
             .0;
 
         let unregistered_at = body
-            .find("save_panel_state(panel, &HashMap::new(), None)")
+            .find("save_panel_state_guarded(panel, &HashMap::new(), None, guard)")
             .expect("面板不在册时仍要清边");
         let guard_at = body
             .find("ensure_room_tree_coverage().await")
             .expect("共享覆盖率门必须挡在重算之前");
-        let recalc_at = body.find("cal_room_refnos(").expect("整间分支必须算成员");
+        let recalc_at = body
+            .find("cal_room_refnos_from(")
+            .expect("整间分支必须算成员");
         let write_at = body
-            .find("save_panel_state(panel, &members, Some(room))")
+            .find("save_panel_state_guarded(panel, &members, Some(room), guard)")
             .expect("整间分支必须写回成员");
 
         assert!(
@@ -2895,7 +3174,7 @@ mod tests {
     fn the_panel_branch_excludes_only_registered_panels_after_staging_retired() {
         let source = include_str!("room_model.rs");
         let body = source
-            .split_once("pub async fn recalc_panel_membership(")
+            .split_once("async fn recalc_panel_membership_inner(")
             .expect("recalc_panel_membership 必须存在")
             .1
             .split_once("/// 一轮 drain 复用的在册面板几何")
@@ -2909,7 +3188,9 @@ mod tests {
         let exclude_at = body
             .find("let exclude = rooms.all_panels.clone();")
             .expect("排除集必须是在册面板");
-        let recalc_at = body.find("cal_room_refnos(").expect("整间分支必须算成员");
+        let recalc_at = body
+            .find("cal_room_refnos_from(")
+            .expect("整间分支必须算成员");
         assert!(exclude_at < recalc_at, "{body}");
     }
 
@@ -2943,7 +3224,7 @@ mod tests {
         );
 
         let panel_branch = source
-            .split_once("pub async fn recalc_panel_membership(")
+            .split_once("async fn recalc_panel_membership_inner(")
             .expect("recalc_panel_membership 必须存在")
             .1
             .split_once("/// 一轮 drain 复用的在册面板几何")
@@ -2957,7 +3238,7 @@ mod tests {
             .map(|at| arm_at + at)
             .expect("整间分支必须上抛，让任务保留重试而不是算成功");
         let write_at = panel_branch
-            .find("save_panel_state(panel, &members, Some(room))")
+            .find("save_panel_state_guarded(panel, &members, Some(room), guard)")
             .expect("整间分支必须写回成员");
         assert!(bail_at < write_at, "{panel_branch}");
     }
@@ -2966,7 +3247,7 @@ mod tests {
     fn element_branch_source() -> &'static str {
         let source = include_str!("room_model.rs");
         source
-            .split_once("pub async fn recalc_element_membership(")
+            .split_once("async fn recalc_element_membership_inner(")
             .expect("recalc_element_membership 必须存在")
             .1
             .split_once("\n/// 构件在世界坐标系下的实际几何点")
@@ -3029,7 +3310,7 @@ mod tests {
             .find("if !pending_point_checks.is_empty()")
             .expect("取点必须被待办列表守着");
         let fetch_at = body
-            .find("element_world_points(element)")
+            .find("element_world_points(element, panels.view, mesh_dir)")
             .expect("第二轮必须取实际几何点");
 
         assert!(first_round_at < guard_at, "第一轮必须先跑完: {body}");

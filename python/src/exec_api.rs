@@ -222,6 +222,15 @@ pub fn full_init(
             if let Some(notice) = aios_database::data_interface::watch_scope::mode_notice() {
                 eprintln!("*** {notice} ***");
             }
+            // 同上：`model_incremental_types` 把模型增量圈到指定类型的生成根，名单外的
+            // 根照常入队却不生成——不出声就是「怎么 HANG 一直没模型」。
+            if let Some(notice) = aios_database::data_interface::model_type_scope::mode_notice() {
+                eprintln!("*** {notice} ***");
+            }
+            // 同上：读模式默认 direct，`AIOS_DATA_READ_MODE` 拼错了要出声而不是静默走默认。
+            if let Some(notice) = aios_database::options::data_read_mode_notice() {
+                eprintln!("*** {notice} ***");
+            }
             // 与 run_cli 同款（specs/023）：几何并发闸额度非法必须启动失败，
             // live A/B 与 testbed 正是靠这条路把额度=1 / 额度=核数两档跑出来的。
             let geometry_workers =
@@ -252,7 +261,8 @@ pub fn full_init(
             // 2. 连接 + define_common_functions + 编译期内置函数快照（含 D11 的
             //    hd/hh 矫正；与 connect / run_cli 同款）。幂等；connect 层可能已做过。
             if !CONNECTED.load(Ordering::SeqCst) {
-                aios_core::init_surreal().await?;
+                // 只附着、不拉起（`store_mode` 默认已是 spawned-mem，2026-09-04）。
+                aios_database::attach_store_connected().await?;
                 aios_database::data_interface::embedded_surql::define_embedded_functions().await?;
                 CONNECTED.store(true, Ordering::SeqCst);
             }
@@ -279,9 +289,9 @@ pub fn full_init(
                 ensure_increment_state_storage()
             .await?;
             println!("增量状态表检查完成（兼容检查 {migrated} 个旧 DBNUM 水位）");
-            aios_database::versioned_db::database::define_dbnum_event()
+            aios_database::versioned_db::database::retire_dbnum_event()
                 .await
-                .context("重新定义 update_dbnum_event 失败")?;
+                .context("移除废弃 update_dbnum_event 失败")?;
 
             // 4. inst_relate 索引 + 自愈回填/清扫（run_cli 同款：失败不阻断，出声）。
             if let Err(error) =
@@ -470,10 +480,9 @@ pub fn resolve_window(py: Python<'_>, path: PathBuf, skip_cata: bool) -> PyResul
     let value = py
         .detach(|| {
             runtime().block_on(async {
-                let header = aios_database::data_interface::db_file_header::DbFileHeader::read(
-                    &path,
-                )
-                .map_err(|error| anyhow::anyhow!("读取库文件头失败: {error}"))?;
+                let header =
+                    aios_database::data_interface::db_file_header::DbFileHeader::read(&path)
+                        .map_err(|error| anyhow::anyhow!("读取库文件头失败: {error}"))?;
                 let dbnum = header.dbnum as u32;
                 let db_type = header.db_type.clone();
                 let latest = header.latest_sesno() as i32;
@@ -653,6 +662,8 @@ pub fn gen_dbnum(py: Python<'_>, dbnum: u32) -> PyResult<()> {
                     aios_database::data_interface::geom_error::GeometryFailurePolicy::Required,
                 )
                 .await?;
+            // 生成只写进程内投影，这一步才让 Plant UI 看得见（ADR-060）。
+            aios_database::fast_model::model_db_adapter::persist_dbnum(dbnum).await?;
             anyhow::Ok(())
         })
     })

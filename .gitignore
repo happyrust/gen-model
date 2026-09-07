@@ -95,6 +95,8 @@ __pycache__/
 # 进程与 agent 会话在仓库根留下的本机产物（都能重建，不反映代码状态）：
 # 单实例锁、根目录草稿探针输出、会话恢复导出、落盘的失败/停滞记录
 /.gen-model.instance.lock
+# 运行目录：发布队列日志（model-publish-queue-v1）与镜像 spool 都是本机运行态
+/.gen-model/
 .scratch-*.txt
 /.session-restore/
 /logs/

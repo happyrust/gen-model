@@ -1,0 +1,328 @@
+[
+  {
+    "label": "P-08 FTUB INCLUDE preserves both branch roots",
+    "db": "D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams8000_0001",
+    "base": 321,
+    "target": 323,
+    "append_units": [],
+    "regen": [
+      "32576/12",
+      "32576/22"
+    ],
+    "delete": []
+  },
+  {
+    "label": "T initial import (not an editing window)",
+    "db": "D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams251142_0001",
+    "base": 2,
+    "target": 9,
+    "append_units": [
+      "CWBRAN"
+    ],
+    "regen": [
+      "2013287686/101",
+      "2013287686/114",
+      "2013287686/124",
+      "2013287686/141",
+      "2013287686/178",
+      "2013287686/199",
+      "2013287686/20",
+      "2013287686/216",
+      "2013287686/226",
+      "2013287686/236",
+      "2013287686/246",
+      "2013287686/264",
+      "2013287686/284",
+      "2013287686/301",
+      "2013287686/311",
+      "2013287686/321",
+      "2013287686/331",
+      "2013287686/349",
+      "2013287686/36",
+      "2013287686/370",
+      "2013287686/391",
+      "2013287686/4",
+      "2013287686/416",
+      "2013287686/441",
+      "2013287686/464",
+      "2013287686/47",
+      "2013287686/480",
+      "2013287686/523",
+      "2013287686/548",
+      "2013287686/573",
+      "2013287686/596",
+      "2013287686/612",
+      "2013287686/62",
+      "2013287686/624",
+      "2013287686/636",
+      "2013287686/652",
+      "2013287686/668",
+      "2013287686/684",
+      "2013287686/701",
+      "2013287686/710",
+      "2013287686/719",
+      "2013287686/728",
+      "2013287686/737",
+      "2013287686/747",
+      "2013287686/75",
+      "2013287686/761",
+      "2013287686/770",
+      "2013287686/783",
+      "2013287686/792",
+      "2013287686/803",
+      "2013287686/812",
+      "2013287686/821",
+      "2013287686/852",
+      "2013287686/87",
+      "2013287686/881",
+      "2013287686/893",
+      "2013287686/902",
+      "2013287686/911",
+      "2013287686/920",
+      "2013287686/929",
+      "2013287686/938"
+    ],
+    "delete": [],
+    "expected_degradation": "too many candidates: 948 > 30% of 948 index keys"
+  },
+  {
+    "label": "E 01-create",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 352,
+    "target": 354,
+    "append_units": [],
+    "regen": [
+      "32576/58",
+      "32576/60"
+    ],
+    "delete": []
+  },
+  {
+    "label": "E 02-move",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 354,
+    "target": 356,
+    "append_units": [],
+    "regen": [
+      "32576/58"
+    ],
+    "delete": []
+  },
+  {
+    "label": "E 03-restore-position",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 356,
+    "target": 358,
+    "append_units": [],
+    "regen": [
+      "32576/58"
+    ],
+    "delete": []
+  },
+  {
+    "label": "E 04-add-member",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 358,
+    "target": 360,
+    "append_units": [],
+    "regen": [
+      "32576/58"
+    ],
+    "delete": []
+  },
+  {
+    "label": "E 05-reparent",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 360,
+    "target": 362,
+    "append_units": [],
+    "regen": [
+      "32576/58",
+      "32576/60"
+    ],
+    "delete": []
+  },
+  {
+    "label": "E 06-delete-member",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 362,
+    "target": 364,
+    "append_units": [],
+    "regen": [
+      "32576/60"
+    ],
+    "delete": []
+  },
+  {
+    "label": "E 07-cleanup",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 364,
+    "target": 366,
+    "append_units": [],
+    "regen": [],
+    "delete": [
+      "32576/58",
+      "32576/60"
+    ]
+  },
+  {
+    "label": "H 01-create",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams7997_0001",
+    "base": 141,
+    "target": 143,
+    "append_units": [],
+    "regen": [
+      "24381/179818",
+      "24381/179833"
+    ],
+    "delete": []
+  },
+  {
+    "label": "H 02-move",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams7997_0001",
+    "base": 143,
+    "target": 145,
+    "append_units": [],
+    "regen": [
+      "24381/179818"
+    ],
+    "delete": []
+  },
+  {
+    "label": "H 03-restore-position",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams7997_0001",
+    "base": 145,
+    "target": 147,
+    "append_units": [],
+    "regen": [
+      "24381/179818"
+    ],
+    "delete": []
+  },
+  {
+    "label": "H 04-add-member",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams7997_0001",
+    "base": 147,
+    "target": 149,
+    "append_units": [],
+    "regen": [
+      "24381/179818"
+    ],
+    "delete": []
+  },
+  {
+    "label": "H 05-reparent",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams7997_0001",
+    "base": 149,
+    "target": 151,
+    "append_units": [],
+    "regen": [
+      "24381/179818",
+      "24381/179833"
+    ],
+    "delete": []
+  },
+  {
+    "label": "H 06-delete-member",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams7997_0001",
+    "base": 151,
+    "target": 153,
+    "append_units": [],
+    "regen": [
+      "24381/179833"
+    ],
+    "delete": []
+  },
+  {
+    "label": "H 07-cleanup",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams7997_0001",
+    "base": 153,
+    "target": 155,
+    "append_units": [],
+    "regen": [],
+    "delete": [
+      "24381/179818",
+      "24381/179833"
+    ]
+  },
+  {
+    "label": "P 01-create",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 366,
+    "target": 368,
+    "append_units": [],
+    "regen": [
+      "32576/63",
+      "32576/73"
+    ],
+    "delete": []
+  },
+  {
+    "label": "P 02-move",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 368,
+    "target": 370,
+    "append_units": [],
+    "regen": [
+      "32576/63"
+    ],
+    "delete": []
+  },
+  {
+    "label": "P 03-restore-position",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 370,
+    "target": 372,
+    "append_units": [],
+    "regen": [
+      "32576/63"
+    ],
+    "delete": []
+  },
+  {
+    "label": "P 04-add-member",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 372,
+    "target": 373,
+    "append_units": [],
+    "regen": [
+      "32576/63"
+    ],
+    "delete": []
+  },
+  {
+    "label": "P 05-reparent",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 373,
+    "target": 375,
+    "append_units": [],
+    "regen": [
+      "32576/63",
+      "32576/73"
+    ],
+    "delete": []
+  },
+  {
+    "label": "P 06-delete-member",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 375,
+    "target": 377,
+    "append_units": [],
+    "regen": [
+      "32576/73"
+    ],
+    "delete": []
+  },
+  {
+    "label": "P 07-cleanup",
+    "db": "D:\\AVEVA\\Projects\\E3D3.1\\AvevaMarineSample\\ams000\\ams8000_0001",
+    "base": 377,
+    "target": 379,
+    "append_units": [],
+    "regen": [],
+    "delete": [
+      "32576/63",
+      "32576/73"
+    ]
+  }
+]

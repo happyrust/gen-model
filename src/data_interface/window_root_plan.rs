@@ -27,14 +27,16 @@
 //! 的 [`advance_root_credentials_on`]（P2-2）在数据尾事务**之后**、模型 drain 之前批量前移
 //! ——`finalize_attempt_on` 提交完水位就调它，失败只记日志（N4：模型面不拦水位）。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::Arc;
 
 use aios_core::{RefnoEnum, SUL_DB};
 use anyhow::Context;
 use e3d_io::db_element::DbSet;
+use e3d_io::refno::RefNo;
 use e3d_model::increment::{AffectedClosure, UpdatePlan, collect_window, plan_update};
+use e3d_model::ledger::ChangeKind;
 use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
@@ -44,6 +46,10 @@ use crate::data_interface::generation_root::{
 use crate::data_interface::manual_update::DeliveryUnitSummary;
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
 use crate::fast_model::e3d_model_service::scan_index;
+
+#[cfg(test)]
+#[path = "window_root_plan_matrix_tests.rs"]
+mod recorded_matrix_tests;
 
 /// 候选数占索引键数的比例超过它就放弃凭证前移（ADR-056 实施约束 5、审核 P1-1）。
 pub const CREDENTIAL_ADVANCE_CANDIDATE_RATIO: f64 = 0.30;
@@ -142,6 +148,7 @@ impl WindowRootPlan {
         end_sesno: i32,
         mut warnings: Vec<String>,
     ) -> ModelUpdatePlan {
+        let lazy_roots = Some(self.lazy.len() as u32);
         let work_items = self.work_items(dbnum, db_type, end_sesno);
         if let Some(reason) = &self.degraded {
             warnings.push(format!(
@@ -152,6 +159,7 @@ impl WindowRootPlan {
         ModelUpdatePlan {
             work_items,
             warnings,
+            lazy_roots,
             credential_advance: self
                 .advance
                 .iter()
@@ -213,6 +221,14 @@ pub struct WindowRootSources {
     pub closure: AffectedClosure,
     /// target 端索引键总数（`scan_index(...).owners.len()`）。
     pub index_keys: usize,
+    /// R2 observation only. The window planner does not filter work or advance
+    /// credentials from this count while the XGEOM gate remains default-off.
+    pub xgeometry_observed: usize,
+    pub xgeometry_unreadable: usize,
+    /// R17–R20 observation only: roots whose owner chain contains another
+    /// generation root, and indexed elements covered by at least two roots.
+    pub nested_roots: usize,
+    pub duplicate_coverage_elements: usize,
     /// 结构连接正向级联（C2）：变更的结构件正向读 `CREF` / `JOIS` / `JOIE` / `CFRA`、核对回指后
     /// 对端 owner 链上的根。[`Self::impact`] 把它并进 `touched`；开关
     /// `model_structural_connection_cascade` 关着时是 `StructuralConnectionCascade::off()`（零 I/O）。
@@ -222,6 +238,138 @@ pub struct WindowRootSources {
     /// `STAREF` / `ENDREF` 反向表点查引用它的电缆，电缆 owner 链上的根。[`Self::impact`] 把它并进
     /// `touched`；开关 `model_cable_endpoint_cascade` 关着时是 `CableEndpointCascade::off()`（零 I/O）。
     pub cable_endpoint: crate::data_interface::cable_endpoint::CableEndpointCascade,
+}
+
+fn nested_root_observation(
+    roots: &[GenerationRoot],
+    owners: &BTreeMap<(u32, u32), RefNo>,
+) -> (usize, usize) {
+    let root_keys: BTreeSet<(u32, u32)> = roots
+        .iter()
+        .map(|root| {
+            let refno = refno_to_e3d(root.root);
+            (refno.word0, refno.word1)
+        })
+        .collect();
+    let root_is_nested = |start: (u32, u32)| {
+        let mut current = start;
+        let mut seen = BTreeSet::new();
+        for _ in 0..256 {
+            if !seen.insert(current) {
+                return false;
+            }
+            let Some(owner) = owners.get(&current) else {
+                return false;
+            };
+            let owner_key = (owner.word0, owner.word1);
+            if owner_key == current {
+                return false;
+            }
+            if root_keys.contains(&owner_key) {
+                return true;
+            }
+            current = owner_key;
+        }
+        false
+    };
+    let nested_roots = root_keys
+        .iter()
+        .filter(|root| root_is_nested(**root))
+        .count();
+    let duplicate_coverage_elements = owners
+        .keys()
+        .filter(|start| {
+            let mut current = **start;
+            let mut seen = BTreeSet::new();
+            let mut covering_roots = usize::from(root_keys.contains(&current));
+            for _ in 0..256 {
+                if !seen.insert(current) {
+                    break;
+                }
+                let Some(owner) = owners.get(&current) else {
+                    break;
+                };
+                let owner_key = (owner.word0, owner.word1);
+                if owner_key == current {
+                    break;
+                }
+                covering_roots += usize::from(root_keys.contains(&owner_key));
+                if covering_roots >= 2 {
+                    return true;
+                }
+                current = owner_key;
+            }
+            false
+        })
+        .count();
+    (nested_roots, duplicate_coverage_elements)
+}
+
+fn under_xgeometry_in_set(set: &Arc<DbSet>, refno: RefNo) -> anyhow::Result<bool> {
+    let mut current = set.element(refno);
+    let mut seen = BTreeSet::new();
+    for _ in 0..256 {
+        let key = (current.refno().word0, current.refno().word1);
+        anyhow::ensure!(
+            seen.insert(key),
+            "XGEOM owner chain contains a cycle at {}",
+            current.refno()
+        );
+        if current.element_type()?.eq_ignore_ascii_case("XGEOM") {
+            return Ok(true);
+        }
+        match current.owner()? {
+            Some(owner) if owner.refno() != current.refno() => current = owner,
+            _ => return Ok(false),
+        }
+    }
+    anyhow::bail!("XGEOM owner chain exceeds 256 elements from {refno}")
+}
+
+fn xgeometry_gate_observed(
+    created: bool,
+    deleted: bool,
+    pre: Option<bool>,
+    post: Option<bool>,
+) -> Option<bool> {
+    if created && !deleted {
+        post
+    } else if deleted && !created {
+        pre
+    } else {
+        Some(pre? && post?)
+    }
+}
+
+fn observe_xgeometry_candidates(
+    plan: &UpdatePlan,
+    base: &Arc<DbSet>,
+    target: &Arc<DbSet>,
+) -> (usize, usize) {
+    let mut candidates = BTreeMap::<(u32, u32), (RefNo, bool, bool)>::new();
+    for entry in plan.ledger.entries() {
+        let state = candidates
+            .entry((entry.refno.word0, entry.refno.word1))
+            .or_insert((entry.refno, false, false));
+        state.1 |= entry.kind == ChangeKind::Created;
+        state.2 |= entry.kind == ChangeKind::Deleted;
+    }
+    let mut observed = 0;
+    let mut unreadable = 0;
+    for (_, (refno, created, deleted)) in candidates {
+        let pre = (!created || deleted)
+            .then(|| under_xgeometry_in_set(base, refno).ok())
+            .flatten();
+        let post = (!deleted || created)
+            .then(|| under_xgeometry_in_set(target, refno).ok())
+            .flatten();
+        match xgeometry_gate_observed(created, deleted, pre, post) {
+            Some(true) => observed += 1,
+            Some(false) => {}
+            None => unreadable += 1,
+        }
+    }
+    (observed, unreadable)
 }
 
 impl WindowRootSources {
@@ -242,7 +390,19 @@ impl WindowRootSources {
             )
         })?;
         let plan = plan_update(base, target, &window);
-        let closure = plan.affected_closure(base, target);
+        let closure = if crate::options::model_entry_drop_no_geometry() {
+            plan.affected_closure_filtering_ledger(base, target, |entry| {
+                // 删除与类型变化可能需要清旧几何；即便账本有 noun 也保守保留。
+                matches!(entry.kind, ChangeKind::Deleted | ChangeKind::TypeChanged)
+                    || !crate::data_interface::model_impact::noun_is_no_geometry_model_entry(
+                        &entry.noun,
+                    )
+            })
+        } else {
+            plan.affected_closure(base, target)
+        };
+        let (xgeometry_observed, xgeometry_unreadable) =
+            observe_xgeometry_candidates(&plan, base, target);
         let index = scan_index(file, Some(target_sesno))
             .with_context(|| format!("scan index of {} at {target_sesno}", file.display()))?;
         let roots_t =
@@ -252,6 +412,8 @@ impl WindowRootSources {
                     file.display()
                 )
             })?;
+        let (nested_roots, duplicate_coverage_elements) =
+            nested_root_observation(&roots_t, index.owners.as_ref());
         // C2：结构连接正向级联。开关关 = 一次文件读都不发生（`off()`），touched 一字不改。
         let structural_connection = if crate::options::model_structural_connection_cascade() {
             crate::data_interface::structural_connection::StructuralConnectionCascade::collect(
@@ -283,6 +445,10 @@ impl WindowRootSources {
             plan,
             closure,
             index_keys: index.owners.len(),
+            xgeometry_observed,
+            xgeometry_unreadable,
+            nested_roots,
+            duplicate_coverage_elements,
             structural_connection,
             cable_endpoint,
         })
@@ -381,7 +547,8 @@ pub(crate) async fn build_model_update_plan_from_window(
     .map_err(|error| anyhow::anyhow!("window root planning task failed: {error}"))??;
     let roots_s = load_persisted_roots(dbnum).await?;
     let impact = sources.impact(&roots_s);
-    let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+    let mut plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+    carry_pending_generation_on(&SUL_DB, dbnum, target_sesno, &sources.roots_t, &mut plan).await?;
     let mut warnings = vec![format!(
         "dbnum={dbnum}: window {base_sesno}→{target_sesno} roots_T={} roots_S={} touched={} \
          regen={} delete={} advance={} lazy={} | {}",
@@ -394,6 +561,16 @@ pub(crate) async fn build_model_update_plan_from_window(
         plan.lazy.len(),
         sources.plan.report.totals_line()
     )];
+    warnings.push(format!(
+        "dbnum={dbnum}: XGEOMETRY observation only — matched={} unreadable={}; \
+         window work and credential advancement were unchanged",
+        sources.xgeometry_observed, sources.xgeometry_unreadable
+    ));
+    warnings.push(format!(
+        "dbnum={dbnum}: nested-root observation only — nested_roots={} \
+         duplicate_coverage_elements={}; no cross-root task compression was applied",
+        sources.nested_roots, sources.duplicate_coverage_elements
+    ));
     warnings.push(sources.structural_connection.summary_line(dbnum));
     warnings.push(sources.cable_endpoint.summary_line(dbnum));
     let units = plan
@@ -413,6 +590,71 @@ pub(crate) async fn build_model_update_plan_from_window(
     // summary for each eager root instead of re-running the legacy PE planner.
     out.units = units;
     Ok(out)
+}
+
+/// A later data window must carry unfinished generation to its own target even
+/// when its geometry closure is empty. Advancing settled credentials cannot
+/// update this intent: the idle generator would otherwise publish latest@T
+/// against a desired target from the previous window.
+async fn carry_pending_generation_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    target_sesno: u32,
+    roots_t: &[GenerationRoot],
+    plan: &mut WindowRootPlan,
+) -> anyhow::Result<()> {
+    let mut response = db
+        .query(format!(
+            "SELECT VALUE target_refno FROM model_update_pending WHERE dbnum = {dbnum} \
+         AND action = 'regen_root' AND source_end_sesno > 0 \
+         AND source_end_sesno < {target_sesno};"
+        ))
+        .await?
+        .check()?;
+    let pending: Vec<String> = response.take(0)?;
+    let pending: BTreeSet<_> = pending
+        .into_iter()
+        .map(|root| root.replace('_', "/"))
+        .collect();
+    for root in roots_t {
+        if pending.contains(&root.root.to_pdms_str())
+            && !plan.regen.iter().any(|item| item.root == root.root)
+        {
+            plan.regen.push(root.clone());
+        }
+    }
+    plan.advance
+        .retain(|root| !pending.contains(&root.to_pdms_str()));
+    plan.lazy
+        .retain(|root| !pending.contains(&root.root.to_pdms_str()));
+    Ok(())
+}
+
+/// Select the same model planner for preview and execution.
+///
+/// Direct DESI derives roots from the pinned S→T file window. Other database
+/// types and the compatibility data mode retain the PE-backed planner.
+pub(crate) async fn build_effective_model_update_plan(
+    dbnum: u32,
+    db_type: &str,
+    base_sesno: u32,
+    target_sesno: u32,
+    range_eles: &std::collections::BTreeMap<
+        u32,
+        Vec<crate::data_interface::ele_ops::EleOperationData>,
+    >,
+) -> anyhow::Result<ModelUpdatePlan> {
+    if crate::options::direct_read_mode() && db_type.eq_ignore_ascii_case("DESI") {
+        build_model_update_plan_from_window(dbnum, db_type, base_sesno, target_sesno).await
+    } else {
+        crate::data_interface::model_update_plan::build_model_update_plan(
+            dbnum,
+            target_sesno as i32,
+            db_type,
+            range_eles,
+        )
+        .await
+    }
 }
 
 // ---- P2-2 凭证前移 ----
@@ -669,12 +911,27 @@ pub struct StartupWindowReport {
     pub degraded: Option<String>,
 }
 
-fn startup_unsettled_action(root: &PersistedRoot) -> ModelWorkAction {
-    if root.noun.trim().is_empty() {
-        ModelWorkAction::DeleteCleanup
-    } else {
-        ModelWorkAction::RegenRoot
-    }
+fn startup_unsettled_action(_root: &PersistedRoot) -> ModelWorkAction {
+    // An unsettled row is generation intent, even when its optional noun was not
+    // persisted yet. Source existence and type belong to the pinned e3d-model
+    // view; an empty projection field must never be interpreted as deletion.
+    ModelWorkAction::RegenRoot
+}
+
+async fn enumerate_target_roots(
+    dbnum: u32,
+    target_sesno: u32,
+) -> anyhow::Result<Vec<GenerationRoot>> {
+    let service = crate::fast_model::e3d_model_service::E3dModelService::from_current().await?;
+    let unit_types = crate::data_interface::generation_root::configured_delivery_unit_types();
+    tokio::task::spawn_blocking(move || {
+        let file = service.source_file(dbnum)?.to_path_buf();
+        let target = service.build_set(dbnum, Some(target_sesno))?;
+        let index = scan_index(&file, Some(target_sesno))?;
+        enumerate_generation_roots(&target, &index.roots, &unit_types)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("target root enumeration task failed: {error}"))?
 }
 
 /// 启动时对一个库做一次退化窗口：`S` = 该库安定凭证的下限、`T` = 文件最新（ADR-058 D4）。
@@ -708,8 +965,8 @@ pub async fn reconcile_startup_window(
         dbnum,
         db_type: db_type.to_string(),
         source_end_sesno: target_sesno as i32,
-        // Pre-v2 rows may contain only gen_root:<refno>. They have no source identity to
-        // regenerate; cleanup is idempotent and removes the orphaned projection/state.
+        // Source identity is resolved by e3d-model from the pinned file view. In
+        // particular, a missing noun on an unsettled row is not deletion evidence.
         action: startup_unsettled_action(root),
         target_refno: root.refno.to_pdms_str(),
         noun: root.noun.clone(),
@@ -743,27 +1000,50 @@ pub async fn reconcile_startup_window(
     };
     let fell_back = base_sesno.is_some() && window.is_none();
 
-    let mut work_items: Vec<ModelWorkItem> = states
-        .iter()
-        .filter(|state| fell_back || !state.is_settled())
-        .inspect(|state| {
-            if !state.is_settled() {
-                report.unsettled += 1;
-            }
-        })
-        .map(|state| unsettled_item(&state.root))
-        .collect();
+    let no_settled_roots = !states.is_empty() && states.iter().all(|state| !state.is_settled());
+    let mut work_items: Vec<ModelWorkItem> = if no_settled_roots {
+        // The model projection has never published a complete root. Its rows are
+        // intent, not an authoritative root inventory: a previous interrupted
+        // startup may have created only part of the set, and optional noun fields
+        // may still be empty. Rebuild the complete list from DbSet@T.
+        report.unsettled = states.len();
+        enumerate_target_roots(dbnum, target_sesno)
+            .await?
+            .into_iter()
+            .map(|root| ModelWorkItem {
+                dbnum,
+                db_type: db_type.to_string(),
+                source_end_sesno: target_sesno as i32,
+                action: ModelWorkAction::RegenRoot,
+                target_refno: root.root.to_pdms_str(),
+                noun: root.noun,
+            })
+            .collect()
+    } else {
+        states
+            .iter()
+            .filter(|state| fell_back || !state.is_settled())
+            .inspect(|state| {
+                if !state.is_settled() {
+                    report.unsettled += 1;
+                }
+            })
+            .map(|state| unsettled_item(&state.root))
+            .collect()
+    };
     let forced: BTreeSet<String> = work_items
         .iter()
         .map(|item| item.target_refno.clone())
         .collect();
 
     let mut advance = Vec::new();
+    let mut lazy_roots = None;
     if let Some(plan) = window {
         for warning in &plan.warnings {
             println!("启动退化窗口 {warning}");
         }
         report.degraded = plan.credential_advance_degraded.clone();
+        lazy_roots = plan.lazy_roots;
         // 被强排的根即便落在 advance 名单上也前移不了（`render_credential_advance` 的状态守卫
         // 会挡掉），但让两份名单当面不打架比依赖那道守卫清楚。
         advance = plan
@@ -773,6 +1053,19 @@ pub async fn reconcile_startup_window(
             .cloned()
             .collect();
         work_items.extend(plan.work_items);
+    }
+
+    if let Some(lazy) = lazy_roots {
+        aios_core::SUL_DB
+            .query(
+                crate::data_interface::model_update_pending::render_model_root_observation(
+                    dbnum,
+                    lazy,
+                    target_sesno as i32,
+                ),
+            )
+            .await?
+            .check()?;
     }
 
     work_items.sort_by(|a, b| {
@@ -797,6 +1090,19 @@ pub async fn reconcile_startup_window(
         )
         .await?
         .advanced;
+    }
+    // 模型水位的第二触发点（ADR-060 D5，2026-09-05 修订），与 `finalize_attempt_on` 同一格：
+    // 这一窗一项工作都没排，模型排空里不会有它的 cohort；凭证刚前移到 T，此刻不盖章，
+    // 两枚水位就要等到**再下一次**启动才对得上——启动对账排在开窗之前，这一轮已经跑过了。
+    // 排了工作就交给 cohort 收口。候选值照旧被 `min(安定下限, applied_sesno)` 夹住：
+    // 数据水位还没到文件最新时写出来的是数据到过的那一版，不是 T（D2 推论二）。
+    if report.enqueued == 0 {
+        crate::data_interface::model_update_pending::advance_model_watermark(
+            dbnum,
+            target_sesno as i32,
+            target.session_time.as_deref(),
+        )
+        .await;
     }
     Ok(report)
 }
@@ -835,6 +1141,52 @@ mod tests {
             candidates: 3,
             index_keys: 1000,
         }
+    }
+
+    #[test]
+    fn xgeometry_observation_uses_the_correct_window_side() {
+        assert_eq!(
+            xgeometry_gate_observed(true, false, None, Some(true)),
+            Some(true),
+            "created elements use the target side"
+        );
+        assert_eq!(
+            xgeometry_gate_observed(false, true, Some(true), None),
+            Some(true),
+            "deleted elements use the base side"
+        );
+        assert_eq!(
+            xgeometry_gate_observed(false, false, Some(true), Some(false)),
+            Some(false),
+            "a move across the boundary must pass through"
+        );
+        assert_eq!(
+            xgeometry_gate_observed(false, false, Some(true), Some(true)),
+            Some(true),
+            "an element inside XGEOM on both sides is observed"
+        );
+        assert_eq!(
+            xgeometry_gate_observed(false, false, None, Some(true)),
+            None,
+            "an unreadable side stays diagnostic instead of becoming a gate"
+        );
+    }
+
+    #[test]
+    fn nested_root_observation_counts_roots_and_repeated_subtree_coverage() {
+        let roots = vec![
+            root(1, "BRAN", GenerationRootKind::DeliveryUnit),
+            root(2, "AIDTEX", GenerationRootKind::Normal),
+        ];
+        let e3d = |id| refno_to_e3d(r(id));
+        let owners = BTreeMap::from([
+            ((e3d(1).word0, e3d(1).word1), e3d(1)),
+            ((e3d(2).word0, e3d(2).word1), e3d(1)),
+            ((e3d(3).word0, e3d(3).word1), e3d(2)),
+            ((e3d(4).word0, e3d(4).word1), e3d(1)),
+        ]);
+
+        assert_eq!(nested_root_observation(&roots, &owners), (1, 2));
     }
 
     fn ids(roots: &[GenerationRoot]) -> Vec<RefnoEnum> {
@@ -1104,9 +1456,29 @@ mod tests {
             .expect("startup window exists")
             .1;
         assert!(
-            startup.contains("build_model_update_plan_from_window(dbnum, db_type, base, target_sesno)"),
+            startup.contains(
+                "build_model_update_plan_from_window(dbnum, db_type, base, target_sesno)"
+            ),
             "启动复核与稳态窗口共用同一条规划入口: {startup}"
         );
+    }
+
+    #[test]
+    fn preview_and_execution_share_the_effective_planner_dispatch() {
+        let execution = include_str!("increment_pipeline.rs");
+        let preview = include_str!("manual_update.rs")
+            .split_once("async fn preview_one_dbnum(")
+            .expect("preview entry exists")
+            .1
+            .split_once("/// 手动触发 = 扫描 + 入队")
+            .expect("preview boundary exists")
+            .0;
+        for (label, body) in [("execution", execution), ("preview", preview)] {
+            assert!(
+                body.contains("build_effective_model_update_plan("),
+                "{label} must use the shared planner dispatch"
+            );
+        }
     }
 
     #[test]
@@ -1185,9 +1557,127 @@ mod tests {
 
     // ---- P2-2 凭证前移 ----
 
+    #[tokio::test]
+    async fn unchanged_window_retargets_only_older_live_generation_backlog() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("window_root_plan")
+            .use_db("carry_pending")
+            .await
+            .unwrap();
+        db.query("CREATE model_update_pending:regen_root_24384_1 SET dbnum=8000, action='regen_root', source_end_sesno=423, target_refno='24384/1';
+                  CREATE model_update_pending:manual SET dbnum=8000, action='regen_root', source_end_sesno=0, target_refno='24384/2';
+                  CREATE model_update_pending:future SET dbnum=8000, action='regen_root', source_end_sesno=425, target_refno='24384/3';
+                  CREATE model_update_pending:other SET dbnum=7997, action='regen_root', source_end_sesno=423, target_refno='24384/4';
+                  CREATE model_update_pending:deleted SET dbnum=8000, action='regen_root', source_end_sesno=423, target_refno='24384/5';
+                  CREATE model_update_pending:cleanup SET dbnum=8000, action='delete_cleanup', source_end_sesno=423, target_refno='24384/6';")
+            .await.unwrap().check().unwrap();
+        let roots = [1, 2, 3, 4, 6]
+            .into_iter()
+            .map(|id| root(id, "BRAN", GenerationRootKind::DeliveryUnit))
+            .collect::<Vec<_>>();
+        let old = (1..=6).map(|id| persisted(id, "BRAN")).collect::<Vec<_>>();
+        let mut plan = plan_window_roots(&roots, &old, &impact(&[]));
+        carry_pending_generation_on(&db, 8000, 424, &roots, &mut plan)
+            .await
+            .unwrap();
+        assert_eq!(
+            plan.regen.iter().map(|root| root.root).collect::<Vec<_>>(),
+            vec![r(1)]
+        );
+        assert_eq!(plan.advance, vec![r(2), r(3), r(4), r(6)]);
+        assert_eq!(
+            plan.delete
+                .iter()
+                .map(|root| root.refno)
+                .collect::<Vec<_>>(),
+            vec![r(5)]
+        );
+        let item = plan
+            .work_items(8000, "DESI", 424)
+            .into_iter()
+            .find(|item| item.action == ModelWorkAction::RegenRoot)
+            .unwrap();
+        let tail = crate::data_interface::model_update_pending::render_finalize_tail(
+            8000,
+            424,
+            None,
+            &ModelUpdatePlan {
+                work_items: vec![item],
+                ..Default::default()
+            },
+            &[],
+        );
+        db.query(tail.tail).await.unwrap().check().unwrap();
+        let mut response = db
+            .query("RETURN gen_root:24384_1.desired_target.source_end_sesno;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(response.take::<Option<i32>>(0).unwrap(), Some(424));
+        let mut response = db
+            .query("RETURN model_update_pending:regen_root_24384_1.source_end_sesno;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(response.take::<Option<i32>>(0).unwrap(), Some(424));
+    }
+
     fn advance_sql(roots: &[&str], time: Option<&str>) -> Vec<String> {
         let roots: Vec<String> = roots.iter().map(|root| root.to_string()).collect();
         render_credential_advance(8000, 26, time, &roots).unwrap()
+    }
+
+    #[tokio::test]
+    async fn deletion_replaces_old_dead_generation_but_preserves_newer_intent() {
+        use crate::data_interface::model_update_pending::{record_id_of, render_finalize_tail};
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("pending")
+            .use_db("delete_supersedes_regen")
+            .await
+            .unwrap();
+        for source in [0, 423, 426, 427] {
+            let root = format!("24384/{}", source + 1);
+            let regen_id = record_id_of(ModelWorkAction::RegenRoot, &root);
+            db.query(format!("CREATE {regen_id} SET dbnum=8000, action='regen_root', target_refno='{root}', source_end_sesno={source}, attempts=5, status='dead';"))
+                .await.unwrap().check().unwrap();
+            let cleanup_id = record_id_of(ModelWorkAction::DeleteCleanup, &root);
+            let cleanup = ModelWorkItem {
+                dbnum: 8000,
+                db_type: "DESI".into(),
+                source_end_sesno: 426,
+                action: ModelWorkAction::DeleteCleanup,
+                target_refno: root,
+                noun: "BRAN".into(),
+            };
+            let render = render_finalize_tail(
+                8000,
+                426,
+                None,
+                &ModelUpdatePlan {
+                    work_items: vec![cleanup],
+                    ..Default::default()
+                },
+                &[],
+            );
+            db.query(format!(
+                "BEGIN TRANSACTION; {} COMMIT TRANSACTION;",
+                render.tail
+            ))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+            let mut response = db.query(format!("RETURN array::len((SELECT VALUE id FROM {regen_id})) = 1; RETURN array::len((SELECT VALUE id FROM {cleanup_id})) = 1;"))
+                .await.unwrap().check().unwrap();
+            assert_eq!(
+                response.take::<Option<bool>>(0).unwrap(),
+                Some(source == 0 || source > 426),
+                "source={source}"
+            );
+            assert_eq!(response.take::<Option<bool>>(1).unwrap(), Some(true));
+        }
     }
 
     /// 前移语句只碰本库、点名的根；只放过「已发布且安定」的行（完成态、`ready`、
@@ -1317,7 +1807,7 @@ mod tests {
         assert!(states[1].is_settled());
         assert_eq!(
             startup_unsettled_action(&states[0].root),
-            ModelWorkAction::DeleteCleanup
+            ModelWorkAction::RegenRoot
         );
         assert_eq!(
             startup_unsettled_action(&states[1].root),
@@ -1591,6 +2081,17 @@ mod tests {
                 &unit_types,
             )
             .expect("collect");
+            if expect.base == 255 && expect.target == 256 {
+                assert!(
+                    sources.nested_roots >= 2,
+                    "嵌套显著根窗口必须观测到 FRMW/SBFR 等后代根: {}",
+                    sources.nested_roots
+                );
+                assert!(
+                    sources.duplicate_coverage_elements > 0,
+                    "嵌套根整棵生成必须产生可量化的重复覆盖"
+                );
+            }
             assert!(
                 sources.closure.is_complete(),
                 "{}: {:?}",

@@ -42,6 +42,7 @@ static MODEL_DB: OnceCell<()> = OnceCell::const_new();
 pub struct QueryService {
     repo: PathBuf,
     driver: E3dDriver,
+    direct_tree: crate::data_interface::direct_tree::DirectTreeProvider,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -123,20 +124,50 @@ fn default_true() -> bool {
     true
 }
 
+fn render_room_pending_probe(room_targets: &[String]) -> String {
+    if room_targets.is_empty() {
+        return "RETURN false;".to_string();
+    }
+    let targets = room_targets
+        .iter()
+        .map(|target| {
+            format!(
+                "'{}'",
+                crate::data_interface::dbnum_state::escape_surql_str(target)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "RETURN array::len((SELECT VALUE id FROM {} WHERE action IN \
+         ['room_recalc_panel', 'room_recalc_element'] AND status IN \
+         ['collecting', 'pending', 'failed', 'running'] AND target_refno IN \
+         [{targets}] LIMIT 1)) > 0;",
+        crate::data_interface::model_update_pending::TABLE
+    )
+}
+
 impl QueryService {
     pub fn from_env(repo: &Path) -> anyhow::Result<Self> {
+        let option = aios_core::get_db_option();
         Ok(Self {
             repo: repo.canonicalize()?,
             driver: E3dDriver::from_env(repo)?,
+            direct_tree: crate::data_interface::direct_tree::DirectTreeProvider::new(
+                option.project_name.clone(),
+                option.mdb_name.clone(),
+            ),
         })
     }
 
-    pub fn for_identity(repo: &Path, _project: &str, mdb: &str) -> anyhow::Result<Self> {
+    pub fn for_identity(repo: &Path, project: &str, mdb: &str) -> anyhow::Result<Self> {
         let mut service = Self::from_env(repo)?;
         // `project` is the model-service identity (for example `AvevaMarineSample`),
         // while the E3D TTY needs its short code (`AMS`). Keep the driver's existing
         // L3_E3D_PROJECT/default configuration and use identity only at the HTTP gate.
         service.driver.mdb = aios_core::helper::to_e3d_name(mdb.trim()).into_owned();
+        service.direct_tree =
+            crate::data_interface::direct_tree::DirectTreeProvider::new(project, mdb);
         Ok(service)
     }
 
@@ -202,14 +233,54 @@ impl QueryService {
                 // in-process query does not try to connect the global client a
                 // second time and fail with `Already connected`. Standalone
                 // MCP/query binaries still fall through to normal init.
+                //
+                // 独立那一条走 `attach_store_connected`（只附着、不拉起）而不是裸
+                // `init_surreal`：`store_mode` 默认已是 spawned-mem，MCP 探针自己拉一台
+                // 空库、再在上面回答查询，是「答得出话但全是空」——最难查的那一类。
                 if SUL_DB.query("RETURN 1;").await.is_err() {
-                    aios_core::init_surreal().await?;
+                    crate::attach_store_connected().await?;
                 }
                 Ok::<(), anyhow::Error>(())
             })
             .await
             .map_err(|error| QueryError::new("DB_UNAVAILABLE", error))?;
         Ok(())
+    }
+
+    async fn published_derivation_status(
+        room_targets: Option<&[String]>,
+    ) -> Result<(u64, bool, &'static str), QueryError> {
+        crate::fast_model::spatial_state::ensure_spatial_ready()
+            .map_err(|error| QueryError::new("UPDATING", error))?;
+        let published_version =
+            crate::data_interface::side_effect_pending::SideEffectCompensator::
+                published_spatial_version()
+                .await
+                .map_err(db_error)?;
+        let collecting =
+            crate::data_interface::side_effect_pending::SideEffectCompensator::
+                has_collecting_file_rounds()
+                .await
+                .map_err(db_error)?;
+        let room_pending = if let Some(room_targets) = room_targets {
+            let mut response = SUL_DB
+                .query(render_room_pending_probe(room_targets))
+                .await
+                .and_then(|response| response.check())
+                .map_err(db_error)?;
+            response
+                .take::<Option<bool>>(0)
+                .unwrap_or(Some(true))
+                .unwrap_or(true)
+        } else {
+            false
+        };
+        let stale = collecting || room_pending;
+        Ok((
+            published_version,
+            stale,
+            if stale { "updating" } else { "current" },
+        ))
     }
 
     async fn identity(&self, args: RefnoArgs) -> Result<Value, QueryError> {
@@ -439,6 +510,7 @@ impl QueryService {
     async fn room(&self, args: RefnoArgs) -> Result<Value, QueryError> {
         let refno = parsed_model_refno(&args.refno)?;
         Self::ensure_model_db().await?;
+        let _published_view_guard = crate::fast_model::spatial_state::lock_spatial_serial().await;
         #[derive(Deserialize)]
         struct RoomEdge {
             panel: RefnoEnum,
@@ -457,7 +529,7 @@ impl QueryService {
             .take(0)
             .map_err(|error| QueryError::new("PARSE_ERROR", error))?;
         let mut memberships = Vec::new();
-        for edge in edges {
+        for edge in &edges {
             let mut rooms = SUL_DB
                 .query(format!(
                     "SELECT VALUE in FROM {}<-room_panel_relate LIMIT 1;",
@@ -473,11 +545,43 @@ impl QueryService {
                 "panel_refno": edge.panel.to_string(),
             }));
         }
-        Ok(json!({ "refno": refno.to_string(), "memberships": memberships }))
+        let mut room_targets = vec![refno.to_pdms_str()];
+        room_targets.extend(edges.iter().map(|edge| edge.panel.to_pdms_str()));
+        room_targets.sort_unstable();
+        room_targets.dedup();
+        let (published_version, stale, publication_status) =
+            Self::published_derivation_status(Some(&room_targets)).await?;
+        Ok(json!({
+            "refno": refno.to_string(),
+            "memberships": memberships,
+            "published_version": published_version,
+            "stale": stale,
+            "publication_status": publication_status,
+        }))
     }
 
     async fn generation_root(&self, args: RefnoArgs) -> Result<Value, QueryError> {
         let refno = parsed_model_refno(&args.refno)?;
+        if crate::options::data_face().is_read_through() {
+            let tree = self
+                .direct_tree
+                .get()
+                .await
+                .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?;
+            let mut roots = tree
+                .generation_roots_in_subtree(refno.refno(), &configured_delivery_unit_types())
+                .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?;
+            let root = roots.drain(..).next().ok_or_else(|| {
+                QueryError::new("NOT_FOUND", format!("no generation root for {refno}"))
+            })?;
+            return Ok(json!({
+                "refno": refno.to_string(),
+                "root": root.root.to_string(),
+                "noun": root.noun,
+                "name": root.name,
+                "kind": root.kind,
+            }));
+        }
         Self::ensure_model_db().await?;
         let root = resolve_live_element_generation_root(refno, &configured_delivery_unit_types())
             .await
@@ -542,7 +646,38 @@ impl QueryService {
 
     async fn spatial_bounds(&self, args: RefnoArgs) -> Result<Value, QueryError> {
         let refno = parsed_model_refno(&args.refno)?;
+        if crate::options::data_face().is_read_through() {
+            let source = crate::data_interface::generation_root::refno_to_e3d(refno);
+            let records = crate::fast_model::model_memory_store::ModelMemoryStore::global()
+                .records(crate::fast_model::model_memory_store::ProjectionScope::Current)
+                .into_iter()
+                .filter(|record| record.source_refno == source)
+                .collect::<Vec<_>>();
+            let first = records.first().ok_or_else(|| {
+                QueryError::new("NOT_FOUND", format!("no in-memory AABB for {refno}"))
+            })?;
+            let mut mins = first.world_bounds[0];
+            let mut maxs = first.world_bounds[1];
+            for record in records.iter().skip(1) {
+                for axis in 0..3 {
+                    mins[axis] = mins[axis].min(record.world_bounds[0][axis]);
+                    maxs[axis] = maxs[axis].max(record.world_bounds[1][axis]);
+                }
+            }
+            return Ok(json!({
+                "refno": refno.to_string(),
+                "min_mm": mins,
+                "max_mm": maxs,
+                "source": "model-memory",
+                "published_version": Value::Null,
+                "stale": Value::Null,
+                "publication_status": "unsupported",
+            }));
+        }
         Self::ensure_model_db().await?;
+        let _published_view_guard = crate::fast_model::spatial_state::lock_spatial_serial().await;
+        let (published_version, stale, publication_status) =
+            Self::published_derivation_status(None).await?;
         #[derive(Deserialize)]
         struct BoundsRow {
             world_aabb: Aabb,
@@ -571,6 +706,9 @@ impl QueryService {
             "min_mm": [row.world_aabb.mins.x, row.world_aabb.mins.y, row.world_aabb.mins.z],
             "max_mm": [row.world_aabb.maxs.x, row.world_aabb.maxs.y, row.world_aabb.maxs.z],
             "source": "inst_relate.aabb.d",
+            "published_version": published_version,
+            "stale": stale,
+            "publication_status": publication_status,
         }))
     }
 }
@@ -675,6 +813,43 @@ mod tests {
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
         assert_eq!(unique.len(), 12);
+    }
+
+    #[test]
+    fn room_freshness_probe_is_targeted_and_escapes_refnos() {
+        let sql = render_room_pending_probe(&["24381/10".into(), "panel'with\\quote".into()]);
+        assert!(sql.contains("target_refno IN ['24381/10', 'panel\\'with\\\\quote']"));
+        assert!(sql.contains("'collecting', 'pending', 'failed', 'running'"));
+        assert!(
+            !sql.contains("dbnum ="),
+            "shared targets cannot be filtered by file: {sql}"
+        );
+    }
+
+    #[test]
+    fn room_and_spatial_queries_publish_freshness_metadata() {
+        let source = include_str!("query_service.rs");
+        let room = source
+            .split_once("async fn room(&self")
+            .expect("room query exists")
+            .1
+            .split_once("async fn generation_root")
+            .expect("room query boundary")
+            .0;
+        let spatial = source
+            .split_once("async fn spatial_bounds(&self")
+            .expect("spatial query exists")
+            .1
+            .split_once("fn validate_refno")
+            .expect("spatial query boundary")
+            .0;
+        for body in [room, spatial] {
+            assert!(body.contains("lock_spatial_serial().await"), "{body}");
+            assert!(body.contains("\"published_version\""), "{body}");
+            assert!(body.contains("\"stale\""), "{body}");
+            assert!(body.contains("\"publication_status\""), "{body}");
+        }
+        assert!(spatial.contains("\"unsupported\""));
     }
 
     #[test]

@@ -1,0 +1,150 @@
+{
+  "source": "direct",
+  "parent": "24384/26229",
+  "nodes": [
+    {
+      "refno": "24384_26230",
+      "noun": "WELD",
+      "name": "WELD",
+      "owner": "24384_26229",
+      "order": 0,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    },
+    {
+      "refno": "24384_26231",
+      "noun": "ELBO",
+      "name": "ELBO",
+      "owner": "24384_26229",
+      "order": 1,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    },
+    {
+      "refno": "24384_26233",
+      "noun": "ATTA",
+      "name": "/Copy-of-R332.001",
+      "owner": "24384_26229",
+      "order": 2,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    },
+    {
+      "refno": "24384_26234",
+      "noun": "ATTA",
+      "name": "/Copy-of-R332.001-BRAN-02",
+      "owner": "24384_26229",
+      "order": 3,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    },
+    {
+      "refno": "24384_26235",
+      "noun": "ATTA",
+      "name": "/Copy-of-R332.001-BRAN-01",
+      "owner": "24384_26229",
+      "order": 4,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    },
+    {
+      "refno": "24384_26236",
+      "noun": "VALV",
+      "name": "/Copy-of-1RCV002VP",
+      "owner": "24384_26229",
+      "order": 5,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    },
+    {
+      "refno": "24384_26237",
+      "noun": "ATTA",
+      "name": "/Copy-of-R332.002",
+      "owner": "24384_26229",
+      "order": 6,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    },
+    {
+      "refno": "24384_26238",
+      "noun": "ELBO",
+      "name": "ELBO",
+      "owner": "24384_26229",
+      "order": 7,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    },
+    {
+      "refno": "24384_26239",
+      "noun": "ELBO",
+      "name": "ELBO",
+      "owner": "24384_26229",
+      "order": 8,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    },
+    {
+      "refno": "24384_26240",
+      "noun": "ATTA",
+      "name": "/Copy-of-R332.003",
+      "owner": "24384_26229",
+      "order": 9,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    },
+    {
+      "refno": "24384_26242",
+      "noun": "ATTA",
+      "name": "/Copy-of-R333.008",
+      "owner": "24384_26229",
+      "order": 10,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    },
+    {
+      "refno": "24384_26246",
+      "noun": "BEND",
+      "name": "BEND",
+      "owner": "24384_26229",
+      "order": 11,
+      "children_count": 0,
+      "op": 0,
+      "mod_cnt": null,
+      "children_updated": null,
+      "status_code": null
+    }
+  ]
+}

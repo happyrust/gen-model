@@ -37,10 +37,12 @@ fn fixtures() -> Option<(PathBuf, PathBuf)> {
 }
 
 fn open_set(db: &Path, templates: &Path) -> Arc<DbSet> {
-    let resolver = DirectoryDbResolver::scan(&[PathBuf::from(AMS000)], templates).expect("scan ams000");
-    let set = DbSet::with_attlib_file_and_resolver(templates.join("attlib.dat"), Box::new(resolver))
-        .expect("DbSet opens")
-        .with_element_cache();
+    let resolver =
+        DirectoryDbResolver::scan(&[PathBuf::from(AMS000)], templates).expect("scan ams000");
+    let set =
+        DbSet::with_attlib_file_and_resolver(templates.join("attlib.dat"), Box::new(resolver))
+            .expect("DbSet opens")
+            .with_element_cache();
     set.add_db(DbFilePin {
         file: db.to_path_buf(),
         template: template_file_for(templates, "DESI").expect("DESI template"),
@@ -68,7 +70,9 @@ async fn serve(set: Arc<DbSet>) -> String {
             }
         }),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind loopback");
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind loopback");
     let addr = listener.local_addr().expect("local addr");
     tokio::spawn(async move {
         axum::serve(listener, app).await.expect("serve");
@@ -78,7 +82,9 @@ async fn serve(set: Arc<DbSet>) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn three_curl_paths_plus_bad_request() {
-    let Some((db, templates)) = fixtures() else { return };
+    let Some((db, templates)) = fixtures() else {
+        return;
+    };
     let set = open_set(&db, &templates);
     let base = serve(set.clone()).await;
     let client = reqwest::Client::new();
@@ -95,14 +101,20 @@ async fn three_curl_paths_plus_bad_request() {
     assert_eq!(body["branch_refno"], "24383_99996");
     assert_eq!(body["input_refno"], "24383_99996");
     assert_eq!(body["meta"]["geometry_space"], "source_mm");
-    assert_eq!(body["meta"]["source_to_design"].as_array().map(Vec::len), Some(16));
+    assert_eq!(
+        body["meta"]["source_to_design"].as_array().map(Vec::len),
+        Some(16)
+    );
     let linear = body["primitives"]
         .as_array()
         .expect("primitives")
         .iter()
         .filter(|primitive| primitive["kind"] == "linear_dim")
         .count();
-    assert!(linear >= 2, "expected several linear_dim primitives, got {linear}");
+    assert!(
+        linear >= 2,
+        "expected several linear_dim primitives, got {linear}"
+    );
     assert!(body["issues"].is_array());
     // 前端契约的严格校验在 plant-mbd `contract_guard` 里钉着；这里只确认 wire 形状到位。
     // 设了 `MBD_DUMP_DIR` 就把 wire 体原样落盘，给前端 `parseMbdV2PipeData` 做一次真身校验。
@@ -115,7 +127,8 @@ async fn three_curl_paths_plus_bad_request() {
         )
         .expect("write dump");
     }
-    let parsed: plant_mbd::MbdV2PipeData = serde_json::from_value(body).expect("body is MbdV2PipeData");
+    let parsed: plant_mbd::MbdV2PipeData =
+        serde_json::from_value(body).expect("body is MbdV2PipeData");
     assert_eq!(parsed.meta.layout_mode.as_deref(), Some("linear_mvp"));
 
     // 同一 refno 用斜杠写法（URL 编码）也要通，且 input_refno 原样回填。
@@ -148,7 +161,11 @@ async fn three_curl_paths_plus_bad_request() {
         .send()
         .await
         .expect("GET 422");
-    assert_eq!(container.status(), 422, "owner {pipe_refno} must be rejected as a non-route container");
+    assert_eq!(
+        container.status(),
+        422,
+        "owner {pipe_refno} must be rejected as a non-route container"
+    );
     let container: serde_json::Value = container.json().await.expect("json");
     assert_eq!(container["code"], "precondition");
 

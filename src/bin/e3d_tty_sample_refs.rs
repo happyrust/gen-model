@@ -4,9 +4,9 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use clap::Parser;
+use e3d_io::RefNo;
 use e3d_io::index::IndexCursor;
 use e3d_io::session::{DbView, SessionSelector};
-use e3d_io::RefNo;
 
 #[derive(Parser)]
 #[command(about = "sample physical E3D refnos for TTY parity capture")]

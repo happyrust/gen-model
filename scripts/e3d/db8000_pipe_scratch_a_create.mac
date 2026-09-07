@@ -1,0 +1,43 @@
+-- 管道 P 组 scratch 支管 A：在 PIPE /1RX-345 下 COPY 整条 /C-OR-1R345-C（24384/23257，
+-- 7 FTUB + 2 BEND）成 /CODEX_DB8000_PIPE_SCR_A。P-07（增成员）/ P-09（换规格件）在它上面做；
+-- P-08（跨 BRAN 改挂）还要一条 B（db8000_pipe_scratch_b_create.mac）。生产支管全程不动。
+--
+-- 与既有 db8000_bran_scratch_create.mac 同形（COPY 带来 9 个带 SPRE 的路由成员，才有几何），
+-- 只换名字与 RVM 输出，避开既有 5 腿链的 /CODEX_DB8000_BRAN_SCRATCH 夹具名。
+--
+-- 纪律：恰好一个 SAVEWORK；不写 QUIT/FINISH（会话归 l3_suite driver）；SAVEWORK 前导窄口径 RVM。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_pipe_scratch_a_create.log" OVER
+$P CODEX-DB8000-PIPE-SCR-A-CREATE-ALIVE
+/1RX-345
+Q CE
+Q REF
+Q NAME
+NEW BRAN /CODEX_DB8000_PIPE_SCR_A
+COPY /C-OR-1R345-C
+Q CE
+Q REF
+Q NAME
+Q OWNE
+Q MEMB
+
+$* ---- RVM 导出（状态 a0：created）----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/db8000-pipe-scratch/rvm/a0-created.rvm"
+export filenote 'CODEX db8000 pipe scratch A created (copy of /C-OR-1R345-C)'
+export holes on
+export autocolour displayexport on
+export repr on
+export /CODEX_DB8000_PIPE_SCR_A
+export finish
+
+/CODEX_DB8000_PIPE_SCR_A
+Q REF
+Q NAME
+SAVEWORK 'CODEX db8000 create pipe scratch A /CODEX_DB8000_PIPE_SCR_A (copy of /C-OR-1R345-C)'
+$P CODEX-DB8000-PIPE-SCR-A-CREATE-DONE
+ALPHA LOG END

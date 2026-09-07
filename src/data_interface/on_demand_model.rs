@@ -13,7 +13,8 @@ use crate::data_interface::generation_root::{
 };
 use crate::data_interface::manual_update::{generate_unit_model, generation_root_lock};
 use crate::data_interface::model_update_pending::{
-    ensure_regen_pending_current, generation_root_cache_current, settle_regen_work,
+    ensure_regen_pending_current, generation_root_cache_current, generation_roots_cache_current,
+    settle_regen_work,
 };
 use crate::data_interface::tidb_manager::AiosDBManager;
 
@@ -46,6 +47,10 @@ pub struct OnDemandModelResult {
     /// 这个节点范围覆盖的去重后生成根数。
     #[serde(default)]
     pub generation_root_count: usize,
+    /// Exact roots covered by a scope request.  For a single-root request this
+    /// contains the same value as `generation_root`.
+    #[serde(default)]
+    pub generation_roots: Vec<String>,
     /// 本次凭最新数据完成凭证直接复用的生成根数。
     #[serde(default)]
     pub cached_root_count: usize,
@@ -61,6 +66,99 @@ impl AiosDBManager {
     /// generation. The deletion scope remains the requested PE subtree.
     pub async fn delete_model_subtree(&self, requested_refno: RefnoEnum) -> anyhow::Result<()> {
         crate::data_interface::initialization_phase::require_model_generation()?;
+
+        if crate::options::data_face().is_read_through() {
+            let root = crate::data_interface::generation_root::refno_to_e3d(requested_refno);
+            let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+            let scope = crate::fast_model::model_memory_store::ProjectionScope::Current;
+            let records = store.records_of_root(scope, root);
+            let record_ids = records
+                .iter()
+                .map(|record| record.record_id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let mut affected_roots = store
+                .roots(scope)
+                .into_iter()
+                .filter(|candidate| {
+                    *candidate == root
+                        || store
+                            .records_of_root(scope, *candidate)
+                            .iter()
+                            .any(|record| record_ids.contains(&record.record_id))
+                })
+                .collect::<Vec<_>>();
+            if affected_roots.is_empty() {
+                affected_roots.push(root);
+            }
+            let tube_branches = records
+                .iter()
+                .filter(|record| record.tube.is_some())
+                .map(|record| record.source_refno)
+                .collect::<Vec<_>>();
+            let option = aios_core::get_db_option();
+            let mut sessions = records
+                .iter()
+                .map(|record| (record.dbnum, record.source_sesno))
+                .collect::<Vec<_>>();
+            sessions.extend(affected_roots.iter().filter_map(|affected| {
+                store
+                    .receipt(scope, *affected)
+                    .map(|receipt| (affected.dbno(), receipt.source_sesno))
+            }));
+            if sessions.is_empty() {
+                sessions.extend(
+                    crate::data_interface::mdb_memory_store::get(
+                        &option.project_name,
+                        &option.mdb_name,
+                    )
+                    .into_iter()
+                    .flat_map(|snapshot| snapshot.session_fingerprint())
+                    .map(|(dbnum, _, sesno)| (dbnum, sesno)),
+                );
+            }
+            sessions.sort_unstable();
+            sessions.dedup();
+            let source_sesno_epoch = sessions
+                .iter()
+                .map(|(_, sesno)| u64::from(*sesno))
+                .max()
+                .unwrap_or_default();
+            let epoch = crate::data_interface::mdb_memory_store::get(
+                &option.project_name,
+                &option.mdb_name,
+            )
+            .map(|snapshot| snapshot.epoch())
+            .unwrap_or(source_sesno_epoch);
+            let transaction = crate::fast_model::model_db_adapter::render_spooled_scope_deletion(
+                root,
+                &affected_roots,
+                &tube_branches,
+            );
+            crate::data_interface::mirror_spool::MirrorSpool::for_process(
+                &option.surreal_ns,
+                &option.project_name,
+                &option.mdb_name,
+            )?
+            .persist(
+                epoch,
+                sessions,
+                format!("model-tombstone:{root}"),
+                vec![transaction],
+            )?;
+
+            store.commit(
+                scope,
+                vec![crate::fast_model::model_memory_store::ProjectionCommit {
+                    tube_branch_resets: tube_branches,
+                    removals: record_ids.into_iter().collect(),
+                    ..Default::default()
+                }],
+            );
+            for affected in affected_roots {
+                store.invalidate_receipt(scope, affected);
+            }
+            return Ok(());
+        }
 
         let mut subtree =
             crate::data_interface::helper::collect_pe_subtree_refnos(&[requested_refno])
@@ -146,10 +244,28 @@ impl AiosDBManager {
         let root_refno = root.to_pdms_str();
         let _guard = try_generation_root(&root_refno)?;
 
+        // 「只写内存」作用域（plan 2026-09-06 §8 R2）：这个库在 rocksdb 里还没准备好，模型面的
+        // 状态只在进程内投影里——判「已可用」、数 renderable、都只问投影；durable pending 与
+        // 初始化门一概不碰（它们都是持久层上的事）。判据本身在 `model_read_route`，这里只认
+        // 作用域，不重拼。
+        let memory_only = crate::data_interface::model_read_route::memory_only_scope().is_some();
         // Never report a partially-written model while another generation owns
         // this root. Once the lock is ours, a completed prior run is safe to reuse.
-        if !force && generation_root_cache_current(&root_refno).await? {
-            let counts = instance_counts(requested_refno).await?;
+        let cache_current = if memory_only || crate::options::data_face().is_read_through() {
+            memory_root_current(root)
+        } else {
+            generation_root_cache_current(&root_refno).await?
+                && (!crate::options::direct_read_mode() || memory_root_current(root))
+        };
+        if !force && cache_current {
+            let counts = if memory_only
+                || crate::options::direct_read_mode()
+                || crate::options::data_face().is_read_through()
+            {
+                memory_counts(&[root])
+            } else {
+                instance_counts(requested_refno).await?
+            };
             return Ok(describe(
                 requested_refno,
                 root,
@@ -162,23 +278,39 @@ impl AiosDBManager {
         // Existing stable geometry stays readable during initialization, but a
         // miss must not create durable work or start generation before all data
         // phases (and the configured startup-wide model pass) have settled.
-        crate::data_interface::initialization_phase::require_model_generation()?;
+        // 只写内存的库不受这道门管：它既不造 durable 工作，也不是启动全量（R2）。
+        if !memory_only {
+            crate::data_interface::initialization_phase::require_model_generation()?;
+        }
 
         // 先落 durable pending 再生成（spec §4.5 / 2026-07-30 审计 C1）。曾经这里只
         // 读现有行的 revision：表里本来没有这个根时收口是 no-op，进程在生成中途崩溃，
         // 这次工作就没有任何持久痕迹，没有 drain 会捡它，只能靠人再点一次。落行失败
         // 直接返回错误、不跑生成——durable 语义必须先于工作本身成立。
-        let pending_revision = Some(ensure_regen_pending_current(&root_refno, root_noun).await?);
+        let pending_revision = if memory_only || crate::options::data_face().is_read_through() {
+            None
+        } else {
+            Some(ensure_regen_pending_current(&root_refno, root_noun).await?)
+        };
         let outcome = generate_unit_model(self, &root_refno).await;
         let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
-        if let Err(error) =
-            settle_regen_work(&root_refno, pending_revision, generation_error.as_deref()).await
+        if !memory_only
+            && !crate::options::data_face().is_read_through()
+            && let Err(error) =
+                settle_regen_work(&root_refno, pending_revision, generation_error.as_deref()).await
         {
             log::error!("收口模型 pending 失败 root={root_refno}: {error:#}");
         }
         outcome?;
 
-        let counts = instance_counts(requested_refno).await?;
+        let counts = if memory_only
+            || crate::options::direct_read_mode()
+            || crate::options::data_face().is_read_through()
+        {
+            memory_counts(&[root])
+        } else {
+            instance_counts(requested_refno).await?
+        };
         let status = post_generation_status(counts);
         Ok(describe(requested_refno, root, root_noun, status, counts))
     }
@@ -240,8 +372,38 @@ impl AiosDBManager {
         }
 
         let root_count = roots.len();
+        let root_refnos = roots.iter().map(|root| root.root).collect::<Vec<_>>();
+        let generation_roots = roots
+            .iter()
+            .map(|root| root.root.to_pdms_str())
+            .collect::<Vec<_>>();
+        let scope_noun = roots
+            .iter()
+            .find(|root| root.root == requested_refno)
+            .map(|root| root.noun.clone())
+            .unwrap_or_else(|| "SCOPE".to_owned());
         let mut cached_root_count = 0usize;
         let mut generated_root_count = 0usize;
+        // 只写内存的库（plan 2026-09-06 §8 R2）：凭证与计数都只问进程内投影。
+        let memory_only = crate::data_interface::model_read_route::memory_only_scope().is_some();
+        let current_roots = if force {
+            std::collections::HashSet::new()
+        } else if memory_only || crate::options::data_face().is_read_through() {
+            root_refnos
+                .iter()
+                .copied()
+                .filter(|root| memory_root_current(*root))
+                .map(|root| root.to_pdms_str())
+                .collect()
+        } else {
+            generation_roots_cache_current(
+                &roots
+                    .iter()
+                    .map(|root| root.root.to_pdms_str())
+                    .collect::<Vec<_>>(),
+            )
+            .await?
+        };
         for root in roots {
             // A scope can contain hundreds of delivery roots. Calling
             // `ensure_model_generated` for every cache hit would recount each
@@ -250,11 +412,10 @@ impl AiosDBManager {
             // HTTP worker's 120 s budget even though all 212 credentials were
             // current. A current credential is the authoritative cache hit;
             // only misses need the generation path and its per-root counts.
-            if !force
-                && crate::data_interface::model_update_pending::generation_root_cache_current(
-                    &root.root.to_pdms_str(),
-                )
-                .await?
+            // A durable credential survives restart, but /model/records serves the
+            // process projection. Rebuild a missing resident root before calling it cached.
+            if current_roots.contains(&root.root.to_pdms_str())
+                && (!crate::options::direct_read_mode() || memory_root_current(root.root))
             {
                 cached_root_count += 1;
                 continue;
@@ -269,7 +430,14 @@ impl AiosDBManager {
             }
         }
 
-        let counts = instance_counts(requested_refno).await?;
+        let counts = if memory_only
+            || crate::options::direct_read_mode()
+            || crate::options::data_face().is_read_through()
+        {
+            memory_counts(&root_refnos)
+        } else {
+            instance_counts(requested_refno).await?
+        };
         let status = if counts.renderable == 0 {
             OnDemandModelStatus::NoRenderableGeometry
         } else if generated_root_count > 0 {
@@ -277,9 +445,14 @@ impl AiosDBManager {
         } else {
             OnDemandModelStatus::AlreadyAvailable
         };
-        let noun = aios_core::get_pe(requested_refno)
-            .await?
-            .map_or_else(|| "SCOPE".to_owned(), |pe| pe.noun);
+        // 只写内存的库还没摄入 `pe`，noun 只能从根名单里来（与读透同一条路）。
+        let noun = if memory_only || crate::options::data_face().is_read_through() {
+            scope_noun
+        } else {
+            aios_core::get_pe(requested_refno)
+                .await?
+                .map_or_else(|| "SCOPE".to_owned(), |pe| pe.noun)
+        };
         Ok(OnDemandModelResult {
             requested_refno: requested_refno.to_pdms_str(),
             generation_root: requested_refno.to_pdms_str(),
@@ -289,6 +462,7 @@ impl AiosDBManager {
             model_instance_count: counts.renderable,
             generated_instance_count: counts.written,
             generation_root_count: root_count,
+            generation_roots,
             cached_root_count,
             generated_root_count,
         })
@@ -371,8 +545,45 @@ fn describe(
         model_instance_count: counts.renderable,
         generated_instance_count: counts.written,
         generation_root_count: 1,
+        generation_roots: vec![root.to_pdms_str()],
         cached_root_count: usize::from(status != OnDemandModelStatus::Generated),
         generated_root_count: usize::from(status == OnDemandModelStatus::Generated),
+    }
+}
+
+fn memory_root_current(root: RefnoEnum) -> bool {
+    crate::fast_model::e3d_model_service::parse_refno(&root.to_pdms_str())
+        .ok()
+        .and_then(|root| {
+            crate::fast_model::model_memory_store::ModelMemoryStore::global().receipt(
+                crate::fast_model::model_memory_store::ProjectionScope::Current,
+                root,
+            )
+        })
+        .is_some()
+}
+
+fn memory_counts(roots: &[RefnoEnum]) -> InstanceCounts {
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let mut ids = std::collections::HashSet::new();
+    for root in roots {
+        let Ok(root) = crate::fast_model::e3d_model_service::parse_refno(&root.to_pdms_str())
+        else {
+            continue;
+        };
+        ids.extend(
+            store
+                .records_of_root(
+                    crate::fast_model::model_memory_store::ProjectionScope::Current,
+                    root,
+                )
+                .into_iter()
+                .map(|record| record.record_id),
+        );
+    }
+    InstanceCounts {
+        written: ids.len(),
+        renderable: ids.len(),
     }
 }
 
@@ -497,6 +708,7 @@ mod tests {
             model_instance_count: 3,
             generated_instance_count: 3,
             generation_root_count: 1,
+            generation_roots: vec!["16192/2".into()],
             cached_root_count: 0,
             generated_root_count: 1,
         };

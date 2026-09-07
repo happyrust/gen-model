@@ -3,7 +3,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 
-use aios_database::e3d_query::{parse_members, E3dDriver};
+use aios_database::e3d_query::{E3dDriver, parse_members};
 use clap::Parser;
 use e3d_attlib::{db1_dehash, db1_hash};
 use e3d_io::record::element::ParsedElement;

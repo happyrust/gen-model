@@ -148,6 +148,7 @@ pub const INST_RELATE_INDEX_SQL: &str = "\
     DEFINE INDEX IF NOT EXISTS idx_inst_relate_anc ON TABLE inst_relate COLUMNS anc;\n\
     DEFINE INDEX IF NOT EXISTS idx_inst_relate_dbnum ON TABLE inst_relate COLUMNS dbnum;\n\
     DEFINE INDEX IF NOT EXISTS idx_inst_relate_in ON TABLE inst_relate COLUMNS in;\n\
+    DEFINE INDEX IF NOT EXISTS idx_geo_relate_in ON TABLE geo_relate COLUMNS in;\n\
     DEFINE INDEX IF NOT EXISTS idx_tubi_relate_anc ON TABLE tubi_relate COLUMNS anc;\n\
     DEFINE INDEX IF NOT EXISTS idx_tubi_relate_dbnum ON TABLE tubi_relate COLUMNS dbnum;";
 
@@ -345,8 +346,8 @@ pub async fn sweep_inst_relate_flat() -> anyhow::Result<usize> {
         let sql = format!(
             "LET $rows = SELECT VALUE id FROM inst_relate WHERE {scoped}insts_flat = NONE AND aabb.d != none LIMIT {BATCH};\n\
              UPDATE $rows SET insts_flat = IF {VALID_BOOLED} THEN \
-             [{{ geo_hash: booled_id }}] ELSE (SELECT trans.d AS transform, record::id(out) AS geo_hash \
-             FROM out->geo_relate WHERE visible && out.meshed && trans.d != none && geo_type='Pos') END, \
+             [{{ geo_hash: booled_id }}] ELSE (SELECT (transform ?? trans.d) AS transform, record::id(out) AS geo_hash \
+             FROM out->geo_relate WHERE visible && out.meshed && (transform ?? trans.d) != none && geo_type='Pos') END, \
              aabb_d = aabb.d, world_trans_d = world_trans.d RETURN NONE;\n\
              RETURN array::len($rows);"
         );

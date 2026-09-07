@@ -49,6 +49,13 @@ try {
     $env:AIOS_LIVE_DB = 'AvevaMarineSample'
     $env:AIOS_ISSUE7_DB_FILE = Join-Path $ProjectDir 'ams000\ams7999_0001'
     $env:DB_OPTION_FILE = 'db_options/DbOption-issue7-e2e'
+    # 本套件自己起 SurrealDB 并把靶定在 8009 上：进程必须连它，不许自己再拉一台
+    # （store_mode 默认已是 spawned-mem，2026-09-04）。配置里也写了 external，
+    # 这一行是给「换了配置忘了改」留的第二道。
+    $env:AIOS_STORE_MODE = 'external'
+    # 数据面同理：这套 e2e 验的是摄入链，data_face 的新默认（read-through，2026-09-05）
+    # 不做基线；配置里也写了 ingest，这一行是第二道。
+    $env:AIOS_DATA_FACE = 'ingest'
     # GEN_MODEL_DIRECT_INCREMENT 随 kv-mem 暂存窗口退役（ADR-056 P1）：稳态增量只有直写一条路，
     # 二进制不再读这个变量。
 

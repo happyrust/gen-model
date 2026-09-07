@@ -1,4 +1,4 @@
-use aios_database::query_service::{QUERY_TOOL_NAMES, QueryError, QueryService};
+use aios_database::query_service::{QueryError, QueryService};
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::{ServiceExt, schemars, tool, tool_router, transport::stdio};
@@ -230,7 +230,9 @@ mod tests {
             .map(|tool| tool.name.to_string())
             .collect::<Vec<_>>();
         names.sort();
-        let mut expected = QUERY_TOOL_NAMES.map(str::to_owned).to_vec();
+        let mut expected = aios_database::query_service::QUERY_TOOL_NAMES
+            .map(str::to_owned)
+            .to_vec();
         expected.sort();
         assert_eq!(names, expected);
     }

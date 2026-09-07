@@ -121,6 +121,7 @@ pub fn import_rvm(options: &ImportOptions) -> Result<RvmSnapshot> {
         export_scope: options.export_scope,
         geo_type_counts: builder.geo_type_counts,
         degenerate_bbox_count: builder.degenerate_bbox_count,
+        facet_aabb_from_vertices: builder.facet_aabb_from_vertices,
     };
 
     Ok(RvmSnapshot {
@@ -137,6 +138,8 @@ struct Builder {
     geometry_count: usize,
     geo_type_counts: BTreeMap<String, usize>,
     degenerate_bbox_count: usize,
+    /// 世界 AABB 由面片顶点实算的几何数（见 [`facet_group_world_aabb_mm`]）。
+    facet_aabb_from_vertices: usize,
 }
 
 impl Builder {
@@ -149,6 +152,7 @@ impl Builder {
             geometry_count: 0,
             geo_type_counts: BTreeMap::new(),
             degenerate_bbox_count: 0,
+            facet_aabb_from_vertices: 0,
         }
     }
 
@@ -291,22 +295,29 @@ impl Builder {
         let geo_type = geo_type_name(geometry.geo_type).to_string();
         *self.geo_type_counts.entry(geo_type.clone()).or_insert(0) += 1;
 
-        let bbox = geometry.bbox_world;
-        let (bbox_world_mm, degenerate) = if bbox.is_valid() {
-            let scaled = [
-                bbox.min.x as f64 * M_TO_MM,
-                bbox.min.y as f64 * M_TO_MM,
-                bbox.min.z as f64 * M_TO_MM,
-                bbox.max.x as f64 * M_TO_MM,
-                bbox.max.y as f64 * M_TO_MM,
-                bbox.max.z as f64 * M_TO_MM,
-            ];
-            let degenerate = (scaled[3] - scaled[0]).abs() < 1e-6
-                && (scaled[4] - scaled[1]).abs() < 1e-6
-                && (scaled[5] - scaled[2]).abs() < 1e-6;
-            (Some(scaled), degenerate)
-        } else {
-            (None, true)
+        let (bbox_world_mm, degenerate) = match facet_group_world_aabb_mm(geometry) {
+            Some(from_vertices) => {
+                self.facet_aabb_from_vertices += 1;
+                let degenerate = is_degenerate(&from_vertices);
+                (Some(from_vertices), degenerate)
+            }
+            None => {
+                let bbox = geometry.bbox_world;
+                if bbox.is_valid() {
+                    let scaled = [
+                        bbox.min.x as f64 * M_TO_MM,
+                        bbox.min.y as f64 * M_TO_MM,
+                        bbox.min.z as f64 * M_TO_MM,
+                        bbox.max.x as f64 * M_TO_MM,
+                        bbox.max.y as f64 * M_TO_MM,
+                        bbox.max.z as f64 * M_TO_MM,
+                    ];
+                    let degenerate = is_degenerate(&scaled);
+                    (Some(scaled), degenerate)
+                } else {
+                    (None, true)
+                }
+            }
         };
         if degenerate {
             self.degenerate_bbox_count += 1;
@@ -341,6 +352,64 @@ impl Builder {
             }),
         }
     }
+}
+
+fn is_degenerate(aabb: &[f64; 6]) -> bool {
+    (aabb[3] - aabb[0]).abs() < 1e-6
+        && (aabb[4] - aabb[1]).abs() < 1e-6
+        && (aabb[5] - aabb[2]).abs() < 1e-6
+}
+
+/// FacetGroup 的世界 AABB，从这条记录**自己的顶点**实算（mm）。非 FacetGroup 返回 None。
+///
+/// PRIM 记录自带的那 6 个 f32 有**两个帧**，而且不按 kind 分。实测 `test_data/rvm/` 六份
+/// E3D 3.1 导出物、432 条记录：
+///
+/// - 解析图元（Box 170 / Cylinder 15 / Snout 6 / CircularTorus 5）**196/196** 存的是图元
+///   自身局部系的盒——`bbox.transform(&transform)` 对它们是对的，所以这条路径原样留给 rvm-rs。
+/// - FacetGroup 236 条里有 **228 条**存的是 `AABB(matrix3 · v × 1000)`，即**乘过旋转、
+///   未加平移**的帧。对这些记录再乘一次 transform 就是多转了一遍：`C-IY-1R330-B.rvm.json`
+///   的 `aabb_world_mm` 因此 **18/18 个带面片的成员全错，最大 158.4 mm**。
+/// - 剩下 8 条（`WALL 1..4` / `STWALL 1..4 of CWALL /1RS-WF03-W-C-RR001`）又落回局部系。
+///   整族切换、两个候选差着上千毫米，不是浮点抖动——**帧由 E3D 写出端的代码路径决定，
+///   不由 kind 决定**，所以按 kind 查表迟早翻车。
+///
+/// 顶点在手时这些都不必猜：`世界 mm = (matrix3 · v + translation) × 1000` 恒成立
+/// （顶点存 mm、matrix3 含 0.001、translation 存米），直接实算即可绕开整个帧问题。
+/// 这与 e3d-model `examples/rvm_facets_dump.rs` 的 `polygons_world_mm` 同一口径，
+/// 因此 `rvm_compare` 给不给 `--facets` 得到的基准 AABB 一致。
+fn facet_group_world_aabb_mm(geometry: &Geometry) -> Option<[f64; 6]> {
+    let GeometryKind::FacetGroup(facet) = &geometry.kind else {
+        return None;
+    };
+    let transform = &geometry.transform;
+    let mut aabb: Option<[f64; 6]> = None;
+    for contour in facet
+        .polygons
+        .iter()
+        .flat_map(|polygon| polygon.contours.iter())
+    {
+        for vertex in &contour.vertices {
+            let world = transform.transform_point3(*vertex);
+            let p = [
+                world.x as f64 * M_TO_MM,
+                world.y as f64 * M_TO_MM,
+                world.z as f64 * M_TO_MM,
+            ];
+            aabb = Some(match aabb {
+                None => [p[0], p[1], p[2], p[0], p[1], p[2]],
+                Some(a) => [
+                    a[0].min(p[0]),
+                    a[1].min(p[1]),
+                    a[2].min(p[2]),
+                    a[3].max(p[0]),
+                    a[4].max(p[1]),
+                    a[5].max(p[2]),
+                ],
+            });
+        }
+    }
+    aabb
 }
 
 fn group_attrs(store: &Store, group: &rvm_rs::store::node::GroupNode) -> Option<serde_json::Value> {

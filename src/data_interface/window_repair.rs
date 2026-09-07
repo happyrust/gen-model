@@ -222,25 +222,22 @@ pub async fn repair_committed_window(
     let hard_delete_rows = deleted_nouns(&deleted_refnos).await?;
 
     // 纠正的是一个已提交窗口，水位不动；重新投影审计补出的删除后，使用与生产相同的
-    // 终态渲染逐条幂等重放。本工具在服务停止后运行，不与批次并发。
-    let persist_changes = crate::data_interface::ele_ops::terminal_persist_changes(
-        &collected.range_eles,
-    );
+    // 终态渲染（`element_batch` 批量先删后插，含墓碑与旧 noun 行）幂等重放。
+    // 本工具在服务停止后运行，不与批次并发。
     let uda_keys = crate::data_interface::uda_keys::UdaKeyMap::load().await?;
-    let statements =
-        IncrementPipeline::render_terminal_persist_statements(&persist_changes, dbnum as i32, &uda_keys)
-            .into_iter()
-            .chain(super::manual_update::build_reverse_index_statements(
-                &collected.range_eles,
-            ))
-            // refno 复用：旧 noun 行随窗口一起删（与生产尾事务同一份语句）。
-            .chain(
-                collected
-                    .retired_type_rows
-                    .iter()
-                    .map(|row| row.delete_statement(&row.refno.to_string())),
-            )
-            .collect::<Vec<_>>();
+    let (batches, report) = IncrementPipeline::terminal_persist_batches(
+        &collected.persist_changes,
+        &collected.retired_type_rows,
+        dbnum as i32,
+        &uda_keys,
+    )?;
+    if let Some(warning) = report.warning(dbnum) {
+        println!("{warning}");
+    }
+    for sql in &batches {
+        super::dbnum_stats::execute_on(&aios_core::SUL_DB, sql).await?;
+    }
+    let statements = super::manual_update::build_reverse_index_statements(&collected.range_eles);
     for sql in &statements {
         crate::surreal_retry::execute_surreal_checked(sql, "纠正窗口数据重放")
             .await
@@ -255,7 +252,9 @@ pub async fn repair_committed_window(
         // 复合 id 前缀范围。谓词形式的 `WHERE in = {pe}` 在 SurrealDB 2.1 的
         // DELETE 里拿不到 `unique_pe_owner`，退化成边表全扫
         // （`increment_pipeline::render_persist_statements` 同一对语句）。
-        crate::surreal_retry::execute_surreal_checked(
+        let sql = super::dbnum_stats::transaction(
+            dbnum,
+            &[refno.refno().to_string()],
             &format!(
                 "DELETE {pe}->pe_owner;\n\
                  DELETE pe_owner:[{pe}, NONE]..=[{pe}, ..];\n\
@@ -263,10 +262,10 @@ pub async fn repair_committed_window(
                 refno.refno().to_table_key("ATT_UDA"),
                 refno.refno()
             ),
-            "纠正窗口主数据硬删除",
-        )
-        .await
-        .context("纠正窗口主数据硬删除失败")?;
+        )?;
+        super::dbnum_stats::execute_on(&aios_core::SUL_DB, &sql)
+            .await
+            .context("纠正窗口主数据硬删除失败")?;
     }
 
     // 尾事务：水位守卫 + 空间 epoch 推进，一个事务；水位值原样写回（纠正不推进水位）。

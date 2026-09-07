@@ -4,12 +4,12 @@
 mod archive;
 
 use aios_core::pdms_types::RefU64;
+use aios_database::data_interface::db_file_header::snapshot_presence;
 use anyhow::{Context, ensure};
 use archive::{
     ARCHIVE_NAME, ArchiveSpec, ElementState, FixtureManifest, IssueSpec, MAX_ARCHIVE_BYTES,
     RefSpec, SnapshotSpec, WindowSpec, sha256_file, verify_and_extract, write_archive,
 };
-use aios_database::data_interface::db_file_header::snapshot_presence;
 use clap::Parser;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};

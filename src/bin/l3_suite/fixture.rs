@@ -648,6 +648,16 @@ fn start_fixture_stack(
                 Command::new(service)
                     .current_dir(repo)
                     .env("DB_OPTION_FILE", &config_no_ext)
+                    // 套件自己在 8048 上起了一台 rocksdb surreal（上面那一段）：
+                    // 服务必须连它，不许按 store_mode 的新默认（spawned-mem，
+                    // 2026-09-04）自己再拉一台 memory 库——那样整套断言会对着一个
+                    // 空库跑，症状是「莫名其妙全查不到数据」而不是一条报错。
+                    // 运行期配置里也写了 external，这一行是第二道。
+                    .env("AIOS_STORE_MODE", "external")
+                    // 同理，数据面必须是摄入形态：套件的断言建立在「基线真的跑了、pe
+                    // 真的进了」之上，而 data_face 的新默认（read-through，2026-09-05）
+                    // 不做基线。运行期配置里也写了 ingest，这一行同样是第二道。
+                    .env("AIOS_DATA_FACE", "ingest")
                     .env("RUST_MIN_STACK", "67108864")
                     // 套件把启动自动执行显式钉为 true，避免外部配置把批次改成 held；
                     // 整套断言都建立在「批次真的被执行」之上。

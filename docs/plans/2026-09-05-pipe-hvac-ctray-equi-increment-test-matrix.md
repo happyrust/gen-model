@@ -2,15 +2,17 @@
 
 - 需求：对管道、通风、桥架、设备四类做增量测试案例（增 / 删 / 改 / 移动里面的管件），配单元测试；
   并用 RVM 与数据接口验证「E3D TTY 导出的数据」与「RVM 真值」的一致性。
-- 本文是**盘点 + 用例清单**，不含实现。盘点范围：`scripts/e3d/`、`tests/`、`src/data_interface/`、
+- 本文包含原始盘点与实施增补；2026-09-06 的可复核实施记录见 `docs/evidence/2026-09-06-cascade-key-matrix/README.md`。原始盘点范围：`scripts/e3d/`、`tests/`、`src/data_interface/`、
   `src/rvm_baseline/`、`test-increment/`、`docs/evidence/2026-09-0{2,3,4}*`、`vendor/e3d-model/tests/`。
 - 术语按 `CONTEXT.md`：生成根 / 最小交付单元（MDU）/ 净变化 / 搬迁 / 净窗口收集器 / 双侧对拍。
 
 ## 0. 一句话
 
-四类里**管道与设备的宏、离线判据、RVM 真值都已齐**（差的是 live 收敛与几条新形态）；
-**通风有宏、有离线门、没有 RVM 真值**；**桥架只有一个一次性导入窗口的离线门**，宏、RVM、gen-model 选根
-三样都缺。单元测试层四类都只覆盖了管道（`tests/pipe26229_increment.rs`），其余三类要照它补。
+2026-09-06 后续修正：两个 hold 来自隔离环境把仓库配置的 ZDJ 7600 错换为 APS 7600，恢复原目录来源后两根均正常生成；同时补齐失败元素明细，并修复提前 SAVEWORK 导致数据轮、模型计划和基线解析各自捕获不同冻结源的问题。随后修复基线/稳态选根差异、跨根迁移提交顺序、连续窗口承接旧生成任务和删除后的旧死信；初始化、未修改模型保留、重启持久性及 E/P 共 14 个 live 窗口已通过；H 基线与清理追平，但创建 RVM 对照失败，矩阵尚未完成。结果见 `docs/evidence/2026-09-06-cascade-catalogue/README.md`，下条为历史记录。
+
+2026-09-06 live 增补：隔离持久库的设备窗口尚未通过，发现初始化发布的双错误遮蔽与追加期间目标摘要漂移，已补回归和修复；原基线另有两个真实几何失败根，不能宣称整库收敛。详见 `docs/evidence/2026-09-06-cascade-live/README.md`。
+
+2026-09-06 增补：P/E/H 已补统一 scratch 操作链、真实窗口选根测试及窄口径 RVM 对拍，首次恢复位置精度问题由严格复核发现并重跑。桥架已补初始导入的 gen-model 选根测试（明确允许阈值触发全量回退），编辑与 RVM 仍受 TTY 访问即异常退出阻塞。live 持久层收敛仍未验收。以下资产表保留原始盘点时点，最新状态以实施记录和各次 summary/acceptance 为准。
 
 ## 1. 现有资产盘点
 
@@ -127,9 +129,9 @@ BEND 3 / TRNS 2 / PCOM 1，PASS）、**桥架 251142 2→9**（CTRAY 128，PASS�
 | P-04 | 删·成员 | `db8000_bran_scratch_delete_member.mac` | remove 1 + derived 1；消失键全部在 removals | D M R | ✅ |
 | P-05 | 删·容器 | `db8000_bran_scratch_delete.mac` | remove 8 + derived retired；`DeleteCleanup` 一条 | D M | ✅（L 的 `DeleteCleanup` 执行未验） |
 | P-06 | 改·路由端点 | `db8000_bran_hpos_apply/restore.mac`（HPOS U +500） | 只 BRAN 重生成，成员几何不变 | D M R L | ◐（09-05 L 停在 drain） |
-| P-07 | 增·成员 | ✚ 在 scratch BRAN 里 `NEW ELBO`/`NEW FTUB` 一件（F5 形态） | 新单元 1 + 邻接管身重算 | D M R | ✚ |
-| P-08 | **移动管件**·跨 BRAN 改挂 | ✚ 两条 scratch 支管，FTUB 从 A 挂到 B（F6 形态；纯函数契约已有 `reparented_fitting_regenerates_both_old_and_new_branches`） | 新旧两根都 regen；A 侧管身收缩 | D M R | ✚ |
-| P-09 | 改·换规格件 | ✚ `SPRE` 换到同 SPEC 另一件（`pipe_spec_reference_regenerates…` 已有分类断言） | 该件 regen；几何随目录变 | D M R | ✚ |
+| P-07 | 增·成员 | ✅ `db8000_pipe_new_member_apply.mac`（scratch A 尾部 NEW FTUB + COPY 带 SPRE） | ②added 1 + BRAN children_changed；③created 1 → BRAN A regen 1、`no_model={}`（PIPE 不成根）、upsert 逐件 = full@289；④RVM 10/10 exact（新件 26301 exact，max 0.0014 mm）；⑤删 A 库回原样 | D M R | ✅（2026-09-06 ams8000 288→290 ①–⑤ 全绿） |
+| P-08 | **移动管件**·跨 BRAN 改挂 | ◐ `db8000_pipe_reparent_apply.mac`（A 的 FTUB 4 改 OWNER 到 B；配 `db8000_pipe_scratch_b_create.mac`） | 新旧两根都 regen（纯函数契约 `reparented_fitting_regenerates_both_old_and_new_branches` 已钉） | D M R | ◐（宏已写，live 待验：OWNER 直改能否被判 owner_change 需首跑确认） |
+| P-09 | 改·换规格件 | ◐ `db8000_pipe_spre_swap_apply.mac`（scratch A 的 BEND 1 换 SPRE） | 该件 regen；几何随目录变（`pipe_spec_reference_regenerates…` 已钉分类） | D M R | ◐（宏已写，占位 `<ALT_SPRE>` 待填：db 13244 SPEC 109234 的同族替换件需先定位该库枚举） |
 | P-10 | 改·数据仅 | ✚ scratch BRAN `NAME` 改回（复用 `db8000_scratch_rename` 形态） | 零模型工作，仅 advance | D M | ✚ |
 | P-11 | 增删抵消 | 同一窗口内 P-01 + P-05 | 净 `cancelled`，无工作项 | D | ◐（`db8000_recording_cases` 里 BOX 版已有，BRAN 版 ✚） |
 

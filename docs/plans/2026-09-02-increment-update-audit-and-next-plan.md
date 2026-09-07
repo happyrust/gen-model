@@ -292,7 +292,21 @@ gen-model 的 CATA 反向级联 planner（Surreal `ref_rev`，ADR-003/008）。�
   `UpdatePlan::FullRebuild{reason}`，调用方走整库；报告记 `degraded_to_full`。P1-1 的前移护栏就吃它。
 - 验收：现有 160 项 + 新增 3 项单测；五窗真库门数字不变（`totals_line` 逐字节对比留档）。
 
-**P1-2b `graphicsBehaviour` 守卫（S5，§1.3）**
+**P1-2b `graphicsBehaviour` 守卫（S5，§1.3）** — ★2026-09-04 复核：**已经落地了，本条可结**
+
+> 逐项对过 `vendor/e3d-model`：`data/noun-family-matrix.json` 有 `gb` 列（`FamilyMatrixRow.gb`，
+> 老矩阵按 0 读）；`category.rs` 有 `graphics_behaviour(noun) -> Option<u8>` /
+> `graphics_ignored_below` / `graphics_ignored_nouns`，注释里引的就是本文 §1.3 与
+> `0x1051c7d0`；`pipeline::push_members` 据它把 gb==1 节点的成员整棵计进 `consumed`、不入栈；
+> 守卫测试 `graphics_ignored_containers_are_never_units_nor_lists` 把 **109** 这个数写死，
+> 并正面断言 `WORL/SITE/ZONE` 是 2、`CABLE` 是 3。
+> **一处与本文不同**：验收里写的测试名是 `graphics_ignored_ancestors_are_not_units`，
+> 实际落的是上面那个名字。
+> 另注：`category.rs` 那句「2/3 的含义未读，不要拿来分派」**仍然成立且应当保留**——
+> 本日新查出 `gb == 2` 在 `sub_1052F2E0` 里被比（见 §5 第 4 条），只说明那里有东西，
+> 不等于读懂了可以拿来分派。
+>
+> 下面是原任务描述，留作记录。
 - `e3d-model/data/noun-family-matrix.json` 导出加 `gb` 列（`scripts/noun_family_probe.py:116` 已在读
   `graphics_behaviour`，只差落盘）。
 - `category.rs` 新增 `graphics_behaviour(noun) -> Option<u8>`；测试：`gb == 1` 的 109 个 noun
@@ -399,8 +413,26 @@ legacy worker；留档不排期。原文如下。
    不影响 §1.1 结论（集合的**用途**由 `scanNew` 读侧确认），但偏移未逐个核对。
 3. `sub_5AAF4E0` / `sub_5AAE610` 是哪两个 dab 原语（`db_start_table_search`？）未从 opcode 名表反查；
    P2-2 取证时补。
-4. `graphicsBehaviour == 2/3` 的语义未读（只确认 `== 1` 是忽略门）；`LISTOP`/`FNDTOP` 里没有它们，
-   暂不影响上卷。
+4. ~~`graphicsBehaviour == 2/3` 的语义未读（只确认 `== 1` 是忽略门）；`LISTOP`/`FNDTOP` 里没有它们，
+   暂不影响上卷。~~ **★2026-09-04 部分结案**（`docs/evidence/2026-09-04-ida-core3d-partial-update-recheck.md` §3）：
+   按字段 id 全盘搜（`bin_search pattern = '68 6F CE 4D 00'`），`Core3D.dll` 里 `graphicsBehaviour`
+   有**三个**消费者而不是一个——除已记的 `isGraphicsIgnoredBetween`，还有
+   `DES_DrawList::hasGraphicsIgnoreFlag`（`0x1051A920`，逐元素判 `== 1`、**不上行**）与
+   未命名的 `sub_1052F2E0`（`0x1052F36F` / `0x1052F3CD` 各读一次，`0x1052F3F0` 处 `cmp eax, 2`）。
+   **`gb == 2`（98 个层级容器 noun）在 `sub_1052F2E0` 里是活判据**，「2/3 暂不影响」的前半句作废。
+   §1.3 关于 `isGraphicsIgnoredBetween` 本身与 P1-2b 的结论**不受影响**。
+   **同日晚跟到底，本条整体结案**：
+   - `sub_1052F2E0` = **`DDES_GraphicsMngr` 的变更过滤器**，`sub_1052E9F0` 里三个 `MTR_Entry`
+     名字串与三次调用一一对应：`postGetWork`（`0x1052EA35`→`0x1052EAF5`）、
+     `postUndo`（`0x1052EB7B`→`0x1052EB9D`）、`preRedo`（`0x1052EBAC`→`0x1052EBCE`）。
+     它遍历变更元素集：**gb==2 整个跳过**、**gb==1 只留属主不是 gb 1/2 的那一个**，
+     再过 `WORL`/`MNUM` 与 `db_go_to_element`，剩下的插进有序结果集。
+   - `0x1052F486` 是 `std::_Tree` 迭代器 `++`，即「跳过这一条」，不是什么分支语义。
+   - **`gb == 3` 没有消费者**：`Core3D.dll` 里四处 `push` 只比 `1` 与 `2`，`core.dll` 零命中。
+   - **带出一条新缺口**：`DDES_GraphicsMngr` + `DES_DrawListRefresh` + `DES_DrawList` 的 TOPF 家族
+     是 3D 模型视图侧的变更→重画通道，而 **`GETWORK` 正是「别人 SAVEWORK 了、我把变更收进来」**，
+     比 DRAFT 局部更新更像我们在做的事。本文 §2 的 L4 行只点了四个名字，没把它当通道梳理过。
+     名单与还原见 `docs/evidence/2026-09-04-ida-core3d-partial-update-recheck.md` §3.1–3.3。
 5. `DB_UserChangesDependency` 在 **其它** DLL（非 Core3D）是否有注册者未查；对本仓无影响
    （我们不复刻 UDA 依赖），仅记录。
 

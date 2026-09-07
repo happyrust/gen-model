@@ -156,6 +156,26 @@ body{
 .panel-head .src{font-family:var(--mono);font-size:10.5px;color:var(--t3);white-space:nowrap}
 .panel-head .sub{font-size:11.5px;color:var(--t3);margin-top:6px;line-height:17px}
 
+/* ── per-dbnum entry ───────────────────────────────────── */
+.dbscope{overflow:visible}
+.dbscope-body{padding:0 18px 16px;display:flex;flex-direction:column;gap:14px}
+.dbentry{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.dbentry a{font-family:var(--mono);font-size:11.5px;line-height:27px;min-width:54px;padding:0 10px;
+  text-align:center;text-decoration:none;color:var(--t2);border:1px solid var(--edge);border-radius:5px}
+.dbentry a:hover{color:var(--t1);border-color:var(--hover-edge);background:var(--hover-bg)}
+.dbentry a.on{color:var(--blue);border-color:var(--blue);background:var(--tint-blue);font-weight:600}
+.dbentry a.bad{color:var(--red)} .dbentry a.warn{color:var(--amber)}
+.dbentry .empty{padding:4px 0;text-align:left}
+.dbsummary{display:grid;grid-template-columns:repeat(4,minmax(150px,1fr));border-top:1px solid var(--line);padding-top:14px;gap:14px 22px}
+.dbsummary>div{display:flex;flex-direction:column;gap:5px;min-width:0}
+.dbsummary .l{font-size:10.5px;letter-spacing:.6px;color:var(--t3)}
+.dbsummary .v{font-family:var(--mono);font-size:14px;color:var(--t1);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dbsummary .s{font-size:11.5px;line-height:17px;color:var(--t3);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.dbscope-all{text-decoration:none;color:var(--blue);font-size:11.5px;white-space:nowrap}
+.dbscope-all:hover{text-decoration:underline}
+.dbn-link{color:var(--blue);text-decoration:none}
+.dbn-link:hover{text-decoration:underline}
+
 /* ── grid tables ────────────────────────────────────────── */
 .tbl{display:grid;font-size:12.5px}
 .tbl>.r{display:grid;grid-template-columns:inherit;grid-column:1/-1;align-items:center;padding:0 18px;border-bottom:1px solid var(--line)}
@@ -200,9 +220,7 @@ body{
 .acts-row .hint{font-size:11.5px;color:var(--t3);line-height:17px}
 a.jump{text-decoration:none}
 .jump.mut{color:var(--t3)}
-/* 每库两枚凭证：dbnum · 项目 · 类型 · 文件最新 · 应用水位 · 生成源版本 · 标记。
-   两枚凭证各占一格、等宽并排，格内摞两行（上行「值 → 文件最新」，下行落后量与进度条）。
-   只画一根合并进度条会把两件事捏成一件——ADR-056 D2 之后它们本来就常常不同步。 */
+/* 每库两枚水位：数据提交与模型收敛分别显示；三态判决由服务端给出。 */
 .w-tbl{grid-template-columns:86px minmax(96px,124px) 84px 72px minmax(170px,1fr) minmax(210px,1.25fr) minmax(200px,320px)}
 .w-tbl>.r{height:52px}
 .w-tbl .stk{display:flex;flex-direction:column;justify-content:center;gap:3px;min-width:0;
@@ -325,6 +343,7 @@ a.jump{text-decoration:none}
   .kpi{flex-wrap:wrap;gap:16px 0}
   .kpi>div{flex:1 1 33%}
   .verdict-line,.lanes .verdict-line{font-size:21px;line-height:29px}
+  .dbsummary{grid-template-columns:repeat(2,minmax(140px,1fr))}
 }
 </style>
 </head>
@@ -342,17 +361,39 @@ a.jump{text-decoration:none}
     </div>
   </div>
 
-  <!-- 共享前置。读不到 /health、或 SurrealDB 断了，两面的数字就都只是最后一次读
-       成功时的样子——那时并排摆两条判决只会让人把旧读数当现状，所以这一档在场时
-       泳道整个让位。 -->
-  <div id="halt"></div>
+  <div class="panel dbscope" id="dbnum-entry">
+    <div class="panel-head">
+      <div>
+        <span class="t">每库入口</span><span class="n" id="dbentry-count">—</span>
+        <div class="sub" id="dbscope-label">选择一个 dbnum，独立追踪它的数据水位、模型水位、队列、任务与错误。</div>
+      </div>
+      <a class="dbscope-all" id="dbscope-all" href="ops.html">全部库</a>
+    </div>
+    <div class="dbscope-body">
+      <nav class="dbentry" id="dbentry-list" aria-label="dbnum 入口"><span class="empty">正在读取库清单…</span></nav>
+      <div class="dbsummary" id="dbsummary" hidden></div>
+    </div>
+  </div>
 
-  <!-- 数据面与模型面并排。ADR-056 D1 之后模型失败不再阻断水位，D2 又把「水位齐、
-       模型没追平」定成承认且可观测的常态；把两面压进一条判决梯，那个常态只能被讲
-       成「进行中」或者干脆被数据面盖掉。所以它们各说各的，谁也不压谁。
-       底层（SurrealDB / worker / 空间树 / 副作用队列）是两面共享的一条，在页脚
-       那道 sysbar 上。 -->
-  <div class="lanes" id="lanes"></div>
+  <div id="halt"></div>
+  <div class="lanes" id="lanes">
+  <div class="verdict" id="verdict">
+    <div class="verdict-body">
+      <div class="verdict-meta">
+        <span class="chip mut" id="v-chip">连接中</span>
+        <span class="src" id="v-path">GET /api/v1/health</span>
+        <span class="chip sm amber" id="v-warn" hidden></span>
+      </div>
+      <div class="verdict-line" id="v-line">正在读取数据水位与模型水位…</div>
+      <div class="verdict-detail" id="v-detail"></div>
+    </div>
+    <div class="verdict-timer" id="v-timer" hidden>
+      <span class="lbl" id="v-tlabel"></span>
+      <span class="val" id="v-tval"></span>
+      <span class="since" id="v-tsince"></span>
+    </div>
+  </div>
+  </div>
 
   <div class="ctl">
     <div class="acts" id="acts" hidden></div>
@@ -452,8 +493,8 @@ a.jump{text-decoration:none}
   <div class="panel">
     <div class="panel-head" style="align-items:flex-start">
       <div style="min-width:0">
-        <div style="display:flex;align-items:baseline"><span class="t">每库两枚凭证</span></div>
-        <div class="sub">数据那一枚是<b>应用水位</b>（applied_sesno），模型那一枚是<b>生成源版本</b>（安定生成根的凭证下限，ADR 里叫模型凭证）。两枚各自与文件最新会话比，谁落后是谁的事：模型失败不阻断水位，水位追平也不代表模型跟上了。</div>
+        <div style="display:flex;align-items:baseline"><span class="t">每库两枚水位</span></div>
+        <div class="sub">应用水位表示数据已保存，模型水位表示模型已按对应数据窗口发布。两者异步推进；相等且没有根在追赶时才显示“一致”。</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
         <span class="src">GET /api/v1/dbnums</span>
@@ -483,6 +524,8 @@ a.jump{text-decoration:none}
 
 const qs = new URLSearchParams(location.search);
 const BASE = (qs.get("api") || "/api/v1").replace(/\/+$/, "");
+const DBNUM_PARAM = String(qs.get("dbnum") || "").trim();
+const FOCUS_DBNUM = /^\d+$/.test(DBNUM_PARAM) ? Number(DBNUM_PARAM) : null;
 const FAST_MS = num(qs.get("interval"), 2000);
 const SLOW_EVERY = 3;            // /dbnums 每 3 个周期拉一次
 const REQ_TIMEOUT = 8000;
@@ -512,7 +555,7 @@ const S = {
   // 错误日志卡的筛选：空 = 全部。筛选在前端做，切一下不用等一轮网络——代价是它
   // 只筛得到取回来那一窗，`bfWindowNote()` 负责把这句话说出来。
   // bfSince 是秒；0 = 不限时间。
-  bfKind:"", bfDbnum:"", bfTask:"", bfSince:0,
+  bfKind:"", bfDbnum:FOCUS_DBNUM == null ? "" : String(FOCUS_DBNUM), bfTask:"", bfSince:0,
   // 项目筛在**服务端**做（`?project=all`），与上面几个前端筛不同族：logs/ 落在进程
   // 工作目录下、跨配置改动活着，同一个目录先后跑过两个项目时库号会撞（8191 在每个
   // 项目的 sys 库里都是 8191）。服务端缺省只回登录项目那份，这里只是那个开关。
@@ -535,6 +578,23 @@ const S = {
 function num(v, d){ const n = parseInt(v, 10); return Number.isFinite(n) && n > 0 ? n : d; }
 function esc(s){ return String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c])); }
 function $(id){ return document.getElementById(id); }
+function dbHref(dbnum){
+  const u = new URL(location.href);
+  if(dbnum == null) u.searchParams.delete("dbnum"); else u.searchParams.set("dbnum", String(dbnum));
+  return u.pathname + u.search + u.hash;
+}
+function taskDbnum(t){
+  const b = t && t.result && t.result.batch;
+  return t && t.dbnum != null ? Number(t.dbnum) : (b && b.dbnum != null ? Number(b.dbnum) : null);
+}
+function eventDbnum(msg){
+  const p = (msg && msg.payload) || {};
+  const b = p.result && p.result.batch;
+  if(p.dbnum != null) return Number(p.dbnum);
+  if(b && b.dbnum != null) return Number(b.dbnum);
+  const t = ((S.tasks && S.tasks.tasks) || []).find(x => x.task_id === msg.task_id);
+  return t ? taskDbnum(t) : null;
+}
 
 // RFC3339 的小数秒可能有 9 位，超出 JS 解析约定，截到 3 位再交给 Date。
 function ts(s){
@@ -796,7 +856,7 @@ async function cycle(){
   // 但它必须被读——/tasks 那份权威回执活在进程内存里，重启即清空，而人打开这一页
   // 时往往已经重启过了。项目筛在服务端（缺省只回登录项目），开关在错误日志卡上。
   if(wantSlow) jobs.push(get("/dbnums"),
-    get(`/error-log?limit=${BF_LIMIT}${S.bfAllProjects ? "&project=all" : ""}`));
+    get(`/error-log?limit=${BF_LIMIT}${S.bfAllProjects ? "&project=all" : ""}${FOCUS_DBNUM == null ? "" : `&dbnum=${FOCUS_DBNUM}`}`));
   const [h, q, t, d, bf] = await Promise.allSettled(jobs);
 
   if(h.status === "fulfilled"){
@@ -926,18 +986,19 @@ function renderEvents(){
   const chip = $("e-state");
   chip.className = "chip sm " + cls;
   chip.textContent = label + (S.ws.state === "open" && S.ws.since ? ` · ${dur(Date.now() - S.ws.since)}` : "");
-  $("e-count").textContent = S.ws.events.length ? `${S.ws.events.length} 条` : "—";
+  const events = FOCUS_DBNUM == null ? S.ws.events : S.ws.events.filter(msg => eventDbnum(msg) === FOCUS_DBNUM);
+  $("e-count").textContent = events.length ? `${events.length} 条` : "—";
 
-  if(!S.ws.events.length){
+  if(!events.length){
     $("e-body").innerHTML = `<div class="empty">${S.ws.state === "open"
-      ? "已连上，还没有事件 —— 引擎这会儿没在跑批次。"
+      ? (FOCUS_DBNUM == null ? "已连上，还没有事件 —— 引擎这会儿没在跑批次。" : `已连上，dbnum ${FOCUS_DBNUM} 还没有事件。`)
       : "还没连上事件流。轮询不受影响；代理不转 WebSocket 升级时这一块会一直空着。" +
         (S.ws.err ? `<br><span class="mono">${esc(S.ws.err)}</span>` : "")}</div>`;
     return;
   }
   $("e-body").innerHTML =
     (S.ws.dropped ? `<div class="ev-gap">服务端跳过了 ${S.ws.dropped} 帧（慢消费者滞后）—— 事件流有缺口，以轮询读数为准。</div>` : "")
-    + S.ws.events.map(msg => {
+    + events.map(msg => {
       const [c, short] = EV_TYPE[msg.type] || ["mut", msg.type];
       const { text, bad } = evText(msg);
       return `<div class="ev${bad ? " bad" : ""}">
@@ -952,9 +1013,12 @@ function renderEvents(){
 function model(){
   const h = S.health || null;
   const init = (h && h.initialization) || {};
-  const rows = (S.queue && S.queue.rows) || [];
-  const tasks = (S.tasks && S.tasks.tasks) || [];
-  const dbs = (S.dbnums && S.dbnums.dbnums) || [];
+  const allRows = (S.queue && S.queue.rows) || [];
+  const allTasks = (S.tasks && S.tasks.tasks) || [];
+  const allDbs = (S.dbnums && S.dbnums.dbnums) || [];
+  const rows = FOCUS_DBNUM == null ? allRows : allRows.filter(r => Number(r.dbnum) === FOCUS_DBNUM);
+  const tasks = FOCUS_DBNUM == null ? allTasks : allTasks.filter(t => taskDbnum(t) === FOCUS_DBNUM);
+  const dbs = FOCUS_DBNUM == null ? allDbs : allDbs.filter(r => Number(r.dbnum) === FOCUS_DBNUM);
   const byTask = new Map(tasks.map(t => [t.task_id, t]));
 
   // dbnum 不是主键：SYS 库在每个项目里都是 8191，撞号是常态而不是异常。同号时
@@ -1009,6 +1073,7 @@ function model(){
 
   const failures = Object.entries((h && h.batch_failures) || {})
     .map(([db, v]) => ({ dbnum:Number(db), ...v }))
+    .filter(f => FOCUS_DBNUM == null || f.dbnum === FOCUS_DBNUM)
     .sort((a, b) => (b.parked - a.parked) || (b.streak - a.streak));
   const parked = failures.filter(f => f.parked);
 
@@ -1023,7 +1088,8 @@ function model(){
   const blockedRows = rows.filter(r => r.blocked_by_phase);
   // 结构化 blocker（ISSUE-025 §三）：相 + 肇事 dbnum + 项目 + 去哪儿取全文原因。
   // 老 exe 只给渲染好的字符串数组，那时这里为空，判决行照旧退回 blockers[0]。
-  const blockedBy = init.blocked_by || (S.queue && S.queue.blockers) || [];
+  const blockedBy = (init.blocked_by || (S.queue && S.queue.blockers) || [])
+    .filter(b => FOCUS_DBNUM == null || b.dbnum == null || Number(b.dbnum) === FOCUS_DBNUM);
 
   const mup = (h && h.model_update_pending) || {};
   // health 给每个分项 2 秒预算，超了就回一份零 + error。那时 0 是「没读到」，不是
@@ -1043,45 +1109,32 @@ function model(){
   // 不报这一栏）与空数组（没有阻断）处置完全不同，兜一下两者就长成同一个空白。
   const wbKey = !h ? null
     : ("window_blocks" in h ? "window_blocks" : ("staging_window_blocks" in h ? "staging_window_blocks" : null));
-  const windowBlocks = wbKey ? h[wbKey] : undefined;
+  const allWindowBlocks = wbKey ? h[wbKey] : undefined;
+  const windowBlocks = Array.isArray(allWindowBlocks) && FOCUS_DBNUM != null
+    ? allWindowBlocks.filter(b => Number(b.dbnum) === FOCUS_DBNUM) : allWindowBlocks;
   // 阻断记录读库，读不出来会走 health 的降级形状（空数组 + 记进 degraded_sections）。
   // 那时的「0 条」是没读到，不是没有。
   const windowBlocksBlind = ((h && h.degraded_sections) || [])
     .some(s => s === "window_blocks" || s === "staging_window_blocks");
   const wbByDb = new Map((Array.isArray(windowBlocks) ? windowBlocks : []).map(b => [b.dbnum, b]));
+  const allStaging = h && Array.isArray(h.staging_windows) ? h.staging_windows : (h ? h.staging_windows : null);
+  const staging = Array.isArray(allStaging) && FOCUS_DBNUM != null
+    ? allStaging.filter(w => Number(w.dbnum) === FOCUS_DBNUM) : allStaging;
 
-  // 模型那一枚凭证：/dbnums 每行的 model_settled_floor / model_settled_roots /
-  // model_unsettled_roots（ADR-058 D5 口径，与启动一级过滤同一条聚合）。三列同进同出，
-  // 取数失败整行缺席并在 warnings 里留一句——所以「缺席」有两种来历：老后端不报这几列
-  // （永远缺席），或这一轮 gen_root 聚合失败（warnings 有话）。null 在 floor 这一列有确切
-  // 含义（一条安定行都没有），不拿它兼表「读不到」。
-  const credOf = r => (r && ("model_settled_floor" in r || "model_unsettled_roots" in r))
-    ? { floor:r.model_settled_floor == null ? null : Number(r.model_settled_floor),
-        settled:Number(r.model_settled_roots || 0), unsettled:Number(r.model_unsettled_roots || 0) }
-    : null;
-  const credWarn = ((S.dbnums && S.dbnums.warnings) || []).find(w => /模型凭证|gen_root/.test(String(w))) || "";
-  // 三态：null = 还没拉到 /dbnums；"absent" = 这版后端不报这几列；"failed" = 本轮聚合失败；
-  // "" = 在。范围内一行都没有时按「在」处理——没有库不等于不报。
-  const credBlind = !S.dbnums ? null
-    : ((dbs.some(r => credOf(r)) || !dbs.length) ? "" : (credWarn ? "failed" : "absent"));
-  // 无凭证记录的库：一条安定行都没有、也没有未安定行。等按需 ensure，**不统计根数**
-  // （ADR-058 D6 / 实施约束 7）——它不是落后，是还没人读过。
-  const noCred = r => { const c = credOf(r); return !!c && c.floor == null && c.unsettled === 0 && c.settled === 0; };
-  // 模型落后：有未安定根，或安定下限落在文件最新之前。凭证 ≥ 文件最新即追平——ADR-054 是
-  // 单调判据，不判等值（凭证前移可以把它推到比文件还新的时刻）。
-  const modelBehind = r => { const c = credOf(r); return (c && c.floor != null) ? Math.max(0, Number(r.file_latest_sesno) - c.floor) : 0; };
-  const modelLagging = inScope.filter(r => {
-    const c = credOf(r);
-    return !!c && !noCred(r) && (c.unsettled > 0 || (c.floor != null && c.floor < Number(r.file_latest_sesno)));
-  }).sort((a, b) => (modelBehind(b) - modelBehind(a)) || (credOf(b).unsettled - credOf(a).unsettled) || (a.dbnum - b.dbnum));
-  const coldDbs = inScope.filter(noCred);
+  // 模型状态只消费服务端的三态判决，客户端不再用根凭证下限重拼。
+  const modelLagging = inScope.filter(r => r.model_verdict === "lagging")
+    .sort((a, b) => Number(b.model_chasing_roots || 0) - Number(a.model_chasing_roots || 0) || a.dbnum - b.dbnum);
+  const modelNotJudged = inScope.filter(r => r.model_verdict === "not_judged");
+  const modelBlind = !S.dbnums ? null : (dbs.some(r => "model_verdict" in r) || !dbs.length ? "" : "absent");
 
   PHASES = phaseKeys(init);
-  return { h, init, rows, tasks, dbs, byTask, byDb, dbsByNum, failedByDb,
+  return { h, init, rows, tasks, dbs, allRows, allTasks, allDbs, byTask, byDb, dbsByNum, failedByDb,
            failures, parked, inScope, lagging,
            running, queued, held, blockedPhase, blockedRows, blockedBy, mup, mupBlind,
            wbKey, windowBlocks, windowBlocksBlind, wbByDb,
-           credOf, credWarn, credBlind, noCred, modelBehind, modelLagging, coldDbs, phaseKeys:PHASES };
+           staging, stagingBlocks:windowBlocks, stagingBlocksBlind:windowBlocksBlind,
+           stagingCommit:h && h.staging_commit,
+           modelLagging, modelNotJudged, modelBlind, phaseKeys:PHASES };
 }
 
 /// 挡住 `phase` 那一相的肇事库。
@@ -1205,31 +1258,34 @@ function dataLane(m){
       detail:"标志持久化在 queue_control:main，活过重启。恢复：POST /api/v1/queue/resume。",
       timer:null };
   }
-  // 两个 stalled 不是一回事：spatial 无视 attempts 上限、会一直重放，等得起；
-  // 副作用队列到顶就成死信，被 drain 挡在候选集外，不人工复活永远回不来。
+  // 两个 stalled 不是一回事：spatial 不重试，一次失败即死信（status=dead），原因落
+  // logs/batch-failures-*.jsonl（event=side_effect_dead_letter，「错误日志」卡能看到），
+  // 修好原因后 UPDATE 该行 status='pending' 才会重放；副作用队列到顶就成死信，被 drain
+  // 挡在候选集外，不人工复活永远回不来。
   // 读库失败那一支也把 stalled 立成真、dead_letters 留 0 —— 那时「有没有死信」是未知，
   // 不能当成「没有」。
   const sep = m.h.side_effect_pending || {};
   const sepDead = Number(sep.dead_letters || 0);
   const spatial = m.h.spatial_reconcile || {};
+  const spatialDead = Number(spatial.dead_letters || 0);
   if(sepDead > 0 || sep.stalled || spatial.stalled){
     const kinds = Object.entries(sep.by_kind || {})
       .filter(([, v]) => Number(v && v.dead_letters) > 0)
       .map(([k, v]) => `${k} ${v.dead_letters} 条`);
     // spatial 只在副作用队列当主角时才作为附注出现，不然就是它自己那一句。
     const aside = spatial.stalled && (sepDead > 0 || sep.stalled)
-      ? `空间对账另有行重试超过 ${MAX_ATTEMPTS} 次；它无视上限、会一直重放，不在复活按钮的范围里。` : "";
+      ? `空间对账另有 ${spatialDead} 条死信（不重试）；原因在「错误日志」卡（side_effect_dead_letter），不在复活按钮的范围里。` : "";
     const why = e => e ? `最近一条：${e}。` : "";
     const line = sepDead > 0
       ? `副作用队列有 ${sepDead} 条死信（attempts ≥ ${MAX_ATTEMPTS}）—— 数据批次照跑，派生结果不再更新`
       : sep.stalled
         ? "副作用队列这一段读不出来 —— 有没有死信现在是未知的"
-        : `空间对账有行重试超过 ${MAX_ATTEMPTS} 次 —— 房间指针还没收口`;
+        : `空间对账有 ${spatialDead} 条死信（不重试）—— 该文件轮次的空间/房间发布停在上一次成功版本`;
     const detail = sepDead > 0
       ? `${kinds.length ? kinds.join(" · ") + "。" : ""}到顶死信被 drain 挡在候选集外，周期重试不会把它们捡回来；复活 = attempts 归零回 pending。${why(sep.last_error)}${aside}`
       : sep.stalled
         ? `${why(sep.last_error) || "health 里只给了 stalled 标志，没给原因；去控制台翻日志。"}死信数这一轮读不到，不代表是零 —— 按钮先不亮，等下一轮读回来。${aside}`
-        : `${why(spatial.last_error)}空间对账无视 attempts 上限、会一直重放，复活按钮不管它；真卡住要去控制台翻日志。`;
+        : `${why(spatial.last_error)}空间对账不自动重试：全文原因在「错误日志」卡（event=side_effect_dead_letter）；修好之后 UPDATE incr_side_effect_pending 该行 status='pending' 即重放。复活按钮不管它。`;
     return { lv:"warn", chip:["amber","停摆"], path, line, detail:esc(detail), timer:null };
   }
   const dl = Number(m.mup.dead_letters || 0);
@@ -1278,10 +1334,22 @@ function dataLane(m){
         + `到顶的死信会一直把这道门焊着：它们被 attempts 上限挡在自动 drain 外，只能人工复活。${mupPhrase(m)}`,
       timer:null };
   }
+  if(m.modelLagging.length){
+    const w = m.modelLagging[0];
+    return { lv:"run", chip:["blue","模型在追"], path,
+      line:`数据已齐，模型仍在追 ${m.modelLagging.length} 个库`,
+      detail:`${w.dbnum}：数据水位 ${w.applied_sesno}，模型水位 ${w.model_sesno || 0}，还有 ${w.model_chasing_roots || 0} 个根在赶。数据增量不会等待模型。`,
+      timer:null };
+  }
   return { lv:"ok", chip:["green","已追平"], path,
-    line:`范围内 ${m.inScope.length} 个库全部追平 —— applied_sesno == file_latest_sesno`,
-    detail:`${mupPhrase(m)}水位是唯一不会骗人的指标：重启会把 batch_failures 和 blockers 清空，但确定性失败会再来一遍。`,
+    line:`范围内 ${m.inScope.length} 个库的数据已齐，已判定的模型均一致`,
+    detail:`${mupPhrase(m)}一致判据为 model_sesno == applied_sesno 且没有根仍在追赶；不判的库单独显示。`,
     timer:null };
+}
+
+// 顶部总判决先尊重共享的断连/存储故障，再展示数据与模型的联合进度。
+function verdict(m){
+  return halt(m) || dataLane(m);
 }
 
 /* ── render ─────────────────────────────────────────────── */
@@ -1289,7 +1357,8 @@ function render(){
   const m = model(), now = Date.now();
   const stale = S.lastOk && now - S.lastOk > FAST_MS * 3;
 
-  $("endpoint").textContent = [location.host, `epoch ${m.init.epoch_id ?? "—"}`, BASE].filter(Boolean).join(" · ");
+  $("endpoint").textContent = [location.host, FOCUS_DBNUM == null ? "全部库" : `dbnum ${FOCUS_DBNUM}`, `epoch ${m.init.epoch_id ?? "—"}`, BASE].filter(Boolean).join(" · ");
+  renderDbnumEntry(m);
   $("pulse").className = "pulse" + (S.errSince || stale ? " bad" : "");
   $("updated").textContent = S.errSince
     ? `断连 ${dur(now - S.errSince)}${S.lastOk ? " · 下方为最后一次成功读数" : ""}`
@@ -1334,6 +1403,47 @@ function render(){
   renderActions(m);
 }
 
+function renderDbnumEntry(m){
+  const unique = new Map();
+  for(const r of m.allDbs){
+    const held = unique.get(Number(r.dbnum));
+    if(!held || (m.h && m.h.project && projOf(r) === m.h.project)) unique.set(Number(r.dbnum), r);
+  }
+  const rows = [...unique.values()].sort((a, b) => Number(a.dbnum) - Number(b.dbnum));
+  $("dbentry-count").textContent = S.dbnums ? `${rows.length} 个` : "—";
+  $("dbscope-all").href = dbHref(null);
+  $("dbscope-all").hidden = FOCUS_DBNUM == null;
+  $("dbscope-label").textContent = FOCUS_DBNUM == null
+    ? "选择一个 dbnum，独立追踪它的数据水位、模型水位、队列、任务与错误。"
+    : `当前只显示 dbnum ${FOCUS_DBNUM} 的增量更新与同步链路；此 URL 可直接收藏。`;
+  $("dbentry-list").innerHTML = rows.length ? rows.map(r => {
+    const on = Number(r.dbnum) === FOCUS_DBNUM;
+    const cls = r.blocked || Number(r.model_dead_roots || 0) > 0 ? "bad"
+      : (r.anomaly || r.file_latest_sesno > r.applied_sesno || r.model_verdict === "lagging") ? "warn" : "";
+    const title = `${projOf(r)} · ${r.db_type || "?"} · 数据 ${r.applied_sesno}/${r.file_latest_sesno} · 模型 ${r.model_sesno ?? "—"}`;
+    return `<a class="${on ? "on" : cls}" href="${esc(dbHref(r.dbnum))}" title="${esc(title)}" aria-current="${on ? "page" : "false"}">${esc(r.dbnum)}</a>`;
+  }).join("") : `<span class="empty">${S.dbnums ? "没有登记的 dbnum。" : "正在读取库清单…"}</span>`;
+
+  const summary = $("dbsummary");
+  summary.hidden = FOCUS_DBNUM == null;
+  if(FOCUS_DBNUM == null){ summary.innerHTML = ""; document.title = "AIOS 数据库 · 增量运行监控"; return; }
+  document.title = `dbnum ${FOCUS_DBNUM} · AIOS 增量运行监控`;
+  const r = m.byDb.get(FOCUS_DBNUM);
+  if(!r){
+    summary.innerHTML = `<div style="grid-column:1/-1"><span class="v red">找不到 dbnum ${esc(FOCUS_DBNUM)}</span><span class="s">入口仍保留，便于确认配置或等待服务登记该库。</span></div>`;
+    return;
+  }
+  const modelText = r.model_verdict === "in_sync" ? `${r.model_sesno} · 一致`
+    : r.model_verdict === "lagging" ? `${r.model_sesno || 0} · 追赶中` : "不判";
+  const recent = m.tasks.slice().sort((a,b) => ts(b.started_at || b.created_at) - ts(a.started_at || a.created_at))[0];
+  const logs = ((S.batchFailures && S.batchFailures.records) || []).filter(x => Number(x.dbnum) === FOCUS_DBNUM);
+  summary.innerHTML = `
+    <div><span class="l">数据水位</span><span class="v">${esc(r.applied_sesno)} / ${esc(r.file_latest_sesno)}</span><span class="s">已保存 / 文件最新</span></div>
+    <div><span class="l">模型水位</span><span class="v">${esc(modelText)}</span><span class="s">追赶 ${esc(r.model_chasing_roots || 0)} · 放弃 ${esc(r.model_dead_roots || 0)} · 懒生成 ${esc(r.model_lazy_roots || 0)}</span></div>
+    <div><span class="l">当前队列</span><span class="v">${m.rows.length ? esc(m.rows.map(x => x.state).join(" · ")) : "空"}</span><span class="s">${m.rows.length ? esc(m.rows.map(x => `${x.start_sesno}–${x.end_sesno}`).join("；")) : "没有待应用的数据批次"}</span></div>
+    <div><span class="l">最近任务 / 落盘错误</span><span class="v">${recent ? esc(recent.state) : "无任务"} · ${logs.length} 条</span><span class="s" title="${esc(recent && recent.task_id || "")}">${recent ? esc(recent.task_id) : "当前进程没有该库任务"}</span></div>`;
+}
+
 // 一行「底层还活着吗」：这些字段平时全是灰的，出事时才有颜色。
 function renderSysbar(m){
   if(!m.h){ $("sysbar").innerHTML = ""; return; }
@@ -1370,6 +1480,13 @@ function kpiCell(label, value, cls, sub){
 function renderKpi(m){
   const lag = m.lagging[0];
   const worst = m.parked[0] || m.failures[0];
+  const focused = FOCUS_DBNUM == null ? null : m.byDb.get(FOCUS_DBNUM);
+  const pendingValue = focused
+    ? `${n(focused.model_chasing_roots)} / ${n(focused.model_dead_roots)}`
+    : (m.mupBlind ? "? / ?" : `${n(m.mup.retryable)} / ${n(m.mup.dead_letters)}`);
+  const pendingClass = focused
+    ? (Number(focused.model_dead_roots || 0) ? "red" : (Number(focused.model_chasing_roots || 0) ? "amber" : "mut"))
+    : (m.mupBlind ? "amber" : (Number(m.mup.dead_letters || 0) ? "red" : (Number(m.mup.retryable || 0) ? "amber" : "mut")));
   $("kpi").innerHTML =
     kpiCell("队列积压", m.rows.length || 0,
       m.rows.length ? (m.blockedRows.length ? "red" : "amber") : "mut",
@@ -1382,9 +1499,8 @@ function renderKpi(m){
     kpiCell("水位落后", m.lagging.length || 0,
       m.lagging.length ? "amber" : "green",
       lag ? `${lag.dbnum} ${lag.applied_sesno} → ${lag.file_latest_sesno}` : `${m.inScope.length} 个库在范围内`) +
-    kpiCell("待重试 / 死信", m.mupBlind ? "? / ?" : `${n(m.mup.retryable)} / ${n(m.mup.dead_letters)}`,
-      m.mupBlind ? "amber" : (Number(m.mup.dead_letters || 0) ? "red" : (Number(m.mup.retryable || 0) ? "amber" : "mut")),
-      m.mupBlind ? "这一段读不出来，不是 0" : "model_update_pending");
+    kpiCell(focused ? "追赶根 / 放弃根" : "待重试 / 死信", pendingValue, pendingClass,
+      focused ? `dbnum ${FOCUS_DBNUM} 模型根` : (m.mupBlind ? "这一段读不出来，不是 0" : "model_update_pending"));
 }
 
 const Q_STATE = {
@@ -1431,7 +1547,9 @@ function renderQueue(m, now){
       <span class="mono mut" style="font-size:11.5px">${esc(clock(enq))}</span>
       <span class="mono ${cls}" style="font-size:12.5px">${esc(waited)}</span>
       <span class="state"><i class="dot" style="background:var(--${cls})"></i><span class="mono ${cls}" style="font-size:12px">${esc(r.state)}</span><span class="note">${esc(meta.note(r, m))}</span>${
-        culprit ? `<button class="jump" data-db="${esc(culprit.dbnum)}" title="${esc(culprit.message)}">→ ${esc(culprit.dbnum)} 的错误记录</button>` : ""}</span>
+        culprit ? (FOCUS_DBNUM != null && Number(culprit.dbnum) !== FOCUS_DBNUM
+          ? `<a class="jump" href="${esc(dbHref(culprit.dbnum))}" title="${esc(culprit.message)}">→ 进入 ${esc(culprit.dbnum)}</a>`
+          : `<button class="jump" data-db="${esc(culprit.dbnum)}" title="${esc(culprit.message)}">→ ${esc(culprit.dbnum)} 的错误记录</button>`) : ""}</span>
     </div>`;
   }).join("");
   $("q-body").innerHTML = `<div class="tbl q-tbl">${head}${body}</div>`;
@@ -1652,7 +1770,7 @@ function renderBatchFailures(){
   const src = S.batchFailures;
   const all = (src && src.records) || [];
   const kind = S.bfKind || "";
-  const wanted = String(S.bfDbnum || "").trim();
+  const wanted = FOCUS_DBNUM == null ? String(S.bfDbnum || "").trim() : String(FOCUS_DBNUM);
   const task = String(S.bfTask || "").trim().toLowerCase();
   // 时间下界按此刻算。这一格的意义是「只看最近这一阵」，不是一个冻住的区间。
   const floor = Number(S.bfSince) > 0 ? Date.now() - Number(S.bfSince) * 1000 : 0;
@@ -2108,7 +2226,7 @@ function renderTasks(m, now){
 }
 
 function renderWatermark(m){
-  const showAll = $("wm-all").checked;
+  const showAll = FOCUS_DBNUM != null || $("wm-all").checked;
   const out = m.dbs.filter(r => r.excluded || r.not_in_project);
   $("wm-all-label").textContent = `显示范围外的库（${out.length}）`;
   const running = new Set(m.running.map(r => r.dbnum));
@@ -2131,7 +2249,7 @@ function renderWatermark(m){
     $("w-body").innerHTML = `<div class="empty">${S.dbnums ? "范围内没有库 —— 当前 MDB 没有声明任何 DESI。" : "读不到 /dbnums"}</div>`;
     return;
   }
-  const head = `<div class="r h"><span>dbnum</span><span>项目</span><span>阶段</span><span>applied / latest</span><span>进度</span><span>落后</span><span>标记</span></div>`;
+  const head = `<div class="r h"><span>dbnum</span><span>项目</span><span>阶段</span><span>数据水位</span><span>模型水位</span><span>数据进度</span><span>标记</span></div>`;
   const body = list.map(r => {
     const lag = r.file_latest_sesno - r.applied_sesno;
     const isRun = running.has(r.dbnum);
@@ -2150,6 +2268,15 @@ function renderWatermark(m){
     if(r.excluded) chips.push(`<span class="chip sm mut">已排除</span>`);
     if(r.not_in_project) chips.push(`<span class="chip sm mut">不在项目</span>`);
     if(!r.initialized && !r.not_in_project) chips.push(`<span class="chip sm amber">未初始化</span>`);
+    if(Number(r.model_dead_roots || 0) > 0) chips.push(`<span class="chip sm red">放弃 ${esc(r.model_dead_roots)}</span>`);
+
+    const modelCell = r.model_verdict === "in_sync"
+      ? `<span class="mono">${esc(r.model_sesno)}</span> <span class="chip sm green" title="${esc(r.model_caught_up_at ? `模型追平 ${stamp(r.model_caught_up_at)}` : "模型已一致，追平时刻未记录")}">一致</span>`
+      : r.model_verdict === "lagging"
+        ? `<span class="mono">${esc(r.model_sesno || 0)}</span> <span class="chip sm blue">在追 ${esc(r.model_chasing_roots || 0)}</span>`
+        : r.model_verdict === "not_judged"
+          ? `<span class="chip sm mut" title="${esc(r.model_verdict_reason || "")}">不判</span>`
+          : `<span class="mut">未知</span>`;
 
     const pk = parked.get(r.dbnum);
     const note = pk ? `park · ${pk.reason || "连败到上限"}`
@@ -2163,12 +2290,12 @@ function renderWatermark(m){
       : lag > 0 ? `落后 ${lag} 个会话` : "已追平";
 
     return `<div class="r">
-      <span class="dbn">${esc(r.dbnum)}</span>
+      <span class="dbn"><a class="dbn-link" href="${esc(dbHref(r.dbnum))}" title="只看 dbnum ${esc(r.dbnum)}">${esc(r.dbnum)}</a></span>
       <span class="sec" title="${esc(r.file_path || "")}">${esc(projOf(r))}</span>
       <span class="mono mut" style="font-size:11.5px">${esc(phaseOf(r.db_type))}</span>
       <span class="mono sec" style="font-size:12.5px">${esc(r.applied_sesno)} / ${esc(r.file_latest_sesno)}</span>
-      <span><span class="track"><i class="${cls}" style="width:${(meaningful ? pct(r.applied_sesno, r.file_latest_sesno) : 0).toFixed(1)}%"></i></span></span>
-      <span class="mono ${lag > 0 ? cls : "mut"}" style="font-size:12.5px">${lag > 0 ? esc(lag) : "—"}</span>
+      <span>${modelCell}</span>
+      <span>${S.dataFace === "read-through" ? `<span class="mut">不判</span>` : `<span class="track"><i class="${cls}" style="width:${(meaningful ? pct(r.applied_sesno, r.file_latest_sesno) : 0).toFixed(1)}%"></i></span>`}</span>
       <span class="marks">${chips.join("")}<span class="note" title="${esc(note)}">${esc(note)}</span></span>
     </div>`;
   }).join("");
@@ -2266,6 +2393,10 @@ $("f-body").addEventListener("click", e => {
   $("acts").scrollIntoView({ behavior:"smooth", block:"center" });
 });
 $("poll-label").textContent = `轮询 ${FAST_MS / 1000}s · 水位 ${FAST_MS * SLOW_EVERY / 1000}s`;
+$("bf-dbnum").value = S.bfDbnum;
+$("bf-dbnum").disabled = FOCUS_DBNUM != null;
+$("bf-dbnum").title = FOCUS_DBNUM == null ? "" : `页面已锁定 dbnum ${FOCUS_DBNUM}`;
+$("wm-all").disabled = FOCUS_DBNUM != null;
 $("foot-note").textContent = (WRITE ? `${Object.keys(ACTIONS).length} 个写操作带二次确认 · 给客户看请加 ?readonly=1` : "只读视图 · 写操作已关闭")
   + " · 深色主题加 ?theme=dark · /assets/ops.html · 同源轮询，不改 Rust、不重启服务";
 loop();

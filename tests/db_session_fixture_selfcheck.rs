@@ -76,8 +76,7 @@ fn generic_cutter_replays_issue019_snapshots_byte_for_byte() {
         let found = snapshot_presence(&out, &refnos).expect("open cut snapshot");
         // 验证闸（方案 §1 第 4 条）：切出的文件自称的 sesno 必须是它自己。
         assert_eq!(
-            found.sesno,
-            spec.sesno,
+            found.sesno, spec.sesno,
             "sesno {} 的切割快照打开后必须坐在自己的会话上",
             spec.sesno
         );

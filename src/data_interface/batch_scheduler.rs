@@ -81,6 +81,9 @@ struct RowMeta {
     project: String,
     path: PathBuf,
     file_name: String,
+    /// The first execution of a file round captures this token. Window-budget
+    /// remainders carry it forward so a later SAVEWORK cannot widen the round.
+    frozen_source_token: Option<String>,
 }
 
 /// 冻结出队后交给 worker 的一份快照。
@@ -99,6 +102,9 @@ pub struct FrozenBatch {
     pub end_sesno: i32,
     /// 入队时冻结的 `merged_sesnos` 基线（见 [`batch_queue::DataBatch::previous_observed_sesno`]）。
     pub previous_observed_sesno: i32,
+    /// Stable file generation + frozen round target. `None` only before the
+    /// first slice of a newly discovered file round reaches the freeze point.
+    pub frozen_source_token: Option<String>,
 }
 
 /// 入队回执的一行（HTTP 202 与日志共用；rollout 第九节第 7 条）。
@@ -430,6 +436,7 @@ impl BatchScheduler {
                                     project: found.project.clone(),
                                     path: found.path.clone(),
                                     file_name: found.file_name.clone(),
+                                    frozen_source_token: None,
                                 },
                             );
                             task_id
@@ -513,8 +520,9 @@ impl BatchScheduler {
             in_flight_empty,
             &is_exclusive,
             |batch| {
-                batch.epoch_id == 0
-                    || InitializationCoordinator::global().allows(batch.phase, batch.epoch_id)
+                !crate::data_interface::model_publish_queue::blocks_data_batch(batch)
+                    && (batch.epoch_id == 0
+                        || InitializationCoordinator::global().allows(batch.phase, batch.epoch_id))
             },
         ) {
             batch_queue::NextDispatch::Freeze(index) => index,
@@ -549,6 +557,7 @@ impl BatchScheduler {
                 start_sesno: row.start_sesno,
                 end_sesno: row.end_sesno,
                 previous_observed_sesno: row.previous_observed_sesno,
+                frozen_source_token: meta.frozen_source_token,
             },
             exclusive,
         };
@@ -561,6 +570,53 @@ impl BatchScheduler {
         drop(state);
         InitializationCoordinator::global().reconcile_pending(epoch_id, pending);
         outcome
+    }
+
+    /// A delayed discovery may arrive after its window committed and survive a
+    /// manifest change. Retire it only with a matching durable applied watermark;
+    /// epoch mismatch alone is never evidence that its work is complete.
+    pub(crate) fn retire_covered_window(
+        &self,
+        registry: &TaskRegistry,
+        task_id: &str,
+        applied: &crate::data_interface::dbnum_state::DbnumState,
+    ) -> bool {
+        let mut state = self.queue();
+        let Some(meta) = state.meta.get(&(applied.dbnum, false)) else {
+            return false;
+        };
+        if meta.task_id != task_id
+            || !applied.initialized
+            || applied.owner_project.is_empty()
+            || !meta.project.eq_ignore_ascii_case(&applied.owner_project)
+            || meta.path != std::path::PathBuf::from(&applied.file_path)
+            || state
+                .queue
+                .iter()
+                .any(|b| b.dbnum == applied.dbnum && b.state == BatchState::Running)
+        {
+            return false;
+        }
+        let Some(index) = state.queue.iter().position(|b| {
+            b.dbnum == applied.dbnum
+                && b.state == BatchState::Queued
+                && b.intent == BatchIntent::ApplyWindow
+                && b.db_type.eq_ignore_ascii_case(&applied.db_type)
+                && b.end_sesno <= applied.applied_sesno
+        }) else {
+            return false;
+        };
+        state.queue.remove(index);
+        state.meta.remove(&(applied.dbnum, false));
+        drop(state);
+        registry.finish(
+            task_id,
+            TaskState::Succeeded,
+            serde_json::json!({
+                "status": "already_applied", "applied_sesno": applied.applied_sesno,
+            }),
+        );
+        true
     }
 
     /// 批次执行完毕：把运行中的那行从队列里摘掉（终态只留在注册表历史里）。
@@ -657,6 +713,14 @@ impl BatchScheduler {
         }
     }
 
+    /// Attach the stable source token captured by the first slice of a file
+    /// round. Remainder rows reuse it instead of observing a later SAVEWORK.
+    pub(crate) fn record_frozen_source(&self, dbnum: u32, running: bool, token: String) {
+        if let Some(meta) = self.queue().meta.get_mut(&(dbnum, running)) {
+            meta.frozen_source_token = Some(token);
+        }
+    }
+
     /// 唤醒 worker 消化一轮（不入队任何东西）。
     ///
     /// 给绕过队列、直接改 `model_update_pending` 表的入口用（如死信人工复活）：
@@ -723,6 +787,18 @@ impl BatchScheduler {
     /// 本进程是否已被真实触发上过弦（见 [`Self::auto_work_armed`] 字段说明）。
     pub fn is_auto_work_armed(&self) -> bool {
         self.auto_work_armed.load(Ordering::SeqCst)
+    }
+
+    /// 是否有属性/结构数据批次正在执行。
+    ///
+    /// 初始化期间模型生成会继续把冻结结果交给本地日志；模型发布消费者只用这个
+    /// 瞬时信号让出数据库写带宽。队列仍由原有状态机负责，调用方不得据此认领、
+    /// 完成或修改批次。
+    pub(crate) fn has_running_data_batch(&self) -> bool {
+        self.queue()
+            .queue
+            .iter()
+            .any(|batch| batch.state == BatchState::Running)
     }
 
     /// 上弦并唤醒 worker：有人真的动了数据，空闲轮那侧的积压可以开始收了。
@@ -840,6 +916,24 @@ mod tests {
         assert_eq!((rows[1].start_sesno, rows[1].end_sesno), (0, 0));
     }
 
+    #[test]
+    fn running_data_batch_is_visible_to_database_bandwidth_peers() {
+        let (scheduler, registry) = fresh();
+        assert!(!scheduler.has_running_data_batch());
+
+        scheduler.enqueue_live(&registry, &found(7997, 0, 10));
+        assert!(
+            !scheduler.has_running_data_batch(),
+            "排队中的批次尚未占用数据库写带宽"
+        );
+
+        scheduler.freeze_next(&registry).expect("running row");
+        assert!(scheduler.has_running_data_batch());
+
+        scheduler.finish(7997);
+        assert!(!scheduler.has_running_data_batch());
+    }
+
     fn fresh() -> (BatchScheduler, TaskRegistry) {
         (
             BatchScheduler {
@@ -852,6 +946,32 @@ mod tests {
             },
             TaskRegistry::default(),
         )
+    }
+
+    #[test]
+    fn delayed_committed_window_retires_only_with_matching_durable_evidence() {
+        use crate::data_interface::dbnum_state::DbnumState;
+        let (scheduler, registry) = fresh();
+        let task = scheduler.enqueue_live(&registry, &found(8000, 452, 453));
+        let mut applied = DbnumState {
+            dbnum: 8000,
+            owner_project: "P".into(),
+            db_type: "DESI".into(),
+            file_path: "D:/proj/db8000".into(),
+            applied_sesno: 452,
+            initialized: true,
+            ..Default::default()
+        };
+        assert!(!scheduler.retire_covered_window(&registry, &task.info.task_id, &applied));
+        applied.applied_sesno = 453;
+        applied.owner_project = "other".into();
+        assert!(!scheduler.retire_covered_window(&registry, &task.info.task_id, &applied));
+        applied.owner_project = "P".into();
+        assert!(scheduler.retire_covered_window(&registry, &task.info.task_id, &applied));
+        assert!(scheduler.snapshot().is_empty());
+        let reinit = scheduler.enqueue_live(&registry, &reinit_found(8000, 453, 0));
+        assert!(!scheduler.retire_covered_window(&registry, &reinit.info.task_id, &applied));
+        assert_eq!(scheduler.snapshot().len(), 1);
     }
 
     #[test]

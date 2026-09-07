@@ -106,6 +106,16 @@ SAVEWORK → 无人工干预模型在窗口内更新；`/health` 在复核期 `m
 先做便宜的半步：启动复核发现 CATA 文件身份与上次不同时（`ModelTarget.catalogue` 指纹）在横幅与 `/health` 点名
 `catalogue_cascade_degraded`。
 
+> **2026-09-04 · 便宜的半步已落地**（会话 3263d0f3，见 `docs/2026-09-04_model-cascade-update-inventory.md` §2.7）：
+> `model_update_pending::published_catalogue_sessions_on` 从 `gen_root.published_model_target.catalogue` 取
+> 「上一次发布落在哪一版目录」（`CATA dbnum → 最旧会话`，一条 `GROUP BY catalogue` 服务端去重），与
+> `model_source::latest_source_version` 一比，得出过期名单；横幅点名 + `/health.startup.reconcile` 新增
+> `catalogue_cascade_degraded` / `stale_catalogue_dbnums` / `unreadable_catalogue_dbnums` 三栏。
+> **只点名不排工作**，且刻意不参与 `result` 取重（守卫
+> `the_catalogue_flag_is_named_separately_and_never_downgrades_the_result`）；「已确认过期」与「不知道」
+> 分两栏（守卫 `a_catalogue_that_cannot_be_read_is_unknown_not_stale`）。
+> **反查那一半（本节正题）仍未开工。** 未 live。
+
 ### 第 6 步 · S3 CATA 退出持久层（#15）— 与 L2 的先后由拍板定
 
 ### 顺手（不排期）
@@ -148,5 +158,6 @@ SAVEWORK → 无人工干预模型在窗口内更新；`/health` 在复核期 `m
   另一会话半改的 `ele_ops.rs`（`RefnoEnum` / `RefU64`）编不过，几分钟后它收口了。
 - **未 live**（见 §5 第 3 条）。
 
-**没动的**：S5-4（db 形态退役 / git tag）；`AIOS_DATA_READ_MODE` 环境变量（ADR-058 Q3）；`sync_pdms` legacy 分支；
+**没动的**：S5-4（db 形态退役 / git tag）；`AIOS_DATA_READ_MODE` 环境变量（ADR-058 Q3；**同日 10:27 后已翻默认**：不设即
+direct、只有显式 `=db` 才退回 legacy，认不出的值出声，见 `changelog.md` 同日「数据读取模式默认 direct」）；`sync_pdms` legacy 分支；
 `print_startup_complete_banner` 里以读模式为标签的那一行（护栏明确不管它）。

@@ -1,0 +1,16 @@
+-- 管道 P 组 scratch 支管 B：与 A 同形（COPY /C-OR-1R345-C 成 /CODEX_DB8000_PIPE_SCR_B），
+-- 只用于 P-08「跨 BRAN 改挂」的目标端。生产支管不动。纪律同 A：一个 SAVEWORK、无 QUIT/FINISH。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_pipe_scratch_b_create.log" OVER
+$P CODEX-DB8000-PIPE-SCR-B-CREATE-ALIVE
+/1RX-345
+Q CE
+NEW BRAN /CODEX_DB8000_PIPE_SCR_B
+COPY /C-OR-1R345-C
+Q CE
+Q REF
+Q NAME
+Q MEMB
+SAVEWORK 'CODEX db8000 create pipe scratch B /CODEX_DB8000_PIPE_SCR_B (copy of /C-OR-1R345-C)'
+$P CODEX-DB8000-PIPE-SCR-B-CREATE-DONE
+ALPHA LOG END

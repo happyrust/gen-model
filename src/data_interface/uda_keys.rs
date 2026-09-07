@@ -37,6 +37,18 @@ pub struct UdaKeyMap {
     misses: Mutex<BTreeMap<i32, BTreeSet<RefU64>>>,
 }
 
+impl Clone for UdaKeyMap {
+    fn clone(&self) -> Self {
+        Self {
+            by_key: self.by_key.clone(),
+            ordered: self.ordered.clone(),
+            // Misses are per render attempt; copying old diagnostics would
+            // report keys that the cloned operation never touched.
+            misses: Mutex::default(),
+        }
+    }
+}
+
 impl UdaKeyMap {
     /// 空表：每个 UDA 键都会记成 miss。测试与「没有 DICT 库」的库用。
     pub fn empty() -> Self {
@@ -62,6 +74,20 @@ impl UdaKeyMap {
             ordered,
             misses: Mutex::default(),
         }
+    }
+
+    /// Build the compatibility record-link map directly from e3d-io's ordered
+    /// Dictionary catalog.  Read-through mode has no DICT ingestion phase, so
+    /// consulting the database here would make actual UDA values disappear.
+    pub fn from_catalog(catalog: &e3d_io::uda_catalog::UdaCatalog) -> Self {
+        Self::from_rows(catalog.definitions().iter().flat_map(|definition| {
+            let row = |key| UdaDefinitionRow {
+                id: RefU64::from_two_nums(definition.refno.word0, definition.refno.word1),
+                ukey: Some(i64::from(key as i32)),
+                udna: Some(format!(":{}", definition.name)),
+            };
+            std::iter::once(row(definition.key)).chain(definition.old_key.map(row))
+        }))
     }
 
     /// 从当前 SurrealDB 的 `UDA` 表建表。DICT 相先于 DESI 相同步，所以 DESI 基线 /
@@ -143,7 +169,13 @@ impl UdaKeyMap {
                     .map(|r| r.to_string())
                     .collect::<Vec<_>>()
                     .join("/");
-                format!("{}(0x{:x})×{}[{}]", db1_dehash(*hash as u32), *hash as u32, elements.len(), sample)
+                format!(
+                    "{}(0x{:x})×{}[{}]",
+                    db1_dehash(*hash as u32),
+                    *hash as u32,
+                    elements.len(),
+                    sample
+                )
             })
             .collect::<Vec<_>>()
             .join("、");
@@ -181,7 +213,10 @@ mod tests {
         let map = UdaKeyMap::from_rows([row(1, hash as i64, ":ROOM")]);
         assert_eq!(map.resolve(hash), Some(RefU64(1)));
         assert_eq!(map.resolve(0x0008_1F4B), None, "普通属性哈希不是 UDA 键");
-        assert!(map.take_misses().is_empty(), "resolve 不记账，resolve_for 才记");
+        assert!(
+            map.take_misses().is_empty(),
+            "resolve 不记账，resolve_for 才记"
+        );
     }
 
     #[test]

@@ -43,12 +43,38 @@
 
 ## P1：执行域地基
 
-- [ ] T006 `src/fast_model/concurrency.rs`：新增 `run_gated_cpu(FnOnce() -> anyhow::Result<T>)`，
+- [x] T006 `src/fast_model/concurrency.rs`：新增 `run_gated_cpu(FnOnce() -> anyhow::Result<T>)`，
       专用有界池（`num_threads(quota)` 的私有 Rayon 池或有界 `spawn_blocking`，禁全局
       Rayon 池），许可在 CPU worker 线程内取得与归还。依赖：T005。
+      2026-09-04 完成，但**依赖 T004/T005 被跳过**：基线与可重复性证据仍未采，故本轮
+      不得引用任何加速比结论。取「私有 Rayon 池」这一支（`num_threads = 闸额度`，
+      线程名 `geometry-cpu-N`）；许可在派发前取得、随闭包搬到 worker 线程上归还，池宽
+      与额度相等故派发排队为零。闭包 panic 就地 `catch_unwind` 转错误——rayon 的默认
+      处置是整个进程 abort，一根坏构件不该把服务打死（去掉这层直接崩测试进程）。
+      配套加 `resident_workers(jobs) = min(额度, 件数)`（第 4 条的动态领取宽度）。
+      首个调用点不是 T011 的 `manifold_bool`，而是 e3d 生成路径的
+      `e3d_model_service::spawn_generation_worker`（新场子、无历史包袱；legacy 叶子一处未动）：
+      整条根列表一个 `RootQueue`，`min(额度, 还能领的件数)` 个常驻 worker 动态领取、按源顺序装配，
+      滑动窗口既拆掉 cohort 边界上的栏（长尾负载下设栏等于每批赔上最慢那根）又把在飞几何限在一个窗口内；
+      窗口满时 worker 还许可后退出，由装配端重新派出，不攥着许可等。
+      四条新测试：并发峰值不超额度 / CPU 段跑在私有池线程上 / panic 接住且许可归还 /
+      `resident_workers` 上下界。
+      **T008 的 `geometry_executor` 开关未做**：本调用点的回滚是 `geometry_workers = 1`
+      ——它在这里是**精确**回滚（一个 worker、一份 catalogue 缓存、按根原序，逐字节复现
+      改前），因为这条路径不从额度派生任何别的东西（不用 `chunk_size`、不攒 SQL）。
+      ADR-052 第 6 条否掉的是那些额度同时决定 SQL 包大小的调用点，与此处不同。
 - [ ] T007 `src/fast_model/concurrency.rs`：`GeometryGate::acquire` 与 `GeometryPermit`
       由 `pub` 收成模块私有，`spawn_gated_leaf` 标记退役并保留一个发布周期；
       `ACTIVE` 语义改为「正在算的 CPU 段数」。依赖：T006。
+      2026-09-04 进度：前两项完成，第三项被 T011～T018 挡住。`acquire` / `GeometryPermit`
+      已收成模块私有（模块外零调用点，对外只剩 `run_gated_cpu`）。`spawn_gated_leaf`
+      在文档里标退役，并用**调用点清单**测试
+      （`the_retired_future_wide_gate_gains_no_new_call_sites`，六个文件逐个点名计数）
+      锁住「只出不进」，而不是 `#[deprecated]`——后者会在七处各喷一条警告，逼着六个
+      不属于本轮的文件各挂一个 `#[allow(deprecated)]`。
+      `ACTIVE` 现在是**混读**：走 `run_gated_cpu` 的那部分等于 CPU 段，走
+      `spawn_gated_leaf` 的七处仍罩整个 `Future`。模块头已写明，叶子迁完前不得把利用率
+      整体当 CPU 利用率引用。
 - [ ] T008 `src/options.rs`、`DbOption.toml`、`python/testbed/DbOption-pytest.toml`：
       `geometry_executor = "tokio_legacy" | "blocking_pool"` 进 `DbOptionExtFields`，
       非法值启动失败不静默回退；两个配置文件同批加键。依赖：T006。

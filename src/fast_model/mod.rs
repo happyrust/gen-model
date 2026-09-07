@@ -3,6 +3,9 @@ pub mod e3d_model_service;
 #[cfg(feature = "legacy_model")]
 pub(crate) mod gen_model;
 pub mod historical_model;
+pub mod model_db_adapter;
+pub mod model_memory_store;
+pub mod model_record_reader;
 
 pub mod concurrency;
 
@@ -66,6 +69,7 @@ pub mod aabb_tree;
 pub mod spatial_state;
 
 pub mod coverage_audit;
+pub(crate) mod room_topology_source;
 
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};

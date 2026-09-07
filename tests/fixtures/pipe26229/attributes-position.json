@@ -1,0 +1,270 @@
+{
+  "source": "e3d-io",
+  "refno": "24384/26239",
+  "dbnum": 8000,
+  "db_type": "DESI",
+  "sesno": 285,
+  "noun": "ELBO",
+  "complete": false,
+  "attributes": [
+    {
+      "name": "LSTU",
+      "value_type": "ref",
+      "value": "13245/846612",
+      "display": "13245/846612",
+      "origin": "stored",
+      "is_uda": false,
+      "is_unset": false,
+      "editable": true
+    },
+    {
+      "name": "ORI",
+      "value_type": "vec3",
+      "value": [
+        0.0,
+        -90.0,
+        -46.999700000000004
+      ],
+      "display": "0, -90, -46.999700000000004",
+      "origin": "stored",
+      "is_uda": false,
+      "is_unset": false,
+      "editable": true
+    },
+    {
+      "name": "OWNER",
+      "value_type": "text",
+      "value": "24384/26229",
+      "display": "24384/26229",
+      "origin": "stored",
+      "is_uda": false,
+      "is_unset": false,
+      "editable": false
+    },
+    {
+      "name": "POS",
+      "value_type": "vec3",
+      "value": [
+        -2306.1,
+        -8259.96,
+        921.1
+      ],
+      "display": "-2306.1, -8259.96, 921.1",
+      "origin": "stored",
+      "is_uda": false,
+      "is_unset": false,
+      "editable": true
+    },
+    {
+      "name": "SPRE",
+      "value_type": "ref",
+      "value": "13245/846167",
+      "display": "13245/846167",
+      "origin": "stored",
+      "is_uda": false,
+      "is_unset": false,
+      "editable": true
+    }
+  ],
+  "diagnostics": {
+    "outside_schema": [],
+    "shape_conflicts": [
+      {
+        "name": "TYPEX",
+        "found": "RawWords[2]",
+        "declared": "StringType"
+      },
+      {
+        "name": "SPAMAP",
+        "found": "IntArray[2]",
+        "declared": "StringType"
+      }
+    ],
+    "undecoded": [
+      {
+        "name": "UDTYPE",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "NAME",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "UNIPAR",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "DESP",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "CREF",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "WDATUM",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "WDATUX",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "CSFBR",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "TSFBR",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "ASFBR",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "LSFBR",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "SPLN",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "SPLT",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "MTOR",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "CMPX",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "PTNO",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "PTNT",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "PTNB",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "JNUM",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "JOIP",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "MTOC",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "MTOT",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "MTOX",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "SPSP",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "DPFN",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "DPGRID",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "NWELDS",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "DMTY",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "DMFA",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "ORRF",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "INVF",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "RREF",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "RATM",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "RATS",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "BSEL",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "MATN",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "RLIN",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "RLEX",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "SPKCHG",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "INPRTR",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "OUPRTR",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "UDATAB",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "UDAFTB",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "UDASTB",
+        "reason": "NonImplicit"
+      },
+      {
+        "name": "SLODIR",
+        "reason": "NonImplicit"
+      }
+    ],
+    "uda_issues": []
+  },
+  "backup": {
+    "status": "skipped-ingest"
+  }
+}

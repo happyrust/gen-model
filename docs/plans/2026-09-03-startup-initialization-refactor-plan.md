@@ -164,7 +164,7 @@ ADR-008 的机制（`ref_rev` 反查 + `cascade_expand` 种子 + 无深度上限
 **验收门**：改一个被 N 个设计元素引用的目录构件，重生成的根数 = 那 N 个元素上卷后的根数，
 不是该库全部根。降级路径能被主动触发并在回执里看到名字。
 
-### S5 — 形态合一（2–3 人日）◐ 1–3 已落地（2026-09-04，未 live），4 未做
+### S5 — 形态合一（2–3 人日）◐ 1–3 已落地（2026-09-04，未 live），4 只走了「direct 成默认」半步
 
 1. 删 `lib.rs:592` 的 `!direct_read_mode`：启动全量扫一次，之后 watcher 一直盯着自动追（ADR-058 D8）。✅
 2. `direct_read_mode` 只保留「数据面读哪儿」这一个含义；启动序列里其余两处分支
@@ -172,6 +172,8 @@ ADR-008 的机制（`ref_rev` 反查 + `cascade_expand` 种子 + 无深度上限
 3. 翻转钉住旧行为的测试：从「`sync_live` 在 direct 下恒 false」改钉「`direct_read_mode` 在 `lib.rs` 里
    只出现在数据面读路由的选择上」。✅
 4. db 形态退役，退路留 git tag（ADR-056 D6 同一口径）。未做（与 ADR-058 Q3 `AIOS_DATA_READ_MODE` 一起收）。
+   **2026-09-04 10:27 后走了半步**：direct 成为默认——`AIOS_DATA_READ_MODE` 不设即 direct，只有显式 `=db` 才退回 legacy，
+   认不出的值出声（`changelog.md` 同日「数据读取模式默认 direct」）；变量整体删除与 `sync_pdms` legacy 分支仍等退役 / git tag。
 
 **落地记录（2026-09-04）**，全部在 `src/lib.rs` `run_cli`：
 
@@ -224,4 +226,4 @@ ADR-008 的机制（`ref_rev` 反查 + `cascade_expand` 种子 + 无深度上限
 - **不做**：启动全量模型生成（ADR-051 已拒）、有界预热默认开启（ADR-058 D6 留作开关）、
   放弃 DESI 基线（ADR-058 D3 已拒，理由是 ADR-021 三条判据的重写成本）。
 - **留档**：ADR-058 Q1（CATA 级联走 `ref_rev` 还是 dab 反向表）、Q2（预热排序）、
-  Q3（`AIOS_DATA_READ_MODE` 何时删）。
+  Q3（`AIOS_DATA_READ_MODE` 何时删——2026-09-04 起 direct 已是默认，它只剩 `=db` 退路一个用途）。

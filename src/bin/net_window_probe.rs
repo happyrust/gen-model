@@ -241,7 +241,11 @@ impl TtyCheck {
                 "{} {}：收集器说 {}，TTY 说 {}",
                 self.refno,
                 self.origin,
-                if self.expect_alive { "还在" } else { "已删" },
+                if self.expect_alive {
+                    "还在"
+                } else {
+                    "已删"
+                },
                 if observed { "还在" } else { "不在" }
             ));
         }
@@ -389,10 +393,7 @@ fn main() -> anyhow::Result<()> {
         gate_failures.push(format!("{text:?} 不是 a/b 形式"));
     }
     for (text, key) in &must_not_delete {
-        if ops
-            .get(key)
-            .is_some_and(|op| op.kind == OpKind::Deleted)
-        {
+        if ops.get(key).is_some_and(|op| op.kind == OpKind::Deleted) {
             gate_failures.push(format!("{text} 被收集器判 Deleted"));
         }
     }
@@ -451,10 +452,7 @@ fn main() -> anyhow::Result<()> {
                 observed_noun: None,
             });
         }
-        let alive_expected = tty_checks
-            .iter()
-            .filter(|check| check.expect_alive)
-            .count();
+        let alive_expected = tty_checks.iter().filter(|check| check.expect_alive).count();
         if alive_expected == 0 {
             gate_failures.push(
                 "TTY 臂一条「必须还在」都没有：全是删除的窗口请用 --tty-anchor 点一个活证，\
@@ -491,7 +489,10 @@ fn main() -> anyhow::Result<()> {
             println!("  {verdict}");
         }
         if verdicts.len() > args.samples {
-            println!("  … 另 {} 条（见 --json-out）", verdicts.len() - args.samples);
+            println!(
+                "  … 另 {} 条（见 --json-out）",
+                verdicts.len() - args.samples
+            );
         }
         gate_failures.extend(verdicts);
     } else {

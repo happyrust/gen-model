@@ -88,7 +88,10 @@ fn connect(py: Python<'_>, config: Option<String>, cwd: Option<PathBuf>) -> PyRe
     }
     py.detach(|| {
         runtime().block_on(async {
-            aios_core::init_surreal().await?;
+            // 只附着、不拉起（`store_mode` 默认已是 spawned-mem，2026-09-04）：
+            // python 调试入口要连的是服务手上那个库；端口空着时响亮地说「服务没起」，
+            // 比自己拉一台空库然后在上面跑一整套 full_init 强得多。
+            aios_database::attach_store_connected().await?;
             // 与 run_cli 同款（D11/ADR-010）：磁盘脚本之后再灌一遍编译期内置
             // 函数快照——目录序里 hh 排在 hd 之后，不矫正的话连接层的
             // fn::room_code 停在 hh 语义，与服务行为漂移。
@@ -258,7 +261,9 @@ fn element_impl(path: &Path, refno: &str, sesno: Option<u32>) -> anyhow::Result<
     let parsed = aios_core::RefU64::from_str(refno.trim())
         .map_err(|_| anyhow::anyhow!("refno 形态不认识: {refno}（要 a_b / a/b / pe:a_b）"))?;
     let frozen = match sesno {
-        Some(sesno) => aios_database::data_interface::frozen_source::FrozenSource::capture_at(path, sesno),
+        Some(sesno) => {
+            aios_database::data_interface::frozen_source::FrozenSource::capture_at(path, sesno)
+        }
         None => aios_database::data_interface::frozen_source::FrozenSource::capture(path),
     }
     .map_err(|error| anyhow::anyhow!("冻结 dabacon 源失败: {error}"))?;

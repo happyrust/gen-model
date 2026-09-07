@@ -165,6 +165,100 @@ fn to_park_record(park: &BatchPark<'_>, now: DateTime<Local>) -> Value {
     })
 }
 
+/// 一条进了死信的副作用任务（今天只有 `spatial_reconcile` 走这里）。
+///
+/// 空间收敛**不重试**（2026-09-06 用户拍板：出错只进错误日志、方便排查，不做错误重试）：
+/// 一次失败就把行标成 `dead`，原因落盘，出队门与房间轮不再被它挡住。所以这条记录
+/// 是这类失败**唯一**的落盘出处——控制台那行会被刷走，`/health` 只留最近一句。
+pub struct SideEffectDeadLetter<'a> {
+    /// `incr_side_effect_pending` 里那一行的 id（`spatial_reconcile_<dbnum>_<end_sesno>`）。
+    pub id: &'a str,
+    pub kind: &'a str,
+    pub dbnum: u32,
+    pub db_type: &'a str,
+    pub end_sesno: i32,
+    /// 行上记着的冻结源（文件身份 + 会话）；`None` = 老格式 / 非文件轮次意图。
+    pub commit_token: Option<&'a str>,
+    pub refresh_refnos: usize,
+    pub remove_refnos: usize,
+    pub room_clear_refnos: usize,
+    /// 这次是第几次撞墙（不重试的话恒为 1；老行被人工复活再死一次会累加）。
+    pub attempts: u32,
+    pub reason: &'a str,
+}
+
+/// 落一条副作用死信记录（`event = side_effect_dead_letter`）。
+///
+/// 与 [`record`] 同一目录、同一族文件，`/api/v1/error-log` 与网页「错误日志」卡不加
+/// 筛子就能看见；写失败只报警不上抛，口径同 [`record`]。
+pub fn record_side_effect_dead_letter(dead: &SideEffectDeadLetter<'_>) {
+    let now = Local::now();
+    let path = daily_path(Path::new(DIRECTORY), now);
+    let line = to_dead_letter_record(dead, now);
+    match append_json_line(&path, &line) {
+        Ok(()) => println!(
+            "[副作用] {} dbnum={} end_sesno={} 收敛失败已进死信（不重试），原因已落盘 {}\
+             （重启不丢；网页「错误日志」卡读 /api/v1/error-log）",
+            dead.kind,
+            dead.dbnum,
+            dead.end_sesno,
+            path.display()
+        ),
+        Err(error) => eprintln!(
+            "[副作用] {} dbnum={} end_sesno={} 死信原因落盘失败 {}: {error}——本次原因只剩控制台这一份: {}",
+            dead.kind,
+            dead.dbnum,
+            dead.end_sesno,
+            path.display(),
+            dead.reason
+        ),
+    }
+}
+
+/// Durable publication failures have no timer-driven retry path.
+pub fn record_model_publish_error(job_id: &str, dbnum: u32, reason: &str) {
+    let now = Local::now();
+    let path = daily_path(Path::new(DIRECTORY), now);
+    let superseded = reason.contains("model_publish_superseded");
+    let restart_required =
+        job_id == "journal" || reason.starts_with("journal ack:") || reason.starts_with("payload:");
+    let is_job = job_id.len() == 64 && job_id.bytes().all(|b| b.is_ascii_hexdigit());
+    let replay = (is_job && !superseded && !restart_required)
+        .then(|| format!("POST /api/v1/model-publish/jobs/{job_id}/replay"));
+    let resume = (!is_job && !restart_required).then_some("POST /api/v1/model-publish/resume");
+    let line = json!({"event":"model_publish_failure", "at":now.to_rfc3339(),
+        "job_id":job_id,"dbnum":dbnum,"reason":reason,"auto_retry":false,
+        "replay":replay,"resume":resume,"restart_required":restart_required,"superseded":superseded});
+    if let Err(error) = append_json_line(&path, &line) {
+        log::error!("model publish error log failed: {error}; {job_id}: {reason}");
+    }
+}
+
+fn to_dead_letter_record(dead: &SideEffectDeadLetter<'_>, now: DateTime<Local>) -> Value {
+    json!({
+        "event": "side_effect_dead_letter",
+        "at": now.to_rfc3339(),
+        "id": dead.id,
+        "kind": dead.kind,
+        "dbnum": dead.dbnum,
+        "db_type": dead.db_type,
+        "end_sesno": dead.end_sesno,
+        "commit_token": dead.commit_token,
+        "refresh_refnos": dead.refresh_refnos,
+        "remove_refnos": dead.remove_refnos,
+        "room_clear_refnos": dead.room_clear_refnos,
+        "attempts": dead.attempts,
+        "reason": dead.reason,
+        "auto_retry": false,
+        // 解除路径写进记录本身：读这个文件的人手上只有这一个文件。
+        "unblock": [
+            format!("修好 reason 之后把该行放回队列：UPDATE {} SET status = 'pending', last_error = NONE;", dead.id),
+            "或删除该行放弃这次空间发布（树将停在上一次成功发布的状态）",
+        ],
+        "unblock_note": "空间收敛不自动重试：不修 reason 直接放回队列只会再死一次、再落一条。",
+    })
+}
+
 /// 落一条失败记录，并在控制台指出它落在哪儿。
 ///
 /// 写失败只报警不上抛：这条记录是排查用的旁路，不能因为磁盘满就把批次终态

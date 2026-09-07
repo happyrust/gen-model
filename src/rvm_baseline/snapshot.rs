@@ -82,6 +82,14 @@ pub struct SnapshotMeta {
     /// bbox_world 退化为一个点的几何数。rvm-rs 对部分带 transform 的原语
     /// 会解出全零矩阵，这类包围盒不能用于空间对拍，只能记账。
     pub degenerate_bbox_count: usize,
+    /// `aabb_world_mm` 由面片顶点实算的几何数（其余取 rvm-rs 的 `bbox_world`）。
+    /// PRIM 记录自带的 bbox 有两个帧，FacetGroup 那一档不能直接乘 transform，
+    /// 详见 [`super::import`] 的 `facet_group_world_aabb_mm`。
+    ///
+    /// 旧快照没有这个字段，反序列化后落 0——0 就意味着「这份快照的 FacetGroup
+    /// AABB 还是老口径，可能多转了一次旋转」，对拍侧据此决定要不要信。
+    #[serde(default)]
+    pub facet_aabb_from_vertices: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -194,5 +202,9 @@ impl RvmSnapshot {
             }
         );
         println!("  退化包围盒     : {}", m.degenerate_bbox_count);
+        println!(
+            "  AABB 面片实算  : {} / {}",
+            m.facet_aabb_from_vertices, m.geometry_count
+        );
     }
 }

@@ -1,0 +1,41 @@
+-- `RPRO TLEN` 的定义在哪：查目录件的设计表 DTSE（2026-09-04）。
+--
+-- 线索：SCOM `/ACP1000-VFVL-100` 有 `Dtref /ACP1000-VFVL-DTSE`（=13244/52083）。
+-- core.dll 把 `ATTRIB RPRO <键>` 走 `DB_PseudoAttPlugger::getRealAtt`，而 RPRO 这一族
+-- （RPRO / CDPR / LDPR / TDPR / PROPRE / REALEV）在 `DB_Element::getAtt` 里被单独拎出来
+-- 交给 `GATPGT`——它问的就是目录件的设计表。所以 TLEN 的算法应该写在这张表里，
+-- 而不是硬编码在 core.dll 里。
+--
+-- 只读：全是 Q，无 SAVEWORK，不写 QUIT/FINISH（会话归 driver）。
+-- 逐元素单开一块，最后一块写宏同名日志给 driver 收尾。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/ftub-tlen-tty/dtse-52083.log" OVER
+$P CODEX-DTSE-52083-ALIVE
+=13244/52083
+Q CE
+Q REF
+Q NAME
+Q TYPE
+Q ATT
+Q MEMB
+$P CODEX-DTSE-52083-DONE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/ftub-tlen-tty/dtse-tree.log" OVER
+$P CODEX-DTSE-TREE-ALIVE
+=13244/52083
+VAR !kids COLLECT ALL FOR CE
+DO !k VALUES !kids
+  $!k
+  $P ---- $!k
+  Q TYPE
+  Q NAME
+  Q ATT
+ENDDO
+$P CODEX-DTSE-TREE-DONE
+ALPHA LOG END
+
+-- 最后这块写在宏同名日志上：l3 driver 跑完就读它，读到了才算整条宏走通。
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/ftub_dtse_probe.log" OVER
+$P CODEX-DTSE-ALL-BLOCKS-DONE
+ALPHA LOG END

@@ -311,6 +311,9 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
     durable_room_trigger: bool,
 ) -> anyhow::Result<Vec<AabbChange>> {
     const CHUNK: usize = 100;
+    let file_round = durable_room_trigger
+        .then(crate::data_interface::batch_worker::active_data_window)
+        .flatten();
     let mut changes = Vec::new();
     for chunk in refnos.chunks(CHUNK) {
         if chunk.is_empty() {
@@ -336,10 +339,10 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
         let inst_keys = get_inst_relate_keys(chunk);
         let mut sql = format!(
             r#"select id, in as refno, world_trans.d as world_trans, in.noun as noun, aabb.d as old_aabb,
-            (select out.aabb.d as aabb, trans.d as trans,
+            (select out.aabb.d as aabb, (transform ?? trans.d) as trans,
              out.param.PrimLoft.path.SpineArc.angle as revolve_sweep,
              out.param.PrimLoft.path.SpineArc.clock_wise as revolve_cw
-             from out->geo_relate where out.aabb.d != none and trans.d != none)
+             from out->geo_relate where out.aabb.d != none and (transform ?? trans.d) != none)
             as geo_aabbs from {inst_keys} where world_trans.d != none"#,
         );
         //替换所有的aabb
@@ -499,6 +502,21 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             if let Some(room_upserts) = room_upserts {
                 statements.push(room_upserts);
             }
+            if let Some((dbnum, round_end_sesno)) = file_round {
+                let refresh_refnos = chunk_changes
+                    .iter()
+                    .map(|change| change.refno.to_string())
+                    .collect::<Vec<_>>();
+                statements.push(
+                    crate::data_interface::side_effect_pending::SideEffectCompensator::render_file_spatial_reconcile_upsert(
+                        dbnum,
+                        round_end_sesno,
+                        &refresh_refnos,
+                        &[],
+                        &[],
+                    )?,
+                );
+            }
             statements.push(crate::fast_model::aabb_tree::render_spatial_epoch_bump());
             let transaction =
                 crate::data_interface::increment_pipeline::wrap_in_transaction(&statements)
@@ -523,12 +541,14 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
 
         // 内存树只在本块 DB 写入全部成功后才动：失败块不留「树新库旧」的半掺状态。
         // sync_refnos 一次遍历摘掉这些 refno 的全部旧条目（含历史堆叠的重复）并插入新值。
-        let tree = direct_tree
-            .as_mut()
-            .expect("直写分支必须持有写锁直到树同步结束");
-        tree.sync_refnos(rstar_objs.clone());
-        if !rstar_objs.is_empty() || !stale_by_refno.is_empty() {
-            crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
+        if file_round.is_none() {
+            let tree = direct_tree
+                .as_mut()
+                .expect("直写分支必须持有写锁直到树同步结束");
+            tree.sync_refnos(rstar_objs.clone());
+            if !rstar_objs.is_empty() || !stale_by_refno.is_empty() {
+                crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
+            }
         }
         drop(direct_tree);
         changes.extend(chunk_changes);

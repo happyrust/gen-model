@@ -237,6 +237,11 @@ pub fn snapshot() -> ModelConcurrencySnapshot {
     }
 }
 
+/// Resident set size of this process in bytes, when the platform reports it.
+pub(crate) fn process_rss_bytes() -> Option<u64> {
+    process_metrics().1
+}
+
 fn process_metrics() -> (Option<f32>, Option<u64>) {
     use sysinfo::{Pid, ProcessesToUpdate, System};
 

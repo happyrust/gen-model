@@ -28,6 +28,7 @@ use aios_core::{NamedAttrMap, RefU64};
 use dashmap::DashMap;
 use e3d_io::ReadOnlyEngine;
 use e3d_io::record::element::ParsedElement;
+use e3d_io::record::explicit::ExplicitAttribute;
 use e3d_io::record::template::TemplateProvider;
 use e3d_io::refno::RefNo;
 
@@ -215,6 +216,13 @@ impl DirectSchema {
         &self.template_dir
     }
 
+    /// The decoded system attribute dictionary.  File-side UDA catalog loading
+    /// uses the very same dictionary as element extraction, so a request cannot
+    /// accidentally combine definitions decoded with a different schema.
+    pub fn attlib(&self) -> &e3d_attlib::AttlibData {
+        &self.attlib
+    }
+
     /// 一个库类型的模板文件。
     ///
     /// E3D 的命名法是「库类型前三字母小写 + `vir.dat`」：`DESI` → `desvir.dat`、
@@ -256,6 +264,19 @@ pub struct DirectStore {
     attrs: DashMap<RefU64, Arc<DirectAttrs>>,
     /// 每库一份的派生索引（D3），键是 dbnum，随 pin 变更一起失效。
     indexes: DashMap<i32, Arc<DbIndexes>>,
+}
+
+/// One element read from one frozen database session.  Keeping the extraction
+/// and explicit tail together is important for UDA resolution: `OLDKEY` can
+/// only be decided against the exact record that produced the normal attrs.
+#[derive(Debug, Clone)]
+pub struct DirectElementSnapshot {
+    pub dbnum: i32,
+    pub db_type: String,
+    pub file: PathBuf,
+    pub sesno: u32,
+    pub extraction: e3d_io::record::descriptor::ElementExtraction,
+    pub explicit_attributes: Vec<ExplicitAttribute>,
 }
 
 impl DirectStore {
@@ -419,6 +440,33 @@ impl DirectStore {
     /// 与 DB 模式同形的出口：只要属性表。
     pub fn named_attmap(&self, refno: RefU64) -> Result<NamedAttrMap, DirectStoreError> {
         Ok(self.attrs(refno)?.map.clone())
+    }
+
+    /// Read the complete descriptor extraction and explicit tail under one
+    /// per-db session lock.  Callers that render public attributes use this
+    /// instead of the compatibility `NamedAttrMap` projection.
+    pub fn element_snapshot(
+        &self,
+        refno: RefU64,
+    ) -> Result<DirectElementSnapshot, DirectStoreError> {
+        let dbnum = self.dbnum_of(refno)?;
+        if self.pinned(dbnum).is_none() {
+            self.pin_from_locator(dbnum)?;
+        }
+        let session = self.session_of(dbnum)?;
+        let mut session = session
+            .lock()
+            .map_err(|_| DirectStoreError::Poisoned { slot: "session" })?;
+        let extraction = self.extract(&mut session, dbnum, refno)?;
+        let parsed = self.parse(&mut session, dbnum, refno)?;
+        Ok(DirectElementSnapshot {
+            dbnum,
+            db_type: session.pin.db_type.clone(),
+            file: session.pin.file.clone(),
+            sesno: session.pinned_sesno,
+            extraction,
+            explicit_attributes: parsed.explicit_attributes,
+        })
     }
 
     /// 一个元素的直接成员，**按记录里存的原序**。

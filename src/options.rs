@@ -121,15 +121,48 @@ pub struct DbOptionExt {
     pub model_post_regen_aabb_page: Option<usize>,
     #[serde(default)]
     pub model_regen_execution_group: Option<usize>,
+    /// 一片内存批最多携带多少个已生成元素。详见 [`model_memory_slice_elements`]。
+    #[serde(default)]
+    pub model_memory_slice_elements: Option<usize>,
+    #[serde(default)]
+    pub init_async_publish: Option<bool>,
+    #[serde(default)]
+    pub model_publish_queue_dir: Option<String>,
+    #[serde(default)]
+    pub model_publish_memory_bytes: Option<u64>,
+    #[serde(default)]
+    pub model_publish_disk_bytes: Option<u64>,
+
     #[serde(default)]
     pub model_root_inflight_max: Option<usize>,
     #[serde(default)]
     pub model_full_rebuild_enabled: Option<bool>,
 
+    /// 数据面事务切块上限三件（`data_interface::tx_limits`）：一笔事务的 SQL 字节 / 写行 /
+    /// 一块的元素数。不写 = 2 MiB / 5000 / 1000（plan 2026-09-06 §3 D3）。
+    #[serde(default)]
+    pub data_tx_max_bytes: Option<u64>,
+    #[serde(default)]
+    pub data_tx_max_write_rows: Option<u64>,
+    #[serde(default)]
+    pub data_tx_elements: Option<u64>,
+
     /// 持久层换成进程内嵌的 kv-mem 引擎（默认 `false` = 连 `v_ip:v_port` 的
     /// SurrealDB 服务）。详见 [`in_memory_db`]。
+    ///
+    /// **已被 [`store_mode`] 取代**：它只表达得了 `embedded-mem` 那一档。保留是因为
+    /// 它散在环境变量、`/health`、`PersistTarget` 与两份 ADR 里，一次性删的面太大。
     #[serde(default)]
     pub in_memory_db: Option<bool>,
+
+    /// 持久层的介质与「谁把它拉起来」：`external` / `spawned-mem` / `embedded-mem`。
+    /// 详见 [`store_mode`]。
+    #[serde(default)]
+    pub store_mode: Option<String>,
+
+    /// 旧数据面配置，保留用于冲突提示；实际备份范围由 `store_mode` 决定。
+    #[serde(default)]
+    pub data_face: Option<String>,
 
     /// XGEOMETRY 子树整体排除的入口门（T2.2 / 核对表 R2，**默认 false = 关**）。
     ///
@@ -148,6 +181,11 @@ pub struct DbOptionExt {
     /// 详见 [`model_significant_over_point`]。
     #[serde(default)]
     pub model_significant_over_point: Option<bool>,
+
+    /// 丢弃 core 判为既非 significant 也非 primitive、且字典看不出几何能力的 noun
+    /// 所产生的模型工作项（T2c 第一批，默认关闭）。数据明细不受影响。
+    #[serde(default)]
+    pub model_entry_drop_no_geometry: Option<bool>,
 
     /// 结构连接正向级联（联动对齐计划 C2，默认关闭）：窗口里改了 `SJOI` / `FIXING` / `SCTN` …
     /// 时，把 `CREF` / `JOIS` / `JOIE` / `CFRA` 回指成立的对端的生成根一起重算。
@@ -201,11 +239,23 @@ impl From<DbOption> for DbOptionExt {
             model_regen_claim_page: None,
             model_post_regen_aabb_page: None,
             model_regen_execution_group: None,
+            model_memory_slice_elements: None,
+            init_async_publish: None,
+            model_publish_queue_dir: None,
+            model_publish_memory_bytes: None,
+            model_publish_disk_bytes: None,
+
             model_root_inflight_max: None,
             model_full_rebuild_enabled: None,
+            data_tx_max_bytes: None,
+            data_tx_max_write_rows: None,
+            data_tx_elements: None,
             in_memory_db: None,
+            store_mode: None,
+            data_face: None,
             model_xgeometry_gate: None,
             model_significant_over_point: None,
+            model_entry_drop_no_geometry: None,
             model_structural_connection_cascade: None,
             model_cable_endpoint_cascade: None,
         }
@@ -263,15 +313,38 @@ struct DbOptionExtFields {
     #[serde(default)]
     model_regen_execution_group: Option<usize>,
     #[serde(default)]
+    model_memory_slice_elements: Option<usize>,
+    #[serde(default)]
+    init_async_publish: Option<bool>,
+    #[serde(default)]
+    model_publish_queue_dir: Option<String>,
+    #[serde(default)]
+    model_publish_memory_bytes: Option<u64>,
+    #[serde(default)]
+    model_publish_disk_bytes: Option<u64>,
+
+    #[serde(default)]
     model_root_inflight_max: Option<usize>,
     #[serde(default)]
     model_full_rebuild_enabled: Option<bool>,
     #[serde(default)]
+    data_tx_max_bytes: Option<u64>,
+    #[serde(default)]
+    data_tx_max_write_rows: Option<u64>,
+    #[serde(default)]
+    data_tx_elements: Option<u64>,
+    #[serde(default)]
     in_memory_db: Option<bool>,
+    #[serde(default)]
+    store_mode: Option<String>,
+    #[serde(default)]
+    data_face: Option<String>,
     #[serde(default)]
     model_xgeometry_gate: Option<bool>,
     #[serde(default)]
     model_significant_over_point: Option<bool>,
+    #[serde(default)]
+    model_entry_drop_no_geometry: Option<bool>,
     #[serde(default)]
     model_structural_connection_cascade: Option<bool>,
     #[serde(default)]
@@ -445,11 +518,23 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_regen_claim_page: ext.model_regen_claim_page,
         model_post_regen_aabb_page: ext.model_post_regen_aabb_page,
         model_regen_execution_group: ext.model_regen_execution_group,
+        model_memory_slice_elements: ext.model_memory_slice_elements,
+        init_async_publish: ext.init_async_publish,
+        model_publish_queue_dir: ext.model_publish_queue_dir.clone(),
+        model_publish_memory_bytes: ext.model_publish_memory_bytes,
+        model_publish_disk_bytes: ext.model_publish_disk_bytes,
+
         model_root_inflight_max: ext.model_root_inflight_max,
         model_full_rebuild_enabled: ext.model_full_rebuild_enabled,
+        data_tx_max_bytes: ext.data_tx_max_bytes,
+        data_tx_max_write_rows: ext.data_tx_max_write_rows,
+        data_tx_elements: ext.data_tx_elements,
         in_memory_db: ext.in_memory_db,
+        store_mode: ext.store_mode.clone(),
+        data_face: ext.data_face.clone(),
         model_xgeometry_gate: ext.model_xgeometry_gate,
         model_significant_over_point: ext.model_significant_over_point,
+        model_entry_drop_no_geometry: ext.model_entry_drop_no_geometry,
         model_structural_connection_cascade: ext.model_structural_connection_cascade,
         model_cable_endpoint_cascade: ext.model_cable_endpoint_cascade,
     }
@@ -507,6 +592,22 @@ pub fn model_regen_execution_group() -> usize {
     }
 }
 
+/// 一片内存批最多携带多少个已生成元素（默认 8000，下限 1）。
+///
+/// 模型生成先把根产进内存、再串行发布。切片预算不能只按根数算：一个 BRAN 和一个
+/// EQUI 的元素数差两个数量级，「只有 16 根」的一页照样可以是进程里最肥的东西，而
+/// 内存里躺的是 `GeneratedElement`（世界系 f64 CSG 实体），不是几十字节的元数据。
+///
+/// 它是**上限**，不是常规切分点：常规切分点仍是 [`model_regen_execution_group`]
+/// 那一档根数（发布 cohort 宽度），本预算只在一页异常肥时提前封片。单根永远不拆
+/// （根是发布的原子单位），所以真实峰值是「一份预算 + 一根」。
+pub fn model_memory_slice_elements() -> usize {
+    load_ext_fields()
+        .model_memory_slice_elements
+        .unwrap_or(8000)
+        .max(1)
+}
+
 pub fn model_root_inflight_max() -> usize {
     match model_concurrency_mode() {
         ModelConcurrencyMode::Legacy => 1,
@@ -551,6 +652,235 @@ fn effective_in_memory_db(configured: Option<bool>, env_override: Option<&str>) 
         .and_then(parse_bool_flag)
         .or(configured)
         .unwrap_or(false)
+}
+
+/// 环境变量名：一次性覆盖 [`store_mode`]，不必改配置文件。
+pub const STORE_MODE_ENV: &str = "AIOS_STORE_MODE";
+
+/// 持久层的介质，外加「谁负责把它拉起来」。
+///
+/// [`in_memory_db`] 只分得出两态，而实际上有三种：外置落盘、自带内存、进程内嵌内存。
+/// 中间那一档（[`StoreMode::SpawnedMem`]）是「开箱即用」形态——库仍然有真端口，
+/// plant-ui / `/sql` 探针 / `rvm_verify` 照常连得上，只是这个 surreal 由本进程负责
+/// 拉起与收尸（`docs/plans/2026-09-04-spawned-memory-store-out-of-box.md`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StoreMode {
+    /// 连 `v_ip:v_port` 上那台已经在跑的 SurrealDB。唯一可持久的一档。
+    External,
+    /// 本进程拉起一个 `--memory` 后端的 surreal 子进程，绑到 `v_ip:v_port`。
+    /// 进程一退整库消失，但**端口是真的**。
+    SpawnedMem,
+    /// 进程内嵌 `mem://`：没有端口，只有本进程读得到。探针与单测用。
+    EmbeddedMem,
+}
+
+impl StoreMode {
+    /// 配置与 `/health` 上的字面值。解析侧认的别名比这一份多，回话只用这三个。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::External => "external",
+            Self::SpawnedMem => "spawned-mem",
+            Self::EmbeddedMem => "embedded-mem",
+        }
+    }
+
+    /// 这一档的行能不能活过进程重启。只有外置那一档可能为真。
+    pub fn is_durable(self) -> bool {
+        matches!(self, Self::External)
+    }
+
+    /// 别的进程连不连得上这个库。`embedded-mem` 是唯一的「连不上」。
+    pub fn has_endpoint(self) -> bool {
+        !matches!(self, Self::EmbeddedMem)
+    }
+}
+
+/// 本进程生效的存储形态（`DbOption.toml` 的 `store_mode`，环境变量
+/// [`STORE_MODE_ENV`] 压过它）。
+///
+/// **默认 `spawned-mem`**（2026-09-04 用户拍板：默认就用 kv-mem，现有落盘部署自己显式写
+/// `external`）。开箱即用的含义就在这个默认值上：起 gen-model 一条命令，库跟着起来，
+/// 零预解析、零落盘，而端口是真的——plant-ui / `/sql` 探针 / `rvm_verify` 照常连得上。
+///
+/// 这次翻转会让**每一份没写这一项的配置换介质**，到达面与迁移见上述计划 §3.8；
+/// `db_options/` 下的夹具由护栏 `every_db_option_fixture_declares_its_store_mode_and_data_face`
+/// 逼着显式声明。
+///
+/// 兼容：没写 `store_mode` 但 [`in_memory_db`] 为真时回 `embedded-mem`，与那个旧开关
+/// 今天的行为逐字相同；写了 `in_memory_db = false` 而没写 `store_mode` 的，视为
+/// **显式要过外置库**，回 `external`——那句 `false` 是人写下的意图，不该被新默认盖掉。
+/// 两个键都写且互相矛盾时以 `store_mode` 为准并由 [`store_mode_notice`] 出声。
+/// 认不出的值当没设，同样出声。
+pub fn store_mode() -> StoreMode {
+    let ext = load_ext_fields();
+    effective_store_mode(
+        ext.store_mode.as_deref(),
+        std::env::var(STORE_MODE_ENV).ok().as_deref(),
+        ext.in_memory_db,
+        std::env::var(IN_MEMORY_DB_ENV).ok().as_deref(),
+    )
+}
+
+fn effective_store_mode(
+    configured: Option<&str>,
+    env_override: Option<&str>,
+    configured_in_memory_db: Option<bool>,
+    in_memory_db_env: Option<&str>,
+) -> StoreMode {
+    if let Some(mode) = parse_store_mode(env_override).or_else(|| parse_store_mode(configured)) {
+        return mode;
+    }
+    // 没写 `store_mode` 时由旧开关说话，语义与它今天的两态逐字相同：
+    // `true` = 库在进程里，`false` = **显式**要过外置库（那句 false 是人写下的意图，
+    // 不该被新默认盖掉）。两处都没写才落到新默认。
+    match in_memory_db_env
+        .and_then(parse_bool_flag)
+        .or(configured_in_memory_db)
+    {
+        Some(true) => StoreMode::EmbeddedMem,
+        Some(false) => StoreMode::External,
+        None => StoreMode::SpawnedMem,
+    }
+}
+
+/// `Some(mode)` = 认出来了；`None` = 没设、设成空白，或设成认不出的值
+/// （后者要出声，见 [`store_mode_notice`]）。
+fn parse_store_mode(raw: Option<&str>) -> Option<StoreMode> {
+    match raw?.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "external" | "rocksdb" => Some(StoreMode::External),
+        "spawned-mem" | "kv-mem" => Some(StoreMode::SpawnedMem),
+        "embedded-mem" => Some(StoreMode::EmbeddedMem),
+        _ => None,
+    }
+}
+
+/// `store_mode` 设了却认不出、或与 `in_memory_db` 打架时的一句告警
+/// （[`data_read_mode_notice`] 同款纪律：静默吃掉一个设了的开关是最高级别缺陷之一）。
+/// 返回 `Some` 时调用方必须把它打出来。
+pub fn store_mode_notice() -> Option<String> {
+    let ext = load_ext_fields();
+    store_mode_notice_for(
+        ext.store_mode.as_deref(),
+        std::env::var(STORE_MODE_ENV).ok().as_deref(),
+        ext.in_memory_db,
+    )
+}
+
+fn store_mode_notice_for(
+    configured: Option<&str>,
+    env_override: Option<&str>,
+    configured_in_memory_db: Option<bool>,
+) -> Option<String> {
+    for (source, raw) in [(STORE_MODE_ENV, env_override), ("store_mode", configured)] {
+        let Some(raw) = raw else { continue };
+        if raw.trim().is_empty() || parse_store_mode(Some(raw)).is_some() {
+            continue;
+        }
+        return Some(format!(
+            "⚠ {source} = {raw:?} 认不出来（只认 external / spawned-mem / embedded-mem），\
+             按未设置处理"
+        ));
+    }
+    // 两个键都写、且说的不是同一件事：以 `store_mode` 为准，但不许静默。
+    let declared = parse_store_mode(env_override).or_else(|| parse_store_mode(configured))?;
+    match configured_in_memory_db {
+        Some(true) if declared != StoreMode::EmbeddedMem => Some(format!(
+            "⚠ 配置同时写了 in_memory_db = true 与 store_mode = {:?}：以 store_mode 为准。\
+             in_memory_db 是 store_mode 之前的旧开关，只表达得了 embedded-mem 那一档",
+            declared.as_str()
+        )),
+        Some(false) if declared != StoreMode::External => Some(format!(
+            "⚠ 配置同时写了 in_memory_db = false 与 store_mode = {:?}：以 store_mode 为准",
+            declared.as_str()
+        )),
+        _ => None,
+    }
+}
+
+/// 环境变量名：一次性覆盖 [`data_face`]，不必改配置文件。
+pub const DATA_FACE_ENV: &str = "AIOS_DATA_FACE";
+
+/// 数据面的形态（`docs/plans/2026-09-05-kv-mem-zero-ingest-read-through-plan.md` §3.1）。
+///
+/// 由 [`StoreMode`] 决定：内存库只发布模型，属性从文件读取；RocksDB 通过基线和
+/// 增量窗口备份完整数据面。旧 `data_face` 配置只用于检测不兼容配置。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataFace {
+    /// 整库基线 + 稳态增量窗口，推进 `applied_sesno`——2026-09-05 之前唯一的形态。
+    Ingest,
+    /// 读透缓存：不做基线、不开数据窗口、水位不动；`pe` / `ATT_*` / `pe_owner` 行是
+    /// 模型生成的副产品（写透）与 `POST /api/v1/element/ensure` 的结果。缺行 = 还没读到，
+    /// 不 = 不存在。
+    ReadThrough,
+}
+
+impl DataFace {
+    /// 配置与 `/health` 上的字面值。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ingest => "ingest",
+            Self::ReadThrough => "read-through",
+        }
+    }
+
+    pub fn is_read_through(self) -> bool {
+        matches!(self, Self::ReadThrough)
+    }
+}
+
+/// 本进程生效的数据面形态（`DbOption.toml` 的 `data_face`，环境变量 [`DATA_FACE_ENV`] 压过它）。
+///
+/// 启动介质决定备份范围，旧配置和环境变量不能让内存库摄入属性或让持久库漏掉备份。
+pub fn data_face() -> DataFace {
+    data_face_for_store(store_mode())
+}
+
+fn data_face_for_store(mode: StoreMode) -> DataFace {
+    if mode.is_durable() {
+        DataFace::Ingest
+    } else {
+        DataFace::ReadThrough
+    }
+}
+
+/// `Some(face)` = 认出来了；`None` = 没设、设成空白，或设成认不出的值（后者要出声）。
+fn parse_data_face(raw: Option<&str>) -> Option<DataFace> {
+    match raw?.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "ingest" => Some(DataFace::Ingest),
+        "read-through" | "readthrough" => Some(DataFace::ReadThrough),
+        _ => None,
+    }
+}
+
+/// `data_face` 设了却认不出时的一句告警（[`store_mode_notice`] 同款纪律）。
+/// 返回 `Some` 时调用方必须把它打出来。
+pub fn data_face_notice() -> Option<String> {
+    let ext = load_ext_fields();
+    let env = std::env::var(DATA_FACE_ENV).ok();
+    if let Some(notice) = data_face_notice_for(ext.data_face.as_deref(), env.as_deref()) {
+        return Some(notice);
+    }
+    let requested =
+        parse_data_face(env.as_deref()).or_else(|| parse_data_face(ext.data_face.as_deref()))?;
+    let mode = store_mode();
+    let effective = data_face_for_store(mode);
+    (requested != effective).then(|| format!(
+        "⚠ data_face={} 与 store_mode={} 的备份范围不符，采用 {}：内存库仅存模型，RocksDB 备份属性与模型",
+        requested.as_str(), mode.as_str(), effective.as_str()
+    ))
+}
+
+fn data_face_notice_for(configured: Option<&str>, env_override: Option<&str>) -> Option<String> {
+    for (source, raw) in [(DATA_FACE_ENV, env_override), ("data_face", configured)] {
+        let Some(raw) = raw else { continue };
+        if raw.trim().is_empty() || parse_data_face(Some(raw)).is_some() {
+            continue;
+        }
+        return Some(format!(
+            "⚠ {source} = {raw:?} 认不出来（只认 read-through / ingest），按未设置处理"
+        ));
+    }
+    None
 }
 
 /// 配置里的增量监听限定域（`DbOption.toml` 的 `watch_dbnums`，**默认空 = 全范围**）。
@@ -659,15 +989,60 @@ fn probe_geometry_workers_config(configured: Option<OsString>) -> Result<Option<
 /// 环境变量名：一次性覆盖 [`startup_autorun`]，不必改配置文件。
 pub const STARTUP_AUTORUN_ENV: &str = "AIOS_STARTUP_AUTORUN";
 
-/// Select the service read substrate. `direct` keeps the HTTP/UI service and
-/// MDB initialization, but does not start the legacy incremental watcher or
-/// worker; request-scoped reads are served by e3d-io.
+/// 环境变量名：数据面读哪儿（ADR-053 direct 生成读 / ADR-058 D8）。
+///
+/// 认两个值：`direct`（e3d-io 直接读库文件，**默认**）与 `db`（legacy：读 SurrealDB 的
+/// `pe` / `ATT_*` 行、模型计划走 `pe` 打头的旧规划器）。它只回答「数据面读哪儿」——
+/// watcher / worker / 模型复核 / 房间与读模式无关（refactor plan S5，2026-09-04）。
 pub const DATA_READ_MODE_ENV: &str = "AIOS_DATA_READ_MODE";
 
+/// 数据面是否走 direct 读路由。**默认 `true`**（2026-09-04 用户拍板：direct 是默认形态，
+/// 全部默认切换过来）。此前要显式 `AIOS_DATA_READ_MODE=direct` 才开、不设即旧 db 形态——
+/// 生产早就跑 direct，而每条脚本 / 每次起服务都得记着带这个变量，忘了就静默退回退役形态。
+///
+/// 只有显式 `AIOS_DATA_READ_MODE=db` 才退回 legacy db 读路由（ADR-058 D8 已宣布退役，
+/// 只留作退路，与 S5-4 的 git tag 一起收）。认不出的值当没设、走默认，并由
+/// [`data_read_mode_notice`] 出声——拼错一个词就静默换掉读底座是更坏的结果。
 pub fn direct_read_mode() -> bool {
-    std::env::var(DATA_READ_MODE_ENV)
-        .ok()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case("direct"))
+    effective_direct_read_mode(std::env::var(DATA_READ_MODE_ENV).ok().as_deref())
+}
+
+fn effective_direct_read_mode(env_value: Option<&str>) -> bool {
+    !matches!(parse_data_read_mode(env_value), Some(DataReadMode::Db))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DataReadMode {
+    Direct,
+    Db,
+}
+
+/// `Some(mode)` = 认出来了；`None` = 没设，或设成认不出的值（两者都走默认 direct，
+/// 但后者要出声，见 [`data_read_mode_notice`]）。
+fn parse_data_read_mode(env_value: Option<&str>) -> Option<DataReadMode> {
+    match env_value?.trim().to_ascii_lowercase().as_str() {
+        "direct" => Some(DataReadMode::Direct),
+        "db" => Some(DataReadMode::Db),
+        _ => None,
+    }
+}
+
+/// `AIOS_DATA_READ_MODE` 设了却认不出来时的一句告警（[`retired_net_window_notice`] 同款：
+/// 静默吃掉一个设了的开关是最高级别缺陷之一）。返回 `Some` 时调用方必须把它打出来；
+/// 没设、设对、设成空白都回 `None`。
+pub fn data_read_mode_notice() -> Option<String> {
+    data_read_mode_notice_for(std::env::var(DATA_READ_MODE_ENV).ok().as_deref())
+}
+
+fn data_read_mode_notice_for(env_value: Option<&str>) -> Option<String> {
+    let raw = env_value?;
+    if raw.trim().is_empty() || parse_data_read_mode(Some(raw)).is_some() {
+        return None;
+    }
+    Some(format!(
+        "⚠ 环境变量 {DATA_READ_MODE_ENV} = {raw:?} 认不出来（只认 direct / db），按未设置处理：\
+         数据面走默认的 direct 读路由。要退回 legacy db 形态请写 {DATA_READ_MODE_ENV}=db"
+    ))
 }
 
 /// 启动是否自动干活（`DbOption.toml` 的 `startup_autorun`，**默认 true**）。
@@ -788,6 +1163,21 @@ fn normalise_model_incremental_types(configured: Option<&[String]>) -> Vec<Strin
 
 /// 环境变量名：一次性覆盖 [`room_incremental`]，不必改配置文件。
 pub const ROOM_INCREMENTAL_ENV: &str = "AIOS_ROOM_INCREMENTAL";
+
+/// 临时只跑模型生成时关闭所有空间派生工作，不改 `DbOption.toml`。
+pub const SPATIAL_COMPUTE_ENV: &str = "AIOS_SPATIAL_COMPUTE";
+
+/// 是否执行空间树装载、同步和后置 AABB 阶段（默认开启）。
+///
+/// 关闭只暂停派生数据计算；模型发布仍递增 spatial epoch，使下次重新开启时能发现
+/// 空间快照已经陈旧并从持久化指针重建。
+pub fn spatial_compute() -> bool {
+    effective_spatial_compute(std::env::var(SPATIAL_COMPUTE_ENV).ok().as_deref())
+}
+
+fn effective_spatial_compute(env_override: Option<&str>) -> bool {
+    env_override.and_then(parse_bool_flag).unwrap_or(true)
+}
 
 /// 房间归属的**增量**重算开不开（`DbOption.toml` 的 `room_incremental`，**默认 true**）。
 ///
@@ -934,6 +1324,30 @@ pub fn model_significant_over_point() -> bool {
     )
 }
 
+/// 环境变量名：一次性覆盖 [`model_entry_drop_no_geometry`]，不必改配置文件。
+pub const MODEL_ENTRY_DROP_NO_GEOMETRY_ENV: &str = "AIOS_MODEL_ENTRY_DROP_NO_GEOMETRY";
+
+/// T2c 第一批入口丢弃门（`DbOption.toml` 的 `model_entry_drop_no_geometry`，
+/// **默认 false**）。
+///
+/// 开启时，仅从模型工作分区中丢弃 core 判为既非 significant 也非 primitive、且
+/// dabacon 字典没有 `geomset` / `extrusion` / 非零 `graphics_behaviour` 的已知 noun。
+/// 数据明细与未知 noun 不受影响。
+pub fn model_entry_drop_no_geometry() -> bool {
+    #[cfg(test)]
+    match MODEL_ENTRY_DROP_NO_GEOMETRY_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    effective_default_off_switch(
+        load_ext_fields().model_entry_drop_no_geometry,
+        std::env::var(MODEL_ENTRY_DROP_NO_GEOMETRY_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
 /// 环境变量名：一次性覆盖 [`model_structural_connection_cascade`]，不必改配置文件。
 pub const MODEL_STRUCTURAL_CONNECTION_CASCADE_ENV: &str =
     "AIOS_MODEL_STRUCTURAL_CONNECTION_CASCADE";
@@ -1065,6 +1479,37 @@ impl SignificantOverPointOverride {
 impl Drop for SignificantOverPointOverride {
     fn drop(&mut self) {
         MODEL_SIGNIFICANT_OVER_POINT_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[cfg(test)]
+static MODEL_ENTRY_DROP_NO_GEOMETRY_OVERRIDE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+static MODEL_ENTRY_DROP_NO_GEOMETRY_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct ModelEntryDropNoGeometryOverride {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl ModelEntryDropNoGeometryOverride {
+    pub(crate) fn set(on: bool) -> Self {
+        let lock = MODEL_ENTRY_DROP_NO_GEOMETRY_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        MODEL_ENTRY_DROP_NO_GEOMETRY_OVERRIDE
+            .store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ModelEntryDropNoGeometryOverride {
+    fn drop(&mut self) {
+        MODEL_ENTRY_DROP_NO_GEOMETRY_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -1323,6 +1768,33 @@ mod tests {
         assert!(effective_startup_autorun(None, Some("")));
     }
 
+    /// 2026-09-04 拍板：direct 是默认形态。不设、设 `direct`、设认不出的值都走 direct；
+    /// 只有显式 `db` 才退回退役的 legacy 读路由（ADR-058 D8）。
+    #[test]
+    fn direct_is_the_default_read_mode_and_db_is_the_explicit_legacy_exit() {
+        assert!(effective_direct_read_mode(None));
+        assert!(effective_direct_read_mode(Some("direct")));
+        assert!(effective_direct_read_mode(Some(" DIRECT ")));
+        assert!(!effective_direct_read_mode(Some("db")));
+        assert!(!effective_direct_read_mode(Some(" Db ")));
+        assert!(effective_direct_read_mode(Some("")));
+        assert!(effective_direct_read_mode(Some("dierct")));
+    }
+
+    /// 拼错的读模式值走默认但必须出声；没设、设对、设成空白都不吵。
+    #[test]
+    fn an_unrecognised_read_mode_value_is_announced_not_swallowed() {
+        assert_eq!(data_read_mode_notice_for(None), None);
+        assert_eq!(data_read_mode_notice_for(Some("direct")), None);
+        assert_eq!(data_read_mode_notice_for(Some("db")), None);
+        assert_eq!(data_read_mode_notice_for(Some("  ")), None);
+        let notice = data_read_mode_notice_for(Some("dierct")).expect("拼错要出声");
+        assert!(
+            notice.contains("dierct") && notice.contains("direct") && notice.contains("=db"),
+            "{notice}"
+        );
+    }
+
     /// 三段增量缺配置都保持历史行为；显式关闭必须生效。
     #[test]
     fn data_and_model_incremental_are_on_unless_explicitly_disabled() {
@@ -1416,6 +1888,207 @@ mod tests {
         assert!(!effective_in_memory_db(None, Some("ture")));
     }
 
+    /// **默认就是开箱即用那一档**（2026-09-04 拍板）：两个键都没写 = `spawned-mem`。
+    /// 这条与 §3.8 的迁移是一对——翻默认的前提是每一份夹具都已经显式声明，
+    /// 那一半由 [`every_db_option_fixture_declares_its_store_mode_and_data_face`] 守。
+    #[test]
+    fn the_default_store_mode_is_spawned_mem() {
+        assert_eq!(
+            effective_store_mode(None, None, None, None),
+            StoreMode::SpawnedMem
+        );
+    }
+
+    /// 没写 `store_mode` 但写了旧开关时，**由旧开关说话**，语义与它今天的两态逐字相同。
+    /// 尤其是 `in_memory_db = false`：那句 false 是人写下的「我要过外置库」，
+    /// 不该被新默认盖掉——那正是升级时最容易被静默改掉的一格。
+    #[test]
+    fn an_explicit_legacy_flag_still_decides_when_store_mode_is_unset() {
+        assert_eq!(
+            effective_store_mode(None, None, Some(true), None),
+            StoreMode::EmbeddedMem
+        );
+        assert_eq!(
+            effective_store_mode(None, None, Some(false), None),
+            StoreMode::External
+        );
+        // 旧开关的环境变量压过它自己的配置值，与 `in_memory_db()` 同一规则。
+        assert_eq!(
+            effective_store_mode(None, None, Some(false), Some("1")),
+            StoreMode::EmbeddedMem
+        );
+    }
+
+    /// 环境变量压过配置，配置压过旧开关；下划线与大小写都认（`SPAWNED_MEM` 是
+    /// 环境变量里最自然的写法，认不出它只会让人以为开关没生效）。
+    #[test]
+    fn the_store_mode_env_override_wins_over_config_and_the_legacy_flag() {
+        assert_eq!(
+            effective_store_mode(Some("external"), Some("spawned-mem"), Some(false), None),
+            StoreMode::SpawnedMem
+        );
+        assert_eq!(
+            effective_store_mode(Some("spawned-mem"), None, Some(true), None),
+            StoreMode::SpawnedMem
+        );
+        assert_eq!(
+            effective_store_mode(None, Some("SPAWNED_MEM"), Some(false), None),
+            StoreMode::SpawnedMem
+        );
+        assert_eq!(
+            effective_store_mode(Some(" Embedded-Mem "), None, None, None),
+            StoreMode::EmbeddedMem
+        );
+    }
+
+    /// 拼错的值当没设 —— 但必须出声。静默换掉持久层介质是本仓最贵的那类沉默：
+    /// 一个 `spawn-mem` 的错字会让部署以为自己在内存形态，实际连着昨天那台落盘库。
+    #[test]
+    fn an_unrecognised_store_mode_is_ignored_but_never_silent() {
+        assert_eq!(
+            effective_store_mode(Some("spawn-mem"), None, Some(false), None),
+            StoreMode::External
+        );
+        let notice = store_mode_notice_for(Some("spawn-mem"), None, None)
+            .expect("认不出的 store_mode 必须出声");
+        assert!(notice.contains("spawn-mem"), "{notice}");
+        assert!(notice.contains("external"), "{notice}");
+        assert!(store_mode_notice_for(Some("external"), None, None).is_none());
+        assert!(store_mode_notice_for(None, None, None).is_none());
+    }
+
+    /// 两个键打架时以 `store_mode` 为准，但不许静默——旧配置里那句
+    /// `in_memory_db = true` 会让读配置的人得出相反的结论。
+    #[test]
+    fn a_contradicting_legacy_flag_is_named_not_swallowed() {
+        let notice = store_mode_notice_for(Some("external"), None, Some(true))
+            .expect("store_mode 与 in_memory_db 打架时必须出声");
+        assert!(notice.contains("in_memory_db"), "{notice}");
+        assert!(notice.contains("external"), "{notice}");
+        // 说的是同一件事就不必吵。
+        assert!(store_mode_notice_for(Some("embedded-mem"), None, Some(true)).is_none());
+        assert!(store_mode_notice_for(Some("external"), None, Some(false)).is_none());
+    }
+
+    /// 只有外置那一档的行活得过进程重启；只有进程内嵌那一档别人连不上。
+    /// 这两句话是 `/health` 与回执的介质口径的唯一来源。
+    #[test]
+    fn only_the_external_store_is_durable_and_only_the_embedded_one_has_no_port() {
+        assert!(StoreMode::External.is_durable());
+        assert!(!StoreMode::SpawnedMem.is_durable());
+        assert!(!StoreMode::EmbeddedMem.is_durable());
+        assert!(StoreMode::External.has_endpoint());
+        assert!(StoreMode::SpawnedMem.has_endpoint());
+        assert!(!StoreMode::EmbeddedMem.has_endpoint());
+    }
+
+    /// 两个内存部署形式都不摄入属性；持久部署必须做完整基线与增量备份。
+    #[test]
+    fn data_face_follows_storage_backup_scope() {
+        assert_eq!(data_face_for_store(StoreMode::External), DataFace::Ingest);
+        assert_eq!(
+            data_face_for_store(StoreMode::SpawnedMem),
+            DataFace::ReadThrough
+        );
+        assert_eq!(
+            data_face_for_store(StoreMode::EmbeddedMem),
+            DataFace::ReadThrough
+        );
+        assert_eq!(parse_store_mode(Some("rocksdb")), Some(StoreMode::External));
+        assert_eq!(
+            parse_store_mode(Some("kv-mem")),
+            Some(StoreMode::SpawnedMem)
+        );
+        assert!(DataFace::ReadThrough.is_read_through());
+        assert!(!DataFace::Ingest.is_read_through());
+        assert_eq!(DataFace::Ingest.as_str(), "ingest");
+        assert_eq!(DataFace::ReadThrough.as_str(), "read-through");
+    }
+
+    /// 旧配置仍可解析，用于报告与启动介质冲突的设置。
+    #[test]
+    fn legacy_data_face_values_are_recognised() {
+        assert_eq!(parse_data_face(Some("INGEST")), Some(DataFace::Ingest));
+        assert_eq!(
+            parse_data_face(Some(" Read_Through ")),
+            Some(DataFace::ReadThrough)
+        );
+        assert_eq!(
+            parse_data_face(Some("readthrough")),
+            Some(DataFace::ReadThrough)
+        );
+    }
+
+    /// 拼错的值当没设——但必须出声：静默换掉数据面形态，症状是「摄入部署开机后 pe 一行
+    /// 都不进」，看上去像解析坏了而不是配置错了。
+    #[test]
+    fn an_unrecognised_data_face_is_ignored_but_never_silent() {
+        assert_eq!(parse_data_face(Some("ingset")), None);
+        let notice =
+            data_face_notice_for(Some("ingset"), None).expect("认不出的 data_face 必须出声");
+        assert!(notice.contains("ingset"), "{notice}");
+        assert!(notice.contains("ingest"), "{notice}");
+        let notice =
+            data_face_notice_for(None, Some("read-thru")).expect("认不出的环境变量必须出声");
+        assert!(notice.contains(DATA_FACE_ENV), "{notice}");
+        assert!(data_face_notice_for(Some("ingest"), None).is_none());
+        assert!(data_face_notice_for(None, Some("  ")).is_none());
+        assert!(data_face_notice_for(None, None).is_none());
+    }
+
+    /// **默认值翻转的护栏**：`spawned-mem` 一旦成为默认（计划 P3），每一份没写
+    /// `store_mode` 的夹具配置都会静默换介质——l3 套件自己在 8048 上起了一台
+    /// rocksdb surreal，服务却会去 spawn 它自己那台，症状是「测试莫名其妙全查不到
+    /// 数据」而不是一条报错。所以每一份夹具 / 现场配置都必须**显式**声明这一项。
+    ///
+    /// 2026-09-05 起 `data_face` 同款：默认翻成 `read-through` 之后，没写它的摄入部署
+    /// 开机不再做基线、`pe` 一行都不进，症状是「解析坏了」而不是「配置漏了一行」。
+    /// 两个键一起守，漏哪个都点名。
+    ///
+    /// 只放过仓根那份 `DbOption.toml`：它就是开箱即用形态本身，默认值正是为它准备的。
+    #[test]
+    fn every_db_option_fixture_declares_its_store_mode_and_data_face() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut missing = Vec::new();
+        let mut checked = 0;
+        for dir in [repo.to_path_buf(), repo.join("db_options")] {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if !name.starts_with("DbOption") || !name.ends_with(".toml") {
+                    continue;
+                }
+                if name == "DbOption.toml" {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                checked += 1;
+                let declares = |key: &str| {
+                    text.lines().any(|line| {
+                        let line = line.trim_start();
+                        !line.starts_with('#') && line.starts_with(key)
+                    })
+                };
+                for key in ["store_mode", "data_face"] {
+                    if !declares(key) {
+                        missing.push(format!("{name} 缺 {key}"));
+                    }
+                }
+            }
+        }
+        assert!(checked > 0, "一份夹具配置都没扫到，护栏的路径写错了");
+        assert!(
+            missing.is_empty(),
+            "这些配置没有显式声明形态键：{missing:?}。默认值（store_mode=spawned-mem、\
+             data_face=read-through）会让它们静默换介质 / 换数据面"
+        );
+    }
+
     /// 缺配置就是「算增量房间」（2026-08-12 起）：关着时房间归属只在删除路径被
     /// 清理，搬家后的重算没有任何自动回补通道——兜底的启动全量重建排在
     /// `startup_autorun` 之后，而它自己默认也是关的。要关得显式写出来。
@@ -1439,7 +2112,16 @@ mod tests {
         assert!(effective_room_incremental(None, Some("ture")));
     }
 
-    /// 两个 P2 灰度开关（T2.2 XGEOMETRY 门、T2b significant 压过 point）都必须
+    #[test]
+    fn spatial_compute_defaults_on_and_can_be_disabled_for_model_only_runs() {
+        assert!(effective_spatial_compute(None));
+        assert!(effective_spatial_compute(Some("on")));
+        assert!(!effective_spatial_compute(Some("0")));
+        assert!(effective_spatial_compute(Some("invalid")));
+    }
+
+    /// 三个 P2 灰度开关（T2.2 XGEOMETRY 门、T2b significant 压过 point、T2c
+    /// 无几何入口丢弃）都必须
     /// 默认关：它们各自改变一类工作项的产生，「没人点头就跟引入前一字不差」是
     /// 计划（每步单独可上线、单独可回滚）的前提。环境变量双向可压、拼错回落配置，
     /// 与其余布尔开关同一套规则。
@@ -1473,6 +2155,14 @@ mod tests {
         {
             let _off = SignificantOverPointOverride::set(false);
             assert!(!model_significant_over_point());
+        }
+        {
+            let _on = ModelEntryDropNoGeometryOverride::set(true);
+            assert!(model_entry_drop_no_geometry());
+        }
+        {
+            let _off = ModelEntryDropNoGeometryOverride::set(false);
+            assert!(!model_entry_drop_no_geometry());
         }
         {
             let _on = StructuralConnectionCascadeOverride::set(true);
@@ -2003,4 +2693,42 @@ mod tests {
         assert_eq!(ext_config_name(Some(OsString::from("  "))), "DbOption");
         assert_eq!(ext_config_name(None), "DbOption");
     }
+}
+
+/// This switch controls new runs only. Existing journals must always recover.
+pub fn init_async_publish() -> bool {
+    std::env::var("AIOS_INIT_ASYNC_PUBLISH")
+        .ok()
+        .map(|v| !matches!(v.as_str(), "0" | "false"))
+        .unwrap_or_else(|| load_ext_fields().init_async_publish.unwrap_or(true))
+        && store_mode().is_durable()
+        && !data_face().is_read_through()
+}
+/// 数据面事务切块上限的三个配置值（原样、未填默认）；合成与默认值在
+/// `data_interface::tx_limits::DataTxLimits::from_config`。
+pub fn data_tx_limits_config() -> (Option<u64>, Option<u64>, Option<u64>) {
+    let ext = load_ext_fields();
+    (
+        ext.data_tx_max_bytes,
+        ext.data_tx_max_write_rows,
+        ext.data_tx_elements,
+    )
+}
+
+pub fn model_publish_queue_limits() -> (std::path::PathBuf, u64, u64) {
+    let ext = load_ext_fields();
+    let base = std::env::var_os("GEN_MODEL_RUN_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().expect("process run directory"));
+    let root = ext
+        .model_publish_queue_dir
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| base.join(".gen-model/model-publish-queue-v1"));
+    (
+        root,
+        ext.model_publish_memory_bytes.unwrap_or(512 * 1024 * 1024),
+        ext.model_publish_disk_bytes
+            .unwrap_or(20 * 1024 * 1024 * 1024),
+    )
 }

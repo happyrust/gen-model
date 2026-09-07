@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use aios_core::{RefU64, RefnoEnum};
+use aios_core::RefU64;
 use aios_database::data_interface::cata_closure::CataDbLocator;
 use aios_database::data_interface::direct_index::BackRefVia;
 use aios_database::data_interface::direct_store::{
@@ -407,15 +407,13 @@ fn bran_members_match_the_e3d_tty_capture_in_order() {
         return;
     }
 
-    let service = DirectTreeService::open("AvevaMarineSample", "ALL")
-        .expect("e3d-io direct tree opens");
+    let service =
+        DirectTreeService::open("AvevaMarineSample", "ALL").expect("e3d-io direct tree opens");
     let binary = service
         .children(RefU64::from_two_nums(24_383, 73_930))
         .expect("BRAN children load");
-    let tty = parse_members(include_str!(
-        "fixtures/bran_24383_73930_members_tty.log"
-    ))
-    .expect("saved E3D TTY Q MEMBERS parses");
+    let tty = parse_members(include_str!("fixtures/bran_24383_73930_members_tty.log"))
+        .expect("saved E3D TTY Q MEMBERS parses");
 
     assert_eq!(binary.len(), 17);
     assert_eq!(binary.len(), tty.len());

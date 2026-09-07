@@ -61,9 +61,16 @@ fn capture_batch(
     out_dir: &Path,
 ) -> anyhow::Result<()> {
     let refnos = read_refnos(refno_file)?;
-    anyhow::ensure!(!refnos.is_empty(), "{} contains no refnos", refno_file.display());
+    anyhow::ensure!(
+        !refnos.is_empty(),
+        "{} contains no refnos",
+        refno_file.display()
+    );
     let raw = driver.run_source(repo, "tty-attlist-batch-capture", &batch_source(&refnos))?;
-    anyhow::ensure!(!raw.contains("NOUN-NOT-FOUND"), "E3D TTY batch contains missing refnos");
+    anyhow::ensure!(
+        !raw.contains("NOUN-NOT-FOUND"),
+        "E3D TTY batch contains missing refnos"
+    );
     std::fs::create_dir_all(out_dir)?;
     for (index, refno) in refnos.iter().enumerate() {
         let fixture = extract_batch_fixture(&raw, index)?;

@@ -5,7 +5,8 @@
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    aios_core::init_surreal().await?;
+    // 只附着、不拉起（`store_mode` 默认已是 spawned-mem）：探针要看的是服务手上那个库。
+    aios_database::attach_store_connected().await?;
 
     let mdb = "/ALL".to_string();
 

@@ -177,7 +177,9 @@ fn collect(
         .roots()?
         .into_iter()
         .filter(|node| {
-            dbnum.is_none_or(|wanted| service.dbnum_of(node.refno.refno()).ok() == Some(wanted))
+            dbnum.is_none_or(|wanted| {
+                service.dbnum_of(node.refno.refno()).map(|db| db as i32) == Some(wanted)
+            })
         })
         .collect::<Vec<_>>();
     anyhow::ensure!(

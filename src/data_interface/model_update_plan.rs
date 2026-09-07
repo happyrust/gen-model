@@ -11,7 +11,8 @@ use crate::data_interface::manual_update::{
     resolve_unit_rollup,
 };
 use crate::data_interface::model_impact::{
-    OperationImpact, classify_operation_impact, normalize_attribute_name, owner_change,
+    OperationImpact, classify_operation_impact, normalize_attribute_name,
+    noun_is_no_geometry_model_entry, owner_change,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -278,6 +279,13 @@ pub(crate) fn partition_operation_impacts(
     let mut regen_refnos = HashSet::new();
     let mut transform_refnos = HashSet::new();
     for op in range_eles.values().flatten() {
+        // T2c 只剪模型分区输入；`details` 与后续 `design_refnos` 仍保留完整数据窗口。
+        // Deleted 没有可靠 noun，`get_noun_type()` 为空，因而天然保守保留。
+        if crate::options::model_entry_drop_no_geometry()
+            && noun_is_no_geometry_model_entry(&op.get_noun_type())
+        {
+            continue;
+        }
         match classify_operation_impact(op) {
             OperationImpact::Regen => {
                 regen_refnos.insert(RefnoEnum::from(op.refno));
@@ -1232,6 +1240,42 @@ mod tests {
             HashSet::from([RefnoEnum::from(geom), RefnoEnum::from(both)]),
             "几何变更与「位姿+几何」都归重建"
         );
+    }
+
+    /// C1-6 后半条：同一条已知无几何变化，关门保持历史 Regen；开门后模型分区为空。
+    /// 原始操作与数据层 details 不被改写。
+    #[test]
+    fn no_geometry_entry_gate_only_removes_model_work() {
+        let refno = aios_core::RefU64((1u64 << 32) | 21);
+        let mut op = modified_op(refno, 42, "MYSTERY");
+        let EleOperationDetail::Modified(modified) = &mut op.detail else {
+            unreachable!()
+        };
+        modified.noun = "DB".into();
+        let range_eles = BTreeMap::from([(42, vec![op])]);
+        let details = vec![NetChangeDetail {
+            refno: RefnoEnum::from(refno),
+            net: NetOp::Modified,
+            model_affecting: true,
+        }];
+
+        {
+            let _off = crate::options::ModelEntryDropNoGeometryOverride::set(false);
+            let partition = partition_operation_impacts(&range_eles, &details);
+            assert_eq!(
+                partition.regen_refnos,
+                HashSet::from([RefnoEnum::from(refno)])
+            );
+        }
+        {
+            let _on = crate::options::ModelEntryDropNoGeometryOverride::set(true);
+            let partition = partition_operation_impacts(&range_eles, &details);
+            assert!(partition.regen_refnos.is_empty());
+            assert!(partition.transform_refnos.is_empty());
+        }
+        assert_eq!(range_eles[&42][0].get_noun_type(), "DB");
+        assert_eq!(details.len(), 1);
+        assert!(details[0].model_affecting, "数据层明细不得被模型门改写");
     }
 
     /// 哪些交付单元的几何由成员位置派生（issue #5）。

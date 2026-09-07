@@ -1,0 +1,61 @@
+$(
+------------------------------------------------------------------------
+RVM 基准导出：STRU /-KX-CAM-S4001
+  (dbnum 7997, SITE /1CAM-HVACHB → ZONE /-KX-CAM-4-HVAC-SUPP
+   → STRU /-KX-CAM-S4001 → FRMW /-KX-CAM-S4001/MAIN → 2 根 SCTN)
+
+ams7997 结构线的第一个对拍基准。背景：这库 1762 只 SCTN 里有 1554 只的
+SPRE 指向 db 7600（`zdj7600_0001`），那个库不在 ams000 / acp000 两个工程
+目录下，`DirectoryDbResolver` 找不到它，于是生成侧一直把这 1554 只记成
+`catalogue_chain_broken`，开发计划也就把 SCTN 当成「未接线」的结构线大头。
+把 zdj7600 显式开进 DbSet 之后，这 1554 只全部出了实体。
+
+但「出了」不等于「对」。SCTN 的标架不是库里存的，是 `GTSTDT` 从
+POSS→POSE + BANG + JUSL p-line 推出来的；截面绕轴转错 90°、基准线选错、
+两端切口差一截，这些在账面上一律看不出来，只有逐面片对拍能判。
+
+选这条 STRU 的理由：
+  - 它的 `/-KX-CAM-S4001-V1` 正是那 1554 族的样本（`GTYP=ANG`、`BANG=-90`、
+    `SPRE → 23984/110644 @ db 7600`），BANG 非零，第一个样本就把「绕轴转」
+    这个最容易错的点暴露出来；
+  - `S4001` 又是开发计划点名的四个型材参考之一（S4001 / L40X4 / HW150 / C80）。
+
+导出是只读：没有 SAVEWORK，不产生新会话号。
+表现口径与 rvm_export_1rx03_msup_e0110.mac 逐行相同，换掉的只有目标与输出。
+跑法也相同：run_ams_c_entrymacro.bat（AVEVA_DESIGN_ENTRYMACRO + 分离进程）。
+末尾的 QUIT 让会话导完立刻退出，不耗满 wrapper 那 1200 秒超时。
+------------------------------------------------------------------------
+$)
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/rvm_export_kx_cam_s4001.log" OVER
+$P CODEX-DB7997-S4001-RVM-EXPORT-ALIVE
+
+$* ---- 表现设置：只导实体几何 ----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+
+$* ---- 驱动与输出 ----
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/test_data/rvm/KX-CAM-S4001.rvm"
+export filenote 'RVM baseline for STRU /-KX-CAM-S4001 (dbnum 7997, 1 FRMW / 2 SCTN)'
+
+$* ---- 表现选项 ----
+export holes on
+export autocolour displayexport on
+export repr on
+
+$* ---- 包含列表：这一条 STRU 及其全部子孙 ----
+export /-KX-CAM-S4001
+
+$* ---- 执行 ----
+export finish
+
+$P CODEX-DB7997-S4001-RVM-EXPORT-DONE
+ALPHA LOG END
+
+$* ---- 自己收尾 ----
+QUIT
+FINISH
+FINISH

@@ -1,0 +1,49 @@
+-- 管道 P-07「增·成员」apply：在 scratch 支管 A（/CODEX_DB8000_PIPE_SCR_A）尾部新增一件 FTUB。
+--
+-- 用 COPY 一个已有 FTUB（带 SPRE 13244/108794）来建，保证新件有目录链、能出几何——空 NEW FTUB
+-- 没有 arrive/leave 就没有管身。源件取 A 的 FTUB 7（本会话 = 24384/26300，由
+-- db8000_pipe_scratch_a_create.log 读到；A 每次 create 重新分配 refno，复跑时按 create 日志改这一行）。
+--
+-- 预期（模型面）：created +1（新 FTUB 归到 BRAN A 根）→ regen 1（就 A 这条 BRAN）+ 邻接派生管身重算；
+-- PIPE /1RX-345 的 members_changed 判 no_model、不成根；生产支管 /C-OR-1R345-C 不动。
+--
+-- 纪律：恰好一个 SAVEWORK；不写 QUIT/FINISH；SAVEWORK 前导窄口径 RVM。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_pipe_new_member_apply.log" OVER
+$P CODEX-DB8000-PIPE-NEW-MEMBER-APPLY-ALIVE
+/CODEX_DB8000_PIPE_SCR_A
+Q CE
+Q REF
+Q NAME
+Q MEMB
+NEW FTUB
+COPY =24384/26300
+Q CE
+Q REF
+Q SPRE
+Q POS
+OWNER
+Q CE
+Q REF
+Q MEMB
+
+$* ---- RVM 导出（状态 a1：new-member）----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/db8000-pipe-scratch/rvm/a1-new-member.rvm"
+export filenote 'CODEX db8000 pipe P-07 apply: NEW FTUB in scratch A'
+export holes on
+export autocolour displayexport on
+export repr on
+export /CODEX_DB8000_PIPE_SCR_A
+export finish
+
+/CODEX_DB8000_PIPE_SCR_A
+Q REF
+Q MEMB
+SAVEWORK 'CODEX db8000 pipe P-07 apply: NEW FTUB in scratch A /CODEX_DB8000_PIPE_SCR_A'
+$P CODEX-DB8000-PIPE-NEW-MEMBER-APPLY-DONE
+ALPHA LOG END

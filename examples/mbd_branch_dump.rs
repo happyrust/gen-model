@@ -29,7 +29,10 @@ use plant_mbd::branch_to_split_members;
 const TEMPLATE_DIR_DEFAULT: &str = r"E:\reverse\e3d\shadow_e3d31_aps_all";
 
 #[derive(Parser, Debug)]
-#[command(name = "mbd_branch_dump", about = "E3D .dat → plant-mbd field fixture（成员结点视图）")]
+#[command(
+    name = "mbd_branch_dump",
+    about = "E3D .dat → plant-mbd field fixture（成员结点视图）"
+)]
 struct Args {
     /// DESI 主库文件（如 ams7999_0001）
     #[arg(long)]
@@ -103,7 +106,9 @@ fn main() -> anyhow::Result<()> {
         let id = wire_refno(refno);
         let mut by_noun: BTreeMap<String, usize> = BTreeMap::new();
         for member in &query.members {
-            *by_noun.entry(member.noun.clone().unwrap_or_default()).or_default() += 1;
+            *by_noun
+                .entry(member.noun.clone().unwrap_or_default())
+                .or_default() += 1;
         }
         let composition = by_noun
             .iter()
@@ -113,7 +118,9 @@ fn main() -> anyhow::Result<()> {
         let members = branch_to_split_members(&query);
         let title = format!(
             "Field BRAN {id} from {db_name} sesno {}: {} members ({composition}), {} adapter issue(s)",
-            sesno.map(|s| s.to_string()).unwrap_or_else(|| "latest".into()),
+            sesno
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "latest".into()),
             query.members.len(),
             query.issues.len()
         );

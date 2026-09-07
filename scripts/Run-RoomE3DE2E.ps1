@@ -453,6 +453,11 @@ try {
     $env:AIOS_LIVE_NS = '1516'
     $env:AIOS_LIVE_DB = 'AvevaMarineSample'
     $env:DB_OPTION_FILE = 'db_options/DbOption-issue7-e2e'
+    # 靶已经定在 $SurrealPort 上那台库：进程必须连它，不许自己再拉一台
+    # （store_mode 默认已是 spawned-mem，2026-09-04）。
+    $env:AIOS_STORE_MODE = 'external'
+    # 数据面同理：房间 e2e 要的是摄入链，data_face 的新默认（read-through，2026-09-05）不做基线。
+    $env:AIOS_DATA_FACE = 'ingest'
 
     if ($L3Exe) {
         $script:l3 = (Resolve-Path $L3Exe).Path

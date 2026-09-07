@@ -119,7 +119,7 @@ bincode = "1.3.3"
 rvm-rs = { git = "https://github.com/happyrust/rvm-rs", optional = true }
 anyhow = "1.0.57"
 e3d-model = { path = "../vendor/e3d-model" }
-serde_json = "1.0.81"
+serde_json = { version = "1.0.81", features = ["float_roundtrip"] }
 hex = "0.4.3"
 sha2 = "0.10.9"
 tempfile = "3.27.0"

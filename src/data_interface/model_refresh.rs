@@ -108,7 +108,16 @@ impl ModelRefreshPolicy {
         if roots.is_empty() {
             return Ok(TargetedGenerationReport::default());
         }
-        crate::data_interface::initialization_phase::require_model_generation()?;
+        let dbnum = E3dModelService::dbnum_for_roots(roots).await?;
+        // 「只写内存」作用域（plan 2026-09-06 §8 R2）：这个库在 rocksdb 里还没准备好（基线未落
+        // 或初始化发布 run 在飞），按需请求直接从文件生成进进程内投影、由 API 供数。三道门
+        // 对它都不适用——`require_model_generation` 挡的是 durable 工作与启动全量，
+        // `wait_for_dbnum` 等的是持久层上那个 run，`persist_root` 写的是持久层；这一档三样
+        // 都不碰。持久由初始化 run 负责，两个写者只会撞乐观事务（Q8）。
+        let memory_only = crate::data_interface::model_read_route::memory_only_for(dbnum);
+        if !memory_only {
+            crate::data_interface::initialization_phase::require_model_generation()?;
+        }
         #[cfg(test)]
         if FAIL_GENERATIONS
             .fetch_update(
@@ -125,10 +134,200 @@ impl ModelRefreshPolicy {
         let failure_policy =
             crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback;
         crate::data_interface::batch_worker::set_active_task_stage("model_generate");
-        let dbnum = E3dModelService::dbnum_for_roots(roots).await?;
-        let service = E3dModelService::from_current().await?;
-        let persisted = service.generate_roots(dbnum, roots, failure_policy).await?;
+        if !memory_only {
+            crate::data_interface::model_publish_queue::wait_for_dbnum(dbnum).await;
+        }
+        let service = match crate::data_interface::batch_worker::active_frozen_source()? {
+            Some(source) => {
+                anyhow::ensure!(
+                    source.dbnum() as u32 == dbnum,
+                    "active file round dbnum {} cannot generate roots owned by dbnum {dbnum}",
+                    source.dbnum()
+                );
+                E3dModelService::from_frozen_source(&source).await?
+            }
+            // Q9：有初始化 run 在飞就钉它那一版文件——按需投影与 run 稍后发布的行同版，
+            // 翻面时 `commit_prepared_frozen_projection` 覆盖进来零差异；没有 run 取文件最新。
+            None => match crate::data_interface::model_read_route::memory_only_scope()
+                .and_then(crate::data_interface::model_publish_queue::initialization_source)
+            {
+                Some(source) if source.dbnum() as u32 == dbnum => {
+                    E3dModelService::from_frozen_source(&source).await?
+                }
+                _ => E3dModelService::from_current().await?,
+            },
+        };
+        let persisted = service
+            .generate_and_persist_roots(dbnum, roots, failure_policy)
+            .await?;
         if persisted.failed == 0 {
+            // 读透形态（`data_face = read-through`）：新生成的每根在**发布模型行之前**先把
+            // 子树（DFS 访问名单 ∪ 祖先链）的数据面终态写透进 `pe` / `ATT_*` / `pe_owner`
+            // ——plant-ui 拿到 ensure 回执后读模型行时 `in.owner` 已经在。生成服务只报名单
+            // （ADR-057：模型面不认识库），读文件用的 `DbSet` 与生成钉同一版会话。
+            // durable spool 是发布门：落盘失败时保留内存记录供连续展示，但清掉根回执，
+            // 让后续 ensure 必须重试发布。
+            let read_through_set = if crate::options::data_face().is_read_through()
+                && crate::options::store_mode().is_durable()
+                && !persisted.visited_by_root.is_empty()
+            {
+                match Self::open_read_through_source(&service, dbnum, &persisted) {
+                    Ok(opened) => Some(opened),
+                    Err(error) => {
+                        log::error!(
+                            "read_through_degraded: dbnum {dbnum} 的读透源打不开，本批 {} 根不能建立 durable mirror job：{error:#}",
+                            roots.len()
+                        );
+                        return Ok(TargetedGenerationReport {
+                            completed: Vec::new(),
+                            failures: roots
+                                .iter()
+                                .map(|root| RootGenerationFailure {
+                                    root: root.clone(),
+                                    error: format!("durable mirror source unavailable: {error:#}"),
+                                })
+                                .collect(),
+                        });
+                    }
+                }
+            } else {
+                None
+            };
+            // CATA 依赖块（plan 2026-09-06 §3 D6 (c)）：摄入 + 落库的形态下，每根发布前把它子树
+            // （e3d-model DFS `visited`）依赖的目录链元素 Fresh 入库——服务 ADR-056 N7 下 `pe` 零行的库
+            // 走按需 ensure 时属性面板也有目录属性可读。独立于模型发布事务，失败只 warning、不拦发布
+            // （ADR-056 D1 的对偶：依赖块也不拦模型）。只写内存的库不落任何东西。
+            let dependency_source = if !memory_only
+                && !crate::options::data_face().is_read_through()
+                && crate::options::store_mode().is_durable()
+                && !persisted.visited_by_root.is_empty()
+            {
+                match Self::open_read_through_source(&service, dbnum, &persisted) {
+                    Ok((set, _)) => Some(set),
+                    Err(error) => {
+                        log::warn!(
+                            "cata_dependency_skipped: dbnum {dbnum} 的设计文件打不开，本批 {} 根的目录依赖不入库：{error:#}",
+                            roots.len()
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            // 生成只写进程内投影（ADR-057：模型面不认识库），落库是这一步。一根一个事务，
+            // 落不进去的那根算它自己失败、进重试账——投影在内存里是对的，但 Plant UI 看不见
+            // 的东西不能算完成。
+            let mut failures = Vec::new();
+            for root in roots {
+                let refno = crate::fast_model::e3d_model_service::parse_refno(root)?;
+                if let (Some(set), Some(visited)) = (
+                    dependency_source.as_ref(),
+                    persisted.visited_by_root.get(&refno),
+                ) {
+                    let project = aios_core::get_db_option().project_name.clone();
+                    match crate::data_interface::cata_dependency::persist_for_design_subtree(
+                        &project, dbnum, set, visited,
+                    )
+                    .await
+                    {
+                        Ok(report) => {
+                            if let Some(warning) = report.warning(dbnum) {
+                                log::warn!("root {root}: {warning}");
+                            }
+                        }
+                        Err(error) => log::warn!(
+                            "cata_dependency_degraded: root {root} 的目录依赖入库失败（不拦发布）：{error:#}"
+                        ),
+                    }
+                }
+                if let Some((set, source)) = read_through_set.as_ref() {
+                    if let Some(visited) = persisted.visited_by_root.get(&refno) {
+                        if let Err(error) =
+                            Self::write_through_root(set, source, refno, visited).await
+                        {
+                            crate::fast_model::model_memory_store::ModelMemoryStore::global()
+                                .invalidate_receipt(
+                                    crate::fast_model::model_memory_store::ProjectionScope::Current,
+                                    refno,
+                                );
+                            failures.push(RootGenerationFailure {
+                                root: root.clone(),
+                                error: format!("durable mirror hand-off failed: {error:#}"),
+                            });
+                            continue;
+                        }
+                    } else {
+                        crate::fast_model::model_memory_store::ModelMemoryStore::global()
+                            .invalidate_receipt(
+                                crate::fast_model::model_memory_store::ProjectionScope::Current,
+                                refno,
+                            );
+                        failures.push(RootGenerationFailure {
+                            root: root.clone(),
+                            error: "generation report omitted the root's frozen source visit set"
+                                .into(),
+                        });
+                        continue;
+                    }
+                    if let Err(error) = Self::spool_model_root(source, refno) {
+                        crate::fast_model::model_memory_store::ModelMemoryStore::global()
+                            .invalidate_receipt(
+                                crate::fast_model::model_memory_store::ProjectionScope::Current,
+                                refno,
+                            );
+                        failures.push(RootGenerationFailure {
+                            root: root.clone(),
+                            error: format!("durable model mirror hand-off failed: {error:#}"),
+                        });
+                        continue;
+                    }
+                }
+                // 只写内存的库不落 rocksdb（R2 / Q8）：投影在内存里、`/model/records` 从那儿供数。
+                if memory_only {
+                    continue;
+                }
+                if !crate::options::data_face().is_read_through()
+                    || !crate::options::store_mode().is_durable()
+                {
+                    let publish_result = if let Some((round_dbnum, round_end)) =
+                        crate::data_interface::batch_worker::active_data_window()
+                    {
+                        anyhow::ensure!(
+                            round_dbnum == dbnum,
+                            "file round {round_dbnum} cannot collect model root for dbnum {dbnum}"
+                        );
+                        let statement = crate::data_interface::side_effect_pending::
+                            SideEffectCompensator::render_file_model_publish_root(
+                                dbnum,
+                                round_end,
+                                root,
+                            )?;
+                        aios_core::SUL_DB
+                            .query(statement)
+                            .await
+                            .map_err(anyhow::Error::from)
+                            .and_then(|response| response.check().map_err(anyhow::Error::from))
+                            .map(|_| ())
+                    } else {
+                        crate::fast_model::model_db_adapter::persist_root(refno)
+                            .await
+                            .map(|_| ())
+                    };
+                    if let Err(error) = publish_result {
+                        failures.push(RootGenerationFailure {
+                            root: root.clone(),
+                            error: format!("{error:#}"),
+                        });
+                    }
+                }
+            }
+            if !failures.is_empty() {
+                return Ok(TargetedGenerationReport {
+                    completed: Vec::new(),
+                    failures,
+                });
+            }
             Ok(TargetedGenerationReport {
                 completed: roots.to_vec(),
                 failures: Vec::new(),
@@ -148,6 +347,120 @@ impl ModelRefreshPolicy {
                     .collect(),
             })
         }
+    }
+
+    /// 读透写行要读的那份文件：与生成同一个 dbnum、同一版会话（`E3dPersistReport::source_sesno`）。
+    /// 打开走 `e3d_collector::open_pinned_set`——基线读行用的就是它，两边渲出的行要逐字段相同，
+    /// 先从同一个开法起。会话缺了不猜：拿文件最新顶上会让 `pe.sesno` 与模型凭证说的不是同一版文件。
+    fn open_read_through_source(
+        service: &E3dModelService,
+        dbnum: u32,
+        persisted: &crate::fast_model::e3d_mesh_store::E3dPersistReport,
+    ) -> anyhow::Result<(
+        std::sync::Arc<e3d_io::db_element::DbSet>,
+        crate::data_interface::read_through::ReadThroughSource,
+    )> {
+        let sesno = persisted
+            .source_sesno
+            .context("generation report carries no source session; cannot write through")?;
+        let (file, db_type) = service.source_pin(dbnum)?;
+        let schema = crate::data_interface::direct_store::DirectSchema::open_from_env()?;
+        let set =
+            crate::data_interface::e3d_collector::open_pinned_set(&schema, &file, &db_type, sesno)?;
+        let source = crate::data_interface::read_through::ReadThroughSource { dbnum, file, sesno };
+        Ok((set, source))
+    }
+
+    /// 一根的写透：`visited ∪ 祖先链` → durable mirror spool。文件属性读取本身不受
+    /// spool 失败影响，但模型根只有在这份交接落盘之后才能取得发布回执。
+    async fn write_through_root(
+        set: &std::sync::Arc<e3d_io::db_element::DbSet>,
+        source: &crate::data_interface::read_through::ReadThroughSource,
+        root: e3d_io::refno::RefNo,
+        visited: &[e3d_io::refno::RefNo],
+    ) -> anyhow::Result<()> {
+        use crate::data_interface::read_through;
+        let refnos = match read_through::subtree_with_ancestors(set, root, visited) {
+            Ok(refnos) => refnos,
+            Err(error) => {
+                log::error!(
+                    "read_through_degraded: root {root} 的祖先链上溯失败，本根未写透：{error:#}"
+                );
+                return Err(error);
+            }
+        };
+        match read_through::spool_write_through(set, source, &refnos) {
+            Ok(receipt) => {
+                log::info!(
+                    "读透写透：根 {root} 写入 {} 个元素的数据面行（名单 {}，祖先在内；{} 块语句，{} ms，dbnum {} 会话 {}）",
+                    receipt.written,
+                    receipt.requested,
+                    receipt.statements,
+                    receipt.elapsed_ms,
+                    receipt.dbnum,
+                    receipt.sesno
+                );
+                if !receipt.missing.is_empty() {
+                    log::warn!(
+                        "读透写透：根 {root} 有 {} 个元素不在会话 {} 的索引里，未写：{}",
+                        receipt.missing.len(),
+                        receipt.sesno,
+                        receipt
+                            .missing
+                            .iter()
+                            .take(8)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                if receipt.foreign > 0 {
+                    log::warn!(
+                        "读透写透：根 {root} 的名单里有 {} 个不属于 dbnum {} 的元素，按 ADR-058 S3 不写",
+                        receipt.foreign,
+                        receipt.dbnum
+                    );
+                }
+                for warning in &receipt.warnings {
+                    log::warn!("{warning}");
+                }
+            }
+            Err(error) => {
+                log::error!("read_through_degraded: root {root} 持久镜像任务落盘失败：{error:#}");
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    /// Freeze the model rows produced for this root into the same durable spool
+    /// as the element mirror.  The queued SQL is a full idempotent replacement;
+    /// replay never reads the current source files or the current memory store.
+    fn spool_model_root(
+        source: &crate::data_interface::read_through::ReadThroughSource,
+        root: e3d_io::refno::RefNo,
+    ) -> anyhow::Result<()> {
+        let option = aios_core::get_db_option();
+        let transaction = crate::fast_model::model_db_adapter::render_spooled_root(
+            crate::fast_model::model_memory_store::ModelMemoryStore::global(),
+            root,
+        )?;
+        let spool = crate::data_interface::mirror_spool::MirrorSpool::for_process(
+            &option.surreal_ns,
+            &option.project_name,
+            &option.mdb_name,
+        )?;
+        let snapshot_epoch =
+            crate::data_interface::mdb_memory_store::get(&option.project_name, &option.mdb_name)
+                .map(|snapshot| snapshot.epoch())
+                .unwrap_or_else(|| u64::from(source.sesno));
+        spool.persist(
+            snapshot_epoch,
+            vec![(source.dbnum, source.sesno)],
+            format!("model:{root}"),
+            vec![transaction],
+        )?;
+        Ok(())
     }
 
     /// F1/F3（T304）补偿路径专用：补偿只有 `changed_refnos`（不含操作类型），故按**当前
@@ -207,6 +520,68 @@ mod tests {
                 "model_refresh.rs 生产代码不得再含 `{needle}`（ADR-056 D1 / D8-A）"
             );
         }
+    }
+
+    fn generate_roots_report_body(source: &str) -> &str {
+        source
+            .split_once("pub(crate) async fn generate_roots_report(")
+            .expect("generate_roots_report")
+            .1
+            .split_once("fn open_read_through_source(")
+            .expect("generate_roots_report end")
+            .0
+    }
+
+    /// 读透形态下，一根的写透排在它的模型行发布之前（计划 §3.2 第 5 条）：plant-ui 拿到
+    /// ensure 回执后去读 `inst_relate.in.owner`，那时 `pe` 行必须已经在。反过来写就会有一段
+    /// 「模型行在、pe 行还没到」的窗口，而隐式直管那条查询在这个窗口里整批解不出来。
+    #[test]
+    fn write_through_precedes_root_publication() {
+        let source = include_str!("model_refresh.rs").replace("\r\n", "\n");
+        let body = generate_roots_report_body(&source);
+        let write_through = body
+            .find("Self::write_through_root(")
+            .expect("generate_roots_report 必须在读透形态下调 write_through_root");
+        let publish = body
+            .find("model_db_adapter::persist_root(")
+            .expect("generate_roots_report 必须调 persist_root");
+        assert!(write_through < publish, "写透必须排在 persist_root 之前");
+        assert!(
+            body.contains("crate::options::data_face().is_read_through()"),
+            "写透只在读透形态下发生，判据必须是 data_face()"
+        );
+    }
+
+    /// 镜像数据库不是前置，但 durable spool 是发布门：源打不开、祖先链失败或
+    /// spool 落盘失败都必须让这根失败，并撤掉提前写入内存的发布回执。
+    #[test]
+    fn durable_spool_failure_blocks_root_publication() {
+        let source = include_str!("model_refresh.rs").replace("\r\n", "\n");
+        let production = source.split_once("mod tests {").expect("tests").0;
+        let helper = production
+            .split_once("async fn write_through_root(")
+            .expect("write_through_root")
+            .1
+            .split_once("pub async fn cleanup_deleted_by_pe_state(")
+            .expect("write_through_root end")
+            .0;
+        assert!(helper.contains("anyhow::Result<()>"));
+        assert!(helper.contains("return Err(error)"));
+        assert!(helper.contains("read_through_degraded"), "失败要有名字");
+        let body = generate_roots_report_body(&source);
+        assert!(body.contains("invalidate_receipt("));
+        assert!(body.contains("durable model mirror hand-off failed"));
+        let opening = body
+            .split_once("Self::open_read_through_source(")
+            .expect("open_read_through_source call")
+            .1;
+        assert!(
+            opening
+                .trim_start()
+                .starts_with("&service, dbnum, &persisted) {"),
+            "读透源打开失败要走 match 分支记日志，不许 `?`：{}",
+            &opening[..opening.len().min(80)]
+        );
     }
 
     /// F1 · T106（live）：按 `pe.deleted` 反推的清理必须扫净整棵子树，且**只**动被删的那棵。

@@ -55,15 +55,21 @@ pub async fn mbd_v2_pipe(
 }
 
 /// 与 `AppState` / MDB 视图无关的主体：给定一个 `DbSet` 就能答。集成测试直接喂目录扫描出来的库。
-pub async fn respond(set: Arc<DbSet>, refno: RefNo, input_refno: String) -> Result<Response, ApiError> {
+pub async fn respond(
+    set: Arc<DbSet>,
+    refno: RefNo,
+    input_refno: String,
+) -> Result<Response, ApiError> {
     let outcome = tokio::task::spawn_blocking(move || layout_pipe(&set, refno, &input_refno))
         .await
-        .map_err(|join| ApiError::from_domain(anyhow::anyhow!("mbd layout task aborted: {join}")))?;
+        .map_err(|join| {
+            ApiError::from_domain(anyhow::anyhow!("mbd layout task aborted: {join}"))
+        })?;
     match outcome {
         Ok(data) => Ok(Json(data).into_response()),
-        Err(BranchQueryError::NotFound { refno }) => {
-            Err(ApiError::not_found(format!("refno {refno} 在所钉会话里不存在")))
-        }
+        Err(BranchQueryError::NotFound { refno }) => Err(ApiError::not_found(format!(
+            "refno {refno} 在所钉会话里不存在"
+        ))),
         Err(error @ BranchQueryError::NotRouteContainer { .. }) => {
             Err(ApiError::precondition(error.to_string()))
         }
@@ -86,7 +92,9 @@ pub async fn respond(set: Arc<DbSet>, refno: RefNo, input_refno: String) -> Resu
             });
             Ok((StatusCode::UNPROCESSABLE_ENTITY, Json(body)).into_response())
         }
-        Err(error @ BranchQueryError::Solver { .. }) => Err(ApiError::precondition(error.to_string())),
+        Err(error @ BranchQueryError::Solver { .. }) => {
+            Err(ApiError::precondition(error.to_string()))
+        }
         Err(BranchQueryError::Db(error)) => Err(ApiError::from_domain(error.into())),
     }
 }

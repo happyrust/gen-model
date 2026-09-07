@@ -18,16 +18,106 @@
 //!
 //! 全库生成（`generate_dbnum`）只清边不排重算（ADR-010 §4 收窄 1：全量以启动全量房间重建收尾，
 //! 逐元素排任务等于给整库每个元素排一次重算）。
+//!
+//! **生产调用点是落库适配器**（`model_db_adapter::persist_root_in_chunks`，2026-09-04 接回）。
+//! 同日早些时候模型生成改成只写进程内投影存储（`model_memory_store`），发布事务连同它携带
+//! 的房间语句一起从 `e3d_model_service` 里撤了，这两支一度悬空；现在折算的输入换成投影记录
+//! （upsert 是这一根的全部记录，removal 是对账出来的陈旧几何），渲染出来的语句仍与几何写在
+//! 同一条事务上——只是切块之后清边跟着删除那一块走、排重算跟着回执那一块走，理由见适配器。
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use aios_core::RefnoEnum;
+use aios_core::{GeomInstQuery, RefnoEnum, SUL_DB};
 use anyhow::Context;
 use e3d_io::refno::RefNo;
 use e3d_model::elmodl::GeometryId;
 
 use crate::data_interface::generation_root::refno_from_e3d;
 use crate::fast_model::aabb_refresh::AabbChange;
+
+const PUBLISHED_ROOM_INPUT_TABLE: &str = "room_published_inst";
+
+/// Render one immutable room-geometry version from the current model rows.
+///
+/// The row set is written before the file manifest is switched.  Readers only
+/// select tokens present in `published_file_input`, so a crash before the
+/// spatial publication leaves this candidate invisible.  Retrying the same
+/// frozen round replaces only its own candidate rows.
+pub(crate) fn render_stage_published_room_input(dbnum: u32, commit_token: &str) -> String {
+    let token = crate::data_interface::dbnum_state::escape_surql_str(commit_token);
+    format!(
+        "DELETE {PUBLISHED_ROOM_INPUT_TABLE} WHERE dbnum = {dbnum} AND commit_token = '{token}' RETURN NONE; \
+         INSERT INTO {PUBLISHED_ROOM_INPUT_TABLE} \
+         SELECT {dbnum} AS dbnum, '{token}' AS commit_token, in AS refno, in.old_pe AS old_refno, \
+           (in.owner ?? type::thing('pe', string::concat(<string><int>math::floor(anc[1] / 4294967296), '_', <string>(anc[1] % 4294967296)))) AS owner, \
+           generic, (aabb_d ?? aabb.d) AS world_aabb, \
+           (world_trans_d ?? world_trans.d) AS world_trans, out.ptset.d.pt AS pts, \
+           IF booled_id != NONE {{ [{{ geo_hash: booled_id }}] }} \
+           ELSE {{ insts_flat ?? (SELECT (transform ?? trans.d) AS transform, record::id(out) AS geo_hash \
+                                  FROM out->geo_relate \
+                                  WHERE visible AND out.meshed AND (transform ?? trans.d) != NONE AND geo_type = 'Pos') }} AS insts, \
+           booled_id != NONE AS has_neg, dt AS date \
+         FROM inst_relate \
+         WHERE (dbnum = {dbnum} OR string::starts_with(record::id(in), '{dbnum}_')) \
+           AND (aabb_d ?? aabb.d) != NONE \
+           AND (world_trans_d ?? world_trans.d) != NONE RETURN NONE;"
+    )
+}
+
+/// Materialize a complete candidate for one frozen file version.  Publication
+/// of the matching token is a separate, later transaction.
+pub(crate) async fn stage_published_room_input(
+    dbnum: u32,
+    commit_token: &str,
+) -> anyhow::Result<()> {
+    let statements = render_stage_published_room_input(dbnum, commit_token);
+    SUL_DB
+        .query(format!(
+            "BEGIN TRANSACTION; {statements} COMMIT TRANSACTION;"
+        ))
+        .await
+        .context("stage immutable room input query")?
+        .check()
+        .context("stage immutable room input statements")?;
+    Ok(())
+}
+
+/// Read room geometry only from file versions named by the committed manifest.
+/// Candidate versions may already exist in the same table, but remain
+/// invisible until their file token is published.
+pub(crate) async fn query_published_room_insts(
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<Vec<GeomInstQuery>> {
+    query_published_room_insts_on(&SUL_DB, refnos).await
+}
+
+async fn query_published_room_insts_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    refnos: &[RefnoEnum],
+) -> anyhow::Result<Vec<GeomInstQuery>> {
+    if refnos.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = render_published_room_inst_query(refnos);
+    let mut response = db.query(sql).await?.check()?;
+    response
+        .take::<Vec<GeomInstQuery>>(0)
+        .map_err(anyhow::Error::from)
+}
+
+fn render_published_room_inst_query(refnos: &[RefnoEnum]) -> String {
+    let keys = refnos
+        .iter()
+        .map(RefnoEnum::to_pe_key)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "SELECT refno, old_refno, owner, generic, world_aabb, world_trans, pts, insts, has_neg, date \
+         FROM {PUBLISHED_ROOM_INPUT_TABLE} \
+         WHERE commit_token IN (SELECT VALUE commit_token FROM published_file_input) \
+           AND (refno IN [{keys}] OR old_refno IN [{keys}]);"
+    )
+}
 
 /// 这次发布是定向生成（窗口 `RegenRoot` / 按需 `ensure`）还是全库生成。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -116,9 +206,201 @@ pub(crate) fn render_room_publication_effects(
     out
 }
 
+/// Apply edge removals captured while a file round was still private. This is
+/// deliberately called only after that round's spatial view has been
+/// published; failures leave the room rows pending for retry.
+pub(crate) async fn clear_deferred_room_edges(refnos: &[String]) -> anyhow::Result<()> {
+    if refnos.is_empty() {
+        return Ok(());
+    }
+    let cleared = refnos
+        .iter()
+        .map(|raw| {
+            raw.parse::<aios_core::RefU64>()
+                .map(aios_core::RefnoEnum::from)
+                .map_err(|err| anyhow::anyhow!("invalid deferred room refno {raw}: {err:?}"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let effects = RoomPublicationEffects {
+        recalc: Vec::new(),
+        cleared,
+    };
+    let statements = render_room_publication_effects(&effects, RoomEffectPolicy::Directed, true);
+    if statements.is_empty() {
+        return Ok(());
+    }
+    aios_core::SUL_DB
+        .query(format!(
+            "BEGIN TRANSACTION;\n{statements}\nCOMMIT TRANSACTION;"
+        ))
+        .await?
+        .check()?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn room_input_candidates_stay_hidden_until_the_file_token_switches() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("room_publication")
+            .use_db("versioned_input")
+            .await
+            .unwrap();
+        db.query(
+            "CREATE pe:24384_1 SET noun = 'SITE'; \
+             CREATE pe:24384_7 SET noun = 'EQUI'; \
+             CREATE inst_relate:24384_7 SET dbnum = 8000, in = pe:24384_7, \
+               anc = [104728482619399, 104728482619393], generic = 'OLD', \
+               aabb_d = { mins: [0f, 0f, 0f], maxs: [1f, 1f, 1f] }, \
+               world_trans_d = { translation: [0f, 0f, 0f], rotation: [0f, 0f, 0f, 1f], scale: [1f, 1f, 1f] }, \
+               insts_flat = [{ geo_hash: 'mesh-old' }], booled_id = NONE;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        db.query(format!(
+            "BEGIN TRANSACTION; {} \
+             CREATE published_file_input:8000 SET dbnum = 8000, commit_token = 'old-token'; \
+             COMMIT TRANSACTION;",
+            render_stage_published_room_input(8000, "old-token")
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        db.query("UPDATE inst_relate:24384_7 SET generic = 'NEW';")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        db.query(format!(
+            "BEGIN TRANSACTION; {} COMMIT TRANSACTION;",
+            render_stage_published_room_input(8000, "new-token")
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let target = RefnoEnum::from("24384/7");
+        let mut response = db
+            .query(render_published_room_inst_query(&[target]))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let rows: Vec<GeomInstQuery> = response.take(0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].generic, "OLD");
+
+        db.query("UPDATE published_file_input:8000 SET commit_token = 'new-token';")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let mut response = db
+            .query(render_published_room_inst_query(&[target]))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let rows: Vec<GeomInstQuery> = response.take(0).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].generic, "NEW");
+    }
+
+    #[tokio::test]
+    async fn completed_file_publishes_with_the_other_files_previous_version() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("room_publication")
+            .use_db("cross_file_versions")
+            .await
+            .unwrap();
+        db.query(
+            "CREATE pe:24384_7 SET noun = 'EQUI'; \
+             CREATE pe:24385_8 SET noun = 'EQUI'; \
+             CREATE inst_relate:a_old SET dbnum = 8000, in = pe:24384_7, \
+               anc = [104728482619399, 104728482619393], generic = 'A-OLD', \
+               aabb_d = { mins: [0f, 0f, 0f], maxs: [1f, 1f, 1f] }, \
+               world_trans_d = { translation: [0f, 0f, 0f], rotation: [0f, 0f, 0f, 1f], scale: [1f, 1f, 1f] }, \
+               insts_flat = [{ geo_hash: 'mesh-a-old' }], booled_id = NONE; \
+             CREATE inst_relate:b_old SET dbnum = 8001, in = pe:24385_8, \
+               anc = [104732777586696, 104732777586689], generic = 'B-OLD', \
+               aabb_d = { mins: [2f, 0f, 0f], maxs: [3f, 1f, 1f] }, \
+               world_trans_d = { translation: [0f, 0f, 0f], rotation: [0f, 0f, 0f, 1f], scale: [1f, 1f, 1f] }, \
+               insts_flat = [{ geo_hash: 'mesh-b-old' }], booled_id = NONE;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        db.query(format!(
+            "BEGIN TRANSACTION; {} {} \
+             CREATE published_file_input:8000 SET dbnum = 8000, commit_token = 'a-old'; \
+             CREATE published_file_input:8001 SET dbnum = 8001, commit_token = 'b-old'; \
+             COMMIT TRANSACTION;",
+            render_stage_published_room_input(8000, "a-old"),
+            render_stage_published_room_input(8001, "b-old")
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        db.query(
+            "UPDATE inst_relate:a_old SET generic = 'A-NEW', insts_flat = [{ geo_hash: 'mesh-a-new' }]; \
+             UPDATE inst_relate:b_old SET generic = 'B-NEW', insts_flat = [{ geo_hash: 'mesh-b-new' }];",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        db.query(format!(
+            "BEGIN TRANSACTION; {} {} COMMIT TRANSACTION;",
+            render_stage_published_room_input(8000, "a-new"),
+            render_stage_published_room_input(8001, "b-new")
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let targets = [RefnoEnum::from("24384/7"), RefnoEnum::from("24385/8")];
+        let mut before = query_published_room_insts_on(&db, &targets)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.generic)
+            .collect::<Vec<_>>();
+        before.sort();
+        assert_eq!(before, ["A-OLD", "B-OLD"]);
+
+        // A 的新轮次失败并保持旧清单；只发布 B。随后删除实时模型行，确保读取没有兜底。
+        db.query(
+            "UPDATE published_file_input:8001 SET commit_token = 'b-new'; \
+             DELETE inst_relate;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        let mut after = query_published_room_insts_on(&db, &targets)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|row| row.generic)
+            .collect::<Vec<_>>();
+        after.sort();
+        assert_eq!(after, ["A-OLD", "B-NEW"]);
+    }
 
     fn element(id: &str) -> GeometryId {
         GeometryId::Element { refno: id.into() }
@@ -364,60 +646,5 @@ mod tests {
         let target: Option<String> = response.take(1).unwrap();
         assert_eq!(action.as_deref(), Some("room_recalc_element"));
         assert_eq!(target.as_deref(), Some("24384/9"));
-    }
-
-    /// 回退即红：两个发布入口都必须在渲染几何之后、事务提交之前把房间副作用并进去。
-    #[test]
-    fn both_publication_paths_carry_the_room_effects() {
-        let source = include_str!("e3d_model_service.rs");
-        let generate_refs = source
-            .split_once("async fn generate_refs(")
-            .expect("generate_refs")
-            .1
-            .split_once("fn pin(&self")
-            .expect("generate_refs end")
-            .0;
-        let effects_at = generate_refs
-            .find("room_publication_effects(")
-            .expect("generate_refs 必须折出房间副作用");
-        let prepare_at = generate_refs
-            .find("prepare_geometry_delta(")
-            .expect("prepare_geometry_delta");
-        let render_at = generate_refs
-            .find("render_room_publication_effects(")
-            .expect("generate_refs 必须渲染房间副作用");
-        let commit_at = generate_refs
-            .find("publication_transaction(&publication)")
-            .expect("publication commit");
-        assert!(
-            effects_at < prepare_at,
-            "副作用要在 snapshot.elements 被搬走之前折出"
-        );
-        assert!(
-            render_at < commit_at,
-            "房间语句要在事务提交之前进 publication"
-        );
-
-        let apply = source
-            .split_once("pub async fn apply_geometry_delta(")
-            .expect("apply_geometry_delta")
-            .1
-            .split_once("pub(crate) enum ProjectionScope")
-            .expect("apply_geometry_delta end")
-            .0;
-        let effects_at = apply
-            .find("room_publication_effects(")
-            .expect("apply_geometry_delta 必须折出房间副作用");
-        let prepare_at = apply
-            .find("prepare_geometry_delta(")
-            .expect("prepare_geometry_delta");
-        let render_at = apply
-            .find("render_room_publication_effects(")
-            .expect("apply_geometry_delta 必须渲染房间副作用");
-        let commit_at = apply
-            .find("publication_transaction(&statements)")
-            .expect("publication commit");
-        assert!(effects_at < prepare_at);
-        assert!(render_at < commit_at);
     }
 }

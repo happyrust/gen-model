@@ -308,7 +308,10 @@ async fn revalidator_loop() {
                 crate::fast_model::aabb_tree::load_project_tree_verified().await
             }
             SpatialTreeState::DegradedBlocked => {
-                crate::fast_model::aabb_tree::rebuild_tree_from_pointers().await
+                // A blocked manifest may belong to a private file round. The
+                // verified loader applies that fence before choosing whether
+                // rebuilding pointers is safe.
+                crate::fast_model::aabb_tree::load_project_tree_verified().await
             }
             _ => unreachable!("上面刚筛过"),
         };

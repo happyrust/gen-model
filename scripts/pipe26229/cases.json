@@ -1,0 +1,26 @@
+{
+  "schema": "pipe-increment-cases-v1",
+  "source": {"project":"AvevaMarineSample","mdb":"ALL","dbnum":8000,"root":"24384/26229","name":"/Copy-of-1RCV0101-60.3-VMB-R90-R332]R333"},
+  "mutation_scope": "fresh disposable project copy, with a copied test BRAN and captured new refnos",
+  "status": "prepared; mutation legs not recorded in this run",
+  "cases": [
+    {"id":"A01","change":"add branch by copying source","expect":"new BRAN and all members appear; generate explicit geometry and implied tubes","restore":"delete only the new copied BRAN"},
+    {"id":"A02","change":"insert copied ELBO before ELBO 3","expect":"member +1; source order matches TTY; both adjacent tube intervals recalculated","restore":"delete added refno; verify exact baseline member order"},
+    {"id":"A03","change":"insert ATTA between existing fitting endpoints","expect":"member +1; tube continues through ATTA according to RVM; no extra broken interval","restore":"delete added refno"},
+    {"id":"D01","change":"delete ELBO 3 from copied branch","expect":"old geometry absent; neighbours reconnected or invalid per TTY/RVM; no stale tube","restore":"restore disposable project checkpoint, not delete/recreate a different refno"},
+    {"id":"D02","change":"delete VALV","expect":"VALV and its subgeometry absent; neighbouring tubes recalculated","restore":"restore disposable project checkpoint"},
+    {"id":"D03","change":"delete copied branch","expect":"branch absent from tree; zero published records and reachable meshes for that root","restore":"restore disposable project checkpoint"},
+    {"id":"U01","change":"rename ATTA","expect":"new name in TTY/API; geometry and transforms unchanged","restore":"restore captured NAME"},
+    {"id":"U02","change":"change ELBO SPRE to another compatible catalogue entry confirmed by TTY","expect":"SPRE matches TTY ref; geometry and connection points match new RVM","restore":"restore captured SPRE; do not invent catalogue ref"},
+    {"id":"M01","change":"ELBO 3 BY U 500mm","selector":"ELBO 3","expect":"target Z +500; vertical interval length changes; unrelated member transforms unchanged","restore":"BY D 500mm plus exact original POS verification"},
+    {"id":"M02","change":"ELBO 3 BY E 500mm","selector":"ELBO 3","expect":"target X +500; off-axis interval classification agrees with RVM; no obsolete solid straight tube","restore":"BY W 500mm plus exact original POS verification"},
+    {"id":"M03","change":"move VALV BY U 200mm","selector":"VALV 1","expect":"all valve subgeometry moves; neighbouring tubes and bounds update","restore":"BY D 200mm plus exact original POS verification"},
+    {"id":"M04","change":"move whole copied BRAN BY U 1000mm","expect":"explicit members and implied tubes translate consistently; tree identity/order unchanged","restore":"BY D 1000mm plus full baseline verification"},
+    {"id":"O01","change":"rotate ELBO 3 orientation using captured local frame","expect":"ARRI/LEAV axes and tube validity follow TTY; RVM world placement agrees","restore":"restore captured ORI"},
+    {"id":"S01","change":"reorder two adjacent ATTA members","expect":"tree order follows TTY even if geometry unchanged; no duplicated tube identity","restore":"restore exact captured member order"},
+    {"id":"S02","change":"move ELBO from copied BRAN A to copied BRAN B","expect":"both roots regenerated; exactly one owner; old root no stale geometry","restore":"original owner and member slot"},
+    {"id":"R01","change":"replay same observed session event twice","expect":"same records, mesh references and order; no duplicates","restore":"none"},
+    {"id":"R02","change":"two SAVEWORK moves before one watcher poll","expect":"final target session; final position and tubes equal full target, no intermediate residue","restore":"inverse moves and verify baseline"},
+    {"id":"R03","change":"move then undo through two SAVEWORK sessions","expect":"final geometry identical to baseline while published session advances","restore":"already baseline; compare all member fields and models"}
+  ]
+}

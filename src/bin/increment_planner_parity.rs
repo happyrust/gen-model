@@ -44,7 +44,8 @@ use aios_database::data_interface::manual_update::{
     merge_net_change_details, propagate_deletes_to_descendants, resolve_change_unit,
 };
 use aios_database::data_interface::model_impact::{
-    OperationImpact, classify_operation_effects, classify_operation_impact, owner_change,
+    OperationImpact, classify_operation_effects, classify_operation_impact,
+    noun_is_no_geometry_model_entry, owner_change,
 };
 use clap::Parser;
 use e3d_attlib::AttlibData;
@@ -329,6 +330,10 @@ fn gen_model_side(
     unit_types: &[String],
 ) -> anyhow::Result<GenSide> {
     let mut side = GenSide::default();
+    println!(
+        "[gen-model] model_entry_drop_no_geometry={}",
+        aios_database::options::model_entry_drop_no_geometry()
+    );
     let started = Instant::now();
     let collected =
         match IncrementPipeline::collect_window(db_file, (base as i32 + 1)..=(target as i32)) {
@@ -390,6 +395,11 @@ fn gen_model_side(
                 new_owner: new_owner.map(|r| r.to_pdms_str()),
             },
         );
+        if aios_database::options::model_entry_drop_no_geometry()
+            && noun_is_no_geometry_model_entry(&op.get_noun_type())
+        {
+            continue;
+        }
         match impact {
             OperationImpact::Regen => {
                 regen.insert(refno);

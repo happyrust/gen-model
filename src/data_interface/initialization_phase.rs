@@ -180,6 +180,29 @@ pub struct StartupReconcile {
     pub lagging: usize,
     /// 真正开成了退化窗口的库数（`lagging - window_failed`）。
     pub windows_opened: usize,
+    /// 目录前移了、而反查**没能精确回答**（2026-09-06 计划 P3 护栏，ADR-058 实施约束 5）：
+    /// 某个过期目录库的窗口收不了 / 是导入级窗口 / 变动件数超阈 / 零反向表且变动在目录内部层，
+    /// 或整个反查没跑成。为真时那些库的**依赖根全部**按过期重排（反查跑成的情形），或一根
+    /// 都没排、只剩按需 `ensure` 的目录指纹失配兜底（反查没跑成）；哪一种看 `catalogue_cascade`。
+    ///
+    /// 目录前移但反查精确命中、只排了引用它的根——**不算**退化，这一位为假。
+    /// 2026-09-04 到 09-06 P2 期间它曾是「目录前移了、启动不为此排任何工作」的点名位。
+    pub catalogue_cascade_degraded: bool,
+    /// 具体是哪几个 CATA 库前移了（升序）。它说的是「有没有根落在旧目录上」，与
+    /// `catalogue_cascade_degraded` 是两件事：前移且精确反查了的库也在这里。
+    pub stale_catalogue_dbnums: Vec<u32>,
+    /// 记录在案、却在当前 MDB 里读不到最新会话的 CATA 库数。它与「对不上」是两件事：
+    /// 这一栏是**不知道**（换过 MDB、文件不在了），不是「已确认过期」。
+    pub unreadable_catalogue_dbnums: usize,
+    /// `stale_catalogue_dbnums` 里每个库一条：`记在案的最旧会话 → 文件最新` 这一窗变了
+    /// 多少目录件、什么 noun、该库有没有反向引用表可供反查（2026-09-06 计划 P2，
+    /// P3 反查的输入）。收不了的窗口带 `error`，那一窗是**未知**不是零。
+    pub catalogue_windows: Vec<crate::data_interface::cata_cascade_window::CatalogueWindowReport>,
+    /// 对上面那些窗口做的反查与排工（2026-09-06 计划 P3）：变动目录件 → 目录侧闭包 →
+    /// 设计侧引用者 → 上卷到根 → 落款仍在旧目录上的根排 `RegenRoot`；退化库的依赖根全部重排。
+    /// `null` = 没有过期目录库，反查没跑。带 `error` = 跑了没跑成，一根都没排（未知，不是零）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catalogue_cascade: Option<crate::data_interface::reverse_reference::CatalogueCascadeReport>,
 }
 
 impl Default for StartupReconcile {
@@ -190,6 +213,11 @@ impl Default for StartupReconcile {
             window_failed: 0,
             lagging: 0,
             windows_opened: 0,
+            catalogue_cascade_degraded: false,
+            stale_catalogue_dbnums: Vec::new(),
+            unreadable_catalogue_dbnums: 0,
+            catalogue_windows: Vec::new(),
+            catalogue_cascade: None,
         }
     }
 }

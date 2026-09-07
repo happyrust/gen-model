@@ -405,6 +405,29 @@ pub fn classify_operation_impact(op: &EleOperationData) -> OperationImpact {
     classify_operation_effects(op).impact()
 }
 
+/// Core3D R13 / T2c 第一批：这个已知 noun 的变化只会制造模型队列噪音。
+///
+/// 第一批严格等于 P1 证据里的 1272 项：core 判为既非 significant 也非两位
+/// primitive，dabacon 字典也没有 geomset、extrusion 或非零 graphics behaviour，且
+/// 它原本可能成为我方普通生成根。loop/point 容器、粗层级和 FTUB 本来就不是普通根，
+/// 不借这道门改变它们的 owner 上卷语义。未知 noun 保守返回 false。
+pub fn noun_is_no_geometry_model_entry(noun: &str) -> bool {
+    let noun = noun.trim().to_ascii_uppercase();
+    let Some(caps) = crate::noun_dict::default_noun_capabilities().get(&noun) else {
+        return false;
+    };
+    if is_loop_container_noun(&noun)
+        || matches!(noun.as_str(), "WORL" | "WORLD" | "SITE" | "ZONE" | "FTUB")
+    {
+        return false;
+    }
+    !crate::data_interface::generation_root::noun_is_significant(&noun)
+        && !crate::data_interface::generation_root::noun_is_primitive(&noun)
+        && !caps.geomset
+        && !caps.extrusion
+        && caps.graphics_behaviour.unwrap_or(0) == 0
+}
+
 /// 是否为 loop/坐标辅助类型（LOOP/PLOO/VERT/PAVE、*DATU 等）：这些自身不是
 /// 几何生成根，需上溯到非容器 owner（如 PANE/EXTR/WALL/GENSEC）再重生成。
 pub fn is_loop_container_noun(noun: &str) -> bool {
@@ -660,6 +683,30 @@ pub fn gated_children_delta(noun: &str, old: &RefU64Vec, new: &RefU64Vec) -> Opt
 mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet, HashMap};
+
+    #[test]
+    fn the_first_no_geometry_entry_batch_is_exactly_the_evidenced_1272_nouns() {
+        let mut nouns = crate::noun_dict::default_noun_capabilities()
+            .iter()
+            .filter(|caps| noun_is_no_geometry_model_entry(&caps.noun_name))
+            .map(|caps| caps.noun_name.as_str())
+            .collect::<Vec<_>>();
+        nouns.sort_unstable();
+        assert_eq!(nouns.len(), 1272);
+        for expected in ["DB", "PIPE"] {
+            assert!(
+                nouns.contains(&expected),
+                "{expected} 是已知无几何普通 noun，应进入第一批"
+            );
+        }
+        for protected in ["ZONE", "PAVE", "FTUB", "TUBE", "EQUI", "BOX"] {
+            assert!(
+                !nouns.contains(&protected),
+                "{protected} 有根语义、几何代理、significant 或 primitive，必须保留"
+            );
+        }
+        assert!(!noun_is_no_geometry_model_entry("UNKNOWN_FUTURE_NOUN"));
+    }
 
     fn modified_operation(attr_name: &str) -> EleOperationData {
         modified_operation_with_attrs(&[attr_name])
@@ -1472,6 +1519,11 @@ mod tests {
         }
     }
 
+    /// 字典里 44 个 point 容器全部按 loop 容器上卷、自身不是生成根——**唯一例外**是 `AIDTEX`：
+    /// core 位表判它显著，`model_significant_over_point` 开着时它自己成根（T2b，
+    /// `generation_root::tests::the_significant_over_point_override_only_moves_aidtex` 钉「恰好一个」）。
+    /// 这里钉两件事：分类器仍把 44 个都判成 point 容器（上卷判据没变），且 44 个里 core 判显著的
+    /// 恰好只有 AIDTEX——多出一个，例外名单就得跟着改。
     #[test]
     fn every_non_significant_point_container_is_skipped_as_a_generation_root() {
         let point_nouns = crate::noun_dict::default_noun_capabilities().point_nouns();
@@ -1482,7 +1534,15 @@ mod tests {
                 is_loop_container_noun(noun),
                 "{noun}: point container must roll up to its real geometry owner"
             );
+            if crate::data_interface::generation_root::core_significant_bit(noun) == Some(true) {
+                core_significant.push(noun.clone());
+            }
         }
+        assert_eq!(
+            core_significant,
+            vec!["AIDTEX".to_string()],
+            "AIDTEX is the only point container core calls significant"
+        );
         assert!(!is_loop_container_noun("BOX"));
     }
 
@@ -1520,11 +1580,6 @@ mod tests {
         let info = aios_core::get_default_pdms_db_info();
         let mut names = BTreeSet::new();
         for noun in info.named_attr_info_map.iter() {
-    /// 字典里 44 个 point 容器全部按 loop 容器上卷、自身不是生成根——**唯一例外**是 `AIDTEX`：
-    /// core 位表判它显著，`model_significant_over_point` 开着时它自己成根（T2b，
-    /// `generation_root::tests::the_significant_over_point_override_only_moves_aidtex` 钉「恰好一个」）。
-    /// 这里钉两件事：分类器仍把 44 个都判成 point 容器（上卷判据没变），且 44 个里 core 判显著的
-    /// 恰好只有 AIDTEX——多出一个，例外名单就得跟着改。
             for ai in noun.value().iter() {
                 let name = ai.name.trim().to_ascii_uppercase();
                 if !name.is_empty() {
@@ -1534,15 +1589,7 @@ mod tests {
         }
         names
     }
-            if crate::data_interface::generation_root::core_significant_bit(noun) == Some(true) {
-                core_significant.push(noun.clone());
-            }
 
-        assert_eq!(
-            core_significant,
-            vec!["AIDTEX".to_string()],
-            "AIDTEX is the only point container core calls significant"
-        );
     /// E3D 属性字典的 per-attribute 设计变化码，来自随源码入库的嵌入快照
     /// （见 [`raw_dchc_code`] / `dchc_change_classes.json`）。快照入库后本函数
     /// 恒返回 `Some`——保留 `Option` 签名只为不动既有调用方的解构写法；

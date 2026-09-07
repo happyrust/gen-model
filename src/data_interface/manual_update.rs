@@ -69,9 +69,11 @@ use crate::data_interface::model_impact::{
     AttributeEffect, OperationImpact, attribute_is_reference, classify_attribute_effect,
     classify_operation_impact, owner_change,
 };
+use crate::data_interface::model_type_scope;
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
 use crate::data_interface::project_paths::resolve_project_root;
 use crate::data_interface::sesno_range::{COLD_START_DB_TYPES, SesnoRangeResolver};
+use crate::data_interface::side_effect_pending::SideEffectCompensator;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_interface::update_scope::UpdateScope;
 use crate::data_interface::watch_scope;
@@ -495,6 +497,50 @@ impl OwnershipSnapshot {
         }
         self.base.get(&refno)
     }
+}
+
+/// 核对表 R2：元素自身或任一祖先是 XGEOMETRY 时，core 一律不让它进局部更新
+/// （`DB_Element::climb(e, NOUN_XGEOM).isNull()` 必须为真才继续，
+/// `docs/specs/core3d-partial-update-conformance.md` R2）。显式几何走另一条路。
+///
+/// **落点是这里而不是采集层**：`partition_operation_impacts` 手里只有窗口操作、没有
+/// owner 链；`build_model_update_plan` 手里只有窗口自己的 overlay，不是完整链。
+/// [`OwnershipSnapshot`] 是唯一一处**不额外打库**就有完整 pre/post 图的地方。
+pub fn under_xgeometry(snap: &OwnershipSnapshot, refno: RefnoEnum, post: bool) -> bool {
+    resolve_report_ancestor(snap, refno, post, "XGEOM").is_some()
+}
+
+/// `candidates` 里被 XGEOMETRY 门挡下的那些（[`under_xgeometry`]）。
+///
+/// pre/post 口径照 [`build_unit_rollup`] 现成的走，**不是随便选的**：
+///
+/// | 两态 | 判据 | 为什么 |
+/// |---|---|---|
+/// | 只在 post（新建） | post | 它此前不存在，只有后态可判 |
+/// | 只在 pre（删除） | pre | 它已经没了，只有前态可判 |
+/// | 两态都在（修改） | **两态都在 XGEOM 底下才挡** | 搬进搬出 XGEOM 的那一次**必须照常处理**，否则搬出来的东西永远不画、搬进去的永远不擦 |
+/// | 两态都不在 | 不挡 | 图里没有它，判不了；落在「不挡」这一侧是多做不是漏做 |
+pub fn xgeometry_gates(
+    snap: &OwnershipSnapshot,
+    candidates: &HashSet<RefnoEnum>,
+) -> HashSet<RefnoEnum> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|&refno| {
+            match (
+                snap.node(refno, false).is_some(),
+                snap.node(refno, true).is_some(),
+            ) {
+                (false, true) => under_xgeometry(snap, refno, true),
+                (true, false) => under_xgeometry(snap, refno, false),
+                (true, true) => {
+                    under_xgeometry(snap, refno, false) && under_xgeometry(snap, refno, true)
+                }
+                (false, false) => false,
+            }
+        })
+        .collect()
 }
 
 /// Nearest self-or-ancestor whose noun equals `noun`（报告分桶用，大小写不敏感）。
@@ -940,8 +986,10 @@ fn render_ref_rev_edge(referrer: &str, referenced: RefnoEnum) -> String {
 /// `ref_rev` is a graph edge table (`in` = referrer, `out` = referenced), so per
 /// changed element (skipping `None`) `DELETE <ele>->ref_rev` clears its stale
 /// outgoing edges through the element's own adjacency — no table scan and no
-/// secondary index needed. Unless the element was deleted or now has no
-/// references, one `INSERT RELATION INTO ref_rev [...]` re-asserts its edges.
+/// secondary index needed. 批量口径（plan 2026-09-06 §3 D1 / P3）：**所有 referrer 的清理排在
+/// 前面，整窗口的边攒成一条 `INSERT RELATION IGNORE INTO ref_rev [..]`**——边 id 是
+/// `[referrer, referenced]` 复合键，重放撞上已有边就跳过；删除仍逐 referrer 一条（图邻接删，
+/// 没有数组形态），但都在插入之前。
 ///
 /// The persist path runs these BEST-EFFORT / non-fatal: a failure must never
 /// block the data batch or the applied watermark (a missing edge only means a
@@ -950,6 +998,7 @@ pub fn build_reverse_index_statements(
     range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
 ) -> Vec<String> {
     let mut stmts = Vec::new();
+    let mut rows = Vec::new();
     for ops in range_eles.values() {
         for op in ops {
             if matches!(op.detail, EleOperationDetail::None) {
@@ -961,14 +1010,21 @@ pub fn build_reverse_index_statements(
             if edges.purge || edges.referenced.is_empty() {
                 continue; // deleted, or genuinely no references now → cleared only
             }
-            let rows = edges
-                .referenced
-                .iter()
-                .map(|t| render_ref_rev_edge(&referrer, *t))
-                .collect::<Vec<_>>()
-                .join(", ");
-            stmts.push(format!("INSERT RELATION INTO ref_rev [{rows}];"));
+            rows.extend(
+                edges
+                    .referenced
+                    .iter()
+                    .map(|t| render_ref_rev_edge(&referrer, *t)),
+            );
         }
+    }
+    // 一条语句最多这么多边：整窗口几万条边攒成一条会是 MB 级报文，按 2000 一条切、仍是批量。
+    const REF_REV_ROWS_PER_INSERT: usize = 2000;
+    for chunk in rows.chunks(REF_REV_ROWS_PER_INSERT) {
+        stmts.push(format!(
+            "INSERT RELATION IGNORE INTO ref_rev [{}];",
+            chunk.join(", ")
+        ));
     }
     stmts
 }
@@ -1799,12 +1855,21 @@ pub(crate) struct ResolvedUnitRollup {
     pub no_generation: u32,
     pub warnings: Vec<String>,
     pub cascade_deferred: bool,
+    /// `gate_candidates` 里被 XGEOMETRY 门挡下的那些（核对表 R2，[`under_xgeometry`]）。
+    ///
+    /// **只报不筛**：这里算出来，筛不筛由调用方按
+    /// [`crate::options::model_xgeometry_gate`] 决定。开关默认关，所以默认行为一字不变。
+    pub xgeometry_gated: HashSet<RefnoEnum>,
 }
 
+/// `gate_candidates` 是要过 XGEOMETRY 门的那批 refno（位姿目标与删除目标）——它们**不在**
+/// `details` 里（`details` 已被 `mask_details_to_regen` 掩成只剩 Regen 类），所以必须单独
+/// 传进来，否则它们的 owner 链根本不会被加载进快照。
 pub(crate) async fn resolve_unit_rollup(
     dbnum: u32,
     range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
     details: &[NetChangeDetail],
+    gate_candidates: &HashSet<RefnoEnum>,
 ) -> anyhow::Result<ResolvedUnitRollup> {
     if details.iter().all(|d| d.net == NetOp::Cancelled) {
         return Ok(ResolvedUnitRollup::default());
@@ -1835,14 +1900,22 @@ pub(crate) async fn resolve_unit_rollup(
             ),
         };
 
-    let (units, no_generation, mut warnings) =
-        resolve_unit_rollup_with_ref_reversal(dbnum, range_eles, details, ref_reversal).await?;
+    let (units, no_generation, mut warnings, xgeometry_gated) =
+        resolve_unit_rollup_with_ref_reversal(
+            dbnum,
+            range_eles,
+            details,
+            ref_reversal,
+            gate_candidates,
+        )
+        .await?;
     warnings.append(&mut lookup_warnings);
     Ok(ResolvedUnitRollup {
         units,
         no_generation,
         warnings,
         cascade_deferred,
+        xgeometry_gated,
     })
 }
 
@@ -1851,9 +1924,15 @@ async fn resolve_unit_rollup_with_ref_reversal(
     range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
     details: &[NetChangeDetail],
     ref_reversal: HashMap<RefnoEnum, Vec<RefnoEnum>>,
-) -> anyhow::Result<(Vec<DeliveryUnitSummary>, u32, Vec<String>)> {
+    gate_candidates: &HashSet<RefnoEnum>,
+) -> anyhow::Result<(
+    Vec<DeliveryUnitSummary>,
+    u32,
+    Vec<String>,
+    HashSet<RefnoEnum>,
+)> {
     if details.iter().all(|d| d.net == NetOp::Cancelled) {
-        return Ok((Vec::new(), 0, Vec::new()));
+        return Ok((Vec::new(), 0, Vec::new(), HashSet::new()));
     }
 
     let change_refnos: HashSet<RefnoEnum> = details.iter().map(|d| d.refno).collect();
@@ -1863,6 +1942,9 @@ async fn resolve_unit_rollup_with_ref_reversal(
     seeds.extend(overlay.values().filter_map(|node| node.owner));
     // Referrers must be resolvable in the owner graph, else their cascade is lost.
     seeds.extend(ref_reversal.values().flatten().copied());
+    // 位姿与删除目标不在 `details` 里（已被掩成 Regen 类），不种进来它们的 owner 链
+    // 就没加载，XGEOMETRY 门会对它们一律判假——那是静默漏门，不是保守。
+    seeds.extend(gate_candidates.iter().copied());
 
     let snap = OwnershipSnapshot {
         base: load_base_graph(seeds).await.map_err(|error| {
@@ -1873,6 +1955,8 @@ async fn resolve_unit_rollup_with_ref_reversal(
         ref_reversal,
     };
 
+    let xgeometry_gated = xgeometry_gates(&snap, gate_candidates);
+
     let (units, no_generation, warnings) =
         build_unit_rollup(&snap, details, &configured_delivery_unit_types());
     Ok((
@@ -1882,6 +1966,7 @@ async fn resolve_unit_rollup_with_ref_reversal(
             .into_iter()
             .map(|w| format!("dbnum={dbnum}: {w}"))
             .collect(),
+        xgeometry_gated,
     ))
 }
 
@@ -2325,6 +2410,21 @@ pub struct PendingRoomUnit {
     pub attempts: u32,
     #[serde(default)]
     pub last_error: Option<String>,
+    /// File rounds whose publication requires this target to be recomputed.
+    #[serde(default)]
+    pub file_rounds: Vec<String>,
+    /// Minimum published spatial version this task must consume.
+    #[serde(default)]
+    pub required_publish_version: u64,
+    /// Spatial version visible when this inspection row was read.
+    #[serde(default)]
+    pub published_version: u64,
+    /// Last published spatial version from which this target completed.
+    #[serde(default)]
+    pub computed_publish_version: u64,
+    /// The target has not yet been computed from its required published view.
+    #[serde(default)]
+    pub stale: bool,
     /// Computed while reading; the retry ceiling remains the single source of
     /// truth and is not duplicated in a stored column.
     #[serde(default)]
@@ -2389,10 +2489,69 @@ pub async fn load_pending_model_units() -> anyhow::Result<Vec<PendingModelUnit>>
 
 fn render_pending_room_units_sql() -> String {
     "SELECT dbnum, action, target_refno, noun, source_end_sesno, status, attempts, \
-     last_error, updated_at FROM model_update_pending WHERE action IN \
-     ['room_recalc_panel', 'room_recalc_element'] AND status IN ['pending', 'failed'] \
+     last_error, file_rounds, required_publish_version, updated_at FROM model_update_pending \
+     WHERE action IN ['room_recalc_panel', 'room_recalc_element'] AND status IN \
+     ['collecting', 'pending', 'failed'] \
      ORDER BY updated_at ASC;"
         .to_string()
+}
+
+fn decorate_pending_room_units(
+    units: &mut [PendingRoomUnit],
+    published_version: u64,
+    computed_versions: &BTreeMap<(ModelWorkAction, String), u64>,
+) {
+    for unit in units {
+        unit.published_version = published_version;
+        unit.computed_publish_version = computed_versions
+            .get(&(unit.action, unit.target_refno.clone()))
+            .copied()
+            .unwrap_or(0);
+        // Every row returned by this inspection query is unsettled. The version
+        // comparison explains why, while `collecting` also covers the interval
+        // before a file round has acquired its publish version.
+        unit.stale = matches!(unit.status.as_str(), "collecting" | "pending" | "failed")
+            || unit.computed_publish_version < unit.required_publish_version;
+        unit.dead = unit.status != "collecting" && is_dead_letter(unit.attempts);
+    }
+}
+
+async fn load_room_computed_versions(
+    units: &[PendingRoomUnit],
+) -> anyhow::Result<BTreeMap<(ModelWorkAction, String), u64>> {
+    #[derive(Deserialize)]
+    struct Row {
+        action: ModelWorkAction,
+        target_refno: String,
+        #[serde(default)]
+        computed_publish_version: u64,
+    }
+
+    if units.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+    let targets = units
+        .iter()
+        .map(|unit| format!("'{}'", escape_surql_str(&unit.target_refno)))
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut response = SUL_DB
+        .query(format!(
+            "SELECT action, target_refno, computed_publish_version FROM room_target_version \
+             WHERE target_refno IN [{targets}];"
+        ))
+        .await?
+        .check()
+        .map_err(|error| anyhow::anyhow!("读取房间目标计算版本失败: {error}"))?;
+    let rows: Vec<Row> = response
+        .take(0)
+        .map_err(|error| anyhow::anyhow!("解码房间目标计算版本失败: {error}"))?;
+    Ok(rows
+        .into_iter()
+        .map(|row| ((row.action, row.target_refno), row.computed_publish_version))
+        .collect())
 }
 
 /// Every pending room-recalculation task, dead letters included (read-only).
@@ -2409,9 +2568,9 @@ pub async fn load_pending_room_units() -> anyhow::Result<Vec<PendingRoomUnit>> {
     let mut units: Vec<PendingRoomUnit> = response
         .take(0)
         .map_err(|error| anyhow::anyhow!("解码房间待重算失败: {error}"))?;
-    for unit in &mut units {
-        unit.dead = is_dead_letter(unit.attempts);
-    }
+    let published_version = SideEffectCompensator::published_spatial_version().await?;
+    let computed_versions = load_room_computed_versions(&units).await?;
+    decorate_pending_room_units(&mut units, published_version, &computed_versions);
     Ok(units)
 }
 
@@ -2735,6 +2894,12 @@ pub struct DbnumPreview {
     /// 有几个成员这次够不着。
     #[serde(default)]
     pub not_in_project: bool,
+    /// 预览时刻的统一双水位判决；它描述现状，不预言确认执行后的结果。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_verdict: Option<String>,
+    /// 预览时已经一致时的追平挂钟时刻。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model_caught_up_at: Option<String>,
 }
 
 /// Full read-only preview of a project's pending manual update.
@@ -2790,30 +2955,9 @@ pub struct DbnumStatus {
     /// 在 MDB 声明的 DESI 名单里、既没登记过也没扫到。不阻断也不执行。
     #[serde(default)]
     pub not_in_project: bool,
-    /// 模型那一枚凭证（ADR-058 D5 口径）。整体缺席 = 这次取数失败，见 `warnings`。
+    /// 数据水位与模型水位的统一判决。整体缺席 = 本次取数失败，见 `warnings`。
     #[serde(flatten)]
-    pub model_credential: Option<ModelCredentialColumns>,
-}
-
-/// `/dbnums` 每行的模型凭证两列（ADR-058 D5 口径，取自
-/// [`startup_coverage_floors`](crate::data_interface::model_update_pending::startup_coverage_floors)）。
-///
-/// 它与同一行的 `applied_sesno` 是**两枚各自独立的凭证**（ADR-056 N5）：数据那一枚
-/// 承诺行已落库，模型这一枚承诺模型按哪一版数据生成。ADR-056 D1 之后模型失败不再
-/// 阻断水位，「水位齐、模型没追平」于是成了常态而不是异常——两枚都摆出来，界面才
-/// 说得清落后的是哪一面。
-///
-/// 三个数**同进同出**：取数失败时整格缺席并在 `warnings` 里留一句，不给 `null` 假装
-/// 「无凭证」。`model_settled_floor: null` 有确切含义——一条安定行都没有的冷库，等按
-/// 需生成（ADR-058 D6）——拿它兼表「读不到」会把冷库和故障混成同一栏。
-#[derive(Debug, Clone, Copy, Serialize)]
-pub struct ModelCredentialColumns {
-    /// 安定生成根里最小的 `source_end_sesno`；`null` = 一条安定行都没有。
-    pub model_settled_floor: Option<i32>,
-    /// 有可用凭证的生成根数。
-    pub model_settled_roots: usize,
-    /// 没有可用凭证、必然要重排的生成根数。一个库只要有一行未安定就没追平。
-    pub model_unsettled_roots: usize,
+    pub model: Option<crate::data_interface::dbnum_consistency::VerdictColumns>,
 }
 
 /// [`AiosDBManager::dbnum_statuses`] 的整体结果。
@@ -3004,6 +3148,10 @@ fn baseline_parse_confirmed_empty(
     parsed_count == Some(0) && baseline_parse_matches(pe_count, root_count, 0)
 }
 
+#[cfg(test)]
+#[path = "baseline_root_parity_tests.rs"]
+mod baseline_root_parity_tests;
+
 /// Turn a freshly baselined dbnum's active ownership graph into durable,
 /// fine-grained generation work (pure).
 ///
@@ -3017,30 +3165,50 @@ fn baseline_work_items(
     end_sesno: i32,
     nodes: &HashMap<RefnoEnum, OwnerNode>,
     unit_types: &[String],
-) -> ModelUpdatePlan {
+) -> anyhow::Result<ModelUpdatePlan> {
     if db_type != "DESI" {
-        return ModelUpdatePlan::default();
+        return Ok(ModelUpdatePlan::default());
+    }
+    // Resolving every node's owner independently invents extra normal roots
+    // (including ancestors of real delivery units). The next steady window
+    // retires those extras and can delete unchanged descendant geometry.
+    // Traverse the ownership forest with the same authority as roots_T.
+    let mut members: HashMap<RefnoEnum, Vec<RefnoEnum>> = HashMap::new();
+    let mut top = Vec::new();
+    for (&refno, node) in nodes {
+        if let Some(owner) = node
+            .owner
+            .filter(|owner| *owner != refno && nodes.contains_key(owner))
+        {
+            members.entry(owner).or_default().push(refno);
+        } else {
+            top.push(refno);
+        }
+    }
+    top.sort_unstable();
+    for children in members.values_mut() {
+        children.sort_unstable();
     }
     let mut roots = BTreeMap::new();
-    for refno in nodes.keys() {
-        let Some(root) = crate::data_interface::generation_root::resolve_element_generation_root(
-            *refno,
+    for top_root in top {
+        for root in crate::data_interface::generation_root::enumerate_generation_roots_in_subtree(
+            top_root,
             unit_types,
             |candidate| {
-                nodes.get(&candidate).map(|node| {
-                    crate::data_interface::generation_root::GenerationNode {
-                        owner: node.owner,
-                        noun: node.noun.clone(),
-                        name: node.name.clone(),
-                    }
+                let node = nodes.get(&candidate).ok_or_else(|| {
+                    anyhow::anyhow!("baseline ownership graph is missing {candidate}")
+                })?;
+                Ok(crate::data_interface::generation_root::SubtreeElement {
+                    noun: node.noun.clone(),
+                    name: node.name.clone(),
+                    members: members.get(&candidate).cloned().unwrap_or_default(),
                 })
             },
-        ) else {
-            continue;
-        };
-        roots.entry(root.root.to_pdms_str()).or_insert(root);
+        )? {
+            roots.entry(root.root.to_pdms_str()).or_insert(root);
+        }
     }
-    ModelUpdatePlan {
+    Ok(ModelUpdatePlan {
         work_items: roots
             .into_iter()
             .map(|(target_refno, root)| ModelWorkItem {
@@ -3053,7 +3221,7 @@ fn baseline_work_items(
             })
             .collect(),
         ..Default::default()
-    }
+    })
 }
 
 #[derive(Deserialize)]
@@ -3112,9 +3280,8 @@ async fn load_baseline_nodes(dbnum: u32) -> anyhow::Result<HashMap<RefnoEnum, Ow
 /// regenerate nothing but the roots they themselves touched — so without this
 /// the elements that are never edited again would have no geometry, ever.
 ///
-/// Every active PE is resolved through the same delivery-unit / normal-granularity
-/// authority used by incremental and on-demand generation. The roots are then
-/// deduplicated; hierarchy containers never become generation work.
+/// Traverse the active ownership forest with the same root enumeration used by
+/// incremental windows, preserving delivery-unit boundaries and normal granularity.
 async fn baseline_model_plan(
     dbnum: u32,
     db_type: &str,
@@ -3126,13 +3293,47 @@ async fn baseline_model_plan(
     let nodes = load_baseline_nodes(dbnum).await.map_err(|error| {
         anyhow::anyhow!("dbnum={dbnum} 基线生成根枚举失败: {error:#}; 不推进 applied_sesno")
     })?;
-    Ok(baseline_work_items(
+    baseline_work_items(
         dbnum,
         db_type,
         end_sesno,
         &nodes,
         &configured_delivery_unit_types(),
-    ))
+    )
+}
+
+/// Use the same root resolver as the persisted baseline, with a session-pinned
+/// ownership graph. It is available before attribute ingestion writes any PE.
+async fn frozen_baseline_model_plan(
+    dbnum: u32,
+    source: &crate::data_interface::frozen_source::FrozenSource,
+) -> anyhow::Result<ModelUpdatePlan> {
+    let source = source.reopen_verified()?;
+    let service =
+        crate::fast_model::e3d_model_service::E3dModelService::from_frozen_source(&source).await?;
+    let units = configured_delivery_unit_types();
+    tokio::task::spawn_blocking(move || {
+        use crate::data_interface::generation_root::refno_from_e3d;
+        use e3d_io::refno::RefNo;
+        let session = source.target_sesno();
+        let index = crate::fast_model::e3d_model_service::scan_index(source.path(), Some(session))?;
+        let set = service.build_set(dbnum, Some(session))?;
+        let mut nodes = HashMap::with_capacity(index.owners.len());
+        for (&(word0, word1), &owner) in index.owners.iter() {
+            let refno = RefNo::new(word0, word1);
+            let element = set.element(refno);
+            nodes.insert(
+                refno_from_e3d(refno),
+                OwnerNode {
+                    owner: (owner.is_valid() && owner != refno).then(|| refno_from_e3d(owner)),
+                    noun: element.element_type()?,
+                    name: element.stored_name()?.unwrap_or_default(),
+                },
+            );
+        }
+        baseline_work_items(dbnum, "DESI", session as i32, &nodes, &units)
+    })
+    .await?
 }
 
 fn file_modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
@@ -3333,9 +3534,12 @@ impl AiosDBManager {
                  FROM dbnum_info_table WHERE dbnum = {dbnum} GROUP ALL"
             ))
             .await?;
+            // 走 `pe_dbnum_noun` 整键索引（common.surql）：`string::uppercase(noun)` 会让计划器
+            // 整体回退成全表扫（58 万行 2.8 s，每库两次），而 `ElementRows::render` 落的 noun
+            // 就是 PDMS 大写类型名（全量实测 0 行 `noun != string::uppercase(noun)`）。
             let root_count = scalar_count(format!(
                 "SELECT count() AS count FROM pe \
-                 WHERE dbnum = {dbnum} AND string::uppercase(noun) = 'WORL' GROUP ALL"
+                 WHERE dbnum = {dbnum} AND noun = 'WORL' GROUP ALL"
             ))
             .await?;
             Ok((pe_count, info_count, root_count))
@@ -3372,7 +3576,12 @@ impl AiosDBManager {
         let applied_sesno = DbnumState::applied_sesno(dbnum).await?;
         let (mut count, mut info_count, mut root_count) = baseline_counts(dbnum).await?;
         if baseline_has_uncommitted_rows(count, applied_sesno) {
-            let wiped = crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await?;
+            let wiped = if crate::data_interface::model_publish_queue::preparing_dbnum(dbnum) {
+                crate::data_interface::fast_delete::wipe_uncommitted_initialization_data(dbnum)
+                    .await?
+            } else {
+                crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await?
+            };
             println!(
                 "dbnum={dbnum} 清理未提交基线残留 PE={}，从水位 0 重新解析",
                 wiped.pe_rows
@@ -3380,6 +3589,37 @@ impl AiosDBManager {
             (count, info_count, root_count) = baseline_counts(dbnum).await?;
         }
         let mut parsed_count = None;
+        let parallel_initialization = crate::options::init_async_publish()
+            && db_type == "DESI"
+            && std::env::var("AIOS_INIT_PARALLEL_GENERATION").as_deref() != Ok("0");
+        let frozen_initialization = if parallel_initialization {
+            let active_source = crate::data_interface::batch_worker::active_frozen_source()?;
+            let source = crate::versioned_db::baseline::source_for_file(
+                file_path,
+                Some(u32::try_from(file_latest_sesno)?),
+                active_source.as_ref(),
+            )?;
+            if !crate::data_interface::model_publish_queue::blocks_dbnum(dbnum) {
+                let started = std::time::Instant::now();
+                let plan = frozen_baseline_model_plan(dbnum, &source).await?;
+                if !plan.work_items.is_empty() {
+                    crate::data_interface::model_update_pending::enqueue_plan(&plan).await?;
+                    crate::data_interface::model_publish_queue::prepare_baseline(
+                        dbnum,
+                        source.clone(),
+                    )
+                    .await?;
+                }
+                println!(
+                    "[model-publish] dbnum={dbnum} frozen plan roots={} elapsed_ms={}",
+                    plan.work_items.len(),
+                    started.elapsed().as_millis()
+                );
+            }
+            Some(source)
+        } else {
+            None
+        };
         if baseline_needs_full_parse(count, applied_sesno) {
             let options = baseline_sync_options(&self.db_option, file_name, dbnum);
             let parsed_counts = crate::versioned_db::database::sync_total_async_threaded(
@@ -3495,8 +3735,18 @@ impl AiosDBManager {
         // 生成工作与水位同一事务收口：枚举失败就整体不推进，下一轮重来（applied
         // 仍为 0，`baseline_needs_full_parse` 会再解析一遍，幂等但不便宜）——这比
         // 「水位推上去、库里一个模型都没有、而且此后永远不会有」要好得多。
-        let plan = baseline_model_plan(dbnum, db_type, file_latest_sesno).await?;
-        let roots = plan.work_items.len();
+        let prepared = frozen_initialization.is_some()
+            && crate::data_interface::model_publish_queue::preparing_dbnum(dbnum);
+        let plan = if prepared {
+            ModelUpdatePlan::default()
+        } else {
+            baseline_model_plan(dbnum, db_type, file_latest_sesno).await?
+        };
+        let roots = if prepared {
+            crate::data_interface::model_publish_queue::planned_roots(dbnum)
+        } else {
+            plan.work_items.len()
+        };
         crate::data_interface::model_update_pending::finalize_baseline(
             dbnum,
             file_latest_sesno,
@@ -3506,6 +3756,20 @@ impl AiosDBManager {
         )
         .await?;
         if roots > 0 {
+            if crate::options::init_async_publish() && db_type == "DESI" {
+                let frozen = if let Some(source) = frozen_initialization {
+                    source.reopen_verified()?
+                } else {
+                    let active_source =
+                        crate::data_interface::batch_worker::active_frozen_source()?;
+                    crate::versioned_db::baseline::source_for_file(
+                        file_path,
+                        Some(u32::try_from(file_latest_sesno)?),
+                        active_source.as_ref(),
+                    )?
+                };
+                crate::data_interface::model_publish_queue::admit_baseline(dbnum, frozen).await?;
+            }
             println!(
                 "dbnum={} 基线已建立，排入 {roots} 个全量生成根（等待模型任务消费）",
                 dbnum
@@ -3531,6 +3795,9 @@ impl AiosDBManager {
         // 是 Err，调用方本来就收不到预览，不存在被蒙蔽的可能。
         let mut warnings = Vec::from_iter(debug_scope::mode_notice());
         warnings.extend(watch_scope::mode_notice());
+        // 模型类型限定同批播种：预览里列出来的库会照常入队数据批次，但其中名单外
+        // 类型的生成根不会被本进程生成——不在这份预览上说，人就会拿它当完整运行状态。
+        warnings.extend(model_type_scope::mode_notice());
         let project_dir = resolve_project_root(&self.db_option, project)
             .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
         if !project_dir.exists() {
@@ -3750,8 +4017,7 @@ impl AiosDBManager {
                 blocked,
                 excluded,
                 not_in_project: false,
-                // 凭证两列在函数尾部一次聚合贴上，不逐行点查。
-                model_credential: None,
+                model: None,
             });
         }
 
@@ -3781,7 +4047,7 @@ impl AiosDBManager {
                 blocked,
                 excluded: false,
                 not_in_project: false,
-                model_credential: None,
+                model: None,
             });
         }
 
@@ -3800,26 +4066,24 @@ impl AiosDBManager {
             });
         }
 
-        // 模型那一枚凭证一次聚合问完全部库（ADR-058 D5），逐行贴上。逐库点查会把
-        // 这个每 6 秒轮询一次的端点变成 448 次查询；而这一份与启动一级过滤、覆盖清单
-        // 共用同一条聚合，口径也就只有一套。
-        //
-        // 失败**不影响这个端点的本职**（登记状态 + 文件异常），只是那两列整体不发：
-        // 数据面的判决不该因为模型面读不出来而失声。
-        match crate::data_interface::model_update_pending::startup_coverage_floors().await {
-            Ok(floors) => {
+        // 一次批量读取两枚水位与实时根普查，逐行只消费统一判决（ADR-060 D9/M8）。
+        let dbnums = report
+            .dbnums
+            .iter()
+            .filter(|row| row.db_type.eq_ignore_ascii_case("DESI"))
+            .map(|row| row.dbnum)
+            .collect();
+        match crate::data_interface::dbnum_consistency::verdicts_for_all(&SUL_DB, &dbnums).await {
+            Ok(verdicts) => {
                 for row in &mut report.dbnums {
-                    let floor = floors.get(&row.dbnum).copied().unwrap_or_default();
-                    row.model_credential = Some(ModelCredentialColumns {
-                        model_settled_floor: floor.settled_floor,
-                        model_settled_roots: floor.settled_roots,
-                        model_unsettled_roots: floor.unsettled_roots,
-                    });
+                    if row.db_type.eq_ignore_ascii_case("DESI") {
+                        row.model = verdicts.get(&row.dbnum).map(|verdict| verdict.columns());
+                    }
                 }
             }
             Err(error) => report.warnings.push(format!(
-                "读不到模型凭证下限（gen_root 聚合失败），本次不报每库的生成源版本\
-                 ——是未知，不是「无凭证记录」: {error:#}"
+                "读不到库一致性判决（双水位或 gen_root 普查失败），本次不报模型状态\
+                 ——这是取数失败，不是 not_judged: {error:#}"
             )),
         }
 
@@ -4104,8 +4368,7 @@ impl AiosDBManager {
                 ));
                 continue;
             }
-            let Some(DbBasicInfo { db_type, db_no, .. }) =
-                DbBasicInfo::from_header_bytes(&header)
+            let Some(DbBasicInfo { db_type, db_no, .. }) = DbBasicInfo::from_header_bytes(&header)
             else {
                 warnings.push(format!(
                     "跳过头 60 字节不是 dabacon 描述符页的文件 {}",
@@ -4344,7 +4607,9 @@ impl AiosDBManager {
                     // 解析器定下的窗口才是执行真正会走的那个。同样读一页会话页。
                     preview.first_pending_sesno_time =
                         session_time_rfc3339(project, &cand.path, *plan.range.start());
-                    let collected = IncrementPipeline::collect_window(&cand.path, plan.range)?;
+                    let pending_range = plan.range;
+                    let collected =
+                        IncrementPipeline::collect_window(&cand.path, pending_range.clone())?;
                     warnings.extend(collected.warnings.iter().cloned());
                     let range_eles = &collected.range_eles;
                     let details =
@@ -4353,50 +4618,94 @@ impl AiosDBManager {
                     // generate models (spec §数据库类型 — CATA/SYST/… 参与数据更新
                     // 但不触发模型生成), so only DESI gets a rollup.
                     if cand.db_type == "DESI" && !details.is_empty() {
-                        // 与执行计划同一分区（单一事实源）：纯位姿目标走 `Transform`
-                        // 便宜路径、不进 rollup——否则预览会把「执行阶段会刷新整棵
-                        // 子树的 ZONE/SITE 位移」错报成 no_generation「跳过模型生成」，
-                        // 又把「成员纯位姿变化」错报成整单 will_generate（执行阶段
-                        // 实际不整单重生成）。
-                        let mut partition =
+                        if crate::options::direct_read_mode() {
+                            let base_sesno = pending_range.start().saturating_sub(1) as u32;
+                            let target_sesno = *pending_range.end() as u32;
+                            let model_plan = crate::data_interface::window_root_plan::
+                                build_effective_model_update_plan(
+                                    cand.db_num,
+                                    &cand.db_type,
+                                    base_sesno,
+                                    target_sesno,
+                                    range_eles,
+                                )
+                                .await?;
+                            let transform_refnos = model_plan
+                                .work_items
+                                .iter()
+                                .filter(|item| item.action == ModelWorkAction::Transform)
+                                .filter_map(|item| item.target_refno.parse::<RefU64>().ok())
+                                .map(RefnoEnum::from)
+                                .collect::<HashSet<_>>();
+                            preview.units = model_plan.units;
+                            preview.transform_targets =
+                                build_transform_target_summaries(&transform_refnos).await;
+                            let (zones, sites) =
+                                resolve_report_rollups(range_eles, &details, &preview.units)
+                                    .await?;
+                            preview.zones = zones;
+                            preview.sites = sites;
+                            warnings.extend(model_plan.warnings);
+                        } else {
+                            // 与执行计划同一分区（单一事实源）：纯位姿目标走 `Transform`
+                            // 便宜路径、不进 rollup——否则预览会把「执行阶段会刷新整棵
+                            // 子树的 ZONE/SITE 位移」错报成 no_generation「跳过模型生成」，
+                            // 又把「成员纯位姿变化」错报成整单 will_generate（执行阶段
+                            // 实际不整单重生成）。
+                            let mut partition =
                             crate::data_interface::model_update_plan::partition_operation_impacts(
                                 &range_eles,
                                 &details,
                             );
-                        // issue #5：预览必须复刻执行计划的这一步，次序也一样。少走它，
-                        // 管件移动会显示成「便宜路径」（执行阶段其实整根重生成），容器
-                        // 移动牵出的那一批分支则根本不出现。
-                        let reroute =
+                            // issue #5：预览必须复刻执行计划的这一步，次序也一样。少走它，
+                            // 管件移动会显示成「便宜路径」（执行阶段其实整根重生成），容器
+                            // 移动牵出的那一批分支则根本不出现。
+                            let reroute =
                             crate::data_interface::model_update_plan::reroute_derived_geometry_units(
                                 &mut partition,
                             )
                             .await;
-                        warnings.extend(
-                            reroute
-                                .warnings
-                                .iter()
-                                .map(|w| format!("dbnum={}: {w}", cand.db_num)),
-                        );
-                        let regen_details =
-                            crate::data_interface::model_update_plan::mask_details_to_regen(
-                                &details,
-                                &partition.regen_refnos,
+                            warnings.extend(
+                                reroute
+                                    .warnings
+                                    .iter()
+                                    .map(|w| format!("dbnum={}: {w}", cand.db_num)),
                             );
-                        let rollup =
-                            resolve_unit_rollup(cand.db_num, &range_eles, &regen_details).await?;
-                        preview.units = rollup.units;
-                        crate::data_interface::model_update_plan::append_derived_geometry_units(
-                            &mut preview.units,
-                            &reroute.descendant_units,
-                        );
-                        let (zones, sites) =
-                            resolve_report_rollups(&range_eles, &details, &preview.units).await?;
-                        preview.zones = zones;
-                        preview.sites = sites;
-                        preview.transform_targets =
-                            build_transform_target_summaries(&partition.transform_refnos).await;
-                        preview.no_generation = rollup.no_generation;
-                        warnings.extend(rollup.warnings);
+                            let regen_details =
+                                crate::data_interface::model_update_plan::mask_details_to_regen(
+                                    &details,
+                                    &partition.regen_refnos,
+                                );
+                            // 预览与执行必须共用同一道 XGEOMETRY 门（核对表 R2）。少走它，
+                            // 就回到 2026-08-04 那个「预览说的不是执行要做的」的老毛病上：
+                            // 执行会把 XGEOM 子树下的位姿目标挡掉，预览却照样列出来。
+                            let rollup = resolve_unit_rollup(
+                                cand.db_num,
+                                &range_eles,
+                                &regen_details,
+                                &partition.transform_refnos,
+                            )
+                            .await?;
+                            if crate::options::model_xgeometry_gate() {
+                                partition
+                                    .transform_refnos
+                                    .retain(|refno| !rollup.xgeometry_gated.contains(refno));
+                            }
+                            preview.units = rollup.units;
+                            crate::data_interface::model_update_plan::append_derived_geometry_units(
+                                &mut preview.units,
+                                &reroute.descendant_units,
+                            );
+                            let (zones, sites) =
+                                resolve_report_rollups(&range_eles, &details, &preview.units)
+                                    .await?;
+                            preview.zones = zones;
+                            preview.sites = sites;
+                            preview.transform_targets =
+                                build_transform_target_summaries(&partition.transform_refnos).await;
+                            preview.no_generation = rollup.no_generation;
+                            warnings.extend(rollup.warnings);
+                        }
                     }
                 }
                 None => {}
@@ -4408,6 +4717,19 @@ impl AiosDBManager {
             && !preview.initialization_required
         {
             return Ok(None);
+        }
+        if cand.db_type.eq_ignore_ascii_case("DESI") {
+            match crate::data_interface::dbnum_consistency::verdict_for(&SUL_DB, cand.db_num).await
+            {
+                Ok(verdict) => {
+                    preview.model_verdict = Some(verdict.as_str().to_owned());
+                    preview.model_caught_up_at = verdict.caught_up_at().map(str::to_owned);
+                }
+                Err(error) => warnings.push(format!(
+                    "读取 dbnum={} 预览双水位判决失败（不影响预览主体）: {error:#}",
+                    cand.db_num
+                )),
+            }
         }
         Ok(Some(preview))
     }
@@ -4452,6 +4774,9 @@ impl AiosDBManager {
         // 监听限定同理，而且更要紧：它可以是配置里躺了一个月的名单，人手上没有
         // 「我刚敲了什么参数」这条线索可循。
         receipt.warnings.extend(watch_scope::mode_notice());
+        // 模型类型限定同理：执行回执说「已入队」时，名单外类型的生成根其实只会入队
+        // 不生成，这一句必须跟着回执走到前端。
+        receipt.warnings.extend(model_type_scope::mode_notice());
         let Some(project_dir) = resolve_project_root(&self.db_option, project) else {
             receipt
                 .warnings
@@ -5769,6 +6094,42 @@ mod tests {
         );
     }
 
+    /// 同上，模型类型限定（`model_incremental_types`）那一份。它比监听限定更隐蔽：
+    /// 数据批次照常入队、照常提交，只有名单外类型的生成根静默留在队列里不生成——
+    /// 回执上不点名，「已入队」看起来就是「会生成」。
+    #[test]
+    fn the_model_type_scope_announces_itself_in_both_receipts() {
+        let source = include_str!("manual_update.rs");
+
+        let enqueue = source
+            .split_once("pub async fn enqueue_manual_update(")
+            .expect("enqueue_manual_update 必须存在")
+            .1;
+        let announced = enqueue
+            .find("receipt.warnings.extend(model_type_scope::mode_notice())")
+            .expect("执行回执必须带上模型类型限定声明");
+        let first_return = enqueue.find("return receipt").expect("必然有早退回执");
+        assert!(
+            announced < first_return,
+            "声明必须排在第一条早退回执之前，否则那条路径上的回执是哑的"
+        );
+
+        let preview = source
+            .split_once("pub async fn preview_manual_update(")
+            .expect("preview_manual_update 必须存在")
+            .1;
+        let seeded = preview
+            .find("warnings.extend(model_type_scope::mode_notice());")
+            .expect("预览必须在第一次赋值时就带上模型类型限定声明");
+        let other_warning = preview
+            .find("warnings.extend(scope.warning()")
+            .expect("范围告警仍要进 warnings");
+        assert!(
+            seeded < other_warning,
+            "模型类型声明必须排在任何业务告警之前，与调试 / 监听声明同批播种"
+        );
+    }
+
     /// 范围外 CATA 必须收齐候选后先走 watcher 的同一 duplicate 权威；重复组在
     /// `continue` 之前报路径，因此任何成员都到不了 `scan_and_check_file`。
     #[test]
@@ -5947,7 +6308,12 @@ mod tests {
         let sql = render_pending_room_units_sql();
         assert!(sql.contains("'room_recalc_panel'"), "{sql}");
         assert!(sql.contains("'room_recalc_element'"), "{sql}");
-        assert!(sql.contains("status IN ['pending', 'failed']"), "{sql}");
+        assert!(
+            sql.contains("status IN ['collecting', 'pending', 'failed']"),
+            "{sql}"
+        );
+        assert!(sql.contains("required_publish_version"), "{sql}");
+        assert!(sql.contains("file_rounds"), "{sql}");
         assert!(!sql.contains("attempts?:0) <"), "{sql}");
         let projection = sql
             .split_once(" FROM ")
@@ -5968,12 +6334,71 @@ mod tests {
             status: "failed".into(),
             attempts: cap,
             last_error: Some("boom".into()),
+            file_rounds: vec!["file_round:7997:42".into()],
+            required_publish_version: 9,
+            published_version: 8,
+            computed_publish_version: 7,
+            stale: true,
             dead: is_dead_letter(cap),
         };
         let json = serde_json::to_value(row).expect("room pending contract serializes");
         assert_eq!(json["action"], "room_recalc_panel");
         assert_eq!(json["target_refno"], "24381/100677");
         assert_eq!(json["dead"], true);
+        assert_eq!(json["required_publish_version"], 9);
+        assert_eq!(json["published_version"], 8);
+        assert_eq!(json["computed_publish_version"], 7);
+        assert_eq!(json["stale"], true);
+    }
+
+    #[test]
+    fn room_pending_inspection_marks_unpublished_and_collecting_targets_stale() {
+        let mut rows = vec![
+            PendingRoomUnit {
+                dbnum: 7997,
+                action: ModelWorkAction::RoomRecalcPanel,
+                target_refno: "24381/1".into(),
+                noun: "PANE".into(),
+                source_end_sesno: 42,
+                status: "pending".into(),
+                attempts: 1,
+                last_error: None,
+                file_rounds: vec!["file_round:7997:42".into()],
+                required_publish_version: 12,
+                published_version: 0,
+                computed_publish_version: 0,
+                stale: false,
+                dead: false,
+            },
+            PendingRoomUnit {
+                dbnum: 7998,
+                action: ModelWorkAction::RoomRecalcElement,
+                target_refno: "24381/2".into(),
+                noun: "EQUI".into(),
+                source_end_sesno: 7,
+                status: "collecting".into(),
+                attempts: crate::data_interface::model_update_pending::MAX_ATTEMPTS,
+                last_error: None,
+                file_rounds: vec!["file_round:7998:7".into()],
+                required_publish_version: 0,
+                published_version: 0,
+                computed_publish_version: 0,
+                stale: false,
+                dead: false,
+            },
+        ];
+
+        let versions = BTreeMap::from([((ModelWorkAction::RoomRecalcPanel, "24381/1".into()), 10)]);
+        decorate_pending_room_units(&mut rows, 11, &versions);
+
+        assert!(rows[0].stale);
+        assert_eq!(rows[0].published_version, 11);
+        assert_eq!(rows[0].computed_publish_version, 10);
+        assert!(
+            rows[1].stale,
+            "collecting means the target is still updating"
+        );
+        assert!(!rows[1].dead, "an unpublished intent is not a dead letter");
     }
 
     /// `/dbnums` 与预览对「够不着」必须给出同一档，否则两个界面讲反话。
@@ -6341,7 +6766,8 @@ mod tests {
             (r(9), owner_node(Some(r(3)), "EQUI")),
         ]);
 
-        let plan = baseline_work_items(7997, "DESI", 76, &nodes, &resolve_delivery_unit_types(&[]));
+        let plan = baseline_work_items(7997, "DESI", 76, &nodes, &resolve_delivery_unit_types(&[]))
+            .unwrap();
 
         assert_eq!(plan.work_items.len(), 3);
         assert!(
@@ -6372,6 +6798,7 @@ mod tests {
 
         assert!(
             baseline_work_items(7997, "CATA", 76, &nodes, &resolve_delivery_unit_types(&[]))
+                .unwrap()
                 .work_items
                 .is_empty()
         );
@@ -6625,6 +7052,63 @@ mod tests {
             deleted_post: HashSet::new(),
             ref_reversal: HashMap::new(),
         }
+    }
+
+    /// 核对表 R2：有 XGEOMETRY 祖先的元素不进模型工作，**但搬进搬出的那一次要照常处理**。
+    ///
+    /// 四种两态组合各钉一条。中间那两条（搬进 / 搬出）是这道门唯一会出错的地方：
+    /// 只看 post 会让「从 XGEOM 里搬出来的东西」永远不画，只看 pre 会让「搬进去的」永远不擦。
+    #[test]
+    fn the_xgeometry_gate_lets_a_move_across_the_boundary_through() {
+        let mut snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "SITE"),
+            (3, Some(2), "ZONE"),
+            (9, Some(3), "XGEOM"),
+            // 前态：10 在 XGEOM 底下，11 在普通 ZONE 底下。
+            (10, Some(9), "BOX"),
+            (11, Some(3), "BOX"),
+            // 前态就在里面、后态也在里面（纯改）。
+            (12, Some(9), "BOX"),
+            // 只在前态（本窗口被删）。
+            (13, Some(9), "BOX"),
+        ]);
+        // 10 搬出 XGEOM，11 搬进 XGEOM。
+        snap.overlay.insert(r(10), owner_node(Some(r(3)), "BOX"));
+        snap.overlay.insert(r(11), owner_node(Some(r(9)), "BOX"));
+        snap.deleted_post.insert(r(13));
+        // 只在后态（本窗口新建在 XGEOM 底下）。
+        snap.overlay.insert(r(14), owner_node(Some(r(9)), "BOX"));
+
+        let candidates = HashSet::from([r(10), r(11), r(12), r(13), r(14), r(99)]);
+        let gated = xgeometry_gates(&snap, &candidates);
+
+        assert!(!gated.contains(&r(10)), "从 XGEOM 搬出来的必须照常处理");
+        assert!(!gated.contains(&r(11)), "搬进 XGEOM 的那一次也必须照常处理");
+        assert!(gated.contains(&r(12)), "两态都在 XGEOM 底下才挡");
+        assert!(gated.contains(&r(13)), "删除看前态");
+        assert!(gated.contains(&r(14)), "新建看后态");
+        assert!(
+            !gated.contains(&r(99)),
+            "图里根本没有的判不了，落在不挡这一侧"
+        );
+    }
+
+    /// 门判的是**祖先链**，不是自身一层——XGEOM 名下隔几级的元素照样挡。
+    #[test]
+    fn the_xgeometry_gate_climbs_the_whole_owner_chain() {
+        let snap = base_snap(&[
+            (1, None, "WORL"),
+            (2, Some(1), "ZONE"),
+            (3, Some(2), "XGEOM"),
+            (4, Some(3), "SUBE"),
+            (5, Some(4), "BOX"),
+            (6, Some(2), "BOX"),
+        ]);
+        assert!(under_xgeometry(&snap, r(5), false), "隔两级也要挡");
+        assert!(under_xgeometry(&snap, r(3), false), "XGEOM 自己也算在内");
+        assert!(!under_xgeometry(&snap, r(6), false));
+        assert!(!under_xgeometry(&snap, r(2), false), "XGEOM 的属主不挡");
     }
 
     #[test]
@@ -7956,6 +8440,67 @@ mod tests {
     fn build_reverse_index_statements_empty_window_is_empty() {
         let range: BTreeMap<u32, Vec<EleOperationData>> = BTreeMap::new();
         assert!(build_reverse_index_statements(&range).is_empty());
+    }
+
+    /// 批量口径（plan 2026-09-06 P3）：两个 referrer 各带引用 → 两条邻接 DELETE 排在前面，
+    /// 边攒成**一条** `INSERT RELATION IGNORE`；没有逐 referrer 的 INSERT。
+    #[test]
+    fn build_reverse_index_statements_batches_all_edges_into_one_insert_after_the_deletes() {
+        use crate::data_interface::ele_data::EleData;
+        use aios_core::NamedAttrValue;
+        fn referrer(refno: RefU64, spre: RefU64) -> EleData {
+            let mut ele = EleData::default();
+            ele.refno = refno;
+            let map = &mut ele.whole_attmap.attmap.map;
+            map.insert("REFNO".into(), NamedAttrValue::RefU64Type(refno));
+            map.insert("TYPE".into(), NamedAttrValue::StringType("BRAN".into()));
+            map.insert("SPRE".into(), NamedAttrValue::RefU64Type(spre));
+            ele
+        }
+        let (a, b, spec) = (
+            RefU64((1u64 << 32) | 7),
+            RefU64((1u64 << 32) | 8),
+            RefU64((2u64 << 32) | 1),
+        );
+        let mut range: BTreeMap<u32, Vec<EleOperationData>> = BTreeMap::new();
+        range.insert(
+            1,
+            vec![
+                EleOperationData::new(a, 1, EleOperationDetail::Add(referrer(a, spec))),
+                EleOperationData::new(b, 1, EleOperationDetail::Add(referrer(b, spec))),
+            ],
+        );
+        let stmts = build_reverse_index_statements(&range);
+        let deletes = stmts.iter().filter(|s| s.starts_with("DELETE ")).count();
+        let inserts = stmts.iter().filter(|s| s.starts_with("INSERT")).count();
+        assert_eq!(deletes, 2, "{stmts:?}");
+        assert_eq!(inserts, 1, "整窗口的边攒成一条 INSERT: {stmts:?}");
+        assert!(
+            stmts.iter().position(|s| s.starts_with("INSERT"))
+                > stmts.iter().rposition(|s| s.starts_with("DELETE ")),
+            "全部 DELETE 排在 INSERT 之前: {stmts:?}"
+        );
+        let insert = stmts.last().unwrap();
+        assert!(
+            insert.starts_with("INSERT RELATION IGNORE INTO ref_rev ["),
+            "{insert}"
+        );
+        assert!(
+            insert.contains(&format!(
+                "ref_rev:[{}, {}]",
+                RefnoEnum::from(a).to_pe_key(),
+                RefnoEnum::from(spec).to_pe_key()
+            )),
+            "{insert}"
+        );
+        assert!(
+            insert.contains(&format!(
+                "ref_rev:[{}, {}]",
+                RefnoEnum::from(b).to_pe_key(),
+                RefnoEnum::from(spec).to_pe_key()
+            )),
+            "{insert}"
+        );
     }
 
     #[test]

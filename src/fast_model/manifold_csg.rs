@@ -184,7 +184,8 @@ pub fn manifold_to_plant_mesh(solid: &Manifold) -> PlantMesh {
 }
 
 /// Convert and concatenate independent display parts without a boolean union.
-/// This preserves E3D RVM component boundaries for touching CLFL primitives.
+/// This preserves E3D RVM component boundaries for touching or overlapping
+/// catalogue primitives.
 pub fn manifolds_to_plant_mesh(solids: &[Manifold]) -> PlantMesh {
     manifolds_to_transformed_plant_mesh(solids, DMat4::IDENTITY)
 }

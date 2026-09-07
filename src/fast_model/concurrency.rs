@@ -12,15 +12,19 @@
 //!
 //! # 用法纪律（防死锁，NON-NEGOTIABLE）
 //!
-//! 许可只准由**叶子工作任务**持有：一个任务拿着许可期间，不得 await 任何同样
-//! 要过闸的子任务。编排层（`gen_model` 的分类 stage 任务这种「spawn 子任务再
-//! join」的壳）一律不拿许可——否则额度 = 1 时外层攥着唯一一张许可等内层，内层
-//! 永远等不到，直接死锁。落到写法上：
+//! 许可只准罩住**同步 CPU 段**：拿着许可期间不得 await 任何同样要过闸的子任务。
+//! 编排层（`gen_model` 的分类 stage 任务这种「spawn 子任务再 join」的壳）一律不
+//! 拿许可——否则额度 = 1 时外层攥着唯一一张许可等内层，内层永远等不到，直接死锁。
+//! 落到写法上：
 //!
-//! - 叶子 fan-out 用 [`spawn_gated_leaf`]，一个任务一张许可，任务结束自动归还；
+//! - CPU 段用 [`run_gated_cpu`]，只收同步闭包，闭包里写不出 `.await`，上面那条
+//!   死锁写法在类型层就不成立（ADR-052 第 1 条）；
+//! - fan-out 宽度用 [`resident_workers`]（`min(额度, 件数)` 个常驻 worker 从共享
+//!   队列动态领取），不是静态均分，也不是「每件一个 task 挤信号量」；
 //! - 编排层继续用 `spawn_with_staged_io`，不碰闸;
 //! - 顺序循环里的分批（SQL 写回攒批这种不并发的 chunk）只用 [`GeometryGate::chunk_size`]
-//!   派生批宽，**不拿许可**。
+//!   派生批宽，**不拿许可**；
+//! - [`spawn_gated_leaf`] 已退役，只剩 specs/033 T011～T018 待迁的七处调用点。
 //!
 //! # 计量（specs/033 T002）
 //!
@@ -34,10 +38,12 @@
 //! 持有之和，与在飞许可各自的取得时刻之和；读数时用「在飞张数 × 当下 − 取得时刻
 //! 之和」把在飞那截补出来。
 //!
-//! 读数有一条现在必须说清的边界：许可当前罩着整个 `Future`（数据库查询、跨 `.await`
-//! 的暂存锁、同步文件写都在里面），所以持有时长现在读作**「许可被占住多久」**，
-//! 不是「CPU 忙了多久」。两者要到 ADR-052 的执行域切换落地之后才重合。改动前采到的
-//! 利用率只能作为「许可被谁占着」的证据，不得当成 CPU 利用率写进 A/B 结论。
+//! 读数有一条现在必须说清的边界：**这一版的 `active` 是混读的**。走
+//! [`run_gated_cpu`] 的那部分许可只罩同步 CPU 段，持有时长就是 CPU 忙的时长；
+//! 走退役的 [`spawn_gated_leaf`] 的那七处仍罩整个 `Future`（数据库查询、跨 `.await`
+//! 的锁、同步文件写都在里面），持有时长只读作「许可被占住多久」。两者要到
+//! specs/033 T011～T018 把叶子迁完之后才全都重合；在那之前采到的利用率不得整体
+//! 当成 CPU 利用率写进 A/B 结论。
 
 use serde::Serialize;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -138,11 +144,13 @@ impl GeometryGate {
         len.div_ceil(self.quota).max(1)
     }
 
-    /// 取一张许可（RAII，drop 即归还）。只准叶子任务调用，见模块级纪律。
+    /// 取一张许可（RAII，drop 即归还）。**模块私有**（ADR-052 第 2 条 /
+    /// specs/033 T007）：调用方拿不到它，也就无法自行把许可的作用域扩大到
+    /// CPU 段之外。对外只有 [`run_gated_cpu`] 一个口子。
     ///
     /// 等待时长在拿到许可的那一刻结算，持有时长从那一刻起算：排队的时间既不算
     /// 在飞，也不算持有——否则额度 1 的串行执行会算出超过 100% 的利用率。
-    pub async fn acquire(&self) -> GeometryPermit {
+    async fn acquire(&self) -> GeometryPermit {
         self.metrics.waiting.fetch_add(1, Ordering::Relaxed);
         let started = Instant::now();
         let permit = self
@@ -185,8 +193,8 @@ impl GeometryGate {
     }
 }
 
-/// 闸的许可凭证；持有期间占一份额度。
-pub struct GeometryPermit {
+/// 闸的许可凭证；持有期间占一份额度。模块私有，见 [`GeometryGate::acquire`]。
+struct GeometryPermit {
     _permit: OwnedSemaphorePermit,
     metrics: Arc<GateMetrics>,
     /// 取得时刻，相对闸的 `epoch`。存偏移而不是 `Instant`：结算与快照补在飞都要拿它
@@ -296,10 +304,14 @@ pub fn geometry_gate() -> &'static GeometryGate {
     })
 }
 
-/// 叶子工作任务的统一入口：继承暂存读写上下文，并对全局闸取一张许可。
+/// **已退役（ADR-052 第 1 条 / specs/033 T007），新代码一律用 [`run_gated_cpu`]。**
 ///
-/// 这是生成路径 fan-out 的**唯一**并发形态（T09 的源码形状断言钉的就是这个名
-/// 字）；持许可期间不得 await 另一个 gated 任务，见模块级纪律。
+/// 它罩的是整个 `Future`：数据库查询、跨 `.await` 的锁、同步文件写都在一张许可
+/// 之内，于是许可可以被「等库 / 等锁」的任务全部占住而 CPU 空着（ADR-052 背景
+/// 第 1、2 条那个容量倒置），而且「攥着许可去 await 另一个过闸子任务」这条会
+/// 死锁的写法在类型层挡不住。现存七处调用点保留一个发布周期（specs/033 T011～
+/// T018 逐个迁移），由
+/// [`tests::the_retired_future_wide_gate_gains_no_new_call_sites`] 钉住不再新增。
 pub(crate) fn spawn_gated_leaf<F>(future: F) -> tokio::task::JoinHandle<F::Output>
 where
     F: std::future::Future + Send + 'static,
@@ -309,6 +321,66 @@ where
         let _permit = geometry_gate().acquire().await;
         future.await
     })
+}
+
+/// 私有的几何 CPU 池：线程数 = 闸额度。
+///
+/// **不用全局 Rayon 池**（ADR-052 第 3 条）：那个池被 `room_model` / `db_model` 的
+/// `par_iter` 共用，宽度不归闸管，接进来就是第二套并发口径——正是 ADR-041 第 3 条
+/// 消灭掉的形态。
+static CPU_POOL: OnceLock<rayon::ThreadPool> = OnceLock::new();
+
+fn cpu_pool() -> &'static rayon::ThreadPool {
+    CPU_POOL.get_or_init(|| {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(geometry_gate().quota())
+            .thread_name(|index| format!("geometry-cpu-{index}"))
+            .build()
+            .expect("private geometry CPU pool")
+    })
+}
+
+/// 几何 CPU 段的执行域（ADR-052 第 1、3 条 / specs/033 T006）。
+///
+/// 只收**同步闭包**。闭包里写不出 `.await`，于是「攥着许可去 await 另一个过闸
+/// 子任务」这条真正会死锁的写法在类型层就不成立——那是 [`spawn_gated_leaf`] 罩
+/// 整个 `Future` 时挡不住的一条。等库、等锁一律留在 async 侧，不占额度。
+///
+/// 计算离开 tokio worker，跑进上面那个私有池：三角化与布尔不再把 shape receiver、
+/// SurrealDB 响应、watcher、`/health` 与 timer 挤掉调度。许可在派发**前**取得、
+/// 在 CPU worker 线程上归还（`permit` 随闭包搬过去），所以它罩住的正好是这一段
+/// CPU——池宽与额度相等，派发排队时间为零。
+///
+/// 闭包 panic 在这里就地接住转成错误：rayon 的默认处置是**整个进程 abort**，
+/// 一根坏构件不该把服务打死。接住之后许可照常归还，闸不会被漏掉的一张堵死。
+pub(crate) async fn run_gated_cpu<T, F>(job: F) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T> + Send + 'static,
+    T: Send + 'static,
+{
+    let permit = geometry_gate().acquire().await;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    cpu_pool().spawn(move || {
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(job))
+            .unwrap_or_else(|_| Err(anyhow::anyhow!("geometry CPU segment panicked")));
+        // 许可跟着 CPU 段走：在 worker 线程上归还，不留在等结果的 async 外壳里。
+        drop(permit);
+        let _ = sender.send(outcome);
+    });
+    receiver
+        .await
+        .map_err(|_| anyhow::anyhow!("geometry CPU worker vanished"))?
+}
+
+/// 一次 fan-out 派多少个常驻 worker：`min(额度, 件数)`（ADR-052 第 4 条）。
+///
+/// 动态领取而不是静态均分——`chunk_size` 只保证块数不超过额度、不保证接近额度
+/// （额度 16、17 件只切出 9 块），而几何负载天然长尾，静态分区一旦把几个重 BRAN
+/// 分进同一块，其余 worker 早已空转。也**不得**改成「每件一个 task 再去挤信号量」。
+///
+/// 件数为 0 时返回 0：没有活就不派 worker，也就不占额度。
+pub(crate) fn resident_workers(jobs: usize) -> usize {
+    geometry_gate().quota().min(jobs)
 }
 
 #[cfg(test)]
@@ -369,10 +441,12 @@ mod tests {
     ///    4..16 的私有信号量）。
     /// 2. 本模块之外不得自行探测核数（`available_parallelism` / `num_cpus`）——
     ///    宽度决策只属于闸。
-    /// 3. 含 fan-out（有 spawn 调用）的文件里不得出现 `.len() / <字面量>` 的
-    ///    分块宽度与 `batch_chunks_cnt = <字面量>`：分块宽度一律
-    ///    `geometry_gate().chunk_size()`。纯网格文件里的 `indices.len() / 3`
-    ///    这类索引算术不在扫描范围（它们不 spawn）。
+    /// 3. 含 fan-out（有 spawn 或 [`run_gated_cpu`] 调用）的文件里不得出现
+    ///    `.len() / <字面量>` 的分块宽度与 `batch_chunks_cnt = <字面量>`：分块宽度
+    ///    一律 `geometry_gate().chunk_size()`，worker 数一律 [`resident_workers`]。
+    ///    `indices.len() / <字面量>` 单独放行——那是「每个三角形三个索引」的网格
+    ///    算术，不是 fan-out 宽度。此前它靠「那些文件不 spawn」侥幸躲开，现在
+    ///    生成服务自己也过闸了，例外必须写明。
     #[test]
     fn no_hardcoded_fanout_width_survives_in_fast_model() {
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fast_model");
@@ -403,6 +477,7 @@ mod tests {
             );
 
             let spawns = source.contains("spawn_gated_leaf(")
+                || source.contains("run_gated_cpu(")
                 || source.contains("spawn_with_staged_io(")
                 || source.contains("tokio::spawn(");
             if !spawns {
@@ -412,7 +487,7 @@ mod tests {
                 if let Some(rest) = line.split(".len() / ").nth(1) {
                     let literal: String = rest.chars().take_while(char::is_ascii_digit).collect();
                     assert!(
-                        literal.is_empty(),
+                        literal.is_empty() || line.contains("indices.len() / "),
                         "{name}:{}: 写死的分块除数：`{}`。宽度用 geometry_gate().chunk_size()",
                         idx + 1,
                         line.trim()
@@ -435,6 +510,124 @@ mod tests {
             }
         }
         assert!(scanned >= 20, "扫描面塌了：只看到 {scanned} 个文件");
+    }
+
+    /// specs/033 T007：`spawn_gated_leaf` 已退役，剩下的调用点是一份点名清单
+    /// （T011～T018 逐个迁走）。**新代码用 [`run_gated_cpu`]**：新增一处调用即红。
+    ///
+    /// 用清单而不是 `#[deprecated]`，是因为后者会在这七处各喷一条警告，逼着六个
+    /// 不属于本轮的文件各挂一个 `#[allow(deprecated)]`——那既弄脏了别人的文件，
+    /// 也把「无新警告」这条纪律作废掉。清单挡的是同一件事，而且点得出名字。
+    #[test]
+    fn the_retired_future_wide_gate_gains_no_new_call_sites() {
+        // 计数含各文件自己那条源码形状断言里的字面量，删调用点时两处一起改。
+        let expected = [
+            ("cata_model.rs", 1_usize),
+            ("gen_model.rs", 2),
+            ("loop_model.rs", 1),
+            ("manifold_bool.rs", 2),
+            ("occ_generate.rs", 2),
+            ("prim_model.rs", 1),
+        ];
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fast_model");
+        for entry in std::fs::read_dir(&dir).expect("read src/fast_model") {
+            let path = entry.expect("dir entry").path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
+                continue;
+            }
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("utf8 file name")
+                .to_string();
+            if name == "concurrency.rs" {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read source");
+            let found = source.matches("concurrency::spawn_gated_leaf(").count();
+            let allowed = expected
+                .iter()
+                .find_map(|(file, count)| (*file == name).then_some(*count))
+                .unwrap_or(0);
+            assert_eq!(
+                found, allowed,
+                "{name}: spawn_gated_leaf 是退役接口，调用点只出不进；新 fan-out 用 run_gated_cpu"
+            );
+        }
+    }
+
+    /// specs/033 T006：额度就是同时在算的 CPU 段数。派 4 倍额度的活下去，观察到的
+    /// 并发峰值不得超过额度——闸真的在限流，而不是只发凭证。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_cpu_domain_never_runs_more_segments_than_the_quota() {
+        let quota = geometry_gate().quota();
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let jobs = (0..quota * 4).map(|_| {
+            let (in_flight, peak) = (in_flight.clone(), peak.clone());
+            run_gated_cpu(move || {
+                let now = in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                std::thread::sleep(Duration::from_millis(5));
+                in_flight.fetch_sub(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+        futures::future::try_join_all(jobs).await.expect("cpu jobs");
+        assert_eq!(in_flight.load(Ordering::SeqCst), 0);
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(peak <= quota, "并发峰值 {peak} 超过额度 {quota}");
+    }
+
+    /// ADR-052 第 3 条：CPU 段离开 tokio worker，跑在私有池里。跑在 tokio worker 上
+    /// 就会把 shape receiver / SurrealDB 响应 / watcher / timer 挤掉调度。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_cpu_segment_leaves_the_tokio_worker_for_the_private_pool() {
+        let thread = run_gated_cpu(|| {
+            Ok(std::thread::current()
+                .name()
+                .unwrap_or_default()
+                .to_string())
+        })
+        .await
+        .expect("cpu job");
+        assert!(
+            thread.starts_with("geometry-cpu-"),
+            "CPU 段跑在了 {thread:?} 上，不是私有几何池"
+        );
+    }
+
+    /// 闭包 panic 必须**就地接住**：rayon 的默认处置是整个进程 abort，一根坏构件
+    /// 不该把服务打死（去掉 `catch_unwind` 这条会直接崩测试进程，不是转红）。接住
+    /// 之后许可要归还，否则额度被永久吃掉一张，额度 1 时下一段直接挂死。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_cpu_segment_is_caught_and_returns_its_permit() {
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let error = run_gated_cpu(|| -> anyhow::Result<()> { panic!("geometry blew up") }).await;
+        std::panic::set_hook(previous);
+
+        let error = error.expect_err("panic 必须变成错误");
+        assert!(error.to_string().contains("panicked"), "{error}");
+        for _ in 0..geometry_gate().quota() + 1 {
+            run_gated_cpu(|| Ok(()))
+                .await
+                .expect("闸没有被漏掉的许可堵住");
+        }
+    }
+
+    /// ADR-052 第 4 条：fan-out 宽度是 `min(额度, 件数)`；没有活就不派 worker。
+    #[test]
+    fn resident_worker_count_is_the_quota_capped_by_the_work() {
+        let quota = geometry_gate().quota();
+        assert_eq!(resident_workers(0), 0, "没有活就不占额度");
+        assert_eq!(resident_workers(1), 1);
+        assert_eq!(resident_workers(quota), quota);
+        assert_eq!(
+            resident_workers(quota * 10),
+            quota,
+            "件数再多也不许超过额度——那正是「每件一个 task 挤信号量」的形态"
+        );
     }
 
     /// specs/023 第 2 条：额度 = 1 时任意多个叶子任务实际串行执行——在飞数的

@@ -1,6 +1,14 @@
 # ADR-052：几何并发额度只覆盖 CPU 执行段
 
-- 状态：Accepted（决策已定，实现未开始；2026-08-27 接受）
+- 状态：Accepted（2026-08-27 接受；2026-09-04 起地基已落地，叶子迁移未开始）
+- 实施注记（2026-09-04，specs/033 T006 完成 / T007 部分完成）：第 1、2、3、4 条的**地基**已建：
+  `concurrency::run_gated_cpu(FnOnce)` 只收同步闭包并把计算送进私有 Rayon 池（`num_threads = 额度`，
+  **不是**全局池），许可随闭包在 CPU worker 线程上归还；`GeometryGate::acquire` 与 `GeometryPermit`
+  收成模块私有；`resident_workers(jobs) = min(额度, 件数)` 是第 4 条动态领取的宽度来源。
+  首个调用点取的是 e3d 生成路径的 `e3d_model_service::generate_wave`（新场子），**不是**背景里点名的
+  `manifold_bool`——那七处 `spawn_gated_leaf` 一处未动，由调用点清单测试锁住只出不进。
+  因此第 1 条只对新路径成立，`active` 目前是混读；第 5 条（SQL 攒批解耦）与第 6 条
+  （`geometry_executor` 开关）都未做，T004/T005 的基线证据也未采，本注记不含任何加速比结论。
 - 日期：2026-08-26
 - 对照（2026-09-03，ADR-056）：背景第 2 条「暂存写在一把 mutex 后面串行」的 convoy 随 `staging/write_context.rs`
   退役消失（P3 删目录）；决策本体——额度只覆盖 CPU 段、等库 / 等锁不占额度、SQL 攒批宽度与并发额度解耦——与暂存无关，

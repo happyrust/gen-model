@@ -96,9 +96,48 @@ pub struct DbnumState {
     /// 只有它与当前 `applied_sesno` 相等，`pe` 零行才是合法空基线（ADR-023）。
     #[serde(default)]
     pub confirmed_empty_baseline_sesno: Option<i32>,
+    /// 模型水位（ADR-060 D1）：模型已经追平到哪一版**数据窗口**。`0` = 从未追平。
+    ///
+    /// 与 `applied_sesno` 是两枚**同粒度**的水位，写在同一行上，一次读出。它记的不是
+    /// 「模型有多新」（那是根级凭证 `gen_root.source_end_sesno` 的事，按 ADR-054 走文件
+    /// 刻度）而是「到哪一版数据为止，数据与模型是一致的」，因此 `model_sesno <= applied_sesno`
+    /// 恒成立（M2）。落后是常态、不是告警（ADR-056 D1/N4）。
+    #[serde(default)]
+    pub model_sesno: i32,
+    /// `model_sesno` 那条保存的写入时刻（RFC3339）。与 [`DbnumState::applied_sesno_time`]
+    /// 同一把尺子：号对不上就不贴时刻，不许拿挂钟兜底。
+    #[serde(default)]
+    pub model_sesno_time: Option<String>,
+    /// 模型水位真正写下的挂钟时刻。只在统一判决为 `in_sync` 时作为
+    /// `model_caught_up_at` 对外；源保存时刻仍由 `model_sesno_time` 表达。
+    #[serde(default)]
+    pub model_settled_at: Option<String>,
+    /// 生成根四格分类里的两格（ADR-060 D3/D5）：应有但从未生成过的根、已放弃的根
+    /// （死信或 `http_422`）。两者都**不拦水位**，但都要露出来。
+    ///
+    /// `None` 表示**未观察**——从没开过窗的冷库就是这一档。它与 `Some(0)`（观察过、确实
+    /// 一个都没有）是两件事，读侧不得把前者降级成后者（M5）。
+    #[serde(default)]
+    pub model_lazy_roots: Option<u32>,
+    #[serde(default)]
+    pub model_dead_roots: Option<u32>,
+    /// 上面两个计数是在哪一版数据窗口右端观察到的；同样 `None` = 未观察。
+    #[serde(default)]
+    pub model_roots_observed_at: Option<i32>,
     /// `true` when a watermark could be resolved from any source (record, legacy
     /// field or info table). `false` means this `dbnum` has never been applied.
     pub initialized: bool,
+}
+
+impl DbnumState {
+    /// 两枚水位这一半的判据（ADR-060 D4 的前两项）：数据已建立，且模型追平到同一版。
+    ///
+    /// **它不是完整的 `model_in_sync`**——D4 还要求「无未安定根」，那是一个实时的
+    /// `gen_root` 计数，不在这一行上。露给读者的那个字段要在两者都成立时才为真；
+    /// 这里只回答行内能回答的那一半，绝不替另一半打包票。
+    pub fn model_caught_up(&self) -> bool {
+        self.applied_sesno > 0 && self.model_sesno == self.applied_sesno
+    }
 }
 
 /// Raw projection of the stored `dbnum_watermark:{dbnum}` record used for reads.
@@ -129,10 +168,30 @@ struct StateRow {
     applied_sesno_time: Option<String>,
     #[serde(default)]
     confirmed_empty_baseline_sesno: Option<i32>,
+    /// 模型水位与它的四格计数（ADR-060）。旧行没有这几列，读出来就是 `None`——
+    /// 「未观察」，不是 0。
+    #[serde(default)]
+    model_sesno: Option<i32>,
+    #[serde(default)]
+    model_sesno_time: Option<String>,
+    #[serde(default)]
+    model_settled_at: Option<String>,
+    #[serde(default)]
+    model_lazy_roots: Option<u32>,
+    #[serde(default)]
+    model_dead_roots: Option<u32>,
+    #[serde(default)]
+    model_roots_observed_at: Option<i32>,
     /// Legacy watermark field, kept for migration + backward-compat mirroring.
     #[serde(default)]
     sesno: Option<i32>,
 }
+
+/// 本表里模型水位那一组列，两条读路径共用一份投影，漂不了。
+const MODEL_WATERMARK_COLUMNS: &str = "model_sesno, model_sesno_time, \
+     IF model_settled_at != NONE THEN type::string(model_settled_at) ELSE NONE END AS model_settled_at, \
+     model_lazy_roots, \
+     model_dead_roots, model_roots_observed_at";
 
 #[derive(Debug, Deserialize)]
 struct DatabaseWatermark {
@@ -151,6 +210,18 @@ fn applied_time_of(row: &StateRow, effective_applied: Option<i32>) -> Option<Str
         return None;
     }
     row.applied_sesno_time.clone()
+}
+
+/// 模型水位那一列的同款纪律（ADR-060 D1）。
+///
+/// 这一枚水位没有 `applied_sesno` 那条兼容迁移链——它只由本仓写、只有一个来源，
+/// 所以不必比「生效值是不是取自这一列」。要挡的只有一格：水位是 0 / 缺席时，
+/// 时刻必须一起消失。留着一个孤零零的时刻，界面会拿它去标注一个并不存在的追平。
+fn model_time_of(row: &StateRow) -> Option<String> {
+    if row.model_sesno.unwrap_or_default() <= 0 {
+        return None;
+    }
+    row.model_sesno_time.clone()
 }
 
 /// A file-identity anomaly for one `dbnum` (see spec §文件异常).
@@ -352,6 +423,43 @@ fn resolve_read_applied(
         Some((applied, legacy)) => resolve_migrated_applied_sesno(applied, legacy, None),
         None => resolve_migrated_applied_sesno(None, None, info_table_max_sesno),
     }
+}
+
+/// A retained initialization is proof that legacy PE/info rows may be partial.
+/// Only an explicit applied watermark may be used until its attribute commit.
+fn resolve_initializing_applied(
+    initializing: bool,
+    dedicated: Option<(Option<i32>, Option<i32>)>,
+    info: Option<i32>,
+) -> Option<i32> {
+    if initializing {
+        dedicated.and_then(|(applied, _)| applied)
+    } else {
+        resolve_read_applied(dedicated, info)
+    }
+}
+
+fn resolve_dbnum_applied(
+    dbnum: u32,
+    dedicated: Option<(Option<i32>, Option<i32>)>,
+    info: Option<i32>,
+) -> Option<i32> {
+    resolve_initializing_applied(
+        crate::data_interface::model_publish_queue::blocks_dbnum(dbnum),
+        dedicated,
+        info,
+    )
+}
+
+fn render_legacy_applied_migration(protected: &[u32]) -> String {
+    let ids = protected
+        .iter()
+        .map(|n| format!("{WATERMARK_TABLE}:{n}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "UPDATE {WATERMARK_TABLE} SET applied_sesno = sesno WHERE applied_sesno = NONE AND sesno != NONE AND id NOT IN [{ids}];"
+    )
 }
 
 /// Classify one observed file for one `dbnum` against its stored state.
@@ -652,11 +760,9 @@ impl DbnumState {
             .check()
             .map_err(|e| anyhow::anyhow!("初始化增量状态表语句失败: {e}"))?;
 
+        let protected = crate::data_interface::model_publish_queue::blocked_dbnums();
         SUL_DB
-            .query(
-                "UPDATE dbnum_watermark SET applied_sesno = sesno \
-                 WHERE applied_sesno = NONE AND sesno != NONE;",
-            )
+            .query(render_legacy_applied_migration(&protected))
             .await
             .map_err(|e| anyhow::anyhow!("迁移旧 DBNUM 水位失败: {e}"))?
             .check()
@@ -706,10 +812,13 @@ impl DbnumState {
         let watermarks: Vec<DatabaseWatermark> = response
             .take(0)
             .map_err(|e| anyhow::anyhow!("解码{source_name}水位失败: {e}"))?;
+        // This exclusion applies to both PE and legacy info-table migration.
+        // Their row counts can agree even when both contain the same partial import.
+        suspect.extend(protected.iter().copied());
         let (watermarks, held_back) = partition_seedable(watermarks, &suspect);
         if !held_back.is_empty() {
             eprintln!(
-                "播种跳过 {} 个对不上账的 dbnum（将按首次导入重建基线）: {held_back:?}",
+                "播种跳过 {} 个不完整或初始化未完成的 dbnum（保留完整导入路径）: {held_back:?}",
                 held_back.len()
             );
         }
@@ -755,8 +864,9 @@ impl DbnumState {
     /// disappeared instead of silently omitting their dbnum.
     pub async fn list_registered() -> anyhow::Result<Vec<DbnumState>> {
         let sql = format!(
-            "SELECT dbnum, db_type, file_name, file_path, file_size, file_latest_sesno, \
-             applied_sesno, applied_sesno_time, confirmed_empty_baseline_sesno, sesno \
+            "SELECT dbnum, owner_project, db_type, file_name, file_path, file_size, file_latest_sesno, \
+             applied_sesno, applied_sesno_time, confirmed_empty_baseline_sesno, \
+             {MODEL_WATERMARK_COLUMNS}, sesno \
              FROM {WATERMARK_TABLE};"
         );
         let mut response = SUL_DB
@@ -772,8 +882,10 @@ impl DbnumState {
             .into_iter()
             .filter_map(|row| {
                 let dbnum = row.dbnum?;
-                let effective = resolve_migrated_applied_sesno(row.applied_sesno, row.sesno, None);
+                let effective =
+                    resolve_dbnum_applied(dbnum, Some((row.applied_sesno, row.sesno)), None);
                 let applied_sesno_time = applied_time_of(&row, effective);
+                let model_sesno_time = model_time_of(&row);
                 Some(DbnumState {
                     dbnum,
                     owner_project: row.owner_project.unwrap_or_default(),
@@ -785,6 +897,12 @@ impl DbnumState {
                     applied_sesno: effective.unwrap_or_default(),
                     applied_sesno_time,
                     confirmed_empty_baseline_sesno: row.confirmed_empty_baseline_sesno,
+                    model_sesno: row.model_sesno.unwrap_or_default(),
+                    model_sesno_time,
+                    model_settled_at: row.model_settled_at,
+                    model_lazy_roots: row.model_lazy_roots,
+                    model_dead_roots: row.model_dead_roots,
+                    model_roots_observed_at: row.model_roots_observed_at,
                     initialized: effective.is_some(),
                 })
             })
@@ -797,8 +915,9 @@ impl DbnumState {
         // 伪元素写出过无 sesno 的行），混进聚合会让 math::max 整条报错，进而把
         // 「读状态」变成扫描/执行的阻断点（2026-08-06 审计，1112 / 7999 实测）。
         let sql = format!(
-            "SELECT dbnum, db_type, file_name, file_path, file_size, file_latest_sesno, \
-             applied_sesno, applied_sesno_time, confirmed_empty_baseline_sesno, sesno \
+            "SELECT dbnum, owner_project, db_type, file_name, file_path, file_size, file_latest_sesno, \
+             applied_sesno, applied_sesno_time, confirmed_empty_baseline_sesno, \
+             {MODEL_WATERMARK_COLUMNS}, sesno \
              FROM {WATERMARK_TABLE}:{dbnum};\
              RETURN math::max((SELECT VALUE sesno FROM {INFO_TABLE} \
              WHERE dbnum = {dbnum} AND sesno != NONE));"
@@ -825,7 +944,7 @@ impl DbnumState {
         let Some(row) = row else {
             // No dedicated record. Still surface a migrated watermark if the info
             // table knows one (legacy full-parse before the watermark existed).
-            let applied = resolve_read_applied(None, info_max);
+            let applied = resolve_dbnum_applied(dbnum, None, info_max);
             return Ok(applied.map(|applied| DbnumState {
                 dbnum,
                 applied_sesno: applied,
@@ -834,8 +953,9 @@ impl DbnumState {
             }));
         };
 
-        let applied = resolve_read_applied(Some((row.applied_sesno, row.sesno)), info_max);
+        let applied = resolve_dbnum_applied(dbnum, Some((row.applied_sesno, row.sesno)), info_max);
         let applied_sesno_time = applied_time_of(&row, applied);
+        let model_sesno_time = model_time_of(&row);
         Ok(Some(DbnumState {
             dbnum: row.dbnum.unwrap_or(dbnum),
             owner_project: row.owner_project.unwrap_or_default(),
@@ -847,6 +967,12 @@ impl DbnumState {
             applied_sesno: applied.unwrap_or_default(),
             applied_sesno_time,
             confirmed_empty_baseline_sesno: row.confirmed_empty_baseline_sesno,
+            model_sesno: row.model_sesno.unwrap_or_default(),
+            model_sesno_time,
+            model_settled_at: row.model_settled_at,
+            model_lazy_roots: row.model_lazy_roots,
+            model_dead_roots: row.model_dead_roots,
+            model_roots_observed_at: row.model_roots_observed_at,
             initialized: applied.is_some(),
         }))
     }
@@ -856,7 +982,10 @@ impl DbnumState {
     /// Read-only: never writes, so it is safe to call from preview scanning.
     pub async fn applied_sesno(dbnum: u32) -> anyhow::Result<i32> {
         let (row, info_max) = Self::read_row(dbnum).await?;
-        Ok(resolve_read_applied(row.map(|r| (r.applied_sesno, r.sesno)), info_max).unwrap_or(0))
+        Ok(
+            resolve_dbnum_applied(dbnum, row.map(|r| (r.applied_sesno, r.sesno)), info_max)
+                .unwrap_or(0),
+        )
     }
 
     /// 读登记身份并对一次观察下裁决（纯读，不写任何东西）。
@@ -1860,5 +1989,61 @@ mod tests {
         assert_eq!(verdict.previous_file_latest_sesno(), 120);
         assert!(!verdict.blocked());
         assert!(verdict.block_reason().is_none());
+    }
+}
+
+#[cfg(test)]
+mod initializing_watermark_tests {
+    use super::*;
+    #[tokio::test]
+    async fn partial_initialization_never_inherits_legacy_watermarks() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("partial_init").use_db("test").await.unwrap();
+        db.query(
+            "CREATE dbnum_watermark:7997 SET sesno=105; CREATE dbnum_watermark:8000 SET sesno=12;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        db.query(render_legacy_applied_migration(&[7997]))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let mut result=db.query("SELECT applied_sesno FROM dbnum_watermark:7997; SELECT applied_sesno FROM dbnum_watermark:8000;").await.unwrap().check().unwrap();
+        let held: Vec<serde_json::Value> = result.take(0).unwrap();
+        let normal: Vec<serde_json::Value> = result.take(1).unwrap();
+        assert!(held[0]["applied_sesno"].is_null());
+        assert_eq!(normal[0]["applied_sesno"], 12);
+        assert_eq!(
+            resolve_initializing_applied(true, Some((None, Some(105))), Some(105)),
+            None
+        );
+        assert_eq!(resolve_initializing_applied(true, None, Some(105)), None);
+        assert_eq!(
+            resolve_initializing_applied(true, Some((Some(112), Some(105))), Some(105)),
+            Some(112)
+        );
+        assert_eq!(
+            resolve_initializing_applied(false, Some((None, Some(105))), None),
+            Some(105)
+        );
+        let (seedable, held) = partition_seedable(
+            vec![
+                DatabaseWatermark {
+                    dbnum: 7997,
+                    sesno: 105,
+                },
+                DatabaseWatermark {
+                    dbnum: 8000,
+                    sesno: 12,
+                },
+            ],
+            &BTreeSet::from([7997]),
+        );
+        assert_eq!(seedable.len(), 1);
+        assert_eq!(seedable[0].dbnum, 8000);
+        assert_eq!(held, vec![7997]);
     }
 }

@@ -117,7 +117,7 @@ where
 ///
 /// 多个写入器争同一批 key 时冲突是持续的：固定或线性退避会让几个批次同步重试、
 /// 一起再撞上，很快耗尽重试预算。指数增长拉开重试窗口，抖动把并发的写入器错开。
-fn conflict_retry_backoff(attempt: usize) -> std::time::Duration {
+pub(crate) fn conflict_retry_backoff(attempt: usize) -> std::time::Duration {
     const BASE_MS: u64 = 25;
     const MAX_SHIFT: usize = 6;
     let backoff_ms = BASE_MS << attempt.min(MAX_SHIFT);

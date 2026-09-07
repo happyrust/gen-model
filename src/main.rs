@@ -225,6 +225,7 @@ fn test_time() {
 
 /// 将 all_attr_info.bin 文件转成 json
 #[test]
+#[ignore = "manual converter: requires all_attr_info.bin in the working directory"]
 fn test_turn_bin_into_json() {
     let mut file = File::open("all_attr_info.bin").unwrap();
     let mut data = vec![];

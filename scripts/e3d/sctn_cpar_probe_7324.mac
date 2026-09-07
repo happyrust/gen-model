@@ -1,0 +1,54 @@
+-- Probe: what E3D itself answers for the CPAR pseudo-attribute on the BS angle
+-- SCTN /MDS/FT01/1-BAR-1 (db 7324), and which catalogue element / PARA it sees.
+-- The generated body is 80x80 while the RVM baseline spans 76.2x76.2, so the
+-- question is whether E3D reads a different profile than /80x80x10.0.
+--
+-- Keep every "--" at the start of its own line: PML treats it as a comment
+-- opener anywhere on a line.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/sctn_cpar_probe_7324_a.log" OVER
+$P SECTION_A_SCTN_MDS_FT01_1_BAR_1
+/MDS/FT01/1-BAR-1
+Q CE
+Q SPRE
+Q CATR
+Q GTYP
+Q DESP
+Q CPAR
+Q JUSL
+Q BANG
+Q POSS
+Q POSE
+Q DRNS
+Q DRNE
+Q REPRE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/sctn_cpar_probe_7324_b.log" OVER
+$P SECTION_B_SPCO_AND_SPRF
+=15193/6830
+Q CE
+Q NAME
+Q CATR
+Q DBNU
+GOTO CATR
+Q CE
+Q NAME
+Q PARA
+Q GSTR
+Q DBNU
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/sctn_cpar_probe_7324_c.log" OVER
+$P SECTION_C_DIRECT_SPRF_SCTN_MDS_FT09_9_BAR_1
+/MDS/FT09/9-BAR-1
+Q CE
+Q SPRE
+Q CATR
+Q CPAR
+Q DESP
+ALPHA LOG END
+
+QUIT
+FINISH
+FINISH

@@ -1,0 +1,43 @@
+-- 管道 P-09「改·换规格件 SPRE」apply：把 scratch A 的 BEND 1 的 SPRE 换成另一件目录组件。
+--
+-- 靶取 BEND（不是 FTUB）：BEND 的 SPRE 现为 13244/108844，换成另一件弯头组件后几何随目录变，
+-- 是「换规格件 → 该件 regen；几何随目录变」最直观的一档；纯函数契约
+-- `pipe_spec_reference_regenerates_but_name_only_skips_model_work`（SPRE→DependencyCascade→Regen）已钉。
+--
+-- ⚠️ 待定：换成哪一件。同 SPEC（PIPE /1RX-345 的 PSPE = 13244/109234）里的合法同族替换件要在
+-- db 13244（本轮未在已接目录集 ams7000/aps7600/acp7043/acp7006 里定位到该文件）枚举后填入。
+-- 下面这行 `<ALT_SPRE>` 是占位——首跑前必须替换成一个经 `Q SPRE`/目录核过的真实组件 refno，
+-- 否则 E3D 会拒绝或出退化几何。定位办法：找到 dbnum 13244 的 .dat，读 SPEC 13244/109234 的
+-- SPCO/SELE 成员，挑一个与 BEND 同 bore/rating 的弯头组件。
+-- 纪律：一个 SAVEWORK、无 QUIT/FINISH、SAVEWORK 前导 RVM。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_pipe_spre_swap_apply.log" OVER
+$P CODEX-DB8000-PIPE-SPRE-SWAP-APPLY-ALIVE
+/CODEX_DB8000_PIPE_SCR_A
+Q CE
+BEND 1
+Q CE
+Q REF
+Q SPRE
+$* SPRE =<ALT_SPRE>   $* <- 占位：填入 db 13244 SPEC 13244/109234 里核过的同族弯头组件 refno
+Q SPRE
+
+$* ---- RVM 导出（状态 spre-swapped）----
+repre insu off
+repre obst off
+repre tube on
+export implied tube into separate containers
+export system /expdri.so
+export file "D:/work/plant-code/old/gen-model/output/db8000-pipe-scratch/rvm/spre-swapped.rvm"
+export filenote 'CODEX db8000 pipe P-09 apply: BEND 1 SPRE swapped'
+export holes on
+export autocolour displayexport on
+export repr on
+export /CODEX_DB8000_PIPE_SCR_A
+export finish
+
+/CODEX_DB8000_PIPE_SCR_A
+Q REF
+SAVEWORK 'CODEX db8000 pipe P-09 apply: BEND 1 SPRE swapped in scratch A'
+$P CODEX-DB8000-PIPE-SPRE-SWAP-APPLY-DONE
+ALPHA LOG END

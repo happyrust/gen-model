@@ -92,7 +92,11 @@ fn view(ele: &EleData) -> ElementView {
         children: ele.children.0.iter().copied().map(pdms_str).collect(),
         implicit: attrs(ele.att_map()),
         explicit: attrs(ele.explicit_attmap()),
-        uda: ele.uda_atts().iter().map(|att| format!("{att:?}")).collect(),
+        uda: ele
+            .uda_atts()
+            .iter()
+            .map(|att| format!("{att:?}"))
+            .collect(),
     }
 }
 

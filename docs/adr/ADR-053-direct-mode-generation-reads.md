@@ -4,6 +4,9 @@
 **追记（2026-09-02，plant-ui 计划 D1）**：direct 形态「不起 watcher / worker」收窄为**只不起 watcher**——数据批次 worker 照常启动，
 只消化人工执行（`POST /update/execute`）排进来的批次；`/health.worker_alive` 在 direct 下报真值。理由：执行请求一律 202 入队、
 服务端不拒绝，没有消费者那一行就永远「排队中」，而 worker 是队列的唯一消费者、与读取底座无关（`changelog.md` 2026-09-02）。
+**追记（2026-09-04）**：direct 成为**默认**读模式——`AIOS_DATA_READ_MODE` 不设即 direct，只有显式 `=db` 才退回 legacy db 读路由
+（ADR-058 D8 已宣布退役，只留退路），认不出的值按未设置处理并出声（`options::data_read_mode_notice`）；同日 S5-1～3 之后它在启动
+序列里也只剩「数据面读哪儿」一个含义，watcher / worker / 模型复核 / 房间都不再看它（`changelog.md` 2026-09-04）。
 日期：2026-08-29
 关联：ADR-002（core.dll 权威范围）、ADR-004（按需解析 CATA）、ADR-005（refno 索引定位）、`docs/plans/scope-a-full-crate-swap-feasibility.md`（fork 整库替换评估，未采）、`teach/learning-records/0002/0004/0009`（core.dll RE 实证）；产出计划 `docs/plans/direct-mode-model-generation.md`。
 
@@ -62,6 +65,8 @@ pdms-io 解析栈已把这套机制全部复刻：
 - `cata_closure` 的 BFS 闭包引擎复用为 direct 的依赖预热器（可选），落库动作在 direct 下改为填内存 store。
 - 新增探针：`direct_attmap_probe`（attmap 逐字段对拍）、`direct_gen_smoke`（单根/批量 inst/geo hash 对拍）。
 - 配置：`DbOption.toml` 新增 `model_gen_mode = "db" | "direct"`（默认 `db`，零回归）。
+  **实际落地与此不同**：开关做成了环境变量 `AIOS_DATA_READ_MODE`（不进配置文件），2026-09-04 起默认 `direct`、只有显式 `db`
+  才退回（见状态行追记）。
 - **语义红线**：direct 只改「数据从哪读」，不改生成算法、`cata_hash` 复用、产物写入与房间管线；同根集合 db/direct 产物必须逐元素一致（Q5 证据把关）。
 - aios_core 改动走 `../vendor/old-aios-core` 本地 patch 开发 → 提交上游 → 升 rev；不得带 patch 推 main（pre-push 守卫已有）。
 

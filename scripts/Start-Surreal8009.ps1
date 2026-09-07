@@ -1,8 +1,20 @@
 <#
 .SYNOPSIS
     启动本项目用的 SurrealDB（8009），并挡住版本不匹配的二进制。
+    **只有 store_mode = "external" 的部署才需要它。**
 
 .DESCRIPTION
+    【先看这一段，2026-09-04】自 store_mode 默认翻成 spawned-mem 起，
+    gen-model **自己会拉起一台 memory 后端的 SurrealDB**（同样绑 v_ip:v_port、
+    同样先过下面这道版本闸，实现见 src/store_process.rs）。所以：
+
+      * 开箱即用（默认形态）：**不要跑这个脚本**，直接起 gen-model 就行；
+      * 要落盘、要留证据、要跨重启：配 store_mode = "external"，那时才跑它。
+
+    端口已经被占着时 gen-model 不会硬上：读不到自家署名就拒绝启动。也就是说
+    先手工跑了这个脚本、又忘了把配置改成 external，服务会**明确报错**而不是
+    悄悄连上你这台库。
+
     本仓库的客户端 SDK 是 fork 的 SurrealDB **2.1.4**
     （Cargo.lock: git+https://gitee.com/happydpc/surrealdb.git#45013fc9…）。
     服务端必须是同一条线的 2.1.x，否则会撞上两个都很难自己看明白的错误：
@@ -129,12 +141,19 @@ if ($lockedRev) {
 
 if ($Memory) { $Datastore = "memory" }
 
+# Sequential model publication needs immediate RPC responses. Preserve any
+# explicit setting and restore the caller's environment when the server exits.
+$priorResponseBuffer = $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE
+if ([string]::IsNullOrEmpty($priorResponseBuffer)) {
+    $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE = '0'
+}
 Push-Location $repoRoot
 try {
     Write-Host "SurrealDB : $exe"
     Write-Host "版本      : $version"
     Write-Host "监听      : $Bind"
     Write-Host "数据后端  : $Datastore"
+    Write-Host "响应缓冲  : $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE"
     if ($Memory) {
         Write-Host "（内存后端：进程退出即全部丢弃，不碰 .surreal/ams-8009）" -ForegroundColor Yellow
     }
@@ -143,4 +162,9 @@ try {
 }
 finally {
     Pop-Location
+    if ($null -eq $priorResponseBuffer) {
+        Remove-Item Env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE -ErrorAction SilentlyContinue
+    } else {
+        $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE = $priorResponseBuffer
+    }
 }

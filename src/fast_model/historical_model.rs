@@ -1,10 +1,13 @@
 //! On-demand historical model projection.
 //!
-//! Source reads are session-pinned e3d-io reads.  The resulting model rows live
-//! in a dedicated `mem://` SurrealDB and never touch the production `SUL_DB`.
+//! Source reads are session-pinned e3d-io reads.  The resulting geometry lands in
+//! its own namespace of the in-process projection store
+//! ([`crate::fast_model::model_memory_store`]), never in the production
+//! projection and never in a database.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::RwLock;
 use std::time::{Instant, UNIX_EPOCH};
 
 use anyhow::Context;
@@ -14,13 +17,14 @@ use e3d_io::refno::RefNo;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
-use surrealdb::Surreal;
-use surrealdb::engine::any::{Any, connect};
 use tokio::sync::OnceCell;
 
 use crate::data_interface::geom_error::GeometryFailurePolicy;
 use crate::fast_model::e3d_model_service::{
-    E3dModelService, ProjectionScope, apply_geometry_delta_on, current_mdb_sources,
+    E3dModelService, apply_geometry_delta_on, current_mdb_sources,
+};
+use crate::fast_model::model_memory_store::{
+    ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectionScope,
 };
 
 pub const MAX_HISTORY_ELEMENTS: usize = 100_000;
@@ -91,105 +95,190 @@ impl std::fmt::Display for HistoricalModelError {
 
 impl std::error::Error for HistoricalModelError {}
 
+/// 快照回执表。几何本身不在这里，在投影存储的 `Historical(<key>)` 命名空间里。
+#[derive(Default)]
 pub struct HistoricalModelStore {
-    db: Surreal<Any>,
+    reports: RwLock<HashMap<String, HistoricalModelReport>>,
 }
 
 static STORE: OnceCell<HistoricalModelStore> = OnceCell::const_new();
 
 impl HistoricalModelStore {
     async fn open() -> anyhow::Result<Self> {
-        let db = connect("mem://").await?;
-        db.use_ns("aios_history").use_db("model_snapshots").await?;
-        Ok(Self { db })
+        Ok(Self::default())
     }
 
     pub async fn global() -> anyhow::Result<&'static Self> {
         STORE.get_or_try_init(Self::open).await
     }
 
-    pub fn db(&self) -> &Surreal<Any> {
-        &self.db
-    }
-
+    /// 丢掉一个快照：回执与它那一格几何一起走。共享的 mesh 文件不动——它们是内容寻址的，
+    /// 由可达性 GC 收，不跟着某一个快照走。
     pub async fn drop_snapshot(&self, snapshot_key: &str) -> anyhow::Result<()> {
         validate_snapshot_key(snapshot_key)?;
-        let sql = format!(
-            "BEGIN TRANSACTION;\n\
-             DELETE geo_relate WHERE snapshot_key='{snapshot_key}';\n\
-             DELETE tubi_relate WHERE snapshot_key='{snapshot_key}';\n\
-             DELETE inst_relate WHERE snapshot_key='{snapshot_key}';\n\
-             DELETE inst_info WHERE snapshot_key='{snapshot_key}';\n\
-             DELETE trans WHERE snapshot_key='{snapshot_key}';\n\
-             DELETE aabb WHERE snapshot_key='{snapshot_key}';\n\
-             DELETE type::thing('historical_snapshot','{snapshot_key}');\n\
-             COMMIT TRANSACTION;"
-        );
-        self.db.query(sql).await?.check()?;
+        ModelMemoryStore::global().drop_scope(ProjectionScope::Historical(snapshot_key));
+        self.reports
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(snapshot_key);
         Ok(())
     }
 
     pub async fn snapshot(&self, snapshot_key: &str) -> anyhow::Result<Option<Value>> {
         validate_snapshot_key(snapshot_key)?;
-        let mut response = self
-            .db
-            .query(format!(
-                "SELECT * FROM type::thing('historical_snapshot','{snapshot_key}');"
-            ))
-            .await?
-            .check()?;
-        Ok(response
-            .take::<Vec<HistoricalModelReport>>(0)?
-            .into_iter()
-            .next()
+        self.reports
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(snapshot_key)
             .map(serde_json::to_value)
-            .transpose()?)
+            .transpose()
+            .map_err(Into::into)
     }
 
     pub async fn query(&self, snapshot_key: &str, tool: &str) -> anyhow::Result<Value> {
         validate_snapshot_key(snapshot_key)?;
-        let sql = match tool {
-            "instances" => format!(
-                "SELECT record::id(id) AS id, snapshot_key, dbnum, generic, booled_id, booled, \
-                 bad_bool, solid, anc, insts_flat, direct_model, record::id(in) AS source_refno, \
-                 IF type::is::record(out) THEN record::id(out) ELSE NONE END AS inst_info_id, \
-                 IF type::is::record(aabb) THEN record::id(aabb) ELSE NONE END AS aabb_id, \
-                 IF type::is::record(world_trans) THEN record::id(world_trans) ELSE NONE END AS world_trans_id \
-                 FROM inst_relate WHERE snapshot_key='{snapshot_key}';"
-            ),
-            "tubes" => format!(
-                "SELECT record::id(id) AS id, snapshot_key, source_refno, dbnum, bore_size, invalid, \
-                 anc, direct_model, record::id(in) AS container_refno, record::id(out) AS mesh_id, \
-                 record::id(leave) AS leave_refno, record::id(arrive) AS arrive_refno, \
-                 record::id(aabb) AS aabb_id, record::id(world_trans) AS world_trans_id \
-                 FROM tubi_relate WHERE snapshot_key='{snapshot_key}';"
-            ),
-            "geometry" => format!(
-                "SELECT record::id(id) AS id, mesh, param, meshed, visible, bad, direct_model, \
-                 IF type::is::record(aabb) THEN record::id(aabb) ELSE NONE END AS aabb_id FROM inst_geo \
-                 WHERE id IN (SELECT VALUE out FROM geo_relate WHERE snapshot_key='{snapshot_key}') \
-                 OR id IN (SELECT VALUE out FROM tubi_relate WHERE snapshot_key='{snapshot_key}');"
-            ),
-            "snapshot" => return Ok(self.snapshot(snapshot_key).await?.unwrap_or(Value::Null)),
+        if tool == "snapshot" {
+            return Ok(self.snapshot(snapshot_key).await?.unwrap_or(Value::Null));
+        }
+        let records = ModelMemoryStore::global().records(ProjectionScope::Historical(snapshot_key));
+        let rows = match tool {
+            "instances" => records
+                .iter()
+                .filter(|record| record.tube.is_none())
+                .map(|record| instance_json(record, snapshot_key))
+                .collect::<Vec<_>>(),
+            "tubes" => records
+                .iter()
+                .filter(|record| record.tube.is_some())
+                .map(|record| tube_json(record, snapshot_key))
+                .collect::<Vec<_>>(),
+            "geometry" => {
+                let mut meshes = records
+                    .iter()
+                    .map(|record| (record.mesh_id.as_str(), record))
+                    .collect::<std::collections::BTreeMap<_, _>>()
+                    .into_values()
+                    .map(mesh_json)
+                    .collect::<Vec<_>>();
+                meshes.dedup();
+                meshes
+            }
             other => anyhow::bail!(
                 "unknown historical query tool {other:?}; expected snapshot/instances/tubes/geometry"
             ),
         };
-        let mut response = self.db.query(sql).await?.check()?;
-        Ok(Value::Array(response.take::<Vec<Value>>(0)?))
+        Ok(Value::Array(rows))
     }
 
     async fn publish(&self, report: &HistoricalModelReport) -> anyhow::Result<()> {
-        let value = serde_json::to_string(report)?;
-        self.db
-            .query(format!(
-                "UPSERT type::thing('historical_snapshot','{}') CONTENT {value};",
-                report.snapshot_key
-            ))
-            .await?
-            .check()?;
+        self.reports
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(report.snapshot_key.clone(), report.clone());
         Ok(())
     }
+}
+
+fn refno_key(refno: RefNo) -> String {
+    format!("{}_{}", refno.word0, refno.word1)
+}
+
+fn transform_json(matrix: glam::DMat4) -> Value {
+    let (scale, rotation, translation) = matrix.to_scale_rotation_translation();
+    json!({
+        "translation": [translation.x as f32, translation.y as f32, translation.z as f32],
+        "rotation": [rotation.x as f32, rotation.y as f32, rotation.z as f32, rotation.w as f32],
+        "scale": [scale.x as f32, scale.y as f32, scale.z as f32],
+    })
+}
+
+fn bounds_json(bounds: [[f32; 3]; 2]) -> Value {
+    json!({ "mins": bounds[0], "maxs": bounds[1] })
+}
+
+fn geometry_format(shape: &ProjectedShape) -> &'static str {
+    match shape {
+        ProjectedShape::Canonical { .. } => "canonical-primitive-v1",
+        ProjectedShape::Baked => "baked-v2",
+    }
+}
+
+fn direct_model_json(record: &ProjectedGeometry) -> Value {
+    json!({
+        "source": "e3d-model",
+        "format": geometry_format(&record.shape),
+        "sesno": record.source_sesno,
+        "geometry_id": record.geometry_id,
+        "mesh_id": record.mesh_id,
+    })
+}
+
+fn instance_json(record: &ProjectedGeometry, snapshot_key: &str) -> Value {
+    let mut row = json!({
+        "id": record.record_id,
+        "snapshot_key": snapshot_key,
+        "dbnum": record.dbnum,
+        "generic": record.noun,
+        "solid": true,
+        "anc": record.ancestors,
+        "source_refno": refno_key(record.source_refno),
+        "mesh_id": record.mesh_id,
+        "world_bounds": bounds_json(record.world_bounds),
+        "world_transform": transform_json(record.world_transform),
+        "direct_model": direct_model_json(record),
+    });
+    match &record.shape {
+        ProjectedShape::Canonical {
+            key,
+            local_transform,
+            local_bounds,
+        } => {
+            row["booled"] = json!(false);
+            row["primitive_key"] = json!(key);
+            row["local_transform"] = transform_json(*local_transform);
+            row["local_bounds"] = bounds_json(*local_bounds);
+        }
+        ProjectedShape::Baked => {
+            row["booled"] = json!(true);
+            row["booled_id"] = json!(record.mesh_id);
+        }
+    }
+    row
+}
+
+fn tube_json(record: &ProjectedGeometry, snapshot_key: &str) -> Value {
+    let tube = record.tube.as_ref().expect("tube record");
+    json!({
+        "id": record.record_id,
+        "snapshot_key": snapshot_key,
+        "dbnum": record.dbnum,
+        "container_refno": refno_key(record.source_refno),
+        "source_refno": refno_key(record.source_refno),
+        "leave_refno": refno_key(tube.from),
+        "arrive_refno": refno_key(tube.to),
+        "route_ordinal": tube.route_ordinal,
+        "bore_size": 0,
+        "invalid": false,
+        "anc": record.ancestors,
+        "mesh_id": record.mesh_id,
+        "world_bounds": bounds_json(record.world_bounds),
+        "world_transform": transform_json(record.world_transform),
+        "direct_model": direct_model_json(record),
+    })
+}
+
+fn mesh_json(record: &ProjectedGeometry) -> Value {
+    json!({
+        "id": record.mesh_id,
+        "mesh": format!("{}.mesh", record.mesh_id),
+        "meshed": true,
+        "visible": true,
+        "bad": false,
+        "direct_model": {
+            "source": "e3d-model",
+            "format": geometry_format(&record.shape),
+        },
+    })
 }
 
 pub async fn generate_historical(
@@ -259,7 +348,6 @@ pub async fn generate_historical(
         .map_err(|e| HistoricalModelError::new("SNAPSHOT_COMMIT_FAILED", e))?;
     let option = aios_core::get_db_option();
     let persisted = apply_geometry_delta_on(
-        store.db(),
         ProjectionScope::Historical(&snapshot_key),
         request.dbnum,
         resolved.sesno,
@@ -491,10 +579,17 @@ mod tests {
         );
     }
 
+    /// 丢快照要把它那一格几何与回执一起清掉，别的快照不受影响；共享 mesh 是内容寻址的
+    /// 盘上文件，不跟着某一个快照走。
     #[tokio::test]
-    async fn dropping_snapshot_removes_namespaced_rows_but_keeps_shared_mesh_rows() {
-        let store = HistoricalModelStore::open().await.expect("mem store");
+    async fn dropping_snapshot_removes_its_namespace_but_leaves_other_snapshots() {
+        use crate::fast_model::model_memory_store::{
+            ProjectedGeometry, ProjectedShape, ProjectionCommit,
+        };
+
+        let store = HistoricalModelStore::open().await.expect("report store");
         let key = "24384_24775@24";
+        let neighbour = "24384_24775@25";
         let report = HistoricalModelReport {
             snapshot_key: key.to_string(),
             dbnum: 24384,
@@ -519,33 +614,51 @@ mod tests {
             elapsed_ms: 1,
         };
         store.publish(&report).await.expect("publish snapshot");
-        store
-            .db()
-            .query(format!(
-                "CREATE pe:24384_24775;\
-                 CREATE inst_relate:⟨{key}::24384_24775⟩ SET snapshot_key='{key}',in=pe:24384_24775;\
-                 CREATE inst_geo:⟨shared_mesh_hash⟩ SET mesh='shared_mesh_hash.mesh';"
-            ))
-            .await
-            .expect("seed rows")
-            .check()
-            .expect("seed statements");
+
+        let projection = ModelMemoryStore::global();
+        let seed = |record_id: &str| ProjectionCommit {
+            upserts: vec![ProjectedGeometry {
+                record_id: record_id.to_string(),
+                geometry_id: e3d_model::elmodl::GeometryId::Element {
+                    refno: "24384/24775".into(),
+                },
+                source_refno: RefNo::new(24384, 24775),
+                dbnum: 24384,
+                source_sesno: 24,
+                noun: "EQUI".into(),
+                mesh_id: "shared_mesh_hash".into(),
+                world_transform: glam::DMat4::IDENTITY,
+                world_bounds: [[0.0; 3], [1.0; 3]],
+                ancestors: vec![104_722_154_390_487],
+                shape: ProjectedShape::Baked,
+                tube: None,
+            }],
+            ..ProjectionCommit::default()
+        };
+        projection.commit(ProjectionScope::Historical(key), vec![seed("24384_24775")]);
+        projection.commit(
+            ProjectionScope::Historical(neighbour),
+            vec![seed("24384_24775")],
+        );
 
         assert!(store.snapshot(key).await.expect("read snapshot").is_some());
         assert_eq!(
             store.query(key, "instances").await.unwrap()[0]["id"],
-            "24384_24775@24::24384_24775"
+            "24384_24775"
         );
+        assert_eq!(
+            store.query(key, "geometry").await.unwrap()[0]["mesh"],
+            "shared_mesh_hash.mesh"
+        );
+
         store.drop_snapshot(key).await.expect("drop snapshot");
         assert!(store.snapshot(key).await.expect("read dropped").is_none());
         assert_eq!(store.query(key, "instances").await.unwrap(), json!([]));
-        let mut response = store
-            .db()
-            .query("RETURN count(SELECT VALUE id FROM inst_geo:⟨shared_mesh_hash⟩);")
-            .await
-            .expect("read shared mesh")
-            .check()
-            .expect("read statement");
-        assert_eq!(response.take::<Option<u64>>(0).unwrap(), Some(1));
+        assert_eq!(
+            store.query(neighbour, "instances").await.unwrap()[0]["id"],
+            "24384_24775",
+            "别的快照不该被这一次丢连累"
+        );
+        projection.drop_scope(ProjectionScope::Historical(neighbour));
     }
 }

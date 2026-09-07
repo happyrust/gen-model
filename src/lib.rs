@@ -15,6 +15,7 @@ use crate::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 use crate::fast_model::room_model::{
     StartupRoomBuild, build_room_relations, reconcile_startup_room_build,
 };
+use crate::fast_model::spatial_state::SpatialTreeState;
 use crate::versioned_db::database::*;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
 use aios_core::options::DbOption;
@@ -52,7 +53,7 @@ use team_data::sync_team_data;
 use aios_core::material::save_all_material_data;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
-use versioned_db::database::{define_dbnum_event, sync_pdms};
+use versioned_db::database::{retire_dbnum_event, sync_pdms};
 
 use log::{LevelFilter, error};
 use simplelog::*;
@@ -156,17 +157,21 @@ static NO_INSTANCE_LOCK_NOTICE: std::sync::Once = std::sync::Once::new();
 
 /// 这一趟要不要拿锁；不拿时返回那句给人看的理由。
 ///
-/// 内存模式（`options::in_memory_db`）不拿。锁挡的是「两个进程驱动同一份持久
-/// 状态」，而内存模式下持久层就在进程里：两个实例各连各的 kv-mem，谁也读不到谁
-/// 写的字节，锁没有保护对象。放开它正是为了让两个实例并排跑起来。
+/// **只有 `embedded-mem` 不拿。** 锁挡的是「两个进程驱动同一份持久状态」，而
+/// `mem://` 那一档持久层就在进程里：两个实例各连各的 kv-mem，谁也读不到谁写的
+/// 字节，锁没有保护对象。放开它正是为了让两个实例并排跑起来。
+///
+/// `spawned-mem` **照常拿锁**（ADR 计划 Q4）。它的库有真端口、别人连得上，
+/// 两个 gen-model 配同一份 `DbOption.toml` 就是冲着同一个端口去的——「不共享库」
+/// 这个理由在那一档不成立。
 ///
 /// 放开不是白送的。盘上还有东西是共享的：`meshes_path` 指的网格目录首当其冲——
 /// 增量路径内部会强制落网格，`gen_mesh=false` 拦不住它。运行目录相对的那些
 /// （`accel_tree` 快照、日志、`cata_dep_cache.bin`）天然分开，绝对路径的不会。
 /// 所以并排跑之前得先让两份配置的 `meshes_path` 分家。
-fn instance_lock_skip_reason(in_memory_db: bool) -> Option<&'static str> {
-    in_memory_db.then_some(
-        "in_memory_db=true，持久层在进程内，两个实例不共享库（meshes_path 仍是共享的，先让它分家）",
+fn instance_lock_skip_reason(store_mode: crate::options::StoreMode) -> Option<&'static str> {
+    matches!(store_mode, crate::options::StoreMode::EmbeddedMem).then_some(
+        "store_mode=embedded-mem，持久层在进程内，两个实例不共享库（meshes_path 仍是共享的，先让它分家）",
     )
 }
 
@@ -176,7 +181,7 @@ fn instance_lock_skip_reason(in_memory_db: bool) -> Option<&'static str> {
 /// 两处例外写在 [`instance_lock_skip_reason`] 与 [`process_instance_lock_path`]：
 /// 内存模式整个不拿，拿的时候按运行目录而不是项目根隔离。
 pub fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()> {
-    if let Some(reason) = instance_lock_skip_reason(crate::options::in_memory_db()) {
+    if let Some(reason) = instance_lock_skip_reason(crate::options::store_mode()) {
         // run_app 与 run_cli 会各调一次，这句只该出现一遍。
         NO_INSTANCE_LOCK_NOTICE.call_once(|| println!("*** 不拿单实例锁：{reason}"));
         return Ok(());
@@ -244,17 +249,26 @@ mod process_instance_lock_tests {
         );
     }
 
-    /// 内存模式一把锁都不拿——两个实例并排跑靠的就是这一句。外部持久层照旧要拿。
+    /// **只有进程内嵌那一档不拿锁。** `spawned-mem` 的库有真端口、别人连得上，
+    /// 两个 gen-model 配同一份 `DbOption.toml` 就是冲着同一个端口去的——「不共享库」
+    /// 这个理由在那一档不成立（计划 Q4）。翻回「凡内存模式都不拿」这条就红。
     #[test]
-    fn memory_mode_needs_no_single_instance_lock() {
+    fn only_the_embedded_store_needs_no_single_instance_lock() {
+        use crate::options::StoreMode;
+
         assert!(
-            instance_lock_skip_reason(false).is_none(),
+            instance_lock_skip_reason(StoreMode::External).is_none(),
             "持久层在进程外时锁仍有保护对象，不许跳过"
         );
-        let reason = instance_lock_skip_reason(true).expect("不拿锁必须说出为什么");
         assert!(
-            reason.contains("in_memory_db"),
-            "理由要点名是哪个开关放开的，否则日志里只是一句没有出处的「不拿锁」：{reason}"
+            instance_lock_skip_reason(StoreMode::SpawnedMem).is_none(),
+            "自带存储有真端口，两个实例会抢同一个，锁不许跳过"
+        );
+        let reason =
+            instance_lock_skip_reason(StoreMode::EmbeddedMem).expect("不拿锁必须说出为什么");
+        assert!(
+            reason.contains("embedded-mem"),
+            "理由要点名是哪一档放开的，否则日志里只是一句没有出处的「不拿锁」：{reason}"
         );
     }
 
@@ -317,16 +331,35 @@ mod process_instance_lock_tests {
 /// 环境变量名：无论如何都不跑启动全量房间重建（既有运维止血口，语义不变）。
 pub const SKIP_STARTUP_ROOM_BUILD_ENV: &str = "AIOS_SKIP_STARTUP_ROOM_BUILD";
 
+/// 第三道门的判据（纯函数）：空间树校验为空 → 全量重建是平凡的，给出跳过的理由。
+///
+/// 只认 `ReadyEmpty`（库里 0 条可用几何指针，`spatial_state::set_ready_by_entries(0)`）。
+/// `Ready` 交给库侧对账；`Loading` / `DegradedBlocked` 之类**不在这里判**——它们在
+/// `build_room_relations` 里由 `ensure_room_tree_coverage` fail-closed 拦住，那道门说的是
+/// 「判不了就不写」，这里说的是「没什么可判」，两句话不合成一句。
+fn vacuous_room_build_reason(state: SpatialTreeState) -> Option<String> {
+    (state == SpatialTreeState::ReadyEmpty).then(|| {
+        "空间树已验证为空（库里没有可用几何指针）：没有已发布几何可算，全量重建无事可做\
+         ——读透 + 空库的常态，房间归属由发布事务排的重算收敛"
+            .to_string()
+    })
+}
+
 /// 本次启动要不要跳过全量房间重建；跳过时返回那句给人看的理由。
 ///
-/// 三道门按优先级排：
+/// 四道门按优先级排：
 /// 1. [`SKIP_STARTUP_ROOM_BUILD_ENV`] —— 永不重建。它比自动执行开关更强，因为
 ///    「跑增量」与「跑 2 万面板级的全量重建」是两件事：L3 夹具、增量演练这类
 ///    场景要前者不要后者。
 /// 2. `startup_autorun=false`（默认 true）—— 本次启动显式要求不自动干活。
-/// 3. 两道门都放行，才与库侧凭据对账：只有空间状态真的变过才重建。
+/// 3. 空间树校验为空（[`vacuous_room_build_reason`]）—— 没有已发布几何，全量重建
+///    会把每块在册面板算成 `NoGeometry`、一条边都写不出，白扫一遍全部 DESI 的房间拓扑。
+///    读透 + spawned-mem 的每次冷启动都是这个形状（合并计划 §9 R3）。只读进程态，
+///    不为它付库查询；跳过时**照样盖章**（[`room_model::stamp_vacuous_room_build`]），
+///    让 `/health.room_build` 与下次启动的对账都有比较对象。
+/// 4. 三道门都放行，才与库侧凭据对账：只有空间状态真的变过才重建。
 ///
-/// 第三道门是这次改动的要点。此前这一步是无条件的，于是每次重启都要为一件
+/// 第四道门是 2026-08 那次改动的要点。此前这一步是无条件的，于是每次重启都要为一件
 /// 多半无事可做的事付上十几秒——而它真正的兜底价值只在「空间状态变了、增量
 /// 房间队列又没收干净」时才兑现。
 async fn skip_startup_room_build() -> Option<String> {
@@ -335,6 +368,16 @@ async fn skip_startup_room_build() -> Option<String> {
     }
     if !crate::options::startup_autorun() {
         return Some("startup_autorun=false".to_string());
+    }
+    if let Some(reason) =
+        vacuous_room_build_reason(crate::fast_model::spatial_state::current_state())
+    {
+        // 平凡重建也盖章：凭据没有比较对象的话，/health 会一直说「没有成功的全量房间
+        // 重建凭据」，下次启动也只能判「跑」。盖不上不拦启动，只是下次多对账一次。
+        if let Err(error) = crate::fast_model::room_model::stamp_vacuous_room_build().await {
+            println!("[房间全量] 空世界的凭据没盖上（下次启动会再对账一次）: {error:#}");
+        }
+        return Some(reason);
     }
     match reconcile_startup_room_build().await {
         StartupRoomBuild::Skip(reason) => Some(reason),
@@ -374,6 +417,7 @@ pub mod fast_model;
 /// （`.planning/2026-09-06-plant-mbd-pipe-dimension`）。
 pub mod mbd;
 
+pub mod store_process;
 pub mod surreal_retry;
 
 pub mod versioned_db;
@@ -477,6 +521,12 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if let Some(notice) = crate::data_interface::watch_scope::mode_notice() {
         eprintln!("*** {notice} ***");
     }
+    // 模型增量类型限定（`model_incremental_types` / `AIOS_MODEL_INCREMENTAL_TYPES`）：
+    // 形状与坑都和 watch_dbnums 一样——名单外的根照常入队却没人生成，不在启动时
+    // 说出来，人只会从「怎么 HANG 一直没模型」倒推。
+    if let Some(notice) = crate::data_interface::model_type_scope::mode_notice() {
+        eprintln!("*** {notice} ***");
+    }
     // dbg!("begin run task");
     // 如果启用了日志功能
     if db_option.enable_log {
@@ -556,16 +606,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         "增量状态表检查完成（兼容检查 {migrated} 个旧 DBNUM 水位），耗时 {}",
         fmt_elapsed(step_started.elapsed())
     );
-    // 解析完成后重新定义EVENT
-    println!("正在重新定义dbnum_event...");
-    let step_started = Instant::now();
-    match define_dbnum_event().await {
-        Ok(_) => println!(
-            "成功重新定义update_dbnum_event，耗时 {}",
-            fmt_elapsed(step_started.elapsed())
-        ),
-        Err(e) => println!("重新定义update_dbnum_event失败: {:?}", e),
-    }
+    retire_dbnum_event().await?;
     println!("预加载方法完成。");
 
     // 初始化数据库索引（开始/完成与耗时日志在函数内部，python full_init 同样受益）
@@ -599,13 +640,32 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // `&& !direct_read_mode`：生产形态启动后没有数据链、没有 manifest、没有文件事件，
     // 模型只靠人工执行与按需 ensure——「改元素 → SAVEWORK → 自动更新」在生产上做不到。
     // `direct_read_mode` 从此只回答「数据面读哪儿」，watcher / 模型复核 / 房间与 db 形态同一条路。
+    // 2026-09-04 起 direct 是**默认**形态（`options::direct_read_mode`）：不带环境变量就是它；
+    // 只有显式 `AIOS_DATA_READ_MODE=db` 才退回退役的 legacy 读路由，而且要出声。
     let sync_live = db_option.sync_live.unwrap_or(false);
     let direct_read_mode = crate::options::direct_read_mode();
     if direct_read_mode {
         println!(
-            "数据读取模式：direct（e3d-io）；watcher / 模型复核 / 房间与 db 形态同一条启动路，\
+            "数据读取模式：direct（e3d-io，默认形态）；watcher / 模型复核 / 房间与 db 形态同一条启动路，\
              监控目录 watcher 由 sync_live 决定（当前 sync_live={sync_live}）"
         );
+    } else {
+        eprintln!(
+            "*** 数据读取模式：db（legacy，由 {}=db 显式选中）——数据面读 SurrealDB 的 pe / ATT_* 行，\
+             模型计划走 pe 打头的旧规划器。该形态已退役（ADR-058 D8），只留作退路；\
+             去掉这个环境变量即回到默认的 direct ***",
+            crate::options::DATA_READ_MODE_ENV
+        );
+    }
+    if let Some(notice) = crate::options::data_read_mode_notice() {
+        eprintln!("*** {notice} ***");
+    }
+    // 另外两个形态键拼错同样要出声（`store_mode_notice` 此前有定义没人打；顺手接上）。
+    if let Some(notice) = crate::options::store_mode_notice() {
+        eprintln!("*** {notice} ***");
+    }
+    if let Some(notice) = crate::options::data_face_notice() {
+        eprintln!("*** {notice} ***");
     }
     let db_option = Arc::new(db_option.clone());
     // initialize_global_db_sender().await;
@@ -694,6 +754,49 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             db_option.mdb_name
         );
     }
+    // 成员名单解完，紧接着把这个 MDB 的**元素骨架**装进内存：每个声明的 DESI 做一次
+    // e3d-io 头扫描，落成 `ref0 → dbnum` 归属、`refno → 属主`、`refno → noun` 三张表。
+    // 属性不在里面——2026-09-05 实测 AMS `/ALL`（28 库 / 611,345 元素）：骨架 0.72s /
+    // 19.8 MiB，全属性 8.02s / **1291 MiB**，而那 2215 B/元素大半是 per-element
+    // `HashMap<String, _>` 的表示开销。换紧凑布局之前不谈全属性常驻。
+    //
+    // 放在这里而不是更早：它吃 `init_mdb` 刚登记的成员名单。放在这里而不是更晚：
+    // 树接口（`/api/v1/tree/*`）与按需生成的选根都要它，此前是第一次树请求时现扫，
+    // 那 0.7 秒落在用户点第一下树的那一刻。
+    //
+    // 失败只告警不中止：`mdb_memory_store::ensure` 在第一次用到时会自己再建一遍，
+    // 行为退回到预热之前，不是回归。
+    let step_started = Instant::now();
+    match crate::data_interface::mdb_memory_store::ensure(
+        &db_option.project_name,
+        &db_option.mdb_name,
+    ) {
+        Ok(skeleton) => {
+            println!(
+                "{}，本步耗时 {}",
+                skeleton.describe(),
+                fmt_elapsed(step_started.elapsed())
+            );
+            // 声明了却不在盘上的库、自报库号与声明不符的文件——两者在下游都表现为
+            // 「这个 refno 不存在」，跟元素真的被删了长得一模一样，必须当面点名。
+            for problem in skeleton.problems() {
+                eprintln!("*** MDB 骨架：{problem} ***");
+            }
+            if skeleton.stats().unreadable_records > 0 {
+                eprintln!(
+                    "*** MDB 骨架：{} 条记录索引指得到、内容读不出来，它们不在骨架里 ***",
+                    skeleton.stats().unreadable_records
+                );
+            }
+        }
+        Err(error) => {
+            log::warn!("MDB 元素骨架预热失败，退回按需现建：{error:#}");
+            eprintln!(
+                "*** MDB 元素骨架预热失败，退回第一次树请求时现建（行为与预热之前相同）：\
+                 {error:#} ***"
+            );
+        }
+    }
     let mgr = Arc::new(manager);
     println!(
         "db manager 初始化完成，耗时 {}",
@@ -717,7 +820,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         "启动模型策略：gen_model={} gen_mesh={} 仅控制增量模型阶段；按文件会话号与 applied_sesno 比对结果执行，不启动整库全量生成",
         db_option.gen_model, db_option.gen_mesh
     );
-    if !sync_live {
+    if !sync_live || crate::options::data_face().is_read_through() {
         initialization.mark_data_ready_without_manifest();
     }
     let step_started = Instant::now();
@@ -761,13 +864,17 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         })
     };
 
-    if sync_live {
+    if sync_live && !crate::options::data_face().is_read_through() {
         println!("正在启动监控目录 watcher（首轮重扫入队，含库文件存档压缩，可能较久）...");
         let step_started = Instant::now();
         mgr.init_watcher().await?;
         println!(
             "监控目录 watcher 启动完成，耗时 {}",
             fmt_elapsed(step_started.elapsed())
+        );
+    } else if sync_live {
+        println!(
+            "read-through：跳过启动数据重扫与 Meta→Catalogue→Design 摄入清单；data_ready 已就绪，watcher 仅作为后续文件脏信号"
         );
     }
 
@@ -821,7 +928,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // watch_dbnums。任何一库失败都告警后继续，不把一个库的配置错变成整个服务的崩溃循环。
     crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup().await;
 
-    let startup_data_ready = !sync_live || scheduler.is_auto_work_armed();
+    let startup_data_ready = crate::options::data_face().is_read_through()
+        || !sync_live
+        || scheduler.is_auto_work_armed();
     if sync_live && startup_data_ready {
         println!(
             "等待 Meta → Catalogue → Design 数据清单完成...（模型面已并行开工：门随清单装好即开，\
@@ -885,21 +994,28 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 复用文件交给重放自愈；失配且无意图 / 文件缺失损坏 → 只读指针重建。
     // 空间树是可重建的派生数据，加载失败不该顶掉整个启动：空树有下游防线
     // （全量重建拒跑、整间分支拒算），worker 启动收敛还会重放未完成的空间意图。
-    println!("正在装载空间树（指纹一致直接复用，失配则重建）...");
-    let step_started = Instant::now();
-    match crate::fast_model::aabb_tree::load_project_tree_verified().await {
-        Ok(_) => println!(
-            "空间树装载完成，耗时 {}",
-            fmt_elapsed(step_started.elapsed())
-        ),
-        Err(error) => {
-            eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待后台复检重建");
+    if crate::options::spatial_compute() {
+        println!("正在装载空间树（指纹一致直接复用，失配则重建）...");
+        let step_started = Instant::now();
+        match crate::fast_model::aabb_tree::load_project_tree_verified().await {
+            Ok(_) => println!(
+                "空间树装载完成，耗时 {}",
+                fmt_elapsed(step_started.elapsed())
+            ),
+            Err(error) => {
+                eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待后台复检重建");
+            }
         }
+        crate::fast_model::spatial_state::spawn_spatial_revalidator();
+    } else {
+        println!(
+            "空间计算已关闭（{}=0）：跳过空间树装载、后台复检和后置 AABB，只运行模型生成",
+            crate::options::SPATIAL_COMPUTE_ENV
+        );
     }
     // 降级复检后台任务（一致性闭环方案 §6）：DegradedReuse/DegradedBlocked 两态
     // 由它退避重试收敛，恢复 Ready 后唤醒调度器；健康状态下它只是每 30s 一次的
     // 状态读取。
-    crate::fast_model::spatial_state::spawn_spatial_revalidator();
     // progress_sender.send(10)?;
     // 2026-09-04（S5-2）之前这里有一条 direct 专用分支：复核落地后立刻 `mark_model_ready()`
     // 并跳过收敛等待，`/health.model_ready=true` 时复核排出的行还在跑，而且不看数据链。
@@ -1028,6 +1144,11 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     println!("房间关键字为: {:?}", db_option.get_room_key_word());
     if !startup_data_ready {
         println!("数据初始化尚未释放，跳过启动房间重建");
+    } else if !crate::options::spatial_compute() {
+        println!(
+            "空间计算已关闭（{}=0）：跳过启动房间重建",
+            crate::options::SPATIAL_COMPUTE_ENV
+        );
     } else if !crate::options::model_incremental() {
         // 房间归属只在「数据与模型都已写入 RocksDB」之后才整体重算（ADR-010 §7 /
         // ADR-011 §8：房间依赖几何与 AABB 都已收敛）。模型开关关着时 durable 模型
@@ -1142,19 +1263,42 @@ fn print_startup_complete_banner(db_option: &DbOption, sync_live: bool, started:
     );
     if crate::options::direct_read_mode() {
         println!(
-            "  数据读取：direct / e3d-io（只决定数据面读哪儿；watcher / 模型复核 / 房间与 db 形态同一条路）"
+            "  数据读取：direct / e3d-io（默认形态；只决定数据面读哪儿，watcher / 模型复核 / 房间与读模式无关）"
+        );
+    } else {
+        println!(
+            "  *** 数据读取：db / legacy（{}=db 显式选中；已退役形态，只留作退路）",
+            crate::options::DATA_READ_MODE_ENV
         );
     }
     if let Some(notice) = crate::data_interface::watch_scope::mode_notice() {
         println!("  *** {notice}");
     }
-    if crate::options::in_memory_db() {
-        println!(
-            "  *** 内存模式（in_memory_db）：持久层是进程内嵌 kv-mem，进程一退整库即消失，\
-             外部无端口可连"
-        );
-    } else {
-        println!("  存储介质：{}", db_option.get_version_db_conn_str());
+    if let Some(notice) = crate::data_interface::model_type_scope::mode_notice() {
+        println!("  *** {notice}");
+    }
+    match crate::options::store_mode() {
+        crate::options::StoreMode::EmbeddedMem => println!(
+            "  *** 内存模式（store_mode=embedded-mem）：持久层是进程内嵌 kv-mem，\
+             进程一退整库即消失，外部无端口可连"
+        ),
+        crate::options::StoreMode::SpawnedMem => println!(
+            "  存储介质：memory（store_mode=spawned-mem，本进程自带的 {}）——\
+             进程一退整库即消失，但端口是真的",
+            crate::store_process::spawned_endpoint()
+                .unwrap_or_else(|| db_option.get_version_db_conn_str())
+        ),
+        crate::options::StoreMode::External => {
+            println!("  存储介质：{}", db_option.get_version_db_conn_str())
+        }
+    }
+    match crate::options::data_face() {
+        crate::options::DataFace::ReadThrough => {
+            println!("  数据面：文件直读，内存数据库仅保存模型；不摄入或写透 pe / ATT_* 属性数据")
+        }
+        crate::options::DataFace::Ingest => {
+            println!("  数据面：ingest（整库基线 + 稳态增量窗口，推进 applied_sesno）")
+        }
     }
     #[cfg(feature = "http_api")]
     {
@@ -1203,16 +1347,287 @@ async fn connect_in_memory_store(db_option: &DbOption) -> anyhow::Result<()> {
     );
     println!(
         "*** 进程一退整库即消失，外部没有端口可连（rvm_verify / /sql 探针 / \
-         Capture-*Evidence 都够不着）。要留证据请关掉 in_memory_db。"
+         Capture-*Evidence 都够不着）。要留证据请改 store_mode = \"spawned-mem\"。"
     );
     Ok(())
+}
+
+/// 连配置里那台 SurrealDB（`external` 与 `spawned-mem` 走同一条）。
+///
+/// 两档的分别只在「那台服务是谁起的」——到这一步它已经在监听了，连接语句一个字不差。
+#[cfg(feature = "ws")]
+async fn connect_configured_store(db_option: &DbOption) -> anyhow::Result<()> {
+    // 此前只 `dbg!` 一下就继续跑：连接失败被吞掉，进程一直走到后面第一次真正用库
+    // 的地方才炸，报错点漂移、根因难找。连接是后续一切步骤的前提，失败就地退出。
+    aios_core::init_surreal().await.map_err(|error| {
+        anyhow!(
+            "SurrealDB 连接失败（{}）: {error:#}",
+            db_option.get_version_db_conn_str()
+        )
+    })?;
+    println!(
+        "数据库已经连接到 {}, 站点: {}",
+        db_option.project_name,
+        db_option.get_version_db_conn_str()
+    );
+    Ok(())
+}
+
+/// `spawned-mem`：让配置里那对 `v_ip:v_port` 上有一台**本进程负责的** memory 后端 SurrealDB。
+///
+/// 端口上已经有东西时按 `store_process::judge_port` 那张表行事（附着 / 收孤儿 / 拒绝）。
+/// 自己起的那一台登记进程内单例，正常退出、`Ctrl+C` 与 panic 三条路都收尸；
+/// 附着到的那一台**不收**——它不是我们的。
+#[cfg(feature = "ws")]
+async fn ensure_own_store(
+    db_option: &DbOption,
+    startup: crate::store_process::StoreStartup,
+) -> anyhow::Result<()> {
+    use crate::store_process::{
+        DEFAULT_READY_TIMEOUT, StoreHandle, StoreIdentity, ensure_spawned_store,
+        install_spawned_store, shutdown_spawned_store,
+    };
+
+    let identity = StoreIdentity {
+        project: db_option.project_name.clone(),
+        namespace: db_option.surreal_ns.clone(),
+        data_face: crate::options::data_face().as_str().to_owned(),
+    };
+    let handle = ensure_spawned_store(
+        &db_option.v_ip,
+        db_option.v_port,
+        &db_option.v_user,
+        &db_option.v_password,
+        &identity,
+        startup,
+        DEFAULT_READY_TIMEOUT,
+    )
+    .await?;
+    match handle {
+        StoreHandle::Attached(_) => {}
+        StoreHandle::Spawned(store) => {
+            install_spawned_store(store);
+            // `Drop` 兜正常退出与 panic，兜不住 `Ctrl+C`——那一路 tokio 直接结束进程，
+            // 析构不跑，留下的孤儿会占着端口，而下一次启动只能靠署名把它认出来。
+            // 少这一条不是「偶尔漏一个」，是**每一次 Ctrl+C 都漏**。
+            tokio::spawn(async {
+                if tokio::signal::ctrl_c().await.is_ok() {
+                    println!("收到 Ctrl+C，先收掉自带存储再退出…");
+                    shutdown_spawned_store();
+                }
+                std::process::exit(130);
+            });
+        }
+    }
+    Ok(())
+}
+
+/// **连上持久层的唯一入口。** 三档介质、一条下游：`SUL_DB` 是 `Surreal<Any>`，
+/// 引擎选择对上层不可见，所以初始化解析、增量窗口写回、模型与房间派生数据全部照原路走。
+///
+/// `startup` 决定这一次有没有资格把库拉起来——**只有服务主进程给 `Spawn`**。
+/// 探针、一次性工具与 python 调试入口给 `AttachOnly`：它们要读的是服务手上那个库，
+/// 端口空着时正确的反应是响亮地说「服务没起」，而不是自己拉一台空库在上面作业。
+#[cfg(feature = "ws")]
+pub async fn ensure_store_connected(
+    db_option: &DbOption,
+    startup: crate::store_process::StoreStartup,
+) -> anyhow::Result<()> {
+    match crate::options::store_mode() {
+        crate::options::StoreMode::EmbeddedMem => connect_in_memory_store(db_option).await,
+        crate::options::StoreMode::SpawnedMem => {
+            ensure_own_store(db_option, startup).await?;
+            connect_configured_store(db_option).await
+        }
+        crate::options::StoreMode::External => connect_configured_store(db_option).await,
+    }
+}
+
+/// 旁路入口（探针 / 一次性工具 / python 调试）用的那一档：读配置、只附着、不拉起。
+#[cfg(feature = "ws")]
+pub async fn attach_store_connected() -> anyhow::Result<()> {
+    let db_option = get_db_option_ext().inner;
+    ensure_store_connected(&db_option, crate::store_process::StoreStartup::AttachOnly).await
+}
+
+/// File/memory-first service path.  No database operation is allowed before
+/// the HTTP core is ready; the optional mirror connects and drains its spool
+/// in the background.
+#[cfg(feature = "ws")]
+async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
+    // 内存库承载模型发布，必须在接受模型请求前就绪；属性始终从文件读取。
+    if !crate::options::store_mode().is_durable() {
+        ensure_store_connected(&db_option, crate::store_process::StoreStartup::Spawn).await?;
+        crate::data_interface::embedded_surql::define_embedded_functions().await?;
+    }
+    let mut manager = AiosDBManager::init_form_config().await?;
+    manager
+        .init_mdb(
+            &db_option.project_name,
+            &db_option.mdb_name,
+            &db_option.module,
+        )
+        .await
+        .map_err(|error| {
+            anyhow!(
+                "resolve MDB {} from source files: {error:#}",
+                db_option.mdb_name
+            )
+        })?;
+    let snapshot = crate::data_interface::mdb_memory_store::ensure(
+        &db_option.project_name,
+        &db_option.mdb_name,
+    )?;
+    println!("read-through core snapshot ready: {}", snapshot.describe());
+
+    let initialization =
+        crate::data_interface::initialization_phase::InitializationCoordinator::global();
+    initialization.configure_model_bootstrap(false);
+    initialization.mark_data_ready_without_manifest();
+    let _ = initialization.open_model_phase();
+    let _ = initialization.mark_model_ready();
+
+    let manager = Arc::new(manager);
+    let refresh_manager = manager.clone();
+    let project = db_option.project_name.clone();
+    let mdb = db_option.mdb_name.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            match crate::data_interface::mdb_memory_store::refresh_if_stale(&project, &mdb) {
+                Ok(true) => {
+                    let model_store =
+                        crate::fast_model::model_memory_store::ModelMemoryStore::global();
+                    let previous_roots = model_store
+                        .roots(crate::fast_model::model_memory_store::ProjectionScope::Current);
+                    // A source snapshot can remove a whole delivery root. Regenerating every
+                    // previous root treats that absence as a generation failure and deliberately
+                    // retains its old rows, which makes Plant UI show a ghost pipeline forever.
+                    // Partition against the newly-published skeleton first: missing roots are
+                    // successful tombstones, while only live roots enter regeneration.
+                    let current = crate::data_interface::mdb_memory_store::get(&project, &mdb);
+                    let (refresh_roots, deleted_roots): (Vec<_>, Vec<_>) =
+                        previous_roots.into_iter().partition(|root| {
+                            current.as_ref().is_some_and(|snapshot| {
+                                snapshot.contains(
+                                    crate::data_interface::generation_root::refno_from_e3d(*root)
+                                        .refno(),
+                                )
+                            })
+                        });
+                    for root in deleted_roots {
+                        let requested =
+                            crate::data_interface::generation_root::refno_from_e3d(root);
+                        if let Err(error) = refresh_manager.delete_model_subtree(requested).await {
+                            log::error!(
+                                "source snapshot failed to retire deleted model root {requested}: {error:#}"
+                            );
+                        } else {
+                            log::info!(
+                                "source snapshot retired deleted model root {requested} from the current projection"
+                            );
+                        }
+                    }
+                    let invalidated = model_store.invalidate_all_receipts(
+                        crate::fast_model::model_memory_store::ProjectionScope::Current,
+                    );
+                    log::info!(
+                        "source snapshot advanced atomically for {project}/{mdb}; invalidated {invalidated} model publication receipt(s)"
+                    );
+                    if !refresh_roots.is_empty() {
+                        let roots = refresh_roots
+                            .into_iter()
+                            .map(|root| format!("{}/{}", root.word0, root.word1))
+                            .collect::<Vec<_>>();
+                        match crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots_report(
+                            &refresh_manager,
+                            &roots,
+                        )
+                        .await
+                        {
+                            Ok(report) if report.failures.is_empty() => log::info!(
+                                "source snapshot refresh published {} model root(s) from the new epoch",
+                                report.completed.len()
+                            ),
+                            Ok(report) => log::error!(
+                                "source snapshot refresh left {} model root(s) pending retry",
+                                report.failures.len()
+                            ),
+                            Err(error) => log::error!(
+                                "source snapshot model refresh failed; roots remain unpublished: {error:#}"
+                            ),
+                        }
+                    }
+                }
+                Ok(false) => {}
+                Err(error) => {
+                    log::error!("source snapshot refresh failed; old epoch retained: {error:#}")
+                }
+            }
+        }
+    });
+
+    let mirror_option = db_option.clone();
+    tokio::spawn(async move {
+        // 旧的属性备份任务只能重放到持久库，切换内存模式时保留任务而不消费。
+        if !crate::options::store_mode().is_durable() {
+            return;
+        }
+        loop {
+            match ensure_store_connected(&mirror_option, crate::store_process::StoreStartup::Spawn)
+                .await
+            {
+                Ok(()) => {
+                    if let Err(error) =
+                        crate::data_interface::embedded_surql::define_embedded_functions().await
+                    {
+                        log::error!("mirror schema installation failed: {error:#}");
+                    }
+                    match crate::data_interface::mirror_spool::MirrorSpool::for_process(
+                        &mirror_option.surreal_ns,
+                        &mirror_option.project_name,
+                        &mirror_option.mdb_name,
+                    ) {
+                        Ok(spool) => loop {
+                            match spool.replay(&SUL_DB).await {
+                                Ok(count) if count > 0 => {
+                                    log::info!("mirror ready; replayed {count} durable job(s)")
+                                }
+                                Ok(_) => {}
+                                Err(error) => {
+                                    log::error!("mirror spool replay degraded: {error:#}")
+                                }
+                            }
+                            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                        },
+                        Err(error) => log::error!("mirror spool open failed: {error:#}"),
+                    }
+                    break;
+                }
+                Err(error) => {
+                    log::warn!("mirror connecting/degraded; core remains ready: {error:#}");
+                    tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+                }
+            }
+        }
+    });
+
+    #[cfg(feature = "http_api")]
+    {
+        crate::web_service::serve_if_configured(manager).await?;
+        return Ok(());
+    }
+    #[cfg(not(feature = "http_api"))]
+    {
+        std::future::pending::<()>().await;
+        Ok(())
+    }
 }
 
 /// 运行app
 pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     use std::sync::mpsc;
-
-    use aios_core::init_surreal;
 
     mark_process_start();
     // 如果传入的是DbOptionExt，则取其内部的DbOption
@@ -1223,6 +1638,10 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     // local store or loading mutable process-global spatial state. `run_cli`
     // repeats this call deliberately; OnceLock makes that check idempotent.
     acquire_process_instance_lock(&db_option)?;
+    #[cfg(feature = "ws")]
+    if crate::options::data_face().is_read_through() {
+        return run_read_through_core(db_option).await;
+    }
     let config = surrealdb::opt::Config::default()
     .ast_payload()  // 启用AST格式
     ; // 设置容
@@ -1234,36 +1653,22 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     println!("数据库连接中...");
     #[cfg(feature = "ws")]
     {
-        // 内存模式换掉的只是介质：下面这条 ws 连接与它连的那台服务器整个不出现，
-        // 持久层改为进程内嵌 kv-mem，其余每一步照原样跑。
-        if crate::options::in_memory_db() {
-            connect_in_memory_store(&db_option).await?;
-        } else {
-            match init_surreal().await {
-                Ok(_) => {
-                    println!(
-                        "数据库已经连接到 {}, 站点: {}",
-                        db_option.project_name,
-                        db_option.get_version_db_conn_str()
-                    );
-                }
-                Err(e) => {
-                    // 此前只 `dbg!` 一下就继续跑：连接失败被吞掉，进程一直走到
-                    // 后面第一次真正用库的地方才炸，报错点漂移、根因难找。
-                    // 连接是后续一切步骤的前提，失败就地退出。
-                    return Err(anyhow!(
-                        "SurrealDB 连接失败（{}）: {e:#}",
-                        db_option.get_version_db_conn_str()
-                    ));
-                }
-            }
-        }
+        // 服务主进程是唯一给 `Spawn` 的调用方：只有它有资格把库拉起来、收自己的孤儿。
+        // 三档介质的分派全在 `ensure_store_connected` 里，旁路入口共用同一条。
+        ensure_store_connected(&db_option, crate::store_process::StoreStartup::Spawn).await?;
     }
+
+    crate::data_interface::data_face_signature::validate_or_claim(
+        &db_option.project_name,
+        &db_option.surreal_ns,
+    )
+    .await?;
 
     // ADR-050: this table is only a scheduler ledger for the current process.
     // Clear it after the database connection exists but before spatial loading,
     // preload, db-manager construction, watcher startup, or worker startup. A
     // cleanup error is fatal: continuing would replay a prior process snapshot.
+    crate::data_interface::model_publish_queue::recover_before_cleanup().await?;
     let cleared = crate::data_interface::model_update_pending::clear_stale_at_process_start()
         .await
         .map_err(|error| anyhow!("启动清理 model_update_pending 失败，拒绝继续：{error:#}"))?;
@@ -1271,10 +1676,17 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
 
     // 启动分层判据装载空间树，与 run_app 同一失败语义（方案决策 D3）：树是可
     // 重建的派生数据，加载失败告警降级空树，不阻断启动；降级两态交给后台复检。
-    if let Err(error) = crate::fast_model::aabb_tree::load_project_tree_verified().await {
-        eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待后台复检重建");
+    if crate::options::spatial_compute() {
+        if let Err(error) = crate::fast_model::aabb_tree::load_project_tree_verified().await {
+            eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待后台复检重建");
+        }
+        crate::fast_model::spatial_state::spawn_spatial_revalidator();
+    } else {
+        println!(
+            "空间计算已关闭（{}=0）：跳过空间树装载、后台复检和后置 AABB，只运行模型生成",
+            crate::options::SPATIAL_COMPUTE_ENV
+        );
     }
-    crate::fast_model::spatial_state::spawn_spatial_revalidator();
     // let (tx, mut rx) = mpsc::channel::<i32>();
     run_cli(db_option).await
 }
@@ -1322,13 +1734,14 @@ mod startup_room_build_gate_tests {
         );
     }
 
-    /// 三道门的优先级：止血口 > 冷启动开关 > 库侧对账。
+    /// 四道门的优先级：止血口 > 冷启动开关 > 空树平凡 > 库侧对账。
     ///
     /// 顺序不能乱。`AIOS_SKIP_STARTUP_ROOM_BUILD` 排在最前是因为「跑增量」与
-    /// 「跑 2 万面板级全量重建」是两件事——L3 夹具正是要前者不要后者；而对账
-    /// 排在最后是因为它要读库，前两道门放行之前不该为它付这次查询。
+    /// 「跑 2 万面板级全量重建」是两件事——L3 夹具正是要前者不要后者；空树那道门只读
+    /// 进程态，排在对账之前是因为对账要读库，没什么可判的时候不该为它付这次查询；
+    /// 对账排在最后。
     #[test]
-    fn the_three_gates_keep_their_precedence() {
+    fn the_four_gates_keep_their_precedence() {
         let source = include_str!("lib.rs");
         let body = source
             .split_once("async fn skip_startup_room_build()")
@@ -1344,12 +1757,79 @@ mod startup_room_build_gate_tests {
         let autorun_at = body
             .find("crate::options::startup_autorun()")
             .expect("冷启动开关必须把门");
+        let vacuous_at = body
+            .find("vacuous_room_build_reason(crate::fast_model::spatial_state::current_state())")
+            .expect("空树那道门必须读的是进程态空间状态");
         let reconcile_at = body
             .find("reconcile_startup_room_build().await")
             .expect("放行后必须与库侧凭据对账");
         assert!(
-            env_at < autorun_at && autorun_at < reconcile_at,
-            "三道门的优先级是 止血口 → 冷启动开关 → 库侧对账: {body}"
+            env_at < autorun_at && autorun_at < vacuous_at && vacuous_at < reconcile_at,
+            "四道门的优先级是 止血口 → 冷启动开关 → 空树平凡 → 库侧对账: {body}"
+        );
+    }
+
+    /// 第三道门的判据是纯函数，真值表钉死：**只有** `ReadyEmpty` 算平凡重建。
+    ///
+    /// `Ready` 必须交给对账（树非空就可能有该重算的房间）；`Loading` / `Rebuilding` /
+    /// 两个 Degraded / `ReplayRequired` / `Uninitialized` 也不许在这里被折成「跳过」——
+    /// 它们该撞的是 `build_room_relations` 里 fail-closed 的覆盖率闸门，那一撞会出声，
+    /// 这里悄悄跳过则不会。
+    #[test]
+    fn only_a_verified_empty_tree_makes_the_full_rebuild_vacuous() {
+        use crate::fast_model::spatial_state::SpatialTreeState as S;
+        for state in [
+            S::Uninitialized,
+            S::Loading,
+            S::Ready,
+            S::ReadyEmpty,
+            S::ReplayRequired,
+            S::Rebuilding,
+            S::DegradedReuse,
+            S::DegradedBlocked,
+        ] {
+            let verdict = super::vacuous_room_build_reason(state);
+            assert_eq!(
+                verdict.is_some(),
+                state == S::ReadyEmpty,
+                "{}: {verdict:?}",
+                state.as_str()
+            );
+        }
+        let reason = super::vacuous_room_build_reason(S::ReadyEmpty).unwrap();
+        assert!(
+            reason.contains("空间树已验证为空") && reason.contains("发布事务"),
+            "理由要说清楚为什么无事可做、以及房间归属从此靠什么收敛: {reason}"
+        );
+    }
+
+    /// 空树那道门跳过时**盖章而不重建**：凭据没有比较对象的话 `/health.room_build`
+    /// 会一直报「没有成功的全量房间重建凭据」，下次启动也只能判「跑」。盖章走
+    /// `stamp_vacuous_room_build`（树非空拒绝），这里不许直接碰 `build_room_relations`。
+    #[test]
+    fn the_vacuous_gate_stamps_instead_of_rebuilding() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("async fn skip_startup_room_build()")
+            .expect("门必须存在")
+            .1
+            .split_once("\npub mod api;")
+            .expect("门之后是模块声明")
+            .0;
+        let branch = body
+            .split_once("vacuous_room_build_reason(")
+            .expect("空树那道门必须存在")
+            .1
+            .split_once("reconcile_startup_room_build().await")
+            .expect("对账在它之后")
+            .0;
+        assert!(
+            branch.contains("stamp_vacuous_room_build().await"),
+            "平凡重建也要盖章: {branch}"
+        );
+        assert!(
+            !branch.contains("build_room_relations"),
+            "空树上不许跑全量重建: {branch}"
         );
     }
 
@@ -1491,6 +1971,54 @@ mod startup_room_build_gate_tests {
         );
     }
 
+    /// Read-through startup must have an explicit source guard: it marks the
+    /// file-side service ready without entering the startup ingest sweep.
+    #[test]
+    fn read_through_startup_cannot_enter_the_ingest_sweep() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli exists")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_cli end exists")
+            .0;
+        assert!(
+            body.contains("if sync_live && !crate::options::data_face().is_read_through()"),
+            "startup init_watcher must be excluded in read-through mode"
+        );
+        assert!(
+            body.contains("if !sync_live || crate::options::data_face().is_read_through()"),
+            "read-through must mark data_ready without an ingest manifest"
+        );
+    }
+
+    /// A read-through snapshot advance must treat a vanished generation root as a
+    /// tombstone. Feeding it back to `generate_roots_report` retains its previous
+    /// records by design on generation failure and creates a ghost pipeline.
+    #[test]
+    fn read_through_snapshot_retires_roots_missing_from_the_new_skeleton() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("async fn run_read_through_core(")
+            .expect("read-through core exists")
+            .1
+            .split_once("pub async fn run_cli(")
+            .expect("read-through core end exists")
+            .0;
+        let partition = body
+            .find(".partition(|root|")
+            .expect("previous roots must be partitioned against the new skeleton");
+        let retire = body
+            .find("delete_model_subtree(requested).await")
+            .expect("missing roots must retire their projection");
+        let regenerate = body
+            .find("ModelRefreshPolicy::generate_roots_report(")
+            .expect("live roots must still regenerate");
+        assert!(partition < retire && retire < regenerate);
+        assert!(body.contains("snapshot.contains("));
+    }
+
     /// 模型门返回 false 只能说明「此刻还开不了」（重扫刚发现新会话、数据回到未就绪），
     /// 不许再把整段模型等待连同收敛横幅一起跳过（审核 P1）。返回值只用于播报，
     /// 之后照常叫醒调度器并进入等待循环；门由 `install_manifest` 在清单就绪时自动打开。
@@ -1587,7 +2115,7 @@ mod startup_room_build_gate_tests {
             &body[guard..worker]
         );
         assert!(
-            !body
+            !run_cli_tail
                 .lines()
                 .filter(|line| !line.trim_start().starts_with("//"))
                 .any(|line| line.contains("mark_model_ready()")),

@@ -27,7 +27,7 @@
 //!
 //! 与索引差分同一条**纯文件纪律**：不查库、不读水位，窗口由调用方显式给定。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::RangeInclusive;
 use std::path::Path;
 use std::sync::Arc;
@@ -42,9 +42,9 @@ use e3d_io::refno::RefNo;
 use e3d_io::session::{DbView, SessionSelector};
 
 use super::db_file_header::SessionStamp;
-use super::ele_data::EleData;
 use super::direct_attmap::{self, DirectAttrError};
 use super::direct_store::DirectSchema;
+use super::ele_data::EleData;
 use super::ele_ops::{EleOperationData, EleOperationDetail, diff_ele_data};
 use super::frozen_source::FrozenSource;
 
@@ -105,6 +105,9 @@ pub struct NetWindowOutcome {
     pub ignored_finals: Vec<IgnoredFinalRecord>,
     /// refno 复用条目：终稿已按 `Add` 进 `window`，旧 noun 行由调用方按此删除。
     pub retired_type_rows: Vec<RetiredTypeRow>,
+    /// 被删元素在窗口基侧（`DbSet@S`）的完整状态：墓碑 `pe` 行从它渲染、旧 noun 行按它的 noun
+    /// 删（plan 2026-09-06 §3 D2）。基侧读不到的 refno 不在表里，落库时退化成最小墓碑并出声。
+    pub tombstones: HashMap<RefU64, EleData>,
     pub stats: WindowStats,
 }
 
@@ -243,10 +246,28 @@ impl std::fmt::Display for ElementReadError {
 /// 在 target 端被显式设置时，会被差分成「隐式删一个 + 显式加一个」——同一列在一条 MERGE
 /// 里既置空又赋值。db8000 24→25 的 EQUI `24384/24778`（`CACHID` "" → "1"）就是这个现场。
 fn read_element(set: &Arc<DbSet>, refno: RefNo) -> Result<EleData, ElementReadError> {
+    read_element_with_catalog(set, refno, None)
+}
+
+fn read_element_with_catalog(
+    set: &Arc<DbSet>,
+    refno: RefNo,
+    uda_catalog: Option<&e3d_io::uda_catalog::UdaCatalog>,
+) -> Result<EleData, ElementReadError> {
     let element = set.element(refno);
-    let extraction = element
+    let mut extraction = (*element
         .extraction()
-        .map_err(|error| ElementReadError::Other(anyhow::anyhow!("{error}")))?;
+        .map_err(|error| ElementReadError::Other(anyhow::anyhow!("{error}")))?)
+    .clone();
+    let parsed = if let Some(catalog) = uda_catalog {
+        let parsed = element
+            .parsed()
+            .map_err(|error| ElementReadError::Other(anyhow::anyhow!("{error}")))?;
+        catalog.materialize_for_element(&mut extraction, &parsed.explicit_attributes);
+        Some(parsed)
+    } else {
+        None
+    };
     let attrs = direct_attmap::to_named_attmap(&extraction).map_err(|error| match error {
         DirectAttrError::UnnamedNoun { noun_hash, .. } => {
             ElementReadError::UnnamedNoun { noun_hash }
@@ -268,12 +289,13 @@ fn read_element(set: &Arc<DbSet>, refno: RefNo) -> Result<EleData, ElementReadEr
                 .collect(),
         });
     }
-    let children: Vec<RefU64> = element
-        .member_refnos()
-        .map_err(|error| ElementReadError::Other(anyhow::anyhow!("成员表读取失败: {error}")))?
-        .into_iter()
-        .map(refu64)
-        .collect();
+    let members = match parsed {
+        Some(parsed) => parsed.members.clone(),
+        None => element
+            .member_refnos()
+            .map_err(|error| ElementReadError::Other(anyhow::anyhow!("成员表读取失败: {error}")))?,
+    };
+    let children: Vec<RefU64> = members.into_iter().map(refu64).collect();
     Ok(assemble_ele_data(&extraction, attrs.map, children))
 }
 
@@ -303,10 +325,12 @@ pub fn read_element_at(frozen: &FrozenSource, refno: RefU64) -> anyhow::Result<E
     })
 }
 
-/// 在一个钉住会话的 `DbSet` 上读一个元素的数据面终态（对拍夹具 / 探针用；生产窗口走
-/// [`collect_net_window`]，不经这里）。元素在该会话不存在给 `Ok(None)`；解得出记录但
-/// 数据面拒收（attlib 反不出 noun、noun 不在 schema、存储形状与 schema 冲突）是 `Err`——
-/// 与生产路径同一套判定，夹具看到的就是持久层会写出去的那份。
+/// 在一个钉住会话的 `DbSet` 上读一个元素的数据面终态。生产窗口走 [`collect_net_window`]，
+/// 不经这里；经这里的是对拍夹具 / 探针，以及 2026-09-05 起的**读透**
+/// （`data_interface::read_through`：生成一根顺手把子树元素写进库、`element/ensure` 按需读）——
+/// 读透与基线必须渲出逐字段相同的行，靠的就是两边共用 [`read_element`] 这一条读法。
+/// 元素在该会话不存在给 `Ok(None)`；解得出记录但数据面拒收（attlib 反不出 noun、noun 不在
+/// schema、存储形状与 schema 冲突）是 `Err`——与生产路径同一套判定，看到的就是持久层会写出去的那份。
 pub fn read_ele_data(set: &Arc<DbSet>, refno: RefU64) -> anyhow::Result<Option<EleData>> {
     let target = refno_of(refno);
     let exists = set
@@ -317,6 +341,28 @@ pub fn read_ele_data(set: &Arc<DbSet>, refno: RefU64) -> anyhow::Result<Option<E
         return Ok(None);
     }
     read_element(set, target)
+        .map(Some)
+        .map_err(|error| anyhow::anyhow!("读 {refno} 失败: {error}"))
+}
+
+/// Read the same terminal data row while resolving actual UDA values through
+/// the file-side DICT catalog.  Defaults materialized by the catalog remain
+/// non-persisted because [`assemble_ele_data`] only accepts decoded stored
+/// attributes into `uda_atts`.
+pub fn read_ele_data_with_uda_catalog(
+    set: &Arc<DbSet>,
+    refno: RefU64,
+    catalog: &e3d_io::uda_catalog::UdaCatalog,
+) -> anyhow::Result<Option<EleData>> {
+    let target = refno_of(refno);
+    let exists = set
+        .element(target)
+        .exists()
+        .map_err(|error| anyhow::anyhow!("查 {refno} 是否存在失败: {error}"))?;
+    if !exists {
+        return Ok(None);
+    }
+    read_element_with_catalog(set, target, Some(catalog))
         .map(Some)
         .map_err(|error| anyhow::anyhow!("读 {refno} 失败: {error}"))
 }
@@ -459,12 +505,13 @@ struct TargetIndex {
 /// [`stream_baseline`] 的全部候选：基线就是每个元素都是 `Add` 的退化窗口（ADR-058 D3 / D4），
 /// 两条路必须从同一次枚举出发，源码钉见 `the_baseline_and_the_net_window_share_one_enumeration`。
 fn enumerate_target_index(path: &Path, target_sesno: u32) -> anyhow::Result<TargetIndex> {
-    let mut view = DbView::open_at(path, SessionSelector::Exact(target_sesno)).map_err(|error| {
-        anyhow::anyhow!(
-            "以会话 {target_sesno} 打开 {} 失败: {error}",
-            path.display()
-        )
-    })?;
+    let mut view =
+        DbView::open_at(path, SessionSelector::Exact(target_sesno)).map_err(|error| {
+            anyhow::anyhow!(
+                "以会话 {target_sesno} 打开 {} 失败: {error}",
+                path.display()
+            )
+        })?;
     let root = view.index_root();
     let mut entries = Vec::new();
     for found in IndexCursor::at_root(view.pages_mut(), root).walk() {
@@ -555,17 +602,21 @@ pub fn stream_baseline(
                 } else {
                     stats.elements += 1;
                 }
-                let sesno = pages.sesno_of_page(position.page.page).unwrap_or(target_sesno);
+                let sesno = pages
+                    .sesno_of_page(position.page.page)
+                    .unwrap_or(target_sesno);
                 chunk.elements.push((sesno, data));
             }
             Err(error) => {
                 stats.ignored += 1;
-                chunk.ignored.push(allowed_ignored_final(refno64, error).map_err(|error| {
-                    anyhow::anyhow!(
-                        "{} 的基线（会话 {target_sesno}）中止: {error:#}",
-                        frozen.path().display()
-                    )
-                })?);
+                chunk
+                    .ignored
+                    .push(allowed_ignored_final(refno64, error).map_err(|error| {
+                        anyhow::anyhow!(
+                            "{} 的基线（会话 {target_sesno}）中止: {error:#}",
+                            frozen.path().display()
+                        )
+                    })?);
             }
         }
         if chunk.elements.len() >= chunk_size {
@@ -609,6 +660,7 @@ pub fn collect_net_window(
         unparseable_finals: 0,
         ignored_finals: Vec::new(),
         retired_type_rows: Vec::new(),
+        tombstones: HashMap::new(),
         stats: WindowStats {
             base_sesno,
             target_sesno,
@@ -646,11 +698,16 @@ pub fn collect_net_window(
             (candidates, index.pages_read)
         }
     };
+    // 基侧要开的两种情形：Modified 要对拍前后态；Deleted 要读基侧状态渲墓碑（noun / owner /
+    // name 保留、`deleted = true`，plan 2026-09-06 §3 D2）。
     let base_set = match base_sesno {
         Some(base)
-            if candidates
-                .iter()
-                .any(|candidate| matches!(candidate, IndexCandidate::Modified { .. })) =>
+            if candidates.iter().any(|candidate| {
+                matches!(
+                    candidate,
+                    IndexCandidate::Modified { .. } | IndexCandidate::Deleted { .. }
+                )
+            }) =>
         {
             Some(open_pinned_set(&schema, frozen.path(), db_type, base)?)
         }
@@ -689,10 +746,23 @@ pub fn collect_net_window(
             }
             IndexCandidate::Deleted { refno, .. } => {
                 outcome.stats.deleted += 1;
+                let refno64 = refu64(refno);
+                // 墓碑的基侧状态：读不到不拦窗口（落库退化成最小墓碑并在回执出声），
+                // 但要在这里点名——它是「被删元素的 noun / owner 从此不可考」的唯一现场。
+                match base_set.as_ref().map(|base| read_element(base, refno)) {
+                    Some(Ok(base)) => {
+                        outcome.tombstones.insert(refno64, base);
+                    }
+                    Some(Err(error)) => outcome.warnings.push(format!(
+                        "被删元素 {refno64} 在基侧会话 {} 读不到（{error}），墓碑只带 id / dbnum / sesno / deleted",
+                        base_sesno.unwrap_or_default()
+                    )),
+                    None => {}
+                }
                 push(
                     &mut outcome.window,
                     target_sesno,
-                    refu64(refno),
+                    refno64,
                     EleOperationDetail::Deleted,
                 );
             }
@@ -966,7 +1036,9 @@ mod tests {
         let between = |from: &str, to: &str| -> &str {
             let start = body.find(from).unwrap_or_else(|| panic!("缺 {from}"));
             let rest = &body[start..];
-            let end = rest.find(to).unwrap_or_else(|| panic!("{from} 之后缺 {to}"));
+            let end = rest
+                .find(to)
+                .unwrap_or_else(|| panic!("{from} 之后缺 {to}"));
             &rest[..end]
         };
         let baseline = between("pub fn stream_baseline(", "pub fn collect_net_window(");
@@ -978,10 +1050,14 @@ mod tests {
             "allowed_ignored_final(",
         ] {
             assert!(baseline.contains(shared), "stream_baseline 必须走 {shared}");
-            assert!(net_window.contains(shared), "collect_net_window 必须走 {shared}");
+            assert!(
+                net_window.contains(shared),
+                "collect_net_window 必须走 {shared}"
+            );
         }
         assert!(
-            !baseline.contains("DbView::open_at(") && !baseline.contains("DirectSchema::open_from_env("),
+            !baseline.contains("DbView::open_at(")
+                && !baseline.contains("DirectSchema::open_from_env("),
             "stream_baseline 不许自己另开一条打开 / 枚举路"
         );
         assert!(
@@ -1029,8 +1105,14 @@ mod tests {
         .expect("stream baseline");
         println!("{stats:?}");
 
-        assert!(!seen.contains(&ghost), "已删的 /1WCC-PIPEBJ 不该出现在基线流里");
-        assert!(!seen.contains(&ghost_pipe), "幽灵子树内部的 /1WCC1135 同样不该出现");
+        assert!(
+            !seen.contains(&ghost),
+            "已删的 /1WCC-PIPEBJ 不该出现在基线流里"
+        );
+        assert!(
+            !seen.contains(&ghost_pipe),
+            "幽灵子树内部的 /1WCC1135 同样不该出现"
+        );
         assert!(seen.contains(&live), "重建出来的 /1WCC-PIPEBJ 必须在");
         assert!(seen.contains(&live_pipe), "真身 /1WCC1135 必须在");
         assert_eq!(worlds.len(), 1, "恰一个 WORL");

@@ -340,7 +340,8 @@ mod tests {
     /// 现在配置里怎么写都不影响：MDB 说了算。
     #[test]
     fn handwritten_dbnum_lists_no_longer_narrow_the_increment_scope() {
-        let _lease = debug_scope::test_guard();
+        let _lease = watch_scope::test_guard();
+        watch_scope::set_dbnums_for_tests(Vec::new(), watch_scope::Origin::Config);
         let mut option = DbOption::default();
         option.project_name = "Main".to_string();
         option.manual_db_nums = Some(vec![1001]);
@@ -362,6 +363,7 @@ mod tests {
             in_scope_with(&option, &scope, "Main", "SYST", 8191),
             "SYS meta 始终解析：MDB 的成员名单本身就存在它里面"
         );
+        watch_scope::clear_for_tests();
     }
 
     /// D7 护栏二：没给 `--debug-dbnum`，入范围判定必须与本特性引入前逐位相同。
@@ -370,7 +372,8 @@ mod tests {
     /// 一切正常，只是永远不处理其他库。
     #[test]
     fn an_unset_debug_scope_leaves_the_scope_verdict_untouched() {
-        let _lease = debug_scope::test_guard();
+        let _lease = watch_scope::test_guard();
+        watch_scope::set_dbnums_for_tests(Vec::new(), watch_scope::Origin::Config);
         let mut option = DbOption::default();
         option.project_name = "Main".to_string();
         let scope = UpdateScope::for_tests("/ALL", &[7997, 7998, 8000]);
@@ -384,6 +387,7 @@ mod tests {
         for db_type in COLD_START_DB_TYPES {
             assert!(in_scope_with(&option, &scope, "Main", db_type, 8191));
         }
+        watch_scope::clear_for_tests();
     }
 
     /// D7 护栏一：调试限定挡掉的库，说法必须与 MDB 范围判定那句**无交集**。
@@ -392,7 +396,8 @@ mod tests {
     /// 没有这个库」和「我自己在命令行上把它划掉了」——那正是 issue #10。
     #[test]
     fn the_debug_exclusion_never_speaks_with_the_scope_verdicts_voice() {
-        let _lease = debug_scope::test_guard();
+        let _lease = watch_scope::test_guard();
+        watch_scope::set_dbnums_for_tests(Vec::new(), watch_scope::Origin::Config);
         let scope = UpdateScope::for_tests("/ALL", &[7998]);
         let mdb_voice = out_of_scope_reason(&scope, "DESI", 7997);
 
@@ -409,6 +414,7 @@ mod tests {
         );
         // 限定域**内**的库若真的不在 MDB 范围里，仍旧要听到范围判定那句。
         assert_eq!(in_scope_voice, out_of_scope_reason(&scope, "DESI", 7998));
+        watch_scope::clear_for_tests();
     }
 
     /// SYS meta 不受调试限定（D3）：MDB 的成员名单存在它们里面，圈掉就解不出
@@ -3111,6 +3117,76 @@ impl AiosDBManager {
     /// `ensure_archives` 只有启动那一次为真：`SyncPublisher::ensure_archive` 会把整个
     /// 库文件重压一遍，重扫时再压一遍纯属白烧 CPU。
     async fn sweep_watch_dirs(&self, origin: &str, ensure_archives: bool) -> anyhow::Result<()> {
+        if crate::options::data_face().is_read_through() {
+            // File events remain useful to the model/cache side, but this
+            // routine is the ingest discovery path.  Never manufacture data
+            // batches or advance applied_sesno in read-through mode.
+            crate::data_interface::initialization_phase::InitializationCoordinator::global()
+                .mark_data_ready_without_manifest();
+            let project = self.db_option.project_name.clone();
+            let mdb = self.db_option.mdb_name.clone();
+            let skeleton_changed = match tokio::task::spawn_blocking(move || {
+                crate::data_interface::mdb_memory_store::refresh_if_stale(&project, &mdb)
+            })
+            .await
+            {
+                Ok(Ok(true)) => {
+                    log::info!(
+                        "[{origin}] read-through MDB skeleton advanced atomically to the latest file sessions"
+                    );
+                    true
+                }
+                Ok(Ok(false)) => false,
+                Ok(Err(error)) => {
+                    log::error!(
+                        "[{origin}] read-through MDB skeleton refresh failed; retaining the old snapshot: {error:#}"
+                    );
+                    false
+                }
+                Err(error) => {
+                    log::error!(
+                        "[{origin}] read-through MDB skeleton refresh task failed: {error}"
+                    );
+                    false
+                }
+            };
+            if skeleton_changed {
+                // This creates model work only.  It does not enter the data
+                // batch/finalize path and therefore cannot advance
+                // `applied_sesno` in read-through mode.
+                crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup()
+                    .await;
+                if let Err(error) = crate::data_interface::element_attributes::refresh_cached(
+                    &self.db_option.project_name,
+                    &self.db_option.mdb_name,
+                )
+                .await
+                {
+                    log::warn!("[{origin}] read-through refresh-if-present degraded: {error:#}");
+                }
+            }
+            log::info!(
+                "[{origin}] read-through data face: skipped ingest sweep (ensure_archives={ensure_archives})"
+            );
+            return Ok(());
+        }
+        // Direct tree/attribute readers use the same in-memory MDB snapshot in
+        // RocksDB mode. Advancing only SQL rows leaves those readers on the old session.
+        let project = self.db_option.project_name.clone();
+        let mdb = self.db_option.mdb_name.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::data_interface::mdb_memory_store::refresh_if_stale(&project, &mdb)
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => {
+                log::error!("[{origin}] ingest MDB snapshot refresh failed: {error:#}")
+            }
+            Err(error) => {
+                log::error!("[{origin}] ingest MDB snapshot refresh task failed: {error}")
+            }
+        }
         let watch_dirs = self.watch_dirs();
         // 目录集合为空时这轮重扫会「成功地」扫出 0 个候选，与「确实没有新会话」
         // 长得一模一样。它同时也是手动摄入的候选面，所以必须自己喊出来。

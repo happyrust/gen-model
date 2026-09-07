@@ -1,10 +1,7 @@
 //! 手动重建 `dbnum_info_table` 统计：连接当前工作目录 `DbOption.toml` 指向的
 //! SurrealDB，对点名的 dbnum 从 pe 全量重算 per-ref0 统计。
 //!
-//! 存在的理由：`update_dbnum_event` 只做增量维护，事件曾被不兼容实现覆盖（或
-//! 写入发生在事件缺失的窗口）漏记的 count **不会自愈**；而自动 rebuild 只挂在
-//! 基线路径（applied=0）上，已有基线的库没有别的纠偏入口。播种完整性告警
-//! （`dbnum_state::seed_integrity_warnings`）报了哪个 dbnum，就拿它来修哪个。
+//! 显式修复历史统计；重建与统计版本标记原子提交，正常写入无需全库重算。
 //!
 //! 用法（在含 DbOption.toml 的目录下执行）：
 //!     rebuild_dbnum_stats <dbnum>...
@@ -78,6 +75,7 @@ async fn main() -> anyhow::Result<()> {
     anyhow::ensure!(!dbnums.is_empty(), "usage: rebuild_dbnum_stats <dbnum>...");
 
     aios_core::init_test_surreal().await?;
+    aios_database::versioned_db::database::retire_dbnum_event().await?;
 
     let mut failures = 0usize;
     for dbnum in dbnums {

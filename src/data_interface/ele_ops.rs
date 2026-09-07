@@ -17,7 +17,13 @@ pub use crate::data_interface::uda_keys::UdaKeyMap;
 pub enum PersistElementState {
     Add(EleData),
     Modified(EleData),
-    Deleted,
+    /// 元素在窗口终态被删。`base` 是它在窗口基侧（`DbSet@S`）的完整状态——墓碑 `pe` 行
+    /// （noun / owner / name 保留、`deleted = true`）从它渲染，旧 noun 行按它的 noun 删；
+    /// 基侧读不到时为 `None`，墓碑退化成只带 id / dbnum / sesno / deleted 的最小行并出声
+    /// （`element_batch::RenderedElementBatch::tombstones_without_base`）。
+    Deleted {
+        base: Option<EleData>,
+    },
 }
 
 #[derive(Clone)]
@@ -32,7 +38,8 @@ impl std::fmt::Debug for PersistElementState {
         formatter.write_str(match self {
             Self::Add(_) => "Add(..)",
             Self::Modified(_) => "Modified(..)",
-            Self::Deleted => "Deleted",
+            Self::Deleted { base: Some(_) } => "Deleted(base)",
+            Self::Deleted { base: None } => "Deleted",
         })
     }
 }
@@ -48,8 +55,11 @@ impl std::fmt::Debug for PersistElementChange {
     }
 }
 
+/// 窗口 → 每 refno 一条终态。`tombstones` 是收集器读回的被删元素基侧状态（`DbSet@S`），
+/// 按 refno 取；没有就是 `Deleted { base: None }`（墓碑退化，见 [`PersistElementState::Deleted`]）。
 pub fn terminal_persist_changes(
     window: &std::collections::BTreeMap<u32, Vec<EleOperationData>>,
+    tombstones: &HashMap<RefU64, EleData>,
 ) -> Vec<PersistElementChange> {
     let mut latest = std::collections::BTreeMap::<RefU64, PersistElementChange>::new();
     for (&sesno, operations) in window {
@@ -59,7 +69,9 @@ pub fn terminal_persist_changes(
                 EleOperationDetail::Modified(data) => {
                     PersistElementState::Modified(data.current_data.clone())
                 }
-                EleOperationDetail::Deleted => PersistElementState::Deleted,
+                EleOperationDetail::Deleted => PersistElementState::Deleted {
+                    base: tombstones.get(&operation.refno).cloned(),
+                },
                 EleOperationDetail::None => continue,
             };
             latest.insert(
@@ -76,40 +88,20 @@ pub fn terminal_persist_changes(
 }
 
 impl PersistElementChange {
-    /// 一个元素的终态落库语句：`pe` / `ATT_<noun>` / `ATT_UDA` / `pe_owner` 四样。
-    ///
-    /// `uda_keys` 把 `uda_atts` 里的 UKEY 换成 `UDA:<refno>` 链接；查不到的键记在表里，
-    /// 由调用方（`persist_latest_main_data` / 基线写者）收进回执告警。
-    pub fn to_surql(&self, dbnum: i32, uda_keys: &UdaKeyMap) -> String {
-        let id = self.refno.to_string();
-        match &self.state {
-            PersistElementState::Add(data) => render_terminal_element_state(
-                data,
-                &id,
-                dbnum,
-                self.sesno,
-                uda_keys,
-                UdaRowPolicy::AbsentIsClean,
-            ),
-            PersistElementState::Modified(data) => render_terminal_element_state(
-                data,
-                &id,
-                dbnum,
-                self.sesno,
-                uda_keys,
-                UdaRowPolicy::DeleteWhenEmpty,
-            ),
-            PersistElementState::Deleted => {
-                format!(
-                    "UPDATE pe:{} SET deleted = true, sesno = {}",
-                    id, self.sesno
-                )
-            }
-        }
-    }
+    /// 终态落库语句由 `data_interface::element_batch` 按**批**渲染（批量先删后插，plan 2026-09-06
+    /// §3 D1/D2）；这里不再有逐元素的 `to_surql`——那正是被退出的写法。
 
     pub fn is_add(&self) -> bool {
         matches!(self.state, PersistElementState::Add(_))
+    }
+
+    pub fn is_deleted(&self) -> bool {
+        matches!(self.state, PersistElementState::Deleted { .. })
+    }
+
+    /// 这一条终态在库里对应的 `pe` id（`ref0_ref1`）。
+    pub fn id(&self) -> String {
+        self.refno.to_string()
     }
 }
 
@@ -119,8 +111,8 @@ mod persist_projection_tests {
         EleOperationData, EleOperationDetail, PersistElementState, diff_ele_data,
         terminal_persist_changes,
     };
-    use aios_core::pdms_types::{RefU64, RefU64Vec};
     use crate::data_interface::ele_data::EleData;
+    use aios_core::pdms_types::{RefU64, RefU64Vec};
     use std::collections::BTreeMap;
 
     #[test]
@@ -136,11 +128,23 @@ mod persist_projection_tests {
                 vec![EleOperationData::new(refno, 2, EleOperationDetail::None)],
             ),
         ]);
-        let changes = terminal_persist_changes(&window);
+        let changes = terminal_persist_changes(&window, &Default::default());
         assert_eq!(changes.len(), 1);
         assert_eq!(changes[0].refno, refno);
         assert_eq!(changes[0].sesno, 1);
-        assert!(matches!(changes[0].state, PersistElementState::Deleted));
+        assert!(matches!(
+            changes[0].state,
+            PersistElementState::Deleted { base: None }
+        ));
+
+        // 收集器给了基侧状态就带上：墓碑行从它渲染。
+        let mut base = EleData::default();
+        base.refno = refno;
+        let changes = terminal_persist_changes(&window, &[(refno, base)].into_iter().collect());
+        assert!(matches!(
+            &changes[0].state,
+            PersistElementState::Deleted { base: Some(data) } if data.refno == refno
+        ));
     }
 
     #[test]
@@ -159,7 +163,7 @@ mod persist_projection_tests {
             )],
         )]);
 
-        let changes = terminal_persist_changes(&window);
+        let changes = terminal_persist_changes(&window, &Default::default());
         assert!(matches!(
             &changes[0].state,
             PersistElementState::Modified(data)
@@ -862,6 +866,13 @@ mod terminal_render_guard_tests {
         }
     }
 
+    /// 生产写法（`element_batch`，Replace）渲出的一块。
+    fn batch_sql(changes: &[PersistElementChange], keys: &UdaKeyMap) -> String {
+        use crate::data_interface::element_batch::{WriteMode, items_from_changes, render_items};
+        let items = items_from_changes(changes, &[], DBNUM, keys);
+        render_items(&items, DBNUM, WriteMode::Replace).sql
+    }
+
     fn line_with<'a>(sql: &'a str, needle: &str) -> Option<&'a str> {
         sql.lines().find(|line| line.contains(needle))
     }
@@ -882,18 +893,20 @@ mod terminal_render_guard_tests {
         );
         let keys = keys(&[(h_room, 11), (h_ref, 12)]);
 
-        let sql = change(PersistElementState::Add(ele), refno).to_surql(DBNUM, &keys);
-        // CONTENT 是 `to_string_pretty` 的多行 JSON（与 `ATT_<noun>` 行同款），按语句截取。
-        let start = sql
-            .find("UPSERT ATT_UDA:")
+        let rows = super::ElementRows::render(&ele, &refno.to_string(), DBNUM, 42, &keys);
+        let uda = rows
+            .uda_row
+            .clone()
             .expect("Add 带 UDA 值必须写 ATT_UDA 行");
-        let end = sql[start..].find("};").expect("语句以 }; 收尾") + start + 2;
-        let upsert = &sql[start..end];
 
         // legacy 写法：`UDA:<定义 refno>` 键进 NamedAttrMap → gen_sur_json_uda → normalize。
         let mut legacy = NamedAttrMap::default();
-        legacy.map.insert("REFNO".into(), NamedAttrValue::RefU64Type(refno));
-        legacy.map.insert("TYPE".into(), NamedAttrValue::StringType("EQUI".into()));
+        legacy
+            .map
+            .insert("REFNO".into(), NamedAttrValue::RefU64Type(refno));
+        legacy
+            .map
+            .insert("TYPE".into(), NamedAttrValue::StringType("EQUI".into()));
         legacy.map.insert(
             format!("UDA:{}", RefU64((24381u64 << 32) | 11)),
             NamedAttrValue::StringType("A101".into()),
@@ -904,38 +917,53 @@ mod terminal_render_guard_tests {
         );
         let expected = normalize_sql_string(&legacy.gen_sur_json_uda(&[]).expect("legacy json"));
         assert_eq!(
-            upsert,
-            format!("UPSERT ATT_UDA:{refno} CONTENT {expected};"),
+            uda, expected,
             "ATT_UDA CONTENT 必须与 legacy 基线逐字节同形"
         );
         // 消费者读的三样都在：`refno: <TYPE>:<id>`、`udas`、`u` 是 UDA:<refno> 记录链接。
         // 标量 `v` 是 NamedAttrValue 的带标签形（`{"StringType": …}`）——legacy 基线就这么写，
         // rs-core `NamedAttrValue::from((utype, Value::Object))` 取第一个字段值解回来；这里钉住
         // 的是「与现库同形」，不是「形状好看」。
-        assert!(upsert.contains("\"refno\": EQUI:"), "{upsert}");
-        assert!(upsert.contains("\"udas\": ["), "{upsert}");
-        assert!(upsert.contains("'u': UDA:24381_11"), "{upsert}");
-        assert!(upsert.contains("'v': {\"StringType\":\"A101\"}"), "{upsert}");
-        assert!(upsert.contains("'v': pe:7997_300"), "引用型 UDA 值走 to_pe_key: {upsert}");
+        assert!(uda.contains("\"refno\": EQUI:"), "{uda}");
+        assert!(uda.contains("\"udas\": ["), "{uda}");
+        assert!(uda.contains("'u': UDA:24381_11"), "{uda}");
+        assert!(uda.contains("'v': {\"StringType\":\"A101\"}"), "{uda}");
+        assert!(
+            uda.contains("'v': pe:7997_300"),
+            "引用型 UDA 值走 to_pe_key: {uda}"
+        );
         assert!(keys.take_misses().is_empty());
+        // 批里它就是 ATT_UDA 那一条 INSERT 的内容。
+        let sql = batch_sql(&[change(PersistElementState::Add(ele), refno)], &keys);
+        assert!(
+            sql.contains(&format!(
+                "INSERT IGNORE INTO ATT_UDA [{expected}] RETURN NONE;"
+            )),
+            "{sql}"
+        );
     }
 
-    /// Modified 把 UDA 值清空 → 旧行不许残留；Add 没有 UDA → 不发语句（前置清理负责旧世代行）。
+    /// 没有 UDA 值的元素：删除块照样清它的 `ATT_UDA` 行（Modified 清空 / Add 复用 refno 的旧世代行
+    /// 都不许残留），插入块不发 `ATT_UDA` 语句。
     #[test]
-    fn empty_uda_deletes_the_row_on_modified_and_stays_quiet_on_add() {
+    fn empty_uda_is_deleted_and_never_inserted() {
         let refno = refu(101);
         let keys = UdaKeyMap::empty();
 
-        let modified = change(PersistElementState::Modified(element(refno, &[], &[])), refno)
-            .to_surql(DBNUM, &keys);
-        assert!(
-            modified.lines().any(|line| line == format!("DELETE ATT_UDA:{refno};")),
-            "Modified 无 UDA 必须删旧行:\n{modified}"
-        );
-
-        let added = change(PersistElementState::Add(element(refno, &[], &[])), refno)
-            .to_surql(DBNUM, &keys);
-        assert!(!added.contains("ATT_UDA"), "Add 无 UDA 不发 ATT_UDA 语句:\n{added}");
+        for state in [
+            PersistElementState::Modified(element(refno, &[], &[])),
+            PersistElementState::Add(element(refno, &[], &[])),
+        ] {
+            let sql = batch_sql(&[change(state, refno)], &keys);
+            assert!(
+                sql.contains(&format!("LET $uda_ids = [ATT_UDA:{refno}];")),
+                "无 UDA 必须删旧行:\n{sql}"
+            );
+            assert!(
+                !sql.contains("INSERT IGNORE INTO ATT_UDA"),
+                "无 UDA 不发 ATT_UDA 插入:\n{sql}"
+            );
+        }
     }
 
     /// 查不到定义的 UKEY 不静默丢：那个值不写，miss 记账给回执。
@@ -953,10 +981,17 @@ mod terminal_render_guard_tests {
             ],
         );
         let keys = keys(&[(known, 21)]);
-        let sql = change(PersistElementState::Modified(ele), refno).to_surql(DBNUM, &keys);
-        assert!(sql.contains("UPSERT ATT_UDA:"), "能解析的那个值仍要落库:\n{sql}");
+        let sql = batch_sql(&[change(PersistElementState::Modified(ele), refno)], &keys);
+        assert!(
+            sql.contains("INSERT IGNORE INTO ATT_UDA ["),
+            "能解析的那个值仍要落库:\n{sql}"
+        );
         assert!(sql.contains("'u': UDA:24381_21"), "{sql}");
-        assert_eq!(sql.matches("'u':").count(), 1, "查不到的键不许编一个链接写进去:\n{sql}");
+        assert_eq!(
+            sql.matches("'u':").count(),
+            1,
+            "查不到的键不许编一个链接写进去:\n{sql}"
+        );
 
         let misses = keys.take_misses();
         assert_eq!(misses.len(), 1);
@@ -964,28 +999,41 @@ mod terminal_render_guard_tests {
     }
 
     /// `pe_owner` 边：`in = child, out = owner`，与 `cata_closure::render_pe_owner_replace`
-    /// 同一份 children 渲染出同一条 INSERT——两处写口不许再各说各话。
+    /// 同一份 children 渲染出同一批边——两处写口不许再各说各话。
     #[test]
     fn pe_owner_edges_point_child_to_owner_exactly_like_cata_closure() {
         let owner = refu(200);
         let children = [refu(201), refu(202), refu(203)];
         let keys = UdaKeyMap::empty();
-        let sql = change(
-            PersistElementState::Modified(element(owner, &children, &[])),
-            owner,
-        )
-        .to_surql(DBNUM, &keys);
+        let sql = batch_sql(
+            &[change(
+                PersistElementState::Modified(element(owner, &children, &[])),
+                owner,
+            )],
+            &keys,
+        );
 
         let owner_key = owner.to_pe_key();
-        let terminal_insert = line_with(&sql, "INSERT RELATION INTO pe_owner")
-            .expect("有 children 必须写 pe_owner")
-            .trim_end_matches(';');
-        let cata = crate::data_interface::cata_closure::render_pe_owner_replace(&owner_key, &children)
-            .expect("cata 渲染");
-        let cata_insert = line_with(&cata, "INSERT RELATION INTO pe_owner")
+        let terminal_insert = line_with(&sql, "INSERT RELATION IGNORE INTO pe_owner")
+            .expect("有 children 必须写 pe_owner");
+        let terminal_edges = terminal_insert
+            .split_once('[')
+            .and_then(|(_, rest)| rest.rsplit_once(']'))
+            .map(|(edges, _)| edges)
+            .expect("边列表");
+        let cata =
+            crate::data_interface::cata_closure::render_pe_owner_replace(&owner_key, &children)
+                .expect("cata 渲染");
+        let cata_edges = line_with(&cata, "INSERT RELATION INTO pe_owner")
             .expect("cata 有 INSERT")
-            .trim_end_matches(';');
-        assert_eq!(terminal_insert, cata_insert, "两处 pe_owner 写口必须逐字节同形");
+            .split_once('[')
+            .and_then(|(_, rest)| rest.rsplit_once(']'))
+            .map(|(edges, _)| edges)
+            .expect("cata 边列表");
+        assert_eq!(
+            terminal_edges, cata_edges,
+            "两处 pe_owner 写口渲出的边必须逐字节同形"
+        );
 
         for (slot, child) in children.iter().enumerate() {
             assert!(
@@ -996,10 +1044,17 @@ mod terminal_render_guard_tests {
                 "第 {slot} 条边方向错了:\n{terminal_insert}"
             );
         }
-        // 清理语句删的是本元素**作为 owner** 的入边（out = owner），与插入方向一致。
+        // 删除块清的是本元素**作为 owner** 的子槽位（id 区间 `[owner, NONE]..=[owner, ..]`），
+        // 与插入方向一致；Modified 不清自己的出向边（那由它的 owner 侧重插）。
         assert!(
-            sql.lines().any(|line| line == format!("DELETE {owner_key}<-pe_owner;")),
+            sql.contains(&format!(
+                "DELETE pe_owner:[{owner_key}, NONE]..=[{owner_key}, ..];"
+            )),
             "{sql}"
+        );
+        assert!(
+            !sql.contains(&format!("DELETE {owner_key}->pe_owner")),
+            "Modified 不许清自己的出向边:\n{sql}"
         );
         assert!(
             !terminal_insert.contains(&format!("in: {owner_key}")),
@@ -1420,7 +1475,7 @@ pub fn convert_to_operation_data(
 
 /// 元素没有 UDA 值时 `ATT_UDA:{id}` 行该怎么处理。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum UdaRowPolicy {
+pub(crate) enum UdaRowPolicy {
     /// `Add`：refno 复用留下的旧行由 `render_terminal_persist_statements` 的前置清理
     /// （`DELETE ATT_UDA:{pe}`）负责，这里不再发一条。
     AbsentIsClean,
@@ -1479,12 +1534,14 @@ fn render_uda_row_content(
         .map(|json| normalize_sql_string(&json))
 }
 
-/// 一个元素终态的**行形状**：`pe` / `ATT_<noun>` / `ATT_UDA` / `pe_owner` 边。
+/// 一个元素终态的**行形状**：`pe` / `<NOUN>` / `ATT_UDA` / `pe_owner` 边。
 ///
-/// 增量路把它们渲染成 `UPSERT … CONTENT` 逐元素语句（[`Self::upsert_statements`]），基线把
-/// 它们攒成 `INSERT IGNORE INTO … [..]` 批（`versioned_db::baseline`）——动词不同、形状只有
-/// 这一份（宪法 II）：`pe` 行 = `SPdmsElement::gen_sur_json`、noun 行 = `NamedAttrMap::gen_sur_json`、
-/// UDA 行 = `gen_sur_json_uda`、边 = [`pe_owner_edge`]。
+/// rocksdb 形态下基线与增量都经 `data_interface::element_batch` 把它们攒成
+/// 「先删后插」的批（每表一条 `INSERT IGNORE INTO … [..]`，plan 2026-09-06 §3 D2）——语句形状
+/// 与行形状都只有这一份（宪法 II）：`pe` 行 = `SPdmsElement::gen_sur_json`、noun 行 =
+/// `NamedAttrMap::gen_sur_json`、UDA 行 = `gen_sur_json_uda`、边 = [`pe_owner_edge`]。
+/// 读透形态（内存库）刷新缓存行走 [`Self::read_through_statements`]（逐元素 UPSERT），
+/// **那不是 rocksdb 口径**。
 pub struct ElementRows {
     /// `dbnum_refno`。
     pub id: String,
@@ -1540,8 +1597,30 @@ impl ElementRows {
         self.pe.gen_sur_json(Some(self.pe_key()))
     }
 
-    /// 增量路的逐元素终态语句。
-    fn upsert_statements(&self, uda_policy: UdaRowPolicy) -> String {
+    /// 墓碑 `pe` 行 JSON（带 id）：与 [`Self::pe_row_with_id`] 同一形状，只是 `deleted = true`、
+    /// `sesno` 换成删除落地的那个会话。noun / owner / name 原样保留——`datacenter` 的 Deleted
+    /// 分支、ADR-036 成员补删、`cleanup_deleted_by_pe_state` 读的都是它们。
+    pub fn tombstone_row_with_id(&self, sesno: u32) -> String {
+        let mut pe = self.pe.clone();
+        pe.deleted = true;
+        pe.sesno = sesno as _;
+        pe.gen_sur_json(Some(self.pe_key()))
+    }
+
+    /// 基侧读不到时的最小墓碑：只带 id / dbnum / sesno / deleted。没有 noun 与 owner，
+    /// 读它的人会把这一条当「链断」跳过——比不留痕迹好，比完整墓碑差，所以要出声。
+    pub fn minimal_tombstone_row(id: &str, dbnum: i32, sesno: u32) -> String {
+        format!("{{ \"id\": pe:{id}, \"dbnum\": {dbnum}, \"sesno\": {sesno}, \"deleted\": true }}")
+    }
+
+    pub(crate) fn sesno(&self) -> u32 {
+        self.pe.sesno.max(0) as u32
+    }
+
+    /// 读透形态（内存库）刷新缓存行的逐元素语句（`DeleteWhenEmpty`）。**不是 rocksdb 口径**：
+    /// 摄入形态的基线与增量一律走 `element_batch` 的批量先删后插；这里保留 UPSERT 只因为
+    /// 读透缓存要「新会话盖旧会话」的守卫（[`Self::read_through_guarded_statements`]）。
+    pub(crate) fn read_through_statements(&self, uda_policy: UdaRowPolicy) -> String {
         let id = &self.id;
         let owner_key = self.pe_key();
         let mut statements = vec![
@@ -1566,17 +1645,28 @@ impl ElementRows {
         }
         statements.join("\n")
     }
-}
 
-fn render_terminal_element_state(
-    ele_data: &EleData,
-    id: &str,
-    dbnum: i32,
-    sesno: u32,
-    uda_keys: &UdaKeyMap,
-    uda_policy: UdaRowPolicy,
-) -> String {
-    ElementRows::render(ele_data, id, dbnum, sesno, uda_keys).upsert_statements(uda_policy)
+    /// Read-through cache replacement guarded by the element's last-touch
+    /// session in the same transaction as every dependent row.  An older
+    /// parse that finishes late therefore cannot overwrite a newer `pe`, noun,
+    /// UDA or owner-edge view.
+    pub(crate) fn read_through_guarded_statements(&self, uda_policy: UdaRowPolicy) -> String {
+        let variable = format!("current_{}", self.id.replace(['-', '/'], "_"));
+        let noun_variable = format!("noun_{}", self.id.replace(['-', '/'], "_"));
+        let body = self.read_through_statements(uda_policy);
+        let noun = serde_json::to_string(&self.noun).unwrap_or_else(|_| "\"\"".into());
+        let record_id = serde_json::to_string(&self.id).unwrap_or_else(|_| "\"\"".into());
+        format!(
+            "LET ${variable} = (SELECT VALUE sesno FROM ONLY {});\n\
+             LET ${noun_variable} = (SELECT VALUE noun FROM ONLY {});\n\
+             IF ${variable} = NONE OR ${variable} <= {} {{\n\
+             IF ${noun_variable} != NONE AND ${noun_variable} != {noun} {{ DELETE type::thing(${noun_variable}, {record_id}); }};\n{}\n}};",
+            self.pe_key(),
+            self.pe_key(),
+            self.sesno(),
+            body
+        )
+    }
 }
 
 impl EleOperationDetail {

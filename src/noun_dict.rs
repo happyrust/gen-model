@@ -484,7 +484,9 @@ mod tests {
     fn hash_value_matches_the_snapshot_hashes() {
         let clf = default_noun_classifier();
         for noun in ["BOX", "CYLI", "EQUI", "PIPE", "WORL", "SITE"] {
-            let flags = clf.flags(noun).unwrap_or_else(|| panic!("{noun} 不在字典里"));
+            let flags = clf
+                .flags(noun)
+                .unwrap_or_else(|| panic!("{noun} 不在字典里"));
             assert_eq!(NounClassifier::hash_value(noun), flags.noun_hash, "{noun}");
             assert!(clf.find_noun(flags.noun_hash).is_some());
         }
@@ -512,7 +514,12 @@ mod tests {
             let Some(f) = clf.find_noun(c.noun_hash) else {
                 panic!("{} 只在 noun_caps.json 里", c.noun_name);
             };
-            assert_eq!((f.primitive, f.geomset, f.extrusion), (c.primitive, c.geomset, c.extrusion), "{}", c.noun_name);
+            assert_eq!(
+                (f.primitive, f.geomset, f.extrusion),
+                (c.primitive, c.geomset, c.extrusion),
+                "{}",
+                c.noun_name
+            );
         }
     }
 

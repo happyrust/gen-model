@@ -27,7 +27,8 @@ use crate::data_interface::sesno_range::COLD_START_DB_TYPES;
 /// 两条之间随机挑，挑中目录侧范围就只剩一两个库。rs-core 的 `MDB_DESI_DBNOS`
 /// 是模型树在同一个坑上踩出来的，这里同源。
 const MDB_DBNOS: &str = r#"(select dbnos, array::len(dbnos) as n
-    from (select (select value DBNO from CURD.refno where STYP = $db_type) as dbnos
+    from (select (select value DBNO from CURD.refno
+                 where type::string(STYP) IN $element_db_types) as dbnos
           from MDB where NAME = $mdb)
     order by n desc limit 1)[0].dbnos ?? []"#;
 
@@ -102,6 +103,34 @@ fn cache_store(scope: &UpdateScope) {
     }
 }
 
+/// 这个 MDB 声明的 DESI / ISOD 库号，取自 **SYS 库文件**那一份——`init_mdb` 启动时
+/// 解析并 `install` 进进程内存的 [`super::mdb_membership`]，没登记过就是 `None`。
+///
+/// 它存在的理由只有一个：全新命名空间上 `MDB` 表是空的，而同一个进程在几十毫秒之前
+/// 已经从 `<项目>sys` 文件里把同一份名单读出来了。库侧那句「尚未解析」在事实上只对库
+/// 成立，两份名单的成员判据本来就同一个——文件侧 `element_databases()` 过滤
+/// `DESI_STYP | ISOD_STYP`，库侧 [`MDB_DBNOS`] 绑的 `element_db_types` 正是这两个值。
+///
+/// **用 `get` 而不是 `resolve`**：`get` 只读一次进程内的登记表，`resolve` 会把 SYS 库整棵树
+/// 扫一遍。看门狗事件路径每隔几秒就会走到这里（缓存未命中时），在它背后藏一次全树扫
+/// 不能接受——`mdb_membership::get` 自己的文档也把这条定成纪律。拿不到就回 `None`，
+/// 由调用方维持退化行为：`run_cli` 里 `init_mdb` 失败只告警不中止，「没登记」是真会
+/// 发生的状态，不是兜底摆设。
+///
+/// `get` 按 `(project, mdb)` 精确匹配，所以「请求带的 MDB 名与配置里的不是同一个」自然
+/// 回 `None`。这一档必须落空：拿配置那个 MDB 的名单去服务另一个 MDB 的请求，正是
+/// `manual_update::update_scope` 明文要挡的「界面显示一个 MDB 的范围、服务端跑另一个」。
+fn file_side_declared(name: &str) -> Option<Vec<u32>> {
+    let project = aios_core::get_db_option().project_name.clone();
+    let membership = super::mdb_membership::get(&project, name)?;
+    Some(
+        membership
+            .element_databases()
+            .map(|database| database.dbnum)
+            .collect(),
+    )
+}
+
 impl UpdateScope {
     /// 解出 `mdb` 声明的 DESI 库号。
     ///
@@ -147,7 +176,13 @@ impl UpdateScope {
                 "RETURN array::distinct(SELECT VALUE NAME FROM MDB);\nRETURN {MDB_DBNOS};"
             ))
             .bind(("mdb", name.to_owned()))
-            .bind(("db_type", u8::from(DBType::DESI)))
+            .bind((
+                "element_db_types",
+                vec![
+                    u8::from(DBType::DESI).to_string(),
+                    super::mdb_membership::ISOD_STYP.to_string(),
+                ],
+            ))
             .await?;
         let known: Vec<String> = response.take(0)?;
         let dbnos: Vec<u32> = response.take(1)?;
@@ -156,17 +191,40 @@ impl UpdateScope {
 
     /// 把查询结果解释成范围（纯函数部分）。唯一的错误出口是「库里有 MDB、
     /// 但没有叫这个名字的」——配置错误，要人修。
-    fn interpret(name: String, known: Vec<String>, dbnos: Vec<u32>) -> anyhow::Result<Self> {
-        let desi: BTreeSet<u32> = dbnos.into_iter().collect();
+    ///
+    /// `from_files` 是[文件侧声明][file_side_declared]，**只在库侧一条 MDB 都没有时**才会被
+    /// 求值（所以是 `FnOnce` 而不是取好的值：常态路径不该为它付任何代价）。库侧非空的三个
+    /// 出口一个字不看它——那三档库里是有内容的，拿文件侧去盖就成了「两个来源不一致时听
+    /// 文件的」，那是另一个决定。
+    fn interpret(
+        name: String,
+        known: Vec<String>,
+        dbnos: Vec<u32>,
+        from_files: impl FnOnce() -> Option<Vec<u32>>,
+    ) -> anyhow::Result<Self> {
+        let mut desi: BTreeSet<u32> = dbnos.into_iter().collect();
 
         let warning = if !desi.is_empty() {
             None
         } else if known.is_empty() {
-            Some(format!(
-                "库里还没有任何 MDB——存放 MDB/CURD 的 SYS meta 库尚未解析。\
-                 本期只解析 SYS meta 把 {name} 的成员名单建起来，设计库一个都不跑；\
-                 完成后再跑一次即可拿到真正的执行范围"
-            ))
+            // 空表不算回答：`init_mdb` 跑过但这个 MDB 一个设计库都没声明时，退化那句话
+            // 仍然是对的，而「取自文件、0 个设计库」只会让人以为文件侧也答不出来。
+            match from_files().filter(|declared| !declared.is_empty()) {
+                Some(declared) => {
+                    desi = declared.into_iter().collect();
+                    Some(format!(
+                        "库侧 MDB 表还是空的（SYS meta 尚未摄入），本轮执行范围改取自 SYS 库文件里 \
+                         {name} 的声明：{} 个设计库。SYS meta 一落库即自动切回库侧名单",
+                        desi.len()
+                    ))
+                }
+                None => Some(format!(
+                    "库里还没有任何 MDB——存放 MDB/CURD 的 SYS meta 库尚未解析，\
+                     文件侧也没有 {name} 的已登记声明可用。\
+                     本期只解析 SYS meta 把成员名单建起来，设计库一个都不跑；\
+                     完成后再跑一次即可拿到真正的执行范围"
+                )),
+            }
         } else if !known.iter().any(|n| n == &name) {
             let mut sample = known.clone();
             sample.sort();
@@ -208,16 +266,19 @@ impl UpdateScope {
         stale_fallback: bool,
     ) -> anyhow::Result<Self> {
         match fetched {
-            Ok((known, dbnos)) => match Self::interpret(name, known, dbnos) {
-                Ok(scope) => {
-                    cache_store(&scope);
-                    Ok(scope)
+            // `name` 只 clone 不移动：下面的 `Err` 分支还要用它取缓存与拼错误。
+            Ok((known, dbnos)) => {
+                match Self::interpret(name.clone(), known, dbnos, || file_side_declared(&name)) {
+                    Ok(scope) => {
+                        cache_store(&scope);
+                        Ok(scope)
+                    }
+                    Err(config_error) => {
+                        invalidate_scope_cache();
+                        Err(config_error)
+                    }
                 }
-                Err(config_error) => {
-                    invalidate_scope_cache();
-                    Err(config_error)
-                }
-            },
+            }
             Err(infra_error) => {
                 if stale_fallback {
                     if let Some(stale) = cache_get(&name, None) {
@@ -270,14 +331,10 @@ impl UpdateScope {
     /// 就存在这些库里，[`UpdateScope::resolve`] 读的就是它们。把它们挡在外面，
     /// 以后往 MDB 里加一个库，范围表永远看不见这个新成员——范围定义会自己冻住。
     ///
-    /// 除此之外只认 DESI，且必须是本 MDB 声明过的。CATA 参与不了模型交付，
-    /// 目录变化要靠重新生成而不是数据批次，这次一律不进范围。
-    ///
-    /// **这一句是全仓「目录改动会不会触发设计实例重生成」的唯一决定点**
-    /// （2026-07-31 决策 A，spec 001 · US5）。ADR-008 / F8 那套 CATA 反向级联规划
-    /// （`model_update_plan::build_cata_cascade_plan`）已经实现并有单测，但只要这里
-    /// ADR-025 将 CATA 提升为正式 Catalogue 阶段；它不受 MDB 的 DESI 清单约束，
-    /// 但仍须经过跨项目优先级、重复身份和阶段屏障裁决。
+    /// 除此之外只认 DESI / ISOD，且必须是本 MDB 声明过的。CATA 文件只进入
+    /// `cata_closure` 的依赖身份清单，供模型生成时按引用读取；它们不进入初始化
+    /// 数据批次，也不全量解析属性进持久层（ADR-058 D1）。显式点名入口仍可用
+    /// [`UpdateScope::unrestricted`] 执行运维基线。
     pub fn admits(&self, db_type: &str, dbnum: u32) -> bool {
         if COLD_START_DB_TYPES.contains(&db_type) {
             return true;
@@ -285,7 +342,7 @@ impl UpdateScope {
         if self.unrestricted {
             return true;
         }
-        db_type == "CATA" || (db_type == "DESI" && self.desi.contains(&dbnum))
+        matches!(db_type, "DESI" | "ISOD") && self.desi.contains(&dbnum)
     }
 
     /// MDB 名（已带前导 `/`）。不设限时是空串。
@@ -317,16 +374,21 @@ mod tests {
         }
     }
 
-    /// Design 只认 MDB 声明的 DESI；Catalogue 独立放行 CATA。
+    /// 正常初始化只认 MDB 声明的设计库；CATA 保留在按需依赖清单里。
     #[test]
     fn only_desi_declared_by_this_mdb_gets_in() {
         let scope = scope(&[7997, 8000]);
         assert!(scope.admits("DESI", 8000));
+        assert!(scope.admits("ISOD", 8000));
         assert!(!scope.admits("DESI", 3001), "MDB 外的设计库不进范围");
-        assert!(
-            scope.admits("CATA", 8000),
-            "ADR-025：CATA 进入 Catalogue 阶段"
-        );
+        assert!(!scope.admits("CATA", 8000), "CATA 不进入全量数据初始化");
+    }
+
+    /// e3d-io 的属性面把显式数值保存成字符串，旧存量又可能仍是数字；范围查询必须
+    /// 先归一类型，否则 `"1" != 1` 会把完整 CURD 误判成零个 DESI。
+    #[test]
+    fn mdb_scope_query_accepts_string_and_numeric_styp_storage() {
+        assert!(MDB_DBNOS.contains("type::string(STYP) IN $element_db_types"));
     }
 
     /// SYS meta 绕过 MDB 门：范围名单本身就是从这些库里读出来的，挡住它们
@@ -417,6 +479,80 @@ mod tests {
         );
         assert!(!scope.admits("DESI", 8000), "设计库一个都不跑");
         assert!(scope.warning().is_some(), "不许悄悄发生");
+    }
+
+    // ---- 库侧为空时回落到文件侧声明（2026-09-07：YCYK-E3D 新项目必须跑两趟的对症）----
+    //
+    // 计划：docs/plans/2026-09-07-update-scope-file-side-mdb-fallback-plan.md
+    // 这四个用例直接调 `interpret`：回落的注入点是它那个 `FnOnce` 入参，走 `finish` 就得
+    // 造一份进程级 registry，而 `finish` 那几个用例正是本次不想碰的东西。
+
+    /// 库侧一条 MDB 都没有、文件侧有声明 → 用文件侧的，别再空跑一趟。
+    #[test]
+    fn an_empty_store_falls_back_to_the_file_side_declaration() {
+        let scope = UpdateScope::interpret("/SLYK".into(), vec![], vec![], || {
+            Some(vec![5525, 7015, 5107])
+        })
+        .expect("回落不是错误出口");
+
+        assert_eq!(scope.declared_desi().collect::<Vec<_>>(), [5107, 5525, 7015]);
+        assert!(scope.admits("DESI", 5525));
+        assert!(!scope.admits("DESI", 8000), "回落的是那份声明，不是不设限");
+        let warning = scope.warning().expect("换了口径就必须出声");
+        assert!(
+            warning.contains("SYS 库文件") && warning.contains("/SLYK"),
+            "要说清名单这一轮取自哪儿、是哪个 MDB：{warning}"
+        );
+    }
+
+    /// 文件侧没登记（`init_mdb` 没跑过 / 失败了 / MDB 名对不上）→ 与引入回落之前逐字相同。
+    #[test]
+    fn without_a_file_side_declaration_it_still_bootstraps() {
+        let scope =
+            UpdateScope::interpret("/SLYK".into(), vec![], vec![], || None).expect("不该 bail");
+
+        assert_eq!(scope.declared_desi().count(), 0);
+        assert!(scope.admits("SYST", 8191), "SYS meta 照常解析，把名单建起来");
+        assert!(!scope.admits("DESI", 5525), "设计库一个都不跑");
+        assert!(
+            scope.warning().is_some_and(|w| w.contains("再跑一次")),
+            "退化那句话要原样留着"
+        );
+    }
+
+    /// 空表不是回答。`init_mdb` 跑过、但这个 MDB 一个设计库都没声明时，说「取自文件、
+    /// 0 个设计库」只会让人以为文件侧也答不出来，退化那句话才是对的。
+    #[test]
+    fn an_empty_file_side_declaration_is_not_an_answer() {
+        let scope = UpdateScope::interpret("/SLYK".into(), vec![], vec![], || Some(vec![]))
+            .expect("不该 bail");
+
+        assert_eq!(scope.declared_desi().count(), 0);
+        assert!(scope.warning().is_some_and(|w| w.contains("再跑一次")));
+    }
+
+    /// **只动库侧全空那一档。** 库里有 MDB 时，另外三个出口一个字不看文件侧——那三档
+    /// 库里是有内容的，拿文件侧去盖就成了「两个来源不一致时听文件的」，那是另一个决定。
+    #[test]
+    fn a_non_empty_store_never_consults_the_file_side() {
+        let loud = || -> Option<Vec<u32>> { panic!("库侧非空时不许去问文件侧") };
+
+        // 有这个 MDB、但它没声明 DESI：照旧是告警，不是回落。
+        let scope = UpdateScope::interpret("/SLYK".into(), vec!["/SLYK".into()], vec![], loud)
+            .expect("不该 bail");
+        assert_eq!(scope.declared_desi().count(), 0);
+        assert!(scope.warning().is_some_and(|w| w.contains("CURD")));
+
+        // 名字打错：照旧 bail，不许被文件侧救回来。
+        let err = UpdateScope::interpret("/SLYK".into(), vec!["/OTHER".into()], vec![], loud)
+            .expect_err("名字不存在必须报错");
+        assert!(err.to_string().contains("/OTHER"), "错误要列出实际有的：{err}");
+
+        // 库侧解出了名单：连问都不问。
+        let scope = UpdateScope::interpret("/SLYK".into(), vec!["/SLYK".into()], vec![8000], loud)
+            .expect("正常范围");
+        assert!(scope.admits("DESI", 8000));
+        assert!(scope.warning().is_none());
     }
 
     // ---- 范围缓存（2026-08-06：连接抖动把文件事件整批丢掉的对症）----

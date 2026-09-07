@@ -622,6 +622,13 @@ pub fn enumerate_generation_roots_in_subtree(
         }
         let element = lookup(current)?;
         let noun = normalized_noun(&element.noun);
+        // SAVEWORK creates a separate DBMETA → DBMDAT bookkeeping tree. These
+        // are database records, not unknown design nouns: the conservative
+        // significant-bit fallback must not turn every save into model work.
+        // The recorded P/H/E windows exercise this through the real collector.
+        if matches!(noun.as_str(), "DBMETA" | "DBMDAT") {
+            continue;
+        }
         let delivery = is_delivery_unit_noun(&noun, unit_types);
         if delivery
             || (!inside_delivery && !is_coarse_hierarchy_noun(&noun) && noun_is_significant(&noun))
@@ -1419,13 +1426,6 @@ mod tests {
         assert_eq!((datum_root.root, datum_root.noun.as_str()), (r(5), "WALL"));
     }
 
-    // ---- 子树枚举（P2-1 / N7：文件枚举根集，不经 `fn::sync_gen_roots`） ----
-
-    /// `(refno, noun, name, members)` 摆成一棵内存树。`FOOB` 不在 core 位表里，按
-    /// `core_bits_are_queryable_and_unknown_nouns_stay_conservative` 的口径保守判显著，
-    /// 正好用来扮演「非交付单元的显著 noun」。
-    fn tree(nodes: &[(u32, &str, &str, &[u32])]) -> HashMap<RefnoEnum, SubtreeElement> {
-        nodes
     #[test]
     fn significant_over_point_only_promotes_aidtex_when_enabled() {
         let nodes = HashMap::from([
@@ -1523,7 +1523,11 @@ mod tests {
     fn significant_bit_resolves_to_itself_and_to_nearest_significant_owner() {
         let _on = crate::options::SignificantOverPointOverride::set(true);
 
-        let aid = owner_chain(&[(1, Some(2), "AIDTEX"), (2, Some(3), "ZONE"), (3, None, "WORL")]);
+        let aid = owner_chain(&[
+            (1, Some(2), "AIDTEX"),
+            (2, Some(3), "ZONE"),
+            (3, None, "WORL"),
+        ]);
         assert_eq!(core_significant_bit("AIDTEX"), Some(true));
         assert_eq!(
             resolve_in(&aid, r(1), &[]),
@@ -1586,11 +1590,22 @@ mod tests {
             "the conservative query says true for unknown nouns — which is why T2b must not use it"
         );
         for nodes in [
-            owner_chain(&[(1, Some(2), "FOOB"), (2, Some(3), "ZONE"), (3, None, "WORL")]),
-            owner_chain(&[(1, Some(8), "FOOB"), (8, Some(3), "EQUI"), (3, None, "ZONE")]),
+            owner_chain(&[
+                (1, Some(2), "FOOB"),
+                (2, Some(3), "ZONE"),
+                (3, None, "WORL"),
+            ]),
+            owner_chain(&[
+                (1, Some(8), "FOOB"),
+                (8, Some(3), "EQUI"),
+                (3, None, "ZONE"),
+            ]),
         ] {
             let (off, on) = resolve_both_states(&nodes, r(1));
-            assert_eq!(off, on, "an unknown noun must resolve identically in both states");
+            assert_eq!(
+                off, on,
+                "an unknown noun must resolve identically in both states"
+            );
             assert!(off.is_some(), "the hand-written list still gives it a root");
         }
 
@@ -1624,7 +1639,10 @@ mod tests {
 
         let mut moved = std::collections::BTreeSet::new();
         for noun in &point_nouns {
-            assert!(is_loop_container_noun(noun), "{noun} must classify as a point container");
+            assert!(
+                is_loop_container_noun(noun),
+                "{noun} must classify as a point container"
+            );
             for nodes in [
                 owner_chain(&[(1, Some(2), noun), (2, Some(3), "ZONE"), (3, None, "WORL")]),
                 owner_chain(&[(1, Some(8), noun), (8, Some(3), "EQUI"), (3, None, "ZONE")]),
@@ -1675,6 +1693,13 @@ mod tests {
         }
     }
 
+    // ---- 子树枚举（P2-1 / N7：文件枚举根集，不经 `fn::sync_gen_roots`） ----
+
+    /// `(refno, noun, name, members)` 摆成一棵内存树。`FOOB` 不在 core 位表里，按
+    /// `core_bits_are_queryable_and_unknown_nouns_stay_conservative` 的口径保守判显著，
+    /// 正好用来扮演「非交付单元的显著 noun」。
+    fn tree(nodes: &[(u32, &str, &str, &[u32])]) -> HashMap<RefnoEnum, SubtreeElement> {
+        nodes
             .iter()
             .map(|(id, noun, name, members)| {
                 (

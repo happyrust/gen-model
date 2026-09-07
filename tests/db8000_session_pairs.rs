@@ -327,7 +327,11 @@ fn read_views(snapshot: &Path, refnos: &[RefU64]) -> BTreeMap<String, ElementVie
         .filter_map(|refno| {
             read_ele_data(&set, *refno)
                 .unwrap_or_else(|error| {
-                    panic!("读 {} 于 {}: {error:#}", pdms_str(*refno), snapshot.display())
+                    panic!(
+                        "读 {} 于 {}: {error:#}",
+                        pdms_str(*refno),
+                        snapshot.display()
+                    )
                 })
                 .map(|ele| (pdms_str(*refno), element_view(&ele)))
         })

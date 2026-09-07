@@ -34,6 +34,14 @@ pub struct E3dPersistReport {
     pub mesh_written: usize,
     #[serde(skip)]
     pub(crate) mesh_ids: std::collections::BTreeSet<String>,
+    /// 本次生成读的是哪一版设计文件（一次调用一个 dbnum、一个会话）。读透写行时钉的
+    /// 就是它——写透与生成必须看同一版文件。
+    pub source_sesno: Option<u32>,
+    /// 每个**新生成**（非缓存命中）的根：e3d-model DFS 访问到的子树元素名单
+    /// （`GenerationOutcome::visited`）。生成服务只报名单、不写库（ADR-057）；把它们写透进
+    /// `pe` / `ATT_*` 是编排层 `model_refresh::generate_roots_report` 在发布模型行之前做的事。
+    #[serde(skip)]
+    pub visited_by_root: std::collections::HashMap<RefNo, Vec<RefNo>>,
 }
 
 pub fn baked_mesh_id(mesh: &PlantMesh) -> String {
@@ -53,15 +61,19 @@ pub fn canonical_mesh_id(key: PrimitiveMeshKey, mesh: &PlantMesh) -> String {
     u64::from_be_bytes(bytes).max(1).to_string()
 }
 
+/// 一件几何在库里的记录 id：真实元素用它自己的 refno，运行时派生的隐式管身没有 refno，
+/// 用身份的 SHA-256。
+///
+/// 两种形状天生分得开——refno 是 `<十进制>_<十进制>`，摘要是 64 位纯十六进制，不含下划线，
+/// 所以摘要不需要再戴前缀来自证身份。（2026-09-04 之前戴的是 `derived_`。它当年的理由是
+/// 「按根删除时普通行能靠 refno 猜到 id，派生行猜不到」，而删除路径早就改走 `geometry_id`
+/// 清单、更新一律先删后插，猜 id 这件事本身没有了。）
 pub fn geometry_record_id(geometry_id: &GeometryId, source_refno: RefNo) -> String {
     match geometry_id {
         GeometryId::Element { .. } => format!("{}_{}", source_refno.word0, source_refno.word1),
-        GeometryId::ImpliedTube { .. } => format!(
-            "derived_{}",
-            hex::encode(Sha256::digest(
-                serde_json::to_vec(geometry_id).expect("GeometryId JSON")
-            ))
-        ),
+        GeometryId::ImpliedTube { .. } => hex::encode(Sha256::digest(
+            serde_json::to_vec(geometry_id).expect("GeometryId JSON"),
+        )),
     }
 }
 

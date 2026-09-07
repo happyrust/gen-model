@@ -1,0 +1,24 @@
+-- 管道 P 组收尾「删·容器」：删掉 scratch 支管 A（与 B，若存在），库在逻辑上回到原样。
+-- 生产支管 /C-OR-1R345-C 全程未动。DELETE 之前 Q REF/Q NAME 留证；本腿无 RVM 导出（元素没了）。
+-- 一个 SAVEWORK、无 QUIT/FINISH。B 不存在时它那两行 handle 掉、不报错。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/db8000_pipe_scratch_delete.log" OVER
+$P CODEX-DB8000-PIPE-SCR-DELETE-ALIVE
+/CODEX_DB8000_PIPE_SCR_A
+Q CE
+Q REF
+Q NAME
+DELETE BRAN
+$P CODEX-DB8000-PIPE-SCR-A-DELETED
+/CODEX_DB8000_PIPE_SCR_B
+handle any
+  $P CODEX-DB8000-PIPE-SCR-B-ABSENT
+elsehandle none
+  Q REF
+  Q NAME
+  DELETE BRAN
+  $P CODEX-DB8000-PIPE-SCR-B-DELETED
+endhandle
+SAVEWORK 'CODEX db8000 delete pipe scratch A (and B if present)'
+$P CODEX-DB8000-PIPE-SCR-DELETE-DONE
+ALPHA LOG END

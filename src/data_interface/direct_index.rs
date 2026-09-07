@@ -163,6 +163,22 @@ impl DbIndexes {
         self.by_name.len()
     }
 
+    /// Case-insensitive NAME substring search over the frozen index.
+    pub fn search_names(&self, query: &str) -> Vec<(String, RefU64)> {
+        let needle = query.trim().to_ascii_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut out = self
+            .by_name
+            .iter()
+            .filter(|(name, _)| name.to_ascii_lowercase().contains(&needle))
+            .flat_map(|(name, rows)| rows.iter().map(move |raw| (name.clone(), RefU64(*raw))))
+            .collect::<Vec<_>>();
+        out.sort_by(|left, right| left.0.cmp(&right.0).then(left.1.0.cmp(&right.1.0)));
+        out
+    }
+
     /// 指向 `target` 的全部入边。
     pub fn inbound_of(&self, target: RefU64) -> &[BackRef] {
         self.inbound
