@@ -3098,19 +3098,9 @@ fn collapse_scanned_file_candidates(
     (new_by_dbnum, duplicate_paths)
 }
 
-fn baseline_sync_options(
-    source: &aios_core::options::DbOption,
-    file_name: &str,
-    dbnum: u32,
-) -> aios_core::options::DbOption {
-    let mut options = source.clone();
-    options.replace_dbs = false;
-    options.included_db_files = Some(vec![file_name.to_string()]);
-    options.manual_db_nums = Some(vec![dbnum]);
-    options.gen_model = false;
-    options.gen_mesh = false;
-    options
-}
+// `baseline_sync_options`（把 `included_db_files / manual_db_nums / replace_dbs / gen_*` 绑成一份
+// 受限配置去调 legacy 全量同步壳）2026-09-07 随 `sync_total_async_threaded` 退役：基线入口
+// `versioned_db::baseline_ingest::ingest_file` 直接吃文件路径与库身份，没有清单可绑。
 
 // `realign_rolled_back_dbnum` / `realign_dbnum_checked`（缝合式对齐：只删高于文件
 // 水位的残留 + INSERT IGNORE 补洞）随 ADR-021 退役：回退的默认处置改为 worker
@@ -3620,21 +3610,19 @@ impl AiosDBManager {
             None
         };
         if baseline_needs_full_parse(count, applied_sesno) {
-            let options = baseline_sync_options(&self.db_option, file_name, dbnum);
-            let parsed_counts = crate::versioned_db::database::sync_total_async_threaded(
-                &options,
+            // 单文件基线摄入（`Fresh` 整库写，不动水位；失败先清库再 Err）。冻结在本轮复核过的
+            // `file_latest_sesno` 上，与模型面的冻结源同一个会话；文件头 dbnum / db_type 与这里
+            // 点名的不符就一行都不落。
+            let ingested = crate::versioned_db::baseline_ingest::ingest_file(
+                &self.db_option,
                 project,
-                Arc::new(dashmap::DashSet::new()),
-                &[db_type],
-                100,
+                file_path,
+                dbnum,
+                db_type,
+                Some(u32::try_from(file_latest_sesno)?),
             )
             .await?;
-            parsed_count = Some(*parsed_counts.get(&dbnum).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "dbnum={} 基线解析未返回目标文件结果；不推进 applied_sesno",
-                    dbnum
-                )
-            })?);
+            parsed_count = Some(ingested.elements);
             (count, info_count, root_count) = baseline_counts(dbnum).await?;
             let parent = extract_parent
                 .map(std::path::Path::to_path_buf)
@@ -3646,40 +3634,28 @@ impl AiosDBManager {
                 ) {
                     Ok(0) => {}
                     Ok(gap) => {
-                        let parent_name = parent
-                            .file_name()
-                            .and_then(|name| name.to_str())
-                            .ok_or_else(|| {
-                                anyhow::anyhow!(
-                                    "dbnum={dbnum} 父层路径没有文件名: {}",
-                                    parent.display()
-                                )
-                            })?;
                         println!(
                             "dbnum={dbnum} 父层有 {gap} 个叶子缺号，补解析 {}",
                             parent.display()
                         );
-                        let parent_options =
-                            baseline_sync_options(&self.db_option, parent_name, dbnum);
-                        let parent_counts =
-                            crate::versioned_db::database::sync_total_async_threaded(
-                                &parent_options,
-                                project,
-                                Arc::new(dashmap::DashSet::new()),
-                                &[db_type],
-                                100,
-                            )
-                            .await?;
-                        // 补缺同步没解析到父层文件就是静默空转（历史上 collect 把
-                        // shadow 主库从清单里删掉过），必须显式失败而不是带着缺口
-                        // 推进水位。
-                        if !parent_counts.contains_key(&dbnum) {
-                            anyhow::bail!(
-                                "dbnum={dbnum} 父层补解析未命中 {}（同步清单里没有该文件）；\
-                                 不推进 applied_sesno",
+                        // 母库整库再摄入进同一个 dbnum：`Fresh` 已有行赢，叶子 extract 里正在改的
+                        // 版本不会被母库的旧版本覆盖；目标会话取母库最新。单文件入口没有「清单里
+                        // 没这个文件」的静默空转——打不开、身份不符、没有会话都是显式 Err。
+                        crate::versioned_db::baseline_ingest::ingest_file(
+                            &self.db_option,
+                            project,
+                            &parent,
+                            dbnum,
+                            db_type,
+                            None,
+                        )
+                        .await
+                        .map_err(|error| {
+                            anyhow::anyhow!(
+                                "dbnum={dbnum} 父层补解析失败 {}；不推进 applied_sesno: {error:#}",
                                 parent.display()
-                            );
-                        }
+                            )
+                        })?;
                         (count, info_count, root_count) = baseline_counts(dbnum).await?;
                         parsed_count = None;
                     }
@@ -6150,7 +6126,7 @@ mod tests {
             .split_once("fn duplicate_candidate_groups(")
             .expect("全候选判重辅助")
             .1
-            .split_once("fn baseline_sync_options(")
+            .split_once("fn baseline_needs_full_parse(")
             .expect("helper boundary")
             .0;
         assert!(
@@ -6803,21 +6779,50 @@ mod tests {
         );
     }
 
+    /// 基线只吃**点名的那一个文件**：叶子基线冻结在本轮复核过的 `file_latest_sesno`，父层补缺
+    /// 取母库最新（`None`）。legacy 时代靠一份受限配置（`included_db_files = [本文件]`）去约束
+    /// 全量同步壳；壳退役后这条纪律直接长在入参上——这里钉两个调用点的形状。
     #[test]
-    fn on_demand_baseline_is_scoped_to_one_file_without_replacing_data() {
-        let mut source = aios_core::options::DbOption::default();
-        source.replace_dbs = true;
-        source.gen_model = true;
-        source.gen_mesh = true;
-        source.included_db_files = Some(vec!["other".into()]);
-        source.manual_db_nums = Some(vec![7997, 8000]);
-
-        let scoped = baseline_sync_options(&source, "ams7999_0001", 7999);
-        assert!(!scoped.replace_dbs);
-        assert!(!scoped.gen_model);
-        assert!(!scoped.gen_mesh);
-        assert_eq!(scoped.included_db_files, Some(vec!["ams7999_0001".into()]));
-        assert_eq!(scoped.manual_db_nums, Some(vec![7999]));
+    fn on_demand_baseline_ingests_exactly_the_named_file() {
+        let source = include_str!("manual_update.rs");
+        let body = source
+            .split_once("pub(crate) async fn initialize_dbnum_baseline(")
+            .expect("initialize_dbnum_baseline 必须存在")
+            .1
+            .split_once("pub async fn preview_manual_update(")
+            .expect("preview follows baseline")
+            .0;
+        assert_eq!(
+            body.matches("baseline_ingest::ingest_file(").count(),
+            2,
+            "叶子基线 + 父层补缺，恰好两个摄入调用点: {body}"
+        );
+        let leaf = body
+            .split_once("baseline_ingest::ingest_file(")
+            .unwrap()
+            .1
+            .split_once(".await")
+            .unwrap()
+            .0;
+        assert!(
+            leaf.contains("file_path,") && leaf.contains("Some(u32::try_from(file_latest_sesno)?)"),
+            "叶子基线必须冻结在本轮复核过的 file_latest_sesno: {leaf}"
+        );
+        let parent = body
+            .rsplit_once("baseline_ingest::ingest_file(")
+            .unwrap()
+            .1
+            .split_once(".await")
+            .unwrap()
+            .0;
+        assert!(
+            parent.contains("&parent,") && parent.contains("None,"),
+            "父层补缺摄入母库文件、目标会话取母库最新: {parent}"
+        );
+        assert!(
+            !body.contains("included_db_files") && !body.contains("manual_db_nums"),
+            "基线不再经受限配置绑清单: {body}"
+        );
     }
 
     #[test]
@@ -6836,8 +6841,8 @@ mod tests {
             .find("if baseline_has_uncommitted_rows(count, applied_sesno)")
             .expect("baseline must detect uncommitted rows");
         let parse = source
-            .find("sync_total_async_threaded(")
-            .expect("baseline must invoke the full parser");
+            .find("baseline_ingest::ingest_file(")
+            .expect("baseline must invoke the single-file ingest");
         assert!(cleanup < parse, "stale rows must be wiped before replay");
     }
 

@@ -22,6 +22,11 @@ use crate::options::DataFace;
 pub enum NotJudgedReason {
     ReadThrough,
     DataWatermarkUnestablished,
+    /// 数据水位已建立，`gen_root` 却一行都没有（连规划过的都没有）：这个库没有交付单元，
+    /// 模型面无事可做，也就没有「追赶」可言。2026-09-07 之前它被判成 `lagging`
+    /// （`model_sesno = 0 ≠ applied`），一个只有 WORL + SITE 的库启动日志永远是「模型在追赶」。
+    /// 不能靠给它盖模型水位来消掉——零根库上的非零模型水位正是 ADR-060 D7 的幽灵水位。
+    NoGenerationRoots,
 }
 
 impl NotJudgedReason {
@@ -29,6 +34,7 @@ impl NotJudgedReason {
         match self {
             Self::ReadThrough => "read-through",
             Self::DataWatermarkUnestablished => "data_watermark_unestablished",
+            Self::NoGenerationRoots => "no_generation_roots",
         }
     }
 }
@@ -175,6 +181,16 @@ pub fn verdict(row: &DbnumState, census: &RootCensus, data_face: DataFace) -> Co
             caught_up_at: row.model_settled_at.clone(),
             roots,
         }
+    } else if !census.has_roots() {
+        // 模型水位落后，但这个库从来没有过一个生成根（`gen_root` 空）：没有东西在赶，
+        // 也不会有。判「不判」而不是「追赶」，理由见 [`NotJudgedReason::NoGenerationRoots`]。
+        ConsistencyVerdict::NotJudged {
+            reason: NotJudgedReason::NoGenerationRoots,
+            model: row.model_sesno,
+            time: row.model_sesno_time.clone(),
+            lazy: row.model_lazy_roots,
+            dead: census.abandoned,
+        }
     } else {
         ConsistencyVerdict::Lagging {
             applied: row.applied_sesno,
@@ -242,6 +258,12 @@ impl ConsistencyVerdict {
                 ..
             } => {
                 format!("dbnum={dbnum} 双水位不判：数据水位未建立")
+            }
+            Self::NotJudged {
+                reason: NotJudgedReason::NoGenerationRoots,
+                ..
+            } => {
+                format!("dbnum={dbnum} 双水位不判：库里没有生成根（无交付单元），模型面无事可做")
             }
         }
     }
@@ -643,6 +665,26 @@ mod tests {
                 ..
             }
         ));
+        // 零根库（只有 WORL + SITE 之类）：数据水位在、模型水位 0、`gen_root` 空——
+        // 没有东西在赶，不是「追赶」。有根在赶的库照旧 lagging（上面 8000 那条）。
+        let no_roots = verdict(&row(4, 0), &RootCensus::default(), DataFace::Ingest);
+        assert!(matches!(
+            no_roots,
+            ConsistencyVerdict::NotJudged {
+                reason: NotJudgedReason::NoGenerationRoots,
+                ..
+            }
+        ));
+        assert_eq!(no_roots.as_str(), "not_judged");
+        assert_eq!(
+            no_roots.columns().model_verdict_reason,
+            Some("no_generation_roots")
+        );
+        assert!(no_roots.describe(5522).contains("没有生成根"));
+        assert!(matches!(
+            verdict(&row(4, 0), &RootCensus::new(0, 0, 1, true), DataFace::Ingest),
+            ConsistencyVerdict::Lagging { .. }
+        ), "有过根（哪怕全放弃了）就还是模型面的事，照旧 lagging");
 
         let mut caught_up = row(26, 26);
         caught_up.model_settled_at = Some("2026-09-05T17:01:43Z".into());

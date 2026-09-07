@@ -2,6 +2,53 @@
 
 ## 2026-09-07
 
+### `sync_total_async_threaded` 真退役：基线摄入只剩一个按文件的入口（`versioned_db::baseline_ingest`）
+
+用户拍板「真退役」（承接同日「为什么还在用 sync_total_async_threaded」的答复；方案
+`docs/plans/2026-09-07-retire-sync-total-async-threaded-plan.md`，2026-09-04 退役清单 §3.2 路 a / B8 的编排半边）。
+它今天只剩壳：收集器（B8.2）、渲染器（ADR-064 D4）、执行器、CATA 闭包、统计五个部件早已与增量共用，
+壳里留下的是 legacy 全量同步的编排形状（多类型 / 多文件 / DashSet 去重 / `included_db_files` 过滤 /
+`is_replace` / MySQL 分支 / 进度参数）。
+
+- **新增** `src/versioned_db/baseline_ingest.rs`：`ingest_file(db_option, project, path, dbnum, db_type, target_sesno)`
+  按**单个文件** `Fresh` 整库写——`spawn_blocking(stream_baseline → render_baseline_batches → 有界队列)` → 单写者
+  `dbnum_stats::execute_on` → 文件收尾 CATA 依赖闭包（同一条队列）→ 排空 → 裁决 → 统计收尾。**不动水位**；
+  解析 / 写者 / 闭包 / 统计任一失败先 `wipe_dbnum_for_reinit` 再 Err。新硬校验：冻结源反哈希出的
+  `dbnum / db_type` 与调用方点名不符就一行都不落（legacy 壳以文件为准、静默落进另一个 dbnum）；
+  `save_db = false` 与「文件没有会话」都是显式 Err，不再以「基线完成后仍没有 PE 数据」的形状失败。
+  `ingest_frozen` 给 `bootstrap_sys_metadata` 用（目录扫出来的文件以文件头为身份）。
+- **统计收尾改无条件重建**（`rebuild_on`，此前 `initialize_on` 只在版本标记落后时算）：基线自 `1eefbd57`
+  起走 `StatisticsMode::Deferred`、事务里不再维护统计，父层补缺是同一 dbnum 的第二次摄入、版本标记早已是
+  当前——条件重建会跳过，`pe_count != info_count` 直接报 `statistics mismatch`，且该错误在清库判断之后、
+  不触发清库，下一轮清库重来照样死在同一处（mem-201）。单测 `baseline_and_parent_gap_replay_keep_actual_pe_counts`
+  一直用的就是 `rebuild_on`，生产与测试从此走同一个函数。
+- **删除**（`database.rs` 1514 → ~680 行）：`sync_total_async_threaded`、`SenderJsonsData`、`BASELINE_*` 三常量、
+  `finish_write_pipeline`、`baseline_cleanup_targets`、`record_write_error`、`check_and_clear_db`、
+  `settle_dbnum_info_after_baseline`、`is_retryable_surreal_write_error` / `conflict_retry_backoff` 的副本
+  （`surreal_retry` 有同名同体的那份）、`#[cfg(feature = "sql")]` 的 MySQL 写者分支；`versioned_db/task.rs`
+  整个删（唯一消费者是 `SenderJsonsData`，且从未被调）；`manual_update::baseline_sync_options` 及其测试删
+  （入口直接吃路径与身份，没有清单可绑）。`collect_project_db_files / dbnum_stat_totals /
+  stamp_dbnum_info_identity_sql` 升 `pub(crate)` 留在 `database.rs`。
+- **调用点**：`initialize_dbnum_baseline` 叶子基线 `ingest_file(.., Some(file_latest_sesno))`、父层补缺
+  `ingest_file(.., &parent, .., None)`；`bootstrap_sys_metadata` 改为 SYS 五类全目录扫（ADR-007 语义）+ DICT
+  按 `sys_metadata_files` 清单（现回路径），逐文件 `ingest_frozen`，同 dbnum 只落一次、无会话的文件跳过。
+- **源码钉**：新模块 I1（`stream_baseline(` 生产调用点唯一）/ I2（不含 legacy 形状）/ I3（身份校验）/ I4
+  （排空 → 裁决 → 清库 → 统计 → 回执，两条失败路都清库）/ I5（无条件 `rebuild_on`）；`database.rs`
+  的 D8 退役钉加上 `sync_total_async_threaded`；`manual_update` 的两条钉改找 `ingest_file(`，新钉
+  `on_demand_baseline_ingests_exactly_the_named_file`；`cata_dependency` 三写入点钉改扫新模块；
+  `legacy_parse_pdms_db_guard` 与 `Check-LegacyParsePdmsDb.ps1` 第 4 条改为两处都扫。
+- **顺手（用户拍板一起落）**：`dbnum_consistency::verdict` 新增 `NotJudgedReason::NoGenerationRoots`——数据水位
+  已建立、模型水位落后、但 `gen_root` 一行都没有（连规划过的都没有）的库判「不判」而不是 `lagging`。现场
+  runycyk pass 3 的 5521 / 5523 / 5524 / 5526 / 7027 与 pass 2 的 5522（只有 WORL + SITE）启动日志永远是
+  「模型在追赶：数据水位 4，模型水位 0，还在赶 0」。**不能**靠给零根库盖模型水位来消掉——零根库上的非零
+  模型水位正是 ADR-060 D7 的幽灵水位（`advance_model_watermark_on` 对 `settled_floor = None` 的库本来就
+  `Unchanged`，这是设计）。`model_ready` 不看这个判决（看 `model_coverage_current`），所以此前只是观测失真。
+- 验证：`cargo check --lib` / `--bin sync_sys_only --bin l3_suite` 过；`cargo test --lib -- versioned_db
+  dbnum_consistency legacy_parse_pdms_db_guard all_three_write_points_persist_catalogue_dependencies
+  manual_update::tests` **137 passed / 0 failed / 3 ignored**；`Check-LegacyParsePdmsDb.ps1` 六判全过。
+  **真库编排等价对拍未跑**（方案 §5 第 3 条：用新 exe 对 YCYK 同一组 10 库空店首载，逐 dbnum 行数与
+  `runycyk1-bootstrap/verification.json` 相等），留给下一次 rig 运行。
+
 ### `UpdateScope` 库侧 MDB 表为空时回落到 SYS 文件声明——新项目首次启动不必再空跑一趟
 
 YCYK-E3D（`D:\AVEVA\Projects\E3D3.1\YCYK-E3D`，MDB `/SLYK`）首次初始化实测撞出来的：全新命名空间上

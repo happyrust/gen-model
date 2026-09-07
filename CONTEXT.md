@@ -301,8 +301,8 @@ _Avoid_: 死信降级、跳过坏根、模型阻断
 _Avoid_: 父子边（泛指时）、`owner` 字段（`pe` 行上没有这个字段）、按 `out` 取 children
 
 **分块解析基线 (Chunked Baseline Parsing)**：
-基线是 e3d-io 的**退化窗口**（base 为空、target = 冻结目标会话），不是第二条解析路：`e3d_collector::stream_baseline` 枚举目标索引，每 `sync_chunk_size`（默认 10 万）个元素交一块给 `versioned_db::baseline::render_baseline_batches` 渲成**元素批**（`Fresh`，每条队列消息 = 一笔事务），经有界队列交单写者落库；块交出去就释放，峰值内存随块不随库。行形状与语句形状都与增量路共用（`ElementRows` + `element_batch`），`Fresh` 只 `INSERT IGNORE`——`manual_update` 的父层补缺靠「已有行赢」保住叶子 extract 里正在改的版本，换 `Replace` 会改掉这条语义。流式收集时顺手攒每个 DESI 元素的目录链引用，文件收尾一次闭包把依赖的 CATA 元素经同一条队列入库（见「依赖入库」）。它**不走提交协议**：基线不开窗口，窗口买的是原子提交与崩溃恢复，不是内存有界。2026-09-04 随 `parse_pdms_db` 退役消失的三件事：把冻结前缀整个读成一个 `Vec<u8>`（`FrozenSource::read_frozen_bytes`）、`mem://` 暂存实例与它的读路由、`member_prune` 事后裁成员（目标索引差分本身就是终态）；`pe.sesno` 从链头 0 变成元素真实的 last-touch 会话。
-_Avoid_: 暂存窗口（基线不开窗口）、全量解析 / `DbBasicData`（随 `parse_pdms_db` 退役）、按需解析（那是元件库的旧词）、`pe_chunk` / `att_chunk`（2026-09-06 起不参与切块）
+基线是 e3d-io 的**退化窗口**（base 为空、target = 冻结目标会话），不是第二条解析路：`e3d_collector::stream_baseline` 枚举目标索引，每 `sync_chunk_size`（默认 10 万）个元素交一块给 `versioned_db::baseline::render_baseline_batches` 渲成**元素批**（`Fresh`，每条队列消息 = 一笔事务），经有界队列交单写者落库；块交出去就释放，峰值内存随块不随库。编排只有一处：`versioned_db::baseline_ingest::ingest_file`（**按单个文件**：路径 + 点名的 dbnum / db_type + 目标会话；文件头身份不符一行都不落；不动水位；解析 / 写者 / CATA 闭包 / 统计任一失败先 `wipe_dbnum_for_reinit` 再 Err；统计收尾无条件 `rebuild_on`）——2026-09-07 起 legacy 全量同步壳 `sync_total_async_threaded`（多类型 / 多文件 / `included_db_files` 过滤）退役，`bootstrap_sys_metadata` 逐文件调同一个入口。行形状与语句形状都与增量路共用（`ElementRows` + `element_batch`），`Fresh` 只 `INSERT IGNORE`——`manual_update` 的父层补缺靠「已有行赢」保住叶子 extract 里正在改的版本，换 `Replace` 会改掉这条语义。流式收集时顺手攒每个 DESI 元素的目录链引用，文件收尾一次闭包把依赖的 CATA 元素经同一条队列入库（见「依赖入库」）。它**不走提交协议**：基线不开窗口，窗口买的是原子提交与崩溃恢复，不是内存有界。2026-09-04 随 `parse_pdms_db` 退役消失的三件事：把冻结前缀整个读成一个 `Vec<u8>`（`FrozenSource::read_frozen_bytes`）、`mem://` 暂存实例与它的读路由、`member_prune` 事后裁成员（目标索引差分本身就是终态）；`pe.sesno` 从链头 0 变成元素真实的 last-touch 会话。
+_Avoid_: 暂存窗口（基线不开窗口）、全量解析 / `DbBasicData`（随 `parse_pdms_db` 退役）、`sync_total_async_threaded` / `baseline_sync_options`（2026-09-07 退役）、按需解析（那是元件库的旧词）、`pe_chunk` / `att_chunk`（2026-09-06 起不参与切块）
 
 ### 已退役词条（retired，ADR-056）
 

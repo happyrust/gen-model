@@ -201,7 +201,7 @@ FrozenSource::capture(path)              e3d-io 底座：dbnum / 库类型 / 目
 | B5 | extract / MDB / l3_suite 换 e3d-io 索引与属性读法（§D） | 无 | ✅ |
 | B6 | feature 门 + 探针 bin 圈起来 + 两道护栏（§F、§0 判据 3） | B1–B5 | ✅（空门） |
 | B7 | §G 夹具 / 测试换 e3d-io 读法 | 无（`tests/db8000_*` 的 old-pdms-io hunk 由 fable-5-1-24 先落，B7 在其上改读侧） | ✅ 2026-09-04（fable-5-1-22 起手、fable-5-1-29 收尾验证） |
-| B8 | 基线收敛成退化窗口（§3 路 a） | T404 三条硬门 | ⏳ 长杆 |
+| B8 | 基线收敛成退化窗口（§3 路 a） | T404 三条硬门 | ✅ 2026-09-07（分两半落地：**收集器 + 渲染器**早在 B8.2 / ADR-064 D4 就已与增量共用；**编排半边**按 `docs/plans/2026-09-07-retire-sync-total-async-threaded-plan.md` 收口——`sync_total_async_threaded` 壳整个删除，基线只剩 `versioned_db::baseline_ingest::ingest_file` 一个按文件的入口。T404 三门没有再压一遍：编排层重构不改数据形状，判据是「同样输入落同样的行」，真库对拍见该方案 §5） |
 | B9 | optional + lock 重生成 + 护栏收紧（§3.3） | B8（B7 已完） | ✅ 2026-09-04（`06bb56fa`；**未等 B8，先于其落地**——依赖、feature、7 个残余探针与门后测试全删，`Cargo.lock` −91/+1，两道门进 `windows-tests.yml:117/:124`。10:59 实跑 `cargo tree -i parse_pdms_db` = `did not match any packages`、`Check-LegacyParsePdmsDb.ps1` exit=0 六判全过） |
 
 ## 5. 本轮引入的语义差别（对拍 / 排障时先看这里）

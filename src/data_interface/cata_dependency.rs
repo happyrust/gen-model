@@ -881,11 +881,11 @@ mod tests {
             pipeline.contains("cata_dependency::persist_cata_dependencies("),
             "数据窗口 apply_one 必须入库 CATA 依赖"
         );
-        let baseline = include_str!("../versioned_db/database.rs");
+        let baseline = include_str!("../versioned_db/baseline_ingest.rs");
         assert!(
             baseline.contains("cata_dependency::resolve_dependency_rows(")
                 && baseline.contains("cata_dependency::render_dependency_transactions(")
-                && baseline.contains("SenderJsonsData::ElementBatch(sql.clone())"),
+                && baseline.contains(".send_async(sql.clone())"),
             "基线必须经同一条写者队列入库 CATA 依赖（单写者不变）"
         );
         let publish = include_str!("model_refresh.rs");

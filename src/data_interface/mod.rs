@@ -416,19 +416,28 @@ mod legacy_parse_pdms_db_guard {
     /// `DbBasicData` 是 `parse_db_basic_data` 的产物，`member_prune` 是补链轮的事后裁决——
     /// 两样都只有旧基线有。e3d-io 退化窗口一个都不经过（收集走 `e3d_collector::stream_baseline`，
     /// 行形状走 `versioned_db::baseline::render_baseline_batches`），任何一个写回来都意味着
-    /// 又开了第二条收集路，而那正是宪法 II 不许的。
+    /// 又开了第二条收集路，而那正是宪法 II 不许的。2026-09-07 起基线编排在
+    /// `versioned_db/baseline_ingest.rs`（`sync_total_async_threaded` 壳退役），`database.rs`
+    /// 只剩 SYS 引导与统计修复——两处都扫。
     #[test]
     fn the_baseline_orchestration_has_no_legacy_parser_intermediates() {
         const INTERMEDIATES: [&str; 2] = ["DbBasicData", "member_prune"];
-        const FILE: &str = "src/versioned_db/database.rs";
+        const FILES: [&str; 2] = [
+            "src/versioned_db/baseline_ingest.rs",
+            "src/versioned_db/database.rs",
+        ];
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let source = std::fs::read_to_string(root.join(FILE)).expect("read database.rs");
-        let leaks: Vec<String> = source
-            .lines()
-            .enumerate()
-            .filter(|(_, line)| code_mentions_any(line, &INTERMEDIATES))
-            .map(|(index, line)| format!("{FILE}:{}: {}", index + 1, line.trim()))
-            .collect();
+        let mut leaks = Vec::new();
+        for file in FILES {
+            let source = std::fs::read_to_string(root.join(file)).expect("read baseline source");
+            leaks.extend(
+                source
+                    .lines()
+                    .enumerate()
+                    .filter(|(_, line)| code_mentions_any(line, &INTERMEDIATES))
+                    .map(|(index, line)| format!("{file}:{}: {}", index + 1, line.trim())),
+            );
+        }
         assert!(
             leaks.is_empty(),
             "基线编排退回了 legacy 解析器的中间态：{leaks:#?}"

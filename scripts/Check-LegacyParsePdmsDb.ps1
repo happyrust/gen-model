@@ -7,8 +7,8 @@
 #      [patch]，或 `legacy_parse_pdms_db` feature；
 #   3. src/、tests/、python/src/ 的代码行不许写 `parse_pdms_db::` / `use parse_pdms_db`，也不许
 #      再挂 `feature = "legacy_parse_pdms_db"` 门；
-#   4. 基线编排（versioned_db/database.rs）全文不含 legacy 解析器的中间态（DbBasicData /
-#      member_prune）——这一条与依赖无关，是防止基线偷偷退回第二条收集路（宪法 II）。
+#   4. 基线编排（versioned_db/baseline_ingest.rs 与 database.rs）全文不含 legacy 解析器的中间态
+#      （DbBasicData / member_prune）——这一条与依赖无关，是防止基线偷偷退回第二条收集路（宪法 II）。
 #
 # 第 2–4 条另有 `data_interface::mod.rs::legacy_parse_pdms_db_guard` 三条源码测试逐文件判定；
 # 这里是不进 cargo test 也能跑的「文件级」同款扫描。基线全量解析走 e3d-io 退化窗口
@@ -99,15 +99,19 @@ try {
 
     # 4. 基线编排不许退回 legacy 解析器的中间态：DbBasicData 是 parse_db_basic_data 的产物，
     #    member_prune 是补链轮的事后裁决，e3d-io 退化窗口一个都不经过。
-    $baselineFile = 'src/versioned_db/database.rs'
+    #    2026-09-07 起基线编排在 versioned_db/baseline_ingest.rs（sync_total_async_threaded 壳退役），
+    #    database.rs 只剩 SYS 引导与统计修复——两处都扫。
+    $baselineFiles = @('src/versioned_db/baseline_ingest.rs', 'src/versioned_db/database.rs')
     $intermediatePattern = '^(?!\s*//).*(DbBasicData|member_prune)'
     Assert-ScannerIsAlive $intermediatePattern 'let basic: DbBasicData = read_full_basic_data();'
-    $intermediates = & rg -n --pcre2 $intermediatePattern (Join-Path $root $baselineFile)
-    if ($LASTEXITCODE -eq 0) {
-        $intermediates
-        throw "$baselineFile fell back to the legacy parser's intermediates (DbBasicData / member_prune)"
+    foreach ($baselineFile in $baselineFiles) {
+        $intermediates = & rg -n --pcre2 $intermediatePattern (Join-Path $root $baselineFile)
+        if ($LASTEXITCODE -eq 0) {
+            $intermediates
+            throw "$baselineFile fell back to the legacy parser's intermediates (DbBasicData / member_prune)"
+        }
+        if ($LASTEXITCODE -ne 1) { throw "rg failed with exit code $LASTEXITCODE" }
     }
-    if ($LASTEXITCODE -ne 1) { throw "rg failed with exit code $LASTEXITCODE" }
     'BASELINE_HAS_NO_LEGACY_INTERMEDIATES'
 } finally {
     Pop-Location
