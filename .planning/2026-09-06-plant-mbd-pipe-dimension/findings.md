@@ -464,3 +464,83 @@ plant-mbd `844ce0e`（ADR-0009，新模块 `tag.rs`，接线 `layout::place_tags
 - 四条金样 wire 体经 plant3d-web `parseMbdV2PipeData` ACCEPTED（`label` / `leader_line` 是冻结契约里有几何的 kind；
   多行 `label` 走前端 `multiLineTexts`）。
 - 未验证：浏览器目测（需起服务）、PML 图纸人工对照（需 E3D）。
+## Phase 5 ⑥（2026-09-07）：Polar 生产路径评估（`polarsystem.getBestPosAndOri`）——读完、对照、建议不整体切换
+
+只读不改代码。事实源：`object/polarsystem/polarsystem.pmlobj`（3177 行，活路径约 1950 行：构造 + `getDetail` L136-345、
+`getMainDimDir` L347-377、`add` L404-433、`balance` L537-648、`getBestPosAndOri` L1028-1296、`weightedweight`
+L1298-1418、`getDirAndCha` L1608-1770、`getUsedAngles` L1985-2043、`getresult` L2420-2539、`getnormaldirs` L2541-2574、
+`splitrange` L2765-3134；`getBestPosAndOriold` / `old2` / `replenishold` 约 1200 行是死代码）、
+`getpolarelement.pmlobj`（2421 行全活：圆柱 `dealpolarcyli` L827-1347、盒 `dealpolarbox` L1589-2072、文字
+`getstringdata` L2092-2207、`lindim` / `mlabel` / 线 / 弧）、`isoline` 的接线（`getisolineinfo` L258-280 建系、
+`addpipeselftopolarsystem` L652-700、`addrealods` L702-975 手轮 / 支管 / 盒占位、`draw` L1709-1712、`drawdim`
+L1836-1962、`drawtag` L3717-4060）、`isobran.getfromltor` L1794-1958 与 `addtopreornextpolarsystem` L3184-3238。
+`isoline` 构造写死 `usepolarsystem = true`（L134），非 Polar 的 `getIsoUsedDirs` / `CalculateDimChardirs` 路径在 PML 里
+已经不走。
+
+### 模型（每条直段一个圆柱坐标系）
+
+- 系：`pos` = 直段起点，`dir` = 管轴，`basicRadius = od/2`，`limitMin/MaxDis = [0, line 长]`；`ori` = `x is showdir and
+  z is dir`。`horidir` = 管轴的水平法向，朝向按 BRAN 包围盒中心（`getDetail` L202-222）、上一条直段的 `prehoridir`
+  （夹角 < 45° 或 > 135° 时沿用 / 取反，L227-238，保证相邻直段同侧）、`branlookdirection` / `fromltor`（L240-248）翻面；
+  `showdir` = `horidir` 在「管轴 × 水平法向」平面里抬 `lookangle`（L258-284，表单「习惯俯视角度」0/15/30/45/60/90，默认 0），
+  `-showdir` 是最佳观看方向。`fromltor`（`isobran.getfromltor`）是 BRAN 级的看图方向：按各拐点连线的水平法向朝不朝包围盒
+  中心投票，票数差不够 1/3 就改用「E45N / E45S 投影跨度更大的那个」当 `branlookdirection`。
+- 元素：一切障碍经 `getpolarelement` 转成圆柱坐标包络 `(startdis, enddis, startangle, endangle, startradius, endradius)`
+  + `basic` 标志（管子自身 / 构件为 basic，引线可以穿过它们）。圆柱按 12 个 30° 扇区逐一求交（L857-905），盒 / 文字矩形 /
+  lindim / mlabel 各有一套。加进来的：管自身圆柱（L693）、每个成员到达 / 离开侧圆柱各外延 od（L600-648）、TEE 支管圆柱
+  （L617-634）、阀门手轮圆柱（P3 bore + 壁厚，SW / EUF 外延 od 否则 od/2，L804-828）、无手轮构件的 P1 / P2 短柱或
+  `getpolarbox` 盒（L833-862）、以及**上一条直段画出来的全部非 basic 对象**（`addtopreornextpolarsystem`：x → x+1；
+  x 与 x+2 近平行（> 160°）且 x+2 离 x 不到 15·od 时也给 x+2，L3220-3235）。`add` 丢掉离本段两端超 2·od 之外、或半径
+  超 15·basicRadius 的元素（L418-423）。
+- 查询 `getBestPosAndOri(disranges, angleranges, radiusranges, needs = [长, 30°, cheight], bestdiss, bestdirs, bestradiuss,
+  isdim, leadline)`：① `getnormaldirs` = `maindimdir` + 观看面里的「上 / 下」两向（水平直段：以 showdir 为 x 的圆上 ±90°；
+  竖直直段：`showdir ⟂ u` 两向）；② 距离区间按 `needs[1]` 切格、优先落在 `bestdiss` 上（`splitrange`）；③ 角度默认
+  0–360（`getanglerange` 的限制分支被 `limit = false` 关掉）；④ 半径环 = 输入环 + 该距离格内各障碍的 `endradius` 派生环
+  `[r + need/10, r + 1.1·need]`（`balance` + L1118-1131）；⑤ 每个 距离格 × 半径环：取与环相交的元素（0.01 容差）→
+  `getUsedAngles` 合并成占用角区间 → `getDirAndCha`：先按序试 `bestdirs`（第一个不落在占用区且离区边 ≥ need/2 的赢，
+  `anglecha = 0`；bestdirs ≥ 3 个而赢的不是第一个 +30°），否则取各空隙的两边缘中离 bestdir 最近的（在观看面同侧 ×0.9），
+  都放不下就取最大空隙中点、`anglecha` = 到 bestdir 的角差；⑥ 权重 `weightedweight`：角差（×need/30）分档 0/3/5/8/10/12/15/25
+  + 半径比 `r/basicRadius` 分档 0/1/3/5/6/7/9/11/12/13/14/50，引线要穿过非 basic 元素时 ×1.3；⑦ 全局最小；⑧ `getresult`：
+  位置 = `pos + dir·dis + outdir·radius − chardir·cheight/2`，`textori` 的 chardir / xdir 按 showdir 定成从观看面读得正。
+- 主尺寸：`getMainDimDir`（L347-366）先用 `needs = [整段长, 30, basicRadius]` 跑一次搜索定 `maindimdir`；之后 `isdim = true`
+  的查询（`balance` L586-595）把角度锁到 `maindimdir ± need/2`——**一条直段的主尺寸与 ATTA 子尺寸同侧**，行位环
+  `[od + 1.2·cheight·(dimtimes−1), +cheight]`（`drawdim` L1868-1870），环被占就沿 ④ 的派生环往外找。
+- 标签：`drawtag` 用 `needs = [文字长, 30° 或 60°（多行）, 行数·cheight]`、半径环起点见 ADR-0009、`bestdirs` 只有
+  TEE / OLET 的支管口方向；`leadline = true` 让穿过障碍的引线加 1.3 倍罚分而不是禁止。
+
+### 与本库现状（`isodim` 非 Polar 路径 + `tag` 固定摆位）的差别
+
+| 面 | PML Polar | 本库 |
+|---|---|---|
+| 主尺寸方向候选 | `maindimdir`（整段一次搜索）+ 观看面上下两向；角差按分档加权 | `CalculateDimChardirs`（E/N/W/S 按包围盒中心排序）→ `get_handle_dim_dir` 第一个空闲 |
+| 占位来源 | 管自身 / 成员两侧圆柱 / 手轮 / 支管 / P1P2 短柱 / 盒 + **上一（二）条直段画出的全部对象**（精确包络） | 手轮 60°、邻段尺寸 90°（`addUsedDirToNext`）、ISODIM 占位；不看已画对象 |
+| 行位 | 输入环被占时按障碍半径往外找环（半径比加权） | 固定 `od + 1.2·cheight·(dimtimes−1)`；只有小段 `sepSmallDim` 往外叠 |
+| 看图方向 | `lookangle` / `fromltor` / `branlookdirection` / `prehoridir`——为**固定视角的二维图纸**优化，相邻直段同侧 | 无视角概念；方向按世界轴 + 包围盒中心 |
+| 文字定向 | `textori` 按观看面定 | 契约没有文字朝向（前端 `ExplicitTextInput` 只有锚点 + 层叠序） |
+| 标签摆位 | 距离 / 角度 / 半径三维搜索，避开一切已画对象，引线穿障加罚 | 尺寸方向反侧固定距离；同袋多标签会互相压（`99996` 第 0 袋 Head + 3 ATTA + BEND 五条同侧） |
+
+对六条金样的影响（推演，未实跑 Polar）：主尺寸**数值、尺寸点、行数一个都不变**（这些在 `isoDim` 层，Polar 只管摆）；会变的是
+部分袋的尺寸侧（Polar 会让相邻直段同侧、并偏向观看面），以及标签的分布（不再五条叠一侧）。
+
+### 建议：不整体切换，抽两件有用的东西做「polar-lite」
+
+1. **切换的收益对不上成本**：Polar 的核心价值一半在「为固定视角的二维出图选侧 + 文字朝向」（`lookangle` / `fromltor` /
+   `textori`），plant3d-web 是自由相机的三维视图、契约也没有文字朝向，这一半用不上；另一半「避开已画对象」有价值。
+   整体移植量：`polarsystem` 活路径 ~1950 行 + `getpolarelement` ~2400 行 + `isoline` 占位播种 ~350 行 + `isobran`
+   看图方向 / 邻段传递 ~250 行，约 5000 行 PML → 估 3–4k 行 Rust；`getpolarelement` 的精确包络（12 扇区圆柱求交、盒的
+   逐面投影）是最重的部分，而 CONTEXT「语义对齐」不要求像素复刻。
+2. **值得拿的两件**（估 600–900 行，一个新模块 `occupancy.rs`，不改契约、不改 `isodim_main`）：
+   - 每条直段一张圆柱坐标占位表：元素 = `(dis 区间, angle 区间, radius 区间, basic)`，用**包络近似**（成员两侧圆柱 / 手轮 /
+     支管 / P1P2 短柱按端点 + 半径直接算区间，不做 12 扇区求交）；本库自己产出的图元（尺寸行、标签文字框按 `text_length_units ×
+     cheight`）加进去；`addtopreornextpolarsystem` 的 x → x+1（x+2 近平行且近）传递照搬。
+   - `getDirAndCha` + `weightedweight` 的选向 / 选环：主尺寸方向在 `CalculateDimChardirs` 的候选上按 PML 分档加权而不是
+     「第一个空闲」，行位环被占时按障碍半径往外找；标签摆位在「尺寸反侧 / 观看面上下」候选里搜空隙、按半径叠行，引线穿障 ×1.3。
+   - 验证口径：六条金样重录，逐条写清哪些袋换了侧、哪些标签挪了；`golden diff` 应只在 `start / end / position / label_anchor`
+     上变，`text` 不变。
+3. **不做**：`lookangle` / `fromltor` / `branlookdirection` / `prehoridir` 的看图方向体系与 `textori`（等有二维出图需求再立项）；
+   `getpolarelement` 的精确包络。
+
+### 待你拍板
+
+A. 按上面做 polar-lite（Phase 5 ⑥′，一笔 plant-mbd 提交 + 金样再审）；B. 整体移植 Polar（另立计划，3–4k 行）；C. 维持现状，
+先做 ⑤ 角度 / ⑦ 调整焊，Polar 等浏览器目测之后再说。

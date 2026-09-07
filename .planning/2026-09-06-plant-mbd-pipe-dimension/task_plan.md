@@ -172,7 +172,7 @@ old/vendor/plant-mbd ── 纯求解器 ──►  old/gen-model  src/mbd/ (e3d
 - [x] **③ 焊缝**（2026-09-07，plant-mbd `43c9882`，ADR-0008）：显式 WELD 成员 → `weld_mark`（`DTXR` 含 SHOP → shop，否则 field）；编号（UDA `:ZD_WLDN`）由宿主给、有才出 `label` + 远时 `leader_line`；按连接类型补焊点 / 顺序编号是仪表管路径，不做；ATTA / KD 焊缝未迁。宿主读 `DTXR` / `:ZD_WLDN`。`26229` 金样 +1 weld_mark。
 - [x] **④ 位号 / 信息标签**（2026-09-07，plant-mbd `844ce0e`，ADR-0009）：`isoTag` 系 + `gettags` / `geteltag` / `getbranmlabel` 的文字与锚点照搬（Head / Tail / TEE / OLET 连接标签、ATTA 位号、BEND 角度 + 弯曲半径 + 标高、ELBO 角度 + 标高、元件名、直通不水平管件标高、管道名称），每条 `label`（多行 `\n`）+ `leader_line`；摆位取 `drawtag` 半径带起点、方向取尺寸方向反侧（无 Polar）；拐角件按 `putIntoIsoline` 归更水平的袋。宿主给 `name` / `stext` / `connection` 与 BRAN 级 `name` / `:ZD_GDWJ` / HREF / TREF。六条金样再录。支架材料标签 / 仪表管 / `:YKSX` / PCOM 未迁。
 - [ ] ⑤ 角度 `getinstallationangles` + `isombdangle` → **需契约扩展** `angle_dim` / `aid_arc` 几何（PML `aidarc`：pos / ori / radius / stangle / sweepAngle ↔ 前端 `ExplicitArcInput`），两侧同版（D7）
-- [ ] ⑥ Polar 生产路径（`usepolarsystem = true`）：`polarsystem.getBestPosAndOri` 选向 + `addtopreornextpolarsystem` 邻段，评估与当前非 Polar 选向的差距再决定是否切换
+- [ ] ⑥ Polar 生产路径（`usepolarsystem = true`）：**评估已做**（2026-09-07，`findings.md`「Phase 5 ⑥」）——`polarsystem` 活路径 ~1950 行 + `getpolarelement` ~2400 行，核心是每条直段一张圆柱坐标占位表（含上一条直段画出的全部对象）+ 距离 / 角度 / 半径三维加权搜索（`getDirAndCha` / `weightedweight`）+ 为固定视角出图服务的看图方向体系（`lookangle` / `fromltor` / `prehoridir` / `textori`）。尺寸数值 / 尺寸点 / 行数不受影响，只影响部分袋的尺寸侧与标签分布。建议不整体切换，抽「占位表 + 加权选向选环」做 polar-lite（`occupancy.rs`，600–900 行）；**待拍板 A / B / C**
 - [ ] ⑦ 调整焊 `getadjustwelds`；⑧ PCOM / tee-olet 切段（`isoteeline.pmlobj`）
 
 约束：每项落地前先冻结对应 V2 契约几何；新 kind 上线顺序：契约 + 前端映射同版发布 → 求解器开始产出。
