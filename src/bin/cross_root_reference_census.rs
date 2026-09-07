@@ -21,6 +21,13 @@
 //! 4. 会话链逐步 `diff_steps`，数**跨根边上只改了一端**的窗口——那才是 C2 / C3 的验收窗口；
 //! 5. 顺带（C5）：按 core `nounlib/LISTOP` 口径判 TOPF 顶层件，数「core 单独重画、我们一个根都不归」
 //!    的实例；以及所有 core 判 primitive 却没有任何根祖先的元素（BOX 直挂 ZONE 那一类）。
+//! 6. ★0907 C8：电缆端点边——`STAREF` / `ENDREF` 指向 `EQUI` / `ELCONN`（core 规则 F `ELCXRF`）或指向
+//!    `CWBRAN` 之下的路由节点 `HATTA` / `TATTA` / `RNODE` / `RATTA`（规则 E `CLIST`；那一端算到 `CWBRAN` 头上）。
+//!    core 对这两条走的是反向查（`DB_RefTableIterator`，证据 §8.6），所以窗口统计问的是**「只改了被引用端、电缆的根没被碰」**：
+//!    `cable_dst_only` = 被引用元素（或规则 E 的 `CWBRAN`）自己的记录变了；`cable_dst_root_only` = 只是它最近的根下面有东西变了
+//!    （GETWORK 是先 `FNDTOP` 再 `EVALAT(top)`，所以 `EQUI` 下面一个 BOX 动了 core 也会重画接在 `EQUI` 上的电缆）。
+//!    两档都要求电缆那一端最近的根**没有**任何变更——有的话整根重生成本来就覆盖。边是从链尾会话扫出来的，
+//!    电缆那端在这一步的 `to` 会话里还没 `Inserted` 的（电缆后建）边当时不存在，不算窗口，单独记 `cable_dst_only_unborn`。
 //!
 //! 用法：
 //! ```text
@@ -47,6 +54,7 @@ use aios_database::noun_dict::default_noun_capabilities;
 use e3d_attlib::{AttlibData, db1_dehash, db1_hash};
 use e3d_io::db_element::template_file_for;
 use e3d_io::engine::extract_parsed_element_with_descriptors;
+use e3d_io::index::IndexCandidate;
 use e3d_io::record::descriptor::{AttributeExtractionStatus, DescriptorValue};
 use e3d_io::record::explicit::ExplicitValue;
 use e3d_io::record::template::TemplateProvider;
@@ -58,6 +66,15 @@ const TEMPLATE_DIR_DEFAULT: &str = r"E:\reverse\e3d\shadow_e3d31_aps_all";
 
 /// `ADSTCH` 三组核对里出现的五个属性（证据 §3）。
 const STRUCTURAL_ATTRS: &[&str] = &["CREF", "JOIS", "JOIE", "CFRA", "PFRE"];
+
+/// 电缆端点边的两个属性（core `ELCXRF` = `BACKRE{ENDREF, STAREF}`，`LALCAB::takeCables` 同两个；证据 §8.6）。
+const CABLE_ENDPOINT_ATTRS: &[&str] = &["STAREF", "ENDREF"];
+
+/// 规则 F 的被引用端 noun。
+const CABLE_ENDPOINT_TARGET_NOUNS: &[&str] = &["EQUI", "ELCONN"];
+
+/// 规则 E 的被引用端 noun（都在 `CWBRAN` 之下；`CAB_DB_BranchCableList_pseudo` 收的正是这四种成员）。
+const CABLE_ROUTE_NODE_NOUNS: &[&str] = &["HATTA", "TATTA", "RNODE", "RATTA"];
 
 /// owner 链最多走多长；超过按成环 / 坏数据处理。
 const MAX_DEPTH: usize = 64;
@@ -265,6 +282,18 @@ struct WindowStats {
     hole_dst_only: u64,
     hole_src_only: u64,
     hole_both: u64,
+    /// ★0907 C8 跨根电缆端点边（反向 nearest 不覆盖）：被引用端（`EQUI` / `ELCONN`，或规则 E 的 `CWBRAN` /
+    /// 路由节点）**自己的记录**改了而电缆那端最近的根没被碰 → C8 该拉进来的窗口；
+    cable_dst_only: u64,
+    /// 被引用端自己没改、但它最近的根下面有东西改了，电缆根没被碰（GETWORK `FNDTOP` 口径下 core 也会重画电缆）。
+    cable_dst_root_only: u64,
+    /// 电缆那端（`CABLE` / `EXTGEO` 记录）改了、被引用端没改 —— 整根重生成本来就覆盖，不是缺口。
+    cable_src_only: u64,
+    /// 被引用端改了、电缆根也被碰 —— 闭包本来就有。
+    cable_both: u64,
+    /// 被引用端改了、电缆根没被碰，**但电缆那端（`CABLE` / `EXTGEO`）在这一步的 `to` 会话里还没建**
+    /// （后面某一步才 `Inserted`）—— 边当时不存在，不是窗口；单独记一笔，免得把「电缆还没画」误当缺口。
+    cable_dst_only_unborn: u64,
     /// 会话链读不出来 / diff 失败的库。
     failed: u64,
 }
@@ -279,6 +308,11 @@ impl WindowStats {
         self.hole_dst_only += other.hole_dst_only;
         self.hole_src_only += other.hole_src_only;
         self.hole_both += other.hole_both;
+        self.cable_dst_only += other.cable_dst_only;
+        self.cable_dst_root_only += other.cable_dst_root_only;
+        self.cable_src_only += other.cable_src_only;
+        self.cable_both += other.cable_both;
+        self.cable_dst_only_unborn += other.cable_dst_only_unborn;
         self.failed += other.failed;
     }
 }
@@ -307,6 +341,9 @@ struct DbReport {
     structural: BTreeMap<String, Tally>,
     /// 负实体（HOLC 代理）发出的边。
     holes: BTreeMap<String, Tally>,
+    /// ★0907 C8 电缆端点边（`STAREF` / `ENDREF` → `EQUI` / `ELCONN`，或 → `CWBRAN` 之下的路由节点），
+    /// 按 `SRC.ATTR->DST` 键；键尾带 `[F]` / `[E]` 标规则。
+    cable_endpoint: BTreeMap<String, Tally>,
     /// 全部 DESI 内引用边（同库或跨 DESI 库），按 `SRC.ATTR->DST` 键。只进合计，不逐库落 JSON
     /// （486 库 × 几百个键太占地方；要逐库看就去掉这行 `skip`）。
     #[serde(skip)]
@@ -633,6 +670,21 @@ struct CrossEdge {
     backref_ok: bool,
     fwd_uncovered: bool,
     rev_uncovered: bool,
+    /// ★0907 C8：电缆端点边才有。`structural` 与它互斥；两者都不是的就是孔洞边。
+    cable: Option<CableEdge>,
+}
+
+/// 电缆端点边的附加信息（窗口统计要看根级的「被碰」）。
+#[derive(Clone, Copy)]
+struct CableEdge {
+    /// `"F"` = `EQUI` / `ELCONN` 被引用；`"E"` = `CWBRAN` 之下的路由节点被引用。
+    rule: &'static str,
+    /// core 规则的**主语**：F 是 `dst` 自己，E 是 `dst` 的 owner `CWBRAN`（规则 E 在 `CWBRAN` 变了时触发）。
+    subject: RefNo,
+    /// 电缆那端（`src`）最近的生成根；`None` = 无根。
+    src_root: Option<RefNo>,
+    /// 被引用端最近的生成根；`None` = 无根。
+    dst_root: Option<RefNo>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -662,6 +714,20 @@ fn main() -> anyhow::Result<()> {
         .map(|name| (db1_hash(name), *name))
         .collect();
     let stru_hash = db1_hash("STRU");
+    // ★0907 C8：电缆端点边的属性与两端 noun。
+    let cable_attr_hashes: HashSet<u32> = CABLE_ENDPOINT_ATTRS
+        .iter()
+        .map(|name| db1_hash(name))
+        .collect();
+    let cable_target_hashes: HashSet<u32> = CABLE_ENDPOINT_TARGET_NOUNS
+        .iter()
+        .map(|name| db1_hash(name))
+        .collect();
+    let route_node_hashes: HashSet<u32> = CABLE_ROUTE_NODE_NOUNS
+        .iter()
+        .map(|name| db1_hash(name))
+        .collect();
+    let cwbran_hash = db1_hash("CWBRAN");
     let unit_types = resolve_delivery_unit_types(&[]);
     let mut attr_names: HashMap<u32, String> = HashMap::new();
 
@@ -712,6 +778,7 @@ fn main() -> anyhow::Result<()> {
     let mut examples: Vec<WindowExample> = Vec::new();
     let mut total_structural: BTreeMap<String, Tally> = BTreeMap::new();
     let mut total_holes: BTreeMap<String, Tally> = BTreeMap::new();
+    let mut total_cable: BTreeMap<String, Tally> = BTreeMap::new();
     let mut total_all: BTreeMap<String, Tally> = BTreeMap::new();
     let mut total_topf: BTreeMap<String, TopfStat> = BTreeMap::new();
     let mut total_prim_no_root: NounOwnerCounts = BTreeMap::new();
@@ -838,6 +905,28 @@ fn main() -> anyhow::Result<()> {
             let attr = attr_name(&mut attr_names, edge.attr, edge.is_uda);
             let structural = structural_hashes.contains_key(&edge.attr);
             let hole = hole_nouns.contains(&scanned.elements[&edge.src].noun);
+            // ★0907 C8：STAREF / ENDREF 指向同库的 EQUI / ELCONN（F），或指向 CWBRAN 之下的路由节点（E；
+            // `RATTA` / `RNODE` 常常不是 CWBRAN 的直接成员，沿 owner 链找最近的 CWBRAN 祖先）。
+            let cable_rule: Option<(&'static str, RefNo)> =
+                if cable_attr_hashes.contains(&edge.attr) && edge.dst.dbno() == scanned.dbnum {
+                    scanned.elements.get(&edge.dst).and_then(|dst_element| {
+                        if cable_target_hashes.contains(&dst_element.noun) {
+                            Some(("F", edge.dst))
+                        } else if route_node_hashes.contains(&dst_element.noun) {
+                            hier.path(edge.dst).and_then(|path| {
+                                path[1..]
+                                    .iter()
+                                    .copied()
+                                    .find(|ancestor| scanned.elements[ancestor].noun == cwbran_hash)
+                                    .map(|branch| ("E", branch))
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                } else {
+                    None
+                };
             let under_stru = structural
                 && hier.path(edge.src).is_some_and(|path| {
                     path[1..]
@@ -913,6 +1002,28 @@ fn main() -> anyhow::Result<()> {
                         backref_ok: ok,
                         fwd_uncovered: !fwd_covered,
                         rev_uncovered: !rev_covered,
+                        cable: None,
+                    });
+                }
+                // 电缆端点边是反向级联：被引用端变了 → 电缆要重画。电缆的根落在被引用端的根链里
+                // （rev_covered）时整根重生成本来就覆盖，只有 rev 不覆盖的才进窗口统计。
+                if let Some((rule, subject)) = cable_rule
+                    && !rev_covered
+                {
+                    cross_edges.push(CrossEdge {
+                        src: edge.src,
+                        attr: edge.attr,
+                        dst: edge.dst,
+                        structural: false,
+                        backref_ok: false,
+                        fwd_uncovered: !fwd_covered,
+                        rev_uncovered: true,
+                        cable: Some(CableEdge {
+                            rule,
+                            subject,
+                            src_root: nearest_src,
+                            dst_root: nearest_dst,
+                        }),
                     });
                 }
             } else {
@@ -931,6 +1042,13 @@ fn main() -> anyhow::Result<()> {
             if hole {
                 report.holes.entry(key.clone()).or_default().add(&tally);
             }
+            if let Some((rule, _)) = cable_rule {
+                report
+                    .cable_endpoint
+                    .entry(format!("{key} [{rule}]"))
+                    .or_default()
+                    .add(&tally);
+            }
             if tally.cross_db_other == 0 {
                 report.all_edges.entry(key).or_default().add(&tally);
             }
@@ -938,7 +1056,7 @@ fn main() -> anyhow::Result<()> {
 
         // ---- 会话逐步 diff：跨根边上只改了一端的窗口 ----
         if args.windows && !cross_edges.is_empty() {
-            match step_windows(path, &cross_edges, args.max_steps) {
+            match step_windows(path, &cross_edges, args.max_steps, &mut hier) {
                 Ok((stats, found)) => {
                     report.windows = stats;
                     for (from_sesno, to_sesno, edge, changed_end) in found {
@@ -980,6 +1098,9 @@ fn main() -> anyhow::Result<()> {
         for (key, tally) in &report.holes {
             total_holes.entry(key.clone()).or_default().add(tally);
         }
+        for (key, tally) in &report.cable_endpoint {
+            total_cable.entry(key.clone()).or_default().add(tally);
+        }
         for (key, tally) in &report.all_edges {
             total_all.entry(key.clone()).or_default().add(tally);
         }
@@ -1003,8 +1124,14 @@ fn main() -> anyhow::Result<()> {
             .sum();
         let hole_edges: u64 = report.holes.values().map(|t| t.edges).sum();
         let hole_gap: u64 = report.holes.values().map(|t| t.rev_uncovered_nearest).sum();
+        let cable_edges: u64 = report.cable_endpoint.values().map(|t| t.edges).sum();
+        let cable_gap: u64 = report
+            .cable_endpoint
+            .values()
+            .map(|t| t.rev_uncovered_nearest)
+            .sum();
         println!(
-            "{:<24} dbnum={:<6} ses={:<5} el={:<8} roots={:<6} 无根={:<6} 引用边={:<8} 结构边={:<6} 结构缺口={:<5} 孔洞边={:<5} 孔洞缺口={:<4} 窗口(结构/孔洞)={}/{} {:.1}s",
+            "{:<24} dbnum={:<6} ses={:<5} el={:<8} roots={:<6} 无根={:<6} 引用边={:<8} 结构边={:<6} 结构缺口={:<5} 孔洞边={:<5} 孔洞缺口={:<4} 电缆边={:<5} 电缆缺口={:<4} 窗口(结构/孔洞/电缆/电缆根级)={}/{}/{}/{} {:.1}s",
             report.file,
             report.dbnum,
             report.sesno,
@@ -1016,8 +1143,12 @@ fn main() -> anyhow::Result<()> {
             structural_gap,
             hole_edges,
             hole_gap,
+            cable_edges,
+            cable_gap,
             report.windows.structural_src_only,
             report.windows.hole_dst_only,
+            report.windows.cable_dst_only,
+            report.windows.cable_dst_root_only,
             started.elapsed().as_secs_f32()
         );
         reports.push(report);
@@ -1038,6 +1169,10 @@ fn main() -> anyhow::Result<()> {
     );
     print_tallies("结构连接边（ADSTCH 五属性）", &total_structural);
     print_tallies("孔洞边（负实体 noun 发出的引用）", &total_holes);
+    print_tallies(
+        "电缆端点边（STAREF / ENDREF → EQUI / ELCONN [F]，或 → CWBRAN 之下的路由节点 [E]；只算同库）",
+        &total_cable,
+    );
 
     println!("\n全部 DESI 内引用边里正向 nearest 不覆盖最多的 25 类：");
     let mut ranked: Vec<(&String, &Tally)> = total_all.iter().collect();
@@ -1101,7 +1236,9 @@ fn main() -> anyhow::Result<()> {
 
     println!(
         "\n会话逐步 diff：{} 个库 {} 步；跨根结构边（回指成立）持属性端单独改动 {} / 被引用端单独改动 {} / 两端都改 {}；\
-         跨根孔洞边 被打孔件单独改动 {} / 孔洞件单独改动 {} / 两端都改 {}；失败 {} 库",
+         跨根孔洞边 被打孔件单独改动 {} / 孔洞件单独改动 {} / 两端都改 {}；\
+         跨根电缆端点边 被引用端记录改了·电缆根没被碰 {} / 被引用端的根被碰·记录没改·电缆根没被碰 {} / 只电缆端改 {} / 两端都碰 {}\
+         （另 {} 处被引用端改了但电缆那端当时还没建，边不存在，不算）；失败 {} 库",
         total_windows.dbs_stepped,
         total_windows.steps,
         total_windows.structural_src_only,
@@ -1110,6 +1247,11 @@ fn main() -> anyhow::Result<()> {
         total_windows.hole_dst_only,
         total_windows.hole_src_only,
         total_windows.hole_both,
+        total_windows.cable_dst_only,
+        total_windows.cable_dst_root_only,
+        total_windows.cable_src_only,
+        total_windows.cable_both,
+        total_windows.cable_dst_only_unborn,
         total_windows.failed
     );
     for example in examples.iter().take(12) {
@@ -1133,6 +1275,9 @@ fn main() -> anyhow::Result<()> {
             "dirs": args.dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>(),
             "delivery_unit_types": unit_types,
             "structural_attrs": STRUCTURAL_ATTRS,
+            "cable_endpoint_attrs": CABLE_ENDPOINT_ATTRS,
+            "cable_endpoint_target_nouns": CABLE_ENDPOINT_TARGET_NOUNS,
+            "cable_route_node_nouns": CABLE_ROUTE_NODE_NOUNS,
             "hole_nouns_proxy": hole_nouns.iter().map(|h| noun_name(&noun_names, *h)).collect::<std::collections::BTreeSet<_>>(),
             "files_seen": files.len(),
             "desi_files": desi_files.len(),
@@ -1147,6 +1292,7 @@ fn main() -> anyhow::Result<()> {
             "elements_without_template": total_template_missing,
             "structural": total_structural,
             "holes": total_holes,
+            "cable_endpoint": total_cable,
             "all_edges": total_all,
             "topf": total_topf,
             "primitive_without_root": total_prim_no_root,
@@ -1161,11 +1307,17 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// 会话链逐步 diff，数跨根边上「只改了一端」的窗口。返回 (账, 样例 (from, to, edge, 改的哪端))。
+///
+/// 电缆端点边（★0907 C8）多看一层「根级被碰」：一步里变更键的根链并集 = 这一步整根重生成会覆盖的根；
+/// 电缆那端的根在里面就不是缺口，被引用端的根在里面（而记录本身没改）就是 GETWORK `FNDTOP` 口径下
+/// core 也会触发的窗口。`hier` 只用来查根链（带缓存，故 `&mut`）。
 fn step_windows(
     path: &Path,
     cross_edges: &[CrossEdge],
     max_steps: usize,
+    hier: &mut Hierarchy<'_>,
 ) -> anyhow::Result<(WindowStats, Vec<WindowHit>)> {
+    let has_cable_edges = cross_edges.iter().any(|edge| edge.cable.is_some());
     let mut engine = ReadOnlyEngine::open(path)?;
     let mut sesnos: Vec<u32> = engine
         .sessions()?
@@ -1183,15 +1335,76 @@ fn step_windows(
         return Ok((stats, found));
     }
     let steps = engine.diff_steps(SessionSelector::Exact(sesnos[0]), SessionSelector::Latest)?;
-    for step in steps.iter().take(max_steps) {
+    // 每个键第一次 `Inserted` 在第几步：电缆边的电缆端在那一步之前不存在，被引用端那时的改动不是窗口
+    // （zdj7200 2→3 改的那几台 EQUI，电缆 4→5 才建）。链头会话里就有的键不在表里 = 一直存在。只有电缆边要看。
+    let mut born_at: HashMap<RefNo, usize> = HashMap::new();
+    if has_cable_edges {
+        for (index, step) in steps.iter().take(max_steps).enumerate() {
+            for change in step.changes() {
+                if let IndexCandidate::Inserted { refno, .. } = change {
+                    born_at.entry(*refno).or_insert(index);
+                }
+            }
+        }
+    }
+    for (index, step) in steps.iter().take(max_steps).enumerate() {
         stats.steps += 1;
         let changed: HashSet<RefNo> = step.changes().iter().map(|change| change.refno()).collect();
         if changed.is_empty() {
             continue;
         }
+        // 这一步被碰到的根：每个变更键 owner 链上的全部根（与祖先闭包同口径）。只有电缆边要看。
+        let touched_roots: HashSet<RefNo> = if has_cable_edges {
+            changed
+                .iter()
+                .filter_map(|refno| hier.chain(*refno))
+                .flatten()
+                .collect()
+        } else {
+            HashSet::new()
+        };
         for edge in cross_edges {
             let src_changed = changed.contains(&edge.src);
             let dst_changed = changed.contains(&edge.dst);
+            if let Some(cable) = edge.cable {
+                // 被引用端：F 看 dst 自己，E 看 dst（路由节点）或它的 CWBRAN。
+                let subject_changed = dst_changed || changed.contains(&cable.subject);
+                let subject_root_touched = cable
+                    .dst_root
+                    .is_some_and(|root| touched_roots.contains(&root));
+                let cable_root_touched = cable
+                    .src_root
+                    .is_some_and(|root| touched_roots.contains(&root));
+                // 电缆那端这一步的 `to` 会话里还没建 → 边当时不存在，被引用端的改动不算窗口，单独记。
+                if born_at.get(&edge.src).is_some_and(|&born| born > index) {
+                    if subject_changed && !cable_root_touched {
+                        stats.cable_dst_only_unborn += 1;
+                    }
+                    continue;
+                }
+                if subject_changed && !cable_root_touched {
+                    stats.cable_dst_only += 1;
+                    let label = if cable.rule == "E" {
+                        "dst[E]"
+                    } else {
+                        "dst[F]"
+                    };
+                    found.push((step.from.sesno, step.to.sesno, *edge, label));
+                } else if !subject_changed && subject_root_touched && !cable_root_touched {
+                    stats.cable_dst_root_only += 1;
+                    let label = if cable.rule == "E" {
+                        "dst-root[E]"
+                    } else {
+                        "dst-root[F]"
+                    };
+                    found.push((step.from.sesno, step.to.sesno, *edge, label));
+                } else if subject_changed && cable_root_touched {
+                    stats.cable_both += 1;
+                } else if src_changed && !subject_changed {
+                    stats.cable_src_only += 1;
+                }
+                continue;
+            }
             if edge.structural && edge.backref_ok {
                 match (src_changed, dst_changed) {
                     (true, false) => {

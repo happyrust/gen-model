@@ -243,7 +243,8 @@ else if ATNLOG(noun, 0xA103E /* primitive_a */):
   `sub_109C9090`（qualifier / `CBSTA` 状态过滤）只看了调用序与属性导入，**没有逐指令核**。0906 把 E/F 两条的属性写反了，
   是伪码里 `unk_10B23C98` / `unk_10B23CA0` 两个常量对号时错位——0907 用 `ida_bytes.get_dword` 直读后按 `db1_dehash` 解回 `CLIST` / `ELCXRF`
   改正。语料那一半：`CABLE.STAREF`/`ENDREF` 的 196 条跨库边对端 noun **未逐条解**（普查 JSON 只记 `@desi<dbnum>`），只知道对端库就是
-  语料里含 ELCONN 的那六个电气库；「只改 EQUI/ELCONN 一端、电缆不动」的窗口**未量**（普查的窗口统计只跟了结构边与孔洞边）。
+  语料里含 ELCONN 的那六个电气库；~~「只改 EQUI/ELCONN 一端、电缆不动」的窗口**未量**（普查的窗口统计只跟了结构边与孔洞边）~~
+  ★0907 同日已量：普查加了电缆端点边这一档，85 库 3935 步里这样的窗口 = **0**（§8.6 末段）。
 - **没有跑任何一条联动的实测**。§6 的 ❓ 三行是取证结论，不是缺口结论。（0907 后 #12 已由真库窗口实测：
   `structural_connection::tests::live`；#15 判构造性覆盖，不需要实测。）
 - §8 的读法：`RECON0` 一族与 `sub_5AB6CB0` / `sub_5AEA500` 是 Hex-Rays 伪码 + 常量解码，**未逐指令核**；`ENHAS2`、
@@ -440,9 +441,17 @@ direct 文件窗口路径没有；旧 PE 路径的 `ref_rev` 按 schema ELEMENT 
 只移植了 `POINTR` 直线段，`EXTGEO` 那支未接），所以这条像 #12 一样**几何上暂不显**，电缆几何落地即成正确性项。C3「通用反向级联」在 core 侧的对应物就只有这两条电缆边——不改 C3 不立项的判词。
 
 **★0907 同日：用户拍板先做同库版 → 已接线**（`src/data_interface/cable_endpoint.rs`，`WindowRootSources.cable_endpoint`，开关
-`model_cable_endpoint_cascade` 默认关）：账本里的 `EQUI` / `ELCONN`（F）查自己、`CWBRAN`（E）查自己 + T 端索引的直接成员，
+`model_cable_endpoint_cascade` 默认关）：账本里的 `EQUI` / `ELCONN`（F）查自己、`CWBRAN`（E）查自己 + T 端索引里的整棵子树
+（第一版只查直接成员，`RATTA` 挂在 `RNODE` 下一层被漏掉：`zdj7200_0001` 32 条规则 E 边只到 27 条，同日改成子树遍历后 32 = 32），
 `ReadOnlyEngine::referrers_of` 到 T 端文件自带的 `STAREF` / `ENDREF` 反向表点查，引用者 owner 链上的 `roots_T` 根并进 `touched`——就是
 上面 `DB_PseudoBACKRE` / `takeCables` 那张表、那两个属性，只差「本库」这一层（core `DB_MDB::dbs` 逐库并）。`zdj7200_0001` 实测：表里有
 `STAREF` / `ENDREF` 两张；假定 `EQUI 23584/10206` 变了 → 6 条边 / 6 个电缆根，与正向读 `CABLE.STAREF`/`ENDREF` 反推的集合相等；假定
-8 条 `CWBRAN` 变了 → 70 次点查 / 27 条 `EXTGEO` 边 / 6 个根全是 `CABLE`；会话链 9 步 + `aps7200_0001` 3→4 开关两态 `regen` 逐字相同
+8 条 `CWBRAN` 变了 → 122 次点查 / 32 条 `EXTGEO` 边 / 6 个根全是 `CABLE`；会话链 9 步 + `aps7200_0001` 3→4 开关两态 `regen` 逐字相同
 （语料里没有「只改一端」的自然窗口：2→3 时会话 3 还没有这两张表，4→5 两端一起建）。
+
+**★0907 同日：「只改一端」的窗口量了 = 0**（`cross_root_reference_census` 加一档电缆端点边，`docs/evidence/2026-09-07-cross-root-reference-census-c8.json`）：
+同库电缆端点边 444 条（`CABLE.STAREF/ENDREF → EQUI` [F] 36 + `EXTGEO.STAREF/ENDREF → HATTA/TATTA/RNODE/RATTA` [E] 408）全部跨根、
+反向 nearest 全不覆盖；85 个库 3935 步会话链上，「被引用端（F：`EQUI`/`ELCONN` 自己；E：路由节点或它的 `CWBRAN`）记录改了 · 电缆那端
+最近的根没被碰」= **0**，「被引用端的根被碰 · 记录没改 · 电缆根没被碰」（GETWORK 先 `FNDTOP` 再 `EVALAT(top)` 的口径）= **0**；两端都碰 457、
+只电缆端改 15。另 15 处是 dbnum 7200 三份副本 × 5 条 `CABLE.ENDREF→EQUI` 在 2→3 改了 EQUI，但那些电缆 4→5 才 `Inserted`——边在会话 3
+不存在，普查单独记作 `cable_dst_only_unborn`，不算窗口。所以同库版今天没有真库窗口可验，只有假定源；要验就得自己造一个窗口。

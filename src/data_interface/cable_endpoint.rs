@@ -2,8 +2,8 @@
 //!
 //! 窗口 S→T 里的变更元素若是 `EQUI` / `ELCONN`（规则 F：`GATREF(ELCXRF)`）或 `CWBRAN`（规则 E：
 //! `GATREF(CLIST)`），到 T 端文件**自带的反向引用表**里点查「`STAREF` / `ENDREF` 指向它的元素」——
-//! 规则 F 查变更元素自己，规则 E 查 `CWBRAN` 自己加它在 T 端索引里的直接成员（`HATTA` / `TATTA` /
-//! `RNODE` / `RATTA` 那一层，路由段 `EXTGEO` 的 `STAREF` / `ENDREF` 指的就是它们）；引用者（`CABLE`
+//! 规则 F 查变更元素自己，规则 E 查 `CWBRAN` 自己加它在 T 端索引里的整棵子树（路由节点 `HATTA` / `TATTA` /
+//! `RNODE` / `RATTA` 散在一到两层下，路由段 `EXTGEO` 的 `STAREF` / `ENDREF` 指的就是它们）；引用者（`CABLE`
 //! 自身或它的 `EXTGEO` 段）owner 链上落在 `roots_T` 里的生成根并进 `touched`，于是
 //! `regen = touched ∩ roots_T` 会带上电缆的根。
 //!
@@ -89,11 +89,35 @@ pub fn sources_from_plan(plan: &UpdatePlan) -> Vec<CascadeSource> {
     out
 }
 
-/// 一个变更元素要在表里点查的键：规则 F 是它自己；规则 E 是 `CWBRAN` 自己加直接成员。
+/// 子树遍历的深度上限（`CWBRAN` 下最多两三层：`CTSTRA` → `RNODE` → `RATTA`；超过就是成环 / 坏数据）。
+const SUBTREE_DEPTH_LIMIT: usize = 16;
+
+/// 一个变更元素要在表里点查的键：规则 F 是它自己；规则 E 是 `CWBRAN` 自己加它**整棵子树**
+/// （`HATTA` / `TATTA` 是直接成员，`RNODE` / `RATTA` 常挂在下一层——core `CAB_DB_BranchCableList_pseudo`
+/// 收的是子树里这四种 noun，索引里没有 noun，就把子树全查；不是路由节点的键在表里本来就是空）。
 pub fn query_points(source: &CascadeSource, children: impl Fn(RefNo) -> Vec<RefNo>) -> Vec<RefNo> {
     let mut out = vec![source.refno];
-    if source.rule == Rule::Route {
-        out.extend(children(source.refno));
+    if source.rule != Rule::Route {
+        return out;
+    }
+    let mut seen: BTreeSet<(u32, u32)> = [(source.refno.word0, source.refno.word1)]
+        .into_iter()
+        .collect();
+    let mut frontier = vec![source.refno];
+    for _ in 0..SUBTREE_DEPTH_LIMIT {
+        let mut next = Vec::new();
+        for parent in &frontier {
+            for child in children(*parent) {
+                if seen.insert((child.word0, child.word1)) {
+                    out.push(child);
+                    next.push(child);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
     }
     out
 }
@@ -103,7 +127,7 @@ pub fn query_points(source: &CascadeSource, children: impl Fn(RefNo) -> Vec<RefN
 pub struct ReferrerEdge {
     pub source: RefNo,
     pub rule: Rule,
-    /// 表里被查的键（规则 F = `source`；规则 E = `source` 或它的成员）。
+    /// 表里被查的键（规则 F = `source`；规则 E = `source` 或它子树里的元素）。
     pub target: RefNo,
     pub attribute: &'static str,
     /// `referrer.attribute == target` 的那个元素（`CABLE` 或它的 `EXTGEO` 段）。
@@ -123,7 +147,7 @@ pub struct ReferrerEdges {
     pub tables_present: BTreeSet<&'static str>,
 }
 
-/// T 端索引的直接成员表，只在窗口里真有 `CWBRAN` 改动时才建（一次 O(索引)）。
+/// T 端索引的直接成员表（子树遍历用），只在窗口里真有 `CWBRAN` 改动时才建（一次 O(索引)）。
 fn children_index(owners: &BTreeMap<(u32, u32), RefNo>) -> BTreeMap<(u32, u32), Vec<RefNo>> {
     let mut out: BTreeMap<(u32, u32), Vec<RefNo>> = BTreeMap::new();
     for (&(word0, word1), owner) in owners {
@@ -491,19 +515,21 @@ mod tests {
         assert!(dangling.referrer_roots.is_empty());
     }
 
-    /// 规则 E 的键 = `CWBRAN` 自己加直接成员；规则 F 只有自己。
+    /// 规则 E 的键 = `CWBRAN` 自己加整棵子树（`RATTA` 挂在 `RNODE` 下那一层也要到）；规则 F 只有自己；
+    /// 成环 / 重复不转圈。
     #[test]
-    fn route_sources_query_their_members_too() {
+    fn route_sources_query_their_whole_subtree() {
         let members = |parent: RefNo| -> Vec<RefNo> {
-            if parent == r(100) {
-                vec![r(101), r(102)]
-            } else {
-                vec![]
+            match parent.word1 {
+                100 => vec![r(101), r(102)],
+                101 => vec![r(103)],
+                103 => vec![r(100)], // 坏数据：指回顶
+                _ => vec![],
             }
         };
         assert_eq!(
             query_points(&cwbran(100), members),
-            vec![r(100), r(101), r(102)]
+            vec![r(100), r(101), r(102), r(103)]
         );
         assert_eq!(query_points(&equi(100), members), vec![r(100)]);
 
