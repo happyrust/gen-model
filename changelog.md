@@ -2,6 +2,36 @@
 
 ## 2026-09-07
 
+### ADR-063：`ref_rev` 从「正确性依赖」降为「UI 便利」，反向查询的权威源改成文件里的引用表
+
+用户拍板「接着做 ADR-063（`ref_rev` 降级，级联计划 P5）」。三件事同时成立才逼出这个决策：
+① **默认路径已经不读它**——direct + DESI 走 `window_root_plan::build_model_update_plan_from_window`
+→ e3d-model `plan_update`（owner 链闭包 + 变换子树 + CTRAY），一次反向引用查询都没有；
+② **它正在失去维护者**——`ref_rev` 只在摄入链上维护，而读透（默认 `data_face`）的 G5 定了跳过摄入链；
+③ **core 里根本没这个问题**——E3D 的引用表由 dabacon 在 `db_put_reference` 写时同步维护，读侧
+`DB_MDB::findElements` 逐库点查、零维护，「联动查询的索引怎么更新」被文件格式吞掉了。
+覆盖面 P0 差表已验：783 库实测 75 张反向引用表，**F \ R 在 DESI / CATA 两侧都为空**。
+
+- **新增** `docs/adr/ADR-063-ref-rev-is-a-ui-convenience-not-a-correctness-dependency.md`：D1 选根不读、
+  D2 维护降为摄入形态的 UI 便利（读透形态不跑）、D3 读透形态下读它**必须报错**、D4 护栏不对称
+  （判不了 → 该库全部根过期 + 点名 `catalogue_cascade_degraded`）。修订 ADR-003 B1-emit。
+- **`increment_pipeline.rs`**：`maintain_reverse_index` 与它的补偿入队在读透形态整段跳过；那段
+  「`ref_rev` 是关联模型也要更新的权威来源，缺一条边就是某个设计实例静默不重生成」的注释按新口径改写
+  （摄入形态仍维护、仍进补偿队列，只是理由从「正确性」换成「别让 UI 看到半张表」）。
+- **`manual_update.rs`**：生产侧唯一反查入口 `fetch_ref_rev_edges` 在读透形态 `ensure!` 报错。**这一条是
+  D2 的安全前提**——不维护之后查出来的空集与「真的没有引用者」长得一样，静默返回空集就是漏算。报错让
+  调用方走既有退化路：`resolve_unit_rollup` 置 `cascade_deferred` + 告警，`expand_live_reverse_cascade`
+  让那条工作项失败，两条都看得见。`fetch_ref_rev_edges_on` 保持纯函数，测试照旧直接用它。
+- **源码钉** `ref_rev_is_a_ui_convenience_and_never_answers_root_selection`：默认窗口规划器全文无反查、
+  维护前必须先问形态、反查入口必须有 `is_read_through()` + `ensure!`。三条钉在一起看才成立。
+- **没动**（等 P4 把文件表反查接进规划器）：老规划器的 `resolve_unit_rollup` / `direct_root_allowed` 与
+  CATA 级联执行器 `expand_live_reverse_cascade` 仍读 `ref_rev`。先删读点等于把能力从老路上拿掉而新路
+  还没有；它们今天的可达性也已经很窄（direct 下 DESI 走窗口规划器、CATA 没有数据批次），且有 D3 兜底。
+  `docs/2026-09-04_model-cascade-update-inventory.md` #4 / #5 一并留到 P4。`fast_delete` 清库表单里的
+  `ref_rev` 照旧保留——它是 `pe` 的边，与本决策无关。
+- 验证：`cargo test --lib --features http_api` **1751 passed / 0 failed / 115 ignored**；两份 .rs rustfmt
+  干净。**未 live**：默认形态下改一个 SCOM 参数只有引用它的根重算，那条验收属于 P4，本 ADR 不认领。
+
 ### `sync_total_async_threaded` 真退役：基线摄入只剩一个按文件的入口（`versioned_db::baseline_ingest`）
 
 用户拍板「真退役」（承接同日「为什么还在用 sync_total_async_threaded」的答复；方案

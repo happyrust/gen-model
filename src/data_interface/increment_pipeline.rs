@@ -1158,13 +1158,19 @@ impl IncrementPipeline {
         }
         warnings.extend(persist_result?);
 
-        // ADR-003 B1-emit: 维护失败可进持久补偿队列；补偿也落不下时不推进水位。
+        // ADR-003 B1-emit / ADR-063：`ref_rev` **只在摄入形态维护，且只服务 UI**。
         //
-        // 失败不能只留一句 warning。`ref_rev` 是「关联模型也要更新」的权威来源，缺一条边
-        // 就是某个设计实例静默不重生成；而「靠后续触及 / 全量重建自愈」里没有任何一步是
-        // 自动发生的——那条边可能到下一次有人手工跑全量重建为止都不存在。所以把这批引用者
-        // 记进持久补偿队列，走与其它副作用同一条重试通道。
-        if let Err(e) = StageTimings::measure(
+        // 它曾是「关联模型也要更新」的权威来源，所以维护失败要进持久补偿队列、补偿也落不
+        // 下就不推进水位。ADR-063 把这个口径降了：反向查询的权威源是**文件里的引用表**
+        // （e3d-io `referrers_of`），选根一行都不读 `ref_rev`。留下的维护只为属性面板那类
+        // UI 便利，所以失败仍进补偿队列（口径不变，别让 UI 悄悄看到半张表），但读透形态
+        // 整个不跑——那一档本来就没有第二份事实要维护。
+        //
+        // 跳过之后**不许**有人把「索引没维护」读成「没有引用者」：`fetch_ref_rev_edges`
+        // 在同一形态下直接报错，调用方走既有的 `cascade_deferred` 退化路（见 ADR-063 D3）。
+        if crate::options::data_face().is_read_through() {
+            timings.reverse_index = std::time::Duration::ZERO;
+        } else if let Err(e) = StageTimings::measure(
             &mut timings.reverse_index,
             Self::maintain_reverse_index(&range_eles),
         )

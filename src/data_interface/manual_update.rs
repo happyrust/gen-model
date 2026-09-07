@@ -1377,9 +1377,19 @@ async fn fetch_ref_rev_edges_on(
     Ok(edges)
 }
 
+/// 生产侧的反查入口。**读透形态直接报错，不返回空集**（ADR-063 D3）。
+///
+/// 那一档不维护 `ref_rev`（`increment_pipeline` 跳过 `maintain_reverse_index`），查出来的
+/// 空集与「这个元素真的没有引用者」长得一模一样——而后者会让引用它的根静默不重生成。
+/// 报错让调用方走既有的退化路：`resolve_unit_rollup` 置 `cascade_deferred`、
+/// `expand_live_reverse_cascade` 让那条工作项失败，两条都是看得见的。
 async fn fetch_ref_rev_edges(
     seeds: &HashSet<RefnoEnum>,
 ) -> anyhow::Result<Vec<(RefnoEnum, RefnoEnum)>> {
+    anyhow::ensure!(
+        !crate::options::data_face().is_read_through(),
+        "ref_rev 在读透形态下不维护（ADR-063），不能当反向查询的源；反查请走文件引用表"
+    );
     fetch_ref_rev_edges_on(&SUL_DB, seeds).await
 }
 
@@ -3439,6 +3449,42 @@ pub(crate) fn fill_batch_session_times(
     );
 }
 
+/// [`AiosDBManager::initialize_project_sys_metadata`] 对一个 SYS 元数据库的回执。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SysMetadataBaseline {
+    pub dbnum: u32,
+    pub db_type: String,
+    pub file_name: String,
+    /// `Some(元素数)` = 本次建了基线；`None` = 已有水位、跳过（增量归 watcher）。
+    pub elements: Option<usize>,
+}
+
+/// SYS 元数据候选的执行顺序：SYS 五类（SYST / COMM / MISC / GLB / GLOB）先、DICT 后、其余类型不要；
+/// 同一档内按 dbnum 升序，结果与扫描顺序无关。DICT 排在 SYS 之后是沿用 legacy 引导的两相顺序，
+/// 排在 DESI 之前是硬依赖（`UdaKeyMap`）。
+fn sys_metadata_candidates<'a>(
+    candidates: impl IntoIterator<Item = &'a FileCandidate>,
+) -> Vec<&'a FileCandidate> {
+    let rank = |db_type: &str| -> Option<u8> {
+        if db_type.eq_ignore_ascii_case("DICT") {
+            Some(1)
+        } else if COLD_START_DB_TYPES
+            .iter()
+            .any(|sys| sys.eq_ignore_ascii_case(db_type))
+        {
+            Some(0)
+        } else {
+            None
+        }
+    };
+    let mut ordered: Vec<(u8, &FileCandidate)> = candidates
+        .into_iter()
+        .filter_map(|cand| rank(&cand.db_type).map(|rank| (rank, cand)))
+        .collect();
+    ordered.sort_by_key(|(rank, cand)| (*rank, cand.db_num));
+    ordered.into_iter().map(|(_, cand)| cand).collect()
+}
+
 impl AiosDBManager {
     /// Idempotently establish the current-file baseline for one project dbnum.
     ///
@@ -3484,6 +3530,74 @@ impl AiosDBManager {
             cand.file_latest_sesno,
         )
         .await
+    }
+
+    /// 把项目的 SYS 元数据库（SYST / COMM / MISC / GLB / GLOB 与 DICT）里**还没建立水位的**那些
+    /// 建一次基线——顺序 SYS 五类 → DICT（`UdaKeyMap` 要 DICT 先落，DESI 的 `ATT_UDA` 才接得上）。
+    ///
+    /// SYS 元数据是初始化的一部分，不是一道单独的引导：服务启动的首轮重扫把它们当普通库入队首载
+    /// （`initialization_phase` 的 meta 相），之后由 watcher 按会话增量追。规格工具
+    /// （`bin/initialize_ams_dbnums`、l3 套件的空店引导、`Invoke-SiteDbnumParse.ps1`）不起服务、直接
+    /// 点名建设计库基线，这里给它们**同一条路**——与首载走的是同一个 `initialize_dbnum_baseline`。
+    /// 2026-09-07 起替代 `bin/sync_sys_only` / `database::bootstrap_sys_metadata`（那两样是 legacy
+    /// 全量同步留下的最后一截壳）。
+    ///
+    /// 已经有水位的库**跳过**：它们的后续会话归 watcher 增量，不在这里追；这条路只负责「从没解析过」。
+    pub async fn initialize_project_sys_metadata(
+        &self,
+        project: &str,
+    ) -> anyhow::Result<Vec<SysMetadataBaseline>> {
+        let project_dir = resolve_project_root(&self.db_option, project)
+            .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
+        let mut warnings = Vec::new();
+        let mut duplicate_paths = BTreeMap::new();
+        let candidates = self.scan_project_candidates(
+            project,
+            &project_dir,
+            &UpdateScope::unrestricted(),
+            &mut warnings,
+            &mut Vec::new(),
+            &mut duplicate_paths,
+        );
+        let mut outcomes = Vec::new();
+        for cand in sys_metadata_candidates(candidates.values().flatten()) {
+            let applied = DbnumState::applied_sesno(cand.db_num).await?;
+            if applied > 0 {
+                outcomes.push(SysMetadataBaseline {
+                    dbnum: cand.db_num,
+                    db_type: cand.db_type.clone(),
+                    file_name: cand.file_name.clone(),
+                    elements: None,
+                });
+                continue;
+            }
+            let elements = self
+                .initialize_dbnum_baseline(
+                    project,
+                    cand.db_num,
+                    &cand.file_name,
+                    &cand.path,
+                    cand.extract_parent.as_deref(),
+                    &cand.db_type,
+                    cand.file_latest_sesno,
+                )
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(
+                        "SYS 元数据基线失败 {} dbnum={} ({}): {error:#}",
+                        cand.file_name,
+                        cand.db_num,
+                        cand.db_type
+                    )
+                })?;
+            outcomes.push(SysMetadataBaseline {
+                dbnum: cand.db_num,
+                db_type: cand.db_type.clone(),
+                file_name: cand.file_name.clone(),
+                elements: Some(elements),
+            });
+        }
+        Ok(outcomes)
     }
 
     /// 给一个从未解析过的 dbnum 补一次全量基线，并把水位与生成工作原子收口。
@@ -6779,6 +6893,50 @@ mod tests {
         );
     }
 
+    /// SYS 元数据的引导顺序：SYS 五类先、DICT 后（`UdaKeyMap` 要 DICT 先于 DESI 落）、
+    /// 设计 / 目录库不进这条路；同档按 dbnum 升序，与扫描顺序无关。
+    #[test]
+    fn sys_metadata_candidates_take_sys_then_dict_and_nothing_else() {
+        fn cand(db_num: u32, db_type: &str) -> FileCandidate {
+            FileCandidate {
+                project: "AvevaMarineSample".into(),
+                path: PathBuf::from(format!("ams{db_num}_0001")),
+                file_name: format!("ams{db_num}_0001"),
+                db_type: db_type.into(),
+                db_num,
+                file_latest_sesno: 1,
+                file_size: 0,
+                file_modified_at: None,
+                frozen: None,
+                extract_parent: None,
+            }
+        }
+        let scanned = vec![
+            cand(7997, "DESI"),
+            cand(6672, "DICT"),
+            cand(8191, "SYST"),
+            cand(212, "CATA"),
+            cand(1529, "dict"),
+            cand(8189, "MISC"),
+            cand(8190, "COMM"),
+            cand(5001, "PROP"),
+        ];
+        let ordered: Vec<(u32, &str)> = sys_metadata_candidates(scanned.iter())
+            .into_iter()
+            .map(|cand| (cand.db_num, cand.db_type.as_str()))
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                (8189, "MISC"),
+                (8190, "COMM"),
+                (8191, "SYST"),
+                (1529, "dict"),
+                (6672, "DICT"),
+            ]
+        );
+    }
+
     /// 基线只吃**点名的那一个文件**：叶子基线冻结在本轮复核过的 `file_latest_sesno`，父层补缺
     /// 取母库最新（`None`）。legacy 时代靠一份受限配置（`included_db_files = [本文件]`）去约束
     /// 全量同步壳；壳退役后这条纪律直接长在入参上——这里钉两个调用点的形状。
@@ -8373,6 +8531,46 @@ mod tests {
         assert!(rows.contains(&(r(50), target)));
         assert!(rows.contains(&(r(50), r(70))));
         assert_eq!(rows.len(), 3);
+    }
+
+    /// ADR-063：`ref_rev` 只是 UI 便利，不是正确性依赖。三条钉在一起看才成立——
+    ///
+    /// D1 选根不读它（默认窗口规划器全文没有反查）；D2 读透形态不维护它；
+    /// D3 读透形态下**读它要报错**，绝不返回空集——空集与「真的没有引用者」长得一样，
+    /// 而后者会让引用它的根静默不重生成。少了 D3，D2 就是个静默漏算的开关。
+    #[test]
+    fn ref_rev_is_a_ui_convenience_and_never_answers_root_selection() {
+        let planner = include_str!("window_root_plan.rs");
+        for forbidden in ["<-ref_rev", "->ref_rev", "ref_reversal", "FROM ref_rev"] {
+            assert!(
+                !planner.contains(forbidden),
+                "默认窗口规划器不许反查 ref_rev（ADR-063 D1）：{forbidden}"
+            );
+        }
+
+        let pipeline = include_str!("increment_pipeline.rs");
+        let guarded = pipeline
+            .find("if crate::options::data_face().is_read_through() {")
+            .expect("反向索引维护必须先问形态（ADR-063 D2）");
+        let maintain = pipeline
+            .find("Self::maintain_reverse_index(&range_eles)")
+            .expect("维护调用还在");
+        assert!(
+            guarded < maintain,
+            "读透形态必须在调用之前就跳过维护（ADR-063 D2）"
+        );
+
+        let body = include_str!("manual_update.rs")
+            .split_once("async fn fetch_ref_rev_edges(")
+            .expect("生产侧反查入口还在")
+            .1
+            .split_once("\n}\n")
+            .expect("函数有结尾")
+            .0;
+        assert!(
+            body.contains("is_read_through()") && body.contains("ensure!"),
+            "读透形态下反查必须报错而不是返回空集（ADR-063 D3）：{body}"
+        );
     }
 
     #[test]

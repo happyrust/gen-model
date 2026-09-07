@@ -213,6 +213,17 @@ GETWORK 刷新路径不调引用表。所以 core 里「联动查询的更新处
 - **验收**：默认形态（`spawned-mem` + `read-through` + direct）下改一个 SCOM 参数的 CATA 窗口，只有引用它的根重算——
   **live**，不只靠 `mem://`。
 
+> **落地（2026-09-07，部分）**：ADR-063 已写
+> （`docs/adr/ADR-063-ref-rev-is-a-ui-convenience-not-a-correctness-dependency.md`），D1 / D2 / D3 已实施：
+> 默认窗口规划器全文无反查（源码钉）；`maintain_reverse_index` 与补偿入队在读透形态整段跳过；
+> **生产侧反查入口 `fetch_ref_rev_edges` 在读透形态直接报错**——这一条是 D2 的安全前提，不维护之后
+> 空集与「真的没有引用者」长得一样，静默返回就是漏算，报错让调用方走既有的 `cascade_deferred` 退化路。
+> 源码钉 `ref_rev_is_a_ui_convenience_and_never_answers_root_selection` 把三条一起盯住；全库 1751 passed。
+>
+> **没动**：`resolve_unit_rollup` / `direct_root_allowed` / `expand_live_reverse_cascade` 三个读点仍读
+> `ref_rev`——换成文件表并集是 P4 那条通用一跳的活，那条还没接，先删读点等于把能力从老路拿掉而新路
+> 还没有。inventory #4 / #5 的改口径、以及上面那条 live 验收，一并留到 P4 落地之后。
+
 合计 **约 2 周**；P0–P3 是主线（把 #4 补上），P4–P5 是把新路与老路合成一条。
 
 ## 4. 需要拍板
