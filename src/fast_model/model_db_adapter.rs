@@ -581,13 +581,60 @@ pub(crate) async fn publication_request_with_timeout<T>(
         .map_err(|_| anyhow::anyhow!("model publication database request timed out; retain result and reconcile database ACK before replay"))?
 }
 
-/// Rehydrate only committed structured rows; no E3D reads and no SQL writes.
-/// Primary-key ranges keep both result frames and work per page bounded.
+/// 读库镜像与换进内存之间被并发提交插了队：镜像已旧，重读 [`RESTORE_ATTEMPTS`] 次仍撞上
+/// 就抛这个，交给调用方推迟（收口每轮都会重新驱动）。
+#[derive(Debug)]
+pub struct ProjectionRestoreConflict {
+    pub dbnum: u32,
+    pub attempts: usize,
+}
+
+impl std::fmt::Display for ProjectionRestoreConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "model projection restore for dbnum {} lost the race with concurrent memory projection commits {} times; the database image was stale and was not swapped in",
+            self.dbnum, self.attempts
+        )
+    }
+}
+
+impl std::error::Error for ProjectionRestoreConflict {}
+
+/// 读库镜像撞上并发提交时原地重读几次。再撞就不占着收口这一轮了。
+const RESTORE_ATTEMPTS: usize = 3;
+
+/// 用库里已提交的行整体换掉某个库的进程内投影。
+///
+/// 读镜像要翻很多页、页与页之间全是 await，而「只写内存」的按需生成同时还在往同一个库
+/// 提交（`model_read_route` R2）。所以取镜像**之前**先记下提交纪元，换进去时由
+/// [`ModelMemoryStore::restore_dbnum`] 校验：纪元变了就重读，不拿旧镜像盖掉那些只在内存
+/// 里的记录。
 pub async fn restore_projection_on(
     db: &Surreal<Any>,
     store: &ModelMemoryStore,
     dbnum: u32,
 ) -> anyhow::Result<()> {
+    for _ in 0..RESTORE_ATTEMPTS {
+        let epoch = store.commit_epoch(dbnum);
+        let (records, receipts) = read_published_projection_on(db, dbnum).await?;
+        if store.restore_dbnum(dbnum, records, receipts, epoch) {
+            return Ok(());
+        }
+    }
+    Err(ProjectionRestoreConflict {
+        dbnum,
+        attempts: RESTORE_ATTEMPTS,
+    }
+    .into())
+}
+
+/// Rehydrate only committed structured rows; no E3D reads and no SQL writes.
+/// Primary-key ranges keep both result frames and work per page bounded.
+async fn read_published_projection_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<(Vec<ProjectedGeometry>, Vec<(RefNo, RootReceipt)>)> {
     #[derive(serde::Deserialize)]
     struct GeometryRow {
         id: surrealdb::RecordId,
@@ -685,8 +732,7 @@ pub async fn restore_projection_on(
             ));
         }
     }
-    store.restore_dbnum(dbnum, records, receipts);
-    Ok(())
+    Ok((records, receipts))
 }
 
 async fn persist_root_chunks_impl(

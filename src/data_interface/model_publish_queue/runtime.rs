@@ -1844,14 +1844,11 @@ pub async fn finish_ready_initializations(
             report_error(r, "finalization", 0, &message);
             if is_connection_error(&message) {
                 pause_for_reconcile(r, &message);
-            } else if crate::surreal_retry::is_retryable_surreal_write_error(&message) {
-                // 收口的每一步都是幂等的、由 `finish_candidates` 每轮重新驱动：乐观冲突
-                // 只说明这一轮跟别的写者撞上了，下一轮再来即可。以前这里跟语法错误一样
-                // 直接暂停消费者、等人工 resume——全 DESI 初始化就是这样停在 `consumer_paused`。
+            } else if finalization_defers(error) {
                 r.finalization_conflict_deferrals
                     .fetch_add(1, Ordering::Relaxed);
                 println!(
-                    "[model-publish] 收口撞上乐观冲突，推迟到下一轮重试（不暂停消费者）：{message}"
+                    "[model-publish] 收口撞上并发写者，推迟到下一轮重试（不暂停消费者）：{message}"
                 );
             } else {
                 pause_consumer(r, &message);
@@ -1860,6 +1857,20 @@ pub async fn finish_ready_initializations(
     }
     result
 }
+/// 收口这一轮的失败该「推迟到下一轮」而不是暂停消费者。收口每一步都幂等、由
+/// `finish_candidates` 每轮重新驱动，所以撞上别的写者不必惊动人工：
+///
+/// - 乐观冲突：这一轮跟别的写者撞上了。以前这里跟语法错误一样直接暂停消费者等人工
+///   `resume`——全 DESI 初始化就是这样停在 `consumer_paused` 的。
+/// - [`model_db_adapter::ProjectionRestoreConflict`]：读库镜像那几秒里有「只写内存」的
+///   按需生成往同一个库提交过，镜像已旧、没敢换。下一轮重读即可。
+pub(super) fn finalization_defers(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<model_db_adapter::ProjectionRestoreConflict>()
+        .is_some()
+        || crate::surreal_retry::is_retryable_surreal_write_error(&format!("{error:#}"))
+}
+
 async fn finish_ready_initializations_inner(
     mgr: &crate::data_interface::tidb_manager::AiosDBManager,
 ) -> anyhow::Result<()> {

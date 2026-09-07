@@ -1133,6 +1133,28 @@ fn publication_barrier_recovers_exact_plan_and_holds_unknown_write() {
     assert_eq!(q.state(&e.job_id), Some(TaskState::UnknownHold));
 }
 
+/// 收口撞上并发写者只该推迟到下一轮，撞上真错误才暂停消费者。恢复投影时被「只写内存」
+/// 的按需生成插队（镜像变旧、没敢换）属于前者——每一步都幂等，下一轮重读就是了。
+#[test]
+fn a_stale_projection_restore_defers_the_finalization_instead_of_pausing() {
+    use super::runtime::finalization_defers;
+    use crate::fast_model::model_db_adapter::ProjectionRestoreConflict;
+
+    let conflict = anyhow::Error::from(ProjectionRestoreConflict {
+        dbnum: 7997,
+        attempts: 3,
+    });
+    assert!(finalization_defers(&conflict));
+    assert!(
+        finalization_defers(&conflict.context("initialization finalization")),
+        "外面裹了一层 context 也得认得出来"
+    );
+
+    assert!(!finalization_defers(&anyhow::anyhow!(
+        "committed projection is missing structured recovery data in inst_relate"
+    )));
+}
+
 /// 一批根共用一次 fsync：逐根 `begin_publication_deferred` 不落盘，发本组第一条 SQL
 /// 之前一次 `barrier` 覆盖整组。重开日志后三根都得是 UnknownHold（写意图确实落了盘），
 /// 而这一组只多付一次 `file_syncs`。

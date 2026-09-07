@@ -196,10 +196,18 @@ struct ScopeState {
     receipts: BTreeMap<i64, RootReceipt>,
     /// 每个库投影过的最高源会话。单调，只涨不落——它护的是「旧会话不许盖新会话」。
     published_sesno: BTreeMap<u32, u32>,
+    /// 每个库的提交纪元：本作用域里凡动了该库的几何或回执就 +1。
+    /// [`ModelMemoryStore::restore_dbnum`] 靠它判断「读库那几秒里有没有人提交过」。
+    commit_epochs: BTreeMap<u32, u64>,
 }
 
 impl ScopeState {
+    fn bump_epoch(&mut self, dbnum: u32) {
+        *self.commit_epochs.entry(dbnum).or_default() += 1;
+    }
+
     fn insert(&mut self, record: ProjectedGeometry) {
+        let dbnum = record.dbnum;
         self.remove(&record.record_id);
         for &ancestor in &record.ancestors {
             self.by_ancestor
@@ -219,10 +227,12 @@ impl ScopeState {
             .or_insert(record.source_sesno);
         *sesno = (*sesno).max(record.source_sesno);
         self.geometries.insert(record.record_id.clone(), record);
+        self.bump_epoch(dbnum);
     }
 
     fn remove(&mut self, record_id: &str) -> Option<ProjectedGeometry> {
         let record = self.geometries.remove(record_id)?;
+        self.bump_epoch(record.dbnum);
         for ancestor in &record.ancestors {
             if let Some(bucket) = self.by_ancestor.get_mut(ancestor) {
                 bucket.remove(record_id);
@@ -276,6 +286,7 @@ impl ScopeState {
                 .or_insert(receipt.source_sesno);
             *sesno = (*sesno).max(receipt.source_sesno);
             self.receipts.insert(packed_refno(root), receipt);
+            self.bump_epoch(root.dbno());
         }
     }
 
@@ -338,16 +349,34 @@ impl ModelMemoryStore {
             .unwrap_or_default()
     }
 
+    /// 当前投影里某个库的提交纪元，配合 [`Self::restore_dbnum`] 用。
+    pub fn commit_epoch(&self, dbnum: u32) -> u64 {
+        self.read()
+            .get(&ProjectionScope::Current.key())
+            .and_then(|state| state.commit_epochs.get(&dbnum).copied())
+            .unwrap_or(0)
+    }
+
     /// Restore a complete published database image without executing generation.
     /// The replacement is atomic to all readers of the process projection.
+    ///
+    /// `expected_epoch` 是读库之前 [`Self::commit_epoch`] 的取值。读库要翻很多页、页与页
+    /// 之间全是 await，而「只写内存」的按需生成同时还在往同一个库提交（`model_read_route`
+    /// R2）。纪元变了就说明这份镜像已经旧了：**不换**，返回 `false` 让调用方重读——照换
+    /// 的话那些只在内存里的记录会被无声抹掉，库里也没有它们。
+    #[must_use = "换不进去要重读镜像，不能当成已恢复"]
     pub fn restore_dbnum(
         &self,
         dbnum: u32,
         records: Vec<ProjectedGeometry>,
         receipts: Vec<(RefNo, RootReceipt)>,
-    ) {
+        expected_epoch: u64,
+    ) -> bool {
         let mut scopes = self.write();
         let state = scopes.entry(ProjectionScope::Current.key()).or_default();
+        if state.commit_epochs.get(&dbnum).copied().unwrap_or(0) != expected_epoch {
+            return false;
+        }
         let old = state
             .geometries
             .values()
@@ -372,6 +401,7 @@ impl ModelMemoryStore {
             *session = (*session).max(receipt.source_sesno);
             state.receipts.insert(packed_refno(root), receipt);
         }
+        true
     }
 
     /// 一个生成根名下、指定库的已投影几何身份。旧 `existing_geometry_ids` 的内存版。
@@ -659,6 +689,57 @@ mod tests {
                 .geometry_ids_of_root(ProjectionScope::Current, 7997, RefNo::new(7997, 999))
                 .is_empty()
         );
+    }
+
+    /// 读库镜像的那几秒里，「只写内存」的按需生成往同一个库提交了一条——旧镜像不许换
+    /// 进来。照换的话那条记录内存里没了、库里也没有（它本来就不落库），无声消失。
+    #[test]
+    fn a_stale_database_image_is_refused_after_a_concurrent_memory_commit() {
+        let store = store();
+        let root = RefNo::new(7997, 100);
+        // 库里已提交的那份镜像（读库时看到的）。
+        let epoch = store.commit_epoch(7997);
+        let image = vec![record("a", RefNo::new(7997, 1), root, 7997)];
+
+        // 读库翻页期间，按需生成把 "b" 提交进内存投影。
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![record("b", RefNo::new(7997, 2), root, 7997)],
+                ..ProjectionCommit::default()
+            }],
+        );
+        assert_ne!(store.commit_epoch(7997), epoch, "提交必须推进纪元");
+
+        assert!(
+            !store.restore_dbnum(7997, image.clone(), vec![], epoch),
+            "纪元已变，旧镜像不许换进来"
+        );
+        assert_eq!(
+            store.records_of_root(ProjectionScope::Current, root).len(),
+            1,
+            "被拒的恢复不许动投影，按需生成那条得还在"
+        );
+
+        // 别的库的提交与这个库无关，不该把它的恢复挡下来。
+        let epoch = store.commit_epoch(7997);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![record("c", RefNo::new(8000, 3), RefNo::new(8000, 100), 8000)],
+                ..ProjectionCommit::default()
+            }],
+        );
+        assert!(
+            store.restore_dbnum(7997, image, vec![], epoch),
+            "8000 的提交不该挡住 7997 的恢复"
+        );
+        let ids = store
+            .records_of_root(ProjectionScope::Current, root)
+            .into_iter()
+            .map(|record| record.record_id)
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["a".to_string()], "换进来之后就是库里那一份");
     }
 
     /// 删掉一条记录，祖先索引跟着收干净——留着空桶等于按根查还会捞出已删的 id。
