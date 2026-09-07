@@ -246,6 +246,9 @@ durable 落定」（直写路径 `applied` ⇒ 尾事务已提交），`model_st
       warning。`cata_closure.rs` 本体未改（`preload_cata_for_roots` 签名够用）。单测 3 条：`cata_ref_rev_upsert_carries_roots_and_keeps_the_retry_budget` /
       `drain_dispatches_cata_ref_rev_instead_of_abandoning_it` / `cata_ref_rev_missing_is_a_warning_not_a_failure`。
       lib 串行：1397 = 1293 绿 / 8 红（基线同名）/ 96 ignored。未做：live 验证（要 8009 + 目录库）。
+      **2026-09-07 退役（ADR-064 Q2）**：CATA 依赖行改由 `cata_dependency::persist_cata_dependencies` 排在 DESI 块与水位
+      之前落（ADR-064 D5），`apply_one` 不再入队；`SideEffectKind::CataRefRev` 只为收口旧行，`/health` 不再报这一档；
+      上面三条单测换成 `cata_ref_rev_is_retired_and_legacy_rows_are_only_settled`。
 - [x] T122 [P] `GEN/src/surreal_retry.rs`：`execute_model_write`（`:185`）、`execute_generation_preload`（`:197`）、
       `execute_model_scoped_delete`（`:209`）删 `active_staging_writes()` 路由，只留直写 + 冲突重试；
       `execute_generation_preload` 若与 `execute_surreal_checked` 等价则合并并改调用点（`fast_model/*`、`cata_closure`、

@@ -1,6 +1,16 @@
 
 -- DEFINE FIELD refnos ON TABLE his_pe TYPE set<record<pe>>;
 
+-- pe 按库、按库+noun 的计数/取行索引（2026-09-06 全 AMS 全量实测：pe 58 万行时
+-- `SELECT count() FROM pe WHERE dbnum = X GROUP ALL` 无索引全表扫 2.8 s，基线每库要问 5 次；
+-- 建索引后 0.05 s，`dbnum = X` 单独走前缀、`dbnum = X AND noun = 'WORL'` 走整键，
+-- 在 58 万行上建索引一次 14 s）。
+-- **注意 SurrealDB 2.1.4 的一个坑**：`count() … GROUP ALL` 命中索引走 "Iterate Index Count" 时
+-- 会把索引键之外的 AND 谓词整个丢掉（实测 `dbnum = 7354 AND noun = 'BRAN'` 在只有 dbnum 索引时
+-- 回 3862 = 该库全部行数）。所以：对 pe 的 count()+GROUP ALL 只许用 dbnum / dbnum+noun 这两种
+-- 恰好被本索引整键覆盖的谓词组合；再多一个谓词就别用 count()，改取行再数。
+DEFINE INDEX IF NOT EXISTS pe_dbnum_noun ON pe FIELDS dbnum, noun;
+
 REMOVE FUNCTION fn::ancestor;
 -- 考虑到版本的原因，需要使用到历史祖先的记录，所以需要使用到这个函数
 DEFINE FUNCTION fn::ancestor($r: record) {

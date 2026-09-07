@@ -1,4 +1,12 @@
+/// CATA 依赖闭包按需入库：每一批 DESI 写回都把它依赖的目录元素一起写进库（plan 2026-09-06 §3 D5–D7）。
+pub mod cata_dependency;
 pub mod db_model;
+pub mod dbnum_stats;
+/// 元素数据行的批量渲染器：先删后插、每表一条 `INSERT IGNORE`（plan 2026-09-06 §3 D1/D2）。
+/// rocksdb 形态下基线与增量唯一的写法出口。
+pub mod element_batch;
+/// 数据面事务切块上限（plan 2026-09-06 §3 D3）：2 MiB / 5000 行 / 1000 元素，可配。
+pub mod tx_limits;
 // pub mod spatial_model;
 pub mod interface;
 pub mod structs;
@@ -53,6 +61,14 @@ pub mod frozen_source;
 /// e3d-io 净窗口收集器：数据面增量窗口的默认底座（替代 old-pdms-io `net_window`）。
 pub mod e3d_collector;
 
+/// 数据面读透：读透形态（`data_face = read-through`）下 `pe` / `ATT_*` / `pe_owner` 行的唯一
+/// 来源——生成一根顺手写透子树、`element/ensure` 按需读透；行形状与基线 / 增量同一份。
+pub mod read_through;
+
+/// Complete file-side element attributes (system, explicit and Dictionary UDA)
+/// plus the bounded read-through backup queue used by the HTTP API.
+pub mod element_attributes;
+
 /// 文件观察登记：监控目录、文件名→全路径、文件头缓存（替代 old-pdms-io `PdmsWatcher` 的状态部分）。
 pub mod db_file_registry;
 
@@ -61,11 +77,26 @@ pub mod file_sync;
 
 pub mod dbnum_state;
 
+/// 每库数据水位与模型水位的唯一三态判决（ADR-060 D9/M8）。
+pub mod dbnum_consistency;
+
+/// 每库模型取数源的唯一判据：rocksdb 还是进程内投影（plan 2026-09-06 §8 R1，共识 d-29）。
+pub mod model_read_route;
+
+/// Persistent project/namespace/data-face ownership marker for data-plane rows.
+pub mod data_face_signature;
+
 pub mod fast_delete;
 
 pub mod manual_update;
 
 pub mod mdb_membership;
+
+/// 本 MDB 的元素骨架（noun + owner + ref0 归属），进程级常驻，启动时从 e3d-io 预热。
+/// 属性不在里面——那一档实测 1.29 GiB，见模块头。
+pub mod mdb_memory_store;
+pub mod mirror_spool;
+pub mod model_publish_queue;
 
 pub mod update_scope;
 
@@ -119,6 +150,15 @@ pub mod structural_connection;
 /// `EQUI` / `ELCONN` / `CWBRAN` 到 T 端文件自带的 `STAREF` / `ENDREF` 反向表点查引用它的电缆，
 /// 把电缆的生成根并进 `touched`。只查本库；开关默认关。
 pub mod cable_endpoint;
+
+/// CATA 窗口 S→T 的变动目录件集合 + T 端反向引用表清单——目录反向级联的触发源
+/// （ADR-058 D2；2026-09-06 计划 P2）。文件侧纯函数，不碰库。
+pub mod cata_cascade_window;
+
+/// 反向引用查询（「联动查询」）：目录件变了 → 谁引用它 → 上卷到生成根。照 core
+/// `DB_MDB::findElements` 逐库点查文件自带的反向引用表，不读 `ref_rev`
+/// （2026-09-06 计划 P3；共识 d-635 / d-665）。文件侧纯函数，不碰库。
+pub mod reverse_reference;
 
 pub mod model_update_pending;
 
@@ -394,5 +434,4 @@ mod legacy_parse_pdms_db_guard {
             "基线编排退回了 legacy 解析器的中间态：{leaks:#?}"
         );
     }
-
 }

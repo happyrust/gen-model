@@ -10,6 +10,10 @@
 > `SideEffectCompensator::enqueue_cata_ref_rev`（spec 035 T126），`missing > 0` 记 warning，不拦模型、不拦水位；
 > `prepare_required_dependencies` 看门狗已删（T121）。监听限定域的**阶段顺序**（`Meta → Design（内含 CATA 引用闭包）→ Model`）、
 > 权威依赖清单、部分解析不推进 CATA 水位、缓存新鲜度与 epoch 纪律不变。
+>
+> **2026-09-07 对照（ADR-064 Q2）**：上面那条补偿任务 `enqueue_cata_ref_rev` 也退役了——CATA 依赖行改由
+> `cata_dependency::persist_cata_dependencies` 排在 DESI 块与水位**之前**落（`pe.dependency = true`，ADR-064 D5），
+> 水位之后不再有 CATA 落库；`preload_cata_for_roots` / 依赖缓存 `CataDepCache` 从此没有生产调用方，只剩诊断 bin。
 
 ## 决策
 

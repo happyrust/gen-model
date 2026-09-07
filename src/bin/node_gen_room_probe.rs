@@ -263,11 +263,6 @@ async fn main() -> anyhow::Result<()> {
     let manager = AiosDBManager::init_form_config().await?;
     let project = aios_core::get_db_option().project_name.clone();
 
-    anyhow::ensure!(
-        aios_database::data_interface::cata_closure::cata_closure_enabled(),
-        "node_gen_room_probe requires AIOS_CATA_CLOSURE_MODE=on"
-    );
-    println!("CATA-MODE|on");
     for (dbnum, file_name) in BASELINE_DBS {
         let (pe, mut info) = baseline_counts(dbnum).await?;
         if pe > 0 {
@@ -393,18 +388,8 @@ async fn main() -> anyhow::Result<()> {
                 option.gen_mesh = true;
                 option.debug_refno_types = vec!["CATA".into(), "LOOP".into(), "PRIM".into()];
                 option.debug_root_refnos = Some(vec![refno.to_pdms_str()]);
-                let cata = aios_database::data_interface::cata_closure::preload_cata_for_roots(
-                    &project,
-                    &[refno.refno()],
-                    None,
-                )
-                .await?;
-                println!(
-                    "CATA-PRELOAD|root={}|parsed={}|missing={}",
-                    refno.to_pdms_str(),
-                    cata.parsed,
-                    cata.missing
-                );
+                // 目录行由该库数据批次的 CATA 依赖块在水位之前落下（ADR-064 D5），
+                // 这里不再单独预解析（`preload_cata_for_roots` 已随 ADR-064 Q2 退役）。
                 println!("GEN-CONTAINER|{}|start", refno.to_pdms_str());
                 match aios_database::fast_model::gen_all_geos_data(&option).await {
                     Ok(_) => {

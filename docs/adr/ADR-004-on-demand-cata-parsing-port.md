@@ -65,6 +65,25 @@ Q5a 的默认 On 一个字未改**。
 全量解析；`CataDbLocator` / `cata_closure_enabled` / `ensure_cata_refnos_parsed` 都还在。真正会动本 ADR 的是
 ADR-058 D1（「CATA 不解析进持久层」），那是另一条线，本次不碰。
 
+### 2026-09-07 · 惰性兜底的落库改走统一渲染器（ADR-064 Q2）
+
+`ensure_cata_refnos_parsed` 的闭包与解析不变，**落库**不再是逐元素 `UPSERT … CONTENT` + 自己攒的 owner / UDA
+replacement 批：改为 `cata_dependency::resolve_catalogue_rows_with`（同一份闭包配置，db_type 只收 CATA）+
+`persist_resolved_rows`（`element_batch` `Fresh`、`pe.dependency = true`、目录文件前移先 `Replace` 刷新）。
+「按元素完整替换」这一句从此由 ADR-064 D5 / D7 承担（已有行赢，版本前移单独刷新），不再靠 UPSERT。
+起因与证据见 ADR-064 Q2。
+
+同日随后（用户拍板「那一簇死代码现在就清掉，不等 ADR-063」）本 ADR 落地的 Phase 3 ～ 6 **整体删除**：
+Q4 的「主动预解析（生成根闭包）」（`collect_design_subtree_outbound` / `run_cata_closure_pass_for_refnos` /
+`ensure_cata_parsed_for_roots`）与「惰性兜底（resolve cache-miss）」入口 `try_lazy_cata_fallback`、Q5a 的
+`AIOS_CATA_CLOSURE_MODE` 开关、Phase 5 的开/关几何冒烟 `geo_smoke_digest` + `bin/cata_smoke`、Phase 6 的
+`(dbnum, root) → CATA ids` 依赖缓存 `CataDepCache` / `preload_cata_for_roots`（`AIOS_CATA_DEP_CACHE_PATH`）、
+以及 ADR-056 D8-A 挂上去的 `cata_ref_rev` 补偿队列。**本 ADR 仍然成立的部分**：Phase 1 的 `CataDbLocator` /
+`InMemoryCataLocator`（文件身份裁决）与 Phase 2 的部分解析 + `CataClosureResolver`（refno 级闭包引擎）——它们现在
+是 ADR-064 D5「依赖入库」的引擎，播种改为 DESI 写回批的目录链属性（不再是根子树的全部出向引用），落库经
+`element_batch`。`ensure_cata_refnos_parsed` 只剩一层薄壳给 `staging::preload`（spec 035 P3 待拆）。
+本 ADR 的状态相应改读：**Phase 1 / 2 在用（被 ADR-064 D5 承接）；Phase 3 ～ 6 已退役**。
+
 ### 2026-08-14 · 初始化主路径改为全量 CATA 阶段
 
 ADR-025 将启动初始化、回退重建和同轮稳态更新统一为

@@ -99,8 +99,12 @@ _Avoid_: 移动、迁移
 _Avoid_: 水位、sesno 水位（泛指时）
 
 **生成源版本 (Model Source Version)**：
-一个库在当前投影下用来生成模型的那一版数据：调用方显式指定的会话号 / 时刻（历史投影、增量窗口右端），或——未指定时——库文件此刻自报的最新会话。它不是应用水位：水位只说数据已摄入，生成时点不从它取；完成凭证记的是模型按哪一版生成，判「当前」看它是否**不早于**要求的版本，不判等值。
-_Avoid_: 生成水位、模型水位、把 applied_sesno 当生成时点
+一个库在当前投影下用来生成模型的那一版数据：调用方显式指定的会话号 / 时刻（历史投影、增量窗口右端），或——未指定时——库文件此刻自报的最新会话。它不是应用水位：水位只说数据已摄入，生成时点不从它取；完成凭证记的是模型按哪一版生成，判「当前」看它是否**不早于**要求的版本，不判等值。它也**不是模型水位**（ADR-060）：这一个记「这份几何按哪一版**文件**算出来的」、判不早于，那一枚记「到哪一版**数据窗口**为止数据与模型一致」、判等值；模型按文件最新生成到更新的版本时，两者取值本就不同。
+_Avoid_: 生成水位、把 applied_sesno 当生成时点、拿它当库级追平判据
+
+**模型水位 (Model Watermark)**：
+某 `dbnum` 上与应用水位并排、写在同一行（`dbnum_watermark:{dbnum}.model_sesno`）的第二枚水位：模型已经追平到哪一版**数据窗口**（ADR-060）。它是**被写下的承诺**而非查询时算出的派生量——只在某个发布同期（cohort `{dbnum}:{T}`）的全部根发布成功、该库无未安定 `gen_root` 行、且 `T <= applied_sesno` 时，由模型排空的收口在根发布 CAS **之后**写下，单调推进。永不超过应用水位；房间任务、按需 `ensure`、启动退化窗口生成的根都**不推进**它。判「这个库现在是不是最新一致」用等值：`applied_sesno > 0 且 model_sesno == applied_sesno 且无未安定根`。落后是常态不是告警（ADR-056 D1/N4）。生成根按四格分类且互不重叠：**已追平 / 还在赶（拦水位）/ 已放弃（死信或 `http_422`，不拦水位但必须并排陈述）/ 没生成过（懒生成，不拦水位）**——已放弃根若算进「还在赶」，一个坏根就让整库的灯永红且看不出被谁卡。**它是仪表不是闸门**：没有任何代码路径可以等它、轮询它、或以它为条件放行另一条链，两条链的异步性一个字不改（ADR-060 M7）。
+_Avoid_: 模型凭证下限（那是它的校验者 `settled_floor`）、生成水位、模型进度、把它当「模型有多新」的答案、拿它当同步点
 
 **数据支撑 (Data Backing)**：
 应用水位的对偶约束：`applied_sesno > 0` 时，该 `dbnum` 必须在 `pe` 里存在至少一行数据，或持有与当前应用水位相等的空基线凭据。判定用存在性查询而不是计数；通常在「基线还是增量」的路由决策上使用，启动重扫遇到水位恰好追平文件时也在入队裁决前使用，以免数值早退漏掉幽灵水位。查询失败必须上浮为批次失败或形成可见的本轮扫描失败，不得吞成「有数据」或「没有数据」中的任何一种默认值。
@@ -114,6 +118,18 @@ _Avoid_: 空库标记、零行豁免、空水位
 `applied_sesno > 0`、该 `dbnum` 在 `pe` 里零行且没有匹配空基线凭据的状态——应用水位声称落库过，库里却没有数据支撑（多由 `dbnum_info_table` 播种回填或历史解析中断留下）。处置是路由到首次导入重建基线，不从水位往后接增量；它不是文件异常，不进 `FileAnomaly`，扫描阶段也不删任何数据。
 _Avoid_: 假水位、虚水位、水位漂移
 
+**模型水位失去支撑 (Unbacked Model Watermark)**：
+模型水位的对偶约束（ADR-060 D6，形状复刻 ADR-021）：支撑值 `supported = 有未安定根 ? 0 : min(settled_floor, applied_sesno)`，`model_sesno` 与它不等就改写成它。**对账是双向的**——下调是「失去支撑」（水位比证据高），上调是「热路径漏记」（模型跑在数据前面那一次跳过、或收口前被 `clear_stale_at_process_start` 清掉那一次）；上调不是凭空盖章，`settled_floor` 就是证据、`applied_sesno` 封顶。落点在启动退化窗口那一轮，两个方向在日志与 `/dbnums` 的 `warnings` 里用**不同措辞**点名。承诺（`model_sesno`）与校验者（`startup_coverage_floors` 的 `settled_floor`）分工固定：只有前者露给读者。
+_Avoid_: 凭证不一致、模型水位漂移、把 `settled_floor` 当第二枚水位露出去、把上调当成盖章
+
+**幽灵模型水位 (Ghost Model Watermark)**：
+`model_sesno > 0` 而该 `dbnum` 的 `gen_root` 零行——水位声称模型追平过，模型面却一行记录都没有。处置是清零 + 出声，按 ADR-058 D6 走懒生成；**不删数据、不阻断、不触发重建**。它与幽灵水位不同：那一个意味着数据没了、必须重建基线，这一个只意味着模型没了，而模型本来就可以按需重新生成。
+_Avoid_: 幽灵水位（那是数据面的）、模型缺失、按幽灵水位那套处置
+
+**库一致性判决 (Dbnum Consistency Verdict)**：
+对一个 `dbnum` 回答「此刻数据与模型是否一致」的**单点结论**，三态：**一致**（应用水位已建立、模型水位与之相等、且没有「还在赶」的根，ADR-060 D4）／**落后**（前述任一不成立，附四格计数）／**不判**（没有可判等的水位对：读透形态下数据面不摄入、应用水位恒 0；或摄入形态下数据水位尚未建立）。「不判」是中性陈述，不是落后、不是告警。结论由同一行上的两枚水位与该库生成根的实时四格（已追平 / 还在赶 / 已放弃 / 没生成过）合成；「已放弃」与「没生成过」不否决结论，但必须与它**并排陈述**（ADR-060 D5）。它是读者（面板、健康页、批次回执、启动日志）唯一该消费的一致性口径——任何读者都不得自己拿水位列、凭证下限或队列计数重新拼一个。房间归属不在它的承诺范围内。
+_Avoid_: 模型追平（只说了一半）、`model_caught_up`（行内那一半的名字）、把 `settled_floor` 露出来当判决、面板自己算一致、把「不判」画成落后
+
 **重建批次 (Reinit Batch)**：
 检出文件回退后入队的数据批次，按首次导入形状（窗口 `1..file_latest_sesno`）排进同一条数据批次队列。扫描只分类入队、不删数据；worker 出队后在冻结点复核仍判回退，才执行 `wipe_dbnum_for_reinit` 整库清空（水位行清值不删行、spatial epoch 同阶段递增），随后按首次导入重新解析，应用水位随重建归零再重新建立。
 _Avoid_: 重建任务、对齐批次、realign 批次
@@ -121,6 +137,10 @@ _Avoid_: 重建任务、对齐批次、realign 批次
 **监听限定域 (Watch Scope)**：
 把增量摄入的主 DESI 数据批次收窄到指定 dbnum 的调试开关（`DbOption.toml` 的 `watch_dbnums`，命令行 `serve --watch-dbnum` 压过它）。它限制的是范围、便于调试，不是生产形态的服务边界；但**初始化启动同样受它约束**——限定时启动的数据摄入、模型凭证复核与派生工作只覆盖域内的库，未限定时启动照常覆盖全部候选库。SYS meta（SYST/DICT/GLB/GLOB）不受限；两者都没给时判定与引入前逐位相同。监听限定域不是依赖隔离域：被监听 DESI 的生成根实际引用到的 CATA 文件仍参与身份与项目优先级裁决，但 CATA 只从文件读（`ModelTarget.catalogue` 文件身份摘要与 `E3dDbResolver`），不解析进持久层。与**调试限定域 (Debug Scope)**（`--debug-dbnum`，只能从命令行来、额外带六个裁决点的链路追踪）是两个独立开关，与已被剥夺增量否决权的 `manual_db_nums` / `exclude_db_nums` 无关。三种「跳过」（MDB 范围判定 / 调试限定 / 监听限定）在日志、回执与 `/health` 上各有各的嗓音，不得混同。
 _Avoid_: 监听白名单、dbnum 过滤、增量范围（指 MDB 声明范围时）、watch 名单、服务边界（它不是）
+
+**模型增量类型限定 (Model Incremental Type Scope)**：
+把**模型增量的消费**圈到指定类型生成根的调试开关（`DbOption.toml` 的 `model_incremental_types = ["BRAN", "EQUI"]`，环境变量 `AIOS_MODEL_INCREMENTAL_TYPES=BRAN,EQUI` 压过它；不写 / 空表 = 不限类型，判定与引入前逐位相同）。它是**消费门，不是计划门**：`model_update_pending` 里只有 `regen_root` / `delete_cleanup` 两种行按 `noun` 放行，名单外类型的根照常规划、照常入队、`gen_root` 照常标 stale，只是留在队列里不被本进程认领——因此凭证不前移、重启后随退化窗口重排、名单一撤即照常消费；在计划层摘掉工作项反而是错的（不标 stale = 下一窗给陈旧几何前移凭证，且永不回补）。数据增量（窗口收集、`pe` / `ATT_*` 写回、水位推进）一律不受影响；`Transform`、`CascadeExpand`、`PostRegenAabb`、房间任务、按需 `ensure` 与 noun 未知（空）的行不看名单。与**监听限定域**（按库圈数据批次与模型工作单，动数据面）、**最小交付单元**配置 `delivery_unit_types`（决定生成根怎么选，改变根的归并）三者互不代替。护栏与监听限定同一套：启动横幅、`/health` 的 `model_incremental_types` 栏与 `model_update_pending.held_by_model_incremental_types` 计数、preview / execute 回执 `warnings`、数据窗口计划 `warnings` 按类型点名本窗暂扣的根、worker 空闲轮首次一句，都点名配置键与来源，且措辞与监听限定 / MDB 范围判定无交集。
+_Avoid_: 模型类型过滤、noun 白名单、类型筛选、MDU 限定（指 `delivery_unit_types` 时）、模型范围（指监听限定域时）
 
 **候选库文件 (Candidate Database File)**：
 监控目录里被认可为「一个 AVEVA 库文件」的物理文件：既不在扩展名/系统文件黑名单里，文件名又合 AVEVA 库命名（三位项目前缀 + 库号[ + 四位序号]，或 `<前缀>sys/com/mis`）。判定只看名字，不读文件头。人手复制的副本（`… copy`、`…_old`、带日期后缀的备份）与正本头部一字不差，只有命名规则分得开它们；把副本当候选会让同一个 `dbnum` 拿到多个候选而整库被判「同号重复」阻断。同项目主库（无后缀）与唯一 `_NNNN` 抽取是抽取树的父层与叶子，归并成一个逻辑库，不是同号重复；多个 `_NNNN` 仍是 Duplicate。自动发现与手动扫描必须共用同一个判定。
@@ -174,6 +194,14 @@ _Avoid_: 模型元数据、gen_root 表（当指概念时）、模型缓存
 
 ## 模型生成执行（Model Generation Execution）
 
+**联动更新 (Cascade Update)**：
+元素 A 变了、**A 自己以外**的模型也必须跟着重算的那些边。全仓一共十一类（容器位姿→子树、删除→子孙、改挂→新旧两根、CATA→引用它的 DESI、连接/邻居、派生几何单元、房间归属、空间树/AABB，加上明确不做的 UDA 依赖递归与 XRPNTR、以及在案未做的 `graphicsBehaviour` 中间祖先）。**唯一索引是 `docs/2026-09-04_model-cascade-update-inventory.md` §1 那张表**——新增或改动任何一条联动边，先改那张表。它不是「一次变更要重算多少东西」（那是扇出），也不是「谁是生成根」（那是上卷）。core 侧的对应物是 `change/EVALAT` 那张 noun × 属性 → 目标的规则表（`docs/evidence/2026-09-06-ida-core3d-change-evalat-cascade.md`）：owner 链上卷那一半我们全有，**引用类联动（结构连接 `CREF`↔`JOIS`/`JOIE`、孔洞反向引用）在 direct 文件窗口路径上缺**，真库普查坐实其中结构连接是洞（清单 #12，对齐计划 `docs/plans/2026-09-06-core3d-cascade-parity-dev-plan.md` C2）；0907 结构连接那一半已接线——`src/data_interface/structural_connection.rs` 从变更元素正向读、核对回指、把对端的生成根并进 `touched`（开关 `model_structural_connection_cascade` 默认关）；孔洞那一半 core 自己也只看 owner 子树成员（`DFIND` 是 dabacon 成员导航，`EVALAT` 自己没有反向引用调用），整根重生成构造性覆盖、不接；core 侧仅剩的反向尾巴是电缆两条——`CWBRAN` 的 `CLIST`、`EQUI`/`ELCONN` 的 `ELCXRF` 都是伪属性、底下是引用表反向查 `STAREF`/`ENDREF` 指向的 `CABLE`（0907 C6，证据 §8.6），同日 C8 同库版接线——`src/data_interface/cable_endpoint.rs` 到 T 端文件自带的 `STAREF` / `ENDREF` 反向表点查引用者、把电缆的生成根并进 `touched`（开关 `model_cable_endpoint_cascade` 默认关；跨库边待跨库版），电缆几何落地前几何上不显。
+_Avoid_: 级联（泛指时）、扇出、反查、依赖传播
+
+**图形行为 (Graphics Behaviour)**：
+noun 字典字段 `graphicsBehaviour`（字段号 5099119，`DB_Noun` 偏移 180），E3D 3.1 的 1931 个 noun 分布 0/1/2/3 = 1652/109/98/72。四档语义：`0` 普通可画件；`1` 几何数据容器（`LOOP` `PFACE` `PSURF` `D*`…，本身不是独立可画项）；`2` 层级容器（`WORL` `SITE` `ZONE` `ROOM` `STRU*`…，永不单独重画）；`3` 照画、但画法由应用侧专用绘制路径提供（电缆桥架 / 船体型材 / 辅助图元 / 标注 / 网格）。**只有 `1` 和 `2` 需要守卫**：全产品没有一处把它与 `3` 比较，`3` 对每个消费点都与 `0` 等价（取证见 `docs/2026-09-04_model-cascade-update-inventory.md` §2.3 / §2.5）。`3` 标出的是几何覆盖度问题，不是增量问题。
+_Avoid_: gb 标志（当指语义时）、图形忽略位、XGEOMETRY
+
 **模型生成结果 (Model Generation Outcome)**：
 某个生成根最近一次成功完成的生成结论，包括存在可绘制模型或确定没有可绘制几何。它是已经发生的成功事实，不是待重试单元；生成失败不会用失败结果覆盖它。
 _Avoid_: 生成任务状态、pending 终态、实例计数
@@ -210,6 +238,18 @@ _Avoid_: 收尾、结算、settle
 基线初始化的并行形态。并行单位是**生成根**——它本来就有 per-根锁这一现成粒度；切片（ZONE）只决定「一次把多少数据拉进来」，是内存分片单位，不决定几件事同时做（按片并行要整片等最慢的根，长尾吃掉加速比）。一片一个 `mem://` 实例，片内的根共享本片实例。根级与根内 fan-out 共用同一个几何并发闸，额度默认等于物理核数，不再各自写死宽度。
 _Avoid_: ZONE 并行、按片并行、分片并发
 
+**内存批切片 (Memory Slice)**：
+e3d 生成路径上生产端一次交给消费端的那一份内存批。装配端按源顺序收下已算完的根，攒够**任一预算**即封片交出：`model_regen_execution_group` 那一档根数（发布 cohort 宽度），或 `model_memory_slice_elements` 那一档元素数。单根不拆——根是发布的原子单位。两端隔一条**深度 1 的有界** channel（ADR-041 §8）：无界一样不阻塞，代价是内存无界，那是被否决的形态。与上一条「切片流水线」的 ZONE 切片不是一件事：那个是基线初始化的数据分片单位，这个是稳态生成路径的内存预算单位。
+_Avoid_: 分块、chunk、execution group（指内存预算时）、ZONE 切片
+
+**生成窗口 (Generation Window)**：
+生成端 worker 最多能跑在装配端前面多少根（`model_regen_execution_group`）。它同时是两件事的答案：**无栏并行**——worker 不在 cohort 边界上停下来等这一批里最慢的那根（几何负载长尾，设栏等于每批都赔上尾巴），只有队头能挡住人；**内存有界**——在飞的已生成几何最多一个窗口，加上正在攒的那一片。窗口满时 worker 把许可**还回去**再退出，由装配端滑动窗口后重新派出，绝不攥着许可等（那是 ADR-052 开篇那个容量倒置）。装配严格按源顺序，所以切片边界与 `Required` 裁决与「谁先算完」无关，`geometry_workers = 1` 逐字节复现串行路径。
+_Avoid_: 批、wave、in-flight（泛指时）、并发度（那是闸额度）
+
+**几何 CPU 执行域 (Geometry CPU Domain)**：
+几何计算跑的那个私有线程池（线程数 = 几何并发闸额度，**不是**全局 Rayon 池——那个被 `room_model` / `db_model` 的 `par_iter` 共用，宽度不归闸管，接进来就是第二套并发口径）。唯一入口 `run_gated_cpu`，只收**同步闭包**：闭包里写不出 `.await`，「攥着许可去 await 另一个过闸子任务」这条会死锁的写法在类型层就不成立。等库、等锁一律留在 async 侧，不占额度。fan-out 宽度只来自 `resident_workers(件数) = min(额度, 件数)` 个**常驻 worker 从共享队列动态领取**，不是静态均分（几何负载长尾，一块里摆两个重 BRAN 就把其余 worker 空在那儿），也不是「每件一个 task 挤信号量」。
+_Avoid_: 线程池（泛指时）、rayon 池、spawn_gated_leaf（已退役）、静态均分
+
 **insts_flat 失效协议 (insts_flat Invalidation Protocol)**：
 维护 `inst_relate.insts_flat` 这份图遍历缓存的规则：**开销与变更量成正比，不与库规模成正比**。它取代的是不带 dbnum、谓词不可索引的全表清扫——那种形态对生成根数是平方级的，实测维护开销达到它所服务的那件事的 2.9 倍。缓存本身不容置疑（它把加载从 253.3s 压到 2.73s），被否掉的是维护方式。
 _Avoid_: 平表清扫、缓存刷新、sweep（泛指时）
@@ -229,12 +269,20 @@ _Avoid_: 快照 token、冻结快照（指 `DabaconSnapshot` 时）、文件指�
 _Avoid_: 会话回放（`collect_changes`，已删）、拿第二套解析器当对拍参照、`net_window`（指 old-pdms-io 模块时）、成员补删
 
 **数据窗口直写 (Direct Window Write-back)**：
-稳态增量窗口唯一的数据写回路径（ADR-056）：`persist_latest_main_data` 按 TX_CHUNK 分块事务写属性行（幂等 UPSERT / 先删后插 / 软删 UPDATE）→ `invalidate_caches` → `maintain_reverse_index`（失败入补偿队列）→ 窗口语句批 → `finalize_attempt` 尾事务最后推进应用水位。任一块失败水位不动、整窗口按同一区间幂等重放；非水位读者可见秒级中间态，以水位为准的读者把「半个写回」视为不存在。不经任何暂存介质。
-_Avoid_: 暂存写回、journal 重放、应急直写（它已是唯一路径）、direct 模式（那是 `AIOS_DATA_READ_MODE=direct` 的生成读侧，见 ADR-053）
+稳态增量窗口唯一的数据写回路径（ADR-056）：CATA 依赖块（见「元素批」/「依赖入库」）→ `persist_latest_main_data` 按 `tx_limits` 分块事务写属性行（元素批：先删后插）→ `invalidate_caches` → `maintain_reverse_index`（失败入补偿队列）→ 窗口语句批 → `finalize_attempt` 尾事务最后推进应用水位。任一块失败水位不动、整窗口按同一区间幂等重放；非水位读者可见秒级中间态，以水位为准的读者把「半个写回」视为不存在。不经任何暂存介质。
+_Avoid_: 暂存写回、journal 重放、应急直写（它已是唯一路径）、direct 模式（那是数据面读路由的名字——2026-09-04 起不设 `AIOS_DATA_READ_MODE` 即 direct、只有显式 `=db` 才退回 legacy，见 ADR-053 / ADR-058 D8——与这条写回路径不是一回事）、逐元素 UPSERT（2026-09-06 起不是它的写法）
+
+**元素批 (Element Batch)**：
+rocksdb 形态下元素数据行（`pe` / `<NOUN>` / `ATT_UDA` / `pe_owner` 边）**唯一**的写法（`data_interface::element_batch`，plan 2026-09-06 §3 D1/D2，共识 d-29）：一块 = 前置块（Add / 墓碑自己的旧出向边）之后，「按 id 批量删边（id 区间）→ `ATT_UDA` → noun 行，再每表一条 `INSERT IGNORE`（边表 `INSERT RELATION IGNORE`）」。**`pe` 行不删**——它是图顶点，删它会级联删掉 `pe_owner` / `ref_rev` / `tubi_relate` 这些别的块、别的窗口、模型面挂在它身上的边——改为一块一条批量 `INSERT INTO pe [..] ON DUPLICATE KEY UPDATE <gen_sur_json 全部字段>` 原地整行替换。两档：`Fresh`（基线 / 父层补缺，只插、已有行赢）与 `Replace`（增量 / 依赖行版本前移）。切块上限 `tx_limits`（2 MiB / 5000 行 / 1000 元素，`DbOption` 三键可调），每笔事务带 pe 统计观测。控制面单行（水位、`gen_root`、队列、统计、`datacenter_version`、`cata_dependency_state`）不在此列，仍是尾事务 / 回执块里的点写。
+_Avoid_: 逐元素 UPSERT / UPDATE、`ATT_<noun>`（属性表名就是 noun 本身）、删 `pe` 行、`PEJson / AttJson / PERelateJson`（已退役的按表消息）
+
+**墓碑 (Tombstone)**：
+被删元素在 `pe` 上留下的那一行：`deleted = true`、`sesno` 是删除落地的会话、noun / owner / name 照基侧（`DbSet@S`）保留——`datacenter` 的 Deleted 分支、ADR-036 成员补删、`cleanup_deleted_by_pe_state` 读的都是它们。它的 `<NOUN>` / `ATT_UDA` 行与在 owner 名下的边随删除块消失（此前软删把它们留在库里）。基侧读不到时退化成只带 id / dbnum / sesno / deleted 的最小墓碑并在回执出声。
+_Avoid_: 软删（当指「只翻 pe.deleted、别的行不动」的旧写法时）、删除记录
 
 **模型凭证前移 (Credential Advance)**：
-数据窗口 S→T 提交后，对 e3d-model `plan_update(S→T)` 判定**未被触到**、已安定且落后于 T 的生成根，一条语句批量把 `gen_root.source_end_sesno` 推到 T（行上记 `credential_advanced_from`），不重生成、不动几何 / manifest / revision。护栏：候选数超过索引键数的 30%，或 `plan_update` 报 `unresolved` 非空，即整窗放弃前移、全部根照旧过期，回执记 `credential_advance_degraded`。
-_Avoid_: 凭证刷新、水位前移、模型水位、跳过生成
+数据窗口 S→T 提交后，对 e3d-model `plan_update(S→T)` 判定**未被触到**、已安定且落后于 T 的生成根，一条语句批量把 `gen_root.source_end_sesno` 推到 T（行上记 `credential_advanced_from`），不重生成、不动几何 / manifest / revision。护栏：候选数超过索引键数的 30%，或 `plan_update` 报 `unresolved` 非空，即整窗放弃前移、全部根照旧过期，回执记 `credential_advance_degraded`。它动的是**根级**凭证，与库级的**模型水位**（ADR-060）不是一回事：前移只说「这份几何到 T 为止仍然有效」，水位说「整库到 T 为止已经追平」。
+_Avoid_: 凭证刷新、水位前移、跳过生成、与模型水位混用
 
 **模型窗口意图 (Model Window Intent)**：
 数据窗口尾事务与应用水位同事务写下的模型侧工作声明：本窗口受影响根集（`plan_update` 经 `touches_roots` 判定，含搬迁两端根与被删根的 `DeleteCleanup`）及其 revision，随尾事务 upsert 进 `model_update_pending`（进程本地账本，ADR-050）。它只说「这一窗要生成什么」，不承诺已生成；eager 生成的范围就是它，其余根前移凭证后懒生成、等按需 `ensure`（ADR-056 D9）。
@@ -253,8 +301,8 @@ _Avoid_: 死信降级、跳过坏根、模型阻断
 _Avoid_: 父子边（泛指时）、`owner` 字段（`pe` 行上没有这个字段）、按 `out` 取 children
 
 **分块解析基线 (Chunked Baseline Parsing)**：
-基线是 e3d-io 的**退化窗口**（base 为空、target = 冻结目标会话），不是第二条解析路：`e3d_collector::stream_baseline` 枚举目标索引，每 `sync_chunk_size`（默认 10 万）个元素交一块给 `versioned_db::baseline::render_baseline_batches` 渲成写者消息，经有界队列交单写者 `INSERT IGNORE` 批量落库；块交出去就释放，峰值内存随块不随库。行形状（`pe` / `ATT_<noun>` / `ATT_UDA` / `pe_owner`）与增量路共用 `ElementRows`，语句动词沿用 legacy 基线的 `INSERT IGNORE`——`manual_update` 的父层补缺靠「已有行赢」保住叶子 extract 里正在改的版本，换 `UPSERT` 会改掉这条语义。它**不走提交协议**：基线不开窗口，窗口买的是原子提交与崩溃恢复，不是内存有界。2026-09-04 随 `parse_pdms_db` 退役消失的三件事：把冻结前缀整个读成一个 `Vec<u8>`（`FrozenSource::read_frozen_bytes`）、`mem://` 暂存实例与它的读路由、`member_prune` 事后裁成员（目标索引差分本身就是终态）；`pe.sesno` 从链头 0 变成元素真实的 last-touch 会话。
-_Avoid_: 暂存窗口（基线不开窗口）、全量解析 / `DbBasicData`（随 `parse_pdms_db` 退役）、按需解析（那是元件库的）
+基线是 e3d-io 的**退化窗口**（base 为空、target = 冻结目标会话），不是第二条解析路：`e3d_collector::stream_baseline` 枚举目标索引，每 `sync_chunk_size`（默认 10 万）个元素交一块给 `versioned_db::baseline::render_baseline_batches` 渲成**元素批**（`Fresh`，每条队列消息 = 一笔事务），经有界队列交单写者落库；块交出去就释放，峰值内存随块不随库。行形状与语句形状都与增量路共用（`ElementRows` + `element_batch`），`Fresh` 只 `INSERT IGNORE`——`manual_update` 的父层补缺靠「已有行赢」保住叶子 extract 里正在改的版本，换 `Replace` 会改掉这条语义。流式收集时顺手攒每个 DESI 元素的目录链引用，文件收尾一次闭包把依赖的 CATA 元素经同一条队列入库（见「依赖入库」）。它**不走提交协议**：基线不开窗口，窗口买的是原子提交与崩溃恢复，不是内存有界。2026-09-04 随 `parse_pdms_db` 退役消失的三件事：把冻结前缀整个读成一个 `Vec<u8>`（`FrozenSource::read_frozen_bytes`）、`mem://` 暂存实例与它的读路由、`member_prune` 事后裁成员（目标索引差分本身就是终态）；`pe.sesno` 从链头 0 变成元素真实的 last-touch 会话。
+_Avoid_: 暂存窗口（基线不开窗口）、全量解析 / `DbBasicData`（随 `parse_pdms_db` 退役）、按需解析（那是元件库的旧词）、`pe_chunk` / `att_chunk`（2026-09-06 起不参与切块）
 
 ### 已退役词条（retired，ADR-056）
 
@@ -264,12 +312,29 @@ _Avoid_: 暂存窗口（基线不开窗口）、全量解析 / `DbBasicData`（�
 - **窗口阻断的模型侧含义**（生成根重试穷尽 → 整窗口水位停止、持久层零痕迹）——被 ADR-056 D1 取代，模型失败与水位解耦。
 - **成员关系仲裁补删 (ADR-036 Membership Reconciliation)**、**幽灵新增丢弃**——old-pdms-io 净窗口收集器在索引差分之外按成员表补判的删除 / 丢弃；2026-09-03 收集器换成 e3d-io 底座后随之退役（两根索引差分即终态，`membership_deleted` 恒 0）。现行口径见上方「净窗口收集器」。
 
-## 按需解析元件库（On-demand CATA）——已整章退役（retired，ADR-058 D1）
+## 依赖入库（Dependency Ingestion）——2026-09-06 起，CATA 按 DESI 依赖入库
 
-> CATA 不再解析进持久层：模型面经 `E3dDbResolver` 从文件读，级联判据用 CATA 文件的会话索引差分加
-> `ref_rev` 反查。本章六个词条只为读 2026-07-27 ～ 2026-09-03 之间的 ADR / 计划 / 证据时对照使用，
-> **现行代码与文档不得再用**。CATA 的**文件身份裁决**（项目优先级、同号选主、`CataDbLocator`）不在退役之列
-> ——那是 `E3dDbResolver` 的输入，不是解析。
+**依赖入库 (Dependency Ingestion)**：
+每一批 DESI 写回（基线、稳态窗口、模型根发布）都以本批 DESI 元素为 seed 算**依赖闭包**，把闭包里的 CATA 元素与 DESI 行一起写进 `pe` / `<NOUN>` / `ATT_UDA` / `pe_owner`（`data_interface::cata_dependency`，plan 2026-09-06 §3 D5–D7，共识 d-29；修订 ADR-058 D1 / S3，见 ADR-064）。seed 只取目录链引用属性（`SPRE CATR PRTREF PTRE GMRE GSTR PSTR HSTU LSTU HSRO LSRO`，与 e3d-model `reference_reads_guard` 同源）；闭包复用 `CataClosureResolver`（容器子树只展开几何 / 点集 / 轮廓容器，owner 链到 WORL，只收 CATA、排除本批 DESI）；行经元素批 `Fresh` 入库，`pe.dependency = true` 标它是按依赖入库的——**不代表该 CATA 库整库在场**，整库 CATA 基线仍不做。数据窗口里它排在 DESI 块与水位之前（闭包解析出错拦水位，「库不在 MDB / 元素不在」只 warning）；基线经同一条写者队列；模型根发布前独立事务、只 warning。一个 DESI 元素落库而它的目录链在库里缺行，算缺陷。
+_Avoid_: 按需解析 CATA（旧章的词，指惰性兜底那条路）、CATA 基线、CATA 水位
+
+**依赖状态 (Dependency State)**：
+`cata_dependency_state:{dbnum} { sesno, rows }`——这个目录库的依赖行是按哪一版目录文件渲的、累计送入了多少行（`rows` 是量级：`Fresh` 命中也计、前移重渲不计；精确数查 `pe … dependency = true`）。**不是水位**：不进 `dbnum_watermark`、不参与 ADR-021 的判据；`/dbnums` 露成 `dependency_rows` / `dependency_sesno`（没有依赖行的库整格不写）。目录文件前移时（文件最新 > `sesno`，只对本批闭包碰到的目录库、排在本批 `Fresh` 之前）由 `cata_cascade_window` 差分出变动目录件，与已入库依赖行求交，被改的 `Replace` 重渲、被删的落墓碑，然后推进 `sesno`；差分不可用（会话不在链上 / 候选超 20,000）退化成该库全部依赖行重渲，回执点名 `cata_dependency_full_refresh`。
+_Avoid_: CATA 水位、`applied_sesno`（那是 DESI 的）
+
+## 按需解析元件库（On-demand CATA）——旧章（retired，ADR-058 D1；2026-09-06 由「依赖入库」接替）
+
+> 2026-09-03 ～ 2026-09-06 之间 CATA 不解析进持久层：模型面经 `E3dDbResolver` 从文件读，级联判据用 CATA 文件的
+> 会话索引差分加 `ref_rev` 反查。2026-09-06 起 CATA **按 DESI 依赖入库**（上一章「依赖入库」，ADR-064 修订 ADR-058
+> D1 / S3）——模型面仍从文件读，入库的依赖行服务属性面板 / `ref_rev` / 依赖备份。本章六个词条只为读
+> 2026-07-27 ～ 2026-09-03 之间的 ADR / 计划 / 证据时对照使用，**现行代码与文档不得再用**（现行词是「依赖入库」
+> 与「依赖闭包」）。CATA 的**文件身份裁决**（项目优先级、同号选主、`CataDbLocator`）从来不在退役之列——那是
+> `E3dDbResolver` 与依赖闭包的输入，不是解析。
+> **2026-09-07（ADR-064 Q2）**：本章描述的那套代码已从树上删除——生成根闭包播种（`collect_design_subtree_outbound` /
+> `run_cata_closure_pass_for_refnos` / `ensure_cata_parsed_for_roots`）、resolve 层惰性兜底入口 `try_lazy_cata_fallback`、
+> 依赖缓存 `CataDepCache` / `preload_cata_for_roots`、`cata_ref_rev` 补偿队列、env 开关 `AIOS_CATA_CLOSURE_MODE`、
+> 开/关几何冒烟 `bin/cata_smoke`。留下的只有依赖闭包的引擎（`CataDbLocator` / `CataClosureResolver`，供「依赖入库」调用）
+> 与 `ensure_cata_refnos_parsed` 的薄壳（落库走「依赖入库」，仅 staging 预加载还引用，随 spec 035 P3 一起走）。
 
 **按需解析（元件库 / CATA）(On-demand CATA Parsing)**：
 只解析「本次生成真正引用到」的元件库元素，而非整库解析 CATA；与「整库解析」相对。
@@ -442,3 +507,21 @@ manifest/epoch 安装与任务冻结共用的短临界区；固定锁序为 acti
 coordinator，保证旧纪元任务不会越过新纪元激活边界。
 
 _Avoid_: 初始化锁、队列锁（泛指时）。
+
+# 文件更新轮次（File Update Round）
+
+一个数据库文件从已应用水位推进到冻结终点 `T` 的完整更新单位。轮次持久保存冻结源令牌，拆窗、重试和重启都沿用同一终点；只有数据窗口、模型任务、PostRegenAabb 与候选派生输入全部成功，轮次才可发布。
+
+_Avoid_: 单批次、当前队列、文件最新版本（这些说法不能表达固定终点和完成屏障）。
+
+# 已发布派生输入（Published Derivation Input）
+
+空间树与房间算法可以消费的最后成功文件版本集合。文件轮次处理中的模型指针、AABB 和房间目标属于候选输入；在发布屏障前不得替换该文件的已发布输入。房间几何按冻结令牌写入版本化的 `room_published_inst`，房间—面板分组按全部文件令牌的规范摘要写入 `room_published_topology`；两者只由 `published_file_input` 当前清单选择，候选可以提前落库，但清单切换前不可见。跨文件视图允许由 A 的旧成功版本与 B 的新成功版本组成。
+
+_Avoid_: 实时模型表、当前文件、最新指针。
+
+# 空间发布版本（Published Spatial Version）
+
+一次文件候选空间变更通过持久意图完成重放、快照落盘并切换内存树后的可消费版本。它与数据写入阶段推进的物理 `spatial_epoch` 含义不同；V3 空间快照用该版本、已发布文件数和冻结输入清单 SHA-256 证明树对应的逻辑输入。房间任务只能在其要求的空间版本已经发布后认领，完成后在目标版本账本记录实际计算版本。更高的实际计算版本覆盖较早要求。
+
+_Avoid_: 数据空间写入计数、AABB 更新时间。

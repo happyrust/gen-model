@@ -1,6 +1,1151 @@
 # 变更记录
 
+## 2026-09-07
+
+### rocksdb 写回重构 ADR-064 Q2：惰性 CATA 落库切到统一渲染器，`cata_ref_rev` 补偿队列退役——D5 修好库类型字后它第一次真写行，而 `UPSERT … CONTENT` 会抹掉 `dependency` 标记
+
+计划 §1.1 #9 给这条路的处置本来就是「复活时不走这条，走统一渲染器」；它复活了。`cata_closure::ensure_cata_refnos_parsed`
+（`cata_ref_rev` 补偿队列 → `preload_cata_for_roots`、resolve 层 `try_lazy_cata_fallback`、staging 预加载共用的惰性兜底）
+此前逐元素 `UPSERT pe:X CONTENT {gen_sur_json}` / `UPSERT <NOUN>:X CONTENT` 外加自己攒的 owner / UDA replacement 批。
+三步：① 落库切到统一渲染器；② 用户拍板「直接把 `cata_ref_rev` 补偿队列退役（P4 已在水位前落行），不等 ADR-063」；
+③ 用户拍板「那一簇死代码现在就清掉」。
+
+- **③ 清掉按需解析的旧机制**（`cata_closure.rs` 2 897 → 1 774 行）：删去根子树播种 `collect_design_subtree_outbound` /
+  `collect_database_subtree_outbound(_on)` / `run_cata_closure_pass_for_refnos`、`ensure_cata_parsed_for_roots`、resolve 层
+  `try_lazy_cata_fallback`、依赖缓存 `CataDepCache` / `DEFERRED_CATA_CACHE` / `publish_deferred_cache` /
+  `discard_deferred_cache` / `preload_cata_for_roots` / `DependencyCacheContext` / `dependency_manifest_fingerprint` /
+  `require_all_roots_resolved`、env 开关 `cata_closure_enabled`（`AIOS_CATA_CLOSURE_MODE` 从此不再被读）、开/关几何冒烟
+  `GeoSmokeReport` / `geo_smoke_digest`；`src/bin/cata_smoke.rs` 整个删除（它存在的前提就是那个开关）；`batch_worker`
+  不再 `discard_deferred_cache`；`bin/node_gen_room_probe` 不再要求开关、不再 `CATA-PRELOAD`（目录行由该库数据批的依赖块
+  在水位前落）。留下的：`CataDbLocator` / `InMemoryCataLocator` / `CataClosureResolver`（依赖入库的引擎）、
+  `ensure_cata_refnos_parsed` 薄壳（`staging::preload` 引用，随 spec 035 P3 走）、`render_pe_owner_replace`（双引擎对拍
+  标准形态）。只钉旧机制的 8 条测试一并删（dep cache ×4、cache context、required roots、staging subtree、preload 段）。
+  ADR-004 状态改读「Phase 1 / 2 在用（被 ADR-064 D5 承接），Phase 3 ～ 6 已退役」；ADR-064 Q2 ③、CONTEXT.md 旧章加注。
+
+- **② 补偿队列退役**（`increment_pipeline.rs` / `side_effect_pending.rs`）：`apply_one` 收口后不再 `enqueue_cata_ref_rev`
+  （函数与 `cata_ref_rev_summary` 删除）；`SideEffectKind::CataRefRev` 变体只为认得旧库里已排进表的行，drain 到它直接
+  `Ok(())` 收口——不解析、不写；`/health.side_effect_pending.by_kind` 不再报这一档（旧行仍计入顶层 `pending`，下一轮 drain
+  就收掉）。**影响评估**：(a) 目录行——P4 三个写入点已按 D5 唯一判据在水位**之前**落行，oracle 证明覆盖全部几何实读；
+  退役后不再落的只有几何链**之外**的目录引用（ISPEC / TSPEC 指向的保温 / 示踪规格那类），属性面板对它们只显 refno——
+  要它就把属性名加进 `CATALOGUE_CHAIN_ATTRIBUTES`，不另开一条路。(b) `ref_rev`——这条路**从未写过一条边**（只写 `pe` /
+  noun / UDA / `pe_owner`）；DESI→CATA 边在 `apply_one` 的 reverse_index 步、CATA→CATA 边只有 `rebuild_reverse_index`
+  （`bin/rebuild_ref_rev`）会建，维护点一个没变（级联计划「CATA→CATA 边靠 cata_ref_rev 补」那句是写错了，已更正）。
+  (c) `CataDepCache` / `DEFERRED_CATA_CACHE` 失去唯一的生产写者，`batch_worker` 里的 `discard_deferred_cache` 成空转，
+  仓内没有别的读者（老规划器的 CATA 级联在 direct 下不可达）；`preload_cata_for_roots` / `ensure_cata_parsed_for_roots` /
+  `try_lazy_cata_fallback` 从此只剩诊断 bin `node_gen_room_probe` 与 staging 预加载引用，随 ADR-063 / spec 035 P3 一起清。
+  (d) 每个 DESI 窗口少一条副作用作业、少一遍按根子树**全部**出向引用的闭包重解析（ams8000 一窗就是 14k 行的重写）。
+  ADR-064 Q2 划掉；ADR-056 D8 / ADR-034 / ADR-058 实施约束 4 / spec 035 T126 / 级联计划 §现状 B 与 P5 范围各加注记。
+  护栏 `cata_ref_rev_is_retired_and_legacy_rows_are_only_settled`（两处生产正文无 `enqueue_cata_ref_rev(`；drain 仍认得
+  `cata_ref_rev` 且臂内无 `preload_cata_for_roots` / `ensure_cata_refnos_parsed`；by_kind 无此键），替掉原来钉入队 / 派发 /
+  warning 口径的三条。
+
+- **① 为什么现在**：D5 对拍抓到的第 1 处漏（`on_demand_db::open_single` 反哈希 `descriptor().noun`）也挡着这条路——真库上每个
+  目录文件都被拒，它一行也写不进去（plant-1 `run2-forget-cache` 04:52 的 7997 初始化日志还是
+  `[cata_closure] 闭包缺失明细: missing=705 … noun 0x00000002 is not a database type`）。库类型字修好后，每个 DESI 窗口
+  收口 `enqueue_cata_ref_rev` → 补偿队列一跑，它就把 P4 刚落的 CATA `pe` 行整行覆盖：`gen_sur_json` 没有 `dependency`
+  字段，`CONTENT` 整行替换 → `dependency = true` 被抹 → P5 的前移刷新（`dependency_rows_among` / `all_dependency_refnos`
+  都按 `dependency = true` 找行）再也认不出这些行，`/dbnums` 的依赖行账也对不上。另一处：它拿 `CataClosureConfig::precise()`
+  原样跑，`cata_db_types` 里带 DESI，回指到**别的 DESI 库**的元素连 owner 链到 WORL 都会被解出来写进 `pe`——DESI 行只能由
+  它自己的数据窗口写（E1 / E4 两条都破）。
+- **① 改法**（`cata_dependency.rs` / `cata_closure.rs`）：闭包配置 `closure_config(Option<u32>)`——三个写入点与惰性兜底同一份
+  （`precise()` 容器白名单、db_type **只收 CATA**），差别只在有没有「本批 DESI 库」可排除；新 `resolve_catalogue_rows_with`
+  （无排除）与 `resolve_dependency_rows_with` 共用 `resolve_rows_with_config`。`persist_cata_dependencies` 拆出
+  `persist_resolved_rows(project, rows)`：D7 前移先 `Replace` 刷新 → `element_batch` `Fresh`（`pe.dependency = true`，
+  命中即零成本）→ `cata_dependency_state`。`ensure_cata_refnos_parsed` = 定位器 → `resolve_catalogue_rows_with` →
+  `persist_resolved_rows`，`LazyFallbackOutcome` 语义不变（`parsed` = 渲出的元素数、`missing` = 闭包缺失）。
+  删掉 `render_content_replacements` / `render_uda_statements` / `render_uda_replacement` / `INSERT_CHUNK` /
+  `OwnerReplaceBatches` / `UdaReplacementBatches` 及其 5 条测试（owner 前缀范围删 + 同事务整块重插、UDA 先删后插、切块
+  这些保证现在由 `element_batch` 与 `tx_limits` 承担并各有钉子）；`render_pe_owner_replace` 留给 `fork_surreal_compat`
+  双引擎对拍当标准形态。（做完 ① 时补偿队列还留着；同日 ② 把它退了，惰性兜底从此只剩 staging 预加载与诊断 bin 会走到。）
+- ① 护栏：`lazy_fallback_lands_rows_through_cata_dependency_and_renders_no_upsert`（惰性兜底体内必须走
+  `resolve_catalogue_rows_with` + `persist_resolved_rows`、不含 `UPSERT` / `execute_model_write`；`cata_closure.rs`
+  生产正文逐行零 `UPSERT `）、`closure_config_collects_only_cata_for_every_entry`。ADR-004 加 2026-09-07 注记、
+  计划 §9.2 加两行 / §9.3 改写。
+
+验证：① `cargo test --lib --features http_api -- cata_closure:: cata_dependency:: element_batch::` **46 passed**；全库
+`cargo test --lib --features http_api` **1730 passed / 0 failed / 113 ignored**；live 对拍
+`live_ams8000_catalogue_reads_are_covered_by_the_dependency_closure`（闭包路径共用 `resolve_rows_with_config` 之后重跑）
+仍是 catalogue_visited 5,009 ⊆ closure 13,995 行 / 6 个目录库 / missing 4，**unexplained = 0**（数字与切换前逐项相同）。
+② `-- side_effect_pending:: increment_pipeline:: cata_closure:: cata_dependency:: element_batch::` **107 passed**；全库
+`cargo test --lib --features http_api` **1729 passed / 0 failed / 113 ignored**（被替掉的 `cata_ref_rev` 三钉换成一钉）；
+`cargo clippy --lib --features http_api` gen-model 零警告；四份文件 rustfmt 干净。
+③ `cargo check --lib --tests --bins` 干净；`-- cata_closure:: cata_dependency:: side_effect_pending:: increment_pipeline::
+element_batch:: batch_worker::` **145 passed**；全库 `cargo test --lib --features http_api` **1735 passed / 0 failed / 115 ignored**
+（同一棵树上别的会话同时在加测试，绝对数只对 0 failed 负责）；`cargo clippy --lib --bins` 本轮碰过的文件零警告（其余 bin 的
+`too_many_arguments` / `type_complexity` 是既有的）；live 对拍第三次重跑仍 **unexplained = 0**；六份 .rs rustfmt 干净。
+**未 live**：真库上一个 DESI 窗口收口后 `incr_side_effect_pending` 里不再出现 `cata_ref_rev_*` 行、`pe … dependency = true`
+行数不掉——要起 fork surreal + `aios-database serve`，与真库门一起留给用户终端（plant-1 `run7997.py` 的 7997 初始化
+就会走到：数据批 `apply_one` 0..=155 之后旧版本会排 6769 根的 `cata_ref_rev`，新版本不排）。
+
+### rocksdb 写回重构 D5 oracle：e3d-model `catalogue_visited` + 对拍 `catalogue_visited ⊆ closure`——首次对拍抓到三处漏
+
+计划 §3 D5 / ADR-064 Q1。oracle 的口径：e3d-model 一次生成**真读到**的目录元素，必须全部落在 gen-model 按「名单 + 闭包」
+算出来的依赖闭包里；闭包比实读宽允许，窄就是漏。
+
+- **e3d-io**（`../vendor/e3d-io`，未提交）：`read_stats::trace_element_reads()` 线程局部、可嵌套的读记录器，
+  `DbElement::parsed` / `extraction` 读成功即记（缓存命中也算，悬空引用 `NotFound` 不算）；`DbSet::db_type(dbno)`、
+  `DbElement::db_set()`。记录点在读入口而不是逐个调用点：目录链每一跳、P 点求值、剖面、桥架目录件都在里面，新增读法不用改。
+- **e3d-model**（`../vendor/e3d-model`，未提交）：`GenerationOutcome::catalogue_visited`——DFS 前开记录器、DFS 后收账，留下
+  「不在根所在库 ∧ 所在库为 CATA」的；源码钉 `catalogue_visited_is_traced_around_the_whole_dfs`；真库门
+  `tests/catalogue_visited_real.rs`（只有目录侧 / BRAN 成员 SPRE→SPCO 一个不漏 / 链走到 SCOM 与点集几何集）。
+- **gen-model**：`cata_dependency::resolve_dependency_rows_with(locator, …)`（闭包只有一条路，定位器可注入）；live 对拍
+  `live_ams8000_catalogue_reads_are_covered_by_the_dependency_closure`（`--ignored`，文件扫描定位器，与 e3d-model 真库门同一口径）。
+- **对拍抓到并修掉三处**（都是真库上才显形、`mem://` 单测看不见的）：
+  1. `on_demand_db::open_single` 反哈希 `descriptor().noun`（第 0 页自身的 noun 字）当库类型——真库上**每个目录文件都被拒**
+     （`noun 0x00000002 is not a database type`），闭包一行也解不出、全部计 missing、只出 warning：P4 的三个写入点在真库上
+     一直没写进过一行 CATA。改读 `db_type_name()`（`db_type_hash`），与 `scan_db_header` / `db_file_header` 同口径。
+  2. `CataClosureConfig::precise()` 容器名单没有正体：Core3D 对每一个有成员的正体开差集，e3d-model 照做，所以 SBOX / SCYL /
+     LCYL / SCON / LSNO / LPYR / SCTO / SRTO / SSPH / SSLC / SDSH / SDIS 名下的负体（NSBO / NLPY / NSRT / NLCY）是实读；补进名单。
+  3. 名单里写的是属性名 `PSTR`，p-line 集的 noun 是 `PTSS`（`SPRF.PSTR → PTSS → PLIN`，型材对齐）；改为 `PTSS`。
+- 顺手：`dbnum_stats::rebuild_on(db, dbnum)`（`versioned_db::baseline` 的测试引用它而它不存在，lib test 编不过——08:31 那次
+  整批文件重写把两份文件带成了不同版本）。
+- ADR-057 B2 白名单追记 `GenerationOutcome::catalogue_visited`（当前只有对拍消费）；ADR-064 Q1、计划 §9.3 D5 划掉，§9.2 加行。
+
+验证：e3d-io `cargo test --lib` **234 passed**；e3d-model `cargo test --lib` **269 passed**、`cargo test --test catalogue_visited_real`
+**1 passed**（ams8000 三根：visited 6,120 / catalogue_visited 5,009 / BRAN 成员 SPRE 抽查 2,634 条全中）；gen-model
+`cargo test --lib --features http_api -- --ignored cata_dependency::tests::live_ams8000_catalogue_reads_are_covered_by_the_dependency_closure`
+**`unexplained = 0`**（catalogue_visited 5,009 ⊆ closure 13,995 行 / 6 个目录库；closure missing 4 = ref0 23984 的库不在项目 + 5052 里 3 个
+悬空引用）；修前同一门 unexplained 5,012（目录文件全被拒）→ 24（负体 + PLIN）→ 0。全库 `cargo test --lib --features http_api`
+**1732 passed / 0 failed / 113 ignored**。
+另：e3d-model `tests/reference_reads_guard.rs::indirect_reference_reads_are_each_registered_with_their_names` 现在红，是另一条会话
+把 `cable_tray.rs` 的间接读点挪进 `rpath.rs`（08:30 那批）还没登记，与本节无关、没动。
+
+### rocksdb 写回重构 U1（plant-ui）落地收口；spec §5.3 补 `model_source_changed` 一行
+
+- **U1 在 plant-ui 仓落地**（`D:\work\plant-code\old\plant-ui`，ADR-0025「模型从哪儿读由服务端按库判决；客户端只消费，
+  一次装载里一个库只认一个源」）：`task_queue::DbnumStatus.model_source` / `model_source_reason`（认不出归 `None` 整格不画）、
+  `ModelSource` 枚举、库行字形 + 悬停整句 + 行内明细；`model_update_api::model_records` 经新 `model_record_union.rs` 按 `dbnum`
+  分桶、同库两源 / 同根分页中途换源报错、老服务端无 `dbnum` 整次一桶；`EnsureReply.model_source` 与装载日志的「其中 dbN 由 API
+  从内存供数」半句；WS `model_source_changed` → 只改那一格、不重载场景。Q7 取 (a)。计划 §9.2 加 U1 行、§9.3 与 ADR-064 Q3 划掉。
+  验证（plant-ui 仓）：`cargo check --workspace --tests` 干净；`cargo test -p plant-ui-app -- model_record_union model_update_api
+  model_update_ws` 14 passed；`cargo test -p plant-ui -- task_queue` 40 passed。gen-model 本仓**只改文档**。
+- `docs/specs/web-service-api.md` §5.3 事件表补 `model_source_changed` 一行（§4.12 早已引用它，表里却没有）。
+- 仍欠：真库门（P0-1/2/4、P1/P2/P4 哈希对照、§8.4 四道读侧门）要起 fork surreal + `aios-database serve`，留给用户终端，
+  命令见 09-06 那节末尾；D5 oracle `catalogue_visited`（vendor/e3d-model，走上游）；ADR-064 Q2（旧惰性 CATA 落库去留，挂 ADR-063）。
+
+## 2026-09-06
+
+### rocksdb 写回重构 P5：CATA 依赖版本前移（Replace）、`inst_geo` 降为 `INSERT IGNORE`、ADR-064、CONTEXT.md 词条
+
+承上一节（同日 P0-3 / P6 / P1–P4），服务端至此全部落地；U1（plant-ui）与真库验收门仍留给用户终端（U1 已于 09-07 落地，见上）。
+
+- **D7 · 目录文件前移**（`cata_dependency::refresh_moved_catalogues`，三个写入点各自入口先跑）：目录文件最新 >
+  `cata_dependency_state.sesno` 时，`cata_cascade_window` 在该目录库上差分出变动目录件，与已入库依赖行求交
+  （`dependency_rows_among`：`pe.dependency = true` 且 dbnum 相同），被改的重解析闭包经 `element_batch` **`Replace`**
+  重渲（边 / UDA / noun 行先删、`pe` 原地整行替换），被删的落最小墓碑；然后推进 `sesno`。差分不可用（会话不在链上 /
+  候选超 20,000）退化为该库**全部**依赖行 `Replace` 重渲，回执点名 `cata_dependency_full_refresh`；正常前移不出声。
+  只写内存的库（P6 `memory`）不触发。
+- **Q4 · `inst_geo` 降为 `INSERT IGNORE`**（`model_db_adapter::RowBatch::render`）：此前那条 `ON DUPLICATE KEY UPDATE
+  direct_model, aabb` 是模型面唯一残留的 UPDATE，为修旧渲染器留下的描述符而设；它是内容寻址的（ADR-060 N3 第一种前提），
+  `direct_model` 是来源账、`inst_geo.aabb` 读侧（plant-ui `plant-ui-data` 只取 `out.meshed` / `record::id(out)`）不消费，
+  改不了任何读者看得见的东西。模型面从此零 UPDATE；旧描述符照旧留着，与「共享网格只增不删」（ADR-060 N2）同口径。
+  `shared_prototype_is_identical_in_both_publication_orders_and_repairs_legacy` 改钉新契约
+  `…_and_existing_rows_win`（手改过的原型行再发布**不被修回**）；新钉 `inst_geo` 渲 `INSERT IGNORE` 且整段正文无
+  `ON DUPLICATE KEY UPDATE` / `UPSERT`。
+- **ADR-064** 起草（`docs/adr/ADR-064-element-rows-are-batched-delete-then-insert-and-cata-enters-by-dependency.md`）：
+  D1 元素批只有先删后插 / D2 `pe` 原地整行替换（图顶点） / D3 墓碑 / D4 基线与增量同渲染器 / D5 CATA 按依赖入库 /
+  D6 `inst_geo` 降级 / D7 模型取数源按就绪度选；新不变量 E1–E5；开放问题 Q1 `catalogue_visited` oracle、Q2 旧惰性 CATA
+  落库去留（挂 ADR-063）、Q3 U1。**ADR-058 D1 / S3** 加 2026-09-06 修订注记（「CATA 不入持久层」→「只按 DESI 依赖入库」，
+  整库基线仍不做）；**ADR-060 D4** 加实施注记（`inst_geo` 是 D4 唯一漏网，已收口）。
+- **CONTEXT.md**：「分块解析基线」改述为经 `element_batch` `Fresh`、`pe_chunk` / `att_chunk` 入 Avoid；新词条
+  「元素批 (Element Batch)」「墓碑 (Tombstone)」「依赖入库 (Dependency Ingestion)」「依赖状态 (Dependency State)」；
+  「按需解析元件库」整章标为旧章（2026-09-03 ～ 09-06 的过渡口径），现行词是「依赖入库」。
+- 计划 §9 实施记录补 P5 行；§9.3 欠账收窄到 U1、真库门、`catalogue_visited` oracle、旧惰性 CATA 落库（ADR-064 Q2）。
+
+验证：`cargo test --lib --features http_api` **1721 passed / 0 failed / 110 ignored**；`cargo clippy --lib --features http_api`
+gen-model 零警告。**未 live**：真库门命令同上一节末尾；P5 的目录前移可用现成的 ams5052 184→185 那窗做 before / after。
+
+### rocksdb 写回重构 P0-3 / P6 / P1 / P2 / P3 / P4：元素数据行批量先删后插、CATA 依赖按需入库、模型取数源按 dbnum 路由
+
+计划 `docs/plans/2026-09-06-rocksdb-batch-write-and-cata-dependency-plan.md`（Plannotator 三轮 approved，共识 d-29）。
+用户原话：「写入 rocksdb 尽量批量、先删后批量插入、不要单独 upsert / update；写回的数据也要按需保存依赖的 CATA；
+未初始化的 dbnum 查模型时 rocksdb 没准备好就由 API 供数给 plant-ui，已初始化的以 rocksdb 查询接口为准」。
+本轮落地六段，P5 见上一节，U1 未开工，真库验收门未跑（见末尾）。
+
+- **P1 · 元素数据行只有一种写法**（新 `data_interface/element_batch.rs`）：前置块清 Add / 墓碑自己的旧出向边 →
+  每块「边（id 区间）→ `ATT_UDA` → noun 行 按 id 批量删，再 `pe` / noun 行 / `ATT_UDA` / `pe_owner` 每表一条
+  `INSERT IGNORE`（边表 `INSERT RELATION IGNORE`）」。被删元素落**墓碑** `pe` 行（`deleted = true`，noun / owner 保留，
+  收集器从 `DbSet@S` 读基侧；读不到退化成最小墓碑并在回执出声），被删元素的 noun / UDA 行与换 noun 的旧表行随删除块消失
+  （此前软删把它们留在库里）。逐元素 `UPSERT … CONTENT` / `UPDATE pe SET deleted` 从增量路退出；
+  `ElementRows::upsert_statements` 改名 `read_through_statements`——它只服务读透形态，不是 rocksdb 口径。
+  **`pe` 行不删、原地整行替换**（计划 §9.1）：`pe` 是图顶点，`DELETE pe:X` 会级联删掉 `pe_owner` / `ref_rev` / `tubi_relate`
+  这些挂在它身上的边，而这些边由别的块 / 别的窗口 / 模型面维护——崩溃重放对拍（元素上限压到 1）当场抓到 EQUI 少一条
+  成员边。改成一块一条 `INSERT INTO pe [..] ON DUPLICATE KEY UPDATE <gen_sur_json 的全部字段>`，仍无逐元素 UPSERT / UPDATE。
+- **P1 · 切块上限搬家重定**（新 `data_interface/tx_limits.rs`）：`dbnum_stats` 不再借 `staging::executor` 的 64 KiB / 250 行 /
+  100 元素，改为 2 MiB / 5000 行 / 1000 元素（模型侧已验证的口径），`DbOption.toml` 三键 `data_tx_max_bytes` /
+  `data_tx_max_write_rows` / `data_tx_elements` 可调；超限劈半。
+- **P2 · 基线并轨**：`versioned_db::baseline::render_baseline_batches` 改调同一渲染器（`Fresh`：只插、已有行赢——父层补缺
+  语义不变），有界队列每条消息 = 一笔事务（`SenderJsonsData::ElementBatch`），`PEJson / AttJson / PERelateJson` 退役，
+  `pe_chunk` / `att_chunk` 不再参与切块。单写者不变。
+- **P3 · `ref_rev` 与 `datacenter_version` 批量化**：`build_reverse_index_statements` 全部 referrer 的邻接 DELETE 在前、
+  整窗口的边攒成 `INSERT RELATION IGNORE`（2000 边一条）；`datacenter` 的 Modify 归组成多目标
+  `UPDATE a, b, c SET status = 'Modify'`（500 目标一条），Delete 仍逐条（各带 `belong_zone`）。
+- **P6 · 模型取数源按 dbnum 路由**（新 `data_interface/model_read_route.rs`，spec §4.12）：`database` ⇔ ingest ∧
+  `applied_sesno > 0` ∧ 该库没有活着的初始化发布 run；其余 `memory`。`memory` 库上 `/model/ensure` 不等初始化队列、
+  不进 durable 队列、不落 rocksdb，直接从文件生成进进程内投影（有初始化 run 就钉它的 `source_sesno`），
+  `/model/records` 从投影供数（没 ensure 过回 409 `not_generated:`）；`database` 库一字不改。`/dbnums` 行与两条接口回执加
+  `model_source` / `model_source_reason` / `durable`；翻面（run 收口 / 回退重建清库）发 WS `model_source_changed`。
+  此前 `/model/records` 按进程介质选源、`/model/ensure` 在初始化期原地等或报错，plant-ui 对正在初始化的库要么等要么错。
+- **P0-3 · 双引擎语法门**：`fork_surreal_compat` 加 5 条 mem / rocksdb 双跑（`DELETE $array`、`INSERT RELATION IGNORE`
+  撞 id 保留旧行且边是图边、多目标 UPDATE、整块先删后插幂等、`pe` 原地替换保边 + 「删顶点级联删边」对照）。
+- **P4 · CATA 依赖闭包按需入库**（新 `data_interface/cata_dependency.rs`；修订 ADR-058 D1/S3「CATA 不入持久层」→
+  「CATA 只按 DESI 依赖入库，不做整库基线」，ADR 正文随 ADR-064 落）：seed = 本批 DESI 元素上目录链引用属性
+  （`SPRE CATR PRTREF PTRE GMRE GSTR PSTR HSTU LSTU HSRO LSRO`，名单与 e3d-model `reference_reads_guard` 同源、有钉子）
+  的出向 refno；闭包复用 `CataClosureResolver`（`precise()` 容器白名单：几何 / 点集 / 轮廓容器，owner 链到 WORL，
+  db_type **只收 CATA**、排除本批 DESI 库）；行经同一个 `element_batch` `Fresh` 入库（`INSERT IGNORE`，命中即零成本），
+  `pe.dependency = true` 标它是按依赖入库的；每个目录库一行 `cata_dependency_state:{dbnum} { sesno, rows }`
+  （不是水位，给 P5 版本前移与 `/dbnums` 的 `dependency_rows` / `dependency_sesno` 用）。三个写入点：
+  数据窗口 `apply_one`（排在 DESI 块与水位**之前**，闭包解析出错拦水位、「库不在 MDB / 元素不在」只 warning，
+  源码钉顺序）、基线（流式收集时攒 seed，文件收尾一次闭包，经**同一条写者队列**入库，单写者不变；失败按基线失败
+  登记清库）、模型根发布前（`visited` 子树从文件读属性做 seed，独立事务、只 warning 不拦发布）。
+  **欠账**：D5 的对拍 oracle（e3d-model `GenerationOutcome.catalogue_visited`，纯输出字段）是 vendor crate 改动，
+  未做——现在的闭包是「名单 + 闭包」的上界，宽于实读；`catalogue_visited ⊆ closure` 的机器验证留待 vendor 提交。
+
+验证：`AIOS_COMPAT_REQUIRE=1 cargo test --lib fork_surreal_compat::dual_` 16 passed（含既有 11 条）（真起 `bin/surreal.exe` rocksdb 后端）；
+`cargo test --lib --features http_api` **1718 passed / 0 failed / 110 ignored**（含 `cata_dependency` 9 条：名单同源钉、
+seed 只取目录链、Fresh 批带 `dependency` 标记按目录库分组、`mem://` 上重跑不翻倍、三个写入点接线钉；`direct_window_replay_parity`
+生产路每个事务边界 kill → 重放 → 逐表一致，元素上限 1 / 2 / 1000 三种切法；`the_production_window_lands_the_expected_shapes`；
+`datacenter_tests::fixed_target_updates_hit_the_rows_the_server_side_walk_hit` 归组后语义对拍照旧绿）；
+`cargo check --all-targets --features http_api` 干净；新文件 rustfmt 干净。**未 live**：真库验收门
+（`scripts/Verify-RocksDb8000.ps1` 复跑 + 逐表哈希对照 `output/rocksdb-8000-20260905/before-manifest.json`、
+一窗 SAVEWORK 计时）要起 fork surreal + `aios-database serve` 跑 ams8000 基线，留给用户在自己的终端里跑：
+`cargo build --bin aios-database --features http_api` → 新建一份 run 目录（脚本里的 `$run` 改日期）→
+`pwsh scripts/Verify-RocksDb8000.ps1 start` → 基线完成后 `python scripts/rocksdb8000_evidence.py` 取 before / after。
+
+### 浏览器口径三件套：`/api/v1/meshes/{hash}.glb`、树节点带 `dbnum`、`/dbnums` 带 `ref0s`
+
+计划 `plant3d-web/docs/plans/2026-09-06-gen-model-v1-tree-and-viewer-adapter-plan.md` 的 P0（共识 d-641，
+D1–D7 全按推荐项）。plant3d-web 要把模型树与三维显示的数据源换到本仓 `/api/v1`，摸底摸出三个硬缺口，
+全在服务端补最省——三项都是**加端点 / 加字段**，既有响应形状一个字节没动，plant-ui 不受影响。
+
+- **`GET /api/v1/meshes/{geo_hash}.glb`**（新模块 `src/web_service/mesh_glb.rs`）：把 `.mesh`（rkyv 0.7 归档的
+  `PlantMesh`）现场编成 GLB。浏览器解不动 rkyv——那套布局与 rkyv / glam 的内存形状强耦合，让前端手解，
+  任何一边升级都会静默读歪（D1 否掉的方案 B）；生成期旁写 `.glb` 要磁盘翻倍加回填 48k 网格（方案 C）。
+  一个三角面 primitive：`POSITION` + 可选 `NORMAL` + u32 `indices`，坐标是 E3D 原生 mm、不换算；法向量数量
+  与顶点数不等时整段省掉（错位的法向量把光照画歪且没有任何东西报错）；`wire_vertices` 不进——前端现有
+  解析只读第一个 primitive。`geo_hash` 只放行 `[0-9A-Za-z_]{1,128}`，既是内容寻址键的字符集，也是唯一一道
+  目录穿越的门。响应带 `Cache-Control: public, max-age=31536000, immutable` + `ETag`（内容寻址，永不变）；
+  缺文件 404 `not_found`，编不成三角网格 422 `precondition`（数据的终局，不该让客户端当 500 重试）。
+- **`tree/roots` / `tree/children` 的节点外包一格 `dbnum`，`search` 的 items 加 `noun`**：refno 前半段是 Ref0
+  不是库号（`CONTEXT.md`「Ref0 库归属」），而浏览器端的几何缓存、可见性、选中全按库号分桶，库号只有
+  服务端骨架答得出。`dbnum` 不加在 `EleTreeNode` 类型上（plant-ui 用 serde 解它，多余字段忽略即兼容），
+  在 handler 的 JSON 层外包；答不出给 `null`，不是 0 号库。`noun` 只给当前这一页解——名称索引里没有类型，
+  要它就得回记录读一次 `TYPE`，对全集解会把大库搜索拖成秒级；读不出给空串而不是 `null`（plant-ui 那边
+  `noun: String` 带 `serde(default)`）。
+- **`GET /api/v1/dbnums` 每行加 `ref0s`**（该库拥有的全部 Ref0，升序，`MdbMemoryStore::ref0s_of`）：
+  客户端只拿得到 refno，此前得靠旧后端一份 `db_meta_info.json` 才拼得出 `ref0 → dbnum`。骨架没预热过的形态
+  **整格不写**——空数组读起来是「这个库一个 Ref0 都没有」，那是另一句话。
+- 顺带：`DirectTreeService` 两个同名 `dbnum_of` 合成一个（旧的走 `DirectStore` 定位器回 `Result<i32>`，新的走骨架
+  回 `Option<u32>`；定位器本来就是拿骨架的 `locator_parts()` 建的，同一份数据两道门，留一道）。
+  `direct_tree_tty_compare` 的 `--dbnum` 过滤跟着改。
+
+单位几何对表（P0-5，`cargo test -- --nocapture` 的实测包围盒）：`1.mesh` 单位盒 `[-0.5,-0.5,-0.5]..[0.5,0.5,0.5]`、
+`2.mesh` 单位圆柱 `[-0.5,-0.5,0]..[0.5,0.5,1]`（半径 0.5、高 1、Z 轴、底面在 z=0）、`3.mesh` 单位球
+`[-0.5,-0.5,-0.5]..[0.5,0.5,0.5]`（半径 0.5、原点居中）——与 plant3d-web 本地造的三份
+（`getUnitBoxGeometry` / `getUnitTubiGeometry` / `getUnitSphereGeometry`）半径、高度、轴向、原点**逐项一致**，
+前端不必改参数。只有细分数不同（前端 16 段，仓内 `2.mesh` 124 面、`3.mesh` 1080 面），那是光滑度不是位置。
+
+验证：`cargo test --lib -- web_service` **36 passed / 0 failed**（含新 `mesh_glb` 6 条：GLB 分块与对齐、
+法向量数量不符整段省掉、退化网格拒收、`geo_hash` 门放行内容键且挡住 `../` 一类、仓内三份单位几何整份转出；
+`handlers` 2 条：`ref0s` 按行 `dbnum` 写且没有 `dbnum` 的行不碰、`mesh_glb` 的两道门排在读盘之前）；
+`cargo check --bins` 干净。**未 live**（本轮没起服务，`curl` 序列与 plant3d-web 对拍留给 P1–P3）。
+`docs/specs/web-service-api.md` 同步 §4.7 的 `ref0s` 与新的 §4.10（直读模型树 + 搜索）/ §4.11（网格 GLB 口径）。
+
+### 文档 · 模型增量「联动查询」核对与换源计划（只读分析 + ida-bridge 取证，未改代码）
+
+- 问题：增量更新是否已处理模型增量的「联动查询」（反向引用查询）的更新处理。结论：**没有处理完**——
+  老规划器有 `ref_rev` 反查；**direct + DESI 的窗口规划器（今天的默认）不做任何反向引用查询**；direct 下 CATA 没有
+  数据批次，`build_cata_cascade_plan` 不可达，#4 洞原样；`ref_rev` 的唯一维护点在摄入链 `apply_one`，
+  读透 G5「跳过摄入链」落地后无人维护。e3d-io `referrers_of` 与 `direct_store::referrers_of` 已就位、仓内零调用方。
+- core 侧新取证 `docs/evidence/2026-09-06-dab-ref-table-write-path.md`（`core.dll` = `idalib-33060`）：引用表由
+  dabacon 在 `db_put_reference`（opcode 140 → `sub_5AD4690` → `sub_5AB8D20` → kind-16 分流 `sub_5AB91B0`）**写时同步维护**
+  ——删 `(旧目标, 自己)`、插 `(新目标, 自己)`（`sub_5AFDF10` op 0/1）、无表则 `sub_5AFF6D0` 建表注册根；仅描述符 kind 16 的属性
+  有表（`HREF`/`TREF`/`CREF` 为 kind 4 无表）；`OWNER`（attId 10206636）硬编码排除；表根随会话页版本化，读侧零维护；
+  `findElements` 的全部消费者（UDA / 集合 / 修订链接 / 伪属性插件 / `GATXRF`）无一在 GETWORK 刷新路上。
+  顺带闭合 09-04 evidence §5 两条（根来自会话页 `+0x31C/+0x320`；叶无值、4 字键）。
+- 计划 `docs/plans/2026-09-06-cascade-query-via-dab-ref-tables-plan.md`（待 Plannotator 评审）：照 core 从 dab 引用表读反向查询，
+  P0 覆盖差表 → P1 e3d-io 收尾 → P2 CATA 文件差分触发 → P3 反查接线（CATA 侧闭包 + DESI 一跳 + 上卷）→ P4 direct DESI
+  窗口规划器接同源 → P5 `ref_rev` 降级（ADR-063）；Q1–Q4 待拍板。取代 09-04 CATA 反向级联计划的 P1–P4 排期。
+- 回填：09-04 inventory §3.4 进展一段；09-04 dab 引用表计划 P0 标闭合并指向本计划。共享记忆 mem-631。
+- **计划已批准（Q1–Q4 按推荐项，共识 d-635），P0 当天做完**：`docs/evidence/2026-09-06-ref-rev-vs-file-table-coverage.md`
+  ——783 个 E3D 3.1 库文件实测 75 张反向引用表（DESI 40 / CATA 19），`ref_rev` 资格 603 个名字；e3d-model 几何读的
+  15 个引用属性里 12 个有表、3 个没有（`VXREF` 单元内、`HSRO`/`LSRO` 仅 stub 备选），DESI/CATA 侧没有一张表在 `ref_rev`
+  资格之外。护栏 `vendor/e3d-model/tests/reference_reads_guard.rs`（新文件）：每个引用读归「有表 / 单元内 / 在案缺口」
+  三档、间接读点逐处登记；`cargo test --test reference_reads_guard` 2 passed，负例红并点名；rustfmt 干净。
+  Q4 修正一格：`POSREF` 是唯一有表且几何真读的设计→设计跨单元边，P4 要把它的引用者并进 `touched`。
+  顺带：`XRPNTR` 在 ENGI 库有表（ADR-061 触发条件 2 的观测，不触发复议）。
+- **P1 做完（e3d-io 提交 `4eeecf9`，只含 reference.rs 的 rustfmt、四条新测试与一条 CHANGELOG；别人的 WIP 未动）**：
+  「是不是引用表」的判据写进测试——4 字键、无值、**引用者全是本库 refno**；`TYPEX` 与 7 张 Draft 表同形不同义；
+  语料门改为按判据走全部具名表（543 库 / 913 张引用表 / 58 个名字 / 8 个 lookalike，无新面孔）。成本门落在语料里最大的
+  引用表 `acp7320_0001 CATR`（744 925 条）：遍历 7 907 页、点查 4 页，门 ≤ 16 页且 ≤ 遍历 1/100。
+  **★ `ams7351_0001` 一张引用表都没有**（只有 `NAME`/`TYPEX`）——原计划拿它做成本门的前提不成立；钉成
+  `a_database_can_state_no_reference_table_at_all`：`NoSuchTable` 必须当独立结果，不能当「没人引用」。P3 开工前要先定
+  这种目录库的退路（扫 SPCO 建内存表 / SCOM 层变动退化为依赖者全部过期并点名）。`cargo test --test reference_table_real`
+  6 passed / 2 ignored（两条 ignored 的语料门本轮也跑绿）。用户随后拍板退路 **(ii)**（共识 d-665）。
+- **P2 做完（触发源）**：新模块 `src/data_interface/cata_cascade_window.rs`——CATA 窗口 S→T 的变动目录件集合
+  （e3d-io `diff_sessions` + 模板无关的记录头读 noun/owner，剔除 `relocated_only`）+ T 端反向引用表清单（判据同 P1）；
+  `CatalogueWindowReport` 上回执 / `/health`，收不了的窗口是「未知」带 `error`，候选超 20 000 只报总数。挂点在
+  `model_update_pending::reconcile_catalogue_versions`：对每个过期目录库收一窗（S = 根落款里最旧的目录会话，T = 文件最新），
+  横幅逐库一行，`/health.startup.reconcile.catalogue_windows` 新栏——读透形态下文件事件也汇到这条路
+  （`sweep_watch_dirs` 读透分支 → `reconcile_model_coverage_at_startup`），所以启动与文件事件共用；**没有**新任务种类、
+  **没有**新水位、**仍不排工作**（P3 未接）。验收门 `ams5052_0001 184→185` = 1 个 Modified（noun `SDTE`）、0 增删、
+  12 张反向表在。验证：模块 5 条测试在仓外同源 crate 上全绿；仓内 `cargo check --lib --tests` 只剩别人 WIP 的两处
+  编译错误（`direct_tree.rs:249` 重复 `dbnum_of`、`handlers.rs:1014` `anyhow::Error: Serialize`），本改动零告警；
+  仓内 `cargo test` 待那两处修好。**未 live**。
+
+### PE 统计事件退役
+
+- 废弃 `pe.update_dbnum_event`，启动幂等移除旧事件。初始化、增量、读透/镜像补写、目录补写和局部删除共用显式统计事务，按本批 PE 写前/写后的实际行数计算差额，与 PE 原子提交；重试不会重复计数。
+- `count` 包含软删墓碑；`sesno`、`max_ref1` 保留已见最大值。首次写入旧 dbnum 时同事务重建统计并记录版本，常态批次不扫全库。整库清理同步删除统计版本。
+- 镜像任务格式升级到 v2；旧版 element 待办任务保留并阻断回放，升级前须用旧版排空。部署与验收说明见 `docs/pe-statistics-explicit-maintenance.md`。
+
+### 修复
+
+- **rocksdb 空库首启不再被 SYS meta 的「文件轮次」焊死；空间收敛改为不重试、一次失败即死信并落错误日志。**
+  实测（`output/rocksdb-7997-perf-20260906/run1-stall/`）：`store_mode=rocksdb`、空库、`--watch-dbnum 7997` 启动，
+  第 1 个批次 amscom（COMM，dbnum 8190）成功后就永久停摆——冻结点对**任何**库类型都落一条 `spatial_reconcile`
+  意图行（`db_type` 还写死 `'DESI'`），批次完成后 `publish_completed_file_round` 无条件发布，收敛时
+  `E3dModelService::from_frozen_sources` 找不到 8190 的 DESI pin（`current MDB has no DESI dbnum 8190`），
+  行被标 `failed`；`reconcile_spatial_pending_locked` 的选行谓词 `status IN ['pending','failed']` 没有上限，
+  每轮同一个确定性错误，出队门 `dispatch_allowed=false`，余下 11 个 meta 批次挂死，MDB 名单建不起来，
+  DESI 7997 连入队资格都没有。
+  - `batch_worker.rs`：文件轮次的意图行（冻结点）与 `publish_completed_file_round` 只对 `db_type == DESI`
+    ——房间输入基线、空间发布、房间任务本来就只认设计库。
+  - `side_effect_pending.rs`：空间收敛**不重试**（用户 2026-09-06 拍板：出错只进错误日志、方便排查）。
+    选行只取 `pending`；逐行收敛，一行失败 → 原因落 `logs/batch-failures-*.jsonl`
+    （新 `event = side_effect_dead_letter`，带 id / dbnum / db_type / end_sesno / commit_token / 意图行数与
+    解封步骤）→ 行标 `dead`（终态，任何选行谓词都看不见），出队门与房间轮照常放行；同批其它行不受牵连。
+    `failed`（老版本的重试中间态）一并视为死信。`/health.spatial_reconcile` 新增 `dead_letters`，
+    `stalled` 改为「有死信」；`web/ops.html` 停摆卡文案同步。
+  - 验证：`cargo test --lib -- side_effect_pending batch_failure_log completed_file_round_publishes_spatial_before_rooms
+    a_stale_spatial_tree_also_holds_back_the_room_round` 32 项通过；live 验证见同目录 `REPORT.md`。
+
+### 性能
+
+- **模型积压消化（`model_update_pending`）去掉两处 O(n) 往返：收口按 record id、页尾释放批量化。**
+  rocksdb 7997 首启实测（`output/rocksdb-7997-perf-20260906/REPORT.md` §3）：18,675 个生成根按 0.73 根/s 消化、
+  预计 7 h，而几何 16 个 worker 空转（服务 CPU 0.04 核）、SurrealDB 一核跑满。两个单项：
+  ① `render_complete_regen_revision` / `render_delete_revision` / `render_mark_failed_revision` / 房间收口用
+  `WHERE action = … AND target_refno = … AND revision = …` 寻址，表上没有索引，事务内每条全表扫 18k 行 140 ms，
+  16 根一笔 4.5–5.8 s（`surreal_write_p50`）；② `release_unsettled_claims_on` 对整 cohort 认领的 18k 行**逐条**发单行
+  UPDATE，页因 EpochChanged 每 100–270 根结束一次，每页释放 3 分钟。
+  - `model_update_pending.rs`：新 `settle_target` = `<record_id_of(action, target)> WHERE <原谓词>`——按 id 取行（O(1)），
+    谓词留作 revision 校验，四处收口/标失败统一走它（历史 `{dbnum}_` 前缀旧行由 `clear_stale_at_process_start`
+    每次启动清掉，不再需要谓词兜底）；`release_unsettled_claims_on` 改为 `render_release_unsettled_claims` 按 500 条一个
+    请求（逐行 status / revision / lease_owner 谓词原样保留）。
+  - 同一隔离目录复跑 7997（run4-perf）：`surreal_write_p50` **5.2 s → 15 ms**，页内 16 根 **7.5 s → 3.0 s**，页间间隙
+    **180–236 s → <15 s**，消化速率 **0.73 → 3.35 根/s（4.6×）**，18,675 根 ETA **7 h → 1.4 h**。SurrealDB 仍是一核跑满
+    （服务 0.08 核）：剩下的大头是每页把整 cohort 17k 行 `UPDATE … RETURN AFTER` 重新认领、无索引表上的
+    `has_pending_work` / `count_pending_work` / 认领 ORDER BY 扫描（读 p50 316 ms）、以及每根一笔 `persist_root`。
+  - 测试：`cargo test --lib -- model_update_pending` 136 通过（改写 `settlement_addresses_the_row_by_its_id_and_guards_it_by_its_fields`、
+    `batch_settlement_is_revision_safe_and_bounded`，新增 `releasing_unsettled_claims_is_batched_per_round_trip_and_keeps_the_row_guards`）；
+    全量 `cargo test --lib` 1592 通过 / 1 失败（`staging::lifecycle::production_windows_have_independent_sessions`，
+    Connection uninitialised，需要库连接、与本改动无关）。
+
+### 变更
+
+- **Plant UI 增量监控增加可收藏的逐库入口。** `web/ops.html?dbnum=<N>` 现在把 dbnum 作为整页作用域：
+  顶部保留全部已登记库的入口并标出异常/滞后，进入单库后集中显示数据水位、模型水位、根追赶情况、
+  当前队列、最近任务与落盘错误；队列、连败、窗口阻断、任务、错误日志、实时事件和双水位表同步按该库过滤。
+  错误日志请求也下推 `dbnum` 到服务端，避免前端 40 条窗口把目标库旧记录截掉；“全部库”可返回总览。
+  AMS8000 RocksDB 现场验证：页面列出 41 个入口，`?dbnum=8000` 显示数据 `543/543`、模型 `543 · 一致`、
+  追赶根 0、放弃根 0、懒生成 1，水位表只有 8000，历史错误 6 条均属 8000；另进入 7006 后各面板切换为
+  7006 且错误为 0，证明作用域不是只改标题。同步修复窗口面板读取新旧字段名断裂的问题。
+
+## 2026-09-05
+
+### 变更
+
+- **双水位统一判决完成，并用 AMS8000 RocksDB 捕获真实的异步追赶窗口。**
+  新增 `dbnum_consistency` 深模块，把 `applied_sesno`、`model_sesno` 与实时生成根普查合成
+  `in_sync / lagging / not_judged` 三态；`/dbnums`、`/health` 与 `web/ops.html` 只消费这一份结论。
+  健康聚合只判监听范围内的 DESI 库，DICT/SYST/CATA 不再制造模型假滞后；模型滞后仍不进入
+  `blocking_conditions`，数据和模型继续异步推进。AMS8000 的 COUP `ORIL` 实改把源会话从 541 推到 542，
+  100ms 采样依次捕获 `541/541 in_sync`、`542/541 lagging`、`542/542 in_sync`；Plant UI 可见
+  `542 / 542` 与「一致」。独立 E3D RVM 对拍中，TUBE 世界 AABB 最大误差 0.00001 mm，带负体的
+  COUP（`has_neg=true`）误差 0 mm（容差 0.01 mm）。全量库测试 1580 项中先由浏览器抓到并修复
+  运维页残留变量/DOM 契约回归，最终验证见 C2 计划。后续补齐预览现状判决、单库任务终态的
+  `model_verdict` / `model_caught_up_at`，以及启动水位对账后的逐库 `describe()` 日志；这些读数失败都只留伴随告警，
+  不改变批次成败、不让数据事务等待模型。
+
+- **模型水位加第二触发点：零 regen 的窗口在凭证前移之后自己盖章，不再等下次启动对账（ADR-060 D5 修订）。**
+  起因是用户补述「增量更新时属性数据已写入 Surreal，模型水位却没跟进」。核查（共享记忆 mem-583）：`model_sesno`
+  唯一热路径盖章点在 `run_regen_group` 收口之后，由 `settled_window_cohorts` 只从 **`RegenRoot`** 行里取 cohort；
+  而 DESI 窗口零 touched 根（改的属性不碰几何）或只删根时，`WindowRootPlan::work_items` 里没有 `RegenRoot`，
+  模型排空里根本不会出现它的 cohort——`applied_sesno = T`、安定下限 = `T`、`model_sesno = T_prev` 在本进程内一直
+  不等，要到下次启动才「热路径漏记，已补记」。ADR-060「代价」一节原先没列这一格，而它是最日常的一格。
+  - **`finalize_attempt_on`**（`model_update_pending.rs`）：尾事务 → 凭证前移之后，若计划里没有 `RegenRoot`，
+    调 `stamp_model_watermark_on`（`advance_model_watermark` 的带库版本，出声措辞同一份）。判据仍只有
+    `ModelWatermarkProbe::supported` 一处；三道闸（拦路根 / `min(下限, applied)` 夹逼 / `WHERE applied >= 候选`）
+    原样生效，提前调最多空转一次、不可能多盖；成败不上抛，数据链不因它等待（M7 不破）。
+  - **`reconcile_startup_window`**（`window_root_plan.rs`）：`enqueued == 0` 的库在凭证前移之后同样盖一次——
+    启动对账排在开窗之前、这一轮已经跑过，不盖就要等**再下一次**启动（09-05 审核 N2 / mem-579）。
+  - **ADR-060**：D5 标题与正文改为「判据唯一、触发点两处」，列出残格（只有 `DeleteCleanup` 的窗口仍由启动对账补）；
+    M1 / 约束 / 代价三处同步。
+  - **护栏四条**：源码顺序钉 `finalize_attempt_on` 的「尾事务 → 凭证前移 → 盖章」与 `RegenRoot` 分流、
+    钉 `reconcile_startup_window` 的「前移 → 盖章」与 `enqueued == 0` 分流；`mem://` 上一窗 20→26 零 regen
+    收口即 `(26, 时刻)`，有 `RegenRoot` 的同一窗收口处不盖、留给 cohort。
+  - **验证**：`cargo test --lib -- a_zero_regen_window startup direct_read_mode initialization model_coverage reconcile`
+    **77 passed / 0 failed / 3 ignored**；模型水位与 finalize 相关 15 条全绿；`rustfmt --check` 两文件通过。
+    **未 live**。
+  - **没做**：P4 露出（`model_sesno` 在 `/dbnums` / `handlers.rs` / `web/` 仍零命中，`/dbnums` 仍露
+    `model_settled_floor`，`model_lazy_roots` 从未被写入）；读透形态下 `applied_sesno` 不动使 M2 封顶永远写不出
+    `model_sesno`，两枚水位在那个形态下不可判等——口径待拍。
+
+- **数据面多了一种形态：读透（`data_face = "read-through"`，默认），`pe` / `ATT_*` 行随模型生成写透进库（G0–G3）。**
+  用户拍板（计划 `docs/plans/2026-09-05-kv-mem-zero-ingest-read-through-plan.md`，Q1–Q5 全按推荐项，Plannotator `approved`）：
+  A′ 把「库」做成了开箱即用，「数据」那一半还没有——默认形态启动仍跑整库 DESI 基线，不跑的话 `pe` 0 行，
+  而模型行 `inst_relate.in = pe:⟨…⟩` 是**悬空引用**（`model_db_adapter.rs:635`），plant-ui 的隐式直管取
+  `in.owner` 得 NONE、一根 BRAN 整批解不出。读透形态下 `pe` 行是**缓存**：缺行 = 还没读到，不 = 不存在。
+  - **G0 `data_face` 三件套**（`src/options.rs`）：`DataFace { Ingest, ReadThrough }` / `data_face()` / `AIOS_DATA_FACE` /
+    `data_face_notice()`，与 `store_mode` **正交**不派生（`external + read-through` 是合法的落盘读透缓存）。
+    默认翻转的到达面与 09-04 P0 同款：13 份现场 / 夹具配置逐份补 `data_face = "ingest"`（仓根 `DbOption.toml` 不写），
+    护栏改名 `every_db_option_fixture_declares_its_store_mode_and_data_face` 两键都守（按负例验过：漏一行即红并点名），
+    五处「先起库再起服务」补 `AIOS_DATA_FACE=ingest`。`/health.data_face`、`/dbnums.data_face`、横幅一行。
+    顺手把此前有定义没人打的 `store_mode_notice()` 接到启动日志上。
+  - **G1 e3d-model 报访问名单**：`GenerationOutcome.visited: Vec<RefNo>`——DFS 本来就逐个 pop 到子树每个元素，
+    「子树是什么」只有这一份答案，另起一次枚举就是第二份。`GeneratedSnapshot` / `BakedSnapshot` 原样带过来。
+  - **G2 `src/data_interface/read_through.rs`**：读透的唯一入口 `write_through`。**行形状只有一份**（宪法 II）：
+    读取走 `e3d_collector::read_ele_data`、渲染走 `ElementRows::render`、动词 `UPSERT`（增量路 `Modified` 口径，幂等刷新）；
+    `pe.sesno` 仍是元素 last-touch 会话（`session_chain` → `PageSessions` + `IndexCursor::seek` 反查，与 `stream_baseline` 同一口径），
+    **不许拿生成时点顶替**——那会让同一张表里出现两种 `sesno` 含义；`RefNo::dbno()` 不等于本库的 refno 一律不写
+    （ADR-058 S3：CATA 永不进 `pe`）。验收是**行级对拍** `tests/read_through_rows_parity.rs`（issue-019 真实 db8000 归档）：
+    64 个样本与基线逐字段相同（`sesno` 在内）、祖先链到 WORL 收尾、真 `mem://` 上别库不写 / 索引外点名 / 重写幂等，4 passed。
+  - **G3 挂钩在编排层，不在生成服务**：`e3d_model_service.rs` 有源码钉「模型面不认识库」，所以生成服务只在
+    `E3dPersistReport` 上多报 `source_sesno` 与 `visited_by_root`；`model_refresh::generate_roots_report` 在读透形态下
+    用 `open_pinned_set` 钉同一版会话，每根 `visited ∪ 祖先链` 写透，**排在该根 `persist_root` 之前**
+    （护栏 `write_through_precedes_root_publication`）。**缓存不是前置**：源打不开 / 上溯失败 / 落库失败三条路只记
+    `read_through_degraded` 日志，模型照常发布（护栏 `write_through_failure_never_fails_the_root`，钉的是那段代码里没有 `?`）。
+  - **验证**：全量 `cargo test --lib` **1530 passed / 0 failed / 104 ignored**；`tests/read_through_rows_parity` 4 passed；
+    `vendor/e3d-model` `cargo check --all-targets` 通过；`rustfmt --check` 对本轮文件通过。**未 live**：没起过服务，
+    `POST /model/ensure` → `pe` 行出现这一格等 G6 的 `Verify-OutOfBox.ps1` 扩展一起验。
+  - **没做**：G4 `POST /api/v1/element/ensure`、G5（读透形态跳过摄入链 / 文件事件 = 退化窗口 / `initialization_required` 恒 false）、
+    G6、plant-ui U0–U5。**G5 之前默认形态启动仍会跑 DESI 基线**——基线 `INSERT IGNORE` 与写透 `UPSERT` 落同一形状的行，共存无冲突。
+
 ## 2026-09-04
+
+### 变更
+
+- **持久层形态从一个 bool 升成三值 `store_mode`，并给默认翻转先铺好护栏（P0；行为一个字没改）。**
+  起因是用户拍板走 A′：「让 gen-model 自己拉起 memory 后端的 surreal 子进程，plant-ui 零改动」
+  （新增 `docs/plans/2026-09-04-spawned-memory-store-out-of-box.md`；plant-ui 侧的对照分析在
+  `plant-ui/docs/plans/2026-09-04-kv-mem-out-of-box-adaptation.md`）。A′ 的意义在于
+  **内存形态从此有真端口**——`in_memory_db` 那条 `mem://` 路把库关在进程里，plant-ui 的启动序列
+  第一步就是连 `v_ip:v_port`，于是**外壳压根起不来**，`/sql` 探针 / `rvm_verify` /
+  `Capture-*Evidence.ps1` 也全部够不着（`options.rs` 自己的注释早就写了「要让别的进程读库就别开」）。
+  - **新增 `StoreMode`**（`external` / `spawned-mem` / `embedded-mem`）与 `store_mode()`、
+    `AIOS_STORE_MODE`、`store_mode_notice()`。`in_memory_db` 只表达得了 `embedded-mem` 那一档，
+    保留为兼容回退（没写 `store_mode` 时它说了算，行为与今天逐字相同）；两个键打架时以
+    `store_mode` 为准**并出声**——旧配置里那句 `in_memory_db = true` 会让读配置的人得出相反结论。
+    认不出的值按未设置处理、同样出声（`AIOS_DATA_READ_MODE` 同款纪律：静默换掉持久层介质是
+    本仓最贵的那类沉默，一个 `spawn-mem` 的错字会让部署以为自己在内存形态、实际连着落盘库）。
+  - **默认值本轮不翻**，护栏 `introducing_store_mode_does_not_flip_the_default_yet` 钉住这一点。
+    翻转（计划 P3）会让**每一份没写这一项的配置静默换介质**：最难看的是 l3 套件——它自己在 8048 上
+    起了一台 rocksdb surreal，服务却会去 spawn 自己那台，症状是「测试莫名其妙全查不到数据」而不是
+    一条报错。
+  - **13 份夹具 / 现场配置逐份补上 `store_mode = "external"`**（`db_options/` 8 份 + 仓根
+    `DbOption-{ams,aba,KMX,zsy}.toml` 与 `DbOption_text.toml`；仓根 `DbOption.toml` 不写——
+    它就是开箱即用形态本身，默认值正是为它准备的），并加护栏
+    `every_db_option_fixture_declares_its_store_mode` 扫这两个目录、**新加的夹具漏写就红**
+    （已按负例验过：注释掉一行即红，且错误里点名是哪一份）。默认值翻转这种事只在翻的那一天
+    有人记得，护栏是唯一能让半年后新加的夹具也不踩的东西。
+  - **验证**：`cargo test --lib -- options::tests` **55 passed / 0 failed**（新增 6 条）；
+    `cargo check --lib --tests` 通过；`rustfmt --check` 通过。**没有任何行为改动**——
+    `store_mode()` 目前还没有调用方，接线是计划里的 P1–P3。
+
+- **新增 `src/store_process.rs`：自带 memory 后端 SurrealDB 子进程（同一计划的 P1，同样还没有调用方）。**
+  `SpawnedStore::start` 做五件事：按 `AIOS_SURREAL_EXE` → 可执行文件旁的 `bin/` → 仓根 `bin/` 找二进制
+  （**刻意不回退 PATH**）、跑一次 `surreal version` 过版本闸、`start --user … --pass … --bind ip:port memory`、
+  轮询到端口能连上、`Drop` 与 `shutdown_spawned_store()` 两条路收尸（Windows 走 `taskkill /T /F`，
+  与 `bin/l3_suite` 那份 `kill_tree` 同一写法）。查找顺序与版本闸**逐条复刻
+  `scripts/Start-Surreal8009.ps1`**（计划 P5 要把「两份判据不许分叉」钉成护栏）。
+  - **版本闸分两档，不是一档**：大版本不是 2 → **硬拒**，错误里点名那两个必现的坑（要求不可逆迁移 /
+    `Server sent no subprotocol`）——人看到后者只会去查网络；`Cargo.lock` 的 fork rev 对不上 → **只警告**，
+    因为那只是*可能*出怪问题，做成硬拒会让任何一次 fork 更新先卡住所有人。拿不到 `Cargo.lock`
+    （部署形态下是常态）不编造警告。
+  - **`v_ip` 是主机名就早拒**：`--bind` 只吃 socket 地址，`localhost` 透传会让 surreal 在参数解析阶段
+    就退出、日志里只剩一行用法提示，所以 `localhost` 映射成 `127.0.0.1`；`localhost` 之外的主机名一律
+    拒绝并给出路（改 IP 或改 `store_mode = "external"`）——它可能压根不在本机，而「在本机拉起一个绑到
+    别人机器上的进程」做不到。绑 `0.0.0.0` 时探回环。回执与 `/health` 用的 `endpoint` **保持配置里的字面
+    形态**，因为跨部署互踩探测按那一栏比对（`handlers.rs`），改写成解析后的 IP 会让同一台库在两处长得不一样。
+  - **子进程输出落 `logs/surreal-<port>.log`，不继承控制台**：surreal 自己的启动横幅会插进 gen-model 的
+    启动日志中间，而那一段正是出问题时第一批要读的东西。等端口超时的那条错误**带日志尾巴**（20 行），
+    「一个字都没输出」也单独成话——不带尾巴等于让人自己猜。起不来的那个也会被收掉，
+    免得一边占着端口一边没人认领。
+  - **失败一律响亮，不回落别的介质**：静默回落等于「用户以为自己在内存形态，实际连上了昨天那台落盘库」，
+    而那正是 `store_mode` 要消灭的沉默。
+  - **验证**：那条 `#[ignore]` 的**真起真杀**手动跑过并通过（`bin/surreal.exe` 未纳入 git，CI 上没有）：
+    `pid=3468 监听 127.0.0.1:18009`、二进制自报 `2.1.4+20250317.45013fc9`（rev 与锁一致、无告警）、
+    `shutdown()` 之后端口确实放开、事后 `Win32_Process` 里无残留。**未接进 `run_app`**（P3）。
+
+- **端口被占时的四格裁决与那枚署名（同一计划的 P2，依旧没有调用方）。** `spawned-mem` 一旦是默认值，
+  「端口上已经有东西」就从边角变成日常：服务在跑的时候，`direct_model_persist` / `db_window_repair` /
+  python `full_init` 这些探针**正常局面**就是撞上服务手上那个库。`judge_port()` 给四格——
+  **空闲**起一个 / **自家还活着**附着 / **自家孤儿**收掉重起 / **别人的库或分不清**拒绝启动。
+  - **判据是写在库里的一枚署名，不是磁盘上的 owner 文件。** 从外面看，一台 memory 后端与一台
+    rocksdb 后端长得一模一样；而磁盘文件与端口上那台服务没有任何绑定关系——一份陈旧的 owner 文件
+    配上一个被复用的 pid，就足以让我们**把别人的库当成自家孤儿杀掉**。写进库里则是自证：
+    能从这个端口上读出那一行，就说明听在这个端口上的正是我们建的那个库。署名住在**固定**的
+    `gen_model/store` ns/db（与工程无关——配错工程的那个 gen-model 也要读得到它，那正是要拦下的局面
+    之一），带 `owner_pid` / `child_pid` / `nonce` / `project` / `namespace` / `heartbeat_ms`。
+  - **活没活看心跳，不看 pid。** 属主每 10 s 敲一次，60 s 没动才算停（六倍余量：GC、换页、机器很忙
+    都不该让活着的服务被判成孤儿，因为判成孤儿要**杀进程**）。pid 只用来在判死之后确认「它确实不在了」，
+    并在收孤儿时作为要杀的那个。
+  - **分不清一律拒，绝不往「杀掉它」那一边猜。** 心跳停了但属主 pid 还在（卡住？正在退出？）、
+    或者压根查不出 pid 在不在——两格都是 `Refuse` 并把原因说全。杀错的代价是把一个正在跑的服务的库
+    端掉；多等一次的代价只是人来看一眼。读不出署名（连不上 / 登录不了 / 查不动）与读出来没有那一行
+    分开报，但处置相同：都不许动它，出路给两条（换端口，或改 `store_mode = "external"`）。
+  - 收孤儿之后**等端口真的放开**再起：不等的话紧接着那次 `--bind` 会撞 `address already in use`，
+    而那条错误只会落在子进程自己的日志里。
+  - **验证**：`cargo test --lib -- store_process::` **29 passed / 0 failed / 2 ignored**；两条 `#[ignore]`
+    手动跑过、均通过。第二条是**署名走真库**（`a_real_store_answers_with_the_signature_we_stamped`）——
+    这条不能只靠纯函数：语句形状或字段名对不上时的表现是「读不出署名 → 拒绝启动」，看上去像端口被别人
+    占了，是最难查的那一类。它验了盖之前 `Absent`、盖之后原样读回、判据落 `Attach`、重复盖不留第二行。
+    `cargo check --lib`（含 test profile）与 `rustfmt --check --edition 2024` 通过；两轮 `#[ignore]` 跑完
+    `Win32_Process` 里无本轮残留。
+
+- **接进 `run_app`，默认翻成 `spawned-mem`（同一计划的 P3）——这一条起，行为真的变了。**
+  `run_app` 的 ws 连接从二分支换成按 `store_mode()` 的三分支：`embedded-mem` 走原来的 `mem://`；
+  `spawned-mem` 先 `ensure_own_store()` 把库拉起来（或附着 / 收孤儿 / 拒绝）再连；`external` 直连配置里
+  那台。**`spawned-mem` 与 `external` 连的是同一句** `init_surreal()`——两档的分别只在「那台服务是谁起的」，
+  到连接这一步它已经在监听了。
+  - **默认值的口径比「默认 spawned-mem」细一格**：两个键都没写才是 `spawned-mem`；写了
+    `in_memory_db = false` 而没写 `store_mode` 的，**视为显式要过外置库**，回 `external`——那句 `false`
+    是人写下的意图，不该被新默认盖掉，而它正是升级时最容易被静默改掉的一格。
+  - **实例锁改由 `store_mode` 把门（Q4）**：只有 `embedded-mem` 跳过。`spawned-mem` 的库有真端口、
+    别人连得上，「两个实例不共享库」这个跳过理由在那一档不成立——两个 gen-model 配同一份
+    `DbOption.toml` 就是冲着同一个端口去的。护栏 `memory_mode_needs_no_single_instance_lock`
+    翻成 `only_the_embedded_store_needs_no_single_instance_lock`，三档各钉一句。
+  - **装了 `Ctrl+C` 钩子**：`Drop` 兜正常退出与 panic，兜不住 `Ctrl+C`——那一路 tokio 直接结束进程、
+    析构不跑。少这一条不是「偶尔漏一个」，是**每一次 Ctrl+C 都漏一个占着端口的孤儿**。
+  - 启动横幅按三档分别说话；`embedded-mem` 那句的出路从「用部署脚本的 -InMemory」改成
+    「改 `store_mode = "spawned-mem"`」——那个脚本要做的事现在进程自己会做了。
+  - **顺带修一条护栏的锚点**：`startup_cleanup_precedes_spatial_watcher_worker_and_model_startup`
+    原先钉 `match init_surreal().await` 这个字面量，而连库已经不只一条路。锚点换成介质分派那一句
+    （`match crate::options::store_mode()`）——这条测试守的是**顺序**，不是某一条连接语句长什么样。
+  - **验证**：全量 `cargo test --lib` **1508 passed / 4 failed / 103 ignored**。四条失败**全部与本改动无关**，
+    且都验过：三条 `increment_manager::tests::*scope*` 是工作树里 `DbOption.toml` 今天启用了
+    `watch_dbnums = [7998, 8000]`（另一会话的 S5 live 验收窗口）——用一份没有该键的配置
+    （`DB_OPTION_FILE=db_options/DbOption-e2e-8009`）复跑，同一批 **44 passed / 0 failed**；
+    第四条 `the_embedded_panel_is_real_and_a_disk_copy_still_wins` 是 `web/ops.html` 改动中的已知红
+    （09-04 审核 §6 已记）。新增 `#[ignore]` 的**整条路径**用例
+    `ensure_spawns_once_and_attaches_the_second_time` 手动跑过并通过：第一次起（pid=37320 @ 18011）、
+    第二次附着、换一份工程身份被拒。`rustfmt --check` 通过。
+  - **没做**：探针与 python `full_init` 那几个自己 `init_surreal()` 的入口还没收进统一的
+    `ensure_connected()`（Q1 的后半）——服务在跑时它们照旧连得上（附着是自然发生的），
+    服务没起时与今天一样连不上，不是回归。
+
+- **P0 补齐两半 + `/health` 认得三种介质（P4）。**
+  - **凡是「先起 surreal 再起服务」的地方，服务那一段显式带 `AIOS_STORE_MODE=external`**：
+    `bin/l3_suite/fixture.rs`（它自己在 8048 上起了一台 rocksdb surreal，服务却会按新默认自己再拉一台
+    memory 库——症状是整套断言对着空库跑、「莫名其妙全查不到数据」而不是一条报错）、
+    `Run-LiveBatch.ps1`（尤其要紧：一部分 live 用例**不读 `DB_OPTION_FILE`**，只能靠环境变量收口）、
+    `Run-Issue7E2E.ps1`、`Run-RoomE3DE2E.ps1`、`Start-AiosDatabaseManual.ps1`。这些脚本指的都是
+    `db_options/*` 那几份已经写了 `store_mode = "external"` 的配置，环境变量是**第二道**——
+    给「换了配置忘了改」留的。CI（`windows-tests.yml`）只跑 `cargo test`、不起服务，无需改。
+  - **`Start-Surreal8009.ps1` 改口**：`.SYNOPSIS` 加一句「**只有 `store_mode = "external"` 的部署才需要它**」，
+    `.DESCRIPTION` 开头补一段说清默认形态下**不要跑它**，以及「先手工跑了它又忘了把配置改成 external，
+    服务会明确报错而不是悄悄连上你这台库」——那正是 P2 的署名判据买到的东西。
+  - **`/health.sul_db` 加 `medium` / `durable` 两栏，`endpoint` 在 `spawned-mem` 下报真地址。**
+    这一格不改就是个坑：那台库是本进程拉起来的，但**端口是真的**，报 `embedded:mem` 会让
+    `aios_db.full_init` 的跨部署互踩探测**放行两个抢同一个端口的实例**。只有 `embedded-mem`
+    才回那个占位串。顶层 `in_memory_db` 保留给老客户端，语义收窄成「持久层不落盘」（`!durable`）——
+    它**不回答「连不连得上」**，那个问题归 `endpoint` / `medium`。
+    新护栏 `only_the_embedded_store_reports_a_placeholder_endpoint` 钉住分叉判据是 `has_endpoint()`，
+    并钉 `health` 全文不再直接读退役的两态开关；既有的 `sul_db` 六键承诺扩成八键。
+  - **验证**：全量 `cargo test --lib` **1511 passed / 4 failed / 104 ignored**，四条失败与上一条同源
+    （三条 `watch_dbnums`、一条 `ops.html`），已分别验过与本改动无关。`rustfmt --check` 通过。
+
+- **P4 收尾：`PersistMedium` 三值 + 连库收成唯一入口，旁路入口一律「只附着、不拉起」。**
+  - **`PersistMedium` 从两值改三值**（`RocksDb` / `SpawnedMem` / `EmbeddedMem`），`PersistTarget::process()`
+    改按 `store_mode()` 逐档判。`is_durable()` 的答案不变（只有 `RocksDb` 为真），但回执不再把
+    `spawned-mem` 说成「InMemory」——那个词会让人以为是进程内嵌、外面读不到，而它恰恰读得到。
+    新增 `is_reachable()` 把这两件事分开：**`spawned-mem` 不 durable，但别的进程读得到**。
+  - **新增 `ensure_store_connected(db_option, startup)`：连持久层的唯一入口。** `run_app` 里那段三分支
+    搬进来，旁路入口共用同一条。配套 `attach_store_connected()` 是给旁路入口的便捷档。
+  - **新增 `StoreStartup::{Spawn, AttachOnly}`——这一格是本轮真正要紧的东西。**
+    只有服务主进程给 `Spawn`。探针（`direct_model_persist` / `db_window_repair` / `world_refno_probe`）、
+    MCP `query_service` 的独立路径、python `full_init` 与 `connect` 一律 `AttachOnly`：
+    **端口空着时响亮地说「服务没起」，而不是自己拉一台空库然后在上面作业**——后者的失败一声不响，
+    现象是「查了半天什么都没有」「纠正跑完什么都没变」「取证落完随进程消失」。
+    `AttachOnly` 撞上自家孤儿同样拒绝：探针没有资格杀别人留下的进程。
+  - **护栏锚点再修一次**：`startup_cleanup_precedes_spatial_watcher_worker_and_model_startup` 改钉
+    `ensure_store_connected(&db_option`——分派已经从 `run_app` 搬走了。
+  - **验证**：全量 `cargo test --lib` **1511 passed / 4 failed / 104 ignored**（同上四条，均已验与本改动无关）；
+    三条 `#[ignore]` 真库用例全部手动跑过通过，其中整条路径那条已扩到验 `AttachOnly`：
+    端口空着 → 报「没有自带存储在跑」；起来之后 `Spawn` 与 `AttachOnly` **两档都附着**。
+    `cargo check --lib`、三个 bin 各自 `cargo check --bin`、`cargo check -p aios-py` 全通过；
+    `rustfmt --check` 通过（`python/src/lib.rs` 有一处 261 行的既有格式偏差，不是本轮改的，没动它）。
+  - **没做**：P5（PS1 与 Rust 两份版本闸判据不许分叉的护栏）。
+
+- **P6 实测：开箱即用在真机上跑通了，并且当场撞出一个真缺陷（已修）。**
+  用真的 `aios-database.exe`（release）在一份换了端口、**故意不写 `store_mode`** 的配置上跑
+  （测的就是新默认），`AIOS_STARTUP_AUTORUN=0` = 不预解析，`watch_dbnums=[7997]`。
+  - **拒绝那一格先验的**：对着被别人占着的 8009 起 → 进程 `exit=1`，stderr 就是那句
+    「端口上是一台**没有署名**的 SurrealDB…拒绝启动」。这一条是**真进程真端口**，不是单测。
+  - **开箱即用成立**：换到空闲端口，**启动总耗时 6.47 s**，`/health.sul_db` =
+    `{endpoint: "localhost:18022", medium: "spawned-mem", durable: false, connected: true}`，
+    子进程 `surreal.exe … --bind 127.0.0.1:18022 memory` 在跑，横幅照三档说话。
+    启动日志明说「**gen_root 尚无凭证记录，本次启动不排任何模型工作**——从未生成过的根等按需
+    `ensure`（ADR-058 D6）」，`/api/v1/tree/roots` 立刻回 37 个 SITE（`source: "direct"`，走文件）。
+  - **按需生成成立**：`POST /api/v1/model/ensure refno=24381/34109`（SITE `/1RX-ARCHHB`）
+    **89.3 s** 回 `status: Generated`、`model_available: true`、416 个实例 / 560 个生成根。
+    直连那台 kv-mem 查回来：`inst_relate` **416 行**、`gen_root` 560 行、
+    **416/416 平表三件齐活**（plant-ui 的快路一行都不用退回 slim）、**`pe` 0 行**——
+    「不预解析、按需生成、落进 kv-mem」这条链在真机上是通的。
+  - **⚠️ 由此坐实一条 plant-ui 侧的边界**：`pe` 是 0 行，而 plant-ui 查隐式直管那条子查询取
+    `in.owner`，没有 `pe` 行就是 `NULL`，`GeomInstQuery.owner` **不是 `Option`** → 一根 BRAN 的
+    直管会整批解不出来。非管件走平表快路（`owner` 从 `anc[1]` 还原，**零解引用**）不受影响。
+    本轮实测的 SITE 全是 PANE，没有触发；这一条按码坐实、未实测。
+  - **撞出的缺陷 —— 心跳新不等于属主还活着（已修）**：强杀服务后 60 s 内重启，心跳看着还新、
+    写它的人却已经没了，于是新进程判「附着」。**附着的进程不认领这台库、也不接着敲心跳**，
+    它就变成一台没有主人的库；再过 60 s 会被下一个启动的进程当孤儿杀掉——**而那时它正被人用着**。
+    实测原样复现（新服务 pid 54872 附着到属主已死的 pid 21716 那台库，416 行旧数据还在，
+    署名再没人更新）。`judge_port` 改成：心跳新**且**属主明确不在 = 没有歧义（写心跳的那个已经死了），
+    照孤儿收；查不出属主在不在时仍然附着（新鲜心跳是够强的证据，而这一格的反面是杀进程）。
+    新护栏 `a_fresh_heartbeat_from_a_dead_owner_is_still_an_orphan`。**修完重跑同一场景，
+    真机日志变成**「回收孤儿存储进程：自家存储的属主 pid=41996 已经不在了（心跳 8 秒前还在写——
+    多半是被强杀，析构没跑），杀掉 pid=44388」，随后起了一台干净的新库。
+  - **新增 `scripts/Verify-OutOfBox.ps1`**：把上面能自动判的那半自动化（起服务 / 等就绪 /
+    打 `sul_db` 三栏 / 树根数 / 收尾查孤儿），剩下一半（点树、点眼睛、看三维）列成清单给人。
+  - **验证**：全量 `cargo test --lib` **1513 passed / 4 failed / 104 ignored**（四条同前，均已验与
+    本改动无关）；`rustfmt --check` 通过；跑完本机无本轮残留进程。
+    **仍未做**：plant-ui 端到端（本机没有 plant-ui 的构建产物，`target/release` 里一个 exe 都没有）。
+
+- **模型增量「联动更新」十一类落成一张表，并当天收掉两条（文档 / ADR，未动源码）。**
+  起因是「现在的联动更新情况是否梳理整理完毕了」这个问题在仓内**答不出来**——十一类联动边各自散在
+  4–5 份文档里，没有一处能回答「漏了哪一类」。新增
+  `docs/2026-09-04_model-cascade-update-inventory.md`：§1 分类表（触发边 / 承担者 / 状态 / 依据），
+  §2 本轮 ida-bridge 新取证，§3 待补项，§4 不许当已证。
+  - **`CONTEXT.md` 加两条词条**：**联动更新 (Cascade Update)**（指定那张表为唯一索引——新增或改动任何
+    一条联动边先改表）与**图形行为 (Graphics Behaviour)**（0/1/2/3 四档语义）。
+  - **ADR-061：不复刻 core 的 `XRPNTR` 正向依赖扩散。** 它此前是清单上**唯一连决策都没有**的边。
+    四条理由：那条递归在 `DB_UserChanges`（会话内交互编辑账本），而本轮实读的 GETWORK 全程
+    **没有任何依赖递归**，照抄是与 core 分叉；`XRPNTR` 的 DCHC = 0；1878-noun 快照里无属主；
+    反向那一侧 `ref_rev` 本就通用覆盖（缺的只是 core 那条正向边）。带四条复议触发条件。
+  - **ida-bridge 五条新取证**（`core.dll` = `idalib-33060`、`Core3D.dll` = `idalib-25128`；
+    既有文档取的都是数据层，本轮补的是**图形层**——core 拿到变更集后究竟扩散成哪些重画）：
+    ① 找到 GETWORK 的级联入口 `DDES_GraphicsMngr::postGetWork`（Core3D `0x1052e9f0`，`op==4`；
+    5/6 是 postUndo / preRedo）；② 它**只吃 `DB_DB::type ∈ {1, 6}` = DESI + ISOD**，
+    **CATA 根本不进这条路**（类型号从 `DB_DatabaseTypes::LoadDatabaseTypes_Generated`
+    core.dll `0x5a2a9bb` 逐条读出）——这独立第二次证实 core 里目录件变更不靠变更扩散，
+    并说明 **gen-model 的 CATA 反向级联是超出 core 的能力、没有 core 侧对照物可对拍**；
+    ③ 变更→重画的完整判据（Core3D `0x1052f2e0`）：
+    `重画 el ⟺ el.type ∉ {WORL, MNUM} ∧ ( gb(el) ∉ {1,2} ∨ ( gb(el)==1 ∧ gb(el.owner()) ∉ {1,2} ) )`；
+    ④ `DES_DrawList::hasGraphicsIgnoreFlag`（Core3D `0x1051a920`，自身一层）是
+    `isGraphicsIgnoredBetween`（上溯多层）的兄弟——**P1-2b 落守卫时是两条规则不能合并**；
+    ⑤ **`gb == 3` 全产品无任何代码路径**：全 E3D 2.10 安装 868 模块 / 0.65 GB 扫 `push 4DCE6Fh`
+    只有 `Core3D.dll` 命中，导出符号 `?graphicsBehaviour@DB_Noun@@QBEHXZ` 零导入方，
+    所有读点只与 `1` / `2` 比较 ⇒ `3` 对每个消费点都与 `0` 等价，**守卫只需管 `{1, 2}`**；
+    那 72 个 gb==3 noun 与 e3d-model family 对表几乎正落在 `ICABCO`(17) / `IPFCOM`(20) / `IFCOMP`(3+1) 上，
+    语义 = 「照画、但画法由应用侧专用绘制路径提供」，属**几何覆盖度**问题而非增量问题。
+    09-02 文档 §5 开放问题 4（gb==2/3 语义）就此两半都结掉；09-02 计划 P1-2b 第一条
+    「矩阵导出加 `gb` 列」经核对**已经做掉了**，可划掉。
+  - **核实第 11 类其实早已落地**（此前记的「在案未做」是错的）：09-02 计划 P1-2b 在 e3d-model
+    `5da8510` 就做完并提交了，且比计划写的还全（矩阵 `gb` 列、`graphics_behaviour()`、
+    109-noun 护栏、`nearest_unit` 只看祖先、`collect_unit_subtree` 不下钻、外加计划里没写的
+    `pipeline::push_members` 消费口径）。
+  - **补上缺的那一档：`gb == 2` 护栏**（e3d-model `src/category.rs`，本轮唯一的代码改动，
+    只有测试与注释）。core 判据里 `gb == 2` 有独立一道门（层级容器永不单独重画），
+    e3d-model 这边由 `classify` 收成 `List` / `Composite` 顺带承担、**没有任何东西钉住它**；
+    而它不是空转——98 个 gb==2 noun 里**有 10 个同时带字典 `primitive` 位**
+    （`CSURF` `PLTGRD` `HRPANE` `STRLNG` `CPANEL` `INTFRM` `HICPAN` `ENVLOP` `HTFEAT` `STRFLT`），
+    今天靠 `classify` 的字典兜底臂不成件是**巧合不是保证**：谁照着 `primitive` 位补一条
+    `Primitive(_)` 臂就会让这些容器静默出几何（`SBFI` 静默漏件的同型，方向相反）。
+    新测试 `graphics_behaviour_two_containers_are_never_units`（98 写死 + 10 个逐个点名），
+    并把 `graphics_behaviour` 文档里**已过期的**「2 / 3 的含义未读，不要拿来分派」换成四档语义
+    与 core 判据原文，写明 **`3` 不该有对应护栏**——为它加分派才是分歧。
+  - **启动复核对 CATA 变更不再零感知**（09-04 启动增量审核 #4 里写的「便宜的半步」，
+    `model_update_pending.rs` + `initialization_phase.rs`）。此前一级过滤只比 DESI 文件最新，
+    目录库前移了启动一根不排、而且**一声不吭**；direct 形态下连 CATA 数据批次都没有，
+    唯一兜底是按需 `ensure` 撞上 `ModelTarget.catalogue` 指纹失配——那要等有人点到那个根。
+    现在：`published_catalogue_sessions_on` 从 `gen_root.published_model_target.catalogue` 取
+    「上一次发布落在哪一版目录」（`CATA dbnum → 最旧会话`；一条 `GROUP BY catalogue`
+    **服务端去重**——一个库的全部根共用同一份 `ModelTarget`，几万行塌成个位数行，不是逐库点查），
+    与 `model_source::latest_source_version` 一比得出过期名单；启动横幅点名 dbnum 并明说
+    「不为此排任何模型工作」+ 人工出口，`/health.startup.reconcile` 新增
+    `catalogue_cascade_degraded` / `stale_catalogue_dbnums` / `unreadable_catalogue_dbnums`。
+    **只点名不排工作**——反查那一半（S4 / 09-02 计划 P1-4）仍未开工。
+    两条刻意的克制各有守卫：目录那一格**不参与 `result` 取重**
+    （`the_catalogue_flag_is_named_separately_and_never_downgrades_the_result`；混进去会让每一次
+    有目录变更的启动都报成失败态，人就分不清哪次是真出岔子），以及「已确认过期」与「不知道」
+    **分两栏**（`a_catalogue_that_cannot_be_read_is_unknown_not_stale`）。
+    踩到并记进注释的坑：`GROUP ALL` + `array::flatten` 是错的——聚合函数逐行求值之后才被 GROUP
+    收集，拿回来的是「数组的数组」，且不报错，只在反序列化那一步变成一句看不出所以然的类型不匹配。
+  - **第 5 类「连接 / 邻居」的验收窗口：找过了，本语料压不出来**（新探针
+    `e3d-model/tests/increment_real.rs::probe_chain_for_connection_change`，`#[ignore]`，
+    与既有三条探针同款只做 `collect_window` + `plan_update`）。它值一条自己的探针是因为
+    **NOZZ 跟 BRAN 不在同一条 owner 链上**：变换级联走链**内**的后代，这条走链**外**的引用。
+    `PROBE_LIBS=ALL_DESI` 扫 **292 个 DESI 库、7 秒**：44 个连接改动窗口，**0 个能判别**，
+    **0** 个 NOZZ 记录变过，**0** 个「名下有 NOZZ 的元素挪了位」。44 个窗口形状一致——
+    变的是 **BRAN 自己的 `HPOS`/`TPOS`**（E3D 把接好之后的头尾位置回写在 BRAN 记录里），
+    BRAN 因此是它自己的索引候选，路由容器照常进重算集。与 `Shape::Reparented` 同一类结论：
+    **没有语料窗口能把这条联动做成判别性验收**。
+  - **第 5 类就此结掉：`HPOS`/`TPOS` 是存储属性，不是由 `HREF` 解出的伪属性**（ida-bridge 实读）。
+    core.dll 里 `ATT_HPOS` **只有一条 xref 且是初始化写点**（`0x56d379a`），零次读，所以
+    core.dll 内唯一的 `addGetPosPlug` 注册点（`0x5a60f14`）没给它挂插件；Core3D 的三个位置
+    伪属性注册点（`sub_10425CD0` / `sub_105EF3F0` / `sub_1062CCE0`）也一个都不碰它。
+    写它的是 `MDR_ApplicationManager::disconnectHead` / `disconnectTail` 的 `putAtt`
+    （接 / 断的时候把解出来的位置回写进 BRAN 记录），读它的一路是普通 `getAtt`，
+    含 `GFX_GraphicsManager::Update`。**画的那一版与存的那一版是同一个**，于是两头堵死：
+    E3D 回写了 → BRAN 记录变 → 我们照常重算；E3D 没回写 → 它自己也照陈旧值画 → 我们跟它一样。
+    「接头动了、管路没跟着动」这条分歧在 SAVEWORK 语义下**构造性不可达**，探针留作回归。
+    未证的一格已写明：`PDMS_HposElement::getHPOS`（`0x106690c0`）那次 vtable 派发（槽 `+64`）
+    本轮没解，结论走的是「伪属性注册表里没有它」这条路。
+  - **第 4 类反查的验收窗口先探明了：不缺，31 个**（新探针 `probe_catalogue_chains`，
+    `PROBE_CATA_ALL_WINDOWS=1` 走完整条链）。30 个 CATA 库全部 ≥2 环；**`ams5052_0001`（链 34 环）
+    一家就有 24 个窗口只改 1–3 件**，`184→185` 恰好一个 Modified 目录件——正是 P1-4 那句
+    「改一个 SCOM 参数的 CATA 窗口」的天然形状；`ams6890_0001` 另有 4 个、`ams5054_0001` /
+    `acp7041_0001` 各 1 个。其余 26 个库链头一律是一次性导入（几万到上百万个 Inserted），
+    不能当门。**所以第 4 类与第 3/5 类不是一回事：不是没有窗口，是东西还没做**，挡在前面的
+    只有反查表本身。下一个要问、本轮没答的：`ams5052` 有没有被本语料的哪个 DESI 库引用
+    （没有则这道门空转）——这一问需要反查表，是 P1-4 第一步的副产品，不是前置。
+  - **★ core 的 CATA→DESI 反查怎么做查清了：读 dab 文件自带的引用表，不扫库**
+    （顺手结掉 09-02 文档 §5 开放问题 3）。`sub_5AAF4E0` / `sub_5AAE610` 是 dabacon **opcode 派发**，
+    名表在 `off_6003900`（`const char*` 数组——**不是** `.ida_scratch/_opcodes.py` 里那张 6 字节
+    内联表，那是另一个 IDB 的基址）：**326 = `db_start_ref_table_search`**、
+    **328 = `db_get_next_ref_table_entry`**，配 `192 db_finish_table_search`；同族还有
+    `122 db_start_int_table_search` / `132 db_start_name_table_search` / `260 db_start_sys_table_search`。
+    `DB_RefTableIterator::increment` 的「键一变就 `db_finish_table_search`」说明**这张表按
+    (属性, 目标 ref) 有序、搜索返回的是游标**，且**按库文件**存。
+    **对 P1-4 的意义**：计划给反查源留了 ①（e3d-io 读 dab 引用表）/ ②（开库时全库扫描建内存表）
+    两条路、定的是先做 ②；现在有正面证据 **core 走的是 ①**。这不推翻排期（② 落地快），
+    但把 ① 从「也许可行」变成「一定存在且是权威口径」——`ams7351` 那种 334 万候选的目录库上
+    两者不是一个量级。**未证**：只坐实了原语身份与调用/终止形状，**没读出引用表的页布局**，
+    P2-2 的取证因此只完成一半。
+  - **收口后的状态**：8 闭环（含第 5 类）/ 2 已记录为决策·不做（UDA 递归、`XRPNTR`）/
+    1 有机制、验收门本语料压不出来（改挂新旧两根）/ **1 洞（CATA→DESI 的反查本身）**。
+  **验证**：e3d-model `cargo test --lib -- category::` **25 passed / 0 failed**（含两条 gb 护栏）；
+  新探针 `cargo test --test increment_real -- --ignored probe_chain_for_connection_change`
+  在 `PROBE_LIBS=ALL_DESI`（292 库）与 `ams8000_0001` 下各实跑一遍，`rustfmt --check` 干净；
+  gen-model `cargo test --lib -- data_interface::model_update_pending` **124 passed / 1 failed**，
+  那 1 条是 `startup_coverage_reconcile_covers_unscoped_and_never_aborts_startup`，
+  **与本改动无关**：它 `include_str!("../lib.rs")` 找带 `\n` 的字面量，而工作树里 `src/lib.rs`
+  此刻是 CRLF（另一会话的编辑翻的；同一类事故本轮也发生在我改的
+  `initialization_phase.rs` 上，已就地改回 CRLF）。`rustfmt --check` 三个改过的 `.rs` 全干净。
+  均**未提交**、**未 live**。
+  引用的 core / Core3D 地址全部本轮实读，可按地址复查（文档 §2 附地址表）；
+  868 模块扫描与导出符号 findstr 均实跑。未验证项与边界写在文档 §4 与 ADR-061 末节。
+
+- **落库审核的 P2–P7 一次收口（ADR-060 D10/D11/D12 + 迁移/影响面回写）。** 同日那份「模型生成落库审核」
+  列了七条，P1（共享网格只增不删）经用户确认是**设计如此**——内容寻址的东西没有「属于哪一根」这回事，
+  所以既不按根回收也不打算有可达性 GC，这一条改写进 ADR 的 D2 而不是当欠账修。其余六条：
+  - **P2 旧前缀清扫接上生产调用点，挂在 `persist_dbnum` 的收尾，按库一次，且只在旧命名空间真的悬空
+    之后。** 守卫两道都写进语句里：标记行（`queue_control:model_legacy_prefix_sweep`）＋「七处指针
+    一个都不许还指着 `direct_*`」。**为什么不用进程内 `OnceCell`**：「一次」的作用域是**库**——进程记的
+    那一份，换个进程连同一个库又扫一遍；语句自带守卫不多一趟往返，扫到一半崩掉也是两样都不算数。
+    另开 `sweep_legacy_prefixes()` 给「已经整库重生成过、想单独补一次」的运维口。
+
+    **第二道守卫与「挂收尾而不是挂单根」都是真库实测撞出来的，见下面的验证段。** 初版跟着单根落库的
+    第一块走、且只判标记行——那一版在 AMS 7997 上会把整库还在用的包围盒与世界变换删掉。
+  - **P3 房间派生面与空间树收敛从投影记录上重新驱动**（`room_publication` 从此不再是悬空模块）。
+    **清边跟着删除那一块、排重算跟着回执那一块，两笔不能对调**：清边落在删除后面的块，中途失败就留下
+    一批指着已删几何的悬空边，而下一轮对账再也看不见那些几何（行已经没了），悬空边永远不会被清；排重算
+    落在前面的块，任务一被消费就在照着只写了一半的几何算房间归属。定向落库排重算 + 清边，全库落库只清边
+    （ADR-010 §4 收窄 1）。动过几何的每一块同事务 `spatial_epoch` +1；提交之后按已提交指针收敛进程内空间树
+    （新 `aabb_tree::converge_tree_after_persist`），**只有 `PersistTarget::process()` 才收敛**——树镜像的
+    是全局那个库，自带句柄的目标去动它就是拿另一个库的指针污染这棵树。管身不进收敛名单：它不写
+    `inst_relate`，树上本来就没有它的条目，照来源同步只会把这个 BRAN 判成「指针已消失」白摘一次。
+  - **P4 ADR-060 的「未做」章过期**：「适配器还没有生产调用点」早就不成立（`model_refresh` 定向收尾与
+    `exec_api::gen_dbnum` 整库收尾），房间那一条也随 P3 消。连同 core3d 一致性表里同一句陈述一并改判。
+  - **P5 多块发布在凭证行上留一道可见性栅栏**：第一块写 `publication_status='publishing'`，最后一块的回执
+    翻回 `ready`。凭证前移判的就是 `ready`，半截根因此不会被当成「S 时刻几何有效」的证明。
+    **只在会盖章的多块发布上写**——没有回执就没人解除它，那时写栅栏等于把这根永久钉死；只有一块时事务
+    本身就是原子的，中间态根本不存在。
+  - **P6 拼 SQL 分两档：值转义，id 拒绝。** 字符串字面量位置（`noun` / `generic` / `manifest_hash` /
+    `dependency_digest` / `root_refno` / `type::thing` 的 id 段）一律走 `sql_string()`；`表:⟨…⟩` 位置没有
+    转义序列可用，走 `bracketed_id()` **拒绝**超出 `[0-9A-Za-z_]` 的东西。`noun` 撞上引号的概率约等于零，
+    但这是**口径不是概率**：裸插值留一处，下一个往行上加字段的人就会照抄。转义之后渲染出来的字节与改前
+    逐字相同，原有 15 条护栏一条没动就全绿。
+  - **P7 取证探针不再自带一套渲染器**：`bin/direct_model_persist.rs` 只把生成结果摊成
+    `ProjectedGeometry`，SQL 由 `model_db_adapter::render_records` 出。它原先出的是 `legacy-instanced-v2`
+    口径（每个元素都写 `inst_info`、`geo_relate` 带 `pts:[]`、`inst_geo` 上多一份 `param.primitive_key`），
+    与生产的行内容本来就不同——**取证探针出的行要是与生产不同，它取的证就不是生产的证**。顺带删掉
+    重复的 `shared_mesh_identity` / `transform_value` / `LegacyRows` 一套（约 110 行）。
+
+  **本轮七条新护栏**（进 `model_db_adapter::tests`）：PDMS noun 带引号与反斜杠时不逃出字面量且行上的值
+  一字不差／记录 id 出了机器字母表整块渲染失败／旧前缀清扫按库一次（第二次落库不再重扫）／半截根停在
+  `publishing`、补齐之后回到 `ready`／没有回执的落库一个字都不动凭证行／房间边与 `spatial_epoch` 跟着
+  发布事务走（被移除的来源清边、留下的排重算、epoch 推高）。
+  第七条是 core3d 一致性表 §8 点名要、当时因「文件被别的会话占着」没写的那一条：
+  `reconciling_an_ancestor_root_does_not_delete_a_nested_roots_rows`——**按根对账的两边必须同一个口径**
+  （库那边 `anc CONTAINS <根>`、存储那边 `records_of_root`，同一张祖先索引）。嵌套生成根 D 的行既挂在 D 下
+  也挂在祖先根 A 下，任一边收窄成「只算直属这一根的」，另一边就把对方名下的行当孤儿删掉。两个方向各落
+  一次断言，真孤儿照删。今天不咬人靠的是「祖先链是全库的 + 生成是整棵子树的」两个互不相干的事实，
+  哪条被优化掉都由它先红。
+  **验证（本轮实跑）**：`cargo test --lib -- fast_model::model_db_adapter` 全绿（收尾时 23 条，多出的那条
+  `a_projection_that_stops_covering_the_nested_root_deletes_its_rows` 是并行的另一条会话在同一文件上补的
+  绊线，与本轮这条正反一对）；
+  `cargo test --bin direct_model_persist` 8 passed / 0 failed；`cargo clippy --lib --bins --all-targets`
+  改动文件零告警；`rustfmt --edition 2024 --check` 四个改动文件干净。
+
+  **真库实测（AMS 7997，`ws://localhost:8009`，SurrealDB 2.1.4，全库重生成 + 落库 + 清扫走了一整趟）。**
+  这一趟改了两次结论，是本轮最值钱的部分：
+
+  **① 落库前的现场根本不是 ADR 假设的那个状态。** 22,040 行 `inst_relate`（`dbnum=7997`、e3d-model 写的）
+  **全部**还指着 `aabb:direct_world_*` 与 `trans:direct_*`，其中 7,908 行的 `out` 指着
+  `inst_info:direct_*`。旧命名空间共 67,950 行，**没有一行是悬空的**——`direct_` 当年只戴在那三张表上，
+  `inst_relate` 一直用不带前缀的 id，所以它没被新写入接管，反倒是活着的引用方。
+  **初版清扫（跟着单根落库的第一块走、只判标记行）会把这 67,950 行连根删掉。**
+
+  **② 加了守卫之后先空跑一次确认拦得住**：把生产那条语句原样打到真库上，`$legacy_live` 命中，
+  **删 0 行、标记没盖**，计数一字未变。
+
+  **③ 整库重落一遍**（`e3d_persist_smoke --dbnum 7997 --chunk 5000`，release）：
+
+  ```
+  GENERATE upserted=52098 shared=20167 baked=31931 unique_meshes=20878 failed=0  用时 36.4s
+  PERSIST  介质=RocksDb 可持久=true 块大小=5000 事务=12 落行=52098 对账删=0 盖章=2  用时 4498s
+  READBACK inst_relate=47475 tubi_relate=4623 平表三件齐活=47475 geo_relate带本地变换=15544
+  ```
+
+  生成 36 秒、落库 75 分钟——**瓶颈整个在 ws 往返 + rocksdb 写**，不在几何。
+
+  **④ 重落之后清扫又被自己拦住了，暴露出守卫的两个错判**（这才是真跑一趟的价值）：
+
+  - `geo_relate.in` 指着旧 `inst_info` 的那 7,908 行**自己就是要删的旧行**，把它们算成活引用等于
+    永远拦住自己；
+  - `inst_geo.aabb` 指着的 22 个旧共享本地盒是**真活引用**，但 `inst_geo` 按 N2 只增不删，这一条
+    永远为真——处置不该是拦住整次清扫，而是把那 22 个盒子从删除里排除。
+
+  改完（判据收到五处、`aabb` 删除加 `NOTINSIDE $shared_boxes`）再跑一次真库：
+
+  | 项 | 落库前 | 清扫后 |
+  | --- | --- | --- |
+  | `inst_info:direct_*` | 7,908 | **0** |
+  | `trans:direct_*` | 33,964 | **0** |
+  | `geo_relate`（`in` 是旧 `inst_info`） | 7,908 | **0** |
+  | `aabb:direct_*` | 26,078 | **22**（`inst_geo` 还指着的共享本地盒，刻意留） |
+  | 清扫标记 | 无 | **true** |
+
+  共回收 **75,836 行**，事后 `inst_relate.aabb` / `.world_trans` / `.out` 与 `geo_relate.in`
+  **悬空数全为 0**；`inst_geo` 34 行一个没动（唯一一个没有 `aabb` 的是隐式管身，本来就不写）。
+
+  **⑤ 平表快路真的被点亮了**：落库前 22,040 行里 **0 行**带齐 `aabb_d` / `world_trans_d` / `insts_flat`
+  （Plant UI 每一行都在退 slim 兜底）；落库后 **47,475 / 47,475 全带齐**。同一批行上两条读法：平表投影
+  **1.45s**、解引用 + 子查询 **3.39s**（ADR 里那对 0.7s / 10.7s 是另一个库、另一批行的数，别直接比）。
+
+  **⑥ 发布栅栏与 `spatial_epoch` 都动了**：12 笔事务里 `spatial_epoch` 从 259 推到 **270**；跑完
+  **没有一根卡在 `publishing`**，盖过章的根都回到 `ready`。
+
+  **⑦ 房间重算改走定向那一档验，通过。** 整库那一趟一条 `room_recalc_*` 都没写，两个原因都成立：
+  这个库 `room_relate` 本来就是 0 行（没有边可清），而 `persist_dbnum` 按 ADR-010 §4 收窄 1
+  **本来就只清边不排重算**。所以给 `e3d_persist_smoke` 补了 `--root <a/b>`，走 `model_refresh` 的生产
+  两步（`generate_and_persist_roots` → `persist_root`，`Directed` 口径）——**房间重算那一支只有这条路
+  走得到，只跑整库那一档等于永远不覆盖它**。拿 7997 的 `24381/100060` 跑：
+
+  ```
+  GENERATE root=24381/100060 upserted=14 removed=0 failed=0  用时 0.81s
+  PERSIST  事务=1 落行=14 对账删=0 盖章=1                      用时 0.35s
+  ```
+
+  库里随即多出 **14 条 `room_recalc_element`**（`status='pending'`，`target_refno` 与来源元素逐一对上，
+  noun 是 SCTN / CYLI / EXTR），`spatial_epoch` 270 → **271**。
+
+  落库前把 15 张表全量导出到仓外 `backup-7997-20260904-195215/`（~50MB）。
+
+- **模型水位 P3 落地：双向对账 + 幽灵模型水位（ADR-060 D6/D7），挂进启动覆盖核对。**
+  探针抽成一份共用取数 `ModelWatermarkProbe`（拦路根 / 已放弃根 / 安定下限 / 应用水位 / 行上已记的水位 /
+  这个库有没有 `gen_root` 行），热路径与对账**共用同一份判据**，漂不了；支撑值
+  `supported = 有拦路根 ? 0 : min(安定下限, applied_sesno)` 只写在 `ModelWatermarkProbe::supported()` 一处。
+  **对账是双向的**：`model_sesno > supported` → 「失去支撑，已下调」；`< supported` → 「热路径漏记，已补记」。
+  后一半是真异步的必然产物——模型跑到数据前面那一次按 D5 条件 3 跳过、或收口前进程被
+  `clear_stale_at_process_start` 清空，**cohort 行删掉之后没人会再回来盖这一章，不补就永久丢**。
+  上调不是凭空盖章：`settled_floor` 就是证据、`applied_sesno` 封顶，与热路径那次写入手上的证据一样多。
+  **两个方向措辞不同**，混成一句现场就分不出是哪一种。
+  **对账写 `=` 不写 `math::max`**，且改了号就把时刻抹成 `NONE`（行上那个时刻描述的是旧号，升降都对不上）。
+  与热路径那条单调语句故意不合并：承诺要单调，更正要能往下写；合并的后果是「降不下来」静默失效，
+  表现为一枚永远偏高的水位。
+  **覆盖面是「有凭证的库 ∪ 没凭证的库」**：幽灵模型水位恰恰只长在后一堆里——`floors` 是一条
+  `GROUP BY gen_root`，零行的库根本不出现在里面，只对它对账就永远发现不了「水位说追平过、模型面一行都没有」。
+  幽灵的处置是清零 + 点名 + 走懒生成，**不删数据、不阻断、不触发重建**（与 ADR-021 的幽灵水位不是一回事）。
+  **Q10 在这条路上比热路径更凶**：对账要是把已放弃根算进「还在赶」，`supported` 恒为 0，
+  **每一次启动都会把刚追平的水位抹掉**，而现场只看到一枚永远为 0 的水位——护栏
+  `an_abandoned_root_does_not_zero_the_watermark_at_reconcile` 钉住。
+  **启动那条 `!body.contains("applied_sesno")` 的老护栏保持红线不变**：对账确实要读数据水位（M2 封顶），
+  但那与「拿什么当生成时点」（ADR-054）是两回事，所以整体委派给 `reconcile_model_watermarks`，
+  函数体里一个 `applied_sesno` 都不许出现；测试文档补了这条边界，并新增一条钉「覆盖面必须并上没有凭证的库」。
+  **八条新护栏**（合计 16 条），`cargo test --lib` 我这部分全绿。
+
+- **模型水位 P2 落地：`dbnum_watermark` 行上多一枚 `model_sesno`，在模型产物真的保存到数据库之后才盖章（ADR-060 D1/D5/D8）。**
+  `dbnum_state.rs` 加六列（`model_sesno` / `model_sesno_time` / `model_settled_at` / `model_lazy_roots` /
+  `model_dead_roots` / `model_roots_observed_at`，后三列 `NONE` = **未观察**，读侧不许降级成 0）；
+  两条读路径共用一份投影常量，漂不了；`model_time_of` 守「水位为 0 时时刻一起消失」；
+  `DbnumState::model_caught_up()` 只答行内能答的那一半，**不替实时未安定根数打包票**。
+  **写入点**挂在 `run_regen_group` 的收口之后（`clear_regen_work_batch` → `settle_unechoed_roots` → 盖章），
+  三个前置条件：除已放弃根外无未安定行、候选值 > 0、候选值 ≤ `applied_sesno`（语句里 `WHERE` 再挡一次，
+  防探针与写入之间数据面掉队）。
+  **实施时相对 ADR 原文收紧一处，已回写 D5**：盖章的值**不是队列刚跑完的 `T`，是安定凭证的下限**被
+  `applied_sesno` 夹住之后的那个数。理由：这一窗没被触到的根在行上仍是旧凭证却算「安定」，照 `T` 盖章
+  等于拿没人验过的数当承诺（凭证前移退化时正是这个形状）。夹逼之后启动退化窗口那条路也不必再靠名单
+  排除——它写不出文件最新来，**名单会漏，夹逼不会**。`T` 只剩两个用处：候选值恰好等于它才贴时刻、
+  记进 `model_roots_observed_at`。
+  **D8 提前到本期**：`fast_delete` 的回退清库与 `applied_sesno = 0` 同一句归零，否则 P2 到 P3 之间这一版
+  会带着幽灵模型水位；现有那条断言字面量的护栏同步改。
+  **八条护栏**：盖章排在收口之后（源码顺序）／模型跑到数据前面时一个字都不写／不认领数据窗口的四类
+  工作不触发／已放弃根（死信 + `http_422`）不卡整库而是照数露出／还在赶的根照旧拦住／盖的是凭证下限
+  不是窗口右端／时刻跟着单调条件且排在覆盖之前／**M7 两枚水位是仪表不是闸门**（数据写回全文不读
+  `model_sesno`、模型生成不以 `applied_sesno` 为前置、生成这一组的过程本身不看数据水位）。
+  **验证**：`cargo test --lib` 1448 passed / 4 failed / 101 ignored；4 条失败全部与本改动无关且改动前即存在
+  ——3 条 `increment_manager` 是working tree 里 `DbOption.toml` 打开了 `watch_dbnums = [7998, 8000]`
+  这个调试开关所致，1 条 `ops.html` 缺 `id="verdict"` 是 d-34 已记录的存量。
+  **未做**：`model_lazy_roots` 还没接（要从窗口规划器的 `lazy` 桶取，随 P4 露出一起）；D6 双向对账是 P3。
+
+- **每库第二枚水位定案：ADR-060「模型水位是被写下的承诺，与应用水位相等才叫一致」（P1 定义期，代码未动）。**
+  用户当日提出：「数据解析的和模型生成的 `dbnum_watermark`，模型那一枚也要以对应 sesno 的模型生成完、
+  **保存到数据库之后**再设置；两枚相等才表明这个 dbnum 处理的是最新一致的——因为两边现在是异步并发的。」
+  **先查清的实况**：模型侧的库级进度**已经存在**，但形态不对——根级是 `gen_root.source_end_sesno`（发布 CAS 时写下，
+  `model_update_pending.rs:1417-1423`），库级只有一个查询时算出来的派生量 `startup_coverage_floors()`
+  （`:1825-1925`，安定根里最小的凭证），已并排露在 `/dbnums` 上（`manual_update.rs:2810`）。
+  所以缺的不是「有没有第二枚」，是**那一枚不是被承诺写下的**。
+  **五条会正面打架的既有约束**逐条摊开后拍板（Q1① Q2a Q3c Q4② Q5① Q6b Q7① Q8① Q9①，方案 C）：
+  ① `CONTEXT.md` 两处 `_Avoid_: 模型水位` 删掉、该词转正；
+  ② 刻度取**数据窗口右端 T** 而不是文件最新——ADR-054 的生成时点语义一个字不改，两者管的是不同的事，
+  模型按文件最新生成到更新版本时这枚水位仍只记 T（**宁可保守不许虚报**），由此两枚同域可判等；
+  ③ 懒生成 / 冷库的根不拉低水位，单出 `model_lazy_roots`，且**未观察写 `NONE` 不写 0**；
+  ④ 一致判据 = `applied_sesno > 0 且 model_sesno == applied_sesno 且无未安定根`，`lazy_roots` 不参与
+  （ADR-058 D6 下算进去等于灯永远不亮）；
+  ⑤ 共识 d-22「模型凭证下限只有一套口径」由「承诺 + 支撑校验」保住——`startup_coverage_floors` 降为校验者，
+  不再单独露给读者。
+  **形状是复刻不是发明**：承诺（D1）+ 支撑校验（D6）+ 幽灵态处置（D7）+ 清库同事务归零（D8），
+  正是 ADR-021 给数据水位定的那一套在模型面的对偶。
+  **拟 ADR 时挖出两个会静默毁掉它的坑，同日一并拍板**：
+  ⑴ 一个重试穷尽的死信根 / `http_422` 根**永远**是未安定行，会把该库的 `model_sesno` 永久卡死——
+  其余几千个根都好好的、每一窗都正常追上，灯却从此永红，且看不出被谁卡。裁决：已放弃根不计入「未安定」，
+  生成根改按**四格**分类（已追平 / 还在赶（拦水位）/ 已放弃（不拦但必须并排陈述）/ 没生成过（不拦）），
+  互不重叠、各有嗓音；过去这四格里有三格挤在「未安定」一个数里。
+  ⑵ 用户同轮补述「我的目的就是要保证数据解析的内容保存和模型生成的保存能够异步」→ 立为
+  **M7：这两枚水位是仪表不是闸门**，没有任何代码路径可以等它、轮询它、或以它为条件放行另一条链
+  （源码护栏钉数据提交路径不读 `model_sesno`、模型生成路径不以 `applied_sesno` 为前置）；
+  连带把 D6 对账改成**双向**——下调是「失去支撑」，上调是「热路径漏记补回」（模型跑在数据前面那一次
+  按 D5 条件 3 跳过、或收口前被 `clear_stale_at_process_start` 清掉那一次，不补就永久丢）。
+  上调不是凭空盖章：`settled_floor` 就是证据、`applied_sesno` 封顶，与热路径那次写入手上的证据一样多。
+  **不做**：不把两面重新绑成一个提交单元（ADR-056 Q1 明写「不回 kv-mem」）、不让模型失败阻断数据水位、
+  不新建同粒度第二张表、不改 ADR-054。
+  **改动**：新增 `docs/adr/ADR-060-*.md` 与 `docs/plans/2026-09-04-model-watermark-per-dbnum-plan.md`
+  （后者保留备选方案 A/B 与取证）；`CONTEXT.md` 新增三条词条（模型水位 / 模型水位失去支撑 / 幽灵模型水位）、
+  改两条 `_Avoid_`。**P2–P4 未实施，读代码仍以现码为准。**
+
+- **写入口径改成「先删后插」，没有 UPDATE / UPSERT（用户 2026-09-04 拍板：「初始化时不需要考虑更新，
+  直接都是 insert batch ignore。然后增量更新时，我们对模型数据都要采用针对 ids 先删除，然后再
+  insert batch ignore。所以不存在 update 等」）。** 新增 `WriteMode`：`Initial` 直接批量插、撞上已有
+  id 就跳过；`Incremental` 先按 id 把这些记录的**整组表示**删掉（`geo_relate` 按 `in` 删、`inst_info` /
+  `inst_relate` / `aabb:<id>` / `trans:<id>` 按 id 删，两种形状一起删），再批量插。**删这一步不是保险
+  而是必需**：`INSERT IGNORE` 撞上已有 id 会保留旧行，不删就等于把上一轮的几何留在库里。渲染形态从
+  「每元素一串 UPSERT」换成「一张表一条批量 `INSERT IGNORE INTO <表> [ … ]`」，被引用的行（盒、变换、
+  网格、实例信息）排在引用它们的关系之前。
+  **两处必须区别对待**：`geo_relate` 与 `tubi_relate` 走 `INSERT RELATION IGNORE INTO`（关键字顺序是
+  `RELATION` 在 `IGNORE` 前）——普通 `INSERT` 只把 `in` / `out` 当两个字段写下去，**不登记成图上的边**，
+  `out->geo_relate` 与 `pe:⟨branch⟩->tubi_relate` 就都走不通（这一条是 `mem://` 真跑打出来的：先用普通
+  INSERT，实例子查询取回空、分支重置删不掉旧管身）；`inst_relate` 反过来**不能**带 `RELATION`，
+  烘焙实体那一行只有 `in` 没有 `out`（网格挂在 `booled_id` 上），而关系插入两端都是必填。
+  护栏两条：`an_initial_batch_is_insert_ignore_only`（整段钉死，正文里不许有 UPDATE / UPSERT）、
+  `an_incremental_batch_deletes_the_ids_first`（前半是按 id 的五条删除，后半与初始化那一档逐字相同）。
+  **取证探针 `bin/direct_model_persist.rs` 一并收口**：同样先删后插 + 批量 `INSERT IGNORE`
+  （`geo_relate` 带 `RELATION`），顺带把 `aabb_d` / `world_trans_d` 两个行内副本直接写进 `inst_relate`
+  行（原先是插完再 `UPDATE` 补一遍）。它那套「写前备份行 → 产出 `rollback.sql` 用 UPDATE 退回去」随之
+  **取消**——没有 UPDATE 就没有可退回的旧值，要退回就重跑上一版生成；`inst-relation-backup.json` 与
+  `rollback.sql` 两份产物不再产生，`backup_query` / `old_or_none` 与 `DIRECT_PERSIST` 那行的
+  `db_records=` 字段一起删。它自带的 Plant UI 形状断言测试也改成先摆一行上一轮的 `inst_relate`、
+  走一遍删除再插——不删的话 `INSERT IGNORE` 会撞上同 id 直接跳过，这条测试本身就是那个语义的证据。
+
+- **落库接上生产调用点，并在 7997 上端到端跑通（用户 2026-09-04：「把 persist_root 接到生成消费端，
+  开 in_memory_db=true 跑一遍 7997 看真实效果」）。**
+  接线放在**编排层**而不是模型面（ADR-057：模型面不认识库）：
+  `data_interface::model_refresh::generate_roots_report` 在 `generate_and_persist_roots` 成功之后逐根
+  `model_db_adapter::persist_root`——落不进去的那根算它自己失败、进重试账（D1 的根级口径），
+  **投影在内存里是对的，但 Plant UI 看不见的东西不能算完成**；整库那条路
+  （`python/exec_api::gen_dbnum`）收尾调新增的 `persist_dbnum(dbnum)`，它按
+  `ModelMemoryStore::roots()`（新增，取回执的键——一根投影完哪怕零变更也有回执，而祖先链在空根上
+  整个消失）逐根对账，一根一个事务。
+  **新增一次性烟测 `src/bin/e3d_persist_smoke.rs`**：走的就是生产那两步，跑完即止不驻留；
+  **介质由配置说了算，程序不自己挑**——第一版让它自己接 `mem://`，回执立刻就说自己是 `RocksDb`
+  （`PersistTarget::process()` 读的是配置），正是 `PersistTarget` 想防的那种「说错介质的回执」，
+  于是改成跟 `run_app` 同一个开关。
+  **实跑（`AIOS_IN_MEMORY_DB=1`，dbnum 7997）**：
+  ```
+  GENERATE upserted=52098 shared=21137 baked=30961 unique_meshes=20123 failed=0 用时=29.2s
+  PERSIST  介质=InMemory 可持久=false 落行=52098 对账删=0 盖章=2 用时=22.1s
+  READBACK inst_relate=47475 tubi_relate=4623 平表三件齐活=47475 geo_relate带本地变换=16514 inst_geo=34
+  ```
+  三处对得上：`47475 + 4623 = 52098`；`47475 = 30961 烘焙 + 16514 共享非管身`；
+  `4623 = 21137 共享 − 16514`（管身全是标准图元）；`inst_geo=34` 是 20123 个网格里真正共享的那几种
+  标准体（BoxV1 与各分段数的 CylinderV3），实例化的收益就在这个数上。**47475 行全部三件齐活**，
+  Plant UI 的平表快路一行都不用退回 slim。
+  **顺带看清一件事**：整个 7997 只有 **2 个生成根**，也就是两笔各约 2.6 万件几何的事务，落库 22.1s。
+  这个粒度与旧发布事务一致（一根一提交），但大根上的单条语句确实很大，要不要按块切开是下一个话题。
+
+- **`inst_relate` 行补上 Plant UI 平表快路要的两个行内副本 `aabb_d` / `world_trans_d`。** 那条快路
+  （`query_insts_flat`）要三件齐活——`aabb_d` / `world_trans_d` / `insts_flat`——才能零解引用零子查询直接
+  成型；我们此前只写了 `insts_flat`（旧发布事务就没写那两个），于是 e3d 行**整批退回 `query_insts_slim`
+  现值兜底**。只慢不错：实库 53,582 行上那两档解引用与子查询约 10.7s，平表读约 0.7s。取证探针原先是插完
+  再 `UPDATE` 补一遍，现在两边都直接写在行上。护栏 `the_flat_fast_path_finds_all_three_inline_copies`
+  起 `mem://` 按 `query_insts_flat` 的投影原形查一遍，顺带钉住 `owner` 从 `anc[1]` 还原这条约定
+  （祖先链顺序不只是给 `anc CONTAINS` 用的集合）。管身不需要：`query_tubi_insts_by_brans` 走的是
+  `aabb.d` / `world_trans.d` 解引用。
+
+- **新增 `docs/adr/ADR-060-model-row-ids-are-record-ids-and-writes-are-delete-then-insert.md`**：把这套
+  id 规则（D1–D2）、`geo_relate.transform` 新口径（D3）、写入口径（D4–D6）、只服务当前投影（D7）、
+  `gen_root` 回执少了 revision CAS（D8）与平表快路的三个行内副本（D9）连同四条不变量、影响面、迁移与
+  未做项一次写清。
+
+- **模型行 id 一律就是记录 id，五层前缀全撤（用户 2026-09-04 拍板：「我不需要前缀，帮我开始修改正确，
+  包括 plant-ui」「我们在更新时都是要先删除，然后再增加。所以用 ID 就好了，不要加什么前缀」）。**
+  | 行 | 旧 id | 新 id |
+  | --- | --- | --- |
+  | `inst_relate` | `<记录 id>` | 不变 |
+  | `inst_info` | `direct_<记录 id>` | `<记录 id>` |
+  | `aabb` 世界盒 / `trans` 世界变换 | `direct_world_<记录 id>` | `<记录 id>` |
+  | `trans` 本地变换（仅共享图元） | `direct_local_<记录 id>` | **整行取消**，改写成 `geo_relate.transform` |
+  | `aabb` 共享本地盒 | `direct_shared_<mesh id>` | `<mesh id>` |
+  | `inst_geo` | `<mesh id>` | 不变 |
+  | 记录 id 本身（隐式管身） | `derived_<64 位摘要>` | `<64 位摘要>` |
+  | 历史快照的库行 | `hist_<key>_<记录 id>` + `snapshot_key` 字段 | **不再渲染**（见下） |
+  那层前缀原本防的是**旧生成器同表撞 id**：`inst_info` / `aabb` / `trans` 这三张表在旧世界里是按几何实例
+  做键的（旧行长这样：`inst_info:zz_f1_10`、`inst_info:⟨1⟩`、`type::thing('inst_info', cata_hash)`），
+  e3d-model 要在同一张表里自己铸 id，就先划了个 `direct_` 命名空间。今天这三张表**只剩本模块一个生产
+  写口**——旧生成器的入口在非默认的 `legacy_model` feature 后面，`aios_core` 与 plant-ui 侧都没有 SQL 写口
+  （全仓扫过：其余命中全是 `zz*` 测试夹具与 `direct_model_persist` 取证探针）——前缀于是没有再付的理由。
+  **`derived_` 与 `hist_` 一并撤掉**：派生几何的记录 id 就是身份的 64 位十六进制摘要，与 refno 的
+  `<十进制>_<十进制>` 形状天生分得开，不需要前缀自证身份——它当年的理由是「按根删除时普通行能靠 refno
+  猜到 id，派生行猜不到」，而删除路径早改走 `geometry_id` 清单、更新一律先删后插，**猜 id 这件事本身
+  没有了**。`hist_` 那一层随之消失的方式是**把历史快照的库行渲染整个撤掉**：没有前缀，两个投影就不能
+  共存在同一批表里；而历史快照本来也不进生产库（按需快照由 `historical_model` 直接从存储回包 JSON，
+  `persist_root` 一直只服务当前投影）。适配器因此不再收 `ProjectionScope` 入参，`snapshot_key` /
+  `source_refno` / 历史那种 `tubi_relate:⟨<id>_<n>⟩` 关系 id 一起下线。
+  **本地变换整行挪到边上**（用户同轮拍板：「把本地变换改成写在 `geo_relate` 行上，连 `_local` 那个后缀
+  一起去掉（要改 plant-ui 读口）」）。它原本非带标记不可，是因为一个共享图元元素在 `trans` 表里要占
+  两行（世界一行、本地一行），而世界那一行占了裸 `<记录 id>`。现在本地变换直接以 `transform` 字段写在
+  `geo_relate` 边上（对象形状与旧 `trans.d` 逐字相同，与 `insts_flat[].transform` 同名同形），
+  `trans` 表回到「一个元素一行」，前缀与后缀一起消失，读侧还少一次解引用。
+  **读口改成 `transform ?? trans.d`，两种形状一起认**（旧生成器写的行与切换前的存量仍是 `trans` 链接）：
+  `plant-ui/vendor/rs-core/src/rs_surreal/inst.rs`（`query_insts` × 2 与 `query_insts_slim`）、
+  `plant-ui/crates/plant-ui-data/src/lib.rs` 的实例子查询、同一份 `old-aios-core` 的
+  `rs_surreal/inst.rs`，以及 gen-model 自己的四个读口（`pdms_inst` 的 `insts_flat` 物化回填、
+  `aabb_refresh` 的几何盒重算、`aabb_tree` 的可建行计数、`manifold_bool` 的布尔取数）。
+  `query_insts_flat` 那条快路读的是行内 `insts_flat`，不受影响。
+  **其余 Plant UI 读口零改动，这是查过的**：读侧全程走记录链接（`aabb.d` / `world_trans.d` /
+  `out->geo_relate ... trans.d` / `booled_id` / `record::id(out) as geo_hash`，见
+  `plant-ui/vendor/rs-core/src/rs_surreal/inst.rs`），从不解析 id 形状；全库唯一提到 `direct` 的是
+  `crates/plant-ui-data/tests/direct_model_legacy.rs`，它匹配的是 `direct_model.format` 这个**字段**，
+  不是 id。`direct_model` 字段名本轮不动。
+  **切换要跑一次清扫**：新 id 的逐条删除语句够不着旧行（`inst_relate` 会被同 id UPSERT 盖掉，但它原先
+  指向的 `inst_info:direct_*` / `aabb:direct_world_*` / `trans:direct_*` 会悬空），所以新增
+  `render_legacy_prefix_cleanup()`——按 `string::starts_with(<string>record::id(id),'direct_')` 扫
+  `inst_info` / `aabb` / `trans` 与指向它们的 `geo_relate`，每个库跑一次即可；模型本来就是从文件重生成的，
+  删干净不丢东西，`inst_geo` 与盘上的 `.mesh` 不在其中（从来没带过前缀，且是内容寻址的）。
+  **改动**：`model_db_adapter.rs` 的六处渲染与两处清理（并去掉 `ProjectionScope` 入参）、
+  `e3d_mesh_store::geometry_record_id`；取证探针 `bin/direct_model_persist.rs` 一并改口径
+  （它自带一套渲染，不改就会往库里写回旧命名空间——id、本地变换挪位、它自己那两条 Plant UI
+  形状的断言查询都跟着走）；上面列的七个读口；plant-ui 侧三处提到
+  `inst_relate:derived_*` 的注释（那条查询本来就按 `in` 反查 + 排除 refno 键，不按 id 形状匹配，
+  所以只是注释过时）。
+  **护栏**：新增三条——`no_row_id_carries_a_prefix`（渲染正文里 `'direct_` / `⟨direct_` /
+  `direct_world_` / `direct_shared_` / `_local` / `derived_` / `hist_` / `snapshot_key` 一个都不许出现，
+  同时钉住 `direct_model` 字段名照旧）、
+  `the_plant_ui_instance_subquery_still_resolves_the_local_transform`（起 `mem://` 真跑一遍 Plant UI 那条
+  insts 子查询的原形，拿回 `geo_hash` 与本地变换）、
+  `the_one_shot_sweep_takes_the_old_namespace_and_leaves_the_new_rows`（起 `mem://` 真跑清扫，旧行清空、
+  新行不动）；原有那条整行钉死的烘焙断言与共享图元断言同步换成新形状。
+  **验证（本轮实跑）**：`cargo test --lib -- fast_model::model_db_adapter` 12 passed / 0 failed；
+  `cargo test --bin direct_model_persist` 8 passed / 0 failed；`cargo test --lib` **1448 passed / 4 failed**
+  （四条同一批既有环境红：三条 `increment_manager` 读工作区 `DbOption.toml` 的 `watch_dbnums`，
+  一条 `handlers` 查内嵌 `web/ops.html`）；`cargo check --all-targets` 无新增警告；`rustfmt --check` 干净；
+  plant-ui 侧 `cargo check -p plant-ui-data` 通过。
+
+- **落库适配器 `fast_model::model_db_adapter`：从投影存储读记录，拼回 Plant UI 一直在消费的那套库行
+  （用户 2026-09-04 提出：「接着做落库适配器：从 `model_memory_store` 读记录，拼回 `inst_relate` /
+  `tubi_relate` 那套库行，注意和之前的数据格式保持一致」）。**
+  它是上一条（生成只写内存）的另一头：`inst_relate` / `tubi_relate` / `inst_info` / `aabb` / `trans`，
+  外加共享网格的 `inst_geo` 与 `geo_relate`。一条 `ProjectedGeometry` 携带的就是当年拼进 SQL 的同一份
+  内容，所以这里只渲染，不回头重算几何、不重新读盘。
+  **格式一致是核对过的**（**行 id 随后按上一条去掉了 `direct_` 前缀，字段与取值仍逐字相同**）：把旧文件
+  （`HEAD:src/fast_model/e3d_model_service.rs`）与新模块里的格式串按
+  占位符归一后逐条比对，九条模板逐字相同——世界盒与世界变换两行、共享图元那一整组
+  （`aabb:direct_shared_<mesh>` + `trans:direct_local_<id>` + `inst_geo` + `inst_info` + `geo_relate` +
+  `inst_relate`）、烘焙实体的 `inst_relate`、隐式管身的 `INSERT RELATION INTO tubi_relate`（关系 id 仍是
+  分支全局的 `[pe:⟨branch⟩,n]`）、换表示清理、几何删除补的两行、当前投影与历史快照两种分支重置、
+  `root_dependency` 依赖收据。记录 id 的 `hist_<key>_` 前缀与各表的 `snapshot_key` 字段由适配器在渲染时
+  补回去——存储按投影域分区，前缀只有库里需要。
+  **有意不同的只有 `gen_root` 回执两处**：`published_revision` 从 `={revision}` 改成 `=desired_revision`
+  （回执里没有 revision）；revision CAS 那条守卫撤了，「同一根不许被两个源会话混着发布」那条留着，
+  判据改读活行上的 `desired_target.source_end_sesno`，与写在同一条事务边界上。
+  **落库走对账而不是回放**：存储是快照不是流水，所以 `persist_root` 按根对——库里由 e3d-model 写过、
+  存储里已经没有的几何就是要删的陈旧行，碰到的 BRAN 先整段重置再插这一轮的管身，整批一个
+  `BEGIN/COMMIT`。只服务当前投影：历史快照从来不进生产库，它的记录由 `historical_model` 直接回包。
+  **两种落库介质，一套行**（用户同轮补充：「保存到数据库可以分为内存模式和 rocksdb 模式」）：库可以是
+  进程内嵌的 kv-mem（`in_memory_db=true`），也可以是 rocksdb（默认那台 ws 连的 SurrealDB，rocksdb 在服务器
+  侧；不带 `ws` 的 `local` 构建是进程内嵌的 `rocksdb://<project>.rdb`）。**渲染那一半拿不到介质**——
+  `render_records` 的签名里没有它，所以想分叉也分不出来，两种模式下写出去的行逐字相同。新的
+  `PersistTarget` 把库句柄与 `PersistMedium` 绑在一起（`Surreal<Any>` 自己说不出连的是谁，拆开传迟早出现
+  一份说错介质的回执），`PersistTarget::process()` 按 `options::in_memory_db()` 判、判法与 `lib.rs` 的连库
+  顺序对齐；回执 `PersistedRows` 带上 `medium`，`is_durable()` 点明**内存模式的行活不过进程重启，那不是
+  「落库了」**。注意本仓 surrealdb 依赖没开 `kv-rocksdb`（Cargo.toml 里注释着），所以 `local` 那条
+  进程内嵌 rocksdb 今天连不上——要用得先开 feature。
+  **改动**：新增 `model_db_adapter.rs`；`e3d_model_service` 的 `geometry_source_refno` / `transform_value`
+  提到 `pub(crate)` 给适配器复用（这两支不是库口径，护栏照旧绿）；`fast_model/mod.rs` 注册新模块并顺手
+  按 rustfmt 的顺序排了那一组 `mod`（`model_memory_store` 那行原先就没排）。
+  **护栏**：`model_db_adapter::tests` 十条——烘焙那一行整条钉死（含 `anc` 打包值与 `direct_model` 对象）、
+  共享图元那一组的六条断言、管身走 TUBI 契约且不碰 `inst_relate`、同分支两段的槽位不撞、历史快照补前缀
+  与 `snapshot_key`、删几何不碰共享网格、回执落在窗口规划器认的那几列上；三条起 `mem://` 真跑：语句能执行
+  且行数落在对的表上、换表示后库里只剩新的那一个、对账把存储不再持有的元素与上一轮管身都删掉。
+  **验证（本轮实跑）**：`cargo check --lib --tests` 通过、无新增警告；
+  `rustfmt --edition 2024 --check` 三个改动文件干净；`cargo test --lib -- fast_model::model_db_adapter`
+  10 passed / 0 failed；`cargo test --lib` 见下（与上一条同一批既有红）。
+  **未做**：适配器还没有生产调用点——什么时候落库、按根还是按批，是上层的事，本轮不替它决定；
+  房间派生面与空间树收敛（`room_publication` / `render_spatial_epoch_bump` /
+  `sync_tree_from_committed_pointers`）仍停在上一条那里，要从存储的记录上重新驱动。
+
+- **模型生成只写进程内投影，`e3d_model_service.rs` 全文不再认识数据库（用户 2026-09-04 提出：
+  「清理这里面的 surreal 查询的所有内容，模型生成先只考虑保存到内存」，落库改由另一层适配接口承担）。**
+  这一步撤掉的是发布事务那一整套：`aios_core::SUL_DB` 直写、`BEGIN/COMMIT` 包裹、
+  `inst_relate` / `tubi_relate` / `inst_info` / `aabb` / `trans` 五张表的 UPSERT 与 DELETE 渲染、
+  `gen_root` 凭证行的 revision CAS 与依赖收据、pre-e3d 旧行清理（`anc CONTAINS` 谓词那三条查询）、
+  以及顺着事务被拉进来的房间语句与空间 epoch bump。**mesh 文件照旧写盘**——那是内容寻址的文件，
+  不是库。
+  **新模块 `fast_model::model_memory_store`**：按投影域（`Current` / `Historical(<key>)`）分区的记录表。
+  一条 `ProjectedGeometry` 携带原先散在五张表里的同一份内容（几何身份、来源 PE、祖先链、世界盒与
+  世界变换、mesh 身份、图元共享信息），适配器照它拼库行即可，不必回头再算一遍几何。三条旧语义
+  照搬：投影域分区取代 `snapshot_key` 字段与 `hist_` 前缀（记录 id 因此不再需要前缀）、
+  `tube_branch_resets` 取代 `DELETE pe:⟨branch⟩->tubi_relate`、`RootReceipt` 取代 `gen_root` 行上的
+  `published_model_target` / `published_manifest_hash` / `published_geometry_count`。
+  **没跟过来的是 revision CAS**：那把锁护的是多个进程抢同一个库行，进程内投影没有那个竞争；
+  「不可变目标没变就整根不重算」这条判据完整保留，只是判据两端都从库行换成了回执。
+  祖先索引（`by_ancestor`）是 `anc CONTAINS <packed>` 的内存形态，按根查 / 按根删走的还是同一条路。
+  **改动**：`e3d_model_service.rs` 3747 → 2580 行（新增 `model_memory_store.rs` 624 行）——
+  `prepare_geometry_delta` 换成纯结构化的
+  `project_geometry_delta`（返回 `ProjectionCommit`，不再返回 SQL 串）、`apply_geometry_delta_on`
+  去掉 `&Surreal<Any>` 入参改收投影域、`ProjectionScope` 迁进存储模块（它原本的职责就是给 SQL id
+  加命名空间）、`RootPublishClaim` 三个反序列化行结构与 `load_root_publish_claim` 删除、
+  `flush_deferred_model_spatial_refresh` 与 `DEFERRED_MODEL_SPATIAL` 删除（连同
+  `model_update_pending.rs` 那个调用点）、`ensure_not_older_than_persisted` /
+  `persisted_session_newer_than` 改读存储的单调水位。`historical_model.rs` 的 `mem://` SurrealDB 整个
+  去掉：几何进存储的 `Historical(<key>)` 那一格，回执进一张进程内表，`query()` 的四个工具
+  （snapshot / instances / tubes / geometry）改成从记录上拼 JSON——`inst_info_id` / `aabb_id` /
+  `world_trans_id` 这三个只在库里有意义的指针字段换成了 `world_bounds` / `world_transform` /
+  `local_transform` 这些真数据。`room_publication` 暂时没有生产调用点（发布事务撤了，它渲染的房间
+  语句跟着撤），整模块 `#![allow(dead_code)]` 留在原地等适配器接手。
+  **护栏**：`e3d_model_service::tests` 头一条 `the_generation_service_never_reaches_for_a_database`
+  ——正文里出现 `SUL_DB` / `surrealdb` / `type::thing` / `UPSERT` / `INSERT RELATION` /
+  `BEGIN TRANSACTION` / `gen_root` / `inst_relate` / `tubi_relate` 任意一个即红（连注释也不许再用库口径
+  说话）；`a_reprojected_root_resets_its_branch_tubes_and_drops_stale_geometry` 钉一根重投影的完整形状
+  （分支管身整段重置、上一轮多出来的几何被删、每条记录都带到根的祖先链、水位推进）；
+  `an_unchanged_manifest_commits_only_the_receipt` / `..._still_repairs_an_incomplete_projection` /
+  `an_identical_immutable_target_reprojects_before_any_geometry_build` /
+  `a_missing_or_different_target_never_hits_the_cache` 接手原先四条 SQL 文本断言；
+  `projection_reads_the_store_once_before_the_root_loop` 接手 `publication_prefetches_database_state_...`。
+  `model_memory_store::tests` 六条（按根可达且按库筛选 / 删记录收干净祖先索引 / 分支重置只清本分支管身 /
+  投影域互不可见且可整格丢 / 水位只涨不落 / 记录数与 mesh 文件同时对上才算投影完整）；
+  `historical_model::tests::dropping_snapshot_removes_its_namespace_but_leaves_other_snapshots`。
+  **顺手修的一处既有脆弱**：几条按文本形状判定的护栏（`split_once("\n}\n")` 那一类）原先直接
+  `include_str!` 生文，`core.autocrlf` 检出的 CRLF 会让它们无故变红；统一走 `service_source()` 归一行尾。
+  **验证（本轮实跑）**：`cargo check --all-targets` 通过、无新增警告；
+  `rustfmt --edition 2024 --check` 四个改动文件干净；
+  `cargo test --lib` **1428 passed / 4 failed**，四条红全部与本次改动无关且改前即红——
+  三条 `increment_manager` 读的是工作区 `DbOption.toml` 里既有的 `watch_dbnums = [7998, 8000]`，
+  一条 `handlers::the_embedded_panel_is_real_and_a_disk_copy_still_wins` 查的是内嵌的 `web/ops.html`。
+  **未做**：落库适配器本身（读存储、拼库行、写 `SUL_DB`）本轮不在范围内，因此**模型面暂时不落库**；
+  房间派生面与空间树的收敛也随发布事务一并停在这里，等适配器接手时从存储的记录上重新驱动。
 
 ### 修复
 
@@ -30,8 +1175,230 @@
   33 passed / 0 failed。**未 live**：已受影响的库（增量路写过反向边的窗口）要走一次 `POST /model/rebuild` 而不是手改数据；
   UDA 的 TTY 抽样对拍（方案 B8.5 第 5 条）等真库机器。
 
+### 新增
+
+- **e3d-io 池级元素缓存 `DbSet::with_element_cache()` + 读取计数 `e3d_io::read_stats`：生成期的瓶颈是重复读取，
+  不是几何（ADR-059；`vendor/e3d-io/src/db_element.rs`、`src/read_stats.rs`、`vendor/e3d-model/src/bin/gen_ams.rs`）。**
+  起因是给 e3d-model 的第一步计划做 W6「分段计时」，第一次跑就发现分档全压在一处：ams8000（6088 个设计元素、会话 264、
+  五个目录库）总 6861ms 里，生成 6752ms，三角化 18ms、写 OBJ 16ms——而生成里 5955ms 是**读取**，88 万次记录解析 +
+  79 万次描述符抽取，**每元素真读 145 遍**。重复不在遍历上：`DbSet::element` 每次造新句柄、`OnceLock` 是空的，于是
+  `owner()` 的祖先链上溯与 `get_element()` 的目录链走查（`SPRE→SPCO→CATR→SCOM→GMRE`）把同一批祖先和同一批目录件
+  反复查索引、反复解析；句柄级缓存只挡下 24%。
+  **改动**：`DbSet` 加两张按 `RefNo` 索引的表（`Arc<ParsedElement>` / `Arc<ElementExtraction>` 分开，只导航的路径
+  不为描述符抽取买单），**默认关**，`with_element_cache()` 才开；`add_db` 换库时按 dbno 清掉对应条目（换库=换时点，
+  留着旧解析等于一直喂上一个会话的树，而且两边都不报错）；`read_stats` 把句柄命中 / 池级命中 / 真读分三档记，
+  只给真读计时。`gen_ams` 开这个开关并打印分档计时。
+  **代价**：开了就是无界、不淘汰——一次生成一棵子树是有界的，长驻进程按库全量读不是，那种场景该另建短命 `DbSet`。
+  这条推翻了 `DbElement` 上原来那句「池级无界缓存是消费方的取舍，格式库不做」：跨句柄的重复发生在 `owner()` /
+  `get_element()` 内部，消费方够不着那个位置，自己补不上。
+  **验证（本轮实跑）**：同一条命令、同一个库，6861ms → **523ms（13.1×）**；读取 5955ms → 116ms（51×）；
+  每元素真读 145 → 1.91 遍（11651 次 miss ≈ 6088 设计 + 约 5500 目录/引用元素，即每个不同元素读一遍）。
+  `model.obj` / `elements.json` / `report.json` 三份 SHA-256 **逐字节一致**，账照旧平（visited 6088 + consumed 517 =
+  索引 6605）。`e3d-io` `cargo test` 全绿；`e3d-model` `cargo test --lib` 201 绿、`--test noun_coverage` 7 绿。
+  **未验证**：只跑了 ams8000 一个库（管道库目录链重，13× 是这一类的上界，结构库会低），`--test increment_real` 因
+  并行会话正占着该 exe 链接不上（`LNK1104`），待补跑；gen-model 生产路径 `e3d_model_service` 尚未开这个开关。
+
+- **模型增量类型限定 `model_incremental_types = ["BRAN", "EQUI"]`（环境变量 `AIOS_MODEL_INCREMENTAL_TYPES=BRAN,EQUI` 压过它）：
+  只有名单内类型的生成根做模型增量，数据增量照旧（用户 2026-09-03 15:53 提出，会话 ff015543 落核心门，本轮补齐「有多大声」
+  与文档）。** 不写 / 空表 = 不限类型，行为与引入前逐位相同；归一 trim + 大写 + 去空 + 去重，空白的环境变量当没设。
+  **口径是消费门，不是计划门**：`model_update_pending` 的 drain select / claim / cohort mate claim / `count_pending_work` /
+  `has_pending_work` / `/health` 状态查询共用一条 SQL 谓词 `render_automatic_type_filter`——
+  `AND (action NOT IN ['regen_root','delete_cleanup'] OR (noun?:'') = '' OR string::uppercase(noun?:'') IN [...])`，
+  与 `watch_dbnums` 的 `render_automatic_scope_filter` 同一条纪律（留在 SQL 里、不过滤解码后的行，两侧对「哪些行算数」
+  答案唯一）。名单外类型的根**照常规划、照常入队、`gen_root` 照常标 stale**，只是本进程不认领：凭证前移
+  （`render_credential_advance` 只放过 `ready ∧ desired == published`）因此不会给它盖新章，重启后 `reconcile_startup_window`
+  把它当未安定行重排，名单一撤即照常消费——在计划层摘掉工作项反而是错的（不标 stale = 下一窗前移凭证 = 陈旧几何盖新章且永不
+  回补）。数据增量（窗口收集、`pe` / `ATT_*` 写回、水位推进）、`Transform`（老规划器便宜路径、noun 空）、`CascadeExpand`、
+  `PostRegenAabb`、房间任务、按需 `ensure_model_generated` 一律不看名单；noun 未知（空）的行不挡。与 `watch_dbnums`
+  （按库、动数据面）、`delivery_unit_types`（决定根怎么选）三者互不代替。
+  **改动**：新模块 `data_interface::model_type_scope`（对标 `watch_scope`：`Origin` / `resolved` / `admits` / `held_reason` /
+  `mode_notice` / `window_plan_notice`）；`options.rs` 新键 `model_incremental_types` + `MODEL_INCREMENTAL_TYPES_ENV` +
+  `model_incremental_types_resolved()`；`model_update_pending.rs` 六条语句接谓词、`ModelPendingStatus` 新增
+  `held_by_model_incremental_types`（互补谓词 `render_automatic_type_holdback` 单独一条计数）。
+  **有多大声（与 `watch_dbnums` 同一套护栏）**：`run_cli` 启动一句 + 初始化完成横幅一行 + python `full_init` 同句；`/health`
+  新增 `model_incremental_types` / `model_incremental_types_origin` 两栏；preview / execute 回执 `warnings` 与调试 / 监听声明
+  同批播种；数据窗口计划 `warnings` 按类型点名本窗暂扣的根（`dbnum=N: 本窗 K 个生成根因 model_incremental_types [...] 暂扣不生成
+  （HANG×2, SUPPO×1；来自…）`）；worker 空闲轮模型门开着时首次一句（`Once`）。每一句都点名 `model_incremental_types` 与来源
+  （配置 / 环境变量），措辞与监听限定、MDB 范围判定无交集。`DbOption.toml` 在 `watch_dbnums` 后补一段说明（默认注释掉）；
+  `CONTEXT.md` 新增术语「模型增量类型限定」。
+  **护栏**：`model_type_scope::tests` 七条（空名单放行一切 / 只放行成员且空 noun 不挡 / 纯谓词与进程级同口径 / 每一句点名来源 /
+  措辞独立 / 计划暂扣只数受限两种行且名单外 / 窗口 warnings 一句的形状与静默条件）；`options::tests` 归一与环境变量覆盖；
+  `model_update_pending::tests` 三条（六条语句都带谓词且与库域谓词共存 / `/health` 互补计数恰一条 / 空名单逐字不变）；
+  `manual_update::tests::the_model_type_scope_announces_itself_in_both_receipts` 源码自检（声明排在第一条早退回执与任何业务
+  告警之前）。
+  **验证（本轮实跑）**：`cargo check --lib --tests` 与 `cargo check --manifest-path python/Cargo.toml` 通过；定向
+  `cargo test --lib -- model_type_scope model_incremental_types type_scope announces_itself` **15 passed / 0 failed**，
+  `options::tests` 三条模型类型用例 3 passed；全量 `cargo test --lib` **1422 passed / 4 failed / 101 ignored**——4 条全与本条
+  无关：`the_embedded_panel_is_real_and_a_disk_copy_still_wins` 仍是 `web/ops.html` 丢 `id="verdict"`；
+  `increment_manager::tests` 的 `an_unset_debug_scope_leaves_the_scope_verdict_untouched` /
+  `handwritten_dbnum_lists_no_longer_narrow_the_increment_scope` / `the_debug_exclusion_never_speaks_with_the_scope_verdicts_voice`
+  三条读的是工作树 `DbOption.toml`，而它此刻被 S5 live 验收开着 `watch_dbnums = [7998, 8000]`（`in_scope_with` 里的
+  `watch_scope::admits` 把 1001 / 7997 挡下）；把 `DB_OPTION_FILE` 指回 HEAD 的 `DbOption.toml`（该行注释着）三条即绿。
+  **未 live**：没有起过服务确认 `/health` 两栏与横幅实际输出；被暂扣的根在真库上「名单一撤即照常消费」的闭环靠 `gen_root`
+  stale 标记推理，没跑过实例。
+
 ### 变更
 
+- **几何 CPU 执行域落地（ADR-052 第 1/2/3/4 条的地基，specs/033 T006 完成、T007 部分完成），e3d 生成端的根级 CPU 段
+  改成 `min(额度, 件数)` 个常驻 worker 从共享游标动态领取（用户 2026-09-04 在四条后续里选了这条）。**
+  ADR-052 自 2026-08-27 接受起「实现未开始」：许可罩的是整个 `Future`（库查询、跨 `.await` 的锁、同步文件写都在一张
+  许可之内），于是许可可以被「等库 / 等锁」的任务全部占住而 CPU 空着（背景第 1、2 条那个容量倒置）；而且「攥着许可去
+  await 另一个过闸子任务」这条真正会死锁的写法在类型层挡不住。分块还是静态均分（`chunk_size` 只保证块数不超过额度，
+  额度 16、17 件只切出 9 块），几何负载天然长尾，一块里摆两个重 BRAN 就把其余 worker 空在那儿。
+  **改动（`src/fast_model/concurrency.rs`）**：新增 `run_gated_cpu(FnOnce() -> anyhow::Result<T>)`——只收同步闭包
+  （闭包里写不出 `.await`，上面那条死锁写法在类型层就不成立），计算送进**私有** Rayon 池（`num_threads` = 闸额度，
+  线程名 `geometry-cpu-N`；**不用全局 Rayon 池**，那个被 `room_model` / `db_model` 的 `par_iter` 共用、宽度不归闸管，
+  接进来就是第二套并发口径）。许可在派发前取得、随闭包搬到 worker 线程上归还，池宽与额度相等故派发排队为零，
+  于是这一段的持有时长就是 CPU 忙的时长。闭包 panic 就地 `catch_unwind` 转成错误——rayon 的默认处置是**整个进程
+  abort**，一根坏构件不该把服务打死（去掉这层直接崩测试进程，实测 `STATUS_STACK_BUFFER_OVERRUN`）。
+  新增 `resident_workers(jobs) = min(额度, 件数)`（第 4 条的宽度来源，件数为 0 时不派 worker）。
+  `GeometryGate::acquire` 与 `GeometryPermit` 由 `pub` 收成模块私有（模块外零调用点），对外只剩 `run_gated_cpu`，
+  调用方无法自行把许可作用域扩大到 CPU 段之外。
+  **改动（`src/fast_model/e3d_model_service.rs`）**：上一条那个串行 for 循环换成**无栏的常驻 worker 池**。
+  新增 `RootQueue`：整条根列表一份，`min(额度, 还能领的件数)` 个 worker 各持一张许可、各带一份 catalogue 缓存，
+  从共享队列按索引领取，算完写回**自己那一格**；装配端只从队头按源顺序取，取走一格窗口就向前滑一格。
+  **窗口（= `model_regen_execution_group` 根）是「无栏并行」与「内存有界」之间那根绳子**：worker 最多跑在装配端前面
+  一个窗口，再多就把许可**还回去**（攥着许可等装配端正是 ADR-052 开篇那个容量倒置），装配端滑动窗口后再把它派回来。
+  一开始写的是按 cohort 分波、波与波之间设栏，但那等于每个 cohort 都赔上其中最慢的那一根，而几何负载天然长尾；
+  改成滑动窗口之后只有队头能挡住人。
+  按源顺序装配不是装饰：切片边界与 `Required` 裁决（在哪一根 bail、哪一根记死信）因此与「谁先算完」无关，
+  `geometry_workers = 1` 逐字节复现改前那条串行路径。缓存池跨窗口存活——缓存跟着一批死掉会丢掉「一次生产就是一个
+  复用窗口」这条。`SourceIndex` 顺手改成 `Arc`（`GenerationInput` 与 `GeneratedMemoryBatch` 各持一份共享指针），
+  否则每个 worker、每一片都要复制一遍整库的 `roots` 表。
+  **回滚**：这条路径上 `geometry_workers = 1` 是**精确**回滚（一个 worker、一份缓存、按根原序），因为它不从额度派生
+  任何别的东西——不用 `chunk_size`、不攒 SQL。ADR-052 第 6 条否掉「靠 geometry_workers 回滚」针对的是额度同时决定
+  SQL 包大小的那些调用点，与此处不同。
+  **护栏**：`concurrency::tests` 四条新增（并发峰值不超额度 / CPU 段跑在 `geometry-cpu-` 线程上而不是 tokio worker /
+  panic 接住且许可归还、闸不被漏掉的一张堵住 / `resident_workers` 上下界）加一条
+  `the_retired_future_wide_gate_gains_no_new_call_sites`（六个文件逐个点名计数，`spawn_gated_leaf` 只出不进）；
+  `no_hardcoded_fanout_width_survives_in_fast_model` 的 spawn 探测加上 `run_gated_cpu(`，`indices.len() / <字面量>`
+  单独放行并写明理由（那是「每三角形三个索引」的网格算术，此前靠「那些文件不 spawn」侥幸躲开）；
+  `e3d_model_service::tests` 三条钉生产端——
+  `generation_workers_claim_dynamically_and_never_share_one_catalogue_cache`（源码形状：宽度只来自
+  `resident_workers(queue.claimable())`、CPU 段只进 `run_gated_cpu`、写回按领取序号落槽、缓存从池里借还，
+  不许 `chunk_size(` / `tokio::spawn(` / `roots.chunks(`）、
+  `the_generation_window_bounds_how_far_workers_may_run_ahead`（行为级：窗口满了不许再领；队头没好时先算完的那根
+  不许插队；取走一格窗口滑一格）、`finished_roots_are_assembled_in_source_order_not_completion_order`
+  （完成序 3/1/2/0，交出去必须是 0/1/2/3）。后两条是真跑 `RootQueue` 的并发不变式，不是扫源码。
+  **验证（本轮实跑）**：`cargo check --lib --tests` 通过、无新警告；  `rustfmt --edition 2024 --check` 四个改动文件全干净；定向
+  `cargo test --lib -- e3d_model_service concurrency` **58 passed / 0 failed**；
+  全量 `cargo test --lib` **1437 passed / 4 failed / 101 ignored**，4 条仍是下面已记的同一批。
+  **未做 / 未 live**：**T004/T005 的基线与可重复性证据没采**，所以本条不含任何加速比结论，也没跑真库；
+  T008 的 `geometry_executor = "tokio_legacy" | "blocking_pool"` 开关没做；T011～T018 那七处 `spawn_gated_leaf`
+  一处未动，因此 `active` 目前是**混读**（新路径读作 CPU 段，那七处仍读作「许可被占住多久」），模块头已写明
+  ——叶子迁完前不得把利用率整体当 CPU 利用率写进 A/B 结论。ADR-052 第 5 条（SQL 攒批与额度解耦）也未做。
+- **模型生成的内存批改成有界切片 + 深度 1 有界 channel，`generate_dbnum_in_memory` 那个「整库一次产进内存」的形态删除
+  （用户 2026-09-04 14:2x 在四条后续里选了这条；收 ADR-041 §8）。** 生产/消费拆开之后，生产端一次把**调用方给的全部根**
+  产进一个 `GeneratedMemoryBatch`，消费端再按 `model_regen_execution_group` 切块发布——一页 100 根就是 100 根的
+  `GeneratedElement`（世界系 f64 CSG 实体，整条链上最胖的表示）同时在内存里，`generate_dbnum_in_memory` 对 7997 那 2720 个根
+  一跑更是 GB 级。ADR-041 §8 把「无界」当否决方案写进了 ADR（“真不阻塞，代价是内存无界”），这正是它点名的形态。而且拆开
+  之后两段是**先全产、再全发**，`(P+C)×N` 一分钟没省。
+  **改动**：`generate_roots_in_memory` 换成私有的 `produce_slices(…, sink)`——按根遍历，攒够**任一预算**即封片交出：
+  `model_regen_execution_group` 那一档根数（发布 cohort 宽度，与改前的事务边界同口径）或新键 `model_memory_slice_elements`
+  那一档元素数（默认 8000）。只按根数算不是内存预算：一个 BRAN 和一个 EQUI 差两个数量级，「只有 16 根」的一页照样可以是
+  进程里最肥的东西。单根不拆（根是发布的原子单位），所以真实峰值是「一份预算 + 一根」。新增公开入口
+  `generate_and_persist_roots`：`tokio::sync::mpsc::channel(1)` 一条，两端用 `futures::future::join` 并跑（不是 `tokio::spawn`
+  ——不需要 `Send`/`'static`，也不碰 `src/fast_model` 那条 fan-out 扫描线）；消费端出错先 `receiver.close()` 再返回，生产端下一次
+  交片拿到 Err 就安静收工，让消费端那个错上浮。同时活着的最多三片（发布中 / 缓冲 / 在攒），不是整页。
+  `model_refresh::generate_roots_report` 改调它；`generate_dbnum_in_memory` 与 `ModelRefreshPolicy::generate_roots_in_memory`
+  两个无调用点的死接口一并删除（前者是被否决形态本身，后者是它的包装；全量 `generate_dbnum` 本来就是逐根流过
+  `generate_refs`，不经内存批，已经是有界的）。
+  **要知道的一处语义放松**：改前一次 `persist_memory_batch` 在**一把** `db_generation_lock` 里发完整页；现在每片各取一次锁、
+  锁内各复核一次 `ensure_not_older_than_persisted`。重叠与「整页一把锁」是互斥的——锁跨整条流水线就等于把生成又关回锁里，
+  正是上一条刚摘掉的东西。片间因此留了缝：同 dbnum 的另一个生成者可以插进来发布，之后本页剩下的片会带着陈旧源报错退回
+  （这是正确结局，不是数据风险；根级 CAS 凭证与 `session_not_stale` 各自独立成立）。分块发布本来就不是原子的——改前
+  chunk 3 失败时 chunk 1/2 也已提交——变的只是「不被别人插队」这一条。
+  **护栏**：`e3d_model_service::tests` 两条新增——`the_generation_pipeline_hands_over_bounded_slices`（流水线函数体必须出现
+  `mpsc::channel::<GeneratedMemoryBatch>(1)` 与 `futures::future::join(produce, consume)`；生产端必须同时读两条预算；
+  生产代码段里不许再出现 `fn generate_dbnum_in_memory(`）、`a_slice_seals_on_either_budget_and_never_splits_a_root`
+  （`MemorySlice` 行为级：空片不满、死信不占元素预算、到 cohort 宽度封片、单根撑破预算立刻封片且不拆根）。原有三条源码钉的
+  切分标记跟着函数改名更新（`memory_producer_body` / `memory_consumer_body` 两个 helper，避免三处各写一遍）。
+  **验证（本轮实跑）**：`cargo check --lib --tests` 通过、无新警告；`rustfmt --edition 2024 --check` 三个改动文件均干净；
+  定向 `cargo test --lib -- memory_producer generation_pipeline slice_seals owner_index memory_generation_reads`
+  5 passed / 0 failed；全量 `cargo test --lib` **1428 passed / 4 failed / 101 ignored**——4 条仍是下面那两条已记的同一批。
+  **未 live**：没跑真库。8000 这个默认值是按「16 根 × 500 元素」推的，不是量出来的；重叠到底省了多少（`max(P,C)` 对
+  `(P+C)`）也没实测——要量就在一页 100 根的 drain 上记生成段与发布段各自的墙钟。**没动的**：生产端仍是串行 for 循环，
+  三角化与 `ensure_mesh_file` 还留在消费端；ADR-052 的 `run_gated_cpu` 未实现（specs/033 T006/T007 未勾）；发布粒度、
+  生成前读合并、`inst_relate`/`tubi_relate` 索引三条仍在原处。
+- **内存批的三处形态修正：owner 索引一批共享一份、单根硬错降级为死信、`db_generation_lock` 从生产端挪到消费端
+  （接 2026-09-04 14:04 那轮「为什么需要加锁，我们都是只读」的审读结论；生产/消费拆分本身是上一批的改动）。**
+  `generate_roots_in_memory` / `persist_memory_batch` 把模型生成拆成「先产进内存、再串行发布」之后，三个原本无害的写法
+  变成了真问题：① `generate_snapshot_from_set` 给每个快照填 `owners: index.owners.clone()`——那是整个 dbnum 的 owner 表。
+  拆分前快照在循环一轮内生并死，同一时刻只活一份；拆分后一页 100 根就是 100 份同一张表同时在内存里，而全仓拼语句读的
+  一直是批自己带的 `&index.owners`（`generate_refs:722`、`apply_geometry_delta`），`snapshot.owners` 唯一的消费者是单根
+  历史快照路径 `historical_model.rs:268`。② 生产端是 `generate_snapshot_from_set(...)?`——一个硬错误（读不动子树、
+  `DbElementError`）把整个内存批抛掉，而旧的 `generate_refs` 在 `BestEffortFallback` 下是 `total.failed += 1` 后 `continue`；
+  生产链路用的就是 `BestEffortFallback`（`model_refresh.rs:145`），这条直接撞 ADR-041 §6「单根失败记死信，不毁整片」，也撞
+  commit `52ae62a5` 修过一次的现场：必现失败的坏构件把整页永久卡死。③ 生产端开头就取 `db_generation_lock(dbnum)`，而那
+  一整段是纯读——这把锁护的是「`source_session` pin → `ensure_not_older_than_persisted` 单调判据 → 发布事务 → 写 `gen_root`
+  凭证」这条写侧链，拿在读段只是把所有生产者串起来。
+  **改动**：`SourceIndex.owners` 与 `GeneratedSnapshot.owners` 改成 `Arc<BTreeMap<(u32, u32), RefNo>>`（`scan_index` 建一份、
+  `generate_snapshot_from_set` 只 `Arc::clone`；两处消费点靠 deref 强转，签名一行没改）；`GeneratedMemoryBatch` 新增
+  `failures: Vec<(RefNo, String)>`，生产端 `Required` 之外的硬错误记一条死信并 `continue`，消费端开批时把它们逐条打日志并
+  计进 `total.failed`（那些根保留上一次已发布的几何，调用方看到的 `failed` 不为零）；生产端不再取 `db_generation_lock`，
+  消费端那把锁与锁内的 `ensure_not_older_than_persisted(batch.source_sesno)` 原样保留——批带出去的只是 pin 好的
+  `source_sesno`，期间若有更新会话发布过，这一批就带着陈旧源报错退回。
+  **护栏**：`e3d_model_service::tests` 两条——`the_memory_producer_neither_locks_publication_nor_drops_a_page_for_one_root`
+  （生产端函数体不许出现 `db_generation_lock`、必须是 `match generate_snapshot_from_set(` 且有 `failures.push(`；消费端函数体
+  必须同时出现 `db_generation_lock` / `ensure_not_older_than_persisted` / `batch.failures`）、
+  `every_snapshot_in_a_batch_shares_one_owner_index`（两处字段声明都是 `Arc<BTreeMap<…>>`，快照构造只许 `Arc::clone(&index.owners)`、
+  不许 `index.owners.clone()`）。既有的 `memory_generation_reads_only_the_e3d_source_projection` 未改，仍在盯生产端不读投影。
+  **验证（本轮实跑）**：`cargo check --lib` 通过、无新警告；`rustfmt --edition 2024 --check src/fast_model/e3d_model_service.rs`
+  干净（上一轮记的那两处既有红已不复现）；`cargo test --lib -- e3d_model_service` 34 passed、`-- model_refresh` 1 passed / 2 ignored、
+  `-- historical` 4 passed、`-- spatial` 29 passed，均 0 failed；全量 `cargo test --lib` **1426 passed / 4 failed / 101 ignored**
+  ——4 条与本条无关，就是上面「模型增量类型限定」那条已记的同一批（`the_embedded_panel_is_real_and_a_disk_copy_still_wins`
+  缺 `id="verdict"`，`increment_manager` 三条读工作树 `DbOption.toml` 的 `watch_dbnums`）。
+  **未 live**：没跑真库，owner 表省下的实际字节数没量（真值可从 `WindowRootSources.index_keys` 读），死信路径也没在真库上
+  触发过。**没动的**：内存批仍然无界——`generate_dbnum_in_memory` 一次把整个 dbnum 的根全产进内存，正是 ADR-041 §8 明文否决
+  的形态；按元素数 / 字节预算切片 + 深度 1 有界 channel 那一步没做。生产端仍是串行 for 循环，三角化与 `ensure_mesh_file`
+  也还留在消费端（ADR-052 的 `run_gated_cpu` 至今未实现，specs/033 T006/T007 未勾）。
+- **模型发布后的空间树收敛改回「提交后就地定向」，cohort 级整树重建永久删除（用户 2026-09-04 12:56 在甲/乙两案里选乙）。**
+  上一版把 `generate_refs` / `apply_geometry_delta` 提交后的定向 `sync_tree_from_committed_pointers` 连同整树重建一起删了，
+  换成进程内旗子 `MODEL_SPATIAL_REFRESH_PENDING` + `SpatialTreeState::ReplayRequired` 门禁，等 `drain` /
+  `drain_data_phases_disposition` 三段队列全空再跑一次 `rebuild_tree_from_pointers()`。这个形态有三个洞：
+  `side_effect_pending::promote_state_after_replay` 只看 durable `spatial_reconcile` 队列、不认识那个进程内旗子，
+  而 `batch_worker::reconcile_spatial_pending` 每领一批都调它，于是树还是旧的就把 `ReplayRequired` 升成 `Ready`，
+  房间轮拿陈旧树算归属；持续 SAVEWORK 流下 `drain_data_phases_disposition` 每次都在 regen 未空处提前返回，收尾刷新饥饿；
+  `/model/ensure` 按需路径同样置旗，没有空闲轮的生产形态无人来刷。
+  **改动**：`e3d_model_service` 恢复提交后就地 `sync_tree_from_committed_pointers(&spatial_refnos)`（`generate_refs` 与
+  `apply_geometry_delta` 各一处，仍在 `lock_spatial_serial()` 之下、与同事务的 `render_spatial_epoch_bump()` 配对），
+  紧随其后的 `rebuild_tree_from_pointers()` 永久删除——它当初是给「只删 legacy 行、不产 GeometryId 的根」兜底，而
+  `pre_e3d_spatial_refnos` 早已把那些源键并进 `spatial_refnos`（`prepare_geometry_delta` 的 `report.removed += expected_count`
+  保证 `persisted.removed > 0` 这个入集条件成立），整树扫描是冗余的；删掉 `MODEL_SPATIAL_REFRESH_PENDING` /
+  `mark_model_spatial_refresh_pending()` / `refresh_spatial_tree_after_model_generation()` 与 `model_update_pending::drain`、
+  `drain_data_phases_disposition` 的两处调用（后者尾部还原成原来的 `match aabb` 形），模型生成不再置
+  `SpatialTreeState::ReplayRequired`。收敛代价从「每 cohort 一次 O(库) 指针全扫」回到 O(本次变更量)；整树重建只剩启动时
+  epoch 失配的 `rebuild_at_startup_locked` 这一处兜底。
+  **护栏**：`e3d_model_service::tests::publication_converges_the_spatial_tree_without_a_full_rebuild` 取代
+  `generation_defers_spatial_tree_refresh_until_dbnum_completion`——`generate_refs` 与 `apply_geometry_delta` 两段函数体都
+  必须出现 `sync_tree_from_committed_pointers`、都不许出现 `rebuild_tree_from_pointers`；
+  `model_update_pending::tests::automatic_regen_and_aabb_drains_are_bounded_and_barriered` 去掉收尾刷新那两段序关系，
+  还原成「regen 屏障在 AABB 之前」。
+  **验证（本轮实跑）**：`cargo check --lib` 通过；`cargo test --lib -- spatial` 29 passed / 0 failed；
+  `cargo test --lib -- e3d_model_service` 30 passed、`-- model_update_pending` 105 passed / 12 ignored、
+  `-- aabb_tree` 21 passed / 1 ignored，均 0 failed。**未 live**：没跑真库，一页 100 根 drain 的三段耗时
+  （生成前读 / 发布事务 / 树收敛）仍未实测。**没动的**：同一次审核提出的另外四条（发布粒度降到每根一事务、生成前读合并成
+  cohort 级 1–2 次查询、`inst_relate` / `tubi_relate` 建索引、离散与哈希搬进 `spawn_blocking`）都还在原处。
+- **数据读取模式默认 direct：`AIOS_DATA_READ_MODE` 不设即 direct，只有显式 `=db` 才退回 legacy 读路由（用户 2026-09-04 10:27
+  拍板「AIOS_DATA_READ_MODE=direct 改成默认的，全部默认切换过来」；ADR-058 Q3 部分收口）。** 此前 `options::direct_read_mode()`
+  只在环境变量恰等于 `direct` 时为真：生产早就跑 direct，而每条启动脚本、每次手起服务都得记着带这个变量，忘了就静默退回
+  ADR-058 D8 已宣布退役的 db 形态——数据面改读 SurrealDB 的 `pe` / `ATT_*` 行、模型计划走 `pe` 打头的旧规划器，日志上只有
+  一行「数据读取模式：db」可辨。
+  **改动**：`options.rs` `direct_read_mode()` 改为「非显式 `db` 即 direct」（`parse_data_read_mode` 只认 `direct` / `db`，大小写与
+  首尾空白不敏感）；新增 `data_read_mode_notice()`——设了却认不出的值（如 `dierct`）按未设置走 direct，但必须出声，`run_cli`
+  与 python `full_init` 都打（与 `retired_net_window_notice` 同款：静默吃掉一个设了的开关是最高级别缺陷之一）；`run_cli` 的
+  读模式播报与完成横幅改口：direct 标「默认形态」，db 变成 `***` 告警行，点名「由 AIOS_DATA_READ_MODE=db 显式选中、已退役、
+  只留作退路」；`DbOption.toml` 在 `sync_live` 旁补一段说明（这个开关不在配置文件里，只认环境变量）。启动序列一行不动：
+  读模式仍只回答「数据面读哪儿」，watcher / worker / 模型复核 / 房间与它无关，S5 护栏
+  `direct_read_mode_only_selects_the_data_read_route` 原样绿。
+  **护栏**：`options::tests::direct_is_the_default_read_mode_and_db_is_the_explicit_legacy_exit`（不设 / `direct` / ` DIRECT ` /
+  空串 / 拼错 → direct；`db` / ` Db ` → db）、`an_unrecognised_read_mode_value_is_announced_not_swallowed`（拼错出声且提示
+  `=db` 退路；没设 / 设对 / 空白不吵）。
+  **验证（本轮实跑）**：`rustfmt --check` `options.rs` / `lib.rs` 通过；`cargo check --lib --tests` 通过；全量 `cargo test --lib`
+  **1417 passed / 1 failed / 101 ignored**——那 1 条 `the_embedded_panel_is_real_and_a_disk_copy_still_wins` 仍是另一会话半改
+  `web/ops.html` 丢了 `id="verdict"` 锚点，与本条无关。**未 live**：没有起过服务确认不带环境变量时横幅打
+  「direct / e3d-io（默认形态）」。**没动的**：S5-4 db 形态整体退役 / git tag——`=db` 这条退路与 `sync_pdms` legacy 分支保留到
+  那一步一起收；`.github/context-cold.md` 是生成物，不手改。
 - **启动形态合一（ADR-058 D8 / refactor plan S5-1～3）：direct 形态也起 watcher，`direct_read_mode` 在启动序列里只回答
   「数据面读哪儿」。** 起因是 2026-09-04 对增量更新启动流程的审核（`docs/plans/2026-09-04-startup-increment-audit-and-next-plan.md`
   #1 / #3 / #14）：`sync_live = configured_sync_live && !direct_read_mode` 让生产形态启动后没有数据链、没有 manifest、

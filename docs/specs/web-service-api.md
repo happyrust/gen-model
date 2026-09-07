@@ -231,7 +231,9 @@
   202 回执、排队中合并、运行中冻结全部照旧——过滤只决定谁入队。
 - 每个数据批次是一条 `kind = "data_batch"` 的任务：`queued -> running -> succeeded|partial|failed`；
   进度经 WebSocket 推送（第 5 节），终态 result 为 `{ project, status, batch: DataBatchResult,
-  units: [ModelUnitResult], warnings }`（一行任务一个批次，「一次运行」的复数形态随 ADR-011 退役）。
+  units: [ModelUnitResult], warnings, model_verdict?, model_caught_up_at? }`（一行任务一个批次，
+  「一次运行」的复数形态随 ADR-011 退役）。双水位字段在模型与文件轮次发布之后读取；
+  `model_caught_up_at` 只在 `model_verdict = in_sync` 时出现，取自水位行的 `model_settled_at`。
 - 模型持久工作由正式消费者 `kind = "model_drain"` 分页认领（每页至多 16 根）。状态为
   `running -> succeeded|partial|failed|yielded`；`yielded` 表示初始化门或数据优先级要求让位，
   是本次进程内任务的终态，但未执行的 durable pending 行、revision 与 attempts 均保持原值。
@@ -251,7 +253,10 @@
   "dbnum": 7997, "start_sesno": 85, "end_sesno": 92,
   "created_at": "2026-07-29T10:03:01+08:00", "finished_at": "2026-07-29T10:04:12+08:00",
   "events_seen": 42,
-  "result": { "status": "success", "batch": {}, "units": [], "warnings": [] }
+  "result": {
+    "status": "success", "batch": {}, "units": [], "warnings": [],
+    "model_verdict": "in_sync", "model_caught_up_at": "2026-09-05T17:01:43Z"
+  }
 }
 ```
 
@@ -342,10 +347,27 @@
 ```json
 { "dbnum": 8003, "db_type": "DESI", "file_name": "ams8003_0001", "file_path": "...",
   "file_size": 57948160, "file_latest_sesno": 812, "applied_sesno": 1005,
+  "model_sesno": 1001, "model_sesno_time": "2026-09-06T10:15:00+08:00",
+  "model_caught_up_at": null,
+  "model_verdict": "lagging", "model_verdict_reason": null,
+  "model_caught_up_roots": 956, "model_chasing_roots": 1,
+  "model_dead_roots": 0, "model_lazy_roots": 12,
   "initialized": true,
   "anomaly": { "kind": "rollback", "file_latest_sesno": 812, "applied_sesno": 1005 },
   "blocked": false, "excluded": false }
 ```
+
+- `model_verdict` 是双水位的唯一判决：`in_sync` 表示 `model_sesno == applied_sesno`
+  且没有根仍在追赶；`lagging` 表示数据与模型暂时不同步；`not_judged` 表示当前形态
+  没有可比较的两枚水位。读透形态的 reason 为 `read-through`，这是中性状态。
+- `model_sesno_time` 表示对应 E3D 保存时刻；`model_caught_up_at` 表示模型水位真正写下的
+  挂钟时刻，只在 `model_verdict = in_sync` 时非空。
+- `model_dead_roots` 与 `model_lazy_roots` 不阻断水位，但必须并排展示；后者为 `null`
+  表示尚未观察，不等于零。
+- `ref0s`：这个库拥有的全部 Ref0（升序）。`dbnum → Ref0` 是一对多（`CONTEXT.md`
+  「Ref0 库归属」），这是那张归属表的反向视图，给只拿得到 refno 的客户端（浏览器）
+  自己算库号用。骨架没预热过的形态下**整格不写**——不写空数组，空数组读起来是
+  「这个库一个 Ref0 都没有」，那是另一句话。
 
 - `anomaly` 五种（spec §文件异常）：`rollback` / `path_migrated` / `type_changed` /
   `duplicate`（带 `paths[]` 交给人挑）/ `missing`。`path_migrated` 不阻断；`rollback`
@@ -358,6 +380,12 @@
 - `rollback` 的库在下一轮扫描/执行时按首次导入入队（窗口 `1..file_latest`），由 worker
   冻结点复核后整库清空重建，不再长期停留在 `blocked: true`；其余四种异常照旧阻断。
   原 `watermark_realign` 档位与单库对齐端点（曾为 §4.9）随 ADR-021 移除。
+- `model_source` / `model_source_reason`：这个库的模型现在该从哪儿读（§4.12）。
+- `dependency_rows` / `dependency_sesno`（2026-09-06，plan §3 D6/D7）：**目录库才有**——按 DESI 依赖入库的
+  CATA 行数与它们按哪一版目录文件渲染（`cata_dependency_state:{dbnum}`，不是水位、不进 `applied_sesno`）。
+  `dependency_rows` 是**累计送入**的依赖行数（`Fresh` 命中已有行也计，版本前移的 `Replace` 重渲不计），是量级
+  不是精确行数；要精确数就 `SELECT count() FROM pe WHERE dbnum = … AND dependency = true GROUP ALL`。
+  没有依赖行的库**整格不写**——写 0 读起来像「一个依赖都没有」，那是另一句话。
 - 旧字段是新形状的子集，既有消费者不受影响。
 
 ### 4.8 `GET /api/v1/queue`、`POST /api/v1/queue/pause`、`POST /api/v1/queue/resume`（ADR-011 §9）
@@ -388,6 +416,86 @@
   （整库快删）与 `DELETE /dbnums/{dbnum}/data/above/{watermark}`（残留清理），
   操作契约（暂停队列 → 等该库空闲 → 精确 confirm）不变。
 
+### 4.10 `GET /api/v1/tree/{roots,children,ancestors}`、`GET /api/v1/search` — 直读模型树
+- 数据源是 e3d-io 直读（`DirectTreeService` + 进程级骨架），**不查 `pe` / `pe_owner`**：
+  读透形态（`data_face = read-through`）下 SurrealDB 里根本没有元素行，树只能从文件解。
+  四条端点都只读，可选 `?project=&mdb=&namespace=`——给了就必须与本进程身份一致，
+  否则 422 `identity_mismatch`（§3）。`?refno=` 收 `a/b` 与 `a_b` 两种写法。
+- `GET /tree/roots` → `{ "source": "direct", "project": "…", "mdb": "/ALL", "nodes": [...] }`：
+  每个 DESI/ISOD 库 WORL 下的 SITE 平铺。**没有单一 WORL 根**——一个 MDB 挂多个库、
+  每库一棵，客户端要单根就自己合成一个虚拟根。
+- `GET /tree/children?refno=a/b` → `{ "source", "parent": "a/b", "nodes": [...] }`：直接成员，
+  按元素记录里成员表的存储顺序，服务端不截断（要分页的自己截）。
+- `GET /tree/ancestors?refno=a/b` → `{ "source", "refnos": ["a_b", …] }`：自己在前，
+  沿 OWNER 向上到库顶。
+- 节点 = `EleTreeNode` 原样序列化 + HTTP 层外包的一格 `dbnum`：
+
+```json
+{ "refno": "24381_2", "noun": "SITE", "name": "/1WCC-PIPE", "owner": "24381_1",
+  "order": 0, "children_count": 12, "op": "…", "mod_cnt": null,
+  "children_updated": null, "status_code": null, "dbnum": 7997 }
+```
+
+- `dbnum` 不加在 `EleTreeNode` 类型上（plant-ui 用 serde 解那个类型，多余字段忽略即
+  兼容），而是 handler 在 JSON 层外包一格。它必须由服务端给：refno 的前半段是 Ref0
+  不是库号（`CONTEXT.md`「Ref0 库归属」），而浏览器端的几何缓存、可见性、选中全按
+  库号分桶。Ref0 不在本 MDB 骨架里时为 `null`——那是「答不出」，不是 0 号库。
+- `GET /search?query=&limit=&cursor=` → `{ "source": "snapshot", "epoch", "session_vector",
+  "items": [{ "name", "refno": "a/b", "dbnum", "noun" }], "total", "truncated", "next_cursor" }`：
+  NAME 子串、大小写不敏感、全库扫描；`limit` 默认 100、夹在 `1..=500`；`query` 为空 400。
+- `noun` 只给**这一页**解：名称索引里没有类型，要它就得回元素记录读一次 `TYPE`——
+  搜「PIPE」在大库上命中几万条，对全集解会把搜索拖成秒级。读不出来给空串而不是
+  `null`：plant-ui 那边 `noun: String` 带 `serde(default)`，缺省可以，`null` 会让整页
+  反序列化失败。
+
+### 4.11 `GET /api/v1/meshes/{geo_hash}.glb` — 网格的浏览器口径
+- 与 `/assets/meshes/{geo_hash}.mesh`（静态 `ServeDir`）是同一份文件的两种口径：那条给
+  plant-ui（原生读 rkyv 归档的 `PlantMesh`），这条给浏览器——rkyv 布局与 rkyv 0.7 /
+  glam 的内存形状强耦合，让前端手解，任何一边升级都会静默读歪。转换在服务端现场做
+  （`web_service::mesh_glb`），前端复用它已有的 GLB 解析。
+- 输出**一个三角面 primitive**：`POSITION` + 可选 `NORMAL`（f32 VEC3）+ `indices`（u32），
+  坐标是 E3D 原生 mm、Z-up，不做单位换算。法向量数量与顶点数不等时整段省掉 `NORMAL`
+  ——错位的法向量比没有法向量更坏，它把光照画歪而没有任何东西报错。
+  `wire_vertices`（硬边折线）不进 GLB：前端现有解析只读第一个 primitive。
+- `geo_hash` 只放行 `[0-9A-Za-z_]{1,128}`。这既是内容寻址键的真实字符集，也是唯一一道
+  目录穿越的门——`..`、`/`、`\` 连门都进不了。网格目录取 `get_meshes_path()`，与生成侧
+  同一份配置。
+- 响应头：`Content-Type: model/gltf-binary`、`Cache-Control: public, max-age=31536000,
+  immutable`、`ETag: "{geo_hash}"`。内容寻址键对应的几何永不改变，所以缓存可以给到
+  `immutable`，转换成本只付第一次。
+- 错误：路径不是 `{hash}.glb` 或字符集不合 400 `bad_request`；文件不在 404 `not_found`
+  （与「refno 不存在」同码，客户端可负缓存）；文件在但编不成三角网格（没有顶点、
+  索引数不是 3 的倍数、索引越界）422 `precondition`——那是数据的终局，重发同一个键还是
+  同一个结果，不该让客户端当 500 重试。
+- `1` / `2` / `3` 是仓内三份单位几何（单位盒 / 单位圆柱 / 单位球）。客户端本地造这三份
+  几何时，参数须与它们对齐，见 `web_service::mesh_glb` 的
+  `repository_unit_meshes_convert_end_to_end`（`cargo test -- --nocapture` 打印包围盒）。
+
+### 4.12 模型取数源路由（`model_source`）——未初始化的库由 API 供数，已初始化的以 rocksdb 为准
+
+出处：`docs/plans/2026-09-06-rocksdb-batch-write-and-cata-dependency-plan.md` §8（共识 d-29）；
+实现 `data_interface::model_read_route`。
+
+- **判据只有一处**（`model_read_route::route`）：`database` ⇔ 数据面是 `ingest` ∧ 该库
+  `applied_sesno > 0` ∧ 该库没有活着的初始化发布 run；其余 `memory`，理由三选一：
+  `read-through` / `data_watermark_unestablished`（基线未落）/ `initialization_publishing`
+  （基线落了、初始化发布 run 在飞）。
+- **`memory` 库上的 `POST /model/ensure`**：不等初始化队列、不进 durable 队列、不落 rocksdb，直接
+  从文件生成进进程内投影（有初始化 run 就钉它那一版会话，翻面时零差异）。回执多四格：
+  `dbnum`、`model_source`、`model_source_reason`、`durable`（`false` = 这批行活不过进程重启，
+  持久由初始化 run 负责）；`publication_status` 取 `ready` / `empty`（`gen_root` 上没有这根的行）。
+- **`memory` 库上的 `POST /model/records`**：从进程内投影回，`source = "model-memory"`；投影里
+  没有这根（还没 ensure 过）回 `409 conflict`，消息以 `not_generated:` 开头——客户端先去
+  `/model/ensure`，它今天本来就是这个顺序。空数组**不**用来表达「没生成过」。
+- **`database` 库上**两条接口与 §4.5 逐字相同：`records` 读 rocksdb（`source = "model-database"`），
+  `ensure` 落库后读库。一次 `records` 请求只有一根、一个库，所以一个响应只有一个源；
+  回执同样带 `dbnum` / `model_source` / `model_source_reason` / `durable`。
+- **`GET /dbnums`** 每行加 `model_source` / `model_source_reason`（§4.7）；读透形态的冷行恒
+  `memory` / `read-through`。
+- **翻面事件**：初始化发布 run 收口 → `database`；回退重建清库 → `memory`。两处都在 WS `tasks`
+  主题发 `model_source_changed { dbnum, model_source }`（§5.3）。客户端只刷那一格、不重载场景
+  ——内存投影与刚发布的行是同一版文件算出来的，下一次范围重载自然读到 rocksdb。
+
 ## 5. WebSocket 协议（`GET /api/v1/ws`）
 
 ### 5.1 信封
@@ -414,6 +522,7 @@
 | `task_started` | tasks | `{ task_id, kind, project }` |
 | `task_progress` | tasks | `ManualUpdateEvent` 原样（`kind: data_batch_started / data_batch_finished / model_unit_started / model_unit_finished`，两阶段、无百分比，与规格一致）|
 | `task_finished` | tasks | `{ task_id, state, result: ManualUpdateResult }` |
+| `model_source_changed` | tasks | `{ dbnum, model_source }`（`memory` / `database`，§4.12）；`task_id` 为空。初始化发布 run 收口 → `database`，回退重建清库 → `memory`。客户端只刷 `/dbnums` 那一行的来源格，不重载场景；字面值认不出当没收到，下一拍 `/dbnums` 带回真值 |
 | ~~`incr_applied`~~ | ~~increments~~ | **已删（ADR-011 合流）**：自动路径的批次与手动同走 tasks 主题的 `task_started / task_progress / task_finished` |
 | `pong` | 无 | `{}` |
 

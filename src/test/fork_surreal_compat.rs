@@ -7,7 +7,7 @@
 //!
 //! 覆盖面（与开发方案 T0.1 清单一一对应）：
 //! - 项目启动序列的全部 DEFINE（`define_common_functions` 目录序加载 +
-//!   project_hd 对 `fn::room_code` 的重放矫正 + `define_dbnum_event` + 索引）；
+//!   project_hd 对 `fn::room_code` 的重放矫正 + `retire_dbnum_event` + 索引）；
 //! - fn:: 覆盖顺序（`fn::room_code` hd/hh 两版、`fn::room_num_of` 排序键语义）；
 //! - `ast_payload` 兼容（fork 侧连接与生产完全同款：`Config::default().ast_payload()`）；
 //! - `INSERT RELATION` 撞 id 行为（ADR-010 D13：fork 服务器静默保留旧行）;
@@ -236,32 +236,6 @@ async fn assert_dual_same(case: &str, mem: &Surreal<Any>, fork: &Surreal<Any>, s
 /// `staging::lifecycle::init_staging_schema`——本套件排练的就是生产那个函数。
 async fn replay_startup_defines(db: &Surreal<Any>) -> anyhow::Result<()> {
     crate::data_interface::staging::lifecycle::init_staging_schema(db).await
-}
-
-/// F4 行为钉子：update_dbnum_event 定义在场时，字符串 id 的 pe 最新行在
-/// **两个引擎上同样**写不进去（事务里也一样整体失败），数组 id 的历史行
-/// 形制则同样成功并推进 dbnum_info_table。mem↔fork 无分歧——这是生产写
-/// 路径自身的雷点，不是暂存介质的行为差异。
-#[tokio::test(flavor = "multi_thread")]
-async fn dual_update_dbnum_event_rejects_string_pe_ids_identically() {
-    let Some((mem, fork, _guard)) = dual_dbs("dbnum_event").await else {
-        return;
-    };
-    assert_dual_same(
-        "dbnum_event",
-        &mem,
-        &fork,
-        &[
-            r#"DEFINE EVENT OVERWRITE update_dbnum_event ON pe WHEN $event = "CREATE" OR $event = "UPDATE" OR $event = "DELETE" THEN { LET $id = record::id($value.id); LET $ref_0 = array::at($id, 0); UPSERT type::thing('dbnum_info_table', $ref_0) SET count = count?:0 + 1; };"#,
-            // 字符串 id 的最新行：事件体 array::at 类型错误，事务整体失败。
-            "BEGIN TRANSACTION; UPSERT pe:24381_100677 SET noun = 'PIPE'; COMMIT TRANSACTION;",
-            "SELECT * FROM pe;",
-            // 数组 id 的历史行形制：事件正常工作。
-            "UPSERT pe:['24381_100677', 5] SET noun = 'PIPE_H';",
-            "SELECT * FROM dbnum_info_table;",
-        ],
-    )
-    .await;
 }
 
 /// `INFO FOR DB` 的 SurrealQL 文本（对拍与标记断言共用）。
@@ -1675,4 +1649,306 @@ async fn dual_pointer_scan_pagination_agrees() {
     let mut single = walk(&mem, 1000).await;
     single.sort();
     assert_eq!(single, want, "单页与多页扫描必须同集合");
+}
+
+// ───────── 双跑：元素数据行「批量先删后插」要用到的四种语句形状（rocksdb 批量写回重构 P0-3） ─────────
+//
+// `docs/plans/2026-09-06-rocksdb-batch-write-and-cata-dependency-plan.md` §3 D1/D2 把数据面的写法
+// 收成「`LET $ids = [..]; DELETE $ids` → 每表一条 `INSERT IGNORE` / `INSERT RELATION IGNORE`」，
+// §1.1 #7 把 `datacenter_version` 的逐条 UPDATE 归组成多目标 UPDATE。模型侧的 `render_chunk`
+// 已经在 rocksdb 上用前两种，但数据面的表（`pe` / `<NOUN>` / `ATT_UDA` / `pe_owner`）此前只见过
+// UPSERT 与 `INSERT IGNORE INTO pe [..]`，多目标 UPDATE 全仓没用过——P1/P3 开工前先让四种形状
+// 在两个引擎上双跑，任何一条在 fork（rocksdb）侧不成立，对应处置改回逐条并记进计划。
+
+/// 一条 `SELECT VALUE …` 的结果按类型取回并排序（不经 JSON 文本，避免押 `surrealdb::Value` 的
+/// 序列化形状；`SELECT VALUE x … ORDER BY id` 在 2.1 上不合法——排序键必须在选择列里，所以这里
+/// 在 Rust 侧排）。
+async fn sorted_values<T: serde::de::DeserializeOwned + Ord>(
+    db: &Surreal<Any>,
+    sql: &str,
+) -> Vec<T> {
+    let mut out = db
+        .query(sql)
+        .await
+        .expect("probe transport")
+        .check()
+        .expect("probe statements")
+        .take::<Vec<T>>(0)
+        .expect("probe decode");
+    out.sort();
+    out
+}
+
+/// `LET $ids = [pe:a, pe:b]; DELETE $ids;` 只删名单里的记录，邻居一行不动；
+/// 名单里有不存在的 id 也不报错（重放同一块时正是这种形态）。
+#[tokio::test(flavor = "multi_thread")]
+async fn dual_array_delete_removes_exactly_the_listed_records() {
+    let Some((mem, fork, _guard)) = dual_dbs("array_delete").await else {
+        return;
+    };
+    assert_dual_same(
+        "array_delete",
+        &mem,
+        &fork,
+        &[
+            "INSERT IGNORE INTO pe [\
+               { id: pe:⟨8000_1⟩, noun: 'BRAN' }, { id: pe:⟨8000_2⟩, noun: 'BRAN' }, \
+               { id: pe:⟨8000_3⟩, noun: 'EQUI' }];\n\
+             INSERT IGNORE INTO BRAN [{ id: BRAN:⟨8000_1⟩, NAME: '/B1' }, { id: BRAN:⟨8000_2⟩, NAME: '/B2' }];",
+            "BEGIN TRANSACTION;\n\
+             LET $pe_ids = [pe:⟨8000_1⟩, pe:⟨8000_2⟩, pe:⟨8000_404⟩];\n\
+             LET $bran_ids = [BRAN:⟨8000_1⟩, BRAN:⟨8000_404⟩];\n\
+             DELETE $bran_ids;\n\
+             DELETE $pe_ids;\n\
+             COMMIT TRANSACTION;",
+            "SELECT record::id(id) AS id FROM pe ORDER BY id;",
+            "SELECT record::id(id) AS id FROM BRAN ORDER BY id;",
+        ],
+    )
+    .await;
+    let pe: Vec<String> = sorted_values(&fork, "SELECT VALUE record::id(id) FROM pe;").await;
+    assert_eq!(pe, vec!["8000_3".to_string()], "只剩名单之外的那一行");
+    let bran: Vec<String> = sorted_values(&fork, "SELECT VALUE record::id(id) FROM BRAN;").await;
+    assert_eq!(bran, vec!["8000_2".to_string()]);
+}
+
+/// `INSERT RELATION IGNORE INTO pe_owner [..]`：撞 id 保留旧行、边照样登记成图
+/// （`owner<-pe_owner` 走得通）；与 `INSERT IGNORE INTO <NOUN> [..]` 撞旧行同款。
+#[tokio::test(flavor = "multi_thread")]
+async fn dual_insert_ignore_keeps_existing_rows_and_relation_edges_stay_graph_edges() {
+    let Some((mem, fork, _guard)) = dual_dbs("insert_ignore").await else {
+        return;
+    };
+    assert_dual_same(
+        "insert_ignore",
+        &mem,
+        &fork,
+        &[
+            "INSERT IGNORE INTO pe [{ id: pe:⟨8000_10⟩, noun: 'ZONE' }, { id: pe:⟨8000_11⟩, noun: 'PIPE' }];",
+            "INSERT RELATION IGNORE INTO pe_owner [\
+               { id: pe_owner:[pe:⟨8000_10⟩, 0], in: pe:⟨8000_11⟩, out: pe:⟨8000_10⟩, tag: 'first' }];",
+            // 撞 id：旧行赢（基线父层补缺「已有行赢」的语义押在这上面）。
+            "INSERT RELATION IGNORE INTO pe_owner [\
+               { id: pe_owner:[pe:⟨8000_10⟩, 0], in: pe:⟨8000_11⟩, out: pe:⟨8000_10⟩, tag: 'second' }];",
+            "SELECT VALUE tag FROM pe_owner;",
+            // 边必须是图上的边：读侧 `{owner}<-pe_owner` 取 `in` 当 children。
+            "SELECT VALUE record::id(in) FROM pe:⟨8000_10⟩<-pe_owner;",
+            "INSERT IGNORE INTO PIPE [{ id: PIPE:⟨8000_11⟩, NAME: '/P-old' }];",
+            "INSERT IGNORE INTO PIPE [{ id: PIPE:⟨8000_11⟩, NAME: '/P-new' }];",
+            "SELECT VALUE NAME FROM PIPE;",
+        ],
+    )
+    .await;
+    let tags: Vec<String> = sorted_values(&fork, "SELECT VALUE tag FROM pe_owner;").await;
+    assert_eq!(tags, vec!["first".to_string()], "撞 id 必须保留旧行");
+    let names: Vec<String> = sorted_values(&fork, "SELECT VALUE NAME FROM PIPE;").await;
+    assert_eq!(names, vec!["/P-old".to_string()]);
+    let children: Vec<String> = sorted_values(
+        &fork,
+        "SELECT VALUE record::id(in) FROM pe:⟨8000_10⟩<-pe_owner;",
+    )
+    .await;
+    assert_eq!(
+        children,
+        vec!["8000_11".to_string()],
+        "INSERT RELATION IGNORE 写出来的必须是图上的边"
+    );
+}
+
+/// 多目标 `UPDATE a, b SET …`：只改名单里的记录、一条语句、不存在的目标静默略过。
+/// `datacenter_version` 状态归组（计划 §1.1 #7 / P3）押在这上面。
+#[tokio::test(flavor = "multi_thread")]
+async fn dual_multi_target_update_sets_every_listed_record_only() {
+    let Some((mem, fork, _guard)) = dual_dbs("multi_update").await else {
+        return;
+    };
+    assert_dual_same(
+        "multi_update",
+        &mem,
+        &fork,
+        &[
+            "INSERT IGNORE INTO datacenter_version [\
+               { id: datacenter_version:⟨8000_1⟩, status: 'None' }, \
+               { id: datacenter_version:⟨8000_2⟩, status: 'None' }, \
+               { id: datacenter_version:⟨8000_3⟩, status: 'None' }];",
+            "UPDATE datacenter_version:⟨8000_1⟩, datacenter_version:⟨8000_2⟩ SET status = 'Modify';",
+            "SELECT record::id(id) AS id, status FROM datacenter_version ORDER BY id;",
+            // 名单里混一个不存在的目标：UPDATE 不许凭空造行。
+            "UPDATE datacenter_version:⟨8000_3⟩, datacenter_version:⟨8000_404⟩ SET status = 'Delete';",
+            "SELECT record::id(id) AS id FROM datacenter_version ORDER BY id;",
+        ],
+    )
+    .await;
+    #[derive(serde::Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
+    struct Row {
+        id: String,
+        status: String,
+    }
+    let rows: Vec<Row> = sorted_values(
+        &fork,
+        "SELECT record::id(id) AS id, status FROM datacenter_version;",
+    )
+    .await;
+    assert_eq!(
+        rows,
+        vec![
+            Row {
+                id: "8000_1".into(),
+                status: "Modify".into()
+            },
+            Row {
+                id: "8000_2".into(),
+                status: "Modify".into()
+            },
+            Row {
+                id: "8000_3".into(),
+                status: "Delete".into()
+            },
+        ],
+        "多目标 UPDATE 必须只改名单里的行，且不凭空造行"
+    );
+}
+
+/// `pe` 是图顶点：删它会把 `pe_owner` / `ref_rev` / `tubi_relate` 这些挂在它身上的边一并带走（元素批
+/// 模块头「pe 行为什么不删」）。所以 `pe` 行走一条批量 `INSERT … ON DUPLICATE KEY UPDATE <全部字段>`：
+/// 已有行整行换新内容、id 与边都在；不存在的 id 直接插。两引擎必须同款。
+#[tokio::test(flavor = "multi_thread")]
+async fn dual_pe_rows_replace_in_place_and_keep_their_edges() {
+    let Some((mem, fork, _guard)) = dual_dbs("pe_replace").await else {
+        return;
+    };
+    let assignments = crate::data_interface::element_batch::PE_REPLACE_ASSIGNMENTS;
+    let seed = "INSERT IGNORE INTO pe [\
+                  { id: pe:⟨8000_30⟩, name: '/OLD', noun: 'BRAN', dbnum: 8000, sesno: 1, deleted: false, owner: pe:⟨8000_31⟩ },\
+                  { id: pe:⟨8000_31⟩, name: '/Z', noun: 'ZONE', dbnum: 8000, sesno: 1, deleted: false }];\n\
+                INSERT RELATION IGNORE INTO pe_owner [{ id: pe_owner:[pe:⟨8000_31⟩, 0], in: pe:⟨8000_30⟩, out: pe:⟨8000_31⟩ }];\n\
+                INSERT RELATION IGNORE INTO tubi_relate [{ id: tubi_relate:[pe:⟨8000_30⟩, 0], in: pe:⟨8000_30⟩, out: inst_geo:t1 }];";
+    let replace = format!(
+        "INSERT INTO pe [\
+           {{ id: pe:⟨8000_30⟩, name: '/NEW', noun: 'BRAN', dbnum: 8000, sesno: 2, status_code: NONE, cata_hash: '', lock: false, deleted: false, refno: BRAN:⟨8000_30⟩, owner: pe:⟨8000_31⟩ }},\
+           {{ id: pe:⟨8000_32⟩, name: '/ADDED', noun: 'EQUI', dbnum: 8000, sesno: 2, status_code: NONE, cata_hash: '', lock: false, deleted: false, refno: EQUI:⟨8000_32⟩, owner: pe:⟨8000_31⟩ }}\
+         ] ON DUPLICATE KEY UPDATE {assignments} RETURN NONE;"
+    );
+    let probe = "SELECT record::id(id) AS id, name, sesno FROM pe ORDER BY id;\n\
+                 SELECT VALUE record::id(in) FROM pe:⟨8000_31⟩<-pe_owner;\n\
+                 SELECT VALUE record::id(out) FROM pe:⟨8000_30⟩->tubi_relate;";
+    assert_dual_same(
+        "pe_replace",
+        &mem,
+        &fork,
+        &[seed, replace.as_str(), probe, replace.as_str(), probe],
+    )
+    .await;
+    #[derive(serde::Deserialize, PartialEq, Eq, PartialOrd, Ord, Debug)]
+    struct Row {
+        id: String,
+        name: String,
+        sesno: i64,
+    }
+    let rows: Vec<Row> =
+        sorted_values(&fork, "SELECT record::id(id) AS id, name, sesno FROM pe;").await;
+    assert_eq!(
+        rows,
+        vec![
+            Row {
+                id: "8000_30".into(),
+                name: "/NEW".into(),
+                sesno: 2
+            },
+            Row {
+                id: "8000_31".into(),
+                name: "/Z".into(),
+                sesno: 1
+            },
+            Row {
+                id: "8000_32".into(),
+                name: "/ADDED".into(),
+                sesno: 2
+            },
+        ],
+        "已有行整行换新、别的行不动、新 id 直接插"
+    );
+    let children: Vec<String> = sorted_values(
+        &fork,
+        "SELECT VALUE record::id(in) FROM pe:⟨8000_31⟩<-pe_owner;",
+    )
+    .await;
+    assert_eq!(children, vec!["8000_30".to_string()], "owner 边必须还在");
+    let tubes: Vec<String> = sorted_values(
+        &fork,
+        "SELECT VALUE record::id(out) FROM pe:⟨8000_30⟩->tubi_relate;",
+    )
+    .await;
+    assert_eq!(
+        tubes,
+        vec!["t1".to_string()],
+        "模型面的 tubi_relate 边必须还在"
+    );
+
+    // 对照：删顶点确实会把边带走——这就是 pe 不走先删后插的原因。
+    let after_delete: Vec<String> = {
+        fork.query("DELETE pe:⟨8000_30⟩;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        sorted_values(
+            &fork,
+            "SELECT VALUE record::id(in) FROM pe:⟨8000_31⟩<-pe_owner;",
+        )
+        .await
+    };
+    assert!(
+        after_delete.is_empty(),
+        "删 pe 顶点应级联删掉它的 owner 边（证明不能删 pe）: {after_delete:?}"
+    );
+}
+
+/// 一块完整的「先删后插」事务：删除块（边 → UDA → noun）在前、插入块（noun → UDA → 边）
+/// 在后，同一事务里对同一批 id 先删再插，终态 = 插入块的内容；重放同一块终态不变（幂等）。
+#[tokio::test(flavor = "multi_thread")]
+async fn dual_delete_then_insert_ignore_block_is_idempotent_and_replaces_rows() {
+    let Some((mem, fork, _guard)) = dual_dbs("replace_block").await else {
+        return;
+    };
+    let seed = "INSERT IGNORE INTO pe [{ id: pe:⟨8000_20⟩, noun: 'BRAN', sesno: 1 }, { id: pe:⟨8000_21⟩, noun: 'ZONE', sesno: 1 }];\n\
+                INSERT IGNORE INTO BRAN [{ id: BRAN:⟨8000_20⟩, NAME: '/old' }];\n\
+                INSERT IGNORE INTO ATT_UDA [{ id: ATT_UDA:⟨8000_20⟩, udas: [] }];\n\
+                INSERT RELATION IGNORE INTO pe_owner [{ id: pe_owner:[pe:⟨8000_21⟩, 0], in: pe:⟨8000_20⟩, out: pe:⟨8000_21⟩ }];";
+    let block = "BEGIN TRANSACTION;\n\
+                 DELETE pe_owner:[pe:⟨8000_21⟩, NONE]..=[pe:⟨8000_21⟩, ..];\n\
+                 LET $uda_ids = [ATT_UDA:⟨8000_20⟩];\n\
+                 DELETE $uda_ids;\n\
+                 LET $bran_ids = [BRAN:⟨8000_20⟩];\n\
+                 DELETE $bran_ids;\n\
+                 LET $pe_ids = [pe:⟨8000_20⟩, pe:⟨8000_21⟩];\n\
+                 DELETE $pe_ids;\n\
+                 INSERT IGNORE INTO pe [{ id: pe:⟨8000_20⟩, noun: 'BRAN', sesno: 2 }, { id: pe:⟨8000_21⟩, noun: 'ZONE', sesno: 2 }] RETURN NONE;\n\
+                 INSERT IGNORE INTO BRAN [{ id: BRAN:⟨8000_20⟩, NAME: '/new' }] RETURN NONE;\n\
+                 INSERT RELATION IGNORE INTO pe_owner [{ id: pe_owner:[pe:⟨8000_21⟩, 0], in: pe:⟨8000_20⟩, out: pe:⟨8000_21⟩ }] RETURN NONE;\n\
+                 COMMIT TRANSACTION;";
+    let probe = "SELECT record::id(id) AS id, sesno FROM pe ORDER BY id;\n\
+                 SELECT VALUE NAME FROM BRAN;\n\
+                 SELECT VALUE record::id(id) FROM ATT_UDA;\n\
+                 SELECT VALUE record::id(in) FROM pe:⟨8000_21⟩<-pe_owner;";
+    assert_dual_same(
+        "replace_block",
+        &mem,
+        &fork,
+        &[seed, block, probe, block, probe],
+    )
+    .await;
+    // 终态必须是插入块的内容：pe 换到 sesno 2、BRAN 换成新名、UDA 行随删除消失、边重建。
+    let sesno: Vec<i64> = sorted_values(&fork, "SELECT VALUE sesno FROM pe;").await;
+    assert_eq!(sesno, vec![2, 2]);
+    let names: Vec<String> = sorted_values(&fork, "SELECT VALUE NAME FROM BRAN;").await;
+    assert_eq!(names, vec!["/new".to_string()]);
+    let udas: Vec<String> = sorted_values(&fork, "SELECT VALUE record::id(id) FROM ATT_UDA;").await;
+    assert!(udas.is_empty(), "删除块里的 UDA 行不许残留: {udas:?}");
+    let children: Vec<String> = sorted_values(
+        &fork,
+        "SELECT VALUE record::id(in) FROM pe:⟨8000_21⟩<-pe_owner;",
+    )
+    .await;
+    assert_eq!(children, vec!["8000_20".to_string()]);
 }

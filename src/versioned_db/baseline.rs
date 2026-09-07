@@ -1,14 +1,19 @@
-//! 基线写者的渲染半边：把 [`BaselineChunk`]（e3d-io 退化窗口流出的一块 `Add`）攒成
-//! 有界队列里的写者消息。
+//! 基线写者的渲染半边：把 [`BaselineChunk`]（e3d-io 退化窗口流出的一块 `Add`）渲成
+//! 有界队列里的写者消息——**每条消息就是一笔完整事务**。
 //!
-//! 出处：`docs/plans/2026-09-04-legacy-parser-retirement-endgame-plan.md` §2 / B8.3。
+//! 出处：`docs/plans/2026-09-04-legacy-parser-retirement-endgame-plan.md` §2 / B8.3；
+//! 2026-09-06 并轨到 `element_batch`（plan 2026-09-06 §3 D2 / P2）。
 //!
-//! * **行形状与增量路同一份**（[`ElementRows`]：`pe` / `ATT_<noun>` / `ATT_UDA` / `pe_owner`），
-//!   宪法 II。
-//! * **语句动词沿用 legacy 基线**：`INSERT IGNORE INTO … [..]` 批（写者 `SenderJsonsData` 三种
-//!   消息原样不动）。不是只为吞吐——`manual_update` 的父层补缺把 extract 母库整库再同步进
+//! * **行形状与语句形状都与增量路同一份**（`element_batch`：`pe` / `<NOUN>` / `ATT_UDA` / `pe_owner`，
+//!   每表一条 `INSERT IGNORE INTO … [..]`），宪法 II 从「行形状一份」扩到「语句形状一份」。
+//! * **`Fresh` 模式**：只插、不删。不是只为吞吐——`manual_update` 的父层补缺把 extract 母库整库再同步进
 //!   同一个 dbnum（`replace_dbs = false`），靠的就是「已有行赢」：叶子 extract 里正在改的
-//!   版本不许被母库的旧版本覆盖。`UPSERT` 会把这条语义改掉。
+//!   版本不许被母库的旧版本覆盖。`Replace` 会把这条语义改掉。
+//! * 事务切块按 `tx_limits`（默认 2 MiB / 5000 行 / 1000 元素）；`DbOption::pe_chunk / att_chunk` 不再参与切块。
+//! * **不带逐笔 pe 统计观测**（`StatisticsMode::Deferred`，2026-09-07）：整库基线写进刚清空的 dbnum，
+//!   `$before` 恒空、`$after` 恒等于本批，逐笔观测的点读量与正文同量级、UPSERT 的又是同一个热点行；
+//!   写者排空后 `database::settle_dbnum_info_after_total_sync` 用 `dbnum_stats::rebuild_body` 一次算清。
+//!   父层补缺（`replace_dbs = false`）走的也是这条路——同一个收尾重建对它同样成立（GROUP BY 数的是实际行）。
 //! * WORL 作为普通元素写全三样行（legacy 不写它的 `pe` 行），计数口径见
 //!   [`BaselineStats::elements`]。
 
@@ -16,62 +21,74 @@ use aios_core::RefU64;
 
 use crate::data_interface::e3d_collector::BaselineChunk;
 use crate::data_interface::ele_ops::{ElementRows, UdaKeyMap};
-use crate::versioned_db::database::SenderJsonsData;
+use crate::data_interface::element_batch::{
+    BatchItem, ElementBatchReport, StatisticsMode, WriteMode,
+    render_item_transactions_with_limits_and_statistics,
+};
+use crate::data_interface::tx_limits::{DataTxLimits, data_tx_limits};
 
-/// 一块基线元素 → 写者消息。
-///
-/// `pe_chunk` / `att_chunk` 是一条 `INSERT IGNORE` 里最多放几行（`DbOption::pe_chunk / att_chunk`，
-/// 与 legacy 基线写者同一对开关）；`pe_owner` 边沿用它 500 一批的粒度。
+/// Resolve a baseline input before crossing a spawned parser boundary.
+pub(crate) fn source_for_file(
+    path: &std::path::Path,
+    target: Option<u32>,
+    active: Option<&crate::data_interface::frozen_source::FrozenSource>,
+) -> anyhow::Result<crate::data_interface::frozen_source::FrozenSource> {
+    use crate::data_interface::frozen_source::FrozenSource;
+    if let Some(active) = active {
+        if active.matches_path(path) {
+            anyhow::ensure!(
+                target.is_none_or(|session| session == active.target_sesno()),
+                "baseline target differs from active frozen file round"
+            );
+            return active.reopen_verified();
+        }
+    }
+    match target {
+        Some(session) => FrozenSource::capture_at(path, session),
+        None => FrozenSource::capture(path),
+    }
+}
+
+#[cfg(test)]
+#[path = "baseline_source_tests.rs"]
+mod baseline_source_tests;
+
+/// 一块基线元素 → 若干笔事务 SQL（`Fresh`：只 `INSERT IGNORE`，已有行赢）。
 pub fn render_baseline_batches(
     chunk: &BaselineChunk,
     dbnum: i32,
     uda_keys: &UdaKeyMap,
-    pe_chunk: usize,
-    att_chunk: usize,
-) -> Vec<SenderJsonsData> {
-    const RELATE_BATCH: usize = 500;
-    let pe_chunk = pe_chunk.max(1);
-    let att_chunk = att_chunk.max(1);
-
-    let mut pe_rows = Vec::with_capacity(chunk.elements.len());
-    let mut noun_rows: indexmap::IndexMap<String, Vec<String>> = indexmap::IndexMap::new();
-    let mut uda_rows = Vec::new();
-    let mut edges = Vec::new();
-    for (sesno, element) in &chunk.elements {
-        let id = element_id(element);
-        let rows = ElementRows::render(element, &id, dbnum, *sesno, uda_keys);
-        pe_rows.push(rows.pe_row_with_id());
-        if !rows.noun.is_empty() && !rows.noun_row.is_empty() {
-            noun_rows
-                .entry(rows.noun.clone())
-                .or_default()
-                .push(rows.noun_row.clone());
-        }
-        if let Some(uda) = rows.uda_row.clone() {
-            uda_rows.push(uda);
-        }
-        edges.extend(rows.owner_edges);
-    }
-
-    let mut messages = Vec::new();
-    for rows in pe_rows.chunks(pe_chunk) {
-        messages.push(SenderJsonsData::PEJson(rows.to_vec()));
-    }
-    for (noun, rows) in noun_rows {
-        for rows in rows.chunks(att_chunk) {
-            messages.push(SenderJsonsData::AttJson((noun.clone(), rows.to_vec())));
-        }
-    }
-    for rows in uda_rows.chunks(att_chunk) {
-        messages.push(SenderJsonsData::AttJson(("ATT_UDA".to_string(), rows.to_vec())));
-    }
-    for rows in edges.chunks(RELATE_BATCH) {
-        messages.push(SenderJsonsData::PERelateJson(rows.to_vec()));
-    }
-    messages
+) -> anyhow::Result<(Vec<String>, ElementBatchReport)> {
+    render_baseline_batches_with_limits(chunk, dbnum, uda_keys, data_tx_limits())
 }
 
-/// 行 id 与增量路同一口径：`PersistElementChange::to_surql` 用 `refno.to_string()`，
+/// [`render_baseline_batches`] 的显式上限形态（测试把元素上限压小看切块）。
+pub fn render_baseline_batches_with_limits(
+    chunk: &BaselineChunk,
+    dbnum: i32,
+    uda_keys: &UdaKeyMap,
+    limits: DataTxLimits,
+) -> anyhow::Result<(Vec<String>, ElementBatchReport)> {
+    let items = chunk
+        .elements
+        .iter()
+        .map(|(sesno, element)| BatchItem::Rows {
+            rows: ElementRows::render(element, &element_id(element), dbnum, *sesno, uda_keys),
+            is_add: false,
+            old_noun: None,
+            dependency: false,
+        })
+        .collect::<Vec<_>>();
+    render_item_transactions_with_limits_and_statistics(
+        &items,
+        dbnum,
+        WriteMode::Fresh,
+        limits,
+        StatisticsMode::Deferred,
+    )
+}
+
+/// 行 id 与增量路同一口径：`PersistElementChange::id` 用 `refno.to_string()`，
 /// 而渲染器内部的 id / refno / owner 又取自属性映射的 `REFNO`——两者在收集器产物上恒等。
 fn element_id(element: &crate::data_interface::ele_data::EleData) -> String {
     let refno: RefU64 = element.refno;
@@ -87,6 +104,46 @@ mod tests {
     use aios_core::types::whole_attmap::ExplicitAttr;
 
     const DBNUM: i32 = 8000;
+
+    /// 基线事务不带逐笔统计观测（`Deferred`），统计由收尾的 `rebuild_on` 一次算清——三轮（基线 + 两次
+    /// 父层补缺重放）之后 `dbnum_info_table` 的 count 仍等于实际 pe 行数，且**写块自身**不碰统计表。
+    #[tokio::test]
+    async fn baseline_and_parent_gap_replay_keep_actual_pe_counts() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("stats").use_db("baseline").await.unwrap();
+        for (sesno, numbers) in [(5, vec![1, 2]), (2, vec![2, 3]), (2, vec![2, 3])] {
+            let chunk = BaselineChunk {
+                elements: numbers
+                    .into_iter()
+                    .map(|n| (sesno, element(refu(n), refu(0), "BOX", &[])))
+                    .collect(),
+                ignored: Vec::new(),
+            };
+            for sql in batches_of(&chunk) {
+                assert!(
+                    !sql.contains("dbnum_info_table") && !sql.contains("$before_"),
+                    "基线写块不带观测:\n{sql}"
+                );
+                crate::data_interface::dbnum_stats::execute_on(&db, &sql)
+                    .await
+                    .unwrap();
+            }
+            // 与 `settle_dbnum_info_after_total_sync` 同一步：写者排空后按 Ref0 重建统计。
+            crate::data_interface::dbnum_stats::rebuild_on(&db, DBNUM as u32)
+                .await
+                .unwrap();
+        }
+        let mut result = db
+            .query("RETURN dbnum_info_table:8000.count; RETURN pe:8000_2.sesno;")
+            .await
+            .unwrap();
+        assert_eq!(result.take::<Option<i64>>(0).unwrap(), Some(3));
+        assert_eq!(
+            result.take::<Option<i64>>(1).unwrap(),
+            Some(5),
+            "父层补缺重放：已有行赢（Fresh 只 INSERT IGNORE）"
+        );
+    }
 
     fn refu(n: u64) -> RefU64 {
         RefU64((DBNUM as u64) << 32 | n)
@@ -105,31 +162,22 @@ mod tests {
         ele
     }
 
-    fn messages_of(chunk: &BaselineChunk, pe_chunk: usize, att_chunk: usize) -> Vec<SenderJsonsData> {
-        render_baseline_batches(chunk, DBNUM, &UdaKeyMap::empty(), pe_chunk, att_chunk)
+    fn batches_of(chunk: &BaselineChunk) -> Vec<String> {
+        render_baseline_batches(chunk, DBNUM, &UdaKeyMap::empty())
+            .unwrap()
+            .0
     }
 
-    fn pe_batches(messages: &[SenderJsonsData]) -> Vec<&Vec<String>> {
-        messages
-            .iter()
-            .filter_map(|message| match message {
-                SenderJsonsData::PEJson(rows) => Some(rows),
-                _ => None,
-            })
-            .collect()
+    /// 一条 `INSERT … INTO <table> [` 语句的方括号内容（一块里每表恰一条）。
+    fn insert_rows<'a>(sql: &'a str, table: &str) -> Option<&'a str> {
+        let needle = format!("INTO {table} [");
+        let start = sql.find(&needle)? + needle.len();
+        let end = sql[start..].find("] RETURN NONE;")? + start;
+        Some(&sql[start..end])
     }
 
-    fn att_batches<'a>(messages: &'a [SenderJsonsData], table: &str) -> Vec<&'a Vec<String>> {
-        messages
-            .iter()
-            .filter_map(|message| match message {
-                SenderJsonsData::AttJson((name, rows)) if name == table => Some(rows),
-                _ => None,
-            })
-            .collect()
-    }
-
-    /// 一块里的每个元素都出 `pe` 行（带 id）与自己 noun 表的行；同 noun 的行攒在同一条消息里。
+    /// 一块里的每个元素都出 `pe` 行（带 id）与自己 noun 表的行；同 noun 的行攒在同一条语句里；
+    /// 基线是 `Fresh`：没有任何 DELETE，也没有原地替换。
     #[test]
     fn every_element_lands_a_pe_row_and_its_noun_row() {
         let site = refu(1);
@@ -141,24 +189,39 @@ mod tests {
             ],
             ignored: Vec::new(),
         };
-        let messages = messages_of(&chunk, 100, 100);
+        let batches = batches_of(&chunk);
+        assert_eq!(batches.len(), 1, "3 个元素装在一笔事务里");
+        let sql = &batches[0];
+        assert!(sql.starts_with("BEGIN TRANSACTION;"));
+        assert!(!sql.contains("DELETE"), "基线只插:\n{sql}");
+        assert!(
+            !sql.contains("ON DUPLICATE KEY"),
+            "基线不原地替换（已有行赢）:\n{sql}"
+        );
 
-        let pe = pe_batches(&messages);
-        assert_eq!(pe.len(), 1, "3 行 pe 装在一条 INSERT 里");
-        assert_eq!(pe[0].len(), 3);
-        assert!(pe[0][0].contains(&format!("\"id\": pe:{site}")), "{}", pe[0][0]);
-        assert!(pe[0][0].contains("\"sesno\": 3"), "pe.sesno 是 last-touch 会话: {}", pe[0][0]);
-        assert!(pe[0][1].contains("\"sesno\": 5"), "{}", pe[0][1]);
+        let pe = insert_rows(sql, "pe").expect("pe 行");
+        assert_eq!(sql.matches("INSERT IGNORE INTO pe [").count(), 1);
+        assert!(pe.contains(&format!("\"id\": pe:{site}")), "{pe}");
+        assert!(
+            pe.contains("\"sesno\": 3"),
+            "pe.sesno 是 last-touch 会话: {pe}"
+        );
+        assert!(pe.contains("\"sesno\": 5"), "{pe}");
 
-        assert_eq!(att_batches(&messages, "SITE").len(), 1);
-        let equi = att_batches(&messages, "EQUI");
-        assert_eq!(equi.len(), 1);
-        assert_eq!(equi[0].len(), 2, "两个 EQUI 攒在同一条消息里");
-        assert!(equi[0][0].contains(&format!("\"id\": \"{}\"", refu(2))), "{}", equi[0][0]);
-        assert!(att_batches(&messages, "ATT_UDA").is_empty(), "没有 UDA 值就没有 ATT_UDA 消息");
+        assert_eq!(sql.matches("INSERT IGNORE INTO SITE [").count(), 1);
+        let equi = insert_rows(sql, "EQUI").expect("EQUI 行");
+        assert_eq!(
+            sql.matches("INSERT IGNORE INTO EQUI [").count(),
+            1,
+            "两个 EQUI 攒在同一条语句里"
+        );
+        assert!(equi.contains(&format!("\"id\": \"{}\"", refu(2))), "{equi}");
+        assert!(equi.contains(&format!("\"id\": \"{}\"", refu(3))), "{equi}");
+        assert!(!sql.contains("ATT_UDA"), "没有 UDA 值就没有 ATT_UDA 语句");
     }
 
-    /// `pe_owner` 边：`in = child, out = owner`，id `[owner, 槽位]`——与增量路同一份 [`pe_owner_edge`]。
+    /// `pe_owner` 边：`in = child, out = owner`，id `[owner, 槽位]`——与增量路同一份 `pe_owner_edge`，
+    /// 且带 `RELATION IGNORE`（父层补缺重放叶子已写过的边时必须幂等）。
     #[test]
     fn owner_edges_point_child_to_owner_in_member_order() {
         let site = refu(1);
@@ -166,41 +229,54 @@ mod tests {
             elements: vec![(3, element(site, refu(0), "SITE", &[refu(2), refu(3)]))],
             ignored: Vec::new(),
         };
-        let messages = messages_of(&chunk, 100, 100);
-        let edges = messages
-            .iter()
-            .find_map(|message| match message {
-                SenderJsonsData::PERelateJson(rows) => Some(rows),
-                _ => None,
-            })
-            .expect("有 children 就有边");
+        let batches = batches_of(&chunk);
+        let sql = &batches[0];
+        assert!(
+            sql.contains("INSERT RELATION IGNORE INTO pe_owner ["),
+            "{sql}"
+        );
+        let edges = insert_rows(sql, "pe_owner").expect("有 children 就有边");
         assert_eq!(
             edges,
-            &vec![
-                format!("{{ id: pe_owner:[pe:{site}, 0], in: pe:{}, out: pe:{site} }}", refu(2)),
-                format!("{{ id: pe_owner:[pe:{site}, 1], in: pe:{}, out: pe:{site} }}", refu(3)),
-            ]
+            format!(
+                "{{ id: pe_owner:[pe:{site}, 0], in: pe:{}, out: pe:{site} }},\
+                 {{ id: pe_owner:[pe:{site}, 1], in: pe:{}, out: pe:{site} }}",
+                refu(2),
+                refu(3)
+            )
         );
     }
 
-    /// 批大小按 `pe_chunk` / `att_chunk` 切；0 视作 1，不许除零也不许整块一条消息。
+    /// 切块按 `tx_limits.elements`：5 个元素、上限 2 → 三笔（2 / 2 / 1）；上限 0 视作 1。
     #[test]
-    fn batches_respect_the_configured_chunk_sizes() {
+    fn batches_split_by_the_element_limit() {
         let chunk = BaselineChunk {
             elements: (10..15u64)
                 .map(|n| (1, element(refu(n), refu(1), "BOX", &[])))
                 .collect(),
             ignored: Vec::new(),
         };
-        let messages = messages_of(&chunk, 2, 3);
-        let pe = pe_batches(&messages);
-        assert_eq!(pe.iter().map(|rows| rows.len()).collect::<Vec<_>>(), vec![2, 2, 1]);
-        let boxes = att_batches(&messages, "BOX");
-        assert_eq!(boxes.iter().map(|rows| rows.len()).collect::<Vec<_>>(), vec![3, 2]);
-        assert_eq!(pe_batches(&messages_of(&chunk, 0, 0)).len(), 5);
+        let limits = |elements: usize| DataTxLimits {
+            elements,
+            ..Default::default()
+        };
+        let (batches, report) =
+            render_baseline_batches_with_limits(&chunk, DBNUM, &UdaKeyMap::empty(), limits(2))
+                .unwrap();
+        let per_batch = batches
+            .iter()
+            .map(|sql| insert_rows(sql, "BOX").unwrap().matches("\"id\": ").count())
+            .collect::<Vec<_>>();
+        assert_eq!(per_batch, vec![2, 2, 1]);
+        assert_eq!(report.transactions, 3);
+        assert_eq!(report.elements, 5);
+        let (single, _) =
+            render_baseline_batches_with_limits(&chunk, DBNUM, &UdaKeyMap::empty(), limits(0))
+                .unwrap();
+        assert_eq!(single.len(), 5, "0 视作 1，不许除零也不许整块一笔");
     }
 
-    /// 有 UDA 值的元素多出一条 `ATT_UDA` 行，形状由 `ElementRows` 保证与增量路一致。
+    /// 有 UDA 值的元素多出一条 `ATT_UDA` 语句，形状由 `ElementRows` 保证与增量路一致。
     #[test]
     fn uda_values_produce_an_att_uda_batch() {
         use crate::data_interface::uda_keys::UdaDefinitionRow;
@@ -221,11 +297,10 @@ mod tests {
             elements: vec![(2, ele)],
             ignored: Vec::new(),
         };
-        let messages = render_baseline_batches(&chunk, DBNUM, &keys, 10, 10);
-        let uda = att_batches(&messages, "ATT_UDA");
-        assert_eq!(uda.len(), 1);
-        assert!(uda[0][0].contains("'u': UDA:24381_9"), "{}", uda[0][0]);
-        assert!(uda[0][0].contains(&format!("\"id\": \"{}\"", refu(20))), "{}", uda[0][0]);
+        let (batches, _) = render_baseline_batches(&chunk, DBNUM, &keys).unwrap();
+        let uda = insert_rows(&batches[0], "ATT_UDA").expect("有 UDA 值就有 ATT_UDA 语句");
+        assert!(uda.contains("'u': UDA:24381_9"), "{uda}");
+        assert!(uda.contains(&format!("\"id\": \"{}\"", refu(20))), "{uda}");
     }
 
     /// issue #10 端到端收口（自 `member_prune` 搬来，判据一个字不改）：把真实的 dbnum 7999

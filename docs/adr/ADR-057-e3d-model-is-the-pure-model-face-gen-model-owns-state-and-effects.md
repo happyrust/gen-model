@@ -93,6 +93,10 @@ ADR-056 能把 kv-mem 暂存层拆掉，唯一的前提就是这一条：生成�
   （`e3d_model_service.rs` / `e3d_mesh_store.rs`）、`category::{is_derived_unit, DERIVED_ROUTE_CONTAINER_NOUNS}`（`model_update_plan.rs`）。
   **过渡期例外**：`increment::{increment_update, IncrementReport}` 经 `apply_window` 的消费随 spec 035 P1 删除臂一起退出白名单。
   `src/bin/` 与 `tests/` 的探针 / 对拍不受白名单限制（`db_discovery::DirectoryDbResolver`、`element_diff::diff_element`、`ledger::ChangeKind`）。
+  **2026-09-07 追记**（ADR-064 D5 / Q1）：`pipeline::GenerationOutcome::catalogue_visited`——一次生成真读到的目录元素，
+  纯输出、不带句柄（B1 合规；记录点在 e3d-io `read_stats::trace_element_reads`，e3d-model 只在 DFS 前后开 / 收）。
+  当前消费者是对拍 oracle `cata_dependency::tests::live_ams8000_catalogue_reads_are_covered_by_the_dependency_closure`
+  （`catalogue_visited ⊆ closure`）；生产路径若要拿它当依赖 seed（计划 D6(c) 的原设想）再在这里追记一次。
 - D4 落地后 gen-model 少一份纯遍历（约 `generation_root.rs` 的 `enumerate_*` 段 + 6 条单测），多一条委托；e3d-model 多一个 `roots` 模块。
 - `CONTEXT.md` 新增「模型面 / 数据面 / 模型面状态」三个词条（本 ADR 同批）。
 - ADR-056 P2-1 文字中「`touches_roots` 抽成 e3d-model 的 pub 函数」的性质由计划项改为边界要求，其余不动。

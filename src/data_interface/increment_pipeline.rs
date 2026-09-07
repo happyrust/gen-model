@@ -48,7 +48,7 @@ pub struct CollectedWindow {
     /// 收集时冻住的文件世代与目标会话；执行前必须用它复核目标 root。
     pub frozen: Option<FrozenSource>,
     /// refno 复用（窗口内换了 noun）的条目：终稿已按 `Add` 进 `range_eles`，旧 noun 行
-    /// 由持久化尾事务按此删除（清单 §8 第 2 条）。
+    /// 随元素块的删除块一起清（`element_batch`，plan 2026-09-06 §3 D2）。
     pub retired_type_rows: Vec<RetiredTypeRow>,
 }
 
@@ -388,6 +388,7 @@ fn fold_window(range_eles: &BTreeMap<u32, Vec<EleOperationData>>) -> Vec<Planned
 struct StageTimings {
     collect: Duration,
     plan: Duration,
+    cata_dependency: Duration,
     persist: Duration,
     cache: Duration,
     reverse_index: Duration,
@@ -406,10 +407,11 @@ impl StageTimings {
     fn report(&self, dbnum: u32, db_type: &str, elements: usize) {
         println!(
             "IncrementPipeline 阶段耗时 dbnum={dbnum} db_type={db_type} 元素={elements}: \
-             collect={}ms plan={}ms persist={}ms cache={}ms rev_index={}ms \
+             collect={}ms plan={}ms cata_dependency={}ms persist={}ms cache={}ms rev_index={}ms \
              datacenter={}ms finalize={}ms",
             self.collect.as_millis(),
             self.plan.as_millis(),
+            self.cata_dependency.as_millis(),
             self.persist.as_millis(),
             self.cache.as_millis(),
             self.reverse_index.as_millis(),
@@ -878,7 +880,7 @@ impl IncrementPipeline {
         warnings.extend(outcome.warnings);
         Ok(CollectedWindow {
             frozen: Some(outcome.frozen),
-            persist_changes: terminal_persist_changes(&outcome.window),
+            persist_changes: terminal_persist_changes(&outcome.window, &outcome.tombstones),
             range_eles: outcome.window,
             session_sesnos,
             warnings,
@@ -1014,32 +1016,18 @@ impl IncrementPipeline {
             // Direct DESI uses the same file-pinned S→T root planner as the
             // live e3d-model parity test.  Other modes retain the established
             // PE-backed planner until their migration is complete.
-            let model_plan = if crate::options::direct_read_mode()
-                && db_type.eq_ignore_ascii_case("DESI")
-            {
-                let base_sesno = requested_range.start().saturating_sub(1) as u32;
-                StageTimings::measure(
-                    &mut timings.plan,
-                    crate::data_interface::window_root_plan::build_model_update_plan_from_window(
-                        dbnum,
-                        db_type,
-                        base_sesno,
-                        end_sesno as u32,
-                    ),
-                )
-                .await?
-            } else {
-                StageTimings::measure(
-                    &mut timings.plan,
-                    crate::data_interface::model_update_plan::build_model_update_plan(
-                        dbnum,
-                        end_sesno,
-                        db_type,
-                        &collected.range_eles,
-                    ),
-                )
-                .await?
-            };
+            let base_sesno = requested_range.start().saturating_sub(1) as u32;
+            let model_plan = StageTimings::measure(
+                &mut timings.plan,
+                crate::data_interface::window_root_plan::build_effective_model_update_plan(
+                    dbnum,
+                    db_type,
+                    base_sesno,
+                    end_sesno as u32,
+                    &collected.range_eles,
+                ),
+            )
+            .await?;
             let commit_token = collected
                 .frozen
                 .as_ref()
@@ -1116,6 +1104,39 @@ impl IncrementPipeline {
         // 重生成会拿旧成员表静默漏算。计划层刚算出生成根，失效按根补齐。
         cache_refnos.extend(model_plan.regen_root_refnos());
         warnings.extend(model_plan.warnings.iter().cloned());
+        // 模型类型限定（`model_incremental_types`）：本窗规划出来、但本进程不会生成的根
+        // 按类型点名。工作项一个不摘、照常入队——摘掉它就是不标 stale、下一窗给陈旧
+        // 几何前移凭证（`model_type_scope` 模块文档「消费门，不是计划门」）。
+        warnings.extend(crate::data_interface::model_type_scope::window_plan_notice(
+            dbnum,
+            &model_plan.work_items,
+        ));
+
+        // CATA 依赖块排在 DESI 块与水位**之前**（plan 2026-09-06 §3 D6 (a) / Q3）：本窗口写回的 DESI 元素
+        // 所依赖的目录链元素先入库，缺依赖的窗口不算落地。闭包解析失败（locator / 文件 I/O）拦水位，
+        // 与 DESI 块同纪律；「库不在 MDB / 元素不在」只进 warning。非 DESI 窗口（SYS / DICT）没有目录链。
+        if db_type.eq_ignore_ascii_case("DESI") {
+            let seeds = crate::data_interface::cata_dependency::seeds_from_elements(
+                persist_changes.iter().filter_map(|change| match &change.state {
+                    crate::data_interface::ele_ops::PersistElementState::Add(data)
+                    | crate::data_interface::ele_ops::PersistElementState::Modified(data) => {
+                        Some(data)
+                    }
+                    crate::data_interface::ele_ops::PersistElementState::Deleted { .. } => None,
+                }),
+            );
+            if !seeds.is_empty() {
+                let project = aios_core::get_db_option().project_name.clone();
+                let report = StageTimings::measure(
+                    &mut timings.cata_dependency,
+                    crate::data_interface::cata_dependency::persist_cata_dependencies(
+                        &project, dbnum, &seeds,
+                    ),
+                )
+                .await?;
+                warnings.extend(report.warning(dbnum));
+            }
+        }
 
         // 只保留最新数据：仅写入 pe 主数据（最新状态），不再写 sessions / element_changes 历史表
         //
@@ -1124,7 +1145,7 @@ impl IncrementPipeline {
         // changed data even though the watermark must remain unchanged.
         let persist_result = StageTimings::measure(
             &mut timings.persist,
-            Self::persist_latest_main_data(&persist_changes, dbnum as i32),
+            Self::persist_latest_main_data(&persist_changes, &retired_type_rows, dbnum as i32),
         )
         .await;
         let invalidated =
@@ -1135,9 +1156,7 @@ impl IncrementPipeline {
                  and world-transform caches"
             );
         }
-        if let Some(uda_warning) = persist_result? {
-            warnings.push(uda_warning);
-        }
+        warnings.extend(persist_result?);
 
         // ADR-003 B1-emit: 维护失败可进持久补偿队列；补偿也落不下时不推进水位。
         //
@@ -1175,10 +1194,8 @@ impl IncrementPipeline {
         // OWNER 搬迁的定点 anc 重算先于水位提交、失败即拦住水位
         // （窗口重放时随窗口语句批重算，幂等收敛）。
         window_statements.extend(Self::anc_repair_statements_for_window(&range_eles, db_type));
-        // refno 复用（窗口内换了 noun）：终稿已按 `Add` 写进新 noun 表，旧 noun 的
-        // `ATT_<old>:{id}` 行要显式删掉，否则永久残留（退役清单 §8 第 2 条）。跟窗口语句
-        // 一起进尾事务：幂等，重放收敛。
-        window_statements.extend(Self::retired_type_row_statements(&retired_type_rows));
+        // refno 复用（窗口内换了 noun）的旧 noun 表行不再单独排进尾事务：它随元素块的删除块
+        // 一起清（`element_batch::items_from_changes` 的 `old_noun`，plan 2026-09-06 §3 D2）。
 
         // Finalization publishes this window's delivery-status updates as ordered
         // chunked batches, then one tail transaction establishes durable model
@@ -1221,26 +1238,11 @@ impl IncrementPipeline {
                 &model_plan,
             );
 
-        // D8-A（ADR-056 / spec 035 T126）：本窗口生成根的 CATA 闭包解析进 Surreal 只为
-        // `ref_rev` 反向索引与 UI 目录属性服务，挂在水位之后的补偿队列上——不拦模型、
-        // 不拦水位；水位已经推进，入队失败也只记 warning，本批不再回头判失败。
-        if db_type.eq_ignore_ascii_case("DESI") {
-            let roots = model_plan
-                .regen_root_refnos()
-                .into_iter()
-                .map(|root| root.refno())
-                .collect::<Vec<_>>();
-            if let Err(error) =
-                crate::data_interface::side_effect_pending::SideEffectCompensator::enqueue_cata_ref_rev(
-                    dbnum, end_sesno, db_type, &roots,
-                )
-                .await
-            {
-                warnings.push(format!(
-                    "dbnum={dbnum}: CATA ref_rev 补偿任务入队失败（不拦水位，下一窗口再登记）: {error:#}"
-                ));
-            }
-        }
+        // 水位之后不再有 CATA 落库的补偿任务（ADR-064 Q2，2026-09-07 退役 D8-A 的
+        // `enqueue_cata_ref_rev`）：本窗口 DESI 元素的目录链依赖已由 `persist_cata_dependencies`
+        // 排在 DESI 块与水位**之前**落进 `pe`（`dependency = true`），`ref_rev` 的 DESI→CATA 边由
+        // 上面的 reverse_index 步维护——补偿队列剩下的只是「按根子树的全出向引用再解一遍闭包、
+        // 水位之后逐元素重写目录行」，第二份判据、第二个写者，还会抹掉 `dependency` 标记。
 
         timings.report(
             dbnum,
@@ -1292,18 +1294,6 @@ impl IncrementPipeline {
             moved.len()
         );
         Self::render_anc_repair_statements(&moved)
-    }
-
-    /// refno 复用条目的旧 noun 行删除语句（随收口窗口语句批提交）。
-    ///
-    /// 同一 refno 在窗口内从 noun A 变成 noun B：终稿已按 `Add` `UPSERT B:{id}`，
-    /// `A:{id}` 那行没有任何语句会碰——不删就永久残留，并让「按 noun 表扫」的消费者
-    /// 读到一个不存在的元素。id 形制与 [`Self::render_persist_statements`] 相同
-    /// （`RefU64` 的 `Display`，`w0_w1`）。
-    fn retired_type_row_statements(rows: &[RetiredTypeRow]) -> Vec<String> {
-        rows.iter()
-            .map(|row| row.delete_statement(&row.refno.to_string()))
-            .collect()
     }
 
     /// 本窗口里发生 OWNER 搬迁的元素（`ChangeBucket::Moved` 口径）。
@@ -1437,63 +1427,61 @@ impl IncrementPipeline {
     ///
     /// Deliberately skips the history/version tables (`sessions` /
     /// `element_changes`): we keep only the latest state, no historical
-    /// versions. Mirrors step 5 of the old `update_elements_to_database`,
-    /// batching `EleOperationData::to_surql` in groups of 100.
+    /// versions.
+    ///
+    /// 写法只有一种（plan 2026-09-06 §3 D1/D2，`element_batch`）：前置块清 Add / 墓碑自己的旧出向边，
+    /// 然后每块「先按 id 删整组表示，再每表一条 `INSERT IGNORE`」——被删元素落成墓碑 `pe` 行
+    /// （`deleted = true`，noun / owner 保留），换了 noun 的元素旧表行随删除块一起清。
+    /// 幂等：重放撞上上一轮写了一半的块，删除块把它清掉、插入块重建，终态收敛。
     ///
     /// Any batch write failure is propagated (ADR-001): the caller must NOT
     /// advance the watermark unless the whole batch persisted. Swallowing errors
     /// here would let `applied_sesno` run ahead of the data actually stored.
+    ///
+    /// 返回值是回执 warnings：UDA 键查不到的、墓碑退化的，都不拦水位。
     async fn persist_latest_main_data(
         changes: &[PersistElementChange],
+        retired: &[RetiredTypeRow],
         dbnum: i32,
-    ) -> anyhow::Result<Option<String>> {
-        // 收集本文件本窗口的全部落库语句，随后分块提交（提交策略见下方 TX_CHUNK 处）。
-        // ADR-001「失败批次不推进水位、按同一窗口重试」的安全性并不依赖「整窗口一个
-        // 事务」，而是靠 Add 改用幂等 UPSERT：重试撞上上一轮已写入的记录也能覆盖收敛，
-        // 不会出现「半写 + 重试反复撞已存在记录失败 → dbnum 水位卡死」。
-        //
+    ) -> anyhow::Result<Vec<String>> {
         // `ATT_UDA` 的 `u` 链接要把 UKEY 换成 `UDA:<refno>`：每窗口读一次 `UDA` 表，
         // 查不到的键随返回值进回执 `warnings`（不静默丢，也不拦水位——元素其它属性照常落库）。
         let uda_keys = UdaKeyMap::load().await?;
-        let statements = Self::render_terminal_persist_statements(changes, dbnum, &uda_keys);
-        let total = statements.len();
-        for tx_sql in persist_transaction_batches(&statements, PERSIST_TX_CHUNK) {
+        let (batches, report) = Self::terminal_persist_batches(changes, retired, dbnum, &uda_keys)?;
+        for tx_sql in &batches {
             // `.check()`：把事务内被取消/失败的语句错误上浮为 Err。原实现只 map_err
             // 传输错误、未 check 语句级错误，事务被取消时仍可能返回 Ok → 水位误推进。
-            SUL_DB
-                .query(&tx_sql)
-                .await
-                .map_err(|e| anyhow::anyhow!("增量主数据落库失败(事务提交): {e}"))?
-                .check()
-                .map_err(|e| anyhow::anyhow!("增量主数据落库失败(事务内语句): {e}"))?;
+            crate::data_interface::dbnum_stats::execute_on(&SUL_DB, tx_sql).await?;
         }
 
         println!(
-            "增量主数据落库完成，共 {total} 条（分块事务提交 chunk={PERSIST_TX_CHUNK}，仅最新状态，不写历史）"
+            "增量主数据落库完成，共 {} 条（批量先删后插，{} 笔事务，最大一笔 {} 字节，墓碑 {}；仅最新状态，不写历史）",
+            report.elements, report.transactions, report.max_transaction_bytes, report.tombstones
         );
-        Ok(uda_keys.misses_warning(dbnum as u32))
+        let mut warnings = Vec::new();
+        warnings.extend(uda_keys.misses_warning(dbnum as u32));
+        warnings.extend(report.warning(dbnum as u32));
+        Ok(warnings)
     }
 
-    /// 生产终态语句：每个 `Add` 先清 refno 复用可能留下的旧世代行（自己指向旧 owner 的边、
-    /// 自己名下的子槽位、旧 `ATT_UDA` 行），再按元素渲染 `pe / ATT_<noun> / ATT_UDA / pe_owner`。
-    pub(crate) fn render_terminal_persist_statements(
+    /// 整窗口的事务 SQL（含前置块与 pe 统计观测）与账——渲染在 `element_batch`，这里只是
+    /// 增量路的入口，`window_repair` 与崩溃重放对拍也从这里拿，保证三处发的是同一批语句。
+    pub(crate) fn terminal_persist_batches(
         changes: &[PersistElementChange],
+        retired: &[RetiredTypeRow],
         dbnum: i32,
         uda_keys: &UdaKeyMap,
-    ) -> Vec<String> {
-        let mut statements = Vec::new();
-        for change in changes.iter().filter(|change| change.is_add()) {
-            let pe = format!("pe:{}", change.refno);
-            statements.push(format!("DELETE {pe}->pe_owner;"));
-            statements.push(format!("DELETE pe_owner:[{pe}, NONE]..=[{pe}, ..];"));
-            statements.push(format!("DELETE ATT_UDA:{};", change.refno));
-        }
-        statements.extend(
-            changes
-                .iter()
-                .map(|change| change.to_surql(dbnum, uda_keys)),
-        );
-        statements
+    ) -> anyhow::Result<(
+        Vec<String>,
+        crate::data_interface::element_batch::ElementBatchReport,
+    )> {
+        crate::data_interface::element_batch::render_transactions(
+            changes,
+            retired,
+            dbnum,
+            uda_keys,
+            crate::data_interface::element_batch::WriteMode::Replace,
+        )
     }
 
     /// 渲染差分操作的兼容语句，供尚未迁移的诊断与测试载体使用。
@@ -1662,6 +1650,10 @@ impl IncrementPipeline {
             HashMap::new();
 
         let mut statements = Vec::new();
+        // Modify 状态归组（plan 2026-09-06 §1.1 #7 / P3）：同状态、无别的字段的目标攒成一条多目标
+        // `UPDATE a, b, c SET status = 'Modify'`（fork 兼容性见 `fork_surreal_compat::dual_multi_target_update_*`）。
+        // Delete 带各自的 `belong_zone`，仍逐条。
+        let mut modify_targets: Vec<String> = Vec::new();
         for ops in data.values() {
             for d in ops {
                 match &d.detail {
@@ -1721,11 +1713,12 @@ impl IncrementPipeline {
                             target
                         };
                         match target {
-                            Some(target) => statements.push(format!(
-                                "update {} set status = '{:?}';",
-                                target.to_table_key(DATACENTER_VERSION),
-                                DataCenterRecordOperate::Modify
-                            )),
+                            Some(target) => {
+                                let key = target.to_table_key(DATACENTER_VERSION);
+                                if !modify_targets.contains(&key) {
+                                    modify_targets.push(key);
+                                }
+                            }
                             None => println!(
                                 "datacenter 上溯：{} 解不出单元层归属（链断或到顶），\
                                  无交付记录可标，跳过",
@@ -1737,7 +1730,17 @@ impl IncrementPipeline {
                 }
             }
         }
-        Ok(dedup_statements_keep_last(statements))
+        // 一条多目标 UPDATE 最多带这么多记录：几千个目标一条语句是几百 KB 的报文，按 500 切、仍是批量。
+        const DATACENTER_TARGETS_PER_UPDATE: usize = 500;
+        let mut statements = dedup_statements_keep_last(statements);
+        for chunk in modify_targets.chunks(DATACENTER_TARGETS_PER_UPDATE) {
+            statements.push(format!(
+                "update {} set status = '{:?}';",
+                chunk.join(", "),
+                DataCenterRecordOperate::Modify
+            ));
+        }
+        Ok(statements)
     }
 
     /// 窗口前持久态的 pe 点查（noun + owner），显式 `SUL_DB` 不经读路由——
@@ -1892,8 +1895,14 @@ mod cache_tests {
             "直写路径从不丢弃一份持久化的恢复记录"
         );
         let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("缺 {needle}"));
-        // 09-03 退役后主数据按 `PersistElementChange` 终态写（`terminal_persist_changes`），入参不再是 `range_eles`。
-        let persist = at("Self::persist_latest_main_data(&persist_changes, dbnum as i32)");
+        // 09-03 退役后主数据按 `PersistElementChange` 终态写（`terminal_persist_changes`），入参不再是 `range_eles`；
+        // 09-06 起换 noun 的旧表行随元素块一起清，所以 `retired_type_rows` 也进 persist。
+        let persist = at(
+            "Self::persist_latest_main_data(&persist_changes, &retired_type_rows, dbnum as i32)",
+        );
+        // CATA 依赖块（plan 2026-09-06 §3 D6 (a)）排在 DESI 块之前、水位之前，失败拦水位。
+        let cata = at("cata_dependency::persist_cata_dependencies(");
+        assert!(cata < persist, "CATA 依赖块必须排在 DESI 块之前");
         let invalidate = at("Self::invalidate_caches(cache_refnos)");
         let reverse_index = at("Self::maintain_reverse_index(&range_eles)");
         let datacenter = at("Self::datacenter_statements(&range_eles, db_type)");
@@ -2194,6 +2203,7 @@ mod cache_tests {
                 old_noun: "BOX".into(),
                 new_noun: "NOZZ".into(),
             }],
+            tombstones: Default::default(),
             stats: WindowStats {
                 base_sesno: Some(45),
                 target_sesno: 46,
@@ -2329,7 +2339,7 @@ mod cache_tests {
             .find("warnings.extend(collected.warnings.iter().cloned())")
             .expect("收集后立即保存口径");
         let plan = one
-            .find("build_model_update_plan(")
+            .find("build_effective_model_update_plan(")
             .expect("模型计划可能失败");
         assert!(
             collect_warning < plan,
@@ -2467,7 +2477,9 @@ mod cache_tests {
             });
         assert!(path.is_file(), "找不到计时文件: {}", path.display());
 
-        let latest = DbFileHeader::read(&path).expect("read header").latest_sesno() as i32;
+        let latest = DbFileHeader::read(&path)
+            .expect("read header")
+            .latest_sesno() as i32;
         let windows = [
             ("high-retouch", (latest / 2).max(1)..=latest),
             ("add-floor", 1..=latest),
@@ -3070,10 +3082,23 @@ mod datacenter_tests {
         )
         .await;
 
-        assert_eq!(statements.len(), 3);
+        // Delete 逐条（各带 belong_zone），两个 Modify 目标归成一条多目标 UPDATE（P3）。
+        assert_eq!(statements.len(), 2, "{statements:?}");
         for statement in &statements {
             assert!(statement.ends_with(';'), "{statement}");
         }
+        let modify = statements
+            .iter()
+            .find(|s| s.contains("'Modify'"))
+            .expect("Modify 归组语句");
+        assert!(
+            modify.starts_with(
+                "update datacenter_version:7997_1, datacenter_version:7997_5 set status = 'Modify';"
+            ) || modify.starts_with(
+                "update datacenter_version:7997_5, datacenter_version:7997_1 set status = 'Modify';"
+            ),
+            "{modify}"
+        );
     }
 
     /// W3（D5）：单元层名词直接标自己；其余名词的上溯在**渲染时**解出固定目标 id
@@ -3210,10 +3235,24 @@ mod datacenter_tests {
         )
         .await;
 
+        // 一条 Delete + 一条归组的 Modify（FTUB 上溯到 ZONE 7997_5、BRAN 7997_10）；SITE 自身修改跳过。
         assert_eq!(
             statements.len(),
-            3,
+            2,
             "SITE 自身修改解不出单元层归属，必须跳过而不是渲出 NONE 目标: {statements:?}"
+        );
+        let modify = statements
+            .iter()
+            .find(|s| s.contains("'Modify'"))
+            .expect("Modify 归组语句");
+        assert!(
+            modify.contains("datacenter_version:7997_5")
+                && modify.contains("datacenter_version:7997_10"),
+            "{modify}"
+        );
+        assert!(
+            !modify.contains("7997_8"),
+            "SITE 自身不得进目标名单: {modify}"
         );
         for statement in &statements {
             assert!(
@@ -3546,8 +3585,8 @@ mod live_tests {
     #[tokio::test]
     #[ignore = "manual live: requires the configured Surreal database"]
     async fn live_add_pe_owner_replay_is_idempotent() {
-        use aios_core::NamedAttrValue;
         use crate::data_interface::ele_data::EleData;
+        use aios_core::NamedAttrValue;
 
         aios_core::init_test_surreal()
             .await

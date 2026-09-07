@@ -44,6 +44,114 @@ pub struct QueryReq {
     pub arguments: Value,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct ElementAttributesReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub refno: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ElementEnsureReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub refno: String,
+    #[serde(default = "default_ensure_depth")]
+    pub depth: usize,
+}
+
+fn default_ensure_depth() -> usize {
+    1
+}
+
+pub async fn model_publish_replay(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ProjectReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    resolve_identity(&state, &req)?;
+    crate::data_interface::model_publish_queue::replay_job(&id).map_err(ApiError::from_domain)?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({"job_id":id,"status":"ready"})),
+    ))
+}
+pub async fn model_publish_resume(
+    State(state): State<AppState>,
+    Json(req): Json<ProjectReq>,
+) -> Result<impl IntoResponse, ApiError> {
+    resolve_identity(&state, &req)?;
+    crate::data_interface::model_publish_queue::resume_consumer()
+        .await
+        .map_err(ApiError::from_domain)?;
+    Ok((StatusCode::ACCEPTED, Json(json!({"status":"resumed"}))))
+}
+
+/// POST /api/v1/element/attributes — complete e3d-io attributes.  Rendering is
+/// blocking file work; the compatibility backup is merely queued by the service.
+pub async fn element_attributes(
+    State(state): State<AppState>,
+    Json(req): Json<ElementAttributesReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = RefU64::from_str(&req.refno)
+        .map_err(|_| ApiError::bad_request(format!("refno 格式非法（应为 a/b）: {}", req.refno)))?;
+    let service = state
+        .element_attributes
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = tokio::task::spawn_blocking(move || service.read(refno))
+        .await
+        .map_err(|error| ApiError::from_domain(anyhow::anyhow!("attribute task failed: {error}")))?
+        .map_err(ApiError::from_domain)?;
+    serde_json::to_value(response)
+        .map(Json)
+        .map_err(|error| ApiError::from_domain(error.into()))
+}
+
+/// POST /api/v1/element/ensure — explicit synchronous compatibility backup.
+pub async fn element_ensure(
+    State(state): State<AppState>,
+    Json(req): Json<ElementEnsureReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &req.identity)?;
+    let refno = RefU64::from_str(&req.refno)
+        .map_err(|_| ApiError::bad_request(format!("refno 格式非法（应为 a/b）: {}", req.refno)))?;
+    let service = state
+        .element_attributes
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let response = service.ensure(refno, req.depth).await.map_err(|error| {
+        let message = format!("{error:#}");
+        if message.contains("DATA_FACE_INGEST_OWNS_CACHE") {
+            ApiError {
+                status: StatusCode::CONFLICT,
+                code: "DATA_FACE_INGEST_OWNS_CACHE",
+                message,
+            }
+        } else if message.contains("CATALOGUE_NOT_PERSISTED") {
+            ApiError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "CATALOGUE_NOT_PERSISTED",
+                message,
+            }
+        } else if message.contains("ENSURE_SCOPE_TOO_LARGE") {
+            ApiError {
+                status: StatusCode::UNPROCESSABLE_ENTITY,
+                code: "ENSURE_SCOPE_TOO_LARGE",
+                message,
+            }
+        } else {
+            ApiError::from_domain(error)
+        }
+    })?;
+    serde_json::to_value(response)
+        .map(Json)
+        .map_err(|error| ApiError::from_domain(error.into()))
+}
+
 fn empty_arguments() -> Value {
     json!({})
 }
@@ -178,6 +286,167 @@ pub async fn ops_panel(State(state): State<AppState>) -> impl IntoResponse {
 /// 共同记账，进程内状态、重启清零。SDK 会自动重连，所以常见形态是
 /// `connected: true` 而 `last_disconnect_at` 是几分钟前——「刚才断过一次，
 /// 现在好了」正是这份字段组合要说的话。
+// Root census reads large generation receipts. It is an observation, never a
+// completion barrier. One refresh may run at a time; HTTP cancellation must not
+// launch overlapping database scans. All domain decisions retain fresh reads.
+#[derive(Default)]
+struct HealthCensusCache {
+    key: String,
+    pending: bool,
+    started: Option<std::time::Instant>,
+    value: Option<(
+        std::time::Instant,
+        crate::data_interface::dbnum_consistency::ConsistencySummary,
+    )>,
+    error: Option<String>,
+}
+static HEALTH_CENSUS: std::sync::LazyLock<std::sync::Mutex<HealthCensusCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(HealthCensusCache::default()));
+
+async fn sampled_health_census()
+-> anyhow::Result<crate::data_interface::dbnum_consistency::ConsistencySummary> {
+    let key = format!(
+        "{:?}:{}:{}",
+        crate::data_interface::watch_scope::dbnums(),
+        crate::options::data_face().as_str(),
+        crate::data_interface::initialization_phase::InitializationCoordinator::global()
+            .snapshot()
+            .model_ready
+    );
+    let mut cache = HEALTH_CENSUS.lock().unwrap();
+    if cache.key != key {
+        cache.key = key.clone();
+        cache.value = None;
+        cache.started = None;
+        cache.error = None;
+    }
+    if !cache.pending
+        && cache
+            .started
+            .is_none_or(|t| t.elapsed() >= Duration::from_secs(30))
+    {
+        cache.pending = true;
+        cache.started = Some(std::time::Instant::now());
+        tokio::spawn(async move {
+            let result =
+                crate::data_interface::dbnum_consistency::health_summary(&aios_core::SUL_DB).await;
+            let mut cache = HEALTH_CENSUS.lock().unwrap();
+            cache.pending = false;
+            if cache.key == key {
+                match result {
+                    Ok(value) => {
+                        cache.value = Some((std::time::Instant::now(), value));
+                        cache.error = None;
+                    }
+                    Err(error) => {
+                        cache.error = Some(format!("{error:#}"));
+                    }
+                }
+            }
+        });
+    }
+    cache
+        .value
+        .as_ref()
+        .map(|(_, value)| value.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                cache
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "root census sampling in progress".into())
+            )
+        })
+}
+fn health_census_observation() -> Value {
+    let cache = HEALTH_CENSUS.lock().unwrap();
+    json!({"sample_age_ms":cache.value.as_ref().map(|(t,_)|t.elapsed().as_millis() as u64),
+        "refresh_interval_ms":30000,"refreshing":cache.pending,"last_error":cache.error})
+}
+
+// `model_update_pending` 的状态是对一张**无索引**表做三条全表聚合。全量初始化把
+// 十万个生成根一次排进这张表之后（2026-09-06 全 AMS 实测 106,645 行），每条聚合
+// 1.8 s、一次 /health 三条 5 s 以上；采样器 / 面板每 5 s 一问，SurrealDB 就被这一个
+// 分项占满一整核——分项预算 2 s 到点只是 HTTP 侧不再等，库里那三条照样跑完——
+// 基线 `INSERT`、`baseline_counts` 与收口事务全排在它后面（7329 一库 351 s，其中
+// 真正解析只 52 s）。它与上面的 root census 同一性质：是仪表，不是闸门，所以用
+// 同一套采样纪律：至多 [`MODEL_PENDING_STATUS_REFRESH`] 刷一次、同时只跑一个刷新、
+// 分项超时不叠加新扫描。代价是 `blocking_conditions` 里的死信判定最多晚一个刷新
+// 周期出现；死信是终态，不会自己消失，晚 30 s 看见不影响任何决策。
+#[derive(Default)]
+struct ModelPendingStatusCache {
+    pending: bool,
+    started: Option<std::time::Instant>,
+    value: Option<(
+        std::time::Instant,
+        crate::data_interface::model_update_pending::ModelPendingStatus,
+    )>,
+    error: Option<String>,
+}
+static MODEL_PENDING_STATUS: std::sync::LazyLock<std::sync::Mutex<ModelPendingStatusCache>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(ModelPendingStatusCache::default()));
+const MODEL_PENDING_STATUS_REFRESH: Duration = Duration::from_secs(30);
+
+async fn sampled_model_pending_status()
+-> anyhow::Result<crate::data_interface::model_update_pending::ModelPendingStatus> {
+    let (refresh, cached) = {
+        let mut cache = MODEL_PENDING_STATUS.lock().unwrap();
+        let stale = cache
+            .started
+            .is_none_or(|t| t.elapsed() >= MODEL_PENDING_STATUS_REFRESH);
+        let refresh = if !cache.pending && stale {
+            cache.pending = true;
+            cache.started = Some(std::time::Instant::now());
+            Some(tokio::spawn(async move {
+                let result =
+                    crate::data_interface::model_update_pending::model_pending_status().await;
+                let mut cache = MODEL_PENDING_STATUS.lock().unwrap();
+                cache.pending = false;
+                match result {
+                    Ok(value) => {
+                        cache.value = Some((std::time::Instant::now(), value));
+                        cache.error = None;
+                    }
+                    Err(error) => cache.error = Some(format!("{error:#}")),
+                }
+            }))
+        } else {
+            None
+        };
+        (
+            refresh,
+            cache.value.as_ref().map(|(_, value)| value.clone()),
+        )
+    };
+    if let Some(value) = cached {
+        return Ok(value);
+    }
+    // 还没有第一份样本：等这一次刷新落定。刷新是独立任务，外层分项预算到点取消的
+    // 只是这里的等待，库里那一次扫描的结果仍会进缓存，下一问直接拿到。
+    if let Some(refresh) = refresh {
+        let _ = refresh.await;
+    }
+    let cache = MODEL_PENDING_STATUS.lock().unwrap();
+    cache
+        .value
+        .as_ref()
+        .map(|(_, value)| value.clone())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                cache
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "model pending status sampling in progress".into())
+            )
+        })
+}
+fn model_pending_status_observation() -> Value {
+    let cache = MODEL_PENDING_STATUS.lock().unwrap();
+    json!({"sample_age_ms":cache.value.as_ref().map(|(t,_)|t.elapsed().as_millis() as u64),
+        "refresh_interval_ms":MODEL_PENDING_STATUS_REFRESH.as_millis() as u64,
+        "refreshing":cache.pending,"last_error":cache.error})
+}
+
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let (worker_alive, worker_idle_secs) = crate::data_interface::batch_worker::worker_liveness();
     let probe_started = std::time::Instant::now();
@@ -215,16 +484,26 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     // （/health 不报库端点），同名工程的隔离沙箱一律被误伤；有了这个键，探测端
     // 能放行「同工程、不同库」，只拦真共享一个库的（探测端做 localhost↔127.0.0.1
     // 归一，这里不做）。
-    // 内存模式下报的是 `embedded:mem` 而不是配置里那对 v_ip:v_port：库在进程里，
+    // `embedded-mem` 报的是 `embedded:mem` 而不是配置里那对 v_ip:v_port：库在进程里，
     // 那个地址根本没被连过。照抄配置会把这一栏变成谎话，而互踩探测正是照它决定
     // 「要不要拦」——一个谁都不共享的进程内库反而会被当成共享库拦下别人。
+    //
+    // 反过来 `spawned-mem` **必须报真地址**：那台库是本进程拉起来的，但端口是真的、
+    // 别人连得上，报 `embedded:mem` 会让互踩探测放行两个抢同一个端口的实例。
+    // 「是不是本进程自己起的」「活不活得过重启」由下面 `medium` / `durable` 两栏回答，
+    // 不压进这一栏——它的读者（跨部署探测）只认地址。
     {
         let db_option = aios_core::get_db_option();
-        sul_db["endpoint"] = if crate::options::in_memory_db() {
-            json!("embedded:mem")
-        } else {
+        let mode = crate::options::store_mode();
+        sul_db["endpoint"] = if mode.has_endpoint() {
             json!(format!("{}:{}", db_option.v_ip, db_option.v_port))
+        } else {
+            json!("embedded:mem")
         };
+        // external / spawned-mem / embedded-mem
+        sul_db["medium"] = json!(mode.as_str());
+        // 行活不活得过进程重启。只有 external 可能为真。
+        sul_db["durable"] = json!(mode.is_durable());
     }
     // 调试限定常驻一栏（D7 护栏三的第二个落点）：跛着的服务必须一眼看得出来，
     // 而不是等人从满屏日志里发现「怎么只有一个库在动」。空列表 = 正常全范围。
@@ -233,6 +512,97 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     // 一个库在动」这个问题在面板上问一次就该有答案，来源也要一起给出去。
     let (watch_dbnums, watch_origin) = crate::data_interface::watch_scope::resolved();
     let watch_dbnums_origin = (!watch_dbnums.is_empty()).then(|| watch_origin.describe());
+    // 模型增量类型限定同栏（`model_incremental_types` / `AIOS_MODEL_INCREMENTAL_TYPES`）。
+    // 它收窄的是模型消费而不是数据摄入：名单外类型的 regen_root / delete_cleanup 行
+    // 照常入队、留在 model_update_pending 里不被本进程认领——「HANG 的数据都进来了，
+    // 模型怎么一直不出」在面板上问一次就该有答案，被扣住的行数在
+    // `model_update_pending.held_by_model_incremental_types`。空列表 = 不限类型。
+    let (model_incremental_types, model_type_origin) =
+        crate::data_interface::model_type_scope::resolved();
+    let model_incremental_types_origin =
+        (!model_incremental_types.is_empty()).then(|| model_type_origin.describe());
+    let model_publish_queue = crate::data_interface::model_publish_queue::health();
+    if sul_db.get("connected").and_then(Value::as_bool) == Some(false) {
+        let read_through = state.element_attributes.health().await;
+        let snapshot = crate::data_interface::mdb_memory_store::get(
+            &state.identity.project,
+            &state.identity.mdb,
+        );
+        let stale_reason = crate::data_interface::mdb_memory_store::stale_reason(
+            &state.identity.project,
+            &state.identity.mdb,
+        );
+        let fingerprint = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.session_fingerprint())
+            .unwrap_or_default();
+        return Json(json!({
+            "status": if snapshot.is_some() && stale_reason.is_none() { "ok" } else { "degraded" },
+            "core": {
+                "status": if stale_reason.is_some() { "stale" } else if snapshot.is_some() { "ready" } else { "unavailable" },
+                "snapshot_epoch": snapshot.as_ref().map(|value| value.epoch()).unwrap_or_default(),
+                "session_vector": fingerprint.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
+                "stale_reason": stale_reason,
+                "skeleton_elements": snapshot.as_ref().map(|value| value.stats().elements).unwrap_or_default(),
+            },
+            "mirror": {
+                "status": "degraded",
+                "endpoint": sul_db.get("endpoint").cloned().unwrap_or(Value::Null),
+                "spool_depth": read_through.spool_depth,
+                "spool_bytes": read_through.spool_bytes,
+                "spool_oldest_age_ms": read_through.spool_oldest_age_ms,
+                "last_error": sul_db.get("last_disconnect_error").cloned().unwrap_or(Value::Null),
+            },
+            "features": {
+                "room": {"status": "degraded", "reason": "mirror unavailable"},
+                "history": {"status": "degraded", "reason": "mirror unavailable"},
+                "operations": {"status": "degraded", "reason": "mirror unavailable"},
+            },
+            "degraded_sections": ["mirror", "room", "history", "operations"],
+            "blocking_conditions": if model_publish_queue["failed_hold"].as_u64().unwrap_or(0) > 0
+                || model_publish_queue["unknown_hold"].as_u64().unwrap_or(0) > 0
+                || model_publish_queue["consumer_paused"].as_bool().unwrap_or(false) {
+                    vec!["model_publish_queue.held"]
+                } else { Vec::<&str>::new() },
+            "model_publish_queue": model_publish_queue,
+            "project": state.identity.project,
+            "mdb": state.identity.mdb,
+            "namespace": state.identity.namespace,
+            "sync_live": state.sync_live,
+            "data_read_mode": if crate::options::direct_read_mode() { "direct" } else { "db" },
+            "data_face": crate::options::data_face().as_str(),
+            "read_through": read_through,
+            "dbnum_consistency": serde_json::Value::Null,
+            "version": env!("CARGO_PKG_VERSION"),
+            "started_at": crate::data_interface::task_registry::process_started_at(),
+            "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
+            "startup_autorun": crate::options::startup_autorun(),
+            "data_incremental": crate::options::data_incremental(),
+            "model_incremental": crate::options::model_incremental(),
+            "room_incremental": crate::options::room_incremental(),
+            "auto_work_armed": crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed(),
+            "increment_mode": crate::data_interface::batch_worker::increment_mode(),
+            "initialization": crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot(),
+            "worker_alive": worker_alive,
+            "worker_idle_secs": worker_idle_secs,
+            "active_dependency": crate::data_interface::task_registry::TaskRegistry::global().active_dependency_snapshot(),
+            "idle_round_panic": crate::data_interface::batch_worker::idle_round_panic_snapshot(),
+            "batch_failures": crate::data_interface::batch_worker::batch_failure_snapshot(),
+            "model_drain": crate::data_interface::model_update_pending::model_drain_telemetry_snapshot(),
+            "model_concurrency": crate::data_interface::model_concurrency::snapshot(),
+            "geometry_concurrency": crate::fast_model::concurrency::snapshot(),
+            "runtime_lag": crate::runtime_lag::snapshot(),
+            "spatial_serial": crate::fast_model::spatial_state::spatial_serial_snapshot(),
+            "sul_db": sul_db,
+            "static_assets": state.static_assets,
+            "debug_dbnums": debug_dbnums,
+            "watch_dbnums": watch_dbnums,
+            "watch_dbnums_origin": watch_dbnums_origin,
+            "model_incremental_types": model_incremental_types,
+            "model_incremental_types_origin": model_incremental_types_origin,
+            "in_memory_db": !crate::options::store_mode().is_durable(),
+        }));
+    }
     // 以下每一项都读库，因此每一项都过 within_health_budget；超时的记进
     // degraded_sections，绝不让任何一项把整个端点拖住。
     let mut degraded: Vec<&'static str> = Vec::new();
@@ -278,11 +648,9 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             )
         }
     };
-    let model_update_pending = match within_health_budget(
-        crate::data_interface::model_update_pending::model_pending_status(),
-    )
-    .await
-    {
+    // 采样版（见 `sampled_model_pending_status`）：现读三条全表聚合每 5 s 一次会把
+    // SurrealDB 占满；仍套分项预算，第一份样本没到时按超时降级。
+    let model_update_pending = match within_health_budget(sampled_model_pending_status()).await {
         Some(Ok(status)) => status,
         Some(Err(error)) => {
             degraded.push("model_update_pending");
@@ -295,7 +663,24 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             )
         }
     };
+    // 双水位是仪表，不是健康闸门：lagging 只做陈述，不进入
+    // `blocking_conditions`（ADR-060 M4/M7）。
+    let dbnum_consistency = match within_health_budget(sampled_health_census()).await {
+        Some(Ok(summary)) => json!(summary),
+        Some(Err(_)) | None => {
+            degraded.push("dbnum_consistency");
+            Value::Null
+        }
+    };
     let mut blocking_conditions: Vec<&'static str> = Vec::new();
+    if model_publish_queue["failed_hold"].as_u64().unwrap_or(0) > 0
+        || model_publish_queue["unknown_hold"].as_u64().unwrap_or(0) > 0
+        || model_publish_queue["consumer_paused"]
+            .as_bool()
+            .unwrap_or(false)
+    {
+        blocking_conditions.push("model_publish_queue.held");
+    }
     if model_update_pending.has_data_dead_letters() {
         blocking_conditions.push("model_update_pending.data_dead_letters");
     }
@@ -328,10 +713,43 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     );
     // room_build 自带 2 秒上限（room_build_health_from），降级形状也是它自己渲染的。
     let room_build = crate::fast_model::room_model::room_build_health().await;
+    let read_through = state.element_attributes.health().await;
+    let source_snapshot =
+        crate::data_interface::mdb_memory_store::get(&state.identity.project, &state.identity.mdb);
+    let source_stale = crate::data_interface::mdb_memory_store::stale_reason(
+        &state.identity.project,
+        &state.identity.mdb,
+    );
+    let source_fingerprint = source_snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.session_fingerprint())
+        .unwrap_or_default();
     Json(json!({
         // 有分项没在预算内答完就不是 ok：库半死不活时这个字段是唯一一眼可见的
         // 信号，剩下的看 degraded_sections。
         "status": health_status(&degraded, &blocking_conditions),
+        "model_publish_queue": model_publish_queue,
+        "core": {
+            "status": if source_stale.is_some() { "stale" } else if source_snapshot.is_some() { "ready" } else { "unavailable" },
+            "snapshot_epoch": source_snapshot.as_ref().map(|value| value.epoch()).unwrap_or_default(),
+            "session_vector": source_fingerprint.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
+            "stale_reason": source_stale,
+            "skeleton_elements": source_snapshot.as_ref().map(|value| value.stats().elements).unwrap_or_default(),
+        },
+        "mirror": {
+            "status": "ready",
+            "endpoint": sul_db.get("endpoint").cloned().unwrap_or(Value::Null),
+            "spool_depth": read_through.spool_depth,
+            "spool_bytes": read_through.spool_bytes,
+            "spool_oldest_age_ms": read_through.spool_oldest_age_ms,
+            "last_error": sul_db.get("last_disconnect_error").cloned().unwrap_or(Value::Null),
+            "last_success": chrono::Utc::now().to_rfc3339(),
+        },
+        "features": {
+            "room": {"status": "available"},
+            "history": {"status": "available"},
+            "operations": {"status": "available"},
+        },
         // 空数组 = 八个读库分项全部按时答完。非空 = 这些分项的值是降级值，
         // 不是现场真相（`null` 在这里可能是「超时」而不是「表空」）。
         "degraded_sections": degraded,
@@ -343,6 +761,11 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "namespace": state.identity.namespace,
         "sync_live": state.sync_live,
         "data_read_mode": if crate::options::direct_read_mode() { "direct" } else { "db" },
+        // 数据面形态（2026-09-05 起默认 read-through）：`pe` / `ATT_*` 行是摄入来的还是
+        // 随模型生成写透的。客户端拿它决定「查空」怎么说话——读透下缺行 = 还没读到，
+        // 摄入下缺行 = 还在灌；`applied_sesno` 在读透下恒 0，不是落后。
+        "data_face": crate::options::data_face().as_str(),
+        "read_through": read_through,
         "version": env!("CARGO_PKG_VERSION"),
         "started_at": crate::data_interface::task_registry::process_started_at(),
         "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
@@ -417,6 +840,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 数据模型与房间工作一次查询得出同一快照；死信样本最多十条，普通积压
         // 只计数、不把启动期间的正常工作误标成 degraded。
         "model_update_pending": model_update_pending,
+        // 上一格是采样值（至多 30 s 刷一次）：这里说清样本多旧、是否正在刷新。
+        "model_update_pending_observation": model_pending_status_observation(),
+        "dbnum_consistency": dbnum_consistency,
+        "dbnum_consistency_observation": health_census_observation(),
         // 空间树状态机 + 文件/库指纹（现读现比）+ 本次启动的装载裁决
         // （reused / replayed / rebuilt / migrated / degraded / preloaded）。
         // 十五键契约钉在 aabb_tree 的渲染器旁（台账 G-02 契约迁移）。
@@ -434,10 +861,16 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // `watch_dbnums_origin` 说清是配置写的还是这次命令行给的。
         "watch_dbnums": watch_dbnums,
         "watch_dbnums_origin": watch_dbnums_origin,
-        // true = 持久层是进程内嵌 kv-mem（`in_memory_db`），不是 v_ip:v_port 那台
-        // 服务器。这一栏必须在场：内存模式下库随进程消失、外部也连不上，看见
-        // 数据「不见了」的人得能一眼分清是没写进去还是根本没落盘。
-        "in_memory_db": crate::options::in_memory_db(),
+        // 非空 = 本进程的模型增量只生成 / 清理这些类型的生成根（`model_incremental_types`
+        // / `AIOS_MODEL_INCREMENTAL_TYPES`），其余类型的行留在队列里不消费；数据增量
+        // 不受影响。`model_incremental_types_origin` 说清是配置写的还是环境变量给的。
+        "model_incremental_types": model_incremental_types,
+        "model_incremental_types_origin": model_incremental_types_origin,
+        // true = 持久层不落盘，库随进程消失（`spawned-mem` 与 `embedded-mem` 都算）。
+        // 这一栏必须在场：看见数据「不见了」的人得能一眼分清是没写进去还是根本没落盘。
+        // **它不回答「连不连得上」**——`spawned-mem` 是易失的但端口是真的，那个问题
+        // 由 `sul_db.endpoint` 与 `sul_db.medium` 回答。老客户端只认得这一栏，所以留着。
+        "in_memory_db": !crate::options::store_mode().is_durable(),
     }))
 }
 
@@ -564,6 +997,30 @@ fn tree_refno(request: &TreeReq) -> Result<RefU64, ApiError> {
     })
 }
 
+/// 树节点外包一格 `dbnum`。
+///
+/// `EleTreeNode` 是 aios_core 的类型，plant-ui 用 serde 原样解它，所以不在类型上加字段
+/// ——在 JSON 层外包一格，多余字段旧消费者照旧忽略。浏览器端（plant3d-web）的缓存、
+/// 可见性、选中全按 dbnum 分桶，而 refno 的前半段只是 ref0，不是库号（见
+/// `CONTEXT.md`「Ref0 库归属」）；库号只有服务端的骨架答得出来。
+fn tree_nodes_with_dbnum(
+    service: &crate::data_interface::direct_tree::DirectTreeService,
+    nodes: Vec<aios_core::pdms_types::EleTreeNode>,
+) -> Result<Vec<Value>, ApiError> {
+    nodes
+        .into_iter()
+        .map(|node| {
+            let dbnum = service.dbnum_of(node.refno.refno());
+            let mut value =
+                serde_json::to_value(&node).map_err(|error| ApiError::from_domain(error.into()))?;
+            if let Some(object) = value.as_object_mut() {
+                object.insert("dbnum".into(), json!(dbnum));
+            }
+            Ok(value)
+        })
+        .collect()
+}
+
 /// GET /api/v1/tree/roots — SITE roots decoded from DESI files by e3d-io.
 pub async fn tree_roots(
     State(state): State<AppState>,
@@ -576,6 +1033,7 @@ pub async fn tree_roots(
         .await
         .map_err(ApiError::from_domain)?;
     let nodes = service.roots().map_err(ApiError::from_domain)?;
+    let nodes = tree_nodes_with_dbnum(&service, nodes)?;
     Ok(Json(json!({
         "source": "direct",
         "project": service.project(),
@@ -597,11 +1055,74 @@ pub async fn tree_children(
         .await
         .map_err(ApiError::from_domain)?;
     let nodes = service.children(parent).map_err(ApiError::from_domain)?;
+    let nodes = tree_nodes_with_dbnum(&service, nodes)?;
     Ok(Json(json!({
         "source": "direct",
         "parent": RefnoEnum::from(parent).to_pdms_str(),
         "nodes": nodes,
     })))
+}
+
+/// GET /api/v1/meshes/{geo_hash}.glb — 一份单位网格的 glTF 二进制。
+///
+/// 磁盘上的 `.mesh` 是 rkyv 归档，浏览器解不动（见 `mesh_glb.rs` 模块注释），这里现场
+/// 转成 GLB。`geo_hash` 是内容寻址键：同一个键永远是同一份几何，所以响应带
+/// `immutable` 缓存头——前端拉过一次就再也不来了，转换成本只付第一次。
+///
+/// 路径参数必须形如 `{hash}.glb`，`hash` 只放行 `[0-9A-Za-z_]`：这既是键的真实字符集，
+/// 也是唯一一道目录穿越的门。文件不在回 404 `not_found`（与「refno 不存在」同码，
+/// 客户端可负缓存）；文件在但编不成三角网格回 422 `precondition`——那是数据的终局，
+/// 重发同一个键还是同一个结果。
+pub async fn mesh_glb(
+    State(state): State<AppState>,
+    Path(file): Path<String>,
+) -> Result<axum::response::Response, ApiError> {
+    let _ = &state;
+    let Some(stem) = file.strip_suffix(".glb") else {
+        return Err(ApiError::bad_request(format!(
+            "网格路径应为 {{geo_hash}}.glb: {file}"
+        )));
+    };
+    if !crate::web_service::mesh_glb::is_valid_geo_hash(stem) {
+        return Err(ApiError::bad_request(format!(
+            "geo_hash 只允许字母、数字与下划线: {stem}"
+        )));
+    }
+    let path = aios_core::get_db_option()
+        .get_meshes_path()
+        .join(format!("{stem}.mesh"));
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::not_found(format!("网格 {stem} 不存在")));
+        }
+        Err(error) => {
+            return Err(ApiError::from_domain(anyhow::anyhow!(
+                "读取网格 {} 失败: {error}",
+                path.display()
+            )));
+        }
+    };
+    let stem_owned = stem.to_string();
+    let glb = tokio::task::spawn_blocking(move || {
+        let mesh = aios_core::shape::pdms_shape::PlantMesh::des_from_bytes(&bytes)
+            .map_err(|error| anyhow::anyhow!("网格 {stem_owned} 不是合法的 .mesh 归档: {error}"))?;
+        crate::web_service::mesh_glb::plant_mesh_to_glb(&mesh)
+    })
+    .await
+    .map_err(|error| ApiError::from_domain(anyhow::anyhow!("网格转换任务异常结束: {error}")))?
+    .map_err(|error| ApiError::precondition(format!("{error:#}")))?;
+    axum::response::Response::builder()
+        .status(StatusCode::OK)
+        .header(axum::http::header::CONTENT_TYPE, "model/gltf-binary")
+        .header(
+            axum::http::header::CACHE_CONTROL,
+            "public, max-age=31536000, immutable",
+        )
+        .header(axum::http::header::ETAG, format!("\"{stem}\""))
+        .header(axum::http::header::CONTENT_LENGTH, glb.len())
+        .body(axum::body::Body::from(glb))
+        .map_err(|error| ApiError::from_domain(anyhow::anyhow!("构造网格响应失败: {error}")))
 }
 
 /// GET /api/v1/tree/ancestors?refno=a/b — self first, then OWNER chain.
@@ -630,6 +1151,20 @@ pub async fn update_preview(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let req = body.map(|b| b.0).unwrap_or_default();
     let identity = resolve_identity(&state, &req)?;
+    if crate::options::data_face().is_read_through() {
+        return Ok(Json(json!({
+            "project": identity.project,
+            "mdb": identity.mdb,
+            "namespace": identity.namespace,
+            "data_face": "read-through",
+            "dbnums": [],
+            "pending_model_retries": [],
+            "warnings": ["read-through 模式不生成数据摄入预览；执行只复核模型与缓存"],
+            "up_to_date": true,
+            "data_batches": [],
+            "message": "read-through preview only schedules model/cache refresh; applied_sesno is unchanged"
+        })));
+    }
     let preview = state
         .mgr
         .preview_manual_update(&identity.project, Some(&identity.mdb))
@@ -663,6 +1198,29 @@ pub async fn update_execute(
 ) -> Result<impl IntoResponse, ApiError> {
     let req = body.map(|b| b.0).unwrap_or_default();
     let identity = resolve_identity(&state, &req.base)?;
+    if crate::options::data_face().is_read_through() {
+        crate::data_interface::batch_scheduler::BatchScheduler::global().arm_auto_work();
+        let attributes = state.element_attributes.clone();
+        tokio::spawn(async move {
+            crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup()
+                .await;
+            if let Err(error) = attributes.refresh_cached().await {
+                log::warn!("manual read-through cache refresh degraded: {error:#}");
+            }
+        });
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "project": identity.project,
+                "mdb": identity.mdb,
+                "namespace": identity.namespace,
+                "data_face": "read-through",
+                "data_batches": [],
+                "status": "model_refresh_queued",
+                "applied_sesno_changed": false
+            })),
+        ));
+    }
     let mut receipt = state
         .mgr
         .enqueue_manual_update(
@@ -949,25 +1507,54 @@ pub async fn model_ensure(
         )));
     };
     let refno = RefnoEnum::from(refu);
+    // 模型取数源路由（plan 2026-09-06 §8 R1/R2）：这个 refno 所属的库在 rocksdb 里准备好了没有。
+    // 没准备好（基线未落 / 初始化发布 run 在飞）就整段按需生成进「只写内存」作用域——不等队列、
+    // 不进 durable 队列、不落 rocksdb，投影由 `/model/records` 供数。解不出所属库（不在 MDB）
+    // 就不路由，交给下面的正常路径报它该报的错。
+    let route = match crate::fast_model::e3d_model_service::E3dModelService::dbnum_for_roots(
+        std::slice::from_ref(&req.refno),
+    )
+    .await
+    {
+        Ok(dbnum) => Some(
+            crate::data_interface::model_read_route::route_for(dbnum)
+                .await
+                .map_err(ApiError::from_domain)?,
+        ),
+        Err(_) => None,
+    };
+    let memory_only_dbnum = route
+        .filter(|route| !route.is_database())
+        .map(|route| route.dbnum);
     let mgr = state.mgr.clone();
     let force = req.force;
     let worker_refno = req.refno.clone();
     let direct_tree = state.direct_tree.clone();
     let task_result = await_background_without_cancelling(Duration::from_secs(120), async move {
-        let result = if crate::options::direct_read_mode() {
-            let tree = direct_tree.get().await?;
-            let root = refno.refno();
-            let unit_types =
-                crate::data_interface::generation_root::configured_delivery_unit_types();
-            let roots = tokio::task::spawn_blocking(move || {
-                tree.generation_roots_in_subtree(root, &unit_types)
-            })
-            .await
-            .map_err(|error| anyhow::anyhow!("direct generation-root task failed: {error}"))??;
-            mgr.ensure_model_scope_generated_from_roots(refno, roots, force)
+        let generate = async move {
+            if crate::options::direct_read_mode() {
+                let tree = direct_tree.get().await?;
+                let root = refno.refno();
+                let unit_types =
+                    crate::data_interface::generation_root::configured_delivery_unit_types();
+                let roots = tokio::task::spawn_blocking(move || {
+                    tree.generation_roots_in_subtree(root, &unit_types)
+                })
                 .await
-        } else {
-            mgr.ensure_model_scope_generated(refno, force).await
+                .map_err(|error| {
+                    anyhow::anyhow!("direct generation-root task failed: {error}")
+                })??;
+                mgr.ensure_model_scope_generated_from_roots(refno, roots, force)
+                    .await
+            } else {
+                mgr.ensure_model_scope_generated(refno, force).await
+            }
+        };
+        let result = match memory_only_dbnum {
+            Some(dbnum) => {
+                crate::data_interface::model_read_route::scope_memory_only(dbnum, generate).await
+            }
+            None => generate.await,
         };
         if let Err(error) = &result {
             log::error!("按需生成后台失败 refno={worker_refno}: {error:#}");
@@ -988,9 +1575,68 @@ pub async fn model_ensure(
         })?
         .map_err(ensure_error)?;
     let mut payload = serde_json::to_value(&result).map_err(|e| ApiError::from_domain(e.into()))?;
-    append_publication_state(&mut payload, &result.generation_root)
-        .await
-        .map_err(ApiError::from_domain)?;
+    if let Some(route) = route {
+        let object = payload.as_object_mut().ok_or_else(|| {
+            ApiError::from_domain(anyhow::anyhow!("model ensure response is not an object"))
+        })?;
+        // 回执说清这一批模型现在在哪、活不活得过重启（§8 R2）：`durable = false` 的那一档
+        // 由 `/model/records` 从进程内投影供数，持久由初始化 run 负责。
+        object.insert("dbnum".into(), json!(route.dbnum));
+        object.insert("model_source".into(), json!(route.source.as_str()));
+        object.insert(
+            "model_source_reason".into(),
+            json!(route.reason.map(|reason| reason.as_str())),
+        );
+        object.insert("durable".into(), json!(route.is_database()));
+    }
+    if crate::options::data_face().is_read_through() {
+        let object = payload.as_object_mut().ok_or_else(|| {
+            ApiError::from_domain(anyhow::anyhow!("model ensure response is not an object"))
+        })?;
+        object.insert("generation_roots".into(), json!(result.generation_roots));
+        object.insert(
+            "snapshot_epoch".into(),
+            json!(
+                crate::data_interface::mdb_memory_store::get(
+                    &state.identity.project,
+                    &state.identity.mdb,
+                )
+                .map(|snapshot| snapshot.epoch())
+                .unwrap_or_default()
+            ),
+        );
+        object.insert(
+            "publication_status".into(),
+            json!(if result.model_available {
+                "ready"
+            } else {
+                "empty"
+            }),
+        );
+        object.insert(
+            "mirror".into(),
+            serde_json::to_value(state.element_attributes.health().await).unwrap_or(Value::Null),
+        );
+    } else if memory_only_dbnum.is_some() {
+        // 只写内存（摄入形态、库未初始化）：`gen_root` 上没有这根的行，发布状态由投影里
+        // 有没有可画的东西说话；`/model/records` 会从同一份投影供数。
+        let object = payload.as_object_mut().ok_or_else(|| {
+            ApiError::from_domain(anyhow::anyhow!("model ensure response is not an object"))
+        })?;
+        object.insert("generation_roots".into(), json!(result.generation_roots));
+        object.insert(
+            "publication_status".into(),
+            json!(if result.model_available {
+                "ready"
+            } else {
+                "empty"
+            }),
+        );
+    } else {
+        append_publication_state(&mut payload, &result.generation_root)
+            .await
+            .map_err(ApiError::from_domain)?;
+    }
     Ok(Json(payload))
 }
 
@@ -1209,14 +1855,224 @@ pub async fn dbnums(
     Query(query): Query<ProjectReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let identity = resolve_identity(&state, &query)?;
-    let report = state
+    if crate::options::data_face().is_read_through() {
+        let service = state
+            .direct_tree
+            .get()
+            .await
+            .map_err(ApiError::from_domain)?;
+        let skeleton = service.skeleton().map_err(ApiError::from_domain)?;
+        let mut dbnums = Vec::new();
+        append_cold_read_through_dbnums(&mut dbnums, skeleton.databases());
+        annotate_ref0s(&mut dbnums, |dbnum| skeleton.ref0s_of(dbnum));
+        return Ok(Json(json!({
+            "dbnums": dbnums,
+            "warnings": skeleton.problems(),
+            "data_face": crate::options::data_face().as_str(),
+            "snapshot_epoch": skeleton.epoch(),
+        })));
+    }
+    let mut report = state
         .mgr
         .dbnum_statuses(&identity.project, Some(&identity.mdb))
         .await
         .map_err(ApiError::from_domain)?;
-    Ok(Json(
-        json!({ "dbnums": report.dbnums, "warnings": report.warnings }),
-    ))
+    let mut dbnums = serde_json::to_value(&report.dbnums)
+        .map_err(|error| ApiError::from_domain(error.into()))?;
+    let mut cache_meta = std::collections::HashMap::<i64, (u64, u64)>::new();
+    // CATA 依赖行（plan 2026-09-06 §3 D6/D7）：这个目录库有多少行是按 DESI 依赖入库的、按哪一版文件渲的。
+    let mut dependency_meta = std::collections::HashMap::<i64, (u64, u64)>::new();
+    if let Ok(mut response) = aios_core::SUL_DB
+        .query(
+            "SELECT dbnum, count() AS cached_pe_rows FROM pe WHERE !deleted GROUP BY dbnum;\n\
+             SELECT dbnum, cache_epoch FROM read_through_cache;\n\
+             SELECT dbnum, sesno, rows FROM cata_dependency_state;",
+        )
+        .await
+        .and_then(|response| response.check())
+    {
+        let states: Vec<Value> = response.take(2).unwrap_or_default();
+        for row in states {
+            if let Some(dbnum) = row.get("dbnum").and_then(Value::as_i64) {
+                dependency_meta.insert(
+                    dbnum,
+                    (
+                        row.get("sesno").and_then(Value::as_u64).unwrap_or_default(),
+                        row.get("rows").and_then(Value::as_u64).unwrap_or_default(),
+                    ),
+                );
+            }
+        }
+        let counts: Vec<Value> = response.take(0).unwrap_or_default();
+        for row in counts {
+            if let (Some(dbnum), Some(count)) = (
+                row.get("dbnum").and_then(Value::as_i64),
+                row.get("cached_pe_rows").and_then(Value::as_u64),
+            ) {
+                cache_meta.entry(dbnum).or_default().1 = count;
+            }
+        }
+        let epochs: Vec<Value> = response.take(1).unwrap_or_default();
+        for row in epochs {
+            if let (Some(dbnum), Some(epoch)) = (
+                row.get("dbnum").and_then(Value::as_i64),
+                row.get("cache_epoch").and_then(Value::as_u64),
+            ) {
+                cache_meta.entry(dbnum).or_default().0 = epoch;
+            }
+        }
+    }
+    if let Some(rows) = dbnums.as_array_mut() {
+        for row in rows.iter_mut() {
+            let Some(object) = row.as_object_mut() else {
+                continue;
+            };
+            let dbnum = object
+                .get("dbnum")
+                .and_then(Value::as_i64)
+                .unwrap_or_default();
+            let (epoch, count) = cache_meta.get(&dbnum).copied().unwrap_or_default();
+            object.insert("cache_epoch".into(), json!(epoch));
+            object.insert("cached_pe_rows".into(), json!(count));
+            // 目录库才有这两格；没有依赖行的库整格不写（写 0 读起来像「一个依赖都没有」，那是另一句话）。
+            if let Some((sesno, dependency_rows)) = dependency_meta.get(&dbnum).copied() {
+                object.insert("dependency_rows".into(), json!(dependency_rows));
+                object.insert("dependency_sesno".into(), json!(sesno));
+            }
+        }
+        annotate_model_source(rows, crate::options::data_face(), |dbnum| {
+            crate::data_interface::model_publish_queue::blocks_dbnum(dbnum)
+        });
+        // 摄入形态下骨架不一定预热过；有就给 `ref0s`，没有就不写这一格（不写空数组
+        // ——空数组读起来是「这个库一个 ref0 都没有」，那是另一句话）。
+        if let Some(skeleton) =
+            crate::data_interface::mdb_memory_store::get(&identity.project, &identity.mdb)
+        {
+            annotate_ref0s(rows, |dbnum| skeleton.ref0s_of(dbnum));
+        }
+    }
+    Ok(Json(json!({
+        "dbnums": dbnums,
+        "warnings": report.warnings,
+        // 数据面形态（与 `/health.data_face` 同源）。读透下每行的 `applied_sesno` 恒 0、
+        // `initialization_required` 不表示「要导入」——客户端要先看这一格再解释那两列。
+        "data_face": crate::options::data_face().as_str(),
+    })))
+}
+
+fn append_cold_read_through_dbnums(
+    rows: &mut Vec<Value>,
+    databases: &[crate::data_interface::mdb_memory_store::LoadedDb],
+) {
+    let mut present = rows
+        .iter()
+        .filter_map(|row| row.get("dbnum").and_then(Value::as_u64))
+        .collect::<std::collections::HashSet<_>>();
+    for database in databases {
+        if !present.insert(u64::from(database.dbnum)) {
+            continue;
+        }
+        let cold_state = crate::data_interface::dbnum_state::DbnumState {
+            dbnum: database.dbnum,
+            ..Default::default()
+        };
+        let model = crate::data_interface::dbnum_consistency::verdict(
+            &cold_state,
+            &crate::data_interface::dbnum_consistency::RootCensus::default(),
+            crate::options::DataFace::ReadThrough,
+        )
+        .columns();
+        let file_size = std::fs::metadata(&database.file)
+            .map(|metadata| metadata.len())
+            .unwrap_or_default();
+        rows.push(json!({
+            "dbnum": database.dbnum,
+            "db_type": database.db_type,
+            "file_name": database.file.file_name().and_then(|name| name.to_str()).unwrap_or_default(),
+            "file_path": database.file.display().to_string(),
+            "file_size": file_size,
+            "file_latest_sesno": database.sesno,
+            "applied_sesno": 0,
+            "initialized": false,
+            "blocked": false,
+            "excluded": false,
+            "not_in_project": false,
+            "model_sesno": model.model_sesno,
+            "model_sesno_time": model.model_sesno_time,
+            "model_verdict": model.model_verdict,
+            "model_verdict_reason": model.model_verdict_reason,
+            "model_caught_up_roots": model.model_caught_up_roots,
+            "model_chasing_roots": model.model_chasing_roots,
+            "model_dead_roots": model.model_dead_roots,
+            "model_lazy_roots": model.model_lazy_roots,
+            "cache_epoch": 0,
+            "cached_pe_rows": 0,
+            // 冷行 = 读透形态从未摄入的库：模型只在进程内投影里。
+            "model_source": crate::data_interface::model_read_route::ModelReadSource::Memory.as_str(),
+            "model_source_reason": crate::data_interface::model_read_route::MemoryReason::ReadThrough.as_str()
+        }));
+    }
+    rows.sort_by_key(|row| row.get("dbnum").and_then(Value::as_u64).unwrap_or_default());
+}
+
+/// 给 `/dbnums` 的每一行写 `model_source` / `model_source_reason`（plan 2026-09-06 §8 R1）：
+/// 这个库的模型现在该从哪儿读。判据只有 `model_read_route::route` 一处，这里只是把行上已有的
+/// `applied_sesno` 与「初始化发布 run 在不在飞」喂给它；取数走闭包，让整形逻辑不依赖真队列也能测。
+fn annotate_model_source(
+    rows: &mut [Value],
+    data_face: crate::options::DataFace,
+    publishing: impl Fn(u32) -> bool,
+) {
+    for row in rows.iter_mut() {
+        let Some(object) = row.as_object_mut() else {
+            continue;
+        };
+        let Some(dbnum) = object
+            .get("dbnum")
+            .and_then(Value::as_u64)
+            .and_then(|dbnum| u32::try_from(dbnum).ok())
+        else {
+            continue;
+        };
+        let applied = object
+            .get("applied_sesno")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok())
+            .unwrap_or_default();
+        let route = crate::data_interface::model_read_route::route(
+            dbnum,
+            data_face,
+            applied,
+            publishing(dbnum),
+        );
+        object.insert("model_source".into(), json!(route.source.as_str()));
+        object.insert(
+            "model_source_reason".into(),
+            json!(route.reason.map(|reason| reason.as_str())),
+        );
+    }
+}
+
+/// 给 `/dbnums` 的每一行写 `ref0s`（该库拥有的全部 Ref0，升序）。
+///
+/// 浏览器端只有 refno，而 refno 的前半段是 Ref0 不是库号；它的缓存与可见性却按库号
+/// 分桶，此前靠旧后端一份 `db_meta_info.json` 才拼得出 `ref0 → dbnum`。这张表服务端
+/// 骨架本来就有（`MdbMemoryStore::affiliations`），随 `/dbnums` 一起给，前端就不必再
+/// 找第二个来源。取数走闭包，是为了让这段整形逻辑不依赖一份真骨架也能测。
+fn annotate_ref0s(rows: &mut [Value], ref0s_of: impl Fn(u32) -> Vec<u32>) {
+    for row in rows.iter_mut() {
+        let Some(object) = row.as_object_mut() else {
+            continue;
+        };
+        let Some(dbnum) = object
+            .get("dbnum")
+            .and_then(Value::as_u64)
+            .and_then(|dbnum| u32::try_from(dbnum).ok())
+        else {
+            continue;
+        };
+        object.insert("ref0s".into(), json!(ref0s_of(dbnum)));
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1385,9 +2241,378 @@ pub async fn queue_resume(
     Ok(Json(json!({ "paused": false })))
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SearchReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub query: String,
+    pub limit: Option<usize>,
+    pub cursor: Option<usize>,
+}
+
+/// GET /api/v1/search — NAME substring search against the pinned file indexes.
+pub async fn search(
+    State(state): State<AppState>,
+    Query(request): Query<SearchReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &request.identity)?;
+    if request.query.trim().is_empty() {
+        return Err(ApiError::bad_request("query 不能为空"));
+    }
+    let limit = request.limit.unwrap_or(100).clamp(1, 500);
+    let cursor = request.cursor.unwrap_or(0);
+    let service = state
+        .direct_tree
+        .get()
+        .await
+        .map_err(ApiError::from_domain)?;
+    let all = service
+        .search_names(&request.query)
+        .map_err(ApiError::from_domain)?;
+    let total = all.len();
+    // `noun` 只给这一页解：名称索引里没有它，得回元素记录读一次 TYPE。一页最多 500 条，
+    // 全集不解——搜「PIPE」在大库上命中几万条，逐条读记录就把搜索拖成秒级。读不出来
+    // 给空串而不是 null：plant-ui 那边 `noun: String` 带 `serde(default)`，缺省可以、
+    // null 会让整页反序列化失败。
+    let nodes = all
+        .into_iter()
+        .skip(cursor)
+        .take(limit)
+        .map(|(name, refno, dbnum)| {
+            let noun = service.noun_of(refno.refno()).unwrap_or_default();
+            json!({
+                "name": name,
+                "refno": refno.to_pdms_str(),
+                "dbnum": dbnum,
+                "noun": noun,
+            })
+        })
+        .collect::<Vec<_>>();
+    let next = cursor.saturating_add(nodes.len());
+    let skeleton = service.skeleton().map_err(ApiError::from_domain)?;
+    let fingerprint = skeleton.session_fingerprint();
+    Ok(Json(json!({
+        "source": "snapshot",
+        "epoch": skeleton.epoch(),
+        "session_vector": fingerprint.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
+        "items": nodes,
+        "total": total,
+        "truncated": next < total,
+        "next_cursor": (next < total).then_some(next),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModelRecordsReq {
+    #[serde(flatten)]
+    pub identity: ProjectReq,
+    pub generation_root: String,
+    pub limit: Option<usize>,
+    pub cursor: Option<usize>,
+}
+
+/// POST /api/v1/model/records — page the process-local model projection.
+pub async fn model_records(
+    State(state): State<AppState>,
+    Json(request): Json<ModelRecordsReq>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    resolve_identity(&state, &request.identity)?;
+    let root = crate::fast_model::e3d_model_service::parse_refno(&request.generation_root)
+        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    let limit = request.limit.unwrap_or(1000).clamp(1, 5000);
+    let cursor = request.cursor.unwrap_or(0);
+    // 取数源按**这根所属的库**选（plan 2026-09-06 §8 R3/R4），不再按进程介质：库在 rocksdb 里
+    // 准备好了就读库（rocksdb 为准），没准备好就读进程内投影。一次请求只有一根、只有一个库，
+    // 所以一个响应天然只有一个源。解不出所属库（不在 MDB）按 400 报。
+    let dbnum = crate::fast_model::e3d_model_service::E3dModelService::dbnum_for_roots(
+        std::slice::from_ref(&request.generation_root),
+    )
+    .await
+    .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    let route = crate::data_interface::model_read_route::route_for(dbnum)
+        .await
+        .map_err(ApiError::from_domain)?;
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let scope = crate::fast_model::model_memory_store::ProjectionScope::Current;
+    if !route.is_database() && store.receipt(scope, root).is_none() {
+        // 投影里没有这根（还没 ensure 过）：空数组会被读成「这一根本来就没有几何」，
+        // 那是另一句话。409 让客户端先去 `/model/ensure`——它今天本来就是这个顺序。
+        return Err(ApiError::conflict(format!(
+            "not_generated: generation root {} of dbnum {dbnum} is not in the process projection yet \
+             (model_source = memory, reason = {}); call /api/v1/model/ensure first",
+            request.generation_root,
+            route
+                .reason
+                .map(|reason| reason.as_str())
+                .unwrap_or("unknown")
+        )));
+    }
+    let records = store.records_of_root(scope, root);
+    let memory_items = records
+        .into_iter()
+        .map(|record| {
+            // Ordinary canonical primitives keep their placement separate from
+            // the element world transform. Tubes already fold it into world.
+            let local_transform = match (&record.shape, &record.tube) {
+                (
+                    crate::fast_model::model_memory_store::ProjectedShape::Canonical {
+                        local_transform,
+                        ..
+                    },
+                    None,
+                ) => *local_transform,
+                _ => glam::DMat4::IDENTITY,
+            };
+            let (local_scale, local_rotation, local_translation) =
+                local_transform.to_scale_rotation_translation();
+            let (scale, rotation, translation) =
+                record.world_transform.to_scale_rotation_translation();
+            let world_trans = bevy_transform::components::Transform {
+                translation: glam::Vec3::new(
+                    translation.x as f32,
+                    translation.y as f32,
+                    translation.z as f32,
+                ),
+                rotation: glam::Quat::from_xyzw(
+                    rotation.x as f32,
+                    rotation.y as f32,
+                    rotation.z as f32,
+                    rotation.w as f32,
+                ),
+                scale: glam::Vec3::new(scale.x as f32, scale.y as f32, scale.z as f32),
+            };
+            let source = RefnoEnum::from(RefU64::from_two_nums(
+                record.source_refno.word0,
+                record.source_refno.word1,
+            ));
+            let owner = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
+            aios_core::GeomInstQuery {
+                refno: source,
+                old_refno: None,
+                owner,
+                world_aabb: parry3d::bounding_volume::Aabb::new(
+                    parry3d::math::Point::new(
+                        record.world_bounds[0][0],
+                        record.world_bounds[0][1],
+                        record.world_bounds[0][2],
+                    ),
+                    parry3d::math::Point::new(
+                        record.world_bounds[1][0],
+                        record.world_bounds[1][1],
+                        record.world_bounds[1][2],
+                    ),
+                ),
+                world_trans,
+                insts: vec![aios_core::ModelHashInst {
+                    geo_hash: record.mesh_id,
+                    transform: bevy_transform::components::Transform {
+                        translation: local_translation.as_vec3(),
+                        rotation: local_rotation.as_quat(),
+                        scale: local_scale.as_vec3(),
+                    },
+                    is_tubi: record.tube.is_some(),
+                    is_invalid_tubi: record.tube.as_ref().is_some_and(|tube| tube.invalid),
+                }],
+                has_neg: false,
+                generic: record.noun,
+                pts: None,
+                date: None,
+            }
+        })
+        .collect::<Vec<_>>();
+    let records = if route.is_database() {
+        let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
+        crate::fast_model::model_record_reader::records_of_root(&aios_core::SUL_DB, refno)
+            .await
+            .map_err(ApiError::from_domain)?
+    } else {
+        memory_items
+    };
+    let source = route.source.records_source_label();
+    let total = records.len();
+    let items = records
+        .into_iter()
+        .skip(cursor)
+        .take(limit)
+        .collect::<Vec<_>>();
+    let next = cursor.saturating_add(items.len());
+    let snapshot =
+        crate::data_interface::mdb_memory_store::get(&state.identity.project, &state.identity.mdb);
+    let session_vector = snapshot
+        .as_ref()
+        .map(|snapshot| snapshot.session_fingerprint())
+        .unwrap_or_default();
+    Ok(Json(json!({
+        "source": source,
+        "dbnum": dbnum,
+        "model_source": route.source.as_str(),
+        "model_source_reason": route.reason.map(|reason| reason.as_str()),
+        "durable": route.is_database(),
+        "generation_root": request.generation_root,
+        "snapshot_epoch": snapshot.as_ref().map(|snapshot| snapshot.epoch()).unwrap_or_default(),
+        "session_vector": session_vector.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
+        "items": items,
+        "total": total,
+        "truncated": next < total,
+        "next_cursor": (next < total).then_some(next),
+    })))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ref0s` 按行上的 `dbnum` 取、升序原样写；没有 `dbnum` 的行不碰。
+    #[test]
+    fn dbnum_rows_carry_their_ref0s_from_the_skeleton() {
+        let mut rows = vec![
+            json!({ "dbnum": 7997, "db_type": "DESI" }),
+            json!({ "dbnum": 8000, "db_type": "DESI" }),
+            json!({ "note": "no dbnum here" }),
+        ];
+        annotate_ref0s(&mut rows, |dbnum| match dbnum {
+            7997 => vec![24381, 24383],
+            8000 => vec![24384],
+            _ => Vec::new(),
+        });
+        assert_eq!(rows[0]["ref0s"], json!([24381, 24383]));
+        assert_eq!(rows[1]["ref0s"], json!([24384]));
+        assert!(rows[2].get("ref0s").is_none(), "没有 dbnum 的行不该被写");
+    }
+
+    /// `/dbnums` 每行的 `model_source` 只由行上的 `applied_sesno` 与「初始化 run 在不在飞」决定
+    /// （plan 2026-09-06 §8 R1）；没有 `dbnum` 的行不碰。
+    #[test]
+    fn dbnum_rows_carry_their_model_source_from_the_single_predicate() {
+        let mut rows = vec![
+            json!({ "dbnum": 7997, "applied_sesno": 264 }),
+            json!({ "dbnum": 8000, "applied_sesno": 285 }),
+            json!({ "dbnum": 7999, "applied_sesno": 0 }),
+            json!({ "note": "no dbnum here" }),
+        ];
+        annotate_model_source(&mut rows, crate::options::DataFace::Ingest, |dbnum| {
+            dbnum == 8000
+        });
+        assert_eq!(rows[0]["model_source"], "database");
+        assert!(rows[0]["model_source_reason"].is_null());
+        assert_eq!(rows[1]["model_source"], "memory");
+        assert_eq!(rows[1]["model_source_reason"], "initialization_publishing");
+        assert_eq!(rows[2]["model_source"], "memory");
+        assert_eq!(
+            rows[2]["model_source_reason"],
+            "data_watermark_unestablished"
+        );
+        assert!(
+            rows[3].get("model_source").is_none(),
+            "没有 dbnum 的行不该被写"
+        );
+
+        let mut rows = vec![json!({ "dbnum": 7997, "applied_sesno": 264 })];
+        annotate_model_source(&mut rows, crate::options::DataFace::ReadThrough, |_| false);
+        assert_eq!(rows[0]["model_source"], "memory");
+        assert_eq!(rows[0]["model_source_reason"], "read-through");
+    }
+
+    /// 读侧路由的护栏（plan 2026-09-06 §8 P6-5）：`/model/records` 与 `/model/ensure` 的取数源
+    /// 由 `model_read_route` 的谓词决定，handler 体内不许再按进程介质（`store_mode().is_durable()`）
+    /// 分叉——那正是「库正在初始化时 plant-ui 要么等要么报错」的来源。
+    #[test]
+    fn model_read_handlers_route_by_dbnum_not_by_store_medium() {
+        let source = include_str!("handlers.rs");
+        for (name, start, end) in [
+            (
+                "model_records",
+                "pub async fn model_records(",
+                "mod tests {",
+            ),
+            (
+                "model_ensure",
+                "pub async fn model_ensure(",
+                "async fn append_publication_state(",
+            ),
+        ] {
+            let body = source
+                .split_once(start)
+                .unwrap_or_else(|| panic!("{name} handler must exist"))
+                .1
+                .split_once(end)
+                .unwrap_or_else(|| panic!("{name} handler end marker"))
+                .0;
+            assert!(
+                !body.contains("store_mode().is_durable()"),
+                "{name} 不得按进程介质选源，只认 model_read_route: {body}"
+            );
+            assert!(
+                body.contains("model_read_route::route_for("),
+                "{name} 必须经 model_read_route::route_for 取路由"
+            );
+        }
+    }
+
+    /// `/api/v1/meshes/{file}` 的路径门：只认 `{hash}.glb`，hash 只放行内容键字符集。
+    /// 这里钉的是 handler 里那两道判断的源码形状——真跑 handler 要一份 `AppState`。
+    #[test]
+    fn mesh_glb_handler_gates_suffix_and_hash_before_touching_the_disk() {
+        let body = include_str!("handlers.rs")
+            .split_once("pub async fn mesh_glb(")
+            .expect("mesh_glb handler must exist")
+            .1
+            .split_once("tokio::fs::read(")
+            .expect("handler reads the file after the gates")
+            .0;
+        assert!(
+            body.contains("strip_suffix(\".glb\")"),
+            "必须先剥 .glb 后缀: {body}"
+        );
+        assert!(
+            body.contains("mesh_glb::is_valid_geo_hash("),
+            "必须过 geo_hash 字符集门再拼路径: {body}"
+        );
+        assert!(
+            body.contains("get_meshes_path()"),
+            "网格目录必须与生成侧同一份配置（meshes_path）: {body}"
+        );
+    }
+
+    #[test]
+    fn cold_read_through_dbnums_include_mdb_design_files_without_duplicate_rows() {
+        let mut rows = vec![json!({ "dbnum": 7999, "db_type": "DESI" })];
+        let databases = vec![
+            crate::data_interface::mdb_memory_store::LoadedDb {
+                dbnum: 7997,
+                db_type: "DESI".into(),
+                file: std::path::PathBuf::from("ams7997_0001"),
+                sesno: 264,
+                elements: 10,
+            },
+            crate::data_interface::mdb_memory_store::LoadedDb {
+                dbnum: 7999,
+                db_type: "ISOD".into(),
+                file: std::path::PathBuf::from("ams7999_0001"),
+                sesno: 46,
+                elements: 20,
+            },
+            crate::data_interface::mdb_memory_store::LoadedDb {
+                dbnum: 8001,
+                db_type: "ISOD".into(),
+                file: std::path::PathBuf::from("ams8001_0001"),
+                sesno: 8,
+                elements: 5,
+            },
+        ];
+
+        append_cold_read_through_dbnums(&mut rows, &databases);
+
+        assert_eq!(rows.len(), 3);
+        assert_eq!(rows[0]["dbnum"], 7997);
+        assert_eq!(rows[0]["db_type"], "DESI");
+        assert_eq!(rows[0]["file_latest_sesno"], 264);
+        assert_eq!(rows[0]["applied_sesno"], 0);
+        assert_eq!(rows[1]["dbnum"], 7999);
+        assert_eq!(rows[1]["db_type"], "DESI");
+        assert_eq!(rows[2]["dbnum"], 8001);
+        assert_eq!(rows[2]["db_type"], "ISOD");
+    }
 
     #[tokio::test]
     async fn timeout_does_not_cancel_background_work() {
@@ -1457,6 +2682,11 @@ mod tests {
             status: "failed".into(),
             attempts: crate::data_interface::model_update_pending::MAX_ATTEMPTS,
             last_error: Some("boom".into()),
+            file_rounds: vec!["file_round:7997:42".into()],
+            required_publish_version: 9,
+            published_version: 8,
+            computed_publish_version: 7,
+            stale: true,
             dead: true,
         }];
 
@@ -1466,6 +2696,10 @@ mod tests {
         assert_eq!(payload["units"].as_array().unwrap().len(), 1);
         assert_eq!(payload["room_units"][0]["action"], "room_recalc_element");
         assert_eq!(payload["room_units"][0]["target_refno"], "24381/100677");
+        assert_eq!(payload["room_units"][0]["required_publish_version"], 9);
+        assert_eq!(payload["room_units"][0]["published_version"], 8);
+        assert_eq!(payload["room_units"][0]["computed_publish_version"], 7);
+        assert_eq!(payload["room_units"][0]["stale"], true);
     }
 
     /// 面板内嵌进二进制之后，两件事都得钉住。
@@ -1478,7 +2712,13 @@ mod tests {
     /// 反应，且一点报错都没有。
     #[test]
     fn the_embedded_panel_is_real_and_a_disk_copy_still_wins() {
-        for marker in ["<title>AIOS 数据库", "id=\"verdict\"", "/api/v1/queue"] {
+        for marker in [
+            "<title>AIOS 数据库",
+            "id=\"dbnum-entry\"",
+            "id=\"lanes\"",
+            "/api/v1/queue",
+            "FOCUS_DBNUM",
+        ] {
             assert!(
                 OPS_PANEL_EMBEDDED.contains(marker),
                 "内嵌的不是运维面板，缺 {marker}"
@@ -1539,9 +2779,45 @@ mod tests {
             "last_disconnect_at",
             "last_disconnect_error",
             "\"endpoint\"",
+            // 介质三值与「活不活得过重启」。`endpoint` 只说地址，说不出那台库是
+            // 本进程自己拉起来的、还是别人的、会不会随进程消失。
+            "\"medium\"",
+            "\"durable\"",
         ] {
             assert!(body.contains(key), "health 必须暴露 {key}: {body}");
         }
+    }
+
+    /// **`spawned-mem` 的 `endpoint` 必须是真地址。**
+    ///
+    /// 那台库是本进程拉起来的，但端口是真的、别人连得上；报 `embedded:mem` 会让
+    /// `aios_db.full_init` 的跨部署互踩探测**放行两个抢同一个端口的实例**。
+    /// 只有 `embedded-mem`（库在进程里、外面根本没被连过）才回那个占位串。
+    /// 判据钉在 `has_endpoint()` 上，不许退回按 `in_memory_db` 这个两态开关分叉。
+    #[test]
+    fn only_the_embedded_store_reports_a_placeholder_endpoint() {
+        use crate::options::StoreMode;
+
+        assert!(StoreMode::SpawnedMem.has_endpoint());
+        assert!(StoreMode::External.has_endpoint());
+        assert!(!StoreMode::EmbeddedMem.has_endpoint());
+
+        let source = include_str!("handlers.rs");
+        let body = source
+            .split_once("pub async fn health(")
+            .expect("health handler must exist")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health 之后是 update_preview")
+            .0;
+        assert!(
+            body.contains("mode.has_endpoint()"),
+            "endpoint 的分叉判据必须是 has_endpoint()，不许按 in_memory_db 那个两态开关走: {body}"
+        );
+        assert!(
+            !body.contains("crate::options::in_memory_db()"),
+            "health 不许再直接读退役的两态开关: {body}"
+        );
     }
 
     /// /health 的读库分项必须**一个不落**地套在 [`within_health_budget`] 里。
@@ -1833,7 +3109,7 @@ mod tests {
             .find(".enqueue_manual_update(")
             .expect("manual execute must scan/enqueue first");
         let arm = body
-            .find(".arm_auto_work()")
+            .rfind(".arm_auto_work()")
             .expect("explicit execute must release durable backlog");
         assert!(
             scan < arm,

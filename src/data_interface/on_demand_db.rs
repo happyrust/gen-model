@@ -48,12 +48,20 @@ impl OnDemandDbSession {
             .with_context(|| format!("open e3d-io session {}", path.display()))?;
         let dbnum = engine.descriptor().db_mark;
         let sesno = engine.session().sesno;
-        let db_type = e3d_attlib::db1_dehash(engine.descriptor().noun)
+        // 库类型取 `+0x20` 的类型字（`DbDescriptor::db_type_hash` → `db_type_name()`），与
+        // `scan_db_header` / `db_file_header` / `reverse_reference` 同一口径。此前这里反哈希的是
+        // `descriptor().noun`——e3d-io 现版里那是 `+0x04` 第 0 页自身的 noun 字，不是库类型：
+        // 真库上每个目录文件都在这里被拒（`noun 0x00000002 is not a database type`），CATA 依赖
+        // 闭包一行也解不出、全部计入 missing 而只出 warning。2026-09-07 由对拍 oracle
+        // `live_ams8000_catalogue_reads_are_covered_by_the_dependency_closure` 抓到。
+        let db_type = engine
+            .descriptor()
+            .db_type_name()
             .filter(|value| !value.trim().is_empty())
             .ok_or_else(|| {
                 anyhow::anyhow!(
-                    "e3d-io descriptor noun 0x{:08x} is not a database type for {}",
-                    engine.descriptor().noun,
+                    "e3d-io descriptor db_type_hash 0x{:08x} is not a database type for {}",
+                    engine.descriptor().db_type_hash,
                     path.display()
                 )
             })?;

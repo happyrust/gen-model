@@ -7,24 +7,26 @@
 //! - **Phase 1**：ref0→dbnum 定位器（就地内存实现，Q2=B），复用 `dbnum_watermark`
 //!   + 文件 `ref0` 扫描（磁盘指纹缓存），不引 sqlite。
 //! - **Phase 2**：`parse_db_refnos`（by-refno 部分解析）+ `CataClosureResolver`
-//!   （refno 级 BFS 引用闭包：全出向 `RefU64` + owner 链 + 容器子树，`db_type` 收口 CATA）
-//!   + `run_cata_closure_pass_for_refnos`（给定生成根→其 CATA 闭包）。
+//!   （refno 级 BFS 引用闭包：全出向 `RefU64` + owner 链 + 容器子树，`db_type` 收口 CATA）。
+//!   它今天的生产调用方是 `cata_dependency`（ADR-064 D5：每批 DESI 写回前按目录链属性播种，
+//!   `precise()` 容器白名单，只收 CATA）。
 //!
-//! Phase 3（`ensure_cata_refnos_parsed` 惰性兜底落 `pe`/`ATT_*`）与生成期接入见计划文档。
+//! Phase 3 的惰性兜底 `ensure_cata_refnos_parsed` 只剩 `staging::preload`（spec 035 P3 待拆）引用，
+//! 落库也走 `cata_dependency`（`element_batch` `Fresh`、`pe.dependency = true`）。**2026-09-07 随
+//! ADR-064 Q2 一并退役、已删除**：`cata_ref_rev` 补偿队列、根子树播种 `collect_design_subtree_outbound` /
+//! `run_cata_closure_pass_for_refnos` / `ensure_cata_parsed_for_roots`、resolve 层 `try_lazy_cata_fallback`、
+//! 依赖缓存 `CataDepCache` / `preload_cata_for_roots`、env 开关 `AIOS_CATA_CLOSURE_MODE`、
+//! 开/关几何冒烟 `geo_smoke_digest`（`bin/cata_smoke`）。目录行进库只有 `cata_dependency` 一个出口。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::RwLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use aios_core::SUL_DB;
-use aios_core::helper::normalize_sql_string;
 use aios_core::{NamedAttrMap, NamedAttrValue, RefU64, RefnoEnum, get_db_option};
-use anyhow::Context;
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
-use surrealdb::{Surreal, engine::any::Any};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::data_interface::dbnum_state::WATERMARK_TABLE;
@@ -33,31 +35,6 @@ use crate::data_interface::on_demand_db::OnDemandDbSession;
 
 /// B+树索引起始标记 / 无效 ref0（需跳过）。
 const INVALID_REF0_SENTINEL: u32 = 0x8000_0001;
-
-/// 引用元素可能早已存在于持久层；CATA 文件版本变化时必须以当前完整行替换旧行。
-/// `INSERT IGNORE` 只能补缺失，保留它会让依赖文件的属性修改永远不可见。
-fn render_content_replacements(rows: &[(String, String)]) -> String {
-    rows.iter()
-        .map(|(id, row)| format!("UPSERT {id} CONTENT {row};"))
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn render_uda_statements(refno: RefU64, current: Option<String>) -> Vec<String> {
-    let mut statements = vec![format!("DELETE {}", refno.to_table_key("ATT_UDA"))];
-    if let Some(row) = current {
-        statements.push(render_content_replacements(&[(
-            refno.to_table_key("ATT_UDA"),
-            row,
-        )]));
-    }
-    statements
-}
-
-fn render_uda_replacement(refno: RefU64, current: Option<String>) -> String {
-    let statements = render_uda_statements(refno, current);
-    wrap_in_transaction(&statements).expect("UDA replacement always contains its scoped delete")
-}
 
 #[inline]
 pub(crate) fn is_valid_ref0(ref0: u32) -> bool {
@@ -123,28 +100,6 @@ fn insert_ref0_affiliation(
             resolved.remove(&ref0);
             conflicts.insert(ref0, BTreeSet::from([existing, dbnum]));
         }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DependencyCacheContext {
-    pub source_dbnum: u32,
-    pub effective_end_sesno: i32,
-}
-
-fn explicit_cache_sesno(
-    context: Option<DependencyCacheContext>,
-    source_dbnum: u32,
-) -> anyhow::Result<Option<i32>> {
-    match context {
-        Some(context) if context.source_dbnum == source_dbnum => {
-            Ok(Some(context.effective_end_sesno))
-        }
-        Some(context) => anyhow::bail!(
-            "CATA dependency cache context source mismatch: expected dbnum={source_dbnum}, got dbnum={}",
-            context.source_dbnum
-        ),
-        None => Ok(None),
     }
 }
 
@@ -245,18 +200,6 @@ pub fn dependency_identity_manifest_snapshot() -> Vec<DependencyIdentityFile> {
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .clone()
-}
-
-fn dependency_manifest_fingerprint() -> String {
-    let entries = dependency_manifest_snapshot();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    for entry in entries {
-        entry.project.hash(&mut hasher);
-        entry.dbnum.hash(&mut hasher);
-        entry.path.hash(&mut hasher);
-        entry.fingerprint.hash(&mut hasher);
-    }
-    format!("{:016x}", hasher.finish())
 }
 
 static LOCATOR_CACHE: Lazy<TokioMutex<HashMap<String, (u64, InMemoryCataLocator)>>> =
@@ -475,7 +418,7 @@ impl InMemoryCataLocator {
         Ok(locator)
     }
 
-    fn merge_cata_files(&mut self, other: Self) {
+    pub(crate) fn merge_cata_files(&mut self, other: Self) {
         let cata_dbnums: HashSet<u32> = other
             .dbnum_files
             .iter()
@@ -752,9 +695,7 @@ fn scan_db_ref0s(path: &Path, project: &str) -> anyhow::Result<Vec<u32>> {
     }
 }
 
-fn scan_db_header(
-    path: &Path,
-) -> Option<crate::data_interface::db_file_header::DbBasicInfo> {
+fn scan_db_header(path: &Path) -> Option<crate::data_interface::db_file_header::DbBasicInfo> {
     // 库类型取 `+0x20` 的类型字（`DbDescriptor::db_type_hash`），与另外三条读头路径
     // （自动重扫 / 手动候选扫描 / CATA 候选枚举）同一口径。此前这里反哈希的是
     // `descriptor().noun`——e3d-io 现版里那是 `+0x04` 第 0 页自身的 noun 字，不是库类型。
@@ -1045,14 +986,27 @@ impl Default for CataClosureConfig {
 
 impl CataClosureConfig {
     /// 精确模式（refno 级按需 / 惰性小闭包）：children 仅对几何与点集容器展开
-    /// （GMSE/GMSS/NGMS/PTSE/PSTR/SPRO/DTSE），不展开 SPEC/SELE 等规格容器。
+    /// （GMSE/GMSS/NGMS/PTSE/PTSS/SPRO/DTSE），不展开 SPEC/SELE 等规格容器。
     ///
     /// 挤出 / 回转体的轮廓是三层：`SEXT|NSEX|SREV|NSRE → SLOO → 顶点`。名单停在
     /// 几何集这一层时闭包仍报 `missing=0`，落库的却是没有顶点的空壳几何。
+    ///
+    /// 2026-09-07 对拍 oracle（e3d-model `catalogue_visited`，ams8000 全库）抓到两处漏、一并补进名单：
+    /// - **正体名下的负体**：Core3D `CSG_TreeBuilderCat::getCSGTree` 对每一个有成员的正体都开差集，
+    ///   e3d-model 照做（`collect_owned_negatives` 读正体的 `members()`），所以 SBOX / SCYL / LCYL / SCON /
+    ///   LSNO / LPYR / SCTO / SRTO / SSPH / SSLC / SDSH / SDIS 名下的 NSBO / NLPY / NSRT / NLCY … 都是实读；
+    ///   此前只展开 SEXT / SREV，7002 库里 SBOX 名下 8 只 NSBO、LPYR 名下 3 只 NLPY 就落不进库。
+    /// - **p-line 集**：型材对齐读 `SPRF.PSTR → PTSS → PLIN`（`section.rs`），容器 noun 是 `PTSS`；
+    ///   此前名单里写的是属性名 `PSTR`（没有这个 noun），PTSS 的 8 只 PLIN 一个都没展开。
     pub fn precise() -> Self {
         let container: HashSet<String> = [
-            "GMSE", "GMSS", "NGMS", "PTSE", "PSTR", "SPRO", "DTSE", "SEXT", "NSEX", "SREV", "NSRE",
-            "SLOO",
+            // 几何集 / 点集 / p-line 集 / 数据集 / 二维轮廓
+            "GMSE", "GMSS", "NGMS", "PTSE", "PTSS", "SPRO", "DTSE",
+            // 轮廓类正体与负体：SLOO 是它们的剖面成员
+            "SEXT", "NSEX", "SREV", "NSRE", "SLOO",
+            // 其余正体：名下的成员就是它的刀（负体）
+            "SBOX", "SCYL", "LCYL", "SCON", "LSNO", "LPYR", "SCTO", "SRTO", "SSPH", "SSLC", "SDSH",
+            "SDIS",
         ]
         .iter()
         .map(|s| s.to_string())
@@ -1347,180 +1301,17 @@ impl<'a, L: CataDbLocator> CataClosureResolver<'a, L> {
     }
 }
 
-/// 设计侧子树出向引用收集（按需播种）。
-///
-/// 给定设计元素根 refno（如 BRAN / PIPE / ZONE），在其所属 DESI 库内沿 `children`
-/// 做子树 BFS（部分解析，**不整库解析**），收集子树内全部元素的出向 `RefU64` 作为
-/// 后续 CATA 闭包种子。返回 `(种子集合, 子树元素数)`。
-pub async fn collect_design_subtree_outbound<L: CataDbLocator>(
-    locator: &L,
-    roots: &[RefU64],
-) -> anyhow::Result<(Vec<RefU64>, usize)> {
-    let mut sessions: HashMap<u32, OnDemandDbSession> = HashMap::new();
-    let mut visited: HashSet<RefU64> = HashSet::new();
-    let mut seeds: HashSet<RefU64> = HashSet::new();
-    let mut frontier: Vec<RefU64> = roots
-        .iter()
-        .copied()
-        .filter(|r| is_valid_ref0(r.get_0()))
-        .collect();
-    let mut parsed_count = 0usize;
-
-    while !frontier.is_empty() {
-        let mut by_db: HashMap<u32, Vec<RefU64>> = HashMap::new();
-        for r in frontier.drain(..) {
-            if !visited.insert(r) {
-                continue;
-            }
-            match locator.resolve_ref0(r.get_0())? {
-                Some(dbnum) => by_db.entry(dbnum).or_default().push(r),
-                None => {
-                    log::warn!(
-                        "[cata_closure] 设计子树 BFS：ref0 {} 无 dbnum 映射，跳过",
-                        r.get_0()
-                    );
-                }
-            }
-        }
-        for (dbnum, refs) in by_db {
-            if !sessions.contains_key(&dbnum) {
-                let Some((project, path)) = locator.file_of(dbnum) else {
-                    log::warn!(
-                        "[cata_closure] 设计子树 BFS：dbnum {} 无文件映射，跳过",
-                        dbnum
-                    );
-                    continue;
-                };
-                match open_db_session(&project, &path) {
-                    Ok(s) => {
-                        sessions.insert(dbnum, s);
-                    }
-                    Err(e) => {
-                        log::warn!("[cata_closure] 打开设计库失败 dbnum={}: {}", dbnum, e);
-                        continue;
-                    }
-                }
-            }
-            let session = sessions.get_mut(&dbnum).expect("session 已插入");
-            let parsed = parse_refnos_with_session(session, &refs, None).await?;
-            parsed_count += parsed.len();
-            for ele in parsed.values() {
-                seeds.extend(ele.outbound.iter().copied());
-                frontier.extend(ele.children.iter().copied());
-            }
-        }
-    }
-    Ok((seeds.into_iter().collect(), parsed_count))
-}
-
-/// Collect catalogue references from the already-parsed design subtree.
-///
-/// This is the runtime authority: DESI rows and their typed attribute tables are
-/// already present in SurrealDB, and preserve references such as SPRE/HSTU/LSTU
-/// even when the partial binary parser cannot decode a design element.
-async fn collect_database_subtree_outbound(roots: &[RefU64]) -> anyhow::Result<Vec<RefU64>> {
-    let db = crate::data_interface::staging::active_data_db();
-    collect_database_subtree_outbound_on(&db, roots).await
-}
-
-async fn collect_database_subtree_outbound_on(
-    db: &Surreal<Any>,
-    roots: &[RefU64],
-) -> anyhow::Result<Vec<RefU64>> {
-    let mut visited = HashSet::new();
-    let mut scope = Vec::new();
-    let mut frontier: Vec<RefnoEnum> = roots.iter().copied().map(RefnoEnum::from).collect();
-    while let Some(refno) = frontier.pop() {
-        if !visited.insert(refno) {
-            continue;
-        }
-        scope.push(refno);
-        let sql = format!(
-            "SELECT VALUE in FROM {}<-pe_owner WHERE record::exists(in.id) AND !in.deleted;",
-            refno.to_pe_key()
-        );
-        let mut response = db.query(sql).await?.check()?;
-        frontier.extend(response.take::<Vec<RefnoEnum>>(0)?);
-    }
-
-    let mut seeds = HashSet::new();
-    for chunk in scope.chunks(200) {
-        let keys = chunk
-            .iter()
-            .map(RefnoEnum::to_pe_key)
-            .collect::<Vec<_>>()
-            .join(",");
-        // `refno` 在真实 schema 里是指向类型化属性表的**记录链接**（如
-        // `BEND:24381_100818`），`refno.*` 取回整行对象；引用属性（SPRE/LSTU/
-        // ISPE/…）是其中的记录值字段。旧写法 `refno.*[WHERE …]` 把数组过滤
-        // 直接套在对象上，对链接形状静默返回空——按需闭包在库侧一颗种子都
-        // 收不到（2026-08-13 testbed 首次暴露；单测夹具当时是内联对象，
-        // 掩盖了形状差异）。先 `object::values` 展开成值数组再过滤。
-        let sql = format!(
-            "SELECT VALUE object::values(refno.* ?? {{}})[WHERE type::is::record($this)] \
-             FROM [{keys}];"
-        );
-        let mut response = db.query(sql).await?.check()?;
-        let refs: Vec<Vec<RefnoEnum>> = response.take(0)?;
-        seeds.extend(refs.into_iter().flatten().map(|r| r.refno()));
-    }
-    Ok(seeds.into_iter().collect())
-}
-
-/// refno 级按需闭包入口：以给定生成根（如单个 BRAN）的子树出向引用为种子，跑 CATA 闭包。
-///
-/// 返回闭包 manifest（各 CATA dbnum 需解析的 refno 集）。Phase 3 据此 `ensure_cata_refnos_parsed`
-/// 落库。种子根自身所属 dbnum 会被自动排除（不重解析根 DESI）。
-pub async fn run_cata_closure_pass_for_refnos<L: CataDbLocator>(
-    locator: &L,
-    seed_roots: &[RefU64],
-    cfg: CataClosureConfig,
-) -> anyhow::Result<CataClosureManifest> {
-    let (seeds, subtree_count) = collect_design_subtree_outbound(locator, seed_roots).await?;
-    log::info!(
-        "[cata_closure] 设计子树元素 {} 个 → 收集种子 {} 个",
-        subtree_count,
-        seeds.len()
-    );
-    let seed_count = seeds.len();
-    let mut exclude_dbnums = HashSet::new();
-    for root in seed_roots {
-        if let Some(dbnum) = locator.resolve_ref0(root.get_0())? {
-            exclude_dbnums.insert(dbnum);
-        }
-    }
-    let mut resolver = CataClosureResolver::new(locator, cfg.excluding_dbnums(exclude_dbnums));
-    resolver.seed(seeds);
-    let mut manifest = resolver.resolve().await?;
-    manifest.seed_count = seed_count;
-    log::info!(
-        "[cata_closure] refno 级闭包完成: {} 个闭包库 / visited={} / missing={}",
-        manifest.by_dbnum.len(),
-        manifest.visited_count,
-        manifest.missing
-    );
-    Ok(manifest)
-}
-
 // ─────────────────────────────────────────────────────────────────────────────
 // Phase 3：运行期惰性兜底（命中未解析 CATA refno → 小闭包 → 落 pe/ATT_* → 重试）
 // ─────────────────────────────────────────────────────────────────────────────
-
-/// CATA replacement 的元素级分批上限。
-///
-/// 一份 UDA replacement 最多会为一个元素产生 `DELETE + UPSERT` 两条逻辑写，
-/// 因此这里必须显著低于提交器的 250 行硬门。旧值 500 会把 BRAN 复制产生的
-/// 依赖闭包拼成 500 行、135 KiB 的单条 journal，重放计划只能确定性拒绝。
-/// 100 个元素在最坏 UDA 形态下约 200 行，并给 64 KiB 字节门保留余量。
-const INSERT_CHUNK: usize = 100;
 
 /// 替换一个 owner 完整成员块的两条语句：先按复合 id 的 owner 前缀范围删掉旧块，
 /// 再整块重插。
 ///
 /// 前缀范围直走 record range，不经过 `WHERE out = owner` 的全表扫。两条语句必须落在
-/// 同一个事务里才收敛（换槽、缩短、失败重放都靠这一点），但**哪个事务**由调用方定：
-/// 单个 owner 走 [`render_pe_owner_replace`]，成批走 [`OwnerReplaceBatches`]。
-/// 空 children 也必须发删除，才能清掉成员表缩短到 0 后留下的幽灵边。
+/// 同一个事务里才收敛（换槽、缩短、失败重放都靠这一点）。生产落库已改走 `element_batch`
+/// （同一条「owner 前缀范围删 + 整块重插」纪律）；这里保留给 `fork_surreal_compat` 双引擎对拍
+/// 与本模块的语义测试当标准形态。空 children 也必须发删除，才能清掉成员表缩短到 0 后留下的幽灵边。
 ///
 /// 重复 child 在这里是硬错：解析路径已由 [`dedupe_members`] 收敛过，能走到这里说明
 /// 调用方绕开了那道收敛，宁可这一个 owner 带着 owner/child 报错，也不要放一段必然
@@ -1559,131 +1350,6 @@ pub(crate) fn render_pe_owner_replace(op: &str, children: &[RefU64]) -> anyhow::
     Ok(wrap_in_transaction(&statements).expect("owner 替换至少有一条删除语句"))
 }
 
-/// 把连续若干个 owner 的替换攒进同一个事务再发。
-///
-/// 一个 owner 一次 `execute_model_write` 是错的量级：CATA 闭包解析出来的绝大多数元素
-/// 是**叶子**，它们的替换只有一条删空范围的语句，却各自占一次往返。在暂存窗口里代价
-/// 还要翻倍——[`StagedExecutor::replay_journal_to`] 对每条显式事务单独成批，**并且会
-/// 先把攒着的普通语句批 flush 掉**，于是 N 个 owner 既是 N 条 journal、N 次写回事务，
-/// 又把周围本该按 `TX_CHUNK` 攒够 500 条的批量切成 N 段。
-///
-/// 合并只让提交粒度变粗，不削弱原子性：每个 owner 的删与插仍在同一事务内相邻，整批
-/// 要么全落要么全不落，重放照旧收敛。两个阈值都取 [`INSERT_CHUNK`]——按 child 行数封
-/// 顶事务载荷，按 owner 个数封顶叶子扎堆时的语句条数。
-#[derive(Default)]
-struct OwnerReplaceBatches {
-    batches: Vec<String>,
-    pending: Vec<String>,
-    pending_owners: usize,
-    pending_rows: usize,
-}
-
-/// UDA 与 owner 一样是「先清旧集合、再写当前集合」的 replacement，但各元素之间
-/// 没有依赖；将最多 [`INSERT_CHUNK`] 个元素合并到一个事务，避免 staging 写回把数百个
-/// 显式事务逐条往返。每个元素的 DELETE 与可选 UPSERT 仍相邻，整批失败可幂等重放。
-#[derive(Default)]
-struct UdaReplacementBatches {
-    batches: Vec<String>,
-    pending: Vec<String>,
-    pending_elements: usize,
-}
-
-impl UdaReplacementBatches {
-    fn push(&mut self, refno: RefU64, current: Option<String>) {
-        self.pending.extend(render_uda_statements(refno, current));
-        self.pending_elements += 1;
-        if self.pending_elements >= INSERT_CHUNK {
-            self.flush();
-        }
-    }
-
-    fn flush(&mut self) {
-        if let Some(sql) = wrap_in_transaction(&self.pending) {
-            self.batches.push(sql);
-        }
-        self.pending.clear();
-        self.pending_elements = 0;
-    }
-
-    fn finish(mut self) -> Vec<String> {
-        self.flush();
-        self.batches
-    }
-}
-
-impl OwnerReplaceBatches {
-    fn push(&mut self, op: &str, children: &[RefU64]) -> anyhow::Result<()> {
-        if children.len() > INSERT_CHUNK {
-            self.flush();
-            let mut seen = HashSet::with_capacity(children.len());
-            for child in children {
-                if !seen.insert(child) {
-                    anyhow::bail!(
-                        "owner {} 的成员块重复列出 child {}，与 unique_pe_owner 冲突",
-                        op,
-                        child.to_pe_key()
-                    );
-                }
-            }
-            for (chunk_index, chunk) in children.chunks(INSERT_CHUNK).enumerate() {
-                let start = chunk_index * INSERT_CHUNK;
-                let rows = chunk
-                    .iter()
-                    .enumerate()
-                    .map(|(offset, child)| {
-                        format!(
-                            "{{ id: pe_owner:[{op}, {}], in: {}, out: {op} }}",
-                            start + offset,
-                            child.to_pe_key()
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                let mut statements = Vec::with_capacity(2);
-                if chunk_index == 0 {
-                    statements.push(format!("DELETE pe_owner:[{op}, NONE]..=[{op}, ..]"));
-                }
-                statements.push(format!(
-                    "INSERT RELATION INTO pe_owner [{}]",
-                    rows.join(",")
-                ));
-                self.batches.push(
-                    wrap_in_transaction(&statements)
-                        .expect("large owner replacement chunk is non-empty"),
-                );
-            }
-            return Ok(());
-        }
-        if self.pending_owners > 0
-            && (self.pending_owners + 1 > INSERT_CHUNK
-                || self.pending_rows + children.len() > INSERT_CHUNK)
-        {
-            self.flush();
-        }
-        self.pending
-            .extend(render_pe_owner_statements(op, children)?);
-        self.pending_owners += 1;
-        self.pending_rows += children.len();
-        if self.pending_owners >= INSERT_CHUNK || self.pending_rows >= INSERT_CHUNK {
-            self.flush();
-        }
-        Ok(())
-    }
-
-    fn flush(&mut self) {
-        if let Some(sql) = wrap_in_transaction(&self.pending) {
-            self.batches.push(sql);
-        }
-        self.pending.clear();
-        self.pending_owners = 0;
-        self.pending_rows = 0;
-    }
-
-    fn finish(mut self) -> Vec<String> {
-        self.flush();
-        self.batches
-    }
-}
-
 /// 惰性兜底全局互斥：并发 miss 串行化，避免重复解析同一批元素（落库 INSERT IGNORE 幂等）。
 static LAZY_CATA_FALLBACK_LOCK: Lazy<TokioMutex<()>> = Lazy::new(|| TokioMutex::new(()));
 
@@ -1694,43 +1360,19 @@ pub struct LazyFallbackOutcome {
     pub missing: usize,
 }
 
-fn require_all_roots_resolved(required: bool, unresolved: &[RefU64]) -> anyhow::Result<()> {
-    if required && !unresolved.is_empty() {
-        anyhow::bail!(
-            "Required CATA dependency roots unresolved: count={} sample={:?}",
-            unresolved.len(),
-            unresolved.iter().take(8).collect::<Vec<_>>()
-        );
-    }
-    Ok(())
-}
-
-/// 是否启用按需解析。**默认 On**（按需解析 CATA 为默认行为）；env `AIOS_CATA_CLOSURE_MODE`
-/// 可双向覆盖：`manifest`/`on`/`1`/`true`/`yes` 强制开，`off`/`0`/`false`/`no` 强制关，
-/// 未设置或取值无法识别时取默认(On)。显式关值供冒烟对照(整库 vs 按需)与临时回退使用。
-pub fn cata_closure_enabled() -> bool {
-    match std::env::var("AIOS_CATA_CLOSURE_MODE") {
-        Ok(v) => {
-            let v = v.trim();
-            if v.eq_ignore_ascii_case("off")
-                || v.eq_ignore_ascii_case("false")
-                || v.eq_ignore_ascii_case("no")
-                || v == "0"
-            {
-                false
-            } else {
-                // on / manifest / 1 / true / yes / 其它无法识别值 → 默认 On
-                true
-            }
-        }
-        // 未设置 → 默认 On
-        Err(_) => true,
-    }
-}
-
 /// 运行期惰性兜底：对未解析的 CATA refno 跑**小闭包**并即时落库
-/// （`pe` + `ATT_{noun}` + `ATT_UDA` + `pe_owner`，按元素完整替换且可幂等重放），
-/// 使随后 `get_named_attmap` 透明命中。
+/// （`pe` + `<NOUN>` + `ATT_UDA` + `pe_owner`），使随后 `get_named_attmap` 透明命中。
+///
+/// **落库走 `cata_dependency` 那一条路**（ADR-064 Q2，2026-09-07）：同一个闭包配置（`precise()`
+/// 容器白名单、db_type 只收 CATA）、同一个渲染器（`element_batch` `Fresh`，`pe.dependency = true`）、
+/// 同一份目录版本前移刷新（D7：先 `Replace` 再 `Fresh`）与 `cata_dependency_state`。此前这里
+/// 逐元素 `UPSERT … CONTENT`：对拍 oracle 修好 `on_demand_db` 的库类型字之后，这条路在真库上第一次
+/// 真的写进了行——`CONTENT` 会把 P4 落的 `dependency = true` 整行抹掉（P5 前移刷新与 `/dbnums`
+/// 从此认不出这些行），`precise()` 原样跑还会把回指到别的 DESI 库的元素一并写进去。
+///
+/// 同日 `cata_ref_rev` 补偿队列、resolve 层 `try_lazy_cata_fallback`、根子树预解析
+/// `ensure_cata_parsed_for_roots` / `preload_cata_for_roots` 与依赖缓存 `CataDepCache` 一并退役，
+/// 生产路径上没有人再走到这里；留下它只因 `staging::preload`（spec 035 P3 待拆）还引用。
 ///
 /// 调用方约定：命中「pe 缺失」再调用（如 `get_named_attmap` 失败路径），成功后重试原查询。
 pub async fn ensure_cata_refnos_parsed(
@@ -1745,498 +1387,44 @@ pub async fn ensure_cata_refnos_parsed(
     // 1. 定位器（内存，复用 dbnum_watermark + ref0 缓存）。
     let locator = InMemoryCataLocator::build_for_project(project).await?;
 
-    // 2. 小闭包（保留属性表；precise 防 SPEC 子树发散）。
-    let mut resolver =
-        CataClosureResolver::new(&locator, CataClosureConfig::precise()).with_retain_attmaps(true);
-    resolver.seed(seeds.iter().copied());
-    let delta = resolver.resolve().await?;
-    let retained = resolver.take_attmaps();
-
-    // 3. 落库：pe + ATT_{noun} 使用 CONTENT replacement；ATT_UDA 与 pe_owner
-    // 都先清当前元素/owner 的旧集合再完整重写。全部语句进入同一 staging journal。
-    let mut parsed = 0usize;
-    for (dbnum, refs) in &delta.by_dbnum {
-        let mut pe_jsons: Vec<(String, String)> = Vec::new();
-        let mut att_by_table: HashMap<String, Vec<(String, String)>> = HashMap::new();
-        let mut uda_replacements = UdaReplacementBatches::default();
-        let mut owner_replaces = OwnerReplaceBatches::default();
-
-        for refno in refs {
-            let Some((att, children)) = retained.get(refno) else {
-                continue;
-            };
-            // pe 行（与 ele_ops::ElementRows 的 pe 行同构）。
-            let pe_data = att.pe(*dbnum as i32);
-            let pe_key = refno.to_pe_key();
-            pe_jsons.push((pe_key.clone(), pe_data.gen_sur_json(Some(pe_key))));
-
-            // ATT_{noun} / ATT_UDA 行。
-            let table = att.get_type_str().to_string();
-            if !table.is_empty() {
-                if let Some(json) = att.gen_sur_json() {
-                    let id = refno.to_table_key(&table);
-                    att_by_table.entry(table).or_default().push((id, json));
-                }
-                let uda = att
-                    .gen_sur_json_uda(&[])
-                    .map(|json| normalize_sql_string(&json));
-                uda_replacements.push(*refno, uda);
-            }
-
-            // pe_owner 关系：一个 owner 是不可拆分的一致性单元，删与插必须相邻同事务。
-            owner_replaces.push(&refno.to_pe_key(), children)?;
-            parsed += 1;
-        }
-
-        // ADR-017 §7：CATA 按需解析产物**随窗口提交**，不再直写持久层——窗口内走
-        // `execute_model_write`（暂存生效 + 进 journal），写回时用确定性 id 完整替换；
-        // 窗口外回落历史持久层直写。载荷全部
-        // 带显式 id（pe 显式传入，ATT_*/ATT_UDA 由 rs-core 渲染函数插入），满足
-        // ReplaySafe；pe_owner 的幂等由「owner 前缀范围删 + 同事务整块重插」保证（见上）。
-        for chunk in pe_jsons.chunks(INSERT_CHUNK) {
-            crate::data_interface::batch_worker::note_dependency_location(
-                "dependency_write",
-                Some(*dbnum),
-                locator
-                    .file_of(*dbnum)
-                    .map(|(_, path)| path.display().to_string()),
-                refs.len() as u64,
-            );
-            let sql = render_content_replacements(chunk);
-            crate::surreal_retry::execute_model_write(&sql, "persist CATA pe").await?;
-            crate::data_interface::batch_worker::note_dependency_progress(
-                "dependency_write",
-                Some(*dbnum),
-                None,
-                refs.len() as u64,
-                parsed as u64,
-                delta.missing as u64,
-            );
-        }
-        for (_table, jsons) in att_by_table {
-            for chunk in jsons.chunks(INSERT_CHUNK) {
-                let sql = render_content_replacements(chunk);
-                crate::surreal_retry::execute_model_write(&sql, "persist CATA attributes").await?;
-            }
-        }
-        for sql in uda_replacements.finish() {
-            crate::surreal_retry::execute_model_write(&sql, "persist CATA UDA").await?;
-        }
-        for sql in owner_replaces.finish() {
-            crate::surreal_retry::execute_model_write(&sql, "replace CATA ownership").await?;
-        }
+    // 2. 小闭包 → 行（与三个写入点同一条闭包路，只收 CATA）。
+    let seeds: BTreeSet<RefU64> = seeds.iter().copied().collect();
+    let rows = super::cata_dependency::resolve_catalogue_rows_with(&locator, &seeds).await?;
+    for (dbnum, elements) in &rows.by_dbnum {
+        crate::data_interface::batch_worker::note_dependency_location(
+            "dependency_write",
+            Some(*dbnum),
+            locator
+                .file_of(*dbnum)
+                .map(|(_, path)| path.display().to_string()),
+            elements.len() as u64,
+        );
     }
 
+    // 3. 落库：目录行只有这一个出口（`Fresh` 命中即零成本；文件前移的先 Replace 刷新）。
+    let report = super::cata_dependency::persist_resolved_rows(project, &rows).await?;
+    crate::data_interface::batch_worker::note_dependency_progress(
+        "dependency_write",
+        None,
+        None,
+        rows.elements() as u64,
+        report.elements as u64,
+        report.missing as u64,
+    );
+
     log::info!(
-        "[cata_closure] 惰性兜底完成: seeds={} parsed={} missing={} rounds={}",
+        "[cata_closure] 惰性兜底完成: seeds={} parsed={} missing={} rounds={} 目录库={} 事务={}",
         seeds.len(),
-        parsed,
-        delta.missing,
-        delta.rounds
+        report.elements,
+        rows.manifest.missing,
+        rows.manifest.rounds,
+        report.dbnums.len(),
+        report.transactions
     );
     Ok(LazyFallbackOutcome {
-        parsed,
-        missing: delta.missing,
+        parsed: report.elements,
+        missing: rows.manifest.missing,
     })
-}
-
-/// 主动预解析（Phase 4）：给定一组生成根，收集其子树出向引用 → 跑 CATA 闭包 → 批量落库。
-///
-/// 与惰性兜底并存：主动保效率（每批根一次），惰性收漏边。受 env 开关门控（默认 On）。
-pub async fn ensure_cata_parsed_for_roots(
-    project: &str,
-    roots: &[RefU64],
-) -> anyhow::Result<LazyFallbackOutcome> {
-    if roots.is_empty() || !cata_closure_enabled() {
-        return Ok(LazyFallbackOutcome::default());
-    }
-    let locator = InMemoryCataLocator::build_for_project(project).await?;
-    let (seeds, subtree_count) = collect_design_subtree_outbound(&locator, roots).await?;
-    log::info!(
-        "[cata_closure] 主动预解析: roots={} 子树元素={} 种子={}",
-        roots.len(),
-        subtree_count,
-        seeds.len()
-    );
-    ensure_cata_refnos_parsed(project, &seeds).await
-}
-
-/// resolve 层调用的惰性兜底入口：受 env 开关门控（默认 On）。
-///
-/// 命中未解析 CATA refno 时调用；返回 `true` 表示已补齐、值得重试原查询。
-pub async fn try_lazy_cata_fallback(cata_refno: RefnoEnum) -> bool {
-    if !cata_closure_enabled() {
-        return false;
-    }
-    let project = get_db_option().project_name.clone();
-    match ensure_cata_refnos_parsed(&project, &[cata_refno.refno()]).await {
-        Ok(outcome) if outcome.parsed > 0 => {
-            log::info!(
-                "[cata_closure] 惰性兜底成功: {} 解析落库 {} 个元素（missing={}），重试原查询",
-                cata_refno,
-                outcome.parsed,
-                outcome.missing
-            );
-            true
-        }
-        Ok(outcome) => {
-            log::warn!(
-                "[cata_closure] 惰性兜底未解析到元素: {}（missing={}）",
-                cata_refno,
-                outcome.missing
-            );
-            false
-        }
-        Err(e) => {
-            log::warn!("[cata_closure] 惰性兜底失败: {}: {}", cata_refno, e);
-            false
-        }
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Phase 5：单根几何冒烟摘要（开/关按需 diff 校验；needs 活库 + 数据环境）
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// 单根几何冒烟报告：对一组设计参考号逐个 `resolve_desi_comp` 算确定性摘要。
-///
-/// 用法：同一批 refno 跑两遍（`AIOS_CATA_CLOSURE_MODE` 关 vs 开），`combined_digest`
-/// 与 `per_refno` 应逐条一致 —— 证明「按需解析 == 整库解析」不漏/不改几何。
-#[derive(Debug, Default, Serialize)]
-pub struct GeoSmokeReport {
-    /// 本次运行按需开关是否开启。
-    pub mode_on: bool,
-    pub total: usize,
-    pub ok: usize,
-    pub err: usize,
-    /// 全部 (refno, digest) 排序后的合并摘要（跨运行可直接比对）。
-    pub combined_digest: u64,
-    /// 每个 refno 的几何摘要（err 记 0），按 refno 排序。
-    pub per_refno: Vec<(String, u64)>,
-}
-
-fn digest_of<T: std::fmt::Debug>(value: &T) -> u64 {
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    format!("{value:?}").hash(&mut h);
-    h.finish()
-}
-
-/// 对一组设计参考号逐个求解几何并算确定性摘要（调用前需已连接 `SUL_DB`）。
-///
-/// 只读；不落库、不改状态。开关开启时，遇未解析 CATA 会经 resolve 惰性兜底自动补齐。
-pub async fn geo_smoke_digest(design_refnos: &[RefnoEnum]) -> GeoSmokeReport {
-    let mut per_refno: Vec<(String, u64)> = Vec::new();
-    let mut ok = 0usize;
-    let mut err = 0usize;
-    for &refno in design_refnos {
-        match crate::fast_model::resolve_desi_comp(refno, None).await {
-            Ok(info) => {
-                per_refno.push((refno.to_string(), digest_of(&info)));
-                ok += 1;
-            }
-            Err(_) => {
-                per_refno.push((refno.to_string(), 0));
-                err += 1;
-            }
-        }
-    }
-    per_refno.sort();
-    let mut ch = std::collections::hash_map::DefaultHasher::new();
-    for (r, d) in &per_refno {
-        r.hash(&mut ch);
-        d.hash(&mut ch);
-    }
-    GeoSmokeReport {
-        mode_on: cata_closure_enabled(),
-        total: design_refnos.len(),
-        ok,
-        err,
-        combined_digest: ch.finish(),
-        per_refno,
-    }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Phase 6：(dbnum, generation root)→CATA 依赖缓存（bincode，applied_sesno 失效）
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// 单个生成根的 CATA 依赖缓存条目。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct CataDepEntry {
-    /// 精确闭包规则版本；白名单变化时递增，避免复用缺少新容器子树的旧依赖。
-    closure_schema_version: u32,
-    /// 建缓存时源库的 applied_sesno（失效判定：sesno 变则重算）。
-    source_sesno: i32,
-    /// 完整扫描裁决后的 CATA 路径与文件指纹；任一依赖文件变化都会使条目失效。
-    dependency_manifest_fingerprint: String,
-    /// 展平的 CATA 参考号（`RefU64.0`，bincode 友好）。
-    cata_refnos: Vec<u64>,
-    updated_at_ms: i64,
-}
-
-/// `(源 dbnum, 生成根 refno) → CATA 依赖 ids` 缓存。
-///
-/// 依赖闭包是从一个生成根的子树收集出来的，不能只按 dbnum 缓存：同一 DESI
-/// 库中的不同 BRAN/FTUB 通常引用完全不同的 CATA 元素。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct CataDepCache {
-    by_source_root: HashMap<(u32, u64), CataDepEntry>,
-}
-
-const CATA_CLOSURE_SCHEMA_VERSION: u32 = 4;
-
-static DEFERRED_CATA_CACHE: Lazy<TokioMutex<HashMap<u32, (String, CataDepCache)>>> =
-    Lazy::new(|| TokioMutex::new(HashMap::new()));
-
-impl CataDepCache {
-    /// 缓存文件路径：env `AIOS_CATA_DEP_CACHE_PATH` 覆盖，缺省 `output/<project>/cata_dep_cache.bin`。
-    fn cache_path(project: &str) -> PathBuf {
-        if let Ok(p) = std::env::var("AIOS_CATA_DEP_CACHE_PATH") {
-            if !p.trim().is_empty() {
-                return PathBuf::from(p);
-            }
-        }
-        PathBuf::from("output")
-            .join(project)
-            .join("cata_dep_cache.bin")
-    }
-
-    fn load(project: &str) -> Self {
-        std::fs::read(Self::cache_path(project))
-            .ok()
-            .and_then(|b| bincode::deserialize(&b).ok())
-            .unwrap_or_default()
-    }
-
-    /// 命中且新鲜（source_sesno 相符）时返回缓存的 CATA 参考号。
-    fn get_fresh(
-        &self,
-        source_dbnum: u32,
-        root: RefU64,
-        source_sesno: i32,
-        manifest_fingerprint: &str,
-    ) -> Option<&Vec<u64>> {
-        self.by_source_root
-            .get(&(source_dbnum, root.0))
-            // Empty entries may have been produced before dependency-project
-            // CATA discovery was available. Treat them as misses so they heal.
-            .filter(|e| {
-                e.closure_schema_version == CATA_CLOSURE_SCHEMA_VERSION
-                    && e.source_sesno == source_sesno
-                    && e.dependency_manifest_fingerprint == manifest_fingerprint
-                    && !e.cata_refnos.is_empty()
-            })
-            .map(|e| &e.cata_refnos)
-    }
-
-    fn put(
-        &mut self,
-        source_dbnum: u32,
-        root: RefU64,
-        source_sesno: i32,
-        manifest_fingerprint: String,
-        cata_refnos: Vec<u64>,
-    ) {
-        self.by_source_root.insert(
-            (source_dbnum, root.0),
-            CataDepEntry {
-                closure_schema_version: CATA_CLOSURE_SCHEMA_VERSION,
-                source_sesno,
-                dependency_manifest_fingerprint: manifest_fingerprint,
-                cata_refnos,
-                updated_at_ms: chrono::Utc::now().timestamp_millis(),
-            },
-        );
-    }
-
-    fn put_if_complete(
-        &mut self,
-        source_dbnum: u32,
-        root: RefU64,
-        source_sesno: i32,
-        manifest_fingerprint: String,
-        cata_refnos: Vec<u64>,
-        missing: usize,
-    ) -> bool {
-        if missing > 0 {
-            return false;
-        }
-        self.put(
-            source_dbnum,
-            root,
-            source_sesno,
-            manifest_fingerprint,
-            cata_refnos,
-        );
-        true
-    }
-
-    fn save(&self, project: &str) {
-        let path = Self::cache_path(project);
-        if let Some(parent) = path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        if let Ok(bytes) = bincode::serialize(self) {
-            let tmp = path.with_extension("bin.tmp");
-            if std::fs::write(&tmp, bytes).is_ok() {
-                let _ = std::fs::rename(&tmp, &path);
-            }
-        }
-    }
-}
-
-/// 暂存窗口的依赖缓存只有在其水位事务成功后才成为可发布事实。
-pub(crate) async fn publish_deferred_cache(dbnum: u32) {
-    if let Some((project, cache)) = DEFERRED_CATA_CACHE.lock().await.remove(&dbnum) {
-        cache.save(&project);
-    }
-}
-
-/// 新窗口开始或旧窗口失败时清掉未提交的优化状态；持久缓存保持原值。
-pub(crate) async fn discard_deferred_cache(dbnum: u32) {
-    DEFERRED_CATA_CACHE.lock().await.remove(&dbnum);
-}
-
-/// 生成入口的**缓存感知预加载**（Phase 6）：按源 dbnum + 生成根读依赖缓存 → 命中即批量预加载；
-/// 未命中 / 过期则现算闭包、写缓存、再预加载。受 env 开关门控（默认 On）。
-///
-/// 失效口径：源库 `applied_sesno`（权威数据版本）。CATA 定义变不改「依赖哪些 id」，
-/// 故仅由源库变更驱动重算。预加载复用 [`ensure_cata_refnos_parsed`]（幂等落库）。
-pub async fn preload_cata_for_roots(
-    project: &str,
-    roots: &[RefU64],
-    cache_context: Option<DependencyCacheContext>,
-) -> anyhow::Result<LazyFallbackOutcome> {
-    if roots.is_empty() || !cata_closure_enabled() {
-        return Ok(LazyFallbackOutcome::default());
-    }
-    let locator = InMemoryCataLocator::build_for_project(project).await?;
-    // ADR-056 D8-A：暂存窗口的「必需依赖」语义退役；带缓存上下文的调用（补偿队列
-    // `cata_ref_rev`）仍要求根全部可定位，缺了就是数据问题而不是静默跳过。
-    let required = cache_context.is_some();
-
-    // 按源 dbnum 分组生成根。
-    let mut by_src: HashMap<u32, Vec<RefU64>> = HashMap::new();
-    let mut unresolved_roots = Vec::new();
-    for &r in roots {
-        match locator.resolve_ref0(r.get_0())? {
-            Some(d) => by_src.entry(d).or_default().push(r),
-            None => unresolved_roots.push(r),
-        }
-    }
-    require_all_roots_resolved(required, &unresolved_roots)?;
-
-    let mut cache = CataDepCache::load(project);
-    let mut seeds: HashSet<RefU64> = HashSet::new();
-    let mut dirty = false;
-    let mut closure_missing = unresolved_roots.len();
-    let manifest_fingerprint = dependency_manifest_fingerprint();
-
-    for (src_dbnum, src_roots) in by_src {
-        let sesno = match explicit_cache_sesno(cache_context, src_dbnum)? {
-            Some(sesno) => sesno,
-            None => crate::data_interface::dbnum_state::DbnumState::applied_sesno(src_dbnum)
-                .await
-                .unwrap_or(0),
-        };
-        for root in src_roots {
-            if let Some(ids) = cache.get_fresh(src_dbnum, root, sesno, &manifest_fingerprint) {
-                log::info!(
-                    "[cata_closure] 依赖缓存命中: src_dbnum={} root={:?} sesno={} ids={}",
-                    src_dbnum,
-                    root,
-                    sesno,
-                    ids.len()
-                );
-                seeds.extend(ids.iter().map(|&u| RefU64(u)));
-            } else {
-                let manifest = run_cata_closure_pass_for_refnos(
-                    &locator,
-                    &[root],
-                    CataClosureConfig::precise(),
-                )
-                .await?;
-                let mut root_missing = manifest.missing;
-                let mut flat: HashSet<u64> = manifest
-                    .by_dbnum
-                    .values()
-                    .flat_map(|s| s.iter().map(|r| r.0))
-                    .collect();
-                let database_outbound = collect_database_subtree_outbound(&[root]).await?;
-                let mut database_seeds = Vec::new();
-                for seed in database_outbound.iter().copied() {
-                    if let Some(dbnum) = locator.resolve_ref0(seed.get_0())?
-                        && locator
-                            .db_type_of(dbnum)
-                            .is_some_and(|db_type| db_type.eq_ignore_ascii_case("CATA"))
-                    {
-                        database_seeds.push(seed);
-                    }
-                }
-                log::info!(
-                    "[cata_closure] 数据库子树引用: total={} cata={} sample={:?}",
-                    database_outbound.len(),
-                    database_seeds.len(),
-                    database_outbound.iter().take(8).collect::<Vec<_>>()
-                );
-                if !database_seeds.is_empty() {
-                    let mut resolver =
-                        CataClosureResolver::new(&locator, CataClosureConfig::precise());
-                    resolver.seed(database_seeds);
-                    let database_manifest = resolver.resolve().await?;
-                    root_missing += database_manifest.missing;
-                    flat.extend(
-                        database_manifest
-                            .by_dbnum
-                            .values()
-                            .flat_map(|refs| refs.iter().map(|r| r.0)),
-                    );
-                }
-                let flat: Vec<u64> = flat.into_iter().collect();
-                if cache.put_if_complete(
-                    src_dbnum,
-                    root,
-                    sesno,
-                    manifest_fingerprint.clone(),
-                    flat.clone(),
-                    root_missing,
-                ) {
-                    log::info!(
-                        "[cata_closure] 依赖缓存更新: src_dbnum={} root={:?} sesno={} ids={} (CATA 库数={})",
-                        src_dbnum,
-                        root,
-                        sesno,
-                        flat.len(),
-                        manifest.by_dbnum.len()
-                    );
-                    dirty = true;
-                } else {
-                    closure_missing += root_missing;
-                    log::warn!(
-                        "[cata_closure] 闭包不完整，不写依赖缓存: src_dbnum={} root={:?} missing={root_missing}",
-                        src_dbnum,
-                        root
-                    );
-                }
-                seeds.extend(flat.into_iter().map(RefU64));
-            }
-        }
-    }
-    if dirty {
-        if let Some(context) = cache_context {
-            DEFERRED_CATA_CACHE
-                .lock()
-                .await
-                .insert(context.source_dbnum, (project.to_string(), cache));
-        } else {
-            cache.save(project);
-        }
-    }
-
-    let seeds: Vec<RefU64> = seeds.into_iter().collect();
-    let mut outcome = ensure_cata_refnos_parsed(project, &seeds).await?;
-    outcome.missing += closure_missing;
-    Ok(outcome)
 }
 
 #[cfg(test)]
@@ -2256,127 +1444,41 @@ mod tests {
     }
 
     #[test]
-    fn large_owner_replacement_is_semantically_chunked_below_commit_row_limit() {
-        let children = (1..=284)
-            .map(|slot| RefU64((50000u64 << 32) | slot))
-            .collect::<Vec<_>>();
-        let mut batches = OwnerReplaceBatches::default();
-        batches
-            .push("pe:50000_0", &children)
-            .expect("large owner replacement must render");
-        let batches = batches.finish();
-        assert_eq!(batches.len(), 3);
-        assert!(batches[0].contains("DELETE pe_owner:"));
-        assert!(!batches[1].contains("DELETE pe_owner:"));
-        assert!(!batches[2].contains("DELETE pe_owner:"));
-        for sql in batches {
-            crate::data_interface::staging::replay_safe::validate_statement(&sql)
-                .expect("each owner chunk remains ReplaySafe");
-            let rows = crate::data_interface::staging::replay_safe::estimate_write_rows(&sql)
-                .expect("estimate owner chunk");
-            assert!(rows <= 101, "rows={rows}\n{sql}");
+    /// ADR-064 Q2：惰性兜底的落库只有 `cata_dependency` 这一条路——闭包配置与三个写入点同源
+    /// （`resolve_catalogue_rows_with`），行经 `persist_resolved_rows`（`element_batch` `Fresh`、
+    /// `pe.dependency = true`、目录前移先刷新）。不再有逐元素 `UPSERT … CONTENT`：它会把 P4 落的
+    /// `dependency = true` 整行抹掉，P5 的前移刷新就再也认不出这些行。
+    #[test]
+    fn lazy_fallback_lands_rows_through_cata_dependency_and_renders_no_upsert() {
+        let source = include_str!("cata_closure.rs");
+        let body = source
+            .split_once("pub async fn ensure_cata_refnos_parsed(")
+            .expect("lazy fallback exists")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("lazy fallback boundary")
+            .0;
+        assert!(
+            body.contains("cata_dependency::resolve_catalogue_rows_with("),
+            "闭包要走 cata_dependency 的同一条路: {body}"
+        );
+        assert!(
+            body.contains("cata_dependency::persist_resolved_rows("),
+            "落库要走 cata_dependency 的唯一出口: {body}"
+        );
+        assert!(
+            !body.contains("UPSERT") && !body.contains("execute_model_write"),
+            "惰性兜底不得自己渲染 / 直写: {body}"
+        );
+
+        let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
+        for line in production.lines() {
+            let code = line.split("//").next().unwrap_or("");
+            assert!(
+                !code.contains("UPSERT "),
+                "cata_closure.rs 生产代码不得渲染 UPSERT（元素数据行只有 element_batch 一个出口）: {line}"
+            );
         }
-    }
-
-    #[test]
-    fn cata_rows_use_content_replacement_and_uda_clears_stale_values() {
-        let row = "{ id: pe:8000_1, noun: 'SPCO' }".to_string();
-        let replacement = render_content_replacements(&[("pe:8000_1".to_string(), row.clone())]);
-        assert!(replacement.contains("UPSERT pe:8000_1 CONTENT"));
-        assert!(!replacement.contains("FOR $row"));
-        assert!(!replacement.contains("INSERT IGNORE"));
-        crate::data_interface::staging::replay_safe::validate_statement(&replacement)
-            .expect("CATA replacement must pass the staging journal ReplaySafe gate");
-
-        let no_uda = render_uda_replacement(RefU64((8000u64 << 32) | 1), None);
-        assert!(no_uda.contains("DELETE ATT_UDA:8000_1"), "{no_uda}");
-        assert!(!no_uda.contains("UPSERT ATT_UDA:8000_1"), "{no_uda}");
-        assert!(no_uda.starts_with("BEGIN TRANSACTION"), "{no_uda}");
-        crate::data_interface::staging::replay_safe::validate_statement(&no_uda)
-            .expect("UDA clear-only replacement must pass ReplaySafe");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn cata_content_replacement_removes_stale_fields_and_replays() {
-        let db = surrealdb::engine::any::connect("mem://")
-            .await
-            .expect("connect memory database");
-        db.use_ns("test")
-            .use_db("cata_content_replacement")
-            .await
-            .expect("select database");
-        db.query("UPSERT pe:8000_1 CONTENT { noun: 'OLD', stale: true };")
-            .await
-            .expect("seed stale row")
-            .check()
-            .expect("valid seed");
-
-        let sql = render_content_replacements(&[(
-            "pe:8000_1".to_string(),
-            "{ id: pe:8000_1, noun: 'SPCO' }".to_string(),
-        )]);
-        for _ in 0..2 {
-            db.query(&sql)
-                .await
-                .expect("replace row")
-                .check()
-                .expect("replacement must execute");
-        }
-
-        let mut response = db
-            .query("RETURN pe:8000_1.noun; RETURN pe:8000_1.stale;")
-            .await
-            .expect("read replacement")
-            .check()
-            .expect("valid read");
-        assert_eq!(
-            response.take::<Option<String>>(0).expect("noun"),
-            Some("SPCO".into())
-        );
-        assert_eq!(
-            response
-                .take::<Option<bool>>(1)
-                .expect("removed stale field"),
-            None
-        );
-    }
-
-    #[test]
-    fn dependency_cache_invalidates_on_source_window_or_cata_fingerprint_change() {
-        let root = RefU64((8000u64 << 32) | 42);
-        let mut cache = CataDepCache::default();
-        cache.put(8000, root, 232, "manifest-a".into(), vec![1, 2, 3]);
-        assert!(cache.get_fresh(8000, root, 232, "manifest-a").is_some());
-        assert!(cache.get_fresh(8000, root, 233, "manifest-a").is_none());
-        assert!(cache.get_fresh(8000, root, 232, "manifest-b").is_none());
-    }
-
-    /// ADR-056 D8-A 之后没有「暂存窗口里缺上下文就报错」这一档：上下文缺席 = 按需
-    /// 路径（`None`），带上下文则库号必须对得上。
-    #[test]
-    fn explicit_cache_context_is_authoritative_and_optional() {
-        let context = DependencyCacheContext {
-            source_dbnum: 8000,
-            effective_end_sesno: 232,
-        };
-        assert_eq!(
-            explicit_cache_sesno(Some(context), 8000).unwrap(),
-            Some(232)
-        );
-        assert_eq!(explicit_cache_sesno(None, 8000).unwrap(), None);
-        assert!(explicit_cache_sesno(Some(context), 7997).is_err());
-    }
-
-    #[test]
-    fn dependency_cache_does_not_publish_an_incomplete_closure() {
-        let root = RefU64((8000u64 << 32) | 42);
-        let mut cache = CataDepCache::default();
-
-        assert!(!cache.put_if_complete(8000, root, 232, "manifest-a".into(), vec![1, 2, 3], 1,));
-        assert!(cache.get_fresh(8000, root, 232, "manifest-a").is_none());
-
-        assert!(cache.put_if_complete(8000, root, 232, "manifest-a".into(), vec![1, 2, 3], 0,));
-        assert!(cache.get_fresh(8000, root, 232, "manifest-a").is_some());
     }
 
     #[test]
@@ -2418,33 +1520,11 @@ mod tests {
             scan.contains("Ok(ref0s) if !ref0s.is_empty()") && scan.contains("拒绝发布空缓存"),
             "成功空扫描也必须保持不可缓存并触发下次重试: {scan}"
         );
-
-        let preload = source
-            .split_once("pub async fn preload_cata_for_roots(")
-            .expect("preload function")
-            .1
-            .split_once("#[cfg(test)]")
-            .expect("preload boundary")
-            .0;
-        assert!(
-            preload.contains("require_all_roots_resolved(required, &unresolved_roots)?"),
-            "Required 路径的未解析根必须显式阻断，不能从 by_src 消失: {preload}"
-        );
     }
 
     #[test]
-    fn subtree_data_reads_use_the_active_window_but_locator_stays_persistent() {
+    fn locator_stays_on_the_persistent_store() {
         let source = include_str!("cata_closure.rs");
-        let subtree = source
-            .split_once("async fn collect_database_subtree_outbound(")
-            .expect("subtree collector exists")
-            .1
-            .split_once("pub async fn run_cata_closure_pass_for_refnos")
-            .expect("subtree collector boundary")
-            .0;
-        assert_eq!(subtree.matches("active_data_db()").count(), 1, "{subtree}");
-        assert!(!subtree.contains("SUL_DB.query"), "{subtree}");
-
         let locator = source
             .split_once("async fn load_dbnum_files_from_watermark(")
             .expect("watermark locator exists")
@@ -2517,59 +1597,6 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn staging_only_subtree_reference_is_collected() {
-        use surrealdb::engine::any::connect;
-
-        let persistent = connect("mem://").await.expect("persistent mem boots");
-        persistent
-            .use_ns("cata_closure")
-            .use_db("persistent")
-            .await
-            .expect("persistent target");
-        let window = connect("mem://").await.expect("window mem boots");
-        window
-            .use_ns("cata_closure")
-            .use_db("window")
-            .await
-            .expect("window target");
-        // 夹具按真实 schema 造形：`refno` 是指向类型化属性表行的记录链接，
-        // 引用属性是该行里的记录值字段（内联对象形状在生产里不存在，
-        // 之前用它把 `refno.*[WHERE …]` 对链接失效的问题盖住了）。
-        window
-            .query(
-                "UPSERT pe:1_1 SET deleted = false, refno = NONE;\
-                 UPSERT BEND:1_2 SET SPRE = pe:9_9, ANGL = 9.5;\
-                 UPSERT pe:1_2 SET deleted = false, refno = BEND:1_2;\
-                 INSERT RELATION INTO pe_owner [{ \
-                    id: pe_owner:[pe:1_2, 0], in: pe:1_2, out: pe:1_1 \
-                 }];",
-            )
-            .await
-            .expect("staging fixture")
-            .check()
-            .expect("fixture statements");
-
-        let root = "1/1".parse::<RefU64>().expect("root refno");
-        let referenced = "9/9".parse::<RefU64>().expect("CATA refno");
-        let seeds = collect_database_subtree_outbound_on(&window, &[root])
-            .await
-            .expect("collect staging subtree");
-        assert!(seeds.contains(&referenced), "{seeds:?}");
-
-        let mut response = persistent
-            .query("SELECT VALUE id FROM pe")
-            .await
-            .expect("persistent probe");
-        assert!(
-            response
-                .take::<Vec<surrealdb::sql::Thing>>(0)
-                .expect("persistent rows")
-                .is_empty(),
-            "fixture reference must exist only in the window"
-        );
-    }
-
     /// pe_owner owner 块替换契约：范围删除 + 完整重插必须是一个 ReplaySafe 事务。
     #[test]
     fn pe_owner_replace_is_atomic_and_owner_scoped() {
@@ -2587,123 +1614,6 @@ mod tests {
         );
         crate::data_interface::staging::replay_safe::validate_statement(&sql)
             .expect("owner 替换事务必须满足 ReplaySafe");
-    }
-
-    /// owner 替换的成批提交：合并只改提交粒度，不许改语义。
-    ///
-    /// 三条主张——每批仍是一个完整的 ReplaySafe 事务；一个 owner 的删与插绝不被批
-    /// 边界切开（切开就等于把该 owner 的成员块清空后不再重插）；叶子扎堆时也不会攒
-    /// 出一个无上限的巨型事务。
-    #[test]
-    fn owner_replacements_batch_without_splitting_any_owner() {
-        let child = |n: u64| RefU64((24381u64 << 32) | n);
-
-        let mut batches = OwnerReplaceBatches::default();
-        for owner in 0..3u64 {
-            batches
-                .push(
-                    &format!("pe:16189_{owner}"),
-                    &[child(owner), child(owner + 100)],
-                )
-                .expect("成员块无重复");
-        }
-        let merged = batches.finish();
-        // 先钉最要命的那条：批边界切开一个 owner，等于把它的成员块清空后不再重插。
-        for owner in 0..3u64 {
-            let delete =
-                format!("DELETE pe_owner:[pe:16189_{owner}, NONE]..=[pe:16189_{owner}, ..]");
-            let insert = format!("in: {}, out: pe:16189_{owner}", child(owner).to_pe_key());
-            let batch = merged
-                .iter()
-                .find(|sql| sql.contains(&delete))
-                .expect("每个 owner 的删除都在某一批里");
-            let insert_at = batch
-                .find(&insert)
-                .expect("同一 owner 的重插必须与它的删除同批");
-            assert!(
-                batch.find(&delete).expect("删除已在本批") < insert_at,
-                "删必须排在同一 owner 的插之前:\n{batch}"
-            );
-        }
-        assert_eq!(merged.len(), 1, "远未到阈值的几个 owner 应攒成一个事务");
-        crate::data_interface::staging::replay_safe::validate_statement(&merged[0])
-            .expect("合并后的事务必须仍满足 ReplaySafe");
-
-        // 叶子（空成员表）只出一条删除语句，靠 owner 计数封顶，不靠 child 行数。
-        let mut leaves = OwnerReplaceBatches::default();
-        for owner in 0..(INSERT_CHUNK * 2) {
-            leaves
-                .push(&format!("pe:70000_{owner}"), &[])
-                .expect("空成员块");
-        }
-        let leaf_batches = leaves.finish();
-        assert_eq!(
-            leaf_batches.len(),
-            2,
-            "{} 个叶子应封顶成两批",
-            INSERT_CHUNK * 2
-        );
-        for sql in &leaf_batches {
-            crate::data_interface::staging::replay_safe::validate_statement(sql)
-                .expect("纯删除批同样要过 ReplaySafe");
-            assert!(
-                !sql.contains("INSERT RELATION"),
-                "空成员表不该写任何边:\n{sql}"
-            );
-        }
-
-        assert!(
-            OwnerReplaceBatches::default().finish().is_empty(),
-            "没有 owner 时不该发空事务"
-        );
-    }
-
-    #[test]
-    fn uda_replacements_batch_without_splitting_any_element() {
-        let mut batches = UdaReplacementBatches::default();
-        for n in 0..=INSERT_CHUNK {
-            let refno = RefU64((8000u64 << 32) | n as u64);
-            batches.push(
-                refno,
-                Some(format!(
-                    "{{ id: {}, VALUE: 'v{n}' }}",
-                    refno.to_table_key("ATT_UDA")
-                )),
-            );
-        }
-
-        let merged = batches.finish();
-        assert_eq!(
-            merged.len(),
-            2,
-            "超过单批元素上限一个的 UDA replacement 必须分成两批"
-        );
-        for sql in &merged {
-            crate::data_interface::staging::replay_safe::validate_statement(sql)
-                .expect("UDA replacement batch must be ReplaySafe");
-            let rows = crate::data_interface::staging::replay_safe::estimate_write_rows(sql)
-                .expect("UDA replacement rows");
-            assert!(
-                rows <= crate::data_interface::staging::executor::TX_MAX_WRITE_ROWS,
-                "UDA replacement batch must fit the replay row gate: {rows}"
-            );
-            assert!(
-                sql.len() <= crate::data_interface::staging::executor::TX_MAX_BYTES,
-                "UDA replacement batch must fit the replay byte gate: {}",
-                sql.len()
-            );
-        }
-        for n in [0usize, INSERT_CHUNK] {
-            let key = RefU64((8000u64 << 32) | n as u64).to_table_key("ATT_UDA");
-            let batch = merged
-                .iter()
-                .find(|sql| sql.contains(&format!("DELETE {key}")))
-                .expect("每个 UDA 删除都在某一批里");
-            assert!(
-                batch.contains(&format!("UPSERT {key} CONTENT")),
-                "同一元素的删除与重写不得跨批: {key}"
-            );
-        }
     }
 
     /// 成员表毛刺的处置分工：解析边界就地收敛（不中断整批），渲染边界兜底硬拒
@@ -2827,45 +1737,6 @@ mod tests {
             .take::<Vec<surrealdb::sql::Thing>>(0)
             .expect("decode large owner");
         assert_eq!(large_children.len(), 1000);
-    }
-
-    #[test]
-    fn dependency_cache_is_scoped_to_each_generation_root() {
-        let mut cache = CataDepCache::default();
-        let first_root = RefnoEnum::from("24384/22402").refno();
-        let second_root = RefnoEnum::from("24384/22404").refno();
-
-        cache.put(
-            8000,
-            first_root,
-            10,
-            "manifest-a".into(),
-            vec![RefnoEnum::from("13244/108798").refno().0],
-        );
-
-        assert!(
-            cache
-                .get_fresh(8000, first_root, 10, "manifest-a")
-                .is_some()
-        );
-        assert!(
-            cache
-                .get_fresh(8000, second_root, 10, "manifest-a")
-                .is_none(),
-            "同一 DESI dbnum 下的不同 BRAN 不能共用局部 CATA 闭包"
-        );
-
-        cache
-            .by_source_root
-            .get_mut(&(8000, first_root.0))
-            .unwrap()
-            .closure_schema_version -= 1;
-        assert!(
-            cache
-                .get_fresh(8000, first_root, 10, "manifest-a")
-                .is_none(),
-            "精确闭包白名单变化后不能复用缺少新容器子树的旧缓存"
-        );
     }
 
     #[test]
@@ -3003,13 +1874,6 @@ mod tests {
     }
 
     #[test]
-    fn required_unresolved_roots_block_while_best_effort_reports_missing() {
-        let unresolved = [RefU64((7320u64 << 32) | 1)];
-        assert!(require_all_roots_resolved(true, &unresolved).is_err());
-        assert!(require_all_roots_resolved(false, &unresolved).is_ok());
-    }
-
-    #[test]
     fn is_valid_ref0_rejects_zero_and_sentinel() {
         assert!(!is_valid_ref0(0));
         assert!(!is_valid_ref0(INVALID_REF0_SENTINEL));
@@ -3026,35 +1890,20 @@ mod tests {
         assert!(allow.contains("GMSE"));
         assert!(allow.contains("GMSS"));
         assert!(!allow.contains("SPEC"));
-    }
-
-    #[test]
-    fn dep_cache_roundtrip_and_sesno_invalidation() {
-        let unique = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
-        let tmp = std::env::temp_dir().join(format!("cata_dep_test_{unique}.bin"));
-        unsafe {
-            std::env::set_var("AIOS_CATA_DEP_CACHE_PATH", &tmp);
+        // 2026-09-07 对拍 oracle 抓到的两处漏：正体名下的负体、`SPRF.PSTR` 指向的 p-line 集 PTSS。
+        for positive in [
+            "SBOX", "SCYL", "LCYL", "SCON", "LSNO", "LPYR", "SCTO", "SRTO", "SSPH", "SSLC", "SDSH",
+            "SDIS", "SEXT", "SREV",
+        ] {
+            assert!(
+                allow.contains(positive),
+                "正体 {positive} 名下的负体要随闭包入库"
+            );
         }
-
-        let mut c = CataDepCache::default();
-        let root = RefU64(123);
-        c.put(8000, root, 42, "manifest-a".into(), vec![1, 2, 3]);
-        c.save("proj");
-
-        let loaded = CataDepCache::load("proj");
-        assert_eq!(
-            loaded.get_fresh(8000, root, 42, "manifest-a"),
-            Some(&vec![1, 2, 3])
+        assert!(allow.contains("PTSS"), "型材对齐读 PTSS 名下的 PLIN");
+        assert!(
+            !allow.contains("PSTR"),
+            "PSTR 是属性名不是 noun，写进名单等于没写"
         );
-        assert_eq!(loaded.get_fresh(8000, root, 43, "manifest-a"), None); // source_sesno 变 → 失效
-        assert_eq!(loaded.get_fresh(9999, root, 42, "manifest-a"), None); // 未知源库
-
-        std::fs::remove_file(&tmp).ok();
-        unsafe {
-            std::env::remove_var("AIOS_CATA_DEP_CACHE_PATH");
-        }
     }
 }

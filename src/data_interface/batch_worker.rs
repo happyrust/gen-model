@@ -184,6 +184,7 @@ struct ActiveDataTaskContext {
     dbnum: u32,
     start_sesno: i32,
     end_sesno: Arc<AtomicI64>,
+    frozen_source_token: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 tokio::task_local! {
@@ -229,6 +230,9 @@ pub(crate) fn note_dependency_location(
 }
 
 pub(crate) fn active_data_window() -> Option<(u32, i32)> {
+    if let Ok(window) = MODEL_PUBLICATION_WINDOW.try_with(|window| (window.0, window.1)) {
+        return Some(window);
+    }
     ACTIVE_DATA_TASK
         .try_with(|context| {
             (
@@ -237,6 +241,41 @@ pub(crate) fn active_data_window() -> Option<(u32, i32)> {
             )
         })
         .ok()
+}
+
+tokio::task_local! { static MODEL_PUBLICATION_WINDOW: (u32, i32, String); }
+pub(crate) async fn with_model_publication_window<T>(
+    dbnum: u32,
+    session: i32,
+    source_token: &str,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    MODEL_PUBLICATION_WINDOW
+        .scope((dbnum, session, source_token.to_owned()), future)
+        .await
+}
+
+/// Exact source generation captured for the active file round. Model
+/// generation uses this instead of reopening the latest session independently.
+pub(crate) fn active_frozen_source()
+-> anyhow::Result<Option<crate::data_interface::frozen_source::FrozenSource>> {
+    if let Ok(token) = MODEL_PUBLICATION_WINDOW.try_with(|window| window.2.clone()) {
+        return crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(&token)
+            .map(Some);
+    }
+    ACTIVE_DATA_TASK
+        .try_with(|context| {
+            let token = context
+                .frozen_source_token
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .clone();
+            token
+                .as_deref()
+                .map(crate::data_interface::frozen_source::FrozenSource::from_commit_token_json)
+                .transpose()
+        })
+        .unwrap_or(Ok(None))
 }
 
 pub(crate) fn set_active_task_stage(stage: &str) {
@@ -763,6 +802,12 @@ pub struct DataBatchTaskResult {
     pub batch: Option<DataBatchResult>,
     pub units: Vec<ModelUnitResult>,
     pub warnings: Vec<String>,
+    /// 该单库任务写终态时的统一双水位判决。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_verdict: Option<String>,
+    /// 仅在模型已追平时出现，取自 `dbnum_watermark.model_settled_at`。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_caught_up_at: Option<String>,
 }
 
 /// 确保本进程有且只有一个队列消费者（幂等；重复调用是无操作）。
@@ -899,6 +944,36 @@ fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// 同 dbnum 恒串行；独占批次保住 FIFO 位置（轮到它时先排空在飞、再单独跑）。
 /// 默认 1 与旧的单消费者行为一致。
 pub async fn drain_queue_until_empty(mgr: &Arc<AiosDBManager>) -> usize {
+    // A prior-epoch row cannot be dispatched, but a delayed watcher may have
+    // queued a window that already committed. Do not let it starve model work.
+    let active_epoch =
+        crate::data_interface::initialization_phase::InitializationCoordinator::global()
+            .snapshot()
+            .epoch_id;
+    for row in BatchScheduler::global().snapshot() {
+        if row.state != "queued" || row.epoch_id == 0 || row.epoch_id == active_epoch {
+            continue;
+        }
+        match crate::data_interface::dbnum_state::DbnumState::read(row.dbnum).await {
+            Ok(Some(applied)) => {
+                if BatchScheduler::global().retire_covered_window(
+                    TaskRegistry::global(),
+                    &row.task_id,
+                    &applied,
+                ) {
+                    println!(
+                        "数据窗口已应用，收口迟到队列 task={} dbnum={} applied={}",
+                        row.task_id, row.dbnum, applied.applied_sesno
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => log::warn!(
+                "保留旧 epoch 队列：读取应用凭证失败 dbnum={}: {error:#}",
+                row.dbnum
+            ),
+        }
+    }
     // 三阶段的第一道门必须放在共享 drain 内：watcher、手动执行、初始化重扫和测试
     // 探针都从这里领取，放在任一调用方都会制造绕过路径。关闭只是不领取，队列行
     // 原样保留，发现/入队仍继续。
@@ -1081,8 +1156,8 @@ async fn run_one_batch(
         dbnum: job.dbnum,
         start_sesno: job.start_sesno,
         end_sesno: Arc::new(AtomicI64::new(job.end_sesno as i64)),
+        frozen_source_token: Arc::new(std::sync::Mutex::new(job.frozen_source_token.clone())),
     };
-    crate::data_interface::cata_closure::discard_deferred_cache(job.dbnum).await;
 
     // 冻结点重扫：排队行上那个右端只是入队时观察到的预期上界，真正要应用的窗口
     // 由执行时的水位与文件现状决定（merged_sesnos 兑现的正是这次重扫，ADR-011 §5）。
@@ -1091,8 +1166,35 @@ async fn run_one_batch(
     let mut observed_end_sesno = job.end_sesno;
     let result = ACTIVE_DATA_TASK
         .scope(active_context, async {
-            match refresh_candidate(&job) {
+            match refresh_candidate(&job).await {
                 Ok(cand) => {
+                    if let Some(frozen) = cand.frozen.as_ref() {
+                        match frozen.commit_token_json() {
+                            Ok(token) => {
+                                scheduler.record_frozen_source(job.dbnum, true, token.clone());
+                                let _ = ACTIVE_DATA_TASK.try_with(|context| {
+                                    *context
+                                        .frozen_source_token
+                                        .lock()
+                                        .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                                        Some(token);
+                                });
+                            }
+                            Err(error) => {
+                                return DataBatchTaskResult {
+                                    project: job.project.clone(),
+                                    status: ManualUpdateStatus::Failed,
+                                    batch: None,
+                                    units: Vec::new(),
+                                    warnings: vec![format!(
+                                        "序列化文件轮次冻结源失败: {error:#}"
+                                    )],
+                                    model_verdict: None,
+                                    model_caught_up_at: None,
+                                };
+                            }
+                        }
+                    }
                     observed_end_sesno = cand.file_latest_sesno;
                     let _ = ACTIVE_DATA_TASK.try_with(|context| {
                         context
@@ -1120,6 +1222,49 @@ async fn run_one_batch(
                         cand.file_latest_sesno,
                         end_sesno_time,
                     );
+                    // 文件轮次（ADR-062）是**设计库**的派生面：房间输入基线、空间发布、
+                    // 房间任务全部只认 DESI（`E3dModelService::from_frozen_sources` 的 pin
+                    // 只有 MDB 里的 DESI/CATA 文件）。SYS meta（COMM/SYST/DICT/…）的
+                    // 数据批次不产生任何模型/空间产物，给它落一条 `collecting` 意图行，
+                    // 收敛时只会确定性地撞上「current MDB has no DESI dbnum N」——
+                    // 2026-09-06 rocksdb 空库首启实测：amscom（8190）那条行把出队门
+                    // 焊死，余下 11 个 meta 批次与整个 DESI 基线永远排不上。
+                    if job.db_type.eq_ignore_ascii_case("DESI") {
+                        if let Err(error) =
+                            SideEffectCompensator::ensure_published_file_baseline(
+                                job.dbnum,
+                                job.start_sesno.saturating_sub(1).max(0) as u32,
+                            )
+                            .await
+                        {
+                            return failed_window_result(
+                                &job,
+                                &mut warnings,
+                                &format!("建立已发布房间输入基线失败: {error:#}"),
+                            );
+                        }
+                        let round_intent =
+                            SideEffectCompensator::render_file_spatial_reconcile_upsert(
+                                job.dbnum,
+                                cand.file_latest_sesno,
+                                &[],
+                                &[],
+                                &[],
+                            );
+                        if let Err(error) = async {
+                            let statement = round_intent?;
+                            aios_core::SUL_DB.query(statement).await?.check()?;
+                            Ok::<(), anyhow::Error>(())
+                        }
+                        .await
+                        {
+                            return failed_window_result(
+                                &job,
+                                &mut warnings,
+                                &format!("持久化文件轮次失败: {error:#}"),
+                            );
+                        }
+                    }
                     crate::data_interface::debug_scope::trace(
                         crate::data_interface::debug_scope::TracePoint::Freeze,
                         job.dbnum,
@@ -1140,6 +1285,13 @@ async fn run_one_batch(
                     execute_frozen_batch(mgr, registry, &job, cand, &progress, &mut warnings).await
                 }
                 Err(error) => {
+                    let replacement = schedule_frozen_source_replacement(
+                        registry,
+                        scheduler,
+                        &job,
+                        &error,
+                    )
+                    .await;
                     crate::data_interface::debug_scope::trace(
                         crate::data_interface::debug_scope::TracePoint::Freeze,
                         job.dbnum,
@@ -1155,12 +1307,21 @@ async fn run_one_batch(
                         },
                     );
                     warnings.push(format!("冻结批次重扫失败: {error:#}"));
+                    match replacement {
+                        Ok(Some(message)) => warnings.push(message),
+                        Ok(None) => {}
+                        Err(replace_error) => warnings.push(format!(
+                            "冻结源替代轮次建立失败，保留原轮次等待重试: {replace_error:#}"
+                        )),
+                    }
                     DataBatchTaskResult {
                         project: job.project.clone(),
                         status: ManualUpdateStatus::Failed,
                         batch: None,
                         units: Vec::new(),
                         warnings: std::mem::take(&mut warnings),
+                        model_verdict: None,
+                        model_caught_up_at: None,
                     }
                 }
             }
@@ -1386,6 +1547,10 @@ async fn execute_frozen_batch(
     // 会话预算可能把本批截短，而 `cand` 随后被移进执行体：右端在这里留一份，
     // 提交后靠它判断「这一段追平了没有」。
     let file_latest_sesno = cand.file_latest_sesno;
+    let frozen_source_token = cand
+        .frozen
+        .as_ref()
+        .and_then(|source| source.commit_token_json().ok());
     let body_started = std::time::Instant::now();
     let mut result = execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings).await;
     let body_ms = body_started.elapsed().as_millis();
@@ -1401,10 +1566,56 @@ async fn execute_frozen_batch(
     if let Some(committed_end_sesno) = committed_end_sesno
         && committed_end_sesno < file_latest_sesno
     {
-        requeue_window_remainder(registry, job, committed_end_sesno, file_latest_sesno);
+        requeue_window_remainder(
+            registry,
+            job,
+            committed_end_sesno,
+            file_latest_sesno,
+            frozen_source_token,
+        );
         result.warnings.push(format!(
             "本批只应用到 sesno {committed_end_sesno}（文件最新 {file_latest_sesno}），余量已排回队列继续"
         ));
+    }
+
+    let round_complete = committed_end_sesno == Some(file_latest_sesno)
+        && result.status == ManualUpdateStatus::Success
+        && result
+            .units
+            .iter()
+            .all(|unit| unit.status == UnitGenStatus::Generated);
+    // 只有 DESI 才有文件轮次可发布（冻结点也只给 DESI 落意图行，见上）。非 DESI 走到
+    // 这里去 `file_round_commit_token` 只会报「has no commit token」，把一个成功的
+    // SYS meta 批次记成 partial。
+    if round_complete
+        && job.db_type.eq_ignore_ascii_case("DESI")
+        && !crate::data_interface::model_publish_queue::blocks_dbnum(job.dbnum)
+    {
+        if let Err(error) =
+            publish_completed_file_round(mgr, job.dbnum, file_latest_sesno, &mut result).await
+        {
+            result.status = ManualUpdateStatus::Partial;
+            result.warnings.push(format!(
+                "文件轮次派生发布未完成（空间收敛失败不重试、已进死信并落 logs/batch-failures-*.jsonl；\
+                 其余步骤的持久待办保留）: {error:#}"
+            ));
+        }
+    }
+
+    // 最终任务回执在模型单元与文件轮次发布之后取一次统一判决。它只是观测：
+    // 读失败不改变批次成败，也不让数据事务等待模型。
+    if job.db_type.eq_ignore_ascii_case("DESI") {
+        match crate::data_interface::dbnum_consistency::verdict_for(&aios_core::SUL_DB, job.dbnum)
+            .await
+        {
+            Ok(verdict) => {
+                result.model_verdict = Some(verdict.as_str().to_owned());
+                result.model_caught_up_at = verdict.caught_up_at().map(str::to_owned);
+            }
+            Err(error) => result.warnings.push(format!(
+                "读取批次终态的双水位判决失败（不影响已提交数据）: {error:#}"
+            )),
+        }
     }
 
     let generated = result
@@ -1419,6 +1630,114 @@ async fn execute_frozen_batch(
         result.warnings.len()
     );
     result
+}
+
+/// Publish the derivations collected by one fully settled file round. Spatial
+/// publication is the barrier: room edges and room tasks stay private until the
+/// tree snapshot has converged successfully.
+pub(crate) async fn publish_completed_file_round(
+    mgr: &AiosDBManager,
+    dbnum: u32,
+    round_end_sesno: i32,
+    result: &mut DataBatchTaskResult,
+) -> anyhow::Result<()> {
+    let round = SideEffectCompensator::file_round(dbnum, round_end_sesno)
+        .await?
+        .ok_or_else(|| {
+            anyhow::anyhow!("missing file publication round {dbnum}/{round_end_sesno}")
+        })?;
+    anyhow::ensure!(
+        matches!(round.status.as_str(), "collecting" | "pending" | "done"),
+        "file publication is held in {}",
+        round.status
+    );
+    if round.status == "done" && round.room_released {
+        return Ok(());
+    }
+    if round.status == "collecting" {
+        let deferred_actions =
+            SideEffectCompensator::file_round_deferred_model_actions(dbnum, round_end_sesno)
+                .await?;
+        for action in deferred_actions
+            .iter()
+            .filter(|action| action.action == "delete_cleanup")
+        {
+            model_update_pending::execute_deferred_file_model_action(mgr, action).await?;
+        }
+        // The in-memory projection may advance while the round is private, but the
+        // durable model rows consumed by room calculation remain on the previous
+        // published version. Flush every completed root now, before spatial replay.
+        for root in
+            SideEffectCompensator::file_round_model_publish_roots(dbnum, round_end_sesno).await?
+        {
+            let refno = crate::fast_model::e3d_model_service::parse_refno(&root)?;
+            crate::fast_model::model_db_adapter::persist_root(refno).await?;
+        }
+        for action in deferred_actions
+            .iter()
+            .filter(|action| action.action != "delete_cleanup")
+        {
+            model_update_pending::execute_deferred_file_model_action(mgr, action).await?;
+        }
+        // Capture one immutable room input after every root and deferred model
+        // action has settled.  It stays invisible until spatial publication moves
+        // this round's token into `published_file_input`.
+        let commit_token =
+            SideEffectCompensator::file_round_commit_token(dbnum, round_end_sesno).await?;
+        crate::fast_model::room_publication::stage_published_room_input(dbnum, &commit_token)
+            .await
+            .map_err(|error| anyhow::anyhow!("freeze file room geometry: {error:#}"))?;
+        let frozen = crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(
+            &commit_token,
+        )?;
+        if !crate::data_interface::model_publish_queue::blocks_dbnum(dbnum) {
+            crate::fast_model::room_topology_source::prepare_producer_source(&frozen).await?;
+        }
+        crate::fast_model::room_topology::stage_candidate_room_topology(
+            dbnum,
+            frozen.db_type(),
+            round_end_sesno,
+            &commit_token,
+        )
+        .await?;
+        SideEffectCompensator::promote_file_round(dbnum, round_end_sesno).await?;
+    }
+    if round.status != "done" {
+        SideEffectCompensator::reconcile_spatial_pending(mgr).await?;
+    }
+    let published = SideEffectCompensator::file_round(dbnum, round_end_sesno)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("file publication round disappeared"))?;
+    anyhow::ensure!(
+        published.status == "done",
+        "file spatial publication has not converged: {}",
+        published.status
+    );
+    let deferred_room_clears = published.room_clear_refnos;
+
+    if !crate::options::room_incremental() {
+        SideEffectCompensator::mark_file_rooms_released(dbnum, round_end_sesno).await?;
+        return Ok(());
+    }
+
+    crate::fast_model::room_publication::clear_deferred_room_edges(&deferred_room_clears).await?;
+    let scope = model_update_pending::promote_room_file_round(dbnum, round_end_sesno).await?;
+    SideEffectCompensator::mark_file_rooms_released(dbnum, round_end_sesno).await?;
+    let report = model_update_pending::drain_rooms_scoped(&mgr.db_option, &scope).await?;
+    if !report.failures.is_empty() {
+        result.warnings.push(format!(
+            "文件空间已发布，房间仍有 {} 个目标待重试: {}",
+            report.failures.len(),
+            report.failures.join("; ")
+        ));
+        result.status = ManualUpdateStatus::Partial;
+    }
+    println!(
+        "文件轮次发布完成 dbnum={dbnum} sesno={round_end_sesno}：空间已切换，房间完成 {} 个、待重试 {} 个",
+        report.done,
+        report.failures.len()
+    );
+    Ok(())
 }
 
 /// 截断窗口的余量批次（ADR-017 拆窗）。
@@ -1456,9 +1775,13 @@ fn requeue_window_remainder(
     job: &FrozenBatch,
     committed_end_sesno: i32,
     file_latest_sesno: i32,
+    frozen_source_token: Option<String>,
 ) {
     let found = window_remainder_batch(job, committed_end_sesno, file_latest_sesno);
     let outcome = BatchScheduler::global().enqueue(registry, &found, false);
+    if let Some(token) = frozen_source_token {
+        BatchScheduler::global().record_frozen_source(job.dbnum, false, token);
+    }
     println!(
         "dbnum={} 截断窗口余量已排队：sesno {}..={}（task {}）",
         job.dbnum, outcome.info.start_sesno, outcome.info.end_sesno, outcome.info.task_id
@@ -1501,6 +1824,8 @@ fn failed_window_result(
         }),
         units: Vec::new(),
         warnings: std::mem::take(warnings),
+        model_verdict: None,
+        model_caught_up_at: None,
     }
 }
 
@@ -1698,6 +2023,8 @@ async fn execute_frozen_batch_body(
         batch,
         units,
         warnings: std::mem::take(warnings),
+        model_verdict: None,
+        model_caught_up_at: None,
     }
 }
 
@@ -2155,6 +2482,15 @@ async fn idle_round(
             );
         });
     }
+    // 模型类型限定（`model_incremental_types`）：同款只说一次。名单外类型的行留在
+    // model_update_pending 里不被本进程认领，下面「空闲模型积压消化完成 N 个」的 N 里
+    // 没有它们——不说这一句，空闲轮日志看起来就是「积压清零」。
+    if model_phase_open {
+        if let Some(notice) = crate::data_interface::model_type_scope::mode_notice() {
+            static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+            ANNOUNCED.call_once(|| println!("*** {notice}"));
+        }
+    }
     let mut side_effect_failed = false;
     if model_phase_open {
         if let Err(error) = SideEffectCompensator::drain(mgr).await {
@@ -2261,7 +2597,25 @@ async fn idle_round(
         drain_queue_until_empty(mgr).await
     };
 
-    let data_outcome = idle_outcome(failed, model_lock_deferred, has_backlog, claimed_batches);
+    // An async initialization backlog is a completion barrier, not work this
+    // worker can claim. Its consumer wakes us when publication can proceed.
+    let owned_backlog_wait = if has_backlog && !failed && !model_lock_deferred {
+        match model_update_pending::has_claimable_data_work().await {
+            Ok(claimable) => !claimable,
+            Err(error) => {
+                println!("检查可认领模型工作失败（暂缓空闲轮）: {error:#}");
+                true
+            }
+        }
+    } else {
+        false
+    };
+    let data_outcome = idle_outcome(
+        failed,
+        model_lock_deferred || owned_backlog_wait,
+        has_backlog,
+        claimed_batches,
+    );
     let spatial_pending = if data_outcome == IdleOutcome::Settled {
         match SideEffectCompensator::has_pending_spatial_work().await {
             Ok(pending) => pending,
@@ -2301,7 +2655,9 @@ async fn idle_round(
             false
         }
     };
-    let model_coverage_current = if crate::data_interface::watch_scope::active() {
+    let model_coverage_current = if data_outcome != IdleOutcome::Settled {
+        false
+    } else if crate::data_interface::watch_scope::active() {
         let mut current = true;
         for dbnum in crate::data_interface::watch_scope::dbnums() {
             match crate::data_interface::model_update_pending::model_coverage_current(dbnum).await {
@@ -2634,11 +2990,33 @@ fn progress_sink(registry: &'static TaskRegistry, task_id: &str) -> Option<Manua
 }
 
 /// 冻结点重扫候选文件：路径 / 类型不变（F6 已在入队前把关），会话号与大小取现值。
-fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
-    let frozen =
-        crate::data_interface::frozen_source::FrozenSource::capture(&job.path).map_err(|e| {
-            anyhow::anyhow!("打开冻结点 dabacon 冻结源失败 {}: {e}", job.path.display())
-        })?;
+async fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
+    let recovered = if job.frozen_source_token.is_none() {
+        SideEffectCompensator::recover_collecting_file_round(job.dbnum).await?
+    } else {
+        None
+    };
+    let frozen_token = job
+        .frozen_source_token
+        .as_deref()
+        .or_else(|| recovered.as_ref().map(|(_, token)| token.as_str()));
+    let frozen = match frozen_token {
+        Some(token) => {
+            crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(token)
+                .and_then(|source| source.reopen_verified())
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "复核文件轮次冻结源失败 {}，拒绝把新保存并入本轮: {e:#}",
+                        job.path.display()
+                    )
+                })?
+        }
+        None => {
+            crate::data_interface::frozen_source::FrozenSource::capture(&job.path).map_err(|e| {
+                anyhow::anyhow!("打开冻结点 dabacon 冻结源失败 {}: {e}", job.path.display())
+            })?
+        }
+    };
     let file_latest_sesno = frozen.target_sesno() as i32;
     let file_name = job
         .path
@@ -2661,12 +3039,88 @@ fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
     })
 }
 
+/// Replace only a previously frozen round. A first capture failure has no
+/// trustworthy successor yet and is retried normally. Once the old token can
+/// no longer reopen but a new stable file generation can be captured, the old
+/// candidate is retired and a full-file reinitialization is queued behind the
+/// currently failing task.
+async fn schedule_frozen_source_replacement(
+    registry: &'static TaskRegistry,
+    scheduler: &'static BatchScheduler,
+    job: &FrozenBatch,
+    cause: &anyhow::Error,
+) -> anyhow::Result<Option<String>> {
+    let old_token = match job.frozen_source_token.clone() {
+        Some(token) => Some(token),
+        None => SideEffectCompensator::recover_collecting_file_round(job.dbnum)
+            .await?
+            .map(|(_, token)| token),
+    };
+    let Some(_old_token) = old_token else {
+        return Ok(None);
+    };
+    let replacement = crate::data_interface::frozen_source::FrozenSource::capture(&job.path)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "旧冻结源不可读后，当前文件也尚未形成可冻结的新世代 {}: {error:#}",
+                job.path.display()
+            )
+        })?;
+    anyhow::ensure!(
+        replacement.dbnum() as u32 == job.dbnum
+            && replacement.db_type().eq_ignore_ascii_case(&job.db_type),
+        "替代文件身份不匹配：任务 dbnum/type={}/{}, 当前={}/{}",
+        job.dbnum,
+        job.db_type,
+        replacement.dbnum(),
+        replacement.db_type()
+    );
+    let replacement_end = replacement.target_sesno() as i32;
+    SideEffectCompensator::replace_collecting_file_round(
+        job.dbnum,
+        job.end_sesno,
+        &replacement,
+        &format!("{cause:#}"),
+    )
+    .await?;
+
+    let first = if replacement_end == 0 { 0 } else { 1 };
+    let (first_pending_sesno_time, file_latest_sesno_time) =
+        crate::data_interface::manual_update::window_times_rfc3339(
+            &job.project,
+            &job.path,
+            first,
+            replacement_end,
+        );
+    let found = crate::data_interface::batch_scheduler::DiscoveredBatch {
+        project: job.project.clone(),
+        dbnum: job.dbnum,
+        db_type: replacement.db_type().to_string(),
+        phase: job.phase,
+        epoch_id: job.epoch_id,
+        intent: crate::data_interface::batch_queue::BatchIntent::Reinitialize,
+        path: job.path.clone(),
+        file_name: job.file_name.clone(),
+        applied_sesno: 0,
+        file_latest_sesno: replacement_end,
+        previous_observed_sesno: 0,
+        first_pending_sesno_time,
+        file_latest_sesno_time,
+    };
+    let outcome = scheduler.enqueue(registry, &found, false);
+    scheduler.record_frozen_source(job.dbnum, false, replacement.commit_token_json()?);
+    Ok(Some(format!(
+        "旧文件轮次已标记为被替代；完整重建 dbnum={} sesno={} 已排队（task {}）",
+        job.dbnum, replacement_end, outcome.info.task_id
+    )))
+}
+
 #[cfg(test)]
 #[test]
 fn assert_refresh_candidate_snapshot_contract() {
     let source = include_str!("batch_worker.rs");
     let body = source
-        .split_once("fn refresh_candidate(")
+        .split_once("async fn refresh_candidate(")
         .expect("refresh_candidate")
         .1
         .split_once("pub(crate) async fn publish_success")
@@ -2699,6 +3153,22 @@ async fn publish_sync(mgr: &Arc<AiosDBManager>, job: &FrozenBatch, _end_sesno: i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn task_receipt_exposes_the_final_model_verdict_and_caught_up_time() {
+        let receipt = DataBatchTaskResult {
+            project: "AvevaMarineSample".into(),
+            status: ManualUpdateStatus::Success,
+            batch: None,
+            units: Vec::new(),
+            warnings: Vec::new(),
+            model_verdict: Some("in_sync".into()),
+            model_caught_up_at: Some("2026-09-05T17:01:43Z".into()),
+        };
+        let json = serde_json::to_value(receipt).expect("task receipt serializes");
+        assert_eq!(json["model_verdict"], "in_sync");
+        assert_eq!(json["model_caught_up_at"], "2026-09-05T17:01:43Z");
+    }
 
     /// 预算式定窗只剩「配置值」一档（ADR-056：触顶收窄随暂存资源状态机退役）。
     ///
@@ -2763,6 +3233,7 @@ mod tests {
             start_sesno: 40,
             end_sesno: 90,
             previous_observed_sesno: 39,
+            frozen_source_token: Some("round-token".into()),
         };
         let found = window_remainder_batch(&job, 60, 90);
         assert_eq!(found.applied_sesno, 60, "左端 = 刚提交的水位");
@@ -2815,7 +3286,7 @@ mod tests {
             .find("committed_end_sesno < file_latest_sesno")
             .expect("提交后必须判断追平与否");
         let requeue = tail
-            .find("requeue_window_remainder(registry, job, committed_end_sesno, file_latest_sesno)")
+            .find("requeue_window_remainder(")
             .expect("没追平必须立刻重排余量");
         assert!(
             applied_only < caught_up && caught_up < requeue,
@@ -3384,15 +3855,10 @@ mod tests {
         );
     }
 
-    /// 执行入口不再有自己的写回 / 空间收敛 / 房间尾巴（ADR-056 P1；翻自
-    /// `committed_room_scope_runs_after_spatial_reconcile_and_window_drop`）。
+    /// 文件轮次完成后才允许空间发布和定向房间消费。
     ///
-    /// 直写路径的水位在 `apply_one` 的 `finalize_attempt` 尾事务里推进，空间收敛由
-    /// 派发门在下一次出队前做（`spatial_reconcile_is_the_gate_before_every_dequeue`），
-    /// 房间目标随 durable pending 交给空闲房间轮。执行入口若重新长出这些尾巴，就是
-    /// 第二条提交路径（ADR-011）。
     #[test]
-    fn the_executor_has_no_commit_tail_of_its_own() {
+    fn completed_file_round_publishes_spatial_before_rooms() {
         let source = include_str!("batch_worker.rs");
         let executor = source
             .split_once("async fn execute_frozen_batch(")
@@ -3401,20 +3867,38 @@ mod tests {
             .split_once("\nfn window_remainder_batch(")
             .expect("executor boundary")
             .0;
-        for forbidden in [
-            "commit_registered_to",
-            "reconcile_spatial_pending",
-            "drain_rooms_scoped",
-            "drop_window",
-            "preload_room_working_set",
-            "run_staged_room_work(",
-            "record_window_block_at",
-        ] {
-            assert!(
-                !executor.contains(forbidden),
-                "执行入口不得再有 `{forbidden}`（ADR-056 P1）: {executor}"
-            );
-        }
+        let completion = executor.find("let round_complete").expect("完成屏障");
+        let publish = executor
+            .find("publish_completed_file_round(")
+            .expect("文件完成后发布");
+        assert!(completion < publish, "发布必须受完成屏障保护: {executor}");
+
+        let helper = executor
+            .split_once("async fn publish_completed_file_round(")
+            .expect("发布帮助函数")
+            .1;
+        let spatial = helper
+            .find("reconcile_spatial_pending(mgr)")
+            .expect("空间发布");
+        let room_input = helper
+            .find("stage_published_room_input")
+            .expect("房间候选输入");
+        let room_topology = helper
+            .find("stage_candidate_room_topology")
+            .expect("房间候选拓扑");
+        let promote = helper.find("promote_file_round").expect("发布意图提升");
+        let clear = helper
+            .find("clear_deferred_room_edges")
+            .expect("发布后清边");
+        let rooms = helper.find("drain_rooms_scoped").expect("定向房间消费");
+        assert!(
+            room_input < room_topology && room_topology < promote && promote < spatial,
+            "房间候选必须完整落库后才能切换文件发布清单: {helper}"
+        );
+        assert!(
+            spatial < clear && clear < rooms,
+            "空间必须先于房间发布: {helper}"
+        );
     }
 
     fn unit_task(

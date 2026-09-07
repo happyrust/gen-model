@@ -9,6 +9,7 @@ pub mod events;
 mod handlers;
 /// MBD 管道尺寸标注端点（`/api/mbd/v2/pipe/{refno}`，前端契约路径，不在 `/api/v1` 下）。
 pub mod mbd;
+pub mod mesh_glb;
 mod ws;
 
 use std::path::PathBuf;
@@ -23,6 +24,7 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use crate::data_interface::direct_tree::DirectTreeProvider;
+use crate::data_interface::element_attributes::ElementAttributeProvider;
 use crate::data_interface::task_registry::TaskRegistry;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::query_service::{QueryError, QueryService};
@@ -94,6 +96,8 @@ pub struct AppState {
     pub queries: Arc<QueryService>,
     /// e3d-io backed tree reader. It stays lazy until a tree endpoint is used.
     pub direct_tree: DirectTreeProvider,
+    /// Complete file-side attributes and their bounded compatibility-backup queue.
+    pub element_attributes: ElementAttributeProvider,
 }
 
 /// 统一错误响应：`{ "code": ..., "message": ..., "detail": null }`（spec §3）。
@@ -195,7 +199,12 @@ impl ApiError {
     /// 领域层 `anyhow::Error` 的统一映射：`sync_live` 前置条件拒绝归为 422，其余 500。
     pub fn from_domain(error: anyhow::Error) -> Self {
         let message = format!("{error:#}");
-        if message.contains("sync_live") {
+        if matches!(
+            error.downcast_ref::<crate::data_interface::direct_store::DirectStoreError>(),
+            Some(crate::data_interface::direct_store::DirectStoreError::NoSuchElement { .. })
+        ) {
+            Self::not_found(message)
+        } else if message.contains("sync_live") {
             Self {
                 status: StatusCode::UNPROCESSABLE_ENTITY,
                 code: "precondition",
@@ -272,6 +281,15 @@ pub async fn serve(
         &identity.mdb,
     )?);
     let direct_tree = DirectTreeProvider::new(identity.project.clone(), identity.mdb.clone());
+    let element_attributes =
+        ElementAttributeProvider::new(identity.project.clone(), identity.mdb.clone());
+    if crate::options::data_face().is_read_through()
+        && let Err(error) = element_attributes.get().await
+    {
+        // Keep the HTTP service alive so health and structured endpoint errors
+        // remain available; the provider retries atomically on the next call.
+        log::error!("read-through attribute/UDA prewarm failed: {error:#}");
+    }
     let state = AppState {
         mgr,
         tasks: TaskRegistry::global(),
@@ -281,6 +299,7 @@ pub async fn serve(
         ui_root: ui_root.clone(),
         queries,
         direct_tree,
+        element_attributes,
     };
 
     // 面板有两份，说清这一次用的是哪一份。两份不一致时人只会相信屏幕上那一份，
@@ -297,6 +316,14 @@ pub async fn serve(
 
     let app = Router::new()
         .route("/api/v1/health", get(handlers::health))
+        .route(
+            "/api/v1/model-publish/jobs/{id}/replay",
+            post(handlers::model_publish_replay),
+        )
+        .route(
+            "/api/v1/model-publish/resume",
+            post(handlers::model_publish_resume),
+        )
         .route("/api/v1/update/preview", post(handlers::update_preview))
         .route("/api/v1/update/execute", post(handlers::update_execute))
         .route("/api/v1/update/pending-units", get(handlers::pending_units))
@@ -315,6 +342,12 @@ pub async fn serve(
             delete(handlers::model_delete_subtree),
         )
         .route("/api/v1/model/ensure", post(handlers::model_ensure))
+        .route("/api/v1/model/records", post(handlers::model_records))
+        .route(
+            "/api/v1/element/attributes",
+            post(handlers::element_attributes),
+        )
+        .route("/api/v1/element/ensure", post(handlers::element_ensure))
         .route(
             "/api/v1/model/history/generate",
             post(handlers::model_history_generate),
@@ -332,9 +365,13 @@ pub async fn serve(
             post(handlers::dbnum_model_rebuild),
         )
         .route("/api/v1/query", post(handlers::query))
+        .route("/api/v1/search", get(handlers::search))
         .route("/api/v1/tree/roots", get(handlers::tree_roots))
         .route("/api/v1/tree/children", get(handlers::tree_children))
         .route("/api/v1/tree/ancestors", get(handlers::tree_ancestors))
+        // 单位网格的 GLB 形态。与下面 `/assets` 的 ServeDir 是同一份 `.mesh` 的两种口径：
+        // 那条给 plant-ui（原生读 rkyv），这条给浏览器（只认 glTF）。
+        .route("/api/v1/meshes/{file}", get(handlers::mesh_glb))
         .route("/api/v1/dbnums", get(handlers::dbnums))
         .route(
             "/api/v1/dbnums/{dbnum}/data",
@@ -516,6 +553,24 @@ mod tests {
         }
     }
 
+    /// 浏览器端的网格口径：只读 GET，路径参数是 `{hash}.glb` 一整段（后缀在 handler 里剥，
+    /// 不在路由上拆——axum 的段匹配不认 `{hash}.glb` 这种半段模式）。
+    #[test]
+    fn mesh_glb_is_a_read_only_get_route_under_api_v1() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("pub async fn serve(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        assert!(
+            serve.contains(".route(\"/api/v1/meshes/{file}\", get(handlers::mesh_glb))"),
+            "missing mesh GLB GET route: {serve}"
+        );
+    }
+
     #[test]
     fn query_errors_have_stable_http_statuses() {
         for (code, status) in [
@@ -535,5 +590,19 @@ mod tests {
             });
             assert_eq!(error.status, status, "{code}");
         }
+    }
+
+    #[test]
+    fn a_deleted_direct_element_is_not_an_internal_server_error() {
+        let error = ApiError::from_domain(anyhow::Error::new(
+            crate::data_interface::direct_store::DirectStoreError::NoSuchElement {
+                refno: "24384_26291".into(),
+                dbnum: 8000,
+                sesno: Some(302),
+            },
+        ));
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.code, "not_found");
+        assert!(error.message.contains("24384_26291"));
     }
 }

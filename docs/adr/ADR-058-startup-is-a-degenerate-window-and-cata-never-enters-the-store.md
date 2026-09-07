@@ -10,7 +10,9 @@ DESI 数据」「初始化启动时，也需要限定监听的范围的，也是
 编排层 P1–P3 修复已落地（2026-09-03，`startup-orchestration-p1-p3-fix-plan` T1–T10）；S2 的 `/health` 半边已落地
 （`/health.initialization.startup` 带覆盖面与复核结果，横幅 / 界面半边未做）；**D8 的代码面已落地**（2026-09-04 S5-1～3：
 `sync_live` 不再被 `direct_read_mode` 钉住、启动序列删除 direct 专用的模型门 / 房间分支、实施约束 3 的护栏翻成
-`direct_read_mode_only_selects_the_data_read_route`；**未 live**，db 形态退役 / git tag 未做）；其余未实施。
+`direct_read_mode_only_selects_the_data_read_route`；**未 live**，db 形态退役 / git tag 未做）；**direct 已是默认读模式**
+（2026-09-04 10:27 用户拍板「AIOS_DATA_READ_MODE=direct 改成默认的，全部默认切换过来」：`AIOS_DATA_READ_MODE` 不设即 direct，
+只有显式 `=db` 才退回 legacy 读路由，认不出的值按未设置处理并出声——Q3 由此部分收口，变量本身留到 db 形态整体退役时一并删）；其余未实施。
 2026-09-04 审核与后续顺序见 `docs/plans/2026-09-04-startup-increment-audit-and-next-plan.md`）
 日期：2026-09-03
 关联：
@@ -55,7 +57,7 @@ ADR-056 / ADR-057 已经把**稳态增量窗口**搬到新架构上：`window_ro
 
 | # | 决策点 | 结论 |
 |---|---|---|
-| D1 | 持久层里还剩什么 | Surreal 只存两样：**模型面自己的状态**（`gen_root` 凭证与 CAS、产物行、mesh、`ref_rev`）与**增量摄入的 DESI 属性数据**。**CATA 不解析进持久层**——模型面经 `E3dDbResolver` 从文件读，级联判据不需要 CATA 行（见背景两条实测）。整库 CATA 基线、按需 CATA 闭包、惰性兜底、部分解析全部退役 |
+| D1 | 持久层里还剩什么 | Surreal 只存两样：**模型面自己的状态**（`gen_root` 凭证与 CAS、产物行、mesh、`ref_rev`）与**增量摄入的 DESI 属性数据**。**CATA 不解析进持久层**——模型面经 `E3dDbResolver` 从文件读，级联判据不需要 CATA 行（见背景两条实测）。整库 CATA 基线、按需 CATA 闭包、惰性兜底、部分解析全部退役。**2026-09-06 修订（ADR-064 D5）**：第三样是**DESI 依赖的 CATA 行**——每批 DESI 写回连带其目录链闭包（`CataClosureResolver`，容器白名单）里的 CATA 元素同批入库，`pe.dependency = true`，服务属性面板 / `ref_rev` / 依赖备份；整库 CATA 基线与惰性兜底仍退役，闭包解析器本身保留并收窄 |
 | D2 | CATA 变更的级联判据 | **ADR-008 的机制不变，换的只是触发源**。此前「变更的 CATA refno」来自 CATA 数据批次解出来的 `EleOperationData`；CATA 不再产生数据批次，改由**对 CATA 文件做会话索引差分**（`collect_window` 在该 CATA 的 `DbSet` 上，纯文件侧）得到。往下照旧：`ref_rev` 反查设计元素 → `cascade_expand` / 上卷到根 → 只重生成命中的根。`ref_rev` 覆盖不到时退到 `ModelTarget.catalogue` 指纹失配 → 该库全部根过期，**回执必须点名**（`catalogue_cascade_degraded`），不得静默 |
 | D3 | DESI 还做不做基线 | **做**。库第一次纳入时按 `1..file_latest` 整库解析，之后全是增量。因此 `applied_sesno`「该 dbnum 已整体落库的会话号上界」的原义，以及 ADR-021 的**数据支撑 / 空基线凭据 / 幽灵水位**三条判据，一个字不改。放弃基线省下的是一次性成本，换来的是把三条已经稳定的判据推倒重写——那不是轻便，是把复杂度从启动挪进每一次判断。**实施注记（2026-09-04）**：基线本身也收敛到 D4 那条路上了——`parse_pdms_db` 整体退役后它就是 e3d-io 的**退化窗口**（base 为空、target = 冻结目标会话），走 `e3d_collector::stream_baseline` + `versioned_db::baseline::render_baseline_batches`，与稳态窗口共用同一套枚举与同一份行渲染（`ele_ops::ElementRows`）；「做不做基线」这个决策不变，变的是它不再是第二条解析路 |
 | D4 | 启动的模型复核机制 | **收敛到与稳态窗口同一条路**：启动 = 一次退化的窗口，`S` = 该库 `gen_root.source_end_sesno` 的下限、`T` = 文件最新，跑同一个 `collect_window` + `touches_roots`，同一套四桶分流（regen / delete / advance / lazy）与同一套护栏。`sync_and_seed_model_coverage` 与 `fn::sync_gen_roots` 从启动路径下线；后者降为 `increment_planner_parity` 的对拍 oracle（ADR-056 约束 9 已经这么写） |
@@ -73,6 +75,10 @@ ADR-056 / ADR-057 已经把**稳态增量窗口**搬到新架构上：`window_ro
   启动路径全程零 `pe` / `pe_owner` 查询。
 - **S3 CATA 永不进持久层**：任何把 CATA 元素写进 `pe` / `ATT_*` 的路径都是边界破坏。CATA 只以
   **文件身份**（`ModelTarget.catalogue`）与**被引用 refno**（`ref_rev` 的 `out` 端）出现在库里。
+  **2026-09-06 修订（ADR-064 D5）**：收窄为「CATA **只按 DESI 依赖入库**」——每批 DESI 写回连带它目录链闭包里的
+  CATA 元素经 `element_batch`（`Fresh`）入 `pe` / `<NOUN>` / `ATT_UDA` / `pe_owner`，行带 `pe.dependency = true`，
+  每库一行 `cata_dependency_state`（不是水位）。仍是边界破坏的：整库 CATA 基线、CATA 进 `applied_sesno`、
+  `dependency = true` 以外的 CATA 行。模型面照旧从文件读（`E3dDbResolver`），本条不改 S2 / D4。
 - **S4 收窄不在扫描层**：候选库枚举、文件头读取、登记文件身份与同号重复裁决恒为全局；`watch_scope::admits`
   只出现在「观察 → 数据批次」与模型工作准入这两处。
 - **S5 启动不排从未生成过的根**：一窗（含启动这一窗）入 `model_update_pending` 的根数必须等于受影响根数，
@@ -96,6 +102,8 @@ ADR-056 / ADR-057 已经把**稳态增量窗口**搬到新架构上：`window_ro
    `watch_scope` 的 CATA 闭包分支（`cata_closure.rs:336/369/711`）、`preload_cata_for_roots` 的
    `enqueue_cata_ref_rev` 补偿（ADR-056 D8 追记）一并处理。CATA 的**文件身份裁决**（项目优先级、同号选主、
    `CataDbLocator`）**保留**——那是 `E3dDbResolver` 的输入，不是解析。
+   **2026-09-07**：`enqueue_cata_ref_rev` 补偿已退役（ADR-064 Q2；闭包解析器按 ADR-064 D5 保留并收窄，
+   目录行只由 `cata_dependency` 在水位之前落）。
 5. **D2 落地前不许宣称级联精确**：`ref_rev` 反查那条路没接上之前，CATA 变更走整库过期是**已知降级**，
    必须在回执与 `/health` 上有名字；不得因为「反正会重生成」就不报。
 6. **D3 不给自己开后门**：~~基线路径今天借 `staging` 目录的 `mem://` 读上下文（ADR-042 分块解析基线）。
@@ -142,3 +150,5 @@ ADR-056 / ADR-057 已经把**稳态增量窗口**搬到新架构上：`window_ro
   等有真实的首显时延投诉再议，不预先设计。
 - **Q3** D8 之后 db 形态退役，`AIOS_DATA_READ_MODE` 这个环境变量本身还有没有存在意义？倾向在 P4
   （ADR-056 的收集器换底座）收口时一并删掉，那时两条读路径合一。
+  **2026-09-04 部分收口**：direct 已是默认（`options::direct_read_mode()` 非显式 `db` 即 direct；`data_read_mode_notice()`
+  对认不出的值出声），变量只剩「显式退回 legacy」一个用途；整体删除仍与 db 形态退役 / git tag（refactor plan S5-4）一起收。
