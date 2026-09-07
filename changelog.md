@@ -2,6 +2,49 @@
 
 ## 2026-09-07
 
+### `UpdateScope` 库侧 MDB 表为空时回落到 SYS 文件声明——新项目首次启动不必再空跑一趟
+
+YCYK-E3D（`D:\AVEVA\Projects\E3D3.1\YCYK-E3D`，MDB `/SLYK`）首次初始化实测撞出来的：全新命名空间上
+第一趟只解析 SYS meta、设计库一个都不跑，要跑第二趟才拿得到真范围。但同一个进程在 **82 毫秒之前**
+已经把同一份名单读出来了——日志上这两行挨着：
+
+```
+13:30:26.451 MDB /SLYK / YCYK-E3D / module=DESI：声明 49 个库（按 STYP {1:10, 2:24, …}）
+13:30:26.533 [init] 库里还没有任何 MDB——存放 MDB/CURD 的 SYS meta 库尚未解析。本期只解析 SYS meta…
+```
+
+前一行是 `mdb_membership::resolve` 从 `<项目>sys` **文件**读的（e3d-io，不经持久层），后一行是
+`UpdateScope::fetch` 查 **SurrealDB 的 `MDB` 表**。两份名单的成员判据本来就同一个（文件侧
+`element_databases()` 过滤 `DESI_STYP | ISOD_STYP`，库侧 `MDB_DBNOS` 绑的 `element_db_types` 正是这两个值）。
+退化那条注释写的防死结理由（「想更新得先有范围、想有范围得先更新」）在 `init_mdb` 落地之后已经不成立：
+死结的另一头有出口了。
+
+- **改**：`interpret` 末尾加 `from_files: impl FnOnce() -> Option<Vec<u32>>`，**只在 `desi` 与 `known` 都空
+  那一档**求值；`finish` 的 `Ok` 分支传 `|| file_side_declared(&name)`；新增 `file_side_declared`
+  （`mdb_membership::get(project, name)` → `element_databases()` 的 dbnum）。
+- **只动一档**：库侧非空的三个出口（正常范围 / 名字打错 `bail` / 有这个 MDB 但没声明 DESI）一个字不看
+  文件侧。那三档库里是有内容的，拿文件侧去盖就成了「两个来源不一致时听文件的」，那是另一个决定，没做。
+- **用 `get` 不用 `resolve`**：看门狗事件路径缓存未命中时每隔几秒会走到这里，背后不能藏一次 SYS 库全树扫
+  （`mdb_membership::get` 自己的文档就是这么定的）。拿不到回 `None` → 维持退化行为；`run_cli` 里
+  `init_mdb` 失败只告警不中止，「没登记」是真会发生的状态。
+- **不串台**：`get` 按 `(project, mdb)` 精确匹配，所以「请求带的 MDB 名与配置不同」自然落空——拿配置那个
+  MDB 的名单去服务另一个 MDB 的请求，正是 `manual_update::update_scope` 明文要挡的东西。
+- **不静音**：回落成功换一句新 warning，说清名单取自 SYS 文件、几个设计库、SYS meta 一落库即切回库侧。
+- 空表不算回答：`init_mdb` 跑过但这个 MDB 一个设计库都没声明时，退化那句话才是对的。
+
+验证：`update_scope` **13 passed / 0 failed**（四个新用例，九个既有用例一字未改；
+`a_non_empty_store_never_consults_the_file_side` 给的 `from_files` 是个 `panic!`，库侧非空只要问一次就红）。
+**live 一趟到位**：全新 store，`watch_dbnums` 给 `/SLYK` 全部 10 个 DESI，只跑一趟——8 个 SYS meta 与
+10 个 DESI 同一次扫描入队，阶段屏障成立（`design 10/0/0/0/0`、`meta 8/0/0/0/0`），产物与两趟版**逐项相等**：
+`pe` 71896、`pe_owner` 83506、依赖行 5168、`gen_root` 2438、`inst_relate` / `aabb` / `trans` / `inst_info` /
+`geo_relate` / `tubi_relate` 全等，10 个库的三枚 sesno 全等，9 张 noun 属性表 5682 行整行 sha256 全等。
+回落那句 warning **只出现一次**，7 秒后的 `[scope-refresh]` 已从库侧解出同一份名单（自动切回是实测的）。
+全库 `cargo test --lib -- --test-threads 1` **1748 passed / 0 failed / 115 ignored**。
+计划与完整验收记录：`docs/plans/2026-09-07-update-scope-file-side-mdb-fallback-plan.md`。
+**本轮未追**：`fast_model::e3d_mesh_store::tests::damaged_existing_content_addressed_file_is_rejected`
+硬崩测试二进制（单独跑那一个模块也崩，与本改动无关，上面那条命令 `--skip` 掉了它）；
+`data_interface::project_paths` 那 12 个用例只在并行下红、串行与单独跑全绿（进程级共享状态互踩）。
+
 ### legacy 全量解析整条退役：`sync_pdms` 与 `total_sync` / `incr_sync` / `only_sync_sys` / `sync_history` 四个开关一起删掉（ADR-058 D8）
 
 用户拍板「先做第一步：删 total_sync 族与 sync_pdms」。**先清点存量**：30 份配置里 `total_sync` 全是 `false`

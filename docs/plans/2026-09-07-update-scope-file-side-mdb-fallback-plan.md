@@ -1,7 +1,8 @@
 # 方案：`UpdateScope` 库侧 MDB 表为空时回落到 SYS 文件声明
 
 > 日期：2026-09-07
-> 状态：**方案，未动代码。** 本文只到「怎么改、为什么这么改、怎么验」为止，实施要另行拍板。
+> 状态：**已实施并验收，见 §9。** §1–§7 是实施前写下的方案，一字未改地留着，好让「当时怎么想的」
+> 与「实际怎么样」能对照——尤其 §5 那两个风险，验收把它们答掉了。
 > 起因：YCYK-E3D 首次初始化实测（运行目录 `plant-1/runycyk1-bootstrap/`，binary `a0a076fc…`，
 > namespace `ycyk_init927_20260907_133017`）。新项目第一趟只解析 SYS meta、设计库一个都不跑，
 > 必须再跑第二趟才拿得到真范围。
@@ -189,3 +190,60 @@ UDA catalog 走 `mdb_memory_store::load` → `element_attributes::load_uda_catal
 - 4 个 BRAN 生成根因目录件缺失卡在 `generation_hold`（`db 7004 会话 3 的索引里没有 15196/40431` 一族，
   另有 `db 212 会话 5 的索引里没有 16596/35338`），且这 4 个把两个初始化发布 run 拖住不收口，
   8 个库的 `model_sesno` 因此一直是 null。**这一条与本方案无关，需要单独立项。**
+
+## 9. 实施与验收（2026-09-07 下午）
+
+改动落在 `src/data_interface/update_scope.rs` 一个文件：`interpret` 末尾加 `from_files: impl FnOnce()`
+入参（**`FnOnce` 不是取好的值**——库侧非空的三个出口不该为它付任何代价）、`finish` 的 `Ok` 分支传
+`|| file_side_declared(&name)`、新增 `file_side_declared`、四个新单测。别的文件一行未动，
+`mdb_membership` 现有的 `get` 与 `element_databases()` 直接够用，没加 accessor。
+
+§6 的五步逐条：
+
+**1–2 纯函数单测（过）**：`cargo test --release --lib update_scope` → **13 passed / 0 failed / 2 ignored**。
+新增四个：库侧空 + 文件侧有 → 用文件侧；文件侧 `None` → 与今天逐字相同；文件侧空表 → 同上（空表不算回答）；
+`a_non_empty_store_never_consults_the_file_side` 把「只动一档」钉死——它给的 `from_files` 是个 `panic!`，
+库侧非空的三个出口只要问一次文件侧就红。九个既有用例一个没改。
+
+**3 一趟到位（过，R1 答掉）**：全新 store + 全新 namespace，`watch_dbnums` 给全部 10 个 DESI，**只跑一趟**
+（运行目录 `plant-1/runycyk2-onepass/`，端口 18095/18096，binary `cff3bbf4…`）。第一次扫描就把
+8 个 SYS meta 与 10 个 DESI 一起排进队列，日志上是这一句：
+
+```
+14:00:44.853 [init] 库侧 MDB 表还是空的（SYS meta 尚未摄入），本轮执行范围改取自 SYS 库文件里 /SLYK 的声明：10 个设计库。SYS meta 一落库即自动切回库侧名单
+```
+
+阶段屏障成立：`phases` 收在 `design {total:10, pending:0, running:0, failed:0, blocked:0}` /
+`meta {total:8, 同上}`。**这一句只出现了一次**——7 秒后的 `[scope-refresh]` 轮已经从库侧解出同一份名单
+（10 个 dbnum 全判「已覆盖」），D5 的「自动切回」是实测过的，不是推断。
+
+**3 的数字判据（过）**：与两趟版（`runycyk1-bootstrap`）逐项对齐，`plant-1/compare_runs.py`：
+
+| | 两趟 | 一趟 |
+|---|---|---|
+| `pe` / 按 dbnum 分布 | 71896 | 一致 |
+| `pe_owner` 边 | 83506 | 一致 |
+| 依赖入库的 `pe`（`dependency = true`） | 5168 | 一致 |
+| `gen_root` / 按 `publication_status` | 2438 | 一致 |
+| `inst_relate` / `aabb` / `trans` / `inst_info` / `geo_relate` / `tubi_relate` / `inst_geo` | — | 全部一致 |
+| 10 个 `applied_sesno` / `model_sesno` / `file_latest_sesno` | — | 全部一致 |
+| `cata_dependency_state` | — | 一致（`updated_at` 等墙钟字段剔除后） |
+
+**4 属性载荷（过，R2 答掉）**：这个项目 `ATT_UDA` 两边都是 0 行——**它压根没有 UDA**，所以「对一次 UDA」
+在这个语料上是空判据，不能算数。改对**按 noun 的属性行整行**（ADR-064：元素行落 `pe` / `<NOUN>` / `ATT_UDA`，
+没有 UDA 时属性就全在 `<NOUN>` 表里）：`BRAN`(1363) / `ELBO`(2228) / `SCTN`(1201) / `PIPE`(637) /
+`EQUI`(122) / `ZONE`(101) / `SITE`(19) / `GENSEC`(11) / `TUBI`(0)，共 5682 行**整行取 sha256 比对，全等**。
+比计数强的地方在这儿：计数对得上而每个值都错的情况，整行比对抓得住。
+
+**5 不回归（过）**：`cargo test --release --lib -- --test-threads 1 --skip damaged_existing_content_addressed_file_is_rejected`
+→ **1748 passed / 0 failed / 115 ignored**。没跑活 AMS 一轮：库侧非空那条路本方案根本进不去，
+第 1 步那个 `panic!` 闭包已经在纯函数层把它钉死，而重跑 7997 要动用户正在跑的服务。
+
+### 顺带撞上、与本方案无关的两件事
+
+- `fast_model::e3d_mesh_store::tests::damaged_existing_content_addressed_file_is_rejected`
+  **硬崩测试二进制**（`STATUS_ACCESS_VIOLATION` / `0xc0000005`）。**单独跑那一个模块也崩**，
+  所以与本方案无关（`update_scope` 根本不在那条路上）。是新回归还是本机 mesh 目录的状态所致，没追。
+  它是上面那条 `--skip` 的原因。
+- `data_interface::project_paths` 那 12 个用例**只在并行下红**（`--test-threads 2/4` 全红、
+  单独跑 16/16 绿、`--test-threads 1` 全绿）。典型的进程级共享状态互踩，同样与本方案无关。

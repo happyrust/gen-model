@@ -495,7 +495,10 @@ mod tests {
         })
         .expect("回落不是错误出口");
 
-        assert_eq!(scope.declared_desi().collect::<Vec<_>>(), [5107, 5525, 7015]);
+        assert_eq!(
+            scope.declared_desi().collect::<Vec<_>>(),
+            [5107, 5525, 7015]
+        );
         assert!(scope.admits("DESI", 5525));
         assert!(!scope.admits("DESI", 8000), "回落的是那份声明，不是不设限");
         let warning = scope.warning().expect("换了口径就必须出声");
@@ -512,7 +515,10 @@ mod tests {
             UpdateScope::interpret("/SLYK".into(), vec![], vec![], || None).expect("不该 bail");
 
         assert_eq!(scope.declared_desi().count(), 0);
-        assert!(scope.admits("SYST", 8191), "SYS meta 照常解析，把名单建起来");
+        assert!(
+            scope.admits("SYST", 8191),
+            "SYS meta 照常解析，把名单建起来"
+        );
         assert!(!scope.admits("DESI", 5525), "设计库一个都不跑");
         assert!(
             scope.warning().is_some_and(|w| w.contains("再跑一次")),
@@ -546,7 +552,10 @@ mod tests {
         // 名字打错：照旧 bail，不许被文件侧救回来。
         let err = UpdateScope::interpret("/SLYK".into(), vec!["/OTHER".into()], vec![], loud)
             .expect_err("名字不存在必须报错");
-        assert!(err.to_string().contains("/OTHER"), "错误要列出实际有的：{err}");
+        assert!(
+            err.to_string().contains("/OTHER"),
+            "错误要列出实际有的：{err}"
+        );
 
         // 库侧解出了名单：连问都不问。
         let scope = UpdateScope::interpret("/SLYK".into(), vec!["/SLYK".into()], vec![8000], loud)
