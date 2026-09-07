@@ -544,3 +544,52 @@ L1836-1962、`drawtag` L3717-4060）、`isobran.getfromltor` L1794-1958 与 `add
 
 A. 按上面做 polar-lite（Phase 5 ⑥′，一笔 plant-mbd 提交 + 金样再审）；B. 整体移植 Polar（另立计划，3–4k 行）；C. 维持现状，
 先做 ⑤ 角度 / ⑦ 调整焊，Polar 等浏览器目测之后再说。
+
+## Phase 5 ⑤（2026-09-07）：角度——契约扩展设计稿 + 第 ①② 步落地，第 ③ 步 `angle.rs` 等 ⑥′
+
+设计稿（PML 逐行事实、契约字段表、被否决方案、七条拍板）在 plant3d-web
+`docs/plans/2026-09-07-mbd-v2-angle-arc-contract-extension-design.md`（`ae862c8`）；放前端仓是因为契约守门人是前端（ADR 0043 / 0046）、
+D7 要求前端先发。七条 2026-09-07 全按建议收：度 / 扁平六字段 / 腿打包 `leg_lines` / 方向小字用 `aid_text` / `sweep = 360` 允许但整圆
+一律 `aid_circle` / `CONTRACT_INCOMPLETE_KINDS` 删除 / `getgoodradiusfrombadradiuss` L1018 覆盖问题按注释意图修正（取第一个够宽的空隙）。
+
+### 读 PML 的结论（`isobran.getinstallationangles` L2563-2612、`getmemP3dirangle` L2635-2757、`isombdangle.pmlobj`、`isoline.drawangle` L2848-2937）
+
+- 只看非 ATTA / ELBO / BEND、且 P3 不在流路上（`arrive / leave ≠ 3`）的构件；取不到 `p3 dir` 跳过；P3 落在 P1 轴线上要 `p3 bore` 非零。
+- 两种角，容差 0.1°：**tilt**（`angle(p1dir, p3dir)` 偏离 90° 在 (0.1, 89.9) 内；> 90 换 `p2dir`）与 **rotation**（`p3dir` 投到垂直管轴的平面，
+  与 `±xdir / ±ydir` 最近轴的夹角；最小夹角 < 30° 时改用次近轴——「太窄放不下文字」）。一个构件可以同时出两条。
+- `anglepos = pos + dir2·aod/2/|cos(angle(adir, dir2))|`（几何上不是管面交点，照搬）；文字 `'d1'` 去尾零 + `°`；
+  两个方向小字 `gettext`（E/N/U → X/Y/Z，`E 45 N` → `X 45° Y`）。
+- 画：半径无障碍 `textlen/2`，有障碍 `getgoodradiusfrombadradiuss`；两条腿 `anglepos → + dir·(radius + cheight/2)`；
+  弧 `arc(anglepos, ori(x = dir1, z = dir1 × dir2), 0, angle, radius)`；角度文字与两个小字进占位表，弧和腿不进；
+  `putIntoIsoline` 把角度插到直段对象表最前（角度先画、主尺寸绕它）。
+
+### 契约（前端 `40dd2e5` ADR 0055 ↔ plant-mbd `b6f6583` ADR-0011，同版）
+
+三 kind 共用 PML `AIDARC` 1:1 的扁平弧框架 `center / x_axis / normal / radius / start_angle_deg / sweep_angle_deg`（度；正扫角从
+`x_axis` 转向 `normal × x_axis`；`0 < sweep ≤ 360`；`radius > 0`；轴非零），`aid_circle` 只带 `center / normal / radius`，
+`angle_dim` 另带 `text / leg_lines / label_anchor`（文字中心）/ `sub_kind`（`tilt | rotation`），`aid_arc` / `aid_circle` 可带 `style`。
+**契约自带 `x_axis`**：内核弧的 0° 是 `stablePlaneBasis(normal).u` 的私有规则，不能钉进对外契约；前端适配层用 `atan2(x·v, x·u) + start`
+换算起始角，`source_to_design` 对 `center` 走点变换、轴只旋转归一、`radius` 取变换后长度。前端 `CONTRACT_INCOMPLETE_KINDS` 退役，
+11 kind 全部可画；plant-mbd `fixtures/contract/full-coverage.json` 复制自前端，`contract_guard` 经 JSON 文本回环（契约几何是 `f32`）+
+11 kind 全覆盖守卫。
+
+### 六条现有金样：零角度（按 PML 规则实算）
+
+带 P3 的非 ATTA / ELBO / BEND 构件只有 OLET `145032`、VALV `145035`（`24381_145018`）与 VALV `26236`（`24384_26229`），全部
+`angle(P1, P3) = 90.00°` 且 P3 正落在参考轴上 → 一条不出。所以 ③ 接上后 `golden diff` 六条不变，求解器验证要靠 toy fixture
+`p3-installation-angles.json` 八例（倾 30° / 倾 120° 换 P2 / 转 45° / 转 20° 改次近轴 / 90° 正轴不出 / 轴上无 bore 不出 /
+`arrive = 3` 不出 / 有主尺寸时角度先进表）+ 真实候选 `24381_177565`（`mbd_branch_dump` 导出后再看有没有偏转手轮）。
+
+### 第 ③ 步的依赖
+
+`angle.rs` 的角度文字要进占位表、半径有障碍时走占位表元素代替 `getdiseles`，接线点在 `layout_isoline` 的 `seed_members` 之后、
+主尺寸 `best_placement` 之前——这些都是 ⑥′ polar-lite（`occupancy.rs`，未提交）的东西；宿主只缺 `PPoint.bore`（e3d-model
+`RoutePoint.bore` 已有）。所以 ③ 排在 ⑥′ 落地之后。
+
+### 验证
+
+- plant3d-web：`npx vitest run src/dimension src/api/mbdV2Api.test.ts src/composables/useMbdExternalSync.test.ts` 52 文件 / 259 用例通过；
+  `vue-tsc --noEmit` 零错误；eslint 改动文件零告警。
+- plant-mbd：`cargo test --workspace` lib 98 + contract_guard 5 通过（golden_regression 1 失败是工作树里 ⑥′ 未提交改动所致，金样里没有弧类 kind）；
+  `rustfmt --check` 通过；gen-model 不构造这三个变体，worktree `cargo check --tests` 通过。
+- 未验证：浏览器目测（还没有会产出 `angle_dim` 的后端）；PML 图纸人工对照。

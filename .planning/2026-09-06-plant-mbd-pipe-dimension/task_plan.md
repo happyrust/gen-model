@@ -165,13 +165,16 @@ old/vendor/plant-mbd ── 纯求解器 ──►  old/gen-model  src/mbd/ (e3d
 
 ### Phase 5 — 几何伴生符号与非尺寸图元（分期立项，每项到时细化）
 
-状态：**in-progress**（① ATTA 子尺寸 complete 2026-09-07 plant-mbd `2d7ca54`；② 坡度 + 斜管分解 complete 2026-09-07 plant-mbd `da4868e`；③ 焊缝 complete 2026-09-07 plant-mbd `43c9882`；④ 位号标签 complete 2026-09-07 plant-mbd `844ce0e`；见 `findings.md`「Phase 5 ①②③④」）
+状态：**in-progress**（① ATTA 子尺寸 complete 2026-09-07 plant-mbd `2d7ca54`；② 坡度 + 斜管分解 complete 2026-09-07 plant-mbd `da4868e`；③ 焊缝 complete 2026-09-07 plant-mbd `43c9882`；④ 位号标签 complete 2026-09-07 plant-mbd `844ce0e`；⑤ 角度契约扩展 ①② 落地 2026-09-07（plant3d-web `40dd2e5`、plant-mbd `b6f6583`），③ `angle.rs` 待 ⑥′ polar-lite；见 `findings.md`「Phase 5 ①②③④⑥⑤」）
 
 - [x] **① ATTA 子尺寸**（`isoline.getAttaDims` L1054-1222）：每个 ATTA 归到从上一主尺寸点起步的 attaDim（落在已有 attaDim 内加进它、否则近者归属），子尺寸第 1 行、同 dimdir、`sub_kind = "atta"`；有 attaDim 的直段主尺寸 `dimtimes = 2`（`twoormoredims`）；ATTA 排在首点前放弃直段（`isodim.atta_before_first_point`）；偏轴且 apos 解不出的 ATTA 静默不进点。三条金样再录（`99996` +2、`145018` +6、`26229` 5+1，其第 4 袋折线管路的 4403.29 消失）。按 SPCO 名字的两侧取点未做。
 - [x] **② 坡度 + 斜管分解**（2026-09-07，plant-mbd `da4868e`，ADR-0007）：`isoSlope` 三角形 → 斜边 `slope_mark` + 两条 `aid_line`（坡度 [0.001, 0.1]、长度 ≥ 外径的直管，TUBI/FTUB 同角色，坡度按几何算）；`isoDim.dimOneMemSlope` / `dimslope` → 斜管（轴离最近世界轴 > 5.71°）主尺寸首末点间 X/Y/Z 分解腿 `aid_line` + 整数腿长 `aid_text`（`X:/Y:/Z:` 前缀）+ 直角标。五条金样再录。契约零改动。
 - [x] **③ 焊缝**（2026-09-07，plant-mbd `43c9882`，ADR-0008）：显式 WELD 成员 → `weld_mark`（`DTXR` 含 SHOP → shop，否则 field）；编号（UDA `:ZD_WLDN`）由宿主给、有才出 `label` + 远时 `leader_line`；按连接类型补焊点 / 顺序编号是仪表管路径，不做；ATTA / KD 焊缝未迁。宿主读 `DTXR` / `:ZD_WLDN`。`26229` 金样 +1 weld_mark。
 - [x] **④ 位号 / 信息标签**（2026-09-07，plant-mbd `844ce0e`，ADR-0009）：`isoTag` 系 + `gettags` / `geteltag` / `getbranmlabel` 的文字与锚点照搬（Head / Tail / TEE / OLET 连接标签、ATTA 位号、BEND 角度 + 弯曲半径 + 标高、ELBO 角度 + 标高、元件名、直通不水平管件标高、管道名称），每条 `label`（多行 `\n`）+ `leader_line`；摆位取 `drawtag` 半径带起点、方向取尺寸方向反侧（无 Polar）；拐角件按 `putIntoIsoline` 归更水平的袋。宿主给 `name` / `stext` / `connection` 与 BRAN 级 `name` / `:ZD_GDWJ` / HREF / TREF。六条金样再录。支架材料标签 / 仪表管 / `:YKSX` / PCOM 未迁。
-- [ ] ⑤ 角度 `getinstallationangles` + `isombdangle` → **需契约扩展** `angle_dim` / `aid_arc` 几何（PML `aidarc`：pos / ori / radius / stangle / sweepAngle ↔ 前端 `ExplicitArcInput`），两侧同版（D7）
+- [ ] ⑤ 角度 `getinstallationangles` + `isombdangle` → 契约扩展 `angle_dim` / `aid_arc` / `aid_circle` 几何，两侧同版（D7），三步走（设计稿 plant3d-web `docs/plans/2026-09-07-mbd-v2-angle-arc-contract-extension-design.md`，七条待拍板 2026-09-07 全按建议收）：
+  - [x] ① 前端契约 + 映射 + fixtures + 测试（2026-09-07，plant3d-web `40dd2e5`，ADR 0055）：三 kind 共用 PML `AIDARC` 1:1 的扁平弧框架 `center / x_axis / normal / radius / start_angle_deg / sweep_angle_deg`（度、自带 `x_axis`、右手扫角），`angle_dim` 显式几何（+ `leg_lines / label_anchor / sub_kind`），`CONTRACT_INCOMPLETE_KINDS` 退役；259 用例通过。
+  - [x] ② plant-mbd `contract.rs` 同步（2026-09-07，plant-mbd `b6f6583`，ADR-0011）：三个变体补字段；`fixtures/contract/full-coverage.json` 复制自前端、`contract_guard` 经 JSON 文本回环 + 11 kind 全覆盖；求解器仍不产出。
+  - [ ] ③ `angle.rs`（`collect_installation_angles` tilt / rotation、`anglepos` 照搬、半径无障碍 `textlen/2` / 有障碍走占位表且按注释意图取第一个够宽空隙）+ 宿主 `PPoint.bore` + toy fixture `p3-installation-angles.json` 八例（六条现有金样实算零角度，`golden diff` 不变）+ 真实候选 `24381_177565` 复核；**依赖 ⑥′ polar-lite（`occupancy.rs`）先落地**。ATTA 角度不做。
 - [ ] ⑥ Polar 生产路径（`usepolarsystem = true`）：**评估已做**（2026-09-07，`findings.md`「Phase 5 ⑥」）——`polarsystem` 活路径 ~1950 行 + `getpolarelement` ~2400 行，核心是每条直段一张圆柱坐标占位表（含上一条直段画出的全部对象）+ 距离 / 角度 / 半径三维加权搜索（`getDirAndCha` / `weightedweight`）+ 为固定视角出图服务的看图方向体系（`lookangle` / `fromltor` / `prehoridir` / `textori`）。尺寸数值 / 尺寸点 / 行数不受影响，只影响部分袋的尺寸侧与标签分布。建议不整体切换，抽「占位表 + 加权选向选环」做 polar-lite（`occupancy.rs`，600–900 行）；**待拍板 A / B / C**
 - [ ] ⑦ 调整焊 `getadjustwelds`；⑧ PCOM / tee-olet 切段（`isoteeline.pmlobj`）
 
