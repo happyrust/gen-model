@@ -275,3 +275,45 @@ AvevaMarineSample 里 Head 比首根管低 80 mm 的支管不止一条（`99996`
 - 三条金样 wire 体经 plant3d-web `parseMbdV2PipeData`：**ACCEPTED**（`sub_kind main` / `layout_mode isodim_main`
   / `cheight_mm` 都是自由字段，0 diagnostics）。前端 `PARTIAL_LAYOUT_MODES` 只含 `linear_mvp`，警示条不再触发。
 - **未验证**：PML 图纸人工对照仍待 E3D 开同一批 BRAN（ADR-0005）；浏览器目测仍待用户起服务（Phase 2）。
+
+## Phase 5 ①（2026-09-07）：ATTA 子尺寸（`getAttaDims`），主尺寸按 `twoormoredims` 升第 2 行
+
+plant-mbd `2d7ca54`。数据来源不变：全部来自 e3d-io / e3d-model 直读（不查数据库）。
+
+### 口径（`isoline.getAttaDims` L1054-1222 → `isodim.rs::collect_atta_dims`）
+
+- 逐个 ATTA（袋序 = 文件序）：`attadis` = 原点沿管轴到直段起点的有向距离。
+  1. 落在某条已有 attaDim 首末点之间 → 加进它；在某条之后 → 记最近的那条（`goodindex`）。
+  2. 否则找主尺寸里第一个比它远的点：排在第一个主点之前 → PML 报「请检查 ATTA 位置 / 顺序」、放弃整条直段
+     （Polar 路径 `getIsoDims` L422-426 先 `getAttaDims` 再 append 主尺寸，所以主尺寸也没了）；离上一主点比离最近
+     attaDim 末点近 → 从那个主点新开一条（`isoDim.copy(index−1, atta)`，点 = [主点, ATTA]）。
+  3. 都不是：比最近 attaDim 末点更近的是主尺寸最后一点 → ATTA 加进**主尺寸**；否则加进最近的 attaDim。
+- ATTA 进点走 `isoDim.addmem(mem)` 普通分支（原点）。L637-643：原点偏轴超 `od·2/3` 且 `apos of $!mem` 解不出
+  （目录链走不到 P 点）→ `return true`——**静默不进点**；有 apos 的水平直段上两端口都偏 → 打「请检查」跳过
+  （`isodim.member_off_axis`）。站点 ATTA 用真端口，穿过件用 P1 / P2 当 apos / lpos。
+- `twoormoredims` = attaDims 非空（L1213，**不看它有没有两个点**）→ 主尺寸 `dimtimes = 2`（`drawOneObjectNew`
+  L4179-4186）；子尺寸 `drawSub(this.dimdir, …, 1)`：第 1 行、与主尺寸同一个 dimdir（`isoori(gooddimdirs,
+  goodchardirs)` + 给定 dimdir，L1283-1287 不再选向）；至少两点且首末 > 1 mm 才画（L1216-1220）。
+- isoline 级 `changeCheightAuto`（L1822-1834）看主 + 子尺寸全部 ISODIM 对象的 `getgoodcheight` 取最小。
+- **两处容差**（PML 是逐位比较，库里的浮点噪声会误报）：「ATTA 在第一主点之前」比较加 0.01 mm（`possunique`
+  同量级；`99996` 第 11 袋 BEND `100022` 的 ldir 带 1.96e-8 的 y 分量，乘 500 mm 横向偏移 = −1e-5 → 差点放弃整条）；
+  `flowDirtoUangle eq 90` 放 0.01°（`26229` 第 4 袋 89.9998°；1:1000 坡管 0.057° 不受影响）。
+- 未做：按 SPCO 名字分派的 `*STE*` / `*TC*` / `*TD*` / `*TE*` / `*TF*` / `*Tuser*` 两侧取点（L896-920，
+  `p101dir` / `para[9]` / `desp[3]`）——没有 SPCO 名字，按原点一个点。
+
+### 金样再审（三条变）
+
+| 金样 | 变化 | 备注 |
+|---|---|---|
+| `24383_99996` | 6 → 6 + 2 | 第 3 袋子尺寸 [拐点 100007, A9, A11] = 96.4 + 1400，主升第 2 行；第 11 袋 A23 / A25 挂在离轴 700 mm 的结构上、目录链走不到 → 静默不进点，但 attaDim 已建 → 主 271.5 在第 2 行、第 1 行空着（PML 怪癖照搬） |
+| `24381_145018` | 12 → 12 + 6 | 六个支撑各一条「上一拐点→支撑」子尺寸（480 / 1257.56 / 1035.51 / 907.52 / 1650 / 402），六个袋主升第 2 行 |
+| `24384_26229` | 6 → 5 + 1 | 第 2 袋子尺寸 300、主升第 2 行；ATTA `26237` 在阀门上方 529 mm → 跳过留痕。**第 4 袋 4403.29 消失**：袋轴从 ELBO `26239` 朝东北出发，管子沿 +X 到达 BEND `26246`（中间在两个穿过件 ATTA 处折了两次，E3D 也不画跨过它的管身 `implied_tube_not_drawn`）；水平判定放容差后 PML 的偏轴检查在这个 89.9998° 的袋上生效、跳过 BEND → 那个数本来是折线的压缩投影 |
+
+`76191` / `100028` / `91813` 没有 ATTA，不变。
+
+### 验证
+
+- plant-mbd `cargo test --workspace` **75 通过**（70 lib + 4 + 1，新增 4 条 ATTA 用例：接力子尺寸 + 主升第 2 行、
+  靠后主点新开一条、无 ATTA 仍第 1 行、ATTA 在首点前放弃直段）；`golden diff` 6/6；clippy 新代码零告警。
+- gen-model worktree `mbd_branch_query` 4/4（真库 `99996`：6 main + 2 atta）、`mbd_http_endpoint` 1/1。
+- 三条金样 wire 体经 plant3d-web `parseMbdV2PipeData` ACCEPTED（`sub_kind = atta` 自由字段，箭头内置）。

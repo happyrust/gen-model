@@ -2,7 +2,7 @@
 
 > 计划 ID：`2026-09-06-plant-mbd-pipe-dimension`
 > 创建：2026-09-06
-> 状态：**in-progress**（plannotator 门禁 2026-09-06 approved，见 `gate_result.json`；Phase 0/1 complete，Phase 2 端点与 HTTP 门已过、浏览器目测待用户起服务，Phase 3 金样六条已固化，Phase 4 线性尺寸已按 PML isoDim 模型重做并重录金样（2026-09-07），PML 图纸人工对照待做；事实与裁决见 `findings.md`）
+> 状态：**in-progress**（plannotator 门禁 2026-09-06 approved，见 `gate_result.json`；Phase 0/1 complete，Phase 2 端点与 HTTP 门已过、浏览器目测待用户起服务，Phase 3 金样六条已固化，Phase 4 线性尺寸已按 PML isoDim 模型重做并重录金样（2026-09-07），Phase 5 ① ATTA 子尺寸已落地（2026-09-07），PML 图纸人工对照待做；事实与裁决见 `findings.md`）
 > 需求（用户 2026-09-06）：新建库 `plant-mbd`，实现 `old/vendor/MBD` 里的 MBD 尺寸标注能力；**第一目标：管道尺寸标注**；经本仓（gen-model）API 提供 JSON，由 `old/plant3d-web` 加载显示。
 > 权威：PML 事实源 `old/vendor/MBD/markpipe/**`、`old/vendor/MBD/object/mbd/**`；前端契约 `old/plant3d-web/src/dimension/adapters/mbdV2Contract.ts`（plant3d-web ADR 0041/0043/0046）；先行 Rust 实现 `D:\work\plant-code\rs-mbd`（`contract.rs` / `split_isolines.rs` / `direction.rs` / `layout.rs` + fixtures，HEAD `b6b1027`）；本仓 ADR-053（direct 读）、ADR-054（默认时点 = 文件最新）、ADR-057（e3d-model 纯模型面，gen-model 持状态与副作用）、ADR-059（池级元素缓存）。
 > 范围：`old/vendor/plant-mbd`（新仓）+ `old/gen-model`（数据适配层 + HTTP 端点）+ `old/plant3d-web`（首发零代码，只用 URL 参数；契约扩展期才改映射）。
@@ -165,9 +165,15 @@ old/vendor/plant-mbd ── 纯求解器 ──►  old/gen-model  src/mbd/ (e3d
 
 ### Phase 5 — 几何伴生符号与非尺寸图元（分期立项，每项到时细化）
 
-状态：proposed
+状态：**in-progress**（① ATTA 子尺寸 complete 2026-09-07，plant-mbd `2d7ca54`，见 `findings.md`「Phase 5 ①」）
 
-顺序沿 rs-mbd Phase 5 与 PML 依赖：① 坡度 `getSlopes` + `dimslope` → `slope_mark`（契约已有几何）② 焊缝 `getwelds` / `isoWeldText` → `weld_mark` ③ 位号 / 材料标签 `getbranmlabel`（L5323）/ `isoTag` → `label` + `leader_line`（先作布局障碍，后输出）④ 角度 `getinstallationangles` + `isombdangle` → **需契约扩展** `angle_dim` / `aid_arc` 几何（PML `aidarc`：pos / ori / radius / stangle / sweepAngle ↔ 前端 `ExplicitArcInput`），两侧同版（D7）⑤ Polar 邻段 `addtopreornextpolarsystem` ⑥ 调整焊 `getadjustwelds` ⑦ PCOM / tee-olet 切段（`isoteeline.pmlobj`）。
+- [x] **① ATTA 子尺寸**（`isoline.getAttaDims` L1054-1222）：每个 ATTA 归到从上一主尺寸点起步的 attaDim（落在已有 attaDim 内加进它、否则近者归属），子尺寸第 1 行、同 dimdir、`sub_kind = "atta"`；有 attaDim 的直段主尺寸 `dimtimes = 2`（`twoormoredims`）；ATTA 排在首点前放弃直段（`isodim.atta_before_first_point`）；偏轴且 apos 解不出的 ATTA 静默不进点。三条金样再录（`99996` +2、`145018` +6、`26229` 5+1，其第 4 袋折线管路的 4403.29 消失）。按 SPCO 名字的两侧取点未做。
+- [ ] ② 坡度 `getSlopes` + `dimslope` → `slope_mark`（契约已有几何）
+- [ ] ③ 焊缝 `getwelds` / `isoWeldText` → `weld_mark`
+- [ ] ④ 位号 / 材料标签 `getbranmlabel`（L5323）/ `isoTag` → `label` + `leader_line`（先作布局障碍，后输出）
+- [ ] ⑤ 角度 `getinstallationangles` + `isombdangle` → **需契约扩展** `angle_dim` / `aid_arc` 几何（PML `aidarc`：pos / ori / radius / stangle / sweepAngle ↔ 前端 `ExplicitArcInput`），两侧同版（D7）
+- [ ] ⑥ Polar 生产路径（`usepolarsystem = true`）：`polarsystem.getBestPosAndOri` 选向 + `addtopreornextpolarsystem` 邻段，评估与当前非 Polar 选向的差距再决定是否切换
+- [ ] ⑦ 调整焊 `getadjustwelds`；⑧ PCOM / tee-olet 切段（`isoteeline.pmlobj`）
 
 约束：每项落地前先冻结对应 V2 契约几何；新 kind 上线顺序：契约 + 前端映射同版发布 → 求解器开始产出。
 
