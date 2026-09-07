@@ -1,0 +1,4805 @@
+{
+  "dirs": [
+    "D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000",
+    "D:/AVEVA/Projects/E3D3.1/AvevaPlantSample/aps000",
+    "D:/AVEVA/Projects/E3D3.1/ZDJ/ZDJ000",
+    "D:/AVEVA/Projects/E3D3.1/YCYK-E3D/acw000",
+    "D:/AVEVA/Projects/E3D3.1/TEST/TES000"
+  ],
+  "nouns": [
+    "ELCONN",
+    "CWBRAN",
+    "CTRAY",
+    "CABLE",
+    "CWAY",
+    "CNODE",
+    "HATTA",
+    "TATTA",
+    "RATTA",
+    "RNODE",
+    "POINTR",
+    "PULLN",
+    "EQUI",
+    "SUBE",
+    "ELFITT",
+    "BUNDLE",
+    "CTSTRA",
+    "CTBEND"
+  ],
+  "scanned_desi_files": 486,
+  "skipped_files": 450,
+  "totals": {
+    "CABLE": {
+      "instances": 116,
+      "descendants": 1308,
+      "primitive_descendants": 1308,
+      "max_subtree": 16,
+      "self_primitive": 116,
+      "uncovered": 1308,
+      "uncovered_primitive": 1308,
+      "inner_roots": 0
+    },
+    "CNODE": {
+      "instances": 3,
+      "descendants": 0,
+      "primitive_descendants": 0,
+      "max_subtree": 0,
+      "self_primitive": 3,
+      "uncovered": 0,
+      "uncovered_primitive": 0,
+      "inner_roots": 0
+    },
+    "CTBEND": {
+      "instances": 289,
+      "descendants": 289,
+      "primitive_descendants": 289,
+      "max_subtree": 1,
+      "self_primitive": 289,
+      "uncovered": 289,
+      "uncovered_primitive": 289,
+      "inner_roots": 0
+    },
+    "CTRAY": {
+      "instances": 2623,
+      "descendants": 92,
+      "primitive_descendants": 92,
+      "max_subtree": 4,
+      "self_primitive": 2623,
+      "uncovered": 92,
+      "uncovered_primitive": 92,
+      "inner_roots": 0
+    },
+    "CTSTRA": {
+      "instances": 2511,
+      "descendants": 4746,
+      "primitive_descendants": 4200,
+      "max_subtree": 5,
+      "self_primitive": 2511,
+      "uncovered": 2562,
+      "uncovered_primitive": 2562,
+      "inner_roots": 546
+    },
+    "CWAY": {
+      "instances": 187,
+      "descendants": 26157,
+      "primitive_descendants": 18625,
+      "max_subtree": 1177,
+      "self_primitive": 0,
+      "uncovered": 0,
+      "uncovered_primitive": 0,
+      "inner_roots": 1699
+    },
+    "CWBRAN": {
+      "instances": 1699,
+      "descendants": 24458,
+      "primitive_descendants": 16926,
+      "max_subtree": 159,
+      "self_primitive": 1699,
+      "uncovered": 22274,
+      "uncovered_primitive": 15288,
+      "inner_roots": 546
+    },
+    "ELCONN": {
+      "instances": 1607,
+      "descendants": 0,
+      "primitive_descendants": 0,
+      "max_subtree": 0,
+      "self_primitive": 1607,
+      "uncovered": 0,
+      "uncovered_primitive": 0,
+      "inner_roots": 0
+    },
+    "EQUI": {
+      "instances": 4070,
+      "descendants": 314852,
+      "primitive_descendants": 147472,
+      "max_subtree": 6110,
+      "self_primitive": 0,
+      "uncovered": 24464,
+      "uncovered_primitive": 21424,
+      "inner_roots": 9681
+    },
+    "HATTA": {
+      "instances": 1695,
+      "descendants": 0,
+      "primitive_descendants": 0,
+      "max_subtree": 0,
+      "self_primitive": 0,
+      "uncovered": 0,
+      "uncovered_primitive": 0,
+      "inner_roots": 0
+    },
+    "POINTR": {
+      "instances": 12926,
+      "descendants": 0,
+      "primitive_descendants": 0,
+      "max_subtree": 0,
+      "self_primitive": 12926,
+      "uncovered": 0,
+      "uncovered_primitive": 0,
+      "inner_roots": 0
+    },
+    "RATTA": {
+      "instances": 349,
+      "descendants": 0,
+      "primitive_descendants": 0,
+      "max_subtree": 0,
+      "self_primitive": 0,
+      "uncovered": 0,
+      "uncovered_primitive": 0,
+      "inner_roots": 0
+    },
+    "RNODE": {
+      "instances": 2943,
+      "descendants": 0,
+      "primitive_descendants": 0,
+      "max_subtree": 0,
+      "self_primitive": 2943,
+      "uncovered": 0,
+      "uncovered_primitive": 0,
+      "inner_roots": 0
+    },
+    "SUBE": {
+      "instances": 9039,
+      "descendants": 193784,
+      "primitive_descendants": 110210,
+      "max_subtree": 2440,
+      "self_primitive": 0,
+      "uncovered": 178152,
+      "uncovered_primitive": 103861,
+      "inner_roots": 41
+    },
+    "TATTA": {
+      "instances": 1695,
+      "descendants": 0,
+      "primitive_descendants": 0,
+      "max_subtree": 0,
+      "self_primitive": 0,
+      "uncovered": 0,
+      "uncovered_primitive": 0,
+      "inner_roots": 0
+    }
+  },
+  "per_db": [
+    {
+      "dbnum": 251050,
+      "file": "ams251050_0001",
+      "sesno": 10,
+      "elements": 36829,
+      "nouns": {
+        "ELCONN": {
+          "instances": 16,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 16,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251097,
+      "file": "ams251097_0001",
+      "sesno": 9,
+      "elements": 3010,
+      "nouns": {
+        "EQUI": {
+          "instances": 25,
+          "descendants": 2980,
+          "primitive_descendants": 460,
+          "max_subtree": 224,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 25
+        }
+      }
+    },
+    {
+      "dbnum": 251099,
+      "file": "ams251099_0001",
+      "sesno": 9,
+      "elements": 2771,
+      "nouns": {
+        "EQUI": {
+          "instances": 16,
+          "descendants": 2744,
+          "primitive_descendants": 388,
+          "max_subtree": 352,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 16
+        }
+      }
+    },
+    {
+      "dbnum": 251100,
+      "file": "ams251100_0001",
+      "sesno": 9,
+      "elements": 204,
+      "nouns": {
+        "EQUI": {
+          "instances": 1,
+          "descendants": 199,
+          "primitive_descendants": 43,
+          "max_subtree": 199,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 1
+        }
+      }
+    },
+    {
+      "dbnum": 251102,
+      "file": "ams251102_0001",
+      "sesno": 9,
+      "elements": 1287,
+      "nouns": {
+        "EQUI": {
+          "instances": 19,
+          "descendants": 1263,
+          "primitive_descendants": 244,
+          "max_subtree": 255,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 19
+        }
+      }
+    },
+    {
+      "dbnum": 251104,
+      "file": "ams251104_0001",
+      "sesno": 9,
+      "elements": 40508,
+      "nouns": {
+        "EQUI": {
+          "instances": 46,
+          "descendants": 40438,
+          "primitive_descendants": 3335,
+          "max_subtree": 6110,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 46
+        }
+      }
+    },
+    {
+      "dbnum": 251107,
+      "file": "ams251107_0001",
+      "sesno": 11,
+      "elements": 989,
+      "nouns": {
+        "EQUI": {
+          "instances": 16,
+          "descendants": 968,
+          "primitive_descendants": 149,
+          "max_subtree": 102,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 16
+        }
+      }
+    },
+    {
+      "dbnum": 251109,
+      "file": "ams251109_0001",
+      "sesno": 9,
+      "elements": 823,
+      "nouns": {
+        "ELCONN": {
+          "instances": 105,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 105,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 30,
+          "descendants": 785,
+          "primitive_descendants": 329,
+          "max_subtree": 260,
+          "self_primitive": 0,
+          "uncovered": 252,
+          "uncovered_primitive": 252,
+          "inner_roots": 22
+        }
+      }
+    },
+    {
+      "dbnum": 251110,
+      "file": "ams251110_0001",
+      "sesno": 9,
+      "elements": 1580,
+      "nouns": {
+        "ELCONN": {
+          "instances": 122,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 122,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 37,
+          "descendants": 1537,
+          "primitive_descendants": 440,
+          "max_subtree": 260,
+          "self_primitive": 0,
+          "uncovered": 241,
+          "uncovered_primitive": 241,
+          "inner_roots": 32
+        }
+      }
+    },
+    {
+      "dbnum": 251111,
+      "file": "ams251111_0001",
+      "sesno": 9,
+      "elements": 1827,
+      "nouns": {
+        "ELCONN": {
+          "instances": 160,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 160,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 48,
+          "descendants": 1771,
+          "primitive_descendants": 512,
+          "max_subtree": 260,
+          "self_primitive": 0,
+          "uncovered": 299,
+          "uncovered_primitive": 299,
+          "inner_roots": 40
+        }
+      }
+    },
+    {
+      "dbnum": 251112,
+      "file": "ams251112_0001",
+      "sesno": 9,
+      "elements": 4731,
+      "nouns": {
+        "ELCONN": {
+          "instances": 131,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 131,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 54,
+          "descendants": 4669,
+          "primitive_descendants": 957,
+          "max_subtree": 260,
+          "self_primitive": 0,
+          "uncovered": 345,
+          "uncovered_primitive": 345,
+          "inner_roots": 44
+        }
+      }
+    },
+    {
+      "dbnum": 251113,
+      "file": "ams251113_0001",
+      "sesno": 9,
+      "elements": 5214,
+      "nouns": {
+        "ELCONN": {
+          "instances": 134,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 134,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 52,
+          "descendants": 5154,
+          "primitive_descendants": 1095,
+          "max_subtree": 1010,
+          "self_primitive": 0,
+          "uncovered": 245,
+          "uncovered_primitive": 245,
+          "inner_roots": 45
+        }
+      }
+    },
+    {
+      "dbnum": 251114,
+      "file": "ams251114_0001",
+      "sesno": 11,
+      "elements": 2781,
+      "nouns": {
+        "ELCONN": {
+          "instances": 200,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 200,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 33,
+          "descendants": 2737,
+          "primitive_descendants": 692,
+          "max_subtree": 352,
+          "self_primitive": 0,
+          "uncovered": 100,
+          "uncovered_primitive": 100,
+          "inner_roots": 33
+        }
+      }
+    },
+    {
+      "dbnum": 251115,
+      "file": "ams251115_0001",
+      "sesno": 11,
+      "elements": 7185,
+      "nouns": {
+        "ELCONN": {
+          "instances": 153,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 153,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 85,
+          "descendants": 7067,
+          "primitive_descendants": 2968,
+          "max_subtree": 872,
+          "self_primitive": 0,
+          "uncovered": 222,
+          "uncovered_primitive": 215,
+          "inner_roots": 81
+        }
+      }
+    },
+    {
+      "dbnum": 251116,
+      "file": "ams251116_0001",
+      "sesno": 12,
+      "elements": 2893,
+      "nouns": {
+        "ELCONN": {
+          "instances": 92,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 92,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 35,
+          "descendants": 2854,
+          "primitive_descendants": 1692,
+          "max_subtree": 265,
+          "self_primitive": 0,
+          "uncovered": 180,
+          "uncovered_primitive": 138,
+          "inner_roots": 33
+        }
+      }
+    },
+    {
+      "dbnum": 251117,
+      "file": "ams251117_0001",
+      "sesno": 12,
+      "elements": 11736,
+      "nouns": {
+        "CWAY": {
+          "instances": 1,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "ELCONN": {
+          "instances": 98,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 98,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 157,
+          "descendants": 11571,
+          "primitive_descendants": 3341,
+          "max_subtree": 2699,
+          "self_primitive": 0,
+          "uncovered": 246,
+          "uncovered_primitive": 225,
+          "inner_roots": 151
+        },
+        "SUBE": {
+          "instances": 5,
+          "descendants": 48,
+          "primitive_descendants": 36,
+          "max_subtree": 28,
+          "self_primitive": 0,
+          "uncovered": 48,
+          "uncovered_primitive": 36,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251142,
+      "file": "ams251142_0001",
+      "sesno": 10,
+      "elements": 948,
+      "nouns": {
+        "CTBEND": {
+          "instances": 18,
+          "descendants": 18,
+          "primitive_descendants": 18,
+          "max_subtree": 1,
+          "self_primitive": 18,
+          "uncovered": 18,
+          "uncovered_primitive": 18,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 128,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 128,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 96,
+          "descendants": 96,
+          "primitive_descendants": 96,
+          "max_subtree": 1,
+          "self_primitive": 96,
+          "uncovered": 96,
+          "uncovered_primitive": 96,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 4,
+          "descendants": 940,
+          "primitive_descendants": 688,
+          "max_subtree": 559,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 61
+        },
+        "CWBRAN": {
+          "instances": 61,
+          "descendants": 879,
+          "primitive_descendants": 627,
+          "max_subtree": 42,
+          "self_primitive": 61,
+          "uncovered": 879,
+          "uncovered_primitive": 627,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 61,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 172,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 172,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 16,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 138,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 138,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 61,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251144,
+      "file": "ams251144_0001",
+      "sesno": 11,
+      "elements": 1843,
+      "nouns": {
+        "CTBEND": {
+          "instances": 11,
+          "descendants": 11,
+          "primitive_descendants": 11,
+          "max_subtree": 1,
+          "self_primitive": 11,
+          "uncovered": 11,
+          "uncovered_primitive": 11,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 140,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 140,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 115,
+          "descendants": 114,
+          "primitive_descendants": 114,
+          "max_subtree": 1,
+          "self_primitive": 115,
+          "uncovered": 114,
+          "uncovered_primitive": 114,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 26,
+          "descendants": 1812,
+          "primitive_descendants": 1184,
+          "max_subtree": 159,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 172
+        },
+        "CWBRAN": {
+          "instances": 172,
+          "descendants": 1640,
+          "primitive_descendants": 1012,
+          "max_subtree": 29,
+          "self_primitive": 172,
+          "uncovered": 1640,
+          "uncovered_primitive": 1012,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 172,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 386,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 386,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 10,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 173,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 173,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 172,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251145,
+      "file": "ams251145_0001",
+      "sesno": 10,
+      "elements": 1081,
+      "nouns": {
+        "CTBEND": {
+          "instances": 13,
+          "descendants": 13,
+          "primitive_descendants": 13,
+          "max_subtree": 1,
+          "self_primitive": 13,
+          "uncovered": 13,
+          "uncovered_primitive": 13,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 97,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 97,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 69,
+          "descendants": 68,
+          "primitive_descendants": 68,
+          "max_subtree": 1,
+          "self_primitive": 69,
+          "uncovered": 68,
+          "uncovered_primitive": 68,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 14,
+          "descendants": 1062,
+          "primitive_descendants": 755,
+          "max_subtree": 367,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 79
+        },
+        "CWBRAN": {
+          "instances": 79,
+          "descendants": 983,
+          "primitive_descendants": 676,
+          "max_subtree": 50,
+          "self_primitive": 79,
+          "uncovered": 983,
+          "uncovered_primitive": 676,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 79,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 216,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 216,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 10,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 186,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 186,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 79,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251146,
+      "file": "ams251146_0001",
+      "sesno": 10,
+      "elements": 867,
+      "nouns": {
+        "CTBEND": {
+          "instances": 11,
+          "descendants": 11,
+          "primitive_descendants": 11,
+          "max_subtree": 1,
+          "self_primitive": 11,
+          "uncovered": 11,
+          "uncovered_primitive": 11,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 82,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 82,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 58,
+          "descendants": 58,
+          "primitive_descendants": 58,
+          "max_subtree": 1,
+          "self_primitive": 58,
+          "uncovered": 58,
+          "uncovered_primitive": 58,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 12,
+          "descendants": 850,
+          "primitive_descendants": 610,
+          "max_subtree": 169,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 64
+        },
+        "CWBRAN": {
+          "instances": 64,
+          "descendants": 786,
+          "primitive_descendants": 546,
+          "max_subtree": 54,
+          "self_primitive": 64,
+          "uncovered": 786,
+          "uncovered_primitive": 546,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 64,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 170,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 170,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 8,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 148,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 148,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 64,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251149,
+      "file": "ams251149_0001",
+      "sesno": 10,
+      "elements": 1295,
+      "nouns": {
+        "CTRAY": {
+          "instances": 88,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 88,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 88,
+          "descendants": 88,
+          "primitive_descendants": 88,
+          "max_subtree": 1,
+          "self_primitive": 88,
+          "uncovered": 88,
+          "uncovered_primitive": 88,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 12,
+          "descendants": 1278,
+          "primitive_descendants": 776,
+          "max_subtree": 124,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 138
+        },
+        "CWBRAN": {
+          "instances": 138,
+          "descendants": 1140,
+          "primitive_descendants": 638,
+          "max_subtree": 10,
+          "self_primitive": 138,
+          "uncovered": 1140,
+          "uncovered_primitive": 638,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 138,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 276,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 276,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 48,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 48,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 138,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251150,
+      "file": "ams251150_0001",
+      "sesno": 10,
+      "elements": 957,
+      "nouns": {
+        "CTBEND": {
+          "instances": 1,
+          "descendants": 1,
+          "primitive_descendants": 1,
+          "max_subtree": 1,
+          "self_primitive": 1,
+          "uncovered": 1,
+          "uncovered_primitive": 1,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 75,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 75,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 73,
+          "descendants": 68,
+          "primitive_descendants": 68,
+          "max_subtree": 1,
+          "self_primitive": 73,
+          "uncovered": 68,
+          "uncovered_primitive": 68,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 12,
+          "descendants": 938,
+          "primitive_descendants": 603,
+          "max_subtree": 210,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 87
+        },
+        "CWBRAN": {
+          "instances": 87,
+          "descendants": 851,
+          "primitive_descendants": 516,
+          "max_subtree": 18,
+          "self_primitive": 87,
+          "uncovered": 851,
+          "uncovered_primitive": 516,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 87,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 189,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 189,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 3,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 85,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 85,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 87,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251151,
+      "file": "ams251151_0001",
+      "sesno": 10,
+      "elements": 1830,
+      "nouns": {
+        "CTBEND": {
+          "instances": 19,
+          "descendants": 19,
+          "primitive_descendants": 19,
+          "max_subtree": 1,
+          "self_primitive": 19,
+          "uncovered": 19,
+          "uncovered_primitive": 19,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 174,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 174,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 118,
+          "descendants": 118,
+          "primitive_descendants": 118,
+          "max_subtree": 1,
+          "self_primitive": 118,
+          "uncovered": 118,
+          "uncovered_primitive": 118,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 16,
+          "descendants": 1807,
+          "primitive_descendants": 1245,
+          "max_subtree": 373,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 136
+        },
+        "CWBRAN": {
+          "instances": 136,
+          "descendants": 1671,
+          "primitive_descendants": 1109,
+          "max_subtree": 50,
+          "self_primitive": 136,
+          "uncovered": 1671,
+          "uncovered_primitive": 1109,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 136,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 356,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 356,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 48,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 268,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 268,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 136,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251153,
+      "file": "ams251153_0001",
+      "sesno": 9,
+      "elements": 839,
+      "nouns": {
+        "CTBEND": {
+          "instances": 6,
+          "descendants": 6,
+          "primitive_descendants": 6,
+          "max_subtree": 1,
+          "self_primitive": 6,
+          "uncovered": 6,
+          "uncovered_primitive": 6,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 80,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 80,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 68,
+          "descendants": 101,
+          "primitive_descendants": 92,
+          "max_subtree": 5,
+          "self_primitive": 68,
+          "uncovered": 65,
+          "uncovered_primitive": 65,
+          "inner_roots": 9
+        },
+        "CWAY": {
+          "instances": 2,
+          "descendants": 579,
+          "primitive_descendants": 430,
+          "max_subtree": 555,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 33
+        },
+        "CWBRAN": {
+          "instances": 33,
+          "descendants": 546,
+          "primitive_descendants": 397,
+          "max_subtree": 34,
+          "self_primitive": 33,
+          "uncovered": 510,
+          "uncovered_primitive": 370,
+          "inner_roots": 9
+        },
+        "ELCONN": {
+          "instances": 24,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 24,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 30,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 79,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 79,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 9,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 78,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 78,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 30,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251154,
+      "file": "ams251154_0001",
+      "sesno": 10,
+      "elements": 1778,
+      "nouns": {
+        "CTBEND": {
+          "instances": 10,
+          "descendants": 10,
+          "primitive_descendants": 10,
+          "max_subtree": 1,
+          "self_primitive": 10,
+          "uncovered": 10,
+          "uncovered_primitive": 10,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 129,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 129,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 147,
+          "descendants": 328,
+          "primitive_descendants": 282,
+          "max_subtree": 5,
+          "self_primitive": 147,
+          "uncovered": 144,
+          "uncovered_primitive": 144,
+          "inner_roots": 46
+        },
+        "CWAY": {
+          "instances": 2,
+          "descendants": 1769,
+          "primitive_descendants": 1193,
+          "max_subtree": 982,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 116
+        },
+        "CWBRAN": {
+          "instances": 116,
+          "descendants": 1653,
+          "primitive_descendants": 1077,
+          "max_subtree": 41,
+          "self_primitive": 116,
+          "uncovered": 1469,
+          "uncovered_primitive": 939,
+          "inner_roots": 46
+        },
+        "HATTA": {
+          "instances": 116,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 261,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 261,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 28,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 209,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 209,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 116,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251155,
+      "file": "ams251155_0001",
+      "sesno": 10,
+      "elements": 1841,
+      "nouns": {
+        "CTBEND": {
+          "instances": 7,
+          "descendants": 7,
+          "primitive_descendants": 7,
+          "max_subtree": 1,
+          "self_primitive": 7,
+          "uncovered": 7,
+          "uncovered_primitive": 7,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 90,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 90,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 174,
+          "descendants": 617,
+          "primitive_descendants": 506,
+          "max_subtree": 5,
+          "self_primitive": 174,
+          "uncovered": 173,
+          "uncovered_primitive": 173,
+          "inner_roots": 111
+        },
+        "CWAY": {
+          "instances": 3,
+          "descendants": 1830,
+          "primitive_descendants": 1320,
+          "max_subtree": 1028,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 91
+        },
+        "CWBRAN": {
+          "instances": 91,
+          "descendants": 1739,
+          "primitive_descendants": 1229,
+          "max_subtree": 154,
+          "self_primitive": 91,
+          "uncovered": 1295,
+          "uncovered_primitive": 896,
+          "inner_roots": 111
+        },
+        "HATTA": {
+          "instances": 91,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 208,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 208,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 34,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 194,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 194,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 91,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251156,
+      "file": "ams251156_0001",
+      "sesno": 10,
+      "elements": 1309,
+      "nouns": {
+        "CTBEND": {
+          "instances": 21,
+          "descendants": 21,
+          "primitive_descendants": 21,
+          "max_subtree": 1,
+          "self_primitive": 21,
+          "uncovered": 21,
+          "uncovered_primitive": 21,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 147,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 147,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 92,
+          "descendants": 93,
+          "primitive_descendants": 92,
+          "max_subtree": 5,
+          "self_primitive": 92,
+          "uncovered": 89,
+          "uncovered_primitive": 89,
+          "inner_roots": 1
+        },
+        "CWAY": {
+          "instances": 4,
+          "descendants": 1297,
+          "primitive_descendants": 907,
+          "max_subtree": 922,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 94
+        },
+        "CWBRAN": {
+          "instances": 94,
+          "descendants": 1203,
+          "primitive_descendants": 813,
+          "max_subtree": 39,
+          "self_primitive": 94,
+          "uncovered": 1199,
+          "uncovered_primitive": 810,
+          "inner_roots": 1
+        },
+        "HATTA": {
+          "instances": 93,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 244,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 244,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 21,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 174,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 174,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 93,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251157,
+      "file": "ams251157_0001",
+      "sesno": 11,
+      "elements": 2092,
+      "nouns": {
+        "CTBEND": {
+          "instances": 21,
+          "descendants": 21,
+          "primitive_descendants": 21,
+          "max_subtree": 1,
+          "self_primitive": 21,
+          "uncovered": 21,
+          "uncovered_primitive": 21,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 141,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 141,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 195,
+          "descendants": 543,
+          "primitive_descendants": 455,
+          "max_subtree": 5,
+          "self_primitive": 195,
+          "uncovered": 191,
+          "uncovered_primitive": 191,
+          "inner_roots": 88
+        },
+        "CWAY": {
+          "instances": 11,
+          "descendants": 2071,
+          "primitive_descendants": 1463,
+          "max_subtree": 478,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 122
+        },
+        "CWBRAN": {
+          "instances": 122,
+          "descendants": 1949,
+          "primitive_descendants": 1341,
+          "max_subtree": 99,
+          "self_primitive": 122,
+          "uncovered": 1597,
+          "uncovered_primitive": 1077,
+          "inner_roots": 88
+        },
+        "HATTA": {
+          "instances": 122,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 281,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 281,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 12,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 212,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 212,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 122,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251158,
+      "file": "ams251158_0001",
+      "sesno": 11,
+      "elements": 1923,
+      "nouns": {
+        "CTBEND": {
+          "instances": 15,
+          "descendants": 15,
+          "primitive_descendants": 15,
+          "max_subtree": 1,
+          "self_primitive": 15,
+          "uncovered": 15,
+          "uncovered_primitive": 15,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 100,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 100,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 189,
+          "descendants": 643,
+          "primitive_descendants": 528,
+          "max_subtree": 5,
+          "self_primitive": 189,
+          "uncovered": 183,
+          "uncovered_primitive": 183,
+          "inner_roots": 115
+        },
+        "CWAY": {
+          "instances": 9,
+          "descendants": 1905,
+          "primitive_descendants": 1395,
+          "max_subtree": 528,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 93
+        },
+        "CWBRAN": {
+          "instances": 93,
+          "descendants": 1812,
+          "primitive_descendants": 1302,
+          "max_subtree": 127,
+          "self_primitive": 93,
+          "uncovered": 1352,
+          "uncovered_primitive": 957,
+          "inner_roots": 115
+        },
+        "HATTA": {
+          "instances": 93,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 222,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 222,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 19,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 206,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 206,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 93,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251159,
+      "file": "ams251159_0001",
+      "sesno": 11,
+      "elements": 2434,
+      "nouns": {
+        "CTBEND": {
+          "instances": 25,
+          "descendants": 25,
+          "primitive_descendants": 25,
+          "max_subtree": 1,
+          "self_primitive": 25,
+          "uncovered": 25,
+          "uncovered_primitive": 25,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 202,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 202,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 243,
+          "descendants": 631,
+          "primitive_descendants": 533,
+          "max_subtree": 5,
+          "self_primitive": 243,
+          "uncovered": 239,
+          "uncovered_primitive": 239,
+          "inner_roots": 98
+        },
+        "CWAY": {
+          "instances": 14,
+          "descendants": 2407,
+          "primitive_descendants": 1724,
+          "max_subtree": 1019,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 138
+        },
+        "CWBRAN": {
+          "instances": 138,
+          "descendants": 2269,
+          "primitive_descendants": 1586,
+          "max_subtree": 159,
+          "self_primitive": 138,
+          "uncovered": 1877,
+          "uncovered_primitive": 1292,
+          "inner_roots": 98
+        },
+        "HATTA": {
+          "instances": 138,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 328,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 328,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 31,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 222,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 222,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 138,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251160,
+      "file": "ams251160_0001",
+      "sesno": 11,
+      "elements": 1539,
+      "nouns": {
+        "CTBEND": {
+          "instances": 25,
+          "descendants": 25,
+          "primitive_descendants": 25,
+          "max_subtree": 1,
+          "self_primitive": 25,
+          "uncovered": 25,
+          "uncovered_primitive": 25,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 139,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 139,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 148,
+          "descendants": 342,
+          "primitive_descendants": 292,
+          "max_subtree": 5,
+          "self_primitive": 148,
+          "uncovered": 142,
+          "uncovered_primitive": 142,
+          "inner_roots": 50
+        },
+        "CWAY": {
+          "instances": 7,
+          "descendants": 1523,
+          "primitive_descendants": 1128,
+          "max_subtree": 873,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 81
+        },
+        "CWBRAN": {
+          "instances": 81,
+          "descendants": 1442,
+          "primitive_descendants": 1047,
+          "max_subtree": 65,
+          "self_primitive": 81,
+          "uncovered": 1242,
+          "uncovered_primitive": 897,
+          "inner_roots": 50
+        },
+        "HATTA": {
+          "instances": 81,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 215,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 215,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 17,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 217,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 217,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 81,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 251161,
+      "file": "ams251161_0001",
+      "sesno": 10,
+      "elements": 1482,
+      "nouns": {
+        "CTBEND": {
+          "instances": 18,
+          "descendants": 18,
+          "primitive_descendants": 18,
+          "max_subtree": 1,
+          "self_primitive": 18,
+          "uncovered": 18,
+          "uncovered_primitive": 18,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 139,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 139,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 134,
+          "descendants": 242,
+          "primitive_descendants": 214,
+          "max_subtree": 5,
+          "self_primitive": 134,
+          "uncovered": 130,
+          "uncovered_primitive": 130,
+          "inner_roots": 28
+        },
+        "CWAY": {
+          "instances": 3,
+          "descendants": 1472,
+          "primitive_descendants": 1011,
+          "max_subtree": 1177,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 100
+        },
+        "CWBRAN": {
+          "instances": 100,
+          "descendants": 1372,
+          "primitive_descendants": 911,
+          "max_subtree": 48,
+          "self_primitive": 100,
+          "uncovered": 1260,
+          "uncovered_primitive": 827,
+          "inner_roots": 28
+        },
+        "HATTA": {
+          "instances": 100,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 229,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 229,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 20,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 160,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 160,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 100,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 7997,
+      "file": "ams7997_0001",
+      "sesno": 155,
+      "elements": 170050,
+      "nouns": {
+        "EQUI": {
+          "instances": 995,
+          "descendants": 68623,
+          "primitive_descendants": 34553,
+          "max_subtree": 3691,
+          "self_primitive": 0,
+          "uncovered": 2752,
+          "uncovered_primitive": 2531,
+          "inner_roots": 4007
+        },
+        "SUBE": {
+          "instances": 4007,
+          "descendants": 61864,
+          "primitive_descendants": 32022,
+          "max_subtree": 2141,
+          "self_primitive": 0,
+          "uncovered": 61864,
+          "uncovered_primitive": 32022,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 7997,
+      "file": "ams7997_0001.codex-before-d03-delete-20260727",
+      "sesno": 83,
+      "elements": 143223,
+      "nouns": {
+        "EQUI": {
+          "instances": 992,
+          "descendants": 68540,
+          "primitive_descendants": 34519,
+          "max_subtree": 3691,
+          "self_primitive": 0,
+          "uncovered": 2669,
+          "uncovered_primitive": 2497,
+          "inner_roots": 4007
+        },
+        "SUBE": {
+          "instances": 4007,
+          "descendants": 61864,
+          "primitive_descendants": 32022,
+          "max_subtree": 2141,
+          "self_primitive": 0,
+          "uncovered": 61864,
+          "uncovered_primitive": 32022,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 7999,
+      "file": "ams7999_0001",
+      "sesno": 191,
+      "elements": 34707,
+      "nouns": {
+        "EQUI": {
+          "instances": 90,
+          "descendants": 4309,
+          "primitive_descendants": 1730,
+          "max_subtree": 3691,
+          "self_primitive": 0,
+          "uncovered": 622,
+          "uncovered_primitive": 622,
+          "inner_roots": 28
+        },
+        "SUBE": {
+          "instances": 28,
+          "descendants": 3659,
+          "primitive_descendants": 1108,
+          "max_subtree": 2141,
+          "self_primitive": 0,
+          "uncovered": 3659,
+          "uncovered_primitive": 1108,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 8000,
+      "file": "ams8000_0001",
+      "sesno": 379,
+      "elements": 6637,
+      "nouns": {
+        "ELCONN": {
+          "instances": 34,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 34,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 76,
+          "descendants": 79,
+          "primitive_descendants": 79,
+          "max_subtree": 2,
+          "self_primitive": 0,
+          "uncovered": 79,
+          "uncovered_primitive": 79,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 8000,
+      "file": "ams8000_0001.codex-before-move-20260724",
+      "sesno": 26,
+      "elements": 11695,
+      "nouns": {
+        "ELCONN": {
+          "instances": 34,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 34,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 77,
+          "descendants": 141,
+          "primitive_descendants": 137,
+          "max_subtree": 62,
+          "self_primitive": 0,
+          "uncovered": 79,
+          "uncovered_primitive": 79,
+          "inner_roots": 4
+        },
+        "SUBE": {
+          "instances": 4,
+          "descendants": 58,
+          "primitive_descendants": 58,
+          "max_subtree": 30,
+          "self_primitive": 0,
+          "uncovered": 58,
+          "uncovered_primitive": 58,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250110,
+      "file": "aps250110_0001",
+      "sesno": 32,
+      "elements": 26187,
+      "nouns": {
+        "EQUI": {
+          "instances": 9,
+          "descendants": 221,
+          "primitive_descendants": 185,
+          "max_subtree": 75,
+          "self_primitive": 0,
+          "uncovered": 71,
+          "uncovered_primitive": 71,
+          "inner_roots": 2
+        },
+        "POINTR": {
+          "instances": 3366,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 3366,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250112,
+      "file": "aps250112_0001",
+      "sesno": 21,
+      "elements": 5875,
+      "nouns": {
+        "POINTR": {
+          "instances": 90,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 90,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250152,
+      "file": "aps250152_0001",
+      "sesno": 11,
+      "elements": 205,
+      "nouns": {
+        "ELCONN": {
+          "instances": 9,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 9,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 14,
+          "descendants": 187,
+          "primitive_descendants": 174,
+          "max_subtree": 76,
+          "self_primitive": 0,
+          "uncovered": 72,
+          "uncovered_primitive": 72,
+          "inner_roots": 13
+        },
+        "SUBE": {
+          "instances": 13,
+          "descendants": 102,
+          "primitive_descendants": 102,
+          "max_subtree": 18,
+          "self_primitive": 0,
+          "uncovered": 102,
+          "uncovered_primitive": 102,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250154,
+      "file": "aps250154_0001",
+      "sesno": 11,
+      "elements": 2114,
+      "nouns": {
+        "ELCONN": {
+          "instances": 51,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 51,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 31,
+          "descendants": 2075,
+          "primitive_descendants": 1939,
+          "max_subtree": 524,
+          "self_primitive": 0,
+          "uncovered": 1503,
+          "uncovered_primitive": 1407,
+          "inner_roots": 40
+        },
+        "SUBE": {
+          "instances": 40,
+          "descendants": 532,
+          "primitive_descendants": 532,
+          "max_subtree": 56,
+          "self_primitive": 0,
+          "uncovered": 532,
+          "uncovered_primitive": 532,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250156,
+      "file": "aps250156_0001",
+      "sesno": 11,
+      "elements": 123,
+      "nouns": {
+        "ELCONN": {
+          "instances": 5,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 5,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 6,
+          "descendants": 88,
+          "primitive_descendants": 88,
+          "max_subtree": 16,
+          "self_primitive": 0,
+          "uncovered": 88,
+          "uncovered_primitive": 88,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250160,
+      "file": "aps250160_0001",
+      "sesno": 22,
+      "elements": 2747,
+      "nouns": {
+        "ELCONN": {
+          "instances": 18,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 18,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 16,
+          "descendants": 2311,
+          "primitive_descendants": 1135,
+          "max_subtree": 242,
+          "self_primitive": 0,
+          "uncovered": 30,
+          "uncovered_primitive": 30,
+          "inner_roots": 35
+        },
+        "SUBE": {
+          "instances": 31,
+          "descendants": 2022,
+          "primitive_descendants": 973,
+          "max_subtree": 185,
+          "self_primitive": 0,
+          "uncovered": 1894,
+          "uncovered_primitive": 889,
+          "inner_roots": 4
+        }
+      }
+    },
+    {
+      "dbnum": 250162,
+      "file": "aps250162_0001",
+      "sesno": 19,
+      "elements": 1311,
+      "nouns": {
+        "ELCONN": {
+          "instances": 61,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 61,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 23,
+          "descendants": 1165,
+          "primitive_descendants": 596,
+          "max_subtree": 124,
+          "self_primitive": 0,
+          "uncovered": 672,
+          "uncovered_primitive": 305,
+          "inner_roots": 14
+        },
+        "SUBE": {
+          "instances": 14,
+          "descendants": 479,
+          "primitive_descendants": 291,
+          "max_subtree": 86,
+          "self_primitive": 0,
+          "uncovered": 479,
+          "uncovered_primitive": 291,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250164,
+      "file": "aps250164_0001",
+      "sesno": 25,
+      "elements": 4071,
+      "nouns": {
+        "ELCONN": {
+          "instances": 8,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 8,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 9,
+          "descendants": 4048,
+          "primitive_descendants": 990,
+          "max_subtree": 1175,
+          "self_primitive": 0,
+          "uncovered": 36,
+          "uncovered_primitive": 36,
+          "inner_roots": 40
+        },
+        "SUBE": {
+          "instances": 40,
+          "descendants": 3972,
+          "primitive_descendants": 954,
+          "max_subtree": 477,
+          "self_primitive": 0,
+          "uncovered": 3972,
+          "uncovered_primitive": 954,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250176,
+      "file": "aps250176_0001",
+      "sesno": 19,
+      "elements": 622,
+      "nouns": {
+        "CABLE": {
+          "instances": 23,
+          "descendants": 249,
+          "primitive_descendants": 249,
+          "max_subtree": 13,
+          "self_primitive": 23,
+          "uncovered": 249,
+          "uncovered_primitive": 249,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 82,
+          "descendants": 19,
+          "primitive_descendants": 19,
+          "max_subtree": 2,
+          "self_primitive": 82,
+          "uncovered": 19,
+          "uncovered_primitive": 19,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 59,
+          "descendants": 78,
+          "primitive_descendants": 78,
+          "max_subtree": 3,
+          "self_primitive": 59,
+          "uncovered": 78,
+          "uncovered_primitive": 78,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 2,
+          "descendants": 342,
+          "primitive_descendants": 280,
+          "max_subtree": 211,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 12
+        },
+        "CWBRAN": {
+          "instances": 12,
+          "descendants": 330,
+          "primitive_descendants": 268,
+          "max_subtree": 47,
+          "self_primitive": 12,
+          "uncovered": 330,
+          "uncovered_primitive": 268,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 12,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 218,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 218,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 9,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 34,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 34,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 12,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250179,
+      "file": "aps250179_0001",
+      "sesno": 15,
+      "elements": 870,
+      "nouns": {
+        "CABLE": {
+          "instances": 16,
+          "descendants": 180,
+          "primitive_descendants": 180,
+          "max_subtree": 14,
+          "self_primitive": 16,
+          "uncovered": 180,
+          "uncovered_primitive": 180,
+          "inner_roots": 0
+        },
+        "CTBEND": {
+          "instances": 32,
+          "descendants": 32,
+          "primitive_descendants": 32,
+          "max_subtree": 1,
+          "self_primitive": 32,
+          "uncovered": 32,
+          "uncovered_primitive": 32,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 195,
+          "descendants": 3,
+          "primitive_descendants": 3,
+          "max_subtree": 2,
+          "self_primitive": 195,
+          "uncovered": 3,
+          "uncovered_primitive": 3,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 148,
+          "descendants": 151,
+          "primitive_descendants": 151,
+          "max_subtree": 3,
+          "self_primitive": 148,
+          "uncovered": 151,
+          "uncovered_primitive": 151,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 12,
+          "descendants": 634,
+          "primitive_descendants": 559,
+          "max_subtree": 114,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 15
+        },
+        "CWBRAN": {
+          "instances": 15,
+          "descendants": 619,
+          "primitive_descendants": 544,
+          "max_subtree": 102,
+          "self_primitive": 15,
+          "uncovered": 619,
+          "uncovered_primitive": 544,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 15,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 208,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 208,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 10,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 58,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 58,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 15,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250182,
+      "file": "aps250182_0001",
+      "sesno": 14,
+      "elements": 402,
+      "nouns": {
+        "CABLE": {
+          "instances": 10,
+          "descendants": 144,
+          "primitive_descendants": 144,
+          "max_subtree": 16,
+          "self_primitive": 10,
+          "uncovered": 144,
+          "uncovered_primitive": 144,
+          "inner_roots": 0
+        },
+        "CTBEND": {
+          "instances": 2,
+          "descendants": 2,
+          "primitive_descendants": 2,
+          "max_subtree": 1,
+          "self_primitive": 2,
+          "uncovered": 2,
+          "uncovered_primitive": 2,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 59,
+          "descendants": 24,
+          "primitive_descendants": 24,
+          "max_subtree": 4,
+          "self_primitive": 59,
+          "uncovered": 24,
+          "uncovered_primitive": 24,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 45,
+          "descendants": 69,
+          "primitive_descendants": 69,
+          "max_subtree": 5,
+          "self_primitive": 45,
+          "uncovered": 69,
+          "uncovered_primitive": 69,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 2,
+          "descendants": 241,
+          "primitive_descendants": 202,
+          "max_subtree": 135,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 8
+        },
+        "CWBRAN": {
+          "instances": 8,
+          "descendants": 233,
+          "primitive_descendants": 194,
+          "max_subtree": 60,
+          "self_primitive": 8,
+          "uncovered": 233,
+          "uncovered_primitive": 194,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 8,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 124,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 124,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 5,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 19,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 19,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 8,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250209,
+      "file": "aps250209_0001",
+      "sesno": 17,
+      "elements": 20994,
+      "nouns": {
+        "EQUI": {
+          "instances": 40,
+          "descendants": 7269,
+          "primitive_descendants": 2393,
+          "max_subtree": 675,
+          "self_primitive": 0,
+          "uncovered": 224,
+          "uncovered_primitive": 54,
+          "inner_roots": 215
+        },
+        "POINTR": {
+          "instances": 352,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 352,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "SUBE": {
+          "instances": 204,
+          "descendants": 5862,
+          "primitive_descendants": 2078,
+          "max_subtree": 162,
+          "self_primitive": 0,
+          "uncovered": 5593,
+          "uncovered_primitive": 2049,
+          "inner_roots": 3
+        }
+      }
+    },
+    {
+      "dbnum": 250514,
+      "file": "aps250514_0001",
+      "sesno": 5,
+      "elements": 402,
+      "nouns": {
+        "CABLE": {
+          "instances": 10,
+          "descendants": 144,
+          "primitive_descendants": 144,
+          "max_subtree": 16,
+          "self_primitive": 10,
+          "uncovered": 144,
+          "uncovered_primitive": 144,
+          "inner_roots": 0
+        },
+        "CTBEND": {
+          "instances": 2,
+          "descendants": 2,
+          "primitive_descendants": 2,
+          "max_subtree": 1,
+          "self_primitive": 2,
+          "uncovered": 2,
+          "uncovered_primitive": 2,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 59,
+          "descendants": 24,
+          "primitive_descendants": 24,
+          "max_subtree": 4,
+          "self_primitive": 59,
+          "uncovered": 24,
+          "uncovered_primitive": 24,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 45,
+          "descendants": 69,
+          "primitive_descendants": 69,
+          "max_subtree": 5,
+          "self_primitive": 45,
+          "uncovered": 69,
+          "uncovered_primitive": 69,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 2,
+          "descendants": 241,
+          "primitive_descendants": 202,
+          "max_subtree": 135,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 8
+        },
+        "CWBRAN": {
+          "instances": 8,
+          "descendants": 233,
+          "primitive_descendants": 194,
+          "max_subtree": 60,
+          "self_primitive": 8,
+          "uncovered": 233,
+          "uncovered_primitive": 194,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 8,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 124,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 124,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 5,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 19,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 19,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 8,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250517,
+      "file": "aps250517_0001",
+      "sesno": 5,
+      "elements": 870,
+      "nouns": {
+        "CABLE": {
+          "instances": 16,
+          "descendants": 180,
+          "primitive_descendants": 180,
+          "max_subtree": 14,
+          "self_primitive": 16,
+          "uncovered": 180,
+          "uncovered_primitive": 180,
+          "inner_roots": 0
+        },
+        "CTBEND": {
+          "instances": 32,
+          "descendants": 32,
+          "primitive_descendants": 32,
+          "max_subtree": 1,
+          "self_primitive": 32,
+          "uncovered": 32,
+          "uncovered_primitive": 32,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 195,
+          "descendants": 3,
+          "primitive_descendants": 3,
+          "max_subtree": 2,
+          "self_primitive": 195,
+          "uncovered": 3,
+          "uncovered_primitive": 3,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 148,
+          "descendants": 151,
+          "primitive_descendants": 151,
+          "max_subtree": 3,
+          "self_primitive": 148,
+          "uncovered": 151,
+          "uncovered_primitive": 151,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 12,
+          "descendants": 634,
+          "primitive_descendants": 559,
+          "max_subtree": 114,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 15
+        },
+        "CWBRAN": {
+          "instances": 15,
+          "descendants": 619,
+          "primitive_descendants": 544,
+          "max_subtree": 102,
+          "self_primitive": 15,
+          "uncovered": 619,
+          "uncovered_primitive": 544,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 15,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 208,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 208,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 10,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 58,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 58,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 15,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250520,
+      "file": "aps250520_0001",
+      "sesno": 5,
+      "elements": 622,
+      "nouns": {
+        "CABLE": {
+          "instances": 23,
+          "descendants": 249,
+          "primitive_descendants": 249,
+          "max_subtree": 13,
+          "self_primitive": 23,
+          "uncovered": 249,
+          "uncovered_primitive": 249,
+          "inner_roots": 0
+        },
+        "CTRAY": {
+          "instances": 82,
+          "descendants": 19,
+          "primitive_descendants": 19,
+          "max_subtree": 2,
+          "self_primitive": 82,
+          "uncovered": 19,
+          "uncovered_primitive": 19,
+          "inner_roots": 0
+        },
+        "CTSTRA": {
+          "instances": 59,
+          "descendants": 78,
+          "primitive_descendants": 78,
+          "max_subtree": 3,
+          "self_primitive": 59,
+          "uncovered": 78,
+          "uncovered_primitive": 78,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 2,
+          "descendants": 342,
+          "primitive_descendants": 280,
+          "max_subtree": 211,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 12
+        },
+        "CWBRAN": {
+          "instances": 12,
+          "descendants": 330,
+          "primitive_descendants": 268,
+          "max_subtree": 47,
+          "self_primitive": 12,
+          "uncovered": 330,
+          "uncovered_primitive": 268,
+          "inner_roots": 0
+        },
+        "HATTA": {
+          "instances": 12,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 218,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 218,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 9,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 34,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 34,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "TATTA": {
+          "instances": 12,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250528,
+      "file": "aps250528_0001",
+      "sesno": 4,
+      "elements": 4071,
+      "nouns": {
+        "ELCONN": {
+          "instances": 8,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 8,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 9,
+          "descendants": 4048,
+          "primitive_descendants": 990,
+          "max_subtree": 1175,
+          "self_primitive": 0,
+          "uncovered": 36,
+          "uncovered_primitive": 36,
+          "inner_roots": 40
+        },
+        "SUBE": {
+          "instances": 40,
+          "descendants": 3972,
+          "primitive_descendants": 954,
+          "max_subtree": 477,
+          "self_primitive": 0,
+          "uncovered": 3972,
+          "uncovered_primitive": 954,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250530,
+      "file": "aps250530_0001",
+      "sesno": 5,
+      "elements": 1311,
+      "nouns": {
+        "ELCONN": {
+          "instances": 61,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 61,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 23,
+          "descendants": 1165,
+          "primitive_descendants": 596,
+          "max_subtree": 124,
+          "self_primitive": 0,
+          "uncovered": 672,
+          "uncovered_primitive": 305,
+          "inner_roots": 14
+        },
+        "SUBE": {
+          "instances": 14,
+          "descendants": 479,
+          "primitive_descendants": 291,
+          "max_subtree": 86,
+          "self_primitive": 0,
+          "uncovered": 479,
+          "uncovered_primitive": 291,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250532,
+      "file": "aps250532_0001",
+      "sesno": 5,
+      "elements": 2747,
+      "nouns": {
+        "ELCONN": {
+          "instances": 18,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 18,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 16,
+          "descendants": 2311,
+          "primitive_descendants": 1135,
+          "max_subtree": 242,
+          "self_primitive": 0,
+          "uncovered": 30,
+          "uncovered_primitive": 30,
+          "inner_roots": 35
+        },
+        "SUBE": {
+          "instances": 31,
+          "descendants": 2022,
+          "primitive_descendants": 973,
+          "max_subtree": 185,
+          "self_primitive": 0,
+          "uncovered": 1894,
+          "uncovered_primitive": 889,
+          "inner_roots": 4
+        }
+      }
+    },
+    {
+      "dbnum": 250534,
+      "file": "aps250534_0001",
+      "sesno": 4,
+      "elements": 123,
+      "nouns": {
+        "ELCONN": {
+          "instances": 5,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 5,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 6,
+          "descendants": 88,
+          "primitive_descendants": 88,
+          "max_subtree": 16,
+          "self_primitive": 0,
+          "uncovered": 88,
+          "uncovered_primitive": 88,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250536,
+      "file": "aps250536_0001",
+      "sesno": 5,
+      "elements": 2114,
+      "nouns": {
+        "ELCONN": {
+          "instances": 51,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 51,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 31,
+          "descendants": 2075,
+          "primitive_descendants": 1939,
+          "max_subtree": 524,
+          "self_primitive": 0,
+          "uncovered": 1503,
+          "uncovered_primitive": 1407,
+          "inner_roots": 40
+        },
+        "SUBE": {
+          "instances": 40,
+          "descendants": 532,
+          "primitive_descendants": 532,
+          "max_subtree": 56,
+          "self_primitive": 0,
+          "uncovered": 532,
+          "uncovered_primitive": 532,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250538,
+      "file": "aps250538_0001",
+      "sesno": 4,
+      "elements": 205,
+      "nouns": {
+        "ELCONN": {
+          "instances": 9,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 9,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 14,
+          "descendants": 187,
+          "primitive_descendants": 174,
+          "max_subtree": 76,
+          "self_primitive": 0,
+          "uncovered": 72,
+          "uncovered_primitive": 72,
+          "inner_roots": 13
+        },
+        "SUBE": {
+          "instances": 13,
+          "descendants": 102,
+          "primitive_descendants": 102,
+          "max_subtree": 18,
+          "self_primitive": 0,
+          "uncovered": 102,
+          "uncovered_primitive": 102,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250558,
+      "file": "aps250558_0001",
+      "sesno": 5,
+      "elements": 5875,
+      "nouns": {
+        "POINTR": {
+          "instances": 90,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 90,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 250560,
+      "file": "aps250560_0001",
+      "sesno": 5,
+      "elements": 26187,
+      "nouns": {
+        "EQUI": {
+          "instances": 9,
+          "descendants": 221,
+          "primitive_descendants": 185,
+          "max_subtree": 75,
+          "self_primitive": 0,
+          "uncovered": 71,
+          "uncovered_primitive": 71,
+          "inner_roots": 2
+        },
+        "POINTR": {
+          "instances": 3366,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 3366,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 7140,
+      "file": "aps7140",
+      "sesno": 466,
+      "elements": 1029,
+      "nouns": {
+        "EQUI": {
+          "instances": 26,
+          "descendants": 308,
+          "primitive_descendants": 300,
+          "max_subtree": 17,
+          "self_primitive": 0,
+          "uncovered": 276,
+          "uncovered_primitive": 276,
+          "inner_roots": 8
+        },
+        "SUBE": {
+          "instances": 8,
+          "descendants": 24,
+          "primitive_descendants": 24,
+          "max_subtree": 3,
+          "self_primitive": 0,
+          "uncovered": 24,
+          "uncovered_primitive": 24,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 7166,
+      "file": "aps7166_0001",
+      "sesno": 7,
+      "elements": 1292,
+      "nouns": {
+        "EQUI": {
+          "instances": 1,
+          "descendants": 12,
+          "primitive_descendants": 12,
+          "max_subtree": 12,
+          "self_primitive": 0,
+          "uncovered": 12,
+          "uncovered_primitive": 12,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 7200,
+      "file": "aps7200_0001",
+      "sesno": 11,
+      "elements": 10450,
+      "nouns": {
+        "CABLE": {
+          "instances": 6,
+          "descendants": 54,
+          "primitive_descendants": 54,
+          "max_subtree": 10,
+          "self_primitive": 6,
+          "uncovered": 54,
+          "uncovered_primitive": 54,
+          "inner_roots": 0
+        },
+        "CNODE": {
+          "instances": 1,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 1,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 1,
+          "descendants": 61,
+          "primitive_descendants": 37,
+          "max_subtree": 61,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 8
+        },
+        "CWBRAN": {
+          "instances": 8,
+          "descendants": 53,
+          "primitive_descendants": 29,
+          "max_subtree": 10,
+          "self_primitive": 8,
+          "uncovered": 53,
+          "uncovered_primitive": 29,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 19,
+          "descendants": 5343,
+          "primitive_descendants": 2212,
+          "max_subtree": 2572,
+          "self_primitive": 0,
+          "uncovered": 163,
+          "uncovered_primitive": 137,
+          "inner_roots": 11
+        },
+        "HATTA": {
+          "instances": 8,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 168,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 168,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 5,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 1,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 1,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "SUBE": {
+          "instances": 8,
+          "descendants": 5009,
+          "primitive_descendants": 2029,
+          "max_subtree": 2440,
+          "self_primitive": 0,
+          "uncovered": 26,
+          "uncovered_primitive": 0,
+          "inner_roots": 8
+        },
+        "TATTA": {
+          "instances": 8,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 1000,
+      "file": "TES016",
+      "sesno": 192,
+      "elements": 1586,
+      "nouns": {
+        "EQUI": {
+          "instances": 65,
+          "descendants": 346,
+          "primitive_descendants": 346,
+          "max_subtree": 11,
+          "self_primitive": 0,
+          "uncovered": 346,
+          "uncovered_primitive": 346,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 1034,
+      "file": "TES022",
+      "sesno": 187,
+      "elements": 735,
+      "nouns": {
+        "EQUI": {
+          "instances": 15,
+          "descendants": 713,
+          "primitive_descendants": 597,
+          "max_subtree": 82,
+          "self_primitive": 0,
+          "uncovered": 408,
+          "uncovered_primitive": 368,
+          "inner_roots": 9
+        },
+        "SUBE": {
+          "instances": 4,
+          "descendants": 46,
+          "primitive_descendants": 33,
+          "max_subtree": 24,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 2
+        }
+      }
+    },
+    {
+      "dbnum": 1035,
+      "file": "TES023",
+      "sesno": 109,
+      "elements": 320,
+      "nouns": {
+        "EQUI": {
+          "instances": 6,
+          "descendants": 307,
+          "primitive_descendants": 305,
+          "max_subtree": 185,
+          "self_primitive": 0,
+          "uncovered": 219,
+          "uncovered_primitive": 219,
+          "inner_roots": 2
+        }
+      }
+    },
+    {
+      "dbnum": 1001,
+      "file": "TES1001_0001",
+      "sesno": 249,
+      "elements": 1302,
+      "nouns": {
+        "EQUI": {
+          "instances": 10,
+          "descendants": 186,
+          "primitive_descendants": 173,
+          "max_subtree": 53,
+          "self_primitive": 0,
+          "uncovered": 4,
+          "uncovered_primitive": 4,
+          "inner_roots": 13
+        },
+        "SUBE": {
+          "instances": 13,
+          "descendants": 169,
+          "primitive_descendants": 169,
+          "max_subtree": 28,
+          "self_primitive": 0,
+          "uncovered": 169,
+          "uncovered_primitive": 169,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 1001,
+      "file": "TES1001_0001 - 副本",
+      "sesno": 239,
+      "elements": 1273,
+      "nouns": {
+        "EQUI": {
+          "instances": 7,
+          "descendants": 183,
+          "primitive_descendants": 170,
+          "max_subtree": 53,
+          "self_primitive": 0,
+          "uncovered": 1,
+          "uncovered_primitive": 1,
+          "inner_roots": 13
+        },
+        "SUBE": {
+          "instances": 13,
+          "descendants": 169,
+          "primitive_descendants": 169,
+          "max_subtree": 28,
+          "self_primitive": 0,
+          "uncovered": 169,
+          "uncovered_primitive": 169,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5101,
+      "file": "acw5101_0001",
+      "sesno": 3,
+      "elements": 18578,
+      "nouns": {
+        "EQUI": {
+          "instances": 24,
+          "descendants": 4975,
+          "primitive_descendants": 4951,
+          "max_subtree": 444,
+          "self_primitive": 0,
+          "uncovered": 52,
+          "uncovered_primitive": 52,
+          "inner_roots": 24
+        },
+        "SUBE": {
+          "instances": 24,
+          "descendants": 4899,
+          "primitive_descendants": 4899,
+          "max_subtree": 353,
+          "self_primitive": 0,
+          "uncovered": 4899,
+          "uncovered_primitive": 4899,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5102,
+      "file": "acw5102_0001",
+      "sesno": 3,
+      "elements": 2671,
+      "nouns": {
+        "EQUI": {
+          "instances": 17,
+          "descendants": 1139,
+          "primitive_descendants": 479,
+          "max_subtree": 375,
+          "self_primitive": 0,
+          "uncovered": 1139,
+          "uncovered_primitive": 479,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5103,
+      "file": "acw5103_0001",
+      "sesno": 3,
+      "elements": 4765,
+      "nouns": {
+        "EQUI": {
+          "instances": 24,
+          "descendants": 144,
+          "primitive_descendants": 144,
+          "max_subtree": 6,
+          "self_primitive": 0,
+          "uncovered": 144,
+          "uncovered_primitive": 144,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5105,
+      "file": "acw5105_0001",
+      "sesno": 4,
+      "elements": 3766,
+      "nouns": {
+        "EQUI": {
+          "instances": 5,
+          "descendants": 56,
+          "primitive_descendants": 56,
+          "max_subtree": 28,
+          "self_primitive": 0,
+          "uncovered": 56,
+          "uncovered_primitive": 56,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5106,
+      "file": "acw5106_0001",
+      "sesno": 3,
+      "elements": 22917,
+      "nouns": {
+        "EQUI": {
+          "instances": 62,
+          "descendants": 8544,
+          "primitive_descendants": 8518,
+          "max_subtree": 730,
+          "self_primitive": 0,
+          "uncovered": 1238,
+          "uncovered_primitive": 1238,
+          "inner_roots": 26
+        },
+        "SUBE": {
+          "instances": 26,
+          "descendants": 7280,
+          "primitive_descendants": 7280,
+          "max_subtree": 606,
+          "self_primitive": 0,
+          "uncovered": 7280,
+          "uncovered_primitive": 7280,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5107,
+      "file": "acw5107_0001",
+      "sesno": 4,
+      "elements": 9496,
+      "nouns": {
+        "EQUI": {
+          "instances": 45,
+          "descendants": 465,
+          "primitive_descendants": 456,
+          "max_subtree": 19,
+          "self_primitive": 0,
+          "uncovered": 420,
+          "uncovered_primitive": 420,
+          "inner_roots": 9
+        },
+        "SUBE": {
+          "instances": 9,
+          "descendants": 36,
+          "primitive_descendants": 36,
+          "max_subtree": 5,
+          "self_primitive": 0,
+          "uncovered": 36,
+          "uncovered_primitive": 36,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5501,
+      "file": "acw5501_0001",
+      "sesno": 3,
+      "elements": 6434,
+      "nouns": {
+        "EQUI": {
+          "instances": 12,
+          "descendants": 192,
+          "primitive_descendants": 192,
+          "max_subtree": 22,
+          "self_primitive": 0,
+          "uncovered": 192,
+          "uncovered_primitive": 192,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5502,
+      "file": "acw5502_0001",
+      "sesno": 3,
+      "elements": 1588,
+      "nouns": {
+        "EQUI": {
+          "instances": 15,
+          "descendants": 61,
+          "primitive_descendants": 61,
+          "max_subtree": 5,
+          "self_primitive": 0,
+          "uncovered": 61,
+          "uncovered_primitive": 61,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5503,
+      "file": "acw5503_0001",
+      "sesno": 3,
+      "elements": 18421,
+      "nouns": {
+        "EQUI": {
+          "instances": 81,
+          "descendants": 1669,
+          "primitive_descendants": 1609,
+          "max_subtree": 434,
+          "self_primitive": 0,
+          "uncovered": 393,
+          "uncovered_primitive": 393,
+          "inner_roots": 60
+        },
+        "SUBE": {
+          "instances": 60,
+          "descendants": 1216,
+          "primitive_descendants": 1216,
+          "max_subtree": 345,
+          "self_primitive": 0,
+          "uncovered": 1216,
+          "uncovered_primitive": 1216,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5505,
+      "file": "acw5505_0001",
+      "sesno": 3,
+      "elements": 4754,
+      "nouns": {
+        "EQUI": {
+          "instances": 12,
+          "descendants": 311,
+          "primitive_descendants": 240,
+          "max_subtree": 33,
+          "self_primitive": 0,
+          "uncovered": 29,
+          "uncovered_primitive": 29,
+          "inner_roots": 71
+        },
+        "SUBE": {
+          "instances": 71,
+          "descendants": 211,
+          "primitive_descendants": 211,
+          "max_subtree": 9,
+          "self_primitive": 0,
+          "uncovered": 211,
+          "uncovered_primitive": 211,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5511,
+      "file": "acw5511_0001",
+      "sesno": 3,
+      "elements": 54347,
+      "nouns": {
+        "EQUI": {
+          "instances": 199,
+          "descendants": 12194,
+          "primitive_descendants": 11416,
+          "max_subtree": 736,
+          "self_primitive": 0,
+          "uncovered": 3025,
+          "uncovered_primitive": 2365,
+          "inner_roots": 118
+        },
+        "SUBE": {
+          "instances": 118,
+          "descendants": 9051,
+          "primitive_descendants": 9051,
+          "max_subtree": 611,
+          "self_primitive": 0,
+          "uncovered": 9051,
+          "uncovered_primitive": 9051,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5514,
+      "file": "acw5514_0001",
+      "sesno": 3,
+      "elements": 2408,
+      "nouns": {
+        "EQUI": {
+          "instances": 3,
+          "descendants": 31,
+          "primitive_descendants": 28,
+          "max_subtree": 12,
+          "self_primitive": 0,
+          "uncovered": 23,
+          "uncovered_primitive": 22,
+          "inner_roots": 2
+        },
+        "SUBE": {
+          "instances": 2,
+          "descendants": 6,
+          "primitive_descendants": 6,
+          "max_subtree": 3,
+          "self_primitive": 0,
+          "uncovered": 6,
+          "uncovered_primitive": 6,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5515,
+      "file": "acw5515_0001",
+      "sesno": 3,
+      "elements": 4560,
+      "nouns": {
+        "EQUI": {
+          "instances": 24,
+          "descendants": 1664,
+          "primitive_descendants": 1654,
+          "max_subtree": 344,
+          "self_primitive": 0,
+          "uncovered": 276,
+          "uncovered_primitive": 276,
+          "inner_roots": 10
+        },
+        "SUBE": {
+          "instances": 10,
+          "descendants": 1378,
+          "primitive_descendants": 1378,
+          "max_subtree": 273,
+          "self_primitive": 0,
+          "uncovered": 1378,
+          "uncovered_primitive": 1378,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5516,
+      "file": "acw5516_0001",
+      "sesno": 3,
+      "elements": 4884,
+      "nouns": {
+        "EQUI": {
+          "instances": 31,
+          "descendants": 471,
+          "primitive_descendants": 455,
+          "max_subtree": 32,
+          "self_primitive": 0,
+          "uncovered": 423,
+          "uncovered_primitive": 422,
+          "inner_roots": 15
+        },
+        "SUBE": {
+          "instances": 15,
+          "descendants": 33,
+          "primitive_descendants": 33,
+          "max_subtree": 3,
+          "self_primitive": 0,
+          "uncovered": 33,
+          "uncovered_primitive": 33,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5525,
+      "file": "acw5525_0001",
+      "sesno": 129,
+      "elements": 37603,
+      "nouns": {
+        "EQUI": {
+          "instances": 77,
+          "descendants": 6802,
+          "primitive_descendants": 6771,
+          "max_subtree": 464,
+          "self_primitive": 0,
+          "uncovered": 611,
+          "uncovered_primitive": 611,
+          "inner_roots": 31
+        },
+        "SUBE": {
+          "instances": 31,
+          "descendants": 6160,
+          "primitive_descendants": 6160,
+          "max_subtree": 369,
+          "self_primitive": 0,
+          "uncovered": 6160,
+          "uncovered_primitive": 6160,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5701,
+      "file": "acw5701_0001",
+      "sesno": 3,
+      "elements": 8342,
+      "nouns": {
+        "EQUI": {
+          "instances": 7,
+          "descendants": 35,
+          "primitive_descendants": 35,
+          "max_subtree": 5,
+          "self_primitive": 0,
+          "uncovered": 35,
+          "uncovered_primitive": 35,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5702,
+      "file": "acw5702_0001",
+      "sesno": 3,
+      "elements": 1619,
+      "nouns": {
+        "EQUI": {
+          "instances": 10,
+          "descendants": 84,
+          "primitive_descendants": 83,
+          "max_subtree": 12,
+          "self_primitive": 0,
+          "uncovered": 84,
+          "uncovered_primitive": 83,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5703,
+      "file": "acw5703_0001",
+      "sesno": 3,
+      "elements": 2140,
+      "nouns": {
+        "EQUI": {
+          "instances": 21,
+          "descendants": 243,
+          "primitive_descendants": 243,
+          "max_subtree": 12,
+          "self_primitive": 0,
+          "uncovered": 243,
+          "uncovered_primitive": 243,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5704,
+      "file": "acw5704_0001",
+      "sesno": 3,
+      "elements": 1421,
+      "nouns": {
+        "EQUI": {
+          "instances": 17,
+          "descendants": 476,
+          "primitive_descendants": 408,
+          "max_subtree": 28,
+          "self_primitive": 0,
+          "uncovered": 34,
+          "uncovered_primitive": 34,
+          "inner_roots": 68
+        },
+        "SUBE": {
+          "instances": 68,
+          "descendants": 374,
+          "primitive_descendants": 374,
+          "max_subtree": 7,
+          "self_primitive": 0,
+          "uncovered": 374,
+          "uncovered_primitive": 374,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 5705,
+      "file": "acw5705_0001",
+      "sesno": 3,
+      "elements": 1408,
+      "nouns": {
+        "EQUI": {
+          "instances": 18,
+          "descendants": 290,
+          "primitive_descendants": 290,
+          "max_subtree": 32,
+          "self_primitive": 0,
+          "uncovered": 290,
+          "uncovered_primitive": 290,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 7110,
+      "file": "zdj7110_0001",
+      "sesno": 451,
+      "elements": 544,
+      "nouns": {
+        "EQUI": {
+          "instances": 3,
+          "descendants": 28,
+          "primitive_descendants": 28,
+          "max_subtree": 10,
+          "self_primitive": 0,
+          "uncovered": 28,
+          "uncovered_primitive": 28,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 7140,
+      "file": "zdj7140_0001",
+      "sesno": 468,
+      "elements": 1029,
+      "nouns": {
+        "EQUI": {
+          "instances": 26,
+          "descendants": 308,
+          "primitive_descendants": 300,
+          "max_subtree": 17,
+          "self_primitive": 0,
+          "uncovered": 276,
+          "uncovered_primitive": 276,
+          "inner_roots": 8
+        },
+        "SUBE": {
+          "instances": 8,
+          "descendants": 24,
+          "primitive_descendants": 24,
+          "max_subtree": 3,
+          "self_primitive": 0,
+          "uncovered": 24,
+          "uncovered_primitive": 24,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 7164,
+      "file": "zdj7164_0001",
+      "sesno": 7,
+      "elements": 834,
+      "nouns": {
+        "EQUI": {
+          "instances": 6,
+          "descendants": 98,
+          "primitive_descendants": 98,
+          "max_subtree": 21,
+          "self_primitive": 0,
+          "uncovered": 98,
+          "uncovered_primitive": 98,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 7200,
+      "file": "zdj7200_0001",
+      "sesno": 10,
+      "elements": 10380,
+      "nouns": {
+        "CABLE": {
+          "instances": 6,
+          "descendants": 54,
+          "primitive_descendants": 54,
+          "max_subtree": 10,
+          "self_primitive": 6,
+          "uncovered": 54,
+          "uncovered_primitive": 54,
+          "inner_roots": 0
+        },
+        "CNODE": {
+          "instances": 1,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 1,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 1,
+          "descendants": 61,
+          "primitive_descendants": 37,
+          "max_subtree": 61,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 8
+        },
+        "CWBRAN": {
+          "instances": 8,
+          "descendants": 53,
+          "primitive_descendants": 29,
+          "max_subtree": 10,
+          "self_primitive": 8,
+          "uncovered": 53,
+          "uncovered_primitive": 29,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 19,
+          "descendants": 5343,
+          "primitive_descendants": 2212,
+          "max_subtree": 2572,
+          "self_primitive": 0,
+          "uncovered": 163,
+          "uncovered_primitive": 137,
+          "inner_roots": 11
+        },
+        "HATTA": {
+          "instances": 8,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 168,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 168,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 5,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 1,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 1,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "SUBE": {
+          "instances": 8,
+          "descendants": 5009,
+          "primitive_descendants": 2029,
+          "max_subtree": 2440,
+          "self_primitive": 0,
+          "uncovered": 26,
+          "uncovered_primitive": 0,
+          "inner_roots": 8
+        },
+        "TATTA": {
+          "instances": 8,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 7209,
+      "file": "zdj7209",
+      "sesno": 9,
+      "elements": 1060,
+      "nouns": {
+        "EQUI": {
+          "instances": 4,
+          "descendants": 600,
+          "primitive_descendants": 148,
+          "max_subtree": 150,
+          "self_primitive": 0,
+          "uncovered": 40,
+          "uncovered_primitive": 0,
+          "inner_roots": 8
+        },
+        "SUBE": {
+          "instances": 4,
+          "descendants": 112,
+          "primitive_descendants": 32,
+          "max_subtree": 28,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 4
+        }
+      }
+    },
+    {
+      "dbnum": 7200,
+      "file": "zdj7210",
+      "sesno": 11,
+      "elements": 10380,
+      "nouns": {
+        "CABLE": {
+          "instances": 6,
+          "descendants": 54,
+          "primitive_descendants": 54,
+          "max_subtree": 10,
+          "self_primitive": 6,
+          "uncovered": 54,
+          "uncovered_primitive": 54,
+          "inner_roots": 0
+        },
+        "CNODE": {
+          "instances": 1,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 1,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "CWAY": {
+          "instances": 1,
+          "descendants": 61,
+          "primitive_descendants": 37,
+          "max_subtree": 61,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 8
+        },
+        "CWBRAN": {
+          "instances": 8,
+          "descendants": 53,
+          "primitive_descendants": 29,
+          "max_subtree": 10,
+          "self_primitive": 8,
+          "uncovered": 53,
+          "uncovered_primitive": 29,
+          "inner_roots": 0
+        },
+        "EQUI": {
+          "instances": 19,
+          "descendants": 5343,
+          "primitive_descendants": 2212,
+          "max_subtree": 2572,
+          "self_primitive": 0,
+          "uncovered": 163,
+          "uncovered_primitive": 137,
+          "inner_roots": 11
+        },
+        "HATTA": {
+          "instances": 8,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "POINTR": {
+          "instances": 168,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 168,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RATTA": {
+          "instances": 5,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "RNODE": {
+          "instances": 1,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 1,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        },
+        "SUBE": {
+          "instances": 8,
+          "descendants": 5009,
+          "primitive_descendants": 2029,
+          "max_subtree": 2440,
+          "self_primitive": 0,
+          "uncovered": 26,
+          "uncovered_primitive": 0,
+          "inner_roots": 8
+        },
+        "TATTA": {
+          "instances": 8,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 0,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    },
+    {
+      "dbnum": 7596,
+      "file": "zdj7596_0001",
+      "sesno": 327,
+      "elements": 3984,
+      "nouns": {
+        "POINTR": {
+          "instances": 226,
+          "descendants": 0,
+          "primitive_descendants": 0,
+          "max_subtree": 0,
+          "self_primitive": 226,
+          "uncovered": 0,
+          "uncovered_primitive": 0,
+          "inner_roots": 0
+        }
+      }
+    }
+  ]
+}

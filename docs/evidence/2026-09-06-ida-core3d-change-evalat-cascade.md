@@ -415,7 +415,8 @@ DB_PseudoBACKRE::getAtt (0x5A5BC20):
 `STAREF`/`ENDREF` 指向它的元素（= 接在它上面的电缆）全部 REDRAW**；规则 E 展开是：**`CWBRAN` 变了 → 它路由节点被 `EXTGEO.STAREF`/`ENDREF`
 引用的那些电缆全部 REDRAW**。两条都是反向边，都跨库。
 
-**语料（486 个 DESI 库；`noun_census_probe` 0907 + 0907 普查 JSON `all_edges`）：**
+**语料（486 个 DESI 库；实例数来自 `noun_census_probe` 0907 → `docs/evidence/2026-09-07-cable-noun-census.json`，边数来自 0907 普查
+`docs/evidence/2026-09-07-cross-root-reference-census.json` 的 `all_edges`）：**
 
 | 项 | 数 | 备注 |
 |---|---|---|
