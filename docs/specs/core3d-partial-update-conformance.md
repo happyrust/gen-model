@@ -289,11 +289,11 @@ ModelToUpdate(e, state):
 
 ★0906 那个「上游」找到了：**`change/EVALAT`**（Core3D `0x1022C679`），DCHC 的读点是 `change/IDCHNG`（`0x1022E302`）
 → core.dll `ATAINT(属性)`；类别 0 根本不进队列（= R13「双假丢弃」的上游），类别 1 = INTUBE 还会连带前一个元件。
-`EVALAT` 同时是 noun 专项联动规则表（上卷 / owner / 正向引用 `CLIST`·`ELCXRF` / 反向引用 `DFIND` / 结构连接 `ADSTCH`），
+`EVALAT` 同时是 noun 专项联动规则表（上卷 / owner / 正向引用 `CLIST`·`ELCXRF` / ~~反向引用 `DFIND`~~ 成员向下 `DFIND`（★0907 实读：`DFIND` = dabacon 成员导航，`EVALAT` 没有反向引用查询） / 结构连接 `ADSTCH`），
 写 QCHGLS 的是 `change/EVALST`（步长 3、同键取 max 类别）。全表见 `docs/evidence/2026-09-06-ida-core3d-change-evalat-cascade.md` §2–§3；
 对我方的意义（direct 路径缺引用类联动）归 `docs/plans/2026-09-06-core3d-cascade-parity-dev-plan.md`，不在本核对表里重复。
 ★0907 其中结构连接 `ADSTCH` 那一条 direct 已接线（`src/data_interface/structural_connection.rs`，正向读 + 回指核对 + `STRU` 门，
-开关 `model_structural_connection_cascade` 默认关）；孔洞 `DFIND` 语料上不可达、不接。
+开关 `model_structural_connection_cascade` 默认关）；孔洞那条 core 走的是 owner 子树成员表（`DFIND` = 成员导航），整根重生成构造性覆盖、不需要接。
 
 - 我方：✅ 分层等价。`OperationEffectSummary.max_dchc` 保留原始码没问题，
   但不该让它调节重生成范围。`TransformOnly` 是我们**主动多留**的便宜路径（省不是漏），

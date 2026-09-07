@@ -33,7 +33,7 @@ rollup（`resolve_element_generation_root` + `ref_rev` 反查 + `build_unit_roll
 | 5 | 点类 noun → 所属几何件（规则 S，`POPF` = 字典 `point`） | owner 链 | 点容器不成根、归 owner | `is_loop_container_noun` 上卷 | ✅（就是 T2b 那条线） |
 | 6 | INTUBE：类别 1 → 前一个元件（规则 H）；删除 / 改挂先按 INTUBE 再 REDRAW（§2.2b） | 分支序 | 整根 BRAN 重生成 | `reroute_derived_geometry_units` 整根 | ✅ 超集（issue #5） |
 | 7 | 结构连接 `ADSTCH`：`CREF`↔`JOIS`/`JOIE`、`CFRA`↔`PFRE` 双向核对 → 对端 / 对端顶层件 + `RECON0`（§3） | **正向引用**（从变更元素读出去） | **无** | `ref_rev`：`CREF`(35 noun)/`JOIS`/`JOIE`(4)/`CFRA`(3)/`PFRE`(1) 都是 schema ELEMENT 型 → 进反向索引 → 对端交付单元级联（不核对回指 = 超集） | ~~❌ direct 缺~~ ◐ **0907 direct 已接线**（`structural_connection.rs`，正向读 + 回指核对 + `STRU` 门，开关 `model_structural_connection_cascade` 默认关；清单 #12） |
-| 8 | 孔洞：PANE / 设备子件变了 → 引用它的 `HOLC` 构件（§2.3-3）；孔洞自己变了 → 自身 + owner（J/P） | **反向引用** | **无**（owner 子树内的孔由整根覆盖；跨 owner 的不覆盖） | `ref_rev` 超集 | ❌ **direct 缺**（清单 #15），前提是真库里有跨 owner 的孔洞引用 |
+| 8 | 孔洞：PANE / 设备子件变了 → ~~引用它的~~ **它成员里的** `HOLC` 构件（§2.3-3，★0907 C7：`DFIND` 是成员导航不是反向引用，证据 §8.1）；孔洞自己变了 → 自身 + owner（J/P） | ~~反向引用~~ **owner 链向下（成员表）** | owner 子树内的孔由整根覆盖 = **同一口径** | `ref_rev` 超集 | ~~❌ direct 缺~~ **✅ 构造性覆盖**（清单 #15）；core 也不查引用者 |
 | 9 | `EQUI`/`ELCONN` → `GATREF(CLIST)` 连接表全部重画（规则 F） | 正向数组 | 无 | 无（`CLIST` 不是存储属性，`ref_rev` 收不到） | ❓ 清单 #13：先定 `CLIST` 是什么 |
 | 10 | 桥架 / 网格：`CWBRAN` `ELCXRF`、`CTRAY` / `CGRDCP` / `CGRDLP` 反向、`CLNPNG` 两层（B–E、G） | 正向 + 反向 | 无 | 部分（ELEMENT 型的进 `ref_rev`） | 登记不排期（清单 #14，`gb==3` 族归几何覆盖度） |
 | 11 | 网格件只标**画列表里有的**（`DES_DrawList::exists`） | — | 不可比（我们没有画列表） | — | ⚪ |
@@ -41,8 +41,12 @@ rollup（`resolve_element_generation_root` + `ref_rev` 反查 + `build_unit_roll
 | 13 | GETWORK / Undo / Redo 同一条路（§5） | — | 我们只吃 SAVEWORK 区间 | 同 | ⚪（ADR-061 理由 1 不变） |
 | 14 | 在 EVALAT 里**没有**的：管道连接 HREF/TREF、CATA→DESI、UDA、XRPNTR | — | — | — | ✅ 09-04 结论全部保持（#5 构造性不可达、#4 我们比 core 强、#9/#10 不做） |
 
-统计：core 侧 14 条规则组里 **8 条 ✅ / 3 条 ⚪ 不可比 / 2 条 ❌ direct 缺（#7 结构连接、#8 孔洞）/ 1 条 ❓（#9 CLIST）**。
-**两条 ❌ 都是同一件事的两面：direct 路径没有任何引用类联动。** 区别只在 #7 用正向读就够（不用等反向表），#8 必须反向。
+统计：core 侧 14 条规则组里 ~~8 条 ✅ / 3 条 ⚪ 不可比 / 2 条 ❌ direct 缺（#7 结构连接、#8 孔洞）/ 1 条 ❓（#9 CLIST）~~
+**★0907 收口：9 条 ✅（#8 归 ✅ 构造性覆盖）/ 1 条 ◐ 已接线灰度中（#7）/ 3 条 ⚪ 不可比 / 1 条 ❓（#9 CLIST）**。
+~~两条 ❌ 都是同一件事的两面：direct 路径没有任何引用类联动。区别只在 #7 用正向读就够（不用等反向表），#8 必须反向。~~
+**★0907 C7 改写这句：core 的 `EVALAT` 里根本没有反向引用查询**（`DFIND` = 成员导航；`change/` 模块一次都没调 `db_find_reference` /
+`DB_RefTableIterator`，证据 §8.1）。core 的联动只有三种边：owner 链（上卷 / owner / 祖父 / 成员向下）、正向引用数组
+（`CLIST` / `ELCXRF` / `REFGRD`）、结构连接（正向读 + 回指核对）。所以 direct 要补的引用类联动只有 #7 一条，0907 已补。
 
 ## 2. 范围
 
@@ -131,9 +135,11 @@ rollup（`resolve_element_generation_root` + `ref_rev` 反查 + `build_unit_roll
 - 什么：`direct_store::referrers_of`（已实现、零调用方）接进 direct 规划器：对窗口里每个变更元素，
   把「引用它的元素」的生成根并进 `regen`。这同时覆盖 #15 孔洞、#12 的超集、以及（本计划外的）#4。
 - 依赖：`docs/plans/2026-09-06-cascade-query-via-dab-ref-tables-plan.md` 的接线与 `ref_rev` 降级排期——**本计划不重复它，只登记消费关系**。
-  另有一条矛盾要那条计划先答：dab 引用表「只覆盖 kind-16 属性、`HREF`/`TREF`/`CREF` 无表」（`2026-09-06-dab-ref-table-write-path.md`）
-  与 core `DFIND`（dabacon opcode 43）能找到 `HOLC` 引用者——`DFIND` 查的是哪张表，读了才知道反向表能不能服务 #15。
-- 验：孔洞窗口（C1 找到的）对端进重算集；`referrers_of` 空结果不改变任何现有窗口。
+  ~~另有一条矛盾要那条计划先答：dab 引用表「只覆盖 kind-16 属性、`HREF`/`TREF`/`CREF` 无表」与 core `DFIND` 能找到 `HOLC` 引用者~~
+  **★0907 C7 消解**：`DFIND` 是 dabacon **成员导航**（与 `db_move_down` 同一个体，读元素记录的 kind-2 成员块），不查任何引用表；
+  `EVALAT` 全表没有一条反向引用查询（证据 §8.1）。所以 #15 在 core 侧就是「owner 子树内的成员」——我们整根重生成**构造性覆盖**。
+  **C3 与 core 对齐这件事上没有对应物**；它若还要做，是「我们比 core 多做」的一项（#4 CATA 那类），归 dab-ref-tables 计划，不在本计划。
+- 验：~~孔洞窗口（C1 找到的）对端进重算集~~（没有这种窗口，也不需要有）；`referrers_of` 空结果不改变任何现有窗口。
 - 退：开关，默认关。
 
 ### C4 —— INTUBE 前一元件的契约（S，只补测试）✅ 2026-09-07：**已经钉着，不必再补**
@@ -168,20 +174,28 @@ rollup（`resolve_element_generation_root` + `ref_rev` 反查 + `build_unit_roll
   由谁算；`ELCONN` 在本语料 486 库里有没有实例（`noun_census_probe --nouns ELCONN CWBRAN CTRAY`）。
 - 判：无实例 → 清单 #13 改「语料上不可达」；有 → 另开计划。
 
-### C7 —— 证据补洞（S，IDA 只读，不阻塞任何项）
+### C7 —— 证据补洞（S，IDA 只读，不阻塞任何项）✅ 2026-09-07（证据文档 §7 划账、新 §8 五节）
 
-`DFIND`（opcode 43）查哪张表；`DB_Element::hashValue` 是否 = noun hash；EVALAT 两个未解 noun（`271245643` / `269526523`）；
-`UPDATN` / `UPDATD` 之后到 `DES_DrawList` 的那一跳（`sub_10507C30` / `sub_1050EA70` 是谁）。产物回灌证据文档 §7。
+~~`DFIND`（opcode 43）查哪张表；`DB_Element::hashValue` 是否 = noun hash；EVALAT 两个未解 noun（`271245643` / `269526523`）；
+`UPDATN` / `UPDATD` 之后到 `DES_DrawList` 的那一跳（`sub_10507C30` / `sub_1050EA70` 是谁）。产物回灌证据文档 §7。~~
+
+| 洞 | 答 |
+|---|---|
+| `DFIND` 查哪张表 | **不查表**：`DFIND(dir, n)` 与 `db_move_down` 同体（core.dll `sub_5AB6CB0`），沿 CE 记录的 kind-2 **成员块**走 FIRST/NEXT/PREV/LAST/SAME，`DRETUR` 退一层回 owner。`change/` 模块从不调 `db_find_reference` / `DB_RefTableIterator` → **`EVALAT` 没有反向引用**。§2.2 规则 C/D/G、§2.3-3 全部改成「成员」；#15 归 ✅ 构造性覆盖；dab-ref-table 那条矛盾消解 |
+| `RECON0` 查哪张表（用户追问） | **不查表**：`connect/RECON0` 按 noun 分节点侧 / 型钢侧，沿 `CREF` → 对端核对 `JOIS`/`JOIE` 回指（与 ADSTCH 同形），然后 `STRCNT` → `JTCONN` / `FXCONN` **写回**两端：型钢 `JOIS`/`JOIE`（`SETREF`）、`CTYS`/`CTYE`；节点 `JFRE`、`ZDIS`/`SZDI`/`EZDI`；FIXING 的 `POS` 吸附。→ 真实会话里两端常常都进账本，C2 补的是写回没改到型钢字节的那类窗口 |
+| `hashValue` = noun hash？ | **是**，且是 **hard type** 的 noun 词 hash（`DB_Noun::hashValue(hardType(contentType(noun)))`，core.dll `0x593dd00`）；UDET 按底层 noun 走规则表 |
+| 两个未解 noun | 合法 `ENHAS2` 词 `YASJWR` / `VWIDTR`（字母表 A–Z + 空格，解码唯一），3.1 字典没有 → **死分支**；不是 UDA/UDET（那族 hash > 387951929） |
+| `UPDATN`/`UPDATD` 之后那一跳 | `sub_1050EA70` = `DES_DrawListManager::instance()->updateGraphics()` → `UpdateChangeList` 消费 QCHGLS（`for i=1; i+=3: HGETIA`）→ 每画列表 `change/UPGRPH` / `UPCACP`；`sub_10507C60` / `sub_10507C30` = 视图层 `VWUPDT` / `VWCLRF` |
 
 ## 4. 顺序与依赖
 
 ```
 C0 文档 ✅(0907) ──▶ C1 真库普查 ✅(0907：结构 21,161 条跨根边 + 12 个窗口；孔洞 0) ──┬─▶ C2 结构连接正向级联 ✅(0907 接线，开关默认关；两真库窗口 + 九窗口两态过)
-                                                                                    └─▶ C3 通用反向级联接线 ✗ 不立项（孔洞 = 0）
+                                                                                    └─▶ C3 通用反向级联接线 ✗ 不立项（孔洞 = 0；0907 C7：core 侧无对应物——EVALAT 没有反向引用）
 C4 INTUBE 删除契约   ✅(0907 核实：live 门 269→270 早已钉着，跑绿)
 C5 TOPF 对拍         ✅(0907，随 C1 扫完：无根 primitive 268 个，全是船体族；不改判据)
 C6 CLIST 定性        随时，只读
-C7 证据补洞          随时，IDA
+C7 证据补洞          ✅(0907：DFIND = 成员导航、RECON0 写回两端、hashValue = hard type noun hash、两个死 noun、UPDATN → DES_DrawListManager::updateGraphics)
 ```
 
 - **C1 是闸**：09-04 清单 #3 / #5 都是先立项后发现语料里压不出窗口，这次反过来。**0907 闸已过**：结构连接那一半两个门槛都满足。
@@ -195,7 +209,8 @@ C7 证据补洞          随时，IDA
 | C0 | 每处新增引用的 `文件:行` / 地址在工作树与 IDB 里 grep / 查得到 |
 | C1 | 三组数字各是一个具体整数；跨根边 = 0 时清单 #12/#15 判词改成「语料上不可达」 —— ✅ 0907：**21,161 / 0 / 783（12 窗口）**；#15 已改判，#12 坐实为洞 |
 | C2 | 契约三态（回指成立 / 不成立 / 开关关）断言集合恰好相等；真库窗口对端根 ∈ `regen`；九窗口两态逐字相同 —— ✅ 0907：三态各一条（`structural_connection::tests`）；`aps7200_0001` 3→4 对端根 6 个全在 `regen`（6→8），`aps250110_0001` 29→30 对端根 31 个全在（251→258）；九窗口两态逐字相同（`tests::live`，本机跑绿） |
-| C3 | 孔洞窗口对端根 ∈ `regen`；`referrers_of` 为空时所有现有窗口计划字节相同 |
+| C3 | ~~孔洞窗口对端根 ∈ `regen`~~；`referrers_of` 为空时所有现有窗口计划字节相同 —— ✗ 不立项（0907 C7：core 无反向引用联动，#15 构造性覆盖） |
+| C7 | 五个洞各有一个实读答案回灌证据文档 —— ✅ 0907：证据 §7 划账 + §8.1–8.5 |
 | C4 | 删中间元件 → `RegenRoot(BRAN)` 恰好 1 条且 `DeleteCleanup` 不单独存在于 `regen` 之外 —— ✅ 已由 live 门 269→270 钉着（0907 跑绿） |
 | C5 | 列出「core 单独重画、我们不归任何根」的 noun 名单，或明确为空 —— ✅ 0907：船体族 `CPANEL`/`CPROF`/`BNDLIN`（247）+ 零星 21 个，见证据 §5 |
 | C6 | `CLIST` 的来源一句话 + `ELCONN` 实例数 |
@@ -208,7 +223,7 @@ C7 证据补洞          随时，IDA
 | 正向读 `CREF` 等要打 T 侧文件，窗口规划变慢 | C2 | 只对结构 noun 读、只读四个属性；`last_root_duration_ms` 前后对比 |
 | 反向级联接线把 #4 CATA 顺手带进 direct，越出用户范围 | C3 | 开关按引用来源库类型分：本计划只放 DESI→DESI 边 |
 | 语料里没有验收窗口 | C1 | 先量再立；零就登记不做 |
-| `hashValue` 不是 noun hash → 规则表读错对象 | 证据 | C7 读实现；规则表所有 noun 比较都建立在这个假设上 |
+| `hashValue` 不是 noun hash → 规则表读错对象 | 证据 | C7 读实现；规则表所有 noun 比较都建立在这个假设上 —— ✅ 0907 已读：是 hard type 的 noun 词 hash，假设成立（UDET 折回底层 noun，规则表对 UDET 元素同样生效） |
 
 ## 7. 需要拍板的事
 

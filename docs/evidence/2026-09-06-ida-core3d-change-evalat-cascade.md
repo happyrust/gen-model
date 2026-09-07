@@ -26,15 +26,16 @@ DDES_GraphicsMngr::postGetWork ────┘ (GETWORK: 先 FNDTOP 再以 REDRA
 
 **`EVALAT` 就是「一个构件变了、哪些别的构件要跟着动」的规则表**：先查属性的 DCHC 类别（`change/IDCHNG`），
 再按 noun 走专项规则——上卷到顶层可画件（`FNDTOP`）、取 owner / 祖父、**沿正向引用**（`GATREF` 读 `CLIST` /
-`ELCXRF`）、**沿反向引用**（`DFIND FIRST/NEXT` = 「谁引用我」）、结构连接（`ADSTCH`：`CREF` ↔ `JOIS`/`JOIE`、
+`ELCXRF`）、~~沿反向引用（`DFIND FIRST/NEXT` = 「谁引用我」）~~ **★0907 沿成员表向下**（`DFIND FIRST/NEXT` 是 dabacon
+成员导航 = `db_move_down`，§8.1；**`EVALAT` 里没有任何一条反向引用查询**）、结构连接（`ADSTCH`：`CREF` ↔ `JOIS`/`JOIE`、
 `CFRA` ↔ `PFRE` **双向核对**）、隐含管段（INTUBE → 前一个元件）——每命中一个目标就
 `EVALCD(ref, 类别)` 推进 QCHGLS。
 
 GETWORK 也走这条路：`sub_1052F2E0` 对每个变更元素先 `FNDTOP`（按 **`toplevel`** 位找顶层可画件），
 再对「owner 不在集合里」的顶层件调 `EVALAT(top, noun, 331445106=REDRAW)`。所以 09-04 清单 §2.3
 「GETWORK 全程没有任何依赖递归」**要改成**：过滤器自己没有，但它把每个顶层件交给 `EVALAT`，
-`EVALAT` 里有引用规则（EQUI 的 `CLIST`、CWBRAN 的 `ELCXRF`、CTRAY / 网格连接点的反向引用、
-设备子件与 PANE 的「谁引用我」）。
+`EVALAT` 里有引用规则（EQUI 的 `CLIST`、CWBRAN 的 `ELCXRF`、~~CTRAY / 网格连接点的反向引用、
+设备子件与 PANE 的「谁引用我」~~ ★0907 后三条实为**成员表向下**，见 §8.1；真正跨子树的只有 `CLIST` / `ELCXRF` 与 §3 的结构连接）。
 
 ## 1. 地址表（E3D 3.1）
 
@@ -49,12 +50,18 @@ GETWORK 也走这条路：`sub_1052F2E0` 对每个变更元素先 `FNDTOP`（按
 | `descases/VDESPT` / `VDESDL` / `SCINC2` | Core3D | `0x101F33A9` / `0x101F1B24` / `0x101F2638` | — | 会话内属性 put / 删除 / include（各调 EVALAT 两次） |
 | `change/ADSTCH` | Core3D | `0x1022D774` | `0x538` | 结构连接联动（§3） |
 | `change/EVALRF` | Core3D | `0x1022DCAC` | — | 「沿属性 A 到 X，X 的属性 B 是否指回我」的双向核对，命中就 EVALCD |
-| `connect/RECON0` | Core3D | `0x1025F521` | — | ADSTCH 命中后的重连 |
+| `connect/RECON0` | Core3D | `0x1025F521` | — | ADSTCH 命中后的重连（★0907 实读 §8.2：不查表，沿 `CREF` / `JOIS` / `JOIE` 导航后**写回**两端的连接属性） |
+| `connect/STRCNT` / `JTCONN` / `FXCONN` | Core3D | `0x102616EA` / `0x10261B5B` / `0x1026358C` | — | RECON0 的工人：断开 / 节点重连 / FIXING 重连（§8.2） |
+| `structures/SETREF` / `MPUTR` | Core3D | `0x102D43CC` / `0x102D5D38` | — | 写 `JOIS` / `JOIE` 引用、写实数属性（§8.2） |
+| `DFIND` 本体 | **core.dll** | `0x5aaff40` → `sub_5ACFF70(43)` → **`sub_5AB6CB0`** | — | ★0907 §8.1：**成员导航**（与 `db_move_down` 同一个体），列表由 `sub_5AEA430` → `sub_5AEA500(记录, kind=2)` 从记录的成员块建 |
+| `DB_Element::hashValue` | core.dll | `0x593dd00` | — | ★0907 §8.3：= `DB_Noun::hashValue(hardType(noun))`，即 **hard type 的 noun 词 hash** |
+| `ENHAS2` | core.dll | — | — | 词 hash 本体（§8.4）：`531441 + Σ (c_i) · 27^i`，A–Z → 1..26、空格 → 0、其它字符整个 hash 判无效 |
+| `DES_DrawListManager::updateGraphics` / `UpdateChangeList` | Core3D | `0x1052D330` / `0x1052B3C0` | — | ★0907 §8.5：`UPDATN` / `UPDATD` 到 3D 画列表的那一跳；`UpdateChangeList` 是 QCHGLS 的消费者 |
 | `desdblib/FNDTOP` | Core3D | `0x10380E38` | `0x21f` | 从 CE 沿 owner 上行，找第一个 `LISTOP` 为真的元素；顶层件的 owner 若是 `TMPL` 则改取 owner |
 | `desdblib/FNDEQP` | Core3D | `0x1038174C` | `0x244` | 点类 noun（`LPOINT`）→ 所属几何件 |
 | `nounlib/LISTOP` | **core.dll** | `0x561C93C` | — | 顶层可画件判据：读 noun 逻辑位 **`0xA187C`（`toplevel`）**；为假时退到 `0xA103E`（`primitive_a`）配特例（§4） |
 | `INCOMP` / `IPCOMP` / `IHCOMP` / `IECOMP` / `LPOINT` | core.dll | `0x561C1B0` / `0x53A9A10` / `0x53A9AAC` / `0x561BC58` / `0x561CD78` | — | noun 谓词（管道 / 管道 / HVAC / 设备子件 / 点类），本轮**未读体** |
-| `DFIND` / `GATREF` / `XTREE` / `CGETEL` / `CLIMBM` / `CLIMBA` / `NATTA` | core.dll（Core3D `.idata` 导入） | — | — | dabacon 导航原语：反向引用 FIRST/NEXT、取属性引用数组、子树遍历、按 noun 取祖先、按 noun 表爬升、前后元件 |
+| `DFIND` / `GATREF` / `XTREE` / `CGETEL` / `CLIMBM` / `CLIMBA` / `NATTA` | core.dll（Core3D `.idata` 导入） | — | — | dabacon 导航原语：~~反向引用 FIRST/NEXT~~ **成员 FIRST/NEXT/PREV/LAST/SAME（★0907）**、取属性引用数组、子树遍历、按 noun 取祖先、按 noun 表爬升、前后元件。`change/` 模块（`0x1022C000`–`0x1022F000`）调 `DFIND` 19 次、`DRETUR` 10 次，**一次都没调** `db_find_reference`（opcode 46）或 `DB_RefTableIterator` |
 | GETWORK 过滤器 | Core3D | `0x1052F2E0` | `0x377` | 09-04 清单 §2.3；本文补上它第二段的输入集合与事件消费者（§5） |
 
 ## 2. `EVALAT(el, noun, attr)` 的规则表
@@ -76,13 +83,13 @@ GETWORK 也走这条路：`sub_1052F2E0` 对每个变更元素先 `FNDTOP`（按
 
 | # | 变更元素的 noun | 规则 | 走的边 | 被标记的目标 | 类别 |
 |---|---|---|---|---|---|
-| A | `FLRLAY` `WLOPEN` `HRGATE` `RAIL` `KICKPL` `HRPOST` `BPOPEN` `AIDLIN` `AIDARC` `AIDCIR` `AIDPOI` `AIDTEX` + 1 个未解 noun（`271245643`） | `FNDTOP` | owner 链 | 顶层可画件 | 4 |
+| A | `FLRLAY` `WLOPEN` `HRGATE` `RAIL` `KICKPL` `HRPOST` `BPOPEN` `AIDLIN` `AIDARC` `AIDCIR` `AIDPOI` `AIDTEX` + 1 个死 noun（`271245643` = `ENHAS2("YASJWR")`，3.1 字典里没有，§8.4） | `FNDTOP` | owner 链 | 顶层可画件 | 4 |
 | B | `GRIDPL` `GRIDCY` `GRIDEL` `GRIDFA` | `CGETEL(REFGRD)` → `XTREE` 遍历该网格子树 | 正向引用 `REFGRD` + 子树 | 子树里 `GRIDPL` / `GRIDCY` 的 `REF`（先过 `sub_1050D810` 谓词，**未读**） | 4 |
-| C | `CGRDCP` `CGRDLP`（网格连接点） | `DFIND FIRST/NEXT` | **反向引用**（谁引用我） | 引用者里 noun ∈ {`FPFITT` `ELFITT` `HVACFI` `INFITT`} 的 | 继承 |
-| D | `CTRAY` | `DFIND FIRST/NEXT` | 反向引用 | **全部**引用者 | 4 |
-| E | `CWBRAN` + 1 个未解 noun（`269526523`） | `GATREF(ELCXRF)` | 正向引用数组 `ELCXRF`（≤2000） | 数组里每个元素 | 4 |
+| C | `CGRDCP` `CGRDLP`（网格连接点） | `DFIND FIRST/NEXT` | ~~反向引用（谁引用我）~~ **★0907 成员表**（`DFIND` = dabacon 成员导航，§8.1） | **成员**里 noun ∈ {`FPFITT` `ELFITT` `HVACFI` `INFITT`} 的 | 继承 |
+| D | `CTRAY` | `DFIND FIRST/NEXT` | ~~反向引用~~ **★0907 成员表** | **全部成员** | 4 |
+| E | `CWBRAN` + 1 个死 noun（`269526523` = `ENHAS2("VWIDTR")`，§8.4） | `GATREF(ELCXRF)` | 正向引用数组 `ELCXRF`（≤2000） | 数组里每个元素 | 4 |
 | F | `EQUI` `ELCONN` | `GATREF(CLIST)` | 正向引用数组 **`CLIST`** | 数组里每个元素 | 4 |
-| G | `CLNPNG` | `DFIND` 两层 | 反向引用 ×2 | 引用者全部；引用者若是 `CLNCGR`，再标它的 `CLNTIL` 引用者 | 继承 |
+| G | `CLNPNG` | `DFIND` 两层（伪码里两个 `DFIND FIRST … DRETUR … DFIND NEXT` 循环嵌套） | ~~反向引用 ×2~~ **★0907 成员表两层** | 成员全部；成员若是 `CLNCGR`，再标它的 `CLNTIL` 成员 | 继承 |
 | H | 类别 == 1（INTUBE） | `CRETUR` + `NATTA(PREV)` | 分支序 | **前一个元件**的 `REF`（它的隐含管段变了） | 4 |
 | I | 类别 == 2 | — | — | 自身 | 4 |
 | J | `INCOMP(noun)`（noun 位 `HOLC`：**负实体 / 孔洞构件**，`DTHOLE` 除外） | — | — | 自身 | 4 |
@@ -132,10 +139,11 @@ GETWORK 也走这条路：`sub_1052F2E0` 对每个变更元素先 `FNDTOP`（按
 
 1. `T.type == TMPL` → 取 `T.owner`，再 `FNDTOP` → 标记那个顶层件。
 2. 否则若 **不是** `IECOMP(T.type)`（`EQUC` 设备子件）且 `T.type != PANE`（或全局旗标 `dword_10EB4004 & 0x10`）→ 直接标记 `T`。
-3. 否则（**T 是设备子件或 PANE**）→ `DFIND FIRST/NEXT` 遍历**所有引用 T 的元素**，其中 `INCOMP`（`HOLC`
-   **孔洞 / 负实体构件**）为真的逐个标记——即「**被打孔的板 / 设备子件动了，引用它的孔洞构件跟着重算**」；
-   随后 `T` 自身也标记。（第一版本文把这条读成「接在 NOZZ 上的管道元件」，**错了**：`INCOMP` 读的是 `HOLC`
-   不是 `PIPC`，见 §2.2a。管道连接在 core 里不走这条——`HPOS`/`TPOS` 是存储属性，09-04 清单 §2.9。）
+3. 否则（**T 是设备子件或 PANE**）→ `DFIND FIRST/NEXT` 遍历 ~~所有引用 T 的元素~~ **★0907 T 的全部成员**（`DFIND`
+   是 dabacon 成员导航，不是反向引用，§8.1），其中 `INCOMP`（`HOLC` **孔洞 / 负实体构件**）为真的逐个标记——即
+   「**被打孔的板 / 设备子件动了，它名下的孔洞构件跟着重算**」；随后 `T` 自身也标记。（第一版本文把这条读成
+   「接在 NOZZ 上的管道元件」，**错了**：`INCOMP` 读的是 `HOLC` 不是 `PIPC`，见 §2.2a；第二版读成「引用 T 的孔洞构件」，
+   **也错了**：走的是成员表，孔洞构件是 T 的子件。管道连接在 core 里不走这条——`HPOS`/`TPOS` 是存储属性，09-04 清单 §2.9。）
 
 ## 3. 结构连接：`change/ADSTCH`（`0x1022D774`）
 
@@ -197,10 +205,10 @@ else if ATNLOG(noun, 0xA103E /* primitive_a */):
 | 清单类 | core 这边的对应规则（本文） | gen-model 现状 | 判词 |
 |---|---|---|---|
 | #5 连接 / 邻居 | 规则 H（INTUBE → 前一元件）。**管道连接（HREF/TREF）在 EVALAT 里没有任何一条**——与 09-04 §2.9「`HPOS`/`TPOS` 是存储属性、接管时回写 BRAN」互证 | INTUBE 在 BRAN 内由整根重生成覆盖 | 09-04 判「构造性不可达」成立，且多了一条正面证据 |
-| 新 #15 孔洞 / 负实体 | §2.3 第 3 条：PANE / 设备子件（`EQUC`）变了 → `DFIND` 找**引用它的孔洞构件**（`HOLC`）逐个重算；规则 J / P：孔洞构件自己变了 → 自身 + owner | 负实体在我们这边是 owner 子树内的成员（整根重生成覆盖 owner 内的孔）；**跨 owner 的孔洞引用**（孔洞元素引用另一个 owner 下的板）靠 `ref_rev`：旧路径有、direct 无 | ❓ 与 #12 同一类：direct 路径缺反向级联；真库里有没有跨 owner 的孔洞引用未查 |
+| 新 #15 孔洞 / 负实体 | §2.3 第 3 条：PANE / 设备子件（`EQUC`）变了 → ~~`DFIND` 找引用它的孔洞构件~~ **★0907 遍历它的成员**，`HOLC` 的逐个重算；规则 J / P：孔洞构件自己变了 → 自身 + owner | 负实体在我们这边是 owner 子树内的成员（整根重生成覆盖 owner 内的孔） | ~~❓ direct 路径缺反向级联~~ **★0907 ✅ 构造性覆盖**：core 自己也只看成员表、不查引用者；`DFIND` 不是反向引用（§8.1）。0907 真库普查另证「跨根孔洞引用 = 0 / 零窗口」（`2026-09-07-cross-root-reference-census.md`）——两边一致 |
 | #4 CATA → DESI | **无**：`EVALAT` 里没有一条走 `SPRE`/`CATR`；GETWORK 库过滤只放 DESI/ISOD | `ref_rev` / 指纹失配 | 09-04 结论不变：我们比 core 强，无对照物 |
 | #9 UDA / #10 XRPNTR | **不在 EVALAT 里**（那两条在 `DB_UserChanges::attributeModified`，ADR-061） | 不做 | 不变 |
-| **新 #12 结构连接** | §3 `ADSTCH`：`CREF` ↔ `JOIS`/`JOIE`、`CFRA` ↔ `PFRE` 双向核对后联动对端。注意它是**从变更元素出发的正向读**（读 `el.CREF` 到 X，再读 `X.JOIS` 核对），**不需要反向表** | **未登记**。旧 PE 路径：`manual_update.rs::reference_edge_eligible` 按 schema `att_type == ELEMENT` 收边，`CREF`(35 noun) / `JOIS` / `JOIE`(4) / `CFRA`(3) / `PFRE`(1) 都是 ELEMENT 型 → 进 `ref_rev`，对端的交付单元会级联（不做双向核对 = 超集，多做不漏）。**direct 文件窗口路径：没有任何反向级联**（09-04 清单 #4 同一个洞：`direct_store::referrers_of` 零调用方） | ❓ **direct 路径上是真缺口候选**，且与 #4 不同：ADSTCH 只要正向读，direct 规划器给结构 noun 加一步「读 `CREF`/`JOIS`/`JOIE`/`CFRA` 的目标并入根集」就能对齐，不必等反向表。验收窗口：改一根 SCTN 的 `POS`，对端 SCTN / 节点是否进重算集 |
+| **新 #12 结构连接** | §3 `ADSTCH`：`CREF` ↔ `JOIS`/`JOIE`、`CFRA` ↔ `PFRE` 双向核对后联动对端。注意它是**从变更元素出发的正向读**（读 `el.CREF` 到 X，再读 `X.JOIS` 核对），**不需要反向表** | **未登记**。旧 PE 路径：`manual_update.rs::reference_edge_eligible` 按 schema `att_type == ELEMENT` 收边，`CREF`(35 noun) / `JOIS` / `JOIE`(4) / `CFRA`(3) / `PFRE`(1) 都是 ELEMENT 型 → 进 `ref_rev`，对端的交付单元会级联（不做双向核对 = 超集，多做不漏）。**direct 文件窗口路径：没有任何反向级联**（09-04 清单 #4 同一个洞：`direct_store::referrers_of` 零调用方） | ~~❓ direct 路径上是真缺口候选~~ **★0907 已坐实并接线**：真库普查 21,161 条回指成立的跨根边（`2026-09-07-cross-root-reference-census.md`）；`src/data_interface/structural_connection.rs` 正向读 + 回指核对 + `STRU` 门，开关 `model_structural_connection_cascade` 默认关（提交 `1913d224`）。§8.2 补：core 命中后还 `RECON0` **写回**两端连接属性，所以真实会话里两端常常都进账本，C2 补的是写回没改到型钢字节的那些窗口（普查 12 个） |
 | 新 #13 设备连接表 | 规则 F：`EQUI` / `ELCONN` 变了 → `CLIST` 数组里的元素全部 REDRAW | `CLIST` **不在** `all_attr_info.json` 的存储属性里（`ELCXRF` / `REFGRD` 也不在）——多半是伪属性，`ref_rev` 收不到 | ❓ 待核（电缆 / 连接件语料里才有内容）；先确认 `CLIST` 是不是伪属性、由谁算 |
 | 新 #14 桥架 / 网格 | 规则 B–E、G（`ELCXRF` 正向、`CTRAY` / 网格连接点反向） | 桥架族 `gb==3`（09-04 §2.5），几何覆盖度问题 | 登记不排期 |
 | 顶层单位 | §4 `toplevel` | 生成根按 `significant` | 不改判据（核对表 R0-3），但 3D 重画单位 = TOPF 这条要写进核对表 W4.1 的结论 |
@@ -212,20 +220,121 @@ else if ATNLOG(noun, 0xA103E /* primitive_a */):
 - §2 / §3 的规则来自 Hex-Rays 伪码 + 常量解码。这批函数是 Fortran 风格的平铺调用（`DGETF` / `DFIND` / `GATREF`
   全走导入表，无 `getField` 出参陷阱），伪码里**没有**出现 §1.4 那类孤零零的 `getField(v); return 0` 形状，
   所以采信；但**没有逐指令核**。`sub_1052F2E0` 的插入点（§5.1）是逐指令核过的。
-- `DB_Element::hashValue(el)` 被当作「noun hash」用（`EVALAT` 的 `a3` 与 noun 常量比较）。这是从比较对象反推的，
-  **没有读 `hashValue` 的实现**。
-- `DFIND(FIRST/NEXT, 1)` 读作「反向引用：引用 CE 的第一个 / 下一个元素」，依据是 hash 解出的字面
-  `FIRST` / `NEXT` 与循环形状（每轮 `DRETUR()` 回到 CE）。`DFIND` 本体 = dabacon **opcode 43**（core.dll
-  `0x5aaff40` → `sub_5ACFF70(43, …)`；名表里 45 = `DFINDF`），与引用表搜索 326/328 不是同一原语——它查哪张表
-  **未读**。
+- ~~`DB_Element::hashValue(el)` 被当作「noun hash」用……没有读 `hashValue` 的实现~~ **★0907 已读（§8.3）**：就是 noun 词 hash，
+  且是 **hard type** 的（UDET 折回底层 noun）。
+- ~~`DFIND(FIRST/NEXT, 1)` 读作「反向引用」……它查哪张表未读~~ **★0907 已读（§8.1），而且原读法是错的**：`DFIND` 是
+  dabacon **成员导航**（与 `db_move_down` 同一个体），列表从元素记录的 kind-2 = 成员块建；不查任何引用表。
+  §2.2 C/D/G 与 §2.3 第 3 条已按此改正。
 - ~~五个谓词未读体~~ 已读（§2.2a）；`sub_1050D810` 已读（= `DES_DrawList::exists`）；`CLIMBM` 表已解
   （{PANE, GENSEC, SCTN, BPANEL}，`0x10D906D0` = 计数 4）。
-- 两个 noun 常量 `271245643`、`269526523` 在 `noun_caps.json` 里没有、逆 hash 也不是词（`YASJWR` / `VWIDTR`），
-  可能是 UDA 或别的编码，未解。
+- ~~两个 noun 常量 `271245643`、`269526523` ……未解~~ **★0907 已解到能解的尽头（§8.4）**：两个都是合法 `ENHAS2` 词 hash
+  （`YASJWR` / `VWIDTR`，字母表只有 A–Z 与空格，解码唯一），3.1 字典里没有这两个 noun → 死分支；不是 UDA / UDET
+  （那两族的 hash 在 `27^6 + 27^4 = 387951930` 之上）。
 - 类别语义 `1` = INTUBE、`4` = REDRAW 沿用 ADR-002 的静态结论；`2` 与 `3`（位姿）按
   `src/data_interface/dchc_change_classes.json` 的口径，本轮未从二进制重证。
-- `docs/evidence/2026-09-06-dab-ref-table-write-path.md` 说 dab 引用表只覆盖 kind-16 属性、`HREF`/`TREF`/`CREF` **无表**；
-  而本文 §2.3 第 3 条的 `DFIND FIRST/NEXT` 却能找到「引用 NOZZ 的管道元件」（`HREF`/`TREF`）。两者只有一个对：
-  要么 `DFIND` 走的不是那张表（会话内内存反向表 / 扫描），要么 kind-16 那条结论不完整。**本轮没有读 `DFIND`，
-  这条矛盾留给 dab 引用表那条线。** ADSTCH 不受影响（它是正向读）。
-- **没有跑任何一条联动的实测**。§6 的 ❓ 三行是取证结论，不是缺口结论。
+- ~~dab 引用表只覆盖 kind-16 而 `DFIND` 能找到 `HREF`/`TREF` 引用者的矛盾~~ **★0907 消解**：`DFIND` 根本不查引用表，
+  所以两条结论都对——引用表只有 kind-16 属性，`EVALAT` 一次也没查过它。ADSTCH 不受影响（它是正向读）。
+- **没有跑任何一条联动的实测**。§6 的 ❓ 三行是取证结论，不是缺口结论。（0907 后 #12 已由真库窗口实测：
+  `structural_connection::tests::live`；#15 判构造性覆盖，不需要实测。）
+- §8 的读法：`RECON0` 一族与 `sub_5AB6CB0` / `sub_5AEA500` 是 Hex-Rays 伪码 + 常量解码，**未逐指令核**；`ENHAS2`、
+  `DB_Element::hashValue`、`DRETUR` 体很短，伪码即可信。`sub_5AEA500` 里 kind-1 / kind-2 两个槽位哪个是成员，
+  由页块头的 kind 标签校验（`((hdr >> 16) & 0xF) != kind → 错误 551`）与 e3d-io `record/block.rs`（`2 => Members`，
+  438 库 3,148,449 块实测）双证。
+
+## 8. 0907 补洞（C7）：`DFIND` / `RECON0` / `hashValue` / 两个死 noun / `UPDATN` 之后那一跳
+
+全部本轮实读，桥同 §1（`Core3D.dll` = `idalib-49136`、`core.dll` = `idalib-33060`）。
+
+### 8.1 `DFIND` 查的不是表，是**成员列表**——`EVALAT` 里没有反向引用
+
+```
+DFIND(dir, n)          core.dll 0x5aaff40   = sub_5ACFF70(43, dir, n)        ← 43 只是 trace 名表的下标（off_6003900[43] = "DFIND"）
+db_move_down(dir, n)                        = sub_5ACFF70(44, dir, n)        ← 同一个派发器、同一个体
+sub_5ACFF70(op, a, b)  = trace(op) ; sub_5AB6CB0(a, b, 1)                    ← 体不看 op
+sub_5AB6CB0(dir, n, 1) core.dll 0x5ab6cb0:
+    frame = CE 栈顶（dword_6A54024 + 60 * level）
+    list  = frame[6]  ?: sub_5AEA430(0)                                      ← 懒建：sub_5AEA500(记录, kind = 2, …)
+    dir ∈ { FIRST 11547609, NEXT 942746, PREV 968614, LAST 938991, SAME 639379 }（ENHAS2 逆解）
+    pos   = FIRST: n | NEXT: cur + n | PREV: cur − n | LAST: count − n + 1 | SAME: cur
+    refno = list[pos]（8 字节一条）；sub_5AEB6B0(refno, 2) 把 CE 移到它
+DRETUR()               = sub_5AD91F0(183) → sub_5AEB0B0()                    ← 要求 level ≥ 1，sub_5AE9460(0, 2, 0) 退一层 = 回到 owner
+                                                                              （EVALAT 循环里每轮 DRETUR 再 DFIND NEXT，正是「看完一个成员回 owner 再取下一个」）
+sub_5AEA500(rec, kind, …) core.dll 0x5aea500:
+    kind 1 → 槽 rec[6..7]，计数 (rec[10] >> 14) & 0x3FFF      ← 显式属性流
+    kind 2 → 槽 rec[8..9]，计数  rec[10]        & 0x3FFF      ← **成员表**（0x3FFF = 溢出，逐页数）
+    每页块头 ((hdr >> 16) & 0xF) 必须 == kind，否则错误 551    ← 与 e3d-io record/block.rs 的 BlockKind 编号一致：2 = Members、1 = Explicit
+```
+
+所以 `EVALAT` 里那 19 处 `DFIND FIRST … DRETUR … DFIND NEXT` 都是「逐个成员、看完回 owner」。`change/` 模块
+（`0x1022C000`–`0x1022F000`）对 dabacon 的引用只有 `DFIND` ×19、`DRETUR` ×10、`GATREF` ×2、`XTREE` ×2、`CGETEL` ×2、
+`CLIMBM` ×1、`CLIMBA` ×3、`NATTA` ×3；**`db_find_reference`（opcode 46）与 `DB_RefTableIterator` 一次都没有**——Core3D
+别处导入了它们，联动规则表不用。**结论：core 的联动只有三种边——owner 链（上卷 / owner / 祖父 / 成员向下）、
+正向引用数组（`CLIST` / `ELCXRF` / `REFGRD`）、结构连接（§3，正向读 + 回指核对）。反向引用一条都没有。**
+
+对 gen-model：#15 孔洞是 owner 子树内的成员 → 整根重生成**构造性覆盖**，不再是「语料上不可达」；C3「通用反向级联」
+在与 core 对齐这件事上没有对应物（它仍可以是我们比 core 多做的事，但不是缺口）。
+
+### 8.2 `RECON0` 不查表：沿 `CREF` / `JOIS` / `JOIE` 导航，然后**写回**两端
+
+`connect/RECON0(mode ∈ {RECO 829026, DISC 604588}, end ∈ {JOIS 912394, JOIE 636832, BOTH 703892}, a4, a5)`（`0x1025F521`）：
+
+```
+el = DGETF(REF); type = DGETI(TYPE)
+type ∈ {PJOI, SJOI, SUBJ, FIXING}:                        ← 节点侧
+    cref = DGETF(CREF); DSAVE; DGOTO(cref)                  ← 去对端型钢
+    end  = JOIS 若 EQREF(DGETF(JOIS), el)，否则 JOIE 若 EQREF(DGETF(JOIE), el)，否则 NULL   ← 与 ADSTCH 同一双向核对
+    mode == DISC → cref = NULREF
+    STRCNT(type(cref), cref, end, el, a4, a5, &err); DRESTO
+type ∈ {SCTN, GENSEC}:                                     ← 型钢侧
+    end ∈ {BOTH, JOIS} 且 mode == RECO → STRCNT(err, el, JOIS, DGETF(JOIS), …)
+    end ∈ {BOTH, JOIE} 且 mode == RECO → STRCNT(…, el, JOIE, DGETF(JOIE), …)
+其它 noun 且 mode == RECO → connect/RECONX(a5)；否则 ERROR + LABORT
+```
+
+`connect/STRCNT`（`0x102616EA`）：任一端 NULREF = **断开**：去节点 `DRMUDA(JFRE)`，去型钢 `structures/SETREF(型钢, type, NULREF, JOIS|JOIE)`、
+`BPUTI(CTYS|CTYE, NULL)`，DB 类型 (2, 25|26) / (41, 54) 时再 `structures/MPUTR`；否则去节点读 `TYPE`：`FIXING` → `connect/FXCONN`，
+其它 → `connect/JTCONN`。
+
+`connect/JTCONN`（`0x10261B5B`）写：型钢 `JOIS`/`JOIE` ← 节点（`SETREF`）、型钢 `CTYS`/`CTYE` ← 节点 `SPRE→CATR→CTYA`（`BPUTI`）；
+节点 `JFRE`（`BPUTL`）；经 `REF` 写 `ZDIS` / `SZDI` / `EZDI`（`BPUTR`，`MPUTR`）；读 `CUTP` `CUTB` `JLIN` `DELP` `NPOS` 算几何。
+`connect/FXCONN`（`0x1026358C`）写：型钢 `JOIS`/`JOIE`、`CTYS`/`CTYE` 同上；**FIXING 的 `POS`**（`BPUTRA`）吸附到型钢；经 `REF` 写 `ZDIS`。
+
+对 C2 的意义：core 的结构联动不只是重画，还**把连接属性写回两端**——这些写在保存的会话里就是账本条目。所以真实会话里
+「改节点 → 型钢也进账本」是常态；0907 普查里 12 个「只改一端」的窗口，是写回没有改动型钢字节的那类（型钢的 `JOIS`/`CTYS`
+本来就是那个值）。C2 补的正是这一类；不需要也不该去模拟这些写。
+
+### 8.3 `DB_Element::hashValue()` = hard type 的 noun 词 hash
+
+core.dll `0x593dd00`：`noun = this+12`（空或 `NOUN_UNKNOWN` 或 UDET 构建号过期 → `setType`）→ `DB_Blob::getContentType(noun)` →
+`DB_Noun::hardType(...)` → `DB_Noun::hashValue`（`0x58d9860`，就是 `DB_Noun+92` 那一格）。所以 `EVALAT(a2, &hashValue(el), attr)`
+里 `*a3` 与 `SCTN` = 821683 这类常量比，比的是 **noun 词 hash**；UDET 元素按其 hard type 走规则表（`:MYSCTN` 当 `SCTN`）。
+
+### 8.4 两个「未解 noun」是死分支
+
+`DB_FortranInterface::stringToHashValue`（`0x58dc4e0`）取前 6 字符、空格补齐 → `ENHAS2`：`hash = 531441 + Σ code(c_i) · 27^i`，
+`code(A..Z) = 1..26`、`code(' ') = 0`、其它字符 → hash = 0。字母表只有 27 个符号，所以 `< 387951930` 的值**唯一**解回一个
+≤ 6 字母的词：`271245643` = `YASJWR`、`269526523` = `VWIDTR`。二者都不在 3.1 字典（`noun_caps.json` 1931 个）里，也不可能是
+UDA / UDET（`hashValueToString` 用 `a2 > 387951929` 区分那一族）。它们各自嵌在规则 A（楼板 / 墙洞 / 栏杆 / 辅助图元族）
+与规则 E（`CWBRAN` 旁）的常量列表里——**旧产品线留下的 noun，3.1 数据永远命不中**，规则表因此少两个 noun、不多不少。
+
+### 8.5 `UPDATN` / `UPDATD` 之后到 3D 画列表的那一跳
+
+```
+UPDATN (0x1022E3E7) / UPDATD (0x1022E5AC):
+    UQGRAF() 图形开着 且 !UQUCUR()（不在 UCB 里）:
+        [UPDATD: MPRCSS; USCHGO(a2)]
+        sub_1050EA70()  =  DES_DrawListManager::instance()->updateGraphics()          ← 那一跳
+            updateGraphics (0x1052D330):
+                UpdateChangeList (0x1052B3C0): change/QCHGLS 句柄（sub_1022C3D7）→ HQLNIR 取长度 → for i = 1; i += 3: HGETIA
+                                               → DB_Ref → DB_Element → sub_10485C20 收进容器 → 排成有序集 → 逐个 sub_1022E020 = EVALCD(ref, &类别)
+                                               （形状像「去重后按类别重灌」，这一步只看了调用序、未细读）
+                每个画列表: gotoDrawList → change/UPGRPH (0x1022EAEE) ；全局或 ARF 列表再 change/UPCACP (0x1022FCD0)
+                promoteElement / isInDrawList 维护顶层件所属列表
+        HLENIR(QCHGLS, 0)                                                              ← 清队列
+    FDBUPD(); sub_1023190B() 的两个返回值 == 1 或 == 6（体未读）时: sub_10507C60() = VWUPDT、sub_10507C30() = VWCLRF   ← 视图层刷新（MTR_Entry 名）
+    UPDATD 另有: dword_10E98500（IDCHNG 置的 INTUBE 旗标）→ PLCDEL()；末尾 DLL_draft::updcps()
+```
+
+`sub_10507C30` / `sub_1050EA70` 就此坐实：前者是 Fortran 可调的 `VWCLRF` 包装（`sub_1052DDC0` → `sub_1052DB20`），后者是
+`DES_DrawListManager::updateGraphics()`。09-04 清单 §2.3 / 核对表 R5 说的「QCHGLS 步长 3、UPDATN 消费」在 `UpdateChangeList`
+里逐字可见（`for (i = 1; i < len; i += 3) HGETIA`）。
