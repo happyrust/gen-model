@@ -2,6 +2,58 @@
 
 ## 2026-09-07
 
+### 级联查询换源 P4：设计侧通用一跳反查接进窗口规划器（MDB 逐库并集，默认关）
+
+direct 窗口规划器此前对「谁引用了这一窗变了的元素」一个字都不问：`plan_update` 只做 owner 链闭包 +
+变换子树 + CTRAY 整条。P4 把这一跳接上，源仍是**文件自带的 kind-16 反向引用表**（不读 `ref_rev`，
+ADR-063）：`data_interface/reverse_reference.rs` 新增 `DesignReferenceCascade`，与 P3 的
+`expand_reverse_cascade` 同模块、共用同一份「哪些表是反向引用表」的判据与同一条点查。
+
+- **逐库并集**：一张反向表只答它自己那个库的引用者（表在引用方的库里），所以要逐个开 MDB 的设计
+  成员（`E3dModelService::design_sources()`，各带 ADR-054 Q1 的生成会话），本库钉窗口 T 端。这正是
+  C8 `cable_endpoint`「只查本库」留下的另一半。
+- **行为只有 `POSREF` 一条**：783 库差表（`docs/evidence/2026-09-06-ref-rev-vs-file-table-coverage.md`
+  §1.3）里设计→设计、跨单元、e3d-model 几何真读的引用边就它一个（电缆桥架成员的位置参照）。它的
+  引用者上卷成根并进 `touched`；其余设计侧表照查，只落进 `edges_by_attribute` 记账。入口与账都在
+  原位，几何覆盖扩到读别的属性那天，改动就是往 `DESIGN_CASCADE_ATTRIBUTES` 里加个名字。
+- **判不了不静默**：成员库打不开 / 点查读挂 / 变更件数超 2 000（超了一次点查都不发）→ 经
+  `WindowImpact::cascade_degraded` **放弃凭证前移**，已持久化的根全部重算。反查答不上来时空集与
+  「真的没有引用者」长得一模一样，取前者就是漏算。
+- **在案缺口**：`POSREF` 命中但引用者在别的设计库里时只计数不排工（本窗口的 `roots_T` 是本库的）。
+  差表说 `POSREF` 目标 0 跨库，这一格今天该恒为 0。
+- 开关 `model_design_reference_cascade`（`AIOS_MODEL_DESIGN_REFERENCE_CASCADE`）**默认关**，关着时
+  连 MDB 成员名单都不解析，四桶与引入前逐字相同。
+- **未做**：计划里写的 `increment_planner_parity` 对拍没做——它对的是老规划器的 `ref_rev`，而那条路
+  在读透形态下已由 ADR-063 D2/D3 停维护并报错，对拍只在摄入形态下才有意义；真库两态门是 `#[ignore]`，
+  **未跑**（要先在语料里找出 31 个带 `POSREF` 表的设计库中的一个）。老规划器那三个 `ref_rev` 读点
+  仍未拆：拿 `POSREF` 一条换 603 个名字的资格是收窄不是等价，留给 P5 收口。
+
+### `versioned_db::database` 清底：MySQL 那一摊（`feature = "sql"`）删干净，515 → 411 行
+
+同日三次退役（`sync_pdms` → `sync_total_async_threaded` → `bootstrap_sys_metadata`）之后，这个模块里剩下的
+legacy 只有 MySQL：`MySqlMethods` / `create_project_database` / `create_info_database` / `execute_sql`，
+四样全在 `feature = "sql"` 后面，仓里**没有任何调用点、也没有任何 impl**。
+
+真正的判据不是「没人调」，是**它已经编不过**：`cargo check --lib --features sql` 停在
+`AiosDBMgr::get_global_pool` / `get_project_pools` 上——这两个函数早已不在 `aios_core` 里。
+这个 feature 从来没人开（`Cargo.toml` 的默认集、CI 的 `--features`、全部脚本里都找不到它），
+于是那段死码烂在那儿很久也没人看见。留着它比没有更坏：它让人以为还有一条 MySQL 落库路，
+而持久层只有 SurrealDB 一个（宪法 I）。
+
+- **删**：上述四个函数 / trait，连同它们里面的 6 处 `dbg!`（那是调试残留，不是日志）。
+  死掉的 import 一并清：`sqlx`（两行）、`AiosDBMgr`、`DbOption`、`aios_core::{pdms_types,types}::*`、
+  `Cow`、`take`、`tokio::fs` 三样、`crate::{consts,tables}::*`、`AiosDBManager`——
+  只剩 `SUL_DB` / `Deserialize` / `BTreeMap` / `Path` / `PathBuf` 五个。
+- **模块注释**：写清这个模块今天只剩两件事（库文件清单 + `pe` 统计修复），以及四次退役的顺序与理由。
+- **源码钉** `the_legacy_full_sync_entry_point_stays_retired` 加第三段：本文件的**代码行**（注释行豁免，
+  墓志铭要留得住）不许再出现 `sqlx` / `MySql` / `feature = "sql"` / `dbg!`。实测塞一行 `dbg!(1)` 即红。
+- **没做**：`feature = "sql"` 本身还在 `Cargo.toml` 里，另外 6 个文件（`db_model.rs` 12 处、
+  `increment_manager.rs` 6 处、`save_data_state.rs` 5 处、`manual_update.rs` / `tidb_manager.rs` 各 2 处、
+  `team_data.rs` 1 处）仍有 `#[cfg(feature = "sql")]` 段，`team_data.rs:75` 也编不过。整条 feature 的退役
+  是单独一件事，另议。
+- 验证：`cargo check --lib --tests` / `--bins` 过；`cargo test --lib` 1764 passed / 0 failed / 117 ignored；
+  `database.rs` rustfmt 干净。
+
 ### `sync_sys_only` / `bootstrap_sys_metadata` 退役：SYS 元数据不是一道引导，是初始化的一部分
 
 用户口径：「`sync_sys_only` 这个不需要了。默认 SYST 就是初始化时需要检查的，以及增量更新需要处理的。」

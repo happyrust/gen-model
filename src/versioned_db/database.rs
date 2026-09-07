@@ -1,24 +1,17 @@
-use aios_core::SUL_DB;
-use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
-use aios_core::options::DbOption;
-use aios_core::pdms_types::*;
-use aios_core::types::*;
-use serde::Deserialize;
-#[cfg(feature = "sql")]
-use sqlx::{Connection, MySql, MySqlPool, Pool};
-#[cfg(feature = "sql")]
-use sqlx::{Error, Executor};
-use std::borrow::Cow;
-use std::collections::BTreeMap;
-use std::mem::take;
-use std::path::{Path, PathBuf};
-use tokio::fs;
-use tokio::fs::{File, create_dir_all};
+//! 库文件清单与 `pe` 统计修复。
+//!
+//! 这个模块曾经是 legacy 全量同步的家（`sync_pdms` → `sync_total_async_threaded` →
+//! `bootstrap_sys_metadata`），三样在 2026-09-07 依次退役；同日最后清掉的是 MySQL 那一摊
+//! （`MySqlMethods` / `create_project_database` / `create_info_database` / `execute_sql`，
+//! 全在 `feature = "sql"` 后面）。它们不只是没人调：`AiosDBMgr::get_global_pool` /
+//! `get_project_pools` 早已不在 `aios_core` 里，`cargo check --features sql` 就停在这几行上
+//! ——留着的是一段**编不过**的死码，比没有更坏（它让人以为还有一条 MySQL 落库路）。
+//! 持久层只有 SurrealDB 一个（宪法 I）。
 
-use crate::consts::*;
-use crate::data_interface::tidb_manager::AiosDBManager;
-// use crate::graph_db::pdms_arango::*;
-use crate::tables::*;
+use aios_core::SUL_DB;
+use serde::Deserialize;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 /// 列出项目 `*000` 目录下需要解析的库文件。
 ///
@@ -214,126 +207,9 @@ pub(crate) async fn dbnum_stat_totals(dbnum: u32) -> anyhow::Result<(usize, usiz
     Ok((pe_count, info_rows, info_count))
 }
 
-#[cfg(feature = "sql")]
-pub trait MySqlMethods {
-    fn add_to_args(&self, args: &mut sqlx::mysql::MySqlArguments);
-
-    fn get_query(count: usize) -> anyhow::Result<String>;
-
-    fn name() -> String;
-}
-
-/// 初始化project database
-#[cfg(feature = "sql")]
-pub async fn create_project_database(project: &str, url: &str) -> anyhow::Result<()> {
-    let pool = MySqlPool::connect(url).await.unwrap();
-    sqlx::query(&format!(
-        "CREATE DATABASE IF NOT EXISTS {project} DEFAULT CHARSET UTF8"
-    ))
-    .execute(&pool)
-    .await?;
-    Ok(())
-}
-
-/// 初始化 info 库和表
-#[cfg(feature = "sql")]
-pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
-    let pool = AiosDBMgr::get_global_pool().await?;
-    let project_name = aios_mgr.db_option.project_name.clone();
-    pool.execute(
-        format!(
-            "CREATE DATABASE IF NOT EXISTS {PDMS_INFO_DB}_{};",
-            project_name
-        )
-        .as_str(),
-    )
-    .await?;
-
-    //todo 改成一对多的实现
-    let mut sql = String::new();
-    sql.push_str(&format!(r#"CREATE TABLE IF NOT EXISTS {} ("#, {
-        PDMS_REFNO_INFOS_TABLE
-    }));
-    // sql.push_str(&format!(r#"{} BIGINT NOT NULL PRIMARY KEY ,"#, "REF0"));
-    sql.push_str(&format!(r#"{} BIGINT UNSIGNED PRIMARY KEY ,"#, "ID"));
-    sql.push_str(&format!(r#"{} BIGINT NOT NULL ,"#, "REF0"));
-    //允许有多个project的存在
-    sql.push_str(&format!(r#"{} VARCHAR(100)"#, "PROJECT"));
-
-    sql.push_str(");");
-    let result = pool.execute(sql.as_str()).await;
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            dbg!(e);
-            dbg!(sql.as_str());
-        }
-    }
-
-    let result = pool
-        .execute(gen_create_dbno_infos_tables_sql().as_str())
-        .await;
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            dbg!(&e);
-        }
-    }
-    let result = pool
-        .execute(gen_create_version_info_table_sql(&project_name).as_str())
-        .await;
-    match result {
-        Ok(_) => {}
-        Err(e) => {
-            dbg!(&e);
-        }
-    }
-    let pools = aios_mgr.get_project_pools().await?;
-    for (_, pool) in pools {
-        let result = pool.execute(gen_create_element_tables_sql().as_str()).await;
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(&e);
-            }
-        }
-        let result = pool.execute(gen_create_project_mdb_sql().as_str()).await;
-        match result {
-            Ok(_) => {}
-            Err(e) => {
-                dbg!(&e);
-            }
-        }
-    }
-
-    Ok(())
-}
-
 /// Remove the retired trigger; all PE writers maintain statistics explicitly.
 pub async fn retire_dbnum_event() -> anyhow::Result<()> {
     crate::data_interface::dbnum_stats::retire_event_on(&SUL_DB).await
-}
-
-#[cfg(feature = "sql")]
-pub async fn execute_sql(conn: &Pool<MySql>, sql: &str) -> bool {
-    return match conn.execute(sql).await {
-        Ok(_) => true,
-        Err(e) => {
-            match &e {
-                Error::Database(error) => {
-                    //index already exist
-                    if error.code() == Some(Cow::from("42000")) {
-                    } else {
-                        dbg!(sql);
-                    }
-                }
-                _ => {
-                    dbg!(&e);
-                }
-            }
-            false
-        }
-    };
 }
 
 #[cfg(test)]
@@ -425,7 +301,8 @@ fn collect_project_db_files_rejects_sibling_extracts() {
 /// 当普通库入队首载（`needs_initial_load` 明说「SYS meta 也算」），规格工具走
 /// `AiosDBManager::initialize_project_sys_metadata`，两条路同一个 `initialize_dbnum_baseline`。
 ///
-/// 现在钉的是「别再长回来」：本文件不许重新出现那三个入口，也不许再读那四个开关。
+/// 现在钉的是「别再长回来」：本文件不许重新出现那三个入口，也不许再读那四个开关，
+/// 也不许再有第二个持久层（同日清掉的 MySQL 那一摊）。
 #[test]
 fn the_legacy_full_sync_entry_point_stays_retired() {
     let source = include_str!("database.rs");
@@ -449,6 +326,25 @@ fn the_legacy_full_sync_entry_point_stays_retired() {
         assert!(
             !source.contains(&format!("db_option.{switch}")),
             "legacy 全量开关 {switch} 已退役，本文件不许再读它"
+        );
+    }
+    // MySQL 落库路 2026-09-07 清掉时已经编不过（`AiosDBMgr::get_global_pool` /
+    // `get_project_pools` 不在 aios_core 里了）——`feature = "sql"` 从来没人开，
+    // 所以那段死码烂了很久也没人看见。持久层只有 SurrealDB 一个（宪法 I）。
+    // 只看代码行：模块注释里点名了这几样，那是它们的墓志铭，不是复活。
+    let code = source
+        .split_once("fn the_legacy_full_sync_entry_point_stays_retired")
+        .expect("this very test")
+        .0
+        .lines()
+        .filter(|line| !line.trim_start().starts_with("//"))
+        .collect::<Vec<_>>();
+    for forbidden in ["sqlx", "MySql", "feature = \"sql\"", "dbg!"] {
+        let hit = code.iter().find(|line| line.contains(forbidden));
+        assert!(
+            hit.is_none(),
+            "本文件不许再出现 `{forbidden}`（MySQL 那条路 2026-09-07 退役，dbg! 不是日志）：{:?}",
+            hit
         );
     }
 }
