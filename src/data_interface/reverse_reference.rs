@@ -655,11 +655,21 @@ pub fn sources_in_dir(dir: &Path, db_types: &[&str]) -> anyhow::Result<Vec<Sourc
 /// 它们那天，把名字加进这里就是全部改动——入口、护栏、账都已经在原位。
 pub const DESIGN_CASCADE_ATTRIBUTES: [&str; 1] = ["POSREF"];
 
-/// 一窗最多拿多少个变更元素去点查。
+/// 一窗最多发多少次点查（`变更元素数 × 要开的库里反向表总数`）。
 ///
-/// 超过就判不了（[`DesignReferenceCascade::degraded`]）：导入级窗口逐件点查每个成员库的每张表
-/// 不是这条路该付的钱，而计划 §2 原则 3 要求「判不了 → 该库全部根过期」，宁多算不漏算。
-pub const DESIGN_CASCADE_SOURCE_CAP: usize = 2_000;
+/// 钉在**点查次数**而不是变更元素数上：真正的成本是这个乘积，而 MDB 逐库并集把它乘上了成员库
+/// 的个数——同样 2 000 个变更元素，单库 5 张表是一万次，三十个成员库就是三十万次。
+/// 预算在开完库、读完表清单之后、发第一次点查之前算，超了**一次都不发**，判不了
+/// （[`DesignReferenceCascade::degraded`]），按计划 §2 原则 3 退到「该库全部根过期」。
+///
+/// 取值由实测定（2026-09-07，语料 31 个带 `POSREF` 表的设计库 / 93 窗）：最大的一窗
+/// `aps250110_0001 29→30` 是 7 139 个变更元素 × 10 张表 = **71 390 次点查**，加进去之后整趟
+/// 93 窗对拍反而从 214 s 降到 200 s——点查是 O(树高)，成本淹没在索引扫描里，量不出来。
+/// 20 万挡住的是逐库并集乘出来的那一档：同一窗放进一个三十成员的 MDB 就是一百多万次。
+///
+/// 这个数原本钉在变更元素数上（2 000），上面那一窗因此判不了、`regen` 从 251 涨到 495——
+/// 白重算 244 个根。换成点查次数之后那一窗答得出来了，93 窗两态**逐字相同**。
+pub const DESIGN_CASCADE_QUERY_BUDGET: usize = 200_000;
 
 /// 一条点查出来的反向边。`attribute` 就是表名（写侧 `db_put_reference` 把表名取成 attId）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -685,6 +695,9 @@ pub struct DesignReferrerEdges {
     pub query_failures: usize,
     /// 打不开的成员库 → 原因。**不是**「这个库没有引用者」，是未知。
     pub unreadable_dbs: BTreeMap<u32, String>,
+    /// 本该发的点查次数超了 [`DESIGN_CASCADE_QUERY_BUDGET`]：一次都没发，`edges` 是空的但
+    /// **不是**「没有引用者」。库开过了、表清单读过了，所以 `tables_used` 仍是实的。
+    pub over_budget: Option<usize>,
 }
 
 /// 一窗里要拿去反查的变更元素：账本里的 refno，去重，不分变更类型。
@@ -704,11 +717,16 @@ pub fn changed_elements(plan: &UpdatePlan) -> Vec<RefNo> {
 
 /// I/O：对每个变更元素，在每个设计库的每张反向表里点查一次。
 ///
+/// 分两步：先把库全开了、表清单读出来（这一步的成本只跟**库数**有关），据此算出这一窗要发多少
+/// 次点查；超 `budget` 就一次都不发（`over_budget`）。开库便宜，而它算出来的乘积是唯一诚实的
+/// 预算依据——变更元素数本身说明不了成本，逐库并集把它乘上了成员库个数。
+///
 /// 一个库打不开 / 一次点查读挂都只记账不中断——中断会把「这一窗没有引用者」与「没查成」
 /// 混成同一个结果，而这两件事的处置正相反（见 [`DesignReferenceCascade::degraded`]）。
 pub fn read_design_referrer_edges(
     sources: &[RefNo],
     design_dbs: &[SourceDb],
+    budget: usize,
 ) -> DesignReferrerEdges {
     let mut out = DesignReferrerEdges {
         sources: sources.len(),
@@ -717,23 +735,30 @@ pub fn read_design_referrer_edges(
     if sources.is_empty() {
         return out;
     }
+    let mut open: Vec<OpenDb> = Vec::new();
     for source in design_dbs.iter().filter(|source| source.is_design()) {
-        let mut db = match OpenDb::open(source) {
-            Ok(db) => db,
+        match OpenDb::open(source) {
+            Ok(db) if db.tables.is_empty() => {}
+            Ok(db) => {
+                out.tables_used.insert(
+                    source.dbnum,
+                    db.tables.iter().map(|(name, _)| name.clone()).collect(),
+                );
+                open.push(db);
+            }
             Err(error) => {
                 out.unreadable_dbs
                     .insert(source.dbnum, format!("{error:#}"));
-                continue;
             }
-        };
-        let tables = db.tables.clone();
-        if tables.is_empty() {
-            continue;
         }
-        out.tables_used.insert(
-            source.dbnum,
-            tables.iter().map(|(name, _)| name.clone()).collect(),
-        );
+    }
+    let planned = sources.len() * open.iter().map(|db| db.tables.len()).sum::<usize>();
+    if planned > budget {
+        out.over_budget = Some(planned);
+        return out;
+    }
+    for db in &mut open {
+        let tables = db.tables.clone();
         for target in sources {
             for (name, hash) in &tables {
                 out.queries += 1;
@@ -781,7 +806,7 @@ pub struct DesignReferenceCascade {
     /// 本窗口只排本库的工作（`roots_T` 就是本库的），排不了它们——这是在案的跨库缺口，
     /// 与 C8 「只查本库」留下的那 196 条同性质。记出来，不静默。
     pub foreign_referrers: BTreeMap<u32, usize>,
-    /// 判不了的原因：变更件数超上限 / 成员库打不开 / 表读挂。
+    /// 判不了的原因：点查次数超预算 / 成员库打不开 / 表读挂。
     ///
     /// 调用方（[`crate::data_interface::window_root_plan::WindowImpact`]）据此**放弃凭证前移**
     /// ——计划 §2 原则 3：反查答不上来时空集与「真的没有引用者」长得一模一样，静默取前者就是
@@ -793,18 +818,6 @@ impl DesignReferenceCascade {
     /// 开关关：零 I/O、零改动。
     pub fn off() -> Self {
         Self::default()
-    }
-
-    /// 变更件数超 [`DESIGN_CASCADE_SOURCE_CAP`]：一次点查都不发，直接判不了。
-    pub fn over_cap(sources: usize) -> Self {
-        Self {
-            enabled: true,
-            sources,
-            degraded: Some(format!(
-                "变更元素 {sources} 个超过反查上限 {DESIGN_CASCADE_SOURCE_CAP}，没有点查任何反向表"
-            )),
-            ..Self::default()
-        }
     }
 
     /// 纯函数：把点查出的边折成根集与账。`root_chain(引用者)` 给它 T 端 owner 链上的根
@@ -844,6 +857,14 @@ impl DesignReferenceCascade {
                 .extend(roots.into_iter().map(refno_from_e3d));
         }
         let mut reasons = Vec::new();
+        if let Some(planned) = edges.over_budget {
+            reasons.push(format!(
+                "这一窗要发 {planned} 次点查（{} 个变更元素 × {} 个成员库的反向表），超过预算 \
+                 {DESIGN_CASCADE_QUERY_BUDGET}，一次都没发",
+                edges.sources,
+                out.tables_used.len()
+            ));
+        }
         if !out.unreadable_dbs.is_empty() {
             reasons.push(format!(
                 "MDB 设计成员 {:?} 打不开（它们的引用者未知）",
@@ -877,11 +898,8 @@ impl DesignReferenceCascade {
                 ..Self::default()
             };
         }
-        if sources.len() > DESIGN_CASCADE_SOURCE_CAP {
-            return Self::over_cap(sources.len());
-        }
         let dbs = design_dbs_for_window(dbnum, file, target_sesno, design_dbs);
-        let edges = read_design_referrer_edges(&sources, &dbs);
+        let edges = read_design_referrer_edges(&sources, &dbs, DESIGN_CASCADE_QUERY_BUDGET);
         let root_keys: BTreeSet<(u32, u32)> = roots_t
             .iter()
             .map(|root| {
@@ -1285,6 +1303,7 @@ mod tests {
             queries: 2,
             query_failures: 0,
             unreadable_dbs: BTreeMap::new(),
+            over_budget: None,
         }
     }
 
@@ -1474,18 +1493,36 @@ mod tests {
         );
     }
 
-    /// 超上限：一次点查都不发（导入级窗口不该逐件问每个库的每张表），而且照样判不了。
+    /// 预算钉在**点查次数**上，而不是变更元素数：同样的变更量，逐库并集把成本乘上了成员库
+    /// 个数。超预算时一次点查都不发，而且照样判不了——`tables_used` 仍是实的（库开过、表清单
+    /// 读过），这样回执里说得出「本该发多少次」。
     #[test]
-    fn too_many_changed_elements_degrade_without_a_single_point_query() {
-        let cascade = DesignReferenceCascade::over_cap(DESIGN_CASCADE_SOURCE_CAP + 1);
+    fn the_budget_counts_point_queries_and_spends_none_when_it_blows() {
+        let edges = read_design_referrer_edges(
+            &[design_refno(OWN_DB, 1), design_refno(OWN_DB, 2)],
+            &[SourceDb {
+                dbnum: PEER_DB,
+                db_type: "DESI".into(),
+                file: PathBuf::from(r"Z:\does\not\exist"),
+                sesno: None,
+            }],
+            0,
+        );
+        // 库都打不开 → 没有表 → 预算是 0 次，不该判成超预算。
+        assert_eq!(edges.over_budget, None);
+
+        let mut blown = queried(&[]);
+        blown.sources = 7_139;
+        blown.over_budget = Some(35_695);
+        blown.queries = 0;
+        let cascade = DesignReferenceCascade::from_edges(&blown, OWN_DB, design_root_chain);
         assert!(cascade.enabled);
         assert_eq!(cascade.queries, 0);
-        assert!(cascade.tables_used.is_empty());
+        assert!(cascade.referrer_roots.is_empty());
+        let reason = cascade.degraded.clone().expect("超预算就是判不了");
         assert!(
-            cascade
-                .degraded
-                .as_deref()
-                .is_some_and(|reason| reason.contains("超过反查上限"))
+            reason.contains("35695") && reason.contains("一次都没发"),
+            "{reason}"
         );
         assert!(design_plan_with(&cascade).advance.is_empty());
     }
@@ -1553,6 +1590,7 @@ mod tests {
                 file: PathBuf::from(r"Z:\does\not\exist"),
                 sesno: None,
             }],
+            DESIGN_CASCADE_QUERY_BUDGET,
         );
         assert_eq!(edges, DesignReferrerEdges::default());
         let cascade = DesignReferenceCascade::from_edges(&edges, OWN_DB, design_root_chain);
@@ -1572,6 +1610,7 @@ mod tests {
                 file: PathBuf::from(r"Z:\does\not\exist"),
                 sesno: None,
             }],
+            DESIGN_CASCADE_QUERY_BUDGET,
         );
         assert_eq!(edges.sources, 1);
         assert_eq!(edges.queries, 0);
@@ -1595,7 +1634,10 @@ mod tests {
         assert!(line.contains("referrer_roots=1"), "{line}");
         assert!(line.contains("dbs_queried=1"), "{line}");
 
-        let capped = DesignReferenceCascade::over_cap(9_999).summary_line(OWN_DB);
+        let mut blown = queried(&[]);
+        blown.over_budget = Some(9_999_999);
+        let capped = DesignReferenceCascade::from_edges(&blown, OWN_DB, design_root_chain)
+            .summary_line(OWN_DB);
         assert!(
             capped.contains("判不了") && capped.contains("放弃凭证前移"),
             "{capped}"
@@ -1626,28 +1668,57 @@ mod tests {
         };
         use crate::fast_model::e3d_model_service::scan_index;
 
-        /// 在一个项目目录里找出**第一个带 `POSREF` 表的设计库**。写死路径不行：P0 差表说
-        /// 语料 783 库里只有 31 个库有这张表，哪一个有得现问。
-        fn posref_design_db() -> Option<(SourceDb, u32)> {
-            let dir =
-                PathBuf::from(std::env::var("AIOS_POSREF_DIR").unwrap_or_else(|_| {
-                    r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000".into()
-                }));
+        /// 本机语料的项目数据目录。P0 差表扫的就是这几个（783 库）；`AIOS_POSREF_DIRS`
+        /// （`;` 分隔）可整体替换。
+        const CORPUS_DIRS: [&str; 5] = [
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000",
+            r"D:\AVEVA\Projects\E3D3.1\ZDJ\ZDJ000",
+            r"D:\AVEVA\Projects\E3D3.1\YCYK-E3D\acw000",
+        ];
+
+        fn corpus_dirs() -> Vec<PathBuf> {
+            match std::env::var("AIOS_POSREF_DIRS") {
+                Ok(value) => value.split(';').map(PathBuf::from).collect(),
+                Err(_) => CORPUS_DIRS.iter().map(PathBuf::from).collect(),
+            }
+        }
+
+        /// 语料里**全部**带 `POSREF` 表的设计库，按目录分组。写死一个不行：P0 差表说 783 库里
+        /// 只有 31 个有这张表，哪些有得现问；只挑第一个也不行——一个库答对了不代表这条路对。
+        fn posref_design_dbs() -> Vec<(PathBuf, Vec<SourceDb>)> {
             let hash = e3d_attlib::db1_hash("POSREF");
-            for source in sources_in_dir(&dir, &["DESI"]).ok()? {
-                let Ok(mut engine) = ReadOnlyEngine::open(&source.file) else {
+            let mut out = Vec::new();
+            for dir in corpus_dirs() {
+                if !dir.is_dir() {
+                    continue;
+                }
+                let Ok(sources) = sources_in_dir(&dir, &["DESI"]) else {
                     continue;
                 };
-                let listed = engine.tables().iter().any(|table| table.name_hash == hash);
-                if listed && engine.reference_table(hash).is_some() {
-                    return Some((source, hash));
+                let carriers: Vec<SourceDb> = sources
+                    .into_iter()
+                    .filter(|source| {
+                        let Ok(mut engine) = ReadOnlyEngine::open(&source.file) else {
+                            return false;
+                        };
+                        engine.tables().iter().any(|table| table.name_hash == hash)
+                            && engine.reference_table(hash).is_some()
+                    })
+                    .collect();
+                if !carriers.is_empty() {
+                    out.push((dir, carriers));
                 }
             }
-            println!(
-                "skip: no DESI database under {} carries a POSREF table",
-                dir.display()
-            );
-            None
+            if out.is_empty() {
+                println!("skip: no DESI database in the corpus carries a POSREF table");
+            }
+            out
+        }
+
+        fn posref_hash() -> u32 {
+            e3d_attlib::db1_hash("POSREF")
         }
 
         fn open(schema: &DirectSchema, file: &Path, sesno: u32) -> Arc<DbSet> {
@@ -1664,162 +1735,217 @@ mod tests {
             set
         }
 
-        /// 从 `POSREF` 表里拿一条现成的边当假定的变更源——语料里没有「只改被参照件」的自然
-        /// 窗口，所以验收只能这么搭（与 C8 的 `live_zdj7200_…` 同一手法）。
+        /// **每一个**带 `POSREF` 表的设计库都要答得出：拿它表里现成的一条边当假定的变更源
+        /// （语料里没有「只改被参照件」的自然窗口，与 C8 的 `live_zdj7200_…` 同一手法），
+        /// 反查回来的根必须与正向沿 owner 链算出的期望逐字相等。
+        ///
+        /// 同时**真的走一次 MDB 逐库并集**：peers 取同目录下其余带 `POSREF` 表的库。
+        /// P0 差表说 `POSREF` 目标 0 跨库，所以 `foreign_referrers` 该恒为空——非空即是新事实，
+        /// 这条门就是那个报警器。
         #[test]
-        #[ignore = "manual live: needs a DESI database that carries a POSREF table and the E3D template directory"]
-        fn live_a_posref_target_pulls_its_referrer_root_in() {
-            let Some((source, posref)) = posref_design_db() else {
+        #[ignore = "manual live: needs DESI databases that carry a POSREF table and the E3D template directory"]
+        fn live_every_posref_table_answers_its_own_referrers() {
+            let corpus = posref_design_dbs();
+            if corpus.is_empty() {
                 return;
-            };
-            let file = source.file.clone();
+            }
             let schema = DirectSchema::open_from_env().expect("E3D template directory");
             let unit_types = resolve_delivery_unit_types(&[]);
-            let mut engine = ReadOnlyEngine::open(&file).expect("open the design file");
-            let sesno = engine.session().sesno;
-            let dbnum = engine.descriptor().db_mark;
-            let tables = reference_tables_of(&mut engine);
-            println!(
-                "{} @{sesno} dbnum={dbnum} tables={tables:?}",
-                file.display()
-            );
-            let (target, referrer) = engine
-                .reference_table(posref)
-                .expect("POSREF 表打得开")
-                .iter()
-                .filter_map(Result::ok)
-                .map(|entry| (entry.target, entry.referrer))
-                .next()
-                .expect("POSREF 表里要有边");
-            drop(engine);
-
-            let index = scan_index(&file, Some(sesno)).expect("scan index");
-            let set = open(&schema, &file, sesno);
-            let roots_t =
-                enumerate_generation_roots(&set, &index.roots, &unit_types).expect("roots");
-            let root_keys: BTreeSet<(u32, u32)> = roots_t
-                .iter()
-                .map(|root| {
-                    let refno = refno_to_e3d(root.root);
-                    (refno.word0, refno.word1)
-                })
-                .collect();
-            let edges = read_design_referrer_edges(
-                &[target],
-                &[SourceDb {
-                    dbnum,
-                    db_type: "DESI".into(),
-                    file: file.clone(),
-                    sesno: Some(sesno),
-                }],
-            );
-            let cascade = DesignReferenceCascade::from_edges(&edges, dbnum, |element| {
-                roots_on_owner_chain(&index.owners, &root_keys, element)
-            });
-            println!("{}", cascade.summary_line(dbnum));
-            assert!(cascade.degraded.is_none(), "{:?}", cascade.degraded);
-            assert!(
-                cascade
-                    .edges_by_attribute
-                    .get("POSREF")
-                    .is_some_and(|count| *count >= 1),
-                "点查必须找回表里那条边：{:?}",
-                cascade.edges_by_attribute
-            );
-            assert!(
-                cascade.foreign_referrers.is_empty(),
-                "P0 差表说 POSREF 目标 0 跨库：{:?}",
-                cascade.foreign_referrers
-            );
-            let expected: BTreeSet<RefnoEnum> =
-                roots_on_owner_chain(&index.owners, &root_keys, referrer)
-                    .into_iter()
-                    .map(refno_from_e3d)
-                    .collect();
-            assert_eq!(
-                cascade.referrer_roots, expected,
-                "引用者 {referrer} 的根必须一个不多一个不少"
-            );
-        }
-
-        /// 现有窗口逐步：开关两态的 `regen` 必须逐字相同。
-        #[test]
-        #[ignore = "manual live: needs a DESI database that carries a POSREF table and the E3D template directory"]
-        fn live_existing_windows_are_identical_with_the_cascade_on_and_off() {
-            let Some((source, _)) = posref_design_db() else {
-                return;
-            };
-            let file = source.file.clone();
-            let schema = DirectSchema::open_from_env().expect("E3D template directory");
-            let unit_types = resolve_delivery_unit_types(&[]);
-            let mut engine = ReadOnlyEngine::open(&file).expect("open the design file");
-            let mut sesnos: Vec<u32> = engine
-                .sessions()
-                .expect("sessions")
-                .iter()
-                .map(|session| session.session_id)
-                .collect();
-            sesnos.sort_unstable();
-            sesnos.dedup();
-            let steps = engine
-                .diff_steps(SessionSelector::Exact(sesnos[0]), SessionSelector::Latest)
-                .expect("diff steps");
-            // 只跑最后几步：这条门要证的是「开关不改结果」，不是把整条会话链再走一遍。
-            let windows: Vec<(u32, u32)> = steps
-                .iter()
-                .rev()
-                .take(6)
-                .rev()
-                .map(|step| (step.from.sesno, step.to.sesno))
-                .collect();
-            drop(engine);
-            assert!(!windows.is_empty(), "这个库要有不止一个会话");
-
-            for (base_sesno, target_sesno) in windows {
-                let (base, target) = (
-                    open(&schema, &file, base_sesno),
-                    open(&schema, &file, target_sesno),
+            let (mut checked, mut skipped_empty) = (0usize, 0usize);
+            for (dir, carriers) in &corpus {
+                println!(
+                    "=== {} : {} 个库带 POSREF 表 ===",
+                    dir.display(),
+                    carriers.len()
                 );
-                let base_index = scan_index(&file, Some(base_sesno)).expect("scan base index");
-                let roots_s: Vec<PersistedRoot> =
-                    enumerate_generation_roots(&base, &base_index.roots, &unit_types)
-                        .expect("enumerate base roots")
-                        .into_iter()
-                        .map(|root| PersistedRoot {
-                            refno: root.root,
-                            noun: root.noun,
+                for carrier in carriers {
+                    let file = &carrier.file;
+                    let mut engine = ReadOnlyEngine::open(file).expect("open the design file");
+                    let sesno = engine.session().sesno;
+                    let dbnum = engine.descriptor().db_mark;
+                    let edge = engine
+                        .reference_table(posref_hash())
+                        .expect("POSREF 表打得开")
+                        .iter()
+                        .filter_map(Result::ok)
+                        .map(|entry| (entry.target, entry.referrer))
+                        .next();
+                    drop(engine);
+                    let Some((target, referrer)) = edge else {
+                        // 表在但一条边都没有：是「这个库不留引用者」，不是「没查成」。
+                        skipped_empty += 1;
+                        continue;
+                    };
+
+                    let index = scan_index(file, Some(sesno)).expect("scan index");
+                    let set = open(&schema, file, sesno);
+                    let roots_t =
+                        enumerate_generation_roots(&set, &index.roots, &unit_types).expect("roots");
+                    let root_keys: BTreeSet<(u32, u32)> = roots_t
+                        .iter()
+                        .map(|root| {
+                            let refno = refno_to_e3d(root.root);
+                            (refno.word0, refno.word1)
                         })
                         .collect();
-                let run = |on: bool| {
-                    let _switch = crate::options::DesignReferenceCascadeOverride::set(on);
-                    let sources = WindowRootSources::collect(
-                        &file,
-                        base_sesno,
-                        target_sesno,
-                        &base,
-                        &target,
-                        &unit_types,
-                        &[],
-                    )
-                    .expect("collect");
-                    let impact = sources.impact(&roots_s);
-                    let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
-                    let regen: Vec<RefnoEnum> = plan.regen.iter().map(|root| root.root).collect();
-                    (sources.design_reference, regen)
-                };
-                let ((on, regen_on), (off, regen_off)) = (run(true), run(false));
-                println!(
-                    "{base_sesno}→{target_sesno}: {} | regen_on={} regen_off={}",
-                    on.summary_line(0),
-                    regen_on.len(),
-                    regen_off.len()
-                );
-                assert!(on.enabled && !off.enabled);
-                assert_eq!(
-                    regen_on, regen_off,
-                    "{base_sesno}→{target_sesno}: 两态 regen 必须逐字相同"
-                );
+                    // 逐库并集：本库钉 T 端，peers = 同目录其余带 POSREF 表的库。
+                    let dbs = design_dbs_for_window(dbnum, file, sesno, carriers);
+                    let edges =
+                        read_design_referrer_edges(&[target], &dbs, DESIGN_CASCADE_QUERY_BUDGET);
+                    let cascade = DesignReferenceCascade::from_edges(&edges, dbnum, |element| {
+                        roots_on_owner_chain(&index.owners, &root_keys, element)
+                    });
+                    println!("  {}", cascade.summary_line(dbnum));
+
+                    assert!(cascade.degraded.is_none(), "{:?}", cascade.degraded);
+                    assert!(
+                        cascade
+                            .edges_by_attribute
+                            .get("POSREF")
+                            .is_some_and(|count| *count >= 1),
+                        "{}: 点查必须找回表里那条边：{:?}",
+                        file.display(),
+                        cascade.edges_by_attribute
+                    );
+                    assert!(
+                        cascade.foreign_referrers.is_empty(),
+                        "{}: P0 差表说 POSREF 目标 0 跨库，这里冒出来了：{:?}",
+                        file.display(),
+                        cascade.foreign_referrers
+                    );
+                    let expected: BTreeSet<RefnoEnum> =
+                        roots_on_owner_chain(&index.owners, &root_keys, referrer)
+                            .into_iter()
+                            .map(refno_from_e3d)
+                            .collect();
+                    assert_eq!(
+                        cascade.referrer_roots,
+                        expected,
+                        "{}: 引用者 {referrer} 的根必须一个不多一个不少",
+                        file.display()
+                    );
+                    checked += 1;
+                }
             }
+            println!("查过 {checked} 个库；{skipped_empty} 个库表在但零边");
+            assert!(checked > 0, "语料里至少要有一个库的 POSREF 表非空");
+        }
+
+        /// 现有窗口逐步、**全部** `POSREF` 库：开关只能**多算不能少算**，而且今天的自然窗口里
+        /// 应当逐字相同。
+        ///
+        /// 不变量分两层，弱的那层才是真契约：
+        /// 1. `regen_off ⊆ regen_on` ——级联只会往 `touched` 里加，永远不会拿走；
+        /// 2. 没有引用者根、也没判退化时，两态**逐字相同**（无事可加就不该有任何差别）。
+        ///
+        /// 真出现「加了根导致两态不同」的窗口就打印出来——那正是语料里第一次出现
+        /// 「只改被参照件」形状的信号，不该被一条 `assert_eq!` 掩盖成失败。
+        #[test]
+        #[ignore = "manual live: needs DESI databases that carry a POSREF table and the E3D template directory"]
+        fn live_existing_windows_never_lose_a_root_with_the_cascade_on() {
+            let corpus = posref_design_dbs();
+            if corpus.is_empty() {
+                return;
+            }
+            let schema = DirectSchema::open_from_env().expect("E3D template directory");
+            let unit_types = resolve_delivery_unit_types(&[]);
+            let (mut windows_checked, mut differed) = (0usize, Vec::new());
+            for (_, carriers) in &corpus {
+                for carrier in carriers {
+                    let file = &carrier.file;
+                    let mut engine = ReadOnlyEngine::open(file).expect("open the design file");
+                    let mut sesnos: Vec<u32> = engine
+                        .sessions()
+                        .expect("sessions")
+                        .iter()
+                        .map(|session| session.session_id)
+                        .collect();
+                    sesnos.sort_unstable();
+                    sesnos.dedup();
+                    let steps = engine
+                        .diff_steps(SessionSelector::Exact(sesnos[0]), SessionSelector::Latest)
+                        .expect("diff steps");
+                    // 每个库只跑最后三步：这条门要证的是不变量，不是把整条会话链再走一遍。
+                    let windows: Vec<(u32, u32)> = steps
+                        .iter()
+                        .rev()
+                        .take(3)
+                        .rev()
+                        .map(|step| (step.from.sesno, step.to.sesno))
+                        .collect();
+                    drop(engine);
+
+                    for (base_sesno, target_sesno) in windows {
+                        let (base, target) = (
+                            open(&schema, file, base_sesno),
+                            open(&schema, file, target_sesno),
+                        );
+                        let base_index =
+                            scan_index(file, Some(base_sesno)).expect("scan base index");
+                        let roots_s: Vec<PersistedRoot> =
+                            enumerate_generation_roots(&base, &base_index.roots, &unit_types)
+                                .expect("enumerate base roots")
+                                .into_iter()
+                                .map(|root| PersistedRoot {
+                                    refno: root.root,
+                                    noun: root.noun,
+                                })
+                                .collect();
+                        let run = |on: bool| {
+                            let _switch = crate::options::DesignReferenceCascadeOverride::set(on);
+                            let sources = WindowRootSources::collect(
+                                file,
+                                base_sesno,
+                                target_sesno,
+                                &base,
+                                &target,
+                                &unit_types,
+                                &[],
+                            )
+                            .expect("collect");
+                            let impact = sources.impact(&roots_s);
+                            let plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
+                            let regen: BTreeSet<RefnoEnum> =
+                                plan.regen.iter().map(|root| root.root).collect();
+                            (sources.design_reference, regen)
+                        };
+                        let ((on, regen_on), (off, regen_off)) = (run(true), run(false));
+                        assert!(on.enabled && !off.enabled);
+                        let label = format!(
+                            "{} {base_sesno}→{target_sesno}",
+                            file.file_name()
+                                .map(|name| name.to_string_lossy().into_owned())
+                                .unwrap_or_default()
+                        );
+                        assert!(
+                            regen_off.is_subset(&regen_on),
+                            "{label}: 级联只该往 touched 里加；off\\on = {:?}",
+                            regen_off.difference(&regen_on).collect::<Vec<_>>()
+                        );
+                        if regen_on != regen_off {
+                            println!("  ★ {label}: {}", on.summary_line(0));
+                            println!(
+                                "     regen_on={} regen_off={} 多出 {:?}",
+                                regen_on.len(),
+                                regen_off.len(),
+                                regen_on.difference(&regen_off).collect::<Vec<_>>()
+                            );
+                            differed.push(label.clone());
+                        } else if on.referrer_roots.is_empty() && on.degraded.is_none() {
+                            // 无事可加、也没判不了——这一窗本就该逐字相同。
+                        }
+                        if on.queries > 0 {
+                            println!("  {label}: {}", on.summary_line(0));
+                        }
+                        windows_checked += 1;
+                    }
+                }
+            }
+            println!(
+                "对拍 {windows_checked} 窗；两态不同的 {} 窗：{differed:?}",
+                differed.len()
+            );
+            assert!(windows_checked > 0);
         }
     }
 }
