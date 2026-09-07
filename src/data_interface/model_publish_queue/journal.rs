@@ -364,8 +364,8 @@ impl Journal {
                 .with_context(|| format!("missing immutable mesh {}", path.display()))?;
             ensure!(meta.is_file(), "invalid immutable mesh {}", path.display());
             // 比内容摘要，不只比长度：长度相同的损坏文件正是长度比较看不见的那一类。
-            // 7997 那轮整个 mesh 语料 190.9 MB / 15,556 件，摘要一遍是零点几秒的量级，
-            // 而同一轮 `publish` 是 68.9 s——这道门付得起。
+            // 代价实测（YCYK 10 库、2434 根、190 MB mesh 语料）：`validate_mesh` 从
+            // 0.354 s 涨到 1.63 s，多付 1.27 s，占整轮约 1.5%——这道门付得起。
             ensure!(
                 digest(&fs::read(&path)?) == expected.digest,
                 "immutable mesh changed: {}",
@@ -829,8 +829,7 @@ impl Journal {
             .manifests
             .values()
             .filter(|m| {
-                self.index.active.contains(&m.run_id)
-                    && !self.index.finished.contains(&m.run_id)
+                self.index.active.contains(&m.run_id) && !self.index.finished.contains(&m.run_id)
             })
             .map(|m| m.dbnum)
             .collect()
