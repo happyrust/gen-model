@@ -88,12 +88,12 @@ fn last_seen_session(path: &Path, refno: RefNo, limit: usize) -> anyhow::Result<
     // 只有 `session_id` 与 `end_page_no` 名副其实（e3d-io `session/mod.rs` 自己写着）。
     let sessions = ReadOnlyEngine::open(path)?.sessions()?;
     for info in sessions.iter().take(limit) {
-        let mut engine = match ReadOnlyEngine::open_at(path, SessionSelector::Exact(info.session_id))
-        {
-            Ok(engine) => engine,
-            // 链上被 MERGE CHANGES 丢掉的会话开不出来，不是错误，跳过。
-            Err(_) => continue,
-        };
+        let mut engine =
+            match ReadOnlyEngine::open_at(path, SessionSelector::Exact(info.session_id)) {
+                Ok(engine) => engine,
+                // 链上被 MERGE CHANGES 丢掉的会话开不出来，不是错误，跳过。
+                Err(_) => continue,
+            };
         if engine
             .indexed_refnos()?
             .iter()
@@ -168,15 +168,19 @@ fn main() -> anyhow::Result<()> {
                 if here { "有" } else { "无" },
                 index.path.display(),
                 index.sesno,
-                if here { "**在**索引里" } else { "**不在**索引里" }
+                if here {
+                    "**在**索引里"
+                } else {
+                    "**不在**索引里"
+                }
             );
             if here {
                 continue;
             }
             match last_seen_session(&index.path, refno, args.history) {
-                Ok(Some(sesno)) => println!(
-                    "      往回翻：会话 {sesno} 还有它 —— 之后被删了，设计仍指着它"
-                ),
+                Ok(Some(sesno)) => {
+                    println!("      往回翻：会话 {sesno} 还有它 —— 之后被删了，设计仍指着它")
+                }
                 Ok(None) => println!(
                     "      往回翻最近 {} 个会话：一次都没出现过 —— 设计指的是一个这个库从未有过的号",
                     args.history

@@ -37,14 +37,15 @@ rollup（`resolve_element_generation_root` + `ref_rev` 反查 + `build_unit_roll
 | 9 | `EQUI`/`ELCONN` → ~~`GATREF(CLIST)` 连接表~~ **`GATREF(ELCXRF)`**（规则 F；★0907 C6：0906 把 E/F 的属性写反了）= 伪属性 `BACKRE{STAREF, ENDREF}`，引用表**反向**找接在它上面的电缆 → 全部重画 | ~~正向数组~~ **反向引用**（经伪属性走 `DB_RefTableIterator`，跨库） | 无 | `CABLE.STAREF`/`ENDREF` 是 schema ELEMENT 型 → 进 `ref_rev` → 电缆单元级联（超集） | ~~❓~~ **★0907 C6 定性完**（证据 §8.6）：语料有实例（ELCONN 1607 / CABLE 116 / 边 36 同库跨根 + 196 跨库）→ 按 C6 判词「有 → 另开计划」= C8（§3）→ **同日同库版接线 ◐**（`cable_endpoint.rs`，开关 `model_cable_endpoint_cascade` 默认关；跨库边待跨库版），几何上暂不显（电缆几何未按路由落地） |
 | 10 | 桥架 / 网格：~~`CWBRAN` `ELCXRF`~~ **`CWBRAN` → `GATREF(CLIST)`**（规则 E，伪属性 = 路过这条分支的电缆，底下同一张引用表反向查 `EXTGEO.STAREF`/`ENDREF`）、`CTRAY` / `CGRDCP` / `CGRDLP` 成员向下、`CLNPNG` 两层、`REFGRD` 正向（B–E、G） | 正向（`REFGRD`）+ 成员向下 + **E 反向** | 无 | 部分（ELEMENT 型的进 `ref_rev`） | 登记不排期（清单 #14，`gb==3` 族归几何覆盖度）；**E 那条并入 C8 提案**（与 #9 同源） |
 | 11 | 网格件只标**画列表里有的**（`DES_DrawList::exists`） | — | 不可比（我们没有画列表） | — | ⚪ |
-| 12 | 顶层件的 owner 是 `TMPL` 时改取 owner（§2.3-1） | owner 链 | 模板不进 DESI 增量 | 同 | ⚪ |
+| 12 | `TMPL` 折叠：`LISTOP` 判「owner 是 `TMPL` 的顶层件不算顶层」、`FNDTOP` 判「顶层件的 owner 是 `TMPL` 就取 owner」→ `TMPL` 成员折进 `TMPL` 这一块；`TMPL` 自己变了则取它 owner 的顶层件（§2.3-1） | owner 链 | ~~模板不进 DESI 增量~~ **★0907 改正：`TMPL` 成根与 core 的 `TMPL` 折叠同形**——位表 `TMPL` significant = toplevel = true，direct 枚根把它当 Normal 根（语料 3,097 个：owner FIXING 986 / TMAR 777 / CTFEAT 546 / CMFI 291 / HRPOST 270 …；另 685 个在交付单元之下不成根），成员（CYLI / PANE / GENSEC / SCTN / EXTR / BOX …）由它这块生成，e3d-model 把 `TMPL` 判 `PrimitiveContainer`、成员里的正体各自成件；`TMPL` 自己变了 → 根链含全部根祖先（FRMW / CWBRAN / HANDRA）⊇ core 的「owner 的顶层件」。实跑：2,538 个真出几何、556 个只有负体（宿主负体未接）跑出 0 件——`docs/evidence/2026-09-07-tmpl-root-shape.log` | `resolve_element_generation_root`：`TMPL` 的成员解到第一个非容器 owner = `TMPL` 自身；`TMPL` 自己变了解到它的 owner（FIXING / CTFEAT …），与 core「取 owner 的顶层件」同向 | ~~⚪~~ ✅ 覆盖成立、粒度同形（外层根整棵子树也生成同一批成员 → 嵌套根重复覆盖，归核对表 W3.2） |
 | 13 | GETWORK / Undo / Redo 同一条路（§5） | — | 我们只吃 SAVEWORK 区间 | 同 | ⚪（ADR-061 理由 1 不变） |
 | 14 | 在 EVALAT 里**没有**的：管道连接 HREF/TREF、CATA→DESI、UDA、XRPNTR | — | — | — | ✅ 09-04 结论全部保持（#5 构造性不可达、#4 我们比 core 强、#9/#10 不做） |
 
 统计：core 侧 14 条规则组里 ~~8 条 ✅ / 3 条 ⚪ 不可比 / 2 条 ❌ direct 缺（#7 结构连接、#8 孔洞）/ 1 条 ❓（#9 CLIST）~~
 ~~**★0907 收口：9 条 ✅（#8 归 ✅ 构造性覆盖）/ 1 条 ◐ 已接线灰度中（#7）/ 3 条 ⚪ 不可比 / 1 条 ❓（#9 CLIST）**。~~
 ~~**★0907 C6 再收口：9 条 ✅ / 1 条 ◐ 已接线灰度中（#7）/ 3 条 ⚪ 不可比 / 1 条 ❌ direct 缺、登记为 C8 提案（#9，连带 #10 的 E 条）**。~~
-**★0907 C8 同库版接线后：9 条 ✅ / 2 条 ◐ 已接线灰度中（#7 结构连接、#9 电缆端点 + #10 的 E 条，同库版）/ 3 条 ⚪ 不可比**。
+~~**★0907 C8 同库版接线后：9 条 ✅ / 2 条 ◐ 已接线灰度中（#7 结构连接、#9 电缆端点 + #10 的 E 条，同库版）/ 3 条 ⚪ 不可比**。~~
+**★0907 #12 `TMPL` 折叠改正后：10 条 ✅ / 2 条 ◐ 已接线灰度中（#7、#9 + #10 的 E 条）/ 2 条 ⚪ 不可比（#11 画列表、#13 GETWORK/Undo/Redo 同路）**。
 ~~两条 ❌ 都是同一件事的两面：direct 路径没有任何引用类联动。区别只在 #7 用正向读就够（不用等反向表），#8 必须反向。~~
 **★0907 C7 改写这句：core 的 `EVALAT` 里根本没有反向引用查询**（`DFIND` = 成员导航；`change/` 模块一次都没调 `db_find_reference` /
 `DB_RefTableIterator`，证据 §8.1）。~~core 的联动只有三种边：owner 链（上卷 / owner / 祖父 / 成员向下）、正向引用数组
