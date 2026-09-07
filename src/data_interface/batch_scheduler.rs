@@ -789,16 +789,18 @@ impl BatchScheduler {
         self.auto_work_armed.load(Ordering::SeqCst)
     }
 
-    /// 是否有属性/结构数据批次正在执行。
+    /// 哪些库的属性/结构数据批次正在执行。
     ///
     /// 初始化期间模型生成会继续把冻结结果交给本地日志；模型发布消费者只用这个
-    /// 瞬时信号让出数据库写带宽。队列仍由原有状态机负责，调用方不得据此认领、
-    /// 完成或修改批次。
-    pub(crate) fn has_running_data_batch(&self) -> bool {
+    /// 瞬时信号给**同一个库**的数据批次让出数据库写带宽。队列仍由原有状态机负责，
+    /// 调用方不得据此认领、完成或修改批次。
+    pub(crate) fn running_data_dbnums(&self) -> Vec<u32> {
         self.queue()
             .queue
             .iter()
-            .any(|batch| batch.state == BatchState::Running)
+            .filter(|batch| batch.state == BatchState::Running)
+            .map(|batch| batch.dbnum)
+            .collect()
     }
 
     /// 上弦并唤醒 worker：有人真的动了数据，空闲轮那侧的积压可以开始收了。
@@ -919,19 +921,23 @@ mod tests {
     #[test]
     fn running_data_batch_is_visible_to_database_bandwidth_peers() {
         let (scheduler, registry) = fresh();
-        assert!(!scheduler.has_running_data_batch());
+        assert!(scheduler.running_data_dbnums().is_empty());
 
         scheduler.enqueue_live(&registry, &found(7997, 0, 10));
         assert!(
-            !scheduler.has_running_data_batch(),
+            scheduler.running_data_dbnums().is_empty(),
             "排队中的批次尚未占用数据库写带宽"
         );
 
         scheduler.freeze_next(&registry).expect("running row");
-        assert!(scheduler.has_running_data_batch());
+        assert_eq!(
+            scheduler.running_data_dbnums(),
+            vec![7997],
+            "让带宽是按库让的，得说得出是哪个库"
+        );
 
         scheduler.finish(7997);
-        assert!(!scheduler.has_running_data_batch());
+        assert!(scheduler.running_data_dbnums().is_empty());
     }
 
     fn fresh() -> (BatchScheduler, TaskRegistry) {

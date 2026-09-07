@@ -164,8 +164,10 @@ pub fn health() -> serde_json::Value {
             value["publish_batch_limit"] = r.batch_limit.load(Ordering::Relaxed).into();
             value["publish_conflict_retries"] =
                 r.publish_conflict_retries.load(Ordering::Relaxed).into();
-            value["finalization_conflict_deferrals"] =
-                r.finalization_conflict_deferrals.load(Ordering::Relaxed).into();
+            value["finalization_conflict_deferrals"] = r
+                .finalization_conflict_deferrals
+                .load(Ordering::Relaxed)
+                .into();
             value["generation_admission"] = serde_json::json!({
                 "max_active_runs": max_active_runs(),
                 "in_flight_runs": r.journal.lock().unwrap().in_flight_runs(&r.producing.lock().unwrap()),
@@ -526,9 +528,7 @@ pub(super) fn require_empty_model_projection(
     if empty == Some(true) {
         return Ok(());
     }
-    let run = run_id
-        .map(|id| format!(" run={id}"))
-        .unwrap_or_default();
+    let run = run_id.map(|id| format!(" run={id}")).unwrap_or_default();
     anyhow::bail!(
         "dbnum={dbnum}{run} initialization requires an empty model projection (inst_relate / tubi_relate rows exist{}); \
          wipe the dbnum by ref0 ranges (fast_delete) and re-initialize instead of reconciling per root",
@@ -1019,15 +1019,26 @@ mod writer_recovery_tests {
         // 400 字节的盘预算：任何一组 handoff 都超预算，`can_handoff_batch` 直接报错。
         let (_tmp, r) = runtime_with_disk_budget(400);
         assert!(spawn_writer_if_parked(&r), "first kick spawns the writer");
-        assert!(!spawn_writer_if_parked(&r), "a running writer owns the receiver");
+        assert!(
+            !spawn_writer_if_parked(&r),
+            "a running writer owns the receiver"
+        );
         assert!(r.writer_running.load(Ordering::Acquire));
 
         let error = handoff(&r, envelope(1)).await.unwrap_err();
         assert!(error.contains("exceed the entire queue budget"), "{error}");
         wait_until(|| !r.writer_running.load(Ordering::Acquire)).await;
-        assert!(r.handoff_rx.lock().unwrap().is_some(), "receiver is parked, not dropped");
+        assert!(
+            r.handoff_rx.lock().unwrap().is_some(),
+            "receiver is parked, not dropped"
+        );
         assert!(r.paused.load(Ordering::Acquire));
-        let reason = r.journal.lock().unwrap().pause_reason().expect("pause is persisted");
+        let reason = r
+            .journal
+            .lock()
+            .unwrap()
+            .pause_reason()
+            .expect("pause is persisted");
         assert!(reason.starts_with("journal writer stopped: "), "{reason}");
         assert!(
             !auto_reconcile_pending_on_open(Some(&reason)),
@@ -1073,7 +1084,9 @@ mod writer_recovery_tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let mut journal = Journal::open(tmp.path().into(), 1024 * 1024, 1024 * 1024).unwrap();
-        journal.set_pause(Some("payload: bad frame".into())).unwrap();
+        journal
+            .set_pause(Some("payload: bad frame".into()))
+            .unwrap();
         let r = Runtime::new(journal);
         assert!(r.paused.load(Ordering::Acquire));
         assert!(!r.auto_reconcile_pending.load(Ordering::Acquire));
@@ -1136,8 +1149,16 @@ async fn consumer(r: Arc<Runtime>) {
             // 延迟成倍增长。属性批次运行时只暂停数据库消费者，生成器仍可继续把
             // 冻结结果持久交接到本地日志。短轮询保证批次结束后无需跨模块通知也能
             // 立即恢复，同时不会领取一页任务后再长期占住它们。
-            if crate::data_interface::batch_scheduler::BatchScheduler::global()
-                .has_running_data_batch()
+            //
+            // 让带宽**按库让**：别的库的属性批次不该停掉本库的发布，否则 28 个库串起来
+            // 就是 Σ属性 + Σ发布，一次都不重叠。
+            let running_data = crate::data_interface::batch_scheduler::BatchScheduler::global()
+                .running_data_dbnums();
+            if !running_data.is_empty()
+                && data_batch_blocks_publication(
+                    &running_data,
+                    &r.journal.lock().unwrap().active_dbnums(),
+                )
             {
                 tokio::time::sleep(Duration::from_millis(100)).await;
                 continue;
@@ -1203,6 +1224,24 @@ fn admit_runs(mut pending: Vec<RunManifest>, in_flight: usize, limit: usize) -> 
         pending.truncate(limit.saturating_sub(in_flight));
     }
     pending
+}
+
+/// 消费者要不要为正在跑的数据批次让路：**只让同一个库的**。
+///
+/// 让路是为了不跟属性/结构写回抢同一份数据库写带宽，而这件事只在同一个库上真正互斥；
+/// 别的库的批次跟本库的发布没有先后关系，停下来只是白白把 28 个库串成 Σ属性 + Σ发布。
+///
+/// 同库其实撞不上：`blocks_data_batch` 不让「该库 run 还活着」的批次进 Running
+/// （`batch_scheduler.rs` 的 `freeze_next_concurrent` 那道谓词），而
+/// [`Journal::next_ready`] 只交出 active run 的根。这道门是把那条不变量钉在原地，
+/// 万一哪天上面两处松了，让路的行为还在，而不是悄悄变成两个写者对着干。
+pub(super) fn data_batch_blocks_publication(
+    running_data_dbnums: &[u32],
+    active_publish_dbnums: &[u32],
+) -> bool {
+    running_data_dbnums
+        .iter()
+        .any(|dbnum| active_publish_dbnums.contains(dbnum))
 }
 
 /// 这一发失败要不要在原地再试：只认乐观冲突的错误文本，且次数未用尽。
@@ -1313,8 +1352,14 @@ mod admission_tests {
             statement 0: The query was not executed due to a failed transaction. Failed to commit \
             transaction due to a read or write conflict. This transaction can be retried";
         assert!(should_retry_publication_conflict(conflict, 1));
-        assert!(should_retry_publication_conflict(conflict, PUBLISH_CONFLICT_ATTEMPTS - 1));
-        assert!(!should_retry_publication_conflict(conflict, PUBLISH_CONFLICT_ATTEMPTS));
+        assert!(should_retry_publication_conflict(
+            conflict,
+            PUBLISH_CONFLICT_ATTEMPTS - 1
+        ));
+        assert!(!should_retry_publication_conflict(
+            conflict,
+            PUBLISH_CONFLICT_ATTEMPTS
+        ));
         assert!(!should_retry_publication_conflict(
             "publication statements failed: statement 0: Parse error",
             1

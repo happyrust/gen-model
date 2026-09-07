@@ -822,6 +822,19 @@ impl Journal {
     pub fn active(&self, id: &str) -> bool {
         self.index.active.contains(id)
     }
+    /// 正在发布的库：run 已 activate 且未收口。只有这些库的根会被 [`Journal::next_ready`]
+    /// 交出去，所以「谁在跟数据批次抢写带宽」问的就是它。
+    pub fn active_dbnums(&self) -> Vec<u32> {
+        self.index
+            .manifests
+            .values()
+            .filter(|m| {
+                self.index.active.contains(&m.run_id)
+                    && !self.index.finished.contains(&m.run_id)
+            })
+            .map(|m| m.dbnum)
+            .collect()
+    }
     pub fn pause_reason(&self) -> Option<String> {
         self.index.consumer_pause.clone()
     }

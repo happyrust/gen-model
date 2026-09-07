@@ -1050,6 +1050,54 @@ fn mesh_budget_counts_unique_live_dependencies_and_recovers_holds() {
     assert!(meshes.path().join("mesh_shared.mesh").exists());
 }
 
+/// 让数据库写带宽是**按库**让的：别的库的属性批次不该停掉本库的发布，否则 28 个库串
+/// 起来就是 Σ属性 + Σ发布、一次都不重叠。同库仍然让路——那条不变量（`blocks_data_batch`
+/// 不让活跃 run 的库进 Running）在上游，这道门只是钉住它。
+#[test]
+fn only_the_same_dbnums_data_batch_yields_publication_bandwidth() {
+    use super::runtime::data_batch_blocks_publication;
+
+    assert!(
+        !data_batch_blocks_publication(&[8000], &[7997]),
+        "8000 在解析属性，不该停掉 7997 的发布"
+    );
+    assert!(
+        !data_batch_blocks_publication(&[8000, 8009], &[7997, 1112]),
+        "多库并行时同样只看有没有交集"
+    );
+    assert!(data_batch_blocks_publication(&[7997], &[7997]));
+    assert!(data_batch_blocks_publication(&[8000, 7997], &[7997]));
+    assert!(!data_batch_blocks_publication(&[], &[7997]));
+    assert!(!data_batch_blocks_publication(&[7997], &[]));
+}
+
+/// 活跃 run 的库才算「正在发布」：登记了但还没 activate、或者已经收口的，都不参与
+/// 抢带宽——`next_ready` 本来就不交它们的根。
+#[test]
+fn active_dbnums_only_counts_runs_that_can_hand_out_roots() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut q = Journal::open(tmp.path().into(), 1024 * 1024, 1024 * 1024).unwrap();
+    let mut m = manifest();
+    q.register(m.clone()).unwrap();
+    assert!(q.active_dbnums().is_empty(), "只登记还不算在发布");
+
+    q.mark_reserved(&m.run_id).unwrap();
+    q.activate(&m.run_id).unwrap();
+    assert_eq!(q.active_dbnums(), vec![7997]);
+
+    m.run_id = "second".into();
+    m.dbnum = 8000;
+    q.register(m.clone()).unwrap();
+    q.mark_reserved(&m.run_id).unwrap();
+    q.activate(&m.run_id).unwrap();
+    let mut dbnums = q.active_dbnums();
+    dbnums.sort_unstable();
+    assert_eq!(dbnums, vec![7997, 8000]);
+
+    q.finish("second").unwrap();
+    assert_eq!(q.active_dbnums(), vec![7997], "收口了就不再抢带宽");
+}
+
 /// 长度没变、内容变了的 mesh 必须拦下来。mesh 文件是内容寻址的不可变件，它变了就说明
 /// 要发布的那份几何已经不是入册时校验过的那一份——而只比长度的旧口径看不见这一类。
 #[test]
