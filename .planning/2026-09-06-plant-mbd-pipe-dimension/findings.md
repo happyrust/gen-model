@@ -395,3 +395,72 @@ plant-mbd `43c9882`（ADR-0008，新模块 `weld.rs`）+ `dc0eec7`；gen-model �
 - gen-model worktree `mbd_branch_query` 4/4、`mbd_http_endpoint` 1/1；六份 field fixtures 重导后与已提交的逐字节相同
   （新字段两者都空、不落键）。
 - `26229` wire 体经 plant3d-web `parseMbdV2PipeData` ACCEPTED（slope_mark 1 / aid_line 10 / linear_dim 6 / weld_mark 1 / aid_text 4）。
+
+## Phase 5 ④（2026-09-07）：位号 / 信息标签（`isoTag` / `gettags` / `geteltag` / `getbranmlabel`）→ `label` + `leader_line`
+
+plant-mbd `844ce0e`（ADR-0009，新模块 `tag.rs`，接线 `layout::place_tags`）；gen-model 本提交（宿主给名字 / STEXT / 连接对象）。
+数据仍全部 e3d-io / e3d-model 直读，没有数据库查询。
+
+### 读 PML 的结论
+
+- `isoTag.pmlobj` L11-233：Head / Tail 的连接标签 = `接 <名>`（HREF / TREF 连到 NOZZ 用它自己的名、BRAN 用 BRAN 名、
+  构件用属主 BRAN 的 `namn`）+ 属主 BRAN 的 `:ZD_NBBM` + `addpos` 的 `X e / Y n / PE u`（`D0` 整数）；连接对象在
+  `*ITUB*` / `*INST*` 区域整条不出（Head 命中时 Tail 也不出，`!!mbdBranTail`）。TEE / OLET 的连接标签取支管口
+  `p pos`（P1–P3 里不是 arrive / leave 的那个）+ `cref`；**没有 cref 也出坐标**（`addpos` 在 handle 块外）。
+  ATTA：SITE 名不含 INST 取 `stext`（`'' / =0/0 / unset / Nulref` 不出），含 INST 走支撑 `:ZD_BZBM`（仪表支架）。
+  PCOM 的 `crfa` 连接、`:YKSX` 仪表名（TEE / OLET / VALV）都在，本期不迁。
+- `isobran.gettags` L1984-2280：ATTA 位号直通且不水平时补标高（SPRE 名含 FLOR 写 `EL +x.xxxm`，否则 `PE ±u`，
+  L2026-2047）；BEND `<角度>°`（`D2` 去 `.00` 去尾零）+ `弯曲半径:R`（P1 / P2 各作垂线求圆心，L2093-2116；
+  P1 / P2 重合的整条 skip）+ 转向时 `PE ±u`；ELBO 角度 ≠ 90 / 45 才写 + 转向时 PE；TEE 不转向整条不出；
+  具名（`/` 开头）非 TUBI / ATTA / WELD / TEE / BEND / ELBO 构件出元件名（首行 `'  '` 给材料序号占位，`*KD-*` 截到 KD，
+  `*KD-02` / `*KD-2` 跳过）。**FTUB 不是 TUBI**，PML 会给具名 FTUB 出元件名；本库 FTUB 与 TUBI 同角色、不出。
+- `geteltag` L2282-2377：直通（adir / ldir 夹角不在 1°–179°）且不水平（ldir 与 U 夹角不在 87°–93°）的管件原点
+  `PE ±u`，去重集合从 hpos / tpos 起步、1 mm 内不重；TEE / OLET 支管口与原点同高不标。
+- `getbranmlabel` L5323-5386：`<NAME 第一段（去 /）>-<:ZD_GDWJ>`（`hbore` → AOD 换算表是注释掉的旧路径）；锚点
+  `gettubimlabelpoint`：TUBI 的 apos→lpos 线（ATTA 处 `addAttapointintolines` 切开），`findhalfpos` 从中间下标向两侧找
+  第一段长度 ≥ `minlen + ⅔·(maxlen − minlen)` 的，取其中点；没有直管时退到管件的 apos→pos / pos→lpos 段。
+- `putIntoIsoline` L1144-1298：标签按 `isoline.mems` 归段；直通件与 Head / Tail 归第一条含它的直段，转向件（拐角在相邻
+  两袋里都出现）归 `|angle(pipedir, U) − 90|` 最小（最水平）的那条；`name` 未设的对象（管道名称）按 `line.onprojected`
+  + 最小距离归段。
+- `isoline.drawtag` L3717-4060：字高 `cutpipe` 2 倍、管道名称 3 倍；半径带起点水平直段 `od/2 + 2·cheight`
+  （管道名称 6 倍、cutpipe 5 倍），竖直直段单行 `od/2 + 0.5·cheight`（管道名称 2 倍）、多行 `2·cheight`；
+  `getbestdir`（L3653-3692）TEE / OLET 沿支管口方向；Polar `getBestPosAndOri` 选位；**离锚点最近的那一行**带
+  `dimpos` → `mlabel.addleadline` 引线（`mlabel.pmlobj` L235-269），其它行没有。
+
+### 落地
+
+- `tag.rs`：文字与锚点照搬上表；`tag_distance` 取半径带起点；`member_tags` 一条直段的成员 → `Tag` 列表，
+  `branch_label_text` / `branch_label_anchor` 管道名称，`tag_primitives` → `label`（多行 `\n`）+ `leader_line`。
+- `layout::place_tags`：全部直段跑完后一遍；拐角件按 `putIntoIsoline` 挑一袋（`member_turns` + 水平度），不重复；
+  摆位方向取尺寸方向反侧（避开尺寸行；直段没选出方向朝上），TEE / OLET 沿支管口方向；管道名称归锚点所在直段。
+- 宿主 `branch_query`：成员 `stored_name()` → `name`；ATTA（SITE 名不含 INST）`get_string("STEX")` → `stext`；
+  TEE / OLET `get_element("CREF")` → `connection`；BRAN `stored_name` / `:ZD_GDWJ` / `HREF` / `TREF` →
+  `name` / `label_bore_text` / `head_connection` / `tail_connection`。连接对象按 `isoTag` 解成
+  `ConnectionRef { name, note }`（目标库没注册 / 不在会话 / UDA 不在字典按没有，`soft`）。`mbd_branch_dump` 的
+  `cases[]` 多写 `branch_name` / `branch_label_bore`，CLI 与金样回归经 `LayoutRequest::with_branch_label` 喂给求解器。
+
+### 与 PML 的差别（ADR-0009 全文）
+
+摆位没有 Polar（方向近似、无文字定向、无每标签字高）；连接对象名一律 `namn`（PML 对 NOZZ 带 `/`）；管道名称无
+`:ZD_GDWJ` 时不拼尾随 `-`；ITUB / INST 区域连接对象宿主不填、坐标照出；元件名首行空格不出；FLOR 的 `EL` 写法、
+支架材料标签、仪表管分支、`:YKSX`、PCOM `crfa`、`cutpipe` 未迁。
+
+### 金样（六条全变，`fixtures/golden/README.md` 逐条）
+
+- `99996` +17 对：7 个支撑位号（`1RX02-LSUP-E099x`，`/DATUM` 那一半有 STEXT）、BEND `90° / 弯曲半径:350 / PE -2980`
+  等、ELBO 60°、管道名称 **`LV`**（`/LV-GR-1RX215-B` 第一段；样本库没有 `:ZD_GDWJ`）。
+- `145018` +14 对：Tail `接 Copy-of-RCS0014-1R43013新`（TREF 连到另一条 BRAN）；排水线斜坡让弯头角度 89.7x°，PML 也会写；
+  OLET 支管口坐标标签；VALV 元件名。
+- `26229` +12 对：支撑位号 `R332.001-BV` 等四条、BEND `100° / 弯曲半径:301.50`、VALV 元件名。
+- `76191` +20、`100028` +15、`91813` +2（只有 Head / Tail 坐标：无名 BRAN、FTUB 不出元件名）。
+- AvevaMarineSample 的 `/Copy-of-…` 命名让三条金样的管道名称都是 `Copy`——是数据，不是求解器。
+
+### 验证
+
+- plant-mbd `cargo test --workspace` **94 通过**（89 lib + 4 contract_guard + 1 golden，新增 9 条 tag 用例）；
+  `golden diff` 6/6；`verify_mapping` 6/6；clippy 新代码零告警（剩 4 条是 `split_isolines.rs` 旧账）。
+- gen-model worktree `mbd_branch_query` **5/5**（新增 `real_branch_carries_tag_texts_and_lays_out_labels`：真库 `99996`
+  出 `LV` / 支撑位号 / BEND 三行 / Head-Tail 坐标，标签数 = 引线数）、`mbd_http_endpoint` 1/1。
+- 四条金样 wire 体经 plant3d-web `parseMbdV2PipeData` ACCEPTED（`label` / `leader_line` 是冻结契约里有几何的 kind；
+  多行 `label` 走前端 `multiLineTexts`）。
+- 未验证：浏览器目测（需起服务）、PML 图纸人工对照（需 E3D）。

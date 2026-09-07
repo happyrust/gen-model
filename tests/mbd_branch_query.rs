@@ -412,3 +412,56 @@ fn real_branch_members_carry_ppoints_and_catalogue_od() {
     assert!(!tubes.is_empty());
     eprintln!("FTUB outside diameters: {tubes:?}");
 }
+
+/// Phase 5 ④ 宿主补的数据：BRAN 名、ATTA 的 STEXT、构件 NAME 原文；端到端出位号标签（plant-mbd ADR-0009）。
+#[test]
+fn real_branch_carries_tag_texts_and_lays_out_labels() {
+    let Some((db, templates)) = fixtures() else {
+        return;
+    };
+    let set = open_set(&db, &templates);
+    let query = branch_query(&set, BRAN).expect("branch query");
+    assert_eq!(query.name.as_deref(), Some("/LV-GR-1RX215-B"), "BRAN NAME 原文（带 /）");
+    assert!(query.label_bore_text.is_none(), "样本库没有 :ZD_GDWJ");
+    // 支撑 ATTA 成对出现：`…/DATUM` 带 STEXT（支架位号），`…/SREF` 没有。
+    let stexts: Vec<(&str, &str)> = query
+        .members
+        .iter()
+        .filter_map(|m| Some((m.name.as_deref()?, m.stext.as_deref()?)))
+        .collect();
+    assert!(
+        stexts.iter().any(|(name, stext)| name.ends_with("/DATUM") && stext.starts_with("1RX02-LSUP-")),
+        "DATUM ATTAs carry the support tag, got {stexts:?}"
+    );
+    assert!(
+        query.members.iter().filter(|m| m.refno.contains('~')).all(|m| m.name.is_none()),
+        "implied tubes never carry a stored name"
+    );
+
+    let data = layout_pipe(&set, BRAN, "24383_99996").expect("layout");
+    let labels: Vec<&str> = data
+        .primitives
+        .iter()
+        .filter_map(|primitive| match primitive {
+            MbdPrimitive::Label { text, .. } => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    let leaders = data
+        .primitives
+        .iter()
+        .filter(|primitive| matches!(primitive, MbdPrimitive::LeaderLine { .. }))
+        .count();
+    eprintln!("labels: {labels:?}");
+    assert_eq!(labels.len(), leaders, "每条标签一条引线");
+    assert!(labels.contains(&"LV"), "管道名称取 NAME 第一段（无 :ZD_GDWJ 不拼口径）");
+    assert!(labels.iter().any(|text| text.starts_with("1RX02-LSUP-E099")), "支撑位号进图");
+    assert!(
+        labels.iter().any(|text| text.starts_with("90°\n弯曲半径:350\nPE ")),
+        "90° BEND 带弯曲半径与标高: {labels:?}"
+    );
+    assert!(
+        labels.iter().filter(|text| text.starts_with("X ") && text.contains("\nPE ")).count() == 2,
+        "Head 与 Tail 各一条坐标标签"
+    );
+}

@@ -45,7 +45,8 @@ use e3d_model::route::{
 use e3d_model::transform::world_matrix;
 use glam::DVec3;
 use plant_mbd::{
-    BranchMember, BranchQueryResult, MbdV2Issue, PPoint, root_error_issue, suppress_issue,
+    BranchMember, BranchQueryResult, ConnectionRef, MbdV2Issue, PPoint, root_error_issue,
+    suppress_issue,
 };
 
 /// 前端 `mbd_refno` 与 plant-mbd fixtures 的 refno 写法：`w0_w1`。
@@ -248,6 +249,19 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
         } else {
             (None, None)
         };
+        // 位号标签（isoTag / isobran.gettags，plant-mbd ADR-0009）要的文本：库里存的 NAME 原文；ATTA 的 STEX
+        // （SITE 名含 INST 的是仪表支架，PML 走支撑 :ZD_BZBM 那条路，未迁、不给）；TEE / OLET 支管口 CREF 连到的对象。
+        let name = member.stored_name()?;
+        let stext = if noun == "ATTA" && !ancestor_name_contains(&member, "SITE", "INST")? {
+            optional_text(&member, "STEX")?
+        } else {
+            None
+        };
+        let connection = if matches!(noun.as_str(), "TEE" | "OLET") {
+            connection_ref(member.get_element("CREF")?)?
+        } else {
+            None
+        };
         let (arrive_ppoint, leave_ppoint) = match station {
             Some(k) => (
                 route_end_ppoint(&route.tubes[k].to),
@@ -295,6 +309,9 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
             leave_ppoint,
             dtxr,
             weld_number,
+            name,
+            stext,
+            connection,
         });
 
         if station.is_some() {
@@ -388,6 +405,13 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
     // 只影响链尺寸终点。缺了不兜底——`branch_to_split_members` 会退回最后一个成员的 lpos。
     // `volume $!bran` 的中心不在这里算：那要建整条 BRAN 的几何。求解器按成员坐标的包围盒中心近似，
     // 它只决定 E/N/W/S 的排序（`CalculateDimChardirs`）。
+    // 管道名称标签（isobran.getbranmlabel L5375-5383）：NAME 第一段 + 口径 UDA :ZD_GDWJ；
+    // Head / Tail 的连接标签（isoTag L18-77）：HREF / TREF 连到的对象。
+    let name = container.stored_name()?;
+    let label_bore_text = optional_text(&container, ":ZD_GDWJ")?;
+    let head_connection = connection_ref(container.get_element("HREF")?)?;
+    let tail_connection = connection_ref(container.get_element("TREF")?)?;
+
     Ok(BranchQueryResult {
         branch_refno,
         members,
@@ -396,9 +420,98 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
         tail_pos,
         tail_dir,
         volume_center: None,
+        name,
+        label_bore_text,
+        head_connection,
+        tail_connection,
         split_members: None,
         issues,
     })
+}
+
+/// 引用目标在别的库、库没注册 / 元素不在所钉会话：按「没有」，不算错（同 [`catalogue_od`]）。
+fn soft<T>(result: Result<T, DbElementError>) -> Result<Option<T>, BranchQueryError> {
+    match result {
+        Ok(value) => Ok(Some(value)),
+        Err(DbElementError::DbNotRegistered { .. } | DbElementError::NotFound { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// PML `name of`：有存名给原文（`/…`），没有给 refno 写法 `=w0/w1`。
+fn pml_name(element: &e3d_io::db_element::DbElement) -> Result<Option<String>, BranchQueryError> {
+    Ok(soft(element.stored_name())?.map(|stored| {
+        stored.unwrap_or_else(|| {
+            let refno = element.refno();
+            format!("={}/{}", refno.word0, refno.word1 as i32)
+        })
+    }))
+}
+
+/// owner 链上第一个 `noun` 祖先（`zone of` / `site of`）的存名里含不含 `needle`。走不到 / 没名字按不含。
+fn ancestor_name_contains(
+    element: &e3d_io::db_element::DbElement,
+    noun: &str,
+    needle: &str,
+) -> Result<bool, BranchQueryError> {
+    let mut cursor = soft(element.owner())?.flatten();
+    for _ in 0..32 {
+        let Some(current) = cursor else {
+            return Ok(false);
+        };
+        let Some(current_noun) = soft(current.element_type())? else {
+            return Ok(false);
+        };
+        if current_noun == noun {
+            return Ok(soft(current.stored_name())?
+                .flatten()
+                .is_some_and(|name| name.to_ascii_uppercase().contains(needle)));
+        }
+        cursor = soft(current.owner())?.flatten();
+    }
+    Ok(false)
+}
+
+/// PML `isoTag` L37-68 / L107-124：连接对象（HREF / TREF / CREF 的目标）的显示名与备注。
+///
+/// NOZZ 用喷嘴自己的名字；BRAN 用 BRAN 名；其它构件用属主 BRAN 的名字；备注是那条 BRAN 的 `:ZD_NBBM`。
+/// 目标落在 `*ITUB*` / `*INST*` 区域（仪表管，L50-57 / L102-105）按没有连接。
+fn connection_ref(
+    target: Option<e3d_io::db_element::DbElement>,
+) -> Result<Option<ConnectionRef>, BranchQueryError> {
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    let Some(noun) = soft(target.element_type())? else {
+        return Ok(None);
+    };
+    if noun == "NOZZ" {
+        return Ok(pml_name(&target)?.map(|name| ConnectionRef { name, note: None }));
+    }
+    let bran = if noun == "BRAN" {
+        Some(target)
+    } else {
+        soft(target.owner())?.flatten()
+    };
+    let Some(bran) = bran else {
+        return Ok(None);
+    };
+    if ancestor_name_contains(&bran, "ZONE", "ITUB")? || ancestor_name_contains(&bran, "ZONE", "INST")? {
+        return Ok(None);
+    }
+    let Some(name) = pml_name(&bran)? else {
+        return Ok(None);
+    };
+    let note = match bran.get_string(":ZD_NBBM") {
+        Ok(value) => value.map(|text| text.trim().to_string()).filter(|text| !text.is_empty()),
+        Err(
+            DbElementError::UnknownAttribute { .. }
+            | DbElementError::DbNotRegistered { .. }
+            | DbElementError::NotFound { .. },
+        ) => None,
+        Err(error) => return Err(error.into()),
+    };
+    Ok(Some(ConnectionRef { name, note }))
 }
 
 fn refno_key(refno: RefNo) -> (u32, u32) {
@@ -521,6 +634,9 @@ fn push_implied_tube(
         leave_ppoint: None,
         dtxr: None,
         weld_number: None,
+        name: None,
+        stext: None,
+        connection: None,
     });
 }
 

@@ -131,7 +131,14 @@ fn main() -> anyhow::Result<()> {
                 db_name,
                 sesno.map(|s| s.to_string()).unwrap_or_else(|| "latest".into())
             ),
-            "cases": [{ "id": id, "title": title, "members": members }],
+            "cases": [{
+                "id": id,
+                "title": title,
+                "members": members,
+                // 管道名称标签（plant-mbd ADR-0009）要的 BRAN 级数据，切段成员表里装不下。
+                "branch_name": query.name,
+                "branch_label_bore": query.label_bore_text,
+            }],
             "branch_query": query,
         });
         let path = args.out_dir.join(format!("{id}.json"));
