@@ -428,6 +428,10 @@
   按元素记录里成员表的存储顺序，服务端不截断（要分页的自己截）。
 - `GET /tree/ancestors?refno=a/b` → `{ "source", "refnos": ["a_b", …] }`：自己在前，
   沿 OWNER 向上到库顶。
+- `children` / `ancestors` 的 `refno` 不在本 MDB 时回 **404 `not_found`**：既包括库里索引不到
+  这个 refno，也包括其 Ref0 在定位器里反查不到任何 dbnum（`1/1` 这类）——后者是确定性的
+  「不在这个 MDB」，与前者同码，客户端可负缓存（2026-09-08 前这一种误回 500 `internal`）。
+  定位器 / 会话文件的暂时故障仍是 500。
 - 节点 = `EleTreeNode` 原样序列化 + HTTP 层外包的一格 `dbnum`：
 
 ```json

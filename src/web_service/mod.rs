@@ -196,6 +196,13 @@ impl ApiError {
 
     /// 领域层 `anyhow::Error` 的统一映射：元素不存在归为 404，其余 500。
     ///
+    /// 「不存在」有两种：库里索引不到这个 refno（`NoSuchElement`），以及 Ref0 在本 MDB
+    /// 的定位器里根本反查不到 dbnum（`UnresolvedRef0`）——后者是确定性的「不在这个 MDB」，
+    /// 不是暂时解析不到（定位器的暂时故障走 `Err`，不走 `Ok(None)`），`on_demand_db` /
+    /// `element_attributes` 也一直把两者一并当 missing。此前 `tree/children?refno=1/1` 这类
+    /// 请求回 500 `internal`，客户端只能当服务端故障重试；现在与 `NoSuchElement` 同码 404，
+    /// 可负缓存。
+    ///
     /// 曾经还有一支按错误文本里有没有 `sync_live` 判 422 的——那个开关 2026-09-07 随
     /// ADR-058 D8 退役，没有任何一处再产出这种文本，分支跟着删了。真要报前置条件不满足，
     /// 用 [`ApiError::precondition`]，别再回到按文本猜的路上。
@@ -203,7 +210,10 @@ impl ApiError {
         let message = format!("{error:#}");
         if matches!(
             error.downcast_ref::<crate::data_interface::direct_store::DirectStoreError>(),
-            Some(crate::data_interface::direct_store::DirectStoreError::NoSuchElement { .. })
+            Some(
+                crate::data_interface::direct_store::DirectStoreError::NoSuchElement { .. }
+                    | crate::data_interface::direct_store::DirectStoreError::UnresolvedRef0 { .. }
+            )
         ) {
             Self::not_found(message)
         } else {
@@ -599,5 +609,30 @@ mod tests {
         assert_eq!(error.status, StatusCode::NOT_FOUND);
         assert_eq!(error.code, "not_found");
         assert!(error.message.contains("24384_26291"));
+    }
+
+    /// `tree/children?refno=1/1`（Ref0 不在本 MDB）曾回 500 `internal`：反查不到 dbnum 是
+    /// 「不在这个 MDB」的确定性结论，与 `NoSuchElement` 同码 404，客户端才能负缓存而不是重试。
+    #[test]
+    fn an_unresolvable_ref0_is_not_found_not_an_internal_server_error() {
+        let error = ApiError::from_domain(anyhow::Error::new(
+            crate::data_interface::direct_store::DirectStoreError::UnresolvedRef0 {
+                ref0: 1,
+                refno: "1_1".into(),
+            },
+        ));
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.code, "not_found");
+        assert!(error.message.contains("ref0 1"), "{}", error.message);
+    }
+
+    /// 其余 `DirectStoreError`（会话 / 文件被换 / 锁毒化…）仍是 500：它们不是「不存在」。
+    #[test]
+    fn other_direct_store_errors_stay_internal() {
+        let error = ApiError::from_domain(anyhow::Error::new(
+            crate::data_interface::direct_store::DirectStoreError::NoFileForDbnum { dbnum: 8000 },
+        ));
+        assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(error.code, "internal");
     }
 }
