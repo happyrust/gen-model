@@ -174,6 +174,10 @@ _Avoid_: 逆引用、backref、被引用列表
 按会话区间算出的元素变更集合（对应 core.dll 的 `DB_UserChanges`，由 `DB_DB::elementsChangedBetween` 产出）。core.dll 分五类：`elementCreated`/`elementDeleted`/`attributeModified`/`elementReordered`/`elementIncluded`；gen-model 现映射为 `Add`/`Modified`/`Deleted`（reorder 并入 `children_changed`，无 include）。
 _Avoid_: 增量集、delta、diff
 
+**联动更新 (Cascade Update)**：
+元素 A 变了、**A 自己以外**的模型也必须跟着重算的那些边。全仓一共十一类（容器位姿→子树、删除→子孙、改挂→新旧两根、CATA→引用它的 DESI、连接/邻居、派生几何单元、房间归属、空间树/AABB，加上明确不做的 UDA 依赖递归与 XRPNTR、以及在案未做的 `graphicsBehaviour` 中间祖先）。**唯一索引是 `docs/2026-09-04_model-cascade-update-inventory.md` §1 那张表**——新增或改动任何一条联动边，先改那张表。它不是「一次变更要重算多少东西」（那是扇出），也不是「谁是生成根」（那是上卷）。core 侧的对应物是 `change/EVALAT` 那张 noun × 属性 → 目标的规则表（`docs/evidence/2026-09-06-ida-core3d-change-evalat-cascade.md`）：owner 链上卷那一半我们全有，**引用类联动（结构连接 `CREF`↔`JOIS`/`JOIE`、孔洞反向引用）在 direct 文件窗口路径上缺**，真库普查坐实其中结构连接是洞（清单 #12，对齐计划 `docs/plans/2026-09-06-core3d-cascade-parity-dev-plan.md` C2）；0907 结构连接那一半已接线——`src/data_interface/structural_connection.rs` 从变更元素正向读、核对回指、把对端的生成根并进 `touched`（开关 `model_structural_connection_cascade` 默认关）；孔洞那一半 core 自己也只看 owner 子树成员（`DFIND` 是 dabacon 成员导航，`EVALAT` 自己没有反向引用调用），整根重生成构造性覆盖、不接；core 侧仅剩的反向尾巴是电缆两条——`CWBRAN` 的 `CLIST`、`EQUI`/`ELCONN` 的 `ELCXRF` 都是伪属性、底下是引用表反向查 `STAREF`/`ENDREF` 指向的 `CABLE`（0907 C6，证据 §8.6），同日 C8 同库版接线——`src/data_interface/cable_endpoint.rs` 到 T 端文件自带的 `STAREF` / `ENDREF` 反向表点查引用者、把电缆的生成根并进 `touched`（开关 `model_cable_endpoint_cascade` 默认关；跨库边待跨库版），电缆几何落地前几何上不显。
+_Avoid_: 级联（泛指时）、扇出、反查、依赖传播
+
 **模型变更通告 (Model Change Notice)**：
 某个 refno 的模型产物已经落库、与观看端手上那份不再相同的对外告知；三种口径与「模型影响」同源：重生成 / 仅位姿 / 已删除。它只陈述「变了」，不指示「谁该重画」——重画与否由观看端按自己的可见性判断，服务端不认识任何一个场景。
 _Avoid_: 局部刷新、增量推送、刷新事件
