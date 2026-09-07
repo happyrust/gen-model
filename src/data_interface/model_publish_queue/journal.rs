@@ -114,6 +114,16 @@ pub struct QueueHealth {
     pub active_runs: usize,
 }
 
+/// 队列盯着的一件 mesh 依赖。入册时记下**内容摘要**而不只是字节数——长度相同的损坏
+/// 文件照样能骗过长度比较。`bytes` 只用来记账（磁盘预算）。
+#[derive(Debug, Clone)]
+struct MeshDependency {
+    bytes: u64,
+    digest: String,
+    /// 还有几条未确认的结果引用着它。归零后这件 mesh 归已发布模型所有，队列不再计账。
+    refs: usize,
+}
+
 /// One owner holds this journal under the process/queue lock. Frames are
 /// length+SHA256+JSON; JSON is deliberate (GeometryId uses tagged serde enums).
 /// A checkpoint contains only offsets, never copies of queued geometry.
@@ -125,7 +135,7 @@ pub struct Journal {
     memory_limit: u64,
     disk_limit: u64,
     mesh_root: Option<PathBuf>,
-    mesh_usage: BTreeMap<String, (u64, usize)>,
+    mesh_usage: BTreeMap<String, MeshDependency>,
     mesh_bytes: u64,
     memory_bytes: u64,
     cache: BTreeMap<String, (Arc<FrozenRootEnvelope>, u64, (u64, u64))>,
@@ -255,7 +265,10 @@ impl Journal {
             .collect::<Vec<_>>();
         for id in live {
             let payload = self.load(&id)?;
-            let ids = self.mesh_ids_and_sizes(&payload)?;
+            // 重启这一路要**对着内容 id** 验一遍：进程不在的时候文件可能被改坏，而这时
+            // 「当前文件」正是待证的东西，不能拿它自己当基准（旧实现就是这么做的，于是
+            // 一次损坏之后永远校验通过）。只走活着的结果，条数被积压量框住。
+            let ids = self.admit_mesh_dependencies(&payload, true)?;
             self.index.entries.get_mut(&id).unwrap().mesh_ids = ids.clone();
             self.adjust_mesh_refs(&ids, true);
         }
@@ -263,6 +276,17 @@ impl Journal {
     }
 
     fn mesh_ids_and_sizes(&mut self, payload: &FrozenRootEnvelope) -> anyhow::Result<Vec<String>> {
+        self.admit_mesh_dependencies(payload, false)
+    }
+
+    /// 把这条结果引用的 mesh 收进账本；每个 id 只在**第一次见到**时读一遍文件，记下它的
+    /// 内容摘要当基准。`verify_content_addressed_mesh` 只在重启重建时开，见
+    /// [`Journal::with_mesh_root`]。
+    fn admit_mesh_dependencies(
+        &mut self,
+        payload: &FrozenRootEnvelope,
+        verify_content: bool,
+    ) -> anyhow::Result<Vec<String>> {
         let Some(root) = &self.mesh_root else {
             return Ok(Vec::new());
         };
@@ -288,7 +312,15 @@ impl Journal {
                     "invalid immutable mesh {}",
                     path.display()
                 );
-                self.mesh_usage.insert(id.clone(), (meta.len(), 0));
+                if verify_content {
+                    crate::fast_model::e3d_mesh_store::verify_content_addressed_mesh(&path, id)?;
+                }
+                let dependency = MeshDependency {
+                    bytes: meta.len(),
+                    digest: digest(&fs::read(&path)?),
+                    refs: 0,
+                };
+                self.mesh_usage.insert(id.clone(), dependency);
             }
         }
         Ok(ids)
@@ -296,16 +328,16 @@ impl Journal {
 
     fn adjust_mesh_refs(&mut self, ids: &[String], live: bool) {
         for id in ids {
-            if let Some((bytes, count)) = self.mesh_usage.get_mut(id) {
+            if let Some(dependency) = self.mesh_usage.get_mut(id) {
                 if live {
-                    if *count == 0 {
-                        self.mesh_bytes += *bytes;
+                    if dependency.refs == 0 {
+                        self.mesh_bytes += dependency.bytes;
                     }
-                    *count += 1;
-                } else if *count > 0 {
-                    *count -= 1;
-                    if *count == 0 {
-                        self.mesh_bytes -= *bytes;
+                    dependency.refs += 1;
+                } else if dependency.refs > 0 {
+                    dependency.refs -= 1;
+                    if dependency.refs == 0 {
+                        self.mesh_bytes -= dependency.bytes;
                     }
                 }
             }
@@ -326,13 +358,16 @@ impl Journal {
             let expected = self
                 .mesh_usage
                 .get(id)
-                .context("mesh dependency is absent from queue index")?
-                .0;
+                .context("mesh dependency is absent from queue index")?;
             let path = root.join(format!("{id}.mesh"));
             let meta = fs::metadata(&path)
                 .with_context(|| format!("missing immutable mesh {}", path.display()))?;
+            ensure!(meta.is_file(), "invalid immutable mesh {}", path.display());
+            // 比内容摘要，不只比长度：长度相同的损坏文件正是长度比较看不见的那一类。
+            // 7997 那轮整个 mesh 语料 190.9 MB / 15,556 件，摘要一遍是零点几秒的量级，
+            // 而同一轮 `publish` 是 68.9 s——这道门付得起。
             ensure!(
-                meta.is_file() && meta.len() == expected,
+                digest(&fs::read(&path)?) == expected.digest,
                 "immutable mesh changed: {}",
                 path.display()
             );
@@ -883,8 +918,9 @@ impl Journal {
             }
             additional += serde_json::to_vec(&Event::Result(e.clone()))?.len() as u64 + 40;
             for id in self.mesh_ids_and_sizes(e)? {
-                let (bytes, count) = self.mesh_usage[&id];
-                if count == 0 && meshes.insert(id) {
+                let dependency = &self.mesh_usage[&id];
+                let (bytes, refs) = (dependency.bytes, dependency.refs);
+                if refs == 0 && meshes.insert(id) {
                     additional += bytes;
                 }
             }

@@ -144,7 +144,10 @@ fn non_empty_model_projection_is_refused_at_both_gates() {
     let without_proof = require_empty_model_projection(None, 7997, None)
         .unwrap_err()
         .to_string();
-    assert!(without_proof.contains("no emptiness proof"), "{without_proof}");
+    assert!(
+        without_proof.contains("no emptiness proof"),
+        "{without_proof}"
+    );
 
     // 旧清单反序列化出来的默认值就是 `false`：它必须落在拒绝这一侧。
     let legacy = manifest();
@@ -492,12 +495,18 @@ async fn batch_errors_are_attributed_per_root_when_superseded_comes_first() {
         .expect("batched publication failures carry per-root attribution");
     assert!(attributed.attributed(), "{attributed:?}");
     assert_eq!(attributed.roots, 2);
-    let first_errors = attributed.root_errors(0).expect("first root failed").join("; ");
+    let first_errors = attributed
+        .root_errors(0)
+        .expect("first root failed")
+        .join("; ");
     let second_errors = attributed
         .root_errors(1)
         .expect("the engine keeps executing the neighbour's independent transaction")
         .join("; ");
-    assert!(first_errors.contains("model_publish_superseded"), "{first_errors}");
+    assert!(
+        first_errors.contains("model_publish_superseded"),
+        "{first_errors}"
+    );
     assert!(
         second_errors.contains("model_publish_database_mismatch"),
         "{second_errors}"
@@ -866,8 +875,12 @@ fn in_flight_runs_count_started_unfinished_runs_that_still_have_live_roots() {
     let mut e1 = envelope(1);
     e1.run_id = "run-a".into();
     e1.projection = Default::default();
-    q.transition(&e1.job_id, TaskState::FailedHold, Some("conflict exhausted".into()))
-        .unwrap();
+    q.transition(
+        &e1.job_id,
+        TaskState::FailedHold,
+        Some("conflict exhausted".into()),
+    )
+    .unwrap();
     assert_eq!(q.in_flight_runs(&started), 0);
 }
 
@@ -1035,6 +1048,32 @@ fn mesh_budget_counts_unique_live_dependencies_and_recovers_holds() {
     q.transition(&b.job_id, TaskState::Committed, None).unwrap();
     assert_eq!(q.health().queued_mesh_bytes, 0);
     assert!(meshes.path().join("mesh_shared.mesh").exists());
+}
+
+/// 长度没变、内容变了的 mesh 必须拦下来。mesh 文件是内容寻址的不可变件，它变了就说明
+/// 要发布的那份几何已经不是入册时校验过的那一份——而只比长度的旧口径看不见这一类。
+#[test]
+fn a_same_length_mesh_rewrite_is_caught_by_the_digest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let meshes = tempfile::tempdir().unwrap();
+    let path = meshes.path().join("mesh_shared.mesh");
+    std::fs::write(&path, vec![1; 4096]).unwrap();
+    let e = mesh_envelope(1);
+    let mut q = Journal::open(tmp.path().into(), 1, 1024 * 1024)
+        .unwrap()
+        .with_mesh_root(meshes.path().into())
+        .unwrap();
+    q.handoff(vec![e.clone()]).unwrap();
+    q.verify_meshes(&e).unwrap();
+
+    std::fs::write(&path, vec![2; 4096]).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        4096,
+        "这一条要验的正是「长度骗得过去」的那种改动"
+    );
+    let error = format!("{:#}", q.verify_meshes(&e).unwrap_err());
+    assert!(error.contains("immutable mesh changed"), "{error}");
 }
 
 #[test]

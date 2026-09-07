@@ -95,6 +95,14 @@ pub fn ensure_mesh_file(path: &Path, mesh: &PlantMesh) -> anyhow::Result<MeshWri
     ));
     mesh.ser_to_file(&temp)?;
     verify_mesh_file(&temp, mesh)?;
+    // 校验过的是页缓存里的字节，不落盘等于没写：发布队列的 Result 帧 fsync 过、引用着
+    // 这个 mesh id，掉电后帧还在而文件缺了半截，那条结果就只能作废重生成。所以先把临时
+    // 文件本身刷下去，再建硬链接。
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&temp)?
+        .sync_all()
+        .with_context(|| format!("落盘 {}", temp.display()))?;
     // `rename` overwrites an existing destination on Windows, so it is not a
     // create-if-absent primitive there. A same-directory hard-link publishes
     // the fully closed inode atomically without replacing a concurrent winner;
@@ -102,6 +110,10 @@ pub fn ensure_mesh_file(path: &Path, mesh: &PlantMesh) -> anyhow::Result<MeshWri
     match std::fs::hard_link(&temp, path) {
         Ok(()) => {
             std::fs::remove_file(&temp)?;
+            // POSIX 下文件 fsync 不带上它的目录项：不刷目录，掉电后可能只剩一个
+            // 「有内容但没有名字」的 inode。Windows 没有这一层。
+            #[cfg(unix)]
+            std::fs::File::open(parent)?.sync_all()?;
             Ok(MeshWrite::Written)
         }
         Err(error) if path.exists() => {
@@ -134,6 +146,34 @@ fn update_mesh_digest(hash: &mut Sha256, mesh: &PlantMesh) {
     for index in &mesh.indices {
         hash.update(index.to_le_bytes());
     }
+}
+
+/// 把落盘的 mesh 拿回它自己的内容 id 上对一遍：`e3d_baked_v2_<sha256>` 的那一档，id
+/// 就是内容摘要，重算一遍就知道文件是不是还是当初那份。
+///
+/// **只有烘焙 mesh 认得出来。** [`canonical_mesh_id`] 那一档是 `PrimitiveMeshKey` 加内容
+/// 一起摘要后取前 8 字节，key 不在文件里、也没别处存着，光看文件复原不出来——那些 id
+/// 直接放行，队列侧仍靠字节摘要盯着它「入册之后有没有变过」。
+///
+/// 用在重启后重建 mesh 账本的路上：那时候「当前文件」本身就是待证的东西，不能拿它自己
+/// 当基准。生成期的写入路径不需要它——[`ensure_mesh_file`] 写的时候已经对着内存里的
+/// mesh 逐字节校验过了。
+pub fn verify_content_addressed_mesh(path: &Path, mesh_id: &str) -> anyhow::Result<()> {
+    let Some(expected) = mesh_id.strip_prefix("e3d_baked_v2_") else {
+        return Ok(());
+    };
+    let mesh = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        PlantMesh::des_mesh_file(&path)
+    }))
+    .map_err(|_| anyhow::anyhow!("{} mesh 文件损坏", path.display()))??;
+    let actual = baked_mesh_id(&mesh);
+    if actual.strip_prefix("e3d_baked_v2_") != Some(expected) {
+        bail!(
+            "{} 的内容摘要与它的 id 不符（算出来是 {actual}）",
+            path.display()
+        );
+    }
+    Ok(())
 }
 
 fn verify_mesh_file(path: &Path, expected: &PlantMesh) -> anyhow::Result<()> {
@@ -189,6 +229,33 @@ mod tests {
         let mut index = mesh.clone();
         index.indices.swap(0, 1);
         assert_ne!(original, baked_mesh_id(&index));
+    }
+
+    /// 重启后重建队列的 mesh 账本走的就是这一条：文件得对着它自己的内容 id 站得住，
+    /// 而不是拿「当前文件」当新基准——进程不在的时候文件才是最可能被改坏的。
+    #[test]
+    fn a_baked_mesh_must_still_hash_to_its_own_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let mesh = box_mesh();
+        let id = baked_mesh_id(&mesh);
+        let path = dir.path().join(format!("{id}.mesh"));
+        assert_eq!(ensure_mesh_file(&path, &mesh).unwrap(), MeshWrite::Written);
+        verify_content_addressed_mesh(&path, &id).unwrap();
+
+        let mut tampered = mesh.clone();
+        tampered.vertices[0].x = f32::from_bits(tampered.vertices[0].x.to_bits() ^ 1);
+        std::fs::remove_file(&path).unwrap();
+        tampered.ser_to_file(&path).unwrap();
+        let error = format!(
+            "{:#}",
+            verify_content_addressed_mesh(&path, &id).unwrap_err()
+        );
+        assert!(error.contains("内容摘要与它的 id 不符"), "{error}");
+
+        // 图元那一档的短 id 从文件复原不出 PrimitiveMeshKey，只能放行。这是明写的边界，
+        // 不是漏网：那些 id 由队列侧的字节摘要盯着「入册之后有没有变过」。
+        verify_content_addressed_mesh(&path, &canonical_mesh_id(PrimitiveMeshKey::BoxV1, &mesh))
+            .unwrap();
     }
 
     #[test]
