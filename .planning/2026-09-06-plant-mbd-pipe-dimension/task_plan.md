@@ -165,10 +165,10 @@ old/vendor/plant-mbd ── 纯求解器 ──►  old/gen-model  src/mbd/ (e3d
 
 ### Phase 5 — 几何伴生符号与非尺寸图元（分期立项，每项到时细化）
 
-状态：**in-progress**（① ATTA 子尺寸 complete 2026-09-07，plant-mbd `2d7ca54`，见 `findings.md`「Phase 5 ①」）
+状态：**in-progress**（① ATTA 子尺寸 complete 2026-09-07 plant-mbd `2d7ca54`；② 坡度 + 斜管分解 complete 2026-09-07 plant-mbd `da4868e`；见 `findings.md`「Phase 5 ①」「Phase 5 ②」）
 
 - [x] **① ATTA 子尺寸**（`isoline.getAttaDims` L1054-1222）：每个 ATTA 归到从上一主尺寸点起步的 attaDim（落在已有 attaDim 内加进它、否则近者归属），子尺寸第 1 行、同 dimdir、`sub_kind = "atta"`；有 attaDim 的直段主尺寸 `dimtimes = 2`（`twoormoredims`）；ATTA 排在首点前放弃直段（`isodim.atta_before_first_point`）；偏轴且 apos 解不出的 ATTA 静默不进点。三条金样再录（`99996` +2、`145018` +6、`26229` 5+1，其第 4 袋折线管路的 4403.29 消失）。按 SPCO 名字的两侧取点未做。
-- [ ] ② 坡度 `getSlopes` + `dimslope` → `slope_mark`（契约已有几何）
+- [x] **② 坡度 + 斜管分解**（2026-09-07，plant-mbd `da4868e`，ADR-0007）：`isoSlope` 三角形 → 斜边 `slope_mark` + 两条 `aid_line`（坡度 [0.001, 0.1]、长度 ≥ 外径的直管，TUBI/FTUB 同角色，坡度按几何算）；`isoDim.dimOneMemSlope` / `dimslope` → 斜管（轴离最近世界轴 > 5.71°）主尺寸首末点间 X/Y/Z 分解腿 `aid_line` + 整数腿长 `aid_text`（`X:/Y:/Z:` 前缀）+ 直角标。五条金样再录。契约零改动。
 - [ ] ③ 焊缝 `getwelds` / `isoWeldText` → `weld_mark`
 - [ ] ④ 位号 / 材料标签 `getbranmlabel`（L5323）/ `isoTag` → `label` + `leader_line`（先作布局障碍，后输出）
 - [ ] ⑤ 角度 `getinstallationangles` + `isombdangle` → **需契约扩展** `angle_dim` / `aid_arc` 几何（PML `aidarc`：pos / ori / radius / stangle / sweepAngle ↔ 前端 `ExplicitArcInput`），两侧同版（D7）

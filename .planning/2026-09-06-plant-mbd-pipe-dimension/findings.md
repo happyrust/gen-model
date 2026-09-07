@@ -317,3 +317,45 @@ plant-mbd `2d7ca54`。数据来源不变：全部来自 e3d-io / e3d-model 直�
   靠后主点新开一条、无 ATTA 仍第 1 行、ATTA 在首点前放弃直段）；`golden diff` 6/6；clippy 新代码零告警。
 - gen-model worktree `mbd_branch_query` 4/4（真库 `99996`：6 main + 2 atta）、`mbd_http_endpoint` 1/1。
 - 三条金样 wire 体经 plant3d-web `parseMbdV2PipeData` ACCEPTED（`sub_kind = atta` 自由字段，箭头内置）。
+
+## Phase 5 ②（2026-09-07）：坡度符号（`getSlopes` / `isoSlope`）+ 斜管分解（`isoDim.dimslope`）
+
+plant-mbd `da4868e`（ADR-0007，新模块 `slope.rs`）。契约零改动：全部走冻结契约里已有几何的
+`slope_mark` / `aid_line` / `aid_text`。
+
+### 口径
+
+- **坡度符号**（`isoSlope.pmlobj` L14-75，`isobran.getSlopes` L2522-2534 逐 BRAN 成员，`putIntoIsoline` 归段）：
+  `type eq 'TUBI'`、`|Gradient| ∈ [minslope 0.001, maxslope 0.1]`（`isobran.pmlobj` L191-192 默认）、`Itlength ≥ aod`
+  的直管，在 `Itposition`（管中点）上方画直角三角形：`dir1` = 坡度为正（沿流向上升）时流向反向、否则流向；
+  `tempdir = dir1 × U`，`ydir = tempdir × dir1`；`p1 = p0 + dir1·od/2 + ydir·(od/2+20)`，`p2 = p0 − dir1·od/2 + ydir·(od/2+20)`，
+  `p3 = p2 + ydir·od/4`；三条线 p3→p1 / p3→p2 / p2→p1，文字 `'slope ' + string(slop×100, 'd1') + '%'` 在 `p4 = p1 + ydir·(od/4+10)`。
+  → 斜边 `slope_mark`（前端画 start→end + `end` 处箭头 + 中点文字，箭头正好落在下坡一侧）+ 两条 `aid_line`。
+  `Gradient` 属性这边按两端点几何算 `Δz / 水平投影长`；TUBI / FTUB 同一线性角色（Phase 0 口径）。
+- **斜管分解**（`isoDim.dimOneMemSlope` L1251-1270：主尺寸首末点；直段轴与 E/W/S/N/U/D 最近者夹角 `tan > maxslope`
+  → 5.71° 以上算斜管 → `dimslope` L1342-1506）：|Δz| > 0.5 时高点投到低点高程 → 竖直腿 + 文字 → 递归水平部分：
+  两个轴对齐角点 `point1 = (pos2.x, pos1.y)` / `point2 = (pos1.x, pos2.y)`，腿向落在 `dimdirs` 里更多的那个胜出
+  （非 Polar 版；Polar 版 `isoline.dimslopedim` L2357-2465 用「离包围盒中心远」）；≥ 1 mm 的腿各一条 `aid_line` +
+  整数腿长 `aid_text`（`len.string('d0')`，加 Polar 版的 `X:` / `Y:` / `Z:` 前缀）；角点直角标
+  `min(min(腿长)/4, cheight)`（`drawRightAngle`）。pos1 就是角点时退回第二条腿给竖直直角标定向（L1484-1487）。
+- 未建：`dimslope` 往 `usedDirs` 加的 `ISODIM-1/2` 占位（L1366 / L1473）——它们落在主尺寸范围两端 `cutlen` 内，
+  `getusedDirs` 一定过滤掉，对选向无影响。腿长文字的 Polar 摆位（`getBestPosAndOri`）用「腿中点沿
+  `get_dim_dir(腿向, dimdirs)` 外移 0.6·cheight」代替。
+
+### 金样再审（五条变，`91813` 竖管不变）
+
+| 金样 | 变化 |
+|---|---|
+| `24381_145018` | +7 `slope_mark`（排水线 0.3%–0.5% 的七根隐式管）+ 14 `aid_line`；第 4 袋平面 45° → X:2002 / Y:1900 / Z:9 |
+| `24384_26229` | +1 `slope_mark`（头管 0.3%）；第 2 / 5 袋平面 30° → X:812 / Y:469、X:728 / Y:1388 |
+| `24383_99996` | 第 5 袋（离 U 30°）→ Z:458 / X:264 / Y:14；第 10 袋（离 E 12°）→ X:442 / Y:94；没有落在坡度带里的管 |
+| `24383_76191` | 第 1 / 3 / 17 / 19 袋平面斜向 → 各两条水平腿 + 直角标 |
+| `24383_100028` | 第 5 / 9 / 13 / 20 / 22 袋斜向 → 分解腿 |
+
+### 验证
+
+- plant-mbd `cargo test --workspace` **80 通过**（75 lib + 4 + 1，新增 5 条 slope 用例）；`golden diff` 6/6；clippy 新代码零告警。
+- gen-model worktree `mbd_branch_query` 4/4、`mbd_http_endpoint` 1/1（宿主没改，只是求解器多出图元）。
+- 三条金样 wire 体经 plant3d-web `parseMbdV2PipeData` ACCEPTED（`145018`：slope_mark 7 / aid_line 21 / linear_dim 18 /
+  aid_text 3，0 diagnostics）。前端 `mbdV2ExternalAnnotations.ts` 对 `slope_mark` 画线 + 箭头 + 中点文字、`aid_line` 画
+  延长线样式、`aid_text` 画注释（代码已读；`node --experimental-strip-types` 跑不了它——扩展名省略的 bundler 导入）。
