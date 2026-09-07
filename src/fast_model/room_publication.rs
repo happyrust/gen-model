@@ -91,7 +91,7 @@ pub(crate) async fn query_published_room_insts(
     query_published_room_insts_on(&SUL_DB, refnos).await
 }
 
-async fn query_published_room_insts_on(
+pub(crate) async fn query_published_room_insts_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     refnos: &[RefnoEnum],
 ) -> anyhow::Result<Vec<GeomInstQuery>> {

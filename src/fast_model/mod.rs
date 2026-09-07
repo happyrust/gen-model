@@ -52,6 +52,8 @@ pub(crate) mod room_publication;
 
 pub(crate) mod room_topology;
 
+
+pub(crate) mod room_resident;
 pub mod cal_model;
 
 pub mod pdms_inst;

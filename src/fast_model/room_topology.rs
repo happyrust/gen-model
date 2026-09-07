@@ -83,7 +83,9 @@ pub(crate) struct RoomGroup {
     pub panels: Vec<RefnoEnum>,
 }
 
-fn published_topology_manifest_key(
+/// 清单身份：`room_published_topology.manifest_key`。常驻房间模型（`room_resident`）的
+/// 摄入侧以它为换代键，所以两边必须是同一个函数算出来的字符串。
+pub(crate) fn published_topology_manifest_key(
     inputs: &[crate::data_interface::side_effect_pending::PublishedFileInput],
     hierarchy: RoomHierarchy,
 ) -> String {
@@ -340,6 +342,19 @@ pub(crate) async fn load_room_panel_map_from_files<F>(
 where
     F: Fn(&str) -> bool,
 {
+    let (_, groups) = load_room_groups_from_files(hierarchy).await?;
+    Ok(room_panel_map_from_groups(
+        room_panel_groups(&groups, room_key_words),
+        match_room_fn,
+    ))
+}
+
+/// [`load_room_panel_map_from_files`] 的下半截：当前 MDB 全部设计库文件的**原始**分组
+/// （未过关键字），以及这组文件版本的规范摘要（各 DESI 冻结令牌的 JSON 序列化再摘要）。
+/// 常驻房间模型（`room_resident`）的读透侧以那个摘要为换代键、以分组算拓扑摘要。
+pub(crate) async fn load_room_groups_from_files(
+    hierarchy: RoomHierarchy,
+) -> anyhow::Result<(String, Vec<RoomGroup>)> {
     let current = crate::fast_model::e3d_model_service::E3dModelService::from_current().await?;
     let mut sources = current
         .design_sources()?
@@ -391,10 +406,7 @@ where
         };
         groups.extend(cached.iter().cloned());
     }
-    Ok(room_panel_map_from_groups(
-        room_panel_groups(&groups, room_key_words),
-        match_room_fn,
-    ))
+    Ok((composite, groups))
 }
 
 /// Load room topology from the durable composite of each file's last
@@ -421,7 +433,7 @@ where
     )))
 }
 
-async fn load_published_topology_groups_on(
+pub(crate) async fn load_published_topology_groups_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     inputs: &[crate::data_interface::side_effect_pending::PublishedFileInput],
     hierarchy: RoomHierarchy,
