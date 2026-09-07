@@ -726,7 +726,12 @@ mod tests {
         store.commit(
             ProjectionScope::Current,
             vec![ProjectionCommit {
-                upserts: vec![record("c", RefNo::new(8000, 3), RefNo::new(8000, 100), 8000)],
+                upserts: vec![record(
+                    "c",
+                    RefNo::new(8000, 3),
+                    RefNo::new(8000, 100),
+                    8000,
+                )],
                 ..ProjectionCommit::default()
             }],
         );
