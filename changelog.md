@@ -49,6 +49,35 @@
   **真库编排等价对拍未跑**（方案 §5 第 3 条：用新 exe 对 YCYK 同一组 10 库空店首载，逐 dbnum 行数与
   `runycyk1-bootstrap/verification.json` 相等），留给下一次 rig 运行。
 
+### `sync_live` 退役：watcher 无条件起，「一个库都不监听」这个状态删掉（ADR-058 D8）
+
+用户拍板选 (a)：「永远起 watcher，删掉不监听这个状态，testbed 多付一次扫描无所谓」。前一轮先定了
+另一半口径——`watch_dbnums` 的「键缺失」与「空表」**不区分**，两者都等于默认监听本 MDB 声明的全部
+DESI（共识 `d-207`）；所以 `watch_dbnums` 永远表达不了「一个都不监听」，`sync_live` 的关闭态没有
+接盘人，只能删。
+
+`sync_live` 此前把两件事绑在一个布尔上：①「起不起 watcher」②「做不做启动数据重扫 + 等 `data_ready`」。
+现在 ① 恒为是，② 由 `data_face` 单独回答（`read-through` 跳过重扫并直接
+`mark_data_ready_without_manifest`，那本来就是这个形状的先例）。
+
+- `lib.rs`：`let sync_live = …` 删除；`init_watcher` 与 `async_watch` 的 spawn 都改成无条件
+  （read-through 仍只跳过启动重扫、watcher 照起作脏信号）；`startup_data_ready` 收成
+  `read-through || is_auto_work_armed()`；`print_startup_complete_banner` 去掉那个参数与
+  「sync_live=false：不进文件监听」那一支；进程长驻的判据从「手动模式 + 配了 HTTP」改成「配了 HTTP」。
+  `startup_autorun=false` 那段里「⚠ 同时 sync_live=false，没有文件事件来解封任何一行」的告警随之
+  失效，一并删。
+- `/health`：`sync_live` 这一格从 `AppState` 与两处载荷里去掉——它现在只能是 `true`，报一个不可能
+  为假的布尔没有信息量。plant-ui 侧读的是 `Option<bool>`（`model_update.rs`），缺字段会退化成
+  「无记录」，不会崩；那边的清理留给 plant-ui 自己。spec §4.1 的 `/health` 样例同步去掉。
+- 配置与脚本：19 份 `DbOption*.toml` 去掉 `sync_live`；`scripts/Invoke-SiteDbnumParse.ps1`、
+  `scripts/Verify-RocksDb8000.ps1`、`scripts/strt_plant_ui_runtime.py`、
+  `python/scripts/smoke_m2_client.py`、`bin/l3_suite` 夹具生成的配置一并去掉。
+  vendor `old-aios-core` 的 `sync_live: Option<bool>` 字段没删（`Option` 缺键即 `None`，别的消费者
+  还在读；ADR-056 约束 7，vendor 走上游）。
+- 护栏：`direct_read_mode_only_selects_the_data_read_route` 加两条——启动序列不许再读
+  `db_option.sync_live`、看门狗必须是无条件 spawn（`let watch_task = {`）；
+  `read_through_startup_cannot_enter_the_ingest_sweep` 的两句锚点改到现在唯一还看形态的那两处。
+
 ### `UpdateScope` 库侧 MDB 表为空时回落到 SYS 文件声明——新项目首次启动不必再空跑一趟
 
 YCYK-E3D（`D:\AVEVA\Projects\E3D3.1\YCYK-E3D`，MDB `/SLYK`）首次初始化实测撞出来的：全新命名空间上
