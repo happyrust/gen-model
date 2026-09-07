@@ -3104,7 +3104,6 @@ fn baseline_sync_options(
     dbnum: u32,
 ) -> aios_core::options::DbOption {
     let mut options = source.clone();
-    options.total_sync = true;
     options.replace_dbs = false;
     options.included_db_files = Some(vec![file_name.to_string()]);
     options.manual_db_nums = Some(vec![dbnum]);
@@ -6814,7 +6813,6 @@ mod tests {
         source.manual_db_nums = Some(vec![7997, 8000]);
 
         let scoped = baseline_sync_options(&source, "ams7999_0001", 7999);
-        assert!(scoped.total_sync);
         assert!(!scoped.replace_dbs);
         assert!(!scoped.gen_model);
         assert!(!scoped.gen_mesh);

@@ -346,7 +346,6 @@ mod tests {
         option.project_name = "Main".to_string();
         option.manual_db_nums = Some(vec![1001]);
         option.exclude_db_nums = Some(vec![7997]);
-        option.only_sync_sys = true;
         let scope = UpdateScope::for_tests("/ALL", &[1001, 7997]);
 
         for dbnum in [1001, 7997] {

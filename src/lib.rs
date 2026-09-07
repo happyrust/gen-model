@@ -53,7 +53,7 @@ use team_data::sync_team_data;
 use aios_core::material::save_all_material_data;
 use std::sync::mpsc;
 use std::sync::mpsc::Sender;
-use versioned_db::database::{retire_dbnum_event, sync_pdms};
+use versioned_db::database::retire_dbnum_event;
 
 use log::{LevelFilter, error};
 use simplelog::*;
@@ -442,31 +442,6 @@ extern crate derive_more;
 extern crate nom;
 extern crate anyhow;
 
-// pub async fn start_sync_task(
-//     db_option: Arc<DbOption>,
-//     progress_sender: Sender<f32>,
-// ) -> anyhow::Result<()> {
-//     if db_option.total_sync
-//         || db_option.incr_sync
-//         || db_option.only_sync_sys
-//         || db_option.is_sync_history()
-//     {
-//         // println!("开始同步解析数据。");
-//         // tokio::spawn(async move {
-//         if let Err(e) = sync_pdms(&db_option).await {
-//             eprintln!("同步PDMS数据失败: {}", e);
-//         }
-//         //记录进度
-//         progress_sender.send(50.0).await?;
-//     }
-
-//     if db_option.build_cate_relate() {
-//         println!("初始化创建Cate relate关系");
-//         build_cate_relate(false).await?;
-//     }
-//     Ok(())
-// }
-
 /// 进程起点，供「初始化完成」横幅报一次总耗时。
 ///
 /// `run_app`（服务正门）与 `run_cli`（python 绑定、l3_suite 夹具直接调的那道门）
@@ -668,66 +643,12 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         eprintln!("*** {notice} ***");
     }
     let db_option = Arc::new(db_option.clone());
-    // initialize_global_db_sender().await;
 
-    // start_sync_task(db_option.clone(), progress_sender.clone()).await?;
-    //如果是解析任务，运行完就应该跳出
-    let legacy_sync_requested = db_option.total_sync
-        || db_option.incr_sync
-        || db_option.only_sync_sys
-        || db_option.is_sync_history();
-    if direct_read_mode && legacy_sync_requested {
-        // 静默忽略配置项是最高级别缺陷之一：此前这几个开关在 direct 下什么都不做、也不说。
-        println!(
-            "direct 形态不跑 sync_pdms（legacy 全量 / 历史解析走 db 读路由）：忽略 total_sync={} \
-             incr_sync={} only_sync_sys={} sync_history={}；数据面由 watcher 首扫与增量窗口经 e3d-io 摄入",
-            db_option.total_sync,
-            db_option.incr_sync,
-            db_option.only_sync_sys,
-            db_option.is_sync_history()
-        );
-    }
-    if !direct_read_mode && legacy_sync_requested {
-        let step_started = Instant::now();
-        // println!("开始同步解析数据。");
-        // tokio::spawn(async move {
-        sync_pdms(&db_option).await?;
-        println!(
-            "PDMS 数据同步解析阶段完成，耗时 {}",
-            fmt_elapsed(step_started.elapsed())
-        );
-        //记录进度
-        // progress_sender.send(90)?;
-        if db_option.build_cate_relate() {
-            println!("初始化创建Cate relate关系");
-            let step_started = Instant::now();
-            build_cate_relate(false).await?;
-            println!(
-                "Cate relate 关系创建完成，耗时 {}",
-                fmt_elapsed(step_started.elapsed())
-            );
-        }
-        // progress_sender.send(100)?;
-        // 遗留路径断点当面说清（审计 2026-08-29 F6）：`sync_pdms` 只解析数据，
-        // 全程不写 dbnum_state 水位、不产模型工作单、不建 gen_root 凭证。这个
-        // 脱钩在两种组合下各有一个坑，以前一个字都不说，出了事只能翻代码。
-        if db_option.total_sync {
-            if sync_live {
-                eprintln!(
-                    "*** total_sync + sync_live=true：全量解析不建立增量水位，watcher 首扫会把\
-                     这些库判成「有数据、水位 0」并按首次导入 wipe+重解析——整库将被解析两遍。\
-                     只想全量导数据请改 sync_live=false；想直接服务化请去掉 total_sync，\
-                     由首载批次一次完成解析+建模+水位"
-                );
-            } else {
-                eprintln!(
-                    "*** total_sync 完成：数据已入库，但增量水位未建立、模型未生成（本分支与\
-                     水位/模型完全脱钩）。模型生成的出口：下次以 sync_live=true 启动（启动播种\
-                     回填水位后按首载批次收口），或对目标库人工触发 POST /model/rebuild"
-                );
-            }
-        }
-    }
+    // legacy 全量 / 历史解析（`sync_pdms` 与 `total_sync` / `incr_sync` / `only_sync_sys` /
+    // `sync_history` 四个开关）2026-09-07 整条退役（ADR-058 D8）。direct 成为默认形态之后
+    // 那条路一次也没被走到过，而它与水位、模型、`gen_root` 凭证全程脱钩——「解析完了却
+    // 什么都没建立」这个坑随路一起没了。数据面从此只有一条：watcher 首扫与增量窗口经
+    // e3d-io 摄入，首载 / 重建由数据批次 worker 按单个文件调 `sync_total_async_threaded`。
 
     println!("正在初始化 db manager（解析监控目录配置）...");
     let step_started = Instant::now();
@@ -1198,18 +1119,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if gen_material {
         save_all_material_data().await?;
     }
-    // sync TEAM_DATA数据
-    if db_option.only_sync_sys {
-        println!("开始生成SYS DATA");
-        match sync_team_data(&aios_mgr).await {
-            Ok(_) => {
-                println!("TEAM DATA生成完成");
-            }
-            Err(e) => {
-                eprintln!("TEAM DATA生成失败: {e:#}");
-            }
-        }
-    }
+    // TEAM_DATA 生成随 `only_sync_sys` 一起退役（ADR-058 D8）：它的唯一开关是那个
+    // legacy 全量键，仓里没有一份配置打开过，因此这段从来没跑过。真要它就给它自己的
+    // 开关，别再挂回一个已经不存在的键上——`sync_team_data` 本体留着。
 
     if db_option.rebuild_ssc_tree {
         println!("生成PBS节点...");
@@ -1902,10 +1814,6 @@ mod startup_room_build_gate_tests {
             .expect("run_cli end exists")
             .0;
         let worker = body.find("ensure_batch_worker(mgr.clone())").unwrap();
-        assert!(
-            body.contains("sync_pdms(&db_option).await?"),
-            "任一全局数据阶段失败必须终止启动，不能继续打开模型门"
-        );
         let web = body.find("serve_if_configured(mgr)").unwrap();
         let reconcile = body
             .find("reconcile_model_coverage_at_startup().await")
@@ -2092,10 +2000,8 @@ mod startup_room_build_gate_tests {
             vec![
                 "let direct_read_mode = crate::options::direct_read_mode();".to_string(),
                 "if direct_read_mode {".to_string(),
-                "if direct_read_mode && legacy_sync_requested {".to_string(),
-                "if !direct_read_mode && legacy_sync_requested {".to_string(),
             ],
-            "worker 之前 direct_read_mode 只许出现在：绑定、一行播报、legacy sync_pdms 读路由的选择"
+            "legacy 全量那条路退役后（ADR-058 D8），worker 之前 direct_read_mode 只剩：绑定、一行播报"
         );
         // `body` 一直延到 `run_app`，中间夹着完成横幅那个函数：它只把读模式当标签打一行，
         // 不在本条的管辖内，启动序列到 `run_cli` 的 `Ok(())` 为止。

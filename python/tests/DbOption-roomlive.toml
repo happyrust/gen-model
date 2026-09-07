@@ -14,9 +14,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
 
 #同步文件配置
-total_sync = false
-incr_sync = false
-sync_history = false
 enable_log = false
 sync_graph_db = false
 sync_versioned = false
@@ -60,7 +57,6 @@ gen_noun_graph = false
 #arangodb 配置（默认 feature 不消费）
 arangodb_database = "ams"
 multi_threads = false
-only_sync_sys = false
 arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
 arangodb_user = "root"

@@ -5,9 +5,6 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # 非CATA增量测试：数据已解析，跳过重新解析
 # Web 服务冒烟验证：关闭启动期全量同步（原值 true，gen-model-9 全量DESI复验遗留）
-total_sync = false
-incr_sync = false
-sync_history = false
 enable_log = false
 sync_graph_db = false
 sync_versioned = false
@@ -81,7 +78,6 @@ gen_noun_graph = false
 #arangodb 配置
 arangodb_database = "ams"
 multi_threads = false
-only_sync_sys = false
 arangodb_url = "http://127.0.0.1:8529"
 rebuild_ssc_tree = false
 arangodb_user = "root"

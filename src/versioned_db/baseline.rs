@@ -12,7 +12,7 @@
 //! * 事务切块按 `tx_limits`（默认 2 MiB / 5000 行 / 1000 元素）；`DbOption::pe_chunk / att_chunk` 不再参与切块。
 //! * **不带逐笔 pe 统计观测**（`StatisticsMode::Deferred`，2026-09-07）：整库基线写进刚清空的 dbnum，
 //!   `$before` 恒空、`$after` 恒等于本批，逐笔观测的点读量与正文同量级、UPSERT 的又是同一个热点行；
-//!   写者排空后 `database::settle_dbnum_info_after_total_sync` 用 `dbnum_stats::rebuild_body` 一次算清。
+//!   写者排空后 `database::settle_dbnum_info_after_baseline` 用 `dbnum_stats::rebuild_body` 一次算清。
 //!   父层补缺（`replace_dbs = false`）走的也是这条路——同一个收尾重建对它同样成立（GROUP BY 数的是实际行）。
 //! * WORL 作为普通元素写全三样行（legacy 不写它的 `pe` 行），计数口径见
 //!   [`BaselineStats::elements`]。
@@ -128,7 +128,7 @@ mod tests {
                     .await
                     .unwrap();
             }
-            // 与 `settle_dbnum_info_after_total_sync` 同一步：写者排空后按 Ref0 重建统计。
+            // 与 `settle_dbnum_info_after_baseline` 同一步：写者排空后按 Ref0 重建统计。
             crate::data_interface::dbnum_stats::rebuild_on(&db, DBNUM as u32)
                 .await
                 .unwrap();
@@ -326,7 +326,6 @@ mod tests {
             .expect("connect the empty live Surreal");
 
         let mut options = db_option.clone();
-        options.total_sync = true;
         options.replace_dbs = true;
         options.included_db_files = Some(vec!["ams7999_0001".into()]);
         options.manual_db_nums = Some(vec![7999]);

@@ -2,6 +2,40 @@
 
 ## 2026-09-07
 
+### legacy 全量解析整条退役：`sync_pdms` 与 `total_sync` / `incr_sync` / `only_sync_sys` / `sync_history` 四个开关一起删掉（ADR-058 D8）
+
+用户拍板「先做第一步：删 total_sync 族与 sync_pdms」。**先清点存量**：30 份配置里 `total_sync` 全是 `false`
+（只有样例 `DbOption_text.toml` 写过 `true`），而 direct 自 09-04 是默认形态——`legacy_sync_requested`
+在任何一份配置下都是 `false`，那条路**一次都没被走到过**，只剩 `lib.rs` 里一行「忽略 total_sync=… 」的打印。
+它还与水位、模型、`gen_root` 凭证全程脱钩，于是有那个写在告警里的坑：`total_sync + sync_live=true` 会让
+watcher 首扫把这些库判成「有数据、水位 0」按首次导入 wipe + 重解析，**整库解析两遍**。路没了，坑随之没。
+
+- **删**：`database::sync_pdms`（Meta → Catalogue → Design 三道全局屏障的编排）、私有辅助
+  `full_sync_catalogue_files`、`lib.rs` 里的 `legacy_sync_requested` 分支与那段 `start_sync_task` 死注释、
+  钉三道屏障先后的源码测试 `sync_pdms_awaits_global_meta_then_catalogue_then_design`。
+- **留**：① `sync_total_async_threaded`——它不是 legacy，是**首载 / 重建的单文件基线写者**，由
+  `manual_update` 的 `baseline_sync_options` 按单个文件调（`total_sync = true` 那一行删掉，它现在只有这一种
+  调法，`is_total_sync && is_save_db` 收成 `is_save_db`，`settle_dbnum_info_after_total_sync` 改名
+  `settle_dbnum_info_after_baseline`）；② 新 `database::bootstrap_sys_metadata`——`sync_pdms` 里唯一还有人
+  要的那一半：空库灌 SYS 元数据（SYST/COMM/MISC/GLB/GLOB + DICT）加三个索引。理由是 DESI 解析要经
+  `MDB` / `WORL` 反查世界 refno，没同步过 SYS 的空库每个 dbnum 都解成「只有根、0 个元素」；`bin/sync_sys_only`
+  与 l3 套件的空店引导（`bootstrap_store`）都吃它。它**不看任何配置开关**，调用即执行。
+- **顺带删掉的死分支**：`lib.rs` 里 `if db_option.only_sync_sys { sync_team_data }`——TEAM_DATA 生成的唯一开关
+  就是那个 legacy 键，仓里没有一份配置打开过，这段从来没跑过。要它就给它自己的开关，`sync_team_data` 本体留着。
+- **配置**：30 份 `DbOption*.toml` 去掉这四个键（`docs/evidence/` 下的证据快照与 `vendor/` 里的不动）；
+  `scripts/Invoke-SiteDbnumParse.ps1` 生成的站点配置、`bin/l3_suite` 夹具生成的配置同步去掉。
+  `vendor/old-aios-core` 的 `DbOption` 三个 `bool` 字段加 `#[serde(default)]`——`config` crate 对缺字段的
+  `bool` 是硬报错（`missing field total_sync`），不加这一下所有读根配置的测试当场全红。字段本身没删：
+  `vendor/aios-parse-pdms` 等别的消费者还在读（ADR-056 约束 7，vendor 走上游）。
+- 护栏 `the_legacy_full_sync_entry_point_stays_retired` 替掉原来那条屏障顺序钉：`database.rs` 里不许重新出现
+  那个入口，也不许再读那四个开关；`lib.rs` 的 `direct_read_mode` 出现位置钉从四处收到两处（绑定 + 一行播报）。
+
+验证：`cargo check --lib --tests --bins --features http_api` 干净；定向
+`-- versioned_db:: manual_update:: increment_manager:: element_batch::` **191 passed**；全库
+`cargo test --lib --features http_api` **1747 passed / 0 failed / 115 ignored**；`cargo clippy --lib --bins`
+本轮碰过的文件零警告；七份 .rs rustfmt 干净。**未 live**：`bin/sync_sys_only` 换底之后要在空库上真跑一遍
+（l3 空店引导 `bootstrap_store` 那一步），本机没有 E3D31-L3 语料，留给用户终端。
+
 ### rocksdb 写回重构 ADR-064 Q2：惰性 CATA 落库切到统一渲染器，`cata_ref_rev` 补偿队列退役——D5 修好库类型字后它第一次真写行，而 `UPSERT … CONTENT` 会抹掉 `dependency` 标记
 
 计划 §1.1 #9 给这条路的处置本来就是「复活时不走这条，走统一渲染器」；它复活了。`cata_closure::ensure_cata_refnos_parsed`

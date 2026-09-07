@@ -43,24 +43,21 @@ ADR-007 遗留① 预告过这个歧义（两个 `/ALL` 并存、`LIMIT 1` 选�
 
 ## 跑法
 
-`DbOption.toml` 里只改一处：
+**2026-09-07 起改法不同了**（ADR-058 D8）：`only_sync_sys` 这个开关连同整个 legacy 全量族已经退役，
+SYS 重解析不再靠「改一个开关再启动服务」，而是跑那个专用 bin——它调
+`database::bootstrap_sys_metadata`，做的还是同两步（SYST/COMM/MISC/GLB/GLOB + DICT）加三个索引，
+但**不看任何配置开关**，跑完就退出，不会留下一个下次启动还会重解析的配置。
 
-```toml
-only_sync_sys = true      # 跑完记得改回 false
-```
-
-其余保持现状即可确认一遍：`total_sync = false`、`sync_live = false`、`gen_model = false`、
+`DbOption.toml` 一个字都不用改，确认一遍即可：`sync_live = false`、`gen_model = false`、
 `replace_dbs = true`（REPLACE 而非 INSERT IGNORE，正是重解析要的覆盖写）。
-
-`included_db_files` 不用动——ADR-007 之后 SYS 解析不再受它约束，`only_sync_sys` 单独就能重建
-MDB/CURD/DB。
+`included_db_files` 也不用动——ADR-007 之后 SYS 解析不受它约束。
 
 ```powershell
 cd D:\work\plant-code\old\gen-model
-cargo run --release --features console
+cargo run --release --bin sync_sys_only
 ```
 
-**跑完立刻把 `only_sync_sys` 改回 `false`**，否则每次启动都重解析一遍。
+跑完打出 `SYSSYNC|<项目名>|ok` 就是这一趟成功了。
 
 ## 验收
 

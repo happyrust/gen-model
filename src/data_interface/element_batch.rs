@@ -73,7 +73,7 @@ pub enum WriteMode {
 /// 的 dbnum 时 `$before` 恒空、`$after` 恒等于本批，这笔观测的键操作量与正文写入同量级，却只为把
 /// `dbnum_info_table.count` 逐笔推到一个收尾时一条 `GROUP BY` 就能算出来的数；同一个 UPSERT 目标行
 /// 还是全部事务共同的热点键（多写者撞的正是它）。所以基线延后到收尾一次算清
-/// （`versioned_db::database::settle_dbnum_info_after_total_sync` → `dbnum_stats::rebuild_body`）。
+/// （`versioned_db::database::settle_dbnum_info_after_baseline` → `dbnum_stats::rebuild_body`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatisticsMode {
     /// 每笔事务自带前后观测：稳态增量窗口、CATA 依赖行、任何写进**已有统计**的 dbnum 的路。
@@ -498,7 +498,14 @@ pub fn render_item_transactions_with_limits_and_statistics(
     }
 
     for chunk in items.chunks(limits.elements.max(1)) {
-        append(chunk, dbnum, mode, statistics, &mut transactions, &mut report)?;
+        append(
+            chunk,
+            dbnum,
+            mode,
+            statistics,
+            &mut transactions,
+            &mut report,
+        )?;
     }
     Ok((transactions, report))
 }
@@ -811,7 +818,13 @@ mod tests {
         assert_eq!(observed_report.elements, deferred_report.elements);
         assert!(observed[0].contains("dbnum_stats_state:8000"));
         assert!(observed[0].contains("$before_"));
-        for marker in ["dbnum_stats_state", "dbnum_info_table", "$before_", "$after_", "FOR $row"] {
+        for marker in [
+            "dbnum_stats_state",
+            "dbnum_info_table",
+            "$before_",
+            "$after_",
+            "FOR $row",
+        ] {
             assert!(
                 !deferred[0].contains(marker),
                 "Deferred 不得渲观测块（{marker}）:\n{}",

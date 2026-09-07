@@ -79,9 +79,8 @@ powershell -File scripts\Test-AmsDbnumIntegrity.ps1 -Dbnums 8000
    0 个元素——`src/bin/sync_sys_only.rs` 的文件头注释写着这件事。
 2. `initialize_ams_dbnums` 走的是 `initialize_project_dbnum_baseline`，也就是手动增量更新
    确认执行时用的同一个初始化入口，不是另起的一套：内部 `baseline_sync_options` 固定
-   `total_sync=true`、`replace_dbs=false`、`included_db_files=[该文件]`、
-   `gen_model/gen_mesh=false`；PE 条数、`dbnum_info_table` 统计、本次解析条数三者对不齐
-   就不推进 `applied_sesno`。
+   `replace_dbs=false`、`included_db_files=[该文件]`、`gen_model/gen_mesh=false`；
+   PE 条数、`dbnum_info_table` 统计、本次解析条数三者对不齐就不推进 `applied_sesno`。
 3. 第 2 步的 `finalize_baseline` 只写 `applied_sesno`/`sesno`，`file_latest_sesno` 是扫描
    观察值、由 `DbnumState::record_scan_observation` 写。跳过这步，验收脚本会报
    `watermark mismatch: applied=34 latest=0`——那是缺一次扫描，不是解析出了问题。

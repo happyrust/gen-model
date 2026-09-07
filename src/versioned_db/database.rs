@@ -370,7 +370,7 @@ async fn dbnum_stat_totals(dbnum: u32) -> anyhow::Result<(usize, usize, usize)> 
 }
 
 /// 基线写者已原子维护统计；结束时核验并补身份，不用全量重算掩盖差异。
-async fn settle_dbnum_info_after_total_sync(
+async fn settle_dbnum_info_after_baseline(
     dbnum: u32,
     file_name: &str,
     db_type: &str,
@@ -484,9 +484,8 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 初始化同步pdms数据到数据
-/// , progress_sender: Sender<i32>
-fn full_sync_catalogue_files(
+/// 一个 `db_type` 在全部包含项目里的候选文件，按项目分组、经身份判重后的选中清单。
+fn sys_metadata_files(
     db_option: &DbOption,
     db_type: &str,
 ) -> anyhow::Result<HashMap<String, Vec<String>>> {
@@ -524,7 +523,7 @@ fn full_sync_catalogue_files(
     );
     if !selection.blockers.is_empty() {
         anyhow::bail!(
-            "{db_type} 全量清单身份阻断: {}",
+            "{db_type} 清单身份阻断: {}",
             selection
                 .blockers
                 .iter()
@@ -540,7 +539,7 @@ fn full_sync_catalogue_files(
         .collect::<HashMap<_, _>>();
     for candidate in selection.shadowed {
         println!(
-            "[full-sync] {db_type} dbnum={} 的 {} 被 {} 遮蔽: {}",
+            "[sys-bootstrap] {db_type} dbnum={} 的 {} 被 {} 遮蔽: {}",
             candidate.dbnum,
             candidate.project,
             selected_project_by_dbnum
@@ -567,185 +566,76 @@ fn full_sync_catalogue_files(
     Ok(by_project)
 }
 
-pub async fn sync_pdms(db_option: &DbOption) -> anyhow::Result<()> {
+/// 把配置项目的 SYS 元数据（SYST / COMM / MISC / GLB / GLOB 与 DICT）灌进一个**空库**。
+///
+/// 这是 `sync_pdms` 退役后唯一留下的那一半（ADR-058 D8）。留它的理由只有一个：DESI 解析要
+/// 经 `MDB` / `WORL` 表反查世界 refno，一个从没同步过 SYS 的空库会让每个 dbnum 解出
+/// 「只有根、0 个元素」。CATA 与 DESI 两道全局屏障随 `sync_pdms` 一起走了——目录不入持久层
+/// （ADR-058），设计侧由数据批次 worker 按库首载。
+///
+/// 只有引导工具会调它（`bin/sync_sys_only`、l3 套件的空店引导）；**它不看任何配置开关**，
+/// 调用即执行。
+pub async fn bootstrap_sys_metadata(db_option: &DbOption) -> anyhow::Result<()> {
     if db_option.included_projects.is_empty() {
         return Err(anyhow::anyhow!("没有包含的项目"));
     }
-    // 开始同步pdms/E3D项目的数据
-    println!("开始同步pdms/E3D: {} 的数据", &db_option.project_name);
-    // 计时器开始
-    let mut time = tokio::time::Instant::now();
+    let started = tokio::time::Instant::now();
+    println!("开始引导 {} 的 SYS 元数据", &db_option.project_name);
 
     retire_dbnum_event().await?;
+    // 空库还没有这几个索引，而 SYS 灌完紧接着就是逐库首载。
+    retry_surreal_write_operation("define owner index", aios_core::define_owner_index).await?;
+    retry_surreal_write_operation("define geometry index", aios_core::create_geom_index).await?;
+    retry_surreal_write_operation("define pe index", aios_core::define_pe_index).await?;
 
-    // 获取默认的数据库连接字符串
-    if db_option.sync_tidb.unwrap_or(false) {
-        #[cfg(feature = "sql")]
-        {
-            let aios_mgr = AiosDBMgr::init_from_db_option().await?;
-            create_info_database(&aios_mgr).await?;
-        }
-    }
-
-    //只有重新同步时，才需要定义index
-    let enable_index = db_option.total_sync || db_option.enable_index.unwrap_or(true);
-    if enable_index {
-        retry_surreal_write_operation("define owner index", aios_core::define_owner_index).await?;
-        retry_surreal_write_operation("define geometry index", aios_core::create_geom_index)
-            .await?;
-        // aios_core::define_fullname_index().await.unwrap();
-        retry_surreal_write_operation("define pe index", aios_core::define_pe_index).await?;
-    }
-    if db_option.is_sync_history() {
-        retry_surreal_write_operation("define session index", aios_core::define_ses_index).await?;
-    }
-
-    let mut dbno_set = Arc::new(DashSet::new());
-    let mut create_tables_elapse = 0;
-    println!("执行多线程解析");
-    let proj_progress_chunk = 80 / db_option.included_projects.len();
-    // ADR-025: full synchronization is global-by-phase, never project-by-project.
-    let debug_refnos: Vec<RefU64> = db_option
-        .debug_root_refnos
-        .as_ref()
-        .map(|roots| {
-            roots
-                .iter()
-                .map(|root| RefU64::from_str(root).unwrap())
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let _is_debug = !debug_refnos.is_empty();
+    let dbno_set = Arc::new(DashSet::new());
     let main_project = &db_option.included_projects[0];
-    let dict_files = full_sync_catalogue_files(db_option, "DICT")?;
-    let cata_files = if db_option.only_sync_sys {
-        HashMap::new()
-    } else {
-        full_sync_catalogue_files(db_option, "CATA")?
-    };
+    sync_total_async_threaded(
+        db_option,
+        main_project,
+        dbno_set.clone(),
+        &["SYST", "COMM", "MISC", "GLB", "GLOB"],
+        100,
+    )
+    .await
+    .with_context(|| format!("同步 {main_project} 的 SYST/COMM/MISC/GLB/GLOB 数据失败"))?;
 
-    {
-        sync_total_async_threaded(
-            db_option,
-            main_project,
-            dbno_set.clone(),
-            &["SYST", "COMM", "MISC", "GLB", "GLOB"],
-            proj_progress_chunk,
-        )
-        .await
-        .with_context(|| format!("同步 {main_project} 的 SYST/COMM/MISC/GLB/GLOB 数据失败"))?;
-
-        // DICT belongs to Meta, including DICT supplied by dependency projects.
-        // Process projects in explicit priority order so the shared naked-dbnum
-        // guard deterministically keeps the authoritative file.
-        let priority = crate::options::catalogue_project_priority();
-        let mut ordered_projects = Vec::with_capacity(db_option.included_projects.len());
-        let mut seen = std::collections::HashSet::new();
-        for project in &priority {
-            let Some(configured) = db_option
-                .included_projects
-                .iter()
-                .find(|candidate| candidate.eq_ignore_ascii_case(project))
-            else {
-                anyhow::bail!("catalogue_project_priority 含未知项目 {project}");
-            };
-            if !seen.insert(configured.to_ascii_lowercase()) {
-                anyhow::bail!("catalogue_project_priority 重复项目 {project}");
-            }
-            ordered_projects.push(configured.clone());
+    // DICT 属于 Meta，含依赖项目提供的 DICT；按显式优先级顺序处理，让共享裸 dbnum
+    // 的判重确定性地留下权威文件。
+    let dict_files = sys_metadata_files(db_option, "DICT")?;
+    let priority = crate::options::catalogue_project_priority();
+    let mut ordered_projects = Vec::with_capacity(db_option.included_projects.len());
+    let mut seen = std::collections::HashSet::new();
+    for project in &priority {
+        let Some(configured) = db_option
+            .included_projects
+            .iter()
+            .find(|candidate| candidate.eq_ignore_ascii_case(project))
+        else {
+            anyhow::bail!("catalogue_project_priority 含未知项目 {project}");
+        };
+        if !seen.insert(configured.to_ascii_lowercase()) {
+            anyhow::bail!("catalogue_project_priority 重复项目 {project}");
         }
-        for project in &db_option.included_projects {
-            if seen.insert(project.to_ascii_lowercase()) {
-                ordered_projects.push(project.clone());
-            }
+        ordered_projects.push(configured.clone());
+    }
+    for project in &db_option.included_projects {
+        if seen.insert(project.to_ascii_lowercase()) {
+            ordered_projects.push(project.clone());
         }
-
-        for project in &ordered_projects {
-            let mut phase_option = db_option.clone();
-            phase_option.included_db_files =
-                Some(dict_files.get(project).cloned().unwrap_or_default());
-            sync_total_async_threaded(
-                &phase_option,
-                project,
-                dbno_set.clone(),
-                &["DICT"],
-                proj_progress_chunk,
-            )
+    }
+    for project in &ordered_projects {
+        let mut phase_option = db_option.clone();
+        phase_option.included_db_files = Some(dict_files.get(project).cloned().unwrap_or_default());
+        sync_total_async_threaded(&phase_option, project, dbno_set.clone(), &["DICT"], 100)
             .await
             .with_context(|| format!("同步 {project} 的 DICT 数据失败"))?;
-        }
-
-        if db_option.only_sync_sys {
-            println!("全局 Meta 阶段完成（SYST/COMM/MISC/GLB/GLOB + included DICT）");
-        }
     }
 
-    if !db_option.only_sync_sys {
-        let priority = crate::options::catalogue_project_priority();
-        let mut ordered_projects = Vec::with_capacity(db_option.included_projects.len());
-        for project in &priority {
-            let configured = db_option
-                .included_projects
-                .iter()
-                .find(|candidate| candidate.eq_ignore_ascii_case(project))
-                .ok_or_else(|| {
-                    anyhow::anyhow!("catalogue_project_priority 含未知项目 {project}")
-                })?;
-            if ordered_projects
-                .iter()
-                .any(|seen: &String| seen.eq_ignore_ascii_case(configured))
-            {
-                anyhow::bail!("catalogue_project_priority 重复项目 {project}");
-            }
-            ordered_projects.push(configured.clone());
-        }
-        for project in &db_option.included_projects {
-            if !ordered_projects
-                .iter()
-                .any(|seen| seen.eq_ignore_ascii_case(project))
-            {
-                ordered_projects.push(project.clone());
-            }
-        }
-
-        // Global Catalogue barrier. Fail-fast before any Design call begins.
-        for project in &ordered_projects {
-            let mut phase_option = db_option.clone();
-            phase_option.included_db_files =
-                Some(cata_files.get(project).cloned().unwrap_or_default());
-            sync_total_async_threaded(
-                &phase_option,
-                project,
-                dbno_set.clone(),
-                &["CATA"],
-                proj_progress_chunk,
-            )
-            .await
-            .with_context(|| format!("同步 {project} 的 CATA 数据失败"))?;
-        }
-
-        // Global Design barrier starts only after every selected CATA settles.
-        for project in &db_option.included_projects {
-            sync_total_async_threaded(
-                db_option,
-                project,
-                dbno_set.clone(),
-                &["DESI"],
-                proj_progress_chunk,
-            )
-            .await
-            .with_context(|| format!("同步 {project} 的 DESI 数据失败"))?;
-        }
-    }
-
-    // 输出创建表所花费的时间
-    println!("创建表花费时间: {} ms", create_tables_elapse);
-    // 输出初始化数据库所花费的时间
     println!(
-        "初始化数据库时间: {} ms",
-        time.elapsed().as_millis() - create_tables_elapse
+        "SYS 元数据引导完成，耗时 {} ms",
+        started.elapsed().as_millis()
     );
-
     Ok(())
 }
 
@@ -916,7 +806,6 @@ pub async fn sync_total_async_threaded(
         .collect::<Vec<_>>();
     let is_parse_sys = db_types_clone.contains(&"SYST".to_string());
     let is_save_db = db_option.is_save_db();
-    let is_total_sync = db_option.total_sync;
     let sender_clone = sender.clone();
     let parsed_db_infos = Arc::new(DashMap::<u32, (String, String, usize)>::new());
     let parsed_db_infos_for_parser = parsed_db_infos.clone();
@@ -940,10 +829,8 @@ pub async fn sync_total_async_threaded(
             // dbg!(&file_name);
             // gen-model-9 / ADR-007：SYS 元数据(SYST/DICT/COMM/MISC/GLB/GLOB)必须从其专属文件(amssys 等)解析，
             // 不应受 included_db_files 过滤——它列的是 DESI/CATA 数据库文件，从不含 SYS 文件。
-            // 旧条件 `is_parse_sys && is_total_sync` 使得 only_sync_sys(非 total_sync) 下 SYS 文件被
-            // included_db_files 过滤掉、静默跳过 → 设计 MDB/CURD/DB 建不起来。改为 is_parse_sys 即可：
             // SYS 同步始终遍历全部文件，再由下方 db_type 过滤只留 SYS 文件。DESI/CATA 同步(is_parse_sys=false)
-            // 行为不变、仍受 included_db_files 约束。
+            // 仍受 included_db_files 约束。
             if is_parse_sys
                 || db_option_arc.included_db_files.is_none()
                 || db_option_arc
@@ -952,9 +839,6 @@ pub async fn sync_total_async_threaded(
                     .unwrap()
                     .contains(&file_name)
             {
-                if !is_total_sync {
-                    // progress_sender_clone.send(db_file_progress_chunk).await.unwrap();
-                }
                 // dbg!(&file_name);
                 // 基线冻结源（e3d-io 底座）：dbnum / 库类型 / 目标会话 / 冻结长度都从它取，
                 // 收集与解码走 `stream_baseline`（与增量同一个 e3d-io 收集器）。
@@ -1262,11 +1146,11 @@ pub async fn sync_total_async_threaded(
         );
     }
     pipeline_result?;
-    if is_total_sync && is_save_db {
+    if is_save_db {
         for entry in parsed_db_infos.iter() {
             let dbnum = *entry.key();
             let (file_name, db_type, _) = entry.value();
-            settle_dbnum_info_after_total_sync(dbnum, file_name, db_type).await?;
+            settle_dbnum_info_after_baseline(dbnum, file_name, db_type).await?;
         }
     }
     // all_handles.push(parse_handle);
@@ -1539,31 +1423,32 @@ fn baseline_failure_registers_the_dbnum_and_wipes_only_after_writers_finish() {
     );
 }
 
+/// legacy 全量解析入口与它的四个开关一起退役（ADR-058 D8）。原来这里钉的是
+/// 「Meta → Catalogue → Design 三道全局屏障的先后」，那是 `sync_pdms` 自己的编排；
+/// direct 成为默认形态后它一次也没被走到过（仓里每份配置都没打开这四个键），
+/// 而基线摄入早已只剩 [`sync_total_async_threaded`] 一个入口——由 `manual_update`
+/// 的首载 / 重建路径按**单个文件**调用，屏障由数据批次队列负责。
+///
+/// 现在钉的是「别再长回来」：本文件不许重新出现那个入口，也不许再读那四个开关。
 #[test]
-fn sync_pdms_awaits_global_meta_then_catalogue_then_design() {
+fn the_legacy_full_sync_entry_point_stays_retired() {
     let source = include_str!("database.rs");
-    let body = source
-        .split_once("pub async fn sync_pdms")
-        .expect("sync_pdms exists")
-        .1
-        .split_once("pub async fn retire_dbnum_event")
-        .expect("sync_pdms end exists")
-        .0;
-    let syst = body
-        .find("&[\"SYST\", \"COMM\", \"MISC\", \"GLB\", \"GLOB\"]")
-        .unwrap();
-    let dict = body.find("&[\"DICT\"]").unwrap();
-    let cata = body.find("&[\"CATA\"]").unwrap();
-    let desi = body.find("&[\"DESI\"]").unwrap();
-    assert!(syst < dict && dict < cata && cata < desi);
+    let entry = format!("pub async fn {}", "sync_pdms");
     assert!(
-        body[dict..cata].contains(".await"),
-        "DICT must settle before Catalogue"
+        !source.contains(&entry),
+        "legacy 全量解析入口已退役（ADR-058 D8），不许复活"
     );
-    assert!(
-        body[cata..desi].contains(".await"),
-        "Catalogue must settle before Design"
-    );
+    for switch in [
+        "total_sync",
+        "incr_sync",
+        "only_sync_sys",
+        "is_sync_history",
+    ] {
+        assert!(
+            !source.contains(&format!("db_option.{switch}")),
+            "legacy 全量开关 {switch} 已退役，本文件不许再读它"
+        );
+    }
 }
 
 /// 统计重算必须在服务端按 Ref0 聚合：**返回行数跟着 Ref0 走，不跟着 pe 行数走。**

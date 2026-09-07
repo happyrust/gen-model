@@ -1,8 +1,5 @@
 #同步文件配置
-total_sync = true
 #增量同步，避免重新创建重复的索引和uda、sys
-incr_sync = false
-# total_sync = false
 enable_log = false
 sync_graph_db = false
 sync_versioned = false
@@ -39,7 +36,6 @@ gen_noun_graph = false
 #arangodb 配置
 arangodb_database = "ams"
 multi_threads = false
-only_sync_sys = false
 arangodb_url = "http://127.0.0.1:8529"
 # arangodb_url = "http://50c170h624.zicp.vip:15830"
 rebuild_ssc_tree = false
