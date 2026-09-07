@@ -189,7 +189,9 @@ UDA catalog 走 `mdb_memory_store::load` → `element_attributes::load_uda_catal
 - `/SLYK` 的 10 个 DESI 里只有 4 个有内容（5525 / 7015 / 5107 / 6015），SITE01~04 是空壳。
 - 4 个 BRAN 生成根因目录件缺失卡在 `generation_hold`（`db 7004 会话 3 的索引里没有 15196/40431` 一族，
   另有 `db 212 会话 5 的索引里没有 16596/35338`），且这 4 个把两个初始化发布 run 拖住不收口，
-  8 个库的 `model_sesno` 因此一直是 null。**这一条与本方案无关，需要单独立项。**
+  8 个库的 `model_sesno` 因此一直是 null。**这一条与本方案无关，已单独立项：
+  `issues/ISSUE-029-initialization-run-has-no-terminal-state-for-a-deterministically-failing-root.md`**
+  ——目录件是真缺（`bin/refno_locator_probe` 查过整条会话链），而 run 被它们焊住是 gen-model 自己的活性缺陷。
 
 ## 9. 实施与验收（2026-09-07 下午）
 
