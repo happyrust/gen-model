@@ -22,6 +22,12 @@
 
 判定符号：✅ 已对齐 ｜ ◐ 形状相同判据不同 ｜ ❌ 缺 ｜ ⚪ core 侧不成立或不可比
 
+> **★0907 标题符号按 §9 现状重标了一遍**（之前只改正文与 §9，标题没跟上，读标题会错判）：
+> R2 / R6 / R22 / R28 → ✅（R2 接线但开关默认关、无正样本；R6 视图切换那条待拍板；R22 收尾两条测试待补）；
+> R11 → ⚪（随 R10 改判，我方没有块内成员抹除，这条遍历没有消费者——**这一条 §9 没点名，是 0907 的判断**）；
+> R17–R21 / R24 保留 ❌ 但标「慢」（§9 定性多做不是漏做，W3.2 先量再定）；R9 / R12 / R13 / R14 保留 ◐ 并注明各自卡在哪。
+> 「✅」不等于「生产已启用」：R2 与 R9 的开关今天都默认关。
+
 > **本轮（2026-08-28）用 ida-bridge 复核指令流，改了证据文档三处、新增六条它没有的规则。**
 > 更正见 §7，逐条在正文里标 `★更正` / `★新增`。
 >
@@ -216,7 +222,7 @@ ida-bridge exec <client> --sql "SELECT '0x5657A0A' AS id, address, name_at(func_
 `DB_DB::type(e->getDB()) == 1`，在 `ModelToUpdate` 里（`0x1047E590`）。
 我方等价物：`UpdateScope::admits(db_type, dbnum)`。
 
-### R2 XGEOMETRY 子树整体排除 ❌
+### R2 XGEOMETRY 子树整体排除 ~~❌~~ ★0904 已接线 ✅（开关 `model_xgeometry_gate` 默认关、语料零正样本；direct 路径只观察不筛，见 W1.1）
 
 `DB_Element::climb(e, NOUN_XGEOM).isNull()` 必须为真才继续。
 凡是有 XGEOMETRY 祖先的元素，core **一律不进**局部更新——显式几何走另一条路。
@@ -301,7 +307,7 @@ ModelToUpdate(e, state):
   但不该让它调节重生成范围。`TransformOnly` 是我们**主动多留**的便宜路径（省不是漏），
   按计划 §1 不取消。
 
-### R6 `Refresh(当前 VIEW)` 清空整个待办队列 ★新增 ★0904 改判 ◐
+### R6 `Refresh(当前 VIEW)` 清空整个待办队列 ★新增 ~~★0904 改判 ◐~~ ★0907 重标 ✅（`Refresh` 那条已落地 `discard_pending_for_full_rebuild`；视图切换判「无对应物」，待拍板 W2.2）
 
 ```
 Refresh(e):                                     # 0x1047E800
@@ -404,7 +410,7 @@ GranularityExpansion(e, state):
 
 **这一段证据文档 §6 写对了**，本轮从指令流逐跳复核通过。
 
-### R9 粒度由 noun 位决定，不由类型名单决定 ◐
+### R9 粒度由 noun 位决定，不由类型名单决定 ◐（★0906 T2b 已接线、`model_significant_over_point` 默认关；direct 按位枚举，MDU 名单是我方主动加的一层）
 
 - 我方：**判定链仍是手写名单** `DEFAULT_DELIVERY_UNIT_TYPES`（BRAN/HANG/SUPPO/EQUI）+
   `COARSE_HIERARCHY_NOUNS` + `is_loop_container_noun`。P1 的对账已量化这个差
@@ -445,7 +451,7 @@ GranularityExpansion(e, state):
   scoped delete 方便，把根塞回 id 里（那正是 ADR-060 之前的形状），R10 立刻从
   「不可比」变回「缺」。ADR-060 的 N1 就是守这个的。
 
-### R11 `SignificantMembers` 只穿过 significant 链 ★精确化 ❌
+### R11 `SignificantMembers` 只穿过 significant 链 ★精确化 ~~❌~~ ★0907 重标 ⚪（随 R10：它只服务块内成员抹除 R10 与 `Exists` R26，两条在我方都不可比，这条遍历没有消费者）
 
 `Members(e, mode=0)`（`0x1047E240`）：种子是 `e` 的**直接成员**，用显式栈做 LIFO；
 每弹出一个成员，**不 significant 就既不收集也不下潜**（`0x1047E37E` / `0x1047E381`）。
@@ -466,14 +472,14 @@ mode 2 的"收集了就不再下潜"是本轮新看清的（`0x1047E48C jmp` 直
 
 返回值是 `out` 非空。
 
-### R12 primitive 且非 significant 的变化 → 上卷到 SignificantOwner ◐
+### R12 primitive 且非 significant 的变化 → 上卷到 SignificantOwner ◐（旧 PE 路径名单 + 深度上限 32；W2.4 先量真库 owner 链深度与环再定）
 
 并对该 owner 做 `AbsentPrimitives`。
 
 - 我方：◐ `resolve_element_generation_root` 形状相同（MDU 优先 → 跨 loop 容器 →
   第一个非容器 owner → 自身），但判据是名单、且有深度上限 32。
 
-### R13 既非 significant 又非 primitive → 完全丢弃 ◐
+### R13 既非 significant 又非 primitive → 完全丢弃 ◐（第一批 1272 noun 的丢弃门已落、`model_entry_drop_no_geometry` 默认关；第二批 223 项未评审；开门前置四条见开发计划 W2.1）
 
 **连 `AncestorDeletes` 都不做**（`0x1047DA55` 的 `jz` 直接跳到函数尾）。
 
@@ -484,7 +490,7 @@ mode 2 的"收集了就不再下潜"是本轮新看清的（`0x1047E48C jmp` 直
   items、91→0 额外重算单元；direct 该窗本来就是 1→1，九个固定窗在开关两态均通过。
   见 `docs/evidence/2026-09-06-no-geometry-entry-gate/README.md`。
 
-### R14 `SignificantOwner` 含自身、无深度上限 ◐
+### R14 `SignificantOwner` 含自身、无深度上限 ◐（同 R12：`MAX_ANCESTOR_DEPTH = 32` + 遇粗层级容器即停，W2.4 量过再定）
 
 ```
 SignificantOwner(e):                     # 0x1047E9E0
@@ -521,7 +527,10 @@ SignificantOwner(e):                     # 0x1047E9E0
 
 `0x1047DDD0`，在 `ModelToUpdate` 里作为最后一道门。**三个 state 三套判法，不是一套。**
 
-### R20 去重键：非 primitive 元素按它的 SignificantOwner 判 ★新增 ❌
+> ★0907：R17–R21 与 R24 的标题保留 ❌（我方仍是同 refno 才合并、没有祖先抢占与 `AncestorDelete` 标记），
+> 但 §9 把这一族定性为「**慢**」——多做不是漏做；做不做由 W3.2 先量 `nested_roots` / `duplicate_coverage_elements` 再定。
+
+### R20 去重键：非 primitive 元素按它的 SignificantOwner 判 ★新增 ❌（慢）
 
 ```
 key = IsPrimitive(e) ? e : SignificantOwner(e)
@@ -532,7 +541,7 @@ key = IsPrimitive(e) ? e : SignificantOwner(e)
 - 我方：❌ 我们的键是 `(action, target_refno)`，`target` 已经是解析后的生成根，
   形状上接近，但我们对 `Skip` / `TransformOnly` 类目标不做这个归一。
 
-### R17 `state == Changed(0)`：沿 owner 链找 New 或 Changed，再看子孙 New，再看祖先删除标记 ★更正 ❌
+### R17 `state == Changed(0)`：沿 owner 链找 New 或 Changed，再看子孙 New，再看祖先删除标记 ★更正 ❌（慢）
 
 ```
 cur = key
@@ -550,11 +559,11 @@ return false
 
 证据文档 §9 把三个 state 归纳成"沿 owner 链逐级上行"，只有这一个 state 是这样。
 
-### R18 `state == New(1)`：沿 owner 链只找 New ❌
+### R18 `state == New(1)`：沿 owner 链只找 New ❌（慢）
 
 `key` 本身不 OK 就直接返回假，不做后面两步。
 
-### R19 `state == Deleted(3)`：只看自身，**不上行** ★更正 ❌
+### R19 `state == Deleted(3)`：只看自身，**不上行** ★更正 ❌（慢）
 
 ```
 return IsPresent(key, Deleted) or IsPresent(key, MemberOfChangedSignificant=4)
@@ -570,7 +579,7 @@ return IsPresent(key, Deleted) or IsPresent(key, MemberOfChangedSignificant=4)
 
 ## 6. 收尾与执行（R21–R29）
 
-### R21 `AncestorDeletes`：判据对了，终止条件写反了 ★更正 ❌
+### R21 `AncestorDeletes`：判据对了，终止条件写反了 ★更正 ❌（慢，随 R17–R20 归 W3.2）
 
 ```
 AncestorDeletes(e, state):                        # 0x1047C060
@@ -599,7 +608,7 @@ primitive-或-significant 的祖先都会被标记**，不是只标最近的那�
 
 - 我方：❌ 无对应物。计划 T3.3 引用的是错的那一版，已同步更正。
 
-### R22 `AbsentPrimitives`：缺失图元回收 ~~❌~~ ★0904 改判 ◐
+### R22 `AbsentPrimitives`：缺失图元回收 ~~❌~~ ~~★0904 改判 ◐~~ ★0906 ✅（按根对账已接两个生产调用点 + 8019 testbed 闭环，§9 / §10；W1.3 收尾：C3-1 与 E 侧护栏两条测试待补）
 
 ```
 AbsentPrimitives(e, state):                       # 0x1047BE10
@@ -657,7 +666,7 @@ PartialUpdateDesiMgr::ExistsIDList() 0x1047D364:  cmp byte ptr [ecx+18h], 0 → 
 我们这边的对应物应当把「清单不可用」当成**前置条件失败**（不做回收、出声），
 而不是当成「全部缺失」。
 
-### R24 `AncestorDelete(2)` 有**两个**消费者 ★更正 ❌
+### R24 `AncestorDelete(2)` 有**两个**消费者 ★更正 ❌（慢：第一个消费者随 R17 归 W3.2；第二个属擦除策略，我方 ⚪ 见 R25）
 
 证据文档 §2 说 state 2"不处理——只作为 `IsPending`/`IsPresent` 的抢占标记"。
 第一个消费者对，但漏了第二个：
@@ -737,7 +746,7 @@ DLL_PMLCommand::Run("PUPDES " + <view ref> + " MODEL " + <element ref> + " FORCE
 - 我方：⚪ 我们跑自研生成管线，重画动作不可比、也不需要比。
   **但三遍的顺序是可比的**：先全擦、再全画、最后清缺失图元。
 
-### R28 pass 1 的"擦不动且不存在 → 从队列删除" ⚪→✅
+### R28 pass 1 的"擦不动且不存在 → 从队列删除" ~~⚪~~ ★0906 ✅（direct 由 `roots_T` 枚举排除、兼容路径终态复核；W3.1 收尾：「T 端读失败 → degraded」那条测试待补）
 
 `!EraseModel(rec) && !Exists(rec, idlist)` 同时成立时，**该条被就地移出队列**，
 于是 pass 2 不会画它。意思是：**不画本来就不在视图里的东西。**
