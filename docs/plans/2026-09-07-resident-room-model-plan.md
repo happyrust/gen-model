@@ -1,12 +1,12 @@
 # 2026-09-07 计划：常驻房间模型——库是存储与参照，不是计算源
 
-状态：**P0 已过目放行（2026-09-07 18:55）并取证完；P1 本体已落地**（`src/fast_model/room_resident.rs`，见 §3 P1 落地记）；**P3-a（启动参照与启动计划的纯函数 / DB 半截）已落地**，P2 与 P3-b 等邻线提交 F-A/F-B。来源：grill 四轮（Q1–Q16 全部按推荐拍板，决议索引见 §8），事实全部按当前**共享工作树**源码手核（行号随邻线未提交改动会漂，以函数名为准）。
+状态：**P0 已过目放行（2026-09-07 18:55）并取证完；P1 本体已落地**（`src/fast_model/room_resident.rs`，见 §3 P1 落地记）；**P3-a（启动参照与启动计划的纯函数 / DB 半截）已落地**；**第 5 轮（Q17–Q20，2026-09-07 21:30）把「房间初始化」搬到启动最前段、覆盖 MDB 全部 DESI、不受 `watch_dbnums` 与上弦位约束**（§3 P3 改序）；**P3-init（房间初始化入口 `initialize_at_startup`）已落地**（见 §3 P3-init 落地记）；P2 与 P3-b（`lib.rs` 接线）等邻线提交 F-A/F-B。来源：grill 五轮（Q1–Q20 全部按推荐拍板，决议索引见 §8），事实全部按当前**共享工作树**源码手核（行号随邻线未提交改动会漂，以函数名为准）。
 
 关联：ADR-010（房间归属增量）、ADR-040（房间失效正确性）、ADR-062（按数据库文件完成后发布）、`docs/2026-09-07-room-increment-audit.md`（F-A/F-B 已落地、F-C 仍红）、`docs/plans/2026-08-19-room-incremental-ams-copy-test-plan.md`（真库门通道）。
 
 ## 0. 一句话回答
 
-房间→面板拓扑与在册面板几何（世界 AABB / 变换 / 三角网）改为**进程内常驻**，按发布清单（摄入）或当前文件会话（读透）为键整份换代；房间归属的两条分支只从它取面板侧输入，候选构件照旧走空间树；启动时拿常驻模型与库里的参照对比，只对变了的面板做删重算，全量重建降为显式修复入口。库里的 `room_published_topology` / `room_published_inst` / `room_topology_source` 照写照读——它们从此是**存储与参照**，不是计算时的读源。结构触发**不换来源**：账本触发（F-A，`room_structural_trigger.rs`）是唯一触发源，常驻模型的 diff 只当护栏。默认关，真库门过了再翻。
+房间→面板拓扑与在册面板几何（世界 AABB / 变换 / 三角网）改为**进程内常驻**，按发布清单（摄入）或当前文件会话（读透）为键整份换代；房间归属的两条分支只从它取面板侧输入，候选构件照旧走空间树；启动时拿常驻模型与库里的参照对比，只对变了的面板做删重算，全量重建降为显式修复入口。库里的 `room_published_topology` / `room_published_inst` / `room_topology_source` 照写照读——它们从此是**存储与参照**，不是计算时的读源。结构触发**不换来源**：账本触发（F-A，`room_structural_trigger.rs`）是唯一触发源，常驻模型的 diff 只当护栏。**房间是参照系，不是增量的一部分**：常驻模型在启动最前段建起来（空间树装载之后、watcher / worker 之前），覆盖 MDB **全部** DESI，不看 `watch_dbnums`、不看上弦位；只有写归属边的启动对比与全量修复才受门（第 5 轮 Q17–Q20）。默认关，真库门过了再翻。
 
 ## 1. 现状核对（按代码，可复查）
 
@@ -30,6 +30,8 @@
 
 多进程：单实例锁 `.gen-model.instance.lock`（`lib.rs` `acquire_process_instance_lock`），`external` / `spawned-mem` 都拿，只有 `embedded-mem` 不拿；`e3d_mcp` 是 HTTP 代理不连库。不会有两份内存模型同时写房间边。
 
+监听限定域与房间（第 5 轮手核，2026-09-07 21:10）：`watch_dbnums` / `--watch-dbnum`（`watch_scope`）圈的是**数据批次与本进程模型工作单**——`increment_manager` 入范围判定（`COLD_START_DB_TYPES ∥ admits`）、`reconcile_model_coverage_at_startup`、drain 的 `dbnum IN` 谓词、房间目标计数（`render_room_target_counts_query`）。房间拓扑三条读法里，发布清单（基线 `ensure_published_file_baseline` 用 `design_sources()` 枚举 **MDB 全部 DESI**、不看 watch）与 direct 文件读法（`load_room_groups_from_files`）都是全 MDB 的；只有 noun 表兜底（`FRMW` 表 = 谁被摄入谁在）实际被 watch 圈。漏在两处：基线的**时机**（第一个文件轮次 `batch_worker` / 第一次房间 drain 才建，且要 `ensure_spatial_ready`），以及基线之后**未监听的文件永远停在基线会话**（没有文件轮次推它）。面板几何另计：`room_published_inst` 从 `inst_relate` 物化、`inst_relate` 由模型生成写、模型生成按 watch 圈——未监听库的房间今天是「拓扑在册、几何为空」→ `missing_panels()` 保护（不算、不删存量边、面板仍进排除集）。启动序（`run_cli`）：watcher → worker → 模型凭证复核 → 等数据清单 → 装空间树 → 等模型收敛 → **房间**（最后一步），前面四道门：`startup_data_ready`（= 读透 ∥ 上弦；上弦 = `startup_autorun` ∥ 声明了 `watch_dbnums`，ADR-048 D1）、`spatial_compute`、`model_incremental`、`skip_startup_room_build`（env / `startup_autorun` / 空树 / 空间凭据对账）。**ADR-048 决策 3** 明文限定域不得把启动全量房间重建拖回来（源码钉 `the_watch_scope_arming_must_not_drag_in_the_full_room_rebuild`）。基线写入要空间树在位（`ensure_spatial_ready` + 持久化一份快照头，清单版本与快照绑定）。
+
 ADR-062 可见性不变量的依赖者全在内部：房间计算的几何与拓扑读法、发布屏障、空间树 V3 快照头校验、`query_service::published_derivation_status`。材料表 surql（`fn::room_code` / `fn::room_num_of`）与 `web_service` 只读 `room_relate` 边。
 
 量级：本项目 2889 个 FRMW 筛出 124 间房 / 147 块面板（`room_model.rs` `load_room_panel_map` 注释）；`room_relate` 8000 库 13.7 万条边；面板网格为箱体 TriMesh。**拓扑重载与分片体量实测**（P0，2026-09-07 18:51–19:20，两条 live 门）：
@@ -43,11 +45,12 @@ ADR-062 可见性不变量的依赖者全在内部：房间计算的几何与拓
 
 两条结论进设计：① 一个 60 MB 设计库的拓扑重载是**秒级**（6–7 s），不是毫秒级——读透侧「每个新会话重载一次」这笔账**今天就在付**（`GroupCache` 的键含 `sesno`，SAVEWORK 一次就 miss 一次），常驻模型不新增这笔，只是把它摆到明处；摄入侧只在文件轮次发布时付（`capture` 本来就跑）。② 分片体量 13 MB / 文件，全 MDB 十几个设计库量级在 100 MB 上下——常驻模型**不该**把分片节点整份留在内存，只留合成后的分组（1 077 组 / 3 937 面板，KB 级）与在册面板几何；分片只在合成与启动对比时流式读。
 
-## 2. 原则（三条）
+## 2. 原则（四条）
 
 1. **一份真值，两份视图。** 常驻模型是库里发布物（摄入）或实时行（读透）的缓存，不是第二份真值：换代只在 `lock_spatial_serial` 下、以清单/会话摘要为键**整份替换**，不做逐条修补。`latest` 与 `published` 两份并存（Q5），**回答归属的入口不得碰 `latest`**——源码钉。
 2. **判不了就不写**（ADR-010 2026-08-05 增补），四种形态一个不少：文件打不开、库不在 MDB、空间树缺库（`ensure_room_tree_coverage`）、面板网格读不出 → 本轮止步、存量边保留、`/health` 点名、下一窗/空闲轮重试（Q10）。合成拓扑是跨文件的（`room_topology_source::compose` 一张 lookup），缺一个文件就整体不算，不按文件降级。
 3. **触发源只有一个。** 结构触发 = 账本（F-A）；几何触发 = 发布事务（`room_publication_effects`）。常驻模型的 diff 只在两处出手：启动对比（Q3）与护栏（Q8：摘要变了而面板目标为 0 → 告警 + `room_rebuild_required`）。
+4. **房间是参照系，不是增量的一部分**（第 5 轮）。常驻模型的范围是 MDB **全部** DESI（`design_sources()`），建模与写分片在启动最前段、不受 `watch_dbnums` / 上弦位 / `startup_autorun` 任何一道门（只认 `spatial_compute`）；`room_resident` / `room_topology` / `room_topology_source` 三份文件**不得引用 `watch_scope`**（源码钉）。哪些清单行归文件轮次管（被监听的）由调用方作为参数传进来，房间初始化只前进**不归任何轮次管**的行。写归属边的两步才受门：启动对比受 `startup_data_ready` / `spatial_compute` / `model_incremental`（不受 `startup_autorun`——它是定向的，成本随变更量走）；全量修复照旧受 `startup_autorun` 与 ADR-048 D3。
 
 ## 3. 分期
 
@@ -110,18 +113,25 @@ ResidentRooms { published: Option<Arc<ResidentRoomModel>>, latest: Option<Arc<Re
 
 验收：`cargo test --lib -- room_resident room_model room_publication room_topology model_update_pending` 0 failed；两态逐边门绿；开关关时 `git diff` 之外行为逐字不变（现有源码钉全绿）。
 
-### P3 · 启动对比与全量降级（2 天）
+### P3 · 房间初始化、启动对比与全量降级（2.5 天）
 
+**启动序改为两段**（第 5 轮 Q17 (a)）：**房间初始化**在最前段，**启动对比**留在今天房间段的位置。
+
+- **房间初始化**（`room_resident::initialize_at_startup`，开关开时在 `run_cli` 里紧跟空间树装载、排在 watcher / worker **之前**；空间树装载随之从「等数据清单之后」前移——它只读指针与快照文件，不依赖数据清单）。只认 `spatial_compute`，**不看** `startup_data_ready` / 上弦位 / `startup_autorun` / `watch_dbnums`（Q18 (a)）。做四件事：
+  1. 枚举 MDB **全部** DESI（`E3dModelService::from_current().design_sources()`）；
+  2. 摄入：没有基线就按今天口径建（`ensure_published_file_baseline(0, 0)`——它本来就是全 MDB 的，只是此前要等第一个文件轮次 / 第一次房间 drain）；然后对**不归任何文件轮次管的文件**（调用方传进来：watch 生效时 = `watch_dbnums` 之外的库；未生效时 = 没有），若清单行缺失或 `end_sesno` ≠ 文件最新会话 → `capture_at(最新)` + `prepare_producer_source` + 重物化该 (dbnum, token) 的 `room_published_inst` + `UPSERT published_file_input:{dbnum}` + 重算 `room_published_topology`，一个事务，在 `lock_spatial_serial` 下、无在途文件轮次时做，随后持久化快照头（与基线同一套纪律）（Q19 (a)）。被监听的文件**照旧只由文件轮次推进**——它们的几何随轮次一起发布，启动时替它前进 token 会把陈旧几何贴上新标签（ADR-062）。读透：`load_latest`（本就全 MDB）+ 每个令牌 `prepare_producer_source` 冻分片；
+  3. 建常驻模型并 `install`（原则 2：建不起来 → 打印原因、不动边、`room_build:main.resident_blocked = 原因`，跳过；下面的对比与增量轮拿不到模型就止步）；
+  4. 回执一行：每个文件 `dbnum@sesno`、动作（保留 / 前进 / 新增）、耗时；模型统计（房 / 在册面板 / 有几何 / 无几何，无几何**按 dbnum 分组**，供 `/health` 点名「来自未监听的库」，Q20 (a)）。**不写** `resident_reference`——那一行只在对比应用成功后写（规则 4）。
 - **参照物**（Q9 (a)）：读透每次成功结算（一轮 drain 全部任务 `done`、或启动对比应用完成）后，对每个 DESI 当前会话 `room_topology_source::capture` + `persist_on`（已有代码，`prepare_producer_source` 的读透版：无 token 行不写 `published_file_input`），并 `UPSERT room_build:main SET resident_reference = {form, manifest, digest, tokens[], settled_at}`。摄入侧参照就是 `room_published_topology`（当前清单）——不另写。
-- **启动**（`lib.rs` 房间段，开关开时替换 `skip_startup_room_build` 之后那支）：
-  1. 建常驻模型（原则 2：建不起来 → 打印原因、不动边、`room_build:main.resident_blocked = 原因`，跳过）；
+- **启动对比**（`lib.rs` 房间段，开关开时替换 `skip_startup_room_build` 之后那支；受 `startup_data_ready` / `spatial_compute` / `model_incremental` 三道门，**不受** `startup_autorun` 与 ADR-048 D3——D3 改写为「限定域不拖回**全量修复**」，源码钉 `the_watch_scope_arming_must_not_drag_in_the_full_room_rebuild` 随之改口径，记进新 ADR）：
+  1. 取初始化装好的常驻模型（没有 → 已 `resident_blocked`，跳过）；
   2. 读参照：摄入 = 常驻 `digest` 对 `room_published_topology` 行重算的摘要（**同源，恒等；不等即库被恢复/手改** → 标 `rebuild_required` 走显式全量）；读透 = 从 `resident_reference.tokens` `load_on` 分片 → `compose` → 旧那份；
   3. `TopologyDiff::between(旧, 新)` → 按 §P1 三类应用：删边 / `recalc_panel_membership_inner`（覆盖率门与「NoGeometry 不写」原样生效）/ 改列；逐块失败收集，收尾一并上抛（与 `build_room_relations` 同口径）；
-  4. 全部成功才写新参照 + 盖章；任一失败参照不动，下次启动再对比一次（多算一次远好过漏算）。
+  4. 全部成功才写新参照 + 盖章；任一失败参照不动，下次启动再对比一次（多算一次远好过漏算）。被门挡掉时同样不写参照——初始化写了分片、参照留旧，下次上弦的启动再比一次。
 - **全量降为显式入口**（Q7 (a)）：触发条件只剩三种——`room_build:main.rebuild_required = true`（结构枚举失败等持久要求，已有）、无参照（开关第一次打开、或库刚建：按今天口径跑一次全量并写参照）、新增 `AIOS_ROOM_FULL_REBUILD=1`（一次性）。`RoomBuildStamp{spatial_epoch, tree_entries}` 那枚空间凭据在开关开时不再决定跑不跑，但**照旧盖**（`/health` 读它）。
 - 覆盖率护栏搬迁：`ensure_room_tree_coverage` 在启动对比的每块重算面板前照调（它在 `recalc_panel_membership_inner` 里，自动生效）；加「MDB 里的 DESI 数 == 常驻模型文件数」一格，缺库直接止步。
 
-验收：`mem://` 三态门——(i) 参照 == 现状 → 零写入；(ii) 面板改挂 / 房间改出关键字 / 房间号变 三形状各一条，写入集合与「全量重建后逐边」相同、房间号变化那条 `room_relate` 边 id 不变只改 `room_num`；(iii) 缺文件 → 零写入 + `resident_blocked`。真文件：在 ams 副本上停服 → 改 FRMW NAME → 起服，启动日志出「对比：删 N / 重算 M / 改列 K」。
+验收：`mem://` 三态门——(i) 参照 == 现状 → 零写入；(ii) 面板改挂 / 房间改出关键字 / 房间号变 三形状各一条，写入集合与「全量重建后逐边」相同、房间号变化那条 `room_relate` 边 id 不变只改 `room_num`；(iii) 缺文件 → 零写入 + `resident_blocked`。初始化：纯测「清单前进计划」——被监听的行哪怕陈旧也不动、未监听的缺行 / 陈旧行前进、未监听且最新的保留、watch 未生效（全归轮次）一行不动；`mem://` 门——前进语句只换目标 dbnum 那一行，其余行逐字不变；源码钉——三份房间文件不含 `watch_scope::`。真文件：在 ams 副本上停服 → 改 FRMW NAME → 起服，启动日志出「对比：删 N / 重算 M / 改列 K」；`watch_dbnums=[8000]` 起服，日志出「7997@… 前进」且 `/health` 点名 7997 的面板无几何。
 
 **P3-a 落地记（2026-09-07 19:40，只碰新文件与干净文件，邻线 F-A/F-B 仍未提交）**——P3 里不依赖脏文件的那一半，全在 `room_resident.rs`：
 - `ResidentRoomModel.source_tokens`（读透：各 DESI 冻结令牌；`load_room_groups_from_files` 现在连令牌一起回）。
@@ -132,6 +142,16 @@ ResidentRooms { published: Option<Arc<ResidentRoomModel>>, latest: Option<Arc<Re
 - `render_renumber_statements(&RoomRenumber)`：`UPDATE (SELECT VALUE id FROM {panel}->room_relate WHERE room_num = old) SET room_num = new` + `<-room_panel_relate` 同款；`mem://` 门：交集面板的边改列、边 id 不动、不在交集的面板与别的房间原样、边数不变。
 - 验证：`cargo test --lib -- room_resident room_topology room_publication` **35 passed / 0 failed / 2 ignored**（`room_resident` 15 条）；rustfmt 干净。
 - **未做（等 P2 / 脏文件）**：把 `StartupRoomPlan::Apply` 真正应用（删 / `recalc_panel_membership_inner` / 改列事务）、接进 `lib.rs` 启动段、`AIOS_ROOM_FULL_REBUILD`、`resident_blocked` 落 `room_build:main`。
+
+**P3-init 落地记（2026-09-07 23:40，只碰 `room_resident.rs` 与此前干净的 `side_effect_pending.rs`，邻线 F-A/F-B 仍未提交）**——P3 的「房间初始化」入口；`lib.rs` 接线留 P3-b：
+- `room_resident::initialize_at_startup(face, owned_by_rounds, hierarchy, keywords, match_fn) -> StartupInitOutcome`。摄入：`ensure_published_file_baseline(0, 0)`（已有基线就跳过；建不成不拦建模，只记告警）→ `lock_spatial_serial` 下读清单 → `plan_manifest_advance` → `advance_orphaned_manifest_rows` → `load_published_on(新清单)` → `install`；空清单（基线没建成）→ `ResidentBuildError`，不装零间房的模型（原则 2）。读透：`load_latest` → `freeze_source_shards`（从 `persist_latest_reference` 抽出：只冻分片、不写参照）→ `install`。**不写** `resident_reference`、不写归属边。
+- 纯函数 `plan_manifest_advance(sources, rows, owned_by_rounds) -> Vec<ManifestStep>`，`ManifestAction::{OwnedByRounds, Current, Added, Advanced{from_sesno}}`，只有后两种写清单。`owned_by_rounds` 由调用方给（限定域生效 = 限定域里的库；未生效 = MDB 全部 DESI），本模块不看 `watch_scope`。
+- `advance_orphaned_manifest_rows`：有在途 `spatial_reconcile`（`collecting` / `pending`）即拒绝、要 `ensure_spatial_ready`；每行 `capture_at(最新)` + `prepare_producer_source` + `render_stage_published_room_input` + `render_published_file_input_upsert`，末尾 `render_stage_published_room_topology(新清单)`，一个事务；随后 `persist_aabb_tree_if_dirty_locked_for_publication(&[])`。**事务提交之后**快照头没落只进 `header_warning`（脏标记已保留，空闲轮补写），返回的清单是新的、模型照新的建——接手时的原稿把这一步当 `Err` 退回旧清单建模，会与库里已前进的清单不一致，已改。事务之前的失败才是 `Err`：清单一行没动，模型照旧清单建，下次启动再试。
+- `side_effect_pending.rs` 三处小改：基线里那段 `UPSERT published_file_input` 抽成 `render_published_file_input_upsert`（基线与初始化共用一个定义）；`published_file_inputs_on(db)`（`mem://` 可喂）；`has_inflight_file_round_on(db)`（基线里那条在途判定抽出）；`PublishedFileInput` 加 `PartialEq, Eq`。
+- `ResidentStats.missing_panels_by_dbnum`（Q20 (a)，`/health` 点名用）；`StartupInitOutcome::summary()` 一行：每个文件 `dbnum@sesno 动作`（前进带 `旧→新`、动过的带冻结耗时）+ 清单前进告警 + 房 / 在册 / 有几何 / 无几何（按库）。
+- 测试 +4（`room_resident` 19 条）：清单前进计划四形状（被监听陈旧不动 / 未监听缺行新增 / 陈旧前进 / 最新保留；限定域未生效一行不动）；回执文案三形态；`mem://` 门（前进语句只换目标 dbnum 那一行、其余行逐字不变、行数不变；在途判定只认 `spatial_reconcile` 的 `collecting` / `pending`，`done` 与别的 kind 不算）；源码钉 `room_files_never_consult_the_watch_scope`（三份房间文件的代码行不得出现模块名 `watch_scope`，注释可提）。
+- 验证：`cargo test --lib -- room_resident room_topology room_publication side_effect_pending` **56 passed / 0 failed / 2 ignored**；两份 .rs rustfmt 干净。
+- **未做（P3-b，等邻线）**：`lib.rs` 接线——`run_cli` 里空间树装载前移、紧跟其后调 `initialize_at_startup`（只认 `spatial_compute`）、`owned_by_rounds` 按 `watch_scope` 算、`resident_blocked` 落 `room_build:main`、`/health.room_build.resident` 点名未监听库；ADR-048 D3 改口径与源码钉随新 ADR（P5）。真库门 `watch_dbnums=[8000]` 起服看「7997@… 前进」仍在 §7 未跑。
 
 ### P4 · 护栏与观测（0.5 天）
 
@@ -150,7 +170,7 @@ ResidentRooms { published: Option<Arc<ResidentRoomModel>>, latest: Option<Arc<Re
 
 验收：两形态各一次逐边对拍留证据（`docs/evidence/2026-09-xx-resident-room-model/`），翻默认在同一笔。
 
-合计约 7 天。每期一笔提交（Q13 (a)）。
+合计约 7.5 天。每期一笔提交（Q13 (a)）；P3 拆 P3-a（参照 / 计划纯函数，已提交）、P3-init（房间初始化入口，只碰 `room_resident.rs` 与干净文件）、P3-b（`lib.rs` 改序与接线，等邻线）。
 
 ## 4. 需要拍板
 
@@ -167,6 +187,8 @@ grill 已把决策问完（§8）。剩下三条是通知，不同意就说：
 - 不动 F-A 的账本触发，也不新增第二个触发源（Q8 (a)）。
 - 不把文件轮次延伸到读透（审核 §4 另立）；不做 mesh GC；不碰 F-C。
 - 不在甲方项目库上做第一次真库门（Q15 (a)）。
+- 不给房间子系统自己的几何来源（Q20 (b)：常驻模型从文件出 PANE 箱体几何，不等模型生成链）——另立一笔。本计划里未监听库的面板「在册、无几何」，按原则 2 处置。
+- 不替被监听的文件在启动时前进清单行（Q19 (a) 反面）：那是文件轮次的地盘，ADR-062 的可见性不变量靠它。
 
 ## 6. 风险与退路
 
@@ -178,6 +200,9 @@ grill 已把决策问完（§8）。剩下三条是通知，不同意就说：
 | 启动对比误删（diff 算错方向） | 删边只走 `recalc_panel_membership_inner` 的不在册分支，与今天同一条路；`mem://` 三形状门 |
 | 邻线 `room_model.rs` / `model_update_pending.rs` 未提交改动 | P2 起等其提交（Q14 (a)）；P0/P1 只碰新文件与本文 |
 | 拓扑重载是秒级（ams7997 实测 6–7 s / 文件） | 读透只对**会话号变了的那个文件**重载（`GroupCache` 的键就是 `(dbnum, sesno, …)`，其余文件命中缓存），摄入只在文件轮次发布后由 `capture` 付；P2 接线时把「哪几个文件重载了、各多久」写进 drain 报告，超过一窗预算再议「按账本只重读变更子树」——那是逐条修补，先不做 |
+| 房间初始化在最前段，每个变了会话的未监听 DESI 要 `capture`（7 s / 60 MB）→ 启动变慢 | 只对**清单行缺失或会话号变了**的未监听文件付；被监听的与最新的一律不付；回执逐文件报耗时；真嫌慢就写 `watch_dbnums` 把它们圈进轮次——那时是轮次付 |
+| 启动初始化在文件轮次之外写清单行（ADR-062 的写纪律） | 只动**不归任何轮次管**的行、只在 `lock_spatial_serial` 下、有在途 `collecting` / `pending` 轮次即拒绝、随后持久化快照头——与 `ensure_published_file_baseline` 同一套；新 ADR 记「启动初始化是清单的第二个合法写者，只动未监听文件的行」 |
+| ADR-048 D3 的字面（限定域不拖回全量房间重建）被启动对比越过 | D3 担心的是 2 万面板十几秒的全量；对比是定向的、成本随变更量走。D3 改写为「不拖回**全量修复**」，源码钉同步改口径，新 ADR 记修订 |
 | 整体退路 | 开关默认关；关着时一行行为不变 |
 
 ## 7. 不许当已证
@@ -188,6 +213,8 @@ grill 已把决策问完（§8）。剩下三条是通知，不同意就说：
 - 语料里是否存在跨库面板（`compose` 支持、测试有夹具、真库未见实例）：**未核**——它决定 Q10 (a) 的「整体止步」是必要的还是保守的。
 - `room_published_topology` 在 P2 之后是否只剩崩溃恢复一个用途：**未证**，退役另立。
 - 摄入侧启动对比恒等的推论（清单拓扑与常驻模型同源）：按代码推的，P3 (ii) 的 `mem://` 门才算证。
+- `watch_dbnums=[8000]` 起服时房间初始化替 7997 前进清单行、`/health` 点名 7997 面板无几何：**未跑**（要 `lib.rs` 接线，P3-b）。
+- 空间树装载前移到等数据清单之前是否有隐藏依赖（`load_project_tree_verified` 读的是指针与快照文件，按代码没有）：**未证**，P3-b 接线时以 `lib.rs` 现有顺序钉为准补一条。
 
 ## 8. 决议索引（grill 2026-09-07，四轮，全部按推荐）
 
@@ -208,8 +235,12 @@ grill 已把决策问完（§8）。剩下三条是通知，不同意就说：
 | Q14 (a) | P0/P1 现在做；P2 起等邻线 F-A/F-B 提交；不等 F-C |
 | Q15 (a) | 纯测 + `mem://` + 真库逐边对拍（ams 副本 × 两形态） |
 | Q16 (a) | 新 ADR；ADR-062 只加实施状态指向 |
+| Q17 (a) | 房间初始化（建模 + 写分片）在启动最前段（空间树装载随之前移），启动对比留在今天房间段的位置；`resident_reference` 只在对比应用成功后写 |
+| Q18 (a) | 初始化不受任何门（只认 `spatial_compute`）；启动对比受 `startup_data_ready` / `spatial_compute` / `model_incremental`，不受 `startup_autorun` 与 ADR-048 D3；全量修复照旧受两者；D3 改写为「不拖回全量修复」 |
+| Q19 (a) | 未监听文件每次启动重新 `capture` 到文件最新，清单行随之前进（串行锁下、无在途轮次）；被监听文件只由文件轮次推进 |
+| Q20 (a) | 未监听库的面板在册、无几何：不算、存量边受保护、面板进排除集；`/health` 按 dbnum 点名「无几何，来自未监听的库」；(b) 自出几何另立 |
 
 ## 9. 附：CONTEXT.md 词条草案（等文件干净再落）
 
-**常驻房间模型 (Resident Room Model)**：进程内按发布清单（摄入）或当前文件会话（读透）钉住的一份房间→面板拓扑 + 在册面板几何（世界 AABB / 变换 / 三角网）。房间归属的两条分支只从它取面板侧输入；候选构件仍取自空间树。它是库里已发布房间几何与 `room_published_topology`（摄入）或实时行（读透）的**缓存**，不是第二份真值：换代只在空间发布串行锁下、以清单/会话摘要为键整份替换。`latest` 与 `published` 两份并存时，回答归属的入口只许碰 `published`（摄入）。启动时它与库里的参照对比，只对变了的面板删重算；全量重建是显式修复入口。
+**常驻房间模型 (Resident Room Model)**：进程内按发布清单（摄入）或当前文件会话（读透）钉住的一份房间→面板拓扑 + 在册面板几何（世界 AABB / 变换 / 三角网）。房间归属的两条分支只从它取面板侧输入；候选构件仍取自空间树。它是库里已发布房间几何与 `room_published_topology`（摄入）或实时行（读透）的**缓存**，不是第二份真值：换代只在空间发布串行锁下、以清单/会话摘要为键整份替换。`latest` 与 `published` 两份并存时，回答归属的入口只许碰 `published`（摄入）。它在启动最前段建起来，范围是 MDB 全部设计库、不受 `watch_dbnums` 与上弦位约束（房间是参照系，不是增量的一部分）；启动时它与库里的参照对比，只对变了的面板删重算；全量重建是显式修复入口。
 _Avoid_: 房间缓存、内存房间表、房间快照（那是空间树的词）

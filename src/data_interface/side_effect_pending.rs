@@ -110,7 +110,7 @@ pub(crate) struct PublishedFileRound {
 /// One database file in the composite input consumed by room topology. The
 /// token identifies both the physical file generation and its exact session;
 /// rows are replaced only by a successful spatial publication.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct PublishedFileInput {
     pub dbnum: u32,
     pub db_type: String,
@@ -242,17 +242,17 @@ impl SideEffectCompensator {
             })?;
             let token_raw = frozen.commit_token_json()?;
             crate::fast_model::room_topology_source::prepare_producer_source(&frozen).await?;
-            let token = escape_surql_str(&token_raw);
             statements.push(
                 crate::fast_model::room_publication::render_stage_published_room_input(
                     dbnum, &token_raw,
                 ),
             );
-            let db_type = escape_surql_str(frozen.db_type());
-            statements.push(format!(
-                "UPSERT {PUBLISHED_FILE_INPUT_TABLE}:{dbnum} SET dbnum = {dbnum}, \
-                 db_type = '{db_type}', end_sesno = {baseline_sesno}, commit_token = '{token}', \
-                 published_version = {published_version}, updated_at = time::now();"
+            statements.push(Self::render_published_file_input_upsert(
+                dbnum,
+                frozen.db_type(),
+                baseline_sesno as i32,
+                &token_raw,
+                published_version,
             ));
             baseline_inputs.push(PublishedFileInput {
                 dbnum,
@@ -290,7 +290,14 @@ impl SideEffectCompensator {
     }
 
     pub(crate) async fn published_file_inputs() -> anyhow::Result<Vec<PublishedFileInput>> {
-        let mut response = SUL_DB
+        Self::published_file_inputs_on(&SUL_DB).await
+    }
+
+    /// [`Self::published_file_inputs`] 的显式连接版——`mem://` 门直接喂。
+    pub(crate) async fn published_file_inputs_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    ) -> anyhow::Result<Vec<PublishedFileInput>> {
+        let mut response = db
             .query(format!(
                 "SELECT dbnum, db_type, end_sesno, commit_token, published_version \
                  FROM {PUBLISHED_FILE_INPUT_TABLE} ORDER BY dbnum ASC;"
@@ -300,6 +307,40 @@ impl SideEffectCompensator {
         response
             .take::<Vec<PublishedFileInput>>(0)
             .map_err(anyhow::Error::from)
+    }
+
+    /// 一行清单的写法——基线与启动房间初始化（`room_resident::initialize_at_startup`，
+    /// 只替**不归任何文件轮次管**的文件前进）共用这一个定义；文件轮次自己的推进走
+    /// `apply_spatial_publications_to_manifest` 那条路，不经这里。
+    pub(crate) fn render_published_file_input_upsert(
+        dbnum: u32,
+        db_type: &str,
+        end_sesno: i32,
+        commit_token: &str,
+        published_version: u64,
+    ) -> String {
+        let token = escape_surql_str(commit_token);
+        let db_type = escape_surql_str(db_type);
+        format!(
+            "UPSERT {PUBLISHED_FILE_INPUT_TABLE}:{dbnum} SET dbnum = {dbnum}, \
+             db_type = '{db_type}', end_sesno = {end_sesno}, commit_token = '{token}', \
+             published_version = {published_version}, updated_at = time::now();"
+        )
+    }
+
+    /// 有没有一个文件轮次正在发布（`spatial_reconcile` 在 `collecting` / `pending`）。
+    /// 基线与启动房间初始化都拿它当「实时行可能半发布」的信号：有就不写清单。
+    pub(crate) async fn has_inflight_file_round_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    ) -> anyhow::Result<bool> {
+        let mut response = db
+            .query(format!(
+                "RETURN array::len((SELECT VALUE id FROM {TABLE} \
+                   WHERE kind = 'spatial_reconcile' AND status IN ['collecting', 'pending'] LIMIT 1)) > 0;"
+            ))
+            .await?
+            .check()?;
+        Ok(response.take::<Option<bool>>(0)?.unwrap_or(false))
     }
 
     fn apply_spatial_publications_to_manifest(
