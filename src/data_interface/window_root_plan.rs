@@ -213,6 +213,11 @@ pub struct WindowRootSources {
     pub closure: AffectedClosure,
     /// target 端索引键总数（`scan_index(...).owners.len()`）。
     pub index_keys: usize,
+    /// 结构连接正向级联（C2）：变更的结构件正向读 `CREF` / `JOIS` / `JOIE` / `CFRA`、核对回指后
+    /// 对端 owner 链上的根。[`Self::impact`] 把它并进 `touched`；开关
+    /// `model_structural_connection_cascade` 关着时是 `StructuralConnectionCascade::off()`（零 I/O）。
+    pub structural_connection:
+        crate::data_interface::structural_connection::StructuralConnectionCascade,
 }
 
 impl WindowRootSources {
@@ -243,6 +248,18 @@ impl WindowRootSources {
                     file.display()
                 )
             })?;
+        // C2：结构连接正向级联。开关关 = 一次文件读都不发生（`off()`），touched 一字不改。
+        let structural_connection = if crate::options::model_structural_connection_cascade() {
+            crate::data_interface::structural_connection::StructuralConnectionCascade::collect(
+                &plan,
+                base,
+                target,
+                &index.owners,
+                &roots_t,
+            )
+        } else {
+            crate::data_interface::structural_connection::StructuralConnectionCascade::off()
+        };
         Ok(Self {
             base_sesno,
             target_sesno,
@@ -250,18 +267,22 @@ impl WindowRootSources {
             plan,
             closure,
             index_keys: index.owners.len(),
+            structural_connection,
         })
     }
 
     /// `roots_S ∪ roots_T` 里哪些根被这一窗波及（`UpdatePlan::touches_roots` 的判据），
     /// 连同护栏要看的三个数。
     pub fn impact(&self, roots_s: &[PersistedRoot]) -> WindowImpact {
-        let touched = roots_s
+        let mut touched: BTreeSet<RefnoEnum> = roots_s
             .iter()
             .map(|root| root.refno)
             .chain(self.roots_t.iter().map(|root| root.root))
             .filter(|refno| self.closure.contains(refno_to_e3d(*refno)))
             .collect();
+        // C2 连接扩展：touched → roots 映射之后、`regen = touched ∩ roots_T` 之前，把结构连接
+        // 对端的根并进来（对端根都取自 roots_T）。开关关时是空操作。
+        self.structural_connection.expand_touched(&mut touched);
         WindowImpact {
             touched,
             closure_complete: self.closure.is_complete(),
@@ -354,6 +375,7 @@ pub(crate) async fn build_model_update_plan_from_window(
         plan.lazy.len(),
         sources.plan.report.totals_line()
     )];
+    warnings.push(sources.structural_connection.summary_line(dbnum));
     let units = plan
         .regen
         .iter()

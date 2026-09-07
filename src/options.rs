@@ -148,6 +148,12 @@ pub struct DbOptionExt {
     /// 详见 [`model_significant_over_point`]。
     #[serde(default)]
     pub model_significant_over_point: Option<bool>,
+
+    /// 结构连接正向级联（联动对齐计划 C2，默认关闭）：窗口里改了 `SJOI` / `FIXING` / `SCTN` …
+    /// 时，把 `CREF` / `JOIS` / `JOIE` / `CFRA` 回指成立的对端的生成根一起重算。
+    /// 详见 [`model_structural_connection_cascade`]。
+    #[serde(default)]
+    pub model_structural_connection_cascade: Option<bool>,
 }
 
 impl Deref for DbOptionExt {
@@ -194,6 +200,7 @@ impl From<DbOption> for DbOptionExt {
             in_memory_db: None,
             model_xgeometry_gate: None,
             model_significant_over_point: None,
+            model_structural_connection_cascade: None,
         }
     }
 }
@@ -258,6 +265,8 @@ struct DbOptionExtFields {
     model_xgeometry_gate: Option<bool>,
     #[serde(default)]
     model_significant_over_point: Option<bool>,
+    #[serde(default)]
+    model_structural_connection_cascade: Option<bool>,
 }
 
 /// 读一次 `DbOption` 的扩展字段，把三种结局分开——它们要求的处置完全不同。
@@ -432,6 +441,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         in_memory_db: ext.in_memory_db,
         model_xgeometry_gate: ext.model_xgeometry_gate,
         model_significant_over_point: ext.model_significant_over_point,
+        model_structural_connection_cascade: ext.model_structural_connection_cascade,
     }
 }
 
@@ -914,6 +924,36 @@ pub fn model_significant_over_point() -> bool {
     )
 }
 
+/// 环境变量名：一次性覆盖 [`model_structural_connection_cascade`]，不必改配置文件。
+pub const MODEL_STRUCTURAL_CONNECTION_CASCADE_ENV: &str =
+    "AIOS_MODEL_STRUCTURAL_CONNECTION_CASCADE";
+
+/// 结构连接正向级联（`DbOption.toml` 的 `model_structural_connection_cascade`，**默认 false**）。
+///
+/// 联动对齐计划（`2026-09-06-core3d-cascade-parity-dev-plan.md` §3 C2）的灰度开关：direct 窗口
+/// 规划器对变更的 `SCTN` / `GENSEC` / `STWALL` / `WALL`（`JOIS` / `JOIE`）、`PJOI` / `SJOI` / `SUBJ` /
+/// `FIXING`（`CREF`）、`CMPF`（`CFRA`）正向读连接属性、到对端核对回指，把对端 owner 链上的生成根
+/// 并进 `touched`——core `change/EVALAT` 规则 K → `ADSTCH` 的同形。关着时一次文件读都不发生，
+/// `regen` 与引入前逐字相同；三态契约在 `structural_connection::tests`，真库窗口
+/// （`aps7200_0001` 3→4、`aps250110_0001` 29→30）与九个钉死窗口两态逐字相同在
+/// `structural_connection::tests::live`。
+///
+/// 环境变量 [`MODEL_STRUCTURAL_CONNECTION_CASCADE_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
+pub fn model_structural_connection_cascade() -> bool {
+    #[cfg(test)]
+    match MODEL_STRUCTURAL_CONNECTION_CASCADE_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    effective_default_off_switch(
+        load_ext_fields().model_structural_connection_cascade,
+        std::env::var(MODEL_STRUCTURAL_CONNECTION_CASCADE_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
 /// 默认关的灰度开关的统一取值规则：环境变量（严格布尔，双向可压）> 配置 > `false`。
 /// 拼错的环境变量退回配置值，理由同 [`effective_startup_autorun`]。
 fn effective_default_off_switch(configured: Option<bool>, env_override: Option<&str>) -> bool {
@@ -986,6 +1026,39 @@ impl SignificantOverPointOverride {
 impl Drop for SignificantOverPointOverride {
     fn drop(&mut self) {
         MODEL_SIGNIFICANT_OVER_POINT_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 单测里摁住 [`model_structural_connection_cascade`] 的进程内覆盖（0 = 按配置来）。
+#[cfg(test)]
+static MODEL_STRUCTURAL_CONNECTION_CASCADE_OVERRIDE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+static MODEL_STRUCTURAL_CONNECTION_CASCADE_OVERRIDE_LOCK: std::sync::Mutex<()> =
+    std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct StructuralConnectionCascadeOverride {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl StructuralConnectionCascadeOverride {
+    pub(crate) fn set(on: bool) -> Self {
+        let lock = MODEL_STRUCTURAL_CONNECTION_CASCADE_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        MODEL_STRUCTURAL_CONNECTION_CASCADE_OVERRIDE
+            .store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for StructuralConnectionCascadeOverride {
+    fn drop(&mut self) {
+        MODEL_STRUCTURAL_CONNECTION_CASCADE_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -1329,6 +1402,14 @@ mod tests {
         {
             let _off = SignificantOverPointOverride::set(false);
             assert!(!model_significant_over_point());
+        }
+        {
+            let _on = StructuralConnectionCascadeOverride::set(true);
+            assert!(model_structural_connection_cascade());
+        }
+        {
+            let _off = StructuralConnectionCascadeOverride::set(false);
+            assert!(!model_structural_connection_cascade());
         }
     }
 

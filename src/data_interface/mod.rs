@@ -111,6 +111,10 @@ pub mod model_update_plan;
 /// 稳态增量窗口 S→T 的模型面选根：`roots_S ∪ roots_T` 与 `touches_roots`（ADR-056 P2-1 / D9 / N7）。
 pub mod window_root_plan;
 
+/// 结构连接正向级联（core `ADSTCH` 同形，联动对齐计划 C2）：窗口里的 `SJOI` / `FIXING` / `SCTN` …
+/// 正向读 `CREF` / `JOIS` / `JOIE` / `CFRA`、核对回指，把对端的生成根并进 `touched`。开关默认关。
+pub mod structural_connection;
+
 pub mod model_update_pending;
 
 pub mod model_concurrency;

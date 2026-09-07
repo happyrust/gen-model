@@ -32,7 +32,7 @@ rollup（`resolve_element_generation_root` + `ref_rev` 反查 + `build_unit_roll
 | 4 | `CLIMBM({PANE,GENSEC,SCTN,BPANEL})` 上卷（规则 M） | owner 链 | ~~`PANE`/`GENSEC`/`SCTN` 在 `significant` 位表里为真 → 是根~~ **★0907 改正：四个全是 `significant=false` / `toplevel=true`**（位表实查），direct 路径**不**把它们当根，归最近的显著祖先（`FRMW` / `SBFR` / `STRU` / `SUBS`，位表均为真）——比 core 的 CLIMBM 目标粗一级，但同在 owner 链上、被整根覆盖 | 同上 | ✅ 覆盖成立、粒度更粗（即 09-04 toplevel 对账 §2.3a 说的「粒度差不是漏」）；`BPANEL` 已查：同样 false/true（C0.5 ✅） |
 | 5 | 点类 noun → 所属几何件（规则 S，`POPF` = 字典 `point`） | owner 链 | 点容器不成根、归 owner | `is_loop_container_noun` 上卷 | ✅（就是 T2b 那条线） |
 | 6 | INTUBE：类别 1 → 前一个元件（规则 H）；删除 / 改挂先按 INTUBE 再 REDRAW（§2.2b） | 分支序 | 整根 BRAN 重生成 | `reroute_derived_geometry_units` 整根 | ✅ 超集（issue #5） |
-| 7 | 结构连接 `ADSTCH`：`CREF`↔`JOIS`/`JOIE`、`CFRA`↔`PFRE` 双向核对 → 对端 / 对端顶层件 + `RECON0`（§3） | **正向引用**（从变更元素读出去） | **无** | `ref_rev`：`CREF`(35 noun)/`JOIS`/`JOIE`(4)/`CFRA`(3)/`PFRE`(1) 都是 schema ELEMENT 型 → 进反向索引 → 对端交付单元级联（不核对回指 = 超集） | ❌ **direct 缺**（清单 #12） |
+| 7 | 结构连接 `ADSTCH`：`CREF`↔`JOIS`/`JOIE`、`CFRA`↔`PFRE` 双向核对 → 对端 / 对端顶层件 + `RECON0`（§3） | **正向引用**（从变更元素读出去） | **无** | `ref_rev`：`CREF`(35 noun)/`JOIS`/`JOIE`(4)/`CFRA`(3)/`PFRE`(1) 都是 schema ELEMENT 型 → 进反向索引 → 对端交付单元级联（不核对回指 = 超集） | ~~❌ direct 缺~~ ◐ **0907 direct 已接线**（`structural_connection.rs`，正向读 + 回指核对 + `STRU` 门，开关 `model_structural_connection_cascade` 默认关；清单 #12） |
 | 8 | 孔洞：PANE / 设备子件变了 → 引用它的 `HOLC` 构件（§2.3-3）；孔洞自己变了 → 自身 + owner（J/P） | **反向引用** | **无**（owner 子树内的孔由整根覆盖；跨 owner 的不覆盖） | `ref_rev` 超集 | ❌ **direct 缺**（清单 #15），前提是真库里有跨 owner 的孔洞引用 |
 | 9 | `EQUI`/`ELCONN` → `GATREF(CLIST)` 连接表全部重画（规则 F） | 正向数组 | 无 | 无（`CLIST` 不是存储属性，`ref_rev` 收不到） | ❓ 清单 #13：先定 `CLIST` 是什么 |
 | 10 | 桥架 / 网格：`CWBRAN` `ELCXRF`、`CTRAY` / `CGRDCP` / `CGRDLP` 反向、`CLNPNG` 两层（B–E、G） | 正向 + 反向 | 无 | 部分（ELEMENT 型的进 `ref_rev`） | 登记不排期（清单 #14，`gb==3` 族归几何覆盖度） |
@@ -90,7 +90,23 @@ rollup（`resolve_element_generation_root` + `ref_rev` 反查 + `build_unit_roll
 - 判：跨根边 = 0 → C2/C3 不立项，清单 #12/#15 改判「语料上不可达（留探针）」；> 0 且有窗口 → 立 C2（正向）；孔洞跨根 > 0 → 立 C3（反向）。
 - 退：无改动。
 
-### C2 —— direct 规划器补结构连接正向级联（M，**C1 已判立项，2026-09-07**）
+### C2 —— direct 规划器补结构连接正向级联（M，**C1 已判立项，2026-09-07**）✅ 2026-09-07 接线落地（开关默认关）
+
+**落地**（`src/data_interface/structural_connection.rs` 新模块 + `window_root_plan.rs` 三处钩子 + `options.rs` 开关）：
+- `WindowRootSources::collect` 里根枚举之后、`impact()` 里 `touched` 折出来之后 / `plan_window_roots` 之前，多一步
+  `StructuralConnectionCascade`：从账本挑结构 noun 的变更元素（账本 noun 先零 I/O 粗筛，所以没有结构改动的窗口一次文件读
+  都不发生），按端读（`Deleted` 读 S、`TypeChanged` 两端、其余读 T），`DbElement::get_ref` 走模板解隐式区读
+  `JOIS`/`JOIE`/`CREF`/`CFRA`，到对端读回指属性**等于自己**才算，`STRU` 门照 core 规则 K 加上（链读挂保守放行），对端沿 T 端
+  owner 索引向上、链上**每一个**落在 `roots_T` 里的根都并进 `touched`（与闭包「按祖先封闭」同口径）。
+- 开关 `model_structural_connection_cascade`（`DbOption.toml` / `AIOS_MODEL_STRUCTURAL_CONNECTION_CASCADE`）默认关，关着时
+  `StructuralConnectionCascade::off()`：零 I/O、`touched` 一字不改。回执多一行 `structural-connection cascade on/off — …` 观测。
+- 验（0907 本机）：契约三态 + `STRU` 门 + 对端无根 / 同根 + 嵌套根链 + noun 表 = 11 条纯内存测试全绿；真库
+  **`aps7200_0001` 3→4：账本里恰好 94 个 `SJOI`（= 普查的 94，逐记录确认不是「搬家未改字节」），94 条边全部回指成立，对端根 6 个，
+  `regen` 6 → 8**；**`aps250110_0001` 29→30：424 个结构变更元素、371 条边全部回指成立，对端根 31 个，`regen` 251 → 258**；两窗都是
+  开关开只多出对端根、开关关一根不多。**九个钉死窗口开关两态 `regen` 逐字相同**（都是 0 个结构变更元素、零文件读）。
+  `live_ams8000_pinned_windows_land_in_the_expected_buckets`、`recorded_matrix_windows_reach_expected_roots` 照旧绿。
+- 未做：默认开（§7 拍板 2 等灰度）；`PFRE` 侧不正向读（持 `PFRE` 的 noun 语料里只 1 个，且它是 `CMPF.CFRA` 的对端，从 `CFRA`
+  侧已覆盖）；反向表一行没动（C3 不立项）。
 
 - 什么：窗口里变更元素若是 `SCTN`/`GENSEC`/`PANE`/`BPANEL`/节点族（或在其下，`CLIMBM` 那四种），读它的
   `CREF`/`JOIS`/`JOIE`/`CFRA`（T 侧），逐个到目标读回指属性（`JOIS`/`JOIE`/`CREF`/`PFRE`）**等于自己**才算，
@@ -160,7 +176,7 @@ rollup（`resolve_element_generation_root` + `ref_rev` 反查 + `build_unit_roll
 ## 4. 顺序与依赖
 
 ```
-C0 文档 ✅(0907) ──▶ C1 真库普查 ✅(0907：结构 21,161 条跨根边 + 12 个窗口；孔洞 0) ──┬─▶ C2 结构连接正向级联 ★立项，下一步
+C0 文档 ✅(0907) ──▶ C1 真库普查 ✅(0907：结构 21,161 条跨根边 + 12 个窗口；孔洞 0) ──┬─▶ C2 结构连接正向级联 ✅(0907 接线，开关默认关；两真库窗口 + 九窗口两态过)
                                                                                     └─▶ C3 通用反向级联接线 ✗ 不立项（孔洞 = 0）
 C4 INTUBE 删除契约   ✅(0907 核实：live 门 269→270 早已钉着，跑绿)
 C5 TOPF 对拍         ✅(0907，随 C1 扫完：无根 primitive 268 个，全是船体族；不改判据)
@@ -178,7 +194,7 @@ C7 证据补洞          随时，IDA
 |---|---|
 | C0 | 每处新增引用的 `文件:行` / 地址在工作树与 IDB 里 grep / 查得到 |
 | C1 | 三组数字各是一个具体整数；跨根边 = 0 时清单 #12/#15 判词改成「语料上不可达」 —— ✅ 0907：**21,161 / 0 / 783（12 窗口）**；#15 已改判，#12 坐实为洞 |
-| C2 | 契约三态（回指成立 / 不成立 / 开关关）断言集合恰好相等；真库窗口对端根 ∈ `regen`；九窗口两态逐字相同 |
+| C2 | 契约三态（回指成立 / 不成立 / 开关关）断言集合恰好相等；真库窗口对端根 ∈ `regen`；九窗口两态逐字相同 —— ✅ 0907：三态各一条（`structural_connection::tests`）；`aps7200_0001` 3→4 对端根 6 个全在 `regen`（6→8），`aps250110_0001` 29→30 对端根 31 个全在（251→258）；九窗口两态逐字相同（`tests::live`，本机跑绿） |
 | C3 | 孔洞窗口对端根 ∈ `regen`；`referrers_of` 为空时所有现有窗口计划字节相同 |
 | C4 | 删中间元件 → `RegenRoot(BRAN)` 恰好 1 条且 `DeleteCleanup` 不单独存在于 `regen` 之外 —— ✅ 已由 live 门 269→270 钉着（0907 跑绿） |
 | C5 | 列出「core 单独重画、我们不归任何根」的 noun 名单，或明确为空 —— ✅ 0907：船体族 `CPANEL`/`CPROF`/`BNDLIN`（247）+ 零星 21 个，见证据 §5 |
@@ -199,6 +215,8 @@ C7 证据补洞          随时，IDA
 1. **C1 的门槛**：跨根结构连接边 > 0 就立 C2，还是要求「> 0 且有只改一端的窗口」？（建议后者——没窗口的实现没法验收。）
    **★0907 数字替你答了**：两个门槛都过（21,161 条边、12 个窗口），不必再拍。
 2. **C2 开关的最终态**：默认关灰度 → 默认开。建议与 W2.1 一样先默认关，九窗口两态相同 + 真库窗口过了再翻。
+   **★0907 两个门槛本机都过了**（九窗口两态逐字相同；两个真库窗口对端根全进 `regen`），代码仍默认关——翻不翻、何时翻由你说；
+   翻的动作只是 `DbOption.toml` 一行 `model_structural_connection_cascade = true`（或环境变量），不改代码。
 3. **C3 要不要等 dab-ref-tables 计划**：等（干净）vs 先用开库全扫的内存反向表（快）。建议等——C1 若判孔洞跨根 = 0，C3 根本不用做。
    **★0907：孔洞跨根 = 0，C3 不做**，这条不必拍。
 4. **C5 若查出漏归 noun**：是补 direct 枚举（按 noun 加白名单）还是改判据？建议补白名单、不改判据（核对表 R0-3 口径）。
