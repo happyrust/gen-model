@@ -359,3 +359,39 @@ plant-mbd `da4868e`（ADR-0007，新模块 `slope.rs`）。契约零改动：全
 - 三条金样 wire 体经 plant3d-web `parseMbdV2PipeData` ACCEPTED（`145018`：slope_mark 7 / aid_line 21 / linear_dim 18 /
   aid_text 3，0 diagnostics）。前端 `mbdV2ExternalAnnotations.ts` 对 `slope_mark` 画线 + 箭头 + 中点文字、`aid_line` 画
   延长线样式、`aid_text` 画注释（代码已读；`node --experimental-strip-types` 跑不了它——扩展名省略的 bundler 导入）。
+
+## Phase 5 ③（2026-09-07）：焊缝标记（`getwelds` / `isoWeldText`）→ `weld_mark`
+
+plant-mbd `43c9882`（ADR-0008，新模块 `weld.rs`）+ `dc0eec7`；gen-model 本提交（宿主读 `DTXR` / `:ZD_WLDN`）。
+
+### 读 PML 的结论（`isobran.getwelds` L4160-4759、`isoWeldText.pmlobj`、`isoline.drawweld` L3510-3587）
+
+- **普通管道只认显式 WELD 成员**：位置 `pos of $!mem`，`dtxr` 含 `SHOP` 为车间焊、否则现场焊（L4206-4230）。
+  按连接类型 BW / SW 在构件端口补焊点（L4401-4483）、Head / Tail 补焊点（L4236-4270）、OLET / TEE 支管焊
+  （L4351-4399）、`sortwelds` 后顺序编 `M{x}` / `A{x}`（L4585-4595）——全部包在 `if !this.isinstpipe`
+  （「EM4 use weld only」）里，是仪表管路径。
+- **编号**：普通管道读 WELD 的项目 UDA `:ZD_WLDN`（L4665），没有就 `'Weld Num Unset'`（L4727）进图。
+- **绘制**（`drawweld`）：编号是 `mlabel`，经 Polar 系统摆在管外（半径带 `od/2 + 0.5·cheight` … `+cheight`），
+  离焊点超过 `od/2 + 2·cheight` 带引线（L3579-3585）；焊点位置本身 PML 不画符号（TPlant 侧按 JSON 画）。
+- ATTA 焊缝（`getattawelds` L4892，要 `pipeatta` 的 PAD / LEG / LUG 几何分类）与 KD 焊缝（`getkdwelds`）未迁。
+
+### 落地
+
+- `weld.rs::weld_primitives`：每个 WELD 一个 `weld_mark {position, weld_type: shop | field}`（前端画圆圈，field 加叉）；
+  宿主给了 `weld_number` 才出 `label`（管外 `od/2 + 1.5·cheight`、沿直段尺寸方向，直段没选出方向时朝上）+ 远时
+  `leader_line`。「Weld Num Unset」是提醒建模人补 UDA 的，不进图。
+- 宿主：WELD 成员 `get_string("DTXR")` / `get_string(":ZD_WLDN")`（`UnknownAttribute` 按没有）→ `BranchMember.dtxr /
+  weld_number`。AvevaMarineSample 的 WELD 两者都空。
+- 接线在 `layout_isoline` 的每条出口（`finish_with_welds`），不依赖主尺寸是否出得来。
+
+### 金样
+
+只有 `24384_26229` 有 WELD（`26230`，在 Head 上，`DTXR` 空 → field、无编号）→ +1 `weld_mark`。README 顺手更正：
+第 2 袋中间的点 `26236` 是 VALV 不是 WELD。
+
+### 验证
+
+- plant-mbd `cargo test --workspace` **84 通过**（79 lib + 4 + 1，新增 4 条 weld 用例）；`golden diff` 6/6。
+- gen-model worktree `mbd_branch_query` 4/4、`mbd_http_endpoint` 1/1；六份 field fixtures 重导后与已提交的逐字节相同
+  （新字段两者都空、不落键）。
+- `26229` wire 体经 plant3d-web `parseMbdV2PipeData` ACCEPTED（slope_mark 1 / aid_line 10 / linear_dim 6 / weld_mark 1 / aid_text 4）。

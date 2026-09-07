@@ -238,6 +238,16 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
         };
         // P1 / P2 / P3：isoDim 的手柄判定与 TEE 补点要它们；解不出的号就不填。
         let ppoints = catalogue_ppoints(&member, &resolver)?;
+        // 焊缝：DTXR 含 SHOP 为车间焊（isobran.getwelds L4211-4216）；编号是项目 UDA :ZD_WLDN（L4665），
+        // 字典里没有这个 UDA 就当没有。
+        let (dtxr, weld_number) = if noun == "WELD" {
+            (
+                optional_text(&member, "DTXR")?,
+                optional_text(&member, ":ZD_WLDN")?,
+            )
+        } else {
+            (None, None)
+        };
         let (arrive_ppoint, leave_ppoint) = match station {
             Some(k) => (
                 route_end_ppoint(&route.tubes[k].to),
@@ -283,6 +293,8 @@ pub fn branch_query(set: &Arc<DbSet>, refno: RefNo) -> Result<BranchQueryResult,
             ppoints,
             arrive_ppoint,
             leave_ppoint,
+            dtxr,
+            weld_number,
         });
 
         if station.is_some() {
@@ -507,7 +519,21 @@ fn push_implied_tube(
         ppoints: Vec::new(),
         arrive_ppoint: None,
         leave_ppoint: None,
+        dtxr: None,
+        weld_number: None,
     });
+}
+
+/// 可选的文本属性：字典里没有（UDA 未定义）或没写都算没有；读库出错照常上抛。
+fn optional_text(
+    member: &e3d_io::db_element::DbElement,
+    name: &str,
+) -> Result<Option<String>, BranchQueryError> {
+    match member.get_string(name) {
+        Ok(value) => Ok(value.map(|text| text.trim().to_string()).filter(|text| !text.is_empty())),
+        Err(DbElementError::UnknownAttribute { .. }) => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
 /// 解一个端口；目录库没开 / 目标不在所钉会话 / 目录链走不到 P 点都算「解不出」——记一条
