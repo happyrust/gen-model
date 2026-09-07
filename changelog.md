@@ -46,8 +46,10 @@
 - 验证：`cargo check --lib` / `--bin sync_sys_only --bin l3_suite` 过；`cargo test --lib -- versioned_db
   dbnum_consistency legacy_parse_pdms_db_guard all_three_write_points_persist_catalogue_dependencies
   manual_update::tests` **137 passed / 0 failed / 3 ignored**；`Check-LegacyParsePdmsDb.ps1` 六判全过。
-  **真库编排等价对拍未跑**（方案 §5 第 3 条：用新 exe 对 YCYK 同一组 10 库空店首载，逐 dbnum 行数与
-  `runycyk1-bootstrap/verification.json` 相等），留给下一次 rig 运行。
+  **真库编排等价对拍已过**（方案 §5 第 3 条，14:52 `plant-1\runycyk3-ingest`）：新 exe 空店一趟跑完 8 SYS/DICT + 10 DESI，
+  31 个 dbnum 的 `pe` 行数、`dbnum_info_table`、10 库水位、`MDB / WORL` 与 pass 3 逐一相等（总 71,896 行），5525 抽 200 个
+  refno 五种行逐字段 0 处不同；六个零根库在 `/health.dbnum_consistency` 上从 lagging 变为 not_judged。父层补缺与
+  `sync_sys_only` 两条路仍未在真库上跑（手头没有母库 + 叶子并存的项目）。
 
 ### `sync_live` 退役：watcher 无条件起，「一个库都不监听」这个状态删掉（ADR-058 D8）
 

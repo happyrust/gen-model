@@ -166,8 +166,20 @@ MySQL 的 `create_*_database`（feature 门后）与 `AiosDBMgr` 相关——它
 
 验证：`cargo check --lib` / `--bin sync_sys_only --bin l3_suite` 过；`cargo test --lib -- versioned_db dbnum_consistency
 legacy_parse_pdms_db_guard all_three_write_points_persist_catalogue_dependencies manual_update::tests`
-137 passed / 0 failed / 3 ignored；`Check-LegacyParsePdmsDb.ps1` 六判全过。**§5 第 3–6 条真库对拍未跑**（需要新
-exe 在 plant-1 rig 上重跑 YCYK 空店首载）。
+137 passed / 0 failed / 3 ignored；`Check-LegacyParsePdmsDb.ps1` 六判全过。
+
+**§5 第 3 条真库编排等价对拍（2026-09-07 14:52，用户拍板后实跑）**：release exe（`D:\Rust\target-perf7997`，HEAD `b9d7c00b`，
+`source_files_modified_after_exe_build = []`）在 `plant-1\runycyk3-ingest` 空店一趟跑完 8 个 SYS/DICT + 10 个 YCYK DESI 库
+（14:52:35 → 14:53:14 `数据链已就绪`，一趟到位、没有 pass2）。`compare_counts.py`（回执 `compare_counts.txt`）对 pass 3
+（`runycyk1-bootstrap/verification.json` + 13:46 的 `inspect_holds.py`）：**31 个 dbnum 的 `pe` 行数逐一相等**（5525=37,603 /
+7015=12,042 / 5107=9,496 / 6015=6,144 / CATA 212=2,626 / 7000=857 / … / 5521–5524=2，总计 71,896）；31 个 dbnum
+`dbnum_info_table` 与 `pe` 逐一相等；10 个设计库 `applied == file_latest` 与 pass 3 同值；`MDB=6 / WORL=31`；从 pass 3 店的
+副本（另开 surreal :18103）随机抽 5525 的 200 个 refno，`pe / <NOUN> / ATT_UDA / pe_owner 出向 / 入向` 五种行逐字段
+**0 处不同**。F2 现场：`/health.dbnum_consistency` = judged 4（in_sync 2 = 5525 / 7015；lagging 2 = 5107 / 6015，各有
+held 根）/ **not_judged 6**（六个零根库，pass 3 时它们是 lagging）。耗时：5525 数据批 14.7s（pass 3 13.1s）、5107 6.5s（5.2s）、
+7015 5.7s（5.1s）、6015 2.8s（2.1s）——机器上同时还有三套 rig 在跑（其一 14:48 刚起、正在初始化），没有做过隔离的
+耗时对比，**不下结论**。模型面照旧停在同 4 根 `generation_hold`（ISSUE-029），与本方案无关。
+§5 第 4 条（父层补缺）与第 5 条（`sync_sys_only` 空库引导）**未跑**：YCYK / AMS 手头没有母库与叶子并存的项目。
 
 ## 8. 不做 / 留档
 
