@@ -803,7 +803,6 @@ fn write_runtime_config(
         ("room_key_word", "[\"AIOS-INC-RM\"]".into()),
         ("manual_db_nums", format!("[{dbnum}]")),
         ("included_db_files", files),
-        ("sync_live", "false".into()),
         ("gen_model", "false".into()),
         ("gen_mesh", "false".into()),
         ("gen_spatial_tree", "true".into()),

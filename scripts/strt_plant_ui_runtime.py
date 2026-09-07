@@ -15,7 +15,7 @@ overrides = {
     'meshes_path': (RUN / 'meshes').as_posix(),
     'surreal_ns': 'strt_cpv_ui_20260905',
     'watch_dbnums': [7997], 'manual_db_nums': [7997],
-    'startup_autorun': False, 'sync_live': False,
+    'startup_autorun': False,
     'gen_model': False, 'gen_mesh': True,
     'data_incremental': False, 'model_incremental': False,
     'room_incremental': False,

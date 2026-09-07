@@ -81,7 +81,7 @@
 存活探针。响应：
 
 ```json
-{ "status": "ok", "project": "HD", "sync_live": false, "version": "0.1.3",
+{ "status": "ok", "project": "HD", "version": "0.1.3",
   "started_at": "2026-07-27T21:02:11+08:00",
   "queue_paused": false, "static_assets": false,
   "model_update_pending": {

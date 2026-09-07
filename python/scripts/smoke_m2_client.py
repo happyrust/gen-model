@@ -17,7 +17,7 @@ def main() -> None:
     client = AiosClient()
 
     health = client.health()
-    print(f"/health: project={health['project']} sync_live={health['sync_live']} "
+    print(f"/health: project={health['project']} "
           f"queue_paused={health['queue_paused']} version={health['version']}")
 
     dbnums = client.dbnums()

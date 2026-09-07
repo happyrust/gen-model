@@ -76,7 +76,6 @@ $overrides = [ordered]@{
     project_name            = "`"$Project`""
     manual_db_nums          = "[$Dbnum]"
     included_db_files       = $dbFilesToml
-    sync_live               = "false"
     replace_dbs             = "false"
     gen_model               = "false"
     gen_mesh                = "false"

@@ -611,18 +611,18 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         fmt_elapsed(preload_started.elapsed())
     );
 
-    // watcher 只听 `sync_live` 一个开关（ADR-058 D8 / refactor plan S5-1）。此前这里还
-    // `&& !direct_read_mode`：生产形态启动后没有数据链、没有 manifest、没有文件事件，
-    // 模型只靠人工执行与按需 ensure——「改元素 → SAVEWORK → 自动更新」在生产上做不到。
-    // `direct_read_mode` 从此只回答「数据面读哪儿」，watcher / 模型复核 / 房间与 db 形态同一条路。
-    // 2026-09-04 起 direct 是**默认**形态（`options::direct_read_mode`）：不带环境变量就是它；
+    // watcher **无条件起**（ADR-058 D8，2026-09-07）：`sync_live` 那个开关退役了。它此前把
+    // 「起不起 watcher」与「做不做启动数据重扫」两件事绑在一个布尔上，而「一个库都不监听」
+    // 这个状态没人真的要——监听范围本来就由 `watch_dbnums` 说了算（不写 = 本 MDB 声明的全部
+    // DESI，共识 d-207），关掉 watcher 只会让「改元素 → SAVEWORK → 自动更新」在那份配置上
+    // 静默失效。启动那次数据重扫的去留由 `data_face` 单独回答（read-through 跳过它）。
+    // `direct_read_mode` 从此只回答「数据面读哪儿」：2026-09-04 起 direct 是**默认**形态，
     // 只有显式 `AIOS_DATA_READ_MODE=db` 才退回退役的 legacy 读路由，而且要出声。
-    let sync_live = db_option.sync_live.unwrap_or(false);
     let direct_read_mode = crate::options::direct_read_mode();
     if direct_read_mode {
         println!(
             "数据读取模式：direct（e3d-io，默认形态）；watcher / 模型复核 / 房间与 db 形态同一条启动路，\
-             监控目录 watcher 由 sync_live 决定（当前 sync_live={sync_live}）"
+             监控目录 watcher 无条件启动"
         );
     } else {
         eprintln!(
@@ -648,7 +648,8 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // `sync_history` 四个开关）2026-09-07 整条退役（ADR-058 D8）。direct 成为默认形态之后
     // 那条路一次也没被走到过，而它与水位、模型、`gen_root` 凭证全程脱钩——「解析完了却
     // 什么都没建立」这个坑随路一起没了。数据面从此只有一条：watcher 首扫与增量窗口经
-    // e3d-io 摄入，首载 / 重建由数据批次 worker 按单个文件调 `sync_total_async_threaded`。
+    // e3d-io 摄入，首载 / 重建由数据批次 worker 按单个文件调
+    // `versioned_db::baseline_ingest::ingest_file`（同日 `sync_total_async_threaded` 壳也退役）。
 
     println!("正在初始化 db manager（解析监控目录配置）...");
     let step_started = Instant::now();
@@ -741,7 +742,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         "启动模型策略：gen_model={} gen_mesh={} 仅控制增量模型阶段；按文件会话号与 applied_sesno 比对结果执行，不启动整库全量生成",
         db_option.gen_model, db_option.gen_mesh
     );
-    if !sync_live || crate::options::data_face().is_read_through() {
+    if crate::options::data_face().is_read_through() {
         initialization.mark_data_ready_without_manifest();
     }
     let step_started = Instant::now();
@@ -760,16 +761,6 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
              全量房间重建；重扫照常发现并入队，但排出来的行挂起，等各自的 dbnum \
              真的来增量再跑（想只跑几个库就写 watch_dbnums，见 ADR-048）"
         );
-        if !sync_live {
-            // 解封条件是「某个 dbnum 真的来一次增量」，而增量只能由 watcher 或
-            // 人工执行送来。watcher 没起，就只剩人工那一条——这话必须当面说清楚，
-            // 否则队列里的行会安静地躺到下次重启。
-            println!(
-                "⚠ 同时 sync_live=false：watcher 没启动，不会有文件事件来解封任何一行。\
-                 除非走人工执行 / 按需生成，持久积压（model_update_pending）本次不会\
-                 有任何进展"
-            );
-        }
         println!("启动模型凭证复核仍照常执行；发现的缺口只入队，不越过上弦门消费");
     }
 
@@ -785,17 +776,17 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         })
     };
 
-    if sync_live && !crate::options::data_face().is_read_through() {
+    if crate::options::data_face().is_read_through() {
+        println!(
+            "read-through：跳过启动数据重扫与 Meta→Design 摄入清单；data_ready 已就绪，watcher 仅作为后续文件脏信号"
+        );
+    } else {
         println!("正在启动监控目录 watcher（首轮重扫入队，含库文件存档压缩，可能较久）...");
         let step_started = Instant::now();
         mgr.init_watcher().await?;
         println!(
             "监控目录 watcher 启动完成，耗时 {}",
             fmt_elapsed(step_started.elapsed())
-        );
-    } else if sync_live {
-        println!(
-            "read-through：跳过启动数据重扫与 Meta→Catalogue→Design 摄入清单；data_ready 已就绪，watcher 仅作为后续文件脏信号"
         );
     }
 
@@ -808,15 +799,16 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     //
     // direct 形态也起（2026-09-02，plant-ui 计划 D1）：worker 是队列的唯一消费者，与读取
     // 底座无关；数据面走直写路径（ADR-056 P1），模型面走 `generate_roots`（e3d-io 读文件）。
-    // 2026-09-04（S5）起 direct 的 watcher 也照 `sync_live` 起，人工执行（`POST /update/execute`）
-    // 与文件事件排进同一个队列。
+    // 人工执行（`POST /update/execute`）与文件事件排进同一个队列。
     crate::data_interface::batch_worker::ensure_batch_worker(mgr.clone());
 
     // Watcher events are dirtiness signals only; `async_watch` debounces them
     // into the same full manifest scan used by startup and reconciliation.
-    let watch_task = if sync_live {
+    // 无条件起（ADR-058 D8）：看门狗是这个进程对「文件变了」的唯一耳朵，没有哪份配置
+    // 真的想把它关掉；监听范围由 `watch_dbnums` 说了算（共识 d-207）。
+    let watch_task = {
         let mgr = mgr.clone();
-        Some(tokio::spawn(async move {
+        tokio::spawn(async move {
             #[cfg(feature = "mqtt")]
             {
                 let (watch_result, _) = tokio::join!(
@@ -833,9 +825,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
                 log::error!("async_watch 退出，增量看门狗已停止: {error:?}");
                 eprintln!("async_watch 退出，增量看门狗已停止: {error:?}");
             }
-        }))
-    } else {
-        None
+        })
     };
 
     // 把生成根凭证与**文件最新会话**对齐——run_app 里 ADR-050 那次无条件清空的补偿路径
@@ -849,12 +839,11 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // watch_dbnums。任何一库失败都告警后继续，不把一个库的配置错变成整个服务的崩溃循环。
     crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup().await;
 
-    let startup_data_ready = crate::options::data_face().is_read_through()
-        || !sync_live
-        || scheduler.is_auto_work_armed();
-    if sync_live && startup_data_ready {
+    let startup_data_ready =
+        crate::options::data_face().is_read_through() || scheduler.is_auto_work_armed();
+    if startup_data_ready {
         println!(
-            "等待 Meta → Catalogue → Design 数据清单完成...（模型面已并行开工：门随清单装好即开，\
+            "等待 Meta → Design 数据清单完成...（模型面已并行开工：门随清单装好即开，\
              积压在数据队列空隙消化，按需生成不受数据阶段阻挡）"
         );
         let mut waited_secs = 0u64;
@@ -1137,17 +1126,15 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 到这里为止的每一步都只在启动跑一次；再往下 `watch_task.await` 就只是挂着
     // 等增量了。此前日志里没有这条边界线——「还在初始化」与「已经在监听、只是
     // 这一轮没事发生」打出来的东西一模一样，只能靠猜。
-    print_startup_complete_banner(&db_option, sync_live, startup_started);
+    print_startup_complete_banner(&db_option, startup_started);
 
-    if let Some(watch_task) = watch_task {
-        let _ = watch_task.await;
-    }
+    let _ = watch_task.await;
 
-    // 手动模式（sync_live=false）下若 Web 服务已启用，保持进程长驻对外服务，
-    // 供前端触发 preview/execute 手动更新与按需生成。
+    // 看门狗退出之后若 Web 服务已启用，保持进程长驻对外服务，供前端触发
+    // preview/execute 手动更新与按需生成。
     #[cfg(feature = "http_api")]
-    if !sync_live && crate::get_db_option_ext().http_api_addr.is_some() {
-        println!("手动模式下 Web 服务保持运行（Ctrl+C 退出）...");
+    if crate::get_db_option_ext().http_api_addr.is_some() {
+        println!("Web 服务保持运行（Ctrl+C 退出）...");
         let _ = web_task.await;
     }
 
@@ -1159,7 +1146,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
 /// 状态在这里复述一遍，而不是只打一行「完成」：阶段开关、监听限定、HTTP 地址
 /// 是出问题时第一批要确认的东西，而它们各自散在前面几十行启动日志里——等真出事
 /// 时，那些行早被稳态轮询的重扫日志刷走了。
-fn print_startup_complete_banner(db_option: &DbOption, sync_live: bool, started: Instant) {
+fn print_startup_complete_banner(db_option: &DbOption, started: Instant) {
     const RULE: &str = "==========================================================";
     println!("{RULE}");
     println!(
@@ -1219,11 +1206,7 @@ fn print_startup_complete_banner(db_option: &DbOption, sync_live: bool, started:
             println!("  HTTP API：http://{addr}/api/v1");
         }
     }
-    if sync_live {
-        println!("已进入增量更新监听：库文件一有变化就入队处理，往下的日志都是运行期输出。");
-    } else {
-        println!("sync_live=false：不进文件监听，增量只能由 HTTP preview/execute 手动触发。");
-    }
+    println!("已进入增量更新监听：库文件一有变化就入队处理，往下的日志都是运行期输出。");
     println!("{RULE}");
 }
 
@@ -1891,12 +1874,14 @@ mod startup_room_build_gate_tests {
             .split_once("pub async fn run_app(")
             .expect("run_cli end exists")
             .0;
+        // watcher 无条件起（ADR-058 D8），read-through 的分野只剩「跳不跳启动重扫」——
+        // 那一支现在是唯一还看形态的地方，两句话各自钉一处。
         assert!(
-            body.contains("if sync_live && !crate::options::data_face().is_read_through()"),
-            "startup init_watcher must be excluded in read-through mode"
+            body.contains("if crate::options::data_face().is_read_through() {\n        println!(\n            \"read-through：跳过启动数据重扫"),
+            "read-through 必须跳过启动重扫，其余形态照常 init_watcher"
         );
         assert!(
-            body.contains("if !sync_live || crate::options::data_face().is_read_through()"),
+            body.contains("if crate::options::data_face().is_read_through() {\n        initialization.mark_data_ready_without_manifest();"),
             "read-through must mark data_ready without an ingest manifest"
         );
     }
@@ -1961,11 +1946,13 @@ mod startup_room_build_gate_tests {
     }
 
     /// ADR-058 D8 / refactor plan S5（2026-09-04）：`direct_read_mode` 在启动序列里只回答
-    /// 「数据面读哪儿」。watcher 只听 `sync_live`——此前 `&& !direct_read_mode` 让生产形态
-    /// 启动后没有数据链、没有文件事件，「改元素 → SAVEWORK → 自动更新」做不到；模型门 /
-    /// 收敛等待 / 房间也不再有 direct 专用分支（direct 曾在复核落地后立刻 `mark_model_ready`，
-    /// 积压还在跑就宣告收敛，并跳过房间）。2026-09-02 那条「direct 也起 worker」的钉留在
-    /// 本测试里：worker 启动不由 direct 把门。
+    /// 「数据面读哪儿」。模型门 / 收敛等待 / 房间不再有 direct 专用分支（direct 曾在复核落地后
+    /// 立刻 `mark_model_ready`，积压还在跑就宣告收敛，并跳过房间）。2026-09-02 那条「direct
+    /// 也起 worker」的钉留在本测试里：worker 启动不由 direct 把门。
+    ///
+    /// 2026-09-07 起 `sync_live` 整个退役（同一条 D8）：watcher **无条件起**，这里连带钉
+    /// 「那个字段不许回来」——它此前把「起不起 watcher」与「做不做启动重扫」绑在一个布尔上，
+    /// 后者现在由 `data_face` 单独回答。
     #[test]
     fn direct_read_mode_only_selects_the_data_read_route() {
         let source = include_str!("lib.rs");
@@ -1977,12 +1964,12 @@ mod startup_room_build_gate_tests {
             .expect("run_cli end exists")
             .0;
         assert!(
-            body.contains("let sync_live = db_option.sync_live.unwrap_or(false);"),
-            "watcher 只听 sync_live 一个开关（S5-1）"
+            !body.contains(&format!("db_option.{}", "sync_live")),
+            "sync_live 已退役（ADR-058 D8）：启动序列不许再读它"
         );
         assert!(
-            !body.contains("&& !direct_read_mode;"),
-            "sync_live 不得再被 direct_read_mode 钉成 false（S5-1）"
+            body.contains("let watch_task = {"),
+            "看门狗无条件 spawn，不许再挂在任何开关上"
         );
         let worker = body
             .find("ensure_batch_worker(mgr.clone())")

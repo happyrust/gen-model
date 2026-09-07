@@ -568,7 +568,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "project": state.identity.project,
             "mdb": state.identity.mdb,
             "namespace": state.identity.namespace,
-            "sync_live": state.sync_live,
             "data_read_mode": if crate::options::direct_read_mode() { "direct" } else { "db" },
             "data_face": crate::options::data_face().as_str(),
             "read_through": read_through,
@@ -759,7 +758,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "project": state.identity.project,
         "mdb": state.identity.mdb,
         "namespace": state.identity.namespace,
-        "sync_live": state.sync_live,
         "data_read_mode": if crate::options::direct_read_mode() { "direct" } else { "db" },
         // 数据面形态（2026-09-05 起默认 read-through）：`pe` / `ATT_*` 行是摄入来的还是
         // 随模型生成写透的。客户端拿它决定「查空」怎么说话——读透下缺行 = 还没读到，
@@ -1189,9 +1187,9 @@ pub struct ExecuteReq {
 
 /// POST /api/v1/update/execute — 扫描 + 入队，202 返回入队回执（ADR-011 §12）。
 ///
-/// 单飞预检与 `sync_live` 拒绝都随合流退役：数据批次由单 worker 天然串行，
-/// 互斥是调度器的性质，在 HTTP 层再写一遍只会产生假冲突；`sync_live = true`
-/// 时手动触发的意义是「别等下一个 30s 轮询，现在就扫一遍」。
+/// 单飞预检与当年那道 `sync_live` 拒绝都随合流退役：数据批次由单 worker 天然串行，
+/// 互斥是调度器的性质，在 HTTP 层再写一遍只会产生假冲突。watcher 如今无条件起
+/// （ADR-058 D8），手动触发的意义是「别等下一个 30s 轮询，现在就扫一遍」。
 pub async fn update_execute(
     State(state): State<AppState>,
     body: Option<Json<ExecuteReq>>,

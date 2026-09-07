@@ -26,7 +26,7 @@ if ($Action -eq 'start') {
         v_ip='"127.0.0.1"'; v_port='18049'; surreal_ns='"rocks8000_20260905"';
         http_api_addr='"127.0.0.1:18050"'; store_mode='"rocksdb"'; data_face='"ingest"';
         watch_dbnums='[8000]'; manual_db_nums='[8000]'; startup_autorun='true';
-        sync_live='true'; gen_model='false'; gen_mesh='true'; gen_spatial_tree='false';
+        gen_model='false'; gen_mesh='true'; gen_spatial_tree='false';
         meshes_path=('"' + ($run -replace '\\','/') + '/meshes"')
     }
     foreach ($key in $overrides.Keys) {

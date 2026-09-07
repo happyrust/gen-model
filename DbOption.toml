@@ -13,7 +13,6 @@ sync_tidb = false
 # 开回 true（aabbidx 轮），2026-08-04 web 冒烟验证再次关闭。
 #【变更 2026-09-04】false→true：S5 形态合一后的 live 验收（direct 默认 + watcher 接回来），
 # 配合下面 watch_dbnums 限定到两个库先跑；验收完是否保留由用户定。
-sync_live = true
 #【变更 2026-09-04】数据读取模式默认 direct（e3d-io 直接读库文件，ADR-053 / ADR-058 D8）。
 # 这个开关不在本文件里，只认环境变量 AIOS_DATA_READ_MODE（direct / db）：不设 = direct；
 # 只有显式 AIOS_DATA_READ_MODE=db 才退回 legacy db 读路由（已退役，只留退路）；认不出的

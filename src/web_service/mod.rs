@@ -86,7 +86,6 @@ pub struct AppState {
     pub mgr: Arc<AiosDBManager>,
     pub tasks: &'static TaskRegistry,
     pub identity: ServiceIdentity,
-    pub sync_live: bool,
     /// 启动时资源目录是否存在（spec §4.1 的 `static_assets`）。缺失不是故障：
     /// `/assets` 返回 404，REST/WS 照常，这个旗子让 `/health` 能把降级说出来。
     pub static_assets: bool,
@@ -159,8 +158,7 @@ impl ApiError {
         }
     }
 
-    /// 请求本身没错，是数据的前置条件不满足。与 `from_domain` 里 `sync_live`
-    /// 那一支同码。
+    /// 请求本身没错，是数据的前置条件不满足。
     pub fn precondition(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::UNPROCESSABLE_ENTITY,
@@ -196,7 +194,11 @@ impl ApiError {
         }
     }
 
-    /// 领域层 `anyhow::Error` 的统一映射：`sync_live` 前置条件拒绝归为 422，其余 500。
+    /// 领域层 `anyhow::Error` 的统一映射：元素不存在归为 404，其余 500。
+    ///
+    /// 曾经还有一支按错误文本里有没有 `sync_live` 判 422 的——那个开关 2026-09-07 随
+    /// ADR-058 D8 退役，没有任何一处再产出这种文本，分支跟着删了。真要报前置条件不满足，
+    /// 用 [`ApiError::precondition`]，别再回到按文本猜的路上。
     pub fn from_domain(error: anyhow::Error) -> Self {
         let message = format!("{error:#}");
         if matches!(
@@ -204,12 +206,6 @@ impl ApiError {
             Some(crate::data_interface::direct_store::DirectStoreError::NoSuchElement { .. })
         ) {
             Self::not_found(message)
-        } else if message.contains("sync_live") {
-            Self {
-                status: StatusCode::UNPROCESSABLE_ENTITY,
-                code: "precondition",
-                message,
-            }
         } else {
             Self {
                 status: StatusCode::INTERNAL_SERVER_ERROR,
@@ -294,7 +290,6 @@ pub async fn serve(
         mgr,
         tasks: TaskRegistry::global(),
         identity,
-        sync_live: db_option.sync_live.unwrap_or(false),
         static_assets,
         ui_root: ui_root.clone(),
         queries,

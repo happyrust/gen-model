@@ -24,7 +24,6 @@ sync_versioned = false
 sync_tidb = false
 #【变更 2026-07-27】true→false：生产增量改为启动重扫后持续监听；2026-07-29 曾临时
 # 开回 true（aabbidx 轮），2026-08-04 web 冒烟验证再次关闭。
-sync_live = false
 #【变更 2026-07-27】false→true：增量重解析允许覆盖既有库文件记录。
 replace_dbs = true
 enable_index = false
@@ -184,8 +183,9 @@ manual_db_nums = [1112, 8000]
 #【新增 2026-08-25】watch_dbnums：增量摄入只收这两个库。
 # 按 ADR-048，声明限定域本身就是「本次跑就要这几个库」的上弦信号——重扫排出的行
 # 不再挂起、`model_update_pending` 的持久积压启动即消化。此前这份配置靠
-# `AIOS_STARTUP_AUTORUN=0` 挡住整库自动开工，而同一份配置里 sync_live=false
-# 没有 watcher，解封条件永不成立，7655 行积压卡死（见 ADR-048 背景）。
+# `AIOS_STARTUP_AUTORUN=0` 挡住整库自动开工，而当时还有个 sync_live=false 把 watcher
+# 也关了，解封条件永不成立，7655 行积压卡死（见 ADR-048 背景）。那个开关 2026-09-07
+# 随 ADR-058 D8 退役，watcher 从此无条件起，这一半的坑不会再有。
 watch_dbnums = [1112, 8000]
 # exclude_db_nums = [] #不参与生成模型的数据库编号
 plat_url = ""

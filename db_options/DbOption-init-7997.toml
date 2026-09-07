@@ -20,7 +20,6 @@ sync_versioned = false
 sync_tidb = false
 #【变更 2026-07-27】true→false：生产增量改为启动重扫后持续监听；2026-07-29 曾临时
 # 开回 true（aabbidx 轮），2026-08-04 web 冒烟验证再次关闭。
-sync_live = false
 #【变更 2026-07-27】false→true：增量重解析允许覆盖既有库文件记录。
 replace_dbs = true
 enable_index = false

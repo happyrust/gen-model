@@ -18,7 +18,6 @@ enable_log = false
 sync_graph_db = false
 sync_versioned = false
 sync_tidb = false
-sync_live = false
 replace_dbs = true
 enable_index = false
 sync_chunk_size = 10_0000
