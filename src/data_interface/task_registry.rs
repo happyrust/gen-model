@@ -207,6 +207,48 @@ fn settle_step(entry: &mut TaskEntry, now: DateTime<Local>, ok: bool) {
     entry.steps.push(TaskStep { name, at, ms, ok });
 }
 
+/// 模型消费页认领时发到 WS `tasks` 主题的 `task_started` 载荷。
+///
+/// 比数据批次那条（`{task_id, kind, project}`）多带 `total_units`（本页认领的根数）与
+/// `detail`（认领时的 `epoch_id / queue_total / roots[] / root_samples_truncated`，
+/// `roots[].target_refno` 为 `a/b`）：浏览器端据 `roots` 就能在收口前把「正在重算的根」
+/// 标出来，而不必再回 `GET /tasks/{id}`。`roots` 只是样本（`model_update_pending` 建行
+/// 时最多放 10 条，其余计入 `root_samples_truncated`），与 REST 任务详情里的同一份。
+#[cfg(feature = "http_api")]
+fn model_drain_started_payload(
+    task_id: &str,
+    project: &str,
+    total: u32,
+    detail: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "task_id": task_id,
+        "kind": TASK_KIND_MODEL_DRAIN,
+        "project": project,
+        "total_units": total,
+        "detail": detail,
+    })
+}
+
+/// 模型消费页收口时的 `task_finished` 载荷。
+///
+/// 数据批次的 `task_finished` 只有 `{task_id, state, result}`；这里另带 `kind`、`project`
+/// 与收口时刻的 `detail`——客户端要拿 `detail.roots[].target_refno` 与自己已加载的
+/// 生成根求交，决定重载哪几根，缺了 `kind` 它连「这是不是一页模型消化」都分不出来，
+/// 只能对任何 `task_finished` 都去 REST 对齐一遍。`result` 即 `finish_model_drain_task`
+/// 交上来的 `{completed, failed, unstarted, claimed_epoch, current_epoch, yield_reason, failures}`。
+#[cfg(feature = "http_api")]
+fn model_drain_finished_payload(entry: &TaskEntry) -> serde_json::Value {
+    serde_json::json!({
+        "task_id": entry.task_id,
+        "kind": entry.kind,
+        "project": entry.project,
+        "state": entry.state.as_str(),
+        "result": entry.result.clone().unwrap_or(serde_json::Value::Null),
+        "detail": entry.detail.clone().unwrap_or(serde_json::Value::Null),
+    })
+}
+
 /// 进程启动时刻（RFC3339）。`ensure_batch_worker` 启动时触发初始化，因此它
 /// 锚定的是服务真正起来的时间，而不是第一次被问到的时间——「队列已重建，
 /// 排队时长从重启起算」那句话靠它才说得出来（ADR-011 §4）。
@@ -360,6 +402,13 @@ impl TaskRegistry {
 
     /// 建一条模型消费页。它不是第二份队列：重启恢复只看 durable pending，
     /// TaskRegistry 仅把本次认领的 epoch、来源与根暴露给 REST/Python/Plant UI。
+    ///
+    /// 同时把这一行镜像成 WS `tasks` 主题的 `task_started`（见 [`model_drain_started_payload`]）。
+    /// 数据批次的两条事件发在 `batch_worker` 的调用点上；模型消费页的认领与收口却全部
+    /// 只经过本方法与 [`Self::finish`] 这两个口（`model_update_pending::DrainPageProgress`
+    /// 的 claim 与 `finish_model_drain_task`），所以镜像就钉在行的旁边——浏览器端
+    /// （plant3d-web 的模型变更同步）此前只能 15 s 轮询 `GET /tasks?kind=model_drain`
+    /// 对齐，因为 drain 一页收口在 WS 上一声不响。
     pub fn insert_running_model_drain(
         &self,
         task_id: &str,
@@ -367,6 +416,8 @@ impl TaskRegistry {
         total: u32,
         detail: serde_json::Value,
     ) {
+        #[cfg(feature = "http_api")]
+        let started_payload = model_drain_started_payload(task_id, project, total, &detail);
         let now = Local::now().to_rfc3339();
         self.insert_entry(TaskEntry {
             task_id: task_id.to_string(),
@@ -399,6 +450,13 @@ impl TaskRegistry {
             steps: Vec::new(),
             steps_dropped: 0,
         });
+        #[cfg(feature = "http_api")]
+        crate::web_service::events::publish(
+            crate::web_service::events::Topic::Tasks,
+            "task_started",
+            Some(task_id.to_string()),
+            started_payload,
+        );
     }
 
     pub fn insert_running_model_rebuild(
@@ -746,22 +804,43 @@ impl TaskRegistry {
     }
 
     pub fn finish(&self, task_id: &str, state: TaskState, result: serde_json::Value) {
-        let mut inner = self.entries();
-        if let Some(entry) = inner.get_mut(task_id) {
-            let now = Local::now();
-            // 最后一步在这儿结算。`current_stage` 照旧不清（它是「死在哪一步」那
-            // 一格），但它占用的时长到此为止。`ok` 按终态定：Succeeded / Partial
-            // 算走完了——Partial 的失败在交付单元层，不在阶段层；Failed / Yielded
-            // 算没走完——前者死在这一步，后者是门在这一步中途关了。
-            settle_step(
-                entry,
-                now,
-                matches!(state, TaskState::Succeeded | TaskState::Partial),
+        // 只有模型消费页在这儿镜像 `task_finished`：数据批次 / 房间轮的那条由
+        // `batch_worker` 在自己的调用点发（带它们各自的 result 形状），这里再发一次
+        // 就是同一收口两条事件。载荷在锁内拼好、锁外发——broadcast 不阻塞，但没必要
+        // 让别的读者等一次 JSON 拼装。
+        #[cfg(feature = "http_api")]
+        let mut finished_payload: Option<serde_json::Value> = None;
+        {
+            let mut inner = self.entries();
+            if let Some(entry) = inner.get_mut(task_id) {
+                let now = Local::now();
+                // 最后一步在这儿结算。`current_stage` 照旧不清（它是「死在哪一步」那
+                // 一格），但它占用的时长到此为止。`ok` 按终态定：Succeeded / Partial
+                // 算走完了——Partial 的失败在交付单元层，不在阶段层；Failed / Yielded
+                // 算没走完——前者死在这一步，后者是门在这一步中途关了。
+                settle_step(
+                    entry,
+                    now,
+                    matches!(state, TaskState::Succeeded | TaskState::Partial),
+                );
+                entry.state = state;
+                entry.finished_at = Some(now.to_rfc3339());
+                entry.stall_deadline = None;
+                entry.result = Some(result);
+                #[cfg(feature = "http_api")]
+                if entry.kind == TASK_KIND_MODEL_DRAIN {
+                    finished_payload = Some(model_drain_finished_payload(entry));
+                }
+            }
+        }
+        #[cfg(feature = "http_api")]
+        if let Some(payload) = finished_payload {
+            crate::web_service::events::publish(
+                crate::web_service::events::Topic::Tasks,
+                "task_finished",
+                Some(task_id.to_string()),
+                payload,
             );
-            entry.state = state;
-            entry.finished_at = Some(now.to_rfc3339());
-            entry.stall_deadline = None;
-            entry.result = Some(result);
         }
     }
 
@@ -1204,5 +1283,104 @@ mod tests {
         assert_eq!(entry.state.as_str(), "yielded");
         assert!(entry.state.is_terminal());
         assert_eq!(entry.detail.unwrap()["roots"][0]["target_refno"], "1/2");
+    }
+
+    /// 把 broadcast 里此刻攒着的、属于 `task_id` 的事件全部取出（其它测试并行发的
+    /// 事件不算；`Lagged` 说明别的测试灌得太快，跳过继续取——我们的两条就在后面）。
+    #[cfg(feature = "http_api")]
+    fn drain_events_for(
+        rx: &mut tokio::sync::broadcast::Receiver<crate::web_service::events::WsEvent>,
+        task_id: &str,
+    ) -> Vec<crate::web_service::events::WsEvent> {
+        use tokio::sync::broadcast::error::TryRecvError;
+        let mut out = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(event) => {
+                    if event.task_id.as_deref() == Some(task_id) {
+                        out.push(event);
+                    }
+                }
+                Err(TryRecvError::Lagged(_)) => continue,
+                Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+            }
+        }
+        out
+    }
+
+    #[cfg(feature = "http_api")]
+    #[test]
+    fn model_drain_claim_and_settle_are_mirrored_to_ws_tasks_topic() {
+        use crate::web_service::events::{Topic, event_sender};
+
+        let mut rx = event_sender().subscribe();
+        let registry = TaskRegistry::default();
+        let task_id = "model-ws-mirror-1";
+        registry.insert_running_model_drain(
+            task_id,
+            "P",
+            2,
+            serde_json::json!({
+                "epoch_id": 9,
+                "queue_total": 40,
+                "roots": [
+                    { "dbnum": 8000, "target_refno": "1/2", "action": "regen_root", "revision": 3 },
+                    { "dbnum": 8000, "target_refno": "1/3", "action": "regen_root", "revision": 1 }
+                ],
+                "root_samples_truncated": 0
+            }),
+        );
+        registry.finish(
+            task_id,
+            TaskState::Succeeded,
+            serde_json::json!({ "completed": 2, "failed": 0, "unstarted": 0 }),
+        );
+
+        let events = drain_events_for(&mut rx, task_id);
+        assert_eq!(
+            events.iter().map(|e| e.ty).collect::<Vec<_>>(),
+            vec!["task_started", "task_finished"],
+            "认领一条、收口一条，不多不少"
+        );
+        assert!(events.iter().all(|e| e.topic == Topic::Tasks));
+
+        let started = &events[0].payload;
+        assert_eq!(started["kind"], TASK_KIND_MODEL_DRAIN);
+        assert_eq!(started["project"], "P");
+        assert_eq!(started["total_units"], 2);
+        assert_eq!(
+            started["detail"]["roots"][1]["target_refno"], "1/3",
+            "认领时的根样本要随 task_started 一起到客户端"
+        );
+
+        let finished = &events[1].payload;
+        assert_eq!(
+            finished["kind"], TASK_KIND_MODEL_DRAIN,
+            "客户端靠 kind 才分得出这是一页模型消化，数据批次的 task_finished 没有这一格"
+        );
+        assert_eq!(finished["state"], "succeeded");
+        assert_eq!(finished["result"]["completed"], 2);
+        assert_eq!(
+            finished["detail"]["roots"][0]["target_refno"], "1/2",
+            "重载哪几根靠 detail.roots[].target_refno，收口时必须还在"
+        );
+    }
+
+    #[cfg(feature = "http_api")]
+    #[test]
+    fn non_drain_rows_do_not_publish_from_the_registry() {
+        use crate::web_service::events::event_sender;
+
+        let mut rx = event_sender().subscribe();
+        let registry = TaskRegistry::default();
+        let task_id = "db-ws-mirror-none";
+        queue_row(&registry, task_id, 7997, 1, 2);
+        registry.mark_started(task_id);
+        registry.finish(task_id, TaskState::Succeeded, serde_json::json!({}));
+
+        assert!(
+            drain_events_for(&mut rx, task_id).is_empty(),
+            "数据批次的 task_started / task_finished 由 batch_worker 在调用点发；注册表再发就是同一收口两条事件"
+        );
     }
 }

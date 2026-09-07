@@ -523,9 +523,9 @@
 
 | type | 主题 | payload |
 | --- | --- | --- |
-| `task_started` | tasks | `{ task_id, kind, project }` |
+| `task_started` | tasks | `{ task_id, kind, project }`；`kind = "model_drain"`（一页模型消化被认领）时另带 `total_units`（本页根数）与 `detail`（认领时的 `epoch_id / queue_total / roots[] / root_samples_truncated`，`roots[].target_refno` 为 `a/b`；`roots` 最多 10 条样本，与 `GET /tasks/{id}` 里的同一份） |
 | `task_progress` | tasks | `ManualUpdateEvent` 原样（`kind: data_batch_started / data_batch_finished / model_unit_started / model_unit_finished`，两阶段、无百分比，与规格一致）|
-| `task_finished` | tasks | `{ task_id, state, result: ManualUpdateResult }` |
+| `task_finished` | tasks | `{ task_id, state, result: ManualUpdateResult }`；`model_drain` 页收口时另带 `kind: "model_drain"`、`project` 与收口时刻的 `detail`（同上），`result` 为 `{ completed, failed, unstarted, claimed_epoch, current_epoch, yield_reason, failures }`。**客户端据此重载**：`detail.roots[].target_refno` ∩ 自己已加载的生成根 → 重载那几根；`root_samples_truncated > 0` 时样本不全，按 `roots[].dbnum` 整库对齐或退回 REST 轮询。2026-09-08 起发（此前 drain 页在 WS 上一声不响，浏览器端只能 15 s 轮询 `GET /tasks?kind=model_drain`）；发送点在 `task_registry` 的 `insert_running_model_drain` / `finish`，不在 `model_update_pending` 的调用点——drain 的认领与收口只经这两个口 |
 | `model_source_changed` | tasks | `{ dbnum, model_source }`（`memory` / `database`，§4.12）；`task_id` 为空。初始化发布 run 收口 → `database`，回退重建清库 → `memory`。客户端只刷 `/dbnums` 那一行的来源格，不重载场景；字面值认不出当没收到，下一拍 `/dbnums` 带回真值 |
 | ~~`incr_applied`~~ | ~~increments~~ | **已删（ADR-011 合流）**：自动路径的批次与手动同走 tasks 主题的 `task_started / task_progress / task_finished` |
 | `pong` | 无 | `{}` |
