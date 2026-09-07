@@ -23,6 +23,7 @@ use std::sync::{Arc, OnceLock, PoisonError, RwLock};
 
 use aios_core::shape::pdms_shape::PlantMesh;
 use aios_core::{GeomInstQuery, RefnoEnum};
+use anyhow::Context;
 use glam::Mat4;
 use parry3d::bounding_volume::{Aabb, BoundingVolume};
 use parry3d::shape::{TriMesh, TriMeshFlags};
@@ -209,6 +210,9 @@ pub(crate) struct ResidentRoomModel {
     /// 在册却没拿到几何或包围盒不可用的面板（与 `PanelIndex::missing_panels` 同口径、同序）。
     pub missing_panels: Vec<RefnoEnum>,
     pub digest: String,
+    /// 读透：各 DESI 的冻结令牌（按 dbnum 序），启动参照按它们读分片；摄入为空（参照就是
+    /// `room_published_topology`）。
+    pub source_tokens: Vec<String>,
     pub built_at: std::time::Instant,
     meshes: Arc<MeshCache>,
 }
@@ -301,9 +305,15 @@ impl ResidentRoomModel {
             panels,
             missing_panels,
             digest,
+            source_tokens: Vec::new(),
             built_at: std::time::Instant::now(),
             meshes,
         }
+    }
+
+    pub(crate) fn with_source_tokens(mut self, tokens: Vec<String>) -> Self {
+        self.source_tokens = tokens;
+        self
     }
 
     pub(crate) fn panel(&self, panel: RefnoEnum) -> Option<&ResidentPanel> {
@@ -585,7 +595,7 @@ pub(crate) async fn load_latest(
     match_room_fn: impl Fn(&str) -> bool,
     meshes: Arc<MeshCache>,
 ) -> anyhow::Result<ResidentRoomModel> {
-    let (composite, groups) =
+    let (composite, tokens, groups) =
         crate::fast_model::room_topology::load_room_groups_from_files(hierarchy)
             .await
             .map_err(|error| {
@@ -618,7 +628,212 @@ pub(crate) async fn load_latest(
         map,
         insts,
         meshes,
-    ))
+    )
+    .with_source_tokens(tokens))
+}
+
+// ---------------------------------------------------------------------------
+// 启动参照（Q9 (a)）与启动对比（Q3 / Q6 / Q7）——P3 里不碰邻线脏文件的那一半。
+// 应用侧（按 diff 删 / 重算 / 改列、接进 `lib.rs` 启动段）随 P3 后半截进。
+// ---------------------------------------------------------------------------
+
+/// 上次成功结算所依据的那组文件版本与拓扑摘要，落在 `room_build:main.resident_reference`。
+///
+/// 读透：`tokens` 是各 DESI 的冻结令牌，分片按它们从 `room_topology_source` 读回来合成
+/// 「旧」那份；摄入：`tokens` 为空，参照就是 `room_published_topology` 本身（与常驻模型同源，
+/// 摘要不等即库被恢复 / 手改）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ResidentReference {
+    pub form: String,
+    pub key: String,
+    pub digest: String,
+    #[serde(default)]
+    pub tokens: Vec<String>,
+    pub rooms: usize,
+    pub registered_panels: usize,
+    pub settled_at: String,
+}
+
+impl ResidentReference {
+    pub(crate) fn for_model(model: &ResidentRoomModel) -> Self {
+        Self {
+            form: model.manifest.form.as_str().to_string(),
+            key: model.manifest.key.clone(),
+            digest: model.digest.clone(),
+            tokens: model.source_tokens.clone(),
+            rooms: model.map.rooms.len(),
+            registered_panels: registered_panels(&model.map).len(),
+            settled_at: chrono::Local::now().to_rfc3339(),
+        }
+    }
+
+    pub(crate) fn form(&self) -> Option<ResidentForm> {
+        match self.form.as_str() {
+            "published" => Some(ResidentForm::Published),
+            "latest" => Some(ResidentForm::Latest),
+            _ => None,
+        }
+    }
+}
+
+/// `UPSERT` 只动 `resident_reference` 一格：`room_build:main` 上的空间凭据
+/// （`spatial_epoch` / `tree_entries` / `rebuild_required`）由 `room_model` 管，这里不碰。
+pub(crate) fn render_resident_reference_write(reference: &ResidentReference) -> String {
+    let json = serde_json::to_string(reference).expect("resident reference serializes");
+    format!("UPSERT room_build:main SET resident_reference = {json};")
+}
+
+pub(crate) async fn write_resident_reference_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    reference: &ResidentReference,
+) -> anyhow::Result<()> {
+    db.query(render_resident_reference_write(reference))
+        .await?
+        .check()?;
+    Ok(())
+}
+
+pub(crate) async fn read_resident_reference_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+) -> anyhow::Result<Option<ResidentReference>> {
+    let mut response = db
+        .query("SELECT VALUE resident_reference FROM room_build:main;")
+        .await?
+        .check()?;
+    let rows: Vec<Option<ResidentReference>> = response.take(0)?;
+    Ok(rows.into_iter().flatten().next())
+}
+
+/// 读透侧：把这份模型依据的每个文件版本冻成 `room_topology_source` 分片（已有同令牌的分片就
+/// 复用，`prepare_producer_source` 幂等），再写参照行。**只在一轮成功结算之后调**——参照说的是
+/// 「边是按这份拓扑算出来的」，算失败的轮次不许推进它。
+pub(crate) async fn persist_latest_reference(
+    model: &ResidentRoomModel,
+) -> anyhow::Result<ResidentReference> {
+    anyhow::ensure!(
+        model.manifest.form == ResidentForm::Latest,
+        "只有读透侧的模型需要写分片参照；摄入侧的参照就是 room_published_topology"
+    );
+    for token in &model.source_tokens {
+        let source =
+            crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(token)?;
+        crate::fast_model::room_topology_source::prepare_producer_source(&source)
+            .await
+            .with_context(|| format!("冻结 dbnum {} 的房间拓扑分片", source.dbnum()))?;
+    }
+    let reference = ResidentReference::for_model(model);
+    write_resident_reference_on(&aios_core::SUL_DB, &reference).await?;
+    Ok(reference)
+}
+
+/// 启动对比的「旧」那份：按参照里的令牌读分片、合成、过关键字。任一分片缺失 / 校验失败
+/// → 整份失败（原则 2），调用方按「参照不可读」处置，不拿半份去 diff。
+pub(crate) async fn load_reference_map_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    reference: &ResidentReference,
+    hierarchy: RoomHierarchy,
+    room_key_words: &[String],
+    match_room_fn: impl Fn(&str) -> bool,
+) -> anyhow::Result<(Vec<RoomGroup>, RoomPanelMap)> {
+    let mut sources = Vec::with_capacity(reference.tokens.len());
+    for token in &reference.tokens {
+        sources.push(
+            crate::fast_model::room_topology_source::load_on(db, token)
+                .await
+                .context("读启动参照的房间拓扑分片")?,
+        );
+    }
+    let composed = crate::fast_model::room_topology_source::compose(&sources, hierarchy)?;
+    let groups: Vec<RoomGroup> = composed
+        .into_iter()
+        .flat_map(|(_, groups)| groups)
+        .collect();
+    let map = registered_map(&groups, room_key_words, match_room_fn);
+    Ok((groups, map))
+}
+
+/// 启动该做什么（Q7 (a)：全量降为显式修复入口，其余走对比）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StartupRoomPlan {
+    /// 没有参照（开关第一次打开 / 库刚建 / 形态换了）：按今天的口径跑一次全量并写参照。
+    NoReference,
+    /// 参照摘要 == 现状摘要：零写入，只刷参照时间。
+    Unchanged,
+    /// 参照能读回来且摘要不同：按 diff 删 / 重算 / 改列。
+    Apply(TopologyDiff),
+    /// 摄入侧参照与常驻模型同源却对不上：库被恢复 / 手改，标 `rebuild_required` 走显式全量。
+    IntegrityMismatch { expected: String, actual: String },
+    /// 参照在但读不回来（分片缺失 / 校验失败）：不猜，走显式全量。
+    ReferenceUnreadable(String),
+}
+
+impl StartupRoomPlan {
+    pub(crate) fn summary(&self) -> String {
+        match self {
+            Self::NoReference => "无参照 → 全量一次并写参照".into(),
+            Self::Unchanged => "参照摘要 == 现状 → 零写入".into(),
+            Self::Apply(diff) => format!("对比 → {}", diff.summary()),
+            Self::IntegrityMismatch { expected, actual } => format!(
+                "摄入侧参照与常驻模型同源却不等（{} ≠ {}）→ rebuild_required",
+                &expected[..expected.len().min(12)],
+                &actual[..actual.len().min(12)]
+            ),
+            Self::ReferenceUnreadable(reason) => {
+                format!("参照不可读（{reason}）→ rebuild_required")
+            }
+        }
+    }
+}
+
+/// 纯函数：参照 + 现状 + （读透）参照合成的旧视图 → 计划。`reference_map` 只在读透且
+/// 摘要不等时才被看；读不回来传 `Err(原因)`。
+pub(crate) fn plan_startup(
+    reference: Option<&ResidentReference>,
+    current: &ResidentRoomModel,
+    reference_map: Option<Result<&RoomPanelMap, String>>,
+) -> StartupRoomPlan {
+    let Some(reference) = reference else {
+        return StartupRoomPlan::NoReference;
+    };
+    if reference.form() != Some(current.manifest.form) {
+        // 换了形态（配置从摄入切到读透或反过来）：参照说的不是这一路，等同于没有。
+        return StartupRoomPlan::NoReference;
+    }
+    if reference.digest == current.digest {
+        return StartupRoomPlan::Unchanged;
+    }
+    match current.manifest.form {
+        ResidentForm::Published => StartupRoomPlan::IntegrityMismatch {
+            expected: reference.digest.clone(),
+            actual: current.digest.clone(),
+        },
+        ResidentForm::Latest => match reference_map {
+            Some(Ok(old)) => StartupRoomPlan::Apply(TopologyDiff::between(old, &current.map)),
+            Some(Err(reason)) => StartupRoomPlan::ReferenceUnreadable(reason),
+            None => StartupRoomPlan::ReferenceUnreadable(
+                "读透侧对比需要参照合成的旧视图，调用方没给".into(),
+            ),
+        },
+    }
+}
+
+/// 改列（Q6 第 3 条）：一间房只改了房间号，交集里每块面板的 `room_relate` 出边与
+/// `room_panel_relate` 入边只改 `room_num`，边 id 不动、不重算。走图遍历取边
+/// （`{panel}->room_relate` / `{panel}<-room_panel_relate`），与删除侧同一条纪律。
+pub(crate) fn render_renumber_statements(renumber: &RoomRenumber) -> Vec<String> {
+    let old = crate::data_interface::dbnum_state::escape_surql_str(&renumber.old_num);
+    let new = crate::data_interface::dbnum_state::escape_surql_str(&renumber.new_num);
+    let mut statements = Vec::with_capacity(renumber.panels.len() * 2);
+    for panel in &renumber.panels {
+        let key = panel.to_pe_key();
+        statements.push(format!(
+            "UPDATE (SELECT VALUE id FROM {key}->room_relate WHERE room_num = '{old}') SET room_num = '{new}';"
+        ));
+        statements.push(format!(
+            "UPDATE (SELECT VALUE id FROM {key}<-room_panel_relate WHERE room_num = '{old}') SET room_num = '{new}';"
+        ));
+    }
+    statements
 }
 
 #[derive(Default)]
@@ -1251,6 +1466,316 @@ mod tests {
             model.panel(r(9)).unwrap().world_aabb,
             Aabb::new(Point::new(2.0, 0.0, 0.0), Point::new(3.0, 1.0, 1.0))
         );
+    }
+
+    /// 参照行只动 `resident_reference` 一格：空间凭据原样，`room_model` 那种按字段投影的读法
+    /// 不受影响；读回来逐字相等。
+    #[tokio::test]
+    async fn resident_reference_roundtrips_and_leaves_the_spatial_stamp_alone() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("room_resident")
+            .use_db("reference")
+            .await
+            .unwrap();
+        db.query(
+            "UPSERT room_build:main SET spatial_epoch = 355, tree_entries = 105650, \
+             rebuild_required = false, built_at = time::now();",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        assert!(read_resident_reference_on(&db).await.unwrap().is_none());
+
+        let model = model_of(groups(), vec![], Arc::default())
+            .with_source_tokens(vec!["tok-a".into(), "tok-b".into()]);
+        let reference = ResidentReference::for_model(&model);
+        assert_eq!(reference.form, "published");
+        assert_eq!((reference.rooms, reference.registered_panels), (2, 3));
+        write_resident_reference_on(&db, &reference).await.unwrap();
+        assert_eq!(
+            read_resident_reference_on(&db).await.unwrap(),
+            Some(reference.clone())
+        );
+
+        #[derive(serde::Deserialize)]
+        struct Stamp {
+            spatial_epoch: u64,
+            tree_entries: u64,
+            rebuild_required: Option<bool>,
+        }
+        let mut response = db
+            .query("SELECT spatial_epoch, tree_entries, rebuild_required FROM room_build:main;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let stamps: Vec<Stamp> = response.take(0).unwrap();
+        assert_eq!(stamps.len(), 1);
+        assert_eq!(
+            (
+                stamps[0].spatial_epoch,
+                stamps[0].tree_entries,
+                stamps[0].rebuild_required
+            ),
+            (355, 105650, Some(false)),
+            "空间凭据一格没动"
+        );
+
+        // 再写一次是覆盖，不是追加。
+        let mut newer = reference.clone();
+        newer.digest = "other".into();
+        write_resident_reference_on(&db, &newer).await.unwrap();
+        assert_eq!(read_resident_reference_on(&db).await.unwrap(), Some(newer));
+    }
+
+    fn shard(
+        dbnum: u32,
+        room_name: &str,
+    ) -> crate::fast_model::room_topology_source::RoomTopologySource {
+        use crate::data_interface::generation_root::refno_from_e3d;
+        use crate::fast_model::room_topology_source::{TopologyNode, fixture_source};
+        use e3d_io::refno::RefNo;
+
+        let node = |id: u32, noun: &str, name: &str, members: Vec<u32>| TopologyNode {
+            refno: refno_from_e3d(RefNo::new(dbnum, id)),
+            noun: noun.into(),
+            name: name.into(),
+            members: members
+                .into_iter()
+                .map(|member| refno_from_e3d(RefNo::new(dbnum, member)))
+                .collect(),
+        };
+        let mut source = fixture_source(dbnum, 1);
+        source.roots = vec![refno_from_e3d(RefNo::new(dbnum, 1))];
+        source.nodes = vec![
+            node(1, "WORL", "", vec![2]),
+            node(2, "FRMW", room_name, vec![3]),
+            node(3, "PANE", "", vec![]),
+        ];
+        source
+    }
+
+    /// 读透参照的旧视图从持久分片合成；缺一片整份失败，不拿半份去 diff。
+    #[tokio::test]
+    async fn reference_map_is_composed_from_persisted_shards_and_fails_closed_when_one_is_missing()
+    {
+        use crate::data_interface::generation_root::refno_from_e3d;
+        use crate::fast_model::room_topology_source::persist_on;
+        use e3d_io::refno::RefNo;
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("room_resident")
+            .use_db("reference_map")
+            .await
+            .unwrap();
+        let a = shard(1, "/A-RM-R101");
+        let b = shard(2, "/B-RM-R201");
+        persist_on(&db, &a).await.unwrap();
+        let reference = ResidentReference {
+            form: "latest".into(),
+            key: "composite".into(),
+            digest: "d".into(),
+            tokens: vec![a.source_token.clone(), b.source_token.clone()],
+            rooms: 2,
+            registered_panels: 2,
+            settled_at: String::new(),
+        };
+        let error = load_reference_map_on(
+            &db,
+            &reference,
+            RoomHierarchy::Hd,
+            &keywords(),
+            match_room_name_hd,
+        )
+        .await
+        .expect_err("b 的分片还没落");
+        assert!(
+            format!("{error:#}").contains("missing exact room topology source"),
+            "{error:#}"
+        );
+
+        persist_on(&db, &b).await.unwrap();
+        let (groups, map) = load_reference_map_on(
+            &db,
+            &reference,
+            RoomHierarchy::Hd,
+            &keywords(),
+            match_room_name_hd,
+        )
+        .await
+        .unwrap();
+        assert_eq!(groups.len(), 2);
+        assert_eq!(map.rooms.len(), 2);
+        assert_eq!(
+            map.room_num_of(refno_from_e3d(RefNo::new(2, 3))),
+            Some("R201")
+        );
+        assert_eq!(
+            topology_digest(&groups),
+            topology_digest(&groups.iter().rev().cloned().collect::<Vec<_>>())
+        );
+    }
+
+    #[test]
+    fn plan_startup_covers_no_reference_unchanged_apply_mismatch_and_unreadable() {
+        let current_published = model_of(groups(), vec![], Arc::default());
+        assert_eq!(
+            plan_startup(None, &current_published, None),
+            StartupRoomPlan::NoReference
+        );
+
+        let mut same = ResidentReference::for_model(&current_published);
+        assert_eq!(
+            plan_startup(Some(&same), &current_published, None),
+            StartupRoomPlan::Unchanged
+        );
+
+        // 形态换了：参照说的不是这一路。
+        same.form = "latest".into();
+        assert_eq!(
+            plan_startup(Some(&same), &current_published, None),
+            StartupRoomPlan::NoReference
+        );
+
+        // 摄入侧摘要不等 = 库被动过。
+        let mut tampered = ResidentReference::for_model(&current_published);
+        tampered.digest = "not-the-same".into();
+        assert!(matches!(
+            plan_startup(Some(&tampered), &current_published, None),
+            StartupRoomPlan::IntegrityMismatch { .. }
+        ));
+
+        // 读透侧：摘要不等 → 拿旧视图 diff；旧视图读不回来 → 不猜。
+        let renamed = vec![
+            group(5, "/1RX-RM03-R309", &[7, 8]),
+            group(6, "/1RX-RM03-R302", &[9]),
+        ];
+        let current_latest = ResidentRoomModel::assemble(
+            manifest(ResidentForm::Latest, "c2"),
+            renamed.clone(),
+            map_of(&renamed),
+            vec![],
+            Arc::default(),
+        );
+        let old_latest = ResidentRoomModel::assemble(
+            manifest(ResidentForm::Latest, "c1"),
+            groups(),
+            map_of(&groups()),
+            vec![],
+            Arc::default(),
+        );
+        let reference = ResidentReference::for_model(&old_latest);
+        let plan = plan_startup(Some(&reference), &current_latest, Some(Ok(&old_latest.map)));
+        let StartupRoomPlan::Apply(diff) = &plan else {
+            panic!("{plan:?}");
+        };
+        assert_eq!(diff.renumbered_rooms.len(), 1);
+        assert!(plan.summary().starts_with("对比 → "), "{}", plan.summary());
+        assert_eq!(
+            plan_startup(
+                Some(&reference),
+                &current_latest,
+                Some(Err("checksum".into()))
+            ),
+            StartupRoomPlan::ReferenceUnreadable("checksum".into())
+        );
+        assert!(matches!(
+            plan_startup(Some(&reference), &current_latest, None),
+            StartupRoomPlan::ReferenceUnreadable(_)
+        ));
+    }
+
+    /// 改列只碰交集里面板的边：`room_num` 变、边 id 不变、别的房间与不在交集的面板原样。
+    #[tokio::test]
+    async fn renumber_statements_change_only_the_room_num_column_of_the_intersection() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("room_resident").use_db("renumber").await.unwrap();
+        db.query(
+            "CREATE pe:24384_1 SET noun = 'FRMW'; CREATE pe:24384_2 SET noun = 'FRMW'; \
+             CREATE pe:24384_7 SET noun = 'PANE'; CREATE pe:24384_8 SET noun = 'PANE'; CREATE pe:24384_11 SET noun = 'PANE'; \
+             CREATE pe:24384_5 SET noun = 'EQUI'; CREATE pe:24384_6 SET noun = 'BOX'; CREATE pe:24384_9 SET noun = 'EQUI'; CREATE pe:24384_12 SET noun = 'EQUI'; \
+             INSERT RELATION INTO room_panel_relate [{ id: room_panel_relate:⟨24384_1_24384_7⟩, in: pe:24384_1, out: pe:24384_7, room_num: 'R301' }]; \
+             RELATE pe:24384_1->room_panel_relate->pe:24384_8 SET room_num = 'R301'; \
+             RELATE pe:24384_2->room_panel_relate->pe:24384_11 SET room_num = 'R302'; \
+             INSERT RELATION INTO room_relate [{ id: room_relate:⟨24384_7_24384_5⟩, in: pe:24384_7, out: pe:24384_5, room_num: 'R301' }]; \
+             RELATE pe:24384_7->room_relate->pe:24384_6 SET room_num = 'R301'; \
+             RELATE pe:24384_8->room_relate->pe:24384_9 SET room_num = 'R301'; \
+             RELATE pe:24384_11->room_relate->pe:24384_12 SET room_num = 'R302';",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let statements = render_renumber_statements(&RoomRenumber {
+            room: r(1),
+            old_num: "R301".into(),
+            new_num: "R309".into(),
+            panels: vec![r(7)],
+        });
+        assert_eq!(statements.len(), 2);
+        db.query(format!(
+            "BEGIN TRANSACTION; {} COMMIT TRANSACTION;",
+            statements.join(" ")
+        ))
+        .await
+        .expect("transport")
+        .check()
+        .expect("statements");
+
+        async fn room_nums(
+            db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+            sql: &str,
+        ) -> Vec<String> {
+            let mut response = db.query(sql).await.unwrap().check().unwrap();
+            let mut nums: Vec<String> = response.take(0).unwrap();
+            nums.sort();
+            nums
+        }
+        assert_eq!(
+            room_nums(&db, "SELECT VALUE room_num FROM pe:24384_7->room_relate;").await,
+            vec!["R309", "R309"],
+            "7 的两条成员边改列"
+        );
+        assert_eq!(
+            room_nums(
+                &db,
+                "SELECT VALUE room_num FROM pe:24384_7<-room_panel_relate;"
+            )
+            .await,
+            vec!["R309"],
+            "7 的房间边改列"
+        );
+        assert_eq!(
+            room_nums(&db, "SELECT VALUE room_num FROM pe:24384_8->room_relate;").await,
+            vec!["R301"],
+            "8 不在交集里，原样"
+        );
+        assert_eq!(
+            room_nums(&db, "SELECT VALUE room_num FROM pe:24384_11->room_relate;").await,
+            vec!["R302"],
+            "别的房间原样"
+        );
+        let ids = room_nums(&db, "SELECT VALUE <string>id FROM pe:24384_7->room_relate;").await;
+        assert!(
+            ids.iter().any(|id| id.contains("24384_7_24384_5")),
+            "边 id 不动: {ids:?}"
+        );
+        let edges: Vec<surrealdb::sql::Thing> = db
+            .query("SELECT VALUE id FROM room_relate;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(edges.len(), 4, "改列不增删边");
     }
 
     /// 回退即红：归属路径只许经 `for_membership` 取模型。P2 接线前这里是空转（两份文件里

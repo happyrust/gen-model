@@ -342,7 +342,7 @@ pub(crate) async fn load_room_panel_map_from_files<F>(
 where
     F: Fn(&str) -> bool,
 {
-    let (_, groups) = load_room_groups_from_files(hierarchy).await?;
+    let (_, _, groups) = load_room_groups_from_files(hierarchy).await?;
     Ok(room_panel_map_from_groups(
         room_panel_groups(&groups, room_key_words),
         match_room_fn,
@@ -350,11 +350,12 @@ where
 }
 
 /// [`load_room_panel_map_from_files`] 的下半截：当前 MDB 全部设计库文件的**原始**分组
-/// （未过关键字），以及这组文件版本的规范摘要（各 DESI 冻结令牌的 JSON 序列化再摘要）。
-/// 常驻房间模型（`room_resident`）的读透侧以那个摘要为换代键、以分组算拓扑摘要。
+/// （未过关键字）、各 DESI 的冻结令牌（按 dbnum 序），以及这组文件版本的规范摘要
+/// （令牌 JSON 序列化再摘要）。常驻房间模型（`room_resident`）的读透侧以那个摘要为换代键、
+/// 以令牌写启动参照、以分组算拓扑摘要。
 pub(crate) async fn load_room_groups_from_files(
     hierarchy: RoomHierarchy,
-) -> anyhow::Result<(String, Vec<RoomGroup>)> {
+) -> anyhow::Result<(String, Vec<String>, Vec<RoomGroup>)> {
     let current = crate::fast_model::e3d_model_service::E3dModelService::from_current().await?;
     let mut sources = current
         .design_sources()?
@@ -406,7 +407,7 @@ pub(crate) async fn load_room_groups_from_files(
         };
         groups.extend(cached.iter().cloned());
     }
-    Ok((composite, groups))
+    Ok((composite, tokens, groups))
 }
 
 /// Load room topology from the durable composite of each file's last

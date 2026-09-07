@@ -1,6 +1,6 @@
 # 2026-09-07 计划：常驻房间模型——库是存储与参照，不是计算源
 
-状态：**P0 已过目放行（2026-09-07 18:55）；P1 本体已落地**（`src/fast_model/room_resident.rs`，11 条测试绿，见 §3 P1 落地记）。来源：grill 四轮（Q1–Q16 全部按推荐拍板，决议索引见 §8），事实全部按当前**共享工作树**源码手核（行号随邻线未提交改动会漂，以函数名为准）。
+状态：**P0 已过目放行（2026-09-07 18:55）并取证完；P1 本体已落地**（`src/fast_model/room_resident.rs`，见 §3 P1 落地记）；**P3-a（启动参照与启动计划的纯函数 / DB 半截）已落地**，P2 与 P3-b 等邻线提交 F-A/F-B。来源：grill 四轮（Q1–Q16 全部按推荐拍板，决议索引见 §8），事实全部按当前**共享工作树**源码手核（行号随邻线未提交改动会漂，以函数名为准）。
 
 关联：ADR-010（房间归属增量）、ADR-040（房间失效正确性）、ADR-062（按数据库文件完成后发布）、`docs/2026-09-07-room-increment-audit.md`（F-A/F-B 已落地、F-C 仍红）、`docs/plans/2026-08-19-room-incremental-ams-copy-test-plan.md`（真库门通道）。
 
@@ -122,6 +122,16 @@ ResidentRooms { published: Option<Arc<ResidentRoomModel>>, latest: Option<Arc<Re
 - 覆盖率护栏搬迁：`ensure_room_tree_coverage` 在启动对比的每块重算面板前照调（它在 `recalc_panel_membership_inner` 里，自动生效）；加「MDB 里的 DESI 数 == 常驻模型文件数」一格，缺库直接止步。
 
 验收：`mem://` 三态门——(i) 参照 == 现状 → 零写入；(ii) 面板改挂 / 房间改出关键字 / 房间号变 三形状各一条，写入集合与「全量重建后逐边」相同、房间号变化那条 `room_relate` 边 id 不变只改 `room_num`；(iii) 缺文件 → 零写入 + `resident_blocked`。真文件：在 ams 副本上停服 → 改 FRMW NAME → 起服，启动日志出「对比：删 N / 重算 M / 改列 K」。
+
+**P3-a 落地记（2026-09-07 19:40，只碰新文件与干净文件，邻线 F-A/F-B 仍未提交）**——P3 里不依赖脏文件的那一半，全在 `room_resident.rs`：
+- `ResidentRoomModel.source_tokens`（读透：各 DESI 冻结令牌；`load_room_groups_from_files` 现在连令牌一起回）。
+- `ResidentReference{form, key, digest, tokens, rooms, registered_panels, settled_at}` 落 `room_build:main.resident_reference`，`UPSERT` 只动这一格（`mem://` 门：空间凭据三字段原样、按字段投影的读法不受影响、重写是覆盖）；`read_resident_reference_on` / `write_resident_reference_on`。
+- `persist_latest_reference(model)`：读透侧对每个令牌 `prepare_producer_source`（幂等）再写参照——**只许在一轮成功结算后调**，摄入侧 `ensure!` 拒绝。
+- `load_reference_map_on(db, reference, …)`：按令牌 `load_on` → `compose` → 过关键字，得「旧」视图；缺一片整份失败（`mem://` 门）。
+- `StartupRoomPlan{NoReference, Unchanged, Apply(diff), IntegrityMismatch, ReferenceUnreadable}` + 纯函数 `plan_startup(reference, current, reference_map)`：形态换了等同无参照；摄入侧摘要不等 = 库被动过 → `IntegrityMismatch`；读透侧拿旧视图 diff，旧视图读不回来不猜。
+- `render_renumber_statements(&RoomRenumber)`：`UPDATE (SELECT VALUE id FROM {panel}->room_relate WHERE room_num = old) SET room_num = new` + `<-room_panel_relate` 同款；`mem://` 门：交集面板的边改列、边 id 不动、不在交集的面板与别的房间原样、边数不变。
+- 验证：`cargo test --lib -- room_resident room_topology room_publication` **35 passed / 0 failed / 2 ignored**（`room_resident` 15 条）；rustfmt 干净。
+- **未做（等 P2 / 脏文件）**：把 `StartupRoomPlan::Apply` 真正应用（删 / `recalc_panel_membership_inner` / 改列事务）、接进 `lib.rs` 启动段、`AIOS_ROOM_FULL_REBUILD`、`resident_blocked` 落 `room_build:main`。
 
 ### P4 · 护栏与观测（0.5 天）
 
