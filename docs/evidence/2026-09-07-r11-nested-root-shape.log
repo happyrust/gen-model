@@ -1,0 +1,154 @@
+# 2026-09-07 R11 探针：direct 枚根对「非 significant 子节点下的 significant 孙节点」怎么算
+# 方法：临时探针（未入库）按 generation_root.rs::enumerate_generation_roots_in_subtree 同一口径复刻——
+#   交付单元（BRAN/HANG/SUPPO/EQUI）优先、交付单元之下不出根、其外 !coarse(WORL/WORLD/SITE/ZONE) && significant 成根、
+#   成员一律下潜不挡；DBMETA/DBMDAT 跳过。significant 位取 tests/fixtures/core-noun-granularity-e3d31.json（快照外 = true 兜底，本次未触发）。
+#   对每个有根祖先的根 G：找最近的根祖先 A，看 G..A 之间的中间节点是否全 significant——全是 = core Members(A, Significant) 收得到（visible）；
+#   有一个不是 = core 被挡（blocked，R11 的差别）。blocked_subtree_elements = 被挡根的整棵子树元素数（A 重画时会被多算一遍的行）。
+# 语料：D:/AVEVA/Projects/E3D3.1/{AvevaMarineSample/ams000, AvevaPlantSample/aps000, ZDJ/ZDJ000, YCYK-E3D/acw000, TEST/TES000}，486 个 DESI 库。
+# 结论：核对表 R11 改 ⚪，理由见 docs/specs/core3d-partial-update-conformance.md R11 末段。
+# 下面是探针原始输出（只列出有 blocked 的库）。
+ams251010_0001           elements=2473     roots=109    (normal 109 / delivery 0) nested: visible=106 blocked=1 blocked_subtree_elements=13
+ams251153_0001           elements=839      roots=49     (normal 49 / delivery 0) nested: visible=0 blocked=9 blocked_subtree_elements=36
+ams251154_0001           elements=1778     roots=162    (normal 162 / delivery 0) nested: visible=0 blocked=46 blocked_subtree_elements=184
+ams251155_0001           elements=1841     roots=202    (normal 202 / delivery 0) nested: visible=0 blocked=111 blocked_subtree_elements=444
+ams251156_0001           elements=1309     roots=95     (normal 95 / delivery 0) nested: visible=0 blocked=1 blocked_subtree_elements=4
+ams251157_0001           elements=2092     roots=210    (normal 210 / delivery 0) nested: visible=0 blocked=88 blocked_subtree_elements=352
+ams251158_0001           elements=1923     roots=208    (normal 208 / delivery 0) nested: visible=0 blocked=115 blocked_subtree_elements=460
+ams251159_0001           elements=2434     roots=236    (normal 236 / delivery 0) nested: visible=0 blocked=98 blocked_subtree_elements=392
+ams251160_0001           elements=1539     roots=131    (normal 131 / delivery 0) nested: visible=0 blocked=50 blocked_subtree_elements=200
+ams251161_0001           elements=1482     roots=128    (normal 128 / delivery 0) nested: visible=0 blocked=28 blocked_subtree_elements=112
+ams251167_0001           elements=924      roots=27     (normal 27 / delivery 0) nested: visible=10 blocked=8 blocked_subtree_elements=176
+ams251179_0001           elements=3281     roots=99     (normal 99 / delivery 0) nested: visible=44 blocked=15 blocked_subtree_elements=615
+ams251180_0001           elements=8126     roots=232    (normal 232 / delivery 0) nested: visible=133 blocked=25 blocked_subtree_elements=1025
+ams251181_0001           elements=5888     roots=226    (normal 226 / delivery 0) nested: visible=121 blocked=18 blocked_subtree_elements=396
+ams251183_0001           elements=12635    roots=491    (normal 491 / delivery 0) nested: visible=209 blocked=152 blocked_subtree_elements=3353
+ams251195_0001           elements=242      roots=14     (normal 14 / delivery 0) nested: visible=3 blocked=2 blocked_subtree_elements=26
+ams251248_0001           elements=533      roots=97     (normal 97 / delivery 0) nested: visible=63 blocked=14 blocked_subtree_elements=14
+ams251249_0001           elements=508      roots=90     (normal 90 / delivery 0) nested: visible=56 blocked=14 blocked_subtree_elements=14
+ams251250_0001           elements=795      roots=107    (normal 107 / delivery 0) nested: visible=62 blocked=6 blocked_subtree_elements=6
+ams251251_0001           elements=1211     roots=290    (normal 290 / delivery 0) nested: visible=189 blocked=72 blocked_subtree_elements=72
+ams251252_0001           elements=795      roots=107    (normal 107 / delivery 0) nested: visible=62 blocked=6 blocked_subtree_elements=6
+ams251253_0001           elements=993      roots=184    (normal 184 / delivery 0) nested: visible=133 blocked=20 blocked_subtree_elements=20
+ams251255_0001           elements=986      roots=180    (normal 180 / delivery 0) nested: visible=131 blocked=20 blocked_subtree_elements=20
+ams251256_0001           elements=396      roots=71     (normal 71 / delivery 0) nested: visible=46 blocked=10 blocked_subtree_elements=10
+ams251257_0001           elements=397      roots=71     (normal 71 / delivery 0) nested: visible=46 blocked=10 blocked_subtree_elements=10
+ams251258_0001           elements=582      roots=71     (normal 71 / delivery 0) nested: visible=43 blocked=5 blocked_subtree_elements=5
+ams251259_0001           elements=1121     roots=268    (normal 268 / delivery 0) nested: visible=168 blocked=72 blocked_subtree_elements=72
+ams251260_0001           elements=579      roots=73     (normal 73 / delivery 0) nested: visible=44 blocked=6 blocked_subtree_elements=6
+ams251261_0001           elements=6932     roots=1257   (normal 1257 / delivery 0) nested: visible=893 blocked=58 blocked_subtree_elements=58
+ams251263_0001           elements=535      roots=66     (normal 66 / delivery 0) nested: visible=35 blocked=6 blocked_subtree_elements=6
+ams251264_0001           elements=1252     roots=286    (normal 286 / delivery 0) nested: visible=157 blocked=96 blocked_subtree_elements=96
+ams251265_0001           elements=535      roots=68     (normal 68 / delivery 0) nested: visible=35 blocked=8 blocked_subtree_elements=8
+ams251267_0001           elements=549      roots=77     (normal 77 / delivery 0) nested: visible=39 blocked=8 blocked_subtree_elements=8
+ams251268_0001           elements=1220     roots=277    (normal 277 / delivery 0) nested: visible=147 blocked=94 blocked_subtree_elements=94
+ams251269_0001           elements=541      roots=77     (normal 77 / delivery 0) nested: visible=39 blocked=8 blocked_subtree_elements=8
+ams251271_0001           elements=7995     roots=1258   (normal 1258 / delivery 0) nested: visible=826 blocked=60 blocked_subtree_elements=60
+ams251305_0001           elements=6186     roots=1045   (normal 1045 / delivery 0) nested: visible=805 blocked=38 blocked_subtree_elements=38
+ams251306_0001           elements=3207     roots=402    (normal 402 / delivery 0) nested: visible=311 blocked=8 blocked_subtree_elements=8
+ams251307_0001           elements=1577     roots=386    (normal 386 / delivery 0) nested: visible=217 blocked=142 blocked_subtree_elements=142
+ams251309_0001           elements=1592     roots=386    (normal 386 / delivery 0) nested: visible=221 blocked=138 blocked_subtree_elements=138
+ams251310_0001           elements=3626     roots=839    (normal 839 / delivery 0) nested: visible=558 blocked=165 blocked_subtree_elements=165
+ams251312_0001           elements=5474     roots=1062   (normal 1062 / delivery 0) nested: visible=768 blocked=153 blocked_subtree_elements=153
+ams251316_0001           elements=1176     roots=272    (normal 272 / delivery 0) nested: visible=183 blocked=72 blocked_subtree_elements=72
+ams251317_0001           elements=3876     roots=987    (normal 987 / delivery 0) nested: visible=682 blocked=188 blocked_subtree_elements=188
+ams251318_0001           elements=1246     roots=267    (normal 267 / delivery 0) nested: visible=181 blocked=64 blocked_subtree_elements=64
+ams251319_0001           elements=3072     roots=651    (normal 651 / delivery 0) nested: visible=484 blocked=51 blocked_subtree_elements=51
+ams251320_0001           elements=4248     roots=674    (normal 674 / delivery 0) nested: visible=478 blocked=38 blocked_subtree_elements=38
+ams251321_0001           elements=953      roots=196    (normal 196 / delivery 0) nested: visible=87 blocked=77 blocked_subtree_elements=77
+ams251323_0001           elements=970      roots=200    (normal 200 / delivery 0) nested: visible=91 blocked=77 blocked_subtree_elements=77
+ams251324_0001           elements=764      roots=132    (normal 132 / delivery 0) nested: visible=58 blocked=41 blocked_subtree_elements=41
+ams251325_0001           elements=1543     roots=398    (normal 398 / delivery 0) nested: visible=230 blocked=120 blocked_subtree_elements=120
+ams251326_0001           elements=809      roots=137    (normal 137 / delivery 0) nested: visible=62 blocked=41 blocked_subtree_elements=41
+ams251327_0001           elements=1437     roots=285    (normal 285 / delivery 0) nested: visible=219 blocked=9 blocked_subtree_elements=9
+ams251328_0001           elements=7550     roots=1736   (normal 1736 / delivery 0) nested: visible=962 blocked=469 blocked_subtree_elements=469
+ams251329_0001           elements=1708     roots=423    (normal 423 / delivery 0) nested: visible=214 blocked=152 blocked_subtree_elements=152
+ams251330_0001           elements=3751     roots=824    (normal 824 / delivery 0) nested: visible=577 blocked=181 blocked_subtree_elements=181
+ams251331_0001           elements=6098     roots=1244   (normal 1244 / delivery 0) nested: visible=855 blocked=191 blocked_subtree_elements=191
+ams7324_0001             elements=13948    roots=2890   (normal 2890 / delivery 0) nested: visible=1580 blocked=62 blocked_subtree_elements=384
+ams7329_0001             elements=12763    roots=2672   (normal 2672 / delivery 0) nested: visible=1478 blocked=62 blocked_subtree_elements=384
+ams7350_0001             elements=14794    roots=2878   (normal 2878 / delivery 0) nested: visible=1574 blocked=62 blocked_subtree_elements=384
+ams7997_0001             elements=170050   roots=6769   (normal 4832 / delivery 1937) nested: visible=4033 blocked=17 blocked_subtree_elements=68
+ams7997_0001.codex-before-d03-delete-20260727 elements=143223   roots=6437   (normal 4541 / delivery 1896) nested: visible=3753 blocked=16 blocked_subtree_elements=64
+aps250108_0001           elements=2346     roots=80     (normal 80 / delivery 0) nested: visible=16 blocked=61 blocked_subtree_elements=1537
+aps250110_0001           elements=26187    roots=495    (normal 482 / delivery 13) nested: visible=101 blocked=368 blocked_subtree_elements=16745
+aps250112_0001           elements=5875     roots=156    (normal 156 / delivery 0) nested: visible=54 blocked=99 blocked_subtree_elements=3617
+aps250212_0001           elements=590      roots=63     (normal 63 / delivery 0) nested: visible=3 blocked=53 blocked_subtree_elements=53
+aps250558_0001           elements=5875     roots=156    (normal 156 / delivery 0) nested: visible=54 blocked=99 blocked_subtree_elements=3617
+aps250560_0001           elements=26187    roots=495    (normal 482 / delivery 13) nested: visible=101 blocked=368 blocked_subtree_elements=16745
+aps250562_0001           elements=2346     roots=80     (normal 80 / delivery 0) nested: visible=16 blocked=61 blocked_subtree_elements=1537
+aps7200_0001             elements=10450    roots=556    (normal 410 / delivery 146) nested: visible=337 blocked=1 blocked_subtree_elements=146
+aps7324_0001             elements=13948    roots=2890   (normal 2890 / delivery 0) nested: visible=1580 blocked=62 blocked_subtree_elements=384
+aps7329_0001             elements=12763    roots=2672   (normal 2672 / delivery 0) nested: visible=1478 blocked=62 blocked_subtree_elements=384
+aps7350_0001             elements=14794    roots=2878   (normal 2878 / delivery 0) nested: visible=1574 blocked=62 blocked_subtree_elements=384
+TES1038_0001             elements=25892    roots=131    (normal 131 / delivery 0) nested: visible=121 blocked=2 blocked_subtree_elements=23
+zdj7200_0001             elements=10380    roots=556    (normal 410 / delivery 146) nested: visible=337 blocked=1 blocked_subtree_elements=146
+zdj7209                  elements=1060     roots=29     (normal 22 / delivery 7) nested: visible=13 blocked=6 blocked_subtree_elements=179
+zdj7210                  elements=10380    roots=556    (normal 410 / delivery 146) nested: visible=337 blocked=1 blocked_subtree_elements=146
+zdj7596_0001             elements=3984     roots=142    (normal 142 / delivery 0) nested: visible=66 blocked=66 blocked_subtree_elements=892
+
+DESI dbs=486 dbs_with_blocked_nested_roots=78
+roots: normal=75954 delivery=105657 top_level(no root ancestor)=95049 nested_visible(all intermediates significant)=81196 nested_blocked(some intermediate non-significant)=5366 blocked_subtree_elements=58615
+
+blocked shapes (A -> [intermediates] -> G), top 30:
+     3008  HPANEL -> [HCTOUT] -> HCLIP
+      910  FRMW -> [GENSEC/JLDATU/PLDATU/FIXING] -> TMPL
+      546  CWBRAN -> [CTMTRL/CTSTRA/CTFEAT] -> TMPL
+      291  FRMW -> [SCTN/CMFI] -> TMPL
+      270  HANDRA -> [POSTSE/HRPOST] -> TMPL
+       72  FRMW -> [SCTN/FITT] -> TMPL
+       53  TRNCEL -> [TRNCUC/TRNCUS] -> TRNCUR
+       48  HANDRA -> [HRPNSE/HRPANE] -> TMPL
+       42  FRMW -> [FIXING] -> TMPL
+       33  FRMW -> [SCTN/SNOD/SJOI] -> TMPL
+       32  HANDRA -> [RAILSE/HRTERM] -> TMPL
+       16  PLTFRM -> [INTFRM/GENSEC/JLDATU/PLDATU/FIXING] -> TMPL
+       10  FRMW -> [CWALL/STWALL/FITT] -> TMPL
+       10  SBFR -> [GENSEC/JLDATU/PLDATU/FIXING] -> TMPL
+        8  PLTFRM -> [EXTFRM/GENSEC/JLDATU/PLDATU/FIXING] -> TMPL
+        3  FRMW -> [CWALL/STWALL/CMFI/SBFI] -> TMPL
+        3  FRMW -> [STWALL/FITT] -> TMPL
+        2  DETGRP -> [CEILIN] -> AREADE
+        2  FRMW -> [CFLOOR/FLOOR/CMPF/SBFI] -> TMPL
+        2  HANDRA -> [HRFEAT/HRGATE] -> TMPL
+        2  HANDRA -> [RAILSE] -> TMPL
+        2  SBFR -> [STWALL/FITT] -> TMPL
+        1  FRMW -> [CSCREE/SCREED/CMPF] -> TMPL
+
+visible shapes, top 15:
+    34717  SUPPO -> [] -> HANG
+    16063  STRU -> [] -> FRMW
+    11557  STRU -> [] -> SUBS
+     7357  HPANEL -> [] -> HSTIFF
+     5200  HPANEL -> [] -> HPLATE
+     2090  FRMW -> [] -> SBFR
+     1782  HPANEL -> [] -> HBRCKT
+      879  HPANEL -> [] -> HFLANG
+      722  HPANEL -> [] -> HSEAM
+      170  VOLM -> [] -> SVOLM
+      142  HRSO -> [] -> HRSOF
+       91  HPANEL -> [] -> HPILLR
+       56  STRFLT -> [] -> HANDRA
+       48  REFGRD -> [] -> GRIDFA
+       47  CSURF -> [] -> CCURVE
+
+examples:
+  ams251010_0001: A 2013287554/2114(FRMW) / blocker 2013287554/2115(FIXING) / G 2013287554/2116(TMPL)
+  ams251153_0001: A 2013287697/22(CWBRAN) / blocker 2013287697/25(CTFEAT) / G 2013287697/26(TMPL)
+  ams251153_0001: A 2013287697/792(CWBRAN) / blocker 2013287697/795(CTFEAT) / G 2013287697/796(TMPL)
+  ams251153_0001: A 2013287697/14(CWBRAN) / blocker 2013287697/17(CTFEAT) / G 2013287697/18(TMPL)
+  ams251153_0001: A 2013287697/761(CWBRAN) / blocker 2013287697/764(CTFEAT) / G 2013287697/765(TMPL)
+  ams251153_0001: A 2013287697/792(CWBRAN) / blocker 2013287697/801(CTFEAT) / G 2013287697/802(TMPL)
+  ams251153_0001: A 2013287697/761(CWBRAN) / blocker 2013287697/770(CTFEAT) / G 2013287697/771(TMPL)
+  ams251153_0001: A 2013287697/6(CWBRAN) / blocker 2013287697/9(CTFEAT) / G 2013287697/10(TMPL)
+  ams251153_0001: A 2013287697/814(CWBRAN) / blocker 2013287697/823(CTFEAT) / G 2013287697/824(TMPL)
+  ams251153_0001: A 2013287697/814(CWBRAN) / blocker 2013287697/817(CTFEAT) / G 2013287697/818(TMPL)
+  ams251154_0001: A 2013287698/1702(CWBRAN) / blocker 2013287698/1707(CTFEAT) / G 2013287698/1708(TMPL)
+  ams251154_0001: A 2013287698/1475(CWBRAN) / blocker 2013287698/1478(CTFEAT) / G 2013287698/1479(TMPL)
+  ams251154_0001: A 2013287698/1660(CWBRAN) / blocker 2013287698/1671(CTFEAT) / G 2013287698/1672(TMPL)
+  ams251154_0001: A 2013287698/822(CWBRAN) / blocker 2013287698/831(CTFEAT) / G 2013287698/832(TMPL)
+  ams251154_0001: A 2013287698/1611(CWBRAN) / blocker 2013287698/1626(CTFEAT) / G 2013287698/1627(TMPL)
+  ams251154_0001: A 2013287698/1444(CWBRAN) / blocker 2013287698/1447(CTFEAT) / G 2013287698/1448(TMPL)
+  ams251154_0001: A 2013287698/853(CWBRAN) / blocker 2013287698/856(CTFEAT) / G 2013287698/857(TMPL)
+  ams251154_0001: A 2013287698/1611(CWBRAN) / blocker 2013287698/1614(CTFEAT) / G 2013287698/1615(TMPL)
+  ams251154_0001: A 2013287698/884(CWBRAN) / blocker 2013287698/887(CTFEAT) / G 2013287698/888(TMPL)
+  ams251154_0001: A 2013287698/1660(CWBRAN) / blocker 2013287698/1665(CTFEAT) / G 2013287698/1666(TMPL)

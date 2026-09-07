@@ -24,7 +24,7 @@
 
 > **★0907 标题符号按 §9 现状重标了一遍**（之前只改正文与 §9，标题没跟上，读标题会错判）：
 > R2 / R6 / R22 / R28 → ✅（R2 接线但开关默认关、无正样本；R6 视图切换那条待拍板；R22 收尾两条测试待补）；
-> R11 保留 ❌（0907 曾随 R10 改 ⚪，用户驳回：§9 没有对它重判，不随 R10 带；要改判得单独过一遍）；
+> R11 → ⚪（第一次随 R10 带着改被驳回；同日单独过了判据：direct 枚根不挡、真库 5,366 个被挡嵌套根，差别只落在 core 的段抹除上，见 R11 末段）；
 > R17–R21 / R24 保留 ❌ 但标「慢」（§9 定性多做不是漏做，W3.2 先量再定）；R9 / R12 / R13 / R14 保留 ◐ 并注明各自卡在哪。
 > 「✅」不等于「生产已启用」：R2 与 R9 的开关今天都默认关。
 
@@ -451,7 +451,7 @@ GranularityExpansion(e, state):
   scoped delete 方便，把根塞回 id 里（那正是 ADR-060 之前的形状），R10 立刻从
   「不可比」变回「缺」。ADR-060 的 N1 就是守这个的。
 
-### R11 `SignificantMembers` 只穿过 significant 链 ★精确化 ❌（★0907 曾按 R10 连带改 ⚪，用户驳回、恢复 ❌：§9 没有对它重判，我方也确无对应遍历；它在 core 里只被 R10 块内成员抹除消费——要改判得单独过一遍，不随 R10 带）
+### R11 `SignificantMembers` 只穿过 significant 链 ★精确化 ~~❌~~ ★0907 单独过判据后改 ⚪（direct 枚根不挡、5,366 个嵌套根两边口径不同，但差别只落在 core 的段抹除上；理由与有效期同 R10，见本条末段）
 
 `Members(e, mode=0)`（`0x1047E240`）：种子是 `e` 的**直接成员**，用显式栈做 LIFO；
 每弹出一个成员，**不 significant 就既不收集也不下潜**（`0x1047E37E` / `0x1047E381`）。
@@ -471,6 +471,23 @@ mode 2 的"收集了就不再下潜"是本轮新看清的（`0x1047E48C jmp` 直
 它挂在死代码上（§4.8），登记备查。
 
 返回值是 `out` 非空。
+
+- **★0907 我方（单独过了一遍判据，不随 R10 带；此前一次随 R10 改 ⚪ 被驳回，这次补了代码与真库两头的证据）**：
+  direct 枚根 `enumerate_generation_roots_in_subtree`（`generation_root.rs`）**不挡**——成员一律入栈，只有「进了交付单元」
+  这一位向下传；非 significant 子节点 C 下面的 significant 孙节点 G 照样成根（注释里「显著节点名下的显著节点也是根」说的就是这个）。
+  core 的 `Members(A, Significant)` 会被 C 挡住、收不到 G。**真库量了一次**（486 个 DESI 库，临时探针按同一段枚举口径复刻，
+  位全部取自快照 `core-noun-granularity-e3d31.json`、没走兜底；产物 `docs/evidence/2026-09-07-r11-nested-root-shape.log`）：
+  根 181,611 = 顶层（没有根祖先）95,049 + 嵌套 86,562；嵌套里中间链全 significant、core 也收得到的 81,196，
+  **被非 significant 中间节点挡住的 5,366**（78 个库，它们的子树共 58,615 个元素）。形状集中在
+  `HPANEL → [HCTOUT] → HCLIP` 3,008、`FRMW → [GENSEC/JLDATU/PLDATU/FIXING] → TMPL` 910、`CWBRAN → [CTMTRL/CTSTRA/CTFEAT] → TMPL` 546、
+  `FRMW → [SCTN/CMFI] → TMPL` 291、`HANDRA → [POSTSE/HRPOST] → TMPL` 270、`TRNCEL → [TRNCUC/TRNCUS] → TRNCUR` 53
+  （`TMPL` 在快照里 significant = toplevel = true，成根是 core 自己的位说的）。
+- **判 ⚪ 的理由**：(1) 这条规则在 core 里唯一的活消费者是 R10 的块内成员抹除——`Members(·, Significant)` 只在 `GranularityExpansion`
+  的 significant 分支里被调，效果是「A 重画时**不**抹被挡住的 G 的段」；我方行按元素 id 落（ADR-060 D1/N1），A 的整棵子树投影重写的
+  就是 G 那些行本身，没有「段」可抹、也不会出现两份——与 R10 同一个理由。(2) 「G 是不是独立单位」两边一致：core 的
+  `GranularityExpansion(G)` 只看 G 自己的位、不看父节点，G 变了照样 `push(G)`；我方 G 也是根。(3) 剩下的差别只有「A 变了时 G 的子树
+  被多算一遍」——那是嵌套根重复覆盖（`duplicate_coverage_elements`，W3.2 量化），是「慢」不是缺。
+  **有效期同 R10**：谁把根塞回行 id，R10 与这条一起回 ❌。
 
 ### R12 primitive 且非 significant 的变化 → 上卷到 SignificantOwner ◐（旧 PE 路径名单 + 深度上限 32；W2.4 先量真库 owner 链深度与环再定）
 
