@@ -47,3 +47,16 @@
 正常房间触发由文件发布直接驱动，全局空闲轮只补偿遗留任务。读透和异步镜像模式不承诺此文件级发布语义。首次启用必须在空间写入暂停且存量输入可验证时建立发布基线；输入损坏时停止相关派生服务，不能回退读取实时半成品。
 
 `e3d.room.lookup` 与 `model.spatial.bounds` 在空间发布串行锁内读取结果和版本。响应携带 `published_version`、`stale` 与 `publication_status`；文件轮次构建中返回 `updating`，房间查询还按元素及其当前面板的目标待办定向判 stale。空间状态本身不可消费时返回 `UPDATING`，不返回无可信版本的结果。读透内存模型明确返回 `publication_status = unsupported`，不伪造发布版本。
+
+## 实施状态（2026-09-07 审核，`docs/2026-09-07-room-increment-audit.md`）
+
+本 ADR 此前没有任何实施记录（实现随 `2352e7fc` 整树快照与 `fdfdd3e5` 入库，无计划文档、无 changelog）。审核逐条核对的结果：
+
+- **已落地**：文件轮次行与冻结令牌（`side_effect_pending.rs`）；`collecting` 期间房间目标不可认领、清边缓存；完成屏障后的发布序列 `publish_completed_file_round`（`batch_worker.rs`）；跨文件 A 旧 + B 新（有测试）；升级基线 fail-closed；`room_published_inst` / `room_published_topology` / `published_file_input`；V3 快照头与启动清单校验；房间消费全程持串行锁；冻结源不可恢复 → superseded + `Reinitialize`（有测试）；`e3d.room.lookup` 携带三字段。
+- **部分核实（未逐句）**：房间边替换 + `room_target_version` + 销账同事务且 revision 条件包住全部写入；消费侧拓扑只按当前清单摘要读完整分片。
+- **未做 / 缺口**（定级见审核报告）：
+  - ~~默认规划器（direct + DESI）没有房间结构触发，D12 三条规则只在老 PE 规划器里（F-A，High）。~~ **已修（2026-09-07，共识 d-284）**：`room_structural_trigger` 作为 `WindowRootSources` 的第四条臂，文件侧读 S/T 两端，面板目标折成 `RoomRecalcPanel` 随文件轮次释放，枚举读挂落 `room_rebuild_required`；不加开关。
+  - ~~「读透不承诺」没有兑现为代码：读透下房间任务照算照销账、几何冻在基线，`e3d.room.lookup` 报 `current`（F-B，High）。~~ **已修（2026-09-07，共识 d-276）**：消费视图随 `data_face`（`room_model::consumption_view`），读透退回实时行、不建发布输入基线，`e3d.room.lookup` / `model.spatial.bounds` 回 `unsupported`。
+  - 「数据 / 模型失败 → 保持 `collecting`」只写了一半：一个根失败后重试成功，没有任何路径再发布该轮；`has_collecting_file_rounds()` 是全局判定，一库卡住所有库 `updating`（F-C，High）。
+  - Published 视图对 booled 构件跳过第二轮点检（F-D）；`room_incremental = false` 丢延迟清边（F-E）；§9 对拍夹具未经过本 ADR 路径（F-F）；启动全量重建仍读实时行，本 ADR 未规定全量侧口径（F-H）。
+- **决议**（2026-09-07 grill）：读透形态先做老实退化（视图切 Live 或不算 + `unsupported`），文件轮次延伸到读透另立计划；F-A 按 09-05 合并计划 §9.3 R1 接进 `WindowRootSources::collect`；F-C 在空闲轮对安定的 `collecting` 轮次重新发布并把 `updating` 收窄到 dbnum。

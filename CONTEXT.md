@@ -394,6 +394,14 @@ _Avoid_: 索引建表、index-first
 构件与房间的从属关系，经面板物化为两类边：`room_relate`（面板→构件，带 `inside_count`/`center_dist` 排序字段）与 `room_panel_relate`（房间→面板）。材料表 surql 经 `fn::room_code` / `fn::room_num_of` 消费；是可事后重建的派生数据。
 _Avoid_: 房间关系、房间隶属
 
+**房间增量 (Room Increment)**：
+从一个文件更新轮次发布，到该轮全部房间目标（`RoomRecalcPanel` / `RoomRecalcElement`）结算为 `room_relate` / `room_panel_relate` 边的整条链，含触发（几何目标 + 结构触发）、发布屏障、消费与结算。它是**过程**；「房间归属」是它的**结果数据**。唯一硬验收是「增量收敛结果 == 全量重建结果，逐边对拍」。
+_Avoid_: 房间增量更新（口语可用，词条以此为准）、房间刷新、房间同步
+
+**已发布房间几何 (Published Room Geometry)**：
+`room_published_inst` 里由 `published_file_input` 当前清单选中的那一片版本化行（内联 refno、世界 AABB、世界变换与不可变 mesh 引用）。房间增量的两条分支只读它，不读实时 `inst_relate` / `inst_geo`；候选片可以先落库，清单切换前不可见。启动全量重建今天仍读实时行，两侧口径不同是已登记的缺口，不是设计。
+_Avoid_: 房间快照、房间几何缓存、实时几何（指本词时）
+
 **面板 (Panel / PANE)**：
 房间的几何载体：`FRMW/SBFR 房间节点 → CWALL/CFLOOR → PANE` 层级中带盒状 mesh 的 PANE 元素。归属判定以面板 mesh 为容器做点包含检查；房间节点自身不参与几何判定。
 _Avoid_: 板、墙板（泛指时）
@@ -411,8 +419,8 @@ _Avoid_: 构件分支、反向分支
 _Avoid_: 任务吸收、任务去重（此场景）
 
 **空间树 (Spatial Tree)**：
-全库元素世界包围盒的进程级 R\* 树（`GLOBAL_AABB_TREE`），房间候选查询与整间分支的成员盒都取自它。带脏标记（`AABB_TREE_DIRTY`）：AABB 刷新与删除清理置位，worker 空闲轮收尾若脏则原子写回项目树文件 `accel_tree_{project}.bin` 并盖空间版本号章；启动时版本号一致才信文件，否则从库指针重建。库中 `inst_relate.aabb` 指针是它唯一的重建真值源。
-_Avoid_: R 树（泛指时）、AABB 树、加速树
+全库元素世界包围盒的进程级 R\* 树（`GLOBAL_AABB_TREE`），房间候选查询与整间分支的成员盒都取自它。带脏标记（`AABB_TREE_DIRTY`）：AABB 刷新与删除清理置位，空闲轮收尾或文件轮次发布时原子写回 V3 单文件快照 `accel_tree_{project}.snapshot`，头部记空间发布版本、已发布文件数与冻结输入清单 SHA-256。启动时快照头与库侧「当前清单 + 待重放前缀」之一相符才复用；错配进空间门禁而不从实时指针兜底；存在未完成文件轮次时复用最后成功发布的快照。指针重建只在没有已发布清单可对时才是兜底路径。
+_Avoid_: R 树（泛指时）、AABB 树、加速树、树文件 `.bin`（V1 旧格式，已迁移删除）
 
 **refno 反查 (Refno Lookup)**：
 按 refno 问空间树「这批盒子在不在树上、旧值是什么」的能力，读路径与写路径共用 `AccelerationTree` 内部那张 `refno_index`（纯内存派生，不进树文件，加载后重建）。读路径若退回 `tree.iter()` 全量遍历，每个生成根前后各扫两遍整棵树，代价对库规模是平方级——并行化只是把平方项除以核数。禁止在调用方另建一份 refno → 包围盒映射：那会造出第二份「树上现在有什么」的真值，漂移的后果不是变慢，是把已经不在那儿的构件算进某间房，而这类错误没有任何东西会报出来。

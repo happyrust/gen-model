@@ -3778,7 +3778,7 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
         // 各扫一遍是承受不起的。
         ModelWorkAction::RoomRecalcElement | ModelWorkAction::RoomRecalcPanel => {
             let rooms = room_model::load_room_panel_map(&mgr.db_option).await?;
-            let panels = room_model::load_published_panel_index(&mgr.db_option, &rooms).await?;
+            let panels = room_model::load_consumption_panel_index(&mgr.db_option, &rooms).await?;
             // 整间任务用不到构件的旧归属快照，别为它多发一条查询。
             let history = if matches!(item.action, ModelWorkAction::RoomRecalcElement) {
                 room_model::ElementRoomHistory::load(&[refno]).await?
@@ -3787,9 +3787,13 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
             };
             match item.action {
                 ModelWorkAction::RoomRecalcPanel => {
-                    room_model::recalc_panel_membership_published(&mgr.db_option, &rooms, refno)
-                        .await
-                        .map(|_| ())
+                    room_model::recalc_panel_membership_for_consumption(
+                        &mgr.db_option,
+                        &rooms,
+                        refno,
+                    )
+                    .await
+                    .map(|_| ())
                 }
                 ModelWorkAction::RoomRecalcElement => {
                     room_model::recalc_element_membership(&rooms, &panels, &history, refno).await
@@ -6272,9 +6276,16 @@ async fn drain_rooms_selected(
     // Establish the immutable geometry baseline here as well; if an old
     // collecting round makes the live rows ambiguous, the baseline helper
     // fails closed and leaves every task untouched.
-    crate::data_interface::side_effect_pending::SideEffectCompensator::
-        ensure_published_file_baseline(0, 0)
-    .await?;
+    //
+    // 读透形态没有数据批次，也就永远不会有文件轮次来更新这份基线：建了也只是把全部
+    // 设计库的实时行冻成一份再也不动的 `room_published_inst`，房间任务随后拿它算新几何。
+    // 所以读透不建基线，几何视图整轮退回实时行（`room_model::consumption_view`，审核 F-B）。
+    let read_through = crate::options::data_face().is_read_through();
+    if !read_through {
+        crate::data_interface::side_effect_pending::SideEffectCompensator::
+            ensure_published_file_baseline(0, 0)
+        .await?;
+    }
     // Pin the spatial tree, published-file manifest and model rows as one
     // consumer view. Spatial publication uses this same serial lock, so a room
     // calculation cannot straddle two published versions; a newly enqueued
@@ -6323,8 +6334,9 @@ async fn drain_rooms_selected(
 
     let rooms = room_model::load_room_panel_map(db_option).await?;
     // Panel geometry is loaded once for the complete scoped drain and reused by
-    // every 256-element history page.
-    let panel_index = room_model::load_published_panel_index(db_option, &rooms).await?;
+    // every 256-element history page. The view (published rows vs live rows)
+    // follows the data face, the same choice the panel branch makes.
+    let panel_index = room_model::load_consumption_panel_index(db_option, &rooms).await?;
     let mut report = DrainReport {
         requested,
         loaded,
@@ -7448,14 +7460,25 @@ mod tests {
             .split_once("async fn drain_room_element_page(")
             .expect("room drain boundary")
             .0;
+        // 视图由数据面决定（`room_model::consumption_view`）：ingest 读发布视图，读透退回
+        // 实时行（审核 F-B）。这里不许再直接点名任何一个视图。
         assert!(
-            body.contains("load_published_panel_index(db_option, &rooms)"),
-            "增量房间消费必须从发布视图加载面板: {body}"
+            body.contains("load_consumption_panel_index(db_option, &rooms)"),
+            "增量房间消费必须经 consumption 入口加载面板（视图随数据面）: {body}"
         );
         assert!(
-            !body.contains("load_panel_index(db_option, &rooms)"),
-            "增量房间消费不得回退实时 inst_relate: {body}"
+            !body.contains("load_panel_index(db_option, &rooms)")
+                && !body.contains("load_published_panel_index("),
+            "增量房间消费不得自己钉死 Live 或 Published 视图: {body}"
         );
+        // 读透没有文件轮次，不建（也不需要）发布输入基线。
+        let baseline_at = body
+            .find("ensure_published_file_baseline(0, 0)")
+            .expect("ingest 形态仍要建基线");
+        let face_at = body
+            .find("data_face()")
+            .expect("基线与视图都要问数据面");
+        assert!(face_at < baseline_at, "建基线之前先问数据面: {body}");
     }
 
     #[test]

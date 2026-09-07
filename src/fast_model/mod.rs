@@ -52,8 +52,8 @@ pub(crate) mod room_publication;
 
 pub(crate) mod room_topology;
 
-
 pub(crate) mod room_resident;
+
 pub mod cal_model;
 
 pub mod pdms_inst;
@@ -72,6 +72,8 @@ pub mod spatial_state;
 
 pub mod coverage_audit;
 pub(crate) mod room_topology_source;
+#[cfg(test)]
+mod room_increment_audit;
 
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};

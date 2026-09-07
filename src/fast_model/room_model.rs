@@ -46,6 +46,27 @@ pub(crate) enum RoomGeometryView {
     Published,
 }
 
+/// 房间增量消费（两条分支 + 在册面板索引）该读哪一份几何。
+///
+/// ingest 形态读已发布房间几何（`room_published_inst` 里当前清单选中的行，ADR-062）。
+/// 读透形态（spawned-mem / embedded-mem 默认）没有数据批次、没有文件轮次，
+/// `room_published_inst` 永远停在启动基线；再读它等于拿旧几何算新任务、算完还销账。
+/// 所以读透退回实时行——一致性回到 ADR-062 之前的弱口径，但不撒谎：`e3d.room.lookup`
+/// 同时回 `publication_status = unsupported`（`query_service::published_derivation_status`）。
+/// 把文件轮次延伸到读透是另一份计划，见 `docs/2026-09-07-room-increment-audit.md` §4。
+pub(crate) fn consumption_view() -> RoomGeometryView {
+    consumption_view_for(crate::options::data_face())
+}
+
+/// [`consumption_view`] 的纯函数形态，单测直接喂数据面。
+pub(crate) fn consumption_view_for(face: crate::options::DataFace) -> RoomGeometryView {
+    if face.is_read_through() {
+        RoomGeometryView::Live
+    } else {
+        RoomGeometryView::Published
+    }
+}
+
 async fn query_room_insts(
     view: RoomGeometryView,
     refnos: &[RefnoEnum],
@@ -1457,12 +1478,13 @@ pub async fn recalc_panel_membership(
     recalc_panel_membership_inner(db_option, rooms, panel, None, RoomGeometryView::Live).await
 }
 
-pub(crate) async fn recalc_panel_membership_published(
+/// 单件执行路径的整间分支（无写守卫）：几何视图按数据面选（[`consumption_view`]）。
+pub(crate) async fn recalc_panel_membership_for_consumption(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
     panel: RefnoEnum,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
-    recalc_panel_membership_inner(db_option, rooms, panel, None, RoomGeometryView::Published).await
+    recalc_panel_membership_inner(db_option, rooms, panel, None, consumption_view()).await
 }
 
 async fn query_geom_pts_for_view(
@@ -1499,20 +1521,15 @@ async fn query_geom_pts_for_view(
     Ok(rows)
 }
 
+/// 房间队列消费的整间分支：几何视图按数据面选（[`consumption_view`]），与同一轮的
+/// 在册面板索引（[`load_consumption_panel_index`]）必须同源，两条分支才收敛到同一个边集。
 pub(crate) async fn recalc_panel_membership_guarded(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
     panel: RefnoEnum,
     guard: &RoomWriteGuard,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
-    recalc_panel_membership_inner(
-        db_option,
-        rooms,
-        panel,
-        Some(guard),
-        RoomGeometryView::Published,
-    )
-    .await
+    recalc_panel_membership_inner(db_option, rooms, panel, Some(guard), consumption_view()).await
 }
 
 async fn recalc_panel_membership_inner(
@@ -1754,11 +1771,12 @@ pub async fn load_panel_index(
     load_panel_index_from(db_option, rooms, RoomGeometryView::Live).await
 }
 
-pub(crate) async fn load_published_panel_index(
+/// 房间队列消费用的在册面板索引：几何视图按数据面选（[`consumption_view`]）。
+pub(crate) async fn load_consumption_panel_index(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
 ) -> anyhow::Result<PanelIndex> {
-    load_panel_index_from(db_option, rooms, RoomGeometryView::Published).await
+    load_panel_index_from(db_option, rooms, consumption_view()).await
 }
 
 async fn load_panel_index_from(

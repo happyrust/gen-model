@@ -247,9 +247,19 @@ impl QueryService {
         Ok(())
     }
 
+    /// 派生面（空间树 / 房间归属）的发布状态三元组 `(published_version, stale, publication_status)`。
+    ///
+    /// 读透形态（`data_face = read-through`，spawned-mem / embedded-mem 的默认）没有数据批次，
+    /// 也就没有文件轮次：`published_file_input` 停在启动基线，`room_published_inst` 不再更新，
+    /// 房间任务改读实时行（`room_model::consumption_view`）。这时既没有「发布版本」也谈不上
+    /// 「stale」——ADR-062 明写读透不承诺文件级发布语义，所以两格回 `null`、状态回
+    /// `unsupported`，不拿「无 collecting / 无 pending」凑成 `current`（审核 F-B）。
     async fn published_derivation_status(
         room_targets: Option<&[String]>,
-    ) -> Result<(u64, bool, &'static str), QueryError> {
+    ) -> Result<(Value, Value, &'static str), QueryError> {
+        if crate::options::data_face().is_read_through() {
+            return Ok((Value::Null, Value::Null, "unsupported"));
+        }
         crate::fast_model::spatial_state::ensure_spatial_ready()
             .map_err(|error| QueryError::new("UPDATING", error))?;
         let published_version =
@@ -277,8 +287,8 @@ impl QueryService {
         };
         let stale = collecting || room_pending;
         Ok((
-            published_version,
-            stale,
+            json!(published_version),
+            json!(stale),
             if stale { "updating" } else { "current" },
         ))
     }
