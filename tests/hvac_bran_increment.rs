@@ -103,6 +103,7 @@ fn impact(touched: &[RefnoEnum]) -> WindowImpact {
     WindowImpact {
         touched: touched.iter().copied().collect::<BTreeSet<_>>(),
         closure_complete: true,
+        cascade_degraded: None,
         unresolved: 0,
         candidates: 2,
         index_keys: 100,

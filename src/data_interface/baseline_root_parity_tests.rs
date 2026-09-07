@@ -32,6 +32,7 @@ async fn frozen_baseline_and_window_target_have_the_same_roots() {
         &base,
         &set,
         &configured_delivery_unit_types(),
+        &[],
     )
     .unwrap();
     let baseline_roots: BTreeSet<_> = baseline

@@ -55,9 +55,16 @@ fn recorded_matrix_windows_reach_expected_roots() {
         };
         let (base, target) = (open(case.base), open(case.target));
         let units = resolve_delivery_unit_types(&case.append_units);
-        let sources =
-            WindowRootSources::collect(&case.db, case.base, case.target, &base, &target, &units)
-                .unwrap_or_else(|error| panic!("{}: {error:#}", case.label));
+        let sources = WindowRootSources::collect(
+            &case.db,
+            case.base,
+            case.target,
+            &base,
+            &target,
+            &units,
+            &[],
+        )
+        .unwrap_or_else(|error| panic!("{}: {error:#}", case.label));
         assert!(
             sources.closure.is_complete(),
             "{}: {:?}",

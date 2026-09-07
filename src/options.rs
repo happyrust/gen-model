@@ -198,6 +198,12 @@ pub struct DbOptionExt {
     /// 详见 [`model_cable_endpoint_cascade`]。
     #[serde(default)]
     pub model_cable_endpoint_cascade: Option<bool>,
+
+    /// 设计侧通用一跳反查（级联查询换源计划 P4，默认关闭）：窗口里的变更元素到 MDB 每个设计库
+    /// 的每张 kind-16 反向引用表点查引用者，`POSREF` 的引用者上卷成根并进 `touched`。
+    /// 详见 [`model_design_reference_cascade`]。
+    #[serde(default)]
+    pub model_design_reference_cascade: Option<bool>,
 }
 
 impl Deref for DbOptionExt {
@@ -258,6 +264,7 @@ impl From<DbOption> for DbOptionExt {
             model_entry_drop_no_geometry: None,
             model_structural_connection_cascade: None,
             model_cable_endpoint_cascade: None,
+            model_design_reference_cascade: None,
         }
     }
 }
@@ -349,6 +356,8 @@ struct DbOptionExtFields {
     model_structural_connection_cascade: Option<bool>,
     #[serde(default)]
     model_cable_endpoint_cascade: Option<bool>,
+    #[serde(default)]
+    model_design_reference_cascade: Option<bool>,
 }
 
 /// 读一次 `DbOption` 的扩展字段，把三种结局分开——它们要求的处置完全不同。
@@ -537,6 +546,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_entry_drop_no_geometry: ext.model_entry_drop_no_geometry,
         model_structural_connection_cascade: ext.model_structural_connection_cascade,
         model_cable_endpoint_cascade: ext.model_cable_endpoint_cascade,
+        model_design_reference_cascade: ext.model_design_reference_cascade,
     }
 }
 
@@ -1407,6 +1417,38 @@ pub fn model_cable_endpoint_cascade() -> bool {
     )
 }
 
+/// 环境变量名：一次性覆盖 [`model_design_reference_cascade`]，不必改配置文件。
+pub const MODEL_DESIGN_REFERENCE_CASCADE_ENV: &str = "AIOS_MODEL_DESIGN_REFERENCE_CASCADE";
+
+/// 设计侧通用一跳反查（`DbOption.toml` 的 `model_design_reference_cascade`，**默认 false**）。
+///
+/// 级联查询换源计划（`2026-09-06-cascade-query-via-dab-ref-tables-plan.md` P4）的灰度开关：direct
+/// 窗口规划器对 `plan_update` 报出的每个变更元素，到 **MDB 每个设计库**自带的 kind-16 反向引用表
+/// 逐库点查「谁引用它」（表在就查，判据与 P1 同一条）。783 库差表里设计→设计、跨单元、e3d-model
+/// 几何真读的引用属性只有 `POSREF` 一条（`docs/evidence/2026-09-06-ref-rev-vs-file-table-coverage.md`
+/// §1.3），所以只有它的引用者上卷成根并进 `touched`；其余属性**只记账不改行为**，等几何覆盖扩到
+/// 读它们那天入口已经在原位。
+///
+/// 反查判不了（变更件数超上限、成员库打不开、表读挂）时按计划 §2 原则 3「宁多算不漏算」退化：
+/// 放弃凭证前移，这一窗所有已持久化的根重算。关着时不开任何成员库、不查表，`regen` 与引入前
+/// 逐字相同；三态契约在 `reverse_reference::tests`，真库两态对拍在 `reverse_reference::tests::live`。
+///
+/// 环境变量 [`MODEL_DESIGN_REFERENCE_CASCADE_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
+pub fn model_design_reference_cascade() -> bool {
+    #[cfg(test)]
+    match MODEL_DESIGN_REFERENCE_CASCADE_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    effective_default_off_switch(
+        load_ext_fields().model_design_reference_cascade,
+        std::env::var(MODEL_DESIGN_REFERENCE_CASCADE_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
 /// 默认关的灰度开关的统一取值规则：环境变量（严格布尔，双向可压）> 配置 > `false`。
 /// 拼错的环境变量退回配置值，理由同 [`effective_startup_autorun`]。
 fn effective_default_off_switch(configured: Option<bool>, env_override: Option<&str>) -> bool {
@@ -1575,6 +1617,39 @@ impl CableEndpointCascadeOverride {
 impl Drop for CableEndpointCascadeOverride {
     fn drop(&mut self) {
         MODEL_CABLE_ENDPOINT_CASCADE_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// 单测里摁住 [`model_design_reference_cascade`] 的进程内覆盖（0 = 按配置来）。
+#[cfg(test)]
+static MODEL_DESIGN_REFERENCE_CASCADE_OVERRIDE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+static MODEL_DESIGN_REFERENCE_CASCADE_OVERRIDE_LOCK: std::sync::Mutex<()> =
+    std::sync::Mutex::new(());
+
+#[cfg(test)]
+pub(crate) struct DesignReferenceCascadeOverride {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl DesignReferenceCascadeOverride {
+    pub(crate) fn set(on: bool) -> Self {
+        let lock = MODEL_DESIGN_REFERENCE_CASCADE_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        MODEL_DESIGN_REFERENCE_CASCADE_OVERRIDE
+            .store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for DesignReferenceCascadeOverride {
+    fn drop(&mut self) {
+        MODEL_DESIGN_REFERENCE_CASCADE_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -2179,6 +2254,14 @@ mod tests {
         {
             let _off = CableEndpointCascadeOverride::set(false);
             assert!(!model_cable_endpoint_cascade());
+        }
+        {
+            let _on = DesignReferenceCascadeOverride::set(true);
+            assert!(model_design_reference_cascade());
+        }
+        {
+            let _off = DesignReferenceCascadeOverride::set(false);
+            assert!(!model_design_reference_cascade());
         }
     }
 

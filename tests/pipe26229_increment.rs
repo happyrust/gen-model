@@ -28,6 +28,7 @@ fn impact(touched: &[u32]) -> WindowImpact {
     WindowImpact {
         touched: touched.iter().map(|n| id(*n)).collect(),
         closure_complete: true,
+        cascade_degraded: None,
         unresolved: 0,
         candidates: 2,
         index_keys: 100,

@@ -456,6 +456,7 @@ mod tests {
         let impact = WindowImpact {
             touched,
             closure_complete: true,
+            cascade_degraded: None,
             unresolved: 0,
             candidates: 1,
             index_keys: 1000,
@@ -796,6 +797,7 @@ mod tests {
                         &base,
                         &target,
                         &unit_types,
+                        &[],
                     )
                     .expect("collect");
                     let impact = sources.impact(&roots_s);

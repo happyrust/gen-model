@@ -26,7 +26,7 @@
 | | **direct 下 CATA**：没有数据批次 → `build_cata_cascade_plan` 根本不会被调；只剩 `ModelTarget.catalogue` 指纹失配 → 该库全部根过期 + 启动 `catalogue_cascade_degraded` 点名（09-04 §2.7）。ADR-058 D2「CATA 文件差分 → `ref_rev` 反查」**未落地** | ❌ inventory #4 的洞**原样** |
 | **B. 查询所依赖的索引的更新**（`ref_rev` 维护） | `apply_one`：persist → invalidate → `maintain_reverse_index`（每元素 `DELETE <el>->ref_rev; INSERT RELATION`）→ 失败进 `enqueue_ref_rev` 补偿 → `repair_reverse_index_for`；~~CATA→CATA 边靠 `cata_ref_rev` 闭包任务（D8-A）补~~ **更正（2026-09-07）**：`cata_ref_rev` 从来只落目录**行**（`pe` / noun / UDA / `pe_owner`），一条边都没写过；CATA→CATA 边只有 `rebuild_reverse_index`（`bin/rebuild_ref_rev`）会建。该任务已随 ADR-064 Q2 退役，目录行改由 `cata_dependency` 在水位之前落 | ✅ 有，但**只在摄入链上** |
 | | 读透形态（默认 `data_face`）的 G5 定了「跳过摄入链」；~~ADR-058 S3 定了 `cata_ref_rev` 一并退役~~（2026-09-07 已退役，ADR-064 Q2）→ **G5 之后 `ref_rev` 没有维护者** | ⚠️ 正在失去地基 |
-| **C. 换源的准备** | e3d-io `ReferenceTable` / `Engine::referrers_of`（会话钉住的表根、4 字键 `(target, referrer)`、543 库 / 906 表 / 3.7M 条 / 0 乱序门）**已实现**（~~工作树未提交~~ P1 已入库 `4eeecf9`）；gen-model `direct_store::referrers_of(dbnum, attribute, target)` **已包好** | ✅ 就位；~~**仓内零调用方**~~ **★0907 已有两个真调用方**：`data_interface/reverse_reference.rs`（本计划 P3，CATA 侧闭包 + DESI 侧一跳，自己开 `ReadOnlyEngine` 逐库、逐表点查 `referrers_of`）与 `data_interface/cable_endpoint.rs`（联动对齐计划 C8 同库版：`EQUI`/`ELCONN`/`CWBRAN` 变了 → T 端 `STAREF`/`ENDREF` 表点查电缆，直接走 `ReadOnlyEngine::referrers_of`，开关 `model_cable_endpoint_cascade` 默认关）。后者是 P4「direct DESI 规划器接同一个源」的一个**专用实例**（只查电缆两条边、只查本库）；P4 那条通用一跳（kind-16 属性、MDB 逐库并）仍未接。`direct_store::referrers_of` 这层包装本身仍无人调——两个调用方都直接用 `ReadOnlyEngine::referrers_of` |
+| **C. 换源的准备** | e3d-io `ReferenceTable` / `Engine::referrers_of`（会话钉住的表根、4 字键 `(target, referrer)`、543 库 / 906 表 / 3.7M 条 / 0 乱序门）**已实现**（~~工作树未提交~~ P1 已入库 `4eeecf9`）；gen-model `direct_store::referrers_of(dbnum, attribute, target)` **已包好** | ✅ 就位；~~**仓内零调用方**~~ **★0907 已有两个真调用方**：`data_interface/reverse_reference.rs`（本计划 P3，CATA 侧闭包 + DESI 侧一跳，自己开 `ReadOnlyEngine` 逐库、逐表点查 `referrers_of`）与 `data_interface/cable_endpoint.rs`（联动对齐计划 C8 同库版：`EQUI`/`ELCONN`/`CWBRAN` 变了 → T 端 `STAREF`/`ENDREF` 表点查电缆，直接走 `ReadOnlyEngine::referrers_of`，开关 `model_cable_endpoint_cascade` 默认关）。后者是 P4「direct DESI 规划器接同一个源」的一个**专用实例**（只查电缆两条边、只查本库）；~~P4 那条通用一跳（kind-16 属性、MDB 逐库并）仍未接~~ **★0907 P4 已接**：`reverse_reference::DesignReferenceCascade`（同模块第二个入口，MDB 逐库并集，行为只有 `POSREF`，开关 `model_design_reference_cascade` 默认关，见 §3 P4 落地段）。`direct_store::referrers_of` 这层包装本身仍无人调——三个调用方都直接用 `ReadOnlyEngine::referrers_of` |
 
 **core 的口径**（本轮实读，evidence §1–§3）：引用表由 dabacon 在 `db_put_reference` **写时同步维护**（删 `(旧目标, 自己)`、
 插 `(新目标, 自己)`、表不存在当场建），表根随会话页版本化；读侧 `DB_MDB::findElements` 逐库游标点查，**零维护**。
@@ -203,6 +203,49 @@ GETWORK 刷新路径不调引用表。所以 core 里「联动查询的更新处
 - **验收**：`increment_planner_parity` 对拍：老规划器（`ref_rev`）与新规划器（文件表）在 `ams8000_0001`
   若干窗口上的根集合，差异只能出现在 P0 差表列出的属性上，且逐条可解释。
 
+> **落地（2026-09-07）**：`data_interface/reverse_reference.rs` 里的 `DesignReferenceCascade`——与 P3 的
+> `expand_reverse_cascade` 同模块、同判据（`reference_tables_of`）、同点查（`ReadOnlyEngine::referrers_of`），
+> 分开的只是种子从哪来（一窗的变更设计元素 vs 变动目录件）与结果排给谁。挂在 `WindowRootSources` 上，
+> 形状与 C2 `structural_connection` / C8 `cable_endpoint` 一致；开关 `model_design_reference_cascade`
+> （`AIOS_MODEL_DESIGN_REFERENCE_CASCADE`）**默认关**，关着时连 MDB 成员名单都不解。
+>
+> - **逐库并集**：`E3dModelService::design_sources()` 给出 MDB 的全部设计成员（含各自的生成会话，ADR-054 Q1），
+>   本库换成钉住窗口 T 端的那一份。一张反向表只答它自己那个库的引用者（表在引用方的库里），跨库引用者
+>   只有逐个开成员库才找得到——这正是 C8「只查本库」留下的那一半。
+> - **行为只有 `POSREF` 一条**（Q4 经 P0 差表修正）：`DESIGN_CASCADE_ATTRIBUTES` 就这一个名字，它的引用者
+>   上卷成根并进 `touched`；其余设计侧表照查，但**只落进 `edges_by_attribute` 记账**。加一个名字就是多重算
+>   一批根，依据只能是「e3d-model 几何真读它」。
+> - **判不了 ≠ 没有引用者**（§2 原则 3）：成员库打不开、点查读挂、变更件数超 `DESIGN_CASCADE_SOURCE_CAP`
+>   （2 000，超了一次点查都不发）→ `degraded` 交给 `WindowImpact::cascade_degraded` → **放弃凭证前移**，
+>   已持久化的根全部重算。不静默取空集。
+> - **在案缺口**：`POSREF` 命中但引用者在**别的**设计库里时只计数（`foreign_referrers`）不排工——本窗口的
+>   `roots_T` 是本库的，跨库排工不在 P4 范围。P0 差表说 `POSREF` 目标 0 跨库，所以这一格今天该恒为 0，
+>   出现即是新事实。
+>
+> **验证**：`cargo test --lib reverse_reference` **18 passed / 2 ignored**——三态契约（`POSREF` 引用者把它的根
+> 从 `advance` 拉进 `regen` / 非行为属性只记账不改四桶 / 开关关时逐字相同）都走**生产同一段**
+> `plan_window_roots`；另有退化两路（成员库打不开、点查读挂）、超上限不点查、本库钉 T 端、跨库引用者记账、
+> 悬空引用者、行为名单就一条。全库 `cargo test --lib --features http_api` 1764 passed / 0 failed。
+>
+> **真库两条门都跑了**（`reverse_reference::tests::live`，`#[ignore]` 手动）。语料里带 `POSREF` 表的设计库
+> 由测试自己找（写死不行：783 库里只有 31 个有），`ams000` 下找到的是 **`ams251142_0001`**（dbnum 251142，
+> 反向表 `CONNRE HCREF POSREF SPRE TCREF`；`ams7000_0001` 是目录库，没有）。
+>
+> - **反查真的答得出**：拿 `POSREF` 表里现成的一条边当假定的变更源（语料里没有「只改被参照件」的自然窗口，
+>   与 C8 同一手法），点查 5 张表回来 **4 条 `POSREF` 边 → 1 个根**，与正向沿 owner 链算出的期望集合逐字相等，
+>   `foreign_referrers` 为空（印证 P0 差表那句「`POSREF` 目标 0 跨库」）。
+> - **现有窗口两态逐字相同**（最后 3 步会话）：`1→2` / `9→10` 两窗各 2 个变更元素、零边；`2→9` 一窗
+>   **948 个变更元素 / 4 740 次点查**，命中 `POSREF:282 HCREF:42 TCREF:31 CONNRE:10` → 61 个根，
+>   而 `regen_on = regen_off = 61`——那一窗把被参照件与参照它的桥架件一起建了，级联拉进来的根本来就在闭包里。
+>   **成本实测**：4 740 次点查连同两端索引扫描，整条门 0.91 s。点查是 O(树高)，逐库并集付得起。
+>
+> **未做（如实）**：
+> - 本节写的 `increment_planner_parity` 对拍**没做**，而且它的前提已经没了：老规划器读的 `ref_rev` 在读透
+>   形态下由 ADR-063 D2 停止维护、D3 直接报错，对拍只在摄入形态下才有意义。要做得先决定在哪一形态下对。
+> - 两态门只证了「开关不改今天任何一窗的结果」，**没有**证「改了被参照件、参照它的根会进 `regen`」——
+>   语料里没有这种自然窗口，要么自造一个会话，要么等真项目里出现。
+> - 跨库排工、以及 P5 那条 live 验收，都还在原地。
+
 ### P5 · `ref_rev` 降级（1 天 + 一份 ADR）
 
 - ADR-063：`ref_rev` 不再是正确性依赖。选根代码全文不含 `ref_rev`（源码钉）；`maintain_reverse_index` /
@@ -223,6 +266,11 @@ GETWORK 刷新路径不调引用表。所以 core 里「联动查询的更新处
 > **没动**：`resolve_unit_rollup` / `direct_root_allowed` / `expand_live_reverse_cascade` 三个读点仍读
 > `ref_rev`——换成文件表并集是 P4 那条通用一跳的活，那条还没接，先删读点等于把能力从老路拿掉而新路
 > 还没有。inventory #4 / #5 的改口径、以及上面那条 live 验收，一并留到 P4 落地之后。
+>
+> **补记（2026-09-07，P4 落地之后）**：那三个读点**仍然没动**，理由变了——P4 的通用一跳已经在原位，但它
+> 的**行为**只有 `POSREF` 一条（P0 差表：设计→设计、e3d-model 几何真读的就这一条）。老规划器那三个读点
+> 走的是 `ref_rev` 的全量边（603 个名字的资格），拿 `POSREF` 一条去换是**收窄**，不是等价替换。要换得先
+> 回答「老路那些边里今天还有哪些在影响几何」——那是 P5 收口时该做的一次逐条对拍，不是 P4 的活。
 
 合计 **约 2 周**；P0–P3 是主线（把 #4 补上），P4–P5 是把新路与老路合成一条。
 

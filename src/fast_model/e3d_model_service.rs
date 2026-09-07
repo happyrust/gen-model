@@ -78,6 +78,8 @@ use crate::fast_model::e3d_mesh_store::{
 /// generation-root enumeration (`generation_root::enumerate_generation_roots`).
 #[derive(Debug, Clone)]
 pub(crate) struct SourceIndex {
+    /// 文件自报的库号（描述符 `db_mark`）——扫的是哪个库由文件说了算，不由调用方转述。
+    pub(crate) dbnum: u32,
     pub(crate) roots: Vec<RefNo>,
     /// Shared, never mutated after the scan: one in-memory batch holds as many
     /// `GeneratedSnapshot`s as it has roots, and each used to carry its own copy
@@ -2062,6 +2064,7 @@ pub(crate) fn scan_index(path: &Path, sesno: Option<u32>) -> anyhow::Result<Sour
         })
         .collect();
     Ok(SourceIndex {
+        dbnum: engine.descriptor().db_mark,
         roots,
         owners: Arc::new(owners),
     })

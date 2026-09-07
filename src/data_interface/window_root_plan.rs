@@ -69,6 +69,9 @@ pub struct WindowImpact {
     pub touched: BTreeSet<RefnoEnum>,
     /// [`AffectedClosure::is_complete`]：有一条 owner 链读挂就是 `false`。
     pub closure_complete: bool,
+    /// 设计侧反查（P4）判不了的原因：`Some` = 这一窗的引用者集合**未知**，不是空
+    /// （`DesignReferenceCascade::degraded`）。开关关着时永远是 `None`。
+    pub cascade_degraded: Option<String>,
     /// `plan_update` 连分类都做不了的候选数（`IncrementReport::unresolved`）。
     pub unresolved: usize,
     /// 索引差分候选数（`IncrementReport::candidates`）。
@@ -88,6 +91,11 @@ impl WindowImpact {
         }
         if self.unresolved > 0 {
             reasons.push(format!("unresolved={}", self.unresolved));
+        }
+        if let Some(reason) = &self.cascade_degraded {
+            reasons.push(format!(
+                "design-reference cascade could not answer: {reason}"
+            ));
         }
         let limit = CREDENTIAL_ADVANCE_CANDIDATE_RATIO * self.index_keys as f64;
         if self.candidates as f64 > limit {
@@ -238,6 +246,11 @@ pub struct WindowRootSources {
     /// `STAREF` / `ENDREF` 反向表点查引用它的电缆，电缆 owner 链上的根。[`Self::impact`] 把它并进
     /// `touched`；开关 `model_cable_endpoint_cascade` 关着时是 `CableEndpointCascade::off()`（零 I/O）。
     pub cable_endpoint: crate::data_interface::cable_endpoint::CableEndpointCascade,
+    /// 设计侧通用一跳反查（换源计划 P4）：变更元素到 **MDB 每个设计库**的每张 kind-16 反向表点查
+    /// 引用者，`POSREF` 的引用者上卷成根由 [`Self::impact`] 并进 `touched`，其余属性只记账；
+    /// 反查判不了时把原因交给 [`WindowImpact::cascade_degraded`]（放弃凭证前移）。开关
+    /// `model_design_reference_cascade` 关着时是 `DesignReferenceCascade::off()`（零 I/O）。
+    pub design_reference: crate::data_interface::reverse_reference::DesignReferenceCascade,
 }
 
 fn nested_root_observation(
@@ -375,6 +388,8 @@ fn observe_xgeometry_candidates(
 impl WindowRootSources {
     /// 一次窗口的全部文件侧工作：索引差分 → `plan_update` → 祖先闭包 → `DbSet@T` 根枚举。
     /// 阻塞 I/O，异步上下文请放进 `spawn_blocking`。
+    /// `design_dbs` = MDB 的设计成员，P4 逐库并集的输入（`E3dModelService::design_sources()`）。
+    /// 给 `&[]` 就是「只查本库」——本库无论如何都在里面，只关心本库的探针与测试照旧这么调。
     pub fn collect(
         file: &Path,
         base_sesno: u32,
@@ -382,6 +397,7 @@ impl WindowRootSources {
         base: &Arc<DbSet>,
         target: &Arc<DbSet>,
         unit_types: &[String],
+        design_dbs: &[crate::data_interface::reverse_reference::SourceDb],
     ) -> anyhow::Result<Self> {
         let window = collect_window(file, base_sesno, target_sesno).with_context(|| {
             format!(
@@ -438,6 +454,20 @@ impl WindowRootSources {
         } else {
             crate::data_interface::cable_endpoint::CableEndpointCascade::off()
         };
+        // P4：设计侧通用一跳。开关关 = 一个成员库都不开（`off()`），touched 一字不改。
+        let design_reference = if crate::options::model_design_reference_cascade() {
+            crate::data_interface::reverse_reference::DesignReferenceCascade::collect(
+                &plan,
+                index.dbnum,
+                file,
+                target_sesno,
+                design_dbs,
+                &index.owners,
+                &roots_t,
+            )
+        } else {
+            crate::data_interface::reverse_reference::DesignReferenceCascade::off()
+        };
         Ok(Self {
             base_sesno,
             target_sesno,
@@ -451,6 +481,7 @@ impl WindowRootSources {
             duplicate_coverage_elements,
             structural_connection,
             cable_endpoint,
+            design_reference,
         })
     }
 
@@ -468,9 +499,12 @@ impl WindowRootSources {
         self.structural_connection.expand_touched(&mut touched);
         // C8 同上：引用者（电缆）的根都取自 roots_T；开关关时是空操作。
         self.cable_endpoint.expand_touched(&mut touched);
+        // P4 同上：`POSREF` 引用者的根都取自 roots_T；开关关时是空操作。
+        self.design_reference.expand_touched(&mut touched);
         WindowImpact {
             touched,
             closure_complete: self.closure.is_complete(),
+            cascade_degraded: self.design_reference.degraded.clone(),
             unresolved: self.plan.report.unresolved.len(),
             candidates: self.plan.report.candidates,
             index_keys: self.index_keys,
@@ -534,6 +568,26 @@ pub(crate) async fn build_model_update_plan_from_window(
         let file = service.source_file(dbnum)?.to_path_buf();
         let base = service.build_set(dbnum, Some(base_sesno))?;
         let target = service.build_set(dbnum, Some(target_sesno))?;
+        // P4 逐库并集的输入：一张反向表只答它自己那个库的引用者，跨库引用者只有逐个开
+        // MDB 的设计成员才找得到。开关关着时连成员名单都不解——`design_sources` 要为每个
+        // 未钉住的库开一次文件问最新会话。
+        let design_dbs: Vec<crate::data_interface::reverse_reference::SourceDb> =
+            if crate::options::model_design_reference_cascade() {
+                service
+                    .design_sources()?
+                    .into_iter()
+                    .map(|(dbnum, file, sesno)| {
+                        crate::data_interface::reverse_reference::SourceDb {
+                            dbnum,
+                            db_type: "DESI".to_string(),
+                            file,
+                            sesno: Some(sesno),
+                        }
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            };
         anyhow::Ok(WindowRootSources::collect(
             &file,
             base_sesno,
@@ -541,6 +595,7 @@ pub(crate) async fn build_model_update_plan_from_window(
             &base,
             &target,
             &unit_types,
+            &design_dbs,
         )?)
     })
     .await
@@ -573,6 +628,7 @@ pub(crate) async fn build_model_update_plan_from_window(
     ));
     warnings.push(sources.structural_connection.summary_line(dbnum));
     warnings.push(sources.cable_endpoint.summary_line(dbnum));
+    warnings.push(sources.design_reference.summary_line(dbnum));
     let units = plan
         .regen
         .iter()
@@ -1137,6 +1193,7 @@ mod tests {
         WindowImpact {
             touched: touched.iter().map(|id| r(*id)).collect(),
             closure_complete: true,
+            cascade_degraded: None,
             unresolved: 0,
             candidates: 3,
             index_keys: 1000,
@@ -2079,6 +2136,7 @@ mod tests {
                 &base,
                 &target,
                 &unit_types,
+                &[],
             )
             .expect("collect");
             if expect.base == 255 && expect.target == 256 {
@@ -2253,7 +2311,7 @@ mod tests {
         let unit_types = resolve_delivery_unit_types(&[]);
         let (base, target) = (open(45), open(46));
 
-        let sources = WindowRootSources::collect(&file, 45, 46, &base, &target, &unit_types)
+        let sources = WindowRootSources::collect(&file, 45, 46, &base, &target, &unit_types, &[])
             .expect("窗口规划器必须能收集 ams7999 45→46——老收集器正是死在这一窗");
         assert!(
             sources.closure.is_complete(),

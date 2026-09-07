@@ -69,7 +69,14 @@ e3d-model 几何真读的 15 个引用属性里 12 个有表，三个没有的�
 CATA 没有数据批次所以 `build_cata_cascade_plan` 根本不会被调，`CascadeExpand` 工作项只可能是旧队列里的
 遗留行。D3 那道错误保证了：即便走到，它们在读透形态下也是**看得见地退化**，不是静默返回空集。
 
-`docs/2026-09-04_model-cascade-update-inventory.md` 的 #4 / #5 也留到 P4 落地后一并改口径。
+**补记（2026-09-07 同日，P4 已接线之后）**：通用一跳落在
+`data_interface/reverse_reference.rs::DesignReferenceCascade`（开关 `model_design_reference_cascade`
+默认关，计划 §3 P4 落地段）。这三个读点**仍然没动**，理由换了一条、而且更硬：P4 的**行为**只有
+`POSREF` 一个属性（P0 差表里设计→设计、e3d-model 几何真读的只有它），而这三个读点走的是 `ref_rev`
+那 603 个名字的全量资格。拿一条换六百条是**收窄**，不是等价替换——要拆，得先逐条回答「老路那些边里
+今天还有哪些真在影响几何」。那是 P5 收口的活。
+
+`docs/2026-09-04_model-cascade-update-inventory.md` 的 #4 / #5 也留到那时一并改口径。
 
 ## 验收
 
@@ -77,3 +84,5 @@ CATA 没有数据批次所以 `build_cata_cascade_plan` 根本不会被调，`Ca
   「读透形态不维护、且读它要报错」。
 - **未 live**：默认形态（`spawned-mem` + `read-through` + direct）下改一个 SCOM 参数的 CATA 窗口、
   只有引用它的根重算——这条验收属于 P4 把文件表反查接进规划器之后，本 ADR 不认领。
+  （P4 同日已接线，但它接的是**设计→设计**那一跳；这条 CATA 窗口的 live 走的是 P3 的
+  `cascade_stale_catalogue_windows`，仍未跑。）
