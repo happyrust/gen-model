@@ -95,6 +95,14 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub room_incremental: Option<bool>,
 
+    /// 常驻房间模型（默认 `false`，计划 `docs/plans/2026-09-07-resident-room-model-plan.md`）。
+    ///
+    /// 开着时启动最前段（空间树装载之后、watcher / worker 之前）建一份进程内的房间→面板
+    /// 拓扑与在册面板几何，范围是 MDB 全部设计库、不受 `watch_dbnums` 与上弦位约束；
+    /// 关着时一行行为不变。详见 [`room_resident_model`]。
+    #[serde(default)]
+    pub room_resident_model: Option<bool>,
+
     /// 跨项目 DICT/CATA 裸 dbnum 冲突的显式选主顺序（ADR-025）。
     #[serde(default)]
     pub catalogue_project_priority: Option<Vec<String>>,
@@ -238,6 +246,7 @@ impl From<DbOption> for DbOptionExt {
             model_incremental: None,
             model_incremental_types: None,
             room_incremental: None,
+            room_resident_model: None,
             catalogue_project_priority: None,
             watch_dbnums: None,
             block_file_identity_conflicts: None,
@@ -305,6 +314,8 @@ struct DbOptionExtFields {
     model_incremental_types: Option<Vec<String>>,
     #[serde(default)]
     room_incremental: Option<bool>,
+    #[serde(default)]
+    room_resident_model: Option<bool>,
     #[serde(default)]
     catalogue_project_priority: Option<Vec<String>>,
     #[serde(default)]
@@ -520,6 +531,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_incremental: ext.model_incremental,
         model_incremental_types: ext.model_incremental_types.clone(),
         room_incremental: ext.room_incremental,
+        room_resident_model: ext.room_resident_model,
         catalogue_project_priority: ext.catalogue_project_priority.clone(),
         watch_dbnums: ext.watch_dbnums.clone(),
         block_file_identity_conflicts: ext.block_file_identity_conflicts,
@@ -1277,6 +1289,33 @@ fn effective_room_incremental(configured: Option<bool>, env_override: Option<&st
         .and_then(parse_bool_flag)
         .or(configured)
         .unwrap_or(true)
+}
+
+/// 环境变量名：一次性覆盖 [`room_resident_model`]，不必改配置文件。
+pub const ROOM_RESIDENT_MODEL_ENV: &str = "AIOS_ROOM_RESIDENT_MODEL";
+
+/// 常驻房间模型开不开（`DbOption.toml` 的 `room_resident_model`，**默认 false**）。
+///
+/// 计划 `docs/plans/2026-09-07-resident-room-model-plan.md`（Q12 (a)）：房间→面板拓扑与在册
+/// 面板几何进程内常驻，库里的 `room_published_topology` / `room_published_inst` 从此是存储与
+/// 参照。开着时 `run_cli` 在空间树装载之后、watcher / worker 之前跑一次
+/// `room_resident::initialize_at_startup`——只认 `spatial_compute`，不看 `startup_data_ready` /
+/// 上弦位 / `startup_autorun` / `watch_dbnums`（第 5 轮 Q17–Q20：房间是参照系，不是增量的一部分）。
+/// 关着时每一处都走今天的路，一字不动。真库门（P5）过了再翻默认。
+///
+/// 环境变量 [`ROOM_RESIDENT_MODEL_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
+pub fn room_resident_model() -> bool {
+    effective_room_resident_model(
+        load_ext_fields().room_resident_model,
+        std::env::var(ROOM_RESIDENT_MODEL_ENV).ok().as_deref(),
+    )
+}
+
+fn effective_room_resident_model(configured: Option<bool>, env_override: Option<&str>) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(false)
 }
 
 /// 环境变量名：一次性覆盖 [`model_xgeometry_gate`]，不必改配置文件。
@@ -2185,6 +2224,25 @@ mod tests {
         assert!(effective_room_incremental(Some(true), Some("ture")));
         assert!(!effective_room_incremental(Some(false), Some("ture")));
         assert!(effective_room_incremental(None, Some("ture")));
+    }
+
+    /// 常驻房间模型**默认关**（真库门过了才翻，计划 Q12 (a)）：缺配置、拼错的环境变量都
+    /// 不算开；配置开了环境变量能临时关，反过来也能临时开一次而不改文件。
+    #[test]
+    fn room_resident_model_is_off_unless_someone_turns_it_on() {
+        assert!(!effective_room_resident_model(None, None));
+        assert!(effective_room_resident_model(Some(true), None));
+        assert!(!effective_room_resident_model(Some(false), None));
+        assert!(effective_room_resident_model(None, Some("1")));
+        assert!(!effective_room_resident_model(Some(true), Some("off")));
+        assert!(effective_room_resident_model(Some(true), Some("ture")));
+        assert!(!effective_room_resident_model(None, Some("ture")));
+        assert!(
+            ext_field_names()
+                .iter()
+                .any(|name| name == "room_resident_model"),
+            "配置读坏时的告警名单从结构体导出，新键得在里面"
+        );
     }
 
     #[test]

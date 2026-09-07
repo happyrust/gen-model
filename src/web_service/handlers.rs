@@ -711,7 +711,18 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         || Value::Null,
     );
     // room_build 自带 2 秒上限（room_build_health_from），降级形状也是它自己渲染的。
-    let room_build = crate::fast_model::room_model::room_build_health().await;
+    let mut room_build = crate::fast_model::room_model::room_build_health().await;
+    // 常驻房间模型（`room_resident_model` 开关）：启动初始化的结局 + 每一路当前模型的统计；
+    // 无几何的在册面板按库点名，限定域之外的库单独成一句（第 5 轮 Q20 (a)）。哪些库在
+    // 限定域里由这里对 `watch_scope` 说——房间文件自己不认识它。进程内读数，不套预算。
+    if let Value::Object(map) = &mut room_build {
+        map.insert(
+            "resident".to_string(),
+            crate::fast_model::room_resident::resident_health(
+                crate::data_interface::watch_scope::admits,
+            ),
+        );
+    }
     let read_through = state.element_attributes.health().await;
     let source_snapshot =
         crate::data_interface::mdb_memory_store::get(&state.identity.project, &state.identity.mdb);

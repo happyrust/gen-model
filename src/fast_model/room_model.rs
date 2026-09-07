@@ -440,14 +440,20 @@ struct RoomBuildStamp {
 ///
 /// 严格读 + 初始化时删旧行也能解，但那要求有一条真的迁移语句；没有它，严格读
 /// 就是把线上每一次启动都钉死在重建上。缺字段按「不要求重建」读并不放松安全：
-/// 这行只在一次**成功**的全量重建之后才存在，真该重建的情形仍由 stamp 对账
-/// （epoch / 条数）与「没有凭据 ⇒ 跑」两条兜住。
+/// 真该重建的情形仍由 stamp 对账（epoch / 条数）与「没有凭据 ⇒ 跑」两条兜住。
+///
+/// 章的两格（`spatial_epoch` / `tree_entries`）同样得是 `Option`：这一行从 2026-09-07 起
+/// 不再只由全量重建写——常驻房间模型把 `resident_blocked` / `resident_reference` 两格也
+/// 放在 `room_build:main` 上（`room_resident.rs`），启动房间初始化先于任何全量重建就会
+/// `UPSERT` 出这一行，那时章的两格投影回来是 `NONE`。按 `u64` 读就是整份「解析房间重建
+/// 凭据失败」：`/health` 报错、启动对账判「跑」——真库门 2026-09-08（`watch_dbnums=[8000]`）
+/// 撞上的正是这一形状。两格缺任一即 [`Self::stamp`] 为 `None`，含义就是「还没成功建过」。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct RoomBuildRecord {
     #[serde(default)]
-    spatial_epoch: u64,
+    spatial_epoch: Option<u64>,
     #[serde(default)]
-    tree_entries: u64,
+    tree_entries: Option<u64>,
     #[serde(default)]
     rebuild_required: Option<bool>,
     #[serde(default)]
@@ -457,6 +463,15 @@ struct RoomBuildRecord {
 impl RoomBuildRecord {
     fn requires_rebuild(&self) -> bool {
         self.rebuild_required.unwrap_or(false)
+    }
+
+    /// 上次成功全量重建盖的章；两格都在才算有。行存在而章不在（只写过
+    /// `resident_blocked` / `resident_reference` / 持久重建要求）与没有这一行同义：从没成功建过。
+    fn stamp(&self) -> Option<RoomBuildStamp> {
+        Some(RoomBuildStamp {
+            spatial_epoch: self.spatial_epoch?,
+            tree_entries: self.tree_entries?,
+        })
     }
 }
 
@@ -556,12 +571,21 @@ where
     F: std::future::Future<Output = anyhow::Result<Option<RoomBuildRecord>>>,
 {
     match tokio::time::timeout(timeout, read).await {
-        Ok(Ok(Some(record))) => serde_json::json!({
-            "rebuild_required": record.requires_rebuild(),
-            "rebuild_reason": record.rebuild_reason,
-            "spatial_epoch": record.spatial_epoch,
-            "tree_entries": record.tree_entries,
-        }),
+        Ok(Ok(Some(record))) => match record.stamp() {
+            Some(stamp) => serde_json::json!({
+                "rebuild_required": record.requires_rebuild(),
+                "rebuild_reason": record.rebuild_reason,
+                "spatial_epoch": stamp.spatial_epoch,
+                "tree_entries": stamp.tree_entries,
+            }),
+            // 行在、章不在：常驻房间模型先写了自己那几格。与没有这一行同一句话。
+            None => serde_json::json!({
+                "rebuild_required": true,
+                "rebuild_reason": record
+                    .rebuild_reason
+                    .unwrap_or_else(|| "没有成功的全量房间重建凭据".to_string()),
+            }),
+        },
         Ok(Ok(None)) => serde_json::json!({
             "rebuild_required": true,
             "rebuild_reason": "没有成功的全量房间重建凭据",
@@ -612,13 +636,8 @@ fn room_build_record_verdict(
                 .as_deref()
                 .unwrap_or("房间结构枚举失败")
         )),
-        last => room_build_verdict(
-            last.map(|record| RoomBuildStamp {
-                spatial_epoch: record.spatial_epoch,
-                tree_entries: record.tree_entries,
-            }),
-            current,
-        ),
+        // 行在而章不在（只写过 resident_blocked / resident_reference）走 `None` 那支：没成功建过。
+        last => room_build_verdict(last.and_then(|record| record.stamp()), current),
     }
 }
 
@@ -3005,11 +3024,66 @@ mod tests {
 
     fn record(rebuild_required: bool) -> RoomBuildRecord {
         RoomBuildRecord {
-            spatial_epoch: 292,
-            tree_entries: 22056,
+            spatial_epoch: Some(292),
+            tree_entries: Some(22056),
             rebuild_required: Some(rebuild_required),
             rebuild_reason: rebuild_required.then(|| "panel enumeration failed".into()),
         }
+    }
+
+    /// 行在、章不在：常驻房间模型的 `resident_blocked` / `resident_reference` 先于任何全量
+    /// 重建就会把 `room_build:main` 建出来，章的两格投影回来是 `NONE`。
+    ///
+    /// 真库门 2026-09-08（`watch_dbnums=[8000]`，`test-increment/runs/resident-advance-*`）
+    /// 撞上的形状：按 `u64` 读整份「解析房间重建凭据失败: expected a 64-bit unsigned integer,
+    /// found None」，`/health.room_build` 报错、启动对账判「跑」。正确含义是「还没成功建过」
+    /// ——与没有这一行同一句话，不是解析错误。
+    #[tokio::test]
+    async fn a_record_without_the_stamp_reads_as_never_built() {
+        let record: RoomBuildRecord = serde_json::from_value(serde_json::json!({
+            "spatial_epoch": null,
+            "tree_entries": null,
+            "rebuild_required": null,
+            "rebuild_reason": null,
+        }))
+        .expect("只写过 resident_blocked 的行必须仍然读得动");
+        assert_eq!(record.stamp(), None);
+        assert!(!record.requires_rebuild());
+        assert_eq!(
+            room_build_record_verdict(Some(record.clone()), stamp(0, 0)),
+            StartupRoomBuild::Run("没有上次成功全量重建的记录".to_string()),
+            "章不在 = 从没成功建过，不是「凭据损坏」"
+        );
+        let health = room_build_health_from(
+            std::time::Duration::from_secs(1),
+            std::future::ready(Ok(Some(record))),
+        )
+        .await;
+        assert_eq!(health["rebuild_required"], true);
+        assert_eq!(health["rebuild_reason"], "没有成功的全量房间重建凭据");
+        assert!(health.get("spatial_epoch").is_none(), "{health}");
+
+        // 一格在一格不在也不算章（半截章只能来自手改）。
+        let half: RoomBuildRecord = serde_json::from_value(serde_json::json!({
+            "spatial_epoch": 292,
+            "tree_entries": null,
+            "rebuild_required": false,
+            "rebuild_reason": null,
+        }))
+        .unwrap();
+        assert_eq!(half.stamp(), None);
+        // 持久重建要求压过一切，哪怕章不在。
+        let required: RoomBuildRecord = serde_json::from_value(serde_json::json!({
+            "spatial_epoch": null,
+            "tree_entries": null,
+            "rebuild_required": true,
+            "rebuild_reason": "房间结构枚举失败",
+        }))
+        .unwrap();
+        assert!(matches!(
+            room_build_record_verdict(Some(required), stamp(0, 0)),
+            StartupRoomBuild::Run(reason) if reason.contains("房间结构枚举失败")
+        ));
     }
 
     /// 老二进制盖的章缺 `rebuild_required`，而 SurrealDB 的投影把它当 `NONE` 列出来。

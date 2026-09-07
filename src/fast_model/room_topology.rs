@@ -342,20 +342,31 @@ pub(crate) async fn load_room_panel_map_from_files<F>(
 where
     F: Fn(&str) -> bool,
 {
-    let (_, _, groups) = load_room_groups_from_files(hierarchy).await?;
+    let (_, _, by_file) = load_room_groups_from_files(hierarchy).await?;
     Ok(room_panel_map_from_groups(
-        room_panel_groups(&groups, room_key_words),
+        room_panel_groups(&flatten_groups_by_file(by_file), room_key_words),
         match_room_fn,
     ))
 }
 
-/// [`load_room_panel_map_from_files`] 的下半截：当前 MDB 全部设计库文件的**原始**分组
-/// （未过关键字）、各 DESI 的冻结令牌（按 dbnum 序），以及这组文件版本的规范摘要
-/// （令牌 JSON 序列化再摘要）。常驻房间模型（`room_resident`）的读透侧以那个摘要为换代键、
-/// 以令牌写启动参照、以分组算拓扑摘要。
-pub(crate) async fn load_room_groups_from_files(
-    hierarchy: RoomHierarchy,
-) -> anyhow::Result<(String, Vec<String>, Vec<RoomGroup>)> {
+/// 摊平「按文件分好的分组」。房间从哪个文件来只有 `/health` 的点名要（见
+/// [`load_published_topology_groups_on`]），别的读法照旧只看一整份分组。
+pub(crate) fn flatten_groups_by_file(by_file: Vec<(u32, Vec<RoomGroup>)>) -> Vec<RoomGroup> {
+    by_file.into_iter().flat_map(|(_, groups)| groups).collect()
+}
+
+/// 此刻 MDB 全部设计库的冻结源（按 dbnum 序）、各自的提交令牌，以及这一组文件版本的规范
+/// 摘要（令牌 JSON 序列化再摘要）。
+///
+/// 摘要只认「有哪些文件、各停在哪个会话」，**不读一个字节的拓扑内容**——常驻房间模型的
+/// 读透侧拿它当换代键（`room_resident::ensure_current` 每轮都要算一次）。它与
+/// [`load_room_groups_from_files`] 算出来的必须是同一个字符串，所以两边共用本函数：
+/// 各写一份的话，键漂一次就是「每轮都以为文件变了、每轮整份重建」，而且不报错。
+pub(crate) async fn latest_frozen_sources() -> anyhow::Result<(
+    String,
+    Vec<String>,
+    Vec<crate::data_interface::frozen_source::FrozenSource>,
+)> {
     let current = crate::fast_model::e3d_model_service::E3dModelService::from_current().await?;
     let mut sources = current
         .design_sources()?
@@ -371,10 +382,21 @@ pub(crate) async fn load_room_groups_from_files(
         .collect::<anyhow::Result<Vec<_>>>()?;
     let composite =
         crate::data_interface::model_publish_queue::digest(&serde_json::to_vec(&tokens)?);
+    Ok((composite, tokens, sources))
+}
+
+/// [`load_room_panel_map_from_files`] 的下半截：当前 MDB 全部设计库文件的**原始**分组
+/// （未过关键字，**按文件 dbnum 分好**）、各 DESI 的冻结令牌（按 dbnum 序），以及这组文件
+/// 版本的规范摘要（令牌 JSON 序列化再摘要）。常驻房间模型（`room_resident`）的读透侧以那个
+/// 摘要为换代键、以令牌写启动参照、以分组算拓扑摘要，并按文件 dbnum 给「无几何按库」点名。
+pub(crate) async fn load_room_groups_from_files(
+    hierarchy: RoomHierarchy,
+) -> anyhow::Result<(String, Vec<String>, Vec<(u32, Vec<RoomGroup>)>)> {
+    let (composite, tokens, sources) = latest_frozen_sources().await?;
     let service =
         crate::fast_model::e3d_model_service::E3dModelService::from_frozen_sources(&sources, true)
             .await?;
-    let mut groups: Vec<RoomGroup> = Vec::new();
+    let mut by_file: Vec<(u32, Vec<RoomGroup>)> = Vec::new();
     for source in sources {
         let (dbnum, file, sesno) = (
             source.dbnum() as u32,
@@ -405,9 +427,9 @@ pub(crate) async fn load_room_groups_from_files(
                 fresh
             }
         };
-        groups.extend(cached.iter().cloned());
+        by_file.push((dbnum, cached.as_ref().clone()));
     }
-    Ok((composite, tokens, groups))
+    Ok((composite, tokens, by_file))
 }
 
 /// Load room topology from the durable composite of each file's last
@@ -427,18 +449,24 @@ where
     if rows.is_empty() {
         return Ok(None);
     }
-    let groups = load_published_topology_groups_on(&SUL_DB, &rows, hierarchy).await?;
+    let by_file = load_published_topology_groups_on(&SUL_DB, &rows, hierarchy).await?;
     Ok(Some(room_panel_map_from_groups(
-        room_panel_groups(&groups, room_key_words),
+        room_panel_groups(&flatten_groups_by_file(by_file), room_key_words),
         match_room_fn,
     )))
 }
 
+/// 发布清单选中的那份拓扑，**按文件 dbnum 分好**（`room_published_topology` 一个 dbnum 一行，
+/// 行里的分组就是那个文件的房间树贡献的）。
+///
+/// 保留行 dbnum 是为了「这块面板来自哪个库」有个能说给人听的答案：面板 refno 的头一段是
+/// **refno 空间**的库号（ams7997 里的元素是 24381），与 `watch_dbnums` / 发布清单说的**文件**
+/// 库号不是同一套编号。
 pub(crate) async fn load_published_topology_groups_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     inputs: &[crate::data_interface::side_effect_pending::PublishedFileInput],
     hierarchy: RoomHierarchy,
-) -> anyhow::Result<Vec<RoomGroup>> {
+) -> anyhow::Result<Vec<(u32, Vec<RoomGroup>)>> {
     #[derive(serde::Deserialize)]
     struct TopologyRow {
         dbnum: u32,
@@ -469,10 +497,7 @@ pub(crate) async fn load_published_topology_groups_on(
     );
     Ok(topology_rows
         .into_iter()
-        .flat_map(|row| {
-            let _ = row.dbnum;
-            row.groups
-        })
+        .map(|row| (row.dbnum, row.groups))
         .collect())
 }
 
@@ -564,10 +589,15 @@ mod tests {
         .unwrap()
         .check()
         .unwrap();
-        let groups = load_published_topology_groups_on(&db, &inputs, RoomHierarchy::Hd)
+        let by_file = load_published_topology_groups_on(&db, &inputs, RoomHierarchy::Hd)
             .await
             .unwrap();
-        assert_eq!(groups, [first, second].concat());
+        assert_eq!(
+            by_file,
+            vec![(8000, first.clone()), (8001, second.clone())],
+            "行 dbnum 是**文件**库号，要留着——面板 refno 的头一段是 refno 空间的库号，两套编号"
+        );
+        assert_eq!(flatten_groups_by_file(by_file), [first, second].concat());
     }
 
     struct Tree {

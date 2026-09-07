@@ -1,6 +1,6 @@
 # 2026-09-07 计划：常驻房间模型——库是存储与参照，不是计算源
 
-状态：**P0 已过目放行（2026-09-07 18:55）并取证完；P1 本体已落地**（`src/fast_model/room_resident.rs`，见 §3 P1 落地记）；**P3-a（启动参照与启动计划的纯函数 / DB 半截）已落地**；**第 5 轮（Q17–Q20，2026-09-07 21:30）把「房间初始化」搬到启动最前段、覆盖 MDB 全部 DESI、不受 `watch_dbnums` 与上弦位约束**（§3 P3 改序）；**P3-init（房间初始化入口 `initialize_at_startup`）已落地**（见 §3 P3-init 落地记）；P2 与 P3-b（`lib.rs` 接线）等邻线提交 F-A/F-B。来源：grill 五轮（Q1–Q20 全部按推荐拍板，决议索引见 §8），事实全部按当前**共享工作树**源码手核（行号随邻线未提交改动会漂，以函数名为准）。
+状态：**P0 已过目放行（2026-09-07 18:55）并取证完；P1 本体已落地**（`src/fast_model/room_resident.rs`，见 §3 P1 落地记）；**P3-a（启动参照与启动计划的纯函数 / DB 半截）已落地**；**第 5 轮（Q17–Q20，2026-09-07 21:30）把「房间初始化」搬到启动最前段、覆盖 MDB 全部 DESI、不受 `watch_dbnums` 与上弦位约束**（§3 P3 改序）；**P3-init（房间初始化入口 `initialize_at_startup`）已落地**（见 §3 P3-init 落地记）；**P3-b（`lib.rs` 接线、结局落库、`/health` 一格、凭据行 Option 化）已落地（2026-09-08，见 §3 P3-b 落地记，同笔带 P2 换代点本体 `ensure_current`，未接线）**；P2 接线与 P3 启动对比的应用侧待做。**2026-09-08 更正**：F-A/F-B 已提交（`40fa79c27`）；P3-b 的**初始化接线**已在工作树落地（`lib.rs::initialize_resident_rooms_at_startup`，未提交），**启动对比与应用**一行未接、摄入形态没有参照写点、`plan_startup` 无生产调用——缺口分析与详细设计见 `docs/plans/2026-09-08-room-startup-compare-and-apply-plan.md`（它修订本文 §3 P3 步 2「摄入侧同源恒等」那半句，待拍板）。来源：grill 五轮（Q1–Q20 全部按推荐拍板，决议索引见 §8），事实全部按当前**共享工作树**源码手核（行号随邻线未提交改动会漂，以函数名为准）。
 
 关联：ADR-010（房间归属增量）、ADR-040（房间失效正确性）、ADR-062（按数据库文件完成后发布）、`docs/2026-09-07-room-increment-audit.md`（F-A/F-B 已落地、F-C 仍红）、`docs/plans/2026-08-19-room-incremental-ams-copy-test-plan.md`（真库门通道）。
 
@@ -151,7 +151,16 @@ ResidentRooms { published: Option<Arc<ResidentRoomModel>>, latest: Option<Arc<Re
 - `ResidentStats.missing_panels_by_dbnum`（Q20 (a)，`/health` 点名用）；`StartupInitOutcome::summary()` 一行：每个文件 `dbnum@sesno 动作`（前进带 `旧→新`、动过的带冻结耗时）+ 清单前进告警 + 房 / 在册 / 有几何 / 无几何（按库）。
 - 测试 +4（`room_resident` 19 条）：清单前进计划四形状（被监听陈旧不动 / 未监听缺行新增 / 陈旧前进 / 最新保留；限定域未生效一行不动）；回执文案三形态；`mem://` 门（前进语句只换目标 dbnum 那一行、其余行逐字不变、行数不变；在途判定只认 `spatial_reconcile` 的 `collecting` / `pending`，`done` 与别的 kind 不算）；源码钉 `room_files_never_consult_the_watch_scope`（三份房间文件的代码行不得出现模块名 `watch_scope`，注释可提）。
 - 验证：`cargo test --lib -- room_resident room_topology room_publication side_effect_pending` **56 passed / 0 failed / 2 ignored**；两份 .rs rustfmt 干净。
-- **未做（P3-b，等邻线）**：`lib.rs` 接线——`run_cli` 里空间树装载前移、紧跟其后调 `initialize_at_startup`（只认 `spatial_compute`）、`owned_by_rounds` 按 `watch_scope` 算、`resident_blocked` 落 `room_build:main`、`/health.room_build.resident` 点名未监听库；ADR-048 D3 改口径与源码钉随新 ADR（P5）。真库门 `watch_dbnums=[8000]` 起服看「7997@… 前进」仍在 §7 未跑。
+- ~~**未做（P3-b，等邻线）**~~ → 见下面 P3-b 落地记；ADR-048 D3 改口径与源码钉仍随新 ADR（P5）。
+
+**P3-b 落地记（2026-09-08，`lib.rs` 接线 + 结局落库 + `/health`；同笔带 P2 换代点本体，未接线）**：
+- `lib.rs`：`run_cli` 里空间树装载从「等数据清单之后」**前移到 watcher / worker 之前**（只此一处，老位置只留一行指路注释）；紧跟其后 `initialize_resident_rooms_at_startup(&db_option)`，门只有 `room_resident_model` 开关与 `spatial_compute`。限定域只在这里被问一次：`watch_scope::active()` → `RoundOwnership::Only(watch_dbnums)`，否则 `RoundOwnership::EveryFile`（新枚举，替掉此前裸传的 `BTreeSet<u32>`；`owned_by_rounds(&sources)` 按这一批 MDB 设计库解出集合）。结局无论成败都 `record_startup_init`。源码钉 `resident_room_initialization_follows_the_tree_load_and_precedes_the_watcher`：顺序 健康接口 → 空间树 → 房间初始化 → watcher → worker → 等数据；树装载到初始化之间、初始化本体里的代码行都不许出现 `startup_data_ready` / `is_auto_work_armed` / `startup_autorun` / `model_incremental` / `skip_startup_room_build` / `build_room_relations`。
+- `options.rs`：`room_resident_model: Option<bool>` 进 `DbOptionExt` / `DbOptionExtFields` / `get_db_option_ext`，`room_resident_model()` + `AIOS_ROOM_RESIDENT_MODEL`（取值规则同 `startup_autorun`，**默认 false**），测试 `room_resident_model_is_off_unless_someone_turns_it_on`。
+- `room_resident.rs`：`StartupInitReport` 进程内一份（`startup_report()`）+ `render_resident_blocked_write` / `read_resident_blocked_on` 只动 `room_build:main.resident_blocked` 一格（建起来清成 `NONE`）；`resident_health(is_watched)` / `resident_health_from`：启动结局 + 每一路模型统计 + 无几何按库点名，限定域之外的库单独一句 `unwatched_missing_geometry_notice`。「无几何按库」改按**文件库号**分组（`ResidentRoomModel.room_files`，由 `load_published_topology_groups_on` / `load_room_groups_from_files` 现在**按文件分好**的分组算出；`room_topology::flatten_groups_by_file` 给别的读法摊平）——此前按面板 refno 头一段报，ams7997 的面板会写成 24381、还会让 `watch_scope::admits` 恒假把被监听库诬成未监听。`initialize_published_at_startup` 在「清单没前进、模型又建不起来」时把前进跳过的原因 `context` 到错误链上。**P2 换代点本体**一并进：`EnsureOutcome` / `probe_manifest`（摄入键 = `published_topology_manifest_key`，读透键 = 新抽出的 `room_topology::latest_frozen_sources`，两处各只有一个定义）/ `ensure_current(face, …)`（调用方须已持 `lock_spatial_serial`；键没变直接复用 `Arc`，变了才整份重建并 `install`），**尚无调用方**——`drain_rooms_selected` 仍走今天的读法，接线在 P2。
+- `room_model.rs`：`RoomBuildRecord` 的 `spatial_epoch` / `tree_entries` 改 `Option<u64>` + `stamp()`——`room_build:main` 这一行从此不只由全量重建写，`resident_blocked` / `resident_reference` 会先于任何全量重建把它 `UPSERT` 出来，章的两格投影回来是 `NONE`，按 `u64` 读就是整份「解析房间重建凭据失败」（`/health` 报错、启动对账判「跑」）。行在章不在 = 「还没成功建过」，与没有这一行同一句话；持久重建要求照旧压过一切。测试 `a_record_without_the_stamp_reads_as_never_built`。
+- `web_service/handlers.rs`：`/health.room_build.resident` 一格，`is_watched = watch_scope::admits`。
+- 验证：`cargo test --lib -- room_resident room_model room_topology startup_room_build_gate_tests room_resident_model_is_off_unless_someone_turns_it_on` **93 passed / 0 failed / 4 ignored**（默认特性集，含 `room_topology_source` 那几条）。未起服务；`room_model.rs` 注释记着 2026-09-08 在 `watch_dbnums=[8000]` 上跑过一次真库门、撞上「章不在」与「按 refno 报库号」两处并已修，但那次的回执本笔没有存证，§7 那两条仍按未证记。
+- 本笔只提交上面六份文件与本文；`lib.rs` / `options.rs` 里同一工作树上别的会话的在途改动（`feature = "sql"` 退役、`store_mode` 默认翻回 `external`）**不在本笔**。
 
 ### P4 · 护栏与观测（0.5 天）
 
@@ -213,8 +222,8 @@ grill 已把决策问完（§8）。剩下三条是通知，不同意就说：
 - 语料里是否存在跨库面板（`compose` 支持、测试有夹具、真库未见实例）：**未核**——它决定 Q10 (a) 的「整体止步」是必要的还是保守的。
 - `room_published_topology` 在 P2 之后是否只剩崩溃恢复一个用途：**未证**，退役另立。
 - 摄入侧启动对比恒等的推论（清单拓扑与常驻模型同源）：按代码推的，P3 (ii) 的 `mem://` 门才算证。
-- `watch_dbnums=[8000]` 起服时房间初始化替 7997 前进清单行、`/health` 点名 7997 面板无几何：**未跑**（要 `lib.rs` 接线，P3-b）。
-- 空间树装载前移到等数据清单之前是否有隐藏依赖（`load_project_tree_verified` 读的是指针与快照文件，按代码没有）：**未证**，P3-b 接线时以 `lib.rs` 现有顺序钉为准补一条。
+- `watch_dbnums=[8000]` 起服时房间初始化替 7997 前进清单行、`/health` 点名 7997 面板无几何：接线已落（P3-b）；`room_model.rs` 注释记着 2026-09-08 跑过一次并修了两处形状，但**回执没有存证**，仍按未证记，P5 真库门时留 `docs/evidence/`。
+- 空间树装载前移到等数据清单之前是否有隐藏依赖（`load_project_tree_verified` 读的是指针与快照文件，按代码没有）：顺序钉已补（`resident_room_initialization_follows_the_tree_load_and_precedes_the_watcher`），真库上**未证**。
 
 ## 8. 决议索引（grill 2026-09-07，四轮，全部按推荐）
 

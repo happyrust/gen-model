@@ -219,6 +219,10 @@ pub(crate) struct ResidentRoomModel {
     /// 读透：各 DESI 的冻结令牌（按 dbnum 序），启动参照按它们读分片；摄入为空（参照就是
     /// `room_published_topology`）。
     pub source_tokens: Vec<String>,
+    /// 房间 → 声明它的那个**文件** dbnum。只有 `/health` 与回执的「无几何按库」用它
+    /// （见 [`ResidentStats::missing_panels_by_dbnum`]）；纯测搭的模型可以是空的，那时退回
+    /// 面板 refno 的头一段。跨文件的面板（`compose` 支持、真库未见）算在它房间那个文件名下。
+    pub room_files: BTreeMap<RefnoEnum, u32>,
     pub built_at: std::time::Instant,
     meshes: Arc<MeshCache>,
 }
@@ -246,8 +250,11 @@ pub(crate) struct ResidentStats {
     pub registered_panels: usize,
     pub panels_with_geometry: usize,
     pub missing_panels: usize,
-    /// 无几何的在册面板按 dbnum 分组（Q20 (a)）：`/health` 拿它点名「来自未监听的库」——
-    /// 哪些库未监听由读 `/health` 的那一侧对 `watch_scope` 说，这里只给数。
+    /// 无几何的在册面板按**文件** dbnum 分组（Q20 (a)）：`/health` 拿它点名「来自未监听的
+    /// 库」——哪些库未监听由读 `/health` 的那一侧对 `watch_scope` 说，这里只给数。
+    ///
+    /// 键是文件库号（7997），不是面板 refno 的头一段（24381）：`watch_dbnums`、发布清单、
+    /// 水位说的都是文件库号，照 refno 报既写错库号，又会把被监听库的面板诬成「未监听」。
     pub missing_panels_by_dbnum: BTreeMap<u32, usize>,
     pub meshes_cached: usize,
 }
@@ -315,6 +322,7 @@ impl ResidentRoomModel {
             missing_panels,
             digest,
             source_tokens: Vec::new(),
+            room_files: BTreeMap::new(),
             built_at: std::time::Instant::now(),
             meshes,
         }
@@ -323,6 +331,22 @@ impl ResidentRoomModel {
     pub(crate) fn with_source_tokens(mut self, tokens: Vec<String>) -> Self {
         self.source_tokens = tokens;
         self
+    }
+
+    pub(crate) fn with_room_files(mut self, room_files: BTreeMap<RefnoEnum, u32>) -> Self {
+        self.room_files = room_files;
+        self
+    }
+
+    /// 这块在册面板算在哪个**文件**库号名下：先看它归属的房间来自哪个文件，没有文件归属
+    /// （纯测模型）才退回 refno 的头一段。
+    fn file_of_panel(&self, panel: RefnoEnum) -> u32 {
+        self.map
+            .rooms
+            .iter()
+            .find(|room| room.panels.contains(&panel))
+            .and_then(|room| self.room_files.get(&room.room).copied())
+            .unwrap_or_else(|| panel.refno().get_0())
     }
 
     pub(crate) fn panel(&self, panel: RefnoEnum) -> Option<&ResidentPanel> {
@@ -372,7 +396,7 @@ impl ResidentRoomModel {
             missing_panels_by_dbnum: self.missing_panels.iter().fold(
                 BTreeMap::new(),
                 |mut by_dbnum, panel| {
-                    *by_dbnum.entry(panel.refno().get_0()).or_insert(0) += 1;
+                    *by_dbnum.entry(self.file_of_panel(*panel)).or_insert(0) += 1;
                     by_dbnum
                 },
             ),
@@ -535,7 +559,7 @@ pub(crate) async fn load_published_on(
     meshes: Arc<MeshCache>,
 ) -> anyhow::Result<ResidentRoomModel> {
     let key = crate::fast_model::room_topology::published_topology_manifest_key(inputs, hierarchy);
-    let groups =
+    let by_file =
         crate::fast_model::room_topology::load_published_topology_groups_on(db, inputs, hierarchy)
             .await
             .map_err(|error| {
@@ -545,6 +569,8 @@ pub(crate) async fn load_published_on(
                     format!("读发布拓扑失败: {error:#}"),
                 )
             })?;
+    let room_files = room_files_of(&by_file);
+    let groups = crate::fast_model::room_topology::flatten_groups_by_file(by_file);
     let map = registered_map(&groups, room_key_words, match_room_fn);
     let registered = registered_panels(&map);
     let insts = crate::fast_model::room_publication::query_published_room_insts_on(db, &registered)
@@ -568,7 +594,20 @@ pub(crate) async fn load_published_on(
         map,
         insts,
         meshes,
-    ))
+    )
+    .with_room_files(room_files))
+}
+
+/// 按文件分好的分组 → 房间 → 文件 dbnum。同一个房间在两个文件里都有根是不合法的
+/// （`compose` 的 `duplicate physical RefNo` 已经拦住），这里取先出现的那个。
+fn room_files_of(by_file: &[(u32, Vec<RoomGroup>)]) -> BTreeMap<RefnoEnum, u32> {
+    let mut room_files = BTreeMap::new();
+    for (dbnum, groups) in by_file {
+        for group in groups {
+            room_files.entry(group.room).or_insert(*dbnum);
+        }
+    }
+    room_files
 }
 
 /// 摄入侧生产入口。`None` = 还没有发布清单（升级基线未建），调用方保留今天的路。
@@ -611,7 +650,7 @@ pub(crate) async fn load_latest(
     match_room_fn: impl Fn(&str) -> bool,
     meshes: Arc<MeshCache>,
 ) -> anyhow::Result<ResidentRoomModel> {
-    let (composite, tokens, groups) =
+    let (composite, tokens, by_file) =
         crate::fast_model::room_topology::load_room_groups_from_files(hierarchy)
             .await
             .map_err(|error| {
@@ -621,6 +660,8 @@ pub(crate) async fn load_latest(
                     format!("读文件侧房间分组失败: {error:#}"),
                 )
             })?;
+    let room_files = room_files_of(&by_file);
+    let groups = crate::fast_model::room_topology::flatten_groups_by_file(by_file);
     let map = registered_map(&groups, room_key_words, match_room_fn);
     let registered = registered_panels(&map);
     let insts = crate::data_interface::staging::query_valid_insts(&registered)
@@ -645,7 +686,8 @@ pub(crate) async fn load_latest(
         insts,
         meshes,
     )
-    .with_source_tokens(tokens))
+    .with_source_tokens(tokens)
+    .with_room_files(room_files))
 }
 
 // ---------------------------------------------------------------------------
@@ -964,9 +1006,163 @@ pub(crate) fn resident_rooms() -> &'static RwLock<ResidentRooms> {
 }
 
 // ---------------------------------------------------------------------------
-// 房间初始化（第 5 轮 Q17–Q20）：启动最前段建模，MDB 全部 DESI，不看 watch_dbnums。
-// `lib.rs` 的接线（改序 + 只认 spatial_compute）随 P3-b 进；这里是它要调的那一个入口。
+// 换代点（P2）：每轮 drain 进串行锁之后按身份键懒判，键变了才整份重建。
 // ---------------------------------------------------------------------------
+
+/// [`ensure_current`] 的回执。
+pub(crate) struct EnsureOutcome {
+    /// 这一轮归属路径要用的那份模型。
+    pub model: Arc<ResidentRoomModel>,
+    /// 这一次是不是真换了代（`false` = 身份键没变，复用的是上一轮那份）。
+    pub rebuilt: bool,
+    /// 换了代时与上一代的拓扑差；没换代、或这是第一代，都是 `None`（P4 护栏读它）。
+    pub diff: Option<TopologyDiff>,
+}
+
+/// 身份探针：只算「此刻这一路是哪一组文件版本」，不读拓扑、不读几何。
+///
+/// 摄入 = 发布清单一次查询 + [`published_topology_manifest_key`]，与
+/// `room_published_topology.manifest_key` 是同一个函数算的；读透 = 各 DESI 的冻结令牌摘要
+/// （`room_topology::latest_frozen_sources`），与 [`load_latest`] 的 composite 同源。
+/// 两边都不许在这里另起一套键——键漂了就是每轮都以为文件变了、每轮整份重建。
+///
+/// `None` = 摄入侧还没有发布清单（升级基线未建），调用方保留今天的读法。
+///
+/// [`published_topology_manifest_key`]: crate::fast_model::room_topology::published_topology_manifest_key
+async fn probe_manifest(
+    form: ResidentForm,
+    hierarchy: RoomHierarchy,
+) -> anyhow::Result<Option<ResidentManifest>> {
+    let key = match form {
+        ResidentForm::Published => {
+            let inputs = crate::data_interface::side_effect_pending::SideEffectCompensator::
+                published_file_inputs()
+            .await
+            .map_err(|error| {
+                ResidentBuildError::new(form, None, format!("读发布清单失败: {error:#}"))
+            })?;
+            if inputs.is_empty() {
+                return Ok(None);
+            }
+            crate::fast_model::room_topology::published_topology_manifest_key(&inputs, hierarchy)
+        }
+        ResidentForm::Latest => {
+            crate::fast_model::room_topology::latest_frozen_sources()
+                .await
+                .map_err(|error| {
+                    ResidentBuildError::new(
+                        form,
+                        None,
+                        format!("读各设计库当前文件版本失败: {error:#}"),
+                    )
+                })?
+                .0
+        }
+    };
+    Ok(Some(ResidentManifest { form, key }))
+}
+
+/// 换代点（P2）：把这一路的当前模型对齐到此刻那一组文件版本，交回归属路径要用的那份。
+///
+/// **调用方必须已持 `spatial_state::lock_spatial_serial()`**（源码钉
+/// `the_generation_swap_happens_inside_the_spatial_serial_lock`）。换代、本轮读任务、写归属边
+/// 要落在同一段串行区里：算到一半模型被换掉就是拿旧拓扑写新边，而且两边都不报错。
+///
+/// 身份键没变是常路——除探针那一次查询 / 一遍文件版本，不再有任何 I/O，直接复用当前那份
+/// `Arc`。键变了才整份重建（原则 1：不逐条修补），新的进当前、当前退上一代。
+///
+/// `None` = 摄入侧没有发布清单，**不是失败**：调用方回到今天的读法。建不起来才是 `Err`
+/// （[`ResidentBuildError`]），那时按原则 2 止步、不动存量边。
+pub(crate) async fn ensure_current(
+    face: DataFace,
+    hierarchy: RoomHierarchy,
+    room_key_words: &[String],
+    match_room_fn: impl Fn(&str) -> bool,
+) -> anyhow::Result<Option<EnsureOutcome>> {
+    let form = ResidentForm::for_face(face);
+    let Some(manifest) = probe_manifest(form, hierarchy).await? else {
+        return Ok(None);
+    };
+    let (current, meshes) = {
+        let rooms = resident_rooms()
+            .read()
+            .unwrap_or_else(PoisonError::into_inner);
+        let current = rooms
+            .is_current(&manifest)
+            .then(|| rooms.for_membership(face))
+            .flatten();
+        (current, rooms.mesh_cache())
+    };
+    if let Some(model) = current {
+        return Ok(Some(EnsureOutcome {
+            model,
+            rebuilt: false,
+            diff: None,
+        }));
+    }
+    let model = match form {
+        ResidentForm::Published => {
+            match load_published(hierarchy, room_key_words, match_room_fn, meshes).await? {
+                Some(model) => model,
+                // 探针刚看见的清单在这一瞬空了（基线正在重建）：不装零间房的模型（原则 2）。
+                None => return Ok(None),
+            }
+        }
+        ResidentForm::Latest => {
+            load_latest(hierarchy, room_key_words, match_room_fn, meshes).await?
+        }
+    };
+    let outcome = resident_rooms()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .install(model);
+    Ok(Some(EnsureOutcome {
+        model: outcome.model,
+        rebuilt: true,
+        diff: outcome.diff,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// 房间初始化（第 5 轮 Q17–Q20）：启动最前段建模，MDB 全部 DESI，不看 watch_dbnums。
+// `lib.rs::initialize_resident_rooms_at_startup` 在空间树装载之后、watcher / worker 之前调
+// [`initialize_at_startup`]（P3-b）；门只有 `room_resident_model` 开关与 `spatial_compute`。
+// ---------------------------------------------------------------------------
+
+/// 哪些文件的清单行归**文件轮次**管（Q19 (a)）。由调用方按监听限定域算好传进来——本模块
+/// 不认识 `watch_scope`（原则 4）；归轮次管的行初始化一个字不动，其余的才由它前进。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RoundOwnership {
+    /// 限定域没生效：MDB 每个 DESI 都有自己的文件轮次，初始化一行不动。
+    EveryFile,
+    /// 限定域生效：只有这些库归轮次管；不在其中的库没有轮次推它，清单行由初始化前进。
+    Only(BTreeSet<u32>),
+}
+
+impl RoundOwnership {
+    /// 对这一批 MDB 设计库，归轮次管的 dbnum 集合。
+    pub(crate) fn owned_by_rounds(&self, sources: &[(u32, PathBuf, u32)]) -> BTreeSet<u32> {
+        match self {
+            Self::EveryFile => sources.iter().map(|(dbnum, _, _)| *dbnum).collect(),
+            Self::Only(dbnums) => dbnums.clone(),
+        }
+    }
+
+    /// 给启动日志的一句。
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::EveryFile => "每个设计库都有自己的文件轮次，清单行一律由轮次推进".to_string(),
+            Self::Only(dbnums) => format!(
+                "只有 [{}] 归文件轮次管，其余设计库的清单行由初始化推进到文件最新会话",
+                dbnums
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        }
+    }
+}
 
 /// 一个 MDB 设计库文件在本次初始化里清单行的去向（摄入形态）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1123,26 +1319,21 @@ impl StartupInitOutcome {
 
 /// 启动房间初始化（Q17 (a)）。只做建模与写分片 / 清单，**不写归属边、不写 `resident_reference`**。
 ///
-/// 调用方（`lib.rs`，P3-b）只在 `spatial_compute` 开着时调，其余门一道不看（Q18 (a)）；
-/// `owned_by_rounds` 是它按 `watch_scope` 算好的「归文件轮次管的库」——本模块不认识 `watch_scope`。
-/// 建不起来整份 `Err`（[`ResidentBuildError`] 可 `downcast_ref`），调用方标 `resident_blocked`、
-/// 不动边。
+/// 调用方（`lib.rs::initialize_resident_rooms_at_startup`）只在 `spatial_compute` 开着时调，其余门
+/// 一道不看（Q18 (a)）；`ownership` 是它按 `watch_scope` 算好的「哪些库归文件轮次管」——本模块
+/// 不认识 `watch_scope`。建不起来整份 `Err`（[`ResidentBuildError`] 可 `downcast_ref`），调用方
+/// 记 `resident_blocked`、不动边。
 pub(crate) async fn initialize_at_startup(
     face: DataFace,
-    owned_by_rounds: &BTreeSet<u32>,
+    ownership: &RoundOwnership,
     hierarchy: RoomHierarchy,
     room_key_words: &[String],
     match_room_fn: impl Fn(&str) -> bool,
 ) -> anyhow::Result<StartupInitOutcome> {
     match ResidentForm::for_face(face) {
         ResidentForm::Published => {
-            initialize_published_at_startup(
-                owned_by_rounds,
-                hierarchy,
-                room_key_words,
-                match_room_fn,
-            )
-            .await
+            initialize_published_at_startup(ownership, hierarchy, room_key_words, match_room_fn)
+                .await
         }
         ResidentForm::Latest => {
             initialize_latest_at_startup(hierarchy, room_key_words, match_room_fn).await
@@ -1152,7 +1343,7 @@ pub(crate) async fn initialize_at_startup(
 
 /// 摄入形态：基线（全 MDB，已有就跳过）→ 替不归轮次管的文件前进清单行 → 从清单建模并装进单例。
 async fn initialize_published_at_startup(
-    owned_by_rounds: &BTreeSet<u32>,
+    ownership: &RoundOwnership,
     hierarchy: RoomHierarchy,
     room_key_words: &[String],
     match_room_fn: impl Fn(&str) -> bool,
@@ -1188,7 +1379,7 @@ async fn initialize_published_at_startup(
                 format!("读发布清单失败: {error:#}"),
             )
         })?;
-    let steps = plan_manifest_advance(&sources, &rows, owned_by_rounds);
+    let steps = plan_manifest_advance(&sources, &rows, &ownership.owned_by_rounds(&sources));
     let (rows, frozen, advance_warning) = if let Some(reason) = baseline_failure {
         (rows, Vec::new(), Some(format!("清单前进跳过：{reason}")))
     } else {
@@ -1212,15 +1403,25 @@ async fn initialize_published_at_startup(
         .read()
         .unwrap_or_else(PoisonError::into_inner)
         .mesh_cache();
-    let model = load_published_on(
-        &aios_core::SUL_DB,
-        &rows,
-        hierarchy,
-        room_key_words,
-        match_room_fn,
-        meshes,
-    )
-    .await?;
+    let model = match (
+        load_published_on(
+            &aios_core::SUL_DB,
+            &rows,
+            hierarchy,
+            room_key_words,
+            match_room_fn,
+            meshes,
+        )
+        .await,
+        advance_warning.as_deref(),
+    ) {
+        (Ok(model), _) => model,
+        // 清单没前进、模型又建不起来时，「为什么没前进」是唯一有用的那半句：现场只看得到
+        // 「读发布拓扑失败 … got []」这个果（旧清单那份拓扑行早被换代删了）。`context` 挂上
+        // 因，`ResidentBuildError` 仍在链上、照样 `downcast_ref`。
+        (Err(error), Some(warning)) => return Err(error.context(warning.to_string())),
+        (Err(error), None) => return Err(error),
+    };
     let model = resident_rooms()
         .write()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1375,6 +1576,149 @@ async fn initialize_latest_at_startup(
         advance_warning: None,
         model,
         elapsed_ms: started.elapsed().as_millis(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// 启动初始化的结局：进程内一份给 /health，`room_build:main.resident_blocked` 一格给事后查库。
+// ---------------------------------------------------------------------------
+
+/// 本进程最近一次启动房间初始化的结局（`/health.room_build.resident.startup`）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct StartupInitReport {
+    /// 建不起来的原因；`None` = 建起来了，模型已装进单例。
+    pub blocked: Option<String>,
+    /// 建起来时的那一行回执（[`StartupInitOutcome::summary`]）。
+    pub summary: Option<String>,
+    pub at: String,
+}
+
+fn startup_report_slot() -> &'static RwLock<Option<StartupInitReport>> {
+    static REPORT: OnceLock<RwLock<Option<StartupInitReport>>> = OnceLock::new();
+    REPORT.get_or_init(|| RwLock::new(None))
+}
+
+/// 最近一次启动初始化的结局；还没跑过就是 `None`。
+pub(crate) fn startup_report() -> Option<StartupInitReport> {
+    startup_report_slot()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+/// `UPSERT` 只动 `resident_blocked` 一格：`Some(原因)` 落字符串，`None` 清成 `NONE`。空间凭据与
+/// `resident_reference` 都不碰（与 [`render_resident_reference_write`] 同一条纪律）。
+pub(crate) fn render_resident_blocked_write(reason: Option<&str>) -> String {
+    match reason {
+        Some(reason) => format!(
+            "UPSERT room_build:main SET resident_blocked = {};",
+            serde_json::to_string(reason).expect("string serializes")
+        ),
+        None => "UPSERT room_build:main SET resident_blocked = NONE;".to_string(),
+    }
+}
+
+pub(crate) async fn read_resident_blocked_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+) -> anyhow::Result<Option<String>> {
+    let mut response = db
+        .query("SELECT VALUE resident_blocked FROM room_build:main;")
+        .await?
+        .check()?;
+    let rows: Vec<Option<String>> = response.take(0)?;
+    Ok(rows.into_iter().flatten().next())
+}
+
+/// 记下这次启动初始化的结局：进程内一份（`/health` 读）+ `room_build:main.resident_blocked`
+/// 一格（建起来了就清成 NONE）。库写失败只打印——结局以进程内那份为准。
+pub(crate) async fn record_startup_init(result: Result<&StartupInitOutcome, &anyhow::Error>) {
+    let (blocked, summary) = match result {
+        Ok(outcome) => (None, Some(outcome.summary())),
+        Err(error) => (Some(format!("{error:#}")), None),
+    };
+    *startup_report_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = Some(StartupInitReport {
+        blocked: blocked.clone(),
+        summary,
+        at: chrono::Local::now().to_rfc3339(),
+    });
+    if let Err(error) = aios_core::SUL_DB
+        .query(render_resident_blocked_write(blocked.as_deref()))
+        .await
+        .and_then(|response| response.check())
+    {
+        println!(
+            "[房间初始化] resident_blocked 没写进 room_build:main（/health 仍按进程内结局报）: {error:#}"
+        );
+    }
+}
+
+/// `/health.room_build.resident`（Q20 (a)）：启动结局 + 每一路当前模型的统计，无几何的在册面板
+/// 按库点名，并标出哪些库在监听限定域之外。`is_watched` 由调用方按 `watch_scope` 给——本模块
+/// 只给数，不认识限定域。
+pub(crate) fn resident_health(is_watched: impl Fn(u32) -> bool) -> serde_json::Value {
+    let stats = resident_rooms()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .stats();
+    resident_health_from(startup_report().as_ref(), &stats, is_watched)
+}
+
+/// [`resident_health`] 的纯函数半截，测试直接喂。
+pub(crate) fn resident_health_from(
+    startup: Option<&StartupInitReport>,
+    stats: &[ResidentStats],
+    is_watched: impl Fn(u32) -> bool,
+) -> serde_json::Value {
+    let mut unwatched_missing: BTreeMap<u32, usize> = BTreeMap::new();
+    let models: Vec<serde_json::Value> = stats
+        .iter()
+        .map(|stat| {
+            let missing_geometry: Vec<serde_json::Value> = stat
+                .missing_panels_by_dbnum
+                .iter()
+                .map(|(dbnum, panels)| {
+                    let watched = is_watched(*dbnum);
+                    if !watched {
+                        *unwatched_missing.entry(*dbnum).or_insert(0) += panels;
+                    }
+                    serde_json::json!({
+                        "dbnum": dbnum,
+                        "panels": panels,
+                        "watched": watched,
+                    })
+                })
+                .collect();
+            serde_json::json!({
+                "form": stat.form,
+                "key": stat.key,
+                "digest": stat.digest,
+                "rooms": stat.rooms,
+                "registered_panels": stat.registered_panels,
+                "panels_with_geometry": stat.panels_with_geometry,
+                "missing_panels": stat.missing_panels,
+                "missing_geometry": missing_geometry,
+                "meshes_cached": stat.meshes_cached,
+            })
+        })
+        .collect();
+    let notice = (!unwatched_missing.is_empty()).then(|| {
+        format!(
+            "{} 块在册面板无几何，来自未监听的库 [{}]（watch_dbnums 之外：拓扑在册、不算归属、\
+             存量边受保护、面板仍进排除集）",
+            unwatched_missing.values().sum::<usize>(),
+            unwatched_missing
+                .keys()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    });
+    serde_json::json!({
+        "startup": startup,
+        "models": models,
+        "unwatched_missing_geometry_notice": notice,
     })
 }
 
@@ -2231,8 +2575,10 @@ mod tests {
         assert_eq!(edges.len(), 4, "改列不增删边");
     }
 
-    /// 回退即红：归属路径只许经 `for_membership` 取模型。P2 接线前这里是空转（两份文件里
-    /// 还没有 `room_resident` 的字样），接线后任何一处直接摸 `latest` / `generations` 都红。
+    /// 回退即红：归属路径只许经 `for_membership` 取模型。P2 接线前这里是空转（两份文件的
+    /// **代码行**里还没有 `room_resident` 的字样；注释可以提——`room_model.rs` 的凭据读法就
+    /// 在注释里点名 `resident_blocked` 为什么会先于全量重建把行建出来），接线后任何一处直接摸
+    /// `latest` / `generations` 都红。
     #[test]
     fn membership_paths_only_take_the_model_through_for_membership() {
         for (name, source) in [
@@ -2244,6 +2590,7 @@ mod tests {
         ] {
             let mentions: Vec<&str> = source
                 .lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
                 .filter(|line| {
                     line.contains("room_resident")
                         || line.contains("ResidentRooms")
@@ -2326,6 +2673,193 @@ mod tests {
                 .map(|step| step.action.as_str())
                 .collect::<Vec<_>>(),
             vec!["新增", "前进", "保留", "前进"]
+        );
+
+        // 调用方给的是「归属口径」，集合按这一批 MDB 设计库解出来：限定域没生效 = 全部，
+        // 生效 = 限定域里那几个（哪怕限定域点了 MDB 里没有的库，也照给——那是数据批次的事）。
+        assert_eq!(
+            RoundOwnership::EveryFile.owned_by_rounds(&sources),
+            everyone
+        );
+        let only: BTreeSet<u32> = [8000, 8191].into_iter().collect();
+        assert_eq!(
+            RoundOwnership::Only(only.clone()).owned_by_rounds(&sources),
+            only
+        );
+        assert!(RoundOwnership::EveryFile.describe().contains("轮次推进"));
+        assert!(
+            RoundOwnership::Only(only)
+                .describe()
+                .contains("[8000, 8191]")
+        );
+    }
+
+    /// `resident_blocked` 只动自己那一格：写原因 / 清成 NONE 都不碰 `resident_reference` 与空间凭据；
+    /// 原因里的引号与换行照样往返。
+    #[tokio::test]
+    async fn resident_blocked_roundtrips_and_leaves_the_rest_of_the_record_alone() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("room_resident").use_db("blocked").await.unwrap();
+        db.query("UPSERT room_build:main SET spatial_epoch = 355, tree_entries = 105650;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let reference = ResidentReference::for_model(&model_of(groups(), vec![], Arc::default()));
+        write_resident_reference_on(&db, &reference).await.unwrap();
+        assert_eq!(read_resident_blocked_on(&db).await.unwrap(), None);
+
+        let reason = "发布清单为空（基线没建成）：'不装' \"零间房\" 的模型\n第二行";
+        db.query(render_resident_blocked_write(Some(reason)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            read_resident_blocked_on(&db).await.unwrap().as_deref(),
+            Some(reason)
+        );
+        assert_eq!(
+            read_resident_reference_on(&db).await.unwrap(),
+            Some(reference.clone()),
+            "参照那一格没动"
+        );
+
+        db.query(render_resident_blocked_write(None))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(read_resident_blocked_on(&db).await.unwrap(), None);
+        #[derive(serde::Deserialize)]
+        struct Stamp {
+            spatial_epoch: u64,
+            tree_entries: u64,
+        }
+        let mut response = db
+            .query("SELECT spatial_epoch, tree_entries FROM room_build:main;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let stamps: Vec<Stamp> = response.take(0).unwrap();
+        assert_eq!(
+            (stamps[0].spatial_epoch, stamps[0].tree_entries),
+            (355, 105650),
+            "空间凭据没动"
+        );
+        assert_eq!(
+            read_resident_reference_on(&db).await.unwrap(),
+            Some(reference)
+        );
+    }
+
+    /// `/health.room_build.resident`：无几何的在册面板按库点名，限定域之外的库单独成一句；
+    /// 全在限定域里就没有那一句；启动结局原样带出。
+    ///
+    /// 这里的 24384 是**退路**——`model_of` 没给文件归属，只好按面板 refno 的头一段报。
+    /// 生产两路都给（[`missing_geometry_is_grouped_by_the_file_dbnum_not_the_refno_dbnum`]）。
+    #[test]
+    fn resident_health_names_unwatched_libraries_with_missing_geometry() {
+        let model = model_of(
+            groups(),
+            vec![inst(7, "mesh-a", 0.0, (0.0, 1.0))],
+            Arc::default(),
+        );
+        let stats = vec![model.stats()];
+        let report = StartupInitReport {
+            blocked: None,
+            summary: Some("[房间初始化] published …".into()),
+            at: "2026-09-07T23:59:00+08:00".into(),
+        };
+
+        let health = resident_health_from(Some(&report), &stats, |dbnum| dbnum != 24384);
+        assert_eq!(health["startup"]["blocked"], serde_json::Value::Null);
+        assert_eq!(health["startup"]["summary"], "[房间初始化] published …");
+        assert_eq!(health["models"].as_array().unwrap().len(), 1);
+        assert_eq!(health["models"][0]["form"], "published");
+        assert_eq!(health["models"][0]["missing_panels"], 2);
+        assert_eq!(
+            health["models"][0]["missing_geometry"],
+            serde_json::json!([{ "dbnum": 24384, "panels": 2, "watched": false }])
+        );
+        let notice = health["unwatched_missing_geometry_notice"]
+            .as_str()
+            .expect("限定域之外的库要点名");
+        assert!(
+            notice.starts_with("2 块在册面板无几何，来自未监听的库 [24384]"),
+            "{notice}"
+        );
+        assert!(notice.contains("watch_dbnums"), "{notice}");
+
+        let health = resident_health_from(None, &stats, |_| true);
+        assert_eq!(health["startup"], serde_json::Value::Null);
+        assert_eq!(health["models"][0]["missing_geometry"][0]["watched"], true);
+        assert_eq!(
+            health["unwatched_missing_geometry_notice"],
+            serde_json::Value::Null,
+            "库都在限定域里：无几何是模型链还没到，不是限定域圈出来的"
+        );
+
+        let blocked = StartupInitReport {
+            blocked: Some("枚举 MDB 设计库失败".into()),
+            summary: None,
+            at: String::new(),
+        };
+        let health = resident_health_from(Some(&blocked), &[], |_| true);
+        assert_eq!(health["startup"]["blocked"], "枚举 MDB 设计库失败");
+        assert_eq!(health["models"], serde_json::json!([]));
+    }
+
+    /// 「无几何按库」报的是**文件**库号，不是面板 refno 的头一段——两套编号：ams7997 里的
+    /// 元素 refno 形如 `24381_*`，而 `watch_dbnums` / 发布清单 / 水位说的都是 7997。
+    ///
+    /// 照 refno 报有两处错，2026-09-08 的真库门（`watch_dbnums=[8000]`）两处都撞上了：
+    /// `/health` 把「7997 的 229 块面板」写成「24381」；而 `is_watched` 收到的是 refno 库号，
+    /// 拿去问 `watch_scope::admits` 恒假，**被监听**库的面板也会被诬成「来自未监听的库」。
+    #[test]
+    fn missing_geometry_is_grouped_by_the_file_dbnum_not_the_refno_dbnum() {
+        let by_file = vec![
+            (7997, vec![group(5, "/1RX-RM03-R301", &[7, 8])]),
+            (8000, vec![group(6, "/1RX-RM03-R302", &[9])]),
+        ];
+        let room_files = room_files_of(&by_file);
+        let flat = crate::fast_model::room_topology::flatten_groups_by_file(by_file);
+        let map = registered_map(&flat, &keywords(), match_room_name_hd);
+        let model = ResidentRoomModel::assemble(
+            manifest(ResidentForm::Published, "m1"),
+            flat,
+            map,
+            vec![inst(7, "mesh-a", 0.0, (0.0, 1.0))],
+            Arc::default(),
+        )
+        .with_room_files(room_files);
+
+        assert_eq!(model.missing_panels.len(), 2, "8 与 9 没有几何行");
+        assert_eq!(
+            model.stats().missing_panels_by_dbnum,
+            BTreeMap::from([(7997, 1), (8000, 1)]),
+            "键是文件库号；面板 refno 的头一段 24384 一个都不许出现"
+        );
+
+        // 限定域说的也是文件库号：7997 未监听要点名，8000 监听着不许算进那一句。
+        let health = resident_health_from(None, &[model.stats()], |dbnum| dbnum == 8000);
+        let notice = health["unwatched_missing_geometry_notice"]
+            .as_str()
+            .expect("7997 未监听");
+        assert!(
+            notice.starts_with("1 块在册面板无几何，来自未监听的库 [7997]"),
+            "{notice}"
+        );
+
+        // 没有文件归属的模型（纯测搭的）退回 refno 头一段，不至于把面板数报成 0。
+        assert_eq!(
+            model_of(groups(), vec![], Arc::default())
+                .stats()
+                .missing_panels_by_dbnum,
+            BTreeMap::from([(24384, 3)]),
         );
     }
 
@@ -2521,6 +3055,58 @@ mod tests {
                 .await
                 .unwrap(),
             "done 的轮次与别的 kind 都不算在途文件轮次"
+        );
+    }
+
+    /// 源码钉（P2 换代点）：身份探针只许用那两个规范键——摄入的
+    /// `published_topology_manifest_key`（`room_published_topology.manifest_key` 同一个函数）、
+    /// 读透的 `room_topology::latest_frozen_sources`。它在这里自己拼一个摘要，键就与模型自带的
+    /// `manifest` 对不上：每轮都判「文件变了」、每轮整份重建，而且不报错。
+    #[test]
+    fn the_manifest_probe_takes_both_keys_from_their_canonical_source() {
+        let source = include_str!("room_resident.rs");
+        let probe = source
+            .split_once("async fn probe_manifest(")
+            .expect("probe_manifest 必须存在")
+            .1
+            .split_once("pub(crate) async fn ensure_current(")
+            .expect("probe_manifest 后面就是 ensure_current")
+            .0;
+        assert!(
+            probe.contains("published_topology_manifest_key(&inputs, hierarchy)"),
+            "摄入侧的键必须是 published_topology_manifest_key 算的: {probe}"
+        );
+        assert!(
+            probe.contains("latest_frozen_sources()"),
+            "读透侧的键必须来自 room_topology::latest_frozen_sources: {probe}"
+        );
+        assert!(
+            !probe.contains("Sha256") && !probe.contains("::digest("),
+            "探针不得自己拼摘要，两个键各只有一个定义: {probe}"
+        );
+    }
+
+    /// 源码钉（P2 换代点）：读透侧那个 composite 只许有一个定义。`load_room_groups_from_files`
+    /// 自己再算一遍的话，它与探针会在「令牌怎么排序、怎么序列化」上悄悄分家——键一漂，
+    /// 每轮都是整份重建（ams7997 一次 6–7 s），却没有任何一处会报错。
+    #[test]
+    fn the_read_through_change_key_has_exactly_one_definition() {
+        let source = include_str!("room_topology.rs");
+        assert_eq!(
+            source.matches("model_publish_queue::digest(").count(),
+            1,
+            "room_topology.rs 里只许 latest_frozen_sources 算这个摘要"
+        );
+        let loader = source
+            .split_once("pub(crate) async fn load_room_groups_from_files(")
+            .expect("load_room_groups_from_files 必须存在")
+            .1
+            .split_once("\n}\n")
+            .expect("函数总有结尾")
+            .0;
+        assert!(
+            loader.contains("latest_frozen_sources().await?"),
+            "文件侧读法必须与探针共用 latest_frozen_sources: {loader}"
         );
     }
 

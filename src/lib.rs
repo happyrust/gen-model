@@ -328,6 +328,64 @@ mod process_instance_lock_tests {
     }
 }
 
+/// 启动房间初始化（常驻房间模型，`docs/plans/2026-09-07-resident-room-model-plan.md` §3 P3，
+/// 第 5 轮 Q17–Q20）。
+///
+/// 位置：紧跟空间树装载、排在 watcher / worker **之前**。门只有两道——`room_resident_model`
+/// 开关与 `spatial_compute`（关了就没有房间子系统），都由 `run_cli` 在调用处判；
+/// `startup_data_ready` / 上弦位 / `startup_autorun` / `model_incremental` 一道都不看
+/// （Q18 (a)）：房间是参照系，不是增量的一部分。它只建模、写分片与清单，不写归属边、
+/// 不写 `resident_reference`；建不起来打印原因、记 `resident_blocked`，不拦启动——下面的
+/// 增量轮与启动对比拿不到模型就止步（原则 2）。
+///
+/// 哪些文件的清单行归**文件轮次**管在这里按监听限定域算好传进去：限定域生效 = 限定域里
+/// 的库，其余库没有轮次推它、由初始化推进到文件最新会话（Q19 (a)）；未生效 = 每个文件都有
+/// 自己的轮次，初始化一行不动。房间那三份文件不认识 `watch_scope`（源码钉
+/// `room_files_never_consult_the_watch_scope`），限定域只在这里被问一次。
+async fn initialize_resident_rooms_at_startup(db_option: &DbOption) {
+    use crate::fast_model::room_resident::{self, RoundOwnership};
+    use crate::fast_model::room_topology::RoomHierarchy;
+
+    let Some(hierarchy) = RoomHierarchy::configured() else {
+        println!("[房间初始化] 房间子系统需要 project_hd 或 project_hh 特性：跳过");
+        return;
+    };
+    #[cfg(any(feature = "project_hd", feature = "project_hh"))]
+    let match_room_fn = crate::fast_model::room_model::configured_match_room_fn();
+    #[cfg(not(any(feature = "project_hd", feature = "project_hh")))]
+    let match_room_fn = |_: &str| false;
+    let ownership = if crate::data_interface::watch_scope::active() {
+        RoundOwnership::Only(
+            crate::data_interface::watch_scope::dbnums()
+                .into_iter()
+                .collect(),
+        )
+    } else {
+        RoundOwnership::EveryFile
+    };
+    println!(
+        "正在初始化房间（常驻房间模型 · {}）：MDB 全部设计库，{}...",
+        crate::options::data_face().as_str(),
+        ownership.describe()
+    );
+    let room_key_words = db_option.get_room_key_word();
+    let result = room_resident::initialize_at_startup(
+        crate::options::data_face(),
+        &ownership,
+        hierarchy,
+        &room_key_words,
+        match_room_fn,
+    )
+    .await;
+    match &result {
+        Ok(outcome) => println!("{}", outcome.summary()),
+        Err(error) => eprintln!(
+            "[房间初始化] 建不起来（不动归属边；增量轮与启动对比拿不到模型就止步）: {error:#}"
+        ),
+    }
+    room_resident::record_startup_init(result.as_ref()).await;
+}
+
 /// 环境变量名：无论如何都不跑启动全量房间重建（既有运维止血口，语义不变）。
 pub const SKIP_STARTUP_ROOM_BUILD_ENV: &str = "AIOS_SKIP_STARTUP_ROOM_BUILD";
 
@@ -776,6 +834,57 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         })
     };
 
+    // 空间树装载（启动分层判据，docs/2026-08-11_spatial-tree-startup-init-plan.md）：
+    // 指纹（epoch 值 + 库侧时间戳）一致 → 直接复用；失配但有待重放空间意图 →
+    // 复用文件交给重放自愈；失配且无意图 / 文件缺失损坏 → 只读指针重建。
+    // 空间树是可重建的派生数据，加载失败不该顶掉整个启动：空树有下游防线
+    // （全量重建拒跑、整间分支拒算），worker 启动收敛还会重放未完成的空间意图。
+    // 降级复检后台任务（一致性闭环方案 §6）：DegradedReuse/DegradedBlocked 两态由它
+    // 退避重试收敛，恢复 Ready 后唤醒调度器；健康状态下它只是每 30s 一次的状态读取。
+    //
+    // 排在 watcher / worker **之前**（2026-09-07，常驻房间模型第 5 轮 Q17 (a)）：它只读指针与
+    // 快照文件，不依赖数据清单——`run_app` 那条正门本来就在进 `run_cli` 之前装过一次，这里
+    // 多半是同进程短路复用；直接调 `run_cli` 的那几条路（python `full_init`、l3 夹具）从此
+    // 与正门同序。此前它压在等数据清单之后，房间初始化要「树在位」就得跟着排到最后。
+    if crate::options::spatial_compute() {
+        println!("正在装载空间树（指纹一致直接复用，失配则重建）...");
+        let step_started = Instant::now();
+        match crate::fast_model::aabb_tree::load_project_tree_verified().await {
+            Ok(_) => println!(
+                "空间树装载完成，耗时 {}",
+                fmt_elapsed(step_started.elapsed())
+            ),
+            Err(error) => {
+                eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待后台复检重建");
+            }
+        }
+        crate::fast_model::spatial_state::spawn_spatial_revalidator();
+    } else {
+        println!(
+            "空间计算已关闭（{}=0）：跳过空间树装载、后台复检和后置 AABB，只运行模型生成",
+            crate::options::SPATIAL_COMPUTE_ENV
+        );
+    }
+    // 房间初始化（常驻房间模型，开关 `room_resident_model` 默认关；第 5 轮 Q17–Q20）：紧跟
+    // 空间树装载、排在 watcher / worker 之前，覆盖 MDB 全部设计库。只认 `spatial_compute`——
+    // `startup_data_ready` / 上弦位 / `startup_autorun` / `model_incremental` 一道都不看，房间是
+    // 参照系，不是增量的一部分；写归属边的启动对比与全量修复仍在下面房间段受门。
+    if crate::options::room_resident_model() {
+        if crate::options::spatial_compute() {
+            let step_started = Instant::now();
+            initialize_resident_rooms_at_startup(&db_option).await;
+            println!(
+                "房间初始化完成，耗时 {}",
+                fmt_elapsed(step_started.elapsed())
+            );
+        } else {
+            println!(
+                "空间计算已关闭（{}=0）：常驻房间模型随空间子系统一起不建",
+                crate::options::SPATIAL_COMPUTE_ENV
+            );
+        }
+    }
+
     if crate::options::data_face().is_read_through() {
         println!(
             "read-through：跳过启动数据重扫与 Meta→Design 摄入清单；data_ready 已就绪，watcher 仅作为后续文件脏信号"
@@ -899,33 +1008,8 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         println!("数据链已就绪；模型面自清单装好起已在跑，下面等模型积压收敛");
     }
 
-    // 启动分层判据装载空间树（docs/2026-08-11_spatial-tree-startup-init-plan.md）：
-    // 指纹（epoch 值 + 库侧时间戳）一致 → 直接复用；失配但有待重放空间意图 →
-    // 复用文件交给重放自愈；失配且无意图 / 文件缺失损坏 → 只读指针重建。
-    // 空间树是可重建的派生数据，加载失败不该顶掉整个启动：空树有下游防线
-    // （全量重建拒跑、整间分支拒算），worker 启动收敛还会重放未完成的空间意图。
-    if crate::options::spatial_compute() {
-        println!("正在装载空间树（指纹一致直接复用，失配则重建）...");
-        let step_started = Instant::now();
-        match crate::fast_model::aabb_tree::load_project_tree_verified().await {
-            Ok(_) => println!(
-                "空间树装载完成，耗时 {}",
-                fmt_elapsed(step_started.elapsed())
-            ),
-            Err(error) => {
-                eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待后台复检重建");
-            }
-        }
-        crate::fast_model::spatial_state::spawn_spatial_revalidator();
-    } else {
-        println!(
-            "空间计算已关闭（{}=0）：跳过空间树装载、后台复检和后置 AABB，只运行模型生成",
-            crate::options::SPATIAL_COMPUTE_ENV
-        );
-    }
-    // 降级复检后台任务（一致性闭环方案 §6）：DegradedReuse/DegradedBlocked 两态
-    // 由它退避重试收敛，恢复 Ready 后唤醒调度器；健康状态下它只是每 30s 一次的
-    // 状态读取。
+    // 空间树装载此前在这里（等数据清单之后）；2026-09-07 起前移到 watcher / worker 之前，
+    // 见上面「空间树装载」那段与 `initialize_resident_rooms_at_startup`（第 5 轮 Q17 (a)）。
     // progress_sender.send(10)?;
     // 2026-09-04（S5-2）之前这里有一条 direct 专用分支：复核落地后立刻 `mark_model_ready()`
     // 并跳过收敛等待，`/health.model_ready=true` 时复核排出的行还在跑，而且不看数据链。
@@ -1820,6 +1904,102 @@ mod startup_room_build_gate_tests {
         assert!(
             data < model_ready && model_ready < room,
             "主线仍按 数据就绪 → 模型收敛 → 房间 等：房间吃模型产物"
+        );
+    }
+
+    /// 常驻房间模型第 5 轮 Q17 (a) / Q18 (a)：空间树装载与房间初始化排在 watcher / worker
+    /// **之前**，房间初始化紧跟树装载；两者之间与初始化本体都不许出现 `startup_data_ready` /
+    /// 上弦位 / `startup_autorun` / `model_incremental` 任何一道门——房间是参照系，不是增量的
+    /// 一部分；写归属边的启动对比与全量修复仍在最后的房间段受门。树装载只此一处，不许在老位置
+    /// 留一份副本。
+    #[test]
+    fn resident_room_initialization_follows_the_tree_load_and_precedes_the_watcher() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli exists")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_cli end exists")
+            .0;
+        assert_eq!(
+            body.matches("load_project_tree_verified().await").count(),
+            1,
+            "run_cli 里空间树只装一次"
+        );
+        let web = body.find("serve_if_configured(mgr)").unwrap();
+        let tree = body.find("load_project_tree_verified().await").unwrap();
+        let rooms = body
+            .find("initialize_resident_rooms_at_startup(&db_option).await")
+            .expect("房间初始化必须接进启动序");
+        let watcher = body.find("mgr.init_watcher().await").unwrap();
+        let worker = body.find("ensure_batch_worker(mgr.clone())").unwrap();
+        let data = body.find("wait_for_data_ready().await").unwrap();
+        assert!(
+            web < tree && tree < rooms && rooms < watcher && watcher < worker && worker < data,
+            "顺序是 健康接口 → 空间树 → 房间初始化 → watcher → worker → 等数据"
+        );
+        // 注释里可以说「不看哪几道门」，代码行里不许出现它们。
+        let code = |text: &str| -> String {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let between = code(&body[tree..rooms]);
+        for forbidden in [
+            "startup_data_ready",
+            "is_auto_work_armed",
+            "startup_autorun",
+            "model_incremental",
+            "skip_startup_room_build",
+        ] {
+            assert!(
+                !between.contains(forbidden),
+                "树装载到房间初始化之间不许夹别的门（{forbidden}）: {between}"
+            );
+        }
+        let gate_at = body[..rooms]
+            .rfind("if crate::options::room_resident_model() {")
+            .expect("房间初始化挂在开关之下");
+        let gate = &body[gate_at..rooms];
+        assert!(
+            gate.contains("if crate::options::spatial_compute() {")
+                && !gate.contains("startup_data_ready"),
+            "房间初始化只认开关与 spatial_compute: {gate}"
+        );
+
+        let helper = code(
+            source
+                .split_once("async fn initialize_resident_rooms_at_startup(")
+                .expect("初始化入口存在")
+                .1
+                .split_once("pub const SKIP_STARTUP_ROOM_BUILD_ENV")
+                .expect("入口之后是止血口常量")
+                .0,
+        );
+        for forbidden in [
+            "startup_data_ready",
+            "is_auto_work_armed",
+            "startup_autorun",
+            "model_incremental",
+            "skip_startup_room_build",
+            "build_room_relations",
+        ] {
+            assert!(
+                !helper.contains(forbidden),
+                "房间初始化本体不看这道门、不写归属边（{forbidden}）: {helper}"
+            );
+        }
+        assert!(
+            helper.contains("watch_scope::active()")
+                && helper.contains("RoundOwnership::EveryFile"),
+            "限定域只在这里被问一次，翻成归属口径传给房间文件: {helper}"
+        );
+        assert!(
+            helper.contains("room_resident::initialize_at_startup(")
+                && helper.contains("record_startup_init(result.as_ref())"),
+            "入口调的是 initialize_at_startup，结局无论成败都记下: {helper}"
         );
     }
 
