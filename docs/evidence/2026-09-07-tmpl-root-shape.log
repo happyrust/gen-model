@@ -1,0 +1,264 @@
+# 2026-09-07 TMPL 根探针：direct 枚根把 FIXING / CTFEAT / CMFI / HRPOST 下的 TMPL 当根，到底生成几何还是空跑
+# 起因：R11 探针里 2,300 多个「被非 significant 中间节点挡住」的嵌套根是 TMPL。快照里 TMPL significant = toplevel = true，成根是 core 自己的位。
+# 方法（两个临时探针，均未入库）：
+#   1. tmplprobe：486 个 DESI 库全扫（ScanTier::Header），每个 TMPL 记 owner noun、是否在交付单元之下（在 = 不成根）、成员 noun；
+#      成员按快照 primitive_a|primitive_b 判图元、按 NBOX/NCYL/NCON/NSNO/NCTO/NRTO/NXTR/NPYR/NDIS/NREV/NSLC/NPOLYH 判负体。
+#   2. tmplgen：与 gen-model direct_model_persist 同一套 DbSet（attlib + desvir 模板 + DirectoryDbResolver 扫项目目录解目录库），
+#      对代表性 TMPL 根及其祖先直接跑 e3d_model::pipeline::generate_subtree，打印 totals / 生成元素 / host_negatives。
+# e3d-model 口径（category.rs）：TMPL = PrimitiveContainer——自己不出几何、成员里的正体各自成件、负体记 host_negatives 不扣（宿主判据未接）。
+# 结论：3,097 个 TMPL 根里 2,538 个（82%）有正体成员、真出几何；556 个（18%）只有负体 / 非图元成员，跑了生成 0 件（负体要扣的是容器外的宿主，
+#   那条路 e3d-model 还没有）。TMPL 根的产出恒是外层根（FRMW / CWBRAN / HANDRA）整棵子树产出的子集——同一批行由两个根各写一遍（嵌套根重复覆盖）。
+======== tmplprobe（全语料）========
+DESI dbs=486 TMPL total=3782 inside_delivery(not a root)=685 direct_root=3097
+TMPL roots: with >=1 positive-primitive member=2538 / only negatives-or-nonprimitive members=556 / no members=3
+
+TMPL owner nouns (all):
+      986  FIXING
+      777  TMAR
+      642  EQUI
+      546  CTFEAT
+      291  CMFI
+      270  HRPOST
+       87  FITT
+       48  HRPANE
+       41  SUBE
+       33  SJOI
+       32  HRTERM
+       17  STRU
+        5  SBFI
+        2  FRMW
+        2  HRGATE
+        2  RAILSE
+        1  CMPF
+
+TMPL-root owner nouns:
+      986  FIXING
+      777  TMAR
+      546  CTFEAT
+      291  CMFI
+      270  HRPOST
+       87  FITT
+       48  HRPANE
+       33  SJOI
+       32  HRTERM
+       15  STRU
+        5  SBFI
+        2  FRMW
+        2  HRGATE
+        2  RAILSE
+        1  CMPF
+
+members of TMPL roots (noun histogram):
+     8134  CYLI     primitive
+     4107  NCYL     negative
+     2773  PANE     primitive
+     2634  GENSEC   primitive
+     2355  SCTN     primitive
+     2309  DDSE     non-primitive
+     2241  EXTR     primitive
+     2008  BOX      primitive
+     1623  DPSE     non-primitive
+     1157  CTOR     primitive
+      822  NBOX     negative
+      770  CONE     primitive
+      734  TMRPSE   non-primitive
+      722  NOZZ     primitive
+      587  DISH     primitive
+      482  NXTR     negative
+      456  NPYR     negative
+      389  RTOR     primitive
+      387  SNOU     primitive
+      365  PYRA     primitive
+      102  REVO     primitive
+       42  ELCONN   primitive
+       33  PNOD     non-primitive
+       15  PORS     non-primitive
+       14  FLOOR    primitive
+        9  STWALL   primitive
+        1  WALL     primitive
+
+members of all TMPL (noun histogram):
+    13808  CYLI     primitive
+     5329  EXTR     primitive
+     4107  NCYL     negative
+     4000  BOX      primitive
+     3555  PANE     primitive
+     3446  DDSE     non-primitive
+     3060  GENSEC   primitive
+     2355  SCTN     primitive
+     2245  CTOR     primitive
+     1700  DPSE     non-primitive
+     1677  CONE     primitive
+     1094  NOZZ     primitive
+      931  DISH     primitive
+      822  NBOX     negative
+      735  TMRPSE   non-primitive
+      482  NXTR     negative
+      456  NPYR     negative
+      415  PYRA     primitive
+      398  SNOU     primitive
+      397  RTOR     primitive
+      210  ELCONN   primitive
+      111  REVO     primitive
+       33  PNOD     non-primitive
+       15  PORS     non-primitive
+       14  FLOOR    primitive
+        9  STWALL   primitive
+        1  WALL     primitive
+
+TMPL-root shapes (root ancestor > owner > TMPL > [members]), top 30:
+      546  CWBRAN > CTFEAT > TMPL > [SCTN SCTN SCTN]
+      390  FRMW > FIXING > TMPL > [DDSE DPSE NBOX NCYL NCYL NCYL NCYL PANE TMRPSE]
+      238  HANDRA > HRPOST > TMPL > [CYLI CYLI CYLI CYLI DDSE DPSE EXTR EXTR GENSEC GENSEC GENSEC GENSEC GENSEC GENSEC PANE]
+      177  FRMW > CMFI > TMPL > [NXTR NXTR]
+      156  FRMW > FIXING > TMPL > [DDSE DPSE NBOX NCYL NCYL NCYL NCYL NCYL NCYL NCYL NCYL PANE TMRPSE]
+      114  FRMW > CMFI > TMPL > [NCYL NPYR NPYR]
+      114  FRMW > FIXING > TMPL > [NCYL NPYR NPYR]
+       84  FRMW > FIXING > TMPL > [DDSE DPSE NBOX NCYL NCYL NCYL NCYL NXTR PANE TMRPSE]
+       52  FRMW > FIXING > TMPL > [DDSE DPSE NBOX NCYL NCYL NCYL NCYL NCYL NCYL PANE TMRPSE]
+       48  FRMW > FITT > TMPL > [DDSE NCYL NCYL]
+       48  FRMW > FIXING > TMPL > [DDSE NCYL NCYL]
+       40  FRMW > FIXING > TMPL > [DDSE DPSE SCTN SCTN SCTN SCTN SCTN]
+       33  FRMW > SJOI > TMPL > [PNOD]
+       27  - > TMAR > TMPL > [DDSE DPSE PANE]
+       24  FRMW > FITT > TMPL > [DDSE PANE]
+       24  FRMW > FIXING > TMPL > [DDSE DPSE NBOX NCYL NCYL PANE TMRPSE]
+       24  FRMW > FIXING > TMPL > [DDSE PANE]
+       22  - > TMAR > TMPL > [BOX BOX DDSE DPSE]
+       20  HANDRA > HRPANE > TMPL > [DDSE DISH DISH DISH DISH DPSE GENSEC GENSEC GENSEC GENSEC PANE PANE PANE PANE]
+       20  HANDRA > HRPOST > TMPL > [CYLI CYLI CYLI CYLI DDSE DISH DPSE EXTR EXTR GENSEC GENSEC GENSEC GENSEC GENSEC GENSEC GENSEC GENSEC PANE]
+       15  - > TMAR > TMPL > [BOX BOX BOX CYLI DDSE DPSE PYRA]
+       14  - > TMAR > TMPL > [BOX DDSE DPSE]
+       14  HANDRA > HRTERM > TMPL > [CYLI CYLI CYLI CYLI DDSE DPSE EXTR EXTR GENSEC GENSEC GENSEC GENSEC GENSEC GENSEC GENSEC GENSEC GENSEC GENSEC GENSEC PANE]
+       13  FRMW > FITT > TMPL > [CTOR CTOR CTOR CTOR CTOR CTOR CTOR CTOR CTOR CTOR CTOR CTOR CTOR CTOR CTOR CTOR CTOR CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI DDSE DISH DISH EXTR EXTR EXTR EXTR NBOX NXTR PANE REVO REVO SCTN SCTN SCTN SCTN SCTN SCTN SCTN SCTN]
+       12  - > TMAR > TMPL > [CYLI CYLI DDSE DISH DISH DPSE SNOU]
+       12  FRMW > FIXING > TMPL > [DDSE DPSE GENSEC GENSEC NBOX NCYL NCYL NCYL NCYL NCYL NCYL TMRPSE]
+       10  - > TMAR > TMPL > [BOX DDSE DDSE]
+       10  HANDRA > HRPOST > TMPL > [GENSEC]
+        9  - > TMAR > TMPL > [BOX BOX BOX BOX CONE CONE CYLI CYLI CYLI CYLI CYLI DDSE DISH DISH DPSE NOZZ NOZZ]
+        9  - > TMAR > TMPL > [CYLI CYLI CYLI DDSE DISH DISH DPSE]
+
+examples with positive members:
+  ams251010_0001: 2013287554/2116 FRMW > FIXING > TMPL > [EXTR]
+  ams251050_0001: 2013287594/22349 - > TMAR > TMPL > [BOX DDSE DPSE NOZZ NOZZ]
+  ams251050_0001: 2013287594/6852 - > TMAR > TMPL > [BOX BOX CONE CONE CONE CONE CYLI CYLI CYLI CYLI CYLI CYLI DDSE DDSE DDSE NOZZ NOZZ]
+  ams251050_0001: 2013287594/1667 - > TMAR > TMPL > [BOX BOX BOX BOX BOX BOX BOX BOX BOX BOX BOX CONE CONE CONE CONE CONE CONE CONE CONE CTOR CTOR CTOR CTOR CTOR CTOR CTOR CTOR CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI DDSE DDSE EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR EXTR NOZZ NOZZ NOZZ NOZZ NOZZ]
+  ams251050_0001: 2013287594/14540 - > TMAR > TMPL > [CYLI CYLI DDSE DDSE EXTR EXTR EXTR EXTR EXTR EXTR]
+  ams251050_0001: 2013287594/6423 - > TMAR > TMPL > [BOX BOX CONE CONE CONE CONE CONE CYLI CYLI CYLI CYLI CYLI CYLI CYLI DDSE DDSE DDSE EXTR NOZZ NOZZ]
+  ams251050_0001: 2013287594/7801 - > TMAR > TMPL > [BOX BOX BOX BOX BOX BOX BOX BOX BOX CONE CONE CONE CONE CYLI DDSE DDSE DDSE ELCONN EXTR EXTR NOZZ NOZZ]
+  ams251050_0001: 2013287594/7935 - > TMAR > TMPL > [BOX CONE CONE CYLI CYLI DDSE DDSE DDSE ELCONN EXTR EXTR EXTR NOZZ NOZZ]
+  ams251050_0001: 2013287594/20734 - > TMAR > TMPL > [BOX BOX DDSE DDSE]
+  ams251050_0001: 2013287594/21931 - > TMAR > TMPL > [BOX BOX BOX CONE CONE CONE CYLI CYLI CYLI DDSE DDSE EXTR EXTR]
+  ams251050_0001: 2013287594/1505 - > TMAR > TMPL > [BOX BOX BOX BOX CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI CYLI DDSE DDSE DDSE NOZZ NOZZ NOZZ NOZZ NOZZ]
+  ams251050_0001: 2013287594/19627 - > TMAR > TMPL > [BOX CYLI DDSE DDSE EXTR]
+
+examples without positive members:
+  ams251167_0001: 2013287711/444 FRMW > CMFI > TMPL > [NXTR NXTR]
+  ams251167_0001: 2013287711/341 FRMW > CMFI > TMPL > [NXTR NXTR]
+  ams251167_0001: 2013287711/398 FRMW > CMFI > TMPL > [NXTR NXTR]
+  ams251167_0001: 2013287711/421 FRMW > CMFI > TMPL > [NXTR NXTR]
+  ams251167_0001: 2013287711/295 FRMW > CMFI > TMPL > [NXTR NXTR]
+  ams251167_0001: 2013287711/318 FRMW > CMFI > TMPL > [NXTR NXTR]
+  ams251167_0001: 2013287711/364 FRMW > CMFI > TMPL > [NXTR NXTR]
+  ams251167_0001: 2013287711/467 FRMW > CMFI > TMPL > [NXTR NXTR]
+  ams251181_0001: 2013287725/5187 FRMW > CMFI > TMPL > [NXTR NXTR]
+  ams251181_0001: 2013287725/5008 FRMW > CMFI > TMPL > [NXTR NXTR]
+  ams251181_0001: 2013287725/3115 FRMW > CMFI > TMPL > [NXTR NXTR]
+  ams251181_0001: 2013287725/3044 FRMW > CMFI > TMPL > [NXTR NXTR]
+
+======== tmplgen: ams251010_0001 FIXING>TMPL>[EXTR] + 它的 FIXING + FRMW ========
+project-dir 扫到 447 个库（ALYS×1 CATA×8 DESI×290 DICT×3 ISOD×3 MANU×102 MISC×1 NSEQ×4 PADD×20 PROP×2 SCHE×5 SYST×1 XPRD×7），5 个可疑文件进诊断，1 个非库文件略过
+
+=== root 2013287554/2116 (TMPL) in ams251010_0001 ===
+visited=2 consumed=11 generated=1 skipped=0 failed=0 catalog=0 route_containers=0 route_members=0 implied_tubes=0 tubes_measured=0 tubes_built=0 tubes_catalogue_od=0 tubes_bore_fallback=0 tubes_no_ppoint=0 tubes_misaligned=0 tubes_reversed=0 unsupported=0 unknown=0 not_wired=0 orphans=0 neg_skipped=0
+visited=2 generated_elements=1
+  generated 2013287554/2117 EXTR name=None negatives_applied=0 parts=None
+  primitive_containers={"TMPL": 1}
+  host_negatives={}
+  consumed={"LOOP": 11}
+  catalog_pending={}
+  unsupported={}
+  unknown_nouns={}
+  orphans={}
+  skipped=0
+  failed=0
+
+=== root 2013287554/2115 (FIXING) in ams251010_0001 ===
+visited=5 consumed=11 generated=1 skipped=0 failed=0 catalog=3 route_containers=0 route_members=0 implied_tubes=0 tubes_measured=0 tubes_built=0 tubes_catalogue_od=0 tubes_bore_fallback=0 tubes_no_ppoint=0 tubes_misaligned=0 tubes_reversed=0 unsupported=0 unknown=0 not_wired=0 orphans=0 neg_skipped=0
+visited=5 generated_elements=1
+  generated 2013287554/2117 EXTR name=None negatives_applied=0 parts=None
+  primitive_containers={"TMPL": 1}
+  host_negatives={}
+  consumed={"LOOP": 11}
+  catalog_pending={"FIXING": 3}
+  unsupported={}
+  unknown_nouns={}
+  orphans={}
+  skipped=0
+  failed=0
+
+=== root 2013287554/2114 (FRMW) in ams251010_0001 ===
+visited=6 consumed=11 generated=1 skipped=0 failed=0 catalog=3 route_containers=0 route_members=0 implied_tubes=0 tubes_measured=0 tubes_built=0 tubes_catalogue_od=0 tubes_bore_fallback=0 tubes_no_ppoint=0 tubes_misaligned=0 tubes_reversed=0 unsupported=0 unknown=0 not_wired=0 orphans=0 neg_skipped=0
+visited=6 generated_elements=1
+  generated 2013287554/2117 EXTR name=None negatives_applied=0 parts=None
+  primitive_containers={"TMPL": 1}
+  host_negatives={}
+  consumed={"LOOP": 11}
+  catalog_pending={"FIXING": 3}
+  unsupported={}
+  unknown_nouns={}
+  orphans={}
+  skipped=0
+  failed=0
+
+======== tmplgen: ams251154_0001 CTFEAT>TMPL>[SCTN SCTN SCTN] ========
+project-dir 扫到 447 个库（ALYS×1 CATA×8 DESI×290 DICT×3 ISOD×3 MANU×102 MISC×1 NSEQ×4 PADD×20 PROP×2 SCHE×5 SYST×1 XPRD×7），5 个可疑文件进诊断，1 个非库文件略过
+
+=== root 2013287698/894 (TMPL) in ams251154_0001 ===
+visited=4 consumed=0 generated=3 skipped=0 failed=0 catalog=0 route_containers=0 route_members=0 implied_tubes=0 tubes_measured=0 tubes_built=0 tubes_catalogue_od=0 tubes_bore_fallback=0 tubes_no_ppoint=0 tubes_misaligned=0 tubes_reversed=0 unsupported=0 unknown=0 not_wired=0 orphans=0 neg_skipped=0
+visited=4 generated_elements=3
+  generated 2013287698/895 SCTN name=None negatives_applied=0 parts=None
+  generated 2013287698/896 SCTN name=None negatives_applied=0 parts=None
+  generated 2013287698/897 SCTN name=None negatives_applied=0 parts=None
+  primitive_containers={"TMPL": 1}
+  host_negatives={}
+  consumed={}
+  catalog_pending={}
+  unsupported={}
+  unknown_nouns={}
+  orphans={}
+  skipped=0
+  failed=0
+
+======== tmplgen: aps250108_0001 FIXING>TMPL>[DDSE DPSE NBOX NCYL x4 PANE TMRPSE] ========
+project-dir 扫到 240 个库（CATA×14 COMM×1 CONF×3 DESI×98 DICT×5 ENGI×7 ISOD×14 MISC×1 NSEQ×1 PADD×61 PROP×10 RDFN×1 SCHE×19 SYST×1 XPRD×4），0 个可疑文件进诊断，0 个非库文件略过
+
+=== root 2013286652/2053 (TMPL) in aps250108_0001 ===
+visited=15 consumed=10 generated=1 skipped=0 failed=0 catalog=0 route_containers=0 route_members=0 implied_tubes=0 tubes_measured=0 tubes_built=0 tubes_catalogue_od=0 tubes_bore_fallback=0 tubes_no_ppoint=0 tubes_misaligned=0 tubes_reversed=0 unsupported=0 unknown=13 not_wired=0 orphans=0 neg_skipped=0
+visited=15 generated_elements=1
+  generated 2013286652/2067 PANE name=None negatives_applied=0 parts=None
+  primitive_containers={"TMPL": 1}
+  host_negatives={"NBOX": 1, "NCYL": 4}
+  consumed={"NBOX": 1, "NCYL": 4, "PLOO": 5}
+  catalog_pending={}
+  unsupported={}
+  unknown_nouns={"DDAT": 1, "DDSE": 1, "DPSE": 1, "TMRPSE": 1, "TMRREL": 2, "VVALUE": 7}
+  orphans={}
+  skipped=0
+  failed=0
+
+======== tmplgen: ams251167_0001 CMFI>TMPL>[NXTR NXTR]（只有负体） ========
+project-dir 扫到 447 个库（ALYS×1 CATA×8 DESI×290 DICT×3 ISOD×3 MANU×102 MISC×1 NSEQ×4 PADD×20 PROP×2 SCHE×5 SYST×1 XPRD×7），5 个可疑文件进诊断，1 个非库文件略过
+
+=== root 2013287711/444 (TMPL) in ams251167_0001 ===
+visited=1 consumed=21 generated=0 skipped=0 failed=0 catalog=0 route_containers=0 route_members=0 implied_tubes=0 tubes_measured=0 tubes_built=0 tubes_catalogue_od=0 tubes_bore_fallback=0 tubes_no_ppoint=0 tubes_misaligned=0 tubes_reversed=0 unsupported=0 unknown=0 not_wired=0 orphans=0 neg_skipped=0
+visited=1 generated_elements=0
+  primitive_containers={"TMPL": 1}
+  host_negatives={"NXTR": 2}
+  consumed={"NXTR": 21}
+  catalog_pending={}
+  unsupported={}
+  unknown_nouns={}
+  orphans={}
+  skipped=0
+  failed=0
