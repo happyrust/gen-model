@@ -53,45 +53,46 @@ Copy-Item D:\Rust\target\debug\*.dll -Destination D:\Rust\target\release\ -Force
 
 ## 解析一个 dbnum：空库到可用基线
 
-下面四步都在 `gen-model` 目录下跑——这些 bin 用 `config::File::with_name("DbOption")` 读
+下面三步都在 `gen-model` 目录下跑——这些 bin 用 `config::File::with_name("DbOption")` 读
 **当前工作目录**的 `DbOption.toml`，`project_path` / `project_name` / `surreal_ns` / `v_port`
 全从那里取。整个流程不需要手改 `DbOption.toml` 的开关，每个 bin 自己把需要的选项顶进去。
 
 ```powershell
 cargo build --release --features console
 
-# 1) SYS 元数据（DICT/SYST/GLB/GLOB）
-D:\Rust\target\release\sync_sys_only.exe
-
-# 2) 目标 dbnum 的基线全量解析 + 水位收口
+# 1) SYS 元数据 + 目标 dbnum 的基线全量解析 + 水位收口
 D:\Rust\target\release\initialize_ams_dbnums.exe 8000
 
-# 3) 预览扫描，登记文件身份与 file_latest_sesno
+# 2) 预览扫描，登记文件身份与 file_latest_sesno
 D:\Rust\target\release\manual_scan_probe.exe AvevaMarineSample
 
-# 4) 验收
+# 3) 验收
 powershell -File scripts\Test-AmsDbnumIntegrity.ps1 -Dbnums 8000
 ```
 
-四步各自不可省的理由：
+三步各自不可省的理由：
 
-1. DESI 解析要靠 `MDB`/`WORL` 定位世界根。库里没做过 SYS 同步，每个 dbnum 都会解析出
-   0 个元素——`src/bin/sync_sys_only.rs` 的文件头注释写着这件事。
-2. `initialize_ams_dbnums` 走的是 `initialize_project_dbnum_baseline`，也就是手动增量更新
-   确认执行时用的同一个初始化入口，不是另起的一套：内部 `baseline_sync_options` 固定
-   `replace_dbs=false`、`included_db_files=[该文件]`、`gen_model/gen_mesh=false`；
-   PE 条数、`dbnum_info_table` 统计、本次解析条数三者对不齐就不推进 `applied_sesno`。
-3. 第 2 步的 `finalize_baseline` 只写 `applied_sesno`/`sesno`，`file_latest_sesno` 是扫描
+1. `initialize_ams_dbnums` 走的是 `initialize_project_dbnum_baseline`，也就是手动增量更新
+   确认执行时用的同一个初始化入口，不是另起的一套：单文件摄入
+   （`versioned_db::baseline_ingest::ingest_file`，`Fresh` 只插不删、文件头身份与点名不符
+   一行不落）、`gen_model/gen_mesh=false`；PE 条数、`dbnum_info_table` 统计、本次解析条数
+   三者对不齐就不推进 `applied_sesno`。
+   它**先**把还没有水位的 SYS 库（SYST/COMM/MISC/GLB/GLOB → DICT）建一遍基线再动设计库：
+   DESI 解析要靠 `MDB`/`WORL` 定位世界根，库里没有 SYS，每个 dbnum 都会解析出 0 个元素；
+   DICT 还要排在 DESI 之前，`ATT_UDA` 的 `UdaKeyMap` 靠它。
+   2026-09-07 之前这是单独一步 `sync_sys_only.exe`，那个 bin 已随 legacy 全量族一起退役
+   ——SYS 元数据是初始化的一部分，服务侧由首轮重扫入队首载、watcher 按会话增量追。
+2. 第 1 步的 `finalize_baseline` 只写 `applied_sesno`/`sesno`，`file_latest_sesno` 是扫描
    观察值、由 `DbnumState::record_scan_observation` 写。跳过这步，验收脚本会报
    `watermark mismatch: applied=34 latest=0`——那是缺一次扫描，不是解析出了问题。
-4. 验收脚本查三项：`pe` 条数、`dbnum_info_table` 统计、水位 `applied == file_latest`。
+3. 验收脚本查三项：`pe` 条数、`dbnum_info_table` 统计、水位 `applied == file_latest`。
 
-已经有基线的 dbnum 重跑第 2 步是幂等的：`baseline_needs_full_parse` 看到
-`pe_count > 0 && applied_sesno > 0` 就不再解析。
+已经有基线的 dbnum 重跑第 1 步是幂等的：设计库看 `needs_initial_load`（水位在位且有数据支撑
+就不重解析），SYS 库看 `applied_sesno > 0` 直接 skip。
 
 ## 2026-07-27 ams 8000 实测
 
-空库（本文档这套 rocksdb 实例）上跑完四步：
+空库（本文档这套 rocksdb 实例）上跑完全程（当时还是四步，SYS 元数据独立一步）：
 
 ```
 BASELINE|AvevaMarineSample|8000|ok|14178

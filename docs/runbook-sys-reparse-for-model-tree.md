@@ -43,21 +43,28 @@ ADR-007 遗留① 预告过这个歧义（两个 `/ALL` 并存、`LIMIT 1` 选�
 
 ## 跑法
 
-**2026-09-07 起改法不同了**（ADR-058 D8）：`only_sync_sys` 这个开关连同整个 legacy 全量族已经退役，
-SYS 重解析不再靠「改一个开关再启动服务」，而是跑那个专用 bin——它调
-`database::bootstrap_sys_metadata`，做的还是同两步（SYST/COMM/MISC/GLB/GLOB + DICT）加三个索引，
-但**不看任何配置开关**，跑完就退出，不会留下一个下次启动还会重解析的配置。
+**2026-09-07 起改法不同了两次**（ADR-058 D8）。先是 `only_sync_sys` 这个开关连同整个 legacy 全量族
+退役，SYS 重解析改跑专用 bin `sync_sys_only`；当天晚些时候**那个 bin 也退役了**——SYS 元数据不是
+一道单独的引导，而是初始化的一部分：服务首轮重扫把 SYST/COMM/MISC/GLB/GLOB 与 DICT 当普通库
+入队首载（`needs_initial_load` 对 SYS meta 同样成立），之后 watcher 按会话增量追。
 
-`DbOption.toml` 一个字都不用改，确认一遍即可：`sync_live = false`、`gen_model = false`、
-`replace_dbs = true`（REPLACE 而非 INSERT IGNORE，正是重解析要的覆盖写）。
+不起服务时走同一条路的是 `initialize_ams_dbnums`：它先把**还没有水位的** SYS 库按
+SYS 五类 → DICT 的顺序建一遍基线（`AiosDBManager::initialize_project_sys_metadata`，
+DICT 必须先于 DESI，`ATT_UDA` 要 `UdaKeyMap`），再建点名的设计库基线。
+
+`DbOption.toml` 一个字都不用改，确认一遍即可：`gen_model = false`。
 `included_db_files` 也不用动——ADR-007 之后 SYS 解析不受它约束。
 
 ```powershell
 cd D:\work\plant-code\old\gen-model
-cargo run --release --bin sync_sys_only
+cargo run --release --bin initialize_ams_dbnums -- 7997
 ```
 
-跑完打出 `SYSSYNC|<项目名>|ok` 就是这一趟成功了。
+每个 SYS 库打一行 `SYSMETA|<项目名>|<dbnum>|<db_type>|ok|<元素数>`，已经有水位的打
+`…|skipped|already_initialized`（它的后续会话归 watcher 增量，不在这条路上追）。
+
+**注意这条路只补「从没解析过」的库**：想让一个已有水位的 SYS 库整库重来，得先清掉它的水位与行
+（`fast_delete::wipe_dbnum_for_reinit` 那条口径），否则这里会直接 skip。
 
 ## 验收
 

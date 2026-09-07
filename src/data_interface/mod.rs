@@ -418,7 +418,7 @@ mod legacy_parse_pdms_db_guard {
     /// 行形状走 `versioned_db::baseline::render_baseline_batches`），任何一个写回来都意味着
     /// 又开了第二条收集路，而那正是宪法 II 不许的。2026-09-07 起基线编排在
     /// `versioned_db/baseline_ingest.rs`（`sync_total_async_threaded` 壳退役），`database.rs`
-    /// 只剩 SYS 引导与统计修复——两处都扫。
+    /// 只剩建表与统计修复——两处都扫。
     #[test]
     fn the_baseline_orchestration_has_no_legacy_parser_intermediates() {
         const INTERMEDIATES: [&str; 2] = ["DbBasicData", "member_prune"];
@@ -441,6 +441,42 @@ mod legacy_parse_pdms_db_guard {
         assert!(
             leaks.is_empty(),
             "基线编排退回了 legacy 解析器的中间态：{leaks:#?}"
+        );
+    }
+
+    /// SYS 元数据不许再长出第二条专用引导（2026-09-07 `bin/sync_sys_only` 退役）。
+    ///
+    /// SYST/COMM/MISC/GLB/GLOB 与 DICT 是初始化的一部分，不是它前面的一道准备工序：服务侧由
+    /// 首轮重扫当普通库入队首载（`needs_initial_load` 对 SYS meta 同样成立）、watcher 按会话增量追；
+    /// 不起服务的规格工具走 `AiosDBManager::initialize_project_sys_metadata`——与首载**同一个**
+    /// `initialize_dbnum_baseline`。再开一条只灌 SYS 的路，就会有两套「什么时候算已初始化」的判据，
+    /// 而那正是 `bootstrap_sys_metadata` 当年的形状：它谁的水位都不看、调用即整库重灌。
+    ///
+    /// 钉两件事：那个 bin 的文件不许回来，`initialize_project_sys_metadata` 的库前提（只补没有水位的）
+    /// 不许被摘掉。
+    #[test]
+    fn sys_metadata_has_no_bootstrap_of_its_own() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            !root.join("src/bin/sync_sys_only.rs").exists(),
+            "bin/sync_sys_only 已退役（ADR-058 D8 实施注记四）：SYS 元数据由初始化与增量两条常规路负责，\
+             不许再开一条只灌 SYS 的引导"
+        );
+
+        let manual_update =
+            std::fs::read_to_string(root.join("src/data_interface/manual_update.rs"))
+                .expect("read manual_update");
+        let body = manual_update
+            .split_once("pub async fn initialize_project_sys_metadata(")
+            .expect("SYS 元数据入口不在了：它是规格工具唯一的那条路")
+            .1
+            .split_once("\n    pub(crate) async fn initialize_dbnum_baseline(")
+            .expect("baseline entry follows")
+            .0;
+        assert!(
+            body.contains("DbnumState::applied_sesno") && body.contains("applied > 0"),
+            "SYS 元数据入口必须只补**还没有水位**的库——已有水位的后续会话归 watcher 增量，\
+             在这里重灌就是第二套初始化判据"
         );
     }
 }

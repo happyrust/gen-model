@@ -964,10 +964,10 @@ fn bootstrap_store(paths: &Paths, out: &Path, dbnums: &[u32]) -> Result<()> {
         "--bootstrap-store selected no scenario dbnums"
     );
     let tools = tool_dir(&paths.repo);
-    let sync_sys = tools.join("sync_sys_only.exe");
+    // SYS 元数据随 `initialize_ams_dbnums` 一起落（`sync_sys_only` 2026-09-07 退役）。
     let initialize = tools.join("initialize_ams_dbnums.exe");
     let scan = tools.join("manual_scan_probe.exe");
-    for exe in [&sync_sys, &initialize, &scan] {
+    for exe in [&initialize, &scan] {
         ensure!(
             exe.is_file(),
             "bootstrap executable is missing: {}",
@@ -975,13 +975,6 @@ fn bootstrap_store(paths: &Paths, out: &Path, dbnums: &[u32]) -> Result<()> {
         );
     }
     let config_no_ext = paths.db_option.with_extension("");
-    fixture::run_fixture_bin(
-        &sync_sys,
-        &[],
-        &paths.repo,
-        &config_no_ext,
-        &out.join("bootstrap-sys.log"),
-    )?;
     fixture::run_fixture_bin(
         &initialize,
         &dbnums.iter().map(u32::to_string).collect::<Vec<_>>(),

@@ -141,6 +141,9 @@ MySQL 的 `create_*_database`（feature 门后）与 `AiosDBMgr` 相关——它
 4. 父层补缺路径（I5 的真正受益者）：找一个母库与 `_0001` 叶子并存的项目（AMS 的 `ams7997` + `ams7997_0001` 若在）跑一次首载，
    断言第二次摄入后 `dbnum_info_table` 与 `pe` 相等且基线成功——今天这条路在 `1eefbd57` 之后是必失败的。
 5. 引导工具：`bin/sync_sys_only` 对一个空库跑一次，`MDB / WORL / db_info` 行数与 D8 提交时的记录一致；l3 套件的空店引导步骤照跑。
+   **（2026-09-07 晚作废）**：这个 bin 与它底下的 `bootstrap_sys_metadata` 当天一并退役——SYS 元数据是初始化的一部分，
+   由首轮重扫 / watcher 增量与 `initialize_project_sys_metadata` 两条常规路负责。等价的验收换成「`initialize_ams_dbnums`
+   对空库跑一次，SYSMETA 行 + `MDB / WORL / db_info` 行数与 D8 提交时的记录一致」，与 l3 空店引导一起认领。
 6. 耗时：同一组库的「解析任务完成」到「基线已建立」的间隔与 pass 3 同量级（写者形状没变，不该有可见变化）。
 
 ## 6. 风险与对策
@@ -180,6 +183,9 @@ held 根）/ **not_judged 6**（六个零根库，pass 3 时它们是 lagging）
 7015 5.7s（5.1s）、6015 2.8s（2.1s）——机器上同时还有三套 rig 在跑（其一 14:48 刚起、正在初始化），没有做过隔离的
 耗时对比，**不下结论**。模型面照旧停在同 4 根 `generation_hold`（ISSUE-029），与本方案无关。
 §5 第 4 条（父层补缺）与第 5 条（`sync_sys_only` 空库引导）**未跑**：YCYK / AMS 手头没有母库与叶子并存的项目。
+第 5 条随后作废——`sync_sys_only` 与 `bootstrap_sys_metadata` 同日晚些时候整条退役（changelog 同日条目
+「SYS 元数据不是一道引导，是初始化的一部分」；ADR-058 D8 实施注记四），空库引导的验收改由
+`initialize_ams_dbnums` 那条路认领。
 
 ## 8. 不做 / 留档
 

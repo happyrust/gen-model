@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    以「端口号 = 站点」的方式解析一个 dbnum：起独立 SurrealDB、备好站点运行目录、跑完基线四步并验收。
+    以「端口号 = 站点」的方式解析一个 dbnum：起独立 SurrealDB、备好站点运行目录、跑完基线三步并验收。
 
 .DESCRIPTION
     一个站点 = 一个运行目录 + 一个 SurrealDB 端口。目录里只有该站点自己的 DbOption.toml，
@@ -27,7 +27,7 @@
 
 .EXAMPLE
     powershell -File scripts\Invoke-SiteDbnumParse.ps1 -Dbnum 7997 -SkipStart -Storage memory
-    复用已经在 7997 上跑着的实例，只重跑解析四步。
+    复用已经在 7997 上跑着的实例，只重跑解析三步。
 #>
 [CmdletBinding()]
 param(
@@ -37,8 +37,7 @@ param(
     [string[]]$DbFiles,
     [ValidateSet("memory", "rocksdb")][string]$Storage = "memory",
     [string]$ReleaseDir = (Join-Path (Split-Path -Parent $PSScriptRoot) "target\release"),
-    [switch]$SkipStart,
-    [switch]$SkipSysSync
+    [switch]$SkipStart
 )
 
 $ErrorActionPreference = "Stop"
@@ -135,7 +134,7 @@ if ($SkipStart) {
     Write-Host "SurrealDB 已启动 (pid $($proc.Id))"
 }
 
-# ---------------------------------------------------------------- 解析四步
+# ---------------------------------------------------------------- 解析三步
 
 function Invoke-SiteBin {
     param([string]$Exe, [string[]]$BinArgs = @(), [string]$LogName)
@@ -159,21 +158,18 @@ function Invoke-SiteBin {
     }
 }
 
-# 1) SYS 元数据：DESI 解析要靠 MDB/WORL 定位世界根，缺了它每个 dbnum 都解析出 0 个元素。
-if (-not $SkipSysSync) {
-    Write-Host "[1/4] SYS 元数据同步..."
-    Invoke-SiteBin -Exe "sync_sys_only.exe" -LogName "sys_sync.log"
-}
-
-# 2) 基线全量解析 + 水位收口（与手动增量更新确认执行走同一个初始化入口）。
-Write-Host "[2/4] dbnum $Dbnum 基线解析..."
+# 1) 基线全量解析 + 水位收口（与手动增量更新确认执行走同一个初始化入口）。
+#    SYS 元数据不再是单独一步（`sync_sys_only` 2026-09-07 退役）：initialize_ams_dbnums 自己
+#    先把没有水位的 SYST/COMM/MISC/GLB/GLOB 与 DICT 落齐，再建设计库基线——DESI 解析要靠
+#    MDB/WORL 定位世界根，缺了它每个 dbnum 都解析出 0 个元素，所以这一步不可跳过。
+Write-Host "[1/3] dbnum $Dbnum 基线解析（含 SYS 元数据）..."
 Invoke-SiteBin -Exe "initialize_ams_dbnums.exe" -BinArgs @("$Dbnum") -LogName "baseline.log"
-Get-Content (Join-Path $SiteDir "baseline.log") | Select-String -Pattern '^BASELINE\|' | ForEach-Object { Write-Host "      $_" }
+Get-Content (Join-Path $SiteDir "baseline.log") | Select-String -Pattern '^(SYSMETA|BASELINE)\|' | ForEach-Object { Write-Host "      $_" }
 
-# 3) 预览扫描：file_latest_sesno 是扫描观察值，不做这步验收会报 applied/latest 对不上。
-Write-Host "[3/4] 预览扫描登记..."
+# 2) 预览扫描：file_latest_sesno 是扫描观察值，不做这步验收会报 applied/latest 对不上。
+Write-Host "[2/3] 预览扫描登记..."
 Invoke-SiteBin -Exe "manual_scan_probe.exe" -BinArgs @($Project) -LogName "scan.log"
 
-# 4) 验收：pe 条数、dbnum_info_table 统计、水位三项对账。
-Write-Host "[4/4] 验收..."
+# 3) 验收：pe 条数、dbnum_info_table 统计、水位三项对账。
+Write-Host "[3/3] 验收..."
 & (Join-Path $PSScriptRoot "Test-AmsDbnumIntegrity.ps1") -Dbnums $Dbnum -Endpoint "http://127.0.0.1:$Port/sql" -Database $Project

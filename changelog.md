@@ -2,6 +2,40 @@
 
 ## 2026-09-07
 
+### `sync_sys_only` / `bootstrap_sys_metadata` 退役：SYS 元数据不是一道引导，是初始化的一部分
+
+用户口径：「`sync_sys_only` 这个不需要了。默认 SYST 就是初始化时需要检查的，以及增量更新需要处理的。」
+ADR-058 D8 那条注记里点名留着的最后一截（「留下的只有 `database::bootstrap_sys_metadata`……」）随之清零。
+留它的理由（DESI 解析经 `MDB` / `WORL` 反查世界 refno，没有 SYS 的空库每个 dbnum 都解成「只有根、0 个元素」）
+依然成立，但它要的从来不是一道**单独的引导**——那六类库在两条常规路上早就各就各位：
+
+- **初始化**：`needs_initial_load` 明写「从未解析过的库都要先补一次全量基线，**SYS meta 也算**」
+  （2026-09-04 起基线与重放同一个收集器之后，把它们排除在外的旧理由就不成立了）。服务首轮重扫
+  把 SYST/COMM/MISC/GLB/GLOB 与 DICT 当普通库入队首载，`DataPhase::Meta` 排在 Catalogue / Design 之前。
+- **增量**：`UpdateScope::admits`、`watch_scope_admits`、`debug_scope_admits` 对这六类**恒放行**
+  ——MDB 的成员名单就存在它们里面，圈掉只会得到一个「什么都没发现」的假现场；水位缺失、行还在的
+  情形另有 `SesnoRangeResolver` 的 cold start 兜底。`IncrResult::geometry_changed_refnos` 把它们排除在
+  几何刷新之外：SYS 库的窗口只落行与水位。
+
+- **删** `src/bin/sync_sys_only.rs`（整个 bin）与 `database::bootstrap_sys_metadata`
+  （及其独占的 `sys_metadata_files`）——`database.rs` 717 → 511 行；`baseline_ingest::SYS_META_DB_TYPES`
+  一并删，`ingest_frozen` 收回成模块私有（`ingest_file` 是唯一入口，点名与文件头必须先对上）。
+  空库那三个索引不再由引导私铺，交给与服务启动同一套 DEFINE 的 `table_parity::init_schema_on`。
+- **新** `AiosDBManager::initialize_project_sys_metadata`：不起服务的规格工具走它——同一个
+  `initialize_dbnum_baseline`，顺序 SYS 五类 → DICT（`UdaKeyMap` 要 DICT 先于 DESI），**只补还没有水位的库**
+  （已有水位的后续会话归 watcher，不在这条路上追）。`bin/initialize_ams_dbnums` 先跑它再建点名的设计库基线，
+  每库打一行 `SYSMETA|项目|dbnum|db_type|ok|元素数`（跳过的打 `skipped|already_initialized`）。
+- **调用点**：l3 套件的空店引导与 fixture 各去掉一步 `sync_sys_only.exe`；
+  `scripts/Invoke-SiteDbnumParse.ps1` 四步变三步（`-SkipSysSync` 开关一并删）；
+  `scripts/Run-E3DFixtureSuite.ps1` 的构建清单去掉这个 bin。
+- **源码钉**：`the_legacy_full_sync_entry_point_stays_retired` 的退役名单加 `bootstrap_sys_metadata`；
+  新增 `data_interface::legacy_parse_pdms_db_guard::sys_metadata_has_no_bootstrap_of_its_own`
+  （`bin/sync_sys_only` 的文件不许回来，`initialize_project_sys_metadata` 的「只补没有水位的库」
+  这条前提也不许被摘掉——摘了就又有两套「什么时候算已初始化」的判据）。实测把 bin 放回去即变红。
+- **文档**：ADR-058 D8 实施注记四；CONTEXT.md「分块解析基线」词条与 Avoid（新增「SYS 引导 / SYS 同步」
+  这两个不该再说的词）；`runbook-sys-reparse-for-model-tree.md` 与 `runbook-local-stack-and-dbnum-parse.md`
+  两份跑法改写（后者顺带修掉一处早已失效的 `baseline_sync_options` 描述）。
+
 ### ADR-063：`ref_rev` 从「正确性依赖」降为「UI 便利」，反向查询的权威源改成文件里的引用表
 
 用户拍板「接着做 ADR-063（`ref_rev` 降级，级联计划 P5）」。三件事同时成立才逼出这个决策：

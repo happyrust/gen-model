@@ -1,41 +1,23 @@
 use aios_core::SUL_DB;
 use aios_core::aios_db_mgr::aios_mgr::AiosDBMgr;
-use aios_core::get_default_pdms_db_info;
-use aios_core::helper::normalize_sql_string;
 use aios_core::options::DbOption;
 use aios_core::pdms_types::*;
-use aios_core::tool::db_tool::db1_dehash;
-use aios_core::tool::hash_tool::hash_str;
 use aios_core::types::*;
-use anyhow::Context;
-use chrono::Local;
-use futures::channel::mpsc::unbounded;
-use itertools::Itertools;
-use pe::SPdmsElement;
-use petgraph::prelude::DiGraph;
 use serde::Deserialize;
 #[cfg(feature = "sql")]
 use sqlx::{Connection, MySql, MySqlPool, Pool};
 #[cfg(feature = "sql")]
 use sqlx::{Error, Executor};
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::future::Future;
-use std::hash::Hash;
-use std::io::Read;
+use std::collections::BTreeMap;
 use std::mem::take;
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::fs::{File, create_dir_all};
-use tokio::io::AsyncReadExt;
-// use tokio::sync::mpsc::Sender;
-use std::sync::mpsc::Sender;
-use tokio::time::Instant;
 
 use crate::consts::*;
 use crate::data_interface::tidb_manager::AiosDBManager;
 // use crate::graph_db::pdms_arango::*;
-use crate::surreal_retry::retry_surreal_write_operation;
 use crate::tables::*;
 
 /// 列出项目 `*000` 目录下需要解析的库文件。
@@ -327,197 +309,6 @@ pub async fn create_info_database(aios_mgr: &AiosDBMgr) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 一个 `db_type` 在全部包含项目里的候选文件，按项目分组、经身份判重后的选中清单（文件路径）。
-fn sys_metadata_files(
-    db_option: &DbOption,
-    db_type: &str,
-) -> anyhow::Result<HashMap<String, Vec<PathBuf>>> {
-    let mut candidates = Vec::new();
-    for project in &db_option.included_projects {
-        let project_dir =
-            crate::data_interface::project_paths::resolve_project_root(db_option, project)
-                .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
-        for path in collect_project_db_files(&project_dir, None)? {
-            let mut header = [0u8; crate::data_interface::db_file_header::BASIC_INFO_HEADER_BYTES];
-            std::fs::File::open(&path)
-                .and_then(|mut file| file.read_exact(&mut header))
-                .with_context(|| format!("读取候选数据库头失败: {}", path.display()))?;
-            // 不是 dabacon 描述符页的文件旧读法会给空 `db_type`、落不进任何类型；这里直接跳过。
-            let Some(info) =
-                crate::data_interface::db_file_header::DbBasicInfo::from_header_bytes(&header)
-            else {
-                continue;
-            };
-            if info.db_type.eq_ignore_ascii_case(db_type) {
-                candidates.push(
-                    crate::data_interface::initialization_phase::CatalogueCandidate {
-                        project: project.clone(),
-                        dbnum: info.db_no,
-                        path,
-                    },
-                );
-            }
-        }
-    }
-    let selection = crate::data_interface::initialization_phase::select_catalogue_candidates(
-        candidates,
-        &db_option.included_projects,
-        &crate::options::catalogue_project_priority(),
-    );
-    if !selection.blockers.is_empty() {
-        anyhow::bail!(
-            "{db_type} 清单身份阻断: {}",
-            selection
-                .blockers
-                .iter()
-                .map(|blocker| blocker.message.as_str())
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
-    }
-    let selected_project_by_dbnum = selection
-        .selected
-        .iter()
-        .map(|candidate| (candidate.dbnum, candidate.project.clone()))
-        .collect::<HashMap<_, _>>();
-    for candidate in selection.shadowed {
-        println!(
-            "[sys-bootstrap] {db_type} dbnum={} 的 {} 被 {} 遮蔽: {}",
-            candidate.dbnum,
-            candidate.project,
-            selected_project_by_dbnum
-                .get(&candidate.dbnum)
-                .map(String::as_str)
-                .unwrap_or("<unknown>"),
-            candidate.path.display()
-        );
-    }
-    let mut by_project: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    for candidate in selection.selected {
-        by_project
-            .entry(candidate.project)
-            .or_default()
-            .push(candidate.path);
-    }
-    Ok(by_project)
-}
-
-/// 把配置项目的 SYS 元数据（SYST / COMM / MISC / GLB / GLOB 与 DICT）灌进一个**空库**。
-///
-/// 这是 `sync_pdms` 退役后唯一留下的那一半（ADR-058 D8）。留它的理由只有一个：DESI 解析要
-/// 经 `MDB` / `WORL` 表反查世界 refno，一个从没同步过 SYS 的空库会让每个 dbnum 解出
-/// 「只有根、0 个元素」。CATA 与 DESI 两道全局屏障随 `sync_pdms` 一起走了——目录不入持久层
-/// （ADR-058），设计侧由数据批次 worker 按库首载。
-///
-/// 只有引导工具会调它（`bin/sync_sys_only`、l3 套件的空店引导）；**它不看任何配置开关**，
-/// 调用即执行。
-///
-/// 每个文件都经 [`baseline_ingest::ingest_frozen`] 落库——与数据批次 worker 的首载同一个写者
-/// （2026-09-07 `sync_total_async_threaded` 壳退役后基线只剩这一个入口）。SYS 五类按 ADR-007 的
-/// 语义**全目录扫、按文件头类型过滤**，不受 `included_db_files` 约束；同一 dbnum 只落一次。
-pub async fn bootstrap_sys_metadata(db_option: &DbOption) -> anyhow::Result<()> {
-    use crate::versioned_db::baseline_ingest;
-
-    if db_option.included_projects.is_empty() {
-        return Err(anyhow::anyhow!("没有包含的项目"));
-    }
-    let started = tokio::time::Instant::now();
-    println!("开始引导 {} 的 SYS 元数据", &db_option.project_name);
-
-    retire_dbnum_event().await?;
-    // 空库还没有这几个索引，而 SYS 灌完紧接着就是逐库首载。
-    retry_surreal_write_operation("define owner index", aios_core::define_owner_index).await?;
-    retry_surreal_write_operation("define geometry index", aios_core::create_geom_index).await?;
-    retry_surreal_write_operation("define pe index", aios_core::define_pe_index).await?;
-
-    let mut ingested_dbnums = BTreeSet::new();
-    let main_project = &db_option.included_projects[0];
-    let project_dir =
-        crate::data_interface::project_paths::resolve_project_root(db_option, main_project)
-            .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {main_project}"))?;
-    for path in collect_project_db_files(&project_dir, None)? {
-        let frozen = match crate::data_interface::frozen_source::FrozenSource::capture(&path) {
-            Ok(frozen) => frozen,
-            Err(error) => {
-                // 不是 dabacon 库文件（或头读不出）：SYS 相是全目录扫，跳过即可，出声不出错。
-                println!(
-                    "[sys-bootstrap] 跳过 {}（不是可打开的库文件）: {error:#}",
-                    path.display()
-                );
-                continue;
-            }
-        };
-        if !baseline_ingest::SYS_META_DB_TYPES
-            .iter()
-            .any(|db_type| db_type.eq_ignore_ascii_case(frozen.db_type()))
-        {
-            continue;
-        }
-        if frozen.target_sesno() == 0 {
-            println!("[sys-bootstrap] 跳过 {}（没有会话）", path.display());
-            continue;
-        }
-        if !ingested_dbnums.insert(frozen.dbnum()) {
-            continue;
-        }
-        baseline_ingest::ingest_frozen(db_option, main_project, &frozen)
-            .await
-            .with_context(|| {
-                format!(
-                    "同步 {main_project} 的 SYST/COMM/MISC/GLB/GLOB 数据失败: {}",
-                    path.display()
-                )
-            })?;
-    }
-
-    // DICT 属于 Meta，含依赖项目提供的 DICT；按显式优先级顺序处理，让共享裸 dbnum
-    // 的判重确定性地留下权威文件。
-    let dict_files = sys_metadata_files(db_option, "DICT")?;
-    let priority = crate::options::catalogue_project_priority();
-    let mut ordered_projects = Vec::with_capacity(db_option.included_projects.len());
-    let mut seen = std::collections::HashSet::new();
-    for project in &priority {
-        let Some(configured) = db_option
-            .included_projects
-            .iter()
-            .find(|candidate| candidate.eq_ignore_ascii_case(project))
-        else {
-            anyhow::bail!("catalogue_project_priority 含未知项目 {project}");
-        };
-        if !seen.insert(configured.to_ascii_lowercase()) {
-            anyhow::bail!("catalogue_project_priority 重复项目 {project}");
-        }
-        ordered_projects.push(configured.clone());
-    }
-    for project in &db_option.included_projects {
-        if seen.insert(project.to_ascii_lowercase()) {
-            ordered_projects.push(project.clone());
-        }
-    }
-    for project in &ordered_projects {
-        for path in dict_files.get(project).into_iter().flatten() {
-            let frozen = crate::data_interface::frozen_source::FrozenSource::capture(path)
-                .with_context(|| format!("打开 {project} 的 DICT 文件失败: {}", path.display()))?;
-            if frozen.target_sesno() == 0 {
-                println!("[sys-bootstrap] 跳过 {}（没有会话）", path.display());
-                continue;
-            }
-            if !ingested_dbnums.insert(frozen.dbnum()) {
-                continue;
-            }
-            baseline_ingest::ingest_frozen(db_option, project, &frozen)
-                .await
-                .with_context(|| format!("同步 {project} 的 DICT 数据失败: {}", path.display()))?;
-        }
-    }
-
-    println!(
-        "SYS 元数据引导完成，耗时 {} ms",
-        started.elapsed().as_millis()
-    );
-    Ok(())
-}
-
 /// Remove the retired trigger; all PE writers maintain statistics explicitly.
 pub async fn retire_dbnum_event() -> anyhow::Result<()> {
     crate::data_interface::dbnum_stats::retire_event_on(&SUL_DB).await
@@ -629,13 +420,20 @@ fn collect_project_db_files_rejects_sibling_extracts() {
 /// 同日晚些时候它的底座 `sync_total_async_threaded`（多类型 / 多文件 / `included_db_files`
 /// 过滤的 legacy 壳）也退役了：基线摄入只剩 `versioned_db::baseline_ingest::ingest_file`
 /// 一个按**单个文件**的入口，由 `manual_update` 的首载 / 重建路径调用，屏障由数据批次队列
-/// 负责；`bootstrap_sys_metadata` 逐文件调同一个入口。
+/// 负责。最后一截 `bootstrap_sys_metadata`（空库 SYS 引导，`bin/sync_sys_only` 的全部内容）
+/// 同日一并退役：SYS 元数据不是一道单独的引导，而是初始化的一部分——服务首轮重扫把它们
+/// 当普通库入队首载（`needs_initial_load` 明说「SYS meta 也算」），规格工具走
+/// `AiosDBManager::initialize_project_sys_metadata`，两条路同一个 `initialize_dbnum_baseline`。
 ///
-/// 现在钉的是「别再长回来」：本文件不许重新出现那两个入口，也不许再读那四个开关。
+/// 现在钉的是「别再长回来」：本文件不许重新出现那三个入口，也不许再读那四个开关。
 #[test]
 fn the_legacy_full_sync_entry_point_stays_retired() {
     let source = include_str!("database.rs");
-    for retired in ["sync_pdms", "sync_total_async_threaded"] {
+    for retired in [
+        "sync_pdms",
+        "sync_total_async_threaded",
+        "bootstrap_sys_metadata",
+    ] {
         let entry = format!("pub async fn {retired}");
         assert!(
             !source.contains(&entry),

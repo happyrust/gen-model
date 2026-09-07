@@ -20,7 +20,7 @@ $repo = Split-Path -Parent $PSScriptRoot
 $target = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $repo "target" }
 Push-Location $repo
 try {
-    cargo build --bin aios-database --bin l3_suite --bin sync_sys_only `
+    cargo build --bin aios-database --bin l3_suite `
         --bin initialize_ams_dbnums --bin manual_scan_probe `
         --no-default-features --features "ws,gen_model,manifold,project_hd,http_api"
     if ($LASTEXITCODE) { exit $LASTEXITCODE }

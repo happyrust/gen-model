@@ -531,10 +531,11 @@ fn start_fixture_stack(
     let tools = tool_dir(repo);
     let surreal = env_path("L3_SURREAL_EXE", repo.join("bin/surreal.exe"));
     let service = tools.join("aios-database.exe");
-    let sync_sys = tools.join("sync_sys_only.exe");
+    // SYS 元数据不再是单独一步（`sync_sys_only` 2026-09-07 退役）：`initialize_ams_dbnums`
+    // 自己先把 SYS / DICT 库落齐再建设计库基线，与服务首载同一条路。
     let initialize = tools.join("initialize_ams_dbnums.exe");
     let scan = tools.join("manual_scan_probe.exe");
-    for path in [&surreal, &service, &sync_sys, &initialize, &scan] {
+    for path in [&surreal, &service, &initialize, &scan] {
         ensure!(
             path.is_file(),
             "fixture executable is missing: {}",
@@ -578,13 +579,6 @@ fn start_fixture_stack(
         )?,
     );
     wait_port(8048, Duration::from_secs(60))?;
-    run_fixture_bin(
-        &sync_sys,
-        &[],
-        repo,
-        &baseline_config_no_ext,
-        &run_dir.join("baseline-sys.log"),
-    )?;
     run_fixture_bin(
         &initialize,
         &[dbnum.to_string()],

@@ -48,9 +48,6 @@ pub(crate) const WRITE_WINDOW: usize = 20;
 /// `sync_chunk_size` 没写时一块的元素数（与 legacy 同值：对绝大多数库等于整文件一块）。
 const DEFAULT_CHUNK_ELEMENTS: usize = 10_0000;
 
-/// SYS 元数据的五个库类型（`bootstrap_sys_metadata` 的第一相）。
-pub(crate) const SYS_META_DB_TYPES: [&str; 5] = ["SYST", "COMM", "MISC", "GLB", "GLOB"];
-
 /// 一个库文件的基线摄入回执。
 #[derive(Debug, Clone)]
 pub struct BaselineIngest {
@@ -160,11 +157,12 @@ pub async fn ingest_file(
     ingest_frozen(db_option, project, &frozen).await
 }
 
-/// [`ingest_file`] 的冻结源形态：dbnum / db_type / 目标会话都以冻结源为准。
+/// [`ingest_file`] 的摄入主体：身份复核过之后，dbnum / db_type / 目标会话一律以冻结源为准。
 ///
-/// `bootstrap_sys_metadata` 按目录扫出来的文件走这里——它手里没有「调用方点名」的身份，
-/// 文件头就是身份。
-pub(crate) async fn ingest_frozen(
+/// 不单独对外：`ingest_file` 是唯一入口，点名与文件头必须先对上（[`check_identity`]）。
+/// 2026-09-07 之前 `bootstrap_sys_metadata` 直接从这里进来——它按目录扫、手里没有点名的身份，
+/// 于是文件头就是身份；那条空库引导已随 `bin/sync_sys_only` 退役。
+async fn ingest_frozen(
     db_option: &DbOption,
     project: &str,
     frozen: &FrozenSource,
@@ -662,7 +660,7 @@ mod tests {
     fn cleanup_happens_after_the_writer_drained_and_before_success() {
         let source = include_str!("baseline_ingest.rs");
         let body = source
-            .split_once("pub(crate) async fn ingest_frozen(")
+            .split_once("async fn ingest_frozen(")
             .expect("ingest_frozen")
             .1
             .split_once("fn dispatch_chunk(")
