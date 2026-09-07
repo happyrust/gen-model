@@ -218,6 +218,10 @@ pub struct WindowRootSources {
     /// `model_structural_connection_cascade` 关着时是 `StructuralConnectionCascade::off()`（零 I/O）。
     pub structural_connection:
         crate::data_interface::structural_connection::StructuralConnectionCascade,
+    /// 电缆端点 / 路由反向级联（C8 同库版）：变更的 `EQUI` / `ELCONN` / `CWBRAN` 到 T 端文件的
+    /// `STAREF` / `ENDREF` 反向表点查引用它的电缆，电缆 owner 链上的根。[`Self::impact`] 把它并进
+    /// `touched`；开关 `model_cable_endpoint_cascade` 关着时是 `CableEndpointCascade::off()`（零 I/O）。
+    pub cable_endpoint: crate::data_interface::cable_endpoint::CableEndpointCascade,
 }
 
 impl WindowRootSources {
@@ -260,6 +264,18 @@ impl WindowRootSources {
         } else {
             crate::data_interface::structural_connection::StructuralConnectionCascade::off()
         };
+        // C8（同库版）：电缆端点 / 路由反向级联。开关关 = 不开引擎、不查表（`off()`），touched 一字不改。
+        let cable_endpoint = if crate::options::model_cable_endpoint_cascade() {
+            crate::data_interface::cable_endpoint::CableEndpointCascade::collect(
+                &plan,
+                file,
+                target_sesno,
+                &index.owners,
+                &roots_t,
+            )
+        } else {
+            crate::data_interface::cable_endpoint::CableEndpointCascade::off()
+        };
         Ok(Self {
             base_sesno,
             target_sesno,
@@ -268,6 +284,7 @@ impl WindowRootSources {
             closure,
             index_keys: index.owners.len(),
             structural_connection,
+            cable_endpoint,
         })
     }
 
@@ -283,6 +300,8 @@ impl WindowRootSources {
         // C2 连接扩展：touched → roots 映射之后、`regen = touched ∩ roots_T` 之前，把结构连接
         // 对端的根并进来（对端根都取自 roots_T）。开关关时是空操作。
         self.structural_connection.expand_touched(&mut touched);
+        // C8 同上：引用者（电缆）的根都取自 roots_T；开关关时是空操作。
+        self.cable_endpoint.expand_touched(&mut touched);
         WindowImpact {
             touched,
             closure_complete: self.closure.is_complete(),
@@ -376,6 +395,7 @@ pub(crate) async fn build_model_update_plan_from_window(
         sources.plan.report.totals_line()
     )];
     warnings.push(sources.structural_connection.summary_line(dbnum));
+    warnings.push(sources.cable_endpoint.summary_line(dbnum));
     let units = plan
         .regen
         .iter()

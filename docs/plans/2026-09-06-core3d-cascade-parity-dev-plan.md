@@ -34,7 +34,7 @@ rollup（`resolve_element_generation_root` + `ref_rev` 反查 + `build_unit_roll
 | 6 | INTUBE：类别 1 → 前一个元件（规则 H）；删除 / 改挂先按 INTUBE 再 REDRAW（§2.2b） | 分支序 | 整根 BRAN 重生成 | `reroute_derived_geometry_units` 整根 | ✅ 超集（issue #5） |
 | 7 | 结构连接 `ADSTCH`：`CREF`↔`JOIS`/`JOIE`、`CFRA`↔`PFRE` 双向核对 → 对端 / 对端顶层件 + `RECON0`（§3） | **正向引用**（从变更元素读出去） | **无** | `ref_rev`：`CREF`(35 noun)/`JOIS`/`JOIE`(4)/`CFRA`(3)/`PFRE`(1) 都是 schema ELEMENT 型 → 进反向索引 → 对端交付单元级联（不核对回指 = 超集） | ~~❌ direct 缺~~ ◐ **0907 direct 已接线**（`structural_connection.rs`，正向读 + 回指核对 + `STRU` 门，开关 `model_structural_connection_cascade` 默认关；清单 #12） |
 | 8 | 孔洞：PANE / 设备子件变了 → ~~引用它的~~ **它成员里的** `HOLC` 构件（§2.3-3，★0907 C7：`DFIND` 是成员导航不是反向引用，证据 §8.1）；孔洞自己变了 → 自身 + owner（J/P） | ~~反向引用~~ **owner 链向下（成员表）** | owner 子树内的孔由整根覆盖 = **同一口径** | `ref_rev` 超集 | ~~❌ direct 缺~~ **✅ 构造性覆盖**（清单 #15）；core 也不查引用者 |
-| 9 | `EQUI`/`ELCONN` → ~~`GATREF(CLIST)` 连接表~~ **`GATREF(ELCXRF)`**（规则 F；★0907 C6：0906 把 E/F 的属性写反了）= 伪属性 `BACKRE{STAREF, ENDREF}`，引用表**反向**找接在它上面的电缆 → 全部重画 | ~~正向数组~~ **反向引用**（经伪属性走 `DB_RefTableIterator`，跨库） | 无 | `CABLE.STAREF`/`ENDREF` 是 schema ELEMENT 型 → 进 `ref_rev` → 电缆单元级联（超集） | ~~❓~~ **★0907 C6 定性完**（证据 §8.6）：语料有实例（ELCONN 1607 / CABLE 116 / 边 36 同库跨根 + 196 跨库）→ 按 C6 判词「有 → 另开计划」= **C8 提案**（§3），几何上暂不显（电缆几何未按路由落地） |
+| 9 | `EQUI`/`ELCONN` → ~~`GATREF(CLIST)` 连接表~~ **`GATREF(ELCXRF)`**（规则 F；★0907 C6：0906 把 E/F 的属性写反了）= 伪属性 `BACKRE{STAREF, ENDREF}`，引用表**反向**找接在它上面的电缆 → 全部重画 | ~~正向数组~~ **反向引用**（经伪属性走 `DB_RefTableIterator`，跨库） | 无 | `CABLE.STAREF`/`ENDREF` 是 schema ELEMENT 型 → 进 `ref_rev` → 电缆单元级联（超集） | ~~❓~~ **★0907 C6 定性完**（证据 §8.6）：语料有实例（ELCONN 1607 / CABLE 116 / 边 36 同库跨根 + 196 跨库）→ 按 C6 判词「有 → 另开计划」= C8（§3）→ **同日同库版接线 ◐**（`cable_endpoint.rs`，开关 `model_cable_endpoint_cascade` 默认关；跨库边待跨库版），几何上暂不显（电缆几何未按路由落地） |
 | 10 | 桥架 / 网格：~~`CWBRAN` `ELCXRF`~~ **`CWBRAN` → `GATREF(CLIST)`**（规则 E，伪属性 = 路过这条分支的电缆，底下同一张引用表反向查 `EXTGEO.STAREF`/`ENDREF`）、`CTRAY` / `CGRDCP` / `CGRDLP` 成员向下、`CLNPNG` 两层、`REFGRD` 正向（B–E、G） | 正向（`REFGRD`）+ 成员向下 + **E 反向** | 无 | 部分（ELEMENT 型的进 `ref_rev`） | 登记不排期（清单 #14，`gb==3` 族归几何覆盖度）；**E 那条并入 C8 提案**（与 #9 同源） |
 | 11 | 网格件只标**画列表里有的**（`DES_DrawList::exists`） | — | 不可比（我们没有画列表） | — | ⚪ |
 | 12 | 顶层件的 owner 是 `TMPL` 时改取 owner（§2.3-1） | owner 链 | 模板不进 DESI 增量 | 同 | ⚪ |
@@ -43,7 +43,8 @@ rollup（`resolve_element_generation_root` + `ref_rev` 反查 + `build_unit_roll
 
 统计：core 侧 14 条规则组里 ~~8 条 ✅ / 3 条 ⚪ 不可比 / 2 条 ❌ direct 缺（#7 结构连接、#8 孔洞）/ 1 条 ❓（#9 CLIST）~~
 ~~**★0907 收口：9 条 ✅（#8 归 ✅ 构造性覆盖）/ 1 条 ◐ 已接线灰度中（#7）/ 3 条 ⚪ 不可比 / 1 条 ❓（#9 CLIST）**。~~
-**★0907 C6 再收口：9 条 ✅ / 1 条 ◐ 已接线灰度中（#7）/ 3 条 ⚪ 不可比 / 1 条 ❌ direct 缺、登记为 C8 提案（#9，连带 #10 的 E 条）**。
+~~**★0907 C6 再收口：9 条 ✅ / 1 条 ◐ 已接线灰度中（#7）/ 3 条 ⚪ 不可比 / 1 条 ❌ direct 缺、登记为 C8 提案（#9，连带 #10 的 E 条）**。~~
+**★0907 C8 同库版接线后：9 条 ✅ / 2 条 ◐ 已接线灰度中（#7 结构连接、#9 电缆端点 + #10 的 E 条，同库版）/ 3 条 ⚪ 不可比**。
 ~~两条 ❌ 都是同一件事的两面：direct 路径没有任何引用类联动。区别只在 #7 用正向读就够（不用等反向表），#8 必须反向。~~
 **★0907 C7 改写这句：core 的 `EVALAT` 里根本没有反向引用查询**（`DFIND` = 成员导航；`change/` 模块一次都没调 `db_find_reference` /
 `DB_RefTableIterator`，证据 §8.1）。~~core 的联动只有三种边：owner 链（上卷 / owner / 祖父 / 成员向下）、正向引用数组
@@ -63,7 +64,8 @@ rollup（`resolve_element_generation_root` + `ref_rev` 反查 + `build_unit_roll
 - 不复刻 `RECON0` 重连——那是编辑器动作，不是刷新。
 - 不实现 UDA / `XRPNTR` 依赖递归（ADR-061）。
 - 不碰旧 PE 路径的 `ref_rev`（它已是超集）。
-- ★0907 C6：不在本计划里接电缆端点 / 路由反向级联（#9 定性的结果），只登记为 C8 提案，立不立见 §7-5。
+- ~~★0907 C6：不在本计划里接电缆端点 / 路由反向级联（#9 定性的结果），只登记为 C8 提案，立不立见 §7-5。~~ **★0907 用户拍板后
+  同库版已接（§3 C8，开关默认关）；跨库版（MDB 逐库并）仍不在本计划。**
 
 ## 3. 任务
 
@@ -193,19 +195,33 @@ rollup（`resolve_element_generation_root` + `ref_rev` 反查 + `build_unit_roll
     （→ 含 `ELCONN` 的六个电气库）；`EXTGEO.STAREF`/`ENDREF` → 路由节点 408 条同库跨根 + 152 跨库。CABLE 与 ELCONN 在语料里从不同库。
   - 判：**有实例 → 另开计划**，先登记为下面的 C8 提案；清单 #13 由 ❓ 改「反向边、direct 缺、C8 提案」，#14 的 E 条并入。
 
-### C8 —— 电缆端点 / 路由反向级联（提案，待拍板；L；C6 的「另开计划」）
+### C8 —— 电缆端点 / 路由反向级联（C6 的「另开计划」）◐ 2026-09-07 **同库版已接线**（用户拍板「先做同库版」；开关默认关；跨库版待立项）
 
 - 什么：direct 规划器里，窗口变更元素若是 `EQUI` / `ELCONN`（规则 F）或 `CWBRAN` 及其路由节点 `HATTA`/`TATTA`/`RNODE`/`RATTA`（规则 E），
   把「`STAREF`/`ENDREF` 指向它的元素」（`CABLE` 自身或其 `EXTGEO` 段 → owner `CABLE`）的生成根并进 `touched`。core 同形：
   `GATREF(ELCXRF)` / `GATREF(CLIST)` → `DB_RefTableIterator`。
-- 为什么不是现在：① 电缆几何今天没按路由落地（`CABLE` 现走 cata_model，e3d-model 的 `EXTGEO` 段未接）——补了联动也看不见；
+- **同库版落地（0907）**：新模块 `src/data_interface/cable_endpoint.rs`（`CableEndpointCascade`）：账本 noun 零 I/O 粗筛
+  （`EQUI` / `ELCONN` → 规则 F 查自己；`CWBRAN` → 规则 E 查自己 + T 端索引里的直接成员），`ReadOnlyEngine::referrers_of` 到 **T 端
+  文件自带的 `STAREF` / `ENDREF` 反向表**点查（表不在 = 空，不算错；e3d-io 读的正是 core `DB_RefTableIterator` 那张表），引用者沿
+  T 端 owner 链上每一个 `roots_T` 里的根并进 `touched`（复用 C2 的 `roots_on_owner_chain`）。`window_root_plan.rs` 三处钩子同 C2
+  （`WindowRootSources.cable_endpoint` / `collect()` 按开关 / `impact()` `expand_touched` / 回执一行 `cable-endpoint cascade on|off`）；
+  开关 `model_cable_endpoint_cascade`（`DbOption.toml` / `AIOS_MODEL_CABLE_ENDPOINT_CASCADE`），**默认关**。只查本库；跨库那 196 条边
+  要 MDB 逐库并，不在此版。
+- **验（0907 本机）**：契约三态（表里有引用者 → `regen ⊇ {root(EQUI), root(CABLE)}`；没有 → 只 `root(EQUI)`；开关关 → `touched` 一字不改）
+  + 引用者经 `EXTGEO` owner 链归 `CABLE` 根 / 同根 / 悬空 + 规则 E 的键集 + noun 表 = 7 条纯内存测试全绿；options 开关守卫绿。
+  真库 `zdj7200_0001`（六根电缆，语料里没有「只改那台 EQUI」的自然窗口：2→3 电缆还没建、4→5 两端一起建）：**假定** `EQUI 23584/10206`
+  变了 → 表里 6 条边、6 个电缆根**一根不多一根不少**（与正向读 `CABLE.STAREF`/`ENDREF` 反推的集合相等）；假定 8 条 `CWBRAN` 变了 →
+  70 次点查、27 条 `EXTGEO` 边、6 个根全是 `CABLE`。现有窗口两态 `regen` 逐字相同：`aps7200_0001` 3→4 与 `zdj7200_0001` 会话链全部
+  9 步（其中 4→5 开着时点查 74 次、拉到 6 个电缆根，但它们本来就在 `touched` 里，regen 16 = 16；2→3 那 17 台 EQUI 命中粗筛但会话 3
+  还没有 `STAREF`/`ENDREF` 表 → 零点查）。`cargo clippy --lib` 本模块零告警。
+- 为什么之前判「不是现在」（仍然成立，所以默认关）：① 电缆几何今天没按路由落地（`CABLE` 现走 cata_model，e3d-model 的 `EXTGEO` 段未接）——补了联动也看不见；
   ② 语料里 196/232 条 `CABLE` 端点边跨库，要逐库并的反向查（`direct_store::referrers_of(dbnum, attr, target)` 是单库入口——一张
   引用表只答它自己那个库，core 的 `DB_PseudoBACKRE` 也是 `DB_MDB::dbs` 逐库迭代；dab-ref-tables 计划的接线未排。`STAREF`/`ENDREF`
   有引用表这一点由 `ELCXRF` 拿它们限定 `BACKRE` 反证——`BACKRE` 只对 `type == 5 && isTable` 的属性起效）；
   ③ 「只改 EQUI/ELCONN 一端、电缆不动」的窗口未量（普查的窗口统计只跟了结构边与孔洞边）。
-- 立项前置：电缆几何排期 + 普查加一档「电缆端点边」窗口统计（`cross_root_reference_census` 的 `STRUCTURAL_ATTRS` 同形再加 `STAREF`/`ENDREF`）。
-- 验（届时）：契约三态同 C2；真库窗口 `zdj7200` 那 6 根电缆（同库对端 `EQUI`）先做同库版。
-- 退：开关，默认关。
+- 跨库版立项前置：电缆几何排期 + 普查加一档「电缆端点边」窗口统计（`cross_root_reference_census` 的 `STRUCTURAL_ATTRS` 同形再加
+  `STAREF`/`ENDREF`）+ MDB 逐库并的反向查入口（dab-ref-tables 计划的接线）。
+- 退：开关 `model_cable_endpoint_cascade`，默认关；关着时不开引擎、不查表。
 
 ### C7 —— 证据补洞（S，IDA 只读，不阻塞任何项）✅ 2026-09-07（证据文档 §7 划账、新 §8 五节）
 
@@ -229,7 +245,7 @@ C4 INTUBE 删除契约   ✅(0907 核实：live 门 269→270 早已钉着，跑
 C5 TOPF 对拍         ✅(0907，随 C1 扫完：无根 primitive 268 个，全是船体族；不改判据)
 C6 CLIST 定性        ✅(0907：CLIST / ELCXRF 都是伪属性 = DB_RefTableIterator(STAREF|ENDREF) 反向；0906 把 E/F 属性写反已改正；ELCONN 1607 / CABLE 116 有实例 → C8 提案)
 C7 证据补洞          ✅(0907：DFIND = 成员导航、RECON0 写回两端、hashValue = hard type noun hash、两个死 noun、UPDATN → DES_DrawListManager::updateGraphics)
-C8 电缆端点/路由反向级联  提案待拍板（前置：电缆几何排期 + 普查加电缆端点边窗口统计）
+C8 电缆端点/路由反向级联  ◐(0907 同库版接线，开关默认关：cable_endpoint.rs 点查本库 STAREF/ENDREF 反向表；zdj7200 假定源 6 根电缆全中、现有窗口两态相同) 跨库版待立项
 ```
 
 - **C1 是闸**：09-04 清单 #3 / #5 都是先立项后发现语料里压不出窗口，这次反过来。**0907 闸已过**：结构连接那一半两个门槛都满足。
@@ -248,7 +264,7 @@ C8 电缆端点/路由反向级联  提案待拍板（前置：电缆几何排�
 | C4 | 删中间元件 → `RegenRoot(BRAN)` 恰好 1 条且 `DeleteCleanup` 不单独存在于 `regen` 之外 —— ✅ 已由 live 门 269→270 钉着（0907 跑绿） |
 | C5 | 列出「core 单独重画、我们不归任何根」的 noun 名单，或明确为空 —— ✅ 0907：船体族 `CPANEL`/`CPROF`/`BNDLIN`（247）+ 零星 21 个，见证据 §5 |
 | C6 | `CLIST` 的来源一句话 + `ELCONN` 实例数 —— ✅ 0907：**`CLIST` 是伪属性，Core3D 电缆模块算的，底下是 `DB_RefTableIterator(STAREF \| ENDREF)` 反向找路过 / 接上的电缆；`ELCONN` = 1607**（证据 §8.6；连带改正 0906 E/F 属性写反） |
-| C8 | 提案；立项时套 C2 的写法：契约三态 + 真库窗口对端根 ∈ `regen` + 现有窗口两态逐字相同 |
+| C8 | 套 C2 的写法：契约三态 + 真库引用者根 ∈ `regen` + 现有窗口两态逐字相同 —— ◐ 0907 同库版：三态各一条（`cable_endpoint::tests`）；`zdj7200_0001` 假定 `EQUI 23584/10206` 变了 → 6 个电缆根与正向读反推的集合**相等**、假定 8 条 `CWBRAN` 变了 → 6 个根全是 `CABLE`（`tests::live`）；`aps7200_0001` 3→4 + `zdj7200_0001` 九步两态逐字相同。语料里没有「只改一端」的自然窗口，所以真库那一条用的是假定源，不是窗口 |
 
 ## 6. 风险
 
@@ -274,6 +290,8 @@ C8 电缆端点/路由反向级联  提案待拍板（前置：电缆几何排�
 5. **★0907 C6 新增：C8 电缆端点 / 路由反向级联立不立、何时立**。C6 的判词是「有实例 → 另开计划」，实例有（ELCONN 1607、CABLE 116、
    端点边 232 条），但电缆几何今天没按路由落地、边又多半跨库。建议：**先登记不排期**，挂在电缆几何排期之后；立项前先让普查多数一档
    「电缆端点边」窗口（有没有「只改 EQUI/ELCONN 或路由节点、电缆不动」的真实窗口）。要现在就做同库版（zdj7200 那 6 根电缆）直接说。
+   **★0907 用户拍板：「把 C8 同库版先做了：zdj7200 那 6 根电缆（对端 EQUI 同库），套 C2 的写法开关默认关」→ 同日接线落地**（§3 C8）。
+   剩下要拍的：开关翻不翻（建议等电缆几何落地再翻——今天翻了也看不见）；跨库版何时立。
 
 ## 8. Plannotator 评审记录
 

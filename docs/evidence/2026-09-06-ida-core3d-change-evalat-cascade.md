@@ -438,3 +438,11 @@ direct 文件窗口路径没有；旧 PE 路径的 `ref_rev` 按 schema ELEMENT 
 的路由节点（E）；边 = `STAREF`/`ENDREF` 反向；目标 = `CABLE`（`EXTGEO` 归 owner `CABLE`）的根；跨库边占多数 → 要跨库的反向索引；
 窗口未量）。今天电缆几何本身没按路由落地（`CABLE` 在 `stage3-noun-routing-gaps.md` §3b 里「现走 cata_model」；e3d-model 的路径段
 只移植了 `POINTR` 直线段，`EXTGEO` 那支未接），所以这条像 #12 一样**几何上暂不显**，电缆几何落地即成正确性项。C3「通用反向级联」在 core 侧的对应物就只有这两条电缆边——不改 C3 不立项的判词。
+
+**★0907 同日：用户拍板先做同库版 → 已接线**（`src/data_interface/cable_endpoint.rs`，`WindowRootSources.cable_endpoint`，开关
+`model_cable_endpoint_cascade` 默认关）：账本里的 `EQUI` / `ELCONN`（F）查自己、`CWBRAN`（E）查自己 + T 端索引的直接成员，
+`ReadOnlyEngine::referrers_of` 到 T 端文件自带的 `STAREF` / `ENDREF` 反向表点查，引用者 owner 链上的 `roots_T` 根并进 `touched`——就是
+上面 `DB_PseudoBACKRE` / `takeCables` 那张表、那两个属性，只差「本库」这一层（core `DB_MDB::dbs` 逐库并）。`zdj7200_0001` 实测：表里有
+`STAREF` / `ENDREF` 两张；假定 `EQUI 23584/10206` 变了 → 6 条边 / 6 个电缆根，与正向读 `CABLE.STAREF`/`ENDREF` 反推的集合相等；假定
+8 条 `CWBRAN` 变了 → 70 次点查 / 27 条 `EXTGEO` 边 / 6 个根全是 `CABLE`；会话链 9 步 + `aps7200_0001` 3→4 开关两态 `regen` 逐字相同
+（语料里没有「只改一端」的自然窗口：2→3 时会话 3 还没有这两张表，4→5 两端一起建）。

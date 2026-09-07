@@ -294,7 +294,8 @@ ModelToUpdate(e, state):
 对我方的意义（direct 路径缺引用类联动）归 `docs/plans/2026-09-06-core3d-cascade-parity-dev-plan.md`，不在本核对表里重复。
 ★0907 其中结构连接 `ADSTCH` 那一条 direct 已接线（`src/data_interface/structural_connection.rs`，正向读 + 回指核对 + `STRU` 门，
 开关 `model_structural_connection_cascade` 默认关）；孔洞那条 core 走的是 owner 子树成员表（`DFIND` = 成员导航），整根重生成构造性覆盖、不需要接；
-电缆那两条（`CWBRAN` → `CLIST`、`EQUI`/`ELCONN` → `ELCXRF`，反向到 `CABLE`）direct 缺、登记为对齐计划 C8 提案（电缆几何未按路由落地，暂不显）。
+电缆那两条（`CWBRAN` → `CLIST`、`EQUI`/`ELCONN` → `ELCXRF`，反向到 `CABLE`）★0907 同库版已接线（`src/data_interface/cable_endpoint.rs`，
+点查 T 端文件自带的 `STAREF` / `ENDREF` 反向表，开关 `model_cable_endpoint_cascade` 默认关；跨库边待跨库版），电缆几何未按路由落地、暂不显。
 
 - 我方：✅ 分层等价。`OperationEffectSummary.max_dchc` 保留原始码没问题，
   但不该让它调节重生成范围。`TransformOnly` 是我们**主动多留**的便宜路径（省不是漏），
