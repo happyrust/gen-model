@@ -32,7 +32,16 @@
 
 ADR-062 可见性不变量的依赖者全在内部：房间计算的几何与拓扑读法、发布屏障、空间树 V3 快照头校验、`query_service::published_derivation_status`。材料表 surql（`fn::room_code` / `fn::room_num_of`）与 `web_service` 只读 `room_relate` 边。
 
-量级：本项目 2889 个 FRMW 筛出 124 间房 / 147 块面板（`room_model.rs` `load_room_panel_map` 注释）；`room_relate` 8000 库 13.7 万条边；面板网格为箱体 TriMesh。**拓扑重载实测一次**（P0，`room_topology::tests::live_ams8000_room_groups_are_structurally_sound`，2026-09-07 18:51）：ams8000 从 3 个 WORL 根整树遍历 → 135 个 FRMW 分组 / 1 块面板，`room_groups_from_set` **180 ms**（DbSet 逐元素 lookup，不含 `scan_index`）。带房间的大库与 `capture` 的节点数仍**未测**（见 §7）。
+量级：本项目 2889 个 FRMW 筛出 124 间房 / 147 块面板（`room_model.rs` `load_room_panel_map` 注释）；`room_relate` 8000 库 13.7 万条边；面板网格为箱体 TriMesh。**拓扑重载与分片体量实测**（P0，2026-09-07 18:51–19:20，两条 live 门）：
+
+| 库 | 文件 | 整树遍历 `room_groups_from_set`（不含 `scan_index`） | 分组 | `-RM` 且命名合规 | `capture`（含 `scan_index` + 全部节点 + 校验） | 分片 |
+|---|---|---|---|---|---|---|
+| ams8000（船体样例） | 23 MB | **180 ms** | 135 FRMW / 1 面板 | 1 间 / 1 块 | — | — |
+| ams7997（房间库，sesno 155） | 60 MB | **5.99 s** | 1 077 FRMW / 3 937 面板 | 214 间 / 229 块 | **7.37 s**，170 050 个节点 | JSON 12.9 MB → 25 片 × 512 KiB；`compose` 590 ms |
+
+（`room_topology::tests::live_ams8000_room_groups_are_structurally_sound` 以 `AIOS_PROJAMS_GEOMETRY_FILE` 换文件；`room_topology_source::tests::live_capture_reports_node_count_payload_and_elapsed_on_a_room_bearing_database` 以 `AIOS_ROOM_TOPOLOGY_LIVE_FILE` 换文件。）
+
+两条结论进设计：① 一个 60 MB 设计库的拓扑重载是**秒级**（6–7 s），不是毫秒级——读透侧「每个新会话重载一次」这笔账**今天就在付**（`GroupCache` 的键含 `sesno`，SAVEWORK 一次就 miss 一次），常驻模型不新增这笔，只是把它摆到明处；摄入侧只在文件轮次发布时付（`capture` 本来就跑）。② 分片体量 13 MB / 文件，全 MDB 十几个设计库量级在 100 MB 上下——常驻模型**不该**把分片节点整份留在内存，只留合成后的分组（1 077 组 / 3 937 面板，KB 级）与在册面板几何；分片只在合成与启动对比时流式读。
 
 ## 2. 原则（三条）
 
@@ -44,8 +53,8 @@ ADR-062 可见性不变量的依赖者全在内部：房间计算的几何与拓
 
 ### P0 · 取证与口径（0.5 天，本文 + 只读）
 
-- 本计划过目。
-- 树能编之后（此刻 vendored `plant-mbd` 被邻线改坏，`MemberKind` / `tag` 9 个 error）：跑 `room_topology::tests::live_ams8000_room_groups_are_structurally_sound`（`--ignored`）取一次 `room_groups_from_set` 耗时；在带房间的库上量一次 `capture` 的 `nodes` 数与 `elapsed_ms`（它本来就打印）。数进 §7 → §1。
+- 本计划过目。（已放行 18:55）
+- ~~树能编之后：跑 `room_topology::tests::live_ams8000_room_groups_are_structurally_sound`（`--ignored`）取一次 `room_groups_from_set` 耗时；在带房间的库上量一次 `capture` 的 `nodes` 数与 `elapsed_ms`。~~ **已测**（19:20，数在 §1 表）：为此在 `room_topology_source.rs` 加了一条 `#[ignore]` 的 live 门 `live_capture_reports_node_count_payload_and_elapsed_on_a_room_bearing_database`（默认 ams7997，可换文件），钉「`-RM` 房间名下有面板」、数字打印给人看。
 - 核 `live_room_*`（`room_fixture.rs` 11 条）在当前树上能不能跑（审核 F-F 说它们依赖 `ensure_published_file_baseline(0,0)` → `from_current()`，合成夹具没有 E3D 文件）。能跑的进 P5 顺带；不能跑不为它停。
 - CONTEXT.md 新词条「常驻房间模型」（文案见 §9）——CONTEXT.md 此刻在邻线的未提交集里，等它干净再落，不在本笔。
 
@@ -158,12 +167,12 @@ grill 已把决策问完（§8）。剩下三条是通知，不同意就说：
 | 读透参照写失败 | 只影响下次启动对比（退到「无参照 → 全量一次」），不影响本轮计算 |
 | 启动对比误删（diff 算错方向） | 删边只走 `recalc_panel_membership_inner` 的不在册分支，与今天同一条路；`mem://` 三形状门 |
 | 邻线 `room_model.rs` / `model_update_pending.rs` 未提交改动 | P2 起等其提交（Q14 (a)）；P0/P1 只碰新文件与本文 |
-| 拓扑重载耗时高于预期 | 读透每窗换代才重载，摄入只在文件轮次发布后；P0 先量，超预算就把读透换代改成按 `design_sources()` 会话号变化才重载（今天 `GroupCache` 的键就是它） |
+| 拓扑重载是秒级（ams7997 实测 6–7 s / 文件） | 读透只对**会话号变了的那个文件**重载（`GroupCache` 的键就是 `(dbnum, sesno, …)`，其余文件命中缓存），摄入只在文件轮次发布后由 `capture` 付；P2 接线时把「哪几个文件重载了、各多久」写进 drain 报告，超过一窗预算再议「按账本只重读变更子树」——那是逐条修补，先不做 |
 | 整体退路 | 开关默认关；关着时一行行为不变 |
 
 ## 7. 不许当已证
 
-- 拓扑重载耗时：只在 ams8000 上量过一次（180 ms，1 块面板的船体样例）；带房间的大库与 `capture` 的节点数 / 分片体量：**未测**。
+- 拓扑重载耗时与分片体量：ams8000 / ams7997 各量过一次（§1 表），是**单机单次**数字；多库并发换代、以及读透侧「每窗一次 6 s」在真会话节奏下的观感：**未测**。
 - `live_room_*` 11 条在当前树上能否跑通：**未核**。
 - 两形态真库逐边对拍：**未跑**。
 - 语料里是否存在跨库面板（`compose` 支持、测试有夹具、真库未见实例）：**未核**——它决定 Q10 (a) 的「整体止步」是必要的还是保守的。

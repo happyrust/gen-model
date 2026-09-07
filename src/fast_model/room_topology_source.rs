@@ -484,6 +484,75 @@ mod tests {
             PART_BYTES * 2
         );
     }
+    /// 真文件门：在带房间的库上量一次 `capture` 的节点数、分片体量与耗时（常驻房间模型计划
+    /// P0 的取证，`docs/plans/2026-09-07-resident-room-model-plan.md` §7）。默认 ams7997——
+    /// 124 间房那个库；`AIOS_ROOM_TOPOLOGY_LIVE_FILE` 可换。只钉「合成得出、房间名下有面板」，
+    /// 数字打印给人看。
+    #[tokio::test]
+    #[ignore = "manual live: needs a real DESI file listed in the current MDB and the E3D template directory"]
+    async fn live_capture_reports_node_count_payload_and_elapsed_on_a_room_bearing_database() {
+        let file = std::path::PathBuf::from(
+            std::env::var("AIOS_ROOM_TOPOLOGY_LIVE_FILE").unwrap_or_else(|_| {
+                r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7997_0001".into()
+            }),
+        );
+        let source =
+            FrozenSource::capture(&file).expect("freeze the DESI file at its latest session");
+        let started = std::time::Instant::now();
+        let captured = capture(&source)
+            .await
+            .expect("capture room topology source");
+        let capture_elapsed = started.elapsed();
+        let payload = serde_json::to_string(&captured).unwrap();
+        let room_nodes = captured
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(
+                    node.noun.trim().to_ascii_uppercase().as_str(),
+                    "FRMW" | "SBFR"
+                )
+            })
+            .count();
+        let keyword_rooms = captured
+            .nodes
+            .iter()
+            .filter(|node| node.name.contains("-RM"))
+            .count();
+        println!(
+            "[live] {} dbnum={} sesno={} nodes={} room_nodes={} named_-RM={} payload_bytes={} parts={} capture={:?}",
+            file.display(),
+            captured.dbnum,
+            captured.source_sesno,
+            captured.nodes.len(),
+            room_nodes,
+            keyword_rooms,
+            payload.len(),
+            parts(&payload).len(),
+            capture_elapsed
+        );
+        let started = std::time::Instant::now();
+        let composed =
+            compose(std::slice::from_ref(&captured), RoomHierarchy::Hd).expect("compose");
+        let groups = &composed[0].1;
+        let filtered = super::super::room_topology::room_panel_groups(groups, &["-RM".to_string()]);
+        println!(
+            "[live] compose: {} FRMW group(s) / {} panel(s); keyword -RM: {} room(s) / {} panel(s); compose={:?}",
+            groups.len(),
+            groups.iter().map(|group| group.panels.len()).sum::<usize>(),
+            filtered.len(),
+            filtered
+                .iter()
+                .map(|(_, _, panels)| panels.len())
+                .sum::<usize>(),
+            started.elapsed()
+        );
+        assert!(
+            filtered.iter().any(|(_, _, panels)| !panels.is_empty()),
+            "带房间的库上 -RM 房间名下该有面板"
+        );
+    }
+
     #[tokio::test]
     async fn ordinary_round_cannot_promote_without_its_complete_exact_source() {
         use crate::data_interface::side_effect_pending::SideEffectCompensator;
