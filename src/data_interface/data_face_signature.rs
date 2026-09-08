@@ -23,17 +23,25 @@ enum ClaimDecision {
     RefuseMismatch,
 }
 
+fn legacy_ingest_evidence(
+    has_applied: bool,
+    has_attributes: bool,
+    has_model_projection: bool,
+) -> bool {
+    has_applied || (has_attributes && has_model_projection)
+}
+
 fn decide_claim(
     stored_matches: Option<bool>,
     nonempty: bool,
-    has_applied: bool,
+    has_legacy_ingest_evidence: bool,
     ingest: bool,
 ) -> ClaimDecision {
     match stored_matches {
         Some(true) => ClaimDecision::UseExisting,
         Some(false) => ClaimDecision::RefuseMismatch,
         None if !nonempty => ClaimDecision::ClaimEmpty,
-        None if has_applied && ingest => ClaimDecision::ClaimLegacyIngest,
+        None if has_legacy_ingest_evidence && ingest => ClaimDecision::ClaimLegacyIngest,
         None => ClaimDecision::RefuseAmbiguous,
     }
 }
@@ -53,7 +61,9 @@ pub async fn validate_or_claim(
             "SELECT project, namespace, data_face, schema_version FROM ONLY {RECORD};\n\
              SELECT VALUE id FROM pe LIMIT 1;\n\
              SELECT VALUE applied_sesno FROM dbnum_watermark LIMIT 1;\n\
-             SELECT VALUE applied_sesno FROM dbnum_watermark WHERE applied_sesno > 0 LIMIT 1;"
+             SELECT VALUE applied_sesno FROM dbnum_watermark WHERE applied_sesno > 0 LIMIT 1;\n\
+             RETURN array::len((SELECT VALUE id FROM inst_relate LIMIT 1)) > 0 OR \
+             array::len((SELECT VALUE id FROM tubi_relate LIMIT 1)) > 0;"
         ))
         .await
         .map_err(|error| anyhow::anyhow!("read data-face signature: {error}"))?
@@ -81,21 +91,30 @@ pub async fn validate_or_claim(
     let pe: Vec<surrealdb::sql::Thing> = response.take(1).unwrap_or_default();
     let watermarks: Vec<i64> = response.take(2).unwrap_or_default();
     let applied: Vec<i64> = response.take(3).unwrap_or_default();
+    let has_model_projection: Option<bool> = response.take(4).unwrap_or_default();
     let nonempty = !pe.is_empty() || !watermarks.is_empty();
+    // 旧版本还没有水位表时，`pe` 与模型投影同时存在就是一份可识别的 ingest 库；
+    // 后续 `ensure_increment_state_storage` 会从 `pe.sesno` 建表播种，两枚水位再由
+    // 启动模型对账统一。只有其中一面仍属来源不明，继续拒绝自动认领。
+    let has_legacy_ingest_evidence = legacy_ingest_evidence(
+        !applied.is_empty(),
+        !pe.is_empty(),
+        has_model_projection.unwrap_or(false),
+    );
     let decision = decide_claim(
         None,
         nonempty,
-        !applied.is_empty(),
+        has_legacy_ingest_evidence,
         crate::options::data_face() == crate::options::DataFace::Ingest,
     );
     anyhow::ensure!(
         decision != ClaimDecision::RefuseAmbiguous,
-        "DATA_FACE_SIGNATURE_REQUIRED: unmarked non-empty store is ambiguous; run an explicit migration (only ingest with applied_sesno > 0 may auto-claim)"
+        "DATA_FACE_SIGNATURE_REQUIRED: unmarked non-empty store is ambiguous; run an explicit migration (ingest may auto-claim with applied_sesno > 0 or with both historical attributes and model projection)"
     );
     let legacy_ingest = decision == ClaimDecision::ClaimLegacyIngest;
     if legacy_ingest {
         log::warn!(
-            "unmarked legacy ingest store auto-claimed because applied_sesno > 0; project={} namespace={}",
+            "unmarked legacy ingest store auto-claimed from its applied watermark or paired historical attributes/model projection; project={} namespace={}",
             project,
             namespace
         );
@@ -150,5 +169,9 @@ mod tests {
             decide_claim(Some(true), true, false, false),
             ClaimDecision::UseExisting
         );
+        assert!(legacy_ingest_evidence(false, true, true));
+        assert!(legacy_ingest_evidence(true, false, false));
+        assert!(!legacy_ingest_evidence(false, true, false));
+        assert!(!legacy_ingest_evidence(false, false, true));
     }
 }

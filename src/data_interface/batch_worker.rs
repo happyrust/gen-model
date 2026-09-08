@@ -3385,6 +3385,8 @@ mod tests {
             applied_sesno,
             recorded: applied_sesno,
             has_roots: true,
+            has_attributes: true,
+            has_model_projection: true,
         }
     }
 

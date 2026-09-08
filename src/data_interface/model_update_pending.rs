@@ -1179,7 +1179,12 @@ pub(crate) fn render_model_watermark_probe(dbnum: u32) -> String {
          WHERE dbnum = {dbnum} AND {settled}));\n\
          RETURN dbnum_watermark:{dbnum}.applied_sesno;\n\
          RETURN dbnum_watermark:{dbnum}.model_sesno;\n\
-         SELECT VALUE record::id(id) FROM gen_root WHERE dbnum = {dbnum} LIMIT 1;"
+         SELECT VALUE record::id(id) FROM gen_root WHERE dbnum = {dbnum} LIMIT 1;\n\
+         RETURN array::len((SELECT VALUE id FROM pe WHERE dbnum = {dbnum} LIMIT 1)) > 0;\n\
+         RETURN array::len((SELECT VALUE id FROM inst_relate WHERE dbnum = {dbnum} \
+         OR in.dbnum = {dbnum} LIMIT 1)) > 0 OR \
+         array::len((SELECT VALUE id FROM tubi_relate WHERE dbnum = {dbnum} \
+         OR in.dbnum = {dbnum} LIMIT 1)) > 0;"
     )
 }
 
@@ -1195,8 +1200,12 @@ pub(crate) struct ModelWatermarkProbe {
     pub applied_sesno: i32,
     /// 行上已经记着的模型水位。
     pub recorded: i32,
-    /// 这个库有没有 `gen_root` 行。零行 + 水位非零 = 幽灵模型水位（D7）。
+    /// 这个库有没有 `gen_root` 行。零行 + 无模型投影 + 水位非零 = 幽灵模型水位（D7）。
     pub has_roots: bool,
+    /// 这个库有没有已持久化属性。历史兼容初始化必须同时看到属性与模型。
+    pub has_attributes: bool,
+    /// 这个库有没有已持久化模型投影。历史库可能有投影但尚无 `gen_root` 凭证。
+    pub has_model_projection: bool,
 }
 
 impl ModelWatermarkProbe {
@@ -1209,6 +1218,10 @@ impl ModelWatermarkProbe {
             return 0;
         }
         self.settled_floor
+            .or_else(|| {
+                (!self.has_roots && self.has_attributes && self.has_model_projection)
+                    .then_some(self.applied_sesno)
+            })
             .unwrap_or_default()
             .min(self.applied_sesno)
             .max(0)
@@ -1246,6 +1259,12 @@ pub(crate) async fn read_model_watermark_probe(
     let any_root: Vec<String> = response
         .take(6)
         .with_context(|| format!("decode gen_root presence of dbnum {dbnum}"))?;
+    let has_attributes: Option<bool> = response
+        .take(7)
+        .with_context(|| format!("decode attribute presence of dbnum {dbnum}"))?;
+    let has_model_projection: Option<bool> = response
+        .take(8)
+        .with_context(|| format!("decode model projection presence of dbnum {dbnum}"))?;
 
     // 两张表两种拼法（`gen_root` 的记录 id 是 `24381_1`，队列行的 `target_refno` 是
     // `24381/1`），比之前都过同一道归一——直接比字符串一次都不会相等。
@@ -1265,6 +1284,8 @@ pub(crate) async fn read_model_watermark_probe(
         applied_sesno: applied_sesno.unwrap_or_default(),
         recorded: recorded.unwrap_or_default(),
         has_roots: !any_root.is_empty(),
+        has_attributes: has_attributes.unwrap_or(false),
+        has_model_projection: has_model_projection.unwrap_or(false),
     })
 }
 
@@ -1471,7 +1492,10 @@ pub enum ModelWatermarkReconcile {
     /// 水位比证据低：热路径漏记（模型跑到数据前面那一次跳过、或收口前进程被清空），
     /// 补记上去（D6 的上调）。
     RaisedMissedStamp { from: i32, to: i32 },
-    /// 水位说模型追平过，这个库的 `gen_root` 却一行都没有：幽灵模型水位（D7）。
+    /// 历史库已有属性与模型投影，但还没有当前版本的 `gen_root` 凭证；按兼容约定把
+    /// 两枚库级水位初始化到同一位置。
+    SeededLegacyProjection { sesno: i32 },
+    /// 水位说模型追平过，这个库却既无 `gen_root` 也无模型投影：幽灵模型水位（D7）。
     ClearedGhost { from: i32 },
 }
 
@@ -1495,21 +1519,30 @@ pub(crate) async fn reconcile_model_watermark_on(
     .check()
     .with_context(|| format!("model watermark reconcile statement of dbnum {dbnum}"))?;
 
-    Ok(if probe.recorded < supported {
-        ModelWatermarkReconcile::RaisedMissedStamp {
-            from: probe.recorded,
-            to: supported,
-        }
-    } else if !probe.has_roots {
-        ModelWatermarkReconcile::ClearedGhost {
-            from: probe.recorded,
-        }
-    } else {
-        ModelWatermarkReconcile::LoweredUnbacked {
-            from: probe.recorded,
-            to: supported,
-        }
-    })
+    Ok(
+        if probe.recorded == 0
+            && !probe.has_roots
+            && probe.has_attributes
+            && probe.has_model_projection
+            && supported > 0
+        {
+            ModelWatermarkReconcile::SeededLegacyProjection { sesno: supported }
+        } else if probe.recorded < supported {
+            ModelWatermarkReconcile::RaisedMissedStamp {
+                from: probe.recorded,
+                to: supported,
+            }
+        } else if !probe.has_roots && !probe.has_model_projection {
+            ModelWatermarkReconcile::ClearedGhost {
+                from: probe.recorded,
+            }
+        } else {
+            ModelWatermarkReconcile::LoweredUnbacked {
+                from: probe.recorded,
+                to: supported,
+            }
+        },
+    )
 }
 
 /// 启动那一轮对每个候选库做一次对账，按去向各自出声。
@@ -1530,6 +1563,12 @@ pub(crate) async fn reconcile_model_watermarks(dbnums: impl IntoIterator<Item = 
                 println!(
                     "[模型水位] dbnum={dbnum} 热路径漏记，已补记 {from} → {to}\
                      （上一轮模型跑在数据前面被跳过，或收口前进程被清空）"
+                );
+            }
+            Ok(ModelWatermarkReconcile::SeededLegacyProjection { sesno }) => {
+                println!(
+                    "[模型水位] dbnum={dbnum} 检出历史属性与模型数据，已按兼容约定把 \
+                     applied_sesno / model_sesno 统一初始化到 {sesno}"
                 );
             }
             Ok(ModelWatermarkReconcile::ClearedGhost { from }) => {
@@ -3242,8 +3281,8 @@ pub(crate) async fn roots_behind_catalogue_on(
 /// 选根判据整条来自稳态窗口，这里一条都不新增（ADR-058 S1）；`fn::sync_gen_roots` 不在这条
 /// 路上——它的 `fn::gen_root_cover` 第一句就是查 `pe`，而 ADR-056 N7 要求模型面不以 `pe` 为前置。
 ///
-/// `gen_root` 一行都没有的库不在这里出现，也不该出现：从未生成过的根按需生成（ADR-058 D6），
-/// 启动一根不排。
+/// `gen_root` 一行都没有的库不参与退化窗口：从未生成过的根按需生成（ADR-058 D6），
+/// 启动一根不排；它仍进入库级水位探针，以兼容已有属性与模型投影但没有水位追踪表的历史库。
 ///
 /// 任何一库失败都**不中止启动**：告警并按「覆盖未确认」处理，人工出口是
 /// `POST /api/v1/dbnums/{dbnum}/model/rebuild`。
@@ -3281,7 +3320,7 @@ async fn dbnums_without_credentials(
             let mut missing: Vec<u32> = states
                 .into_iter()
                 .filter(|state| {
-                    state.db_type.eq_ignore_ascii_case("DESI")
+                    (state.db_type.eq_ignore_ascii_case("DESI") || state.db_type.is_empty())
                         && crate::data_interface::watch_scope::admits(state.dbnum)
                         && !floors.contains_key(&state.dbnum)
                 })
@@ -8578,7 +8617,10 @@ mod tests {
             model_sesno_time: Option<String>,
         }
         let mut response = db
-            .query("SELECT model_sesno, model_sesno_time FROM ONLY dbnum_watermark:8000;")
+            .query(
+                "SELECT model_sesno ?: 0 AS model_sesno, model_sesno_time \
+                 FROM ONLY dbnum_watermark:8000;",
+            )
             .await
             .unwrap()
             .check()
@@ -8666,7 +8708,75 @@ mod tests {
         );
     }
 
-    /// D7 幽灵模型水位：水位说追平过，`gen_root` 一行都没有。
+    /// 兼容历史库：属性已经落在 `pe`、模型已经落在投影表，但当时还没有 `gen_root`
+    /// 与模型水位。启动对账按用户约定把两枚库级水位视为同一位置。
+    #[tokio::test]
+    async fn legacy_inst_projection_seeds_the_model_watermark_from_applied() {
+        let db = reconcile_fixture(
+            "legacy_inst_model_watermark",
+            "CREATE pe:24381_1 SET dbnum = 8000, sesno = 26;\
+             CREATE inst_relate:24381_1 SET in = pe:24381_1;\
+             CREATE dbnum_watermark:8000 SET dbnum = 8000, applied_sesno = 26;",
+        )
+        .await;
+
+        assert_eq!(
+            reconcile_model_watermark_on(&db, 8000).await.unwrap(),
+            ModelWatermarkReconcile::SeededLegacyProjection { sesno: 26 }
+        );
+        assert_eq!(stamped_watermark(&db).await, (26, None));
+    }
+
+    #[tokio::test]
+    async fn legacy_tubi_projection_with_dbnum_seeds_the_model_watermark() {
+        let db = reconcile_fixture(
+            "legacy_tubi_model_watermark",
+            "CREATE pe:24381_1 SET dbnum = 8000, sesno = 26;\
+             CREATE tubi_relate:24381_1 SET dbnum = 8000;\
+             CREATE dbnum_watermark:8000 SET dbnum = 8000, applied_sesno = 26;",
+        )
+        .await;
+
+        assert_eq!(
+            reconcile_model_watermark_on(&db, 8000).await.unwrap(),
+            ModelWatermarkReconcile::SeededLegacyProjection { sesno: 26 }
+        );
+        assert_eq!(stamped_watermark(&db).await, (26, None));
+    }
+
+    #[tokio::test]
+    async fn attributes_without_a_model_projection_do_not_seed_model_watermark() {
+        let db = reconcile_fixture(
+            "attributes_only_model_watermark",
+            "CREATE pe:24381_1 SET dbnum = 8000, sesno = 26;\
+             CREATE dbnum_watermark:8000 SET dbnum = 8000, applied_sesno = 26;",
+        )
+        .await;
+
+        assert_eq!(
+            reconcile_model_watermark_on(&db, 8000).await.unwrap(),
+            ModelWatermarkReconcile::Aligned { sesno: 0 }
+        );
+        assert_eq!(stamped_watermark(&db).await, (0, None));
+    }
+
+    #[tokio::test]
+    async fn model_projection_without_attributes_does_not_seed_model_watermark() {
+        let db = reconcile_fixture(
+            "model_only_model_watermark",
+            "CREATE inst_relate:24381_1 SET dbnum = 8000;\
+             CREATE dbnum_watermark:8000 SET dbnum = 8000, applied_sesno = 26;",
+        )
+        .await;
+
+        assert_eq!(
+            reconcile_model_watermark_on(&db, 8000).await.unwrap(),
+            ModelWatermarkReconcile::Aligned { sesno: 0 }
+        );
+        assert_eq!(stamped_watermark(&db).await, (0, None));
+    }
+
+    /// D7 幽灵模型水位：水位说追平过，`gen_root` 与模型投影却都没有。
     ///
     /// 它与「失去支撑」共用同一个下调动作，但**措辞必须分开**：这一种意味着模型面整个
     /// 没了（按需重新生成即可），那一种意味着水位记高了。混成一句，现场就分不出该不该
@@ -10956,9 +11066,9 @@ mod tests {
 
     /// ADR-060 D6/D7：对账必须挂进启动，且覆盖面要包含**没有凭证的库**。
     ///
-    /// 幽灵模型水位（水位说追平过、`gen_root` 一行都没有）恰恰只长在没有凭证的那一堆里
-    /// ——`floors` 是一条 `GROUP BY gen_root`，零行的库根本不会出现在里面。只对
-    /// `floors` 对账，这类现场就永远发现不了，而它的表现是一枚指着不存在的模型的水位。
+    /// 无凭证库包含两类：既无 `gen_root` 也无模型投影的幽灵水位，以及已有属性和模型投影、
+    /// 但历史版本还没有水位追踪的兼容库。`floors` 是一条 `GROUP BY gen_root`，两类都不会
+    /// 出现在里面；只对 `floors` 对账就会同时漏掉清理与兼容初始化。
     #[test]
     fn startup_reconcile_checks_the_model_watermark_including_the_libraries_without_credentials() {
         let body = startup_reconcile_body();
@@ -10974,7 +11084,7 @@ mod tests {
             .expect("二级开窗必须存在");
         assert!(
             call < window,
-            "对账只读 gen_root 与水位行，排在开窗之前，别和选根搅在一起: {body}"
+            "对账只读既有属性、模型投影、gen_root 与水位行，排在开窗之前，别和选根搅在一起: {body}"
         );
     }
 
