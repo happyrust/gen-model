@@ -1729,20 +1729,69 @@ pub(crate) async fn record_startup_init(result: Result<&StartupInitOutcome, &any
     }
 }
 
+/// 本进程最近一次**换代**的观测（`/health.room_build.resident.last_swap`，主计划 §3 P4）。
+///
+/// 只有真换了代的那一轮才记——身份键没变是常路，一轮一条会把这一格刷成噪音。`guard_fired`
+/// 就是 P4 那条护栏：拓扑变了（diff 非空）而这一轮一块面板目标都没落在 diff 上，说明账本
+/// 触发（F-A，`room_structural_trigger.rs`）漏了这一形状。护栏只出声、不标脏（§3 P4 落地记）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct GenerationSwapReport {
+    pub form: String,
+    /// 换到的那份模型的身份键（截断给人看）。
+    pub key: String,
+    /// [`TopologyDiff::summary`]；第一代没有上一代可比时是 `None`。
+    pub diff: Option<String>,
+    /// diff 碰到的面板数（[`TopologyDiff::touched_panels`]）。
+    pub touched_panels: usize,
+    /// 本轮 drain 载到的面板任务里，落在 diff 上的块数。
+    pub matched_targets: usize,
+    /// 本轮 drain 载到的面板任务总数。
+    pub round_targets: usize,
+    pub guard_fired: bool,
+    /// 护栏那一句；或者判不了时的原因（面板页满了，后面还有页）。
+    pub note: Option<String>,
+    pub at: String,
+}
+
+fn generation_swap_slot() -> &'static RwLock<Option<GenerationSwapReport>> {
+    static SWAP: OnceLock<RwLock<Option<GenerationSwapReport>>> = OnceLock::new();
+    SWAP.get_or_init(|| RwLock::new(None))
+}
+
+/// 本进程最近一次换代的观测；还没换过代就是 `None`。
+pub(crate) fn last_generation_swap() -> Option<GenerationSwapReport> {
+    generation_swap_slot()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+pub(crate) fn record_generation_swap(report: GenerationSwapReport) {
+    *generation_swap_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = Some(report);
+}
+
 /// `/health.room_build.resident`（Q20 (a)）：启动结局 + 每一路当前模型的统计，无几何的在册面板
 /// 按库点名，并标出哪些库在监听限定域之外。`is_watched` 由调用方按 `watch_scope` 给——本模块
-/// 只给数，不认识限定域。
+/// 只给数，不认识限定域。P4 之后多一格 `last_swap`（最近一次换代的 diff 摘要 + 护栏响没响）。
 pub(crate) fn resident_health(is_watched: impl Fn(u32) -> bool) -> serde_json::Value {
     let stats = resident_rooms()
         .read()
         .unwrap_or_else(PoisonError::into_inner)
         .stats();
-    resident_health_from(startup_report().as_ref(), &stats, is_watched)
+    resident_health_from(
+        startup_report().as_ref(),
+        last_generation_swap().as_ref(),
+        &stats,
+        is_watched,
+    )
 }
 
 /// [`resident_health`] 的纯函数半截，测试直接喂。
 pub(crate) fn resident_health_from(
     startup: Option<&StartupInitReport>,
+    last_swap: Option<&GenerationSwapReport>,
     stats: &[ResidentStats],
     is_watched: impl Fn(u32) -> bool,
 ) -> serde_json::Value {
@@ -1792,6 +1841,7 @@ pub(crate) fn resident_health_from(
     });
     serde_json::json!({
         "startup": startup,
+        "last_swap": last_swap,
         "models": models,
         "unwatched_missing_geometry_notice": notice,
     })
@@ -3043,9 +3093,14 @@ mod tests {
             at: "2026-09-07T23:59:00+08:00".into(),
         };
 
-        let health = resident_health_from(Some(&report), &stats, |dbnum| dbnum != 24384);
+        let health = resident_health_from(Some(&report), None, &stats, |dbnum| dbnum != 24384);
         assert_eq!(health["startup"]["blocked"], serde_json::Value::Null);
         assert_eq!(health["startup"]["summary"], "[房间初始化] published …");
+        assert_eq!(
+            health["last_swap"],
+            serde_json::Value::Null,
+            "还没换过代：这一格是 null，不是零计数"
+        );
         assert_eq!(health["models"].as_array().unwrap().len(), 1);
         assert_eq!(health["models"][0]["form"], "published");
         assert_eq!(health["models"][0]["missing_panels"], 2);
@@ -3062,7 +3117,7 @@ mod tests {
         );
         assert!(notice.contains("watch_dbnums"), "{notice}");
 
-        let health = resident_health_from(None, &stats, |_| true);
+        let health = resident_health_from(None, None, &stats, |_| true);
         assert_eq!(health["startup"], serde_json::Value::Null);
         assert_eq!(health["models"][0]["missing_geometry"][0]["watched"], true);
         assert_eq!(
@@ -3076,9 +3131,37 @@ mod tests {
             summary: None,
             at: String::new(),
         };
-        let health = resident_health_from(Some(&blocked), &[], |_| true);
+        let health = resident_health_from(Some(&blocked), None, &[], |_| true);
         assert_eq!(health["startup"]["blocked"], "枚举 MDB 设计库失败");
         assert_eq!(health["models"], serde_json::json!([]));
+    }
+
+    /// `/health.room_build.resident.last_swap`（P4）：最近一次换代的 diff 摘要与护栏结论原样带出，
+    /// 且与启动那一格互不覆盖。
+    #[test]
+    fn resident_health_carries_the_last_generation_swap_and_the_guard_verdict() {
+        let swap = GenerationSwapReport {
+            form: "published".into(),
+            key: "abc123".into(),
+            diff: Some("removed=1 recalc=2 renumbered_rooms=0 (panels 0)".into()),
+            touched_panels: 3,
+            matched_targets: 0,
+            round_targets: 4,
+            guard_fired: true,
+            note: Some("账本触发可能漏了".into()),
+            at: "2026-09-08T10:00:00+08:00".into(),
+        };
+        let health = resident_health_from(None, Some(&swap), &[], |_| true);
+        assert_eq!(health["last_swap"]["guard_fired"], true);
+        assert_eq!(health["last_swap"]["touched_panels"], 3);
+        assert_eq!(health["last_swap"]["matched_targets"], 0);
+        assert_eq!(health["last_swap"]["round_targets"], 4);
+        assert_eq!(
+            health["last_swap"]["diff"],
+            "removed=1 recalc=2 renumbered_rooms=0 (panels 0)"
+        );
+        assert_eq!(health["last_swap"]["note"], "账本触发可能漏了");
+        assert_eq!(health["startup"], serde_json::Value::Null);
     }
 
     /// 「无几何按库」报的是**文件**库号，不是面板 refno 的头一段——两套编号：ams7997 里的
@@ -3113,7 +3196,7 @@ mod tests {
         );
 
         // 限定域说的也是文件库号：7997 未监听要点名，8000 监听着不许算进那一句。
-        let health = resident_health_from(None, &[model.stats()], |dbnum| dbnum == 8000);
+        let health = resident_health_from(None, None, &[model.stats()], |dbnum| dbnum == 8000);
         let notice = health["unwatched_missing_geometry_notice"]
             .as_str()
             .expect("7997 未监听");

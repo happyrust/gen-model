@@ -2,6 +2,48 @@
 
 ## 2026-09-08
 
+### 常驻房间模型 P4：启动对比留下的尾巴不再被一轮干净的 drain 洗白；换代 diff 接上护栏与 `/health`
+
+修一个**静默数据错误**加落一条护栏。开关 `room_resident_model` **默认仍关**，关着时每一处走今天的路。
+计划见 `docs/plans/2026-09-07-resident-room-model-plan.md` §3 P4（P4 落地记）。
+
+- **洞（M2）**：写点 ③（`settle_resident_reference`）放行的前提只有「本轮无失败」与「房间表连死信都不剩」，
+  而启动对比（`apply_startup_plan`）里失败或无几何的面板此前**既不入队、也不标脏**——它们不在房间表里，
+  也不产生 drain 失败，两条前提对那一摊**恒真**。于是启动之后任意一轮干净的 drain 都会把参照推进到当前
+  拓扑，而参照的含义是「库里的归属边就是按这份拓扑算出来的」；下次启动的 diff 就把那几块从没算成的面板
+  判成「没变」，陈旧的边**永久留下、且无日志**。这正是写点 ③ 自己的注释声称要防的事，守卫只覆盖了 drain
+  侧、漏了启动对比侧。
+- **修法两条一起做**，它们各自堵的是对方够不着的那一半：
+  - **(a) 没算成的面板折成 `RoomRecalcPanel` durable 目标**（`enqueue_room_panel_recalcs`，走既有入队入口，
+    不在 `room_startup.rs` 里拼 SQL）。四条路一视同仁：删边失败、重算失败、**无几何**那一摊、以及改列失败
+    那间房的面板（改成整间重算，多算不漏算）。入队之后 `room_work_is_drained()` 自动为假，第二条前提真的
+    挡得住，`/health` 现成的房间队列与死信观测也看得见。`dbnum` / `source_end_sesno` **都取 0**，与几何触发
+    那条路一字不差：启动对比不是一次保存窗口（宁可留空不填假值），更要紧的是 drain 与清空判定共用的范围
+    谓词是 `(dbnum?:0) = 0 OR (dbnum?:0) IN [watch_dbnums]`——填真实库号会让未监听库的面板（「无几何」那一
+    摊的主力）入队之后既没人消费也不被看见，等于白入队。
+  - **(b) 进程内闸**：`StartupCompareReport` 多一格 `unsettled`，**缺省是「有尾巴」**，只有 `Unchanged` 零写入
+    与显式全量**写上参照**两处才清成 `None`；写点 ③ 多第三条前提 `startup_compare_tail()`。它堵的是入队本身
+    失败、以及**启动对比压根还没跑**——worker 起在 `run_cli` 的房间段之前，它的空闲轮完全可能先跑一轮干净的
+    drain。重启丢标志不构成漏洞：没有回执 = 拒写，缺省就在保守那一边；而参照没写 → 下次启动同一份 diff →
+    同一摊尾巴 → 闸重新立起。
+- **护栏（M3，P4 本体的一半）**：`ensure_resident_rooms` 不再把 `EnsureOutcome.diff` 丢掉（改回
+  `ResidentRound{model, diff}`）；换代那一轮 diff 非空而本轮面板目标一块都没落在 diff 上 → 限流告警
+  （理由变了或隔 300 s，与 `announce_file_round_holds` 同一条纪律）。三种不出声的形状分开写：diff 为空、
+  有命中、**面板页满**（判据不完整，那是「判不了」不是「没响」）。护栏排在 `loaded == 0` 那道早退之前——
+  一个目标都没有恰恰是最该出声的形状。
+- **只告警、不标脏**（与 P4 原文的有意偏离）：标脏会把下次启动拖进全量重建，而护栏本身还没在真库上验过，
+  误报的代价太大。理由写进了告警文案本身。
+- **`/health.room_build.resident` 多一格 `last_swap`**：`{form, key, diff, touched_panels, matched_targets,
+  round_targets, guard_fired, note, at}`，每次换代都记（不然「护栏没报过」与「压根没换过代」分不开）；
+  `startup_compare` 那一格多 `requeued` / `unsettled` 两项。
+- **源码钉 +5**：写点 ③ 的第三条前提且零 I/O 的闸排在两条查询之前；`diff` 不许再被丢掉；护栏排在空轮早退
+  之前；启动对比四条没算成的路各自收进 `unsettled` 且**收完才入队**；尾巴缺省有、`unsettled = None` 恰两处。
+- 验证：`cargo test --lib` **1849 passed / 0 failed / 118 ignored**（本笔之前 1841，新增 8 条真测）；
+  `cargo check --tests` 通过；四份 .rs `rustfmt --edition 2024 --check` 干净。**未起服务**。写点 ③ 那条闸的
+  **端到端**没测——`settle_resident_reference` / `room_work_is_drained` / `persist_reference` 都钉死在进程级
+  `SUL_DB` 上，`mem://` 喂不进；测到的是判据（纯测）+ 入队真的落成待消费目标（`mem://`）+ 写点 ③ 真的问了
+  这道闸（源码钉），中间那段接线按未证记（07 计划 §7 新增五条）。
+
 ### 常驻房间模型 P2-b：几何侧接常驻模型，三角网经 `MeshCache` 跨代复用，`mem://` 两态逐边门
 
 P2-a 只接了拓扑，几何侧照旧每轮 `load_consumption_panel_index` 查一遍库、每块面板各读一次 `.mesh`
@@ -147,7 +189,8 @@ P2-a 只接了拓扑，几何侧照旧每轮 `load_consumption_panel_index` 查�
 - 验证：`cargo test --lib -- room_startup room_resident room_topology_source startup_room_build_gate_tests handlers`
   **84 passed / 0 failed / 1 ignored**；`cargo test --lib` 全量 **1823 passed / 1 failed / 118 ignored**，那 1 条是
   `room_increment_audit::f_c_idle_round_republishes_file_rounds_settled_by_retries`（F-C 空闲轮重发布的审计钉，
-  钉的是 `batch_worker.rs`，本笔未碰、HEAD 上同红）。`rustfmt --edition 2024 --check` 对 `room_startup.rs` /
+  钉的是 `batch_worker.rs`，本笔未碰、当时 HEAD 上同红；**它已由上面 F-C 那一笔转绿**，2026-09-08 实测全量
+  0 failed）。`rustfmt --edition 2024 --check` 对 `room_startup.rs` /
   `room_resident.rs` / `lib.rs` / `handlers.rs` 干净。**未起服务、未在真库上跑**：方案 §5 S5 的七条真库门
   （三形状逐边相等、`watch_dbnums=[8000]` 改 7997、手删一片分片、读透三条、原地重启两次第二次零写入）一条没跑，
   ADR-010 §9 那道硬门仍按未证记；`apply_startup_plan` 的删 / 重算走的是增量今天同一条路，单测层只钉了纪律与

@@ -715,6 +715,8 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     // 常驻房间模型（`room_resident_model` 开关）：启动初始化的结局 + 每一路当前模型的统计；
     // 无几何的在册面板按库点名，限定域之外的库单独成一句（第 5 轮 Q20 (a)）。哪些库在
     // 限定域里由这里对 `watch_scope` 说——房间文件自己不认识它。进程内读数，不套预算。
+    // P4 之后还多一格 `last_swap`：最近一次换代的 diff 摘要与护栏结论（拓扑变了而这一轮
+    // 一块面板目标都没碰到它 = 账本触发漏了，只出声不标脏）。
     if let Value::Object(map) = &mut room_build {
         let mut resident = crate::fast_model::room_resident::resident_health(
             crate::data_interface::watch_scope::admits,

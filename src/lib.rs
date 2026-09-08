@@ -404,15 +404,16 @@ pub(crate) fn vacuous_room_build_reason(state: SpatialTreeState) -> Option<Strin
 }
 
 /// 环境变量名：本次启动显式要求跑一次全量房间重建（`1/true/yes/on`）。常驻房间模型开着时
-/// 启动对比接管了房间段，全量降为五条显式入口，这是运维那一条（共识 d-42，
+/// 启动对比接管了房间段，全量降为六条显式入口，这是运维那一条（共识 d-42，
 /// `docs/plans/2026-09-08-room-startup-compare-and-apply-plan.md` §4.3）。开关关着时它没有意义
 /// ——那条路每次启动本来就按凭据对账决定跑不跑。
 pub const ROOM_FULL_REBUILD_ENV: &str = "AIOS_ROOM_FULL_REBUILD";
 
 /// 常驻房间模型开着时的房间段（d-42 §4.2 / §4.6）：启动对比接管——参照摘要 == 现状零写入；
-/// 变了只对变了的面板删 / 重算 / 改列；全量降为五条显式入口（无参照 / 同键不等 / 参照不可读 /
-/// 持久 `rebuild_required` / [`ROOM_FULL_REBUILD_ENV`]），由 `room_startup::startup_room_reconcile`
-/// 判出、交回这里跑。
+/// 变了只对变了的面板删 / 重算 / 改列；全量降为**六**条显式入口（无参照 / **读参照失败** /
+/// 同键不等 / 参照不可读 / 持久 `rebuild_required` / [`ROOM_FULL_REBUILD_ENV`]），由
+/// `room_startup::startup_room_reconcile` 判出、交回这里跑。「读参照失败」与「无参照」同判
+/// （多跑一次全量远好过让一次查询故障静默变成房间永不收敛），方案稿写的五条漏了它。
 ///
 /// 门：止血口 `AIOS_SKIP_STARTUP_ROOM_BUILD` 与空树平凡两道在 `startup_room_reconcile` 里照旧最强
 /// （对比与全量一起跳）；`startup_autorun` **只门全量那一臂**——对比是定向的，成本随变更量走，

@@ -596,23 +596,28 @@ async fn enqueue_missing_panel_repairs(
 
 /// Persist the exact model work before advancing `applied_sesno`.
 pub async fn enqueue_plan(plan: &ModelUpdatePlan) -> anyhow::Result<()> {
+    enqueue_plan_on(&SUL_DB, plan).await
+}
+
+/// [`enqueue_plan`] 的显式 `db` 版，`mem://` 门直接喂（入队的行形与生产逐字同源）。
+pub(crate) async fn enqueue_plan_on(
+    db: &Surreal<Any>,
+    plan: &ModelUpdatePlan,
+) -> anyhow::Result<()> {
     for chunk in plan.work_items.chunks(QUERY_CHUNK) {
-        SUL_DB
-            .query(
-                chunk
-                    .iter()
-                    // 这条路只入队工作项，手上没有窗口右端的时刻——来源时刻由收口
-                    // 事务那一份 upsert 补（同一行、同一条单调条件，不会互相覆盖）。
-                    .map(|item| render_upsert(item, None))
-                    .collect::<Vec<_>>()
-                    .join("\n"),
-            )
-            .await
-            .map_err(|error| anyhow::anyhow!("persist model work batch failed: {error}"))?
-            .check()
-            .map_err(|error| {
-                anyhow::anyhow!("persist model work batch statement failed: {error}")
-            })?;
+        db.query(
+            chunk
+                .iter()
+                // 这条路只入队工作项，手上没有窗口右端的时刻——来源时刻由收口
+                // 事务那一份 upsert 补（同一行、同一条单调条件，不会互相覆盖）。
+                .map(|item| render_upsert(item, None))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!("persist model work batch failed: {error}"))?
+        .check()
+        .map_err(|error| anyhow::anyhow!("persist model work batch statement failed: {error}"))?;
     }
     Ok(())
 }
@@ -720,6 +725,60 @@ pub async fn enqueue_room_recalc(changes: &[AabbChange]) -> anyhow::Result<()> {
         ..Default::default()
     })
     .await
+}
+
+/// 启动对比里**没算成**的面板 → `RoomRecalcPanel` durable 目标（常驻房间模型 M2；
+/// 调用方是 `room_startup::apply_startup_plan`）。返回入队了几块。
+///
+/// 为什么要有这条路：写点 ③（[`settle_resident_reference`]）放行的前提只有「本轮没失败」
+/// 与「房间表里连死信都不剩」。启动对比里失败或无几何的面板此前**既不入队、也不标脏**——
+/// 它们不在房间表里，也不产生 drain 失败，于是那两条前提恒真，启动之后任意一轮干净的 drain
+/// 都会把参照推进到当前拓扑，而参照的含义是「库里的归属边就是按这份拓扑算出来的」。下次启动
+/// `plan_startup` 拿它做 diff，就把那几块从没算成的面板判成「没变」，陈旧的边永久留下且无日志。
+///
+/// 形状与几何触发那条路（[`room_recalc_item`]）一字不差，特别是 **`dbnum` / `source_end_sesno`
+/// 都取 0**，两条理由：
+///
+/// 1. 启动对比不是一次保存窗口，手上没有「来源库 + 来源会话」——照 [`room_recalc_item`] 的
+///    注释，宁可留空也不填一个看着像真的假值（行 id 本来就不带 dbnum，寻址只认目标）。
+/// 2. **正确性**：drain 与 [`room_work_is_drained`] 共用 [`render_automatic_scope_filter`]
+///    的范围谓词 `(dbnum?:0) = 0 OR (dbnum?:0) IN [watch_dbnums]`。填一个真实库号的话，
+///    未监听库的面板——恰恰是「无几何」那一摊的主力（Q20 (a)）——入队之后既没人消费，
+///    也不被清空判定看见：行在库里躺着，参照照写不误，等于白入队。0 让它对两侧都可见。
+pub(crate) async fn enqueue_room_panel_recalcs(
+    panels: &BTreeSet<RefnoEnum>,
+) -> anyhow::Result<usize> {
+    enqueue_room_panel_recalcs_on(&SUL_DB, panels).await
+}
+
+/// [`enqueue_room_panel_recalcs`] 的显式 `db` 版，`mem://` 门直接喂。
+pub(crate) async fn enqueue_room_panel_recalcs_on(
+    db: &Surreal<Any>,
+    panels: &BTreeSet<RefnoEnum>,
+) -> anyhow::Result<usize> {
+    let items = room_panel_recalc_items(panels);
+    if items.is_empty() {
+        return Ok(0);
+    }
+    let count = items.len();
+    enqueue_plan_on(
+        db,
+        &ModelUpdatePlan {
+            work_items: items,
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(count)
+}
+
+/// 纯函数：一摊面板 → `RoomRecalcPanel` 工作项。与
+/// `window_root_plan::append_room_structural_work` 折面板目标的落法同形，只是不认领来源。
+pub(crate) fn room_panel_recalc_items(panels: &BTreeSet<RefnoEnum>) -> Vec<ModelWorkItem> {
+    panels
+        .iter()
+        .map(|panel| room_recalc_item_with_source(*panel, "PANE", 0, 0))
+        .collect()
 }
 
 /// Refresh targets omitted by a derived-geometry root's final node set, then force one
@@ -6354,7 +6413,8 @@ async fn drain_rooms_selected(
     // 读任务之前**。身份键没变是常路（一次探针查询，直接复用上一轮那份 `Arc`）；键变了才
     // 整份重建。换代、读任务、写归属边落在同一段串行区里，算到一半模型被换掉就是拿旧拓扑
     // 写新边，而且两边都不报错。开关关着时是 `None`，下面每一处都走今天的读法。
-    let resident = ensure_resident_rooms(db_option).await?;
+    let round = ensure_resident_rooms(db_option).await?;
+    let resident = round.as_ref().map(|round| round.model.clone());
     // Panels are always complete-before-elements. The scoped path selects exact
     // record ids; element records themselves are not accumulated across pages.
     //
@@ -6373,6 +6433,15 @@ async fn drain_rooms_selected(
     // 让本该被吸收的元素任务各自先清后写一遍，下一轮那块面板再整间重写一遍。两条
     // 分支共用判定与边 id，收敛结果一样，但白跑一遍。
     let panel_page_full = scope.is_none() && panels.len() >= ROOM_PANEL_PAGE_SIZE;
+    // 护栏（主计划 §3 P4）：换代那一轮拓扑真的变了（diff 非空），而这一轮的面板目标里一块
+    // 都没落在 diff 上 → 账本触发（F-A，`room_structural_trigger.rs`）漏了这一形状。常驻模型的
+    // diff **不产目标**（原则 3），它只是唯一能出声的第二道。放在 `loaded == 0` 那道早退
+    // **之前**：一个目标都没有恰恰是最该出声的形状。
+    if let Some(round) = round.as_ref()
+        && let Some(diff) = round.diff.as_ref()
+    {
+        report_generation_swap(&round.model, diff, &panels, panel_page_full);
+    }
     let global_elements = if scope.is_none() && !panel_page_full {
         load_room_jobs(ROOM_ELEMENT_ACTION_FILTER, Some(ROOM_DRAIN_PAGE_SIZE)).await?
     } else {
@@ -6497,6 +6566,15 @@ async fn drain_rooms_selected(
     Ok(report)
 }
 
+/// 一次换代交回来的东西：这一轮归属要用的那份模型，外加**真换了代**那一次与上一代的拓扑差。
+///
+/// `diff` 是 P4 护栏唯一的输入（`EnsureOutcome.diff`）。身份键没变的常路是 `None`——那时
+/// 拓扑压根没动，没有护栏可言；第一代（进程里第一次建模）也是 `None`，没有上一代可比。
+struct ResidentRound {
+    model: std::sync::Arc<crate::fast_model::room_resident::ResidentRoomModel>,
+    diff: Option<crate::fast_model::room_resident::TopologyDiff>,
+}
+
 /// 开关开着时把常驻房间模型对齐到此刻的文件版本，交回这一轮归属要用的那份。
 ///
 /// **调用方必须已持 `lock_spatial_serial`**（源码钉
@@ -6505,9 +6583,12 @@ async fn drain_rooms_selected(
 /// `None` 有三种，都回到今天的读法（每轮各查一次拓扑与几何）：开关关着、这个构建没有
 /// 房间层级、摄入侧还没有发布清单（升级基线未建）。建不起来才是 `Err`——那时按原则 2
 /// 止步，不拿半份拓扑改写存量边。
+///
+/// `EnsureOutcome.diff` 此前在这里被直接丢掉；P4 之后它随 [`ResidentRound`] 一起交出去，
+/// 护栏拿它对本轮的面板目标。
 async fn ensure_resident_rooms(
     db_option: &aios_core::options::DbOption,
-) -> anyhow::Result<Option<std::sync::Arc<crate::fast_model::room_resident::ResidentRoomModel>>> {
+) -> anyhow::Result<Option<ResidentRound>> {
     if !crate::options::room_resident_model() {
         return Ok(None);
     }
@@ -6526,16 +6607,171 @@ async fn ensure_resident_rooms(
         match_room_fn,
     )
     .await?;
-    Ok(outcome.map(|outcome| outcome.model))
+    Ok(outcome.map(|outcome| ResidentRound {
+        model: outcome.model,
+        diff: outcome.diff,
+    }))
 }
 
-/// 写点 ③（常驻房间模型 S4）：一轮 drain 全成、且房间表里一个活口都不剩时，把这一份
-/// 拓扑钉成参照。
+/// 护栏与「参照被启动对比的尾巴挡住」两句话的出声间隔。与
+/// `batch_worker::MODEL_DEAD_LETTER_REPEAT_SECS` 同一个数、同一条纪律：空闲轮每 30 秒来
+/// 一趟，每趟复述同一句就是把日志刷成噪音；可完全不说又正是这类问题最难查的地方。
+const ROOM_ANNOUNCE_REPEAT_SECS: i64 = 300;
+
+/// 限流判据（纯函数）：理由变了、或者距上次出声已经到期。
+fn announcement_is_due(
+    last: &(Option<String>, i64),
+    fingerprint: &str,
+    now: i64,
+    repeat_secs: i64,
+) -> bool {
+    last.0.as_deref() != Some(fingerprint) || now.saturating_sub(last.1) >= repeat_secs
+}
+
+/// 取一次出声名额：够格就把 `(理由, 时刻)` 写回槽位并回 `true`。
+fn claim_announcement(slot: &Mutex<(Option<String>, i64)>, fingerprint: &str) -> bool {
+    let now = chrono::Local::now().timestamp();
+    let mut last = slot
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if !announcement_is_due(&last, fingerprint, now, ROOM_ANNOUNCE_REPEAT_SECS) {
+        return false;
+    }
+    *last = (Some(fingerprint.to_string()), now);
+    true
+}
+
+static RESIDENT_GUARD_ANNOUNCEMENT: Mutex<(Option<String>, i64)> = Mutex::new((None, 0));
+static REFERENCE_TAIL_ANNOUNCEMENT: Mutex<(Option<String>, i64)> = Mutex::new((None, 0));
+
+/// P4 护栏的判据（纯函数）：这一轮的面板目标碰没碰到 diff。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SwapObservation {
+    /// diff 碰到的面板数（[`TopologyDiff::touched_panels`]）。
+    touched: usize,
+    /// 本轮面板目标里落在 diff 上的块数。
+    matched: usize,
+    /// 护栏响不响。
+    fired: bool,
+    /// 响了是那一句；判不了时是「为什么判不了」；一切正常是 `None`。
+    note: Option<String>,
+}
+
+/// 拓扑变了而这一轮一块面板目标都没碰到它 → 账本触发漏了（主计划 §3 P4，Q8 (a)）。
 ///
-/// 参照的含义是「库里的归属边就是按这份拓扑算出来的」，下次启动拿它做增量对比。所以
-/// 两个前提缺一不可：本轮**没有失败**，以及此刻**没有任何未消费的房间目标**（含死信）。
-/// 少了后一条就可能有一块面板的边还停在上一份拓扑上，而参照却说它是新的——下次启动
-/// 的 diff 会把这块面板算成「没变」，那条陈旧的边就永久留下来了，静默且无日志。
+/// 两种**不出声**的形状要分清，别把它们折进「护栏没响」一句里：
+///
+/// * `diff` 为空——换了代但拓扑没动（某个文件的版本前进了、房间与面板没变）。本来就无事。
+/// * 面板页满了（[`ROOM_PANEL_PAGE_SIZE`]）——后面还有页，本轮没命中说明不了任何事。
+///   判不了就不判（判据不完整时出声就是误报），但把原因写进 `/health` 那一格。
+fn observe_generation_swap(
+    diff: &crate::fast_model::room_resident::TopologyDiff,
+    round_targets: &BTreeSet<RefnoEnum>,
+    panel_page_full: bool,
+) -> SwapObservation {
+    if diff.is_empty() {
+        return SwapObservation {
+            touched: 0,
+            matched: 0,
+            fired: false,
+            note: None,
+        };
+    }
+    let touched = diff.touched_panels();
+    let matched = round_targets
+        .iter()
+        .filter(|panel| touched.contains(panel))
+        .count();
+    if matched > 0 {
+        return SwapObservation {
+            touched: touched.len(),
+            matched,
+            fired: false,
+            note: None,
+        };
+    }
+    if panel_page_full {
+        return SwapObservation {
+            touched: touched.len(),
+            matched: 0,
+            fired: false,
+            note: Some(format!(
+                "本轮面板页已满（{ROOM_PANEL_PAGE_SIZE} 块，后面还有页），命中判不了，本次不出声"
+            )),
+        };
+    }
+    let sample: Vec<String> = touched.iter().take(5).map(RefnoEnum::to_pdms_str).collect();
+    SwapObservation {
+        touched: touched.len(),
+        matched: 0,
+        fired: true,
+        note: Some(format!(
+            "常驻拓扑换代后 {}，而本轮 {} 个面板目标里一块都不在这 {} 块受影响的面板上\
+             （例：{}{}）——账本结构触发（F-A，room_structural_trigger.rs）可能漏了这一形状。\
+             本笔只出声、不标脏：标脏会把下次启动拖进全量重建，而护栏本身还没在真库上验过。\
+             下次启动的对比会把这些面板算进 diff",
+            diff.summary(),
+            round_targets.len(),
+            touched.len(),
+            sample.join(", "),
+            if touched.len() > sample.len() {
+                " …"
+            } else {
+                ""
+            }
+        )),
+    }
+}
+
+/// 换代那一轮的出声与观测：判据是 [`observe_generation_swap`]，出声限流，结论进
+/// `/health.room_build.resident.last_swap`。
+fn report_generation_swap(
+    model: &crate::fast_model::room_resident::ResidentRoomModel,
+    diff: &crate::fast_model::room_resident::TopologyDiff,
+    panels: &[PendingModelWork],
+    panel_page_full: bool,
+) {
+    let round_targets: BTreeSet<RefnoEnum> = panels
+        .iter()
+        .filter_map(|job| RefU64::from_str(&job.target_refno).ok())
+        .map(RefnoEnum::from)
+        .collect();
+    let observation = observe_generation_swap(diff, &round_targets, panel_page_full);
+    if observation.fired
+        && let Some(line) = observation.note.as_deref()
+        && claim_announcement(&RESIDENT_GUARD_ANNOUNCEMENT, &diff.summary())
+    {
+        println!("[常驻房间模型护栏] {line}");
+    }
+    crate::fast_model::room_resident::record_generation_swap(
+        crate::fast_model::room_resident::GenerationSwapReport {
+            form: model.manifest.form.as_str().to_string(),
+            key: model.manifest.key.chars().take(12).collect(),
+            diff: Some(diff.summary()),
+            touched_panels: observation.touched,
+            matched_targets: observation.matched,
+            round_targets: round_targets.len(),
+            guard_fired: observation.fired,
+            note: observation.note,
+            at: chrono::Local::now().to_rfc3339(),
+        },
+    );
+}
+
+/// 写点 ③（常驻房间模型 S4）：一轮 drain 全成、房间表里一个活口都不剩、且启动对比没留
+/// 尾巴时，把这一份拓扑钉成参照。
+///
+/// 参照的含义是「库里的归属边就是按这份拓扑算出来的」，下次启动拿它做增量对比。三条前提
+/// 缺一不可：
+///
+/// 1. 本轮**没有失败**；
+/// 2. 此刻**没有任何未消费的房间目标**（含死信）——少了它就可能有一块面板的边还停在上一份
+///    拓扑上，而参照却说它是新的，下次启动的 diff 把这块面板算成「没变」，陈旧的边永久留下；
+/// 3. **本进程的启动对比没留下尾巴**（M2）。前两条都只看得见「房间表」与「本轮」：启动对比
+///    里失败或无几何的面板此前既不入队、也不标脏，于是两条前提恒真，任意一轮干净的 drain
+///    都会把参照推进到当前拓扑。现在那一摊会被 `apply_startup_plan` 折成 `RoomRecalcPanel`
+///    （第 2 条就挡得住），这一条是它的**互补**：入队本身失败、或者行被范围谓词滤掉、
+///    又或者对比压根还没跑（worker 起在房间段之前）时，只剩它。
 ///
 /// 写失败只影响下次启动（退回 `NoReference` → 全量一次，多算不漏算），所以只出声、
 /// 不让本轮 drain 失败。
@@ -6544,6 +6780,12 @@ async fn settle_resident_reference(
     report: &DrainReport,
 ) {
     if !report.failures.is_empty() {
+        return;
+    }
+    if let Some(tail) = crate::fast_model::room_startup::startup_compare_tail() {
+        if claim_announcement(&REFERENCE_TAIL_ANNOUNCEMENT, &tail) {
+            println!("[房间参照] 参照不写——启动对比这一轮留了尾巴：{tail}");
+        }
         return;
     }
     match room_work_is_drained().await {
@@ -7674,13 +7916,278 @@ mod tests {
             ensure.contains("crate::options::data_face()"),
             "取哪一路模型由数据面决定，不许在这里点名形态: {ensure}"
         );
+        // P4：`EnsureOutcome.diff` 是护栏唯一的输入，不许在这里丢掉（此前这一行是
+        // `Ok(outcome.map(|outcome| outcome.model))`，diff 直接落地）。
+        assert!(
+            ensure.contains("diff: outcome.diff"),
+            "换代的 diff 必须交给调用方（P4 护栏读它）: {ensure}"
+        );
+        assert!(
+            body.contains("report_generation_swap(&round.model, diff, &panels, panel_page_full)"),
+            "护栏必须在这一轮的面板任务上判: {body}"
+        );
+        let guard_at = body
+            .find("report_generation_swap(")
+            .expect("护栏必须在 drain 里调");
+        let early_return_at = body
+            .find("if loaded == 0 && scoped_element_keys.is_empty()")
+            .expect("空轮早退必须在");
+        assert!(
+            guard_at < early_return_at,
+            "一个目标都没有恰恰最该出声：护栏排在空轮早退之前: {body}"
+        );
     }
 
-    /// 写点 ③（S4）：一轮 drain 之后写参照，要同时满足「本轮无失败」与「房间表清空」。
+    /// P4 护栏的判据（主计划 §3 P4）：拓扑变了而这一轮一块面板目标都没碰到它 → 出声。
     ///
-    /// 少了后一条，参照就会在还有目标没消费时宣称「边 == 这份拓扑」——下次启动的 diff
+    /// 三条边界一并钉住：diff 为空（换了代但拓扑没动）不出声；有命中不出声；面板页满时
+    /// 判据不完整，不出声但要留下原因——那不是「护栏没响」，是「判不了」。
+    #[test]
+    fn the_guard_only_fires_when_a_real_topology_change_meets_zero_panel_targets() {
+        use crate::fast_model::room_resident::TopologyDiff;
+
+        let panel = |id: u32| RefnoEnum::from(RefU64::from_two_nums(24384, id));
+        let diff = TopologyDiff {
+            recalc_panels: BTreeSet::from([panel(7), panel(8)]),
+            ..Default::default()
+        };
+
+        let quiet = observe_generation_swap(&TopologyDiff::default(), &BTreeSet::new(), false);
+        assert_eq!(
+            quiet,
+            SwapObservation {
+                touched: 0,
+                matched: 0,
+                fired: false,
+                note: None
+            },
+            "换了代但拓扑没动：本来就无事"
+        );
+
+        let hit = observe_generation_swap(&diff, &BTreeSet::from([panel(8), panel(99)]), false);
+        assert_eq!((hit.touched, hit.matched, hit.fired), (2, 1, false));
+        assert_eq!(hit.note, None, "有命中就是账本触发干了活");
+
+        let missed = observe_generation_swap(&diff, &BTreeSet::from([panel(99)]), false);
+        assert_eq!((missed.touched, missed.matched, missed.fired), (2, 0, true));
+        let line = missed.note.expect("响了要有那一句");
+        assert!(line.contains("recalc=2"), "{line}");
+        assert!(
+            line.contains("24384/7") && line.contains("24384/8"),
+            "{line}"
+        );
+        assert!(line.contains("F-A"), "护栏要点名它抓的是谁漏了: {line}");
+        assert!(
+            line.contains("不标脏"),
+            "只出声不标脏要写在那一句里: {line}"
+        );
+
+        let empty_round = observe_generation_swap(&diff, &BTreeSet::new(), false);
+        assert!(
+            empty_round.fired,
+            "一个面板目标都没有正是护栏要抓的形状: {empty_round:?}"
+        );
+
+        let full_page = observe_generation_swap(&diff, &BTreeSet::from([panel(99)]), true);
+        assert!(
+            !full_page.fired,
+            "面板页满了后面还有页，命中判不了：判不了就不判"
+        );
+        assert!(
+            full_page
+                .note
+                .expect("判不了也要写清为什么")
+                .contains("判不了"),
+            "「判不了」不等于「护栏没响」，两句话不合成一句"
+        );
+    }
+
+    /// 限流（与 `batch_worker` 的两处同一条纪律）：理由变了立刻说；同一句话没到期就闭嘴；
+    /// 到期再说一次。
+    #[test]
+    fn the_guard_announcement_is_throttled_by_reason_and_by_clock() {
+        let mut slot = (None, 0i64);
+        assert!(
+            announcement_is_due(&slot, "removed=1", 1_000, ROOM_ANNOUNCE_REPEAT_SECS),
+            "第一次总要说"
+        );
+        slot = (Some("removed=1".to_string()), 1_000);
+        assert!(
+            !announcement_is_due(&slot, "removed=1", 1_299, ROOM_ANNOUNCE_REPEAT_SECS),
+            "同一句话、没到期：闭嘴"
+        );
+        assert!(
+            announcement_is_due(&slot, "removed=2", 1_001, ROOM_ANNOUNCE_REPEAT_SECS),
+            "理由变了：立刻说，不等表"
+        );
+        assert!(
+            announcement_is_due(&slot, "removed=1", 1_300, ROOM_ANNOUNCE_REPEAT_SECS),
+            "同一句话到期了：再说一次"
+        );
+        // 槽位版走的是同一个判据，只是把时刻记回去。
+        static SLOT: Mutex<(Option<String>, i64)> = Mutex::new((None, 0));
+        assert!(claim_announcement(&SLOT, "第一次"));
+        assert!(
+            !claim_announcement(&SLOT, "第一次"),
+            "同一句立刻复述要被吃掉"
+        );
+        assert!(claim_announcement(&SLOT, "换了个理由"));
+    }
+
+    /// M2 (a)：启动对比没算成的面板折成 `RoomRecalcPanel`，形状与几何触发那条路一字不差，
+    /// 特别是 `dbnum` / `source_end_sesno` 都不认领。
+    ///
+    /// `dbnum = 0` 不是偷懒：drain 与 [`room_work_is_drained`] 共用的范围谓词是
+    /// `(dbnum?:0) = 0 OR (dbnum?:0) IN [watch_dbnums]`，填真实库号会让未监听库的面板
+    /// （「无几何」那一摊的主力）入队之后既没人消费、也不被清空判定看见。
+    #[test]
+    fn startup_repair_targets_are_room_panel_recalcs_that_claim_no_source_database() {
+        let panel = |id: u32| RefnoEnum::from(RefU64::from_two_nums(24384, id));
+        assert!(room_panel_recalc_items(&BTreeSet::new()).is_empty());
+
+        let items = room_panel_recalc_items(&BTreeSet::from([panel(8), panel(7)]));
+        assert_eq!(items.len(), 2);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.target_refno.as_str())
+                .collect::<Vec<_>>(),
+            vec!["24384/7", "24384/8"],
+            "BTreeSet 定序，入队幂等"
+        );
+        for item in &items {
+            assert_eq!(item.action, ModelWorkAction::RoomRecalcPanel);
+            assert_eq!(item.noun, "PANE");
+            assert_eq!(item.db_type, "DESI");
+            assert_eq!(
+                (item.dbnum, item.source_end_sesno),
+                (0, 0),
+                "启动对比不是一次保存窗口，来源库与会话都不认领"
+            );
+        }
+        // 与几何触发那条路同源：同一个目标渲染出同一行 id，重复入队只是复活它。
+        assert_eq!(
+            record_id(&items[0]),
+            record_id(&room_recalc_item(&AabbChange {
+                refno: panel(7),
+                noun: "PANE".into(),
+            }))
+        );
+    }
+
+    /// M2 (a) 的 `mem://` 门：入队的行**真的**落成房间表里一个待消费目标，且被
+    /// [`render_has_pending_work_query`]（`room_work_is_drained` 的两条查询）看见——
+    /// 这就是写点 ③ 第二条前提被挡住的机制。空集不写任何一行。
+    #[tokio::test]
+    async fn requeued_startup_panels_are_visible_to_the_room_queue_drained_probe() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("startup_repair_targets")
+            .await
+            .expect("select fixture db");
+
+        async fn room_queue_is_drained(db: &Surreal<Any>) -> bool {
+            for operator in ["<", ">="] {
+                let mut response = db
+                    .query(render_has_pending_work_query(
+                        ROOM_ACTION_FILTER,
+                        operator,
+                        &[],
+                        &[],
+                    ))
+                    .await
+                    .expect("probe runs")
+                    .check()
+                    .expect("probe checks");
+                if response
+                    .take::<Option<bool>>(0)
+                    .expect("probe decodes")
+                    .unwrap_or(true)
+                {
+                    return false;
+                }
+            }
+            true
+        }
+
+        assert!(room_queue_is_drained(&db).await, "空表 = 已清空");
+        assert_eq!(
+            enqueue_room_panel_recalcs_on(&db, &BTreeSet::new())
+                .await
+                .expect("空集不写库"),
+            0
+        );
+        assert!(room_queue_is_drained(&db).await, "空集之后还是空表");
+
+        let panel = RefnoEnum::from(RefU64::from_two_nums(24384, 7));
+        assert_eq!(
+            enqueue_room_panel_recalcs_on(&db, &BTreeSet::from([panel]))
+                .await
+                .expect("入队"),
+            1
+        );
+        assert!(
+            !room_queue_is_drained(&db).await,
+            "没算成的面板在队列里 = 写点 ③ 的第二条前提为假"
+        );
+
+        let mut rows = db
+            .query(format!(
+                "SELECT VALUE {{ status: status, action: action, dbnum: dbnum?:0, \
+                 attempts: attempts?:0, target_refno: target_refno }} FROM {TABLE};"
+            ))
+            .await
+            .expect("read back")
+            .check()
+            .expect("read back checks");
+        let rows: Vec<serde_json::Value> = rows.take(0).expect("decode rows");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["status"], "pending", "{rows:?}");
+        assert_eq!(rows[0]["action"], "room_recalc_panel", "{rows:?}");
+        assert_eq!(rows[0]["dbnum"], 0, "{rows:?}");
+        assert_eq!(rows[0]["attempts"], 0, "{rows:?}");
+        assert_eq!(rows[0]["target_refno"], "24384/7", "{rows:?}");
+
+        // 死信也算没消费：撞满 MAX_ATTEMPTS 之后队列依然「没清空」。
+        db.query(format!(
+            "UPDATE {TABLE} SET status = 'failed', attempts = {MAX_ATTEMPTS};"
+        ))
+        .await
+        .expect("bury")
+        .check()
+        .expect("bury checks");
+        assert!(
+            !room_queue_is_drained(&db).await,
+            "死信同样是「这个目标没算成」"
+        );
+
+        // 再入队一次是幂等的：同一个目标同一行，只是复活它。
+        assert_eq!(
+            enqueue_room_panel_recalcs_on(&db, &BTreeSet::from([panel]))
+                .await
+                .expect("重复入队"),
+            1
+        );
+        let mut count = db
+            .query(format!(
+                "RETURN array::len((SELECT VALUE id FROM {TABLE}));"
+            ))
+            .await
+            .expect("count")
+            .check()
+            .expect("count checks");
+        assert_eq!(count.take::<Option<i64>>(0).expect("decode"), Some(1));
+    }
+
+    /// 写点 ③（S4 + M2）：一轮 drain 之后写参照，三条前提缺一不可——「本轮无失败」、
+    /// 「房间表清空」、「启动对比没留尾巴」。
+    ///
+    /// 少了第二条，参照就会在还有目标没消费时宣称「边 == 这份拓扑」——下次启动的 diff
     /// 把那块面板算成没变，陈旧的边永久留下，静默且无日志。死信也算没消费：撞满
-    /// `MAX_ATTEMPTS` 不会让那条边变正确。
+    /// `MAX_ATTEMPTS` 不会让那条边变正确。少了第三条，前两条对**启动对比**留下的那一摊
+    /// 恒真（那些面板既不在房间表里、也不产生本轮失败），洞照旧。
     #[test]
     fn the_third_reference_write_needs_a_clean_round_and_an_empty_room_queue() {
         let source = include_str!("model_update_pending.rs");
@@ -7713,6 +8220,16 @@ mod tests {
         assert!(
             settle.contains("room_work_is_drained()"),
             "还有未消费的房间目标就不许推进参照: {settle}"
+        );
+        let tail_at = settle
+            .find("room_startup::startup_compare_tail()")
+            .expect("启动对比留了尾巴就不许推进参照");
+        let drained_at = settle
+            .find("room_work_is_drained().await")
+            .expect("清空判定必须在");
+        assert!(
+            tail_at < drained_at,
+            "进程内那道闸是零 I/O 的，排在两条查询之前: {settle}"
         );
 
         let drained = source

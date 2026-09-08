@@ -83,6 +83,12 @@ pub(crate) struct StartupApplyOutcome {
     pub no_geometry: BTreeMap<u32, Vec<RefnoEnum>>,
     /// 逐块 / 逐间失败（覆盖率闸门、网格、写库）。边不动。
     pub failures: Vec<String>,
+    /// **这一轮没能按新拓扑算过的面板**——无几何的、删失败的、重算失败的、改列失败那间房里
+    /// 的面板，一视同仁（M2）：它们的边与新拓扑不一致，都要有 durable 的落点。
+    /// [`apply_startup_plan`] 把这一摊入队成 `RoomRecalcPanel`。
+    pub unsettled: BTreeSet<RefnoEnum>,
+    /// 上面那一摊真的入队成功了几块（入队失败时是 0，理由进 `failures`）。
+    pub requeued: usize,
     pub renumbered_rooms: usize,
     pub renumbered_panels: usize,
     pub elapsed_ms: u128,
@@ -125,14 +131,24 @@ impl StartupApplyOutcome {
         Some(parts.join("；"))
     }
 
-    /// 回执那一段：`删 N / 重算 M（成功 a · 无几何 b · 失败 c）/ 改列 K 间 P 块`。
+    /// 回执那一段：`删 N / 重算 M（成功 a · 无几何 b · 失败 c）/ 改列 K 间 P 块`；有尾巴时
+    /// 末尾多一句「已入队重试 n 块」。
     pub(crate) fn summary(&self) -> String {
         let recalc_failed = self
             .planned
             .recalc
             .saturating_sub(self.recalculated + self.no_geometry_count());
+        let requeued = if self.unsettled.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " / 没算成的 {} 块已入队 {} 块 RoomRecalcPanel",
+                self.unsettled.len(),
+                self.requeued
+            )
+        };
         format!(
-            "删 {}/{} / 重算 {}（成功 {} · 无几何 {} · 失败 {}）/ 改列 {}/{} 间 {}/{} 块",
+            "删 {}/{} / 重算 {}（成功 {} · 无几何 {} · 失败 {}）/ 改列 {}/{} 间 {}/{} 块{requeued}",
             self.removed,
             self.planned.removed,
             self.planned.recalc,
@@ -185,6 +201,13 @@ pub(crate) fn split_recalc_by_geometry(
 /// 3. 改列（`renumbered_rooms`）：`render_renumber_statements` 一间房一个事务，边 id 不动。
 ///
 /// 顺序删 → 重算 → 改列只为日志好读；三类按面板 / 房间分键、互不重叠，换序不影响结果。
+///
+/// **没算成的那一摊入队**（M2）：三类里失败的、以及无几何那一摊，收进 `unsettled` 并折成
+/// `RoomRecalcPanel` durable 目标（[`enqueue_room_panel_recalcs`]）。理由见那个函数的注释——
+/// 一句话：不入队的话它们既不在房间表里、也不产生 drain 失败，写点 ③ 的两条前提于是**恒真**，
+/// 启动之后任意一轮干净的 drain 都会把参照推进到当前拓扑，那几条陈旧的边就永久留下且无日志。
+///
+/// [`enqueue_room_panel_recalcs`]: crate::data_interface::model_update_pending::enqueue_room_panel_recalcs
 pub(crate) async fn apply_startup_plan(
     db_option: &DbOption,
     model: &ResidentRoomModel,
@@ -202,21 +225,32 @@ pub(crate) async fn apply_startup_plan(
             .await
         {
             Ok(_) => outcome.removed += 1,
-            Err(error) => outcome
-                .failures
-                .push(format!("{panel} 清空归属失败: {error:#}")),
+            Err(error) => {
+                outcome
+                    .failures
+                    .push(format!("{panel} 清空归属失败: {error:#}"));
+                outcome.unsettled.insert(*panel);
+            }
         }
     }
     let (to_recalc, no_geometry) = split_recalc_by_geometry(model, &diff.recalc_panels);
+    // 无几何与重算失败一视同仁：两者都是「这块面板的边没有按新拓扑算过」。前者是常态
+    // （未监听的库，Q20 (a)）、后者是缺陷，但对参照与队列而言没有区别。
+    outcome
+        .unsettled
+        .extend(no_geometry.values().flatten().copied());
     outcome.no_geometry = no_geometry;
     for panel in to_recalc {
         match recalc_panel_membership_for_consumption(db_option, &model.map, panel, Some(model))
             .await
         {
             Ok(_) => outcome.recalculated += 1,
-            Err(error) => outcome
-                .failures
-                .push(format!("{panel} 重算归属失败: {error:#}")),
+            Err(error) => {
+                outcome
+                    .failures
+                    .push(format!("{panel} 重算归属失败: {error:#}"));
+                outcome.unsettled.insert(panel);
+            }
         }
     }
     for renumber in &diff.renumbered_rooms {
@@ -225,11 +259,29 @@ pub(crate) async fn apply_startup_plan(
                 outcome.renumbered_rooms += 1;
                 outcome.renumbered_panels += renumber.panels.len();
             }
-            Err(error) => outcome.failures.push(format!(
-                "房间 {} {}→{} 改列失败: {error:#}",
-                renumber.room, renumber.old_num, renumber.new_num
-            )),
+            Err(error) => {
+                outcome.failures.push(format!(
+                    "房间 {} {}→{} 改列失败: {error:#}",
+                    renumber.room, renumber.old_num, renumber.new_num
+                ));
+                // 改列失败那间房的面板改成整间重算：比只补一次 `UPDATE room_num` 多算，
+                // 但改列本来就是重算的省略式，多算的那一遍收敛到同一批边（宁可多算一次）。
+                outcome.unsettled.extend(renumber.panels.iter().copied());
+            }
         }
+    }
+    match crate::data_interface::model_update_pending::enqueue_room_panel_recalcs(
+        &outcome.unsettled,
+    )
+    .await
+    {
+        Ok(queued) => outcome.requeued = queued,
+        // 入队失败不改变「参照写不写」——`unsettled` 非空时 `all_settled()` 本来就是假。
+        // 但要点名：进程内那道闸（[`startup_tail_of`]）此刻是这条线唯一的守卫。
+        Err(error) => outcome.failures.push(format!(
+            "{} 块没算成的面板入队 RoomRecalcPanel 失败（本进程内仍由启动对比回执挡住参照）: {error:#}",
+            outcome.unsettled.len()
+        )),
     }
     outcome.elapsed_ms = started.elapsed().as_millis();
     outcome
@@ -310,7 +362,19 @@ pub(crate) struct StartupCompareReport {
     pub failed: usize,
     pub renumbered_rooms: usize,
     pub renumbered_panels: usize,
+    /// 没算成、已折成 `RoomRecalcPanel` 目标的面板数（M2）。
+    pub requeued: usize,
     pub reference_written: bool,
+    /// **本次启动对比给这个进程留下的尾巴**（M2 的进程内闸）。`None` = 没留尾巴：这一路的
+    /// 归属边确实按当前拓扑算过（`Unchanged` 零写入，或 `Apply` 全部成功），写点 ③ 可以放行。
+    /// `Some(理由)` = 有没算成的目标、或者压根没比过（跳过 / 显式全量还没收尾），写点 ③ 拒写。
+    ///
+    /// 它与入队（(a)）是两道**互补**的守卫，不是二选一：入队那道靠 `room_work_is_drained()`
+    /// 起作用，行的 `dbnum` 一旦落在监听限定域之外就会被 drain 的范围谓词滤掉；而这一格是
+    /// 进程内的，谁也滤不掉。反过来它只活在本进程——但重启会重新做一次对比（参照没写、
+    /// 现状与参照的键仍不等 → 同一份 diff → 同一摊尾巴），所以「重启丢标志」不构成漏洞：
+    /// 缺省值（没有回执 = 还没比过）本身就是拒写。
+    pub unsettled: Option<String>,
     /// 参照没写的原因 / 补充说明。
     pub note: Option<String>,
     /// 走了显式全量臂时的理由；全量本体在 `lib.rs`，成败看 `room_build` 的章与
@@ -321,17 +385,21 @@ pub(crate) struct StartupCompareReport {
 }
 
 impl StartupCompareReport {
+    /// 缺省是**有尾巴**：只有明确走到「边 == 这份拓扑」的臂才把它清成 `None`。新增一条臂
+    /// 而忘了表态时，默认落在保守那一边（写点 ③ 拒写，下次启动多比一次）。
     fn new(form: ResidentForm, plan: String, elapsed_ms: u128) -> Self {
         Self {
             form: form.as_str().to_string(),
-            plan,
+            plan: plan.clone(),
             removed: 0,
             recalculated: 0,
             no_geometry: 0,
             failed: 0,
             renumbered_rooms: 0,
             renumbered_panels: 0,
+            requeued: 0,
             reference_written: false,
+            unsettled: Some(plan),
             note: None,
             full_rebuild: None,
             at: chrono::Local::now().to_rfc3339(),
@@ -346,8 +414,35 @@ impl StartupCompareReport {
         self.failed = outcome.failures.len();
         self.renumbered_rooms = outcome.renumbered_rooms;
         self.renumbered_panels = outcome.renumbered_panels;
+        self.requeued = outcome.requeued;
+        // 参照写失败不算尾巴：边确实按这份拓扑算过了，只是那一行没落库——写点 ③ 正是它的重试。
+        self.unsettled = outcome.blocking_reason();
         self
     }
+}
+
+/// 写点 ③ 的第三条前提（M2，纯函数）：本进程的启动对比留没留下尾巴。
+///
+/// `None` = 放行。`Some(理由)` = 拒写参照，两种：
+/// 1. **没有回执** —— 本进程还没做过启动房间对比。这不是理论情形：worker
+///    （`ensure_batch_worker`）起在 `run_cli` 的房间段**之前**，它的空闲轮完全可能先跑一轮
+///    干净的 drain。那时启动 diff 一块面板都还没应用，参照却会被推进到当前拓扑，停机期间
+///    未监听库的全部变化就此静默丢失。
+/// 2. **回执说有尾巴** —— 见 [`StartupCompareReport::unsettled`]。
+pub(crate) fn startup_tail_of(report: Option<&StartupCompareReport>) -> Option<String> {
+    match report {
+        None => Some(
+            "本进程还没做过启动房间对比（worker 的空闲轮起在房间段之前）：\
+             启动 diff 尚未应用，此刻写参照等于宣称停机期间什么都没变"
+                .to_string(),
+        ),
+        Some(report) => report.unsettled.clone(),
+    }
+}
+
+/// [`startup_tail_of`] 的进程内取数版；写点 ③（`model_update_pending::settle_resident_reference`）调它。
+pub(crate) fn startup_compare_tail() -> Option<String> {
+    startup_tail_of(startup_compare_report().as_ref())
 }
 
 fn compare_report_slot() -> &'static RwLock<Option<StartupCompareReport>> {
@@ -370,6 +465,10 @@ pub(crate) fn record_startup_compare(report: StartupCompareReport) {
 }
 
 /// 显式全量收尾后回填「参照写了没」。没有在途回执（全量不是本模块判的）就不动。
+///
+/// 全量成功并写上参照 = 边就是按这份拓扑算的，尾巴一并清掉（写点 ③ 从此可以放行）；没写成
+/// （身份换了代 / 参照写失败 / 模型建不起来）照旧留着尾巴。全量被 `startup_autorun` 挡住或
+/// 自己失败时，这个函数**根本不会被调**，`full()` 立的那句尾巴原样留着——正是要的。
 fn note_full_rebuild_settled(reference_written: bool, note: Option<String>) {
     if let Some(report) = compare_report_slot()
         .write()
@@ -377,6 +476,14 @@ fn note_full_rebuild_settled(reference_written: bool, note: Option<String>) {
         .as_mut()
     {
         report.reference_written = reference_written;
+        if reference_written {
+            report.unsettled = None;
+        } else {
+            report.unsettled =
+                Some(note.clone().unwrap_or_else(|| {
+                    "显式全量收尾没能写上参照，本进程按「有尾巴」处置".to_string()
+                }));
+        }
         report.note = note;
     }
 }
@@ -682,6 +789,9 @@ pub(crate) async fn startup_room_reconcile(db_option: &DbOption) -> StartupRoomV
             let mut report =
                 StartupCompareReport::new(form, plan.summary(), started.elapsed().as_millis());
             report.note = Some("参照摘要 == 现状，参照不动（D2）".to_string());
+            // 零写入不是「没比」而是「比过、一样」：参照说的那份拓扑就是现状，边与它一致。
+            // 这一臂没有尾巴，写点 ③ 从此可以放行（它此后只是把 `settled_at` 往前推）。
+            report.unsettled = None;
             record_startup_compare(report);
             StartupRoomVerdict::Settled
         }
@@ -986,6 +1096,21 @@ mod tests {
         outcome.recalculated = 3;
         assert!(outcome.all_settled() && outcome.blocking_reason().is_none());
 
+        // 有尾巴时回执末尾多一句「已入队多少块」——(a) 那条路有没有真落下去，看这里。
+        outcome.no_geometry = BTreeMap::from([(7997u32, vec![r(8)])]);
+        outcome.recalculated = 2;
+        outcome.unsettled = BTreeSet::from([r(8)]);
+        outcome.requeued = 1;
+        assert_eq!(
+            outcome.summary(),
+            "删 1/1 / 重算 3（成功 2 · 无几何 1 · 失败 0）/ 改列 1/1 间 2/2 块 \
+             / 没算成的 1 块已入队 1 块 RoomRecalcPanel"
+        );
+        outcome.no_geometry.clear();
+        outcome.unsettled.clear();
+        outcome.requeued = 0;
+        outcome.recalculated = 3;
+
         outcome
             .failures
             .push("pe:24384_9 重算归属失败: 覆盖率不够".into());
@@ -1155,7 +1280,72 @@ mod tests {
         assert!(slow["error"].as_str().unwrap().contains("超过"));
     }
 
-    /// 回执槽：记一条、读回来；显式全量收尾只回填两格。
+    /// M2 (b) 的闸（纯函数）：写点 ③ 只在「本进程比过、且没留尾巴」时放行。
+    ///
+    /// 没有回执那一条不是形式主义——worker（`ensure_batch_worker`）起在 `run_cli` 的房间段
+    /// **之前**，它的空闲轮完全可能先跑一轮干净的 drain；那时启动 diff 一块面板都没应用，
+    /// 参照却会被推进到当前拓扑，停机期间未监听库的全部变化就此静默丢失。
+    /// **重启不构成漏洞**：标志丢了 = 回到「没有回执」= 拒写，缺省就在保守那一边。
+    #[test]
+    fn the_third_write_point_is_gated_by_the_startup_compare_tail() {
+        assert!(
+            startup_tail_of(None)
+                .expect("还没比过就不许写")
+                .contains("还没做过启动房间对比"),
+            "没有回执时要说清为什么拒写"
+        );
+
+        let clean = StartupApplyOutcome {
+            planned: PlannedCounts {
+                recalc: 2,
+                ..Default::default()
+            },
+            recalculated: 2,
+            ..Default::default()
+        };
+        let settled =
+            StartupCompareReport::new(ResidentForm::Published, "对比".into(), 1).with_apply(&clean);
+        assert_eq!(
+            startup_tail_of(Some(&settled)),
+            None,
+            "一块没落下：写点 ③ 照旧放行"
+        );
+
+        let with_tail = StartupApplyOutcome {
+            planned: PlannedCounts {
+                recalc: 2,
+                ..Default::default()
+            },
+            recalculated: 1,
+            no_geometry: BTreeMap::from([(7997u32, vec![r(8)])]),
+            unsettled: BTreeSet::from([r(8)]),
+            requeued: 1,
+            ..Default::default()
+        };
+        let held = StartupCompareReport::new(ResidentForm::Published, "对比".into(), 1)
+            .with_apply(&with_tail);
+        let reason = startup_tail_of(Some(&held)).expect("有尾巴就不许写");
+        assert!(
+            reason.contains("无几何") && reason.contains("7997"),
+            "拒写的理由要点名是哪一摊: {reason}"
+        );
+        assert_eq!(
+            held.requeued, 1,
+            "尾巴同时也进了 durable 队列（(a) 那条路）"
+        );
+
+        // 跳过与显式全量两条臂：缺省就是「有尾巴」，没人表态它也不会放行。
+        let skipped =
+            StartupCompareReport::new(ResidentForm::Published, "跳过：空间树已验证为空".into(), 0);
+        assert!(
+            startup_tail_of(Some(&skipped))
+                .expect("没比过就不许写")
+                .contains("跳过"),
+            "跳过那一臂照样拦"
+        );
+    }
+
+    /// 回执槽：记一条、读回来；显式全量收尾只回填三格（含尾巴）。
     #[test]
     fn compare_report_records_and_full_rebuild_settlement_only_touches_two_fields() {
         let outcome = StartupApplyOutcome {
@@ -1177,6 +1367,31 @@ mod tests {
             (2, 1, 0)
         );
 
+        // 显式全量还没收尾：进程内那道闸拦着（`full()` 立的那句尾巴）。
+        let pending_full = StartupCompareReport::new(
+            ResidentForm::Latest,
+            "持久重建要求：房间结构枚举失败".into(),
+            1,
+        );
+        record_startup_compare(pending_full);
+        assert!(
+            startup_compare_tail().is_some(),
+            "全量没跑完就写参照 = 宣称边已按新拓扑算过"
+        );
+        note_full_rebuild_settled(false, Some("全量期间清单换了代".into()));
+        assert_eq!(
+            startup_compare_tail().as_deref(),
+            Some("全量期间清单换了代"),
+            "全量收尾没写成参照：尾巴留着"
+        );
+        note_full_rebuild_settled(true, None);
+        assert_eq!(
+            startup_compare_tail(),
+            None,
+            "全量全成并写上参照：边就是按这份拓扑算的，闸放行"
+        );
+
+        record_startup_compare(report.clone());
         note_full_rebuild_settled(true, Some("x".into()));
         let settled = startup_compare_report().unwrap();
         assert!(settled.reference_written);
@@ -1277,6 +1492,105 @@ mod tests {
                 "应用臂不含全量、不带写守卫、不看冷启动开关（{forbidden}）: {apply}"
             );
         }
+    }
+
+    /// 源码钉（M2 (a)）：应用臂里**每一条**没算成的路都要把面板收进 `unsettled`，并把那一摊
+    /// 折成 `RoomRecalcPanel` durable 目标。
+    ///
+    /// 少任何一条，那些面板就既不在房间表里、也不产生 drain 失败——写点 ③ 的两条前提于是
+    /// 恒真，启动之后任意一轮干净的 drain 都会把参照推进到当前拓扑，陈旧的边永久留下且无日志。
+    /// 「无几何」与「重算失败」一视同仁：两者都是「这块面板的边没有按新拓扑算过」。
+    #[test]
+    fn every_unsettled_panel_of_the_startup_apply_lands_as_a_durable_room_target() {
+        let apply = fn_body(
+            production_source(),
+            "pub(crate) async fn apply_startup_plan(",
+        );
+        // 删失败 / 重算失败：逐块进 unsettled。
+        assert_eq!(
+            apply.matches("outcome.unsettled.insert(").count(),
+            2,
+            "删失败与重算失败两条路各收一次: {apply}"
+        );
+        // 无几何那一摊（`split_recalc_by_geometry` 分出来的）整摊进。
+        assert!(
+            apply.contains("no_geometry.values().flatten().copied()"),
+            "无几何与重算失败一视同仁: {apply}"
+        );
+        // 改列失败那间房的面板整间重算（改列本来就是重算的省略式，多算不漏算）。
+        assert!(
+            apply.contains("outcome.unsettled.extend(renumber.panels.iter().copied())"),
+            "改列失败同样算尾巴: {apply}"
+        );
+        assert!(
+            apply.contains(
+                "model_update_pending::enqueue_room_panel_recalcs(\n        &outcome.unsettled,\n    )"
+            ),
+            "尾巴要走既有的入队入口，不许在这里自己拼 SQL: {apply}"
+        );
+        let enqueue_at = apply
+            .find("enqueue_room_panel_recalcs(")
+            .expect("入队必须在");
+        for collected in [
+            "outcome.unsettled.insert(",
+            "no_geometry.values().flatten().copied()",
+            "outcome.unsettled.extend(renumber.panels.iter().copied())",
+        ] {
+            assert!(
+                apply.find(collected).expect("收集点必须在") < enqueue_at,
+                "三类都收完了才入队（少收一类就漏一摊）: {collected}"
+            );
+        }
+    }
+
+    /// 源码钉（M2 (b)）：进程内那道闸的缺省是「有尾巴」，只有两处明确表态才清成 `None`
+    /// ——`Unchanged` 零写入那一臂，与显式全量写上参照那一处。
+    ///
+    /// 新增一条臂而忘了表态时，默认落在保守那一边（写点 ③ 拒写，下次启动多比一次）。
+    #[test]
+    fn the_startup_tail_defaults_to_blocked_and_is_cleared_at_exactly_two_places() {
+        let code = code_lines(production_source());
+        let clears: Vec<usize> = code
+            .match_indices("unsettled = None")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(clears.len(), 2, "只有两处清尾巴: {clears:?}");
+        let new_body = fn_body(
+            production_source(),
+            "    fn new(form: ResidentForm, plan: String, elapsed_ms: u128) -> Self {",
+        );
+        assert!(
+            new_body.contains("unsettled: Some(plan)"),
+            "回执的缺省是「有尾巴」: {new_body}"
+        );
+        let reconcile = code_lines(fn_body(
+            production_source(),
+            "pub(crate) async fn startup_room_reconcile(",
+        ));
+        let zero_write_arm = reconcile
+            .split_once("PlanDisposition::ZeroWrite =>")
+            .expect("零写入那一臂必须在")
+            .1
+            .split_once("PlanDisposition::FullRebuild {")
+            .expect("下一臂是显式全量")
+            .0;
+        assert!(
+            zero_write_arm.contains("report.unsettled = None"),
+            "零写入那一臂要清尾巴（参照说的那份拓扑就是现状）: {zero_write_arm}"
+        );
+        let settle = fn_body(production_source(), "fn note_full_rebuild_settled(");
+        assert!(
+            settle.contains("report.unsettled = None") && settle.contains("if reference_written {"),
+            "全量只有**写上参照**那一支清尾巴: {settle}"
+        );
+        let with_apply = fn_body(
+            production_source(),
+            "    fn with_apply(mut self, outcome: &StartupApplyOutcome) -> Self {",
+        );
+        assert!(
+            with_apply.contains("self.unsettled = outcome.blocking_reason()"),
+            "应用臂的尾巴就是「参照为什么没写」那一句: {with_apply}"
+        );
     }
 
     /// 源码钉：编排进锁后才换代（`the_generation_swap_happens_inside_the_spatial_serial_lock` 的
