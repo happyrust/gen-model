@@ -1,5 +1,57 @@
 # 变更记录
 
+## 2026-09-08
+
+### 房间启动对比与应用（常驻房间模型 P3 后半截，S1–S3）：扫描 → 三层版本对比 → 只对变了的面板删 / 重算 / 改列 → 参照落款
+
+用户口径「启动时扫描全部房间数据，与 SurrealDB(rocksdb) 里已有的房间信息对版本，有增量就重算变了的
+房间、删旧关系写新关系」——此前四步里只有前两步落地（`initialize_at_startup` / `plan_startup` 纯函数，
+无生产调用），启动段仍是整库全量；默认的摄入形态下对比还是恒等式（参照就是 `room_published_topology`
+本身，`advance_orphaned_manifest_rows` 让拓扑在启动时变了却无人重算）。方案与拍板见
+`docs/plans/2026-09-08-room-startup-compare-and-apply-plan.md`（D1–D4 全按推荐，共识 d-42）。
+
+- **版本判定三层，不用时间**：① 单文件 = E3D `sesno` + 稳定文件身份 → `commit_token`；② 文件组 = 令牌
+  排序后 SHA-256 = `ResidentReference.key`；③ 内容 = `topology_digest` = `.digest`。`plan_startup` 先比 ③
+  （等 → `Unchanged` 零写入），再看 ②（同键不等 → `IntegrityMismatch`：库被恢复 / 手改），键不同才拿 ①
+  的令牌从 `room_topology_source` 分片合成旧视图 → `TopologyDiff` → `Apply`；旧视图读不回 →
+  `ReferenceUnreadable`。**两形态同一张臂表**：摄入侧的 `source_tokens` 改填清单 DESI 行的 `commit_token`，
+  参照不再拿 `room_published_topology` 旧键行当依据（那些行无人管、不保证在）。
+- **参照落款**（`room_resident::persist_reference` / `persist_reference_on`）：两形态都核对每个令牌的分片在且
+  完整（复用 `room_topology_source::exists_on`），缺一片或没有令牌都拒写并点名——宁可下次多算一次，不写
+  一条读不回来的参照。只在「边 == 这份拓扑」成立的瞬间写：启动对比应用全成（写点 ①）、显式全量全成
+  （写点 ②）；一轮 drain 全 `done` 那处（写点 ③）随 P2。
+- **新文件 `src/fast_model/room_startup.rs`**：`startup_room_reconcile` 编排（止血口 → 空树盖平凡章 →
+  `lock_spatial_serial` → `ensure_current` → 显式入口 `AIOS_ROOM_FULL_REBUILD=1` / 持久 `rebuild_required`
+  → 读参照 → 需要时合成旧视图 → 计划 → 处置）；`apply_startup_plan` 删 → 重算 → 改列，每块面板 / 每间房
+  一个事务，**删与写只经 `recalc_panel_membership_for_consumption`**（面板不在新视图它自己落进「已不在册」
+  分支清边），**改列只经 `render_renumber_statements`**，本文件不另写删除 / 插入语句；无几何的面板先按常驻
+  模型分出来不算、边不动、按**文件** dbnum 进回执，且挡参照。全量降为五条显式入口，`startup_room_reconcile`
+  只**判出**、交回 `lib.rs::reconcile_rooms_with_resident_model` 跑——只有这一臂受 `startup_autorun`，
+  对比本身不受；凭据对账（`reconcile_startup_room_build`）不再决定跑不跑，每次成功全量照旧盖章。同键不等与
+  参照不可读先把理由落进 `room_build:main.rebuild_required`，全量被开关挡住下次也知道要跑。写点 ② 多一道
+  身份核对：全量在锁外跑，期间清单换了代就不写参照（回执点名，下次启动 `NoReference` → 再全量一次）。
+- **`lib.rs`**：房间段多一个 `else if room_resident_model()` 分支排在 `skip_startup_room_build` 之前，开关关着
+  时老路逐字不变；新常量 `ROOM_FULL_REBUILD_ENV`；`vacuous_room_build_reason` 放开给新文件。
+- **`/health.room_build.resident`** 多两格：`reference`（读库 2 s 上限；`null` = 没有参照，`{error}` = 读失败
+  / 超时）与 `startup_compare`（本进程最近一次对比的回执：计划摘要、删 / 重算 / 无几何 / 失败 / 改列计数、
+  `reference_written` 与原因、走了全量的理由、耗时）。启动日志一行同款：
+  `[房间启动对比] {form} 参照 K@D（时间）→ 现状 K@D：{计划}；删 a/b / 重算 n（成功 · 无几何 · 失败）/ 改列 …；参照已更新 | 参照未更新（原因）；耗时`。
+- **源码钉**：`room_startup.rs` 生产代码不含 `DELETE` / `INSERT RELATION` / `RELATE `；`apply_startup_plan`
+  不含 `build_room_relations` / `RoomWriteGuard` / `startup_autorun`；编排顺序 止血口 → 空树 → 锁 → 换代 →
+  读参照 → 计划，不含 `reconcile_startup_room_build`；`persist_reference(` 生产调用点恰两处、各紧邻
+  `all_settled()` / `manifest == *expected`；`lib.rs` 里 `build_room_relations(` 生产调用点恰两处；对比臂排在
+  老门之前、全量臂顺序 对比 → `startup_autorun` → 全量 → `Ok(()) =>` 写点 ②；`room_files_never_consult_the_watch_scope`
+  扩到新文件；`plan_startup` 摄入侧键不等不得回 `IntegrityMismatch`。
+- 验证：`cargo test --lib -- room_startup room_resident room_topology_source startup_room_build_gate_tests handlers`
+  **84 passed / 0 failed / 1 ignored**；`cargo test --lib` 全量 **1823 passed / 1 failed / 118 ignored**，那 1 条是
+  `room_increment_audit::f_c_idle_round_republishes_file_rounds_settled_by_retries`（F-C 空闲轮重发布的审计钉，
+  钉的是 `batch_worker.rs`，本笔未碰、HEAD 上同红）。`rustfmt --edition 2024 --check` 对 `room_startup.rs` /
+  `room_resident.rs` / `lib.rs` / `handlers.rs` 干净。**未起服务、未在真库上跑**：方案 §5 S5 的七条真库门
+  （三形状逐边相等、`watch_dbnums=[8000]` 改 7997、手删一片分片、读透三条、原地重启两次第二次零写入）一条没跑，
+  ADR-010 §9 那道硬门仍按未证记；`apply_startup_plan` 的删 / 重算走的是增量今天同一条路，单测层只钉了纪律与
+  改列事务，边集正确性靠真库门。开关 `room_resident_model` 默认仍关。工作树里同时有别的会话的在途改动
+  （57 个文件），本笔只提交自己那几处 hunk。
+
 ## 2026-09-07
 
 ### 级联查询换源 P4：设计侧通用一跳反查接进窗口规划器（MDB 逐库并集，默认关）

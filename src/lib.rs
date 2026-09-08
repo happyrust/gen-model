@@ -395,12 +395,61 @@ pub const SKIP_STARTUP_ROOM_BUILD_ENV: &str = "AIOS_SKIP_STARTUP_ROOM_BUILD";
 /// `Ready` 交给库侧对账；`Loading` / `DegradedBlocked` 之类**不在这里判**——它们在
 /// `build_room_relations` 里由 `ensure_room_tree_coverage` fail-closed 拦住，那道门说的是
 /// 「判不了就不写」，这里说的是「没什么可判」，两句话不合成一句。
-fn vacuous_room_build_reason(state: SpatialTreeState) -> Option<String> {
+pub(crate) fn vacuous_room_build_reason(state: SpatialTreeState) -> Option<String> {
     (state == SpatialTreeState::ReadyEmpty).then(|| {
         "空间树已验证为空（库里没有可用几何指针）：没有已发布几何可算，全量重建无事可做\
          ——读透 + 空库的常态，房间归属由发布事务排的重算收敛"
             .to_string()
     })
+}
+
+/// 环境变量名：本次启动显式要求跑一次全量房间重建（`1/true/yes/on`）。常驻房间模型开着时
+/// 启动对比接管了房间段，全量降为五条显式入口，这是运维那一条（共识 d-42，
+/// `docs/plans/2026-09-08-room-startup-compare-and-apply-plan.md` §4.3）。开关关着时它没有意义
+/// ——那条路每次启动本来就按凭据对账决定跑不跑。
+pub const ROOM_FULL_REBUILD_ENV: &str = "AIOS_ROOM_FULL_REBUILD";
+
+/// 常驻房间模型开着时的房间段（d-42 §4.2 / §4.6）：启动对比接管——参照摘要 == 现状零写入；
+/// 变了只对变了的面板删 / 重算 / 改列；全量降为五条显式入口（无参照 / 同键不等 / 参照不可读 /
+/// 持久 `rebuild_required` / [`ROOM_FULL_REBUILD_ENV`]），由 `room_startup::startup_room_reconcile`
+/// 判出、交回这里跑。
+///
+/// 门：止血口 `AIOS_SKIP_STARTUP_ROOM_BUILD` 与空树平凡两道在 `startup_room_reconcile` 里照旧最强
+/// （对比与全量一起跳）；`startup_autorun` **只门全量那一臂**——对比是定向的，成本随变更量走，
+/// 不该为它付那道「别自动干活」的门。ADR-048 D3 照旧：这里不读监听限定域，限定域上弦不得
+/// 拖回全量修复。凭据对账（`reconcile_startup_room_build`）不再决定跑不跑（§4.6）——对比接管了
+/// 它拓扑那一半，几何那一半本来就归发布事务的 `RoomRecalcPanel`；每次成功全量照旧盖章。
+async fn reconcile_rooms_with_resident_model(db_option: &DbOption) {
+    use crate::fast_model::room_startup::{self, StartupRoomVerdict};
+
+    let StartupRoomVerdict::FullRebuild { reason, expected } =
+        room_startup::startup_room_reconcile(db_option).await
+    else {
+        return;
+    };
+    if !crate::options::startup_autorun() {
+        println!(
+            "跳过启动全量房间重建（startup_autorun=false；本来要它的原因：{reason}）：\
+             房间归属由增量队列收敛，下次启动再比，或显式打开自动执行"
+        );
+        return;
+    }
+    println!("启动全量房间重建：{reason}");
+    println!(
+        "正在计算房间（空间树 {} 条）",
+        GLOBAL_AABB_TREE.read().await.tree.size()
+    );
+    let time = Instant::now();
+    match build_room_relations(db_option).await {
+        // 写点 ②（d-42 §4.5）：全部成功才写参照；盖章仍在 build_room_relations 收尾那一处。
+        Ok(()) => room_startup::settle_full_rebuild(db_option, expected.as_ref()).await,
+        Err(error) => eprintln!("计算房间未完全成功: {error:#}"),
+    }
+    println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
+    // 与开关关着的那一臂同姿态：全量跑了才顺带算支管部件派生量，失败只告警。
+    if let Err(error) = update_cal_bran_component().await {
+        eprintln!("支管部件派生量计算未完全成功（可由下次启动或手动重算回补）: {error:#}");
+    }
 }
 
 /// 本次启动要不要跳过全量房间重建；跳过时返回那句给人看的理由。
@@ -1153,6 +1202,10 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             "模型增量阶段已关闭（model_incremental=false）：模型积压未收敛，跳过启动房间重建\
              （房间只在数据与模型都落库后才整体重算，重新开启模型阶段后回补）"
         );
+    } else if crate::options::room_resident_model() {
+        // 常驻房间模型开着：启动对比接管房间段（d-42），全量只剩显式入口，见
+        // `reconcile_rooms_with_resident_model`。关着时下面两臂一字不动。
+        reconcile_rooms_with_resident_model(&db_option).await;
     } else if let Some(reason) = skip_startup_room_build().await {
         println!("跳过启动全量房间重建（{reason}）：房间归属由增量队列收敛");
     } else {
@@ -1837,6 +1890,102 @@ mod startup_room_build_gate_tests {
             !body.contains("is_auto_work_armed"),
             "启动全量房间重建这道门只认 startup_autorun，不许改读上弦位（ADR-048）: {body}"
         );
+    }
+
+    /// d-42：常驻房间模型开着时房间段由启动对比接管，排在 `skip_startup_room_build` 那一臂
+    /// **之前**（开关关着时老路一字不动）。对比本身不受 `startup_autorun`；只有它判出的显式全量
+    /// 那一臂受——门在 `reconcile_rooms_with_resident_model` 里、`build_room_relations` 之前；全量
+    /// 成功后紧接写点 ②（`settle_full_rebuild`）。凭据对账与限定域都不再进这条路
+    /// （§4.6 / ADR-048 D3）；止血口与空树两道门在 `startup_room_reconcile` 里判，这里不重判。
+    #[test]
+    fn the_resident_model_takes_over_the_room_segment_and_gates_only_the_full_rebuild() {
+        let source = include_str!("lib.rs");
+        let segment = source
+            .split_once(r#"println!("房间关键字为: {:?}""#)
+            .expect("启动房间段必须存在")
+            .1
+            .split_once("let aios_mgr = AiosDBMgr {")
+            .expect("房间段之后是 aios_mgr")
+            .0;
+        let resident_at = segment
+            .find("else if crate::options::room_resident_model() {")
+            .expect("开关开着走对比");
+        let legacy_at = segment
+            .find("skip_startup_room_build().await")
+            .expect("开关关着走老门");
+        assert!(resident_at < legacy_at, "对比那一臂排在老门之前: {segment}");
+        assert!(
+            segment[resident_at..legacy_at]
+                .contains("reconcile_rooms_with_resident_model(&db_option).await"),
+            "开关开着只调这一个入口: {segment}"
+        );
+
+        let helper = source
+            .split_once("async fn reconcile_rooms_with_resident_model(")
+            .expect("入口存在")
+            .1
+            .split_once("async fn skip_startup_room_build()")
+            .expect("入口之后是老门")
+            .0;
+        let code: String = helper
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let reconcile = code
+            .find("startup_room_reconcile(db_option).await")
+            .expect("先对比");
+        let autorun = code
+            .find("crate::options::startup_autorun()")
+            .expect("全量臂受 startup_autorun");
+        let full = code
+            .find("build_room_relations(db_option).await")
+            .expect("显式全量在这里跑");
+        let settle = code
+            .find("settle_full_rebuild(db_option, expected.as_ref()).await")
+            .expect("全量成功后写参照");
+        assert!(
+            reconcile < autorun && autorun < full && full < settle,
+            "顺序是 对比 → 冷启动开关 → 全量 → 写点 ②: {code}"
+        );
+        assert!(
+            code[full..settle].contains("Ok(()) =>"),
+            "写点 ② 只在全量 Ok(()) 之后: {code}"
+        );
+        for forbidden in [
+            "watch_scope",
+            "is_auto_work_armed",
+            "reconcile_startup_room_build",
+            "skip_startup_room_build",
+            "SKIP_STARTUP_ROOM_BUILD_ENV",
+            "vacuous_room_build_reason",
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "对比这条路不做这件事（{forbidden}）: {code}"
+            );
+        }
+    }
+
+    /// d-42 §4.8：`build_room_relations(` 的生产调用点在 `lib.rs` 只有两处——开关关的老臂、开关开的
+    /// 显式全量臂；多一处就是又开了一条全量路。
+    #[test]
+    fn build_room_relations_is_called_from_exactly_two_places_in_lib() {
+        let source = include_str!("lib.rs");
+        let production = source
+            .split_once("#[cfg(test)]\nmod startup_room_build_gate_tests {")
+            .expect("钉子模块在文件末尾")
+            .0;
+        let code: String = production
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let calls: Vec<usize> = code
+            .match_indices("build_room_relations(")
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(calls.len(), 2, "生产调用点只有两处: {calls:?}");
     }
 
     /// The MDB declaration has to be resolved while the manager is still owned

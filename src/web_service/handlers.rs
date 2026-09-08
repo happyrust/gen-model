@@ -716,12 +716,15 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     // 无几何的在册面板按库点名，限定域之外的库单独成一句（第 5 轮 Q20 (a)）。哪些库在
     // 限定域里由这里对 `watch_scope` 说——房间文件自己不认识它。进程内读数，不套预算。
     if let Value::Object(map) = &mut room_build {
-        map.insert(
-            "resident".to_string(),
-            crate::fast_model::room_resident::resident_health(
-                crate::data_interface::watch_scope::admits,
-            ),
+        let mut resident = crate::fast_model::room_resident::resident_health(
+            crate::data_interface::watch_scope::admits,
         );
+        // 启动对比（d-42 §4.7）再加两格：`reference`（上次成功结算所依据的文件版本与拓扑摘要，
+        // 读库、自带 2 秒上限）与 `startup_compare`（本进程最近一次对比的回执，进程内）。
+        if let Value::Object(resident) = &mut resident {
+            resident.extend(crate::fast_model::room_startup::startup_health().await);
+        }
+        map.insert("resident".to_string(), resident);
     }
     let read_through = state.element_attributes.health().await;
     let source_snapshot =

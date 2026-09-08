@@ -216,8 +216,10 @@ pub(crate) struct ResidentRoomModel {
     /// 在册却没拿到几何或包围盒不可用的面板（与 `PanelIndex::missing_panels` 同口径、同序）。
     pub missing_panels: Vec<RefnoEnum>,
     pub digest: String,
-    /// 读透：各 DESI 的冻结令牌（按 dbnum 序），启动参照按它们读分片；摄入为空（参照就是
-    /// `room_published_topology`）。
+    /// 这份拓扑依据的每个文件版本（按 dbnum 序）：读透 = 各 DESI 的冻结令牌；摄入 = 清单
+    /// `published_file_input` 里 DESI 行的 `commit_token`。启动参照按它们从 `room_topology_source`
+    /// 分片合成「旧」视图（共识 d-42：两形态同一条路，摄入侧不再拿 `room_published_topology`
+    /// 当参照——它只重写本清单键的行，旧键的行无人管、不保证在）。
     pub source_tokens: Vec<String>,
     /// 房间 → 声明它的那个**文件** dbnum。只有 `/health` 与回执的「无几何按库」用它
     /// （见 [`ResidentStats::missing_panels_by_dbnum`]）；纯测搭的模型可以是空的，那时退回
@@ -339,8 +341,9 @@ impl ResidentRoomModel {
     }
 
     /// 这块在册面板算在哪个**文件**库号名下：先看它归属的房间来自哪个文件，没有文件归属
-    /// （纯测模型）才退回 refno 的头一段。
-    fn file_of_panel(&self, panel: RefnoEnum) -> u32 {
+    /// （纯测模型）才退回 refno 的头一段。启动对比的回执按它给「无几何」分组
+    /// （`room_startup::split_recalc_by_geometry`），与 [`ResidentStats::missing_panels_by_dbnum`] 同口径。
+    pub(crate) fn file_of_panel(&self, panel: RefnoEnum) -> u32 {
         self.map
             .rooms
             .iter()
@@ -595,7 +598,22 @@ pub(crate) async fn load_published_on(
         insts,
         meshes,
     )
+    .with_source_tokens(published_source_tokens(inputs))
     .with_room_files(room_files))
+}
+
+/// 摄入侧模型依据的文件版本：清单里 DESI 行的 `commit_token`，按 dbnum 序——与
+/// `published_topology_manifest_key` 摘要进键里的、`load_published_topology_groups_on` 要求
+/// 齐全的是同一批行。参照按它们读分片合成旧视图。
+pub(crate) fn published_source_tokens(inputs: &[PublishedFileInput]) -> Vec<String> {
+    let mut rows: Vec<&PublishedFileInput> = inputs
+        .iter()
+        .filter(|input| input.db_type.eq_ignore_ascii_case("DESI"))
+        .collect();
+    rows.sort_by_key(|input| input.dbnum);
+    rows.into_iter()
+        .map(|input| input.commit_token.clone())
+        .collect()
 }
 
 /// 按文件分好的分组 → 房间 → 文件 dbnum。同一个房间在两个文件里都有根是不合法的
@@ -691,15 +709,18 @@ pub(crate) async fn load_latest(
 }
 
 // ---------------------------------------------------------------------------
-// 启动参照（Q9 (a)）与启动对比（Q3 / Q6 / Q7）——P3 里不碰邻线脏文件的那一半。
-// 应用侧（按 diff 删 / 重算 / 改列、接进 `lib.rs` 启动段）随 P3 后半截进。
+// 启动参照（Q9 (a)）与启动对比（Q3 / Q6 / Q7；臂表按共识 d-42，
+// `docs/plans/2026-09-08-room-startup-compare-and-apply-plan.md` §4.1 / §4.3）。
+// 应用侧（按 diff 删 / 重算 / 改列、接进 `lib.rs` 启动段）在 `room_startup.rs`（S2 / S3）。
 // ---------------------------------------------------------------------------
 
 /// 上次成功结算所依据的那组文件版本与拓扑摘要，落在 `room_build:main.resident_reference`。
 ///
-/// 读透：`tokens` 是各 DESI 的冻结令牌，分片按它们从 `room_topology_source` 读回来合成
-/// 「旧」那份；摄入：`tokens` 为空，参照就是 `room_published_topology` 本身（与常驻模型同源，
-/// 摘要不等即库被恢复 / 手改）。
+/// **两形态同一条路**（d-42）：`tokens` 是那一份拓扑依据的每个文件版本——读透 = 各 DESI 的
+/// 冻结令牌，摄入 = 清单里 DESI 行的 `commit_token`；启动对比按它们从 `room_topology_source`
+/// 分片合成「旧」那份再 diff。`key` 是形态自己的身份键（摄入 `manifest_key`、读透 composite），
+/// 只用来判「同一组文件版本、拓扑却不同 = 库被恢复 / 手改」；`digest` 是内容摘要，先比它。
+/// 三样都不是时间：`settled_at` 只给 `/health` 与日志看，不参与判定。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ResidentReference {
     pub form: String,
@@ -762,20 +783,73 @@ pub(crate) async fn read_resident_reference_on(
     Ok(rows.into_iter().flatten().next())
 }
 
-/// 读透侧：把这份模型依据的每个文件版本冻成 `room_topology_source` 分片（已有同令牌的分片就
-/// 复用，`prepare_producer_source` 幂等），再写参照行。**只在一轮成功结算之后调**——参照说的是
-/// 「边是按这份拓扑算出来的」，算失败的轮次不许推进它。
-pub(crate) async fn persist_latest_reference(
+/// 把这份模型钉成参照并写 `room_build:main.resident_reference`。**只在一轮成功结算之后调**
+/// （启动对比应用全成 / 显式全量全成 / 一轮 drain 全 `done`）——参照说的是「边是按这份拓扑
+/// 算出来的」，算失败的轮次不许推进它。
+///
+/// 读透：先把每个令牌冻成 `room_topology_source` 分片（`prepare_producer_source` 幂等，启动
+/// 初始化多半已经冻过）；摄入：分片由基线 / 文件轮次 / 启动前进三条写清单的路冻过，这里不冻。
+/// 两形态随后都过 [`persist_reference_on`] 的分片核对：缺一片就不写。
+pub(crate) async fn persist_reference(
+    model: &ResidentRoomModel,
+) -> anyhow::Result<ResidentReference> {
+    if model.manifest.form == ResidentForm::Latest {
+        freeze_source_shards(model).await?;
+    }
+    persist_reference_on(&aios_core::SUL_DB, model).await
+}
+
+/// [`persist_reference`] 的库半截：核对模型每个令牌的分片**都在且完整**（头在、`complete`、
+/// 令牌相等，[`room_topology_source::exists_on`]），再写参照。任一片缺失 / 不完整 / 令牌对不上
+/// → 不写、上抛：宁可下次启动多算一次（`NoReference` → 全量），不写一条到时候读不回来的参照
+/// （那会是 `ReferenceUnreadable` → `rebuild_required`，同样是全量，却多绕一圈还标了脏）。
+/// 没有令牌的模型同样拒写——参照没有令牌就没有旧视图可合成。`db` 显式传入，`mem://` 门直接喂。
+///
+/// [`room_topology_source::exists_on`]: crate::fast_model::room_topology_source::exists_on
+pub(crate) async fn persist_reference_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     model: &ResidentRoomModel,
 ) -> anyhow::Result<ResidentReference> {
     anyhow::ensure!(
-        model.manifest.form == ResidentForm::Latest,
-        "只有读透侧的模型需要写分片参照；摄入侧的参照就是 room_published_topology"
+        !model.source_tokens.is_empty(),
+        "参照不写：{} 模型 {} 没有来源令牌，下次启动无从合成旧视图",
+        model.manifest.form.as_str(),
+        model.manifest.key
     );
-    freeze_source_shards(model).await?;
+    ensure_source_shards_present_on(db, &model.source_tokens).await?;
     let reference = ResidentReference::for_model(model);
-    write_resident_reference_on(&aios_core::SUL_DB, &reference).await?;
+    write_resident_reference_on(db, &reference).await?;
     Ok(reference)
+}
+
+/// 每个令牌的分片都在且完整，否则一次说全（哪几片、各为什么）。
+async fn ensure_source_shards_present_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    tokens: &[String],
+) -> anyhow::Result<()> {
+    let mut missing = Vec::new();
+    for token in tokens {
+        match crate::fast_model::room_topology_source::exists_on(db, token).await {
+            Ok(true) => {}
+            Ok(false) => missing.push(format!("{}: 分片缺失", describe_token(token))),
+            Err(error) => missing.push(format!("{}: {error:#}", describe_token(token))),
+        }
+    }
+    anyhow::ensure!(
+        missing.is_empty(),
+        "参照不写：{} 个令牌的房间拓扑分片缺失或不完整 [{}]",
+        missing.len(),
+        missing.join("; ")
+    );
+    Ok(())
+}
+
+/// 给人看的令牌：`dbnum@sesno`；解不出来（纯测里的占位令牌）退回前 24 个字符。
+fn describe_token(token: &str) -> String {
+    match crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(token) {
+        Ok(source) => format!("{}@{}", source.dbnum(), source.target_sesno()),
+        Err(_) => token.chars().take(24).collect(),
+    }
 }
 
 /// 把模型依据的每个文件版本冻成 `room_topology_source` 分片（`prepare_producer_source` 幂等：
@@ -827,18 +901,19 @@ pub(crate) async fn load_reference_map_on(
     Ok((groups, map))
 }
 
-/// 启动该做什么（Q7 (a)：全量降为显式修复入口，其余走对比）。
+/// 启动该做什么（Q7 (a)：全量降为显式修复入口，其余走对比；臂表 d-42，两形态同一张）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum StartupRoomPlan {
     /// 没有参照（开关第一次打开 / 库刚建 / 形态换了）：按今天的口径跑一次全量并写参照。
     NoReference,
-    /// 参照摘要 == 现状摘要：零写入，只刷参照时间。
+    /// 参照摘要 == 现状摘要：零写入，参照不动（D2：不刷 `settled_at`，观测走进程内那一格）。
     Unchanged,
-    /// 参照能读回来且摘要不同：按 diff 删 / 重算 / 改列。
+    /// 文件版本变了（`key` 不同）、旧视图能从分片合成、摘要不同：按 diff 删 / 重算 / 改列。
     Apply(TopologyDiff),
-    /// 摄入侧参照与常驻模型同源却对不上：库被恢复 / 手改，标 `rebuild_required` 走显式全量。
+    /// **同一组文件版本**（`key` 相等）拓扑摘要却不同：分片 / 拓扑行被恢复或手改。不猜，标
+    /// `rebuild_required` 走显式全量。两形态同判。
     IntegrityMismatch { expected: String, actual: String },
-    /// 参照在但读不回来（分片缺失 / 校验失败）：不猜，走显式全量。
+    /// 参照在但旧视图读不回来（分片缺失 / 校验失败 / `compose` 失败）：不猜，走显式全量。
     ReferenceUnreadable(String),
 }
 
@@ -849,7 +924,7 @@ impl StartupRoomPlan {
             Self::Unchanged => "参照摘要 == 现状 → 零写入".into(),
             Self::Apply(diff) => format!("对比 → {}", diff.summary()),
             Self::IntegrityMismatch { expected, actual } => format!(
-                "摄入侧参照与常驻模型同源却不等（{} ≠ {}）→ rebuild_required",
+                "同一组文件版本拓扑摘要却不等（{} ≠ {}）：库被恢复 / 手改 → rebuild_required",
                 &expected[..expected.len().min(12)],
                 &actual[..actual.len().min(12)]
             ),
@@ -860,8 +935,10 @@ impl StartupRoomPlan {
     }
 }
 
-/// 纯函数：参照 + 现状 + （读透）参照合成的旧视图 → 计划。`reference_map` 只在读透且
-/// 摘要不等时才被看；读不回来传 `Err(原因)`。
+/// 纯函数：参照 + 现状 + 参照合成的旧视图 → 计划。三层版本按序比（d-42）：先比内容摘要
+/// （`digest`），相等就零写入；不等再看身份键（`key`）——同键 = 同一组文件版本拓扑却不同，
+/// 只能是库被动过；键不同才是真的有文件前进，拿 `reference_map`（调用方按参照令牌从分片合成
+/// 的旧视图）diff。`reference_map` 只在走到最后一臂时才被看；读不回来传 `Err(原因)`。
 pub(crate) fn plan_startup(
     reference: Option<&ResidentReference>,
     current: &ResidentRoomModel,
@@ -877,18 +954,16 @@ pub(crate) fn plan_startup(
     if reference.digest == current.digest {
         return StartupRoomPlan::Unchanged;
     }
-    match current.manifest.form {
-        ResidentForm::Published => StartupRoomPlan::IntegrityMismatch {
+    if reference.key == current.manifest.key {
+        return StartupRoomPlan::IntegrityMismatch {
             expected: reference.digest.clone(),
             actual: current.digest.clone(),
-        },
-        ResidentForm::Latest => match reference_map {
-            Some(Ok(old)) => StartupRoomPlan::Apply(TopologyDiff::between(old, &current.map)),
-            Some(Err(reason)) => StartupRoomPlan::ReferenceUnreadable(reason),
-            None => StartupRoomPlan::ReferenceUnreadable(
-                "读透侧对比需要参照合成的旧视图，调用方没给".into(),
-            ),
-        },
+        };
+    }
+    match reference_map {
+        Some(Ok(old)) => StartupRoomPlan::Apply(TopologyDiff::between(old, &current.map)),
+        Some(Err(reason)) => StartupRoomPlan::ReferenceUnreadable(reason),
+        None => StartupRoomPlan::ReferenceUnreadable("对比需要参照合成的旧视图，调用方没给".into()),
     }
 }
 
@@ -2438,7 +2513,7 @@ mod tests {
             StartupRoomPlan::NoReference
         );
 
-        // 摄入侧摘要不等 = 库被动过。
+        // 同键摘要不等 = 同一组文件版本拓扑却不同 = 库被动过（两形态同判）。
         let mut tampered = ResidentReference::for_model(&current_published);
         tampered.digest = "not-the-same".into();
         assert!(matches!(
@@ -2446,7 +2521,7 @@ mod tests {
             StartupRoomPlan::IntegrityMismatch { .. }
         ));
 
-        // 读透侧：摘要不等 → 拿旧视图 diff；旧视图读不回来 → 不猜。
+        // 键不同（文件真前进了）：摘要不等 → 拿旧视图 diff；旧视图读不回来 → 不猜。
         let renamed = vec![
             group(5, "/1RX-RM03-R309", &[7, 8]),
             group(6, "/1RX-RM03-R302", &[9]),
@@ -2484,6 +2559,194 @@ mod tests {
             plan_startup(Some(&reference), &current_latest, None),
             StartupRoomPlan::ReferenceUnreadable(_)
         ));
+    }
+
+    /// d-42：摄入侧不再是恒等式——键不同就拿旧视图 diff，与读透同一张臂表；`IntegrityMismatch`
+    /// 只留给「同键不等」，两形态同判，旧视图给了也不看。回退到「摄入侧摘要不等即 mismatch」即红。
+    #[test]
+    fn plan_startup_diffs_by_key_in_both_forms_and_reserves_mismatch_for_the_same_key() {
+        let old = model_of(groups(), vec![], Arc::default());
+        assert_eq!(old.manifest.form, ResidentForm::Published);
+        let renamed = vec![
+            group(5, "/1RX-RM03-R309", &[7, 8]),
+            group(6, "/1RX-RM03-R302", &[9]),
+        ];
+        let current = ResidentRoomModel::assemble(
+            manifest(ResidentForm::Published, "m2"),
+            renamed.clone(),
+            map_of(&renamed),
+            vec![],
+            Arc::default(),
+        );
+        let reference = ResidentReference::for_model(&old);
+        assert_ne!(reference.key, current.manifest.key);
+
+        let plan = plan_startup(Some(&reference), &current, Some(Ok(&old.map)));
+        let StartupRoomPlan::Apply(diff) = &plan else {
+            panic!("摄入侧键不同必须走 diff，不是 IntegrityMismatch: {plan:?}");
+        };
+        assert_eq!(diff.renumbered_rooms.len(), 1);
+        assert!(diff.removed_panels.is_empty() && diff.recalc_panels.is_empty());
+        assert!(matches!(
+            plan_startup(Some(&reference), &current, None),
+            StartupRoomPlan::ReferenceUnreadable(_)
+        ));
+        assert_eq!(
+            plan_startup(Some(&reference), &current, Some(Err("checksum".into()))),
+            StartupRoomPlan::ReferenceUnreadable("checksum".into())
+        );
+
+        let mut same_key = ResidentReference::for_model(&current);
+        same_key.digest = "tampered".into();
+        assert!(matches!(
+            plan_startup(Some(&same_key), &current, Some(Ok(&old.map))),
+            StartupRoomPlan::IntegrityMismatch { .. }
+        ));
+        let current_latest = ResidentRoomModel::assemble(
+            manifest(ResidentForm::Latest, "c1"),
+            renamed.clone(),
+            map_of(&renamed),
+            vec![],
+            Arc::default(),
+        );
+        let mut latest_same_key = ResidentReference::for_model(&current_latest);
+        latest_same_key.digest = "tampered".into();
+        assert!(matches!(
+            plan_startup(Some(&latest_same_key), &current_latest, Some(Ok(&old.map))),
+            StartupRoomPlan::IntegrityMismatch { .. }
+        ));
+    }
+
+    /// `mem://` 门（d-42）：摄入模型带清单 DESI 行的令牌；参照写进去后按令牌从分片合成的旧视图
+    /// 与现状逐字相等（同一批分片、同一个 `compose`）；任一令牌的分片缺失、或模型没有令牌，
+    /// 参照拒写且原行不动。
+    #[tokio::test]
+    async fn published_reference_carries_the_manifest_tokens_and_is_refused_while_a_shard_is_missing()
+     {
+        use crate::fast_model::room_topology::published_topology_manifest_key;
+        use crate::fast_model::room_topology_source::{compose, persist_on};
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("room_resident")
+            .use_db("published_reference")
+            .await
+            .unwrap();
+        let a = shard(1, "/A-RM-R101");
+        let b = shard(2, "/B-RM-R201");
+        persist_on(&db, &a).await.unwrap();
+        persist_on(&db, &b).await.unwrap();
+        let inputs = vec![
+            published_input(1, a.source_sesno as i32, &a.source_token),
+            published_input(2, b.source_sesno as i32, &b.source_token),
+        ];
+        let key = published_topology_manifest_key(&inputs, RoomHierarchy::Hd);
+        // 清单拓扑行就是这批分片合成出来的（生产里 `render_stage_published_room_topology` 同一个
+        // `compose`）。
+        let composed = compose(&[a.clone(), b.clone()], RoomHierarchy::Hd).unwrap();
+        let statements: Vec<String> = composed
+            .iter()
+            .map(|(dbnum, groups)| {
+                format!(
+                    "CREATE room_published_topology:t{dbnum} SET manifest_key = '{key}', \
+                     dbnum = {dbnum}, groups = {};",
+                    serde_json::to_string(groups).unwrap()
+                )
+            })
+            .collect();
+        db.query(statements.join(" "))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let model = load_published_on(
+            &db,
+            &inputs,
+            RoomHierarchy::Hd,
+            &keywords(),
+            match_room_name_hd,
+            Arc::default(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            model.source_tokens,
+            vec![a.source_token.clone(), b.source_token.clone()],
+            "摄入模型带清单 DESI 行的令牌，按 dbnum 序"
+        );
+        assert_eq!(model.map.rooms.len(), 2);
+
+        let reference = persist_reference_on(&db, &model).await.unwrap();
+        assert_eq!(
+            (reference.form.as_str(), reference.key.as_str()),
+            ("published", key.as_str())
+        );
+        assert_eq!(reference.tokens, model.source_tokens);
+        assert_eq!(
+            read_resident_reference_on(&db).await.unwrap(),
+            Some(reference.clone())
+        );
+
+        let (old_groups, old_map) = load_reference_map_on(
+            &db,
+            &reference,
+            RoomHierarchy::Hd,
+            &keywords(),
+            match_room_name_hd,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            topology_digest(&old_groups),
+            model.digest,
+            "按令牌合成的旧视图 == 现状"
+        );
+        assert_eq!(old_map.rooms.len(), model.map.rooms.len());
+        for room in &model.map.rooms {
+            for panel in &room.panels {
+                assert_eq!(old_map.room_num_of(*panel), Some(room.room_num.as_str()));
+            }
+        }
+        assert_eq!(
+            plan_startup(Some(&reference), &model, Some(Ok(&old_map))),
+            StartupRoomPlan::Unchanged
+        );
+
+        // 第三个文件的令牌没冻分片：拒写，原参照行不动。
+        let c = shard(3, "/C-RM-R301");
+        let stale = ResidentRoomModel::assemble(
+            manifest(ResidentForm::Published, "m-next"),
+            model.groups.clone(),
+            registered_map(&model.groups, &keywords(), match_room_name_hd),
+            vec![],
+            Arc::default(),
+        )
+        .with_source_tokens(vec![a.source_token.clone(), c.source_token.clone()]);
+        let error = persist_reference_on(&db, &stale)
+            .await
+            .expect_err("c 的分片还没落");
+        let text = format!("{error:#}");
+        assert!(
+            text.contains("分片缺失") && text.contains("3@"),
+            "错误要点名哪一片: {text}"
+        );
+        assert_eq!(
+            read_resident_reference_on(&db).await.unwrap(),
+            Some(reference.clone()),
+            "拒写时参照行不动"
+        );
+
+        // 没有令牌的模型同样拒写。
+        let tokenless = model_of(groups(), vec![], Arc::default());
+        let error = persist_reference_on(&db, &tokenless)
+            .await
+            .expect_err("没有令牌就没有旧视图");
+        assert!(format!("{error:#}").contains("没有来源令牌"), "{error:#}");
+        assert_eq!(
+            read_resident_reference_on(&db).await.unwrap(),
+            Some(reference)
+        );
     }
 
     /// 改列只碰交集里面板的边：`room_num` 变、边 id 不变、别的房间与不在交集的面板原样。
@@ -3110,9 +3373,10 @@ mod tests {
         );
     }
 
-    /// 源码钉（原则 4）：三份房间文件不认识 `watch_scope`——哪些清单行归文件轮次管由调用方传进来，
+    /// 源码钉（原则 4）：四份房间文件不认识 `watch_scope`——哪些清单行归文件轮次管由调用方传进来，
     /// 房间是参照系，不是增量的一部分。注释里可以提它（说明为什么不引用），代码行里不许出现
-    /// 这个模块名（`use` 与 `watch_scope::…` 路径都算）。
+    /// 这个模块名（`use` 与 `watch_scope::…` 路径都算）。`room_startup.rs`（启动对比与应用，d-42）
+    /// 同受此钉：对比不限初始化前进过的库（D3），它不需要知道限定域。
     #[test]
     fn room_files_never_consult_the_watch_scope() {
         let needle = ["watch_", "scope"].concat();
@@ -3127,6 +3391,7 @@ mod tests {
                 "room_topology_source.rs",
                 include_str!("room_topology_source.rs"),
             ),
+            ("room_startup.rs", include_str!("room_startup.rs")),
         ] {
             for (index, line) in source.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or_default();
