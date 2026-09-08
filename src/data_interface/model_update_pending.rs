@@ -6296,6 +6296,11 @@ async fn drain_rooms_selected(
         crate::data_interface::side_effect_pending::SideEffectCompensator::
             published_spatial_version()
         .await?;
+    // 换代点（常驻房间模型 P2）：把这一路的模型对齐到此刻那一组文件版本——**串行锁之内、
+    // 读任务之前**。身份键没变是常路（一次探针查询，直接复用上一轮那份 `Arc`）；键变了才
+    // 整份重建。换代、读任务、写归属边落在同一段串行区里，算到一半模型被换掉就是拿旧拓扑
+    // 写新边，而且两边都不报错。开关关着时是 `None`，下面每一处都走今天的读法。
+    let resident = ensure_resident_rooms(db_option).await?;
     // Panels are always complete-before-elements. The scoped path selects exact
     // record ids; element records themselves are not accumulated across pages.
     //
@@ -6332,7 +6337,13 @@ async fn drain_rooms_selected(
         });
     }
 
-    let rooms = room_model::load_room_panel_map(db_option).await?;
+    // 拓扑从常驻模型取——它就是「过了关键字与命名校验的在册视图」，与
+    // `load_room_panel_map` 的产物同形（`room_resident::registered_map`）。每轮各读一次
+    // 拓扑在 ams7997 上是 6–7 s / 文件；常驻之后只有换代那一轮付。
+    let rooms = match resident.as_ref() {
+        Some(model) => model.map.clone(),
+        None => room_model::load_room_panel_map(db_option).await?,
+    };
     // Panel geometry is loaded once for the complete scoped drain and reused by
     // every 256-element history page. The view (published rows vs live rows)
     // follows the data face, the same choice the panel branch makes.
@@ -6420,7 +6431,101 @@ async fn drain_rooms_selected(
         )
         .await;
     }
+    // 写点 ③（S4）：仍在串行锁之内，参照说的就是刚才那份清单。
+    if let Some(model) = resident.as_ref() {
+        settle_resident_reference(model, &report).await;
+    }
     Ok(report)
+}
+
+/// 开关开着时把常驻房间模型对齐到此刻的文件版本，交回这一轮归属要用的那份。
+///
+/// **调用方必须已持 `lock_spatial_serial`**（源码钉
+/// `the_resident_generation_swap_happens_inside_the_spatial_serial_lock`）。
+///
+/// `None` 有三种，都回到今天的读法（每轮各查一次拓扑与几何）：开关关着、这个构建没有
+/// 房间层级、摄入侧还没有发布清单（升级基线未建）。建不起来才是 `Err`——那时按原则 2
+/// 止步，不拿半份拓扑改写存量边。
+async fn ensure_resident_rooms(
+    db_option: &aios_core::options::DbOption,
+) -> anyhow::Result<Option<std::sync::Arc<crate::fast_model::room_resident::ResidentRoomModel>>> {
+    if !crate::options::room_resident_model() {
+        return Ok(None);
+    }
+    let Some(hierarchy) = crate::fast_model::room_topology::RoomHierarchy::configured() else {
+        return Ok(None);
+    };
+    #[cfg(any(feature = "project_hd", feature = "project_hh"))]
+    let match_room_fn = room_model::configured_match_room_fn();
+    #[cfg(not(any(feature = "project_hd", feature = "project_hh")))]
+    let match_room_fn = |_: &str| false;
+    let room_key_words = db_option.get_room_key_word();
+    let outcome = crate::fast_model::room_resident::ensure_current(
+        crate::options::data_face(),
+        hierarchy,
+        &room_key_words,
+        match_room_fn,
+    )
+    .await?;
+    Ok(outcome.map(|outcome| outcome.model))
+}
+
+/// 写点 ③（常驻房间模型 S4）：一轮 drain 全成、且房间表里一个活口都不剩时，把这一份
+/// 拓扑钉成参照。
+///
+/// 参照的含义是「库里的归属边就是按这份拓扑算出来的」，下次启动拿它做增量对比。所以
+/// 两个前提缺一不可：本轮**没有失败**，以及此刻**没有任何未消费的房间目标**（含死信）。
+/// 少了后一条就可能有一块面板的边还停在上一份拓扑上，而参照却说它是新的——下次启动
+/// 的 diff 会把这块面板算成「没变」，那条陈旧的边就永久留下来了，静默且无日志。
+///
+/// 写失败只影响下次启动（退回 `NoReference` → 全量一次，多算不漏算），所以只出声、
+/// 不让本轮 drain 失败。
+async fn settle_resident_reference(
+    model: &crate::fast_model::room_resident::ResidentRoomModel,
+    report: &DrainReport,
+) {
+    if !report.failures.is_empty() {
+        return;
+    }
+    match room_work_is_drained().await {
+        Ok(true) => {}
+        Ok(false) => return,
+        Err(error) => {
+            println!("[房间参照] 无法确认房间目标是否已清空，参照不写: {error:#}");
+            return;
+        }
+    }
+    match crate::fast_model::room_resident::persist_reference(model).await {
+        Ok(reference) => println!(
+            "[房间参照] 一轮 drain 全成、房间目标已清空：参照已更新 {} {}（{} 间房 / {} 块在册面板 / {} 个令牌）",
+            reference.form,
+            reference.key.chars().take(12).collect::<String>(),
+            reference.rooms,
+            reference.registered_panels,
+            reference.tokens.len()
+        ),
+        Err(error) => println!("[房间参照] 参照未更新: {error:#}"),
+    }
+}
+
+/// 房间表里还有没有活口——**含死信**。
+///
+/// `has_pending_work` 那一支只看还会被重试的行；撞满 [`MAX_ATTEMPTS`] 的死信行同样是
+/// 「这个目标没算成」，对参照而言两者没有区别。
+async fn room_work_is_drained() -> anyhow::Result<bool> {
+    if has_pending_work(ROOM_ACTION_FILTER).await? {
+        return Ok(false);
+    }
+    let mut response = SUL_DB
+        .query(render_has_pending_work_query(
+            ROOM_ACTION_FILTER,
+            ">=",
+            &crate::data_interface::watch_scope::dbnums(),
+            &crate::data_interface::model_type_scope::nouns(),
+        ))
+        .await?
+        .check()?;
+    Ok(!response.take::<Option<bool>>(0)?.unwrap_or(true))
 }
 
 async fn drain_room_element_page(
@@ -7450,6 +7555,124 @@ mod tests {
         );
     }
 
+    /// 换代点（常驻房间模型 P2）必须落在串行锁**之内**、读任务**之前**。
+    ///
+    /// 锁外换代 = 算到一半模型被替掉，拿旧拓扑写新边，两边都不报错。读完任务再换代
+    /// 同样不行：那一批任务是按上一份拓扑派生的，配上新拓扑就是张冠李戴。
+    #[test]
+    fn the_resident_generation_swap_happens_inside_the_spatial_serial_lock() {
+        let source = include_str!("model_update_pending.rs");
+        let head = source
+            .split_once("async fn drain_rooms_selected(")
+            .expect("room drain must exist")
+            .1
+            .split_once("let panels = ")
+            .expect("面板任务加载必须存在")
+            .0;
+        let lock = head
+            .find("lock_spatial_serial().await")
+            .expect("房间计算必须固定一个已发布版本");
+        let swap = head
+            .find("ensure_resident_rooms(db_option)")
+            .expect("换代点必须在读任务之前调");
+        assert!(lock < swap, "换代必须在串行锁之内: {head}");
+    }
+
+    /// 开关开着时拓扑从常驻模型取；关着时**一字不动**地走今天的读法。
+    ///
+    /// 常驻那份 `map` 与 `load_room_panel_map` 的产物同形（都出自
+    /// `room_resident::registered_map`），换的只是「从哪拿」，不是「怎么算」。
+    #[test]
+    fn the_room_drain_takes_its_topology_from_the_resident_model_when_it_is_on() {
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("async fn drain_rooms_selected(")
+            .expect("room drain must exist")
+            .1
+            .split_once("async fn ensure_resident_rooms(")
+            .expect("room drain boundary")
+            .0;
+        assert!(
+            body.contains("Some(model) => model.map.clone()"),
+            "开着时拓扑必须从常驻模型取: {body}"
+        );
+        assert!(
+            body.contains("None => room_model::load_room_panel_map(db_option).await?"),
+            "关着时必须回到今天的读法: {body}"
+        );
+        let ensure = source
+            .split_once("async fn ensure_resident_rooms(")
+            .expect("换代点入口")
+            .1
+            .split_once("\n}\n")
+            .expect("入口结束")
+            .0;
+        assert!(
+            ensure.contains("crate::options::room_resident_model()"),
+            "换代点必须受开关门控: {ensure}"
+        );
+        assert!(
+            ensure.contains("crate::options::data_face()"),
+            "取哪一路模型由数据面决定，不许在这里点名形态: {ensure}"
+        );
+    }
+
+    /// 写点 ③（S4）：一轮 drain 之后写参照，要同时满足「本轮无失败」与「房间表清空」。
+    ///
+    /// 少了后一条，参照就会在还有目标没消费时宣称「边 == 这份拓扑」——下次启动的 diff
+    /// 把那块面板算成没变，陈旧的边永久留下，静默且无日志。死信也算没消费：撞满
+    /// `MAX_ATTEMPTS` 不会让那条边变正确。
+    #[test]
+    fn the_third_reference_write_needs_a_clean_round_and_an_empty_room_queue() {
+        let source = include_str!("model_update_pending.rs");
+        let drain = source
+            .split_once("async fn drain_rooms_selected(")
+            .expect("room drain must exist")
+            .1
+            .split_once("async fn ensure_resident_rooms(")
+            .expect("room drain boundary")
+            .0;
+        let pages = drain
+            .rfind("drain_room_element_page(")
+            .expect("元素页必须存在");
+        let write = drain
+            .find("settle_resident_reference(model, &report)")
+            .expect("写点 ③ 必须存在");
+        assert!(pages < write, "参照要在元素页都跑完之后才写: {drain}");
+
+        let settle = source
+            .split_once("async fn settle_resident_reference(")
+            .expect("写点 ③ 入口")
+            .1
+            .split_once("\n}\n")
+            .expect("入口结束")
+            .0;
+        assert!(
+            settle.contains("report.failures.is_empty()"),
+            "本轮有失败就不许推进参照: {settle}"
+        );
+        assert!(
+            settle.contains("room_work_is_drained()"),
+            "还有未消费的房间目标就不许推进参照: {settle}"
+        );
+
+        let drained = source
+            .split_once("async fn room_work_is_drained(")
+            .expect("清空判定")
+            .1
+            .split_once("\n}\n")
+            .expect("判定结束")
+            .0;
+        assert!(
+            drained.contains("has_pending_work(ROOM_ACTION_FILTER)"),
+            "会被重试的行要算: {drained}"
+        );
+        assert!(
+            drained.contains("\">=\""),
+            "死信同样是「这个目标没算成」，一样要算: {drained}"
+        );
+    }
+
     #[test]
     fn room_drain_reads_the_committed_room_geometry_view() {
         let source = include_str!("model_update_pending.rs");
@@ -7475,9 +7698,7 @@ mod tests {
         let baseline_at = body
             .find("ensure_published_file_baseline(0, 0)")
             .expect("ingest 形态仍要建基线");
-        let face_at = body
-            .find("data_face()")
-            .expect("基线与视图都要问数据面");
+        let face_at = body.find("data_face()").expect("基线与视图都要问数据面");
         assert!(face_at < baseline_at, "建基线之前先问数据面: {body}");
     }
 

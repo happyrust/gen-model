@@ -2838,10 +2838,13 @@ mod tests {
         assert_eq!(edges.len(), 4, "改列不增删边");
     }
 
-    /// 回退即红：归属路径只许经 `for_membership` 取模型。P2 接线前这里是空转（两份文件的
-    /// **代码行**里还没有 `room_resident` 的字样；注释可以提——`room_model.rs` 的凭据读法就
-    /// 在注释里点名 `resident_blocked` 为什么会先于全量重建把行建出来），接线后任何一处直接摸
-    /// `latest` / `generations` 都红。
+    /// 回退即红：归属路径只许经 [`ensure_current`]（它内部是唯一调 [`ResidentRooms::for_membership`]
+    /// 的地方）取模型，不许自己摸进程单例、两代或点名形态。
+    ///
+    /// P2 接线后 `model_update_pending.rs` 的换代点走的就是 `ensure_current`；哪一路由
+    /// `data_face()` 决定，代码里出现 `ResidentForm::Latest` 就是绕开了这个决定。注释可以提
+    /// ——`room_model.rs` 的凭据读法就在注释里点名 `resident_blocked` 为什么会先于全量重建
+    /// 把行建出来。
     #[test]
     fn membership_paths_only_take_the_model_through_for_membership() {
         for (name, source) in [
@@ -2862,14 +2865,16 @@ mod tests {
                 .collect();
             for line in &mentions {
                 assert!(
-                    !line.contains(".generations(") && !line.contains("ResidentForm::Latest"),
-                    "{name}: 归属路径不得直接摸两代或点名 latest: {line}"
+                    !line.contains(".generations(")
+                        && !line.contains("ResidentForm::Latest")
+                        && !line.contains("resident_rooms()"),
+                    "{name}: 归属路径不得直接摸进程单例、两代或点名形态: {line}"
                 );
             }
             if !mentions.is_empty() {
                 assert!(
-                    source.contains("for_membership("),
-                    "{name}: 用了常驻模型却没经 for_membership 取"
+                    source.contains("for_membership(") || source.contains("ensure_current("),
+                    "{name}: 用了常驻模型却没经 for_membership / ensure_current 取"
                 );
             }
         }

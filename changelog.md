@@ -2,6 +2,32 @@
 
 ## 2026-09-08
 
+### 常驻房间模型 P2-a：增量的拓扑源改成常驻模型，换代点落在串行锁里，一轮全成写参照
+
+常驻房间模型（`room_resident.rs`）此前只在启动那一下用得上——`ensure_current` 的生产调用方只有启动段两处，
+稳态的每一轮 drain 照旧各读一次房间拓扑（ams7997 实测 6–7 s / 文件）。这一笔把它接进 `drain_rooms_selected`。
+开关 `room_resident_model` **默认仍关**，关着时每一处走今天的路。计划见
+`docs/plans/2026-09-07-resident-room-model-plan.md` §3 P2（P2-a 落地记）。
+
+- **换代点在串行锁之内、读任务之前**：新入口 `ensure_resident_rooms(db_option)` 排在 `lock_spatial_serial()` 与
+  `published_spatial_version()` 之后、`let panels =` 之前，内部只调 `room_resident::ensure_current(data_face(), …)`
+  ——哪一路模型由数据面决定，不在调用方点名形态。身份键没变是常路（一次探针查询，直接复用上一轮那份 `Arc`）。
+  锁外换代 = 算到一半模型被替掉、拿旧拓扑写新边，两边都不报错；读完任务再换代则是拿新拓扑配旧派生的任务。
+- **拓扑从常驻模型取**：`let rooms` 开着取 `model.map.clone()`（与 `load_room_panel_map` 同形，都出自
+  `registered_map`），关着走原来那一行。`None` 有三种——开关关着、这个构建没有房间层级、摄入侧还没有发布
+  清单——都回到今天的读法；建不起来才是 `Err`，整轮止步，不拿半份拓扑改写存量边。
+- **写点 ③：一轮 drain 全成之后写参照**：末尾仍在串行锁之内调 `settle_resident_reference`，要求本轮
+  `report.failures.is_empty()` **且** `room_work_is_drained()`——房间表里连死信都不剩。少了后一条就可能有一块
+  面板的边还停在上一份拓扑上，参照却宣称「边 == 这份拓扑」，下次启动的 diff 把它算成没变，那条陈旧的边
+  永久留下且无日志。写失败只出声、不让本轮 drain 失败（退路是下次启动 `NoReference` → 全量一次）。
+- **源码钉 +3**：换代在锁之后、两态各自的取法与开关门控、写点 ③ 的两条前提（死信也算没消费）。P1 那条
+  `membership_paths_only_take_the_model_through_for_membership` 放宽为「经 `for_membership` 或 `ensure_current`」
+  并补禁直接摸 `resident_rooms()`——`ensure_current` 内部是唯一调 `for_membership` 的地方。
+- **几何侧没动**（P2-b）：`load_consumption_panel_index` 仍每轮查库、面板三角网仍按面板各读一次 `.mesh`，
+  `GroupCache` 仍不淘汰。跨代 `MeshCache` 因此在增量侧还没生效。`mem://` 两态逐边门未跑。
+- 验证：`cargo test --lib` **1829 passed / 0 failed / 118 ignored**（本笔之前 1826）；`cargo check --tests` 通过；
+  `rustfmt --edition 2024 --check` 干净。未起服务。
+
 ### 房间增量审核 F-C：一根失败单元不再把整个库的文件轮次永久钉在 `collecting`
 
 `publish_completed_file_round` 的完成屏障（追平冻结右端 + 批次成功 + 交付单元全部生成）只在数据批次跑完那

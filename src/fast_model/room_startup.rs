@@ -1327,6 +1327,10 @@ mod tests {
     /// 源码钉：`persist_reference(` 的生产调用点只有两处（写点 ① 对比应用全成、写点 ② 显式全量
     /// 全成），每处紧邻「全部成功」判定。
     #[test]
+    /// 写点 ③（一轮 drain 全成）不在本文件，在 `model_update_pending.rs`——它有自己的钉
+    /// （`the_third_reference_write_needs_a_clean_round_and_an_empty_room_queue`）。这里数的
+    /// 是**启动侧**的写点。
+    #[test]
     fn the_reference_is_written_at_exactly_two_places_each_behind_a_success_check() {
         let code = code_lines(production_source());
         let calls: Vec<usize> = code

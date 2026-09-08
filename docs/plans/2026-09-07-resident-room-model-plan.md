@@ -103,6 +103,8 @@ ResidentRooms { published: Option<Arc<ResidentRoomModel>>, latest: Option<Arc<Re
 
 ### P2 · 计算源接线（1.5 天，开关下，等邻线 F-A/F-B 提交后动）
 
+状态：**P2-a 已落地**（换代点 + 拓扑源 + 写点 ③，见下面落地记）；**P2-b 未做**（几何侧 `PanelIndex` / 三角网 / `GroupCache` 两代）。
+
 开关 `room_resident_model`（`DbOption.toml`）/ `AIOS_ROOM_RESIDENT_MODEL`，**默认 false**，取值规则同 `room_incremental`（`options.rs`）。关着时下面每一处都走今天的路，一字不动。
 
 - `model_update_pending.rs` `drain_rooms_selected`：进 `lock_spatial_serial()` 之后、读任务之前——开关开时 `ResidentRooms::ensure_current(face)`：摄入按 `published_file_inputs()` 算清单键、读透按 `from_current().design_sources()` 算会话摘要，与常驻那份的 `manifest` 不同才重建（重建即换代，整份替换，仍在锁下——**这就是换代点**，工程默认③；不改 `batch_worker.rs`，F-C 那条线多调一次 `publish_completed_file_round` 只会更早触发一次换代）。随后 `rooms` / `panel_index` 从常驻模型取，不再每轮 `load_room_panel_map` + `load_consumption_panel_index`。
@@ -112,6 +114,15 @@ ResidentRooms { published: Option<Arc<ResidentRoomModel>>, latest: Option<Arc<Re
 - `mem://` 门：同一批面板/元素任务，开关两态 `room_relate` / `room_panel_relate` **逐边相同**（F-A/F-B 之后 `model_update_pending` 现有的 248 条测试全绿是前置）。
 
 验收：`cargo test --lib -- room_resident room_model room_publication room_topology model_update_pending` 0 failed；两态逐边门绿；开关关时 `git diff` 之外行为逐字不变（现有源码钉全绿）。
+
+**P2-a 落地记（2026-09-08，换代点 + 拓扑源 + 写点 ③；几何侧未动）**——只碰 `model_update_pending.rs` 与两处源码钉：
+
+- **换代点接上了**。`drain_rooms_selected` 在 `lock_spatial_serial()` 与 `published_spatial_version()` 之后、`let panels =` 读任务之前调新入口 `ensure_resident_rooms(db_option)`：开关关着 / 这个构建没有房间层级 / 摄入侧还没有发布清单 → `None`，下面每一处走今天的读法；建不起来 → `Err`，按原则 2 整轮止步，不拿半份拓扑改写存量边。入口内部只调 `room_resident::ensure_current(data_face(), …)`，形态由数据面决定，不在这里点名。`ensure_current` 从此有了生产调用方（此前只有启动段的两处）。
+- **拓扑改从常驻模型取**。`let rooms` 由 `match resident.as_ref()` 分岔：开着取 `model.map.clone()`（与 `load_room_panel_map` 同形，都出自 `registered_map`），关着走原来那一行。这一步吃掉的是「每轮各读一次拓扑」——ams7997 上 6–7 s / 文件，常驻之后只有换代那一轮付。
+- **写点 ③（S4）**。`drain_rooms_selected` 末尾、仍在串行锁之内调 `settle_resident_reference`：本轮 `report.failures.is_empty()` **且** `room_work_is_drained()`（房间表里连死信都不剩）才 `persist_reference`。两条缺一不可——还有一个目标没消费就写参照，等于宣称「边 == 这份拓扑」，下次启动的 diff 会把那块面板算成没变，陈旧的边永久留下且无日志。写失败只出声、不让本轮 drain 失败（退路：下次启动 `NoReference` → 全量一次，多算不漏算）。三处早退（`loaded == 0`、`data_batch_waiting()` 让位、失败）都不写。
+- **源码钉 +3**（`model_update_pending.rs`）：`the_resident_generation_swap_happens_inside_the_spatial_serial_lock`（锁在换代之前）、`the_room_drain_takes_its_topology_from_the_resident_model_when_it_is_on`（两态各自的取法 + 换代点受开关与数据面门控）、`the_third_reference_write_needs_a_clean_round_and_an_empty_room_queue`（写点在元素页之后、两条前提都在、死信也算没消费）。P1 那条 `membership_paths_only_take_the_model_through_for_membership` 放宽为「经 `for_membership` **或** `ensure_current`」并补禁 `resident_rooms()`——`ensure_current` 内部是唯一调 `for_membership` 的地方，它就是 P2 唯一许可的取法；`room_startup.rs` 的「写点只有两处」那条钉只数**启动侧**，补了一句注释指向写点 ③。
+- 验证：`cargo test --lib` **1829 passed / 0 failed / 118 ignored**（此前基线 1826）；`rustfmt --edition 2024 --check` 干净。
+- **未做（P2-b）**：几何侧仍每轮 `load_consumption_panel_index` 查库、`PanelEntry` 仍按面板各读一次 `.mesh`——`load_panel_index_from` 由常驻 `panels` / `meshes` 组 `PanelIndex`、`recalc_panel_membership_inner` / `cal_room_refnos_from` 改从 `for_membership()` 取、`GroupCache` 改两代，这三条一条没动。`mem://` 两态逐边门也未跑。跨代三角网复用（`MeshCache`）因此在增量侧还没生效，只有启动对比用上了。
 
 ### P3 · 房间初始化、启动对比与全量降级（2.5 天）
 
