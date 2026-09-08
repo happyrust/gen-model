@@ -195,6 +195,13 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_entry_drop_no_geometry: Option<bool>,
 
+    /// direct 窗口规划器的元数据门（**默认开**，2026-09-08）：一个元素这一窗只改了
+    /// `NAME / DESC / PURP / FUNC / LCHKDA`（效果表 DataOnly ∧ 字典 DCHC=0）且成员 / 属主 / 类型都没动，
+    /// 不上卷成单元、不让它的根重算；账本与闭包种子照收。`false` = 回到「任何属性变了就整根算」。
+    /// 详见 [`model_skip_metadata_only_changes`]。
+    #[serde(default)]
+    pub model_skip_metadata_only_changes: Option<bool>,
+
     /// 结构连接正向级联（联动对齐计划 C2，默认关闭）：窗口里改了 `SJOI` / `FIXING` / `SCTN` …
     /// 时，把 `CREF` / `JOIS` / `JOIE` / `CFRA` 回指成立的对端的生成根一起重算。
     /// 详见 [`model_structural_connection_cascade`]。
@@ -271,6 +278,7 @@ impl From<DbOption> for DbOptionExt {
             model_xgeometry_gate: None,
             model_significant_over_point: None,
             model_entry_drop_no_geometry: None,
+            model_skip_metadata_only_changes: None,
             model_structural_connection_cascade: None,
             model_cable_endpoint_cascade: None,
             model_design_reference_cascade: None,
@@ -363,6 +371,8 @@ struct DbOptionExtFields {
     model_significant_over_point: Option<bool>,
     #[serde(default)]
     model_entry_drop_no_geometry: Option<bool>,
+    #[serde(default)]
+    model_skip_metadata_only_changes: Option<bool>,
     #[serde(default)]
     model_structural_connection_cascade: Option<bool>,
     #[serde(default)]
@@ -556,6 +566,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_xgeometry_gate: ext.model_xgeometry_gate,
         model_significant_over_point: ext.model_significant_over_point,
         model_entry_drop_no_geometry: ext.model_entry_drop_no_geometry,
+        model_skip_metadata_only_changes: ext.model_skip_metadata_only_changes,
         model_structural_connection_cascade: ext.model_structural_connection_cascade,
         model_cable_endpoint_cascade: ext.model_cable_endpoint_cascade,
         model_design_reference_cascade: ext.model_design_reference_cascade,
@@ -1400,6 +1411,41 @@ pub fn model_entry_drop_no_geometry() -> bool {
     )
 }
 
+/// 环境变量名：一次性覆盖 [`model_skip_metadata_only_changes`]，不必改配置文件。
+pub const MODEL_SKIP_METADATA_ONLY_CHANGES_ENV: &str = "AIOS_MODEL_SKIP_METADATA_ONLY_CHANGES";
+
+/// direct 窗口规划器的元数据门（`DbOption.toml` 的 `model_skip_metadata_only_changes`，
+/// **默认 true**，2026-09-08）。
+///
+/// 开着时 `WindowRootSources::collect` 经 e3d-model `plan_update_with` 给规划器一条谓词
+/// （`window_root_plan::change_is_metadata_only`）：一个 Modified 候选的改动**全部**落在
+/// `model_impact::attribute_is_metadata_only` 放行的属性上（效果表 DataOnly **且** E3D 字典
+/// DCHC=0，今天就是 `NAME / DESC / PURP / FUNC / LCHKDA` 五个）、且成员 / 属主 / 类型 / opaque 都没动
+/// → 记 `no_model`、不上卷、不级联；它的根不因它进 `regen`。账本照记、闭包种子照收，凭证前移
+/// 与房间结构触发（改名进 `RoomRecalcPanel`）都不受影响。此前 direct 路径对「改了哪个属性」
+/// 一律不分：改一个 ELBO 的 NAME 就是它的 BRAN 整根重算。
+///
+/// 这是「少算」方向的开关，所以留着关的位置：关上就逐位回到 2026-09-08 之前。环境变量
+/// [`MODEL_SKIP_METADATA_ONLY_CHANGES_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
+pub fn model_skip_metadata_only_changes() -> bool {
+    effective_model_skip_metadata_only_changes(
+        load_ext_fields().model_skip_metadata_only_changes,
+        std::env::var(MODEL_SKIP_METADATA_ONLY_CHANGES_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn effective_model_skip_metadata_only_changes(
+    configured: Option<bool>,
+    env_override: Option<&str>,
+) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(true)
+}
+
 /// 环境变量名：一次性覆盖 [`model_structural_connection_cascade`]，不必改配置文件。
 pub const MODEL_STRUCTURAL_CONNECTION_CASCADE_ENV: &str =
     "AIOS_MODEL_STRUCTURAL_CONNECTION_CASCADE";
@@ -2220,6 +2266,29 @@ mod tests {
         assert!(effective_room_incremental(None, None));
         assert!(!effective_room_incremental(Some(false), None));
         assert!(effective_room_incremental(Some(true), None));
+    }
+
+    /// 元数据门默认开（2026-09-08 用户拍板接线）；它是「少算」方向的开关，关的位置必须留着，
+    /// 两个方向都要能被环境变量压住，拼错的值退回配置值。
+    #[test]
+    fn the_metadata_only_gate_is_on_by_default_and_can_be_shut() {
+        assert!(effective_model_skip_metadata_only_changes(None, None));
+        assert!(!effective_model_skip_metadata_only_changes(
+            Some(false),
+            None
+        ));
+        assert!(!effective_model_skip_metadata_only_changes(
+            Some(true),
+            Some("0")
+        ));
+        assert!(effective_model_skip_metadata_only_changes(
+            Some(false),
+            Some("on")
+        ));
+        assert!(!effective_model_skip_metadata_only_changes(
+            Some(false),
+            Some("maybe")
+        ));
     }
 
     /// 两个方向都要能被环境变量压住：配置里写死 `true` 的部署也得有办法临时关掉，

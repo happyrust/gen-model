@@ -6,7 +6,7 @@
 //!
 //! 新语义（对齐 `plant-model-gen`）：
 //! - 未知属性 / UDA 一律**保守触发**（漏判=正确性 bug；误判=多算一次，成本可控）；
-//! - 只有明确的业务元数据（`NAME`/`DESC`/`PURP`/`FUNCTION`）判为中性、可跳过；
+//! - 只有明确的业务元数据（`NAME`/`DESC`/`PURP`/`FUNC`）判为中性、可跳过；
 //! - noun/类型不再作为分类前置门，只用于最终生成器路由。
 //!
 //! 属性清单来源：AVEVA Everything3D `core.dll` / `Core3D.dll` 逆向（`DCHC/EVALAT`
@@ -37,7 +37,7 @@ pub enum AttributeModelImpact {
 /// 都触发（宁多勿漏）。`TransformOnly` 走便宜的 world-transform 更新，其余触发重生成。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum AttributeEffect {
-    /// 纯业务元数据：NAME/DESC/PURP/FUNCTION，不影响几何/模型。
+    /// 纯业务元数据：NAME/DESC/PURP/FUNC，不影响几何/模型。
     DataOnly,
     /// 仅位姿/方位：POS/ORI/…，只需更新 world transform，网格不变。
     TransformOnly,
@@ -113,7 +113,13 @@ impl OperationEffectSummary {
 pub const TRANSFORM_ONLY_ATTR_NAMES: &[&str] = &["POS", "ORI"];
 
 /// 业务元数据（不影响模型）。
-pub const DATA_ONLY_ATTR_NAMES: &[&str] = &["NAME", "DESC", "PURP", "FUNCTION", "CACHID", "LCHKDA"];
+///
+/// 名字用 E3D 的**属性短名**（`attlib` / 字典与运行库 schema 都只认这一份）。这里曾写着
+/// `FUNCTION`：字典 4270 名与运行库 descriptor 表里都没有这个名字，它从落表那天起一次都
+/// 没命中过，而真名 `FUNC`（633 个 noun 上有，字典 DCHC=0）反而落 `Unknown` 整根重算。
+/// 2026-09-08 改回短名，并由 [`tests::curated_tables_are_reconciled_against_the_runtime_schema`]
+/// 钉住「这张减免表里不许再有匹配不上任何东西的名字」。
+pub const DATA_ONLY_ATTR_NAMES: &[&str] = &["NAME", "DESC", "PURP", "FUNC", "CACHID", "LCHKDA"];
 
 /// 结构/成员/类型属性（改变层级、生成分派或参与范围）。
 pub const STRUCTURAL_ATTR_NAMES: &[&str] = &["OWNER", "CHILDREN", "NOUN", "TYPE", "LEVE", "LEVEL"];
@@ -291,6 +297,19 @@ fn dchc_change_classes() -> &'static HashMap<String, i32> {
     })
 }
 
+/// 「只改了这个属性，模型一个字都不用动」的**双重**判据（direct 窗口规划器的元数据门，
+/// 2026-09-08）：我们自己的效果表说它是 [`AttributeEffect::DataOnly`]，**并且** E3D 字典的
+/// 设计变化码说它是 0（core 自己也不为它重画，`IDCHNG` 门）。两票缺一不可——效果表是人手写的、
+/// 字典是 core 的第二意见，「少算」方向的判定只在两边都同意时放行。
+///
+/// `CACHID` 不在字典快照里（`raw_dchc_code` 回 `None`）：效果表虽判 DataOnly，字典没投票，
+/// 这里回 `false`——它照旧上卷重算。它是项目 UDA，字典按构造就不会收它，所以这一票不是
+/// 「还没补上」而是**永远不会有**：要放行只能改判据，不能等字典。UDA 与任何未知属性同理。
+pub fn attribute_is_metadata_only(raw_name: &str) -> bool {
+    classify_attribute_effect(raw_name) == AttributeEffect::DataOnly
+        && raw_dchc_code(raw_name) == Some(0)
+}
+
 /// 属性是否命中「已知会影响模型」的分类——除 `DataOnly` 与 `Unknown` 之外的一切。
 ///
 /// 只表示「命中已知影响集合」；未命中项由 [`classify_attribute_model_impact`] 标为
@@ -331,7 +350,8 @@ fn collect_modified_attribute_names(modified: &ModifiedElement) -> Vec<String> {
 /// 汇总一次操作的效果（宁多勿漏），并保留原始 DCHC code。
 ///
 /// - `Add` / `Deleted` → 需重生成（结构/成员效果）；
-/// - `Modified`：逐属性归类效果——`DataOnly` 忽略；`TransformOnly` 记位姿；其余
+/// - `Modified`：逐属性归类效果——`DataOnly` **且**过 [`attribute_is_metadata_only`]
+///   （字典 DCHC=0 那第二票）才忽略，只有效果表一票的保守重生成；`TransformOnly` 记位姿；其余
 ///   （DirectGeometry/DependencyCascade/StructuralMembership/Unknown，含 `UDA:*`）记重生成；
 ///   `children` 变化、或检测不到任何属性差异（如非 detail 解析）时保守记重生成；
 /// - `None` → 无动作。
@@ -809,7 +829,7 @@ mod tests {
     #[test]
     fn metadata_only_changes_are_known_neutral() {
         for name in [
-            "NAME", "DESC", "PURP", "FUNCTION", "CACHID", "LCHKDA", "att.NAME", "att.DESC",
+            "NAME", "DESC", "PURP", "FUNC", "CACHID", "LCHKDA", "att.NAME", "att.DESC",
         ] {
             assert!(!attribute_affects_model(name), "{name}");
             assert_eq!(
@@ -1633,9 +1653,14 @@ mod tests {
             "走便宜路径的属性必须真实存在，否则等于白写：{}",
             unmatched(TRANSFORM_ONLY_ATTR_NAMES)
         );
-        // FUNCTION 是历史遗留；CACHID（项目 UDA）与 LCHKDA（BRAN 检查元数据）
-        // 在 descriptor 表里有了属主，2026-08-27 起出列。
-        assert_eq!(unmatched(DATA_ONLY_ATTR_NAMES), "FUNCTION");
+        // 两张「减免」表一个死名都不许有：减免表上的名字匹配不到任何真属性时，它不只是
+        // 白写，而是**把真属性挡在减免之外还看不出来**——`FUNCTION` 就这么躺了很久（字典与
+        // descriptor 表都没有这个名字，真名是 `FUNC`），旧断言还把它当既成事实钉住。
+        assert!(
+            unmatched(DATA_ONLY_ATTR_NAMES).is_empty(),
+            "判为纯元数据的属性必须真实存在，否则真名那条反而落 Unknown 整根重算：{}",
+            unmatched(DATA_ONLY_ATTR_NAMES)
+        );
         // CHILDREN / NOUN 是元素元数据而非属性；LEVEL 是 LEVE 的别名写法。
         assert_eq!(unmatched(STRUCTURAL_ATTR_NAMES), "CHILDREN, LEVEL, NOUN");
         // 目录/连接类短名：字典有名（如 ADIR/CONN/SPREF），descriptor 表仍未含属主，
@@ -1815,6 +1840,53 @@ mod tests {
         // 字典没有的（UDA、未知名）仍是 None。
         assert_eq!(raw_dchc_code("UDA:42"), None);
         assert_eq!(raw_dchc_code("NO_SUCH_ATTR"), None);
+    }
+
+    /// 元数据门要两票：效果表 DataOnly **且** 字典 DCHC=0。任一票缺席就照旧重算。
+    #[test]
+    fn metadata_only_needs_both_the_effect_table_and_the_dictionary() {
+        // 两票都在：字典里的五个业务元数据名。
+        for name in ["NAME", "DESC", "PURP", "FUNC", "LCHKDA", "name", "att.NAME"] {
+            assert!(attribute_is_metadata_only(name), "{name}");
+        }
+        // 效果表说 DataOnly、字典没投票（快照里没有）：不放行。`CACHID` 是项目 UDA，
+        // 字典按构造收不到它——这一票不会等来。
+        for name in ["CACHID"] {
+            assert_eq!(classify_attribute_effect(name), AttributeEffect::DataOnly);
+            assert_eq!(raw_dchc_code(name), None);
+            assert!(!attribute_is_metadata_only(name), "{name}");
+        }
+        // 死名不会再从这张表里溜进来：写错的长名两票都拿不到，而真名才是要放行的那个。
+        assert_eq!(
+            classify_attribute_effect("FUNCTION"),
+            AttributeEffect::Unknown
+        );
+        assert!(!attribute_is_metadata_only("FUNCTION"));
+        // 字典说 0、效果表不认它是 DataOnly：不放行（`NGMR` 负体引用、`PKEY` 设计表键，
+        // 都是 core 不重画但我们要读的输入）。
+        for name in ["NGMR", "PKEY", "STYP", "ACCREF"] {
+            assert_eq!(raw_dchc_code(name), Some(0), "{name}");
+            assert!(!attribute_is_metadata_only(name), "{name}");
+        }
+        // 几何 / 位姿 / 结构 / UDA / 未知：一个都不放行。
+        for name in [
+            "DIAM",
+            "POS",
+            "ORI",
+            "OWNER",
+            "SPRE",
+            "UDA:42",
+            "NO_SUCH_ATTR",
+        ] {
+            assert!(!attribute_is_metadata_only(name), "{name}");
+        }
+        // 全部放行的名字都必须真的在两张表里——名单漂移一格就红。
+        let admitted: Vec<&str> = DATA_ONLY_ATTR_NAMES
+            .iter()
+            .copied()
+            .filter(|name| attribute_is_metadata_only(name))
+            .collect();
+        assert_eq!(admitted, vec!["NAME", "DESC", "PURP", "FUNC", "LCHKDA"]);
     }
 
     #[test]

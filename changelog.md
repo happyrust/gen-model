@@ -2,6 +2,73 @@
 
 ## 2026-09-08
 
+### direct 窗口规划器的元数据门：只改了 `NAME / DESC / PURP / FUNC / LCHKDA` 的元素不再让它的根整根重算（`model_skip_metadata_only_changes`，默认开）
+
+起因是用户问「方位的变化、模型的变化、不影响模型的变化这几类是否处理了」。答案是：三类在老 PE 规划器上分开
+处理（`classify_operation_impact` → Regen / Transform / Skip，CONTEXT「模型影响」词条），2026-09-04 direct 成为
+默认之后这一层**没有搬过来**——e3d-model L2 `diff_element` 只回答「有没有属性值变了」，变了就 `nearest_unit`
+上卷 → 根进 `touched` → `RegenRoot`；改一个 ELBO 的 NAME 就是它的 BRAN 整根重算，改 ZONE 描述就是整区。
+用户拍板先接「不影响模型」这一档（「只动方位」那档要先定发布语义，另议）。
+
+- **e3d-model `increment.rs`**：新入口 `plan_update_with(base, target, window, limits, metadata_only)`，
+  `plan_update_bounded` 退成 `|_| false` 的薄壳。Modified 候选在 `ledger.record` 与 `is_unchanged` **之后**、
+  `nearest_unit` **之前**问一次谓词：为真就 `settle(contributed = false)`——记 `no_model`、不上卷、不级联
+  （不进变换级联也不进桥架分支级联），`continue`。账本已经记过 → 闭包种子照收 → 凭证前移那一层一个根都不少收；
+  读账本的房间结构触发照常看得见它（FRMW 改名命中关键字仍出 `RoomRecalcPanel`）。`IncrementReport` 多一格
+  横切计数 `metadata_only`（已含在 `no_model` 里），`totals_line` 跟着多 `(metadata_only=N)`。名单**不在**
+  e3d-model 里写第二份：它只收闭包。
+- **gen-model 谓词双票制**：`model_impact::attribute_is_metadata_only(name)` = 效果表 `DataOnly` **且** E3D 字典
+  DCHC = 0（core 自己也不为它重画）。两票缺一不放行：`CACHID` 效果表说 DataOnly 但不在字典快照里
+  （`raw_dchc_code` 回 `None`）→ 不放行，照旧上卷——所以 ams8000 255→256 那窗（PANE 改 CACHID）仍 regen 3，
+  九钉死窗口逐字不变；`NGMR` / `PKEY` / `STYP` 字典说 0 但效果表认它是几何 / 依赖输入 → 不放行。今天真正放行的
+  就五个名字：`NAME DESC PURP FUNC LCHKDA`（有测试把这份名单钉死，多一个少一个都红）。
+- **顺带修掉一个死名**：`DATA_ONLY_ATTR_NAMES` 里躺着的 `FUNCTION` 字典 4270 名与运行库 descriptor 表都没有，
+  从落表那天起一次都没命中过，而真名 `FUNC`（633 个 noun 上有，DCHC=0）反而落 `Unknown` 整根重算——减免表上的
+  死名不只是白写，是**把真属性挡在减免之外还看不出来**。改回短名，并把
+  `curated_tables_are_reconciled_against_the_runtime_schema` 里那句「`FUNCTION` 是历史遗留」的既成事实断言
+  换成「这张减免表里不许再有匹配不上任何东西的名字」。
+  `window_root_plan::change_is_metadata_only(diff)` 再加四条结构条件：没换类型、没换属主、成员表没动、不 `opaque`，
+  且 `attributes` 非空——空的是「没变」或「只动了结构」，都不是这里的事。
+- **接线**：`WindowRootSources::collect` 在开关 `model_skip_metadata_only_changes`（`DbOption.toml`，环境变量
+  `AIOS_MODEL_SKIP_METADATA_ONLY_CHANGES` 压过，**默认 true**）开着时走 `plan_update_with(.., change_is_metadata_only)`，
+  关着时逐位走 `plan_update`——这是「少算」方向的开关，关的位置必须留着。计划回执 `warnings` 在门判掉过候选时多一行
+  `metadata-only gate — N modified candidate(s) …`。
+- **钉子**：`metadata_only_needs_both_the_effect_table_and_the_dictionary`（双票制 + 名单钉死）、
+  `a_change_is_metadata_only_when_every_attribute_is_data_only_and_nothing_structural_moved`（谓词真值表：四条
+  结构条件各红一次、混一个几何 / 位姿 / 依赖属性即红、CACHID / FUNCTION 不放行）、
+  `the_metadata_gate_is_wired_through_plan_update_with_behind_its_switch`（源码钉：开 → 谓词 → 关 的顺序、谓词只读
+  `model_impact` 的双重判据、本文件不许再写属性名单）、`the_metadata_only_gate_is_on_by_default_and_can_be_shut`。
+- **live**（`#[ignore]` 手动，都跑绿）：
+  - `live_ams8000_pinned_windows_land_in_the_expected_buckets` 门开着照跑：九窗 regen / delete **逐字相同**，
+    每窗 `metadata_only=0`（255→256 的 CACHID 因字典没投票而不被判元数据）。
+  - 新门 `live_ams8000_metadata_only_gate_never_adds_and_never_shrinks_the_closure`：沿 ams8000 链逐窗算两态
+    （`plan_update` vs `plan_update_with`）钉三条契约——`regenerate_on ⊆ regenerate_off`、`regenerate_derived_on ⊆
+    regenerate_derived_off`、`remove` 逐字相同；两态**祖先闭包逐字相同**（种子照收的实证）；`no_model` 只多不少且
+    多出的 ≤ `metadata_only`，`unchanged` 相同，账本守恒两态都过。默认最后 40 步；`AIOS_METADATA_GATE_STEPS=500`
+    跑完**整条链（1→415）**：**25 个自然窗口**有候选被判元数据（5→6、6→7、49→50 … 133→134、304→305），其中 24 窗
+    那个元素本来就没有单元（关着也是 `no_model`，省 0），**304→305 省下 1 个派生容器**——一个成员只改了名，关着时
+    上卷路过 BRAN `24384/26338` 把它记进派生集整链重算管身，开着时不算；管身不读名字，这一链省得对。第一版契约把
+    `regenerate_derived` 写成逐字相同，就是这一窗把它改成了子集。
+  - 要验自己在 E3D 里造的改名窗：`AIOS_METADATA_ONLY_WINDOW=base:target` 指定那一窗，门要求 `metadata_only > 0`
+    且 regen / derived 严格变少，否则红。**本轮没有 E3D 会话，这一条没跑**；语料里 25 个自然窗口是替代证据。
+- 验证分三轮，共享工作树那两轮的数字都含别的会话的在途改动：定向 `cargo test --lib -- metadata_only
+  metadata_gate a_change_is_metadata_only …` 9 passed；S4 落定后补跑全量 `cargo test --lib`
+  **1870 passed / 0 failed / 120 ignored**，两条 live 门原样重跑仍绿（九窗逐字不变，
+  `AIOS_METADATA_GATE_STEPS=500` 整链复现 25 个元数据窗口、304→305 仍是那 1 个派生容器的省）。
+  **落这一提交时又验了一遍「本笔 hunk 单独成立」**：HEAD 起一棵干净 worktree，只打上面这几处改动
+  （共享树里 S4、W3.2 普查、预览口径对齐那些 hunk 一个都不带），`cargo test --lib`
+  **1852 passed / 0 failed / 119 ignored**（HEAD 没有别的会话新添的用例，所以比 1870 少）、
+  `cargo check --lib --tests` 干净、`rustfmt --edition 2024 --check` 三份 `.rs` 干净。
+  e3d-model 侧 `cargo test --lib -- increment element_diff ledger` 24 passed。
+- **没做**：「只动方位」那一档（direct 路径没有 `Transform` 执行物：根级 CAS / 内存投影 / 落款 / 变更通告四件事要先定，
+  是 ADR-056 D3 的一条例外，另议）；把 `CACHID` 这类字典外的 DataOnly 放进门（要么补字典快照要么改判据，先不动）；
+  自己在 E3D 里造一窗改名验那条 `AIOS_METADATA_ONLY_WINDOW`（要 E3D 会话，语料里 25 个自然窗口是替代证据）。
+  预览 `details.model_affecting` 与规划器口径对齐**不在本提交里**：它同日由另一会话在
+  `merge_net_change_details` / `classify_operation_effects` 上做，横跨 `model_update_plan.rs` 等本笔没碰的文件，
+  与本笔的 hunk 在共享工作树里交错，单独提。与同日重构计划 S4 的关系：S4 删老 PE 规划器时，Skip 那一档
+  从此只剩 direct 这一份实现；Transform 那一档若不先搬就随之消失，已在会话里点名。
+
+
 ### 常驻房间模型 P4：启动对比留下的尾巴不再被一轮干净的 drain 洗白；换代 diff 接上护栏与 `/health`
 
 修一个**静默数据错误**加落一条护栏。开关 `room_resident_model` **默认仍关**，关着时每一处走今天的路。

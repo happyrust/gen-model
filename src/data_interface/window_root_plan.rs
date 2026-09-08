@@ -35,7 +35,10 @@ use aios_core::{RefnoEnum, SUL_DB};
 use anyhow::Context;
 use e3d_io::db_element::DbSet;
 use e3d_io::refno::RefNo;
-use e3d_model::increment::{AffectedClosure, UpdatePlan, collect_window, plan_update};
+use e3d_model::element_diff::ElementDiff;
+use e3d_model::increment::{
+    AffectedClosure, PlanLimits, UpdatePlan, collect_window, plan_update, plan_update_with,
+};
 use e3d_model::ledger::ChangeKind;
 use surrealdb::{Surreal, engine::any::Any};
 
@@ -217,6 +220,28 @@ pub fn plan_window_roots(
     plan
 }
 
+/// 「这一窗对这个元素的改动一个字都不碰模型」（e3d-model `plan_update_with` 的谓词，2026-09-08）。
+///
+/// 四条缺一不可：没换类型、没换属主、成员表没动、记录变了能指出是哪几项（不 `opaque`）；
+/// 且**每一个**变了的属性都过 [`crate::data_interface::model_impact::attribute_is_metadata_only`]
+/// （效果表 DataOnly ∧ E3D 字典 DCHC=0，今天就是 `NAME / DESC / PURP / FUNC / LCHKDA`）。`attributes`
+/// 为空回 `false`——那是「没变」（`is_unchanged`）或只动了结构，都不是这里的事。
+///
+/// 它只决定**上卷**：账本照记、闭包种子照收（凭证前移不因此少收），房间结构触发照读账本
+/// （FRMW 改名命中关键字仍出 `RoomRecalcPanel`）。与 e3d-model 的 `is_placement_only` 是两个
+/// 问题：那个问「除了摆放还动了别的没有」，这个问「动的全是业务元数据吗」。
+pub(crate) fn change_is_metadata_only(diff: &ElementDiff) -> bool {
+    diff.type_changed.is_none()
+        && diff.owner_changed.is_none()
+        && diff.members.is_none()
+        && !diff.opaque
+        && !diff.attributes.is_empty()
+        && diff
+            .attributes
+            .iter()
+            .all(|name| crate::data_interface::model_impact::attribute_is_metadata_only(name))
+}
+
 /// 文件侧输入：只读两端 `DbSet`，不碰 SurrealDB。生产由
 /// [`build_model_update_plan_from_window`] 用 `E3dModelService::build_set` 的两端调用；
 /// 测试与探针可以直接用 attlib 开两个钉住会话的 `DbSet`。
@@ -255,7 +280,8 @@ pub struct WindowRootSources {
     /// PANE / CWALL / CFLOOR 换属主 → 要整间重算的 PANE。不进 `touched`（它不改几何根），
     /// 由 [`build_model_update_plan_from_window`] 折成 `RoomRecalcPanel` 工作项；枚举读挂时
     /// 让计划标 `room_rebuild_required`。账本粗筛零 I/O；没有开关（审核 F-A，d-272）。
-    pub(crate) room_structural: crate::data_interface::room_structural_trigger::RoomStructuralTriggers,
+    pub(crate) room_structural:
+        crate::data_interface::room_structural_trigger::RoomStructuralTriggers,
 }
 
 fn nested_root_observation(
@@ -410,7 +436,19 @@ impl WindowRootSources {
                 file.display()
             )
         })?;
-        let plan = plan_update(base, target, &window);
+        // 元数据门（2026-09-08，默认开）：只改了 NAME / DESC 一类的候选不上卷、不级联。谓词是
+        // gen-model 的（效果表 ∧ 字典 DCHC），e3d-model 只收一个闭包；关着时逐位回到 `plan_update`。
+        let plan = if crate::options::model_skip_metadata_only_changes() {
+            plan_update_with(
+                base,
+                target,
+                &window,
+                PlanLimits::default(),
+                change_is_metadata_only,
+            )
+        } else {
+            plan_update(base, target, &window)
+        };
         let closure = if crate::options::model_entry_drop_no_geometry() {
             plan.affected_closure_filtering_ledger(base, target, |entry| {
                 // 删除与类型变化可能需要清旧几何；即便账本有 noun 也保守保留。
@@ -630,6 +668,14 @@ pub(crate) async fn build_model_update_plan_from_window(
         plan.lazy.len(),
         sources.plan.report.totals_line()
     )];
+    if sources.plan.report.metadata_only > 0 {
+        warnings.push(format!(
+            "dbnum={dbnum}: metadata-only gate — {} modified candidate(s) changed nothing but \
+             NAME/DESC/PURP/FUNC/LCHKDA (effect table DataOnly ∧ dictionary DCHC=0) and were not \
+             rolled up; ledger and closure seeds unchanged (model_skip_metadata_only_changes)",
+            sources.plan.report.metadata_only
+        ));
+    }
     warnings.push(format!(
         "dbnum={dbnum}: XGEOMETRY observation only — matched={} unreadable={}; \
          window work and credential advancement were unchanged",
@@ -670,7 +716,13 @@ pub(crate) async fn build_model_update_plan_from_window(
     // 房间结构触发（ADR-010 D12 / ADR-040 §4，审核 F-A）：与老 PE 规划器同一份落法——面板目标
     // 折成 `RoomRecalcPanel`，随数据窗口落 `collecting`、跟文件轮次一起释放；枚举读挂不掐窗口，
     // 但要在同一份计划上留下 `room_build:main = rebuild_required` 的持久信号（ADR-040 §5）。
-    append_room_structural_work(&mut out, &sources.room_structural, dbnum, db_type, target_sesno as i32);
+    append_room_structural_work(
+        &mut out,
+        &sources.room_structural,
+        dbnum,
+        db_type,
+        target_sesno as i32,
+    );
     Ok(out)
 }
 
@@ -2324,6 +2376,278 @@ mod tests {
                 expect.label,
                 items
             );
+        }
+    }
+
+    /// 元数据门谓词的真值表（2026-09-08）：四条结构条件缺一不可，属性全部过双重判据才放行。
+    #[test]
+    fn a_change_is_metadata_only_when_every_attribute_is_data_only_and_nothing_structural_moved() {
+        use e3d_model::element_diff::MemberDelta;
+        let diff = |attributes: &[&str]| ElementDiff {
+            refno: "24384/1".into(),
+            noun: "ELBO".into(),
+            type_changed: None,
+            owner_changed: None,
+            members: None,
+            attributes: attributes.iter().map(|name| name.to_string()).collect(),
+            opaque: false,
+        };
+        // 五个双票属性，单个或组合都放行。
+        assert!(change_is_metadata_only(&diff(&["NAME"])));
+        assert!(change_is_metadata_only(&diff(&[
+            "DESC", "NAME", "PURP", "FUNC", "LCHKDA"
+        ])));
+        // 混进一个几何 / 位姿 / 依赖属性就不放行。
+        assert!(!change_is_metadata_only(&diff(&["NAME", "DIAM"])));
+        assert!(!change_is_metadata_only(&diff(&["NAME", "POS"])));
+        assert!(!change_is_metadata_only(&diff(&["NAME", "SPRE"])));
+        // 效果表 DataOnly 但字典没投票（CACHID）：不放行——255→256 那一窗照旧 regen 3。
+        assert!(!change_is_metadata_only(&diff(&["CACHID"])));
+        assert!(!change_is_metadata_only(&diff(&["NAME", "CACHID"])));
+        // 没有属性变化不是「只改了元数据」：那是没变，或只动了结构。
+        assert!(!change_is_metadata_only(&diff(&[])));
+        // 结构四条：类型、属主、成员、opaque，任一动了就不放行，哪怕属性只有 NAME。
+        let mut typed = diff(&["NAME"]);
+        typed.type_changed = Some(("BRAN".into(), "ELBO".into()));
+        assert!(!change_is_metadata_only(&typed));
+        let mut reparented = diff(&["NAME"]);
+        reparented.owner_changed = Some((Some("24384/2".into()), Some("24384/3".into())));
+        assert!(!change_is_metadata_only(&reparented));
+        let mut members = diff(&["NAME"]);
+        members.members = Some(MemberDelta {
+            added: vec![],
+            removed: vec![],
+            reordered: true,
+        });
+        assert!(!change_is_metadata_only(&members));
+        let mut opaque = diff(&["NAME"]);
+        opaque.opaque = true;
+        assert!(!change_is_metadata_only(&opaque));
+    }
+
+    /// 接线的形状：`collect` 只在开关开着时经 `plan_update_with` 把 `change_is_metadata_only`
+    /// 交给 e3d-model，关着时逐位走 `plan_update`；谓词在 `plan_update_with` 之前定义、只读
+    /// `model_impact` 的双重判据，不在本文件另写一份名单。
+    #[test]
+    fn the_metadata_gate_is_wired_through_plan_update_with_behind_its_switch() {
+        let src = include_str!("window_root_plan.rs");
+        let collect = src
+            .split_once("    pub fn collect(\n")
+            .expect("WindowRootSources::collect")
+            .1
+            .split_once("    pub fn impact(")
+            .expect("impact follows collect")
+            .0;
+        let gate = collect
+            .split_once(concat!("model_skip_metadata_", "only_changes()"))
+            .expect("collect 必须问开关")
+            .1;
+        let on = gate
+            .find(concat!("plan_update_", "with("))
+            .expect("开着走 plan_update_with");
+        let predicate = gate
+            .find(concat!("change_is_", "metadata_only"))
+            .expect("谓词必须是本文件的 change_is_metadata_only");
+        let off = gate
+            .find(concat!("plan_update(", "base, target, &window)"))
+            .expect("关着逐位走 plan_update");
+        assert!(on < predicate && predicate < off, "开 → 谓词 → 关 的顺序");
+        let predicate_body = src
+            .split_once(concat!("pub(crate) fn ", "change_is_metadata_only("))
+            .expect("谓词定义")
+            .1
+            .split_once("\n}\n")
+            .expect("谓词函数体")
+            .0;
+        assert!(
+            predicate_body.contains(concat!("attribute_is_", "metadata_only(")),
+            "属性名单只有 model_impact 那一份"
+        );
+        for structural in ["type_changed", "owner_changed", "members", "opaque"] {
+            assert!(
+                predicate_body.contains(structural),
+                "谓词必须排除 {structural}"
+            );
+        }
+        assert!(
+            !predicate_body.contains("\"NAME\""),
+            "不许在这里再写一份属性名单"
+        );
+    }
+
+    /// 元数据门的两态 live 门（2026-09-08，`#[ignore]` 手动）：沿 ams8000 会话链最后 `K` 步
+    /// （默认 40，`AIOS_METADATA_GATE_STEPS` 可改）逐窗算两份计划——开着（`plan_update_with` +
+    /// `change_is_metadata_only`）与关着（`plan_update`）——钉三条契约：
+    ///
+    /// 1. `regenerate_on ⊆ regenerate_off`、`regenerate_derived_on ⊆ regenerate_derived_off`，`remove` 逐字相同
+    ///    （门只少上卷，不多不删；管身不读名字，成员只改名时 BRAN 不必重算管身）；
+    /// 2. 两态的祖先闭包**逐字相同**（账本照记 → 种子照收 → 凭证前移那一层一个根都不少收）；
+    /// 3. 两态 `regenerate` 有差 ⇔ `metadata_only > 0`（省下的每一根都归因到一个只改了元数据的候选）。
+    ///
+    /// 语料里有没有「只改名」的自然窗口事先不知道：有就打印出来当证据，没有就如实说
+    /// 「本机链上 K 步无一窗只改了元数据」——契约 1/2 在每一窗都成立，不靠有没有那种窗。
+    /// 要验自己在 E3D 里造的改名窗，`AIOS_METADATA_ONLY_WINDOW=base:target` 指定那一窗，
+    /// 此时**必须** `metadata_only > 0` 且 `regenerate` 严格变少，否则红。
+    #[test]
+    #[ignore = "manual live: needs the real ams8000 DESI file and the E3D template directory"]
+    fn live_ams8000_metadata_only_gate_never_adds_and_never_shrinks_the_closure() {
+        use std::path::PathBuf;
+
+        use e3d_io::ReadOnlyEngine;
+        use e3d_io::db_element::{DbFilePin, template_file_for};
+
+        use crate::data_interface::direct_store::DirectSchema;
+
+        let file = PathBuf::from(std::env::var("AIOS_PROJAMS_GEOMETRY_FILE").unwrap_or_else(
+            |_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams8000_0001".into(),
+        ));
+        if !file.is_file() {
+            println!("skip: {} is not installed", file.display());
+            return;
+        }
+        let schema = DirectSchema::open_from_env().expect("E3D template directory");
+        let open = |sesno: u32| -> Arc<DbSet> {
+            let set = Arc::new(
+                DbSet::with_attlib_file(schema.template_dir().join("attlib.dat")).expect("attlib"),
+            );
+            set.add_db(DbFilePin {
+                file: file.clone(),
+                template: template_file_for(schema.template_dir(), "DESI").expect("DESI template"),
+                db_type: Some("DESI".into()),
+                sesno: Some(sesno),
+            })
+            .expect("pin DESI");
+            set
+        };
+        let steps: usize = std::env::var("AIOS_METADATA_GATE_STEPS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(40);
+        let mut windows: Vec<(u32, u32)> = match std::env::var("AIOS_METADATA_ONLY_WINDOW") {
+            Ok(pinned) => {
+                let (base, target) = pinned
+                    .split_once(':')
+                    .expect("AIOS_METADATA_ONLY_WINDOW=base:target");
+                vec![(base.parse().expect("base"), target.parse().expect("target"))]
+            }
+            Err(_) => {
+                let sessions: Vec<u32> = ReadOnlyEngine::open(&file)
+                    .expect("open ams8000")
+                    .sessions()
+                    .expect("session chain")
+                    .iter()
+                    .map(|session| session.session_id)
+                    .collect();
+                // 链是新→旧：相邻两项 (older, newer) 就是一步。
+                sessions
+                    .windows(2)
+                    .take(steps)
+                    .map(|pair| (pair[1], pair[0]))
+                    .collect()
+            }
+        };
+        windows.reverse();
+        let pinned = std::env::var("AIOS_METADATA_ONLY_WINDOW").is_ok();
+        let mut natural = Vec::new();
+        for (base_sesno, target_sesno) in windows {
+            let (base, target) = (open(base_sesno), open(target_sesno));
+            let window = match collect_window(&file, base_sesno, target_sesno) {
+                Ok(window) => window,
+                Err(error) => {
+                    println!("skip {base_sesno}→{target_sesno}: {error}");
+                    continue;
+                }
+            };
+            let off = plan_update(&base, &target, &window);
+            let on = plan_update_with(
+                &base,
+                &target,
+                &window,
+                PlanLimits::default(),
+                change_is_metadata_only,
+            );
+            let label = format!("{base_sesno}→{target_sesno}");
+            // 1. 只少上卷，不多、不删。
+            assert!(
+                on.regenerate.is_subset(&off.regenerate),
+                "{label}: 门开着不许多算：{:?}",
+                on.regenerate
+                    .difference(&off.regenerate)
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(on.remove, off.remove, "{label}: remove 不受门影响");
+            // 派生容器（BRAN 名下的隐式管身）同样只许少不许多：一个成员只改了 NAME，关着时
+            // 上卷路过 BRAN 把它记进派生集、整链重算管身；开着时那个候选根本不上卷，BRAN 也就
+            // 不进派生集——管身不读名字，少算的这一链是对的（ams8000 304→305 实测就是这形状）。
+            assert!(
+                on.regenerate_derived.is_subset(&off.regenerate_derived),
+                "{label}: 门开着不许多算派生容器：{:?}",
+                on.regenerate_derived
+                    .difference(&off.regenerate_derived)
+                    .collect::<Vec<_>>()
+            );
+            // 2. 闭包逐字相同：账本照记、种子照收。
+            let closure_on = on.affected_closure(&base, &target);
+            let closure_off = off.affected_closure(&base, &target);
+            assert_eq!(
+                closure_on.refnos, closure_off.refnos,
+                "{label}: 元数据门不许改变祖先闭包（凭证前移会少收根）"
+            );
+            assert_eq!(
+                closure_on.unreadable.len(),
+                closure_off.unreadable.len(),
+                "{label}"
+            );
+            // 3. 有差 ⇔ 有只改元数据的候选；账本守恒两态都成立。门判掉的候选在关着那一态里
+            //    要么上卷了、要么本来就 no_model（容器改名）、要么上卷失败进了 unresolved，
+            //    所以 no_model 只会多、多出来的不超过 metadata_only；unchanged 两态逐字相同。
+            on.accounts_for()
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            off.accounts_for()
+                .unwrap_or_else(|error| panic!("{label}: {error}"));
+            let saved = off.regenerate.len() - on.regenerate.len()
+                + (off.regenerate_derived.len() - on.regenerate_derived.len());
+            let (no_model_on, no_model_off) = (
+                on.report.no_model.values().sum::<usize>(),
+                off.report.no_model.values().sum::<usize>(),
+            );
+            assert_eq!(on.report.unchanged, off.report.unchanged, "{label}");
+            assert!(
+                no_model_on >= no_model_off
+                    && no_model_on - no_model_off <= on.report.metadata_only,
+                "{label}: no_model on={no_model_on} off={no_model_off} metadata_only={}",
+                on.report.metadata_only
+            );
+            if saved > 0 {
+                assert!(
+                    on.report.metadata_only > 0,
+                    "{label}: regen 少了 {saved} 个单元却没有任何候选被判元数据"
+                );
+            }
+            println!(
+                "{label}: candidates={} metadata_only={} regen off={} on={} saved_units={} | {}",
+                on.report.candidates,
+                on.report.metadata_only,
+                off.regenerate.len(),
+                on.regenerate.len(),
+                saved,
+                on.report.changes_line()
+            );
+            if on.report.metadata_only > 0 {
+                natural.push((label.clone(), on.report.metadata_only, saved));
+            }
+            if pinned {
+                assert!(
+                    on.report.metadata_only > 0 && saved > 0,
+                    "{label}: 指定的改名窗必须有候选被判元数据、且 regen 严格变少（metadata_only={} saved={saved}）",
+                    on.report.metadata_only
+                );
+            }
+        }
+        if natural.is_empty() {
+            println!("本机 ams8000 链上这些步里没有一窗只改了元数据（契约 1/2 在每一窗都过）");
+        } else {
+            println!("只改了元数据的窗口（label, metadata_only, saved_units）：{natural:?}");
         }
     }
 
