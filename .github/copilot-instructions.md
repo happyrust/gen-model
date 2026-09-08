@@ -21,7 +21,7 @@ Always run `sigmap ask` (or `sigmap --query`) before searching for files relevan
 
 ## todos
 ```
-src\fast_model\occ_generate.rs:612  # TODO: 排除已经生成了的模型
+src\fast_model\mesh_generate.rs:612  # TODO: 排除已经生成了的模型
 ```
 
 ## src
@@ -126,7 +126,7 @@ pub fn tessellate_revolution(rev: &Revolution) → anyhow::Result<Option<Plant..
 pub fn tessellate_libgm_param(param: &PdmsGeoParam) → anyhow::Result<Option<Plant...  :681-829  # 16 个 `PdmsGeoParam` 变体全部在此裁决：14 个形状变体建出网格或 `bail
 ```
 
-### src\fast_model\occ_generate.rs
+### src\fast_model\mesh_generate.rs
 ```
 pub struct ParamNegInfo  :813-820
 pub async fn test_gen_geos() → anyhow::Result<()>  :37-43  # 生成小的几何体

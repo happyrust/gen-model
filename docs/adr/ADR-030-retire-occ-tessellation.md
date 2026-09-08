@@ -125,7 +125,7 @@ libgm §7.9.1 的调用点表说明每个曲面原语喂进 `d2_numberOfSegments
    走到的 `PdmsGeoParam` 都能直接稳定生成 `PlantMesh`，并通过既有 RVM 对拍门。不是
    「所有 OCC API 都换完」。
 2. **三角化后端权威放在 aios-core。** 新增 `gen_manifold_mesh(&PdmsGeoParam) -> PlantMesh`。
-   gen-model 只负责调度、布尔、AABB、缓存、落盘。`occ_generate.rs` 改成后端 trait
+   gen-model 只负责调度、布尔、AABB、缓存、落盘。`mesh_generate.rs` 改成后端 trait
    调度，不得整文件删除。
 3. **扫掠体对齐 libgm 三支，不做通用脊线扫掠。** `do_solid_segments` 逐段调用
    `gm_CreateExtrusion` / `gm_CreateRevolution`(实测 180° 半圆再组合) /

@@ -14,7 +14,7 @@
 已收口：
 
 - **WP-F 假回退**（T033–T037）：`tessellate_libgm_param` 只剩一处 `Ok(None)` 且语义固定为
-  「非形状」；OCC 形状回退在 `src/fast_model/occ_generate.rs` 整段拆除。
+  「非形状」；OCC 形状回退在 `src/fast_model/mesh_generate.rs` 整段拆除。
 - **WP-G 口径**（T038 / T039 / T040 / T040a / T042）：曲面段数按真实半径走
   `src/fast_model/libgm_discretise.rs` 权威规则；回转与挤出两套轮廓口径分开；
   弦高容差全库唯一 `FACET_TOL_MM`，兜底默认值已删。柱/球写死段数收成
@@ -142,7 +142,7 @@ T004 后半、T008、T025–T028、T045a、T046–T049、T031、T032。
 > **2026-08-24 摘除盘点**（为什么这些 cfg 门还在，以及怎么删）。
 >
 > 现存挂点：gen-model 的 `feature = "occ"` 只剩 **2 个文件 11 处**——
-> `src/fast_model/occ_generate.rs` 9 处（3 条 import、2 个 occ 回归测试、
+> `src/fast_model/mesh_generate.rs` 9 处（3 条 import、2 个 occ 回归测试、
 > `apply_insts_boolean_occ` / `apply_cata_neg_boolean_occ` 两个死布尔函数，生产调用点
 > 213/265/402 三处全是注释）与 `src/rvm_baseline/mesh_compare.rs` 2 处（T043 刻意保留的
 > 可选 OCC 参照）。`feature = "truck"` 在 gen-model **零挂点**，`Cargo.toml` 的
@@ -170,7 +170,7 @@ T004 后半、T008、T025–T028、T045a、T046–T049、T031、T032。
 - **X1a（T031 本体；2026-08-24 已做，先于 R1–R4——见执行注记）** gen-model 摘 `occ`：
   default / console 去 `occ`，`occ = ["aios_core/occ", "dep:opencascade"]` 与
   `dep:opencascade` 一并删除；mesh_compare 的 OCC 参照分支删除（R4 对拍时先开着
-  occ 对照跑最后一轮留证，然后再摘）；occ_generate.rs 两个死布尔函数删除
+  occ 对照跑最后一轮留证，然后再摘）；mesh_generate.rs 两个死布尔函数删除
   （ADR-029 布尔单轨 manifold 已一年量级，注释调用点一起清）；两个 occ 回归测试处置：
   房间面板自交修复改为 manifold 断言（轮廓修复在 wire 层、后端无关），GENSEC SPRO
   在 R1 直墙 RVM 绿后属重复覆盖、删除。CI 增加「无 occ 时失败闭合」测试。

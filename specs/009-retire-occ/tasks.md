@@ -24,14 +24,14 @@
   布尔 ingest f64、空网格 hard fail、禁止 `ManifoldRust`（ADR-029 骨架）。
 - [ ] T004（串行，依赖 T003）编译并跑 `cube_minus_inner_cube` / `ingest_rejects_empty_mesh`；
   live `mesh_gwall_extra_against_cwall`；更新 `docs/2026-08-12_live-test-ledger.md`。
-- [x] T005（串行，依赖 T003）`src/fast_model/occ_generate.rs`：`not(occ)` 且无
+- [x] T005（串行，依赖 T003）`src/fast_model/mesh_generate.rs`：`not(occ)` 且无
   `tessellate_libgm_param` 后端时 `bail!`，禁止 `Ok(())` 静默跳过。
 
 ## WP-A / B1–B2 箱柱挤出骨架
 
 - [x] T006（可与 T003 并行）`src/fast_model/manifold_tessellate.rs`、`src/fast_model/mod.rs`：
   单位箱、单位柱、`PrimExtrusion` 轮廓挤出；空挤出 hard fail。五条单测已绿。
-- [x] T007（串行，依赖 T005+T006）`src/fast_model/occ_generate.rs`：`gen_inst_meshes` 对
+- [x] T007（串行，依赖 T005+T006）`src/fast_model/mesh_generate.rs`：`gen_inst_meshes` 对
   `PrimBox` / `PrimLCylinder` / 无切角 `PrimSCylinder` / `PrimExtrusion` 先
   `tessellate_libgm_param`，失败或 `None` 再 OCC；AABB/`pts` 改从网格取，禁止空 `pts` 静默。
 - [x] T007a（2026-08-19 补口径）`src/fast_model/manifold_tessellate.rs`：挤出 FRADIUS 倒角接
@@ -193,7 +193,7 @@
 
 ## WP-E 离散口径与收口
 
-- [ ] T028（依赖 T007）`src/fast_model/occ_generate.rs`：manifold 路径 AABB 来自 `PlantMesh`；`pts` 有明确
+- [ ] T028（依赖 T007）`src/fast_model/mesh_generate.rs`：manifold 路径 AABB 来自 `PlantMesh`；`pts` 有明确
   来源或省略策略写进回执，禁止空列表假装成功。
 > T029（活库盘点）已拆分为 T045；T030（测试与浸水解绑）已拆分为 T043 / T044。
 > 两条不再单独跟踪，勾在拆出去的那几条上。
@@ -237,7 +237,7 @@
   `cal_circus_center`，内外圈同一套 `gen_occ_spline_wire` 点位，直线挤出与弧形墙
   共用 `extrude_flat_polygons` 尾段）；三条门测试 +「SPINE 点出平面 / thick 吃穿
   半径」也硬失败。
-- [x] T037（可并行）`src/fast_model/manifold_tessellate.rs`、`src/fast_model/occ_generate.rs`：`Unknown` /
+- [x] T037（可并行）`src/fast_model/manifold_tessellate.rs`、`src/fast_model/mesh_generate.rs`：`Unknown` /
   `CompoundShape` 直接推进 `unbuildable` 标 `bad`，不经 OCC 分支
   （两者 `check_valid()` 为 false，`gen_occ_shape()` 本来就 `Err`）。
   门：源码断言 manifold 分支之后不再有 `#[cfg(feature = "occ")]` 的形状回退路径。

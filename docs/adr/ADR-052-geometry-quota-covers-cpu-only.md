@@ -80,7 +80,7 @@ ADR-041 第 3 条与 `specs/023` 把散落各处的写死 fan-out 收成一个�
 
 ## 未决
 
-- `occ_generate.rs` / `cata_model.rs` / `prim_model.rs` / `loop_model.rs` /
+- `mesh_generate.rs` / `cata_model.rs` / `prim_model.rs` / `loop_model.rs` /
   `pdms_inst.rs` 是否还有未过闸的 fan-out 或阻塞调用，本决策成文时未逐一核过。
   迁移按 `manifold_bool.rs` → 其余的顺序推进，每个文件一个可独立回滚的提交。
 - 单进程假设本身有缺口：非 Windows 上 `acquire_process_instance_lock` 直接返回

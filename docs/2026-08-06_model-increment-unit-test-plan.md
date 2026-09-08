@@ -262,7 +262,7 @@ S0–S13 是需求阶段编号；U1–U13 是便于选择测试的模块分组�
 | U5 durable pending | `src/data_interface/model_update_pending.rs` | 三条出路、revision 收口、死信复活、尾事务、scoped room drain | 健康；空间跨行净变化仍缺行为专测 |
 | U6 暂存窗口（退役中） | `src/data_interface/staging/**`、`src/surreal_retry.rs` | ReplaySafe、生命周期、预载、分块重放、断点收敛、资源状态机、parity | 随 ADR-056 退役：不再是门禁，P3 删目录后整组消失；`attempts.rs` 搬家保留 |
 | U7 队列与 worker | `src/data_interface/batch_*.rs`、`src/data_interface/task_registry.rs`、`src/data_interface/side_effect_pending.rs` | FIFO、暂停、panic 隔离、提交后空间门、退避、空闲轮 | 源码顺序多，暂停/失败行为半边仍需下沉 |
-| U8 模型生成与空间树 | `src/fast_model/gen_model.rs`、`src/fast_model/cata_model.rs`、`src/fast_model/occ_generate.rs`、`src/fast_model/aabb_tree.rs` | 失败汇聚、AABB 写序、空间版本号、十五键 health、持久化失败保脏 | 新增 5mm 连接容差缺回归测试 |
+| U8 模型生成与空间树 | `src/fast_model/gen_model.rs`、`src/fast_model/cata_model.rs`、`src/fast_model/mesh_generate.rs`、`src/fast_model/aabb_tree.rs` | 失败汇聚、AABB 写序、空间版本号、十五键 health、持久化失败保脏 | 新增 5mm 连接容差缺回归测试 |
 | U9 删除清理 | `src/data_interface/helper.rs`、`src/data_interface/model_refresh.rs` | 级联删除、共享模型保留、房间双向清边、直写 epoch | 单测健康，真实产物由 live 补 |
 | U10 房间归属 | `src/fast_model/room_model.rs`、`src/fast_model/room_predicate.rs` | renderer、候选、强边归并、双表同源、coverage gate、fail-closed | 场景语义仍过度依赖 ignored live |
 | U11 按需生成 | `src/data_interface/on_demand_model.rs` | durable 行先行、活动生成根 409、先锁后查、不可绘终态 | 健康 |
@@ -531,7 +531,7 @@ RF10（关闭空间树）和 RF14（人工 retry 死信）可先写进程内行�
 | `src/data_interface/model_update_pending.rs` | U5 | U7、U10 |
 | `src/data_interface/staging/**` | U6 | U5、U7 |
 | `src/data_interface/batch_worker.rs`、`src/data_interface/batch_queue.rs`、`src/data_interface/side_effect_pending.rs` | U7 | U5、U6、U10 |
-| `src/fast_model/cata_model.rs`、`src/fast_model/gen_model.rs`、`src/fast_model/occ_generate.rs`、`src/fast_model/aabb_tree.rs` | U8 | U7、U10 |
+| `src/fast_model/cata_model.rs`、`src/fast_model/gen_model.rs`、`src/fast_model/mesh_generate.rs`、`src/fast_model/aabb_tree.rs` | U8 | U7、U10 |
 | `src/data_interface/helper.rs`、`src/data_interface/model_refresh.rs` | U9 | U5、U10 |
 | `src/fast_model/room_model.rs`、`src/fast_model/room_predicate.rs`、`src/fast_model/room_fixture.rs` | U10 | U5、U7 |
 | `src/data_interface/on_demand_model.rs` | U11 | U3、U5 |

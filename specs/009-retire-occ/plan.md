@@ -73,7 +73,7 @@ T011 / T013 / T016 一直空着，现已全部两头对照过（libgm 构造函�
 > **G3 的范围不是「柱与球」，是所有参与复用的曲面原语**，见 T053。
 
 `occ` 在源码里剩下的引用只有四处，全部不在生成路径上：
-`src/rvm_baseline/mesh_compare.rs` 的 `gen_side`、`src/fast_model/occ_generate.rs` 里两条
+`src/rvm_baseline/mesh_compare.rs` 的 `gen_side`、`src/fast_model/mesh_generate.rs` 里两条
 `#[cfg]` 测试与已注释的 `apply_insts_boolean_occ` / `apply_cata_neg_boolean_occ`、
 `src/fast_model/loop_model.rs` 一条断言、`src/plug_in/water_calculation.rs`（挂在
 **Cargo.toml 里根本没定义**的 `opencascade_rs` feature 上，等于常关死代码）。
@@ -149,7 +149,7 @@ T011 / T013 / T016 一直空着，现已全部两头对照过（libgm 构造函�
   `Err("Invalid shape")`。回 `None` 只是换个地方报同一个错。
 - **改法**：`tessellate_libgm_param` 的返回类型换掉 `Option`，或让这两支返回一个显式的
   「非形状」判定，由 `gen_inst_meshes` 直接推进 `unbuildable`，不经 OCC 分支。
-- **门**：源码断言 `src/fast_model/occ_generate.rs` 的 manifold 分支之后不再有
+- **门**：源码断言 `src/fast_model/mesh_generate.rs` 的 manifold 分支之后不再有
   `#[cfg(feature = "occ")]` 的形状回退路径。
 
 ---

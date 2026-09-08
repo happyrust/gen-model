@@ -31,7 +31,7 @@ ADR-010 §4 / 增补 4、ADR-017 §5、`docs/2026-08-12_room-scoped-drain-commit
   （`reconcile_spatial_pending`）时若当前态为 ReplayRequired，晋升 Ready/ReadyEmpty。
 - **D6（B2）锁范围**：staged 路径只在 [提交后收敛 → 发布] 段持 `SPATIAL_STATE_SERIAL`，
   journal 写回与尾事务不持（尾事务不动树，崩溃安全靠 pending 行）。durable direct 路径
-  取锁点在读输入之前（先于既有树写锁——`occ_generate.rs` 的同 refno 乱序防护要求锁跨
+  取锁点在读输入之前（先于既有树写锁——`mesh_generate.rs` 的同 refno 乱序防护要求锁跨
   读输入段）；普通直写锁跨 [事务→树同步]。锁序恒为
   `STAGED_COMMIT_SERIAL → SPATIAL_STATE_SERIAL → GLOBAL_AABB_TREE`，源码钉住。
 - **D7（B5）吸收直写 epoch 方案**：2026-08-12 trace plan 的 H1（删除分支无痕迹）/

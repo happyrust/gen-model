@@ -1,10 +1,10 @@
 use crate::data_interface::interface::PdmsDataInterface;
 use crate::data_interface::tidb_manager::AiosDBManager;
-use crate::fast_model::occ_generate::process_meshes_update_db_deep;
-use crate::fast_model::occ_generate::{
+use crate::fast_model::mesh_generate::process_meshes_update_db_deep;
+use crate::fast_model::mesh_generate::{
     RootGenerationFailure, process_meshes_update_db_deep_report,
 };
-use crate::fast_model::occ_generate::{booleans_meshes_in_db, gen_meshes_in_db};
+use crate::fast_model::mesh_generate::{booleans_meshes_in_db, gen_meshes_in_db};
 use crate::fast_model::shape_save::{SaveMode, run_shape_save_receiver};
 use crate::fast_model::{
     cata_model, coverage_audit, loop_model, prim_model, resolve_desi_comp, shared,
@@ -215,7 +215,7 @@ pub(crate) async fn gen_all_geos_data_with_policy(
         )
         .await?;
         if !report.failures.is_empty() {
-            anyhow::bail!(crate::fast_model::occ_generate::summarize_root_failures(
+            anyhow::bail!(crate::fast_model::mesh_generate::summarize_root_failures(
                 "targeted model",
                 &report.failures
             ));

@@ -8,7 +8,7 @@
 //! 派发门 / 空闲轮）收口——staged 尾事务提交不翻状态，否则常态流量下状态高频
 //! 抖动，health 的 `state` 字段成了噪音。
 //!
-//! 锁序（源码钉在 `batch_worker` / `occ_generate` / 本模块测试）：
+//! 锁序（源码钉在 `batch_worker` / `aabb_refresh` / 本模块测试）：
 //!
 //! ```text
 //! DATA_COMMIT_SERIAL → SPATIAL_STATE_SERIAL → GLOBAL_AABB_TREE
@@ -79,7 +79,7 @@ impl SpatialTreeState {
 /// 持锁方（获取点见各调用处注释）：
 /// - 数据批次提交后的空间收敛与发布（`reconcile_spatial_pending`，经
 ///   `DATA_COMMIT_SERIAL` → 本锁）；
-/// - direct/non-staged 指针事务到内存树同步（`occ_generate` 直写、
+/// - direct/non-staged 指针事务到内存树同步（`aabb_refresh` 直写、
 ///   `helper::delete_room_membership` 直写删除）；
 /// - 全量指针重建的换树/发布段（分页读在锁外，D4）；
 /// - 快照落盘（`persist_aabb_tree*`）与启动装载。

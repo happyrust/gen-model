@@ -2,13 +2,13 @@
 
 - [x] T01 建 `docs/evidence/2026-08-23-spatial-tree-refno-lookup/baseline/`，记录改动前代码
       哈希（本仓 + `../vendor/old-aios-core`）、`DB_OPTION_FILE`、feature 组合与运行环境。
-- [x] T02 `src/fast_model/occ_generate.rs`：给 `update_inst_relate_aabbs_by_refnos_mode` 里
+- [x] T02 `src/fast_model/mesh_generate.rs`：给 `update_inst_relate_aabbs_by_refnos_mode` 里
       `stale_by_refno` 那一段埋独立计时，并把它与当时的 `GLOBAL_AABB_TREE` 条目数并入
       `process_meshes_update_db_deep_with_policy` 的「模型结点更新耗时」那行输出。**只加观测，
       不改行为。**
       落点：`StaleLookupStats` + 三个 `AtomicU64` + `note_stale_lookup` / `take_stale_lookup_stats`；
       窗口开始前清零、结束时取走。`cargo fmt` + `cargo check` 过；
-      `cargo test --lib fast_model::occ_generate --no-default-features --features ws,gen_model,manifold,project_hd`
+      `cargo test --lib fast_model::mesh_generate --no-default-features --features ws,gen_model,manifold,project_hd`
       18 passed / 3 ignored，锁序与写序断言全部保持通过。
 - [ ] T03 跑一轮真实 dbnum 初始化，把 T02 的数落进 `baseline/`。**若 stale 子项占 AABB落库
       不足三成，停下来重排优先级**（见 plan 风险第一条），不要盲目往下做。
@@ -21,7 +21,7 @@
       `sync_refnos_cost_is_not_proportional_to_tree_size`。**退回全树扫描时这条必须红。**
 - [ ] T06 [P] `../vendor/old-aios-core/src/accel_tree/acceleration_tree.rs`：补「索引不同步」
       用例——绕过 API 直接改树之后，新接口的答案仍然正确，且回退计数递增。
-- [ ] T07 `src/fast_model/occ_generate.rs`：`stale_by_refno` 改用 T04 的接口，**直写与暂存
+- [ ] T07 `src/fast_model/mesh_generate.rs`：`stale_by_refno` 改用 T04 的接口，**直写与暂存
       两条分支都换**。判定仍在锁下、仍先于任何指针写入与树同步；现有源码顺序断言
       （`lock_at < classify_at`、记录先于指针、布尔后必须再刷一次）全部保持通过。
 - [ ] T08 `src/data_interface/helper.rs`：`delete_room_membership` 窗口外分支的 `present`
@@ -29,7 +29,7 @@
 - [ ] T09 `src/data_interface/helper.rs`：同批更新那条按 `tree.iter().any(` 找位置的源码顺序
       断言。**必须与 T08 同一个 commit**——针不改，这道门会从「守着次序」静默退化成
       「找不到即 panic」。与 T08 同文件，不可并行。
-- [ ] T10 [P] 加源码形状断言：`src/fast_model/occ_generate.rs` 与
+- [ ] T10 [P] 加源码形状断言：`src/fast_model/mesh_generate.rs` 与
       `src/data_interface/helper.rs` 中不得再出现「遍历整棵树来按 refno 定位」的写法。
 - [ ] T11 改动后重跑 T03 的同一场景，逐表比对：`inst_relate` 的 `aabb` 指针与 `aabb_d`、
       `geo_relate`、空间树快照条目集合、`room_panel_relate`、`room_relate`、

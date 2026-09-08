@@ -9,7 +9,7 @@
       OCC/RVM及其他脏变更。依赖：T001。
 - [ ] T003 `src/fast_model/cata_cache.rs`、`resolve.rs`、`cata_model.rs`、staging失效hook、配置和测试：
       把T002的focused资产汇总到当前分支；容量0/cache-off先过旧路径等价。依赖：T002。
-- [ ] T004 [P] `src/fast_model/gen_model.rs`、`cata_model.rs`、`shape_save.rs`、`occ_generate.rs`：
+- [ ] T004 [P] `src/fast_model/gen_model.rs`、`cata_model.rs`、`shape_save.rs`、`mesh_generate.rs`：
       增加group wall、产品key、缓存、packet、AABB查找归因字段；不改行为。依赖：T001。
 - [ ] T005 `docs/evidence/2026-08-25-model-throughput-closure/attribution/`：连续采集至少20组，计算
       产品key跨组重复率、CATA build p50/p95、SavePhase packet和stale lookup占比，执行20%/30%
@@ -52,7 +52,7 @@
       write p95≤1.15倍且无新增重试的最小候选。依赖：T017。
 - [ ] T019 `specs/026-spatial-tree-refno-lookup`：完成T03占比门；不足30%则记录停止决定并跳到T023。
       依赖：T005。
-- [ ] T020 `../vendor/old-aios-core/.../acceleration_tree.rs`及`src/fast_model/occ_generate.rs`：
+- [ ] T020 `../vendor/old-aios-core/.../acceleration_tree.rs`及`src/fast_model/mesh_generate.rs`：
       完成refno索引接口与直写/staged shadow接线，保留重复多重性和现有锁/发布顺序。依赖：T019。
 - [ ] T021 [P] `src/data_interface/helper.rs`、`spatial_state.rs`和树测试：覆盖删除、reconcile、启动加载、
       pending replay、全树替换；漏hook时索引失效并回退扫描。依赖：T020。

@@ -15,14 +15,14 @@
   T106/T205/T306/T403/T605 已于
   2026-07-26 在本地 SurrealDB 通过；纯逻辑单测 T402 同日通过；
   F7 同日确认无需实现；P3 的 T902 同日核实为早已解决。
-- **涉及改动文件**：`src/fast_model/gen_model.rs`、`src/fast_model/occ_generate.rs`、`src/data_interface/helper.rs`、`src/data_interface/model_refresh.rs`、`src/data_interface/side_effect_pending.rs`、`src/data_interface/increment_manager.rs`、`../pdms-io/src/io.rs`。
+- **涉及改动文件**：`src/fast_model/gen_model.rs`、`src/fast_model/mesh_generate.rs`、`src/data_interface/helper.rs`、`src/data_interface/model_refresh.rs`、`src/data_interface/side_effect_pending.rs`、`src/data_interface/increment_manager.rs`、`../pdms-io/src/io.rs`。
 
 ## 批次 P0（本期必修）
 
 ### F2 · mesh panic → 错误传播（先做，打通失败通道）
 - [x] T201 `src/fast_model/gen_model.rs`：增量分支 `process_meshes_update_db_deep(...).await.expect(...)` → `?`
 - [x] T202 `src/fast_model/gen_model.rs`：全量分支 `process_meshes_update_db_deep(db_option, &sites)` 同步改 `?`
-- [x] T203 增量热路径 `.unwrap()/.expect()`：`occ_generate.rs` 的 `gen_inst_meshes`/`update_inst_relate_aabbs_by_refnos`/入口查询已改 `?`；`save_instance_data`（并行版，增量实际用）本就聚合写错误为 `Err`
+- [x] T203 增量热路径 `.unwrap()/.expect()`：`mesh_generate.rs` 的 `gen_inst_meshes`/`update_inst_relate_aabbs_by_refnos`/入口查询已改 `?`；`save_instance_data`（并行版，增量实际用）本就聚合写错误为 `Err`
 - [x] T204 当前架构确认：模型计划与水位在同一事务持久化；生成失败由
   `model_update_pending` 标记 failed，旧 `SideEffectCompensator::ModelRefresh` 仅兼容历史记录
 - [x] T205 [P] 本地 Surreal 集成测试**已通过**（2026-07-26）：

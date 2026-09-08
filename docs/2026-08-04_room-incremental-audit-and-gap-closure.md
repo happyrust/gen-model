@@ -12,7 +12,7 @@ live 验证（`d485baad` + `d62f1497`）。承接同日水位播种工作
 - 队列骨架：`RoomRecalcElement/Panel` 两个 action、行 id 不带 dbnum、`drain_rooms`
   第三阶段、房间收敛统一在 worker 空闲轮 `room_round`（ADR-011 合流后的归宿）。
 - AABB 差异触发的两个入队点都在（`increment_manager` 的 TransformOnly 路径、
-  `occ_generate` 的定向重生成路径），变更判定基线取空间树旧值。
+  `mesh_generate` 的定向重生成路径），变更判定基线取空间树旧值。
 - 吸收封闭性检查（`absorption_is_closed`）在位；两条重算分支共享判定谓词
   `element_in_panel`、共享边 id、都是先清后写——「增量==全量」的收敛保证结构性成立。
 - 脏标记落盘（`AABB_TREE_DIRTY` + 空闲轮收尾）、失败保脏、临时文件 + 原子 rename。

@@ -88,7 +88,7 @@ ADR-053「生成期查询面」节列了 12 个收口函数 + 「表达式求值
 
 | 函数 | 调用点 | 为什么不进 direct |
 |---|---|---|
-| `query_refnos_by_geo_hash` | `occ_generate.rs:704,737` | 按已生成 geo 的 hash 反查受影响 refno —— 产物 |
+| `query_refnos_by_geo_hash` | `mesh_generate.rs:704,737` | 按已生成 geo 的 hash 反查受影响 refno —— 产物 |
 | `query_refnos_has_pos_neg_map` | `cata_model.rs:1094` | 正负体映射，产物侧记账 |
 | `query_arrive_leave_points_by_cata_hash` | `cata_model.rs:1491` | 按 cata_hash 取已存在的进出点 —— 产物 |
 | `query_insts` | `room_fixture.rs:374` | inst 表 —— 产物（且是房间夹具） |
@@ -110,7 +110,7 @@ ADR-053「生成期查询面」节列了 12 个收口函数 + 「表达式求值
 
 | 位置 | 形态 | 处置要求 |
 |---|---|---|
-| `occ_generate.rs:1922` | `aios_core::SUL_DB.query(...)` 内联 SQL | 判定读的是源模型还是产物；产物则标 P 档并注明，源模型则必须收口 |
+| `mesh_generate.rs:1922` | `aios_core::SUL_DB.query(...)` 内联 SQL | 判定读的是源模型还是产物；产物则标 P 档并注明，源模型则必须收口 |
 | `pdms_inst.rs:4` + `:648` | `use aios_core::SUL_DB`；`active_staging_reads().map(\|_\| SUL_DB.clone())` | 已有 staging 分流意识，direct 下的语义要一并定 |
 | `room_fixture.rs:27` | `use aios_core::SUL_DB` | 房间夹具，Q1 范围外，标注即可 |
 
@@ -258,7 +258,7 @@ super::direct::active_direct_reads()`，**排在 staging 分支之前**：
 - ~~§2.3 两个混合读的拆分边界~~ → **已拆并落地**（见 §6.9）：源模型半边进 provider，
   产物半边留在收口函数里走 Surreal（`query_group_by_cata_hash_direct` 与
   `retain_ungenerated`）。仍需 opus-5-22 在 DirectStore 侧复核产物半边的查询形态是否够用。
-- §5 `occ_generate.rs:1922` 那条内联 SQL 的定性。
+- §5 `mesh_generate.rs:1922` 那条内联 SQL 的定性。
 - ~~§6 表达式求值~~ → 方言问题已由 `docs/specs/direct-mode-expression-dialect.md` 结清
   （同一种方言，三条映射规则）。**仍未决的是那四个符号自身是否再打库**，
   以及 `SCOM_INFO_MAP` 的填充时机是否依赖 Surreal。

@@ -1,7 +1,7 @@
 //! 全局几何并发闸（specs/023，ADR-041 第 3 条）。
 //!
 //! 生成路径此前的并行形态是「根内并行、根间串行」，且每处 fan-out 的宽度都是
-//! 写死的（`manifold_bool` 固定切 16 块、`occ_generate`/`pdms_inst`/`gen_model`
+//! 写死的（`manifold_bool` 固定切 16 块、`mesh_generate`/`pdms_inst`/`gen_model`
 //! 同类）：这层代码写的时候假设自己独占进程，彼此不知道对方存在。两层各限各的
 //! 会得到一个没人算得清的乘积（8 个根 × 16 路 = 128 个 task 同抢 CPU 且全砸同
 //! 一个 kv-mem 实例），调参时无法归因。
@@ -526,7 +526,7 @@ mod tests {
             ("gen_model.rs", 2),
             ("loop_model.rs", 1),
             ("manifold_bool.rs", 2),
-            ("occ_generate.rs", 2),
+            ("mesh_generate.rs", 2),
             ("prim_model.rs", 1),
         ];
         let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/fast_model");

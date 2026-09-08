@@ -103,7 +103,7 @@
   它本来就同时握着，比一下几乎零成本，此前只算不比、外面拿不到任何信号。没有旧值
   （几何是刚生成的）同样算变。两个调用点各自把变更集转成房间任务入队：
   `increment_manager.rs` 的 TransformOnly 路径（纯 POS/ORI 移动，即「设备从 A 房挪到
-  B 房」）与 `occ_generate.rs` 的 regen 路径。按 `noun` 分流，PANE 进整间分支、其余
+  B 房」）与 `mesh_generate.rs` 的 regen 路径。按 `noun` 分流，PANE 进整间分支、其余
   进元素分支。任务的 dbnum 跟着 refno 走、会话号取 0——两个触发点都在几何刷新那一层，
   本来就不知道自己属于哪次会话，而房间任务的复活本来也不看会话号。
   **三处刻意的收窄**：
@@ -443,7 +443,7 @@
     变更，都会在库侧留下可检测的痕迹」。该方案 §3 的论证原文是「直写路径不产生意图，
     其崩溃丢失自然落入 3c 被重建接住」，但这句话**只对会 bump epoch 的 durable 直写
     分支成立**。盘点全仓 `GLOBAL_AABB_TREE` 的写变更点，另有两处既不写意图行、
-    也不 bump：普通直写刷新（`occ_generate.rs`，全量生成与 `manual_update_aabbs`
+    也不 bump：普通直写刷新（`mesh_generate.rs`，全量生成与 `manual_update_aabbs`
     走这里）与直写删除清理（`helper.rs` 的 `delete_room_membership` 窗口外分支）。
     共同失效形态是「变更已提交 → 任务标记完成（不再重放）→ 内存树已同步、仅剩脏
     标记 → 空闲轮落盘前崩溃 → 重启时指纹相等 → Reuse 复用陈旧文件」，而

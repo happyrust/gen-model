@@ -374,7 +374,7 @@ cargo test --lib --features http_api <测试名> -- --ignored --exact --nocaptur
 | `live_startup_sweep_routes_a_new_db_to_baseline_beside_an_applied_one` | increment_manager.rs（tests） | testbed 沙箱 + `AIOS_MANUAL_UPDATE_PROJECT`；`AIOS_STARTUP_APPLIED_DBNUM` 默认 8000（**前提：已追平且 pe 有支撑**，只读不写）、`AIOS_STARTUP_NEW_DBNUM` 默认 7998（**会清成从未解析后重建**）；debug 构建需 `RUST_MIN_STACK=16777216` | 2026-08-18 @8019 | **通过**（13.13s，测试体；命令总耗时 25.4s）。存量库与新库同处一个一次性目录，一轮重扫里存量库零入队、新库 `apply_window 1..=12` → 基线；收尾断言存量库水位未动。真靶口径 `-NewDbnum 7999`（56 MB / 120 会话，基线以分钟计） |
 | `live_scope_refresh_baselines_a_db_the_mdb_just_declared` | increment_manager.rs（tests） | 同上，外加**会临时改写沙箱库里 `/ALL` 的 `CURD`**（原样备份进 `queue_control:test_mdb_curd_backup`，无论红绿都还原） | 2026-08-18 @8019 | **通过**（13.23s，测试体；命令总耗时 25.4s）。摘出 CURD → 重扫零入队且不写观察值 → 装回 CURD → `scope-refresh` 重扫发现并走基线。跑后实测 CURD 71 项、备份行 0 |
 | `live_direct_delete_crash_before_persist_recovers_by_rebuild` | helper.rs:908 | testbed 指定（推进 epoch、重建树文件） | 2026-08-12 批次1 @8019 | **修复后通过**（5.5s）——用例写于状态机之前，自灌树后 persist 被发布门拒（Uninitialized），补 `mark_spatial_tree_fixture_preloaded()` |
-| `live_direct_refresh_crash_before_persist_recovers_by_rebuild` | occ_generate.rs:2057 | testbed 指定（需基线+生成在位） | 2026-08-12 批次1 @8019 | **修复后通过**（5.8s）——同上，补测试装载模式声明 |
+| `live_direct_refresh_crash_before_persist_recovers_by_rebuild` | mesh_generate.rs:2057 | testbed 指定（需基线+生成在位） | 2026-08-12 批次1 @8019 | **修复后通过**（5.8s）——同上，补测试装载模式声明 |
 | `live_sync_aabb_tree_fills_tree_from_db` | aabb_tree.rs:2072 | 重写 inst_relate.aabb + 树文件（走 AIOS_LIVE_WS 三件套） | 2026-08-12 批次1 @8019 | **通过**（1.2s，工具补齐 AIOS_LIVE_* 派生后） |
 
 ## B 需生成基线（批次 2，2026-08-12/13 执行 @ testbed 8019）
@@ -425,7 +425,7 @@ ams8000 世代）+ 长跑专项 1（manual_update 二遍）+ 未跑 4（room mes
 | `live_sweep_inst_relate_flat_on_configured_db` | pdms_inst.rs:992 | 生成产物在位 | 2026-08-13 B2 @8019 | **通过**（32.7s） |
 | `live_shared_geo_bad_retry_must_refresh_sibling_insts_flat_on_disposable_db` | pdms_inst.rs:2042 | **可丢弃沙箱**（`Start-TestSurreal.ps1 -Memory`）；自建 zzflat/20260823 夹具，断言前自清理 | 2026-08-24 @8019(-Memory) | **按设计红**（2.55s）：共享 geo `bad→meshed` 后未被重写的 A 行 `insts_flat` 停在旧值 `[]`，坐实 ADR-043 缺口（spec 025 T01/T02，FR-6 定选项 P、FR-7 定路线 B）；T18 闭环后本行应改记「通过」，回退旧写法必须复红 |
 | `test_boolean_refno_parse_error` | manifold_bool.rs:670 | mesh 在位 | 2026-08-13 B2 @8019 | **通过**（3.1s） |
-| `test_gen_geos` | occ_generate.rs:37 | 基线 + mesh 目录 | 2026-08-13 B2 @8019 | **通过**（3.4s） |
+| `test_gen_geos` | mesh_generate.rs:37 | 基线 + mesh 目录 | 2026-08-13 B2 @8019 | **通过**（3.4s） |
 | `test_ancestor`（team_data.rs:166） | team_data.rs:166 | 项目数据在位 | 2026-08-13 B1 @8019 | **通过**（3.2s） |
 | `a_reparse_lands_exactly_one_site_per_name` | ~~member_prune.rs:441~~ → **`versioned_db/baseline.rs:244`**（2026-09-04 随 `parse_pdms_db` 退役迁走，用例还在） | 空 8009 + 本地 AMS 文件 | — | 未跑：需空 8009 专项窗口。跑法写在用例注释里（`Start-Surreal8009.ps1 -Memory` + `cargo test --lib a_reparse_lands_exactly_one_site_per_name -- --ignored`）。**钉的东西变了**：原先钉「补链轮把已删子树复活、`member_prune` 事后裁掉」，现在钉「e3d-io 的目标索引在 T 上根本没有已删元素，不裁也没有幽灵」 |
 

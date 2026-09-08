@@ -7,7 +7,7 @@
 全量收敛单项 227 秒。
 
 现状是「根内并行、根间串行」：`gen_model.rs` 22 处 spawn/join、`manifold_bool.rs:76` 固定
-切 16 块、`occ_generate.rs` 6 处、`pdms_inst.rs` 4 处，这些 fan-out 宽度写死、不看核数，
+切 16 块、`mesh_generate.rs` 6 处、`pdms_inst.rs` 4 处，这些 fan-out 宽度写死、不看核数，
 彼此不知道对方存在。收口段的空间树重建与房间收敛则完全串行，且不在任何并发预算里。
 
 本规格是 ADR-041 的第一个可交付：**不碰 `old-pdms-io`、不引入 ZONE 分片、不新建持久表**，
@@ -17,7 +17,7 @@
 ## 要求
 
 1. 存在**唯一**的全局几何并发闸，额度可配，默认 = 物理核数，最小 1。生成路径的所有
-   fan-out（`manifold_bool`、`occ_generate`、`pdms_inst`、`gen_model` 及同类）均从该闸取额度，
+   fan-out（`manifold_bool`、`mesh_generate`、`pdms_inst`、`gen_model` 及同类）均从该闸取额度，
    不得再出现写死的并发宽度。
 2. 额度设为 1 时，行为与改动前等价：不产生新的并发形态，只是串行执行。这是本特性的回滚路径。
 3. 生成期间的 journal 条目先进各自生成根的本地 buffer，根结束时整段并入窗口 journal；

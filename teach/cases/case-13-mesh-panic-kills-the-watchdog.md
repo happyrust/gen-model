@@ -49,7 +49,7 @@ F2 的需求（MUST）：
 落地（[`tasks.md`](../../docs/specs/incr-gen-fixes/tasks.md) T201–T205）：
 
 - `gen_model.rs` 增量分支与全量分支的 `.expect(...)` 都改 `?`；
-- `occ_generate.rs` 的 `gen_inst_meshes` / `update_inst_relate_aabbs_by_refnos` / 入口查询改 `?`；
+- `mesh_generate.rs` 的 `gen_inst_meshes` / `update_inst_relate_aabbs_by_refnos` / 入口查询改 `?`；
   `save_instance_data`（并行版，增量实际用的那个）本就把错误聚合为 `Err`；
 - 失败由 `model_update_pending` 标记 failed 并重试；旧的 `SideEffectCompensator::ModelRefresh`
   只保留兼容历史记录。

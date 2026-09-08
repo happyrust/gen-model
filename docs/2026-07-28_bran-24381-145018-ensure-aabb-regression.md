@@ -127,7 +127,7 @@ minX / minY / minZ / maxX / maxY / maxZ 六个方向上把盒子撑开的，全�
 **同时澄清两条会把人带偏的旧记载：**
 
 1. **第 4 节「定向重生成链路跑的是 `replace_exist=false`」已经过时。**
-   `occ_generate.rs:329` 已强制传 `true`，旁边挂着 ADR-010 D2 的理由；ensure 走的
+   `mesh_generate.rs:329` 已强制传 `true`，旁边挂着 ADR-010 D2 的理由；ensure 走的
    `generate_roots → gen_all_geos_data → process_meshes_update_db_deep` 正是这一条。
    传配置值的是另一条 `gen_meshes_in_db`（`:157`）。
 2. **`:797-807` 那段「geo 侧算不出就以行内指针为准」的回退没有参与。** 现查

@@ -119,7 +119,7 @@ BOX/CYLI/… primitive 而 WORL/SITE/ZONE/EQUI 不是、两表几何 flag 一致
 
 | 文件 | 原用法 | 现状 |
 |---|---|---|
-| `fast_model/occ_generate.rs` | `use parse_pdms_db::parse::round_f32`（**未使用**） | ✅ 删 |
+| `fast_model/mesh_generate.rs` | `use parse_pdms_db::parse::round_f32`（**未使用**） | ✅ 删 |
 | `pcf/bran.rs` | `use …::times_keep_f32_two_decimal_place`（**未使用**；`pcf` 整个模块在 `lib.rs` 里是注掉的） | ✅ 删 |
 
 ### F. 探针 bin（legacy 参照臂 / 直接读字节取证）
@@ -230,7 +230,7 @@ FrozenSource::capture(path)              e3d-io 底座：dbnum / 库类型 / 目
 
 - 新文件：`src/data_interface/ele_data.rs`、`src/noun_dict.rs`、`resource/dict/noun_flags.json`、
   `resource/dict/noun_caps.json`、`scripts/Check-LegacyParsePdmsDb.ps1`、本文。
-- 只有 B 的 hunk：`src/uda_table.rs`、`src/pcf/bran.rs`、`src/fast_model/occ_generate.rs`、`src/fast_model/shared.rs`、
+- 只有 B 的 hunk：`src/uda_table.rs`、`src/pcf/bran.rs`、`src/fast_model/mesh_generate.rs`、`src/fast_model/shared.rs`、
   `src/fast_model/coverage_audit.rs`、`src/data_interface/cata_closure.rs`、`src/data_interface/extract_family.rs`、
   `src/data_interface/mdb_membership.rs`、`src/bin/refno_attr_probe.rs`。
 - 与 A / 同伴混在一个文件里的 B hunk：`Cargo.toml`（`legacy_parse_pdms_db` feature + 8 个 `[[bin]]` + 1 个

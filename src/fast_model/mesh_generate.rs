@@ -18,7 +18,6 @@ use aios_core::{
 };
 use aios_core::{get_db_option, init_test_surreal};
 use anyhow::anyhow;
-use bevy_transform::prelude::Transform;
 use dashmap::DashMap;
 use futures::{StreamExt, stream};
 use glam::DMat4;
@@ -803,33 +802,6 @@ pub async fn gen_inst_meshes(
 
 pub(crate) use super::aabb_refresh::*;
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct GeoParam {
-    pub id: String,
-    pub param: PdmsGeoParam,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ParamNegInfo {
-    // pub id: String,
-    pub param: PdmsGeoParam,
-    pub geo_type: String,
-    pub para_type: String,
-    pub trans: Transform,
-    pub aabb: Option<Aabb>,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub(crate) struct OccGeoTransQuery {
-    pub refno: RefnoEnum,
-    pub sesno: u32,
-    pub noun: String,
-    pub wt: Transform,
-    pub aabb: Aabb,
-    pub ts: Vec<(PdmsGeoParam, Transform)>,
-    pub neg_ts: Vec<(RefnoEnum, Transform, Vec<ParamNegInfo>)>,
-}
-
 #[inline]
 fn round_dmat4(m: DMat4) -> DMat4 {
     DMat4 {
@@ -848,7 +820,7 @@ mod aabb_write_order_tests {
 
     #[test]
     fn mesh_workers_propagate_query_write_and_join_failures() {
-        let source = include_str!("occ_generate.rs");
+        let source = include_str!("mesh_generate.rs");
         let body = source
             .split_once("pub async fn gen_inst_meshes(")
             .expect("gen_inst_meshes exists")
@@ -877,7 +849,7 @@ mod aabb_write_order_tests {
     /// 窗口：两步之间崩溃或并发读，`aabb.d` 读者会把几何整条漏掉。
     #[test]
     fn mesh_records_land_before_inst_geo_pointers_inside_each_task() {
-        let source = include_str!("occ_generate.rs");
+        let source = include_str!("mesh_generate.rs");
         let body = source
             .split_once("pub async fn gen_inst_meshes(")
             .expect("gen_inst_meshes exists")
@@ -908,7 +880,7 @@ mod aabb_write_order_tests {
 
     #[test]
     fn gen_inst_meshes_bails_without_backend_and_tries_libgm_first() {
-        let source = include_str!("occ_generate.rs");
+        let source = include_str!("mesh_generate.rs");
         let body = source
             .split_once("pub async fn gen_inst_meshes(")
             .expect("gen_inst_meshes exists")
@@ -939,7 +911,7 @@ mod aabb_write_order_tests {
     /// `shapes_map` 加回来（哪怕挂在 `#[cfg(feature = "occ")]` 下）本测试红。
     #[test]
     fn gen_inst_meshes_has_no_occ_shape_fallback() {
-        let source = include_str!("occ_generate.rs");
+        let source = include_str!("mesh_generate.rs");
         let body = source
             .split_once("pub async fn gen_inst_meshes(")
             .expect("gen_inst_meshes exists")
@@ -974,7 +946,7 @@ mod aabb_write_order_tests {
 
     #[test]
     fn targeted_regen_and_transform_use_the_incremental_aabb_entrypoint() {
-        let regen = include_str!("occ_generate.rs")
+        let regen = include_str!("mesh_generate.rs")
             .split_once("pub async fn process_meshes_update_db_deep(")
             .expect("process_meshes_update_db_deep exists")
             .1
@@ -1009,7 +981,7 @@ mod aabb_write_order_tests {
 
     #[test]
     fn root_dependency_queries_fail_the_root_instead_of_becoming_empty_results() {
-        let body = include_str!("occ_generate.rs")
+        let body = include_str!("mesh_generate.rs")
             .split_once("async fn process_one_model_root(")
             .expect("root pipeline exists")
             .1
@@ -1029,7 +1001,7 @@ mod aabb_write_order_tests {
     /// 返回原始正实体包围盒，而增量链因后续 post_regen_aabb 偶然得到另一结果。
     #[test]
     fn boolean_generation_refreshes_aabb_after_final_relations_exist() {
-        let body = include_str!("occ_generate.rs")
+        let body = include_str!("mesh_generate.rs")
             .split_once("pub async fn process_meshes_update_db_deep(")
             .expect("process_meshes_update_db_deep exists")
             .1

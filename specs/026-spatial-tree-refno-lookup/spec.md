@@ -35,7 +35,7 @@ AABB落库 就占 124~200 ms，是四段里最大的一块
    `remove_by_refnos` 共用同一份索引。不得在 `gen-model` 侧另建一份 refno → 包围盒 的映射：
    第二份真值会与树漂移，而漂移的后果不是变慢，是房间归属算错。
 2. 该能力的单次调用耗时**不随空间树总条目数线性增长**，只随被问的 refno 数量增长。
-3. `src/fast_model/occ_generate.rs` 的变更判定与 `src/data_interface/helper.rs` 的删除清理
+3. `src/fast_model/mesh_generate.rs` 的变更判定与 `src/data_interface/helper.rs` 的删除清理
    探测都改用它；这两处不再存在「为按 refno 定位而遍历整棵树」的写法。
 4. 索引不可用（与树不同步）时**行为必须可见**。答案仍须正确，但不得静默退化成线性扫描而
    无人知晓——生产路径上所有动树的调用都经过维护索引的 API，因此该情形一旦发生，就意味着

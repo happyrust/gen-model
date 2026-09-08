@@ -73,7 +73,7 @@
 
 ## 2. 相邻但**不在**本口径内的一摊（另立议题）
 
-`fast_model/` 里 gen-model 自己的几何生成器：`gen_model.rs` / `occ_generate.rs`（`legacy_model` feature，默认关）、`cata_model.rs`（2 048）、
+`fast_model/` 里 gen-model 自己的几何生成器：`gen_model.rs` / `mesh_generate.rs`（`legacy_model` feature，默认关）、`cata_model.rs`（2 048）、
 `prim_model` / `loop_model` / `cal_model`、`mesh_primitives`（1 445）、`sweep_mesh`（1 613）、`libgm_discretise`（1 436）、
 `manifold_bool` / `manifold_csg` / `manifold_tessellate`（≈ 3 650，`manifold` feature 默认开，ADR-029/030 负体 CSG 后处理仍在用）。
 它们是「几何本体」不是「增量逻辑」；若用户把口径扩成「e3d-model = 几何 + 增量本体」，这一摊（≈ 12k 行）是下一张清单，

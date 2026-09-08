@@ -8,7 +8,7 @@
 - **状态**: Open 📝
 - **创建日期**: 2026-08-27
 - **相关模块**: `aios_core::RefU64` / `RefnoEnum`、`src/data_interface/model_update_pending.rs`、
-  `src/fast_model/occ_generate.rs`、`src/data_interface/increment_pipeline.rs`
+  `src/fast_model/mesh_generate.rs`、`src/data_interface/increment_pipeline.rs`
 
 ## 🔍 问题描述
 
@@ -38,7 +38,7 @@
 `run_regen_group` 的合批收口拿**报告侧的下划线**去查**队列侧的斜杠**：
 
 ```rust
-// 报告侧：occ_generate.rs:371 —— refno: RefnoEnum，Display 是 "{get_0}_{get_1}"
+// 报告侧：mesh_generate.rs:371 —— refno: RefnoEnum，Display 是 "{get_0}_{get_1}"
 let root = refno.to_string();               // "24381_100677"
 report.completed.push(root);
 
@@ -150,7 +150,7 @@ impl RootKey {
 1. `RootKey::parse` 对三种拼法归一到同一个值，对不同的根不归一，对坏值返回 `Err`
    （不是一个零值）。
 2. `queue_field()` / `compact()` 各自的输出格式钉死，与 `to_pdms_str` / `Display` 逐字符一致。
-3. 源码断言：`model_update_pending.rs` 与 `occ_generate.rs` 里不得再出现裸的
+3. 源码断言：`model_update_pending.rs` 与 `mesh_generate.rs` 里不得再出现裸的
    `target_refno == ` / `completed.contains(&<String>)` 形态（仿 `concurrency.rs` 那条
    `no_hardcoded_fanout_width_survives_in_fast_model` 的按目录扫描写法）。
 4. 回归：构造「报告用下划线、队列用斜杠」的一页，断言全部收口——退回 `String` 比较即红。
@@ -166,7 +166,7 @@ impl RootKey {
 - [x] 逐处核上面「影响范围」名单（2026-08-27）：扫出第三处已经在错的（覆盖回填写的是
       下划线拼法），已修于 `eef945bf`；其余五处当前一致，第 6、7 条只是「碰巧一致」，
       没有机制保证
-- [ ] `RootKey` 落地，先只在 `model_update_pending` ↔ `occ_generate` 这条边界上换掉
+- [ ] `RootKey` 落地，先只在 `model_update_pending` ↔ `mesh_generate` 这条边界上换掉
 - [ ] 换完删掉 `root_identity_key` 与它那条调用点守卫断言（类型接管之后它们是死重）
 
 ### 预防措施

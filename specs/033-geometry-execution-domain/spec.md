@@ -113,5 +113,5 @@ Surreal 读写 p50 / p95 / p99 与 retry、进程 CPU 与 RSS。
 若单个最大 BRAN 就占总 CPU 的大头则收益有限）、tokio 调度器当前被饿死到什么程度、
 64MB 线程栈在 CentOS 上的真实内存代价。
 
-审核当时未送进上下文、因而其内部并发形态未经核实的文件：`occ_generate.rs`、
+审核当时未送进上下文、因而其内部并发形态未经核实的文件：`mesh_generate.rs`、
 `cata_model.rs`、`prim_model.rs`、`loop_model.rs`、`pdms_inst.rs`、`batch_worker.rs`。

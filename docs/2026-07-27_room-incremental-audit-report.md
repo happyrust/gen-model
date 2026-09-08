@@ -25,8 +25,8 @@ model_update_pending::drain                     (model_update_pending.rs:611)
   → ModelRefreshPolicy::generate_roots          (model_refresh.rs:35)
     → gen_all_geos_data                         (gen_model.rs:160)
       → process_meshes_update_db_deep           (gen_model.rs:201)
-        → update_inst_relate_aabbs_by_refnos    (occ_generate.rs:324)
-          → GLOBAL_AABB_TREE.update_aabbs       (occ_generate.rs:740)
+        → update_inst_relate_aabbs_by_refnos    (mesh_generate.rs:324)
+          → GLOBAL_AABB_TREE.update_aabbs       (mesh_generate.rs:740)
       → GLOBAL_AABB_TREE.serialize_to_bin_file  (gen_model.rs:263)
 ```
 
@@ -89,7 +89,7 @@ D9 与 D1 则是叠加的：只修 D1 不修 D9，修复不生效。
 `inst_relate.aabb`，也不碰任何一棵树。
 
 而 `inst_relate.aabb` 正是用 `world_trans * geo.trans` 变换 `geo.aabb` 合并出来的
-（`occ_generate.rs:709-715`）。`world_trans` 一变，存的 `aabb` 立即失效。
+（`mesh_generate.rs:709-715`）。`world_trans` 一变，存的 `aabb` 立即失效。
 
 后果：**一次纯 `POS` / `ORI` 移动——最典型的「把设备从 A 房挪到 B 房」——走的是
 `TransformOnly` 便宜路径，不重生成几何，因此永远进不了
@@ -103,8 +103,8 @@ D9 与 D1 则是叠加的：只修 D1 不修 D9，修复不生效。
 ### D2 · `replace_mesh = false` 让存量元素的包围盒永不刷新
 
 `process_meshes_update_db_deep` 把 `replace_exist = dboption.is_replace_mesh()`
-（`occ_generate.rs:286`）一路传到 `update_inst_relate_aabbs_by_refnos`，后者在
-`replace_exist` 为假时给 SQL 追加 `and aabb=none`（`occ_generate.rs:697-699`）——
+（`mesh_generate.rs:286`）一路传到 `update_inst_relate_aabbs_by_refnos`，后者在
+`replace_exist` 为假时给 SQL 追加 `and aabb=none`（`mesh_generate.rs:697-699`）——
 **只有还没有包围盒的行才会被算**。
 
 `DbOption.toml:33` 是 `replace_mesh = false`，而

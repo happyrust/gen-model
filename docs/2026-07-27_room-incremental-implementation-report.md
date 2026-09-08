@@ -90,14 +90,14 @@ drain 阶段 1  非 regen：transform → 刷包围盒 → 变了的入房间队
 
 ### 2.4 触发源（ADR §4）
 
-`src/fast_model/occ_generate.rs`：`update_inst_relate_aabbs_by_refnos` 改为返回
+`src/fast_model/mesh_generate.rs`：`update_inst_relate_aabbs_by_refnos` 改为返回
 `Vec<AabbChange>`。新旧两个值它本来就同时握着，比一下几乎零成本，此前只算不比、外面拿不到
 任何信号。没有旧值（几何刚生成）同样算变。
 
 两个调用点各自把变更集转成房间任务入队，按 `noun` 分流（PANE → 整间，其余 → 元素）：
 
 - `src/data_interface/increment_manager.rs`：TransformOnly 路径，即「设备从 A 房挪到 B 房」；
-- `src/fast_model/occ_generate.rs`：regen 路径。
+- `src/fast_model/mesh_generate.rs`：regen 路径。
 
 ### 2.5 删除路径（ADR §4 的删除例外，缺陷 D4）
 
@@ -283,7 +283,7 @@ AIOS_LIVE_WS=ws://localhost:8071 cargo test --lib \
 
 ```text
 src/fast_model/room_model.rs          先清后写、两条重算分支、读写分离、11 条单测
-src/fast_model/occ_generate.rs        AabbChange + 变更集返回 + regen 侧入队
+src/fast_model/mesh_generate.rs        AabbChange + 变更集返回 + regen 侧入队
 src/fast_model/room_fixture.rs        move_fixture_body、room_edges、2 条 live 用例
 src/data_interface/model_update_plan.rs      两种 action + is_room_recalc
 src/data_interface/model_update_pending.rs   record_id / 复活 / 三阶段 / 入队口、4 条单测

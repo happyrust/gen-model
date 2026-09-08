@@ -33,11 +33,11 @@
 | --- | --- |
 | 清扫三段谓词都不可索引，`inst_relate` 只有 `anc` / `dbnum` 两个索引 | `sweep_inst_relate_flat` 与 `init_inst_relate_indices`，同在 `src/fast_model/pdms_inst.rs` |
 | 第三段脏值计数无 `LIMIT`，只为打一行警告 | `sweep_inst_relate_flat` 末段 |
-| 脏位是进程级 `AtomicBool`，由「packets 非空」触发 | `INSTS_FLAT_DIRTY` / `mark_insts_flat_dirty`；调用点是 `save_instance_data` 尾与 `src/fast_model/occ_generate.rs` 的 AABB 段尾 |
+| 脏位是进程级 `AtomicBool`，由「packets 非空」触发 | `INSTS_FLAT_DIRTY` / `mark_insts_flat_dirty`；调用点是 `save_instance_data` 尾与 `src/fast_model/mesh_generate.rs` 的 AABB 段尾 |
 | 失效集与「本轮写过的行」不是同一个集合 | 脏位由 `!plan.packets.is_empty()` 触发（含 `inst_geo` / `geo_relate` / 共享内容 packet），而 `SavePlan::written_refnos` 只收实际写出的 `inst_relate` 行 |
 | 共享 geo 可以从 `bad` 恢复成 `meshed` | `render_inst_geo_upsert` 的第三个参数为真时发 `UPDATE inst_geo:⟨hash⟩ SET bad = false;` |
 | 回填段与修复段对空串 `booled_id` 的判定相反 | 回填 `IF booled_id != NONE THEN [{geo_hash: booled_id}]`（空串命中布尔分支）vs 修复/脏值段把 `''` 与字面 `'none'` 当作「无成品，不得写入平表」 |
-| 布尔成功路径已内联写平表 | `src/fast_model/occ_generate.rs` 的 `set booled_id=…, booled=true, insts_flat=[{geo_hash:…}]`；manifold 侧同形 |
+| 布尔成功路径已内联写平表 | `src/fast_model/mesh_generate.rs` 的 `set booled_id=…, booled=true, insts_flat=[{geo_hash:…}]`；manifold 侧同形 |
 | 读侧正确性不依赖物化覆盖率 | P4 §读侧两段式：三副本齐活直接用 / 副本缺走 pass2 `query_insts_slim` / 无链接丢弃 |
 | 空闲轮清扫挂点 | `src/data_interface/batch_worker.rs` 空闲轮的 `sweep_inst_relate_flat_if_dirty` |
 | 启动清扫挂点 | `src/lib.rs` 启动预加载段的 `sweep_inst_relate_flat` |

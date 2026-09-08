@@ -29,7 +29,7 @@ ADR-011、ADR-012、ADR-018、ADR-029。
 写 41370 条成员边）。
 
 现状的并行形态是「根内并行、根间串行」：`gen_model.rs` 22 处 spawn/join，
-`manifold_bool.rs:76` 把布尔输入固定切 16 块并发，`occ_generate.rs` 6 处、
+`manifold_bool.rs:76` 把布尔输入固定切 16 块并发，`mesh_generate.rs` 6 处、
 `pdms_inst.rs` 4 处同类。这层代码写的时候假设自己独占进程——宽度写死、不看核数、
 不知道旁边还有没有别的根在跑。
 
@@ -63,7 +63,7 @@ ZONE 决定「一次把多少数据拉进来」，不决定「几件事同时做
 
 ### 3. 一个全局几何并发闸，根级与根内 fan-out 共用同一份额度
 
-额度默认 = 物理核数。`manifold_bool.rs` 写死的 16 改为从额度派生，`occ_generate.rs`、
+额度默认 = 物理核数。`manifold_bool.rs` 写死的 16 改为从额度派生，`mesh_generate.rs`、
 `pdms_inst.rs` 的同类 fan-out 一并接入。
 
 两层各限各的会得到一个没人算得清的乘积（8 个根 × 16 路 = 128 个 task 同抢 CPU 且全砸同一个

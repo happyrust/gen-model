@@ -18,7 +18,7 @@ pub mod loop_model;
 pub mod shared;
 
 #[cfg(feature = "legacy_model")]
-pub(crate) mod occ_generate;
+pub(crate) mod mesh_generate;
 
 pub mod aabb_refresh;
 

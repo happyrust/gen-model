@@ -53,7 +53,7 @@
      暂存分支只持读锁，改成写锁会破坏锁序（见 Constitution Check 并发模型条），出局。
 3. **不收窄 `tree` 字段的可见性、不移除 `Deref`**。那是让索引「永远新鲜」的根治办法，但会波及
    依赖仓的其它下游，与本轮目标不对价。用第 2 条的可见回退兜住。
-4. **两处调用点的语义严格照搬**：`src/fast_model/occ_generate.rs` 仍在锁下、仍在任何指针写入
+4. **两处调用点的语义严格照搬**：`src/fast_model/mesh_generate.rs` 仍在锁下、仍在任何指针写入
    与树同步之前完成变更判定；`src/data_interface/helper.rs` 仍在写锁下、仍在事务之前完成
    present 探测。只把「怎么问树」换掉。
 
@@ -64,7 +64,7 @@
    无从归因，而且万一它只占一小半，优先级就该当场重排。
 2. **依赖仓加只读接口。** 在 `../vendor/old-aios-core` 上实现两个 `&self` 接口与不新鲜回退，
    并在该仓补复杂度性质测试（小树 vs 大树，单 refno 查询耗时不成比例增长）。
-3. **换掉生成路径。** `src/fast_model/occ_generate.rs` 的 `stale_by_refno` 改用新接口，
+3. **换掉生成路径。** `src/fast_model/mesh_generate.rs` 的 `stale_by_refno` 改用新接口，
    直写与暂存两条分支都换；现有源码顺序断言全部保持通过。
 4. **换掉删除路径。** `src/data_interface/helper.rs` 的 present 探测改用新接口，**同批更新**
    它那条按 `tree.iter().any(` 找位置的源码顺序断言——针不改，那道门会静默变成「找不到即 panic」。

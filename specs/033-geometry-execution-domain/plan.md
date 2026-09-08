@@ -102,13 +102,13 @@ SurrealDB 2.1.x 数据目录，不碰已被 3.x 写坏的 `.surreal/ams-8009`。
 
 1. 按收益排序迁移：`cata_model.rs:1934`（resolve 段是 258s 里最大的一块，排第一）、
    `prim_model.rs:71`、`loop_model.rs:46`、`gen_model.rs:851` / `:877`、
-   `occ_generate.rs:645`。每文件一个可独立回滚的提交。
-2. `occ_generate.rs` 若 `specs/009-retire-occ` 先行落地则直接删除、不迁——动手前
+   `mesh_generate.rs:645`。每文件一个可独立回滚的提交。
+2. `mesh_generate.rs` 若 `specs/009-retire-occ` 先行落地则直接删除、不迁——动手前
    先跟 009 对进度。
 3. 静态均分改动态领取：`cata_model.rs:1915`、`prim_model.rs:62`、`loop_model.rs:37`、
    `manifold_bool.rs:78` 的 `chunk_size` fan-out 换成 `min(quota, job_count)` 个常驻
    worker 共享队列逐件领取。**不得**改成「每个元素一个 task 再去挤信号量」。
-4. 逐文件核 ADR-052 的「未决」项：`occ_generate.rs` / `cata_model.rs` / `prim_model.rs` /
+4. 逐文件核 ADR-052 的「未决」项：`mesh_generate.rs` / `cata_model.rs` / `prim_model.rs` /
    `loop_model.rs` / `pdms_inst.rs` / `batch_worker.rs` 里是否还有未过闸的 fan-out
    或阻塞调用，核完写进证据目录。
 

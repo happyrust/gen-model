@@ -10,7 +10,7 @@
       RAII 许可；补额度 = 1 时串行执行的纯函数测试。
 - [ ] T05 `src/fast_model/manifold_bool.rs` 的固定 16 路 fan-out 改为从闸取额度；
       额度 = 1 与改前逐表等价。
-- [ ] T06 [P] `src/fast_model/occ_generate.rs` 的 6 处 fan-out 接入闸。
+- [ ] T06 [P] `src/fast_model/mesh_generate.rs` 的 6 处 fan-out 接入闸。
 - [ ] T07 [P] `src/fast_model/pdms_inst.rs` 的 4 处 fan-out 接入闸。
 - [ ] T08 [P] `src/fast_model/gen_model.rs` 的 spawn/join 接入闸。
 - [ ] T09 加源码形状断言：`src/fast_model/` 内不得再出现写死的并发宽度，新增 fan-out 必须过闸。
@@ -37,7 +37,7 @@
 
 - [x] T21 模型认领页与执行组解耦：100 根 claim、默认 16 根 execution group，根锁只覆盖
       即将执行的小组；组间出现数据工作/epoch变化即停止接纳，未开始根不增加 attempts。
-- [x] T22 `occ_generate` 后半程改为有界根级流水，单根失败逐根回报，健康根直接收口；
+- [x] T22 `mesh_generate` 后半程改为有界根级流水，单根失败逐根回报，健康根直接收口；
       Shape writer 与 AABB 串行纪律不变，并暴露 geometry/Shape 并发遥测。
 - [x] T23 当前水位生成根凭证接入启动与 `model_ready`，缺凭证根自动补入既有队列；新增
       watch-scope 内指定 dbnum 的幂等全量模型重建 API。

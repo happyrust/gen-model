@@ -62,7 +62,7 @@
 - [ ] T11 调用点改造 —— `src/fast_model/pdms_inst.rs` 的 `save_instance_data` 尾：
       不再无差别置脏，改为**收集** `plan.written_refnos` 到本次生成任务的候选集
       （不立即消费，FR-4）。
-- [ ] T12 调用点改造 —— `src/fast_model/occ_generate.rs` AABB 段尾：把 `target_refnos`
+- [ ] T12 调用点改造 —— `src/fast_model/mesh_generate.rs` AABB 段尾：把 `target_refnos`
       （本批刚落 `aabb` / `aabb_d`、因而刚满足 `aabb.d != none` 的那批）并入候选集。
 - [ ] T13 消费点搬到生成任务终态：mesh / OCC / manifold / AABB 全部完成且任务成功之后
       才刷新（FR-4）。用源码顺序断言钉住「`insts_flat` 写入点不早于几何终态」

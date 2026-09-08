@@ -103,7 +103,7 @@
 - [ ] T015 [P] `src/fast_model/prim_model.rs:71`：叶子迁移，独立提交。依赖：T013。
 - [ ] T016 [P] `src/fast_model/loop_model.rs:46`：叶子迁移，独立提交。依赖：T013。
 - [ ] T017 [P] `src/fast_model/gen_model.rs:851`、`:877`：两处叶子迁移。依赖：T013。
-- [ ] T018 `src/fast_model/occ_generate.rs:645`、`:1475`：先与 `specs/009-retire-occ`
+- [ ] T018 `src/fast_model/mesh_generate.rs:645`、`:1475`：先与 `specs/009-retire-occ`
       对进度——OCC 退役先落地就直接删除不迁；否则迁移并同步源码断言。依赖：T013。
 - [ ] T019 `src/fast_model/cata_model.rs:1915`、`prim_model.rs:62`、`loop_model.rs:37`、
       `manifold_bool.rs:78`：静态均分 `chunk_size` 改 `min(quota, jobs)` 个常驻 worker
@@ -113,7 +113,7 @@
       纳入 ADR-052 点名的漏网形态（`.chunks(20)`、`CHUNK_SIZE = 100`、
       `buffer_unordered`、`JoinSet`、`use ... as`）。依赖：T019。
 - [ ] T021 `docs/evidence/2026-08-27-geometry-execution-domain/fanout/`：逐文件核
-      `occ_generate.rs` / `cata_model.rs` / `prim_model.rs` / `loop_model.rs` /
+      `mesh_generate.rs` / `cata_model.rs` / `prim_model.rs` / `loop_model.rs` /
       `pdms_inst.rs` / `batch_worker.rs` 有无未过闸的 fan-out 或阻塞调用（ADR-052
       「未决」项）；CATA p50/p95 −50%、CPU/wall ≥ 5。依赖：T019、T020。
 

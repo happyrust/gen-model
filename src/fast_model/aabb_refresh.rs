@@ -577,7 +577,7 @@ pub(crate) fn room_target_required(aabb_changed: bool, durable_incremental: bool
 }
 
 /// `GLOBAL_AABB_TREE` 直写刷新的源码钉。`aabb_tree.rs` 的写点白名单只认「配了源码钉
-/// 的文件」——这一组就是本文件的那份钉，随函数体一起从 `occ_generate.rs` 搬过来
+/// 的文件」——这一组就是本文件的那份钉，随函数体一起从 `mesh_generate.rs` 搬过来
 /// （旧生成器已退到 `legacy_model` feature 后面，钉不能跟着它一起从默认构建里消失）。
 #[cfg(test)]
 mod aabb_write_order_tests {
