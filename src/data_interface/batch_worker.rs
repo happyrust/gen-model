@@ -1578,12 +1578,12 @@ async fn execute_frozen_batch(
         ));
     }
 
-    let round_complete = committed_end_sesno == Some(file_latest_sesno)
-        && result.status == ManualUpdateStatus::Success
-        && result
-            .units
-            .iter()
-            .all(|unit| unit.status == UnitGenStatus::Generated);
+    let round_complete = batch_round_complete(
+        committed_end_sesno,
+        file_latest_sesno,
+        result.status,
+        &result.units,
+    );
     // 只有 DESI 才有文件轮次可发布（冻结点也只给 DESI 落意图行，见上）。非 DESI 走到
     // 这里去 `file_round_commit_token` 只会报「has no commit token」，把一个成功的
     // SYS meta 批次记成 partial。
@@ -1630,6 +1630,90 @@ async fn execute_frozen_batch(
         result.warnings.len()
     );
     result
+}
+
+/// 文件轮次完成屏障，批次侧那一半（ADR-062）。
+///
+/// 「这一批把冻结右端追平了，数据事务成功，交付单元全部生成」——三件事同时成立，
+/// 这一轮才可以发布。与 [`file_round_readiness`] 是同一道屏障的两种证据：批次刚跑完
+/// 时手上有内存里的单元回执，空闲轮回头看时只剩库里的凭据。判据写两遍就会漂，所以
+/// 两侧各自收在一个函数里，改一边时另一边就在隔壁。
+fn batch_round_complete(
+    committed_end_sesno: Option<i32>,
+    file_latest_sesno: i32,
+    status: ManualUpdateStatus,
+    units: &[ModelUnitResult],
+) -> bool {
+    committed_end_sesno == Some(file_latest_sesno)
+        && status == ManualUpdateStatus::Success
+        && units
+            .iter()
+            .all(|unit| unit.status == UnitGenStatus::Generated)
+}
+
+/// 文件轮次完成屏障，durable 那一半：一个仍在 `collecting` 的轮次此刻差什么。
+///
+/// 输入只有模型水位探针与这一轮冻住的右端——两者都在库里，重启、换进程、跨会话都
+/// 读得到，因此**批次跑完之后**还能再判一次。这正是审核 F-C 缺的那个判点：
+/// [`batch_round_complete`] 只在数据批次那一刻成立一次，一根偶发失败让它为假之后，
+/// 重试成功也没有人再回来看，该库的文件轮次就永久停在 `collecting`。
+///
+/// 「已放弃的根」（`http_422` 与死信）**不放行**：那是 ISSUE-029 的确定性失败，模型面
+/// 本来就没产出，硬发布等于拿残缺的几何换掉上一份好的。它继续卡着，但现在 /health
+/// 会点名是谁在卡。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FileRoundReadiness {
+    /// 屏障已满足，可以走 [`publish_completed_file_round`]。
+    Ready,
+    /// 数据面还没追平这一轮冻住的右端。
+    DataBehind { applied: i32, frozen: i32 },
+    /// 还有根没安定（正在赶或还没重试到）。
+    RootsChasing { count: usize, sample: Vec<String> },
+    /// 有根被放弃（`http_422` / 死信）：不自动放行，等人处置。
+    RootsAbandoned { count: usize },
+}
+
+impl FileRoundReadiness {
+    /// 给 /health 与日志用的一句话；`Ready` 没有阻塞理由，回 `None`。
+    pub(crate) fn describe(&self) -> Option<String> {
+        match self {
+            Self::Ready => None,
+            Self::DataBehind { applied, frozen } => {
+                Some(format!("数据水位 {applied} 未追平冻结右端 {frozen}"))
+            }
+            Self::RootsChasing { count, sample } => Some(format!(
+                "{count} 个生成根尚未安定: {}",
+                render_roots(sample)
+            )),
+            Self::RootsAbandoned { count } => Some(format!(
+                "{count} 个生成根已放弃（http_422 / 死信，ISSUE-029），等人处置"
+            )),
+        }
+    }
+}
+
+pub(crate) fn file_round_readiness(
+    probe: &model_update_pending::ModelWatermarkProbe,
+    frozen_end_sesno: i32,
+) -> FileRoundReadiness {
+    if probe.applied_sesno < frozen_end_sesno {
+        return FileRoundReadiness::DataBehind {
+            applied: probe.applied_sesno,
+            frozen: frozen_end_sesno,
+        };
+    }
+    if !probe.blockers.is_empty() {
+        return FileRoundReadiness::RootsChasing {
+            count: probe.blockers.len(),
+            sample: probe.blockers.clone(),
+        };
+    }
+    if probe.abandoned > 0 {
+        return FileRoundReadiness::RootsAbandoned {
+            count: probe.abandoned,
+        };
+    }
+    FileRoundReadiness::Ready
 }
 
 /// Publish the derivations collected by one fully settled file round. Spatial
@@ -2427,6 +2511,133 @@ fn render_roots(roots: &[String]) -> String {
     }
 }
 
+static FILE_ROUND_HOLD_ANNOUNCEMENT: std::sync::Mutex<(Option<String>, i64)> =
+    std::sync::Mutex::new((None, 0));
+
+/// 收集期轮次的阻塞理由：理由变了、或者隔了 [`MODEL_DEAD_LETTER_REPEAT_SECS`] 才说一次。
+///
+/// 空闲轮每 30 秒来一趟，每趟复述同一句就是把日志刷成噪音；可完全不说又正是 F-C 现场
+/// 最难查的地方——`e3d.room.lookup` 全局恒 `updating`，控制台却一片安静。
+fn announce_file_round_holds(holds: &[String]) {
+    let fingerprint = holds.join(" | ");
+    let now = Local::now().timestamp();
+    let mut announcement = FILE_ROUND_HOLD_ANNOUNCEMENT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let changed = announcement.0.as_deref() != Some(fingerprint.as_str());
+    if !changed && now.saturating_sub(announcement.1) < MODEL_DEAD_LETTER_REPEAT_SECS {
+        return;
+    }
+    let was_holding = announcement
+        .0
+        .as_deref()
+        .is_some_and(|previous| !previous.is_empty());
+    *announcement = (Some(fingerprint), now);
+    if holds.is_empty() {
+        if was_holding {
+            println!("收集期文件轮次的阻塞已清零");
+        }
+        return;
+    }
+    println!(
+        "收集期文件轮次仍未过完成屏障（房间目标不释放，e3d.room.lookup 保持 updating）：{}",
+        holds.join("；")
+    );
+}
+
+/// 把重试已经消化干净的 `collecting` 文件轮次重新推过完成屏障（审核 F-C）。
+///
+/// [`batch_round_complete`] 只在数据批次跑完那一刻判一次。一根偶发失败让它为假，这一轮
+/// 就停在 `collecting`；失败单元随后被空闲重试救回来，却没有任何地方再调
+/// [`publish_completed_file_round`]。后果不是「慢一点」而是永久：该库的房间目标不释放，
+/// `has_collecting_file_rounds()` 恒真，**所有**库的 `e3d.room.lookup` 恒为 `updating`，
+/// 启动也一直走 `file_round_private`。这里就是那个缺失的第二判点。
+///
+/// 只在数据侧本轮已经 `Settled` 时调用——判据里的「根都安定了」以整库的模型积压已经
+/// 消化为前提，队列里还有活时问它没有意义。
+async fn republish_settled_file_rounds(mgr: &AiosDBManager) -> IdleOutcome {
+    let rounds = match SideEffectCompensator::collecting_file_rounds().await {
+        Ok(rounds) => rounds,
+        Err(error) => {
+            println!("复核收集期文件轮次失败（保留待下一轮）: {error:#}");
+            return IdleOutcome::Failed;
+        }
+    };
+    let mut published = 0usize;
+    let mut failed = false;
+    let mut holds = Vec::new();
+    for round in rounds {
+        // 非 DESI 没有文件轮次可发布（冻结点也只给 DESI 落意图行）；被发布队列接管的库
+        // 由它自己的收口调发布，这里不抢。两条与批次侧的守卫同一形状。
+        if !round.db_type.eq_ignore_ascii_case("DESI")
+            || crate::data_interface::model_publish_queue::blocks_dbnum(round.dbnum)
+        {
+            continue;
+        }
+        let probe =
+            match model_update_pending::read_model_watermark_probe(&aios_core::SUL_DB, round.dbnum)
+                .await
+            {
+                Ok(probe) => probe,
+                Err(error) => {
+                    println!(
+                        "读取 dbnum={} 的文件轮次完成屏障判据失败（保留待下一轮）: {error:#}",
+                        round.dbnum
+                    );
+                    failed = true;
+                    continue;
+                }
+            };
+        let readiness = file_round_readiness(&probe, round.end_sesno);
+        if let Some(reason) = readiness.describe() {
+            holds.push(format!(
+                "dbnum={} sesno={}：{reason}",
+                round.dbnum, round.end_sesno
+            ));
+            continue;
+        }
+        let mut result = DataBatchTaskResult {
+            project: mgr.db_option.project_name.clone(),
+            status: ManualUpdateStatus::Success,
+            batch: None,
+            units: Vec::new(),
+            warnings: Vec::new(),
+            model_verdict: None,
+            model_caught_up_at: None,
+        };
+        match publish_completed_file_round(mgr, round.dbnum, round.end_sesno, &mut result).await {
+            Ok(()) => {
+                published += 1;
+                println!(
+                    "重试已消化失败单元，文件轮次补发布 dbnum={} sesno={}{}",
+                    round.dbnum,
+                    round.end_sesno,
+                    if result.warnings.is_empty() {
+                        String::new()
+                    } else {
+                        format!("：{}", result.warnings.join("; "))
+                    }
+                );
+            }
+            Err(error) => {
+                println!(
+                    "文件轮次补发布失败 dbnum={} sesno={}（保留 collecting，下一轮重试）: {error:#}",
+                    round.dbnum, round.end_sesno
+                );
+                failed = true;
+            }
+        }
+    }
+    announce_file_round_holds(&holds);
+    if failed {
+        IdleOutcome::Failed
+    } else if published > 0 {
+        IdleOutcome::MoreWork
+    } else {
+        IdleOutcome::Settled
+    }
+}
+
 /// 队列跑空后的收尾轮：积压补偿 + 房间收敛（ADR-011 §8）。
 ///
 /// `after_batches` 只影响日志口径；两类动作本身都以「表里有没有活」为准，
@@ -2616,6 +2827,14 @@ async fn idle_round(
         has_backlog,
         claimed_batches,
     );
+    // 完成屏障的第二个判点（审核 F-C）：数据侧这一轮干净了，回头看还有没有 `collecting`
+    // 的文件轮次其实已经可以发布——它当初被一根失败单元挡下，而那根后来被重试救了回来。
+    // 必须排在房间轮之前：发布才会把该轮的房间目标从 `collecting` 释放成可消费。
+    let data_outcome = if data_outcome == IdleOutcome::Settled {
+        combine_idle_outcomes(data_outcome, republish_settled_file_rounds(mgr).await)
+    } else {
+        data_outcome
+    };
     let spatial_pending = if data_outcome == IdleOutcome::Settled {
         match SideEffectCompensator::has_pending_spatial_work().await {
             Ok(pending) => pending,
@@ -3153,6 +3372,110 @@ async fn publish_sync(mgr: &Arc<AiosDBManager>, job: &FrozenBatch, _end_sesno: i
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn probe(
+        applied_sesno: i32,
+        blockers: &[&str],
+        abandoned: usize,
+    ) -> model_update_pending::ModelWatermarkProbe {
+        model_update_pending::ModelWatermarkProbe {
+            blockers: blockers.iter().map(|root| (*root).to_owned()).collect(),
+            abandoned,
+            settled_floor: Some(applied_sesno),
+            applied_sesno,
+            recorded: applied_sesno,
+            has_roots: true,
+        }
+    }
+
+    /// 完成屏障批次侧：三件事同时成立才算这一轮跑完了。任何一件不成立都不发布——
+    /// 这正是 F-C 的起点，不是缺陷。
+    #[test]
+    fn the_batch_side_barrier_needs_the_frozen_end_a_clean_batch_and_every_unit() {
+        let unit = |status| ModelUnitResult {
+            dbnum: 8000,
+            root_refno: "24384/3".into(),
+            noun: "PANE".into(),
+            status,
+            attempts: 1,
+            message: None,
+            old_owner: None,
+            new_owner: None,
+        };
+        assert!(batch_round_complete(
+            Some(42),
+            42,
+            ManualUpdateStatus::Success,
+            &[unit(UnitGenStatus::Generated)]
+        ));
+        assert!(
+            !batch_round_complete(
+                Some(41),
+                42,
+                ManualUpdateStatus::Success,
+                &[unit(UnitGenStatus::Generated)]
+            ),
+            "没追平冻结右端不算完成"
+        );
+        assert!(
+            !batch_round_complete(
+                Some(42),
+                42,
+                ManualUpdateStatus::Partial,
+                &[unit(UnitGenStatus::Generated)]
+            ),
+            "批次本身不干净不算完成"
+        );
+        assert!(
+            !batch_round_complete(
+                Some(42),
+                42,
+                ManualUpdateStatus::Success,
+                &[unit(UnitGenStatus::Generated), unit(UnitGenStatus::Failed)]
+            ),
+            "一根失败单元就把这一轮留在 collecting"
+        );
+    }
+
+    /// 完成屏障 durable 侧（审核 F-C）：同一道屏障换成库里的凭据再判一次。
+    ///
+    /// 「一根失败 → 轮次 collecting → 重试成功 → 可以发布」这条链的转折点就在这里：
+    /// 失败时探针里有拦路根，重试成功后拦路清零、判据转 `Ready`，空闲轮据此补发布。
+    /// 已放弃的根（`http_422` / 死信）不放行——那是 ISSUE-029，硬发布等于拿残缺几何
+    /// 换掉上一份好的。
+    #[test]
+    fn the_durable_barrier_reopens_a_round_once_retries_settle_every_root() {
+        assert_eq!(
+            file_round_readiness(&probe(41, &[], 0), 42),
+            FileRoundReadiness::DataBehind {
+                applied: 41,
+                frozen: 42
+            }
+        );
+        let chasing = file_round_readiness(&probe(42, &["24384_3"], 0), 42);
+        assert_eq!(
+            chasing,
+            FileRoundReadiness::RootsChasing {
+                count: 1,
+                sample: vec!["24384_3".to_owned()]
+            }
+        );
+        assert!(
+            chasing
+                .describe()
+                .expect("卡住必须给得出理由")
+                .contains("24384_3"),
+            "/health 要点得出是哪一根在卡"
+        );
+        assert_eq!(
+            file_round_readiness(&probe(42, &[], 2), 42),
+            FileRoundReadiness::RootsAbandoned { count: 2 }
+        );
+        // 重试把最后一根救回来的那一刻。
+        let settled = file_round_readiness(&probe(42, &[], 0), 42);
+        assert_eq!(settled, FileRoundReadiness::Ready);
+        assert_eq!(settled.describe(), None, "已就绪没有阻塞理由");
+    }
 
     #[test]
     fn task_receipt_exposes_the_final_model_verdict_and_caught_up_time() {

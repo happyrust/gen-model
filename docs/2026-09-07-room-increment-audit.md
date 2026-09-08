@@ -126,6 +126,13 @@
   - `window_root_plan.rs`：`WindowRootSources` 新字段 `room_structural`（`collect()` 里收）；`build_model_update_plan_from_window` 在 `into_model_update_plan` 之后 `append_room_structural_work`：面板目标 → `RoomRecalcPanel`（dbnum + end_sesno，排序去重），`unreadable` → `room_rebuild_required` + 原因；回执多一行观测。`data_interface/mod.rs` +1 mod。
   - 验证：`cargo test --lib -- room_increment_audit room_structural_trigger window_root_plan` → **34 passed / 1 failed**（失败的是 F-C 的钉，应红）；真文件 `live_ams8000_pinned_windows_land_in_the_expected_buckets`（9 个钉死窗口）**仍绿**——新臂不改 regen / delete 桶。**未 live**：真会话里「改 FRMW NAME 命中 `-RM` → SAVEWORK → `RoomRecalcPanel × N`」与「PANE 搬到另一间」（09-05 合并计划 §7 第 14/15 条），需要 E3D 会话。
 
+- **2026-09-08 07:5x F-C 已落地（Q10 (a)+(c)，接班会话）**：
+  - `batch_worker.rs` 把完成屏障拆成同名一对，判据各收在一个函数里：`batch_round_complete`（批次侧，原地内联的三条与件，签名不变）与 `file_round_readiness`（durable 侧，纯函数，输入只有 `ModelWatermarkProbe` + 冻结右端）。后者返回 `FileRoundReadiness::{Ready, DataBehind, RootsChasing, RootsAbandoned}`，`describe()` 出一句人话。
+  - `idle_round`：数据侧本轮 `Settled` 之后、房间轮之前调 `republish_settled_file_rounds`——列出全部 `collecting` 轮次（`SideEffectCompensator::collecting_file_rounds`，新增），逐个用 durable 判据复核，`Ready` 的走 `publish_completed_file_round`。发布过就把本轮折成 `MoreWork`（下一圈立刻回来收房间），发布失败折成 `Failed` 走 `IDLE_WAKE` 退避、轮次留在 `collecting`。非 DESI 与被发布队列接管的库照批次侧同一守卫跳过。
+  - **已放弃的根不放行**：`http_422` 与死信让判据停在 `RootsAbandoned`，仍卡着（ISSUE-029），但不再是静默卡着——`announce_file_round_holds` 按「理由变了或隔 300 s」出声，/health 的 `spatial_reconcile.target_sessions[]` 多一格 `blocked`（同一判据渲染，读不出时把读取错误写进这一格，不让 /health 整块报错）。
+  - **`updating` 的按 dbnum 收窄没做**（Q10 (c) 的后半）：`published_file_input` 是**复合**清单，房间可以跨文件（ADR-062「跨文件视图 = A 旧成功版 + B 新版」）。只看「本元素所在库有没有 collecting」会把一间跨库房间报成 `current`，那是拿硬标准②换一句好看的状态。留待与 F-H 的口径一并处理。
+  - 验证：`cargo test --lib` → **1826 passed / 0 failed / 118 ignored**（此前 1823 / 1 failed，唯一那条红的就是 F-C 的钉，现已转绿）；新增两条纯测把两侧屏障各钉一遍，其中 durable 那条走的正是「一根失败 → collecting → 重试成功 → `Ready`」这条链的转折点。`rustfmt --check` 干净，`cargo check --tests` 通过。**未 live**：Q10 验收要的 mem:// 端到端（构造失败批次 → 重试成功 → 轮次 `done`、房间目标 `pending→done`）没跑，它要一台带 `E3dModelService` 的实例，与 F-F、S5 的真库门一起做。
+
 ## 决议（本会话 grill 两轮）
 
 Q1 (c)｜Q2 三条硬标准｜Q3 (a)+(b) 全做，(c) 与 oracle 只对 High｜Q4 报告+计划先交，High 逐条报批后本会话修｜Q5 词条三项随结论当场写｜Q6 只读 src、只写 docs/CONTEXT，代码改动拍板后拿锁｜Q7 定级照表，F-A/F-B/F-C High｜Q8 F-B → F-A → F-C｜Q9 (a) R1 + (b) 护栏｜Q10 (a) + (c) 可观测｜Q11 (a) 老实退化，(b) 另立。

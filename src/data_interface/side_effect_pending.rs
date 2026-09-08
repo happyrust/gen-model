@@ -1257,6 +1257,23 @@ impl SideEffectCompensator {
         Ok(!response.take::<Vec<Thing>>(0)?.is_empty())
     }
 
+    /// 仍停在 `collecting` 的文件轮次本身（按 dbnum / 冻结右端升序）。
+    ///
+    /// 与 [`Self::has_collecting_file_rounds`] 同一谓词，只是要行而不是布尔：空闲轮拿它
+    /// 逐个复核「当初卡住这一轮的失败单元是不是已经被重试消化掉了」。没有这一步，
+    /// 一根确定性之外的偶发失败就能把该库的文件轮次永久钉在 `collecting`——完成屏障
+    /// 只在数据批次那一刻判一次，重试成功之后没有第二个判点（审核 F-C）。
+    pub(crate) async fn collecting_file_rounds() -> anyhow::Result<Vec<PendingJob>> {
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT * FROM {TABLE} WHERE kind = 'spatial_reconcile' \
+                 AND status = 'collecting' ORDER BY dbnum ASC, end_sesno ASC;"
+            ))
+            .await?
+            .check()?;
+        Ok(response.take::<Vec<PendingJob>>(0)?)
+    }
+
     /// 待收敛空间意图的条数（/health `spatial_tree.pending` 的同源镜像；
     /// 权威口径仍是 `spatial_reconcile.pending`，两处同一查询谓词）。
     pub async fn count_pending_spatial_work() -> anyhow::Result<usize> {
@@ -1287,7 +1304,31 @@ impl SideEffectCompensator {
             .await?
             .check()?;
         let jobs: Vec<PendingJob> = response.take(0)?;
-        Ok(Self::render_spatial_reconcile_status(&jobs))
+        // 每个仍在 collecting 的轮次问一句「差什么才能发布」。空闲轮用的是同一个判据，
+        // 所以 /health 上写的就是它下一轮会做的判断，而不是另一套近似说法。读不出来
+        // 时把原因当成阻塞理由写进去——/health 不因为这一格失败而整块报错。
+        let mut holds = std::collections::BTreeMap::new();
+        for job in jobs.iter().filter(|job| job.status == "collecting") {
+            let key = (job.dbnum, job.end_sesno);
+            if holds.contains_key(&key) {
+                continue;
+            }
+            let hold =
+                match crate::data_interface::model_update_pending::read_model_watermark_probe(
+                    &SUL_DB, job.dbnum,
+                )
+                .await
+                {
+                    Ok(probe) => crate::data_interface::batch_worker::file_round_readiness(
+                        &probe,
+                        job.end_sesno,
+                    )
+                    .describe(),
+                    Err(error) => Some(format!("完成屏障判据读取失败: {error:#}")),
+                };
+            holds.insert(key, hold);
+        }
+        Ok(Self::render_spatial_reconcile_status(&jobs, &holds))
     }
 
     /// /health `spatial_reconcile` 的纯渲染半边。
@@ -1298,7 +1339,14 @@ impl SideEffectCompensator {
     /// `pending` = 还会被收敛的行；`dead_letters` = 进了死信的行（`dead`，以及老版本留下的
     /// `failed`）——不重试、等人处置，原因在 `logs/batch-failures-*.jsonl`
     /// （`event = side_effect_dead_letter`）。`stalled` 只在有死信时立起。
-    pub(crate) fn render_spatial_reconcile_status(jobs: &[PendingJob]) -> serde_json::Value {
+    ///
+    /// `holds` 是「这一轮差什么才能发布」的现场，按 `(dbnum, end_sesno)` 索引，落在
+    /// `target_sessions[].blocked` 上。收集期的轮次在 /health 上原本只有一个数字，
+    /// 一根根卡住时看不出是谁在卡；`None` = 判据已满足，只是还没轮到发布。
+    pub(crate) fn render_spatial_reconcile_status(
+        jobs: &[PendingJob],
+        holds: &std::collections::BTreeMap<(u32, i32), Option<String>>,
+    ) -> serde_json::Value {
         let pending = jobs
             .iter()
             .filter(|job| job.status == "pending")
@@ -1325,6 +1373,7 @@ impl SideEffectCompensator {
             "target_sessions": collecting.iter().map(|job| serde_json::json!({
                 "dbnum": job.dbnum,
                 "end_sesno": job.end_sesno,
+                "blocked": holds.get(&(job.dbnum, job.end_sesno)).cloned().flatten(),
             })).collect::<Vec<_>>(),
             "published_version": jobs.iter().map(|job| job.published_version).max().unwrap_or(0),
         })
@@ -2042,7 +2091,8 @@ mod tests {
             "target_sessions",
             "published_version",
         ];
-        let empty = SideEffectCompensator::render_spatial_reconcile_status(&[]);
+        let no_holds = std::collections::BTreeMap::new();
+        let empty = SideEffectCompensator::render_spatial_reconcile_status(&[], &no_holds);
         let object = empty.as_object().expect("形状必须是对象");
         assert_eq!(object.len(), keys.len(), "键数漂移: {empty}");
         for key in keys {
@@ -2075,19 +2125,24 @@ mod tests {
         };
         // 一条 `dead`（或老版本留下的 `failed`）就是死信：`stalled` 立起、不算进
         // pending；原因仍从 last_error 露出来。
-        let stalled = SideEffectCompensator::render_spatial_reconcile_status(&[
-            job("dead", 1, Some("current MDB has no DESI dbnum 8190")),
-            job("failed", 3, None),
-            job("pending", 0, None),
-        ]);
+        let stalled = SideEffectCompensator::render_spatial_reconcile_status(
+            &[
+                job("dead", 1, Some("current MDB has no DESI dbnum 8190")),
+                job("failed", 3, None),
+                job("pending", 0, None),
+            ],
+            &no_holds,
+        );
         assert_eq!(stalled["pending"], 1);
         assert_eq!(stalled["dead_letters"], 2);
         assert_eq!(stalled["retries"], 4);
         assert_eq!(stalled["last_error"], "current MDB has no DESI dbnum 8190");
         assert_eq!(stalled["stalled"], true, "有死信必须报 stalled: {stalled}");
 
-        let waiting =
-            SideEffectCompensator::render_spatial_reconcile_status(&[job("pending", 0, None)]);
+        let waiting = SideEffectCompensator::render_spatial_reconcile_status(
+            &[job("pending", 0, None)],
+            &no_holds,
+        );
         assert_eq!(waiting["pending"], 1);
         assert_eq!(waiting["dead_letters"], 0);
         assert_eq!(

@@ -2,6 +2,37 @@
 
 ## 2026-09-08
 
+### 房间增量审核 F-C：一根失败单元不再把整个库的文件轮次永久钉在 `collecting`
+
+`publish_completed_file_round` 的完成屏障（追平冻结右端 + 批次成功 + 交付单元全部生成）只在数据批次跑完那
+一刻判一次。任一根生成失败，这一轮就停在 `collecting`；失败单元随后被空闲重试救回来，**却没有任何地方再调
+一次发布**——全仓只有 `execute_frozen_batch` 与发布队列收口两个调用点。后果不是慢一点而是永久：该轮房间目标
+不释放，`has_collecting_file_rounds()` 恒真，而它是**全局**判定，于是所有库的 `e3d.room.lookup` 恒为
+`updating`，启动也一直走 `file_round_private`。plant-1 三轮实测每轮都有 4 根 `generation_hold`，现场可达。
+定级与修法见 `docs/2026-09-07-room-increment-audit.md` F-C（决议 Q10 (a)+(c)）。
+
+- **完成屏障拆成同名一对，判据各写一次**：`batch_round_complete`（批次侧，手上有内存里的单元回执）与
+  `file_round_readiness`（durable 侧，输入只有 `ModelWatermarkProbe` + 这一轮冻住的右端，因此**批次跑完之后
+  还能再判**）。后者是纯函数，回 `FileRoundReadiness::{Ready, DataBehind, RootsChasing, RootsAbandoned}`。
+- **空闲轮补上那个缺失的判点**：`idle_round` 在数据侧本轮 `Settled` 之后、房间轮之前调
+  `republish_settled_file_rounds`——`SideEffectCompensator::collecting_file_rounds()`（新增）列出全部收集期
+  轮次，逐个用 durable 判据复核，`Ready` 的走 `publish_completed_file_round`。发布过折成 `MoreWork`（下一圈
+  立刻回来收房间），失败折成 `Failed` 走 `IDLE_WAKE` 退避、轮次原样留在 `collecting`。非 DESI 与被发布队列
+  接管的库跳过，两条守卫与批次侧同形。
+- **已放弃的根不自动放行**：`http_422` 与死信让判据停在 `RootsAbandoned`（ISSUE-029 的确定性失败），硬发布
+  等于拿残缺几何换掉上一份好的。但不再是**静默**卡着：`announce_file_round_holds` 按「理由变了或隔 300 s」
+  出声，`/health` 的 `spatial_reconcile.target_sessions[]` 多一格 `blocked`，与空闲轮同一判据渲染——面板上
+  写的就是它下一轮会做的判断；判据读不出时把错误写进这一格，不让 /health 整块报错。
+- **`updating` 的按 dbnum 收窄没做**（Q10 (c) 的后半，故意留白）：`published_file_input` 是复合清单，房间可以
+  跨文件（ADR-062「跨文件视图 = A 旧成功版 + B 新版」）。只看「本元素所在库有没有 collecting」会把一间跨库
+  房间报成 `current`，那是拿可见性不变量换一句好看的状态。留待与 F-H 的口径一并处理。
+- 验证：`cargo test --lib` **1826 passed / 0 failed / 118 ignored**（本笔之前是 1823 / 1 failed，唯一那条红的
+  `room_increment_audit::f_c_idle_round_republishes_file_rounds_settled_by_retries` 现已转绿）；新增两条纯测
+  把两侧屏障各钉一遍，durable 那条走的正是「一根失败 → `collecting` → 重试成功 → `Ready`」的转折点。
+  `rustfmt --edition 2024 --check` 对两份改动文件干净，`cargo check --tests` 通过。**未 live**：Q10 验收要的
+  mem:// 端到端（失败批次 → 重试成功 → 轮次 `done`、房间目标 `pending→done`）没跑，它要一台带
+  `E3dModelService` 的实例，与 F-F、S5 的真库门一起做。
+
 ### 房间启动对比与应用（常驻房间模型 P3 后半截，S1–S3）：扫描 → 三层版本对比 → 只对变了的面板删 / 重算 / 改列 → 参照落款
 
 用户口径「启动时扫描全部房间数据，与 SurrealDB(rocksdb) 里已有的房间信息对版本，有增量就重算变了的
