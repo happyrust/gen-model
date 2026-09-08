@@ -88,7 +88,7 @@ fn connect(py: Python<'_>, config: Option<String>, cwd: Option<PathBuf>) -> PyRe
     }
     py.detach(|| {
         runtime().block_on(async {
-            // 只附着、不拉起（`store_mode` 默认已是 spawned-mem，2026-09-04）：
+            // 只附着、不拉起，不管 `store_mode` 的默认这一版指向哪一档：
             // python 调试入口要连的是服务手上那个库；端口空着时响亮地说「服务没起」，
             // 比自己拉一台空库然后在上面跑一整套 full_init 强得多。
             aios_database::attach_store_connected().await?;

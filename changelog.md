@@ -199,6 +199,75 @@ P2-a 只接了拓扑，几何侧照旧每轮 `load_consumption_panel_index` 查�
 
 ## 2026-09-07
 
+### `store_mode` 默认翻回 `external`（Q5 翻案，2026-09-04 那次翻转只活了三天）
+
+用户拍板。`effective_store_mode` 里 `Some(false) => External` / `None => SpawnedMem` 合成
+`Some(false) | None => External`——**改的只有「哪一档是默认」这一格**：三档形态、`store_process.rs`
+的署名裁决与子进程收尸、`/health` 的 `medium` / `durable`、`PersistMedium` 三值、实例锁口径
+一个字都没动，`spawned-mem` 与 `embedded-mem` 照旧要得到，只是从此要显式写。
+
+- **翻回来的理由是一个撞出来的现场**：`test-worklspace/bin/DbOption.toml` 两个形态键都没写，
+  默认 `spawned-mem` 下被判成「自己拉一台 memory surreal 绑 8009」，而 8009 上蹲着一台手工起的
+  memory 后端 surreal，`owner:current` 空表 → `SignatureProbe::Absent` → `judge_port` 落 `Refuse`
+  → **拒绝启动**。两边都没错：那台库不可能有本进程的署名，配置又没说要连它——是**默认值替一份
+  没说话的配置做了一个它不想要的决定**，而症状是起不来。
+- **护栏的判据一个字没动**，只改了它的说法。`every_db_option_fixture_declares_its_store_mode_and_data_face`
+  守的是「不许有配置去依赖那个会变的默认」，与默认当前指向哪一档无关——它在 2026-09-04 那次翻转
+  与这次翻回来之间是同一条。失败信息改成「默认翻过两次，依赖它的配置每翻一次就静默换一回介质」。
+- 测试 `the_default_store_mode_is_spawned_mem` → `the_default_store_mode_is_external`，并补一句
+  「显式写 `spawned-mem` 仍然要得到」——只钉住新默认而不钉住这一句的话，下一次有人把
+  `parse_store_mode` 里的别名删了，测试照样绿。
+- **`data_face` 跟着翻**：它是从 `store_mode` 派生的（`data_face_for_store`），所以没写形态键的
+  配置，数据面同时从 `read-through` 变回 `ingest`。护栏逼着两个键都写，为的就是这个连带。
+- **口径反了的注释一起改**：13 份夹具 / 现场配置里那句「默认值**将**翻成 spawned-mem，漏写这一行
+  的配置届时会静默换介质」、`Start-Surreal8009.ps1` 的 `.SYNOPSIS` / `.DESCRIPTION`
+  （「开箱即用不要跑这个脚本」→ external 是默认、要先跑它）、四个 `Run-*` / `Start-*` 脚本里
+  `AIOS_STORE_MODE=external` 的理由（环境变量本身**保留**，不靠默认本来就是对的）、
+  `python/src/{lib,exec_api}.rs` 的「只附着不拉起」。上一轮排查的结论就是过期注释会把人送进同一堵墙。
+- **顺带清掉 `data_face` 那两句更早就假了的话**（用户点名）：13 份配置里的「默认值是 read-through」
+  「环境变量 AIOS_DATA_FACE 压过本键」，以及**源码里同一句谎**——`options.rs` 的 `DATA_FACE_ENV`
+  与 `data_face()` 的文档注释都还写着「压过它」。事实是 `data_face()` 自打改成
+  `data_face_for_store(store_mode())` 就是**派生量**：配置键与环境变量都只喂 `data_face_notice()`，
+  与介质给出的那一档不符时报一行警，决定不了任何事。前一句是本次翻转弄假的（派生值随 `external`
+  变成 `ingest`），后一句是更早那次改动留下的。`l3_suite/fixture.rs` 里 `AIOS_DATA_FACE=ingest`
+  的理由同款改口——**环境变量都保留**，它们现在的作用是「把意图写出来，写错了当场被点名」。
+- 验证：**`cargo test --lib` 1775 passed / 1 failed / 116 ignored**，`options::` 那 58 条
+  （含 `the_default_store_mode_is_external`、`every_db_option_fixture_declares_its_store_mode_and_data_face`、
+  `data_face_follows_storage_backup_scope`）全绿；唯一那条红是
+  `fast_model::room_increment_audit::tests::f_c_idle_round_republishes_file_rounds_settled_by_retries`
+  ——同日房间增量审核给**尚未修复的 F-C 缺口**留的「回退即红」钉，只读 `batch_worker.rs`，与本改动无关。
+  `rustfmt --check` 对碰过的 `options.rs` / `l3_suite/fixture.rs` / `python/src/*.rs` 干净。
+  过程中整仓一度编不过（`vendor/plant-mbd` 与 `src/mbd/branch_query.rs` 的在飞改动，另一个会话
+  同时段在改 MBD Phase 5），期间先用「把那几个纯函数与 11 条测试逐字抄进独立文件 `rustc --test`」
+  拿到过一次 13 passed 的旁证；**上面那次 `cargo test --lib` 是编得过之后补跑的真结果**。
+- **live 实测（同一份配置、同一个端口，只差一个环境变量）**：隔离运行目录里拿
+  `test-worklspace/bin/DbOption.toml` **删掉 `store_mode` 那一行**，`v_port` 指一台现起的、
+  没有署名的 memory surreal（`owner:current` 空表，与 8009 那台同形）。**A**（无环境变量 = 新默认）
+  `数据库已经连接到 AvevaMarineSample, 站点: ws://127.0.0.1:18777`，启动序列走完；
+  **B**（`AIOS_STORE_MODE=spawned-mem` = 翻转前的默认）`Error: 端口上是一台没有署名的
+  SurrealDB……所以拒绝启动。`——逐字复现 16:25 那次起不来。**署名裁决没松**，只是不再由默认值
+  把所有沉默的配置推进那一格。`AIOS_STARTUP_AUTORUN=0`，没碰 8010 真库，没动机器上在跑的服务。
+- **真环境复验**：`test-worklspace/bin`（8010 那台 880 万行 `pe` 的 rocksdb 库）换上新二进制、
+  把 `store_mode = "external"` 注释掉（`data_face` 本来就没写、无 `AIOS_*` 覆盖）后照常起服务，
+  16.53 s 起完：`存储介质：ws://127.0.0.1:8010`、`数据面：ingest`，`/health.sul_db` =
+  `{"connected":true,"endpoint":"127.0.0.1:8010","medium":"external","durable":true}`。
+  `data_face` 是白拿的连带证据——配置一个字没说，它随 `external` 派生成 `ingest` 而不是
+  `read-through`。空间树指纹一致、跳过全量房间重建、`dbnum=8000` 一致到 379，与换二进制前
+  那个进程的状态接得上。旧二进制与原配置各留了一份
+  `*.bak-storemode-default-20260907` 在同目录。
+- 记录：计划 `docs/plans/2026-09-04-spawned-memory-store-out-of-box.md` 新增 §9（翻案经过、
+  改动清单、三条在案未做）。
+- **落地补记（2026-09-08）**：上面那一格代码当时只改在 `p1p2/gen-model` 那棵工作树里，**从没进过
+  任何提交**——`git log --all -S "the_default_store_mode_is_external"` 只搜得到**引用**它的文档
+  （`docs/2026-09-07-room-increment-audit.md:8` 点名的那个测试在主树上并不存在）。主树 `e3d-direct`
+  收到的只有 13 份配置注释、脚本改口与 `python/src/*.rs` 那一半，`effective_store_mode` 仍是
+  `None => SpawnedMem`。这半截状态最贵的一格在现场：`test-worklspace/bin/DbOption.toml` 已经按
+  「默认是 external」把 `store_mode` 那一行注释掉了，拿主树二进制跑它就会重演本节开头那个 `Refuse`。
+  今天把那一格补进主树，验证：`cargo test --lib -- options:: store_process::` **94 passed / 0 failed /
+  3 ignored**（含 `the_default_store_mode_is_external` 与两条护栏），`rustfmt --edition 2024 --check`
+  对 `options.rs` 干净。`src/bin/l3_suite/fixture.rs` 里同款的注释改口与另一条线的端口迁移
+  （8048/8028 → 18048/18028）混在同几个 hunk 里，**不在本笔**。
+
 ### 级联查询换源 P4：设计侧通用一跳反查接进窗口规划器（MDB 逐库并集，默认关）
 
 direct 窗口规划器此前对「谁引用了这一窗变了的元素」一个字都不问：`plan_update` 只做 owner 链闭包 +

@@ -261,7 +261,7 @@ pub fn full_init(
             // 2. 连接 + define_common_functions + 编译期内置函数快照（含 D11 的
             //    hd/hh 矫正；与 connect / run_cli 同款）。幂等；connect 层可能已做过。
             if !CONNECTED.load(Ordering::SeqCst) {
-                // 只附着、不拉起（`store_mode` 默认已是 spawned-mem，2026-09-04）。
+                // 只附着、不拉起，不管 `store_mode` 的默认这一版指向哪一档。
                 aios_database::attach_store_connected().await?;
                 aios_database::data_interface::embedded_surql::define_embedded_functions().await?;
                 CONNECTED.store(true, Ordering::SeqCst);

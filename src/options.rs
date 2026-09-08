@@ -720,17 +720,19 @@ impl StoreMode {
 /// 本进程生效的存储形态（`DbOption.toml` 的 `store_mode`，环境变量
 /// [`STORE_MODE_ENV`] 压过它）。
 ///
-/// **默认 `spawned-mem`**（2026-09-04 用户拍板：默认就用 kv-mem，现有落盘部署自己显式写
-/// `external`）。开箱即用的含义就在这个默认值上：起 gen-model 一条命令，库跟着起来，
-/// 零预解析、零落盘，而端口是真的——plant-ui / `/sql` 探针 / `rvm_verify` 照常连得上。
+/// **默认 `external`**（2026-09-07 用户拍板，翻回 2026-09-04 之前的口径）。默认连
+/// `v_ip:v_port` 上那台已经在跑的 SurrealDB，不由本进程拉起——现场配置绝大多数指着一台
+/// 手工起的落盘库，而那台库没有本进程的[署名][`crate::store_process::StoreSignature`]，
+/// `spawned-mem` 默认下 [`crate::store_process::judge_port`] 只能判「分不清」并拒绝启动。
+/// 开箱即用那一档改为**显式**写 `store_mode = "spawned-mem"`。
 ///
-/// 这次翻转会让**每一份没写这一项的配置换介质**，到达面与迁移见上述计划 §3.8；
-/// `db_options/` 下的夹具由护栏 `every_db_option_fixture_declares_its_store_mode_and_data_face`
-/// 逼着显式声明。
+/// 这个默认同时决定 [`data_face`]（`external` → `ingest`，两档内存 → `read-through`），
+/// 所以漏写这一项换掉的不只是介质，还有整个数据面；`db_options/` 下的夹具由护栏
+/// `every_db_option_fixture_declares_its_store_mode_and_data_face` 逼着显式声明。
 ///
 /// 兼容：没写 `store_mode` 但 [`in_memory_db`] 为真时回 `embedded-mem`，与那个旧开关
-/// 今天的行为逐字相同；写了 `in_memory_db = false` 而没写 `store_mode` 的，视为
-/// **显式要过外置库**，回 `external`——那句 `false` 是人写下的意图，不该被新默认盖掉。
+/// 今天的行为逐字相同；写了 `in_memory_db = false` 而没写 `store_mode` 的同样回
+/// `external`——与新默认一致，那句 `false` 本来说的就是这件事。
 /// 两个键都写且互相矛盾时以 `store_mode` 为准并由 [`store_mode_notice`] 出声。
 /// 认不出的值当没设，同样出声。
 pub fn store_mode() -> StoreMode {
@@ -753,15 +755,13 @@ fn effective_store_mode(
         return mode;
     }
     // 没写 `store_mode` 时由旧开关说话，语义与它今天的两态逐字相同：
-    // `true` = 库在进程里，`false` = **显式**要过外置库（那句 false 是人写下的意图，
-    // 不该被新默认盖掉）。两处都没写才落到新默认。
+    // `true` = 库在进程里，`false` = 过外置库。两处都没写也是外置——自带存储要显式要。
     match in_memory_db_env
         .and_then(parse_bool_flag)
         .or(configured_in_memory_db)
     {
         Some(true) => StoreMode::EmbeddedMem,
-        Some(false) => StoreMode::External,
-        None => StoreMode::SpawnedMem,
+        Some(false) | None => StoreMode::External,
     }
 }
 
@@ -819,7 +819,8 @@ fn store_mode_notice_for(
     }
 }
 
-/// 环境变量名：一次性覆盖 [`data_face`]，不必改配置文件。
+/// 环境变量名：声明这一跑要哪个数据面。**它压不过 [`data_face`]**——生效值由
+/// [`store_mode`] 派生，这个变量只喂 [`data_face_notice`]，说的不是同一件事时报一行警。
 pub const DATA_FACE_ENV: &str = "AIOS_DATA_FACE";
 
 /// 数据面的形态（`docs/plans/2026-09-05-kv-mem-zero-ingest-read-through-plan.md` §3.1）。
@@ -850,7 +851,9 @@ impl DataFace {
     }
 }
 
-/// 本进程生效的数据面形态（`DbOption.toml` 的 `data_face`，环境变量 [`DATA_FACE_ENV`] 压过它）。
+/// 本进程生效的数据面形态。**由 [`store_mode`] 派生，不由配置直接说了算**：`DbOption.toml`
+/// 的 `data_face` 与环境变量 [`DATA_FACE_ENV`] 都只是「这份配置想要哪一档」的声明，与介质
+/// 给出的那一档不符时由 [`data_face_notice`] 报一行警，而不是压过这里。
 ///
 /// 启动介质决定备份范围，旧配置和环境变量不能让内存库摄入属性或让持久库漏掉备份。
 pub fn data_face() -> DataFace {
@@ -2002,20 +2005,26 @@ mod tests {
         assert!(!effective_in_memory_db(None, Some("ture")));
     }
 
-    /// **默认就是开箱即用那一档**（2026-09-04 拍板）：两个键都没写 = `spawned-mem`。
-    /// 这条与 §3.8 的迁移是一对——翻默认的前提是每一份夹具都已经显式声明，
-    /// 那一半由 [`every_db_option_fixture_declares_its_store_mode_and_data_face`] 守。
+    /// **默认是外置库**（2026-09-07 拍板，翻回 2026-09-04 之前的口径）：两个键都没写 =
+    /// `external`。默认 `spawned-mem` 服役期间，任何指着一台手工起的库的现场配置都会被
+    /// `judge_port` 判「端口上是一台没有署名的 SurrealDB」而拒绝启动——那台库不可能有本
+    /// 进程的署名，配置又没说要连它，两边都没错，人却起不来。自带存储从此要显式要。
     #[test]
-    fn the_default_store_mode_is_spawned_mem() {
+    fn the_default_store_mode_is_external() {
         assert_eq!(
             effective_store_mode(None, None, None, None),
-            StoreMode::SpawnedMem
+            StoreMode::External
+        );
+        assert_eq!(
+            effective_store_mode(Some("spawned-mem"), None, None, None),
+            StoreMode::SpawnedMem,
+            "开箱即用那一档仍然要得到，只是要显式写"
         );
     }
 
     /// 没写 `store_mode` 但写了旧开关时，**由旧开关说话**，语义与它今天的两态逐字相同。
-    /// 尤其是 `in_memory_db = false`：那句 false 是人写下的「我要过外置库」，
-    /// 不该被新默认盖掉——那正是升级时最容易被静默改掉的一格。
+    /// `in_memory_db = true` 是它唯一还能改变结论的取值；`false` 与不写都是外置库，
+    /// 与新默认一致。
     #[test]
     fn an_explicit_legacy_flag_still_decides_when_store_mode_is_unset() {
         assert_eq!(
@@ -2150,16 +2159,16 @@ mod tests {
         assert!(data_face_notice_for(None, None).is_none());
     }
 
-    /// **默认值翻转的护栏**：`spawned-mem` 一旦成为默认（计划 P3），每一份没写
-    /// `store_mode` 的夹具配置都会静默换介质——l3 套件自己在 8048 上起了一台
-    /// rocksdb surreal，服务却会去 spawn 它自己那台，症状是「测试莫名其妙全查不到
-    /// 数据」而不是一条报错。所以每一份夹具 / 现场配置都必须**显式**声明这一项。
+    /// **形态键必须显式声明的护栏。** 这两个键决定的是「库在哪、属性进不进库」，
+    /// 漏写的症状一律不是报错，而是「测试莫名其妙全查不到数据」「开机后 `pe` 一行都不进」
+    /// ——看上去像解析坏了，实际是配置少了一行。
     ///
-    /// 2026-09-05 起 `data_face` 同款：默认翻成 `read-through` 之后，没写它的摄入部署
-    /// 开机不再做基线、`pe` 一行都不进，症状是「解析坏了」而不是「配置漏了一行」。
-    /// 两个键一起守，漏哪个都点名。
+    /// 默认值本身翻过两次（2026-09-04 `external` → `spawned-mem`，2026-09-07 翻回
+    /// `external`），每一次都会让没写这一项的配置静默换介质、连带换掉 `data_face`
+    /// （它是从 `store_mode` 派生的）。护栏守的正是「不许有配置去依赖那个会变的默认」，
+    /// 所以它与默认值当前指向哪一档无关。
     ///
-    /// 只放过仓根那份 `DbOption.toml`：它就是开箱即用形态本身，默认值正是为它准备的。
+    /// 只放过仓根那份 `DbOption.toml`：它是默认形态的样板，默认值正是为它准备的。
     #[test]
     fn every_db_option_fixture_declares_its_store_mode_and_data_face() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -2198,8 +2207,8 @@ mod tests {
         assert!(checked > 0, "一份夹具配置都没扫到，护栏的路径写错了");
         assert!(
             missing.is_empty(),
-            "这些配置没有显式声明形态键：{missing:?}。默认值（store_mode=spawned-mem、\
-             data_face=read-through）会让它们静默换介质 / 换数据面"
+            "这些配置没有显式声明形态键：{missing:?}。默认值（store_mode=external、\
+             data_face=ingest）翻过两次，依赖它的配置每翻一次就静默换一回介质 / 数据面"
         );
     }
 

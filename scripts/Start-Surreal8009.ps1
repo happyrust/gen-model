@@ -1,19 +1,19 @@
 <#
 .SYNOPSIS
     启动本项目用的 SurrealDB（8009），并挡住版本不匹配的二进制。
-    **只有 store_mode = "external" 的部署才需要它。**
+    **store_mode = "external" 的部署要它——2026-09-07 起这又是默认值。**
 
 .DESCRIPTION
-    【先看这一段，2026-09-04】自 store_mode 默认翻成 spawned-mem 起，
-    gen-model **自己会拉起一台 memory 后端的 SurrealDB**（同样绑 v_ip:v_port、
-    同样先过下面这道版本闸，实现见 src/store_process.rs）。所以：
+    【先看这一段，2026-09-07】store_mode 的默认值 2026-09-04 翻成过 spawned-mem，
+    2026-09-07 又翻回 external。现在的口径是：
 
-      * 开箱即用（默认形态）：**不要跑这个脚本**，直接起 gen-model 就行；
-      * 要落盘、要留证据、要跨重启：配 store_mode = "external"，那时才跑它。
+      * external（默认）：库不由 gen-model 拉起，**先跑这个脚本**再起 gen-model；
+      * spawned-mem（从此要显式写）：gen-model **自己拉一台 memory 后端的 SurrealDB**
+        （同样绑 v_ip:v_port、同样先过下面这道版本闸，实现见 src/store_process.rs），
+        那一档**不要跑这个脚本**。
 
-    端口已经被占着时 gen-model 不会硬上：读不到自家署名就拒绝启动。也就是说
-    先手工跑了这个脚本、又忘了把配置改成 external，服务会**明确报错**而不是
-    悄悄连上你这台库。
+    端口已经被占着时 gen-model 不会硬上：读不到自家署名就拒绝启动。也就是说配了
+    spawned-mem、又先手工跑了这个脚本，服务会**明确报错**而不是悄悄连上你这台库。
 
     本仓库的客户端 SDK 是 fork 的 SurrealDB **2.1.4**
     （Cargo.lock: git+https://gitee.com/happydpc/surrealdb.git#45013fc9…）。

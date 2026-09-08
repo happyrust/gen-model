@@ -67,8 +67,8 @@ try {
 
     $env:DB_OPTION_FILE = $spec.config
     # 本批次自己起了库并把靶定在 $port 上：进程必须连它，不许自己再拉一台。
-    # store_mode 默认已是 spawned-mem（2026-09-04），而这里有一部分 live 用例
-    # 不读 DB_OPTION_FILE（见下），它们只能靠这个环境变量收口。
+    # store_mode 的默认值翻过两次（2026-09-04 spawned-mem、2026-09-07 翻回 external），
+    # 而这里有一部分 live 用例不读 DB_OPTION_FILE（见下），它们只能靠这个环境变量收口。
     $env:AIOS_STORE_MODE = 'external'
     # 数据面同理：live 用例要的是摄入（基线 + 增量窗口），data_face 的新默认
     # （read-through，2026-09-05）不做基线，靠这一行收口。

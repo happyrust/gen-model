@@ -102,15 +102,19 @@ v_password = "root"
 
 #【新增 2026-09-04】store_mode —— 持久层介质与「谁把它拉起来」。
 # 这一份夹具 / 现场配置连的是外面那台已经在跑的 SurrealDB（上面 v_ip:v_port），
-# 所以显式写 external。默认值将翻成 spawned-mem（本进程自己拉起一个 --memory 后端的
-# surreal 子进程，绑同一对 v_ip:v_port），漏写这一行的配置届时会静默换介质、启动即空库。
+# 所以显式写 external。默认值翻过两次（2026-09-04 翻成 spawned-mem，2026-09-07 翻回 external），
+# 自带存储那一档从此要显式写 spawned-mem。翻过的默认不能被依赖——漏写这一行的配置每翻一次
+# 就静默换一回介质，护栏因此逼着每一份夹具 / 现场配置都把它写出来。
 # 取值：external / spawned-mem / embedded-mem；环境变量 AIOS_STORE_MODE 压过本键。
 # 计划：docs/plans/2026-09-04-spawned-memory-store-out-of-box.md
 store_mode = "external"
-#【新增 2026-09-05】data_face —— 数据面形态。这一份配置是摄入部署（整库基线 + 稳态增量窗口、
-# 推进 applied_sesno），所以显式写 ingest。默认值是 read-through（读透缓存：不做基线、不开数据窗口，
-# pe / ATT_* 行随模型生成与按需请求写进库），漏写这一行的摄入部署开机后 pe 一行都不进。
-# 取值：read-through / ingest；环境变量 AIOS_DATA_FACE 压过本键。
+#【新增 2026-09-05；2026-09-07 订正】data_face —— 数据面形态。这一份配置是摄入部署（整库基线
+# + 稳态增量窗口、推进 applied_sesno），所以写 ingest。
+# 它**不自己做主**：生效值由 store_mode 派生（data_face_for_store——只有 external 回 ingest，
+# 两档内存回 read-through：不做基线、不开数据窗口，pe / ATT_* 行随模型生成与按需请求写进库）。
+# 本键与环境变量 AIOS_DATA_FACE 都**不压过**它，只在与介质给出的那一档不符时由 data_face_notice
+# 报一行警——写它是为了让配置自己说清要哪个数据面，说错了当场被点名，而不是静默按介质走。
+# 取值：read-through / ingest。护栏要求每一份夹具 / 现场配置都写出来。
 # 计划：docs/plans/2026-09-05-kv-mem-zero-ingest-read-through-plan.md
 data_face = "ingest"
 pe_chunk = 300

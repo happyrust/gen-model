@@ -20,8 +20,8 @@ if ($listener) {
 
 $env:DB_OPTION_FILE = $Config
 # 这个脚本只负责起服务，库由人自己先起好（`Start-Surreal8009.ps1`）：明写 external，
-# 免得 store_mode 的新默认（spawned-mem，2026-09-04）让它自己再拉一台。
-# 要试开箱即用形态就别用这个脚本，或把这一行改成 spawned-mem。
+# 不靠默认——那个默认 2026-09-04 翻成过 spawned-mem（会让它自己再拉一台）、2026-09-07
+# 才翻回 external。要试自带存储那一档就别用这个脚本，或把这一行改成 spawned-mem。
 $env:AIOS_STORE_MODE = 'external'
 # 数据面同理：这个脚本服务的是摄入部署（基线 + 增量窗口），明写 ingest，免得 data_face 的
 # 新默认（read-through，2026-09-05）让它开机不做基线。要试读透形态就把这一行改成 read-through。
