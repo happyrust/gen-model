@@ -198,7 +198,9 @@ pub(crate) async fn apply_startup_plan(
         ..Default::default()
     };
     for panel in &diff.removed_panels {
-        match recalc_panel_membership_for_consumption(db_option, &model.map, *panel).await {
+        match recalc_panel_membership_for_consumption(db_option, &model.map, *panel, Some(model))
+            .await
+        {
             Ok(_) => outcome.removed += 1,
             Err(error) => outcome
                 .failures
@@ -208,7 +210,9 @@ pub(crate) async fn apply_startup_plan(
     let (to_recalc, no_geometry) = split_recalc_by_geometry(model, &diff.recalc_panels);
     outcome.no_geometry = no_geometry;
     for panel in to_recalc {
-        match recalc_panel_membership_for_consumption(db_option, &model.map, panel).await {
+        match recalc_panel_membership_for_consumption(db_option, &model.map, panel, Some(model))
+            .await
+        {
             Ok(_) => outcome.recalculated += 1,
             Err(error) => outcome
                 .failures
@@ -1248,12 +1252,12 @@ mod tests {
             "pub(crate) async fn apply_startup_plan(",
         );
         assert!(
-            apply
-                .contains("recalc_panel_membership_for_consumption(db_option, &model.map, *panel)")
-                && apply.contains(
-                    "recalc_panel_membership_for_consumption(db_option, &model.map, panel)"
-                ),
-            "删与重算都走同一个函数: {apply}"
+            apply.contains(
+                "recalc_panel_membership_for_consumption(db_option, &model.map, *panel, Some(model))"
+            ) && apply.contains(
+                "recalc_panel_membership_for_consumption(db_option, &model.map, panel, Some(model))"
+            ),
+            "删与重算都走同一个函数，且面板几何取自这次装好的那份常驻模型（P2-b）: {apply}"
         );
         assert!(
             apply.contains("apply_renumber_on(&aios_core::SUL_DB, renumber)"),

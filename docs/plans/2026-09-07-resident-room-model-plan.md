@@ -103,7 +103,7 @@ ResidentRooms { published: Option<Arc<ResidentRoomModel>>, latest: Option<Arc<Re
 
 ### P2 · 计算源接线（1.5 天，开关下，等邻线 F-A/F-B 提交后动）
 
-状态：**P2-a 已落地**（换代点 + 拓扑源 + 写点 ③，见下面落地记）；**P2-b 未做**（几何侧 `PanelIndex` / 三角网 / `GroupCache` 两代）。
+状态：**P2-a 已落地**（换代点 + 拓扑源 + 写点 ③）；**P2-b 已落地**（几何侧 `PanelIndex` / 三角网经 `MeshCache` / `GroupCache` 两代，见下面 P2-b 落地记）；**`mem://` 两态门已跑**，但只覆盖到「渲染出来的语句」为止，落库那一段与真库两形态对拍仍未证（§7）。
 
 开关 `room_resident_model`（`DbOption.toml`）/ `AIOS_ROOM_RESIDENT_MODEL`，**默认 false**，取值规则同 `room_incremental`（`options.rs`）。关着时下面每一处都走今天的路，一字不动。
 
@@ -122,7 +122,22 @@ ResidentRooms { published: Option<Arc<ResidentRoomModel>>, latest: Option<Arc<Re
 - **写点 ③（S4）**。`drain_rooms_selected` 末尾、仍在串行锁之内调 `settle_resident_reference`：本轮 `report.failures.is_empty()` **且** `room_work_is_drained()`（房间表里连死信都不剩）才 `persist_reference`。两条缺一不可——还有一个目标没消费就写参照，等于宣称「边 == 这份拓扑」，下次启动的 diff 会把那块面板算成没变，陈旧的边永久留下且无日志。写失败只出声、不让本轮 drain 失败（退路：下次启动 `NoReference` → 全量一次，多算不漏算）。三处早退（`loaded == 0`、`data_batch_waiting()` 让位、失败）都不写。
 - **源码钉 +3**（`model_update_pending.rs`）：`the_resident_generation_swap_happens_inside_the_spatial_serial_lock`（锁在换代之前）、`the_room_drain_takes_its_topology_from_the_resident_model_when_it_is_on`（两态各自的取法 + 换代点受开关与数据面门控）、`the_third_reference_write_needs_a_clean_round_and_an_empty_room_queue`（写点在元素页之后、两条前提都在、死信也算没消费）。P1 那条 `membership_paths_only_take_the_model_through_for_membership` 放宽为「经 `for_membership` **或** `ensure_current`」并补禁 `resident_rooms()`——`ensure_current` 内部是唯一调 `for_membership` 的地方，它就是 P2 唯一许可的取法；`room_startup.rs` 的「写点只有两处」那条钉只数**启动侧**，补了一句注释指向写点 ③。
 - 验证：`cargo test --lib` **1829 passed / 0 failed / 118 ignored**（此前基线 1826）；`rustfmt --edition 2024 --check` 干净。
-- **未做（P2-b）**：几何侧仍每轮 `load_consumption_panel_index` 查库、`PanelEntry` 仍按面板各读一次 `.mesh`——`load_panel_index_from` 由常驻 `panels` / `meshes` 组 `PanelIndex`、`recalc_panel_membership_inner` / `cal_room_refnos_from` 改从 `for_membership()` 取、`GroupCache` 改两代，这三条一条没动。`mem://` 两态逐边门也未跑。跨代三角网复用（`MeshCache`）因此在增量侧还没生效，只有启动对比用上了。
+- ~~**未做（P2-b）**~~ → 见下面 P2-b 落地记。
+
+**P2-b 落地记（2026-09-08，几何侧接常驻 + `mem://` 两态门；碰 `room_model.rs` / `room_topology.rs` / `room_startup.rs` / `model_update_pending.rs`）**
+
+- **接缝选的是显式参数，不是读开关**。新类型 `room_model::ResidentSource<'a> = Option<&'a ResidentRoomModel>`：`Some` = 用常驻那份，`None` = 走今天那条查询。`room_model.rs` 里**一处开关也不读**（源码钉守着），开关只在换代点判一次（`ensure_resident_rooms` 里那句 `ensure_current(`，串行锁之内），模型从此只以参数形态进出。理由有两条：一是多一处判定就多一个能和换代点漂开的地方——两处判出不同答案时，拓扑来自常驻而几何来自库内查询，先清后写会按两份不同的输入改写同一批边；二是 `room_resident_model()` 读的是进程级 `OnceLock`，同进程翻不了两次，两态门只能靠可注入的接缝，而这个接缝**就是生产走的那条**，不是为测试另开的路。
+- **`load_panel_index_from` 分岔**。`PanelIndex` 多一个字段 `resident: Option<Arc<ResidentRoomModel>>`（收在索引里而不是逐次传参：整间分支从 `panel_index.resident()` 取的必然是元素分支同一份，类型上不可能一个走常驻一个走查询）。开着时 `fill_panel_index_from_resident` **在查库之前早退**，一次库都不查；关着时照旧 `query_room_insts(view, &registered)` + `fill_panel_index_from_rows`。`PanelEntry` 随之改形：新增 `world_aabb`（候选相交与 `center_dist` 排序键的基准），`inst` 降为 `Option<GeomInstQuery>`（常驻那条路上是 `None`）。
+- **三角网经 `MeshCache`**。`PanelMeshes` 拆成 `from_rows`（今天：按面板各读一次 `.mesh`）与 `from_resident`（`model.panel_tri_meshes(panel, mesh_dir)`，键 = `geo_hash` + 世界矩阵位模式，跨代复用）；后者**全有或全无**，一块面板的网格只要有一张读不出来就整块判不了，不留半份。取网格从 `PanelEntry::meshes` 上移到 `PanelIndex::meshes(&entry)`（懒惰按轮缓存不变，只是选哪条路要看索引身上那份模型）。
+- **整间分支同源**。`cal_room_refnos_from` 多一个 `resident: ResidentSource<'_>` 参数，面板几何在函数开头一次取定（`match resident`）产出一份 `PanelMeshes`，主循环改为遍历 `geometry.pieces()` 拿 `(&Aabb, &Arc<TriMesh>)`；`recalc_panel_membership_{inner,guarded,for_consumption}` 顺路带参。`run_room_task` 的整间臂传 `panels.resident()`，`drain_rooms_selected` 把换代交回来的那份递给 `load_consumption_panel_index`。启动对比（`room_startup::apply_startup_plan`）也改成传 `Some(model)`——它本来就已经装好了一份模型，此前白读一遍盘。
+- **全量重建那条路恒不接常驻**，`load_panel_index` / `cal_room_refnos` / `recalc_panel_membership` 三个入口在**类型层面**永远传 `None`。它是显式修复入口：常驻模型不可信时正是靠它重算出正确的边，接上去就没有退路了。**`execute_item` 的房间臂也恒传 `None`**，这一条是对 P2 原文「`execute_item` 房间臂同源」的**有意偏离**：单件执行路径不在 `lock_spatial_serial` 之内，而 `ensure_current` 的前提是调用方已持这把锁；在那里取模型要么改锁的语义，要么拿一份没人保证还对得上的拓扑去先清后写。批量消费才是接常驻的地方，单件路径照旧各查一次（已写进注释）。
+- **`GroupCache` 只留两代**（`GROUP_CACHE_GENERATIONS = 2`，与 `ResidentRooms` 同口径）。「一代」= 一个 `(composite, 层级)`，一代里每个文件各一条（键 `(dbnum, sesno)`）；同一代里再来一个文件是**并进去**而不算新一代（否则一代多文件的项目会自己把自己挤掉）。此前这张表从不淘汰——ams7997 一个文件的分组是 1 077 组 / 3 937 面板，读透侧每 SAVEWORK 攒一代，进程活得越久留下的死代越多。
+- **`missing_panels` 「同口径、同序」那句话核过了**，`room_resident.rs` 的注释是**基本为真、有一处例外**：一条行都没拿到、以及唯一那行包围盒不可用，两边同集合同序（`to_string` 序）；**只有「半份几何」不同**——一块面板一行可用一行坏，今天既进索引（拿半份几何去筛候选、去先清后写）又进 `missing`（保护存量边），两件互相矛盾的事同时做了；常驻侧那块面板整块不进 `panels`，于是只进 `missing`。**按保守那边办：没改常驻去迁就今天，而是让开关开着时更严**（坏行的存在本身说明这块面板的几何不可信，拿剩下半份算出来的边一样是错的，而错的边会被当成算成功写下去；代价是这块面板等下一轮几何修好才重算）。关着时行为一字未动。有专门的测试钉住这个差（`the_resident_missing_criteria_is_the_index_criteria_except_it_is_stricter_on_half_geometry`），**这一条请复核**。
+- **`mem://` 两态门**（`room_model.rs::the_two_faces_render_the_same_room_edges_on_a_mem_fixture`）：一份内存库夹具（两间房、四块在册面板——7/9 有几何、8 一条行都没有、10 的包围盒溢出成 inf 不可用；三个构件——20 完全落在 7 里、21 谁都不沾、22 跨 7 的边界），同一份 `RoomPanelMap` 建两份 `PanelIndex`（关 = `query_published_room_insts_on`，开 = `load_published_on` 那份常驻模型），比四件事：① `missing_panels()` 的集合与顺序（`[10, 8]`，`to_string` 序而非在册序）、`usable_panels()`、三个探针盒的 `candidate_panel_refnos()`；② 整间分支的输入（每块面板的 `world_aabbs` 与三角网的顶点、索引逐个相等）；③ **逐边**——元素分支第一轮的产物渲染成 `room_relate` 写入语句**逐字**比（边 id、目标、`room_num`、`inside_count`、`center_dist`、保护子句里的 `NOT IN` 名单全在那段文本里），外加第二轮待办按 `(构件, 面板 refno, 网格下标, 顶点计数)` 比；④ 同一把 `MeshCache` 建第二份模型后 `Arc::ptr_eq` 命中、`meshes.len() == 2`。门里有**非空断言**（三个构件必须各走到「成边 / 无候选 / 只留待办」三条不同的路），并做过**变异检验**：给常驻那侧的 `world_aabb` 加 7.0，②与③都变红。
+- **为此把元素分支第一轮抽成纯函数** `element_first_pass(panels, element, element_insts) -> ElementFirstPass`。它本来就不碰库（候选来自索引、判定来自 `room_predicate`），抽出来两态才能在同进程里对拍；`recalc_element_membership_inner` 只是解构它的产物，判定顺序与第二轮的取网格方式一字未改（原有三条元素分支源码钉随之把范围扩到 `fn element_first_pass(` 起）。
+- **源码钉 +5**：`the_full_rebuild_entry_never_takes_the_resident_model`（三个全量入口恒 `None`，且本文件不出现 `room_resident_model()`）、`the_geometry_side_falls_back_to_todays_query_without_a_model`（关着时索引与整间分支走的仍是 `query_room_insts` + `from_rows`，且开着时必须在查库**之前**早退）、`the_resident_branch_takes_its_tri_meshes_from_the_shared_cache`（`from_resident` 里必须有 `panel_tri_meshes`、不许有 `des_mesh_file` / `get_tri_mesh_with_flag`）、`the_group_cache_has_an_eviction_bound`（代数上限 + `pop_front`）、`the_group_cache_keeps_only_two_generations`（行为门：第三代进来第一代出局，同代并入不顶掉上一代）。「不许摸 `resident_rooms()` / 不许点名形态」那条**没有在 `room_model.rs` 里重写**——`room_resident.rs` 的 `membership_paths_only_take_the_model_through_for_membership` 扫的正是本文件的源码文本，在这里写同样的字面量会把它自己钉红（试过，红了）。三处既有钉随调用文本更新：`model_update_pending::room_drain_reads_the_committed_room_geometry_view`、`room_startup` 的写路径钉、三条元素分支钉。
+- 验证：`cargo test --lib` **1841 passed / 0 failed / 118 ignored**（此前基线 1829，其中 +7 来自邻线水位那笔在途改动，本笔新增 6 条）；`cargo check --tests` 通过；四个文件 `rustfmt --edition 2024 --check` 干净。
+- **未做 / 未证**：见 §7 新增五条——两态门只比到语句、不落库；`room_panel_relate` 那一半（要 `GLOBAL_AABB_TREE`）没做到；读透形态喂不进 `mem://`；多行面板的 `center_dist` 差未在语料上核过；`execute_item` 房间臂的偏离是有意的但未在真库上验证过它与批量路径的边一致。
 
 ### P3 · 房间初始化、启动对比与全量降级（2.5 天）
 
@@ -235,6 +250,11 @@ grill 已把决策问完（§8）。剩下三条是通知，不同意就说：
 - 摄入侧启动对比恒等的推论（清单拓扑与常驻模型同源）：按代码推的，P3 (ii) 的 `mem://` 门才算证。
 - `watch_dbnums=[8000]` 起服时房间初始化替 7997 前进清单行、`/health` 点名 7997 面板无几何：接线已落（P3-b）；`room_model.rs` 注释记着 2026-09-08 跑过一次并修了两处形状，但**回执没有存证**，仍按未证记，P5 真库门时留 `docs/evidence/`。
 - 空间树装载前移到等数据清单之前是否有隐藏依赖（`load_project_tree_verified` 读的是指针与快照文件，按代码没有）：顺序钉已补（`resident_room_initialization_follows_the_tree_load_and_precedes_the_watcher`），真库上**未证**。
+- P2 的 `mem://` 两态门（P2-b 已跑）**只比到「渲染出来的语句」为止，没有落库比表**：`save_room_relate` / `save_panel_state_guarded` 那一段要 `SUL_DB`（进程级 Surreal 连接），而两态门是 `mem://` 上的普通单元测试，改 `SUL_DB` 的指向会污染同进程里所有邻居测试。语句逐字相同 ⇒ 落库结果相同，这一步是**按代码推的**，不是量过的。
+- **面板分支（`room_panel_relate` / `cal_room_refnos_from` 的成员集合）没有两态逐边对拍**：它要 `GLOBAL_AABB_TREE`（进程级空间树），`mem://` 喂不了。门里比的是它的**输入**（每块面板的 `world_aabbs` 与三角网顶点/索引逐个相等）；输入相同 ⇒ 输出相同，同样是推的。主计划 §3 P2 验收原文写的是「`room_relate` / `room_panel_relate` 逐边相同」，**`room_panel_relate` 那一半没做到**。
+- **读透形态（`ResidentForm::Latest`）不在两态门覆盖范围内**：`query_valid_insts` 没有 `_on(db, …)` 变体，喂不进 `mem://`。门跑的是摄入形态（`load_published_on`）。
+- **多行面板的 `center_dist` 两态可能不同**：常驻侧把同 refno 的多行并成一个 `ResidentPanel`，`world_aabb` 是并集，而 `center_dist` 是持久化的边字段。成员**集合**不受影响（判定用的还是三角网），单行面板（真库常态）位级相同；多行面板的这一位差**未在语料上核过**有多少块面板受影响。
+- **`execute_item` 房间臂恒不接常驻**（不在 `lock_spatial_serial` 之内），与批量消费路径的输入来源因此不同源。两条路各自都是自洽的（单件走今天那条查询），但「同一块面板经单件路径与经批量路径算出同一批边」在真库上**未证**。
 
 ## 8. 决议索引（grill 2026-09-07，四轮，全部按推荐）
 

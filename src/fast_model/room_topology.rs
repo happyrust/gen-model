@@ -19,8 +19,9 @@
 //!
 //! 一个库一个会话的原始分组（未过关键字）按 `(dbnum, sesno, 层级)` 缓存：会话内容不可变，
 //! 而房间映射「按轮复用」的调用方（drain、`execute_item`、启动全量）今天各自都要重载一遍。
+//! 缓存只留两代（[`GROUP_CACHE_GENERATIONS`]，常驻房间模型 P2-b）。
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -310,26 +311,60 @@ pub(crate) fn room_groups_from_set(
     })
 }
 
-type GroupCache = Mutex<HashMap<(u32, u32, String, RoomHierarchy), Arc<Vec<RoomGroup>>>>;
+/// 文件侧分组缓存**只留两代**（常驻房间模型 P2-b，与 `ResidentRooms` 同一口径）。
+///
+/// 「一代」= 一个 `(composite, 层级)`：composite 是这一组文件版本的规范摘要
+/// （[`latest_frozen_sources`]），任一 DESI 的会话号变了就是新一代；一代里每个文件各一条
+/// （键 `(dbnum, sesno)`）。此前这张表**从不淘汰**——ams7997 一个文件的分组是 1 077 组 /
+/// 3 937 面板，读透侧每 SAVEWORK 一次就多攒一代，进程活得越久留下的死代越多，而除了当前
+/// 那一代与用来做 diff 的上一代，谁也不会再看它们一眼。
+const GROUP_CACHE_GENERATIONS: usize = 2;
+
+/// 一代：同一组文件版本下，各文件各自的分组。
+struct GroupGeneration {
+    ident: (String, RoomHierarchy),
+    files: HashMap<(u32, u32), Arc<Vec<RoomGroup>>>,
+}
+
+type GroupCache = Mutex<VecDeque<GroupGeneration>>;
 
 fn group_cache() -> &'static GroupCache {
     static CACHE: OnceLock<GroupCache> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+    CACHE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
 fn cached_groups(key: (u32, u32, String, RoomHierarchy)) -> Option<Arc<Vec<RoomGroup>>> {
+    let (dbnum, sesno, composite, hierarchy) = key;
     group_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .get(&key)
-        .cloned()
+        .iter()
+        .find(|generation| generation.ident == (composite.clone(), hierarchy))
+        .and_then(|generation| generation.files.get(&(dbnum, sesno)).cloned())
 }
 
+/// 记一条。命中已有的那一代就并进去（不重排——同一代里各文件是一起读出来的，先后无意义）；
+/// 是新的一代才排到队尾，队首那一代随之出局。
 fn remember_groups(key: (u32, u32, String, RoomHierarchy), groups: Arc<Vec<RoomGroup>>) {
-    group_cache()
+    let (dbnum, sesno, composite, hierarchy) = key;
+    let ident = (composite, hierarchy);
+    let mut cache = group_cache()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(key, groups);
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(generation) = cache
+        .iter_mut()
+        .find(|generation| generation.ident == ident)
+    {
+        generation.files.insert((dbnum, sesno), groups);
+        return;
+    }
+    cache.push_back(GroupGeneration {
+        ident,
+        files: HashMap::from([((dbnum, sesno), groups)]),
+    });
+    while cache.len() > GROUP_CACHE_GENERATIONS {
+        cache.pop_front();
+    }
 }
 
 /// 从当前 MDB 的每个设计库文件（各自的生成会话：钉住的或文件最新，ADR-054 Q1）读出房间
@@ -877,6 +912,68 @@ mod tests {
             "keyword {keyword:?}: {} room(s) pass naming, {} panel(s) excluded in total",
             map.rooms.len(),
             map.all_panels.len()
+        );
+    }
+
+    /// 分组缓存只留两代（常驻房间模型 P2-b）：新一代进来时最老那一代必须出局。
+    ///
+    /// 用独一无二的 composite 做键，免得和别的测试在这张进程级表上互相踩；断言只看
+    /// 「自己这三代里哪一代还在」，不看表长——并行跑的邻居也在往同一张表里写。
+    #[test]
+    fn the_group_cache_keeps_only_two_generations() {
+        let tag = format!("gen-cache-{:?}", std::thread::current().id());
+        let key = |era: u32| (77, era, format!("{tag}-{era}"), RoomHierarchy::Hd);
+        let groups = |era: u32| {
+            Arc::new(vec![RoomGroup {
+                room: r(era),
+                name: format!("/1RX-RM03-R30{era}"),
+                panels: vec![r(era + 100)],
+            }])
+        };
+
+        for era in 1..=2 {
+            remember_groups(key(era), groups(era));
+        }
+        assert_eq!(cached_groups(key(1)), Some(groups(1)), "两代之内必须还在");
+        assert_eq!(cached_groups(key(2)), Some(groups(2)));
+
+        remember_groups(key(3), groups(3));
+        assert_eq!(cached_groups(key(1)), None, "第三代进来，第一代必须出局");
+        assert_eq!(cached_groups(key(2)), Some(groups(2)));
+        assert_eq!(cached_groups(key(3)), Some(groups(3)));
+
+        // 同一代里再来一个文件是并进去，不算新一代——否则一代多文件的项目会自己把自己挤掉。
+        let sibling = (78, 3, format!("{tag}-3"), RoomHierarchy::Hd);
+        remember_groups(sibling.clone(), groups(4));
+        assert_eq!(cached_groups(key(2)), Some(groups(2)), "并入不该顶掉上一代");
+        assert_eq!(cached_groups(key(3)), Some(groups(3)));
+        assert_eq!(cached_groups(sibling), Some(groups(4)));
+    }
+
+    /// 回退即红：淘汰逻辑长回「从不淘汰」就红。
+    #[test]
+    fn the_group_cache_has_an_eviction_bound() {
+        let source = include_str!("room_topology.rs")
+            .replace("\r\n", "\n")
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("测试跟在生产代码后面")
+            .0
+            .to_string();
+        assert!(
+            source.contains("const GROUP_CACHE_GENERATIONS: usize = 2;"),
+            "分组缓存的代数上限必须是 2（与 ResidentRooms 同口径）"
+        );
+        let remember = source
+            .split_once("fn remember_groups(")
+            .expect("remember_groups 必须存在")
+            .1
+            .split_once("\n}\n")
+            .expect("函数体必须闭合")
+            .0;
+        assert!(
+            remember.contains("while cache.len() > GROUP_CACHE_GENERATIONS")
+                && remember.contains("cache.pop_front()"),
+            "记一代之后必须淘汰超出上限的老代: {remember}"
         );
     }
 }

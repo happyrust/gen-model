@@ -3777,8 +3777,13 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
         // 一次并在整轮复用——房间映射是一次房间类型表全表扫描加逐行图遍历，几十个任务
         // 各扫一遍是承受不起的。
         ModelWorkAction::RoomRecalcElement | ModelWorkAction::RoomRecalcPanel => {
+            // 常驻模型在这条路上恒不参与（`None`）：换代点的前提是调用方已持
+            // `lock_spatial_serial`，而单件执行路径不在那段串行区里，取模型就是拿一份没人
+            // 保证还对得上的拓扑改写存量边。批量消费（`drain_rooms_selected`）才是接常驻
+            // 的地方，这里照旧每次各查一次拓扑与几何。
             let rooms = room_model::load_room_panel_map(&mgr.db_option).await?;
-            let panels = room_model::load_consumption_panel_index(&mgr.db_option, &rooms).await?;
+            let panels =
+                room_model::load_consumption_panel_index(&mgr.db_option, &rooms, None).await?;
             // 整间任务用不到构件的旧归属快照，别为它多发一条查询。
             let history = if matches!(item.action, ModelWorkAction::RoomRecalcElement) {
                 room_model::ElementRoomHistory::load(&[refno]).await?
@@ -3791,6 +3796,7 @@ async fn execute_item(mgr: &AiosDBManager, item: &PendingModelWork) -> anyhow::R
                         &mgr.db_option,
                         &rooms,
                         refno,
+                        None,
                     )
                     .await
                     .map(|_| ())
@@ -4012,7 +4018,16 @@ async fn run_room_task(
     let guard = room_write_guard(job, published_version);
     match job.action {
         ModelWorkAction::RoomRecalcPanel => {
-            room_model::recalc_panel_membership_guarded(db_option, rooms, target, &guard).await
+            // 面板侧几何与元素分支同源：两条分支都从这一轮那份索引取，不可能一个走常驻、
+            // 一个走库内查询（`PanelIndex::resident`）。
+            room_model::recalc_panel_membership_guarded(
+                db_option,
+                rooms,
+                target,
+                &guard,
+                panels.resident(),
+            )
+            .await
         }
         ModelWorkAction::RoomRecalcElement => {
             room_model::recalc_element_membership_guarded(rooms, panels, history, target, &guard)
@@ -6347,7 +6362,12 @@ async fn drain_rooms_selected(
     // Panel geometry is loaded once for the complete scoped drain and reused by
     // every 256-element history page. The view (published rows vs live rows)
     // follows the data face, the same choice the panel branch makes.
-    let panel_index = room_model::load_consumption_panel_index(db_option, &rooms).await?;
+    // 面板几何同源：`resident` 就是刚才那次换代交回来的那份，索引把它收在身上，整间分支
+    // 从 `panel_index.resident()` 取同一份（`run_room_task`）。开关关着是 `None`，两条分支
+    // 一起回到今天的库内查询。三角网从此经 `MeshCache`（键 = geo_hash + 世界矩阵位模式）
+    // 跨代复用，不再每轮按面板各读一次 `.mesh`。
+    let panel_index =
+        room_model::load_consumption_panel_index(db_option, &rooms, resident.clone()).await?;
     let mut report = DrainReport {
         requested,
         loaded,
@@ -7686,11 +7706,11 @@ mod tests {
         // 视图由数据面决定（`room_model::consumption_view`）：ingest 读发布视图，读透退回
         // 实时行（审核 F-B）。这里不许再直接点名任何一个视图。
         assert!(
-            body.contains("load_consumption_panel_index(db_option, &rooms)"),
-            "增量房间消费必须经 consumption 入口加载面板（视图随数据面）: {body}"
+            body.contains("load_consumption_panel_index(db_option, &rooms, resident.clone())"),
+            "增量房间消费必须经 consumption 入口加载面板（视图随数据面，面板几何随换代那份）: {body}"
         );
         assert!(
-            !body.contains("load_panel_index(db_option, &rooms)")
+            !body.contains("load_panel_index(db_option, &rooms")
                 && !body.contains("load_published_panel_index("),
             "增量房间消费不得自己钉死 Live 或 Published 视图: {body}"
         );

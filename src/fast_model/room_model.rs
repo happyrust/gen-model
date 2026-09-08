@@ -4,6 +4,7 @@ use crate::fast_model::room_predicate::{
     AabbVerdict, aabb_is_usable, any_point_inside, center_distance, count_vertices_inside,
     element_in_panel, membership_by_aabb, verdict_of,
 };
+use crate::fast_model::room_resident::ResidentRoomModel;
 use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
 use aios_core::options::DbOption;
 use aios_core::room::algorithm::*;
@@ -26,7 +27,7 @@ use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 /// Revision guard and settlement statements supplied by the durable room queue.
 /// Geometry code owns the edge mutations; queue code owns task identity. Keeping
@@ -78,6 +79,22 @@ async fn query_room_insts(
         }
     }
 }
+
+/// 面板侧几何这一轮从哪来（常驻房间模型 P2-b）。
+///
+/// `Some(模型)` = 走常驻那份：面板实例表已经在内存里，三角网经 `MeshCache`（键 =
+/// `geo_hash` + 世界矩阵位模式）跨代复用。`None` = 走今天那条路：每块面板各查一次
+/// `query_room_insts`、各读一次 `.mesh`。
+///
+/// **本文件不读开关，也不摸进程单例。** 开关（`options::room_resident_model`）与形态
+/// （`options::data_face`）只在换代点判一次——`model_update_pending::ensure_resident_rooms`
+/// 里那一句 `room_resident::ensure_current(`，串行锁之内；启动对比那一路由
+/// `room_startup` 把它已经装好的那份直接递进来。模型只以参数形态进出，这里没有第二处
+/// 判定可以漂，也没有第二个取法可以绕开 `for_membership(`。
+///
+/// 全量重建（[`load_panel_index`] / [`cal_room_refnos`] / [`recalc_panel_membership`]）在**类型
+/// 层面**恒为 `None`：它是显式修复入口，常驻模型不可信时正是靠它重算，接上去就没有退路了。
+type ResidentSource<'a> = Option<&'a ResidentRoomModel>;
 
 pub(crate) fn render_room_write(mutations: &[String], guard: Option<&RoomWriteGuard>) -> String {
     let statements = match guard {
@@ -1298,6 +1315,7 @@ pub async fn cal_room_refnos(
         panel_refno,
         exclude_refnos,
         RoomGeometryView::Live,
+        None,
     )
     .await
 }
@@ -1307,165 +1325,162 @@ async fn cal_room_refnos_from(
     panel_refno: RefnoEnum,
     exclude_refnos: &HashSet<RefnoEnum>,
     view: RoomGeometryView,
+    resident: ResidentSource<'_>,
 ) -> anyhow::Result<PanelMembers> {
     //查询到aabb直接完全在这个房间里的mesh里，就不用做点的检查
-    // 这里曾经是 `unwrap_or_default()`：面板实例只要有一个字段形状不对
-    //（`GeomInstQuery` 的 `pe.owner` / `inst_relate.generic` 都是非 Option 字符串），
-    // 反序列化错误就被吞成空 Vec，紧接着下面的 `is_empty()` 让整间房**无声地**算成
-    // 0 个成员，日志里一行都没有。合成夹具首跑就是被它藏了半天。
-    let geom_insts: Vec<GeomInstQuery> = query_room_insts(view, &[panel_refno])
-        .await
-        .map_err(|error| anyhow::anyhow!("查询面板 {panel_refno} 的实例失败: {error}"))?;
-    // dbg!(&geom_insts);
-    // 此前这里 `return Ok(Default::default())`——把「没有几何」当成「没有成员」交出去，
-    // 调用方紧接着先清后写，于是这块面板的存量归属边被静默清空。它与下面「网格一个都
-    // 不可用」是同一件事，处置也该一样：不写。
-    if geom_insts.is_empty() {
-        return Ok(PanelMembers::NoGeometry);
-    }
+    let geometry = match resident {
+        // 常驻分支：面板实例表已经在模型里，三角网经 `MeshCache` 跨代复用。模型里没有这块
+        // 面板 = 一条几何行都没拿到、或每条行的世界包围盒都不可用；两者在今天那条路上分别
+        // 是下面的 `is_empty()` 与「拿一个不可用的盒去树上捞候选」，这里一律按「判不了」
+        // 处置（原则 2：宁可把陈旧边多留一轮，不可拿垃圾盒算出空集再先清后写）。
+        Some(model) => {
+            if model.panel(panel_refno).is_none() {
+                return Ok(PanelMembers::NoGeometry);
+            }
+            PanelMeshes::from_resident(model, panel_refno, mesh_dir)
+        }
+        None => {
+            // 这里曾经是 `unwrap_or_default()`：面板实例只要有一个字段形状不对
+            //（`GeomInstQuery` 的 `pe.owner` / `inst_relate.generic` 都是非 Option 字符串），
+            // 反序列化错误就被吞成空 Vec，紧接着下面的 `is_empty()` 让整间房**无声地**算成
+            // 0 个成员，日志里一行都没有。合成夹具首跑就是被它藏了半天。
+            let geom_insts: Vec<GeomInstQuery> = query_room_insts(view, &[panel_refno])
+                .await
+                .map_err(|error| anyhow::anyhow!("查询面板 {panel_refno} 的实例失败: {error}"))?;
+            // dbg!(&geom_insts);
+            // 此前这里 `return Ok(Default::default())`——把「没有几何」当成「没有成员」交出去，
+            // 调用方紧接着先清后写，于是这块面板的存量归属边被静默清空。它与下面「网格一个都
+            // 不可用」是同一件事，处置也该一样：不写。
+            if geom_insts.is_empty() {
+                return Ok(PanelMembers::NoGeometry);
+            }
+            PanelMeshes::from_rows(&geom_insts, mesh_dir)
+        }
+    };
 
     let mut within_refnos: HashMap<RefnoEnum, RoomMember> = HashMap::new();
     // 网格读不出来不能静默当成「没有成员」：这套写入是先清后写，判不了却照常
     // 返回结果会把整间房的存量边部分抹掉且不留痕迹。逐个实例的失败先收集，
     // 只要有一个失败就中止写入并保留任务重试。
     let mut usable_meshes = 0usize;
-    let mut mesh_failures: Vec<String> = Vec::new();
+    let mesh_failures = &geometry.failures;
     //将panel的 plant mesh 转换成TriMesh
-    for geom_inst in geom_insts {
-        for inst in geom_inst.insts {
-            let file_path = mesh_dir.join(format!("{}.mesh", inst.geo_hash));
-            let mesh = match PlantMesh::des_mesh_file(&file_path) {
-                Ok(mesh) => mesh,
-                Err(error) => {
-                    mesh_failures.push(format!("{}: {error}", file_path.display()));
-                    continue;
-                }
-            };
-            // dbg!(&file_path);
-            let Some(mut tri_mesh) = mesh.get_tri_mesh_with_flag(
-                (geom_inst.world_trans * inst.transform).compute_matrix(),
-                TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
-            ) else {
-                mesh_failures.push(format!("{}: 三角网转换失败", file_path.display()));
-                continue;
-            };
-            usable_meshes += 1;
-            let mut read = GLOBAL_AABB_TREE.read().await;
-            let mut contains_query = read
-                .locate_intersecting_bounds(&geom_inst.world_aabb)
-                .collect::<Vec<_>>();
-            if contains_query.is_empty() {
-                continue;
+    // `world_aabb` 是这一片三角网所属那条实例行的世界包围盒（常驻分支是该面板各行并起来
+    // 的那一个，见 [`PanelMeshes::from_resident`]），与今天那条路上的 `geom_inst.world_aabb`
+    // 同一个位置：既是树查询的范围，也是 `center_dist` 排序键的基准。
+    for (world_aabb, tri_mesh) in geometry.pieces() {
+        let tri_mesh = tri_mesh.as_ref();
+        usable_meshes += 1;
+        let mut read = GLOBAL_AABB_TREE.read().await;
+        let mut contains_query = read
+            .locate_intersecting_bounds(world_aabb)
+            .collect::<Vec<_>>();
+        if contains_query.is_empty() {
+            continue;
+        }
+        // dbg!(&contains_query);
+        // 第二轮要用的：既记下待查 refno，也记下它第一轮的顶点计数，
+        // 免得点检查通过后还得为了排序再算一遍。
+        let mut need_check_refnos: HashMap<RefU64, u8> = HashMap::default();
+        let mut vertex_counts: HashMap<RefU64, u8> = HashMap::default();
+        contains_query.retain(|RStarBoundingBox { refno, aabb, .. }| {
+            if !aabb_is_usable(aabb) {
+                return false;
             }
-            // dbg!(&contains_query);
-            // 第二轮要用的：既记下待查 refno，也记下它第一轮的顶点计数，
-            // 免得点检查通过后还得为了排序再算一遍。
-            let mut need_check_refnos: HashMap<RefU64, u8> = HashMap::default();
-            let mut vertex_counts: HashMap<RefU64, u8> = HashMap::default();
-            contains_query.retain(|RStarBoundingBox { refno, aabb, .. }| {
-                if !aabb_is_usable(aabb) {
-                    return false;
+            //排除自己
+            let r: RefnoEnum = (*refno).into();
+            if exclude_refnos.contains(&r) || panel_refno.refno() == *refno {
+                return false;
+            }
+            // 判定口径只有 room_predicate 一份，反向路径调的是同一个（ADR-010 §3）。
+            let inside = count_vertices_inside(tri_mesh, aabb);
+            vertex_counts.insert(*refno, inside);
+            match verdict_of(inside) {
+                AabbVerdict::Inside => true,
+                AabbVerdict::NeedsPointCheck => {
+                    need_check_refnos.insert(*refno, inside);
+                    false
                 }
-                //排除自己
-                let r: RefnoEnum = (*refno).into();
-                if exclude_refnos.contains(&r) || panel_refno.refno() == *refno {
-                    return false;
-                }
-                // 判定口径只有 room_predicate 一份，反向路径调的是同一个（ADR-010 §3）。
-                let inside = count_vertices_inside(&tri_mesh, aabb);
-                vertex_counts.insert(*refno, inside);
-                match verdict_of(inside) {
-                    AabbVerdict::Inside => true,
-                    AabbVerdict::NeedsPointCheck => {
-                        need_check_refnos.insert(*refno, inside);
-                        false
-                    }
-                    AabbVerdict::Outside => false,
+                AabbVerdict::Outside => false,
+            }
+        });
+        //for test
+        // dbg!(tri_mesh.contains_point(&Isometry::identity(), &Point::new(0.0, 0.0, 0.0) ));
+        // if !contains_query.is_empty() {
+        //     dbg!(&contains_query);
+        // }
+        for bbox in &contains_query {
+            merge_member(
+                &mut within_refnos,
+                RoomMember {
+                    refno: bbox.refno.into(),
+                    inside_count: vertex_counts.get(&bbox.refno).copied().unwrap_or(8),
+                    center_dist: center_distance(world_aabb, &bbox.aabb),
+                },
+            );
+        }
+        // if within_refnos.len() > 1 {
+        //     dbg!(&within_refnos);
+        // }
+        // let need_check_refnos: Vec<RefU64> = vec!["24383_71586".into()];
+        // dbg!(&need_check_refnos);
+        if !need_check_refnos.is_empty() {
+            // dbg!(panel_refno);
+            // dbg!(&within_refnos);
+            // dbg!(&need_check_refnos);
+            //首先判断，如果是包围盒完全不在里面，直接跳过
+            //继续的点检查可能会比较耗时，后续应该加开关，让用户判断是否需要继续做检查
+            // 这一步过去是 `let Ok(..) else { continue }`：查询或反序列化一失败，
+            // 整轮逐点兜底被静默跳过，跨界构件就此丢掉归属而不留痕迹。
+            let candidates: Vec<RefnoEnum> = need_check_refnos
+                .keys()
+                .map(|refno| RefnoEnum::from(*refno))
+                .collect();
+            let geom_pts = query_geom_pts_for_view(view, &candidates, mesh_dir)
+                .await
+                .map_err(|error| anyhow::anyhow!("面板 {panel_refno} 的候选几何点: {error:#}"))?;
+            // dbg!(&geom_pts);
+            // Aabb 既不是 Eq 也不是 Hash，所以按 refno 建映射而不是塞进 Set。
+            let intersect_set: DashMap<RefnoEnum, Aabb> = DashMap::new();
+            geom_pts.par_iter().for_each(|g| {
+                if g.pts_group
+                    .par_iter()
+                    .find_any(|(trans, o_pts)| {
+                        let Some(pts) = o_pts else {
+                            return false;
+                        };
+                        let pt_trans = (g.world_trans * (*trans)).compute_matrix();
+                        any_point_inside(
+                            tri_mesh,
+                            pts.iter().map(|pt| {
+                                pt_trans.as_dmat4().transform_point3(*pt).as_vec3().into()
+                            }),
+                        )
+                    })
+                    .is_some()
+                {
+                    intersect_set.insert(g.refno, g.world_aabb);
                 }
             });
-            //for test
-            // dbg!(tri_mesh.contains_point(&Isometry::identity(), &Point::new(0.0, 0.0, 0.0) ));
-            // if !contains_query.is_empty() {
-            //     dbg!(&contains_query);
-            // }
-            for bbox in &contains_query {
+            #[cfg(feature = "debug_room")]
+            if !intersect_set.is_empty() {
+                println!(
+                    "found intersect room panel {}, refnos: {}",
+                    panel_refno,
+                    &intersect_set.iter().map(|x| x.key().to_string()).join(",")
+                );
+            }
+            for entry in intersect_set.iter() {
+                let (refno, member_aabb) = (*entry.key(), *entry.value());
                 merge_member(
                     &mut within_refnos,
                     RoomMember {
-                        refno: bbox.refno.into(),
-                        inside_count: vertex_counts.get(&bbox.refno).copied().unwrap_or(8),
-                        center_dist: center_distance(&geom_inst.world_aabb, &bbox.aabb),
+                        refno,
+                        // 第二轮进来的必然是部分包含（1–7），沿用第一轮已算好的计数。
+                        inside_count: need_check_refnos.get(&refno.refno()).copied().unwrap_or(1),
+                        center_dist: center_distance(world_aabb, &member_aabb),
                     },
                 );
-            }
-            // if within_refnos.len() > 1 {
-            //     dbg!(&within_refnos);
-            // }
-            // let need_check_refnos: Vec<RefU64> = vec!["24383_71586".into()];
-            // dbg!(&need_check_refnos);
-            if !need_check_refnos.is_empty() {
-                // dbg!(panel_refno);
-                // dbg!(&within_refnos);
-                // dbg!(&need_check_refnos);
-                //首先判断，如果是包围盒完全不在里面，直接跳过
-                //继续的点检查可能会比较耗时，后续应该加开关，让用户判断是否需要继续做检查
-                // 这一步过去是 `let Ok(..) else { continue }`：查询或反序列化一失败，
-                // 整轮逐点兜底被静默跳过，跨界构件就此丢掉归属而不留痕迹。
-                let candidates: Vec<RefnoEnum> = need_check_refnos
-                    .keys()
-                    .map(|refno| RefnoEnum::from(*refno))
-                    .collect();
-                let geom_pts = query_geom_pts_for_view(view, &candidates, mesh_dir)
-                    .await
-                    .map_err(|error| {
-                        anyhow::anyhow!("面板 {panel_refno} 的候选几何点: {error:#}")
-                    })?;
-                // dbg!(&geom_pts);
-                // Aabb 既不是 Eq 也不是 Hash，所以按 refno 建映射而不是塞进 Set。
-                let intersect_set: DashMap<RefnoEnum, Aabb> = DashMap::new();
-                geom_pts.par_iter().for_each(|g| {
-                    if g.pts_group
-                        .par_iter()
-                        .find_any(|(trans, o_pts)| {
-                            let Some(pts) = o_pts else {
-                                return false;
-                            };
-                            let pt_trans = (g.world_trans * (*trans)).compute_matrix();
-                            any_point_inside(
-                                &tri_mesh,
-                                pts.iter().map(|pt| {
-                                    pt_trans.as_dmat4().transform_point3(*pt).as_vec3().into()
-                                }),
-                            )
-                        })
-                        .is_some()
-                    {
-                        intersect_set.insert(g.refno, g.world_aabb);
-                    }
-                });
-                #[cfg(feature = "debug_room")]
-                if !intersect_set.is_empty() {
-                    println!(
-                        "found intersect room panel {}, refnos: {}",
-                        panel_refno,
-                        &intersect_set.iter().map(|x| x.key().to_string()).join(",")
-                    );
-                }
-                for entry in intersect_set.iter() {
-                    let (refno, world_aabb) = (*entry.key(), *entry.value());
-                    merge_member(
-                        &mut within_refnos,
-                        RoomMember {
-                            refno,
-                            // 第二轮进来的必然是部分包含（1–7），沿用第一轮已算好的计数。
-                            inside_count: need_check_refnos
-                                .get(&refno.refno())
-                                .copied()
-                                .unwrap_or(1),
-                            center_dist: center_distance(&geom_inst.world_aabb, &world_aabb),
-                        },
-                    );
-                }
             }
         }
     }
@@ -1489,21 +1504,27 @@ async fn cal_room_refnos_from(
 /// 返回本次写入的成员集合，供同一轮 drain 跳过重复的元素任务（§8 的冲突规则）。
 /// 跳过纯粹是省一次网格加载与点检测：两条分支共用 `room_predicate` 的判定、共用
 /// `{panel}_{element}` 边 id、都是先清后写，因此谁先谁后都收敛到同一个边集。
+///
+/// 全量修复入口，面板几何恒走库内查询（[`ResidentSource`] 恒为 `None`）。
 pub async fn recalc_panel_membership(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
     panel: RefnoEnum,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
-    recalc_panel_membership_inner(db_option, rooms, panel, None, RoomGeometryView::Live).await
+    recalc_panel_membership_inner(db_option, rooms, panel, None, RoomGeometryView::Live, None).await
 }
 
-/// 单件执行路径的整间分支（无写守卫）：几何视图按数据面选（[`consumption_view`]）。
+/// 单件执行路径与启动对比的整间分支（无写守卫）：几何视图按数据面选（[`consumption_view`]）。
+///
+/// `resident` 由调用方给（[`ResidentSource`]）：启动对比递的是它刚装好的那份，单件执行路径
+/// 递 `None`——那条路不在 `lock_spatial_serial` 之内，拿不到合法的换代点。
 pub(crate) async fn recalc_panel_membership_for_consumption(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
     panel: RefnoEnum,
+    resident: ResidentSource<'_>,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
-    recalc_panel_membership_inner(db_option, rooms, panel, None, consumption_view()).await
+    recalc_panel_membership_inner(db_option, rooms, panel, None, consumption_view(), resident).await
 }
 
 async fn query_geom_pts_for_view(
@@ -1547,8 +1568,17 @@ pub(crate) async fn recalc_panel_membership_guarded(
     rooms: &RoomPanelMap,
     panel: RefnoEnum,
     guard: &RoomWriteGuard,
+    resident: ResidentSource<'_>,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
-    recalc_panel_membership_inner(db_option, rooms, panel, Some(guard), consumption_view()).await
+    recalc_panel_membership_inner(
+        db_option,
+        rooms,
+        panel,
+        Some(guard),
+        consumption_view(),
+        resident,
+    )
+    .await
 }
 
 async fn recalc_panel_membership_inner(
@@ -1557,6 +1587,7 @@ async fn recalc_panel_membership_inner(
     panel: RefnoEnum,
     guard: Option<&RoomWriteGuard>,
     view: RoomGeometryView,
+    resident: ResidentSource<'_>,
 ) -> anyhow::Result<HashSet<RefnoEnum>> {
     let Some(room) = rooms.room_of_panel(panel) else {
         // 面板已不在册：房间改名后不再合规、面板被挪出房间、或房间本身没了。
@@ -1594,14 +1625,21 @@ async fn recalc_panel_membership_inner(
     // 没有几何同样是「判不了」，在这里要比全量那一侧更响：整间任务的入队条件是这块
     // 面板的包围盒确实变过，能变就说明它刚才还有几何，此刻却查不到，本身就是信号。
     // 上抛让任务保留重试，而不是写一个空集把这间房清掉。
-    let members =
-        match cal_room_refnos_from(&db_option.get_meshes_path(), panel, &exclude, view).await? {
-            PanelMembers::Computed(members) => members,
-            PanelMembers::NoGeometry => anyhow::bail!(
-                "面板 {panel} 查不到任何几何实例，不改写它的房间归属（任务保留重试）。\
+    let members = match cal_room_refnos_from(
+        &db_option.get_meshes_path(),
+        panel,
+        &exclude,
+        view,
+        resident,
+    )
+    .await?
+    {
+        PanelMembers::Computed(members) => members,
+        PanelMembers::NoGeometry => anyhow::bail!(
+            "面板 {panel} 查不到任何几何实例，不改写它的房间归属（任务保留重试）。\
              它的包围盒刚变过才排的这次重算，此刻却没有几何——先确认结构库是否被清过"
-            ),
-        };
+        ),
+    };
     let new_members: HashSet<RefnoEnum> = members.keys().copied().collect();
     let old_members = existing_members_of_panel(panel)
         .await
@@ -1639,14 +1677,25 @@ pub struct PanelIndex {
     /// 在册、但没能进索引的面板：`query_insts` 没返回行，或世界包围盒不可用。
     missing: Vec<RefnoEnum>,
     view: RoomGeometryView,
+    /// 这一轮的面板侧几何来自哪份常驻模型（`None` = 今天那条库内查询）。
+    ///
+    /// 存在索引里而不是逐次传参，是为了让**两条分支同源**这条既有纪律在类型上兜住：
+    /// 元素分支从索引取候选与网格，整间分支从 `panels.resident()` 取同一份模型
+    /// （`run_room_task`），两边不可能一个走常驻、一个走库内查询。
+    resident: Option<Arc<ResidentRoomModel>>,
 }
 
-/// 一块在册面板的一条实例（同一个 refno 可能有多条 `inst_relate` 行）。
+/// 一块在册面板：库内查询那条路上是**一条** `inst_relate` 行（同一个 refno 可能有多条，
+/// 各占一块）；常驻那条路上是模型里那**一块**面板（同 refno 的多行已在
+/// `ResidentPanel` 里并好，包围盒取并、实例取并）。
 struct PanelEntry {
     panel: RefnoEnum,
     room_num: String,
-    inst: GeomInstQuery,
-    /// 本轮第一次用到这块面板时构建，之后整轮复用（见 [`PanelEntry::meshes`]）。
+    /// 候选相交与 `center_dist` 排序键的基准。
+    world_aabb: Aabb,
+    /// 库内查询那条路上的原始行；常驻那条路上是 `None`（网格从模型的 `MeshCache` 取）。
+    inst: Option<GeomInstQuery>,
+    /// 本轮第一次用到这块面板时构建，之后整轮复用（见 [`PanelIndex::meshes`]）。
     mesh_cache: OnceLock<PanelMeshes>,
 }
 
@@ -1654,51 +1703,82 @@ struct PanelEntry {
 ///
 /// 失败逐条留着而不是当场上抛：调用方要按面板汇总「哪几块判不了」，且这个结果整轮
 /// 复用，同一个失败不该在每个元素任务里各报一次不同的话。
+///
+/// 两条来源在这里合流，下游（整间分支的树查询与点检查、元素分支的相交判定）一行不分岔。
+#[derive(Default)]
 struct PanelMeshes {
-    tri_meshes: Vec<TriMesh>,
+    /// 与 `tri_meshes` 同序：这一片三角网所属那条实例行的世界包围盒。整间分支拿它当树查询
+    /// 范围与 `center_dist` 基准；元素分支只看面板块自己的那一个（[`PanelEntry::world_aabb`]）。
+    world_aabbs: Vec<Aabb>,
+    /// `Arc` 是为了让常驻那条路把 `MeshCache` 里那一份直接递过来，不再逐面板复制。
+    tri_meshes: Vec<Arc<TriMesh>>,
     failures: Vec<String>,
 }
 
 impl PanelMeshes {
-    fn build(inst: &GeomInstQuery, mesh_dir: &Path) -> Self {
-        let mut tri_meshes = Vec::new();
-        let mut failures = Vec::new();
-        for geo in &inst.insts {
-            let file_path = mesh_dir.join(format!("{}.mesh", geo.geo_hash));
-            let mesh = match PlantMesh::des_mesh_file(&file_path) {
-                Ok(mesh) => mesh,
-                Err(error) => {
-                    failures.push(format!("{}: {error}", file_path.display()));
-                    continue;
-                }
-            };
-            let Some(tri_mesh) = mesh.get_tri_mesh_with_flag(
-                (inst.world_trans * geo.transform).compute_matrix(),
-                TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
-            ) else {
-                failures.push(format!("{}: 三角网转换失败", file_path.display()));
-                continue;
-            };
-            tri_meshes.push(tri_mesh);
-        }
-        Self {
-            tri_meshes,
-            failures,
-        }
+    fn pieces(&self) -> impl Iterator<Item = (&Aabb, &Arc<TriMesh>)> {
+        self.world_aabbs.iter().zip(self.tri_meshes.iter())
     }
-}
 
-impl PanelEntry {
-    /// 本块面板的世界坐标三角网，**一轮只构建一次**。
+    /// 今天那条路：库内 `inst_relate` 行，每块面板各读一次 `.mesh` 再三角化。
+    fn from_rows(rows: &[GeomInstQuery], mesh_dir: &Path) -> Self {
+        let mut built = Self::default();
+        for inst in rows {
+            for geo in &inst.insts {
+                let file_path = mesh_dir.join(format!("{}.mesh", geo.geo_hash));
+                let mesh = match PlantMesh::des_mesh_file(&file_path) {
+                    Ok(mesh) => mesh,
+                    Err(error) => {
+                        built
+                            .failures
+                            .push(format!("{}: {error}", file_path.display()));
+                        continue;
+                    }
+                };
+                let Some(tri_mesh) = mesh.get_tri_mesh_with_flag(
+                    (inst.world_trans * geo.transform).compute_matrix(),
+                    TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
+                ) else {
+                    built
+                        .failures
+                        .push(format!("{}: 三角网转换失败", file_path.display()));
+                    continue;
+                };
+                built.world_aabbs.push(inst.world_aabb);
+                built.tri_meshes.push(Arc::new(tri_mesh));
+            }
+        }
+        built
+    }
+
+    /// 常驻那条路：三角网一律经 `MeshCache` 取（键 = `geo_hash` + 世界矩阵位模式，
+    /// `.mesh` 内容寻址不可变，命中即复用、永不陈旧），**这里不许再出现按面板读 `.mesh`**
+    /// ——跨代复用正是 P2-b 的收益，自己再读一次就等于白接（源码钉
+    /// `the_resident_branch_takes_its_tri_meshes_from_the_shared_cache`）。
     ///
-    /// 缓存的理由不是省 CPU 而是省重复：元素侧一页最多几百个任务，它们通常挤在同一间
-    /// 房里，同一块墙板的 `.mesh` 于是被读盘并三角化上百遍。[`PanelIndex`] 此前只把面板
-    /// 的**库内行**整轮复用，网格仍在每个元素任务里现做。
-    ///
-    /// 惰性而非加载时构建：一轮只有两个元素任务时，不该为 147 块在册面板全部读盘。
-    fn meshes(&self, mesh_dir: &Path) -> &PanelMeshes {
-        self.mesh_cache
-            .get_or_init(|| PanelMeshes::build(&self.inst, mesh_dir))
+    /// 失败时不留半份（`panel_tri_meshes` 要么整份成功要么整份失败）：调用方两侧都是
+    /// 「有一条失败就整块面板判不了」，留半份只会让日志更难读。
+    fn from_resident(model: &ResidentRoomModel, panel: RefnoEnum, mesh_dir: &Path) -> Self {
+        let world_aabb = match model.panel(panel) {
+            Some(entry) => entry.world_aabb,
+            None => {
+                return Self {
+                    failures: vec![format!("面板 {panel} 不在常驻模型里（不在册或没有几何）")],
+                    ..Default::default()
+                };
+            }
+        };
+        match model.panel_tri_meshes(panel, mesh_dir) {
+            Ok(tri_meshes) => Self {
+                world_aabbs: vec![world_aabb; tri_meshes.len()],
+                tri_meshes,
+                failures: Vec::new(),
+            },
+            Err(failures) => Self {
+                failures,
+                ..Default::default()
+            },
+        }
     }
 }
 
@@ -1758,11 +1838,53 @@ impl PanelIndex {
         &self.mesh_dir
     }
 
-    fn candidates(&self, element_aabb: &Aabb) -> Vec<&PanelEntry> {
+    /// 这一轮的面板侧几何来自哪份常驻模型。整间分支（`run_room_task` →
+    /// [`recalc_panel_membership_guarded`]）从这里取，与元素分支同源。
+    pub(crate) fn resident(&self) -> ResidentSource<'_> {
+        self.resident.as_deref()
+    }
+
+    fn candidate_slots(&self, element_aabb: &Aabb) -> Vec<usize> {
         intersecting_panel_slots(&self.boxes, element_aabb)
+    }
+
+    fn entry(&self, slot: usize) -> &PanelEntry {
+        &self.entries[slot]
+    }
+
+    fn candidates(&self, element_aabb: &Aabb) -> Vec<&PanelEntry> {
+        self.candidate_slots(element_aabb)
             .into_iter()
-            .map(|slot| &self.entries[slot])
+            .map(|slot| self.entry(slot))
             .collect()
+    }
+
+    /// 一块候选面板的世界坐标三角网，**一轮只构建一次**。
+    ///
+    /// 缓存的理由不是省 CPU 而是省重复：元素侧一页最多几百个任务，它们通常挤在同一间
+    /// 房里，同一块墙板的 `.mesh` 于是被读盘并三角化上百遍。[`PanelIndex`] 此前只把面板
+    /// 的**库内行**整轮复用，网格仍在每个元素任务里现做。
+    ///
+    /// 惰性而非加载时构建：一轮只有两个元素任务时，不该为 147 块在册面板全部读盘。开关开着
+    /// 时这一层退化成「跨代缓存的一层薄包装」——真正的三角网在 `MeshCache` 里，换代不掉。
+    fn meshes<'a>(&'a self, entry: &'a PanelEntry) -> &'a PanelMeshes {
+        entry.mesh_cache.get_or_init(|| {
+            match (self.resident.as_deref(), entry.inst.as_ref()) {
+                (Some(model), _) => PanelMeshes::from_resident(model, entry.panel, &self.mesh_dir),
+                (None, Some(inst)) => {
+                    PanelMeshes::from_rows(std::slice::from_ref(inst), &self.mesh_dir)
+                }
+                // 构造函数只产这两种形状；真出现第三种，按「判不了」处置而不是当成空网格
+                // ——空网格会让这块面板对每个构件都答「不在里面」，先清后写就把边抹了。
+                (None, None) => PanelMeshes {
+                    failures: vec![format!(
+                        "面板 {} 既没有库内实例行也没有常驻模型",
+                        entry.panel
+                    )],
+                    ..Default::default()
+                },
+            }
+        })
     }
 
     /// 与构件世界包围盒相交的在册候选面板 refno 集合。
@@ -1783,29 +1905,38 @@ impl PanelIndex {
 ///
 /// 与 [`load_room_panel_map`] 同一个理由：每个元素任务各查一遍，一轮几十个任务就会被
 /// 它拖垮。
+/// 全量重建那条路：面板几何恒从库内查询取（[`ResidentSource`] 恒为 `None`）。
+///
+/// 它是显式修复入口——常驻模型不可信、或压根没建起来时，正是靠它重算出正确的边。接上常驻
+/// 就没有退路了，所以这里在**类型层面**不接受模型，而不是靠一句「记得别传」。
 pub async fn load_panel_index(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
 ) -> anyhow::Result<PanelIndex> {
-    load_panel_index_from(db_option, rooms, RoomGeometryView::Live).await
+    load_panel_index_from(db_option, rooms, RoomGeometryView::Live, None).await
 }
 
-/// 房间队列消费用的在册面板索引：几何视图按数据面选（[`consumption_view`]）。
+/// 房间队列消费用的在册面板索引：几何视图按数据面选（[`consumption_view`]），面板侧几何
+/// 由调用方决定从哪来（[`ResidentSource`]）——`drain_rooms_selected` 在串行锁下换代之后把
+/// 那一份递进来，单件执行路径递 `None`。
 pub(crate) async fn load_consumption_panel_index(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
+    resident: Option<Arc<ResidentRoomModel>>,
 ) -> anyhow::Result<PanelIndex> {
-    load_panel_index_from(db_option, rooms, consumption_view()).await
+    load_panel_index_from(db_option, rooms, consumption_view(), resident).await
 }
 
 async fn load_panel_index_from(
     db_option: &DbOption,
     rooms: &RoomPanelMap,
     view: RoomGeometryView,
+    resident: Option<Arc<ResidentRoomModel>>,
 ) -> anyhow::Result<PanelIndex> {
     let mut index = PanelIndex {
         mesh_dir: db_option.get_meshes_path(),
         view,
+        resident,
         ..Default::default()
     };
     let registered: Vec<RefnoEnum> = rooms
@@ -1817,10 +1948,26 @@ async fn load_panel_index_from(
     if registered.is_empty() {
         return Ok(index);
     }
+    // 开关开着：面板行已经在模型里，一次库都不用查。索引的对外形状（`missing_panels` 的
+    // 口径与顺序、`candidate_panel_refnos` 的相交答案、`usable_panels`）与今天逐字一致。
+    if let Some(model) = index.resident.clone() {
+        fill_panel_index_from_resident(&mut index, rooms, &registered, &model);
+        return Ok(index);
+    }
     let insts: Vec<GeomInstQuery> = query_room_insts(view, &registered).await.map_err(|error| {
         anyhow::anyhow!("查询 {} 块在册面板的实例失败: {error}", registered.len())
     })?;
+    fill_panel_index_from_rows(&mut index, rooms, &registered, insts);
+    Ok(index)
+}
 
+/// 今天那条路：一块面板一行 `inst_relate` 一个索引块。
+fn fill_panel_index_from_rows(
+    index: &mut PanelIndex,
+    rooms: &RoomPanelMap,
+    registered: &[RefnoEnum],
+    insts: Vec<GeomInstQuery>,
+) {
     let mut indexed: HashSet<RefnoEnum> = HashSet::new();
     let mut invalid: HashSet<RefnoEnum> = HashSet::new();
     for inst in insts {
@@ -1836,17 +1983,57 @@ async fn load_panel_index_from(
         index.entries.push(PanelEntry {
             panel: inst.refno,
             room_num: room_num.to_string(),
-            inst,
+            world_aabb: inst.world_aabb,
+            inst: Some(inst),
             mesh_cache: OnceLock::new(),
         });
     }
     // 在册却没进索引的：查不到实例，或包围盒不可用。顺序固定，日志才对得上。
     index.missing = registered
-        .into_iter()
+        .iter()
+        .copied()
         .filter(|panel| !indexed.contains(panel) || invalid.contains(panel))
         .collect();
     index.missing.sort_by_key(RefnoEnum::to_string);
-    Ok(index)
+}
+
+/// 常驻那条路：一块在册面板一个索引块（同 refno 的多行模型里已并好）。
+///
+/// `missing` 的口径与今天同一句话——「一条几何行都没拿到，或世界包围盒不可用」：模型
+/// `assemble` 时就是按这两条把面板挡在 `panels` 之外的，所以「不在 `model.panels` 里」
+/// 与今天那个 `!indexed || invalid` 是同一个集合，排序也照旧按 `to_string`。
+///
+/// 有一处**故意更严**：一块面板若一行可用、另一行包围盒不可用，今天会既进索引又进 `missing`
+/// （拿半份几何当候选，同时又保护它的存量边）；常驻侧那块面板整块不进 `panels`，于是只进
+/// `missing`。判不了就不写，宁可这一轮不算它，也不拿半份几何去先清后写（原则 2）。
+fn fill_panel_index_from_resident(
+    index: &mut PanelIndex,
+    rooms: &RoomPanelMap,
+    registered: &[RefnoEnum],
+    model: &ResidentRoomModel,
+) {
+    for panel in registered {
+        let Some(room_num) = rooms.room_num_of(*panel) else {
+            continue;
+        };
+        let Some(entry) = model.panel(*panel) else {
+            continue;
+        };
+        index.boxes.push(entry.world_aabb);
+        index.entries.push(PanelEntry {
+            panel: *panel,
+            room_num: room_num.to_string(),
+            world_aabb: entry.world_aabb,
+            inst: None,
+            mesh_cache: OnceLock::new(),
+        });
+    }
+    index.missing = registered
+        .iter()
+        .copied()
+        .filter(|panel| model.panel(*panel).is_none())
+        .collect();
+    index.missing.sort_by_key(RefnoEnum::to_string);
 }
 
 /// 一轮 drain 复用的构件现存归属快照：整页元素的 `room_relate` 入边，一条 SELECT 查完。
@@ -2011,7 +2198,7 @@ fn merge_element_edge(
     let member = RoomMember {
         refno: element,
         inside_count,
-        center_dist: center_distance(&candidate.inst.world_aabb, element_aabb),
+        center_dist: center_distance(&candidate.world_aabb, element_aabb),
     };
     edges
         .entry(candidate.panel)
@@ -2041,6 +2228,76 @@ pub(crate) async fn recalc_element_membership_guarded(
     guard: &RoomWriteGuard,
 ) -> anyhow::Result<()> {
     recalc_element_membership_inner(rooms, panels, history, element, Some(guard)).await
+}
+
+/// 元素分支第一轮的产物（纯函数 [`element_first_pass`] 的返回值）。
+struct ElementFirstPass {
+    /// 本次算出的边，按面板收敛（同一块面板的多片网格只留归属更强的那次）。
+    edges: HashMap<RefnoEnum, ElementRoomEdge>,
+    /// 网格读不出来 / 没有可用网格的候选面板：判不了，调用方据此整块收手。
+    undecidable_panels: BTreeSet<String>,
+    /// 第二轮逐点兜底的待办：(构件实例下标, 候选面板槽位, 网格下标, 第一轮顶点计数)。
+    pending_point_checks: Vec<(usize, usize, usize, u8)>,
+}
+
+/// 元素分支第一轮：拿在册面板索引与该构件的实例行，算出边、判不了的面板与待兜底的对。
+///
+/// 抽成纯函数有两个用处：一是这一段本来就不碰库（元素分支与空间树解耦，见 [`PanelIndex`]），
+/// 二是常驻模型两态的**逐边对拍**押在它身上——同一份 `mem://` 夹具建两份索引（开关关 =
+/// 库内查询，开关开 = 常驻模型），把这里的产物渲染成 `room_relate` 语句逐字比。
+fn element_first_pass(
+    panels: &PanelIndex,
+    element: RefnoEnum,
+    element_insts: &[GeomInstQuery],
+) -> ElementFirstPass {
+    let mut pass = ElementFirstPass {
+        edges: HashMap::new(),
+        undecidable_panels: BTreeSet::new(),
+        pending_point_checks: Vec::new(),
+    };
+    // 每条构件实例独立取候选、独立判定，最后按 panel union/stronger。不能把相隔很远的
+    // 实例先包成一个总 AABB，否则中间区域的面板会被误命中；也不能只取 `.next()`，否则
+    // 第二条及以后的实例归属会永久丢失。
+    for (element_slot, element_inst) in element_insts.iter().enumerate() {
+        let element_aabb = &element_inst.world_aabb;
+        for panel_slot in panels.candidate_slots(element_aabb) {
+            let candidate = panels.entry(panel_slot);
+            let meshes = panels.meshes(candidate);
+            for (mesh_slot, tri_mesh) in meshes.tri_meshes.iter().enumerate() {
+                let Some((verdict, inside_count)) = membership_by_aabb(tri_mesh, element_aabb)
+                else {
+                    continue;
+                };
+                match verdict {
+                    AabbVerdict::Inside => merge_element_edge(
+                        &mut pass.edges,
+                        candidate,
+                        element,
+                        element_aabb,
+                        inside_count,
+                    ),
+                    AabbVerdict::Outside => {}
+                    AabbVerdict::NeedsPointCheck => pass.pending_point_checks.push((
+                        element_slot,
+                        panel_slot,
+                        mesh_slot,
+                        inside_count,
+                    )),
+                }
+            }
+            if !meshes.failures.is_empty() {
+                pass.undecidable_panels.insert(format!(
+                    "{}({})",
+                    candidate.panel,
+                    meshes.failures.join("; ")
+                ));
+            } else if meshes.tri_meshes.is_empty() {
+                pass.undecidable_panels
+                    .insert(format!("{}(没有可用网格)", candidate.panel));
+            }
+        }
+    }
+    pass
 }
 
 async fn recalc_element_membership_inner(
@@ -2099,55 +2356,11 @@ async fn recalc_element_membership_inner(
     }
 
     let mesh_dir = panels.mesh_dir();
-    let mut edges: HashMap<RefnoEnum, ElementRoomEdge> = HashMap::new();
-    // 候选面板的网格读不出来时不能把「判不了」当「不在里面」：本函数是先删该构件
-    // 全部入边再写回，静默跳过一块面板等于悄悄退掉该构件在这块面板的归属。
-    // 任一网格失败或面板没有可用网格都中止写入并保留任务重试。
-    let mut undecidable_panels: BTreeSet<String> = BTreeSet::new();
-    // 第二轮逐点兜底的待办：(构件实例下标, 候选面板实例, 网格下标, 第一轮顶点计数)。
-    let mut pending_point_checks: Vec<(usize, &PanelEntry, usize, u8)> = Vec::new();
-
-    // 每条构件实例独立取候选、独立判定，最后按 panel union/stronger。不能把相隔很远的
-    // 实例先包成一个总 AABB，否则中间区域的面板会被误命中；也不能只取 `.next()`，否则
-    // 第二条及以后的实例归属会永久丢失。
-    for (element_slot, element_inst) in element_insts.iter().enumerate() {
-        let element_aabb = &element_inst.world_aabb;
-        let candidates = panels.candidates(element_aabb);
-        for candidate in candidates {
-            let meshes = candidate.meshes(mesh_dir);
-            for (mesh_slot, tri_mesh) in meshes.tri_meshes.iter().enumerate() {
-                let Some((verdict, inside_count)) = membership_by_aabb(tri_mesh, element_aabb)
-                else {
-                    continue;
-                };
-                match verdict {
-                    AabbVerdict::Inside => merge_element_edge(
-                        &mut edges,
-                        candidate,
-                        element,
-                        element_aabb,
-                        inside_count,
-                    ),
-                    AabbVerdict::Outside => {}
-                    AabbVerdict::NeedsPointCheck => pending_point_checks.push((
-                        element_slot,
-                        candidate,
-                        mesh_slot,
-                        inside_count,
-                    )),
-                }
-            }
-            if !meshes.failures.is_empty() {
-                undecidable_panels.insert(format!(
-                    "{}({})",
-                    candidate.panel,
-                    meshes.failures.join("; ")
-                ));
-            } else if meshes.tri_meshes.is_empty() {
-                undecidable_panels.insert(format!("{}(没有可用网格)", candidate.panel));
-            }
-        }
-    }
+    let ElementFirstPass {
+        mut edges,
+        undecidable_panels,
+        pending_point_checks,
+    } = element_first_pass(panels, element, &element_insts);
 
     // 判不了就在这里收手：本次不写、任务保留重试。排在第二轮之前，是因为这一轮的结果
     // 无论如何都不会落库，没必要再为它取一次几何点。
@@ -2165,10 +2378,11 @@ async fn recalc_element_membership_inner(
         let world_points = element_world_points(element, panels.view, mesh_dir)
             .await
             .map_err(|error| anyhow::anyhow!("构件 {element} 的几何点: {error:#}"))?;
-        for (element_slot, candidate, mesh_slot, inside_count) in pending_point_checks {
+        for (element_slot, panel_slot, mesh_slot, inside_count) in pending_point_checks {
             let element_aabb = &element_insts[element_slot].world_aabb;
-            let tri_mesh = &candidate.meshes(mesh_dir).tri_meshes[mesh_slot];
-            if element_in_panel(tri_mesh, element_aabb, || {
+            let candidate = panels.entry(panel_slot);
+            let tri_mesh = panels.meshes(candidate).tri_meshes[mesh_slot].clone();
+            if element_in_panel(&tri_mesh, element_aabb, || {
                 world_points
                     .iter()
                     .filter(|row| same_world_aabb(&row.world_aabb, element_aabb))
@@ -2480,6 +2694,24 @@ pub(crate) async fn existing_members_of_panel(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 生产段（`#[cfg(test)]` 之前）的源码，行尾已归一成 `\n`。
+    ///
+    /// 归一这一步不是洁癖：`core.autocrlf = true` 下这份文件在工作树里是 CRLF，而下面几条钉
+    /// 用的模式串按 `\n` 写。不归一就整片落空，钉会以「模式串找不到」齐红——看起来像生产代码
+    /// 退了，其实只是行尾变了，而 `git diff` 因为 autocrlf 什么都不显示（同一条纪律见
+    /// `room_startup.rs::production_source`）。
+    fn production_source() -> &'static str {
+        static SOURCE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+            let normalized = include_str!("room_model.rs").replace("\r\n", "\n");
+            normalized
+                .split_once("#[cfg(test)]\nmod tests {")
+                .expect("tests follow production code")
+                .0
+                .to_string()
+        });
+        &SOURCE
+    }
 
     /// 无 project 特性构建（CI 单测组合 `ws,gen_model,manifold`，两个 project 特性
     /// 皆未开）下，房间子系统入口必须**响亮拒绝**——不发明命名规则与 FRMW/SBFR
@@ -3335,12 +3567,15 @@ mod tests {
         assert!(bail_at < write_at, "{panel_branch}");
     }
 
-    /// 元素分支的函数体，供下面几条源码断言共用。
+    /// 元素分支的代码，供下面几条源码断言共用。
+    ///
+    /// 从第一轮那个纯函数（[`element_first_pass`]）起算：P2-b 把候选循环抽了出去，两段合起来
+    /// 才是「元素分支」，钉的范围必须跟着走，否则约束只剩下半截还在看。
     fn element_branch_source() -> &'static str {
-        let source = include_str!("room_model.rs");
+        let source = production_source();
         source
-            .split_once("async fn recalc_element_membership_inner(")
-            .expect("recalc_element_membership 必须存在")
+            .split_once("fn element_first_pass(")
+            .expect("元素分支第一轮必须存在")
             .1
             .split_once("\n/// 构件在世界坐标系下的实际几何点")
             .expect("元素分支之后是 element_world_points")
@@ -3361,7 +3596,7 @@ mod tests {
             "元素分支的候选必须来自 PanelIndex，不能回到空间树: {body}"
         );
         assert!(
-            body.contains("panels.candidates(element_aabb)"),
+            body.contains("panels.candidate_slots(element_aabb)"),
             "候选必须走本轮加载的在册面板索引: {body}"
         );
     }
@@ -3381,8 +3616,8 @@ mod tests {
             "候选面板的三角网必须走 PanelIndex 的整轮缓存: {body}"
         );
         assert!(
-            body.contains("candidate.meshes(mesh_dir)"),
-            "网格必须从候选块上取: {body}"
+            body.contains("panels.meshes(candidate)"),
+            "网格必须从本轮那份索引上取（开关开着时它背后是常驻模型的 MeshCache）: {body}"
         );
     }
 
@@ -3674,5 +3909,515 @@ mod tests {
             vec!["room_panel_relate:old_topology".to_string()]
         );
         window.drop_database().await.expect("cleanup");
+    }
+
+    // -----------------------------------------------------------------------
+    // 常驻房间模型 P2-b：几何侧接常驻模型的源码钉与 `mem://` 两态门。
+    // -----------------------------------------------------------------------
+
+    /// 全量修复入口不许被常驻模型接管，本文件也不许自己判开关。
+    ///
+    /// 全量是「常驻模型不可信时用来重算出正确边」的那条退路：它一旦也读常驻，坏掉的模型
+    /// 就再没有别的东西能纠正它。开关判定同理——本文件多一处 `room_resident_model()`，
+    /// 就多一个能和换代点漂开的判定；模型只以参数进出（[`ResidentSource`]）。
+    ///
+    /// 「不许摸进程单例 / 不许点名形态」由 `room_resident.rs` 的
+    /// `membership_paths_only_take_the_model_through_for_membership` 钉着，这里不重复
+    /// ——那道钉扫的是本文件的源码文本，在这里写同样的字面量会把它自己钉红。
+    #[test]
+    fn the_full_rebuild_entry_never_takes_the_resident_model() {
+        let source = production_source();
+        for (head, tail) in [
+            ("pub async fn load_panel_index(", "\n}\n"),
+            ("pub async fn cal_room_refnos(", "\n}\n"),
+            ("pub async fn recalc_panel_membership(", "\n}\n"),
+        ] {
+            let body = source
+                .split_once(head)
+                .unwrap_or_else(|| panic!("{head} 必须存在"))
+                .1
+                .split_once(tail)
+                .expect("函数体必须闭合")
+                .0;
+            assert!(
+                body.contains("None"),
+                "{head} 是显式修复入口，面板几何必须恒走库内查询: {body}"
+            );
+        }
+        let code = source
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !code.contains("room_resident_model()"),
+            "开关只在换代点判一次（model_update_pending::ensure_resident_rooms），本文件不判"
+        );
+    }
+
+    /// 开关关着时几何侧走的仍是今天那条查询，一字不动。
+    #[test]
+    fn the_geometry_side_falls_back_to_todays_query_without_a_model() {
+        let source = production_source();
+        let index = source
+            .split_once("async fn load_panel_index_from(")
+            .expect("在册面板索引入口必须存在")
+            .1
+            .split_once("\n/// 今天那条路")
+            .expect("索引入口之后是两条填充路径")
+            .0;
+        assert!(
+            index.contains("query_room_insts(view, &registered)")
+                && index
+                    .contains("fill_panel_index_from_rows(&mut index, rooms, &registered, insts)"),
+            "没有常驻模型时必须照旧查库再按行填索引: {index}"
+        );
+        let resident_at = index
+            .find("fill_panel_index_from_resident(")
+            .expect("开着时走常驻那条填充");
+        let query_at = index
+            .find("query_room_insts(view, &registered)")
+            .expect("关着时走库内查询");
+        assert!(
+            resident_at < query_at,
+            "开着时必须在查库之前就早退，不能白查一遍: {index}"
+        );
+
+        let panel_branch = source
+            .split_once("async fn cal_room_refnos_from(")
+            .expect("整间分支必须存在")
+            .1
+            .split_once("\n/// 整间分支：一块面板动了")
+            .expect("整间分支之后是 recalc_panel_membership")
+            .0;
+        assert!(
+            panel_branch.contains("query_room_insts(view, &[panel_refno])")
+                && panel_branch.contains("PanelMeshes::from_rows(&geom_insts, mesh_dir)"),
+            "关着时整间分支照旧各查一次面板实例: {panel_branch}"
+        );
+    }
+
+    /// 常驻分支的三角网只许经 `MeshCache`，不许自己再按面板读一次 `.mesh`。
+    ///
+    /// 跨代复用是 P2-b 的收益本身：`.mesh` 内容寻址不可变，键里带了世界矩阵，命中即复用、
+    /// 永不陈旧。这里一旦长回 `des_mesh_file`，接线还在、收益归零，而且不会有任何测试变红
+    /// ——只会让房间轮悄悄慢回去。
+    #[test]
+    fn the_resident_branch_takes_its_tri_meshes_from_the_shared_cache() {
+        let source = production_source();
+        let body = source
+            .split_once("fn from_resident(model: &ResidentRoomModel, panel: RefnoEnum, mesh_dir: &Path) -> Self {")
+            .expect("常驻分支的网格构造必须存在")
+            .1
+            .split_once("\n    }\n")
+            .expect("函数体必须闭合")
+            .0;
+        assert!(
+            body.contains("model.panel_tri_meshes(panel, mesh_dir)"),
+            "常驻分支的三角网必须经 MeshCache 取: {body}"
+        );
+        assert!(
+            !body.contains("des_mesh_file") && !body.contains("get_tri_mesh_with_flag"),
+            "常驻分支不许再按面板各读一次 .mesh: {body}"
+        );
+    }
+
+    fn rm(seq: u32) -> RefnoEnum {
+        RefnoEnum::from(RefU64::from_two_nums(24384, seq))
+    }
+
+    /// 常驻模型的 `missing_panels` 自称「与 `PanelIndex::missing_panels` 同口径、同序」。
+    /// 这句话对**一块面板一行**（真库里的常态）与**整块都不可用**都成立，`mem://` 门里
+    /// 一并钉了；只有**半份几何**那一种不成立，而不成立的方向是常驻**更严**：
+    ///
+    /// 今天：一行可用、一行包围盒坏，这块面板既进索引（拿半份几何去筛候选、去先清后写），
+    /// 又进 `missing`（保护它的存量边）——两件互相矛盾的事同时做了。
+    /// 常驻：整块不进 `panels`，于是只进 `missing`，这一轮不算它。
+    ///
+    /// 取保守那边（宁可多算一次、不可少算）：坏行的存在本身说明这块面板的几何不可信，拿
+    /// 剩下半份去算成员，算出来的边一样是错的，而错的边会被当成算成功写下去。代价是这块
+    /// 面板要等下一轮几何修好才重算；今天那条路的行为一字未动，只有开关开着才更严。
+    #[test]
+    fn the_resident_missing_criteria_is_the_index_criteria_except_it_is_stricter_on_half_geometry()
+    {
+        use crate::fast_model::room_resident::{
+            MeshCache, ResidentForm, ResidentManifest, ResidentRoomModel,
+        };
+        use aios_core::ModelHashInst;
+
+        let map = RoomPanelMap {
+            rooms: vec![RoomPanels {
+                room: rm(1),
+                room_num: "R301".into(),
+                panels: vec![rm(7), rm(8), rm(9)],
+            }],
+            all_panels: [rm(7), rm(8), rm(9)].into_iter().collect(),
+        };
+        // 7 = 一行好一行坏（半份几何）、8 = 一条行都没有、9 = 唯一那行坏。
+        let rows = || {
+            [
+                (rm(7), 0.0f32),
+                (rm(7), f32::INFINITY),
+                (rm(9), f32::INFINITY),
+            ]
+            .into_iter()
+            .map(|(panel, span)| GeomInstQuery {
+                refno: panel,
+                old_refno: None,
+                owner: rm(1),
+                world_aabb: Aabb::new(Point::origin(), Point::new(span, 1.0, 1.0)),
+                world_trans: Default::default(),
+                insts: vec![ModelHashInst {
+                    geo_hash: "mesh-a".into(),
+                    ..Default::default()
+                }],
+                has_neg: false,
+                generic: "PANE".into(),
+                pts: None,
+                date: None,
+            })
+            .collect::<Vec<_>>()
+        };
+
+        let mut today = PanelIndex::default();
+        fill_panel_index_from_rows(&mut today, &map, &[rm(7), rm(8), rm(9)], rows());
+        assert_eq!(today.missing_panels(), [rm(7), rm(8), rm(9)]);
+        assert_eq!(
+            today.usable_panels(),
+            1,
+            "今天：半份几何的 7 既进索引又进 missing"
+        );
+
+        let model = ResidentRoomModel::assemble(
+            ResidentManifest {
+                form: ResidentForm::Published,
+                key: "k".into(),
+            },
+            Vec::new(),
+            map.clone(),
+            rows(),
+            Arc::<MeshCache>::default(),
+        );
+        assert_eq!(
+            model.missing_panels, today.missing,
+            "判不了的集合与顺序两边一致"
+        );
+        assert!(
+            model.panel(rm(7)).is_none(),
+            "常驻更严：半份几何的面板整块不参与这一轮"
+        );
+
+        let mut resident_index = PanelIndex {
+            resident: Some(Arc::new(model)),
+            ..Default::default()
+        };
+        let model = resident_index.resident.clone().unwrap();
+        fill_panel_index_from_resident(&mut resident_index, &map, &[rm(7), rm(8), rm(9)], &model);
+        assert_eq!(resident_index.missing_panels(), today.missing_panels());
+        assert_eq!(resident_index.usable_panels(), 0, "这是唯一的口径差");
+    }
+
+    /// `mem://` 两态门（P2 验收）：同一份夹具、同一批任务，开关**关**（面板几何来自
+    /// `query_published_room_insts`）与开关**开**（来自常驻模型）算出的 `room_relate`
+    /// 写入语句**逐字相同**——边 id、目标、`room_num`、`inside_count`、`center_dist` 全在里面。
+    ///
+    /// 接缝选的是**显式参数**而不是环境变量：`room_resident_model()` 读的是进程级
+    /// `OnceLock`，同一个测试进程里翻不了两次；而生产侧的开关本来就只在换代点判一次
+    /// （`ensure_resident_rooms`），几何侧收到的一律是「用不用这份模型」这个参数
+    /// （[`ResidentSource`]）。于是这道门喂的正是生产走的那两条分支，没有为测试另开的路。
+    ///
+    /// **范围**：面板侧几何（索引、候选、三角网、整间分支的输入）。拓扑两态同源已由 P2-a
+    /// 的钉守着（`model.map` 与 `load_room_panel_map` 都出自 `registered_map`），这里直接
+    /// 用同一份 `RoomPanelMap`。写库那一段（`SUL_DB` / `GLOBAL_AABB_TREE` 两个进程级单例）
+    /// 不在 `mem://` 能喂的范围里，所以门比到**渲染出来的语句**为止，不落库。
+    #[tokio::test]
+    async fn the_two_faces_render_the_same_room_edges_on_a_mem_fixture() {
+        use crate::data_interface::side_effect_pending::PublishedFileInput;
+        use crate::fast_model::room_fixture::box_mesh_for_test;
+        use crate::fast_model::room_publication::{
+            query_published_room_insts_on, render_stage_published_room_input,
+        };
+        use crate::fast_model::room_resident::{self, MeshCache};
+        use crate::fast_model::room_topology::{
+            RoomGroup, RoomHierarchy, published_topology_manifest_key,
+        };
+        use glam::Vec3;
+        use surrealdb::engine::any::connect;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mesh_dir = dir.path().to_path_buf();
+        for (name, min, max) in [
+            ("panel7", Vec3::ZERO, Vec3::splat(1000.0)),
+            (
+                "panel9",
+                Vec3::new(2000.0, 0.0, 0.0),
+                Vec3::new(3000.0, 1000.0, 1000.0),
+            ),
+        ] {
+            box_mesh_for_test(min, max)
+                .ser_to_file(&mesh_dir.join(format!("{name}.mesh")))
+                .expect("write fixture mesh");
+        }
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("room_model").use_db("two_faces").await.unwrap();
+        // 一间房两块面板（7 有几何、8 在册无几何），另一间房两块（9 有几何、10 的包围盒
+        // 溢出成 inf 不可用）；三个构件：20 完全落在 7 里、21 谁都不沾、22 跨 7 的边界
+        // （第二轮逐点兜底的待办）。
+        let mut statements = vec![
+            "CREATE published_file_input:8000 SET dbnum = 8000, commit_token = 'token-a';"
+                .to_string(),
+        ];
+        for (seq, generic, mesh, mins, maxs) in [
+            (
+                7u32,
+                "PANE",
+                Some("panel7"),
+                (0.0, 0.0, 0.0),
+                (1000.0, 1000.0, 1000.0),
+            ),
+            (
+                9,
+                "PANE",
+                Some("panel9"),
+                (2000.0, 0.0, 0.0),
+                (3000.0, 1000.0, 1000.0),
+            ),
+            (
+                10,
+                "PANE",
+                Some("panel9"),
+                (-3.0e38, 0.0, 0.0),
+                (3.0e38, 1000.0, 1000.0),
+            ),
+            (
+                20,
+                "BOX",
+                None,
+                (400.0, 400.0, 400.0),
+                (600.0, 600.0, 600.0),
+            ),
+            (
+                21,
+                "BOX",
+                None,
+                (5000.0, 5000.0, 5000.0),
+                (5100.0, 5100.0, 5100.0),
+            ),
+            (
+                22,
+                "BOX",
+                None,
+                (900.0, 400.0, 400.0),
+                (1100.0, 600.0, 600.0),
+            ),
+        ] {
+            let geo_hash = mesh.unwrap_or("box");
+            statements.push(format!(
+                "CREATE pe:24384_{seq} SET noun = '{generic}', owner = pe:24384_1;"
+            ));
+            statements.push(format!(
+                "CREATE inst_relate:24384_{seq} SET dbnum = 8000, in = pe:24384_{seq}, \
+                 generic = '{generic}', \
+                 aabb_d = {{ mins: [{}f, {}f, {}f], maxs: [{}f, {}f, {}f] }}, \
+                 world_trans_d = {{ translation: [0f, 0f, 0f], rotation: [0f, 0f, 0f, 1f], \
+                   scale: [1f, 1f, 1f] }}, \
+                 insts_flat = [{{ geo_hash: '{geo_hash}' }}], booled_id = NONE;",
+                mins.0, mins.1, mins.2, maxs.0, maxs.1, maxs.2
+            ));
+        }
+        db.query(statements.join(" "))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let inputs = vec![PublishedFileInput {
+            dbnum: 8000,
+            db_type: "DESI".into(),
+            end_sesno: 5,
+            commit_token: "token-a".into(),
+            published_version: 1,
+        }];
+        let groups = vec![
+            RoomGroup {
+                room: rm(1),
+                name: "/1RX-RM03-R301".into(),
+                panels: vec![rm(7), rm(8)],
+            },
+            RoomGroup {
+                room: rm(2),
+                name: "/1RX-RM03-R302".into(),
+                panels: vec![rm(9), rm(10)],
+            },
+        ];
+        let manifest_key = published_topology_manifest_key(&inputs, RoomHierarchy::Hd);
+        db.query(format!(
+            "CREATE room_published_topology:a SET manifest_key = '{manifest_key}', \
+             dbnum = 8000, groups = {}; BEGIN TRANSACTION; {} COMMIT TRANSACTION;",
+            serde_json::to_string(&groups).unwrap(),
+            render_stage_published_room_input(8000, "token-a"),
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let keywords = vec!["-RM".to_string()];
+        let meshes: Arc<MeshCache> = Arc::default();
+        let model = Arc::new(
+            room_resident::load_published_on(
+                &db,
+                &inputs,
+                RoomHierarchy::Hd,
+                &keywords,
+                match_room_name_hd,
+                meshes.clone(),
+            )
+            .await
+            .expect("常驻模型建得起来"),
+        );
+
+        let rooms = model.map.clone();
+        let registered = room_resident::registered_panels(&rooms);
+        assert_eq!(registered, vec![rm(7), rm(8), rm(9), rm(10)]);
+        let rows = query_published_room_insts_on(&db, &registered)
+            .await
+            .expect("今天那条路读在册面板");
+
+        let mut off = PanelIndex {
+            mesh_dir: mesh_dir.clone(),
+            view: RoomGeometryView::Published,
+            ..Default::default()
+        };
+        fill_panel_index_from_rows(&mut off, &rooms, &registered, rows);
+        let mut on = PanelIndex {
+            mesh_dir: mesh_dir.clone(),
+            view: RoomGeometryView::Published,
+            resident: Some(model.clone()),
+            ..Default::default()
+        };
+        fill_panel_index_from_resident(&mut on, &rooms, &registered, &model);
+
+        // ① 索引的对外形状：判不了的面板集合与顺序、可用面板数、候选相交答案。
+        // 顺序是 `to_string` 序而不是在册序，所以 10 排在 8 前面——两条填充路径都得这么排。
+        assert_eq!(
+            off.missing_panels(),
+            [rm(10), rm(8)],
+            "没拿到行的 8 与包围盒不可用的 10 都要露出来"
+        );
+        assert_eq!(off.missing_panels(), on.missing_panels());
+        assert_eq!(
+            off.missing_panels(),
+            model.missing_panels.as_slice(),
+            "常驻模型自称与 PanelIndex::missing_panels 同口径同序，这里就是那句话的门"
+        );
+        assert_eq!(off.usable_panels(), 2);
+        assert_eq!(off.usable_panels(), on.usable_panels());
+        for probe in [
+            Aabb::new(
+                Point::new(400.0, 400.0, 400.0),
+                Point::new(600.0, 600.0, 600.0),
+            ),
+            Aabb::new(
+                Point::new(2400.0, 400.0, 400.0),
+                Point::new(2600.0, 600.0, 600.0),
+            ),
+            Aabb::new(
+                Point::new(5000.0, 5000.0, 5000.0),
+                Point::new(5100.0, 5100.0, 5100.0),
+            ),
+        ] {
+            assert_eq!(
+                off.candidate_panel_refnos(&probe),
+                on.candidate_panel_refnos(&probe),
+                "候选相交答案两态必须一致"
+            );
+        }
+
+        // ② 整间分支喂进判定的东西：世界包围盒与三角网逐字相同。
+        for panel in [rm(7), rm(9)] {
+            let panel_rows = query_published_room_insts_on(&db, &[panel])
+                .await
+                .expect("面板实例");
+            let today = PanelMeshes::from_rows(&panel_rows, &mesh_dir);
+            let resident = PanelMeshes::from_resident(&model, panel, &mesh_dir);
+            assert!(today.failures.is_empty() && resident.failures.is_empty());
+            assert_eq!(today.world_aabbs, resident.world_aabbs, "{panel}");
+            assert_eq!(today.tri_meshes.len(), resident.tri_meshes.len());
+            for (a, b) in today.tri_meshes.iter().zip(&resident.tri_meshes) {
+                assert_eq!(a.vertices(), b.vertices(), "{panel}");
+                assert_eq!(a.indices(), b.indices(), "{panel}");
+            }
+        }
+
+        // ③ 逐边对拍：元素分支第一轮的产物渲染成 `room_relate` 语句，两态逐字相同。
+        let mut shape = Vec::new();
+        for element in [rm(20), rm(21), rm(22)] {
+            let element_insts = query_published_room_insts_on(&db, &[element])
+                .await
+                .expect("构件实例");
+            assert_eq!(element_insts.len(), 1, "{element}");
+            let mut rendered = Vec::new();
+            let mut pending = Vec::new();
+            for index in [&off, &on] {
+                let pass = element_first_pass(index, element, &element_insts);
+                assert!(pass.undecidable_panels.is_empty(), "{element}");
+                pending.push(
+                    pass.pending_point_checks
+                        .iter()
+                        .map(|(slot, panel_slot, mesh_slot, inside)| {
+                            (*slot, index.entry(*panel_slot).panel, *mesh_slot, *inside)
+                        })
+                        .collect::<Vec<_>>(),
+                );
+                let edges: Vec<ElementRoomEdge> = pass.edges.into_values().collect();
+                rendered.push(render_element_relate_write(
+                    element,
+                    &edges,
+                    index.missing_panels(),
+                ));
+            }
+            assert_eq!(
+                rendered[0], rendered[1],
+                "{element} 的归属边两态必须逐字相同"
+            );
+            assert_eq!(pending[0], pending[1], "{element} 的第二轮待办两态必须一致");
+            // 保护子句照旧带上判不了的那两块面板，两态同款（顺序也同）。
+            assert!(
+                rendered[0].contains(&format!(
+                    "WHERE in NOT IN [{}, {}]",
+                    rm(10).to_pe_key(),
+                    rm(8).to_pe_key()
+                )),
+                "{}",
+                rendered[0]
+            );
+            shape.push((
+                rendered[0].contains("INSERT RELATION INTO room_relate"),
+                pending[0].len(),
+            ));
+        }
+        // 三个构件必须各走到一条不同的路，否则这道门是空跑的（两边都空当然相等）：
+        // 20 直接成边、21 连候选都没有、22 只留下第二轮待办。
+        assert_eq!(shape, vec![(true, 0), (false, 0), (false, 1)], "{shape:?}");
+
+        // ④ 跨代复用：同一把 `MeshCache` 建出的第二份模型直接命中，不再读盘。
+        let next = room_resident::load_published_on(
+            &db,
+            &inputs,
+            RoomHierarchy::Hd,
+            &keywords,
+            match_room_name_hd,
+            meshes.clone(),
+        )
+        .await
+        .expect("第二代");
+        let first = model
+            .panel_tri_meshes(rm(7), &mesh_dir)
+            .expect("第一代网格");
+        let second = next.panel_tri_meshes(rm(7), &mesh_dir).expect("第二代网格");
+        assert!(Arc::ptr_eq(&first[0], &second[0]), "换代不该让三角网重建");
+        assert_eq!(meshes.len(), 2, "两块有几何的面板各一份");
     }
 }

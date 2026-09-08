@@ -2,6 +2,51 @@
 
 ## 2026-09-08
 
+### 常驻房间模型 P2-b：几何侧接常驻模型，三角网经 `MeshCache` 跨代复用，`mem://` 两态逐边门
+
+P2-a 只接了拓扑，几何侧照旧每轮 `load_consumption_panel_index` 查一遍库、每块面板各读一次 `.mesh`
+——跨代复用（`MeshCache`）在增量侧一直没生效。这一笔把面板侧几何也接上，并补上 P2 唯一的硬验收。
+开关 `room_resident_model` **默认仍关**，关着时每一处走今天的路。计划见
+`docs/plans/2026-09-07-resident-room-model-plan.md` §3 P2（P2-b 落地记）。
+
+- **接缝是显式参数，不是读开关**：新类型 `room_model::ResidentSource<'a> = Option<&'a ResidentRoomModel>`
+  ——`Some` = 用常驻那份，`None` = 走今天那条查询。`room_model.rs` 里一处开关也不读（源码钉守着），
+  开关仍只在换代点判一次（`ensure_resident_rooms`，串行锁之内）。多一处判定就多一个能和换代点漂开的
+  地方：两处判出不同答案时，拓扑来自常驻而几何来自库内查询，先清后写会按两份不同的输入改写同一批边。
+- **`PanelIndex` 开着时不查库**：模型收在索引身上（`PanelIndex::resident`），`load_panel_index_from`
+  在查库**之前**早退；整间分支从 `panel_index.resident()` 取的必然是元素分支同一份，类型上不可能一个
+  走常驻一个走查询。对外形状（`missing_panels()` 的口径与顺序、`candidate_panel_refnos()`、
+  `usable_panels()`）与今天一致，元素分支的判定顺序一字未改。
+- **三角网经 `MeshCache`**（键 = `geo_hash` + 世界矩阵位模式）：`PanelMeshes` 拆成 `from_rows`（今天：
+  各读一次 `.mesh`）与 `from_resident`（`panel_tri_meshes`，跨代复用）；后者**全有或全无**，一块面板
+  的网格有一张读不出来就整块判不了，不留半份。启动对比（`room_startup::apply_startup_plan`）顺路也
+  改成用它已经装好的那份模型，此前白读一遍盘。
+- **全量重建恒不接常驻**：`load_panel_index` / `cal_room_refnos` / `recalc_panel_membership` 在类型层面
+  永远传 `None`——它是显式修复入口，常驻模型不可信时正是靠它重算出正确的边。`execute_item` 的房间臂
+  同样恒 `None`：单件路径不在 `lock_spatial_serial` 之内，而换代点的前提是调用方已持这把锁。
+- **`GroupCache` 只留两代**（与 `ResidentRooms` 同口径）：一代 = 一个 `(composite, 层级)`，一代里每个
+  文件各一条，同代再来一个文件是并进去而不算新一代。此前从不淘汰——ams7997 一个文件是 1 077 组 /
+  3 937 面板，读透侧每 SAVEWORK 攒一代，进程活得越久留下的死代越多。
+- **常驻的 `missing_panels` 口径核过了，有一处有意更严**：一条行都没拿到、唯一那行包围盒不可用，两边
+  同集合同序；**只有「半份几何」不同**——一行可用一行坏，今天既进索引（拿半份几何去算）又进 `missing`
+  （保护存量边），两件互相矛盾的事同时做了；常驻侧整块不进 `panels`，这一轮不算它。按保守那边办：
+  没改常驻去迁就今天，而是让开关开着时更严。关着时行为一字未动，有专门的测试钉住这个差。
+- **`mem://` 两态逐边门**：一份内存库夹具（两间房、四块在册面板——两块有几何、一块一条行都没有、一块
+  包围盒溢出成 inf；三个构件——完全落在里面 / 谁都不沾 / 跨边界），同一份拓扑建两份 `PanelIndex`，比
+  ① 索引对外形状、② 整间分支的输入（`world_aabbs` 与三角网顶点/索引）、③ **逐边**：元素分支第一轮的
+  产物渲染成 `room_relate` 写入语句**逐字**比（边 id、目标、`room_num`、`inside_count`、`center_dist`、
+  保护子句的 `NOT IN` 名单都在那段文本里）、④ `MeshCache` 的 `Arc::ptr_eq` 跨代命中。门里有非空断言
+  （三个构件必须各走到三条不同的路），并做过变异检验（给常驻侧 `world_aabb` 加 7.0，②③都变红）。
+  为此把元素分支第一轮抽成纯函数 `element_first_pass`——它本来就不碰库，抽出来两态才能同进程对拍。
+- **门只比到语句，没落库比表**；面板侧 `room_panel_relate` 的成员集合要 `GLOBAL_AABB_TREE`、读透形态的
+  `query_valid_insts` 没有 `_on(db, …)` 变体，两者 `mem://` 都喂不了，只比了输入。P2 验收原文「`room_relate`
+  / `room_panel_relate` 逐边相同」里 `room_panel_relate` 那一半**没做到**，已记进 §7。
+- **源码钉 +5**：全量入口恒 `None` 且本文件不判开关；关着时走的仍是 `query_room_insts` + `from_rows` 且
+  开着时必须在查库之前早退；常驻分支不许出现 `des_mesh_file` / `get_tri_mesh_with_flag`；`GroupCache`
+  的代数上限与 `pop_front`；外加 `GroupCache` 的行为门。
+- 验证：`cargo test --lib` **1841 passed / 0 failed / 118 ignored**；`cargo check --tests` 通过；
+  `rustfmt --edition 2024 --check` 四个文件干净。未起服务，真库两形态逐边仍未跑。
+
 ### 常驻房间模型 P2-a：增量的拓扑源改成常驻模型，换代点落在串行锁里，一轮全成写参照
 
 常驻房间模型（`room_resident.rs`）此前只在启动那一下用得上——`ensure_current` 的生产调用方只有启动段两处，
