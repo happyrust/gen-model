@@ -3,7 +3,8 @@
 状态：已评审定稿（吸收 2026-08-12 审核结论 A1–A4 / B1–B6，决策 D1–D8 已定）
 日期：2026-08-12
 关联：`docs/2026-08-11_spatial-tree-startup-init-plan.md`（启动分层判据，已实施，被本方案扩展）、
-`docs/plans/2026-08-12-spatial-tree-direct-mutation-epoch-trace-plan.md`（**被本方案吸收取代**，见 D7）、
+`docs/plans/2026-08-12-spatial-tree-direct-mutation-epoch-trace-plan.md`（**被本方案吸收取代**，见 D7；
+2026-09-08 随过期计划清理删除，见 git 历史）、
 ADR-010 §4 / 增补 4、ADR-017 §5、`docs/2026-08-12_room-scoped-drain-commit-lock-assessment.md`
 
 ## 0. 相对原草案的已定修订（D1–D8）

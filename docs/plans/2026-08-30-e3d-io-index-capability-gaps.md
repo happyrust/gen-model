@@ -10,7 +10,8 @@
 > - `docs/evidence/2026-08-30-e3d-io-index-node-aos-layout.md`（页头/AoS/free_dwords，指令级）
 > - `docs/evidence/2026-08-13_reverse-core-dll-index-leaf-report.md`（双根差分/表根获取 `sub_5AF6840`）
 > - `docs/evidence/2026-08-30-e3d-io-record-self-addressing.md`（记录自寻址，438 库全量）
-> - `docs/plans/direct-dbelement-read-api.md`（D3：name/backref 索引需求）、ADR-053（direct 生成读）
+> - `docs/plans/direct-dbelement-read-api.md`（D3：name/backref 索引需求；2026-09-08 随 pdms-io 线
+>   过期计划清理删除，见 git 历史）、ADR-053（direct 生成读）
 > - 覆盖分析缺口 Q-B（`上下文/会话-2026-08-30-数据接口覆盖分析.md`）：文件侧**无类型索引**，
 >   `query_type_refnos_by_dbnum` 一族（生成主链 ×7 调用点）在 direct 下无路可走
 

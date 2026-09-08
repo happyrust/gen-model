@@ -121,7 +121,9 @@
       重定向的，验收前钉回正式 rev。依赖：P0–P4 全部。
 - [ ] T502 `GEN/src/data_interface/core3d_reference.rs` 删除，改 re-export 共享 crate；
       引用点（`tests/model_impact.rs` 等）随迁。依赖：T501。
-- [ ] T503 `DbElement` 门面（`GEN/docs/plans/direct-dbelement-read-api.md` 的 L2）薄封装：
+- [ ] T503 `DbElement` 门面（原 L2 蓝图 `GEN/docs/plans/direct-dbelement-read-api.md` 已于
+      2026-09-08 清理，见 git 历史；e3d-io 栈的对标面见
+      `GEN/docs/plans/2026-08-30-core-dll-api-alignment.md`）薄封装：
       分类/遍历/攀爬转调 db4 `Core3dSemantics`，gen-model 内不得存在第二份判据实现
       （`rg` 抽查作验收）。依赖：T501。
 - [ ] T504 [P] `GEN/src/data_interface/generation_root.rs`：名单判定接位表，按 R9 口径

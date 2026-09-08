@@ -1,7 +1,8 @@
 # 034 新版 pdms-io 的 Core3D 元素语义层实施计划
 
 > 决策依据：`docs/adr/ADR-055-pdms-io-v2-core3d-semantics.md`（Q1–Q8 已拍板，全采推荐项）。
-> 完整拷问记录与阶段展开：`docs/plans/pdms-io-v2-core3d-alignment.md`。
+> 完整拷问记录与阶段展开原在 `docs/plans/pdms-io-v2-core3d-alignment.md`（pdms-io 整条线 2026-09-04
+> 退出本仓后，该计划于 2026-09-08 随过期计划清理删除，见 git 历史）。
 > 实施位置：引擎侧在 `d:\work\plant-code\pdms-io-fork-engine-v2`（`pdmsdb_engine_v2` 所在
 > 工作副本，当前分支 `codex/occ-retire-paged-session`，HEAD `348d187`，领先 gen-model
 > 钉的 rev `13a17e1f` 两个提交）；gen-model 联动在本仓（P5）。

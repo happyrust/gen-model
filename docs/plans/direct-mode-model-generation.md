@@ -100,5 +100,6 @@ R1 转换语义漂移（同源+探针闭环）；R2 跨库 owner 链（定位器
 - SurrealDB 退役 / 数据摄入管线 direct 化（Q1 范围 B，远期独立 ADR）。
 - 房间/空间后处理 direct 化。
 - 读文件最新会话的「免摄入直生」形态（Q3 选项 B，direct 稳定后再议）。
-- fork 世界（rs-core v0.3.2）整库替换（`scope-a-full-crate-swap-feasibility.md` 维持 A0 结论）。
+- fork 世界（rs-core v0.3.2）整库替换（`scope-a-full-crate-swap-feasibility.md` 维持 A0 结论；该评估
+  2026-09-08 随 pdms-io 线过期计划清理删除，见 git 历史）。
 - back-ref 反向索引直读 E3D（ADR-002/003 既有轨道，不并入本计划）。

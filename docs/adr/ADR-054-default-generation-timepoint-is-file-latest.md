@@ -4,7 +4,7 @@
 **已实施**（2026-09-02，实施约束 1–7 全部落地：新模块 `src/data_interface/model_source.rs`，改动清单见 `changelog.md` 同日条目）
 日期：2026-09-02
 关联：ADR-053（direct 模式生成读，**本 ADR 取代其 Q3**）、ADR-001（`applied_sesno` 是唯一权威水位——**不改**）、
-ADR-025（严格初始化相位 · 模型门）、`docs/plans/direct-dbelement-read-api.md` §D6（把本编号预留给「免入库直生的范围与权威边界」）、
+ADR-025（严格初始化相位 · 模型门）、`docs/plans/direct-dbelement-read-api.md` §D6（把本编号预留给「免入库直生的范围与权威边界」；该计划 2026-09-08 随过期计划清理删除，见 git 历史）、
 `docs/plans/2026-09-01-refno-scope-model-reconcile-plan.md`（凭证判据从等值走向单调的同一方向）、
 plant-ui ADR-0009（显示时补齐模型走服务）。
 

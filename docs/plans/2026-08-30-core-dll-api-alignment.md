@@ -10,7 +10,8 @@
 > 与既有计划的关系：本矩阵是 `.planning/2026-08-30-direct-read-model-generation` **Phase 2
 > 的具体化**（Phase 2 七项全部落在本矩阵的某一行里）；API 面清单沿用
 > `docs/plans/direct-dbelement-read-api.md` 的 RE 存量（那份计划基于 pdms-io-v2 栈，
-> 本矩阵把同一 API 面**重新对标到 e3d-io 栈**——用户已拍板不对接 pdms-io）。
+> 本矩阵把同一 API 面**重新对标到 e3d-io 栈**——用户已拍板不对接 pdms-io；那份计划已于
+> 2026-09-08 随 pdms-io 线过期计划清理删除，见 git 历史，API 面清单以本矩阵为准）。
 
 ## 1. 口径：对标什么、不对标什么
 
@@ -246,7 +247,7 @@ GL3D 坐实几何真正的算子在独立模块 **libgm**：`gm_CreateCombinatio
   `e3d_mdb_api.txt`（MDB/Db/DbType）、`e3d_netapi{,2}.txt`
 - `teach/learning-records/0009-batch-model-generation-pipeline.md`（ELMODL/NXTITM 调用树）
 - `docs/evidence/2026-08-13_reverse-core-dll-index-leaf-report.md`（差分/删除判据）
-- `docs/plans/direct-dbelement-read-api.md`（pdms-io-v2 版蓝图，API 面清单的前身）
+- `docs/plans/direct-dbelement-read-api.md`（pdms-io-v2 版蓝图，API 面清单的前身；2026-09-08 已清理，见 git 历史）
 - `docs/plans/2026-08-30-e3d-io-gen-model-gap.md`（G1–G13）、
   `.planning/2026-08-30-direct-read-model-generation/task_plan.md`（Phase 2 清单）
 - 我方现状代码：`vendor/e3d-io/src/engine.rs`（open_at/find_element/resolve_attribute/

@@ -8,7 +8,8 @@
 `tests/fixtures/core-noun-granularity-e3d31.json`（1931 noun 位表快照）、
 `src/data_interface/core3d_reference.rs`（可执行参考模型）、
 `teach/learning-records/0009`（Core3D 批量生成流水线 RE）；
-产出计划 `docs/plans/pdms-io-v2-core3d-alignment.md`，规格 `specs/034-core3d-semantics/`。
+产出计划 `docs/plans/pdms-io-v2-core3d-alignment.md`（pdms-io 整条线 2026-09-04 退出本仓后，
+该计划于 2026-09-08 随过期计划清理删除，见 git 历史），规格 `specs/034-core3d-semantics/`。
 
 ## 背景
 
@@ -75,7 +76,8 @@ gen-model 侧已把 Core3D 的 `PartialUpdateDesiMgr` 逆向到规则级（R0–
   探测器双判据；`open_at(path, sesno)` 让「pin applied_sesno」与「读最新」共用一条实现。
 - 共享 crate：`core3d_reference` 参考模型 + `NounBitSource` 快照/FFI 双实现提升为单一来源，
   gen-model 与 pdms-io 都依赖它，消除两处漂移。
-- gen-model 侧：`DbElement` 门面（`docs/plans/direct-dbelement-read-api.md`）改为薄封装，
+- gen-model 侧：`DbElement` 门面（原蓝图 `docs/plans/direct-dbelement-read-api.md`，2026-09-08
+  随过期计划清理删除，见 git 历史；e3d-io 栈上的对标面见 `docs/plans/2026-08-30-core-dll-api-alignment.md`）改为薄封装，
   分类/遍历/攀爬转调 db4，不再本地实现第二遍；`generation_root` 名单判定接位表按 R9 口径
   **加层不换判据**。
 - 实施纪律：每个实现 Core3D 语义的函数，文档注释回引核对表 R 编号；判据一律读指令流不读伪码

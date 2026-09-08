@@ -436,7 +436,9 @@
     旧版 sidecar 两个边界）、旧格式 sidecar 解析缺省空串。
 
 - 2026-08-12 增补（**直写路径的空间树变更补上 epoch 痕迹**，方案
-  `docs/plans/2026-08-12-spatial-tree-direct-mutation-epoch-trace-plan.md`）——
+  `docs/plans/2026-08-12-spatial-tree-direct-mutation-epoch-trace-plan.md`；该方案当日即被
+  `docs/plans/2026-08-12-spatial-tree-consistency-closure-plan.md` D7 吸收取代，2026-09-08
+  随过期计划清理删除，见 git 历史）——
   - 背景：2026-08-11 的分层判据押在一条前提上——「凡是改变了『树应有内容』的已提交
     变更，都会在库侧留下可检测的痕迹」。该方案 §3 的论证原文是「直写路径不产生意图，
     其崩溃丢失自然落入 3c 被重建接住」，但这句话**只对会 bump epoch 的 durable 直写

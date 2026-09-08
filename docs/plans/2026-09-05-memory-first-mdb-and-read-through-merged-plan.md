@@ -2,7 +2,8 @@
 
 - 日期：2026-09-05
 - 合并自（两份就此作废，只留作落地记录与取证）：
-  - `docs/plans/2026-09-05-mdb-memory-first-initialization-plan.md`（元素骨架 / 选根；A、B 两层）
+  - `docs/plans/2026-09-05-mdb-memory-first-initialization-plan.md`（元素骨架 / 选根；A、B 两层。
+    它 2026-09-08 随过期计划清理删除，见 git 历史；其 P0 实测数据与评审记录只在 git 历史里）
   - `docs/plans/2026-09-05-kv-mem-zero-ingest-read-through-plan.md`（数据面读透 / plant-ui；C、D 两层，
     **§9 落地记录仍以那一份为准**，本文不复制它）
 - 起点是同一句话的两半：「不要通过数据库、库是备份」（前者）与「不解析任何数据、开箱即用」（后者）

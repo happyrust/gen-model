@@ -67,7 +67,8 @@ aios_db.parse.element(f, "24381_100677", sesno=97)        # 钉在会话 97 的�
 # old-pdms-io 底座的 collect_changes / net_changes / attmap / subtree / generate_* /
 # noun_dict 2026-09-04 已随 old-pdms-io 一起删除。窗口对不对，判据是 E3D TTY 录下的会话
 # （scripts/e3d/Test-TtyNetWindow.ps1、tests/fixtures/issues/issue-019-*），不是第二套解析器；
-# 子树 / 合并视图走 web-service 的 direct 读 API（docs/plans/direct-dbelement-read-api.md）。
+# 子树 / 合并视图走 web-service 的 direct 读 API（API 面见
+# docs/plans/2026-08-30-core-dll-api-alignment.md；pdms-io-v2 版旧蓝图已清理，见 git 历史）。
 
 # ── 连接层：只读（服务可以在跑）────────────────────────────────────
 aios_db.connect(cwd=str(repo))                 # cwd=仓库根（resource/surreal 按 CWD 找）

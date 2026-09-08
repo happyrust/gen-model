@@ -8,7 +8,7 @@
 （ADR-058 D8 已宣布退役，只留退路），认不出的值按未设置处理并出声（`options::data_read_mode_notice`）；同日 S5-1～3 之后它在启动
 序列里也只剩「数据面读哪儿」一个含义，watcher / worker / 模型复核 / 房间都不再看它（`changelog.md` 2026-09-04）。
 日期：2026-08-29
-关联：ADR-002（core.dll 权威范围）、ADR-004（按需解析 CATA）、ADR-005（refno 索引定位）、`docs/plans/scope-a-full-crate-swap-feasibility.md`（fork 整库替换评估，未采）、`teach/learning-records/0002/0004/0009`（core.dll RE 实证）；产出计划 `docs/plans/direct-mode-model-generation.md`。
+关联：ADR-002（core.dll 权威范围）、ADR-004（按需解析 CATA）、ADR-005（refno 索引定位）、`docs/plans/scope-a-full-crate-swap-feasibility.md`（fork 整库替换评估，未采；2026-09-08 随 pdms-io 线过期计划清理删除，见 git 历史）、`teach/learning-records/0002/0004/0009`（core.dll RE 实证）；产出计划 `docs/plans/direct-mode-model-generation.md`。
 
 ## 背景
 

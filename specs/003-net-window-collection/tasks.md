@@ -132,8 +132,8 @@
 
 ## M1 / M2 状态（2026-08-13 记；2026-08-18 由 ADR-031 收束）
 
-里程碑划分见
-[`docs/plans/2026-08-13-net-window-default-on-development-plan.md`](../../docs/plans/2026-08-13-net-window-default-on-development-plan.md)。
+里程碑划分原见 `docs/plans/2026-08-13-net-window-default-on-development-plan.md`（该计划自己写明
+2026-08-18 已被 ADR-031 取代，2026-09-08 随过期计划清理删除，见 git 历史）。
 
 - **M1 正确性闭环**：技术项 **T20 / T11b / T19 / T18a 全部完成**，**唯 T13 阻塞**
   （无合格真实窗口，须受控 E3D 录制）。
