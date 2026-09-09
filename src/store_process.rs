@@ -492,9 +492,73 @@ pub fn resolve_bind(v_ip: &str, v_port: u16) -> anyhow::Result<StoreBind> {
     })
 }
 
-/// `surreal start` 的参数表。`memory` 是**位置参数**（数据源），不是选项——写成
+/// 自带子进程的数据源：`spawned-mem` 给 memory，`spawned-rocksdb` 给一个 rocksdb 目录。
+/// 从外面看两台库长得一模一样（署名 / 四格裁决 / 收尸全同构），差别只有这一个位置参数
+/// 与「行活不活得过重启」。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SpawnDatastore {
+    /// `--memory` 后端：进程一退整库即消失。
+    Memory,
+    /// rocksdb 目录：数据落盘，活得过重启（ADR-070）。
+    RocksDb(PathBuf),
+}
+
+impl SpawnDatastore {
+    /// `surreal start` 的位置参数形态。
+    pub fn as_positional(&self) -> String {
+        match self {
+            Self::Memory => "memory".into(),
+            Self::RocksDb(dir) => format!("rocksdb:{}", dir.display()),
+        }
+    }
+
+    /// 启动横幅里「介质」那半句。
+    pub fn medium_banner(&self) -> String {
+        match self {
+            Self::Memory => "介质 memory，进程一退整库即消失".into(),
+            Self::RocksDb(dir) => {
+                format!("介质 rocksdb，数据落 {}，活得过重启", dir.display())
+            }
+        }
+    }
+}
+
+/// `spawned-rocksdb` 的数据目录：`<workspace>\.surreal\<project_code>`（workspace =
+/// 本进程实际在读的配置文件所在目录）。**按项目代号分家**：换代号 = 新目录新库，旧目录
+/// 留在盘上人工清（ADR-070——这不是丢数据）。代号空 / "0"（出厂哨兵）时回落项目名，
+/// 再回落 `ams`；目录名只保留路径安全字符。
+pub fn default_rocksdb_dir(project_code: &str, project_name: &str) -> PathBuf {
+    let sanitize = |raw: &str| -> String {
+        raw.trim()
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+            .collect()
+    };
+    let code = sanitize(project_code);
+    let name = sanitize(project_name);
+    let leaf = if !code.is_empty() && code != "0" {
+        code
+    } else if !name.is_empty() {
+        name
+    } else {
+        "ams".to_string()
+    };
+    let workspace = crate::options::active_config_path()
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    workspace.join(".surreal").join(leaf)
+}
+
+/// `surreal start` 的参数表。数据源是**位置参数**，不是选项——写成
 /// `--memory` 在 2.1.x 上是「未知参数」。
-pub fn spawn_args(user: &str, password: &str, bind: SocketAddr) -> Vec<String> {
+pub fn spawn_args(
+    user: &str,
+    password: &str,
+    bind: SocketAddr,
+    datastore: &SpawnDatastore,
+) -> Vec<String> {
     vec![
         "start".into(),
         "--user".into(),
@@ -503,7 +567,7 @@ pub fn spawn_args(user: &str, password: &str, bind: SocketAddr) -> Vec<String> {
         password.to_owned(),
         "--bind".into(),
         bind.to_string(),
-        "memory".into(),
+        datastore.as_positional(),
     ]
 }
 
@@ -564,9 +628,16 @@ impl SpawnedStore {
         v_port: u16,
         v_user: &str,
         v_password: &str,
+        datastore: &SpawnDatastore,
         timeout: Duration,
     ) -> anyhow::Result<Self> {
-        Self::start_on(resolve_bind(v_ip, v_port)?, v_user, v_password, timeout)
+        Self::start_on(
+            resolve_bind(v_ip, v_port)?,
+            v_user,
+            v_password,
+            datastore,
+            timeout,
+        )
     }
 
     /// [`Self::start`] 的后半段，地址已经解好。[`ensure_spawned_store`] 走这一条——
@@ -576,6 +647,7 @@ impl SpawnedStore {
         bind: StoreBind,
         v_user: &str,
         v_password: &str,
+        datastore: &SpawnDatastore,
         timeout: Duration,
     ) -> anyhow::Result<Self> {
         let exe = resolve_surreal_exe()?;
@@ -598,6 +670,11 @@ impl SpawnedStore {
             Ok(None) => {}
         }
 
+        if let SpawnDatastore::RocksDb(dir) = datastore {
+            // rocksdb 往既有目录里初始化没问题，父目录不存在才会让 surreal 起不来。
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("创建持久库数据目录 {} 失败", dir.display()))?;
+        }
         let log_path = spawn_log_path(bind.bind.port());
         if let Some(parent) = log_path.parent() {
             std::fs::create_dir_all(parent)
@@ -620,7 +697,7 @@ impl SpawnedStore {
                     .filter(|value| !value.is_empty())
                     .unwrap_or_else(|| "0".into()),
             )
-            .args(spawn_args(v_user, v_password, bind.bind))
+            .args(spawn_args(v_user, v_password, bind.bind, datastore))
             .stdin(Stdio::null())
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
@@ -645,8 +722,10 @@ impl SpawnedStore {
             bail!(message);
         }
         println!(
-            "*** 存储子进程已就绪：pid={} 监听 {}（介质 memory，进程一退整库即消失）",
-            store.pid, store.bind.endpoint
+            "*** 存储子进程已就绪：pid={} 监听 {}（{}）",
+            store.pid,
+            store.bind.endpoint,
+            datastore.medium_banner()
         );
         println!("    二进制 {} / {}", store.exe.display(), store.version);
         println!("    子进程日志：{}", store.log_path.display());
@@ -795,6 +874,7 @@ pub async fn ensure_spawned_store(
     identity: &StoreIdentity,
     startup: StoreStartup,
     timeout: Duration,
+    datastore: &SpawnDatastore,
 ) -> anyhow::Result<StoreHandle> {
     let bind = resolve_bind(v_ip, v_port)?;
     let port_open = TcpStream::connect_timeout(&bind.probe, PROBE_CONNECT_TIMEOUT).is_ok();
@@ -829,18 +909,18 @@ pub async fn ensure_spawned_store(
                 signature.child_pid
             );
             reclaim_orphan(signature.child_pid, bind.probe, timeout)?;
-            spawn_and_stamp(&bind, v_user, v_password, identity, timeout).await
+            spawn_and_stamp(&bind, v_user, v_password, identity, datastore, timeout).await
         }
         StorePortVerdict::Idle => {
             if startup == StoreStartup::AttachOnly {
                 bail!(
-                    "{} 上没有自带存储在跑（store_mode = spawned-mem）。本进程只附着、不拉起——\
-                     自己拉一台空库、再在上面作业，失败会一声不响。\
+                    "{} 上没有自带存储在跑（store_mode = spawned-mem / spawned-rocksdb）。\
+                     本进程只附着、不拉起——自己拉一台空库、再在上面作业，失败会一声不响。\
                      先起 gen-model，或改 store_mode = \"external\" 指一台已有的库。",
                     bind.endpoint
                 );
             }
-            spawn_and_stamp(&bind, v_user, v_password, identity, timeout).await
+            spawn_and_stamp(&bind, v_user, v_password, identity, datastore, timeout).await
         }
     }
 }
@@ -869,9 +949,10 @@ async fn spawn_and_stamp(
     v_user: &str,
     v_password: &str,
     identity: &StoreIdentity,
+    datastore: &SpawnDatastore,
     timeout: Duration,
 ) -> anyhow::Result<StoreHandle> {
-    let store = SpawnedStore::start_on(bind.clone(), v_user, v_password, timeout)?;
+    let store = SpawnedStore::start_on(bind.clone(), v_user, v_password, datastore, timeout)?;
     let now = now_unix_ms();
     let signature = StoreSignature {
         owner_pid: std::process::id(),
@@ -1131,11 +1212,16 @@ mod tests {
         assert!(text.contains("external"), "{text}");
     }
 
-    /// `memory` 是位置参数不是选项。写成 `--memory` 在 2.1.x 上是「未知参数」，
-    /// 而那条错误只会出现在子进程自己的日志里。
+    /// 数据源是位置参数不是选项。写成 `--memory` 在 2.1.x 上是「未知参数」，
+    /// 而那条错误只会出现在子进程自己的日志里。rocksdb 档同一个位置，形态 `rocksdb:<目录>`。
     #[test]
     fn the_datastore_is_a_positional_argument_not_a_flag() {
-        let args = spawn_args("root", "root", sock("127.0.0.1:8009"));
+        let args = spawn_args(
+            "root",
+            "root",
+            sock("127.0.0.1:8009"),
+            &SpawnDatastore::Memory,
+        );
         assert_eq!(args.last().map(String::as_str), Some("memory"));
         assert!(!args.iter().any(|a| a == "--memory"));
         assert_eq!(
@@ -1150,6 +1236,42 @@ mod tests {
                 "127.0.0.1:8009",
                 "memory"
             ]
+        );
+        let rocks = spawn_args(
+            "root",
+            "root",
+            sock("127.0.0.1:8010"),
+            &SpawnDatastore::RocksDb(PathBuf::from(r"D:\ws\.surreal\1516")),
+        );
+        assert_eq!(
+            rocks.last().map(String::as_str),
+            Some(r"rocksdb:D:\ws\.surreal\1516")
+        );
+        assert!(!rocks.iter().any(|a| a == "memory"));
+    }
+
+    /// 持久库目录按项目代号分家；代号空 / "0"（出厂哨兵）回落项目名，再回落 ams；
+    /// 目录名滤掉路径不安全字符。换代号 = 新目录新库，旧目录留盘人工清（ADR-070）。
+    #[test]
+    fn the_rocksdb_dir_is_keyed_by_project_code_with_fallbacks() {
+        let leaf = |code: &str, name: &str| -> String {
+            default_rocksdb_dir(code, name)
+                .file_name()
+                .expect("目录必有叶子名")
+                .to_string_lossy()
+                .into_owned()
+        };
+        assert_eq!(leaf("1516", "AvevaMarineSample"), "1516");
+        assert_eq!(leaf("0", "AvevaMarineSample"), "AvevaMarineSample");
+        assert_eq!(leaf("", "AvevaMarineSample"), "AvevaMarineSample");
+        assert_eq!(leaf("", ""), "ams");
+        assert_eq!(leaf(" 15/16 ", ""), "1516", "路径不安全字符要滤掉");
+        let dir = default_rocksdb_dir("1516", "x");
+        assert!(
+            dir.parent()
+                .is_some_and(|parent| parent.ends_with(".surreal")),
+            "必须落在 workspace 的 .surreal 下：{}",
+            dir.display()
         );
     }
 
@@ -1499,9 +1621,15 @@ mod tests {
     #[ignore = "需要本地 bin/surreal.exe，且会占用一个端口"]
     fn spawns_and_reaps_a_real_memory_store() {
         let port = 18009;
-        let mut store =
-            SpawnedStore::start("127.0.0.1", port, "root", "root", DEFAULT_READY_TIMEOUT)
-                .expect("拉起 memory 后端失败");
+        let mut store = SpawnedStore::start(
+            "127.0.0.1",
+            port,
+            "root",
+            "root",
+            &SpawnDatastore::Memory,
+            DEFAULT_READY_TIMEOUT,
+        )
+        .expect("拉起 memory 后端失败");
         let addr = sock(&format!("127.0.0.1:{port}"));
         assert!(TcpStream::connect_timeout(&addr, PROBE_CONNECT_TIMEOUT).is_ok());
         store.shutdown();
@@ -1520,8 +1648,14 @@ mod tests {
     async fn a_real_store_answers_with_the_signature_we_stamped() {
         let port = 18010;
         let bind = resolve_bind("127.0.0.1", port).expect("地址应当能解");
-        let mut store = SpawnedStore::start_on(bind.clone(), "root", "root", DEFAULT_READY_TIMEOUT)
-            .expect("拉起 memory 后端失败");
+        let mut store = SpawnedStore::start_on(
+            bind.clone(),
+            "root",
+            "root",
+            &SpawnDatastore::Memory,
+            DEFAULT_READY_TIMEOUT,
+        )
+        .expect("拉起 memory 后端失败");
 
         // 盖之前：一台没有署名的库，判据必须落「拒绝」而不是「附着」。
         assert_eq!(
@@ -1588,6 +1722,7 @@ mod tests {
             &identity,
             StoreStartup::AttachOnly,
             DEFAULT_READY_TIMEOUT,
+            &SpawnDatastore::Memory,
         )
         .await
         .expect_err("端口空着时 AttachOnly 必须失败");
@@ -1601,6 +1736,7 @@ mod tests {
             &identity,
             StoreStartup::Spawn,
             DEFAULT_READY_TIMEOUT,
+            &SpawnDatastore::Memory,
         )
         .await
         .expect("第一次应当把库起起来");
@@ -1618,6 +1754,7 @@ mod tests {
                 &identity,
                 startup,
                 DEFAULT_READY_TIMEOUT,
+                &SpawnDatastore::Memory,
             )
             .await
             .unwrap_or_else(|error| panic!("{startup:?} 应当附着上去：{error:#}"));
@@ -1641,6 +1778,7 @@ mod tests {
             &stranger,
             StoreStartup::Spawn,
             DEFAULT_READY_TIMEOUT,
+            &SpawnDatastore::Memory,
         )
         .await
         .expect_err("另一份工程必须被拒");

@@ -711,14 +711,19 @@ pub const STORE_MODE_ENV: &str = "AIOS_STORE_MODE";
 
 /// 持久层的介质，外加「谁负责把它拉起来」。
 ///
-/// [`in_memory_db`] 只分得出两态，而实际上有三种：外置落盘、自带内存、进程内嵌内存。
-/// 中间那一档（[`StoreMode::SpawnedMem`]）是「开箱即用」形态——库仍然有真端口，
-/// plant-ui / `/sql` 探针 / `rvm_verify` 照常连得上，只是这个 surreal 由本进程负责
-/// 拉起与收尸（`docs/plans/2026-09-04-spawned-memory-store-out-of-box.md`）。
+/// [`in_memory_db`] 只分得出两态，而实际上有四种：外置落盘、自带落盘、自带内存、
+/// 进程内嵌内存。自带两档（[`StoreMode::SpawnedRocks`] / [`StoreMode::SpawnedMem`]）
+/// 的库都有真端口，plant-ui / `/sql` 探针 / `rvm_verify` 照常连得上，只是那个 surreal
+/// 由本进程负责拉起与收尸（`docs/plans/2026-09-04-spawned-memory-store-out-of-box.md`；
+/// 持久档见 `docs/plans/2026-09-09-spawned-rocksdb-store-and-create-instance.md` / ADR-070）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StoreMode {
-    /// 连 `v_ip:v_port` 上那台已经在跑的 SurrealDB。唯一可持久的一档。
+    /// 连 `v_ip:v_port` 上那台已经在跑的 SurrealDB。
     External,
+    /// 本进程拉起一个 **rocksdb 后端**的 surreal 子进程，绑到 `v_ip:v_port`，数据落
+    /// `workspace\.surreal\<project_code>`——**活得过重启**（配置向导「新建本机持久库」
+    /// 选的就是这档）。进程退出照常收尸，数据在盘上，下次启动重新拉起即接上。
+    SpawnedRocks,
     /// 本进程拉起一个 `--memory` 后端的 surreal 子进程，绑到 `v_ip:v_port`。
     /// 进程一退整库消失，但**端口是真的**。
     SpawnedMem,
@@ -727,18 +732,19 @@ pub enum StoreMode {
 }
 
 impl StoreMode {
-    /// 配置与 `/health` 上的字面值。解析侧认的别名比这一份多，回话只用这三个。
+    /// 配置与 `/health` 上的字面值。解析侧认的别名比这一份多，回话只用这四个。
     pub fn as_str(self) -> &'static str {
         match self {
             Self::External => "external",
+            Self::SpawnedRocks => "spawned-rocksdb",
             Self::SpawnedMem => "spawned-mem",
             Self::EmbeddedMem => "embedded-mem",
         }
     }
 
-    /// 这一档的行能不能活过进程重启。只有外置那一档可能为真。
+    /// 这一档的行能不能活过进程重启。外置与自带落盘两档为真。
     pub fn is_durable(self) -> bool {
-        matches!(self, Self::External)
+        matches!(self, Self::External | Self::SpawnedRocks)
     }
 
     /// 别的进程连不连得上这个库。`embedded-mem` 是唯一的「连不上」。
@@ -799,7 +805,9 @@ fn effective_store_mode(
 /// （后者要出声，见 [`store_mode_notice`]）。
 fn parse_store_mode(raw: Option<&str>) -> Option<StoreMode> {
     match raw?.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        // "rocksdb" 是 external 的历史别名（rocksdb 在对端服务器侧），不是自带落盘档。
         "external" | "rocksdb" => Some(StoreMode::External),
+        "spawned-rocksdb" => Some(StoreMode::SpawnedRocks),
         "spawned-mem" | "kv-mem" => Some(StoreMode::SpawnedMem),
         "embedded-mem" => Some(StoreMode::EmbeddedMem),
         _ => None,
@@ -829,8 +837,8 @@ fn store_mode_notice_for(
             continue;
         }
         return Some(format!(
-            "⚠ {source} = {raw:?} 认不出来（只认 external / spawned-mem / embedded-mem），\
-             按未设置处理"
+            "⚠ {source} = {raw:?} 认不出来（只认 external / spawned-rocksdb / spawned-mem / \
+             embedded-mem），按未设置处理"
         ));
     }
     // 两个键都写、且说的不是同一件事：以 `store_mode` 为准，但不许静默。
@@ -841,10 +849,14 @@ fn store_mode_notice_for(
              in_memory_db 是 store_mode 之前的旧开关，只表达得了 embedded-mem 那一档",
             declared.as_str()
         )),
-        Some(false) if declared != StoreMode::External => Some(format!(
-            "⚠ 配置同时写了 in_memory_db = false 与 store_mode = {:?}：以 store_mode 为准",
-            declared.as_str()
-        )),
+        // `in_memory_db = false` 说的是「持久层不在进程内存里」——external 与自带落盘
+        // 两档都与它相容，只有两档内存形态才算打架。
+        Some(false) if !matches!(declared, StoreMode::External | StoreMode::SpawnedRocks) => {
+            Some(format!(
+                "⚠ 配置同时写了 in_memory_db = false 与 store_mode = {:?}：以 store_mode 为准",
+                declared.as_str()
+            ))
+        }
         _ => None,
     }
 }
@@ -2305,22 +2317,38 @@ mod tests {
         assert!(store_mode_notice_for(Some("external"), None, Some(false)).is_none());
     }
 
-    /// 只有外置那一档的行活得过进程重启；只有进程内嵌那一档别人连不上。
+    /// 外置与自带落盘两档的行活得过进程重启；只有进程内嵌那一档别人连不上。
     /// 这两句话是 `/health` 与回执的介质口径的唯一来源。
     #[test]
-    fn only_the_external_store_is_durable_and_only_the_embedded_one_has_no_port() {
+    fn only_the_disk_backed_stores_are_durable_and_only_the_embedded_one_has_no_port() {
         assert!(StoreMode::External.is_durable());
+        assert!(StoreMode::SpawnedRocks.is_durable());
         assert!(!StoreMode::SpawnedMem.is_durable());
         assert!(!StoreMode::EmbeddedMem.is_durable());
         assert!(StoreMode::External.has_endpoint());
+        assert!(StoreMode::SpawnedRocks.has_endpoint());
         assert!(StoreMode::SpawnedMem.has_endpoint());
         assert!(!StoreMode::EmbeddedMem.has_endpoint());
+        assert_eq!(StoreMode::SpawnedRocks.as_str(), "spawned-rocksdb");
+        // 自带落盘档只在写全名时给；别名 "rocksdb" 属于 external（对端服务器侧的 rocksdb）。
+        assert_eq!(
+            parse_store_mode(Some("spawned-rocksdb")),
+            Some(StoreMode::SpawnedRocks)
+        );
+        assert_eq!(
+            parse_store_mode(Some("SPAWNED_ROCKSDB")),
+            Some(StoreMode::SpawnedRocks)
+        );
     }
 
-    /// 两个内存部署形式都不摄入属性；持久部署必须做完整基线与增量备份。
+    /// 两个内存部署形式都不摄入属性；持久部署（外置与自带落盘）必须做完整基线与增量备份。
     #[test]
     fn data_face_follows_storage_backup_scope() {
         assert_eq!(data_face_for_store(StoreMode::External), DataFace::Ingest);
+        assert_eq!(
+            data_face_for_store(StoreMode::SpawnedRocks),
+            DataFace::Ingest
+        );
         assert_eq!(
             data_face_for_store(StoreMode::SpawnedMem),
             DataFace::ReadThrough

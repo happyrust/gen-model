@@ -2,6 +2,45 @@
 
 ## 2026-09-09
 
+### 自带持久库档 `spawned-rocksdb`：「创建数据库实例」是一档配置（0.1.21，ADR-070）
+
+计划 `docs/plans/2026-09-09-spawned-rocksdb-store-and-create-instance.md`（一轮 6 问全按推荐拍板），
+承接向导计划 Q5 / ADR-069 后果节留给 v2 的「一键用包内 surreal 起持久库」。需求原话：数据库要能
+创建实例——指定 ip（默认本机）、端口、项目名、代号等。答案是**一档配置而不是一次性动作**：
+一次性动作起的实例没有属主（机器重启后不在，external 连不上又回到手动）；档位形态重启即自愈。
+
+- **新档位**：`store_mode = "spawned-rocksdb"`——服务每次启动用包内 surreal（fork 2.1.x，版本闸
+  不放宽）在 `v_ip:v_port`（向导默认 127.0.0.1:8010）拉起一台 **rocksdb 后端**的库，数据落
+  `workspace\.surreal\<project_code>`（代号空/"0" 回落项目名再回落 ams，目录名滤路径不安全字符；
+  **换代号 = 新目录新库**，旧目录留盘人工清），退出收尸只杀进程、**数据活得过重启**。署名/心跳/
+  四格裁决/孤儿回收/AttachOnly 与 spawned-mem 逐字同一套——唯一真改动是把写死的数据源位置参数
+  `"memory"` 参数化成 `SpawnDatastore`（memory / `rocksdb:<目录>`）。档位派生一张表跟上：
+  `is_durable()` 真、data_face 派生 ingest、实例锁照拿、`/health.medium="spawned-rocksdb"`（as_str
+  直通，`handlers.rs` 零改动）、`PersistMedium` 归 RocksDb；`in_memory_db=false` 与本档不再误报冲突。
+- **向导第②步改三档**：外接（连通+版本硬闸）/ **新建本机持久库（新部署推荐，带端口预检与
+  0.0.0.0 暴露警告——凭据默认 root/root，先改 `v_user`/`v_password` 再暴露）**/ 试用内存库；
+  数据目录只读展示并随项目代号联动；自带两档地址留空由前端自动补默认（8010/8009）。顺带把
+  radio 单选整块包进 `<label>`（0.1.20 走查发现 13px 圆圈难点中）。
+- **判据连锁**（修订 ADR-069 D3 一句）：设置模式判据从「external 且地址空」扩成「**需要端点的
+  档位**（除 embedded-mem）且地址空」——spawn 两档空地址是必坏形状（bind 端口 0 / `ws://:0`），
+  手改坏形状从「启动死在绑定错误」变成「进设置模式」；写口合并后校验同律扩档（422、盘上不动、
+  错误带各自默认端口）。出厂模板不改（仍 external + 空地址；「出厂直接改本档」单独拍）。
+- **脚本**：冒烟门第三腿 C（本机配置副本改 `spawned-rocksdb`@18010、整份包 workspace 打底，考
+  正常模式 medium/durable + `.surreal` 目录真落盘，绝不碰真 8010）；包内 `Start-Surreal.ps1` 修
+  「出厂 `v_port="0"` 哨兵被当端口」的坑（读到 0 回落 8010）并改口「向导第三档可替代本脚本」。
+- 文档：ADR-070 + CONTEXT 词条「自带持久库」（并同步「设置模式/配置向导/冒烟门」三词条）+
+  `docs/release-notes/0.1.21.md`。
+- 验证：全量 `cargo test --lib` **1973 passed / 0 failed / 137 ignored**（28.4 s，新钉：档位真值表、
+  rocksdb 位置参数形态、目录命名回落、设置模式判据扩档真值表、写口拦截扩档）；`rustfmt --check`
+  五文件干净、`git ls-files --eol` 无行尾漂移。**spawned-rocksdb 实机 E2E**（release exe + 出厂模板
+  @19099 + 真项目）：设置模式 → 空地址 422 拦 → PUT 15 键 → 重启交接进正常模式（medium=
+  spawned-rocksdb / durable=true / `.surreal\1516` 落盘）→ **强杀后端** → 孤儿 surreal 留 18011 →
+  再起服务按署名收编（「属主已经不在…杀掉 pid=22428」）且**同一数据目录接上**（创建时刻未变）→
+  complete 删哨兵，全链 16 s，跑完 19099/18011 归零、临时目录已清。0.1.21-full 出包**三腿冒烟
+  全过**（A 设置模式 / B 本机全启动 / C 持久库落盘），`ams-local-0.1.21-full.zip` 394.7 MB +
+  sha256 + release.json（含 rocks_leg）。首跑 C 腿曾暴露临时工作区缺 `resource\surreal\*.surql`
+  导致 define functions 失败——已改为与 B 腿同底（整份包 workspace 拷底再换配置）后通过。
+
 ### 首跑配置向导 `/setup.html` + 设置模式启动臂 + 出厂模板包形态（0.1.20）
 
 计划 `docs/plans/2026-09-09-setup-wizard-web-frontend.md`（两轮 16 问全按推荐拍板 + 两条补拍：
@@ -46,6 +85,65 @@ CONTEXT.md 收「配置向导 / 设置模式 / 首跑哨兵 / 引导子集」四
   （pid 64956 → 46092）→ 正常模式 `/` 仍 302（哨兵在）→ complete 删哨兵、`/` 恢复 200，
   全链 10.5 s；跑完 19099/18009 归零、临时目录已清。0.1.20-full 出包与两腿冒烟见
   `releases/ams-local-0.1.20-full.release.json`。
+
+### 补齐两篇悬空 evidence（collar 拷回 + coincidence-tolerances 重建取证）+ Snout/Pyramid/CircTorus facet 逐面复核
+
+承上条 facet 复核线，把 `sweep_mesh.rs` / `libgm_discretise.rs` / `manifold_csg.rs` / ISSUE-022 引用却
+在本工作树缺失的两篇 evidence 补齐，并把 CircTorus 管向相位、Snout、Pyramid 也逐面对过——全程只读取证，无生产代码改动：
+
+- **`2026-08-24-ida-gm-collar-ruled-solid.md`**：从 `gm-verify-tmp` 工作树拷回 gen-model 主树
+  （与另外几棵树逐行同内容，仅 EOL 差；取 CRLF 变体，14093B）。`sweep_mesh.rs:485` /
+  `Ruled` 臂注释的引用即刻解析。
+- **`2026-08-25-ida-libgm-coincidence-tolerances.md`**：此前**从未在任何工作树落盘**（纯悬空），
+  按 ISSUE-022 + changelog 已记的 08-25 发现**重建 + 逐条在活库 IDB 重新取证**：Core3D
+  `adp_gm_mk_body`（`sub_104DA260`）建体前连设 `gm_SetResolutionTolerance(0.051)` /
+  `gm_SetDefaultNormalisationTolerance(0.051)` / `gm_SetDefaultTangentTolerance(0.0087266)` /
+  `gm_SetDefaultFacetTolerance(0.5)`——最后一个就是本仓 `FACET_TOL_MM`，前面 restol/normtol=0.051
+  就是 `RES_TOL_MM`（三个自由函数 0x1003CAC0/0x1003C8A0/0x1003C580 各写 `restol_/normtol_/arctol_`，
+  都带 `>0` 门）。**负体机制本轮逐帧复跑，更正了 ISSUE-022 的描述**：`addStandAloneNegative`
+  (Core3D 0x10726620) → `gm_CreateCombination(3)` 建 `GM_SolidCombination`（不是 AggregateCombination）
+  → 自有 `GM_SolidCombination::calcFacets`(0x100A00D0) → `gm_combine`(`sub_1009BD60`, `GM_SetOp.cxx`)
+  **真三维 facet 布尔**：交线 `GM_IntCurve` + `buildFacets` + `normalisePostSetOp(GM_User::normtol_)`
+  + squeeze；共面重合由 **`normtol_`(0.051)** 治理，**不是** `restol_`、**也不是** `obscureFaces`
+  面内二维相减（obscureFaces 0x10068710 的调用者只有 `GM_Facets::obscure`/`selfHide`，是隐藏面/出图；
+  `D2_PolySet::booleanPrecise` 是二维截面布尔——ISSUE-022 把这两者误挂成负体减法）。数值 0.051 不变，
+  ISSUE-022/`manifold_csg` 注释里「面内二维相减/restol」的机制描述**已同步更正**为「三维 set-op 的
+  normtol 共面重合」（用户 2026-09-09 拍板；数值 0.051 不动、`RES_TOL_MM` 常量名与 `NEGATIVE_INFLATE`
+  行为不变，只改注释）：改了 `issues/ISSUE-022-*.md`、`manifold_csg.rs`、`libgm_discretise.rs` 的
+  `RES_TOL_MM` 注释；ADR-044 经查不含该机制措辞、无需改。rustfmt 干净、`fast_model::libgm_discretise`
+  + `fast_model::manifold_csg` 48 passed（含源码扫描钉与负体回归钉）。顺带坐实 `normtol(double)` 成员 setter
+  零调用（2 条 xref 均导出表 RVA 数据、非 call），运行期真值 0.051 而非注释旧写的 1e-6。
+  08-25 evidence 文件头标注 2026-09-09 重建。
+- **facet 复核补三节**（写进 `2026-09-09-ida-dish-rtorus-collar-facet-recheck.md`）：§3b CircTorus
+  管向 `k·2π/n` 全圆格（常量 0x100D0420=2π）+ 环向沿扫角均分（0x100D0398=π/180）、接缝重复末点是
+  ADR-049 有意表示；§3c Snout 段数 `circle(max(rBtm,rTop))` + 偏移上下各摊一半（T050 那件事的 libgm
+  坐实）；§3d Pyramid 与 Snout 同构的偏移各摊一半、退化成线/点、无段数无相位。地址对照表补
+  Snout / Pyramid 两行。
+- 验证：本轮纯只读（ida-bridge SQL/汇编/IDAPython 读常量 + 目录统计 + 文件拷贝/换行规范化），
+  未改生产代码，未跑构建/测试；两篇 evidence 现均在 `gen-model/docs/evidence/`，引用不再悬空。
+
+### ADR-044「份数量出来再定」欠项关闭（实测 48,590 份 / 636.8 MB）+ 碟与矩形环面 facet 分布 libgm 复核通过
+
+09-09 上午差异盘点（fable-5-26 交接线）剩余两项本日收口，均为取证 / 文档，无生产代码改动：
+
+- **网格份数与磁盘占用（ADR-044 后果第 1 条）**：`assets/meshes` 离线实测 48,590 份
+  `.mesh`、636.8 MB（内容寻址含历史代数，为上界；与 0.1.19 发布轮剔除的 636 MB web 侧
+  网格冗余互证）。字节大头是近唯一的挤出 / 布尔网格；段数身份的单位网格增量上限 =
+  段数档位数（圆柱 / 球每类 ≤249 档，环面 / 碟为小枚举组合），对该库份数 <1%、字节是
+  噪声。判定**无需存储侧缓解**，ADR-044 补「2026-09-09 回填」一节关闭欠项；per-type
+  物化档位盘点留作下次活栈顺手一条 SurrealQL，不立专项。
+- **高级原语 facet 分布复核（盘点第 2 项）**：用真实 libgm.dll（idalib-72996）反编译 +
+  关键处下到汇编，坐实 `GM_SDish` / `GM_EDish` / `GM_RectTorus` /
+  `GM_Collar::form{Base,Top}Facet` 与本仓逐面一致——碟母线两段均分（hub θ/n、knuckle
+  (π/2−θ)/n）、SDish 经向 θ/meridional 均分、RectTorus 截面居中 ±h/2 且环向沿扫角均分、
+  EDish `isSpherical` = `|a−h| ≤ 1e-6`、2(hub+knuckle)>1000 时各自 4n>1000 夹 250；源码
+  注释引用的全部地址与真实符号一一对上，无需改码。取证
+  `docs/evidence/2026-09-09-ida-dish-rtorus-collar-facet-recheck.md`（顺带记账：
+  `sweep_mesh.rs:485` 与 aios-core `libgm_discretise.rs:55` 引用的两篇 08-24/25 evidence
+  在本工作树悬空，只在旧工作树里有——未处置）。
+- 验证：本线两轮均纯只读（ida-bridge SQL / 汇编 + 目录统计），未改生产代码，未跑构建 /
+  测试；e3d-model `flatten_ring` 负 FRAD 补丁经查已由后续会话落地（见下方「负 FRAD 收尾」
+  条），未重做。
 
 ### 初始化准入门的嗓音收口：重扫汇总一句 + /health 点名最近一轮拦下的库（含方案与词条并轨）
 

@@ -70,6 +70,8 @@ v_password = "root"
 # "0" = 未设置（哨兵；这一格是数字，不能写空串）。连已有库填真实端口，如 "8010"。
 v_port = "0"
 # 缺省 external：连 v_ip:v_port 上已经在跑的 SurrealDB（必须本包 workspace\bin 的 fork 2.1.x）。
+# 新部署推荐改 "spawned-rocksdb"：服务自己用包内 surreal 在 v_ip:v_port 起一台落盘库，
+#   数据在 workspace\.surreal\<项目代号>，活得过重启（向导第②步第三档就是它）。
 # 试用/演示可改 "spawned-mem"：服务自带内存库，数据不落盘。
 store_mode = "external"
 

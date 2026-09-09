@@ -11,7 +11,8 @@
 //!    拒掉；按对端判，应用面局域网可达、setup 面仍只许本机。对外暴露 setup 面必须另加
 //!    认证（ADR-069 硬边界）。
 //! 3. **两个判据各管一件事**：设置模式（启动臂）= 配置无效（`project_path` 缺/不存在，或
-//!    external 且 `v_ip`/`v_port` 留空）；哨兵 [`FIRST_RUN_MARKER`] 只管首页 302 到向导，
+//!    需要端点的档位——除 embedded-mem 外——`v_ip`/`v_port` 留空）；哨兵
+//!    [`FIRST_RUN_MARKER`] 只管首页 302 到向导，
 //!    不影响启动臂——向导在 ④→⑤ 之间要重启一次，重启后必须**正常启动**（初始化要全
 //!    服务）但向导还没走完，哨兵若也决定启动臂就死锁在设置模式里。库地址填了但连不上
 //!    **不算**配置无效：那可能只是 8010 没开机，照旧走正常启动失败退出，不把真故障盖成向导。
@@ -84,8 +85,11 @@ fn workspace_of(config_path: &Path) -> PathBuf {
 
 /// 配置无效 → 设置模式的理由；`None` = 正常启动。
 ///
-/// 只认两条：`project_path` 缺/不存在，external 且库地址留空（出厂模板正是这个形态，
-/// Q15）。**填了地址但连不上不算**——判据只看配置文件自身，不做网络探测，理由见模块 doc。
+/// 只认两条：`project_path` 缺/不存在，需要端点的档位（external / spawned-rocksdb /
+/// spawned-mem，即除 embedded-mem 外的全部）库地址留空——external 空地址是出厂形态
+/// （Q15），spawn 两档空地址是「写进去必然坏」的手改形状（bind 端口 0 / `ws://:0`，
+/// ADR-070 扩的这一条）。**填了地址但连不上不算**——判据只看配置文件自身，
+/// 不做网络探测，理由见模块 doc。
 pub fn setup_mode_reason(option: &aios_core::options::DbOption) -> Option<String> {
     setup_mode_reason_for(
         crate::options::store_mode(),
@@ -113,12 +117,11 @@ pub(crate) fn setup_mode_reason_for(
     if !Path::new(project_path).is_dir() {
         return Some(format!("project_path 不存在或不是目录：{project_path}"));
     }
-    if matches!(store, crate::options::StoreMode::External)
-        && (v_ip.trim().is_empty() || v_port == 0)
-    {
-        return Some(
-            "store_mode=external 但 v_ip / v_port 未设置（v_port=0 即出厂哨兵值）".to_string(),
-        );
+    if store != crate::options::StoreMode::EmbeddedMem && (v_ip.trim().is_empty() || v_port == 0) {
+        return Some(format!(
+            "store_mode={} 需要 v_ip / v_port，当前未设置（v_port=0 即出厂哨兵值）",
+            store.as_str()
+        ));
     }
     None
 }
@@ -186,10 +189,13 @@ pub struct SetupConfigPatch {
 fn validate_patch(patch: &SetupConfigPatch) -> Vec<String> {
     let mut problems = Vec::new();
     if let Some(mode) = patch.store_mode.as_deref()
-        && !matches!(mode, "external" | "spawned-mem" | "embedded-mem")
+        && !matches!(
+            mode,
+            "external" | "spawned-rocksdb" | "spawned-mem" | "embedded-mem"
+        )
     {
         problems.push(format!(
-            "store_mode 只认 external / spawned-mem / embedded-mem，收到 {mode:?}"
+            "store_mode 只认 external / spawned-rocksdb / spawned-mem / embedded-mem，收到 {mode:?}"
         ));
     }
     if let Some(port) = patch.v_port.as_deref()
@@ -301,11 +307,11 @@ fn u32_array(values: &[u32]) -> toml_edit::Array {
     array
 }
 
-/// 合并后的整份文档还满足「写进去不会必然坏」吗？目前只有一条：`spawned-mem` 必须带
-/// 真实本机地址——`resolve_bind` 对空 `v_ip` 会兜成 127.0.0.1，但 `v_port=0`（未设置
-/// 哨兵）会把内存库绑到端口 0，下一次**正常启动**必然死在连库上（external 留空则只是
-/// 进设置模式，安全，不拦）。逐补丁校验（[`validate_patch`]）看不到文件里的旧值，
-/// 这一条只能在合并后判。
+/// 合并后的整份文档还满足「写进去不会必然坏」吗？目前只有一条：自带两档
+/// （`spawned-mem` / `spawned-rocksdb`）必须带真实本机地址——`resolve_bind` 对空 `v_ip`
+/// 会兜成 127.0.0.1，但 `v_port=0`（未设置哨兵）会把库绑到端口 0，下一次**正常启动**
+/// 必然死在连库上（external 留空则只是进设置模式，安全，不拦——出厂形态正是它）。
+/// 逐补丁校验（[`validate_patch`]）看不到文件里的旧值，这一条只能在合并后判。
 fn merged_document_problem(document: &toml_edit::DocumentMut) -> Option<String> {
     let key_str = |key: &str| -> Option<String> {
         let item = document.get(key)?;
@@ -314,18 +320,23 @@ fn merged_document_problem(document: &toml_edit::DocumentMut) -> Option<String> 
         }
         item.as_integer().map(|number| number.to_string())
     };
-    if key_str("store_mode").as_deref() == Some("spawned-mem") {
+    let store = key_str("store_mode").unwrap_or_default();
+    let default_port = match store.as_str() {
+        "spawned-mem" => Some("8009"),
+        "spawned-rocksdb" => Some("8010"),
+        _ => None,
+    };
+    if let Some(default_port) = default_port {
         let ip_blank = key_str("v_ip").unwrap_or_default().is_empty();
         let port = key_str("v_port")
             .and_then(|port| port.parse::<u16>().ok())
             .unwrap_or(0);
         if ip_blank || port == 0 {
-            return Some(
-                "store_mode=spawned-mem（试用模式）也要一个真实本机地址来放内存库：\
-                 v_ip / v_port 不能留空（向导默认 127.0.0.1:8009）。落盘的话下一次启动会把库\
-                 绑到端口 0 而必然失败，所以拦在写盘前，一个字都没写。"
-                    .to_string(),
-            );
+            return Some(format!(
+                "store_mode={store}（自带存储）也要一个真实本机地址来放库：\
+                 v_ip / v_port 不能留空（向导默认 127.0.0.1:{default_port}）。落盘的话下一次\
+                 启动会把库绑到端口 0 而必然失败，所以拦在写盘前，一个字都没写。"
+            ));
         }
     }
     None
@@ -915,10 +926,12 @@ mod tests {
 
     // ---------- 判据 ----------
 
-    /// 设置模式判据真值表：只有「project_path 缺/不存在」与「external 且地址留空」两条。
-    /// spawned-mem 不需要地址；地址填了但连不上不在判据里（那是运行期的事）。
+    /// 设置模式判据真值表：只有「project_path 缺/不存在」与「需要端点的档位地址留空」
+    /// 两条。embedded-mem 不需要地址；spawn 两档空地址是必坏形状（bind 端口 0 /
+    /// `ws://:0`），进设置模式当逃生门（ADR-070）；地址填了但连不上不在判据里
+    /// （那是运行期的事）。
     #[test]
-    fn setup_mode_triggers_on_missing_project_path_or_blank_external_address() {
+    fn setup_mode_triggers_on_missing_project_path_or_blank_endpoint_address() {
         use crate::options::StoreMode;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -927,6 +940,7 @@ mod tests {
         // project_path 缺/不存在：任何 store 形态都进设置模式。
         for store in [
             StoreMode::External,
+            StoreMode::SpawnedRocks,
             StoreMode::SpawnedMem,
             StoreMode::EmbeddedMem,
         ] {
@@ -936,13 +950,18 @@ mod tests {
                 setup_mode_reason_for(store, "Z:/does/not/exist-9f2c", "127.0.0.1", 8010).is_some()
             );
         }
-        // external + 地址未设置（出厂形态：v_ip 空、v_port=0 哨兵）= 设置模式；补齐即正常。
-        assert!(setup_mode_reason_for(StoreMode::External, real, "", 0).is_some());
-        assert!(setup_mode_reason_for(StoreMode::External, real, "127.0.0.1", 0).is_some());
-        assert!(setup_mode_reason_for(StoreMode::External, real, "", 8010).is_some());
-        assert!(setup_mode_reason_for(StoreMode::External, real, "127.0.0.1", 8010).is_none());
-        // 两档内存形态不需要外部地址。
-        assert!(setup_mode_reason_for(StoreMode::SpawnedMem, real, "", 0).is_none());
+        // 需要端点的三档 + 地址未设置（v_ip 空或 v_port=0 哨兵）= 设置模式；补齐即正常。
+        for store in [
+            StoreMode::External,
+            StoreMode::SpawnedRocks,
+            StoreMode::SpawnedMem,
+        ] {
+            assert!(setup_mode_reason_for(store, real, "", 0).is_some());
+            assert!(setup_mode_reason_for(store, real, "127.0.0.1", 0).is_some());
+            assert!(setup_mode_reason_for(store, real, "", 8010).is_some());
+            assert!(setup_mode_reason_for(store, real, "127.0.0.1", 8010).is_none());
+        }
+        // 进程内嵌那一档不需要外部地址。
         assert!(setup_mode_reason_for(StoreMode::EmbeddedMem, real, "", 0).is_none());
     }
 
@@ -1141,6 +1160,29 @@ room_key_word = ["-RM"]
         assert!(text.contains(r#"store_mode = "spawned-mem""#));
         assert!(text.contains(r#"v_port = "8009""#));
         assert!(text.contains("# 出厂注释"));
+
+        // 自带持久档同律（ADR-070）：空地址拦下、错误里带它自己的默认 8010；补齐放行。
+        let broken_rocks = SetupConfigPatch {
+            store_mode: Some("spawned-rocksdb".into()),
+            v_ip: Some("".into()),
+            v_port: Some("".into()),
+            ..Default::default()
+        };
+        let error = write_config(&path, &broken_rocks).expect_err("空地址的持久档必须被拦");
+        assert!(error.to_string().contains("spawned-rocksdb"), "{error:#}");
+        assert!(error.to_string().contains("8010"), "{error:#}");
+        let fixed_rocks = SetupConfigPatch {
+            store_mode: Some("spawned-rocksdb".into()),
+            v_ip: Some("127.0.0.1".into()),
+            v_port: Some("8010".into()),
+            ..Default::default()
+        };
+        write_config(&path, &fixed_rocks).expect("带地址的持久档放行");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains(r#"store_mode = "spawned-rocksdb""#)
+        );
     }
 
     /// PUT 的形状校验：store_mode 拼错、v_port 非数字、http_api_addr 不成形都拦在写盘前。

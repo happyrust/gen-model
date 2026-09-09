@@ -28,9 +28,10 @@
     （scripts\templates\DbOption.factory.toml：project_path 空、external 且 v_port="0" 哨兵、
     监听 0.0.0.0:9099），另落 .first-run-pending 首跑哨兵——解压首跑自动进 /setup.html 配置向导。
 
-    冒烟门（Q9，两腿）：A 腿出厂配置起服务考「设置模式 + 向导页」；B 腿本机配置全启动考
-    health + 首页。端口被占或起不来则跳过/失败并在 release.json / 产物名旁标「未冒烟」，
-    不静默放行（-StrictSmoke 改为任一腿失败即中止、不出包）。
+    冒烟门（Q9，三腿）：A 腿出厂配置起服务考「设置模式 + 向导页」；B 腿本机配置全启动考
+    health + 首页；C 腿本机配置改 spawned-rocksdb@18010 考「自带持久库」（ADR-070：
+    medium/durable + .surreal 目录落盘）。端口被占或起不来则跳过/失败并在 release.json /
+    产物名旁标「未冒烟」，不静默放行（-StrictSmoke 改为任一腿失败即中止、不出包）。
 
     资源不进包的部分（见 ADR-068）：SurrealDB 数据目录与源模型不打入 zip。
 
@@ -273,7 +274,9 @@ Write-Output 'Prior installation restored; files and database were not replaced.
 Set-Content -LiteralPath (Join-Path $stage 'Rollback.ps1') -Value $rollback -Encoding UTF8
 
 $startSurreal = @'
-# 用包内 surreal.exe（本仓 fork 的 2.1.x）起一台本地库。仅在你没有外部 8010 库、想本地自带一台时用。
+# 用包内 surreal.exe（本仓 fork 的 2.1.x）手动起一台本地库。多数情况不必用它：
+# 配置向导第②步「新建本机持久库（spawned-rocksdb）」由服务自己拉起并管生命周期。
+# 只有 external 部署（库独立于本服务起停）才需要本脚本。
 # 注意：本包不含既有库数据；这台是空库，属性/搜索/补齐/更新仍需连回原始库或先导入数据。
 param(
     [int]$Port,
@@ -290,6 +293,8 @@ if (-not $Port) {
     $m = [regex]::Match($dbo, '(?m)^\s*v_port\s*=\s*"?(\d+)"?')
     $Port = if ($m.Success) { [int]$m.Groups[1].Value } else { 8010 }
 }
+# 出厂模板的 v_port="0" 是「未设置」哨兵，不是端口——读到 0 一律回落 8010。
+if ($Port -le 0) { $Port = 8010 }
 if (-not $Datastore) { $Datastore = 'rocksdb:' + (Join-Path $root '.surreal\ams') }
 $ver = (& $exe version) -join ' '
 if ($ver -notmatch '(\d+)\.(\d+)\.(\d+)' -or [int]$Matches[1] -ne 2) {
@@ -484,10 +489,70 @@ function Invoke-SetupSmoke {
     return $result
 }
 
+# 冒烟第三腿（ADR-070）：本机配置副本改成 spawned-rocksdb（v_port=18010，避开真 8010），
+# 考「自带持久库」主路——正常模式起来、/health 报 medium=spawned-rocksdb + durable=true、
+# rocksdb 数据目录真的落在 workspace\.surreal\。surreal 用暂存包里那只（顺带验包内二进制）。
+function Invoke-RocksSmoke {
+    $exe = Join-Path $stage 'aios-database.exe'
+    foreach ($port in 9099, 18010) {
+        $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($listener) { return [ordered]@{ status = 'skipped'; reason = "$port 被 PID $($listener.OwningProcess) 占用" } }
+    }
+    # 与 B 腿同底：整份包 workspace 拷过去（resource\surreal 的 surql、bin\surreal 都要在），
+    # 再换配置——本机真配置改档 spawned-rocksdb + 端口挪 18010，摘掉首跑哨兵。
+    $rocksWs = Join-Path $env:TEMP ("ams-rocks-smoke-" + (Get-Date -Format 'yyyyMMddHHmmss'))
+    Copy-Item -LiteralPath $wsStage -Destination $rocksWs -Recurse
+    Remove-Item -LiteralPath (Join-Path $rocksWs '.first-run-pending') -Force -ErrorAction SilentlyContinue
+    $cfg = Get-Content -LiteralPath (Join-Path $Workspace 'DbOption.toml') -Raw
+    $cfg = $cfg -replace '(?m)^\s*store_mode\s*=.*$', ''
+    $cfg = $cfg -replace '(?m)^(\s*v_port\s*=\s*).*$', '$1"18010"'
+    $cfg = $cfg + "`r`nstore_mode = `"spawned-rocksdb`"`r`n"
+    Set-Content -LiteralPath (Join-Path $rocksWs 'DbOption.toml') -Value $cfg -Encoding utf8
+    $logDir = Join-Path $stage 'smoke-logs'
+    New-Item -ItemType Directory -Force $logDir | Out-Null
+    $env:DB_OPTION_FILE = Join-Path $rocksWs 'DbOption.toml'
+    $env:PLANT_UI_WEB_ROOT = Join-Path $stage 'web'
+    $env:AIOS_SURREAL_EXE = Join-Path $wsStage 'bin\surreal.exe'
+    Remove-Item Env:AIOS_STORE_MODE -ErrorAction SilentlyContinue
+    Remove-Item Env:AIOS_STARTUP_AUTORUN -ErrorAction SilentlyContinue
+    $proc = Start-Process -FilePath $exe -ArgumentList 'serve' -WorkingDirectory $rocksWs -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput (Join-Path $logDir 'rocks-smoke.stdout.log') -RedirectStandardError (Join-Path $logDir 'rocks-smoke.stderr.log')
+    $result = [ordered]@{ status = 'failed'; reason = 'readiness timeout' }
+    $deadline = (Get-Date).AddSeconds($SmokeTimeoutSeconds)
+    try {
+        do {
+            $proc.Refresh()
+            if ($proc.HasExited) { $result.reason = "backend exited $($proc.ExitCode)"; break }
+            try {
+                $h = Invoke-WebRequest -Uri 'http://127.0.0.1:9099/api/v1/health' -UseBasicParsing -TimeoutSec 3
+                if ($h.StatusCode -eq 200 -and $h.Content.Contains('"medium":"spawned-rocksdb"') -and $h.Content.Contains('"durable":true')) {
+                    if (Test-Path -LiteralPath (Join-Path $rocksWs '.surreal')) {
+                        $result.status = 'passed'; $result.reason = 'medium=spawned-rocksdb + durable=true + .surreal 目录真落盘'; break
+                    }
+                    $result.reason = 'health 对了但 workspace\.surreal 目录没出现'; break
+                }
+            }
+            catch {}
+            Start-Sleep -Seconds 1
+        } while ((Get-Date) -lt $deadline)
+    }
+    finally {
+        if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500 }
+        # 强杀后端不走析构，自带 surreal 会留在 18010 上——按端口收掉。
+        $orphan = Get-NetTCPConnection -LocalPort 18010 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($orphan) { Stop-Process -Id $orphan.OwningProcess -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500 }
+        Remove-Item Env:AIOS_SURREAL_EXE -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $rocksWs -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return $result
+}
+
 $setupSmoke = [ordered]@{ status = 'unknown'; reason = '' }
+$rocksSmoke = [ordered]@{ status = 'unknown'; reason = '' }
 if ($SkipSmoke) {
     $smoke = [ordered]@{ status = 'skipped'; reason = '-SkipSmoke'; url = $smoke.url; store_mode = $SmokeStoreMode }
     $setupSmoke = [ordered]@{ status = 'skipped'; reason = '-SkipSmoke' }
+    $rocksSmoke = [ordered]@{ status = 'skipped'; reason = '-SkipSmoke' }
     Write-Warn2 "冒烟门已跳过（-SkipSmoke）——产物标『未冒烟』"
 }
 else {
@@ -507,15 +572,24 @@ else {
             Write-Warn2 "冒烟未过：$($smoke.reason)（看 $stage\smoke-logs）"
         }
     }
-    if ($StrictSmoke -and (($smoke.status -eq 'failed') -or ($setupSmoke.status -eq 'failed'))) {
-        throw "冒烟未过且 -StrictSmoke，中止、不出包。（A=$($setupSmoke.status) / B=$($smoke.status)）"
+    Write-Step "冒烟门 C：自带持久库（spawned-rocksdb@18010，超时 ${SmokeTimeoutSeconds}s）"
+    $rocksSmoke = Invoke-RocksSmoke
+    switch ($rocksSmoke.status) {
+        'passed' { Write-Host "  [OK] 持久库腿通过：$($rocksSmoke.reason)" -ForegroundColor Green }
+        'skipped' { Write-Warn2 "持久库腿跳过：$($rocksSmoke.reason)" }
+        default { Write-Warn2 "持久库腿未过：$($rocksSmoke.reason)（看 $stage\smoke-logs\rocks-smoke.*.log）" }
     }
-    if (($smoke.status -eq 'failed') -or ($setupSmoke.status -eq 'failed')) {
+    $legFailed = ($smoke.status -eq 'failed') -or ($setupSmoke.status -eq 'failed') -or ($rocksSmoke.status -eq 'failed')
+    if ($StrictSmoke -and $legFailed) {
+        throw "冒烟未过且 -StrictSmoke，中止、不出包。（A=$($setupSmoke.status) / B=$($smoke.status) / C=$($rocksSmoke.status)）"
+    }
+    if ($legFailed) {
         Write-Warn2 "非严格模式：仍出包，但标『未冒烟』。"
     }
 }
 $smoke.setup_leg = $setupSmoke
-$smoked = (($smoke.status -eq 'passed') -and ($setupSmoke.status -eq 'passed'))
+$smoke.rocks_leg = $rocksSmoke
+$smoked = (($smoke.status -eq 'passed') -and ($setupSmoke.status -eq 'passed') -and ($rocksSmoke.status -eq 'passed'))
 
 # ── 6. 组 zip + sha256 清单（assets 从源直灌，省磁盘） ───────────────────────
 $free = (Get-PSDrive (Split-Path $OutDir -Qualifier).TrimEnd(':')).Free

@@ -1579,6 +1579,17 @@ fn print_startup_complete_banner(
             crate::store_process::spawned_endpoint()
                 .unwrap_or_else(|| db_option.get_version_db_conn_str())
         ),
+        crate::options::StoreMode::SpawnedRocks => println!(
+            "  存储介质：rocksdb（store_mode=spawned-rocksdb，本进程自带的 {}，数据落 {}）——\
+             活得过重启；退出收尸只杀进程，下次启动重新拉起即接上",
+            crate::store_process::spawned_endpoint()
+                .unwrap_or_else(|| db_option.get_version_db_conn_str()),
+            crate::store_process::default_rocksdb_dir(
+                &db_option.project_code,
+                &db_option.project_name
+            )
+            .display()
+        ),
         crate::options::StoreMode::External => {
             println!("  存储介质：{}", db_option.get_version_db_conn_str())
         }
@@ -1660,15 +1671,18 @@ async fn connect_configured_store(db_option: &DbOption) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `spawned-mem`：让配置里那对 `v_ip:v_port` 上有一台**本进程负责的** memory 后端 SurrealDB。
+/// `spawned-mem` / `spawned-rocksdb`：让配置里那对 `v_ip:v_port` 上有一台**本进程负责的**
+/// SurrealDB（memory 或 rocksdb 后端，由 `datastore` 说了算——两档只差这一个位置参数）。
 ///
 /// 端口上已经有东西时按 `store_process::judge_port` 那张表行事（附着 / 收孤儿 / 拒绝）。
 /// 自己起的那一台登记进程内单例，正常退出、`Ctrl+C` 与 panic 三条路都收尸；
-/// 附着到的那一台**不收**——它不是我们的。
+/// 附着到的那一台**不收**——它不是我们的。rocksdb 档收尸杀的只是进程，数据在盘上，
+/// 下次启动重新拉起即接上（ADR-070）。
 #[cfg(feature = "ws")]
 async fn ensure_own_store(
     db_option: &DbOption,
     startup: crate::store_process::StoreStartup,
+    datastore: &crate::store_process::SpawnDatastore,
 ) -> anyhow::Result<()> {
     use crate::store_process::{
         DEFAULT_READY_TIMEOUT, StoreHandle, StoreIdentity, ensure_spawned_store,
@@ -1688,6 +1702,7 @@ async fn ensure_own_store(
         &identity,
         startup,
         DEFAULT_READY_TIMEOUT,
+        datastore,
     )
     .await?;
     match handle {
@@ -1723,7 +1738,22 @@ pub async fn ensure_store_connected(
     match crate::options::store_mode() {
         crate::options::StoreMode::EmbeddedMem => connect_in_memory_store(db_option).await,
         crate::options::StoreMode::SpawnedMem => {
-            ensure_own_store(db_option, startup).await?;
+            ensure_own_store(
+                db_option,
+                startup,
+                &crate::store_process::SpawnDatastore::Memory,
+            )
+            .await?;
+            connect_configured_store(db_option).await
+        }
+        crate::options::StoreMode::SpawnedRocks => {
+            let datastore = crate::store_process::SpawnDatastore::RocksDb(
+                crate::store_process::default_rocksdb_dir(
+                    &db_option.project_code,
+                    &db_option.project_name,
+                ),
+            );
+            ensure_own_store(db_option, startup, &datastore).await?;
             connect_configured_store(db_option).await
         }
         crate::options::StoreMode::External => connect_configured_store(db_option).await,
@@ -1931,9 +1961,10 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     // local store or loading mutable process-global spatial state. `run_cli`
     // repeats this call deliberately; OnceLock makes that check idempotent.
     acquire_process_instance_lock(&db_option)?;
-    // 设置模式（配置向导，计划 2026-09-09-setup-wizard-web-frontend.md / ADR-069）：
-    // 配置无效（project_path 缺/不存在，或 external 且库地址留空——出厂模板正是这个
-    // 形态）时，下面的连库与监控目录解析必死，而且死在 HTTP 起来之前，向导页根本
+    // 设置模式（配置向导，计划 2026-09-09-setup-wizard-web-frontend.md / ADR-069，
+    // 判据在 ADR-070 扩到 spawn 两档）：配置无效（project_path 缺/不存在，或需要端点
+    // 的档位库地址留空——external 空地址是出厂模板形态，spawn 档空地址是必坏手改
+    // 形状）时，下面的连库与监控目录解析必死，而且死在 HTTP 起来之前，向导页根本
     // 送不出去。所以在这里拐进最小启动臂：不连库、不扫描，只绑 HTTP 供 /setup.html
     // 与 setup API；配置修好经 restart 口交接后，新进程自然走正常启动。
     // 库地址**填了但连不上**不算配置无效——那照旧走下面的正常失败，不盖真故障。

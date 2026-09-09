@@ -145,7 +145,10 @@ impl PersistTarget<'_> {
     pub fn process() -> PersistTarget<'static> {
         let medium = if cfg!(feature = "ws") {
             match crate::options::store_mode() {
-                crate::options::StoreMode::External => PersistMedium::RocksDb,
+                // 自带落盘档归 RocksDb：这枚枚举要紧的是「活得过重启」，不是「在不在外面」。
+                crate::options::StoreMode::External | crate::options::StoreMode::SpawnedRocks => {
+                    PersistMedium::RocksDb
+                }
                 crate::options::StoreMode::SpawnedMem => PersistMedium::SpawnedMem,
                 crate::options::StoreMode::EmbeddedMem => PersistMedium::EmbeddedMem,
             }
