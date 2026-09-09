@@ -72,6 +72,12 @@ def ops(result: dict) -> list[dict]:
 def op_for(result: dict, wanted: str) -> dict | None:
     return next((operation for operation in ops(result) if operation["refno"] == wanted), None)
 
+def metadata_only(operation: dict) -> bool:
+    if operation.get("added") or operation.get("deleted") or operation.get("modified"):
+        return False
+    keys = set(operation.get("modified_explicit", {}))
+    return keys <= {"CACHID"} or (operation.get("noun") == "DBMDAT" and keys <= {"DBMVAL"})
+
 def run_macro(macro: Path, label: str) -> dict:
     output = evidence / f"{label}-driver"
     command = [
@@ -107,10 +113,12 @@ try:
     summary["apply_driver"] = run_macro(apply_macro, "apply")
     apply_header = header()
     apply_sesno = int(apply_header["latest_sesno"])
-    if apply_sesno != before_sesno + 1:
-        raise AssertionError(f"apply session must be {before_sesno + 1}, got {apply_sesno}")
+    if apply_sesno <= before_sesno:
+        raise AssertionError(f"apply must create a session after {before_sesno}, got {apply_sesno}")
     apply_element = element(apply_sesno)
-    apply_net = semantic(apply_sesno, apply_sesno)
+    # E3D may append a trailing DBMDAT bookkeeping session when the driver exits.
+    # Validate the entire leg instead of assuming one SAVEWORK equals one session.
+    apply_net = semantic(before_sesno + 1, apply_sesno)
     apply_op = op_for(apply_net, refno)
     if apply_op is None or apply_op["op"] != "modified":
         raise AssertionError(f"apply must report {refno} modified: {apply_net['counts']}")
@@ -127,8 +135,10 @@ finally:
             summary["restore_driver"] = run_macro(restore_macro, "restore")
         restore_header = header()
         restore_sesno = int(restore_header["latest_sesno"])
+        if restore_sesno <= apply_sesno:
+            raise AssertionError(f"restore must create a session after {apply_sesno}, got {restore_sesno}")
         restore_element = element(restore_sesno)
-        restore_net = semantic(restore_sesno, restore_sesno)
+        restore_net = semantic(apply_sesno + 1, restore_sesno)
         restore_op = op_for(restore_net, refno)
         combined = semantic(before_sesno + 1, restore_sesno)
         combined_op = op_for(combined, refno)
@@ -140,9 +150,9 @@ finally:
             raise AssertionError(f"restore must report {refno} modified: {restore_net['counts']}")
         if combined_op is not None:
             raise AssertionError(f"apply+restore must cancel target business change: {combined_op}")
-        non_metadata = [operation for operation in ops(combined) if set(operation.get("modified_explicit", {})) - {"CACHID"}]
+        non_metadata = [operation for operation in ops(combined) if not metadata_only(operation)]
         if non_metadata:
-            raise AssertionError(f"combined window has non-CACHID explicit changes: {non_metadata}")
+            raise AssertionError(f"combined window has business changes after restore: {non_metadata}")
         summary["restore"] = {"header": restore_header, "element": restore_element, "net_window": restore_net}
         summary["combined"] = combined
         summary["rollback"] = {"command": summary.get("restore_driver", {}).get("command"), "verified": True}

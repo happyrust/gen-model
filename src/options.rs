@@ -70,6 +70,11 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub startup_autorun: Option<bool>,
 
+    /// Automatically initialize newly discovered dbnums. Default false;
+    /// existing databases and explicit manual initialization remain eligible.
+    #[serde(default)]
+    pub auto_initialize_new_dbnums: Option<bool>,
+
     /// 数据增量批次消费（默认 `true`）。关闭时仍扫描、入队，但 worker 不领取批次。
     #[serde(default)]
     pub data_incremental: Option<bool>,
@@ -95,11 +100,11 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub room_incremental: Option<bool>,
 
-    /// 常驻房间模型（默认 `false`，计划 `docs/plans/2026-09-07-resident-room-model-plan.md`）。
+    /// 常驻房间模型（默认 `true`，计划 `docs/plans/2026-09-07-resident-room-model-plan.md`）。
     ///
     /// 开着时启动最前段（空间树装载之后、watcher / worker 之前）建一份进程内的房间→面板
     /// 拓扑与在册面板几何，范围是 MDB 全部设计库、不受 `watch_dbnums` 与上弦位约束；
-    /// 关着时一行行为不变。详见 [`room_resident_model`]。
+    /// 显式关掉时走兼容读取路径。详见 [`room_resident_model`]。
     #[serde(default)]
     pub room_resident_model: Option<bool>,
 
@@ -202,6 +207,12 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub model_skip_metadata_only_changes: Option<bool>,
 
+    /// 刚体前移便宜路径（ADR-066，**默认关**，2026-09-08）：一窗里只动了 `POS / ORI` 的锚点名下、
+    /// 已安定的生成根不整根重算，改为对投影记录左乘刚体增量并按 regen 同款发布一次。
+    /// `true` 才开；关着时窗口规划器的产物与今天逐位相同。详见 [`model_transform_cheap_path`]。
+    #[serde(default)]
+    pub model_transform_cheap_path: Option<bool>,
+
     /// 结构连接正向级联（联动对齐计划 C2，默认关闭）：窗口里改了 `SJOI` / `FIXING` / `SCTN` …
     /// 时，把 `CREF` / `JOIS` / `JOIE` / `CFRA` 回指成立的对端的生成根一起重算。
     /// 详见 [`model_structural_connection_cascade`]。
@@ -249,6 +260,7 @@ impl From<DbOption> for DbOptionExt {
             http_api_cors: None,
             data_batch_workers: None,
             startup_autorun: None,
+            auto_initialize_new_dbnums: None,
             data_incremental: None,
             model_incremental: None,
             model_incremental_types: None,
@@ -279,6 +291,7 @@ impl From<DbOption> for DbOptionExt {
             model_significant_over_point: None,
             model_entry_drop_no_geometry: None,
             model_skip_metadata_only_changes: None,
+            model_transform_cheap_path: None,
             model_structural_connection_cascade: None,
             model_cable_endpoint_cascade: None,
             model_design_reference_cascade: None,
@@ -314,6 +327,8 @@ struct DbOptionExtFields {
     data_batch_workers: Option<usize>,
     #[serde(default)]
     startup_autorun: Option<bool>,
+    #[serde(default)]
+    auto_initialize_new_dbnums: Option<bool>,
     #[serde(default)]
     data_incremental: Option<bool>,
     #[serde(default)]
@@ -373,6 +388,8 @@ struct DbOptionExtFields {
     model_entry_drop_no_geometry: Option<bool>,
     #[serde(default)]
     model_skip_metadata_only_changes: Option<bool>,
+    #[serde(default)]
+    model_transform_cheap_path: Option<bool>,
     #[serde(default)]
     model_structural_connection_cascade: Option<bool>,
     #[serde(default)]
@@ -537,6 +554,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         http_api_cors: ext.http_api_cors.clone(),
         data_batch_workers: ext.data_batch_workers,
         startup_autorun: ext.startup_autorun,
+        auto_initialize_new_dbnums: ext.auto_initialize_new_dbnums,
         data_incremental: ext.data_incremental,
         model_incremental: ext.model_incremental,
         model_incremental_types: ext.model_incremental_types.clone(),
@@ -567,6 +585,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_significant_over_point: ext.model_significant_over_point,
         model_entry_drop_no_geometry: ext.model_entry_drop_no_geometry,
         model_skip_metadata_only_changes: ext.model_skip_metadata_only_changes,
+        model_transform_cheap_path: ext.model_transform_cheap_path,
         model_structural_connection_cascade: ext.model_structural_connection_cascade,
         model_cable_endpoint_cascade: ext.model_cable_endpoint_cascade,
         model_design_reference_cascade: ext.model_design_reference_cascade,
@@ -1025,47 +1044,105 @@ fn probe_geometry_workers_config(configured: Option<OsString>) -> Result<Option<
 /// 环境变量名：一次性覆盖 [`startup_autorun`]，不必改配置文件。
 pub const STARTUP_AUTORUN_ENV: &str = "AIOS_STARTUP_AUTORUN";
 
+pub const AUTO_INITIALIZE_NEW_DBNUMS_ENV: &str = "AIOS_AUTO_INITIALIZE_NEW_DBNUMS";
+
+static AUTO_INITIALIZE_NEW_DBNUMS_CLI: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+pub fn enable_auto_initialize_new_dbnums() {
+    let _ = AUTO_INITIALIZE_NEW_DBNUMS_CLI.set(true);
+}
+
+/// 单测里摁住 [`auto_initialize_new_dbnums`] 的进程内覆盖（0 = 按配置来）。
+/// 形状与理由同 [`RoomIncrementalOverride`]：live 用例要在同一进程里先钉「缺省
+/// 不初始化新库」、再钉「开关打开走基线」，而 `set_var` 在 2024 edition 是数据
+/// 竞争；CLI 那个 OnceLock 又是一次性的，翻不回来。
+#[cfg(test)]
+static AUTO_INITIALIZE_NEW_DBNUMS_OVERRIDE: std::sync::atomic::AtomicU8 =
+    std::sync::atomic::AtomicU8::new(0);
+
+#[cfg(test)]
+static AUTO_INITIALIZE_NEW_DBNUMS_OVERRIDE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// 覆盖的作用域守卫：离开作用域即恢复「按配置来」，用例之间不会互相串。
+#[cfg(test)]
+pub(crate) struct AutoInitializeNewDbnumsOverride {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl AutoInitializeNewDbnumsOverride {
+    pub(crate) fn set(on: bool) -> Self {
+        let lock = AUTO_INITIALIZE_NEW_DBNUMS_OVERRIDE_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        AUTO_INITIALIZE_NEW_DBNUMS_OVERRIDE
+            .store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
+        Self { _lock: lock }
+    }
+}
+
+#[cfg(test)]
+impl Drop for AutoInitializeNewDbnumsOverride {
+    fn drop(&mut self) {
+        AUTO_INITIALIZE_NEW_DBNUMS_OVERRIDE.store(0, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// Watch scope selects databases; it never enables cold initialization.
+pub fn auto_initialize_new_dbnums() -> bool {
+    #[cfg(test)]
+    match AUTO_INITIALIZE_NEW_DBNUMS_OVERRIDE.load(std::sync::atomic::Ordering::SeqCst) {
+        1 => return true,
+        2 => return false,
+        _ => {}
+    }
+    AUTO_INITIALIZE_NEW_DBNUMS_CLI
+        .get()
+        .copied()
+        .unwrap_or_else(|| {
+            effective_auto_initialize_new_dbnums(
+                load_ext_fields().auto_initialize_new_dbnums,
+                std::env::var(AUTO_INITIALIZE_NEW_DBNUMS_ENV)
+                    .ok()
+                    .as_deref(),
+            )
+        })
+}
+
+fn effective_auto_initialize_new_dbnums(
+    configured: Option<bool>,
+    env_override: Option<&str>,
+) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(false)
+}
+
 /// 环境变量名：数据面读哪儿（ADR-053 direct 生成读 / ADR-058 D8）。
 ///
-/// 认两个值：`direct`（e3d-io 直接读库文件，**默认**）与 `db`（legacy：读 SurrealDB 的
-/// `pe` / `ATT_*` 行、模型计划走 `pe` 打头的旧规划器）。它只回答「数据面读哪儿」——
-/// watcher / worker / 模型复核 / 房间与读模式无关（refactor plan S5，2026-09-04）。
+/// 数据面**只有一条读路由**：`direct`（e3d-io 直接读库文件）。`db` 那一档——读 SurrealDB 的
+/// `pe` / `ATT_*` 行、模型计划走 `pe` 打头的旧规划器——2026-09-04 起只是退路，
+/// **2026-09-08 随 refactor plan S4 退役**（ADR-058 D8 / 09-04 审核 S5-4；退役前最后一版
+/// 打了 git tag `legacy-db-read-route-pe-planner-last`）。这个环境变量从此只剩「认得出 /
+/// 认不出」两种状态：`direct`（与不设同义）不出声，其余值——**包括 `db`**——按认不出的值处理：
+/// 出声、按未设置。没有任何代码再问「是不是 direct」。
 pub const DATA_READ_MODE_ENV: &str = "AIOS_DATA_READ_MODE";
 
-/// 数据面是否走 direct 读路由。**默认 `true`**（2026-09-04 用户拍板：direct 是默认形态，
-/// 全部默认切换过来）。此前要显式 `AIOS_DATA_READ_MODE=direct` 才开、不设即旧 db 形态——
-/// 生产早就跑 direct，而每条脚本 / 每次起服务都得记着带这个变量，忘了就静默退回退役形态。
-///
-/// 只有显式 `AIOS_DATA_READ_MODE=db` 才退回 legacy db 读路由（ADR-058 D8 已宣布退役，
-/// 只留作退路，与 S5-4 的 git tag 一起收）。认不出的值当没设、走默认，并由
-/// [`data_read_mode_notice`] 出声——拼错一个词就静默换掉读底座是更坏的结果。
-pub fn direct_read_mode() -> bool {
-    effective_direct_read_mode(std::env::var(DATA_READ_MODE_ENV).ok().as_deref())
-}
-
-fn effective_direct_read_mode(env_value: Option<&str>) -> bool {
-    !matches!(parse_data_read_mode(env_value), Some(DataReadMode::Db))
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DataReadMode {
-    Direct,
-    Db,
-}
-
-/// `Some(mode)` = 认出来了；`None` = 没设，或设成认不出的值（两者都走默认 direct，
-/// 但后者要出声，见 [`data_read_mode_notice`]）。
-fn parse_data_read_mode(env_value: Option<&str>) -> Option<DataReadMode> {
+/// `Some(())` = 认出来了（只认 `direct`）；`None` = 没设，或设成认不出的值（含退役的 `db`）。
+/// 两者行为相同——数据面本来就只有 direct 一条路——差别只在后者要出声，
+/// 见 [`data_read_mode_notice`]。
+fn parse_data_read_mode(env_value: Option<&str>) -> Option<()> {
     match env_value?.trim().to_ascii_lowercase().as_str() {
-        "direct" => Some(DataReadMode::Direct),
-        "db" => Some(DataReadMode::Db),
+        "direct" => Some(()),
         _ => None,
     }
 }
 
 /// `AIOS_DATA_READ_MODE` 设了却认不出来时的一句告警（[`retired_net_window_notice`] 同款：
 /// 静默吃掉一个设了的开关是最高级别缺陷之一）。返回 `Some` 时调用方必须把它打出来；
-/// 没设、设对、设成空白都回 `None`。
+/// 没设、设 `direct`、设成空白都回 `None`。`db` 从 2026-09-08 起也走这里——它不再是一档形态，
+/// 而是一个认不出的值：写了它的部署要知道自己**没有**回到 legacy，而是照常跑 direct。
 pub fn data_read_mode_notice() -> Option<String> {
     data_read_mode_notice_for(std::env::var(DATA_READ_MODE_ENV).ok().as_deref())
 }
@@ -1075,10 +1152,19 @@ fn data_read_mode_notice_for(env_value: Option<&str>) -> Option<String> {
     if raw.trim().is_empty() || parse_data_read_mode(Some(raw)).is_some() {
         return None;
     }
-    Some(format!(
-        "⚠ 环境变量 {DATA_READ_MODE_ENV} = {raw:?} 认不出来（只认 direct / db），按未设置处理：\
-         数据面走默认的 direct 读路由。要退回 legacy db 形态请写 {DATA_READ_MODE_ENV}=db"
-    ))
+    let retired = raw.trim().eq_ignore_ascii_case("db");
+    Some(if retired {
+        format!(
+            "⚠ 环境变量 {DATA_READ_MODE_ENV} = {raw:?}：legacy db 读路由已于 2026-09-08 退役\
+             （ADR-058 D8；最后一版在 git tag legacy-db-read-route-pe-planner-last），按未设置处理：\
+             数据面照常走 direct 读路由。去掉这个环境变量即可"
+        )
+    } else {
+        format!(
+            "⚠ 环境变量 {DATA_READ_MODE_ENV} = {raw:?} 认不出来（只认 direct），按未设置处理：\
+             数据面走 direct 读路由（唯一形态）"
+        )
+    })
 }
 
 /// 启动是否自动干活（`DbOption.toml` 的 `startup_autorun`，**默认 true**）。
@@ -1086,8 +1172,9 @@ fn data_read_mode_notice_for(env_value: Option<&str>) -> Option<String> {
 /// 关着时启动只做「让库能用」的那些幂等自愈，不消费队列、不做全量房间重建：
 /// 发现照常（重扫入队，队列是准的），执行等人点头。开着时是历史行为。
 ///
-/// 默认取真（ADR-023）：启动重扫检出的未解析库与幽灵水位必须直接进入初始化解析。
-/// 需要「起来先看看」的部署仍可显式配置或用环境变量写 `false`。
+/// 默认取真，继续维护已初始化库。新库是否自动入队由
+/// [`auto_initialize_new_dbnums`] 单独控制，默认等待前端手动初始化。
+/// 需要连旧库也暂停启动消费的部署可显式配置 `false`。
 ///
 /// 环境变量 [`STARTUP_AUTORUN_ENV`] 压过配置，认 `1/true/yes/on` 与
 /// `0/false/no/off`（大小写不敏感）；认不出的值一律当没设，退回配置值——
@@ -1241,7 +1328,7 @@ fn effective_spatial_compute(env_override: Option<&str>) -> bool {
 /// 开关取值进程内固定（配置经 `load_ext_fields` 的 `OnceLock` 只读一次，环境变量
 /// 随进程出生定死），改开关必然伴随重启；而增量链的两条空间提交（暂存尾事务、
 /// 直写 durable 事务）无论开关都递增 spatial epoch——关着开关只摘 `room_recalc`
-/// 语句，epoch 照 bump（见 `occ_generate` 直写分支的注释）——于是「关闭期间发生过
+/// 语句，epoch 照 bump（见 `aabb_refresh` 直写分支的注释）——于是「关闭期间发生过
 /// 任何空间提交」⇒ 启动的 `reconcile_startup_room_build` stamp 对账必失配 ⇒ 全量
 /// 重建必跑；对账相等则说明关闭期间真的无可回补。全量/手动生成路径不递增 epoch，
 /// 但本就以整体房间重建收尾，不在此闭环内。唯一要盯的：启动全量重建失败只降级
@@ -1308,14 +1395,14 @@ fn effective_room_incremental(configured: Option<bool>, env_override: Option<&st
 /// 环境变量名：一次性覆盖 [`room_resident_model`]，不必改配置文件。
 pub const ROOM_RESIDENT_MODEL_ENV: &str = "AIOS_ROOM_RESIDENT_MODEL";
 
-/// 常驻房间模型开不开（`DbOption.toml` 的 `room_resident_model`，**默认 false**）。
+/// 常驻房间模型开不开（`DbOption.toml` 的 `room_resident_model`，**默认 true**）。
 ///
 /// 计划 `docs/plans/2026-09-07-resident-room-model-plan.md`（Q12 (a)）：房间→面板拓扑与在册
 /// 面板几何进程内常驻，库里的 `room_published_topology` / `room_published_inst` 从此是存储与
 /// 参照。开着时 `run_cli` 在空间树装载之后、watcher / worker 之前跑一次
 /// `room_resident::initialize_at_startup`——只认 `spatial_compute`，不看 `startup_data_ready` /
 /// 上弦位 / `startup_autorun` / `watch_dbnums`（第 5 轮 Q17–Q20：房间是参照系，不是增量的一部分）。
-/// 关着时每一处都走今天的路，一字不动。真库门（P5）过了再翻默认。
+/// 关着时走兼容读取路径；环境变量仍可为单次诊断显式关闭。
 ///
 /// 环境变量 [`ROOM_RESIDENT_MODEL_ENV`] 压过配置，取值规则同 [`startup_autorun`]。
 pub fn room_resident_model() -> bool {
@@ -1329,7 +1416,7 @@ fn effective_room_resident_model(configured: Option<bool>, env_override: Option<
     env_override
         .and_then(parse_bool_flag)
         .or(configured)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// 环境变量名：一次性覆盖 [`model_xgeometry_gate`]，不必改配置文件。
@@ -1444,6 +1531,40 @@ fn effective_model_skip_metadata_only_changes(
         .and_then(parse_bool_flag)
         .or(configured)
         .unwrap_or(true)
+}
+
+/// 环境变量名：一次性覆盖 [`model_transform_cheap_path`]，不必改配置文件。
+pub const MODEL_TRANSFORM_CHEAP_PATH_ENV: &str = "AIOS_MODEL_TRANSFORM_CHEAP_PATH";
+
+/// 刚体前移便宜路径开不开（`DbOption.toml` 的 `model_transform_cheap_path`，**默认 false**，
+/// ADR-066，2026-09-08）。
+///
+/// 开着时窗口规划器多一个 `transform` 桶：一窗里只动了 `POS / ORI`（e3d-model
+/// `ElementDiff::is_placement_only`）、且不在路由容器 / 点容器 / `CWBRAN` 之内的锚点，其名下
+/// **已安定**的生成根不再整根重算，改为在 dbnum Task 里对投影记录左乘刚体增量
+/// `Δ = W_T(a)·W_S(a)⁻¹`（规划期算好随计划携带），再按 regen 同一条路发布一次（同锁、同守卫、
+/// 同回执、同房间 / 空间收尾）。关着时 `transform` 桶为空、一切进 `regen`，计划与今天逐位相同。
+///
+/// 这是「少算」方向的开关，而且一次实证都还没有（对拍门在 ADR-066 §验收），所以**默认关**：
+/// ams8000 与 live #2 的对拍过了再翻默认。环境变量 [`MODEL_TRANSFORM_CHEAP_PATH_ENV`] 压过配置，
+/// 取值规则同 [`startup_autorun`]。与元数据门 [`model_skip_metadata_only_changes`] 彼此独立。
+pub fn model_transform_cheap_path() -> bool {
+    effective_model_transform_cheap_path(
+        load_ext_fields().model_transform_cheap_path,
+        std::env::var(MODEL_TRANSFORM_CHEAP_PATH_ENV)
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn effective_model_transform_cheap_path(
+    configured: Option<bool>,
+    env_override: Option<&str>,
+) -> bool {
+    env_override
+        .and_then(parse_bool_flag)
+        .or(configured)
+        .unwrap_or(false)
 }
 
 /// 环境变量名：一次性覆盖 [`model_structural_connection_cascade`]，不必改配置文件。
@@ -1911,6 +2032,24 @@ mod tests {
         assert!(effective_startup_autorun(Some(true), None));
     }
 
+    #[test]
+    fn new_dbnum_initialization_requires_explicit_opt_in() {
+        assert!(!effective_auto_initialize_new_dbnums(None, None));
+        assert!(!effective_auto_initialize_new_dbnums(None, Some("typo")));
+        assert!(effective_auto_initialize_new_dbnums(Some(true), None));
+        assert!(effective_auto_initialize_new_dbnums(
+            Some(false),
+            Some("on")
+        ));
+        assert!(!effective_auto_initialize_new_dbnums(
+            Some(true),
+            Some("off")
+        ));
+        let fields: DbOptionExtFields =
+            toml::from_str("auto_initialize_new_dbnums = true").unwrap();
+        assert_eq!(fields.auto_initialize_new_dbnums, Some(true));
+    }
+
     /// 环境变量压过配置，两个方向都要能压——只认「设了就是开」的话，配置里
     /// 写死 `true` 的部署就没有一次性冷启动的办法了。
     #[test]
@@ -1931,30 +2070,35 @@ mod tests {
         assert!(effective_startup_autorun(None, Some("")));
     }
 
-    /// 2026-09-04 拍板：direct 是默认形态。不设、设 `direct`、设认不出的值都走 direct；
-    /// 只有显式 `db` 才退回退役的 legacy 读路由（ADR-058 D8）。
+    /// 2026-09-08（refactor plan S4 / Q24）：数据面只剩 direct 一条读路由。`direct` 与不设
+    /// 同义；`db` 不再是一档形态，与拼错的值同一待遇——认不出。
     #[test]
-    fn direct_is_the_default_read_mode_and_db_is_the_explicit_legacy_exit() {
-        assert!(effective_direct_read_mode(None));
-        assert!(effective_direct_read_mode(Some("direct")));
-        assert!(effective_direct_read_mode(Some(" DIRECT ")));
-        assert!(!effective_direct_read_mode(Some("db")));
-        assert!(!effective_direct_read_mode(Some(" Db ")));
-        assert!(effective_direct_read_mode(Some("")));
-        assert!(effective_direct_read_mode(Some("dierct")));
+    fn direct_is_the_only_read_route_and_db_is_no_longer_recognised() {
+        assert_eq!(parse_data_read_mode(None), None);
+        assert_eq!(parse_data_read_mode(Some("direct")), Some(()));
+        assert_eq!(parse_data_read_mode(Some(" DIRECT ")), Some(()));
+        assert_eq!(parse_data_read_mode(Some("db")), None);
+        assert_eq!(parse_data_read_mode(Some(" Db ")), None);
+        assert_eq!(parse_data_read_mode(Some("")), None);
+        assert_eq!(parse_data_read_mode(Some("dierct")), None);
     }
 
-    /// 拼错的读模式值走默认但必须出声；没设、设对、设成空白都不吵。
+    /// 认不出的读模式值走默认但必须出声；没设、设 `direct`、设成空白都不吵。`db` 要出声，
+    /// 且那句话得说清「已退役、照常 direct、去掉变量」——写着它的部署不能以为自己回到了 legacy。
     #[test]
     fn an_unrecognised_read_mode_value_is_announced_not_swallowed() {
         assert_eq!(data_read_mode_notice_for(None), None);
         assert_eq!(data_read_mode_notice_for(Some("direct")), None);
-        assert_eq!(data_read_mode_notice_for(Some("db")), None);
         assert_eq!(data_read_mode_notice_for(Some("  ")), None);
         let notice = data_read_mode_notice_for(Some("dierct")).expect("拼错要出声");
         assert!(
-            notice.contains("dierct") && notice.contains("direct") && notice.contains("=db"),
+            notice.contains("dierct") && notice.contains("direct") && !notice.contains("=db"),
             "{notice}"
+        );
+        let retired = data_read_mode_notice_for(Some(" Db ")).expect("退役的值要出声");
+        assert!(
+            retired.contains("退役") && retired.contains("direct") && retired.contains("去掉"),
+            "{retired}"
         );
     }
 
@@ -2291,6 +2435,27 @@ mod tests {
         ));
     }
 
+    /// 刚体前移便宜路径默认关（ADR-066 D7：少算方向、尚无实证），配置能开、环境变量两个方向
+    /// 都能压，拼错的值退回配置值。
+    #[test]
+    fn the_transform_cheap_path_is_off_by_default_and_can_be_turned_on() {
+        assert!(!effective_model_transform_cheap_path(None, None));
+        assert!(effective_model_transform_cheap_path(Some(true), None));
+        assert!(!effective_model_transform_cheap_path(Some(true), Some("0")));
+        assert!(effective_model_transform_cheap_path(
+            Some(false),
+            Some("on")
+        ));
+        assert!(!effective_model_transform_cheap_path(
+            Some(false),
+            Some("maybe")
+        ));
+        assert!(effective_model_transform_cheap_path(
+            Some(true),
+            Some("maybe")
+        ));
+    }
+
     /// 两个方向都要能被环境变量压住：配置里写死 `true` 的部署也得有办法临时关掉，
     /// 反过来排查房间问题时也得能临时开一次而不改文件。拼错的值退回配置值，
     /// 理由同 [`effective_startup_autorun`]。
@@ -2304,17 +2469,17 @@ mod tests {
         assert!(effective_room_incremental(None, Some("ture")));
     }
 
-    /// 常驻房间模型**默认关**（真库门过了才翻，计划 Q12 (a)）：缺配置、拼错的环境变量都
-    /// 不算开；配置开了环境变量能临时关，反过来也能临时开一次而不改文件。
+    /// 常驻房间模型**默认开**：缺配置、拼错的环境变量都保持默认；配置或环境变量仍能
+    /// 显式关闭，环境变量优先于配置。
     #[test]
-    fn room_resident_model_is_off_unless_someone_turns_it_on() {
-        assert!(!effective_room_resident_model(None, None));
+    fn room_resident_model_is_on_unless_someone_turns_it_off() {
+        assert!(effective_room_resident_model(None, None));
         assert!(effective_room_resident_model(Some(true), None));
         assert!(!effective_room_resident_model(Some(false), None));
         assert!(effective_room_resident_model(None, Some("1")));
         assert!(!effective_room_resident_model(Some(true), Some("off")));
         assert!(effective_room_resident_model(Some(true), Some("ture")));
-        assert!(!effective_room_resident_model(None, Some("ture")));
+        assert!(effective_room_resident_model(None, Some("ture")));
         assert!(
             ext_field_names()
                 .iter()

@@ -134,6 +134,22 @@ impl ModelRefreshPolicy {
         let failure_policy =
             crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback;
         crate::data_interface::batch_worker::set_active_task_stage("model_generate");
+        if let Some((round_dbnum, round_end)) =
+            crate::data_interface::batch_worker::active_data_window()
+            && round_dbnum == dbnum
+            && crate::data_interface::model_publish_queue::wait_for_task_root_acks(
+                mgr,
+                dbnum,
+                round_end.max(0) as u32,
+                roots,
+            )
+            .await?
+        {
+            return Ok(TargetedGenerationReport {
+                completed: roots.to_vec(),
+                failures: Vec::new(),
+            });
+        }
         if !memory_only {
             crate::data_interface::model_publish_queue::wait_for_dbnum(dbnum).await;
         }

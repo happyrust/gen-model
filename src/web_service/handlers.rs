@@ -7,9 +7,10 @@ use std::time::Duration;
 use aios_core::pdms_types::{RefU64, RefnoEnum};
 use anyhow::Context;
 use axum::Json;
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::http::{StatusCode, Uri, header};
+use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -228,6 +229,166 @@ fn health_status(
 /// 内嵌是为了部署：一个 exe 拷到现场就有面板，不必再同步一个目录，也不会出现
 /// 「后端升了、面板还是上一版」这种两份东西各走各的。
 const OPS_PANEL_EMBEDDED: &str = include_str!("../../web/ops.html");
+
+/// `plant-ui/web/public` 的发布包。资源保持在相邻的 plant-ui 工作树中，由
+/// `build-wasm.ps1` 生成；`include_bytes!` 使最终的 aios-database 不再依赖该目录。
+/// 运行时磁盘副本仍可覆盖这里的编译期快照。
+struct EmbeddedWebAsset {
+    path: &'static str,
+    content_type: &'static str,
+    bytes: &'static [u8],
+}
+
+const PLANT_UI_WEB: &[EmbeddedWebAsset] = &[
+    EmbeddedWebAsset {
+        path: "index.html",
+        content_type: "text/html; charset=utf-8",
+        bytes: include_bytes!("../../../plant-ui/web/public/index.html"),
+    },
+    EmbeddedWebAsset {
+        path: "config.example.json",
+        content_type: "application/json; charset=utf-8",
+        bytes: include_bytes!("../../../plant-ui/web/public/config.example.json"),
+    },
+    EmbeddedWebAsset {
+        path: "pkg/plant_ui_app.js",
+        content_type: "text/javascript; charset=utf-8",
+        bytes: include_bytes!("../../../plant-ui/web/public/pkg/plant_ui_app.js"),
+    },
+    EmbeddedWebAsset {
+        path: "pkg/plant_ui_app.d.ts",
+        content_type: "text/plain; charset=utf-8",
+        bytes: include_bytes!("../../../plant-ui/web/public/pkg/plant_ui_app.d.ts"),
+    },
+    EmbeddedWebAsset {
+        path: "pkg/plant_ui_app_bg.wasm",
+        content_type: "application/wasm",
+        bytes: include_bytes!("../../../plant-ui/web/public/pkg/plant_ui_app_bg.wasm"),
+    },
+    EmbeddedWebAsset {
+        path: "pkg/plant_ui_app_bg.wasm.d.ts",
+        content_type: "text/plain; charset=utf-8",
+        bytes: include_bytes!("../../../plant-ui/web/public/pkg/plant_ui_app_bg.wasm.d.ts"),
+    },
+    EmbeddedWebAsset {
+        path: "assets/fonts/AlibabaPuHuiTi-2-55-Regular.ttf",
+        content_type: "font/ttf",
+        bytes: include_bytes!(
+            "../../../plant-ui/web/public/assets/fonts/AlibabaPuHuiTi-2-55-Regular.ttf"
+        ),
+    },
+    EmbeddedWebAsset {
+        path: "assets/fonts/AlibabaPuHuiTi-2-65-Medium.ttf",
+        content_type: "font/ttf",
+        bytes: include_bytes!(
+            "../../../plant-ui/web/public/assets/fonts/AlibabaPuHuiTi-2-65-Medium.ttf"
+        ),
+    },
+    EmbeddedWebAsset {
+        path: "assets/fonts/AlibabaPuHuiTi-2-75-SemiBold.ttf",
+        content_type: "font/ttf",
+        bytes: include_bytes!(
+            "../../../plant-ui/web/public/assets/fonts/AlibabaPuHuiTi-2-75-SemiBold.ttf"
+        ),
+    },
+    EmbeddedWebAsset {
+        path: "assets/textures/viewport-placeholder.jpg",
+        content_type: "image/jpeg",
+        bytes: include_bytes!(
+            "../../../plant-ui/web/public/assets/textures/viewport-placeholder.jpg"
+        ),
+    },
+];
+
+fn web_content_type(path: &str) -> &'static str {
+    PLANT_UI_WEB
+        .iter()
+        .find(|asset| asset.path == path)
+        .map(|asset| asset.content_type)
+        .unwrap_or_else(|| match path.rsplit('.').next() {
+            Some("json") => "application/json; charset=utf-8",
+            Some("ron") => "text/plain; charset=utf-8",
+            Some("mesh") => "application/octet-stream",
+            _ => "application/octet-stream",
+        })
+}
+
+fn embedded_web_asset(path: &str) -> Option<&'static EmbeddedWebAsset> {
+    PLANT_UI_WEB.iter().find(|asset| asset.path == path)
+}
+
+fn web_response(content_type: &'static str, body: impl Into<Body>) -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, content_type),
+            (header::CACHE_CONTROL, "no-cache"),
+        ],
+        body.into(),
+    )
+        .into_response()
+}
+
+fn embedded_config() -> Vec<u8> {
+    let option = aios_core::get_db_option();
+    serde_json::to_vec(&json!({
+        "db": {
+            "host": option.v_ip,
+            "port": option.v_port,
+            "secure": false,
+            "namespace": option.surreal_ns,
+            "database": option.project_name,
+            "mdb": option.mdb_name,
+            "username": option.v_user,
+            "password": option.v_password,
+        },
+        // index.html maps this legacy default to window.location.origin.
+        "model_api_url": "http://127.0.0.1:8022",
+        "data_api_url": "",
+    }))
+    .expect("plant-ui configuration is serializable")
+}
+
+/// Fallback for the browser build. A supplied `PLANT_UI_WEB_ROOT` keeps the old
+/// disk-first workflow; without it every browser asset comes from the executable.
+fn disk_web_asset_path(
+    ui_root: &std::path::Path,
+    asset_root: &std::path::Path,
+    path: &str,
+) -> Option<std::path::PathBuf> {
+    if path == "assets/config/e3d.project.ron" && !ui_root.join("index.html").is_file() {
+        return None;
+    }
+    Some(if let Some(asset_path) = path.strip_prefix("assets/") {
+        asset_root.join(asset_path)
+    } else {
+        ui_root.join(path)
+    })
+}
+
+pub async fn plant_ui_web(State(state): State<AppState>, uri: Uri) -> Response {
+    let requested = uri.path().trim_start_matches('/');
+    let path = if requested.is_empty() {
+        "index.html"
+    } else {
+        requested
+    };
+    if path.split('/').any(|segment| segment == "..") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
+    if let Some(disk_path) = disk_web_asset_path(&state.ui_root, &state.asset_root, path) {
+        if let Ok(bytes) = std::fs::read(&disk_path) {
+            return web_response(web_content_type(path), bytes);
+        }
+    }
+    if path == "config.json" {
+        return web_response("application/json; charset=utf-8", embedded_config());
+    }
+    if let Some(asset) = embedded_web_asset(path) {
+        return web_response(asset.content_type, asset.bytes);
+    }
+    StatusCode::NOT_FOUND.into_response()
+}
 
 /// 面板正文与它的来源。磁盘副本优先。
 ///
@@ -568,7 +729,8 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "project": state.identity.project,
             "mdb": state.identity.mdb,
             "namespace": state.identity.namespace,
-            "data_read_mode": if crate::options::direct_read_mode() { "direct" } else { "db" },
+            // 读路由只剩 direct（2026-09-08 S4）；键留着给老客户端对形态，值是常量。
+            "data_read_mode": "direct",
             "data_face": crate::options::data_face().as_str(),
             "read_through": read_through,
             "dbnum_consistency": serde_json::Value::Null,
@@ -576,6 +738,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "started_at": crate::data_interface::task_registry::process_started_at(),
             "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
             "startup_autorun": crate::options::startup_autorun(),
+            "auto_initialize_new_dbnums": crate::options::auto_initialize_new_dbnums(),
             "data_incremental": crate::options::data_incremental(),
             "model_incremental": crate::options::model_incremental(),
             "room_incremental": crate::options::room_incremental(),
@@ -774,7 +937,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "project": state.identity.project,
         "mdb": state.identity.mdb,
         "namespace": state.identity.namespace,
-        "data_read_mode": if crate::options::direct_read_mode() { "direct" } else { "db" },
+        // 数据面读路由只剩 direct（legacy db 读路由 2026-09-08 随 refactor plan S4 退役）。
+        // 键保留：plant-ui M1 拿 `data_read_mode == "direct"` 配 `worker_alive` 判形态，
+        // 老客户端还在读它；值从此是常量。
+        "data_read_mode": "direct",
         // 数据面形态（2026-09-05 起默认 read-through）：`pe` / `ATT_*` 行是摄入来的还是
         // 随模型生成写透的。客户端拿它决定「查空」怎么说话——读透下缺行 = 还没读到，
         // 摄入下缺行 = 还在灌；`applied_sesno` 在读透下恒 0，不是落后。
@@ -788,6 +954,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 上弦（auto_work_armed=false，队列里那些行在 /queue 上是 held）、或者 worker
         // 真的死了（worker_alive）。少了中间这个字段，前两种在接口上分不出来。
         "startup_autorun": crate::options::startup_autorun(),
+        "auto_initialize_new_dbnums": crate::options::auto_initialize_new_dbnums(),
         // 三段增量的最终生效值（含环境变量覆盖）。顺序依赖由 worker 的共享阶段门
         // 保证；这里拆成三个平铺字段，面板不用猜「没活」还是「阶段关闭」。
         "data_incremental": crate::options::data_incremental(),
@@ -828,6 +995,12 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 连败到上限、重扫已停止自动重跑——水位差还在但没人再追，只有新会话或
         // 人工执行会解开；不摆出来的话它与「一直没增量」在外面看不出区别。
         "batch_failures": crate::data_interface::batch_worker::batch_failure_snapshot(),
+        // 运行期目录版本核对的最近一次回执（H1，2026-09-08；进程内，不读库）。摄入形态下
+        // 目录库不进数据批次，目录换了版只有这一条路让模型面知道：sweep 看见目录文件会话
+        // 前移 / 周期对账那一拍 / `/update/execute`。`null` = 本进程还没跑过运行期核对
+        // （启动那一次在 `initialization.startup.reconcile`）；`stale_catalogue_dbnums` 非空
+        // 且 `catalogue_cascade_degraded` 为真 = 前移了却没能精确反查，看 `catalogue_cascade`。
+        "catalogue_reconcile": crate::data_interface::model_update_pending::catalogue_reconcile_snapshot(),
         "model_drain": crate::data_interface::model_update_pending::model_drain_telemetry_snapshot(),
         "model_concurrency": crate::data_interface::model_concurrency::snapshot(),
         "geometry_concurrency": crate::fast_model::concurrency::snapshot(),
@@ -1249,6 +1422,20 @@ pub async fn update_execute(
     // this arm an `AIOS_STARTUP_AUTORUN=0` canary returns `up_to_date` forever
     // while its pre-existing room work remains stranded.
     crate::data_interface::batch_scheduler::BatchScheduler::global().arm_auto_work();
+    // 摄入形态下目录库不进数据批次（ADR-058 D1），上面那次扫描对「目录换了版」一声不响；
+    // 显式执行是人在说「现在就核」，目录版本核对随之另起任务跑一次（H1 (b)），与读透分支的
+    // `reconcile_model_coverage_at_startup` 对称。不在这里等它：反查要开 MDB 的每个设计库。
+    tokio::spawn(async {
+        crate::data_interface::model_update_pending::reconcile_catalogue_versions_now(
+            "update-execute",
+        )
+        .await;
+    });
+    receipt.warnings.push(
+        "目录版本核对已随本次执行另起任务（目录库不进数据批次，前移只触发模型面重算引用它的根）：\
+         结果见 /health.catalogue_reconcile"
+            .to_string(),
+    );
     receipt.project.clone_from(&identity.project);
     receipt.mdb.clone_from(&identity.mdb);
     receipt.namespace.clone_from(&identity.namespace);
@@ -1546,23 +1733,19 @@ pub async fn model_ensure(
     let direct_tree = state.direct_tree.clone();
     let task_result = await_background_without_cancelling(Duration::from_secs(120), async move {
         let generate = async move {
-            if crate::options::direct_read_mode() {
-                let tree = direct_tree.get().await?;
-                let root = refno.refno();
-                let unit_types =
-                    crate::data_interface::generation_root::configured_delivery_unit_types();
-                let roots = tokio::task::spawn_blocking(move || {
-                    tree.generation_roots_in_subtree(root, &unit_types)
-                })
+            // 范围下的生成根由 e3d-io 骨架给（唯一路：legacy 那条经 SurrealDB `pe` 子树上溯的
+            // `ensure_model_scope_generated` 随 db 读路由于 2026-09-08 退役）。
+            let tree = direct_tree.get().await?;
+            let root = refno.refno();
+            let unit_types =
+                crate::data_interface::generation_root::configured_delivery_unit_types();
+            let roots = tokio::task::spawn_blocking(move || {
+                tree.generation_roots_in_subtree(root, &unit_types)
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("direct generation-root task failed: {error}"))??;
+            mgr.ensure_model_scope_generated_from_roots(refno, roots, force)
                 .await
-                .map_err(|error| {
-                    anyhow::anyhow!("direct generation-root task failed: {error}")
-                })??;
-                mgr.ensure_model_scope_generated_from_roots(refno, roots, force)
-                    .await
-            } else {
-                mgr.ensure_model_scope_generated(refno, force).await
-            }
         };
         let result = match memory_only_dbnum {
             Some(dbnum) => {
@@ -1868,7 +2051,26 @@ pub async fn dbnums(
     State(state): State<AppState>,
     Query(query): Query<ProjectReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    let bootstrap_request =
+        query.project.is_none() && query.mdb.is_none() && query.namespace.is_none();
     let identity = resolve_identity(&state, &query)?;
+    if bootstrap_request {
+        let service = state
+            .direct_tree
+            .get()
+            .await
+            .map_err(ApiError::from_domain)?;
+        let skeleton = service.skeleton().map_err(ApiError::from_domain)?;
+        let mut dbnums = skeleton_dbnums(skeleton.databases());
+        annotate_ref0s(&mut dbnums, |dbnum| skeleton.ref0s_of(dbnum));
+        return Ok(Json(json!({
+            "dbnums": dbnums,
+            "warnings": skeleton.problems(),
+            "data_face": crate::options::data_face().as_str(),
+            "snapshot_epoch": skeleton.epoch(),
+            "summary": true,
+        })));
+    }
     if crate::options::data_face().is_read_through() {
         let service = state
             .direct_tree
@@ -1948,6 +2150,15 @@ pub async fn dbnums(
             let (epoch, count) = cache_meta.get(&dbnum).copied().unwrap_or_default();
             object.insert("cache_epoch".into(), json!(epoch));
             object.insert("cached_pe_rows".into(), json!(count));
+            object.insert(
+                "awaiting_manual_initialization".into(),
+                json!(
+                    !crate::options::auto_initialize_new_dbnums()
+                        && object.get("initialized").and_then(Value::as_bool) == Some(false)
+                        && object.get("excluded").and_then(Value::as_bool) != Some(true)
+                        && object.get("not_in_project").and_then(Value::as_bool) != Some(true)
+                ),
+            );
             // 目录库才有这两格；没有依赖行的库整格不写（写 0 读起来像「一个依赖都没有」，那是另一句话）。
             if let Some((sesno, dependency_rows)) = dependency_meta.get(&dbnum).copied() {
                 object.insert("dependency_rows".into(), json!(dependency_rows));
@@ -2027,6 +2238,25 @@ fn append_cold_read_through_dbnums(
         }));
     }
     rows.sort_by_key(|row| row.get("dbnum").and_then(Value::as_u64).unwrap_or_default());
+}
+
+fn skeleton_dbnums(databases: &[crate::data_interface::mdb_memory_store::LoadedDb]) -> Vec<Value> {
+    let mut rows = databases
+        .iter()
+        .map(|database| {
+            json!({
+                "dbnum": database.dbnum,
+                "db_type": database.db_type,
+                "file_name": database.file.file_name().and_then(|name| name.to_str()).unwrap_or_default(),
+                "file_path": database.file.display().to_string(),
+                "file_size": std::fs::metadata(&database.file).map(|metadata| metadata.len()).unwrap_or_default(),
+                "file_latest_sesno": database.sesno,
+                "not_in_project": false,
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.get("dbnum").and_then(Value::as_u64).unwrap_or_default());
+    rows
 }
 
 /// 给 `/dbnums` 的每一行写 `model_source` / `model_source_reason`（plan 2026-09-06 §8 R1）：
@@ -2476,6 +2706,59 @@ pub async fn model_records(
 mod tests {
     use super::*;
 
+    #[test]
+    fn plant_ui_web_bundle_contains_bootstrap_and_runtime_assets() {
+        let expected = [
+            "index.html",
+            "pkg/plant_ui_app.js",
+            "pkg/plant_ui_app_bg.wasm",
+            "assets/fonts/AlibabaPuHuiTi-2-55-Regular.ttf",
+            "assets/textures/viewport-placeholder.jpg",
+        ];
+        for path in expected {
+            let asset =
+                embedded_web_asset(path).unwrap_or_else(|| panic!("内嵌 plant-ui 缺少 {path}"));
+            assert!(!asset.bytes.is_empty(), "内嵌 plant-ui 资源为空: {path}");
+        }
+        let index = std::str::from_utf8(embedded_web_asset("index.html").unwrap().bytes)
+            .expect("index.html 必须是 UTF-8");
+        assert!(
+            index.contains("./pkg/plant_ui_app.js"),
+            "入口页必须加载内嵌 WASM 启动器"
+        );
+        assert_eq!(
+            index.matches("window.location.origin").count(),
+            3,
+            "动态配置必须把默认模型服务和空数据服务映射到当前内置服务"
+        );
+    }
+
+    #[test]
+    fn embedded_plant_ui_does_not_inherit_legacy_project_config() {
+        let root = tempfile::tempdir().expect("temporary UI root");
+        let ui_root = root.path().join("web");
+        let asset_root = root.path().join("assets");
+
+        assert_eq!(
+            disk_web_asset_path(&ui_root, &asset_root, "assets/config/e3d.project.ron"),
+            None,
+            "embedded UI must fall back to its dynamic config.json"
+        );
+        assert_eq!(
+            disk_web_asset_path(&ui_root, &asset_root, "assets/logo.png"),
+            Some(asset_root.join("logo.png")),
+            "ordinary shared assets remain available"
+        );
+
+        std::fs::create_dir_all(&ui_root).expect("create disk UI root");
+        std::fs::write(ui_root.join("index.html"), "disk UI").expect("write disk UI entry");
+        assert_eq!(
+            disk_web_asset_path(&ui_root, &asset_root, "assets/config/e3d.project.ron"),
+            Some(asset_root.join("config/e3d.project.ron")),
+            "a deployed disk UI keeps its matching legacy project config"
+        );
+    }
+
     /// `ref0s` 按行上的 `dbnum` 取、升序原样写；没有 `dbnum` 的行不碰。
     #[test]
     fn dbnum_rows_carry_their_ref0s_from_the_skeleton() {
@@ -2626,6 +2909,31 @@ mod tests {
         assert_eq!(rows[1]["db_type"], "DESI");
         assert_eq!(rows[2]["dbnum"], 8001);
         assert_eq!(rows[2]["db_type"], "ISOD");
+    }
+
+    #[test]
+    fn skeleton_dbnums_are_sufficient_for_startup_identity() {
+        let rows = skeleton_dbnums(&[
+            crate::data_interface::mdb_memory_store::LoadedDb {
+                dbnum: 8000,
+                db_type: "DESI".into(),
+                file: std::path::PathBuf::from("ams8000_0001"),
+                sesno: 444,
+                elements: 12,
+            },
+            crate::data_interface::mdb_memory_store::LoadedDb {
+                dbnum: 7997,
+                db_type: "DESI".into(),
+                file: std::path::PathBuf::from("ams7997_0001"),
+                sesno: 155,
+                elements: 34,
+            },
+        ]);
+
+        assert_eq!(rows[0]["dbnum"], 7997);
+        assert_eq!(rows[0]["db_type"], "DESI");
+        assert_eq!(rows[0]["file_latest_sesno"], 155);
+        assert_eq!(rows[1]["dbnum"], 8000);
     }
 
     #[tokio::test]
@@ -3128,6 +3436,51 @@ mod tests {
         assert!(
             scan < arm,
             "only a completed explicit scan may arm backlog: {body}"
+        );
+    }
+
+    /// H1 (b)/(d)（2026-09-08）：摄入形态下目录库不进数据批次，显式执行必须顺带把目录版本
+    /// 核对另起任务跑一次（读透分支早就走 `reconcile_model_coverage_at_startup`，摄入分支此前
+    /// 只扫数据批次、对目录换版一声不响）；`/health` 要露最近一次运行期核对。
+    #[test]
+    fn explicit_execute_reconciles_catalogue_versions_and_health_exposes_it() {
+        let source = include_str!("handlers.rs");
+        let execute = source
+            .split_once("pub async fn update_execute(")
+            .expect("update_execute handler must exist")
+            .1
+            .split_once("pub struct TaskListQuery")
+            .expect("task list must follow update_execute")
+            .0;
+        let ingest = execute
+            .split_once(".enqueue_manual_update(")
+            .expect("摄入分支先扫描入队")
+            .1;
+        assert!(
+            ingest.contains(concat!(
+                "reconcile_catalogue_versions_",
+                "now(\n            \"update-execute\","
+            )) || ingest.contains(concat!(
+                "reconcile_catalogue_versions_",
+                "now(\"update-execute\")"
+            )),
+            "摄入分支的显式执行必须触发一次目录版本核对: {ingest}"
+        );
+        assert!(
+            ingest.contains("/health.catalogue_reconcile"),
+            "回执要告诉人结果去哪看: {ingest}"
+        );
+        let health = source
+            .split_once("pub async fn health(")
+            .expect("health handler must exist")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health 之后是 update_preview")
+            .0;
+        assert!(
+            health.contains("\"catalogue_reconcile\"")
+                && health.contains(concat!("catalogue_reconcile_", "snapshot()")),
+            "health 必须露运行期目录核对的最近一次回执: {health}"
         );
     }
 

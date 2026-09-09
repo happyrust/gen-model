@@ -451,6 +451,141 @@ pub async fn refresh_moved_catalogues(
     Ok(out)
 }
 
+/// 一次「目录版本核对之后」的数据面前移账（A3，2026-09-08）——**不挂在哪个 DESI 批次上**。
+///
+/// [`refresh_moved_catalogues`] 此前只在某个写回批的闭包碰到那个目录库时才跑（D7）：目录改了、
+/// 设计没改，`pe` 里 `dependency = true` 的目录行与它们的 `ref_rev` 就停在旧版本上——模型面那一半
+/// 由 `reconcile_catalogue_versions` 反查排根，属性面板 / `ref_rev` 看到的目录属性却还是旧的。
+/// 现在每次目录版本核对排完根之后，经 [`refresh_dependency_rows_of_moved_catalogues`] 把**全部有
+/// 依赖状态行**的目录库过一遍；这份账随核对回执进 `/health`。
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub struct CatalogueDependencyRefreshReport {
+    /// 有 `cata_dependency_state` 行的目录库数（候选）。文件没前移的一步不走，不在 `refreshed` 里。
+    pub candidates: usize,
+    /// 文件比已入库依赖行新、真做了 Replace 重渲 / 墓碑 / 推进状态行的目录库，每库一条。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refreshed: Vec<CatalogueRefresh>,
+    /// 没跑成的库（`dbnum: 原因`；候选名单读不到时是一条不带 dbnum 的话）：那一库一行都没
+    /// 前移，是未知不是零。一库失败不挡别的库。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub errors: Vec<String>,
+    pub elapsed_ms: u128,
+}
+
+impl CatalogueDependencyRefreshReport {
+    /// 什么都没发生：没有库前移、也没有失败——横幅一个字不打（周期核对 300 s 一拍，打了就是刷屏）。
+    pub fn is_quiet(&self) -> bool {
+        self.refreshed.is_empty() && self.errors.is_empty()
+    }
+
+    /// 控制台上的一行；`None` = 没什么可说。逐库的明细 [`refresh_moved_catalogues`] 自己已经
+    /// 打过（`[cata_dependency] 目录库 … 前移 …`），这里只收总账与失败。
+    pub fn banner_line(&self) -> Option<String> {
+        if self.is_quiet() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if !self.refreshed.is_empty() {
+            let dbnums: Vec<u32> = self.refreshed.iter().map(|refresh| refresh.dbnum).collect();
+            let rows: usize = self.refreshed.iter().map(|refresh| refresh.refreshed).sum();
+            let tombstoned: usize = self
+                .refreshed
+                .iter()
+                .map(|refresh| refresh.tombstoned)
+                .sum();
+            let degraded: Vec<u32> = self
+                .refreshed
+                .iter()
+                .filter(|refresh| refresh.full_refresh)
+                .map(|refresh| refresh.dbnum)
+                .collect();
+            parts.push(format!(
+                "目录库 {dbnums:?} 的已入库依赖行随目录前移：刷新 {rows} 行，墓碑 {tombstoned}{}",
+                if degraded.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "；{degraded:?} 差分不可用、整库依赖行重渲（cata_dependency_full_refresh）"
+                    )
+                }
+            ));
+        }
+        if !self.errors.is_empty() {
+            parts.push(format!(
+                "{} 个库没跑成（那一库一行都没前移，未知不是零）：{}",
+                self.errors.len(),
+                self.errors.join("；")
+            ));
+        }
+        Some(format!(
+            "数据面目录依赖行前移（{} 个候选库，{} ms）：{}",
+            self.candidates,
+            self.elapsed_ms,
+            parts.join("；")
+        ))
+    }
+}
+
+/// A3：把**全部有依赖状态行**的目录库过一遍 [`refresh_moved_catalogues`]——逐库调用，一库失败记进
+/// `errors`、不挡别的库；locator 有项目级缓存，逐库调不多花什么。
+///
+/// 候选名单来自 `cata_dependency_state`，**不是**模型面那份「过期」名单：依赖行落后与已发布根落后是
+/// 两件事——一个根都没发布过的库也可能早就有依赖行（数据批次入的），反过来根落款到了新目录、
+/// 依赖行却还停在旧版本（`ensure` 重算根不碰 `pe`）。文件没前移的库在 [`refresh_moved_catalogues`]
+/// 里一步不走。
+pub async fn refresh_dependency_rows_of_moved_catalogues(
+    project: &str,
+) -> CatalogueDependencyRefreshReport {
+    let started = std::time::Instant::now();
+    let mut report = CatalogueDependencyRefreshReport::default();
+    let dbnums = match dependency_state_dbnums().await {
+        Ok(dbnums) => dbnums,
+        Err(error) => {
+            report
+                .errors
+                .push(format!("读不到 cata_dependency_state 候选名单: {error:#}"));
+            report.elapsed_ms = started.elapsed().as_millis();
+            return report;
+        }
+    };
+    report.candidates = dbnums.len();
+    if dbnums.is_empty() {
+        report.elapsed_ms = started.elapsed().as_millis();
+        return report;
+    }
+    let uda_keys = match UdaKeyMap::load().await {
+        Ok(uda_keys) => uda_keys,
+        Err(error) => {
+            report.errors.push(format!("读不到 UDA 键表: {error:#}"));
+            report.elapsed_ms = started.elapsed().as_millis();
+            return report;
+        }
+    };
+    for dbnum in dbnums {
+        match refresh_moved_catalogues(project, [dbnum], &uda_keys).await {
+            Ok(refreshed) => report.refreshed.extend(refreshed),
+            Err(error) => report.errors.push(format!("{dbnum}: {error:#}")),
+        }
+    }
+    report.elapsed_ms = started.elapsed().as_millis();
+    report
+}
+
+/// 有依赖状态行的目录库（升序去重）。`dbnum` 缺格的行跳过——它没法对到文件。
+async fn dependency_state_dbnums() -> anyhow::Result<Vec<u32>> {
+    let mut response = SUL_DB
+        .query("SELECT VALUE dbnum FROM cata_dependency_state;")
+        .await?
+        .check()?;
+    let dbnums: Vec<Option<u32>> = response.take(0)?;
+    Ok(dbnums
+        .into_iter()
+        .flatten()
+        .collect::<BTreeSet<u32>>()
+        .into_iter()
+        .collect())
+}
+
 /// 这些 refno 里哪些是已入库的依赖行（`pe … dependency = true`）：点查，不扫表。
 async fn dependency_rows_among(refnos: &[RefU64]) -> anyhow::Result<Vec<RefU64>> {
     let mut out = Vec::new();
@@ -983,6 +1118,127 @@ mod tests {
         );
         assert!(sql.contains("dependency = $input.dependency"), "{sql}");
         assert!(sql.contains("\"dependency\": true"), "{sql}");
+    }
+
+    /// A3：数据面前移的账——安静的一次（没库前移、没失败）横幅一个字不打；前移了就报总账并
+    /// 点名退化库；失败逐库点名、说清那一库一行都没前移。
+    #[test]
+    fn a_quiet_dependency_refresh_says_nothing_and_a_moved_one_reports_totals_and_failures() {
+        let quiet = CatalogueDependencyRefreshReport {
+            candidates: 3,
+            elapsed_ms: 2,
+            ..Default::default()
+        };
+        assert!(quiet.is_quiet());
+        assert!(
+            quiet.banner_line().is_none(),
+            "候选有、没前移、没失败：不出声"
+        );
+
+        let moved = CatalogueDependencyRefreshReport {
+            candidates: 3,
+            refreshed: vec![
+                CatalogueRefresh {
+                    dbnum: 5052,
+                    base_sesno: 184,
+                    target_sesno: 185,
+                    changed: 4,
+                    refreshed: 3,
+                    tombstoned: 1,
+                    ..Default::default()
+                },
+                CatalogueRefresh {
+                    dbnum: 7000,
+                    base_sesno: 100,
+                    target_sesno: 263,
+                    full_refresh: true,
+                    degraded_reason: Some("会话不在链上".into()),
+                    refreshed: 4000,
+                    ..Default::default()
+                },
+            ],
+            elapsed_ms: 40,
+            ..Default::default()
+        };
+        let line = moved.banner_line().expect("前移了要出声");
+        assert!(line.contains("3 个候选库"), "{line}");
+        assert!(line.contains("[5052, 7000]"), "{line}");
+        assert!(
+            line.contains("刷新 4003 行") && line.contains("墓碑 1"),
+            "{line}"
+        );
+        assert!(
+            line.contains("[7000]") && line.contains("cata_dependency_full_refresh"),
+            "退化库要点名: {line}"
+        );
+
+        let failed = CatalogueDependencyRefreshReport {
+            candidates: 2,
+            errors: vec!["7000: build CATA locator for dependency refresh: boom".into()],
+            ..Default::default()
+        };
+        let line = failed.banner_line().expect("失败要出声");
+        assert!(
+            line.contains("1 个库没跑成") && line.contains("7000:") && line.contains("未知不是零"),
+            "{line}"
+        );
+    }
+
+    /// A3 的接线（源码钉）：目录版本核对排完根之后要做数据面那一半，而且两个出口
+    /// （启动的 `StartupReconcile`、运行期的 `/health.catalogue_reconcile`）都带上这份账。
+    /// 候选名单来自 `cata_dependency_state`，不是模型面的「过期」名单；逐库调用、一库失败不挡别的库。
+    #[test]
+    fn the_catalogue_reconcile_refreshes_dependency_rows_after_scheduling_roots_and_exposes_it() {
+        let pending = include_str!("model_update_pending.rs").replace("\r\n", "\n");
+        let reconcile = pending
+            .split_once("async fn reconcile_catalogue_versions() -> CatalogueReconcile {")
+            .expect("reconcile exists")
+            .1;
+        let reconcile = &reconcile[..reconcile.find("\n}\n").expect("函数体收尾")];
+        let stamps = reconcile
+            .find("reconcile_published_root_stamps().await")
+            .expect("先做模型面那一半（点名 → 收窗 → 反查排工）");
+        let refresh = reconcile
+            .find("cata_dependency::refresh_dependency_rows_of_moved_catalogues(")
+            .expect("再做数据面那一半");
+        assert!(stamps < refresh, "排完根之后再前移依赖行");
+        assert!(
+            !reconcile.contains("stale") && !reconcile.contains("if "),
+            "数据面那一半不看模型面的过期名单、不带条件——两半各自对文件: {reconcile}"
+        );
+        for probe in [
+            "dependency_refresh,\n        } = reconcile;",
+            "catalogue_dependency_refresh: dependency_refresh,",
+            "dependency_refresh: catalogue_dependency_refresh,\n    } = reconcile_catalogue_versions().await;",
+            "coverage.reconcile.catalogue_dependency_refresh = catalogue_dependency_refresh;",
+            "        catalogue_cascade,\n        catalogue_dependency_refresh,\n    };",
+        ] {
+            assert!(
+                pending.contains(probe),
+                "两个出口都要带上这份账：找不到 {probe:?}"
+            );
+        }
+        assert!(
+            pending.contains("self.catalogue_dependency_refresh.banner_line()")
+                && pending.contains("catalogue_dependency_refresh.banner_line() {"),
+            "运行期横幅与启动横幅都要给数据面那一半一行"
+        );
+
+        let this = include_str!("cata_dependency.rs").replace("\r\n", "\n");
+        let body = this
+            .split_once("pub async fn refresh_dependency_rows_of_moved_catalogues(")
+            .expect("入口存在")
+            .1;
+        let body = &body[..body.find("\n}\n").expect("函数体收尾")];
+        assert!(
+            body.contains("dependency_state_dbnums().await"),
+            "候选来自 cata_dependency_state"
+        );
+        assert!(
+            body.contains("refresh_moved_catalogues(project, [dbnum], &uda_keys).await")
+                && body.contains("Err(error) => report.errors.push("),
+            "逐库调用，一库失败记账、不挡别的库: {body}"
+        );
     }
 
     /// 文件扫描出来的定位器（对拍 oracle 用）：`ref0 → dbnum` 走 e3d-io 的 `RefNo::dbno` 公式，

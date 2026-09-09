@@ -195,11 +195,9 @@ async fn ingest_frozen(
     crate::versioned_db::database::retire_dbnum_event().await?;
     // `ATT_UDA` 的 `u` 链接要把 UKEY 换成 `UDA:<refno>`；DICT 相先于 DESI 相，定义此时已在库里。
     // 查不到的键记账、随文件回执打一行，不静默丢。
-    let uda_keys = Arc::new(
-        UdaKeyMap::load()
-            .await
-            .with_context(|| format!("baseline UDA key table failed: file={file_name} dbnum={dbnum}"))?,
-    );
+    let uda_keys = Arc::new(UdaKeyMap::load().await.with_context(|| {
+        format!("baseline UDA key table failed: file={file_name} dbnum={dbnum}")
+    })?);
     let chunk_size = db_option
         .sync_chunk_size
         .map(|size| size as usize)
@@ -224,7 +222,14 @@ async fn ingest_frozen(
         // 写者任务照常在运行时上消费。
         tokio::task::spawn_blocking(move || {
             stream_baseline(&frozen, &db_type, chunk_size, |chunk| {
-                dispatch_chunk(&chunk, dbnum, is_design, &uda_keys, &dependency_seeds, &sender)
+                dispatch_chunk(
+                    &chunk,
+                    dbnum,
+                    is_design,
+                    &uda_keys,
+                    &dependency_seeds,
+                    &sender,
+                )
             })
         })
         .await
@@ -258,7 +263,8 @@ async fn ingest_frozen(
         log::warn!("{error:#}");
     }
 
-    if let Some(summary) = failure_summary(parser.as_ref().err(), dependency.as_ref().err(), &writer)
+    if let Some(summary) =
+        failure_summary(parser.as_ref().err(), dependency.as_ref().err(), &writer)
     {
         log::error!("baseline failed: file={file_name} dbnum={dbnum}: {summary}");
         println!("{file_name}: 基线失败，清库后重来（dbnum={dbnum}）: {summary}");
@@ -399,7 +405,11 @@ async fn persist_dependency_closure(
         log::warn!(
             "{file_name}: CATA 依赖闭包缺失 {} 个 refno（库不在 MDB / 元素不在），样例 {:?}",
             summary.missing,
-            rows.manifest.missing_samples.iter().take(5).collect::<Vec<_>>()
+            rows.manifest
+                .missing_samples
+                .iter()
+                .take(5)
+                .collect::<Vec<_>>()
         );
     }
     Ok(summary)
@@ -457,8 +467,7 @@ async fn wipe_after_failure(dbnum: u32) -> anyhow::Result<()> {
 /// 写者排空后的统计收尾：按 Ref0 重算 `dbnum_info_table`（无条件）、核验与 pe 行数相等、补身份。
 async fn settle_statistics(dbnum: u32, file_name: &str, db_type: &str) -> anyhow::Result<()> {
     crate::data_interface::dbnum_stats::rebuild_on(&SUL_DB, dbnum).await?;
-    let (pe_count, _, info_count) =
-        crate::versioned_db::database::dbnum_stat_totals(dbnum).await?;
+    let (pe_count, _, info_count) = crate::versioned_db::database::dbnum_stat_totals(dbnum).await?;
     anyhow::ensure!(
         pe_count == info_count,
         "dbnum={dbnum} statistics mismatch: PE={pe_count}, statistics={info_count}"
@@ -486,9 +495,15 @@ mod tests {
         check_identity(7999, "DESI", 7999, "DESI").unwrap();
         check_identity(7999, "desi", 7999, "DESI").unwrap();
         let wrong_dbnum = check_identity(7998, "DESI", 7999, "DESI").unwrap_err();
-        assert!(wrong_dbnum.to_string().contains("dbnum=7998"), "{wrong_dbnum}");
+        assert!(
+            wrong_dbnum.to_string().contains("dbnum=7998"),
+            "{wrong_dbnum}"
+        );
         let wrong_type = check_identity(7999, "CATA", 7999, "DESI").unwrap_err();
-        assert!(wrong_type.to_string().contains("db_type=CATA"), "{wrong_type}");
+        assert!(
+            wrong_type.to_string().contains("db_type=CATA"),
+            "{wrong_type}"
+        );
         assert!(check_identity(-1, "DESI", 7999, "DESI").is_err());
     }
 
@@ -510,10 +525,16 @@ mod tests {
         writer.record("element batch", anyhow::anyhow!("conflict on pe"));
         writer.record("element batch", anyhow::anyhow!("conflict on pe"));
         let summary = failure_summary(None, None, &writer).unwrap();
-        assert!(summary.contains("2 time(s)") && summary.contains("conflict on pe"), "{summary}");
+        assert!(
+            summary.contains("2 time(s)") && summary.contains("conflict on pe"),
+            "{summary}"
+        );
 
         let summary = failure_summary(Some(&parse), None, &writer).unwrap();
-        assert!(summary.contains("parse boom") && summary.contains("2 time(s)"), "{summary}");
+        assert!(
+            summary.contains("parse boom") && summary.contains("2 time(s)"),
+            "{summary}"
+        );
     }
 
     #[test]
@@ -568,7 +589,11 @@ mod tests {
         });
         let outcome = drain_writer(sender, writer).await;
         assert_eq!(outcome.errors, 1);
-        assert!(outcome.samples[0].contains("writer task join failed"), "{:?}", outcome.samples);
+        assert!(
+            outcome.samples[0].contains("writer task join failed"),
+            "{:?}",
+            outcome.samples
+        );
     }
 
     fn crate_root() -> PathBuf {
@@ -666,10 +691,16 @@ mod tests {
             .split_once("fn dispatch_chunk(")
             .expect("dispatch follows")
             .0;
-        let drain = body.find("drain_writer(sender, writer).await").expect("writer drain");
+        let drain = body
+            .find("drain_writer(sender, writer).await")
+            .expect("writer drain");
         let judge = body.find("failure_summary(").expect("failure judgement");
-        let wipe = body.find("wipe_after_failure(dbnum).await?").expect("failure cleanup");
-        let settle = body.find("settle_statistics(dbnum").expect("statistics settle");
+        let wipe = body
+            .find("wipe_after_failure(dbnum).await?")
+            .expect("failure cleanup");
+        let settle = body
+            .find("settle_statistics(dbnum")
+            .expect("statistics settle");
         let success = body.find("Ok(BaselineIngest {").expect("success receipt");
         assert!(
             drain < judge && judge < wipe && wipe < settle && settle < success,

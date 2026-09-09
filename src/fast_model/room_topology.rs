@@ -1,9 +1,9 @@
 //! 房间 → 面板拓扑的**文件侧**来源（ADR-010 房间面在 ADR-056 N7 / ADR-053 direct 读模式下的替身）。
 //!
-//! `room_model::load_room_panel_groups` 从 SurrealDB 的 noun 表（`FRMW` / `SBFR`）+ `pe_owner`
-//! 图读「哪些是房间、房间下有哪些面板」，于是 direct 读模式（生产现状：不跑数据解析）与从未
-//! 解析过的库上是 **0 间房**——`build_room_relations` 打印「0 间房 / 0 块面板」、盖章成功，
-//! 房间子系统整体静默不工作。本模块把同一份口径搬到 e3d-io `DbSet` 上：
+//! legacy 的 `room_model::load_room_panel_groups`（2026-09-08 随 S4 退役）从 SurrealDB 的 noun 表
+//! （`FRMW` / `SBFR`）+ `pe_owner` 图读「哪些是房间、房间下有哪些面板」，于是不跑数据解析的部署
+//! 与从未解析过的库上是 **0 间房**——`build_room_relations` 打印「0 间房 / 0 块面板」、盖章成功，
+//! 房间子系统整体静默不工作。本模块把同一份口径搬到 e3d-io `DbSet` 上，如今是**唯一**来源：
 //!
 //! - **hd**（`project_hd`）：房间 = `FRMW`，面板 = 它的子与孙里 noun 为 `PANE` 的元素
 //!   （legacy SQL 是 `array::flatten([id<-pe_owner<-pe, id<-pe_owner<-pe<-pe_owner<-pe])[?noun='PANE']`
@@ -315,15 +315,25 @@ pub(crate) fn room_groups_from_set(
 ///
 /// 「一代」= 一个 `(composite, 层级)`：composite 是这一组文件版本的规范摘要
 /// （[`latest_frozen_sources`]），任一 DESI 的会话号变了就是新一代；一代里每个文件各一条
-/// （键 `(dbnum, sesno)`）。此前这张表**从不淘汰**——ams7997 一个文件的分组是 1 077 组 /
-/// 3 937 面板，读透侧每 SAVEWORK 一次就多攒一代，进程活得越久留下的死代越多，而除了当前
-/// 那一代与用来做 diff 的上一代，谁也不会再看它们一眼。
+/// （键 `(dbnum, sesno)`，条上带本文件冻结令牌）。此前这张表**从不淘汰**——ams7997 一个
+/// 文件的分组是 1 077 组 / 3 937 面板，读透侧每 SAVEWORK 一次就多攒一代，进程活得越久
+/// 留下的死代越多，而除了当前那一代与用来做 diff 的上一代，谁也不会再看它们一眼。
+///
+/// 跨代命中即提升（Q16，ADR-067 实施约束 3，T4.0）：composite 换代后没变的文件
+/// （同 dbnum / sesno / 令牌）从旧代直接命中并提进新代，见 [`cached_groups`]。
 const GROUP_CACHE_GENERATIONS: usize = 2;
+
+/// 一代里的一条：本文件的分组，连同它的冻结令牌——跨代提升靠令牌认「同一份文件」，
+/// `(dbnum, sesno)` 同号换文件时令牌不同，旧产物提不进新代（与磁盘工件键 W2 同判）。
+struct CachedFileGroups {
+    token: String,
+    groups: Arc<Vec<RoomGroup>>,
+}
 
 /// 一代：同一组文件版本下，各文件各自的分组。
 struct GroupGeneration {
     ident: (String, RoomHierarchy),
-    files: HashMap<(u32, u32), Arc<Vec<RoomGroup>>>,
+    files: HashMap<(u32, u32), CachedFileGroups>,
 }
 
 type GroupCache = Mutex<VecDeque<GroupGeneration>>;
@@ -333,38 +343,92 @@ fn group_cache() -> &'static GroupCache {
     CACHE.get_or_init(|| Mutex::new(VecDeque::new()))
 }
 
-fn cached_groups(key: (u32, u32, String, RoomHierarchy)) -> Option<Arc<Vec<RoomGroup>>> {
-    let (dbnum, sesno, composite, hierarchy) = key;
-    group_cache()
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .iter()
-        .find(|generation| generation.ident == (composite.clone(), hierarchy))
-        .and_then(|generation| generation.files.get(&(dbnum, sesno)).cloned())
+/// 找或建 `ident` 那一代，把这条并进去；新建代时排到队尾，超出上限的最老一代出局。
+/// **全部写入都走这一条**（[`remember_groups`] 与 Q16 提升共用），淘汰上限只在这里守。
+fn insert_groups(
+    cache: &mut VecDeque<GroupGeneration>,
+    ident: (String, RoomHierarchy),
+    file_key: (u32, u32),
+    token: String,
+    groups: Arc<Vec<RoomGroup>>,
+) {
+    let entry = CachedFileGroups { token, groups };
+    if let Some(generation) = cache
+        .iter_mut()
+        .find(|generation| generation.ident == ident)
+    {
+        generation.files.insert(file_key, entry);
+        return;
+    }
+    cache.push_back(GroupGeneration {
+        ident,
+        files: HashMap::from([(file_key, entry)]),
+    });
+    while cache.len() > GROUP_CACHE_GENERATIONS {
+        cache.pop_front();
+    }
 }
 
-/// 记一条。命中已有的那一代就并进去（不重排——同一代里各文件是一起读出来的，先后无意义）；
-/// 是新的一代才排到队尾，队首那一代随之出局。
-fn remember_groups(key: (u32, u32, String, RoomHierarchy), groups: Arc<Vec<RoomGroup>>) {
+/// 命中顺序：先在 `composite` 自己那一代里找；没有，再从新到旧看别的代里有没有
+/// **同一份文件**（dbnum、sesno、冻结令牌逐字相同，且层级同口径）——有就地**提升**进
+/// 当前 composite 的那一代再返回（Q16「跨代命中即提升」）。这样任一邻库前进（composite
+/// 变、没变文件的令牌不变）时，没变的文件连磁盘工件都不用读；且命中跟着代走，连续
+/// 两次换代也不会随最老一代出局。令牌不同（同号换文件）或层级不同，一律不借。
+fn cached_groups(
+    key: (u32, u32, String, RoomHierarchy),
+    token: &str,
+) -> Option<Arc<Vec<RoomGroup>>> {
     let (dbnum, sesno, composite, hierarchy) = key;
     let ident = (composite, hierarchy);
     let mut cache = group_cache()
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    if let Some(generation) = cache
-        .iter_mut()
-        .find(|generation| generation.ident == ident)
-    {
-        generation.files.insert((dbnum, sesno), groups);
-        return;
+    if let Some(generation) = cache.iter().find(|generation| generation.ident == ident) {
+        if let Some(entry) = generation.files.get(&(dbnum, sesno)) {
+            if entry.token == token {
+                return Some(entry.groups.clone());
+            }
+        }
     }
-    cache.push_back(GroupGeneration {
+    let promoted = cache
+        .iter()
+        .rev()
+        .filter(|generation| generation.ident != ident && generation.ident.1 == hierarchy)
+        .find_map(|generation| {
+            generation
+                .files
+                .get(&(dbnum, sesno))
+                .filter(|entry| entry.token == token)
+                .map(|entry| entry.groups.clone())
+        })?;
+    insert_groups(
+        &mut cache,
         ident,
-        files: HashMap::from([((dbnum, sesno), groups)]),
-    });
-    while cache.len() > GROUP_CACHE_GENERATIONS {
-        cache.pop_front();
-    }
+        (dbnum, sesno),
+        token.to_string(),
+        promoted.clone(),
+    );
+    Some(promoted)
+}
+
+/// 记一条。命中已有的那一代就并进去（不重排——同一代里各文件是一起读出来的，先后无意义）；
+/// 是新的一代才排到队尾，队首那一代随之出局（见 [`insert_groups`]）。
+fn remember_groups(
+    key: (u32, u32, String, RoomHierarchy),
+    token: String,
+    groups: Arc<Vec<RoomGroup>>,
+) {
+    let (dbnum, sesno, composite, hierarchy) = key;
+    let mut cache = group_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    insert_groups(
+        &mut cache,
+        (composite, hierarchy),
+        (dbnum, sesno),
+        token,
+        groups,
+    );
 }
 
 /// 从当前 MDB 的每个设计库文件（各自的生成会话：钉住的或文件最新，ADR-054 Q1）读出房间
@@ -402,6 +466,19 @@ pub(crate) async fn latest_frozen_sources() -> anyhow::Result<(
     Vec<String>,
     Vec<crate::data_interface::frozen_source::FrozenSource>,
 )> {
+    let option = aios_core::get_db_option();
+    let membership =
+        crate::data_interface::mdb_membership::get(&option.project_name, &option.mdb_name)
+            .map(Ok)
+            .unwrap_or_else(|| {
+                crate::data_interface::mdb_membership::resolve(
+                    option,
+                    &option.project_name,
+                    &option.mdb_name,
+                )
+                .map(crate::data_interface::mdb_membership::install)
+            })?;
+    membership.require_design_files()?;
     let current = crate::fast_model::e3d_model_service::E3dModelService::from_current().await?;
     let mut sources = current
         .design_sources()?
@@ -433,15 +510,44 @@ pub(crate) async fn load_room_groups_from_files(
             .await?;
     let mut by_file: Vec<(u32, Vec<RoomGroup>)> = Vec::new();
     for source in sources {
+        let started = std::time::Instant::now();
         let (dbnum, file, sesno) = (
             source.dbnum() as u32,
             source.path().to_path_buf(),
             source.target_sesno(),
         );
         let key = (dbnum, sesno, composite.clone(), hierarchy);
-        let cached = match cached_groups(key.clone()) {
+        let cache_dir = aios_core::get_db_option()
+            .get_meshes_path()
+            .join("room-input-cache");
+        // 磁盘工件按**本文件**的冻结令牌寻址，不含 composite：一个文件的解析产物只由它
+        // 自己的内容 + 会话 + 层级口径决定，把整组文件的 composite 编进键里，等于任一
+        // 邻库前进就把没变文件的工件全部作废、整份重解析（ams7997 实测 6–7 s / 文件，
+        // 审核 2026-09-09 §3）。令牌带文件身份，同号换文件不会误命中旧产物；原文入键即可
+        // ——工件信封自己会把键哈希成文件名、装载时逐字节比对（`model_artifact::path` /
+        // `load_value`），这里**不另算摘要**（读透变更键只许 `latest_frozen_sources` 一处
+        // 定义，钉 `the_read_through_change_key_has_exactly_one_definition`）。进程内
+        // GroupCache 两代语义（composite 为代键）不动，跨代按同一份令牌**命中即提升**
+        // （Q16，T4.0）：没变的文件先内存跨代命中，其次磁盘工件，最后才重解析。
+        let file_token = source.commit_token_json()?;
+        let artifact_key = format!("room-groups-v2:{dbnum}:{sesno}:{file_token}:{hierarchy:?}");
+        let cached = match cached_groups(key.clone(), &file_token) {
             Some(cached) => cached,
             None => {
+                if let Some(groups) = crate::fast_model::model_artifact::load_value::<Vec<RoomGroup>>(
+                    &cache_dir,
+                    &artifact_key,
+                ) {
+                    let groups = Arc::new(groups);
+                    remember_groups(key, file_token.clone(), groups.clone());
+                    println!(
+                        "[ams-phase] phase=room_topology dbnum={dbnum} sesno={sesno} cached=true groups={} elapsed_ms={}",
+                        groups.len(),
+                        started.elapsed().as_millis()
+                    );
+                    by_file.push((dbnum, groups.as_ref().clone()));
+                    continue;
+                }
                 let set = service.build_set(dbnum, Some(sesno))?;
                 let file: PathBuf = file.clone();
                 let fresh =
@@ -457,11 +563,18 @@ pub(crate) async fn load_room_groups_from_files(
                     })
                     .await
                     .map_err(|error| anyhow::anyhow!("room topology task failed: {error}"))??;
+                source.reopen_verified()?;
+                crate::fast_model::model_artifact::store_value(&cache_dir, &artifact_key, &fresh)?;
                 let fresh = Arc::new(fresh);
-                remember_groups(key, fresh.clone());
+                remember_groups(key, file_token.clone(), fresh.clone());
                 fresh
             }
         };
+        println!(
+            "[ams-phase] phase=room_topology dbnum={dbnum} sesno={sesno} groups={} elapsed_ms={}",
+            cached.len(),
+            started.elapsed().as_millis()
+        );
         by_file.push((dbnum, cached.as_ref().clone()));
     }
     Ok((composite, tokens, by_file))
@@ -812,9 +925,11 @@ mod tests {
         );
     }
 
-    /// 回退即红：房间映射的两个来源入口都必须按读模式路由，不得直接读 noun 表。
+    /// 回退即红：房间映射的两个来源入口都必须走文件侧拓扑（先已发布清单、再实时文件），
+    /// 不得直接读 noun 表；legacy 的 `load_room_panel_groups` 与 `direct_read_mode` 那道门
+    /// （2026-09-08 随 S4 退役）都不许回来。
     #[test]
-    fn room_model_routes_both_topology_entries_by_read_mode() {
+    fn room_model_routes_both_topology_entries_to_file_topology() {
         let source = include_str!("room_model.rs");
         let load = source
             .split_once("pub async fn load_room_panel_map(")
@@ -843,18 +958,29 @@ mod tests {
             .split_once("async fn load_room_panel_groups_by_mode<F>(")
             .expect("load_room_panel_groups_by_mode")
             .1
-            .split_once("async fn load_room_panel_groups<F>(")
+            .split_once("pub(crate) fn room_panel_map_from_groups<F>(")
             .expect("by_mode end")
             .0;
         let published = by_mode
             .find("load_room_panel_map_from_published_files(")
             .expect("已发布文件清单必须优先于实时来源");
-        let direct = by_mode.find("direct_read_mode()").expect("direct fallback");
-        assert!(published < direct, "发布清单必须先于实时来源: {by_mode}");
-        assert!(by_mode.contains("direct_read_mode()"), "{by_mode}");
+        let files = by_mode
+            .find("load_room_panel_map_from_files(")
+            .expect("实时文件来源必须存在");
+        assert!(published < files, "发布清单必须先于实时来源: {by_mode}");
+        for forbidden in [
+            concat!("direct_read", "_mode"),
+            concat!("load_room_panel", "_groups("),
+            "active_data_db()",
+        ] {
+            assert!(
+                !by_mode.contains(forbidden),
+                "legacy 读路由不许回来（{forbidden}）: {by_mode}"
+            );
+        }
         assert!(
-            by_mode.contains("load_room_panel_map_from_files("),
-            "{by_mode}"
+            !source.contains(concat!("async fn load_room_panel", "_groups<F>(")),
+            "legacy 的 load_room_panel_groups 已随 S4 退役，不许回来"
         );
     }
 
@@ -915,14 +1041,24 @@ mod tests {
         );
     }
 
+    /// 在进程级 GroupCache 上操练换代的测试**串行跑**：它们互相推代就会把对方的代挤出局。
+    fn group_cache_test_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        LOCK.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     /// 分组缓存只留两代（常驻房间模型 P2-b）：新一代进来时最老那一代必须出局。
     ///
     /// 用独一无二的 composite 做键，免得和别的测试在这张进程级表上互相踩；断言只看
-    /// 「自己这三代里哪一代还在」，不看表长——并行跑的邻居也在往同一张表里写。
+    /// 「自己这三代里哪一代还在」，不看表长。**每代的 sesno 各不相同**，所以 Q16 跨代
+    /// 提升在本测试里永远不命中（令牌也不同），出局断言不受它影响。
     #[test]
     fn the_group_cache_keeps_only_two_generations() {
+        let _serial = group_cache_test_guard();
         let tag = format!("gen-cache-{:?}", std::thread::current().id());
         let key = |era: u32| (77, era, format!("{tag}-{era}"), RoomHierarchy::Hd);
+        let token = |era: u32| format!("{tag}-token-{era}");
         let groups = |era: u32| {
             Arc::new(vec![RoomGroup {
                 room: r(era),
@@ -932,25 +1068,83 @@ mod tests {
         };
 
         for era in 1..=2 {
-            remember_groups(key(era), groups(era));
+            remember_groups(key(era), token(era), groups(era));
         }
-        assert_eq!(cached_groups(key(1)), Some(groups(1)), "两代之内必须还在");
-        assert_eq!(cached_groups(key(2)), Some(groups(2)));
+        assert_eq!(
+            cached_groups(key(1), &token(1)),
+            Some(groups(1)),
+            "两代之内必须还在"
+        );
+        assert_eq!(cached_groups(key(2), &token(2)), Some(groups(2)));
 
-        remember_groups(key(3), groups(3));
-        assert_eq!(cached_groups(key(1)), None, "第三代进来，第一代必须出局");
-        assert_eq!(cached_groups(key(2)), Some(groups(2)));
-        assert_eq!(cached_groups(key(3)), Some(groups(3)));
+        remember_groups(key(3), token(3), groups(3));
+        assert_eq!(
+            cached_groups(key(1), &token(1)),
+            None,
+            "第三代进来，第一代必须出局"
+        );
+        assert_eq!(cached_groups(key(2), &token(2)), Some(groups(2)));
+        assert_eq!(cached_groups(key(3), &token(3)), Some(groups(3)));
 
         // 同一代里再来一个文件是并进去，不算新一代——否则一代多文件的项目会自己把自己挤掉。
         let sibling = (78, 3, format!("{tag}-3"), RoomHierarchy::Hd);
-        remember_groups(sibling.clone(), groups(4));
-        assert_eq!(cached_groups(key(2)), Some(groups(2)), "并入不该顶掉上一代");
-        assert_eq!(cached_groups(key(3)), Some(groups(3)));
-        assert_eq!(cached_groups(sibling), Some(groups(4)));
+        remember_groups(sibling.clone(), token(4), groups(4));
+        assert_eq!(
+            cached_groups(key(2), &token(2)),
+            Some(groups(2)),
+            "并入不该顶掉上一代"
+        );
+        assert_eq!(cached_groups(key(3), &token(3)), Some(groups(3)));
+        assert_eq!(cached_groups(sibling, &token(4)), Some(groups(4)));
     }
 
-    /// 回退即红：淘汰逻辑长回「从不淘汰」就红。
+    /// Q16「跨代命中即提升」（ADR-067 实施约束 3，T4.0）：composite 换代后，没变的文件
+    /// （同 dbnum / sesno / 令牌）必须直接从旧代命中并被提进新代——连续两次换代命中也
+    /// 不丢；同号换文件（令牌不同）与层级不同一律不借。
+    #[test]
+    fn unchanged_files_are_promoted_across_generations_and_survive_two_swaps() {
+        let _serial = group_cache_test_guard();
+        let tag = format!("promote-{:?}", std::thread::current().id());
+        let composite = |era: u32| format!("{tag}-era-{era}");
+        // (dbnum=91, sesno=5) 三代之间都没变，令牌也不变。
+        let key = |era: u32| (91, 5, composite(era), RoomHierarchy::Hd);
+        let token = format!("{tag}-token");
+        let groups = Arc::new(vec![RoomGroup {
+            room: r(9),
+            name: "/1RX-RM03-R309".into(),
+            panels: vec![r(109)],
+        }]);
+
+        remember_groups(key(1), token.clone(), groups.clone());
+        assert_eq!(
+            cached_groups(key(2), &token),
+            Some(groups.clone()),
+            "第一次换代：代键变了、文件没变，必须跨代命中（而不是重解析）"
+        );
+        // 邻文件并进第 2 代（提升在上一步已把没变文件带进去了）。
+        remember_groups(
+            (92, 1, composite(2), RoomHierarchy::Hd),
+            format!("{tag}-other"),
+            groups.clone(),
+        );
+        assert_eq!(
+            cached_groups(key(3), &token),
+            Some(groups.clone()),
+            "第二次换代：命中必须跟着代走，不得随最老一代出局"
+        );
+        assert_eq!(
+            cached_groups(key(3), &format!("{tag}-swapped")),
+            None,
+            "同号换文件（令牌不同）不得跨代借用旧产物"
+        );
+        assert_eq!(
+            cached_groups((91, 5, composite(4), RoomHierarchy::Hh), &token),
+            None,
+            "层级不同分组口径不同，不得跨代借用"
+        );
+    }
+
+    /// 回退即红：淘汰逻辑长回「从不淘汰」就红；写入路径长出第二条（绕开淘汰）也红。
     #[test]
     fn the_group_cache_has_an_eviction_bound() {
         let source = include_str!("room_topology.rs")
@@ -963,17 +1157,57 @@ mod tests {
             source.contains("const GROUP_CACHE_GENERATIONS: usize = 2;"),
             "分组缓存的代数上限必须是 2（与 ResidentRooms 同口径）"
         );
-        let remember = source
-            .split_once("fn remember_groups(")
-            .expect("remember_groups 必须存在")
+        let insert = source
+            .split_once("fn insert_groups(")
+            .expect("insert_groups 必须存在（remember 与 Q16 提升共用的唯一写入口）")
             .1
             .split_once("\n}\n")
             .expect("函数体必须闭合")
             .0;
         assert!(
-            remember.contains("while cache.len() > GROUP_CACHE_GENERATIONS")
-                && remember.contains("cache.pop_front()"),
-            "记一代之后必须淘汰超出上限的老代: {remember}"
+            insert.contains("while cache.len() > GROUP_CACHE_GENERATIONS")
+                && insert.contains("cache.pop_front()"),
+            "写入之后必须淘汰超出上限的老代: {insert}"
+        );
+        for writer in ["fn remember_groups(", "fn cached_groups("] {
+            let body = source
+                .split_once(writer)
+                .expect("写入方必须存在")
+                .1
+                .split_once("\n}\n")
+                .expect("函数体必须闭合")
+                .0;
+            assert!(
+                body.contains("insert_groups(") && !body.contains("push_back"),
+                "{writer} 必须经 insert_groups 写入，不得自带第二条写入路径"
+            );
+        }
+    }
+
+    /// 回退即红（审核 2026-09-09）：磁盘工件键只认**本文件**的身份（dbnum / sesno / 本文件
+    /// 令牌 / 层级），不许把整组文件的 composite 编回去——编回去就是任一邻库前进把没变
+    /// 文件的工件全部作废、整份重解析（ams7997 实测 6–7 s / 文件）。
+    #[test]
+    fn the_room_groups_artifact_is_addressed_by_the_file_not_the_composite() {
+        let source = include_str!("room_topology.rs")
+            .replace("\r\n", "\n")
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("测试跟在生产代码后面")
+            .0
+            .to_string();
+        let needle = concat!("room-groups-", "v2:");
+        let key_at = source.find(needle).expect("磁盘工件键必须还在（v2）");
+        let key_line = source[key_at..]
+            .split_once('\n')
+            .map(|(line, _)| line)
+            .unwrap_or(&source[key_at..]);
+        assert!(
+            key_line.contains("{file_token}"),
+            "工件键必须按本文件令牌寻址: {key_line}"
+        );
+        assert!(
+            !key_line.contains("{composite}"),
+            "工件键不许把 composite 编回去: {key_line}"
         );
     }
 }

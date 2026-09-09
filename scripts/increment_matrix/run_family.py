@@ -160,7 +160,7 @@ def main():
                 merged = out / "merged-net-window.json"
                 with (out / "merged-net-window.log").open("w", encoding="utf-8") as log:
                     subprocess.run([str(REPO / "python/.venv/Scripts/python.exe"),
-                        str(REPO / "docs/evidence/2026-09-06-hvac-100817-increment-tty-rvm/net_window.py"),
+                        str(REPO / "scripts/increment_matrix/net_window.py"),
                         str(db), str(first + 1), str(last), str(merged)], check=True, stdout=log, stderr=log)
                 summary["business_residuals"] = business_residuals(read_json(merged)["summary"])
                 if summary["business_residuals"]:

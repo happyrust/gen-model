@@ -380,7 +380,7 @@ impl ActiveStagedWindow {
     pub(crate) async fn render_finalize_tail(
         &self,
     ) -> anyhow::Result<crate::data_interface::model_update_pending::FinalizeRender> {
-        let finalize = self
+        let mut finalize = self
             .staged_finalize()
             .await
             .context("staged window has no registered finalize state")?;
@@ -394,6 +394,12 @@ impl ActiveStagedWindow {
             );
         }
         let spatial = self.deferred_spatial().await;
+        crate::data_interface::model_update_pending::merge_room_recalc_changes(
+            &mut finalize.plan,
+            finalize.dbnum,
+            finalize.end_sesno,
+            &spatial.room_changes,
+        );
         let mut refresh = spatial
             .refresh
             .into_iter()
@@ -758,6 +764,62 @@ mod tests {
             Some("PIPE".into())
         );
         assert_eq!(response.take::<Option<i32>>(1).expect("watermark"), Some(7));
+        window.drop_database().await.expect("cleanup");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn finalize_tail_includes_deferred_room_changes_in_the_file_round() {
+        let _room = crate::options::RoomIncrementalOverride::set(true);
+        let instance = own_instance().await;
+        let window = create_window_on(&instance, 7906, 8, 9, ResourceThresholds::default())
+            .await
+            .expect("create window");
+        window
+            .scope(super::super::register_staged_finalize(
+                super::super::StagedFinalize {
+                    dbnum: 7906,
+                    start_sesno: 8,
+                    end_sesno: 9,
+                    end_sesno_time: None,
+                    plan: Default::default(),
+                    window_statements: Vec::new(),
+                    cache_refnos: Vec::new(),
+                },
+            ))
+            .await
+            .expect("register finalize");
+        window
+            .spatial
+            .lock()
+            .await
+            .room_changes
+            .insert(aios_core::RefnoEnum::from("4000000001/20"), "EQUI".into());
+
+        let rendered = crate::data_interface::batch_worker::with_model_publication_window(
+            7906,
+            9,
+            "test-source",
+            window.render_finalize_tail(),
+        )
+        .await
+        .expect("render finalize tail");
+        assert!(
+            rendered.tail.contains("action = 'room_recalc_element'"),
+            "{}",
+            rendered.tail
+        );
+        assert!(
+            rendered
+                .tail
+                .contains("file_rounds = array::union(file_rounds?:[], ['7906:9'])"),
+            "{}",
+            rendered.tail
+        );
+        assert!(
+            rendered.tail.contains("status = 'collecting'"),
+            "{}",
+            rendered.tail
+        );
         window.drop_database().await.expect("cleanup");
     }
 

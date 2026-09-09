@@ -30,8 +30,8 @@
 pub use aios_core::prim_geo::libgm_discretise::{
     EllipticalDishFacets, FACET_TOL_MM, MAX_SEGMENTS, PartRev, SphericalDishFacets,
     chord_tol_is_usable, circle_segments, circle_segments_uncapped, circular_torus_tube_segments,
-    cylinder_segments, elliptical_dish_facets, part_rev_segments, snout_segments, sphere_stacks,
-    spherical_dish_facets, sweep_segments_rad, torus_ring_segments,
+    cylinder_segments, elliptical_dish_facets, part_rev_segments, part_rev_sweep_deg,
+    snout_segments, sphere_stacks, spherical_dish_facets, sweep_segments_rad, torus_ring_segments,
 };
 
 /// libgm 的分辨率容差（mm，绝对量）——「两处东西离得多近就算同一处」。
@@ -353,8 +353,20 @@ fn dedup_carrying_fillet(pts: &[[f64; 3]]) -> Vec<[f64; 3]> {
 /// 形状仍在——**而不是把整条环裁掉**。
 ///
 /// 倒不出来的角保留成尖角（`mthArcFillet` 返回 false 时 E3D 留原顶点），
-/// 不能把顶点丢掉。负 FRAD 在 E3D 走另一条 `mth::mthArcRadius`，这里尚未移植，
-/// 暂按尖角处理——与本仓此前的行为一致。
+/// 不能把顶点丢掉。
+///
+/// **负 FRAD 走另一条 `mth::mthArcRadius`（libgeom 3.1 `0x10042ba0`）。** Core3D 的
+/// `MDR_Point` 倒角方法（`Core3D.dll` 3.1 `sub_10621980`）按 FRAD 符号分流：开头
+/// `if (fabs(radius) < 0.1) return 0` 对正负同一门槛；`FRAD > 0` 调 `mthArcFillet`
+/// （上面那套切向退距的相切凸圆角），`FRAD ≤ 0` 把角点沿两邻边各退 `|FRAD|` 得两个
+/// 端点，再调 `mthArcRadius(端点0, 端点1, 侧向点, 法向, |FRAD|, /*minorArc=*/false, …)`
+/// （负支起手就 `push 0` 那个 bool）。反编译 `mthArcRadius`：过两端点、半径 `R=|FRAD|`
+/// 的弧，圆心离弦中点 `sqrt(R² − (弦长/2)²)`——两端点都距角点 `|FRAD|`，弦长
+/// `2R·sin(φ/2)`，代进去圆心恰好落在**角点**上。所以负 FRAD = **以角点为心、半径
+/// `|FRAD|` 的劣弧**（凹圆角），与正 FRAD 同一张弦、反向鼓：正 `-sign·tan((π−φ)/4)`，
+/// 负 `+sign·tan(φ/4)`（`φ` 为两邻边夹角）。`R² ≥ (弦长/2)²` 恒成立，所以负支不会像
+/// 一般 `mthArcRadius` 那样因半径太小失败。取证：
+/// `docs/evidence/2026-09-09-ida-negative-frad-mtharcradius.md`。
 pub fn profile_spans(loop_pts: &[[f64; 3]]) -> Vec<ProfileSpan> {
     let pts = dedup_carrying_fillet(loop_pts);
     let len = pts.len();
@@ -370,7 +382,9 @@ pub fn profile_spans(loop_pts: &[[f64; 3]]) -> Vec<ProfileSpan> {
             bulge: 0.0,
         };
         let frad = pts[i][2];
-        if !(frad >= FRAD_EPS) {
+        // `|FRAD| < 0.1` 一律不倒角——`sub_10621980` 开头 `if (fabs(radius) < 0.1) return 0`，
+        // 正负同一门槛（`FRAD_EPS`）。`!(… >= …)` 写法把 NaN 也一并挡在倒角外。
+        if !(frad.abs() >= FRAD_EPS) {
             spans.push(sharp);
             continue;
         }
@@ -390,15 +404,28 @@ pub fn profile_spans(loop_pts: &[[f64; 3]]) -> Vec<ProfileSpan> {
             spans.push(sharp);
             continue;
         }
+        // `angle` = 两邻边方向（`back` / `fwd`）的有符号夹角 φ。
         let angle = cross.atan2(back[0] * fwd[0] + back[1] * fwd[1]);
-        let tangent = frad / (angle * 0.5).tan().abs();
-        if !tangent.is_finite() {
+        // FRAD 符号分流，对齐 Core3D `MDR_Point` 倒角方法（`sub_10621980`）：
+        // - `FRAD > 0`：切向退距 `T = R·cot(φ/2)`、弧与两邻边相切、鼓向背离角点
+        //   （`mthArcFillet`，libgeom 3.1 `0x10043470`）。
+        // - `FRAD < 0`：退距恒为 `|FRAD|`、弧以角点为心、半径 `|FRAD|`、取劣弧、鼓向朝角点
+        //   （`mthArcRadius`，libgeom 3.1 `0x10042ba0`）。同一张弦上与正 FRAD 反向鼓。
+        let (setback, bulge) = if frad >= 0.0 {
+            (
+                frad / (angle * 0.5).tan().abs(),
+                -angle.signum() * ((std::f64::consts::PI - angle.abs()) * 0.25).tan(),
+            )
+        } else {
+            (frad.abs(), angle.signum() * (angle.abs() * 0.25).tan())
+        };
+        if !setback.is_finite() {
             spans.push(sharp);
             continue;
         }
 
-        let mut p0 = [cur[0] + back[0] * tangent, cur[1] + back[1] * tangent];
-        let mut p1 = [cur[0] + fwd[0] * tangent, cur[1] + fwd[1] * tangent];
+        let mut p0 = [cur[0] + back[0] * setback, cur[1] + back[1] * setback];
+        let mut p1 = [cur[0] + fwd[0] * setback, cur[1] + fwd[1] * setback];
         if hypot2(prev, p0) < DUP_EPS {
             p0 = prev;
         }
@@ -406,7 +433,6 @@ pub fn profile_spans(loop_pts: &[[f64; 3]]) -> Vec<ProfileSpan> {
             p1 = next;
         }
 
-        let bulge = -angle.signum() * ((std::f64::consts::PI - angle.abs()) * 0.25).tan();
         if !bulge.is_finite() || bulge.abs() < SPAN_EPS {
             spans.push(sharp);
             continue;
@@ -930,6 +956,97 @@ mod tests {
         ]);
         assert_eq!(flat.len(), 4);
         assert!(flat.iter().all(|s| s.bulge == 0.0));
+    }
+
+    /// 负 FRAD 走 `mthArcRadius`（libgeom 3.1 `0x10042ba0`）：角点沿两邻边各退 `|FRAD|`
+    /// 得两端点，弧**以角点为心、半径 `|FRAD|`**、取劣弧。对拍反编译解出的几何——用
+    /// `span_arc` 把展开出来的弧解回圆心 / 半径，钉死圆心落在角点、半径等于 `|FRAD|`。
+    #[test]
+    fn negative_frad_is_an_arc_centred_on_the_vertex() {
+        // 直角：角点在原点，两邻边沿 −x / −y。
+        let spans = profile_spans(&[[-100.0, 0.0, 0.0], [0.0, 0.0, -40.0], [0.0, -100.0, 0.0]]);
+        assert_eq!(spans.len(), 4, "一个倒角两段 + 两个尖角各一段");
+
+        // 端点各距角点 |FRAD| = 40，落在两邻边上。
+        assert!(hypot2([-40.0, 0.0], spans[1].point) < 1e-9);
+        assert!(hypot2([0.0, -40.0], spans[2].point) < 1e-9);
+
+        let arc = span_arc(spans[1].point, spans[2].point, spans[1].bulge)
+            .expect("负 FRAD 段应当是一段弧");
+        assert!(
+            hypot2(arc.centre, [0.0, 0.0]) < 1e-9,
+            "圆心应落在角点，实得 {:?}",
+            arc.centre
+        );
+        assert!(
+            (arc.radius - 40.0).abs() < 1e-9,
+            "半径应为 |FRAD|=40，实得 {}",
+            arc.radius
+        );
+        // 劣弧：扫角 = 两邻边夹角 90°，远小于半圈。
+        assert!(
+            (arc.alpha1 - arc.alpha0).abs() < std::f64::consts::PI,
+            "应当是劣弧"
+        );
+    }
+
+    /// 正 / 负 FRAD 在同一张弦上反向鼓：正的凸圆角圆心在角平分线外侧，负的凹圆角圆心
+    /// 正落在角点。直角处两者退距恰好都等于 R，端点重合、弧相反。
+    #[test]
+    fn positive_and_negative_frad_bulge_opposite_on_the_same_chord() {
+        let pos = profile_spans(&[[-100.0, 0.0, 0.0], [0.0, 0.0, 40.0], [0.0, -100.0, 0.0]]);
+        let neg = profile_spans(&[[-100.0, 0.0, 0.0], [0.0, 0.0, -40.0], [0.0, -100.0, 0.0]]);
+
+        // 同一张弦。
+        assert!(hypot2(pos[1].point, neg[1].point) < 1e-9);
+        assert!(hypot2(pos[2].point, neg[2].point) < 1e-9);
+        // 反向鼓。
+        assert!(
+            pos[1].bulge * neg[1].bulge < 0.0,
+            "正负 FRAD 的 bulge 应当反号"
+        );
+
+        let ap = span_arc(pos[1].point, pos[2].point, pos[1].bulge).unwrap();
+        let an = span_arc(neg[1].point, neg[2].point, neg[1].bulge).unwrap();
+        assert!((ap.radius - 40.0).abs() < 1e-9 && (an.radius - 40.0).abs() < 1e-9);
+        assert!(hypot2(an.centre, [0.0, 0.0]) < 1e-9, "凹圆角圆心在角点");
+        assert!(
+            hypot2(ap.centre, [-40.0, -40.0]) < 1e-9,
+            "凸圆角圆心在角平分线外侧"
+        );
+    }
+
+    /// 非直角同样成立：两邻边夹角 60°、FRAD = −30，圆心仍在角点、半径仍是 |FRAD|。
+    #[test]
+    fn negative_frad_holds_at_a_non_right_angle() {
+        // back = (−1,0)；next 落在 120° 方向，使 back 与 fwd 夹角为 60°。
+        let (sin120, cos120) = (120.0_f64).to_radians().sin_cos();
+        let spans = profile_spans(&[
+            [-100.0, 0.0, 0.0],
+            [0.0, 0.0, -30.0],
+            [100.0 * cos120, 100.0 * sin120, 0.0],
+        ]);
+        let arc = span_arc(spans[1].point, spans[2].point, spans[1].bulge)
+            .expect("负 FRAD 段应当是一段弧");
+        assert!(
+            hypot2(arc.centre, [0.0, 0.0]) < 1e-9,
+            "圆心应落在角点，实得 {:?}",
+            arc.centre
+        );
+        assert!(
+            (arc.radius - 30.0).abs() < 1e-9,
+            "半径应为 |FRAD|=30，实得 {}",
+            arc.radius
+        );
+    }
+
+    /// `|FRAD| < 0.1` 对负值同样按 `fabs` 门槛不倒角（`sub_10621980` 开头那句），
+    /// 顶点原样留下、不产生弧。
+    #[test]
+    fn a_tiny_negative_frad_stays_sharp() {
+        let spans = profile_spans(&[[-100.0, 0.0, 0.0], [0.0, 0.0, -0.05], [0.0, -100.0, 0.0]]);
+        assert_eq!(spans.len(), 3, "|FRAD|=0.05 < 0.1，三个顶点原样留下");
+        assert!(spans.iter().all(|s| s.bulge == 0.0));
     }
 
     // ─── §7.9.2 轮廓那条路 ──────────────────────────────────────────────────

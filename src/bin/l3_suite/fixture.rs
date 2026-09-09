@@ -1,6 +1,13 @@
 use super::*;
 use std::collections::{BTreeMap, BTreeSet};
 
+// The portable fixture owns its stack. Keep it off the legacy golden-suite
+// ports so a retained 8048/8028 process cannot make assertions hit stale data.
+const FIXTURE_API: &str = "http://127.0.0.1:18028/api/v1";
+const FIXTURE_API_PORT: u16 = 18028;
+const FIXTURE_SURREAL_PORT: u16 = 18048;
+const FIXTURE_SURREAL_SQL: &str = "http://127.0.0.1:18048/sql";
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(super) struct FixtureManifest {
     pub version: u32,
@@ -525,7 +532,7 @@ fn start_fixture_stack(
     project: &str,
     namespace: &str,
 ) -> Result<(Stack, PathBuf)> {
-    for port in [8048, 8028] {
+    for port in [FIXTURE_SURREAL_PORT, FIXTURE_API_PORT] {
         ensure!(!port_open(port), "fixture port {port} is already in use");
     }
     let tools = tool_dir(repo);
@@ -572,13 +579,13 @@ fn start_fixture_stack(
                     "--pass",
                     "root",
                     "--bind",
-                    "127.0.0.1:8048",
+                    "127.0.0.1:18048",
                 ])
                 .arg(format!("rocksdb:{}", store.display())),
             &run_dir.join("stack-surreal.log"),
         )?,
     );
-    wait_port(8048, Duration::from_secs(60))?;
+    wait_port(FIXTURE_SURREAL_PORT, Duration::from_secs(60))?;
     run_fixture_bin(
         &initialize,
         &[dbnum.to_string()],
@@ -642,15 +649,17 @@ fn start_fixture_stack(
                 Command::new(service)
                     .current_dir(repo)
                     .env("DB_OPTION_FILE", &config_no_ext)
-                    // 套件自己在 8048 上起了一台 rocksdb surreal（上面那一段）：
-                    // 服务必须连它，不许按 store_mode 的新默认（spawned-mem，
-                    // 2026-09-04）自己再拉一台 memory 库——那样整套断言会对着一个
-                    // 空库跑，症状是「莫名其妙全查不到数据」而不是一条报错。
-                    // 运行期配置里也写了 external，这一行是第二道。
+                    // 套件自己在 18048 上起了一台 rocksdb surreal（上面那一段）：
+                    // 服务必须连它，不许自己再拉一台 memory 库——那样整套断言会对着
+                    // 一个空库跑，症状是「莫名其妙全查不到数据」而不是一条报错。
+                    // `store_mode` 的默认翻过两次（2026-09-04 → spawned-mem，
+                    // 2026-09-07 → 翻回 external），套件不押在它现在指着哪一档上：
+                    // 运行期配置里写了 external，这一行是第二道。
                     .env("AIOS_STORE_MODE", "external")
                     // 同理，数据面必须是摄入形态：套件的断言建立在「基线真的跑了、pe
-                    // 真的进了」之上，而 data_face 的新默认（read-through，2026-09-05）
-                    // 不做基线。运行期配置里也写了 ingest，这一行同样是第二道。
+                    // 真的进了」之上，而读透形态不做基线。数据面是从 `store_mode` 派生的，
+                    // 所以真正定它的是上面那一行；这一行只是把意图写出来，与介质给出的
+                    // 那一档不符时会被 `data_face_notice` 当场点名。
                     .env("AIOS_DATA_FACE", "ingest")
                     .env("RUST_MIN_STACK", "67108864")
                     // 套件把启动自动执行显式钉为 true，避免外部配置把批次改成 held；
@@ -663,7 +672,7 @@ fn start_fixture_stack(
             &run_dir.join("stack-service.log"),
         )?,
     );
-    wait_http(&format!("{API}/health"), Duration::from_secs(180))?;
+    wait_http(&format!("{FIXTURE_API}/health"), Duration::from_secs(180))?;
     if cli.fixture_ui {
         let ui = tools.join("plant-ui-app.exe");
         let inspect = tools.join("inspect.exe");
@@ -684,7 +693,7 @@ fn start_fixture_stack(
                     .env("EGUI_INSPECTION", "1")
                     .env("PLANT_UI_SETTINGS_FILE", &ui_runtime.settings_file)
                     .env("PLANT_ASSET_ROOT", &ui_runtime.asset_root)
-                    .env("PLANT_MODEL_API_URL", "http://127.0.0.1:8028"),
+                    .env("PLANT_MODEL_API_URL", "http://127.0.0.1:18028"),
                 &run_dir.join("stack-plant-ui.log"),
             )?,
         );
@@ -787,8 +796,8 @@ fn write_runtime_config(
         ("project_code", namespace.to_owned()),
         ("surreal_ns", namespace.to_owned()),
         ("mdb_name", format!("\"{}\"", mdb.trim_start_matches('/'))),
-        ("v_port", "8048".into()),
-        ("http_api_addr", "\"127.0.0.1:8028\"".into()),
+        ("v_port", FIXTURE_SURREAL_PORT.to_string()),
+        ("http_api_addr", "\"127.0.0.1:18028\"".into()),
         // Keep the portable fixture's room coverage barrier scoped to the two
         // rooms created by setup.mac. The real AMS database contains hundreds
         // of unrelated PANE rows whose models are intentionally not seeded by
@@ -1034,7 +1043,7 @@ fn run_case(
     // before E3D mutates the file; previewing after SAVEWORK would correctly yield an empty list.
     let preview = http_json(
         "POST",
-        &format!("{API}/update/preview"),
+        &format!("{FIXTURE_API}/update/preview"),
         Some(fixture_identity(project, &driver.mdb, ns)),
     )?;
     fs::write(
@@ -1119,7 +1128,7 @@ fn run_case(
         )?;
         let repeat = http_json(
             "POST",
-            &format!("{API}/update/execute"),
+            &format!("{FIXTURE_API}/update/execute"),
             Some(fixture_identity(project, &driver.mdb, ns)),
         )?;
         ensure!(
@@ -1467,7 +1476,7 @@ fn seed_fixture_models(
         body.as_object_mut()
             .unwrap()
             .insert("force".into(), Value::Bool(true));
-        let response = http_json("POST", &format!("{API}/model/ensure"), Some(body))?;
+        let response = http_json("POST", &format!("{FIXTURE_API}/model/ensure"), Some(body))?;
         evidence.push(response);
     }
     fs::write(
@@ -1877,7 +1886,7 @@ fn execute_fixture_and_wait(
     );
     let receipt = http_json(
         "POST",
-        &format!("{API}/update/execute"),
+        &format!("{FIXTURE_API}/update/execute"),
         Some(fixture_identity(project, mdb, ns)),
     )?;
     fs::write(
@@ -1888,7 +1897,7 @@ fn execute_fixture_and_wait(
     let mut tasks = Vec::new();
     for id in ids {
         loop {
-            let task = http_json("GET", &format!("{API}/tasks/{id}"), None)?;
+            let task = http_json("GET", &format!("{FIXTURE_API}/tasks/{id}"), None)?;
             if task_terminal(&task)?.is_some() {
                 tasks.push(task);
                 break;
@@ -1987,7 +1996,7 @@ fn fixture_surreal_sql(ns: &str, project: &str, sql: &str) -> Result<Value> {
             &format!("surreal-db: {project}"),
             "--data-binary",
             sql,
-            SURREAL_SQL,
+            FIXTURE_SURREAL_SQL,
         ])
         .output()?;
     ensure!(

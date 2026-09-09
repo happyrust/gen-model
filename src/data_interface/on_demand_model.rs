@@ -18,10 +18,6 @@ use crate::data_interface::model_update_pending::{
 };
 use crate::data_interface::tidb_manager::AiosDBManager;
 
-/// Scope chunk for the written-instance probe, matching the viewer's own probe
-/// in `rs-plant3-d` (`model_system.rs`).
-const COUNT_CHUNK: usize = 500;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnDemandModelStatus {
     AlreadyAvailable,
@@ -194,6 +190,12 @@ impl AiosDBManager {
                 .ok_or_else(|| anyhow::anyhow!("invalid generation root {root}"))?;
             let root = e3d_io::RefNo::new(word0.parse()?, word1.parse()?);
             crate::fast_model::e3d_model_service::delete_persisted_geometry_root(root).await?;
+            let tombstone = crate::fast_model::model_db_adapter::render_spooled_scope_deletion(
+                root,
+                &[root],
+                &[],
+            );
+            SUL_DB.query(tombstone).await?.check()?;
         }
         crate::data_interface::helper::delete_inst_relate_subtree(&[requested_refno], 300).await?;
 
@@ -251,21 +253,16 @@ impl AiosDBManager {
         let memory_only = crate::data_interface::model_read_route::memory_only_scope().is_some();
         // Never report a partially-written model while another generation owns
         // this root. Once the lock is ours, a completed prior run is safe to reuse.
+        // A durable credential survives restart, but /model/records serves the
+        // process projection: a root only counts as cached once the projection holds it.
         let cache_current = if memory_only || crate::options::data_face().is_read_through() {
             memory_root_current(root)
         } else {
-            generation_root_cache_current(&root_refno).await?
-                && (!crate::options::direct_read_mode() || memory_root_current(root))
+            generation_root_cache_current(&root_refno).await? && memory_root_current(root)
         };
         if !force && cache_current {
-            let counts = if memory_only
-                || crate::options::direct_read_mode()
-                || crate::options::data_face().is_read_through()
-            {
-                memory_counts(&[root])
-            } else {
-                instance_counts(requested_refno).await?
-            };
+            // 计数只问进程内投影（S4 之后 legacy「读 inst_relate 表数实例」那条路退役）。
+            let counts = memory_counts(&[root]);
             return Ok(describe(
                 requested_refno,
                 root,
@@ -303,14 +300,7 @@ impl AiosDBManager {
         }
         outcome?;
 
-        let counts = if memory_only
-            || crate::options::direct_read_mode()
-            || crate::options::data_face().is_read_through()
-        {
-            memory_counts(&[root])
-        } else {
-            instance_counts(requested_refno).await?
-        };
+        let counts = memory_counts(&[root]);
         let status = post_generation_status(counts);
         Ok(describe(requested_refno, root, root_noun, status, counts))
     }
@@ -414,9 +404,7 @@ impl AiosDBManager {
             // only misses need the generation path and its per-root counts.
             // A durable credential survives restart, but /model/records serves the
             // process projection. Rebuild a missing resident root before calling it cached.
-            if current_roots.contains(&root.root.to_pdms_str())
-                && (!crate::options::direct_read_mode() || memory_root_current(root.root))
-            {
+            if current_roots.contains(&root.root.to_pdms_str()) && memory_root_current(root.root) {
                 cached_root_count += 1;
                 continue;
             }
@@ -430,14 +418,7 @@ impl AiosDBManager {
             }
         }
 
-        let counts = if memory_only
-            || crate::options::direct_read_mode()
-            || crate::options::data_face().is_read_through()
-        {
-            memory_counts(&root_refnos)
-        } else {
-            instance_counts(requested_refno).await?
-        };
+        let counts = memory_counts(&root_refnos);
         let status = if counts.renderable == 0 {
             OnDemandModelStatus::NoRenderableGeometry
         } else if generated_root_count > 0 {
@@ -585,62 +566,6 @@ fn memory_counts(roots: &[RefnoEnum]) -> InstanceCounts {
         written: ids.len(),
         renderable: ids.len(),
     }
-}
-
-async fn instance_counts(refno: RefnoEnum) -> anyhow::Result<InstanceCounts> {
-    // The model table already materializes every row's ancestor chain and has
-    // an index on `anc`. Walking the PE tree here made a cache-hit ensure pay
-    // for a second full hierarchy traversal before it could answer. Query the
-    // generated subtree directly, and add the root's own row because `anc`
-    // contains ancestors only (not self).
-    let root_u64 = refno.refno().0;
-    let mut response = SUL_DB
-        .query(format!(
-            "SELECT VALUE in FROM inst_relate WHERE anc CONTAINS {root_u64};\
-             SELECT VALUE in FROM {} LIMIT 1;",
-            refno.to_inst_relate_key()
-        ))
-        .await?
-        .check()?;
-    let mut scope: Vec<RefnoEnum> = response.take(0)?;
-    scope.extend(response.take::<Vec<RefnoEnum>>(1)?);
-    scope.sort_by_key(RefnoEnum::to_string);
-    scope.dedup();
-    if scope.is_empty() {
-        return Ok(InstanceCounts::default());
-    }
-    let rows = crate::data_interface::staging::query_valid_insts(&scope).await?;
-    let renderable = rows
-        .iter()
-        .map(|row| {
-            row.insts.len() + usize::from(row.pts.as_ref().is_some_and(|points| !points.is_empty()))
-        })
-        .sum();
-    Ok(InstanceCounts {
-        written: written_instance_count(&scope).await?,
-        renderable,
-    })
-}
-
-/// Rows `query_insts` never reports: it drops everything without an `aabb`, so
-/// on its own it cannot tell "生成还没跑过" from "跑过了，只是画不出来".
-async fn written_instance_count(scope: &[RefnoEnum]) -> anyhow::Result<usize> {
-    let mut total = 0usize;
-    for chunk in scope.chunks(COUNT_CHUNK) {
-        // An empty slice makes `get_inst_relate_keys` address the whole table.
-        if chunk.is_empty() {
-            continue;
-        }
-        let inst_keys = aios_core::get_inst_relate_keys(chunk);
-        let mut response = SUL_DB
-            .query(format!(
-                "RETURN array::len(SELECT VALUE id FROM {inst_keys});"
-            ))
-            .await?;
-        let count: Option<usize> = response.take(0)?;
-        total += count.unwrap_or_default();
-    }
-    Ok(total)
 }
 
 /// 解析不出生成根的两种缘由。调用方（HTTP 层）据此分型：客户端对着容器该做的事

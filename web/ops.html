@@ -220,8 +220,8 @@ body{
 .acts-row .hint{font-size:11.5px;color:var(--t3);line-height:17px}
 a.jump{text-decoration:none}
 .jump.mut{color:var(--t3)}
-/* 每库两枚水位：数据提交与模型收敛分别显示；三态判决由服务端给出。 */
-.w-tbl{grid-template-columns:86px minmax(96px,124px) 84px 72px minmax(170px,1fr) minmax(210px,1.25fr) minmax(200px,320px)}
+/* 每库三枚水位：数据提交、模型发布、房间发布分别显示。 */
+.w-tbl{grid-template-columns:72px minmax(90px,112px) 64px 72px minmax(132px,1fr) minmax(150px,1fr) minmax(150px,1fr) minmax(170px,260px)}
 .w-tbl>.r{height:52px}
 .w-tbl .stk{display:flex;flex-direction:column;justify-content:center;gap:3px;min-width:0;
   font-size:11.5px;line-height:15px}
@@ -493,8 +493,8 @@ a.jump{text-decoration:none}
   <div class="panel">
     <div class="panel-head" style="align-items:flex-start">
       <div style="min-width:0">
-        <div style="display:flex;align-items:baseline"><span class="t">每库两枚水位</span></div>
-        <div class="sub">应用水位表示数据已保存，模型水位表示模型已按对应数据窗口发布。两者异步推进；相等且没有根在追赶时才显示“一致”。</div>
+        <div style="display:flex;align-items:baseline"><span class="t">每库三枚水位</span></div>
+        <div class="sub">数据、模型、房间水位按阶段推进；房间同时核对内存模型与房间定义版本。三者及版本凭证一致时才表示完整收敛。</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
         <span class="src">GET /api/v1/dbnums</span>
@@ -551,7 +551,7 @@ const BF_LIMIT = 40;
 const BF_MAX = 200;
 
 const S = {
-  health:null, queue:null, dbnums:null, tasks:null, batchFailures:null,
+  health:null, queue:null, dbnums:null, dbnumsErr:"", tasks:null, batchFailures:null,
   // 错误日志卡的筛选：空 = 全部。筛选在前端做，切一下不用等一轮网络——代价是它
   // 只筛得到取回来那一窗，`bfWindowNote()` 负责把这句话说出来。
   // bfSince 是秒；0 = 不限时间。
@@ -850,12 +850,16 @@ function renderActions(m){
 async function cycle(){
   const wantSlow = S.tick % SLOW_EVERY === 0 || !S.dbnums || !S.batchFailures || S.bfForce;
   S.bfForce = false;
-  const jobs = [get("/health"), get("/queue"),
+  const healthRequest = get("/health");
+  const jobs = [healthRequest, get("/queue"),
                 get(`/tasks?limit=${tasksAll() ? TASKS_ALL : TASKS_FAST}`)];
   // 落盘的失败原因跟着慢轮走：它读磁盘，而失败是低频事件，没必要每 2 秒翻一次。
   // 但它必须被读——/tasks 那份权威回执活在进程内存里，重启即清空，而人打开这一页
   // 时往往已经重启过了。项目筛在服务端（缺省只回登录项目），开关在错误日志卡上。
-  if(wantSlow) jobs.push(get("/dbnums"),
+  if(wantSlow) jobs.push(healthRequest.then(h => {
+    if(!h.project || !h.mdb) throw new Error("后台未提供项目/MDB 身份，水位状态暂不可读");
+    return get(`/dbnums?project=${encodeURIComponent(h.project)}&mdb=${encodeURIComponent(h.mdb)}`);
+  }),
     get(`/error-log?limit=${BF_LIMIT}${S.bfAllProjects ? "&project=all" : ""}${FOCUS_DBNUM == null ? "" : `&dbnum=${FOCUS_DBNUM}`}`));
   const [h, q, t, d, bf] = await Promise.allSettled(jobs);
 
@@ -871,7 +875,13 @@ async function cycle(){
   }
   if(q.status === "fulfilled") S.queue = q.value;
   if(t.status === "fulfilled") S.tasks = t.value;
-  if(d && d.status === "fulfilled") S.dbnums = d.value;
+  if(d && d.status === "fulfilled"){
+    S.dbnums = d.value;
+    S.dbnumsErr = "";
+  }else if(d){
+    S.dbnums = null;
+    S.dbnumsErr = String(d.reason?.message || d.reason || "请求失败");
+  }
   if(bf && bf.status === "fulfilled") S.batchFailures = bf.value;
   S.tick++;
 }
@@ -1078,7 +1088,7 @@ function model(){
   const parked = failures.filter(f => f.parked);
 
   const inScope = dbs.filter(r => !r.excluded && !r.not_in_project);
-  const lagging = inScope.filter(r => r.file_latest_sesno > r.applied_sesno)
+  const lagging = inScope.filter(r => !r.awaiting_manual_initialization && r.file_latest_sesno > r.applied_sesno)
     .sort((a, b) => (b.file_latest_sesno - b.applied_sesno) - (a.file_latest_sesno - a.applied_sesno));
 
   const running = rows.filter(r => r.state === "running");
@@ -1280,13 +1290,18 @@ function dataLane(m){
       ? `副作用队列有 ${sepDead} 条死信（attempts ≥ ${MAX_ATTEMPTS}）—— 数据批次照跑，派生结果不再更新`
       : sep.stalled
         ? "副作用队列这一段读不出来 —— 有没有死信现在是未知的"
-        : `空间对账有 ${spatialDead} 条死信（不重试）—— 该文件轮次的空间/房间发布停在上一次成功版本`;
+        : spatialDead > 0
+          ? `空间对账有 ${spatialDead} 条死信（不重试）—— 该文件轮次的空间/房间发布停在上一次成功版本`
+          : "空间对账状态暂时未知 —— 状态读取失败，不代表任务已失败";
     const detail = sepDead > 0
       ? `${kinds.length ? kinds.join(" · ") + "。" : ""}到顶死信被 drain 挡在候选集外，周期重试不会把它们捡回来；复活 = attempts 归零回 pending。${why(sep.last_error)}${aside}`
       : sep.stalled
         ? `${why(sep.last_error) || "health 里只给了 stalled 标志，没给原因；去控制台翻日志。"}死信数这一轮读不到，不代表是零 —— 按钮先不亮，等下一轮读回来。${aside}`
-        : `${why(spatial.last_error)}空间对账不自动重试：全文原因在「错误日志」卡（event=side_effect_dead_letter）；修好之后 UPDATE incr_side_effect_pending 该行 status='pending' 即重放。复活按钮不管它。`;
-    return { lv:"warn", chip:["amber","停摆"], path, line, detail:esc(detail), timer:null };
+        : spatialDead > 0
+          ? `${why(spatial.last_error)}空间对账不自动重试：全文原因在「错误日志」卡（event=side_effect_dead_letter）；修好之后 UPDATE incr_side_effect_pending 该行 status='pending' 即重放。复活按钮不管它。`
+          : `${why(spatial.last_error)}等待下一轮状态读取；当前没有可据此复活的死信。`;
+    const unknownOnly = sepDead === 0 && !sep.stalled && spatialDead === 0;
+    return { lv:"warn", chip:["amber", unknownOnly ? "状态未知" : "停摆"], path, line, detail:esc(detail), timer:null };
   }
   const dl = Number(m.mup.dead_letters || 0);
   if(dl > 0){
@@ -1340,6 +1355,16 @@ function dataLane(m){
       line:`数据已齐，模型仍在追 ${m.modelLagging.length} 个库`,
       detail:`${w.dbnum}：数据水位 ${w.applied_sesno}，模型水位 ${w.model_sesno || 0}，还有 ${w.model_chasing_roots || 0} 个根在赶。数据增量不会等待模型。`,
       timer:null };
+  }
+  if(!S.dbnums){
+    return { lv:"warn", chip:["amber","水位未知"], path,
+      line:"水位状态尚未读到，暂未确认初始化进度", detail:esc(S.dbnumsErr || "等待读取"), timer:null };
+  }
+  const awaitingManual = m.inScope.filter(r => r.awaiting_manual_initialization);
+  if(awaitingManual.length){
+    return { lv:"warn", chip:["amber","等待手动初始化"], path,
+      line:`${awaitingManual.length} 个新库等待手动初始化，已初始化库继续自动更新`,
+      detail:"在 plant-ui 模型更新中选择待初始化库后执行；自动初始化新库当前关闭。", timer:null };
   }
   return { lv:"ok", chip:["green","已追平"], path,
     line:`范围内 ${m.inScope.length} 个库的数据已齐，已判定的模型均一致`,
@@ -1437,9 +1462,15 @@ function renderDbnumEntry(m){
     : r.model_verdict === "lagging" ? `${r.model_sesno || 0} · 追赶中` : "不判";
   const recent = m.tasks.slice().sort((a,b) => ts(b.started_at || b.created_at) - ts(a.started_at || a.created_at))[0];
   const logs = ((S.batchFailures && S.batchFailures.records) || []).filter(x => Number(x.dbnum) === FOCUS_DBNUM);
+  const roomKnown = Object.prototype.hasOwnProperty.call(r, "room_sesno");
+  const roomInputMatch = roomKnown && r.room_input_version && r.room_required_input
+    && JSON.stringify(r.room_input_version) === JSON.stringify(r.room_required_input);
+  const roomText = !roomKnown ? "后端未提供"
+    : `${r.room_sesno ?? 0}${Number(r.room_sesno ?? 0) === Number(r.model_sesno ?? 0) && roomInputMatch && r.room_result_version ? " · 一致" : " · 待补"}`;
   summary.innerHTML = `
     <div><span class="l">数据水位</span><span class="v">${esc(r.applied_sesno)} / ${esc(r.file_latest_sesno)}</span><span class="s">已保存 / 文件最新</span></div>
     <div><span class="l">模型水位</span><span class="v">${esc(modelText)}</span><span class="s">追赶 ${esc(r.model_chasing_roots || 0)} · 放弃 ${esc(r.model_dead_roots || 0)} · 懒生成 ${esc(r.model_lazy_roots || 0)}</span></div>
+    <div><span class="l">房间水位</span><span class="v">${esc(roomText)}</span><span class="s" title="${esc(r.room_result_version || "")}">${roomInputMatch ? "输入版本匹配" : "等待房间输入凭证"}</span></div>
     <div><span class="l">当前队列</span><span class="v">${m.rows.length ? esc(m.rows.map(x => x.state).join(" · ")) : "空"}</span><span class="s">${m.rows.length ? esc(m.rows.map(x => `${x.start_sesno}–${x.end_sesno}`).join("；")) : "没有待应用的数据批次"}</span></div>
     <div><span class="l">最近任务 / 落盘错误</span><span class="v">${recent ? esc(recent.state) : "无任务"} · ${logs.length} 条</span><span class="s" title="${esc(recent && recent.task_id || "")}">${recent ? esc(recent.task_id) : "当前进程没有该库任务"}</span></div>`;
 }
@@ -1496,9 +1527,9 @@ function renderKpi(m){
     kpiCell("熔断 park", worst ? worst.dbnum : "无",
       m.parked.length ? "red" : (m.failures.length ? "amber" : "mut"),
       worst ? `streak ${worst.streak}/${MAX_ATTEMPTS}${m.failures.length > 1 ? ` · 共 ${m.failures.length} 库` : ""}` : "batch_failures = null") +
-    kpiCell("水位落后", m.lagging.length || 0,
-      m.lagging.length ? "amber" : "green",
-      lag ? `${lag.dbnum} ${lag.applied_sesno} → ${lag.file_latest_sesno}` : `${m.inScope.length} 个库在范围内`) +
+    kpiCell("水位落后", S.dbnums ? (m.lagging.length || 0) : "?",
+      !S.dbnums ? "amber" : (m.lagging.length ? "amber" : "green"),
+      !S.dbnums ? `状态读取失败：${S.dbnumsErr || "未知原因"}` : (lag ? `${lag.dbnum} ${lag.applied_sesno} → ${lag.file_latest_sesno}` : `${m.inScope.length} 个库在范围内`)) +
     kpiCell(focused ? "追赶根 / 放弃根" : "待重试 / 死信", pendingValue, pendingClass,
       focused ? `dbnum ${FOCUS_DBNUM} 模型根` : (m.mupBlind ? "这一段读不出来，不是 0" : "model_update_pending"));
 }
@@ -2246,10 +2277,10 @@ function renderWatermark(m){
     a.dbnum - b.dbnum);
 
   if(!list.length){
-    $("w-body").innerHTML = `<div class="empty">${S.dbnums ? "范围内没有库 —— 当前 MDB 没有声明任何 DESI。" : "读不到 /dbnums"}</div>`;
+    $("w-body").innerHTML = `<div class="empty">${S.dbnums ? "范围内没有库 —— 当前 MDB 没有声明任何 DESI。" : `读不到 /dbnums：${esc(S.dbnumsErr || "请求失败")}`}</div>`;
     return;
   }
-  const head = `<div class="r h"><span>dbnum</span><span>项目</span><span>阶段</span><span>数据水位</span><span>模型水位</span><span>数据进度</span><span>标记</span></div>`;
+  const head = `<div class="r h"><span>dbnum</span><span>项目</span><span>阶段</span><span>数据水位</span><span>模型水位</span><span>房间水位</span><span>数据进度</span><span>标记</span></div>`;
   const body = list.map(r => {
     const lag = r.file_latest_sesno - r.applied_sesno;
     const isRun = running.has(r.dbnum);
@@ -2277,6 +2308,16 @@ function renderWatermark(m){
         : r.model_verdict === "not_judged"
           ? `<span class="chip sm mut" title="${esc(r.model_verdict_reason || "")}">不判</span>`
           : `<span class="mut">未知</span>`;
+    const roomKnown = Object.prototype.hasOwnProperty.call(r, "room_sesno");
+    const roomInputMatch = roomKnown && r.room_input_version && r.room_required_input
+      && JSON.stringify(r.room_input_version) === JSON.stringify(r.room_required_input);
+    const roomComplete = roomKnown
+      && Number(r.room_sesno ?? 0) === Number(r.model_sesno ?? 0)
+      && roomInputMatch && !!r.room_result_version;
+    const roomCell = !roomKnown ? `<span class="mut">未提供</span>`
+      : roomComplete
+        ? `<span class="mono">${esc(r.room_sesno)}</span> <span class="chip sm green" title="${esc(r.room_settled_at ? `房间追平 ${stamp(r.room_settled_at)}` : "房间已一致")}">一致</span>`
+        : `<span class="mono">${esc(r.room_sesno || 0)}</span> <span class="chip sm amber" title="${esc(roomInputMatch ? "房间水位落后模型" : "房间输入版本不匹配")}">待补</span>`;
 
     const pk = parked.get(r.dbnum);
     const note = pk ? `park · ${pk.reason || "连败到上限"}`
@@ -2284,6 +2325,7 @@ function renderWatermark(m){
       : r.anomaly ? (r.anomaly.kind === "rollback"
           ? `文件右端 ${r.file_latest_sesno} 落在水位 ${r.applied_sesno} 后面，下一轮按整库重建入队`
           : "异常已判定，这个库不入队")
+      : r.awaiting_manual_initialization ? "等待前端手动初始化"
       : !r.initialized && !r.not_in_project ? "从没导入过，等首次全量"
       : r.not_in_project ? "登记表里有，项目里没有"
       : r.excluded ? "当前 MDB 没有声明，不参与对账"
@@ -2295,6 +2337,7 @@ function renderWatermark(m){
       <span class="mono mut" style="font-size:11.5px">${esc(phaseOf(r.db_type))}</span>
       <span class="mono sec" style="font-size:12.5px">${esc(r.applied_sesno)} / ${esc(r.file_latest_sesno)}</span>
       <span>${modelCell}</span>
+      <span>${roomCell}</span>
       <span>${S.dataFace === "read-through" ? `<span class="mut">不判</span>` : `<span class="track"><i class="${cls}" style="width:${(meaningful ? pct(r.applied_sesno, r.file_latest_sesno) : 0).toFixed(1)}%"></i></span>`}</span>
       <span class="marks">${chips.join("")}<span class="note" title="${esc(note)}">${esc(note)}</span></span>
     </div>`;

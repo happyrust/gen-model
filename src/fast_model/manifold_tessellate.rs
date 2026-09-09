@@ -614,11 +614,13 @@ pub fn tessellate_revolution(rev: &Revolution) -> anyhow::Result<Option<PlantMes
         }
     }
 
-    let degrees = if (rev.angle - 360.0).abs() < 0.01 || rev.angle > 360.0 || rev.angle == 0.0 {
-        360.0
-    } else {
-        rev.angle as f64
-    };
+    // Core3D 把 ANGL 原样当「终止角」交给 GM_Revolution，起始角恒 0（`CSG_BasicREV::
+    // getPrimGeom` `0x107270C0` → `sub_1071C4F0`，四处 gm_CreateRevolution 全是
+    // `(0.0, ANGL)` 或它的对半拆分）；区间归一化在 libgm 的 d2_numberOfSegmentsForPartRev。
+    // 所以 ANGL=0 是整圈（zdj7015 的泵体模板全是 ANGL=0）、ANGL=−30 是 0°→330° 的逆时针
+    // 补弧（aps250209 的两条 Belt）、ANGL=450 折回 90°。旧写法负角原样交给 revolve、
+    // >360 一律当整圈，两条都与 E3D 相反。整圈给 360.0，走 revolve 的闭合分支。
+    let (degrees, _) = libgm_discretise::part_rev_sweep_deg(rev.angle as f64);
 
     let section = CrossSection::from_polygons_with_fill_rule(&polygons, FillRule::NonZero);
     if section.is_empty() {
@@ -863,11 +865,15 @@ pub fn tessellate_libgm_param(param: &PdmsGeoParam) -> anyhow::Result<Option<Pla
                 ring: ring_segments,
                 tube: tube_segments,
             } = t.segment_counts();
+            // ANGL 的扫角口径与 REVO 同一条（`CSG_BasicCTO::getPrimGeom` `0x10726BE0`
+            // 起始角恒 0）：负角是逆时针补弧、近零是整圈。段数侧 `torus_ring_segments`
+            // 一直按归一化区间配数，网格不归一就是「270° 的段数配 90° 的弧」。
+            let (sweep_deg, _) = libgm_discretise::part_rev_sweep_deg(t.angle as f64);
             covered(
                 mesh_primitives::gen_circular_torus(
                     t.rins,
                     t.rout,
-                    t.angle,
+                    sweep_deg as f32,
                     segs(ring_segments),
                     segs(tube_segments),
                 ),

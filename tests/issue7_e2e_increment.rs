@@ -556,6 +556,7 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
     );
     let found = DiscoveredBatch {
         intent: aios_database::data_interface::batch_queue::BatchIntent::ApplyWindow,
+        model_start_sesno: None,
         project: PROJECT.to_string(),
         dbnum: case.dbnum,
         db_type: "DESI".to_string(),

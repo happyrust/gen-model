@@ -61,11 +61,37 @@ static DBNUM_BY_REF0: Lazy<DashMap<u32, u32>> = Lazy::new(DashMap::new);
 
 /// 当前 MDB 里 `dbnum` 的库类型与文件。
 pub fn source_file_of(dbnum: u32) -> anyhow::Result<(String, PathBuf)> {
+    source_file_lookup(dbnum)?.with_context(|| format!("当前 MDB 没有 dbnum {dbnum} 的库文件"))
+}
+
+/// 同上，但把「不在当前 MDB」与「成员名单读不到」分成两个答案：`Ok(None)` 是前者
+/// （多半是换过 MDB 之后留下的历史 `gen_root` 行），`Err` 是后者。
+///
+/// 启动复核（09-04 审核 #7）要把这两栏分开陈述——把「不在 MDB」记进 `unreadable`，
+/// `gen_root` 里只要留着一行历史库，`/health.startup.reconcile.result` 就一辈子出不来 `ok`。
+pub fn source_file_lookup(dbnum: u32) -> anyhow::Result<Option<(String, PathBuf)>> {
     let (pins, _) = current_mdb_sources()?;
-    pins.into_iter()
+    Ok(pins
+        .into_iter()
         .find(|pin| pin.dbnum == dbnum as i32)
-        .map(|pin| (pin.db_type, pin.file))
-        .with_context(|| format!("当前 MDB 没有 dbnum {dbnum} 的库文件"))
+        .map(|pin| (pin.db_type, pin.file)))
+}
+
+/// 当前 MDB 声明的 DESI 库号（升序、去重）。
+///
+/// 启动复核「哪些库还没有凭证记录」那一栏的**唯一**来源（09-04 审核 #6）：模型面只认 MDB
+/// 成员（本模块头），`DbnumState::list_registered()` 是数据面的登记表——它里面有 SYST /
+/// DICT / CATA，也有换过 MDB 之后留下的历史行，拿它当分母会把没有模型面的库报成「无凭证」。
+pub fn mdb_design_dbnums() -> anyhow::Result<Vec<u32>> {
+    let (pins, _) = current_mdb_sources()?;
+    let mut dbnums: Vec<u32> = pins
+        .into_iter()
+        .filter(|pin| pin.db_type.eq_ignore_ascii_case("DESI"))
+        .filter_map(|pin| u32::try_from(pin.dbnum).ok())
+        .collect();
+    dbnums.sort_unstable();
+    dbnums.dedup();
+    Ok(dbnums)
 }
 
 /// 未指定时点 → 文件最新（ADR-054 Q1）。

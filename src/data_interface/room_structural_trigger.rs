@@ -117,7 +117,8 @@ pub(crate) fn read_room_structural_changes(
                     match subtree_element_from_set(set, refno) {
                         Ok(element) => Some(element.name),
                         Err(error) => {
-                            unreadable.push(format!("读 {refno} 在 {side} 端的 NAME 失败: {error:#}"));
+                            unreadable
+                                .push(format!("读 {refno} 在 {side} 端的 NAME 失败: {error:#}"));
                             None
                         }
                     }
@@ -203,7 +204,10 @@ impl RoomStructuralTriggers {
                     let rooms: Vec<RefnoEnum> = out.renamed_rooms.iter().copied().collect();
                     match collect_room_groups(&rooms, hierarchy, &mut lookup) {
                         Ok(groups) => {
-                            for group in groups.into_iter().filter(|group| out.renamed_rooms.contains(&group.room)) {
+                            for group in groups
+                                .into_iter()
+                                .filter(|group| out.renamed_rooms.contains(&group.room))
+                            {
                                 out.panel_targets.extend(group.panels);
                             }
                         }
@@ -213,7 +217,8 @@ impl RoomStructuralTriggers {
                     }
                 }
                 None => out.unreadable.push(
-                    "房间改名命中，但本构建没有房间层级口径（project_hd / project_hh 都没开）".into(),
+                    "房间改名命中，但本构建没有房间层级口径（project_hd / project_hh 都没开）"
+                        .into(),
                 ),
             }
         }
@@ -223,8 +228,9 @@ impl RoomStructuralTriggers {
             let members = match lookup(container) {
                 Ok(element) => element.members,
                 Err(error) => {
-                    out.unreadable
-                        .push(format!("CWALL/CFLOOR {container} 搬迁的 PANE 枚举失败: {error:#}"));
+                    out.unreadable.push(format!(
+                        "CWALL/CFLOOR {container} 搬迁的 PANE 枚举失败: {error:#}"
+                    ));
                     continue;
                 }
             };
@@ -308,7 +314,10 @@ mod tests {
     /// CFLOOR(6) → PANE(7)；ZONE(8) → EQUI(9)。
     fn tree() -> HashMap<RefnoEnum, SubtreeElement> {
         HashMap::from([
-            (refno(1), element("FRMW", "/1RX-RM03-R301", &[refno(2), refno(5)])),
+            (
+                refno(1),
+                element("FRMW", "/1RX-RM03-R301", &[refno(2), refno(5)]),
+            ),
             (refno(2), element("CWALL", "/W1", &[refno(3), refno(4)])),
             (refno(3), element("PANE", "/P3", &[])),
             (refno(4), element("PANE", "/P4", &[])),
@@ -320,7 +329,9 @@ mod tests {
         ])
     }
 
-    fn lookup(tree: &HashMap<RefnoEnum, SubtreeElement>) -> impl FnMut(RefnoEnum) -> anyhow::Result<SubtreeElement> + '_ {
+    fn lookup(
+        tree: &HashMap<RefnoEnum, SubtreeElement>,
+    ) -> impl FnMut(RefnoEnum) -> anyhow::Result<SubtreeElement> + '_ {
         move |refno| {
             tree.get(&refno)
                 .cloned()
@@ -386,7 +397,11 @@ mod tests {
             lookup(&tree),
         );
         assert!(same.renamed_rooms.is_empty() && same.panel_targets.is_empty());
-        assert!(same.summary_line(8000).contains("请核对"), "{}", same.summary_line(8000));
+        assert!(
+            same.summary_line(8000).contains("请核对"),
+            "{}",
+            same.summary_line(8000)
+        );
 
         // 名字变了但两头都不是房间名。
         let plain = RoomStructuralTriggers::classify(
@@ -426,7 +441,10 @@ mod tests {
             Some(RoomHierarchy::Hd),
             lookup(&tree),
         );
-        assert!(empty_keyword.panel_targets.is_empty(), "空关键字不匹配任何名字");
+        assert!(
+            empty_keyword.panel_targets.is_empty(),
+            "空关键字不匹配任何名字"
+        );
     }
 
     #[test]
@@ -443,7 +461,10 @@ mod tests {
             Some(RoomHierarchy::Hd),
             lookup(&tree),
         );
-        assert_eq!(out.panel_targets, BTreeSet::from([refno(3), refno(4), refno(5)]));
+        assert_eq!(
+            out.panel_targets,
+            BTreeSet::from([refno(3), refno(4), refno(5)])
+        );
     }
 
     #[test]
@@ -452,7 +473,9 @@ mod tests {
         let out = RoomStructuralTriggers::classify(
             &[
                 RoomStructuralChange::PanelReparented { panel: refno(3) },
-                RoomStructuralChange::ContainerReparented { container: refno(6) },
+                RoomStructuralChange::ContainerReparented {
+                    container: refno(6),
+                },
                 // 同一块面板重复上报只算一次。
                 RoomStructuralChange::PanelReparented { panel: refno(3) },
             ],
@@ -477,7 +500,9 @@ mod tests {
                     old_name: Some("/A-RM".into()),
                     new_name: Some("/B-RM".into()),
                 },
-                RoomStructuralChange::ContainerReparented { container: refno(43) },
+                RoomStructuralChange::ContainerReparented {
+                    container: refno(43),
+                },
                 RoomStructuralChange::PanelReparented { panel: refno(3) },
             ],
             3,
@@ -485,7 +510,11 @@ mod tests {
             Some(RoomHierarchy::Hd),
             lookup(&tree),
         );
-        assert_eq!(out.panel_targets, BTreeSet::from([refno(3)]), "读得到的那条照常进");
+        assert_eq!(
+            out.panel_targets,
+            BTreeSet::from([refno(3)]),
+            "读得到的那条照常进"
+        );
         assert_eq!(out.unreadable.len(), 2, "{:?}", out.unreadable);
         assert!(!out.is_empty());
     }

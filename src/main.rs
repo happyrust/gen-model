@@ -35,7 +35,6 @@ use aios_core::{build_cate_relate, get_db_option};
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
 use aios_database::fast_model::room_model::build_room_relations;
-use aios_database::team_data::sync_team_data;
 use aios_database::versioned_db::database::*;
 use aios_database::{run_app, run_cli};
 use bevy_reflect::List;
@@ -52,7 +51,7 @@ use surrealdb::opt::auth::Root;
 /// `thread 'tokio-rt-worker' has overflowed its stack`——服务能起、/health 全绿，
 /// 直到真有增量要应用才当场死。release 压得下，所以 `#[tokio::main]` 一直没出事。
 ///
-/// 取值对齐 `fast_model/occ_generate.rs` 给 `gensec-occ-regression` 线程的 64MB：
+/// 取值对齐 `fast_model/mesh_generate.rs` 给 `gensec-spro-regression` 线程的 64MB：
 /// 栈是保留地址空间、按页提交，多留不花实际内存。
 const RUNTIME_STACK_SIZE: usize = 64 * 1024 * 1024;
 
@@ -84,6 +83,10 @@ enum Command {
 
 #[derive(clap::Args, Default)]
 struct ServeArgs {
+    /// 自动初始化新发现的 dbnum；默认仅维护已初始化库，新库从前端手动初始化。
+    #[arg(long)]
+    auto_initialize_new_dbnums: bool,
+
     /// **调试用**：把本轮数据批次的检查圈到这些 dbnum，并全程追踪它们。
     ///
     /// 逗号分隔（`7998,8000`）。SYS meta 不受限——MDB 的成员名单存在那些库里。
@@ -124,6 +127,9 @@ fn main() -> anyhow::Result<()> {
         Some(Command::Serve(args)) => args,
         None => ServeArgs::default(),
     };
+    if serve.auto_initialize_new_dbnums {
+        aios_database::options::enable_auto_initialize_new_dbnums();
+    }
     if let Some(raw) = serve.debug_dbnum.as_deref() {
         // 拼错的取值直接失败，不回落。悄悄吞成「全范围」看起来像参数没生效，吞成
         // 「空集」看起来像什么都没跑，两种都要人再花一轮才发现是自己手误。

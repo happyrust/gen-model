@@ -167,10 +167,29 @@ impl UpdateScope {
         Self::finish(name, fetched, true)
     }
 
-    /// 只做那一趟 SurrealQL：这里的任何错误都是**基础设施**错误（连接断、
-    /// 服务器重启、形状解不出来），与「名字打错」这类配置错误分属两类，
-    /// 缓存回退只对前者生效。
+    /// 当前 MDB 的范围来自 SYS 源文件，与房间预加载共用成员解析器。
+    /// 每次 fresh 扫描重新解析，事件路径仍由 TTL 和 SYS 更新失效控制频率。
+    /// 历史 MDB 表即使非空，也不能覆盖当前源声明；源读取失败直接返回错误。
+    /// 查询其他 MDB 的旧管理入口暂时保留持久层解析。
     async fn fetch(name: &str) -> anyhow::Result<(Vec<String>, Vec<u32>)> {
+        let option = aios_core::get_db_option();
+        if name == aios_core::helper::to_e3d_name(&option.mdb_name).as_ref() {
+            let started = Instant::now();
+            let membership = super::mdb_membership::resolve(option, &option.project_name, name)?;
+            // 保留所有声明成员，包括缺件库；缺件是初始化阻断，不是缩小范围的依据。
+            let dbnos = membership
+                .element_databases()
+                .map(|database| database.dbnum)
+                .collect::<Vec<_>>();
+            println!(
+                "[ams-phase] phase=mdb_scope project={} mdb={name} source=sys-file dbnums={} elapsed_ms={}",
+                option.project_name,
+                dbnos.len(),
+                started.elapsed().as_millis()
+            );
+            super::mdb_membership::install(membership);
+            return Ok((vec![name.to_owned()], dbnos));
+        }
         let mut response = SUL_DB
             .query(format!(
                 "RETURN array::distinct(SELECT VALUE NAME FROM MDB);\nRETURN {MDB_DBNOS};"
@@ -364,6 +383,68 @@ impl UpdateScope {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires AMS source files and an isolated DB_OPTION_FILE; no database connection"]
+    async fn ams_mdb_initialization_scope_without_database() -> anyhow::Result<()> {
+        let option = aios_core::get_db_option();
+        anyhow::ensure!(
+            option.project_name == "AvevaMarineSample"
+                && option.mdb_name.trim_start_matches('/') == "ALL",
+            "requires AMS /ALL"
+        );
+        let started = Instant::now();
+        let scope = UpdateScope::resolve("ALL").await?;
+        let membership = super::super::mdb_membership::get(&option.project_name, "/ALL")
+            .expect("scope and room initialization share the installed source declaration");
+        let expected: BTreeSet<_> = membership.element_databases().map(|db| db.dbnum).collect();
+        assert_eq!(scope.declared_desi().collect::<BTreeSet<_>>(), expected);
+        let design: BTreeSet<_> = membership
+            .of_type(super::super::mdb_membership::DESI_STYP)
+            .map(|db| db.dbnum)
+            .collect();
+        let missing = membership
+            .unresolved()
+            .filter(|db| db.styp == super::super::mdb_membership::DESI_STYP)
+            .collect::<Vec<_>>();
+        println!("AMS_MDB_DESI declared={} missing={missing:?}", design.len());
+        match crate::fast_model::room_topology::latest_frozen_sources().await {
+            Ok((_, _, room_sources)) => {
+                assert!(missing.is_empty());
+                assert_eq!(
+                    room_sources
+                        .iter()
+                        .map(|source| source.dbnum() as u32)
+                        .collect::<BTreeSet<_>>(),
+                    design,
+                    "room preload must cover precisely all MDB DESI files"
+                );
+            }
+            Err(error) => {
+                assert!(
+                    !missing.is_empty(),
+                    "unexpected room input failure: {error:#}"
+                );
+                for database in missing {
+                    assert!(error.to_string().contains(&database.dbnum.to_string()));
+                }
+                println!("AMS_MDB_ROOM_BLOCKER {error:#}");
+            }
+        }
+        assert!(
+            scope.admits("DESI", 7015),
+            "an unresolved model dependency must not remove a declared database"
+        );
+        assert!(
+            !scope.admits("DESI", 3001),
+            "project directory contents do not extend MDB scope"
+        );
+        println!(
+            "AMS_MDB_SCOPE dbnums={expected:?} elapsed_ms={}",
+            started.elapsed().as_millis()
+        );
+        Ok(())
+    }
 
     fn scope(desi: &[u32]) -> UpdateScope {
         UpdateScope {

@@ -608,19 +608,15 @@ pub async fn gen_inst_meshes(
             .await?
             .check()?;
         let mut inst_geo_ids: Vec<(Option<Thing>, bool)> = response.take(0)?;
-        //todo 排除已经生成了的模型
-        // let mut update_geos_by_meshes = HashSet::default();
+        // 已生成的排除分两道：`!replace_exist` 那条 SQL 谓词挡住库里已落章的，这一道挡
+        // 本进程刚生成、库读还没追上的那批——`EXIST_MESH_GEO_HASHES` 只装本进程这一轮的
+        // 产物（收尾在下面回填），重启即空，durable 的那一半始终由 SQL 谓词负责。
         inst_geo_ids.retain(|(x, y)| {
             if let Some(t) = x {
                 if replace_exist {
                     true
                 } else {
-                    if EXIST_MESH_GEO_HASHES.contains_key(&t.id.to_raw()) {
-                        // update_geos_by_meshes.insert(t.id.to_raw());
-                        false
-                    } else {
-                        true
-                    }
+                    !EXIST_MESH_GEO_HASHES.contains_key(&t.id.to_raw())
                 }
             } else {
                 false

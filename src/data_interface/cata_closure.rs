@@ -286,16 +286,6 @@ impl InMemoryCataLocator {
             // DESI 不是本次依赖定位输入，扫描它们正是 8000 长时间无进展的主因。
             // 身份表保留完整：闭包必须能区分范围外 DESI/PROP 与真正缺失的 CATA。
             // 只缩小“需要建 Ref0 索引”的集合，不能删掉类型与路径身份。
-            for entry in &manifest {
-                dbnum_files.insert(
-                    entry.dbnum,
-                    DbFileEntry {
-                        db_type: "CATA".to_string(),
-                        project: entry.project.clone(),
-                        path: entry.path.clone(),
-                    },
-                );
-            }
         }
 
         // ref0 扫描（磁盘指纹缓存：文件未变则复用上次结果）。
@@ -308,6 +298,20 @@ impl InMemoryCataLocator {
             .iter()
             .map(|entry| entry.dbnum)
             .collect::<HashSet<_>>();
+        // The selected CATA manifest is the authoritative identity when a CATA
+        // dbnum collides with a DESI of the same number in another project.
+        // This overlay must also run with an unrestricted watcher; otherwise the
+        // watermark/identity map can leave the DESI path selected for closure reads.
+        for entry in &manifest {
+            dbnum_files.insert(
+                entry.dbnum,
+                DbFileEntry {
+                    db_type: "CATA".to_string(),
+                    project: entry.project.clone(),
+                    path: entry.path.clone(),
+                },
+            );
+        }
         let index_candidates = dbnum_files
             .iter()
             .filter(|(dbnum, entry)| {

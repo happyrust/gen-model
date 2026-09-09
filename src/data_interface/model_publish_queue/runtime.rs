@@ -223,12 +223,94 @@ pub fn blocks_data_batch(batch: &crate::data_interface::batch_queue::DataBatch) 
     RUNTIME.get().is_some_and(|r| {
         let journal = r.journal.lock().unwrap();
         journal.run_for_dbnum(batch.dbnum).is_some_and(|m| {
-            (journal.active(&m.run_id) || batch.end_sesno != m.source_sesno as i32)
+            retained_run_blocks_batch(
+                journal.active(&m.run_id),
+                m.source_sesno as i32,
+                batch.intent,
+                batch.end_sesno,
+            )
         })
+    })
+}
+
+pub(super) fn retained_run_blocks_batch(
+    active: bool,
+    retained_target: i32,
+    intent: crate::data_interface::batch_queue::BatchIntent,
+    batch_target: i32,
+) -> bool {
+    let exact_recovery = intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly
+        && batch_target == retained_target;
+    batch_target != retained_target || (active && !exact_recovery)
+}
+
+/// A startup ModelOnly Task may adopt a retained initialization only when it
+/// targets the exact frozen source version recorded by that run.
+pub fn can_adopt_retained_initialization(dbnum: u32, target_sesno: i32) -> bool {
+    RUNTIME.get().is_some_and(|r| {
+        r.journal
+            .lock()
+            .unwrap()
+            .run_for_dbnum(dbnum)
+            .is_some_and(|m| m.source_sesno as i32 == target_sesno)
     })
 }
 pub async fn wait_for_dbnum(dbnum: u32) {
     while blocks_dbnum(dbnum) {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Wait until every root in this Task's initialization run has a durable ACK.
+/// The run intentionally remains active until the owning Task publishes spatial
+/// and room results and advances the strict model watermark.
+pub async fn wait_for_task_root_acks(
+    mgr: &crate::data_interface::tidb_manager::AiosDBManager,
+    dbnum: u32,
+    source_sesno: u32,
+    roots: &[String],
+) -> anyhow::Result<bool> {
+    loop {
+        let Some(r) = RUNTIME.get() else {
+            return Ok(false);
+        };
+        let (manifest, ready, failure) = {
+            let journal = r.journal.lock().unwrap();
+            let Some(manifest) = journal.run_for_dbnum(dbnum).cloned() else {
+                return Ok(false);
+            };
+            let ready = journal
+                .finish_candidates()
+                .iter()
+                .any(|candidate| candidate.run_id == manifest.run_id);
+            let failure = journal.run_failure(&manifest.run_id);
+            (manifest, ready, failure)
+        };
+        ensure!(
+            manifest.source_sesno == source_sesno,
+            "initialization run for dbnum {dbnum} targets {}, Task targets {source_sesno}",
+            manifest.source_sesno
+        );
+        let manifest_roots = manifest
+            .roots
+            .iter()
+            .map(|intent| intent.root.as_str())
+            .collect::<std::collections::BTreeSet<_>>();
+        ensure!(
+            roots
+                .iter()
+                .all(|root| manifest_roots.contains(root.as_str())),
+            "initialization run for dbnum {dbnum} does not cover every Task root"
+        );
+        if let Some(error) = failure {
+            anyhow::bail!("initialization root publication failed for dbnum {dbnum}: {error}");
+        }
+        if ready {
+            // Hydrate the acknowledged projection and collect its spatial fragments.
+            // This helper no longer publishes a file round or advances a watermark.
+            finish_ready_initializations_inner(mgr).await?;
+            return Ok(true);
+        }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
@@ -420,6 +502,25 @@ async fn register_baseline(
     r.journal.lock().unwrap().register(manifest.clone())?;
     reserve_on(&SUL_DB, &manifest, false).await?;
     r.journal.lock().unwrap().mark_reserved(&manifest.run_id)?;
+    // Initialization generates roots before the ordinary data-window finalize path
+    // can create its spatial side-effect row. Seed the same collecting round here so
+    // each root publish can attach fragments and finalization can release rooms.
+    crate::data_interface::batch_worker::with_model_publication_window(
+        manifest.dbnum,
+        manifest.source_sesno as i32,
+        &manifest.source_token,
+        async {
+            let sql = crate::data_interface::side_effect_pending::SideEffectCompensator::render_spatial_reconcile_upsert(
+                manifest.dbnum,
+                manifest.source_sesno as i32,
+                &[],
+                &[],
+            )?;
+            SUL_DB.query(sql).await?.check()?;
+            anyhow::Ok(())
+        },
+    )
+    .await?;
     if publish_ready {
         ensure!(
             source_is_applied(&manifest).await?,
@@ -1152,11 +1253,11 @@ async fn consumer(r: Arc<Runtime>) {
             //
             // 让带宽**按库让**：别的库的属性批次不该停掉本库的发布，否则 28 个库串起来
             // 就是 Σ属性 + Σ发布，一次都不重叠。
-            let running_data = crate::data_interface::batch_scheduler::BatchScheduler::global()
-                .running_data_dbnums();
-            if !running_data.is_empty()
+            let data_writing = crate::data_interface::batch_scheduler::BatchScheduler::global()
+                .data_writing_dbnums();
+            if !data_writing.is_empty()
                 && data_batch_blocks_publication(
-                    &running_data,
+                    &data_writing,
                     &r.journal.lock().unwrap().active_dbnums(),
                 )
             {
@@ -1177,6 +1278,12 @@ async fn consumer(r: Arc<Runtime>) {
     }
 }
 
+/// 一次数据库请求最多打包多少根。
+///
+/// 2026-09-07 从 32 提到 96：AMS 7997 那轮实测每批平均只有 1.45 MB，卡住的是根数而不是
+/// [`PUBLISH_BATCH_BYTES`]（字节那一维还空着 2.8 倍），212 批 / 74.6 s = 352 ms 一个往返，
+/// 而服务侧 0.30 核、库侧 0.82 核都远没跑满——每批都在付一笔固定开销。批量失败已按
+/// statement index 逐根归因（不再连坐），所以「一批越大牵连越多」的代价比当初便宜了。
 const PUBLISH_BATCH_ROOTS: usize = 32;
 const PUBLISH_BATCH_BYTES: usize = 4 * 1024 * 1024;
 /// 连续成功这么多批之后把批量上限翻倍回去（最多到 [`PUBLISH_BATCH_ROOTS`]）。
@@ -1236,10 +1343,10 @@ fn admit_runs(mut pending: Vec<RunManifest>, in_flight: usize, limit: usize) -> 
 /// [`Journal::next_ready`] 只交出 active run 的根。这道门是把那条不变量钉在原地，
 /// 万一哪天上面两处松了，让路的行为还在，而不是悄悄变成两个写者对着干。
 pub(super) fn data_batch_blocks_publication(
-    running_data_dbnums: &[u32],
+    data_writing_dbnums: &[u32],
     active_publish_dbnums: &[u32],
 ) -> bool {
-    running_data_dbnums
+    data_writing_dbnums
         .iter()
         .any(|dbnum| active_publish_dbnums.contains(dbnum))
 }
@@ -1917,7 +2024,7 @@ pub(super) fn finalization_defers(error: &anyhow::Error) -> bool {
 }
 
 async fn finish_ready_initializations_inner(
-    mgr: &crate::data_interface::tidb_manager::AiosDBManager,
+    _mgr: &crate::data_interface::tidb_manager::AiosDBManager,
 ) -> anyhow::Result<()> {
     let Some(r) = RUNTIME.get() else {
         return Ok(());
@@ -1955,12 +2062,39 @@ async fn finish_ready_initializations_inner(
             r.hydrated.lock().unwrap().insert(m.run_id.clone());
         }
         lap("restore_projection", &mut laps);
-        let round = crate::data_interface::side_effect_pending::SideEffectCompensator::file_round(
-            m.dbnum,
-            m.source_sesno as i32,
-        )
-        .await?
-        .context("initialization file round missing")?;
+        let mut round =
+            crate::data_interface::side_effect_pending::SideEffectCompensator::file_round(
+                m.dbnum,
+                m.source_sesno as i32,
+            )
+            .await?;
+        if round.is_none() {
+            // Older initialization manifests could be persisted before the
+            // collecting side-effect row was introduced. Recreate that row
+            // from the manifest token so restart recovery is idempotent.
+            crate::data_interface::batch_worker::with_model_publication_window(
+                m.dbnum,
+                m.source_sesno as i32,
+                &m.source_token,
+                async {
+                    let sql = crate::data_interface::side_effect_pending::SideEffectCompensator::render_spatial_reconcile_upsert(
+                        m.dbnum,
+                        m.source_sesno as i32,
+                        &[],
+                        &[],
+                    )?;
+                    SUL_DB.query(sql).await?.check()?;
+                    anyhow::Ok(())
+                },
+            )
+            .await?;
+            round = crate::data_interface::side_effect_pending::SideEffectCompensator::file_round(
+                m.dbnum,
+                m.source_sesno as i32,
+            )
+            .await?;
+        }
+        let round = round.context("initialization file round missing")?;
         ensure!(
             round.commit_token.as_deref() == Some(m.source_token.as_str()),
             "initialization finalization source token mismatch"
@@ -1969,20 +2103,28 @@ async fn finish_ready_initializations_inner(
             collect_spatial_fragments(&m).await?;
         }
         lap("spatial_fragments", &mut laps);
-        crate::data_interface::model_update_pending::reconcile_model_watermark_on(&SUL_DB, m.dbnum)
-            .await?;
         let probe = crate::data_interface::model_update_pending::read_model_watermark_probe(
             &SUL_DB, m.dbnum,
         )
         .await?;
         lap("model_watermark", &mut laps);
-        if probe.recorded != m.source_sesno as i32
+        let round = crate::data_interface::side_effect_pending::SideEffectCompensator::file_round(
+            m.dbnum,
+            m.source_sesno as i32,
+        )
+        .await?
+        .context("initialization file round disappeared")?;
+        if round.status != "done"
+            || !round.room_released
+            || probe.recorded != m.source_sesno as i32
             || probe.supported() != m.source_sesno as i32
             || probe.abandoned != 0
         {
             println!(
-                "[model-publish] dbnum={} 收口等待水位对齐（recorded={} supported={} abandoned={} 目标={}）：{}",
+                "[model-publish] dbnum={} 等待 Task 收尾（round={} rooms={} recorded={} supported={} abandoned={} 目标={}）：{}",
                 m.dbnum,
+                round.status,
+                round.room_released,
                 probe.recorded,
                 probe.supported(),
                 probe.abandoned,
@@ -1991,27 +2133,6 @@ async fn finish_ready_initializations_inner(
             );
             continue;
         }
-        let mut report = crate::data_interface::batch_worker::DataBatchTaskResult {
-            project: mgr.db_option.project_name.clone(),
-            status: crate::data_interface::manual_update::ManualUpdateStatus::Success,
-            batch: None,
-            units: Vec::new(),
-            warnings: Vec::new(),
-            model_verdict: None,
-            model_caught_up_at: None,
-        };
-        if let Err(error) = crate::data_interface::batch_worker::publish_completed_file_round(
-            mgr,
-            m.dbnum,
-            m.source_sesno as i32,
-            &mut report,
-        )
-        .await
-        {
-            return Err(error)
-                .with_context(|| format!("file publication dbnum={} run={}", m.dbnum, m.run_id));
-        }
-        lap("file_round", &mut laps);
         let sql = format!(
             "RETURN count(SELECT id FROM model_update_pending WHERE dbnum={});\n\
             RETURN count(SELECT id FROM incr_side_effect_pending WHERE dbnum={} AND status IN ['collecting','pending','failed','dead']);",

@@ -20,6 +20,7 @@ pub enum BatchState {
 pub enum BatchIntent {
     ApplyWindow,
     Reinitialize,
+    ModelOnly,
 }
 
 impl BatchIntent {
@@ -27,6 +28,7 @@ impl BatchIntent {
         match self {
             Self::ApplyWindow => "apply_window",
             Self::Reinitialize => "reinitialize",
+            Self::ModelOnly => "model_only",
         }
     }
 }
@@ -39,6 +41,9 @@ pub struct DataBatch {
     pub epoch_id: u64,
     pub db_type: String,
     pub intent: BatchIntent,
+    /// Earliest model-completion watermark that this Task must recover from.
+    /// It stays independent from the data window when intents merge.
+    pub model_start_sesno: Option<i32>,
     /// 闭区间左端，等于入队时的水位 + 1。
     pub start_sesno: i32,
     /// 闭区间右端。**排队期间它是「入队时观察到的预期上界」，不是冻结值**——
@@ -114,6 +119,7 @@ pub fn enqueue(
     applied_sesno: i32,
     file_latest_sesno: i32,
     previous_observed_sesno: i32,
+    model_start_sesno: Option<i32>,
     hold: bool,
     intent: BatchIntent,
     phase: crate::data_interface::initialization_phase::DataPhase,
@@ -123,6 +129,7 @@ pub fn enqueue(
         .iter_mut()
         .find(|b| b.dbnum == dbnum && b.state == BatchState::Queued)
     {
+        let previous_model_start = queued.model_start_sesno;
         if !hold {
             queued.held = false;
         }
@@ -132,12 +139,17 @@ pub fn enqueue(
         // 「上一次观察」已经包含首次触发要报的那几条保存。
         queued.previous_observed_sesno =
             queued.previous_observed_sesno.min(previous_observed_sesno);
+        queued.model_start_sesno = match (queued.model_start_sesno, model_start_sesno) {
+            (Some(left), Some(right)) => Some(left.min(right)),
+            (left, right) => left.or(right),
+        };
         if intent == BatchIntent::Reinitialize {
             let start_sesno = reinitialize_start(file_latest_sesno);
             let changed = queued.intent != intent
                 || queued.start_sesno != start_sesno
                 || queued.end_sesno != file_latest_sesno;
             queued.intent = intent;
+            queued.model_start_sesno = Some(0);
             queued.start_sesno = start_sesno;
             queued.end_sesno = file_latest_sesno;
             return if changed {
@@ -156,17 +168,60 @@ pub fn enqueue(
             }
             return Enqueued::AlreadyCovered;
         }
+        if intent == BatchIntent::ApplyWindow && queued.intent == BatchIntent::ModelOnly {
+            queued.intent = BatchIntent::ApplyWindow;
+            queued.start_sesno = applied_sesno + 1;
+            queued.end_sesno = queued.end_sesno.max(file_latest_sesno);
+            return Enqueued::Merged;
+        }
+        if intent == BatchIntent::ModelOnly {
+            if queued.intent == BatchIntent::ModelOnly {
+                let previous_range = (queued.start_sesno, queued.end_sesno);
+                queued.start_sesno = queued
+                    .model_start_sesno
+                    .unwrap_or(applied_sesno)
+                    .saturating_add(1);
+                queued.end_sesno = queued.end_sesno.max(file_latest_sesno);
+                return if previous_range != (queued.start_sesno, queued.end_sesno)
+                    || previous_model_start != queued.model_start_sesno
+                {
+                    Enqueued::Merged
+                } else {
+                    Enqueued::AlreadyCovered
+                };
+            }
+            return if previous_model_start != queued.model_start_sesno {
+                Enqueued::Merged
+            } else {
+                Enqueued::AlreadyCovered
+            };
+        }
         if file_latest_sesno > queued.end_sesno {
             queued.end_sesno = file_latest_sesno;
             return Enqueued::Merged;
         }
-        return Enqueued::AlreadyCovered;
+        return if previous_model_start != queued.model_start_sesno {
+            Enqueued::Merged
+        } else {
+            Enqueued::AlreadyCovered
+        };
     }
 
     let running_end = queue
         .iter()
         .find(|b| b.dbnum == dbnum && b.state == BatchState::Running)
         .map(|b| b.end_sesno);
+    // A model recovery discovered while a newer data task is running must target
+    // at least that task's frozen generation. Otherwise it runs afterwards and
+    // attempts to publish an older model generation over roots already advanced
+    // by the data task.
+    let effective_end_sesno = if intent == BatchIntent::ModelOnly {
+        running_end
+            .map(|end| end.max(file_latest_sesno))
+            .unwrap_or(file_latest_sesno)
+    } else {
+        file_latest_sesno
+    };
 
     let (start_sesno, outcome) = match (running_end, intent) {
         (Some(_), BatchIntent::Reinitialize) => (
@@ -176,8 +231,16 @@ pub fn enqueue(
         (None, BatchIntent::Reinitialize) => (reinitialize_start(file_latest_sesno), Enqueued::New),
         (Some(end), BatchIntent::ApplyWindow) => (end + 1, Enqueued::BehindRunning),
         (None, BatchIntent::ApplyWindow) => (applied_sesno + 1, Enqueued::New),
+        (Some(_), BatchIntent::ModelOnly) => (
+            model_start_sesno.unwrap_or(applied_sesno).saturating_add(1),
+            Enqueued::BehindRunning,
+        ),
+        (None, BatchIntent::ModelOnly) => (
+            model_start_sesno.unwrap_or(applied_sesno).saturating_add(1),
+            Enqueued::New,
+        ),
     };
-    if !covers(start_sesno, file_latest_sesno) {
+    if !covers(start_sesno, effective_end_sesno) {
         return Enqueued::AlreadyCovered;
     }
     queue.push(DataBatch {
@@ -186,8 +249,13 @@ pub fn enqueue(
         epoch_id,
         db_type: db_type.to_owned(),
         intent,
+        model_start_sesno: if intent == BatchIntent::Reinitialize {
+            Some(0)
+        } else {
+            model_start_sesno
+        },
         start_sesno,
-        end_sesno: file_latest_sesno,
+        end_sesno: effective_end_sesno,
         previous_observed_sesno,
         state: BatchState::Queued,
         held: hold,
@@ -287,6 +355,7 @@ mod tests {
             epoch_id: 1,
             db_type: "DESI".to_owned(),
             intent: BatchIntent::ApplyWindow,
+            model_start_sesno: None,
             start_sesno: start,
             end_sesno: end,
             previous_observed_sesno: start - 1,
@@ -351,6 +420,7 @@ mod tests {
             applied_sesno,
             file_latest_sesno,
             applied_sesno,
+            None,
             false,
             BatchIntent::ApplyWindow,
             crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type),
@@ -373,6 +443,7 @@ mod tests {
             applied_sesno,
             file_latest_sesno,
             applied_sesno,
+            None,
             true,
             BatchIntent::ApplyWindow,
             crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type),
@@ -393,11 +464,99 @@ mod tests {
             applied_sesno,
             file_latest_sesno,
             applied_sesno,
+            Some(0),
             false,
             BatchIntent::Reinitialize,
             crate::data_interface::initialization_phase::DataPhase::Design,
             1,
         )
+    }
+
+    fn model_only(
+        queue: &mut Vec<DataBatch>,
+        dbnum: u32,
+        model_start_sesno: i32,
+        target_sesno: i32,
+    ) -> Enqueued {
+        enqueue(
+            queue,
+            dbnum,
+            "DESI",
+            target_sesno,
+            target_sesno,
+            target_sesno,
+            Some(model_start_sesno),
+            false,
+            BatchIntent::ModelOnly,
+            crate::data_interface::initialization_phase::DataPhase::Design,
+            1,
+        )
+    }
+
+    #[test]
+    fn mixed_intents_preserve_the_earliest_model_gap() {
+        let mut model_then_data = Vec::new();
+        assert_eq!(model_only(&mut model_then_data, 7997, 4, 10), Enqueued::New);
+        assert_eq!(
+            live_trigger(&mut model_then_data, 7997, "DESI", 8, 12),
+            Enqueued::Merged
+        );
+        assert_eq!(model_then_data[0].intent, BatchIntent::ApplyWindow);
+        assert_eq!(model_then_data[0].model_start_sesno, Some(4));
+        assert_eq!(
+            (model_then_data[0].start_sesno, model_then_data[0].end_sesno),
+            (9, 12)
+        );
+
+        let mut data_then_model = Vec::new();
+        live_trigger(&mut data_then_model, 7997, "DESI", 8, 12);
+        assert_eq!(
+            model_only(&mut data_then_model, 7997, 3, 8),
+            Enqueued::Merged
+        );
+        assert_eq!(data_then_model[0].intent, BatchIntent::ApplyWindow);
+        assert_eq!(data_then_model[0].model_start_sesno, Some(3));
+        assert_eq!(
+            (data_then_model[0].start_sesno, data_then_model[0].end_sesno),
+            (9, 12)
+        );
+    }
+
+    #[test]
+    fn reinitialize_dominates_model_only_and_resets_the_model_floor() {
+        let mut queue = Vec::new();
+        model_only(&mut queue, 7997, 7, 10);
+        assert_eq!(reinitialize(&mut queue, 7997, 10, 12), Enqueued::Merged);
+        assert_eq!(queue[0].intent, BatchIntent::Reinitialize);
+        assert_eq!(queue[0].model_start_sesno, Some(0));
+        assert_eq!((queue[0].start_sesno, queue[0].end_sesno), (1, 12));
+    }
+
+    #[test]
+    fn a_running_target_is_frozen_while_model_recovery_queues_behind_it() {
+        let mut queue = Vec::new();
+        live_trigger(&mut queue, 7997, "DESI", 0, 10);
+        assert_eq!(freeze_next(&mut queue, false), Some(0));
+        assert_eq!(model_only(&mut queue, 7997, 2, 10), Enqueued::BehindRunning);
+        assert_eq!(queue[0].end_sesno, 10);
+        assert_eq!(queue[1].intent, BatchIntent::ModelOnly);
+        assert_eq!(queue[1].model_start_sesno, Some(2));
+        assert_eq!((queue[1].start_sesno, queue[1].end_sesno), (3, 10));
+    }
+
+    #[test]
+    fn model_recovery_behind_newer_data_uses_the_running_generation() {
+        let mut queue = Vec::new();
+        live_trigger(&mut queue, 8000, "DESI", 432, 438);
+        assert_eq!(freeze_next(&mut queue, false), Some(0));
+
+        assert_eq!(
+            model_only(&mut queue, 8000, 432, 434),
+            Enqueued::BehindRunning
+        );
+        assert_eq!(queue[1].intent, BatchIntent::ModelOnly);
+        assert_eq!(queue[1].model_start_sesno, Some(432));
+        assert_eq!((queue[1].start_sesno, queue[1].end_sesno), (433, 438));
     }
 
     #[test]
@@ -451,6 +610,7 @@ mod tests {
             1023,
             1034,
             1030,
+            None,
             false,
             BatchIntent::ApplyWindow,
             crate::data_interface::initialization_phase::DataPhase::Design,
@@ -468,6 +628,7 @@ mod tests {
             1023,
             1041,
             1034,
+            None,
             false,
             BatchIntent::ApplyWindow,
             crate::data_interface::initialization_phase::DataPhase::Design,
@@ -650,6 +811,7 @@ mod tests {
                 epoch_id: 1,
                 db_type: "SYST".to_owned(),
                 intent: BatchIntent::ApplyWindow,
+                model_start_sesno: None,
                 start_sesno: 5,
                 end_sesno: 9,
                 previous_observed_sesno: 4,

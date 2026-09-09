@@ -44,10 +44,14 @@ use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
 use crate::data_interface::generation_root::{
-    GenerationRoot, enumerate_generation_roots, refno_to_e3d,
+    GenerationRoot, enumerate_generation_roots, refno_from_e3d, refno_to_e3d,
 };
 use crate::data_interface::manual_update::DeliveryUnitSummary;
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
+use crate::data_interface::rigid_motion::{
+    CandidateKind, TransformClassification, TransformUnit, WindowCandidate,
+    classify_transform_roots,
+};
 use crate::fast_model::e3d_model_service::scan_index;
 
 #[cfg(test)]
@@ -282,6 +286,189 @@ pub struct WindowRootSources {
     /// 让计划标 `room_rebuild_required`。账本粗筛零 I/O；没有开关（审核 F-A，d-272）。
     pub(crate) room_structural:
         crate::data_interface::room_structural_trigger::RoomStructuralTriggers,
+    /// 刚体前移（ADR-066，S4b）的文件侧输入：候选（两端属主链、`Δ`、三条排除的判决）与每个根在
+    /// T 端的属主链。开关 `model_transform_cheap_path` 关着时 `enabled = false`、两个集合都空——
+    /// 一次 `world_matrix` 都不算，`impact` / `plan_window_roots` 的产物与今天逐位相同。
+    pub(crate) rigid: RigidMotionSources,
+}
+
+/// [`WindowRootSources::rigid`] 的形状。纯数据；分桶在 `rigid_motion::classify_transform_roots`。
+#[derive(Debug, Default)]
+pub(crate) struct RigidMotionSources {
+    pub enabled: bool,
+    pub candidates: Vec<WindowCandidate>,
+    pub root_ancestors_t: BTreeMap<RefnoEnum, Vec<RefnoEnum>>,
+    /// 算不出的地方（世界矩阵 / 属主链读挂）——那些候选已按 `Other` 处理，这里只留给 warnings。
+    pub notes: Vec<String>,
+}
+
+/// 属主链最长走多少级就认作回环。e3d-model 的 `MAX_ANCESTOR_DEPTH` 不公开，这里独立钉一份。
+const RIGID_MOTION_MAX_ANCESTOR_DEPTH: usize = 64;
+
+/// 沿 T 端索引属主表上溯，**不含自身**。停在：属主缺席、属主 == 自身、属主不在索引里
+/// （与 `e3d_model_service::ancestor_chain` 同一套停法，所以未索引的 WORL 不出现）。
+pub(crate) fn owner_chain_t(owners: &BTreeMap<(u32, u32), RefNo>, refno: RefNo) -> Vec<RefnoEnum> {
+    let mut chain = Vec::new();
+    let mut current = refno;
+    while chain.len() < RIGID_MOTION_MAX_ANCESTOR_DEPTH {
+        let Some(&owner) = owners.get(&(current.word0, current.word1)) else {
+            break;
+        };
+        if owner == current
+            || !owner.is_valid()
+            || !owners.contains_key(&(owner.word0, owner.word1))
+        {
+            break;
+        }
+        chain.push(refno_from_e3d(owner));
+        current = owner;
+    }
+    chain
+}
+
+/// 沿某一端 `DbSet` 的属主链上溯，**不含自身**。起点在这一端不存在回空链（Inserted 在 base、
+/// Deleted 在 target 是常态）；读挂回 `Err`。
+fn owner_chain_in_set(set: &Arc<DbSet>, refno: RefNo) -> anyhow::Result<Vec<RefnoEnum>> {
+    let mut current = set.element(refno);
+    if !current
+        .exists()
+        .map_err(|error| anyhow::anyhow!("{refno}: {error}"))?
+    {
+        return Ok(Vec::new());
+    }
+    let mut chain = Vec::new();
+    while chain.len() < RIGID_MOTION_MAX_ANCESTOR_DEPTH {
+        match current
+            .owner()
+            .map_err(|error| anyhow::anyhow!("{}: {error}", current.refno()))?
+        {
+            Some(owner) if owner.refno() == current.refno() => break,
+            Some(owner) => {
+                chain.push(refno_from_e3d(owner.refno()));
+                current = owner;
+            }
+            None => break,
+        }
+    }
+    Ok(chain)
+}
+
+/// 一个只动了摆放的候选：`Δ = W_T·W_S⁻¹`（两端世界矩阵都在文件侧算），外加三条排除的判决
+/// （ADR-066 D1 规则 3）——沿 T 端**严格祖先**逐个读：路由容器（`derives_implied_tubes`）、
+/// 点 / 环容器（`graphics_ignored_below`）、`CWBRAN`；候选自己是桥架件也不刚（摆放是伪属性）。
+fn rigid_anchor(
+    base: &Arc<DbSet>,
+    target: &Arc<DbSet>,
+    refno: RefNo,
+    chain_t: &[RefnoEnum],
+) -> anyhow::Result<CandidateKind> {
+    let w_s = e3d_model::transform::world_matrix(&base.element(refno))
+        .map_err(|error| anyhow::anyhow!("world matrix of {refno} at S: {error}"))?;
+    let w_t = e3d_model::transform::world_matrix(&target.element(refno))
+        .map_err(|error| anyhow::anyhow!("world matrix of {refno} at T: {error}"))?;
+    let delta = w_t * w_s.inverse();
+    let own_noun = target
+        .element(refno)
+        .element_type()
+        .map_err(|error| anyhow::anyhow!("noun of {refno} at T: {error}"))?;
+    let mut rigid = if e3d_model::is_cable_tray_element(&own_noun) {
+        Err(format!(
+            "anchor {refno} is a cable tray piece ({own_noun}); its placement is a pseudo attribute"
+        ))
+    } else {
+        Ok(())
+    };
+    if rigid.is_ok() {
+        for ancestor in chain_t {
+            let element = target.element(refno_to_e3d(*ancestor));
+            let noun = element
+                .element_type()
+                .map_err(|error| anyhow::anyhow!("noun of ancestor {ancestor}: {error}"))?;
+            if noun == "CWBRAN" {
+                rigid = Err(format!("anchor inside CWBRAN {ancestor}"));
+                break;
+            }
+            if e3d_model::category::graphics_ignored_below(&noun) {
+                rigid = Err(format!(
+                    "anchor under point/loop container {noun} {ancestor}"
+                ));
+                break;
+            }
+            if e3d_model::category::derives_implied_tubes(&element)
+                .map_err(|error| anyhow::anyhow!("route check of {ancestor}: {error}"))?
+            {
+                rigid = Err(format!("anchor inside route container {noun} {ancestor}"));
+                break;
+            }
+        }
+    }
+    Ok(CandidateKind::Anchor { delta, rigid })
+}
+
+/// 把 e3d-model 的账本折成刚体前移的候选表（只在开关开着时调）。每个 refno 一条：账本里只动了
+/// 摆放的（`placement_only`）算 `Anchor`，其余一律 `Other`（新建 / 删除 / 改挂 / 换类型 / 动成员 /
+/// 动了别的属性 / opaque / 读不出来）。删除 / 改挂 / 换类型的候选另走一遍 S 端属主链——旧根只有它说得出。
+fn collect_rigid_motion_sources(
+    plan: &UpdatePlan,
+    base: &Arc<DbSet>,
+    target: &Arc<DbSet>,
+    owners: &BTreeMap<(u32, u32), RefNo>,
+    roots_t: &[GenerationRoot],
+) -> RigidMotionSources {
+    let mut out = RigidMotionSources {
+        enabled: true,
+        ..Default::default()
+    };
+    let anchors = plan.ledger.placement_only();
+    let mut kinds: BTreeMap<(u32, u32), (RefNo, Vec<String>, bool)> = BTreeMap::new();
+    for entry in plan.ledger.entries() {
+        let slot = kinds
+            .entry((entry.refno.word0, entry.refno.word1))
+            .or_insert_with(|| (entry.refno, Vec::new(), false));
+        slot.1.push(format!("{:?}: {}", entry.kind, entry.detail));
+        slot.2 |= matches!(
+            entry.kind,
+            ChangeKind::Deleted | ChangeKind::Reparented | ChangeKind::TypeChanged
+        );
+    }
+    for (key, (refno, details, needs_base_chain)) in kinds {
+        let chain_t = owner_chain_t(owners, refno);
+        let chain_s = if needs_base_chain {
+            match owner_chain_in_set(base, refno) {
+                Ok(chain) => chain,
+                Err(error) => {
+                    out.notes
+                        .push(format!("base owner chain of {refno} unreadable: {error:#}"));
+                    Vec::new()
+                }
+            }
+        } else {
+            Vec::new()
+        };
+        let kind = if anchors.contains(&key) {
+            match rigid_anchor(base, target, refno, &chain_t) {
+                Ok(kind) => kind,
+                Err(error) => {
+                    out.notes
+                        .push(format!("placement anchor {refno} unreadable: {error:#}"));
+                    CandidateKind::Other(format!("placement anchor unreadable: {error:#}"))
+                }
+            }
+        } else {
+            CandidateKind::Other(details.join("; "))
+        };
+        out.candidates.push(WindowCandidate {
+            refno: refno_from_e3d(refno),
+            kind,
+            chain_t,
+            chain_s,
+        });
+    }
+    out.root_ancestors_t = roots_t
+        .iter()
+        .map(|root| (root.root, owner_chain_t(owners, refno_to_e3d(root.root))))
+        .collect();
+    out
 }
 
 fn nested_root_observation(
@@ -473,6 +660,14 @@ impl WindowRootSources {
             })?;
         let (nested_roots, duplicate_coverage_elements) =
             nested_root_observation(&roots_t, index.owners.as_ref());
+        // 刚体前移（ADR-066）：开关关 = 一次 `world_matrix` 都不算、候选表空，下游产物与今天逐位相同。
+        // 开着时在这里（两端 `DbSet` 都在手、索引属主表刚扫完）把候选链 / `Δ` / 三条排除一次算完，
+        // 执行体从此一个文件都不必读。
+        let rigid = if crate::options::model_transform_cheap_path() {
+            collect_rigid_motion_sources(&plan, base, target, index.owners.as_ref(), &roots_t)
+        } else {
+            RigidMotionSources::default()
+        };
         // C2：结构连接正向级联。开关关 = 一次文件读都不发生（`off()`），touched 一字不改。
         let structural_connection = if crate::options::model_structural_connection_cascade() {
             crate::data_interface::structural_connection::StructuralConnectionCascade::collect(
@@ -534,18 +729,48 @@ impl WindowRootSources {
             cable_endpoint,
             design_reference,
             room_structural,
+            rigid,
         })
+    }
+
+    /// 闭包**直接**命中的根：`(roots_S ∪ roots_T) ∩ closure`，`expand_touched` 之前那一份。
+    fn directly_touched(&self, roots_s: &[PersistedRoot]) -> BTreeSet<RefnoEnum> {
+        roots_s
+            .iter()
+            .map(|root| root.refno)
+            .chain(self.roots_t.iter().map(|root| root.root))
+            .filter(|refno| self.closure.contains(refno_to_e3d(*refno)))
+            .collect()
+    }
+
+    /// 刚体前移（ADR-066）的分桶，在 [`Self::impact`] 之后调。`expanded` = `impact.touched` 里不是
+    /// 闭包直接命中的根（C2 / C8 / P4 加进来的）——它们一律不走便宜路（D1 规则 5）。
+    /// `settled` = `roots_S` 里已发布且安定的根（[`load_persisted_roots_with_settlement`]）。
+    /// 开关关着时 `self.rigid.enabled == false`，返回默认值。
+    pub(crate) fn rigid_motion(
+        &self,
+        roots_s: &[PersistedRoot],
+        settled: &BTreeSet<RefnoEnum>,
+        impact: &WindowImpact,
+    ) -> TransformClassification {
+        let direct = self.directly_touched(roots_s);
+        let expanded: BTreeSet<RefnoEnum> = impact.touched.difference(&direct).copied().collect();
+        classify_transform_roots(
+            &self.roots_t,
+            &self.rigid.root_ancestors_t,
+            settled,
+            &impact.touched,
+            &expanded,
+            impact.degraded_reason().as_deref(),
+            &self.rigid.candidates,
+            self.rigid.enabled,
+        )
     }
 
     /// `roots_S ∪ roots_T` 里哪些根被这一窗波及（`UpdatePlan::touches_roots` 的判据），
     /// 连同护栏要看的三个数。
     pub fn impact(&self, roots_s: &[PersistedRoot]) -> WindowImpact {
-        let mut touched: BTreeSet<RefnoEnum> = roots_s
-            .iter()
-            .map(|root| root.refno)
-            .chain(self.roots_t.iter().map(|root| root.root))
-            .filter(|refno| self.closure.contains(refno_to_e3d(*refno)))
-            .collect();
+        let mut touched = self.directly_touched(roots_s);
         // C2 连接扩展：touched → roots 映射之后、`regen = touched ∩ roots_T` 之前，把结构连接
         // 对端的根并进来（对端根都取自 roots_T）。开关关时是空操作。
         self.structural_connection.expand_touched(&mut touched);
@@ -600,6 +825,151 @@ async fn load_persisted_roots_on(
         .collect()
 }
 
+/// 「已发布且安定」——与 [`render_credential_advance`] 的 SQL 守卫**同一口径**的纯函数版：状态在
+/// [`SETTLED_ROOT_STATUSES`]、凭证 `> 0`、`publication_status` 是 `ready`（旧式行没有这一列，视同
+/// `ready`）、`desired_revision == published_revision`（同上）。刚体前移只对这样的根开放（ADR-066 D1
+/// 规则 1）：在飞 / 失败 / 从没生成过的根没有可前移的记录。
+pub fn root_is_settled(
+    status: Option<&str>,
+    source_end_sesno: Option<i32>,
+    publication_status: Option<&str>,
+    desired_revision: Option<u64>,
+    published_revision: Option<u64>,
+) -> bool {
+    status.is_some_and(|status| SETTLED_ROOT_STATUSES.contains(&status))
+        && source_end_sesno.is_some_and(|sesno| sesno > 0)
+        && publication_status.unwrap_or("ready") == "ready"
+        && desired_revision.unwrap_or(0) == published_revision.unwrap_or(0)
+}
+
+/// [`load_persisted_roots`] 外加「哪些根安定」（[`root_is_settled`]）。刚体前移开着时
+/// [`build_model_update_plan_from_window`] 用它替代前者——同一条 SELECT 多取四列，行数 = 根数。
+pub async fn load_persisted_roots_with_settlement(
+    dbnum: u32,
+) -> anyhow::Result<(Vec<PersistedRoot>, BTreeSet<RefnoEnum>)> {
+    load_persisted_roots_with_settlement_on(&SUL_DB, dbnum).await
+}
+
+async fn load_persisted_roots_with_settlement_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<(Vec<PersistedRoot>, BTreeSet<RefnoEnum>)> {
+    #[derive(serde::Deserialize)]
+    struct Row {
+        pe: surrealdb::sql::Thing,
+        noun: String,
+        #[serde(default)]
+        status: Option<String>,
+        #[serde(default)]
+        source_end_sesno: Option<i32>,
+        #[serde(default)]
+        publication_status: Option<String>,
+        #[serde(default)]
+        desired_revision: Option<u64>,
+        #[serde(default)]
+        published_revision: Option<u64>,
+    }
+    let mut response = db
+        .query(format!(
+            "SELECT pe ?: type::thing('pe', type::string(record::id(id))) AS pe, \
+             noun ?: '' AS noun, status, source_end_sesno, publication_status, \
+             desired_revision, published_revision FROM gen_root WHERE dbnum = {dbnum} ORDER BY pe;"
+        ))
+        .await
+        .with_context(|| format!("load gen_root rows with settlement of dbnum {dbnum}"))?
+        .check()
+        .with_context(|| format!("gen_root settlement statement for dbnum {dbnum}"))?;
+    let rows: Vec<Row> = response
+        .take(0)
+        .with_context(|| format!("decode gen_root settlement rows of dbnum {dbnum}"))?;
+    let mut roots = Vec::with_capacity(rows.len());
+    let mut settled = BTreeSet::new();
+    for row in rows {
+        let refno = crate::data_interface::helper::pe_thing_to_refno(row.pe)?;
+        if root_is_settled(
+            row.status.as_deref(),
+            row.source_end_sesno,
+            row.publication_status.as_deref(),
+            row.desired_revision,
+            row.published_revision,
+        ) {
+            settled.insert(refno);
+        }
+        roots.push(PersistedRoot {
+            refno,
+            noun: row.noun,
+        });
+    }
+    Ok((roots, settled))
+}
+
+/// 纯函数：把刚体前移的分桶折成计划上的提示——`plan.regen` 里、且过了判据的根，各带锚点。
+/// 它是 `regen` 的**子集**（`transform ⊆ regen`）：`work_items` / `units` 一字不改，不认识提示的
+/// 执行体照旧整根重算。退化窗口与开关关都在分桶那一层已经空了，这里不再判。
+/// `base_sesno` 是算 `Δ` 的窗口基线 S，随提示带给执行体——重放闸（`republish_gate`）拿它对回执，
+/// 投影不在 S 上就不许左乘（S4b 审核 P0）。
+pub(crate) fn transform_units_for(
+    plan: &WindowRootPlan,
+    classification: &TransformClassification,
+    base_sesno: u32,
+) -> Vec<TransformUnit> {
+    plan.regen
+        .iter()
+        .filter_map(|root| {
+            classification
+                .transform
+                .get(&root.root)
+                .map(|anchors| TransformUnit {
+                    root_refno: root.root.to_pdms_str(),
+                    noun: root.noun.clone(),
+                    source_start_sesno: base_sesno,
+                    anchors: anchors.iter().map(Into::into).collect(),
+                })
+        })
+        .collect()
+}
+
+/// warnings 里那一行刚体前移的账；开关关着时不出这一行（计划与今天逐字相同）。
+fn rigid_motion_summary_line(
+    dbnum: u32,
+    units: &[TransformUnit],
+    classification: &TransformClassification,
+    notes: &[String],
+) -> String {
+    const SHOWN: usize = 6;
+    let anchors: usize = units.iter().map(|unit| unit.anchors.len()).sum();
+    let rejected = classification
+        .rejected
+        .iter()
+        .take(SHOWN)
+        .map(|(root, reason)| format!("{}: {reason}", root.to_pdms_str()))
+        .collect::<Vec<_>>()
+        .join(" | ");
+    let more = classification.rejected.len().saturating_sub(SHOWN);
+    format!(
+        "dbnum={dbnum}: rigid-motion (model_transform_cheap_path) — transform={} (anchors={}) \
+         rejected={}{}{}{}",
+        units.len(),
+        anchors,
+        classification.rejected.len(),
+        if rejected.is_empty() {
+            String::new()
+        } else {
+            format!(" [{rejected}]")
+        },
+        if more > 0 {
+            format!(" (+{more} more)")
+        } else {
+            String::new()
+        },
+        if notes.is_empty() {
+            String::new()
+        } else {
+            format!("; notes: {}", notes.join(" | "))
+        },
+    )
+}
+
 /// DESI 窗口 S→T 的模型计划，输入全部来自文件与 `gen_root`（P2-1）。
 ///
 /// 非 DESI 库返回空计划：CATA 窗口仍走 `build_cata_cascade_plan`（`ref_rev` 反查，P2-3），
@@ -652,10 +1022,20 @@ pub(crate) async fn build_model_update_plan_from_window(
     })
     .await
     .map_err(|error| anyhow::anyhow!("window root planning task failed: {error}"))??;
-    let roots_s = load_persisted_roots(dbnum).await?;
+    // 刚体前移开着才多取「安定」四列；关着走原来那条 SELECT，行为逐位相同。
+    let (roots_s, settled) = if sources.rigid.enabled {
+        load_persisted_roots_with_settlement(dbnum).await?
+    } else {
+        (load_persisted_roots(dbnum).await?, BTreeSet::new())
+    };
     let impact = sources.impact(&roots_s);
     let mut plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
     carry_pending_generation_on(&SUL_DB, dbnum, target_sesno, &sources.roots_t, &mut plan).await?;
+    // 分桶在 `carry_pending_generation_on` 之后：带着 pending 重生成的根 `desired_revision` 已被抬高、
+    // 不在 `settled` 里，判据本身就不会把它判成 transform；这里的顺序只是让「提示 ⊆ 最终 regen」
+    // 一目了然。
+    let rigid = sources.rigid_motion(&roots_s, &settled, &impact);
+    let transform_units = transform_units_for(&plan, &rigid, base_sesno);
     let mut warnings = vec![format!(
         "dbnum={dbnum}: window {base_sesno}→{target_sesno} roots_T={} roots_S={} touched={} \
          regen={} delete={} advance={} lazy={} | {}",
@@ -689,6 +1069,14 @@ pub(crate) async fn build_model_update_plan_from_window(
     warnings.push(sources.structural_connection.summary_line(dbnum));
     warnings.push(sources.cable_endpoint.summary_line(dbnum));
     warnings.push(sources.design_reference.summary_line(dbnum));
+    if sources.rigid.enabled {
+        warnings.push(rigid_motion_summary_line(
+            dbnum,
+            &transform_units,
+            &rigid,
+            &sources.rigid.notes,
+        ));
+    }
     warnings.push(sources.room_structural.summary_line(dbnum));
     warnings.extend(
         sources
@@ -713,6 +1101,10 @@ pub(crate) async fn build_model_update_plan_from_window(
     // planner already has the authoritative root list, so carry a minimal
     // summary for each eager root instead of re-running the legacy PE planner.
     out.units = units;
+    // 刚体前移（ADR-066）的提示随计划走：`transform ⊆ regen`，`work_items` / `units` 一字未改，
+    // 不认识它的执行体（今天的 drain）照旧整根重算；B6 的分流认它。开关关时分桶已空，
+    // `transform_units` 为空，计划与今天逐位相同。
+    out.transform_units = transform_units;
     // 房间结构触发（ADR-010 D12 / ADR-040 §4，审核 F-A）：与老 PE 规划器同一份落法——面板目标
     // 折成 `RoomRecalcPanel`，随数据窗口落 `collecting`、跟文件轮次一起释放；枚举读挂不掐窗口，
     // 但要在同一份计划上留下 `room_build:main = rebuild_required` 的持久信号（ADR-040 §5）。
@@ -799,8 +1191,8 @@ async fn carry_pending_generation_on(
 
 /// Select the same model planner for preview and execution.
 ///
-/// Direct DESI derives roots from the pinned S→T file window. Other database
-/// types and the compatibility data mode retain the PE-backed planner.
+/// DESI derives roots from the pinned S→T file window. CATA temporarily keeps
+/// its isolated `ref_rev` cascade arm; other database types have no model plan.
 pub(crate) async fn build_effective_model_update_plan(
     dbnum: u32,
     db_type: &str,
@@ -811,9 +1203,10 @@ pub(crate) async fn build_effective_model_update_plan(
         Vec<crate::data_interface::ele_ops::EleOperationData>,
     >,
 ) -> anyhow::Result<ModelUpdatePlan> {
-    if crate::options::direct_read_mode() && db_type.eq_ignore_ascii_case("DESI") {
-        build_model_update_plan_from_window(dbnum, db_type, base_sesno, target_sesno).await
-    } else {
+    if db_type.eq_ignore_ascii_case("DESI") {
+        return build_model_update_plan_from_window(dbnum, db_type, base_sesno, target_sesno).await;
+    }
+    if db_type.eq_ignore_ascii_case("CATA") {
         crate::data_interface::model_update_plan::build_model_update_plan(
             dbnum,
             target_sesno as i32,
@@ -821,6 +1214,8 @@ pub(crate) async fn build_effective_model_update_plan(
             range_eles,
         )
         .await
+    } else {
+        Ok(ModelUpdatePlan::default())
     }
 }
 
@@ -1025,6 +1420,7 @@ async fn load_persisted_root_states_on(
 ) -> anyhow::Result<Vec<PersistedRootState>> {
     #[derive(serde::Deserialize)]
     struct Row {
+        id: surrealdb::sql::Thing,
         pe: surrealdb::sql::Thing,
         noun: String,
         #[serde(default)]
@@ -1032,19 +1428,40 @@ async fn load_persisted_root_states_on(
         #[serde(default)]
         source_end_sesno: Option<i32>,
     }
-    let mut response = db
-        .query(format!(
-            "SELECT pe ?: type::thing('pe', type::string(record::id(id))) AS pe, \
+    let started = std::time::Instant::now();
+    let mut rows: Vec<Row> = Vec::new();
+    let mut after = String::new();
+    let mut pages = 0;
+    loop {
+        let mut response = db
+            .query(format!(
+                "SELECT id, pe ?: type::thing('pe', type::string(record::id(id))) AS pe, \
              noun ?: '' AS noun, status, source_end_sesno FROM gen_root \
-             WHERE dbnum = {dbnum} ORDER BY pe;"
-        ))
-        .await
-        .with_context(|| format!("load gen_root credential rows of dbnum {dbnum}"))?
-        .check()
-        .with_context(|| format!("gen_root credential statement for dbnum {dbnum}"))?;
-    let rows: Vec<Row> = response
-        .take(0)
-        .with_context(|| format!("decode gen_root credential rows of dbnum {dbnum}"))?;
+             WHERE dbnum = {dbnum}{after} ORDER BY id LIMIT 500;"
+            ))
+            .await
+            .with_context(|| format!("load root states dbnum={dbnum} page={pages}"))?
+            .check()?;
+        let page: Vec<Row> = response.take(0)?;
+        pages += 1;
+        let last = page.len() < 500;
+        if let Some(row) = page.last() {
+            after = format!(" AND id > {}", row.id);
+        }
+        rows.extend(page);
+        if last {
+            break;
+        }
+    }
+    // Retain the caller's complete set and original PE ordering; only the
+    // server-side result and sorting collector are bounded by page size.
+    rows.sort_by(|a, b| a.pe.cmp(&b.pe));
+    println!(
+        "[model-query] at={} query=root_states dbnum={dbnum} pages={pages} rows={} elapsed_ms={}",
+        chrono::Utc::now().to_rfc3339(),
+        rows.len(),
+        started.elapsed().as_millis()
+    );
     rows.into_iter()
         .map(|row| {
             Ok(PersistedRootState {
@@ -1085,7 +1502,7 @@ fn startup_unsettled_action(_root: &PersistedRoot) -> ModelWorkAction {
     ModelWorkAction::RegenRoot
 }
 
-async fn enumerate_target_roots(
+pub(crate) async fn enumerate_target_roots(
     dbnum: u32,
     target_sesno: u32,
 ) -> anyhow::Result<Vec<GenerationRoot>> {
@@ -1167,7 +1584,8 @@ pub async fn reconcile_startup_window(
     };
     let fell_back = base_sesno.is_some() && window.is_none();
 
-    let no_settled_roots = !states.is_empty() && states.iter().all(|state| !state.is_settled());
+    let no_settled_roots =
+        settled_floor.is_none() || states.iter().all(|state| !state.is_settled());
     let mut work_items: Vec<ModelWorkItem> = if no_settled_roots {
         // The model projection has never published a complete root. Its rows are
         // intent, not an authoritative root inventory: a previous interrupted
@@ -1258,19 +1676,8 @@ pub async fn reconcile_startup_window(
         .await?
         .advanced;
     }
-    // 模型水位的第二触发点（ADR-060 D5，2026-09-05 修订），与 `finalize_attempt_on` 同一格：
-    // 这一窗一项工作都没排，模型排空里不会有它的 cohort；凭证刚前移到 T，此刻不盖章，
-    // 两枚水位就要等到**再下一次**启动才对得上——启动对账排在开窗之前，这一轮已经跑过了。
-    // 排了工作就交给 cohort 收口。候选值照旧被 `min(安定下限, applied_sesno)` 夹住：
-    // 数据水位还没到文件最新时写出来的是数据到过的那一版，不是 T（D2 推论二）。
-    if report.enqueued == 0 {
-        crate::data_interface::model_update_pending::advance_model_watermark(
-            dbnum,
-            target_sesno as i32,
-            target.session_time.as_deref(),
-        )
-        .await;
-    }
+    // 即使本窗口没有生成项，也不在规划/探针路径推进库级完成水位。调用方仍需通过
+    // ModelOnly Task 完成发布、空间与房间，再由 Task 收尾盖章。
     Ok(report)
 }
 
@@ -1945,6 +2352,107 @@ mod tests {
         db
     }
 
+    /// B7 判据 · settled 门（mem://）：`load_persisted_roots_with_settlement_on` 只把
+    /// 「状态 ∈ SETTLED_ROOT_STATUSES ∧ 凭证>0 ∧ publication ready ∧ desired==published」的根算进
+    /// settled；别的库不加载。刚体前移只对 settled 的根开放（ADR-066 D1 规则 1）。
+    #[tokio::test]
+    async fn the_settlement_gate_marks_only_ready_published_roots() {
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem boots");
+        db.use_ns("window_root_plan")
+            .use_db("settlement_gate")
+            .await
+            .unwrap();
+        db.query(
+            "CREATE gen_root:24384_1 SET dbnum = 8000, status = 'Generated', publication_status = 'ready', \
+               desired_revision = 3, published_revision = 3, source_end_sesno = 20;\
+             CREATE gen_root:24384_2 SET dbnum = 8000, status = 'Generated', publication_status = 'stale', \
+               desired_revision = 4, published_revision = 3, source_end_sesno = 20;\
+             CREATE gen_root:24384_3 SET dbnum = 8000, status = 'Failed', publication_status = 'ready', \
+               desired_revision = 3, published_revision = 3, source_end_sesno = 20;\
+             CREATE gen_root:24384_4 SET dbnum = 8000, status = 'AlreadyAvailable', publication_status = 'ready', \
+               desired_revision = 3, published_revision = 3, source_end_sesno = 30;\
+             CREATE gen_root:24384_5 SET dbnum = 8000, status = 'Generated', publication_status = 'ready', \
+               desired_revision = 3, published_revision = 3, source_end_sesno = 0;\
+             CREATE gen_root:24384_6 SET dbnum = 8000, status = 'NoRenderableGeometry', source_end_sesno = 20;\
+             CREATE gen_root:24384_7 SET dbnum = 1112, status = 'Generated', publication_status = 'ready', \
+               desired_revision = 3, published_revision = 3, source_end_sesno = 20;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let (roots, settled) = load_persisted_roots_with_settlement_on(&db, 8000)
+            .await
+            .unwrap();
+        // 只加载本库（8000）的根：7 属别的库，不出现。
+        let loaded: BTreeSet<RefnoEnum> = roots.iter().map(|root| root.refno).collect();
+        assert_eq!(
+            loaded,
+            [1u32, 2, 3, 4, 5, 6]
+                .iter()
+                .map(|id| r(*id))
+                .collect::<BTreeSet<_>>()
+        );
+        // settled = 1（ready）、4（AlreadyAvailable ready）、6（旧式行：无 publication 列视同 ready、凭证>0）。
+        // 2 stale（desired≠published）、3 Failed、5 凭证=0 都不算；7 属别的库根本没加载。
+        assert_eq!(
+            settled,
+            [1u32, 4, 6]
+                .iter()
+                .map(|id| r(*id))
+                .collect::<BTreeSet<_>>()
+        );
+    }
+
+    /// B7 判据 · 提示装配：`transform_units_for` 只给 `plan.regen` 里、且过了判据（在
+    /// `classification.transform`）的根发提示——`transform ⊆ regen`。判成 transform 却不在 regen
+    /// 的根不出现，regen 里没判 transform 的根也不带提示。
+    #[test]
+    fn transform_units_are_a_regen_subset_carrying_their_anchors() {
+        use crate::data_interface::rigid_motion::TransformAnchor;
+        let plan = WindowRootPlan {
+            regen: vec![
+                root(5, "BRAN", GenerationRootKind::DeliveryUnit),
+                root(8, "EQUI", GenerationRootKind::DeliveryUnit),
+            ],
+            ..Default::default()
+        };
+        let mut transform = BTreeMap::new();
+        transform.insert(
+            r(5),
+            vec![TransformAnchor {
+                refno: r(3),
+                delta: glam::DMat4::from_translation(glam::DVec3::new(1.0, 0.0, 0.0)),
+            }],
+        );
+        // r(9) 判成 transform，但不在 plan.regen —— 必须被 `transform ⊆ regen` 挡掉。
+        transform.insert(
+            r(9),
+            vec![TransformAnchor {
+                refno: r(2),
+                delta: glam::DMat4::IDENTITY,
+            }],
+        );
+        let classification = TransformClassification {
+            transform,
+            rejected: Vec::new(),
+        };
+        let units = transform_units_for(&plan, &classification, 40);
+        // regen ∩ transform = {5}：只有它出提示；8（regen 无 transform）与 9（transform 非 regen）都不出。
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].root_refno, r(5).to_pdms_str());
+        assert_eq!(units[0].noun, "BRAN");
+        assert_eq!(
+            units[0].source_start_sesno, 40,
+            "算 Δ 的窗口基线 S 随提示走，执行体的重放闸要拿它对回执"
+        );
+        assert_eq!(units[0].anchors.len(), 1);
+        assert_eq!(units[0].anchors[0].refno, r(3).to_pdms_str());
+    }
+
     #[tokio::test]
     async fn persisted_root_loaders_recover_legacy_rows_without_pe_or_noun() {
         let db = surrealdb::engine::any::connect("mem://")
@@ -1981,6 +2489,22 @@ mod tests {
             startup_unsettled_action(&states[1].root),
             ModelWorkAction::RegenRoot
         );
+    }
+
+    #[test]
+    fn effective_increment_planner_has_no_legacy_read_route() {
+        let source = include_str!("window_root_plan.rs");
+        let dispatch = source
+            .split_once("pub(crate) async fn build_effective_model_update_plan(")
+            .expect("effective planner")
+            .1
+            .split_once("// ---- P2-2")
+            .expect("effective planner boundary")
+            .0;
+        assert!(!dispatch.contains("direct_read_mode"));
+        assert!(dispatch.contains("db_type.eq_ignore_ascii_case(\"DESI\")"));
+        assert!(dispatch.contains("db_type.eq_ignore_ascii_case(\"CATA\")"));
+        assert!(dispatch.contains("Ok(ModelUpdatePlan::default())"));
     }
 
     /// `(凭证, 时刻, 前移前的凭证)`，按根 id 排。
@@ -2780,5 +3304,198 @@ mod tests {
             out.window_planned,
             "窗口规划器的计划必须自报家门，否则 apply_one 还会去跑那条会炸的复核"
         );
+    }
+
+    /// **W3.2 的「先量再定」那一步**（核对表 §9「慢」档 R17–R20 / 开发计划 W3.2）。
+    ///
+    /// 祖先抢占去重要不要立项，定性早就有了——「多做不是漏做」。缺的是量：真实窗口里
+    /// 嵌套根**多常见**、被两个以上根盖住的元素**多到什么程度**。两个观测量
+    /// [`WindowRootSources::nested_roots`] / [`WindowRootSources::duplicate_coverage_elements`]
+    /// 早就在算、也早就随窗口 warning 打出来了，但从来没有人在整个语料上收过一遍。
+    ///
+    /// 这条测试只做收集：**一个断言都不下在数值上**。它不是回归门——嵌套根多少是语料的
+    /// 性质，不是代码的契约，钉住它只会在换语料那天红一次然后被人改掉。它是一次可复跑的
+    /// 测量，产物是打印出来的分布。
+    ///
+    /// 五个开关全默认关（级联零 I/O），所以量到的就是今天生产路径上的形状。
+    ///
+    /// 环境变量：`AIOS_POSREF_DIRS`（`;` 分隔，覆盖语料目录）、`AIOS_NESTED_WINDOWS_PER_DB`
+    /// （每库取最后几步，默认 3）、`AIOS_E3D_TEMPLATE_DIR`。
+    #[test]
+    #[ignore = "manual live: measures nested-root cost across the DESI corpus; needs the E3D template directory"]
+    fn live_corpus_nested_root_and_duplicate_coverage_measurement() {
+        use std::path::PathBuf;
+
+        use e3d_io::db_element::{DbFilePin, template_file_for};
+        use e3d_io::engine::ReadOnlyEngine;
+        use e3d_io::session::SessionSelector;
+
+        use crate::data_interface::direct_store::DirectSchema;
+        use crate::data_interface::generation_root::resolve_delivery_unit_types;
+        use crate::data_interface::reverse_reference::sources_in_dir;
+
+        const DEFAULT_DIRS: [&str; 5] = [
+            r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaPlantSample\aps000",
+            r"D:\AVEVA\Projects\E3D3.1\AvevaCatalogue\acp000",
+            r"D:\AVEVA\Projects\E3D3.1\ZDJ\ZDJ000",
+            r"D:\AVEVA\Projects\E3D3.1\YCYK-E3D\acw000",
+        ];
+        let dirs: Vec<PathBuf> = match std::env::var("AIOS_POSREF_DIRS") {
+            Ok(value) => value.split(';').map(PathBuf::from).collect(),
+            Err(_) => DEFAULT_DIRS.iter().map(PathBuf::from).collect(),
+        };
+        let per_db: usize = std::env::var("AIOS_NESTED_WINDOWS_PER_DB")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(3);
+
+        let schema = DirectSchema::open_from_env().expect("E3D template directory");
+        let unit_types = resolve_delivery_unit_types(&[]);
+        let attlib = schema.template_dir().join("attlib.dat");
+        let desi_template =
+            template_file_for(schema.template_dir(), "DESI").expect("DESI template");
+
+        let mut windows = 0usize;
+        let mut windows_with_nesting = 0usize;
+        let mut dbs_measured = 0usize;
+        let mut nested_total = 0usize;
+        let mut nested_max = (0usize, String::new());
+        let mut duplicate_total = 0usize;
+        let mut duplicate_max = (0usize, String::new());
+        let mut roots_total = 0usize;
+        let mut indexed_total = 0usize;
+
+        for dir in &dirs {
+            if !dir.is_dir() {
+                continue;
+            }
+            let Ok(sources) = sources_in_dir(dir, &["DESI"]) else {
+                continue;
+            };
+            for source in sources {
+                let file = source.file.clone();
+                let Ok(mut engine) = ReadOnlyEngine::open(&file) else {
+                    continue;
+                };
+                let Ok(sessions) = engine.sessions() else {
+                    continue;
+                };
+                let mut sesnos: Vec<u32> =
+                    sessions.iter().map(|session| session.session_id).collect();
+                sesnos.sort_unstable();
+                sesnos.dedup();
+                if sesnos.len() < 2 {
+                    continue;
+                }
+                let Ok(steps) =
+                    engine.diff_steps(SessionSelector::Exact(sesnos[0]), SessionSelector::Latest)
+                else {
+                    continue;
+                };
+                let picked: Vec<(u32, u32)> = steps
+                    .iter()
+                    .rev()
+                    .take(per_db)
+                    .rev()
+                    .map(|step| (step.from.sesno, step.to.sesno))
+                    .collect();
+                drop(engine);
+                if picked.is_empty() {
+                    continue;
+                }
+                dbs_measured += 1;
+
+                let open = |sesno: u32| -> Option<Arc<DbSet>> {
+                    let set = Arc::new(DbSet::with_attlib_file(&attlib).ok()?);
+                    set.add_db(DbFilePin {
+                        file: file.clone(),
+                        template: desi_template.clone(),
+                        db_type: Some("DESI".into()),
+                        sesno: Some(sesno),
+                    })
+                    .ok()?;
+                    Some(set)
+                };
+                for (base_sesno, target_sesno) in picked {
+                    let (Some(base), Some(target)) = (open(base_sesno), open(target_sesno)) else {
+                        continue;
+                    };
+                    let Ok(sources) = WindowRootSources::collect(
+                        &file,
+                        base_sesno,
+                        target_sesno,
+                        &base,
+                        &target,
+                        &unit_types,
+                        &[],
+                    ) else {
+                        continue;
+                    };
+                    let label = format!(
+                        "{} {base_sesno}→{target_sesno}",
+                        file.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_default()
+                    );
+                    windows += 1;
+                    roots_total += sources.roots_t.len();
+                    indexed_total += sources.index_keys;
+                    nested_total += sources.nested_roots;
+                    duplicate_total += sources.duplicate_coverage_elements;
+                    if sources.nested_roots > nested_max.0 {
+                        nested_max = (sources.nested_roots, label.clone());
+                    }
+                    if sources.duplicate_coverage_elements > duplicate_max.0 {
+                        duplicate_max = (sources.duplicate_coverage_elements, label.clone());
+                    }
+                    if sources.nested_roots > 0 {
+                        windows_with_nesting += 1;
+                        println!(
+                            "  {label}: roots_T={} index_keys={} nested_roots={} duplicate_coverage_elements={}",
+                            sources.roots_t.len(),
+                            sources.index_keys,
+                            sources.nested_roots,
+                            sources.duplicate_coverage_elements
+                        );
+                    }
+                }
+            }
+        }
+
+        println!("=========== W3.2 嵌套根成本基线 ===========");
+        println!(
+            "语料目录 {} 个，量到 {dbs_measured} 个 DESI 库 / {windows} 窗（每库最后 {per_db} 步）",
+            dirs.len()
+        );
+        println!(
+            "有嵌套根的窗：{windows_with_nesting} / {windows}（{:.1}%）",
+            if windows == 0 {
+                0.0
+            } else {
+                windows_with_nesting as f64 * 100.0 / windows as f64
+            }
+        );
+        println!(
+            "nested_roots 合计 {nested_total}（占 roots_T 合计 {roots_total} 的 {:.2}%），单窗最大 {} @ {}",
+            if roots_total == 0 {
+                0.0
+            } else {
+                nested_total as f64 * 100.0 / roots_total as f64
+            },
+            nested_max.0,
+            nested_max.1
+        );
+        println!(
+            "duplicate_coverage_elements 合计 {duplicate_total}（占索引键合计 {indexed_total} 的 {:.2}%），单窗最大 {} @ {}",
+            if indexed_total == 0 {
+                0.0
+            } else {
+                duplicate_total as f64 * 100.0 / indexed_total as f64
+            },
+            duplicate_max.0,
+            duplicate_max.1
+        );
+        assert!(windows > 0, "一窗都没量到：语料目录或模板目录不对");
     }
 }

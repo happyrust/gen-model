@@ -1239,6 +1239,39 @@ mod tests {
     }
 
     #[test]
+    fn room_round_detail_preserves_membership_delta_for_task_api() {
+        let registry = TaskRegistry::default();
+        registry.insert_running_room_round(
+            "room-delta",
+            "P",
+            1,
+            serde_json::json!({
+                "panels": 0,
+                "elements": 1,
+                "dead_letters": 0,
+                "membership_delta": {
+                    "room_membership_changes": 1,
+                    "members_entered": 0,
+                    "members_left": 0,
+                    "samples": ["构件 4000000001_20: K100 -> K200"]
+                }
+            }),
+        );
+
+        let entry = registry.get("room-delta").expect("room task exists");
+        let payload = serde_json::to_value(&entry).expect("task entry serializes");
+        assert_eq!(payload["kind"], TASK_KIND_ROOM_RECALC);
+        assert_eq!(
+            payload["detail"]["membership_delta"]["room_membership_changes"],
+            1
+        );
+        assert_eq!(
+            payload["detail"]["membership_delta"]["samples"][0],
+            "构件 4000000001_20: K100 -> K200"
+        );
+    }
+
+    #[test]
     fn started_at_is_set_on_freeze_not_on_enqueue() {
         let registry = TaskRegistry::default();
         queue_row(&registry, "row", 7997, 1, 2);

@@ -1015,7 +1015,7 @@ impl IncrementPipeline {
             let end_sesno = *requested_range.end();
             // Direct DESI uses the same file-pinned S→T root planner as the
             // live e3d-model parity test.  Other modes retain the established
-            // PE-backed planner until their migration is complete.
+            // CATA temporarily keeps its isolated ref_rev cascade planner.
             let base_sesno = requested_range.start().saturating_sub(1) as u32;
             let model_plan = StageTimings::measure(
                 &mut timings.plan,

@@ -1,0 +1,38 @@
+-- Metadata-only rename window on db8000: SCTN /-SR-CSV-S6137-BAR-3 (=24384/25639,
+-- owner FRMW /-SR-CSV-S6137/MAIN). A SCTN is a model unit (e3d-model
+-- is_model_unit), so with the metadata gate off this single NAME change rolls up
+-- to the SCTN itself (regenerate = 1 unit) and with the gate on it rolls up to
+-- nothing: exactly the shape the pinned live gate
+-- (AIOS_METADATA_ONLY_WINDOW=base:target) asserts.
+--
+-- Why not the EQUI /1-LNR-Q005-PJ the first draft used: EQUI is a generation
+-- root, not a model unit, so renaming it is no_model with the gate off as well
+-- and the pinned gate would report saved_units=0 and go red.
+--
+-- Only NAME is written, exactly one SAVEWORK, no QUIT/FINISH (the l3_suite
+-- driver wrapper owns the session). Navigation is by refno, which holds on this
+-- channel (see db8000_bran_ftub_move_apply.mac).
+-- restore partner: codex_md_rename_restore.mac
+--
+-- History: the 2026-09-08 15:0x drafts of this file crashed E3D TTY with
+-- 0xC0000005 before their first log line. Lines 10 and 20 of those drafts
+-- carried a literal editor line-number prefix (four spaces, the number, a
+-- vertical bar) pasted from a read-out, which PML cannot parse. Keep this
+-- file free of such prefixes.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/codex_md_rename_apply.log" OVER
+$P CODEX-MD-RENAME-APPLY-ALIVE
+Q PROJ
+Q MDB
+=24384/25639
+Q CE
+Q TYPE
+Q NAME
+Q OWNE
+NAME /-SR-CSV-S6137-BAR-3_CODEXMD
+Q CE
+Q NAME
+Q OWNE
+SAVEWORK 'CODEX metadata only rename of SCTN -SR-CSV-S6137-BAR-3'
+$P CODEX-MD-RENAME-APPLY-DONE
+ALPHA LOG END

@@ -112,6 +112,22 @@ pub struct DbnumState {
     /// `model_caught_up_at` 对外；源保存时刻仍由 `model_sesno_time` 表达。
     #[serde(default)]
     pub model_settled_at: Option<String>,
+    /// Last model session whose room results were atomically published.
+    #[serde(default)]
+    pub room_sesno: i32,
+    #[serde(default)]
+    pub room_sesno_time: Option<String>,
+    #[serde(default)]
+    pub room_settled_at: Option<String>,
+    /// Source-bound model and room-definition versions, not a wall-clock token.
+    #[serde(default)]
+    pub room_input_version: Option<RoomInputVersion>,
+    /// Latest durable obligation; a boundary change can update this without a new session.
+    #[serde(default)]
+    pub room_required_input: Option<RoomInputVersion>,
+    /// Visible immutable result set, committed with room_sesno and its input proof.
+    #[serde(default)]
+    pub room_result_version: Option<String>,
     /// 生成根四格分类里的两格（ADR-060 D3/D5）：应有但从未生成过的根、已放弃的根
     /// （死信或 `http_422`）。两者都**不拦水位**，但都要露出来。
     ///
@@ -130,6 +146,47 @@ pub struct DbnumState {
 }
 
 impl DbnumState {
+    /// Select the first missing stage without reading model or room tables.
+    /// `expected` must come from the verified local E3D input manifest.
+    pub fn recovery_stage(&self, expected: Option<&RoomInputVersion>) -> RecoveryStage {
+        if self.room_sesno < 0
+            || self.model_sesno < self.room_sesno
+            || self.applied_sesno < self.model_sesno
+            || self.file_latest_sesno < self.applied_sesno
+        {
+            return RecoveryStage::InvalidWatermarks;
+        }
+        let Some(expected) = expected.filter(|v| v.is_valid()) else {
+            return RecoveryStage::VerifyInput;
+        };
+        if self.room_input_version.as_ref().is_some_and(|old| {
+            old.source_identity != expected.source_identity
+                || old.generation_rule_version != expected.generation_rule_version
+        }) {
+            return RecoveryStage::VerifyInput;
+        }
+        if !self.initialized || self.applied_sesno < self.file_latest_sesno {
+            return RecoveryStage::Data;
+        }
+        if self.model_sesno < self.applied_sesno {
+            return RecoveryStage::Model;
+        }
+        if expected.model_sesno != self.model_sesno {
+            return RecoveryStage::VerifyInput;
+        }
+        if self.room_sesno < self.model_sesno
+            || self.room_input_version.as_ref() != Some(expected)
+            || self.room_required_input.as_ref() != Some(expected)
+            || self
+                .room_result_version
+                .as_ref()
+                .is_none_or(|v| v.is_empty())
+        {
+            return RecoveryStage::Room;
+        }
+        RecoveryStage::Complete
+    }
+
     /// 两枚水位这一半的判据（ADR-060 D4 的前两项）：数据已建立，且模型追平到同一版。
     ///
     /// **它不是完整的 `model_in_sync`**——D4 还要求「无未安定根」，那是一个实时的
@@ -138,6 +195,42 @@ impl DbnumState {
     pub fn model_caught_up(&self) -> bool {
         self.applied_sesno > 0 && self.model_sesno == self.applied_sesno
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RoomInputVersion {
+    pub version: u32,
+    pub source_identity: String,
+    pub model_sesno: i32,
+    pub model_version: String,
+    pub room_definition_version: String,
+    pub generation_rule_version: String,
+}
+
+impl RoomInputVersion {
+    pub(crate) fn is_valid(&self) -> bool {
+        self.version == 1
+            && self.model_sesno >= 0
+            && [
+                &self.source_identity,
+                &self.model_version,
+                &self.room_definition_version,
+                &self.generation_rule_version,
+            ]
+            .into_iter()
+            .all(|s| !s.is_empty())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecoveryStage {
+    InvalidWatermarks,
+    VerifyInput,
+    Data,
+    Model,
+    Room,
+    Complete,
 }
 
 /// Raw projection of the stored `dbnum_watermark:{dbnum}` record used for reads.
@@ -177,6 +270,18 @@ struct StateRow {
     #[serde(default)]
     model_settled_at: Option<String>,
     #[serde(default)]
+    room_sesno: Option<i32>,
+    #[serde(default)]
+    room_sesno_time: Option<String>,
+    #[serde(default)]
+    room_settled_at: Option<String>,
+    #[serde(default)]
+    room_input_version: Option<RoomInputVersion>,
+    #[serde(default)]
+    room_required_input: Option<RoomInputVersion>,
+    #[serde(default)]
+    room_result_version: Option<String>,
+    #[serde(default)]
     model_lazy_roots: Option<u32>,
     #[serde(default)]
     model_dead_roots: Option<u32>,
@@ -189,6 +294,8 @@ struct StateRow {
 
 /// 本表里模型水位那一组列，两条读路径共用一份投影，漂不了。
 const MODEL_WATERMARK_COLUMNS: &str = "model_sesno, model_sesno_time, \
+     room_sesno, room_sesno_time, room_input_version, room_required_input, room_result_version, \
+     IF room_settled_at != NONE THEN type::string(room_settled_at) ELSE NONE END AS room_settled_at, \
      IF model_settled_at != NONE THEN type::string(model_settled_at) ELSE NONE END AS model_settled_at, \
      model_lazy_roots, \
      model_dead_roots, model_roots_observed_at";
@@ -900,6 +1007,14 @@ impl DbnumState {
                     model_sesno: row.model_sesno.unwrap_or_default(),
                     model_sesno_time,
                     model_settled_at: row.model_settled_at,
+                    room_sesno: row.room_sesno.unwrap_or_default(),
+                    room_sesno_time: row
+                        .room_sesno_time
+                        .filter(|_| row.room_sesno.unwrap_or_default() > 0),
+                    room_settled_at: row.room_settled_at,
+                    room_input_version: row.room_input_version,
+                    room_required_input: row.room_required_input,
+                    room_result_version: row.room_result_version,
                     model_lazy_roots: row.model_lazy_roots,
                     model_dead_roots: row.model_dead_roots,
                     model_roots_observed_at: row.model_roots_observed_at,
@@ -970,6 +1085,14 @@ impl DbnumState {
             model_sesno: row.model_sesno.unwrap_or_default(),
             model_sesno_time,
             model_settled_at: row.model_settled_at,
+            room_sesno: row.room_sesno.unwrap_or_default(),
+            room_sesno_time: row
+                .room_sesno_time
+                .filter(|_| row.room_sesno.unwrap_or_default() > 0),
+            room_settled_at: row.room_settled_at,
+            room_input_version: row.room_input_version,
+            room_required_input: row.room_required_input,
+            room_result_version: row.room_result_version,
             model_lazy_roots: row.model_lazy_roots,
             model_dead_roots: row.model_dead_roots,
             model_roots_observed_at: row.model_roots_observed_at,
@@ -1242,6 +1365,75 @@ fn render_duplicate_identity_block(dbnum: u32) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn three_watermarks_recover_only_the_missing_stage() {
+        use super::{DbnumState, RecoveryStage as Stage, RoomInputVersion};
+        let input = RoomInputVersion {
+            version: 1,
+            source_identity: "source-a".into(),
+            model_sesno: 12,
+            model_version: "model-12".into(),
+            room_definition_version: "rooms-a".into(),
+            generation_rule_version: "v1".into(),
+        };
+        let mut state = DbnumState {
+            initialized: true,
+            file_latest_sesno: 12,
+            applied_sesno: 12,
+            model_sesno: 12,
+            room_sesno: 12,
+            room_input_version: Some(input.clone()),
+            room_required_input: Some(input.clone()),
+            room_result_version: Some("results-a".into()),
+            ..Default::default()
+        };
+        assert_eq!(state.recovery_stage(Some(&input)), Stage::Complete);
+        state.room_result_version = None;
+        assert_eq!(state.recovery_stage(Some(&input)), Stage::Room);
+        state.room_result_version = Some("results-a".into());
+        state.room_required_input = None;
+        assert_eq!(state.recovery_stage(Some(&input)), Stage::Room);
+        state.room_required_input = Some(input.clone());
+        for _ in 0..3 {
+            // unchanged restart preserves the serialized completion proof
+            state = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
+            assert_eq!(state.recovery_stage(Some(&input)), Stage::Complete);
+        }
+        let mut changed = input.clone();
+        changed.room_definition_version = "rooms-b".into();
+        assert_eq!(state.recovery_stage(Some(&changed)), Stage::Room);
+        changed.source_identity = "replacement-file".into();
+        assert_eq!(state.recovery_stage(Some(&changed)), Stage::VerifyInput);
+        assert_eq!(state.recovery_stage(None), Stage::VerifyInput);
+        state.room_sesno = 10;
+        assert_eq!(state.recovery_stage(Some(&input)), Stage::Room);
+        state.model_sesno = 11;
+        assert_eq!(state.recovery_stage(Some(&input)), Stage::Model);
+        state.applied_sesno = 11;
+        assert_eq!(state.recovery_stage(Some(&input)), Stage::Data);
+        state.room_sesno = 12;
+        assert_eq!(state.recovery_stage(Some(&input)), Stage::InvalidWatermarks);
+    }
+
+    #[test]
+    fn missing_room_proof_is_not_inherited_from_model_watermark() {
+        use super::{DbnumState, RecoveryStage, RoomInputVersion};
+        let state = DbnumState {
+            initialized: true,
+            file_latest_sesno: 0,
+            ..Default::default()
+        };
+        let input = RoomInputVersion {
+            version: 1,
+            source_identity: "empty-file".into(),
+            model_sesno: 0,
+            model_version: "verified-empty-model".into(),
+            room_definition_version: "verified-empty-rooms".into(),
+            generation_rule_version: "v1".into(),
+        };
+        assert_eq!(state.recovery_stage(Some(&input)), RecoveryStage::Room);
+    }
+
     use super::*;
 
     #[test]

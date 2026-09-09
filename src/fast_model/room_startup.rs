@@ -69,8 +69,8 @@ impl PlannedCounts {
     }
 }
 
-/// [`apply_startup_plan`] 的回执。三类各自计数；没算的（无几何）与失败的逐条留着——参照能不能写
-/// 看它们是不是都空。
+/// [`apply_startup_plan`] 的回执。三类各自计数；没算的（无几何 / 不可用）与失败的逐条留着——
+/// 参照能不能写看 `unusable` 与 `failures` 是不是都空（`no_geometry` 不挡，D-A (a)）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct StartupApplyOutcome {
     pub planned: PlannedCounts,
@@ -78,14 +78,20 @@ pub(crate) struct StartupApplyOutcome {
     pub removed: usize,
     /// 边已按新视图重写的面板数。
     pub recalculated: usize,
-    /// 在册却没有可用几何、这次没算的面板，按**文件** dbnum 分组（与
-    /// `ResidentStats::missing_panels_by_dbnum` 同口径）。边不动。
+    /// 在册却**一条几何行都没有**（从未生成）、这次没算的面板，按**文件** dbnum 分组（与
+    /// `ResidentStats::missing_panels_by_dbnum` 同口径）。边不动。**不挡参照、不入队**
+    /// （共识 D-A (a)，2026-09-08）：没有几何就没有边可陈旧，几何到来时由发布事务排的
+    /// `RoomRecalcPanel` 补算——入队只会 `NoGeometry` 一路失败到死信，参照却永远写不上。
     pub no_geometry: BTreeMap<u32, Vec<RefnoEnum>>,
+    /// 在册、有几何行、却有一行世界包围盒不可用的面板（`ResidentRoomModel::unusable_panels`），
+    /// 按文件 dbnum 分组。这块面板的几何不可信、存量边可能已陈旧：**挡参照、入队**等几何修好。
+    pub unusable: BTreeMap<u32, Vec<RefnoEnum>>,
     /// 逐块 / 逐间失败（覆盖率闸门、网格、写库）。边不动。
     pub failures: Vec<String>,
-    /// **这一轮没能按新拓扑算过的面板**——无几何的、删失败的、重算失败的、改列失败那间房里
-    /// 的面板，一视同仁（M2）：它们的边与新拓扑不一致，都要有 durable 的落点。
-    /// [`apply_startup_plan`] 把这一摊入队成 `RoomRecalcPanel`。
+    /// **这一轮没能按新拓扑算过、且存量边可能因此陈旧的面板**——不可用的、删失败的、重算失败的、
+    /// 改列失败那间房里的面板，一视同仁（M2）：它们的边与新拓扑不一致，都要有 durable 的落点。
+    /// [`apply_startup_plan`] 把这一摊入队成 `RoomRecalcPanel`。从未生成的（`no_geometry`）不在
+    /// 这一摊（D-A (a)）。
     pub unsettled: BTreeSet<RefnoEnum>,
     /// 上面那一摊真的入队成功了几块（入队失败时是 0，理由进 `failures`）。
     pub requeued: usize,
@@ -99,9 +105,14 @@ impl StartupApplyOutcome {
         self.no_geometry.values().map(Vec::len).sum()
     }
 
-    /// 参照能不能写：一块没算的都不行——参照说的是「边与这份拓扑一致」，没算出来的那几块不一致。
+    pub(crate) fn unusable_count(&self) -> usize {
+        self.unusable.values().map(Vec::len).sum()
+    }
+
+    /// 参照能不能写：有一块**可能有陈旧边**却没算成的都不行——参照说的是「边与这份拓扑一致」。
+    /// 从未生成的面板（`no_geometry`）没有边，不在此列（D-A (a)）。
     pub(crate) fn all_settled(&self) -> bool {
-        self.failures.is_empty() && self.no_geometry.is_empty()
+        self.failures.is_empty() && self.unusable.is_empty()
     }
 
     /// 参照没写的原因；全部成功时 `None`。
@@ -110,11 +121,11 @@ impl StartupApplyOutcome {
             return None;
         }
         let mut parts = Vec::new();
-        if !self.no_geometry.is_empty() {
+        if !self.unusable.is_empty() {
             parts.push(format!(
-                "{} 块在册面板无几何没算，按库 {{{}}}",
-                self.no_geometry_count(),
-                self.no_geometry
+                "{} 块在册面板几何不可用没算，按库 {{{}}}",
+                self.unusable_count(),
+                self.unusable
                     .iter()
                     .map(|(dbnum, panels)| format!("{dbnum}: {}", panels.len()))
                     .collect::<Vec<_>>()
@@ -131,13 +142,13 @@ impl StartupApplyOutcome {
         Some(parts.join("；"))
     }
 
-    /// 回执那一段：`删 N / 重算 M（成功 a · 无几何 b · 失败 c）/ 改列 K 间 P 块`；有尾巴时
-    /// 末尾多一句「已入队重试 n 块」。
+    /// 回执那一段：`删 N / 重算 M（成功 a · 无几何 b · 不可用 u · 失败 c）/ 改列 K 间 P 块`；
+    /// 有尾巴时末尾多一句「已入队重试 n 块」。
     pub(crate) fn summary(&self) -> String {
         let recalc_failed = self
             .planned
             .recalc
-            .saturating_sub(self.recalculated + self.no_geometry_count());
+            .saturating_sub(self.recalculated + self.no_geometry_count() + self.unusable_count());
         let requeued = if self.unsettled.is_empty() {
             String::new()
         } else {
@@ -148,12 +159,13 @@ impl StartupApplyOutcome {
             )
         };
         format!(
-            "删 {}/{} / 重算 {}（成功 {} · 无几何 {} · 失败 {}）/ 改列 {}/{} 间 {}/{} 块{requeued}",
+            "删 {}/{} / 重算 {}（成功 {} · 无几何 {} · 不可用 {} · 失败 {}）/ 改列 {}/{} 间 {}/{} 块{requeued}",
             self.removed,
             self.planned.removed,
             self.planned.recalc,
             self.recalculated,
             self.no_geometry_count(),
+            self.unusable_count(),
             recalc_failed,
             self.renumbered_rooms,
             self.planned.renumbered_rooms,
@@ -163,28 +175,48 @@ impl StartupApplyOutcome {
     }
 }
 
-/// 重算集按「常驻模型里有没有可用几何」分两摊（纯函数）。没几何的这次不算、边不动、进回执
+/// [`split_recalc_by_geometry`] 的三摊。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct RecalcSplit {
+    /// 常驻模型里有可用几何：这次算。
+    pub to_recalc: Vec<RefnoEnum>,
+    /// 一条几何行都没有（从未生成），按文件 dbnum 分组：不算、不挡参照、不入队（D-A (a)）。
+    pub no_geometry: BTreeMap<u32, Vec<RefnoEnum>>,
+    /// 有行却有一行包围盒不可用，按文件 dbnum 分组：不算、挡参照、入队。
+    pub unusable: BTreeMap<u32, Vec<RefnoEnum>>,
+}
+
+/// 重算集按「常驻模型里有没有可用几何」分**三**摊（纯函数）。没几何的这次不算、边不动、进回执
 /// 点名（Q20 (a)）——`recalc_panel_membership_for_consumption` 读的是同一份几何（摄入
 /// `room_published_inst` / 读透实时行），去了也只会 `NoGeometry` 上抛；在这里先分开，回执里
-/// 「无几何」与「失败」才是两句话，不必从错误文本里猜。包围盒不可用的面板模型同样不收
-/// （`missing_panels`），也算在这一摊：判不了就不写。
+/// 「无几何」与「失败」才是两句话，不必从错误文本里猜。
+///
+/// 没几何再分一刀（D-A (a)）：**从未生成**（一条行都没有）与**有行却不可用**（包围盒坏，
+/// `ResidentRoomModel::unusable_panels`）。前者没有边可陈旧，不挡参照；后者的存量边可能已经
+/// 陈旧，挡参照并入队。两者对归属计算一样都是「判不了就不写」。
 pub(crate) fn split_recalc_by_geometry(
     model: &ResidentRoomModel,
     panels: &BTreeSet<RefnoEnum>,
-) -> (Vec<RefnoEnum>, BTreeMap<u32, Vec<RefnoEnum>>) {
-    let mut to_recalc = Vec::with_capacity(panels.len());
-    let mut no_geometry: BTreeMap<u32, Vec<RefnoEnum>> = BTreeMap::new();
+) -> RecalcSplit {
+    let mut split = RecalcSplit::default();
     for panel in panels {
         if model.panel(*panel).is_some() {
-            to_recalc.push(*panel);
+            split.to_recalc.push(*panel);
+        } else if model.unusable_panels.contains(panel) {
+            split
+                .unusable
+                .entry(model.file_of_panel(*panel))
+                .or_default()
+                .push(*panel);
         } else {
-            no_geometry
+            split
+                .no_geometry
                 .entry(model.file_of_panel(*panel))
                 .or_default()
                 .push(*panel);
         }
     }
-    (to_recalc, no_geometry)
+    split
 }
 
 /// 按 diff 删 / 重算 / 改列（§4.4）。**调用方已持 `lock_spatial_serial`**。
@@ -197,15 +229,19 @@ pub(crate) fn split_recalc_by_geometry(
 ///    日志「面板 X 已不在册，清空其房间归属」照旧打。不另写一条删除路径。
 /// 2. 重算（`recalc_panels`）：同一个函数，面板在新视图里 → 覆盖率闸门（fail-closed）→ 成员
 ///    判定 → 先清后写（带新 `room_num`；面板从 A 间挪到 B 间时 A→板的旧边在这一步掉）。
-///    无几何的先分出去不算（[`split_recalc_by_geometry`]）；闸门 / 网格 / 写库失败进 `failures`。
+///    无几何 / 不可用的先分出去不算（[`split_recalc_by_geometry`]）；闸门 / 网格 / 写库失败进
+///    `failures`。
 /// 3. 改列（`renumbered_rooms`）：`render_renumber_statements` 一间房一个事务，边 id 不动。
 ///
 /// 顺序删 → 重算 → 改列只为日志好读；三类按面板 / 房间分键、互不重叠，换序不影响结果。
 ///
-/// **没算成的那一摊入队**（M2）：三类里失败的、以及无几何那一摊，收进 `unsettled` 并折成
-/// `RoomRecalcPanel` durable 目标（[`enqueue_room_panel_recalcs`]）。理由见那个函数的注释——
-/// 一句话：不入队的话它们既不在房间表里、也不产生 drain 失败，写点 ③ 的两条前提于是**恒真**，
-/// 启动之后任意一轮干净的 drain 都会把参照推进到当前拓扑，那几条陈旧的边就永久留下且无日志。
+/// **没算成、且存量边可能因此陈旧的那一摊入队**（M2）：三类里失败的、以及几何不可用那一摊，
+/// 收进 `unsettled` 并折成 `RoomRecalcPanel` durable 目标（[`enqueue_room_panel_recalcs`]）。
+/// 理由见那个函数的注释——一句话：不入队的话它们既不在房间表里、也不产生 drain 失败，写点 ③
+/// 的两条前提于是**恒真**，启动之后任意一轮干净的 drain 都会把参照推进到当前拓扑，那几条陈旧
+/// 的边就永久留下且无日志。**从未生成**的面板（`no_geometry`）不在这一摊（D-A (a)，2026-09-08）：
+/// 它没有边可陈旧，入队只会 `NoGeometry` 一路失败到死信、把 `room_work_is_drained` 永久按假，
+/// 参照却一次都写不上；几何到来时由发布事务的 `RoomRecalcPanel` 补算。
 ///
 /// [`enqueue_room_panel_recalcs`]: crate::data_interface::model_update_pending::enqueue_room_panel_recalcs
 pub(crate) async fn apply_startup_plan(
@@ -233,13 +269,19 @@ pub(crate) async fn apply_startup_plan(
             }
         }
     }
-    let (to_recalc, no_geometry) = split_recalc_by_geometry(model, &diff.recalc_panels);
-    // 无几何与重算失败一视同仁：两者都是「这块面板的边没有按新拓扑算过」。前者是常态
-    // （未监听的库，Q20 (a)）、后者是缺陷，但对参照与队列而言没有区别。
+    let RecalcSplit {
+        to_recalc,
+        no_geometry,
+        unusable,
+    } = split_recalc_by_geometry(model, &diff.recalc_panels);
+    // 几何不可用与重算失败一视同仁：两者都是「这块面板有几何、边却没有按新拓扑算过」。
+    // 从未生成的那一摊（`no_geometry`，未监听库的常态，Q20 (a)）只进回执点名——它没有边可
+    // 陈旧，不挡参照、不入队（D-A (a)）。
     outcome
         .unsettled
-        .extend(no_geometry.values().flatten().copied());
+        .extend(unusable.values().flatten().copied());
     outcome.no_geometry = no_geometry;
+    outcome.unusable = unusable;
     for panel in to_recalc {
         match recalc_panel_membership_for_consumption(db_option, &model.map, panel, Some(model))
             .await
@@ -358,7 +400,10 @@ pub(crate) struct StartupCompareReport {
     pub plan: String,
     pub removed: usize,
     pub recalculated: usize,
+    /// 从未生成、这次没算的面板数：**不挡参照**（D-A (a)），只是点名。
     pub no_geometry: usize,
+    /// 有几何却不可用、这次没算的面板数：挡参照、已入队。
+    pub unusable: usize,
     pub failed: usize,
     pub renumbered_rooms: usize,
     pub renumbered_panels: usize,
@@ -394,6 +439,7 @@ impl StartupCompareReport {
             removed: 0,
             recalculated: 0,
             no_geometry: 0,
+            unusable: 0,
             failed: 0,
             renumbered_rooms: 0,
             renumbered_panels: 0,
@@ -411,6 +457,7 @@ impl StartupCompareReport {
         self.removed = outcome.removed;
         self.recalculated = outcome.recalculated;
         self.no_geometry = outcome.no_geometry_count();
+        self.unusable = outcome.unusable_count();
         self.failed = outcome.failures.len();
         self.renumbered_rooms = outcome.renumbered_rooms;
         self.renumbered_panels = outcome.renumbered_panels;
@@ -485,6 +532,18 @@ fn note_full_rebuild_settled(reference_written: bool, note: Option<String>) {
                 }));
         }
         report.note = note;
+    }
+}
+
+/// 显式全量收尾时把「从未生成、这次没算」的面板数回填进回执的 `no_geometry` 一格（只点名，
+/// 不动尾巴——D-A (a)）。没有在途回执就不动。
+fn note_full_rebuild_geometry(without_geometry: usize) {
+    if let Some(report) = compare_report_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .as_mut()
+    {
+        report.no_geometry = without_geometry;
     }
 }
 
@@ -705,9 +764,11 @@ pub(crate) async fn startup_room_reconcile(db_option: &DbOption) -> StartupRoomV
     // 换代、读参照、diff、写边、写参照落在同一段串行区：文件发布不会插在中间把清单换掉；
     // worker 的空闲轮与这里串行，对同一块面板各算一次也是幂等的。
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
-    let model = room_resident::ensure_current(face, hierarchy, &room_key_words, match_room_fn)
-        .await
-        .map(|outcome| outcome.map(|outcome| outcome.model));
+    let mesh_dir = db_option.get_meshes_path();
+    let model =
+        room_resident::ensure_current(face, hierarchy, &room_key_words, match_room_fn, &mesh_dir)
+            .await
+            .map(|outcome| outcome.map(|outcome| outcome.model));
     let expected = model
         .as_ref()
         .ok()
@@ -842,25 +903,41 @@ pub(crate) async fn startup_room_reconcile(db_option: &DbOption) -> StartupRoomV
     }
 }
 
-/// 写点 ②（§4.5）：显式全量 `build_room_relations` 返回 `Ok(())` 之后调。持 `lock_spatial_serial`
-/// 取此刻的模型；它的身份得与决策时那份一致（`expected`）——全量在锁外跑了十几秒，期间若清单
-/// 换了代，全量依据的拓扑与此刻模型说的就不是同一份，不写（下次启动 `NoReference` → 再全量
-/// 一次，多算不漏算）。决策时没拿到模型（`expected = None`）同理不写。
-pub(crate) async fn settle_full_rebuild(db_option: &DbOption, expected: Option<&ResidentManifest>) {
+/// 写点 ②（§4.5）：显式全量 `build_room_relations_with_view` 返回 `Ok(outcome)` 之后调。持
+/// `lock_spatial_serial` 取此刻的模型；它的身份得与决策时那份一致（`expected`）——全量在锁外跑了
+/// 十几秒，期间若清单换了代，全量依据的拓扑与此刻模型说的就不是同一份，不写（下次启动
+/// `NoReference` → 再全量一次，多算不漏算）。决策时没拿到模型（`expected = None`）同理不写。
+///
+/// `outcome.without_geometry`（从未生成的面板）**不挡**这里的参照（D-A (a)），与写点 ① 对
+/// `no_geometry` 同一口径——有行却不可用的面板在全量里是 `failures`，整轮 `Err`，根本到不了这里。
+/// 它只随回执点名，`/health.startup_compare.no_geometry` 照记。
+pub(crate) async fn settle_full_rebuild(
+    db_option: &DbOption,
+    expected: Option<&ResidentManifest>,
+    outcome: &crate::fast_model::room_model::FullRebuildOutcome,
+) -> bool {
+    if !outcome.without_geometry.is_empty() {
+        println!(
+            "[房间全量] {} 块在册面板从未生成几何、这次没算（不挡参照：没有边可陈旧，几何到来时由发布事务补算）",
+            outcome.without_geometry.len()
+        );
+    }
+    note_full_rebuild_geometry(outcome.without_geometry.len());
     let Some(expected) = expected else {
         let note = "决策时模型建不起来，无从核对全量依据的拓扑，参照不写".to_string();
         println!("[房间全量] 参照未更新（{note}）");
         note_full_rebuild_settled(false, Some(note));
-        return;
+        return false;
     };
     let Some(hierarchy) = RoomHierarchy::configured() else {
-        return;
+        return false;
     };
     #[cfg(any(feature = "project_hd", feature = "project_hh"))]
     let match_room_fn = crate::fast_model::room_model::configured_match_room_fn();
     #[cfg(not(any(feature = "project_hd", feature = "project_hh")))]
     let match_room_fn = |_: &str| false;
     let room_key_words = db_option.get_room_key_word();
+    let mesh_dir = db_option.get_meshes_path();
     let face = crate::options::data_face();
 
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
@@ -869,6 +946,7 @@ pub(crate) async fn settle_full_rebuild(db_option: &DbOption, expected: Option<&
         hierarchy,
         &room_key_words,
         match_room_fn,
+        &mesh_dir,
     )
     .await
     {
@@ -904,6 +982,7 @@ pub(crate) async fn settle_full_rebuild(db_option: &DbOption, expected: Option<&
         println!("[房间全量] 参照未更新（{note}）");
     }
     note_full_rebuild_settled(reference_written, note);
+    reference_written
 }
 
 #[cfg(test)]
@@ -1045,32 +1124,40 @@ mod tests {
         );
     }
 
-    /// 重算集按模型里有没有几何分摊：没几何的按**文件** dbnum 分组、不进重算；有几何的进重算。
+    /// 重算集按模型里有没有几何分**三**摊：从未生成的按**文件** dbnum 分组、不进重算、不挡参照；
+    /// 有行却不可用的另成一摊（挡参照）；有几何的进重算（D-A (a)）。
     #[test]
     fn recalc_panels_without_geometry_are_set_aside_by_file_dbnum() {
-        let mut current = model(
-            ResidentForm::Published,
-            "m2",
-            groups(),
-            vec![inst(7), inst(9)],
-        );
+        let mut bad = inst(9);
+        bad.world_aabb = Aabb::new(Point::new(f32::NAN, 0.0, 0.0), Point::new(1.0, 1.0, 1.0));
+        let mut current = model(ResidentForm::Published, "m2", groups(), vec![inst(7), bad]);
         current.room_files = BTreeMap::from([(r(5), 7997u32), (r(6), 8000u32)]);
         let panels = BTreeSet::from([r(7), r(8), r(9)]);
-        let (to_recalc, no_geometry) = split_recalc_by_geometry(&current, &panels);
+        let split = split_recalc_by_geometry(&current, &panels);
         assert_eq!(
-            to_recalc.into_iter().collect::<BTreeSet<_>>(),
-            BTreeSet::from([r(7), r(9)])
+            split.to_recalc.into_iter().collect::<BTreeSet<_>>(),
+            BTreeSet::from([r(7)])
         );
-        assert_eq!(no_geometry, BTreeMap::from([(7997u32, vec![r(8)])]));
+        assert_eq!(
+            split.no_geometry,
+            BTreeMap::from([(7997u32, vec![r(8)])]),
+            "8 一条行都没有：从未生成"
+        );
+        assert_eq!(
+            split.unusable,
+            BTreeMap::from([(8000u32, vec![r(9)])]),
+            "9 有行、包围盒坏：不可用，按它房间所属的文件 8000 分组"
+        );
     }
 
-    /// 回执：无几何与失败都挡参照，理由点名；全部成功才 `all_settled`。
+    /// 回执：几何不可用与失败挡参照、理由点名；从未生成的（`no_geometry`）**不挡**（D-A (a)）；
+    /// 全部成功才 `all_settled`。
     #[test]
     fn apply_outcome_blocks_the_reference_on_missing_geometry_or_failures_and_names_them() {
         let mut outcome = StartupApplyOutcome {
             planned: PlannedCounts {
                 removed: 1,
-                recalc: 3,
+                recalc: 4,
                 renumbered_rooms: 1,
                 renumbered_panels: 2,
             },
@@ -1079,37 +1166,49 @@ mod tests {
             renumbered_rooms: 1,
             renumbered_panels: 2,
             no_geometry: BTreeMap::from([(7997u32, vec![r(8)])]),
+            unusable: BTreeMap::from([(8000u32, vec![r(9)])]),
             ..Default::default()
         };
-        assert!(!outcome.all_settled(), "无几何的那一块挡参照");
+        assert!(!outcome.all_settled(), "几何不可用的那一块挡参照");
         let reason = outcome.blocking_reason().unwrap();
         assert!(
-            reason.contains("1 块在册面板无几何") && reason.contains("7997: 1"),
+            reason.contains("1 块在册面板几何不可用") && reason.contains("8000: 1"),
             "{reason}"
+        );
+        assert!(
+            !reason.contains("7997"),
+            "从未生成的那一块不是拒写的理由: {reason}"
         );
         assert_eq!(
             outcome.summary(),
-            "删 1/1 / 重算 3（成功 2 · 无几何 1 · 失败 0）/ 改列 1/1 间 2/2 块"
+            "删 1/1 / 重算 4（成功 2 · 无几何 1 · 不可用 1 · 失败 0）/ 改列 1/1 间 2/2 块"
         );
 
-        outcome.no_geometry.clear();
+        // 只剩从未生成的那一块：不挡参照（它没有边可陈旧，几何到来时由发布事务补算）。
+        outcome.unusable.clear();
         outcome.recalculated = 3;
+        assert!(
+            outcome.all_settled() && outcome.blocking_reason().is_none(),
+            "no_geometry 不挡参照（D-A (a)）"
+        );
+        outcome.no_geometry.clear();
+        outcome.recalculated = 4;
         assert!(outcome.all_settled() && outcome.blocking_reason().is_none());
 
         // 有尾巴时回执末尾多一句「已入队多少块」——(a) 那条路有没有真落下去，看这里。
-        outcome.no_geometry = BTreeMap::from([(7997u32, vec![r(8)])]);
-        outcome.recalculated = 2;
-        outcome.unsettled = BTreeSet::from([r(8)]);
+        outcome.unusable = BTreeMap::from([(8000u32, vec![r(9)])]);
+        outcome.recalculated = 3;
+        outcome.unsettled = BTreeSet::from([r(9)]);
         outcome.requeued = 1;
         assert_eq!(
             outcome.summary(),
-            "删 1/1 / 重算 3（成功 2 · 无几何 1 · 失败 0）/ 改列 1/1 间 2/2 块 \
+            "删 1/1 / 重算 4（成功 3 · 无几何 0 · 不可用 1 · 失败 0）/ 改列 1/1 间 2/2 块 \
              / 没算成的 1 块已入队 1 块 RoomRecalcPanel"
         );
-        outcome.no_geometry.clear();
+        outcome.unusable.clear();
         outcome.unsettled.clear();
         outcome.requeued = 0;
-        outcome.recalculated = 3;
+        outcome.recalculated = 4;
 
         outcome
             .failures
@@ -1311,14 +1410,33 @@ mod tests {
             "一块没落下：写点 ③ 照旧放行"
         );
 
-        let with_tail = StartupApplyOutcome {
+        // 只有从未生成的那一块没算：不是尾巴（D-A (a)），写点 ③ 照旧放行。
+        let never_generated = StartupApplyOutcome {
             planned: PlannedCounts {
                 recalc: 2,
                 ..Default::default()
             },
             recalculated: 1,
             no_geometry: BTreeMap::from([(7997u32, vec![r(8)])]),
-            unsettled: BTreeSet::from([r(8)]),
+            ..Default::default()
+        };
+        let passed = StartupCompareReport::new(ResidentForm::Published, "对比".into(), 1)
+            .with_apply(&never_generated);
+        assert_eq!(
+            startup_tail_of(Some(&passed)),
+            None,
+            "从未生成的面板没有边可陈旧，不算尾巴"
+        );
+        assert_eq!(passed.no_geometry, 1, "但回执照样点名");
+
+        let with_tail = StartupApplyOutcome {
+            planned: PlannedCounts {
+                recalc: 2,
+                ..Default::default()
+            },
+            recalculated: 1,
+            unusable: BTreeMap::from([(8000u32, vec![r(9)])]),
+            unsettled: BTreeSet::from([r(9)]),
             requeued: 1,
             ..Default::default()
         };
@@ -1326,9 +1444,10 @@ mod tests {
             .with_apply(&with_tail);
         let reason = startup_tail_of(Some(&held)).expect("有尾巴就不许写");
         assert!(
-            reason.contains("无几何") && reason.contains("7997"),
+            reason.contains("几何不可用") && reason.contains("8000"),
             "拒写的理由要点名是哪一摊: {reason}"
         );
+        assert_eq!(held.unusable, 1);
         assert_eq!(
             held.requeued, 1,
             "尾巴同时也进了 durable 队列（(a) 那条路）"
@@ -1499,7 +1618,9 @@ mod tests {
     ///
     /// 少任何一条，那些面板就既不在房间表里、也不产生 drain 失败——写点 ③ 的两条前提于是
     /// 恒真，启动之后任意一轮干净的 drain 都会把参照推进到当前拓扑，陈旧的边永久留下且无日志。
-    /// 「无几何」与「重算失败」一视同仁：两者都是「这块面板的边没有按新拓扑算过」。
+    /// 「几何不可用」与「重算失败」一视同仁：两者都是「这块面板有几何、边却没有按新拓扑算过」。
+    /// **从未生成**的那一摊（`no_geometry`）不进（D-A (a)）：它没有边可陈旧，入队只会一路失败到
+    /// 死信、把参照永久按住。
     #[test]
     fn every_unsettled_panel_of_the_startup_apply_lands_as_a_durable_room_target() {
         let apply = fn_body(
@@ -1512,10 +1633,14 @@ mod tests {
             2,
             "删失败与重算失败两条路各收一次: {apply}"
         );
-        // 无几何那一摊（`split_recalc_by_geometry` 分出来的）整摊进。
+        // 几何不可用那一摊（`split_recalc_by_geometry` 分出来的）整摊进；从未生成的那一摊不进。
         assert!(
-            apply.contains("no_geometry.values().flatten().copied()"),
-            "无几何与重算失败一视同仁: {apply}"
+            apply.contains("unusable.values().flatten().copied()"),
+            "几何不可用与重算失败一视同仁: {apply}"
+        );
+        assert!(
+            !apply.contains("no_geometry.values()"),
+            "从未生成的面板不入队、不算尾巴（D-A (a)）: {apply}"
         );
         // 改列失败那间房的面板整间重算（改列本来就是重算的省略式，多算不漏算）。
         assert!(
@@ -1533,7 +1658,7 @@ mod tests {
             .expect("入队必须在");
         for collected in [
             "outcome.unsettled.insert(",
-            "no_geometry.values().flatten().copied()",
+            "unusable.values().flatten().copied()",
             "outcome.unsettled.extend(renumber.panels.iter().copied())",
         ] {
             assert!(

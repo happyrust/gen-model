@@ -819,6 +819,21 @@ impl Journal {
             .values()
             .find(|m| m.dbnum == dbnum && !self.index.finished.contains(&m.run_id))
     }
+    pub fn run_failure(&self, run_id: &str) -> Option<String> {
+        self.index.entries.values().find_map(|entry| {
+            (entry.run_id == run_id
+                && matches!(
+                    entry.state,
+                    TaskState::FailedHold | TaskState::GenerationHold | TaskState::UnknownHold
+                ))
+            .then(|| {
+                entry
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| format!("publication root in run {run_id} is held"))
+            })
+        })
+    }
     pub fn active(&self, id: &str) -> bool {
         self.index.active.contains(id)
     }

@@ -111,6 +111,15 @@ pub struct RootReceipt {
     pub model_target: Option<ModelTarget>,
     pub manifest_hash: String,
     pub geometry_count: usize,
+    /// 这一根这轮是怎么发布的（ADR-066，观测用）：`"regen"` 整根重算 / `"transform"` 刚体前移便宜路。
+    /// 旧回执没有这一列 → `"regen"`。落 `gen_root.published_via` 供观测，不进任何判据。
+    #[serde(default = "default_published_via")]
+    pub published_via: String,
+}
+
+/// `RootReceipt::published_via` 的默认值：旧回执与整根重算都是 `"regen"`。
+pub fn default_published_via() -> String {
+    "regen".to_string()
 }
 
 /// 一根（或一次增量）要落进存储的全部改动。攒齐一批再一次提交，一批就是一个原子边界。
@@ -448,6 +457,24 @@ impl ModelMemoryStore {
             .get(&scope.key())
             .map(|state| state.geometries.values().cloned().collect())
             .unwrap_or_default()
+    }
+
+    /// Immutable file view and its version from one read lock. Room consumers
+    /// check this epoch again before committing their results.
+    pub(crate) fn snapshot_dbnum(&self, dbnum: u32) -> (u64, Vec<ProjectedGeometry>) {
+        let scopes = self.read();
+        let Some(state) = scopes.get(&ScopeKey::Current) else {
+            return (0, Vec::new());
+        };
+        (
+            state.commit_epochs.get(&dbnum).copied().unwrap_or(0),
+            state
+                .geometries
+                .values()
+                .filter(|row| row.dbnum == dbnum)
+                .cloned()
+                .collect(),
+        )
     }
 
     /// 这个投影域里盖过章的生成根。落库适配器按它逐根对账。
@@ -944,6 +971,7 @@ mod tests {
                         model_target: None,
                         manifest_hash: "manifest".into(),
                         geometry_count: 1,
+                        published_via: "regen".into(),
                     },
                 )),
                 ..ProjectionCommit::default()
@@ -985,6 +1013,7 @@ mod tests {
                         model_target: None,
                         manifest_hash: "manifest".into(),
                         geometry_count: 1,
+                        published_via: "regen".into(),
                     },
                 )),
                 ..ProjectionCommit::default()

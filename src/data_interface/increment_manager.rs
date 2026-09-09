@@ -48,6 +48,15 @@ use tracing_subscriber::fmt::format;
 
 use crate::consts::PDMS_ELEMENTS_TABLE;
 
+fn automatic_discovery_admits(
+    initialized: bool,
+    auto_initialize_new_dbnums: bool,
+    already_queued: bool,
+) -> bool {
+    // An accepted manual initialization must survive Meta -> Design manifest refreshes.
+    initialized || auto_initialize_new_dbnums || already_queued
+}
+
 fn running_queue_row(
     rows: &[crate::data_interface::batch_scheduler::QueueRow],
 ) -> Option<&crate::data_interface::batch_scheduler::QueueRow> {
@@ -56,6 +65,15 @@ fn running_queue_row(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn automatic_discovery_keeps_existing_databases_and_cold_databases_are_opt_in() {
+        assert!(!super::automatic_discovery_admits(false, false, false));
+        assert!(super::automatic_discovery_admits(true, false, false));
+        assert!(super::automatic_discovery_admits(false, true, false));
+        assert!(super::automatic_discovery_admits(true, true, false));
+        assert!(super::automatic_discovery_admits(false, false, true));
+    }
+
     use super::*;
     use crate::SUL_DB;
     use std::path::Path;
@@ -64,6 +82,7 @@ mod tests {
     fn reconcile_detects_a_running_row_before_replacing_the_epoch() {
         use crate::data_interface::batch_scheduler::QueueRow;
         let rows = vec![QueueRow {
+            model_start_sesno: None,
             task_id: "db-epoch-1".into(),
             dbnum: 8000,
             db_type: "DESI".into(),
@@ -650,6 +669,151 @@ mod tests {
         );
     }
 
+    /// 第四句「MDB 声明了却没解析到文件」只许说**范围之内**的库，且只在整面重扫里说。
+    ///
+    /// sweep 是文件驱动的，声明了却没文件的库在三个桶里都不会出现——这一句是它在数据面
+    /// 唯一的出处（2026-09-07 现场的 6003 SCBDESI）。但 2026-09-08 共识 d-25 把增量数据面
+    /// 的范围定成 MDB 声明 ∩ 监听限定（∩ 调试限定）：域外的库不是「没文件」，是本轮
+    /// 「没有问过」，把它们点进这一句就是又一次嗓音混同；子集补扫没看其余目录，说
+    /// 「没文件」是事实性错误。sweep 依赖实库与文件系统，只能钉源码形状。
+    #[test]
+    fn the_sweep_names_unseen_declared_design_databases_only_inside_the_scope() {
+        let src = include_str!("increment_manager.rs");
+        let body = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 未找到")
+            .1
+            .split_once(concat!("fn ", "reinit_batch("))
+            .expect("sweep_dirs 之后是 reinit_batch")
+            .0;
+        // 「见过」记在范围门之前：它回答的是盘上有没有，不是进不进本轮。
+        let seen_at = body
+            .find(concat!("seen_design_dbnums", ".insert("))
+            .expect("sweep 缺「盘上见过的设计库」登记");
+        let gate_at = body
+            .find("let in_scope = self.in_scope")
+            .expect("sweep 缺范围门");
+        assert!(seen_at < gate_at, "「盘上见过」必须记在范围门之前");
+        // 第四句排在三个桶的聚合之后，且门在 SweepSurface::Full 上。
+        let statement = body
+            .split_once("let unseen_declared")
+            .expect("sweep 缺「声明了却没解析到文件」的收尾")
+            .1;
+        let unseen_at = body.find("let unseen_declared").unwrap();
+        for voice in ["个库不在 MDB", "监听限定跳过", "个库被 --debug-dbnum"] {
+            let at = body
+                .find(voice)
+                .unwrap_or_else(|| panic!("缺三个桶之一: {voice}"));
+            assert!(at < unseen_at, "第四句必须排在「{voice}」那个桶的聚合之后");
+        }
+        let gate = &body[..unseen_at];
+        assert!(
+            gate.rsplit("if ")
+                .next()
+                .is_some_and(|tail| tail.contains(concat!("SweepSurface::", "Full"))),
+            "第四句必须门在 SweepSurface::Full 上，子集补扫无资格说「没文件」"
+        );
+        // 过滤与打印之间必须问过监听门与调试门（d-25），且措辞不借三个桶的嗓音。
+        // 到 `sweep_log::note(format!(…));` 收口为止（首个 `));`），不把后面的 F6 扫进来。
+        let statement = statement
+            .split_once("));")
+            .map_or(statement, |(statement, _)| statement);
+        assert!(
+            statement.contains(concat!("watch_scope_", "admits(\"DESI\""))
+                && statement.contains(concat!("debug_scope_", "admits(\"DESI\"")),
+            "第四句只许点名 MDB ∩ 监听限定 ∩ 调试限定之内的库: {statement}"
+        );
+        let print = statement
+            .split_once("sweep_log::note(")
+            .expect("第四句要走 sweep_log::note")
+            .1;
+        assert!(
+            print.contains("没有解析到文件"),
+            "第四句要说清是「没解析到文件」"
+        );
+        for voice in [
+            "不在 MDB",
+            "监听限定跳过",
+            "--debug-dbnum",
+            "不在本期执行范围",
+        ] {
+            assert!(
+                !print.contains(voice),
+                "第四句不许借「{voice}」的嗓音: {print}"
+            );
+        }
+    }
+
+    /// H1 (a)（2026-09-08）：摄入形态下目录库不进数据批次，目录换了版只有 sweep 能第一个
+    /// 知道。钉三件事：① 选中的 CATA 正本在范围门**之前**拐去目录版本观察并 `continue`
+    /// ——回到从前它就落进「不在 MDB 声明名单里」那个桶、模型面等重启；② 观察在整面重扫
+    /// 收尾交给 `reconcile_catalogue_versions_after_sweep`，门在 `SweepSurface::Full`，
+    /// 周期对账那一拍（`origin == "reconcile"`）强制复核；③ 收尾在三个桶与第四句之后、
+    /// 入队之前——它不是数据面的桶，不借那几句的嗓音。sweep 依赖实库，只能钉源码。
+    #[test]
+    fn the_ingest_sweep_hands_catalogue_sessions_to_the_model_face() {
+        let src = include_str!("increment_manager.rs");
+        let body = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 未找到")
+            .1
+            .split_once(concat!("fn ", "reinit_batch("))
+            .expect("sweep_dirs 之后是 reinit_batch")
+            .0;
+        // ① 观察记在范围门之前，且随即 continue（不进 in_scope、不进三个桶）。
+        let observe_at = body
+            .find(concat!("catalogue_observed", ".insert("))
+            .expect("sweep 缺目录库最新会话的观察");
+        let gate_at = body
+            .find("let in_scope = self.in_scope")
+            .expect("sweep 缺范围门");
+        assert!(observe_at < gate_at, "目录观察必须记在范围门之前");
+        let after_observe = &body[observe_at..gate_at];
+        assert!(
+            after_observe.contains("continue;"),
+            "目录库观察完必须 continue，不许再落进范围判定的桶"
+        );
+        assert!(
+            !after_observe.contains("out_of_scope.push"),
+            "目录库不许进「不在 MDB 声明名单里」那个桶"
+        );
+        // 读失败的那句不许借「无法读取最新会话的数据库文件」（那是 DESI 阶段 blocker 的嗓音）。
+        let cata_read = &body[observe_at..gate_at];
+        assert!(!cata_read.contains(concat!("无法读取最新会话", "的数据库文件")));
+        // ② 收尾交给模型面，门在 Full，reconcile 那一拍强制。
+        let handoff_at = body
+            .find(concat!("reconcile_catalogue_versions_", "after_sweep("))
+            .expect("sweep 收尾缺目录版本核对的交接");
+        let gate = &body[..handoff_at];
+        assert!(
+            gate.rsplit("if ")
+                .next()
+                .is_some_and(|tail| tail.contains(concat!("SweepSurface::", "Full"))),
+            "目录交接必须门在 SweepSurface::Full 上"
+        );
+        let call = &body[handoff_at..];
+        let call = call.split_once(");").map_or(call, |(call, _)| call);
+        assert!(
+            call.contains("origin == \"reconcile\""),
+            "周期对账那一拍必须强制复核: {call}"
+        );
+        // ③ 顺序：三个桶 → 第四句 → 目录交接 → 入队。
+        let fourth_at = body.find("let unseen_declared").expect("第四句");
+        let enqueue_at = body
+            .find(concat!("self.enqueue_", "discovered("))
+            .expect("入队");
+        assert!(fourth_at < handoff_at && handoff_at < enqueue_at);
+        let print = &body[handoff_at..enqueue_at];
+        for voice in [
+            "不在 MDB",
+            "监听限定跳过",
+            "--debug-dbnum",
+            "不在本期执行范围",
+        ] {
+            assert!(!print.contains(voice), "目录交接不许借「{voice}」的嗓音");
+        }
+    }
+
     /// 归属不符的观察**一个字都不许写**。
     ///
     /// 阻断路径本来就只写观察值（file_size / file_latest_sesno / scanned_at），
@@ -720,6 +884,10 @@ mod tests {
         assert!(
             in_scope_with(&option, &scope, "AvevaCatalogue", "DICT", 7006),
             "目录库是主项目依赖的数据，跨项目照旧摄入"
+        );
+        assert!(
+            !in_scope_with(&option, &scope, "ZDJ", "DESI", 7015),
+            "别的项目同号 DESI 不得抢主项目裸 dbnum 状态"
         );
     }
 
@@ -962,13 +1130,17 @@ mod tests {
         assert!(dbnum_has_any_pe_row(dbnum).await.expect("probe backing"));
     }
 
-    /// 全新库（范围内、从未解析：无水位行、无统计行、无 pe 行）必须被启动重扫
-    /// 自动发现并走全量基线（`needs_initial_load` → `initialize_dbnum_baseline`），
-    /// 全程不需要人工放行——这是 ADR-023 §4 生产缺省 `startup_autorun=true` 的形状。
+    /// 全新库（范围内、从未解析：无水位行、无统计行、无 pe 行）的启动重扫路由随
+    /// `auto_initialize_new_dbnums` 二分，本用例两拍各钉一半：**缺省 false**——重扫
+    /// 发现它但不入队，留给 plant-ui 手动初始化（`/update/execute` 那条路不看这个
+    /// 开关）；**显式开启**——自动发现并走全量基线（`needs_initial_load` →
+    /// `initialize_dbnum_baseline`），全程不需要人工放行（ADR-023 §4 当年的生产缺省，
+    /// 如今是开关打开后的形状）。
     ///
-    /// 与上一条幽灵水位用例的分界：那条留着登记行（水位在撒谎），这条**连登记行
-    /// 都没有**（`delete_dbnum_fast` 按 DropRow 把 pe / 派生 / 统计 / 水位行全删），
-    /// 对应「新库文件第一次进入监控目录」。testbed 配置 `startup_autorun=false`，
+    /// 与上一条幽灵水位用例的分界：那条留着登记行（水位在撒谎，属**已初始化库的
+    /// 维护**，不受开关门控），这条**连登记行都没有**（`delete_dbnum_fast` 按
+    /// DropRow 把 pe / 派生 / 统计 / 水位行全删），对应「新库文件第一次进入监控
+    /// 目录」。testbed 配置 `startup_autorun=false`，
     /// 这里显式上弦模拟生产缺省，因此断言重扫行是 queued 而不是 held。
     ///
     /// watcher 换成只含目标库副本的一次性目录（与上面判重/抽取树用例同一手法）：
@@ -1042,6 +1214,26 @@ mod tests {
         // 模拟生产缺省 startup_autorun=true：重扫排出来的行不挂起，worker 直接消费。
         BatchScheduler::global().arm_auto_work();
 
+        // 第一拍：缺省 auto_initialize_new_dbnums=false——从未解析的库重扫**不入队**，
+        // 等前端手动初始化。覆盖摁成 false 而不是依赖 testbed 配置，测试才不随
+        // 现场 DbOption 漂移。
+        {
+            let _default_off = crate::options::AutoInitializeNewDbnumsOverride::set(false);
+            mgr.sweep_watch_dirs("live-startup-never-parsed-default", false)
+                .await
+                .expect("default startup sweep");
+            assert!(
+                !BatchScheduler::global()
+                    .snapshot()
+                    .iter()
+                    .any(|row| row.dbnum == dbnum),
+                "缺省不自动初始化新库：从未解析的 dbnum 必须留给前端手动初始化"
+            );
+        }
+
+        // 第二拍：开关打开（serve --auto-initialize-new-dbnums 的形状）——重扫自动
+        // 发现并走全量基线。
+        let _auto_init = crate::options::AutoInitializeNewDbnumsOverride::set(true);
         mgr.sweep_watch_dirs("live-startup-never-parsed", false)
             .await
             .expect("startup sweep");
@@ -1289,7 +1481,9 @@ mod tests {
     /// 库水位追平文件且 pe 有数据支撑，新库一行登记都没有。要的结果是——存量库
     /// 一行都不排（`discover_batch` 的水位早退），新库走「发现从未解析过的文件」
     /// → worker `needs_initial_load` → `initialize_dbnum_baseline`，而不是拿
-    /// `applied + 1` 去接一个根本不存在的增量窗口。
+    /// `applied + 1` 去接一个根本不存在的增量窗口。本用例显式开启
+    /// `auto_initialize_new_dbnums`（缺省 false 时新库整轮不入队，那一半归
+    /// [`live_startup_sweep_baselines_a_never_parsed_db`] 的第一拍钉）。
     ///
     /// 与 [`live_startup_sweep_baselines_a_never_parsed_db`] 的分界：那条的目录里
     /// 只有一个孤零零的新库，钉的是单库路由；这条钉的是**两条路由在同一份清单里
@@ -1365,6 +1559,8 @@ mod tests {
         manager.watcher = Arc::new(DbFileRegistry::new(vec![fixture.clone()]));
         let mgr = Arc::new(manager);
 
+        // 新库自动走基线是本用例的前提：显式开启 auto_initialize_new_dbnums。
+        let _auto_init = crate::options::AutoInitializeNewDbnumsOverride::set(true);
         // 模拟生产缺省 startup_autorun=true：重扫排出来的行不挂起。
         BatchScheduler::global().arm_auto_work();
         mgr.sweep_watch_dirs("live-startup-new-beside-applied", false)
@@ -1428,7 +1624,9 @@ mod tests {
     /// 1. 把这个库从当前 MDB 的 CURD 里摘掉 → 重扫一行都不排，而且**连观察值都
     ///    不写**（范围门排在 `record_observation` 之前，那条断言正是它的证据）。
     /// 2. 装回 CURD → [`AiosDBManager::resweep_for_scope_change`]（SYS meta 落库后
-    ///    那条 `scope-refresh` 重扫）把它发现出来，照样走首次导入基线。
+    ///    那条 `scope-refresh` 重扫）把它发现出来，照样走首次导入基线（全程显式
+    ///    开着 `auto_initialize_new_dbnums`——缺省 false 时刚进范围的新库同样等
+    ///    前端手动初始化，本用例钉的是范围门，不是初始化准入门）。
     ///
     /// 第二拍复刻的是生产里「有人往 MDB 里加一个库」的形状：那些**刚刚进入范围**
     /// 的设计库自己没有任何文件变更事件，不重扫就得等下次重启才会被发现。
@@ -1470,6 +1668,8 @@ mod tests {
         let fixture = isolated_watch_dir("scope-refresh-new-db", &[&applied_file, &new_file]);
         manager.watcher = Arc::new(DbFileRegistry::new(vec![fixture.clone()]));
         let mgr = Arc::new(manager);
+        // 本用例钉的是 MDB 范围门；初始化准入门显式敞开，别让两道门叠在一起。
+        let _auto_init = crate::options::AutoInitializeNewDbnumsOverride::set(true);
         BatchScheduler::global().arm_auto_work();
 
         // 摘除态是一个必须还原的现场：主体的断言包在隔离壳里，无论红绿都先把
@@ -2112,44 +2312,6 @@ mod tests {
             "两项权威读取都必须上浮，不能 return None: {discover}"
         );
     }
-
-    /// MySQL 镜像（feature=sql）：NAME 必须参数绑定、DBNO 缺失必须出声
-    /// （2026-08-13 审计 P2）。
-    ///
-    /// 元素名可含引号/反斜杠，拼进单引号字面量会让该条 UPDATE 失败且只留
-    /// warning；DBNO 缺失静默取 0 则在镜像表里留下一个看着像真的库号。
-    /// 函数在 `#[cfg(feature = "sql")]` 门后，纯函数测不到，钉源码
-    /// （include_str 不受 feature 影响）。
-    #[test]
-    fn the_mysql_mirror_binds_name_and_reports_missing_dbno() {
-        let src = include_str!("increment_manager.rs");
-        let update = src
-            .split_once(concat!("async fn ", "process_mysql_update_elements("))
-            .expect("process_mysql_update_elements 未找到")
-            .1
-            .split_once(concat!("async fn ", "process_mysql_delete_elements("))
-            .expect("其后应当是 process_mysql_delete_elements")
-            .0;
-        assert!(
-            update.contains(".bind("),
-            "OWNER/NAME/ID 必须走 sqlx 参数绑定: {update}"
-        );
-        assert!(
-            !update.contains(concat!("NAME='", "{}'")),
-            "不得把元素名拼进单引号字面量"
-        );
-        let insert = src
-            .split_once(concat!("async fn ", "process_mysql_insert_elements("))
-            .expect("process_mysql_insert_elements 未找到")
-            .1
-            .split_once(concat!("async fn ", "process_mysql_update_elements("))
-            .expect("其后应当是 process_mysql_update_elements")
-            .0;
-        assert!(
-            insert.contains("缺 DBNO"),
-            "DBNO 缺失必须告警而不是静默取 0: {insert}"
-        );
-    }
 }
 
 /// 增量更新信息结构体
@@ -2330,6 +2492,13 @@ pub(crate) fn is_foreign_runtime_sys(db_option: &DbOption, project: &str, db_typ
             .eq_ignore_ascii_case(db_option.project_name.trim())
 }
 
+fn is_foreign_design_data(db_option: &DbOption, project: &str, db_type: &str) -> bool {
+    (db_type.eq_ignore_ascii_case("DESI") || db_type.eq_ignore_ascii_case("ISOD"))
+        && !project
+            .trim()
+            .eq_ignore_ascii_case(db_option.project_name.trim())
+}
+
 /// 增量摄入的唯一判定：**本期 MDB 声明的 DESI**。
 ///
 /// 只剩两条判据：
@@ -2360,6 +2529,13 @@ pub(crate) fn in_scope_with(
         log::debug!(
             "忽略非主项目的运行态系统库: project={project} db_type={db_type} dbnum={db_num}"
         );
+        return false;
+    }
+    // DESI/ISOD dbnums are only unique within an AVEVA project, while the
+    // durable data/model tables are keyed by bare dbnum. Do not let a foreign
+    // project's same-number design file enter the primary project's queue.
+    if is_foreign_design_data(db_option, project, db_type) {
+        log::debug!("忽略非主项目的设计库: project={project} db_type={db_type} dbnum={db_num}");
         return false;
     }
     if !watch_scope_admits(db_type, db_num) {
@@ -2712,34 +2888,19 @@ fn scan_gate_for(verdict: &crate::data_interface::dbnum_state::ScanVerdict) -> S
     }
 }
 
+/// 一轮 `sweep_dirs` 扫的是整个候选面，还是补挂后刚恢复的那几个目录。
+///
+/// 「MDB 声明了却没解析到文件」这一句只在整面重扫里成立：子集补扫压根没看其余
+/// 目录，说那些库「没文件」是事实性错误，与 issue #10 那种嗓音混同同一性质。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SweepSurface {
+    /// 全部监控目录（`sweep_watch_dirs`：init / reconcile / scope-refresh）。
+    Full,
+    /// 共享盘重挂轮补挂成功的那几个目录（`share-remount`）。
+    RemountedSubset,
+}
+
 impl AiosDBManager {
-    /// 简化的MySQL pdms_element表更新方法
-    ///
-    /// 这是一个简化版本的方法，只需要传入range_eles参数即可完成MySQL数据库的更新。
-    /// 该方法会自动处理数据库连接、元素分类和批量更新操作。
-    ///
-    /// # 参数
-    ///
-    /// * `range_eles` - 从collect_increment_eles方法获取的增量元素数据
-    ///
-    /// # 返回值
-    ///
-    /// * `anyhow::Result<()>` - 成功返回Ok(())，失败返回错误信息
-    ///
-    /// # 使用示例
-    ///
-    /// ```rust
-    /// // 在增量更新流程中使用
-    /// let range_eles = io.collect_increment_eles(Some(sesno_range))?;
-    /// aios_db_manager.update_mysql_pdms_elements_simple(&range_eles).await?;
-    /// ```
-    #[cfg(feature = "sql")]
-    pub async fn update_mysql_pdms_elements_simple(
-        &self,
-        range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
-    ) -> anyhow::Result<()> {
-        self.update_mysql_pdms_elements(range_eles).await
-    }
     /// 这个项目里「能被摄入」的库目录，即监控目录中落在 `project_dir` 下的那些。
     ///
     /// 手动与自动两条触发路径喂的是同一个队列，因此必须共用同一份目录集合与同一个
@@ -3199,7 +3360,8 @@ impl AiosDBManager {
             log::error!("{msg}");
             eprintln!("{msg}");
         }
-        self.sweep_dirs(origin, ensure_archives, watch_dirs).await
+        self.sweep_dirs(origin, ensure_archives, watch_dirs, SweepSurface::Full)
+            .await
     }
 
     /// 对给定目录子集做一轮发现与入队（[`Self::sweep_watch_dirs`] 的执行体）。
@@ -3208,11 +3370,15 @@ impl AiosDBManager {
     /// 整面重扫在网络盘上可能分钟级，而那次 await 就睡在 `async_watch` 的事件
     /// select 循环里——扫多久，文件事件就积压多久。刚恢复的目录本来就必须扫
     /// （PollWatcher 不补发停机期间的事件），其余目录没有理由陪跑。
+    ///
+    /// `surface` 说清这份目录集合是不是完整候选面：只有整面重扫才有资格说
+    /// 「MDB 声明的库本轮没解析到文件」（见收尾那一句）。
     async fn sweep_dirs(
         &self,
         origin: &str,
         ensure_archives: bool,
         watch_dirs: Vec<PathBuf>,
+        surface: SweepSurface,
     ) -> anyhow::Result<()> {
         // 本期执行范围与手动路径走同一个谓词（`in_scope`）。自动路径过去只过类型
         // 白名单，于是 MDB 外的设计库照样入队——预览说它不在范围里、队列里却有它的
@@ -3280,6 +3446,16 @@ impl AiosDBManager {
         // 被 watch_dbnums / --watch-dbnum 圈掉的库：**第三个桶、第三种嗓音**。
         // 理由同上，而且这一个更要紧——配置里的名单能跨重启活着。
         let mut watch_excluded: Vec<String> = Vec::new();
+        // 本轮在盘上解析到文件头的设计库号（DESI / ISOD，不问归属项目、不问过没过门）。
+        // sweep 是文件驱动的：从盘上有的文件出发逐个过门，所以「MDB 声明了却没文件」
+        // 的库在上面三个桶里都不会出现——这张表是收尾那一句唯一的依据。
+        let mut seen_design_dbnums: BTreeSet<u32> = BTreeSet::new();
+        // 选中的目录库正本 → 文件最新会话。目录库不进数据面（ADR-058 D1），但它的会话前移
+        // 是模型面目录级联的触发源（H1，2026-09-08）：收尾交给
+        // `reconcile_catalogue_versions_after_sweep` 与上一轮比，前移了才开一次目录版本核对。
+        // 读不到头的不进表（未知，不触发）。
+        let mut catalogue_observed: BTreeMap<u32, u32> = BTreeMap::new();
+        let mut catalogue_unreadable: Vec<String> = Vec::new();
         let mut manifest_totals = Vec::new();
         let time = Instant::now();
         log::debug!("[{origin}] 监控目录: {watch_dirs:?}");
@@ -3337,9 +3513,34 @@ impl AiosDBManager {
                     println!("跳过无法读取 E3D 数据库头的文件: {}", path.display());
                     continue;
                 };
+                // 记在所有门之前：这里回答的是「盘上有没有这个库号的设计库文件」，
+                // 不是「它进不进本轮」——后者是下面三个桶的事。
+                if db_type.eq_ignore_ascii_case("DESI") || db_type.eq_ignore_ascii_case("ISOD") {
+                    seen_design_dbnums.insert(db_no);
+                }
                 if (db_type.eq_ignore_ascii_case("DICT") || db_type.eq_ignore_ascii_case("CATA"))
                     && !selected_catalogue_paths.contains(path)
                 {
+                    continue;
+                }
+                // 选中的目录库正本：不进数据面（`UpdateScope::admits` 只认 SYS meta 与 MDB 声明的
+                // DESI / ISOD，ADR-058 D1），此前一路落到「不在 MDB 声明名单里」那个桶——对
+                // 它是事实性错误（它在 MDB 里，只是不是数据面的类型），而且数据面就此对目录
+                // 前移一声不响，模型面要等重启才知道目录换了版（H1）。这里记下它的最新会话，
+                // 收尾与上一轮比；DICT 照旧往下走（它是 SYS meta，进 Meta 批次）。
+                if db_type.eq_ignore_ascii_case("CATA") {
+                    match db_file_header::latest_sesno(path) {
+                        Ok(sesno) => {
+                            catalogue_observed.insert(db_no, sesno);
+                        }
+                        Err(error) => {
+                            catalogue_unreadable.push(format!("CATA:{db_no}"));
+                            log::warn!(
+                                "[{origin}] 目录库 dbnum={db_no} 最新会话号读取失败，本轮不据它判目录前移: {} : {error}",
+                                path.display()
+                            );
+                        }
+                    }
                     continue;
                 }
 
@@ -3373,15 +3574,17 @@ impl AiosDBManager {
                     }
                     // 逐个打印会在整面重扫时刷屏（AvevaMarineSample 目录里躺着
                     // 287 个 DESI，MDB 只声明 29 个），聚合成一句收在循环外。
-                    // CATA/DICT 已由共享清单选择器裁决并由 UpdateScope 放行，不会
-                    // 落入这里；因此所有真正范围外的文件都直接跳过。
+                    // DICT 由共享清单选择器裁决并由 UpdateScope 放行（SYS meta），CATA
+                    // 在上面已经拐去目录版本观察，都不会落入这里；因此所有真正范围外
+                    // 的文件都直接跳过。
                     out_of_scope.push(format!("{db_type}:{db_no}"));
                     continue;
                 }
                 // 抽取家族裁决仅阻断实际会执行的库。Watch Scope 下引入额外
                 // 项目只是为了建立 CATA/PROP 依赖身份；该项目内与 8000 无关的
-                // DESI 副本不得把 8000 的 Design 阶段变成 blocker。CATA/DICT 由
-                // 权威清单选主后仍会进入这里，其身份冲突继续严格阻断。
+                // DESI 副本不得把 8000 的 Design 阶段变成 blocker。DICT 由
+                // 权威清单选主后仍会进入这里，其身份冲突继续严格阻断；CATA 的
+                // 同号冲突在 `catalogue_manifest_for_dirs` 里裁（Catalogue 相 blocker）。
                 if extract_parents.contains(path) {
                     println!(
                         "[{origin}] 抽取树父层由叶子代表（dbnum={db_no}），本轮不单独登记: {}",
@@ -3702,6 +3905,74 @@ impl AiosDBManager {
                 }
             ));
         }
+        // 第四句：范围之内**声明了、本轮却没在盘上解析到文件**的设计库。上面三个桶
+        // 都是从盘上有的文件出发分的，这样的库在哪个桶里都不会出现，数据面对它一声
+        // 不响——此前只有骨架装载的 `problems` 与手动预览的 `not_in_project` 看得见它
+        // （2026-09-07 现场的 6003 SCBDESI 就是这样）。
+        //
+        // 「范围之内」按 2026-09-08 共识 d-25：增量数据面的范围 = MDB 声明的 DESI ∩
+        // 监听限定 ∩ 调试限定。域外的库不进这一句——它们不是「没文件」，是本轮
+        // 「没有问过」，上面两个限定桶已经替它们说过话了。只点名、不记 blocker、
+        // 不改范围定义；子集补扫没看其余目录，没资格说这句（`SweepSurface`）。
+        if surface == SweepSurface::Full {
+            let unseen_declared: Vec<u32> = scope
+                .declared_desi()
+                .filter(|dbnum| {
+                    watch_scope_admits("DESI", *dbnum) && debug_scope_admits("DESI", *dbnum)
+                })
+                .filter(|dbnum| !seen_design_dbnums.contains(dbnum))
+                .collect();
+            if !unseen_declared.is_empty() {
+                let sample = unseen_declared.iter().take(12).join("、");
+                sweep_log::note(format!(
+                    "[{origin}] {} 个 MDB {} 声明的设计库本轮在监控目录里没有解析到文件，\
+                     数据面无从核对其水位（盘上没有这个库号的 DESI/ISOD 文件，或文件头读不出\
+                     ——后者上面已逐个点名；只点名，不记 blocker）：{sample}{}",
+                    unseen_declared.len(),
+                    scope.mdb(),
+                    if unseen_declared.len() > 12 {
+                        " …"
+                    } else {
+                        ""
+                    }
+                ));
+            }
+        }
+        // 目录库（H1，2026-09-08）：数据面不收它们，但模型面要知道目录换了版。整面重扫把
+        // 本轮看到的每个目录库正本的最新会话交给模型面与上一轮比，前移了才开一次目录版本
+        // 核对（另起任务，不在这里等）；周期对账那一拍强制复核一次，兜住 sweep 看不见的
+        // 形状（启动那次反查失败、目录文件不在监控目录里）。子集补扫没看其余目录，不交。
+        if surface == SweepSurface::Full {
+            let observed = catalogue_observed.len();
+            let verdict =
+                crate::data_interface::model_update_pending::reconcile_catalogue_versions_after_sweep(
+                    origin,
+                    catalogue_observed,
+                    origin == "reconcile",
+                );
+            match verdict {
+                crate::data_interface::model_update_pending::CatalogueSweepVerdict::Run {
+                    trigger,
+                } => sweep_log::note(format!(
+                    "[{origin}] 目录版本核对已另起任务（{trigger}，本轮观察到 {observed} 个目录库）：\
+                     目录库不进数据批次，前移只触发模型面重算引用它的根；结果见 /health.catalogue_reconcile"
+                )),
+                crate::data_interface::model_update_pending::CatalogueSweepVerdict::Seeded => {
+                    log::debug!(
+                        "[{origin}] 首轮 sweep 记下 {observed} 个目录库的最新会话；启动那次目录版本核对归 reconcile_model_coverage_at_startup"
+                    )
+                }
+                crate::data_interface::model_update_pending::CatalogueSweepVerdict::Unchanged => {}
+            }
+            if !catalogue_unreadable.is_empty() {
+                sweep_log::note(format!(
+                    "[{origin}] {} 个目录库最新会话号读取失败，本轮不据它们判目录前移（未知，\
+                     不是「没变」）：{}",
+                    catalogue_unreadable.len(),
+                    catalogue_unreadable.iter().take(12).join("、")
+                ));
+            }
+        }
 
         // F6：移除被判为「同 dbnum 多文件」的文件。冲突库始终不入队；严格模式
         // 追加阶段 blocker，默认模式只把完整问题收进重扫日志。
@@ -3794,6 +4065,7 @@ impl AiosDBManager {
             phase: crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type),
             epoch_id: 0,
             intent: crate::data_interface::batch_queue::BatchIntent::Reinitialize,
+            model_start_sesno: Some(0),
             path: path.to_path_buf(),
             file_name,
             applied_sesno: 0,
@@ -3832,6 +4104,19 @@ impl AiosDBManager {
         let state = DbnumState::read(db_num)
             .await
             .with_context(|| format!("dbnum={db_num} 读取应用水位失败"))?;
+        if !automatic_discovery_admits(
+            state.as_ref().is_some_and(|state| state.initialized),
+            crate::options::auto_initialize_new_dbnums(),
+            crate::data_interface::batch_scheduler::BatchScheduler::global()
+                .snapshot()
+                .iter()
+                .any(|row| row.dbnum == db_num),
+        ) {
+            sweep_log::note(format!(
+                "dbnum={db_num} 等待前端手动初始化（auto_initialize_new_dbnums=false），本轮自动发现不入队"
+            ));
+            return Ok(None);
+        }
         let applied = state.as_ref().map(|state| state.applied_sesno).unwrap_or(0);
         let confirmed_empty_baseline_sesno = state
             .as_ref()
@@ -3884,6 +4169,7 @@ impl AiosDBManager {
                 phase: crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type),
                 epoch_id: 0,
                 intent: crate::data_interface::batch_queue::BatchIntent::ApplyWindow,
+                model_start_sesno: None,
                 path: path.to_path_buf(),
                 file_name: file_name.to_string(),
                 applied_sesno: queued_applied,
@@ -4106,7 +4392,15 @@ impl AiosDBManager {
             .cloned()
             .collect();
         println!("重挂轮补挂了 {added} 个监控目录，开始补扫停机期间的会话: {added_dirs:?}");
-        if let Err(error) = self.sweep_dirs("share-remount", false, added_dirs).await {
+        if let Err(error) = self
+            .sweep_dirs(
+                "share-remount",
+                false,
+                added_dirs,
+                SweepSurface::RemountedSubset,
+            )
+            .await
+        {
             log::error!("补挂后的重扫失败: {error:#}");
             eprintln!("补挂后的重扫失败: {error:#}");
         }
@@ -4401,280 +4695,6 @@ impl AiosDBManager {
         Err(notify::Error::generic(
             "async_watch 事件流意外关闭，增量看门狗已停止监听",
         ))
-    }
-
-    /// 更新MySQL pdms_element表数据
-    ///
-    /// 该方法专门用于将增量元素数据更新到MySQL的pdms_element表中。
-    /// 根据元素操作类型（新增、修改、删除）执行相应的数据库操作。
-    ///
-    /// # 参数
-    ///
-    /// * `range_eles` - 元素操作数据的映射
-    ///   - key: 会话号(sesno)
-    ///   - value: 该会话号下的元素操作数据列表
-    ///
-    /// # 返回值
-    ///
-    /// * `anyhow::Result<()>` - 成功返回Ok(())，失败返回错误信息
-    ///
-    /// # 处理逻辑
-    ///
-    /// 1. **新增操作**: 插入新的元素记录到pdms_element表
-    /// 2. **修改操作**: 更新现有元素的相关字段
-    /// 3. **删除操作**: 将IS_DEL字段设置为1，标记为已删除
-    ///
-    /// # 性能优化
-    ///
-    /// - 使用批量SQL操作减少数据库连接开销
-    /// - 按操作类型分组处理，提高执行效率
-    /// - 分批处理避免SQL语句过长
-    #[cfg(feature = "sql")]
-    pub async fn update_mysql_pdms_elements(
-        &self,
-        range_eles: &BTreeMap<u32, Vec<EleOperationData>>,
-    ) -> anyhow::Result<()> {
-        // 获取数据库连接配置
-        let project_name = &self.db_option.project_name;
-        // 获取MySQL连接池
-        let connection_str =
-            crate::data_interface::tidb_manager::AiosDBManager::get_default_conn_str(
-                &self.db_option,
-            );
-        let pool = crate::data_interface::tidb_manager::AiosDBManager::get_db_pool(
-            &connection_str,
-            project_name,
-        )
-        .await?;
-        // 分类收集不同操作类型的元素
-        let mut insert_elements = Vec::new(); // 新增元素
-        let mut update_elements = Vec::new(); // 修改元素
-        let mut delete_elements = Vec::new(); // 删除元素
-        // 遍历所有会话号下的元素操作数据
-        for (sesno, ele_vec) in range_eles {
-            for ele_data in ele_vec {
-                match &ele_data.detail {
-                    EleOperationDetail::Add(add_data) => {
-                        insert_elements.push((ele_data.refno, *sesno, add_data));
-                    }
-                    EleOperationDetail::Modified(modify_data) => {
-                        update_elements.push((ele_data.refno, *sesno, modify_data));
-                    }
-                    EleOperationDetail::Deleted => {
-                        delete_elements.push((ele_data.refno, *sesno));
-                    }
-                    EleOperationDetail::None => {
-                        // 跳过无操作类型
-                        continue;
-                    }
-                }
-            }
-        }
-        // 处理新增元素
-        if !insert_elements.is_empty() {
-            self.process_mysql_insert_elements(&pool, &insert_elements)
-                .await?;
-        }
-        // 处理修改元素
-        if !update_elements.is_empty() {
-            self.process_mysql_update_elements(&pool, &update_elements)
-                .await?;
-        }
-        // 处理删除元素
-        if !delete_elements.is_empty() {
-            self.process_mysql_delete_elements(&pool, &delete_elements)
-                .await?;
-        }
-        println!("MySQL pdms_element表更新完成");
-        Ok(())
-    }
-
-    /// 处理MySQL新增元素操作
-    ///
-    /// 批量插入新增的元素到pdms_element表中
-    ///
-    /// # 参数
-    ///
-    /// * `pool` - MySQL连接池
-    /// * `insert_elements` - 新增元素列表，包含(refno, sesno, add_data)
-    #[cfg(feature = "sql")]
-    async fn process_mysql_insert_elements(
-        &self,
-        pool: &sqlx::Pool<sqlx::MySql>,
-        insert_elements: &[(RefU64, u32, &crate::data_interface::ele_data::EleData)],
-    ) -> anyhow::Result<()> {
-        if insert_elements.is_empty() {
-            return Ok(());
-        }
-        println!("开始处理{}个新增元素", insert_elements.len());
-        // 分批处理，避免SQL语句过长
-        for chunk in insert_elements.chunks(BATCH_SIZE) {
-            let mut insert_sql = String::new();
-            let mut has_valid_elements = false;
-
-            for (refno, _sesno, add_data) in chunk {
-                // 使用EleData中的属性信息
-                let attr_map = add_data.whole_attmap.att_map();
-                // 构建children_map（使用EleData中的children信息）
-                let mut children_map = HashMap::new();
-                if !add_data.children.is_empty() {
-                    // 将RefU64Vec转换为Vec<RefU64>
-                    let children_vec: Vec<RefU64> = add_data.children.iter().cloned().collect();
-                    children_map.insert(*refno, children_vec);
-                }
-                // 从属性映射中获取数据库编号；缺失以 0（未解析）写入并出声——
-                // 0 是「拿不到真值」的显式记号，不是可静默默认的正常值
-                // （2026-08-13 审计：镜像表里一个看着像真的库号比缺值更难排查）。
-                let dbnum = attr_map.get_i32("DBNO").unwrap_or_else(|| {
-                    log::warn!(
-                        "MySQL 镜像: 元素 {refno:?} 缺 DBNO 属性，NUMBDB 以 0（未解析）写入"
-                    );
-                    0
-                });
-                // 生成插入SQL片段
-                let sql_fragment = gen_pdms_element_insert_sql(attr_map, dbnum, &children_map);
-                if !sql_fragment.is_empty() {
-                    insert_sql.push_str(&sql_fragment);
-                    has_valid_elements = true;
-                }
-            }
-            // 执行批量插入
-            if has_valid_elements {
-                // 构建完整的INSERT语句
-                let mut full_sql = format!(
-                    "INSERT IGNORE INTO {} (ID, REFNO, TYPE, OWNER, NAME, NUMBDB, ORDER_NUM, CHILDREN_COUNT, IS_DEL) VALUES {}",
-                    PDMS_ELEMENTS_TABLE, insert_sql
-                );
-                // 移除最后的逗号
-                if full_sql.ends_with(",") {
-                    full_sql.truncate(full_sql.len() - 1);
-                }
-                // 执行SQL
-                match sqlx::query(&full_sql).execute(pool).await {
-                    Ok(result) => {
-                        println!("成功插入{}行记录", result.rows_affected());
-                    }
-                    Err(e) => {
-                        println!("插入元素失败: {}", e);
-                        println!("SQL: {}", full_sql);
-                        return Err(anyhow::anyhow!("插入元素失败: {}", e));
-                    }
-                }
-            }
-        }
-
-        println!("新增元素处理完成");
-        Ok(())
-    }
-    /// 处理MySQL修改元素操作
-    ///
-    /// 更新已存在元素的相关字段
-    ///
-    /// # 参数
-    ///
-    /// * `pool` - MySQL连接池
-    /// * `update_elements` - 修改元素列表，包含(refno, sesno, modify_data)
-    #[cfg(feature = "sql")]
-    async fn process_mysql_update_elements(
-        &self,
-        pool: &sqlx::Pool<sqlx::MySql>,
-        update_elements: &[(RefU64, u32, &ModifiedElement)],
-    ) -> anyhow::Result<()> {
-        use crate::consts::PDMS_ELEMENTS_TABLE;
-
-        if update_elements.is_empty() {
-            return Ok(());
-        }
-        println!("开始处理{}个修改元素", update_elements.len());
-        // 分批处理
-        for chunk in update_elements.chunks(BATCH_SIZE) {
-            let mut updates = Vec::new();
-            for (refno, _sesno, _modify_data) in chunk {
-                // todo 暂时通过查询surreal来获取最终得值
-                if let Some(pe) = get_pe((*refno).into()).await? {
-                    let name = if !pe.name.is_empty() {
-                        pe.name
-                    } else {
-                        get_default_name((*refno).into())
-                            .await?
-                            .unwrap_or("".to_string())
-                    };
-                    updates.push((pe.owner.refno().0, name, pe.refno.refno().0));
-                }
-            }
-            // 逐条参数绑定执行：NAME 是外部字符串（元素名可含引号/反斜杠），拼进
-            // 单引号字面量会破坏语句、让该条 UPDATE 失败且只留 warning
-            // （2026-08-13 审计 P2）。OWNER/ID 顺带一起绑定，语句文本从此恒定。
-            let update_sql = format!("UPDATE {PDMS_ELEMENTS_TABLE} SET OWNER=?, NAME=? WHERE ID=?");
-            for (owner, name, id) in updates {
-                match sqlx::query(&update_sql)
-                    .bind(owner)
-                    .bind(&name)
-                    .bind(id)
-                    .execute(pool)
-                    .await
-                {
-                    Ok(result) => {
-                        if result.rows_affected() == 0 {
-                            println!("警告: MySQL 更新元素时未找到对应记录: ID={id} NAME={name}");
-                        }
-                    }
-                    Err(e) => {
-                        println!("更新元素失败: {}", e);
-                        println!("SQL: {update_sql} (ID={id}, NAME={name})");
-                        return Err(anyhow::anyhow!("更新元素失败: {}", e));
-                    }
-                }
-            }
-        }
-        println!("修改元素处理完成");
-        Ok(())
-    }
-
-    /// 处理MySQL删除元素操作
-    ///
-    /// 将删除的元素标记为已删除（IS_DEL=1）
-    ///
-    /// # 参数
-    ///
-    /// * `pool` - MySQL连接池
-    /// * `delete_elements` - 删除元素列表，包含(refno, sesno)
-    #[cfg(feature = "sql")]
-    async fn process_mysql_delete_elements(
-        &self,
-        pool: &sqlx::Pool<sqlx::MySql>,
-        delete_elements: &[(RefU64, u32)],
-    ) -> anyhow::Result<()> {
-        if delete_elements.is_empty() {
-            return Ok(());
-        }
-        println!("开始处理{}个删除元素", delete_elements.len());
-        // 分批处理
-        for chunk in delete_elements.chunks(BATCH_SIZE) {
-            // 构建批量UPDATE语句，将IS_DEL设置为1
-            let refno_list: Vec<String> = chunk
-                .iter()
-                .map(|(refno, _sesno)| refno.0.to_string())
-                .collect();
-
-            let delete_sql = format!(
-                "UPDATE {} SET IS_DEL=1 WHERE ID IN ({})",
-                PDMS_ELEMENTS_TABLE,
-                refno_list.join(",")
-            );
-            match sqlx::query(&delete_sql).execute(pool).await {
-                Ok(result) => {
-                    println!("成功标记{}行记录为已删除", result.rows_affected());
-                }
-                Err(e) => {
-                    println!("删除元素失败: {}", e);
-                    println!("SQL: {}", delete_sql);
-                    return Err(anyhow::anyhow!("删除元素失败: {}", e));
-                }
-            }
-        }
-        println!("删除元素处理完成");
-        Ok(())
     }
 
     /// 更新指定参考号及其子树的世界变换矩阵

@@ -20,7 +20,6 @@ use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
 use crate::data_interface::direct_tree::DirectTreeProvider;
@@ -92,6 +91,9 @@ pub struct AppState {
     /// 前端静态根。`/ops.html` 每次请求都在这里找一次磁盘副本，找不到才用内嵌的
     /// ——所以存的是目录而不是启动时定死的结论，热替换才谈得上「不重启」。
     pub ui_root: PathBuf,
+    /// 运行期模型资源根。浏览器包里的 `/assets` 请求仍优先从这里取，以便模型网格
+    /// 与站点配置无需重编服务即可更新。
+    pub asset_root: PathBuf,
     pub queries: Arc<QueryService>,
     /// e3d-io backed tree reader. It stays lazy until a tree endpoint is used.
     pub direct_tree: DirectTreeProvider,
@@ -179,6 +181,9 @@ impl ApiError {
         let (status, code) = match error.code {
             "INVALID_ARGUMENT" => (StatusCode::BAD_REQUEST, "invalid_argument"),
             "NOT_FOUND" => (StatusCode::NOT_FOUND, "not_found"),
+            "NO_RENDERABLE_GEOMETRY" => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "no_renderable_geometry")
+            }
             "ATTR_NOT_APPLICABLE" => (StatusCode::UNPROCESSABLE_ENTITY, "attr_not_applicable"),
             "CHAIN_INCOMPLETE" => (StatusCode::UNPROCESSABLE_ENTITY, "chain_incomplete"),
             "DB_UNAVAILABLE" => (StatusCode::SERVICE_UNAVAILABLE, "db_unavailable"),
@@ -302,6 +307,7 @@ pub async fn serve(
         identity,
         static_assets,
         ui_root: ui_root.clone(),
+        asset_root: asset_root.clone(),
         queries,
         direct_tree,
         element_attributes,
@@ -402,8 +408,9 @@ pub async fn serve(
         // 显式路由压过下面的 ServeDir 兜底：磁盘上没有这个文件时也要有面板，
         // 而它自己会先去 ServeDir 同一个目录里找一次，所以有文件时结果不变。
         .route("/ops.html", get(handlers::ops_panel))
-        .nest_service("/assets", ServeDir::new(asset_root))
-        .fallback_service(ServeDir::new(ui_root).append_index_html_on_directories(true))
+        // 完整 plant-ui WASM 包编译进当前服务；同路径的磁盘副本仍优先，便于现场替换
+        // 配置、网格和前端包。API 路由都在 fallback 之前注册，不会被静态处理吞掉。
+        .fallback(get(handlers::plant_ui_web))
         .layer(build_cors(cors_origins))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
@@ -574,6 +581,25 @@ mod tests {
             serve.contains(".route(\"/api/v1/meshes/{file}\", get(handlers::mesh_glb))"),
             "missing mesh GLB GET route: {serve}"
         );
+    }
+
+    #[test]
+    fn plant_ui_web_is_the_last_fallback_after_api_routes() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("pub async fn serve(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        let api = serve
+            .find(".route(\"/api/v1/health\", get(handlers::health))")
+            .expect("health route must exist");
+        let fallback = serve
+            .find(".fallback(get(handlers::plant_ui_web))")
+            .expect("plant-ui web fallback must exist");
+        assert!(api < fallback, "API routes must win over the web fallback");
     }
 
     #[test]

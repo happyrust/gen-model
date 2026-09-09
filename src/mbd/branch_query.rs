@@ -496,14 +496,18 @@ fn connection_ref(
     let Some(bran) = bran else {
         return Ok(None);
     };
-    if ancestor_name_contains(&bran, "ZONE", "ITUB")? || ancestor_name_contains(&bran, "ZONE", "INST")? {
+    if ancestor_name_contains(&bran, "ZONE", "ITUB")?
+        || ancestor_name_contains(&bran, "ZONE", "INST")?
+    {
         return Ok(None);
     }
     let Some(name) = pml_name(&bran)? else {
         return Ok(None);
     };
     let note = match bran.get_string(":ZD_NBBM") {
-        Ok(value) => value.map(|text| text.trim().to_string()).filter(|text| !text.is_empty()),
+        Ok(value) => value
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty()),
         Err(
             DbElementError::UnknownAttribute { .. }
             | DbElementError::DbNotRegistered { .. }
@@ -646,7 +650,9 @@ fn optional_text(
     name: &str,
 ) -> Result<Option<String>, BranchQueryError> {
     match member.get_string(name) {
-        Ok(value) => Ok(value.map(|text| text.trim().to_string()).filter(|text| !text.is_empty())),
+        Ok(value) => Ok(value
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())),
         Err(DbElementError::UnknownAttribute { .. }) => Ok(None),
         Err(error) => Err(error.into()),
     }

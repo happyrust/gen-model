@@ -45,7 +45,10 @@ mod tests {
         );
         // 落法：面板目标折成 `RoomRecalcPanel`，且排在 `into_model_update_plan` 之后（工作项
         // 已经成形才并进去），枚举读挂要落 `room_rebuild_required`。
-        let planner = fn_body(source, "pub(crate) async fn build_model_update_plan_from_window(");
+        let planner = fn_body(
+            source,
+            "pub(crate) async fn build_model_update_plan_from_window(",
+        );
         let into_at = planner
             .find("into_model_update_plan(")
             .expect("窗口计划要先成形");
@@ -55,7 +58,8 @@ mod tests {
         assert!(into_at < append_at, "{planner}");
         let append = fn_body(source, "pub(crate) fn append_room_structural_work(");
         assert!(
-            append.contains("ModelWorkAction::RoomRecalcPanel") && append.contains("room_rebuild_required = true"),
+            append.contains("ModelWorkAction::RoomRecalcPanel")
+                && append.contains("room_rebuild_required = true"),
             "{append}"
         );
     }
@@ -64,7 +68,9 @@ mod tests {
     /// 枚举读挂 → `room_rebuild_required` + 原因；空触发对计划零改动。
     #[test]
     fn f_a_room_structural_work_lands_as_panel_recalcs_and_rebuild_requirements() {
-        use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
+        use crate::data_interface::model_update_plan::{
+            ModelUpdatePlan, ModelWorkAction, ModelWorkItem,
+        };
         use crate::data_interface::room_structural_trigger::RoomStructuralTriggers;
         use crate::data_interface::window_root_plan::append_room_structural_work;
         use aios_core::RefnoEnum;
@@ -93,18 +99,35 @@ mod tests {
             .collect();
         assert_eq!(panels, vec!["24384/3", "24384/7"], "{:?}", plan.work_items);
         assert!(!plan.room_rebuild_required);
-        assert!(plan.work_items.iter().all(|item| item.dbnum == 8000 && item.source_end_sesno == 42));
+        assert!(
+            plan.work_items
+                .iter()
+                .all(|item| item.dbnum == 8000 && item.source_end_sesno == 42)
+        );
 
         let mut degraded = RoomStructuralTriggers::default();
-        degraded.unreadable.push("房间改名的面板枚举失败: 夹具".into());
+        degraded
+            .unreadable
+            .push("房间改名的面板枚举失败: 夹具".into());
         let mut plan = ModelUpdatePlan::default();
         append_room_structural_work(&mut plan, &degraded, 8000, "DESI", 42);
         assert!(plan.work_items.is_empty());
         assert!(plan.room_rebuild_required);
-        assert!(plan.room_rebuild_reason.as_deref().unwrap_or_default().contains("面板枚举失败"));
+        assert!(
+            plan.room_rebuild_reason
+                .as_deref()
+                .unwrap_or_default()
+                .contains("面板枚举失败")
+        );
 
         let mut untouched = ModelUpdatePlan::default();
-        append_room_structural_work(&mut untouched, &RoomStructuralTriggers::default(), 8000, "DESI", 42);
+        append_room_structural_work(
+            &mut untouched,
+            &RoomStructuralTriggers::default(),
+            8000,
+            "DESI",
+            42,
+        );
         assert_eq!(untouched, ModelUpdatePlan::default());
     }
 

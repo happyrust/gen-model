@@ -72,6 +72,7 @@ use crate::data_interface::model_impact::{
 use crate::data_interface::model_type_scope;
 use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction, ModelWorkItem};
 use crate::data_interface::project_paths::resolve_project_root;
+use crate::data_interface::rigid_motion::{TransformAnchorWire, TransformUnit};
 use crate::data_interface::sesno_range::{COLD_START_DB_TYPES, SesnoRangeResolver};
 use crate::data_interface::side_effect_pending::SideEffectCompensator;
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -253,11 +254,30 @@ pub struct NetChangeDetail {
 
 /// Merge per-session ops into per-`refno` net change details (ordered by `sesno`).
 ///
+/// 读一次进程开关的薄壳；纯形态与判据见 [`merge_net_change_details_with`]。
+pub fn merge_net_change_details(
+    range_eles: &std::collections::BTreeMap<u32, Vec<EleOperationData>>,
+) -> Vec<NetChangeDetail> {
+    merge_net_change_details_with(
+        range_eles,
+        crate::options::model_skip_metadata_only_changes(),
+    )
+}
+
+/// Merge per-session ops into per-`refno` net change details (ordered by `sesno`).
+///
 /// `range_eles` is a `BTreeMap<sesno, ops>` so iteration is already in session
 /// order. Model-impact accumulates across contributing ops via
 /// [`classify_operation_impact`]; a cancelled element is never model-affecting.
-pub fn merge_net_change_details(
+///
+/// `model_affecting` 报的是**执行侧会不会为它排模型工作**，所以它得跟着 direct 窗口
+/// 规划器的元数据门走（`metadata_gate` = [`crate::options::model_skip_metadata_only_changes`]）：
+/// 门开着时判据落回 [`classify_operation_impact`]，它与门共用同一道双票；门关上时规划器
+/// 对任何一次属性变化都整根重算，于是这里也不许再有 `Skip`——否则预览会说「不影响模型」，
+/// 而执行照样重算那个根。
+pub fn merge_net_change_details_with(
     range_eles: &std::collections::BTreeMap<u32, Vec<EleOperationData>>,
+    metadata_gate: bool,
 ) -> Vec<NetChangeDetail> {
     // refno -> (net op, any contributing op affected the model)
     let mut acc: IndexMap<RefU64, (NetOp, bool)> = IndexMap::new();
@@ -266,7 +286,10 @@ pub fn merge_net_change_details(
             let Some(kind) = IncomingKind::from_op(op) else {
                 continue;
             };
-            let affected = !matches!(classify_operation_impact(op), OperationImpact::Skip);
+            let affected = match classify_operation_impact(op) {
+                OperationImpact::Skip => !metadata_gate,
+                OperationImpact::Regen | OperationImpact::TransformOnly => true,
+            };
             match acc.get_mut(&op.refno) {
                 Some(entry) => {
                     entry.0 = fold_net_op(Some(entry.0), kind);
@@ -2293,6 +2316,16 @@ pub enum UnitGenStatus {
     Failed,
 }
 
+/// 一个交付单元这一轮的发布方式（ADR-066）：整根重算（默认）或刚体前移便宜路。
+/// 旧回执没有这一列，反序列化成 `Regen`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnitKind {
+    #[default]
+    Regen,
+    Transform,
+}
+
 /// Result of one model delivery unit within a manual execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelUnitResult {
@@ -2312,6 +2345,13 @@ pub struct ModelUnitResult {
     /// refresh on the client (plan 阶段 6.2). `None` for retry-only tasks.
     #[serde(default)]
     pub new_owner: Option<String>,
+    /// 本单元这一轮的发布方式（ADR-066）：整根重算还是刚体前移便宜路。
+    /// 旧回执没有该字段 → `Regen`。
+    #[serde(default)]
+    pub kind: UnitKind,
+    /// 规划期判 `transform`、执行期回退整根重算时的原因（`Some` 仅此时）。旧回执没有该字段。
+    #[serde(default)]
+    pub transform_fallback_reason: Option<String>,
 }
 
 /// Full result of one manual update execution.
@@ -2622,6 +2662,12 @@ pub struct UnitTask {
     /// result for client tree refresh. `None` for pending-only (retry) tasks.
     pub old_owner: Option<String>,
     pub new_owner: Option<String>,
+    /// 刚体前移（ADR-066）的提示：规划器判这个根只动了摆放、可按 `Δ` 便宜前移时带上**整条**
+    /// `TransformUnit`——锚点之外还有算 `Δ` 用的窗口基线 S（`source_start_sesno`），执行体（B6）
+    /// 的重放闸（`republish_gate`）要拿它对投影回执，防「记录已在 T 再乘一次 Δ」的双重搬移。
+    /// `None` = 照旧整根重算。开关关时规划器不产它，恒 `None`。执行体认它才分流，B6 之前的
+    /// 执行体忽略它、行为不变。`UnitTask` 只在内存里，不入库，故无需 `serde`。
+    pub transform: Option<TransformUnit>,
 }
 
 /// Derive the generation worklist of one applied DESI batch from its delivery-
@@ -2630,6 +2676,7 @@ pub struct UnitTask {
 /// regenerate it reintroduces a deleted BRAN into the staged generation worklist.
 pub fn collect_unit_tasks(
     units: &[DeliveryUnitSummary],
+    transform_units: &[TransformUnit],
     dbnum: u32,
     end_sesno: i32,
 ) -> Vec<UnitTask> {
@@ -2649,6 +2696,12 @@ pub fn collect_unit_tasks(
             revision: None,
             old_owner: unit.old_owner.clone(),
             new_owner: unit.new_owner.clone(),
+            // 刚体前移提示（ADR-066）：规划器把这个根判成只动了摆放时整条带上（锚点 + 基线 S），
+            // 否则 None（整根重算）。
+            transform: transform_units
+                .iter()
+                .find(|hint| hint.root_refno == unit.root_refno)
+                .cloned(),
         });
     }
     tasks
@@ -2680,6 +2733,8 @@ pub fn merge_unit_worklist(
                 // fills them in when the same unit is re-affected this window.
                 old_owner: None,
                 new_owner: None,
+                // 待重试一律整根重算；本窗若把它重判成 transform，由下面的合并分支带过来。
+                transform: None,
             },
         );
     }
@@ -2698,6 +2753,8 @@ pub fn merge_unit_worklist(
                 if task.new_owner.is_some() {
                     existing.new_owner = task.new_owner;
                 }
+                // 采用本轮的刚体前移判据（安定的根被这一窗的纯摆放变更重新命中）；待重试项本是 None。
+                existing.transform = task.transform;
             }
             None => {
                 merged.insert((task.dbnum, task.root_refno.clone()), task);
@@ -2968,6 +3025,9 @@ pub struct DbnumStatus {
     /// 数据水位与模型水位的统一判决。整体缺席 = 本次取数失败，见 `warnings`。
     #[serde(flatten)]
     pub model: Option<crate::data_interface::dbnum_consistency::VerdictColumns>,
+    /// 第三枚水位及房间输入/结果凭证。与模型判决同一次批量读取，避免面板自行查库拼状态。
+    #[serde(flatten)]
+    pub room: Option<crate::data_interface::dbnum_consistency::RoomVerdictColumns>,
 }
 
 /// [`AiosDBManager::dbnum_statuses`] 的整体结果。
@@ -4107,6 +4167,7 @@ impl AiosDBManager {
                 excluded,
                 not_in_project: false,
                 model: None,
+                room: None,
             });
         }
 
@@ -4137,6 +4198,7 @@ impl AiosDBManager {
                 excluded: false,
                 not_in_project: false,
                 model: None,
+                room: None,
             });
         }
 
@@ -4162,11 +4224,17 @@ impl AiosDBManager {
             .filter(|row| row.db_type.eq_ignore_ascii_case("DESI"))
             .map(|row| row.dbnum)
             .collect();
-        match crate::data_interface::dbnum_consistency::verdicts_for_all(&SUL_DB, &dbnums).await {
-            Ok(verdicts) => {
+        match crate::data_interface::dbnum_consistency::observations_for_all(&SUL_DB, &dbnums).await
+        {
+            Ok(observations) => {
                 for row in &mut report.dbnums {
                     if row.db_type.eq_ignore_ascii_case("DESI") {
-                        row.model = verdicts.get(&row.dbnum).map(|verdict| verdict.columns());
+                        if let Some(observation) = observations.get(&row.dbnum) {
+                            row.applied_sesno = observation.applied_sesno;
+                            row.initialized = observation.initialized;
+                            row.model = Some(observation.verdict.columns());
+                            row.room = Some(observation.room.clone());
+                        }
                     }
                 }
             }
@@ -4707,94 +4775,35 @@ impl AiosDBManager {
                     // generate models (spec §数据库类型 — CATA/SYST/… 参与数据更新
                     // 但不触发模型生成), so only DESI gets a rollup.
                     if cand.db_type == "DESI" && !details.is_empty() {
-                        if crate::options::direct_read_mode() {
-                            let base_sesno = pending_range.start().saturating_sub(1) as u32;
-                            let target_sesno = *pending_range.end() as u32;
-                            let model_plan = crate::data_interface::window_root_plan::
-                                build_effective_model_update_plan(
-                                    cand.db_num,
-                                    &cand.db_type,
-                                    base_sesno,
-                                    target_sesno,
-                                    range_eles,
-                                )
-                                .await?;
-                            let transform_refnos = model_plan
-                                .work_items
-                                .iter()
-                                .filter(|item| item.action == ModelWorkAction::Transform)
-                                .filter_map(|item| item.target_refno.parse::<RefU64>().ok())
-                                .map(RefnoEnum::from)
-                                .collect::<HashSet<_>>();
-                            preview.units = model_plan.units;
-                            preview.transform_targets =
-                                build_transform_target_summaries(&transform_refnos).await;
-                            let (zones, sites) =
-                                resolve_report_rollups(range_eles, &details, &preview.units)
-                                    .await?;
-                            preview.zones = zones;
-                            preview.sites = sites;
-                            warnings.extend(model_plan.warnings);
-                        } else {
-                            // 与执行计划同一分区（单一事实源）：纯位姿目标走 `Transform`
-                            // 便宜路径、不进 rollup——否则预览会把「执行阶段会刷新整棵
-                            // 子树的 ZONE/SITE 位移」错报成 no_generation「跳过模型生成」，
-                            // 又把「成员纯位姿变化」错报成整单 will_generate（执行阶段
-                            // 实际不整单重生成）。
-                            let mut partition =
-                            crate::data_interface::model_update_plan::partition_operation_impacts(
-                                &range_eles,
-                                &details,
-                            );
-                            // issue #5：预览必须复刻执行计划的这一步，次序也一样。少走它，
-                            // 管件移动会显示成「便宜路径」（执行阶段其实整根重生成），容器
-                            // 移动牵出的那一批分支则根本不出现。
-                            let reroute =
-                            crate::data_interface::model_update_plan::reroute_derived_geometry_units(
-                                &mut partition,
-                            )
-                            .await;
-                            warnings.extend(
-                                reroute
-                                    .warnings
-                                    .iter()
-                                    .map(|w| format!("dbnum={}: {w}", cand.db_num)),
-                            );
-                            let regen_details =
-                                crate::data_interface::model_update_plan::mask_details_to_regen(
-                                    &details,
-                                    &partition.regen_refnos,
-                                );
-                            // 预览与执行必须共用同一道 XGEOMETRY 门（核对表 R2）。少走它，
-                            // 就回到 2026-08-04 那个「预览说的不是执行要做的」的老毛病上：
-                            // 执行会把 XGEOM 子树下的位姿目标挡掉，预览却照样列出来。
-                            let rollup = resolve_unit_rollup(
+                        // 预览与执行同一份规划器（单一事实源）：交付单元、位姿目标与 rollup 都取
+                        // 窗口规划器的产物。legacy「预览自己复刻 PE 分区序列」那条路随 S4 / Q5
+                        // 退役（2026-09-08）——数据面只有 e3d-io 一条读路由，没有可选的东西。
+                        let base_sesno = pending_range.start().saturating_sub(1) as u32;
+                        let target_sesno = *pending_range.end() as u32;
+                        let model_plan = crate::data_interface::window_root_plan::
+                            build_effective_model_update_plan(
                                 cand.db_num,
-                                &range_eles,
-                                &regen_details,
-                                &partition.transform_refnos,
+                                &cand.db_type,
+                                base_sesno,
+                                target_sesno,
+                                range_eles,
                             )
                             .await?;
-                            if crate::options::model_xgeometry_gate() {
-                                partition
-                                    .transform_refnos
-                                    .retain(|refno| !rollup.xgeometry_gated.contains(refno));
-                            }
-                            preview.units = rollup.units;
-                            crate::data_interface::model_update_plan::append_derived_geometry_units(
-                                &mut preview.units,
-                                &reroute.descendant_units,
-                            );
-                            let (zones, sites) =
-                                resolve_report_rollups(&range_eles, &details, &preview.units)
-                                    .await?;
-                            preview.zones = zones;
-                            preview.sites = sites;
-                            preview.transform_targets =
-                                build_transform_target_summaries(&partition.transform_refnos).await;
-                            preview.no_generation = rollup.no_generation;
-                            warnings.extend(rollup.warnings);
-                        }
+                        let transform_refnos = model_plan
+                            .work_items
+                            .iter()
+                            .filter(|item| item.action == ModelWorkAction::Transform)
+                            .filter_map(|item| item.target_refno.parse::<RefU64>().ok())
+                            .map(RefnoEnum::from)
+                            .collect::<HashSet<_>>();
+                        preview.units = model_plan.units;
+                        preview.transform_targets =
+                            build_transform_target_summaries(&transform_refnos).await;
+                        let (zones, sites) =
+                            resolve_report_rollups(range_eles, &details, &preview.units).await?;
+                        preview.zones = zones;
+                        preview.sites = sites;
+                        warnings.extend(model_plan.warnings);
                     }
                 }
                 None => {}
@@ -5138,6 +5147,9 @@ impl AiosDBManager {
                     ),
                     epoch_id,
                     intent,
+                    model_start_sesno: (intent
+                        == crate::data_interface::batch_queue::BatchIntent::Reinitialize)
+                        .then_some(0),
                     path: cand.path.clone(),
                     file_name: cand.file_name.clone(),
                     applied_sesno: applied,
@@ -5724,22 +5736,17 @@ impl AiosDBManager {
                 }
                 batch.set_change_counts(&success.range_eles);
             }
-            // MySQL 可选同步（feature = "sql"）：从退役的 `execute_incr_update` 搬来。
-            // 合流后不再分手动/自动，每个应用成功的批次都同步；失败只记警告，
-            // 与旧口径一致（不回滚水位）。
-            #[cfg(feature = "sql")]
-            if let Some(success) = incr.successes.first() {
-                match self.update_mysql_pdms_elements(&success.range_eles).await {
-                    Ok(_) => println!("MySQL pdms_element 更新成功: dbnum={dbnum}"),
-                    Err(e) => {
-                        warnings.push(format!("dbnum={dbnum}: MySQL pdms_element 更新失败: {e}"))
-                    }
-                }
-            }
+            // MySQL 可选同步（`feature = "sql"`）2026-09-07 随整条 feature 退役：镜像表
+            // 与它的连接池早就编不过，而这里是它在生产路上的唯一挂点。
             // Only DESI batches carry a unit rollup (CATA / SYS meta: data only),
             // so this is empty for the others without a type check.
             if let Some(success) = incr.successes.first() {
-                units = collect_unit_tasks(&success.model_plan.units, dbnum, success.end_sesno);
+                units = collect_unit_tasks(
+                    &success.model_plan.units,
+                    &success.model_plan.transform_units,
+                    dbnum,
+                    success.end_sesno,
+                );
             }
         }
 
@@ -5871,6 +5878,149 @@ mod preview_session_tests {
                 .collect::<Vec<_>>(),
             vec![(25, 0, 0, 0), (26, 0, 0, 0)]
         );
+    }
+}
+
+/// 预览的 `model_affecting` 与 direct 窗口规划器同口径（2026-09-08）。
+///
+/// 回执里 `details` 说「这次变更影响不影响模型」，`units` 说「这个根会不会重生成」。
+/// 两句话出自两个判据时就会打架：元数据门接线之前，一次改名在 `details` 里是
+/// 「不影响」、在 `units` 里是 `will_generate = true`。
+#[cfg(test)]
+mod metadata_gate_caliber_tests {
+    use super::*;
+    use crate::data_interface::ele_ops::ModifiedElement;
+    use aios_core::NamedAttrValue;
+
+    /// 窗口里被改的那个 ELBO，与它的 BRAN 属主（`units` 侧要有个交付单元可落）。
+    const ELBO: RefU64 = RefU64((24384u64 << 32) | 1);
+    const BRAN: RefU64 = RefU64((24384u64 << 32) | 2);
+
+    /// 一窗一个元素，只改给定的这几个属性（结构不动）。
+    fn window(attr_names: &[&str]) -> BTreeMap<u32, Vec<EleOperationData>> {
+        let mut modified_attrs = HashMap::new();
+        for name in attr_names {
+            modified_attrs.insert(
+                (*name).to_string(),
+                (
+                    NamedAttrValue::StringType("old".into()),
+                    NamedAttrValue::StringType("new".into()),
+                ),
+            );
+        }
+        BTreeMap::from([(
+            25,
+            vec![EleOperationData::new(
+                ELBO,
+                25,
+                EleOperationDetail::Modified(ModifiedElement {
+                    current_data: Default::default(),
+                    added_attrs: Default::default(),
+                    deleted_attrs: Default::default(),
+                    modified_attrs,
+                    added_explicit_attrs: Default::default(),
+                    deleted_explicit_attrs: Default::default(),
+                    modified_explicit_attrs: Default::default(),
+                    added_uda_attrs: Default::default(),
+                    deleted_uda_attrs: Default::default(),
+                    modified_uda_attrs: Default::default(),
+                    noun: "ELBO".into(),
+                    children_changed: None,
+                }),
+            )],
+        )])
+    }
+
+    fn affecting(attr_names: &[&str], metadata_gate: bool) -> bool {
+        let details = merge_net_change_details_with(&window(attr_names), metadata_gate);
+        assert_eq!(details.len(), 1);
+        details[0].model_affecting
+    }
+
+    /// `ELBO` 挂在 `BRAN` 底下，别的什么都没有。
+    fn snapshot() -> OwnershipSnapshot {
+        let node = |owner: Option<RefU64>, noun: &str| OwnerNode {
+            owner: owner.map(RefnoEnum::from),
+            noun: noun.to_string(),
+            name: String::new(),
+        };
+        OwnershipSnapshot {
+            base: HashMap::from([
+                (RefnoEnum::from(ELBO), node(Some(BRAN), "ELBO")),
+                (RefnoEnum::from(BRAN), node(None, "BRAN")),
+            ]),
+            ..Default::default()
+        }
+    }
+
+    /// 门开着：放行的只有拿到两票的五个名字，与 `change_is_metadata_only` 逐名相同。
+    /// 字典没投票的 `CACHID` 规划器照旧整根重算，预览也得这么说。
+    #[test]
+    fn with_the_gate_on_only_the_double_voted_names_are_not_model_affecting() {
+        for name in ["NAME", "DESC", "PURP", "FUNC", "LCHKDA"] {
+            assert!(!affecting(&[name], true), "{name}");
+        }
+        for name in ["CACHID"] {
+            assert!(affecting(&[name], true), "{name}");
+        }
+        assert!(!affecting(&["NAME", "DESC"], true));
+        assert!(affecting(&["NAME", "CACHID"], true));
+        assert!(affecting(&["NAME", "DIAM"], true));
+        // 位姿仍算影响模型：direct 上没有便宜路径，POS 变了那个根照样重算。
+        assert!(affecting(&["POS"], true));
+    }
+
+    /// 门关上：规划器逐位回到「任何属性变了就整根重算」，于是这里一条 `Skip` 都不许剩，
+    /// 否则关掉开关反而让预览开始说谎。
+    #[test]
+    fn with_the_gate_off_even_a_rename_is_model_affecting() {
+        for name in ["NAME", "DESC", "PURP", "FUNC", "LCHKDA"] {
+            assert!(affecting(&[name], false), "{name}");
+        }
+    }
+
+    /// 源码钉：对外那一层薄壳读的是同一个开关，不是自己另定一档默认。
+    #[test]
+    fn the_public_merge_reads_the_same_switch_as_the_window_planner() {
+        let shell = include_str!("manual_update.rs")
+            .split_once("pub fn merge_net_change_details(")
+            .expect("merge shell exists")
+            .1
+            .split_once("pub fn merge_net_change_details_with(")
+            .expect("merge shell boundary")
+            .0;
+        assert!(
+            shell.contains("crate::options::model_skip_metadata_only_changes()"),
+            "薄壳必须读窗口规划器那同一个开关: {shell}"
+        );
+    }
+
+    /// 整条链上钉一次，而不是两头各钉半条：`units` 的 `will_generate` 是
+    /// [`build_unit_rollup`] 从 `details.model_affecting` 卷上来的，两句话同口径这件事
+    /// 只有把一窗真的走完才看得见。计数不受门影响——门管的是生成不生成，不是数不数。
+    #[test]
+    fn the_details_verdict_and_the_unit_verdict_are_one_sentence() {
+        let verdicts = |attr_names: &[&str], metadata_gate: bool| {
+            let details = merge_net_change_details_with(&window(attr_names), metadata_gate);
+            let (units, no_generation, warnings) =
+                build_unit_rollup(&snapshot(), &details, &resolve_delivery_unit_types(&[]));
+            assert_eq!(details.len(), 1);
+            assert_eq!(units.len(), 1, "ELBO 落在它的 BRAN 上");
+            assert_eq!(units[0].modified, 1, "改了就是改了，门不改计数");
+            assert_eq!((no_generation, warnings.len()), (0, 0));
+            (details[0].model_affecting, units[0].will_generate)
+        };
+
+        // 门开着：拿到两票的名字两边都说「不生成」。
+        assert_eq!(verdicts(&["NAME"], true), (false, false));
+        assert_eq!(verdicts(&["NAME", "DESC"], true), (false, false));
+        assert_eq!(verdicts(&["NAME", "FUNC"], true), (false, false));
+        // 字典没投票的、以及混进一个几何属性的，两边都说「要生成」。
+        assert_eq!(verdicts(&["CACHID"], true), (true, true));
+        assert_eq!(verdicts(&["NAME", "CACHID"], true), (true, true));
+        assert_eq!(verdicts(&["NAME", "DIAM"], true), (true, true));
+        // 门关上：规划器整根重算，两句话一起翻面。
+        assert_eq!(verdicts(&["NAME"], false), (true, true));
     }
 }
 
@@ -6333,14 +6483,15 @@ mod tests {
         );
     }
 
-    /// 预览必须逐步复刻执行计划的分区序列，次序也一样。
+    /// 预览与执行共用同一份规划器（S4 / Q5，2026-09-08）。
     ///
-    /// 2026-08-04 修掉过一次同族分歧（预览把容器位姿错报成「跳过模型生成」）。issue #5
-    /// 的改判又给这条序列加了一步：少走它，管件移动在预览里显示成便宜路径（执行阶段
-    /// 其实整根重生成），容器移动牵出的那一批分支在预览里根本不出现——面板说的又不是
-    /// 执行要做的。
+    /// 2026-08-04 修掉过一次「预览说的不是执行要做的」（预览把容器位姿错报成「跳过模型生成」），
+    /// 当时的办法是让预览逐步复刻执行的 PE 分区序列（分区 → 改判 → 掩码 → rollup → 并子树）。
+    /// legacy PE 规划器退役后这条序列不再存在：预览直接拿 `build_effective_model_update_plan`
+    /// 的产物，「预览 == 执行」由同一个函数保证，而不是靠两处步骤对齐。旧序列在预览里一步
+    /// 都不许回来，`direct_read_mode` 那道已退役的门也不许回来。
     #[test]
-    fn the_preview_replays_the_execute_partition_step_for_step() {
+    fn the_preview_takes_units_from_the_window_planner_not_a_replayed_partition() {
         let src = include_str!("manual_update.rs");
         let body = src
             .split_once(concat!("async fn ", "preview_one_dbnum"))
@@ -6351,24 +6502,24 @@ mod tests {
             .map(|(head, _)| head)
             .unwrap_or(body);
 
-        let step = |needle: &str| {
-            body.find(needle)
-                .unwrap_or_else(|| panic!("预览缺了这一步: {needle}\n{body}"))
-        };
-        let partition_at = step("partition_operation_impacts(");
-        let reroute_at = step("reroute_derived_geometry_units(");
-        let mask_at = step("mask_details_to_regen(");
-        let rollup_at = step("resolve_unit_rollup(");
-        let append_at = step("append_derived_geometry_units(");
-
         assert!(
-            partition_at < reroute_at && reroute_at < mask_at && mask_at < rollup_at,
-            "改判必须夹在分区与掩码之间，掩码之后才轮到 rollup"
+            body.contains("build_effective_model_update_plan("),
+            "预览必须走窗口规划器: {body}"
         );
-        assert!(
-            rollup_at < append_at,
-            "子树牵出来的单元并在 rollup 之后，才不会覆盖带真实计数的那一条"
-        );
+        assert!(body.contains("preview.units = model_plan.units;"), "{body}");
+        for forbidden in [
+            concat!("direct_read", "_mode("),
+            concat!("partition_operation", "_impacts("),
+            concat!("reroute_derived", "_geometry_units("),
+            concat!("mask_details", "_to_regen("),
+            concat!("resolve_unit", "_rollup("),
+            concat!("append_derived", "_geometry_units("),
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "预览不许再复刻 legacy 分区序列或问读模式（{forbidden}）；单元来自 build_effective_model_update_plan"
+            );
+        }
     }
 
     /// 死信的判定标准只有一个。检查视图看得到全部（含死信），要**执行**它们就必须
@@ -7876,7 +8027,7 @@ mod tests {
         assert!(unit.will_generate);
 
         // 一次分支重生成即可同时重算弯头与相邻管段——生成任务只有一个。
-        let tasks = collect_unit_tasks(&units, 1, 42);
+        let tasks = collect_unit_tasks(&units, &[], 1, 42);
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].root_refno, r(5).to_pdms_str());
     }
@@ -8793,6 +8944,8 @@ mod tests {
             message: None,
             old_owner: None,
             new_owner: None,
+            kind: UnitKind::Regen,
+            transform_fallback_reason: None,
         }
     }
 
@@ -8806,6 +8959,7 @@ mod tests {
             revision: None,
             old_owner: None,
             new_owner: None,
+            transform: None,
         }
     }
 
@@ -9065,7 +9219,7 @@ mod tests {
         assert_eq!(unit.deleted, 1);
         assert_eq!(unit.added, 1);
 
-        let tasks = collect_unit_tasks(&units, 1, 42);
+        let tasks = collect_unit_tasks(&units, &[], 1, 42);
         assert_eq!(tasks.len(), 1, "same root dedupes to one generation task");
         assert_eq!(tasks[0].root_refno, root_key);
         assert_eq!(tasks[0].source_end_sesno, 42);
@@ -9076,7 +9230,7 @@ mod tests {
             &[change(20, NetOp::Added, false)],
             &default_unit_types(),
         );
-        assert!(collect_unit_tasks(&units, 1, 42).is_empty());
+        assert!(collect_unit_tasks(&units, &[], 1, 42).is_empty());
 
         // Issue #18: deleting the delivery root itself is handled by DeleteCleanup. The preview
         // rollup may still mark the old BRAN model-affecting, but it no longer exists post-save.
@@ -9091,9 +9245,77 @@ mod tests {
             ..Default::default()
         };
         assert!(
-            collect_unit_tasks(&[deleted_root], 1, 42).is_empty(),
+            collect_unit_tasks(&[deleted_root], &[], 1, 42).is_empty(),
             "a deleted delivery root must not be regenerated"
         );
+    }
+
+    /// B5 载体：规划器判成 `transform` 的根，其锚点随 `UnitTask.transform` 带下去；没进
+    /// `transform_units` 的根照旧 `None`（整根重算）。
+    #[test]
+    fn collect_unit_tasks_carries_the_rigid_motion_hint() {
+        let equi = DeliveryUnitSummary {
+            root_refno: r(5).to_pdms_str(),
+            noun: "EQUI".into(),
+            will_generate: true,
+            ..Default::default()
+        };
+        let bran = DeliveryUnitSummary {
+            root_refno: r(6).to_pdms_str(),
+            noun: "BRAN".into(),
+            will_generate: true,
+            ..Default::default()
+        };
+        let hint = vec![TransformUnit {
+            root_refno: r(5).to_pdms_str(),
+            noun: "EQUI".into(),
+            source_start_sesno: 41,
+            anchors: vec![TransformAnchorWire {
+                refno: r(3).to_pdms_str(),
+                delta: crate::data_interface::rigid_motion::MatrixWire([0.0; 16]),
+            }],
+        }];
+        let tasks = collect_unit_tasks(&[equi, bran], &hint, 7997, 42);
+        let equi_task = tasks
+            .iter()
+            .find(|t| t.root_refno == r(5).to_pdms_str())
+            .expect("EQUI task present");
+        let bran_task = tasks
+            .iter()
+            .find(|t| t.root_refno == r(6).to_pdms_str())
+            .expect("BRAN task present");
+        let carried = equi_task.transform.as_ref().expect("EQUI carries the hint");
+        assert_eq!(carried.anchors.len(), 1);
+        assert_eq!(carried.anchors[0].refno, r(3).to_pdms_str());
+        assert_eq!(
+            carried.source_start_sesno, 41,
+            "算 Δ 的窗口基线 S 随提示带到执行体（重放闸对回执用）"
+        );
+        assert!(
+            bran_task.transform.is_none(),
+            "没进 transform_units 的根不带提示"
+        );
+    }
+
+    /// 旧回执（没有 `kind` / `transform_fallback_reason` 两列）反序列化仍成立：`kind` 默认 `Regen`。
+    #[test]
+    fn an_old_model_unit_result_without_kind_deserialises_as_regen() {
+        let legacy = serde_json::json!({
+            "dbnum": 7997,
+            "root_refno": "24384/5",
+            "noun": "BRAN",
+            "status": "generated",
+            "attempts": 1,
+            "message": null
+        });
+        let result: ModelUnitResult = serde_json::from_value(legacy).unwrap();
+        assert_eq!(result.kind, UnitKind::Regen);
+        assert_eq!(result.transform_fallback_reason, None);
+        // 新回执带上两列后 round-trip 仍一致。
+        let round: ModelUnitResult =
+            serde_json::from_str(&serde_json::to_string(&result).unwrap()).unwrap();
+        assert_eq!(round.kind, UnitKind::Regen);
+        assert_eq!(round.transform_fallback_reason, None);
     }
 
     #[test]

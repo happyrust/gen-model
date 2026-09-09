@@ -8,7 +8,7 @@
 //! 队列不持久（ADR-011 §4）：durable 语义在水位与 `model_update_pending` 表上，
 //! 重启后由 `init_watcher` 重扫水位把队列重建出来。
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -40,6 +40,7 @@ pub struct DiscoveredBatch {
     pub phase: DataPhase,
     pub epoch_id: u64,
     pub intent: BatchIntent,
+    pub model_start_sesno: Option<i32>,
     pub path: PathBuf,
     /// 完整文件名（含扩展名，由 `discover_batch` 从 path 现取；仅作展示与
     /// 冻结重扫失败时的 fallback，执行一律以 `path` 为准）。
@@ -96,6 +97,7 @@ pub struct FrozenBatch {
     pub phase: DataPhase,
     pub epoch_id: u64,
     pub intent: BatchIntent,
+    pub model_start_sesno: Option<i32>,
     pub path: PathBuf,
     pub file_name: String,
     pub start_sesno: i32,
@@ -116,6 +118,7 @@ pub struct EnqueuedBatchInfo {
     pub phase: &'static str,
     pub epoch_id: u64,
     pub intent: &'static str,
+    pub model_start_sesno: Option<i32>,
     /// 在排队中的位置（1 起，含运行中的行不算）。
     pub position: usize,
     pub start_sesno: i32,
@@ -198,6 +201,7 @@ pub struct QueueRow {
     pub epoch_id: u64,
     pub blocked_by_phase: Option<&'static str>,
     pub intent: &'static str,
+    pub model_start_sesno: Option<i32>,
     /// `running` / `queued` / `held`。`held` = 重扫排出来的积压，等这个 dbnum
     /// 真的来一次增量才会被派发（见 [`batch_queue::DataBatch::held`]）。
     pub state: &'static str,
@@ -228,6 +232,23 @@ pub struct BatchScheduler {
 struct QueueState {
     queue: Vec<DataBatch>,
     meta: HashMap<(u32, bool), RowMeta>,
+    /// Only the transactional attribute/structure write phase, not the whole Task.
+    data_writing_dbnums: BTreeSet<u32>,
+}
+
+/// Releases the publisher bandwidth gate even when the data phase returns early or panics.
+pub(crate) struct DataWriteGuard<'a> {
+    scheduler: &'a BatchScheduler,
+    dbnum: u32,
+}
+
+impl Drop for DataWriteGuard<'_> {
+    fn drop(&mut self) {
+        self.scheduler
+            .queue()
+            .data_writing_dbnums
+            .remove(&self.dbnum);
+    }
 }
 
 static SCHEDULER: OnceLock<BatchScheduler> = OnceLock::new();
@@ -306,6 +327,7 @@ impl BatchScheduler {
                 found.applied_sesno,
                 found.file_latest_sesno,
                 found.previous_observed_sesno,
+                found.model_start_sesno,
                 hold,
                 found.intent,
                 found.phase,
@@ -358,6 +380,7 @@ impl BatchScheduler {
                         phase: found.phase.as_str(),
                         epoch_id: found.epoch_id,
                         intent: found.intent.as_str(),
+                        model_start_sesno: found.model_start_sesno,
                         position,
                         start_sesno: found.applied_sesno + 1,
                         end_sesno: found.file_latest_sesno,
@@ -449,6 +472,7 @@ impl BatchScheduler {
                         phase: row.phase.as_str(),
                         epoch_id: row.epoch_id,
                         intent: row.intent.as_str(),
+                        model_start_sesno: row.model_start_sesno,
                         position,
                         start_sesno: row.start_sesno,
                         end_sesno: row.end_sesno,
@@ -457,6 +481,17 @@ impl BatchScheduler {
             };
             EnqueueOutcome { outcome, info }
         };
+        if !outcome.info.task_id.is_empty() {
+            registry.set_detail(
+                &outcome.info.task_id,
+                serde_json::json!({
+                    "intent": outcome.info.intent,
+                    "model_start_sesno": outcome.info.model_start_sesno,
+                    "frozen_target_sesno": outcome.info.end_sesno,
+                    "stages": ["data", "generation", "publication", "spatial", "rooms"],
+                }),
+            );
+        }
         // 阶段闸的当下裁定跟着入队一起记。入队成功不等于会被执行：屏障是按
         // **阶段**关的，别的项目的一处身份歧义就能让本行永远停在 queued，而回执里
         // 只写着「已覆盖」。2026-08-17 的 7998 就是这么消失的，追踪必须把这两件事
@@ -552,6 +587,7 @@ impl BatchScheduler {
                 phase: row.phase,
                 epoch_id: row.epoch_id,
                 intent: row.intent,
+                model_start_sesno: row.model_start_sesno,
                 path: meta.path,
                 file_name: meta.file_name,
                 start_sesno: row.start_sesno,
@@ -789,18 +825,21 @@ impl BatchScheduler {
         self.auto_work_armed.load(Ordering::SeqCst)
     }
 
-    /// 哪些库的属性/结构数据批次正在执行。
+    /// 哪些库正在执行属性/结构数据写入阶段。
     ///
     /// 初始化期间模型生成会继续把冻结结果交给本地日志；模型发布消费者只用这个
     /// 瞬时信号给**同一个库**的数据批次让出数据库写带宽。队列仍由原有状态机负责，
     /// 调用方不得据此认领、完成或修改批次。
-    pub(crate) fn running_data_dbnums(&self) -> Vec<u32> {
-        self.queue()
-            .queue
-            .iter()
-            .filter(|batch| batch.state == BatchState::Running)
-            .map(|batch| batch.dbnum)
-            .collect()
+    pub(crate) fn begin_data_write(&self, dbnum: u32) -> DataWriteGuard<'_> {
+        self.queue().data_writing_dbnums.insert(dbnum);
+        DataWriteGuard {
+            scheduler: self,
+            dbnum,
+        }
+    }
+
+    pub(crate) fn data_writing_dbnums(&self) -> Vec<u32> {
+        self.queue().data_writing_dbnums.iter().copied().collect()
     }
 
     /// 上弦并唤醒 worker：有人真的动了数据，空闲轮那侧的积压可以开始收了。
@@ -848,6 +887,7 @@ impl BatchScheduler {
                             .unwrap_or("manifest")
                     }),
                     intent: b.intent.as_str(),
+                    model_start_sesno: b.model_start_sesno,
                     // 挂起行单列一个状态，不混进 queued：它不会自己往前走，
                     // 显示成排队会让人以为消费者卡住了，而那是完全不同的故障。
                     state: match (running, b.held) {
@@ -885,6 +925,7 @@ mod tests {
             phase: DataPhase::Design,
             epoch_id: 0,
             intent: BatchIntent::ApplyWindow,
+            model_start_sesno: None,
             path: PathBuf::from(format!("D:/proj/db{dbnum}")),
             file_name: format!("db{dbnum}"),
             applied_sesno: applied,
@@ -919,25 +960,32 @@ mod tests {
     }
 
     #[test]
-    fn running_data_batch_is_visible_to_database_bandwidth_peers() {
+    fn only_data_write_phase_is_visible_to_database_bandwidth_peers() {
         let (scheduler, registry) = fresh();
-        assert!(scheduler.running_data_dbnums().is_empty());
+        assert!(scheduler.data_writing_dbnums().is_empty());
 
         scheduler.enqueue_live(&registry, &found(7997, 0, 10));
-        assert!(
-            scheduler.running_data_dbnums().is_empty(),
-            "排队中的批次尚未占用数据库写带宽"
-        );
-
         scheduler.freeze_next(&registry).expect("running row");
-        assert_eq!(
-            scheduler.running_data_dbnums(),
-            vec![7997],
-            "让带宽是按库让的，得说得出是哪个库"
-        );
+        assert!(scheduler.data_writing_dbnums().is_empty());
+
+        {
+            let _guard = scheduler.begin_data_write(7997);
+            assert_eq!(scheduler.data_writing_dbnums(), vec![7997]);
+        }
+        assert!(scheduler.data_writing_dbnums().is_empty());
 
         scheduler.finish(7997);
-        assert!(scheduler.running_data_dbnums().is_empty());
+        assert!(scheduler.data_writing_dbnums().is_empty());
+    }
+
+    #[test]
+    fn data_write_guard_releases_after_panic() {
+        let (scheduler, _) = fresh();
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = scheduler.begin_data_write(7999);
+            panic!("fixture panic");
+        }));
+        assert!(scheduler.data_writing_dbnums().is_empty());
     }
 
     fn fresh() -> (BatchScheduler, TaskRegistry) {

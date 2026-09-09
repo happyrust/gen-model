@@ -26,8 +26,6 @@ use glam::Vec3;
 use itertools::Itertools;
 use parry3d::bounding_volume::BoundingVolume;
 use rumqttc::AsyncClient;
-#[cfg(feature = "sql")]
-use sqlx::{MySql, Pool, Row};
 use std::boxed::Box;
 use std::collections::BTreeMap;
 use std::collections::{HashMap, VecDeque};
@@ -38,10 +36,7 @@ use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct AiosDBManager {
-    //不同project的连接池子
-    #[cfg(feature = "sql")]
-    pub project_map: DashMap<String, Pool<MySql>>,
-
+    // `project_map`（每个项目一个 MySQL 连接池）2026-09-07 随 `feature = "sql"` 退役。
     pub projects: Vec<String>,
 
     pub needed_parse_files: Option<Vec<String>>,

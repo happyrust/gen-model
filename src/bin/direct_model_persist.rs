@@ -285,7 +285,7 @@ async fn main() -> anyhow::Result<()> {
     )?;
 
     let db = if args.persist {
-        // 只附着、不拉起（`store_mode` 默认已是 spawned-mem）：取证探针要落进服务手上
+        // 只附着、不拉起（配成 spawned-mem 时才有得拉）：取证探针要落进服务手上
         // 那个库，自己拉一台空库落完就随进程消失，证据等于没留。
         aios_database::attach_store_connected()
             .await

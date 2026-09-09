@@ -1122,6 +1122,7 @@ mod tests {
             revision: None,
             old_owner: None,
             new_owner: None,
+            transform: None,
         };
         let new_units = vec![
             unit("4000000001/784005"),

@@ -148,9 +148,12 @@ pub const INST_RELATE_INDEX_SQL: &str = "\
     DEFINE INDEX IF NOT EXISTS idx_inst_relate_anc ON TABLE inst_relate COLUMNS anc;\n\
     DEFINE INDEX IF NOT EXISTS idx_inst_relate_dbnum ON TABLE inst_relate COLUMNS dbnum;\n\
     DEFINE INDEX IF NOT EXISTS idx_inst_relate_in ON TABLE inst_relate COLUMNS in;\n\
+    DEFINE INDEX IF NOT EXISTS idx_room_published_refno ON TABLE room_published_inst COLUMNS refno;\n\
+    DEFINE INDEX IF NOT EXISTS idx_room_published_old_refno ON TABLE room_published_inst COLUMNS old_refno;\n\
     DEFINE INDEX IF NOT EXISTS idx_geo_relate_in ON TABLE geo_relate COLUMNS in;\n\
     DEFINE INDEX IF NOT EXISTS idx_tubi_relate_anc ON TABLE tubi_relate COLUMNS anc;\n\
-    DEFINE INDEX IF NOT EXISTS idx_tubi_relate_dbnum ON TABLE tubi_relate COLUMNS dbnum;";
+    DEFINE INDEX IF NOT EXISTS idx_tubi_relate_dbnum ON TABLE tubi_relate COLUMNS dbnum;
+    DEFINE INDEX IF NOT EXISTS idx_tubi_relate_in ON TABLE tubi_relate COLUMNS in;";
 
 /// 存量 `inst_relate` / `tubi_relate` 行的 `anc` + `dbnum` 回填（幂等，自愈式）。
 ///
@@ -239,7 +242,11 @@ pub fn mark_insts_flat_dirty() {
 ///
 /// 实参一律 `?? ''` 兜底：生产 8009 服务器对 NONE 实参直接报错（AND/OR 不短路，
 /// 另一臂照样求值），mem/fork 2.1.4 反而容忍——三引擎的真实分叉，2026-08-20 实测钉死。
-const VALID_BOOLED: &str =
+///
+/// 房间判定的 Live 视图第二轮读烘焙件的点（`room_model::query_baked_geom_pts`，审核 F-D）
+/// 也引用这一份：脏值行按「无成品」处理 = 没有点可查，而不是拿空串去读 `.mesh` 把整块面板
+/// 判成失败。
+pub(crate) const VALID_BOOLED: &str =
     "booled_id != NONE AND booled_id != '' AND string::lowercase(booled_id ?? '') != 'none'";
 
 /// 监听限定域（`watch_dbnums` / `--watch-dbnum`）在 `inst_relate` 上的谓词**前缀**。
@@ -3216,12 +3223,12 @@ mod tests {
     ///
     /// 1. 首轮构建：A、B 两个 `inst_relate` 行（不同生成根）共用一个内容寻址
     ///    `inst_geo` G（单位网格按内容寻址，跨根共享是设计本意）；G 网格失败
-    ///    （occ_generate 失败路径 `set bad = true` 同形），清扫把两行物化成
+    ///    （mesh_generate 失败路径 `set bad = true` 同形），清扫把两行物化成
     ///    **不含 G 的 insts_flat（非 NONE）**——这是「旧值」。
     /// 2. 只对 B 做定向重生成（`SaveMode::TargetedReplace` 的三笔同形写）：
     ///    [`render_inst_relate_replace`] 替换 B 行（新行无 insts_flat）、
     ///    [`render_inst_geo_upsert`] 第三参为真清掉 bad、网格重试成功
-    ///    （occ_generate 成功路径 `set meshed = true` 同形）、AABB 阶段落指针与副本。
+    ///    （mesh_generate 成功路径 `set meshed = true` 同形）、AABB 阶段落指针与副本。
     /// 3. 空闲轮清扫（真函数 [`sweep_inst_relate_flat`]）：B 行 `insts_flat = NONE`
     ///    被回填出含 G 的新值；A 行**非 NONE**，回填段够不着、修复段（只圈
     ///    booled_id 不符）也够不着。
@@ -3325,7 +3332,7 @@ mod tests {
         let replace =
             render_inst_relate_replace(&[("inst_relate:⟨20260823_102⟩".to_string(), b_row)]);
         let reset = render_inst_geo_upsert(SHARED_GEO_HASH, unit_param, true);
-        // 网格重试成功（occ_generate 成功路径同形）＋ AABB 阶段回填指针与副本。
+        // 网格重试成功（mesh_generate 成功路径同形）＋ AABB 阶段回填指针与副本。
         let regen = format!(
             "{replace}\n{reset}\n\
              update inst_geo:⟨{SHARED_GEO_HASH}⟩ set meshed = true, aabb = aabb:zzflat_box, pts=[];\n\

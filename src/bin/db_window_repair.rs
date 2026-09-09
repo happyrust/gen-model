@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
     let option = aios_core::get_db_option().clone();
     aios_database::acquire_process_instance_lock(&option)
         .context("维护纠正要求 aios-database 服务已停止")?;
-    // 只附着、不拉起：`store_mode` 默认已是 spawned-mem，而一台自己拉的空库上
+    // 只附着、不拉起：配成 spawned-mem 时会自己拉一台，而一台自己拉的空库上
     // 「纠正」等于什么都没做，且一声不响。
     aios_database::attach_store_connected().await?;
 

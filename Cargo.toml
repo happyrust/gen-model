@@ -1,6 +1,6 @@
 [package]
 name = "aios-database"
-version = "0.1.18"
+version = "0.1.19"
 edition = "2024"
 
 # Python 调试绑定（python/aios-py）与主 crate 同一个 workspace：
@@ -30,7 +30,9 @@ mqtt = []
 viewer = []                                                           #是否开启视图
 gen_model = ["aios_core/gen_model"]
 manifold = ["dep:manifold-csg"]
-sql = ["dep:sqlx"]
+# `sql`（MySQL 落库路）2026-09-07 整条退役：它从来没被任何默认集 / CI / 脚本打开过，
+# 而门后的代码早已编不过（`AiosDBMgr::get_global_pool` / `get_project_pools` 不在 aios_core 里）。
+# 持久层只有 SurrealDB 一个（宪法 I）。`sqlx` 依赖随之删除。
 # old-pdms-io 已整体退出本仓（2026-09-04；此前 2026-09-03 先降为 `legacy_pdms_io` 门后的对拍参照臂，
 # `docs/plans/2026-09-03-old-pdms-io-retirement-inventory.md` §0）。数据面的解析走 e3d-io
 # （`data_interface::e3d_collector` / `db_file_header` / `frozen_source`），模型面走 e3d-model。
@@ -273,25 +275,6 @@ aios_core = { path = "../vendor/old-aios-core" }
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
-
-
-[dependencies.sqlx]
-version = "0.7.2"
-default-features = false
-optional = true
-features = [
-    "runtime-async-std-rustls",
-    #    "runtime-async-std-native-tls",
-    "macros",
-    "mysql",
-    # "tls",
-    "chrono",
-    "json",
-    # "decimal",
-    "bigdecimal",
-    "uuid",
-    "time",
-]
 
 
 #[profile.release]

@@ -170,9 +170,14 @@ pub struct StartupReconcile {
     ///
     /// 几种同时成立时取最重的那个（`floors_failed` > `window_failed` >
     /// `unreadable` > `ok`）：这一格是给人决定「要不要动手」的，不是统计。
+    /// `not_in_mdb` **不参与**取重——那些库没有文件可核，不是这次复核没跑成。
     pub result: &'static str,
-    /// 取不到文件最新会话、按「未确认」跳过的库数。
+    /// 取不到文件最新会话（stat / 解会话失败、成员名单读不到）、按「未确认」跳过的库数。
     pub unreadable: usize,
+    /// `gen_root` 里有凭证记录、却**不在当前 MDB** 的库数（换过 MDB 之后留下的历史行，
+    /// 09-04 审核 #7）。它们没有文件可核，只能点名；此前与 `unreadable` 混在一栏，
+    /// 留着一行历史库 `result` 就一辈子出不来 `ok`。
+    pub not_in_mdb: usize,
     /// 开了退化窗口但收口失败的库数。人工出口是
     /// `POST /api/v1/dbnums/{dbnum}/model/rebuild`。
     pub window_failed: usize,
@@ -203,6 +208,12 @@ pub struct StartupReconcile {
     /// `null` = 没有过期目录库，反查没跑。带 `error` = 跑了没跑成，一根都没排（未知，不是零）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub catalogue_cascade: Option<crate::data_interface::reverse_reference::CatalogueCascadeReport>,
+    /// 数据面那一半（A3，2026-09-08）：目录版本核对排完根之后，已入库依赖行（`pe.dependency = true`
+    /// 与它们的 `ref_rev`）随目录前移的账——候选是全部有 `cata_dependency_state` 行的目录库，
+    /// 文件比依赖行新的 `Replace` 重渲、被删的落墓碑、推进状态行。此前这一步只在某个 DESI 批次的
+    /// 闭包碰到那个目录库时才跑。`refreshed` 空且 `errors` 空 = 这一次没有依赖行要前移。
+    pub catalogue_dependency_refresh:
+        crate::data_interface::cata_dependency::CatalogueDependencyRefreshReport,
 }
 
 impl Default for StartupReconcile {
@@ -210,6 +221,7 @@ impl Default for StartupReconcile {
         Self {
             result: "pending",
             unreadable: 0,
+            not_in_mdb: 0,
             window_failed: 0,
             lagging: 0,
             windows_opened: 0,
@@ -218,6 +230,7 @@ impl Default for StartupReconcile {
             unreadable_catalogue_dbnums: 0,
             catalogue_windows: Vec::new(),
             catalogue_cascade: None,
+            catalogue_dependency_refresh: Default::default(),
         }
     }
 }
@@ -239,9 +252,15 @@ pub struct InitializationSnapshot {
     pub model_phase_open: bool,
     /// 启动模型凭证复核（ADR-058 D4）还没落地：为真时 `model_ready` 不可能置位。
     pub startup_reconcile_pending: bool,
+    /// 启动主线正在等待项目级房间计算。为真时 worker 不消费逐文件房间任务。
+    pub startup_rooms_pending: bool,
     /// 本次启动的模型覆盖面。`null` = 本进程没跑过启动复核（python 绑定、测试与
     /// 不经 `run_cli` 的入口都没有这一步），不是「覆盖为空」。
     pub startup: Option<StartupCoverage>,
+    /// 启动主线等数据清单时判定「受阻且无批次在跑」、放弃等待降级进入监听的那一句理由
+    /// （09-04 审核 #10）。`null` = 没降级过：要么等到了，要么还在等。它**不**清 `blockers`
+    /// ——阻断还在，只是主线不再为它挂死；房间段随之跳过，完成横幅标 blocked。
+    pub startup_data_wait_degraded: Option<String>,
     pub phases: BTreeMap<&'static str, PhaseCounts>,
     /// 渲染好的那份，形状与结构化之前一字不差。
     pub blockers: Vec<String>,
@@ -273,9 +292,12 @@ struct CoordinatorState {
     /// 这一位让 `model_ready` 在复核落地前不可能为真。默认 false：python 绑定、测试
     /// 与不经 `run_cli` 的入口没有这一步，不该被它拦住。
     startup_reconcile_pending: bool,
+    startup_rooms_pending: bool,
     /// 本次启动核对到的覆盖面。进程级事实，**不随 `begin_discovery` 清**：重扫开
     /// 一个新 epoch，但启动那一刻核了多少库不会因此改变。
     startup_coverage: Option<StartupCoverage>,
+    /// 启动主线放弃等数据清单、降级进入监听的理由（#10）。进程级事实，同样不随 epoch 清。
+    startup_data_wait_degraded: Option<String>,
     phases: BTreeMap<DataPhase, PhaseCounts>,
     blockers: Vec<PhaseBlocker>,
     shadowed: Vec<String>,
@@ -294,7 +316,9 @@ impl Default for CoordinatorState {
             model_phase_open: true,
             model_in_flight: false,
             startup_reconcile_pending: false,
+            startup_rooms_pending: false,
             startup_coverage: None,
+            startup_data_wait_degraded: None,
             phases: BTreeMap::new(),
             blockers: Vec::new(),
             shadowed: Vec::new(),
@@ -615,7 +639,8 @@ impl InitializationCoordinator {
     /// which does not install an incremental manifest.
     pub fn postprocess_allowed(&self) -> bool {
         let state = self.state();
-        state.epoch_id == 0 || (state.data_ready && state.model_ready)
+        state.epoch_id == 0
+            || (state.data_ready && state.model_ready && !state.startup_rooms_pending)
     }
 
     pub fn mark_model_running(&self) -> bool {
@@ -670,6 +695,27 @@ impl InitializationCoordinator {
         self.state().startup_reconcile_pending
     }
 
+    pub fn begin_startup_rooms(&self) {
+        self.state().startup_rooms_pending = true;
+    }
+
+    pub fn settle_startup_rooms(&self) {
+        self.state().startup_rooms_pending = false;
+    }
+
+    pub fn startup_rooms_pending(&self) -> bool {
+        self.state().startup_rooms_pending
+    }
+
+    /// 启动主线判定数据清单「受阻且没有批次在跑」、放弃等待降级进入监听（09-04 审核 #10）。
+    ///
+    /// 只记一句理由给 `/health` 与完成横幅看；**不动** `data_ready`、不清 `blockers`——阻断
+    /// 是真的，降级只是主线不再为它挂死。`data_ready` 随后由清单自己置位（阻断解除、
+    /// 重扫换纪元），`mark_model_ready` 照旧等它。
+    pub fn mark_startup_data_wait_degraded(&self, reason: impl Into<String>) {
+        self.state().startup_data_wait_degraded = Some(reason.into());
+    }
+
     pub fn snapshot(&self) -> InitializationSnapshot {
         let state = self.state();
         InitializationSnapshot {
@@ -681,7 +727,9 @@ impl InitializationCoordinator {
             model_in_flight: state.model_in_flight,
             model_phase_open: state.model_phase_open,
             startup_reconcile_pending: state.startup_reconcile_pending,
+            startup_rooms_pending: state.startup_rooms_pending,
             startup: state.startup_coverage.clone(),
+            startup_data_wait_degraded: state.startup_data_wait_degraded.clone(),
             phases: state
                 .phases
                 .iter()
@@ -1200,6 +1248,22 @@ mod tests {
         assert!(coordinator.mark_model_ready());
         assert!(coordinator.snapshot().model_ready);
         assert!(!coordinator.snapshot().startup_reconcile_pending);
+    }
+
+    #[test]
+    fn project_room_barrier_blocks_worker_rooms_after_models_are_ready() {
+        let coordinator = coordinator();
+        let epoch = coordinator.begin_discovery();
+        coordinator.install_manifest(epoch, [], false, []);
+        coordinator.begin_startup_rooms();
+        assert!(coordinator.mark_model_ready());
+        assert!(coordinator.snapshot().model_ready);
+        assert!(coordinator.snapshot().startup_rooms_pending);
+        assert!(!coordinator.postprocess_allowed());
+
+        coordinator.settle_startup_rooms();
+        assert!(!coordinator.snapshot().startup_rooms_pending);
+        assert!(coordinator.postprocess_allowed());
     }
 
     #[test]

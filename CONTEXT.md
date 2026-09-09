@@ -134,13 +134,21 @@ _Avoid_: 模型追平（只说了一半）、`model_caught_up`（行内那一半
 检出文件回退后入队的数据批次，按首次导入形状（窗口 `1..file_latest_sesno`）排进同一条数据批次队列。扫描只分类入队、不删数据；worker 出队后在冻结点复核仍判回退，才执行 `wipe_dbnum_for_reinit` 整库清空（水位行清值不删行、spatial epoch 同阶段递增），随后按首次导入重新解析，应用水位随重建归零再重新建立。
 _Avoid_: 重建任务、对齐批次、realign 批次
 
+**本期执行范围 (Update Scope)**：
+增量摄入认哪些库的**唯一 MDB 口径**（`update_scope.rs`）：当前 MDB 的 CURD 里 STYP=DESI/ISOD 的库号，取**声明口径**而不是「已解析出 SITE 的库」——MDB 列了却从没导入过的库正是 `initialization_required` 那一档，该出现在范围里等人确认。库侧 `MDB` 表为空（全新命名空间）时回落到 `init_mdb` 已 `install` 的文件侧成员名单（同一判据 `DESI_STYP | ISOD_STYP`）。SYS meta（SYST/DICT/COMM/MISC/GLB/GLOB）不受它门控——成员名单本身就存在这些库里，挡掉它们范围定义会自己冻住。`manual_db_nums` / `exclude_db_nums` 自 2026-08-06 起不再参与这个判定（issue #10），只供全量模型生成与按需基线解析。它与**监听限定域**是**叠加**关系，不是二选一：数据批次入队走 `in_scope_with` 四道门串联（外项目运行态 sys 永不进 → 监听限定 → 调试限定 → MDB 范围），`[库一致性]`、模型凭证核对、`/health` 与按需 `sync_and_seed_model_coverage` 同样套监听门，所以**增量数据面的有效范围 = MDB 声明的 DESI ∩ watch_dbnums**（2026-09-08 共识 d-25）。限定时 `[init] N 个库被 watch_dbnums 监听限定跳过`、`[库一致性]` 只出域内几行，是**预期输出而非缺陷**；审核与改动都不得拿「MDB 全量」去要求数据面（那是常驻房间模型 P3-init 自己的原则，源码钉 `room_files_never_consult_the_watch_scope`）。已知且允许的残余：范围之内声明了、盘上却没有文件的设计库，文件驱动的 `sweep_dirs` 在三个「跳过」桶里都不会碰到它，只在整面重扫收尾点名一句（「没有解析到文件」，不记 blocker、不改范围定义），此外只有骨架装载的 `problems` 与手动预览的 `not_in_project` 看得见它。
+_Avoid_: 增量范围（泛指时）、MDB 范围（当指监听限定域时）、按 MDB 全量核对数据面、把 `watch_dbnums` 当范围定义、把 `manual_db_nums` 当范围
+
 **监听限定域 (Watch Scope)**：
-把增量摄入的主 DESI 数据批次收窄到指定 dbnum 的调试开关（`DbOption.toml` 的 `watch_dbnums`，命令行 `serve --watch-dbnum` 压过它）。它限制的是范围、便于调试，不是生产形态的服务边界；但**初始化启动同样受它约束**——限定时启动的数据摄入、模型凭证复核与派生工作只覆盖域内的库，未限定时启动照常覆盖全部候选库。SYS meta（SYST/DICT/GLB/GLOB）不受限；两者都没给时判定与引入前逐位相同。监听限定域不是依赖隔离域：被监听 DESI 的生成根实际引用到的 CATA 文件仍参与身份与项目优先级裁决，但 CATA 只从文件读（`ModelTarget.catalogue` 文件身份摘要与 `E3dDbResolver`），不解析进持久层。与**调试限定域 (Debug Scope)**（`--debug-dbnum`，只能从命令行来、额外带六个裁决点的链路追踪）是两个独立开关，与已被剥夺增量否决权的 `manual_db_nums` / `exclude_db_nums` 无关。三种「跳过」（MDB 范围判定 / 调试限定 / 监听限定）在日志、回执与 `/health` 上各有各的嗓音，不得混同。
+把增量摄入的主 DESI 数据批次收窄到指定 dbnum 的调试开关（`DbOption.toml` 的 `watch_dbnums`，命令行 `serve --watch-dbnum` 压过它）。它限制的是范围、便于调试，不是生产形态的服务边界；但**初始化启动同样受它约束**——限定时启动的数据摄入、模型凭证复核与派生工作只覆盖域内的库，未限定时启动照常覆盖全部候选库。它叠在**本期执行范围**之上而不是替代它：有效范围是两者的交集（d-25），域外的库在 sweep 里落「监听限定跳过」那个桶，**不**进「不在 MDB 声明名单里」也**不**进「声明了却没解析到文件」那两句——它们不是没文件、不是不在名单，是本轮没有问过。SYS meta（SYST/DICT/GLB/GLOB）不受限；两者都没给时判定与引入前逐位相同。监听限定域不是依赖隔离域：被监听 DESI 的生成根实际引用到的 CATA 文件仍参与身份与项目优先级裁决，但 CATA 只从文件读（`ModelTarget.catalogue` 文件身份摘要与 `E3dDbResolver`），不解析进持久层。与**调试限定域 (Debug Scope)**（`--debug-dbnum`，只能从命令行来、额外带六个裁决点的链路追踪）是两个独立开关，与已被剥夺增量否决权的 `manual_db_nums` / `exclude_db_nums` 无关。三种「跳过」（MDB 范围判定 / 调试限定 / 监听限定）在日志、回执与 `/health` 上各有各的嗓音，不得混同。
 _Avoid_: 监听白名单、dbnum 过滤、增量范围（指 MDB 声明范围时）、watch 名单、服务边界（它不是）
 
 **模型增量类型限定 (Model Incremental Type Scope)**：
 把**模型增量的消费**圈到指定类型生成根的调试开关（`DbOption.toml` 的 `model_incremental_types = ["BRAN", "EQUI"]`，环境变量 `AIOS_MODEL_INCREMENTAL_TYPES=BRAN,EQUI` 压过它；不写 / 空表 = 不限类型，判定与引入前逐位相同）。它是**消费门，不是计划门**：`model_update_pending` 里只有 `regen_root` / `delete_cleanup` 两种行按 `noun` 放行，名单外类型的根照常规划、照常入队、`gen_root` 照常标 stale，只是留在队列里不被本进程认领——因此凭证不前移、重启后随退化窗口重排、名单一撤即照常消费；在计划层摘掉工作项反而是错的（不标 stale = 下一窗给陈旧几何前移凭证，且永不回补）。数据增量（窗口收集、`pe` / `ATT_*` 写回、水位推进）一律不受影响；`Transform`、`CascadeExpand`、`PostRegenAabb`、房间任务、按需 `ensure` 与 noun 未知（空）的行不看名单。与**监听限定域**（按库圈数据批次与模型工作单，动数据面）、**最小交付单元**配置 `delivery_unit_types`（决定生成根怎么选，改变根的归并）三者互不代替。护栏与监听限定同一套：启动横幅、`/health` 的 `model_incremental_types` 栏与 `model_update_pending.held_by_model_incremental_types` 计数、preview / execute 回执 `warnings`、数据窗口计划 `warnings` 按类型点名本窗暂扣的根、worker 空闲轮首次一句，都点名配置键与来源，且措辞与监听限定 / MDB 范围判定无交集。
 _Avoid_: 模型类型过滤、noun 白名单、类型筛选、MDU 限定（指 `delivery_unit_types` 时）、模型范围（指监听限定域时）
+
+**新库自动初始化开关 (Auto-Initialize New Dbnums)**：
+自动发现路径对**从未初始化**库（解析不出应用水位，`initialized = false`）的冷初始化准入开关（`DbOption.toml` 的 `auto_initialize_new_dbnums`，**默认 false**；环境变量 `AIOS_AUTO_INITIALIZE_NEW_DBNUMS` 双向可压，`serve --auto-initialize-new-dbnums` 单次打开）。关着（缺省）时启动重扫、watch 事件与 scope-refresh 只维护已初始化库，从未初始化的库不入队、在 `/dbnums` 上标 `awaiting_manual_initialization`，由 plant-ui 走手动预览 / 执行（`/update/preview`、`/update/execute`）或规格工具（`bin/initialize_ams_dbnums`）初始化——手动路径不看这个开关；已入队的行不被后续重扫撤下（`already_queued` 放行，接受了的手动初始化要活过 Meta → Design 的清单刷新）。开着时是历史行为：重扫把新库按首次导入自动入队（`needs_initial_load` → `initialize_dbnum_baseline`）。它门的是**冷初始化准入**，不是范围（那是 MDB 声明与监听限定域）也不是消费（那是 `startup_autorun` / 增量阶段控制）；回退重建（Reinitialize）与幽灵水位属**已初始化库的维护**，不受它门控。
+_Avoid_: 初始化白名单、冷启动开关、把 startup_autorun 当它用、把它当范围定义
 
 **候选库文件 (Candidate Database File)**：
 监控目录里被认可为「一个 AVEVA 库文件」的物理文件：既不在扩展名/系统文件黑名单里，文件名又合 AVEVA 库命名（三位项目前缀 + 库号[ + 四位序号]，或 `<前缀>sys/com/mis`）。判定只看名字，不读文件头。人手复制的副本（`… copy`、`…_old`、带日期后缀的备份）与正本头部一字不差，只有命名规则分得开它们；把副本当候选会让同一个 `dbnum` 拿到多个候选而整库被判「同号重复」阻断。同项目主库（无后缀）与唯一 `_NNNN` 抽取是抽取树的父层与叶子，归并成一个逻辑库，不是同号重复；多个 `_NNNN` 仍是 Duplicate。自动发现与手动扫描必须共用同一个判定。
@@ -533,3 +541,25 @@ _Avoid_: 实时模型表、当前文件、最新指针。
 一次文件候选空间变更通过持久意图完成重放、快照落盘并切换内存树后的可消费版本。它与数据写入阶段推进的物理 `spatial_epoch` 含义不同；V3 空间快照用该版本、已发布文件数和冻结输入清单 SHA-256 证明树对应的逻辑输入。房间任务只能在其要求的空间版本已经发布后认领，完成后在目标版本账本记录实际计算版本。更高的实际计算版本覆盖较早要求。
 
 _Avoid_: 数据空间写入计数、AABB 更新时间。
+
+## 本地发布（Local Release）
+
+> 面向「把已发布的服务端 + Web 打成一个可分发压缩包」这件事的词汇；实现见 `scripts/New-LocalRelease.ps1`，口径见 `docs/adr/ADR-068`。
+
+# 本地发布包 (Local Release Package)
+
+`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。程序档只含程序（现有 `ams-local-0.1.19`）；`-full` 档再把运行所需依赖资源装进包根 `workspace\`（一体化，`Start-AMS.ps1` 默认 `-Workspace` 指向包内）。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
+
+_Avoid_: 安装包、部署包（泛指时不指这一档）、发行版。
+
+# 依赖资源包 (Dependency Resource Bundle)
+
+本地发布包 `-full` 档里 `workspace\` 那部分：`assets`（含 `meshes` / `fonts`）、`config`、`resource`、`search-index`、accel 快照、`DbOption.toml`、本仓 fork 的 `surreal.exe` + 起库脚本。**它是「资源进包」的那一半**；**库数据（SurrealDB `rocksdb://ams.db`）与源模型不在其内**（ADR-068 D3）——带它够离线看已生成模型的三维，但属性 / 搜索 / 补齐 / 更新仍要连回原库。
+
+_Avoid_: 数据包、库包、离线数据（这些会误读成含库数据）。
+
+# 冒烟门 (Smoke Gate)
+
+本地发布组包后、压 zip 前的一道自动校验：把包内服务拉起来，`health` 200 + 首页含 `plant_ui_app.js` 才算过。默认以 `spawned-mem`（自带内存库、不依赖外部 8010）跑，自足可判。端口被占或起不来则跳过并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
+
+_Avoid_: 冒烟测试（泛指）、健康检查（那是运行期 `/health`，不是发布门）、验收（那是 Live E2E Testing）。

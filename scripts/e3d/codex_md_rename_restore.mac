@@ -1,0 +1,23 @@
+-- Restore partner of codex_md_rename_apply.mac: write the full terminal state of
+-- the SCTN name back (not a reverse increment), so the rollback does not depend
+-- on any implicit pre-run state. Exactly one SAVEWORK, no QUIT/FINISH.
+-- Target: SCTN =24384/25639 (owner FRMW /-SR-CSV-S6137/MAIN), name back to
+-- /-SR-CSV-S6137-BAR-3. This leg is itself a metadata-only window, so the
+-- pinned live gate can be run on it as well.
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/scripts/e3d/codex_md_rename_restore.log" OVER
+$P CODEX-MD-RENAME-RESTORE-ALIVE
+Q PROJ
+Q MDB
+=24384/25639
+Q CE
+Q TYPE
+Q NAME
+Q OWNE
+NAME /-SR-CSV-S6137-BAR-3
+Q CE
+Q NAME
+Q OWNE
+SAVEWORK 'CODEX restore SCTN name -SR-CSV-S6137-BAR-3'
+$P CODEX-MD-RENAME-RESTORE-DONE
+ALPHA LOG END

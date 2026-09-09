@@ -27,6 +27,7 @@ fn envelope(n: u32) -> FrozenRootEnvelope {
                     model_target: None,
                     manifest_hash: "empty".into(),
                     geometry_count: 0,
+                    published_via: "regen".into(),
                 },
             )),
             ..Default::default()
@@ -1069,6 +1070,31 @@ fn only_the_same_dbnums_data_batch_yields_publication_bandwidth() {
     assert!(data_batch_blocks_publication(&[8000, 7997], &[7997]));
     assert!(!data_batch_blocks_publication(&[], &[7997]));
     assert!(!data_batch_blocks_publication(&[7997], &[]));
+}
+
+#[test]
+fn exact_model_only_task_adopts_an_active_retained_run() {
+    use super::runtime::retained_run_blocks_batch;
+    use crate::data_interface::batch_queue::BatchIntent;
+
+    assert!(!retained_run_blocks_batch(
+        true,
+        520,
+        BatchIntent::ModelOnly,
+        520,
+    ));
+    assert!(retained_run_blocks_batch(
+        true,
+        520,
+        BatchIntent::ApplyWindow,
+        520,
+    ));
+    assert!(retained_run_blocks_batch(
+        true,
+        520,
+        BatchIntent::ModelOnly,
+        521,
+    ));
 }
 
 /// 活跃 run 的库才算「正在发布」：登记了但还没 activate、或者已经收口的，都不参与

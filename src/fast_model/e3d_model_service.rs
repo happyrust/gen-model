@@ -32,10 +32,33 @@ use crate::data_interface::direct_store::{DbPin, DirectSchema};
 use crate::data_interface::geom_error::GeometryFailurePolicy;
 use crate::data_interface::mdb_membership;
 use crate::data_interface::model_source;
+use crate::data_interface::rigid_motion::{
+    RepublishGate, TransformAnchor, republish_gate, republish_records,
+};
 use crate::fast_model::model_memory_store::{
     ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectedTube, ProjectionCommit,
     ProjectionScope, RootReceipt, packed_refno,
 };
+
+/// 刚体前移执行体（ADR-066 B6）一轮的结果：哪些根走成便宜路（`completed`），哪些是「回执已在 T」
+/// 的窗口重放（`replayed`——投影一字未动、按已完成计，见 [`republish_gate`]），哪些回退整根重算
+/// （`fallbacks`，带原因）。回退永远正确、只是不省。用 pdms `a/b` 串标识根，方便与 `UnitTask` 对齐。
+#[derive(Debug, Default)]
+pub struct RigidMotionReport {
+    pub completed: Vec<String>,
+    pub replayed: Vec<String>,
+    pub fallbacks: Vec<(String, String)>,
+}
+
+/// 刚体前移执行体一次吃的一根。`source_start_sesno` 是规划器算 `Δ` 的窗口基线 S（随
+/// [`TransformUnit`](crate::data_interface::rigid_motion::TransformUnit) 的线格式带过来）：
+/// `Δ = W_T·W_S⁻¹` 只对「投影还停在 S」的记录成立，重放闸拿它对回执，对不上就回退 regen。
+#[derive(Debug, Clone)]
+pub struct RigidMotionUnit {
+    pub root_refno: String,
+    pub source_start_sesno: u32,
+    pub anchors: Vec<TransformAnchor>,
+}
 
 /// 一个生成根这一轮的投影决策：现在要投的目标是什么，上一轮投成了什么。
 ///
@@ -919,6 +942,125 @@ impl E3dModelService {
         Ok(total)
     }
 
+    /// 刚体前移执行体（ADR-066 B6）的**存储半边**：把「只动摆放」的根从整根重算改成「投影记录左乘
+    /// Δ + 前移回执到 T」，只左乘并提交进内存投影——**生成服务不碰数据库**（登记 / durable flush 由
+    /// 调用方在 batch_worker 里做，见 `run_rigid_motion_units`）。**保守优先**：任一前置不满足就把这根
+    /// 放进 `fallbacks` 退回整根重算，回退永远正确。本轮只做**纯平移**（`republish_records` 内部走
+    /// `translate_bounds`）；含旋转（要读网格重算盒）让盒闭包报错 → 回退。`completed` 的根已把左乘后的
+    /// 记录与前移到 T 的回执提交进投影，等调用方登记后由 `publish_completed_file_round` 统一刷 durable。
+    /// 开关 `model_transform_cheap_path` 关着时规划器不产 transform 单元，本函数不会被调到。
+    ///
+    /// 幂等（S4b 审核 P0）：transform 不像 regen 天然幂等——动记录之前先过 [`republish_gate`]：
+    /// 回执已在 T（发布成功但回合没收尾的窗口重放）跳过、按已完成计（`replayed`）；回执不在规划
+    /// 基线 S 上（半截状态 / 旧计划 / 别的路径动过它）`Δ` 对不上，回退整根重算。
+    ///
+    /// 待补（开关翻开前 B8 对拍门会挡住）：含旋转时读网格顶点重算盒；`model_target.design` 落款推进到
+    /// pin@T（现在沿用旧的，最坏是下一窗不命中缓存、照旧重算，安全）。
+    pub(crate) async fn republish_roots_by_rigid_motion(
+        &self,
+        dbnum: u32,
+        target_sesno: u32,
+        units: &[RigidMotionUnit],
+    ) -> anyhow::Result<RigidMotionReport> {
+        let _generation_guard = db_generation_lock(dbnum).lock_owned().await;
+        ensure_not_older_than_persisted(dbnum, target_sesno).await?;
+        let store = ModelMemoryStore::global();
+        let mesh_dir = self.mesh_dir.as_path();
+        let mut report = RigidMotionReport::default();
+        for unit in units {
+            let root_refno = &unit.root_refno;
+            let anchors = unit.anchors.as_slice();
+            let root = match parse_refno(root_refno) {
+                Ok(root) => root,
+                Err(error) => {
+                    report
+                        .fallbacks
+                        .push((root_refno.clone(), format!("unparsable root: {error:#}")));
+                    continue;
+                }
+            };
+            // 前置：投影完整（记录数与回执相符、mesh 文件都在）且有旧回执可前移。
+            if !store.root_projection_complete(ProjectionScope::Current, root, mesh_dir) {
+                report
+                    .fallbacks
+                    .push((root_refno.clone(), "projection incomplete".into()));
+                continue;
+            }
+            let Some(old_receipt) = store.receipt(ProjectionScope::Current, root) else {
+                report
+                    .fallbacks
+                    .push((root_refno.clone(), "no cached receipt".into()));
+                continue;
+            };
+            // 幂等闸（S4b 审核 P0 / mem-42）：只有「投影还停在规划基线 S」才许左乘。
+            match republish_gate(
+                old_receipt.source_sesno,
+                unit.source_start_sesno,
+                target_sesno,
+            ) {
+                RepublishGate::Proceed => {}
+                RepublishGate::SkipAlreadyAtTarget => {
+                    report.replayed.push(root_refno.clone());
+                    continue;
+                }
+                RepublishGate::FallbackBaselineMismatch => {
+                    report.fallbacks.push((
+                        root_refno.clone(),
+                        format!(
+                            "projection receipt at sesno {}, but Δ was planned against baseline \
+                             {} (target {}); falling back to regen",
+                            old_receipt.source_sesno, unit.source_start_sesno, target_sesno
+                        ),
+                    ));
+                    continue;
+                }
+            }
+            let records = store.records_of_root(ProjectionScope::Current, root);
+            // 左乘 Δ：纯平移直接加 t；含旋转让盒闭包报错 → 回退（读网格那半边留作 B6 后续）。
+            let moved = match republish_records(records, anchors, target_sesno, |_, _| {
+                anyhow::bail!("rotation bounds read not yet wired; falling back to regen")
+            }) {
+                Ok(moved) => moved,
+                Err(error) => {
+                    report
+                        .fallbacks
+                        .push((root_refno.clone(), format!("{error:#}")));
+                    continue;
+                }
+            };
+            let (manifest_digest, geometry_count) = match manifest_hash(&moved) {
+                Ok(pair) => pair,
+                Err(error) => {
+                    report
+                        .fallbacks
+                        .push((root_refno.clone(), format!("manifest hash: {error:#}")));
+                    continue;
+                }
+            };
+            // 回执整根前移到 T；`model_target` 暂沿用旧的（见函数头「待补」）。只提交进内存投影，
+            // 登记 / durable flush 交给调用方（batch_worker）——生成服务不碰库。
+            store.commit(
+                ProjectionScope::Current,
+                vec![ProjectionCommit {
+                    upserts: moved,
+                    receipt: Some((
+                        root,
+                        RootReceipt {
+                            source_sesno: target_sesno,
+                            model_target: old_receipt.model_target.clone(),
+                            manifest_hash: manifest_digest,
+                            geometry_count,
+                            published_via: "transform".into(),
+                        },
+                    )),
+                    ..ProjectionCommit::default()
+                }],
+            );
+            report.completed.push(root_refno.clone());
+        }
+        Ok(report)
+    }
+
     pub async fn generate_dbnum(
         &self,
         dbnum: u32,
@@ -1352,7 +1494,7 @@ impl E3dModelService {
                 0,
             )?,
             generator_fingerprint: format!(
-                "e3d-model:{};aios-database:{};route-atta-pass-through-v1;route-atta-anci-only-v1;catalogue-atta-paxi-frame-v2;catalogue-route-scyl-paxi-frame-v1;catalogue-pml-sqrt-atan-v1;catalogue-pml-flex-mask-v1;catalogue-lpyr-negative-pbax-v1;section-fitt-posl-frame-v1;catalogue-cylinder-cuts-v1;design-cyli-centered-z-v1;design-snout-revolution-facets-v1;design-negative-ctor-grid-v2;polyhedron-member-order-v1;pohe-polygon-panels-v1",
+                "e3d-model:{};aios-database:{};route-atta-pass-through-v1;route-atta-anci-only-v1;catalogue-atta-paxi-frame-v2;catalogue-route-scyl-paxi-frame-v1;catalogue-pml-sqrt-atan-v1;catalogue-pml-flex-mask-v1;catalogue-lpyr-negative-pbax-v1;section-fitt-posl-frame-v1;catalogue-cylinder-cuts-v1;design-cyli-centered-z-v1;design-snout-revolution-facets-v1;design-negative-ctor-grid-v2;polyhedron-member-order-v1;pohe-polygon-panels-v1;cable-tray-missing-rpath-origin-v1;section-finite-empty-length-v1;explicit-word-angle-units-v1",
                 env!("CARGO_PKG_VERSION"),
                 env!("CARGO_PKG_VERSION")
             ),
@@ -1701,6 +1843,7 @@ fn cached_root_commit(
                 model_target: publication.model_target.clone(),
                 manifest_hash: published.manifest_hash.clone(),
                 geometry_count: published.geometry_count,
+                published_via: "regen".into(),
             },
         )),
         ..ProjectionCommit::default()
@@ -1782,12 +1925,9 @@ fn project_geometry_delta(
         report.removed += 1;
     }
 
-    let mut manifest_entries = BTreeMap::<String, Value>::new();
     for element in upserts {
         let source_refno = geometry_source_refno(&element.geometry_id)?;
         let record_id = geometry_record_id(&element.geometry_id, source_refno);
-        let geometry_value = serde_json::to_value(&element.geometry_id)?;
-        let geometry_key = serde_json::to_string(&element.geometry_id)?;
         let ancestors = ancestor_chain(source_refno, owners)?;
         // 隐式管身只向 Plant UI 暴露一个变换，所以标准管身要把元素摆放与标准网格的
         // 缩放 / 居中折进同一个存下来的世界变换里。
@@ -1830,34 +1970,6 @@ fn project_geometry_delta(
             GeometryId::Element { .. } => None,
         };
 
-        // 这一根「看得见的清单」：目标变了但清单逐位没变时，几何一条都不必重写。
-        let mut entry = json!({
-            "geometry_id": geometry_value,
-            "mesh": element.mesh_id,
-            "world": transform_value(world_transform),
-            "noun": element.noun,
-            "solid": true,
-        });
-        match (&tube, &shape) {
-            (Some(tube), _) => {
-                entry["route_ordinal"] = json!(tube.route_ordinal);
-                entry["invalid"] = json!(tube.invalid);
-            }
-            (
-                None,
-                ProjectedShape::Canonical {
-                    key,
-                    local_transform,
-                    ..
-                },
-            ) => {
-                entry["local"] = transform_value(*local_transform);
-                entry["primitive_key"] = serde_json::to_value(key)?;
-            }
-            (None, ProjectedShape::Baked) => entry["booled"] = json!(true),
-        }
-        manifest_entries.insert(geometry_key, entry);
-
         commit.upserts.push(ProjectedGeometry {
             record_id,
             geometry_id: element.geometry_id,
@@ -1876,8 +1988,8 @@ fn project_geometry_delta(
     }
 
     if let Some(publication) = publication {
-        let manifest_hash = hex::encode(Sha256::digest(serde_json::to_vec(&manifest_entries)?));
-        let geometry_count = manifest_entries.len();
+        // 这一根「看得见的清单」：目标变了但清单逐位没变时，几何一条都不必重写。
+        let (manifest_hash, geometry_count) = manifest_hash(&commit.upserts)?;
         if publication.projection_complete
             && publication
                 .published
@@ -1898,11 +2010,60 @@ fn project_geometry_delta(
                 model_target: publication.model_target.clone(),
                 manifest_hash,
                 geometry_count,
+                published_via: "regen".into(),
             },
         ));
     }
     report.unique_meshes = report.mesh_ids.len();
     Ok((commit, report))
+}
+
+/// 一条投影记录在根回执清单里的那一格：`geometry_key → entry`。
+///
+/// 这是 `RootReceipt.manifest_hash` 的**配方**：重生成（[`project_geometry_delta`]）与刚体前移
+/// （`rigid_motion::republish_records`，ADR-066）都必须从这里取——两条路对同一批记录才会算出
+/// 同一个章，对拍门比的正是它。条目只放「看得见」的东西（几何身份、mesh、世界变换、noun、
+/// 图元摆放 / 烘焙标记、管段序号与有效位），不放来源会话与祖先链。
+pub(crate) fn manifest_entry(record: &ProjectedGeometry) -> anyhow::Result<(String, Value)> {
+    let geometry_key = serde_json::to_string(&record.geometry_id)?;
+    let mut entry = json!({
+        "geometry_id": serde_json::to_value(&record.geometry_id)?,
+        "mesh": record.mesh_id,
+        "world": transform_value(record.world_transform),
+        "noun": record.noun,
+        "solid": true,
+    });
+    match (&record.tube, &record.shape) {
+        (Some(tube), _) => {
+            entry["route_ordinal"] = json!(tube.route_ordinal);
+            entry["invalid"] = json!(tube.invalid);
+        }
+        (
+            None,
+            ProjectedShape::Canonical {
+                key,
+                local_transform,
+                ..
+            },
+        ) => {
+            entry["local"] = transform_value(*local_transform);
+            entry["primitive_key"] = serde_json::to_value(key)?;
+        }
+        (None, ProjectedShape::Baked) => entry["booled"] = json!(true),
+    }
+    Ok((geometry_key, entry))
+}
+
+/// 一根记录的清单摘要与条目数。同一 `geometry_id` 只算一条（后者覆盖前者），与它取代的
+/// 内联实现逐位相同。
+pub(crate) fn manifest_hash(records: &[ProjectedGeometry]) -> anyhow::Result<(String, usize)> {
+    let mut entries = BTreeMap::<String, Value>::new();
+    for record in records {
+        let (key, entry) = manifest_entry(record)?;
+        entries.insert(key, entry);
+    }
+    let digest = hex::encode(Sha256::digest(serde_json::to_vec(&entries)?));
+    Ok((digest, entries.len()))
 }
 
 fn local_generated_mesh(element: &GeneratedElement) -> PlantMesh {
@@ -2128,6 +2289,221 @@ mod tests {
     use super::*;
     use crate::fast_model::model_memory_store::packed_refno;
     use std::collections::HashMap;
+
+    #[tokio::test]
+    #[ignore = "read-only AMS catalogue source diagnosis"]
+    async fn ams_catalogue_7000_reference_inventory() -> anyhow::Result<()> {
+        let service = E3dModelService::from_current().await?;
+        let option = aios_core::get_db_option();
+        let membership = mdb_membership::resolve(option, &option.project_name, &option.mdb_name)?;
+        for database in membership
+            .databases()
+            .iter()
+            .filter(|db| db.dbnum == 7000 || db.dbnum == 7015)
+        {
+            println!("MDB_DECLARATION {database:?}");
+        }
+        println!("MDB_PROBLEMS {:?}", membership.problems());
+        for pin in current_mdb_sources()?
+            .0
+            .iter()
+            .filter(|pin| pin.dbnum == 7000 || pin.dbnum == 7015)
+        {
+            println!(
+                "MDB_PIN dbnum={} type={} file={}",
+                pin.dbnum,
+                pin.db_type,
+                pin.file.display()
+            );
+        }
+        for file in [
+            "D:/AVEVA/Projects/E3D3.1/AvevaMarineSample/ams000/ams7000_0001",
+            "D:/AVEVA/Projects/E3D3.1/AvevaCatalogue/acp000/acp7000_0001",
+        ] {
+            let mut view = DbView::open(file)?;
+            let session = view
+                .walk_sessions()?
+                .first()
+                .context("catalogue session")?
+                .sesno;
+            let set = Arc::new(DbSet::with_attlib_file(
+                service.schema.template_dir().join("attlib.dat"),
+            )?);
+            set.add_db(DbFilePin {
+                file: file.into(),
+                template: template_file_for(service.schema.template_dir(), "CATA")?,
+                db_type: Some("CATA".into()),
+                sesno: Some(session),
+            })?;
+            for id in [11893, 19297, 32948, 11899, 19303, 47230] {
+                let element = set.element(RefNo::new(15192, id));
+                println!(
+                    "CATA_REF file={file} session={session} ref=15192/{id} result={:?}",
+                    element.element_type()
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "read-only AMS initialization root overlap census"]
+    async fn ams_initialization_root_overlap_census() -> anyhow::Result<()> {
+        let service = E3dModelService::from_current().await?;
+        for dbnum in [7022, 7333] {
+            let pin = service.pin(dbnum)?;
+            let mut view = DbView::open(&pin.file)?;
+            let session = view
+                .walk_sessions()?
+                .first()
+                .context("source session")?
+                .sesno;
+            let index = scan_index(&pin.file, Some(session))?;
+            let roots =
+                crate::data_interface::window_root_plan::enumerate_target_roots(dbnum, session)
+                    .await?;
+            let root_set = roots
+                .iter()
+                .map(|root| parse_refno(&root.root.to_string()))
+                .collect::<anyhow::Result<std::collections::HashSet<_>>>()?;
+            let mut nouns = BTreeMap::<String, usize>::new();
+            let mut nested = 0;
+            for root in roots {
+                *nouns.entry(root.noun).or_default() += 1;
+                let mut current = parse_refno(&root.root.to_string())?;
+                let mut seen = std::collections::HashSet::new();
+                while seen.insert(current) {
+                    let Some(owner) = index.owners.get(&(current.word0, current.word1)) else {
+                        break;
+                    };
+                    if root_set.contains(owner) {
+                        nested += 1;
+                        break;
+                    }
+                    current = *owner;
+                }
+            }
+            println!(
+                "ROOT_OVERLAP dbnum={dbnum} session={session} roots={} nested={nested} nouns={nouns:?}",
+                root_set.len()
+            );
+            if dbnum == 7022 {
+                let set = service.build_set(dbnum, Some(session))?;
+                for id in [6, 8, 10, 14] {
+                    let element = set.element(RefNo::new(23406, id));
+                    println!(
+                        "ROOT_INPUT ref=23406/{id} noun={:?} owner={:?} members={:?}",
+                        element.element_type(),
+                        element.owner()?.map(|e| e.refno()),
+                        element.member_refnos()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "real AMS 7022 missing-RPATH Core3D behavior"]
+    async fn ams_cable_tray_without_rpath_uses_core_origin() -> anyhow::Result<()> {
+        let service = E3dModelService::from_current().await?;
+        let set = service.build_set(7022, Some(254))?;
+        let element = set.element(RefNo::new(23406, 8));
+        let placement = e3d_model::cable_tray::placement(&element)?;
+        assert_eq!(placement.position, glam::DVec3::ZERO);
+        assert_eq!(placement.rotation, glam::DMat3::IDENTITY);
+        println!(
+            "CORE_MISSING_RPATH ref=23406/8 position={:?} rotation={:?}",
+            placement.position, placement.rotation
+        );
+        let index = scan_index(&service.pin(7022)?.file, Some(254))?;
+        let snapshot = generate_snapshot_from_set(
+            &set,
+            &index,
+            RefNo::new(23406, 6),
+            &mut CatalogueMeshCache::default(),
+        )?;
+        anyhow::ensure!(
+            snapshot.report.failed.is_empty(),
+            "{}",
+            summarize_geometry_incidents(&snapshot.report.failed)
+        );
+        anyhow::ensure!(
+            !snapshot.elements.is_empty(),
+            "repaired root must produce geometry"
+        );
+        println!(
+            "CORE_MISSING_RPATH_MODEL root=23406/6 elements={} failed={}",
+            snapshot.elements.len(),
+            snapshot.report.failed.len()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "read-only AMS unfinished model attribute diagnosis"]
+    async fn ams_unfinished_model_attribute_inventory() -> anyhow::Result<()> {
+        let service = E3dModelService::from_current().await?;
+        for (dbnum, refno, attributes) in [
+            (
+                7048,
+                RefNo::new(23432, 32104),
+                vec!["BANG", "POS", "ORI", "TYPE"],
+            ),
+            (
+                7330,
+                RefNo::new(23714, 1011),
+                vec!["POSS", "POSE", "POS", "ORI"],
+            ),
+        ] {
+            let set = service.build_set(dbnum, None)?;
+            let element = set.element(refno);
+            for attribute in attributes {
+                println!(
+                    "MODEL_INPUT dbnum={dbnum} ref={refno} attribute={attribute} value={:?}",
+                    element.attribute(attribute)
+                );
+                if attribute == "BANG" {
+                    println!(
+                        "MODEL_DESCRIPTOR {:?}",
+                        element.extraction()?.find_attribute(attribute)
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "real AMS finite zero-length section completion"]
+    async fn ams_zero_length_section_root_completes() -> anyhow::Result<()> {
+        let service = E3dModelService::from_current().await?;
+        let pin = service.pin(7330)?;
+        let session = service.source_session(pin)?;
+        let set = service.build_set(7330, Some(session))?;
+        let index = scan_index(&pin.file, Some(session))?;
+        let snapshot = generate_snapshot_from_set(
+            &set,
+            &index,
+            RefNo::new(23714, 997),
+            &mut CatalogueMeshCache::default(),
+        )?;
+        anyhow::ensure!(
+            snapshot.report.failed.is_empty(),
+            "{}",
+            summarize_geometry_incidents(&snapshot.report.failed)
+        );
+        anyhow::ensure!(
+            !snapshot.elements.is_empty(),
+            "other valid members must survive"
+        );
+        println!(
+            "ZERO_LENGTH_SECTION root=23714/997 elements={} failed={}",
+            snapshot.elements.len(),
+            snapshot.report.failed.len()
+        );
+        Ok(())
+    }
 
     fn baked_element(refno: RefNo, mesh_id: &str) -> BakedElement {
         BakedElement {
@@ -2404,6 +2780,7 @@ mod tests {
                 model_target: None,
                 manifest_hash: hex::encode(Sha256::digest(empty_manifest)),
                 geometry_count: 0,
+                published_via: "regen".into(),
             }),
             projection_complete: true,
         };
@@ -2440,6 +2817,7 @@ mod tests {
                 model_target: None,
                 manifest_hash: hex::encode(Sha256::digest(empty_manifest)),
                 geometry_count: 0,
+                published_via: "regen".into(),
             }),
             projection_complete: false,
         };
@@ -2483,6 +2861,7 @@ mod tests {
                 model_target: Some(target),
                 manifest_hash: "manifest".into(),
                 geometry_count: 3,
+                published_via: "regen".into(),
             }),
             projection_complete: true,
         };
@@ -2517,6 +2896,7 @@ mod tests {
             model_target: None,
             manifest_hash: "manifest".into(),
             geometry_count: 0,
+            published_via: "regen".into(),
         });
         assert!(
             !cached_root_target_matches(&publication, 42),

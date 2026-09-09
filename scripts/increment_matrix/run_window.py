@@ -41,7 +41,7 @@ def run_case(case, out, tools):
     try:
         result["database_before"] = fingerprint(case["db"])
         command(str(REPO / "python/.venv/Scripts/python.exe"),
-                [REPO / "docs/evidence/2026-09-06-hvac-100817-increment-tty-rvm/net_window.py",
+                [REPO / "scripts/increment_matrix/net_window.py",
                  case["db"], case["base"] + 1, case["target"], out / "net-window.json"], "net-window")
         net = read_json(out / "net-window.json")["summary"]
         refs = [op["refno"] for op in net["ops"]]

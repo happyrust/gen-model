@@ -875,11 +875,14 @@ fn render_upsert(item: &ModelWorkItem, source_end_sesno_time: Option<&str>) -> S
     // 不取——状态在撒谎。drain 的候选集本来就按 attempts 挡，这里只修观感与
     // 一致性，不改消费语义。
     let revival_clauses = if revives_unconditionally(item) {
-        vec![
-            "attempts = 0".to_string(),
+        let mut clauses = vec![
             "last_error = NONE".to_string(),
             format!("status = '{queued_status}'"),
-        ]
+        ];
+        if !item.action.is_room_recalc() {
+            clauses.push("attempts = 0".to_string());
+        }
+        clauses
     } else {
         vec![
             format!(
@@ -1227,23 +1230,26 @@ pub(crate) fn blocking_root_predicate() -> String {
 pub(crate) fn render_model_watermark_probe(dbnum: u32) -> String {
     let settled = settled_root_predicate();
     let blocking = blocking_root_predicate();
+    let projection = crate::data_interface::model_completion::projection_presence_expr(dbnum);
     format!(
         "SELECT VALUE record::id(id) FROM gen_root WHERE dbnum = {dbnum} \
          AND {blocking};\n\
          SELECT VALUE record::id(id) FROM gen_root WHERE dbnum = {dbnum} \
          AND (status ?: '') = 'http_422';\n\
          SELECT VALUE target_refno FROM {TABLE} WHERE dbnum = {dbnum} \
-         AND (attempts ?: 0) >= {MAX_ATTEMPTS};\n\
+         AND (attempts ?: 0) >= {MAX_ATTEMPTS} \
+         AND action NOT IN ['room_recalc_element','room_recalc_panel'];\n\
          RETURN math::min((SELECT VALUE source_end_sesno FROM gen_root \
          WHERE dbnum = {dbnum} AND {settled}));\n\
          RETURN dbnum_watermark:{dbnum}.applied_sesno;\n\
          RETURN dbnum_watermark:{dbnum}.model_sesno;\n\
          SELECT VALUE record::id(id) FROM gen_root WHERE dbnum = {dbnum} LIMIT 1;\n\
          RETURN array::len((SELECT VALUE id FROM pe WHERE dbnum = {dbnum} LIMIT 1)) > 0;\n\
-         RETURN array::len((SELECT VALUE id FROM inst_relate WHERE dbnum = {dbnum} \
-         OR in.dbnum = {dbnum} LIMIT 1)) > 0 OR \
-         array::len((SELECT VALUE id FROM tubi_relate WHERE dbnum = {dbnum} \
-         OR in.dbnum = {dbnum} LIMIT 1)) > 0;"
+         RETURN IF array::len((SELECT VALUE id FROM gen_root WHERE dbnum={dbnum} LIMIT 1)) > 0 \
+         THEN true ELSE ({projection}) END;\n\
+         SELECT model_completion, commit_token FROM type::thing('incr_side_effect_pending', \
+         'spatial_reconcile_{dbnum}_' + type::string(dbnum_watermark:{dbnum}.model_sesno ?: 0)) \
+         WHERE status = 'done';"
     )
 }
 
@@ -1252,7 +1258,8 @@ pub(crate) fn render_model_watermark_probe(dbnum: u32) -> String {
 pub(crate) struct ModelWatermarkProbe {
     /// 还在赶的根：未安定，且不属于已放弃那一格。它们拦住水位。
     pub blockers: Vec<String>,
-    /// 已放弃的根（`http_422` 与死信合并去重）。不拦水位，但要露出来。
+    /// 已放弃的根（`http_422` 与死信合并去重）。严格完成水位下仍然拦水位，
+    /// 但与正在执行的根分开观测。
     pub abandoned: usize,
     /// 安定凭证的下限；一条安定行都没有时是 `None`。
     pub settled_floor: Option<i32>,
@@ -1265,6 +1272,8 @@ pub(crate) struct ModelWatermarkProbe {
     pub has_attributes: bool,
     /// 这个库有没有已持久化模型投影。历史库可能有投影但尚无 `gen_root` 凭证。
     pub has_model_projection: bool,
+    pub completed_sesno: Option<i32>,
+    pub completion_present: bool,
 }
 
 impl ModelWatermarkProbe {
@@ -1273,10 +1282,14 @@ impl ModelWatermarkProbe {
     /// 还有根在赶就是 0：那说明这个库整体没追平到任何一版，行上记的不管是多少都
     /// 没有支撑。没有根在赶时，上界是安定凭证的下限，再被应用水位封顶（M2）。
     pub fn supported(&self) -> i32 {
-        if !self.blockers.is_empty() {
+        if !self.blockers.is_empty() || self.abandoned > 0 {
+            return 0;
+        }
+        if self.completion_present && self.completed_sesno.is_none() {
             return 0;
         }
         self.settled_floor
+            .or(self.completed_sesno)
             .or_else(|| {
                 (!self.has_roots && self.has_attributes && self.has_model_projection)
                     .then_some(self.applied_sesno)
@@ -1291,6 +1304,7 @@ pub(crate) async fn read_model_watermark_probe(
     db: &Surreal<Any>,
     dbnum: u32,
 ) -> anyhow::Result<ModelWatermarkProbe> {
+    let started = std::time::Instant::now();
     let mut response = db
         .query(render_model_watermark_probe(dbnum))
         .await
@@ -1324,6 +1338,33 @@ pub(crate) async fn read_model_watermark_probe(
     let has_model_projection: Option<bool> = response
         .take(8)
         .with_context(|| format!("decode model projection presence of dbnum {dbnum}"))?;
+    #[derive(serde::Deserialize)]
+    struct CompletionRow {
+        model_completion: Option<String>,
+        commit_token: Option<String>,
+    }
+    let receipt_rows: Vec<CompletionRow> = response.take(9)?;
+    let receipt_row = receipt_rows.first();
+    let raw_receipt = receipt_row.and_then(|row| row.model_completion.as_deref());
+    let completed_sesno = crate::data_interface::model_completion::validated_receipt(
+        raw_receipt,
+        dbnum,
+        recorded.unwrap_or_default(),
+    )
+    .filter(|receipt| {
+        receipt_row.and_then(|row| row.commit_token.as_deref()) == Some(receipt.source_token())
+    })
+    .filter(|receipt| {
+        !receipt.empty || (any_root.is_empty() && !has_model_projection.unwrap_or(false))
+    })
+    .map(|_| recorded.unwrap_or_default());
+    println!(
+        "[model-query] at={} query=watermark_probe dbnum={dbnum} elapsed_ms={} rows={} completion={:?}",
+        chrono::Utc::now().to_rfc3339(),
+        started.elapsed().as_millis(),
+        unsettled.len() + refused.len() + dead_letters.len() + any_root.len() + receipt_rows.len(),
+        completed_sesno
+    );
 
     // 两张表两种拼法（`gen_root` 的记录 id 是 `24381_1`，队列行的 `target_refno` 是
     // `24381/1`），比之前都过同一道归一——直接比字符串一次都不会相等。
@@ -1345,6 +1386,8 @@ pub(crate) async fn read_model_watermark_probe(
         has_roots: !any_root.is_empty(),
         has_attributes: has_attributes.unwrap_or(false),
         has_model_projection: has_model_projection.unwrap_or(false),
+        completed_sesno,
+        completion_present: raw_receipt.is_some(),
     })
 }
 
@@ -1397,11 +1440,96 @@ pub enum ModelWatermarkOutcome {
     Advanced { sesno: i32 },
     /// 已经在这个位置或更高，本次没动。
     Unchanged { sesno: i32 },
-    /// 还有根没安定（已放弃的那些不算）。`blockers` 是抽样，`total` 是全量。
+    /// 还有根没安定（含单独计数的已放弃根）。`blockers` 是仍在赶的抽样，
+    /// `total` 是两类未完整根的全量。
     HeldByRoots { total: usize, blockers: Vec<String> },
     /// 模型跑到了数据前面：候选 `candidate` 高于 `applied`，本次不写（M2）。
     /// **只闸水位不闸生成**——生成早就跑完了，这里只是不盖章。
     AheadOfData { candidate: i32, applied: i32 },
+}
+
+/// Durable stage evidence owned by one dbnum Task at its frozen target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ModelTaskCompletion {
+    pub target_sesno: i32,
+    pub file_round: crate::data_interface::side_effect_pending::CompletedFileRound,
+    pub inputs: Option<crate::data_interface::model_completion::CompletionReceipt>,
+}
+
+pub(crate) async fn complete_model_task_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    completion: ModelTaskCompletion,
+    target_time: Option<&str>,
+) -> anyhow::Result<ModelWatermarkOutcome> {
+    anyhow::ensure!(
+        completion.file_round.dbnum() == dbnum,
+        "file round completion belongs to dbnum {} rather than {dbnum}",
+        completion.file_round.dbnum()
+    );
+    anyhow::ensure!(
+        completion.file_round.end_sesno() == completion.target_sesno,
+        "file round completion target {} differs from task target {}",
+        completion.file_round.end_sesno(),
+        completion.target_sesno
+    );
+    let target = completion.target_sesno;
+    let probe = read_model_watermark_probe(db, dbnum).await?;
+    anyhow::ensure!(
+        probe.blockers.is_empty() && probe.abandoned == 0,
+        "dbnum={dbnum} has unfinished roots"
+    );
+    let empty = !probe.has_roots;
+    anyhow::ensure!(
+        if empty {
+            !probe.has_model_projection
+        } else {
+            probe.settled_floor.is_some_and(|floor| floor >= target)
+        },
+        "dbnum={dbnum} model evidence does not cover target {target}"
+    );
+    let token = completion
+        .file_round
+        .commit_token
+        .as_deref()
+        .context("file round has no authoritative source token")?;
+    let mut receipt = completion
+        .inputs
+        .context("task has no frozen completion inputs")?;
+    anyhow::ensure!(
+        receipt.source_token() == token,
+        "completion inputs differ from published source"
+    );
+    if empty {
+        let roots =
+            crate::data_interface::window_root_plan::enumerate_target_roots(dbnum, target as u32)
+                .await?;
+        anyhow::ensure!(
+            roots.is_empty(),
+            "dbnum={dbnum} has {} source roots but no settled projection",
+            roots.len()
+        );
+    }
+    receipt.empty = empty;
+    receipt.validate(dbnum, target)?;
+    crate::data_interface::model_completion::commit_on(
+        db,
+        dbnum,
+        target,
+        token,
+        &receipt,
+        target_time,
+    )
+    .await?;
+    println!(
+        "[model-completion] dbnum={dbnum} target={target} kind={} completed=true",
+        if empty {
+            "verified_empty"
+        } else {
+            "settled_roots"
+        }
+    );
+    Ok(ModelWatermarkOutcome::Advanced { sesno: target })
 }
 
 /// 拦路根抽样上限：日志里点几个名字够定位，全量只报数。
@@ -1419,9 +1547,9 @@ pub(crate) async fn advance_model_watermark_on(
     window_end_time: Option<&str>,
 ) -> anyhow::Result<ModelWatermarkOutcome> {
     let probe = read_model_watermark_probe(db, dbnum).await?;
-    if !probe.blockers.is_empty() {
+    if !probe.blockers.is_empty() || probe.abandoned > 0 {
         return Ok(ModelWatermarkOutcome::HeldByRoots {
-            total: probe.blockers.len(),
+            total: probe.blockers.len() + probe.abandoned,
             blockers: probe
                 .blockers
                 .into_iter()
@@ -1474,50 +1602,6 @@ pub(crate) async fn advance_model_watermark_on(
     Ok(ModelWatermarkOutcome::Advanced { sesno: candidate })
 }
 
-/// 生产入口：在 `SUL_DB` 上推进，并把去向按各自的嗓音打出来。
-///
-/// **成败都不上抛**：模型水位是仪表不是闸门（ADR-060 M7），一块读不出来的仪表不该让
-/// 刚刚成功的那一批生成变成失败。
-pub(crate) async fn advance_model_watermark(
-    dbnum: u32,
-    window_end_sesno: i32,
-    window_end_time: Option<&str>,
-) {
-    stamp_model_watermark_on(&SUL_DB, dbnum, window_end_sesno, window_end_time).await
-}
-
-/// [`advance_model_watermark`] 的带库版本：两个触发点（cohort 收口、零 regen 窗口的凭证
-/// 前移之后）共用同一份出声措辞，测试也能在 `mem://` 上走完整条路。
-pub(crate) async fn stamp_model_watermark_on(
-    db: &Surreal<Any>,
-    dbnum: u32,
-    window_end_sesno: i32,
-    window_end_time: Option<&str>,
-) {
-    match advance_model_watermark_on(db, dbnum, window_end_sesno, window_end_time).await {
-        Ok(ModelWatermarkOutcome::Advanced { sesno }) => {
-            println!("[模型水位] dbnum={dbnum} 追平到 {sesno}");
-        }
-        Ok(ModelWatermarkOutcome::Unchanged { .. }) => {}
-        Ok(ModelWatermarkOutcome::HeldByRoots { total, blockers }) => {
-            println!(
-                "[模型水位] dbnum={dbnum} 暂不推进：还有 {total} 个根未安定，例如 {}",
-                blockers.join(", ")
-            );
-        }
-        Ok(ModelWatermarkOutcome::AheadOfData { candidate, applied }) => {
-            println!(
-                "[模型水位] model_watermark_skipped_ahead_of_data dbnum={dbnum}：\
-                 模型已追到 {candidate}，数据水位还在 {applied}，本次不盖章\
-                 （生成不受影响），等数据追上后由启动对账补记"
-            );
-        }
-        Err(error) => {
-            println!("[模型水位] dbnum={dbnum} 推进失败，本轮跳过（不影响生成）: {error:#}");
-        }
-    }
-}
-
 /// 把模型水位**绝对**写成对账算出来的支撑值（ADR-060 D6）。
 ///
 /// 与 [`render_model_watermark_advance`] 是两种写法，故意不合并：
@@ -1548,25 +1632,36 @@ pub enum ModelWatermarkReconcile {
     Aligned { sesno: i32 },
     /// 水位比证据高：失去支撑，降回去（D6 的下调）。
     LoweredUnbacked { from: i32, to: i32 },
-    /// 水位比证据低：热路径漏记（模型跑到数据前面那一次跳过、或收口前进程被清空），
-    /// 补记上去（D6 的上调）。
-    RaisedMissedStamp { from: i32, to: i32 },
-    /// 历史库已有属性与模型投影，但还没有当前版本的 `gen_root` 凭证；按兼容约定把
-    /// 两枚库级水位初始化到同一位置。
-    SeededLegacyProjection { sesno: i32 },
+    /// 根凭证能支撑更高版本，但普通探针没有资格上调完成水位。启动恢复必须排 Task，
+    /// 由 Task 在发布、空间与房间全部完成后盖章。
+    AwaitingTaskCompletion { recorded: i32, supported: i32 },
     /// 水位说模型追平过，这个库却既无 `gen_root` 也无模型投影：幽灵模型水位（D7）。
     ClearedGhost { from: i32 },
 }
 
-/// 在 `db` 上对一个库的模型水位做一次双向对账（ADR-060 D6/D7 的执行体）。
+/// 在 `db` 上核验一个库的模型水位。普通探针只保持或下调；上调只允许由 Task 收尾执行。
 pub(crate) async fn reconcile_model_watermark_on(
     db: &Surreal<Any>,
     dbnum: u32,
 ) -> anyhow::Result<ModelWatermarkReconcile> {
     let probe = read_model_watermark_probe(db, dbnum).await?;
+    reconcile_model_watermark_from_probe(db, dbnum, &probe).await
+}
+
+async fn reconcile_model_watermark_from_probe(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    probe: &ModelWatermarkProbe,
+) -> anyhow::Result<ModelWatermarkReconcile> {
     let supported = probe.supported();
     if probe.recorded == supported {
         return Ok(ModelWatermarkReconcile::Aligned { sesno: supported });
+    }
+    if probe.recorded < supported {
+        return Ok(ModelWatermarkReconcile::AwaitingTaskCompletion {
+            recorded: probe.recorded,
+            supported,
+        });
     }
     db.query(render_model_watermark_reconcile(
         dbnum,
@@ -1578,39 +1673,35 @@ pub(crate) async fn reconcile_model_watermark_on(
     .check()
     .with_context(|| format!("model watermark reconcile statement of dbnum {dbnum}"))?;
 
-    Ok(
-        if probe.recorded == 0
-            && !probe.has_roots
-            && probe.has_attributes
-            && probe.has_model_projection
-            && supported > 0
-        {
-            ModelWatermarkReconcile::SeededLegacyProjection { sesno: supported }
-        } else if probe.recorded < supported {
-            ModelWatermarkReconcile::RaisedMissedStamp {
-                from: probe.recorded,
-                to: supported,
-            }
-        } else if !probe.has_roots && !probe.has_model_projection {
-            ModelWatermarkReconcile::ClearedGhost {
-                from: probe.recorded,
-            }
-        } else {
-            ModelWatermarkReconcile::LoweredUnbacked {
-                from: probe.recorded,
-                to: supported,
-            }
-        },
-    )
+    Ok(if !probe.has_roots && !probe.has_model_projection {
+        ModelWatermarkReconcile::ClearedGhost {
+            from: probe.recorded,
+        }
+    } else {
+        ModelWatermarkReconcile::LoweredUnbacked {
+            from: probe.recorded,
+            to: supported,
+        }
+    })
 }
 
 /// 启动那一轮对每个候选库做一次对账，按去向各自出声。
 ///
 /// **一库失败不中止**：与它挂靠的启动覆盖核对同一条纪律（ADR-050 的补偿路径不许把
 /// 一个库的问题变成整个服务的崩溃循环）。
-pub(crate) async fn reconcile_model_watermarks(dbnums: impl IntoIterator<Item = u32>) {
+pub(crate) async fn reconcile_model_watermarks(
+    dbnums: impl IntoIterator<Item = u32>,
+) -> BTreeMap<u32, ModelWatermarkProbe> {
+    let mut probes = BTreeMap::new();
     for dbnum in dbnums {
-        match reconcile_model_watermark_on(&SUL_DB, dbnum).await {
+        let mut probe = match read_model_watermark_probe(&SUL_DB, dbnum).await {
+            Ok(probe) => probe,
+            Err(error) => {
+                println!("[model-completion] dbnum={dbnum} reason=probe_failed error={error:#}");
+                continue;
+            }
+        };
+        match reconcile_model_watermark_from_probe(&SUL_DB, dbnum, &probe).await {
             Ok(ModelWatermarkReconcile::Aligned { .. }) => {}
             Ok(ModelWatermarkReconcile::LoweredUnbacked { from, to }) => {
                 println!(
@@ -1618,16 +1709,13 @@ pub(crate) async fn reconcile_model_watermarks(dbnums: impl IntoIterator<Item = 
                      （行上记的追平点高于安定凭证能证明的那一版）"
                 );
             }
-            Ok(ModelWatermarkReconcile::RaisedMissedStamp { from, to }) => {
+            Ok(ModelWatermarkReconcile::AwaitingTaskCompletion {
+                recorded,
+                supported,
+            }) => {
                 println!(
-                    "[模型水位] dbnum={dbnum} 热路径漏记，已补记 {from} → {to}\
-                     （上一轮模型跑在数据前面被跳过，或收口前进程被清空）"
-                );
-            }
-            Ok(ModelWatermarkReconcile::SeededLegacyProjection { sesno }) => {
-                println!(
-                    "[模型水位] dbnum={dbnum} 检出历史属性与模型数据，已按兼容约定把 \
-                     applied_sesno / model_sesno 统一初始化到 {sesno}"
+                    "[模型水位] dbnum={dbnum} 凭证可支撑 {supported}、完成水位仍为 {recorded}；\
+                     普通对账不上调，排恢复 Task 完成发布、空间与房间后盖章"
                 );
             }
             Ok(ModelWatermarkReconcile::ClearedGhost { from }) => {
@@ -1641,13 +1729,10 @@ pub(crate) async fn reconcile_model_watermarks(dbnums: impl IntoIterator<Item = 
                 println!("[模型水位] dbnum={dbnum} 对账失败，本次跳过（启动继续）: {error:#}");
             }
         }
-        match crate::data_interface::dbnum_consistency::verdict_for(&SUL_DB, dbnum).await {
-            Ok(verdict) => println!("[库一致性] {}", verdict.describe(dbnum)),
-            Err(error) => {
-                println!("[库一致性] dbnum={dbnum} 判决取数失败，本次不判（启动继续）: {error:#}")
-            }
-        }
+        probe.recorded = probe.recorded.min(probe.supported());
+        probes.insert(dbnum, probe);
     }
+    probes
 }
 
 /// 窗口语句批的分块大小。与主数据落库的 `TX_CHUNK` 同一纪律（`increment_pipeline::
@@ -1940,25 +2025,8 @@ pub(crate) async fn finalize_attempt_on(
         )
     };
 
-    // 模型水位的第二触发点（ADR-060 D5，2026-09-05 修订）：这一窗**没有 `RegenRoot`** 时，
-    // 模型排空里不会出现它的 cohort，`run_regen_group` 收口之后那一处永远轮不到它——
-    // 而它的模型面此刻已经处置完毕（未触到的根刚前移到 T、或本来就没有需要动的根）。
-    // 不在这里盖一次，`applied_sesno = T`、安定凭证下限 = T、`model_sesno = T_prev` 会在
-    // 本进程内一直不等，直到下次启动对账才「热路径漏记，已补记」。改不碰几何的属性、
-    // 只删根的窗口，都是这一格。
-    //
-    // 有 `RegenRoot` 时不在这里跑：被触到的根还停在旧凭证，探针只能读出旧值，白跑七句；
-    // 它们收口之后 cohort 那一处会盖。判据仍只有 `ModelWatermarkProbe::supported` 一处，
-    // 三道闸（有拦路根不写、被下限与应用水位夹住、`WHERE applied >= 候选`）原样生效，
-    // 提前调最多空转一次，不可能多盖。与凭证前移同一纪律：尾事务之后、成败都不上抛，
-    // 数据链不因它等待或失败（M7）。
-    if !plan
-        .work_items
-        .iter()
-        .any(|item| item.action == ModelWorkAction::RegenRoot)
-    {
-        stamp_model_watermark_on(db, dbnum, end_sesno, end_sesno_time).await;
-    }
+    // Root credentials may advance here, but the library completion watermark is
+    // owned by the enclosing Task after publication, spatial refresh and rooms.
     Ok(outcome)
 }
 
@@ -2142,45 +2210,6 @@ async fn delete_work_on(db: &Surreal<Any>, item: &PendingModelWork) -> anyhow::R
         .map_err(|error| {
             anyhow::anyhow!("delete completed model work {target} statement failed: {error}")
         })?;
-    // A zero-regen window tries stamping before its deferred deletions run.
-    // Removing the last old root can raise the settled floor, so observe it
-    // again after successful cleanup. A file-round deferral is not completion.
-    if item.action == ModelWorkAction::DeleteCleanup
-        && item.db_type.eq_ignore_ascii_case("DESI")
-        && publication_cohort(item.dbnum, item.source_end_sesno).is_some()
-        && crate::data_interface::batch_worker::active_data_window().is_none()
-    {
-        // One window can retire thousands of old roots. The full credential
-        // probe is a table scan; pay for it once when this db's cleanup drains.
-        let drained = async {
-            let mut response = db
-                .query(format!(
-                    "RETURN array::len((SELECT VALUE target_refno FROM {TABLE} \
-                 WHERE dbnum={} AND action='delete_cleanup' LIMIT 1)) = 0;",
-                    item.dbnum,
-                ))
-                .await?
-                .check()?;
-            anyhow::Ok(response.take::<Option<bool>>(0)?.unwrap_or(false))
-        }
-        .await;
-        match drained {
-            Ok(true) => {
-                stamp_model_watermark_on(
-                    db,
-                    item.dbnum,
-                    item.source_end_sesno,
-                    item.source_end_sesno_time.as_deref(),
-                )
-                .await
-            }
-            Ok(false) => {}
-            Err(error) => println!(
-                "[模型水位] dbnum={} 清理排空检查失败，本轮跳过（不影响清理）: {error:#}",
-                item.dbnum,
-            ),
-        }
-    }
     Ok(())
 }
 
@@ -2216,9 +2245,14 @@ fn render_mark_failed_revision(
     error: &str,
 ) -> String {
     let error = escape_surql_str(error);
+    let attempts = if action.is_room_recalc() {
+        String::new()
+    } else {
+        "attempts = (attempts?:0) + 1, ".to_string()
+    };
     // `UPDATE <id> SET … WHERE <谓词>`：与收口同一套按 id 寻址 + 谓词校验（见 `settle_target`）。
     let pending = format!(
-        "UPDATE {} SET status = 'failed', attempts = (attempts?:0) + 1, \
+        "UPDATE {} SET status = 'failed', {attempts}\
          last_error = '{error}', updated_at = time::now() \
          WHERE {};",
         record_id_of(action, target_refno),
@@ -2292,6 +2326,38 @@ struct RootCompletionCredentialRow {
     status: Option<String>,
     #[serde(default)]
     source_end_sesno: Option<i32>,
+    /// `published_model_target.catalogue`：这份几何是照哪一版**目录**算出来的，每个 CATA
+    /// 依赖一条（H1 (c)，2026-09-08）。此前凭证只比设计库会话，目录改了、设计没改的根
+    /// 在按需 `ensure` 眼里永远「当前」。
+    #[serde(default)]
+    catalogue: Vec<CatalogueStamp>,
+}
+
+/// `gen_root.published_model_target.catalogue[*]` 里与凭证判据有关的两格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub(crate) struct CatalogueStamp {
+    #[serde(default)]
+    pub dbnum: Option<u32>,
+    #[serde(default)]
+    pub session: Option<u32>,
+}
+
+/// 目录落款是否仍覆盖此刻的目录文件（纯函数，H1 (c)）。
+///
+/// 每条落款 `session` 不早于该目录库文件最新会话才算覆盖（与设计库那半 `credential_covers`
+/// 同为单调判据：ensure 用更新的目录算过、记录比文件新，不是过期）。`latest(dbnum) == None`
+/// ——不在当前 MDB、stat 不到——是**未知**，不算过期，与 [`stale_catalogue_dbnums`] 同一口径：
+/// 判成过期会让一个读不到的目录库把每次显示都变成重算。缺 `dbnum` / `session` 的历史落款同样放行。
+pub(crate) fn catalogue_stamps_current(
+    stamps: &[CatalogueStamp],
+    latest: impl Fn(u32) -> Option<u32>,
+) -> bool {
+    stamps
+        .iter()
+        .all(|stamp| match (stamp.dbnum, stamp.session) {
+            (Some(dbnum), Some(session)) => latest(dbnum).is_none_or(|now| session >= now),
+            _ => true,
+        })
 }
 
 /// 生成根在当前投影下的生成源版本（ADR-054）：所在库由 MDB 的 DESI 文件按索引点查得出，
@@ -2327,11 +2393,18 @@ fn render_generation_root_credentials(root_refnos: &[String]) -> String {
         .map(|root| format!("gen_root:{}", escape_surql_str(&root.replace('/', "_"))))
         .collect::<Vec<_>>()
         .join(",");
-    format!("SELECT record::id(id) AS root_id, status, source_end_sesno FROM [{keys}];")
+    format!(
+        "SELECT record::id(id) AS root_id, status, source_end_sesno, \
+         published_model_target.catalogue ?? [] AS catalogue FROM [{keys}];"
+    )
 }
 
 /// Batch form used by subtree display: resolve file versions off-thread once,
 /// then load every completion credential with one primary-key query.
+///
+/// 命中 = 完成终态 ∧ 设计库凭证不早于文件最新 ∧ **目录落款不早于各目录文件最新**
+/// （[`catalogue_stamps_current`]，H1 (c)）。目录文件最新会话按 dbnum 只读一次
+/// （`latest_source_version` 自己还有按文件戳的缓存），一次子树显示多付的是几个目录库的头。
 pub async fn generation_roots_cache_current(
     root_refnos: &[String],
 ) -> anyhow::Result<HashSet<String>> {
@@ -2372,6 +2445,28 @@ pub async fn generation_roots_cache_current(
         .into_iter()
         .map(|row| (row.root_id, row.credential))
         .collect::<HashMap<_, _>>();
+    // 目录文件最新会话：这批凭证落款提到的每个目录库问一次。读不到的留 `None`（未知）。
+    let catalogue_dbnums: BTreeSet<u32> = rows
+        .values()
+        .flat_map(|row| row.catalogue.iter().filter_map(|stamp| stamp.dbnum))
+        .collect();
+    let catalogue_latest: BTreeMap<u32, Option<u32>> = if catalogue_dbnums.is_empty() {
+        BTreeMap::new()
+    } else {
+        tokio::task::spawn_blocking(move || {
+            catalogue_dbnums
+                .into_iter()
+                .map(|dbnum| {
+                    let latest = crate::data_interface::model_source::latest_source_version(dbnum)
+                        .ok()
+                        .map(|version| version.sesno);
+                    (dbnum, latest)
+                })
+                .collect()
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("resolve catalogue versions task failed: {error}"))?
+    };
     Ok(versions
         .into_iter()
         .filter_map(|(root_refno, required_sesno)| {
@@ -2384,7 +2479,9 @@ pub async fn generation_roots_cache_current(
                     ) && crate::data_interface::model_source::credential_covers(
                         row.source_end_sesno,
                         required_sesno,
-                    )
+                    ) && catalogue_stamps_current(&row.catalogue, |dbnum| {
+                        catalogue_latest.get(&dbnum).copied().flatten()
+                    })
                 })
                 .then_some(root_refno)
         })
@@ -2398,10 +2495,61 @@ fn generation_root_credentials_use_one_primary_key_query() {
         render_generation_root_credentials(&["24384/26229".to_string(), "24384/23264".to_string()]);
     assert_eq!(
         query,
-        "SELECT record::id(id) AS root_id, status, source_end_sesno FROM \
+        "SELECT record::id(id) AS root_id, status, source_end_sesno, \
+         published_model_target.catalogue ?? [] AS catalogue FROM \
 [gen_root:24384_26229,gen_root:24384_23264];"
     );
     assert!(!query.contains(" WHERE "));
+}
+
+/// H1 (c)：凭证判据的目录那一半。设计会话够新、目录落款却早于目录文件最新 → 未命中；
+/// 落款不早于（等于或更新）→ 命中；目录库读不到 / 历史落款缺格 → 未知，放行。
+#[cfg(test)]
+#[test]
+fn catalogue_stamps_are_current_only_when_no_stamp_is_behind_its_file() {
+    let stamp = |dbnum: u32, session: u32| CatalogueStamp {
+        dbnum: Some(dbnum),
+        session: Some(session),
+    };
+    let latest = |dbnum: u32| match dbnum {
+        7000 => Some(12),
+        5052 => Some(185),
+        _ => None,
+    };
+    // 没有目录依赖的根（历史行 / 纯设计几何）：目录那一半恒真。
+    assert!(catalogue_stamps_current(&[], latest));
+    // 两个目录库都追平 → 命中；其中一个早于文件最新 → 未命中。
+    assert!(catalogue_stamps_current(
+        &[stamp(7000, 12), stamp(5052, 185)],
+        latest
+    ));
+    assert!(!catalogue_stamps_current(
+        &[stamp(7000, 11), stamp(5052, 185)],
+        latest
+    ));
+    assert!(!catalogue_stamps_current(
+        &[stamp(7000, 12), stamp(5052, 184)],
+        latest
+    ));
+    // 落款比文件还新（ensure 用更新的目录算过、文件随后没变）：单调判据，仍命中。
+    assert!(catalogue_stamps_current(&[stamp(7000, 13)], latest));
+    // 不在当前 MDB / 读不到的目录库：未知不算过期，不许把每次显示变成重算。
+    assert!(catalogue_stamps_current(&[stamp(9999, 1)], latest));
+    // 历史落款缺 dbnum 或 session：同样放行。
+    assert!(catalogue_stamps_current(
+        &[CatalogueStamp {
+            dbnum: Some(7000),
+            session: None,
+        }],
+        latest
+    ));
+    assert!(catalogue_stamps_current(
+        &[CatalogueStamp {
+            dbnum: None,
+            session: Some(1),
+        }],
+        latest
+    ));
 }
 
 /// 为按需生成落一条认领**当前生成源版本**（文件最新会话，ADR-054）的 durable 工作。
@@ -2845,6 +2993,10 @@ struct CatalogueReconcile {
     windows: Vec<crate::data_interface::cata_cascade_window::CatalogueWindowReport>,
     /// P3：对上面那些窗口做的反查与排工。`None` = 没有过期库，没跑。
     cascade: Option<crate::data_interface::reverse_reference::CatalogueCascadeReport>,
+    /// A3（2026-09-08）：数据面那一半——已入库依赖行（`pe.dependency = true` 与它们的 `ref_rev`）
+    /// 随目录前移的账。每次核对都跑，候选是全部有 `cata_dependency_state` 行的目录库，
+    /// 与上面模型面的「过期」名单无关。
+    dependency_refresh: crate::data_interface::cata_dependency::CatalogueDependencyRefreshReport,
 }
 
 /// 收成的一窗：回执 + 窗口本体（逐件清单是反查的种子，不上 `/health`）。
@@ -2863,9 +3015,36 @@ struct StaleCatalogueWindow {
 /// 并点名 `catalogue_cascade_degraded`——宁多算不漏算）。
 ///
 /// ADR-058 D2 的触发源就在这里：direct / 读透形态下目录库没有数据批次，读透形态的文件事件也
-/// 汇到 `reconcile_model_coverage_at_startup`，所以启动与文件事件共用这一处。反查没跑成时
-/// 唯一的兜底仍是按需 `ensure` 撞上 `ModelTarget.catalogue` 指纹失配。
+/// 汇到 `reconcile_model_coverage_at_startup`，所以启动与文件事件共用这一处。**摄入形态**
+/// （external / rocksdb，2026-09-07 起的默认）的文件事件走的是数据面 sweep，目录库在那条路上
+/// 被 `UpdateScope::admits` 挡在数据批次之外——2026-09-08 之前它们到不了这里，目录改了要等
+/// 重启；现在 sweep 收尾经 [`reconcile_catalogue_versions_after_sweep`]、`/update/execute` 经
+/// [`reconcile_catalogue_versions_now`] 也汇到这一处（H1）。三条入口串行（同一把
+/// [`CATALOGUE_RECONCILE_SERIAL`]），免得两次核对把同一批根排两遍。
+///
+/// 反查没跑成时的兜底：按需 `ensure` 的凭证判据自 2026-09-08 起也比目录落款
+/// （[`catalogue_stamps_current`]），落款早于目录文件最新即判未命中、照常重算。
+///
+/// **数据面那一半（A3，2026-09-08）**：模型面排完根之后，再把 `pe` 里 `dependency = true` 的目录行
+/// 与它们的 `ref_rev` 也随目录前移（[`crate::data_interface::cata_dependency::refresh_dependency_rows_of_moved_catalogues`]：
+/// 变动目录件 ∩ 已入库依赖行 → `Replace` 重渲、被删的落墓碑、推进 `cata_dependency_state`）。此前这一步
+/// 只在某个 DESI 批次的闭包碰到那个目录库时才跑（ADR-064 D5 的 D7）：目录改了、设计没改，属性面板看到的
+/// 目录属性就一直是旧的。两半各自对文件、互不依赖：模型面没跑成（读不到落款 / 一个根都没发布）数据面照做。
 async fn reconcile_catalogue_versions() -> CatalogueReconcile {
+    let _serial = CATALOGUE_RECONCILE_SERIAL.lock().await;
+    let mut reconcile = reconcile_published_root_stamps().await;
+    let project = aios_core::get_db_option().project_name.clone();
+    reconcile.dependency_refresh =
+        crate::data_interface::cata_dependency::refresh_dependency_rows_of_moved_catalogues(
+            &project,
+        )
+        .await;
+    reconcile
+}
+
+/// 模型面那一半：点名 → 收窗 → 反查排工（三步见 [`reconcile_catalogue_versions`] 的文档）。
+/// 只在串行闸里被调；`dependency_refresh` 留空，由调用方补数据面那一半。
+async fn reconcile_published_root_stamps() -> CatalogueReconcile {
     let recorded = match published_catalogue_sessions_on(&SUL_DB).await {
         Ok(recorded) => recorded,
         Err(error) => {
@@ -2915,7 +3094,395 @@ async fn reconcile_catalogue_versions() -> CatalogueReconcile {
         unreadable,
         windows,
         cascade,
+        ..CatalogueReconcile::default()
     }
+}
+
+/// 目录版本核对的三条入口（启动 / sweep / `/update/execute`）共用的串行闸。
+///
+/// 两次核对前后脚跑，第二次会把第一次刚排、还没重算完的根再排一遍（落款仍旧），
+/// 白算一轮；串行之后至多剩「第一次排完、第二次紧跟着又排」这一种，靠 `render_upsert`
+/// 同 `(action, target)` 一行收口，不会多出第二行。
+static CATALOGUE_RECONCILE_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 运行期目录版本核对的一次回执（H1，2026-09-08）：摄入形态的 sweep 与 `/update/execute`
+/// 触发的那几次；启动那一次在 `StartupReconcile`（`/health.initialization.startup.reconcile`）。
+/// `/health.catalogue_reconcile` 露的就是**最近一次**。
+#[derive(Debug, Clone, Serialize)]
+pub struct CatalogueReconcileSnapshot {
+    /// 谁触发的：sweep 的 origin（`watch` / `reconcile` / `scope-refresh`）或 `update-execute`。
+    pub origin: String,
+    /// `catalogue_file_advanced` = sweep 看见某个目录库文件的会话前移了；`periodic` = 周期对账
+    /// 那一拍的强制复核（sweep 没看见前移也跑，兜住启动那次反查失败 / 目录文件不在监控目录
+    /// 里的形状）；`requested` = 人工 `/update/execute`。
+    pub trigger: &'static str,
+    /// sweep 观察到前移 / 新出现的目录库号（`periodic` / `requested` 下为空）。
+    pub advanced_catalogue_dbnums: Vec<u32>,
+    pub at: String,
+    pub elapsed_ms: u128,
+    /// 已确认前移、且有已发布根落在旧目录上的 CATA 库，升序。
+    pub stale_catalogue_dbnums: Vec<u32>,
+    /// 记在案却读不到最新会话的 CATA 库数：未知，不算过期。
+    pub unreadable_catalogue_dbnums: usize,
+    /// 前移了**且**反查没能精确回答（与 `StartupReconcile` 同一语义）。
+    pub catalogue_cascade_degraded: bool,
+    pub catalogue_windows: Vec<crate::data_interface::cata_cascade_window::CatalogueWindowReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalogue_cascade: Option<crate::data_interface::reverse_reference::CatalogueCascadeReport>,
+    /// A3：数据面那一半——已入库依赖行随目录前移的账（候选 = 全部有 `cata_dependency_state` 行的
+    /// 目录库；`refreshed` 空且 `errors` 空 = 这一次没有依赖行要前移）。
+    pub catalogue_dependency_refresh:
+        crate::data_interface::cata_dependency::CatalogueDependencyRefreshReport,
+}
+
+impl CatalogueReconcileSnapshot {
+    fn from_reconcile(
+        origin: &str,
+        trigger: &'static str,
+        advanced: &[u32],
+        elapsed: std::time::Duration,
+        reconcile: CatalogueReconcile,
+    ) -> Self {
+        let CatalogueReconcile {
+            stale,
+            unreadable,
+            windows,
+            cascade,
+            dependency_refresh,
+        } = reconcile;
+        Self {
+            origin: origin.to_string(),
+            trigger,
+            advanced_catalogue_dbnums: advanced.to_vec(),
+            at: chrono::Local::now().to_rfc3339(),
+            elapsed_ms: elapsed.as_millis(),
+            stale_catalogue_dbnums: stale,
+            unreadable_catalogue_dbnums: unreadable,
+            catalogue_cascade_degraded: cascade
+                .as_ref()
+                .is_some_and(|cascade| cascade.is_degraded()),
+            catalogue_windows: windows,
+            catalogue_cascade: cascade,
+            catalogue_dependency_refresh: dependency_refresh,
+        }
+    }
+
+    /// 本次排了多少根（精确命中 + 退化库整份名单）。
+    pub fn enqueued_roots(&self) -> usize {
+        self.catalogue_cascade
+            .as_ref()
+            .map_or(0, |cascade| cascade.enqueued_total())
+    }
+
+    /// 控制台上的话。周期复核没发现过期库时**一个字不打**（300 s 一拍，打了就是刷屏）；
+    /// 文件前移 / 人工触发那两种总要回一句，哪怕结论是「没有根落在旧目录上」——
+    /// 触发了却没声音，人分不清是没跑还是没事。数据面那一半（A3）真前移了行或有失败时
+    /// 另占一行，不管是哪种触发——安静的一次不出声。
+    pub fn banner_lines(&self) -> Vec<String> {
+        let origin = &self.origin;
+        let mut lines = Vec::new();
+        if self.stale_catalogue_dbnums.is_empty() {
+            if self.trigger != "periodic" {
+                lines.push(format!(
+                    "[{origin}] 目录版本核对（{}{}）：已发布的根没有落在旧目录上，不排模型工作{}",
+                    self.trigger,
+                    if self.advanced_catalogue_dbnums.is_empty() {
+                        String::new()
+                    } else {
+                        format!("，前移的目录库 {:?}", self.advanced_catalogue_dbnums)
+                    },
+                    if self.unreadable_catalogue_dbnums > 0 {
+                        format!(
+                            "；{} 个记在案的 CATA 库读不到最新会话（未知，不算过期）",
+                            self.unreadable_catalogue_dbnums
+                        )
+                    } else {
+                        String::new()
+                    }
+                ));
+            }
+        } else {
+            lines.push(format!(
+                "[{origin}] 目录版本核对（{}）：{} 个 CATA 库已前移到新会话，而已发布的根还落在旧目录上 \
+                 dbnum={:?}。下面每库一行是这一窗变了什么，末行是反查排了什么（2026-09-06 计划 P3）；\
+                 反查没跑成 / 退化的库只剩按需 ensure 的目录落款判据兜底，或人工 \
+                 POST /api/v1/dbnums/{{dbnum}}/model/rebuild：",
+                self.trigger,
+                self.stale_catalogue_dbnums.len(),
+                self.stale_catalogue_dbnums
+            ));
+            for window in &self.catalogue_windows {
+                lines.push(format!("  {}", window.banner_line()));
+            }
+            if let Some(cascade) = &self.catalogue_cascade {
+                lines.push(format!("  {}", cascade.banner_line()));
+            }
+        }
+        if let Some(line) = self.catalogue_dependency_refresh.banner_line() {
+            lines.push(format!("[{origin}] {line}"));
+        }
+        lines
+    }
+}
+
+/// 进程内：最近一次运行期目录核对 + sweep 上一轮观察到的目录文件会话。
+struct CatalogueReconcileState {
+    latest: Option<CatalogueReconcileSnapshot>,
+    /// `None` = 还没有任何一轮 sweep 记过观察（进程刚起）。
+    observed: Option<BTreeMap<u32, u32>>,
+}
+
+static CATALOGUE_RECONCILE_STATE: Mutex<CatalogueReconcileState> =
+    Mutex::new(CatalogueReconcileState {
+        latest: None,
+        observed: None,
+    });
+
+fn catalogue_reconcile_state() -> MutexGuard<'static, CatalogueReconcileState> {
+    CATALOGUE_RECONCILE_STATE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `/health.catalogue_reconcile`：最近一次运行期目录核对；`None` = 本进程还没跑过
+/// （启动那一次不在这里，在 `initialization.startup.reconcile`）。
+pub fn catalogue_reconcile_snapshot() -> Option<CatalogueReconcileSnapshot> {
+    catalogue_reconcile_state().latest.clone()
+}
+
+/// 一轮摄入形态 sweep 对目录核对的裁决。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CatalogueSweepVerdict {
+    /// 进程里第一轮 sweep：只记下观察。启动那一次核对由 `reconcile_model_coverage_at_startup`
+    /// 负责（`run_cli` 里它排在 `init_watcher` 之后），这里再跑一遍就是把同一批根排两遍。
+    Seeded,
+    /// 与上一轮相比没有目录库前移，也不是强制复核那一拍。
+    Unchanged,
+    /// 要跑：`catalogue_file_advanced`（看见前移）或 `periodic`（强制）。
+    Run { trigger: &'static str },
+}
+
+/// 与上一轮观察相比**前移**或**新出现**的目录库（纯函数）。
+///
+/// 只看这一轮观察到的：上一轮见过、这一轮读不到头的库不算前移——读不到是未知，
+/// 而未知不触发任何工作（与 [`stale_catalogue_dbnums`] 同一口径）。
+pub(crate) fn catalogue_files_advanced(
+    previous: Option<&BTreeMap<u32, u32>>,
+    observed: &BTreeMap<u32, u32>,
+) -> Vec<u32> {
+    observed
+        .iter()
+        .filter(|(dbnum, now)| {
+            previous
+                .and_then(|previous| previous.get(*dbnum))
+                .is_none_or(|seen| *now > seen)
+        })
+        .map(|(dbnum, _)| *dbnum)
+        .collect()
+}
+
+/// 这一轮 sweep 要不要跑目录核对（纯函数）：第一轮只记观察；看见前移就跑；`force`
+/// （周期对账那一拍）没看见也跑。
+pub(crate) fn catalogue_sweep_verdict(
+    previous: Option<&BTreeMap<u32, u32>>,
+    observed: &BTreeMap<u32, u32>,
+    force: bool,
+) -> (CatalogueSweepVerdict, Vec<u32>) {
+    let Some(previous) = previous else {
+        return (CatalogueSweepVerdict::Seeded, Vec::new());
+    };
+    let advanced = catalogue_files_advanced(Some(previous), observed);
+    let verdict = if !advanced.is_empty() {
+        CatalogueSweepVerdict::Run {
+            trigger: "catalogue_file_advanced",
+        }
+    } else if force {
+        CatalogueSweepVerdict::Run {
+            trigger: "periodic",
+        }
+    } else {
+        CatalogueSweepVerdict::Unchanged
+    };
+    (verdict, advanced)
+}
+
+/// 摄入形态 sweep 的收尾（H1 (a)）：记下这一轮在监控目录里看到的每个目录库文件的最新会话，
+/// 与上一轮比；有前移（或 `force`）就**另起任务**跑一次目录版本核对——不在 sweep 里等：
+/// sweep 的 await 睡在看门狗的事件循环上，反查开 MDB 每个设计库要好几秒，等就是积压文件事件。
+///
+/// 只收整面重扫的观察（子集补扫没看其余目录，拿它当全集会把没扫到的库当成消失又出现）。
+/// 返回裁决给调用方写日志。
+pub fn reconcile_catalogue_versions_after_sweep(
+    origin: &str,
+    observed: BTreeMap<u32, u32>,
+    force: bool,
+) -> CatalogueSweepVerdict {
+    let (verdict, advanced) = {
+        let mut state = catalogue_reconcile_state();
+        let (verdict, advanced) =
+            catalogue_sweep_verdict(state.observed.as_ref(), &observed, force);
+        state.observed = Some(observed);
+        (verdict, advanced)
+    };
+    if let CatalogueSweepVerdict::Run { trigger } = verdict {
+        let origin = origin.to_string();
+        tokio::spawn(async move {
+            reconcile_catalogue_versions_now_with(&origin, trigger, &advanced).await;
+        });
+    }
+    verdict
+}
+
+/// 人工 / 显式触发的目录版本核对（H1 (b)，`/update/execute` 的摄入分支）：跑完再回，
+/// 回执同时落进 `/health.catalogue_reconcile`。
+pub async fn reconcile_catalogue_versions_now(origin: &str) -> CatalogueReconcileSnapshot {
+    reconcile_catalogue_versions_now_with(origin, "requested", &[]).await
+}
+
+async fn reconcile_catalogue_versions_now_with(
+    origin: &str,
+    trigger: &'static str,
+    advanced: &[u32],
+) -> CatalogueReconcileSnapshot {
+    let started = Instant::now();
+    let reconcile = reconcile_catalogue_versions().await;
+    let snapshot = CatalogueReconcileSnapshot::from_reconcile(
+        origin,
+        trigger,
+        advanced,
+        started.elapsed(),
+        reconcile,
+    );
+    for line in snapshot.banner_lines() {
+        println!("{line}");
+    }
+    catalogue_reconcile_state().latest = Some(snapshot.clone());
+    snapshot
+}
+
+/// H1 (a)：sweep 对目录核对的裁决。第一轮只记观察（启动那次核对另有人负责）；此后看见
+/// 任一目录库文件会话前移、或新出现一个目录库，就跑；周期对账那一拍强制跑；读不到头的库
+/// 从观察里消失不算前移。
+#[cfg(test)]
+#[test]
+fn a_sweep_reconciles_catalogues_only_when_a_file_advanced_or_the_tick_forces_it() {
+    use CatalogueSweepVerdict::{Run, Seeded, Unchanged};
+    let observed = |pairs: &[(u32, u32)]| pairs.iter().copied().collect::<BTreeMap<u32, u32>>();
+    let first = observed(&[(7000, 12), (5052, 185)]);
+    // 进程里的第一轮：只记，不跑——即便是强制那一拍。
+    assert_eq!(
+        catalogue_sweep_verdict(None, &first, false),
+        (Seeded, Vec::new())
+    );
+    assert_eq!(
+        catalogue_sweep_verdict(None, &first, true),
+        (Seeded, Vec::new())
+    );
+    // 没变、不强制：不跑。
+    assert_eq!(
+        catalogue_sweep_verdict(Some(&first), &first, false),
+        (Unchanged, Vec::new())
+    );
+    // 没变、周期对账那一拍：跑，理由是 periodic，前移名单为空。
+    assert_eq!(
+        catalogue_sweep_verdict(Some(&first), &first, true),
+        (
+            Run {
+                trigger: "periodic"
+            },
+            Vec::new()
+        )
+    );
+    // 一个库前移：跑，点名它。
+    assert_eq!(
+        catalogue_sweep_verdict(Some(&first), &observed(&[(7000, 13), (5052, 185)]), false),
+        (
+            Run {
+                trigger: "catalogue_file_advanced"
+            },
+            vec![7000]
+        )
+    );
+    // 新出现一个目录库（刚进 MDB / 刚出现在监控目录）：也算前移。
+    assert_eq!(
+        catalogue_files_advanced(
+            Some(&first),
+            &observed(&[(7000, 12), (5052, 185), (7351, 3)])
+        ),
+        vec![7351]
+    );
+    // 上一轮见过、这一轮读不到头（从观察里消失）：未知，不算前移。
+    assert_eq!(
+        catalogue_sweep_verdict(Some(&first), &observed(&[(7000, 12)]), false),
+        (Unchanged, Vec::new())
+    );
+    // 会话回退（文件被换回旧版）不是前移：那是数据面回退阻断管的事。
+    assert_eq!(
+        catalogue_files_advanced(Some(&first), &observed(&[(7000, 11), (5052, 185)])),
+        Vec::<u32>::new()
+    );
+}
+
+/// 周期复核没发现过期库时不许刷屏；文件前移 / 人工触发总要回一句；有过期库时逐库一行 + 反查一行。
+#[cfg(test)]
+#[test]
+fn the_runtime_catalogue_reconcile_speaks_only_when_it_has_something_to_say() {
+    let quiet = CatalogueReconcileSnapshot::from_reconcile(
+        "reconcile",
+        "periodic",
+        &[],
+        std::time::Duration::from_millis(3),
+        CatalogueReconcile::default(),
+    );
+    assert!(quiet.banner_lines().is_empty());
+    assert_eq!(quiet.enqueued_roots(), 0);
+
+    let advanced = CatalogueReconcileSnapshot::from_reconcile(
+        "watch",
+        "catalogue_file_advanced",
+        &[7000],
+        std::time::Duration::from_millis(3),
+        CatalogueReconcile {
+            unreadable: 1,
+            ..CatalogueReconcile::default()
+        },
+    );
+    let lines = advanced.banner_lines();
+    assert_eq!(lines.len(), 1);
+    assert!(
+        lines[0].contains("[watch]") && lines[0].contains("7000"),
+        "{lines:?}"
+    );
+    assert!(lines[0].contains("没有落在旧目录上"), "{lines:?}");
+    assert!(lines[0].contains("1 个记在案的 CATA 库读不到"), "{lines:?}");
+
+    let stale = CatalogueReconcileSnapshot::from_reconcile(
+        "update-execute",
+        "requested",
+        &[],
+        std::time::Duration::from_millis(3),
+        CatalogueReconcile {
+            stale: vec![7000],
+            windows: vec![
+                crate::data_interface::cata_cascade_window::CatalogueWindowReport::failed(
+                    7000,
+                    11,
+                    12,
+                    "locked".into(),
+                ),
+            ],
+            cascade: Some(
+                crate::data_interface::reverse_reference::CatalogueCascadeReport::failed(
+                    "open the current MDB".into(),
+                ),
+            ),
+            ..CatalogueReconcile::default()
+        },
+    );
+    assert!(stale.catalogue_cascade_degraded);
+    let lines = stale.banner_lines();
+    assert_eq!(lines.len(), 3, "{lines:?}");
+    assert!(lines[0].contains("1 个 CATA 库已前移") && lines[0].contains("requested"));
 }
 
 /// 逐个过期目录库收窗；收不了的记 `error`，**不**让一个库的失败挡住别的库。
@@ -3366,36 +3933,64 @@ pub async fn reconcile_model_coverage_at_startup() {
     crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
 }
 
-/// 启动那一刻**登记了、却一条凭证记录都没有**的库（ADR-058 D6：等按需 ensure，
-/// 启动一根不排）。
+/// 启动那一刻**当前 MDB 声明了、却一条凭证记录都没有**的 DESI 库（ADR-058 D6：等按需
+/// ensure，启动一根不排）。
 ///
-/// 读不到登记表时回 `None`：「没有无凭证的库」与「不知道有没有」在这一栏上长得一
+/// 分母是 MDB 成员（`model_source::mdb_design_dbnums`，与右端「文件最新」同一份权威），
+/// **不是** `DbnumState::list_registered()`（09-04 审核 #6）：登记表是数据面的，里面有
+/// SYST / DICT / CATA 与换过 MDB 之后的历史行，拿它当分母会把没有模型面的库报成「无凭证」。
+///
+/// 读不到成员名单时回 `None`：「没有无凭证的库」与「不知道有没有」在这一栏上长得一
 /// 模一样，而前者是绿灯、后者要人去翻日志。
 async fn dbnums_without_credentials(
     floors: &BTreeMap<u32, StartupCoverageFloor>,
 ) -> Option<Vec<u32>> {
-    match crate::data_interface::dbnum_state::DbnumState::list_registered().await {
-        Ok(states) => {
-            let mut missing: Vec<u32> = states
+    let declared = current_mdb_design_dbnums().await;
+    match declared {
+        Ok(declared) => Some(
+            declared
                 .into_iter()
-                .filter(|state| {
-                    (state.db_type.eq_ignore_ascii_case("DESI") || state.db_type.is_empty())
-                        && crate::data_interface::watch_scope::admits(state.dbnum)
-                        && !floors.contains_key(&state.dbnum)
+                .filter(|dbnum| {
+                    crate::data_interface::watch_scope::admits(*dbnum)
+                        && !floors.contains_key(dbnum)
                 })
-                .map(|state| state.dbnum)
-                .collect();
-            missing.sort_unstable();
-            missing.dedup();
-            Some(missing)
-        }
+                .collect(),
+        ),
         Err(error) => {
             println!(
-                "模型凭证核对：读不到 DBNUM 登记表，本次说不出哪些库还没有凭证记录\
+                "模型凭证核对：读不到当前 MDB 的 DESI 成员名单，本次说不出哪些库还没有凭证记录\
                  ——是未知，不是「都有」: {error:#}"
             );
             None
         }
+    }
+}
+
+async fn current_mdb_design_dbnums() -> anyhow::Result<BTreeSet<u32>> {
+    tokio::task::spawn_blocking(crate::data_interface::model_source::mdb_design_dbnums)
+        .await
+        .map_err(|error| anyhow::anyhow!("读取 MDB 成员的阻塞任务异常: {error}"))?
+        .map(|dbnums| dbnums.into_iter().collect())
+}
+
+/// 启动复核为一个有凭证的库取右端时的三种结局（09-04 审核 #7）。
+enum StartupTargetLookup {
+    Found(crate::data_interface::model_source::SourceVersion),
+    /// 这个 dbnum 不在当前 MDB：换过 MDB 之后留下的历史 `gen_root` 行。没有文件可核，
+    /// 只能点名——它**不是**「这次没确认」。
+    NotInMdb,
+    /// 成员名单读不到、stat 失败、解会话失败：这一轮没确认。
+    Unreadable(anyhow::Error),
+}
+
+/// `result` 那一格的取重：最重的说了算。`not_in_mdb` 刻意不在入参里——它不表示复核没跑成。
+fn startup_reconcile_result(window_failed: usize, unreadable: usize) -> &'static str {
+    if window_failed > 0 {
+        "window_failed"
+    } else if unreadable > 0 {
+        "unreadable"
+    } else {
+        "ok"
     }
 }
 
@@ -3431,7 +4026,35 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
             return coverage;
         }
     };
-    coverage.candidates = floors.len();
+    let registered = match crate::data_interface::dbnum_state::DbnumState::list_registered().await {
+        Ok(rows) => rows,
+        Err(error) => {
+            println!("模型水位恢复扫描失败：读不到 DBNUM 注册表，本次按未确认处理: {error:#}");
+            coverage.reconcile.result = "watermarks_failed";
+            return coverage;
+        }
+    };
+    let registered_by_dbnum = registered
+        .into_iter()
+        .map(|state| (state.dbnum, state))
+        .collect::<BTreeMap<_, _>>();
+    // `watch_dbnums=[]` means unrestricted watcher intake, not unrestricted MDB
+    // initialization. Startup model recovery is still scoped to the current MDB's
+    // declared DESI set; historical gen_root/watermark rows outside that set are
+    // retained but must not reopen work in this project startup.
+    let mdb_design_dbnums = match current_mdb_design_dbnums().await {
+        Ok(dbnums) => dbnums,
+        Err(error) => {
+            println!(
+                "模型凭证核对失败：读取当前 MDB 的 DESI 成员名单失败，启动覆盖范围未知: {error:#}"
+            );
+            coverage.reconcile.result = "mdb_members_failed";
+            return coverage;
+        }
+    };
+    // Even equal watermarks require a valid source-bound completion receipt.
+    let candidate_dbnums = mdb_design_dbnums.clone();
+    coverage.candidates = candidate_dbnums.len();
     coverage.no_credential_dbnums = dbnums_without_credentials(&floors).await;
     // 目录那一格挂在开窗之前、也挂在 `floors.is_empty()` 早退之前：目录前移与本库
     // 有没有落后是两件独立的事，一个库凭证全追平、目录却换了版，照样要点名。
@@ -3440,6 +4063,7 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         unreadable: unreadable_catalogue,
         windows: catalogue_windows,
         cascade: catalogue_cascade,
+        dependency_refresh: catalogue_dependency_refresh,
     } = reconcile_catalogue_versions().await;
     // 目录那一位的语义（P3 起）：前移了**且**反查没能精确回答——某个库退化、或整个反查没跑成。
     // 精确命中只排引用根的启动不算退化。
@@ -3467,56 +4091,82 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
              （换过 MDB / 文件不在了），这几个是**未知**、不算已确认过期"
         );
     }
+    // A3：数据面那一半——已入库依赖行随目录前移。安静的一次不出声。
+    if let Some(line) = catalogue_dependency_refresh.banner_line() {
+        println!("目录版本核对：{line}");
+    }
     // 模型水位双向对账（ADR-060 D6/D7），挂在开窗之前：它只读 `gen_root` 与水位行，
     // 不依赖文件、也不影响下面选根开窗的任何一个判据。
     //
     // 覆盖面是**有凭证的库 ∪ 没凭证的库**：幽灵模型水位恰恰长在后一堆里——`gen_root`
     // 零行的库根本不会出现在 `floors`（那是一条 `GROUP BY gen_root`），只查前一堆
     // 就永远发现不了「水位说追平过、模型面一行都没有」。
-    reconcile_model_watermarks(
-        floors
-            .keys()
-            .copied()
-            .chain(coverage.no_credential_dbnums.iter().flatten().copied())
-            .filter(|dbnum| crate::data_interface::watch_scope::admits(*dbnum))
-            .collect::<BTreeSet<_>>(),
-    )
-    .await;
-    if floors.is_empty() {
-        println!(
-            "模型凭证核对：gen_root 尚无凭证记录，本次启动不排任何模型工作\
-             ——从未生成过的根等按需 ensure（ADR-058 D6）"
-        );
+    let completion_probes = reconcile_model_watermarks(candidate_dbnums.iter().copied()).await;
+    if candidate_dbnums.is_empty() {
+        println!("模型凭证与严格水位核对：没有需要恢复的库");
         coverage.reconcile.result = "ok";
         coverage.reconcile.catalogue_cascade_degraded = catalogue_cascade_degraded;
         coverage.reconcile.stale_catalogue_dbnums = stale_catalogue;
         coverage.reconcile.unreadable_catalogue_dbnums = unreadable_catalogue;
         coverage.reconcile.catalogue_windows = catalogue_windows;
         coverage.reconcile.catalogue_cascade = catalogue_cascade;
+        coverage.reconcile.catalogue_dependency_refresh = catalogue_dependency_refresh;
         return coverage;
     }
 
     let mut examined = 0usize;
     let mut windows = 0usize;
     let mut enqueued = 0usize;
-    let mut advanced = 0usize;
+    let advanced = 0usize;
     let mut unreadable = 0usize;
+    let mut not_in_mdb: Vec<u32> = Vec::new();
     let mut window_failed = 0usize;
-    for (dbnum, floor) in floors {
-        if crate::data_interface::model_publish_queue::blocks_dbnum(dbnum) {
-            continue;
-        }
+    for dbnum in candidate_dbnums {
         if !crate::data_interface::watch_scope::admits(dbnum) {
             continue;
         }
         examined += 1;
-        let target = match tokio::task::spawn_blocking(move || {
-            crate::data_interface::model_source::latest_source_version(dbnum)
+        let Some(state) = registered_by_dbnum.get(&dbnum) else {
+            not_in_mdb.push(dbnum);
+            continue;
+        };
+        let Some(probe) = completion_probes.get(&dbnum) else {
+            unreadable += 1;
+            continue;
+        };
+        if !state.db_type.eq_ignore_ascii_case("DESI") || state.applied_sesno <= 0 {
+            continue;
+        }
+        if crate::data_interface::model_publish_queue::blocks_dbnum(dbnum)
+            && !crate::data_interface::model_publish_queue::can_adopt_retained_initialization(
+                dbnum,
+                state.applied_sesno,
+            )
+        {
+            continue;
+        }
+        // 先问「在不在当前 MDB」，再问「文件最新是哪一版」：两句失败的含义不同（#7），
+        // 右端仍取 `latest_source_version`——启动的标尺是文件最新，不是应用水位。
+        let source = match tokio::task::spawn_blocking(move || {
+            match crate::data_interface::model_source::source_file_lookup(dbnum) {
+                Ok(None) => StartupTargetLookup::NotInMdb,
+                Err(error) => StartupTargetLookup::Unreadable(error),
+                Ok(Some(_)) => {
+                    match crate::data_interface::model_source::latest_source_version(dbnum) {
+                        Ok(target) => StartupTargetLookup::Found(target),
+                        Err(error) => StartupTargetLookup::Unreadable(error),
+                    }
+                }
+            }
         })
         .await
         {
-            Ok(Ok(target)) => target,
-            Ok(Err(error)) => {
+            Ok(StartupTargetLookup::Found(target)) => target,
+            Ok(StartupTargetLookup::NotInMdb) => {
+                not_in_mdb.push(dbnum);
+                continue;
+            }
+            Ok(StartupTargetLookup::Unreadable(error)) => {
                 unreadable += 1;
                 println!(
                     "模型凭证核对跳过 dbnum={dbnum}（取不到文件最新会话，按未确认处理，\
@@ -3534,66 +4184,115 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
             }
         };
         // 一级过滤：安定凭证已不早于文件最新，且没有未安定的行 —— 这个库连窗都不用开。
-        let behind = floor.unsettled_roots > 0
-            || floor
-                .settled_floor
-                .is_none_or(|settled| settled < target.sesno as i32);
+        let credential_behind = floors.get(&dbnum).is_some_and(|floor| {
+            floor.unsettled_roots > 0
+                || floor
+                    .settled_floor
+                    .is_none_or(|settled| settled < state.applied_sesno)
+        });
+        let completion_covers = probe
+            .completed_sesno
+            .is_some_and(|end| end >= state.applied_sesno)
+            && probe.supported() >= state.applied_sesno;
+        let behind =
+            probe.recorded < state.applied_sesno || credential_behind || !completion_covers;
         if !behind {
             continue;
         }
-        windows += 1;
-        match crate::data_interface::window_root_plan::reconcile_startup_window(
-            dbnum,
-            &target.db_type,
-            floor.settled_floor,
-            &target,
-        )
-        .await
-        {
-            Ok(report) => {
-                enqueued += report.enqueued;
-                advanced += report.advanced;
-                println!(
-                    "启动退化窗口 dbnum={dbnum} {}→{} 根={} 未安定={} 排队={} 前移={}{}",
-                    report
-                        .base_sesno
-                        .map_or_else(|| "—".to_string(), |base| base.to_string()),
-                    report.target_sesno,
-                    report.roots_s,
-                    report.unsettled,
-                    report.enqueued,
-                    report.advanced,
-                    report
-                        .degraded
-                        .as_deref()
-                        .map(|reason| format!(" degraded={reason}"))
-                        .unwrap_or_default(),
-                );
+        println!(
+            "[model-completion] dbnum={dbnum} applied={} model={} floor={:?} \
+            reason={} credential_behind={credential_behind}",
+            state.applied_sesno,
+            probe.recorded,
+            probe.settled_floor,
+            if !probe.has_roots {
+                "empty_inventory_unverified"
+            } else if probe.completion_present && probe.completed_sesno.is_none() {
+                "input_changed"
+            } else if credential_behind {
+                "root_credential_behind"
+            } else {
+                "legacy_completion_missing"
             }
-            Err(error) => {
-                window_failed += 1;
-                println!(
-                    "启动退化窗口失败 dbnum={dbnum}：该库模型覆盖有缺口且本次未能收口，\
-                     需人工 POST /api/v1/dbnums/{dbnum}/model/rebuild 收口（启动继续）: {error:#}"
-                )
-            }
+        );
+        if source.sesno < state.applied_sesno as u32 {
+            unreadable += 1;
+            println!(
+                "模型恢复跳过 dbnum={dbnum}：登记应用水位 {} 超过文件最新 {}",
+                state.applied_sesno, source.sesno
+            );
+            continue;
         }
+        windows += 1;
+        let model_start_sesno = if probe.completion_present && probe.completed_sesno.is_none() {
+            0
+        } else {
+            floors
+                .get(&dbnum)
+                .and_then(|floor| floor.settled_floor)
+                .map_or(probe.recorded, |floor| floor.min(probe.recorded))
+        };
+        let found = crate::data_interface::batch_scheduler::DiscoveredBatch {
+            project: state.owner_project.clone(),
+            dbnum,
+            db_type: state.db_type.clone(),
+            phase: crate::data_interface::initialization_phase::DataPhase::Design,
+            epoch_id: 0,
+            intent: crate::data_interface::batch_queue::BatchIntent::ModelOnly,
+            model_start_sesno: Some(model_start_sesno),
+            path: source.file.clone(),
+            file_name: source
+                .file
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| state.file_name.clone()),
+            applied_sesno: state.applied_sesno,
+            file_latest_sesno: state.applied_sesno,
+            previous_observed_sesno: state.applied_sesno,
+            first_pending_sesno_time: None,
+            file_latest_sesno_time: state.applied_sesno_time.clone(),
+        };
+        let outcome = crate::data_interface::batch_scheduler::BatchScheduler::global().enqueue(
+            crate::data_interface::task_registry::TaskRegistry::global(),
+            &found,
+            false,
+        );
+        if outcome.outcome != crate::data_interface::batch_queue::Enqueued::AlreadyCovered {
+            enqueued += 1;
+        }
+        println!(
+            "启动模型恢复已排 Task dbnum={dbnum} model={}→{} intent={} task={}",
+            model_start_sesno, state.applied_sesno, outcome.info.intent, outcome.info.task_id
+        );
+    }
+    if !not_in_mdb.is_empty() {
+        not_in_mdb.sort_unstable();
+        let sample = not_in_mdb
+            .iter()
+            .take(12)
+            .map(|dbnum| dbnum.to_string())
+            .collect::<Vec<_>>()
+            .join("、");
+        println!(
+            "模型凭证核对：{} 个库在 gen_root 里有凭证记录、却不在当前 MDB（历史行，多半是换过 \
+             MDB）；没有文件可核，只点名、不计入「未确认」：{sample}{}",
+            not_in_mdb.len(),
+            if not_in_mdb.len() > 12 { " …" } else { "" }
+        );
     }
     println!(
         "模型凭证核对完成：核对 {examined} 库，开窗 {windows} 库，排队 {enqueued} 项，\
-         前移凭证 {advanced} 根，取不到文件最新 {unreadable} 库，开窗失败 {window_failed} 库"
+         前移凭证 {advanced} 根，取不到文件最新 {unreadable} 库，不在当前 MDB {} 库，\
+         开窗失败 {window_failed} 库",
+        not_in_mdb.len()
     );
     coverage.in_scope = examined;
     coverage.reconcile = StartupReconcile {
-        // 最重的那一档说了算：开窗失败要人动手，取不到文件最新只是这一轮没确认。
-        result: if window_failed > 0 {
-            "window_failed"
-        } else if unreadable > 0 {
-            "unreadable"
-        } else {
-            "ok"
-        },
+        // 最重的那一档说了算：开窗失败要人动手，取不到文件最新只是这一轮没确认；
+        // 不在当前 MDB 的历史行不参与取重（#7）。
+        result: startup_reconcile_result(window_failed, unreadable),
         unreadable,
+        not_in_mdb: not_in_mdb.len(),
         window_failed,
         lagging: windows,
         windows_opened: windows - window_failed,
@@ -3605,6 +4304,7 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         unreadable_catalogue_dbnums: unreadable_catalogue,
         catalogue_windows,
         catalogue_cascade,
+        catalogue_dependency_refresh,
     };
     coverage
 }
@@ -4596,7 +5296,7 @@ fn render_drain_select_for_scope_with_active_cohorts(
           (status = 'running' AND (lease_until IS NONE OR lease_until < time::now()))) \
          AND init_run_id IS NONE \
          AND (cohort_id IS NONE OR cohort_id NOT IN {active_cohorts}) \
-         AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter}{scope_filter}{type_filter}{init_exclusion} \
+         AND (action IN ['room_recalc_panel', 'room_recalc_element'] OR (attempts?:0) < {MAX_ATTEMPTS}) {action_filter}{scope_filter}{type_filter}{init_exclusion} \
          ORDER BY legacy_source_time ASC, source_end_sesno_time DESC, \
          legacy_timestamp ASC, updated_at DESC, id ASC{limit};"
     )
@@ -4652,7 +5352,7 @@ fn render_cohort_mate_claim_for_scope(
          WHERE cohort_id IN [{cohorts}] AND init_run_id IS NONE \
          AND (status IN ['pending', 'failed'] OR \
           (status = 'running' AND (lease_until IS NONE OR lease_until < time::now()))) \
-         AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter}{scope_filter}{type_filter}{init_exclusion} RETURN AFTER;",
+         AND (action IN ['room_recalc_panel', 'room_recalc_element'] OR (attempts?:0) < {MAX_ATTEMPTS}) {action_filter}{scope_filter}{type_filter}{init_exclusion} RETURN AFTER;",
         escape_surql_str(lease_owner)
     ))
 }
@@ -4727,7 +5427,7 @@ fn render_pending_count_query(action_filter: &str, dbnums: &[u32], nouns: &[Stri
     format!(
         "SELECT count() AS count FROM {TABLE} \
          WHERE status IN ['pending', 'failed', 'running'] \
-         AND (attempts?:0) < {MAX_ATTEMPTS} {action_filter}{scope_filter}{type_filter} GROUP ALL;"
+         AND (action IN ['room_recalc_panel', 'room_recalc_element'] OR (attempts?:0) < {MAX_ATTEMPTS}) {action_filter}{scope_filter}{type_filter} GROUP ALL;"
     )
 }
 
@@ -5310,7 +6010,7 @@ fn render_scoped_room_select(keys: &[RoomWorkKey]) -> String {
     format!(
         "SELECT * FROM [{ids}] WHERE record::exists(id) \
          AND status IN ['pending', 'failed'] \
-         AND (attempts?:0) < {MAX_ATTEMPTS} ORDER BY updated_at ASC;"
+         ORDER BY updated_at ASC;"
     )
 }
 
@@ -5793,15 +6493,8 @@ async fn run_regen_group(
                     disposed.insert(root_identity_key(root));
                 }
                 settle_unechoed_roots(&plain_jobs, &repair_jobs, &disposed, report).await;
-                // 这一组的去向都定了，顺手看看它所属的库能不能盖章（ADR-060 D5）。
-                // 挂在收口**之后**：`gen_root` 的发布 CAS 与队列行的删除都已经落了，
-                // 探针这时读到的才是「模型确实保存到数据库之后」的状态。反过来排在
-                // 生成之前，就是给还没落地的几何盖「这一版有效」的章。
-                for (dbnum, end_sesno, end_time) in
-                    settled_window_cohorts(&plain_jobs, &repair_jobs)
-                {
-                    advance_model_watermark(dbnum, end_sesno, end_time.as_deref()).await;
-                }
+                // 兼容 drain 只结算根凭证和旧工作行，不再推进库级完成水位。
+                // 发布、空间和房间是否完成只有所属 dbnum Task 知道，水位由其收尾盖章。
             }
             Err(error) => {
                 // The per-root fallback acquires the same locks one by one, so
@@ -6034,6 +6727,15 @@ fn render_has_pending_work_query(
 ) -> String {
     let scope_filter = render_automatic_scope_filter(dbnums);
     let type_filter = render_automatic_type_filter(nouns);
+    let attempt_filter = if attempt_operator == "<" {
+        format!(
+            "(action IN ['room_recalc_panel', 'room_recalc_element'] OR (attempts?:0) < {MAX_ATTEMPTS})"
+        )
+    } else {
+        format!(
+            "(action NOT IN ['room_recalc_panel', 'room_recalc_element'] AND (attempts?:0) >= {MAX_ATTEMPTS})"
+        )
+    };
     let statuses = if attempt_operator == "<" {
         "['pending', 'failed', 'running']"
     } else {
@@ -6041,7 +6743,7 @@ fn render_has_pending_work_query(
     };
     format!(
         "RETURN array::len((SELECT VALUE id FROM {TABLE} \
-         WHERE status IN {statuses} AND (attempts?:0) {attempt_operator} {MAX_ATTEMPTS} \
+         WHERE status IN {statuses} AND {attempt_filter} \
          {action_filter}{scope_filter}{type_filter} LIMIT 1)) > 0;"
     )
 }
@@ -6155,21 +6857,21 @@ fn render_model_pending_status_query_for_scope(dbnums: &[u32], nouns: &[String])
         .map(|holdback| {
             format!(
                 "SELECT count() AS count FROM {TABLE} \
-                 WHERE status IN ['pending', 'failed', 'running'] AND (attempts?:0) < {MAX_ATTEMPTS}\
+                 WHERE status IN ['pending', 'failed', 'running'] AND (action IN ['room_recalc_panel', 'room_recalc_element'] OR (attempts?:0) < {MAX_ATTEMPTS})\
                  {holdback}{scope_filter} GROUP ALL;"
             )
         })
         .unwrap_or_default();
     format!(
         "SELECT action, count() AS c FROM {TABLE} \
-             WHERE status IN ['pending', 'failed', 'running'] AND (attempts?:0) < {MAX_ATTEMPTS}{scope_filter}{type_filter} \
+             WHERE status IN ['pending', 'failed', 'running'] AND (action IN ['room_recalc_panel', 'room_recalc_element'] OR (attempts?:0) < {MAX_ATTEMPTS}){scope_filter}{type_filter} \
              GROUP BY action;\
              SELECT action, count() AS c FROM {TABLE} \
-             WHERE status IN ['pending', 'failed'] AND (attempts?:0) >= {MAX_ATTEMPTS}{scope_filter}{type_filter} \
+             WHERE status IN ['pending', 'failed'] AND action NOT IN ['room_recalc_panel', 'room_recalc_element'] AND (attempts?:0) >= {MAX_ATTEMPTS}{scope_filter}{type_filter} \
              GROUP BY action;\
              SELECT id, action, target_refno, noun, attempts, last_error, revision, updated_at \
              FROM {TABLE} WHERE status IN ['pending', 'failed'] \
-             AND (attempts?:0) >= {MAX_ATTEMPTS}{scope_filter}{type_filter} \
+             AND action NOT IN ['room_recalc_panel', 'room_recalc_element'] AND (attempts?:0) >= {MAX_ATTEMPTS}{scope_filter}{type_filter} \
              ORDER BY updated_at DESC, id ASC LIMIT 10;{held}"
     )
 }
@@ -6247,9 +6949,7 @@ fn render_room_target_counts_query(dbnums: &[u32]) -> String {
     let scope_filter = render_automatic_scope_filter(dbnums);
     format!(
         "SELECT action, count() AS c FROM {TABLE} WHERE status IN ['pending', 'failed'] \
-         AND (attempts?:0) < {MAX_ATTEMPTS} {ROOM_ACTION_FILTER}{scope_filter} GROUP BY action;\
-         SELECT count() AS c FROM {TABLE} WHERE (attempts?:0) >= {MAX_ATTEMPTS} \
-         {ROOM_ACTION_FILTER}{scope_filter} GROUP ALL;"
+         {ROOM_ACTION_FILTER}{scope_filter} GROUP BY action; RETURN [];"
     )
 }
 
@@ -6313,7 +7013,13 @@ pub async fn drain_rooms(db_option: &aios_core::options::DbOption) -> anyhow::Re
                         &round.room_clear_refnos,
                     )
                     .await?;
-                    promote_room_file_round(round.dbnum, round.end_sesno).await?;
+                    let scope = promote_room_file_round(round.dbnum, round.end_sesno).await?;
+                    let report = drain_rooms_scoped(db_option, &scope).await?;
+                    anyhow::ensure!(
+                        report.failures.is_empty(),
+                        "房间恢复仍有 {} 个目标失败",
+                        report.failures.len()
+                    );
                     crate::data_interface::side_effect_pending::SideEffectCompensator::
                         mark_file_rooms_released(round.dbnum, round.end_sesno)
                     .await?;
@@ -6342,11 +7048,6 @@ pub(crate) async fn drain_rooms_scoped(
     db_option: &aios_core::options::DbOption,
     scope: &RoomDrainScope,
 ) -> anyhow::Result<DrainReport> {
-    if !crate::data_interface::initialization_phase::InitializationCoordinator::global()
-        .postprocess_allowed()
-    {
-        return Ok(DrainReport::default());
-    }
     if scope.is_empty() {
         return Ok(DrainReport::default());
     }
@@ -6600,11 +7301,13 @@ async fn ensure_resident_rooms(
     #[cfg(not(any(feature = "project_hd", feature = "project_hh")))]
     let match_room_fn = |_: &str| false;
     let room_key_words = db_option.get_room_key_word();
+    let mesh_dir = db_option.get_meshes_path();
     let outcome = crate::fast_model::room_resident::ensure_current(
         crate::options::data_face(),
         hierarchy,
         &room_key_words,
         match_room_fn,
+        &mesh_dir,
     )
     .await?;
     Ok(outcome.map(|outcome| ResidentRound {
@@ -6827,6 +7530,37 @@ async fn room_work_is_drained() -> anyhow::Result<bool> {
         .await?
         .check()?;
     Ok(!response.take::<Option<bool>>(0)?.unwrap_or(true))
+}
+
+pub(crate) async fn has_room_work() -> anyhow::Result<bool> {
+    room_work_is_drained().await.map(|drained| !drained)
+}
+
+/// 项目级全量房间计算已经重新写过全部当前面板的成员边后，删除在计算开始前遗留的
+/// 房间任务。计算期间产生的新 revision 通过 `updated_at > cutoff` 保留给增量路径。
+pub(crate) async fn clear_room_work_covered_by_full_rebuild(cutoff: &str) -> anyhow::Result<u64> {
+    clear_room_work_covered_by_full_rebuild_on(&SUL_DB, cutoff).await
+}
+
+async fn clear_room_work_covered_by_full_rebuild_on(
+    db: &Surreal<Any>,
+    cutoff: &str,
+) -> anyhow::Result<u64> {
+    let cutoff = escape_surql_str(cutoff);
+    let predicate = format!(
+        "action IN ['room_recalc_element', 'room_recalc_panel'] AND updated_at <= d'{cutoff}'"
+    );
+    let mut response = db
+        .query(format!(
+            "SELECT count() AS count FROM {TABLE} WHERE {predicate} GROUP ALL; \
+             DELETE {TABLE} WHERE {predicate} RETURN NONE;"
+        ))
+        .await?
+        .check()?;
+    Ok(response
+        .take::<Vec<PendingRowCount>>(0)?
+        .first()
+        .map_or(0, |row| row.count))
 }
 
 async fn drain_room_element_page(
@@ -7335,17 +8069,17 @@ mod tests {
         );
         assert_eq!(
             counts.matches(predicate.as_str()).count(),
-            2,
-            "活口与死信两句都必须带域: {counts}"
+            1,
+            "房间活口计数必须带域: {counts}"
         );
         assert!(
             loader.contains(predicate.as_str()),
             "加载器必须与计数器同域: {loader}"
         );
         assert!(
-            counts.contains(&format!("(attempts?:0) < {MAX_ATTEMPTS}"))
-                && loader.contains(&format!("(attempts?:0) < {MAX_ATTEMPTS}")),
-            "重试上限也必须同口径: {counts}"
+            !counts.contains("attempts")
+                && loader.contains("action IN ['room_recalc_panel', 'room_recalc_element'] OR"),
+            "房间目标无次数上限: {counts}"
         );
     }
 
@@ -8572,6 +9306,87 @@ mod tests {
 
     // ---- 模型水位护栏（ADR-060）----
 
+    #[tokio::test]
+    async fn task_tail_rejects_empty_roots_without_authoritative_completion() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("task_tail")
+            .use_db("empty_unverified")
+            .await
+            .unwrap();
+        db.query(
+            "CREATE dbnum_watermark:8000 SET applied_sesno=12, model_sesno=0; \
+                  CREATE incr_side_effect_pending:spatial_reconcile_8000_12 SET \
+                  dbnum=8000, end_sesno=12, status='done', room_released=true;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        let proof = crate::data_interface::side_effect_pending::SideEffectCompensator::
+            completed_file_round_on(&db, 8000, 12).await.unwrap();
+        let result = complete_model_task_on(
+            &db,
+            8000,
+            ModelTaskCompletion {
+                target_sesno: 12,
+                file_round: proof,
+                inputs: None,
+            },
+            None,
+        )
+        .await;
+        assert!(
+            result.is_err(),
+            "missing root inventory must not finish a task: {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn task_tail_rejects_a_file_round_proof_for_another_target() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("task_tail").use_db("stage_gate").await.unwrap();
+        db.query(
+            "CREATE incr_side_effect_pending:spatial_reconcile_8000_12 SET kind='spatial_reconcile', \
+             dbnum=8000, end_sesno=12, status='done', room_released=false;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        let proof = crate::data_interface::side_effect_pending::SideEffectCompensator::
+            mark_file_rooms_released_on(&db, 8000, 12)
+            .await
+            .unwrap();
+
+        let error = complete_model_task_on(
+            &db,
+            8001,
+            ModelTaskCompletion {
+                target_sesno: 12,
+                file_round: proof.clone(),
+                inputs: None,
+            },
+            None,
+        )
+        .await
+        .expect_err("another dbnum proof must not stamp");
+        assert!(error.to_string().contains("dbnum"), "{error:#}");
+
+        let error = complete_model_task_on(
+            &db,
+            8000,
+            ModelTaskCompletion {
+                target_sesno: 13,
+                file_round: proof,
+                inputs: None,
+            },
+            None,
+        )
+        .await
+        .expect_err("another target proof must not stamp");
+        assert!(error.to_string().contains("target"), "{error:#}");
+    }
+
     fn regen_group_body() -> &'static str {
         include_str!("model_update_pending.rs")
             .split_once("async fn run_regen_group(")
@@ -8582,31 +9397,13 @@ mod tests {
             .0
     }
 
-    /// G1（ADR-060 D5 的顺序纪律）：盖章必须排在收口之后。
-    ///
-    /// 反过来就是「先盖章后生成」——给还没落地的几何盖上「这一版有效」的章，
-    /// `generation_root_cache_current` 会判它当前，读者拿到的是旧几何。
-    /// 与 `render_credential_advance` 防的是同一个坑，那边靠 SQL 状态守卫，
-    /// 这边只有书写顺序，所以必须钉在测试里。
+    /// Compatibility drain settles roots only; the enclosing Task owns the library stamp.
     #[test]
-    fn the_model_watermark_is_stamped_only_after_the_settlement() {
+    fn the_compatibility_regen_drain_never_stamps_the_model_watermark() {
         let group = regen_group_body();
-        let settled = group
-            .find("match clear_regen_work_batch(&settlements).await")
-            .expect("收口必须存在");
-        let stamped = group
-            .find("advance_model_watermark(")
-            .expect("模型水位推进必须挂在这一组的收口之后");
-        assert!(
-            settled < stamped,
-            "模型水位必须在队列收口之后才盖章，否则就是给没落地的几何发凭证: {group}"
-        );
-        assert!(
-            group
-                .find("settle_unechoed_roots(")
-                .is_some_and(|swept| swept < stamped),
-            "未回报清扫也要先做完：那一步还会给根记失败，记完才知道这一组到底安不安定: {group}"
-        );
+        assert!(group.contains("clear_regen_work_batch(&settlements)"));
+        assert!(!group.contains("advance_model_watermark("));
+        assert!(!group.contains("stamp_model_watermark_on("));
     }
 
     fn finalize_attempt_body() -> &'static str {
@@ -8626,29 +9423,20 @@ mod tests {
     /// `RegenRoot` 时跑——有的话被触到的根还停在旧凭证，探针只能读出旧值，白跑，
     /// 收口之后 cohort 那一处会盖。反过来（先盖再前移）就是拿旧下限盖一个没意义的章。
     #[test]
-    fn a_window_without_regen_work_stamps_the_model_watermark_after_the_credential_advance() {
+    fn finalize_attempt_advances_root_credentials_but_not_the_library_watermark() {
         let body = finalize_attempt_body();
         let committed = body.find("COMMIT TRANSACTION").expect("尾事务必须存在");
         let advanced = body
             .find("advance_root_credentials_on(")
             .expect("凭证前移必须存在");
-        let stamped = body
-            .find("stamp_model_watermark_on(")
-            .expect("零 regen 窗口必须在这里盖模型水位，否则要等下次启动对账才补记");
-        assert!(
-            committed < advanced && advanced < stamped,
-            "顺序必须是 尾事务 → 凭证前移 → 盖章: {body}"
-        );
-        let gate = body
-            .find("ModelWorkAction::RegenRoot")
-            .expect("有 RegenRoot 的窗口交给 cohort 收口盖章，这里必须按它分流");
-        assert!(gate < stamped, "分流判据要排在盖章之前: {body}");
+        assert!(committed < advanced);
+        assert!(!body.contains("stamp_model_watermark_on("));
     }
 
     /// 同一格在启动退化窗口上：一项工作都没排、凭证刚前移的库，`reconcile_startup_window`
     /// 自己盖章——启动对账排在开窗之前、这一轮已经跑过，不盖就要等再下一次启动（N2）。
     #[test]
-    fn a_startup_window_that_enqueues_nothing_stamps_the_model_watermark_itself() {
+    fn a_startup_window_never_stamps_the_model_watermark_itself() {
         let body = include_str!("window_root_plan.rs")
             .split_once("pub async fn reconcile_startup_window(")
             .expect("reconcile_startup_window 必须存在")
@@ -8659,18 +9447,13 @@ mod tests {
         let advanced = body
             .find("advance_root_credentials(")
             .expect("启动窗口的凭证前移必须存在");
-        let stamped = body
-            .find("advance_model_watermark(")
-            .expect("零排队的启动窗口必须自己盖模型水位");
-        assert!(advanced < stamped, "先前移凭证再盖章: {body}");
-        let gate = body
-            .find("report.enqueued == 0")
-            .expect("排了工作的库交给 cohort 收口，这里必须按 enqueued 分流");
-        assert!(gate < stamped, "分流判据要排在盖章之前: {body}");
+        assert!(advanced > 0);
+        assert!(!body.contains("advance_model_watermark("));
+        assert!(!body.contains("stamp_model_watermark_on("));
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn delete_cleanup_completion_stamps_a_zero_regen_window() {
+    async fn delete_cleanup_completion_leaves_the_stamp_to_the_task_tail() {
         let db = reconcile_fixture(
             "delete_cleanup_watermark",
             "CREATE gen_root:24381_1 SET dbnum=8000, status='Generated', publication_status='ready', \
@@ -8734,15 +9517,15 @@ mod tests {
         delete_work_on(&db, &jobs[1]).await.unwrap();
         assert_eq!(
             stamped_watermark(&db).await,
-            (26, Some(time.into())),
-            "a delete-only window must not wait for restart reconciliation"
+            (20, None),
+            "delete cleanup settles root work but cannot certify publication and rooms"
         );
     }
 
     /// 真引擎上走一遍 G1：一窗 20→26 只前移凭证、零 regen，收口之后两枚水位都在 26，
     /// 时刻跟着号一起贴上——不必等下次启动。
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_zero_regen_window_leaves_both_watermarks_equal_when_it_closes() {
+    async fn a_zero_regen_window_leaves_the_library_watermark_to_the_task_tail() {
         let db = reconcile_fixture(
             "model_watermark_zero_regen_window",
             "CREATE gen_root:24381_1 SET dbnum = 8000, status = 'Generated', publication_status = 'ready', \
@@ -8762,8 +9545,8 @@ mod tests {
             .expect("finalize");
         assert_eq!(
             stamped_watermark(&db).await,
-            (26, Some(time.to_string())),
-            "零 regen 的窗口收口即追平，不许留到下次启动对账"
+            (20, None),
+            "根凭证前移不能替 Task 证明发布、空间与房间都已完成"
         );
     }
 
@@ -8973,13 +9756,13 @@ mod tests {
         assert_eq!(stamped, None, "数据没到那一版，一个字都不许写");
     }
 
-    /// G4（Q10）：一个修不好的根不许把整库的水位永久钉死。
+    /// ADR-065：失败根必须把严格完成水位钉在上一版。
     ///
     /// `http_422` 是「这个 noun 与数据永远解析不出合法生成根」的永久判定，死信是
     /// 重试撞满 [`MAX_ATTEMPTS`]。两者都永远不会变成安定行——算进拦路，这个库的灯
     /// 从此永红，而且现场看不出是被哪一个根卡的。它们进「已放弃」那一格，照旧露出来。
     #[tokio::test]
-    async fn an_abandoned_root_does_not_pin_the_model_watermark_forever() {
+    async fn an_abandoned_root_holds_the_strict_model_watermark() {
         use surrealdb::engine::any::connect;
 
         let db = connect("mem://").await.expect("mem boots");
@@ -8994,7 +9777,8 @@ mod tests {
              CREATE {TABLE}:dead SET dbnum = 8000, db_type = 'DESI', source_end_sesno = 26, \
              action = 'regen_root', target_refno = '24381/3', noun = 'BRAN', \
              status = 'failed', attempts = {MAX_ATTEMPTS}, revision = 1;\
-             CREATE dbnum_watermark:8000 SET dbnum = 8000, applied_sesno = 26;"
+             CREATE dbnum_watermark:8000 SET dbnum = 8000, applied_sesno = 26, model_sesno = 0, \
+             model_sesno_time = NONE, model_dead_roots = 0;"
         ))
         .await
         .unwrap()
@@ -9006,8 +9790,11 @@ mod tests {
             .expect("probe runs");
         assert_eq!(
             outcome,
-            ModelWatermarkOutcome::Advanced { sesno: 26 },
-            "唯一没安定的两个根都已放弃，水位照常追平"
+            ModelWatermarkOutcome::HeldByRoots {
+                total: 2,
+                blockers: Vec::new(),
+            },
+            "已放弃根仍未生成完整，严格完成水位不得越过"
         );
 
         #[derive(serde::Deserialize)]
@@ -9027,13 +9814,9 @@ mod tests {
             .unwrap();
         let row: Option<Stamped> = response.take(0).unwrap();
         let row = row.expect("水位行还在");
-        assert_eq!(row.model_sesno, 26);
-        assert_eq!(
-            row.model_sesno_time.as_deref(),
-            Some("2026-09-04T09:00:00+08:00"),
-            "候选值正好等于窗口右端，时刻才贴得上"
-        );
-        assert_eq!(row.model_dead_roots, 2, "已放弃的那两个必须照数露出来");
+        assert_eq!(row.model_sesno, 0);
+        assert_eq!(row.model_sesno_time, None);
+        assert_eq!(row.model_dead_roots, 0, "阻挡路径不伪造一次水位写入");
     }
 
     /// 还在赶的根（既不是死信也不是 `http_422`）照旧拦住水位——G4 放宽的只有已放弃那一格。
@@ -9187,13 +9970,9 @@ mod tests {
         assert_eq!(stamped_watermark(&db).await, (20, None));
     }
 
-    /// D6 上调：热路径漏记的那一次在这里补回来。
-    ///
-    /// 漏记有两个来源，都是真异步换来的（M7）：模型跑到数据前面那一次按 D5 条件 3
-    /// 跳过，以及收口前进程被 `clear_stale_at_process_start` 清空。不补就永久丢——
-    /// cohort 行删了之后没人会再回来盖这一章。
+    /// 普通对账发现凭证高于完成水位时只报告，不代替 Task 补章。
     #[tokio::test]
-    async fn the_reconcile_raises_a_stamp_the_hot_path_missed() {
+    async fn the_reconcile_reports_but_does_not_raise_a_missed_stamp() {
         let db = reconcile_fixture(
             "model_watermark_raise",
             "CREATE gen_root:24381_1 SET dbnum = 8000, status = 'Generated', source_end_sesno = 26;\
@@ -9203,9 +9982,12 @@ mod tests {
 
         assert_eq!(
             reconcile_model_watermark_on(&db, 8000).await.unwrap(),
-            ModelWatermarkReconcile::RaisedMissedStamp { from: 0, to: 26 }
+            ModelWatermarkReconcile::AwaitingTaskCompletion {
+                recorded: 0,
+                supported: 26
+            }
         );
-        assert_eq!(stamped_watermark(&db).await, (26, None));
+        assert_eq!(stamped_watermark(&db).await, (0, None));
     }
 
     /// 上调同样受 M2 封顶：证据再高，也不许越过数据水位。
@@ -9220,15 +10002,17 @@ mod tests {
 
         assert_eq!(
             reconcile_model_watermark_on(&db, 8000).await.unwrap(),
-            ModelWatermarkReconcile::RaisedMissedStamp { from: 0, to: 26 },
+            ModelWatermarkReconcile::AwaitingTaskCompletion {
+                recorded: 0,
+                supported: 26
+            },
             "模型追到 40 了，但只承诺到数据到过的那一版"
         );
     }
 
-    /// 兼容历史库：属性已经落在 `pe`、模型已经落在投影表，但当时还没有 `gen_root`
-    /// 与模型水位。启动对账按用户约定把两枚库级水位视为同一位置。
+    /// 兼容历史库也必须经过恢复 Task，普通对账不再凭投影存在直接上调。
     #[tokio::test]
-    async fn legacy_inst_projection_seeds_the_model_watermark_from_applied() {
+    async fn legacy_inst_projection_waits_for_a_completion_task() {
         let db = reconcile_fixture(
             "legacy_inst_model_watermark",
             "CREATE pe:24381_1 SET dbnum = 8000, sesno = 26;\
@@ -9239,13 +10023,16 @@ mod tests {
 
         assert_eq!(
             reconcile_model_watermark_on(&db, 8000).await.unwrap(),
-            ModelWatermarkReconcile::SeededLegacyProjection { sesno: 26 }
+            ModelWatermarkReconcile::AwaitingTaskCompletion {
+                recorded: 0,
+                supported: 26
+            }
         );
-        assert_eq!(stamped_watermark(&db).await, (26, None));
+        assert_eq!(stamped_watermark(&db).await, (0, None));
     }
 
     #[tokio::test]
-    async fn legacy_tubi_projection_with_dbnum_seeds_the_model_watermark() {
+    async fn legacy_tubi_projection_with_dbnum_waits_for_a_completion_task() {
         let db = reconcile_fixture(
             "legacy_tubi_model_watermark",
             "CREATE pe:24381_1 SET dbnum = 8000, sesno = 26;\
@@ -9256,9 +10043,12 @@ mod tests {
 
         assert_eq!(
             reconcile_model_watermark_on(&db, 8000).await.unwrap(),
-            ModelWatermarkReconcile::SeededLegacyProjection { sesno: 26 }
+            ModelWatermarkReconcile::AwaitingTaskCompletion {
+                recorded: 0,
+                supported: 26
+            }
         );
-        assert_eq!(stamped_watermark(&db).await, (26, None));
+        assert_eq!(stamped_watermark(&db).await, (0, None));
     }
 
     #[tokio::test]
@@ -9314,13 +10104,13 @@ mod tests {
         assert_eq!(stamped_watermark(&db).await, (0, None));
     }
 
-    /// Q10 在对账这条路上同样成立：一个已放弃的根不许每次启动都把水位清零。
+    /// ADR-065 在启动对账同样成立：失败根使既有追平水位失去完整性证据。
     ///
     /// 这一格比热路径那一格更凶——热路径漏一次只是晚点盖章，对账要是把已放弃根算进
     /// 「还在赶」，`supported` 恒为 0，**每一次启动都会把刚追平的水位抹掉**，而现场看到
     /// 的只是一枚永远为 0 的水位。
     #[tokio::test]
-    async fn an_abandoned_root_does_not_zero_the_watermark_at_reconcile() {
+    async fn an_abandoned_root_lowers_unbacked_watermark_at_reconcile() {
         let db = reconcile_fixture(
             "model_watermark_reconcile_dead",
             "CREATE gen_root:24381_1 SET dbnum = 8000, status = 'Generated', source_end_sesno = 26;\
@@ -9332,16 +10122,12 @@ mod tests {
 
         assert_eq!(
             reconcile_model_watermark_on(&db, 8000).await.unwrap(),
-            ModelWatermarkReconcile::Aligned { sesno: 26 },
-            "唯一没安定的那个根已放弃，对账不得动这枚水位"
+            ModelWatermarkReconcile::LoweredUnbacked { from: 26, to: 0 },
+            "失败根没有完整模型证据，对账必须撤销错误水位"
         );
         let (sesno, time) = stamped_watermark(&db).await;
-        assert_eq!(sesno, 26);
-        assert_eq!(
-            time.as_deref(),
-            Some("2026-09-04T09:00:00+08:00"),
-            "没改号就不该动时刻"
-        );
+        assert_eq!(sesno, 0);
+        assert_eq!(time, None);
     }
 
     /// 还在赶的根让支撑值归 0——对账降水位是对的：这个库整体没追平到任何一版。
@@ -10174,6 +10960,79 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn room_failures_remain_selectable_without_attempt_limits() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("test")
+            .use_db("room_no_attempt_limit")
+            .await
+            .unwrap();
+        let item = room_item(ModelWorkAction::RoomRecalcElement, 0, 0);
+        db.query(render_upsert_no_time(&item))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        db.query(format!("UPDATE {} SET attempts=999;", record_id(&item)))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let failure =
+            render_mark_failed_revision(item.action, &item.target_refno, 1, "fixture failure");
+        assert!(!failure.contains("attempts"));
+        db.query(failure).await.unwrap().check().unwrap();
+        let keys = vec![RoomWorkKey {
+            action: item.action,
+            target_refno: item.target_refno,
+        }];
+        assert_eq!(load_scoped_room_jobs_on(&db, &keys).await.unwrap().len(), 1);
+        let mut result = db
+            .query(render_model_pending_status_query_for_scope(&[], &[]))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let live: Vec<ModelPendingActionCount> = result.take(0).unwrap();
+        let dead: Vec<ModelPendingActionCount> = result.take(1).unwrap();
+        assert_eq!(live[0].c, 1);
+        assert!(dead.is_empty());
+    }
+
+    #[tokio::test]
+    async fn full_room_rebuild_clears_only_older_room_work() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("test")
+            .use_db("full_room_settlement")
+            .await
+            .unwrap();
+        db.query(
+            "CREATE model_update_pending:old_element SET action='room_recalc_element', updated_at=d'2026-09-09T00:00:00Z';
+             CREATE model_update_pending:new_element SET action='room_recalc_element', updated_at=d'2026-09-09T00:00:02Z';
+             CREATE model_update_pending:old_panel SET action='room_recalc_panel', updated_at=d'2026-09-09T00:00:00Z';
+             CREATE model_update_pending:new_panel SET action='room_recalc_panel', updated_at=d'2026-09-09T00:00:02Z';",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let cleared = clear_room_work_covered_by_full_rebuild_on(&db, "2026-09-09T00:00:01Z")
+            .await
+            .unwrap();
+        assert_eq!(cleared, 2);
+        let mut result = db
+            .query("SELECT VALUE id FROM model_update_pending ORDER BY id;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let ids: Vec<surrealdb::sql::Thing> = result.take(0).unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.iter().any(|id| id.id.to_string() == "new_element"));
+        assert!(ids.iter().any(|id| id.id.to_string() == "new_panel"));
+    }
+
+    #[tokio::test]
     async fn scoped_room_selection_isolated_backlog_and_revision_safe_on_surreal() {
         use surrealdb::engine::any::connect;
 
@@ -10490,6 +11349,22 @@ mod tests {
         assert!(report.failures.is_empty());
     }
 
+    #[test]
+    fn task_scoped_room_drain_does_not_wait_for_the_initialization_run() {
+        let source = include_str!("model_update_pending.rs");
+        let body = source
+            .split_once("pub(crate) async fn drain_rooms_scoped(")
+            .expect("scoped room drain exists")
+            .1
+            .split_once("pub(crate) async fn promote_room_file_round(")
+            .expect("promotion follows scoped room drain")
+            .0;
+        assert!(
+            !body.contains("postprocess_allowed"),
+            "a dbnum Task must finish its own room work during initialization"
+        );
+    }
+
     /// ADR-010 §7：房间任务的行不带 dbnum。一块面板天然跨库，带上 dbnum 会让同一间房
     /// 在一轮里排出多行、被重算多遍，失败后又只能等同一个库的新会话来复活，而真正
     /// 触发它的那些库永远够不着它（B6 的放大版）。
@@ -10690,7 +11565,7 @@ mod tests {
     #[test]
     fn a_room_task_revives_on_any_new_trigger_not_on_a_newer_session() {
         let sql = render_upsert_no_time(&room_item(ModelWorkAction::RoomRecalcPanel, 24381, 42));
-        assert!(sql.contains("attempts = 0"), "{sql}");
+        assert!(!sql.contains("attempts ="), "{sql}");
         assert!(sql.contains("last_error = NONE"), "{sql}");
         assert!(
             !sql.contains("IF 42 > (source_end_sesno?:0)"),
@@ -11106,13 +11981,23 @@ mod tests {
             ) && inner.contains("        catalogue_cascade_degraded,\n"),
             "两个出口都要带上目录那一位"
         );
+        // 取重 2026-09-08 起是纯函数 `startup_reconcile_result(window_failed, unreadable)`（09-04 审核 #7）：
+        // 入参里既没有目录那一格、也没有 `not_in_mdb`，函数体里也不许出现。
+        assert!(
+            inner.contains("result: startup_reconcile_result(window_failed, unreadable),"),
+            "`result` 必须由那个纯函数给出"
+        );
+        let arms = source
+            .split_once("fn startup_reconcile_result(window_failed: usize, unreadable: usize)")
+            .expect("取重的纯函数存在")
+            .1;
+        let arms = &arms[..arms.find("\n}\n").expect("函数体收尾")];
+        assert!(
+            !arms.contains("catalogue") && !arms.contains("not_in_mdb"),
+            "`result` 的取重不许看目录那一格、也不看不在 MDB 的历史行: {arms}"
+        );
         for probe in ["if window_failed > 0 {", "} else if unreadable > 0 {"] {
-            let arm = inner.split_once(probe).expect("result arm exists").1;
-            let arm = &arm[..arm.len().min(120)];
-            assert!(
-                !arm.contains("catalogue"),
-                "`result` 的取重不许看目录那一格: {arm}"
-            );
+            assert!(arms.contains(probe), "取重顺序不变：{probe}");
         }
     }
 
@@ -11496,8 +12381,8 @@ mod tests {
             "一级过滤必须一次问完全部库的凭证下限: {body}"
         );
         assert!(
-            body.contains("reconcile_startup_window("),
-            "发现落后必须开退化窗口收口，不能只报数: {body}"
+            body.contains("BatchIntent::ModelOnly"),
+            "发现落后必须排 ModelOnly Task，不能只报数: {body}"
         );
 
         let startup = include_str!("../lib.rs");
@@ -11552,7 +12437,7 @@ mod tests {
         );
     }
 
-    /// ADR-058 实施约束 1：启动的选根不得再经 `pe`，标尺不得再是水位。
+    /// Startup recovery uses the applied watermark as its frozen completion target.
     ///
     /// `fn::sync_gen_roots` → `fn::gen_root_cover` 第一句就是
     /// `select value id from pe where dbnum = …`（ADR-056 N7 点名的那一处），
@@ -11565,20 +12450,36 @@ mod tests {
     /// [`reconcile_model_watermarks`]，这条函数体里一个 `applied_sesno` 都不许出现，
     /// 谁想图省事把那一句读回内联进来，本测试就红。
     #[test]
-    fn startup_reconcile_reads_neither_pe_backed_coverage_nor_the_watermark() {
+    fn startup_reconcile_uses_strict_watermarks_without_pe_backed_coverage() {
         let body = startup_reconcile_body();
         assert!(
             !body.contains("sync_gen_roots") && !body.contains("sync_and_seed_model_coverage"),
             "启动路径不得再经 pe 打头的覆盖物化（ADR-058 D4 / ADR-056 约束 9）: {body}"
         );
         assert!(
-            !body.contains("applied_sesno"),
-            "启动的标尺是文件最新会话，不是应用水位（ADR-054 / 审核 A3）: {body}"
+            body.contains("probe.recorded < state.applied_sesno"),
+            "启动必须按严格库水位缺口排恢复: {body}"
         );
         assert!(
             body.contains("latest_source_version(dbnum)"),
             "右端必须取文件最新会话: {body}"
         );
+    }
+
+    #[test]
+    fn startup_reconcile_enqueues_exact_retained_initialization_adoption() {
+        let body = startup_reconcile_body();
+        assert!(
+            body.contains("can_adopt_retained_initialization("),
+            "a retained run needs an exact-target ModelOnly owner after restart: {body}"
+        );
+        let ownership_check = body
+            .find("can_adopt_retained_initialization(")
+            .expect("retained ownership check");
+        let enqueue = body
+            .find("BatchIntent::ModelOnly")
+            .expect("ModelOnly recovery task");
+        assert!(ownership_check < enqueue);
     }
 
     /// ADR-060 D6/D7：对账必须挂进启动，且覆盖面要包含**没有凭证的库**。
@@ -11593,12 +12494,13 @@ mod tests {
             .find("reconcile_model_watermarks(")
             .expect("模型水位对账必须挂进启动");
         assert!(
-            body[call..].contains("no_credential_dbnums"),
+            body.contains("let candidate_dbnums = mdb_design_dbnums.clone();")
+                && body[call..].contains("candidate_dbnums.iter().copied()"),
             "对账覆盖面必须并上没有凭证的库，否则幽灵模型水位永远查不出来: {body}"
         );
         let window = body
-            .find("reconcile_startup_window(")
-            .expect("二级开窗必须存在");
+            .find("BatchIntent::ModelOnly")
+            .expect("二级恢复 Task 必须存在");
         assert!(
             call < window,
             "对账只读既有属性、模型投影、gen_root 与水位行，排在开窗之前，别和选根搅在一起: {body}"
@@ -11617,12 +12519,78 @@ mod tests {
             .expect("一级取数必须存在");
         let skip = body.find("if !behind {").expect("一级过滤的跳过必须存在");
         let window = body
-            .find("reconcile_startup_window(")
-            .expect("二级开窗必须存在");
+            .find("BatchIntent::ModelOnly")
+            .expect("二级恢复 Task 必须存在");
         assert!(
             floors < skip && skip < window,
             "顺序必须是 一次取下限 → 不落后就跳过 → 才开窗: {body}"
         );
+    }
+
+    /// 09-04 审核 #6：「哪些库还没有凭证记录」的分母是 **MDB 声明的 DESI**，不是数据面的
+    /// 登记表。登记表里有 SYST / DICT / CATA 与换过 MDB 之后的历史行，拿它当分母会把没有
+    /// 模型面的库报成「无凭证」——而这一栏是 `/health.startup` 上给人看的。
+    #[test]
+    fn the_no_credential_column_is_measured_against_the_mdb_not_the_registry() {
+        let body = startup_reconcile_body()
+            .split_once("async fn dbnums_without_credentials(")
+            .expect("无凭证库那一栏必须存在")
+            .1
+            .split_once("enum StartupTargetLookup")
+            .expect("其后是右端查找的三态")
+            .0;
+        assert!(
+            !body.contains("list_registered"),
+            "分母不许再是 DbnumState 登记表: {body}"
+        );
+        assert!(
+            body.contains("mdb_design_dbnums"),
+            "分母必须来自 model_source::mdb_design_dbnums（与右端「文件最新」同一份权威）: {body}"
+        );
+        assert!(
+            body.contains("watch_scope::admits("),
+            "监听限定域照样套在这一栏上: {body}"
+        );
+    }
+
+    /// 09-04 审核 #7：「不在当前 MDB」与「取不到文件最新」是两栏。
+    ///
+    /// 前者是换过 MDB 之后留下的历史 `gen_root` 行，没有文件可核，只能点名；后者才是
+    /// 「这一轮没确认」。混成一栏的后果是 `gen_root` 里只要留着一行历史库，
+    /// `/health.startup.reconcile.result` 就一辈子出不来 `ok`。
+    #[test]
+    fn startup_reconcile_names_libraries_outside_the_mdb_separately_from_unreadable() {
+        // 取重是纯函数：不在 MDB 的库数根本不是入参。
+        assert_eq!(startup_reconcile_result(0, 0), "ok");
+        assert_eq!(startup_reconcile_result(0, 3), "unreadable");
+        assert_eq!(startup_reconcile_result(1, 3), "window_failed");
+        assert_eq!(startup_reconcile_result(2, 0), "window_failed");
+
+        let body = startup_reconcile_body();
+        let lookup = body
+            .find("source_file_lookup(dbnum)")
+            .expect("右端之前必须先问「在不在当前 MDB」");
+        let latest = body
+            .find("latest_source_version(dbnum)")
+            .expect("右端仍取文件最新会话");
+        assert!(lookup < latest, "先分栏再取右端: {body}");
+        assert!(
+            body.contains("Ok(StartupTargetLookup::NotInMdb) =>")
+                && body.contains("not_in_mdb.push(dbnum)"),
+            "不在 MDB 的库要单独计数: {body}"
+        );
+        assert!(
+            body.contains("result: startup_reconcile_result(window_failed, unreadable)"),
+            "result 只由开窗失败与未确认取重: {body}"
+        );
+        assert!(
+            body.contains("not_in_mdb: not_in_mdb.len()"),
+            "那一栏要进 StartupReconcile 给 /health 看: {body}"
+        );
+        let unreadable_default =
+            crate::data_interface::initialization_phase::StartupReconcile::default();
+        assert_eq!(unreadable_default.not_in_mdb, 0);
+        assert_eq!(unreadable_default.result, "pending");
     }
 
     #[test]
@@ -13450,7 +14418,7 @@ mod tests {
     }
 
     #[test]
-    fn initialization_gate_precedes_every_model_pending_claim() {
+    fn initialization_gate_precedes_every_background_model_pending_claim() {
         let source = include_str!("model_update_pending.rs");
         for marker in [
             "pub async fn drain(",
@@ -13475,10 +14443,7 @@ mod tests {
                 "{marker} may claim/increment attempts before the gate"
             );
         }
-        for marker in [
-            "pub async fn drain_rooms(",
-            "pub(crate) async fn drain_rooms_scoped(",
-        ] {
+        for marker in ["pub async fn drain_rooms("] {
             let body = source
                 .split_once(marker)
                 .unwrap_or_else(|| panic!("missing {marker}"))
@@ -13504,7 +14469,9 @@ mod tests {
                     model_in_flight: false,
                     model_phase_open: false,
                     startup_reconcile_pending: false,
+                    startup_rooms_pending: false,
                     startup: None,
+                    startup_data_wait_degraded: None,
                     phases: Default::default(),
                     blockers: Vec::new(),
                     blocked_by: Vec::new(),

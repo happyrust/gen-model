@@ -497,7 +497,8 @@ def issue019_execution(binding):
         force_empty_run = os.environ.get("AIOS_T11B_FORCE_EMPTYRUN") == "1"
         baseline_role = "parent_deleted" if force_empty_run else "baseline"
         baseline_sesno = 26 if force_empty_run else window["baseline_sesno"]
-        _atomic_install(payloads[baseline_role], DB_FILE, scratch)
+        if snap.sha256_file(DB_FILE) != snap.sha256_bytes(payloads[baseline_role]):
+            _atomic_install(payloads[baseline_role], DB_FILE, scratch)
         assert int(binding.parse.header(str(DB_FILE))["latest_sesno"]) == baseline_sesno
 
         reset_secs = _reset_arm(binding, ref0s, baseline_sesno, None)

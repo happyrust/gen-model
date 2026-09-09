@@ -152,6 +152,24 @@ impl MdbMembership {
     pub fn unresolved(&self) -> impl Iterator<Item = &MdbDatabase> {
         self.databases.iter().filter(|db| db.path.is_none())
     }
+
+    /// A complete room reference frame requires every declared design file.
+    /// An absent file may contain a room or a panel; it is not an empty database.
+    pub(crate) fn require_design_files(&self) -> anyhow::Result<()> {
+        let missing = self
+            .unresolved()
+            .filter(|db| db.styp == DESI_STYP)
+            .map(|db| format!("{} ({})", db.dbnum, db.name))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            missing.is_empty(),
+            "MDB {} / {} room inputs incomplete: missing DESI source files: {}",
+            self.project,
+            self.mdb,
+            missing.join(", ")
+        );
+        Ok(())
+    }
 }
 
 /// Read `<project>`'s SYS database and resolve `mdb`'s declaration.
@@ -623,6 +641,27 @@ mod tests {
         let missing: Vec<u32> = membership.unresolved().map(|db| db.dbnum).collect();
         assert_eq!(missing, vec![7323]);
         assert_eq!(membership.databases().len(), 4);
+    }
+
+    #[test]
+    fn missing_design_file_blocks_complete_room_inputs_but_empty_mdb_is_valid() {
+        let mut declaration = membership();
+        assert!(
+            declaration.require_design_files().is_ok(),
+            "missing dictionary is a separate check"
+        );
+        declaration
+            .databases
+            .push(db(9999, DESI_STYP, "*MASTER/MISSING", false));
+        let error = declaration.require_design_files().unwrap_err().to_string();
+        assert!(
+            error.contains("9999") && error.contains("*MASTER/MISSING") && error.contains("/ALL")
+        );
+        declaration.databases.clear();
+        assert!(
+            declaration.require_design_files().is_ok(),
+            "authoritative empty declaration differs from a missing file"
+        );
     }
 
     #[test]

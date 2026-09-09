@@ -369,7 +369,11 @@ fn real_branch_lays_out_into_multiple_isolines() {
             .all(|issue| issue.rule_id.as_deref() != Some("isodim.outside_diameter_unknown")),
         "every isoline must know its outside diameter from the catalogue"
     );
-    assert!(data.meta.cheight_mm.is_some_and(|c| c > 0.0), "{:?}", data.meta);
+    assert!(
+        data.meta.cheight_mm.is_some_and(|c| c > 0.0),
+        "{:?}",
+        data.meta
+    );
 }
 
 /// Phase 4 宿主补的数据：站点成员带 P1 / P2 / P3 与到达 / 离开口编号；外径来自目录（不再是通径）。
@@ -388,20 +392,37 @@ fn real_branch_members_carry_ppoints_and_catalogue_od() {
     assert!(!stations.is_empty());
     for member in &stations {
         assert!(
-            member.ppoints.iter().any(|p| p.number == 1) && member.ppoints.iter().any(|p| p.number == 2),
+            member.ppoints.iter().any(|p| p.number == 1)
+                && member.ppoints.iter().any(|p| p.number == 2),
             "{} ({:?}) must resolve P1 and P2, got {:?}",
             member.refno,
             member.noun,
             member.ppoints
         );
-        assert_eq!(member.arrive_ppoint.is_some(), true, "{} arrive ppoint", member.refno);
-        assert_eq!(member.leave_ppoint.is_some(), true, "{} leave ppoint", member.refno);
+        assert_eq!(
+            member.arrive_ppoint.is_some(),
+            true,
+            "{} arrive ppoint",
+            member.refno
+        );
+        assert_eq!(
+            member.leave_ppoint.is_some(),
+            true,
+            "{} leave ppoint",
+            member.refno
+        );
         let od = member.outside_diameter.expect("outside diameter");
         assert!(od > 0.0 && od.is_finite(), "{} od {od}", member.refno);
     }
     // 弯头没有手柄：P3 不该被当成手柄（P2 不在 P1 轴线上）。手柄判定在求解器里，这里只看数据齐。
-    let elbows = stations.iter().filter(|m| matches!(m.noun.as_deref(), Some("ELBO" | "BEND"))).count();
-    assert!(elbows >= 5, "sample branch has 7 bends/elbows, got {elbows}");
+    let elbows = stations
+        .iter()
+        .filter(|m| matches!(m.noun.as_deref(), Some("ELBO" | "BEND")))
+        .count();
+    assert!(
+        elbows >= 5,
+        "sample branch has 7 bends/elbows, got {elbows}"
+    );
     // 外径来自目录 PARA[2]，而不是通径回落：FTUB 通径 ≠ 外径。
     let tubes: Vec<f64> = query
         .members
@@ -421,7 +442,11 @@ fn real_branch_carries_tag_texts_and_lays_out_labels() {
     };
     let set = open_set(&db, &templates);
     let query = branch_query(&set, BRAN).expect("branch query");
-    assert_eq!(query.name.as_deref(), Some("/LV-GR-1RX215-B"), "BRAN NAME 原文（带 /）");
+    assert_eq!(
+        query.name.as_deref(),
+        Some("/LV-GR-1RX215-B"),
+        "BRAN NAME 原文（带 /）"
+    );
     assert!(query.label_bore_text.is_none(), "样本库没有 :ZD_GDWJ");
     // 支撑 ATTA 成对出现：`…/DATUM` 带 STEXT（支架位号），`…/SREF` 没有。
     let stexts: Vec<(&str, &str)> = query
@@ -430,11 +455,17 @@ fn real_branch_carries_tag_texts_and_lays_out_labels() {
         .filter_map(|m| Some((m.name.as_deref()?, m.stext.as_deref()?)))
         .collect();
     assert!(
-        stexts.iter().any(|(name, stext)| name.ends_with("/DATUM") && stext.starts_with("1RX02-LSUP-")),
+        stexts
+            .iter()
+            .any(|(name, stext)| name.ends_with("/DATUM") && stext.starts_with("1RX02-LSUP-")),
         "DATUM ATTAs carry the support tag, got {stexts:?}"
     );
     assert!(
-        query.members.iter().filter(|m| m.refno.contains('~')).all(|m| m.name.is_none()),
+        query
+            .members
+            .iter()
+            .filter(|m| m.refno.contains('~'))
+            .all(|m| m.name.is_none()),
         "implied tubes never carry a stored name"
     );
 
@@ -454,14 +485,28 @@ fn real_branch_carries_tag_texts_and_lays_out_labels() {
         .count();
     eprintln!("labels: {labels:?}");
     assert_eq!(labels.len(), leaders, "每条标签一条引线");
-    assert!(labels.contains(&"LV"), "管道名称取 NAME 第一段（无 :ZD_GDWJ 不拼口径）");
-    assert!(labels.iter().any(|text| text.starts_with("1RX02-LSUP-E099")), "支撑位号进图");
     assert!(
-        labels.iter().any(|text| text.starts_with("90°\n弯曲半径:350\nPE ")),
+        labels.contains(&"LV"),
+        "管道名称取 NAME 第一段（无 :ZD_GDWJ 不拼口径）"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|text| text.starts_with("1RX02-LSUP-E099")),
+        "支撑位号进图"
+    );
+    assert!(
+        labels
+            .iter()
+            .any(|text| text.starts_with("90°\n弯曲半径:350\nPE ")),
         "90° BEND 带弯曲半径与标高: {labels:?}"
     );
     assert!(
-        labels.iter().filter(|text| text.starts_with("X ") && text.contains("\nPE ")).count() == 2,
+        labels
+            .iter()
+            .filter(|text| text.starts_with("X ") && text.contains("\nPE "))
+            .count()
+            == 2,
         "Head 与 Tail 各一条坐标标签"
     );
 }

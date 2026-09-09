@@ -14,6 +14,7 @@ use crate::data_interface::model_impact::{
     OperationImpact, classify_operation_impact, normalize_attribute_name,
     noun_is_no_geometry_model_entry, owner_change,
 };
+use crate::data_interface::rigid_motion::TransformUnit;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,7 +121,7 @@ pub struct ModelUpdatePlan {
     /// 旧恢复记录没有该字段。
     #[serde(default)]
     pub credential_advance_degraded: Option<String>,
-    /// 这份计划出自 `window_root_plan` 的窗口规划器（`direct_read_mode() && DESI`），
+    /// 这份计划出自 `window_root_plan` 的 DESI 窗口规划器，
     /// 根集来自 `enumerate_generation_roots(DbSet@T)`。
     ///
     /// 它决定要不要跑 old-pdms-io 的「计划目标 T 端存活复核」
@@ -131,6 +132,12 @@ pub struct ModelUpdatePlan {
     /// 旧恢复记录没有该字段——反序列化成 `false`，正是老规划器的行为。
     #[serde(default)]
     pub window_planned: bool,
+    /// 刚体前移提示（ADR-066，S4b）：`work_items` 里哪些 `RegenRoot` 可以按「投影记录左乘 `Δ` +
+    /// 一次根级发布」便宜地做，连同各根的锚点与 `Δ`（规划期在文件侧算好）。它是 `regen` 的
+    /// **子集加提示**，不是另一个去向——不认识它的执行体（pending drain、B6 之前的 Task）照旧
+    /// 整根重算，一字不差。开关 `model_transform_cheap_path` 关着时恒空；旧恢复记录没有该字段。
+    #[serde(default)]
+    pub transform_units: Vec<TransformUnit>,
 }
 
 impl ModelUpdatePlan {
@@ -843,6 +850,7 @@ fn build_cata_cascade_plan(
         credential_advance_degraded: None,
         // CATA 反向级联计划走 `ref_rev` 反查，不是文件窗口枚举——存活复核照旧（T412）。
         window_planned: false,
+        transform_units: Vec::new(),
     }
 }
 
@@ -1068,6 +1076,7 @@ pub(crate) async fn build_model_update_plan(
         // 这是 PE 图上溯的老规划器：它的根来自窗口**之前**的 `pe_owner`，所以
         // `apply_one` 仍要对它跑 T 端存活复核（T412）。
         window_planned: false,
+        transform_units: Vec::new(),
     })
 }
 

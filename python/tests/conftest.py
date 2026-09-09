@@ -23,11 +23,14 @@ OnceCell、SUL_DB 是全局连接，所以 SurrealDB 实例与执行层初始化
 
 from __future__ import annotations
 
+import json
 import os
 import socket
 import subprocess
 import sys
+import tempfile
 import time
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -45,6 +48,9 @@ CI_CONFIG = TESTS / "DbOption-ci"
 SURREAL_EXE = REPO_ROOT / "bin" / "surreal.exe"
 SURREAL_PORT = 8071
 MESH_DIR = TESTS / ".meshes"
+
+if os.environ.get("AIOS_NET_AB") == "1" and "GEN_MODEL_RUN_DIR" not in os.environ:
+    os.environ["GEN_MODEL_RUN_DIR"] = tempfile.mkdtemp(prefix="aios-net-ab-run-")
 
 # aios_client.py 是 python/ 下的单文件模块，不在包里；pytest 只会把用例自己的
 # 目录（python/tests）放进 sys.path。
@@ -87,6 +93,50 @@ TREE_ARTIFACTS = [
     REPO_ROOT / "accel_tree_AvevaMarineSample.meta.json",
 ]
 BACKUP_SUFFIX = ".bak-roomtest"
+
+
+def _preload_net_ab_baseline() -> tuple[Path, Path] | None:
+    """Install issue-019 @24 before full_init pins the project sources."""
+    if os.environ.get("AIOS_NET_AB") != "1":
+        return None
+
+    db_file = (
+        REPO_ROOT
+        / "python"
+        / "testbed"
+        / "projects"
+        / "AvevaMarineSample"
+        / "ams000"
+        / "ams8000_0001"
+    )
+    fixture = (
+        REPO_ROOT
+        / "tests"
+        / "fixtures"
+        / "issues"
+        / "issue-019-cross-session-parent-child-delete"
+    )
+    manifest = json.loads((fixture / "manifest.json").read_text("utf-8"))
+    baseline = next(row for row in manifest["snapshots"] if row["role"] == "baseline")
+    archive = fixture / manifest["archive"]["path"]
+    with zipfile.ZipFile(archive) as packed:
+        baseline_bytes = packed.read(baseline["path"])
+
+    backup_fd, backup_name = tempfile.mkstemp(prefix="aios-net-ab-original-", dir=TESTS)
+    os.close(backup_fd)
+    backup = Path(backup_name)
+    backup.write_bytes(db_file.read_bytes())
+    swap = db_file.with_name(f"{db_file.name}.net-ab-swap")
+    swap.write_bytes(baseline_bytes)
+    os.replace(swap, db_file)
+    return db_file, backup
+
+
+def _restore_net_ab_source(preloaded: tuple[Path, Path] | None) -> None:
+    if preloaded is None:
+        return
+    db_file, backup = preloaded
+    os.replace(backup, db_file)
 
 
 def _port_in_use(port: int) -> bool:
@@ -164,6 +214,7 @@ def binding(surreal, configured):
         pytest.skip(f"本进程的配置是 {_SESSION_CONFIG.name}，房间档要 {CONFIG.name}")
     MESH_DIR.mkdir(exist_ok=True)
     shelved = _shelve_existing_tree_files()
+    preloaded = _preload_net_ab_baseline()
     try:
         # force=True：沙箱与在跑服务只是**工程重名**，不是真冲突——库是本
         # conftest 自起的 8071 内存实例、锁在 testbed 项目副本根、mesh 在
@@ -175,6 +226,7 @@ def binding(surreal, configured):
         yield configured
     finally:
         _restore_tree_files(shelved)
+        _restore_net_ab_source(preloaded)
 
 
 @pytest.fixture()

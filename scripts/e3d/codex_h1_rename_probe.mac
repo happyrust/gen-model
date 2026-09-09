@@ -1,0 +1,33 @@
+-- 只读探针（不改任何东西、没有 SAVEWORK），一次会话回答两件事：
+--   A. 改名窗的目标 EQUI /1-LNR-Q005-PJ 还在不在 db8000，refno / owner 是什么；
+--   B. DESIGN 这个模块能不能看见 CATA 7000 的元素（H1 的目录件要在这里改）。
+--
+-- 两段各自一个 ALPHA LOG 块：日志到 END 才落盘，中途报错整块都没有，
+-- 所以 B 段的失败不能连累 A 段（见 db8000_zone_members_probe.mac 头注）。
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/h1-metadata-live/probe-a.log" OVER
+$P CODEX-H1-PROBE-A-ALIVE
+Q PROJ
+Q MDB
+/1-LNR-Q005-PJ
+Q CE
+Q TYPE
+Q NAME
+Q REF
+Q OWNE
+Q DESC
+Q PURP
+$P CODEX-H1-PROBE-A-DONE
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/h1-metadata-live/probe-b.log" OVER
+$P CODEX-H1-PROBE-B-ALIVE
+/XXBVAGXX-DATA-PA1
+Q CE
+Q TYPE
+Q NAME
+Q REF
+Q OWNE
+Q DTIT
+$P CODEX-H1-PROBE-B-DONE
+ALPHA LOG END

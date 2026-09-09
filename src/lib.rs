@@ -48,7 +48,6 @@ use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use surrealdb::opt::auth::Root;
-use team_data::sync_team_data;
 // use tokio::sync::mpsc::Sender;
 use aios_core::material::save_all_material_data;
 use std::sync::mpsc;
@@ -369,12 +368,14 @@ async fn initialize_resident_rooms_at_startup(db_option: &DbOption) {
         ownership.describe()
     );
     let room_key_words = db_option.get_room_key_word();
+    let mesh_dir = db_option.get_meshes_path();
     let result = room_resident::initialize_at_startup(
         crate::options::data_face(),
         &ownership,
         hierarchy,
         &room_key_words,
         match_room_fn,
+        &mesh_dir,
     )
     .await;
     match &result {
@@ -384,6 +385,48 @@ async fn initialize_resident_rooms_at_startup(db_option: &DbOption) {
         ),
     }
     room_resident::record_startup_init(result.as_ref()).await;
+}
+
+/// Shared room-capability preparation for ingest and read-through. Callers have
+/// already resolved the MDB skeleton and connected the process-local model store.
+async fn prepare_room_resident_at_startup(db_option: &DbOption) {
+    use crate::fast_model::room_resident;
+
+    if !crate::options::room_resident_model() {
+        room_resident::mark_disabled("configuration");
+        return;
+    }
+    if !crate::options::spatial_compute() {
+        room_resident::mark_unsupported(format!("{}=0", crate::options::SPATIAL_COMPUTE_ENV));
+        return;
+    }
+    if crate::fast_model::room_topology::RoomHierarchy::configured().is_none() {
+        room_resident::mark_unsupported("project_hd/project_hh feature is absent");
+        return;
+    }
+
+    room_resident::mark_loading("spatial-tree");
+    println!("正在装载空间树（指纹一致直接复用，失配则重建）...");
+    let step_started = Instant::now();
+    match crate::fast_model::aabb_tree::load_project_tree_verified().await {
+        Ok(_) => println!(
+            "空间树装载完成，耗时 {}",
+            fmt_elapsed(step_started.elapsed())
+        ),
+        Err(error) => eprintln!("空间树启动加载失败（{error:#}），房间 resident 保持 blocked"),
+    }
+    crate::fast_model::spatial_state::spawn_spatial_revalidator();
+
+    room_resident::mark_loading("source-snapshot");
+    let step_started = Instant::now();
+    initialize_resident_rooms_at_startup(db_option).await;
+    let rss = crate::data_interface::model_concurrency::process_rss_bytes()
+        .map(|bytes| format!("，RSS {:.0} MB", bytes as f64 / (1024.0 * 1024.0)))
+        .unwrap_or_default();
+    println!(
+        "房间初始化结束，耗时 {}{rss}",
+        fmt_elapsed(step_started.elapsed())
+    );
 }
 
 /// 环境变量名：无论如何都不跑启动全量房间重建（既有运维止血口，语义不变）。
@@ -420,20 +463,36 @@ pub const ROOM_FULL_REBUILD_ENV: &str = "AIOS_ROOM_FULL_REBUILD";
 /// 不该为它付那道「别自动干活」的门。ADR-048 D3 照旧：这里不读监听限定域，限定域上弦不得
 /// 拖回全量修复。凭据对账（`reconcile_startup_room_build`）不再决定跑不跑（§4.6）——对比接管了
 /// 它拓扑那一半，几何那一半本来就归发布事务的 `RoomRecalcPanel`；每次成功全量照旧盖章。
-async fn reconcile_rooms_with_resident_model(db_option: &DbOption) {
+async fn reconcile_rooms_with_resident_model(db_option: &DbOption) -> bool {
     use crate::fast_model::room_startup::{self, StartupRoomVerdict};
 
-    let StartupRoomVerdict::FullRebuild { reason, expected } =
-        room_startup::startup_room_reconcile(db_option).await
-    else {
-        return;
+    let verdict = room_startup::startup_room_reconcile(db_option).await;
+    let pending_room_work = match crate::data_interface::model_update_pending::has_room_work().await
+    {
+        Ok(pending) => pending,
+        Err(error) => {
+            eprintln!("读取历史房间待办失败，按需要全量计算处理: {error:#}");
+            true
+        }
+    };
+    let (reason, expected) = match verdict {
+        StartupRoomVerdict::FullRebuild { reason, expected } => (reason, expected),
+        StartupRoomVerdict::Settled if pending_room_work => (
+            "存在初始化前遗留的逐构件房间待办；改由项目级全量房间计算覆盖".to_string(),
+            crate::fast_model::room_resident::resident_rooms()
+                .read()
+                .unwrap()
+                .for_membership(crate::options::data_face())
+                .map(|model| model.manifest.clone()),
+        ),
+        StartupRoomVerdict::Settled => return true,
     };
     if !crate::options::startup_autorun() {
         println!(
             "跳过启动全量房间重建（startup_autorun=false；本来要它的原因：{reason}）：\
              房间归属由增量队列收敛，下次启动再比，或显式打开自动执行"
         );
-        return;
+        return false;
     }
     println!("启动全量房间重建：{reason}");
     println!(
@@ -441,16 +500,56 @@ async fn reconcile_rooms_with_resident_model(db_option: &DbOption) {
         GLOBAL_AABB_TREE.read().await.tree.size()
     );
     let time = Instant::now();
-    match build_room_relations(db_option).await {
+    // 几何视图按数据面取（审核 F-H）：摄入读已发布房间几何、读透读实时行——与增量两条分支、
+    // 启动对比同一份几何，ADR-010 §9「增量 == 全量逐边」才是在同一份数据上比。开关关着的
+    // 老臂（下面 `build_room_relations`）仍恒 Live，一字不变。
+    let cutoff = chrono::Utc::now().to_rfc3339();
+    println!("[ams-phase] at={cutoff} phase=project_rooms state=start");
+    let settled = match crate::fast_model::room_model::build_room_relations_with_view(
+        db_option,
+        crate::fast_model::room_model::consumption_view(),
+    )
+    .await
+    {
         // 写点 ②（d-42 §4.5）：全部成功才写参照；盖章仍在 build_room_relations 收尾那一处。
-        Ok(()) => room_startup::settle_full_rebuild(db_option, expected.as_ref()).await,
-        Err(error) => eprintln!("计算房间未完全成功: {error:#}"),
-    }
+        // 「从未生成」的面板（`without_geometry`）不算没成功（D-A (a)），只随回执点名。
+        Ok(outcome) => {
+            let reference_written =
+                room_startup::settle_full_rebuild(db_option, expected.as_ref(), &outcome).await;
+            if !reference_written {
+                eprintln!("项目房间完成基线未提交，保留历史待办与初始化屏障");
+                return false;
+            }
+            match crate::data_interface::model_update_pending::
+                clear_room_work_covered_by_full_rebuild(&cutoff)
+                .await
+            {
+                Ok(cleared) => {
+                    println!("项目级房间计算覆盖并清理 {cleared} 条历史房间待办");
+                    true
+                }
+                Err(error) => {
+                    eprintln!("房间已算完，但历史房间待办清理失败: {error:#}");
+                    false
+                }
+            }
+        }
+        Err(error) => {
+            eprintln!("计算房间未完全成功: {error:#}");
+            false
+        }
+    };
     println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
+    println!(
+        "[ams-phase] at={} phase=project_rooms state=end success={settled} elapsed_ms={}",
+        chrono::Utc::now().to_rfc3339(),
+        time.elapsed().as_millis()
+    );
     // 与开关关着的那一臂同姿态：全量跑了才顺带算支管部件派生量，失败只告警。
     if let Err(error) = update_cal_bran_component().await {
         eprintln!("支管部件派生量计算未完全成功（可由下次启动或手动重算回补）: {error:#}");
     }
+    settled
 }
 
 /// 本次启动要不要跳过全量房间重建；跳过时返回那句给人看的理由。
@@ -724,22 +823,12 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 这个状态没人真的要——监听范围本来就由 `watch_dbnums` 说了算（不写 = 本 MDB 声明的全部
     // DESI，共识 d-207），关掉 watcher 只会让「改元素 → SAVEWORK → 自动更新」在那份配置上
     // 静默失效。启动那次数据重扫的去留由 `data_face` 单独回答（read-through 跳过它）。
-    // `direct_read_mode` 从此只回答「数据面读哪儿」：2026-09-04 起 direct 是**默认**形态，
-    // 只有显式 `AIOS_DATA_READ_MODE=db` 才退回退役的 legacy 读路由，而且要出声。
-    let direct_read_mode = crate::options::direct_read_mode();
-    if direct_read_mode {
-        println!(
-            "数据读取模式：direct（e3d-io，默认形态）；watcher / 模型复核 / 房间与 db 形态同一条启动路，\
-             监控目录 watcher 无条件启动"
-        );
-    } else {
-        eprintln!(
-            "*** 数据读取模式：db（legacy，由 {}=db 显式选中）——数据面读 SurrealDB 的 pe / ATT_* 行，\
-             模型计划走 pe 打头的旧规划器。该形态已退役（ADR-058 D8），只留作退路；\
-             去掉这个环境变量即回到默认的 direct ***",
-            crate::options::DATA_READ_MODE_ENV
-        );
-    }
+    // 数据面只有 direct 一条读路由（2026-09-08 refactor plan S4：legacy db 读路由与 PE 规划器
+    // 一并退役，ADR-058 D8）；`AIOS_DATA_READ_MODE` 再写 `db` 按认不出的值出声、照常 direct。
+    println!(
+        "数据读取模式：direct（e3d-io，唯一形态）；watcher / 模型复核 / 房间同一条启动路，\
+         监控目录 watcher 无条件启动"
+    );
     if let Some(notice) = crate::options::data_read_mode_notice() {
         eprintln!("*** {notice} ***");
     }
@@ -896,44 +985,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 快照文件，不依赖数据清单——`run_app` 那条正门本来就在进 `run_cli` 之前装过一次，这里
     // 多半是同进程短路复用；直接调 `run_cli` 的那几条路（python `full_init`、l3 夹具）从此
     // 与正门同序。此前它压在等数据清单之后，房间初始化要「树在位」就得跟着排到最后。
-    if crate::options::spatial_compute() {
-        println!("正在装载空间树（指纹一致直接复用，失配则重建）...");
-        let step_started = Instant::now();
-        match crate::fast_model::aabb_tree::load_project_tree_verified().await {
-            Ok(_) => println!(
-                "空间树装载完成，耗时 {}",
-                fmt_elapsed(step_started.elapsed())
-            ),
-            Err(error) => {
-                eprintln!("空间树启动加载失败（{error:#}），以空树启动，等待后台复检重建");
-            }
-        }
-        crate::fast_model::spatial_state::spawn_spatial_revalidator();
-    } else {
-        println!(
-            "空间计算已关闭（{}=0）：跳过空间树装载、后台复检和后置 AABB，只运行模型生成",
-            crate::options::SPATIAL_COMPUTE_ENV
-        );
-    }
-    // 房间初始化（常驻房间模型，开关 `room_resident_model` 默认关；第 5 轮 Q17–Q20）：紧跟
-    // 空间树装载、排在 watcher / worker 之前，覆盖 MDB 全部设计库。只认 `spatial_compute`——
-    // `startup_data_ready` / 上弦位 / `startup_autorun` / `model_incremental` 一道都不看，房间是
-    // 参照系，不是增量的一部分；写归属边的启动对比与全量修复仍在下面房间段受门。
-    if crate::options::room_resident_model() {
-        if crate::options::spatial_compute() {
-            let step_started = Instant::now();
-            initialize_resident_rooms_at_startup(&db_option).await;
-            println!(
-                "房间初始化完成，耗时 {}",
-                fmt_elapsed(step_started.elapsed())
-            );
-        } else {
-            println!(
-                "空间计算已关闭（{}=0）：常驻房间模型随空间子系统一起不建",
-                crate::options::SPATIAL_COMPUTE_ENV
-            );
-        }
-    }
+    prepare_room_resident_at_startup(&db_option).await;
 
     if crate::options::data_face().is_read_through() {
         println!(
@@ -959,6 +1011,8 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // direct 形态也起（2026-09-02，plant-ui 计划 D1）：worker 是队列的唯一消费者，与读取
     // 底座无关；数据面走直写路径（ADR-056 P1），模型面走 `generate_roots`（e3d-io 读文件）。
     // 人工执行（`POST /update/execute`）与文件事件排进同一个队列。
+    let startup_data_ready =
+        crate::options::data_face().is_read_through() || scheduler.is_auto_work_armed();
     crate::data_interface::batch_worker::ensure_batch_worker(mgr.clone());
 
     // Watcher events are dirtiness signals only; `async_watch` debounces them
@@ -994,18 +1048,23 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // Design 基线跑多久模型面就干等多久。direct 也跑，而且 direct 才是它的主场；此前那道
     // `!direct_read_mode` 让生产形态启动时一根都不核，ADR-050 承诺的「重启靠凭证 vs 文件
     // 最新重新发现」于是没有实现者（审核 A1 / A2）。仅看 model_update_pending=0 会把
-    // “从未生成过的根”误判成完成；这里只补缺失工作，不改水位、不删旧模型，也不越过
-    // watch_dbnums。任何一库失败都告警后继续，不把一个库的配置错变成整个服务的崩溃循环。
+    // “从未生成过的根”误判成完成；这里只补缺失工作，并为已有属性与模型投影但缺少
+    // 水位追踪的历史库统一初始化两枚水位；不删旧模型，也不越过 watch_dbnums。
+    // 任何一库失败都告警后继续，不把一个库的配置错变成整个服务的崩溃循环。
     crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup().await;
 
-    let startup_data_ready =
-        crate::options::data_face().is_read_through() || scheduler.is_auto_work_armed();
+    // 数据等待的退出口（09-04 审核 #10）：判据是「受阻」不是「久」——Design 基线在大项目上
+    // 合法地跑几小时，按时长降级会误伤；只有 `blockers` 非空**且**队列里没有任何批次在
+    // `queued/running`、连续 [`STARTUP_DATA_STALL_DEGRADE_SECS`] 之后，才放弃等待降级进入监听。
+    // 降级不清阻断、不改 `data_ready`：模型收敛等待与房间段随之跳过，完成横幅标 blocked。
+    let mut data_wait_degraded: Option<String> = None;
     if startup_data_ready {
         println!(
             "等待 Meta → Design 数据清单完成...（模型面已并行开工：门随清单装好即开，\
              积压在数据队列空隙消化，按需生成不受数据阶段阻挡）"
         );
         let mut waited_secs = 0u64;
+        let mut stalled_secs = 0u64;
         let mut last_wait_fingerprint: Option<String> = None;
         let mut last_wait_emitted_secs = 0u64;
         loop {
@@ -1019,6 +1078,30 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             }
             waited_secs += 60;
             let snapshot = initialization.snapshot();
+            let batch_in_flight = scheduler
+                .snapshot()
+                .iter()
+                .any(|row| matches!(row.state, "queued" | "running"));
+            if startup_data_wait_is_stalled(&snapshot, batch_in_flight) {
+                stalled_secs += 60;
+            } else {
+                stalled_secs = 0;
+            }
+            if stalled_secs >= STARTUP_DATA_STALL_DEGRADE_SECS {
+                let reason = format!(
+                    "数据清单受阻 {stalled_secs}s 且队列里没有批次在跑（status={} blockers=[{}]）",
+                    snapshot.status,
+                    snapshot.blockers.join(" | ")
+                );
+                println!(
+                    "数据初始化受阻，降级继续：{reason}。阻断不清、data_ready 不置位；\
+                     跳过模型收敛等待与启动房间重建，进入增量监听——修好阻断的库后重扫自会接上，\
+                     /health.initialization 仍报 blocked"
+                );
+                initialization.mark_startup_data_wait_degraded(reason.clone());
+                data_wait_degraded = Some(reason);
+                break;
+            }
             let phases = snapshot
                 .phases
                 .iter()
@@ -1055,7 +1138,9 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
                 last_wait_emitted_secs = waited_secs;
             }
         }
-        println!("数据链已就绪；模型面自清单装好起已在跑，下面等模型积压收敛");
+        if data_wait_degraded.is_none() {
+            println!("数据链已就绪；模型面自清单装好起已在跑，下面等模型积压收敛");
+        }
     }
 
     // 空间树装载此前在这里（等数据清单之后）；2026-09-07 起前移到 watcher / worker 之前，
@@ -1064,7 +1149,14 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 2026-09-04（S5-2）之前这里有一条 direct 专用分支：复核落地后立刻 `mark_model_ready()`
     // 并跳过收敛等待，`/health.model_ready=true` 时复核排出的行还在跑，而且不看数据链。
     // direct 从此与 db 形态走同一条等待：门随清单开，收敛由 worker 空闲轮宣告。
-    if startup_data_ready {
+    //
+    // 数据等待已降级时不等模型收敛：`mark_model_ready` 要 `data_ready`（尾事务还会往积压
+    // 添行），而 `data_ready` 正是等不到的那一样——这里再等就是把同一个挂死换个名字。
+    // worker 照常在后台消化积压，模型门随清单开，按需生成不受影响。
+    if let Some(reason) = data_wait_degraded.as_deref() {
+        scheduler.wake();
+        println!("数据初始化受阻（{reason}）：不等模型收敛，积压由 worker 后台消化");
+    } else if startup_data_ready {
         if !initialization.open_model_phase() {
             println!(
                 "模型门未能立即打开（重扫刚发现新会话，数据阶段回到未就绪）：\
@@ -1186,50 +1278,11 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     }
 
     println!("房间关键字为: {:?}", db_option.get_room_key_word());
-    if !startup_data_ready {
-        println!("数据初始化尚未释放，跳过启动房间重建");
-    } else if !crate::options::spatial_compute() {
-        println!(
-            "空间计算已关闭（{}=0）：跳过启动房间重建",
-            crate::options::SPATIAL_COMPUTE_ENV
-        );
-    } else if !crate::options::model_incremental() {
-        // 房间归属只在「数据与模型都已写入 RocksDB」之后才整体重算（ADR-010 §7 /
-        // ADR-011 §8：房间依赖几何与 AABB 都已收敛）。模型开关关着时 durable 模型
-        // 积压不消化，此刻全量重建就是在缺模型的空间树上算归属——先清后写还会把
-        // 存量归属边改坏。跳过；重新开启模型阶段后由凭据对账（stamp 失配→启动全量
-        // 重建）与模型收敛链派生的房间目标回补。
-        println!(
-            "模型增量阶段已关闭（model_incremental=false）：模型积压未收敛，跳过启动房间重建\
-             （房间只在数据与模型都落库后才整体重算，重新开启模型阶段后回补）"
-        );
-    } else if crate::options::room_resident_model() {
-        // 常驻房间模型开着：启动对比接管房间段（d-42），全量只剩显式入口，见
-        // `reconcile_rooms_with_resident_model`。关着时下面两臂一字不动。
-        reconcile_rooms_with_resident_model(&db_option).await;
-    } else if let Some(reason) = skip_startup_room_build().await {
-        println!("跳过启动全量房间重建（{reason}）：房间归属由增量队列收敛");
-    } else {
-        println!(
-            "正在计算房间（空间树 {} 条）",
-            GLOBAL_AABB_TREE.read().await.tree.size()
-        );
-        let time = Instant::now();
-        // 单块面板算不出来不该拦住启动：这里在 `async_watch` 之前，panic 等于整个服务
-        // 起不来，而房间归属是可以事后重建的派生数据。函数内已按面板逐条聚合失败原因，
-        // 打出来即可定位——此前那些失败是被 `unwrap_or_default()` 吞成「这间房 0 个成员」的。
-        if let Err(error) = build_room_relations(&db_option).await {
-            eprintln!("计算房间未完全成功: {error:#}");
-        }
-        println!("计算房间花费时间: {} ms", time.elapsed().as_millis());
-        // update_cal_equip().await?;
-        // 支管部件派生量（阀门距楼板高度）与房间同姿态：可事后重建的派生数据。
-        // 此前用 `?` 上抛，一次查询抖动就把整个服务打死在启动尾段——与上面
-        // build_room_relations 的降级口径自相矛盾。
-        if let Err(error) = update_cal_bran_component().await {
-            eprintln!("支管部件派生量计算未完全成功（可由下次启动或手动重算回补）: {error:#}");
-        }
-    }
+    // 项目级启动房间重建与数据库几何查询路径已经退役。常驻房间参照在 watcher
+    // 之前由 E3D 文件预建；每个已完成模型的 dbnum 由自己的 Task（或三水位恢复）
+    // 立即消费内存投影。这里不设全项目屏障，也不扫描数据库推导计算范围。
+    println!("房间计算采用逐 dbnum 实时内存模式；启动项目全算与数据库计算输入已停用");
+    scheduler.wake();
 
     // `run_app` has already connected the process-global `SUL_DB`.  Calling
     // `AiosDBMgr::init_from_db_option()` here tries to connect that same
@@ -1247,8 +1300,10 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         save_all_material_data().await?;
     }
     // TEAM_DATA 生成随 `only_sync_sys` 一起退役（ADR-058 D8）：它的唯一开关是那个
-    // legacy 全量键，仓里没有一份配置打开过，因此这段从来没跑过。真要它就给它自己的
-    // 开关，别再挂回一个已经不存在的键上——`sync_team_data` 本体留着。
+    // legacy 全量键，仓里没有一份配置打开过，因此这段从来没跑过。2026-09-07 连本体也
+    // 收口了——它唯一的写出口是 MySQL 镜像表，随 `feature = "sql"` 一起退役
+    // （`team_data::sync_team_data` 现在只打一行声就返回）。真要 TEAM_DATA，它的家是
+    // Surreal，给它自己的写入路径，别再把这条 MySQL 镜像接回来。
 
     if db_option.rebuild_ssc_tree {
         println!("生成PBS节点...");
@@ -1264,7 +1319,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 到这里为止的每一步都只在启动跑一次；再往下 `watch_task.await` 就只是挂着
     // 等增量了。此前日志里没有这条边界线——「还在初始化」与「已经在监听、只是
     // 这一轮没事发生」打出来的东西一模一样，只能靠猜。
-    print_startup_complete_banner(&db_option, startup_started);
+    print_startup_complete_banner(&db_option, startup_started, data_wait_degraded.as_deref());
 
     let _ = watch_task.await;
 
@@ -1279,35 +1334,203 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// 启动主线等数据清单时，「受阻且无批次在跑」连续多久才放弃等待降级进入监听
+/// （09-04 审核 #10）。三个 60 s 的观察拍：一拍可能只是 worker 刚收口、下一批还没入队。
+const STARTUP_DATA_STALL_DEGRADE_SECS: u64 = 180;
+
+/// 数据等待是不是「受阻」（#10 的降级判据，纯函数）：清单报 blocked / 有阻断**且**队列里
+/// 没有任何批次在 `queued/running`。只有阻断而批次还在跑不算——那是别的库在正常推进；
+/// 只有队列空而没有阻断也不算——那是清单还在装、或 worker 正要认领下一批。
+fn startup_data_wait_is_stalled(
+    snapshot: &crate::data_interface::initialization_phase::InitializationSnapshot,
+    batch_in_flight: bool,
+) -> bool {
+    let blocked = snapshot.status == "blocked" || !snapshot.blockers.is_empty();
+    blocked && !batch_in_flight
+}
+
+#[cfg(test)]
+mod startup_data_wait_tests {
+    use super::*;
+
+    fn snapshot(
+        status: &'static str,
+        blockers: &[&str],
+    ) -> crate::data_interface::initialization_phase::InitializationSnapshot {
+        crate::data_interface::initialization_phase::InitializationSnapshot {
+            epoch_id: 1,
+            status,
+            current_phase: None,
+            data_ready: false,
+            model_ready: false,
+            model_in_flight: false,
+            model_phase_open: true,
+            startup_reconcile_pending: false,
+            startup_rooms_pending: false,
+            startup: None,
+            startup_data_wait_degraded: None,
+            phases: Default::default(),
+            blockers: blockers.iter().map(|text| text.to_string()).collect(),
+            blocked_by: Vec::new(),
+            shadowed: Vec::new(),
+        }
+    }
+
+    /// 09-04 审核 #10：降级判据是「受阻且无批次在跑」，两个条件缺一个都不算。
+    /// 按时长降级会误伤合法跑几小时的 Design 基线；只看阻断会在别的库还在正常推进时误降。
+    #[test]
+    fn the_data_wait_is_stalled_only_when_blocked_and_nothing_is_running() {
+        assert!(startup_data_wait_is_stalled(
+            &snapshot("blocked", &["meta: dbnum=8000 文件头读不出"]),
+            false
+        ));
+        assert!(startup_data_wait_is_stalled(
+            &snapshot("design_running", &["meta: dbnum=8000 文件头读不出"]),
+            false
+        ));
+        assert!(!startup_data_wait_is_stalled(
+            &snapshot("blocked", &["meta: dbnum=8000 文件头读不出"]),
+            true
+        ));
+        assert!(!startup_data_wait_is_stalled(
+            &snapshot("design_running", &[]),
+            false
+        ));
+        assert!(!startup_data_wait_is_stalled(
+            &snapshot("discovering", &[]),
+            true
+        ));
+        assert!(
+            STARTUP_DATA_STALL_DEGRADE_SECS >= 120,
+            "至少两个观察拍：一拍可能只是 worker 刚收口、下一批还没入队"
+        );
+    }
+
+    /// 降级要贯通三处：等待循环里退出、模型收敛等待与房间段跳过、完成横幅点名；且不许
+    /// 动 `data_ready`——阻断是真的，降级只是主线不再为它挂死。
+    #[test]
+    fn the_degraded_data_wait_skips_model_wait_and_rooms_and_is_named_on_the_banner() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli exists")
+            .1
+            .split_once("\nfn print_startup_complete_banner(")
+            .expect("完成横幅紧跟 run_cli")
+            .0;
+        let data_wait = body.find("wait_for_data_ready().await").unwrap();
+        let degrade = body
+            .find("if stalled_secs >= STARTUP_DATA_STALL_DEGRADE_SECS {")
+            .expect("等待循环里必须有降级出口");
+        let mark = body
+            .find("initialization.mark_startup_data_wait_degraded(")
+            .expect("降级要记进协调器给 /health 看");
+        let model_wait = body
+            .find(
+                "if let Some(reason) = data_wait_degraded.as_deref() {\n        scheduler.wake();",
+            )
+            .expect("降级后不等模型收敛");
+        let model_ready = body.find("wait_for_model_ready()").unwrap();
+        let rooms = body
+            .find("} else if let Some(reason) = data_wait_degraded.as_deref() {\n        // 房间")
+            .expect("降级后跳过启动房间重建");
+        let banner = body
+            .find("print_startup_complete_banner(&db_option, startup_started, data_wait_degraded.as_deref())")
+            .expect("完成横幅要拿到降级理由");
+        assert!(
+            data_wait < degrade
+                && degrade < mark
+                && mark < model_wait
+                && model_wait < model_ready
+                && model_ready < rooms
+                && rooms < banner,
+            "顺序：等数据 → 降级出口 → 记协调器 → 跳模型等待 → 跳房间 → 横幅点名"
+        );
+        let code = |text: &str| -> String {
+            text.lines()
+                .filter(|line| !line.trim_start().starts_with("//"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let degrade_block = code(&body[degrade..model_wait]);
+        assert!(
+            !degrade_block.contains("mark_data_ready")
+                && !degrade_block.contains("data_ready = true"),
+            "降级不许假装数据就绪: {degrade_block}"
+        );
+        assert!(
+            body[degrade..mark].contains("且队列里没有批次在跑"),
+            "降级理由要说清是受阻而不是慢"
+        );
+    }
+}
+
 /// 「初始化完成 → 进入增量监听」这条边界的横幅。
 ///
 /// 状态在这里复述一遍，而不是只打一行「完成」：阶段开关、监听限定、HTTP 地址
 /// 是出问题时第一批要确认的东西，而它们各自散在前面几十行启动日志里——等真出事
 /// 时，那些行早被稳态轮询的重扫日志刷走了。
-fn print_startup_complete_banner(db_option: &DbOption, started: Instant) {
+fn print_startup_complete_banner(
+    db_option: &DbOption,
+    started: Instant,
+    data_wait_degraded: Option<&str>,
+) {
     const RULE: &str = "==========================================================";
     println!("{RULE}");
-    println!(
-        "初始化完成：项目 {}，启动总耗时 {}",
-        db_option.project_name,
-        fmt_elapsed(started.elapsed())
-    );
+    match data_wait_degraded {
+        Some(_) => println!(
+            "初始化完成（**数据受阻，降级进入监听**）：项目 {}，启动总耗时 {}",
+            db_option.project_name,
+            fmt_elapsed(started.elapsed())
+        ),
+        None => println!(
+            "初始化完成：项目 {}，启动总耗时 {}",
+            db_option.project_name,
+            fmt_elapsed(started.elapsed())
+        ),
+    }
+    if let Some(reason) = data_wait_degraded {
+        println!(
+            "  *** 数据初始化受阻：{reason}——模型收敛等待与启动房间重建已跳过；\
+             /health.initialization 仍报 blocked，修好阻断的库后重扫自会接上"
+        );
+    }
     println!(
         "  增量阶段：data={} model={} room={}（数据链与模型链并行，房间排在模型之后）",
         crate::options::data_incremental(),
         crate::options::model_incremental(),
         crate::options::room_incremental()
     );
-    if crate::options::direct_read_mode() {
-        println!(
-            "  数据读取：direct / e3d-io（默认形态；只决定数据面读哪儿，watcher / 模型复核 / 房间与读模式无关）"
-        );
-    } else {
-        println!(
-            "  *** 数据读取：db / legacy（{}=db 显式选中；已退役形态，只留作退路）",
-            crate::options::DATA_READ_MODE_ENV
-        );
+    {
+        use crate::fast_model::room_resident::ResidentLifecycle;
+        let short = |key: &str| key.chars().take(12).collect::<String>();
+        let state = match crate::fast_model::room_resident::lifecycle() {
+            ResidentLifecycle::Disabled { source } => format!("关（{source}）"),
+            ResidentLifecycle::Unsupported { reason } => format!("不适用（{reason}）"),
+            ResidentLifecycle::Loading { phase, .. } => {
+                format!("开，仍在装载（{phase}）——普通房间写入口此刻返回 UPDATING")
+            }
+            ResidentLifecycle::Ready { generation, .. } => {
+                format!("开，ready（代 {}）", short(&generation))
+            }
+            ResidentLifecycle::Degraded {
+                generation,
+                problems,
+            } => format!(
+                "开，degraded（代 {}）：{}",
+                short(&generation),
+                problems.join("; ")
+            ),
+            ResidentLifecycle::Blocked { problems } => {
+                format!(
+                    "开，blocked：{}（房间边不写，修复后重启或等换代）",
+                    problems.join("; ")
+                )
+            }
+        };
+        println!("  常驻房间模型：{state}");
     }
+    println!("  数据读取：direct / e3d-io（唯一形态；legacy db 读路由已于 2026-09-08 退役）");
     if let Some(notice) = crate::data_interface::watch_scope::mode_notice() {
         println!("  *** {notice}");
     }
@@ -1507,11 +1730,18 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
                 db_option.mdb_name
             )
         })?;
+    let manager = Arc::new(manager);
+    #[cfg(feature = "http_api")]
+    let web_task = {
+        let manager = manager.clone();
+        tokio::spawn(async move { crate::web_service::serve_if_configured(manager).await })
+    };
     let snapshot = crate::data_interface::mdb_memory_store::ensure(
         &db_option.project_name,
         &db_option.mdb_name,
     )?;
     println!("read-through core snapshot ready: {}", snapshot.describe());
+    prepare_room_resident_at_startup(&db_option).await;
 
     let initialization =
         crate::data_interface::initialization_phase::InitializationCoordinator::global();
@@ -1520,7 +1750,6 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     let _ = initialization.open_model_phase();
     let _ = initialization.mark_model_ready();
 
-    let manager = Arc::new(manager);
     let refresh_manager = manager.clone();
     let project = db_option.project_name.clone();
     let mdb = db_option.mdb_name.clone();
@@ -1648,7 +1877,7 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
 
     #[cfg(feature = "http_api")]
     {
-        crate::web_service::serve_if_configured(manager).await?;
+        web_task.await??;
         return Ok(());
     }
     #[cfg(not(feature = "http_api"))]
@@ -1725,7 +1954,8 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
 }
 
 pub mod admin;
-pub mod data_state;
+// `data_state` 整个模块 2026-09-07 随 `feature = "sql"` 退役：它只有一个文件，
+// 而那个文件从第一行到最后一行都在 sql 门后（往 MySQL 的 `data_status` 表写状态）。
 // pub mod data_to_excel;
 // pub mod data_to_file;
 // pub mod other_plat;
@@ -1893,13 +2123,9 @@ mod startup_room_build_gate_tests {
         );
     }
 
-    /// d-42：常驻房间模型开着时房间段由启动对比接管，排在 `skip_startup_room_build` 那一臂
-    /// **之前**（开关关着时老路一字不动）。对比本身不受 `startup_autorun`；只有它判出的显式全量
-    /// 那一臂受——门在 `reconcile_rooms_with_resident_model` 里、`build_room_relations` 之前；全量
-    /// 成功后紧接写点 ②（`settle_full_rebuild`）。凭据对账与限定域都不再进这条路
-    /// （§4.6 / ADR-048 D3）；止血口与空树两道门在 `startup_room_reconcile` 里判，这里不重判。
+    /// 房间预加载只建立内存参照；启动主流程不再查询数据库做项目全算。
     #[test]
-    fn the_resident_model_takes_over_the_room_segment_and_gates_only_the_full_rebuild() {
+    fn startup_room_segment_only_releases_per_dbnum_memory_processing() {
         let source = include_str!("lib.rs");
         let segment = source
             .split_once(r#"println!("房间关键字为: {:?}""#)
@@ -1908,85 +2134,39 @@ mod startup_room_build_gate_tests {
             .split_once("let aios_mgr = AiosDBMgr {")
             .expect("房间段之后是 aios_mgr")
             .0;
-        let resident_at = segment
-            .find("else if crate::options::room_resident_model() {")
-            .expect("开关开着走对比");
-        let legacy_at = segment
-            .find("skip_startup_room_build().await")
-            .expect("开关关着走老门");
-        assert!(resident_at < legacy_at, "对比那一臂排在老门之前: {segment}");
         assert!(
-            segment[resident_at..legacy_at]
-                .contains("reconcile_rooms_with_resident_model(&db_option).await"),
-            "开关开着只调这一个入口: {segment}"
-        );
-
-        let helper = source
-            .split_once("async fn reconcile_rooms_with_resident_model(")
-            .expect("入口存在")
-            .1
-            .split_once("async fn skip_startup_room_build()")
-            .expect("入口之后是老门")
-            .0;
-        let code: String = helper
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let reconcile = code
-            .find("startup_room_reconcile(db_option).await")
-            .expect("先对比");
-        let autorun = code
-            .find("crate::options::startup_autorun()")
-            .expect("全量臂受 startup_autorun");
-        let full = code
-            .find("build_room_relations(db_option).await")
-            .expect("显式全量在这里跑");
-        let settle = code
-            .find("settle_full_rebuild(db_option, expected.as_ref()).await")
-            .expect("全量成功后写参照");
-        assert!(
-            reconcile < autorun && autorun < full && full < settle,
-            "顺序是 对比 → 冷启动开关 → 全量 → 写点 ②: {code}"
-        );
-        assert!(
-            code[full..settle].contains("Ok(()) =>"),
-            "写点 ② 只在全量 Ok(()) 之后: {code}"
+            segment.contains("房间计算采用逐 dbnum 实时内存模式"),
+            "启动段必须明确释放逐库实时内存处理: {segment}"
         );
         for forbidden in [
-            "watch_scope",
-            "is_auto_work_armed",
-            "reconcile_startup_room_build",
+            "reconcile_rooms_with_resident_model",
             "skip_startup_room_build",
-            "SKIP_STARTUP_ROOM_BUILD_ENV",
-            "vacuous_room_build_reason",
+            "build_room_relations(",
+            "build_room_relations_with_view(",
+            "startup_room_barrier",
+            "begin_startup_rooms",
         ] {
             assert!(
-                !code.contains(forbidden),
-                "对比这条路不做这件事（{forbidden}）: {code}"
+                !segment.contains(forbidden),
+                "启动段不再走项目级房间路径（{forbidden}）: {segment}"
             );
         }
     }
 
-    /// d-42 §4.8：`build_room_relations(` 的生产调用点在 `lib.rs` 只有两处——开关关的老臂、开关开的
-    /// 显式全量臂；多一处就是又开了一条全量路。
+    /// `run_cli` 的启动段不允许恢复任何项目级全量房间调用。
     #[test]
-    fn build_room_relations_is_called_from_exactly_two_places_in_lib() {
+    fn startup_segment_has_zero_project_room_calculation_calls() {
         let source = include_str!("lib.rs");
-        let production = source
-            .split_once("#[cfg(test)]\nmod startup_room_build_gate_tests {")
-            .expect("钉子模块在文件末尾")
+        let run = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_cli boundary")
             .0;
-        let code: String = production
-            .lines()
-            .filter(|line| !line.trim_start().starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let calls: Vec<usize> = code
-            .match_indices("build_room_relations(")
-            .map(|(at, _)| at)
-            .collect();
-        assert_eq!(calls.len(), 2, "生产调用点只有两处: {calls:?}");
+        assert!(!run.contains("build_room_relations("));
+        assert!(!run.contains("build_room_relations_with_view("));
+        assert!(!run.contains("startup_room_reconcile("));
     }
 
     /// The MDB declaration has to be resolved while the manager is still owned
@@ -2072,22 +2252,16 @@ mod startup_room_build_gate_tests {
             .split_once("pub async fn run_app(")
             .expect("run_cli end exists")
             .0;
-        assert_eq!(
-            body.matches("load_project_tree_verified().await").count(),
-            1,
-            "run_cli 里空间树只装一次"
-        );
         let web = body.find("serve_if_configured(mgr)").unwrap();
-        let tree = body.find("load_project_tree_verified().await").unwrap();
         let rooms = body
-            .find("initialize_resident_rooms_at_startup(&db_option).await")
-            .expect("房间初始化必须接进启动序");
+            .find("prepare_room_resident_at_startup(&db_option).await")
+            .expect("共享房间准备必须接进 ingest 启动序");
         let watcher = body.find("mgr.init_watcher().await").unwrap();
         let worker = body.find("ensure_batch_worker(mgr.clone())").unwrap();
         let data = body.find("wait_for_data_ready().await").unwrap();
         assert!(
-            web < tree && tree < rooms && rooms < watcher && watcher < worker && worker < data,
-            "顺序是 健康接口 → 空间树 → 房间初始化 → watcher → worker → 等数据"
+            web < rooms && rooms < watcher && watcher < worker && worker < data,
+            "顺序是 健康接口 → 共享房间准备 → watcher → worker → 等数据"
         );
         // 注释里可以说「不看哪几道门」，代码行里不许出现它们。
         let code = |text: &str| -> String {
@@ -2096,33 +2270,10 @@ mod startup_room_build_gate_tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         };
-        let between = code(&body[tree..rooms]);
-        for forbidden in [
-            "startup_data_ready",
-            "is_auto_work_armed",
-            "startup_autorun",
-            "model_incremental",
-            "skip_startup_room_build",
-        ] {
-            assert!(
-                !between.contains(forbidden),
-                "树装载到房间初始化之间不许夹别的门（{forbidden}）: {between}"
-            );
-        }
-        let gate_at = body[..rooms]
-            .rfind("if crate::options::room_resident_model() {")
-            .expect("房间初始化挂在开关之下");
-        let gate = &body[gate_at..rooms];
-        assert!(
-            gate.contains("if crate::options::spatial_compute() {")
-                && !gate.contains("startup_data_ready"),
-            "房间初始化只认开关与 spatial_compute: {gate}"
-        );
-
         let helper = code(
             source
-                .split_once("async fn initialize_resident_rooms_at_startup(")
-                .expect("初始化入口存在")
+                .split_once("async fn prepare_room_resident_at_startup(")
+                .expect("共享准备入口存在")
                 .1
                 .split_once("pub const SKIP_STARTUP_ROOM_BUILD_ENV")
                 .expect("入口之后是止血口常量")
@@ -2142,14 +2293,32 @@ mod startup_room_build_gate_tests {
             );
         }
         assert!(
-            helper.contains("watch_scope::active()")
-                && helper.contains("RoundOwnership::EveryFile"),
-            "限定域只在这里被问一次，翻成归属口径传给房间文件: {helper}"
+            helper.contains("load_project_tree_verified().await")
+                && helper.contains("initialize_resident_rooms_at_startup(db_option).await"),
+            "共享入口必须先装空间树再初始化 resident: {helper}"
         );
         assert!(
-            helper.contains("room_resident::initialize_at_startup(")
-                && helper.contains("record_startup_init(result.as_ref())"),
-            "入口调的是 initialize_at_startup，结局无论成败都记下: {helper}"
+            helper.find("load_project_tree_verified().await").unwrap()
+                < helper
+                    .find("initialize_resident_rooms_at_startup(db_option).await")
+                    .unwrap(),
+            "空间树必须先于 resident 构建: {helper}"
+        );
+        let read_through = source
+            .split_once("async fn run_read_through_core(")
+            .expect("read-through core exists")
+            .1
+            .split_once("pub async fn run_cli(")
+            .expect("read-through core end exists")
+            .0;
+        assert!(
+            read_through
+                .find("serve_if_configured(manager).await")
+                .unwrap()
+                < read_through
+                    .find("prepare_room_resident_at_startup(&db_option).await")
+                    .unwrap(),
+            "read-through 必须先开放健康探针；房间写入口由 resident ready 门拦住"
         );
     }
 
@@ -2283,6 +2452,9 @@ mod startup_room_build_gate_tests {
     /// 2026-09-07 起 `sync_live` 整个退役（同一条 D8）：watcher **无条件起**，这里连带钉
     /// 「那个字段不许回来」——它此前把「起不起 watcher」与「做不做启动重扫」绑在一个布尔上，
     /// 后者现在由 `data_face` 单独回答。
+    ///
+    /// 2026-09-08 起（refactor plan S4 / Q24）legacy db 读路由整个退役：`direct_read_mode()`
+    /// 这个函数不存在了，启动序列里**一处**都不许再出现它——数据面只有一条路，没有可选的东西。
     #[test]
     fn direct_read_mode_only_selects_the_data_read_route() {
         let source = include_str!("lib.rs");
@@ -2312,13 +2484,14 @@ mod startup_room_build_gate_tests {
                 .map(|line| line.trim().to_string())
                 .collect()
         };
-        assert_eq!(
-            code_lines(&body[..worker]),
-            vec![
-                "let direct_read_mode = crate::options::direct_read_mode();".to_string(),
-                "if direct_read_mode {".to_string(),
-            ],
-            "legacy 全量那条路退役后（ADR-058 D8），worker 之前 direct_read_mode 只剩：绑定、一行播报"
+        assert!(
+            code_lines(&body[..worker]).is_empty(),
+            "legacy db 读路由退役后（ADR-058 D8，2026-09-08 S4），启动序列不许再问 direct_read_mode: {:?}",
+            code_lines(&body[..worker])
+        );
+        assert!(
+            body.contains("数据读取模式：direct（e3d-io，唯一形态）"),
+            "读路由只剩一条也要在启动时说一声，读日志的人不必去翻 ADR"
         );
         // `body` 一直延到 `run_app`，中间夹着完成横幅那个函数：它只把读模式当标签打一行，
         // 不在本条的管辖内，启动序列到 `run_cli` 的 `Ok(())` 为止。

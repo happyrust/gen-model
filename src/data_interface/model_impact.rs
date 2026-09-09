@@ -396,6 +396,14 @@ pub fn classify_operation_effects(op: &EleOperationData) -> OperationEffectSumma
                     dchc = Some(dchc.map_or(code, |c| c.max(code)));
                 }
                 match effect {
+                    // 「不影响模型」是**少算**方向，判据与 direct 窗口规划器的元数据门
+                    // （`window_root_plan::change_is_metadata_only`）共用同一道双票：效果表
+                    // 说是元数据、E3D 字典却没投票的（`CACHID`）规划器照旧上卷
+                    // 整根重算，这里就不能报「不影响模型」——同一份回执里的 `details` 与
+                    // `units` 必须是一句话。
+                    AttributeEffect::DataOnly if !attribute_is_metadata_only(name) => {
+                        summary.impact_regen = true;
+                    }
                     AttributeEffect::DataOnly => {}
                     AttributeEffect::TransformOnly if is_loop_container_noun(&modified.noun) => {
                         // A point/vertex's local POS is an input of its owner's
@@ -899,9 +907,16 @@ mod tests {
                 AttributeEffect::DataOnly,
                 "{name}"
             );
+            // 动作不再只由效果表决定：`DataOnly` 还得拿到字典那第二票才落 `Skip`，
+            // 见 `the_skip_verdict_uses_the_same_double_vote_as_the_window_metadata_gate`。
+            let expected = if attribute_is_metadata_only(name) {
+                OperationImpact::Skip
+            } else {
+                OperationImpact::Regen
+            };
             assert_eq!(
                 classify_operation_impact(&modified_operation(name)),
-                OperationImpact::Skip,
+                expected,
                 "{name}"
             );
         }
@@ -1887,6 +1902,42 @@ mod tests {
             .filter(|name| attribute_is_metadata_only(name))
             .collect();
         assert_eq!(admitted, vec!["NAME", "DESC", "PURP", "FUNC", "LCHKDA"]);
+    }
+
+    /// 预览与执行同口径（2026-09-08）：`OperationImpact::Skip` 是「执行侧不会为它排模型
+    /// 工作」这句承诺，判据必须与 direct 窗口规划器的元数据门逐名一致——两边共问
+    /// [`attribute_is_metadata_only`]，谁也不许自己再列一张名单。字典没投票的
+    /// `CACHID` 因此不是 Skip：规划器对它照旧整根重算，预览再报
+    /// 「不影响模型」，同一份回执里 `details` 与 `units` 就是两句话。
+    #[test]
+    fn the_skip_verdict_uses_the_same_double_vote_as_the_window_metadata_gate() {
+        for name in DATA_ONLY_ATTR_NAMES {
+            let expected = if attribute_is_metadata_only(name) {
+                OperationImpact::Skip
+            } else {
+                OperationImpact::Regen
+            };
+            assert_eq!(
+                classify_operation_impact(&modified_operation(name)),
+                expected,
+                "{name}"
+            );
+        }
+        // 一次改动里混进一个没拿到第二票的名字，整次操作就不再是 Skip。
+        assert_eq!(
+            classify_operation_impact(&modified_operation_with_attrs(&["NAME", "CACHID"])),
+            OperationImpact::Regen
+        );
+        assert_eq!(
+            classify_operation_impact(&modified_operation_with_attrs(&["NAME", "DESC"])),
+            OperationImpact::Skip
+        );
+        // 源码钉：门那一侧问的是同一个谓词，不是自己抄的名单。
+        assert!(
+            include_str!("window_root_plan.rs")
+                .contains("model_impact::attribute_is_metadata_only"),
+            "元数据门必须共用 attribute_is_metadata_only"
+        );
     }
 
     #[test]

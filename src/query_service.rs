@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aios_core::{RefnoEnum, SUL_DB};
+use aios_core::{RefU64, RefnoEnum, SUL_DB};
 use parry3d::bounding_volume::Aabb;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -81,6 +81,21 @@ impl std::error::Error for QueryError {}
 #[derive(Deserialize)]
 struct RefnoArgs {
     refno: String,
+}
+
+#[derive(Deserialize)]
+struct BoundsArgs {
+    refno: String,
+    #[serde(default)]
+    scope: BoundsScope,
+}
+
+#[derive(Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum BoundsScope {
+    #[default]
+    Exact,
+    Subtree,
 }
 
 #[derive(Deserialize)]
@@ -235,8 +250,8 @@ impl QueryService {
                 // MCP/query binaries still fall through to normal init.
                 //
                 // 独立那一条走 `attach_store_connected`（只附着、不拉起）而不是裸
-                // `init_surreal`：`store_mode` 默认已是 spawned-mem，MCP 探针自己拉一台
-                // 空库、再在上面回答查询，是「答得出话但全是空」——最难查的那一类。
+                // `init_surreal`：配成 spawned-mem 时 MCP 探针会自己拉一台空库、再在
+                // 上面回答查询，是「答得出话但全是空」——最难查的那一类。
                 if SUL_DB.query("RETURN 1;").await.is_err() {
                     crate::attach_store_connected().await?;
                 }
@@ -523,40 +538,58 @@ impl QueryService {
         let _published_view_guard = crate::fast_model::spatial_state::lock_spatial_serial().await;
         #[derive(Deserialize)]
         struct RoomEdge {
-            panel: RefnoEnum,
+            panel: String,
             #[serde(default)]
             room_num: Option<String>,
         }
+        let dbnum = refno.refno().get_0();
         let mut response = SUL_DB
-            .query(format!(
-                "SELECT in AS panel, room_num FROM {}<-room_relate;",
-                refno.to_pe_key()
+            .query(
+                "SELECT panel, room_num FROM room_result \
+                 WHERE dbnum = $dbnum AND result_version = $watermark.room_result_version \
+                 AND member = $member;",
+            )
+            .bind(("dbnum", dbnum))
+            .bind((
+                "watermark",
+                surrealdb::sql::Thing::from((
+                    "dbnum_watermark".to_owned(),
+                    surrealdb::sql::Id::Number(i64::from(dbnum)),
+                )),
             ))
+            .bind(("member", refno.to_string()))
             .await
             .and_then(|response| response.check())
             .map_err(db_error)?;
         let edges: Vec<RoomEdge> = response
             .take(0)
             .map_err(|error| QueryError::new("PARSE_ERROR", error))?;
+        let resident = crate::fast_model::room_resident::current_for_calculation().ok();
         let mut memberships = Vec::new();
-        for edge in &edges {
-            let mut rooms = SUL_DB
-                .query(format!(
-                    "SELECT VALUE in FROM {}<-room_panel_relate LIMIT 1;",
-                    edge.panel.to_pe_key()
-                ))
-                .await
-                .and_then(|response| response.check())
-                .map_err(db_error)?;
-            let room_refnos: Vec<RefnoEnum> = rooms.take(0).unwrap_or_default();
+        let mut panels = Vec::with_capacity(edges.len());
+        for edge in edges {
+            let panel = RefnoEnum::from(
+                edge.panel
+                    .parse::<RefU64>()
+                    .map_err(|error| QueryError::new("PARSE_ERROR", error))?,
+            );
+            let room_refno = resident.as_ref().and_then(|model| {
+                model
+                    .map
+                    .rooms
+                    .iter()
+                    .find(|room| room.panels.contains(&panel))
+                    .map(|room| room.room.to_string())
+            });
             memberships.push(json!({
-                "room_refno": room_refnos.first().map(ToString::to_string),
+                "room_refno": room_refno,
                 "room_num": edge.room_num,
-                "panel_refno": edge.panel.to_string(),
+                "panel_refno": panel.to_string(),
             }));
+            panels.push(panel);
         }
         let mut room_targets = vec![refno.to_pdms_str()];
-        room_targets.extend(edges.iter().map(|edge| edge.panel.to_pdms_str()));
+        room_targets.extend(panels.iter().map(|panel| panel.to_pdms_str()));
         room_targets.sort_unstable();
         room_targets.dedup();
         let (published_version, stale, publication_status) =
@@ -654,17 +687,54 @@ impl QueryService {
         }))
     }
 
-    async fn spatial_bounds(&self, args: RefnoArgs) -> Result<Value, QueryError> {
+    async fn spatial_bounds(&self, args: BoundsArgs) -> Result<Value, QueryError> {
         let refno = parsed_model_refno(&args.refno)?;
-        if crate::options::data_face().is_read_through() {
+        // Use the same per-database projection as ensure/records. In ingest mode,
+        // a database without an applied watermark still publishes on-demand models to memory.
+        let memory_projection = if crate::options::data_face().is_read_through() {
+            true
+        } else if args.scope == BoundsScope::Subtree {
+            let dbnum = crate::fast_model::e3d_model_service::E3dModelService::dbnum_for_roots(
+                std::slice::from_ref(&args.refno),
+            )
+            .await
+            .map_err(e3d_error)?;
+            !crate::data_interface::model_read_route::route_for(dbnum)
+                .await
+                .map_err(db_error)?
+                .is_database()
+        } else {
+            false
+        };
+        if memory_projection {
             let source = crate::data_interface::generation_root::refno_to_e3d(refno);
+            let target = crate::fast_model::model_memory_store::packed_refno(source);
             let records = crate::fast_model::model_memory_store::ModelMemoryStore::global()
-                .records(crate::fast_model::model_memory_store::ProjectionScope::Current)
+                .records_of_root(
+                    crate::fast_model::model_memory_store::ProjectionScope::Current,
+                    source,
+                )
                 .into_iter()
-                .filter(|record| record.source_refno == source)
+                .filter(|record| match args.scope {
+                    BoundsScope::Exact => record.source_refno == source,
+                    BoundsScope::Subtree => {
+                        record.source_refno == source || record.ancestors.contains(&target)
+                    }
+                })
+                .filter(|record| {
+                    !record.mesh_id.is_empty()
+                        && valid_bounds(record.world_bounds[0], record.world_bounds[1])
+                })
                 .collect::<Vec<_>>();
             let first = records.first().ok_or_else(|| {
-                QueryError::new("NOT_FOUND", format!("no in-memory AABB for {refno}"))
+                QueryError::new(
+                    if args.scope == BoundsScope::Subtree {
+                        "NO_RENDERABLE_GEOMETRY"
+                    } else {
+                        "NOT_FOUND"
+                    },
+                    format!("no in-memory AABB for {refno}"),
+                )
             })?;
             let mut mins = first.world_bounds[0];
             let mut maxs = first.world_bounds[1];
@@ -676,6 +746,8 @@ impl QueryService {
             }
             return Ok(json!({
                 "refno": refno.to_string(),
+                "scope": match args.scope { BoundsScope::Exact => "exact", BoundsScope::Subtree => "subtree" },
+                "model_count": records.len(),
                 "min_mm": mins,
                 "max_mm": maxs,
                 "source": "model-memory",
@@ -688,6 +760,39 @@ impl QueryService {
         let _published_view_guard = crate::fast_model::spatial_state::lock_spatial_serial().await;
         let (published_version, stale, publication_status) =
             Self::published_derivation_status(None).await?;
+        if args.scope == BoundsScope::Subtree {
+            let records = crate::fast_model::model_record_reader::records_of_root(&SUL_DB, refno)
+                .await
+                .map_err(db_error)?;
+            let bounds =
+                aggregate_bounds(records.iter().filter(|r| !r.insts.is_empty()).map(|r| {
+                    (
+                        [
+                            r.world_aabb.mins.x,
+                            r.world_aabb.mins.y,
+                            r.world_aabb.mins.z,
+                        ],
+                        [
+                            r.world_aabb.maxs.x,
+                            r.world_aabb.maxs.y,
+                            r.world_aabb.maxs.z,
+                        ],
+                    )
+                }))
+                .ok_or_else(|| {
+                    QueryError::new(
+                        "NO_RENDERABLE_GEOMETRY",
+                        format!("no published geometry for {refno}"),
+                    )
+                })?;
+            return Ok(json!({
+                "refno": refno.to_string(), "scope": "subtree",
+                "min_mm": bounds.0, "max_mm": bounds.1, "model_count": bounds.2,
+                "source": "published-model-records",
+                "published_version": published_version, "stale": stale,
+                "publication_status": publication_status,
+            }));
+        }
         #[derive(Deserialize)]
         struct BoundsRow {
             world_aabb: Aabb,
@@ -721,6 +826,29 @@ impl QueryService {
             "publication_status": publication_status,
         }))
     }
+}
+
+fn valid_bounds(min: [f32; 3], max: [f32; 3]) -> bool {
+    (0..3).all(|i| min[i].is_finite() && max[i].is_finite() && min[i] <= max[i])
+}
+
+fn aggregate_bounds(
+    rows: impl IntoIterator<Item = ([f32; 3], [f32; 3])>,
+) -> Option<([f32; 3], [f32; 3], usize)> {
+    let mut min = [f32::INFINITY; 3];
+    let mut max = [f32::NEG_INFINITY; 3];
+    let mut count = 0;
+    for (lo, hi) in rows {
+        if !valid_bounds(lo, hi) {
+            continue;
+        }
+        for i in 0..3 {
+            min[i] = min[i].min(lo[i]);
+            max[i] = max[i].max(hi[i]);
+        }
+        count += 1;
+    }
+    (count > 0).then_some((min, max, count))
 }
 
 fn decode<T: DeserializeOwned>(arguments: Value) -> Result<T, QueryError> {
@@ -787,6 +915,19 @@ fn e3d_error(error: anyhow::Error) -> QueryError {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn subtree_bounds_union_rejects_invalid_and_empty_geometry() {
+        assert!(super::aggregate_bounds([]).is_none());
+        let result = super::aggregate_bounds([
+            ([0., 1., 2.], [3., 4., 5.]),
+            ([-10., 2., 3.], [2., 20., 4.]),
+            ([f32::NAN, 0., 0.], [1.; 3]),
+            ([5.; 3], [1.; 3]),
+        ])
+        .unwrap();
+        assert_eq!(result, ([-10., 1., 2.], [3., 20., 5.], 2));
+    }
+
     use super::*;
 
     fn service() -> QueryService {
@@ -850,7 +991,7 @@ mod tests {
             .split_once("async fn spatial_bounds(&self")
             .expect("spatial query exists")
             .1
-            .split_once("fn validate_refno")
+            .split_once("fn validate_limit")
             .expect("spatial query boundary")
             .0;
         for body in [room, spatial] {
@@ -859,6 +1000,10 @@ mod tests {
             assert!(body.contains("\"stale\""), "{body}");
             assert!(body.contains("\"publication_status\""), "{body}");
         }
+        assert!(room.contains("FROM room_result"), "{room}");
+        assert!(room.contains("room_result_version"), "{room}");
+        assert!(!room.contains("<-room_relate"), "{room}");
+        assert!(!room.contains("<-room_panel_relate"), "{room}");
         assert!(spatial.contains("\"unsupported\""));
     }
 

@@ -57,6 +57,8 @@ pub mod db_file_header;
 
 /// 冻结源：收集时冻住的文件世代与目标会话（替代 `SnapshotToken` / `DabaconSnapshot`）。
 pub mod frozen_source;
+pub(crate) mod model_completion;
+pub(crate) mod room_completion;
 
 /// e3d-io 净窗口收集器：数据面增量窗口的默认底座（替代 old-pdms-io `net_window`）。
 pub mod e3d_collector;
@@ -141,6 +143,10 @@ pub mod model_update_plan;
 
 /// 稳态增量窗口 S→T 的模型面选根：`roots_S ∪ roots_T` 与 `touches_roots`（ADR-056 P2-1 / D9 / N7）。
 pub mod window_root_plan;
+
+/// 刚体前移（ADR-066）的纯函数层：只动 `POS / ORI` 的锚点名下、已安定的根不整根重算，投影记录
+/// 左乘 `Δ = W_T·W_S⁻¹` 再按 regen 同款发布。开关 `model_transform_cheap_path` 默认关。
+pub mod rigid_motion;
 
 /// 结构连接正向级联（core `ADSTCH` 同形，联动对齐计划 C2）：窗口里的 `SJOI` / `FIXING` / `SCTN` …
 /// 正向读 `CREF` / `JOIS` / `JOIE` / `CFRA`、核对回指，把对端的生成根并进 `touched`。开关默认关。
@@ -457,6 +463,34 @@ mod legacy_parse_pdms_db_guard {
     /// `initialize_dbnum_baseline`。再开一条只灌 SYS 的路，就会有两套「什么时候算已初始化」的判据，
     /// 而那正是 `bootstrap_sys_metadata` 当年的形状：它谁的水位都不看、调用即整库重灌。
     ///
+    /// 持久层只有 SurrealDB 一个（宪法 I）：`sqlx` 不许再进 manifest。
+    ///
+    /// 2026-09-07 退役的 MySQL 那条路（`feature = "sql"`）之所以能烂很久没人发现，正是因为
+    /// 它是个**从来没人开的 feature**：默认集里没有、CI 的 `--features` 里没有、脚本里也没有，
+    /// 于是门后的代码跟着 `aios_core` 的接口一起腐烂（`AiosDBMgr::get_global_pool` 早就没了），
+    /// 一开就是七个编译错。
+    ///
+    /// 钉在 manifest 上而不是源码上是有意的：仓里还躺着一批**没进模块树的孤儿文件**
+    /// （`ssc.rs` / `mdb.rs` / `metadata.rs` / `pcf/*` / `plug_in/*` / `api/*` …，`lib.rs` 里
+    /// 那几行 `// pub mod` 就是它们的现状），它们满篇 `sqlx` 却一行都不参与编译。
+    /// 只要 manifest 里没有这个依赖，任何一个想复活的文件都会当场编不过——这才是那道真闸。
+    #[test]
+    fn no_manifest_declares_sqlx_or_the_sql_feature() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for manifest in ["Cargo.toml", "python/Cargo.toml"] {
+            let path = root.join(manifest);
+            if !path.exists() {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect(manifest);
+            let hits = manifest_lines_mentioning(&text, &["sqlx", "sql = ["]);
+            assert!(
+                hits.is_empty(),
+                "{manifest} 仍声明 sqlx / `sql` feature（2026-09-07 退役，持久层只有 SurrealDB）：{hits:#?}"
+            );
+        }
+    }
+
     /// 钉两件事：那个 bin 的文件不许回来，`initialize_project_sys_metadata` 的库前提（只补没有水位的）
     /// 不许被摘掉。
     #[test]

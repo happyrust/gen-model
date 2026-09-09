@@ -17,6 +17,14 @@ struct RefnoArgs {
 }
 
 #[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
+struct BoundsArgs {
+    /// E3D reference number in `dbnum/index` form.
+    refno: String,
+    #[serde(default)]
+    scope: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, schemars::JsonSchema)]
 struct AttributesArgs {
     refno: String,
     /// Any subset of name, type, owner, position. Empty means all four.
@@ -200,7 +208,7 @@ impl E3dMcp {
         name = "model.spatial.bounds",
         description = "Read an element's persisted world AABB from inst_relate"
     )]
-    async fn spatial_bounds(&self, Parameters(args): Parameters<RefnoArgs>) -> CallToolResult {
+    async fn spatial_bounds(&self, Parameters(args): Parameters<BoundsArgs>) -> CallToolResult {
         self.call("model.spatial.bounds", args).await
     }
 }

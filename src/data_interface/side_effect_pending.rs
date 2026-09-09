@@ -7,6 +7,8 @@
 use aios_core::SUL_DB;
 use aios_core::pdms_types::*;
 use serde::{Deserialize, Serialize};
+use surrealdb::Surreal;
+use surrealdb::engine::any::Any;
 use surrealdb::sql::Thing;
 
 use crate::data_interface::dbnum_state::escape_surql_str;
@@ -18,6 +20,25 @@ const PUBLISHED_SPATIAL_VERSION_ID: &str = "published_spatial_version:current";
 const PUBLISHED_FILE_INPUT_TABLE: &str = "published_file_input";
 const PUBLISHED_ROOM_BASELINE_ID: &str = "room_published_input_baseline:topology_v2";
 const MAX_ATTEMPTS: u32 = 5;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+/// File identity and completed model/spatial publication. Room completion is
+/// checked separately by the room-release APIs; this proof alone does not imply it.
+pub(crate) struct CompletedFileRound {
+    dbnum: u32,
+    end_sesno: i32,
+    pub(crate) commit_token: Option<String>,
+}
+
+impl CompletedFileRound {
+    pub(crate) fn dbnum(&self) -> u32 {
+        self.dbnum
+    }
+
+    pub(crate) fn end_sesno(&self) -> i32 {
+        self.end_sesno
+    }
+}
 
 fn parse_ref_rev_payload(changed_refnos: &[String]) -> anyhow::Result<Vec<RefnoEnum>> {
     anyhow::ensure!(
@@ -478,21 +499,35 @@ impl SideEffectCompensator {
     /// authoritative until that round publishes or is explicitly replaced.
     pub(crate) async fn recover_collecting_file_round(
         dbnum: u32,
+        end_sesno: i32,
     ) -> anyhow::Result<Option<(i32, String)>> {
-        let mut response = SUL_DB
+        Self::recover_collecting_file_round_on(&SUL_DB, dbnum, end_sesno).await
+    }
+
+    async fn recover_collecting_file_round_on(
+        db: &Surreal<Any>,
+        dbnum: u32,
+        end_sesno: i32,
+    ) -> anyhow::Result<Option<(i32, String)>> {
+        #[derive(Deserialize)]
+        struct RecoveryRow {
+            end_sesno: i32,
+            commit_token: Option<String>,
+        }
+        let mut response = db
             .query(format!(
-                "SELECT * FROM {TABLE} WHERE kind = 'spatial_reconcile' \
-                 AND dbnum = {dbnum} AND status = 'collecting' \
-                 ORDER BY end_sesno ASC LIMIT 1;"
+                "SELECT end_sesno, commit_token FROM {TABLE} WHERE kind = 'spatial_reconcile' \
+                 AND dbnum = {dbnum} AND end_sesno = {end_sesno} \
+                 AND status = 'collecting' LIMIT 1;"
             ))
             .await?
             .check()?;
-        let row = response.take::<Option<PendingJob>>(0)?;
+        let row = response.take::<Option<RecoveryRow>>(0)?;
         row.map(|row| {
             let token = row.commit_token.ok_or_else(|| {
                 anyhow::anyhow!(
                     "collecting file round dbnum={} end={} has no frozen source token",
-                    row.dbnum,
+                    dbnum,
                     row.end_sesno
                 )
             })?;
@@ -834,16 +869,124 @@ impl SideEffectCompensator {
             .collect())
     }
 
-    pub(crate) async fn mark_file_rooms_released(dbnum: u32, end_sesno: i32) -> anyhow::Result<()> {
+    pub(crate) async fn mark_file_rooms_released(
+        dbnum: u32,
+        end_sesno: i32,
+    ) -> anyhow::Result<CompletedFileRound> {
+        Self::mark_file_rooms_released_on(&SUL_DB, dbnum, end_sesno).await
+    }
+
+    /// During startup, project-wide room rebuilding owns all room work. A file
+    /// round therefore completes after spatial publication even when legacy
+    /// room rows still name that round; the project rebuild clears only rows
+    /// older than its cutoff after it has successfully published all rooms.
+    pub(crate) async fn mark_file_rooms_released_for_project_rebuild(
+        dbnum: u32,
+        end_sesno: i32,
+    ) -> anyhow::Result<CompletedFileRound> {
+        Self::mark_file_rooms_released_for_project_rebuild_on(&SUL_DB, dbnum, end_sesno).await
+    }
+
+    async fn mark_file_rooms_released_for_project_rebuild_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        dbnum: u32,
+        end_sesno: i32,
+    ) -> anyhow::Result<CompletedFileRound> {
         let id = Self::record_id(SideEffectKind::SpatialReconcile, dbnum, end_sesno);
-        SUL_DB
+        let mut response = db
             .query(format!(
                 "UPDATE {id} SET room_released = true, updated_at = time::now() \
-                 WHERE status = 'done';"
+                 WHERE status = 'done' RETURN VALUE id;"
             ))
             .await?
             .check()?;
-        Ok(())
+        let released: Vec<Thing> = response.take(0)?;
+        anyhow::ensure!(
+            released.len() == 1,
+            "file round {dbnum}/{end_sesno} is not spatially done"
+        );
+        Self::completed_file_round_on(db, dbnum, end_sesno).await
+    }
+
+    pub(crate) async fn mark_file_rooms_released_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        dbnum: u32,
+        end_sesno: i32,
+    ) -> anyhow::Result<CompletedFileRound> {
+        let id = Self::record_id(SideEffectKind::SpatialReconcile, dbnum, end_sesno);
+        let round = escape_surql_str(&format!("{dbnum}:{end_sesno}"));
+        let mut response = db
+            .query(format!(
+                "UPDATE {id} SET room_released = true, updated_at = time::now() \
+                 WHERE status = 'done' AND array::len((SELECT VALUE id FROM model_update_pending \
+                 WHERE file_rounds CONTAINS '{round}' AND action IN \
+                 ['room_recalc_panel', 'room_recalc_element'])) = 0 RETURN VALUE id;"
+            ))
+            .await?
+            .check()?;
+        let released: Vec<Thing> = response.take(0)?;
+        anyhow::ensure!(
+            released.len() == 1,
+            "file round {dbnum}/{end_sesno} is not spatially done or still has room work"
+        );
+        Self::completed_file_round_on(db, dbnum, end_sesno).await
+    }
+
+    pub(crate) async fn completed_file_round(
+        dbnum: u32,
+        end_sesno: i32,
+    ) -> anyhow::Result<CompletedFileRound> {
+        Self::completed_file_round_on(&SUL_DB, dbnum, end_sesno).await
+    }
+
+    pub(crate) async fn completed_file_round_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        dbnum: u32,
+        end_sesno: i32,
+    ) -> anyhow::Result<CompletedFileRound> {
+        Self::file_publication_proof_on(db, dbnum, end_sesno, true).await
+    }
+
+    pub(crate) async fn published_model_file_round_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        dbnum: u32,
+        end_sesno: i32,
+    ) -> anyhow::Result<CompletedFileRound> {
+        Self::file_publication_proof_on(db, dbnum, end_sesno, false).await
+    }
+
+    async fn file_publication_proof_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        dbnum: u32,
+        end_sesno: i32,
+        require_rooms: bool,
+    ) -> anyhow::Result<CompletedFileRound> {
+        let id = Self::record_id(SideEffectKind::SpatialReconcile, dbnum, end_sesno);
+        let room_guard = if require_rooms {
+            " AND room_released = true"
+        } else {
+            ""
+        };
+        #[derive(Deserialize)]
+        struct Row {
+            commit_token: Option<String>,
+        }
+        let mut response = db
+            .query(format!(
+                "SELECT commit_token FROM {id} WHERE status = 'done'{room_guard};"
+            ))
+            .await?
+            .check()?;
+        let mut rows: Vec<Row> = response.take(0)?;
+        anyhow::ensure!(
+            rows.len() == 1,
+            "file round {dbnum}/{end_sesno} has no completion proof"
+        );
+        Ok(CompletedFileRound {
+            dbnum,
+            end_sesno,
+            commit_token: rows.pop().unwrap().commit_token,
+        })
     }
 
     /// After PE+watermark success: enqueue only legacy non-model side effects.
@@ -1652,22 +1795,30 @@ impl SideEffectCompensator {
     /// spatial 的 done 行**不在此清扫**——它的重放/销账语义（崩溃窗口 ②/④，pending
     /// 在场即 ReplayRequired）自成一套，误删会掩盖重启该重放的意图。返回删除行数。
     pub async fn sweep_done() -> anyhow::Result<usize> {
-        let mut response = SUL_DB
+        Self::sweep_done_on(&SUL_DB).await
+    }
+
+    async fn sweep_done_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    ) -> anyhow::Result<usize> {
+        let mut response = db
             .query(Self::render_sweep_done())
             .await
             .map_err(|e| anyhow::anyhow!("sweep done side-effect rows failed: {e}"))?
             .check()
             .map_err(|e| anyhow::anyhow!("sweep done side-effect rows statement failed: {e}"))?;
-        let removed: Vec<serde_json::Value> = response
-            .take(0)
-            .map_err(|e| anyhow::anyhow!("decode swept side-effect rows failed: {e}"))?;
-        Ok(removed.len())
+        let count: Option<usize> = response
+            .take(2)
+            .map_err(|e| anyhow::anyhow!("decode swept side-effect row count failed: {e}"))?;
+        Ok(count.unwrap_or(0))
     }
 
-    /// 清扫 done 行的 DELETE（纯渲染）：非空间、终态；`RETURN BEFORE` 回删掉的行以计数。
+    /// 清扫 done 行的 DELETE（纯渲染）：只让数据库返回标量计数，不反序列化 schemaless 行。
     fn render_sweep_done() -> String {
         format!(
-            "DELETE {TABLE} WHERE kind != 'spatial_reconcile' AND status = 'done' RETURN BEFORE;"
+            "LET $done = SELECT VALUE id FROM {TABLE} WHERE kind != 'spatial_reconcile' AND status = 'done';\
+             DELETE $done RETURN NONE;\
+             RETURN count($done);"
         )
     }
 
@@ -1682,6 +1833,7 @@ mod tests {
         PendingJob, PublishedFileInput, SideEffectCompensator, SideEffectKind,
         parse_ref_rev_payload,
     };
+    use crate::data_interface::table_parity::{fresh_mem_db, init_schema_on};
 
     fn manifest_job(dbnum: u32, end_sesno: i32, token: &str) -> PendingJob {
         PendingJob {
@@ -2355,11 +2507,153 @@ mod tests {
     #[test]
     fn sweeping_done_removes_only_terminal_non_spatial_rows() {
         let sql = SideEffectCompensator::render_sweep_done();
-        assert!(sql.starts_with("DELETE "), "必须是删除语句: {sql}");
+        assert!(
+            sql.contains("DELETE $done RETURN NONE"),
+            "必须是删除语句: {sql}"
+        );
+        assert!(sql.contains("RETURN count($done)"), "只返回标量计数: {sql}");
         assert!(sql.contains("status = 'done'"), "只删终态行: {sql}");
         assert!(
             sql.contains("kind != 'spatial_reconcile'"),
             "空间收敛的 done 行有自己的重放/销账语义，不在此清扫: {sql}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_done_counts_without_decoding_schemaless_rows() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test").use_db("sweep_done_count").await.unwrap();
+        db.query(
+            "CREATE incr_side_effect_pending:one SET kind='syst_derived', status='done', arbitrary=type::thing('pe','1_2');\
+             CREATE incr_side_effect_pending:two SET kind='ref_rev_maintain', status='done', arbitrary=time::now();\
+             CREATE incr_side_effect_pending:keep SET kind='spatial_reconcile', status='done';",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        assert_eq!(SideEffectCompensator::sweep_done_on(&db).await.unwrap(), 2);
+        #[derive(serde::Deserialize)]
+        struct CountRow {
+            count: usize,
+        }
+        let mut response = db
+            .query("SELECT count() AS count FROM incr_side_effect_pending GROUP ALL;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            response.take::<Option<CountRow>>(0).unwrap().unwrap().count,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn file_round_proof_requires_spatial_done_and_no_associated_room_work() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test").use_db("file_round_proof").await.unwrap();
+        db.query(
+            "CREATE incr_side_effect_pending:spatial_reconcile_8000_42 SET kind='spatial_reconcile', \
+             dbnum=8000, end_sesno=42, status='done', room_released=false;\
+             CREATE model_update_pending:room_recalc_element_1_2 SET action='room_recalc_element', \
+             target_refno='1/2', status='pending', file_rounds=['8000:42'];",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        assert!(
+            SideEffectCompensator::mark_file_rooms_released_on(&db, 8000, 42)
+                .await
+                .is_err()
+        );
+        db.query("DELETE model_update_pending:room_recalc_element_1_2;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let proof = SideEffectCompensator::mark_file_rooms_released_on(&db, 8000, 42)
+            .await
+            .unwrap();
+        assert_eq!((proof.dbnum(), proof.end_sesno()), (8000, 42));
+        assert_eq!(
+            SideEffectCompensator::completed_file_round_on(&db, 8000, 42)
+                .await
+                .unwrap(),
+            proof
+        );
+    }
+
+    #[tokio::test]
+    async fn project_room_rebuild_owns_legacy_room_work_after_spatial_done() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("project_room_rebuild_proof")
+            .await
+            .unwrap();
+        db.query(
+            "CREATE incr_side_effect_pending:spatial_reconcile_7997_155 SET kind='spatial_reconcile', \
+             dbnum=7997, end_sesno=155, status='done', room_released=false;\
+             CREATE model_update_pending:legacy SET action='room_recalc_element', \
+             target_refno='1/2', status='pending', file_rounds=['7997:155'];",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let proof =
+            SideEffectCompensator::mark_file_rooms_released_for_project_rebuild_on(&db, 7997, 155)
+                .await
+                .unwrap();
+        assert_eq!((proof.dbnum(), proof.end_sesno()), (7997, 155));
+        assert_eq!(
+            SideEffectCompensator::completed_file_round_on(&db, 7997, 155)
+                .await
+                .unwrap(),
+            proof
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_token_must_match_the_task_right_edge() {
+        let db = fresh_mem_db("side_effect_pending", "exact_recovery_round")
+            .await
+            .unwrap();
+        init_schema_on(&db).await.unwrap();
+        db.query(
+            "CREATE incr_side_effect_pending:spatial_reconcile_8000_434 SET \
+                 kind='spatial_reconcile', dbnum=8000, end_sesno=434, \
+                 status='collecting', commit_token='old'; \
+             CREATE incr_side_effect_pending:spatial_reconcile_8000_438 SET \
+                 kind='spatial_reconcile', dbnum=8000, end_sesno=438, \
+                 status='collecting', commit_token='current';",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        assert_eq!(
+            SideEffectCompensator::recover_collecting_file_round_on(&db, 8000, 438)
+                .await
+                .unwrap(),
+            Some((438, "current".to_owned()))
+        );
+        assert_eq!(
+            SideEffectCompensator::recover_collecting_file_round_on(&db, 8000, 440)
+                .await
+                .unwrap(),
+            None
         );
     }
 }

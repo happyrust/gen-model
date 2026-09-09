@@ -22,10 +22,6 @@ use parry3d::query::{Ray, RayCast};
 use rayon::prelude::*;
 use rumqttc::Event::Incoming;
 use rumqttc::{Packet, QoS};
-#[cfg(feature = "sql")]
-use sqlx::pool::PoolOptions;
-#[cfg(feature = "sql")]
-use sqlx::{Executor, MySql, MySqlPool, Pool, Row};
 use tokio::sync::Mutex;
 
 use crate::consts::*;
@@ -287,98 +283,6 @@ impl AiosDBManager {
             .unwrap_or("UNSET".to_string())
     }
 
-    ///获得默认的连接字符串
-    #[inline]
-    pub fn get_default_conn_str(d: &DbOption) -> String {
-        let user = d.user.as_str();
-        let pwd = urlencoding::encode(d.password.as_str());
-        let ip = d.ip.as_str();
-        let port = d.port.as_str();
-        format!("mysql://{user}:{pwd}@{ip}:{port}")
-    }
-
-    #[cfg(feature = "sql")]
-    #[inline]
-    pub async fn get_global_pool(&self) -> anyhow::Result<Pool<MySql>> {
-        let connection_str = self.default_conn_str();
-        let url = &format!("{connection_str}/{}", GLOBAL_DATABASE);
-        PoolOptions::new()
-            .max_connections(500)
-            .acquire_timeout(Duration::from_secs(10 * 60))
-            .connect(url)
-            .await
-            .map_err({ |x| anyhow::anyhow!(x.to_string()) })
-    }
-
-    ///获得默认的连接字符串
-    #[inline]
-    pub fn default_conn_str(&self) -> String {
-        let d = &self.db_option;
-        let user = d.user.as_str();
-        let pwd = urlencoding::encode(&d.password);
-        let ip = d.ip.as_str();
-        let port = d.port.as_str();
-        format!("mysql://{user}:{pwd}@{ip}:{port}")
-    }
-    /// 获得pool
-    #[cfg(feature = "sql")]
-    #[inline]
-    pub async fn get_db_pool(connection_str: &str, project: &str) -> anyhow::Result<Pool<MySql>> {
-        let url = &format!("{connection_str}/{}", project);
-        PoolOptions::new()
-            .max_connections(500)
-            .acquire_timeout(Duration::from_secs(10 * 60))
-            .connect(url)
-            .await
-            .map_err({ |x| anyhow::anyhow!(x.to_string()) })
-    }
-
-    #[inline]
-    pub fn puhua_conn_str(&self) -> String {
-        let d = &self.db_option;
-        let user = d.puhua_database_user.as_str();
-        let pwd = d.puhua_database_password.as_str();
-        let ip = d.puhua_database_ip.as_str();
-        format!("mysql://{user}:{pwd}@{ip}")
-    }
-
-    ///获取普华mysql数据库的连接pool
-    #[cfg(feature = "sql")]
-    #[inline]
-    pub async fn get_puhua_pool(&self) -> anyhow::Result<Pool<MySql>> {
-        let conn = self.puhua_conn_str();
-        let url = &format!("{conn}/{}", PUHUA_MATERIAL_DATABASE);
-        PoolOptions::new()
-            .max_connections(500)
-            .acquire_timeout(Duration::from_secs(10 * 60))
-            .connect(url)
-            .await
-            .map_err({ |x| anyhow::anyhow!(x.to_string()) })
-    }
-
-    ///获取mysql数据库模糊查询的连接pool
-    #[cfg(feature = "sql")]
-    #[inline]
-    pub async fn get_fuzzy_query_pool(&self) -> anyhow::Result<Pool<MySql>> {
-        let connection_str = self.default_conn_str();
-        let url = &format!("{connection_str}/{}", FUZZY_QUERT);
-        PoolOptions::new()
-            .max_connections(500)
-            .acquire_timeout(Duration::from_secs(10 * 60))
-            .connect(url)
-            .await
-            .map_err({ |x| anyhow::anyhow!(x.to_string()) })
-    }
-
-    ///获得默认的pool
-    #[cfg(feature = "sql")]
-    #[inline]
-    pub async fn get_default_pool(conn_str: &str) -> anyhow::Result<Pool<MySql>> {
-        MySqlPool::connect(conn_str)
-            .await
-            .map_err(|x| anyhow::anyhow!(x.to_string()))
-    }
-
     /// 初始化 mdb：把这个 MDB 声明了哪些库解出来并登记，供后续按类型取用。
     ///
     /// 之前这里是个空壳（只有 `Ok(())`），于是「哪些库属于本 MDB」在初始化期
@@ -491,9 +395,6 @@ impl AiosDBManager {
     ///初始化db manager
     pub async fn init(db_option: &DbOption) -> anyhow::Result<Self> {
         let dir = db_option.project_path.to_string();
-        #[cfg(feature = "sql")]
-        let mut project_map = DashMap::new();
-        let default_conn = AiosDBManager::get_default_conn_str(&db_option);
         let projects = db_option.get_project_dir_names().clone();
 
         // 监控目录逐项目解析：本地盘与共享目录（UNC / 映射盘）混排都要认，而且一个
@@ -594,8 +495,6 @@ impl AiosDBManager {
             }
         });
         Ok(Self {
-            #[cfg(feature = "sql")]
-            project_map,
             projects,
             needed_parse_files: None,
             project_path: dir,
@@ -604,49 +503,6 @@ impl AiosDBManager {
             mqtt_client,
             rtree: None,
         })
-    }
-
-    /// 根据project获取连接池
-    #[cfg(feature = "sql")]
-    #[inline]
-    pub fn get_project_pool(&self, project: &str) -> Option<Pool<MySql>> {
-        self.project_map.get(project).map(|x| x.value().clone())
-    }
-
-    /// 根据project获取连接池
-    #[cfg(feature = "sql")]
-    #[inline]
-    pub fn get_cur_project_pool(&self) -> Option<Pool<MySql>> {
-        self.project_map
-            .get(self.get_cur_project())
-            .map(|x| x.value().clone())
-    }
-
-    ///获得project 的db
-    #[cfg(feature = "sql")]
-    #[inline]
-    pub async fn get_project_pool_by_refno(&self, refno: RefU64) -> Option<(String, Pool<MySql>)> {
-        // if let Some(projects) = self.ref0_projects.get(&refno.get_0()) {
-        //     ///只有一个的时候
-        //     if projects.len() == 1 {
-        //         let project = projects.value().iter().next().as_ref().unwrap().clone();
-        //         if let Some(project_pool) = self.project_map.get(project) {
-        //             return Some((project.clone(), project_pool.value().clone()));
-        //         }
-        //     } else {
-        //         for project in &self.db_option.included_projects {
-        //             if let Some(pool) = self.get_project_pool(project) {
-        //                 // if check_exist_refno(refno, &pool, &self.mdb_dbnums)
-        //                 //     .await
-        //                 //     .ok()?
-        //                 // {
-        //                     return Some((project.clone(), pool.clone()));
-        //                 // }
-        //             }
-        //         }
-        //     }
-        // }
-        None
     }
 
     fn match_stype(input: i32) -> String {

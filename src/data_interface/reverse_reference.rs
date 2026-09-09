@@ -1075,6 +1075,182 @@ mod tests {
         );
     }
 
+    const AMS7000: &str = r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000\ams7000_0001";
+
+    /// H1 的 live 门（2026-09-08）：`ams7000_0001` 是 DESI 门钉住的 `PROJECT_CATALOGUE`，
+    /// 09-06 计划 P3 说主门该改到它、却一直没跑过。沿它的会话链往回找最近一个「变了目录件、
+    /// 且反查得到设计引用者」的窗口 S→T，走 P2 收窗 → P3 反查（与运行期 `reconcile_catalogue_versions`
+    /// 同一对纯函数），再按 (c) 的凭证判据核：落款停在 S 的根判过期、落款到 T 的判命中——
+    /// 这正是 external 形态下目录改了、设计没改时 `ensure` 从前答错的那一问。
+    ///
+    /// 语料里没有「改一个目录件就 SAVEWORK」的自然窗口对，所以先沿链往回找；本机语料的
+    /// `ams7000_0001` 链上只留了 5 个会话（1 / 237 / 238 / 262 / 263，MERGE CHANGES 折过），
+    /// 262→263 零变更、其余都是几万件的导入级窗——找不到精确窗就退到 C8 / P4 live 门的同一手法：
+    /// 从某个 DESI 的 `SPRE` 反向表里拿一条指向 7000 的边，把那个 SPCO 当**假定的变更源**，
+    /// 反查回来的引用者必须包含那条边的 referrer。DB 那一半（`roots_behind_catalogue_on` / 排工）
+    /// 由 mem:// 单测钉，这里只走文件半边。
+    #[test]
+    #[ignore = "manual live: walks the ams7000_0001 session chain and opens every DESI in ams000"]
+    fn live_ams7000_catalogue_window_regenerates_referrers_and_fails_stale_stamps() {
+        use crate::data_interface::model_update_pending::{
+            CatalogueStamp, catalogue_stamps_current,
+        };
+        if !fixtures_present() || !Path::new(AMS7000).is_file() {
+            println!("skip: ams7000_0001 is not installed");
+            return;
+        }
+        // 与 `model_update_pending::CATALOGUE_CASCADE_SEED_CAP` 同值：更大的窗在运行期本来就退化。
+        const SEED_CAP: usize = 50;
+        let file = Path::new(AMS7000);
+        let sessions: Vec<u32> = ReadOnlyEngine::open(file)
+            .expect("open ams7000_0001")
+            .sessions()
+            .expect("session chain")
+            .iter()
+            .map(|session| session.session_id)
+            .collect();
+        let target = *sessions
+            .first()
+            .expect("a catalogue file has at least one session");
+        let mut sources = sources_in_dir(Path::new(AMS_DIR), &["DESI", "CATA"]).expect("sources");
+        assert!(sources.iter().any(|s| s.dbnum == 7000 && s.is_catalogue()));
+        for source in &mut sources {
+            if source.dbnum == 7000 {
+                source.sesno = Some(target);
+            }
+        }
+        // (c) 的判据先钉死：落款停在旧会话的根不算当前，到 T 的才算。与下面走哪条路无关。
+        let latest = |dbnum: u32| (dbnum == 7000).then_some(target);
+        let stamped_at = |session: u32| CatalogueStamp {
+            dbnum: Some(7000),
+            session: Some(session),
+        };
+        assert!(catalogue_stamps_current(&[stamped_at(target)], latest));
+        for &base in sessions.iter().skip(1) {
+            assert!(
+                !catalogue_stamps_current(&[stamped_at(base)], latest),
+                "a root still stamped on catalogue session {base} must not count as current at {target}"
+            );
+        }
+
+        // 退路：假定源。语料里 ams7000 没有精确窗时，反查那一半照样要验——拿一条真实存在的
+        // DESI→7000 `SPRE` 边，把它的目标当变了的目录件。
+        let assumed_seed = || -> Option<(CatalogueSeed, RefNo, u32)> {
+            let spre = e3d_attlib::db1_hash("SPRE");
+            for source in sources.iter().filter(|source| source.is_design()) {
+                let Ok(mut engine) = ReadOnlyEngine::open(&source.file) else {
+                    continue;
+                };
+                let Some(mut table) = engine.reference_table(spre) else {
+                    continue;
+                };
+                let edge = table
+                    .iter()
+                    .filter_map(Result::ok)
+                    .find(|entry| entry.target.dbno() == 7000)
+                    .map(|entry| (entry.target, entry.referrer));
+                if let Some((seed, referrer)) = edge {
+                    return Some((
+                        CatalogueSeed {
+                            refno: seed,
+                            noun: Some("SPCO".into()),
+                        },
+                        referrer,
+                        source.dbnum,
+                    ));
+                }
+            }
+            None
+        };
+
+        let mut found = None;
+        for &base in sessions.iter().skip(1).take(24) {
+            let window = match crate::data_interface::cata_cascade_window::collect_catalogue_window(
+                7000, file, base, target,
+            ) {
+                Ok(window) => window,
+                Err(error) => {
+                    println!("skip window {base}→{target}: {error:#}");
+                    continue;
+                }
+            };
+            if window.changes.is_empty() || window.changes.len() > SEED_CAP {
+                println!(
+                    "window {base}→{target}: {} changes, not a precise-cascade shape",
+                    window.changes.len()
+                );
+                continue;
+            }
+            let seeds: Vec<CatalogueSeed> = window
+                .changes
+                .iter()
+                .map(|change| CatalogueSeed {
+                    refno: change.refno(),
+                    noun: change.noun.clone(),
+                })
+                .collect();
+            let cascade = expand_reverse_cascade(&sources, &seeds, self_as_root).expect("cascade");
+            println!("window {base}→{target}: {}", cascade.summary_line());
+            if cascade.referrer_count() > 0 {
+                found = Some((base, window, cascade));
+                break;
+            }
+        }
+        let cascade = match found {
+            Some((base, window, cascade)) => {
+                println!(
+                    "ams7000 {base}→{target}: {} changed catalogue elements → {} design referrers in {} DESI dbs → {} roots",
+                    window.changes.len(),
+                    cascade.referrer_count(),
+                    cascade.design_referrers.len(),
+                    cascade.roots.values().map(Vec::len).sum::<usize>()
+                );
+                cascade
+            }
+            None => {
+                println!(
+                    "no precise window on the ams7000_0001 chain ({} sessions retained); \
+                     falling back to an assumed changed SPCO taken from a DESI SPRE table",
+                    sessions.len()
+                );
+                let Some((seed, referrer, referrer_db)) = assumed_seed() else {
+                    println!("skip: no DESI in ams000 carries an SPRE edge into 7000");
+                    return;
+                };
+                println!(
+                    "assumed source: {} (SPCO in 7000) referenced by {referrer} in DESI {referrer_db}",
+                    seed.refno
+                );
+                let cascade = expand_reverse_cascade(&sources, &[seed], self_as_root)
+                    .expect("cascade from the assumed source");
+                println!("{}", cascade.summary_line());
+                assert!(
+                    cascade
+                        .design_referrers
+                        .get(&referrer_db)
+                        .is_some_and(|referrers| referrers.contains(&text(referrer))),
+                    "the SPRE edge's own referrer {} must come back from the reverse lookup: {:?}",
+                    text(referrer),
+                    cascade.design_referrers
+                );
+                cascade
+            }
+        };
+        assert!(
+            cascade.degraded.is_empty(),
+            "the project catalogue keeps its reference tables: {:?}",
+            cascade.degraded
+        );
+        assert!(
+            cascade.point_queries > 0 && cascade.referrer_count() > 0,
+            "the reverse lookup must have queried and found design referrers"
+        );
+        assert!(
+            cascade.roots.values().map(Vec::len).sum::<usize>() > 0,
+            "every design referrer rolls up to a generation root"
+        );
+    }
+
     /// 退路 (ii)：零表目录库上，SPCO 层的种子照常进设计侧点查（不退化），SCOM 层的种子让该库退化并点名。
     #[test]
     fn a_tableless_catalogue_degrades_only_for_catalogue_internal_seeds() {

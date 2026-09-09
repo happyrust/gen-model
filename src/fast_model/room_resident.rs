@@ -19,7 +19,7 @@
 //!
 //! P1（本文件）只有本体：合成、摘要、diff、网格缓存、两代存放，一行生产路径未接。接线
 //! （`drain_rooms_selected` 进串行锁后按清单键懒换代、三条归属入口改读这里）在 P2，
-//! 开关 `room_resident_model` 默认关。
+//! 开关 `room_resident_model` 默认开，仍可显式关闭以走兼容读取路径。
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -95,8 +95,8 @@ pub(crate) struct ResidentPanel {
 }
 
 /// 三角网缓存键：`.mesh` 按内容寻址不可变，键里再带世界矩阵的位模式，命中即可复用、
-/// 永不陈旧（工程默认①）。
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// 永不陈旧（工程默认①）。`Ord` 给换代回收的活键集（`BTreeSet`）用。
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub(crate) struct MeshKey {
     geo_hash: String,
     matrix_bits: [u32; 16],
@@ -142,9 +142,51 @@ impl MeshCache {
         let mut guard = self.inner.write().unwrap_or_else(PoisonError::into_inner);
         Ok(guard.entry(key).or_insert(built).clone())
     }
+
+    /// [`Self::get_or_build`] 的闸内版本（S3.2）：命中只碰一次读锁；未命中把 `.mesh`
+    /// 读取与三角网构建放进几何 CPU 闸（[`run_gated_cpu`]）——预热的 fan-out 与生成
+    /// 路径共用同一份额度，闸就是唯一的并发与内存限流阀门。
+    ///
+    /// [`run_gated_cpu`]: crate::fast_model::concurrency::run_gated_cpu
+    async fn get_or_build_gated(
+        &self,
+        key: MeshKey,
+        mesh_dir: &Path,
+        geo_hash: String,
+        matrix: Mat4,
+    ) -> Result<Arc<TriMesh>, String> {
+        if let Some(hit) = self
+            .inner
+            .read()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&key)
+        {
+            return Ok(hit.clone());
+        }
+        let mesh_dir = mesh_dir.to_path_buf();
+        let built = crate::fast_model::concurrency::run_gated_cpu(move || {
+            build_tri_mesh(&mesh_dir, &geo_hash, matrix).map_err(anyhow::Error::msg)
+        })
+        .await
+        .map_err(|error| format!("{error:#}"))?;
+        let built = Arc::new(built);
+        let mut guard = self.inner.write().unwrap_or_else(PoisonError::into_inner);
+        Ok(guard.entry(key).or_insert(built).clone())
+    }
+
+    fn retain(&self, live: &BTreeSet<MeshKey>) {
+        self.inner
+            .write()
+            .unwrap_or_else(PoisonError::into_inner)
+            .retain(|key, _| live.contains(key));
+    }
 }
 
-fn build_tri_mesh(mesh_dir: &Path, geo_hash: &str, matrix: Mat4) -> Result<TriMesh, String> {
+pub(crate) fn build_tri_mesh(
+    mesh_dir: &Path,
+    geo_hash: &str,
+    matrix: Mat4,
+) -> Result<TriMesh, String> {
     let file_path = mesh_dir.join(format!("{geo_hash}.mesh"));
     let mesh = PlantMesh::des_mesh_file(&file_path)
         .map_err(|error| format!("{}: {error}", file_path.display()))?;
@@ -153,6 +195,12 @@ fn build_tri_mesh(mesh_dir: &Path, geo_hash: &str, matrix: Mat4) -> Result<TriMe
         TriMeshFlags::ORIENTED | TriMeshFlags::MERGE_DUPLICATE_VERTICES,
     )
     .ok_or_else(|| format!("{}: 三角网转换失败", file_path.display()))
+}
+
+/// 一张世界坐标三角网占的字节（顶点 + 索引），`mesh_bytes` 指标的口径。
+fn tri_mesh_bytes(mesh: &TriMesh) -> usize {
+    mesh.vertices().len() * 3 * std::mem::size_of::<f32>()
+        + mesh.indices().len() * std::mem::size_of::<[u32; 3]>()
 }
 
 /// 拓扑摘要：对房间与面板的顺序不敏感（两条来源的遍历序可能不同），对房间名、房间集合、
@@ -215,18 +263,28 @@ pub(crate) struct ResidentRoomModel {
     pub panels: BTreeMap<RefnoEnum, ResidentPanel>,
     /// 在册却没拿到几何或包围盒不可用的面板（与 `PanelIndex::missing_panels` 同口径、同序）。
     pub missing_panels: Vec<RefnoEnum>,
+    /// `missing_panels` 里**有几何行、却有一行世界包围盒不可用**的那一部分（共识 D-A (a)，
+    /// 2026-09-08）。另一部分是「一条几何行都没有」（从未生成）——两者对归属计算同样是
+    /// 「判不了就不写」，对**参照**却不同：从未生成的面板没有边可陈旧，几何到来时由发布事务的
+    /// `RoomRecalcPanel` 补算，不挡参照、不入队；有行却不可用说明这块面板的几何不可信、它的存量
+    /// 边可能已经陈旧，挡参照并入队等几何修好。`room_startup::split_recalc_by_geometry` 按它分摊。
+    pub unusable_panels: BTreeSet<RefnoEnum>,
     pub digest: String,
+    pub geometry_digest: String,
     /// 这份拓扑依据的每个文件版本（按 dbnum 序）：读透 = 各 DESI 的冻结令牌；摄入 = 清单
     /// `published_file_input` 里 DESI 行的 `commit_token`。启动参照按它们从 `room_topology_source`
     /// 分片合成「旧」视图（共识 d-42：两形态同一条路，摄入侧不再拿 `room_published_topology`
     /// 当参照——它只重写本清单键的行，旧键的行无人管、不保证在）。
     pub source_tokens: Vec<String>,
+    /// MDB DESI source set frozen for this generation, sorted by dbnum.
+    pub expected_dbnums: Vec<u32>,
     /// 房间 → 声明它的那个**文件** dbnum。只有 `/health` 与回执的「无几何按库」用它
     /// （见 [`ResidentStats::missing_panels_by_dbnum`]）；纯测搭的模型可以是空的，那时退回
     /// 面板 refno 的头一段。跨文件的面板（`compose` 支持、真库未见）算在它房间那个文件名下。
     pub room_files: BTreeMap<RefnoEnum, u32>,
     pub built_at: std::time::Instant,
     meshes: Arc<MeshCache>,
+    mesh_warm: MeshWarmStats,
 }
 
 impl fmt::Debug for ResidentRoomModel {
@@ -237,6 +295,7 @@ impl fmt::Debug for ResidentRoomModel {
             .field("registered_panels", &registered_panels(&self.map).len())
             .field("panels_with_geometry", &self.panels.len())
             .field("missing_panels", &self.missing_panels.len())
+            .field("unusable_panels", &self.unusable_panels.len())
             .field("digest", &self.digest)
             .finish()
     }
@@ -258,10 +317,104 @@ pub(crate) struct ResidentStats {
     /// 键是文件库号（7997），不是面板 refno 的头一段（24381）：`watch_dbnums`、发布清单、
     /// 水位说的都是文件库号，照 refno 报既写错库号，又会把被监听库的面板诬成「未监听」。
     pub missing_panels_by_dbnum: BTreeMap<u32, usize>,
+    /// `missing_panels` 里有几何行却不可用的那一部分（D-A (a)）：这一部分挡参照，其余（从未
+    /// 生成）不挡。
+    pub unusable_panels: usize,
     pub meshes_cached: usize,
+    pub mesh_keys_expected: usize,
+    pub mesh_keys_warmed: usize,
+    pub mesh_warm_failed: usize,
+    pub mesh_bytes: usize,
+    pub source_sessions: BTreeMap<u32, u32>,
+    pub expected_dbnums: Vec<u32>,
+    pub geometry_digest: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct MeshWarmStats {
+    pub expected: usize,
+    pub warmed: usize,
+    pub failed: usize,
+    pub bytes: usize,
 }
 
 impl ResidentRoomModel {
+    pub(crate) fn input_version(&self) -> String {
+        // Registration keywords and room-code parsing can change without an E3D
+        // save. Hash the actual calculation map as well as raw source topology.
+        let mut rooms: Vec<_> = self
+            .map
+            .rooms
+            .iter()
+            .map(|room| {
+                let mut panels = room.panels.clone();
+                panels.sort();
+                (room.room.to_string(), room.room_num.clone(), panels)
+            })
+            .collect();
+        rooms.sort();
+        let mut excluded: Vec<_> = self.map.all_panels.iter().collect();
+        excluded.sort();
+        let mut digest = Sha256::new();
+        digest.update(b"room-memory-input-v1");
+        digest.update(self.digest.as_bytes());
+        digest.update(self.geometry_digest.as_bytes());
+        digest.update(format!("{rooms:?}:{excluded:?}").as_bytes());
+        hex::encode(digest.finalize())
+    }
+
+    /// E3D output adapter. No persisted instance rows participate in this view.
+    pub(crate) fn from_projection(
+        manifest: ResidentManifest,
+        groups: Vec<RoomGroup>,
+        map: RoomPanelMap,
+        records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
+        meshes: Arc<MeshCache>,
+    ) -> Self {
+        use crate::fast_model::model_memory_store::ProjectedShape;
+        use bevy_transform::components::Transform;
+        let rows = records
+            .iter()
+            .map(|record| {
+                let refno =
+                    crate::data_interface::generation_root::refno_from_e3d(record.source_refno);
+                let local = match &record.shape {
+                    ProjectedShape::Baked => Mat4::IDENTITY,
+                    ProjectedShape::Canonical {
+                        local_transform, ..
+                    } => local_transform.as_mat4(),
+                };
+                GeomInstQuery {
+                    refno,
+                    old_refno: None,
+                    owner: refno,
+                    world_aabb: Aabb::new(
+                        record.world_bounds[0].into(),
+                        record.world_bounds[1].into(),
+                    ),
+                    world_trans: Transform::from_matrix(record.world_transform.as_mat4()),
+                    insts: vec![aios_core::ModelHashInst {
+                        geo_hash: record.mesh_id.clone(),
+                        transform: Transform::from_matrix(local),
+                        ..Default::default()
+                    }],
+                    has_neg: false,
+                    generic: record.noun.clone(),
+                    pts: None,
+                    date: None,
+                }
+            })
+            .collect();
+        Self::assemble(manifest, groups, map, rows, meshes)
+    }
+    fn mesh_keys(&self) -> impl Iterator<Item = MeshKey> + '_ {
+        self.panels.values().flat_map(|panel| {
+            panel
+                .insts
+                .iter()
+                .map(|inst| MeshKey::new(&inst.geo_hash, inst.matrix))
+        })
+    }
     /// 纯函数：拓扑分组 + 几何行 → 模型。两路形态共用这一段，差别只在调用方从哪拿输入。
     pub(crate) fn assemble(
         manifest: ResidentManifest,
@@ -315,23 +468,53 @@ impl ResidentRoomModel {
         for panel in &invalid {
             panels.remove(panel);
         }
+        for panel in panels.values_mut() {
+            panel.insts.sort_by(|a, b| {
+                MeshKey::new(&a.geo_hash, a.matrix).cmp(&MeshKey::new(&b.geo_hash, b.matrix))
+            });
+            panel.insts.dedup_by(|a, b| {
+                MeshKey::new(&a.geo_hash, a.matrix) == MeshKey::new(&b.geo_hash, b.matrix)
+            });
+        }
         missing_panels.sort_by_key(RefnoEnum::to_string);
+        let mut geometry = Sha256::new();
+        geometry.update(b"resident-room-geometry-v1");
+        for (panel, value) in &panels {
+            geometry.update(panel.to_string().as_bytes());
+            for inst in &value.insts {
+                geometry.update(inst.geo_hash.as_bytes());
+                for bits in inst.matrix.to_cols_array().map(f32::to_bits) {
+                    geometry.update(bits.to_le_bytes());
+                }
+            }
+        }
         Self {
             manifest,
             groups,
             map,
             panels,
             missing_panels,
+            unusable_panels: invalid,
             digest,
+            geometry_digest: hex::encode(geometry.finalize()),
             source_tokens: Vec::new(),
+            expected_dbnums: Vec::new(),
             room_files: BTreeMap::new(),
             built_at: std::time::Instant::now(),
             meshes,
+            mesh_warm: MeshWarmStats::default(),
         }
     }
 
     pub(crate) fn with_source_tokens(mut self, tokens: Vec<String>) -> Self {
         self.source_tokens = tokens;
+        self
+    }
+
+    fn with_expected_dbnums(mut self, mut dbnums: Vec<u32>) -> Self {
+        dbnums.sort_unstable();
+        dbnums.dedup();
+        self.expected_dbnums = dbnums;
         self
     }
 
@@ -387,7 +570,131 @@ impl ResidentRoomModel {
         }
     }
 
+    /// Materialize every unique geometry/placement used by this generation before it
+    /// becomes visible. A failed key blocks the whole generation; callers retain the
+    /// previously installed generation instead of exposing a partially warm model.
+    ///
+    /// 几何侧的阻断只收**有几何行却不可用**的面板（`unusable_panels`，共识 D-A (a)，与
+    /// `room_startup::split_recalc_by_geometry` 同判）：它们的存量边可能已经陈旧，半份
+    /// 几何整块判不了。**从未生成**（一条几何行都没有）的在册面板不阻代——它没有边可
+    /// 陈旧，留痕（`missing_panels` / `missing_panels_by_dbnum` 指标、归属计算的排除集）
+    /// 即可，几何到来时由发布事务的 `RoomRecalcPanel` 补算（ADR-067 D6「无几何面板不算
+    /// 失败」）。把它们也算进阻断，未监听库的面板会让 `ensure_current` 每轮 Err，整个
+    /// 房间子系统在几何覆盖稀疏的实例上被按死（审核 2026-09-09 W1）。
+    ///
+    /// 并发走几何闸（S3.2）：[`resident_workers`] 个常驻 worker 从共享游标动态领取，
+    /// `.mesh` 读取与 `TriMesh` 构建各在一张 [`run_gated_cpu`] 许可之内——预热与生成
+    /// 路径共用同一份额度，`geometry_workers = 1` 即退化为旧实现那条串行预热。
+    /// 任务按缓存键排序后派发，失败清单的顺序与重跑一致。
+    ///
+    /// [`resident_workers`]: crate::fast_model::concurrency::resident_workers
+    /// [`run_gated_cpu`]: crate::fast_model::concurrency::run_gated_cpu
+    pub(crate) async fn warm_meshes(&mut self, mesh_dir: &Path) -> Result<(), ResidentBuildError> {
+        let mut work: HashMap<MeshKey, (RefnoEnum, String, Mat4)> = HashMap::new();
+        for (panel, entry) in &self.panels {
+            for inst in &entry.insts {
+                work.entry(MeshKey::new(&inst.geo_hash, inst.matrix))
+                    .or_insert_with(|| (*panel, inst.geo_hash.clone(), inst.matrix));
+            }
+        }
+        self.mesh_warm.expected = work.len();
+        self.mesh_warm.warmed = 0;
+        self.mesh_warm.failed = 0;
+        self.mesh_warm.bytes = 0;
+
+        let mut failures = self
+            .unusable_panels
+            .iter()
+            .map(|panel| {
+                format!(
+                    "dbnum={} panel={panel} stage=geometry reason=invalid-geometry",
+                    self.file_of_panel(*panel)
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut jobs: Vec<(MeshKey, RefnoEnum, String, Mat4)> = work
+            .into_iter()
+            .map(|(key, (panel, geo_hash, matrix))| (key, panel, geo_hash, matrix))
+            .collect();
+        jobs.sort_by(|a, b| a.0.cmp(&b.0));
+        let worker_count = crate::fast_model::concurrency::resident_workers(jobs.len());
+        let jobs = Arc::new(jobs);
+        let cursor = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut workers = Vec::with_capacity(worker_count);
+        for _ in 0..worker_count {
+            let jobs = jobs.clone();
+            let cursor = cursor.clone();
+            let meshes = self.meshes.clone();
+            let mesh_dir = mesh_dir.to_path_buf();
+            workers.push(tokio::spawn(async move {
+                let mut warmed = 0usize;
+                let mut bytes = 0usize;
+                let mut failed: Vec<(usize, RefnoEnum, String, String)> = Vec::new();
+                loop {
+                    let index = cursor.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let Some((key, panel, geo_hash, matrix)) = jobs.get(index).cloned() else {
+                        break;
+                    };
+                    match meshes
+                        .get_or_build_gated(key, &mesh_dir, geo_hash.clone(), matrix)
+                        .await
+                    {
+                        Ok(mesh) => {
+                            warmed += 1;
+                            bytes = bytes.saturating_add(tri_mesh_bytes(&mesh));
+                        }
+                        Err(reason) => failed.push((index, panel, geo_hash, reason)),
+                    }
+                }
+                (warmed, bytes, failed)
+            }));
+        }
+        let mut failed: Vec<(usize, RefnoEnum, String, String)> = Vec::new();
+        for worker in workers {
+            match worker.await {
+                Ok((warmed, bytes, worker_failed)) => {
+                    self.mesh_warm.warmed += warmed;
+                    self.mesh_warm.bytes = self.mesh_warm.bytes.saturating_add(bytes);
+                    failed.extend(worker_failed);
+                }
+                Err(join_error) => {
+                    self.mesh_warm.failed += 1;
+                    failures.push(format!(
+                        "stage=mesh-warm reason=预热 worker 崩了: {join_error}"
+                    ));
+                }
+            }
+        }
+        failed.sort_by_key(|(index, ..)| *index);
+        self.mesh_warm.failed += failed.len();
+        for (_, panel, geo_hash, reason) in failed {
+            failures.push(format!(
+                "dbnum={} panel={panel} stage=mesh-warm geo_hash={geo_hash} reason={reason}",
+                self.file_of_panel(panel)
+            ));
+        }
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(ResidentBuildError {
+                form: self.manifest.form,
+                key: Some(self.manifest.key.clone()),
+                reasons: failures,
+            })
+        }
+    }
+
     pub(crate) fn stats(&self) -> ResidentStats {
+        let source_sessions = self
+            .source_tokens
+            .iter()
+            .filter_map(|token| {
+                crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(token)
+                    .ok()
+                    .map(|source| (source.dbnum() as u32, source.target_sesno()))
+            })
+            .collect();
         ResidentStats {
             form: self.manifest.form.as_str(),
             key: self.manifest.key.clone(),
@@ -403,7 +710,15 @@ impl ResidentRoomModel {
                     by_dbnum
                 },
             ),
+            unusable_panels: self.unusable_panels.len(),
             meshes_cached: self.meshes.len(),
+            mesh_keys_expected: self.mesh_warm.expected,
+            mesh_keys_warmed: self.mesh_warm.warmed,
+            mesh_warm_failed: self.mesh_warm.failed,
+            mesh_bytes: self.mesh_warm.bytes,
+            source_sessions,
+            expected_dbnums: self.expected_dbnums.clone(),
+            geometry_digest: self.geometry_digest.clone(),
         }
     }
 }
@@ -648,6 +963,17 @@ pub(crate) async fn load_published(
     if inputs.is_empty() {
         return Ok(None);
     }
+    let sources = crate::fast_model::e3d_model_service::E3dModelService::from_current()
+        .await
+        .and_then(|service| service.design_sources())
+        .map_err(|error| {
+            ResidentBuildError::new(
+                ResidentForm::Published,
+                None,
+                format!("枚举 MDB 设计库失败: {error:#}"),
+            )
+        })?;
+    validate_source_coverage(&sources, &inputs)?;
     load_published_on(
         &aios_core::SUL_DB,
         &inputs,
@@ -657,12 +983,33 @@ pub(crate) async fn load_published(
         meshes,
     )
     .await
+    .map(|model| model.with_expected_dbnums(sources.iter().map(|(dbnum, _, _)| *dbnum).collect()))
     .map(Some)
 }
 
-/// 读透侧：从当前 MDB 各设计库文件的生成会话读分组（`room_topology` 的文件侧遍历），
-/// 几何取实时行。任一文件读不到 → 整份失败。
+/// Current MDB room inputs come exclusively from frozen E3D sources and local
+/// generation artifacts. A missing artifact regenerates only that panel root.
 pub(crate) async fn load_latest(
+    hierarchy: RoomHierarchy,
+    room_key_words: &[String],
+    match_room_fn: impl Fn(&str) -> bool,
+    meshes: Arc<MeshCache>,
+) -> anyhow::Result<ResidentRoomModel> {
+    load_file_backed(
+        ResidentForm::Latest,
+        hierarchy,
+        room_key_words,
+        match_room_fn,
+        meshes,
+    )
+    .await
+}
+
+/// Build the calculation view from frozen MDB files and e3d-model output for
+/// either serving face. `form` is only the resident slot selected by callers;
+/// topology and panel geometry never come from the database.
+async fn load_file_backed(
+    form: ResidentForm,
     hierarchy: RoomHierarchy,
     room_key_words: &[String],
     match_room_fn: impl Fn(&str) -> bool,
@@ -672,40 +1019,133 @@ pub(crate) async fn load_latest(
         crate::fast_model::room_topology::load_room_groups_from_files(hierarchy)
             .await
             .map_err(|error| {
-                ResidentBuildError::new(
-                    ResidentForm::Latest,
-                    None,
-                    format!("读文件侧房间分组失败: {error:#}"),
-                )
+                ResidentBuildError::new(form, None, format!("读文件侧房间分组失败: {error:#}"))
             })?;
     let room_files = room_files_of(&by_file);
     let groups = crate::fast_model::room_topology::flatten_groups_by_file(by_file);
     let map = registered_map(&groups, room_key_words, match_room_fn);
-    let registered = registered_panels(&map);
-    let insts = crate::data_interface::staging::query_valid_insts(&registered)
-        .await
-        .map_err(|error| {
-            ResidentBuildError::new(
-                ResidentForm::Latest,
-                Some(composite.clone()),
-                format!(
-                    "读 {} 块在册面板的实时几何失败: {error:#}",
-                    registered.len()
-                ),
-            )
-        })?;
-    Ok(ResidentRoomModel::assemble(
+    let records = preload_panel_projection(&tokens, &map, &room_files).await?;
+    let expected_dbnums = tokens
+        .iter()
+        .filter_map(|token| {
+            crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(token)
+                .ok()
+                .map(|source| source.dbnum() as u32)
+        })
+        .collect();
+    Ok(ResidentRoomModel::from_projection(
         ResidentManifest {
-            form: ResidentForm::Latest,
+            form,
             key: composite,
         },
         groups,
         map,
-        insts,
+        &records,
         meshes,
     )
     .with_source_tokens(tokens)
+    .with_expected_dbnums(expected_dbnums)
     .with_room_files(room_files))
+}
+
+async fn preload_panel_projection(
+    tokens: &[String],
+    map: &RoomPanelMap,
+    room_files: &BTreeMap<RefnoEnum, u32>,
+) -> anyhow::Result<Vec<crate::fast_model::model_memory_store::ProjectedGeometry>> {
+    use crate::data_interface::frozen_source::FrozenSource;
+    use crate::fast_model::{e3d_model_service::E3dModelService, model_artifact};
+    let mesh_dir = aios_core::get_db_option().get_meshes_path();
+    let cache_dir = mesh_dir.join("room-input-cache");
+    let mut dependencies = tokens.to_vec();
+    for pin in crate::fast_model::e3d_model_service::current_mdb_sources()?.0 {
+        if !pin.db_type.eq_ignore_ascii_case("DESI") {
+            dependencies.push(FrozenSource::capture(pin.file)?.commit_token_json()?);
+        }
+    }
+    dependencies.sort();
+    dependencies.dedup();
+    let mut by_file = BTreeMap::<u32, BTreeSet<RefnoEnum>>::new();
+    for room in &map.rooms {
+        let dbnum = room_files
+            .get(&room.room)
+            .context("room definition has no source file")?;
+        by_file
+            .entry(*dbnum)
+            .or_default()
+            .extend(room.panels.iter().copied());
+    }
+    let mut records = Vec::new();
+    for token in tokens {
+        let source = FrozenSource::from_commit_token_json(token)?.reopen_verified()?;
+        let dbnum = source.dbnum() as u32;
+        let Some(panels) = by_file.remove(&dbnum) else {
+            continue;
+        };
+        let started = Instant::now();
+        let service = E3dModelService::from_initialization_sources(&source, &dependencies).await?;
+        let input = service.initialization_target_hash(dbnum, source.target_sesno())?;
+        let mut missing = Vec::new();
+        let mut cached = 0;
+        let before = records.len();
+        for panel in &panels {
+            let root = crate::fast_model::e3d_model_service::parse_refno(&panel.to_string())?;
+            if let Some(commit) = model_artifact::load(&cache_dir, &mesh_dir, &input, root) {
+                records.extend(commit.upserts);
+                cached += 1;
+            } else {
+                missing.push(root.to_string());
+            }
+        }
+        let generated = missing.len();
+        if !missing.is_empty() {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            let produce = service.generate_frozen_roots(dbnum, &missing, tx);
+            let consume =
+                async {
+                    let mut received = BTreeSet::new();
+                    while let Some(result) = rx.recv().await {
+                        let commit = result.outcome.map_err(anyhow::Error::msg)?;
+                        anyhow::ensure!(
+                            received.insert(result.root.to_string()),
+                            "duplicate room panel output"
+                        );
+                        anyhow::ensure!(
+                            commit.upserts.iter().all(|row| row.dbnum == dbnum
+                                && row.source_sesno == source.target_sesno()),
+                            "room panel output version mismatch"
+                        );
+                        model_artifact::store(&cache_dir, &input, result.root, &commit)?;
+                        records.extend(commit.upserts);
+                    }
+                    anyhow::ensure!(
+                        received == missing.iter().cloned().collect::<BTreeSet<_>>(),
+                        "incomplete room panel generation"
+                    );
+                    anyhow::Ok(())
+                };
+            futures::future::try_join(produce, consume).await?;
+            // Heavy source indexes belong to the producer; room inputs now own
+            // lightweight projection rows and immutable mesh references.
+            crate::fast_model::e3d_model_service::forget_generation_input(dbnum);
+        }
+        source.reopen_verified()?;
+        println!(
+            "[ams-phase] phase=room_panel_preload dbnum={dbnum} sesno={} panels={} generated={generated} cached={cached} records={} elapsed_ms={}",
+            source.target_sesno(),
+            panels.len(),
+            records.len() - before,
+            started.elapsed().as_millis()
+        );
+    }
+    anyhow::ensure!(
+        by_file.is_empty(),
+        "room definitions reference an unselected source file"
+    );
+    for token in &dependencies {
+        FrozenSource::from_commit_token_json(token)?.reopen_verified()?;
+    }
+    Ok(records)
 }
 
 // ---------------------------------------------------------------------------
@@ -1050,7 +1490,18 @@ impl ResidentRooms {
             .map(|old| TopologyDiff::between(&old.map, &model.map));
         slot.previous = slot.current.take();
         slot.current = Some(model.clone());
+        self.prune_meshes();
         InstallOutcome { model, diff }
+    }
+
+    fn prune_meshes(&self) {
+        let live = [&self.published, &self.latest]
+            .into_iter()
+            .flat_map(|generations| [&generations.current, &generations.previous])
+            .filter_map(|generation| generation.as_ref())
+            .flat_map(|generation| generation.mesh_keys())
+            .collect();
+        self.meshes.retain(&live);
     }
 
     /// 只给 `/health`、启动对比与护栏看两代；归属路径不许碰（源码钉
@@ -1078,6 +1529,33 @@ impl ResidentRooms {
 pub(crate) fn resident_rooms() -> &'static RwLock<ResidentRooms> {
     static ROOMS: OnceLock<RwLock<ResidentRooms>> = OnceLock::new();
     ROOMS.get_or_init(|| RwLock::new(ResidentRooms::default()))
+}
+
+/// Fixed, already-preloaded room input for a dbnum Task. This accessor performs
+/// no file or database I/O; startup (or a prior generation swap) owns rebuilding it.
+pub(crate) fn current_for_calculation() -> anyhow::Result<Arc<ResidentRoomModel>> {
+    ensure_ready()?;
+    resident_rooms()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .for_membership(crate::options::data_face())
+        .context("resident room model is not installed")
+}
+
+async fn warm_for_install(
+    model: &mut ResidentRoomModel,
+    mesh_dir: &Path,
+) -> Result<(), ResidentBuildError> {
+    match model.warm_meshes(mesh_dir).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            resident_rooms()
+                .write()
+                .unwrap_or_else(PoisonError::into_inner)
+                .prune_meshes();
+            Err(error)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,10 +1631,31 @@ pub(crate) async fn ensure_current(
     hierarchy: RoomHierarchy,
     room_key_words: &[String],
     match_room_fn: impl Fn(&str) -> bool,
+    mesh_dir: &Path,
+) -> anyhow::Result<Option<EnsureOutcome>> {
+    let result =
+        ensure_current_inner(face, hierarchy, room_key_words, match_room_fn, mesh_dir).await;
+    if let Err(error) = &result {
+        mark_failed(error);
+    }
+    result
+}
+
+async fn ensure_current_inner(
+    face: DataFace,
+    hierarchy: RoomHierarchy,
+    room_key_words: &[String],
+    match_room_fn: impl Fn(&str) -> bool,
+    mesh_dir: &Path,
 ) -> anyhow::Result<Option<EnsureOutcome>> {
     let form = ResidentForm::for_face(face);
     let Some(manifest) = probe_manifest(form, hierarchy).await? else {
-        return Ok(None);
+        return Err(ResidentBuildError::new(
+            form,
+            None,
+            "发布清单为空，resident generation 不可用",
+        )
+        .into());
     };
     let (current, meshes) = {
         let rooms = resident_rooms()
@@ -1169,28 +1668,42 @@ pub(crate) async fn ensure_current(
         (current, rooms.mesh_cache())
     };
     if let Some(model) = current {
+        mark_ready(&model);
         return Ok(Some(EnsureOutcome {
             model,
             rebuilt: false,
             diff: None,
         }));
     }
-    let model = match form {
+    let mut model = match form {
         ResidentForm::Published => {
             match load_published(hierarchy, room_key_words, match_room_fn, meshes).await? {
                 Some(model) => model,
                 // 探针刚看见的清单在这一瞬空了（基线正在重建）：不装零间房的模型（原则 2）。
-                None => return Ok(None),
+                None => {
+                    return Err(ResidentBuildError::new(
+                        form,
+                        Some(manifest.key.clone()),
+                        "探针之后发布清单消失，拒绝安装或复用旧代",
+                    )
+                    .into());
+                }
             }
         }
         ResidentForm::Latest => {
             load_latest(hierarchy, room_key_words, match_room_fn, meshes).await?
         }
     };
+    mark_loading("mesh-warm");
+    if let Err(error) = warm_for_install(&mut model, mesh_dir).await {
+        let error = anyhow::Error::new(error);
+        return Err(error);
+    }
     let outcome = resident_rooms()
         .write()
         .unwrap_or_else(PoisonError::into_inner)
         .install(model);
+    mark_ready(&outcome.model);
     Ok(Some(EnsureOutcome {
         model: outcome.model,
         rebuilt: true,
@@ -1315,6 +1828,64 @@ pub(crate) fn plan_manifest_advance(
     steps
 }
 
+/// The resident generation is a frozen all-MDB view. Its DESI manifest must contain
+/// exactly one current row per design source; extra, duplicate, missing, or stale rows
+/// would mix source sessions inside one generation.
+fn validate_source_coverage(
+    sources: &[(u32, PathBuf, u32)],
+    rows: &[PublishedFileInput],
+) -> Result<(), ResidentBuildError> {
+    let expected: BTreeMap<u32, u32> = sources
+        .iter()
+        .map(|(dbnum, _, sesno)| (*dbnum, *sesno))
+        .collect();
+    if expected.len() != sources.len() {
+        return Err(ResidentBuildError::new(
+            ResidentForm::Published,
+            None,
+            "MDB 设计库清单含重复 dbnum",
+        ));
+    }
+    let design_rows: Vec<&PublishedFileInput> = rows
+        .iter()
+        .filter(|row| row.db_type.eq_ignore_ascii_case("DESI"))
+        .collect();
+    let actual: BTreeMap<u32, i32> = design_rows
+        .iter()
+        .map(|row| (row.dbnum, row.end_sesno))
+        .collect();
+    let duplicate = actual.len() != design_rows.len();
+    let missing: Vec<u32> = expected
+        .keys()
+        .filter(|dbnum| !actual.contains_key(dbnum))
+        .copied()
+        .collect();
+    let extra: Vec<u32> = actual
+        .keys()
+        .filter(|dbnum| !expected.contains_key(dbnum))
+        .copied()
+        .collect();
+    let stale: Vec<String> = expected
+        .iter()
+        .filter_map(|(dbnum, sesno)| {
+            actual
+                .get(dbnum)
+                .filter(|actual| **actual != *sesno as i32)
+                .map(|actual| format!("{dbnum}:{actual}->{sesno}"))
+        })
+        .collect();
+    if duplicate || !missing.is_empty() || !extra.is_empty() || !stale.is_empty() {
+        return Err(ResidentBuildError::new(
+            ResidentForm::Published,
+            None,
+            format!(
+                "MDB source coverage 不完整: duplicate={duplicate} missing={missing:?} extra={extra:?} stale={stale:?}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// 一次启动初始化的回执。
 #[derive(Debug)]
 pub(crate) struct StartupInitOutcome {
@@ -1375,7 +1946,7 @@ impl StartupInitOutcome {
             )
         };
         format!(
-            "[房间初始化] {} 文件 [{}]{} → {} 间房 / {} 块在册面板 / {} 块有几何 / {} 块无几何{} 耗时 {}ms",
+            "[房间初始化] {} 文件 [{}]{} → {} 间房 / {} 块在册面板 / {} 块有几何 / {} 块无几何{} / 网格 {}/{} 键 {:.1} MB{} 耗时 {}ms",
             self.form.as_str(),
             files,
             self.advance_warning
@@ -1387,8 +1958,27 @@ impl StartupInitOutcome {
             stats.panels_with_geometry,
             stats.missing_panels,
             missing,
+            stats.mesh_keys_warmed,
+            stats.mesh_keys_expected,
+            stats.mesh_bytes as f64 / (1024.0 * 1024.0),
+            if stats.mesh_warm_failed > 0 {
+                format!("（预热失败 {}）", stats.mesh_warm_failed)
+            } else {
+                String::new()
+            },
             self.elapsed_ms
         )
+    }
+
+    /// 这次初始化覆盖到的 MDB 设计库号（`/health.mdb_dbnums_expected` 的来源）：摄入 =
+    /// 清单去向表里的每个文件；读透 = 冻结令牌的每个文件。启动只探一次（§2.1），进程内
+    /// 之后的换代不再重新枚举 MDB。
+    pub(crate) fn expected_dbnums(&self) -> Vec<u32> {
+        if self.steps.is_empty() {
+            self.frozen.iter().map(|(dbnum, _, _)| *dbnum).collect()
+        } else {
+            self.steps.iter().map(|step| step.dbnum).collect()
+        }
     }
 }
 
@@ -1404,16 +1994,57 @@ pub(crate) async fn initialize_at_startup(
     hierarchy: RoomHierarchy,
     room_key_words: &[String],
     match_room_fn: impl Fn(&str) -> bool,
+    mesh_dir: &Path,
 ) -> anyhow::Result<StartupInitOutcome> {
-    match ResidentForm::for_face(face) {
-        ResidentForm::Published => {
-            initialize_published_at_startup(ownership, hierarchy, room_key_words, match_room_fn)
-                .await
-        }
-        ResidentForm::Latest => {
-            initialize_latest_at_startup(hierarchy, room_key_words, match_room_fn).await
-        }
-    }
+    let _ = ownership; // file-round ownership no longer changes room calculation inputs
+    initialize_file_backed_at_startup(
+        ResidentForm::for_face(face),
+        hierarchy,
+        room_key_words,
+        match_room_fn,
+        mesh_dir,
+    )
+    .await
+}
+
+/// Both ingest and read-through prebuild the room reference directly from the
+/// frozen MDB files. Database state remains an output/credential store only.
+async fn initialize_file_backed_at_startup(
+    form: ResidentForm,
+    hierarchy: RoomHierarchy,
+    room_key_words: &[String],
+    match_room_fn: impl Fn(&str) -> bool,
+    mesh_dir: &Path,
+) -> anyhow::Result<StartupInitOutcome> {
+    let started = Instant::now();
+    let meshes = resident_rooms()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .mesh_cache();
+    let mut model =
+        load_file_backed(form, hierarchy, room_key_words, match_room_fn, meshes).await?;
+    let frozen = freeze_source_shards(&model).await.map_err(|error| {
+        ResidentBuildError::new(
+            form,
+            Some(model.manifest.key.clone()),
+            format!("冻结房间拓扑分片失败: {error:#}"),
+        )
+    })?;
+    warm_for_install(&mut model, mesh_dir).await?;
+    let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
+    let model = resident_rooms()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner)
+        .install(model)
+        .model;
+    Ok(StartupInitOutcome {
+        form,
+        steps: Vec::new(),
+        frozen,
+        advance_warning: None,
+        model,
+        elapsed_ms: started.elapsed().as_millis(),
+    })
 }
 
 /// 摄入形态：基线（全 MDB，已有就跳过）→ 替不归轮次管的文件前进清单行 → 从清单建模并装进单例。
@@ -1422,6 +2053,7 @@ async fn initialize_published_at_startup(
     hierarchy: RoomHierarchy,
     room_key_words: &[String],
     match_room_fn: impl Fn(&str) -> bool,
+    mesh_dir: &Path,
 ) -> anyhow::Result<StartupInitOutcome> {
     use crate::data_interface::side_effect_pending::SideEffectCompensator;
 
@@ -1456,14 +2088,24 @@ async fn initialize_published_at_startup(
         })?;
     let steps = plan_manifest_advance(&sources, &rows, &ownership.owned_by_rounds(&sources));
     let (rows, frozen, advance_warning) = if let Some(reason) = baseline_failure {
-        (rows, Vec::new(), Some(format!("清单前进跳过：{reason}")))
+        if steps.iter().any(|step| step.action.moves()) {
+            return Err(ResidentBuildError::new(ResidentForm::Published, None, reason).into());
+        }
+        (rows, Vec::new(), None)
     } else {
         match advance_orphaned_manifest_rows(&steps, rows.clone()).await {
             Ok(advance) => (advance.rows, advance.frozen, advance.header_warning),
-            // 事务没提交就失败了：清单还是刚才那份，模型照它建，下次启动再试一次。
-            Err(reason) => (rows, Vec::new(), Some(format!("清单前进跳过：{reason:#}"))),
+            Err(reason) => {
+                return Err(ResidentBuildError::new(
+                    ResidentForm::Published,
+                    None,
+                    format!("清单前进失败: {reason:#}"),
+                )
+                .into());
+            }
         }
     };
+    validate_source_coverage(&sources, &rows)?;
     if rows.is_empty() {
         // 空清单建出来的是「零间房」的模型；装进去等于让每个构件都算成不在任何房间里，
         // 先删后写会把存量边清光（原则 2）。
@@ -1478,7 +2120,7 @@ async fn initialize_published_at_startup(
         .read()
         .unwrap_or_else(PoisonError::into_inner)
         .mesh_cache();
-    let model = match (
+    let mut model = match (
         load_published_on(
             &aios_core::SUL_DB,
             &rows,
@@ -1496,7 +2138,9 @@ async fn initialize_published_at_startup(
         // 因，`ResidentBuildError` 仍在链上、照样 `downcast_ref`。
         (Err(error), Some(warning)) => return Err(error.context(warning.to_string())),
         (Err(error), None) => return Err(error),
-    };
+    }
+    .with_expected_dbnums(sources.iter().map(|(dbnum, _, _)| *dbnum).collect());
+    warm_for_install(&mut model, mesh_dir).await?;
     let model = resident_rooms()
         .write()
         .unwrap_or_else(PoisonError::into_inner)
@@ -1624,13 +2268,14 @@ async fn initialize_latest_at_startup(
     hierarchy: RoomHierarchy,
     room_key_words: &[String],
     match_room_fn: impl Fn(&str) -> bool,
+    mesh_dir: &Path,
 ) -> anyhow::Result<StartupInitOutcome> {
     let started = Instant::now();
     let meshes = resident_rooms()
         .read()
         .unwrap_or_else(PoisonError::into_inner)
         .mesh_cache();
-    let model = load_latest(hierarchy, room_key_words, match_room_fn, meshes).await?;
+    let mut model = load_latest(hierarchy, room_key_words, match_room_fn, meshes).await?;
     let frozen = freeze_source_shards(&model).await.map_err(|error| {
         ResidentBuildError::new(
             ResidentForm::Latest,
@@ -1638,6 +2283,7 @@ async fn initialize_latest_at_startup(
             format!("冻结房间拓扑分片失败: {error:#}"),
         )
     })?;
+    warm_for_install(&mut model, mesh_dir).await?;
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
     let model = resident_rooms()
         .write()
@@ -1658,6 +2304,154 @@ async fn initialize_latest_at_startup(
 // 启动初始化的结局：进程内一份给 /health，`room_build:main.resident_blocked` 一格给事后查库。
 // ---------------------------------------------------------------------------
 
+pub(crate) const RESIDENT_MODEL_UPDATING: &str = "RESIDENT_MODEL_UPDATING";
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "lowercase")]
+pub(crate) enum ResidentLifecycle {
+    Disabled {
+        source: String,
+    },
+    Loading {
+        phase: String,
+        started_at: String,
+    },
+    Ready {
+        generation: String,
+        completed_at: String,
+    },
+    Degraded {
+        generation: String,
+        problems: Vec<String>,
+    },
+    Blocked {
+        problems: Vec<String>,
+    },
+    Unsupported {
+        reason: String,
+    },
+}
+
+fn lifecycle_slot() -> &'static RwLock<ResidentLifecycle> {
+    static STATE: OnceLock<RwLock<ResidentLifecycle>> = OnceLock::new();
+    STATE.get_or_init(|| {
+        RwLock::new(ResidentLifecycle::Disabled {
+            source: "startup-not-evaluated".to_string(),
+        })
+    })
+}
+
+pub(crate) fn lifecycle() -> ResidentLifecycle {
+    lifecycle_slot()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+fn set_lifecycle(state: ResidentLifecycle) {
+    *lifecycle_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = state;
+}
+
+pub(crate) fn mark_disabled(source: impl Into<String>) {
+    set_lifecycle(ResidentLifecycle::Disabled {
+        source: source.into(),
+    });
+}
+
+pub(crate) fn mark_unsupported(reason: impl Into<String>) {
+    set_lifecycle(ResidentLifecycle::Unsupported {
+        reason: reason.into(),
+    });
+}
+
+pub(crate) fn mark_loading(phase: impl Into<String>) {
+    set_lifecycle(ResidentLifecycle::Loading {
+        phase: phase.into(),
+        started_at: chrono::Local::now().to_rfc3339(),
+    });
+}
+
+fn mark_ready(model: &ResidentRoomModel) {
+    set_lifecycle(ResidentLifecycle::Ready {
+        generation: model.manifest.key.clone(),
+        completed_at: chrono::Local::now().to_rfc3339(),
+    });
+}
+
+fn mark_failed(error: &anyhow::Error) {
+    record_failure(format!("{error:#}"));
+    let previous = resident_rooms()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .for_membership(crate::options::data_face());
+    let problems = vec![format!("{error:#}")];
+    set_lifecycle(match previous {
+        Some(model) => ResidentLifecycle::Degraded {
+            generation: model.manifest.key.clone(),
+            problems,
+        },
+        None => ResidentLifecycle::Blocked { problems },
+    });
+}
+
+/// 本进程最近一次 resident 构建 / 换代失败（`/health.room_build.resident.last_failure`）。
+/// 只记最近一条：逐条历史在日志里，这一格回答的是「上一次为什么没成」。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct ResidentFailure {
+    pub reason: String,
+    pub at: String,
+}
+
+fn last_failure_slot() -> &'static RwLock<Option<ResidentFailure>> {
+    static FAILURE: OnceLock<RwLock<Option<ResidentFailure>>> = OnceLock::new();
+    FAILURE.get_or_init(|| RwLock::new(None))
+}
+
+pub(crate) fn last_failure() -> Option<ResidentFailure> {
+    last_failure_slot()
+        .read()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+}
+
+fn record_failure(reason: String) {
+    *last_failure_slot()
+        .write()
+        .unwrap_or_else(PoisonError::into_inner) = Some(ResidentFailure {
+        reason,
+        at: chrono::Local::now().to_rfc3339(),
+    });
+}
+
+/// 业务 ready 门（完成定义 #5）：初始化未完成时，会写房间边的入口不许动手——返回
+/// 结构化 `UPDATING`，调用方按可重试处置，不拿半份模型（或与初始化交错的实时行）写边。
+///
+/// 开关判定不在调用方（源码钉 `the_full_rebuild_entry_never_takes_the_resident_model`：
+/// `room_model.rs` 不许出现 `room_resident_model()`），而在状态机里：`Disabled` /
+/// `Unsupported` 就是「本进程没有 resident 体制」，放行走今天的路；`Loading` / `Blocked` /
+/// `Degraded` 都是「有体制而这一刻没有可信的当前代」，一律 `UPDATING`。`Degraded` 不放行
+/// 是因为它的模型要么是上一代（新代没建成，§4.2 不得用旧代为新会话写边），要么带着没
+/// 收口的问题；换代点（`ensure_current`）一成功就翻回 `Ready`，门随之开。
+pub(crate) fn ensure_ready() -> anyhow::Result<()> {
+    match lifecycle() {
+        ResidentLifecycle::Disabled { .. }
+        | ResidentLifecycle::Unsupported { .. }
+        | ResidentLifecycle::Ready { .. } => Ok(()),
+        state @ (ResidentLifecycle::Loading { .. }
+        | ResidentLifecycle::Degraded { .. }
+        | ResidentLifecycle::Blocked { .. }) => anyhow::bail!(
+            "{RESIDENT_MODEL_UPDATING}: room resident model is not ready ({})",
+            match state {
+                ResidentLifecycle::Loading { phase, .. } => format!("loading:{phase}"),
+                ResidentLifecycle::Degraded { .. } => "degraded".to_string(),
+                _ => "blocked".to_string(),
+            }
+        ),
+    }
+}
+
 /// 本进程最近一次启动房间初始化的结局（`/health.room_build.resident.startup`）。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub(crate) struct StartupInitReport {
@@ -1665,6 +2459,14 @@ pub(crate) struct StartupInitReport {
     pub blocked: Option<String>,
     /// 建起来时的那一行回执（[`StartupInitOutcome::summary`]）。
     pub summary: Option<String>,
+    /// 这次初始化覆盖到的 MDB 设计库号（[`StartupInitOutcome::expected_dbnums`]）；
+    /// 建不起来时是空的——枚举 MDB 本身就可能是失败的那一步。
+    pub expected_dbnums: Vec<u32>,
+    /// 初始化耗时；建不起来时 `None`。
+    pub duration_ms: Option<u128>,
+    /// 初始化收尾时刻的进程 RSS（字节）。sysinfo 不给峰值；这一刻紧跟满载的网格预热，
+    /// 约等于本阶段峰值。平台探不到时 `None`。
+    pub rss_bytes: Option<u64>,
     pub at: String,
 }
 
@@ -1716,8 +2518,23 @@ pub(crate) async fn record_startup_init(result: Result<&StartupInitOutcome, &any
         .unwrap_or_else(PoisonError::into_inner) = Some(StartupInitReport {
         blocked: blocked.clone(),
         summary,
+        expected_dbnums: result
+            .map(StartupInitOutcome::expected_dbnums)
+            .unwrap_or_default(),
+        duration_ms: result.ok().map(|outcome| outcome.elapsed_ms),
+        rss_bytes: crate::data_interface::model_concurrency::process_rss_bytes(),
         at: chrono::Local::now().to_rfc3339(),
     });
+    match result {
+        Ok(outcome) if outcome.advance_warning.is_some() => {
+            set_lifecycle(ResidentLifecycle::Degraded {
+                generation: outcome.model.manifest.key.clone(),
+                problems: vec![outcome.advance_warning.clone().unwrap_or_default()],
+            });
+        }
+        Ok(outcome) => mark_ready(&outcome.model),
+        Err(error) => mark_failed(error),
+    }
     if let Err(error) = aios_core::SUL_DB
         .query(render_resident_blocked_write(blocked.as_deref()))
         .await
@@ -1776,16 +2593,101 @@ pub(crate) fn record_generation_swap(report: GenerationSwapReport) {
 /// 按库点名，并标出哪些库在监听限定域之外。`is_watched` 由调用方按 `watch_scope` 给——本模块
 /// 只给数，不认识限定域。P4 之后多一格 `last_swap`（最近一次换代的 diff 摘要 + 护栏响没响）。
 pub(crate) fn resident_health(is_watched: impl Fn(u32) -> bool) -> serde_json::Value {
-    let stats = resident_rooms()
+    let rooms = resident_rooms()
         .read()
-        .unwrap_or_else(PoisonError::into_inner)
-        .stats();
-    resident_health_from(
-        startup_report().as_ref(),
+        .unwrap_or_else(PoisonError::into_inner);
+    let stats = rooms.stats();
+    let active = rooms
+        .for_membership(crate::options::data_face())
+        .map(|model| model.stats());
+    drop(rooms);
+    let startup = startup_report();
+    let mut health = resident_health_from(
+        startup.as_ref(),
         last_generation_swap().as_ref(),
         &stats,
         is_watched,
-    )
+    );
+    if let (Some(target), Ok(serde_json::Value::Object(state))) =
+        (health.as_object_mut(), serde_json::to_value(lifecycle()))
+    {
+        target.extend(state);
+        target.insert(
+            "enabled".to_string(),
+            serde_json::json!(!matches!(lifecycle(), ResidentLifecycle::Disabled { .. })),
+        );
+        // MDB 覆盖判定（完成定义 #1 的观测面）：期望集来自启动那一次枚举（§2.1 只探
+        // 一次），已装集来自当前代的来源会话；差集就是「哪个库还没进当前代」。
+        let expected = active
+            .as_ref()
+            .map(|stat| stat.expected_dbnums.clone())
+            .or_else(|| {
+                startup
+                    .as_ref()
+                    .map(|report| report.expected_dbnums.clone())
+            })
+            .unwrap_or_default();
+        let loaded: Vec<u32> = active
+            .as_ref()
+            .map(|stat| stat.source_sessions.keys().copied().collect())
+            .unwrap_or_default();
+        let missing: Vec<u32> = expected
+            .iter()
+            .filter(|dbnum| !loaded.contains(dbnum))
+            .copied()
+            .collect();
+        target.insert(
+            "mdb_dbnums_expected".to_string(),
+            serde_json::json!(expected),
+        );
+        target.insert("mdb_dbnums_loaded".to_string(), serde_json::json!(loaded));
+        target.insert("mdb_dbnums_missing".to_string(), serde_json::json!(missing));
+        target.insert(
+            "startup_duration_ms".to_string(),
+            serde_json::json!(startup.as_ref().and_then(|report| report.duration_ms)),
+        );
+        target.insert(
+            "last_failure".to_string(),
+            serde_json::json!(last_failure()),
+        );
+        if let Some(stat) = active {
+            target.insert("rooms".to_string(), serde_json::json!(stat.rooms));
+            target.insert(
+                "registered_panels".to_string(),
+                serde_json::json!(stat.registered_panels),
+            );
+            target.insert(
+                "panels_ready".to_string(),
+                serde_json::json!(stat.panels_with_geometry),
+            );
+            target.insert(
+                "mesh_keys_expected".to_string(),
+                serde_json::json!(stat.mesh_keys_expected),
+            );
+            target.insert(
+                "mesh_keys_warmed".to_string(),
+                serde_json::json!(stat.mesh_keys_warmed),
+            );
+            target.insert(
+                "mesh_warm_failed".to_string(),
+                serde_json::json!(stat.mesh_warm_failed),
+            );
+            target.insert("mesh_bytes".to_string(), serde_json::json!(stat.mesh_bytes));
+            target.insert(
+                "topology_digest".to_string(),
+                serde_json::json!(stat.digest),
+            );
+            target.insert(
+                "geometry_digest".to_string(),
+                serde_json::json!(stat.geometry_digest),
+            );
+            target.insert(
+                "source_sessions".to_string(),
+                serde_json::json!(stat.source_sessions),
+            );
+        }
+    }
+    health
 }
 
 /// [`resident_health`] 的纯函数半截，测试直接喂。
@@ -1824,6 +2726,10 @@ pub(crate) fn resident_health_from(
                 "missing_panels": stat.missing_panels,
                 "missing_geometry": missing_geometry,
                 "meshes_cached": stat.meshes_cached,
+                "mesh_keys_expected": stat.mesh_keys_expected,
+                "mesh_keys_warmed": stat.mesh_keys_warmed,
+                "mesh_warm_failed": stat.mesh_warm_failed,
+                "mesh_bytes": stat.mesh_bytes,
             })
         })
         .collect();
@@ -1855,6 +2761,256 @@ mod tests {
     use bevy_transform::components::Transform;
     use glam::Vec3;
     use parry3d::math::Point;
+
+    /// Real AMS /ALL source read, with no SurrealDB initialization. Keep this
+    /// isolated from the regular suite and give it a private meshes directory.
+    #[tokio::test]
+    #[ignore = "requires AMS source files and an isolated DB_OPTION_FILE"]
+    async fn ams_all_room_preload_without_database() -> anyhow::Result<()> {
+        let option = aios_core::get_db_option();
+        anyhow::ensure!(
+            option.project_name == "AvevaMarineSample"
+                && option.mdb_name.trim_start_matches('/') == "ALL",
+            "this measurement requires AMS /ALL"
+        );
+        let started = Instant::now();
+        let mut model = load_latest(
+            RoomHierarchy::configured().context("room hierarchy")?,
+            &option.get_room_key_word(),
+            crate::fast_model::room_model::configured_match_room_fn(),
+            Arc::<MeshCache>::default(),
+        )
+        .await?;
+        let load_ms = started.elapsed().as_millis();
+        warm_for_install(&mut model, &option.get_meshes_path()).await?;
+        let stats = model.stats();
+        let report = serde_json::json!({
+            "project": option.project_name, "mdb": option.mdb_name,
+            "dbnums": model.expected_dbnums, "rooms": stats.rooms,
+            "registered_panels": stats.registered_panels,
+            "panels_ready": stats.panels_with_geometry,
+            "missing_panels": stats.missing_panels,
+            "preload_ms": load_ms, "total_ms": started.elapsed().as_millis(),
+            "mesh_bytes": stats.mesh_bytes, "input_version": model.input_version()
+        });
+        println!("AMS_ROOM_PRELOAD {}", report);
+        if let Some(path) = std::env::var_os("AMS_ROOM_TIMING_REPORT") {
+            std::fs::write(path, serde_json::to_vec_pretty(&report)?)?;
+        }
+        anyhow::ensure!(
+            stats.rooms > 0 && stats.registered_panels > 0,
+            "AMS rooms missing"
+        );
+        anyhow::ensure!(stats.missing_panels == 0, "AMS room panels incomplete");
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "measures all AMS DESI model generation and rooms from real files"]
+    async fn ams_all_desi_models_and_rooms_without_database() -> anyhow::Result<()> {
+        measure_ams_memory_rooms(None, false).await
+    }
+
+    #[tokio::test]
+    #[ignore = "real AMS cached model output: vertex optimization edge parity"]
+    async fn ams_cached_room_vertex_optimization_parity() -> anyhow::Result<()> {
+        measure_ams_memory_rooms(Some(1112), true).await
+    }
+
+    #[tokio::test]
+    #[ignore = "real AMS 7022 model and room initialization after route repair"]
+    async fn ams_7022_models_and_rooms_without_database() -> anyhow::Result<()> {
+        measure_ams_memory_rooms(Some(7022), false).await
+    }
+
+    #[tokio::test]
+    #[ignore = "real AMS 7330 zero-length section model and room completion"]
+    async fn ams_7330_models_and_rooms_without_database() -> anyhow::Result<()> {
+        measure_ams_memory_rooms(Some(7330), false).await
+    }
+
+    #[tokio::test]
+    #[ignore = "real AMS 7048 explicit-angle model and room completion"]
+    async fn ams_7048_models_and_rooms_without_database() -> anyhow::Result<()> {
+        measure_ams_memory_rooms(Some(7048), false).await
+    }
+
+    async fn measure_ams_memory_rooms(
+        only_dbnum: Option<u32>,
+        check_parity: bool,
+    ) -> anyhow::Result<()> {
+        use crate::data_interface::frozen_source::FrozenSource;
+        use crate::fast_model::e3d_model_service::{E3dModelService, parse_refno};
+        use crate::fast_model::model_memory_store::{ModelMemoryStore, ProjectionScope};
+        use crate::fast_model::{model_artifact, room_model::MemoryRoomCalculator};
+        let option = aios_core::get_db_option();
+        anyhow::ensure!(
+            option.project_name == "AvevaMarineSample"
+                && option.mdb_name.trim_start_matches('/') == "ALL",
+            "requires AMS /ALL"
+        );
+        let output =
+            std::env::var_os("AMS_ROOM_TIMING_REPORT").context("timing output path required")?;
+        let started = Instant::now();
+        let mut model = load_latest(
+            RoomHierarchy::configured().context("room hierarchy")?,
+            &option.get_room_key_word(),
+            crate::fast_model::room_model::configured_match_room_fn(),
+            Arc::<MeshCache>::default(),
+        )
+        .await?;
+        warm_for_install(&mut model, &option.get_meshes_path()).await?;
+        anyhow::ensure!(
+            model.missing_panels.is_empty(),
+            "room definitions incomplete"
+        );
+        let room_preload_ms = started.elapsed().as_millis();
+        let room_version = model.input_version();
+        let sources = model.source_tokens.clone();
+        let expected_files = sources.len();
+        let calculator = MemoryRoomCalculator::new(Arc::new(model), option.get_meshes_path())?;
+        let memory = ModelMemoryStore::default();
+        let cache_dir = option.get_meshes_path().join("model-input-cache");
+        let dependencies = crate::fast_model::e3d_model_service::current_mdb_sources()?
+            .0
+            .into_iter()
+            .map(|pin| FrozenSource::capture(pin.file)?.commit_token_json())
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        let mut timings = Vec::new();
+        let mut failed_dbnums = Vec::new();
+        for token in sources {
+            let source = FrozenSource::from_commit_token_json(&token)?.reopen_verified()?;
+            let dbnum = source.dbnum() as u32;
+            if only_dbnum.is_some_and(|only| only != dbnum) {
+                continue;
+            }
+            let session = source.target_sesno();
+            let file_started = Instant::now();
+            println!("[ams-phase] phase=dbnum_initialize_started dbnum={dbnum} sesno={session}");
+            let roots =
+                crate::data_interface::window_root_plan::enumerate_target_roots(dbnum, session)
+                    .await?;
+            let enumerate_ms = file_started.elapsed().as_millis();
+            let service =
+                E3dModelService::from_initialization_sources(&source, &dependencies).await?;
+            let input = service.initialization_target_hash(dbnum, session)?;
+            let generation_started = Instant::now();
+            let mut missing = Vec::new();
+            let mut cached = 0;
+            for root in &roots {
+                let root = parse_refno(&root.root.to_string())?;
+                if let Some(commit) =
+                    model_artifact::load(&cache_dir, &option.get_meshes_path(), &input, root)
+                {
+                    memory.commit(ProjectionScope::Current, vec![commit]);
+                    cached += 1;
+                } else {
+                    missing.push(root.to_string());
+                }
+            }
+            let generated = missing.len();
+            let mut failures = Vec::new();
+            if !missing.is_empty() {
+                let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+                let produce = service.generate_frozen_roots(dbnum, &missing, tx);
+                let consume = async {
+                    let mut received = BTreeSet::new();
+                    while let Some(result) = rx.recv().await {
+                        anyhow::ensure!(
+                            received.insert(result.root.to_string()),
+                            "duplicate model output"
+                        );
+                        match result.outcome {
+                            Ok(commit) => {
+                                model_artifact::store(&cache_dir, &input, result.root, &commit)?;
+                                memory.commit(ProjectionScope::Current, vec![commit]);
+                            }
+                            Err(error) => failures.push(format!("{}: {error}", result.root)),
+                        }
+                    }
+                    anyhow::ensure!(
+                        received == missing.iter().cloned().collect::<BTreeSet<_>>(),
+                        "missing model output"
+                    );
+                    anyhow::Ok(())
+                };
+                futures::future::try_join(produce, consume).await?;
+            }
+            let generation_ms = generation_started.elapsed().as_millis();
+            crate::fast_model::e3d_model_service::forget_generation_input(dbnum);
+            let (epoch, records) = memory.snapshot_dbnum(dbnum);
+            let room_started = Instant::now();
+            let mut edge_count = None;
+            let mut reference_room_ms = None;
+            let mut optimized_room_ms = None;
+            if failures.is_empty() {
+                let version = crate::data_interface::dbnum_state::RoomInputVersion {
+                    version: 1,
+                    source_identity: token,
+                    model_sesno: session as i32,
+                    model_version: input,
+                    room_definition_version: room_version.clone(),
+                    generation_rule_version: "model-target-v1".into(),
+                };
+                match calculator.calculate(dbnum, &version, &records) {
+                    Ok(edges) => {
+                        optimized_room_ms = Some(room_started.elapsed().as_millis());
+                        edge_count = Some(edges.len());
+                        if check_parity {
+                            let reference_started = Instant::now();
+                            let reference = calculator
+                                .calculate_with_component_bvh(dbnum, &version, &records)?;
+                            reference_room_ms = Some(reference_started.elapsed().as_millis());
+                            let key = |edge: &crate::fast_model::room_model::ElementRoomEdge| {
+                                (
+                                    edge.panel,
+                                    edge.room_num.clone(),
+                                    edge.member.refno,
+                                    edge.member.inside_count,
+                                    edge.member.center_dist.to_bits(),
+                                )
+                            };
+                            anyhow::ensure!(
+                                edges.iter().map(key).eq(reference.iter().map(key)),
+                                "optimized room calculation differs from component-BVH reference"
+                            );
+                        }
+                    }
+                    Err(error) => failures.push(format!("room calculation: {error:#}")),
+                }
+            }
+            anyhow::ensure!(
+                memory.commit_epoch(dbnum) == epoch,
+                "model changed during room calculation"
+            );
+            source.reopen_verified()?;
+            if !failures.is_empty() {
+                failed_dbnums.push(dbnum);
+            }
+            let timing = serde_json::json!({"dbnum": dbnum, "sesno": session,
+                "roots": roots.len(), "generated": generated, "cached": cached,
+                "records": records.len(), "enumerate_ms": enumerate_ms,
+                "model_ms": generation_ms, "room_ms": room_started.elapsed().as_millis(),
+                "optimized_room_ms": optimized_room_ms, "reference_room_ms": reference_room_ms,
+                "room_edges": edge_count, "total_ms": file_started.elapsed().as_millis(), "failures": failures});
+            println!("AMS_DBNUM_TIMING {timing}");
+            timings.push(timing);
+            std::fs::write(
+                &output,
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    "room_preload_ms": room_preload_ms, "expected_files": expected_files,
+                    "completed_files": timings.len(), "dbnums": timings,
+                    "failed_dbnums": failed_dbnums, "total_ms": started.elapsed().as_millis(),
+                    "scope": "e3d-model generation and memory room calculation; excludes data ingest and publication"
+                }))?,
+            )?;
+        }
+        anyhow::ensure!(
+            failed_dbnums.is_empty(),
+            "unfinished dbnums: {failed_dbnums:?}"
+        );
+        Ok(())
+    }
 
     fn r(id: u32) -> RefnoEnum {
         RefnoEnum::from(RefU64::from_two_nums(24384, id))
@@ -1966,6 +3122,13 @@ mod tests {
             vec![r(8), r(9)],
             "没行的 8 与包围盒坏的 9"
         );
+        // D-A (a)：`missing` 里再分一刀——9 有行却不可用（挡参照、入队），8 从未生成（不挡）。
+        assert_eq!(
+            model.unusable_panels,
+            BTreeSet::from([r(9)]),
+            "只有包围盒坏的 9 算不可用；一条行都没有的 8 不算"
+        );
+        assert_eq!(model.stats().unusable_panels, 1);
         assert_eq!(model.digest, topology_digest(&groups()));
         let stats = model.stats();
         assert_eq!(
@@ -2254,6 +3417,215 @@ mod tests {
             commit_token: token.into(),
             published_version: 1,
         }
+    }
+
+    #[test]
+    fn source_coverage_requires_exactly_one_current_row_per_mdb_design_db() {
+        let sources = vec![
+            (7997, PathBuf::from("7997"), 11),
+            (8000, PathBuf::from("8000"), 22),
+        ];
+        let complete = vec![
+            published_input(7997, 11, "a"),
+            published_input(8000, 22, "b"),
+        ];
+        validate_source_coverage(&sources, &complete).expect("exact coverage");
+
+        for rows in [
+            vec![published_input(7997, 11, "a")],
+            vec![
+                published_input(7997, 10, "a"),
+                published_input(8000, 22, "b"),
+            ],
+            vec![
+                published_input(7997, 11, "a"),
+                published_input(7997, 11, "duplicate"),
+                published_input(8000, 22, "b"),
+            ],
+        ] {
+            assert!(validate_source_coverage(&sources, &rows).is_err());
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn eager_mesh_warm_deduplicates_keys_and_fails_the_generation_on_a_missing_mesh() {
+        let dir = tempfile::tempdir().unwrap();
+        box_mesh()
+            .ser_to_file(&dir.path().join("box.mesh"))
+            .unwrap();
+        let meshes: Arc<MeshCache> = Arc::default();
+        let mut model = model_of(
+            vec![group(5, "/1RX-RM03-R301", &[7, 8])],
+            vec![
+                inst(7, "box", 0.0, (0.0, 1.0)),
+                inst(8, "box", 0.0, (0.0, 1.0)),
+            ],
+            meshes.clone(),
+        );
+        model.warm_meshes(dir.path()).await.expect("warm succeeds");
+        let stats = model.stats();
+        assert_eq!(
+            (
+                stats.mesh_keys_expected,
+                stats.mesh_keys_warmed,
+                stats.mesh_warm_failed
+            ),
+            (1, 1, 0)
+        );
+        assert!(stats.mesh_bytes > 0);
+        assert_eq!(meshes.len(), 1);
+
+        let mut broken = model_of(
+            vec![group(5, "/1RX-RM03-R301", &[7])],
+            vec![inst(7, "missing", 0.0, (0.0, 1.0))],
+            meshes,
+        );
+        let error = broken
+            .warm_meshes(dir.path())
+            .await
+            .expect_err("missing mesh blocks generation");
+        assert!(error.to_string().contains("stage=mesh-warm"));
+        assert_eq!(broken.stats().mesh_warm_failed, 1);
+    }
+
+    /// 几何侧阻断的口径（共识 D-A (a)，审核 2026-09-09 W1）：**有几何行却不可用**的面板
+    /// 阻整代（存量边可能陈旧，半份几何判不了）；**从未生成**的在册面板只留痕不阻代——
+    /// 否则未监听库的面板会把 `ensure_current` 按死，几何覆盖稀疏的实例上整个房间子系统
+    /// 永远 Blocked。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn eager_mesh_warm_blocks_on_unusable_geometry_but_not_on_never_generated_panels() {
+        let dir = tempfile::tempdir().unwrap();
+        box_mesh()
+            .ser_to_file(&dir.path().join("box.mesh"))
+            .unwrap();
+
+        // 面板 7 有可用几何；8、9 在册但一条几何行都没有（从未生成）。
+        let mut sparse = model_of(
+            groups(),
+            vec![inst(7, "box", 0.0, (0.0, 1.0))],
+            Arc::default(),
+        );
+        assert!(
+            sparse.missing_panels.contains(&r(8)) && sparse.unusable_panels.is_empty(),
+            "夹具前提：8/9 是「从未生成」而不是「不可用」: {:?}",
+            sparse.missing_panels
+        );
+        sparse
+            .warm_meshes(dir.path())
+            .await
+            .expect("从未生成的面板只留痕，不阻整代");
+        let stats = sparse.stats();
+        assert_eq!(
+            (
+                stats.mesh_keys_expected,
+                stats.mesh_keys_warmed,
+                stats.mesh_warm_failed
+            ),
+            (1, 1, 0)
+        );
+        assert_eq!(stats.missing_panels, 2, "留痕照旧：8、9 在指标里点名");
+
+        // 面板 9 有几何行、包围盒不可用（NaN）→ 阻整代，理由点名 stage=geometry。
+        let mut unusable = model_of(
+            groups(),
+            vec![
+                inst(7, "box", 0.0, (0.0, 1.0)),
+                inst(9, "box", 0.0, (f32::NAN, 1.0)),
+            ],
+            Arc::default(),
+        );
+        assert!(
+            unusable.unusable_panels.contains(&r(9)),
+            "夹具前提：9 不可用"
+        );
+        let error = unusable
+            .warm_meshes(dir.path())
+            .await
+            .expect_err("不可用几何阻整代");
+        let message = error.to_string();
+        assert!(
+            message.contains("stage=geometry")
+                && message.contains("reason=invalid-geometry")
+                && message.contains(&format!("panel={}", r(9))),
+            "{message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mesh_pruning_drops_warmed_keys_that_never_reached_install() {
+        let dir = tempfile::tempdir().unwrap();
+        box_mesh()
+            .ser_to_file(&dir.path().join("box.mesh"))
+            .unwrap();
+        let meshes: Arc<MeshCache> = Arc::default();
+        let mut rooms = ResidentRooms {
+            meshes: meshes.clone(),
+            ..Default::default()
+        };
+        let mut installed = model_of(
+            vec![group(5, "/1RX-RM03-R301", &[7])],
+            vec![inst(7, "box", 0.0, (0.0, 1.0))],
+            meshes.clone(),
+        );
+        installed.warm_meshes(dir.path()).await.unwrap();
+        rooms.install(installed);
+
+        let mut abandoned = model_of(
+            vec![group(6, "/1RX-RM03-R302", &[8])],
+            vec![inst(8, "box", 3.0, (0.0, 1.0))],
+            meshes.clone(),
+        );
+        abandoned.warm_meshes(dir.path()).await.unwrap();
+        assert_eq!(meshes.len(), 2);
+
+        rooms.prune_meshes();
+        assert_eq!(meshes.len(), 1);
+    }
+
+    /// 完成定义 #5 的业务 ready 门（S1）：初始化未完成时，会写房间边的入口拿不到放行——
+    /// `Loading` / `Blocked` / `Degraded` 一律结构化 `UPDATING`。`Disabled` / `Unsupported`
+    /// 是「本进程没有 resident 体制」，放行走今天的路：开关判定收在状态机里，
+    /// `room_model.rs` 不判开关（源码钉 `the_full_rebuild_entry_never_takes_the_resident_model`）。
+    ///
+    /// 全局 lifecycle 单例，测完复原；本测试二进制里没有别的用例在运行期碰这几个入口。
+    #[test]
+    fn the_ready_gate_returns_structured_updating_until_the_model_is_ready() {
+        let restore = lifecycle();
+
+        mark_loading("mesh-warm");
+        let error = ensure_ready().expect_err("loading 必须拦");
+        assert!(
+            error.to_string().starts_with(RESIDENT_MODEL_UPDATING),
+            "门要给结构化 UPDATING，不是随手一句话: {error}"
+        );
+        assert!(error.to_string().contains("loading:mesh-warm"), "{error}");
+
+        set_lifecycle(ResidentLifecycle::Blocked {
+            problems: vec!["建模失败".into()],
+        });
+        assert!(ensure_ready().is_err(), "blocked 没有可信的当前代");
+
+        set_lifecycle(ResidentLifecycle::Degraded {
+            generation: "g1".into(),
+            problems: vec!["新代没建成".into()],
+        });
+        assert!(
+            ensure_ready().is_err(),
+            "degraded 的模型要么是旧代（§4.2 不得用旧代为新会话写边）要么带伤，不放行"
+        );
+
+        set_lifecycle(ResidentLifecycle::Ready {
+            generation: "g2".into(),
+            completed_at: String::new(),
+        });
+        assert!(ensure_ready().is_ok());
+
+        mark_disabled("configuration");
+        assert!(ensure_ready().is_ok(), "关着 = 没有体制，走今天的路，不拦");
+        mark_unsupported("project_hd/project_hh feature is absent");
+        assert!(ensure_ready().is_ok());
+
+        set_lifecycle(restore);
     }
 
     /// `mem://` 门：从 `room_published_topology` + `room_published_inst` 合成的模型，拓扑与
@@ -3090,6 +4462,9 @@ mod tests {
         let report = StartupInitReport {
             blocked: None,
             summary: Some("[房间初始化] published …".into()),
+            expected_dbnums: vec![8000],
+            duration_ms: Some(2950),
+            rss_bytes: Some(512 * 1024 * 1024),
             at: "2026-09-07T23:59:00+08:00".into(),
         };
 
@@ -3129,6 +4504,9 @@ mod tests {
         let blocked = StartupInitReport {
             blocked: Some("枚举 MDB 设计库失败".into()),
             summary: None,
+            expected_dbnums: Vec::new(),
+            duration_ms: None,
+            rss_bytes: None,
             at: String::new(),
         };
         let health = resident_health_from(Some(&blocked), None, &[], |_| true);
@@ -3253,7 +4631,7 @@ mod tests {
         assert!(line.contains("8002@2→3 前进 180ms]"), "{line}");
         assert!(
             line.contains(
-                "→ 2 间房 / 3 块在册面板 / 1 块有几何 / 2 块无几何 无几何按库 {24384: 2} 耗时 8000ms"
+                "→ 2 间房 / 3 块在册面板 / 1 块有几何 / 2 块无几何 无几何按库 {24384: 2} / 网格 0/0 键 0.0 MB 耗时 8000ms"
             ),
             "{line}"
         );

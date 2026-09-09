@@ -193,6 +193,7 @@ mod tests {
 
     fn row(state: &'static str, blocked_by_phase: Option<&'static str>) -> QueueRow {
         QueueRow {
+            model_start_sesno: None,
             task_id: "db-1".to_string(),
             dbnum: 7999,
             db_type: "DESI".to_string(),

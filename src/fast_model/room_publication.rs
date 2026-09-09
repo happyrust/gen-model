@@ -106,6 +106,9 @@ pub(crate) async fn query_published_room_insts_on(
 }
 
 fn render_published_room_inst_query(refnos: &[RefnoEnum]) -> String {
+    // Keep the manifest subquery outside the indexed element lookup: Surreal
+    // otherwise falls back to scanning every version and evaluating the
+    // manifest predicate for every row, even for a single requested element.
     let keys = refnos
         .iter()
         .map(RefnoEnum::to_pe_key)
@@ -113,9 +116,9 @@ fn render_published_room_inst_query(refnos: &[RefnoEnum]) -> String {
         .join(", ");
     format!(
         "SELECT refno, old_refno, owner, generic, world_aabb, world_trans, pts, insts, has_neg, date \
-         FROM {PUBLISHED_ROOM_INPUT_TABLE} \
-         WHERE commit_token IN (SELECT VALUE commit_token FROM published_file_input) \
-           AND (refno IN [{keys}] OR old_refno IN [{keys}]);"
+         FROM (SELECT * FROM {PUBLISHED_ROOM_INPUT_TABLE} \
+               WHERE refno IN [{keys}] OR old_refno IN [{keys}]) \
+         WHERE commit_token IN (SELECT VALUE commit_token FROM published_file_input);"
     )
 }
 

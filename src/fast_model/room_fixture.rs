@@ -24,10 +24,13 @@
 
 use std::path::{Path, PathBuf};
 
-use aios_core::SUL_DB;
 use aios_core::shape::pdms_shape::PlantMesh;
+use aios_core::{RefnoEnum, SUL_DB};
 use glam::Vec3;
 use parry3d::bounding_volume::Aabb;
+
+use crate::data_interface::side_effect_pending::PublishedFileInput;
+use crate::fast_model::room_topology::{RoomGroup, RoomHierarchy, published_topology_manifest_key};
 
 /// 夹具占用的库号。沿用仓库既有的保留段约定（见 `model_refresh.rs` 的 live 用例）。
 pub const FIXTURE_DBNUM: u64 = 4000000001;
@@ -115,7 +118,7 @@ fn bodies() -> Vec<Body> {
     };
     let part = |seq, cx: f32, half: f32| Body {
         seq,
-        noun: "BOX",
+        noun: if seq == 20 { "VALV" } else { "BOX" },
         owner_seq: 2,
         min: Vec3::new(cx - half, 500.0 - half, 500.0 - half),
         max: Vec3::new(cx + half, 500.0 + half, 500.0 + half),
@@ -225,6 +228,35 @@ pub async fn create_room_fixture(mesh_dir: &Path) -> anyhow::Result<()> {
         ));
     }
 
+    // The production room loader consumes the published topology snapshot (or E3D files),
+    // not the retired FRMW noun-table query. Publish the synthetic hierarchy through the same
+    // snapshot contract so this fixture exercises the real incremental room path.
+    let input = PublishedFileInput {
+        dbnum: FIXTURE_DBNUM as u32,
+        db_type: "DESI".into(),
+        end_sesno: 1,
+        commit_token: "fixture-room-token".into(),
+        published_version: 1,
+    };
+    let manifest_key = published_topology_manifest_key(&[input.clone()], RoomHierarchy::Hd);
+    let groups = vec![RoomGroup {
+        room: RefnoEnum::from(refno(1).as_str()),
+        name: ROOM_NAME.into(),
+        panels: vec![
+            RefnoEnum::from(refno(10).as_str()),
+            RefnoEnum::from(refno(11).as_str()),
+        ],
+    }];
+    sql.push_str(&format!(
+        "UPSERT published_file_input:{} SET dbnum = {}, db_type = 'DESI', end_sesno = 1, commit_token = 'fixture-room-token', published_version = 1;\
+         UPSERT room_published_topology:fixture SET manifest_key = '{}', dbnum = {}, groups = {};",
+        input.dbnum,
+        input.dbnum,
+        manifest_key,
+        input.dbnum,
+        serde_json::to_string(&groups)?,
+    ));
+
     SUL_DB.query(sql).await?.check()?;
     Ok(())
 }
@@ -268,8 +300,13 @@ pub async fn drop_room_fixture(mesh_dir: &Path) -> anyhow::Result<()> {
     let mut ids = vec![
         format!("pe:{}", refno(1)),
         format!("FRMW:{}", refno(1)),
+        format!("pe:{}", refno(3)),
+        format!("FRMW:{}", refno(3)),
         format!("pe:{}", refno(2)),
+        format!("pe:{}", refno(4)),
         format!("trans:zzfx_id"),
+        format!("published_file_input:{}", FIXTURE_DBNUM),
+        "room_published_topology:fixture".to_string(),
     ];
     for body in bodies() {
         let geo_hash = body.geo_hash();
@@ -889,7 +926,9 @@ mod tests {
         );
     }
 
-    #[derive(serde::Deserialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    #[derive(
+        serde::Deserialize, serde::Serialize, Debug, Clone, PartialEq, Eq, PartialOrd, Ord,
+    )]
     struct Edge {
         panel: String,
         part: String,
@@ -910,6 +949,57 @@ mod tests {
         let mut edges: Vec<Edge> = response.take(0).expect("decode room_relate");
         edges.sort();
         edges
+    }
+
+    async fn all_fixture_room_edges() -> Vec<Edge> {
+        let mut response = SUL_DB
+            .query(
+                "SELECT record::id(in) AS panel, record::id(out) AS part, room_num \
+                 FROM room_relate WHERE in IN [pe:4000000001_10, pe:4000000001_11] \
+                 ORDER BY panel, part, room_num;",
+            )
+            .await
+            .expect("query all fixture room_relate")
+            .check()
+            .expect("valid all fixture room_relate query");
+        let mut edges: Vec<Edge> = response.take(0).expect("decode all room_relate");
+        edges.sort();
+        edges
+    }
+
+    async fn element_aabb(element: &RefnoEnum) -> Vec<String> {
+        let mut response = SUL_DB
+            .query(format!(
+                "SELECT VALUE <string>aabb.d FROM pe:{}->inst_relate;",
+                element.to_string()
+            ))
+            .await
+            .expect("query element aabb")
+            .check()
+            .expect("valid element aabb query");
+        response.take(0).expect("decode element aabb")
+    }
+
+    async fn room_queue_count() -> usize {
+        #[derive(serde::Deserialize)]
+        struct Count {
+            count: usize,
+        }
+        let mut response = SUL_DB
+            .query(
+                "SELECT count() AS count FROM model_update_pending \
+                 WHERE action IN ['room_recalc_element', 'room_recalc_panel'] GROUP ALL;",
+            )
+            .await
+            .expect("query room queue count")
+            .check()
+            .expect("valid room queue count query");
+        response
+            .take::<Vec<Count>>(0)
+            .expect("decode room queue count")
+            .first()
+            .map(|row| row.count)
+            .unwrap_or(0)
     }
 
     /// ADR-010 §9 的验收骨架：夹具 → `build_room_relations` → 逐边比对。
@@ -1024,6 +1114,77 @@ mod tests {
             .await
             .expect("baseline full rebuild");
         assert_eq!(room_edges().await.len(), 6, "基线应有 6 条归属边");
+        db_option
+    }
+
+    async fn two_room_fixture_baseline() -> aios_core::options::DbOption {
+        crate::fast_model::spatial_state::mark_spatial_tree_fixture_preloaded();
+        let mut db_option = get_db_option().clone();
+        db_option.room_key_word = Some(vec!["ZZ-R-".to_string()]);
+        let mesh_dir = db_option.get_meshes_path();
+        create_room_fixture(&mesh_dir)
+            .await
+            .expect("create fixture");
+
+        // Split panel B into a second FRMW room while keeping the published topology contract.
+        SUL_DB
+            .query(format!(
+                "CREATE pe:{} SET noun = 'FRMW', deleted = false, owner = pe:{}, name = '/ZZ-R-K200';\
+                 CREATE FRMW:{} SET NAME = '/ZZ-R-K200', REFNO = pe:{};\
+                 CREATE pe:{} SET noun = 'CWALL', deleted = false, owner = pe:{}, name = '';\
+                 RELATE pe:{}->pe_owner->pe:{};\
+                 DELETE pe:{}<-pe_owner;\
+                 RELATE pe:{}->pe_owner->pe:{};",
+                refno(3), refno(3), refno(3), refno(3), refno(4), refno(3),
+                refno(4), refno(3), refno(11), refno(11), refno(4)
+            ))
+            .await
+            .expect("create second room")
+            .check()
+            .expect("valid second room setup");
+
+        let input = PublishedFileInput {
+            dbnum: FIXTURE_DBNUM as u32,
+            db_type: "DESI".into(),
+            end_sesno: 1,
+            commit_token: "fixture-room-token".into(),
+            published_version: 1,
+        };
+        let manifest_key = published_topology_manifest_key(&[input.clone()], RoomHierarchy::Hd);
+        let groups = vec![
+            RoomGroup {
+                room: RefnoEnum::from(refno(1).as_str()),
+                name: ROOM_NAME.into(),
+                panels: vec![RefnoEnum::from(refno(10).as_str())],
+            },
+            RoomGroup {
+                room: RefnoEnum::from(refno(3).as_str()),
+                name: "/ZZ-R-K200".into(),
+                panels: vec![RefnoEnum::from(refno(11).as_str())],
+            },
+        ];
+        SUL_DB
+            .query(format!(
+                "UPSERT room_published_topology:fixture SET manifest_key = '{}', dbnum = {}, groups = {};",
+                manifest_key,
+                input.dbnum,
+                serde_json::to_string(&groups).expect("serialize two-room topology")
+            ))
+            .await
+            .expect("publish two-room topology")
+            .check()
+            .expect("valid two-room topology");
+
+        let fixture_refnos: Vec<RefnoEnum> = bodies()
+            .iter()
+            .map(|body| RefnoEnum::from(refno(body.seq).as_str()))
+            .collect();
+        update_inst_relate_aabbs_by_refnos(&fixture_refnos, true)
+            .await
+            .expect("push fixture aabbs into tree");
+        build_room_relations(&db_option)
+            .await
+            .expect("build two-room relations");
         db_option
     }
 
@@ -1294,6 +1455,74 @@ mod tests {
             incremental, full,
             "\n增量: {incremental:#?}\n全量: {full:#?}\n（增量收敛结果必须等于全量重建结果）"
         );
+    }
+
+    /// Production-shaped valve move: model geometry changes first, then the durable room target
+    /// is consumed. The report is intentionally printed as structured JSON so the detailed room
+    /// delta is visible alongside the model AABB delta and completed room work count.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "manual live: writes fixture records, queue rows and .mesh files"]
+    async fn live_room_valve_move_reports_model_and_room_delta() {
+        use crate::data_interface::model_update_pending::{drain_rooms, enqueue_room_recalc};
+        use crate::fast_model::aabb_refresh::update_inst_relate_aabbs_by_refnos;
+        connect_live().await;
+        let db_option = two_room_fixture_baseline().await;
+        let mesh_dir = db_option.get_meshes_path();
+        let valve = RefnoEnum::from(refno(20).as_str());
+        let (pane_a, pane_b) = panel_refnos();
+        let before = all_fixture_room_edges().await;
+        let before_aabb = element_aabb(&valve).await;
+
+        // Move the valve from panel A's volume to panel B's volume. This is the same model-side
+        // trigger used by production: update the source geometry, refresh inst_relate AABB, then
+        // enqueue the room target rather than calling the room calculator directly.
+        move_fixture_body(
+            &mesh_dir,
+            20,
+            Vec3::new(1450.0, 450.0, 450.0),
+            Vec3::new(1550.0, 550.0, 550.0),
+        )
+        .await
+        .expect("move valve from room A to room B");
+        let changes = update_inst_relate_aabbs_by_refnos(&[valve], true)
+            .await
+            .expect("refresh valve model AABB");
+        enqueue_room_recalc(&changes)
+            .await
+            .expect("enqueue room recalculation");
+
+        let queued_before = room_queue_count().await;
+        crate::fast_model::room_model::reset_room_increment_stats();
+        let done = drain_rooms(&db_option)
+            .await
+            .expect("drain valve room recalculation")
+            .done;
+        let membership_delta = crate::fast_model::room_model::room_increment_stats_snapshot();
+        let after = all_fixture_room_edges().await;
+        let after_aabb = element_aabb(&valve).await;
+        let moved_to_b = after
+            .iter()
+            .any(|edge| edge.part == refno(20) && edge.panel == pane_b && edge.room_num == "K200");
+        let left_a = !after
+            .iter()
+            .any(|edge| edge.part == refno(20) && edge.panel == pane_a && edge.room_num == "K100");
+        println!(
+            "[room-detailed] {}",
+            serde_json::json!({
+                "noun": "VALV",
+                "model": {"aabb_changed": before_aabb != after_aabb, "before": before_aabb, "after": after_aabb},
+                "room": {"queued_targets": queued_before, "completed_targets": done, "moved_to_panel_b": moved_to_b, "left_panel_a": left_a, "membership_delta": membership_delta, "edges_before": before, "edges_after": after},
+            })
+        );
+        assert!(before_aabb != after_aabb, "模型增量必须体现阀门位置变化");
+        assert!(moved_to_b && left_a, "房间增量必须把阀门从 A 搬到 B");
+        assert_eq!(
+            membership_delta.room_membership_changes, 1,
+            "详细统计必须记录房间归属变化"
+        );
+        assert_eq!(done, 1, "房间增量目标必须被生产 drain 消费");
+
+        drop_fixture_and_queue(&mesh_dir).await;
     }
 
     /// 删除路径：被删元素的房间归属必须当场清干净，而不是留成悬空边（ADR-010 §4）。

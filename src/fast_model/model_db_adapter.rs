@@ -285,6 +285,46 @@ pub async fn persist_root_on(
     .await
 }
 
+pub(crate) async fn persist_root_for_file_round(
+    root: RefNo,
+    dbnum: u32,
+    round_end_sesno: i32,
+    source_token: &str,
+) -> anyhow::Result<PersistedRows> {
+    persist_root_for_file_round_on(
+        PersistTarget::process(),
+        ModelMemoryStore::global(),
+        root,
+        dbnum,
+        round_end_sesno,
+        source_token,
+    )
+    .await
+}
+
+async fn persist_root_for_file_round_on(
+    target: PersistTarget<'_>,
+    store: &ModelMemoryStore,
+    root: RefNo,
+    dbnum: u32,
+    round_end_sesno: i32,
+    source_token: &str,
+) -> anyhow::Result<PersistedRows> {
+    crate::data_interface::batch_worker::with_model_publication_window(
+        dbnum,
+        round_end_sesno,
+        source_token,
+        persist_root_in_chunks(
+            target,
+            store,
+            root,
+            PERSIST_CHUNK,
+            RoomEffectPolicy::Directed,
+        ),
+    )
+    .await
+}
+
 /// [`persist_root_on`] 的可调块大小形态。块大小只有测试才需要拨。
 async fn persist_root_in_chunks(
     target: PersistTarget<'_>,
@@ -728,6 +768,8 @@ async fn read_published_projection_on(
                     model_target: row.published_model_target,
                     manifest_hash: row.published_manifest_hash,
                     geometry_count: row.published_geometry_count,
+                    // 内部对账用的旧回执，不再发布，published_via 取默认即可。
+                    published_via: crate::fast_model::model_memory_store::default_published_via(),
                 },
             ));
         }
@@ -1257,9 +1299,8 @@ pub fn render_spooled_root(store: &ModelMemoryStore, root: RefNo) -> anyhow::Res
     let receipt = store
         .receipt(ProjectionScope::Current, root)
         .with_context(|| format!("model root {root} has no publication receipt"))?;
-    let packed = packed_refno(root);
     let mut statements = render_publication_guard(root, &receipt);
-    statements.push_str(&render_spooled_scope_cleanup(packed));
+    statements.push_str(&render_spooled_scope_cleanup(root));
     let branches = records
         .iter()
         .filter(|record| record.tube.is_some())
@@ -1281,7 +1322,7 @@ pub fn render_spooled_scope_deletion(
     affected_roots: &[RefNo],
     tube_branches: &[RefNo],
 ) -> String {
-    let mut statements = render_spooled_scope_cleanup(packed_refno(root));
+    let mut statements = render_spooled_scope_cleanup(root);
     statements.push_str(&render_tube_branch_resets(tube_branches));
     for affected in affected_roots {
         statements.push_str(&format!(
@@ -1294,20 +1335,27 @@ pub fn render_spooled_scope_deletion(
     publication_transaction(&statements)
 }
 
-fn render_spooled_scope_cleanup(packed: i64) -> String {
+fn render_spooled_scope_cleanup(root: RefNo) -> String {
+    let packed = packed_refno(root);
+    let owner = sql_string(&refno_key(root));
     // Capture relation and info ids before deleting the relation rows.  All
     // predicates are evaluated by SurrealDB at replay time; replacement rows
     // are already fully rendered from the source epoch.
     format!(
-        "LET $mirror_rels = SELECT id, out FROM inst_relate \
-         WHERE direct_model.source='e3d-model' AND anc CONTAINS {packed};\n\
+        "LET $mirror_owner = type::thing('pe',{owner});\n\
+         LET $mirror_rels = SELECT id, out FROM inst_relate \
+         WHERE direct_model.source='e3d-model' AND (anc CONTAINS {packed} OR in = $mirror_owner);\n\
+         LET $mirror_tubes = SELECT id FROM tubi_relate \
+         WHERE direct_model.source='e3d-model' AND (anc CONTAINS {packed} OR in = $mirror_owner);\n\
          LET $mirror_ids = $mirror_rels.map(|$row| record::id($row.id));\n\
+         LET $mirror_tube_ids = $mirror_tubes.map(|$row| record::id($row.id));\n\
          LET $mirror_infos = $mirror_rels.map(|$row| $row.out);\n\
          DELETE geo_relate WHERE in IN $mirror_infos;\n\
          DELETE inst_info WHERE id IN $mirror_infos;\n\
          DELETE inst_relate WHERE id IN $mirror_rels.id;\n\
-         DELETE aabb WHERE record::id(id) IN $mirror_ids;\n\
-         DELETE trans WHERE record::id(id) IN $mirror_ids;\n"
+         DELETE tubi_relate WHERE id IN $mirror_tubes.id;\n\
+         DELETE aabb WHERE record::id(id) IN $mirror_ids OR record::id(id) IN $mirror_tube_ids;\n\
+         DELETE trans WHERE record::id(id) IN $mirror_ids OR record::id(id) IN $mirror_tube_ids;\n"
     )
 }
 
@@ -1611,17 +1659,28 @@ fn render_receipt_version(
         .transpose()?
         .map(|value| sql_value(&value))
         .unwrap_or_else(|| "NONE".to_string());
-    let mut statements = format!(
+    // 这份清单是整个 run 的（设计库 + 目录库的身份、会话、摘要），与根无关，而两列恒等。
+    // 写成字面量就是每根把同一串发两遍：AMS 7997 那轮一份 5 952 字节、6 769 根合计 80.5 MB，
+    // 占整批发布 SQL 的 26%。绑一次再引用两次，库里落的东西一字不变。
+    let mut statements = String::new();
+    let model_target = if model_target == "NONE" {
+        model_target
+    } else {
+        statements.push_str(&format!("LET $mt = {model_target};\n"));
+        "$mt".to_string()
+    };
+    statements.push_str(&format!(
         "UPDATE type::thing('gen_root', {root_id}) SET \
          status='Generated', publication_status='ready', \
          published_revision={revision}, published_target={published_target}, \
          desired_model_target={model_target}, published_model_target={model_target}, \
          published_manifest_hash={}, published_geometry_count={}, \
-         source_end_sesno={}, last_error=NONE, updated_at=time::now();\n",
+         source_end_sesno={}, published_via={}, last_error=NONE, updated_at=time::now();\n",
         sql_string(&receipt.manifest_hash),
         receipt.geometry_count,
         receipt.source_sesno,
-    );
+        sql_string(&receipt.published_via),
+    ));
     append_root_dependency_receipt(&mut statements, root, receipt.model_target.as_ref());
     Ok(statements)
 }
@@ -1884,6 +1943,7 @@ mod tests {
                 model_target: None,
                 manifest_hash: format!("test-{geometry_count}"),
                 geometry_count,
+                published_via: "regen".into(),
             },
         )
     }
@@ -2366,6 +2426,7 @@ mod tests {
             model_target: None,
             manifest_hash: "abc123".into(),
             geometry_count: 2,
+            published_via: "regen".into(),
         }
     }
 
@@ -2412,6 +2473,7 @@ mod tests {
                         model_target: Some(model_target),
                         manifest_hash: "manifest".into(),
                         geometry_count: 1,
+                        published_via: "regen".into(),
                     },
                 )),
                 ..ProjectionCommit::default()
@@ -2440,6 +2502,11 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(queried.hash().unwrap(), skipped.hash().unwrap());
+        let sql = skipped.chunks.join("\n");
+        assert!(
+            !sql.contains("room_recalc_element") && !sql.contains("room_recalc_panel"),
+            "初始化发布由项目级全量房间计算收尾，不应制造逐构件待办"
+        );
         assert_eq!(queried_profile.reconcile_queries, 1);
         assert_eq!(skipped_profile.reconcile_queries, 0);
         assert_eq!(skipped_profile.reconcile_read_micros, 0);
@@ -2534,6 +2601,27 @@ mod tests {
         }
         assert_eq!(count(&db, "inst_relate").await, 0);
         assert_eq!(count(&db, "gen_root").await, 0);
+    }
+
+    #[tokio::test]
+    async fn a_spooled_tombstone_deletes_durable_rows_without_memory_projection() {
+        let db = surreal_mem().await;
+        let root = RefNo::new(24383, 1);
+        let packed = packed_refno(root);
+        db.query(format!(
+            "CREATE inst_relate:durable_only SET in=pe:durable_only, anc=[{packed}], \
+             out=inst_info:durable_only, direct_model={{source:'e3d-model'}};"
+        ))
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let tombstone = render_spooled_scope_deletion(root, &[root], &[]);
+        assert!(tombstone.contains("DELETE tubi_relate WHERE id IN $mirror_tubes.id"));
+        db.query(tombstone).await.unwrap().check().unwrap();
+
+        assert_eq!(count(&db, "inst_relate").await, 0);
     }
 
     /// 渲染出来的语句真能在库里跑通，落进的是旧那几张表：烘焙实体只占 `inst_relate`，
@@ -3297,6 +3385,63 @@ mod tests {
             .and_then(|response| response.check())
             .map(|_| ());
         result.and(cleanup.map_err(Into::into))
+    }
+
+    #[tokio::test]
+    async fn directed_persist_for_file_round_tags_room_work_as_collecting() {
+        let _room = crate::options::RoomIncrementalOverride::set(true);
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        seed_gen_root(&db).await;
+        let store = ModelMemoryStore::default();
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![baked_record()],
+                receipt: Some(test_receipt(BRANCH, 1)),
+                ..Default::default()
+            }],
+        );
+
+        let source_token = crate::data_interface::frozen_source::FrozenSource::synthetic(
+            "fixture.db",
+            7997,
+            "DESI",
+            42,
+        )
+        .commit_token_json()
+        .unwrap();
+        persist_root_for_file_round_on(
+            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            &store,
+            BRANCH,
+            7997,
+            42,
+            &source_token,
+        )
+        .await
+        .unwrap();
+
+        #[derive(serde::Deserialize)]
+        struct RoomRow {
+            status: String,
+            #[serde(default)]
+            file_rounds: Vec<String>,
+        }
+        let mut response = db
+            .query(
+                "SELECT status, file_rounds FROM model_update_pending:room_recalc_element_24383_73948;",
+            )
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let row = response
+            .take::<Option<RoomRow>>(0)
+            .unwrap()
+            .expect("directed room row");
+        assert_eq!(row.status, "collecting");
+        assert_eq!(row.file_rounds, ["7997:42"]);
     }
 
     #[tokio::test]

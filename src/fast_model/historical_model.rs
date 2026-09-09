@@ -416,9 +416,9 @@ pub(crate) fn resolve_session(
             Ok(ResolvedSession {
                 requested: "latest".to_string(),
                 sesno,
-                session_time: session_times(path)
+                session_time: session_chain_times(path)
                     .ok()
-                    .and_then(|mut times| times.remove(&sesno)),
+                    .and_then(|chain| time_of(&chain, sesno)),
             })
         }
         SessionSelector::Sesno(sesno) => {
@@ -427,14 +427,14 @@ pub(crate) fn resolve_session(
             Ok(ResolvedSession {
                 requested: format!("sesno:{sesno}"),
                 sesno: *sesno,
-                session_time: session_times(path)
+                session_time: session_chain_times(path)
                     .ok()
-                    .and_then(|mut times| times.remove(sesno)),
+                    .and_then(|chain| time_of(&chain, *sesno)),
             })
         }
         SessionSelector::At(requested) => {
-            let times = session_times(path)?;
-            let (sesno, time) = select_session_at(&times, requested)?;
+            let chain = session_chain_times(path)?;
+            let (sesno, time) = select_session_at(&chain, requested)?;
             Ok(ResolvedSession {
                 requested: format!("time:{}", requested.to_rfc3339()),
                 sesno,
@@ -444,44 +444,73 @@ pub(crate) fn resolve_session(
     }
 }
 
+/// 时点 `t` 落在哪条会话上：**从链头往回走，第一条时刻 ≤ t 的会话**。
+///
+/// 按时刻取最大值是错的。会话 1 的时刻是这个文件**在本项目里被建立**的时刻，而
+/// 会话 2 以后带的是从源项目拷进来的**原始创作时刻**，所以会话 1 常常比它后面
+/// 整条链都晚：AvevaMarineSample 的 443 个库里 423 个如此，最大倒退 13.6 年。
+/// 纯时刻序会让这些库的**任何** `time` 请求都解到会话 1——初始树——而且不报错、
+/// 回执里还显示一个看起来正常的日期。实测 36 个库当场中招（含一个目录库），
+/// 取证见 `docs/evidence/2026-09-08-session-time-coverage-and-selector-probe.md` §3。
+///
+/// 链序才是「谁在谁之前」的权威。这与 `e3d_io::session::SessionSelector::AtOrBefore`
+/// 对 sesno 的解法、以及 `e3d_model::increment::collect_window` 判窗口方向时
+/// 「链序为准——链不保证连号，数字大小不算数」是同一把尺子。
 fn select_session_at(
-    times: &HashMap<u32, String>,
+    chain: &[ChainTime],
     requested: &DateTime<FixedOffset>,
 ) -> Result<(u32, String), HistoricalModelError> {
-    if times.is_empty() {
+    if chain.is_empty() {
         return Err(HistoricalModelError::new(
             "SESSION_TIME_UNAVAILABLE",
             "source has no decodable session timestamps",
         ));
     }
     let requested_utc = requested.with_timezone(&Utc);
-    let candidates = times
-        .iter()
-        .map(|(&sesno, value)| {
-            DateTime::parse_from_rfc3339(value)
-                .map(|time| (sesno, time.with_timezone(&Utc), value.clone()))
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| HistoricalModelError::new("SESSION_TIME_UNAVAILABLE", e))?;
-    candidates
-        .into_iter()
-        .filter(|(_, time, _)| *time <= requested_utc)
-        .max_by_key(|(sesno, time, _)| (*time, *sesno))
-        .map(|(sesno, _, time)| (sesno, time))
-        .ok_or_else(|| {
-            HistoricalModelError::new("TIME_BEFORE_OLDEST_SESSION", requested.to_rfc3339())
-        })
+    for entry in chain.iter().rev() {
+        let time = DateTime::parse_from_rfc3339(&entry.time)
+            .map_err(|e| HistoricalModelError::new("SESSION_TIME_UNAVAILABLE", e))?;
+        if time.with_timezone(&Utc) <= requested_utc {
+            return Ok((entry.sesno, entry.time.clone()));
+        }
+    }
+    Err(HistoricalModelError::new(
+        "TIME_BEFORE_OLDEST_SESSION",
+        requested.to_rfc3339(),
+    ))
 }
 
-fn session_times(path: &Path) -> Result<HashMap<u32, String>, HistoricalModelError> {
-    // 整条会话链一次读完（e3d-io `DbView::walk_sessions`），时刻解法与旧 `get_dt` 相同；
-    // 解不出时刻的会话页（字段全零）不进候选，与旧实现按 `get_dt` 必成功的假设相比更保守。
+/// 一条会话的号与时刻。**装在 `Vec` 里而不是 `HashMap`，因为顺序是链序**——
+/// 谁在谁之前只有链说了算，见 [`select_session_at`]。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ChainTime {
+    sesno: u32,
+    time: String,
+}
+
+/// 整条会话链的时刻，**旧 → 新**（`session_chain` 就是这个方向）。
+///
+/// 整条链一次读完（e3d-io `DbView::walk_sessions`），时刻解法与旧 `get_dt` 相同；
+/// 解不出时刻的会话页（字段全零）不进候选，与旧实现按 `get_dt` 必成功的假设相比更保守。
+fn session_chain_times(path: &Path) -> Result<Vec<ChainTime>, HistoricalModelError> {
     let chain = crate::data_interface::db_file_header::session_chain(path)
         .map_err(|e| HistoricalModelError::new("SESSION_TIME_UNAVAILABLE", e))?;
     Ok(chain
         .iter()
-        .filter_map(|stamp| stamp.rfc3339().map(|time| (stamp.sesno, time)))
+        .filter_map(|stamp| {
+            stamp.rfc3339().map(|time| ChainTime {
+                sesno: stamp.sesno,
+                time,
+            })
+        })
         .collect())
+}
+
+fn time_of(chain: &[ChainTime], sesno: u32) -> Option<String> {
+    chain
+        .iter()
+        .find(|entry| entry.sesno == sesno)
+        .map(|entry| entry.time.clone())
 }
 
 fn source_fingerprint(path: &Path) -> anyhow::Result<String> {
@@ -531,6 +560,17 @@ pub fn parse_selector(
 mod tests {
     use super::*;
 
+    /// 链序：旧 → 新，与 `db_file_header::session_chain` 同向。
+    fn chain_of(entries: &[(u32, &str)]) -> Vec<ChainTime> {
+        entries
+            .iter()
+            .map(|(sesno, time)| ChainTime {
+                sesno: *sesno,
+                time: (*time).to_string(),
+            })
+            .collect()
+    }
+
     #[test]
     fn selector_requires_one_or_zero_inputs() {
         assert!(matches!(
@@ -562,21 +602,128 @@ mod tests {
     }
 
     #[test]
-    fn time_selector_uses_utc_then_highest_session_number() {
-        let times = HashMap::from([
-            (24, "2026-01-01T08:00:00+08:00".to_string()),
-            (25, "2026-01-01T00:00:00Z".to_string()),
-            (26, "2026-01-02T00:00:00Z".to_string()),
+    fn time_selector_compares_in_utc_and_walks_back_from_the_chain_head() {
+        // 24 与 25 是同一个 UTC 时刻，只是写法不同。
+        let chain = chain_of(&[
+            (24, "2026-01-01T08:00:00+08:00"),
+            (25, "2026-01-01T00:00:00Z"),
+            (26, "2026-01-02T00:00:00Z"),
         ]);
         let between = DateTime::parse_from_rfc3339("2026-01-01T12:00:00+08:00").unwrap();
-        assert_eq!(select_session_at(&times, &between).unwrap().0, 25);
+        assert_eq!(select_session_at(&chain, &between).unwrap().0, 25);
         let late = DateTime::parse_from_rfc3339("2027-01-01T00:00:00Z").unwrap();
-        assert_eq!(select_session_at(&times, &late).unwrap().0, 26);
+        assert_eq!(select_session_at(&chain, &late).unwrap().0, 26);
         let early = DateTime::parse_from_rfc3339("2025-12-31T23:59:59Z").unwrap();
         assert_eq!(
-            select_session_at(&times, &early).unwrap_err().code,
+            select_session_at(&chain, &early).unwrap_err().code,
             "TIME_BEFORE_OLDEST_SESSION"
         );
+    }
+
+    /// **改回按时刻取最大值，这一条立刻变红。**
+    ///
+    /// 形状照抄目录库 `ams251049_0001`：会话 1 停在 2016-01-05（文件在本项目里被
+    /// 建立的时刻），会话 2..64 是 2014–2015 的原始创作时刻，比会话 1 都早。
+    /// 纯时刻序会让「给我此刻的模型」解到会话 1——初始树——而且不报错。
+    #[test]
+    fn a_session_one_stamped_after_the_whole_chain_never_wins() {
+        let chain = chain_of(&[
+            (1, "2016-01-05T09:12:00+08:00"),
+            (2, "2014-08-06T10:00:00+08:00"),
+            (37, "2015-03-11T14:20:00+08:00"),
+            (64, "2015-08-19T16:45:00+08:00"),
+        ]);
+
+        let now = DateTime::parse_from_rfc3339("2026-09-08T19:00:00+08:00").unwrap();
+        assert_eq!(
+            select_session_at(&chain, &now).unwrap().0,
+            64,
+            "此刻的模型是链头，不是时刻最晚的那条"
+        );
+
+        // 越过会话 1 的时刻之后，答案仍然是链头：它在链上排在最前面。
+        let after_session_one = DateTime::parse_from_rfc3339("2016-06-01T00:00:00+08:00").unwrap();
+        assert_eq!(select_session_at(&chain, &after_session_one).unwrap().0, 64);
+
+        // 真正的历史时点照常沿链回走。
+        let mid = DateTime::parse_from_rfc3339("2015-06-01T00:00:00+08:00").unwrap();
+        assert_eq!(select_session_at(&chain, &mid).unwrap().0, 37);
+
+        // 早于整条链 = 报错，不拿会话 1 顶替。
+        let before = DateTime::parse_from_rfc3339("2014-01-01T00:00:00+08:00").unwrap();
+        assert_eq!(
+            select_session_at(&chain, &before).unwrap_err().code,
+            "TIME_BEFORE_OLDEST_SESSION"
+        );
+    }
+
+    /// 全语料门：**「此刻的模型」必须是每个库的链头，一个库都不许例外。**
+    ///
+    /// 这一条守的是上面那个合成用例的真实来源。2026-09-08 在
+    /// `AvevaMarineSample\ams000` 上实测：439 个库里 36 个（PADD 17、XPRD 7、
+    /// SCHE 5、ISOD 3、DICT/PROP/ALYS/CATA 各 1）在按时刻取最大值的旧解法下
+    /// 会解到会话 1。取证见
+    /// `docs/evidence/2026-09-08-session-time-coverage-and-selector-probe.md` §3。
+    #[test]
+    #[ignore = "manual live: needs the AvevaMarineSample ams000 project directory"]
+    fn live_ams000_now_resolves_to_every_chain_head() {
+        let project = PathBuf::from(
+            std::env::var("AIOS_AMS_PROJECT_DIR")
+                .unwrap_or_else(|_| r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000".into()),
+        );
+        let now: DateTime<FixedOffset> = Utc::now().into();
+
+        let mut checked = 0usize;
+        let mut wrong: Vec<String> = Vec::new();
+        for entry in std::fs::read_dir(&project).expect("project directory") {
+            let path = entry.expect("dir entry").path();
+            if !path.is_file() {
+                continue;
+            }
+            let Ok(engine) = ReadOnlyEngine::open(&path) else {
+                continue; // 不是 dabacon 文件
+            };
+            let head = engine.session().sesno;
+            let Ok(chain) = session_chain_times(&path) else {
+                continue;
+            };
+            if chain.len() < 2 {
+                continue;
+            }
+            checked += 1;
+            let picked = select_session_at(&chain, &now)
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()))
+                .0;
+            if picked != head {
+                wrong.push(format!(
+                    "{}: 解到会话 {picked}，链头是 {head}",
+                    path.file_name().unwrap_or_default().to_string_lossy()
+                ));
+            }
+        }
+
+        // 手工门，跑的人要看得见覆盖了多少个库，否则「全绿」可能只是没读到文件。
+        println!("checked {checked} databases under {}", project.display());
+        assert!(checked > 0, "{} 下没读到任何库文件", project.display());
+        assert!(
+            wrong.is_empty(),
+            "{} / {checked} 个库把「此刻」解到了链头以外：\n{}",
+            wrong.len(),
+            wrong.join("\n")
+        );
+    }
+
+    #[test]
+    fn a_session_time_is_looked_up_by_number_not_by_position() {
+        let chain = chain_of(&[
+            (1, "2016-01-05T09:12:00+08:00"),
+            (64, "2015-08-19T16:45:00+08:00"),
+        ]);
+        assert_eq!(
+            time_of(&chain, 64).as_deref(),
+            Some("2015-08-19T16:45:00+08:00")
+        );
+        assert_eq!(time_of(&chain, 63), None);
     }
 
     /// 丢快照要把它那一格几何与回执一起清掉，别的快照不受影响；共享 mesh 是内容寻址的

@@ -633,9 +633,18 @@ mod tests {
             &["EQUI".into()],
             WatermarkDisposal::RestartInitializationData,
         );
-        for table in ["inst_relate", "tubi_relate", "geo_relate", "inst_info", "aabb", "trans"] {
+        for table in [
+            "inst_relate",
+            "tubi_relate",
+            "geo_relate",
+            "inst_info",
+            "aabb",
+            "trans",
+        ] {
             assert!(
-                !ranges.iter().any(|sql| sql.starts_with(&format!("DELETE {table}:"))),
+                !ranges
+                    .iter()
+                    .any(|sql| sql.starts_with(&format!("DELETE {table}:"))),
                 "{table} 不该在 RestartInitializationData 里被清: {ranges:?}"
             );
         }

@@ -22,10 +22,7 @@ use crate::options::DataFace;
 pub enum NotJudgedReason {
     ReadThrough,
     DataWatermarkUnestablished,
-    /// 数据水位已建立，`gen_root` 却一行都没有（连规划过的都没有）：这个库没有交付单元，
-    /// 模型面无事可做，也就没有「追赶」可言。2026-09-07 之前它被判成 `lagging`
-    /// （`model_sesno = 0 ≠ applied`），一个只有 WORL + SITE 的库启动日志永远是「模型在追赶」。
-    /// 不能靠给它盖模型水位来消掉——零根库上的非零模型水位正是 ADR-060 D7 的幽灵水位。
+    /// No roots and no valid authoritative empty-inventory completion receipt.
     NoGenerationRoots,
 }
 
@@ -74,6 +71,8 @@ pub struct RootCensus {
     chasing: u32,
     abandoned: u32,
     has_roots: bool,
+    verified_completion: Option<i32>,
+    completion_invalid: bool,
 }
 
 impl RootCensus {
@@ -83,6 +82,8 @@ impl RootCensus {
             chasing,
             abandoned,
             has_roots,
+            verified_completion: None,
+            completion_invalid: false,
         }
     }
 
@@ -136,6 +137,34 @@ pub struct VerdictColumns {
     pub model_lazy_roots: Option<u32>,
 }
 
+/// 房间阶段与模型阶段并排暴露的持久证据。这里不重新计算房间归属，
+/// 只转述 `dbnum_watermark` 上已经原子提交的第三枚水位与输入凭证。
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+pub struct RoomVerdictColumns {
+    pub room_sesno: i32,
+    pub room_sesno_time: Option<String>,
+    pub room_settled_at: Option<String>,
+    pub room_input_version: Option<super::dbnum_state::RoomInputVersion>,
+    pub room_required_input: Option<super::dbnum_state::RoomInputVersion>,
+    pub room_result_version: Option<String>,
+    pub room_input_version_matches: bool,
+}
+
+impl From<&DbnumState> for RoomVerdictColumns {
+    fn from(row: &DbnumState) -> Self {
+        Self {
+            room_sesno: row.room_sesno,
+            room_sesno_time: row.room_sesno_time.clone(),
+            room_settled_at: row.room_settled_at.clone(),
+            room_input_version: row.room_input_version.clone(),
+            room_required_input: row.room_required_input.clone(),
+            room_result_version: row.room_result_version.clone(),
+            room_input_version_matches: row.room_input_version.is_some()
+                && row.room_input_version == row.room_required_input,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct ConsistencySummary {
     pub judged: u32,
@@ -146,6 +175,14 @@ pub struct ConsistencySummary {
     pub dead_roots: u32,
     pub lazy_roots: u32,
     pub lagging_samples: Vec<u32>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ConsistencyObservation {
+    pub applied_sesno: i32,
+    pub initialized: bool,
+    pub verdict: ConsistencyVerdict,
+    pub room: RoomVerdictColumns,
 }
 
 pub fn verdict(row: &DbnumState, census: &RootCensus, data_face: DataFace) -> ConsistencyVerdict {
@@ -174,7 +211,12 @@ pub fn verdict(row: &DbnumState, census: &RootCensus, data_face: DataFace) -> Co
         lazy: row.model_lazy_roots,
         observed_at: row.model_roots_observed_at,
     };
-    if row.model_sesno == row.applied_sesno && census.chasing == 0 {
+    if row.model_sesno == row.applied_sesno
+        && census.chasing == 0
+        && census.abandoned == 0
+        && !census.completion_invalid
+        && (census.has_roots() || census.verified_completion == Some(row.applied_sesno))
+    {
         ConsistencyVerdict::InSync {
             sesno: row.model_sesno,
             time: row.model_sesno_time.clone(),
@@ -182,8 +224,8 @@ pub fn verdict(row: &DbnumState, census: &RootCensus, data_face: DataFace) -> Co
             roots,
         }
     } else if !census.has_roots() {
-        // 模型水位落后，但这个库从来没有过一个生成根（`gen_root` 空）：没有东西在赶，
-        // 也不会有。判「不判」而不是「追赶」，理由见 [`NotJudgedReason::NoGenerationRoots`]。
+        // Table emptiness is not an authoritative inventory. Keep it unjudged
+        // until the task commits a source-bound verified-empty receipt.
         ConsistencyVerdict::NotJudged {
             reason: NotJudgedReason::NoGenerationRoots,
             model: row.model_sesno,
@@ -263,7 +305,7 @@ impl ConsistencyVerdict {
                 reason: NotJudgedReason::NoGenerationRoots,
                 ..
             } => {
-                format!("dbnum={dbnum} 双水位不判：库里没有生成根（无交付单元），模型面无事可做")
+                format!("dbnum={dbnum} 双水位不判：库里没有生成根，尚无有效的空模型完成凭证")
             }
         }
     }
@@ -337,6 +379,18 @@ struct WatermarkRow {
     #[serde(default)]
     model_settled_at: Option<String>,
     #[serde(default)]
+    room_sesno: Option<i32>,
+    #[serde(default)]
+    room_sesno_time: Option<String>,
+    #[serde(default)]
+    room_settled_at: Option<String>,
+    #[serde(default)]
+    room_input_version: Option<super::dbnum_state::RoomInputVersion>,
+    #[serde(default)]
+    room_required_input: Option<super::dbnum_state::RoomInputVersion>,
+    #[serde(default)]
+    room_result_version: Option<String>,
+    #[serde(default)]
     model_lazy_roots: Option<u32>,
     #[serde(default)]
     model_dead_roots: Option<u32>,
@@ -354,6 +408,14 @@ impl From<WatermarkRow> for DbnumState {
             model_sesno: row.model_sesno.unwrap_or_default(),
             model_sesno_time: row.model_sesno_time,
             model_settled_at: row.model_settled_at,
+            room_sesno: row.room_sesno.unwrap_or_default(),
+            room_sesno_time: row
+                .room_sesno_time
+                .filter(|_| row.room_sesno.unwrap_or_default() > 0),
+            room_settled_at: row.room_settled_at,
+            room_input_version: row.room_input_version,
+            room_required_input: row.room_required_input,
+            room_result_version: row.room_result_version,
             model_lazy_roots: row.model_lazy_roots,
             model_dead_roots: row.model_dead_roots,
             model_roots_observed_at: row.model_roots_observed_at,
@@ -402,15 +464,38 @@ fn root_key(value: &str) -> String {
 fn render_root_census_bulk() -> String {
     format!(
         "SELECT dbnum, record::id(id) AS root, status, source_end_sesno FROM gen_root WHERE dbnum != NONE;\n\
-         SELECT dbnum, target_refno AS root FROM {MODEL_PENDING_TABLE} WHERE dbnum != NONE AND (attempts ?: 0) >= {MAX_ATTEMPTS};"
+         SELECT dbnum, target_refno AS root FROM {MODEL_PENDING_TABLE} WHERE dbnum != NONE AND (attempts ?: 0) >= {MAX_ATTEMPTS} \
+         AND action NOT IN ['room_recalc_element','room_recalc_panel'];"
     )
 }
 
 type CensusSnapshot = (BTreeMap<u32, DbnumState>, BTreeMap<u32, RootCensus>);
 
+async fn watermark_states(db: &Surreal<Any>) -> anyhow::Result<BTreeMap<u32, DbnumState>> {
+    let mut response = db
+        .query(
+            "SELECT dbnum, db_type, applied_sesno, model_sesno, model_sesno_time, \
+             room_sesno, room_sesno_time, room_input_version, room_required_input, room_result_version, \
+             IF room_settled_at != NONE THEN type::string(room_settled_at) ELSE NONE END AS room_settled_at, \
+             IF model_settled_at != NONE THEN type::string(model_settled_at) ELSE NONE END AS model_settled_at, \
+             model_lazy_roots, model_dead_roots, model_roots_observed_at FROM dbnum_watermark;",
+        )
+        .await
+        .context("read dbnum consistency watermarks")?
+        .check()
+        .context("check dbnum consistency watermark query")?;
+    let rows: Vec<WatermarkRow> = response.take(0).context("decode consistency watermarks")?;
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.dbnum, row.into()))
+        .collect())
+}
+
 async fn states_and_census(db: &Surreal<Any>) -> anyhow::Result<CensusSnapshot> {
     let mut response = db.query(format!(
         "SELECT dbnum, db_type, applied_sesno, model_sesno, model_sesno_time, \
+         room_sesno, room_sesno_time, room_input_version, room_required_input, room_result_version, \
+         IF room_settled_at != NONE THEN type::string(room_settled_at) ELSE NONE END AS room_settled_at, \
          IF model_settled_at != NONE THEN type::string(model_settled_at) ELSE NONE END AS model_settled_at, \
          model_lazy_roots, \
          model_dead_roots, model_roots_observed_at FROM dbnum_watermark;\n{}",
@@ -420,7 +505,7 @@ async fn states_and_census(db: &Surreal<Any>) -> anyhow::Result<CensusSnapshot> 
     let roots: Vec<RootStateRow> = response.take(1).context("decode root census")?;
     let dead: Vec<RootRow> = response.take(2).context("decode dead-letter root census")?;
 
-    let states = rows
+    let states: BTreeMap<u32, DbnumState> = rows
         .into_iter()
         .map(|row| (row.dbnum, row.into()))
         .collect();
@@ -462,12 +547,44 @@ async fn states_and_census(db: &Surreal<Any>) -> anyhow::Result<CensusSnapshot> 
     for (dbnum, roots) in blockers {
         census.entry(dbnum).or_default().chasing = roots.len() as u32;
     }
+    #[derive(Deserialize)]
+    struct ReceiptRow {
+        dbnum: u32,
+        end_sesno: i32,
+        model_completion: String,
+        commit_token: Option<String>,
+    }
+    let receipts: Vec<ReceiptRow> = db
+        .query(
+            "SELECT dbnum, end_sesno, model_completion, commit_token FROM incr_side_effect_pending \
+         WHERE model_completion != NONE AND status = 'done';",
+        )
+        .await?
+        .check()?
+        .take(0)?;
+    for row in receipts {
+        if states
+            .get(&row.dbnum)
+            .is_none_or(|state| state.model_sesno != row.end_sesno)
+        {
+            continue;
+        }
+        let valid = crate::data_interface::model_completion::validated_receipt(
+            Some(&row.model_completion),
+            row.dbnum,
+            row.end_sesno,
+        )
+        .is_some_and(|receipt| row.commit_token.as_deref() == Some(receipt.source_token()));
+        let counts = census.entry(row.dbnum).or_default();
+        counts.verified_completion = valid.then_some(row.end_sesno);
+        counts.completion_invalid = !valid;
+    }
     Ok((states, census))
 }
 
 struct CensusCache {
     taken: Instant,
-    value: Arc<CensusSnapshot>,
+    value: Arc<BTreeMap<u32, RootCensus>>,
 }
 static CENSUS_CACHE: Mutex<Option<CensusCache>> = Mutex::new(None);
 static CENSUS_REFRESH: LazyLock<tokio::sync::Mutex<()>> =
@@ -475,37 +592,59 @@ static CENSUS_REFRESH: LazyLock<tokio::sync::Mutex<()>> =
 /// 比 `/health` 的 30 s 采样短一点，让采样器每次都拿到新样本，其余调用方共用它。
 const CENSUS_CACHE_TTL: Duration = Duration::from_secs(20);
 
+pub(crate) fn invalidate_census() {
+    *CENSUS_CACHE.lock().unwrap() = None;
+}
+
 /// 生产路径共用一份普查。`/health` 的采样器、增量闸门（F6 扫描门）、数据批次收尾、
 /// 预览接口各自都会来问一遍，每一问都是 `gen_root` 整表一扫（见 [`RootStateRow`]）。
 /// 只对全局 `SUL_DB` 缓存；测试夹具与旁路连接直接查，互不串账。
-async fn states_and_census_shared(db: &Surreal<Any>) -> anyhow::Result<Arc<CensusSnapshot>> {
-    if !std::ptr::eq(db, &*aios_core::SUL_DB) {
-        return Ok(Arc::new(states_and_census(db).await?));
-    }
+async fn states_and_census_cached(
+    db: &Surreal<Any>,
+    cache: &Mutex<Option<CensusCache>>,
+    refresh: &tokio::sync::Mutex<()>,
+) -> anyhow::Result<CensusSnapshot> {
     let fresh = |cache: &Option<CensusCache>| {
         cache
             .as_ref()
             .filter(|c| c.taken.elapsed() < CENSUS_CACHE_TTL)
             .map(|c| c.value.clone())
     };
-    if let Some(value) = fresh(&CENSUS_CACHE.lock().unwrap()) {
-        return Ok(value);
+    let cached = {
+        let guard = cache.lock().unwrap();
+        fresh(&guard)
+    };
+    if let Some(census) = cached {
+        return Ok((watermark_states(db).await?, census.as_ref().clone()));
     }
-    let _refresh = CENSUS_REFRESH.lock().await;
-    if let Some(value) = fresh(&CENSUS_CACHE.lock().unwrap()) {
-        return Ok(value);
+    let _refresh = refresh.lock().await;
+    let cached = {
+        let guard = cache.lock().unwrap();
+        fresh(&guard)
+    };
+    if let Some(census) = cached {
+        return Ok((watermark_states(db).await?, census.as_ref().clone()));
     }
-    let value = Arc::new(states_and_census(db).await?);
-    *CENSUS_CACHE.lock().unwrap() = Some(CensusCache {
+    let (_, census) = states_and_census(db).await?;
+    // The census can take several seconds on a large project. Read the cheap
+    // watermarks afterwards so the response cannot report a stale data target.
+    let states = watermark_states(db).await?;
+    *cache.lock().unwrap() = Some(CensusCache {
         taken: Instant::now(),
-        value: value.clone(),
+        value: Arc::new(census.clone()),
     });
-    Ok(value)
+    Ok((states, census))
+}
+
+async fn states_and_census_shared(db: &Surreal<Any>) -> anyhow::Result<CensusSnapshot> {
+    if !std::ptr::eq(db, &*aios_core::SUL_DB) {
+        return states_and_census(db).await;
+    }
+    states_and_census_cached(db, &CENSUS_CACHE, &CENSUS_REFRESH).await
 }
 
 pub async fn verdict_for(db: &Surreal<Any>, dbnum: u32) -> anyhow::Result<ConsistencyVerdict> {
-    let snapshot = states_and_census_shared(db).await?;
-    let (states, census) = snapshot.as_ref();
+    let (states, census) = states_and_census_shared(db).await?;
     let row = states.get(&dbnum).cloned().unwrap_or_else(|| DbnumState {
         dbnum,
         ..Default::default()
@@ -521,8 +660,18 @@ pub async fn verdicts_for_all(
     db: &Surreal<Any>,
     dbnums: &BTreeSet<u32>,
 ) -> anyhow::Result<BTreeMap<u32, ConsistencyVerdict>> {
-    let snapshot = states_and_census_shared(db).await?;
-    let (states, census) = snapshot.as_ref();
+    Ok(observations_for_all(db, dbnums)
+        .await?
+        .into_iter()
+        .map(|(dbnum, observation)| (dbnum, observation.verdict))
+        .collect())
+}
+
+pub(crate) async fn observations_for_all(
+    db: &Surreal<Any>,
+    dbnums: &BTreeSet<u32>,
+) -> anyhow::Result<BTreeMap<u32, ConsistencyObservation>> {
+    let (states, census) = states_and_census_shared(db).await?;
     let face = crate::options::data_face();
     Ok(dbnums
         .iter()
@@ -537,7 +686,15 @@ pub async fn verdicts_for_all(
                 census.get(&dbnum).unwrap_or(&RootCensus::default()),
                 face,
             );
-            (dbnum, result)
+            (
+                dbnum,
+                ConsistencyObservation {
+                    applied_sesno: row.applied_sesno,
+                    initialized: row.initialized,
+                    verdict: result,
+                    room: RoomVerdictColumns::from(&row),
+                },
+            )
         })
         .collect())
 }
@@ -597,13 +754,12 @@ fn summarize_states(
 }
 
 pub async fn health_summary(db: &Surreal<Any>) -> anyhow::Result<ConsistencySummary> {
-    let snapshot = states_and_census_shared(db).await?;
-    let (states, census) = snapshot.as_ref();
+    let (states, census) = states_and_census_shared(db).await?;
     // 模型水位只描述会产出 Plant 模型的设计库；健康聚合还必须遵守本进程的
     // watch 范围，否则一个 `--watch-dbnum 8000` 实例会被别的元数据库制造假滞后。
     Ok(summarize_states(
-        states,
-        census,
+        &states,
+        &census,
         crate::options::data_face(),
         crate::data_interface::watch_scope::admits,
     ))
@@ -623,26 +779,23 @@ mod tests {
     }
 
     #[test]
-    fn pure_verdict_has_three_states_and_keeps_abandoned_out_of_the_gate() {
-        assert_eq!(
+    fn pure_verdict_has_three_states_and_failed_roots_block_in_sync() {
+        assert!(matches!(
             verdict(
                 &row(26, 26),
                 &RootCensus::new(10, 0, 2, true),
                 DataFace::Ingest
             ),
-            ConsistencyVerdict::InSync {
-                sesno: 26,
-                time: None,
-                caught_up_at: None,
-                roots: RootQuadrants {
-                    caught_up: 10,
-                    chasing: 0,
-                    abandoned: 2,
-                    lazy: None,
-                    observed_at: None
-                }
-            }
-        );
+            ConsistencyVerdict::Lagging { .. }
+        ));
+        assert!(matches!(
+            verdict(
+                &row(26, 26),
+                &RootCensus::new(10, 0, 0, true),
+                DataFace::Ingest
+            ),
+            ConsistencyVerdict::InSync { .. }
+        ));
         assert!(matches!(
             verdict(
                 &row(26, 20),
@@ -680,15 +833,26 @@ mod tests {
             no_roots.columns().model_verdict_reason,
             Some("no_generation_roots")
         );
-        assert!(no_roots.describe(5522).contains("没有生成根"));
-        assert!(matches!(
-            verdict(&row(4, 0), &RootCensus::new(0, 0, 1, true), DataFace::Ingest),
-            ConsistencyVerdict::Lagging { .. }
-        ), "有过根（哪怕全放弃了）就还是模型面的事，照旧 lagging");
+        assert!(no_roots.describe(5522).contains("空模型完成凭证"));
+        assert!(
+            matches!(
+                verdict(
+                    &row(4, 0),
+                    &RootCensus::new(0, 0, 1, true),
+                    DataFace::Ingest
+                ),
+                ConsistencyVerdict::Lagging { .. }
+            ),
+            "有过根（哪怕全放弃了）就还是模型面的事，照旧 lagging"
+        );
 
         let mut caught_up = row(26, 26);
         caught_up.model_settled_at = Some("2026-09-05T17:01:43Z".into());
-        let caught_up = verdict(&caught_up, &RootCensus::default(), DataFace::Ingest);
+        let completed_empty = RootCensus {
+            verified_completion: Some(26),
+            ..RootCensus::default()
+        };
+        let caught_up = verdict(&caught_up, &completed_empty, DataFace::Ingest);
         assert_eq!(caught_up.caught_up_at(), Some("2026-09-05T17:01:43Z"));
         assert_eq!(caught_up.as_str(), "in_sync");
         assert_eq!(
@@ -698,7 +862,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bulk_census_deduplicates_abandoned_roots_and_keeps_them_out_of_chasing() {
+    async fn bulk_census_separates_abandoned_roots_but_keeps_strict_verdict_lagging() {
         use surrealdb::engine::any::connect;
 
         let db = connect("mem://").await.expect("mem boots");
@@ -733,7 +897,10 @@ mod tests {
                 )
             })
             .collect::<BTreeMap<_, _>>();
-        assert!(verdicts[&8000].is_in_sync());
+        assert!(matches!(
+            verdicts[&8000],
+            ConsistencyVerdict::Lagging { .. }
+        ));
         assert!(matches!(
             verdicts[&8001],
             ConsistencyVerdict::Lagging { .. }
@@ -741,6 +908,49 @@ mod tests {
         assert!(matches!(
             verdicts[&8002],
             ConsistencyVerdict::NotJudged { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn cached_root_census_never_caches_watermarks() {
+        use surrealdb::engine::any::connect;
+
+        let db = connect("mem://").await.expect("mem boots");
+        db.use_ns("test")
+            .use_db("fresh_watermarks_cached_census")
+            .await
+            .unwrap();
+        db.query(
+            "CREATE dbnum_watermark:8000 SET dbnum=8000, db_type='DESI', applied_sesno=26, model_sesno=26;\
+             CREATE gen_root:24384_1 SET dbnum=8000, status='Generated', source_end_sesno=26;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let cache = Mutex::new(None);
+        let refresh = tokio::sync::Mutex::new(());
+        let (first, census) = states_and_census_cached(&db, &cache, &refresh)
+            .await
+            .unwrap();
+        assert_eq!(first[&8000].applied_sesno, 26);
+        assert_eq!(census[&8000].settled, 1);
+
+        db.query("UPDATE dbnum_watermark:8000 SET applied_sesno=28, model_sesno=26;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let (second, cached_census) = states_and_census_cached(&db, &cache, &refresh)
+            .await
+            .unwrap();
+        assert_eq!(second[&8000].applied_sesno, 28);
+        assert_eq!(second[&8000].model_sesno, 26);
+        assert_eq!(cached_census, census);
+        assert!(matches!(
+            verdict(&second[&8000], &cached_census[&8000], DataFace::Ingest),
+            ConsistencyVerdict::Lagging { .. }
         ));
     }
 
@@ -755,7 +965,8 @@ mod tests {
             .unwrap();
         db.query(
             "CREATE dbnum_watermark:8000 SET dbnum=8000, db_type='DESI', applied_sesno=26, model_sesno=26;\
-             CREATE dbnum_watermark:5100 SET dbnum=5100, db_type='DICT', applied_sesno=12, model_sesno=0;",
+             CREATE dbnum_watermark:5100 SET dbnum=5100, db_type='DICT', applied_sesno=12, model_sesno=0;\
+             CREATE gen_root:example SET dbnum=8000, status='Generated', source_end_sesno=26;",
         )
         .await
         .unwrap()
