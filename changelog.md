@@ -2,6 +2,15 @@
 
 ## 2026-09-09
 
+### 本地发布一键脚本 `New-LocalRelease.ps1` + `ams-local-0.1.19-full` 一体化发布包
+
+把 09-09 上午手工拼的 0.1.19 发布包沉淀成脚本化流程（9 项裁决全按推荐拍板：包内已验证 exe、全资源档、一体化布局、独立 CHANGELOG、`-full` 命名、本机 PowerShell 全链路、拒覆盖 + changelog 缺版只警告、冲烟门不静默放行）：
+
+- **脚本**：`scripts/New-LocalRelease.ps1` 一键全链路——构建/复用 → 组包 → 组 CHANGELOG（gen-model 提炼段 + plant-ui 用户口径段）→ 冲烟门 → zip + sha256 + release.json 清单。开关 `-SkipBuild`/`-SkipSmoke`/`-Force`/`-SmokeStoreMode`/`-StrictSmoke`/`-CompressionLevel`。版本纪律：版本号以两仓 Cargo.toml 为准，`releases` 已有同名 zip 拒绝执行（`-Force` 才覆盖）；changelog 找不到当版条目只警告不中止。冲烟门：`spawned-mem` 自带内存库把包内服务拉起，`/health` 200 + 首页含 `plant_ui_app.js` 才放行压 zip；端口被占或起不来 → 明确报错并在产物标「未冲烟」，不静默放行。
+- **产物**：`releases/ams-local-0.1.19-full.zip`（394.2 MB，62381 条目）——包根 `aios-database.exe`（逐字节 = 已验证 0.1.19，非 `D:\Rust\target` 里未验证的 15:40 构建）+ `web\` + `workspace\`（`assets`/`config`/`resource`/`search-index`/accel 快照/`DbOption.toml`/`bin\surreal.exe` + `Start-Surreal.ps1`，与 `test-worklspace\bin` 同构）；`web/assets/meshes` 清零（剔 636 MB 冗余，后端从 `workspace\assets` 供 mesh）；`Start-AMS.ps1` 默认 `-Workspace` 指向包内，解压即跑；旁挂 `.zip.sha256` 与 `.release.json`。
+- **口径**（ADR-068）：资源进包、库数据与源模型不进包——已生成模型三维可离线看（文件 + assets + accel 快照），属性/搜索/补齐/更新要连回原 8010 库或先导数据；SurrealDB 必须本仓 fork 的 2.1.x（包内 `bin\surreal.exe`），不得用 PATH 上的 3.x。`CONTEXT.md` 收「本地发布包 / 依赖资源包 / 冲烟门」三词条；后端提炼版更新说明另存 `docs/release-notes/0.1.19.md` 供下版复用。
+- 验证：冲烟实跑通过（`spawned-mem` 起包内服务，`/health` 200 + 首页含 `plant_ui_app.js`，不依赖外部 8010）；zip 62381 条目、`web/assets/meshes = 0`、`workspace/assets` 62288 文件、`config`/`resource`/`search-index` 齐；`aios-database.exe` 与 web 各文件 sha256 与源 `release.json` 逐一一致；跑完 9099/8010 均空、临时冲烟目录已清。（本条目补记：脚本与文档本体已随 bbf037112 / c5de1040b 入库，当时漏了 changelog 条目。）
+
 ### 新库冷初始化收口为开关：缺省只维护旧库，新 dbnum 等 plant-ui 手动初始化
 
 增量数据面的自动发现（启动重扫 / watch 事件 / 周期对账 / scope-refresh / 共享盘重挂，全部经 `discover_batch`）对**从未初始化**的库（解析不出应用水位）不再自动铺首次导入，改由 `auto_initialize_new_dbnums` 门控（`DbOption.toml` **缺省 `false`**；环境变量 `AIOS_AUTO_INITIALIZE_NEW_DBNUMS` 双向可压，`serve --auto-initialize-new-dbnums` 单次打开）。缺省形态下新库由 plant-ui 走手动预览 / 执行初始化，服务端只维护已初始化库的增量。
