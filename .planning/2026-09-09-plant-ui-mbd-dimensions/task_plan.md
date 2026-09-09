@@ -62,14 +62,14 @@
 
 ### Phase A — 收尾 ADR-0012，工作树转绿（plant-mbd，≈0.5–1 人日）
 
-- [ ] 修 4 条红：toy 语义不回退（`toy-bridge-and-stick` 等不得触发守卫）；「只剩两点」「端点与唯一邻点错开」的删点口径与 `segment_spans_kink` 的分工按 diff 注释意图收敛（平行错开管段留给出图抑制，不在取点期删）。
-- [ ] 写 `docs/adr/0012-…`（阈值 `od·2/3` 的出处、与 PML 行号对照、2026-09-08 扫查数据）；顺手处置 **0010 空号**（补记实际决策或留占位声明，不许悬着）。
-- [ ] `golden diff` 全跑：受影响 field 金样重录，`fixtures/golden/README.md` 逐条写为什么变。
-- 验收：`cargo test --workspace` 全绿、`golden diff` 6/6 OK、单笔提交（feat(isodim): ADR-0012）。
+- [x] 修 4 条红：toy 语义不回退（`toy-bridge-and-stick` 等不得触发守卫）；「只剩两点」「端点与唯一邻点错开」的删点口径与 `segment_spans_kink` 的分工按 diff 注释意图收敛（平行错开管段留给出图抑制，不在取点期删）。——判据改成「断口」（相邻成员端口不相接 = E3D 没画管），plant-mbd `1a741b2`；后续 `b6b8c4d` 排除 ATTA 穿过件的幽灵断口。
+- [x] 写 `docs/adr/0012-…`（阈值 `od·2/3` 的出处、与 PML 行号对照、2026-09-08 扫查数据）；顺手处置 **0010 空号**（补记实际决策或留占位声明，不许悬着）。——同 `1a741b2`。
+- [x] `golden diff` 全跑：受影响 field 金样重录，`fixtures/golden/README.md` 逐条写为什么变。——三条 Tail 隔断口删点重录，三条逐字节不变；`f888a50` 箭头随字高缩放又重录六条（仅 arrow_lines）。
+- 验收：`cargo test --workspace` 全绿、`golden diff` 6/6 OK、单笔提交（feat(isodim): ADR-0012）。——2026-09-09 达成（96/96，golden 6/6）。
 
 ### Phase B — plant-ui 右键「查看尺寸标注」（**第一目标**，≈3–4 人日）
 
-- [ ] **B1 契约与客户端**（0.5）：plant-ui-app 加 path 依赖 `plant-mbd`（只用 contract 类型）；新模块 `mbd_api`：`GET {模型服务 base}/api/mbd/v2/pipe/{w0_w1}`（ureq、后台线程、超时与取消跟既有取数同口径）；404 / 422（带 issues）/ 网络失败 / 解析失败分类成可展示错误。
+- [x] **B1 契约与客户端**（0.5）：plant-ui-app 加 path 依赖 `plant-mbd`（只用 contract 类型）；新模块 `mbd_api`：`GET {模型服务 base}/api/mbd/v2/pipe/{w0_w1}`（ureq、后台线程、超时与取消跟既有取数同口径）；404 / 422（带 issues）/ 网络失败 / 解析失败分类成可展示错误。——plant-ui `bdc985b54`（2026-09-09）：`mbd_api::{pipe_dimensions, MbdError}`（ehttp——仓里 HTTP 已统一到 ehttp 双端，ureq 是它的原生后端；30 s 超时）+ `data::Req::PipeDimensions{epoch, refno}` → `Evt::PipeDimensions`（数据线程取数、宿主 `dimensions_epoch` 认帧丢旧结果，不走读面）；裸 404 单列 `endpoint_missing`（R1）、`geometry_space ≠ source_mm` 边界拒收；`cargo test -p plant-ui-app` 150/150。B2 接上发送点后删 `Req` 变体上的 `allow(dead_code)`。
 - [ ] **B2 菜单与动作**（0.5）：`element_menu` 增「查看尺寸标注」——落点是 BRAN 直接用；落点是 BRAN 成员（ELBO / ATTA…）向上归属到所在 BRAN；其余元素不出现该项。再点一次（或菜单变「隐藏尺寸标注」）清除。新 `Cmd` 带 refno 上行宿主。
 - [ ] **B3 视口尺寸标注层**（1.5–2）：`View3d` 新命令 `SetDimensions(refno, batch)` / `ClearDimensions`。几何映射：`linear_dim`（尺寸线 + 延长线 + 箭头小线段）、`aid_line / leader_line / slope_mark / weld_mark` → 世界毫米系 `LineList`（直接用 `source_mm` 几何，**不吃** `source_to_design`——那是网页设计系的事）；`aid_arc / aid_circle / angle_dim` 弧按 ADR-0011 框架采样成折线；文字（尺寸数值 / label / `aid_text`）→ 锚点投影 egui 覆盖层（`axis_labels` 同机制），首版不做遮挡剔除与避让。换场景 / 卸载模型 / 切项目时清层。
 - [ ] **B4 状态与错误呈现**（0.5）：加载中 / 失败 toast；`meta.layout_mode` 与 issues 计数先给轻量入口（状态条或 tooltip），完整 issues 面板后置。
