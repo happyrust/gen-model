@@ -326,6 +326,59 @@
 既有模型协调器，不直调整库生成函数；不预删旧模型、不改变水位。重建期间同库
 `/model/ensure` 返回 409。任务仅进程内有效，重启后需重新调用本端点。
 
+### 4.5.2 `POST /api/v1/model/records` — 按生成根分页取模型记录（单根现状 + 多根批量草案）
+
+实现 `handlers::model_records`；取数源按**这根所属的库**选（§4.12），不按进程介质。
+本节前半是今天已在跑的单根契约（此前只散见于 §4.12，这里补齐），后半是 **多根批量的草案**
+（plant3d-web 收口计划 2026-09-09 §3 P9-1，决策 d-181 按 A 拍板；**服务端尚未实现**，
+gen-model 侧认可后再动 `src/web_service/`）。
+
+**单根（现状）**
+
+- 请求：`{ "generation_root": "24381/100677", "limit": 1000, "cursor": 0 }`，外加 `ProjectReq` 的
+  `project` / `mdb` / `namespace` 身份字段。`limit` 夹在 `1..=5000`（缺省 1000），`cursor` 缺省 0。
+- 响应 200：
+
+  ```json
+  {"source":"model-database","dbnum":7997,"model_source":"database","model_source_reason":null,
+   "durable":true,"generation_root":"24381/100677","snapshot_epoch":3,
+   "session_vector":[{"dbnum":7997,"sesno":812}],
+   "items":[{"refno":"24381_100678","old_refno":null,"owner":"24381_100677","world_aabb":{"mins":[0,0,0],"maxs":[1,1,1]},
+             "world_trans":{"translation":[0,0,0],"rotation":[0,0,0,1],"scale":[1,1,1]},
+             "insts":[{"geo_hash":"…","transform":{"…":"…"},"is_tubi":false,"is_invalid_tubi":false}],
+             "has_neg":false,"generic":"ELBO","pts":null,"date":null}],
+   "total":22,"truncated":false,"next_cursor":null}
+  ```
+
+  `items` 是 `GeomInstQuery` 原样，`owner` 填的是**生成根**（不是直接属主）；`total` 是这根的全部条数，
+  `items` 是 `[cursor, cursor+limit)` 那一段，`truncated = next < total`，`next_cursor` 只在还有下一页时给。
+  `source` 为 `model-database`（读 rocksdb）或 `model-memory`（读进程内投影）；
+  `dbnum` / `model_source` / `model_source_reason` / `durable` 四格见 §4.12。
+- 错误：refno 连格式都不对、或解不出所属库（不在 MDB）→ `400 bad_request`；内存形态下这根还没
+  `ensure` 过 → `409 conflict`，消息以 `not_generated:` 开头（客户端先去 §4.5；**空数组不表达「没生成过」**）。
+
+**多根批量（草案，未实现）**
+
+动机：整库入口一根一次 `records` 是瓶颈（plant3d-web 母计划 §8.9：200 根预算 269 s，单次 0.5 s–4 min 长尾），
+服务端一次拿一批根能把往返与逐根建连的开销一起省掉；方案 A 只在既有端点上加一个可选字段，
+plant-ui 的单根调用零影响。
+
+- 请求体加可选 `"generation_roots": ["24381/100677", "24381/100691", …]`：
+  - `1..=64` 条；与 `generation_root` **互斥**——两个都给、都不给、空数组、超 64 条 → `400 bad_request`。
+  - 一批根须属**同一 dbnum**（客户端手里的根本来就出自同一次 `ensure` 解出的 `generation_roots`
+    或同一次整库收集），跨库 → `400 bad_request`。于是一个响应仍只有一个 `source` / `model_source`，§4.12 的口径不变。
+- 响应 `items` **平铺**：顺序 = 请求里根的顺序 × 每根现有的稳定顺序；客户端按 `owner`（就是生成根）分组，
+  不需要另一层嵌套。
+- 分页：`cursor` 是平铺列表的下标，**跨根连续**；`limit` 仍是总条数（`1..=5000`）；`total` 是这一批的总条数，
+  `truncated` / `next_cursor` 语义与单根相同。翻页时原样带同一批 `generation_roots`（顺序也不变）。
+- 响应回显 `"generation_roots": [...]`（替代单根的 `generation_root`），并多一格
+  `"roots": [{"generation_root":"24381/100677","total":22}, …]`——整批逐根总数，每页都带，
+  让「这根就是 0 条」显式可见，不用靠 `items` 里缺席去猜。
+- 内存形态下批里任一根没 `ensure` 过 → **整批** `409 conflict`，消息仍以 `not_generated:` 开头并列出缺的根；
+  客户端对缺的那几根补 `ensure` 后重发。rocksdb 形态没有这一档。
+- 单响应体积：64 根 × 每根几百条，靠分页（`limit` ≤ 5000）兜住，不另设上限。
+- 不动的：单根请求 / 响应形状一字不改；`/model/ensure` 不变；不新开 `model/records/batch` 端点（B 案已否）。
+
 ### 4.6 `GET /api/v1/update/pending-units` — 待重试模型单元
 - 映射：`load_pending_model_units()`，响应 `{ "units": [...] }`，元素为 `PendingModelUnit` 原样。
 
