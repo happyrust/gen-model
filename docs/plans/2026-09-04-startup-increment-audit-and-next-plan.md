@@ -87,6 +87,10 @@ SAVEWORK → 无人工干预模型在窗口内更新；`/health` 在复核期 `m
 
 ### 第 3 步 · P2 三条小口径（#6 / #7 / #8，合计 ≤ 1 人日）
 
+> **2026-09-08 回填**：#6 / #7 与顺手那条 #10 已随 `2026-09-08-external-increment-refactor-plan.md` S0 落地
+> （分母改 MDB DESI；`StartupReconcile.not_in_mdb` 单独一栏、不参与 `result`；数据等待「受阻且无批次在跑」
+> 连续 180 s 即降级进入监听）。**#8 后排**（不在 live 路上）。#11 / #12 横幅半边仍未做。
+
 - #6：`dbnums_without_credentials` 改从 `current_mdb_sources` 的 DESI 集合减 `floors` 的键；护栏钉函数体不含
   `list_registered`。
 - #7：`StartupReconcile` 增 `not_in_mdb: usize`，`source_file_of` 的「不在当前 MDB」单独计数、不进 `unreadable`；

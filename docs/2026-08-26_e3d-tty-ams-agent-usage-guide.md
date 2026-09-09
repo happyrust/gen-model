@@ -138,14 +138,14 @@ Get-Content "$out\summary.json"
 
 通过时至少满足：
 
-1. `sessions` 连续增加两次：baseline → apply → restore。
+1. apply / restore 两腿的业务会话按顺序增加；driver 若在退出时再落 DBMDAT/DBMVAL 元数据会话，每腿可占多个会话。
 2. apply 和 restore 的目标操作都是 `modified`。
 3. apply 后 POS 等于 `ExpectedApplyPos`。
 4. restore 后 `attrs` 与 `explicit_attrs` 都等于 baseline。
-5. 合并窗口中目标 FTUB 不再出现，且没有 CACHID 以外的显式业务变化。
+5. 合并窗口中目标 FTUB 不再出现，且没有 CACHID 或 DBMDAT/DBMVAL 以外的显式业务变化。
 6. `rollback_verified=true`，进程退出码为 `0`。
 
-合并窗口仍可能保留 BRAN 的 `CACHID` 保存元数据，这是 E3D 会话写入事实，不等于
+合并窗口仍可能保留 BRAN 的 `CACHID` 或 driver 退出阶段的 `DBMDAT`/`DBMVAL` 元数据，这是 E3D 会话写入事实，不等于
 FTUB 业务回滚失败。`unchanged_rewrites` 也应保留在报告里，不能把位置换页但内容相同的
 重写误报成业务变化。
 
@@ -242,7 +242,7 @@ ALPHA LOG END
 约束：
 
 - 目标 refno、基线值和预期值必须先由只读探针确认；不要用近似标识填充。
-- apply 与 restore 各一个 `SAVEWORK`，因此预期各增加一个会话。
+- apply 与 restore 各一个 `SAVEWORK`；业务会话各一个，driver 退出时可追加仅含 DBMDAT/DBMVAL 的元数据会话。
 - restore 写完整业务终态，并在 `finally` 执行。
 - 宏中不写 `QUIT`/`FINISH`。
 - 用 `aios_db.parse.net_window(..., detail=True)` 校验语义，不用文本日志代替。
@@ -258,7 +258,7 @@ ALPHA LOG END
 | dabacon 被占用 / instance lock | 查持锁 E3D/服务进程；不要终止不属于本轮的共享会话，改用隔离项目副本 |
 | apply 通过但后续断言失败 | 先确认 `finally` 的 restore 结果；恢复未证实时停止服务提交 |
 | 文件 SHA 与基线不同 | 正常检查会话增长；以属性恢复和合并净窗口为准 |
-| 合并窗口只剩 `CACHID` | 记录为保存元数据；目标业务变化已经抵消 |
+| 合并窗口只剩 `CACHID` 或 `DBMDAT`/`DBMVAL` | 记录为保存/退出元数据；目标业务变化已经抵消 |
 | execute 后 preview 不再含 8000 | 任务已消费时是正常现象；改查 `/api/v1/dbnums`、task 和已落盘快照，不要重复 execute |
 | 水位不前进 | 查 dbnum blocker、task、staging、side effects、batch failures 和 worker；写失败时水位本就不得推进 |
 

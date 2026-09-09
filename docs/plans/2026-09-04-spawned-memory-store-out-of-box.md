@@ -6,13 +6,16 @@
 - 范围：`src/lib.rs`（连库那一段）、`src/options.rs`（形态开关）、新增 `src/store_process.rs`、
   `src/web_service/handlers.rs`（`/health` 两格）、`src/fast_model/model_db_adapter.rs`（介质口径）、
   `scripts/`（版本闸规则的单一来源）。
-- 状态：**Q5 已定案**（2026-09-04 用户拍板：默认就是 `spawned-mem`，现有落盘部署自己显式写
-  `store_mode = "external"`）→ 由此新增 **P0 迁移**（§3.8），它是 P3 的硬前置。
+- 状态：**Q5 已翻案（2026-09-07 用户拍板：默认翻回 `external`）**。三档形态、署名裁决、
+  `/health` 口径、子进程生命周期**全部照旧有效**，翻掉的只有「哪一档是默认」这一格——
+  `spawned-mem` 从此要显式写。翻案的经过与理由见 §9。
   **Q1–Q4 已定案**（2026-09-04 用户拍板：全按 §4 推荐项）。
-  **P0 / P1 / P2 / P3 / P4 已于本日全部落地**（见 §5 表内与下方记录）。
-  **P3 起行为真的变了**：默认形态是 `spawned-mem`，`run_app` 会自己拉起一台 memory 后端的 SurrealDB。
+  **P0 / P1 / P2 / P3 / P4 已于 2026-09-04 全部落地**（见 §5 表内与下方记录）。
   余下只剩 P5（版本闸单一来源护栏）与 **P6（实测验收，一次都没跑过——下面全部结论都是单测与
   `#[ignore]` 真库用例给的，没有任何一次真的起过服务）**。
+- **读下文的注意**：§3.1 / §3.8 / §4 Q5 / §5 P3 里凡是说「默认 `spawned-mem`」的地方，
+  记的都是 2026-09-04 那一版的口径，**今天不成立**。留着不改是因为 P0 那份迁移清单
+  （13 份配置显式写 `external`）本身还在生效，而且它正是 §9 翻案时唯一没白做的那一半。
 
 ### P0 落地记录（2026-09-04）
 
@@ -458,3 +461,89 @@ A′ 之后 `spawned-mem` 仍然 **不 durable**，所以 `is_durable()` 的答�
 
 新增 `scripts/Verify-OutOfBox.ps1`：把能自动判的那半做成一条命令（起服务 / 等就绪 /
 打 `sul_db` 三栏 / 树根数 / 收尾查孤儿），剩下一半（点树、点眼睛、看三维）原样列成清单给人。
+
+---
+
+## 9. Q5 翻案：默认翻回 `external`（2026-09-07）
+
+- 拍板：用户「选 B：把代码里的 store_mode 默认翻回 external，连带改那条测试与护栏」。
+- **只翻「哪一档是默认」这一格。** 三档形态、`store_process.rs` 的署名裁决与子进程生命周期、
+  `/health` 的 `medium` / `durable`、`PersistMedium` 三值、实例锁口径**一个字都没动**；
+  `spawned-mem` 与 `embedded-mem` 照旧要得到，只是从此要显式写。
+
+### 撞出来的现场
+
+`test-worklspace/bin/DbOption.toml`（2026-08-25 改的，`store_mode` 与 `in_memory_db` 都没写）
+在默认 `spawned-mem` 下被判成「本进程自己拉一台 memory surreal 绑 8009」，而 8009 上蹲着一台
+2026-09-05 手工起的 `memory` 后端 surreal，`owner:current` 空表 → `SignatureProbe::Absent`
+→ `judge_port` 落 `Refuse` → **拒绝启动**。
+
+这一格谁都没错：那台库不可能有本进程的署名（它不是本进程拉起来的），配置又没说要连它。
+**默认值替一份没说话的配置做了一个它不想要的决定**，而症状是起不来。
+
+§3.8 的迁移清单挡住了 `db_options/` 与仓根那 13 份，但它守的是**夹具**——
+`test-worklspace/bin/DbOption.toml` 与仓根 `DbOption.toml` 都不在护栏覆盖范围里，
+而现场配置恰恰是人真拿来跑的那一份。
+
+### 改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `options.rs::effective_store_mode` | `Some(false) => External` / `None => SpawnedMem` 合并成 `Some(false) \| None => External` |
+| `options.rs::store_mode` 文档注释 | 默认口径改写，点名「`spawned-mem` 默认下 `judge_port` 只能判分不清并拒绝启动」 |
+| 测试 `the_default_store_mode_is_spawned_mem` | 改名 `the_default_store_mode_is_external`，并加一句「显式写 `spawned-mem` 仍然要得到」 |
+| 护栏 `every_db_option_fixture_declares_its_store_mode_and_data_face` | **判据一个字没动**——它本来就与默认指向哪一档无关；只把文档注释与失败信息改成「默认翻过两次，不许有配置去依赖它」 |
+| 13 份夹具 / 现场配置的 `store_mode` 注释 | 「默认值**将**翻成 spawned-mem」改成「翻过两次，翻过的默认不能被依赖」 |
+| `Start-Surreal8009.ps1` | `.SYNOPSIS` / `.DESCRIPTION` 改回「external（默认）要先跑它；`spawned-mem` 那一档才不要跑」 |
+| `Start-AiosDatabaseManual.ps1`、`Run-LiveBatch.ps1`、`Run-Issue7E2E.ps1`、`Run-RoomE3DE2E.ps1` | `AIOS_STORE_MODE=external` **保留**（不靠默认本来就是对的），只改那句已经反了的理由 |
+| `python/src/lib.rs`、`python/src/exec_api.rs` | 「只附着不拉起」的理由从「默认已是 spawned-mem」改成「不管默认指向哪一档」 |
+
+### 实测：同一份配置、同一个端口，只差一个环境变量（2026-09-07）
+
+在一个隔离运行目录里复现 §9 开头那个现场——配置取 `test-worklspace/bin/DbOption.toml`，
+**删掉 `store_mode` 那一行**（`in_memory_db` 本来就没有），`v_port` 指向一台现起的、
+**没有署名**的 memory surreal（`owner:current` 空表，与 8009 那台同形）：
+
+| 跑 | 环境变量 | 结果 |
+|---|---|---|
+| A | 无（= 新默认 `external`） | `数据库已经连接到 AvevaMarineSample, 站点: ws://127.0.0.1:18777`，启动序列走完（surql 灌入、水位播种、索引就绪、平表清扫、watcher 起） |
+| B | `AIOS_STORE_MODE=spawned-mem`（= 翻转前的默认） | `Error: 端口上是一台**没有署名**的 SurrealDB……所以拒绝启动。` |
+
+**两跑之间只差那一个环境变量。** B 逐字复现了 2026-09-07 16:25 那次起不来，A 证明翻回默认之后
+同一份没写形态键的配置直接过门；同时 B 也说明**署名裁决本身一点没松**——它仍然拦得住
+「配了自带存储、端口上却蹲着别人的库」，只是不再由默认值把所有沉默的配置推进这一格。
+
+`AIOS_STARTUP_AUTORUN=0`，没有碰 8010 那台真库，也没有动机器上任何在跑的服务。
+
+**随后在真环境上又验了一次**（`test-worklspace/bin`，8010 那台 880 万行 `pe` 的 rocksdb 库）：
+换上新二进制、把 `store_mode = "external"` 那一行**注释掉**（`data_face` 本来就没写、无任何
+`AIOS_*` 覆盖）后照常起服务，16.53 s 起完，横幅与 `/health` 逐格对上：
+
+```
+数据库已经连接到 AvevaMarineSample, 站点: ws://127.0.0.1:8010
+  存储介质：ws://127.0.0.1:8010
+  数据面：ingest（整库基线 + 稳态增量窗口，推进 applied_sesno）
+
+/health  sul_db = {"connected":true,"endpoint":"127.0.0.1:8010","medium":"external","durable":true}
+         data_face = "ingest"   in_memory_db = false
+```
+
+`data_face` 那一格是白拿的连带证据：配置一个字没说，它随 `external` 派生成了 `ingest`，
+而不是翻转前的 `read-through`。空间树指纹一致、跳过全量房间重建、`dbnum=8000` 一致到 379，
+与换二进制前那个进程的状态接得上。
+
+### 连带效果：`data_face` 跟着翻
+
+`data_face` 是从 `store_mode` 派生的（`data_face_for_store`），所以没写形态键的配置，
+数据面同时从 `read-through` 变回 `ingest`。这正是护栏逼着**两个键**都显式写的理由。
+
+### 未做 / 在案
+
+- `docs/plans/2026-09-05-kv-mem-zero-ingest-read-through-plan.md` 整份以「kv-mem 是默认形态」
+  为前提，标题与 §3 若干处今天不成立。**没改**——那份计划的技术内容（零摄入、写透）不受影响，
+  受影响的只有「默认」二字。
+- 13 份配置里 `data_face` 那段注释仍写着「默认值是 read-through」与「环境变量 AIOS_DATA_FACE
+  压过本键」，两句今天都不对：前者随本次翻转变成 `ingest`，后者在 `data_face` 改成派生量之后
+  就不成立了（环境变量只剩报警作用）。**没改**，是单独一件事。
+- 仓根 `DbOption.toml` 仍不写形态键（护栏放过它）。默认翻回 `external` 之后，它 `:101` 那句
+  「默认不写 = 连上面那台 SurrealDB」**又对了**，无需改。

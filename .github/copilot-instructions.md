@@ -21,7 +21,6 @@ Always run `sigmap ask` (or `sigmap --query`) before searching for files relevan
 
 ## todos
 ```
-src\fast_model\mesh_generate.rs:612  # TODO: 排除已经生成了的模型
 ```
 
 ## src

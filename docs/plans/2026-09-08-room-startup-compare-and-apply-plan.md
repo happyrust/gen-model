@@ -1,6 +1,6 @@
 # 2026-09-08 计划：房间启动阶段——扫描 → 与库里参照对版本 → 只对变了的面板删重算 → 参照落款
 
-状态：**§6 四条 2026-09-08 全按推荐拍板（共识 d-42）；S1–S3 已落地（`dbe5f4670`，见 §10 落地记）；S4（写点 ③）已随 P2-a 落地（`ba0fa50ae`），2026-09-08 又补了第三条前提与「没算成的面板入队」两处修（§10 M2 补记）；S5 真库门未跑、ADR / CONTEXT 词条待真库门后补。**（§2「未落地」那一段是方案稿时的快照，2026-09-08 已逐条标注实际去向。） 它是 `docs/plans/2026-09-07-resident-room-model-plan.md`（常驻房间模型）§3 P3 里「启动对比与应用」那半截的详细设计，同时**更正**那份计划的状态（P3-b 的初始化接线已提交 `b7a7922ff`；对比与应用随本计划 S1–S3 落地）。事实按 2026-09-08 共享工作树源码手核（分支 `e3d-direct`，方案稿时 HEAD `ff04ea3e5`，落地时 `97e819a5a`；行号随邻线未提交改动会漂，以函数名为准）。
+状态：**§6 四条 2026-09-08 全按推荐拍板（共识 d-42）；S1–S3 已落地（`dbe5f4670`，见 §10 落地记）；S4（写点 ③）已随 P2-a 落地（`ba0fa50ae`），2026-09-08 又补了第三条前提与「没算成的面板入队」两处修（§10 M2 补记）；S5 真库门未跑、ADR / CONTEXT 词条待真库门后补。**（§2「未落地」那一段是方案稿时的快照，2026-09-08 已逐条标注实际去向。）** **2026-09-08 晚 ADR-065 D8 影响（接班会话回写，来源：同日 fable-5-1-50 的 07 × 08 对照审核）**：发布视图三表、文件轮次与 `drain_rooms_selected` 随 08 重构计划 T4 / T5 退役——本文的骨架（扫描 → 对版本 → 定向删重算 → 参照落款；参照 = 令牌 + 摘要；旧视图只从 `room_topology_source` 分片来）**不变**，但 §4.1 摄入侧令牌、§4.3 几何视图、§4.4「durable 落点」、§4.5 写点 ③、§7 两条「不做」、S5 门 4 / 6 六处失去对象或改判，已就地标注；去向与新增的写点 ②' / ③' 全在 07 计划 §3 P4.5，本文不重复。 它是 `docs/plans/2026-09-07-resident-room-model-plan.md`（常驻房间模型）§3 P3 里「启动对比与应用」那半截的详细设计，同时**更正**那份计划的状态（P3-b 的初始化接线已提交 `b7a7922ff`；对比与应用随本计划 S1–S3 落地）。事实按 2026-09-08 共享工作树源码手核（分支 `e3d-direct`，方案稿时 HEAD `ff04ea3e5`，落地时 `97e819a5a`；行号随邻线未提交改动会漂，以函数名为准）。
 
 关联：ADR-010（房间归属增量，§9 唯一硬门「增量 == 全量逐边」）、ADR-040（房间失效正确性）、ADR-048（限定域上弦，D3）、ADR-062（按数据库文件完成后发布）、共识 d-3（常驻房间模型：库是存储与参照）、共识 d-25（数据面范围 = MDB ∩ watch；房间 P3-init 按 MDB 全量）、`docs/2026-09-07-room-increment-audit.md`（F-A/F-B 已落地）。
 
@@ -58,6 +58,8 @@
 - `persist_latest_reference` 改名 `persist_reference(model)`，去掉 `ensure!(Latest)`：读透先 `freeze_source_shards`（幂等）；摄入不冻——三条写清单的路都已冻过——但**要核对每个令牌的分片在**（头在、`complete == true`、`source_token` 相等；落地时发现 `room_topology_source::exists_on(db, token)` 已经是这个判定，直接复用，不另抽 `exact_source_exists_on`——`side_effect_pending` 提升守卫那段 surql 是事务内的 `THROW`，形状不同、不合并），缺一片就不写参照并上抛：宁可下次启动多算一次，不写一条读不回来的参照。没有令牌的模型同样拒写。
 - 旧视图仍由 `load_reference_map_on` 合成（不改）。
 
+> **2026-09-08 ADR-065 D8**：上面「摄入 = 清单 `published_file_input` 里 DESI 行的 `commit_token`」与「摄入不冻、只核对」两句随 `ResidentForm::Published` 退役失去对象——坍缩后只剩读透那一路：`tokens` = 各 DESI 冻结令牌，分片由启动 `freeze_source_shards` 与各 dbnum Task 房间收尾的写点 ③'（`capture_at(T)` + `persist_on`，只冻本库）写；`key` 从「文件最新 composite」改为「各库当前会话的 composite，本库 = Task 的 T」（07 计划 §3 P4.5 第 1 / 3 条）。「参照 = 令牌 + 摘要、旧视图只从分片来」不变。
+
 ### 4.2 位置与门
 
 启动序不动：… → 装空间树 → **房间初始化**（已接）→ watcher → worker → 模型凭证复核 → 等数据清单 → 等模型收敛 → **房间段**。房间段在 `room_resident_model` 开着时换成 `startup_room_reconcile(&db_option)`（新函数，放新文件 `src/fast_model/room_startup.rs`，见 §6 D4），关着时一字不动走今天的 `skip_startup_room_build` → `build_room_relations`。
@@ -68,7 +70,7 @@
 
 ### 4.3 对比：`plan_startup` 修订
 
-进锁后先 `ensure_current(face, …)`：初始化装的那份模型对应的是初始化那一刻的清单；到房间段时被监听文件的首轮可能已发布、清单已变，身份键不同就整份重建（键没变是常路、零 I/O）。`None`（摄入无清单）→ 记「无清单，跳过对比」，不动边、不写参照。
+进锁后先 `ensure_current(face, …)`：初始化装的那份模型对应的是初始化那一刻的清单；到房间段时被监听文件的首轮可能已发布、清单已变，身份键不同就整份重建（键没变是常路、零 I/O）。`None`（摄入无清单）→ 记「无清单，跳过对比」，不动边、不写参照。（**2026-09-08 晚 ADR-065 / 07 计划第 7 轮 Q10**：T4 之后房间段**不再探文件最新**——用常驻当前键（各库上次换代会话）做对比，`ensure_current` 拆成 `current()`（这里用，只读不推）与 `ensure_at(dbnum, T)`（Task 用）；否则初始化 Task 之后若有人 SAVEWORK，模型跳到新会话而边是按各 Task 的 T 算的，②' 写下的参照就在撒谎。「无清单」那一臂随摄入形态退。）
 
 然后 `read_resident_reference_on` → `plan_startup(reference, current, reference_map)`，臂表改为：
 
@@ -83,7 +85,7 @@
 | `room_build:main.rebuild_required == true`（持久要求） | 全量 | 与今天同：只有成功全量清它 |
 | `AIOS_ROOM_FULL_REBUILD=1` | 全量 | 一次性运维入口，`env` 名进 `lib.rs` 常量，与 `AIOS_SKIP_STARTUP_ROOM_BUILD` 并排 |
 
-摄入与读透从此**同一张臂表**；两形态的差别只剩几何视图（`consumption_view()`：摄入 Published、读透 Live）与参照落款时要不要冻分片。
+摄入与读透从此**同一张臂表**；两形态的差别只剩几何视图（`consumption_view()`：摄入 Published、读透 Live）与参照落款时要不要冻分片。（**2026-09-08 ADR-065 D8**：这两处差别也消失——`RoomGeometryView::Published` 臂退、只剩 `Live`，分片一律要冻；臂表本身不变。）
 
 ### 4.4 应用：`apply_startup_plan(db_option, model, diff) -> StartupApplyOutcome`
 
@@ -97,7 +99,7 @@
 
 **结算**：`failures` 与 `no_geometry` 都为空 → `persist_reference(model)`（§4.1）→ 打一行回执；任一非空 → **不写参照**，回执点名，下次启动再比一次（多算一次远好过漏算；07 计划规则 4）。`no_geometry` 单列出来是因为它不是缺陷是常态（未监听库），但它照样挡参照——参照说的是「边与这份拓扑一致」，没算出来的那几块不一致。空间凭据章（`RoomBuildStamp`）**不由对比盖**：它记的是「上次成功全量看到的世界」，`/health.room_build` 照读它；对比成功与否看 `resident.reference` 与 `resident.startup_compare`。
 
-**没算成的那一摊要有 durable 落点**（2026-09-08 补，07 计划 §3 P4 落地记 M2）：`failures`（删 / 重算 / 改列三类）与 `no_geometry` 收进 `StartupApplyOutcome.unsettled`，一并折成 `RoomRecalcPanel` durable 目标（`model_update_pending::enqueue_room_panel_recalcs`，`dbnum` / `source_end_sesno` 都不认领）。「这一轮不写参照」只管住本次启动；不入队的话那几块面板既不在房间表里、也不产生 drain 失败，写点 ③（§4.5）的两条前提对它们恒真，启动之后任意一轮干净的 drain 就会把参照推进到当前拓扑，陈旧的边永久留下且无日志。与 §7「diff 不产 `RoomRecalcPanel`」的关系见那一节的补注。
+~~**没算成的那一摊要有 durable 落点**（2026-09-08 补，07 计划 §3 P4 落地记 M2）：`failures`（删 / 重算 / 改列三类）与 `no_geometry` 收进 `StartupApplyOutcome.unsettled`，一并折成 `RoomRecalcPanel` durable 目标（`model_update_pending::enqueue_room_panel_recalcs`，`dbnum` / `source_end_sesno` 都不认领）。「这一轮不写参照」只管住本次启动；不入队的话那几块面板既不在房间表里、也不产生 drain 失败，写点 ③（§4.5）的两条前提对它们恒真，启动之后任意一轮干净的 drain 就会把参照推进到当前拓扑，陈旧的边永久留下且无日志。与 §7「diff 不产 `RoomRecalcPanel`」的关系见那一节的补注。~~ **改判（2026-09-08 晚，ADR-065 D4「不排队、不自动重试」）**：入队那一半（M2 (a)）**退役**——`enqueue_room_panel_recalcs` 随表退、`StartupApplyOutcome.requeued` 删；进程内闸（M2 (b)，`unsettled` 缺省有尾巴）**保留**，升为 Task 侧写点 ③' 的第二前提。它当初堵的洞（一轮干净 drain 洗白参照）在内联下换了形状：Task 手上是完整目标集，「还有目标没消费」不存在，剩下的只有「启动对比还没跑 / 有尾巴」——正是闸管的那一半。**无几何不再进 `unsettled`（07 计划第 6 轮 grill Q3 已拍板）**：D8 下几何首次生成的那个 Task 自带 `RoomRecalcPanel`，不靠参照卡住补算；只留痕点名（`no_geometry` 按库、`/health`）。真失败仍进 `unsettled`、仍挡参照。**同轮 Q1**：`apply_startup_plan` 传进来的常驻模型从此**不带面板几何**——对比应用进锁后自己对在册面板 `query_valid_insts` 一次组 `PanelIndex`（`split_recalc_by_geometry` 改吃这份现读的索引），否则冷启动后房间段拿的是初始化前装的、没几何的模型。详见 07 计划 §3 P4.5 第 1.5 / 4 条。
 
 `recalc_panel_membership_for_consumption` 今天读几何走 `room_published_inst` / 实时行、读网格自己开 `.mesh`——不经常驻模型的 `panels` / `meshes`。这不影响正确性（同一份数据），P2 接线后自然改从 `for_membership()` 取；本计划**不等 P2**。
 
@@ -110,6 +112,8 @@
 3. **一轮 drain 成功结算**：`drain_rooms_selected` 收尾 `report.failed == 0 && report.pending == 0`（本轮任务全 `done`、表里没剩房间行）时 `ensure_current` 取当前模型 → `persist_reference`。这是 07 计划 Q9 (a) 读透侧的原话，本计划把它推广到摄入侧。它是**优化**不是正确性前提：没有它，参照只在启动写，下次启动的 diff 会把停机前所有已由轮次收敛的变化再算一遍（幂等、多算）。落地顺序上它跟 P2 一起进（同一个函数、同一把锁）；本计划的 S1–S3 不依赖它。**2026-09-08 更正**：这两条前提**不足**——它们只看得见「房间表」与「本轮」，而 §4.4 里失败 / 无几何的面板此前既不入队也不标脏，两条前提对那一摊恒真。现在多第三条：本进程的启动对比没留下尾巴（`room_startup::startup_compare_tail()`），配合 §4.4 把那一摊折成 `RoomRecalcPanel`。修法与论证见 07 计划 §3 P4 落地记。
 
 写点 ③ 的形状：写参照在 `_published_view_guard` 释放之前；写失败只打印（与 `record_startup_init` 同口径），不影响本轮结算。
+
+> **2026-09-08 晚 ADR-065 D8**：写点 ③ 的宿主 `drain_rooms_selected` 随 T4 退役，**搬成写点 ③'**——dbnum Task 房间收尾末尾、凭证前移之前，两前提：本 Task 房间收尾全成功 ∧ `startup_compare_tail()` 为 `None`（`room_work_is_drained` 没有对象、M2 (a) 入队退役）；做的事多一步：`capture_at(T)` 冻本库分片，参照**只前进本 dbnum 的令牌**、重算摘要。房间收尾失败按 ADR-065 G2 (i) 走（牵涉根不安定、`model_sesno` 不越过），③' 同时不写。另加**写点 ②'**（07 计划第 6 轮 Q4 已拍板）：§4.3 臂表**多一臂**「`NoReference` ∧ 真冷启动全成（范围内每个 DESI 本进程跑了基线 Task 且全部成功、未受阻降级）→ 写参照、零写入」，放本文件 `room_startup.rs`（协调器只暴露一个只读探针），房间段随即 `Unchanged`——写点从三处变四处（① ② ②' ③'），§4.8 那条「`persist_reference(` 生产调用点只有三处」的钉随之改数。详见 07 计划 §3 P4.5 第 2 / 5 条。
 
 ### 4.6 全量降为显式入口
 
@@ -146,9 +150,9 @@ S5 真库门（每条都以 `AIOS_ROOM_FULL_REBUILD=1` 重建后的 `room_relate
 1. 摄入 · 停服 → PML 改 FRMW NAME 进 / 出 `-RM` → SAVEWORK → 起服：启动日志出「删 N / 重算 M」，边集逐边 ==。
 2. 摄入 · 停服 → PANE 搬到另一间 → 起服：「重算 1」（新旧两间都经它收敛），逐边 ==。
 3. 摄入 · 停服 → 房间号 `…-R101` → `…-R102` → 起服：「改列 1 间 K 块」，边 id 不变，逐边 ==。
-4. 摄入 · `watch_dbnums=[8000]`、改的是 7997 的 FRMW：初始化「7997@… 前进」，对比对 7997 的面板出「重算 / 无几何」，`/health` 按库点名；逐边 ==（有几何的那部分）。
+4. 摄入 · `watch_dbnums=[8000]`、改的是 7997 的 FRMW：~~初始化「7997@… 前进」~~，对比对 7997 的面板出「重算 / 无几何」，`/health` 按库点名；逐边 ==（有几何的那部分）。（**2026-09-08 晚 ADR-065 改判**：「前进清单行」半句随初始化摄入臂退；改验「7997 无 Task → 面板无几何留痕、`/health` 按库点名、**参照照写**（D-2 无几何不挡）」，7997 后来被写进 `watch_dbnums` 起服 → 它的 Task 重生成面板 → `RoomRecalcPanel` 补算、逐边 ==。）
 5. 摄入 · 拿掉参照里一个令牌的分片（手删一行）→ 起服：`ReferenceUnreadable`、零写入、`rebuild_required`；再起一次 → 全量、参照重写。
-6. 读透 · `store_mode = spawned-mem` 跑 1–3。
+6. 读透 · `store_mode = spawned-mem` ~~跑 1–3~~ **只跑 1**（**2026-09-08 晚**：坍缩后两形态房间路径同一份代码，读透只是 `ModelOnly` Task 进来，一条 smoke 够；07 计划 P5 已并入 08 重构计划 S11 live #2，本表 1–7 随之一起跑，T4 之前不跑）。
 7. 不动任何东西重启两次：第二次「参照摘要 == 现状 → 零写入」，房间段耗时 < 1 s（对比接管了今天每次重启十几秒全量的那件事）。
 
 合计约 3 天（S4 归 P2）。每期一笔提交。
@@ -162,8 +166,8 @@ S5 真库门（每条都以 `AIOS_ROOM_FULL_REBUILD=1` 重建后的 `room_relate
 
 ## 7. 不做什么
 
-- 不动 ADR-062 的清单与可见性不变量；不替被监听文件在启动时前进清单行（Q19 (a) 反面）。
-- 不新增第二个结构触发源：diff 只在启动对比与护栏（P4）出手，不产 `RoomRecalcPanel`（共识 d-3 第 1 条）。**2026-09-08 一处有意偏离，待复核**：启动对比**没算成**的那一摊（§4.4 结算段）现在会折成 `RoomRecalcPanel`。它不是「diff 当触发源」——决定重算哪些面板的仍然是启动对比这个已被接受的出手点，入队的只是它自己**失败没做完**的那部分，走的是既有的重试与死信通道；稳态下 diff 照旧一个目标都不产（护栏只出声）。之所以非做不可：不入队的话那一摊既不在房间表里也不产生 drain 失败，写点 ③ 的守卫对它们恒真（07 计划 §3 P4 落地记 M2）。
+- ~~不动 ADR-062 的清单与可见性不变量；不替被监听文件在启动时前进清单行（Q19 (a) 反面）。~~ **作废（2026-09-08 晚，ADR-065 D8）**：ADR-062 被修订为退役，清单没有对象。
+- 不新增第二个结构触发源：diff 只在启动对比与护栏（P4）出手，不产 `RoomRecalcPanel`（共识 d-3 第 1 条）。~~**2026-09-08 一处有意偏离，待复核**：启动对比**没算成**的那一摊（§4.4 结算段）现在会折成 `RoomRecalcPanel`。它不是「diff 当触发源」——决定重算哪些面板的仍然是启动对比这个已被接受的出手点，入队的只是它自己**失败没做完**的那部分，走的是既有的重试与死信通道；稳态下 diff 照旧一个目标都不产（护栏只出声）。之所以非做不可：不入队的话那一摊既不在房间表里也不产生 drain 失败，写点 ③ 的守卫对它们恒真（07 计划 §3 P4 落地记 M2）。~~ **复核结果（2026-09-08 晚）**：与 ADR-065 D4「不排队、不自动重试；死信 / 复活退役」正面冲突，那处偏离**退役**（§4.4 改判）；「diff 不产 `RoomRecalcPanel`」从此没有例外。
 - 不另写删除 / 写入语句：删与写只经 `recalc_panel_membership_for_consumption`，改列只经 `render_renumber_statements`。
 - 不改 `room_relate` / `room_panel_relate` 的边 schema、不改 `room_predicate` 判定、不改候选来源（空间树）。
 - 不做 `room_published_topology` 旧键行的 GC 或依赖它存在——旧视图只从分片来。
@@ -182,7 +186,7 @@ S5 真库门（每条都以 `AIOS_ROOM_FULL_REBUILD=1` 重建后的 `room_relate
 | worker 空闲轮与对比对同一块面板双算 | 同一把 `lock_spatial_serial` 串行、输入相同、边 id 确定 → 结果幂等；对比不带写守卫，不与任务 revision 争 |
 | 参照令牌的分片被将来某个 GC 清掉 | 今天无删除路径；将来引 GC 时 `resident_reference.tokens` 必须进可达根（与 ADR-062 对 mesh GC 的要求同形），记进新 ADR |
 | ADR-048 D3 字面被对比越过 | D3 担心的是全量的成本；对比定向。改口径 + 钉子扩面，新 ADR 记修订 |
-| 整体退路 | `room_resident_model` 默认关，关着时房间段一字不动 |
+| 整体退路 | `room_resident_model` 默认开，显式关掉时走兼容房间路径 |
 
 ## 9. 不许当已证
 
@@ -208,4 +212,4 @@ S5 真库门（每条都以 `AIOS_ROOM_FULL_REBUILD=1` 重建后的 `room_relate
 
 **留给后面**：~~S4（写点 ③ 随 P2 `drain_rooms_selected`）~~ → **已落地**（P2-a，`ba0fa50ae`；2026-09-08 补第三条前提「启动对比没留尾巴」，并把 §4.4 没算成的那一摊折成 `RoomRecalcPanel`，见 07 计划 §3 P4 落地记）；S5（真库门 1–7、新 ADR「启动对比」一节 + ADR-048 D3 改口径 + CONTEXT.md「常驻房间模型」词条补「启动对比」一句）；§9 其余各条照旧未证。
 
-**M2 补记（2026-09-08）**：§4.4 的结算段与 §4.5 写点 ③ 的守卫合起来曾有一个**静默数据错误**——对比里失败 / 无几何的面板既不入队也不标脏，写点 ③ 的两条前提对那一摊恒真，一轮干净的 drain 就能把参照推进到当前拓扑，下次启动把从没算成的面板判成「没变」，陈旧的边永久留下且无日志。两条一起修：`apply_startup_plan` 入队（durable 落点，走 `room_work_is_drained` 挡）+ 回执多一格 `unsettled` 立进程内闸（挡「入队失败」与「对比还没跑就先来了一轮 drain」——worker 起在房间段之前）。`/health.startup_compare` 随之多两格 `requeued` / `unsettled`。
+**M2 补记（2026-09-08）**：§4.4 的结算段与 §4.5 写点 ③ 的守卫合起来曾有一个**静默数据错误**——对比里失败 / 无几何的面板既不入队也不标脏，写点 ③ 的两条前提对那一摊恒真，一轮干净的 drain 就能把参照推进到当前拓扑，下次启动把从没算成的面板判成「没变」，陈旧的边永久留下且无日志。两条一起修：`apply_startup_plan` 入队（durable 落点，走 `room_work_is_drained` 挡）+ 回执多一格 `unsettled` 立进程内闸（挡「入队失败」与「对比还没跑就先来了一轮 drain」——worker 起在房间段之前）。`/health.startup_compare` 随之多两格 `requeued` / `unsettled`。**2026-09-08 晚 ADR-065 改判**：入队那一半随 T4 退（`requeued` 格删），闸留并升为 ③' 前提；无几何不再计入 `unsettled`（D-2）。见 §4.4 / §4.5 标注与 07 计划 §3 P4.5。
