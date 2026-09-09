@@ -329,9 +329,9 @@
 ### 4.5.2 `POST /api/v1/model/records` — 按生成根分页取模型记录（单根现状 + 多根批量草案）
 
 实现 `handlers::model_records`；取数源按**这根所属的库**选（§4.12），不按进程介质。
-本节前半是今天已在跑的单根契约（此前只散见于 §4.12，这里补齐），后半是 **多根批量的草案**
-（plant3d-web 收口计划 2026-09-09 §3 P9-1，决策 d-181 按 A 拍板；**服务端尚未实现**，
-gen-model 侧认可后再动 `src/web_service/`）。
+本节前半是单根契约（此前只散见于 §4.12，这里补齐），后半是 **多根批量**
+（plant3d-web 收口计划 2026-09-09 §3 P9-1/P9-2，决策 d-181 按 A 拍板；服务端 2026-09-09 深夜落地，
+只改 `handlers::model_records` 与 `ModelRecordsReq`，路由不动）。
 
 **单根（现状）**
 
@@ -357,14 +357,15 @@ gen-model 侧认可后再动 `src/web_service/`）。
 - 错误：refno 连格式都不对、或解不出所属库（不在 MDB）→ `400 bad_request`；内存形态下这根还没
   `ensure` 过 → `409 conflict`，消息以 `not_generated:` 开头（客户端先去 §4.5；**空数组不表达「没生成过」**）。
 
-**多根批量（草案，未实现）**
+**多根批量（已实现，2026-09-09）**
 
 动机：整库入口一根一次 `records` 是瓶颈（plant3d-web 母计划 §8.9：200 根预算 269 s，单次 0.5 s–4 min 长尾），
 服务端一次拿一批根能把往返与逐根建连的开销一起省掉；方案 A 只在既有端点上加一个可选字段，
 plant-ui 的单根调用零影响。
 
 - 请求体加可选 `"generation_roots": ["24381/100677", "24381/100691", …]`：
-  - `1..=64` 条；与 `generation_root` **互斥**——两个都给、都不给、空数组、超 64 条 → `400 bad_request`。
+  - `1..=64` 条、**不重复**；与 `generation_root` **互斥**——两个都给、都不给、空数组、超 64 条、同一根出现两次
+    → `400 bad_request`（`MAX_MODEL_RECORDS_ROOTS`；判定在 `requested_generation_roots`，有单测钉着）。
   - 一批根须属**同一 dbnum**（客户端手里的根本来就出自同一次 `ensure` 解出的 `generation_roots`
     或同一次整库收集），跨库 → `400 bad_request`。于是一个响应仍只有一个 `source`。
   - plant3d-web 的口径（2026-09-09 用户拍板）：前端只吃 **`ensure` 即时生成、`records` 原样回**的数据，
@@ -381,6 +382,14 @@ plant-ui 的单根调用零影响。
   并列出缺的根；客户端对缺的那几根补 `ensure` 后重发。**空数组仍不表达「没生成过」。**
 - 单响应体积：64 根 × 每根几百条，靠分页（`limit` ≤ 5000）兜住，不另设上限。
 - 不动的：单根请求 / 响应形状一字不改；`/model/ensure` 不变；不新开 `model/records/batch` 端点（B 案已否）。
+- 实现说明：所属库逐根解（`dbnum_for_roots`，跨库 400）→ 一次 `route_for(dbnum)` → 内存形态先按 receipt 收齐缺的根
+  再决定 409 → 逐根取记录（库形态 `model_record_reader::records_of_root`，内存形态投影 → `GeomInstQuery`）→
+  `page_records_across_roots` 平铺切页（单根 = 一根的特例，切页与原来逐字相同）。单测：
+  `model_records_request_takes_exactly_one_root_form_and_bounds_the_batch`、
+  `model_records_pages_flatten_across_roots_with_a_continuous_cursor`（`cargo test --lib -- web_service` 62 passed）。
+  **未 live**：本机在跑的 `:9099` 是 0.1.21 出厂包，没有这段代码；起新构建后
+  `curl -X POST :8022/api/v1/model/records -d '{"generation_roots":["24381/145018","24381/145052"],"limit":5}'`
+  应回 `generation_roots` + `roots[]` + 平铺 `items`，单根请求回执与之前逐字段相同。
 
 ### 4.6 `GET /api/v1/update/pending-units` — 待重试模型单元
 - 映射：`load_pending_model_units()`，响应 `{ "units": [...] }`，元素为 `PendingModelUnit` 原样。

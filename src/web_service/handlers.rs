@@ -2569,165 +2569,403 @@ pub async fn search(
     })))
 }
 
+/// 一次批量 `model/records` 最多带多少根（spec §4.5.2，决策 d-181）。
+pub const MAX_MODEL_RECORDS_ROOTS: usize = 64;
+
 #[derive(Debug, Deserialize)]
 pub struct ModelRecordsReq {
     #[serde(flatten)]
     pub identity: ProjectReq,
-    pub generation_root: String,
+    /// 单根（原有形状）。与 `generation_roots` 互斥。
+    #[serde(default)]
+    pub generation_root: Option<String>,
+    /// 多根批量（spec §4.5.2）：`1..=64` 条、不重复、同库；与 `generation_root` 互斥。
+    #[serde(default)]
+    pub generation_roots: Option<Vec<String>>,
     pub limit: Option<usize>,
     pub cursor: Option<usize>,
 }
 
-/// POST /api/v1/model/records — page the process-local model projection.
+/// 请求到底要哪些根：`generation_root` 与 `generation_roots` 二选一。
+/// 返回 `(roots, batch)`——`batch = false` 是单根请求，响应保持原有形状。
+pub(crate) fn requested_generation_roots(
+    generation_root: Option<&str>,
+    generation_roots: Option<&[String]>,
+) -> Result<(Vec<String>, bool), String> {
+    match (generation_root, generation_roots) {
+        (Some(_), Some(_)) => Err(
+            "generation_root and generation_roots are mutually exclusive; send exactly one".into(),
+        ),
+        (None, None) => Err("one of generation_root or generation_roots is required".into()),
+        (Some(root), None) => Ok((vec![root.to_string()], false)),
+        (None, Some(roots)) => {
+            if roots.is_empty() {
+                return Err("generation_roots must not be empty".into());
+            }
+            if roots.len() > MAX_MODEL_RECORDS_ROOTS {
+                return Err(format!(
+                    "generation_roots carries {} roots; at most {MAX_MODEL_RECORDS_ROOTS} per request",
+                    roots.len()
+                ));
+            }
+            let mut seen = std::collections::HashSet::with_capacity(roots.len());
+            if let Some(duplicate) = roots.iter().find(|root| !seen.insert(root.as_str())) {
+                return Err(format!(
+                    "generation_roots repeats {duplicate}; list each root at most once"
+                ));
+            }
+            Ok((roots.to_vec(), true))
+        }
+    }
+}
+
+/// 一页平铺记录：整批 `total`、这一页 `items`、下一页游标、整批逐根条数（每页都带，
+/// 让「这根就是 0 条」显式可见）。
+pub(crate) struct RecordsPage<T> {
+    pub items: Vec<T>,
+    pub total: usize,
+    pub next_cursor: Option<usize>,
+    pub per_root_total: Vec<(String, usize)>,
+}
+
+/// 逐根记录按请求里根的顺序平铺；`cursor` 是平铺列表的下标（跨根连续），`limit` 是总条数。
+/// 单根请求就是 `per_root.len() == 1` 的特例，切页语义与原来逐字相同。
+pub(crate) fn page_records_across_roots<T>(
+    per_root: Vec<(String, Vec<T>)>,
+    cursor: usize,
+    limit: usize,
+) -> RecordsPage<T> {
+    let per_root_total = per_root
+        .iter()
+        .map(|(root, records)| (root.clone(), records.len()))
+        .collect::<Vec<_>>();
+    let total = per_root_total.iter().map(|(_, count)| count).sum::<usize>();
+    let items = per_root
+        .into_iter()
+        .flat_map(|(_, records)| records)
+        .skip(cursor)
+        .take(limit)
+        .collect::<Vec<T>>();
+    let next = cursor.saturating_add(items.len());
+    RecordsPage {
+        items,
+        total,
+        next_cursor: (next < total).then_some(next),
+        per_root_total,
+    }
+}
+
+/// 进程内投影的一条记录 → `GeomInstQuery`（与从库里读出来的同一形状；`owner` 填生成根）。
+fn projection_record_to_query(
+    record: crate::fast_model::model_memory_store::ProjectedGeometry,
+    root: e3d_io::refno::RefNo,
+) -> aios_core::GeomInstQuery {
+    // Ordinary canonical primitives keep their placement separate from
+    // the element world transform. Tubes already fold it into world.
+    let local_transform = match (&record.shape, &record.tube) {
+        (
+            crate::fast_model::model_memory_store::ProjectedShape::Canonical {
+                local_transform,
+                ..
+            },
+            None,
+        ) => *local_transform,
+        _ => glam::DMat4::IDENTITY,
+    };
+    let (local_scale, local_rotation, local_translation) =
+        local_transform.to_scale_rotation_translation();
+    let (scale, rotation, translation) = record.world_transform.to_scale_rotation_translation();
+    let world_trans = bevy_transform::components::Transform {
+        translation: glam::Vec3::new(
+            translation.x as f32,
+            translation.y as f32,
+            translation.z as f32,
+        ),
+        rotation: glam::Quat::from_xyzw(
+            rotation.x as f32,
+            rotation.y as f32,
+            rotation.z as f32,
+            rotation.w as f32,
+        ),
+        scale: glam::Vec3::new(scale.x as f32, scale.y as f32, scale.z as f32),
+    };
+    let source = RefnoEnum::from(RefU64::from_two_nums(
+        record.source_refno.word0,
+        record.source_refno.word1,
+    ));
+    let owner = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
+    aios_core::GeomInstQuery {
+        refno: source,
+        old_refno: None,
+        owner,
+        world_aabb: parry3d::bounding_volume::Aabb::new(
+            parry3d::math::Point::new(
+                record.world_bounds[0][0],
+                record.world_bounds[0][1],
+                record.world_bounds[0][2],
+            ),
+            parry3d::math::Point::new(
+                record.world_bounds[1][0],
+                record.world_bounds[1][1],
+                record.world_bounds[1][2],
+            ),
+        ),
+        world_trans,
+        insts: vec![aios_core::ModelHashInst {
+            geo_hash: record.mesh_id,
+            transform: bevy_transform::components::Transform {
+                translation: local_translation.as_vec3(),
+                rotation: local_rotation.as_quat(),
+                scale: local_scale.as_vec3(),
+            },
+            is_tubi: record.tube.is_some(),
+            is_invalid_tubi: record.tube.as_ref().is_some_and(|tube| tube.invalid),
+        }],
+        has_neg: false,
+        generic: record.noun,
+        pts: None,
+        date: None,
+    }
+}
+
+/// POST /api/v1/model/records — 按生成根分页取模型记录：单根（原有形状）或
+/// `generation_roots[]` 多根批量（spec §4.5.2，决策 d-181）。
 pub async fn model_records(
     State(state): State<AppState>,
     Json(request): Json<ModelRecordsReq>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     resolve_identity(&state, &request.identity)?;
-    let root = crate::fast_model::e3d_model_service::parse_refno(&request.generation_root)
-        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    let (roots, batch) = requested_generation_roots(
+        request.generation_root.as_deref(),
+        request.generation_roots.as_deref(),
+    )
+    .map_err(ApiError::bad_request)?;
+    let parsed_roots = roots
+        .iter()
+        .map(|root| {
+            crate::fast_model::e3d_model_service::parse_refno(root)
+                .map_err(|error| ApiError::bad_request(format!("{error:#}")))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let limit = request.limit.unwrap_or(1000).clamp(1, 5000);
     let cursor = request.cursor.unwrap_or(0);
-    // 取数源按**这根所属的库**选（plan 2026-09-06 §8 R3/R4），不再按进程介质：库在 rocksdb 里
-    // 准备好了就读库（rocksdb 为准），没准备好就读进程内投影。一次请求只有一根、只有一个库，
-    // 所以一个响应天然只有一个源。解不出所属库（不在 MDB）按 400 报。
-    let dbnum = crate::fast_model::e3d_model_service::E3dModelService::dbnum_for_roots(
-        std::slice::from_ref(&request.generation_root),
-    )
-    .await
-    .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+    // 取数源按**根所属的库**选（plan 2026-09-06 §8 R3/R4），不按进程介质：库在 rocksdb 里
+    // 准备好了就读库，没准备好就读进程内投影。一批根必须同库，所以一个响应仍只有一个源；
+    // 解不出所属库（不在 MDB）或跨库按 400 报。
+    let mut dbnum: Option<u32> = None;
+    for root in &roots {
+        let root_dbnum = crate::fast_model::e3d_model_service::E3dModelService::dbnum_for_roots(
+            std::slice::from_ref(root),
+        )
+        .await
+        .map_err(|error| ApiError::bad_request(format!("{error:#}")))?;
+        match dbnum {
+            None => dbnum = Some(root_dbnum),
+            Some(first) if first != root_dbnum => {
+                return Err(ApiError::bad_request(format!(
+                    "generation_roots must belong to one dbnum: {} is in dbnum {first} but {root} is in dbnum {root_dbnum}",
+                    roots[0]
+                )));
+            }
+            Some(_) => {}
+        }
+    }
+    let dbnum = dbnum.expect("requested_generation_roots guarantees at least one root");
     let route = crate::data_interface::model_read_route::route_for(dbnum)
         .await
         .map_err(ApiError::from_domain)?;
     let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
     let scope = crate::fast_model::model_memory_store::ProjectionScope::Current;
-    if !route.is_database() && store.receipt(scope, root).is_none() {
-        // 投影里没有这根（还没 ensure 过）：空数组会被读成「这一根本来就没有几何」，
+    if !route.is_database() {
+        // 投影里没有的根（还没 ensure 过）：空数组会被读成「这一根本来就没有几何」，
         // 那是另一句话。409 让客户端先去 `/model/ensure`——它今天本来就是这个顺序。
-        return Err(ApiError::conflict(format!(
-            "not_generated: generation root {} of dbnum {dbnum} is not in the process projection yet \
-             (model_source = memory, reason = {}); call /api/v1/model/ensure first",
-            request.generation_root,
-            route
+        // 批量时任一根缺就整批 409，并把缺的根全部列出来，客户端一次补齐。
+        let missing = roots
+            .iter()
+            .zip(&parsed_roots)
+            .filter(|(_, root)| store.receipt(scope, **root).is_none())
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            let reason = route
                 .reason
                 .map(|reason| reason.as_str())
-                .unwrap_or("unknown")
-        )));
+                .unwrap_or("unknown");
+            let message = if batch {
+                format!(
+                    "not_generated: generation roots [{}] of dbnum {dbnum} are not in the process projection yet \
+                     (model_source = memory, reason = {reason}); call /api/v1/model/ensure for them first",
+                    missing.join(", ")
+                )
+            } else {
+                format!(
+                    "not_generated: generation root {} of dbnum {dbnum} is not in the process projection yet \
+                     (model_source = memory, reason = {reason}); call /api/v1/model/ensure first",
+                    missing[0]
+                )
+            };
+            return Err(ApiError::conflict(message));
+        }
     }
-    let records = store.records_of_root(scope, root);
-    let memory_items = records
-        .into_iter()
-        .map(|record| {
-            // Ordinary canonical primitives keep their placement separate from
-            // the element world transform. Tubes already fold it into world.
-            let local_transform = match (&record.shape, &record.tube) {
-                (
-                    crate::fast_model::model_memory_store::ProjectedShape::Canonical {
-                        local_transform,
-                        ..
-                    },
-                    None,
-                ) => *local_transform,
-                _ => glam::DMat4::IDENTITY,
-            };
-            let (local_scale, local_rotation, local_translation) =
-                local_transform.to_scale_rotation_translation();
-            let (scale, rotation, translation) =
-                record.world_transform.to_scale_rotation_translation();
-            let world_trans = bevy_transform::components::Transform {
-                translation: glam::Vec3::new(
-                    translation.x as f32,
-                    translation.y as f32,
-                    translation.z as f32,
-                ),
-                rotation: glam::Quat::from_xyzw(
-                    rotation.x as f32,
-                    rotation.y as f32,
-                    rotation.z as f32,
-                    rotation.w as f32,
-                ),
-                scale: glam::Vec3::new(scale.x as f32, scale.y as f32, scale.z as f32),
-            };
-            let source = RefnoEnum::from(RefU64::from_two_nums(
-                record.source_refno.word0,
-                record.source_refno.word1,
-            ));
-            let owner = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
-            aios_core::GeomInstQuery {
-                refno: source,
-                old_refno: None,
-                owner,
-                world_aabb: parry3d::bounding_volume::Aabb::new(
-                    parry3d::math::Point::new(
-                        record.world_bounds[0][0],
-                        record.world_bounds[0][1],
-                        record.world_bounds[0][2],
-                    ),
-                    parry3d::math::Point::new(
-                        record.world_bounds[1][0],
-                        record.world_bounds[1][1],
-                        record.world_bounds[1][2],
-                    ),
-                ),
-                world_trans,
-                insts: vec![aios_core::ModelHashInst {
-                    geo_hash: record.mesh_id,
-                    transform: bevy_transform::components::Transform {
-                        translation: local_translation.as_vec3(),
-                        rotation: local_rotation.as_quat(),
-                        scale: local_scale.as_vec3(),
-                    },
-                    is_tubi: record.tube.is_some(),
-                    is_invalid_tubi: record.tube.as_ref().is_some_and(|tube| tube.invalid),
-                }],
-                has_neg: false,
-                generic: record.noun,
-                pts: None,
-                date: None,
-            }
-        })
-        .collect::<Vec<_>>();
-    let records = if route.is_database() {
-        let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
-        crate::fast_model::model_record_reader::records_of_root(&aios_core::SUL_DB, refno)
-            .await
-            .map_err(ApiError::from_domain)?
-    } else {
-        memory_items
-    };
+    let mut per_root: Vec<(String, Vec<aios_core::GeomInstQuery>)> =
+        Vec::with_capacity(roots.len());
+    for (name, root) in roots.iter().zip(&parsed_roots) {
+        let records = if route.is_database() {
+            let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
+            crate::fast_model::model_record_reader::records_of_root(&aios_core::SUL_DB, refno)
+                .await
+                .map_err(ApiError::from_domain)?
+        } else {
+            store
+                .records_of_root(scope, *root)
+                .into_iter()
+                .map(|record| projection_record_to_query(record, *root))
+                .collect()
+        };
+        per_root.push((name.clone(), records));
+    }
+    let page = page_records_across_roots(per_root, cursor, limit);
     let source = route.source.records_source_label();
-    let total = records.len();
-    let items = records
-        .into_iter()
-        .skip(cursor)
-        .take(limit)
-        .collect::<Vec<_>>();
-    let next = cursor.saturating_add(items.len());
     let snapshot =
         crate::data_interface::mdb_memory_store::get(&state.identity.project, &state.identity.mdb);
     let session_vector = snapshot
         .as_ref()
         .map(|snapshot| snapshot.session_fingerprint())
         .unwrap_or_default();
-    Ok(Json(json!({
+    let mut payload = json!({
         "source": source,
         "dbnum": dbnum,
         "model_source": route.source.as_str(),
         "model_source_reason": route.reason.map(|reason| reason.as_str()),
         "durable": route.is_database(),
-        "generation_root": request.generation_root,
         "snapshot_epoch": snapshot.as_ref().map(|snapshot| snapshot.epoch()).unwrap_or_default(),
         "session_vector": session_vector.iter().map(|(dbnum, _, sesno)| json!({"dbnum": dbnum, "sesno": sesno})).collect::<Vec<_>>(),
-        "items": items,
-        "total": total,
-        "truncated": next < total,
-        "next_cursor": (next < total).then_some(next),
-    })))
+        "items": page.items,
+        "total": page.total,
+        "truncated": page.next_cursor.is_some(),
+        "next_cursor": page.next_cursor,
+    });
+    let object = payload
+        .as_object_mut()
+        .expect("model/records payload is a JSON object");
+    if batch {
+        // 批量：回显 `generation_roots`，多一格 `roots`（整批逐根总数，每页都带）。
+        object.insert("generation_roots".into(), json!(roots));
+        object.insert(
+            "roots".into(),
+            json!(
+                page.per_root_total
+                    .iter()
+                    .map(|(root, total)| json!({ "generation_root": root, "total": total }))
+                    .collect::<Vec<_>>()
+            ),
+        );
+    } else {
+        // 单根：形状一字不改。
+        object.insert("generation_root".into(), json!(roots[0]));
+    }
+    Ok(Json(payload))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn roots(names: &[&str]) -> Vec<String> {
+        names.iter().map(|name| name.to_string()).collect()
+    }
+
+    /// spec §4.5.2：`generation_root` / `generation_roots` 二选一；批量 1..=64 条、不重复。
+    #[test]
+    fn model_records_request_takes_exactly_one_root_form_and_bounds_the_batch() {
+        assert_eq!(
+            requested_generation_roots(Some("24381/145018"), None),
+            Ok((roots(&["24381/145018"]), false)),
+            "单根请求：batch=false，响应保持原有形状"
+        );
+        let batch = roots(&["24381/145018", "24381/145052"]);
+        assert_eq!(
+            requested_generation_roots(None, Some(batch.as_slice())),
+            Ok((batch.clone(), true))
+        );
+
+        let both =
+            requested_generation_roots(Some("24381/145018"), Some(batch.as_slice())).unwrap_err();
+        assert!(both.contains("mutually exclusive"), "{both}");
+        let neither = requested_generation_roots(None, None).unwrap_err();
+        assert!(neither.contains("required"), "{neither}");
+        let none: Vec<String> = Vec::new();
+        let empty = requested_generation_roots(None, Some(none.as_slice())).unwrap_err();
+        assert!(empty.contains("must not be empty"), "{empty}");
+
+        let too_many = (0..=MAX_MODEL_RECORDS_ROOTS)
+            .map(|index| format!("24381/{index}"))
+            .collect::<Vec<_>>();
+        assert_eq!(too_many.len(), MAX_MODEL_RECORDS_ROOTS + 1);
+        let over = requested_generation_roots(None, Some(too_many.as_slice())).unwrap_err();
+        assert!(over.contains("at most 64"), "{over}");
+        let exactly_max = &too_many[..MAX_MODEL_RECORDS_ROOTS];
+        assert!(
+            requested_generation_roots(None, Some(exactly_max)).is_ok(),
+            "64 条正好在上限内"
+        );
+
+        let repeated = roots(&["24381/145018", "24381/145052", "24381/145018"]);
+        let duplicate = requested_generation_roots(None, Some(repeated.as_slice())).unwrap_err();
+        assert!(duplicate.contains("repeats 24381/145018"), "{duplicate}");
+    }
+
+    /// spec §4.5.2：items 平铺、顺序 = 请求根序 × 每根顺序；cursor 跨根连续；`roots` 逐根总数每页都带，
+    /// 0 条的根也在里面。
+    #[test]
+    fn model_records_pages_flatten_across_roots_with_a_continuous_cursor() {
+        let per_root = || {
+            vec![
+                ("a".to_string(), vec!["a0", "a1", "a2"]),
+                ("b".to_string(), vec![]),
+                ("c".to_string(), vec!["c0", "c1"]),
+            ]
+        };
+
+        let first = page_records_across_roots(per_root(), 0, 2);
+        assert_eq!(first.items, vec!["a0", "a1"]);
+        assert_eq!(first.total, 5);
+        assert_eq!(first.next_cursor, Some(2));
+        assert_eq!(
+            first.per_root_total,
+            vec![
+                ("a".to_string(), 3),
+                ("b".to_string(), 0),
+                ("c".to_string(), 2)
+            ],
+            "逐根总数是整批的，不随页变；0 条的根显式在列"
+        );
+
+        let across = page_records_across_roots(per_root(), 2, 2);
+        assert_eq!(
+            across.items,
+            vec!["a2", "c0"],
+            "一页可以跨根边界，空根不占位"
+        );
+        assert_eq!(across.next_cursor, Some(4));
+        assert_eq!(across.per_root_total, first.per_root_total);
+
+        let last = page_records_across_roots(per_root(), 4, 2);
+        assert_eq!(last.items, vec!["c1"]);
+        assert_eq!(last.total, 5);
+        assert_eq!(last.next_cursor, None, "翻完了就没有下一页");
+
+        let beyond = page_records_across_roots(per_root(), 9, 2);
+        assert!(beyond.items.is_empty());
+        assert_eq!(beyond.total, 5);
+        assert_eq!(beyond.next_cursor, None);
+
+        // 单根 = 一根的特例，与原来 skip/take 的切页逐字相同
+        let single = page_records_across_roots(vec![("a".to_string(), vec![1, 2, 3])], 1, 5);
+        assert_eq!(single.items, vec![2, 3]);
+        assert_eq!(single.total, 3);
+        assert_eq!(single.next_cursor, None);
+    }
 
     #[test]
     fn plant_ui_web_bundle_contains_bootstrap_and_runtime_assets() {
