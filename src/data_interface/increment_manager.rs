@@ -57,6 +57,47 @@ fn automatic_discovery_admits(
     initialized || auto_initialize_new_dbnums || already_queued
 }
 
+/// [`AiosDBManager::discover_batch`] 的三种结局。「拦下等手动初始化」此前与「水位已
+/// 覆盖」折叠在同一个 `Ok(None)` 里，重扫收尾分不出该汇总谁——初始化准入门要有
+/// 自己的桶与嗓音（对齐 out_of_scope / watch_excluded / debug_excluded 各说各话），
+/// 就得先在这里把两种「没活」分开。
+enum DiscoveryOutcome {
+    /// 有活要干：基线（从未应用）或增量窗口，怎么干由 worker 冻结点的
+    /// `needs_initial_load` 分家。
+    Batch(crate::data_interface::batch_scheduler::DiscoveredBatch),
+    /// 水位已覆盖（或合法空库凭据在案），本轮没活。
+    UpToDate,
+    /// 从未应用过且 `auto_initialize_new_dbnums = false`：不入队，等 plant-ui 手动初始化。
+    AwaitingManualInitialization,
+}
+
+/// 最近一轮自动发现被初始化准入门拦下的库（去重排序）。整面重扫整体覆写——手动
+/// 初始化完成后下一轮自然清空；子集补扫（share-remount）只并入新增，它没看其余
+/// 目录，没资格清别人。`/health` 据此点名；逐库真值仍以
+/// `/dbnums.awaiting_manual_initialization` 为准（那一格按水位现算，不依赖重扫跑过）。
+static AWAITING_MANUAL_INIT_SNAPSHOT: std::sync::Mutex<Vec<u32>> =
+    std::sync::Mutex::new(Vec::new());
+
+fn record_awaiting_manual_init(held: &[u32], full_surface: bool) {
+    let mut snapshot = AWAITING_MANUAL_INIT_SNAPSHOT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if full_surface {
+        snapshot.clear();
+    }
+    snapshot.extend_from_slice(held);
+    snapshot.sort_unstable();
+    snapshot.dedup();
+}
+
+/// `/health` 的「等待前端手动初始化」一格：最近一轮重扫被初始化准入门拦下的 dbnum。
+pub fn awaiting_manual_initialization_snapshot() -> Vec<u32> {
+    AWAITING_MANUAL_INIT_SNAPSHOT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone()
+}
+
 fn running_queue_row(
     rows: &[crate::data_interface::batch_scheduler::QueueRow],
 ) -> Option<&crate::data_interface::batch_scheduler::QueueRow> {
@@ -72,6 +113,61 @@ mod tests {
         assert!(super::automatic_discovery_admits(false, true, false));
         assert!(super::automatic_discovery_admits(true, true, false));
         assert!(super::automatic_discovery_admits(false, false, true));
+    }
+
+    /// 快照是「最近一轮重扫」语义：整面覆写（**含空轮清空**——手动初始化完成后
+    /// /health 那一格靠这一步熄掉），子集补扫只并入——补挂轮没看其余目录，没资格
+    /// 清别人。输入不必预先去重排序，快照自己收口。
+    #[test]
+    fn the_awaiting_manual_init_snapshot_replaces_on_full_sweeps_and_merges_on_subsets() {
+        super::record_awaiting_manual_init(&[8021, 8021, 7003], true);
+        assert_eq!(
+            super::awaiting_manual_initialization_snapshot(),
+            vec![7003, 8021]
+        );
+        super::record_awaiting_manual_init(&[9001], false);
+        assert_eq!(
+            super::awaiting_manual_initialization_snapshot(),
+            vec![7003, 8021, 9001]
+        );
+        super::record_awaiting_manual_init(&[], true);
+        assert!(super::awaiting_manual_initialization_snapshot().is_empty());
+    }
+
+    /// 初始化准入门在重扫里有**自己的桶与嗓音**（2026-09-09）：拦下的库聚成收尾
+    /// 一句汇总（不逐库刷屏），快照每轮无条件更新，且排在「声明了却没文件」那句
+    /// 之前。快照更新不许挂在「桶非空」底下——空轮覆写正是清 /health 那一格的一步。
+    #[test]
+    fn the_sweep_gives_the_initialization_admission_gate_its_own_voice() {
+        let src = include_str!("increment_manager.rs");
+        let body = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 未找到")
+            .1
+            .split_once(concat!("fn ", "reinit_batch("))
+            .expect("sweep_dirs 之后应当是 reinit_batch")
+            .0;
+        let bucket_at = body
+            .find(concat!("awaiting_manual_init", ".push("))
+            .expect("缺初始化准入门的桶");
+        let record_at = body
+            .find(concat!("record_awaiting_manual_init", "("))
+            .expect("快照必须在重扫里更新");
+        let summary_at = body.find("个库从未初始化").expect("缺收尾汇总一句");
+        let fourth_at = body
+            .find("let unseen_declared")
+            .expect("「声明了却没文件」那句");
+        assert!(
+            bucket_at < record_at && record_at < summary_at && summary_at < fourth_at,
+            "顺序必须是 桶 → 快照 → 汇总 → 「声明了却没文件」"
+        );
+        let summary_gate = body
+            .find(concat!("!awaiting_manual_init", ".is_empty()"))
+            .expect("汇总的非空门");
+        assert!(
+            record_at < summary_gate,
+            "快照更新必须在非空门之前（空轮也要覆写）"
+        );
     }
 
     use super::*;
@@ -3446,6 +3542,11 @@ impl AiosDBManager {
         // 被 watch_dbnums / --watch-dbnum 圈掉的库：**第三个桶、第三种嗓音**。
         // 理由同上，而且这一个更要紧——配置里的名单能跨重启活着。
         let mut watch_excluded: Vec<String> = Vec::new();
+        // 被初始化准入门拦下的库（`auto_initialize_new_dbnums = false` 且从未应用过）：
+        // **又一个桶、又一种嗓音**。它们在范围内、盘上有文件，既不是「不在名单」也
+        // 不是「被限定圈掉」，是等 plant-ui 手动初始化——措辞混进上面任何一句都是
+        // 事实性错误。
+        let mut awaiting_manual_init: Vec<u32> = Vec::new();
         // 本轮在盘上解析到文件头的设计库号（DESI / ISOD，不问归属项目、不问过没过门）。
         // sweep 是文件驱动的：从盘上有的文件出发逐个过门，所以「MDB 声明了却没文件」
         // 的库在上面三个桶里都不会出现——这张表是收尾那一句唯一的依据。
@@ -3829,7 +3930,8 @@ impl AiosDBManager {
 
                 // 需不需要更新只看「文件会话号 vs 水位」；从未解析（水位 0）的库
                 // 同样入队，worker 执行体的 `needs_initial_load` 会把基线接管过去
-                // （与手动路径同口径——两条路径合流后只剩这一份判定）。
+                // （与手动路径同口径——两条路径合流后只剩这一份判定）。唯一例外是
+                // 初始化准入门：开关关着时从未应用过的库不入队，进桶等收尾汇总。
                 match self
                     .discover_batch(
                         &project,
@@ -3841,10 +3943,13 @@ impl AiosDBManager {
                     )
                     .await
                 {
-                    Ok(Some(found)) => {
+                    Ok(DiscoveryOutcome::Batch(found)) => {
                         params.insert(path.to_path_buf(), found);
                     }
-                    Ok(None) => {}
+                    Ok(DiscoveryOutcome::AwaitingManualInitialization) => {
+                        awaiting_manual_init.push(db_no);
+                    }
+                    Ok(DiscoveryOutcome::UpToDate) => {}
                     Err(error) => phase_blockers.push(
                         crate::data_interface::initialization_phase::PhaseBlocker::new(
                             crate::data_interface::initialization_phase::DataPhase::of_db_type(
@@ -3899,6 +4004,26 @@ impl AiosDBManager {
                 debug_excluded.len(),
                 debug_scope::dbnums().iter().join(","),
                 if debug_excluded.len() > 12 {
+                    " …"
+                } else {
+                    ""
+                }
+            ));
+        }
+        // 初始化准入门的桶。快照**每轮无条件更新**（整面覆写、子集补扫只并入）——
+        // 手动初始化完成后下一轮重扫把 /health 那一格自己清掉；桶空时不占一行日志。
+        awaiting_manual_init.sort_unstable();
+        awaiting_manual_init.dedup();
+        record_awaiting_manual_init(&awaiting_manual_init, surface == SweepSurface::Full);
+        if !awaiting_manual_init.is_empty() {
+            let sample = awaiting_manual_init.iter().take(12).join("、");
+            sweep_log::note(format!(
+                "[{origin}] {} 个库从未初始化，本轮自动发现不入队（auto_initialize_new_dbnums=false，\
+                 等 plant-ui 手动更新初始化；配置该键 / AIOS_AUTO_INITIALIZE_NEW_DBNUMS / \
+                 serve --auto-initialize-new-dbnums 可回自动。这些库在范围内、盘上有文件——\
+                 这不是 MDB 范围判定，也不是监听/调试限定）：{sample}{}",
+                awaiting_manual_init.len(),
+                if awaiting_manual_init.len() > 12 {
                     " …"
                 } else {
                     ""
@@ -4078,9 +4203,11 @@ impl AiosDBManager {
 
     /// 一次发现的公共判定：读水位、比会话号，需要更新则给出待入队批次。
     ///
-    /// 基线（水位 0、文件有会话）与增量窗口在这里不分家——都只是「有活要干」，
-    /// 具体怎么干由 worker 冻结点重扫时的 `execute_one_dbnum` 决定。
-    /// 返回 `Ok(None)` 只表示水位已覆盖；水位/数据支撑读取失败必须上浮给 manifest
+    /// 基线（水位 0、文件有会话）与增量窗口在这里不分家——都只是「有活要干」
+    /// （[`DiscoveryOutcome::Batch`]），具体怎么干由 worker 冻结点重扫时的
+    /// `execute_one_dbnum` 决定。`UpToDate` 表示水位已覆盖；从未应用过的库在
+    /// `auto_initialize_new_dbnums = false` 时给 `AwaitingManualInitialization`
+    /// ——不入队，由调用方进桶汇总。水位/数据支撑读取失败必须上浮给 manifest
     /// 记录为阶段 blocker，不能把未知状态伪装成 up-to-date。
     ///
     /// `file_name` 从 `path` 现取（完整文件名）：init 重扫与 watch 事件两个调用方
@@ -4093,7 +4220,7 @@ impl AiosDBManager {
         db_num: u32,
         file_latest_sesno: i32,
         previous_observed_sesno: i32,
-    ) -> anyhow::Result<Option<crate::data_interface::batch_scheduler::DiscoveredBatch>> {
+    ) -> anyhow::Result<DiscoveryOutcome> {
         use crate::data_interface::dbnum_state::DbnumState;
 
         let file_name = path
@@ -4112,10 +4239,9 @@ impl AiosDBManager {
                 .iter()
                 .any(|row| row.dbnum == db_num),
         ) {
-            sweep_log::note(format!(
-                "dbnum={db_num} 等待前端手动初始化（auto_initialize_new_dbnums=false），本轮自动发现不入队"
-            ));
-            return Ok(None);
+            // 逐库不打日志：一个新项目可能一次多出几十个库，交给 sweep 收尾那句汇总
+            // （对齐 out_of_scope 的做法），/health 与 /dbnums 另各有一格。
+            return Ok(DiscoveryOutcome::AwaitingManualInitialization);
         }
         let applied = state.as_ref().map(|state| state.applied_sesno).unwrap_or(0);
         let confirmed_empty_baseline_sesno = state
@@ -4124,7 +4250,7 @@ impl AiosDBManager {
         let mut queued_applied = applied;
         if file_latest_sesno <= applied {
             if file_latest_sesno != applied || applied == 0 {
-                return Ok(None);
+                return Ok(DiscoveryOutcome::UpToDate);
             }
             let has_any_data = crate::data_interface::manual_update::dbnum_has_any_pe_row(db_num)
                 .await
@@ -4134,7 +4260,7 @@ impl AiosDBManager {
                 has_any_data,
                 confirmed_empty_baseline_sesno,
             ) {
-                return Ok(None);
+                return Ok(DiscoveryOutcome::UpToDate);
             }
             println!(
                 "发现追平幽灵水位: {file_name}, db_type={db_type}, applied_sesno={applied}，\
@@ -4161,7 +4287,7 @@ impl AiosDBManager {
                 queued_applied + 1,
                 file_latest_sesno,
             );
-        Ok(Some(
+        Ok(DiscoveryOutcome::Batch(
             crate::data_interface::batch_scheduler::DiscoveredBatch {
                 project: project.to_string(),
                 dbnum: db_num,

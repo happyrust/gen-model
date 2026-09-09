@@ -142,13 +142,25 @@ _Avoid_: 增量范围（泛指时）、MDB 范围（当指监听限定域时）�
 把增量摄入的主 DESI 数据批次收窄到指定 dbnum 的调试开关（`DbOption.toml` 的 `watch_dbnums`，命令行 `serve --watch-dbnum` 压过它）。它限制的是范围、便于调试，不是生产形态的服务边界；但**初始化启动同样受它约束**——限定时启动的数据摄入、模型凭证复核与派生工作只覆盖域内的库，未限定时启动照常覆盖全部候选库。它叠在**本期执行范围**之上而不是替代它：有效范围是两者的交集（d-25），域外的库在 sweep 里落「监听限定跳过」那个桶，**不**进「不在 MDB 声明名单里」也**不**进「声明了却没解析到文件」那两句——它们不是没文件、不是不在名单，是本轮没有问过。SYS meta（SYST/DICT/GLB/GLOB）不受限；两者都没给时判定与引入前逐位相同。监听限定域不是依赖隔离域：被监听 DESI 的生成根实际引用到的 CATA 文件仍参与身份与项目优先级裁决，但 CATA 只从文件读（`ModelTarget.catalogue` 文件身份摘要与 `E3dDbResolver`），不解析进持久层。与**调试限定域 (Debug Scope)**（`--debug-dbnum`，只能从命令行来、额外带六个裁决点的链路追踪）是两个独立开关，与已被剥夺增量否决权的 `manual_db_nums` / `exclude_db_nums` 无关。三种「跳过」（MDB 范围判定 / 调试限定 / 监听限定）在日志、回执与 `/health` 上各有各的嗓音，不得混同。
 _Avoid_: 监听白名单、dbnum 过滤、增量范围（指 MDB 声明范围时）、watch 名单、服务边界（它不是）
 
+**初始化准入门 (Initialization Admission Gate)**：
+自动发现要不要收**从未初始化**库（任何来源都解析不出应用水位，`initialized = false`）的那道门
+（`DbOption.toml` 的 `auto_initialize_new_dbnums`，**默认 false**；环境变量
+`AIOS_AUTO_INITIALIZE_NEW_DBNUMS` 双向可压，`serve --auto-initialize-new-dbnums` 单次打开）。全部自动
+发现路（启动重扫 / 周期对账 / watch 文件事件 / scope-refresh / 共享盘重挂）共用 `discover_batch` 里的
+单点判定 `automatic_discovery_admits`：已初始化 ∨ 开关开 ∨ 已在队列，三者皆否才拦（已入队的行不被
+后续重扫撤下——接受了的手动初始化要活过 Meta → Design 清单刷新）。默认形态下新库不入队：重扫收尾
+汇总一句、`/health` 点名最近一轮拦下的库（重扫快照，整面覆写、子集补挂只并入）、`/dbnums` 逐行标
+`awaiting_manual_initialization`（按水位现算），由 plant-ui 手动预览 / 执行（`/update/preview` +
+`/update/execute`，不看本门）或规格工具（`bin/initialize_ams_dbnums`）初始化。开着时是历史行为：重扫
+把新库按首次导入自动入队（`needs_initial_load` → `initialize_dbnum_baseline`）。它门的是**冷初始化
+准入**：不是范围（MDB 声明 / 监听限定域）、不是消费（`startup_autorun` / 增量阶段控制）；已初始化库
+的维护（增量窗口、回退重建 Reinitialize、幽灵水位修复）与按需 ensure 一概不归它管；SYS meta 不豁免
+——全新部署由一次手动全范围执行引导（SYS meta 永远随批）。
+_Avoid_: 新库自动初始化开关（当指这道门时，词条以此为准）、初始化白名单、冷启动开关、把 `startup_autorun` 当它用、把它当范围定义
+
 **模型增量类型限定 (Model Incremental Type Scope)**：
 把**模型增量的消费**圈到指定类型生成根的调试开关（`DbOption.toml` 的 `model_incremental_types = ["BRAN", "EQUI"]`，环境变量 `AIOS_MODEL_INCREMENTAL_TYPES=BRAN,EQUI` 压过它；不写 / 空表 = 不限类型，判定与引入前逐位相同）。它是**消费门，不是计划门**：`model_update_pending` 里只有 `regen_root` / `delete_cleanup` 两种行按 `noun` 放行，名单外类型的根照常规划、照常入队、`gen_root` 照常标 stale，只是留在队列里不被本进程认领——因此凭证不前移、重启后随退化窗口重排、名单一撤即照常消费；在计划层摘掉工作项反而是错的（不标 stale = 下一窗给陈旧几何前移凭证，且永不回补）。数据增量（窗口收集、`pe` / `ATT_*` 写回、水位推进）一律不受影响；`Transform`、`CascadeExpand`、`PostRegenAabb`、房间任务、按需 `ensure` 与 noun 未知（空）的行不看名单。与**监听限定域**（按库圈数据批次与模型工作单，动数据面）、**最小交付单元**配置 `delivery_unit_types`（决定生成根怎么选，改变根的归并）三者互不代替。护栏与监听限定同一套：启动横幅、`/health` 的 `model_incremental_types` 栏与 `model_update_pending.held_by_model_incremental_types` 计数、preview / execute 回执 `warnings`、数据窗口计划 `warnings` 按类型点名本窗暂扣的根、worker 空闲轮首次一句，都点名配置键与来源，且措辞与监听限定 / MDB 范围判定无交集。
 _Avoid_: 模型类型过滤、noun 白名单、类型筛选、MDU 限定（指 `delivery_unit_types` 时）、模型范围（指监听限定域时）
-
-**新库自动初始化开关 (Auto-Initialize New Dbnums)**：
-自动发现路径对**从未初始化**库（解析不出应用水位，`initialized = false`）的冷初始化准入开关（`DbOption.toml` 的 `auto_initialize_new_dbnums`，**默认 false**；环境变量 `AIOS_AUTO_INITIALIZE_NEW_DBNUMS` 双向可压，`serve --auto-initialize-new-dbnums` 单次打开）。关着（缺省）时启动重扫、watch 事件与 scope-refresh 只维护已初始化库，从未初始化的库不入队、在 `/dbnums` 上标 `awaiting_manual_initialization`，由 plant-ui 走手动预览 / 执行（`/update/preview`、`/update/execute`）或规格工具（`bin/initialize_ams_dbnums`）初始化——手动路径不看这个开关；已入队的行不被后续重扫撤下（`already_queued` 放行，接受了的手动初始化要活过 Meta → Design 的清单刷新）。开着时是历史行为：重扫把新库按首次导入自动入队（`needs_initial_load` → `initialize_dbnum_baseline`）。它门的是**冷初始化准入**，不是范围（那是 MDB 声明与监听限定域）也不是消费（那是 `startup_autorun` / 增量阶段控制）；回退重建（Reinitialize）与幽灵水位属**已初始化库的维护**，不受它门控。
-_Avoid_: 初始化白名单、冷启动开关、把 startup_autorun 当它用、把它当范围定义
 
 **候选库文件 (Candidate Database File)**：
 监控目录里被认可为「一个 AVEVA 库文件」的物理文件：既不在扩展名/系统文件黑名单里，文件名又合 AVEVA 库命名（三位项目前缀 + 库号[ + 四位序号]，或 `<前缀>sys/com/mis`）。判定只看名字，不读文件头。人手复制的副本（`… copy`、`…_old`、带日期后缀的备份）与正本头部一字不差，只有命名规则分得开它们；把副本当候选会让同一个 `dbnum` 拿到多个候选而整库被判「同号重复」阻断。同项目主库（无后缀）与唯一 `_NNNN` 抽取是抽取树的父层与叶子，归并成一个逻辑库，不是同号重复；多个 `_NNNN` 仍是 Duplicate。自动发现与手动扫描必须共用同一个判定。

@@ -2,6 +2,35 @@
 
 ## 2026-09-09
 
+### 初始化准入门的嗓音收口：重扫汇总一句 + /health 点名最近一轮拦下的库（含方案与词条并轨）
+
+方案 `docs/plans/2026-09-09-new-dbnum-manual-init-default-plan.md`（Plannotator 审阅通过）对下面
+「新库冷初始化收口为开关」那条的收尾：门与开关本体见那条；本条补可见性与文档，并把两会话同日
+各记的同义词条并成一条。
+
+- **重扫收尾汇总**：`discover_batch` 的三种结局拆成 `DiscoveryOutcome::{Batch, UpToDate,
+  AwaitingManualInitialization}`——「拦下等手动初始化」不再与「水位已覆盖」折叠在同一个 `Ok(None)`
+  里；被拦的库进桶，重扫收尾汇总一句「N 个库从未初始化，本轮自动发现不入队…」（对齐 out_of_scope /
+  watch_excluded / debug_excluded 各说各话，不逐库刷屏——原先门内那句逐库日志随之删除）。
+- **/health 点名**：两个分支新增 `awaiting_manual_initialization`（最近一轮重扫快照：整面覆写**含空轮
+  清空**——手动初始化完成后下一轮自然熄掉；share-remount 子集补扫只并入，它没看其余目录、没资格清
+  别人）。逐库真值仍以 `/dbnums.awaiting_manual_initialization` 为准（按水位现算，不依赖重扫跑过）。
+- **词条并轨**：CONTEXT.md 两条同义词条（「初始化准入门」/「新库自动初始化开关」）并成
+  「初始化准入门 (Initialization Admission Gate)」一条，后者进 _Avoid_；下面那条的词汇表行已同步改口。
+- 钉：`the_awaiting_manual_init_snapshot_replaces_on_full_sweeps_and_merges_on_subsets`（快照整面/子集
+  两种语义）、`the_sweep_gives_the_initialization_admission_gate_its_own_voice`（桶 → 快照 → 汇总 →
+  「声明了却没文件」顺序、快照更新不许挂在非空门底下——空轮覆写正是清 /health 那一格的一步）、
+  `health_names_the_dbnums_awaiting_manual_initialization`（两分支同一快照源，不许各自手搓）。
+- 验证：全量 `cargo test --lib -- --skip damaged_` 首跑 **1955 passed / 3 failed / 134 ignored**（26.8 s）
+  ——3 个失败均为启动房间段源码钉（`the_startup_path_asks_the_gate_before_rebuilding_rooms`、
+  `startup_reconciles_models_before_waiting_for_data_and_keeps_rooms_last`、
+  `the_degraded_data_wait_skips_model_wait_and_rooms_and_is_named_on_the_banner`）：`lib.rs` 与 HEAD
+  逐字相同、钉的标记（`skip_startup_room_build().await` 等）在 HEAD 启动段里已不存在，属房间流在途
+  重排的既有欠账、与本条无关。处置（用户 2026-09-09 拍板）：三钉挂 `#[ignore]`（理由指回 T4 工单
+  T4.2 与 mem-107，随反向重钉一并按新启动形状重钉或删除，别让 ignore 长住），T4 工单 T4.2 加
+  「顺带欠账」一行；复跑全量 **1955 passed / 0 failed / 137 ignored**（26.5 s）。定向 5 条全绿；
+  `rustfmt --edition 2024 --check` 对本轮改动行干净（两文件其余漂移属别的会话在途区，未动）。
+
 ### 本地发布一键脚本 `New-LocalRelease.ps1` + `ams-local-0.1.19-full` 一体化发布包
 
 把 09-09 上午手工拼的 0.1.19 发布包沉淀成脚本化流程（9 项裁决全按推荐拍板：包内已验证 exe、全资源档、一体化布局、独立 CHANGELOG、`-full` 命名、本机 PowerShell 全链路、拒覆盖 + changelog 缺版只警告、冲烟门不静默放行）：
@@ -18,7 +47,7 @@
 - **准入门**：`automatic_discovery_admits(initialized, auto_initialize_new_dbnums, already_queued)`——已初始化库照旧维护（增量窗口、回退重建、幽灵水位都是旧库维护，不受门控）；已入队的行放行（接受了的手动初始化要活过 Meta → Design 清单刷新）；从未初始化的库缺省落「等待前端手动初始化」一声、不入队。门只在 `discover_batch` 一处，重建批次（Rollback → Reinitialize）那条绕行路不属于冷初始化。
 - **手动路径不看开关**：plant-ui `/update/preview` + `/update/execute`（ADR-020 的 dbnum 子集照常可点名新库）与规格工具 `bin/initialize_ams_dbnums` 照常初始化；`/dbnums` 每行新增 `awaiting_manual_initialization`（未初始化 ∧ 未排除 ∧ 在项目里 ∧ 开关关着），`/health` 两个分支都露最终生效值。
 - **live 钉改口**（开关落地时三条 live 用例还钉着旧缺省「全程不需要人工放行」）：`live_startup_sweep_baselines_a_never_parsed_db` 改两拍——第一拍缺省 false 重扫不入队，第二拍开关打开走全量基线；`live_startup_sweep_routes_a_new_db_to_baseline_beside_an_applied_one` 与 `live_scope_refresh_baselines_a_db_the_mdb_just_declared` 显式开着开关，各自只钉路由分家 / MDB 范围门。测试侧进程内覆盖 `AutoInitializeNewDbnumsOverride`（形状同 `RoomIncrementalOverride`：`set_var` 在 2024 edition 是数据竞争，CLI 那个 OnceLock 又翻不回来）。
-- **词汇表**：CONTEXT.md 增「新库自动初始化开关」词条——它门的是冷初始化准入，不是范围（MDB 声明 / 监听限定域）也不是消费（`startup_autorun` / 增量阶段控制）。
+- **词汇表**：CONTEXT.md 增「初始化准入门 (Initialization Admission Gate)」词条（两会话同日各记了一条同义词条，已并成这一条；「新库自动初始化开关」进 _Avoid_）——它门的是冷初始化准入，不是范围（MDB 声明 / 监听限定域）也不是消费（`startup_autorun` / 增量阶段控制）。
 - 验证：全量 `cargo test --lib -- --skip damaged_` **1955 passed / 0 failed / 134 ignored**（25.9 s，rustfmt 后复跑同绿）；定向 `automatic_discovery_keeps_existing_databases_and_cold_databases_are_opt_in` + `new_dbnum_initialization_requires_explicit_opt_in` 2 passed；`rustfmt --edition 2024 --check` 对 `options.rs` / `increment_manager.rs` 全文件干净。**未验证**：三条 live 用例要 testbed（E3D 项目夹具 + Surreal），本轮到编译与断言改写为止。
 
 ### T4.1 房间收尾搬进 `fast_model::room_task`（S8 模块搬家，行为不变）

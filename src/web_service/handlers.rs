@@ -739,6 +739,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "queue_paused": crate::data_interface::batch_scheduler::BatchScheduler::global().is_paused(),
             "startup_autorun": crate::options::startup_autorun(),
             "auto_initialize_new_dbnums": crate::options::auto_initialize_new_dbnums(),
+            "awaiting_manual_initialization": crate::data_interface::increment_manager::awaiting_manual_initialization_snapshot(),
             "data_incremental": crate::options::data_incremental(),
             "model_incremental": crate::options::model_incremental(),
             "room_incremental": crate::options::room_incremental(),
@@ -955,6 +956,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 真的死了（worker_alive）。少了中间这个字段，前两种在接口上分不出来。
         "startup_autorun": crate::options::startup_autorun(),
         "auto_initialize_new_dbnums": crate::options::auto_initialize_new_dbnums(),
+        // 初始化准入门最近一轮重扫拦下的库（进程内快照，不读库）。「服务健康、队列
+        // 空、新库就是不动」少了这一格只能翻 sweep 日志；逐库真值（按水位现算）在
+        // /dbnums 的 awaiting_manual_initialization。开关打开或没有新库时是空数组。
+        "awaiting_manual_initialization": crate::data_interface::increment_manager::awaiting_manual_initialization_snapshot(),
         // 三段增量的最终生效值（含环境变量覆盖）。顺序依赖由 worker 的共享阶段门
         // 保证；这里拆成三个平铺字段，面板不用猜「没活」还是「阶段关闭」。
         "data_incremental": crate::options::data_incremental(),
@@ -3303,6 +3308,36 @@ mod tests {
         assert_eq!(
             health_status(&[], &["model_drain.page_starved"]),
             "degraded"
+        );
+    }
+
+    /// 初始化准入门（`auto_initialize_new_dbnums`，默认 false）：/health 除了报开关
+    /// 生效值，还要点名最近一轮重扫拦下的库——「服务健康、队列空、新库就是不动」
+    /// 少了这一格就只能去翻 sweep 日志。镜像降级早退与正常两个分支都要带，且都
+    /// 必须走同一个重扫快照，不许各自手搓。
+    #[test]
+    fn health_names_the_dbnums_awaiting_manual_initialization() {
+        let source = include_str!("handlers.rs");
+        let health = source
+            .split_once("pub async fn health(")
+            .expect("health exists")
+            .1
+            .split_once("pub async fn update_preview(")
+            .expect("health end exists")
+            .0;
+        assert_eq!(
+            health
+                .matches("\"awaiting_manual_initialization\":")
+                .count(),
+            2,
+            "health 的两个分支都要带 awaiting_manual_initialization"
+        );
+        assert_eq!(
+            health
+                .matches("awaiting_manual_initialization_snapshot()")
+                .count(),
+            2,
+            "两个分支都必须走同一个重扫快照"
         );
     }
 
