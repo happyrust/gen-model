@@ -100,12 +100,16 @@ jobs:
           repository: happyrust/plant-mbd
           token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
           path: vendor/plant-mbd
+      # aios_core 的在途工作在 codex/libgm-snout-caliber 分支上（Cargo.toml [patch]
+      # 用本地树、git 依赖 rev 钉在该分支提交），checkout 必须跟着这条分支走，
+      # 不能拿 main。分支合回 main 后把这里的 ref 拿掉。
       - name: Check out vendor/old-aios-core
         uses: actions/checkout@v6
         with:
           repository: happyrust/old-aios-core
           token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
           path: vendor/old-aios-core
+          ref: codex/libgm-snout-caliber
 
       - name: Install Python
         uses: actions/setup-python@v6
@@ -337,12 +341,14 @@ jobs:
           repository: happyrust/plant-mbd
           token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
           path: vendor/plant-mbd
+      # 同上：aios_core 在途工作在 codex/libgm-snout-caliber 分支上。
       - name: Check out vendor/old-aios-core
         uses: actions/checkout@v6
         with:
           repository: happyrust/old-aios-core
           token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
           path: vendor/old-aios-core
+          ref: codex/libgm-snout-caliber
 
       - name: Install Python
         uses: actions/setup-python@v6
