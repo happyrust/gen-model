@@ -10,6 +10,8 @@ mod handlers;
 /// MBD 管道尺寸标注端点（`/api/mbd/v2/pipe/{refno}`，前端契约路径，不在 `/api/v1` 下）。
 pub mod mbd;
 pub mod mesh_glb;
+/// 配置向导（`/setup.html` + `/api/v1/setup/*`）与「设置模式」最小启动臂。
+pub mod setup;
 mod ws;
 
 use std::path::PathBuf;
@@ -408,16 +410,35 @@ pub async fn serve(
         // 显式路由压过下面的 ServeDir 兜底：磁盘上没有这个文件时也要有面板，
         // 而它自己会先去 ServeDir 同一个目录里找一次，所以有文件时结果不变。
         .route("/ops.html", get(handlers::ops_panel))
+        // 首页过首跑闸：哨兵 `.first-run-pending` 在场时 302 到 /setup.html，
+        // 不在场时原样交给 plant-ui 静态兜底（向导完成删哨兵，无需重启即恢复）。
+        .route("/", get(setup::root_gate))
         // 完整 plant-ui WASM 包编译进当前服务；同路径的磁盘副本仍优先，便于现场替换
         // 配置、网格和前端包。API 路由都在 fallback 之前注册，不会被静态处理吞掉。
         .fallback(get(handlers::plant_ui_web))
         .layer(build_cors(cors_origins))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
+    // setup 面（配置读写 / 探测 / 重启 / /setup.html）带自己的小状态，正常模式在这里
+    // 合进来；设置模式（lib.rs 最小启动臂）单独用它成军。回环闸在 handler 内按对端判。
+    let bound_port = addr
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .map(|parsed| parsed.port());
+    let app = app.merge(setup::router(setup::SetupCtx::new(
+        "normal",
+        ui_root.clone(),
+        bound_port,
+    )));
 
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+    // 交接窗口内重试绑定：restart 口的父进程还有零点几秒才交出端口。
+    let listener = setup::bind_with_handoff(addr).await?;
     println!("Web 服务已启动: http://{addr}/api/v1 （地址由 DbOption.toml 的 http_api_addr 配置）");
-    axum::serve(listener, app).await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
     Ok(())
 }
 

@@ -572,6 +572,30 @@ _Avoid_: 数据包、库包、离线数据（这些会误读成含库数据）�
 
 # 冒烟门 (Smoke Gate)
 
-本地发布组包后、压 zip 前的一道自动校验：把包内服务拉起来，`health` 200 + 首页含 `plant_ui_app.js` 才算过。默认以 `spawned-mem`（自带内存库、不依赖外部 8010）跑，自足可判。端口被占或起不来则跳过并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
+本地发布组包后、压 zip 前的一道自动校验，**两腿**（ADR-069 D8）：A 腿以出厂配置起包内服务，`/health` 报 `mode:"setup"` 且 `/setup.html` 含向导标记才算过（考「新机器解压第一步」）；B 腿以本机真配置全启动，`health` 200 + 首页含 plant-ui 或向导页才算过（默认 `spawned-mem`，自带内存库、不依赖外部 8010）。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
 
 _Avoid_: 冒烟测试（泛指）、健康检查（那是运行期 `/health`，不是发布门）、验收（那是 Live E2E Testing）。
+
+# 配置向导 (Setup Wizard)
+
+exe 内嵌的单文件页 `/setup.html`（磁盘副本优先，模式同 `/ops.html`）：五步引导——①数据源（项目目录探测）→②存储（连通 + 版本硬闸）→③服务（端口预检）→④生成与监听（初始化两档单选）+ 保存并重启 →⑤初始化（复用 `/dbnums` + `/update/preview` + `/update/execute` 的薄壳）。配置真值仍是 `DbOption.toml` 文件（`toml_edit` 外科手术写盘，注释与未知键保留，先落 `.bak`）；`/api/v1/setup/*` 按 **TCP 对端**回环限定，对外暴露须另加认证（ADR-069 D4 硬边界）。
+
+_Avoid_: 安装向导（没有安装动作）、配置中心 / 配置页（真值在文件，不在服务里）、首跑向导（向导也服务于日常改配置）。
+
+# 设置模式 (Setup Mode)
+
+启动臂的一档：**配置无效**（`project_path` 缺 / 不存在，或 `external` 且 `v_ip` 空 / `v_port=0` 哨兵）时，进程不连库、不扫描、不起 watcher / 队列，只绑 HTTP 供配置向导与 `/health`（`mode:"setup"`）。判据是配置文件自身的形状，**不做网络探测**——库地址填了但连不上照旧走正常启动失败，不盖真故障。配置修好经重启口交接后，新进程自然走正常启动。
+
+_Avoid_: 安全模式 / 降级模式（正常启动链的失败语义没改）、维护模式（没有这一档）。
+
+# 首跑哨兵 (First-Run Marker)
+
+workspace 里的 `.first-run-pending` 文件：在场 = 向导没走完，首页 `/` 302 到 `/setup.html`；向导「完成」时删除（幂等，删了无需重启即恢复正常首页）。由 `New-LocalRelease.ps1` 组包时落下。**只管跳转，不影响启动臂**——向导中途重启后要正常启动才能初始化，这是它与「设置模式」必须拆成两个判据的原因（ADR-069 D3）。
+
+_Avoid_: 锁文件（不互斥任何东西）、初始化标记（初始化完成与否由库水位说了算，不由它）。
+
+# 引导子集 (Guided Subset)
+
+配置向导管的那部分 `DbOption.toml` 键：`project_path` / `included_projects` / `project_name` / `mdb_name` / `module` / `project_code` / `surreal_ns` / `store_mode` / `v_ip` / `v_port` / `http_api_addr` / `gen_model` / `gen_mesh` / `watch_dbnums` / `manual_db_nums`。向导的职责是「把非改不可的引导完」，不是替代 toml——子集之外的键留给手改（`PUT /api/v1/setup/config` 也只认这个子集，`deny_unknown_fields`）。
+
+_Avoid_: 全量配置编辑器、配置模板（那是出厂模板，另一个东西）。

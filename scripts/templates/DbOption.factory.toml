@@ -1,0 +1,126 @@
+# ============================================================================
+# AMS 本地发布包 · 出厂配置模板（DbOption.factory.toml）
+#
+# 这份是「还没配置」的形态：project_path 留空、库地址留空（v_port 用哨兵值 "0"，
+# 它是数字字段，写空串会让配置整个读不动）。服务用这份配置启动会进「设置模式」——
+# 只起 HTTP 供 http://127.0.0.1:9099/setup.html 配置向导，配好保存并重启后进入正常服务。
+# 不想用向导的，直接改本文件再重启也一样：真值永远是这份文件。
+# ============================================================================
+
+#同步文件配置（缺省形态，向导不管这几项）
+total_sync = false
+incr_sync = false
+sync_history = false
+enable_log = false
+sync_graph_db = false
+sync_versioned = false
+sync_tidb = false
+sync_localdb = false
+sync_live = true
+replace_dbs = false
+sync_chunk_size = 100_0000
+
+#项目设置 —— 向导第①步填这里
+# E3D 项目根目录（装着各项目子目录的那一层），如 "D:/AVEVA/Projects/E3D3.1"
+project_path = ""
+included_projects = []
+catalogue_project_priority = []
+mdb_name = "ALL"
+project_name = ""
+project_code = 0
+surreal_ns = 0
+module = "DESI"
+
+#是否生成模型数据 —— 向导第④步「初始化档位」写这两项（只导数据=false / 一步到位=true）
+gen_model = false
+gen_mesh = false
+gen_history_model = false
+save_db = true
+mesh_tol_ratio = 3.0
+apply_boolean_operation = true
+#是否生成房间树
+gen_spatial_tree = false
+load_spatial_tree = false
+save_spatial_tree_to_db = true
+gen_model_batch_size = 100
+pe_chunk = 500
+att_chunk = 200
+
+#arangodb 配置（未使用的旧集成，保留缺省）
+arangodb_database = "ams"
+multi_threads = false
+only_sync_sys = false
+arangodb_url = "http://127.0.0.1:8529"
+rebuild_ssc_tree = false
+arangodb_user = "root"
+arangodb_password = ""
+
+#tidb 配置（未使用的旧集成，保留缺省）
+ip = "127.0.0.1"
+user = "root"
+password = "root"
+port = "3306"
+sql_threads_number = 50
+batch_insert_sql_cnt = 100
+
+#版本服务配置（SurrealDB）—— 向导第②步填这里
+v_ip = ""
+v_user = "root"
+v_password = "root"
+# "0" = 未设置（哨兵；这一格是数字，不能写空串）。连已有库填真实端口，如 "8010"。
+v_port = "0"
+# 缺省 external：连 v_ip:v_port 上已经在跑的 SurrealDB（必须本包 workspace\bin 的 fork 2.1.x）。
+# 试用/演示可改 "spawned-mem"：服务自带内存库，数据不落盘。
+store_mode = "external"
+
+#服务器启动配置 —— 向导第③步；0.0.0.0 = 局域网可访问（配置向导页仍只许本机打开）
+server_release_ip = "0.0.0.0:9099"
+http_api_addr = "0.0.0.0:9099"
+
+#消息队列（未使用，保留缺省）
+mqtt_host = "127.0.0.1"
+mqtt_port = 1881
+
+location = ""
+
+remote_file_server_hosts = [""]
+file_server_host = ""
+
+#调试选项（缺省形态）
+save_model_mesh_to_graph_db = true
+need_sync_refno_basic = false
+reset_mdb_project = false
+only_update_dbinfo = false
+debug_print_world_transform = false
+only_rebuild_pdms_element = false
+
+debug_refno_types = []
+manual_db_nums = []
+# 空 = 不限制增量监听范围（本 MDB 声明的全部设计库）
+watch_dbnums = []
+location_dbs = []
+included_db_files = []
+plat_url = ""
+
+#puhua（未使用的旧集成，保留缺省）
+puhua_database_ip = "localhost:3306"
+puhua_database_user = "root"
+puhua_database_password = "root"
+
+replace_mesh = true
+room_key_word = ["-RM"]
+
+# 增量三开关：缺省全开
+data_incremental = true
+model_incremental = true
+room_incremental = true
+
+# 文件身份冲突只记录并跳过，不阻断其它库初始化。
+block_file_identity_conflicts = false
+
+model_concurrency_mode = "adaptive"
+model_regen_claim_page = 100
+model_post_regen_aabb_page = 256
+model_regen_execution_group = 16
+model_root_inflight_max = 4
+model_full_rebuild_enabled = true

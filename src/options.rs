@@ -1955,6 +1955,28 @@ fn config_path_candidates(configured: Option<OsString>) -> Vec<PathBuf> {
     candidates
 }
 
+/// 本进程实际在读的那份 `DbOption.toml` 的路径。
+///
+/// setup 面（`/api/v1/setup/*`，计划 2026-09-09-setup-wizard-web-frontend.md）要改的
+/// 就是这一份——候选口径必须与 [`read_ext_fields`] 逐字相同（`DB_OPTION_FILE` 字面
+/// 路径，无扩展名时补 `.toml`），否则「向导写的」和「服务读的」会是两个文件，改完
+/// 重启什么都没变。取第一个**存在**的候选；都不存在给候选头一个（`DbOption` 相对
+/// 运行目录），此时读端本来也会在 `aios_core::get_db_option()` 上失败，setup 写口
+/// 留这个路径是为了能把文件建出来。
+pub fn active_config_path() -> PathBuf {
+    let candidates = config_path_candidates(std::env::var_os("DB_OPTION_FILE"));
+    candidates
+        .iter()
+        .find(|candidate| candidate.exists())
+        .cloned()
+        .unwrap_or_else(|| {
+            candidates
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| PathBuf::from("DbOption.toml"))
+        })
+}
+
 // `watermark_realign` 档位（off/check/rebaseline，2026-08-12 引入）随 ADR-021
 // 移除：回退的默认且唯一处置是「worker 冻结点复核后整库清空重建」，档位剩下的
 // 「先别动我看看」由 startup_autorun / 队列暂停承担（清库只发生在 worker 出队

@@ -82,6 +82,35 @@ fn open_process_instance_lock(path: &std::path::Path) -> std::io::Result<File> {
         .open(path)
 }
 
+/// 重启交接窗口内重试拿锁（`/api/v1/setup/restart`，计划 2026-09-09 向导 §5）：
+/// 父进程 spawn 完子进程还有零点几秒才退出，deny-share 句柄随退出才释放；子进程
+/// 带着 `AIOS_RESTART_HANDOFF` 在窗口内重试，别因为抢跑一步就报「已有实例」死掉。
+/// 窗口外（平时）一次失败就是失败，语义不变。
+#[cfg(feature = "http_api")]
+fn open_lock_within_handoff_window(path: &std::path::Path) -> std::io::Result<File> {
+    // 截止时刻只算一次：窗口是「从现在起最多 10 秒」，每轮重算就成了永不到期。
+    let deadline = crate::web_service::setup::handoff_deadline();
+    loop {
+        match open_process_instance_lock(path) {
+            Ok(file) => return Ok(file),
+            Err(error) => {
+                if let Some(deadline) = deadline
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                    continue;
+                }
+                return Err(error);
+            }
+        }
+    }
+}
+
+#[cfg(not(feature = "http_api"))]
+fn open_lock_within_handoff_window(path: &std::path::Path) -> std::io::Result<File> {
+    open_process_instance_lock(path)
+}
+
 /// The Unix branch's whole body, compiled on every platform on purpose: the
 /// development and CI machines are Windows, and ISSUE-023 happened precisely
 /// because the non-Windows code (`Ok(())`) and its tests never got built
@@ -189,7 +218,7 @@ pub fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()>
     let held = PROCESS_INSTANCE_LOCK.get_or_init(|| {
         let path = process_instance_lock_path()
             .ok_or_else(|| "未解析到运行目录（CWD），单实例锁无处可放".to_string())?;
-        let mut file = open_process_instance_lock(&path).map_err(|error| {
+        let mut file = open_lock_within_handoff_window(&path).map_err(|error| {
             format!(
                 "这个运行目录已有 gen-model 实例，或单实例锁不可访问（{}）: {error}",
                 path.display()
@@ -1902,6 +1931,16 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     // local store or loading mutable process-global spatial state. `run_cli`
     // repeats this call deliberately; OnceLock makes that check idempotent.
     acquire_process_instance_lock(&db_option)?;
+    // 设置模式（配置向导，计划 2026-09-09-setup-wizard-web-frontend.md / ADR-069）：
+    // 配置无效（project_path 缺/不存在，或 external 且库地址留空——出厂模板正是这个
+    // 形态）时，下面的连库与监控目录解析必死，而且死在 HTTP 起来之前，向导页根本
+    // 送不出去。所以在这里拐进最小启动臂：不连库、不扫描，只绑 HTTP 供 /setup.html
+    // 与 setup API；配置修好经 restart 口交接后，新进程自然走正常启动。
+    // 库地址**填了但连不上**不算配置无效——那照旧走下面的正常失败，不盖真故障。
+    #[cfg(feature = "http_api")]
+    if let Some(reason) = crate::web_service::setup::setup_mode_reason(&db_option) {
+        return crate::web_service::setup::run_setup_mode(reason).await;
+    }
     #[cfg(feature = "ws")]
     if crate::options::data_face().is_read_through() {
         return run_read_through_core(db_option).await;

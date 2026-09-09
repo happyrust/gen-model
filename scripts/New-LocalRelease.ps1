@@ -24,8 +24,13 @@
     版本纪律（Q8）：版本号以两仓 Cargo.toml 为准；输出 zip 已存在则拒绝执行（-Force 覆盖）；
     CHANGELOG 找不到当版条目时只警告、不中止。releases 目录不自动清理旧版。
 
-    冒烟门（Q9）：组包后把包内服务拉起来校验；端口被占或起不来则跳过并在 release.json / 产物名旁
-    标「未冒烟」，不静默放行（-StrictSmoke 可改为起不来即中止、不出包）。
+    出厂形态（2026-09-09 向导计划 Q10/Q15/Q16）：包内 workspace\DbOption.toml 是出厂模板
+    （scripts\templates\DbOption.factory.toml：project_path 空、external 且 v_port="0" 哨兵、
+    监听 0.0.0.0:9099），另落 .first-run-pending 首跑哨兵——解压首跑自动进 /setup.html 配置向导。
+
+    冒烟门（Q9，两腿）：A 腿出厂配置起服务考「设置模式 + 向导页」；B 腿本机配置全启动考
+    health + 首页。端口被占或起不来则跳过/失败并在 release.json / 产物名旁标「未冒烟」，
+    不静默放行（-StrictSmoke 改为任一腿失败即中止、不出包）。
 
     资源不进包的部分（见 ADR-068）：SurrealDB 数据目录与源模型不打入 zip。
 
@@ -162,10 +167,20 @@ else {
 if (-not (Test-Path -LiteralPath (Join-Path $webStage 'pkg\plant_ui_app_bg.wasm'))) {
     throw "web 组装后缺 pkg\plant_ui_app_bg.wasm，无法继续"
 }
+# 配置向导页的磁盘副本（exe 内嵌版兜底；磁盘版便于现场热替换——与 ops.html 同一套逻辑）
+$setupHtml = Join-Path $RepoRoot 'web\setup.html'
+if (Test-Path -LiteralPath $setupHtml) { Copy-Item -LiteralPath $setupHtml -Destination (Join-Path $webStage 'setup.html') -Force }
+else { Write-Warn2 "缺 $setupHtml —— 包内只有 exe 内嵌的向导页副本" }
 
 # ── 3. workspace\ 小资源（assets 不进暂存，组 zip 时从源直灌，省磁盘） ─────────
 Write-Step "组装 workspace\ 依赖资源（assets 延后直灌）"
-Copy-Item -LiteralPath (Join-Path $Workspace 'DbOption.toml') -Destination (Join-Path $wsStage 'DbOption.toml')
+# 出厂配置模板 + 首跑哨兵（计划 2026-09-09 向导 Q10/Q15/Q16）：包不再带本机配置快照。
+# 模板是「设置模式」形态（project_path 空、external 且 v_port="0" 哨兵、监听 0.0.0.0:9099），
+# 解压首跑自动进 /setup.html 配置向导；哨兵由向导「完成」时删除。
+$factoryConfig = Join-Path $scriptDir 'templates\DbOption.factory.toml'
+if (-not (Test-Path -LiteralPath $factoryConfig)) { throw "缺出厂配置模板：$factoryConfig" }
+Copy-Item -LiteralPath $factoryConfig -Destination (Join-Path $wsStage 'DbOption.toml')
+Set-Content -LiteralPath (Join-Path $wsStage '.first-run-pending') -Value ("shipped by New-LocalRelease " + (Get-Date -Format 'o')) -Encoding ascii
 foreach ($d in 'config', 'resource', 'search-index') {
     $src = Join-Path $Workspace $d
     if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $wsStage $d) -Recurse }
@@ -221,7 +236,8 @@ do {
     try {
         $health = Invoke-WebRequest -Uri ($url + 'api/v1/health') -UseBasicParsing -TimeoutSec 3
         $page = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 3
-        if ($health.StatusCode -eq 200 -and $page.Content.Contains('plant_ui_app.js')) {
+        # 首跑（哨兵在场）首页 302 到 /setup.html（含 ams-setup-wizard）；配置完成后是 plant-ui。
+        if ($health.StatusCode -eq 200 -and ($page.Content.Contains('plant_ui_app.js') -or $page.Content.Contains('ams-setup-wizard'))) {
             Write-Output "READY PID=$($process.Id) URL=$url"
             if (-not $NoBrowser) { Start-Process $url }
             exit 0
@@ -290,6 +306,14 @@ $readme = @"
 
 解压后双击 **Start-AMS.cmd**（或运行 Start-AMS.ps1）。服务就绪后自动打开 http://127.0.0.1:9099/ 。
 重复运行会复用本包已启动的进程；9099 被别的版本占用会明确报错，不打开错版本网页。
+
+## 首跑：配置向导
+本包出厂配置是「未配置」形态（``workspace\DbOption.toml`` 出厂模板 + ``.first-run-pending`` 哨兵）。
+**第一次启动会自动进入配置向导**（浏览器打开的首页跳到 ``/setup.html``）：
+①选 E3D 项目目录与项目 → ②选存储（连已有 SurrealDB，或试用模式）→ ③定监听端口
+→ ④选「只导数据 / 一步到位」并保存重启 → ⑤勾库初始化。向导页只许在**本机**打开
+（局域网访问应用没问题，但改配置的接口只收 127.0.0.1 的请求）。
+不想用向导：直接改 ``workspace\DbOption.toml`` 后重启，并删掉 ``workspace\.first-run-pending``。
 
 ## 包内布局（一体化，解压即跑）
 - ``aios-database.exe`` —— 后端服务（gen-model $BackendVersion）
@@ -368,6 +392,10 @@ function Invoke-Smoke {
     # 跑出的日志/锁落在临时目录、不污染待打包的暂存目录。
     $smokeWs = Join-Path $env:TEMP ("ams-smoke-" + (Get-Date -Format 'yyyyMMddHHmmss'))
     Copy-Item -LiteralPath $wsStage -Destination $smokeWs -Recurse
+    # 全启动腿考的是「真配置 + 包内程序」：包里现在装的是出厂模板（设置模式形态），
+    # 这一腿换回本机 workspace 的配置、摘掉首跑哨兵；出厂形态由 Invoke-SetupSmoke 那一腿考。
+    Copy-Item -LiteralPath (Join-Path $Workspace 'DbOption.toml') -Destination (Join-Path $smokeWs 'DbOption.toml') -Force
+    Remove-Item -LiteralPath (Join-Path $smokeWs '.first-run-pending') -Force -ErrorAction SilentlyContinue
     $logDir = Join-Path $stage 'smoke-logs'
     New-Item -ItemType Directory -Force $logDir | Out-Null
     $env:DB_OPTION_FILE = Join-Path $smokeWs 'DbOption.toml'
@@ -409,24 +437,85 @@ function Invoke-Smoke {
     return $result
 }
 
+# 冒烟第二腿（计划 2026-09-09 向导 §7）：出厂配置 + 哨兵起服务，考「设置模式」面——
+# /api/v1/health 报 mode=setup、/setup.html 200 且含向导标记。这一腿不连库、不扫描，几秒就完。
+function Invoke-SetupSmoke {
+    $exe = Join-Path $stage 'aios-database.exe'
+    $listener = Get-NetTCPConnection -LocalPort 9099 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($listener) {
+        return [ordered]@{ status = 'skipped'; reason = "9099 被 PID $($listener.OwningProcess) 占用" }
+    }
+    $setupWs = Join-Path $env:TEMP ("ams-setup-smoke-" + (Get-Date -Format 'yyyyMMddHHmmss'))
+    New-Item -ItemType Directory -Force $setupWs | Out-Null
+    Copy-Item -LiteralPath (Join-Path $wsStage 'DbOption.toml') -Destination (Join-Path $setupWs 'DbOption.toml')
+    Set-Content -LiteralPath (Join-Path $setupWs '.first-run-pending') -Value 'setup-smoke' -Encoding ascii
+    $logDir = Join-Path $stage 'smoke-logs'
+    New-Item -ItemType Directory -Force $logDir | Out-Null
+    $env:DB_OPTION_FILE = Join-Path $setupWs 'DbOption.toml'
+    $env:PLANT_UI_WEB_ROOT = Join-Path $stage 'web'
+    Remove-Item Env:AIOS_STORE_MODE -ErrorAction SilentlyContinue
+    Remove-Item Env:AIOS_STARTUP_AUTORUN -ErrorAction SilentlyContinue
+    $proc = Start-Process -FilePath $exe -ArgumentList 'serve' -WorkingDirectory $setupWs -WindowStyle Hidden -PassThru `
+        -RedirectStandardOutput (Join-Path $logDir 'setup-smoke.stdout.log') -RedirectStandardError (Join-Path $logDir 'setup-smoke.stderr.log')
+    $result = [ordered]@{ status = 'failed'; reason = 'readiness timeout' }
+    $deadline = (Get-Date).AddSeconds(30)
+    try {
+        do {
+            $proc.Refresh()
+            if ($proc.HasExited) { $result.reason = "backend exited $($proc.ExitCode)"; break }
+            try {
+                $h = Invoke-WebRequest -Uri 'http://127.0.0.1:9099/api/v1/health' -UseBasicParsing -TimeoutSec 3
+                $p = Invoke-WebRequest -Uri 'http://127.0.0.1:9099/setup.html' -UseBasicParsing -TimeoutSec 3
+                if ($h.StatusCode -eq 200 -and $h.Content.Contains('"mode":"setup"') -and $p.Content.Contains('ams-setup-wizard')) {
+                    $result.status = 'passed'; $result.reason = 'health mode=setup + /setup.html 含向导标记'; break
+                }
+                if ($h.StatusCode -eq 200 -and -not $h.Content.Contains('"mode":"setup"')) {
+                    $result.reason = '起来了但不在设置模式（出厂配置该判「配置无效」）'; break
+                }
+            }
+            catch {}
+            Start-Sleep -Seconds 1
+        } while ((Get-Date) -lt $deadline)
+    }
+    finally {
+        if ($proc -and -not $proc.HasExited) { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue; Start-Sleep -Milliseconds 500 }
+        Remove-Item -LiteralPath $setupWs -Recurse -Force -ErrorAction SilentlyContinue
+    }
+    return $result
+}
+
+$setupSmoke = [ordered]@{ status = 'unknown'; reason = '' }
 if ($SkipSmoke) {
     $smoke = [ordered]@{ status = 'skipped'; reason = '-SkipSmoke'; url = $smoke.url; store_mode = $SmokeStoreMode }
+    $setupSmoke = [ordered]@{ status = 'skipped'; reason = '-SkipSmoke' }
     Write-Warn2 "冒烟门已跳过（-SkipSmoke）——产物标『未冒烟』"
 }
 else {
-    Write-Step "冒烟门：起服务（store_mode=$SmokeStoreMode，超时 ${SmokeTimeoutSeconds}s）"
+    Write-Step "冒烟门 A：出厂配置起服务 → 设置模式 + 向导页（超时 30s）"
+    $setupSmoke = Invoke-SetupSmoke
+    switch ($setupSmoke.status) {
+        'passed' { Write-Host "  [OK] 设置模式腿通过：$($setupSmoke.reason)" -ForegroundColor Green }
+        'skipped' { Write-Warn2 "设置模式腿跳过：$($setupSmoke.reason)" }
+        default { Write-Warn2 "设置模式腿未过：$($setupSmoke.reason)（看 $stage\smoke-logs\setup-smoke.*.log）" }
+    }
+    Write-Step "冒烟门 B：本机配置全启动（store_mode=$SmokeStoreMode，超时 ${SmokeTimeoutSeconds}s）"
     $smoke = Invoke-Smoke
     switch ($smoke.status) {
         'passed' { Write-Host "  [OK] 冒烟通过：$($smoke.reason)" -ForegroundColor Green }
         'skipped' { Write-Warn2 "冒烟跳过：$($smoke.reason) —— 产物标『未冒烟』" }
         default {
             Write-Warn2 "冒烟未过：$($smoke.reason)（看 $stage\smoke-logs）"
-            if ($StrictSmoke) { throw "冒烟未过且 -StrictSmoke，中止、不出包。" }
-            Write-Warn2 "非严格模式：仍出包，但标『未冒烟』。"
         }
     }
+    if ($StrictSmoke -and (($smoke.status -eq 'failed') -or ($setupSmoke.status -eq 'failed'))) {
+        throw "冒烟未过且 -StrictSmoke，中止、不出包。（A=$($setupSmoke.status) / B=$($smoke.status)）"
+    }
+    if (($smoke.status -eq 'failed') -or ($setupSmoke.status -eq 'failed')) {
+        Write-Warn2 "非严格模式：仍出包，但标『未冒烟』。"
+    }
 }
-$smoked = ($smoke.status -eq 'passed')
+$smoke.setup_leg = $setupSmoke
+$smoked = (($smoke.status -eq 'passed') -and ($setupSmoke.status -eq 'passed'))
 
 # ── 6. 组 zip + sha256 清单（assets 从源直灌，省磁盘） ───────────────────────
 $free = (Get-PSDrive (Split-Path $OutDir -Qualifier).TrimEnd(':')).Free

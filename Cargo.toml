@@ -1,6 +1,6 @@
 [package]
 name = "aios-database"
-version = "0.1.19"
+version = "0.1.20"
 edition = "2024"
 
 # Python 调试绑定（python/aios-py）与主 crate 同一个 workspace：
@@ -58,7 +58,7 @@ surreal_v2 = []
 project_hd = []
 project_hh = []
 profile = []                                                          #性能分析，包含tracing功能
-http_api = ["dep:axum", "dep:tower-http"]                             #前端Web服务(REST+WebSocket)
+http_api = ["dep:axum", "dep:tower-http", "dep:toml_edit"]            #前端Web服务(REST+WebSocket)
 rvm_verify = ["dep:rvm-rs"]                                           #RVM 基准对拍（rvm_verify 探针）
 
 [[bin]]
@@ -238,6 +238,10 @@ pollster = "0.4.0"
 async-std = "1.13.1"
 axum = { version = "0.8.9", features = ["ws"], optional = true }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"], optional = true }
+# 配置向导（/api/v1/setup）的写盘口：外科手术式改键，注释与未知键原样保留
+# （docs/plans/2026-09-09-setup-wizard-web-frontend.md Q12）。普通 `toml` 做不到——
+# 它 round-trip 会丢注释，而 DbOption.toml 的注释是决策史。
+toml_edit = { version = "0.22", optional = true }
 rmcp = { version = "=3.1.1", features = ["server", "transport-io"] }
 
 # ── 自研 crate 的本地重定向（默认关闭）────────────────────────────────────

@@ -75,7 +75,7 @@ dependencies = [
 
 [[package]]
 name = "aios-database"
-version = "0.1.19"
+version = "0.1.20"
 dependencies = [
  "aios_core",
  "anyhow",
@@ -150,6 +150,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "toml_edit 0.22.26",
  "tower-http",
  "tracing",
  "tracing-chrome",

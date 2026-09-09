@@ -2,6 +2,51 @@
 
 ## 2026-09-09
 
+### 首跑配置向导 `/setup.html` + 设置模式启动臂 + 出厂模板包形态（0.1.20）
+
+计划 `docs/plans/2026-09-09-setup-wizard-web-frontend.md`（两轮 16 问全按推荐拍板 + 两条补拍：
+出厂 external 空地址、默认监听全 0），口径 ADR-069（修订 ADR-068 的 D3 包内配置与 D6 冒烟门），
+CONTEXT.md 收「配置向导 / 设置模式 / 首跑哨兵 / 引导子集」四词条并改写「冒烟门」词条。
+解决的事：-full 包解压到新机器，配置是打包机快照，服务死在任何网页能送出去之前——现在解压
+首跑自动进浏览器向导，一步步配好再初始化。
+
+- **设置模式最小启动臂**（`lib.rs`）：配置无效（`project_path` 缺/不存在，或 `external` 且
+  `v_ip` 空 / `v_port=0` 哨兵）→ 不连库、不扫描、不起 watcher/队列，只绑 HTTP 供向导 +
+  `/health`（`mode:"setup"`）。**库地址填了但连不上不算**——照旧正常启动失败退出，不盖真故障。
+  首跑哨兵 `.first-run-pending` 只管 `/` 302 到向导、**不影响启动臂**（向导 ④→⑤ 之间要重启一次，
+  重启后必须正常启动才能初始化——两判据拆开的原因，ADR-069 D3）。
+- **setup 面**（新文件 `web_service/setup.rs`，8 端点 `/api/v1/setup/*`）：state / config 读写 /
+  三探测（项目目录形态、SurrealDB 连通 + 2.1.x 版本硬闸、端口预检）/ restart / complete。
+  全部按 **TCP 对端**回环限定（出厂监听全 0，监听地址判会拒掉所有人；不认代理头）。写盘走
+  `toml_edit` 外科手术：注释与未知键原样保留、整数键不漂移、先落 `.bak`、空补丁不碰盘；
+  合并后校验拦「spawned-mem + 空地址」（落盘必坏：下次启动把内存库绑到端口 0）——前端试用档
+  对空地址自动补 `127.0.0.1:8009`。
+- **向导页** `web/setup.html`（exe 内嵌 + 磁盘副本优先 + `x-setup-panel-source`，同 ops.html
+  模式）：五步（数据源探测勾选 → 存储两档带测试 → 端口预检 → 初始化两档单选「只导数据/一步到位」
+  写回 `gen_model`/`gen_mesh` + 保存并重启 → 初始化薄壳）；⑤ 全复用现口
+  `/dbnums` + `/update/preview` + `/update/execute`，勾选执行、水位轮询到全同步；403 整页引导
+  「在服务器本机用 127.0.0.1 打开」。
+- **重启交接**（唯一高危面）：restart 口 202 → 300ms 后 spawn 同 exe/参数/环境的子进程（带
+  `AIOS_RESTART_HANDOFF=1`）→ 父进程退出交出端口与单实例锁；子进程对锁与端口在 ≤10s 窗口内
+  重试（`open_lock_within_handoff_window` / `bind_with_handoff`），窗口只在环境变量在场时存在。
+  拉起失败父进程继续跑并出声，不静默。
+- **包形态**（`New-LocalRelease.ps1` + 新模板 `scripts/templates/DbOption.factory.toml`）：包内
+  `workspace\DbOption.toml` 换成中性出厂模板（`project_path=""`、external + 空地址哨兵、
+  `0.0.0.0:9099`、gen 全关）+ 落首跑哨兵；`web\setup.html` 磁盘副本进包；README 加「首跑：
+  配置向导」一节（含不用向导的手改路径）。冒烟门改**两腿**：A 腿出厂配置起包内 exe 考
+  `mode:"setup"` + 向导页标记，B 腿本机真配置全启动（首页判定放宽为 plant-ui 或向导页二择一）；
+  `-StrictSmoke` 任一腿失败即不出包。
+- 验证：全量 `cargo test --lib` **1970 passed / 0 failed / 137 ignored**（28.1 s，含 13 条
+  setup 钉：判据真值表、回环闸真值表、不读请求头源码钉、写盘保注释/保未知键/整数不漂移、
+  先备份后写、spawned-mem 空地址拦截、路由接线钉、内嵌标记钉、探测形态钉、哨兵往返幂等、
+  交接窗口要环境变量）；`rustfmt --edition 2024 --check` 对 `setup.rs` 干净。**重启交接实机
+  E2E**（release exe + 出厂模板改 19099 + 包内三缓存目录）：设置模式 health/内嵌页/302 →
+  项目探测（9 子目录识出 7 个 E3D 形态）→ 端口预检 self → PUT 15 键（`.bak` 落盘、模板注释
+  保留）→ 空地址试用档被 422 拦、盘上不动 → restart 后旧进程退出、新进程接手端口与锁
+  （pid 64956 → 46092）→ 正常模式 `/` 仍 302（哨兵在）→ complete 删哨兵、`/` 恢复 200，
+  全链 10.5 s；跑完 19099/18009 归零、临时目录已清。0.1.20-full 出包与两腿冒烟见
+  `releases/ams-local-0.1.20-full.release.json`。
+
 ### 初始化准入门的嗓音收口：重扫汇总一句 + /health 点名最近一轮拦下的库（含方案与词条并轨）
 
 方案 `docs/plans/2026-09-09-new-dbnum-manual-init-default-plan.md`（Plannotator 审阅通过）对下面

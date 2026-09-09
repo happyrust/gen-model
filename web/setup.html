@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AMS 配置向导</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #1c2330; --muted: #67707f;
+    --line: #dde1e7; --accent: #2563eb; --accent-ink: #ffffff;
+    --ok: #15803d; --warn: #b45309; --bad: #b91c1c; --chip: #eef2f7;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 14px/1.65 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif; }
+  main { max-width: 880px; margin: 0 auto; padding: 24px 16px 80px; }
+  h1 { font-size: 20px; margin: 8px 0 2px; }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  .sub { color: var(--muted); margin-bottom: 18px; }
+  .chip { display: inline-block; background: var(--chip); border: 1px solid var(--line);
+          border-radius: 999px; padding: 1px 10px; font-size: 12px; color: var(--muted); margin-left: 8px; }
+  .steps { display: flex; gap: 6px; margin: 18px 0; flex-wrap: wrap; }
+  .steps .s { flex: 1 1 140px; border: 1px solid var(--line); background: var(--card);
+              border-radius: 8px; padding: 8px 12px; font-size: 13px; color: var(--muted); }
+  .steps .s.cur { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+  .steps .s.done { color: var(--ok); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          padding: 20px 22px; margin-bottom: 16px; }
+  label { display: block; margin: 12px 0 4px; font-weight: 600; font-size: 13px; }
+  .hint { font-weight: 400; color: var(--muted); font-size: 12px; margin-left: 6px; }
+  input[type=text], input[type=number] { width: 100%; padding: 7px 10px; border: 1px solid var(--line);
+          border-radius: 6px; font: inherit; background: #fff; }
+  input[type=text]:focus { outline: 2px solid #bfd3ff; border-color: var(--accent); }
+  .row { display: flex; gap: 12px; } .row > div { flex: 1; }
+  button { font: inherit; border-radius: 7px; border: 1px solid var(--line); background: #fff;
+           padding: 7px 16px; cursor: pointer; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .actions { margin-top: 20px; display: flex; gap: 10px; justify-content: flex-end; }
+  .note { border-left: 3px solid var(--accent); background: #f0f5ff; padding: 8px 12px;
+          border-radius: 0 6px 6px 0; margin: 10px 0; font-size: 13px; }
+  .note.warn { border-color: var(--warn); background: #fff7ed; }
+  .note.bad { border-color: var(--bad); background: #fef2f2; }
+  .note.ok { border-color: var(--ok); background: #f0fdf4; }
+  .plist { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; margin-top: 8px; }
+  .pcard { border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 13px; }
+  .pcard.off { opacity: .55; }
+  .pcard .nm { font-weight: 600; }
+  .pcard .meta { color: var(--muted); font-size: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 10px; }
+  th, td { border-bottom: 1px solid var(--line); text-align: left; padding: 6px 8px; }
+  th { color: var(--muted); font-weight: 600; }
+  .st-ok { color: var(--ok); } .st-warn { color: var(--warn); } .st-bad { color: var(--bad); }
+  code, pre { background: var(--chip); border-radius: 5px; padding: 1px 6px; font-size: 12.5px; }
+  pre { padding: 10px 12px; overflow: auto; }
+  #overlay { position: fixed; inset: 0; background: rgba(24,30,40,.55); display: none;
+             align-items: center; justify-content: center; z-index: 50; }
+  #overlay .box { background: #fff; border-radius: 12px; padding: 28px 34px; max-width: 480px; text-align: center; }
+  .spin { width: 26px; height: 26px; border: 3px solid var(--line); border-top-color: var(--accent);
+          border-radius: 50%; margin: 0 auto 14px; animation: r 1s linear infinite; }
+  @keyframes r { to { transform: rotate(360deg); } }
+  .radio-line { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0; }
+  .radio-line input { margin-top: 4px; }
+</style>
+</head>
+<body>
+<main id="ams-setup-wizard">
+  <h1>AMS 配置向导 <span class="chip" id="chip-mode">…</span><span class="chip" id="chip-ver"></span></h1>
+  <div class="sub">一步步把 <code>DbOption.toml</code> 配好，然后初始化数据库。配置真值始终是那份文件；本页只是它的读写口，注释与你手改过的其他键都会原样保留。</div>
+
+  <div class="steps" id="stepbar">
+    <div class="s" data-s="1">① 数据源</div>
+    <div class="s" data-s="2">② 存储</div>
+    <div class="s" data-s="3">③ 服务</div>
+    <div class="s" data-s="4">④ 生成与监听 · 保存</div>
+    <div class="s" data-s="5">⑤ 初始化</div>
+  </div>
+
+  <div id="banner"></div>
+
+  <!-- ① 数据源 -->
+  <section class="card" id="step1" hidden>
+    <h2>① 数据源：E3D 项目在哪</h2>
+    <label>项目根目录 project_path <span class="hint">装着各项目子目录的那一层，如 D:\AVEVA\Projects\E3D3.1</span></label>
+    <div class="row">
+      <div><input type="text" id="f-project_path" placeholder="D:\AVEVA\Projects\E3D3.1"></div>
+      <div style="flex:0 0 auto"><button id="btn-probe-project">探测</button></div>
+    </div>
+    <div id="probe-project-out"></div>
+    <label>纳入的项目 included_projects <span class="hint">探测后勾选；主项目单选</span></label>
+    <div class="plist" id="plist"></div>
+    <div class="row">
+      <div>
+        <label>主项目 project_name</label>
+        <input type="text" id="f-project_name">
+      </div>
+      <div>
+        <label>MDB mdb_name</label>
+        <input type="text" id="f-mdb_name" placeholder="ALL">
+      </div>
+      <div>
+        <label>模块 module</label>
+        <input type="text" id="f-module" placeholder="DESI">
+      </div>
+    </div>
+    <div class="row">
+      <div>
+        <label>项目代号 project_code</label>
+        <input type="number" id="f-project_code" placeholder="1516">
+      </div>
+      <div>
+        <label>命名空间 surreal_ns <span class="hint">通常与 project_code 一致</span></label>
+        <input type="text" id="f-surreal_ns" placeholder="1516">
+      </div>
+    </div>
+    <div class="actions"><button class="primary" id="next-1">下一步</button></div>
+  </section>
+
+  <!-- ② 存储 -->
+  <section class="card" id="step2" hidden>
+    <h2>② 存储：模型数据放哪</h2>
+    <div class="radio-line">
+      <input type="radio" name="store" id="store-external" value="external" checked>
+      <div><b>连接已有 SurrealDB（external，推荐）</b><br>
+        <span class="hint">数据持久保存。必须是本套发布配套的 SurrealDB 2.1.x（包内 workspace\bin\surreal.exe），不能用官方 3.x。</span>
+        <div class="row" style="margin-top:8px">
+          <div><label>地址 v_ip</label><input type="text" id="f-v_ip" placeholder="127.0.0.1"></div>
+          <div><label>端口 v_port</label><input type="text" id="f-v_port" placeholder="8010"></div>
+          <div style="flex:0 0 auto; align-self:flex-end"><button id="btn-probe-store">测试连接</button></div>
+        </div>
+        <div id="probe-store-out"></div>
+        <div class="note">还没有库？用包里带的启动一台（在解压目录的 PowerShell 里执行，数据落在 workspace）：<br>
+          <code>powershell -ExecutionPolicy Bypass -File .\workspace\Start-Surreal.ps1</code></div>
+      </div>
+    </div>
+    <div class="radio-line">
+      <input type="radio" name="store" id="store-spawned" value="spawned-mem">
+      <div><b>试用模式（spawned-mem）</b><br>
+        <span class="hint">服务自己拉一台内存库，开箱即看。<b>数据不落盘，重启即清空</b>，只适合演示与验证。地址留空时内存库默认挂在本机 8009 端口。</span>
+      </div>
+    </div>
+    <div class="actions"><button id="back-2">上一步</button><button class="primary" id="next-2">下一步</button></div>
+  </section>
+
+  <!-- ③ 服务 -->
+  <section class="card" id="step3" hidden>
+    <h2>③ 服务：本服务监听在哪</h2>
+    <label>监听地址 http_api_addr <span class="hint">0.0.0.0 = 局域网可访问（配置页仍只许本机打开）；127.0.0.1 = 仅本机</span></label>
+    <div class="row">
+      <div><input type="text" id="f-http_api_addr" placeholder="0.0.0.0:9099"></div>
+      <div style="flex:0 0 auto"><button id="btn-probe-port">端口预检</button></div>
+    </div>
+    <div id="probe-port-out"></div>
+    <div class="actions"><button id="back-3">上一步</button><button class="primary" id="next-3">下一步</button></div>
+  </section>
+
+  <!-- ④ 生成与监听 + 保存重启 -->
+  <section class="card" id="step4" hidden>
+    <h2>④ 生成与监听，然后保存</h2>
+    <label>初始化档位 <span class="hint">决定 gen_model / gen_mesh；改主意随时回这页重选</span></label>
+    <div class="radio-line">
+      <input type="radio" name="tier" id="tier-data" value="data" checked>
+      <div><b>只导数据（快）</b><br><span class="hint">先把库导进来，三维模型以后再补生成。首次全量通常几分钟到几十分钟。</span></div>
+    </div>
+    <div class="radio-line">
+      <input type="radio" name="tier" id="tier-full" value="full">
+      <div><b>导数据 + 生成模型与网格（慢，一步到位）</b><br><span class="hint">首次全量按库规模可能要数小时，期间可正常浏览已完成部分。</span></div>
+    </div>
+    <div class="row">
+      <div>
+        <label>增量监听范围 watch_dbnums <span class="hint">逗号分隔；留空 = 本 MDB 全部设计库</span></label>
+        <input type="text" id="f-watch_dbnums" placeholder="留空 = 全部">
+      </div>
+      <div>
+        <label>手动点名库 manual_db_nums <span class="hint">逗号分隔；没有就留空</span></label>
+        <input type="text" id="f-manual_db_nums" placeholder="如 8000">
+      </div>
+    </div>
+    <div class="note">「保存并重启」会把以上所有步骤的值写进 <code>DbOption.toml</code>（旁落 <code>.bak</code> 备份），然后服务自动重启并回到本向导继续初始化。</div>
+    <div class="actions"><button id="back-4">上一步</button><button class="primary" id="btn-save">保存并重启</button></div>
+  </section>
+
+  <!-- ⑤ 初始化 -->
+  <section class="card" id="step5" hidden>
+    <h2>⑤ 初始化数据库</h2>
+    <div id="init-note"></div>
+    <div class="row" style="align-items:center">
+      <div><button id="btn-load-dbnums">刷新库列表</button>
+           <button id="btn-preview">预览</button>
+           <button class="primary" id="btn-execute">执行初始化</button></div>
+    </div>
+    <div id="dbnums-out"></div>
+    <div id="preview-out"></div>
+    <div id="exec-out"></div>
+    <div class="note">复杂场景（子集重算、失败重试、逐根补齐）去 <a href="/" target="_blank">plant-ui</a> 的手动更新面板；运行日志看 <a href="/ops.html" target="_blank">运维面板</a>。</div>
+    <div class="actions"><button class="primary" id="btn-finish">完成向导</button></div>
+  </section>
+
+  <section class="card" id="stepdone" hidden>
+    <h2>✅ 完成</h2>
+    <p>配置与初始化都好了。<a href="/">进入 plant-ui</a> 开始使用；以后要改配置，随时回 <code>/setup.html</code>。</p>
+  </section>
+</main>
+
+<div id="overlay"><div class="box"><div class="spin"></div><div id="overlay-msg">…</div></div></div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const S = { state: null, cfg: null, step: 1, storeTestOk: false, portOk: false, selected: new Set(), pollTimer: null };
+
+function overlay(msg) { $("overlay").style.display = msg ? "flex" : "none"; if (msg) $("overlay-msg").innerHTML = msg; }
+function note(el, cls, html) { el.innerHTML = '<div class="note ' + cls + '">' + html + "</div>"; }
+
+async function api(path, options) {
+  const response = await fetch(path, Object.assign({ cache: "no-store" }, options || {}));
+  if (response.status === 403) {
+    document.body.innerHTML = '<main id="ams-setup-wizard" style="max-width:640px;margin:80px auto;font-family:system-ui">' +
+      '<h1>只能在服务器本机打开</h1><p>配置向导的接口只接受来自 127.0.0.1 的请求。' +
+      '请到运行本服务的那台机器上，用浏览器打开 <code>http://127.0.0.1:&lt;端口&gt;/setup.html</code>。</p></main>';
+    throw new Error("loopback_only");
+  }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(body.message || (path + " -> " + response.status));
+  return body;
+}
+
+function goto(step) {
+  S.step = step;
+  for (let i = 1; i <= 5; i++) $("step" + i).hidden = (i !== step);
+  $("stepdone").hidden = step !== 6;
+  document.querySelectorAll("#stepbar .s").forEach((el) => {
+    const n = Number(el.dataset.s);
+    el.classList.toggle("cur", n === step);
+    el.classList.toggle("done", n < step);
+  });
+  window.scrollTo(0, 0);
+}
+
+function val(id) { return $(id).value.trim(); }
+function intsOf(id) {
+  const raw = val(id);
+  if (!raw) return [];
+  return raw.split(/[，,\s]+/).filter(Boolean).map((s) => parseInt(s, 10)).filter((n) => Number.isFinite(n) && n >= 0);
+}
+function browserFacing(addr) {
+  addr = (addr || "").trim();
+  return addr.startsWith("0.0.0.0:") ? "127.0.0.1:" + addr.slice(8) : addr;
+}
+
+// ---------- 装载 ----------
+async function boot() {
+  const state = await api("/api/v1/setup/state");
+  S.state = state;
+  $("chip-mode").textContent = state.mode === "setup" ? "设置模式（服务未完全启动）" : "正常模式";
+  $("chip-ver").textContent = "v" + state.version;
+  const config = await api("/api/v1/setup/config");
+  S.cfg = config.values || {};
+  fillForm(S.cfg);
+  const resume = new URLSearchParams(location.search).get("resume");
+  if (!state.first_run_pending) {
+    $("banner").innerHTML = '<div class="note">当前不是首跑：本页也可当配置页用——改完在第 ④ 步「保存并重启」即可，初始化那一步可跳过。</div>';
+  }
+  if (resume === "init" || (state.mode === "normal" && state.first_run_pending && haveCoreConfig())) {
+    goto(5); loadDbnums().catch((e) => note($("dbnums-out"), "bad", e.message));
+  } else {
+    goto(1);
+  }
+  if (state.mode === "setup") {
+    $("init-note").innerHTML = '<div class="note warn">设置模式下没法初始化：先走完 ①—④ 保存并重启。</div>';
+  }
+}
+function haveCoreConfig() {
+  const v = S.cfg;
+  return v && v.project_path && (v.store_mode === "spawned-mem" || (v.v_ip && v.v_port));
+}
+function fillForm(v) {
+  const put = (id, x) => { if (x !== null && x !== undefined) $(id).value = Array.isArray(x) ? x.join(",") : x; };
+  put("f-project_path", v.project_path);
+  put("f-project_name", v.project_name);
+  put("f-mdb_name", v.mdb_name || "ALL");
+  put("f-module", v.module || "DESI");
+  put("f-project_code", v.project_code);
+  put("f-surreal_ns", v.surreal_ns);
+  put("f-v_ip", v.v_ip);
+  put("f-v_port", v.v_port);
+  put("f-http_api_addr", v.http_api_addr || "0.0.0.0:9099");
+  put("f-watch_dbnums", v.watch_dbnums);
+  put("f-manual_db_nums", v.manual_db_nums);
+  if (v.store_mode === "spawned-mem") $("store-spawned").checked = true; else $("store-external").checked = true;
+  if (v.gen_model === true || v.gen_mesh === true) $("tier-full").checked = true; else $("tier-data").checked = true;
+  renderProjects((v.included_projects || []).map((name) => ({ name, e3d_shape: true, db_files: null })), v.included_projects || [], v.project_name);
+}
+
+// ---------- ① 项目探测 ----------
+async function probeProject() {
+  const path = val("f-project_path");
+  if (!path) return note($("probe-project-out"), "warn", "先填 project_path");
+  note($("probe-project-out"), "", "探测中…");
+  try {
+    const out = await api("/api/v1/setup/probe/project", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ project_path: path }),
+    });
+    if (!out.exists) return note($("probe-project-out"), "bad", "目录不存在：" + path);
+    if (out.readable === false) return note($("probe-project-out"), "bad", "目录存在但读不了（权限？）");
+    const shaped = (out.projects || []).filter((p) => p.e3d_shape);
+    note($("probe-project-out"), shaped.length ? "ok" : "warn",
+      "找到 " + (out.projects || []).length + " 个子目录，其中 " + shaped.length + " 个像 E3D 项目（有 xxx000 库目录）。勾选要纳入的项目：");
+    const keep = new Set(S.cfg.included_projects || []);
+    renderProjects(out.projects || [], [...keep], val("f-project_name") || S.cfg.project_name);
+  } catch (e) { note($("probe-project-out"), "bad", e.message); }
+}
+function renderProjects(list, includedNames, primary) {
+  const host = $("plist"); host.innerHTML = "";
+  const included = new Set(includedNames || []);
+  list.forEach((p) => {
+    const card = document.createElement("label");
+    card.className = "pcard" + (p.e3d_shape ? "" : " off");
+    const meta = p.db_files === null || p.db_files === undefined ? "" : "库文件 ×" + p.db_files;
+    card.innerHTML =
+      '<input type="checkbox" data-inc="' + p.name + '"' + (included.has(p.name) ? " checked" : "") + "> " +
+      '<span class="nm">' + p.name + "</span> " +
+      '<input type="radio" name="primary" title="设为主项目" data-primary="' + p.name + '"' + (primary === p.name ? " checked" : "") + ">" +
+      '<div class="meta">' + (p.e3d_shape ? meta : "不像 E3D 项目") + "</div>";
+    host.appendChild(card);
+  });
+  host.querySelectorAll("[data-primary]").forEach((r) =>
+    r.addEventListener("change", () => { $("f-project_name").value = r.dataset.primary; }));
+}
+function includedProjects() {
+  return [...document.querySelectorAll("#plist [data-inc]:checked")].map((el) => el.dataset.inc);
+}
+
+// ---------- ② 存储测试 ----------
+async function probeStore() {
+  note($("probe-store-out"), "", "连接中…");
+  S.storeTestOk = false;
+  try {
+    const out = await api("/api/v1/setup/probe/store", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ v_ip: val("f-v_ip"), v_port: val("f-v_port") }),
+    });
+    if (!out.reachable) return note($("probe-store-out"), "bad", "连不上：" + (out.error || ""));
+    if (!out.fork_ok) return note($("probe-store-out"), "bad",
+      "版本不符：<b>" + (out.version || "未知") + "</b>。必须用本套发布配套的 SurrealDB 2.1.x（包内 workspace\\bin\\surreal.exe），官方 3.x 会在运行期出难查的错，这里不放行。");
+    S.storeTestOk = true;
+    note($("probe-store-out"), "ok", "连接成功：" + out.version);
+  } catch (e) { note($("probe-store-out"), "bad", e.message); }
+}
+
+// ---------- ③ 端口预检 ----------
+async function probePort() {
+  S.portOk = false;
+  note($("probe-port-out"), "", "预检中…");
+  try {
+    const out = await api("/api/v1/setup/probe/port", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ http_api_addr: val("f-http_api_addr") }),
+    });
+    if (out.verdict === "invalid") return note($("probe-port-out"), "bad", "地址不成形，要 <IP>:<端口>，如 0.0.0.0:9099");
+    if (out.verdict === "occupied") return note($("probe-port-out"), "bad", "端口 " + out.port + " 被别的进程占着，换一个或先停掉它");
+    S.portOk = true;
+    note($("probe-port-out"), "ok", out.verdict === "self" ? "就是本服务当前的端口，保存后沿用" : "端口空闲");
+  } catch (e) { note($("probe-port-out"), "bad", e.message); }
+}
+
+// ---------- ④ 保存并重启 ----------
+function gatherPatch() {
+  const external = $("store-external").checked;
+  const full = $("tier-full").checked;
+  const patch = {
+    project_path: val("f-project_path"),
+    included_projects: includedProjects(),
+    project_name: val("f-project_name"),
+    mdb_name: val("f-mdb_name") || "ALL",
+    module: val("f-module") || "DESI",
+    surreal_ns: val("f-surreal_ns"),
+    store_mode: external ? "external" : "spawned-mem",
+    v_ip: val("f-v_ip"),
+    v_port: val("f-v_port"),
+    http_api_addr: val("f-http_api_addr"),
+    gen_model: full,
+    gen_mesh: full,
+    watch_dbnums: intsOf("f-watch_dbnums"),
+    manual_db_nums: intsOf("f-manual_db_nums"),
+  };
+  const code = val("f-project_code");
+  if (code) patch.project_code = parseInt(code, 10);
+  if (!patch.included_projects.length && patch.project_name) patch.included_projects = [patch.project_name];
+  if (!external) {
+    // 试用模式不逼用户填地址，但内存库要有真实端口放（v_port=0 会让下次启动绑死在端口 0）。
+    if (!patch.v_ip) patch.v_ip = "127.0.0.1";
+    if (!patch.v_port || patch.v_port === "0") patch.v_port = "8009";
+  }
+  return patch;
+}
+async function saveAndRestart() {
+  const patch = gatherPatch();
+  overlay("正在写入配置…");
+  try {
+    await api("/api/v1/setup/config", {
+      method: "PUT", headers: { "content-type": "application/json" }, body: JSON.stringify(patch),
+    });
+    const out = await api("/api/v1/setup/restart", { method: "POST" });
+    const target = browserFacing(out.poll || patch.http_api_addr);
+    const base = "http://" + target;
+    let seconds = 0;
+    overlay("配置已保存，服务重启中…<br><span class='hint'>首次启动要装载项目骨架，可能要几分钟。已等 0s</span>");
+    const timer = setInterval(async () => {
+      seconds += 3;
+      $("overlay-msg").innerHTML = "配置已保存，服务重启中…<br><span class='hint'>首次启动要装载项目骨架，可能要几分钟。已等 " + seconds + "s</span>";
+      try {
+        const health = await fetch(base + "/api/v1/health", { cache: "no-store" });
+        if (health.ok) {
+          clearInterval(timer);
+          location.href = base + "/setup.html?resume=init";
+        }
+      } catch (_) { /* 还没起来，接着等 */ }
+      if (seconds >= 600) {
+        clearInterval(timer);
+        overlay(null);
+        alert("等了 10 分钟还没起来。请在服务器上重跑 Start-AMS.ps1，然后手动打开 " + base + "/setup.html");
+      }
+    }, 3000);
+  } catch (e) { overlay(null); alert("保存失败：" + e.message); }
+}
+
+// ---------- ⑤ 初始化 ----------
+function rowSync(row) {
+  if (row.model_verdict === "in_sync") return true;
+  const a = row.applied_sesno, m = row.model_sesno, f = row.file_latest_sesno;
+  return a !== undefined && a === m && m === f;
+}
+async function loadDbnums() {
+  const project = (S.cfg && S.cfg.project_name) || val("f-project_name");
+  const out = await api("/api/v1/dbnums?project=" + encodeURIComponent(project || ""));
+  const rows = out.dbnums || [];
+  const host = $("dbnums-out");
+  if (!rows.length) { note(host, "warn", "没拿到库列表（服务可能还在装载骨架，稍后「刷新库列表」）"); return; }
+  const awaiting = rows.filter((r) => r.awaiting_manual_initialization);
+  if (!S.selected.size) awaiting.forEach((r) => S.selected.add(r.dbnum));
+  let html = "<table><tr><th></th><th>dbnum</th><th>状态</th><th>水位 应用/模型/文件</th></tr>";
+  rows.forEach((r) => {
+    const checked = S.selected.has(r.dbnum) ? " checked" : "";
+    const state = r.awaiting_manual_initialization
+      ? '<span class="st-warn">待初始化</span>'
+      : r.initialized === false
+        ? '<span class="st-warn">未初始化</span>'
+        : rowSync(r) ? '<span class="st-ok">已同步</span>' : "进行中";
+    const marks = [r.applied_sesno, r.model_sesno, r.file_latest_sesno]
+      .map((x) => (x === undefined || x === null ? "—" : x)).join(" / ");
+    html += "<tr><td><input type='checkbox' data-db='" + r.dbnum + "'" + checked + "></td>" +
+            "<td>" + r.dbnum + "</td><td>" + state + "</td><td>" + marks + "</td></tr>";
+  });
+  html += "</table>";
+  host.innerHTML = "<div class='hint'>共 " + rows.length + " 库，" + awaiting.length + " 库待初始化（已预选）。</div>" + html;
+  host.querySelectorAll("[data-db]").forEach((box) => box.addEventListener("change", () => {
+    const n = Number(box.dataset.db);
+    if (box.checked) S.selected.add(n); else S.selected.delete(n);
+  }));
+}
+async function previewInit() {
+  note($("preview-out"), "", "预览中…");
+  try {
+    const out = await api("/api/v1/update/preview", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    const picked = [...S.selected];
+    const all = out.dbnums || [];
+    const mine = all.filter((d) => picked.includes(d.dbnum));
+    if (out.up_to_date && !mine.length) return note($("preview-out"), "ok", "范围内没有待办：库都在最新水位。");
+    note($("preview-out"), "ok", "预览：范围内 " + all.length + " 库有待办，其中勾选的 " + mine.length + " 库会被执行。" +
+      (out.warnings && out.warnings.length ? "<br>提示：" + out.warnings.join("；") : ""));
+  } catch (e) { note($("preview-out"), "bad", e.message); }
+}
+async function executeInit() {
+  if (!S.selected.size) return alert("先勾选要初始化的库");
+  const dbnums = [...S.selected];
+  note($("exec-out"), "", "已提交，入队中…");
+  try {
+    await api("/api/v1/update/execute", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ dbnums }),
+    });
+    note($("exec-out"), "ok", "已入队：" + dbnums.join(", ") + "。下方水位会自动刷新，全部「已同步」即完成。");
+    if (S.pollTimer) clearInterval(S.pollTimer);
+    S.pollTimer = setInterval(async () => {
+      try {
+        await loadDbnums();
+        const project = (S.cfg && S.cfg.project_name) || "";
+        const out = await api("/api/v1/dbnums?project=" + encodeURIComponent(project));
+        const rows = (out.dbnums || []).filter((r) => dbnums.includes(r.dbnum));
+        if (rows.length && rows.every(rowSync)) {
+          clearInterval(S.pollTimer); S.pollTimer = null;
+          note($("exec-out"), "ok", "勾选的 " + rows.length + " 库全部同步完成 ✅ 可以「完成向导」了。");
+        }
+      } catch (_) { /* 下一轮再试 */ }
+    }, 4000);
+  } catch (e) { note($("exec-out"), "bad", e.message); }
+}
+async function finish() {
+  try {
+    await api("/api/v1/setup/complete", { method: "POST" });
+    if (S.pollTimer) clearInterval(S.pollTimer);
+    goto(6);
+  } catch (e) { alert(e.message); }
+}
+
+// ---------- 接线 ----------
+$("btn-probe-project").addEventListener("click", probeProject);
+$("btn-probe-store").addEventListener("click", probeStore);
+$("btn-probe-port").addEventListener("click", probePort);
+$("btn-save").addEventListener("click", saveAndRestart);
+$("btn-load-dbnums").addEventListener("click", () => loadDbnums().catch((e) => note($("dbnums-out"), "bad", e.message)));
+$("btn-preview").addEventListener("click", previewInit);
+$("btn-execute").addEventListener("click", executeInit);
+$("btn-finish").addEventListener("click", finish);
+["f-v_ip", "f-v_port"].forEach((id) => $(id).addEventListener("input", () => { S.storeTestOk = false; }));
+$("f-http_api_addr").addEventListener("input", () => { S.portOk = false; });
+
+$("next-1").addEventListener("click", () => {
+  if (!val("f-project_path")) return alert("project_path 还没填");
+  if (!val("f-project_name")) return alert("主项目 project_name 还没定（探测后点选，或手填）");
+  goto(2);
+});
+$("back-2").addEventListener("click", () => goto(1));
+$("next-2").addEventListener("click", () => {
+  if ($("store-external").checked) {
+    if (!val("f-v_ip") || !val("f-v_port")) return alert("external 模式要填 v_ip / v_port");
+    if (!S.storeTestOk) return alert("先点「测试连接」并通过（连通 + 版本 2.1.x）再往下走");
+  }
+  goto(3);
+});
+$("back-3").addEventListener("click", () => goto(2));
+$("next-3").addEventListener("click", async () => {
+  if (!S.portOk) await probePort();
+  if (!S.portOk) return;
+  goto(4);
+});
+$("back-4").addEventListener("click", () => goto(3));
+
+boot().catch((e) => { if (e.message !== "loopback_only") note($("banner"), "bad", "向导装载失败：" + e.message); });
+</script>
+</body>
+</html>
