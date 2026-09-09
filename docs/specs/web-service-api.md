@@ -366,7 +366,10 @@ plant-ui 的单根调用零影响。
 - 请求体加可选 `"generation_roots": ["24381/100677", "24381/100691", …]`：
   - `1..=64` 条；与 `generation_root` **互斥**——两个都给、都不给、空数组、超 64 条 → `400 bad_request`。
   - 一批根须属**同一 dbnum**（客户端手里的根本来就出自同一次 `ensure` 解出的 `generation_roots`
-    或同一次整库收集），跨库 → `400 bad_request`。于是一个响应仍只有一个 `source` / `model_source`，§4.12 的口径不变。
+    或同一次整库收集），跨库 → `400 bad_request`。于是一个响应仍只有一个 `source`。
+  - plant3d-web 的口径（2026-09-09 用户拍板）：前端只吃 **`ensure` 即时生成、`records` 原样回**的数据，
+    不区分也不依赖记录是从哪种介质回的；批量契约因此不对存储形态作任何承诺，`source` 等回执格
+    只是可观测信息。
 - 响应 `items` **平铺**：顺序 = 请求里根的顺序 × 每根现有的稳定顺序；客户端按 `owner`（就是生成根）分组，
   不需要另一层嵌套。
 - 分页：`cursor` 是平铺列表的下标，**跨根连续**；`limit` 仍是总条数（`1..=5000`）；`total` 是这一批的总条数，
@@ -374,8 +377,8 @@ plant-ui 的单根调用零影响。
 - 响应回显 `"generation_roots": [...]`（替代单根的 `generation_root`），并多一格
   `"roots": [{"generation_root":"24381/100677","total":22}, …]`——整批逐根总数，每页都带，
   让「这根就是 0 条」显式可见，不用靠 `items` 里缺席去猜。
-- 内存形态下批里任一根没 `ensure` 过 → **整批** `409 conflict`，消息仍以 `not_generated:` 开头并列出缺的根；
-  客户端对缺的那几根补 `ensure` 后重发。rocksdb 形态没有这一档。
+- 批里任一根还没 `ensure` 过（服务端手里没有它的记录）→ **整批** `409 conflict`，消息仍以 `not_generated:` 开头
+  并列出缺的根；客户端对缺的那几根补 `ensure` 后重发。**空数组仍不表达「没生成过」。**
 - 单响应体积：64 根 × 每根几百条，靠分页（`limit` ≤ 5000）兜住，不另设上限。
 - 不动的：单根请求 / 响应形状一字不改；`/model/ensure` 不变；不新开 `model/records/batch` 端点（B 案已否）。
 
@@ -584,7 +587,7 @@ plant-ui 的单根调用零影响。
 | --- | --- | --- |
 | `task_started` | tasks | `{ task_id, kind, project }`；`kind = "model_drain"`（一页模型消化被认领）时另带 `total_units`（本页根数）与 `detail`（认领时的 `epoch_id / queue_total / roots[] / root_samples_truncated`，`roots[].target_refno` 为 `a/b`；`roots` 最多 10 条样本，与 `GET /tasks/{id}` 里的同一份） |
 | `task_progress` | tasks | `ManualUpdateEvent` 原样（`kind: data_batch_started / data_batch_finished / model_unit_started / model_unit_finished`，两阶段、无百分比，与规格一致）|
-| `task_finished` | tasks | `{ task_id, state, result: ManualUpdateResult }`；`model_drain` 页收口时另带 `kind: "model_drain"`、`project` 与收口时刻的 `detail`（同上），`result` 为 `{ completed, failed, unstarted, claimed_epoch, current_epoch, yield_reason, failures }`。**客户端据此重载**：`detail.roots[].target_refno` ∩ 自己已加载的生成根 → 重载那几根；`root_samples_truncated > 0` 时样本不全，按 `roots[].dbnum` 整库对齐或退回 REST 轮询。2026-09-08 起发（此前 drain 页在 WS 上一声不响，浏览器端只能 15 s 轮询 `GET /tasks?kind=model_drain`）；发送点在 `task_registry` 的 `insert_running_model_drain` / `finish`，不在 `model_update_pending` 的调用点——drain 的认领与收口只经这两个口 |
+| `task_finished` | tasks | `{ task_id, state, result: ManualUpdateResult }`；`model_drain` 页收口时另带 `kind: "model_drain"`、`project` 与收口时刻的 `detail`（同上），`result` 为 `{ completed, failed, unstarted, claimed_epoch, current_epoch, yield_reason, failures }`。**客户端据此重载**：`detail.roots[].target_refno` ∩ 自己已加载的生成根 → 重载那几根；`root_samples_truncated > 0` 时样本不全，按 `roots[].dbnum` 整库对齐或退回 REST 轮询。2026-09-08 起发（此前 drain 页在 WS 上一声不响，浏览器端只能 15 s 轮询 `GET /tasks?kind=model_drain`）；发送点在 `task_registry` 的 `insert_running_model_drain` / `finish`，不在 `model_update_pending` 的调用点——drain 的认领与收口只经这两个口。（plant3d-web 自 2026-09-09 起**不再消费**这条事件也不轮询 `GET /tasks`：它只吃自己 `ensure` 出来的数据，见其收口计划 §12；事件保留给其它客户端） |
 | `model_source_changed` | tasks | `{ dbnum, model_source }`（`memory` / `database`，§4.12）；`task_id` 为空。初始化发布 run 收口 → `database`，回退重建清库 → `memory`。客户端只刷 `/dbnums` 那一行的来源格，不重载场景；字面值认不出当没收到，下一拍 `/dbnums` 带回真值 |
 | ~~`incr_applied`~~ | ~~increments~~ | **已删（ADR-011 合流）**：自动路径的批次与手动同走 tasks 主题的 `task_started / task_progress / task_finished` |
 | `pong` | 无 | `{}` |
