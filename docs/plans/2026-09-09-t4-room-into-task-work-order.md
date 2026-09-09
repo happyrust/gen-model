@@ -43,6 +43,12 @@
   所属根**（Q6，元数据门「凭证前移不少收」的唯一例外）。
 - **反向重钉**：现有顺序钉断言的恰是过渡顺序（publish < complete < rooms），必须改成断言
   rooms 先于 complete；补 mem:// 真测「房间失败挡住牵涉根凭证前移、水位不越过」（ADR-065 实施约束 2）。
+- **顺带欠账（2026-09-09，会话 fable-5-47 代记）**：启动房间段重排后 `lib.rs` 三条启动钉
+  （`the_startup_path_asks_the_gate_before_rebuilding_rooms`、
+  `startup_reconciles_models_before_waiting_for_data_and_keeps_rooms_last`、
+  `the_degraded_data_wait_skips_model_wait_and_rooms_and_is_named_on_the_banner`）的标记已从
+  `run_cli` 撤走、在 HEAD 上是红的，现挂 `#[ignore]`（理由指回本条与 mem-107）——本片反向重钉时
+  按新启动形状一并重钉或删除，别让 ignore 长住。
 - 过渡兜底（durable 行 / `room_released` / 空闲轮恢复重放）**本片不动**——它们到 T5 才退。
 - 收口：全量不降 + 上述 mem:// 真测绿。
 
