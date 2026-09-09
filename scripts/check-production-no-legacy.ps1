@@ -17,3 +17,6 @@ if ($LASTEXITCODE -ne 1) {
   throw "rg failed with exit code $LASTEXITCODE"
 }
 'PRODUCTION_LEGACY_SCAN_OK'
+# rg 的「无命中」出口是 1，正是本检查的通过态；不清掉它，GitHub Actions 的 pwsh
+# 包装（结尾 exit $LASTEXITCODE）会把绿的一步标红。
+exit 0

@@ -1,8 +1,35 @@
 name: Windows tests
 
+# 2026-09-09 布局说明（e3d-io 底座换装后的 CI 形态）：
+#
+# 本仓的自研依赖是 **path 依赖**，指向仓库外的兄弟目录（Cargo.toml：
+# `../vendor/e3d-io`、`../vendor/e3d-attlib`、`../vendor/e3d-model`、
+# `../vendor/plant-mbd/crates/plant-mbd`，以及 aios_core 的 [patch] →
+# `../vendor/old-aios-core`）。e3d-io 自己又 path 依赖 `../e3d-attlib`，
+# 所以它们只能以「并排放在 vendor/ 下」的目录形状存在——git 依赖救不了。
+#
+# 因此 CI 用多仓 checkout 复刻本地 old/ 的目录形状：
+#   $GITHUB_WORKSPACE/
+#     gen-model/            ← 本仓（checkout path: gen-model）
+#     vendor/e3d-io         ← happyrust/e3d-io
+#     vendor/e3d-attlib     ← happyrust/e3d-attlib
+#     vendor/e3d-model      ← happyrust/e3d-model
+#     vendor/plant-mbd      ← happyrust/plant-mbd
+#     vendor/old-aios-core  ← happyrust/old-aios-core
+#     target/               ← CARGO_TARGET_DIR（缓存键照旧叫 target）
+#
+# 兄弟仓是私有仓时，给本仓配一个 `VENDOR_REPOS_TOKEN` secret（对 happyrust/*
+# 有读权限的 PAT）；公开仓不需要。跑之前的硬前提：**五个兄弟仓的默认分支必须
+# 推到 GitHub 且与本仓当前提交互相兼容**——本地未提交/未推送的 vendor 改动，
+# CI 一概看不见。
+#
+# E3D schema 资产（attlib.dat + desvir.dat）不再依赖装机：随仓走
+# `tests/fixtures/e3d-templates/`（见该目录 README），AIOS_E3D_TEMPLATE_DIR
+# 全局指过去。离线夹具档从此在 GitHub 托管 runner 上完整可跑。
+
 on:
   push:
-    branches: [main]
+    branches: [main, e3d-direct]
   pull_request:
   workflow_dispatch:
 
@@ -16,7 +43,7 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: "0"
-  CARGO_TARGET_DIR: target
+  CARGO_TARGET_DIR: ${{ github.workspace }}\target
   # Integration-test builds also compile every binary target. Keep the hosted
   # runner below its paging/commit-memory limit (the repository default is 8x8).
   CARGO_BUILD_JOBS: "2"
@@ -26,18 +53,59 @@ env:
   CXXFLAGS: /std:c++17
   PROTOC_ARCHIVE_URL: https://github.com/protocolbuffers/protobuf/releases/download/v35.1/protoc-35.1-win64.zip
   PROTOC_ARCHIVE_SHA256: 5d3ff218d7d91eea95f7569bcb5a98f3030f8996d44151279d9772edcff76082
+  # 离线夹具档（db8000 会话链、基线流、读透对拍）要 E3D 模板与 attlib：
+  # 用仓内随行副本，不依赖 runner 上有 E3D 装机。
+  AIOS_E3D_TEMPLATE_DIR: ${{ github.workspace }}\gen-model\tests\fixtures\e3d-templates
 
 jobs:
-  # 离线回归总闸：不需要 E3D、SurrealDB 或任何外部服务的那一档。
-  # 现含 issue-019 增量夹具、通用会话切割自检、db8000 会话对回归、
-  # PDMS 记录边界解析、以及删除清理的 lib 用例。
+  # 离线回归总闸：不需要 E3D 装机、SurrealDB 或任何外部服务的那一档。
+  # 现含 增量纯规划契约（pipe/equi/hvac/ctray + model_impact）、issue-019 增量夹具、
+  # 通用会话切割自检、db8000 会话对回归、基线流回归、读透行级对拍、
+  # 删除清理的 lib 用例，以及整个单测层（cargo test --lib，U1–U13）。
   # （原名 db8000-model-increment，范围早已超出 db8000 一个库。）
   offline-increment-regression:
     runs-on: windows-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
+    defaults:
+      run:
+        working-directory: gen-model
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          path: gen-model
+
+      # ../vendor 兄弟仓：形状必须与本地 old/vendor 一致（见文件头说明）。
+      - name: Check out vendor/e3d-io
+        uses: actions/checkout@v6
+        with:
+          repository: happyrust/e3d-io
+          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          path: vendor/e3d-io
+      - name: Check out vendor/e3d-attlib
+        uses: actions/checkout@v6
+        with:
+          repository: happyrust/e3d-attlib
+          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          path: vendor/e3d-attlib
+      - name: Check out vendor/e3d-model
+        uses: actions/checkout@v6
+        with:
+          repository: happyrust/e3d-model
+          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          path: vendor/e3d-model
+      - name: Check out vendor/plant-mbd
+        uses: actions/checkout@v6
+        with:
+          repository: happyrust/plant-mbd
+          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          path: vendor/plant-mbd
+      - name: Check out vendor/old-aios-core
+        uses: actions/checkout@v6
+        with:
+          repository: happyrust/old-aios-core
+          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          path: vendor/old-aios-core
 
       - name: Install Python
         uses: actions/setup-python@v6
@@ -75,7 +143,7 @@ jobs:
             ~\.cargo\registry
             ~\.cargo\git
             target
-          key: cargo-windows-tests-${{ hashFiles('Cargo.lock') }}
+          key: cargo-windows-tests-${{ hashFiles('gen-model/Cargo.lock') }}
           restore-keys: |
             cargo-windows-tests-
 
@@ -122,6 +190,23 @@ jobs:
       - name: Prove the baseline no longer runs on old-parse-pdms-db
         shell: pwsh
         run: powershell -NoProfile -File scripts\Check-LegacyParsePdmsDb.ps1
+
+      # 增量纯规划契约：四个学科（管道 / 设备 / HVAC / 电缆桥架）的
+      # 「变化元素 → 生成根 → 窗口去向」矩阵 + 模型影响门。不接 E3D、不接库、
+      # 不要任何夹具，动 generation_root / window_root_plan / model_update_plan /
+      # model_impact 的回归第一时间在这里红。
+      - name: Run pure planner-contract increment cases
+        shell: pwsh
+        run: >-
+          cargo test --locked
+          --test pipe26229_increment
+          --test equi_increment
+          --test hvac_bran_increment
+          --test ctray_increment
+          --test model_impact
+          --no-default-features
+          --features ws,gen_model,manifold,project_hd
+          -- --nocapture
 
       - name: Run portable db8000 model-increment cases
         shell: pwsh
@@ -175,11 +260,15 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-      - name: Check PDMS record-boundary parsing
+      # B8.5 第 2 条：基线退化窗口在真实 db8000 会话链上的离线回归（幽灵/遗漏、
+      # 分块、真会话号 F7、双读口对拍），加读透行级对拍（G2/R2）。两者都吃
+      # AIOS_E3D_TEMPLATE_DIR 的仓内模板副本。
+      - name: Run baseline-stream and read-through regressions
         shell: pwsh
         run: >-
           cargo test --locked
-          --test pdms_record_boundary
+          --test baseline_stream_8000
+          --test read_through_rows_parity
           --no-default-features
           --features ws,gen_model,manifold,project_hd
           -- --nocapture
@@ -189,6 +278,16 @@ jobs:
         run: >-
           cargo test --locked --lib
           child_delete_then_parent_delete_across_sessions_schedules_only_the_parent
+          --no-default-features
+          --features ws,gen_model,manifold,project_hd
+          -- --nocapture
+
+      # 单测层总闸（增量单测总纲 §3 的 CI 特性口径）：纯函数、源码契约与
+      # 进程内 kv-mem 三层，U1–U13 全组。#[ignore] 的 live 用例照常跳过。
+      - name: Run the unit-test layer (cargo test --lib)
+        shell: pwsh
+        run: >-
+          cargo test --locked --lib
           --no-default-features
           --features ws,gen_model,manifold,project_hd
           -- --nocapture
@@ -205,14 +304,45 @@ jobs:
   python-bindings:
     runs-on: windows-latest
     timeout-minutes: 180
-
-    env:
-      # 绑定的 cdylib 与主 crate 共享编译产物；给绝对路径，免得 maturin 在
-      # python/ 目录下跑时把 target 落到 python/target 而错过缓存。
-      CARGO_TARGET_DIR: ${{ github.workspace }}\target
+    defaults:
+      run:
+        working-directory: gen-model
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          path: gen-model
+
+      - name: Check out vendor/e3d-io
+        uses: actions/checkout@v6
+        with:
+          repository: happyrust/e3d-io
+          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          path: vendor/e3d-io
+      - name: Check out vendor/e3d-attlib
+        uses: actions/checkout@v6
+        with:
+          repository: happyrust/e3d-attlib
+          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          path: vendor/e3d-attlib
+      - name: Check out vendor/e3d-model
+        uses: actions/checkout@v6
+        with:
+          repository: happyrust/e3d-model
+          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          path: vendor/e3d-model
+      - name: Check out vendor/plant-mbd
+        uses: actions/checkout@v6
+        with:
+          repository: happyrust/plant-mbd
+          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          path: vendor/plant-mbd
+      - name: Check out vendor/old-aios-core
+        uses: actions/checkout@v6
+        with:
+          repository: happyrust/old-aios-core
+          token: ${{ secrets.VENDOR_REPOS_TOKEN || github.token }}
+          path: vendor/old-aios-core
 
       - name: Install Python
         uses: actions/setup-python@v6
@@ -246,9 +376,9 @@ jobs:
             ~\.cargo\registry
             ~\.cargo\git
             target
-          key: cargo-python-bindings-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          key: cargo-python-bindings-${{ hashFiles('gen-model/Cargo.lock') }}-${{ github.run_id }}
           restore-keys: |
-            cargo-python-bindings-${{ hashFiles('Cargo.lock') }}-
+            cargo-python-bindings-${{ hashFiles('gen-model/Cargo.lock') }}-
             cargo-python-bindings-
 
       - name: Install maturin and pytest
@@ -257,7 +387,7 @@ jobs:
 
       - name: Build abi3 wheel
         shell: pwsh
-        working-directory: python
+        working-directory: gen-model/python
         run: maturin build --locked --out "$env:CARGO_TARGET_DIR\wheels"
 
       # 键里带 run_id：失败轮也把编译进度存下来，重试从断点继续。
@@ -269,7 +399,7 @@ jobs:
             ~\.cargo\registry
             ~\.cargo\git
             target
-          key: cargo-python-bindings-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          key: cargo-python-bindings-${{ hashFiles('gen-model/Cargo.lock') }}-${{ github.run_id }}
 
       - name: Install wheel
         shell: pwsh
@@ -289,7 +419,7 @@ jobs:
 
       - name: Run offline binding tests
         shell: pwsh
-        working-directory: python
+        working-directory: gen-model/python
         run: python -m pytest -m offline -q
 
       - name: Upload wheel
