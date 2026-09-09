@@ -1255,24 +1255,33 @@ pub async fn tree_children(
     })))
 }
 
-/// GET /api/v1/meshes/{geo_hash}.glb — 一份单位网格的 glTF 二进制。
+/// GET /api/v1/meshes/{geo_hash}.glb | {geo_hash}.mesh — 同一份网格的两种线上形态。
 ///
-/// 磁盘上的 `.mesh` 是 rkyv 归档，浏览器解不动（见 `mesh_glb.rs` 模块注释），这里现场
-/// 转成 GLB。`geo_hash` 是内容寻址键：同一个键永远是同一份几何，所以响应带
-/// `immutable` 缓存头——前端拉过一次就再也不来了，转换成本只付第一次。
+/// `.glb`：磁盘 `.mesh`（rkyv 归档）现场转 glTF 二进制——浏览器旧口径，plant3d-web
+/// 切 `.mesh` 直连后留一个发布周期再收（2026-09-09 拍板）。
+/// `.mesh`：原样吐 rkyv 字节，零转换。布局对前端是冻结契约：语料按内容寻址落盘，
+/// rkyv 一升级连本服务都读不了旧文件，所以「浏览器解 rkyv 会读歪」的顾虑有界——
+/// plant3d-web `parseMeshGeometry.ts` 以金样单测钉住布局（见 `mesh_glb.rs` 模块注释）。
 ///
-/// 路径参数必须形如 `{hash}.glb`，`hash` 只放行 `[0-9A-Za-z_]`：这既是键的真实字符集，
-/// 也是唯一一道目录穿越的门。文件不在回 404 `not_found`（与「refno 不存在」同码，
-/// 客户端可负缓存）；文件在但编不成三角网格回 422 `precondition`——那是数据的终局，
-/// 重发同一个键还是同一个结果。
+/// `geo_hash` 是内容寻址键：同一个键永远是同一份几何，所以两种形态都带 `immutable`
+/// 缓存头——前端拉过一次就再也不来了。
+///
+/// 路径参数必须形如 `{hash}.glb` / `{hash}.mesh`，`hash` 只放行 `[0-9A-Za-z_]`：这既是
+/// 键的真实字符集，也是唯一一道目录穿越的门。文件不在回 404 `not_found`（与「refno
+/// 不存在」同码，客户端可负缓存）；文件在但编不成三角网格回 422 `precondition`——那是
+/// 数据的终局，重发同一个键还是同一个结果（只有 `.glb` 会走到这一步）。
 pub async fn mesh_glb(
     State(state): State<AppState>,
     Path(file): Path<String>,
 ) -> Result<axum::response::Response, ApiError> {
     let _ = &state;
-    let Some(stem) = file.strip_suffix(".glb") else {
+    let (stem, raw_mesh) = if let Some(stem) = file.strip_suffix(".glb") {
+        (stem, false)
+    } else if let Some(stem) = file.strip_suffix(".mesh") {
+        (stem, true)
+    } else {
         return Err(ApiError::bad_request(format!(
-            "网格路径应为 {{geo_hash}}.glb: {file}"
+            "网格路径应为 {{geo_hash}}.glb 或 {{geo_hash}}.mesh: {file}"
         )));
     };
     if !crate::web_service::mesh_glb::is_valid_geo_hash(stem) {
@@ -1295,25 +1304,34 @@ pub async fn mesh_glb(
             )));
         }
     };
-    let stem_owned = stem.to_string();
-    let glb = tokio::task::spawn_blocking(move || {
-        let mesh = aios_core::shape::pdms_shape::PlantMesh::des_from_bytes(&bytes)
-            .map_err(|error| anyhow::anyhow!("网格 {stem_owned} 不是合法的 .mesh 归档: {error}"))?;
-        crate::web_service::mesh_glb::plant_mesh_to_glb(&mesh)
-    })
-    .await
-    .map_err(|error| ApiError::from_domain(anyhow::anyhow!("网格转换任务异常结束: {error}")))?
-    .map_err(|error| ApiError::precondition(format!("{error:#}")))?;
+    let (payload, content_type) = if raw_mesh {
+        // 原样直发：不解析、不转换。合法性由生成侧保证，前端解析器对不上会自己回退；
+        // 这里多解析一遍只会把 404/422 的语义搅浑（文件在就该按字节交付）。
+        (bytes, "application/octet-stream")
+    } else {
+        let stem_owned = stem.to_string();
+        let glb = tokio::task::spawn_blocking(move || {
+            let mesh = aios_core::shape::pdms_shape::PlantMesh::des_from_bytes(&bytes)
+                .map_err(|error| {
+                    anyhow::anyhow!("网格 {stem_owned} 不是合法的 .mesh 归档: {error}")
+                })?;
+            crate::web_service::mesh_glb::plant_mesh_to_glb(&mesh)
+        })
+        .await
+        .map_err(|error| ApiError::from_domain(anyhow::anyhow!("网格转换任务异常结束: {error}")))?
+        .map_err(|error| ApiError::precondition(format!("{error:#}")))?;
+        (glb, "model/gltf-binary")
+    };
     axum::response::Response::builder()
         .status(StatusCode::OK)
-        .header(axum::http::header::CONTENT_TYPE, "model/gltf-binary")
+        .header(axum::http::header::CONTENT_TYPE, content_type)
         .header(
             axum::http::header::CACHE_CONTROL,
             "public, max-age=31536000, immutable",
         )
         .header(axum::http::header::ETAG, format!("\"{stem}\""))
-        .header(axum::http::header::CONTENT_LENGTH, glb.len())
-        .body(axum::body::Body::from(glb))
+        .header(axum::http::header::CONTENT_LENGTH, payload.len())
+        .body(axum::body::Body::from(payload))
         .map_err(|error| ApiError::from_domain(anyhow::anyhow!("构造网格响应失败: {error}")))
 }
 
@@ -2867,12 +2885,49 @@ mod tests {
             "必须先剥 .glb 后缀: {body}"
         );
         assert!(
+            body.contains("strip_suffix(\".mesh\")"),
+            ".mesh 直连与 .glb 同一道门、同一次读盘: {body}"
+        );
+        assert!(
             body.contains("mesh_glb::is_valid_geo_hash("),
             "必须过 geo_hash 字符集门再拼路径: {body}"
         );
         assert!(
             body.contains("get_meshes_path()"),
             "网格目录必须与生成侧同一份配置（meshes_path）: {body}"
+        );
+    }
+
+    /// `.mesh` 直连形态（plant3d-web 2026-09-09 拍板）：读盘之后原样吐字节，
+    /// 转换只属于 `.glb` 分支。这里钉两件事：raw 分支不得碰 `plant_mesh_to_glb`，
+    /// 且以 `application/octet-stream` 交付（immutable 缓存头对两种形态一视同仁）。
+    #[test]
+    fn mesh_raw_branch_serves_bytes_without_conversion() {
+        let body = include_str!("handlers.rs")
+            .split_once("pub async fn mesh_glb(")
+            .expect("mesh_glb handler must exist")
+            .1
+            .split_once("\n}")
+            .expect("handler must close")
+            .0;
+        let raw_branch = body
+            .split_once("if raw_mesh {")
+            .expect("raw 分支必须存在")
+            .1
+            .split_once("} else {")
+            .expect("raw 分支之后才轮到转换")
+            .0;
+        assert!(
+            !raw_branch.contains("plant_mesh_to_glb"),
+            "raw 分支不得做任何转换: {raw_branch}"
+        );
+        assert!(
+            raw_branch.contains("application/octet-stream"),
+            ".mesh 按二进制原样交付: {raw_branch}"
+        );
+        assert!(
+            body.contains("public, max-age=31536000, immutable"),
+            "内容寻址键必须给 immutable 缓存: {body}"
         );
     }
 

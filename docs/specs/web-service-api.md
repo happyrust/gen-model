@@ -452,25 +452,31 @@
   `null`：plant-ui 那边 `noun: String` 带 `serde(default)`，缺省可以，`null` 会让整页
   反序列化失败。
 
-### 4.11 `GET /api/v1/meshes/{geo_hash}.glb` — 网格的浏览器口径
-- 与 `/assets/meshes/{geo_hash}.mesh`（静态 `ServeDir`）是同一份文件的两种口径：那条给
-  plant-ui（原生读 rkyv 归档的 `PlantMesh`），这条给浏览器——rkyv 布局与 rkyv 0.7 /
-  glam 的内存形状强耦合，让前端手解，任何一边升级都会静默读歪。转换在服务端现场做
-  （`web_service::mesh_glb`），前端复用它已有的 GLB 解析。
-- 输出**一个三角面 primitive**：`POSITION` + 可选 `NORMAL`（f32 VEC3）+ `indices`（u32），
-  坐标是 E3D 原生 mm、Z-up，不做单位换算。法向量数量与顶点数不等时整段省掉 `NORMAL`
-  ——错位的法向量比没有法向量更坏，它把光照画歪而没有任何东西报错。
-  `wire_vertices`（硬边折线）不进 GLB：前端现有解析只读第一个 primitive。
+### 4.11 `GET /api/v1/meshes/{geo_hash}.mesh | {geo_hash}.glb` — 网格的两种线上形态
+- 同一个路由、同一道门、同一次读盘，按后缀选输出形态（`web_service::handlers::mesh_glb`）：
+  - **`.mesh`（默认口径，plant3d-web 2026-09-09 拍板）**：原样吐 rkyv 归档字节，零转换，
+    `Content-Type: application/octet-stream`。前端 `parseMeshGeometry.ts` 手解——布局是
+    **冻结契约**：语料按内容寻址落盘，rkyv 一升级连本服务都读不了旧文件；两头各有一道钉
+    （本仓 `mesh_glb.rs` 单测、plant3d-web 金样单测，2026-09-09 全量 48,590 份语料扫描通过）。
+  - **`.glb`（过渡口径，留一个发布周期）**：现场转 glTF 二进制，
+    `Content-Type: model/gltf-binary`。输出**一个三角面 primitive**：`POSITION` + 可选
+    `NORMAL`（f32 VEC3）+ `indices`（u32）。法向量数量与顶点数不等时整段省掉 `NORMAL`
+    ——错位的法向量比没有法向量更坏。`wire_vertices` 不进 GLB。
+- 与 `/assets/meshes/{geo_hash}.mesh`（静态 `ServeDir`，plant-ui 口径）是同一份文件：
+  API 版多了 geo_hash 字符集门、404/400 分型与 `immutable` 缓存头，且走 `/api/v1` 前缀，
+  plant3d-web 的反向代理 / baseUrl 拼接不必另开一条静态路径。
+- 坐标是 E3D 原生 mm、Z-up，不做单位换算（两种形态一致）。
 - `geo_hash` 只放行 `[0-9A-Za-z_]{1,128}`。这既是内容寻址键的真实字符集，也是唯一一道
   目录穿越的门——`..`、`/`、`\` 连门都进不了。网格目录取 `get_meshes_path()`，与生成侧
   同一份配置。
-- 响应头：`Content-Type: model/gltf-binary`、`Cache-Control: public, max-age=31536000,
-  immutable`、`ETag: "{geo_hash}"`。内容寻址键对应的几何永不改变，所以缓存可以给到
-  `immutable`，转换成本只付第一次。
-- 错误：路径不是 `{hash}.glb` 或字符集不合 400 `bad_request`；文件不在 404 `not_found`
-  （与「refno 不存在」同码，客户端可负缓存）；文件在但编不成三角网格（没有顶点、
-  索引数不是 3 的倍数、索引越界）422 `precondition`——那是数据的终局，重发同一个键还是
-  同一个结果，不该让客户端当 500 重试。
+- 响应头（两种形态相同）：`Cache-Control: public, max-age=31536000, immutable`、
+  `ETag: "{geo_hash}"`。内容寻址键对应的几何永不改变，所以缓存可以给到 `immutable`；
+  `.glb` 的转换成本只付第一次，`.mesh` 连这一次都没有。
+- 错误：路径不是 `{hash}.mesh` / `{hash}.glb` 或字符集不合 400 `bad_request`；文件不在
+  404 `not_found`（与「refno 不存在」同码，客户端可负缓存）；`.glb` 下文件在但编不成
+  三角网格（没有顶点、索引数不是 3 的倍数、索引越界）422 `precondition`——那是数据的
+  终局，重发同一个键还是同一个结果，不该让客户端当 500 重试。`.mesh` 不解析不转换，
+  文件在就按字节交付（空网格这类终局由前端解析器判 null，与 `.glb` 的 422 同一语义）。
 - `1` / `2` / `3` 是仓内三份单位几何（单位盒 / 单位圆柱 / 单位球）。客户端本地造这三份
   几何时，参数须与它们对齐，见 `web_service::mesh_glb` 的
   `repository_unit_meshes_convert_end_to_end`（`cargo test -- --nocapture` 打印包围盒）。
