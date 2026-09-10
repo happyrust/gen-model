@@ -106,8 +106,6 @@ def test_rest_methods_hit_documented_routes(stub):
     client.tasks(state="yielded", kind="model_drain", limit=5)
     client.task("task-1")
     client.model_ensure("24381_100677", force=True)
-    client.pending_units()
-    client.pending_unit_retry("regen", "24381_100677")
     client.dbnums("AMS")
     client.queue()
     client.queue_pause()
@@ -120,8 +118,6 @@ def test_rest_methods_hit_documented_routes(stub):
         ("GET", "/api/v1/tasks?state=yielded&kind=model_drain&limit=5"),
         ("GET", "/api/v1/tasks/task-1"),
         ("POST", "/api/v1/model/ensure"),
-        ("GET", "/api/v1/update/pending-units"),
-        ("POST", "/api/v1/update/pending-units/retry"),
         ("GET", "/api/v1/dbnums?project=AMS"),
         ("GET", "/api/v1/queue"),
         ("POST", "/api/v1/queue/pause"),
@@ -137,12 +133,6 @@ def test_rest_methods_hit_documented_routes(stub):
         "refno": "24381_100677",
         "force": True,
     }
-    assert bodies["/api/v1/update/pending-units/retry"] == {
-        "action": "regen",
-        "target_refno": "24381_100677",
-    }
-
-
 def test_optional_arguments_are_dropped_not_sent_as_null(stub):
     """None 的查询参数要整个不出现——服务端把 `project=` 当空字符串会走错分支。"""
     base, handler = stub

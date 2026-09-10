@@ -33,7 +33,7 @@ from typing import Any, Iterator
 # 手抄常量，靠测试自锁：`python/tests/test_client_offline.py::
 # test_expected_version_tracks_the_crate_version` 会拿它跟 Cargo.toml 对表，
 # release bump 忘了同步这里，CI 的离线档立刻红。
-EXPECTED_SERVER_VERSION = "0.1.18"
+EXPECTED_SERVER_VERSION = "0.1.21"
 
 
 class AiosVersionWarning(UserWarning):
@@ -145,13 +145,6 @@ class AiosClient:
             "/model/subtree",
             query={"refno": refno, "confirm": refno},
         )
-
-    def pending_units(self) -> dict:
-        return self._request("GET", "/update/pending-units")
-
-    def pending_unit_retry(self, action: str, target_refno: str) -> dict:
-        return self._request("POST", "/update/pending-units/retry",
-                             {"action": action, "target_refno": target_refno})
 
     def dbnums(self, project: str | None = None) -> dict:
         return self._request("GET", "/dbnums", query={"project": project})
