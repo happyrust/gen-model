@@ -1,12 +1,17 @@
 # -*- coding: utf-8 -*-
-"""房间增量的 Python 对拍测试（口径与 Rust room_fixture live 轨一致）。
+"""房间归属的 Python 对拍测试（口径与 Rust room_fixture live 轨一致）。
 
-硬标准（ADR-010 §9 / 测试计划 RI-12）：增量收敛后的规范化边集合等于同数据上
-全量重建的结果，**逐边比较**，禁止只比 count；且搬家/删除本身必须可见——只比
-「增量 == 全量」的话，两边同时算错成空集也会相等。
+硬标准（ADR-010 §9 / 测试计划 RI-12）：直写路径收敛后的规范化边集合等于同数据上
+全量重建的结果，**逐边比较**，禁止只比 count；且删除本身必须可见——只比
+「直写 == 全量」的话，两边同时算错成空集也会相等。
 
 边的规范形态：(panel, element, room_num, inside_count, center_dist)，
 center_dist 按 0.01mm 容差取整比较（测试计划 §3 数值容差）。
+
+搬家两例（RS2 构件搬家 / RS3 面板搬家）与「durable 直写发布房间任务」一例随
+逐目标的房间待办行退役（ADR-072 D4 / D5：房间归属由该库 dbnum 任务的房间段整库算，
+绑定侧没有 `room.enqueue → room.drain` 这条触发路了）；对拍口径由 Rust 侧
+`room_fixture.rs` 的直调元素分支用例接着守。
 """
 
 from __future__ import annotations
@@ -70,68 +75,7 @@ def baseline(aios_db, fx) -> list[tuple]:
     return base
 
 
-def room_pending_ids(db) -> list[str]:
-    rows = db.query("SELECT record::id(id) AS id FROM model_update_pending;")[0]
-    return sorted(
-        row["id"] for row in rows if str(row["id"]).startswith("room_recalc_")
-    )
-
-
 # ── 用例 ─────────────────────────────────────────────────────────────────────
-
-
-def test_element_move_parity(binding, room_fixture):
-    """RS2：构件 A→B 搬家，增量收敛 == 全量重建，且搬家可见。"""
-    fx = room_fixture
-    baseline(binding, fx)
-    straddler = norm(fx["straddler"])
-
-    # 跨界件（原骑在 A/B 重叠区）整体搬进 B 的独占区。
-    binding.fixture.move_body(fx["seqs"]["straddler"], (1450, 450, 450), (1550, 550, 550))
-    changes = binding.model.update_aabbs([straddler], replace=True)
-    assert [norm(change["refno"]) for change in changes] == [straddler], (
-        f"变更集应恰为搬动的跨界件: {changes}"
-    )
-
-    assert binding.room.enqueue(changes) == 1
-    report = binding.room.drain()
-    assert not report["failures"], f"房间消费不该有失败: {report}"
-
-    incremental = edges(binding.db)
-    pairs = membership_pairs(incremental)
-    assert (fx["pane_b"], straddler) in pairs, f"B 房应收下搬家件: {incremental}"
-    assert (fx["pane_a"], straddler) not in pairs, f"A 房应放走搬家件: {incremental}"
-
-    binding.room.build_all()
-    full = edges(binding.db)
-    assert incremental == full, f"增量 != 全量:\n增量 {incremental}\n全量 {full}"
-
-
-def test_panel_move_parity(binding, room_fixture):
-    """RS3：面板移动走整间分支，跨界件掉出该房，与全量逐边一致。"""
-    fx = room_fixture
-    baseline(binding, fx)
-    straddler = norm(fx["straddler"])
-
-    # B 面板整体右移：22/23 仍在其内，跨界件掉出。
-    binding.fixture.move_body(fx["seqs"]["pane_b"], (1400, 0, 0), (2400, 1000, 1000))
-    changes = binding.model.update_aabbs([fx["pane_b"]], replace=True)
-    assert len(changes) == 1 and changes[0]["noun"] == "PANE", changes
-
-    binding.room.enqueue(changes)
-    report = binding.room.drain()
-    assert not report["failures"], f"整间分支不该失败: {report}"
-
-    incremental = edges(binding.db)
-    pairs = membership_pairs(incremental)
-    assert (fx["pane_b"], straddler) not in pairs, f"跨界件应掉出 B: {incremental}"
-    assert (fx["pane_a"], straddler) in pairs, f"A 房归属不该被牵连: {incremental}"
-    for part in fx["in_b"]:
-        assert (fx["pane_b"], norm(part)) in pairs, f"B 房存量成员不该丢: {incremental}"
-
-    binding.room.build_all()
-    full = edges(binding.db)
-    assert incremental == full, f"增量 != 全量:\n增量 {incremental}\n全量 {full}"
 
 
 def test_noop_refresh_produces_no_changes(binding, room_fixture):
@@ -176,9 +120,9 @@ def test_delete_clears_membership_and_bumps_epoch(binding, room_fixture):
     assert len(full) == 5, full
 
 
-def test_durable_update_publishes_room_task_and_bumps_epoch(binding, room_fixture):
-    """durable 直写：AABB 指针、room_recalc 任务、spatial epoch 同事务
-    （生产 TransformOnly / 定向 regen 的路径）；随后 drain 收敛到与全量一致。"""
+def test_durable_update_bumps_epoch_without_a_room_queue(binding, room_fixture):
+    """durable 直写：AABB 指针与 spatial epoch 同事务（生产 TransformOnly / 定向 regen
+    的路径）；库里不再长出逐目标的房间待办行（ADR-072 D5）。"""
     fx = room_fixture
     baseline(binding, fx)
     straddler = norm(fx["straddler"])
@@ -190,20 +134,14 @@ def test_durable_update_publishes_room_task_and_bumps_epoch(binding, room_fixtur
     assert [norm(change["refno"]) for change in changes] == [straddler], changes
 
     assert spatial_epoch(binding.db) > epoch_before, "durable 直写必须 bump epoch"
-    pending = room_pending_ids(binding.db)
-    assert f"room_recalc_element_{straddler}" in pending, (
-        f"room_recalc 任务应随直写事务发布（room_incremental=true）: {pending}"
+    tables = binding.db.query("INFO FOR DB;")[0]["tables"]
+    assert "model_update_pending" not in tables, (
+        f"退役的模型意图队列表不许被直写路径重新建出来: {sorted(tables)}"
     )
 
-    report = binding.room.drain()
-    assert not report["failures"], report
-    assert room_pending_ids(binding.db) == [], "消费后队列应清空"
-
-    incremental = edges(binding.db)
-    pairs = membership_pairs(incremental)
-    assert (fx["pane_a"], straddler) in pairs
-    assert (fx["pane_b"], straddler) not in pairs
-
+    # 归属由全量路给出，且搬家可见。
     binding.room.build_all()
     full = edges(binding.db)
-    assert incremental == full, f"增量 != 全量:\n增量 {incremental}\n全量 {full}"
+    pairs = membership_pairs(full)
+    assert (fx["pane_a"], straddler) in pairs
+    assert (fx["pane_b"], straddler) not in pairs

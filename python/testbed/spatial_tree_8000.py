@@ -4,10 +4,11 @@
 测什么（对应方案 c:/Users/dpc/.cursor/plans/ams8000_空间树增量测试_472cdf86.plan.md）：
 
 1. **启动初始化裁决矩阵**：同一个 SurrealDB 实例上反复「重启」（full_init 只能
-   每进程一次，所以每次重启 = 一个新 Python 子进程），分别制造五种现场——
+   每进程一次，所以每次重启 = 一个新 Python 子进程），分别制造四种现场——
    快照新鲜（reused）、快照缺失（rebuilt）、库侧 epoch 漂移（rebuilt）、
-   携带待重放空间意图（replayed）、快照字节损坏（rebuilt）——断言
-   `spatial.tree_status()` 的 startup_verdict / state / entries / pending。
+   快照字节损坏（rebuilt）——断言 `spatial.tree_status()` 的
+   startup_verdict / state / entries。（「携带待重放空间意图 → replayed」那一格随
+   空间副作用队列退役，ADR-072 D5：空间树随任务落库就地收敛，没有待重放意图。）
 2. **增量窗口回放**：以 issue-019 夹具的 db8000 sesno-24 快照为基线建库，然后
    拿真实 ams8000 文件逐会话 `incr.apply_file(end=k)` 回放，每窗断言水位、
    树条目 == 库内可用指针数、epoch 单调；sesno 25/26 是已知的两次真实删除
@@ -224,7 +225,6 @@ def _tree_summary(aios_db) -> dict:
         "verdict": status.get("startup_verdict"),
         "state": status.get("state"),
         "entries": status.get("entries"),
-        "pending": status.get("pending"),
     }
 
 
@@ -326,11 +326,13 @@ def worker_probe(params: dict) -> dict:
 
 
 def worker_prepare(params: dict) -> dict:
-    """基线建库 → 生成 → 出清积压 → 落快照 → 值级校验。
+    """基线建库 → 生成 → 落快照 → 值级校验。
 
     A 侧（默认）：baseline@24，显式 ensure 目标 EQUI + 抽样根，断言 BOX 有实例。
     B 侧（oracle）：baseline@26（final-26 文件），EQUI/BOX 已删不 ensure，
-    生成全靠 drain_data 出清基线登记的全部单元；dump=True 带回指针哈希集与树内容。
+    生成按 A 侧清单逐根 ensure；dump=True 带回指针哈希集与树内容。
+    模型工作随 dbnum 任务在内存里算、任务内落库（ADR-072），库里没有可单独
+    出清的模型积压。
     """
     checks = Checks()
     aios_db = _init_full(params)
@@ -340,20 +342,6 @@ def worker_prepare(params: dict) -> dict:
     watermark = aios_db.db.watermark(8000)
     checks.add(f"baseline 水位 = {expect_watermark}", watermark == expect_watermark,
                f"watermark={watermark}, report={json.dumps(baseline, default=str)[:160]}")
-
-    # 聚焦增量管道时，先清掉 baseline 刚登记的全库生成积压。
-    # 必须位于 ensure 之前，否则会把目标根新产生的 post_regen_aabb
-    # 一并删掉，导致“几何指针已更新、空间树未更新”。
-    if params.get("skip_baseline_backlog"):
-        pending_before = aios_db.db.query(
-            "RETURN count(SELECT * FROM model_update_pending WHERE dbnum = 8000);"
-        )[0]
-        aios_db.db.query("DELETE model_update_pending WHERE dbnum = 8000;")
-        pending_after = aios_db.db.query(
-            "RETURN count(SELECT * FROM model_update_pending WHERE dbnum = 8000);"
-        )[0]
-        checks.add("聚焦模式清除基线全库积压", pending_after == 0,
-                   f"before={pending_before}, after={pending_after}")
 
     generated: list[str] = []
     if params.get("ensure_equi", True):
@@ -399,15 +387,8 @@ def worker_prepare(params: dict) -> dict:
         checks.add("对照库按 A 侧清单生成", not gen_failures,
                    f"generated={generated}, failures={gen_failures}")
 
-    # 正常模式出清全库基线积压；聚焦模式只会出清上面 ensure
-    # 重新产生的目标 pending。后续窗口也仍走同一 drain_data 入口。
-    backlog = aios_db.incr.drain_data()
-    checks.add("目标模型积压出清" if params.get("skip_baseline_backlog") else "基线模型积压出清",
-               True, f"drain_data={backlog}")
-
-    # 按需 ensure 是直写几何路径，不会为已被清除的 baseline regen
-    # 补造窗口级 spatial_reconcile 意图。聚焦夹具在基线结束时从
-    # 已提交指针重建一次树；被测的 25/26 窗口仍走真实增量收敛。
+    # 聚焦夹具在基线结束时从已提交指针重建一次树，让「树 == 指针」的起点
+    # 与库内几何逐条对齐；被测的 25/26 窗口仍走任务内的就地收敛。
     if params.get("skip_baseline_backlog"):
         aios_db.spatial.rebuild()
 
@@ -417,7 +398,6 @@ def worker_prepare(params: dict) -> dict:
                str(summary))
     checks.add("树条目 > 0", (summary["entries"] or 0) > 0, str(summary))
     rows = _check_tree_matches_pointers(checks, aios_db)
-    checks.add("无待重放空间意图", (summary["pending"] or 0) == 0, str(summary))
 
     extra_fields: dict = {}
     if params.get("dump"):
@@ -440,7 +420,6 @@ def worker_restart(params: dict) -> dict:
                summary["verdict"] == params["expect_verdict"], str(summary))
     expected_state = "ready_empty" if params.get("expect_entries") == 0 else "ready"
     checks.add(f"state == {expected_state}", summary["state"] == expected_state, str(summary))
-    checks.add("pending == 0", (summary["pending"] or 0) == 0, str(summary))
     _check_tree_matches_pointers(checks, aios_db)
     if params.get("expect_entries") is not None:
         checks.add("树条目与上一阶段一致", summary["entries"] == params["expect_entries"],
@@ -449,7 +428,7 @@ def worker_restart(params: dict) -> dict:
 
 
 def worker_apply_window(params: dict) -> dict:
-    """一个增量窗口：apply → drain → 收尾三件套 → 值级断言。"""
+    """一个增量窗口：apply → 树落盘 → 值级断言（模型 / 空间收敛在任务内就地完成）。"""
     checks = Checks()
     aios_db = _init_full(params)
 
@@ -461,14 +440,11 @@ def worker_apply_window(params: dict) -> dict:
     # 夹具把完整增量源放在 WORK/full，MDB 路径则先换成 sesno-24
     # 基线。真实 watcher 现场是同一 MDB 文件先被发布新会话，再执行
     # apply。因此在 full_init 完成快照复用裁决后，再将源发布到
-    # MDB 路径，使后续 pending drain 能按已推进水位钉住 sesno。
+    # MDB 路径，使任务按已推进水位钉住 sesno。
     source_path = Path(params["source"])
     if source_path.resolve() != PROJECT_DB.resolve():
         publish_session_snapshot(source_path, end, PROJECT_DB)
     applied = aios_db.incr.apply_file(params["source"], end=end)
-    drained = aios_db.incr.drain_data()
-    side_effects = aios_db.incr.drain_side_effects()
-    reconciled = aios_db.spatial.reconcile()
     aios_db.spatial.persist()
 
     watermark = aios_db.db.watermark(8000)
@@ -479,14 +455,12 @@ def worker_apply_window(params: dict) -> dict:
                json.dumps({"errors": applied.get("errors"),
                            "warnings": applied.get("warnings")}, ensure_ascii=False)[:300])
     checks.add(f"watermark == {end}", watermark == end,
-               f"watermark={watermark}, apply={json.dumps(applied, default=str)[:280]}, "
-               f"drain_data={drained}, side_effects={side_effects}, reconciled={reconciled}")
+               f"watermark={watermark}, apply={json.dumps(applied, default=str)[:280]}")
 
     summary = _tree_summary(aios_db)
     checks.add("state ∈ {ready, ready_empty}",
                summary["state"] in ("ready", "ready_empty"), str(summary))
     rows = _check_tree_matches_pointers(checks, aios_db)
-    checks.add("pending == 0（收尾后无滞留意图）", (summary["pending"] or 0) == 0, str(summary))
 
     epoch = _epoch(aios_db)
     prev = int(params["prev_epoch"])
@@ -729,21 +703,6 @@ class Driver:
         surql("UPSERT spatial_epoch:current SET value = (value?:0) + 1, "
               "updated_at = time::now();")
 
-    def plant_pending_intent(self) -> None:
-        refno = EQUI.replace("_", "/")
-        surql(
-            "BEGIN TRANSACTION;\n"
-            "UPSERT incr_side_effect_pending:spatial_reconcile_8000_9999 SET "
-            "kind = 'spatial_reconcile', dbnum = 8000, end_sesno = 9999, "
-            "db_type = 'DESI', changed_refnos = [], "
-            f"refresh_refnos = ['{refno}'], remove_refnos = [], "
-            "status = 'pending', attempts = 0, last_error = NONE, "
-            "updated_at = time::now();\n"
-            "UPSERT spatial_epoch:current SET value = (value?:0) + 1, "
-            "updated_at = time::now();\n"
-            "COMMIT TRANSACTION;"
-        )
-
     def corrupt_snapshot(self) -> None:
         snapshot = self.snapshot_artifact()
         assert snapshot.exists(), f"预期存在的快照文件不见了：{snapshot}"
@@ -861,12 +820,9 @@ class Driver:
             restart = self.run_phase("S3 库侧 epoch 漂移 → rebuilt", "restart",
                                      {**cfg, "expect_verdict": "rebuilt"}, timeout=900)
 
-            self.plant_pending_intent()
-            restart = self.run_phase("S4 携带待重放意图 → replayed", "restart",
-                                     {**cfg, "expect_verdict": "replayed"}, timeout=900)
-
+            # 「S4 携带待重放意图 → replayed」随空间副作用队列退役（ADR-072 D5）。
             self.corrupt_snapshot()
-            restart = self.run_phase("S5 快照损坏 → rebuilt", "restart",
+            restart = self.run_phase("S4 快照损坏 → rebuilt", "restart",
                                      {**cfg, "expect_verdict": "rebuilt"}, timeout=900)
             entries = restart.get("entries", entries)
             epoch = restart.get("epoch", epoch)
@@ -934,7 +890,7 @@ def main() -> int:
                         help="基线阶段额外生成多少个抽样 EQUI 根（默认 3）")
     parser.add_argument(
         "--skip-baseline-backlog", action="store_true",
-        help="只保留显式 ensure 的基线根，清除基线全库 pending；窗口 pending 仍正常 drain",
+        help="聚焦夹具：基线结束时从已提交指针重建一次空间树再落快照（窗口照常走任务内收敛）",
     )
     parser.add_argument("--skip-windows", action="store_true", help="只跑启动裁决矩阵")
     parser.add_argument("--skip-oracle", action="store_true",

@@ -34,8 +34,6 @@ CASES = [
     # 执行层（未 full_init 必须拒绝）
     ("incr.apply_file", lambda: aios_db.incr.apply_file("no-such-file")),
     ("incr.execute_manual", lambda: aios_db.incr.execute_manual()),
-    ("incr.drain_data", lambda: aios_db.incr.drain_data()),
-    ("incr.drain_side_effects", lambda: aios_db.incr.drain_side_effects()),
     ("incr.queue_pause", lambda: aios_db.incr.queue_pause()),
     ("incr.queue_resume", lambda: aios_db.incr.queue_resume()),
     ("model.ensure", lambda: aios_db.model.ensure("1_1")),
@@ -44,9 +42,6 @@ CASES = [
     ("model.update_aabbs", lambda: aios_db.model.update_aabbs(["1_1"])),
     ("model.delete_subtree", lambda: aios_db.model.delete_subtree(["1_1"])),
     ("room.build_all", lambda: aios_db.room.build_all()),
-    ("room.drain", lambda: aios_db.room.drain()),
-    ("room.enqueue", lambda: aios_db.room.enqueue([])),
-    ("spatial.reconcile", lambda: aios_db.spatial.reconcile()),
     ("spatial.persist", lambda: aios_db.spatial.persist()),
     ("spatial.rebuild", lambda: aios_db.spatial.rebuild()),
     ("sync.baseline", lambda: aios_db.sync.baseline(8000)),
@@ -59,12 +54,10 @@ CASES = [
     ("db.pe", lambda: aios_db.db.pe("1_1")),
     ("db.inst", lambda: aios_db.db.inst("1_1")),
     ("db.watermark", lambda: aios_db.db.watermark(8000)),
-    ("db.window_blocks", lambda: aios_db.db.window_blocks()),
     ("incr.resolve_window", lambda: aios_db.incr.resolve_window("no-such-file")),
     ("incr.queue_status", lambda: aios_db.incr.queue_status()),
     ("model.export_obj", lambda: aios_db.model.export_obj("1_1", ".")),
     ("room.code", lambda: aios_db.room.code("1_1")),
-    ("spatial.status", lambda: aios_db.spatial.status()),
     ("spatial.tree_status", lambda: aios_db.spatial.tree_status()),
 ]
 
@@ -90,8 +83,6 @@ print(json.dumps(out, ensure_ascii=False))
 FULL_INIT_GUARDED = [
     "incr.apply_file",
     "incr.execute_manual",
-    "incr.drain_data",
-    "incr.drain_side_effects",
     "incr.queue_pause",
     "incr.queue_resume",
     "model.ensure",
@@ -100,9 +91,6 @@ FULL_INIT_GUARDED = [
     "model.update_aabbs",
     "model.delete_subtree",
     "room.build_all",
-    "room.drain",
-    "room.enqueue",
-    "spatial.reconcile",
     "spatial.persist",
     "spatial.rebuild",
     "sync.baseline",
@@ -117,12 +105,10 @@ CONNECT_GUARDED = [
     "db.pe",
     "db.inst",
     "db.watermark",
-    "db.window_blocks",
     "incr.resolve_window",
     "incr.queue_status",
     "model.export_obj",
     "room.code",
-    "spatial.status",
     "spatial.tree_status",
 ]
 
