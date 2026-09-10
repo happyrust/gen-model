@@ -627,7 +627,11 @@ fn start_fixture_stack(
         spawn_logged(
             with_debug_dbnum(
                 Command::new(service)
-                    .current_dir(repo)
+                    // Instance locks and other run-scoped artifacts belong to
+                    // this isolated fixture, not to the source checkout. Using
+                    // the repo as CWD collides with any developer service that
+                    // is legitimately running from the same checkout.
+                    .current_dir(run_dir)
                     .env("DB_OPTION_FILE", &config_no_ext)
                     // 套件自己在 18048 上起了一台 rocksdb surreal（上面那一段）：
                     // 服务必须连它，不许自己再拉一台 memory 库——那样整套断言会对着
@@ -2306,6 +2310,27 @@ mod tests {
     /// The fixture pins the spatial tree on and never writes the retired
     /// `room_incremental` key (ADR-073 D7): room membership has no switch of its
     /// own in the fixture config any more.
+    #[test]
+    fn fixture_service_uses_the_run_directory_for_its_instance_lock() {
+        let source = include_str!("fixture.rs");
+        let stack = source
+            .split_once("fn start_fixture_stack(")
+            .expect("fixture stack")
+            .1
+            .split_once("fn create_service_project_mirror(")
+            .expect("stack boundary")
+            .0;
+        let service = stack
+            .split_once("Command::new(service)")
+            .expect("service command")
+            .1;
+        assert!(service.contains(".current_dir(run_dir)"));
+        assert!(
+            !service.lines().any(|line| line.trim() == ".current_dir(repo)"),
+            "fixture service must not share the checkout instance lock"
+        );
+    }
+
     #[test]
     fn fixture_runtime_config_enables_spatial_tree_and_writes_no_room_switch() {
         let dir = std::env::temp_dir().join(format!("e3d-fixture-config-{}", std::process::id()));
