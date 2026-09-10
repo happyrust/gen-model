@@ -87,7 +87,6 @@
   "model_update_pending": {
     "retryable": 4053, "dead_letters": 1,
     "data_phase": { "retryable": 0, "dead_letters": 1 },
-    "room_phase": { "retryable": 4053, "dead_letters": 0 },
     "by_action": {}, "blocking_samples": []
   },
   "blocking_conditions": ["model_update_pending.data_phase.dead_letters=1"],
@@ -117,12 +116,13 @@
 - `static_assets`：当前是否找到可服务的前端资源目录。`false` 只表示 UI 静态资源不可用，
   不降低 REST/WS 与增量 worker 的健康状态。
 - `model_update_pending`：一次 SurrealQL 往返形成的持久工作快照，分别列出总量、
-  `data_phase`、`room_phase`、各 action 的可重试/死信计数，以及最多 10 条
+  `data_phase`、各 action 的可重试/死信计数，以及最多 10 条
   `blocking_samples`（action、目标、noun、attempts、last_error、revision、updated_at）。
-  `attempts < 5` 只算普通积压；`attempts >= 5` 才是死信。
-- `blocking_conditions`：当前明确阻断健康状态的条件。数据模型死信或房间死信非零时，
-  顶层 `status` 为 `degraded`；普通可重试积压保持 `ok`。模型死信仍关闭模型门，Room
-  不得越过 ADR-025 的 Model 阶段。
+  `attempts < 5` 只算普通积压；`attempts >= 5` 才是死信。`room_phase` 随房间流程退役
+  （§4.7.2），整格不再出现。
+- `blocking_conditions`：当前明确阻断健康状态的条件。数据模型死信非零时，
+  顶层 `status` 为 `degraded`；普通可重试积压保持 `ok`。模型死信仍关闭模型门。
+  房间死信那一档随房间流程退役（§4.7.2）。
 - `geom_errors`：数据库 `geom_error` 的当前错误摘要。除 `bool_pos` / `bool_neg` 布尔降级外，
   `primitive` 表示基本体缺失/非法 BREP 或 NaN 变换；记录以 `(kind, target)` 唯一，
   `noun` 保存元素类型，`last_error` 保存包含尺寸的原始失败，成功生成后按类别自动销账。
@@ -306,8 +306,9 @@
 - 删除范围严格是传入 refno 自身及其全部 PE 后代，不向上归一到 generation root。
   generation root 解析只用于取得与按需/增量生成相同的互斥锁；任一覆盖根正在生成时
   返回 `409 conflict`，不与生成并发互相覆盖。
-- 删除模型关系、无剩余引用的实例信息、直管边、房间归属和空间树条目；不删除 PE、
-  内容寻址共享的 `inst_geo` 或磁盘 `.mesh`。
+- 删除模型关系、无剩余引用的实例信息、直管边和空间树条目；不删除 PE、
+  内容寻址共享的 `inst_geo` 或磁盘 `.mesh`。「房间归属」随房间流程退役（§4.7.2）——
+  没有房间边可清，这一项从删除范围里消失。
 - 重复调用幂等，响应
   `{ "requested_refno": "24381/100677", "scope": "exact_subtree", "status": "deleted" }`。
 - 本端点只清理。需要重建时，由调用方随后调用 §4.5，并显式传 `force=true`。
@@ -429,15 +430,15 @@ plant-ui 的单根调用零影响。
 ```
 
 - `write_state`（2026-09-10，ADR-072 D1）：**这个库有没有一次没写完的任务**。它不回答
-  「欠什么」——欠什么仍由三枚水位回答。一库一行（`dbnum_write_state:{dbnum}`），任务第一笔
-  写库之前置 `writing{S,T}`，任务收尾那一笔与三枚水位同事务置 `finished`（行留着，不删）。
+  「欠什么」——欠什么仍由两枚水位回答。一库一行（`dbnum_write_state:{dbnum}`），任务第一笔
+  写库之前置 `writing{S,T}`，任务收尾那一笔与两枚水位同事务置 `finished`（行留着，不删）。
 
   | 字段 | 类型 | 取值 / 含义 |
   |---|---|---|
   | `status` | string \| null | `writing`（正在写库，或上一次死在写库中途）\| `finished`（那一次任务的写库结束了）\| `null`（这个库从没被任务写过；等价于整格缺失，见下） |
-  | `start_sesno` | int ≥ 0 | 本次任务的起点 **S**。崩溃后回退删的是 `sesno > S` 的痕迹、三水位退回它。初始化 / 重初始化恒 `0`；`apply_window` 是任务开工时的 `applied_sesno`；`model_only` 是起点 `model_sesno` |
+  | `start_sesno` | int ≥ 0 | 本次任务的起点 **S**。崩溃后回退删的是 `sesno > S` 的痕迹、两枚水位退回它。初始化 / 重初始化恒 `0`；`apply_window` 是任务开工时的 `applied_sesno`；`model_only` 是起点 `model_sesno` |
   | `end_sesno` | int ≥ 0 | 目标 **T**。回退之后按 `S→T` 重排 |
-  | `intent` | string | `initialize` \| `apply_window` \| `model_only` \| `room_only` \| `reinitialize`。决定回退走哪条清理路：前者与 `reinitialize` 整库清空重排，其余按 sesno 谓词删 |
+  | `intent` | string | `initialize` \| `apply_window` \| `model_only` \| `reinitialize`。决定回退走哪条清理路：前者与 `reinitialize` 整库清空重排，其余按 sesno 谓词删。`room_only` 随房间流程退役（§4.7.2），不再作为取值出现 |
   | `started_at` | RFC3339 \| null | 置 `writing` 的时刻 |
   | `finished_at` | RFC3339 \| null | 置 `finished` 的时刻；`status = writing` 时恒 `null` |
 
@@ -445,14 +446,14 @@ plant-ui 的单根调用零影响。
   下一次任务还没开工。两种形态客户端都要认，处置一样——那一栏留空，**别退回 `finished` 再据此
   画绿灯**。
 
-  `status` 与三枚水位的分工要分清：`finished` 只说「本任务的写库结束了」，**不说这个库追平了**
-  ——欠什么仍由 `applied_sesno` / `model_sesno` / `room_sesno` 回答。一个模型失败的任务照样以
+  `status` 与两枚水位的分工要分清：`finished` 只说「本任务的写库结束了」，**不说这个库追平了**
+  ——欠什么仍由 `applied_sesno` / `model_sesno` 回答。一个模型失败的任务照样以
   `finished` 收尾（`model_sesno` 不动），那不是矛盾。反过来 `writing` 也不表示数据坏了：它只说
   「这一次写库还没结束」，启动水化段或该库下一次任务开工前会把它回退到 `start_sesno` 再从
   `start_sesno → end_sesno` 重跑。
 
   界面读法：`status = writing` 且这个库**不在** `/queue` 的运行行里 = 上一次死在写库中途。
-  回退期间这一行会短暂缺失、三枚水位往回走、`state_revision` 已经前进——那不是异常，是回退在进行。
+  回退期间这一行会短暂缺失、两枚水位往回走、`state_revision` 已经前进——那不是异常，是回退在进行。
 
   字段真值以 `src/data_interface/write_state.rs` 的 `WriteState` 为准（`dbnum` 那一格是行主键，
   不重复出到 JSON 里；库里还有一个 `updated_at` 是写入时刻的运维痕迹，不进契约）。
@@ -501,12 +502,15 @@ plant-ui 的单根调用零影响。
 | `model_pending` / `model_pending_status` / `model_pending_phase`、`abandoned`、`attempts` / `MAX_ATTEMPTS` 那一族 | `/dbnums`、`web/ops.html` | `model_update_pending` 整表退役。任务的单元清单就是真值；「已放弃」改由镜像的失败根集回答 |
 | `model_drain_*`（`telemetry` / `page_starved` / `starved_pages`）、`drain_report`、`drain_page_progress` | `/dbnums`、WS `task_started` / `task_finished` 的 `model_drain` 分支 | 没有 drain 了：模型随任务同步生成 |
 | `spatial_pending` / `spatial_reconcile_*` / `published_spatial_version` | `/dbnums`、`/health` | 空间树随 `persist_roots_batched` 就地收敛，不再留意图行 |
-| `room_published_*`（`room_published_version` / `room_topology_source`） | 房间查询面 | `room_published_inst` / `room_published_topology` / `room_topology_source` 三表退役；「已发布到哪一版」= `room_sesno` |
+| `room_published_*`（`room_published_version` / `room_topology_source`） | 房间查询面 | `room_published_inst` / `room_published_topology` / `room_topology_source` 三表退役。当时的替身是 `room_sesno`，而 `room_sesno` 本身随房间流程一并退役（§4.7.2）——整条房间查询面不再有「已发布到哪一版」这个问题 |
 
-**不动的格**：`applied_sesno` / `model_sesno` / `room_sesno` 三枚水位、`model_verdict` /
+**不动的格**：`applied_sesno` / `model_sesno` 两枚水位、`model_verdict` /
 `model_caught_up_at`（名字与取值不变，来源换镜像）、`credential_advance`、`anomaly` / `blocked` /
 `excluded`、`model_source` / `model_source_reason`。契约上这一轮**只加一格 `write_state`**，
 其余全是减法。
+
+> 本节写成时水位是三枚。第三枚 `room_sesno` 与整条房间对外面随后一并退役，见 §4.7.2
+> ——那是另一刀，不在 ADR-072 的账上。
 
 ##### 逐条对照表（T4 改 `handlers.rs` / `ops.html` 时按这张表判真假）
 
@@ -514,7 +518,7 @@ plant-ui 的单根调用零影响。
 
 | 端点 · 格 | 定义点 / 消费点（grep 得到） | 数据来源 | 退役依据 | plant-ui / ops 侧处置 |
 |---|---|---|---|---|
-| `/health` · `model_update_pending`、`model_update_pending_observation` | `handlers.rs:771`（`sampled_model_pending_status`，:528）、`:979`、`:581` | `model_update_pending::model_pending_status()` | ADR-072 D5（整表退）；计划 C.1 第 2 行 | 整格删；「欠什么」看三枚水位 |
+| `/health` · `model_update_pending`、`model_update_pending_observation` | `handlers.rs:771`（`sampled_model_pending_status`，:528）、`:979`、`:581` | `model_update_pending::model_pending_status()` | ADR-072 D5（整表退）；计划 C.1 第 2 行 | 整格删；「欠什么」看两枚水位 |
 | `/health` · `model_drain`、`blocking_conditions` 里的 `model_drain.page_starved` | `handlers.rs:726`、`:956`、`:803`–`:804` | `model_update_pending::model_drain_telemetry_snapshot()` / `model_drain_page_starved()` | 计划 C.1 第 2 行（没有 drain 了） | 整格删；`blocking_conditions` 少一档 |
 | `/health` · `spatial_reconcile` | `handlers.rs:755`–`:764`、`:974`；`ops.html:1390`（`m.h.spatial_reconcile`） | `SideEffectCompensator::spatial_reconcile_status()` | ADR-072 D4（空间树随 `persist_roots_batched` 就地收敛）；计划 C.2 第 4 行 | 整格删；树是否落后看下面那两格 |
 | `/health` · `spatial_tree.pending` / `published_version` / `published_input_files` / `published_input_sha256` | 已落 —— 提交 `f2bdaa21c` | 发布输入 manifest（`published_file_input`） | ADR-072 D4；计划 C.2 第 3 行 | **已退**；换成同一节新增的 `snapshot_watermarks` / `db_watermarks` 两格（快照头记的各库 `(applied, model)` 数对 vs 库里现值，不等即重建） |
@@ -525,6 +529,60 @@ plant-ui 的单根调用零影响。
 
 判真假的方法：表里每条「定义点」都能 `rg -n "<字段名>" src/web_service/handlers.rs web/ops.html`
 命中；T4 改完之后同一条命令应当查无此项（`window_blocks` 那一行除外——它留到 R4）。
+
+### 4.7.2 随房间流程退役的格与查询工具（2026-09-10）
+
+房间流程整套退场：房间的**计算**只剩几何与筛选算法（`fast_model/room_topology.rs`），
+房间的**流水线、水位、任务种类与查询工具**从对外面上消失。与 §4.7.1 同一个读法——
+这些格不是改名、不是置空，是不再出现；读不到就是读不到，别退回默认值再据此画状态。
+
+本节是房间对外面的**唯一权威**：文首 2026-07-27 修订注记里的 `room_recalc`、§4.1 的
+`room_phase`、§4.7.1 `room_published_*` 那一行提到的 `room_sesno`，一律以本节为准。
+
+「真实调用者」一栏是 2026-09-10 在 `plant-ui/crates`、`plant-ui/resource`、`plant3d-web/src`
+上 grep 出来的，不是转述；命中数写在格里，复核命令见本节末。
+
+| 消失的格 / 口 | 出处 | 真实调用者 | 为什么没了 |
+|---|---|---|---|
+| `room_sesno` 与同族五列（`room_sesno_time` / `room_settled_at` / `room_input_version` / `room_required_input` / `room_result_version`） | 水位行 `dbnum_watermark`、`/dbnums` | **无**（0 命中） | 房间不再是一段独立流程，也就没有自己的一枚水位。水位从三枚回到两枚 |
+| `write_state.intent` 的 `room_only` | `/dbnums` 行的 `write_state`（§4.7） | **无**（0 命中） | 没有「只算房间」这条任务意图了 |
+| 任务 kind `room_recalc` 与 TaskId 前缀 `room-…` | `/tasks`、`/tasks/{id}`、WS `tasks` 主题（§6） | **有：plant-ui**——`crates/plant-ui/src/task_queue.rs:40`（`KIND_ROOM_RECALC`）、:1181 / :1713（任务面板的「房间泳道」与「距上一轮多久」）、:4517（用例夹具里的 `room-1`），4 命中 | 房间轮随房间队列退役 |
+| `/health` · `model_update_pending.room_phase`，以及 `blocking_conditions` 的房间死信档 | `/health`（§4.1） | **无**（0 命中） | `model_update_pending` 整表已随 ADR-072 D5 退役，房间那一半一并消失 |
+| `model_source_reason` 的 `room_lagging`，以及判据里的 `room_sesno == applied_sesno` | `/dbnums`、`/model/records` 回执（§4.12） | **无**（0 命中） | 没有房间水位可落后 |
+| `DELETE /model/subtree` 删除范围里的「房间归属」 | §4.5.1 | **无** | 没有房间边可清 |
+| 查询工具 `e3d.room.lookup`（`POST /api/v1/query` 的 `tool` 之一） | `src/query_service.rs:31` / `:158` / `:487`；MCP 侧 `src/bin/e3d_mcp.rs:176` | **有：plant-ui**——`crates/plant-ui-app/src/command.rs`（`q room` 的命令解析、结果渲染与用例，3 命中）、`sim.rs:1708`（离线桩，1 命中） | 成员来源 `room_delta::read_member_compatible_on` 随 `room_delta.rs` 整文件删除，工具无从作答 |
+
+**`e3d.room.lookup` 退了之后必须回错、不许回空。** 该 `tool` 不再登记时
+`POST /api/v1/query` 回 `400 bad_request`（未知工具）。**空 `memberships` 不表达
+「这个构件不在任何房间」**——那是另一句话，回空会让 plant-ui 把「面已经没了」画成
+「这个构件不属于任何房间」。同一条理由与 §4.5.2 「空数组不表达『没生成过』」一致。
+
+> 本规格从未记载 `POST /api/v1/query` 的工具清单（路由在 `web_service/mod.rs`，工具在
+> `query_service.rs::TOOLS`）。房间这一条是第一次被写进契约，只因为它要退；其余工具仍无契约条文。
+
+#### 不由本服务回答、也从未由本服务回答的
+
+- plant3d-web 的 `/api/room/rebuild-relations`、`/api/room/worker/status`、
+  `/api/room/tasks/{id}/cancel`、`/api/room/status`（`src/api/genModelRoomComputeApi.ts`，4 命中）
+  与 `/api/room-tree/{root,children,ancestors,search}`（`src/api/genModelRoomTreeApi.ts`，4 命中）
+  **共八条路径，本服务从来没有实现过**（`rg -n "api/room" src web` = **0**）。它们经
+  `getBackendApiBaseUrl()` 打的是另一套旧后端，与本规格无关：房间退役既不影响它们，
+  本规格也不为它们背书。它们今天在本服务上就是 404，退役后仍是 404。
+- `room_relate` / `room_panel_relate` 两张边与 `fn::room_code` / `fn::room_num_of` 一族
+  SurrealDB 函数是**数据库层**契约，不在本规格的对外面上。plant-ui 直连 `SUL_DB` 读它们
+  （`crates/plant-ui-data/src/room.rs` 20 命中、`crates/plant-ui/src/room_browser.rs`、
+  `resource/surreal/*.surql` 9 命中），**不经 HTTP**。是否随本次一并删表尚未拍板，
+  本节不作决定，也不因为「HTTP 面上看不见」就当它没有消费者。
+
+复核命令（2026-09-10 实测，工作目录 `D:\work\plant-code\old`）：
+
+```
+rg -c --no-heading "e3d\.room\.lookup"            plant-ui/crates plant3d-web/src
+rg -c --no-heading "room_relate|room_panel_relate" plant-ui/crates plant-ui/resource plant3d-web/src
+rg -n  --no-heading "room_recalc"                  plant-ui/crates plant-ui/resource plant3d-web/src
+rg -n  --no-heading "room_sesno|room_only|room_phase|room_lagging" plant-ui/crates plant-ui/resource plant3d-web/src
+rg -n  --no-heading "api/room"                     gen-model-refactor/src gen-model-refactor/web
+```
 
 ### 4.8 `GET /api/v1/queue`、`POST /api/v1/queue/pause`、`POST /api/v1/queue/resume`（ADR-011 §9）
 - `GET /queue` → `{ "paused": false, "epoch_id": 7, "blocked_by_phase": "catalogue",
@@ -626,12 +684,13 @@ plant-ui 的单根调用零影响。
 
 - **判据只有一处**（`model_read_route::route`）：`database` ⇔ 数据面是 `ingest` ∧ 该库
   `applied_sesno > 0` ∧ 该库没有数据批次任务在跑（`task_registry`）∧ `model_sesno == applied_sesno`
-  ∧ `room_sesno == applied_sesno`（ADR-071 D8「三水位相等」，三枚同一次读进程内镜像）；其余 `memory`，
-  理由五选一、按此优先序只报最靠前的一条：`read-through` / `data_watermark_unestablished`（基线未落）/
+  （ADR-071 D8 原文是「三水位相等」；第三枚 `room_sesno` 随房间流程退役后只剩两枚，仍是同一次
+  读进程内镜像）；其余 `memory`，理由四选一、按此优先序只报最靠前的一条：
+  `read-through` / `data_watermark_unestablished`（基线未落）/
   `initialization_publishing`（基线落了、该库的 dbnum 任务在飞；字面值沿用，含义 = 「这个库正在被写」）/
-  `model_lagging`（数据到了 T、模型水位没追上：库里的模型行是旧版，进程内投影更全）/
-  `room_lagging`（数据与模型到了 T、房间水位没追上：这一版的收尾没把房间那一枚盖上）。
-  模型 / 房间水位跑到数据**前面**不算落后（那是 M2 违反，另有对账管）。
+  `model_lagging`（数据到了 T、模型水位没追上：库里的模型行是旧版，进程内投影更全）。
+  `room_lagging` 随房间流程退役（§4.7.2），不再作为理由出现。
+  模型水位跑到数据**前面**不算落后（那是 M2 违反，另有对账管）。
 - **`memory` 库上的 `POST /model/ensure`**：不等初始化队列、不进 durable 队列、不落 rocksdb，直接
   从文件生成进进程内投影（该库有任务在飞就钉它那一版会话，翻面时零差异）。回执多四格：
   `dbnum`、`model_source`、`model_source_reason`、`durable`（`false` = 这批行活不过进程重启，
@@ -643,9 +702,9 @@ plant-ui 的单根调用零影响。
   `ensure` 落库后读库。一次 `records` 请求只有一根、一个库，所以一个响应只有一个源；
   回执同样带 `dbnum` / `model_source` / `model_source_reason` / `durable`。
 - **`GET /dbnums`** 每行加 `model_source` / `model_source_reason`（§4.7），喂给判据的是行上自己的
-  `applied_sesno` / `model_sesno` / `room_sesno`；没有模型 / 房间判决列的行（非 DESI 库、这一次
+  `applied_sesno` / `model_sesno`；没有模型判决列的行（非 DESI 库、这一次
   普查失败）**不判落后**——「不知道」不写成 `model_lagging`。读透形态的冷行恒 `memory` / `read-through`。
-- **翻面事件**：该库的 dbnum 任务跑完（收尾那一笔把三枚水位盖齐）→ `database`；回退重建清库 →
+- **翻面事件**：该库的 dbnum 任务跑完（收尾那一笔把两枚水位盖齐）→ `database`；回退重建清库 →
   `memory`。两处都在 WS `tasks` 主题发 `model_source_changed { dbnum, model_source }`（§5.3）。
   客户端只刷那一格、不重载场景——内存投影与刚落的行是同一版文件算出来的，下一次范围重载自然读到 rocksdb。
 
@@ -691,14 +750,13 @@ plant-ui 的单根调用零影响。
   events_seen, detail?, result? }`——`created_at` 是**入队时刻**，`started_at` 是开跑时刻，
   「已排」与「已用」是两个起点。
 - 状态机：数据任务为 `queued -> running -> succeeded | partial | failed`；模型消费页为
-  `running -> succeeded | partial | failed | yielded`。kind 四种：
+  `running -> succeeded | partial | failed | yielded`。kind 三种：
   `data_batch`（一行 = 一个数据批次；同一 dbnum 至多两行——运行中一行 + 排队中一行）、
-  `room_recalc`（队列跑空时收的一轮房间收敛，创建即 running；`detail` 携带
-  `{ panels, elements, dead_letters }` 分项计数，done/total 用 `units_done`/`total_units`，
-  ADR-011 §10）、`model_drain`（持久模型工作的一页进程内观察）、`manual_update`（已退役，
-  不再产生新行）。
-- TaskId 格式 `db-{yyyyMMdd-HHmmss}-{4位随机hex}`（数据批次）/ `room-…`（房间轮）/
-  `model-…`（模型消费页）。
+  `model_drain`（持久模型工作的一页进程内观察）、`manual_update`（已退役，
+  不再产生新行）。`room_recalc`（曾是队列跑空时收的一轮房间收敛）随房间流程退役
+  （§4.7.2）：不再产生新行，`GET /tasks?kind=room_recalc` 恒回空列表。
+- TaskId 格式 `db-{yyyyMMdd-HHmmss}-{4位随机hex}`（数据批次）/
+  `model-…`（模型消费页）。`room-…`（房间轮）随 `room_recalc` 一并退役，不再产生。
 - 保留策略（ADR-011 §11）：内存上限 1000；queued / running 永不剔除；每个 dbnum 保留
   最近一条终态；其余按全局最老终态先剔。重启即清空，队列由 `init_watcher` 重扫水位重建
   （界面须说明「这是重建的队列」）。
@@ -761,5 +819,27 @@ tokio/serde/serde_json 均已存在，无其他新增。
    正在写库；`writing` 而队列里没有它 = 上一次死在写库中途，下一次启动或该库下一次任务
    开工会回退到 `start_sesno` 再从 `start_sesno → end_sesno` 重跑——这一档值得在库那一行
    出声，它是「为什么这个库的水位会往回走」的唯一出处。
-3. 回退进行中那几秒，`write_state` 整格会短暂消失、三枚水位往回走、`state_revision` 前进。
+3. 回退进行中那几秒，`write_state` 整格会短暂消失、两枚水位往回走、`state_revision` 前进。
    **水位回退不是异常**，别按数据丢失报警；跨仓同步一句即可，不阻本仓落地。
+
+## 11. 给前端的一句话（房间退役，2026-09-10）
+
+**这个服务从此不回答任何「房间」问题。** 房间只剩几何与筛选算法留在服务内部，
+对外没有房间水位、没有房间任务、没有房间查询工具。清单与命中数见 §4.7.2。
+
+分两头说，因为两个仓的处境不一样：
+
+1. **plant3d-web：不必改。** 你那八条 `/api/room/*` 与 `/api/room-tree/*` 打的本来就是
+   另一套旧后端，本服务从没实现过它们——退役前后都是 404，行为一个字不变。
+2. **plant-ui：要改两处，不是「忽略新增字段即可」那种兼容。**
+   - 任务面板的**房间泳道**（`task_queue.rs` 的 `KIND_ROOM_RECALC`）：`room_recalc` 任务
+     不再产生，泳道会恒空。请把它摘掉，而不是留一条永远「距上一轮 ∞」的空泳道。
+   - `q room` / `q e3d.room.lookup` 命令：该工具从 `POST /api/v1/query` 摘掉后回
+     `400 bad_request`。**请按「这个能力没有了」提示，不要按「查不到房间」提示**——
+     服务端刻意不回空 `memberships`，就是不想让「面没了」被读成「这个构件不在任何房间」。
+   - 你**直连 SurrealDB** 读的 `room_relate` / `room_panel_relate` / `fn::room_code`
+     （房间浏览器、材料表 surql）不在本规格管辖内，另行拍板，不随本节退役。
+
+`DbnumStatus` 上少的那一枚是 `room_sesno`（连同 `room_sesno_time` 等五列）：
+水位从三枚回到两枚，`applied_sesno` / `model_sesno` 语义不变。**少的格别退回默认值再画**
+——`room_sesno` 缺席不等于 `0`，`0` 读起来是「房间一次都没算过」，那是另一句话。
