@@ -161,19 +161,18 @@ mod tests {
         assert!(unsupported_at < gate_at, "读透分支必须先于空间门: {status}");
     }
 
-    /// F-B 的行为面：视图选择是数据面的纯函数——ingest 读已发布房间几何，读透退回实时行。
+    /// F-B 的行为面：视图选择仍是纯函数，但发布视图退役之后（ADR-072 D4 / 计划 R5）
+    /// **两种数据面读的是同一份实时行**——`RoomGeometryView` 只剩 `Live`。
+    ///
+    /// 这条原先钉的是「ingest 读已发布房间几何、读透退回实时行」。那个分叉正是这轮要消灭的
+    /// 东西：`room_published_inst` 退役后没有第二份几何可读，ingest 与读透同一条路。
     #[test]
-    fn f_b_consumption_view_is_a_pure_function_of_the_data_face() {
+    fn f_b_consumption_view_is_the_live_rows_on_every_data_face() {
         use crate::fast_model::room_model::{RoomGeometryView, consumption_view_for};
         use crate::options::DataFace;
-        assert_eq!(
-            consumption_view_for(DataFace::Ingest),
-            RoomGeometryView::Published
-        );
-        assert_eq!(
-            consumption_view_for(DataFace::ReadThrough),
-            RoomGeometryView::Live
-        );
+        for face in [DataFace::Ingest, DataFace::ReadThrough] {
+            assert_eq!(consumption_view_for(face), RoomGeometryView::Live, "{face:?}");
+        }
     }
 
     /// F-C：空闲轮消化完模型积压之后，必须回头看「有没有 collecting 的文件轮次已经不再有

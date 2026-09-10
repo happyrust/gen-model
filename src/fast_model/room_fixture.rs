@@ -29,8 +29,7 @@ use aios_core::{RefnoEnum, SUL_DB};
 use glam::Vec3;
 use parry3d::bounding_volume::Aabb;
 
-use crate::data_interface::side_effect_pending::PublishedFileInput;
-use crate::fast_model::room_topology::{RoomGroup, RoomHierarchy, published_topology_manifest_key};
+use crate::fast_model::room_topology::RoomHierarchy;
 
 /// 夹具占用的库号。沿用仓库既有的保留段约定（见 `model_refresh.rs` 的 live 用例）。
 pub const FIXTURE_DBNUM: u64 = 4000000001;
@@ -228,35 +227,11 @@ pub async fn create_room_fixture(mesh_dir: &Path) -> anyhow::Result<()> {
         ));
     }
 
-    // The production room loader consumes the published topology snapshot (or E3D files),
-    // not the retired FRMW noun-table query. Publish the synthetic hierarchy through the same
-    // snapshot contract so this fixture exercises the real incremental room path.
-    let input = PublishedFileInput {
-        dbnum: FIXTURE_DBNUM as u32,
-        db_type: "DESI".into(),
-        end_sesno: 1,
-        commit_token: "fixture-room-token".into(),
-        published_version: 1,
-    };
-    let manifest_key = published_topology_manifest_key(&[input.clone()], RoomHierarchy::Hd);
-    let groups = vec![RoomGroup {
-        room: RefnoEnum::from(refno(1).as_str()),
-        name: ROOM_NAME.into(),
-        panels: vec![
-            RefnoEnum::from(refno(10).as_str()),
-            RefnoEnum::from(refno(11).as_str()),
-        ],
-    }];
-    sql.push_str(&format!(
-        "UPSERT published_file_input:{} SET dbnum = {}, db_type = 'DESI', end_sesno = 1, commit_token = 'fixture-room-token', published_version = 1;\
-         UPSERT room_published_topology:fixture SET manifest_key = '{}', dbnum = {}, groups = {};",
-        input.dbnum,
-        input.dbnum,
-        manifest_key,
-        input.dbnum,
-        serde_json::to_string(&groups)?,
-    ));
-
+    // 发布视图退役之后（ADR-072 D4 / 计划 R5）这里不再「把合成层级发布一遍」：
+    // `room_published_topology` / `published_file_input` 两张表都退了，房间分组由
+    // `room_model` 直接从 `pe + pe_owner` 实时行读（`array::flatten([id<-pe_owner<-pe, …])[?noun='PANE']`）
+    // ——而上面那段 SQL 建的正是这份实时层级（FRMW 房间 + CWALL 面板 + pe_owner 边）。
+    // 少了那一步，这个夹具跑的反而更像生产：只有一份几何、一条读路。
     SUL_DB.query(sql).await?.check()?;
     Ok(())
 }
@@ -1143,37 +1118,9 @@ mod tests {
             .check()
             .expect("valid second room setup");
 
-        let input = PublishedFileInput {
-            dbnum: FIXTURE_DBNUM as u32,
-            db_type: "DESI".into(),
-            end_sesno: 1,
-            commit_token: "fixture-room-token".into(),
-            published_version: 1,
-        };
-        let manifest_key = published_topology_manifest_key(&[input.clone()], RoomHierarchy::Hd);
-        let groups = vec![
-            RoomGroup {
-                room: RefnoEnum::from(refno(1).as_str()),
-                name: ROOM_NAME.into(),
-                panels: vec![RefnoEnum::from(refno(10).as_str())],
-            },
-            RoomGroup {
-                room: RefnoEnum::from(refno(3).as_str()),
-                name: "/ZZ-R-K200".into(),
-                panels: vec![RefnoEnum::from(refno(11).as_str())],
-            },
-        ];
-        SUL_DB
-            .query(format!(
-                "UPSERT room_published_topology:fixture SET manifest_key = '{}', dbnum = {}, groups = {};",
-                manifest_key,
-                input.dbnum,
-                serde_json::to_string(&groups).expect("serialize two-room topology")
-            ))
-            .await
-            .expect("publish two-room topology")
-            .check()
-            .expect("valid two-room topology");
+        // 第二间房同样不再走「发布一份拓扑快照」那一步（见 `setup` 里的同款注释）：
+        // 上面那段 SQL 已经把 K200 的 FRMW / CWALL 与 `pe_owner` 边落成实时行，
+        // 房间分组从它们身上读得出来。
 
         let fixture_refnos: Vec<RefnoEnum> = bodies()
             .iter()

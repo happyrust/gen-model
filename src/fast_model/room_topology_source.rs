@@ -1,5 +1,12 @@
-//! Immutable, source-local room topology. Only `capture` reads E3D; publication
+//! Immutable, source-local room topology. Only `capture` reads E3D; composition
 //! combines exact source tokens and never consults the current model projection.
+//!
+//! 分片**不进库**（ADR-072 D4 / d-441 ⑤）：一片 = 一个 DESI 文件在一个冻结令牌下的房间树
+//! 节点表，落成本地磁盘工件（`model_artifact` 信封：校验和 + 键逐字节比对），键按 d-89 只由
+//! **本文件的冻结令牌**寻址、不含整组文件的 composite——邻库前进不作废没变文件的分片。
+//! 启动参照（`room_resident::ResidentReference`）按令牌读回这些分片合成「旧」视图；找不到
+//! 就是 `ReferenceUnreadable`，走显式全量（多算不漏算）。此前这一层是两张表
+//! （头 + 512 KiB 分块）加 `publication_request` 串行写，随 publish 阶段一起退役。
 use super::room_topology::{RoomGroup, RoomHierarchy, collect_room_groups};
 use crate::data_interface::{
     digest::digest,
@@ -10,12 +17,11 @@ use aios_core::RefnoEnum;
 use anyhow::{Context, ensure};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use surrealdb::{Surreal, engine::any::Any};
+use std::path::{Path, PathBuf};
 
 const SCHEMA_VERSION: u16 = 1;
-const PART_BYTES: usize = 512 * 1024;
-const HEADER: &str = "room_topology_source";
-const PART: &str = "room_topology_source_part";
+/// 磁盘工件目录名（在 `meshes_path` 之下，与 `room-input-cache` / `room-result-cache` 并排）。
+const ARTIFACT_DIR: &str = "room-topology-source";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct TopologyNode {
@@ -35,14 +41,26 @@ pub(crate) struct RoomTopologySource {
     pub nodes: Vec<TopologyNode>,
 }
 
+/// 分片身份摘要。**过渡件**：库里两张分片表退役后它已没有生产读者，只剩
+/// `side_effect_pending` 退役前的一处引用；随 T4 删该文件一起删。
 pub(crate) fn source_key(token: &str) -> String {
     digest(format!("room-topology-source-v{SCHEMA_VERSION}\n{token}").as_bytes())
 }
 
+/// 磁盘工件键：按**本文件**的冻结令牌原文寻址（d-89），不含 composite、不另算摘要——
+/// 工件信封自己把键哈希成文件名、装载时逐字节比对（`model_artifact::path` / `load_value`）。
+pub(crate) fn artifact_key(token: &str) -> String {
+    format!("room-topology-source-v{SCHEMA_VERSION}:{token}")
+}
+
+/// 缺省工件目录：`meshes_path/room-topology-source`。
+pub(crate) fn artifact_dir() -> PathBuf {
+    aios_core::get_db_option()
+        .get_meshes_path()
+        .join(ARTIFACT_DIR)
+}
+
 impl RoomTopologySource {
-    pub fn key(&self) -> String {
-        source_key(&self.source_token)
-    }
     pub fn validate(&self) -> anyhow::Result<()> {
         ensure!(
             self.version == SCHEMA_VERSION,
@@ -126,18 +144,6 @@ pub(crate) async fn capture(source: &FrozenSource) -> anyhow::Result<RoomTopolog
     Ok(result)
 }
 
-#[derive(Debug, Deserialize)]
-struct SourceHeader {
-    source_token: String,
-    payload_hash: String,
-    part_count: usize,
-    complete: bool,
-}
-
-async fn query(db: &Surreal<Any>, sql: String) -> anyhow::Result<surrealdb::Response> {
-    super::model_db_adapter::publication_request(async { Ok(db.query(sql).await?.check()?) }).await
-}
-
 pub(crate) fn context_fingerprint() -> String {
     digest(
         format!(
@@ -149,138 +155,80 @@ pub(crate) fn context_fingerprint() -> String {
     )
 }
 
-async fn read_header(db: &Surreal<Any>, key: &str) -> anyhow::Result<Option<SourceHeader>> {
-    let rows: Vec<SourceHeader> = query(
-        db,
-        format!("SELECT source_token,payload_hash,part_count,complete FROM {HEADER}:⟨{key}⟩;"),
-    )
-    .await?
-    .take(0)?;
-    Ok(rows.into_iter().next())
+/// 这个令牌的分片在不在磁盘上（在、且校验通过、且令牌逐字相等）。
+///
+/// 信封校验不过（内容被改 / 键不对）按「不在」算——参照那一侧据此判 `ReferenceUnreadable`
+/// 走全量，与此前库里「头不完整」同一去向。
+pub(crate) fn exists_in(dir: &Path, token: &str) -> bool {
+    load_from(dir, token).is_ok()
 }
 
-pub(crate) async fn exists_on(db: &Surreal<Any>, token: &str) -> anyhow::Result<bool> {
-    let Some(header) = read_header(db, &source_key(token)).await? else {
-        return Ok(false);
-    };
-    ensure!(
-        header.source_token == token && header.complete && header.part_count > 0,
-        "incomplete or mismatched room topology source"
-    );
-    Ok(true)
+pub(crate) fn exists(token: &str) -> bool {
+    exists_in(&artifact_dir(), token)
 }
 
-/// Producer/upgrade-baseline entry only. Async initialization uses its durable
-/// journal artifact instead; its consumer must never invoke this capture path.
-pub(crate) async fn prepare_producer_source(source: &FrozenSource) -> anyhow::Result<()> {
-    if !source.db_type().eq_ignore_ascii_case("DESI") {
-        return Ok(());
-    }
-    let token = source.commit_token_json()?;
-    if exists_on(&aios_core::SUL_DB, &token).await? {
-        load_on(&aios_core::SUL_DB, &token).await?;
-    } else {
-        persist_on(&aios_core::SUL_DB, &capture(source).await?).await?;
-    }
-    Ok(())
-}
-
-fn parts(payload: &str) -> Vec<&str> {
-    let mut result = Vec::new();
-    let mut rest = payload;
-    while !rest.is_empty() {
-        let mut end = rest.len().min(PART_BYTES);
-        while !rest.is_char_boundary(end) {
-            end -= 1;
-        }
-        result.push(&rest[..end]);
-        rest = &rest[end..];
-    }
-    result
-}
-
-/// Parts are immutable and individually acknowledged; the complete header is
-/// written last. Replaying a partial upload checks every existing part instead
-/// of replacing it. No whole-file or whole-database transaction is required.
-pub(crate) async fn persist_on(
-    db: &Surreal<Any>,
-    source: &RoomTopologySource,
-) -> anyhow::Result<()> {
-    source.validate()?;
-    let key = source.key();
-    let payload = serde_json::to_string(source)?;
-    let hash = digest(payload.as_bytes());
-    if let Some(header) = read_header(db, &key).await? {
-        ensure!(
-            header.complete
-                && header.source_token == source.source_token
-                && header.payload_hash == hash,
-            "immutable room topology source conflicts with existing header"
-        );
-        load_on(db, &source.source_token).await?;
-        return Ok(());
-    }
-    let parts = parts(&payload);
-    for (index, part) in parts.iter().enumerate() {
-        let part_hash = digest(part.as_bytes());
-        let text = serde_json::to_string(part)?;
-        query(db, format!("BEGIN TRANSACTION; LET $old=(SELECT * FROM {PART}:['{key}',{index}])[0]; \
-            IF $old IS NONE {{ CREATE {PART}:['{key}',{index}] SET payload={text},payload_hash='{part_hash}' RETURN NONE; }} \
-            ELSE {{ IF $old.payload_hash != '{part_hash}' OR $old.payload != {text} {{ THROW 'room_topology_part_conflict'; }}; }}; COMMIT TRANSACTION;"))
-            .await?;
-    }
-    let token = serde_json::to_string(&source.source_token)?;
-    let count = parts.len();
-    query(db, format!("BEGIN TRANSACTION; LET $old=(SELECT * FROM {HEADER}:⟨{key}⟩)[0]; \
-        IF $old IS NONE {{ CREATE {HEADER}:⟨{key}⟩ SET source_token={token},payload_hash='{hash}',part_count={count},complete=true RETURN NONE; }} \
-        ELSE {{ IF $old.source_token != {token} OR $old.payload_hash != '{hash}' OR $old.part_count != {count} OR $old.complete != true {{ THROW 'room_topology_source_conflict'; }}; }}; COMMIT TRANSACTION;"))
-        .await?;
-    Ok(())
-}
-
-pub(crate) async fn load_on(db: &Surreal<Any>, token: &str) -> anyhow::Result<RoomTopologySource> {
-    let key = source_key(token);
-    let header = read_header(db, &key)
-        .await?
-        .context("missing exact room topology source; retain publication without reopening E3D")?;
-    ensure!(
-        header.complete && header.source_token == token && header.part_count > 0,
-        "room topology source identity or completion mismatch"
-    );
-    #[derive(Deserialize)]
-    struct Part {
-        payload: String,
-        payload_hash: String,
-    }
-    let mut payload = String::new();
-    for index in 0..header.part_count {
-        let rows: Vec<Part> = query(
-            db,
-            format!("SELECT payload,payload_hash FROM {PART}:['{key}',{index}];"),
-        )
-        .await?
-        .take(0)?;
-        let part = rows
-            .into_iter()
-            .next()
-            .context("missing room topology source part")?;
-        ensure!(
-            digest(part.payload.as_bytes()) == part.payload_hash,
-            "room topology source part checksum mismatch"
-        );
-        payload.push_str(&part.payload);
-    }
-    ensure!(
-        digest(payload.as_bytes()) == header.payload_hash,
-        "room topology source checksum mismatch"
-    );
-    let source: RoomTopologySource = serde_json::from_str(&payload)?;
+/// 读回一片：信封校验 + 结构自检 + 令牌逐字相等，任一不过整片 `Err`（原则 2：判不了就不用）。
+pub(crate) fn load_from(dir: &Path, token: &str) -> anyhow::Result<RoomTopologySource> {
+    let source: RoomTopologySource =
+        super::model_artifact::load_value(dir, &artifact_key(token)).with_context(|| {
+            format!(
+                "missing exact room topology source artifact in {}; retain the reference without reopening E3D",
+                dir.display()
+            )
+        })?;
     source.validate()?;
     ensure!(
         source.source_token == token,
         "room topology payload token mismatch"
     );
     Ok(source)
+}
+
+pub(crate) fn load(token: &str) -> anyhow::Result<RoomTopologySource> {
+    load_from(&artifact_dir(), token)
+}
+
+/// 落一片：`model_artifact::store_value`（临时文件 + fsync + 原子改名）。已有同令牌的分片时
+/// 只核对不重写——分片是不可变的，内容不同说明同一令牌下捕获出了两份不同的拓扑，那是
+/// 上游的 bug，不能静默盖掉。
+pub(crate) fn persist_in(dir: &Path, source: &RoomTopologySource) -> anyhow::Result<()> {
+    source.validate()?;
+    let payload = serde_json::to_vec(source)?;
+    if let Some(existing) =
+        super::model_artifact::load_value::<RoomTopologySource>(dir, &artifact_key(&source.source_token))
+    {
+        ensure!(
+            serde_json::to_vec(&existing)? == payload,
+            "immutable room topology source conflicts with the retained artifact"
+        );
+        return Ok(());
+    }
+    super::model_artifact::store_value(dir, &artifact_key(&source.source_token), source)
+}
+
+pub(crate) fn persist(source: &RoomTopologySource) -> anyhow::Result<()> {
+    persist_in(&artifact_dir(), source)
+}
+
+/// 把一个冻结源的分片备好：磁盘上已有就只校验（不重开 E3D），没有才 `capture` 再落盘。
+/// 只在结构触发命中 / 本库首次（参照缺这一片）时才该走到 `capture` 那一支——调用方管这道门。
+/// 不写库、不写参照。
+pub(crate) async fn prepare_producer_source(source: &FrozenSource) -> anyhow::Result<()> {
+    prepare_producer_source_in(&artifact_dir(), source).await
+}
+
+pub(crate) async fn prepare_producer_source_in(
+    dir: &Path,
+    source: &FrozenSource,
+) -> anyhow::Result<()> {
+    if !source.db_type().eq_ignore_ascii_case("DESI") {
+        return Ok(());
+    }
+    let token = source.commit_token_json()?;
+    if exists_in(dir, &token) {
+        return Ok(());
+    }
+    persist_in(dir, &capture(source).await?)
 }
 
 pub(crate) fn compose(
@@ -399,7 +347,13 @@ mod tests {
         next[2].nodes[0].noun = "BOX".into();
         assert_eq!(old[0].source_token, next[0].source_token);
         assert_eq!(old[2].source_sesno, next[2].source_sesno);
-        assert_ne!(old[2].key(), next[2].key());
+        // 分片身份 = 文件令牌本身（`source_key`）。`RoomTopologySource::key()` 随
+        // `room_published_topology` 一起退役：那把键是发布视图的 manifest 键，而分片
+        // 现在只按令牌寻址（`the_shard_artifact_is_addressed_by_the_file_token_alone`）。
+        assert_ne!(
+            source_key(&old[2].source_token),
+            source_key(&next[2].source_token)
+        );
         assert_ne!(
             compose(&old, RoomHierarchy::Hd).unwrap()[0].1,
             compose(&next, RoomHierarchy::Hd).unwrap()[0].1
@@ -413,21 +367,12 @@ mod tests {
         source[2].nodes.push(duplicate);
         assert!(compose(&source, RoomHierarchy::Hd).is_err());
     }
+    /// 磁盘分片的往返：落一次、再落一次幂等、读回逐字节相等；没落过的令牌读不到；
+    /// 工件被改（信封校验不过）→ 读不到，**也不许**被同令牌的重写盖掉。一次都不打开
+    /// E3D 文件（夹具令牌指向不存在的路径）。
     #[test]
-    fn multipart_payload_preserves_unicode_boundaries() {
-        let payload = "门\"\\\n".repeat(PART_BYTES);
-        let split = parts(&payload);
-        assert!(split.iter().all(|s| s.len() <= PART_BYTES));
-        assert_eq!(split.join(""), payload);
-    }
-    async fn db() -> Surreal<Any> {
-        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
-        db.use_ns("topology").use_db("test").await.unwrap();
-        db
-    }
-    #[tokio::test]
-    async fn exact_source_roundtrip_never_opens_missing_source_and_detects_corruption() {
-        let db = db().await;
+    fn exact_source_roundtrip_on_disk_never_opens_missing_source_and_detects_corruption() {
+        let dir = tempfile::tempdir().unwrap();
         let source = cross_sources().remove(1);
         assert!(
             !FrozenSource::from_commit_token_json(&source.source_token)
@@ -435,54 +380,74 @@ mod tests {
                 .path()
                 .exists()
         );
-        persist_on(&db, &source).await.unwrap();
-        persist_on(&db, &source).await.unwrap();
-        let loaded = load_on(&db, &source.source_token).await.unwrap();
+        assert!(!exists_in(dir.path(), &source.source_token));
+        persist_in(dir.path(), &source).unwrap();
+        persist_in(dir.path(), &source).unwrap();
+        assert!(exists_in(dir.path(), &source.source_token));
+        let loaded = load_from(dir.path(), &source.source_token).unwrap();
         assert_eq!(
             serde_json::to_vec(&source).unwrap(),
             serde_json::to_vec(&loaded).unwrap()
         );
+        assert!(load_from(dir.path(), &fixture_source(2, 2).source_token).is_err());
+
+        // 同令牌、不同内容：不可变分片不许被盖。
+        let mut conflicting = source.clone();
+        conflicting.nodes[0].name = "ROOM-999".into();
         assert!(
-            load_on(&db, &fixture_source(2, 2).source_token)
-                .await
-                .is_err()
+            persist_in(dir.path(), &conflicting).is_err(),
+            "同一令牌下两份不同拓扑是上游 bug，不能静默覆盖"
         );
-        db.query(format!(
-            "UPDATE {PART}:['{}',0] SET payload_hash='corrupt';",
-            source.key()
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        assert!(load_on(&db, &source.source_token).await.is_err());
-        assert!(
-            persist_on(&db, &source).await.is_err(),
-            "do not overwrite corrupt retained content"
-        );
+
+        // 工件损坏：信封校验不过 → 读不到、按缺片处置。
+        let mut corrupted = None;
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                let mut text = std::fs::read_to_string(&path).unwrap();
+                text = text.replace("ROOM-001", "ROOM-XXX");
+                std::fs::write(&path, text).unwrap();
+                corrupted = Some(path);
+            }
+        }
+        assert!(corrupted.is_some(), "夹具至少落了一份工件");
+        assert!(load_from(dir.path(), &source.source_token).is_err());
+        assert!(!exists_in(dir.path(), &source.source_token));
     }
-    #[tokio::test]
-    async fn failed_part_upload_has_no_complete_header_and_explicit_replay_is_idempotent() {
-        let db = db().await;
-        let mut source = cross_sources().remove(1);
-        source.nodes[0].name = "R".repeat(PART_BYTES * 2);
-        let key = source.key();
-        db.query(format!("DEFINE EVENT reject_second ON TABLE {PART} WHEN $after.id={PART}:['{key}',1] THEN {{ THROW 'injected topology upload'; }};"))
-            .await.unwrap().check().unwrap();
-        assert!(persist_on(&db, &source).await.is_err());
-        assert!(!exists_on(&db, &source.source_token).await.unwrap());
-        db.query(format!("REMOVE EVENT reject_second ON TABLE {PART};"))
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        persist_on(&db, &source).await.unwrap();
-        assert_eq!(
-            load_on(&db, &source.source_token).await.unwrap().nodes[0]
-                .name
-                .len(),
-            PART_BYTES * 2
-        );
+
+    /// 分片工件键按**本文件令牌**寻址、不含 composite（d-89）：两个不同文件版本的令牌各有
+    /// 各的工件，互不遮蔽；键里带着令牌原文、不另算摘要。
+    #[test]
+    fn the_shard_artifact_is_addressed_by_the_file_token_alone() {
+        let a = fixture_source(7997, 1);
+        let b = fixture_source(7997, 2);
+        assert_ne!(a.source_token, b.source_token);
+        assert_ne!(artifact_key(&a.source_token), artifact_key(&b.source_token));
+        assert!(artifact_key(&a.source_token).ends_with(&a.source_token));
+        assert!(!artifact_key(&a.source_token).contains("composite"));
+
+        let dir = tempfile::tempdir().unwrap();
+        persist_in(dir.path(), &a).unwrap();
+        assert!(exists_in(dir.path(), &a.source_token));
+        assert!(!exists_in(dir.path(), &b.source_token));
+        persist_in(dir.path(), &b).unwrap();
+        assert!(exists_in(dir.path(), &a.source_token));
+        assert!(exists_in(dir.path(), &b.source_token));
+    }
+
+    /// 这一层从此不碰库：没有 `SUL_DB`、没有 `.query(`、没有分片表名。
+    #[test]
+    fn room_topology_shards_never_touch_the_database() {
+        let source = include_str!("room_topology_source.rs");
+        let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
+        for needle in ["SUL_DB", ".query(", "surrealdb", "publication_request", "_part"] {
+            assert!(
+                !production.contains(needle),
+                "room_topology_source.rs 生产路径不该再出现 `{needle}`"
+            );
+        }
+        assert!(production.contains("model_artifact::store_value"));
+        assert!(production.contains("model_artifact::load_value"));
     }
     /// 真文件门：在带房间的库上量一次 `capture` 的节点数、分片体量与耗时（常驻房间模型计划
     /// P0 的取证，`docs/plans/2026-09-07-resident-room-model-plan.md` §7）。默认 ams7997——
@@ -520,7 +485,8 @@ mod tests {
             .filter(|node| node.name.contains("-RM"))
             .count();
         println!(
-            "[live] {} dbnum={} sesno={} nodes={} room_nodes={} named_-RM={} payload_bytes={} parts={} capture={:?}",
+            // `parts=` 那一格随发布视图的分片切分一起退役：工件现在整份按令牌落盘。
+            "[live] {} dbnum={} sesno={} nodes={} room_nodes={} named_-RM={} payload_bytes={} capture={:?}",
             file.display(),
             captured.dbnum,
             captured.source_sesno,
@@ -528,7 +494,6 @@ mod tests {
             room_nodes,
             keyword_rooms,
             payload.len(),
-            parts(&payload).len(),
             capture_elapsed
         );
         let started = std::time::Instant::now();
@@ -551,43 +516,5 @@ mod tests {
             filtered.iter().any(|(_, _, panels)| !panels.is_empty()),
             "带房间的库上 -RM 房间名下该有面板"
         );
-    }
-
-    #[tokio::test]
-    async fn ordinary_round_cannot_promote_without_its_complete_exact_source() {
-        use crate::data_interface::side_effect_pending::SideEffectCompensator;
-        let db = db().await;
-        let source = fixture_source(7997, 1);
-        let token = serde_json::to_string(&source.source_token).unwrap();
-        let id = "incr_side_effect_pending:spatial_reconcile_7997_112";
-        db.query(format!("CREATE {id} SET kind='spatial_reconcile',dbnum=7997,end_sesno=112,db_type='DESI',commit_token={token},status='collecting';"))
-            .await.unwrap().check().unwrap();
-        assert!(
-            SideEffectCompensator::promote_file_round_on(&db, 7997, 112)
-                .await
-                .is_err()
-        );
-        let states: Vec<String> = db
-            .query(format!("SELECT VALUE status FROM {id};"))
-            .await
-            .unwrap()
-            .check()
-            .unwrap()
-            .take(0)
-            .unwrap();
-        assert_eq!(states, vec!["collecting"]);
-        persist_on(&db, &source).await.unwrap();
-        SideEffectCompensator::promote_file_round_on(&db, 7997, 112)
-            .await
-            .unwrap();
-        let states: Vec<String> = db
-            .query(format!("SELECT VALUE status FROM {id};"))
-            .await
-            .unwrap()
-            .check()
-            .unwrap()
-            .take(0)
-            .unwrap();
-        assert_eq!(states, vec!["pending"]);
     }
 }
