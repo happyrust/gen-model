@@ -107,7 +107,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fast_model::room_fixture::box_mesh_for_test;
+    use crate::fast_model::room_model::box_mesh_for_test;
     use glam::{Mat4, Vec3};
     use parry3d::shape::TriMeshFlags;
 

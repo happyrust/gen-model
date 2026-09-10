@@ -304,7 +304,6 @@ impl ModelRefreshPolicy {
                     crate::fast_model::model_memory_store::ModelMemoryStore::global(),
                     dbnum,
                     &refnos,
-                    crate::fast_model::room_publication::RoomEffectPolicy::Directed,
                 )
                 .await?;
                 if let Some(rows) = batched.rows.as_ref() {

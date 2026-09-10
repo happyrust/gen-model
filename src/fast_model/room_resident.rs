@@ -848,51 +848,6 @@ impl fmt::Display for ResidentBuildError {
 
 impl std::error::Error for ResidentBuildError {}
 
-/// 从**实时行**装一份模型（d-21 / ADR-072 D4 R5）：拓扑分组由调用方按文件分好递进来
-/// （生产 = 文件侧 `load_room_groups_from_files`，`mem://` 门 = 直接给），在册面板的几何按
-/// refno 点名从 `inst_relate` 实时行读（`room_publication::query_live_room_insts_on`）。
-/// 库里只有一份几何——任务同步写进去的那份——没有「按清单令牌选版本」这一层了。
-///
-/// 键 = 各文件 `(dbnum, sesno)` 的规范摘要（与 `latest_frozen_sources` 的 composite 同一算法：
-/// 令牌 JSON 序列化再摘要）；调用方手里有令牌时用 [`ResidentRoomModel::with_source_tokens`]
-/// 补上参照要的令牌。`db` 显式传入，启动水化喂 `SUL_DB`，`mem://` 门直接喂。
-pub(crate) async fn load_live_on(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    by_file: Vec<(u32, Vec<RoomGroup>)>,
-    room_key_words: &[String],
-    match_room_fn: impl Fn(&str) -> bool,
-    meshes: Arc<MeshCache>,
-) -> anyhow::Result<ResidentRoomModel> {
-    let key = live_generation_key(&by_file);
-    let room_files = room_files_of(&by_file);
-    let groups = crate::fast_model::room_topology::flatten_groups_by_file(by_file);
-    let map = registered_map(&groups, room_key_words, match_room_fn);
-    let registered = registered_panels(&map);
-    let insts = crate::fast_model::room_publication::query_live_room_insts_on(db, &registered)
-        .await
-        .map_err(|error| {
-            ResidentBuildError::new(
-                ResidentForm::Published,
-                Some(key.clone()),
-                format!(
-                    "读 {} 块在册面板的实时行几何失败: {error:#}",
-                    registered.len()
-                ),
-            )
-        })?;
-    Ok(ResidentRoomModel::assemble(
-        ResidentManifest {
-            form: ResidentForm::Published,
-            key,
-        },
-        groups,
-        map,
-        insts,
-        meshes,
-    )
-    .with_room_files(room_files))
-}
-
 /// 实时行那一份的身份键：按文件 dbnum 序的 `(dbnum, 分组摘要)`。没有令牌可摘时用它——
 /// 只用来判「同一份输入」，不参与任何跨进程比对。
 fn live_generation_key(by_file: &[(u32, Vec<RoomGroup>)]) -> String {
@@ -1166,149 +1121,6 @@ pub(crate) async fn read_resident_reference_on(
     Ok(rows.into_iter().flatten().next())
 }
 
-/// 把这份模型钉成参照并写 `room_build:main.resident_reference`。**只在一轮成功结算之后调**
-/// （启动对比应用全成 / 显式全量全成 / 一轮 drain 全 `done`）——参照说的是「边是按这份拓扑
-/// 算出来的」，算失败的轮次不许推进它。
-///
-/// 两形态都先把每个令牌冻成 `room_topology_source` 磁盘分片（`prepare_producer_source` 幂等，
-/// 启动初始化多半已经冻过；此前摄入侧的分片由 publish 那条路冻，publish 退役后没人替它冻了），
-/// 随后都过 [`persist_reference_on`] 的分片核对：缺一片就不写。
-pub(crate) async fn persist_reference(
-    model: &ResidentRoomModel,
-) -> anyhow::Result<ResidentReference> {
-    freeze_source_shards(model).await?;
-    persist_reference_on(&aios_core::SUL_DB, model).await
-}
-
-/// [`persist_reference`] 的库半截：核对模型每个令牌的**磁盘分片**都在且完整（信封校验过、
-/// 令牌相等，[`room_topology_source::exists_in`]），再写参照。任一片缺失 / 不完整 / 令牌对不上
-/// → 不写、上抛：宁可下次启动多算一次（`NoReference` → 全量），不写一条到时候读不回来的参照
-/// （那会是 `ReferenceUnreadable` → `rebuild_required`，同样是全量，却多绕一圈还标了脏）。
-/// 没有令牌的模型同样拒写——参照没有令牌就没有旧视图可合成。`db` 只用来写参照那一行，
-/// `mem://` 门直接喂；分片在缺省工件目录。
-///
-/// [`room_topology_source::exists_in`]: crate::fast_model::room_topology_source::exists_in
-pub(crate) async fn persist_reference_on(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    model: &ResidentRoomModel,
-) -> anyhow::Result<ResidentReference> {
-    persist_reference_with_shards_on(
-        db,
-        &crate::fast_model::room_topology_source::artifact_dir(),
-        model,
-    )
-    .await
-}
-
-/// [`persist_reference_on`] 带显式分片目录的形态（`mem://` 门用临时目录喂）。
-pub(crate) async fn persist_reference_with_shards_on(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    shard_dir: &Path,
-    model: &ResidentRoomModel,
-) -> anyhow::Result<ResidentReference> {
-    anyhow::ensure!(
-        !model.source_tokens.is_empty(),
-        "参照不写：{} 模型 {} 没有来源令牌，下次启动无从合成旧视图",
-        model.manifest.form.as_str(),
-        model.manifest.key
-    );
-    ensure_source_shards_present_in(shard_dir, &model.source_tokens)?;
-    let reference = ResidentReference::for_model(model);
-    write_resident_reference_on(db, &reference).await?;
-    Ok(reference)
-}
-
-/// 每个令牌的分片都在且完整，否则一次说全（哪几片、各为什么）。
-fn ensure_source_shards_present_in(shard_dir: &Path, tokens: &[String]) -> anyhow::Result<()> {
-    let mut missing = Vec::new();
-    for token in tokens {
-        if !crate::fast_model::room_topology_source::exists_in(shard_dir, token) {
-            missing.push(format!("{}: 分片缺失或校验不过", describe_token(token)));
-        }
-    }
-    anyhow::ensure!(
-        missing.is_empty(),
-        "参照不写：{} 个令牌的房间拓扑分片缺失或不完整 [{}]",
-        missing.len(),
-        missing.join("; ")
-    );
-    Ok(())
-}
-
-/// 给人看的令牌：`dbnum@sesno`；解不出来（纯测里的占位令牌）退回前 24 个字符。
-fn describe_token(token: &str) -> String {
-    match crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(token) {
-        Ok(source) => format!("{}@{}", source.dbnum(), source.target_sesno()),
-        Err(_) => token.chars().take(24).collect(),
-    }
-}
-
-/// 把模型依据的每个文件版本冻成 `room_topology_source` 分片（`prepare_producer_source` 幂等：
-/// 已有同令牌的分片只校验不重冻）。返回每个令牌 `(dbnum, sesno, 耗时 ms)`——启动初始化的回执
-/// 逐文件报它。**只冻分片、不写参照**：参照说的是「边是按这份拓扑算出来的」，归结算那一步写。
-pub(crate) async fn freeze_source_shards(
-    model: &ResidentRoomModel,
-) -> anyhow::Result<Vec<(u32, u32, u128)>> {
-    let mut frozen = Vec::with_capacity(model.source_tokens.len());
-    for token in &model.source_tokens {
-        let started = Instant::now();
-        let source =
-            crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(token)?;
-        crate::fast_model::room_topology_source::prepare_producer_source(&source)
-            .await
-            .with_context(|| format!("冻结 dbnum {} 的房间拓扑分片", source.dbnum()))?;
-        frozen.push((
-            source.dbnum() as u32,
-            source.target_sesno(),
-            started.elapsed().as_millis(),
-        ));
-    }
-    Ok(frozen)
-}
-
-/// 启动对比的「旧」那份：按参照里的令牌读**磁盘**分片、合成、过关键字。任一分片缺失 /
-/// 校验失败 → 整份失败（原则 2），调用方按「参照不可读」处置，不拿半份去 diff。
-/// `db` 参数保留给调用方的既有签名（参照本身在库里），分片不再从库读。
-pub(crate) async fn load_reference_map_on(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    reference: &ResidentReference,
-    hierarchy: RoomHierarchy,
-    room_key_words: &[String],
-    match_room_fn: impl Fn(&str) -> bool,
-) -> anyhow::Result<(Vec<RoomGroup>, RoomPanelMap)> {
-    let _ = db;
-    load_reference_map_from_shards(
-        &crate::fast_model::room_topology_source::artifact_dir(),
-        reference,
-        hierarchy,
-        room_key_words,
-        match_room_fn,
-    )
-}
-
-/// [`load_reference_map_on`] 带显式分片目录的形态（`mem://` 门用临时目录喂）。
-pub(crate) fn load_reference_map_from_shards(
-    shard_dir: &Path,
-    reference: &ResidentReference,
-    hierarchy: RoomHierarchy,
-    room_key_words: &[String],
-    match_room_fn: impl Fn(&str) -> bool,
-) -> anyhow::Result<(Vec<RoomGroup>, RoomPanelMap)> {
-    let mut sources = Vec::with_capacity(reference.tokens.len());
-    for token in &reference.tokens {
-        sources.push(
-            crate::fast_model::room_topology_source::load_from(shard_dir, token)
-                .context("读启动参照的房间拓扑分片")?,
-        );
-    }
-    let composed = crate::fast_model::room_topology_source::compose(&sources, hierarchy)?;
-    let groups: Vec<RoomGroup> = composed
-        .into_iter()
-        .flat_map(|(_, groups)| groups)
-        .collect();
-    let map = registered_map(&groups, room_key_words, match_room_fn);
-    Ok((groups, map))
-}
 
 /// 启动该做什么（Q7 (a)：全量降为显式修复入口，其余走对比；臂表 d-42，两形态同一张）。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1870,13 +1682,8 @@ async fn initialize_file_backed_at_startup(
         .mesh_cache();
     let mut model =
         load_file_backed(form, hierarchy, room_key_words, match_room_fn, meshes).await?;
-    let frozen = freeze_source_shards(&model).await.map_err(|error| {
-        ResidentBuildError::new(
-            form,
-            Some(model.manifest.key.clone()),
-            format!("冻结房间拓扑分片失败: {error:#}"),
-        )
-    })?;
+    // 拓扑分片（`room_topology_source`）随房间流程退役（t-678）：没有分片要冻，回执那一格空着。
+    let frozen = Vec::new();
     warm_for_install(&mut model, mesh_dir).await?;
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
     let model = resident_rooms()
@@ -1908,13 +1715,8 @@ async fn initialize_latest_at_startup(
         .unwrap_or_else(PoisonError::into_inner)
         .mesh_cache();
     let mut model = load_latest(hierarchy, room_key_words, match_room_fn, meshes).await?;
-    let frozen = freeze_source_shards(&model).await.map_err(|error| {
-        ResidentBuildError::new(
-            ResidentForm::Latest,
-            Some(model.manifest.key.clone()),
-            format!("冻结房间拓扑分片失败: {error:#}"),
-        )
-    })?;
+    // 见 `initialize_file_backed_at_startup`：分片退役，回执那一格空着。
+    let frozen = Vec::new();
     warm_for_install(&mut model, mesh_dir).await?;
     let _serial = crate::fast_model::spatial_state::lock_spatial_serial().await;
     let model = resident_rooms()
@@ -3221,115 +3023,6 @@ mod tests {
 
         set_lifecycle(restore);
     }
-
-    /// `mem://` 门（ADR-072 R5）：从**实时行**装出来的模型——拓扑分组按文件递进来、在册
-    /// 面板的几何按 refno 从 `inst_relate` 点名读——在册面板集、缺几何面板集、房间号、包围盒
-    /// 与此前从发布表装的那份完全一样；行改了，重装读到的就是改后的几何（库里只有一份）。
-    #[tokio::test]
-    async fn the_live_model_is_assembled_from_inst_relate_rows_and_matches_the_published_shape() {
-        use surrealdb::engine::any::connect;
-
-        let db = connect("mem://").await.expect("mem boots");
-        db.use_ns("room_resident")
-            .use_db("live_rows")
-            .await
-            .unwrap();
-        let shard_a = vec![group(5, "/1RX-RM03-R301", &[7])];
-        let shard_b = vec![group(6, "/1RX-RM03-R302", &[9])];
-        db.query(
-            "CREATE pe:24384_7 SET noun = 'PANE'; CREATE pe:24384_9 SET noun = 'PANE'; \
-             CREATE inst_relate:24384_7 SET dbnum = 8000, in = pe:24384_7, \
-               anc = [104728482619399, 104728482619393], generic = 'PANE', \
-               aabb_d = { mins: [0f, 0f, 0f], maxs: [1f, 1f, 1f] }, \
-               world_trans_d = { translation: [0f, 0f, 0f], rotation: [0f, 0f, 0f, 1f], scale: [1f, 1f, 1f] }, \
-               insts_flat = [{ geo_hash: 'mesh-old' }], booled_id = NONE;",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-
-        // 8001 的面板 9 还没有实时行：模型照建，9 进 `missing_panels`（判不了就不写），不失败。
-        let by_file = vec![(8000u32, shard_a.clone()), (8001u32, shard_b.clone())];
-        let partial = load_live_on(
-            &db,
-            by_file.clone(),
-            &keywords(),
-            match_room_name_hd,
-            Arc::default(),
-        )
-        .await
-        .expect("缺几何不拦建模");
-        assert_eq!(registered_panels(&partial.map), vec![r(7), r(9)]);
-        assert_eq!(partial.missing_panels, vec![r(9)]);
-        assert_eq!(partial.room_files.get(&r(6)), Some(&8001));
-
-        db.query(
-            "CREATE inst_relate:24384_9 SET dbnum = 8001, in = pe:24384_9, \
-               anc = [104732777586696, 104732777586689], generic = 'PANE', \
-               aabb_d = { mins: [2f, 0f, 0f], maxs: [3f, 1f, 1f] }, \
-               world_trans_d = { translation: [0f, 0f, 0f], rotation: [0f, 0f, 0f, 1f], scale: [1f, 1f, 1f] }, \
-               insts_flat = [{ geo_hash: 'mesh-b' }], booled_id = NONE;",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        let model = load_live_on(
-            &db,
-            by_file.clone(),
-            &keywords(),
-            match_room_name_hd,
-            Arc::default(),
-        )
-        .await
-        .expect("两块面板都有实时行");
-        assert_eq!(model.manifest.form, ResidentForm::Published);
-        assert_eq!(model.manifest.key, partial.manifest.key, "键只看输入分组，不看几何");
-        assert_eq!(model.groups, [shard_a.clone(), shard_b.clone()].concat());
-        assert_eq!(model.digest, topology_digest(&[shard_a, shard_b].concat()));
-        assert_eq!(registered_panels(&model.map), vec![r(7), r(9)]);
-        assert!(
-            model.missing_panels.is_empty(),
-            "{:?}",
-            model.missing_panels
-        );
-        let seven = model.panel(r(7)).unwrap();
-        assert_eq!(seven.room_num, "R301");
-        assert_eq!(
-            seven
-                .insts
-                .iter()
-                .map(|inst| inst.geo_hash.as_str())
-                .collect::<Vec<_>>(),
-            vec!["mesh-old"]
-        );
-        assert_eq!(
-            model.panel(r(9)).unwrap().world_aabb,
-            Aabb::new(Point::new(2.0, 0.0, 0.0), Point::new(3.0, 1.0, 1.0))
-        );
-
-        // 库里只有一份几何：行改了，重装读到的就是新的。
-        db.query("UPDATE inst_relate:24384_7 SET insts_flat = [{ geo_hash: 'mesh-new' }];")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        let next = load_live_on(&db, by_file, &keywords(), match_room_name_hd, Arc::default())
-            .await
-            .unwrap();
-        assert_eq!(
-            next.panel(r(7))
-                .unwrap()
-                .insts
-                .iter()
-                .map(|inst| inst.geo_hash.as_str())
-                .collect::<Vec<_>>(),
-            vec!["mesh-new"]
-        );
-        assert_eq!(next.digest, model.digest, "拓扑摘要不随几何变");
-        assert_ne!(next.geometry_digest, model.geometry_digest);
-    }
     /// 参照行只动 `resident_reference` 一格：空间凭据原样，`room_model` 那种按字段投影的读法
     /// 不受影响；读回来逐字相等。
     #[tokio::test]
@@ -3391,87 +3084,6 @@ mod tests {
         newer.digest = "other".into();
         write_resident_reference_on(&db, &newer).await.unwrap();
         assert_eq!(read_resident_reference_on(&db).await.unwrap(), Some(newer));
-    }
-
-    fn shard(
-        dbnum: u32,
-        room_name: &str,
-    ) -> crate::fast_model::room_topology_source::RoomTopologySource {
-        use crate::data_interface::generation_root::refno_from_e3d;
-        use crate::fast_model::room_topology_source::{TopologyNode, fixture_source};
-        use e3d_io::refno::RefNo;
-
-        let node = |id: u32, noun: &str, name: &str, members: Vec<u32>| TopologyNode {
-            refno: refno_from_e3d(RefNo::new(dbnum, id)),
-            noun: noun.into(),
-            name: name.into(),
-            members: members
-                .into_iter()
-                .map(|member| refno_from_e3d(RefNo::new(dbnum, member)))
-                .collect(),
-        };
-        let mut source = fixture_source(dbnum, 1);
-        source.roots = vec![refno_from_e3d(RefNo::new(dbnum, 1))];
-        source.nodes = vec![
-            node(1, "WORL", "", vec![2]),
-            node(2, "FRMW", room_name, vec![3]),
-            node(3, "PANE", "", vec![]),
-        ];
-        source
-    }
-
-    /// 参照的旧视图从**磁盘**分片合成；缺一片整份失败，不拿半份去 diff。
-    #[test]
-    fn reference_map_is_composed_from_persisted_shards_and_fails_closed_when_one_is_missing() {
-        use crate::data_interface::generation_root::refno_from_e3d;
-        use crate::fast_model::room_topology_source::persist_in;
-        use e3d_io::refno::RefNo;
-
-        let shards = tempfile::tempdir().expect("tempdir");
-        let a = shard(1, "/A-RM-R101");
-        let b = shard(2, "/B-RM-R201");
-        persist_in(shards.path(), &a).unwrap();
-        let reference = ResidentReference {
-            form: "latest".into(),
-            key: "composite".into(),
-            digest: "d".into(),
-            tokens: vec![a.source_token.clone(), b.source_token.clone()],
-            rooms: 2,
-            registered_panels: 2,
-            settled_at: String::new(),
-        };
-        let error = load_reference_map_from_shards(
-            shards.path(),
-            &reference,
-            RoomHierarchy::Hd,
-            &keywords(),
-            match_room_name_hd,
-        )
-        .expect_err("b 的分片还没落");
-        assert!(
-            format!("{error:#}").contains("missing exact room topology source"),
-            "{error:#}"
-        );
-
-        persist_in(shards.path(), &b).unwrap();
-        let (groups, map) = load_reference_map_from_shards(
-            shards.path(),
-            &reference,
-            RoomHierarchy::Hd,
-            &keywords(),
-            match_room_name_hd,
-        )
-        .unwrap();
-        assert_eq!(groups.len(), 2);
-        assert_eq!(map.rooms.len(), 2);
-        assert_eq!(
-            map.room_num_of(refno_from_e3d(RefNo::new(2, 3))),
-            Some("R201")
-        );
-        assert_eq!(
-            topology_digest(&groups),
-            topology_digest(&groups.iter().rev().cloned().collect::<Vec<_>>())
-        );
     }
 
     #[test]
@@ -3598,114 +3210,6 @@ mod tests {
             StartupRoomPlan::IntegrityMismatch { .. }
         ));
     }
-
-    /// `mem://` 门（d-42 / ADR-072 R5）：摄入模型带各 DESI 的冻结令牌；参照写进去后按令牌从
-    /// **磁盘分片**合成的旧视图与现状逐字相等（同一批分片、同一个 `compose`）；任一令牌的分片
-    /// 缺失、或模型没有令牌，参照拒写且原行不动。参照那一行仍在库里，分片不在。
-    #[tokio::test]
-    async fn published_reference_carries_the_source_tokens_and_is_refused_while_a_shard_is_missing()
-     {
-        use crate::fast_model::room_topology_source::{compose, persist_in};
-        use surrealdb::engine::any::connect;
-
-        let db = connect("mem://").await.expect("mem boots");
-        db.use_ns("room_resident")
-            .use_db("published_reference")
-            .await
-            .unwrap();
-        let shards = tempfile::tempdir().expect("tempdir");
-        let a = shard(1, "/A-RM-R101");
-        let b = shard(2, "/B-RM-R201");
-        persist_in(shards.path(), &a).unwrap();
-        persist_in(shards.path(), &b).unwrap();
-        // 现状拓扑就是这批分片合成出来的（生产里文件侧分组与分片同源）。
-        let composed = compose(&[a.clone(), b.clone()], RoomHierarchy::Hd).unwrap();
-
-        let model = load_live_on(
-            &db,
-            composed.clone(),
-            &keywords(),
-            match_room_name_hd,
-            Arc::default(),
-        )
-        .await
-        .unwrap()
-        .with_source_tokens(vec![a.source_token.clone(), b.source_token.clone()]);
-        assert_eq!(model.map.rooms.len(), 2);
-        let key = model.manifest.key.clone();
-
-        let reference = persist_reference_with_shards_on(&db, shards.path(), &model)
-            .await
-            .unwrap();
-        assert_eq!(
-            (reference.form.as_str(), reference.key.as_str()),
-            ("published", key.as_str())
-        );
-        assert_eq!(reference.tokens, model.source_tokens);
-        assert_eq!(
-            read_resident_reference_on(&db).await.unwrap(),
-            Some(reference.clone())
-        );
-
-        let (old_groups, old_map) = load_reference_map_from_shards(
-            shards.path(),
-            &reference,
-            RoomHierarchy::Hd,
-            &keywords(),
-            match_room_name_hd,
-        )
-        .unwrap();
-        assert_eq!(
-            topology_digest(&old_groups),
-            model.digest,
-            "按令牌合成的旧视图 == 现状"
-        );
-        assert_eq!(old_map.rooms.len(), model.map.rooms.len());
-        for room in &model.map.rooms {
-            for panel in &room.panels {
-                assert_eq!(old_map.room_num_of(*panel), Some(room.room_num.as_str()));
-            }
-        }
-        assert_eq!(
-            plan_startup(Some(&reference), &model, Some(Ok(&old_map))),
-            StartupRoomPlan::Unchanged
-        );
-
-        // 第三个文件的令牌没冻分片：拒写，原参照行不动。
-        let c = shard(3, "/C-RM-R301");
-        let stale = ResidentRoomModel::assemble(
-            manifest(ResidentForm::Published, "m-next"),
-            model.groups.clone(),
-            registered_map(&model.groups, &keywords(), match_room_name_hd),
-            vec![],
-            Arc::default(),
-        )
-        .with_source_tokens(vec![a.source_token.clone(), c.source_token.clone()]);
-        let error = persist_reference_with_shards_on(&db, shards.path(), &stale)
-            .await
-            .expect_err("c 的分片还没落");
-        let text = format!("{error:#}");
-        assert!(
-            text.contains("分片缺失") && text.contains("3@"),
-            "错误要点名哪一片: {text}"
-        );
-        assert_eq!(
-            read_resident_reference_on(&db).await.unwrap(),
-            Some(reference.clone()),
-            "拒写时参照行不动"
-        );
-
-        // 没有令牌的模型同样拒写。
-        let tokenless = model_of(groups(), vec![], Arc::default());
-        let error = persist_reference_with_shards_on(&db, shards.path(), &tokenless)
-            .await
-            .expect_err("没有令牌就没有旧视图");
-        assert!(format!("{error:#}").contains("没有来源令牌"), "{error:#}");
-        assert_eq!(
-            read_resident_reference_on(&db).await.unwrap(),
-            Some(reference)
-        );
-    }
     /// 改列只碰交集里面板的边：`room_num` 变、边 id 不变、别的房间与不在交集的面板原样。
     #[tokio::test]
     async fn renumber_statements_change_only_the_room_num_column_of_the_intersection() {
@@ -3804,10 +3308,7 @@ mod tests {
     /// 把行建出来。
     #[test]
     fn membership_paths_only_take_the_model_through_for_membership() {
-        for (name, source) in [
-            ("room_model.rs", include_str!("room_model.rs")),
-            ("room_startup.rs", include_str!("room_startup.rs")),
-        ] {
+        for (name, source) in [("room_model.rs", include_str!("room_model.rs"))] {
             let mentions: Vec<&str> = source
                 .lines()
                 .filter(|line| !line.trim_start().starts_with("//"))
@@ -4213,11 +3714,6 @@ mod tests {
         for (name, source) in [
             ("room_resident.rs", include_str!("room_resident.rs")),
             ("room_topology.rs", include_str!("room_topology.rs")),
-            (
-                "room_topology_source.rs",
-                include_str!("room_topology_source.rs"),
-            ),
-            ("room_startup.rs", include_str!("room_startup.rs")),
         ] {
             for (index, line) in source.lines().enumerate() {
                 let code = line.split("//").next().unwrap_or_default();

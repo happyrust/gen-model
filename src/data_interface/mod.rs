@@ -59,8 +59,6 @@ pub mod db_file_header;
 
 /// 冻结源：收集时冻住的文件世代与目标会话（替代 `SnapshotToken` / `DabaconSnapshot`）。
 pub mod frozen_source;
-pub(crate) mod room_completion;
-pub(crate) mod room_delta;
 
 /// dbnum 任务收尾的一笔控制面事务：模型 / 房间水位 + Ref0 统计，事实全来自任务内存
 /// （ADR-071 D3 / D6）。
@@ -171,11 +169,6 @@ pub mod rigid_motion;
 /// 结构连接正向级联（core `ADSTCH` 同形，联动对齐计划 C2）：窗口里的 `SJOI` / `FIXING` / `SCTN` …
 /// 正向读 `CREF` / `JOIS` / `JOIE` / `CFRA`、核对回指，把对端的生成根并进 `touched`。开关默认关。
 pub mod structural_connection;
-
-/// 房间结构触发（ADR-010 D12 / ADR-040 §4 在 direct 窗口规划器上的落点，2026-09-07 审核 F-A）：
-/// 窗口里 FRMW/SBFR 改名命中关键字、PANE / CWALL / CFLOOR 换属主 → 折成 `RoomRecalcPanel`。
-/// 全部读 S / T 两端 DbSet，不读 `pe`；没有开关。
-pub(crate) mod room_structural_trigger;
 
 /// 电缆端点 / 路由反向级联（core 规则 F `ELCXRF` / E `CLIST` 同形，联动对齐计划 C8 同库版）：窗口里的
 /// `EQUI` / `ELCONN` / `CWBRAN` 到 T 端文件自带的 `STAREF` / `ENDREF` 反向表点查引用它的电缆，
