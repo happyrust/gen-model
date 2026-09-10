@@ -289,24 +289,13 @@ impl ActiveStagedWindow {
                 self.meta.commit_token,
             )
         });
-        let result = self
-            .executor
+        // 「commit outcome unknown」不再往 `increment_update_attempt` 行上记（那张表随
+        // ADR-072 D1 退了）：这条暂存路只剩维护纠正与测试在走，结果直接交给调用方。
+        self.executor
             .lock()
             .await
             .commit_to(target, pre_tail_transactions, guarded_tail.as_deref())
-            .await;
-        if let Err(error) = &result
-            && error.to_string().contains("commit outcome unknown")
-        {
-            crate::data_interface::increment_tail::mark_attempt_commit_state_on(
-                target,
-                self.meta.dbnum,
-                &self.meta.commit_token,
-                "outcome_unknown",
-            )
-            .await?;
-        }
-        result
+            .await
     }
 
     pub fn staging_db(&self) -> &Surreal<Any> {
@@ -346,25 +335,6 @@ impl ActiveStagedWindow {
         }
     }
 
-    pub(crate) async fn merge_room_recalc_changes(
-        &self,
-        changes: &std::collections::HashMap<aios_core::RefnoEnum, String>,
-    ) {
-        if changes.is_empty() {
-            return;
-        }
-        if let Some(finalize) = self.finalize.lock().await.as_mut() {
-            let dbnum = finalize.dbnum;
-            let end_sesno = finalize.end_sesno;
-            crate::data_interface::model_update_pending::merge_room_recalc_changes(
-                &mut finalize.plan,
-                dbnum,
-                end_sesno,
-                changes,
-            );
-        }
-    }
-
     pub(crate) async fn deferred_regen_settlements(&self) -> Vec<(String, u64)> {
         self.regen_settlements.lock().await.clone()
     }
@@ -393,35 +363,15 @@ impl ActiveStagedWindow {
                 finalize.end_sesno
             );
         }
-        let spatial = self.deferred_spatial().await;
-        crate::data_interface::model_update_pending::merge_room_recalc_changes(
-            &mut finalize.plan,
-            finalize.dbnum,
-            finalize.end_sesno,
-            &spatial.room_changes,
-        );
-        let mut refresh = spatial
-            .refresh
-            .into_iter()
-            .map(|refno| refno.to_pdms_str())
-            .collect::<Vec<_>>();
-        let mut remove = spatial
-            .remove
-            .into_iter()
-            .map(|refno| refno.to_pdms_str())
-            .collect::<Vec<_>>();
-        refresh.sort_unstable();
-        remove.sort_unstable();
-        crate::data_interface::increment_tail::render_finalize_tail_with_effects(
+        // 空间意图 / 房间重算项 / regen 收口不再进尾事务（ADR-072 D5）：这条暂存路只剩维护纠正
+        // 与测试在走，尾事务与直写路径同一份渲染。
+        Ok(crate::data_interface::increment_tail::render_finalize_tail(
             finalize.dbnum,
             finalize.end_sesno,
             finalize.end_sesno_time.as_deref(),
             &finalize.plan,
             &finalize.window_statements,
-            &refresh,
-            &remove,
-            &self.deferred_regen_settlements().await,
-        )
+        ))
     }
 
     /// Replay the journal, close the authoritative watermark transaction, then invalidate
@@ -764,62 +714,6 @@ mod tests {
             Some("PIPE".into())
         );
         assert_eq!(response.take::<Option<i32>>(1).expect("watermark"), Some(7));
-        window.drop_database().await.expect("cleanup");
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn finalize_tail_includes_deferred_room_changes_in_the_file_round() {
-        let _room = crate::options::RoomIncrementalOverride::set(true);
-        let instance = own_instance().await;
-        let window = create_window_on(&instance, 7906, 8, 9, ResourceThresholds::default())
-            .await
-            .expect("create window");
-        window
-            .scope(super::super::register_staged_finalize(
-                super::super::StagedFinalize {
-                    dbnum: 7906,
-                    start_sesno: 8,
-                    end_sesno: 9,
-                    end_sesno_time: None,
-                    plan: Default::default(),
-                    window_statements: Vec::new(),
-                    cache_refnos: Vec::new(),
-                },
-            ))
-            .await
-            .expect("register finalize");
-        window
-            .spatial
-            .lock()
-            .await
-            .room_changes
-            .insert(aios_core::RefnoEnum::from("4000000001/20"), "EQUI".into());
-
-        let rendered = crate::data_interface::batch_worker::with_model_publication_window(
-            7906,
-            9,
-            "test-source",
-            window.render_finalize_tail(),
-        )
-        .await
-        .expect("render finalize tail");
-        assert!(
-            rendered.tail.contains("action = 'room_recalc_element'"),
-            "{}",
-            rendered.tail
-        );
-        assert!(
-            rendered
-                .tail
-                .contains("file_rounds = array::union(file_rounds?:[], ['7906:9'])"),
-            "{}",
-            rendered.tail
-        );
-        assert!(
-            rendered.tail.contains("status = 'collecting'"),
-            "{}",
-            rendered.tail
-        );
         window.drop_database().await.expect("cleanup");
     }
 

@@ -59,7 +59,6 @@ pub mod db_file_header;
 
 /// 冻结源：收集时冻住的文件世代与目标会话（替代 `SnapshotToken` / `DabaconSnapshot`）。
 pub mod frozen_source;
-pub(crate) mod model_completion;
 pub(crate) mod room_completion;
 pub(crate) mod room_delta;
 
@@ -117,8 +116,6 @@ pub mod mirror_spool;
 /// `gen_root` 凭证的只读取数（凭证命中 / 启动下限 / 模型门 / 目录落款；原 `model_update_pending`，
 /// ADR-071 S7 搬出）。
 pub mod model_coverage;
-/// 只剩根发布信封；随文件轮次那一刀（ADR-071 S3 后半）整目录删。
-pub mod model_publish_queue;
 /// Ref0 统计快照的生产者：目标索引 `DbSet@T` 按 Ref0 数活元素（ADR-071 D6）。
 pub mod ref0_snapshot;
 /// 数据窗口的内存产物 + 同步落库口（原 `model_publish_queue/{structured_data_sink,
@@ -132,8 +129,6 @@ pub mod on_demand_model;
 pub(crate) mod on_demand_db;
 
 pub mod sync_publisher;
-
-pub mod side_effect_pending;
 
 pub mod helper;
 
@@ -213,8 +208,6 @@ pub mod model_watermark;
 /// 启动期模型覆盖复核：凭证 ↔ 文件最新会话对齐，缺口开退化窗口（ADR-058 D4）。ADR-050
 /// 清空队列之后「这个库欠到哪」只剩 `gen_root` 凭证一个说法，这里就是读那个说法的地方。
 pub mod startup_reconcile;
-
-pub mod model_update_pending;
 
 pub mod model_concurrency;
 

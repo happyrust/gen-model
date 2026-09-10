@@ -27,158 +27,26 @@ use serde::Serialize;
 use crate::data_interface::batch_scheduler::{BatchScheduler, DispatchOutcome, FrozenBatch};
 use crate::data_interface::manual_update::{
     BatchStatus, DataBatchResult, FileCandidate, ManualUpdateEvent, ManualUpdateProgress,
-    ManualUpdateStatus, ModelUnitResult, UnitGenStatus, UnitKind, aggregate_manual_status,
-    include_model_side_effect_failure, load_pending_model_units_for_retry, merge_unit_worklist,
+    ManualUpdateStatus, ModelUnitResult, UnitGenStatus, UnitKind, UnitTask,
+    aggregate_manual_status, include_model_side_effect_failure, merge_unit_worklist,
 };
-use crate::data_interface::model_update_pending;
-use crate::data_interface::model_watermark;
-use crate::data_interface::side_effect_pending::SideEffectCompensator;
+use crate::data_interface::model_update_plan::{ModelWorkAction, ModelWorkItem};
 use crate::data_interface::task_registry::{TaskRegistry, TaskState};
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 /// 队列空转时的兜底唤醒间隔：Notify 丢失或外部直接改表时最多晚这一拍。
 const IDLE_WAKE: Duration = Duration::from_secs(30);
-const MODEL_DEAD_LETTER_REPEAT_SECS: i64 = 300;
+
+/// 进程内两本连败账（空闲轮 panic、数据批次同右端连败）的停跑上限。
+///
+/// 数值沿用退役前 `model_update_pending::MAX_ATTEMPTS` 的 5：那条队列行的重试账随第二条
+/// 异步账一起退了（ADR-072 D5），「已放弃」不再是一格状态；留下的只有这两本**进程内**的账，
+/// 它们守的是「确定性失败别每 30 秒重演一次」，与库无关。
+pub(crate) const MAX_ATTEMPTS: u32 = 5;
 /// CATA 依赖进度在 `/tasks` 面板上的停滞提示阈值（`stall_deadline`）。只剩展示用途：
 /// 提交前的必需依赖门与它的看门狗随 ADR-056 D8-A 一起退役（spec 035 T121），
 /// 没有任何路径再按它超时。
 pub(crate) const DEPENDENCY_STALL_TIMEOUT: Duration = Duration::from_secs(300);
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ModelDeadLetterNotice {
-    Quiet,
-    Active(String),
-    Recovered,
-}
-
-#[derive(Debug, Default)]
-struct ModelDeadLetterAnnouncement {
-    fingerprint: Option<String>,
-    last_emitted_at: Option<i64>,
-}
-
-impl ModelDeadLetterAnnouncement {
-    fn observe(
-        &mut self,
-        status: &model_update_pending::ModelPendingStatus,
-        now: i64,
-    ) -> ModelDeadLetterNotice {
-        if !status.has_data_dead_letters() {
-            let recovered = self.fingerprint.take().is_some();
-            self.last_emitted_at = None;
-            return if recovered {
-                ModelDeadLetterNotice::Recovered
-            } else {
-                ModelDeadLetterNotice::Quiet
-            };
-        }
-
-        let action_counts = status
-            .by_action
-            .iter()
-            .filter(|(action, counts)| {
-                counts.dead_letters > 0
-                    && crate::data_interface::model_update_plan::ModelWorkAction::parse(action)
-                        .is_none_or(|action| !action.is_room_recalc())
-            })
-            .map(|(action, counts)| format!("{action}:{}", counts.dead_letters))
-            .collect::<Vec<_>>()
-            .join("|");
-        let samples = status
-            .data_blocking_samples()
-            .map(|sample| {
-                format!(
-                    "{}:{}:{}:{}:{}:{}:{}",
-                    sample.action,
-                    sample.target_refno,
-                    sample.noun,
-                    sample.attempts,
-                    sample.revision,
-                    sample.last_error.as_deref().unwrap_or(""),
-                    sample.updated_at
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("|");
-        let fingerprint = format!(
-            "{}|{action_counts}|{samples}",
-            status.data_phase.dead_letters
-        );
-        let changed = self.fingerprint.as_deref() != Some(fingerprint.as_str());
-        let repeat_due = self
-            .last_emitted_at
-            .is_none_or(|last| now.saturating_sub(last) >= MODEL_DEAD_LETTER_REPEAT_SECS);
-        self.fingerprint = Some(fingerprint);
-        if !changed && !repeat_due {
-            return ModelDeadLetterNotice::Quiet;
-        }
-        self.last_emitted_at = Some(now);
-
-        let details = status
-            .data_blocking_samples()
-            .take(10)
-            .map(|sample| {
-                format!(
-                    "{}:{} attempts={} error={}",
-                    sample.action,
-                    sample.target_refno,
-                    sample.attempts,
-                    sample.last_error.as_deref().unwrap_or("未记录")
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("; ");
-        ModelDeadLetterNotice::Active(format!(
-            "模型工作存在 {} 条死信，模型门保持未就绪；可重试数据工作 {} 条；按动作={action_counts}；阻断样本={details}",
-            status.data_phase.dead_letters, status.data_phase.retryable
-        ))
-    }
-}
-
-static MODEL_DEAD_LETTER_ANNOUNCEMENT: std::sync::Mutex<ModelDeadLetterAnnouncement> =
-    std::sync::Mutex::new(ModelDeadLetterAnnouncement {
-        fingerprint: None,
-        last_emitted_at: None,
-    });
-
-static MODEL_LOCK_DEFER_ANNOUNCEMENT: std::sync::Mutex<(Option<String>, i64)> =
-    std::sync::Mutex::new((None, 0));
-
-fn announce_model_lock_deferred(done: usize, busy: usize, sample: Option<&str>) {
-    let fingerprint = format!("{busy}|{}", sample.unwrap_or(""));
-    let now = Local::now().timestamp();
-    let mut announcement = MODEL_LOCK_DEFER_ANNOUNCEMENT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let changed = announcement.0.as_deref() != Some(fingerprint.as_str());
-    if !changed && now.saturating_sub(announcement.1) < MODEL_DEAD_LETTER_REPEAT_SECS {
-        return;
-    }
-    *announcement = (Some(fingerprint), now);
-    println!(
-        "空闲模型页完成 {done} 个，{busy} 个根锁正忙，不增加 attempts，{}s 后重试：{}",
-        IDLE_WAKE.as_secs(),
-        sample.unwrap_or("未记录样例")
-    );
-}
-
-fn announce_model_dead_letters(status: &model_update_pending::ModelPendingStatus) {
-    let notice = MODEL_DEAD_LETTER_ANNOUNCEMENT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .observe(status, Local::now().timestamp());
-    match notice {
-        ModelDeadLetterNotice::Quiet => {}
-        ModelDeadLetterNotice::Active(message) => {
-            log::error!("{message}");
-            eprintln!("{message}");
-        }
-        ModelDeadLetterNotice::Recovered => {
-            log::info!("模型工作死信已清零，模型门可继续收敛");
-            println!("模型工作死信已清零，模型门可继续收敛");
-        }
-    }
-}
 
 #[derive(Clone)]
 struct ActiveDataTaskContext {
@@ -231,10 +99,32 @@ pub(crate) fn note_dependency_location(
     });
 }
 
+/// 测试夹具：把一段 future 放进一个合成的数据任务作用域，让 [`active_data_window`] 有值
+/// （对账基线快照 `GeometryBaseline` 按它分作用域）。生产路径只有 `run_one_batch` 会开这个作用域；
+/// 这里不挂 `cfg(test)`，因为本文件的源码钉按第一个 `#[cfg(test)]` 切生产半边。
+#[allow(dead_code)]
+pub(crate) async fn with_active_data_window_for_test<T>(
+    dbnum: u32,
+    end_sesno: i32,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    ACTIVE_DATA_TASK
+        .scope(
+            ActiveDataTaskContext {
+                task_id: format!("test-{dbnum}-{end_sesno}"),
+                dbnum,
+                start_sesno: end_sesno,
+                end_sesno: Arc::new(AtomicI64::new(end_sesno as i64)),
+                frozen_source_token: Arc::new(std::sync::Mutex::new(None)),
+            },
+            future,
+        )
+        .await
+}
+
+/// 当前任务的 `(dbnum, 冻结右端)`。只剩一个来源——任务自己（publish 阶段那层
+/// `MODEL_PUBLICATION_WINDOW` 随 ADR-072 D4 退了）；任务之外（`/model/ensure` 一根一调）是 `None`。
 pub(crate) fn active_data_window() -> Option<(u32, i32)> {
-    if let Ok(window) = MODEL_PUBLICATION_WINDOW.try_with(|window| (window.0, window.1)) {
-        return Some(window);
-    }
     ACTIVE_DATA_TASK
         .try_with(|context| {
             (
@@ -245,26 +135,10 @@ pub(crate) fn active_data_window() -> Option<(u32, i32)> {
         .ok()
 }
 
-tokio::task_local! { static MODEL_PUBLICATION_WINDOW: (u32, i32, String); }
-pub(crate) async fn with_model_publication_window<T>(
-    dbnum: u32,
-    session: i32,
-    source_token: &str,
-    future: impl std::future::Future<Output = T>,
-) -> T {
-    MODEL_PUBLICATION_WINDOW
-        .scope((dbnum, session, source_token.to_owned()), future)
-        .await
-}
-
-/// Exact source generation captured for the active file round. Model
+/// Exact source generation captured for the active task. Model
 /// generation uses this instead of reopening the latest session independently.
 pub(crate) fn active_frozen_source()
 -> anyhow::Result<Option<crate::data_interface::frozen_source::FrozenSource>> {
-    if let Ok(token) = MODEL_PUBLICATION_WINDOW.try_with(|window| window.2.clone()) {
-        return crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(&token)
-            .map(Some);
-    }
     ACTIVE_DATA_TASK
         .try_with(|context| {
             let token = context
@@ -454,11 +328,10 @@ fn beat() {
 /// 为什么需要它：现场 2026-08-08 那份日志里，`range end index 172 out of range for
 /// slice of length 168` 逐字相同地刷了 46 次，间隔正好一个 [`IDLE_WAKE`]——一个确定
 /// 性 panic 每 30 秒重演一次，把真正该被看见的东西全顶出了屏幕。而这条路上**一个
-/// 计数都没有**：panic 被 [`isolate_panic`] 接住就回主循环，走不到
-/// `model_update_pending::record_failure`，所以队列行那套 `MAX_ATTEMPTS` → 死信
-/// 压根盖不到它。重试第 2 轮和第 46 轮是同一件事，只是没人喊停。
+/// 计数都没有**：panic 被 [`isolate_panic`] 接住就回主循环，没有任何账管它。
+/// 重试第 2 轮和第 46 轮是同一件事，只是没人喊停。
 ///
-/// 上限语义与队列行对齐：同一句话连撞 [`MAX_ATTEMPTS`] 轮就不再跑空闲轮。复活条件
+/// 上限：同一句话连撞 [`MAX_ATTEMPTS`] 轮就不再跑空闲轮。复活条件
 /// 也对齐「来了新东西就归零」——真跑过一个批次就重新开始；换了一句 panic 是另一个
 /// 故障，计数从头算。
 ///
@@ -503,7 +376,7 @@ impl IdlePanicLedger {
     }
 
     fn parked(&self) -> bool {
-        self.streak >= crate::data_interface::model_update_pending::MAX_ATTEMPTS
+        self.streak >= MAX_ATTEMPTS
     }
 }
 
@@ -550,7 +423,7 @@ struct BatchFailureEntry {
 
 impl BatchFailureEntry {
     fn parked(&self) -> bool {
-        self.streak >= crate::data_interface::model_update_pending::MAX_ATTEMPTS
+        self.streak >= MAX_ATTEMPTS
     }
 }
 
@@ -581,7 +454,7 @@ pub(crate) struct ParkedVerdict {
 /// [`reset_batch_failure`]）都从头再来；成功一次即清零。重启即清零——重启本身
 /// 就是一次人为的重试机会。
 ///
-/// [`MAX_ATTEMPTS`]: crate::data_interface::model_update_pending::MAX_ATTEMPTS
+/// [`MAX_ATTEMPTS`]: MAX_ATTEMPTS
 #[derive(Default)]
 struct BatchFailureLedger {
     entries: std::collections::HashMap<u32, BatchFailureEntry>,
@@ -719,18 +592,20 @@ fn batch_failure_blocks_data_phase(state: TaskState, batch_status: Option<BatchS
     }
 }
 
-/// 记一次数据侧失败进连败账，达到上限时把「停跑自动重试」喊出来，并落一条
-/// 持久的 `window_block` 终态。
+/// 记一次数据侧失败进连败账，达到上限时把「停跑自动重试」喊出来。
 ///
 /// 停跑是有代价的（该库的水位差在下一个新会话/人工执行之前不再有人追），
 /// 所以必须在控制台与 `/health` 都看得见，而不是只留一行滚走的日志。
+/// 持久的 `window_block` 终态行随 `staging/attempts.rs` 一起退了（ADR-072 D5）：
+/// 跨重启还能看见的那一份是 `logs/batch-failures-*.jsonl`（`batch_failure_log`），
+/// 它就带着这里返回的连败次数。
 ///
 /// 返回同右端连败第几次：落盘记录要带上它，否则事后翻文件只看得见一串失败，
 /// 分不出哪一条是「还会自动重跑」、哪一条已经把这个库 park 住了。
 async fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str) -> u32 {
     let streak =
         batch_failure_ledger().record(dbnum, end_sesno, reason, &Local::now().to_rfc3339());
-    let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+    let cap = MAX_ATTEMPTS;
     if streak >= cap {
         let message = format!(
             "dbnum={dbnum} 数据批次连续失败第 {streak} 次（右端 {end_sesno} 未前进，上限 {cap}），\
@@ -738,7 +613,6 @@ async fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str) -> u32 {
         );
         log::error!("{message}");
         eprintln!("{message}");
-        record_data_window_block(dbnum, end_sesno, reason).await;
     } else {
         println!(
             "dbnum={dbnum} 数据批次失败记账：同右端连续第 {streak}/{cap} 次，\
@@ -746,34 +620,6 @@ async fn note_batch_failure(dbnum: u32, end_sesno: i32, reason: &str) -> u32 {
         );
     }
     streak
-}
-
-/// 连败触顶 ⇒ 这一窗的数据侧失败是确定性的（同一右端连撞 `MAX_ATTEMPTS` 次同一堵
-/// 墙），按 spec 035 功能要求 2（D1）落一条**带原始错误**的 `window_block` 终态。
-///
-/// 为什么连败账不够：它活在进程内、重启即清空，而「不再自动重跑」这件事要对外
-/// 可见得能跨重启、跨机器——这条记录在持久层，`/health.window_blocks`
-/// 与事后异机复核读的都是它。ADR-017 的窗口阻断作为**模型侧**概念已随暂存层退役，
-/// 数据侧这一半是 spec 保留下来的，这里就是它今天唯一的生产写入点。
-///
-/// 坏根清单留空：这是整窗的数据侧失败，不归咎某个生成根。解除沿用 ADR-017 §8
-/// 既有的两条出路，本函数不另开——窗口成功提交时尾事务的 `render_clear_window_attempts`
-/// 清掉，冻结吸收扩窗时 `reset_roots_on_absorb` 清掉（坏根为空 ⇒ 一次吸收即解除，
-/// 与连败账「右端前进即复活」同一口径）。
-async fn record_data_window_block(dbnum: u32, end_sesno: i32, reason: &str) {
-    // 写不进去只喊一句：这条是可观测性记录，不能反过来把批次收尾再拖失败一次。
-    if let Err(error) = crate::data_interface::staging::attempts::record_window_block_at(
-        dbnum,
-        end_sesno,
-        reason,
-        &[],
-    )
-    .await
-    {
-        let message = format!("dbnum={dbnum} 数据窗口阻断终态落库失败: {error:#}");
-        log::error!("{message}");
-        eprintln!("{message}");
-    }
 }
 
 struct WorkerLiveGuard;
@@ -886,9 +732,9 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
         if !scheduler.is_paused() && scheduler.is_auto_work_armed() && !parked {
             // 空闲轮同样要隔离：房间收敛与范围刷新重扫都跑在这里，它们 panic
             // 一样会把唯一的消费者带走。
-            if let Err(reason) = isolate_panic(idle_round(&mgr, registry, ran > 0)).await {
+            if let Err(reason) = isolate_panic(idle_round(&mgr, registry)).await {
                 let streak = idle_panic_ledger().record(&reason, &Local::now().to_rfc3339());
-                let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+                let cap = MAX_ATTEMPTS;
                 let msg = if streak >= cap {
                     format!(
                         "空闲轮 panic 连续第 {streak} 轮同因，已停跑空闲轮（房间收敛与范围重扫一并暂停）；\
@@ -999,25 +845,9 @@ pub async fn drain_queue_until_empty(mgr: &Arc<AiosDBManager>) -> usize {
     let mut exclusive_in_flight = false;
     let mut ran = 0usize;
     loop {
-        // 出队门（ADR-017 §9 的留存条款）：提交后空间状态未收敛时不派发新批次；在飞
-        // 批次不受影响。持 DATA_COMMIT_SERIAL 执行，不与任何正在收口的批次并发动空间树。
-        let mut dispatch_allowed = true;
-        {
-            let _serial = DATA_COMMIT_SERIAL.lock().await;
-            match SideEffectCompensator::reconcile_spatial_pending(mgr).await {
-                Ok(done) if done > 0 => {
-                    println!("领取下一批前完成 {done} 个提交后空间收敛任务");
-                    beat();
-                }
-                Ok(_) => {}
-                Err(error) => {
-                    log::error!("提交后空间状态尚未收敛，本轮停止出队: {error:#}");
-                    eprintln!("提交后空间状态尚未收敛，本轮停止出队: {error:#}");
-                    dispatch_allowed = false;
-                }
-            }
-        }
-        while dispatch_allowed && !exclusive_in_flight && in_flight.len() < slots {
+        // 出队前不再有「提交后空间收敛」那道门（ADR-017 §9 的留存条款随 ADR-072 D4 退）：
+        // 空间树在 `persist_roots_batched` 落完那一刻就地收敛，库里没有 pending 的空间意图行可等。
+        while !exclusive_in_flight && in_flight.len() < slots {
             match scheduler.next_dispatch(registry, in_flight.is_empty(), |batch| {
                 batch_needs_exclusive_lane(&batch.db_type, batch.start_sesno)
             }) {
@@ -1230,53 +1060,15 @@ async fn run_one_batch(
                         cand.file_latest_sesno,
                         end_sesno_time,
                     );
-                    // 文件轮次（ADR-062）是**设计库**的派生面：房间输入基线、空间发布、
-                    // 房间任务全部只认 DESI（`E3dModelService::from_frozen_sources` 的 pin
-                    // 只有 MDB 里的 DESI/CATA 文件）。SYS meta（COMM/SYST/DICT/…）的
-                    // 数据批次不产生任何模型/空间产物，给它落一条 `collecting` 意图行，
-                    // 收敛时只会确定性地撞上「current MDB has no DESI dbnum N」——
-                    // 2026-09-06 rocksdb 空库首启实测：amscom（8190）那条行把出队门
-                    // 焊死，余下 11 个 meta 批次与整个 DESI 基线永远排不上。
+                    // 模型 / 房间产物只有**设计库**才有（`E3dModelService::from_frozen_sources`
+                    // 的 pin 只有 MDB 里的 DESI/CATA 文件）。这一版攒下的副作用（房间清边）记在
+                    // 任务内存的那本账里（`task_effects`），房间段收尾时取——库里不再有文件
+                    // 轮次那一行（ADR-072 D4）。
                     if job.db_type.eq_ignore_ascii_case("DESI") {
-                        if let Err(error) =
-                            SideEffectCompensator::ensure_published_file_baseline(
-                                job.dbnum,
-                                job.start_sesno.saturating_sub(1).max(0) as u32,
-                            )
-                            .await
-                        {
-                            return failed_window_result(
-                                &job,
-                                &mut warnings,
-                                &format!("建立已发布房间输入基线失败: {error:#}"),
-                            );
-                        }
-                        // 开一轮：内存那本与库里那一行同时开，之后生成阶段两边一起喂。
                         crate::data_interface::task_effects::open(
                             job.dbnum,
                             cand.file_latest_sesno,
                         );
-                        let round_intent =
-                            SideEffectCompensator::render_file_spatial_reconcile_upsert(
-                                job.dbnum,
-                                cand.file_latest_sesno,
-                                &[],
-                                &[],
-                                &[],
-                            );
-                        if let Err(error) = async {
-                            let statement = round_intent?;
-                            aios_core::SUL_DB.query(statement).await?.check()?;
-                            Ok::<(), anyhow::Error>(())
-                        }
-                        .await
-                        {
-                            return failed_window_result(
-                                &job,
-                                &mut warnings,
-                                &format!("持久化文件轮次失败: {error:#}"),
-                            );
-                        }
                     }
                     crate::data_interface::debug_scope::trace(
                         crate::data_interface::debug_scope::TracePoint::Freeze,
@@ -1655,28 +1447,10 @@ async fn execute_frozen_batch(
         db_type: cand.db_type.clone(),
     };
     let body_started = std::time::Instant::now();
-    let mut completion_inputs = if job.db_type.eq_ignore_ascii_case("DESI") {
-        match frozen_source_token
-            .as_deref()
-            .ok_or_else(|| anyhow::anyhow!("missing frozen source"))
-            .and_then(crate::data_interface::model_completion::CompletionReceipt::capture)
-        {
-            Ok(inputs) => Some(inputs),
-            Err(error) => {
-                warnings.push(format!("完成凭证输入冻结失败: {error:#}"));
-                return failed_window_result(job, warnings, "完成凭证输入冻结失败");
-            }
-        }
-    } else {
-        None
-    };
-    if let Some(inputs) = completion_inputs.as_mut() {
-        let base_start = completion_coverage_start(job.intent, job.start_sesno, job.model_start_sesno);
-        if let Err(error) = inputs.bind_base_on(&aios_core::SUL_DB, job.dbnum, base_start).await {
-            warnings.push(format!("完成基线读取失败: {error:#}"));
-            return failed_window_result(job, warnings, "完成基线读取失败");
-        }
-    }
+    // 房间段要的源身份：本任务冻住的那份文件世代（`cand` 随后被移进执行体，这里留一份）。
+    // 整库完成收据那一路随 publish / model_complete 一起退了（ADR-072 D4）：
+    // 「这一版的根全 OK」由任务手里的单元清单回答，不回问库。
+    let frozen_source = cand.frozen.clone();
     let mut result = if job.intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly {
         execute_model_only_body(mgr, registry, job, cand, progress, warnings).await
     } else {
@@ -1792,131 +1566,84 @@ async fn execute_frozen_batch(
             &result.units,
         )
     };
-    // 只有 DESI 才有文件轮次可发布（冻结点也只给 DESI 落意图行，见上）。非 DESI 走到
-    // 这里去 `file_round_commit_token` 只会报「has no commit token」，把一个成功的
-    // SYS meta 批次记成 partial。
-    let mut completed_file_round = None;
-    if round_complete && job.db_type.eq_ignore_ascii_case("DESI") {
-        registry.set_stage(&job.task_id, "publish");
-        match publish_model_file_round(mgr, job.dbnum, file_latest_sesno).await {
-            Ok(completion) => completed_file_round = Some(completion),
-            Err(error) => {
-                result.status = ManualUpdateStatus::Partial;
-                result.warnings.push(format!(
-                    "文件轮次派生发布未完成（空间收敛失败不重试、已进死信并落 logs/batch-failures-*.jsonl；\
-                     其余步骤的持久待办保留）: {error:#}"
-                ));
-            }
-        }
-    }
-
     // 写入标记收没收（ADR-072 W1「有 writing 必有出路」）。下面收尾那一笔盖得上就是它收的；
-    // 收不上（没有 file_round、模型核验失败、收尾事务本身失败）由函数末尾那一笔兜底。
+    // 收不上（这一轮没追平、模型没全成、收尾事务本身失败）由函数末尾那一笔兜底。
     let mut write_marker_closed = false;
 
-    // 收尾三段：收据（整库证据闸）→ 房间 → **一笔**盖三水位（ADR-071 D3 / ADR-065 G2 (i)）。
-    // 顺序 2026-09-10 翻过来了：房间排在盖章之前算，修掉 d-73 指出的「模型水位先于房间前移」。
-    // 房间失败不擦掉已经成的模型那一半——那一枚照盖，房间那一枚不盖，启动恢复再补。
-    if let Some(file_round) = completed_file_round {
-        if let Some(inputs) = completion_inputs.as_mut() {
-            inputs.changed_roots = result.units.iter().map(|unit| unit.root_refno.clone()).collect();
-        }
-        registry.set_stage(&job.task_id, "model_complete");
+    // 收尾两段：房间 → **一笔**盖三水位（ADR-071 D3 / ADR-065 G2 (i)）。publish 阶段与
+    // `model_complete` 那道整库证据闸都退了（ADR-072 D4）：空间树已在 `persist_roots_batched`
+    // 落完那一刻就地收敛，「这一版的根全 OK」由 `round_complete` 担保（每个交付单元都是
+    // `Generated`，落不进去的根会先把单元标回失败），不回问库。
+    // 房间排在盖章之前算（d-73）：房间失败不擦掉已经成的模型那一半——那一枚照盖，
+    // 房间那一枚不盖，启动恢复再补。只有 DESI 才有模型 / 房间可收（SYS meta 的数据批次
+    // 不产生任何模型产物），非 DESI 由末尾那一笔收标记。
+    if round_complete && job.db_type.eq_ignore_ascii_case("DESI") {
         let end_time = result
             .batch
             .as_ref()
             .and_then(|batch| batch.end_sesno_time.clone());
-        // 收尾的事实全来自本任务手里的单元清单（ADR-071 D3）：走到这里
-        // `round_complete` 已经担保每个交付单元都是 `Generated`，`persist_roots_batched`
-        // 落不进去的根会先把单元标回失败，所以「这一版的根全 OK」不必回问库。
         let model_outcome = crate::data_interface::task_end::TaskModelOutcome {
-            all_roots_ok: result
-                .units
-                .iter()
-                .all(|unit| unit.status == UnitGenStatus::Generated),
+            all_roots_ok: true,
             dead_roots: 0,
         };
-        match model_watermark::complete_model_task_on(
-            &aios_core::SUL_DB,
-            job.dbnum,
-            model_watermark::ModelTaskCompletion {
-                target_sesno: file_latest_sesno,
-                file_round,
-                inputs: completion_inputs,
-                model: model_outcome.clone(),
-                roots: result.units.len(),
-            },
-        )
-        .await
-        {
-            Ok(model_watermark::ModelWatermarkOutcome::Advanced { sesno })
-            | Ok(model_watermark::ModelWatermarkOutcome::Unchanged { sesno })
-                if sesno >= file_latest_sesno =>
-            {
-                registry.set_stage(&job.task_id, "rooms");
-                let rooms_ok = match crate::fast_model::room_task::finish_file_room_round(
+        registry.set_stage(&job.task_id, "rooms");
+        let rooms_ok = match frozen_source.as_ref() {
+            Some(source) => {
+                match crate::fast_model::room_task::finish_task_rooms(
                     mgr,
                     job.dbnum,
                     file_latest_sesno,
+                    &model_outcome,
+                    source,
                     &mut result,
                 )
                 .await
                 {
-                    Ok(Some(_)) => true,
-                    Ok(None) => {
-                        result.status = ManualUpdateStatus::Partial;
-                        false
-                    }
+                    // `Ok(false)` 的原因已由房间段记进 `result`。
+                    Ok(done) => done,
                     Err(error) => {
                         result.status = ManualUpdateStatus::Partial;
                         result.warnings.push(format!(
-                            "房间阶段未完成，模型那一枚照盖、房间那一枚不盖 dbnum={} sesno={sesno}: {error:#}",
+                            "房间阶段未完成，模型那一枚照盖、房间那一枚不盖 dbnum={} sesno={file_latest_sesno}: {error:#}",
                             job.dbnum
                         ));
                         false
                     }
-                };
-                registry.set_stage(&job.task_id, "task_end");
-                match crate::data_interface::task_end::commit_task_end_on(
-                    &aios_core::SUL_DB,
-                    &crate::data_interface::task_end::TaskEnd {
-                        dbnum: job.dbnum,
-                        target_sesno: file_latest_sesno,
-                        target_time: end_time.clone(),
-                        model: Some(model_outcome),
-                        rooms: rooms_ok.then_some(
-                            crate::data_interface::task_end::TaskRoomOutcome { ok: true },
-                        ),
-                        // Ref0 统计已在数据批次应用之后那一笔序列化（上面 `ref0_snapshot`），
-                        // 这一笔只盖水位与写入标记。
-                        info: None,
-                        closes_task: true,
-                    },
-                )
-                .await
-                {
-                    Ok(_) => write_marker_closed = true,
-                    Err(error) => {
-                        result.status = ManualUpdateStatus::Partial;
-                        result
-                            .warnings
-                            .push(format!("任务收尾水位未落 dbnum={}: {error:#}", job.dbnum));
-                    }
                 }
             }
-            Ok(outcome) => {
+            None => {
                 result.status = ManualUpdateStatus::Partial;
                 result.warnings.push(format!(
-                    "模型严格完成水位未推进 dbnum={}: {outcome:?}",
+                    "房间阶段缺冻结源，模型那一枚照盖、房间那一枚不盖 dbnum={} sesno={file_latest_sesno}",
                     job.dbnum
                 ));
+                false
             }
+        };
+        registry.set_stage(&job.task_id, "task_end");
+        match crate::data_interface::task_end::commit_task_end_on(
+            &aios_core::SUL_DB,
+            &crate::data_interface::task_end::TaskEnd {
+                dbnum: job.dbnum,
+                target_sesno: file_latest_sesno,
+                target_time: end_time,
+                model: Some(model_outcome),
+                rooms: rooms_ok
+                    .then_some(crate::data_interface::task_end::TaskRoomOutcome { ok: true }),
+                // Ref0 统计已在数据批次应用之后那一笔序列化（上面 `ref0_snapshot`），
+                // 这一笔只盖水位与写入标记。
+                info: None,
+                closes_task: true,
+            },
+        )
+        .await
+        {
+            Ok(_) => write_marker_closed = true,
             Err(error) => {
                 result.status = ManualUpdateStatus::Partial;
-                result.warnings.push(format!(
-                    "模型严格完成水位核验失败 dbnum={}: {error:#}",
-                    job.dbnum
-                ));
+                result
+                    .warnings
+                    .push(format!("任务收尾水位未落 dbnum={}: {error:#}", job.dbnum));
             }
         }
     }
@@ -1951,16 +1678,18 @@ async fn execute_frozen_batch(
         ));
     }
 
-    // 最终任务回执在模型单元与文件轮次发布之后取一次统一判决。它只是观测：
-    // 读失败不改变批次成败，也不让数据事务等待模型。
+    // 最终任务回执的双水位判决：水位读**镜像**（收尾那一笔落库后作废过那一格），根普查用
+    // 本任务的单元清单——任务不回问库自己刚写的东西（ADR-071 D1；`verdict_for` 的整表普查
+    // 随 ADR-072 出了任务）。它只是观测：读失败不改变批次成败。
     if job.db_type.eq_ignore_ascii_case("DESI") {
-        match crate::data_interface::dbnum_consistency::verdict_for(&aios_core::SUL_DB, job.dbnum)
-            .await
-        {
-            Ok(verdict) => {
+        match crate::data_interface::dbnum_state::DbnumState::read(job.dbnum).await {
+            Ok(Some(state)) => {
+                let verdict =
+                    crate::data_interface::dbnum_consistency::task_verdict(&state, &result.units);
                 result.model_verdict = Some(verdict.as_str().to_owned());
                 result.model_caught_up_at = verdict.caught_up_at().map(str::to_owned);
             }
+            Ok(None) => {}
             Err(error) => result.warnings.push(format!(
                 "读取批次终态的双水位判决失败（不影响已提交数据）: {error:#}"
             )),
@@ -2003,7 +1732,9 @@ async fn execute_model_only_body(
         ),
     };
     let floor = job.model_start_sesno.filter(|value| *value > 0);
-    if let Err(error) = crate::data_interface::window_root_plan::reconcile_startup_window(
+    // 规划器把这一窗的工作项**直接交回**（ADR-072 D5：任务计划在内存，不再写 pending 行
+    // 再由本任务领回来）。
+    let planned = match crate::data_interface::window_root_plan::reconcile_startup_window(
         job.dbnum,
         &job.db_type,
         floor,
@@ -2011,30 +1742,34 @@ async fn execute_model_only_body(
     )
     .await
     {
-        warnings.push(format!("模型恢复规划失败: {error:#}"));
-        return DataBatchTaskResult {
-            project: job.project.clone(),
-            status: ManualUpdateStatus::Failed,
-            batch: None,
-            units: Vec::new(),
-            warnings: std::mem::take(warnings),
-            model_verdict: None,
-            model_caught_up_at: None,
-        };
-    }
+        Ok(planned) => planned,
+        Err(error) => {
+            warnings.push(format!("模型恢复规划失败: {error:#}"));
+            return DataBatchTaskResult {
+                project: job.project.clone(),
+                status: ManualUpdateStatus::Failed,
+                batch: None,
+                units: Vec::new(),
+                warnings: std::mem::take(warnings),
+                model_verdict: None,
+                model_caught_up_at: None,
+            };
+        }
+    };
 
     registry.set_stage(&job.task_id, "pre_generation");
     let mut failed = false;
-    match model_update_pending::drain_non_regen_report(mgr).await {
-        Ok(report) if report.blocks(job.dbnum) => {
-            warnings.extend(report.failures);
-            failed = true;
-        }
-        Ok(_) => {}
-        Err(error) => {
-            warnings.push(format!("模型恢复前置动作失败: {error:#}"));
-            failed = true;
-        }
+    let (regen_items, side_actions): (Vec<_>, Vec<_>) = planned
+        .work_items
+        .into_iter()
+        .partition(|item| item.action == ModelWorkAction::RegenRoot);
+    let (derived_units, side_failures) = run_model_side_actions(mgr, &side_actions).await;
+    if !side_failures.is_empty() {
+        warnings.push(format!(
+            "模型恢复前置动作失败: {}",
+            side_failures.join("; ")
+        ));
+        failed = true;
     }
 
     registry.set_stage(&job.task_id, "generation");
@@ -2042,20 +1777,13 @@ async fn execute_model_only_body(
         registry.set_unit_totals(&job.task_id, 0);
         (Vec::new(), true)
     } else {
-        match load_pending_model_units_for_retry(job.dbnum).await {
-            Ok(pending) => {
-                // 明确要重算的根（目录级联反查命中的名单，ADR-071 S4）随任务本身进来，不再写
-                // pending 行等 drain 领：它们与规划器排出来的待重试并成一张工作单。
-                let worklist =
-                    merge_unit_worklist(explicit_regen_units(job, target.sesno as i32), pending);
-                run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
-            }
-            Err(error) => {
-                warnings.push(format!("读取模型恢复工作单失败: {error:#}"));
-                registry.set_unit_totals(&job.task_id, 0);
-                (Vec::new(), true)
-            }
-        }
+        // 明确要重算的根（目录级联反查命中的名单，ADR-071 S4）随任务本身进来，与规划器
+        // 排出来的根、级联展开出来的根并成一张工作单。
+        let mut worklist = explicit_regen_units(job, target.sesno as i32);
+        worklist.extend(regen_items.iter().map(unit_task_from_regen_item));
+        worklist.extend(derived_units);
+        let worklist = merge_unit_worklist(worklist);
+        run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
     };
     failed |= settlement_failed
         || units
@@ -2063,18 +1791,11 @@ async fn execute_model_only_body(
             .any(|unit| unit.status != UnitGenStatus::Generated);
 
     registry.set_stage(&job.task_id, "post_generation_aabb");
-    if !failed {
-        match model_update_pending::drain_post_regen_aabb_report(mgr, job.dbnum).await {
-            Ok(report) if report.blocks(job.dbnum) => {
-                warnings.extend(report.failures);
-                failed = true;
-            }
-            Ok(_) => {}
-            Err(error) => {
-                warnings.push(format!("模型恢复后置 AABB 失败: {error:#}"));
-                failed = true;
-            }
-        }
+    if !failed
+        && let Err(error) = refresh_post_regen_aabbs_for(&side_actions).await
+    {
+        warnings.push(format!("模型恢复后置 AABB 失败: {error:#}"));
+        failed = true;
     }
 
     DataBatchTaskResult {
@@ -2107,7 +1828,6 @@ fn explicit_regen_units(
             noun: root.noun.clone(),
             source_end_sesno,
             attempts: 0,
-            revision: None,
             old_owner: None,
             new_owner: None,
             transform: None,
@@ -2115,12 +1835,198 @@ fn explicit_regen_units(
         .collect()
 }
 
-/// 文件轮次完成屏障，批次侧那一半（ADR-062）。
+/// 规划器排出来的一条 `RegenRoot` 工作项 → 本任务的一个交付单元（整根重算，无刚体前移提示）。
+fn unit_task_from_regen_item(item: &ModelWorkItem) -> UnitTask {
+    UnitTask {
+        dbnum: item.dbnum,
+        root_refno: item.target_refno.clone(),
+        noun: item.noun.clone(),
+        source_end_sesno: item.source_end_sesno,
+        attempts: 0,
+        old_owner: None,
+        new_owner: None,
+        transform: None,
+    }
+}
+
+/// 反向级联展开出来的根 → 交付单元。来源库未解析时 `dbnum` 是 0（见
+/// `manual_update::expand_live_reverse_cascade`），生成时点取本任务的目标会话。
+fn unit_task_from_derived_root(
+    root: crate::data_interface::generation_root::GenerationRoot,
+    dbnum: u32,
+    source_end_sesno: i32,
+) -> UnitTask {
+    UnitTask {
+        dbnum,
+        root_refno: root.root.to_pdms_str(),
+        noun: root.noun,
+        source_end_sesno,
+        attempts: 0,
+        old_owner: None,
+        new_owner: None,
+        transform: None,
+    }
+}
+
+/// 计划里 `RegenRoot` 之外的那几类工作项，在规划出来的这一刻**就地**执行（ADR-072 D5：
+/// 延迟动作不再写进 pending 行等 drain / publish 领）。
 ///
-/// 「这一批把冻结右端追平了，数据事务成功，交付单元全部生成」——三件事同时成立，
-/// 这一轮才可以发布。与 [`file_round_readiness`] 是同一道屏障的两种证据：批次刚跑完
-/// 时手上有内存里的单元回执，空闲轮回头看时只剩库里的凭据。判据写两遍就会漂，所以
-/// 两侧各自收在一个函数里，改一边时另一边就在隔壁。
+/// - `DeleteCleanup`：删掉子树的模型行与投影（先于生成，删掉的根不许再进工作单）；
+/// - `Transform`：整棵子树刷世界变换 + 盒 + 空间树；
+/// - `CascadeExpand`：目录件变了 → 引用它的根并进本任务的工作单（返回值那一半）；
+/// - `PostRegenAabb`：**不在这里**——它要排在根生成之后（[`refresh_post_regen_aabbs_for`]）；
+/// - `RoomRecalc*`：房间随任务整库算（`room_task::finish_task_rooms`），逐目标的重算行没有了。
+///
+/// 返回 `(级联展开出来的交付单元, 失败原因)`。一条失败不拦别的条——都是幂等动作，
+/// 调用方按「有没有失败」决定本批的模型生成让不让位。
+async fn run_model_side_actions(
+    mgr: &AiosDBManager,
+    items: &[ModelWorkItem],
+) -> (Vec<UnitTask>, Vec<String>) {
+    use std::str::FromStr;
+    let mut derived = Vec::new();
+    let mut failures = Vec::new();
+    let mut ordered: Vec<&ModelWorkItem> = items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.action,
+                ModelWorkAction::DeleteCleanup
+                    | ModelWorkAction::Transform
+                    | ModelWorkAction::CascadeExpand
+            )
+        })
+        .collect();
+    // 删除先于位姿与级联：被删子树的根不该再被级联捡回来。
+    ordered.sort_by_key(|item| match item.action {
+        ModelWorkAction::DeleteCleanup => 0,
+        ModelWorkAction::Transform => 1,
+        _ => 2,
+    });
+    for item in ordered {
+        let refno = match aios_core::RefU64::from_str(&item.target_refno) {
+            Ok(refno) => aios_core::RefnoEnum::from(refno),
+            Err(_) => {
+                failures.push(format!(
+                    "{} {}: invalid refno",
+                    item.action.as_str(),
+                    item.target_refno
+                ));
+                continue;
+            }
+        };
+        let outcome: anyhow::Result<()> = match item.action {
+            ModelWorkAction::DeleteCleanup => {
+                // 两面都退：读透形态下 Plant UI 的权威投影在 ModelMemoryStore，只删 Surreal
+                // 那份会让 `/model/records` 继续供一棵幽灵子树直到重启。
+                match mgr.delete_model_subtree(refno).await {
+                    Ok(()) if item.noun.trim().is_empty() => {
+                        let key = item.target_refno.replace('/', "_");
+                        aios_core::SUL_DB
+                            .query(format!(
+                                "DELETE gen_root:{key} WHERE pe = NONE AND noun = NONE;"
+                            ))
+                            .await
+                            .map_err(anyhow::Error::from)
+                            .and_then(|response| response.check().map_err(anyhow::Error::from))
+                            .map(|_| ())
+                    }
+                    other => other,
+                }
+            }
+            ModelWorkAction::Transform => {
+                mgr.update_world_transforms(&std::collections::HashSet::from([refno]))
+                    .await
+            }
+            ModelWorkAction::CascadeExpand => {
+                match crate::data_interface::manual_update::expand_live_reverse_cascade(refno)
+                    .await
+                {
+                    Ok(roots) => {
+                        derived.extend(roots.into_iter().map(|root| {
+                            unit_task_from_derived_root(root, item.dbnum, item.source_end_sesno)
+                        }));
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            }
+            _ => Ok(()),
+        };
+        if let Err(error) = outcome {
+            failures.push(format!(
+                "{} {}: {error:#}",
+                item.action.as_str(),
+                item.target_refno
+            ));
+        }
+    }
+    (derived, failures)
+}
+
+/// 把生成失败写到根凭证上：`gen_root:{root} SET status = 'failed', last_error = …`。
+///
+/// 这是 pending 表退役（ADR-072 D5）后「这根还欠着」唯一的库内痕迹：`status` 不在安定集里
+/// （`window_root_plan::SETTLED_ROOT_STATUSES`），于是
+///
+/// - 数据尾事务的凭证前移（`render_credential_advance` 的 SQL 守卫）不会把它推到 T；
+/// - 下一窗的规划器（`carry_unsettled_generation`）把它并进 regen；
+/// - 启动核对（`startup_coverage_floors` 的 `unsettled_roots`）把它算进缺口、排恢复任务。
+///
+/// 从没生成过的根也造一行（`UPSERT`）：没有行的根在规划器眼里是「懒生成」，失败一次就该
+/// 被看见。`noun` 只填空——已有行上的值是生成器写的，比这里的更可信。写不进去只喊一句：
+/// 这条是恢复用的痕迹，不能反过来把本批再拖失败一次。
+async fn mark_generation_failed(dbnum: u32, root_refno: &str, noun: &str, error: &str) {
+    use std::str::FromStr;
+    let Ok(refno) = aios_core::RefU64::from_str(root_refno) else {
+        return;
+    };
+    let key = format!("{}_{}", refno.get_0(), refno.get_1());
+    let statement = format!(
+        "UPSERT type::thing('gen_root', {key}) SET dbnum = {dbnum}, \
+         pe = type::thing('pe', {key}), noun = noun ?? {noun}, \
+         status = 'failed', last_error = {error}, updated_at = time::now();",
+        key = format!(
+            "'{}'",
+            crate::data_interface::dbnum_state::escape_surql_str(&key)
+        ),
+        noun = format!(
+            "'{}'",
+            crate::data_interface::dbnum_state::escape_surql_str(noun.trim())
+        ),
+        error = format!(
+            "'{}'",
+            crate::data_interface::dbnum_state::escape_surql_str(
+                &error.chars().take(2000).collect::<String>()
+            )
+        ),
+    );
+    if let Err(error) = aios_core::SUL_DB
+        .query(statement)
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|response| response.check().map_err(anyhow::Error::from))
+    {
+        log::error!("记生成失败到 gen_root 失败 dbnum={dbnum} root={root_refno}: {error:#}");
+        eprintln!("记生成失败到 gen_root 失败 dbnum={dbnum} root={root_refno}: {error:#}");
+    }
+}
+
+/// 根生成成功后，把被改判的原始位姿目标送回统一 AABB 变更链（`PostRegenAabb`，
+/// 原第二条异步账里的 `refresh_post_regen_aabbs`，现住 `aabb_refresh`）。返回刷了几个目标。
+async fn refresh_post_regen_aabbs_for(items: &[ModelWorkItem]) -> anyhow::Result<usize> {
+    use std::str::FromStr;
+    let refnos: Vec<aios_core::RefnoEnum> = items
+        .iter()
+        .filter(|item| item.action == ModelWorkAction::PostRegenAabb)
+        .filter_map(|item| aios_core::RefU64::from_str(&item.target_refno).ok())
+        .map(aios_core::RefnoEnum::from)
+        .collect();
+    crate::fast_model::aabb_refresh::refresh_post_regen_aabbs(&refnos).await
+}
+
+/// 这一轮跑完了：把冻结右端追平、数据事务成功、交付单元全部生成——三件事同时成立，
+/// 才盖模型 / 房间那两枚水位（ADR-072 D4；文件轮次的完成屏障退了，判据只剩这一份）。
 fn batch_round_complete(
     committed_end_sesno: Option<i32>,
     file_latest_sesno: i32,
@@ -2132,275 +2038,6 @@ fn batch_round_complete(
         && units
             .iter()
             .all(|unit| unit.status == UnitGenStatus::Generated)
-}
-
-/// 文件轮次完成屏障，durable 那一半：一个仍在 `collecting` 的轮次此刻差什么。
-///
-/// 输入只有模型水位探针与这一轮冻住的右端——两者都在库里，重启、换进程、跨会话都
-/// 读得到，因此**批次跑完之后**还能再判一次。这正是审核 F-C 缺的那个判点：
-/// [`batch_round_complete`] 只在数据批次那一刻成立一次，一根偶发失败让它为假之后，
-/// 重试成功也没有人再回来看，该库的文件轮次就永久停在 `collecting`。
-///
-/// 「已放弃的根」（`http_422` 与死信）**不放行**：那是 ISSUE-029 的确定性失败，模型面
-/// 本来就没产出，硬发布等于拿残缺的几何换掉上一份好的。它继续卡着，但现在 /health
-/// 会点名是谁在卡。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum FileRoundReadiness {
-    /// 屏障已满足，可以走 [`publish_completed_file_round`]。
-    Ready,
-    /// 数据面还没追平这一轮冻住的右端。
-    DataBehind { applied: i32, frozen: i32 },
-    /// 还有根没安定（正在赶或还没重试到）。
-    RootsChasing { count: usize, sample: Vec<String> },
-    /// 有根被放弃（`http_422` / 死信）：不自动放行，等人处置。
-    RootsAbandoned { count: usize },
-}
-
-impl FileRoundReadiness {
-    /// 给 /health 与日志用的一句话；`Ready` 没有阻塞理由，回 `None`。
-    pub(crate) fn describe(&self) -> Option<String> {
-        match self {
-            Self::Ready => None,
-            Self::DataBehind { applied, frozen } => {
-                Some(format!("数据水位 {applied} 未追平冻结右端 {frozen}"))
-            }
-            Self::RootsChasing { count, sample } => Some(format!(
-                "{count} 个生成根尚未安定: {}",
-                render_roots(sample)
-            )),
-            Self::RootsAbandoned { count } => Some(format!(
-                "{count} 个生成根已放弃（http_422 / 死信，ISSUE-029），等人处置"
-            )),
-        }
-    }
-}
-
-pub(crate) fn file_round_readiness(
-    probe: &model_watermark::ModelWatermarkProbe,
-    frozen_end_sesno: i32,
-) -> FileRoundReadiness {
-    if probe.applied_sesno < frozen_end_sesno {
-        return FileRoundReadiness::DataBehind {
-            applied: probe.applied_sesno,
-            frozen: frozen_end_sesno,
-        };
-    }
-    if !probe.blockers.is_empty() {
-        return FileRoundReadiness::RootsChasing {
-            count: probe.blockers.len(),
-            sample: probe.blockers.clone(),
-        };
-    }
-    if probe.abandoned > 0 {
-        return FileRoundReadiness::RootsAbandoned {
-            count: probe.abandoned,
-        };
-    }
-    FileRoundReadiness::Ready
-}
-
-/// 一轮发布内部的逐子阶段计时。
-///
-/// 整段 `publish` 早就进了任务级 `stages`，但内部一直是一个数：7997 实测 35.4 / 64.9 s、
-/// 1112 实测 36.6 / 49.5 s——两个体量差 5 倍的库几乎一样快，光看总数分不出这里面哪一笔
-/// 与库大小成比例、哪一笔是项目级固定开销。这几个格子就是为了把那个数拆开。
-#[derive(Debug, Default)]
-struct PublishStageTimings {
-    round_read: Duration,
-    deferred_delete: Duration,
-    persist_roots: Duration,
-    deferred_other: Duration,
-    room_input: Duration,
-    topology_source: Duration,
-    topology_stage: Duration,
-    promote: Duration,
-    spatial: Duration,
-    roots: usize,
-    deferred: usize,
-}
-
-impl PublishStageTimings {
-    async fn measure<T>(slot: &mut Duration, work: impl Future<Output = T>) -> T {
-        let start = Instant::now();
-        let value = work.await;
-        *slot += start.elapsed();
-        value
-    }
-
-    fn report(&self, dbnum: u32, round_end_sesno: i32) {
-        println!(
-            "发布阶段 阶段耗时 dbnum={dbnum} sesno={round_end_sesno} 根={} 延迟动作={}: \
-             round_read={}ms deferred_delete={}ms persist_roots={}ms deferred_other={}ms \
-             room_input={}ms topology_source={}ms topology_stage={}ms promote={}ms spatial={}ms",
-            self.roots,
-            self.deferred,
-            self.round_read.as_millis(),
-            self.deferred_delete.as_millis(),
-            self.persist_roots.as_millis(),
-            self.deferred_other.as_millis(),
-            self.room_input.as_millis(),
-            self.topology_source.as_millis(),
-            self.topology_stage.as_millis(),
-            self.promote.as_millis(),
-            self.spatial.as_millis(),
-        );
-    }
-}
-
-/// Publish the derivations collected by one fully settled file round. Spatial
-/// publication is the barrier: room edges and room tasks stay private until the
-/// tree snapshot has converged successfully.
-fn completion_coverage_start(intent: crate::data_interface::batch_queue::BatchIntent, first_sesno: i32, model_start: Option<i32>) -> i32 {
-    // Queue windows include the first changed session; coverage starts at the
-    // preceding completed session. ModelOnly can cover an earlier model gap.
-    if intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly {
-        model_start.unwrap_or_else(|| first_sesno.saturating_sub(1)).max(0)
-    } else {
-        first_sesno.saturating_sub(1).max(0)
-    }
-}
-
-async fn publish_model_file_round(
-    mgr: &AiosDBManager,
-    dbnum: u32,
-    round_end_sesno: i32,
-) -> anyhow::Result<crate::data_interface::side_effect_pending::CompletedFileRound> {
-    let mut timings = PublishStageTimings::default();
-    let round = PublishStageTimings::measure(
-        &mut timings.round_read,
-        SideEffectCompensator::file_round(dbnum, round_end_sesno),
-    )
-    .await?
-    .ok_or_else(|| anyhow::anyhow!("missing file publication round {dbnum}/{round_end_sesno}"))?;
-    anyhow::ensure!(
-        matches!(round.status.as_str(), "collecting" | "pending" | "done"),
-        "file publication is held in {}",
-        round.status
-    );
-    if round.status == "done" {
-        return SideEffectCompensator::published_model_file_round_on(
-            &aios_core::SUL_DB,
-            dbnum,
-            round_end_sesno,
-        )
-        .await;
-    }
-    if round.status == "collecting" {
-        let commit_token =
-            SideEffectCompensator::file_round_commit_token(dbnum, round_end_sesno).await?;
-        let deferred_actions =
-            SideEffectCompensator::file_round_deferred_model_actions(dbnum, round_end_sesno)
-                .await?;
-        timings.deferred = deferred_actions.len();
-        for action in deferred_actions
-            .iter()
-            .filter(|action| action.action == "delete_cleanup")
-        {
-            PublishStageTimings::measure(
-                &mut timings.deferred_delete,
-                model_update_pending::execute_deferred_file_model_action(mgr, action),
-            )
-            .await?;
-        }
-        // The in-memory projection may advance while the round is private, but the
-        // durable model rows consumed by room calculation remain on the previous
-        // published version. Flush every completed root now, before spatial replay.
-        let publish_roots = PublishStageTimings::measure(
-            &mut timings.persist_roots,
-            SideEffectCompensator::file_round_model_publish_roots(dbnum, round_end_sesno),
-        )
-        .await?;
-        timings.roots = publish_roots.len();
-        for root in publish_roots {
-            let refno = crate::fast_model::e3d_model_service::parse_refno(&root)?;
-            PublishStageTimings::measure(
-                &mut timings.persist_roots,
-                crate::fast_model::model_db_adapter::persist_root_for_file_round(
-                    refno,
-                    dbnum,
-                    round_end_sesno,
-                    &commit_token,
-                ),
-            )
-            .await?;
-        }
-        for action in deferred_actions
-            .iter()
-            .filter(|action| action.action != "delete_cleanup")
-        {
-            PublishStageTimings::measure(
-                &mut timings.deferred_other,
-                model_update_pending::execute_deferred_file_model_action(mgr, action),
-            )
-            .await?;
-        }
-        // Room inputs already reside in ResidentRoomModel / ModelMemoryStore.
-        // Publication persists model results, never a second full-db geometry image.
-        let frozen = crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(
-            &commit_token,
-        )?;
-        PublishStageTimings::measure(
-            &mut timings.topology_source,
-            crate::fast_model::room_topology_source::prepare_producer_source(&frozen),
-        )
-        .await?;
-        PublishStageTimings::measure(
-            &mut timings.topology_stage,
-            crate::fast_model::room_topology::stage_candidate_room_topology(
-                dbnum,
-                frozen.db_type(),
-                round_end_sesno,
-                &commit_token,
-            ),
-        )
-        .await?;
-        PublishStageTimings::measure(
-            &mut timings.promote,
-            SideEffectCompensator::promote_file_round(dbnum, round_end_sesno),
-        )
-        .await?;
-    }
-    if round.status != "done" {
-        // 任务直发：这一轮的空间增删从 `task_effects` 那本内存账拿，不再绕库一圈
-        // （ADR-071 D1）。别的库遗留的 pending 行不归这里管——出队前那道闸
-        // （`reconcile_spatial_pending`）照旧扫全局。
-        PublishStageTimings::measure(
-            &mut timings.spatial,
-            SideEffectCompensator::publish_task_spatial_effects(
-                dbnum,
-                round_end_sesno,
-                &round.db_type,
-                round.commit_token.as_deref(),
-            ),
-        )
-        .await?;
-    }
-    let published = PublishStageTimings::measure(
-        &mut timings.round_read,
-        SideEffectCompensator::file_round(dbnum, round_end_sesno),
-    )
-    .await?
-    .ok_or_else(|| anyhow::anyhow!("file publication round disappeared"))?;
-    timings.report(dbnum, round_end_sesno);
-    anyhow::ensure!(
-        published.status == "done",
-        "file spatial publication has not converged: {}",
-        published.status
-    );
-    SideEffectCompensator::published_model_file_round_on(&aios_core::SUL_DB, dbnum, round_end_sesno)
-        .await
-}
-
-/// Legacy/resume callers still publish both stages. The owning Task calls the
-/// stages separately so its model checkpoint is durable before rooms begin.
-pub(crate) async fn publish_completed_file_round(
-    mgr: &AiosDBManager,
-    dbnum: u32,
-    round_end_sesno: i32,
-    result: &mut DataBatchTaskResult,
-) -> anyhow::Result<Option<crate::data_interface::side_effect_pending::CompletedFileRound>> {
-    publish_model_file_round(mgr, dbnum, round_end_sesno).await?;
-    crate::fast_model::room_task::finish_file_room_round(mgr, dbnum, round_end_sesno, result).await
 }
 
 /// 截断窗口的余量批次（ADR-017 拆窗）。
@@ -2505,6 +2142,7 @@ async fn execute_frozen_batch_body(
     progress: &Option<ManualUpdateProgress>,
     warnings: &mut Vec<String>,
 ) -> DataBatchTaskResult {
+    let mut side_actions: Vec<ModelWorkItem> = Vec::new();
     let (batch, mut new_units) = {
         let _data_write = crate::data_interface::batch_scheduler::BatchScheduler::global()
             .begin_data_write(job.dbnum);
@@ -2516,6 +2154,7 @@ async fn execute_frozen_batch_body(
             job.reinit_requested,
             progress,
             warnings,
+            &mut side_actions,
         )
         .await
     };
@@ -2538,42 +2177,28 @@ async fn execute_frozen_batch_body(
     }
 
     // 直写路径（ADR-056 P1 之后唯一路径）：数据与水位已在 `execute_one_dbnum` →
-    // `apply_one` 的尾事务里收口。过渡期仍从 durable 行领取本窗工作，但领取和生成
-    // 都属于当前 dbnum Task，不再等全局 idle drain。
+    // `apply_one` 的尾事务里收口。本窗的模型计划**随返回值交回**（ADR-072 D5：计划在内存，
+    // 不写 pending 行再由本任务领回来），领取和生成都属于当前 dbnum Task。
     let mut non_regen_failed = false;
     let mut side_effect_failed = false;
 
-    // 位姿 / 删除 / 级联先行——级联展开会反过来入队 regen 工作，随后一起并进
-    // 本批的单元工作单（与旧手动路径的顺序一致）。
-    //
-    // 这一轮消化是**全局**的（非 regen 积压不分库），所以「有失败」不等于「本批
-    // 的前置没做完」：只有失败牵涉到 `job.dbnum` 时才拦下本批的生成，否则隔壁库
-    // 的一条坏行会让每个库的每一批都一个交付单元都不生成。
+    // 位姿 / 删除 / 级联先行——级联展开出来的根随后一起并进本批的单元工作单
+    // （与旧手动路径的顺序一致）。这些动作全是本库的：有失败就拦下本批的生成。
+    let mut derived_units = Vec::new();
     if !defer_model_phase {
-        match model_update_pending::drain_non_regen_report(mgr).await {
-            Ok(report) => {
-                if !report.failures.is_empty() {
-                    warnings.push(format!(
-                        "执行位姿/删除/级联模型任务失败（已保留待重试）: {}",
-                        report.failures.join("; ")
-                    ));
-                    side_effect_failed = true;
-                    non_regen_failed = report.blocks(job.dbnum);
-                }
-            }
-            Err(error) => {
-                // 整个阶段没跑起来（读表/解码失败），本批前置是否做完无从确认，按阻断处理。
-                warnings.push(format!(
-                    "读取位姿/删除/级联模型任务失败（本批模型生成已延后，持久任务保留）: {error:#}"
-                ));
-                side_effect_failed = true;
-                non_regen_failed = true;
-            }
+        let (derived, failures) = run_model_side_actions(mgr, &side_actions).await;
+        derived_units = derived;
+        if !failures.is_empty() {
+            warnings.push(format!(
+                "执行位姿/删除/级联模型任务失败: {}",
+                failures.join("; ")
+            ));
+            side_effect_failed = true;
+            non_regen_failed = true;
         }
     }
 
-    // 本批新单元 + **本库**的持久待重试合并成一张工作单（同根只留最新一条）。
-    // 跨库积压归空闲轮的 `drain_data_phases`，不该记在这条任务名下。
+    // 本批新单元 + 明确要重算的根 + 级联展开出来的根并成一张工作单（同根只留最新一条）。
     let (units, mut settlement_failed) = if defer_model_phase {
         registry.set_unit_totals(&job.task_id, 0);
         // 这句过去无条件打，失败批次照样宣告「已收口」——2026-08-18 现场
@@ -2581,11 +2206,12 @@ async fn execute_frozen_batch_body(
         // 只能绕到 `/api/v1/tasks/<id>` 回执里才拿到真错。让位不等于成功，
         // 没推上水位的批次必须在同一行说清楚。
         //
-        // `applied` 在直写路径上就是「`finalize_attempt` 尾事务已提交」：水位与
-        // durable 模型意图同一事务落定（ADR-056 N1/N2），这里可以如实宣告。
+        // `applied` 在直写路径上就是「`finalize_attempt` 尾事务已提交」。模型阶段关着时
+        // 这一窗的模型计划**不落库**（没有 pending 行了）：下一次该库任务由镜像里的凭证
+        // 缺口重新规划（ModelOnly 恢复任务），这里如实说。
         if applied && !model_incremental {
             println!(
-                "dbnum={} 数据应用完成，水位已推进；model_incremental=false，模型计划已随提交事务 durable 落定，留待模型阶段开启后执行",
+                "dbnum={} 数据应用完成，水位已推进；model_incremental=false，本窗模型工作不执行，模型阶段开启后由恢复任务按凭证缺口重排",
                 job.dbnum
             );
         } else {
@@ -2596,27 +2222,17 @@ async fn execute_frozen_batch_body(
         }
         (Vec::new(), false)
     } else if batch_regen_is_allowed(non_regen_failed) {
-        match load_pending_model_units_for_retry(job.dbnum).await {
-            Ok(pending) => {
-                // 明确要重算的根（目录级联并进这条 ApplyWindow 时带来的名单）也进本任务的工作单。
-                new_units.extend(explicit_regen_units(
-                    job,
-                    batch
-                        .as_ref()
-                        .map(|batch| batch.end_sesno)
-                        .unwrap_or(job.end_sesno),
-                ));
-                let worklist = merge_unit_worklist(new_units, pending);
-                run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
-            }
-            Err(error) => {
-                warnings.push(format!(
-                    "读取模型待重试列表失败（本批模型生成已延后，持久任务保留）: {error:#}"
-                ));
-                registry.set_unit_totals(&job.task_id, 0);
-                (Vec::new(), true)
-            }
-        }
+        // 明确要重算的根（目录级联并进这条 ApplyWindow 时带来的名单）也进本任务的工作单。
+        new_units.extend(explicit_regen_units(
+            job,
+            batch
+                .as_ref()
+                .map(|batch| batch.end_sesno)
+                .unwrap_or(job.end_sesno),
+        ));
+        new_units.extend(derived_units);
+        let worklist = merge_unit_worklist(new_units);
+        run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
     } else {
         registry.set_unit_totals(&job.task_id, 0);
         (Vec::new(), true)
@@ -2626,31 +2242,19 @@ async fn execute_frozen_batch_body(
     // worklist and promoted to root regeneration.  Some root generators replace the
     // member's inst_relate/AABB directly but omit that original member from their final
     // AABB refresh set.  Re-run only those preserved targets through the canonical path
-    // (durable `PostRegenAabb` pending rows): no-geometry nouns are naturally skipped,
-    // while real changes feed both the spatial refresh and the room_recalc_element merge.
+    // (the plan's `PostRegenAabb` items): no-geometry nouns are naturally skipped,
+    // while real changes feed the spatial refresh in place.
     if !defer_model_phase
         && !settlement_failed
         && units
             .iter()
             .all(|unit| unit.status == UnitGenStatus::Generated)
+        && let Err(error) = refresh_post_regen_aabbs_for(&side_actions).await
     {
-        match model_update_pending::drain_post_regen_aabb_report(mgr, job.dbnum).await {
-            Ok(report) => {
-                if !report.failures.is_empty() {
-                    warnings.push(format!(
-                        "根生成后补刷原始位姿目标 AABB 失败（已保留待重试）: {}",
-                        report.failures.join("; ")
-                    ));
-                    settlement_failed = report.blocks(job.dbnum);
-                }
-            }
-            Err(error) => {
-                warnings.push(format!(
-                    "读取根生成后 AABB 补刷任务失败（本批拒绝成功）: {error:#}"
-                ));
-                settlement_failed = true;
-            }
-        }
+        warnings.push(format!(
+            "根生成后补刷原始位姿目标 AABB 失败（本批拒绝成功）: {error:#}"
+        ));
+        settlement_failed = true;
     }
     side_effect_failed |= settlement_failed;
 
@@ -2687,11 +2291,12 @@ fn model_phase_is_deferred(model_incremental: bool, data_applied: bool) -> bool 
     !model_incremental || !data_applied
 }
 
-/// 只有带 durable pending revision、且还没失败过的可解析根才并进批量重生成
-/// （ADR-012）；没有 revision 的单元没有可收口的行，逐根路径会把它记成失败说出口。
-fn unit_joins_regen_batch(task: &crate::data_interface::manual_update::UnitTask) -> bool {
-    task.revision.is_some()
-        && model_update_pending::root_joins_regen_batch(task.attempts, &task.root_refno)
+/// 还没失败过的可解析根才并进批量重生成（ADR-012）；失败过的逐根跑，让它的错误自己说出口。
+fn unit_joins_regen_batch(task: &UnitTask) -> bool {
+    crate::data_interface::window_root_plan::root_joins_regen_batch(
+        task.attempts,
+        &task.root_refno,
+    )
 }
 
 async fn run_single_unit(
@@ -2716,39 +2321,6 @@ async fn run_single_unit(
         );
     }
 
-    if task.revision.is_none() {
-        let message = format!(
-            "模型任务缺少 pending revision，已跳过生成 root={}",
-            task.root_refno
-        );
-        warnings.push(message.clone());
-        emit(
-            progress,
-            ManualUpdateEvent::ModelUnitFinished {
-                dbnum: task.dbnum,
-                root_refno: task.root_refno.clone(),
-                success: false,
-                message: Some(message.clone()),
-            },
-        );
-        registry.bump_units_done(task_id);
-        return (
-            ModelUnitResult {
-                dbnum: task.dbnum,
-                root_refno: task.root_refno,
-                noun: task.noun,
-                status: UnitGenStatus::Failed,
-                attempts: task.attempts,
-                message: Some(message),
-                old_owner: task.old_owner,
-                new_owner: task.new_owner,
-                kind: UnitKind::Regen,
-                transform_fallback_reason: None,
-            },
-            true,
-        );
-    }
-
     let unit_started = std::time::Instant::now();
     let outcome = {
         let lock = generation_root_lock(&task.root_refno);
@@ -2756,24 +2328,13 @@ async fn run_single_unit(
         generate_unit_model(mgr, &task.root_refno).await
     };
     let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
-    let settlement_failed = match model_update_pending::settle_regen_work(
-        &task.root_refno,
-        task.revision,
-        generation_error.as_deref(),
-    )
-    .await
-    {
-        Ok(()) => false,
-        Err(error) => {
-            log::error!(
-                "收口模型 pending 失败 dbnum={} root={}: {error:#}",
-                task.dbnum,
-                task.root_refno
-            );
-            warnings.push(error.to_string());
-            true
-        }
-    };
+    // 没有 pending 行要收口了（ADR-072 D5）：单元清单就是真值，成败直接进回执；失败另写到
+    // 根凭证上（`status = 'failed'`），让下一窗与启动核对看见这根还欠着。
+    let settlement_failed = false;
+    let _ = warnings;
+    if let Some(error) = generation_error.as_deref() {
+        mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, error).await;
+    }
     let (status, attempts, message) = match outcome {
         Ok(()) => (UnitGenStatus::Generated, task.attempts, None),
         Err(_) => (UnitGenStatus::Failed, task.attempts + 1, generation_error),
@@ -2816,33 +2377,44 @@ async fn run_single_unit(
     )
 }
 
-/// 把一根刚体前移完成的根登记进活动文件轮次的模型发布清单（ADR-066 B6）。SUL_DB 落在这里
+/// 刚体前移完成的根**就地**落库（ADR-066 B6 × ADR-072 D4）：投影记录已被执行体左乘 `Δ`，
+/// 这里按 regen 同一条路 `persist_roots_batched` 合块写进库、空间树随之就地收敛。SUL_DB 落在这里
 /// （batch_worker）而不是生成服务——`the_generation_service_never_reaches_for_a_database` 那条钉守着
-/// 生成入口不碰库。登记后由 `publish_completed_file_round` 用轮次 token 统一刷 durable。
-async fn register_transform_publish_root(
+/// 生成入口不碰库。「登记进文件轮次、publish 阶段统一刷 durable」那一路随 publish 退了。
+///
+/// 返回没落进去的根与原因（一组任一块失败整组算失败，见 [`persist_roots_batched`]）。
+///
+/// [`persist_roots_batched`]: crate::fast_model::model_db_adapter::persist_roots_batched
+async fn persist_transform_roots(
     dbnum: u32,
-    round_end_sesno: i32,
-    root_refno: &str,
-) -> anyhow::Result<()> {
-    let statement =
-        crate::data_interface::side_effect_pending::SideEffectCompensator::render_file_model_publish_root(
-            dbnum,
-            round_end_sesno,
-            root_refno,
-        )?;
-    aios_core::SUL_DB
-        .query(statement)
-        .await
-        .map_err(anyhow::Error::from)
-        .and_then(|response| response.check().map_err(anyhow::Error::from))
-        .map(|_| ())
+    roots: &[String],
+) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    use crate::fast_model::model_db_adapter::{PersistTarget, persist_roots_batched};
+    use crate::fast_model::room_publication::RoomEffectPolicy;
+    let refnos = roots
+        .iter()
+        .map(|root| crate::fast_model::e3d_model_service::parse_refno(root))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    let batched = persist_roots_batched(
+        PersistTarget::process(),
+        crate::fast_model::model_memory_store::ModelMemoryStore::global(),
+        dbnum,
+        &refnos,
+        RoomEffectPolicy::Directed,
+    )
+    .await?;
+    Ok(batched
+        .failed
+        .into_iter()
+        .map(|(root, reason)| (root.to_string(), reason))
+        .collect())
 }
 
 /// 刚体前移分流（ADR-066 B6）：把 `task.transform.is_some()` 的单元交给便宜路执行体
 /// ([`E3dModelService::republish_roots_by_rigid_motion`])，按它的清单分成三摞——走成的与「回执已在 T」
-/// 的重放（幂等闸跳过、投影未动）都记 Transform 完成回执（顺带收口 pending、报进度、计一次 done），
+/// 的重放（幂等闸跳过、投影未动）都记 Transform 完成回执（顺带落库、报进度、计一次 done），
 /// 走不成的记下回退原因、清掉 transform 提示交回整根重算。返回 `(完成回执, 待重排的 regen 单元,
-/// 是否有 pending 收口失败)`。执行体本身保守：任一前置不满足就把那根放进回退，所以这里不再判断、
+/// 是否有落库失败)`。执行体本身保守：任一前置不满足就把那根放进回退，所以这里不再判断、
 /// 只按它的分派落结果。
 async fn run_rigid_motion_units(
     transform_tasks: Vec<crate::data_interface::manual_update::UnitTask>,
@@ -2894,30 +2466,22 @@ async fn run_rigid_motion_units(
     }
 
     for ((dbnum, sesno), group) in by_window {
-        // 便宜路只支持「登记进活动文件轮次、由 publish_completed_file_round 统一刷 durable」这条发布
-        // 模式——与 RegenRoot 的 render_file_model_publish_root 分支同款。读透+durable 直落 / 内存库 /
-        // 无活动数据窗一律回退整根重算（回退永远正确）。
-        let round_end = match active_data_window() {
-            Some((round_dbnum, round_end))
-                if round_dbnum == dbnum
-                    && (!crate::options::data_face().is_read_through()
-                        || !crate::options::store_mode().is_durable())
-                    && !crate::data_interface::model_read_route::memory_only_for(dbnum) =>
-            {
-                round_end
+        // 便宜路只支持「投影记录左乘 Δ 后按 regen 同款合块落库」这一种发布模式。读透+durable
+        // 直落 / 内存库一律回退整根重算（回退永远正确）。
+        let supported = (!crate::options::data_face().is_read_through()
+            || !crate::options::store_mode().is_durable())
+            && !crate::data_interface::model_read_route::memory_only_for(dbnum);
+        if !supported {
+            for mut task in group {
+                fallback_reason.insert(
+                    task.root_refno.clone(),
+                    "unsupported publish mode for rigid motion (falls back to regen)".into(),
+                );
+                task.transform = None;
+                requeue.push(task);
             }
-            _ => {
-                for mut task in group {
-                    fallback_reason.insert(
-                        task.root_refno.clone(),
-                        "unsupported publish mode for rigid motion (falls back to regen)".into(),
-                    );
-                    task.transform = None;
-                    requeue.push(task);
-                }
-                continue;
-            }
-        };
+            continue;
+        }
         let units: Vec<crate::fast_model::e3d_model_service::RigidMotionUnit> = group
             .iter()
             .map(|task| {
@@ -2967,19 +2531,35 @@ async fn run_rigid_motion_units(
                 )
             }
         };
+        // 走成的与重放的根一起合块落库（重放的投影一字未动，落库幂等；不落的话这根就漏出
+        // 本轮清单）。落库失败 → 退回整根重算（regen 会覆盖投影）。
+        let landed_roots: Vec<String> = group
+            .iter()
+            .map(|task| task.root_refno.clone())
+            .filter(|root| completed.contains(root) || replayed.contains(root))
+            .collect();
+        let mut persist_failures = match persist_transform_roots(dbnum, &landed_roots).await {
+            Ok(failures) => failures,
+            Err(error) => {
+                warnings.push(format!(
+                    "dbnum={dbnum} 刚体前移根落库报错，本组 {} 个单元回退整根重算: {error:#}",
+                    landed_roots.len()
+                ));
+                settlement_failed = true;
+                landed_roots
+                    .iter()
+                    .map(|root| (root.clone(), format!("persist error: {error:#}")))
+                    .collect()
+            }
+        };
         for mut task in group {
-            // 重放（回执已在 T）的根按完成计：投影一字未动，但登记 / 收口照做——上一轮的发布
-            // 登记随那一轮走了，本轮 flush 幂等；不登记的话这根就漏出本轮清单。
+            // 重放（回执已在 T）的根按完成计：投影一字未动，但落库 / 回执照做。
             let replay = replayed.contains(&task.root_refno);
             if completed.contains(&task.root_refno) || replay {
-                // 登记进文件轮次（SUL_DB 在 batch_worker 里做，生成服务不碰库）；durable flush 由
-                // publish_completed_file_round 统一做。登记失败 → 退回整根重算（regen 会覆盖投影）。
-                if let Err(error) =
-                    register_transform_publish_root(dbnum, round_end, &task.root_refno).await
-                {
+                if let Some(error) = persist_failures.remove(&task.root_refno) {
                     fallback_reason.insert(
                         task.root_refno.clone(),
-                        format!("register publish root: {error:#}"),
+                        format!("persist transformed root: {error}"),
                     );
                     task.transform = None;
                     requeue.push(task);
@@ -2993,21 +2573,6 @@ async fn run_rigid_motion_units(
                         noun: task.noun.clone(),
                     },
                 );
-                if let Err(error) = crate::data_interface::model_update_pending::settle_regen_work(
-                    &task.root_refno,
-                    task.revision,
-                    None,
-                )
-                .await
-                {
-                    log::error!(
-                        "收口刚体前移 pending 失败 dbnum={} root={}: {error:#}",
-                        task.dbnum,
-                        task.root_refno
-                    );
-                    warnings.push(error.to_string());
-                    settlement_failed = true;
-                }
                 emit(
                     progress,
                     ManualUpdateEvent::ModelUnitFinished {
@@ -3174,43 +2739,16 @@ async fn run_unit_worklist(
                 render_roots(&roots)
             );
 
-            // 成功根在一条有界事务里收口；失败根仍逐根记录自己的错误。收口失败不是
-            // 生成失败：成功根保持 pending，下一次恢复会幂等重跑并再次尝试收口。
-            let settlements = group
-                .iter()
-                .filter(|task| completed.contains(&task.root_refno))
-                .filter_map(|task| {
-                    task.revision
-                        .map(|revision| (task.root_refno.clone(), revision))
-                })
-                .collect::<Vec<_>>();
-            if let Err(error) = model_update_pending::clear_regen_work_batch(&settlements).await {
-                log::error!("批量收口模型 pending 失败: {error:#}");
-                warnings.push(error.to_string());
-                settlement_failed = true;
-            }
-
+            // 没有 pending 行要收口了（ADR-072 D5）：成败直接进本任务的单元清单，失败根的
+            // 错误逐根记在回执上，并写到根凭证上（`status = 'failed'`）让下一窗与启动核对看见。
             for task in group {
                 let message = failures.remove(&task.root_refno).or_else(|| {
                     (!completed.contains(&task.root_refno))
                         .then(|| "生成器未返回该根的成功或失败结果".to_string())
                 });
                 let success = message.is_none();
-                if let Some(error_message) = message.as_deref()
-                    && let Err(error) = model_update_pending::settle_regen_work(
-                        &task.root_refno,
-                        task.revision,
-                        Some(error_message),
-                    )
-                    .await
-                {
-                    log::error!(
-                        "记录模型 pending 失败 dbnum={} root={}: {error:#}",
-                        task.dbnum,
-                        task.root_refno
-                    );
-                    warnings.push(error.to_string());
-                    settlement_failed = true;
+                if let Some(error) = message.as_deref() {
+                    mark_generation_failed(task.dbnum, &task.root_refno, &task.noun, error).await;
                 }
                 if !success {
                     settlement_failed = true;
@@ -3385,141 +2923,11 @@ fn render_roots(roots: &[String]) -> String {
     }
 }
 
-static FILE_ROUND_HOLD_ANNOUNCEMENT: std::sync::Mutex<(Option<String>, i64)> =
-    std::sync::Mutex::new((None, 0));
-
-/// 收集期轮次的阻塞理由：理由变了、或者隔了 [`MODEL_DEAD_LETTER_REPEAT_SECS`] 才说一次。
+/// 队列跑空后的收尾轮：范围重扫、认领迟到的批次、启动补房间段、空间树落盘、模型门（ADR-011 §8）。
 ///
-/// 空闲轮每 30 秒来一趟，每趟复述同一句就是把日志刷成噪音；可完全不说又正是 F-C 现场
-/// 最难查的地方——`e3d.room.lookup` 全局恒 `updating`，控制台却一片安静。
-fn announce_file_round_holds(holds: &[String]) {
-    let fingerprint = holds.join(" | ");
-    let now = Local::now().timestamp();
-    let mut announcement = FILE_ROUND_HOLD_ANNOUNCEMENT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let changed = announcement.0.as_deref() != Some(fingerprint.as_str());
-    if !changed && now.saturating_sub(announcement.1) < MODEL_DEAD_LETTER_REPEAT_SECS {
-        return;
-    }
-    let was_holding = announcement
-        .0
-        .as_deref()
-        .is_some_and(|previous| !previous.is_empty());
-    *announcement = (Some(fingerprint), now);
-    if holds.is_empty() {
-        if was_holding {
-            println!("收集期文件轮次的阻塞已清零");
-        }
-        return;
-    }
-    println!(
-        "收集期文件轮次仍未过完成屏障（房间目标不释放，e3d.room.lookup 保持 updating）：{}",
-        holds.join("；")
-    );
-}
-
-/// 把重试已经消化干净的 `collecting` 文件轮次重新推过完成屏障（审核 F-C）。
-///
-/// [`batch_round_complete`] 只在数据批次跑完那一刻判一次。一根偶发失败让它为假，这一轮
-/// 就停在 `collecting`；失败单元随后被空闲重试救回来，却没有任何地方再调
-/// [`publish_completed_file_round`]。后果不是「慢一点」而是永久：该库的房间目标不释放，
-/// `has_collecting_file_rounds()` 恒真，**所有**库的 `e3d.room.lookup` 恒为 `updating`，
-/// 启动也一直走 `file_round_private`。这里就是那个缺失的第二判点。
-///
-/// 只在数据侧本轮已经 `Settled` 时调用——判据里的「根都安定了」以整库的模型积压已经
-/// 消化为前提，队列里还有活时问它没有意义。
-async fn republish_settled_file_rounds(mgr: &AiosDBManager) -> IdleOutcome {
-    let rounds = match SideEffectCompensator::collecting_file_rounds().await {
-        Ok(rounds) => rounds,
-        Err(error) => {
-            println!("复核收集期文件轮次失败（保留待下一轮）: {error:#}");
-            return IdleOutcome::Failed;
-        }
-    };
-    let mut published = 0usize;
-    let mut failed = false;
-    let mut holds = Vec::new();
-    for round in rounds {
-        // 非 DESI 没有文件轮次可发布（冻结点也只给 DESI 落意图行）。
-        if !round.db_type.eq_ignore_ascii_case("DESI") {
-            continue;
-        }
-        let probe = match model_watermark::read_model_watermark_probe(
-            &aios_core::SUL_DB,
-            round.dbnum,
-        )
-        .await
-        {
-            Ok(probe) => probe,
-            Err(error) => {
-                println!(
-                    "读取 dbnum={} 的文件轮次完成屏障判据失败（保留待下一轮）: {error:#}",
-                    round.dbnum
-                );
-                failed = true;
-                continue;
-            }
-        };
-        let readiness = file_round_readiness(&probe, round.end_sesno);
-        if let Some(reason) = readiness.describe() {
-            holds.push(format!(
-                "dbnum={} sesno={}：{reason}",
-                round.dbnum, round.end_sesno
-            ));
-            continue;
-        }
-        let mut result = DataBatchTaskResult {
-            project: mgr.db_option.project_name.clone(),
-            status: ManualUpdateStatus::Success,
-            batch: None,
-            units: Vec::new(),
-            warnings: Vec::new(),
-            model_verdict: None,
-            model_caught_up_at: None,
-        };
-        match publish_completed_file_round(mgr, round.dbnum, round.end_sesno, &mut result).await {
-            Ok(_) => {
-                published += 1;
-                println!(
-                    "重试已消化失败单元，文件轮次补发布 dbnum={} sesno={}{}",
-                    round.dbnum,
-                    round.end_sesno,
-                    if result.warnings.is_empty() {
-                        String::new()
-                    } else {
-                        format!("：{}", result.warnings.join("; "))
-                    }
-                );
-            }
-            Err(error) => {
-                println!(
-                    "文件轮次补发布失败 dbnum={} sesno={}（保留 collecting，下一轮重试）: {error:#}",
-                    round.dbnum, round.end_sesno
-                );
-                failed = true;
-            }
-        }
-    }
-    announce_file_round_holds(&holds);
-    if failed {
-        IdleOutcome::Failed
-    } else if published > 0 {
-        IdleOutcome::MoreWork
-    } else {
-        IdleOutcome::Settled
-    }
-}
-
-/// 队列跑空后的收尾轮：积压补偿 + 房间收敛（ADR-011 §8）。
-///
-/// `after_batches` 只影响日志口径；两类动作本身都以「表里有没有活」为准，
-/// 空表时各是一次廉价 SELECT。
-async fn idle_round(
-    mgr: &Arc<AiosDBManager>,
-    registry: &'static TaskRegistry,
-    after_batches: bool,
-) {
+/// 积压补偿 / 模型 pending 消化 / 文件轮次补发布这几段随第二条异步账退了（ADR-072 D5）：
+/// 模型与房间工作都随各自的 dbnum 任务同步做完，这里没有「积压」可消化。
+async fn idle_round(mgr: &Arc<AiosDBManager>, _registry: &'static TaskRegistry) {
     let initialization =
         crate::data_interface::initialization_phase::InitializationCoordinator::global();
     // 范围可能刚变宽（见 [`SCOPE_DIRTY`]）：先把新进范围的库找出来入队，它们没有
@@ -3554,158 +2962,37 @@ async fn idle_round(
         }
     }
 
-    // 副作用与模型积压：覆盖「水位已推、工作未完成」的重启/失败残留。
-    let model_phase_open =
-        crate::options::model_incremental() && initialization.model_generation_allowed();
+    // 第二条异步账（模型 pending 积压 / 死信 / 文件轮次补发布 / 空间 pending）随 ADR-072 D5
+    // 退了：模型与房间工作都随各自的 dbnum 任务同步做完，空闲轮没有「积压」可消化。
     if !crate::options::model_incremental() {
         static ANNOUNCED: std::sync::Once = std::sync::Once::new();
         ANNOUNCED.call_once(|| {
             println!(
-                "模型增量阶段已关闭（DbOption.toml 的 model_incremental / 环境变量 {}）：数据批次照常提交，模型积压 durable 留存",
+                "模型增量阶段已关闭（DbOption.toml 的 model_incremental / 环境变量 {}）：数据批次照常提交，模型工作等阶段开启后由恢复任务按凭证缺口重排",
                 crate::options::MODEL_INCREMENTAL_ENV
             );
         });
     }
-    // 模型类型限定（`model_incremental_types`）：同款只说一次。名单外类型的行留在
-    // model_update_pending 里不被本进程认领，下面「空闲模型积压消化完成 N 个」的 N 里
-    // 没有它们——不说这一句，空闲轮日志看起来就是「积压清零」。
-    if model_phase_open {
+    // 模型类型限定（`model_incremental_types`）：同款只说一次。名单外类型的根本进程不生成
+    // ——不说这一句，空闲轮日志看起来就是「一切追平」。
+    if crate::options::model_incremental() && initialization.model_generation_allowed() {
         if let Some(notice) = crate::data_interface::model_type_scope::mode_notice() {
             static ANNOUNCED: std::sync::Once = std::sync::Once::new();
             ANNOUNCED.call_once(|| println!("*** {notice}"));
         }
     }
-    // 非空间副作用补偿队列（SYST 派生 / ref_rev 补偿）的 drain / 死信 / 清扫已退役
-    // （ADR-071 D9，d-300）：空闲轮不再有「副作用补偿」这一段，模型门也不再被它的死信卡住。
-    let side_effect_failed = false;
-    let (data_phase_failed, model_lock_deferred) = if model_phase_open {
-        match model_update_pending::drain_data_phases_disposition(mgr).await {
-            Ok(model_update_pending::ModelDrainDisposition::Completed { done }) => {
-                if done > 0 {
-                    println!("空闲模型积压消化完成 {done} 个任务");
-                }
-                (false, false)
-            }
-            Ok(model_update_pending::ModelDrainDisposition::YieldedForData {
-                done,
-                claimed_epoch,
-                current_epoch,
-                reason,
-            }) => {
-                println!(
-                    "空闲模型积压完成 {done} 个后让位数据：reason={} claimed_epoch={claimed_epoch} current_epoch={current_epoch}",
-                    reason.as_str()
-                );
-                (false, false)
-            }
-            Ok(model_update_pending::ModelDrainDisposition::Failed { done, message }) => {
-                println!("空闲模型积压完成 {done} 个后失败（保留待重试）: {message}");
-                (true, false)
-            }
-            Ok(model_update_pending::ModelDrainDisposition::DeferredForLock {
-                done,
-                busy,
-                sample,
-            }) => {
-                announce_model_lock_deferred(done, busy, sample.as_deref());
-                (false, true)
-            }
-            Err(error) => {
-                println!("空闲模型积压消化失败（保留待重试）: {error:#}");
-                (true, false)
-            }
-        }
-    } else {
-        (false, false)
-    };
-
-    // 消化失败时不必再问「还有没有活」——这一轮已经在退避那条路上了。
-    let (has_backlog, backlog_check_failed) = if !model_phase_open {
-        (false, false)
-    } else if data_phase_failed {
-        (false, false)
-    } else {
-        match model_update_pending::has_pending_data_work().await {
-            Ok(pending) => (pending, false),
-            Err(error) => {
-                println!("检查模型积压是否清空失败（暂缓房间轮）: {error:#}");
-                (false, true)
-            }
-        }
-    };
-    let (has_dead_work, dead_check_failed) = if !model_phase_open {
-        (false, false)
-    } else {
-        match model_update_pending::model_pending_status().await {
-            Ok(status) => {
-                announce_model_dead_letters(&status);
-                (status.has_data_dead_letters(), false)
-            }
-            Err(error) => {
-                println!("检查模型死信失败（模型门保持未就绪）: {error:#}");
-                (false, true)
-            }
-        }
-    };
-    let failed = side_effect_failed
-        || data_phase_failed
-        || backlog_check_failed
-        || has_dead_work
-        || dead_check_failed;
     // 最后一页执行期间可能已有新批次入队。这里直接认领并跑掉，房间轮不能越过它。
-    let claimed_batches = if failed || has_backlog {
-        0
-    } else {
-        drain_queue_until_empty(mgr).await
-    };
-
-    // An async initialization backlog is a completion barrier, not work this
-    // worker can claim. Its consumer wakes us when publication can proceed.
-    let owned_backlog_wait = if has_backlog && !failed && !model_lock_deferred {
-        match model_update_pending::has_claimable_data_work().await {
-            Ok(claimable) => !claimable,
-            Err(error) => {
-                println!("检查可认领模型工作失败（暂缓空闲轮）: {error:#}");
-                true
-            }
-        }
-    } else {
-        false
-    };
-    let data_outcome = idle_outcome(
-        failed,
-        model_lock_deferred || owned_backlog_wait,
-        has_backlog,
-        claimed_batches,
-    );
-    // 完成屏障的第二个判点（审核 F-C）：数据侧这一轮干净了，回头看还有没有 `collecting`
-    // 的文件轮次其实已经可以发布——它当初被一根失败单元挡下，而那根后来被重试救了回来。
-    // 必须排在房间轮之前：发布才会把该轮的房间目标从 `collecting` 释放成可消费。
-    let data_outcome = if data_outcome == IdleOutcome::Settled {
-        combine_idle_outcomes(data_outcome, republish_settled_file_rounds(mgr).await)
-    } else {
-        data_outcome
-    };
-    let spatial_pending = if data_outcome == IdleOutcome::Settled {
-        match SideEffectCompensator::has_pending_spatial_work().await {
-            Ok(pending) => pending,
-            Err(error) => {
-                println!("检查模型阶段 AABB 积压失败（模型门保持关闭）: {error:#}");
-                true
-            }
-        }
-    } else {
-        true
-    };
-    // 房间轮两侧都是分页的，一页吃不完就要立刻回来——否则积压会以每 30 秒一页的
-    // 速度爬，`IDLE_WAKE` 成了房间收敛的节拍器。
+    let claimed_batches = drain_queue_until_empty(mgr).await;
+    let data_outcome = idle_outcome(false, false, false, claimed_batches);
+    // 空间树在 `persist_roots_batched` 落完那一刻就地收敛，没有 pending 的空间意图行可等。
+    let spatial_pending = false;
     let room_outcome = if room_round_is_due(data_outcome) {
-        room_round(mgr, registry, after_batches).await
+        room_round(mgr).await
     } else {
         IdleOutcome::Settled
     };
     // 房间失败压过数据侧 MoreWork：失败行需要走 IDLE_WAKE 退避，不能因为另一侧还有
-    // 工作就留下一个 Notify permit，把五次 attempts 在热循环里瞬间烧完。
+    // 工作就留下一个 Notify permit 把重试在热循环里瞬间烧完。
     let outcome = combine_idle_outcomes(data_outcome, room_outcome);
 
     // 空间树增量变更落盘（ADR-010 落盘时机，2026-07-28 已决）：TransformOnly 的
@@ -3836,22 +3123,22 @@ fn room_round_is_due(outcome: IdleOutcome) -> bool {
     outcome == IdleOutcome::Settled
 }
 
-/// 收一轮房间归属重算，包成一条 `room_recalc` 任务（ADR-011 §10）。
+/// 空闲轮的房间那一段：只剩**启动补缺**——模型水位已追平数据、房间水位还落后的库，
+/// 用内存里的投影与常驻房间参照把房间段补上。
 ///
-/// 返回本轮处置：干净且有下一页是 `MoreWork`；任一目标/轮级失败是 `Failed`，必须
-/// 交给 `IDLE_WAKE` 退避；全部收敛是 `Settled`。
-async fn room_round(
-    mgr: &Arc<AiosDBManager>,
-    registry: &'static TaskRegistry,
-    after_batches: bool,
-) -> IdleOutcome {
+/// 逐目标的房间重算行（`room_recalc_*` pending）与「收一轮房间归属重算」那条 `room_recalc`
+/// 任务随第二条异步账退了（ADR-072 D5）：房间随各自的 dbnum 任务整库算
+/// （`room_task::finish_task_rooms`），不再有队列可收。
+///
+/// 返回本轮处置：补过至少一个库是 `MoreWork`；失败是 `Failed`，交给 `IDLE_WAKE` 退避；
+/// 没有缺口是 `Settled`。
+async fn room_round(mgr: &Arc<AiosDBManager>) -> IdleOutcome {
     let initialization =
         crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot();
     if !initialization.model_ready {
         return IdleOutcome::Settled;
     }
-    // 房间增量的总开关（`crate::options::room_incremental`，默认开）。关着时这一轮
-    // 不建任务行、不消费任何目标——已经排在表里的原样留着，开关一开照常收。
+    // 房间增量的总开关（`crate::options::room_incremental`，默认开）。
     //
     // 只说一次：空闲轮每 30 秒来一趟，每趟复述同一个配置项就是把日志刷成噪音
     // （`live == 0` 那条播报当年正是这么退役的）。
@@ -3860,199 +3147,21 @@ async fn room_round(
         ANNOUNCED.call_once(|| {
             println!(
                 "房间增量重算已关闭（DbOption.toml 的 room_incremental / 环境变量 {}）：\
-                 本进程不再收房间轮，已排队的目标留在表里等开关打开",
+                 本进程不补房间段",
                 crate::options::ROOM_INCREMENTAL_ENV
             );
         });
         return IdleOutcome::Settled;
     }
-    // 三水位恢复先于旧 pending 队列：它只消费已经恢复到内存的 e3d-model
-    // 投影与启动时预建的房间参照。即便历史库没有逐构件 pending 行，也能仅补
-    // room 阶段；没有缺口时是零计算、零写入。
+    // 只消费已经恢复到内存的 e3d-model 投影与启动时预建的房间参照；没有缺口时是零计算、零写入。
     match crate::fast_model::room_task::recover_missing_room_watermarks(mgr).await {
-        Ok(completed) if completed > 0 => return IdleOutcome::MoreWork,
-        Ok(_) => {}
+        Ok(completed) if completed > 0 => IdleOutcome::MoreWork,
+        Ok(_) => IdleOutcome::Settled,
         Err(error) => {
             println!("恢复房间水位失败（保留模型水位，稍后仅重试房间阶段）: {error:#}");
-            return IdleOutcome::Failed;
+            IdleOutcome::Failed
         }
     }
-    // 状态机门禁（一致性闭环方案 §6）：空间树不在可消费状态（重放/重建/复检中、
-    // 降级）时不收房间。与下面的 pending 检查相比，状态门多挡住「pending 为零但
-    // 树不可信」的情形（重建失败的 DegradedBlocked、指纹读不到的 DegradedReuse）。
-    // 状态变化时只播报一次——30 秒一趟的空闲轮不许把同一句话刷成噪音。
-    {
-        use crate::fast_model::spatial_state::{self, SpatialTreeState};
-        let state = spatial_state::current_state();
-        if !state.is_ready() {
-            static LAST_ANNOUNCED: std::sync::Mutex<Option<SpatialTreeState>> =
-                std::sync::Mutex::new(None);
-            let mut last = LAST_ANNOUNCED
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if *last != Some(state) {
-                println!(
-                    "空间树状态 {}：本轮不收房间（等重放/重建/复检收敛）",
-                    state.as_str()
-                );
-                *last = Some(state);
-            }
-            return IdleOutcome::Settled;
-        }
-    }
-    // 提交后的空间收敛还没做完 = 空间树已知陈旧，而整间分支的成员候选正取自这棵树，
-    // 待摘的删除也还压在意图里。此时收房间就是拿陈旧树改写归属，与
-    // `drain_queue_until_empty` 「收敛失败就停止出队」是同一条理由（方案 §4 R-B）。
-    // 出队那道门只管住了新批次，空闲轮照跑，房间轮得自己再拦一道。
-    match SideEffectCompensator::has_pending_spatial_work().await {
-        Ok(false) => {}
-        Ok(true) => {
-            println!("提交后空间收敛未完成，本轮不收房间（陈旧空间树上算出的归属会覆盖对的边）");
-            return IdleOutcome::Settled;
-        }
-        Err(error) => {
-            println!("检查提交后空间收敛状态失败（暂缓房间轮）: {error:#}");
-            return IdleOutcome::Failed;
-        }
-    }
-    let counts = match model_update_pending::count_room_targets().await {
-        Ok(counts) => counts,
-        Err(error) => {
-            println!("统计待重算房间目标失败: {error:#}");
-            return IdleOutcome::Failed;
-        }
-    };
-    let live = counts.live();
-    if live == 0 {
-        // 没有活就安静收工。这里曾经有一条「覆盖屏障生效，N 个目标保持 pending」的
-        // 播报：屏障是永久态（缺几何的面板不会自己长出几何），于是它每 30 秒复述一次
-        // 同一个事实，把日志刷成噪音。缺陷面板现在由 `record_room_panel_defects` 在
-        // **清单变化时**说一次，而房间目标不再被它冻结。
-        return IdleOutcome::Settled;
-    }
-
-    let task_id = TaskRegistry::new_task_id("room");
-    let project = mgr.db_option.project_name.clone();
-    let detail = serde_json::to_value(counts).unwrap_or_default();
-    registry.insert_running_room_round(&task_id, &project, live as u32, detail);
-    #[cfg(feature = "http_api")]
-    crate::web_service::events::publish(
-        crate::web_service::events::Topic::Tasks,
-        "task_started",
-        Some(task_id.clone()),
-        serde_json::json!({
-            "task_id": task_id,
-            "kind": crate::data_interface::task_registry::TASK_KIND_ROOM_RECALC,
-            "project": project,
-            "total": live,
-        }),
-    );
-    println!(
-        "{}，收一轮房间归属重算（{live} 个目标：{} 块面板 / {} 个构件，另有 {} 条死信；task {task_id}）",
-        if after_batches {
-            "队列已跑空"
-        } else {
-            "距上轮房间已超过保底间隔"
-        },
-        counts.panels,
-        counts.elements,
-        counts.dead_letters
-    );
-
-    crate::fast_model::room_model::reset_room_increment_stats();
-    let room_started = std::time::Instant::now();
-    let (done, failures, mut round_error) =
-        match model_update_pending::drain_rooms(&mgr.db_option).await {
-            Ok(report) => (report.done, report.failures, None),
-            Err(error) => {
-                println!(
-                    "房间归属重算轮级失败（耗时 {}ms，task {task_id}）: {error:#}",
-                    room_started.elapsed().as_millis()
-                );
-                (0, Vec::new(), Some(format!("{error:#}")))
-            }
-        };
-    for _ in 0..done {
-        registry.bump_units_done(&task_id);
-    }
-    let failed = failures.len();
-    println!(
-        "房间归属重算本轮完成 {done}、失败 {failed}（开跑前 {live} 个目标，耗时 {}ms，task {task_id}）",
-        room_started.elapsed().as_millis()
-    );
-
-    // 收尾必须用收敛后的计数覆盖建行时那份 detail。客户端泳道读的是最近一条
-    // room_recalc 的 detail（live = panels + elements），而收敛到 0 的下一空闲轮
-    // 因本函数开头的早退不再建新行——不覆盖的话，房间全部收敛干净的那一刻起，
-    // 泳道永远显示本轮开跑前的待重算数，30 分钟后误报「饥饿」且永不自愈。
-    // 统计失败时保留旧 detail：宁可显示旧数字，也别把分项计数抹成空。
-    //
-    // 这次重新统计顺带回答了「还剩不剩」——分页之后那是调用方要不要立刻再来一轮的
-    // 依据。统计失败归入 Failed：宁可等下一个 `IDLE_WAKE`，也不拿一个不知道的数去空转。
-    let (remaining, dead_letters) = match model_update_pending::count_room_targets().await {
-        Ok(after) => {
-            let remaining = after.live();
-            let dead_letters = after.dead_letters;
-            let mut detail = serde_json::to_value(after).unwrap_or_default();
-            detail["membership_delta"] = serde_json::to_value(
-                crate::fast_model::room_model::room_increment_stats_snapshot(),
-            )
-            .unwrap_or_default();
-            registry.set_detail(&task_id, detail);
-            (Some(remaining), Some(dead_letters))
-        }
-        Err(error) => {
-            let message = format!("收敛后统计房间目标失败: {error:#}");
-            println!("{message}（泳道将沿用开跑前的计数）");
-            round_error = Some(match round_error {
-                Some(previous) => format!("{previous}; {message}"),
-                None => message,
-            });
-            (None, None)
-        }
-    };
-    let room_outcome = if round_error.is_some() || failed > 0 {
-        IdleOutcome::Failed
-    } else if remaining.is_some_and(|count| count > 0) {
-        IdleOutcome::MoreWork
-    } else {
-        IdleOutcome::Settled
-    };
-    let state = if room_outcome == IdleOutcome::Settled {
-        TaskState::Succeeded
-    } else if done > 0 {
-        TaskState::Partial
-    } else {
-        TaskState::Failed
-    };
-    let error_summary = match (round_error.as_deref(), failures.is_empty()) {
-        (None, true) => None,
-        (Some(error), true) => Some(error.to_string()),
-        (None, false) => Some(failures.join("; ")),
-        (Some(error), false) => Some(format!("{error}; {}", failures.join("; "))),
-    };
-    let mut result_json = serde_json::json!({
-        "total": live,
-        "done": done,
-        "remaining": remaining,
-        "dead_letters": dead_letters,
-        "failures": failures,
-        "round_error": round_error,
-    });
-    if let Some(error) = error_summary {
-        // Preserve the pre-existing task-result contract used by older clients;
-        // the structured fields above are the new inspection detail.
-        result_json["error"] = serde_json::json!(error);
-    }
-    registry.finish(&task_id, state, result_json.clone());
-    #[cfg(feature = "http_api")]
-    crate::web_service::events::publish(
-        crate::web_service::events::Topic::Tasks,
-        "task_finished",
-        Some(task_id.clone()),
-        serde_json::json!({ "task_id": task_id, "state": state.as_str(), "result": result_json }),
-    );
-    room_outcome
 }
 
 /// 把领域进度事件接到任务注册表（计数）与 WS 广播（`http_api` 门内）。
@@ -4077,16 +3186,10 @@ fn progress_sink(registry: &'static TaskRegistry, task_id: &str) -> Option<Manua
 
 /// 冻结点重扫候选文件：路径 / 类型不变（F6 已在入队前把关），会话号与大小取现值。
 async fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
-    let recovered = if job.frozen_source_token.is_none() {
-        SideEffectCompensator::recover_collecting_file_round(job.dbnum, job.end_sesno).await?
-    } else {
-        None
-    };
-    let frozen_token = job
-        .frozen_source_token
-        .as_deref()
-        .or_else(|| recovered.as_ref().map(|(_, token)| token.as_str()));
-    let frozen = match frozen_token {
+    // 冻结源只有一个来源——队列行自己带的令牌（`record_frozen_source`）。文件轮次那一行的
+    // 兜底（`recover_collecting_file_round`）随 publish 阶段退了（ADR-072 D4）：没有令牌就按
+    // 当前文件重新冻结。
+    let frozen = match job.frozen_source_token.as_deref() {
         Some(token) => {
             crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(token)
                 .and_then(|source| source.reopen_verified())
@@ -4136,15 +3239,9 @@ async fn schedule_frozen_source_replacement(
     job: &FrozenBatch,
     cause: &anyhow::Error,
 ) -> anyhow::Result<Option<String>> {
-    let old_token = match job.frozen_source_token.clone() {
-        Some(token) => Some(token),
-        None => SideEffectCompensator::recover_collecting_file_round(job.dbnum, job.end_sesno)
-            .await?
-            .map(|(_, token)| token),
-    };
-    let Some(_old_token) = old_token else {
+    if job.frozen_source_token.is_none() {
         return Ok(None);
-    };
+    }
     let replacement = crate::data_interface::frozen_source::FrozenSource::capture(&job.path)
         .map_err(|error| {
             anyhow::anyhow!(
@@ -4162,13 +3259,10 @@ async fn schedule_frozen_source_replacement(
         replacement.db_type()
     );
     let replacement_end = replacement.target_sesno() as i32;
-    SideEffectCompensator::replace_collecting_file_round(
-        job.dbnum,
-        job.end_sesno,
-        &replacement,
-        &format!("{cause:#}"),
-    )
-    .await?;
+    println!(
+        "dbnum={} 旧冻结源不可读（{cause:#}），当前文件已形成新世代 sesno={replacement_end}，改排完整重建",
+        job.dbnum
+    );
 
     let first = if replacement_end == 0 { 0 } else { 1 };
     let (first_pending_sesno_time, file_latest_sesno_time) =
@@ -4244,25 +3338,6 @@ async fn publish_sync(mgr: &Arc<AiosDBManager>, job: &FrozenBatch, _end_sesno: i
 mod tests {
     use super::*;
 
-    fn probe(
-        applied_sesno: i32,
-        blockers: &[&str],
-        abandoned: usize,
-    ) -> model_watermark::ModelWatermarkProbe {
-        model_watermark::ModelWatermarkProbe {
-            blockers: blockers.iter().map(|root| (*root).to_owned()).collect(),
-            abandoned,
-            settled_floor: Some(applied_sesno),
-            applied_sesno,
-            recorded: applied_sesno,
-            has_roots: true,
-            has_attributes: true,
-            has_model_projection: true,
-            completed_sesno: Some(applied_sesno),
-            completion_present: true,
-        }
-    }
-
     /// 完成屏障批次侧：三件事同时成立才算这一轮跑完了。任何一件不成立都不发布——
     /// 这正是 F-C 的起点，不是缺陷。
     #[test]
@@ -4312,46 +3387,6 @@ mod tests {
             ),
             "一根失败单元就把这一轮留在 collecting"
         );
-    }
-
-    /// 完成屏障 durable 侧（审核 F-C）：同一道屏障换成库里的凭据再判一次。
-    ///
-    /// 「一根失败 → 轮次 collecting → 重试成功 → 可以发布」这条链的转折点就在这里：
-    /// 失败时探针里有拦路根，重试成功后拦路清零、判据转 `Ready`，空闲轮据此补发布。
-    /// 已放弃的根（`http_422` / 死信）不放行——那是 ISSUE-029，硬发布等于拿残缺几何
-    /// 换掉上一份好的。
-    #[test]
-    fn the_durable_barrier_reopens_a_round_once_retries_settle_every_root() {
-        assert_eq!(
-            file_round_readiness(&probe(41, &[], 0), 42),
-            FileRoundReadiness::DataBehind {
-                applied: 41,
-                frozen: 42
-            }
-        );
-        let chasing = file_round_readiness(&probe(42, &["24384_3"], 0), 42);
-        assert_eq!(
-            chasing,
-            FileRoundReadiness::RootsChasing {
-                count: 1,
-                sample: vec!["24384_3".to_owned()]
-            }
-        );
-        assert!(
-            chasing
-                .describe()
-                .expect("卡住必须给得出理由")
-                .contains("24384_3"),
-            "/health 要点得出是哪一根在卡"
-        );
-        assert_eq!(
-            file_round_readiness(&probe(42, &[], 2), 42),
-            FileRoundReadiness::RootsAbandoned { count: 2 }
-        );
-        // 重试把最后一根救回来的那一刻。
-        let settled = file_round_readiness(&probe(42, &[], 0), 42);
-        assert_eq!(settled, FileRoundReadiness::Ready);
-        assert_eq!(settled.describe(), None, "已就绪没有阻塞理由");
     }
 
     #[test]
@@ -4501,8 +3536,10 @@ mod tests {
         );
     }
 
+    /// 出队前没有「提交后空间收敛」那道门了（ADR-072 D4）：空间树在 `persist_roots_batched`
+    /// 落完那一刻就地收敛，库里没有 pending 的空间意图行可等——门回来一个即红。
     #[test]
-    fn spatial_reconcile_is_the_gate_before_every_dequeue() {
+    fn dequeue_has_no_pending_spatial_gate() {
         let source = include_str!("batch_worker.rs");
         let body = source
             .split_once("pub async fn drain_queue_until_empty(")
@@ -4511,20 +3548,15 @@ mod tests {
             .split_once("/// [`run_one_batch`]")
             .expect("queue drain must end before the isolation wrapper")
             .0;
-        let reconcile = body
-            .find("reconcile_spatial_pending(mgr)")
-            .expect("spatial reconcile gate");
-        let dequeue = body.find("next_dispatch(registry").expect("dispatch call");
-        assert!(
-            reconcile < dequeue,
-            "spatial convergence must precede dequeue"
-        );
-        // 并发派发（ADR-011 2026-08-09 修订）的两道硬约束也钉在这里：
-        // 派发门与数据提交临界段共锁；独占判定必须传给调度器而不是派发后再补救。
-        assert!(
-            body.contains("DATA_COMMIT_SERIAL.lock().await"),
-            "派发门的空间收敛必须持数据提交串行锁: {body}"
-        );
+        for needle in [
+            "reconcile_spatial_pending",
+            "SideEffectCompensator",
+            "has_pending_spatial_work",
+        ] {
+            assert!(!body.contains(needle), "出队门不得再等空间意图行 `{needle}`: {body}");
+        }
+        assert!(body.contains("next_dispatch(registry"), "dispatch call");
+        // 并发派发（ADR-011 2026-08-09 修订）：独占判定必须传给调度器而不是派发后再补救。
         assert!(
             body.contains("batch_needs_exclusive_lane(&batch.db_type, batch.start_sesno)"),
             "独占车道判定必须在出队时生效: {body}"
@@ -4566,12 +3598,14 @@ mod tests {
         );
         assert!(!execute.contains("job.epoch_id > 0"));
         // 直写路径上 `applied` 就是尾事务已提交（ADR-056 N1/N2）：让位那一行如实报
-        // 「水位已推进」，且不得再提暂存时代的「写回」——那会让人去等一个不存在的阶段。
+        // 「水位已推进」；模型计划不再落库（ADR-072 D5），所以也不许再说「durable 落定」
+        // 或暂存时代的「写回」——那会让人去等一个不存在的阶段。
         assert!(
             execute.contains("水位已推进；model_incremental=false")
-                && execute.contains("模型计划已随提交事务 durable 落定")
+                && execute.contains("本窗模型工作不执行")
+                && !execute.contains("durable 落定")
                 && !execute.contains("写回成功后推进"),
-            "让位行必须按直写路径如实宣告水位与 durable 模型计划: {execute}"
+            "让位行必须按直写路径如实宣告水位与模型工作的去向: {execute}"
         );
 
         let idle = source
@@ -4581,23 +3615,29 @@ mod tests {
             .split_once("/// 一个空闲轮消化完这一页之后的处置")
             .expect("idle round boundary")
             .0;
-        let gate = idle
-            .find(
-                "crate::options::model_incremental() && initialization.model_generation_allowed()",
-            )
-            .expect("空闲模型门");
-        let drain = idle
-            .find("drain_data_phases_disposition(mgr)")
-            .expect("模型积压消费");
-        assert!(gate < drain, "模型阶段门必须早于 durable 模型消费: {idle}");
+        assert!(
+            idle.contains(
+                "crate::options::model_incremental() && initialization.model_generation_allowed()"
+            ),
+            "空闲模型门"
+        );
+        // 第二条异步账退了（ADR-072 D5）：空闲轮没有模型积压可消化。
+        for needle in [
+            "drain_data_phases_disposition",
+            "has_pending_data_work",
+            "model_pending_status",
+            "republish_settled_file_rounds",
+        ] {
+            assert!(!idle.contains(needle), "空闲轮不得再消化 pending 积压 `{needle}`: {idle}");
+        }
         assert!(
             idle.contains("let model_became_ready = crate::options::model_incremental()"),
             "模型关闭时不得把下游房间门标为 ready"
         );
     }
 
-    /// 房间阶段开关门住空闲房间轮（ADR-056 P1 之后批次路径不再有写回后的精确房间
-    /// 消费；P2-7 若把 `drain_rooms_scoped` 接回受影响根之后，这里要再加回那一半）。
+    /// 房间阶段开关门住空闲轮的房间那一段——它只剩启动补缺（`recover_missing_room_watermarks`）；
+    /// 逐目标的房间重算行与「收一轮房间归属重算」随第二条异步账退了（ADR-072 D5）。
     #[test]
     fn room_stage_gate_covers_the_idle_consumer() {
         let source = include_str!("batch_worker.rs");
@@ -4605,20 +3645,19 @@ mod tests {
             .split_once("async fn room_round(")
             .expect("idle room round")
             .1
-            .split_once("async fn settle_room_round(")
+            .split_once("/// 把领域进度事件接到任务注册表")
             .expect("idle room round boundary")
             .0;
         let idle_gate = idle
             .find("if !crate::options::room_incremental()")
             .expect("空闲房间轮必须检查房间阶段开关");
-        let idle_count = idle
-            .find("count_room_targets()")
-            .expect("空闲房间轮目标统计");
-        let idle_drain = idle.find("drain_rooms").expect("空闲房间轮消费");
-        assert!(
-            idle_gate < idle_count && idle_gate < idle_drain,
-            "房间阶段门必须早于目标统计和消费: {idle}"
-        );
+        let repair = idle
+            .find("recover_missing_room_watermarks(mgr)")
+            .expect("启动补房间段");
+        assert!(idle_gate < repair, "房间阶段门必须早于启动补缺: {idle}");
+        for needle in ["count_room_targets", "drain_rooms", "has_pending_spatial_work"] {
+            assert!(!idle.contains(needle), "房间轮不得再消化 pending 行 `{needle}`: {idle}");
+        }
     }
 
     /// ADR-072 D1 的开工写点：标记必须落在第一笔写库**之前**，而且落之前先把上一次崩溃
@@ -4799,7 +3838,7 @@ mod tests {
     /// 同右端连败计数、达上限 park、右端前进 / 显式清零即复活。
     #[test]
     fn the_batch_failure_ledger_parks_at_the_cap_and_revives_on_new_sessions() {
-        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+        let cap = MAX_ATTEMPTS;
         let mut ledger = BatchFailureLedger::default();
 
         for attempt in 1..=cap {
@@ -4840,73 +3879,33 @@ mod tests {
         assert!(ledger.parked_streak(7997, 1035).is_none());
     }
 
-    /// D1 数据侧半边：连败触顶才落 `window_block` 终态，未触顶不落。
+    /// D1 数据侧半边：连败触顶才把「停跑自动重试」喊出来，未触顶只记账。
     ///
-    /// 只在触顶落是有意的——一次失败可能是瞬态的，落了终态就要有人来解；
-    /// 同右端连撞 `MAX_ATTEMPTS` 次才叫确定性。这条钉的是那个条件本身：
-    /// 挪进 else 臂或提到 `if` 之外，都会让终态变成「失败一次就阻断」。
+    /// 只在触顶喊是有意的——一次失败可能是瞬态的；同右端连撞 `MAX_ATTEMPTS` 次才叫确定性。
+    /// 持久的 `window_block` 行随 `staging/attempts.rs` 退了（ADR-072 D5），跨重启的那一份
+    /// 是 `logs/batch-failures-*.jsonl`——它带着这里返回的连败次数，不再另写库。
     #[test]
-    fn only_a_capped_out_data_failure_records_the_window_block() {
+    fn only_a_capped_out_data_failure_announces_the_park() {
         let source = include_str!("batch_worker.rs");
         let body = source
             .split_once("async fn note_batch_failure(")
             .expect("note_batch_failure")
             .1
-            .split_once("\nasync fn record_data_window_block(")
+            .split_once("\nstruct WorkerLiveGuard;")
             .expect("note_batch_failure boundary")
             .0;
         let (capped, below_cap) = body.split_once("    } else {").expect("触顶与未触顶两臂");
         assert!(
-            capped.contains("record_data_window_block(dbnum, end_sesno, reason).await"),
-            "触顶臂必须落一条带原始错误的 window_block 终态（spec 035 D1）: {capped}"
+            capped.contains("重扫不再自动重跑该库"),
+            "触顶臂必须把停跑喊到控制台: {capped}"
         );
         assert!(
-            !below_cap.contains("record_data_window_block"),
-            "未触顶不得落终态——瞬态失败靠对账重扫自动重试: {below_cap}"
+            !below_cap.contains("不再自动重跑"),
+            "未触顶不得宣告停跑——瞬态失败靠对账重扫自动重试: {below_cap}"
         );
-    }
-
-    /// 终态的解除只走既有的两条出路，别再长第三条。
-    ///
-    /// 落终态容易，解除才是会悄悄坏掉的那一半：`window_block` 在持久层，没人清
-    /// 就是这个库永远显示阻断。这里钉住「窗口成功提交 ⇒ 尾事务清掉」这条主出路
-    /// ——尾事务的清除语句由 `finalize_attempt` 拼进去，改了那边这条会红。
-    #[tokio::test(flavor = "multi_thread")]
-    async fn a_committed_window_clears_the_data_side_block() {
-        use crate::data_interface::staging::attempts::{
-            load_window_block_on, record_window_block_at_on, render_clear_window_attempts,
-        };
-
-        let db = surrealdb::engine::any::connect("mem://")
-            .await
-            .expect("mem");
-        db.use_ns("main").use_db("main").await.expect("use db");
-
-        record_window_block_at_on(&db, 7995, Some(1034), "冻结批次重扫失败: boom", &[])
-            .await
-            .expect("block");
-        let block = load_window_block_on(&db, 7995)
-            .await
-            .expect("load")
-            .expect("已阻断");
-        assert_eq!(
-            block.reason, "冻结批次重扫失败: boom",
-            "终态必须带原始错误，不能只留一句「批次失败」"
-        );
-        assert_eq!(block.end_sesno, Some(1034));
-        assert!(block.bad_roots.is_empty(), "整窗数据侧失败不归咎某个生成根");
-
-        db.query(render_clear_window_attempts(7995))
-            .await
-            .expect("clear")
-            .check()
-            .expect("cleared");
         assert!(
-            load_window_block_on(&db, 7995)
-                .await
-                .expect("load")
-                .is_none(),
-            "窗口成功提交的尾事务必须解除数据侧阻断"
+            !body.contains("record_window_block_at") && !body.contains("staging::attempts"),
+            "window_block 终态行已随 attempts.rs 退役，不得回来: {body}"
         );
     }
 
@@ -4918,7 +3917,7 @@ mod tests {
     /// 沿用旧标记就会让第二次 park 悄无声息。
     #[test]
     fn a_park_announces_itself_once_per_episode() {
-        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+        let cap = MAX_ATTEMPTS;
         let mut ledger = BatchFailureLedger::default();
         for _ in 0..cap {
             ledger.record(7997, 1034, "injected failure", "t");
@@ -4949,7 +3948,7 @@ mod tests {
     /// 不能把新窗口的第一次失败接在旧窗口的连败后面直接 park。
     #[test]
     fn a_failure_on_a_newer_end_restarts_the_streak() {
-        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+        let cap = MAX_ATTEMPTS;
         let mut ledger = BatchFailureLedger::default();
         for _ in 0..cap - 1 {
             ledger.record(7997, 1034, "old window", "t");
@@ -5077,12 +4076,20 @@ mod tests {
                 "执行体不得再有 `{forbidden}`（ADR-056 P1）: {body}"
             );
         }
-        // 直写路径的模型前置与补刷都经 durable pending 消费，且按本库 dbnum 判阻断。
+        // 直写路径的模型前置与补刷就地执行（ADR-072 D5）：计划随 `execute_one_dbnum` 交回，
+        // 不再写 pending 行再由本任务领回来。
         assert!(
-            body.contains("drain_non_regen_report(mgr)")
-                && body.contains("drain_post_regen_aabb_report(mgr, job.dbnum)"),
-            "模型前置 / 补刷必须经 durable pending 消费: {body}"
+            body.contains("run_model_side_actions(mgr, &side_actions)")
+                && body.contains("refresh_post_regen_aabbs_for(&side_actions)"),
+            "模型前置 / 补刷必须就地执行任务手里的计划: {body}"
         );
+        for retired in [
+            "drain_non_regen_report",
+            "drain_post_regen_aabb_report",
+            "load_pending_model_units_for_retry",
+        ] {
+            assert!(!body.contains(retired), "pending 消费不得回来 `{retired}`: {body}");
+        }
 
         let units = production
             .split_once("\nfn unit_joins_regen_batch(")
@@ -5112,12 +4119,12 @@ mod tests {
         assert!(
             units.contains("crate::options::model_regen_execution_group().max(1)")
                 && units.contains("batchable.by_ref().take(group_size)"),
-            "初始化工作单也必须按 durable drain 的有界 execution group 生成: {units}"
+            "初始化工作单也必须按有界 execution group 生成: {units}"
         );
-        assert!(
-            units.contains("clear_regen_work_batch(&settlements).await"),
-            "每个有界生成组必须随即批量收口，不能把数万条逐根事务压给 SurrealDB: {units}"
-        );
+        // 没有 pending 行要收口了（ADR-072 D5）：成败直接进本任务的单元清单。
+        for retired in ["clear_regen_work_batch", "settle_regen_work", "task.revision"] {
+            assert!(!units.contains(retired), "pending 收口不得回来 `{retired}`: {units}");
+        }
         assert!(!units.contains("回退逐根重试以定位问题根"));
 
         for gone in [
@@ -5134,125 +4141,52 @@ mod tests {
         }
     }
 
-    /// 空间收敛没做完时，空闲轮不得收房间。
-    ///
-    /// `drain_queue_until_empty` 的收敛门只挡住了新批次出队；主循环紧接着照跑空闲轮，
-    /// 而整间分支的成员候选正取自那棵已知陈旧的树，待摘的删除也还压在意图里。
-    #[test]
-    fn a_stale_spatial_tree_also_holds_back_the_room_round() {
-        let source = include_str!("batch_worker.rs");
-        let body = source
-            .split_once("async fn room_round(")
-            .expect("room_round 必须存在")
-            .1
-            .split_once("\nasync fn ")
-            .expect("room_round 之后还有别的函数")
-            .0;
-
-        let spatial_at = body
-            .find("has_pending_spatial_work()")
-            .expect("房间轮必须先问空间收敛做完没有");
-        let count_at = body
-            .find("count_room_targets()")
-            .expect("房间轮必须统计目标");
-        let drain_at = body.find("drain_rooms").expect("房间轮必须消化房间任务");
-        assert!(spatial_at < count_at && spatial_at < drain_at, "{body}");
-
-        // 状态机门（一致性闭环方案 §6）在 pending 检查之前：它多挡住「pending
-        // 为零但树不可信」的情形（DegradedBlocked / DegradedReuse / 重放重建中）。
-        let gate_at = body.find(".is_ready()").expect("房间轮必须先问空间状态机");
-        assert!(
-            gate_at < spatial_at,
-            "状态门必须在 pending 检查之前: {body}"
-        );
-    }
-
-    /// 文件轮次完成后才允许空间发布和定向房间消费。
-    ///
-    #[test]
-    fn completed_file_round_publishes_spatial_before_rooms() {
-        let source = include_str!("batch_worker.rs");
-        let executor = source
-            .split_once("async fn execute_frozen_batch(")
-            .expect("batch executor")
-            .1
-            .split_once("\nfn window_remainder_batch(")
-            .expect("executor boundary")
-            .0;
-        let completion = executor.find("let round_complete").expect("完成屏障");
-        let publish = executor
-            .find("publish_model_file_round(")
-            .expect("文件完成后发布");
-        assert!(completion < publish, "发布必须受完成屏障保护: {executor}");
-
-        let helper = executor
-            .split_once("async fn publish_model_file_round(")
-            .expect("发布帮助函数")
-            .1;
-        // 空间发布现在是任务直发（集合来自 `task_effects` 那本内存账，ADR-071 D1），
-        // 不再绕账本一圈；顺序纪律不变。
-        let spatial = helper
-            .find("publish_task_spatial_effects(")
-            .expect("空间发布");
-        assert!(!helper.contains("stage_published_room_input"), "publication must not copy room geometry");
-        let room_topology = helper
-            .find("stage_candidate_room_topology")
-            .expect("房间候选拓扑");
-        let promote = helper.find("promote_file_round").expect("发布意图提升");
-        assert!(
-            room_topology < promote && promote < spatial,
-            "房间候选必须完整落库后才能切换文件发布清单: {helper}"
-        );
-        // 空间发布先于房间收尾：房间收尾（清边 → 定向消费 → 开关早退）已随 T4.1 原样搬进
-        // `fast_model::room_task`。两阶段的先后由 `execute_frozen_batch` 的调用序钉住
-        // （publish < rooms，见 `an_initialization_publish_run_is_closed_by_the_owning_task`）；
-        // 收尾内部的清边/消费/开关次序由 `room_task::room_finalization_clears_before_draining` 钉。
-    }
-
-    #[test]
-    fn completion_coverage_uses_the_exclusive_left_boundary() {
-        use crate::data_interface::batch_queue::BatchIntent;
-        assert_eq!(completion_coverage_start(BatchIntent::ApplyWindow, 166, None), 165);
-        assert_eq!(completion_coverage_start(BatchIntent::ApplyWindow, 1, None), 0);
-        assert_eq!(completion_coverage_start(BatchIntent::ModelOnly, 166, Some(160)), 160);
-        assert_eq!(completion_coverage_start(BatchIntent::ModelOnly, 166, None), 165);
-    }
-
-    fn unit_task(
-        attempts: u32,
-        revision: Option<u64>,
-        root_refno: &str,
-    ) -> crate::data_interface::manual_update::UnitTask {
-        crate::data_interface::manual_update::UnitTask {
+    fn unit_task(attempts: u32, root_refno: &str) -> UnitTask {
+        UnitTask {
             dbnum: 8191,
             root_refno: root_refno.into(),
             noun: "BRAN".into(),
             source_end_sesno: 42,
             attempts,
-            revision,
             old_owner: None,
             new_owner: None,
             transform: None,
         }
     }
 
-    /// 并进批量重生成的只有「首次尝试 + 带 durable revision + 可解析 refno」的单元；
-    /// 暂存时代「窗口内新根不需要 revision 也并批」那一臂随 ADR-056 P1 退役，
-    /// 没有 revision 的单元一律走逐根路径并被记成失败说出口。
+    /// 并进批量重生成的只有「首次尝试 + 可解析 refno」的单元；失败过的走逐根路径，
+    /// 让它的错误自己说出口。「带 durable revision」那一格随 pending 表退了（ADR-072 D5）。
     #[test]
-    fn only_fresh_parseable_revisioned_units_join_the_batch() {
-        assert!(unit_joins_regen_batch(&unit_task(0, Some(7), "16777216/5")));
-        assert!(!unit_joins_regen_batch(&unit_task(
-            1,
-            Some(7),
-            "16777216/5"
-        )));
-        assert!(!unit_joins_regen_batch(&unit_task(0, None, "16777216/5")));
-        assert!(!unit_joins_regen_batch(&unit_task(
-            0,
-            Some(7),
-            "not-a-refno"
-        )));
+    fn only_fresh_parseable_units_join_the_batch() {
+        assert!(unit_joins_regen_batch(&unit_task(0, "16777216/5")));
+        assert!(!unit_joins_regen_batch(&unit_task(1, "16777216/5")));
+        assert!(!unit_joins_regen_batch(&unit_task(0, "not-a-refno")));
+    }
+
+    /// 几路来的交付单元并成一张工作单：同根只留一条、`source_end_sesno` 取最新、属主与
+    /// 刚体前移提示由带着它们的那一条补上；输出按 `(dbnum, root)` 升序。
+    #[test]
+    fn the_worklist_merges_units_by_root_and_keeps_the_richest_state() {
+        let planner = UnitTask {
+            source_end_sesno: 40,
+            ..unit_task(0, "16777216/5")
+        };
+        let fresh = UnitTask {
+            old_owner: Some("16777216/1".into()),
+            new_owner: Some("16777216/2".into()),
+            ..unit_task(0, "16777216/5")
+        };
+        let other = unit_task(0, "16777216/3");
+        let merged = merge_unit_worklist(vec![planner, other, fresh]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].root_refno, "16777216/3");
+        assert_eq!(merged[1].root_refno, "16777216/5");
+        assert_eq!(merged[1].source_end_sesno, 42, "同根取最新的目标会话");
+        assert_eq!(
+            merged[1].new_owner.as_deref(),
+            Some("16777216/2"),
+            "本窗解出来的属主补进规划器那条空白"
+        );
     }
 
     /// 稳态与基线批次走同一条执行路径（ADR-056 P1；翻自
@@ -5456,40 +4390,6 @@ mod tests {
         assert!(!panic_message(&42u8).is_empty());
     }
 
-    /// 房间轮收尾必须用收敛后的计数覆盖 detail（2026-07-30 审计 B2）。
-    ///
-    /// 泳道读的是最近一条 `room_recalc` 的 `detail`，而收敛到 0 的下一空闲轮因
-    /// `live == 0` 早退不再建新行：drain 之后不重新统计并 `set_detail`，
-    /// 「已全部收敛」这个事实就没有任何出口，界面永远显示开跑前的待重算数。
-    #[test]
-    fn the_room_round_overwrites_its_detail_after_draining() {
-        let source = include_str!("batch_worker.rs");
-        let body = source
-            .split_once("async fn room_round(")
-            .expect("room_round 必须存在")
-            .1
-            .split_once("\nasync fn ")
-            .expect("room_round 之后还有别的函数")
-            .0;
-        let drain_at = body
-            .find("drain_rooms")
-            .expect("room_round 必须消化房间任务");
-        let recount_at = body
-            .rfind("count_room_targets")
-            .expect("room_round 必须在收尾时重新统计");
-        assert!(
-            recount_at > drain_at,
-            "收敛后的重新统计必须发生在 drain 之后，否则写回的还是旧计数"
-        );
-        let set_detail_at = body
-            .find("set_detail")
-            .expect("重新统计的结果必须经 set_detail 写回任务行");
-        assert!(
-            set_detail_at > recount_at,
-            "set_detail 写回的必须是收敛后那份计数"
-        );
-    }
-
     /// 无 live 目标的早退分支必须保持安静，也不得在这里跑探针。
     ///
     /// 它每 `IDLE_WAKE`（30 秒）被碰一次，所以任何无条件 `println!` 都会把一个静态
@@ -5514,32 +4414,6 @@ mod tests {
             !early_exit.contains("drain_rooms"),
             "早退分支不得循环执行覆盖探针: {early_exit}"
         );
-    }
-
-    #[test]
-    fn pending_data_pages_yield_to_new_batches_before_room_recalc() {
-        let source = include_str!("batch_worker.rs");
-        let body = source
-            .split_once("async fn idle_round(")
-            .expect("idle_round 必须存在")
-            .1
-            .split_once("async fn room_round(")
-            .expect("idle_round 必须在 room_round 之前结束")
-            .0;
-
-        let backlog_at = body
-            .find("has_pending_data_work")
-            .expect("有界页之后必须检查数据积压");
-        let claim_at = body
-            .find("drain_queue_until_empty")
-            .expect("房间轮前必须认领执行期间新到的批次");
-        let room_at = body.find("room_round(").expect("数据清空后必须保留房间轮");
-        assert!(backlog_at < claim_at && claim_at < room_at, "{body}");
-        assert_eq!(idle_outcome(false, false, false, 0), IdleOutcome::Settled);
-        assert_eq!(idle_outcome(true, false, false, 0), IdleOutcome::Failed);
-        assert_eq!(idle_outcome(false, true, true, 0), IdleOutcome::Backoff);
-        assert_eq!(idle_outcome(false, false, true, 0), IdleOutcome::MoreWork);
-        assert_eq!(idle_outcome(false, false, false, 1), IdleOutcome::MoreWork);
     }
 
     /// ADR-011 §8 把房间放在数据队列与积压全部跑空之后；持续保存导致的饥饿是
@@ -5579,79 +4453,6 @@ mod tests {
                 && !room_body.contains("startup_rooms_pending"),
             "per-dbnum room recovery must start as soon as its model input is ready: {room_body}"
         );
-    }
-
-    fn dead_letter_status(target: &str, error: &str) -> model_update_pending::ModelPendingStatus {
-        model_update_pending::ModelPendingStatus {
-            retryable: 4,
-            dead_letters: 1,
-            data_phase: model_update_pending::ModelPendingPhaseStatus {
-                retryable: 4,
-                dead_letters: 1,
-            },
-            blocking_samples: vec![model_update_pending::ModelPendingBlockingSample {
-                action: "regen_root".into(),
-                target_refno: target.into(),
-                noun: "FRMW".into(),
-                attempts: model_update_pending::MAX_ATTEMPTS,
-                last_error: Some(error.into()),
-                revision: 2,
-                ..Default::default()
-            }],
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn model_dead_letter_notice_reports_changes_repeats_slowly_and_recovers_once() {
-        let mut announcement = ModelDeadLetterAnnouncement::default();
-        let first = dead_letter_status("24381/38436", "DIAM=0, HEIG=0");
-        let changed = dead_letter_status("24381/38436", "DIAM=0, HEIG=1");
-
-        assert!(matches!(
-            announcement.observe(&first, 1_000),
-            ModelDeadLetterNotice::Active(message)
-                if message.contains("24381/38436") && message.contains("DIAM=0")
-        ));
-        assert_eq!(
-            announcement.observe(&first, 1_299),
-            ModelDeadLetterNotice::Quiet
-        );
-        assert!(matches!(
-            announcement.observe(&first, 1_300),
-            ModelDeadLetterNotice::Active(_)
-        ));
-        assert!(matches!(
-            announcement.observe(&changed, 1_301),
-            ModelDeadLetterNotice::Active(_)
-        ));
-
-        let clear = model_update_pending::ModelPendingStatus::default();
-        assert_eq!(
-            announcement.observe(&clear, 1_302),
-            ModelDeadLetterNotice::Recovered
-        );
-        assert_eq!(
-            announcement.observe(&clear, 1_303),
-            ModelDeadLetterNotice::Quiet
-        );
-    }
-
-    #[test]
-    fn dead_letter_reporting_does_not_relax_model_before_room_ordering() {
-        let source = include_str!("batch_worker.rs");
-        let body = source
-            .split_once("async fn idle_round(")
-            .expect("idle_round exists")
-            .1
-            .split_once("/// 一个空闲轮消化完这一页之后的处置")
-            .expect("idle_round end")
-            .0;
-        let status_at = body.find("model_pending_status()").expect("status read");
-        let failed_at = body.find("let failed =").expect("failed gate");
-        let room_at = body.find("room_round_is_due").expect("room gate");
-        assert!(status_at < failed_at && failed_at < room_at, "{body}");
-        assert!(body.contains("status.has_data_dead_letters()"), "{body}");
     }
 
     /// 空闲轮必须同时受暂停与上弦两道门管。
@@ -5763,11 +4564,13 @@ mod tests {
         assert!(!production.contains("initialization_defers_model_phase"));
     }
 
-    /// 任务收尾的阶段顺序：文件轮次发布 → 完成收据 → 房间 → 一笔收尾盖三水位（ADR-065 G2 (i)，
-    /// 修 d-73 的顺序）。初始化发布 run 已退役（ADR-071 S5，d-300）：Task 不再等 ACK、不再
-    /// 「收口 run」、也不再问某库是否被发布队列接管。
+    /// 任务收尾的阶段顺序：房间 → 一笔收尾盖三水位（ADR-065 G2 (i)，修 d-73 的顺序）。
+    /// publish 阶段与 `model_complete` 那道整库证据闸随 ADR-072 D4 退了，初始化发布 run 随
+    /// ADR-071 S5 退了：Task 不再发布文件轮次、不再回问库开完成收据、不再等 ACK。
+    /// 计划 §6-4 源码钉：`execute_frozen_batch` 一线不含 `publish` / `file_round` /
+    /// `model_update_pending` / `side_effect_pending` / `SideEffectCompensator`。
     #[test]
-    fn the_task_tail_runs_publish_receipt_rooms_then_stamp_without_a_publish_run() {
+    fn the_task_tail_runs_rooms_then_stamp_without_a_publish_stage() {
         let source = include_str!("batch_worker.rs");
         let body = source
             .split_once("async fn execute_frozen_batch(")
@@ -5781,25 +4584,29 @@ mod tests {
             "finish_ready_initializations(",
             "wait_for_task_root_acks(",
             "initialization_source(",
+            "publish_model_file_round(",
+            "publish_completed_file_round(",
+            "complete_model_task_on(",
+            "CompletionReceipt",
+            "finish_file_room_round(",
+            "verdict_for(",
+            "file_round",
+            "model_update_pending",
+            "side_effect_pending",
+            "SideEffectCompensator",
         ] {
             assert!(
                 !body.contains(retired),
-                "初始化发布 run 已退役，Task 不得再调 {retired}"
+                "publish 阶段与第二条异步账已退役，Task 不得再有 {retired}: {body}"
             );
         }
         // rustfmt 会把长调用折行，去掉全部空白后再定位，钉的是「调用存在 + 阶段顺序」。
         let body: String = body.split_whitespace().collect();
-        let publish = body
-            .find("publish_model_file_round(")
-            .expect("Task publish");
-        let receipt = body
-            .find("complete_model_task_on(")
-            .expect("Task completion receipt");
         let rooms = body
-            .find("finish_file_room_round(")
+            .find("room_task::finish_task_rooms(")
             .expect("Task room stage");
         // 收尾那一笔有两处：数据批次应用之后的 Ref0 统计快照（`ref0_snapshot::snapshot_at` 之后、
-        // 与模型无关、排在发布之前），与模型 / 房间之后盖水位的那一笔。钉的是后者。
+        // 与模型无关、排在房间之前），与房间之后盖水位的那一笔。钉的是后者。
         let snapshot = body
             .find("ref0_snapshot::snapshot_at(")
             .expect("Ref0 snapshot after the data batch");
@@ -5810,50 +4617,12 @@ mod tests {
             .rfind("task_end::commit_task_end_on(")
             .expect("Task end watermark");
         assert!(
-            snapshot < stats_tail && stats_tail < publish,
-            "统计快照排在数据批次之后、模型发布之前，不等模型"
+            snapshot < stats_tail && stats_tail < rooms,
+            "统计快照排在数据批次之后、房间之前，不等模型"
         );
-        assert!(publish < receipt && receipt < rooms && rooms < stamp);
-    }
-
-    /// 前置阻断只认**本批这个库**的失败。
-    ///
-    /// 批次执行前那次 `drain_non_regen` 扫的是全局积压（非 regen 工作不分库）。
-    /// 按「这一轮有没有失败」来阻断的话，任意一个库里一条坏 transform 就会让
-    /// 每个库的每一批都跳过整张单元工作单——所有交付单元停摆，直到那条行涨到
-    /// `MAX_ATTEMPTS` 进死信才自动解封。
-    #[test]
-    fn another_databases_failure_does_not_block_this_batch() {
-        use crate::data_interface::model_update_pending::DrainReport;
-
-        let mut report = DrainReport::default();
-        report.failed_dbnums.insert(7997);
-
-        assert!(report.blocks(7997), "本库的前置失败必须拦下本批");
-        assert!(!report.blocks(8000), "隔壁库的失败不该牵连本批");
-        assert!(batch_regen_is_allowed(report.blocks(8000)));
-
-        // 来源库未知（dbnum = 0）的入队牵连范围判断不了，只能按阻断处理。
-        let mut unknown = DrainReport::default();
-        unknown.failed_dbnums.insert(0);
-        assert!(unknown.blocks(8000));
-
-        // 一条都没失败时谁也不拦。
-        assert!(!DrainReport::default().blocks(8000));
-
-        // 调用点也得守住：判据必须带上本批的 dbnum，不能退回「这一轮有没有失败」。
-        let source = include_str!("batch_worker.rs");
-        let body = source
-            .split_once("async fn execute_frozen_batch(")
-            .expect("execute_frozen_batch 必须存在")
-            .1
-            .split_once("fn batch_regen_is_allowed(")
-            .expect("execute_frozen_batch 在 batch_regen_is_allowed 之前结束")
-            .0;
-        assert!(
-            body.contains("report.blocks(job.dbnum)"),
-            "前置阻断必须按本批 dbnum 判定: {body}"
-        );
+        assert!(rooms < stamp, "房间排在盖章之前（d-73）");
+        // 回执的双水位判决读镜像 + 本任务单元清单，不再整表普查。
+        assert!(body.contains("dbnum_consistency::task_verdict("));
     }
 
     /// issue #16 的护栏钉在源码结构上：DESI 收口预检必须挡在一切执行工作之前——
@@ -5909,7 +4678,7 @@ mod tests {
     /// `MAX_ATTEMPTS` → 死信管不到被 `isolate_panic` 接住的 panic。
     #[test]
     fn the_same_idle_panic_parks_the_round_at_the_cap() {
-        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
+        let cap = MAX_ATTEMPTS;
         let mut ledger = IdlePanicLedger::new();
 
         for round in 1..cap {
@@ -5925,7 +4694,7 @@ mod tests {
     #[test]
     fn a_different_idle_panic_restarts_the_streak() {
         let mut ledger = IdlePanicLedger::new();
-        for _ in 0..crate::data_interface::model_update_pending::MAX_ATTEMPTS {
+        for _ in 0..MAX_ATTEMPTS {
             ledger.record("index 172 out of range", "t1");
         }
         assert!(ledger.parked());
@@ -5947,7 +4716,7 @@ mod tests {
     #[test]
     fn real_work_revives_a_parked_idle_round() {
         let mut ledger = IdlePanicLedger::new();
-        for _ in 0..crate::data_interface::model_update_pending::MAX_ATTEMPTS {
+        for _ in 0..MAX_ATTEMPTS {
             ledger.record("index 172 out of range", "t");
         }
         assert!(ledger.parked());
@@ -5958,7 +4727,7 @@ mod tests {
         assert_eq!(ledger.streak, 0);
         assert_eq!(
             ledger.total,
-            u64::from(crate::data_interface::model_update_pending::MAX_ATTEMPTS),
+            u64::from(MAX_ATTEMPTS),
             "累计数是给人看的账，不能被复活抹掉"
         );
         assert_eq!(ledger.last_at.as_deref(), Some("t"));

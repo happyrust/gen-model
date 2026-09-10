@@ -16,7 +16,6 @@ use crate::data_interface::dbnum_state::{DbnumState, RoomInputVersion};
 use crate::data_interface::frozen_source::FrozenSource;
 use crate::data_interface::manual_update::{ManualUpdateStatus, UnitGenStatus};
 use crate::data_interface::room_completion::PreparedRoomResult;
-use crate::data_interface::side_effect_pending::SideEffectCompensator;
 use crate::data_interface::task_end::TaskModelOutcome;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::fast_model::model_memory_store::ModelMemoryStore;
@@ -302,34 +301,6 @@ pub(crate) async fn finish_task_rooms(
             Ok(false)
         }
     }
-}
-
-/// 旧名转发壳——**过渡件**，随 `batch_worker::publish_completed_file_round` 一起删。
-///
-/// 还没迁到 [`finish_task_rooms`] 的调用点（任务执行体与那条 legacy/resume 发布路）
-/// 原样走这里：本壳按与任务收尾**同一条口径**从单元清单折出 [`TaskModelOutcome`]、
-/// 从文件冻结出源身份，再转给 [`finish_task_rooms`]。返回类型保持旧形状，好让未迁移
-/// 的调用点不必同步改。
-pub(crate) async fn finish_file_room_round(
-    mgr: &AiosDBManager,
-    dbnum: u32,
-    round_end_sesno: i32,
-    result: &mut DataBatchTaskResult,
-) -> anyhow::Result<Option<crate::data_interface::side_effect_pending::CompletedFileRound>> {
-    let model = TaskModelOutcome {
-        all_roots_ok: result
-            .units
-            .iter()
-            .all(|unit| unit.status == UnitGenStatus::Generated),
-        dead_roots: 0,
-    };
-    let source = frozen_source_for(dbnum, round_end_sesno, "")?;
-    if !finish_task_rooms(mgr, dbnum, round_end_sesno, &model, &source, result).await? {
-        return Ok(None);
-    }
-    SideEffectCompensator::mark_file_rooms_released(dbnum, round_end_sesno)
-        .await
-        .map(Some)
 }
 
 /// Repair only missing room stages on restart. Scope is the initialized DESI

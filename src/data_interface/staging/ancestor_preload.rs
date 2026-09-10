@@ -1119,7 +1119,6 @@ mod tests {
             noun: "BRAN".into(),
             source_end_sesno: 3,
             attempts: 0,
-            revision: None,
             old_owner: None,
             new_owner: None,
             transform: None,

@@ -32,9 +32,8 @@
 //! 执行由数据批次 worker（`batch_worker`）从队列取走（ADR-011 合流）：worker
 //! 在冻结点重扫、按 `dbnum` 复用 [`IncrementPipeline`]（水位只在其成功路径上
 //! 推进），随后逐个生成受影响的交付单元。Data success + model failure
-//! never rolls back data: the unit lands in the `manual_model_pending` table
-//! ([`PendingModelUnit`]) and is retried — merged and deduped with newer data —
-//! on the next run, even when no new sesno exists.
+//! never rolls back data: 失败根记在任务回执上、该库的模型水位不盖（ADR-071 D3），
+//! 下一次该库任务由镜像里的凭证缺口重新规划——没有 pending 表了（ADR-072 D5）。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
@@ -76,7 +75,6 @@ use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction,
 use crate::data_interface::project_paths::resolve_project_root;
 use crate::data_interface::rigid_motion::{TransformAnchorWire, TransformUnit};
 use crate::data_interface::sesno_range::{COLD_START_DB_TYPES, SesnoRangeResolver};
-use crate::data_interface::side_effect_pending::SideEffectCompensator;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::data_interface::update_scope::UpdateScope;
 use crate::data_interface::watch_scope;
@@ -2434,247 +2432,12 @@ pub(crate) fn emit(progress: &Option<ManualUpdateProgress>, event: ManualUpdateE
     }
 }
 
-/// Surreal table holding per-unit model pending-retry tasks (spec §失败与重试).
-/// One persisted model pending-retry task: `dbnum` + delivery-unit root +
-/// source `end_sesno` + attempts + last error (spec §失败与重试 最小字段).
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingModelUnit {
-    pub dbnum: u32,
-    /// `a/b` pdms string.
-    pub root_refno: String,
-    #[serde(default)]
-    pub noun: String,
-    pub source_end_sesno: i32,
-    /// 来源那条保存在 E3D 里的写入时刻（RFC3339）——待重试卡上的
-    /// `来源保存 08-05 18:24`（plant-ui ADR-0019 Q7）。
-    ///
-    /// 会话号仍是内部口径，时刻只是显示代理。旧行没有这一列、以及**不认领会话号的
-    /// 行**（房间任务、反向级联派生根，`source_end_sesno == 0`）都是 `None`，
-    /// 界面规则是**来源段整个不摆**——不许回落成会话号，也不许拿挂钟时刻顶替。
-    #[serde(default)]
-    pub source_end_sesno_time: Option<String>,
-    #[serde(default)]
-    pub attempts: u32,
-    #[serde(default)]
-    pub last_error: Option<String>,
-    /// 已达 [`MAX_ATTEMPTS`](crate::data_interface::model_update_pending::MAX_ATTEMPTS)：
-    /// 自动路径**永不再碰**它，只有 `POST /update/pending-units/retry` 能复活。
-    ///
-    /// 不是库里的列，是读的时候按 `attempts` 算出来的——上限是服务端常量，客户端
-    /// 拿着 `attempts` 也判不出死没死，于是界面只能对每一行一律说「后台自动重试」，
-    /// 而那句话对死信是**字面错误**：模型会一直停在旧几何，没人知道。
-    #[serde(default)]
-    pub dead: bool,
-    /// Revision-safe settlement token. Loaded for execution but intentionally
-    /// omitted from the inspection/API JSON contract.
-    #[serde(default, skip_serializing)]
-    pub revision: u64,
-}
-
-/// One persisted room-recalculation task exposed by the pending-units
-/// inspection endpoint. Room targets are not generation roots, so they keep
-/// their queue-native `(action, target_refno)` identity instead of overloading
-/// [`PendingModelUnit::root_refno`].
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PendingRoomUnit {
-    #[serde(default)]
-    pub dbnum: u32,
-    pub action: ModelWorkAction,
-    /// `a/b` PDMS reference used together with `action` by the retry endpoint.
-    pub target_refno: String,
-    #[serde(default)]
-    pub noun: String,
-    #[serde(default)]
-    pub source_end_sesno: i32,
-    #[serde(default)]
-    pub status: String,
-    #[serde(default)]
-    pub attempts: u32,
-    #[serde(default)]
-    pub last_error: Option<String>,
-    /// File rounds whose publication requires this target to be recomputed.
-    #[serde(default)]
-    pub file_rounds: Vec<String>,
-    /// Minimum published spatial version this task must consume.
-    #[serde(default)]
-    pub required_publish_version: u64,
-    /// Spatial version visible when this inspection row was read.
-    #[serde(default)]
-    pub published_version: u64,
-    /// Last published spatial version from which this target completed.
-    #[serde(default)]
-    pub computed_publish_version: u64,
-    /// The target has not yet been computed from its required published view.
-    #[serde(default)]
-    pub stale: bool,
-    /// Computed while reading; the retry ceiling remains the single source of
-    /// truth and is not duplicated in a stored column.
-    #[serde(default)]
-    pub dead: bool,
-}
-
-/// 待重试重生成根的 SELECT（纯函数）。
-///
-/// `attempt_cap` 只在调用方打算**执行**这些任务时给；`None` 连死信一起返回，那是
-/// 检查视图要的。`dbnum` 限定到一个库，`None` 是全库。
-fn render_pending_units_sql(attempt_cap: Option<u32>, dbnum: Option<u32>) -> String {
-    let mut filters = vec![
-        "action = 'regen_root'".to_string(),
-        "status IN ['pending', 'failed']".to_string(),
-    ];
-    if let Some(cap) = attempt_cap {
-        filters.push(format!("(attempts?:0) < {cap}"));
-    }
-    if let Some(dbnum) = dbnum {
-        filters.push(format!("dbnum = {dbnum}"));
-    }
-    format!(
-        "SELECT dbnum, target_refno AS root_refno, noun, source_end_sesno, \
-         source_end_sesno_time, attempts, last_error, revision \
-         FROM model_update_pending WHERE {};",
-        filters.join(" AND ")
-    )
-}
-
-async fn load_pending_units_where(
-    attempt_cap: Option<u32>,
-    dbnum: Option<u32>,
-) -> anyhow::Result<Vec<PendingModelUnit>> {
-    let mut response = SUL_DB
-        .query(render_pending_units_sql(attempt_cap, dbnum))
-        .await?
-        .check()
-        .map_err(|error| anyhow::anyhow!("读取模型待重试语句失败: {error}"))?;
-    let mut units: Vec<PendingModelUnit> = response
-        .take(0)
-        .map_err(|error| anyhow::anyhow!("解码模型待重试失败: {error}"))?;
-    for unit in &mut units {
-        unit.dead = is_dead_letter(unit.attempts);
-    }
-    Ok(units)
-}
-
-/// 一行到没到自动路径的重试上限。**读的时候算，不存库**——上限是服务端常量，
-/// 存一份下来就多一个会与常量错开的真值。
-pub fn is_dead_letter(attempts: u32) -> bool {
-    attempts >= crate::data_interface::model_update_pending::MAX_ATTEMPTS
-}
-
-/// Every pending model-retry task, dead letters included (read-only).
-///
-/// This is the INSPECTION view — the preview and `GET /update/pending-units`.
-/// Anything that is going to actually run the tasks wants
-/// [`load_pending_model_units_for_retry`] instead.
-pub async fn load_pending_model_units() -> anyhow::Result<Vec<PendingModelUnit>> {
-    load_pending_units_where(None, None).await
-}
-
-fn render_pending_room_units_sql() -> String {
-    "SELECT dbnum, action, target_refno, noun, source_end_sesno, status, attempts, \
-     last_error, file_rounds, required_publish_version, updated_at FROM model_update_pending \
-     WHERE action IN ['room_recalc_panel', 'room_recalc_element'] AND status IN \
-     ['collecting', 'pending', 'failed'] \
-     ORDER BY updated_at ASC;"
-        .to_string()
-}
-
-fn decorate_pending_room_units(
-    units: &mut [PendingRoomUnit],
-    published_version: u64,
-    computed_versions: &BTreeMap<(ModelWorkAction, String), u64>,
-) {
-    for unit in units {
-        unit.published_version = published_version;
-        unit.computed_publish_version = computed_versions
-            .get(&(unit.action, unit.target_refno.clone()))
-            .copied()
-            .unwrap_or(0);
-        // Every row returned by this inspection query is unsettled. The version
-        // comparison explains why, while `collecting` also covers the interval
-        // before a file round has acquired its publish version.
-        unit.stale = matches!(unit.status.as_str(), "collecting" | "pending" | "failed")
-            || unit.computed_publish_version < unit.required_publish_version;
-        unit.dead = unit.status != "collecting" && is_dead_letter(unit.attempts);
-    }
-}
-
-async fn load_room_computed_versions(
-    units: &[PendingRoomUnit],
-) -> anyhow::Result<BTreeMap<(ModelWorkAction, String), u64>> {
-    #[derive(Deserialize)]
-    struct Row {
-        action: ModelWorkAction,
-        target_refno: String,
-        #[serde(default)]
-        computed_publish_version: u64,
-    }
-
-    if units.is_empty() {
-        return Ok(BTreeMap::new());
-    }
-    let targets = units
-        .iter()
-        .map(|unit| format!("'{}'", escape_surql_str(&unit.target_refno)))
-        .collect::<HashSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut response = SUL_DB
-        .query(format!(
-            "SELECT action, target_refno, computed_publish_version FROM room_target_version \
-             WHERE target_refno IN [{targets}];"
-        ))
-        .await?
-        .check()
-        .map_err(|error| anyhow::anyhow!("读取房间目标计算版本失败: {error}"))?;
-    let rows: Vec<Row> = response
-        .take(0)
-        .map_err(|error| anyhow::anyhow!("解码房间目标计算版本失败: {error}"))?;
-    Ok(rows
-        .into_iter()
-        .map(|row| ((row.action, row.target_refno), row.computed_publish_version))
-        .collect())
-}
-
-/// Every pending room-recalculation task, dead letters included (read-only).
-///
-/// This deliberately remains separate from [`load_pending_model_units`]: the
-/// latter is also consumed by preview/model worklist code whose rows must all
-/// be generation roots.
-pub async fn load_pending_room_units() -> anyhow::Result<Vec<PendingRoomUnit>> {
-    let mut response = SUL_DB
-        .query(render_pending_room_units_sql())
-        .await?
-        .check()
-        .map_err(|error| anyhow::anyhow!("读取房间待重算语句失败: {error}"))?;
-    let mut units: Vec<PendingRoomUnit> = response
-        .take(0)
-        .map_err(|error| anyhow::anyhow!("解码房间待重算失败: {error}"))?;
-    let published_version = SideEffectCompensator::published_spatial_version().await?;
-    let computed_versions = load_room_computed_versions(&units).await?;
-    decorate_pending_room_units(&mut units, published_version, &computed_versions);
-    Ok(units)
-}
-
-/// 本批次可以顺带重试的模型任务——**只限本库**。
-///
-/// 遵守与自动 drain 同一个
-/// [`MAX_ATTEMPTS`](crate::data_interface::model_update_pending::MAX_ATTEMPTS) 上限：
-/// 没有它的话，一个永久坏掉的根会在每次运行里烧掉一整趟生成，而 `attempts` 一路上涨
-/// 却没人看——死信机制存在，但只有自动路径受它约束。
-///
-/// 限本库同样是必须的。过去这里读的是全库积压，于是 dbnum=A 的批次会去跑 B/C/D 的根，
-/// 结果还记在 A 那条任务名下（面板上冒出与本批无关的库）；29 个库轮流跑批时，同一个
-/// 坏根在触到上限之前会被每个批次各试一遍。跨库积压归 worker 空闲轮的
-/// `drain_data_phases` 管，那本来就是它的职责。
-pub async fn load_pending_model_units_for_retry(
-    dbnum: u32,
-) -> anyhow::Result<Vec<PendingModelUnit>> {
-    load_pending_units_where(
-        Some(crate::data_interface::model_update_pending::MAX_ATTEMPTS),
-        Some(dbnum),
-    )
-    .await
+/// 一次基线建立交回任务的东西：解析了多少元素、以及要由**本任务**随即生成的全量生成根
+/// （DESI 才有；SYS meta / CATA 为空）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BaselineOutcome {
+    pub elements: usize,
+    pub units: Vec<UnitTask>,
 }
 
 /// One model delivery-unit generation task inside an execution run.
@@ -2685,13 +2448,11 @@ pub struct UnitTask {
     pub root_refno: String,
     pub noun: String,
     pub source_end_sesno: i32,
-    /// Attempts BEFORE this run (carried from a pending record; 0 for new).
+    /// Attempts BEFORE this run. 恒 0：没有 pending 行了（ADR-072 D5），一个任务里每根只跑一次；
+    /// 回执上的 `attempts` 仍按「失败 +1」算，给面板看。
     pub attempts: u32,
-    /// Queue revision observed before generation. New-only tasks have no
-    /// revision until matched with the authoritative pending row.
-    pub revision: Option<u64>,
     /// Pre/post-update OWNER (parent) of the unit root (`a/b`); carried to the
-    /// result for client tree refresh. `None` for pending-only (retry) tasks.
+    /// result for client tree refresh. `None` for planner-only (recovery / cascade) tasks.
     pub old_owner: Option<String>,
     pub new_owner: Option<String>,
     /// 刚体前移（ADR-066）的提示：规划器判这个根只动了摆放、可按 `Δ` 便宜前移时带上**整条**
@@ -2725,7 +2486,6 @@ pub fn collect_unit_tasks(
             noun: unit.noun.clone(),
             source_end_sesno: end_sesno,
             attempts: 0,
-            revision: None,
             old_owner: unit.old_owner.clone(),
             new_owner: unit.new_owner.clone(),
             // 刚体前移提示（ADR-066）：规划器把这个根判成只动了摆放时整条带上（锚点 + 基线 S），
@@ -2739,61 +2499,37 @@ pub fn collect_unit_tasks(
     tasks
 }
 
-/// Merge this run's new unit tasks with the persisted pending-retry tasks.
+/// 把一个任务手里几路来的交付单元并成一张工作单：本窗的新单元、明确要重算的根
+/// （目录级联名单）、级联展开出来的根、规划器排出来的根。
 ///
-/// Dedup key is `(dbnum, root)`: a pending unit re-affected by new data keeps
-/// ONE task with the latest `end_sesno` and its accumulated attempts; pending
-/// units without new data still run (spec: 无新会话时可以只重试模型).
-/// Output order is deterministic: `(dbnum, root)` ascending.
-pub fn merge_unit_worklist(
-    new_units: Vec<UnitTask>,
-    pending: Vec<PendingModelUnit>,
-) -> Vec<UnitTask> {
+/// Dedup key is `(dbnum, root)`：同根只留一条，`source_end_sesno` 取最新；先到的那条若没有
+/// 属主 / 刚体前移提示，后到的补上（本窗新单元解出来的属主与 transform 判据优先于规划器的
+/// 空白）。Output order is deterministic: `(dbnum, root)` ascending.
+pub fn merge_unit_worklist(units: Vec<UnitTask>) -> Vec<UnitTask> {
     let mut merged: BTreeMap<(u32, String), UnitTask> = BTreeMap::new();
-
-    for p in pending {
-        merged.insert(
-            (p.dbnum, p.root_refno.clone()),
-            UnitTask {
-                dbnum: p.dbnum,
-                root_refno: p.root_refno,
-                noun: p.noun,
-                source_end_sesno: p.source_end_sesno,
-                attempts: p.attempts,
-                revision: Some(p.revision),
-                // Pending records don't persist owners; a fresh run (below)
-                // fills them in when the same unit is re-affected this window.
-                old_owner: None,
-                new_owner: None,
-                // 待重试一律整根重算；本窗若把它重判成 transform，由下面的合并分支带过来。
-                transform: None,
-            },
-        );
-    }
-
-    for task in new_units {
+    for task in units {
         match merged.get_mut(&(task.dbnum, task.root_refno.clone())) {
             Some(existing) => {
                 existing.source_end_sesno = existing.source_end_sesno.max(task.source_end_sesno);
+                existing.attempts = existing.attempts.max(task.attempts);
                 if !task.noun.is_empty() {
                     existing.noun = task.noun;
                 }
-                // Prefer this run's freshly-resolved owners over the pending None.
                 if task.old_owner.is_some() {
                     existing.old_owner = task.old_owner;
                 }
                 if task.new_owner.is_some() {
                     existing.new_owner = task.new_owner;
                 }
-                // 采用本轮的刚体前移判据（安定的根被这一窗的纯摆放变更重新命中）；待重试项本是 None。
-                existing.transform = task.transform;
+                if task.transform.is_some() {
+                    existing.transform = task.transform;
+                }
             }
             None => {
                 merged.insert((task.dbnum, task.root_refno.clone()), task);
             }
         }
     }
-
     merged.into_values().collect()
 }
 
@@ -3011,18 +2747,14 @@ pub struct ManualUpdatePreview {
     #[serde(default)]
     pub mdb: String,
     pub dbnums: Vec<DbnumPreview>,
-    /// Model units still awaiting a retry from earlier runs. Shown even when
-    /// no new sesno is pending (spec §失败与重试: 下次预览即使没有新 sesno 也
-    /// 显示并允许重试).
-    #[serde(default)]
-    pub pending_model_retries: Vec<PendingModelUnit>,
     /// Cross-project DICT/CATA candidates hidden by explicit project priority.
     #[serde(default)]
     pub shadowed: Vec<ShadowedCandidate>,
     /// Non-fatal per-file scan issues (unreadable header, collect error, …).
     pub warnings: Vec<String>,
-    /// `true` when there is nothing pending to show (no sessions, no anomalies,
-    /// no pending model retries).
+    /// `true` when there is nothing pending to show (no sessions, no anomalies).
+    /// 「待重试的模型单元」那一格随 pending 表退了（ADR-072 D5）：模型欠账由 `/dbnums`
+    /// 的双水位判决回答。
     pub up_to_date: bool,
 }
 
@@ -3570,6 +3302,8 @@ impl AiosDBManager {
             );
         }
         let cand = &candidates[0];
+        // 规格工具那条路不起 worker：基线的全量生成根不在这里生成，留给启动核对
+        // （`startup_reconcile`）按凭证缺口排 ModelOnly 恢复任务。
         self.initialize_dbnum_baseline(
             project,
             cand.db_num,
@@ -3580,6 +3314,7 @@ impl AiosDBManager {
             cand.file_latest_sesno,
         )
         .await
+        .map(|outcome| outcome.elements)
     }
 
     /// 把项目的 SYS 元数据库（SYST / COMM / MISC / GLB / GLOB 与 DICT）里**还没建立水位的**那些
@@ -3632,6 +3367,7 @@ impl AiosDBManager {
                     cand.file_latest_sesno,
                 )
                 .await
+                .map(|outcome| outcome.elements)
                 .map_err(|error| {
                     anyhow::anyhow!(
                         "SYS 元数据基线失败 {} dbnum={} ({}): {error:#}",
@@ -3666,7 +3402,7 @@ impl AiosDBManager {
         extract_parent: Option<&std::path::Path>,
         db_type: &str,
         file_latest_sesno: i32,
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<BaselineOutcome> {
         #[derive(Deserialize)]
         struct CountRow {
             count: usize,
@@ -3803,11 +3539,10 @@ impl AiosDBManager {
                 dbnum,
                 file_latest_sesno,
                 applied_sesno_time.as_deref(),
-                &ModelUpdatePlan::default(),
                 true,
             )
             .await?;
-            return Ok(0);
+            return Ok(BaselineOutcome::default());
         }
         if count == 0 {
             anyhow::bail!("dbnum={} 基线解析完成后仍没有 PE 数据", dbnum);
@@ -3824,28 +3559,45 @@ impl AiosDBManager {
             );
         }
 
-        // 生成工作与水位同一事务收口：枚举失败就整体不推进，下一轮重来（applied
+        // 全量生成根先枚举、再推水位：枚举失败就整体不推进，下一轮重来（applied
         // 仍为 0，`baseline_needs_full_parse` 会再解析一遍，幂等但不便宜）——这比
         // 「水位推上去、库里一个模型都没有、而且此后永远不会有」要好得多。
-        // 初始化发布 run 已退役（ADR-071 S5，d-300）：基线的全量生成根一律由本 dbnum 任务自己
-        // 生成、合块落库，这里只把工作单与水位同一事务收口。
+        // 初始化发布 run 已退役（ADR-071 S5，d-300），pending 行也退了（ADR-072 D5）：基线的
+        // 全量生成根**随返回值交给本 dbnum 任务**自己生成、合块落库；库里只留水位。
         let plan = baseline_model_plan(dbnum, db_type, file_latest_sesno).await?;
-        let roots = plan.work_items.len();
+        let units: Vec<UnitTask> = plan
+            .work_items
+            .iter()
+            .filter(|item| item.action == ModelWorkAction::RegenRoot)
+            .map(|item| UnitTask {
+                dbnum,
+                root_refno: item.target_refno.clone(),
+                noun: item.noun.clone(),
+                source_end_sesno: item.source_end_sesno,
+                attempts: 0,
+                old_owner: None,
+                new_owner: None,
+                transform: None,
+            })
+            .collect();
         crate::data_interface::increment_tail::finalize_baseline(
             dbnum,
             file_latest_sesno,
             applied_sesno_time.as_deref(),
-            &plan,
             false,
         )
         .await?;
-        if roots > 0 {
+        if !units.is_empty() {
             println!(
-                "dbnum={} 基线已建立，排入 {roots} 个全量生成根（本任务随即生成）",
-                dbnum
+                "dbnum={} 基线已建立，{} 个全量生成根随本任务生成",
+                dbnum,
+                units.len()
             );
         }
-        Ok(count)
+        Ok(BaselineOutcome {
+            elements: count,
+            units,
+        })
     }
 
     /// Read-only preview of the current project's pending manual update.
@@ -3970,14 +3722,6 @@ impl AiosDBManager {
             }
         }
 
-        let pending_model_retries = match load_pending_model_units().await {
-            Ok(pending) => pending,
-            Err(e) => {
-                warnings.push(format!("读取模型待重试列表失败: {e}"));
-                Vec::new()
-            }
-        };
-
         dbnums.sort_by_key(|d| d.dbnum);
         // 「够不着」的行不算待办：它们每次预览都在，算进去的话「已是最新」这个
         // 终态永远到不了，界面会一直催人去更新九个它压根碰不到的库。
@@ -3985,9 +3729,8 @@ impl AiosDBManager {
         Ok(ManualUpdatePreview {
             project: project.to_string(),
             mdb: scope.mdb().to_owned(),
-            up_to_date: pending_rows == 0 && pending_model_retries.is_empty(),
+            up_to_date: pending_rows == 0,
             dbnums,
-            pending_model_retries,
             shadowed,
             warnings,
         })
@@ -5221,6 +4964,7 @@ impl AiosDBManager {
         reinit_requested: bool,
         progress: &Option<ManualUpdateProgress>,
         warnings: &mut Vec<String>,
+        side_actions: &mut Vec<ModelWorkItem>,
     ) -> (Option<DataBatchResult>, Vec<UnitTask>) {
         let dbnum = cand.db_num;
         let obs = FileObservation {
@@ -5468,7 +5212,7 @@ impl AiosDBManager {
                 )
                 .await
             {
-                Ok(count) => (
+                Ok(BaselineOutcome { elements: count, units }) => (
                     Some(DataBatchResult {
                         dbnum,
                         db_type: cand.db_type.clone(),
@@ -5481,7 +5225,8 @@ impl AiosDBManager {
                         end_sesno_time: None,
                         status: BatchStatus::Applied,
                         message: Some(format!(
-                            "首次按需初始化完成：解析 {count} 个元素、建立增量水位并排入全量生成"
+                            "首次按需初始化完成：解析 {count} 个元素、建立增量水位，{} 个全量生成根随本任务生成",
+                            units.len()
                         )),
                         merged_sesnos: Vec::new(),
                         merged_sesno_times: Vec::new(),
@@ -5490,7 +5235,7 @@ impl AiosDBManager {
                         modified_elements: 0,
                         deleted_elements: 0,
                     }),
-                    Vec::new(),
+                    units,
                 ),
                 Err(error) => (
                     Some(DataBatchResult {
@@ -5722,6 +5467,20 @@ impl AiosDBManager {
                     &success.model_plan.transform_units,
                     dbnum,
                     success.end_sesno,
+                );
+                // 计划里 `RegenRoot` 之外的工作项（删除清理 / 位姿 / 级联 / 根生成后补刷 AABB）
+                // 随返回值交给任务就地执行（ADR-072 D5）——尾事务不再把它们写成 pending 行。
+                // 房间重算项不在内：房间随任务整库算。
+                side_actions.extend(
+                    success
+                        .model_plan
+                        .work_items
+                        .iter()
+                        .filter(|item| {
+                            item.action != ModelWorkAction::RegenRoot
+                                && !item.action.is_room_recalc()
+                        })
+                        .cloned(),
                 );
             }
         }
@@ -6498,125 +6257,6 @@ mod tests {
         }
     }
 
-    /// 死信的判定标准只有一个。检查视图看得到全部（含死信），要**执行**它们就必须
-    /// 和自动 drain 用同一个 `MAX_ATTEMPTS` 上限，否则手动路径会永远重跑一个已经
-    /// 判死的根，每跑一次烧掉一整趟生成。
-    #[test]
-    fn only_the_retry_query_caps_attempts() {
-        let inspect = render_pending_units_sql(None, None);
-        assert!(!inspect.contains("attempts?:0) <"), "{inspect}");
-        assert!(
-            inspect.contains("status IN ['pending', 'failed']"),
-            "{inspect}"
-        );
-        assert!(inspect.contains("last_error, revision FROM"), "{inspect}");
-
-        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
-        let retry = render_pending_units_sql(Some(cap), None);
-        assert!(retry.contains(&format!("(attempts?:0) < {cap}")), "{retry}");
-    }
-
-    /// 房间检查视图与模型根检查视图一样必须把死信带出来；它只负责观测，不能复用
-    /// 自动 drain 的 attempts 上限。两种房间 action 都要保留原生身份，供既有 retry
-    /// 端点原样回传。
-    #[test]
-    fn room_pending_inspection_includes_both_actions_and_dead_letters() {
-        let sql = render_pending_room_units_sql();
-        assert!(sql.contains("'room_recalc_panel'"), "{sql}");
-        assert!(sql.contains("'room_recalc_element'"), "{sql}");
-        assert!(
-            sql.contains("status IN ['collecting', 'pending', 'failed']"),
-            "{sql}"
-        );
-        assert!(sql.contains("required_publish_version"), "{sql}");
-        assert!(sql.contains("file_rounds"), "{sql}");
-        assert!(!sql.contains("attempts?:0) <"), "{sql}");
-        let projection = sql
-            .split_once(" FROM ")
-            .expect("pending room query must have a projection")
-            .0;
-        assert!(
-            projection.contains("updated_at"),
-            "SurrealDB 3 requires ORDER BY fields in the SELECT projection: {sql}"
-        );
-
-        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
-        let row = PendingRoomUnit {
-            dbnum: 7997,
-            action: ModelWorkAction::RoomRecalcPanel,
-            target_refno: "24381/100677".into(),
-            noun: "PANE".into(),
-            source_end_sesno: 42,
-            status: "failed".into(),
-            attempts: cap,
-            last_error: Some("boom".into()),
-            file_rounds: vec!["file_round:7997:42".into()],
-            required_publish_version: 9,
-            published_version: 8,
-            computed_publish_version: 7,
-            stale: true,
-            dead: is_dead_letter(cap),
-        };
-        let json = serde_json::to_value(row).expect("room pending contract serializes");
-        assert_eq!(json["action"], "room_recalc_panel");
-        assert_eq!(json["target_refno"], "24381/100677");
-        assert_eq!(json["dead"], true);
-        assert_eq!(json["required_publish_version"], 9);
-        assert_eq!(json["published_version"], 8);
-        assert_eq!(json["computed_publish_version"], 7);
-        assert_eq!(json["stale"], true);
-    }
-
-    #[test]
-    fn room_pending_inspection_marks_unpublished_and_collecting_targets_stale() {
-        let mut rows = vec![
-            PendingRoomUnit {
-                dbnum: 7997,
-                action: ModelWorkAction::RoomRecalcPanel,
-                target_refno: "24381/1".into(),
-                noun: "PANE".into(),
-                source_end_sesno: 42,
-                status: "pending".into(),
-                attempts: 1,
-                last_error: None,
-                file_rounds: vec!["file_round:7997:42".into()],
-                required_publish_version: 12,
-                published_version: 0,
-                computed_publish_version: 0,
-                stale: false,
-                dead: false,
-            },
-            PendingRoomUnit {
-                dbnum: 7998,
-                action: ModelWorkAction::RoomRecalcElement,
-                target_refno: "24381/2".into(),
-                noun: "EQUI".into(),
-                source_end_sesno: 7,
-                status: "collecting".into(),
-                attempts: crate::data_interface::model_update_pending::MAX_ATTEMPTS,
-                last_error: None,
-                file_rounds: vec!["file_round:7998:7".into()],
-                required_publish_version: 0,
-                published_version: 0,
-                computed_publish_version: 0,
-                stale: false,
-                dead: false,
-            },
-        ];
-
-        let versions = BTreeMap::from([((ModelWorkAction::RoomRecalcPanel, "24381/1".into()), 10)]);
-        decorate_pending_room_units(&mut rows, 11, &versions);
-
-        assert!(rows[0].stale);
-        assert_eq!(rows[0].published_version, 11);
-        assert_eq!(rows[0].computed_publish_version, 10);
-        assert!(
-            rows[1].stale,
-            "collecting means the target is still updating"
-        );
-        assert!(!rows[1].dead, "an unpublished intent is not a dead letter");
-    }
-
     /// `/dbnums` 与预览对「够不着」必须给出同一档，否则两个界面讲反话。
     ///
     /// 预览那边为 `declared_desi()` 里既没登记也没扫到的库补一行 `not_in_project`；
@@ -6647,43 +6287,6 @@ mod tests {
         assert!(
             !report.contains("should_process_database"),
             "MDB 声明过的库不许再被第二道手写名单筛一遍: {report}"
-        );
-    }
-
-    /// 检查视图捞回来的死信必须自己带着「我已经死了」，边界与执行侧的上限**同一个常量**。
-    ///
-    /// 客户端拿到的只有 `attempts`，上限是服务端常量、不在契约里——两边各写一个 5
-    /// 就是两个会错开的真值。所以判定放在服务端、随行带出：少了它，界面对一个
-    /// `attempts = 5` 的行只能继续说「后台自动重试」，而自动路径永不再碰它。
-    #[test]
-    fn the_inspection_view_marks_rows_the_automatic_path_will_never_touch_again() {
-        let cap = crate::data_interface::model_update_pending::MAX_ATTEMPTS;
-        assert!(!is_dead_letter(cap - 1), "还能自动重试的行不许标成死信");
-        assert!(is_dead_letter(cap), "到顶那一行就是死信，边界是 >=");
-        assert!(is_dead_letter(cap + 1));
-
-        // 序列化必须真把它带出去：`dead` 是界面区分两种文案的唯一依据，
-        // 漏在 JSON 之外的话客户端 `serde(default)` 会静默收成 false。
-        let dead = PendingModelUnit {
-            attempts: cap,
-            dead: is_dead_letter(cap),
-            ..Default::default()
-        };
-        let json = serde_json::to_string(&dead).expect("契约要能序列化");
-        assert!(json.contains("\"dead\":true"), "{json}");
-    }
-
-    /// 批次工作单只捞本库的积压。全库口径下 dbnum=A 的批次会去跑 B/C/D 的根，结果
-    /// 还记在 A 那条任务名下；而检查视图必须保持全库，否则界面看不到别的库的死信。
-    #[test]
-    fn only_the_per_batch_query_narrows_to_one_dbnum() {
-        assert!(
-            render_pending_units_sql(Some(5), Some(7997)).contains("dbnum = 7997"),
-            "批次工作单要限本库"
-        );
-        assert!(
-            !render_pending_units_sql(None, None).contains("dbnum ="),
-            "检查视图要保持全库"
         );
     }
 
@@ -7196,7 +6799,7 @@ mod tests {
             .split_once("async fn baseline_counts(dbnum: u32)")
             .expect("baseline_counts")
             .1
-            .split_once("Ok(count)\n    }")
+            .split_once("Ok(BaselineOutcome {\n            elements: count,")
             .expect("baseline branch end")
             .0;
         assert!(
@@ -9022,24 +8625,9 @@ mod tests {
             noun: "BRAN".into(),
             source_end_sesno: end_sesno,
             attempts,
-            revision: None,
             old_owner: None,
             new_owner: None,
             transform: None,
-        }
-    }
-
-    fn pending_unit(dbnum: u32, root: u64, end_sesno: i32, attempts: u32) -> PendingModelUnit {
-        PendingModelUnit {
-            dbnum,
-            root_refno: r(root).to_pdms_str(),
-            noun: "BRAN".into(),
-            source_end_sesno: end_sesno,
-            source_end_sesno_time: None,
-            attempts,
-            last_error: Some("boom".into()),
-            dead: is_dead_letter(attempts),
-            revision: 7,
         }
     }
 
@@ -9215,43 +8803,6 @@ mod tests {
         assert_eq!(
             include_model_side_effect_failure(ManualUpdateStatus::Success, false),
             ManualUpdateStatus::Success
-        );
-    }
-
-    #[test]
-    fn worklist_merges_pending_with_new_units_keeping_latest_state() {
-        // Unit 5: pending (attempts=2, end=10) re-affected by new data (end=12)
-        // → ONE task with the newest end_sesno and accumulated attempts.
-        // Unit 7: pending only → still runs (retry without new sessions).
-        // Unit 9: new only.
-        let merged = merge_unit_worklist(
-            vec![unit_task(1, 5, 12, 0), unit_task(1, 9, 12, 0)],
-            vec![pending_unit(1, 5, 10, 2), pending_unit(1, 7, 8, 1)],
-        );
-
-        assert_eq!(merged.len(), 3);
-        let five = merged
-            .iter()
-            .find(|t| t.root_refno == r(5).to_pdms_str())
-            .unwrap();
-        assert_eq!(five.source_end_sesno, 12);
-        assert_eq!(five.attempts, 2);
-        assert_eq!(five.revision, Some(7));
-        let seven = merged
-            .iter()
-            .find(|t| t.root_refno == r(7).to_pdms_str())
-            .unwrap();
-        assert_eq!(seven.source_end_sesno, 8);
-        assert_eq!(seven.attempts, 1);
-        assert_eq!(seven.revision, Some(7));
-        assert!(merged.iter().any(|t| t.root_refno == r(9).to_pdms_str()));
-        assert!(
-            !serde_json::to_value(pending_unit(1, 5, 10, 2))
-                .unwrap()
-                .as_object()
-                .unwrap()
-                .contains_key("revision"),
-            "revision is an internal settlement token, not a public API field"
         );
     }
 

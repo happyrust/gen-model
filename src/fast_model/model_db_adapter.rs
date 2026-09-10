@@ -304,46 +304,6 @@ pub async fn persist_root_on(
     .await
 }
 
-pub(crate) async fn persist_root_for_file_round(
-    root: RefNo,
-    dbnum: u32,
-    round_end_sesno: i32,
-    source_token: &str,
-) -> anyhow::Result<PersistedRows> {
-    persist_root_for_file_round_on(
-        PersistTarget::process(),
-        ModelMemoryStore::global(),
-        root,
-        dbnum,
-        round_end_sesno,
-        source_token,
-    )
-    .await
-}
-
-async fn persist_root_for_file_round_on(
-    target: PersistTarget<'_>,
-    store: &ModelMemoryStore,
-    root: RefNo,
-    dbnum: u32,
-    round_end_sesno: i32,
-    source_token: &str,
-) -> anyhow::Result<PersistedRows> {
-    crate::data_interface::batch_worker::with_model_publication_window(
-        dbnum,
-        round_end_sesno,
-        source_token,
-        persist_root_in_chunks(
-            target,
-            store,
-            root,
-            PERSIST_CHUNK,
-            RoomEffectPolicy::Directed,
-        ),
-    )
-    .await
-}
-
 /// [`persist_root_on`] 的可调块大小形态。块大小只有测试才需要拨。
 async fn persist_root_in_chunks(
     target: PersistTarget<'_>,
@@ -352,18 +312,7 @@ async fn persist_root_in_chunks(
     chunk_size: usize,
     room_policy: RoomEffectPolicy,
 ) -> anyhow::Result<PersistedRows> {
-    persist_root_chunks_impl(
-        target,
-        store,
-        root,
-        chunk_size,
-        room_policy,
-        None,
-        None,
-        None,
-        false,
-    )
-    .await
+    persist_root_chunks_impl(target, store, root, chunk_size, room_policy).await
 }
 
 /// 一组最多装这么多根（[`persist_roots_batched`]）。一组是失败的赔付边界：组内任一块失败，
@@ -862,7 +811,6 @@ async fn persist_group(
                 }
                 format!("$mt{index}")
             };
-            body.push_str(&render_publication_guard(*root, receipt));
             body.push_str(&render_receipt_with_target(
                 *root,
                 receipt,
@@ -893,8 +841,6 @@ async fn persist_group(
     }
     let fenced = statement_count > 1 && !receipted.is_empty();
     let fence_roots = receipted.iter().map(|(root, _)| *root).collect::<Vec<_>>();
-    // 回执块自带守卫（check-then-write 同事务）；首块若本身就是回执块，不再重复发一遍。
-    let first_is_receipt_chunk = geometry_chunks.is_empty() && !receipt_chunks.is_empty();
 
     let mut commits = 0usize;
     for index in 0..statement_count {
@@ -902,12 +848,7 @@ async fn persist_group(
         let is_first = index == 0;
         let is_last = index + 1 == statement_count;
         if is_first {
-            // 写任何东西之前先过混源守卫；多块时把中间态标在凭证行上。
-            if !first_is_receipt_chunk {
-                for (root, receipt) in &receipted {
-                    statements.push_str(&render_publication_guard(*root, receipt));
-                }
-            }
+            // 多块时把中间态标在凭证行上。
             if fenced {
                 statements.push_str(&render_publication_fence_batch(&fence_roots, 500));
             }
@@ -972,244 +913,6 @@ async fn persist_group(
         boxes: tree_boxes,
         cleared: effects.cleared,
     })
-}
-
-/// Consume an immutable journal payload. This store is private to this call;
-/// another producer can never change its records while SQL is being rendered.
-pub async fn persist_frozen_on(
-    target: PersistTarget<'_>,
-    envelope: &crate::data_interface::model_publish_queue::FrozenRootEnvelope,
-) -> anyhow::Result<PersistedRows> {
-    let plan = prepare_frozen_on(target, envelope).await?;
-    persist_prepared_frozen_on(target, envelope, &plan).await
-}
-
-#[derive(Default)]
-struct PreparedPublicationParts {
-    chunks: Vec<String>,
-    memory_removals: Vec<String>,
-    memory_tube_branch_resets: Vec<String>,
-}
-
-pub async fn prepare_frozen_on(
-    target: PersistTarget<'_>,
-    envelope: &crate::data_interface::model_publish_queue::FrozenRootEnvelope,
-) -> anyhow::Result<crate::data_interface::model_publish_queue::PreparedRootPublication> {
-    Ok(prepare_frozen_profiled_on(target, envelope).await?.0)
-}
-
-#[derive(Debug, Default, Clone, Copy)]
-pub struct FrozenPrepareProfile {
-    pub reconcile_queries: u64,
-    pub reconcile_read_micros: u64,
-    pub render_plan_micros: u64,
-}
-
-/// Prepare one immutable publication plan and expose timing without putting
-/// diagnostic fields into the durable plan hash.
-pub async fn prepare_frozen_profiled_on(
-    target: PersistTarget<'_>,
-    envelope: &crate::data_interface::model_publish_queue::FrozenRootEnvelope,
-) -> anyhow::Result<(
-    crate::data_interface::model_publish_queue::PreparedRootPublication,
-    FrozenPrepareProfile,
-)> {
-    prepare_frozen_profiled_for_baseline_on(target, envelope, false).await
-}
-
-/// Use a durable run-level proof to omit per-root reconciliation reads when
-/// the projection was empty before the initialization run was reserved.
-pub async fn prepare_frozen_profiled_for_baseline_on(
-    target: PersistTarget<'_>,
-    envelope: &crate::data_interface::model_publish_queue::FrozenRootEnvelope,
-    model_projection_empty_at_reservation: bool,
-) -> anyhow::Result<(
-    crate::data_interface::model_publish_queue::PreparedRootPublication,
-    FrozenPrepareProfile,
-)> {
-    let prepare_started = std::time::Instant::now();
-    envelope.validate()?;
-    let root = crate::fast_model::e3d_model_service::parse_refno(&envelope.intent.root)?;
-    let store = ModelMemoryStore::default();
-    store.commit(ProjectionScope::Current, vec![envelope.projection.clone()]);
-    let mut prepared = PreparedPublicationParts::default();
-    let mut reconcile_read = std::time::Duration::ZERO;
-    let result = crate::data_interface::batch_worker::with_model_publication_window(
-        envelope.dbnum,
-        envelope.source_sesno as i32,
-        &envelope.source_token,
-        persist_root_chunks_impl(
-            target,
-            &store,
-            root,
-            PERSIST_CHUNK,
-            RoomEffectPolicy::FullDatabase,
-            Some(envelope),
-            Some(&mut prepared),
-            Some(&mut reconcile_read),
-            model_projection_empty_at_reservation,
-        ),
-    )
-    .await?;
-    anyhow::ensure!(
-        result.receipts == 1,
-        "frozen publication must have its exact root receipt"
-    );
-    anyhow::ensure!(
-        prepared.chunks.iter().all(|s| s.len() <= 8 * 1024 * 1024),
-        "frozen SQL chunk exceeds 8 MiB; retained for operator repair"
-    );
-    let plan = crate::data_interface::model_publish_queue::PreparedRootPublication {
-        version: crate::data_interface::model_publish_queue::FORMAT_VERSION,
-        envelope_hash: crate::data_interface::digest::digest(&serde_json::to_vec(envelope)?),
-        chunks: prepared.chunks,
-        memory_removals: prepared.memory_removals,
-        memory_tube_branch_resets: prepared.memory_tube_branch_resets,
-        upserted: result.upserted,
-        removed: result.removed,
-        receipts: result.receipts,
-    };
-    let total = prepare_started.elapsed();
-    let profile = FrozenPrepareProfile {
-        reconcile_queries: u64::from(!model_projection_empty_at_reservation),
-        reconcile_read_micros: reconcile_read.as_micros() as u64,
-        render_plan_micros: total.saturating_sub(reconcile_read).as_micros() as u64,
-    };
-    Ok((plan, profile))
-}
-
-pub async fn persist_prepared_frozen_on(
-    target: PersistTarget<'_>,
-    envelope: &crate::data_interface::model_publish_queue::FrozenRootEnvelope,
-    plan: &crate::data_interface::model_publish_queue::PreparedRootPublication,
-) -> anyhow::Result<PersistedRows> {
-    envelope.validate()?;
-    anyhow::ensure!(
-        plan.version == crate::data_interface::model_publish_queue::FORMAT_VERSION
-            && plan.receipts == 1
-            && !plan.chunks.is_empty(),
-        "invalid frozen publication plan"
-    );
-    anyhow::ensure!(
-        plan.envelope_hash == crate::data_interface::digest::digest(&serde_json::to_vec(envelope)?),
-        "prepared publication belongs to a different envelope"
-    );
-    let hash = plan.hash()?;
-    for (index, statements) in plan.chunks.iter().enumerate() {
-        let sql = render_frozen_plan_chunk(envelope, index, plan.chunks.len(), &hash, statements);
-        let timeout = publication_timeout_for(1, sql.len());
-        publication_request_with_timeout(
-            async {
-                target
-                    .db
-                    .query(sql)
-                    .await
-                    .map_err(anyhow::Error::from)
-                    .and_then(check_publication_response)
-            },
-            timeout,
-        )
-        .await
-        .with_context(|| {
-            format!(
-                "persist frozen root {} chunk {}/{}",
-                envelope.intent.root,
-                index + 1,
-                plan.chunks.len()
-            )
-        })?;
-    }
-    commit_prepared_frozen_projection(envelope, plan)?;
-    Ok(PersistedRows {
-        medium: target.medium,
-        upserted: plan.upserted,
-        removed: plan.removed,
-        receipts: plan.receipts,
-        commits: plan.chunks.len(),
-    })
-}
-
-/// Apply only the process-local half of an already committed publication.
-/// Recovery and batched publication use the database ACK as authority, so they
-/// must never issue the SQL effects a second time just to restore this view.
-pub(crate) fn commit_prepared_frozen_projection(
-    envelope: &crate::data_interface::model_publish_queue::FrozenRootEnvelope,
-    plan: &crate::data_interface::model_publish_queue::PreparedRootPublication,
-) -> anyhow::Result<()> {
-    let mut projection = envelope.projection.clone();
-    projection
-        .removals
-        .extend(plan.memory_removals.iter().cloned());
-    for branch in &plan.memory_tube_branch_resets {
-        projection
-            .tube_branch_resets
-            .push(crate::fast_model::e3d_model_service::parse_refno(branch)?);
-    }
-    ModelMemoryStore::global().commit(ProjectionScope::Current, vec![projection]);
-    Ok(())
-}
-
-/// Submit several one-chunk roots in one database request while retaining one
-/// independent transaction and ACK per root. A failed transaction does not
-/// roll back its neighbours; the caller reconciles every ACK before assigning
-/// per-root terminal states.
-pub(crate) async fn persist_prepared_frozen_batch_on(
-    target: PersistTarget<'_>,
-    publications: &[(
-        &crate::data_interface::model_publish_queue::FrozenRootEnvelope,
-        &crate::data_interface::model_publish_queue::PreparedRootPublication,
-    )],
-) -> anyhow::Result<Vec<PersistedRows>> {
-    anyhow::ensure!(!publications.is_empty(), "empty frozen publication batch");
-    let mut sql = String::new();
-    for (envelope, plan) in publications {
-        envelope.validate()?;
-        anyhow::ensure!(
-            plan.version == crate::data_interface::model_publish_queue::FORMAT_VERSION
-                && plan.receipts == 1
-                && plan.chunks.len() == 1,
-            "batched frozen publication requires exactly one valid chunk"
-        );
-        anyhow::ensure!(
-            plan.envelope_hash
-                == crate::data_interface::digest::digest(&serde_json::to_vec(envelope)?),
-            "prepared publication belongs to a different envelope"
-        );
-        let hash = plan.hash()?;
-        sql.push_str(&render_frozen_plan_chunk(
-            envelope,
-            0,
-            1,
-            &hash,
-            &plan.chunks[0],
-        ));
-    }
-    let timeout = publication_timeout_for(publications.len(), sql.len());
-    let roots = publications.len();
-    publication_request_with_timeout(
-        async {
-            target
-                .db
-                .query(sql)
-                .await
-                .map_err(anyhow::Error::from)
-                .and_then(|response| check_batch_publication_response(response, roots))
-        },
-        timeout,
-    )
-    .await?;
-    let mut outcomes = Vec::with_capacity(publications.len());
-    for (envelope, plan) in publications {
-        commit_prepared_frozen_projection(envelope, plan)?;
-        outcomes.push(PersistedRows {
-            medium: target.medium,
-            upserted: plan.upserted,
-            removed: plan.removed,
-            receipts: plan.receipts,
-            commits: 1,
-        });
-    }
-    Ok(outcomes)
 }
 
 /// The WS router can retain a pending response until reconnection. A deadline
@@ -1405,10 +1108,6 @@ async fn persist_root_chunks_impl(
     root: RefNo,
     chunk_size: usize,
     room_policy: RoomEffectPolicy,
-    frozen: Option<&crate::data_interface::model_publish_queue::FrozenRootEnvelope>,
-    mut preparing: Option<&mut PreparedPublicationParts>,
-    mut reconcile_timing: Option<&mut std::time::Duration>,
-    skip_reconcile_query: bool,
 ) -> anyhow::Result<PersistedRows> {
     let db = target.db;
     let scope = ProjectionScope::Current;
@@ -1452,15 +1151,10 @@ async fn persist_root_chunks_impl(
     }
     let mut removals = Vec::new();
     let mut removed_geometry = Vec::new();
-    let projected_geometry_ids = if skip_reconcile_query || !reconciliation_ready {
+    let projected_geometry_ids = if !reconciliation_ready {
         Vec::new()
     } else {
-        let reconcile_started = std::time::Instant::now();
-        let ids = projected_geometry_ids_on(db, root).await?;
-        if let Some(elapsed) = reconcile_timing.as_mut() {
-            **elapsed += reconcile_started.elapsed();
-        }
-        ids
+        projected_geometry_ids_on(db, root).await?
     };
     for geometry_id in projected_geometry_ids {
         let source = geometry_source_refno(&geometry_id)?;
@@ -1531,11 +1225,6 @@ async fn persist_root_chunks_impl(
     //   能自愈**，这也是敢切块的全部理由。
     // - 混源会话守卫发两次：第一块发一次是为了在写任何东西之前就失败，最后一块再发一次是
     //   为了与盖章在同一个事务里（check-then-write 不能跨事务）。
-    if let Some(prepared) = preparing.as_mut() {
-        prepared.memory_removals = removals.clone();
-        prepared.memory_tube_branch_resets =
-            branches.iter().map(|(a, b)| format!("{a}/{b}")).collect();
-    }
     // Keep geometry messages bounded by their rendered size, including the
     // structured restart projection. Record count alone cannot bound large roots.
     let mut chunks = Vec::new();
@@ -1563,9 +1252,6 @@ async fn persist_root_chunks_impl(
     for index in 0..chunk_count {
         let chunk = chunks.get(index).map(|(chunk, _)| *chunk).unwrap_or(&[]);
         let mut statements = String::new();
-        if let Some(receipt) = receipt.as_ref() {
-            statements.push_str(&render_publication_guard(root, receipt));
-        }
         if index == 0 {
             if fenced {
                 statements.push_str(&render_publication_fence(root));
@@ -1594,11 +1280,7 @@ async fn persist_root_chunks_impl(
                 room_incremental,
             ));
             if let Some(receipt) = receipt.as_ref() {
-                statements.push_str(&render_receipt_version(
-                    root,
-                    receipt,
-                    frozen.map(|e| (e.intent.revision, e.dbnum)),
-                )?);
+                statements.push_str(&render_receipt_version(root, receipt, None)?);
             }
         }
         // 「凡是改变了树应有内容的已提交变更，都在同一事务内把 epoch +1」——落库改的
@@ -1613,21 +1295,7 @@ async fn persist_root_chunks_impl(
         if statements.is_empty() {
             continue;
         }
-        if let Some(envelope) = frozen {
-            if index + 1 == chunk_count {
-                statements.push_str(&render_frozen_tail(envelope));
-            }
-        }
-        if let Some(prepared) = preparing.as_mut() {
-            prepared.chunks.push(statements);
-            continue;
-        }
-        let transaction = if let Some(envelope) = frozen {
-            render_frozen_chunk(envelope, index, index + 1 == chunk_count, &statements)
-        } else {
-            publication_transaction(&statements)
-        };
-        db.query(transaction)
+        db.query(publication_transaction(&statements))
             .await
             .map_err(anyhow::Error::from)
             .and_then(check_publication_response)
@@ -1659,97 +1327,6 @@ async fn persist_root_chunks_impl(
         receipts: usize::from(receipt.is_some()),
         commits,
     })
-}
-
-/// Each chunk's acknowledgement and effects share a transaction. Exact job
-/// identity remains mandatory even when the design session did not change.
-pub(crate) fn render_frozen_chunk(
-    envelope: &crate::data_interface::model_publish_queue::FrozenRootEnvelope,
-    chunk: usize,
-    last: bool,
-    statements: &str,
-) -> String {
-    let effects = if last {
-        format!("{statements}\n{}", render_frozen_tail(envelope))
-    } else {
-        statements.to_owned()
-    };
-    render_frozen_plan_chunk(
-        envelope,
-        chunk,
-        chunk + if last { 1 } else { 2 },
-        "test-plan",
-        &effects,
-    )
-}
-
-fn render_frozen_tail(
-    envelope: &crate::data_interface::model_publish_queue::FrozenRootEnvelope,
-) -> String {
-    format!(
-        "DELETE model_update_pending:regen_root_{} WHERE revision={} AND init_run_id={} AND init_token={} RETURN NONE;\n",
-        envelope.intent.root.replace('/', "_"),
-        envelope.intent.revision,
-        sql_string(&envelope.run_id),
-        sql_string(&envelope.intent.token)
-    )
-}
-
-fn render_frozen_plan_chunk(
-    envelope: &crate::data_interface::model_publish_queue::FrozenRootEnvelope,
-    chunk: usize,
-    count: usize,
-    plan_hash: &str,
-    statements: &str,
-) -> String {
-    let last = chunk + 1 == count;
-    let chunk_hash = crate::data_interface::digest::digest(statements.as_bytes());
-    let source_hash = crate::data_interface::digest::digest(envelope.source_token.as_bytes());
-    let dbnum = envelope.dbnum;
-    let incarnation = sql_string(&envelope.database_incarnation);
-    let root_id = sql_string(&refno_key(
-        crate::fast_model::e3d_model_service::parse_refno(&envelope.intent.root)
-            .expect("validated frozen root"),
-    ));
-    let pending = format!(
-        "model_update_pending:regen_root_{}",
-        envelope.intent.root.replace('/', "_")
-    );
-    let run = sql_string(&envelope.run_id);
-    let token = sql_string(&envelope.intent.token);
-    let hash = sql_string(&envelope.target_hash);
-    let marker = format!("model_publish_ack:⟨{}_{}⟩", envelope.job_id, chunk);
-    let revision = envelope.intent.revision;
-    let session = envelope.source_sesno;
-    publication_transaction(&format!(
-        "LET $ack = (SELECT * FROM {marker} LIMIT 1)[0];\n\
-         LET $watermark = (SELECT applied_sesno, applied_source_hash FROM dbnum_watermark:{dbnum})[0];\n\
-         LET $applied = $watermark.applied_sesno;\n\
-         IF (SELECT VALUE incarnation FROM model_publish_database:current)[0] != {incarnation} {{ THROW 'model_publish_database_mismatch'; }};\n\
-         IF $watermark.applied_source_hash != '{source_hash}' {{ THROW 'model_publish_source_mismatch'; }};\n\
-         LET $root = (SELECT desired_revision, init_target_hash FROM type::thing('gen_root',{root_id}) LIMIT 1)[0];\n\
-         IF $applied != {session} {{ THROW 'model_publish_applied_barrier'; }};\n\
-         IF $root.desired_revision != {revision} {{ THROW 'model_publish_superseded'; }};\n\
-         IF $ack = NONE {{\n\
-           LET $work = (SELECT revision, init_run_id, init_token, source_end_sesno, init_target_hash, dbnum, init_source_hash FROM {pending} LIMIT 1)[0];\n\
-           IF $work = NONE OR $work.revision != {revision} OR $work.init_run_id != {run} \
-               OR $work.init_token != {token} OR $work.source_end_sesno != {session} \
-               OR $work.init_target_hash != {hash} OR $work.dbnum != {} \
-               OR $work.init_source_hash != '{source_hash}' \
-              OR ($root.init_target_hash IS NOT NONE AND $root.init_target_hash != {hash}) \
-              {{ THROW 'model_publish_superseded'; }};\n\
-           {statements}\n\
-            CREATE {marker} SET job_id='{}', run_id={run}, target_hash={hash}, revision={revision}, source_sesno={session}, final={last}, \
-              token={token}, dbnum={dbnum}, database_incarnation={incarnation}, source_hash='{source_hash}', plan_hash='{plan_hash}', chunk_hash='{chunk_hash}', chunk_count={count}, renderer_version=2;\n\
-         }} ELSE {{\n\
-           IF $ack.target_hash != {hash} OR $ack.revision != {revision} OR $ack.run_id != {run} \
-              OR $ack.source_sesno != {session} OR $ack.final != {last} OR $ack.token != {token} OR $ack.dbnum != {dbnum} \
-              OR $ack.database_incarnation != {incarnation} OR $ack.source_hash != '{source_hash}' OR $ack.plan_hash != '{plan_hash}' OR $ack.chunk_hash != '{chunk_hash}' \
-              OR $ack.chunk_count != {count} OR $ack.renderer_version != 2 \
-              {{ THROW 'model_publish_ack_identity_mismatch'; }};\n\
-          }};\n",
-        envelope.dbnum, envelope.job_id
-    ))
 }
 
 /// 写入口径：**没有 UPDATE，也没有 UPSERT**。
@@ -1897,8 +1474,7 @@ pub fn render_spooled_root(store: &ModelMemoryStore, root: RefNo) -> anyhow::Res
     let receipt = store
         .receipt(ProjectionScope::Current, root)
         .with_context(|| format!("model root {root} has no publication receipt"))?;
-    let mut statements = render_publication_guard(root, &receipt);
-    statements.push_str(&render_spooled_scope_cleanup(root));
+    let mut statements = render_spooled_scope_cleanup(root);
     let branches = records
         .iter()
         .filter(|record| record.tube.is_some())
@@ -2277,23 +1853,37 @@ fn render_receipt_with_target(
     frozen: Option<(u64, u32)>,
     model_target: &str,
 ) -> String {
-    let (revision, published_target) = frozen
+    // 没有人再先写 `desired_target`（模型意图 upsert 随 pending 表退了，ADR-072 D5）：回执自己
+    // 把「想要的」与「发布的」一起写成本次的目标，凭证行上两对字段始终相等。
+    let target_literal = format!(
+        "{{dbnum:{},source_end_sesno:{}}}",
+        root.dbno(),
+        receipt.source_sesno
+    );
+    let (revision, desired_target, published_target) = frozen
         .map(|(revision, dbnum)| {
             (
                 revision.to_string(),
+                "desired_target".to_string(),
                 format!(
                     "{{dbnum:{dbnum},source_end_sesno:{}}}",
                     receipt.source_sesno
                 ),
             )
         })
-        .unwrap_or_else(|| ("desired_revision".into(), "desired_target".into()));
+        .unwrap_or_else(|| {
+            (
+                "desired_revision".into(),
+                target_literal.clone(),
+                target_literal.clone(),
+            )
+        });
     let root_id = sql_string(&refno_key(root));
     let mut statements = String::new();
     statements.push_str(&format!(
         "UPDATE type::thing('gen_root', {root_id}) SET \
          status='Generated', publication_status='ready', \
-         published_revision={revision}, published_target={published_target}, \
+         published_revision={revision}, desired_target={desired_target}, published_target={published_target}, \
          desired_model_target={model_target}, published_model_target={model_target}, \
          published_manifest_hash={}, published_geometry_count={}, \
          source_end_sesno={}, published_via={}, last_error=NONE, updated_at=time::now();\n",
@@ -2324,17 +1914,10 @@ fn render_publication_fence(root: RefNo) -> String {
     )
 }
 
-/// 旧发布事务的 revision CAS 没有跟过来（回执里没有 revision），但「同一根不许被两个源
-/// 会话混着发布」这条还在：判据从凭证行上的 `desired_target.source_end_sesno` 读，
-/// 与事务里的写在同一条边界上。
-fn render_publication_guard(root: RefNo, receipt: &RootReceipt) -> String {
-    let root_id = sql_string(&refno_key(root));
-    let source_sesno = receipt.source_sesno;
-    format!(
-        "LET $publish_root = (SELECT * FROM type::thing('gen_root', {root_id}) LIMIT 1)[0];\n\
-         IF $publish_root != NONE AND ($publish_root.desired_target.source_end_sesno?:0) > 0 AND ($publish_root.desired_target.source_end_sesno?:0) != {source_sesno} {{ THROW 'mixed model target publication'; }};\n"
-    )
-}
+// 「同一根不许被两个源会话混着发布」那道守卫（`render_publication_guard`，读凭证行上的
+// `desired_target.source_end_sesno` 与回执比）随 pending 表退了（ADR-072 D5）：`desired_target`
+// 原由数据尾事务的模型意图 upsert 抬到 T，现在没有人先写它；而同一 dbnum 只有本任务一个写者
+// （ADR-071 D5）、同一根还有 `generation_root_lock`，守卫没有对手。
 
 fn append_root_dependency_receipt(
     statements: &mut String,
@@ -3054,104 +2637,30 @@ mod tests {
         }
     }
 
-    fn valid_frozen_envelope() -> crate::data_interface::model_publish_queue::FrozenRootEnvelope {
-        let model_target = crate::fast_model::e3d_model_service::ModelTarget {
-            project: "test".into(),
-            design: crate::fast_model::e3d_model_service::ModelFileTarget {
-                dbnum: 7997,
-                db_type: "DESI".into(),
-                file: "frozen".into(),
-                session: 26,
-                digest: "digest".into(),
-            },
-            catalogue: vec![],
-            template_attlib_digest: "template".into(),
-            generator_fingerprint: "generator".into(),
-            tessellation_profile: "profile".into(),
-        };
-        let target_hash = crate::data_interface::digest::digest(
-            &serde_json::to_vec(&Some(model_target.clone())).unwrap(),
-        );
-        let mut record = baked_record();
-        record.source_sesno = 26;
-        crate::data_interface::model_publish_queue::FrozenRootEnvelope {
-            version: crate::data_interface::model_publish_queue::FORMAT_VERSION,
-            job_id: "profile-job".into(),
-            run_id: "profile-run".into(),
-            dbnum: 7997,
-            source_sesno: 26,
-            source_token: "frozen-source".into(),
-            database_incarnation: "database-1".into(),
-            intent: crate::data_interface::model_publish_queue::RootIntent {
-                root: BRANCH.to_string(),
-                revision: 2,
-                token: "root-token".into(),
-            },
-            target_hash,
-            projection: ProjectionCommit {
-                upserts: vec![record],
-                receipt: Some((
-                    BRANCH,
-                    RootReceipt {
-                        source_sesno: 26,
-                        model_target: Some(model_target),
-                        manifest_hash: "manifest".into(),
-                        geometry_count: 1,
-                        published_via: "regen".into(),
-                    },
-                )),
-                ..ProjectionCommit::default()
-            },
-            created_ms: 0,
-        }
-    }
-
-    #[tokio::test]
-    async fn empty_baseline_proof_skips_the_query_without_changing_the_plan() {
-        let envelope = valid_frozen_envelope();
-        let queried_db = surreal_mem().await;
-        let skipped_db = surreal_mem().await;
-        let (queried, queried_profile) = prepare_frozen_profiled_for_baseline_on(
-            PersistTarget::new(&queried_db, PersistMedium::EmbeddedMem),
-            &envelope,
-            false,
-        )
-        .await
-        .unwrap();
-        let (skipped, skipped_profile) = prepare_frozen_profiled_for_baseline_on(
-            PersistTarget::new(&skipped_db, PersistMedium::EmbeddedMem),
-            &envelope,
-            true,
-        )
-        .await
-        .unwrap();
-        assert_eq!(queried.hash().unwrap(), skipped.hash().unwrap());
-        let sql = skipped.chunks.join("\n");
-        assert!(
-            !sql.contains("room_recalc_element") && !sql.contains("room_recalc_panel"),
-            "初始化发布由项目级全量房间计算收尾，不应制造逐构件待办"
-        );
-        assert_eq!(queried_profile.reconcile_queries, 1);
-        assert_eq!(skipped_profile.reconcile_queries, 0);
-        assert_eq!(skipped_profile.reconcile_read_micros, 0);
-    }
-
     /// 回执盖的就是窗口规划器认的那几列。revision 不在回执里，所以
-    /// `published_revision` 直接跟着行上的 `desired_revision` 走。
+    /// `published_revision` 直接跟着行上的 `desired_revision` 走；`desired_target` 与
+    /// `published_target` 由回执一起写成本次目标（没有人再先写「想要的」，ADR-072 D5）。
+    /// 混源发布守卫随之退役：同库单写者 + 根锁，守卫没有对手。
     #[test]
     fn a_receipt_settles_the_root_credential() {
         let sql = render_receipt(RefNo::new(24384, 1), &receipt()).expect("receipt");
         assert!(sql.contains("UPDATE type::thing('gen_root', '24384_1')"));
         assert!(sql.contains("publication_status='ready'"));
         assert!(sql.contains("published_revision=desired_revision"));
+        assert!(
+            sql.contains("desired_target={dbnum:")
+                && sql.contains("published_target={dbnum:")
+                && sql.matches("source_end_sesno:26}").count() == 2,
+            "{sql}"
+        );
         assert!(sql.contains("published_manifest_hash='abc123'"));
         assert!(sql.contains("published_geometry_count=2"));
         assert!(sql.contains("source_end_sesno=26"));
         assert!(!sql.contains("root_dependency"));
-
-        let guard = render_publication_guard(RefNo::new(24384, 1), &receipt());
-        assert!(guard.contains("THROW 'mixed model target publication'"));
-        assert!(guard.contains("!= 26"));
+        assert!(
+            !sql.contains("mixed model target publication"),
+            "混源守卫已随 pending 表退役: {sql}"
+        );
     }
 
     #[test]
@@ -3680,10 +3189,9 @@ mod tests {
             };
             let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
 
-            crate::data_interface::batch_worker::with_model_publication_window(
+            crate::data_interface::batch_worker::with_active_data_window_for_test(
                 BATCH_DBNUM,
                 7,
-                "{}",
                 async {
                     store.commit(
                         ProjectionScope::Current,
@@ -3936,8 +3444,8 @@ mod tests {
             .split_once("async fn persist_group(")
             .expect("persist_group exists")
             .1
-            .split_once("pub async fn persist_frozen_on(")
-            .expect("frozen persist follows")
+            .split_once("/// The WS router can retain a pending response until reconnection.")
+            .expect("publication request helpers follow")
             .0;
         assert!(
             group.contains("filter_map(crate::fast_model::aabb_tree::projected_tree_entry)"),
@@ -3951,8 +3459,8 @@ mod tests {
             .split_once("async fn persist_root_chunks_impl(")
             .expect("per-root persist exists")
             .1
-            .split_once("pub(crate) fn render_frozen_chunk(")
-            .expect("frozen chunk renderer follows")
+            .split_once("/// 写入口径：**没有 UPDATE，也没有 UPSERT**。")
+            .expect("write mode follows")
             .0;
         assert!(
             per_root.contains("if target.converge_spatial && commits > 0 {")
@@ -4306,15 +3814,6 @@ mod tests {
         .check()
         .expect("seed room statements");
         let epoch_before = spatial_epoch(&db).await;
-        // 第一轮两条几何各排过一次重算；清空之后再看第二轮自己排了谁。
-        db.query(format!(
-            "DELETE {};",
-            crate::data_interface::model_update_pending::TABLE
-        ))
-        .await
-        .expect("clear queue")
-        .check()
-        .expect("clear queue statement");
 
         store.commit(
             ProjectionScope::Current,
@@ -4344,21 +3843,8 @@ mod tests {
             spatial_epoch(&db).await > epoch_before,
             "动过几何的事务必须把 spatial_epoch 推高"
         );
-
-        let mut response = db
-            .query(format!(
-                "SELECT VALUE target_refno FROM {} WHERE action='room_recalc_element';",
-                crate::data_interface::model_update_pending::TABLE
-            ))
-            .await
-            .expect("recalc")
-            .check()
-            .expect("recalc statement");
-        assert_eq!(
-            response.take::<Vec<String>>(0).expect("recalc rows"),
-            vec!["24383/73948".to_string()],
-            "留下来的那条几何要排一次房间重算"
-        );
+        // 「留下来的那条几何要排一次房间重算」那一半随 pending 表退了（ADR-072 D5）：房间随
+        // 任务整库算，发布事务里没有 `room_recalc_*` 行可查。
     }
 
     /// 按根对账的两边必须**同一个口径**：库那边是 `anc CONTAINS <根>`，存储那边是
@@ -4536,162 +4022,6 @@ mod tests {
             .and_then(|response| response.check())
             .map(|_| ());
         result.and(cleanup.map_err(Into::into))
-    }
-
-    #[tokio::test]
-    async fn directed_persist_for_file_round_tags_room_work_as_collecting() {
-        let _room = crate::options::RoomIncrementalOverride::set(true);
-        let db = surreal_mem().await;
-        seed_pe(&db).await;
-        seed_gen_root(&db).await;
-        let store = ModelMemoryStore::default();
-        store.commit(
-            ProjectionScope::Current,
-            vec![ProjectionCommit {
-                upserts: vec![baked_record()],
-                receipt: Some(test_receipt(BRANCH, 1)),
-                ..Default::default()
-            }],
-        );
-
-        let source_token = crate::data_interface::frozen_source::FrozenSource::synthetic(
-            "fixture.db",
-            7997,
-            "DESI",
-            42,
-        )
-        .commit_token_json()
-        .unwrap();
-        persist_root_for_file_round_on(
-            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
-            &store,
-            BRANCH,
-            7997,
-            42,
-            &source_token,
-        )
-        .await
-        .unwrap();
-
-        #[derive(serde::Deserialize)]
-        struct RoomRow {
-            status: String,
-            #[serde(default)]
-            file_rounds: Vec<String>,
-        }
-        let mut response = db
-            .query(
-                "SELECT status, file_rounds FROM model_update_pending:room_recalc_element_24383_73948;",
-            )
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        let row = response
-            .take::<Option<RoomRow>>(0)
-            .unwrap()
-            .expect("directed room row");
-        assert_eq!(row.status, "collecting");
-        assert_eq!(row.file_rounds, ["7997:42"]);
-    }
-
-    #[tokio::test]
-    async fn frozen_file_round_clears_room_edges_in_first_chunk_before_later_failure() {
-        let _room = crate::options::RoomIncrementalOverride::set(true);
-        let db = surreal_mem().await;
-        seed_pe(&db).await;
-        seed_gen_root(&db).await;
-        let root = RefNo::new(24383, 1);
-        let stale = ProjectedGeometry {
-            record_id: "24383_9999".into(),
-            geometry_id: GeometryId::Element {
-                refno: "24383/9999".into(),
-            },
-            source_refno: RefNo::new(24383, 9999),
-            ..baked_record()
-        };
-        db.query(publication_transaction(
-            &render_records(&[stale], WriteMode::Incremental).unwrap(),
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        db.query("CREATE room:one; RELATE pe:24383_9999->room_relate->room:one; RELATE pe:24383_9999->room_panel_relate->room:one;").await.unwrap().check().unwrap();
-        let store = ModelMemoryStore::default();
-        let mut first = baked_record();
-        first.source_sesno = 26;
-        let mut second = other_canonical_record();
-        second.source_sesno = 26;
-        let projection = ProjectionCommit {
-            upserts: vec![first, second],
-            receipt: Some((root, receipt())),
-            ..Default::default()
-        };
-        store.commit(ProjectionScope::Current, vec![projection.clone()]);
-        let envelope = crate::data_interface::model_publish_queue::FrozenRootEnvelope {
-            version: crate::data_interface::model_publish_queue::FORMAT_VERSION,
-            job_id: "test-job".into(),
-            run_id: "test-run".into(),
-            dbnum: 7997,
-            source_sesno: 26,
-            source_token: "frozen".into(),
-            database_incarnation: "database".into(),
-            intent: crate::data_interface::model_publish_queue::RootIntent {
-                root: root.to_string(),
-                revision: 2,
-                token: "token".into(),
-            },
-            target_hash: "target".into(),
-            created_ms: 0,
-            projection,
-        };
-        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
-        let mut prepared = PreparedPublicationParts::default();
-        crate::data_interface::batch_worker::with_model_publication_window(
-            7997,
-            26,
-            "frozen",
-            persist_root_chunks_impl(
-                target,
-                &store,
-                root,
-                1,
-                RoomEffectPolicy::Directed,
-                Some(&envelope),
-                Some(&mut prepared),
-                None,
-                false,
-            ),
-        )
-        .await
-        .unwrap();
-        assert_eq!(prepared.chunks.len(), 2);
-        let before = spatial_epoch(&db).await;
-        db.query(publication_transaction(&prepared.chunks[0]))
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        assert_eq!(count(&db, "room_relate").await, 0);
-        assert_eq!(count(&db, "room_panel_relate").await, 0);
-        assert!(spatial_epoch(&db).await > before);
-        assert_eq!(publication_status(&db).await, "publishing");
-        // Failure of the receipt block must retain first-block cleanup and fence.
-        let second = format!(
-            "THROW 'injected later block failure'; {}",
-            prepared.chunks[1]
-        );
-        assert!(
-            db.query(publication_transaction(&second))
-                .await
-                .unwrap()
-                .check()
-                .is_err()
-        );
-        assert_eq!(publication_status(&db).await, "publishing");
-        assert_eq!(count(&db, "room_relate").await, 0);
-        assert_eq!(count(&db, "model_publish_fragment").await, 0);
     }
 
     async fn seed_gen_root(db: &Surreal<Any>) {

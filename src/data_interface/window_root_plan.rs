@@ -1022,18 +1022,14 @@ pub(crate) async fn build_model_update_plan_from_window(
     })
     .await
     .map_err(|error| anyhow::anyhow!("window root planning task failed: {error}"))??;
-    // 刚体前移开着才多取「安定」四列；关着走原来那条 SELECT，行为逐位相同。
-    let (roots_s, settled) = if sources.rigid.enabled {
-        load_persisted_roots_with_settlement(dbnum).await?
-    } else {
-        (load_persisted_roots(dbnum).await?, BTreeSet::new())
-    };
+    // `roots_S` 连凭证状态一起取（一次 `gen_root` 读，规划输入）：未安定的根要随本窗重排，
+    // 刚体前移那一臂另要「安定」集合。
+    let (roots_s, settled) = load_persisted_roots_with_settlement(dbnum).await?;
     let impact = sources.impact(&roots_s);
     let mut plan = plan_window_roots(&sources.roots_t, &roots_s, &impact);
-    carry_pending_generation_on(&SUL_DB, dbnum, target_sesno, &sources.roots_t, &mut plan).await?;
-    // 分桶在 `carry_pending_generation_on` 之后：带着 pending 重生成的根 `desired_revision` 已被抬高、
-    // 不在 `settled` 里，判据本身就不会把它判成 transform；这里的顺序只是让「提示 ⊆ 最终 regen」
-    // 一目了然。
+    carry_unsettled_generation(&roots_s, &settled, &sources.roots_t, &mut plan);
+    // 分桶在 `carry_unsettled_generation` 之后：带着未完成生成的根不在 `settled` 里，判据本身
+    // 就不会把它判成 transform；这里的顺序只是让「提示 ⊆ 最终 regen」一目了然。
     let rigid = sources.rigid_motion(&roots_s, &settled, &impact);
     let transform_units = transform_units_for(&plan, &rigid, base_sesno);
     let mut warnings = vec![format!(
@@ -1156,40 +1152,33 @@ pub(crate) fn append_room_structural_work(
 
 /// A later data window must carry unfinished generation to its own target even
 /// when its geometry closure is empty. Advancing settled credentials cannot
-/// update this intent: the idle generator would otherwise publish latest@T
-/// against a desired target from the previous window.
-async fn carry_pending_generation_on(
-    db: &Surreal<Any>,
-    dbnum: u32,
-    target_sesno: u32,
+/// update this intent: a root that failed (or was left half-published) in an
+/// earlier window has no valid credential to advance, and nothing else revisits it.
+///
+/// 「未完成」的判据就是凭证本身（`root_is_settled`），不再是 pending 表里的一行（ADR-072 D5）：
+/// `roots_S` 里在 T 端仍存在、却没有安定凭证的根，并进本窗的 regen，从前移与懒生成名单里摘掉。
+fn carry_unsettled_generation(
+    roots_s: &[PersistedRoot],
+    settled: &BTreeSet<RefnoEnum>,
     roots_t: &[GenerationRoot],
     plan: &mut WindowRootPlan,
-) -> anyhow::Result<()> {
-    let mut response = db
-        .query(format!(
-            "SELECT VALUE target_refno FROM model_update_pending WHERE dbnum = {dbnum} \
-         AND action = 'regen_root' AND source_end_sesno > 0 \
-         AND source_end_sesno < {target_sesno};"
-        ))
-        .await?
-        .check()?;
-    let pending: Vec<String> = response.take(0)?;
-    let pending: BTreeSet<_> = pending
-        .into_iter()
-        .map(|root| root.replace('_', "/"))
+) {
+    let unsettled: BTreeSet<RefnoEnum> = roots_s
+        .iter()
+        .map(|root| root.refno)
+        .filter(|refno| !settled.contains(refno))
         .collect();
+    if unsettled.is_empty() {
+        return;
+    }
     for root in roots_t {
-        if pending.contains(&root.root.to_pdms_str())
-            && !plan.regen.iter().any(|item| item.root == root.root)
+        if unsettled.contains(&root.root) && !plan.regen.iter().any(|item| item.root == root.root)
         {
             plan.regen.push(root.clone());
         }
     }
-    plan.advance
-        .retain(|root| !pending.contains(&root.to_pdms_str()));
-    plan.lazy
-        .retain(|root| !pending.contains(&root.root.to_pdms_str()));
-    Ok(())
+    plan.advance.retain(|root| !unsettled.contains(root));
+    plan.lazy.retain(|root| !unsettled.contains(&root.root));
 }
 
 /// Select the same model planner for preview and execution.
@@ -1513,12 +1502,23 @@ pub struct StartupWindowReport {
     pub roots_s: usize,
     /// 其中未安定、被无条件重排的行数。
     pub unsettled: usize,
-    /// 实际写进 `model_update_pending` 的工作项数。
+    /// 交回任务的工作项数（`work_items.len()`）。
     pub enqueued: usize,
     /// 真正被前移的凭证数。
     pub advanced: usize,
     /// 放弃前移 / 开窗失败的原因。
     pub degraded: Option<String>,
+    /// 这一窗要做的工作项，**直接交给调用方的任务执行**（ADR-072 D5：计划在内存，不再写
+    /// `model_update_pending` 行再由任务领回来）。`RegenRoot` 是要重生成的根，其余是就地
+    /// 执行的副动作。
+    pub work_items: Vec<ModelWorkItem>,
+}
+
+/// 还没失败过的可解析根才并进批量重生成（ADR-012）；失败过的逐根跑，让它的错误自己说出口。
+/// 纯谓词（原 `model_update_pending::root_joins_regen_batch`）。
+pub(crate) fn root_joins_regen_batch(attempts: u32, target_refno: &str) -> bool {
+    use std::str::FromStr;
+    attempts == 0 && aios_core::RefU64::from_str(target_refno).is_ok()
 }
 
 fn startup_unsettled_action(_root: &PersistedRoot) -> ModelWorkAction {
@@ -1684,14 +1684,9 @@ pub async fn reconcile_startup_window(
     });
     work_items.dedup_by(|a, b| a.action == b.action && a.target_refno == b.target_refno);
     report.enqueued = work_items.len();
-    if !work_items.is_empty() {
-        crate::data_interface::model_update_pending::enqueue_plan(&ModelUpdatePlan {
-            work_items,
-            ..Default::default()
-        })
-        .await?;
-        crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
-    }
+    // 工作项直接交给调用方的 ModelOnly 任务执行（ADR-072 D5）：没有 pending 行、也没有
+    // 「排进队列再被领走」那一步——这里就在任务里。
+    report.work_items = work_items;
     // Coverage advances only in the owning Task completion transaction.
     // 即使本窗口没有生成项，也不在规划/探针路径推进库级完成水位。调用方仍需通过
     // ModelOnly Task 完成发布、空间与房间，再由 Task 收尾盖章。
@@ -2160,128 +2155,39 @@ mod tests {
 
     // ---- P2-2 凭证前移 ----
 
-    #[tokio::test]
-    async fn unchanged_window_retargets_only_older_live_generation_backlog() {
-        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
-        db.use_ns("window_root_plan")
-            .use_db("carry_pending")
-            .await
-            .unwrap();
-        db.query("CREATE model_update_pending:regen_root_24384_1 SET dbnum=8000, action='regen_root', source_end_sesno=423, target_refno='24384/1';
-                  CREATE model_update_pending:manual SET dbnum=8000, action='regen_root', source_end_sesno=0, target_refno='24384/2';
-                  CREATE model_update_pending:future SET dbnum=8000, action='regen_root', source_end_sesno=425, target_refno='24384/3';
-                  CREATE model_update_pending:other SET dbnum=7997, action='regen_root', source_end_sesno=423, target_refno='24384/4';
-                  CREATE model_update_pending:deleted SET dbnum=8000, action='regen_root', source_end_sesno=423, target_refno='24384/5';
-                  CREATE model_update_pending:cleanup SET dbnum=8000, action='delete_cleanup', source_end_sesno=423, target_refno='24384/6';")
-            .await.unwrap().check().unwrap();
+    /// 上一窗没生成成的根（凭证未安定）要随本窗重排，即便这一窗的几何闭包没碰到它：
+    /// 并进 regen、从前移与懒生成名单摘掉；安定的根照旧前移（ADR-072 D5：判据是凭证，不是 pending 行）。
+    #[test]
+    fn unchanged_window_carries_unsettled_generation_into_regen() {
         let roots = [1, 2, 3, 4, 6]
             .into_iter()
             .map(|id| root(id, "BRAN", GenerationRootKind::DeliveryUnit))
             .collect::<Vec<_>>();
         let old = (1..=6).map(|id| persisted(id, "BRAN")).collect::<Vec<_>>();
         let mut plan = plan_window_roots(&roots, &old, &impact(&[]));
-        carry_pending_generation_on(&db, 8000, 424, &roots, &mut plan)
-            .await
-            .unwrap();
+        // 1 号根上一窗失败、6 号根半发布：两根凭证都不安定；其余安定。
+        let settled: BTreeSet<RefnoEnum> = [2, 3, 4, 5].into_iter().map(r).collect();
+        carry_unsettled_generation(&old, &settled, &roots, &mut plan);
         assert_eq!(
             plan.regen.iter().map(|root| root.root).collect::<Vec<_>>(),
-            vec![r(1)]
+            vec![r(1), r(6)]
         );
-        assert_eq!(plan.advance, vec![r(2), r(3), r(4), r(6)]);
+        assert_eq!(plan.advance, vec![r(2), r(3), r(4)]);
         assert_eq!(
-            plan.delete
-                .iter()
-                .map(|root| root.refno)
-                .collect::<Vec<_>>(),
+            plan.delete.iter().map(|root| root.refno).collect::<Vec<_>>(),
             vec![r(5)]
         );
-        let item = plan
-            .work_items(8000, "DESI", 424)
-            .into_iter()
-            .find(|item| item.action == ModelWorkAction::RegenRoot)
-            .unwrap();
-        let tail = crate::data_interface::increment_tail::render_finalize_tail(
-            8000,
-            424,
-            None,
-            &ModelUpdatePlan {
-                work_items: vec![item],
-                ..Default::default()
-            },
-            &[],
-        );
-        db.query(tail.tail).await.unwrap().check().unwrap();
-        let mut response = db
-            .query("RETURN gen_root:24384_1.desired_target.source_end_sesno;")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        assert_eq!(response.take::<Option<i32>>(0).unwrap(), Some(424));
-        let mut response = db
-            .query("RETURN model_update_pending:regen_root_24384_1.source_end_sesno;")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        assert_eq!(response.take::<Option<i32>>(0).unwrap(), Some(424));
+        // 全部安定时什么都不动。
+        let mut untouched = plan_window_roots(&roots, &old, &impact(&[]));
+        let all: BTreeSet<RefnoEnum> = (1..=6).map(r).collect();
+        carry_unsettled_generation(&old, &all, &roots, &mut untouched);
+        assert!(untouched.regen.is_empty());
+        assert_eq!(untouched.advance, vec![r(1), r(2), r(3), r(4), r(6)]);
     }
 
     fn advance_sql(roots: &[&str], time: Option<&str>) -> Vec<String> {
         let roots: Vec<String> = roots.iter().map(|root| root.to_string()).collect();
         render_credential_advance(8000, 26, time, &roots).unwrap()
-    }
-
-    #[tokio::test]
-    async fn deletion_replaces_old_dead_generation_but_preserves_newer_intent() {
-        use crate::data_interface::increment_tail::render_finalize_tail;
-        use crate::data_interface::model_update_pending::record_id_of;
-        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
-        db.use_ns("pending")
-            .use_db("delete_supersedes_regen")
-            .await
-            .unwrap();
-        for source in [0, 423, 426, 427] {
-            let root = format!("24384/{}", source + 1);
-            let regen_id = record_id_of(ModelWorkAction::RegenRoot, &root);
-            db.query(format!("CREATE {regen_id} SET dbnum=8000, action='regen_root', target_refno='{root}', source_end_sesno={source}, attempts=5, status='dead';"))
-                .await.unwrap().check().unwrap();
-            let cleanup_id = record_id_of(ModelWorkAction::DeleteCleanup, &root);
-            let cleanup = ModelWorkItem {
-                dbnum: 8000,
-                db_type: "DESI".into(),
-                source_end_sesno: 426,
-                action: ModelWorkAction::DeleteCleanup,
-                target_refno: root,
-                noun: "BRAN".into(),
-            };
-            let render = render_finalize_tail(
-                8000,
-                426,
-                None,
-                &ModelUpdatePlan {
-                    work_items: vec![cleanup],
-                    ..Default::default()
-                },
-                &[],
-            );
-            db.query(format!(
-                "BEGIN TRANSACTION; {} COMMIT TRANSACTION;",
-                render.tail
-            ))
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-            let mut response = db.query(format!("RETURN array::len((SELECT VALUE id FROM {regen_id})) = 1; RETURN array::len((SELECT VALUE id FROM {cleanup_id})) = 1;"))
-                .await.unwrap().check().unwrap();
-            assert_eq!(
-                response.take::<Option<bool>>(0).unwrap(),
-                Some(source == 0 || source > 426),
-                "source={source}"
-            );
-            assert_eq!(response.take::<Option<bool>>(1).unwrap(), Some(true));
-        }
     }
 
     /// 前移语句只碰本库、点名的根；只放过「已发布且安定」的行（完成态、`ready`、

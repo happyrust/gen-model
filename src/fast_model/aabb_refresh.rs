@@ -271,6 +271,21 @@ pub async fn update_inst_relate_aabbs_by_refnos_incremental(
     update_inst_relate_aabbs_by_refnos_mode(refnos, replace_exist, true).await
 }
 
+/// 根生成成功后，把被改判的原始位姿目标（BRAN/HANG 里的位姿目标，规划器判成整根重算、
+/// 而根生成器的最终 AABB 刷新集又漏掉了它们）送回统一 AABB 变更链（`PostRegenAabb`）。
+///
+/// 原 `model_update_pending::refresh_post_regen_aabbs`。它曾在刷完之后把变了的目标排成
+/// 房间重算行——那一半随第二条异步账退了（ADR-072 D5）：房间随任务整库算，输入直接取
+/// 刷新后的内存投影与空间树。返回确实有几何、被刷了的目标数。
+pub async fn refresh_post_regen_aabbs(refnos: &[RefnoEnum]) -> anyhow::Result<usize> {
+    if refnos.is_empty() {
+        return Ok(0);
+    }
+    update_inst_relate_aabbs_by_refnos_incremental(refnos, true).await?;
+    let changes = existing_geometric_aabb_changes(refnos).await?;
+    Ok(changes.len())
+}
+
 /// 「按 refno 取树上旧条目」那一步的累计观测（specs/026 T02，ADR-045 的前置量化）。
 ///
 /// 这一步今天遍历整棵 `GLOBAL_AABB_TREE`，而一个生成根要问两遍（布尔前刷一次、布尔后
@@ -479,19 +494,11 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             // 直写路径不产生 `spatial_reconcile` 意图行，epoch 是它在库侧留下的**唯一**
             // 痕迹：少 bump 一次，落盘前崩溃的重启就会看到 sidecar 与库指纹相等、按
             // Reuse 复用一棵陈旧的树，而 /health 的 drift 恒为 false，没有人看得见。
-            // 关掉房间增量、或走非定向的全量生成，都只摘掉 room_recalc 这一条语句。
-            let room_upserts =
-                (durable_room_trigger && crate::options::room_incremental()).then(|| {
-                    crate::data_interface::model_update_pending::render_room_recalc_upserts(
-                        &chunk_changes,
-                    )
-                });
-            let mut statements = Vec::with_capacity(3);
+            // 逐目标的房间重算行不再随这笔事务写（ADR-072 D5）：房间随任务整库算，
+            // 输入就是刷完之后的内存投影与空间树。
+            let mut statements = Vec::with_capacity(2);
             if !update_sql.is_empty() {
                 statements.push(update_sql.clone());
-            }
-            if let Some(room_upserts) = room_upserts {
-                statements.push(room_upserts);
             }
             statements.push(crate::fast_model::aabb_tree::render_spatial_epoch_bump());
             let transaction =
@@ -637,13 +644,10 @@ mod aabb_write_order_tests {
         let pointer_at = body
             .find("statements.push(update_sql.clone())")
             .expect("pointer statement is not part of the direct transaction");
-        assert!(
-            body.contains("render_room_recalc_upserts"),
-            "durable room upsert renderer missing"
-        );
-        let room_at = body
-            .find("statements.push(room_upserts)")
-            .expect("room upserts are not part of the direct transaction");
+        // 逐目标的房间重算行不再随这笔事务写（ADR-072 D5）：房间随任务整库算。
+        for retired in ["render_room_recalc_upserts", "room_upserts"] {
+            assert!(!body.contains(retired), "房间重算行不得回到直写事务 `{retired}`: {body}");
+        }
         let epoch_at = body
             .find("render_spatial_epoch_bump")
             .expect("spatial epoch bump missing");
@@ -660,10 +664,7 @@ mod aabb_write_order_tests {
         );
         assert!(classify_at < records_at, "变化判定必须发生在任何持久写之前");
         assert!(records_at < pointer_at, "AABB 内容记录必须先于指针事务");
-        assert!(
-            pointer_at < room_at && room_at < epoch_at,
-            "指针、房间任务、epoch 顺序漂移"
-        );
+        assert!(pointer_at < epoch_at, "指针、epoch 顺序漂移");
         assert!(
             epoch_at < commit_at && commit_at < tree_at,
             "事务成功之前不得推进内存树"
@@ -690,10 +691,11 @@ mod aabb_write_order_tests {
             body.contains("if !chunk_changes.is_empty() {"),
             "本块确有包围盒变化就必须走事务 + bump: {body}"
         );
-        // durable_room_trigger 从此只决定「要不要随事务发布房间任务」。
+        // durable_room_trigger 从此只决定「定向目标要不要保守算进变更集」；房间任务行
+        // 随 pending 表退了（ADR-072 D5），事务里没有它的门控。
         assert!(
-            body.contains("durable_room_trigger && crate::options::room_incremental()"),
-            "room_upserts 的门控漂移: {body}"
+            !body.contains("durable_room_trigger && crate::options::room_incremental()"),
+            "房间重算行的门控不得回来: {body}"
         );
 
         let bump_at = body

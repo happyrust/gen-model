@@ -1020,15 +1020,32 @@ fn render_legacy_model_watermark_data_only(dbnum: u32) -> String {
     )
 }
 
+/// 「这个库有没有模型投影」的 SurrealQL 谓词（原 `model_completion::projection_presence_expr`，
+/// 随 ADR-072 D5 搬来）：`inst_relate` / `tubi_relate` 两张表各问一次——先按行上的 `dbnum`
+/// 列直查，查不到再从 `pe` 的 dbnum 索引出发沿属主看有没有挂着的投影行（历史行可能没有
+/// `dbnum` 列）。两条路各保其义。
+pub(crate) fn projection_presence_expr(dbnum: u32) -> String {
+    ["inst_relate", "tubi_relate"]
+        .into_iter()
+        .map(|table| {
+            format!(
+                "array::len((SELECT VALUE id FROM {table} WHERE dbnum={dbnum} LIMIT 1)) > 0 OR \
+         array::len((SELECT VALUE id FROM pe WHERE dbnum={dbnum} AND \
+         array::len((SELECT VALUE id FROM {table} WHERE in=$parent.id LIMIT 1)) > 0 LIMIT 1)) > 0"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
 /// 兼容播种的第二半（ADR-060 D10）：模型 / 房间水位缺省按数据水位追平。
 ///
 /// 对象是「已有数据的库」里**旧管线已经留下模型投影**、而 `model_sesno` 从未写过的行：
 /// 两枚水位填成 `applied_sesno`。数据在、模型一行没有的库显式记 0，照旧由模型面生成。
 /// 只填空，重跑无损；`protected`（初始化在飞）的库不碰。
 ///
-/// **必须排在 `init_inst_relate_indices` 之后**：投影探针（`model_completion::
-/// projection_presence_expr`）的 `WHERE in = $parent.id` 没有 `idx_inst_relate_in` 时是逐 pe
-/// 行全表扫，大库上跑不完。
+/// **必须排在 `init_inst_relate_indices` 之后**：投影探针（[`projection_presence_expr`]）
+/// 的 `WHERE in = $parent.id` 没有 `idx_inst_relate_in` 时是逐 pe 行全表扫，大库上跑不完。
 pub(crate) async fn seed_legacy_model_watermarks_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     protected: &[u32],
@@ -1048,7 +1065,7 @@ pub(crate) async fn seed_legacy_model_watermarks_on(
         if protected.contains(&dbnum) {
             continue;
         }
-        let projection = crate::data_interface::model_completion::projection_presence_expr(dbnum);
+        let projection = projection_presence_expr(dbnum);
         let mut probe = db
             .query(format!("RETURN {projection};"))
             .await

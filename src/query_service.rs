@@ -12,7 +12,6 @@ use tokio::sync::OnceCell;
 use crate::data_interface::generation_root::{
     configured_delivery_unit_types, resolve_live_element_generation_root,
 };
-use crate::data_interface::manual_update::load_pending_model_units;
 use crate::data_interface::model_impact::{
     AttributeEffect, classify_attribute_effect, normalize_attribute_name,
 };
@@ -21,7 +20,7 @@ use crate::e3d_query::{
     render_owner_chain, scalar, section, validate_refno,
 };
 
-pub const QUERY_TOOL_NAMES: [&str; 12] = [
+pub const QUERY_TOOL_NAMES: [&str; 11] = [
     "e3d.element.identity",
     "e3d.element.owner_chain",
     "e3d.element.attributes",
@@ -32,7 +31,6 @@ pub const QUERY_TOOL_NAMES: [&str; 12] = [
     "e3d.room.lookup",
     "model.generation_root",
     "model.change_impact",
-    "model.pending_units",
     "model.spatial.bounds",
 ];
 
@@ -114,18 +112,6 @@ struct MembersArgs {
     limit: usize,
 }
 
-#[derive(Default, Deserialize)]
-struct PendingArgs {
-    #[serde(default)]
-    dbnum: Option<u32>,
-    #[serde(default = "default_true")]
-    include_dead: bool,
-    #[serde(default)]
-    offset: usize,
-    #[serde(default = "default_limit")]
-    limit: usize,
-}
-
 #[derive(Deserialize)]
 struct ImpactArgs {
     attribute: String,
@@ -133,10 +119,6 @@ struct ImpactArgs {
 
 fn default_limit() -> usize {
     200
-}
-
-fn default_true() -> bool {
-    true
 }
 
 impl QueryService {
@@ -176,7 +158,6 @@ impl QueryService {
             "e3d.room.lookup" => self.room(decode(arguments)?).await?,
             "model.generation_root" => self.generation_root(decode(arguments)?).await?,
             "model.change_impact" => self.change_impact(decode(arguments)?)?,
-            "model.pending_units" => self.pending_units(decode(arguments)?).await?,
             "model.spatial.bounds" => self.spatial_bounds(decode(arguments)?).await?,
             _ => return Err(QueryError::invalid(format!("unknown query tool {tool}"))),
         };
@@ -626,33 +607,6 @@ impl QueryService {
         }))
     }
 
-    async fn pending_units(&self, args: PendingArgs) -> Result<Value, QueryError> {
-        validate_limit(args.limit)?;
-        Self::ensure_model_db().await?;
-        let mut units = load_pending_model_units().await.map_err(db_error)?;
-        if let Some(dbnum) = args.dbnum {
-            units.retain(|unit| unit.dbnum == dbnum);
-        }
-        if !args.include_dead {
-            units.retain(|unit| !unit.dead);
-        }
-        let total = units.len();
-        let dead_count = units.iter().filter(|unit| unit.dead).count();
-        let units = units
-            .into_iter()
-            .skip(args.offset)
-            .take(args.limit)
-            .collect::<Vec<_>>();
-        Ok(json!({
-            "total": total,
-            "dead_count": dead_count,
-            "offset": args.offset,
-            "limit": args.limit,
-            "truncated": args.offset.saturating_add(args.limit) < total,
-            "units": units,
-        }))
-    }
-
     async fn spatial_bounds(&self, args: BoundsArgs) -> Result<Value, QueryError> {
         let refno = parsed_model_refno(&args.refno)?;
         // Use the same per-database projection as ensure/records. In ingest mode,
@@ -925,11 +879,13 @@ mod tests {
     }
 
     #[test]
-    fn contract_has_exactly_twelve_unique_tools() {
+    /// `model.pending_units` 随 pending 表退了（ADR-072 D5），契约剩十一个工具。
+    fn contract_has_exactly_eleven_unique_tools() {
         let unique = QUERY_TOOL_NAMES
             .into_iter()
             .collect::<std::collections::HashSet<_>>();
-        assert_eq!(unique.len(), 12);
+        assert_eq!(unique.len(), 11);
+        assert!(!unique.contains(&"model.pending_units"));
     }
 
     /// ADR-072 D4：`e3d.room.lookup` 回的 `published_version` 就是该库的 `room_sesno`（任务收尾

@@ -581,24 +581,10 @@ async fn reconcile_rooms_with_resident_model(db_option: &DbOption) -> bool {
     use crate::fast_model::room_startup::{self, StartupRoomVerdict};
 
     let verdict = room_startup::startup_room_reconcile(db_option).await;
-    let pending_room_work = match crate::data_interface::model_update_pending::has_room_work().await
-    {
-        Ok(pending) => pending,
-        Err(error) => {
-            eprintln!("读取历史房间待办失败，按需要全量计算处理: {error:#}");
-            true
-        }
-    };
+    // 「初始化前遗留的逐构件房间待办」那一档随 pending 表退了（ADR-072 D5）：房间随各库任务
+    // 整库算，启动这里只认对比判出来的去向。
     let (reason, expected) = match verdict {
         StartupRoomVerdict::FullRebuild { reason, expected } => (reason, expected),
-        StartupRoomVerdict::Settled if pending_room_work => (
-            "存在初始化前遗留的逐构件房间待办；改由项目级全量房间计算覆盖".to_string(),
-            crate::fast_model::room_resident::resident_rooms()
-                .read()
-                .unwrap()
-                .for_membership(crate::options::data_face())
-                .map(|model| model.manifest.clone()),
-        ),
         StartupRoomVerdict::Settled => return true,
     };
     if !crate::options::startup_autorun() {
@@ -631,22 +617,10 @@ async fn reconcile_rooms_with_resident_model(db_option: &DbOption) -> bool {
             let reference_written =
                 room_startup::settle_full_rebuild(db_option, expected.as_ref(), &outcome).await;
             if !reference_written {
-                eprintln!("项目房间完成基线未提交，保留历史待办与初始化屏障");
+                eprintln!("项目房间完成基线未提交，保留初始化屏障");
                 return false;
             }
-            match crate::data_interface::model_update_pending::
-                clear_room_work_covered_by_full_rebuild(&cutoff)
-                .await
-            {
-                Ok(cleared) => {
-                    println!("项目级房间计算覆盖并清理 {cleared} 条历史房间待办");
-                    true
-                }
-                Err(error) => {
-                    eprintln!("房间已算完，但历史房间待办清理失败: {error:#}");
-                    false
-                }
-            }
+            true
         }
         Err(error) => {
             eprintln!("计算房间未完全成功: {error:#}");
@@ -831,21 +805,34 @@ async fn hydrate_model_projections(states: &[crate::data_interface::dbnum_state:
     );
 }
 
-/// 一次性迁移（ADR-071 S6）：初始化发布 run 的几张表已经没有写者（S5 删掉了 run），存量库里
-/// 若还留着就丢掉。`REMOVE TABLE IF EXISTS` 幂等，每次启动跑一遍也只是空转；失败只出声不拦启动
-/// ——这些表不参与任何读路。`model_update_pending` / `incr_side_effect_pending` /
-/// `published_file_input` / `room_published_*` **不在这里**：它们随 S4 后半 / S7 各自的那一刀退。
+/// 一次性迁移（ADR-071 S6 / ADR-072 D5）：没有写者的表存量库里若还留着就丢掉。
+/// `REMOVE TABLE IF EXISTS` 幂等，每次启动跑一遍也只是空转；失败只出声不拦启动——这些表不参与
+/// 任何读路。ADR-072 W4：退役表名在 `src/` 里**只许**出现在这份清单里。
+///
+/// - 初始化发布 run 那六张（ADR-071 S5）；
+/// - 第二条异步账那四张：`model_update_pending`（模型工作队列）/ `incr_side_effect_pending`
+///   （副作用补偿 + 文件轮次）/ `published_file_input`（房间输入发布清单）/
+///   `increment_update_attempt`（固定区间重放的恢复记录，位置让给 `dbnum_write_state`）；
+/// - `room_published_*` 三张：房间输入的发布视图与拓扑源分片，常驻房间模型改从 `inst_relate`
+///   实时行装（d-21）、拓扑分片只进内存与磁盘工件。
 async fn retire_publish_run_tables() {
     if !crate::options::store_mode().is_durable() {
         return;
     }
-    const RETIRED: [&str; 6] = [
+    const RETIRED: [&str; 13] = [
         "model_publish_run",
         "model_publish_fragment",
         "model_publish_ack",
         "model_publish_database",
         "model_publish_error",
         "model_publish_superseded",
+        "model_update_pending",
+        "incr_side_effect_pending",
+        "published_file_input",
+        "increment_update_attempt",
+        "room_published_inst",
+        "room_published_topology",
+        "room_topology_source",
     ];
     let sql = RETIRED
         .iter()
@@ -858,10 +845,10 @@ async fn retire_publish_run_tables() {
         .and_then(|response| response.check())
     {
         Ok(_) => println!(
-            "初始化发布 run 的 {} 张表已确认不存在（一次性迁移，幂等）",
+            "发布阶段与第二条异步账的 {} 张退役表已确认不存在（一次性迁移，幂等）",
             RETIRED.len()
         ),
-        Err(error) => eprintln!("清理初始化发布 run 遗留表失败（下次启动重试）: {error:#}"),
+        Err(error) => eprintln!("清理发布阶段遗留表失败（下次启动重试）: {error:#}"),
     }
 }
 
@@ -1403,16 +1390,17 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             // `model_incremental()` 上（batch_worker 的空闲模型门），开关关着时
             // model_ready 在本进程内永远不会置位——这里若照常等待就是无限期挂死：
             // watcher/web 已经起了，启动序列却永远走不到房间阶段与完成横幅。
-            // 模型门照开（按需生成沿用 require_model_generation 那道门），durable
-            // 积压原样留存，只跳过等待；房间阶段由下方同一开关一并跳过。
+            // 模型门照开（按需生成沿用 require_model_generation 那道门），只跳过等待；
+            // 房间阶段由下方同一开关一并跳过。
             println!(
-                "模型增量阶段已关闭（model_incremental=false）：durable 模型积压留存不消化，\
-                 跳过启动模型收敛等待（重新开启后由空闲轮回补；按需生成不受影响）"
+                "模型增量阶段已关闭（model_incremental=false）：跳过启动模型收敛等待\
+                 （重新开启后由恢复任务按凭证缺口回补；按需生成不受影响）"
             );
         } else {
-            // 收敛发生在 worker 空闲轮里（模型积压分页消化、空间收敛、AABB 落盘，
-            // 任一环失败都按 30s 退避重试），主线可能要等很久。干等会让启动看起来
-            // 像挂死——数量/阶段变化时报实际进展，完全不变时最多每 300s 提醒一次。
+            // 模型工作随各库任务同步做完（ADR-072 D5，没有 pending 积压可数），收敛只剩
+            // worker 空闲轮那几步（认领迟到批次、AABB 落盘、模型门）。主线可能要等在飞的
+            // 任务跑完；干等会让启动看起来像挂死——在飞任务变化时报实际进展，完全不变时
+            // 最多每 300s 提醒一次。
             let mut waited_secs = 0u64;
             let mut last_wait_fingerprint: Option<String> = None;
             let mut last_wait_emitted_secs = 0u64;
@@ -1427,87 +1415,23 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
                     break;
                 }
                 waited_secs += 60;
-                let pending =
-                    crate::data_interface::model_update_pending::model_pending_status().await;
-                let telemetry =
-                    crate::data_interface::model_update_pending::model_drain_telemetry_snapshot();
-                let (message, fingerprint) = match pending {
-                    Ok(status) => {
-                        let count = |action: &str| {
-                            status
-                                .by_action
-                                .get(action)
-                                .map_or(0, |counts| counts.retryable)
-                        };
-                        let non_regen =
-                            count("transform") + count("delete_cleanup") + count("cascade_expand");
-                        let regen = count("regen_root");
-                        let aabb = count("post_regen_aabb");
-                        let stage = telemetry
-                            .get("last_stage")
-                            .and_then(serde_json::Value::as_str)
-                            .unwrap_or("waiting");
-                        let page_claimed = telemetry
-                            .get("last_page_claimed")
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(0);
-                        let page_completed = telemetry
-                            .get("last_page_completed")
-                            .and_then(serde_json::Value::as_u64)
-                            .unwrap_or(0);
-                        let phase = if non_regen > 0 {
-                            "non_regen"
-                        } else if regen > 0 {
-                            "regen_root"
-                        } else if aabb > 0 {
-                            "post_regen_aabb"
-                        } else {
-                            "spatial_persist"
-                        };
-                        let message = if regen > 0 {
-                            format!(
-                                "初始化模型进行中：阶段={phase} regen_root剩余={regen} \
-                                 当前页={page_completed}/{page_claimed} 子阶段={stage} 已等={waited_secs}s；AABB尚未开始"
-                            )
-                        } else {
-                            format!(
-                                "初始化模型进行中：阶段={phase} non_regen剩余={non_regen} \
-                                 AABB剩余={aabb} 当前页={page_completed}/{page_claimed} \
-                                 子阶段={stage} 已等={waited_secs}s"
-                            )
-                        };
-                        let fingerprint = format!(
-                            "{phase}|{non_regen}|{regen}|{aabb}|{stage}|{page_completed}|{page_claimed}"
-                        );
-                        (message, fingerprint)
-                    }
-                    Err(error) => (
-                        format!("读取初始化模型进展失败（已等 {waited_secs}s）: {error:#}"),
-                        format!("status_error:{error:#}"),
-                    ),
-                };
-                // 「数字不变就退到 300 秒一行」这条退避在卡死时是反的：越卡越安静。
-                // 2026-08-27 现场前 19 分钟每 60 秒一行，真卡住之后反而变成 300 秒一行。
-                // 页级停滞一旦确认，就按 60 秒照常出声，并把停滞页数带上。
-                let starved =
-                    crate::data_interface::model_update_pending::model_drain_page_starved();
-                let message = if starved {
-                    format!(
-                        "{message}；模型页已连续 {} 页整页认领、零收口——这不是慢是收不掉，\
-                         看日志里点名的根与 /health 的 blocking_conditions",
-                        crate::data_interface::model_update_pending::model_drain_starved_pages()
-                    )
-                } else {
-                    message
-                };
+                let registry = crate::data_interface::task_registry::TaskRegistry::global();
+                let running = registry.running_data_batch_dbnums();
+                let queued = scheduler.snapshot().iter().filter(|row| row.state == "queued").count();
+                let message = format!(
+                    "初始化模型进行中：在飞任务 {} 个（dbnum {:?}）、排队 {queued} 条，已等={waited_secs}s",
+                    running.len(),
+                    running
+                );
+                let fingerprint = format!("{running:?}|{queued}");
                 let changed = last_wait_fingerprint.as_deref() != Some(fingerprint.as_str());
-                if starved || changed || waited_secs.saturating_sub(last_wait_emitted_secs) >= 300 {
+                if changed || waited_secs.saturating_sub(last_wait_emitted_secs) >= 300 {
                     println!("{message}");
                     last_wait_fingerprint = Some(fingerprint);
                     last_wait_emitted_secs = waited_secs;
                 }
             }
-            println!("持久模型工作单与 AABB 阶段已收敛");
+            println!("模型阶段已收敛");
         }
     }
 
@@ -2209,11 +2133,9 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     // cleanup error is fatal: continuing would replay a prior process snapshot.
     //
     // 初始化发布 run 的 journal 恢复（`recover_before_cleanup`）已退役（ADR-071 S5，d-300）；
-    // 模型投影的启动水化在 `run_cli` 的统一水化段里（ADR-071 D7 / S6）。
-    let cleared = crate::data_interface::model_update_pending::clear_stale_at_process_start()
-        .await
-        .map_err(|error| anyhow!("启动清理 model_update_pending 失败，拒绝继续：{error:#}"))?;
-    println!("启动清理 model_update_pending 完成：删除 {cleared} 条历史工作单");
+    // 模型投影的启动水化在 `run_cli` 的统一水化段里（ADR-071 D7 / S6）。启动清理
+    // `model_update_pending` 也没有了（ADR-072 D5）：那张表随第二条异步账退役，`run_cli` 的
+    // 水化段用 `REMOVE TABLE IF EXISTS` 一次收掉；崩溃残留的出路是写入标记回退。
 
     // 启动分层判据装载空间树，与 run_app 同一失败语义（方案决策 D3）：树是可
     // 重建的派生数据，加载失败告警降级空树，不阻断启动；降级两态交给后台复检。

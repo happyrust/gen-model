@@ -1,6 +1,10 @@
-//! 指定 dbnum 全量模型重建的进程内任务协调。它只强制重排权威生成根，实际消费仍由
-//! `model_update_pending` 单派发器完成；重启后注册表和 lease 一并消失，历史 pending
-//! 仍按启动纪律清理，不自动恢复人工任务。
+//! 指定 dbnum 全量模型重建：把该库**全部**权威生成根装进一条 `ModelOnly` 任务的名单
+//! （`DiscoveredBatch::regen_roots`）排进共享队列，由数据批次 worker 按普通任务执行——
+//! 生成、合块落库、空间树就地收敛、房间段、收尾盖章全在那条任务里（ADR-071 / ADR-072）。
+//!
+//! 它原先「先作废 `model_update_pending` 旧队列、再把根 seed 进去、另起一个监视器数
+//! pending 行」；第二条异步账退了（ADR-072 D5），重建就是一条任务，进度看 `/tasks` 里
+//! 那一行，没有第二本账要盯。
 
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -8,16 +12,15 @@ use std::sync::{LazyLock, Mutex};
 use aios_core::{RefnoEnum, SUL_DB};
 use serde::Serialize;
 
-use crate::data_interface::task_registry::{TaskRegistry, TaskState};
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ModelRebuildReceipt {
+    /// 排进队列的那条 ModelOnly 任务（`/tasks/{task_id}`）。
     pub task_id: String,
     pub dbnum: u32,
     pub expected_roots: usize,
-    /// 本次重建开工时作废掉的陈旧增量行数（R6）。
-    pub discarded_pending: u64,
+    /// 队列上的处置：`new` = 新排了一行；`merged` = 并进了该库已排队的行（名单取并集）。
     pub state: &'static str,
 }
 
@@ -31,7 +34,14 @@ fn active() -> std::sync::MutexGuard<'static, HashMap<u32, ModelRebuildReceipt>>
 }
 
 pub fn active_for_dbnum(dbnum: u32) -> Option<ModelRebuildReceipt> {
-    active().get(&dbnum).cloned()
+    active()
+        .get(&dbnum)
+        .filter(|receipt| {
+            crate::data_interface::task_registry::TaskRegistry::global()
+                .get(&receipt.task_id)
+                .is_some_and(|entry| !entry.state.is_terminal())
+        })
+        .cloned()
 }
 
 pub async fn reject_ensure_during_rebuild(root: RefnoEnum) -> anyhow::Result<()> {
@@ -67,205 +77,92 @@ pub async fn start(mgr: &AiosDBManager, dbnum: u32) -> anyhow::Result<ModelRebui
         return Ok(receipt);
     }
 
-    let task_id = TaskRegistry::new_task_id(&format!("model-rebuild-{dbnum}"));
-    let registry = TaskRegistry::global();
-    let reserved = ModelRebuildReceipt {
-        task_id: task_id.clone(),
+    // 权威根清单来自文件最新会话的 `DbSet@T`（与增量窗口、启动恢复同一枚举）。
+    let version = tokio::task::spawn_blocking(move || {
+        crate::data_interface::model_source::latest_source_version(dbnum)
+    })
+    .await
+    .map_err(|error| anyhow::anyhow!("model rebuild dbnum={dbnum} source read panicked: {error}"))??;
+    let latest = version.sesno as i32;
+    let roots = crate::data_interface::window_root_plan::enumerate_target_roots(dbnum, version.sesno)
+        .await?;
+    let found = crate::data_interface::batch_scheduler::DiscoveredBatch {
+        project: mgr.db_option.project_name.clone(),
         dbnum,
-        expected_roots: 0,
-        discarded_pending: 0,
-        state: "queued",
+        db_type: version.db_type.clone(),
+        phase: crate::data_interface::initialization_phase::DataPhase::Design,
+        epoch_id: 0,
+        intent: crate::data_interface::batch_queue::BatchIntent::ModelOnly,
+        // 下限 = 目标：规划器不开窗，进工作单的就是这份全量名单（加本就未安定的根）。
+        model_start_sesno: Some(latest),
+        file_name: version
+            .file
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        path: version.file.clone(),
+        applied_sesno: latest,
+        file_latest_sesno: latest,
+        previous_observed_sesno: latest,
+        first_pending_sesno_time: None,
+        file_latest_sesno_time: version.session_time.clone(),
+        reinit_requested: false,
+        regen_roots: roots
+            .iter()
+            .map(|root| crate::data_interface::batch_scheduler::RegenRoot {
+                refno: root.root.to_pdms_str(),
+                noun: root.noun.clone(),
+            })
+            .collect(),
     };
-    {
-        let mut tasks = active();
-        if let Some(existing) = tasks.get(&dbnum) {
-            return Ok(existing.clone());
-        }
-        tasks.insert(dbnum, reserved);
-    }
-    registry.insert_running_model_rebuild(
-        &task_id,
-        &mgr.db_option.project_name,
-        dbnum,
-        0,
-        serde_json::json!({"dbnum": dbnum, "stage": "coverage_scan"}),
-    );
-    // 先作废旧队列再回填覆盖，顺序是硬的：排着的增量是照重建前那份模型算的，
-    // 而非 regen 阶段跑在 regen 前面——留到重建之后，它们会先拿旧结论改一遍
-    // 马上要被替换的行。core 的 `Refresh(当前 VIEW)` 在同一处清空整条队列。
-    let prepared = async {
-        let discarded =
-            crate::data_interface::model_update_pending::discard_pending_for_full_rebuild(dbnum)
-                .await?;
-        let coverage =
-            crate::data_interface::model_update_pending::sync_and_seed_model_coverage(dbnum, true)
-                .await?;
-        anyhow::Ok((discarded, coverage))
-    }
-    .await;
-    let (discarded_pending, coverage) = match prepared {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            active().remove(&dbnum);
-            registry.finish(
-                &task_id,
-                TaskState::Failed,
-                serde_json::json!({"error": format!("{error:#}")}),
-            );
-            return Err(error);
-        }
-    };
-    registry.set_unit_totals(&task_id, coverage.expected_roots as u32);
-    registry.set_stage(&task_id, "claim");
-    registry.set_detail(
-        &task_id,
-        serde_json::json!({
-            "dbnum": dbnum,
-            "expected_roots": coverage.expected_roots,
-            "pending": coverage.enqueued_roots,
-            "discarded_pending": discarded_pending,
-            "completed": 0,
-            "failed": 0,
-            "dead": 0,
-            "execution_group_size": crate::options::model_regen_execution_group(),
-            "effective_root_inflight": crate::data_interface::model_concurrency::effective_root_inflight(),
-            "root_inflight_max": crate::options::model_root_inflight_max(),
-        }),
+    let outcome = crate::data_interface::batch_scheduler::BatchScheduler::global().enqueue(
+        crate::data_interface::task_registry::TaskRegistry::global(),
+        &found,
+        false,
     );
     let receipt = ModelRebuildReceipt {
-        task_id: task_id.clone(),
+        task_id: outcome.info.task_id.clone(),
         dbnum,
-        expected_roots: coverage.expected_roots,
-        discarded_pending,
-        state: "queued",
+        expected_roots: roots.len(),
+        state: match outcome.outcome {
+            crate::data_interface::batch_queue::Enqueued::New => "new",
+            _ => "merged",
+        },
     };
+    println!(
+        "整库模型重建已排 ModelOnly 任务 dbnum={dbnum} roots={} target={latest} outcome={:?} task={}",
+        roots.len(),
+        outcome.outcome,
+        outcome.info.task_id
+    );
     active().insert(dbnum, receipt.clone());
-    crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
-    spawn_monitor(task_id, dbnum, coverage.expected_roots);
     Ok(receipt)
-}
-
-fn spawn_monitor(task_id: String, dbnum: u32, expected_roots: usize) {
-    tokio::spawn(async move {
-        let mut settling_reported = false;
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-            let sql = format!(
-                "SELECT count() AS count FROM model_update_pending WHERE dbnum = {dbnum} \
-                 AND action = 'regen_root' GROUP ALL;\n\
-                 SELECT count() AS count FROM model_update_pending WHERE dbnum = {dbnum} \
-                 AND action = 'regen_root' AND attempts >= {} GROUP ALL;",
-                crate::data_interface::model_update_pending::MAX_ATTEMPTS
-            );
-            let counts = async {
-                let mut response = SUL_DB.query(sql).await?.check()?;
-                let pending: Vec<serde_json::Value> = response.take(0)?;
-                let dead: Vec<serde_json::Value> = response.take(1)?;
-                let count = |rows: &[serde_json::Value]| {
-                    rows.first()
-                        .and_then(|row| row.get("count"))
-                        .and_then(serde_json::Value::as_u64)
-                        .unwrap_or(0) as usize
-                };
-                anyhow::Ok((count(&pending), count(&dead)))
-            }
-            .await;
-            let (pending, dead) = match counts {
-                Ok(counts) => counts,
-                Err(error) => {
-                    log::warn!("model rebuild monitor dbnum={dbnum} failed: {error:#}");
-                    continue;
-                }
-            };
-            let completed = expected_roots.saturating_sub(pending);
-            let registry = TaskRegistry::global();
-            registry.set_units_done(&task_id, completed as u32);
-            registry.set_detail(
-                &task_id,
-                serde_json::json!({
-                    "dbnum": dbnum,
-                    "expected_roots": expected_roots,
-                    "pending": pending,
-                    "completed": completed,
-                    "dead": dead,
-                    "execution_group_size": crate::options::model_regen_execution_group(),
-                    "effective_root_inflight": crate::data_interface::model_concurrency::effective_root_inflight(),
-                    "root_inflight_max": crate::options::model_root_inflight_max(),
-                }),
-            );
-            if dead > 0 {
-                registry.finish(
-                    &task_id,
-                    TaskState::Failed,
-                    serde_json::json!({"completed": completed, "dead": dead}),
-                );
-                active().remove(&dbnum);
-                break;
-            }
-            if pending == 0 {
-                match crate::data_interface::model_coverage::model_coverage_current(dbnum).await {
-                    Ok(true) => {
-                        registry.finish(
-                            &task_id,
-                            TaskState::Succeeded,
-                            serde_json::json!({"completed": completed, "model_ready": true}),
-                        );
-                        active().remove(&dbnum);
-                        break;
-                    }
-                    Ok(false) if !settling_reported => {
-                        registry.set_stage(&task_id, "settling");
-                        settling_reported = true;
-                    }
-                    Ok(false) => {}
-                    Err(error) => {
-                        log::warn!("model rebuild coverage check dbnum={dbnum} failed: {error:#}")
-                    }
-                }
-            }
-        }
-    });
 }
 
 #[cfg(test)]
 mod tests {
+    /// 重建只排任务，不自己动库：不改水位、不清库、不删模型，也没有第二本 pending 账。
     #[test]
-    fn rebuild_reuses_the_model_queue_and_never_mutates_the_watermark() {
+    fn rebuild_enqueues_one_model_only_task_and_never_mutates_the_database() {
         let source = include_str!("model_rebuild.rs");
         let start = source
             .split_once("pub async fn start(")
             .expect("start exists")
             .1
-            .split_once("fn spawn_monitor")
-            .expect("monitor follows start")
+            .split_once("#[cfg(test)]")
+            .expect("tests follow")
             .0;
-        assert!(start.contains("sync_and_seed_model_coverage"));
-        assert!(start.contains("BatchScheduler::global().wake()"));
-        assert!(!start.contains("advance_applied"));
-        assert!(!start.contains("wipe_dbnum"));
-        assert!(!start.contains("delete_model"));
-    }
-
-    /// R6 / T3.4 —— 作废旧队列必须在回填覆盖**之前**。
-    ///
-    /// 反过来写就把重建自己刚排下的那批 regen 一起删了，重建立刻变成空转；
-    /// 而两条都不做，非 regen 阶段会先拿旧窗口的结论改一遍马上要被替换的行。
-    #[test]
-    fn stale_queue_is_discarded_before_the_rebuild_seeds_its_own_work() {
-        let source = include_str!("model_rebuild.rs");
-        let start = source
-            .split_once("pub async fn start(")
-            .expect("start exists")
-            .1
-            .split_once("fn spawn_monitor")
-            .expect("monitor follows start")
-            .0;
-        let discard = start
-            .find("discard_pending_for_full_rebuild(dbnum)")
-            .expect("整库重建必须先作废陈旧增量");
-        let seed = start
-            .find("sync_and_seed_model_coverage(dbnum, true)")
-            .expect("覆盖回填仍在");
-        assert!(discard < seed, "作废要排在回填之前: {start}");
+        assert!(start.contains("BatchIntent::ModelOnly"));
+        assert!(start.contains("enumerate_target_roots("));
+        assert!(start.contains("BatchScheduler::global().enqueue("));
+        for forbidden in [
+            "advance_applied",
+            "wipe_dbnum",
+            "delete_model",
+            "model_update_pending",
+            "SUL_DB",
+        ] {
+            assert!(!start.contains(forbidden), "start 不该出现 {forbidden}");
+        }
     }
 }

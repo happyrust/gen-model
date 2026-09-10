@@ -526,29 +526,6 @@ pub(crate) async fn persist_aabb_tree_if_dirty_locked() -> anyhow::Result<bool> 
     Ok(true)
 }
 
-/// 过渡壳：文件发布清单退役前（`side_effect_pending` / `room_resident::advance_manifest`
-/// 仍在调）保留原语义——不看脏标记、过发布门就无条件写一次快照并清脏。快照头不再记
-/// 发布清单，`_jobs` 没有用处；随第二条异步账一起删（ADR-072 D5 / 计划 R3–R4）。
-pub(crate) async fn persist_aabb_tree_if_dirty_locked_for_publication(
-    _jobs: &[crate::data_interface::side_effect_pending::PublishedRoundIdentity],
-) -> anyhow::Result<bool> {
-    let state = crate::fast_model::spatial_state::current_state();
-    if !state.allows_snapshot_publish() {
-        AABB_TREE_DIRTY.store(true, Ordering::SeqCst);
-        println!(
-            "空间树状态 {} 不允许发布文件快照，保留脏标记等状态收敛",
-            state.as_str()
-        );
-        return Ok(false);
-    }
-    if let Err(error) = persist_project_tree_now().await {
-        AABB_TREE_DIRTY.store(true, Ordering::SeqCst);
-        return Err(error);
-    }
-    AABB_TREE_DIRTY.store(false, Ordering::SeqCst);
-    Ok(true)
-}
-
 /// 无条件写回并清脏标记（全量生成收尾走这里；Python `spatial.persist(force)`
 /// 在入口另有 Ready 严门）。
 ///
@@ -1178,11 +1155,8 @@ mod tests {
             ))
             .expect("persist_aabb_tree_if_dirty_locked must exist")
             .1
-            .split_once(concat!(
-                "pub(crate) async fn ",
-                "persist_aabb_tree_if_dirty_locked_for_publication("
-            ))
-            .expect("publication shim must follow")
+            .split_once("/// 无条件写回并清脏标记")
+            .expect("unconditional persist must follow")
             .0;
         // 发布门分支：状态不可信 → 恢复脏标记且不落盘。
         let gate_at = body

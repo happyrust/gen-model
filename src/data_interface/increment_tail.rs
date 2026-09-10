@@ -10,45 +10,19 @@
 //! `load_attempt`）——退役了。崩溃恢复不再「复用旧计划重放那一段」，改成
 //! [`write_state`](crate::data_interface::write_state) 的写入标记：见 `writing{S,T}` 就回退到 S、
 //! 从头重算 S→T。于是尾事务这边少了最后一句：**它不再删任何标记行**，标记由任务收尾那一笔
-//! （`task_end`）盖成 `finished`。`ATTEMPT_TABLE` 常量留着，因为同一张表还住着
-//! `staging::attempts` 的 per-root attempts 与 `window_block`（R4 才退）。
+//! （`task_end`）盖成 `finished`。
 //!
-//! 尾事务渲染仍要回头调 `model_update_pending` 的 [`render_upsert`] / [`source_time_for`] /
-//! [`render_delete_revision`]：模型意图这会儿还落成 pending 行，那是 S6 / S7 掐掉写入点
-//! 之后才会消失的依赖，不是本次搬家要解决的。
+//! **2026-09-10（ADR-072 D5）**：尾事务不再写模型意图行——任务计划在内存，`RegenRoot` 之外的
+//! 工作项由任务就地执行（`batch_worker::run_model_side_actions`）；空间意图行、per-root
+//! attempts 与 `window_block` 也随第二条异步账一起退了。尾事务现在只剩：房间全量重建要求
+//! （ADR-040）、懒生成根观察值、水位推进。
 
 use aios_core::SUL_DB;
 use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
-use crate::data_interface::model_update_pending::{
-    render_delete_revision, render_upsert, source_time_for,
-};
-use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction};
+use crate::data_interface::model_update_plan::ModelUpdatePlan;
 use crate::data_interface::window_root_plan::CredentialAdvanceOutcome;
-
-pub const ATTEMPT_TABLE: &str = "increment_update_attempt";
-
-pub async fn mark_attempt_commit_state_on(
-    db: &Surreal<Any>,
-    dbnum: u32,
-    commit_token: &str,
-    status: &str,
-) -> anyhow::Result<()> {
-    let commit_token = escape_surql_str(commit_token);
-    let status = escape_surql_str(status);
-    db.query(format!(
-        "UPDATE {ATTEMPT_TABLE}:{dbnum} SET commit_token = '{commit_token}', \
-         status = '{status}', updated_at = time::now();"
-    ))
-    .await
-    .map_err(|error| anyhow::anyhow!("mark increment attempt dbnum={dbnum} failed: {error}"))?
-    .check()
-    .map_err(|error| {
-        anyhow::anyhow!("mark increment attempt dbnum={dbnum} statement failed: {error}")
-    })?;
-    Ok(())
-}
 
 /// The monotonic watermark advance for one `dbnum`. Rendered in one place so
 /// the window and baseline transactions cannot drift apart.
@@ -133,9 +107,8 @@ pub(crate) const FINALIZE_WINDOW_TX_CHUNK: usize = 500;
 /// 拆块之后不变量依然成立：任何一块失败都发生在水位推进**之前**——水位不动、
 /// 恢复记录还在，整窗口按同一区间重放，幂等的固定目标 UPDATE 重复应用只是空转。
 ///
-/// `tail`：收口尾事务体（未包装）——durable 模型工作、空间意图、revision 收口、
-/// 水位推进、attempts 清除、恢复记录删除。行数有界（∝ 工作项数），保持单个原子
-/// 事务：这一段才是「要么全部成立、要么整体重放」的收口本体。
+/// `tail`：收口尾事务体（未包装）——房间全量重建要求、懒生成根观察值、水位推进。
+/// 行数有界，保持单个原子事务：这一段才是「要么全部成立、要么整体重放」的收口本体。
 #[derive(Debug, Clone)]
 pub(crate) struct FinalizeRender {
     /// 已各自包装成 `BEGIN…COMMIT` 的窗口语句批，按原序执行。
@@ -158,11 +131,13 @@ fn render_window_statement_batches(window_statements: &[String]) -> Vec<String> 
 
 /// ADR-017 T1.3：窗口收口的渲染（窗口语句批 + 尾事务体）。
 ///
-/// 暂存路径由 `StagedExecutor::commit_to` 在 journal 重放之后、尾事务之前逐批
-/// 执行 `window_batches`；直写路径由 [`finalize_attempt_on`] 同序执行——两条
-/// 路径共用同一份渲染，收口内容不可能漂移。顺序：窗口语句批（datacenter 交付
-/// 状态 + anc 重算，commit-time 语义）→ 尾事务（durable 模型工作 → 水位推进 →
-/// 恢复记录删除）。收口条件（水位单调、revision 判真）全部在持久层事务内判定。
+/// 直写路径由 [`finalize_attempt_on`] 同序执行。顺序：窗口语句批（datacenter 交付
+/// 状态 + anc 重算，commit-time 语义）→ 尾事务（房间重建要求 → 懒根观察 → 水位推进）。
+/// 收口条件（水位单调）在持久层事务内判定。
+///
+/// 计划里的工作项**不进**这一笔（ADR-072 D5）：它们随 `IncrFileSuccess::model_plan` 交回任务，
+/// 由任务在内存里执行。写入标记 `dbnum_write_state:{dbnum}` 也**不在这里动**：数据尾事务盖的
+/// 是 `applied_sesno`，而「本任务的写库结束了」由任务收尾那一笔说（ADR-072 D1 / W2）。
 pub(crate) fn render_finalize_tail(
     dbnum: u32,
     end_sesno: i32,
@@ -170,95 +145,33 @@ pub(crate) fn render_finalize_tail(
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> FinalizeRender {
-    render_finalize_tail_with_effects(
-        dbnum,
-        end_sesno,
-        end_sesno_time,
-        plan,
-        window_statements,
-        &[],
-        &[],
-        &[],
-    )
-    .expect("empty finalize effects are valid")
-}
-
-pub(crate) fn render_finalize_tail_with_effects(
-    dbnum: u32,
-    end_sesno: i32,
-    end_sesno_time: Option<&str>,
-    plan: &ModelUpdatePlan,
-    window_statements: &[String],
-    refresh_refnos: &[String],
-    remove_refnos: &[String],
-    settled_regen: &[(String, u64)],
-) -> anyhow::Result<FinalizeRender> {
-    let mut statements: Vec<String> = plan
-        .work_items
-        .iter()
-        .map(|item| render_upsert(item, source_time_for(item, end_sesno, end_sesno_time)))
-        .collect();
-    if !refresh_refnos.is_empty() || !remove_refnos.is_empty() {
-        statements.push(
-            crate::data_interface::side_effect_pending::SideEffectCompensator::render_spatial_reconcile_upsert(
-                dbnum,
-                end_sesno,
-                refresh_refnos,
-                remove_refnos,
-            )?,
-        );
-        // 空间版本号与意图、水位同一事务递增：启动侧拿 sidecar 与它比相等来决定
-        // 树文件还能不能信（load_project_tree_verified）。只有携带空间意图的尾
-        // 事务才 bump——没动树的提交不该作废别人的文件。
-        statements.push(crate::fast_model::aabb_tree::render_spatial_epoch_bump());
-    }
+    let mut statements: Vec<String> = Vec::new();
     if plan.room_rebuild_required {
         statements.push(crate::fast_model::room_model::render_room_rebuild_required(
             plan.room_rebuild_reason.as_deref(),
         ));
     }
-    statements.extend(settled_regen.iter().map(|(root, revision)| {
-        render_delete_revision(ModelWorkAction::RegenRoot, root, *revision)
-    }));
     if let Some(lazy_roots) = plan.lazy_roots {
         statements.push(render_model_root_observation(dbnum, lazy_roots, end_sesno));
     }
     statements.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
-    // 只清 per-root attempts 与 `window_block` 那两类行（R4 随 `staging/attempts.rs` 一起退）。
-    // 写入标记 `dbnum_write_state:{dbnum}` **不在这里动**：数据尾事务盖的是 `applied_sesno`，
-    // 而「本任务的写库结束了」由任务收尾那一笔说（ADR-072 D1 / W2）。
-    statements.push(crate::data_interface::staging::attempts::render_clear_window_attempts(dbnum));
-    Ok(FinalizeRender {
+    FinalizeRender {
         window_batches: render_window_statement_batches(window_statements),
         tail: statements.join("\n"),
-    })
+    }
 }
 
-/// Render the ordered batches that close a freshly parsed baseline.
-///
-/// Generation work is idempotent and executes in bounded transactions before
-/// the watermark tail. A failed batch therefore leaves the watermark in place;
-/// replaying the baseline only upserts the same deterministic work again. 基线
-/// 的写入标记（`writing{0,T}`，`baseline_ingest::ingest_file` 开头落）同样不在这一笔里
-/// 收——收它的是任务收尾（ADR-072 D1）。
+/// Render the transaction that closes a freshly parsed baseline: watermark + the
+/// confirmed-empty marker. 基线的全量生成根不落库（ADR-072 D5），随
+/// `manual_update::BaselineOutcome` 交给本任务生成；基线的写入标记（`writing{0,T}`，
+/// `baseline_ingest::ingest_file` 开头落）同样不在这一笔里收——收它的是任务收尾（ADR-072 D1）。
 pub(crate) fn render_baseline_finalize(
     dbnum: u32,
     end_sesno: i32,
     end_sesno_time: Option<&str>,
-    plan: &ModelUpdatePlan,
     confirmed_empty: bool,
 ) -> FinalizeRender {
-    let work_statements: Vec<String> = plan
-        .work_items
-        .iter()
-        .map(|item| render_upsert(item, source_time_for(item, end_sesno, end_sesno_time)))
-        .collect();
     let mut tail = Vec::new();
-    if plan.room_rebuild_required {
-        tail.push(crate::fast_model::room_model::render_room_rebuild_required(
-            plan.room_rebuild_reason.as_deref(),
-        ));
-    }
     tail.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
     tail.push(if confirmed_empty {
         format!("UPDATE dbnum_watermark:{dbnum} SET confirmed_empty_baseline_sesno = {end_sesno};")
@@ -266,7 +179,7 @@ pub(crate) fn render_baseline_finalize(
         format!("UPDATE dbnum_watermark:{dbnum} SET confirmed_empty_baseline_sesno = NONE;")
     });
     FinalizeRender {
-        window_batches: render_window_statement_batches(&work_statements),
+        window_batches: Vec::new(),
         tail: tail.join("\n"),
     }
 }
@@ -352,40 +265,19 @@ pub(crate) async fn finalize_attempt_on(
     Ok(None)
 }
 
-/// Establish a freshly parsed `dbnum`'s model work before advancing its watermark.
+/// Advance a freshly parsed `dbnum`'s watermark.
 ///
-/// A baseline full-parse writes element data but no geometry, and every later
-/// incremental window only regenerates the roots that window itself touched. So
-/// a watermark that advances without its generation work leaves the database
-/// permanently modelless — nothing revisits a root that never changes again.
-/// Work upserts run in bounded, idempotent batches before the small watermark
-/// transaction. Any failure returns before the watermark moves, so a retry
-/// converges on the same work and a modelless watermarked baseline remains
-/// unreachable.
+/// A baseline full-parse writes element data but no geometry. 全量生成根由本任务随即生成
+/// （`manual_update::BaselineOutcome::units`），不落库：任务死在生成中途时写入标记
+/// `writing{0,T}` 让下一次启动整库 wipe 重排初始化（ADR-072 D2），所以「水位推上去、库里
+/// 一个模型都没有、而且此后永远不会有」这条路不存在。
 pub async fn finalize_baseline(
     dbnum: u32,
     end_sesno: i32,
     end_sesno_time: Option<&str>,
-    plan: &ModelUpdatePlan,
     confirmed_empty: bool,
 ) -> anyhow::Result<()> {
-    let render = render_baseline_finalize(dbnum, end_sesno, end_sesno_time, plan, confirmed_empty);
-    for (index, batch) in render.window_batches.iter().enumerate() {
-        SUL_DB
-            .query(batch)
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "finalize baseline dbnum={dbnum} model work batch {index} failed: {error}"
-                )
-            })?
-            .check()
-            .map_err(|error| {
-                anyhow::anyhow!(
-                    "finalize baseline dbnum={dbnum} model work batch {index} statement failed: {error}"
-                )
-            })?;
-    }
+    let render = render_baseline_finalize(dbnum, end_sesno, end_sesno_time, confirmed_empty);
     SUL_DB
         .query(format!(
             "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",

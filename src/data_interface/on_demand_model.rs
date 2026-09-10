@@ -15,9 +15,6 @@ use crate::data_interface::manual_update::{generate_unit_model, generation_root_
 use crate::data_interface::model_coverage::{
     generation_root_cache_current, generation_roots_cache_current,
 };
-use crate::data_interface::model_update_pending::{
-    ensure_regen_pending_current, settle_regen_work,
-};
 use crate::data_interface::tidb_manager::AiosDBManager;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -282,25 +279,10 @@ impl AiosDBManager {
             crate::data_interface::initialization_phase::require_model_generation()?;
         }
 
-        // 先落 durable pending 再生成（spec §4.5 / 2026-07-30 审计 C1）。曾经这里只
-        // 读现有行的 revision：表里本来没有这个根时收口是 no-op，进程在生成中途崩溃，
-        // 这次工作就没有任何持久痕迹，没有 drain 会捡它，只能靠人再点一次。落行失败
-        // 直接返回错误、不跑生成——durable 语义必须先于工作本身成立。
-        let pending_revision = if memory_only || crate::options::data_face().is_read_through() {
-            None
-        } else {
-            Some(ensure_regen_pending_current(&root_refno, root_noun).await?)
-        };
-        let outcome = generate_unit_model(self, &root_refno).await;
-        let generation_error = outcome.as_ref().err().map(|error| format!("{error:#}"));
-        if !memory_only
-            && !crate::options::data_face().is_read_through()
-            && let Err(error) =
-                settle_regen_work(&root_refno, pending_revision, generation_error.as_deref()).await
-        {
-            log::error!("收口模型 pending 失败 root={root_refno}: {error:#}");
-        }
-        outcome?;
+        // 不再先落 durable pending 行再生成（ADR-072 D5）：`/model/ensure` 是任务之外按根串行的
+        // 第二个写者（ADR-071 D5），生成完就地合块落库、盖根凭证；进程在生成中途崩溃，这一根
+        // 的凭证没盖，下一次点它（或该库任务的规划器按凭证缺口）照常重生成——没有第二本账要收。
+        generate_unit_model(self, &root_refno).await?;
 
         let counts = memory_counts(&[root]);
         let status = post_generation_status(counts);
@@ -706,36 +688,6 @@ mod tests {
         );
     }
 
-    /// durable pending 必须先于生成成立（spec §4.5 / 2026-07-30 审计 C1）。
-    ///
-    /// 只读现有行（`current_regen_revision`）的话，表里本来没有这个根时收口是
-    /// no-op：进程在生成中途崩溃，这次工作没有任何持久痕迹，没有 drain 会捡它。
-    #[test]
-    fn a_durable_pending_row_is_written_before_generation_runs() {
-        let source = include_str!("on_demand_model.rs");
-        let body = source
-            .split_once("pub async fn ensure_model_generated(")
-            .expect("ensure entrypoint must exist")
-            .1
-            .split_once("#[derive(Debug, Clone, PartialEq, Eq)]")
-            .expect("ensure implementation must end before its error type")
-            .0;
-        let pending_at = body
-            .find("ensure_regen_pending")
-            .expect("ensure 必须先写 durable pending 行");
-        let generate_at = body
-            .find("generate_unit_model")
-            .expect("ensure 必须执行生成");
-        assert!(
-            pending_at < generate_at,
-            "pending 行必须写在生成之前，崩溃才有 drain 能捡的痕迹"
-        );
-        assert!(
-            !body.contains("current_regen_revision"),
-            "ensure 不得再走只读旧行的路——那条路对『表里没有行』的情形收口是 no-op"
-        );
-    }
-
     /// A subtree that generated rows but nothing drawable must settle instead of
     /// asking for another generation run: that is the case the viewer hits on
     /// every single show of an EQUI whose only child is an ELCONN.
@@ -868,8 +820,10 @@ mod tests {
         }
     }
 
+    /// 初始化门排在「复用已有模型」之后、生成之前；生成前不再落 durable pending 行
+    /// （ADR-072 D5），生成完也没有 pending 行要收口。
     #[test]
-    fn initialization_gate_precedes_pending_creation_but_follows_existing_model_reuse() {
+    fn initialization_gate_precedes_generation_but_follows_existing_model_reuse() {
         let source = include_str!("on_demand_model.rs");
         let body = source
             .split_once("pub async fn ensure_model_generated(")
@@ -880,8 +834,11 @@ mod tests {
             .0;
         let reuse = body.find("generation_root_cache_current").unwrap();
         let gate = body.find("require_model_generation()").unwrap();
-        let pending = body.find("ensure_regen_pending_current(").unwrap();
-        assert!(reuse < gate && gate < pending);
+        let generate = body.find("generate_unit_model(self, &root_refno)").unwrap();
+        assert!(reuse < gate && gate < generate);
+        for retired in ["ensure_regen_pending_current", "settle_regen_work"] {
+            assert!(!body.contains(retired), "pending 行不得回来 `{retired}`");
+        }
     }
 
     #[test]

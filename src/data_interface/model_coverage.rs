@@ -168,7 +168,7 @@ pub async fn generation_roots_cache_current(
     };
     let mut covered = BTreeMap::new();
     for dbnum in versions.iter().map(|(_, dbnum, _)| *dbnum).collect::<BTreeSet<_>>() {
-        if let Some((sesno, _)) = super::model_completion::coverage_on(&SUL_DB, dbnum).await? {
+        if let Some(sesno) = library_coverage_on(&SUL_DB, dbnum).await? {
             covered.insert(dbnum, sesno);
         }
     }
@@ -191,6 +191,33 @@ pub async fn generation_roots_cache_current(
                 .then_some(root_refno)
         })
         .collect())
+}
+
+/// 库级模型覆盖：这个库追平到哪一版——就是 `dbnum_watermark.model_sesno`。
+///
+/// 任务收尾只在这一版的根**全部**落进去时才盖它（ADR-072 D4 / `task_end::render_task_end_tail`
+/// 的 `TaskModelOutcome::all_roots_ok` 守卫），所以这一格本身就是凭据；原先另开一张
+/// `CompletionReceipt` 收据再交叉核验的那一路随 publish 阶段退了。`None` = 从没追平过。
+/// 生产库走水位镜像（`DbnumState::read`），测试夹具与旁路连接直查那一行。
+async fn library_coverage_on(db: &Surreal<Any>, dbnum: u32) -> anyhow::Result<Option<i32>> {
+    #[derive(Deserialize)]
+    struct Row {
+        #[serde(default)]
+        model_sesno: Option<i32>,
+    }
+    let model_sesno = if std::ptr::eq(db, &*SUL_DB) {
+        crate::data_interface::dbnum_state::DbnumState::read(dbnum)
+            .await?
+            .map(|state| state.model_sesno)
+    } else {
+        let row: Option<Row> = db
+            .query(format!("SELECT model_sesno FROM ONLY dbnum_watermark:{dbnum};"))
+            .await?
+            .check()?
+            .take(0)?;
+        row.and_then(|row| row.model_sesno)
+    };
+    Ok(model_sesno.filter(|sesno| *sesno > 0))
 }
 
 #[cfg(test)]
@@ -274,8 +301,9 @@ pub async fn model_coverage_current(dbnum: u32) -> anyhow::Result<bool> {
     .map_err(|error| {
         anyhow::anyhow!("model coverage dbnum={dbnum} source read panicked: {error}")
     })??;
-    let covered = super::model_completion::coverage_on(&SUL_DB, dbnum).await?
-        .is_some_and(|(sesno, _)| sesno >= target.sesno as i32);
+    let covered = library_coverage_on(&SUL_DB, dbnum)
+        .await?
+        .is_some_and(|sesno| sesno >= target.sesno as i32);
     let settled = super::model_watermark::settled_root_predicate();
     let lag = if covered { String::new() } else {
         format!(" OR (source_end_sesno?:0) <= 0 OR (source_end_sesno?:0) < {}", target.sesno)
@@ -416,7 +444,8 @@ pub(crate) async fn startup_coverage_floors_on(
     }
     for (dbnum, entry) in &mut floors {
         if entry.unsettled_roots == 0
-            && let Some((sesno, _)) = super::model_completion::coverage_on(db, *dbnum).await? {
+            && let Some(sesno) = library_coverage_on(db, *dbnum).await?
+        {
             entry.settled_floor = Some(sesno);
         }
     }
@@ -1689,7 +1718,7 @@ mod tests {
             .expect("model gate ends before the next row type")
             .0;
         assert!(body.contains("(source_end_sesno?:0) <= 0 OR (source_end_sesno?:0) < {}"));
-        assert!(body.contains("model_completion::coverage_on"));
+        assert!(body.contains("library_coverage_on(&SUL_DB, dbnum)"), "库级覆盖读水位镜像，不再问收据");
         assert!(
             !body.contains("source_end_sesno_time"),
             "时刻列只记不比（ADR-054）: {body}"

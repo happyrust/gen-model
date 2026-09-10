@@ -470,10 +470,9 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
                     .settled_floor
                     .is_none_or(|settled| settled < state.applied_sesno)
         });
-        let completion_covers = probe
-            .completed_sesno
-            .is_some_and(|end| end >= state.applied_sesno)
-            && probe.supported() >= state.applied_sesno;
+        // 「完成收据覆盖到 T」那一格随 `CompletionReceipt` 退了（ADR-072 D4）：库级完成态就是
+        // 任务收尾盖的 `model_sesno`（`probe.recorded`），凭证那一半由 `supported()` 说。
+        let completion_covers = probe.supported() >= state.applied_sesno;
         let behind =
             probe.recorded < state.applied_sesno || credential_behind || !completion_covers;
         if !behind {
@@ -487,12 +486,10 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
             probe.settled_floor,
             if !probe.has_roots {
                 "empty_inventory_unverified"
-            } else if probe.completion_present && probe.completed_sesno.is_none() {
-                "input_changed"
             } else if credential_behind {
                 "root_credential_behind"
             } else {
-                "legacy_completion_missing"
+                "model_watermark_behind"
             }
         );
         if source.sesno < state.applied_sesno as u32 {
@@ -513,7 +510,7 @@ async fn reconcile_model_coverage_at_startup_inner() -> StartupCoverage {
         let model_start_sesno = model_recovery_base(
             probe.recorded,
             floors.get(&dbnum).and_then(|floor| floor.settled_floor),
-            probe.completion_present && probe.completed_sesno.is_none(),
+            false,
         );
         let found = crate::data_interface::batch_scheduler::DiscoveredBatch {
             project: state.owner_project.clone(),

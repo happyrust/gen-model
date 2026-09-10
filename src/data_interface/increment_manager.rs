@@ -3878,7 +3878,7 @@ impl AiosDBManager {
                                     .as_str(),
                                 streak: parked.streak,
                                 max_attempts:
-                                    crate::data_interface::model_update_pending::MAX_ATTEMPTS,
+                                    crate::data_interface::batch_worker::MAX_ATTEMPTS,
                                 end_sesno: parked.end_sesno,
                                 file_path: path.to_str(),
                                 last_reason: &parked.last_reason,

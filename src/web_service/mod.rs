@@ -331,11 +331,7 @@ pub async fn serve(
         .route("/api/v1/health", get(handlers::health))
         .route("/api/v1/update/preview", post(handlers::update_preview))
         .route("/api/v1/update/execute", post(handlers::update_execute))
-        .route("/api/v1/update/pending-units", get(handlers::pending_units))
-        .route(
-            "/api/v1/update/pending-units/retry",
-            post(handlers::pending_units_retry),
-        )
+        // `/update/pending-units`（含 `/retry`）随 pending 表退了（ADR-072 D5，spec §7 退役格清单）。
         .route("/api/v1/tasks", get(handlers::tasks_list))
         .route("/api/v1/tasks/{id}", get(handlers::task_get))
         .route(

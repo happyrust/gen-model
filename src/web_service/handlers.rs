@@ -15,9 +15,6 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::data_interface::initialization_phase::InitializationNotReady;
-use crate::data_interface::manual_update::{
-    PendingModelUnit, PendingRoomUnit, load_pending_model_units, load_pending_room_units,
-};
 use crate::data_interface::on_demand_model::{ModelGenerationInProgress, UnresolvableRoot};
 use crate::web_service::{ApiError, AppState, ServiceIdentity};
 
@@ -502,89 +499,6 @@ fn health_census_observation() -> Value {
         "refresh_interval_ms":30000,"refreshing":cache.pending,"last_error":cache.error})
 }
 
-// `model_update_pending` 的状态是对一张**无索引**表做三条全表聚合。全量初始化把
-// 十万个生成根一次排进这张表之后（2026-09-06 全 AMS 实测 106,645 行），每条聚合
-// 1.8 s、一次 /health 三条 5 s 以上；采样器 / 面板每 5 s 一问，SurrealDB 就被这一个
-// 分项占满一整核——分项预算 2 s 到点只是 HTTP 侧不再等，库里那三条照样跑完——
-// 基线 `INSERT`、`baseline_counts` 与收口事务全排在它后面（7329 一库 351 s，其中
-// 真正解析只 52 s）。它与上面的 root census 同一性质：是仪表，不是闸门，所以用
-// 同一套采样纪律：至多 [`MODEL_PENDING_STATUS_REFRESH`] 刷一次、同时只跑一个刷新、
-// 分项超时不叠加新扫描。代价是 `blocking_conditions` 里的死信判定最多晚一个刷新
-// 周期出现；死信是终态，不会自己消失，晚 30 s 看见不影响任何决策。
-#[derive(Default)]
-struct ModelPendingStatusCache {
-    pending: bool,
-    started: Option<std::time::Instant>,
-    value: Option<(
-        std::time::Instant,
-        crate::data_interface::model_update_pending::ModelPendingStatus,
-    )>,
-    error: Option<String>,
-}
-static MODEL_PENDING_STATUS: std::sync::LazyLock<std::sync::Mutex<ModelPendingStatusCache>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(ModelPendingStatusCache::default()));
-const MODEL_PENDING_STATUS_REFRESH: Duration = Duration::from_secs(30);
-
-async fn sampled_model_pending_status()
--> anyhow::Result<crate::data_interface::model_update_pending::ModelPendingStatus> {
-    let (refresh, cached) = {
-        let mut cache = MODEL_PENDING_STATUS.lock().unwrap();
-        let stale = cache
-            .started
-            .is_none_or(|t| t.elapsed() >= MODEL_PENDING_STATUS_REFRESH);
-        let refresh = if !cache.pending && stale {
-            cache.pending = true;
-            cache.started = Some(std::time::Instant::now());
-            Some(tokio::spawn(async move {
-                let result =
-                    crate::data_interface::model_update_pending::model_pending_status().await;
-                let mut cache = MODEL_PENDING_STATUS.lock().unwrap();
-                cache.pending = false;
-                match result {
-                    Ok(value) => {
-                        cache.value = Some((std::time::Instant::now(), value));
-                        cache.error = None;
-                    }
-                    Err(error) => cache.error = Some(format!("{error:#}")),
-                }
-            }))
-        } else {
-            None
-        };
-        (
-            refresh,
-            cache.value.as_ref().map(|(_, value)| value.clone()),
-        )
-    };
-    if let Some(value) = cached {
-        return Ok(value);
-    }
-    // 还没有第一份样本：等这一次刷新落定。刷新是独立任务，外层分项预算到点取消的
-    // 只是这里的等待，库里那一次扫描的结果仍会进缓存，下一问直接拿到。
-    if let Some(refresh) = refresh {
-        let _ = refresh.await;
-    }
-    let cache = MODEL_PENDING_STATUS.lock().unwrap();
-    cache
-        .value
-        .as_ref()
-        .map(|(_, value)| value.clone())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                cache
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "model pending status sampling in progress".into())
-            )
-        })
-}
-fn model_pending_status_observation() -> Value {
-    let cache = MODEL_PENDING_STATUS.lock().unwrap();
-    json!({"sample_age_ms":cache.value.as_ref().map(|(t,_)|t.elapsed().as_millis() as u64),
-        "refresh_interval_ms":MODEL_PENDING_STATUS_REFRESH.as_millis() as u64,
-        "refreshing":cache.pending,"last_error":cache.error})
-}
-
 pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     let (worker_alive, worker_idle_secs) = crate::data_interface::batch_worker::worker_liveness();
     let probe_started = std::time::Instant::now();
@@ -723,7 +637,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "active_dependency": crate::data_interface::task_registry::TaskRegistry::global().active_dependency_snapshot(),
             "idle_round_panic": crate::data_interface::batch_worker::idle_round_panic_snapshot(),
             "batch_failures": crate::data_interface::batch_worker::batch_failure_snapshot(),
-            "model_drain": crate::data_interface::model_update_pending::model_drain_telemetry_snapshot(),
             "model_concurrency": crate::data_interface::model_concurrency::snapshot(),
             "geometry_concurrency": crate::fast_model::concurrency::snapshot(),
             "runtime_lag": crate::runtime_lag::snapshot(),
@@ -741,46 +654,11 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
     // 以下每一项都读库，因此每一项都过 within_health_budget；超时的记进
     // degraded_sections，绝不让任何一项把整个端点拖住。
     let mut degraded: Vec<&'static str> = Vec::new();
-    let window_blocks = or_degraded(
-        "window_blocks",
-        within_health_budget(crate::data_interface::staging::attempts::load_window_blocks())
-            .await
-            .and_then(Result::ok),
-        &mut degraded,
-        Vec::new,
-    );
-    // 读库失败的降级形状与成功形状同源（side_effect_pending 里同键渲染，
-    // 形状由那边的单测钉住），不在这里手搓 JSON。超时走同一份降级形状，
-    // 只是错误那句换成预算超限。
-    let spatial_reconcile = match within_health_budget(
-        crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_status(),
-    )
-    .await
-    {
-        Some(Ok(status)) => status,
-        Some(Err(error)) => crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_error_status(&error),
-        None => {
-            degraded.push("spatial_reconcile");
-            crate::data_interface::side_effect_pending::SideEffectCompensator::spatial_reconcile_error_status(
-                &health_budget_exceeded("空间收敛状态"),
-            )
-        }
-    };
-    // 采样版（见 `sampled_model_pending_status`）：现读三条全表聚合每 5 s 一次会把
-    // SurrealDB 占满；仍套分项预算，第一份样本没到时按超时降级。
-    let model_update_pending = match within_health_budget(sampled_model_pending_status()).await {
-        Some(Ok(status)) => status,
-        Some(Err(error)) => {
-            degraded.push("model_update_pending");
-            crate::data_interface::model_update_pending::ModelPendingStatus::error(error)
-        }
-        None => {
-            degraded.push("model_update_pending");
-            crate::data_interface::model_update_pending::ModelPendingStatus::error(
-                health_budget_exceeded("模型工作状态"),
-            )
-        }
-    };
+    // `window_blocks` / `spatial_reconcile` / `model_update_pending`（含 `_observation`）/
+    // `model_drain` 这几格随第二条异步账退了（ADR-072 D5，spec §7 退役格清单）：没有 pending
+    // 表、没有空间意图行、没有文件轮次，也就没有死信与页级停滞可报。写库中途死掉的库由
+    // `/dbnums` 每行的 `write_state` 说。
+    //
     // 双水位是仪表，不是健康闸门：lagging 只做陈述，不进入
     // `blocking_conditions`（ADR-060 M4/M7）。
     let dbnum_consistency = match within_health_budget(sampled_health_census()).await {
@@ -790,19 +668,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             Value::Null
         }
     };
-    let mut blocking_conditions: Vec<&'static str> = Vec::new();
-    if model_update_pending.has_data_dead_letters() {
-        blocking_conditions.push("model_update_pending.data_dead_letters");
-    }
-    if model_update_pending.has_room_dead_letters() {
-        blocking_conditions.push("model_update_pending.room_dead_letters");
-    }
-    // 页级停滞：模型页在认领、在烧 CPU，却一页都收不掉。它与死信是两种不同的卡死
-    // ——死信是「这些行认输了」，停滞是「这些行还在被无限重试」——但对外都是同一件
-    // 事：模型阶段不会自己走完。进程内读数，不套 within_health_budget。
-    if crate::data_interface::model_update_pending::model_drain_page_starved() {
-        blocking_conditions.push("model_drain.page_starved");
-    }
+    let blocking_conditions: Vec<&'static str> = Vec::new();
     let parse_errors = or_degraded(
         "parse_errors",
         within_health_budget(crate::data_interface::parse_error::snapshot()).await,
@@ -953,7 +819,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // （启动那一次在 `initialization.startup.reconcile`）；`stale_catalogue_dbnums` 非空
         // 且 `catalogue_cascade_degraded` 为真 = 前移了却没能精确反查，看 `catalogue_cascade`。
         "catalogue_reconcile": crate::data_interface::model_coverage::catalogue_reconcile_snapshot(),
-        "model_drain": crate::data_interface::model_update_pending::model_drain_telemetry_snapshot(),
         "model_concurrency": crate::data_interface::model_concurrency::snapshot(),
         "geometry_concurrency": crate::fast_model::concurrency::snapshot(),
         // tokio 调度延迟（specs/033 T003）：定时器「该醒」与「真醒」的差。CPU 密集段
@@ -962,21 +827,10 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "runtime_lag": crate::runtime_lag::snapshot(),
         "spatial_serial": crate::fast_model::spatial_state::spatial_serial_snapshot(),
         "sul_db": sul_db,
-        // 数据侧确定性失败的终态（attempts.rs `window_block`），**跨重启活着**。
-        // kv-mem 暂存窗口退役（ADR-056 P1）后 `staging_windows` / `staging_commit`
-        // 两个 gauge 不再有来源，已摘；这一键随之从 `staging_window_blocks` 改名
-        // （spec 035 T301）——它记的是数据窗口直写路径上的确定性失败，跟暂存没关系，
-        // 顶着旧名字会让人以为暂存窗口还在。
-        //
-        // ADR-056 D1 要求原始错误可见：每条带 `reason` 原话与 `bad_roots`，面板把它
-        // 升成数据面独立一级判决，不再埋在别的卡的尾巴里。
-        "window_blocks": window_blocks,
-        "spatial_reconcile": spatial_reconcile,
-        // 数据模型与房间工作一次查询得出同一快照；死信样本最多十条，普通积压
-        // 只计数、不把启动期间的正常工作误标成 degraded。
-        "model_update_pending": model_update_pending,
-        // 上一格是采样值（至多 30 s 刷一次）：这里说清样本多旧、是否正在刷新。
-        "model_update_pending_observation": model_pending_status_observation(),
+        // `window_blocks` / `spatial_reconcile` / `model_update_pending` /
+        // `model_update_pending_observation` 四格随第二条异步账退了（ADR-072 D5，spec §7）：
+        // 数据侧确定性失败跨重启的那一份在 `logs/batch-failures-*.jsonl`（`batch_failures`
+        // 是进程内那一份）；写库中途死掉的库看 `/dbnums` 每行的 `write_state`。
         "dbnum_consistency": dbnum_consistency,
         "dbnum_consistency_observation": health_census_observation(),
         // 空间树状态机 + 文件/库指纹（现读现比）+ 本次启动的装载裁决
@@ -1943,88 +1797,6 @@ fn ensure_error(error: anyhow::Error) -> ApiError {
         Some(UnresolvableRoot::NoRoot) => ApiError::precondition(message),
         None => ApiError::from_domain(error),
     }
-}
-
-/// GET /api/v1/update/pending-units — 映射 `load_pending_model_units`（spec §4.6）。
-pub async fn pending_units(
-    State(_state): State<AppState>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    let units = load_pending_model_units()
-        .await
-        .map_err(ApiError::from_domain)?;
-    let room_units = load_pending_room_units()
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok(Json(pending_units_payload(units, room_units)))
-}
-
-fn pending_units_payload(
-    units: Vec<PendingModelUnit>,
-    room_units: Vec<PendingRoomUnit>,
-) -> serde_json::Value {
-    // `units` / `dead_letters` 保留原来只统计 regen_root 的契约；房间侧追加独立字段，
-    // 避免旧客户端把面板/构件误当生成根，也避免悄悄改变旧状态栏整数的含义。
-    let dead_letters = units.iter().filter(|unit| unit.dead).count();
-    let room_dead_letters = room_units.iter().filter(|unit| unit.dead).count();
-    json!({
-        "units": units,
-        "dead_letters": dead_letters,
-        "room_units": room_units,
-        "room_dead_letters": room_dead_letters,
-    })
-}
-
-#[derive(Debug, Deserialize)]
-pub struct PendingUnitRetryReq {
-    /// 队列行动作名（`regen_root` / `transform` / …）。缺省 `regen_root`——
-    /// 死信几乎全是它，检查视图（GET /pending-units）列的也正是这一种。
-    #[serde(default)]
-    pub action: Option<String>,
-    /// PDMS `a/b` 目标（与检查视图回执里的 `root_refno` 同值）。
-    pub target_refno: String,
-    #[serde(flatten)]
-    pub identity: ProjectReq,
-}
-
-/// POST /api/v1/update/pending-units/retry — 人工复活一行死信（spec §4.6.1）。
-///
-/// 自动路径的 attempts 上限把到顶的行永远挡在 drain 之外，此前除了直接改库没有
-/// 第二条复活路。只允许操作已存在的 `(action, target_refno)`：这个端点是「复活」
-/// 不是「入队」。成功回 202 + 复活后的行，行不存在回 404。
-pub async fn pending_units_retry(
-    State(state): State<AppState>,
-    Json(req): Json<PendingUnitRetryReq>,
-) -> Result<impl IntoResponse, ApiError> {
-    resolve_identity(&state, &req.identity)?;
-    let action = match req.action.as_deref() {
-        None => crate::data_interface::model_update_plan::ModelWorkAction::RegenRoot,
-        Some(name) => crate::data_interface::model_update_plan::ModelWorkAction::parse(name)
-            .ok_or_else(|| ApiError::bad_request(format!("未知的队列动作: {name}")))?,
-    };
-    let revived =
-        crate::data_interface::model_update_pending::retry_pending_unit(action, &req.target_refno)
-            .await
-            .map_err(ApiError::from_domain)?
-            .ok_or_else(|| {
-                ApiError::not_found(format!(
-                    "待重试任务不存在: ({}, {})，复活只作用于已存在的行",
-                    action.as_str(),
-                    req.target_refno
-                ))
-            })?;
-    // 复活绕过了入队通道，worker 的 Notify 没人碰过；不叫醒它，这行要等 30s
-    // 兜底轮询才被捡走。
-    crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({
-            "action": revived.action.as_str(),
-            "target_refno": revived.target_refno,
-            "revision": revived.revision,
-            "attempts": revived.attempts,
-            "status": revived.status,
-        })),
-    ))
 }
 
 /// GET /api/v1/dbnums — 映射 `dbnum_statuses`（spec §4.7）。
@@ -3273,42 +3045,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn pending_units_adds_room_rows_without_changing_legacy_counts() {
-        let units = vec![PendingModelUnit {
-            attempts: crate::data_interface::model_update_pending::MAX_ATTEMPTS,
-            dead: true,
-            ..Default::default()
-        }];
-        let room_units = vec![PendingRoomUnit {
-            dbnum: 7997,
-            action: crate::data_interface::model_update_plan::ModelWorkAction::RoomRecalcElement,
-            target_refno: "24381/100677".into(),
-            noun: "EQUI".into(),
-            source_end_sesno: 42,
-            status: "failed".into(),
-            attempts: crate::data_interface::model_update_pending::MAX_ATTEMPTS,
-            last_error: Some("boom".into()),
-            file_rounds: vec!["file_round:7997:42".into()],
-            required_publish_version: 9,
-            published_version: 8,
-            computed_publish_version: 7,
-            stale: true,
-            dead: true,
-        }];
-
-        let payload = pending_units_payload(units, room_units);
-        assert_eq!(payload["dead_letters"], 1, "旧口径仍只统计模型根");
-        assert_eq!(payload["room_dead_letters"], 1);
-        assert_eq!(payload["units"].as_array().unwrap().len(), 1);
-        assert_eq!(payload["room_units"][0]["action"], "room_recalc_element");
-        assert_eq!(payload["room_units"][0]["target_refno"], "24381/100677");
-        assert_eq!(payload["room_units"][0]["required_publish_version"], 9);
-        assert_eq!(payload["room_units"][0]["published_version"], 8);
-        assert_eq!(payload["room_units"][0]["computed_publish_version"], 7);
-        assert_eq!(payload["room_units"][0]["stale"], true);
-    }
-
     /// 面板内嵌进二进制之后，两件事都得钉住。
     ///
     /// 一是内嵌的确实是那一页：`include_str!` 指错文件、或者哪天 `web/ops.html`
@@ -3475,10 +3211,12 @@ mod tests {
             .expect("health 之后是 trace")
             .0;
 
+        // `load_window_blocks` / `spatial_reconcile_status` / `model_pending_status` 三格随第二条
+        // 异步账退了（ADR-072 D5）；回来一个即红。
+        for retired in ["load_window_blocks", "spatial_reconcile_status", "model_pending_status"] {
+            assert!(!body.contains(retired), "{retired} 已随 pending 账退役，不得回到 /health: {body}");
+        }
         for section in [
-            "load_window_blocks()",
-            "spatial_reconcile_status()",
-            "model_pending_status()",
             "parse_error::snapshot()",
             "geom_error::snapshot()",
             "spatial_tree_status()",
@@ -3549,47 +3287,6 @@ mod tests {
         assert!(
             queue.contains("initialization.blocked_by"),
             "结构化 blocker 没跟着队列快照一起回: {queue}"
-        );
-    }
-
-    #[test]
-    fn health_is_degraded_by_dead_letters_but_not_by_retryable_backlog() {
-        assert_eq!(health_status(&[], &[]), "ok");
-        assert_eq!(
-            health_status(&[], &["model_update_pending.data_dead_letters"]),
-            "degraded"
-        );
-        assert_eq!(
-            health_status(&[], &["model_update_pending.room_dead_letters"]),
-            "degraded"
-        );
-        assert_eq!(health_status(&["model_update_pending"], &[]), "degraded");
-
-        let source = include_str!("handlers.rs");
-        let body = source
-            .split_once("pub async fn health(")
-            .expect("health exists")
-            .1
-            .split_once("pub async fn trace(")
-            .expect("health end")
-            .0;
-        assert!(body.contains("\"model_update_pending\""), "{body}");
-        assert!(body.contains("\"blocking_conditions\""), "{body}");
-        assert!(
-            body.contains("model_update_pending.data_dead_letters"),
-            "{body}"
-        );
-        assert!(
-            body.contains("model_update_pending.room_dead_letters"),
-            "{body}"
-        );
-        // 页级停滞与死信是两种不同的卡死，但对外是同一件事：模型阶段不会自己走完。
-        // 死信是「这些行认输了」，停滞是「这些行还在被无限重试」——2026-08-27 现场
-        // 只有后者，于是 118 页零收口烧了 50 分钟，而 /health 一路报 ok。
-        assert!(body.contains("model_drain.page_starved"), "{body}");
-        assert_eq!(
-            health_status(&[], &["model_drain.page_starved"]),
-            "degraded"
         );
     }
 
@@ -3685,16 +3382,13 @@ mod tests {
             .expect("health 之后是 update_preview")
             .0;
 
-        for key in [
-            "\"spatial_reconcile\"",
-            "\"spatial_tree\"",
-            "\"room_build\"",
-        ] {
+        for key in ["\"spatial_tree\"", "\"room_build\""] {
             assert!(body.contains(key), "health 必须暴露 {key}: {body}");
         }
+        // `spatial_reconcile` 那一格随空间意图行退了（ADR-072 D5）：没有 pending 的空间收敛可报。
         assert!(
-            body.contains("spatial_reconcile_error_status"),
-            "降级形状必须与成功形状同源: {body}"
+            !body.contains("\"spatial_reconcile\"") && !body.contains("spatial_reconcile_error_status"),
+            "spatial_reconcile 已随第二条异步账退役: {body}"
         );
         assert!(
             body.contains("spatial_tree_status()"),

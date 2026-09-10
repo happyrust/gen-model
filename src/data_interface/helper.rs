@@ -902,15 +902,8 @@ mod tests {
         // 声明，否则进程态停在 Uninitialized，下面的基线 persist 会被发布门拒绝
         // （一致性闭环方案 §2 步骤 0；用例写于状态机落地之前，2026-08-12 补）。
         crate::fast_model::spatial_state::mark_spatial_tree_fixture_preloaded();
-        let pending =
-            crate::data_interface::side_effect_pending::SideEffectCompensator::has_pending_spatial_work()
-                .await
-                .expect("query pending spatial work");
-        assert!(
-            !pending,
-            "沙箱库还有未收敛的空间意图（会走 HealByReplay 而不是本用例要验的 Rebuild）：\
-             先起服务把收敛跑完，或清掉 incr_side_effect_pending 的 spatial_reconcile 行"
-        );
+        // 「沙箱库还有未收敛的空间意图」那道前置随 pending 表退了（ADR-072 D5）：空间树在落库
+        // 那一刻就地收敛，没有 HealByReplay 可走，启动判据只剩 Reuse / Rebuild 两档。
 
         // 幽灵构件：只存在于内存树与树文件里，库中没有它的任何指针行——
         // 正是「已删元素的旧包围盒」在崩溃窗口里的形态。
