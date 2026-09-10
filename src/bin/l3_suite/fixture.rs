@@ -3,9 +3,30 @@ use std::collections::{BTreeMap, BTreeSet};
 
 // The portable fixture owns its stack. Keep it off the legacy golden-suite
 // ports so a retained 8048/8028 process cannot make assertions hit stale data.
-const FIXTURE_API: &str = "http://127.0.0.1:18028/api/v1";
-const FIXTURE_API_PORT: u16 = 18028;
-const FIXTURE_SURREAL_PORT: u16 = 18048;
+const DEFAULT_FIXTURE_API_PORT: u16 = 18028;
+const DEFAULT_FIXTURE_SURREAL_PORT: u16 = 18048;
+
+fn fixture_port(name: &str, default: u16) -> u16 {
+    std::env::var(name)
+        .ok()
+        .map(|raw| {
+            raw.parse::<u16>()
+                .unwrap_or_else(|error| panic!("{name} must be a TCP port: {error}"))
+        })
+        .unwrap_or(default)
+}
+
+fn fixture_api_port() -> u16 {
+    fixture_port("L3_FIXTURE_API_PORT", DEFAULT_FIXTURE_API_PORT)
+}
+
+fn fixture_surreal_port() -> u16 {
+    fixture_port("L3_FIXTURE_SURREAL_PORT", DEFAULT_FIXTURE_SURREAL_PORT)
+}
+
+fn fixture_api() -> String {
+    format!("http://127.0.0.1:{}/api/v1", fixture_api_port())
+}
 const FIXTURE_SURREAL_SQL: &str = "http://127.0.0.1:18048/sql";
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -532,7 +553,7 @@ fn start_fixture_stack(
     project: &str,
     namespace: &str,
 ) -> Result<(Stack, PathBuf)> {
-    for port in [FIXTURE_SURREAL_PORT, FIXTURE_API_PORT] {
+    for port in [fixture_surreal_port(), fixture_api_port()] {
         ensure!(!port_open(port), "fixture port {port} is already in use");
     }
     let tools = tool_dir(repo);
@@ -579,13 +600,13 @@ fn start_fixture_stack(
                     "--pass",
                     "root",
                     "--bind",
-                    "127.0.0.1:18048",
+                    &format!("127.0.0.1:{}", fixture_surreal_port()),
                 ])
                 .arg(format!("rocksdb:{}", store.display())),
             &run_dir.join("stack-surreal.log"),
         )?,
     );
-    wait_port(FIXTURE_SURREAL_PORT, Duration::from_secs(60))?;
+    wait_port(fixture_surreal_port(), Duration::from_secs(60))?;
     run_fixture_bin(
         &initialize,
         &[dbnum.to_string()],
@@ -654,7 +675,7 @@ fn start_fixture_stack(
             &run_dir.join("stack-service.log"),
         )?,
     );
-    wait_http(&format!("{FIXTURE_API}/health"), Duration::from_secs(180))?;
+    wait_http(&format!("{}/health", fixture_api()), Duration::from_secs(180))?;
     if cli.fixture_ui {
         let ui = tools.join("plant-ui-app.exe");
         let inspect = tools.join("inspect.exe");
@@ -675,7 +696,7 @@ fn start_fixture_stack(
                     .env("EGUI_INSPECTION", "1")
                     .env("PLANT_UI_SETTINGS_FILE", &ui_runtime.settings_file)
                     .env("PLANT_ASSET_ROOT", &ui_runtime.asset_root)
-                    .env("PLANT_MODEL_API_URL", "http://127.0.0.1:18028"),
+                    .env("PLANT_MODEL_API_URL", format!("http://127.0.0.1:{}", fixture_api_port())),
                 &run_dir.join("stack-plant-ui.log"),
             )?,
         );
@@ -778,8 +799,8 @@ fn write_runtime_config(
         ("project_code", namespace.to_owned()),
         ("surreal_ns", namespace.to_owned()),
         ("mdb_name", format!("\"{}\"", mdb.trim_start_matches('/'))),
-        ("v_port", FIXTURE_SURREAL_PORT.to_string()),
-        ("http_api_addr", "\"127.0.0.1:18028\"".into()),
+        ("v_port", fixture_surreal_port().to_string()),
+        ("http_api_addr", format!("\"127.0.0.1:{}\"", fixture_api_port())),
         // Keep the portable fixture's room coverage barrier scoped to the two
         // rooms created by setup.mac. The real AMS database contains hundreds
         // of unrelated PANE rows whose models are intentionally not seeded by
@@ -1029,7 +1050,7 @@ fn run_case(
     // before E3D mutates the file; previewing after SAVEWORK would correctly yield an empty list.
     let preview = http_json(
         "POST",
-        &format!("{FIXTURE_API}/update/preview"),
+        &format!("{}/update/preview", fixture_api()),
         Some(fixture_identity(project, &driver.mdb, ns)),
     )?;
     fs::write(
@@ -1114,7 +1135,7 @@ fn run_case(
         )?;
         let repeat = http_json(
             "POST",
-            &format!("{FIXTURE_API}/update/execute"),
+            &format!("{}/update/execute", fixture_api()),
             Some(fixture_identity(project, &driver.mdb, ns)),
         )?;
         ensure!(
@@ -1462,7 +1483,7 @@ fn seed_fixture_models(
         body.as_object_mut()
             .unwrap()
             .insert("force".into(), Value::Bool(true));
-        let response = http_json("POST", &format!("{FIXTURE_API}/model/ensure"), Some(body))?;
+        let response = http_json("POST", &format!("{}/model/ensure", fixture_api()), Some(body))?;
         evidence.push(response);
     }
     fs::write(
@@ -1879,7 +1900,7 @@ fn execute_fixture_and_wait(
     );
     let receipt = http_json(
         "POST",
-        &format!("{FIXTURE_API}/update/execute"),
+        &format!("{}/update/execute", fixture_api()),
         Some(fixture_identity(project, mdb, ns)),
     )?;
     fs::write(
@@ -1890,7 +1911,7 @@ fn execute_fixture_and_wait(
     let mut tasks = Vec::new();
     for id in ids {
         loop {
-            let task = http_json("GET", &format!("{FIXTURE_API}/tasks/{id}"), None)?;
+            let task = http_json("GET", &format!("{}/tasks/{id}", fixture_api()), None)?;
             if task_terminal(&task)?.is_some() {
                 tasks.push(task);
                 break;
