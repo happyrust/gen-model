@@ -46,15 +46,26 @@ done 重放），所以不能只删不补。
 启动水化段（`hydrate_watermark_mirror` 之前）与任务开工前见 `status = writing` → `rollback_to_watermark(dbnum, S, intent)`：
 
 - `initialize | reinitialize`（S = 0）：`wipe_dbnum_for_reinit`。
-- 其余：`DELETE pe WHERE dbnum = X AND sesno > S`（顶点删除级联掉挂在它身上的边）、noun 行与 `ATT_UDA` 行同谓词；
+- 其余：**不删 `pe` 顶点**（2026-09-10 18:5x 修订，d-570，见下）；noun 行与 `ATT_UDA` 卫星行按 `dbnum = X AND sesno > S` 删；
   `DELETE inst_relate / inst_info / tubi_relate WHERE dbnum = X AND direct_model.sesno > S`；`DELETE gen_root WHERE dbnum = X AND
   source_end_sesno > S`；`DELETE room_relate / room_panel_relate WHERE dbnum = X`；三水位 `min(·, S)`、`state_revision + 1`；删标记行；
   进程内镜像作废重水化、空间树置脏、常驻房间模型按新 `room_sesno` 换代；排 S→T 重跑。
 
-它删的是 S 之后的痕迹让重放补齐，**不是**还原 S 版本的行（一个 Modified 元素的 pe 行被整行替换后，回退把它删掉，S→T 重放把它写回来）。
-谓词是 `sesno > S` 不是 `= T`：`pe.sesno` 是元素自己的 last-touch 会话，窗口内的改动落在 (S, T] 任何一号。全部是谓词 `DELETE`，没有
-`SELECT` 再点名（今天 `prune_above_watermark` 的写法退）。跨库副作用（DESI 任务给别的库写的 CATA 依赖行，`Fresh` 档已有行赢）不回退，
-幂等无害。
+它删的是 S 之后的痕迹让重放补齐，**不是**还原 S 版本的行（一个 Modified 元素的 pe 行被整行替换后，回退不动它，S→T 重放的
+`INSERT … ON DUPLICATE KEY UPDATE` 再整行覆盖一次；删掉的是卫星行、模型行、凭证行与房间边）。谓词是 `sesno > S` 不是 `= T`：
+`pe.sesno` 是元素自己的 last-touch 会话，窗口内的改动落在 (S, T] 任何一号。全部是谓词 `DELETE`，没有 `SELECT` 再点名（原
+`prune_above_watermark` 的写法退）。跨库副作用（DESI 任务给别的库写的 CATA 依赖行，`Fresh` 档已有行赢）不回退，幂等无害。
+
+**修订：为什么不删 `pe` 顶点**（2026-09-10 18:5x 用户拍板，d-570；落地 `54795e2e6`；量测
+`docs/evidence/2026-09-10-rollback-predicate-index-measurement.md` §4）。本 ADR 初稿写「顶点删除级联掉挂在它身上的边」并把这当成
+回退的便利——它只论证了模型面那一半。级联同时带走 `pe_owner:[属主, 槽位]` 那条**属主名下**的成员边；属主这一版没改、不进 S→T 重放窗口
+时，这条入边补不回来（在一次性 `memory` 实例上跑出来的，不是读代码推的），与验收「`pe_owner` 逐表与一次成功相等」直接打架。而 `pe`
+每 refno 一行最新态，重放的 `INSERT … ON DUPLICATE KEY UPDATE`（`element_batch::PE_REPLACE_ASSIGNMENTS`）整行覆盖，先删对 `pe`
+从来不是必需的——元素批本来就因为同一条级联**不删 `pe`**，回退删它等于把那条纪律在恢复路上又破一次。数据面靠**行幂等**收敛（ADR-071 S3）。
+代价：`sesno > S` 的 `pe` 行在回退后、重跑前短暂高于水位，由同一窗口重放覆盖；「重放窗口比崩溃那次更窄」留下的残行由下一窗覆盖或人工
+`DELETE /dbnums/{dbnum}/data/above/{watermark}`；`Reinitialize` 仍整库 wipe。钉：
+`fast_delete::tests::the_rollback_never_deletes_the_pe_vertex_so_the_membership_edge_survives`、
+`direct_window_replay_parity::a_modified_element_keeps_the_membership_edge_its_unchanged_owner_owns`。
 
 ### D3　崩溃不分面
 
@@ -72,9 +83,14 @@ done 重放），所以不能只删不补。
 ### D5　库读白名单
 
 对 SurrealDB 的读只允许：`dbnum_watermark`（三水位 / `sesno` / `state_revision`）、`dbnum_write_state`、启动水化一次（ADR-071 D7：
-`gen_root` 凭证、模型投影、常驻房间模型几何）、字典一次（`UDA` 键表）。其余对库的一切操作是写或删。「先删后插」的删那一半从「查出全集再点名删」
-改成按根谓词删（`anc CONTAINS <root>`），`existing_geometry_for_window` / `GeometryBaseline` / `CataSeedMemo` 随之退——若该谓词在
-SurrealDB 2.1.4 上走不了索引，保留那一次对账读作为唯一例外（计划 §9-7）。
+`gen_root` 凭证、模型投影、常驻房间模型几何）、字典一次（`UDA` 键表）、以及 `persist_roots_batched` 每任务一次的对账读
+`existing_geometry_for_window`（该库至今为止的全部几何身份，供「先删后插」的删那一半点名）。其余对库的一切操作是写或删。
+
+**已决（2026-09-10 19:05 用户拍板，d-568；计划 §9-7 按 (a)）**：初稿拟把「先删后插」的删那一半改成按根谓词删（`anc CONTAINS <root>`）、
+让 `existing_geometry_for_window` / `GeometryBaseline` / `CataSeedMemo` 随之退，量过是 **no-go**（`docs/evidence/2026-09-10-anc-contains-predicate-delete.md`）：
+`anc CONTAINS` 在 `inst_relate` / `tubi_relate` 走索引，但 `inst_info` / `aabb` / `trans` 没有 `anc`（后两张连 `dbnum` 都没有），
+子查询退化成全表扫（8404 行小库 `aabb` 一次 42–62 s）。所以对账读**原样保留**并列入上面的白名单，`GeometryBaseline` / `CataSeedMemo`
+不退；不补列建索引回填（b），不走同事务 `LET $rows = SELECT …; DELETE $rows.*`（c）。
 
 ### D6　一次清干净
 
@@ -93,7 +109,8 @@ publish → R4 删账本退表 → R5 退 `room_published_*` → R6 文档。pub
 
 - **W1 有 writing 必有出路**：任一时刻 `status = writing` 的行，要么它的任务在飞（`task_registry`），要么下一次启动 / 开工会回退它。
 - **W2 finished 只由收尾写**：源码里 `status = 'finished'` 只出现在 `task_end` 渲染器。
-- **W3 库读白名单**：生产路径的 `SELECT` 只出现在 D5 点名的函数里（`include_str!` 逐函数钉）。
+- **W3 库读白名单**：生产路径的 `SELECT` 只出现在 D5 点名的函数里（`include_str!` 逐函数钉）；任务内唯一允许的对账读是
+  `persist_roots_batched` 的 `existing_geometry_for_window`（d-568），不得再添第二处。
 - **W4 表名只在迁移里**：退役表名在 `src/` 只出现在 `REMOVE TABLE IF EXISTS`。
 - **W5 执行体干净**：`execute_frozen_batch_body` 不含 `publish` / `file_round` / `model_update_pending` / `side_effect_pending` /
   `SideEffectCompensator`。

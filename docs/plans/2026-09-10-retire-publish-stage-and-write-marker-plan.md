@@ -1,6 +1,6 @@
 # 去掉发布阶段：任务写库带写入标记，中断按 sesno 回退重做（ADR-072 计划）
 
-> 状态：**已批准**（2026-09-10 Plannotator `{"decision":"approved"}`；§1-15 / §4.5 / §9-6、9-7 的「库读白名单」是批准后按用户 17:15 口径补入的，ADR-072 D5 同）。共识 **d-441**（grill-with-docs 第 1 轮 Q1–Q10，2026-09-10 全按推荐拍板）+ 第 2 轮 Q11–Q15 全按推荐 + 用户追加「全面退役 `model_update_pending`」。ADR：`docs/adr/ADR-072-the-publish-stage-retires-tasks-write-under-a-write-marker-and-roll-back-by-sesno.md`（已接受）。
+> 状态：**已批准**（2026-09-10 Plannotator `{"decision":"approved"}`；§1-15 / §4.5 / §9-6、9-7 的「库读白名单」是批准后按用户 17:15 口径补入的，ADR-072 D5 同；§4.3-2「不删 `pe` 顶点」与 §4.5 / §9-7「对账读保留」是 18:5x–19:05 用户拍板后按 d-570 / d-568 修订的，ADR-072 D2 / D5 / W3 同）。共识 **d-441**（grill-with-docs 第 1 轮 Q1–Q10，2026-09-10 全按推荐拍板）+ 第 2 轮 Q11–Q15 全按推荐 + 用户追加「全面退役 `model_update_pending`」。ADR：`docs/adr/ADR-072-the-publish-stage-retires-tasks-write-under-a-write-marker-and-roll-back-by-sesno.md`（已接受）。
 >
 > 工作树：`D:\work\plant-code\old\gen-model-refactor`，分支 `refactor/retire-publish-stage`，基线 `6f0813f6b`（= `e3d-direct` 上 ADR-071 S1–S6 在途成果的整份 WIP 提交）。主树 `gen-model` 不动。
 >
@@ -108,7 +108,10 @@ publish（`publish_model_file_round`，`:2141`）九个子步里 7 件是簿记 
 基于 `prune_above_watermark` 扩成（同一把 `DATA_COMMIT_SERIAL` + `DBNUM_STATE_WRITE_GATE`）：
 
 1. `intent = initialize | reinitialize`（S = 0）→ `wipe_dbnum_for_reinit(dbnum)`，完。
-2. 数据面：**谓词删除**，不再 `SELECT id FROM pe … ` 再逐键删（那是今天 `prune_above_watermark` 的写法，`fast_delete.rs:188 / 252–274`）：`DELETE pe WHERE dbnum = X AND sesno > S`（`pe` 是图顶点，删它级联掉 `pe_owner` / `ref_rev` / `tubi_relate` 等挂在它身上的边——CONTEXT「元素批」词条正是因此才**不**删 `pe`，回退恰好要这个级联）；noun 表行与 `ATT_UDA` 行按同一谓词删（行上要有 `dbnum` + `sesno`，见 §9-6）。
+2. 数据面：**谓词删除**，不再 `SELECT id FROM pe … ` 再逐键删（那是原来 `prune_above_watermark` 的写法）。**不删 `pe` 顶点**（2026-09-10 18:5x 用户拍板，d-570；已落 `54795e2e6`）：只删卫星行——noun 表行与 `ATT_UDA` 行按 `dbnum = X AND sesno > S` 删（行上要有 `dbnum` + `sesno`，见 §9-6）。
+   - 为什么不删 `pe`：`pe` 是图顶点，`DELETE pe` 会级联带走 `pe_owner:[属主, 槽位]` 那条**属主名下**的成员边；属主这一版没改、不进 S→T 重放窗口时，这条入边补不回来（`docs/evidence/2026-09-10-rollback-predicate-index-measurement.md` §4 在一次性 `memory` 实例上跑出来的，不是读代码推的）。而 `pe` 每 refno 一行最新态，重放的 `INSERT … ON DUPLICATE KEY UPDATE`（列清单 = `element_batch::PE_REPLACE_ASSIGNMENTS`）整行覆盖，先删那一步对 `pe` 从来不是必需的——元素批本来就不删 `pe`（`element_batch` 模块头「pe 行为什么不删」），回退删它等于把那条纪律在恢复路上又破一次。本条原文「回退恰好要这个级联」只论证了模型面那一半，作废。
+   - 代价：`sesno > S` 的 `pe` 行在回退之后、重跑之前短暂高于水位，由同一窗口的重放逐行覆盖；只有「重放窗口比崩溃那次更窄」（会话预算截断）才留得下够不着的行，那一档由下一窗覆盖或人工走 `DELETE /dbnums/{dbnum}/data/above/{watermark}`。文件被换回旧版本那一档是 `Reinitialize`，整库 wipe，不走这条路。
+   - 钉：`fast_delete::tests::the_rollback_never_deletes_the_pe_vertex_so_the_membership_edge_survives`（任何形态的 `pe` 行删除都不许有）；`direct_window_replay_parity::a_modified_element_keeps_the_membership_edge_its_unchanged_owner_owns`（SITE 名下挂 EQUI、SITE 不进窗口，崩在第一块后回退，成员边仍在，重跑后逐表与一次成功相等）。
 3. 模型面：`DELETE inst_relate / inst_info / tubi_relate WHERE dbnum = X AND direct_model.sesno > S`；`DELETE gen_root WHERE dbnum = X AND source_end_sesno > S`。
 4. 房间面：`DELETE room_relate / room_panel_relate WHERE dbnum = X`（房间本来就是整库重算，不给边加 sesno）。
 5. 水位：`UPDATE dbnum_watermark:{dbnum} SET applied_sesno = math::min([applied_sesno, S]), model_sesno = math::min([model_sesno, S]), room_sesno = math::min([room_sesno, S]), sesno = S, state_revision += 1`。
@@ -116,7 +119,7 @@ publish（`publish_model_file_round`，`:2141`）九个子步里 7 件是簿记 
 7. 进程内：镜像格作废并重水化；`mark_aabb_tree_dirty` + 启动判据落到指针重建；常驻房间模型按新 `room_sesno` 换代。
 8. 排队：`enqueue` 该库 S→T（intent 原样）。
 
-**它不是「还原 S 版本的行」**：一个 Modified 元素的 pe 行被整行替换成 (S, T] 版后，回退是把它**删掉**，让 S→T 重放把它写回来（元素批的 `Replace` 档整行覆盖、边 `INSERT RELATION IGNORE`）。`fast_delete.rs:234` 的头注本来就是这个意思——residue cleanup, not a historical restore。所以名字叫**回退到水位**，不叫还原。
+**它不是「还原 S 版本的行」**：一个 Modified 元素的 pe 行被整行替换成 (S, T] 版后，回退**不动它**（第 2 步，d-570），让 S→T 重放的 `ON DUPLICATE KEY UPDATE` 再整行覆盖一次；真正删掉让重放补齐的是卫星行（noun / `ATT_UDA`）、模型行、凭证行与房间边（元素批的 `Replace` 档整行覆盖、边 `INSERT RELATION IGNORE`）。`fast_delete.rs` 回退渲染器的头注本来就是这个意思——residue cleanup, not a historical restore。所以名字叫**回退到水位**，不叫还原。
 
 **跨库副作用不回退**：DESI 任务给别的库写的 CATA 依赖行（`dependency_closure`，`Fresh` 档「已有行赢」）幂等，留着无害。
 
@@ -130,11 +133,12 @@ publish（`publish_model_file_round`，`:2141`）九个子步里 7 件是簿记 
 | `dbnum_write_state:{dbnum}` | 启动水化、任务开工前 | `status / start_sesno / end_sesno / intent` |
 | 启动水化（ADR-071 D7） | `run_cli` 一次 | `gen_root` 凭证、模型投影 `restore_projection_on`、常驻房间模型几何（实时行） |
 | 字典 | 进程一次、缓存 | `UDA` 键表（`UdaKeyMap::load`） |
+| `persist_roots_batched` 的对账读 | 每个模型任务一次 | `existing_geometry_for_window`：该库至今为止的全部几何身份（`inst_relate` / `inst_info` / `tubi_relate` 键），供「先删后插」的删那一半点名——§9-7 按 (a) 保留，d-568 |
 
 其余对库的一切操作是**写或删**。由此：
 
 - 回退（§4.3）全部是按 `(dbnum, sesno)` 谓词的 `DELETE`，没有 `SELECT`。
-- `persist_roots_batched` 的对账读 `existing_geometry_for_window`（「这个库至今为止的全部几何身份」，ADR-071 D1 推论里保住的那一次）改成**按根谓词删除**：落一根之前 `DELETE inst_relate / inst_info / tubi_relate WHERE dbnum = X AND anc CONTAINS <root>`，再插新行——「先删后插」的删那一半从「查出来再点名删」变成「谓词删」。`GeometryBaseline` / `CataSeedMemo` 随之退。**前提**：`anc CONTAINS` 在 SurrealDB 2.1.4 上能走索引，R2 先量一下 7997（§9-7）。
+- `persist_roots_batched` 的对账读 `existing_geometry_for_window`（「这个库至今为止的全部几何身份」，ADR-071 D1 推论里保住的那一次）**原样保留**（2026-09-10 用户拍板 §9-7 (a)，d-568）。原拟改成按根谓词删（落一根之前 `DELETE inst_relate / inst_info / tubi_relate WHERE dbnum = X AND anc CONTAINS <root>`）量过是 **no-go**：`anc CONTAINS` 在 `inst_relate` / `tubi_relate` 走索引，但 `inst_info` / `aabb` / `trans` 没有 `anc`（后两张连 `dbnum` 都没有），子查询退化成全表扫（8404 行小库 `aabb` 一次 42–62 s；`docs/evidence/2026-09-10-anc-contains-predicate-delete.md`）。`GeometryBaseline` / `CataSeedMemo` 不退；不补列建索引回填（b）、不走 `LET $rows = SELECT …; DELETE $rows.*`（c）。白名单上表已把这一次读列为允许项，ADR-072 W3 同。
 - `/dbnums` 的 census（`dbnum_consistency`）读镜像，不读 `gen_root`。
 - 源码钉：`data_interface/` 与 `fast_model/` 生产路径里 `SUL_DB.query(` 的 `SELECT` 只出现在白名单点名的函数里（`include_str!` 逐函数钉）。
 
@@ -170,9 +174,9 @@ publish（`publish_model_file_round`，`:2141`）九个子步里 7 件是簿记 
 | 房间门改读任务结果；`require_on / stage_on / commit_on` 三道 CAS 退成普通写 | `room_task.rs:40–120`、`room_completion.rs`、`room_delta.rs` |
 | `model_complete` 段整段删；`complete_model_task_on` / `CompletionReceipt` 删 | `batch_worker.rs:1736–1766`、`model_watermark.rs`、`model_completion.rs` |
 | `verdict_for` 出任务；回执 `model_verdict` 改由镜像算 | `batch_worker.rs:1835`、`dbnum_consistency.rs` |
-| 对账读 `existing_geometry_for_window` → 按根谓词删（§4.5）；先量 `anc CONTAINS` 能否走索引 | `model_db_adapter.rs:640–650`、`geometry_baseline` |
+| ~~对账读 `existing_geometry_for_window` → 按根谓词删~~ **已决不做**（§9-7 (a)，d-568）：量过 `anc CONTAINS` 在 `inst_info` / `aabb` / `trans` 退化全表扫，对账读原样保留、`GeometryBaseline` / `CataSeedMemo` 不退，§4.5 白名单已列 | `model_db_adapter.rs`、`geometry_baseline`（不动） |
 
-验收：源码钉——生产路径里 `SELECT` 只出现在 §4.5 白名单点名的函数里；`fast_model/` 不含 `sync_tree_from_committed_pointers` / `existing_geometry_for_window`。
+验收：源码钉——生产路径里 `SELECT` 只出现在 §4.5 白名单点名的函数里（`existing_geometry_for_window` 在名单上，d-568）；`fast_model/` 不含 `sync_tree_from_committed_pointers`。
 
 ### R3　删 publish 与屏障产物
 
@@ -223,7 +227,7 @@ ADR-072（附录 A 全文）落 `docs/adr/`；ADR-062 文头标「已作废（AD
 4. `model_watermark.rs` 里 `legacy_adopted`（d-277 兼容接管）依赖探针的 `has_roots / has_attributes / has_model_projection` 三格——R4 搬到 `startup_reconcile.rs` 用三条 `LIMIT 1` 保住，不随探针一起删。
 5. `staging/attempts.rs` 的 per-root attempts 是 ADR-050 进程本地账的残余，R4 一起退；`MAX_ATTEMPTS` 的 30 处引用全在观测口与死信判据，退了就没有「已放弃」这一格——`/dbnums` 的 `abandoned` 改由镜像失败根集回答。
 6. 谓词删除要求 noun 表行 / `ATT_UDA` 行带 `dbnum` + `sesno`：`pe` 行有（`element_batch.rs:56`），noun 行与 `ATT_UDA` 行是否都带 sesno 要在 R1 核一遍；没有就在元素批渲染里补这两列（一次性、随 R1 提交）。历史库里没有这两列的旧行只能靠整库 wipe 回退——记进 `rollback_to_watermark` 的回执。
-7. `anc CONTAINS <root>` 谓词删若走不了索引，7997（17 万 `inst_relate`）一根一次全表扫不可接受——退路是保留 `existing_geometry_for_window` 一次性对账读（它在白名单外，但是 ADR-071 D1 推论明确保住的那一次），R2 量完再定。
+7. **已决 (a)**（2026-09-10 19:05 用户拍板，d-568；量测 `docs/evidence/2026-09-10-anc-contains-predicate-delete.md`）：`anc CONTAINS <root>` 在 `inst_relate` / `tubi_relate` 走索引（go），但 `inst_info` / `aabb` / `trans` 没有 `anc`（后两张连 `dbnum` 都没有），子查询退化成全表扫（8404 行小库 `aabb` 一次 42–62 s），按根谓词删 **no-go**。保留 `existing_geometry_for_window` 一次性对账读并列进 §4.5 白名单 / ADR-072 W3；`GeometryBaseline` / `CataSeedMemo` 不退；不选 (b) 三张表补 `anc` / `dbnum` 列 + 索引 + 历史回填，不选 (c) 同事务 `LET $rows = SELECT …; DELETE $rows.*`。
 
 ---
 
