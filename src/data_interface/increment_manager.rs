@@ -3222,6 +3222,42 @@ impl AiosDBManager {
         )
     }
 
+    /// Prepare the Catalogue dependency inputs for a direct dbnum initializer.
+    ///
+    /// `watch_dbnums` limits DESI data/model work; it must never narrow the
+    /// CATA/DICT identity surface needed to interpret one admitted DESI file.
+    /// The automatic watcher installs the same manifests during `sweep_dirs`.
+    /// Specification tools (`initialize_ams_dbnums`, Python baseline helpers)
+    /// do not run that sweep, so they enter through this explicit preparation.
+    pub(crate) fn prepare_dependency_manifests_for_initialization(
+        &self,
+    ) -> anyhow::Result<()> {
+        let watch_dirs = self.watch_dirs();
+        let (_, blockers, _, cata_dependencies, dependency_identities) =
+            self.catalogue_manifest_for_dirs(&watch_dirs);
+        if !blockers.is_empty() {
+            let reasons = blockers
+                .iter()
+                .map(|blocker| format!("{}: {}", blocker.phase.as_str(), blocker.message))
+                .collect::<Vec<_>>()
+                .join("; ");
+            anyhow::bail!("初始化依赖清单裁决失败: {reasons}");
+        }
+        let cata_count = cata_dependencies.len();
+        let identity_count = dependency_identities.len();
+        let dependency_version =
+            crate::data_interface::cata_closure::install_dependency_manifest(cata_dependencies);
+        let identity_version =
+            crate::data_interface::cata_closure::install_dependency_identity_manifest(
+                dependency_identities,
+            );
+        println!(
+            "[initialization-manifest] CATA 依赖不受 watch_dbnums 限制：选中 {cata_count} 个目录库，\
+             身份 {identity_count} 个文件，依赖版本={dependency_version}，身份版本={identity_version}"
+        );
+        Ok(())
+    }
+
     /// F6：自动 watcher 的「文件观察落库 + 异常检测」。
     ///
     /// 分类与落库都交给 [`DbnumState::classify_scan`] / [`DbnumState::record_observation`]

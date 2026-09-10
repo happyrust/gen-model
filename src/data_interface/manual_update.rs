@@ -3307,6 +3307,10 @@ impl AiosDBManager {
         project: &str,
         dbnum: u32,
     ) -> anyhow::Result<usize> {
+        // Direct initializers do not run the automatic watcher's sweep. Install
+        // the same full Catalogue/identity manifests first; watch_dbnums only
+        // chooses DESI work and must not remove dependencies of that work.
+        self.prepare_dependency_manifests_for_initialization()?;
         let project_dir = resolve_project_root(&self.db_option, project)
             .ok_or_else(|| anyhow::anyhow!("无法解析项目目录: {project}"))?;
         let mut warnings = Vec::new();
@@ -5900,6 +5904,37 @@ mod delete_propagation_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn direct_dbnum_initialization_prepares_catalogue_dependencies_before_scanning_target() {
+        let direct = include_str!("manual_update.rs")
+            .split_once("pub async fn initialize_project_dbnum_baseline(")
+            .expect("direct initializer")
+            .1
+            .split_once("pub async fn initialize_project_sys_metadata(")
+            .expect("next initializer")
+            .0;
+        let prepare = direct
+            .find("prepare_dependency_manifests_for_initialization()")
+            .expect("dependency preparation");
+        let target_scan = direct
+            .find("scan_project_candidates(")
+            .expect("target scan");
+        assert!(prepare < target_scan, "依赖清单必须在目标 DESI 扫描/写入前准备");
+
+        let manager = include_str!("increment_manager.rs")
+            .split_once("fn prepare_dependency_manifests_for_initialization(")
+            .expect("preparation helper")
+            .1
+            .split_once("/// F6：")
+            .expect("helper boundary")
+            .0;
+        assert!(manager.contains("catalogue_manifest_for_dirs(&watch_dirs)"));
+        assert!(manager.contains("install_dependency_manifest(cata_dependencies)"));
+        assert!(manager.contains("install_dependency_identity_manifest("));
+        assert!(!manager.contains(".in_scope("), "依赖解析不得走 DESI watch 范围门");
+        assert!(!manager.contains("watch_scope::"), "依赖解析不得读取 watch 限定状态");
+    }
 
     #[tokio::test]
     async fn generation_lock_is_shared_by_root() {
