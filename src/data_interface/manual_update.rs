@@ -2087,9 +2087,8 @@ async fn load_non_design_dbnums() -> anyhow::Result<HashSet<u32>> {
 /// （ADR-003 存在的全部理由）。
 ///
 /// 这个判断过去写成 `non_design_dbnums.contains(&referrer.refno().get_0())`，
-/// 拿 Ref0 直接当 dbnum 比。两者不是一回事（见
-/// `model_update_pending::record_id_of`，以及 `cata_closure::dbnum_of_ref0`
-/// 这层专门的反查），于是两个方向都会错：Ref0 撞不上任何非设计 dbnum 时目录
+/// 拿 Ref0 直接当 dbnum 比。两者不是一回事（`cata_closure::dbnum_of_ref0`
+/// 这层专门的反查就是为此而设），于是两个方向都会错：Ref0 撞不上任何非设计 dbnum 时目录
 /// 中间体混进来成为永远失败的垃圾根；Ref0 恰好等于某个非 DESI 库的 dbnum 时，
 /// 一个真实的设计引用者被静默丢掉。
 pub(crate) fn referrer_is_design(dbnum: Option<u32>, non_design_dbnums: &HashSet<u32>) -> bool {
@@ -2792,6 +2791,40 @@ pub struct DbnumStatus {
     /// 第三枚水位及房间输入/结果凭证。与模型判决同一次批量读取，避免面板自行查库拼状态。
     #[serde(flatten)]
     pub room: Option<crate::data_interface::dbnum_consistency::RoomVerdictColumns>,
+    /// 写入标记（ADR-072 D1，spec §4.7）：这个库有没有一次没写完的任务。它不回答「欠什么」
+    /// ——欠什么仍由三枚水位回答。整格缺失 = 这个库从没被任务写过，或上一次回退刚把标记行
+    /// 删掉、下一次任务还没开工；客户端按「没有这一格」处理，不许退回 `finished` 画绿灯。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub write_state: Option<WriteStateColumns>,
+}
+
+/// `/dbnums` 每行 `write_state` 格的形状（spec §4.7 的字段表）。`dbnum` 是行主键、不重复出；
+/// 库里的 `updated_at` 是写入时刻的运维痕迹，不进契约。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct WriteStateColumns {
+    /// `writing` | `finished`。
+    pub status: String,
+    /// 本次任务的起点 S：崩溃后回退删 `sesno > S` 的痕迹、三水位退回它。
+    pub start_sesno: i32,
+    /// 目标 T：回退之后按 S→T 重排。
+    pub end_sesno: i32,
+    /// `initialize` | `apply_window` | `model_only` | `room_only` | `reinitialize`。
+    pub intent: &'static str,
+    pub started_at: Option<String>,
+    pub finished_at: Option<String>,
+}
+
+impl From<crate::data_interface::write_state::WriteState> for WriteStateColumns {
+    fn from(state: crate::data_interface::write_state::WriteState) -> Self {
+        Self {
+            status: state.status,
+            start_sesno: state.start_sesno,
+            end_sesno: state.end_sesno,
+            intent: state.intent.as_str(),
+            started_at: state.started_at,
+            finished_at: state.finished_at,
+        }
+    }
 }
 
 /// [`AiosDBManager::dbnum_statuses`] 的整体结果。
@@ -3832,6 +3865,7 @@ impl AiosDBManager {
                 not_in_project: false,
                 model: None,
                 room: None,
+                write_state: None,
             });
         }
 
@@ -3863,6 +3897,7 @@ impl AiosDBManager {
                 not_in_project: false,
                 model: None,
                 room: None,
+                write_state: None,
             });
         }
 
@@ -3905,6 +3940,24 @@ impl AiosDBManager {
             Err(error) => report.warnings.push(format!(
                 "读不到库一致性判决（双水位或 gen_root 普查失败），本次不报模型状态\
                  ——这是取数失败，不是 not_judged: {error:#}"
+            )),
+        }
+
+        // 写入标记一趟整表读回（计划 §4.5 白名单里的 `dbnum_write_state` 控制面读），逐行贴上
+        // （ADR-072 D1，spec §4.7）。读不到只记 warning、整格留空——这一格缺失客户端本来就要认，
+        // 不该因为它让整份状态报告失败。
+        match crate::data_interface::write_state::load_all().await {
+            Ok(states) => {
+                let by_dbnum: HashMap<u32, WriteStateColumns> = states
+                    .into_iter()
+                    .map(|state| (state.dbnum, WriteStateColumns::from(state)))
+                    .collect();
+                for row in &mut report.dbnums {
+                    row.write_state = by_dbnum.get(&row.dbnum).cloned();
+                }
+            }
+            Err(error) => report.warnings.push(format!(
+                "读不到写入标记（dbnum_write_state），本次 /dbnums 不报 write_state: {error:#}"
             )),
         }
 
@@ -6290,6 +6343,60 @@ mod tests {
         );
     }
 
+    /// `/dbnums` 每行的 `write_state` 格（ADR-072 D1，spec §4.7）：有标记行时六个字段整格出，
+    /// `intent` 是字面 `apply_window` 这类字符串、`dbnum` 不重复出；没有标记行时**整格缺失**
+    /// ——不写 `null`，客户端按「没有这一格」处理。取数那一段读的是整表一趟，不逐库点名。
+    #[test]
+    fn the_dbnum_row_carries_the_write_marker_as_one_optional_cell() {
+        let marked = DbnumStatus {
+            dbnum: 7997,
+            write_state: Some(WriteStateColumns::from(
+                crate::data_interface::write_state::WriteState {
+                    dbnum: 7997,
+                    status: crate::data_interface::write_state::STATUS_WRITING.to_owned(),
+                    start_sesno: 41,
+                    end_sesno: 43,
+                    intent: crate::data_interface::write_state::WriteIntent::ApplyWindow,
+                    started_at: Some("2026-09-10T17:02:11Z".to_owned()),
+                    finished_at: None,
+                },
+            )),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&marked).unwrap();
+        let cell = json.get("write_state").expect("write_state cell");
+        assert_eq!(
+            cell,
+            &serde_json::json!({
+                "status": "writing",
+                "start_sesno": 41,
+                "end_sesno": 43,
+                "intent": "apply_window",
+                "started_at": "2026-09-10T17:02:11Z",
+                "finished_at": null,
+            })
+        );
+
+        let unmarked = serde_json::to_value(DbnumStatus::default()).unwrap();
+        assert!(
+            unmarked.get("write_state").is_none(),
+            "没有标记行就整格缺失，不写 null: {unmarked}"
+        );
+
+        let source = include_str!("manual_update.rs");
+        let report = source
+            .split_once("pub async fn dbnum_statuses(")
+            .expect("dbnum_statuses 必须存在")
+            .1
+            .split_once("\n    /// 这个库进不进本期执行范围")
+            .expect("函数体到下一个条目为止")
+            .0;
+        assert!(
+            report.contains("write_state::load_all().await"),
+            "写入标记整表一趟读回、逐行贴上: {report}"
+        );
+    }
+
     fn seq(kinds: &[IncomingKind]) -> NetOp {
         let mut net: Option<NetOp> = None;
         for &k in kinds {
@@ -6820,8 +6927,9 @@ mod tests {
     }
 
     /// 回退整库重建（live，ADR-021）：`wipe_dbnum_for_reinit` 一次做对四件事——
-    /// 该 dbnum 的 pe 行**全部**物理消失（幸存行也不留）、队列残留与统计出清、
+    /// 该 dbnum 的 pe 行**全部**物理消失（幸存行也不留）、统计出清、
     /// 水位**清值不删行**（登记身份原地不动）、spatial epoch 同批递增。
+    /// （第二条异步账的队列 / 恢复记录随 ADR-072 D5 整体退役，清库路上不再有它们。）
     ///
     /// 四个断言各钉一个失败模式：
     ///
@@ -6852,9 +6960,7 @@ mod tests {
              DELETE ZZWM:{ref0}_1; DELETE ZZWM:{ref0}_2; \
              DELETE inst_relate:{ref0}_2; \
              DELETE dbnum_watermark:{dbnum}; \
-             DELETE dbnum_info_table WHERE dbnum = {dbnum}; \
-             DELETE model_update_pending WHERE dbnum = {dbnum}; \
-             DELETE increment_update_attempt:{dbnum};"
+             DELETE dbnum_info_table WHERE dbnum = {dbnum};"
         );
         SUL_DB
             .query(&cleanup)
@@ -6864,9 +6970,8 @@ mod tests {
             .expect("valid pre-clean");
 
         // 库侧状态停在会话 60：sesno=40 的幸存元素 + sesno=60 的「未来」元素
-        // （文件回卷到 50 之后它就是幽灵），幽灵挂着 inst_relate 派生行；队列里
-        // 留一条低于目标水位（45）与一条高于目标水位（55）的 pending，外加一条
-        // 未收口的 attempt——realign 之后它们必须全部出清。
+        // （文件回卷到 50 之后它就是幽灵），幽灵挂着 inst_relate 派生行，统计行记着
+        // 旧水位——realign 之后它们必须全部出清。
         SUL_DB
             .query(format!(
                 "CREATE pe:{ref0}_1 SET dbnum = {dbnum}, sesno = 40, noun = 'ZZWM', \
@@ -6875,13 +6980,7 @@ mod tests {
                  name = '/zz-realign-ghost'; \
                  CREATE ZZWM:{ref0}_2 SET dbnum = {dbnum}; \
                  CREATE inst_relate:{ref0}_2 SET dbnum = {dbnum}; \
-                 CREATE model_update_pending SET dbnum = {dbnum}, source_end_sesno = 45, \
-                 action = 'regen_root', target_refno = '{ref0}/1'; \
-                 CREATE model_update_pending SET dbnum = {dbnum}, source_end_sesno = 55, \
-                 action = 'regen_root', target_refno = '{ref0}/2'; \
-                 CREATE dbnum_info_table SET dbnum = {dbnum}, sesno = 40, count = 1; \
-                 UPSERT increment_update_attempt:{dbnum} SET dbnum = {dbnum}, \
-                 start_sesno = 51, end_sesno = 60;"
+                 CREATE dbnum_info_table SET dbnum = {dbnum}, sesno = 40, count = 1;"
             ))
             .await
             .expect("seed fixture")
@@ -6919,10 +7018,7 @@ mod tests {
         let mut response = SUL_DB
             .query(format!(
                 "RETURN [record::exists(pe:{ref0}_1), record::exists(pe:{ref0}_2), \
-                 record::exists(inst_relate:{ref0}_2), record::exists(ZZWM:{ref0}_2), \
-                 record::exists(increment_update_attempt:{dbnum})]; \
-                 SELECT count() AS count FROM model_update_pending \
-                 WHERE dbnum = {dbnum} GROUP ALL; \
+                 record::exists(inst_relate:{ref0}_2), record::exists(ZZWM:{ref0}_2)]; \
                  SELECT count() AS count FROM dbnum_info_table \
                  WHERE dbnum = {dbnum} GROUP ALL;"
             ))
@@ -6932,11 +7028,10 @@ mod tests {
             .expect("valid inspection");
         let exists: Vec<bool> = response.take(0).expect("existence flags");
         #[derive(serde::Deserialize)]
-        struct PendingCountRow {
+        struct CountRow {
             count: usize,
         }
-        let pending: Vec<PendingCountRow> = response.take(1).expect("pending count");
-        let info: Vec<PendingCountRow> = response.take(2).expect("info count");
+        let info: Vec<CountRow> = response.take(1).expect("info count");
 
         let state = DbnumState::read(dbnum)
             .await
@@ -6953,13 +7048,8 @@ mod tests {
         assert_eq!(report.pe_rows, 2, "整库清空：幸存行与幽灵一并计入删除规模");
         assert_eq!(
             exists,
-            vec![false, false, false, false, false],
-            "整库清空：pe（幸存行也不留）/ 派生行 / noun 行 / attempt 必须全部物理消失"
-        );
-        assert_eq!(
-            pending.first().map(|row| row.count).unwrap_or_default(),
-            0,
-            "该库 model_update_pending 必须清空（基线会重排全量生成根）"
+            vec![false, false, false, false],
+            "整库清空：pe（幸存行也不留）/ 派生行 / noun 行必须全部物理消失"
         );
         assert_eq!(
             info.first().map(|row| row.count).unwrap_or_default(),
@@ -9055,8 +9145,8 @@ mod tests {
     }
 
     // `pending_record_id_is_stable_per_dbnum_and_root` 随 `manual_model_pending`
-    // 的读写路径一并退役；行 id 的性质由 `model_update_pending` 的
-    // `record_id_is_stable_per_dbnum_action_and_target` 守着。
+    // 的读写路径一并退役；接手它的那张模型意图队列表也随 ADR-072 D5 退了，
+    // 任务的单元清单只在内存，没有行 id 可钉。
 
     // `project_exec_guard_is_exclusive_per_project` 随 `ProjectExecGuard` 一并
     // 退役（ADR-011 §12）：互斥由数据批次队列的单 worker 承担，见

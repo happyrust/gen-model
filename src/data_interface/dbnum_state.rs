@@ -255,15 +255,12 @@ mod mirror {
 const INCREMENT_STATE_SCHEMA: &str = r#"
 DEFINE TABLE IF NOT EXISTS dbnum_watermark SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS dbnum_info_table SCHEMALESS;
-DEFINE TABLE IF NOT EXISTS increment_update_attempt SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS dbnum_write_state SCHEMALESS;
 -- 回退到水位（ADR-072 D2）按 dbnum 谓词删 `inst_info`，而这张表此前一条索引都没有：
 -- 量测里它是唯一一张落 `Iterate Table` 的模型面表（`docs/evidence/2026-09-10-rollback-predicate-index-measurement.md`
 -- §2 / §5）。姐妹表 `inst_relate` / `tubi_relate` 的同名索引在 `pdms_inst::INST_RELATE_INDEX_SQL`
 -- 里，这一条落在这里只因为那个文件此刻归房间段改；两处等价，都是启动序列跑一次。
 DEFINE INDEX IF NOT EXISTS idx_inst_info_dbnum ON inst_info FIELDS dbnum;
-DEFINE TABLE IF NOT EXISTS model_update_pending SCHEMALESS;
-DEFINE TABLE IF NOT EXISTS incr_side_effect_pending SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS queue_control SCHEMALESS;
 "#;
 
@@ -2104,10 +2101,7 @@ mod tests {
         for table in [
             WATERMARK_TABLE,
             INFO_TABLE,
-            "increment_update_attempt",
             crate::data_interface::write_state::WRITE_STATE_TABLE,
-            "model_update_pending",
-            "incr_side_effect_pending",
             "queue_control",
         ] {
             assert!(

@@ -600,31 +600,11 @@ fn start_fixture_stack(
         &baseline_config_no_ext,
         &run_dir.join("baseline-scan.log"),
     )?;
-    // A full baseline intentionally discovers every delivery unit in the target
-    // database. This fixture suite owns only its named roots, so discard that
-    // unrelated baseline backlog before the worker starts; seed_fixture_models
-    // below regenerates the fixture roots explicitly and verifies them.
-    let reset = fixture_surreal_sql(
-        namespace,
-        project,
-        &format!(
-            "DELETE model_update_pending WHERE dbnum = {dbnum}; \
-             RETURN count(SELECT * FROM model_update_pending WHERE dbnum = {dbnum});"
-        ),
-    )?;
-    fs::write(
-        run_dir.join("baseline-pending-reset.json"),
-        serde_json::to_vec_pretty(&reset)?,
-    )?;
-    let remaining = reset
-        .as_array()
-        .and_then(|rows| rows.last())
-        .and_then(|row| row.get("result"))
-        .and_then(Value::as_u64);
-    ensure!(
-        remaining == Some(0),
-        "failed to isolate fixture model backlog for dbnum {dbnum}"
-    );
+    // A full baseline no longer leaves a model backlog behind: models are generated
+    // inside the dbnum task (ADR-071 D1) and the queue table of the second async
+    // ledger is retired (ADR-072 D5), so there is nothing to discard here;
+    // seed_fixture_models below regenerates the fixture roots explicitly and
+    // verifies them.
     let (mirror_project_dir, mirror_target_db) = create_service_project_mirror(
         project_dir,
         target_db_file,
@@ -1630,8 +1610,7 @@ fn fixture_snapshot(
            unrelated_owner: (SELECT id, ->pe_owner.{{id,in,out}} AS outgoing, <-pe_owner.{{id,in,out}} AS incoming FROM [{unrelated}] ORDER BY id), \
            unrelated_inst: (SELECT id, ->inst_relate.{{id,in,out,aabb,world_trans}} AS outgoing, <-inst_relate.{{id,in,out,aabb,world_trans}} AS incoming FROM [{unrelated}] ORDER BY id), \
            unrelated_geo: (SELECT id, ->geo_relate.{{id,in,out}} AS outgoing, <-geo_relate.{{id,in,out}} AS incoming FROM [{unrelated}] ORDER BY id), \
-           unrelated_room: (SELECT id, ->room_relate.{{id,in,out,room_num}} AS outgoing, <-room_relate.{{id,in,out,room_num}} AS incoming FROM [{unrelated}] ORDER BY id), \
-           pending: (SELECT action,target_refno,attempts,last_error FROM model_update_pending WHERE dbnum={dbnum}) \
+           unrelated_room: (SELECT id, ->room_relate.{{id,in,out,room_num}} AS outgoing, <-room_relate.{{id,in,out,room_num}} AS incoming FROM [{unrelated}] ORDER BY id) \
          }};"
     );
     let response = fixture_surreal_sql(ns, project, &sql)?;
@@ -1662,12 +1641,20 @@ fn assert_case(
             .all(|task| task_terminal(task).ok() == Some(Some(true))),
         "one or more data/model tasks failed"
     );
-    ensure!(
+    // Model debt is answered by the watermark pair since the queue table retired
+    // (ADR-072 D5): the task tail stamps `model_sesno` only when every root of
+    // this dbnum settled, so a lagging model watermark is the remaining debt.
+    let watermark = |key: &str| {
         after
-            .pointer("/payload/pending")
-            .and_then(Value::as_array)
-            .is_some_and(Vec::is_empty),
-        "pending model/room work remains"
+            .pointer(&format!("/payload/watermark/{key}"))
+            .and_then(Value::as_i64)
+    };
+    ensure!(
+        watermark("model_sesno").is_some()
+            && watermark("model_sesno") == watermark("applied_sesno"),
+        "pending model work remains: model_sesno={:?} applied_sesno={:?}",
+        watermark("model_sesno"),
+        watermark("applied_sesno")
     );
     for key in [
         "unrelated_pe",
@@ -1921,6 +1908,14 @@ fn fixture_identity(project: &str, mdb: &str, ns: &str) -> Value {
     json!({"project":project,"mdb":mdb.trim_start_matches('/'),"namespace":ns})
 }
 
+/// Wait until the dbnum task of `phase` has finished writing: the write marker
+/// (`dbnum_write_state`, ADR-072 D1) is no longer `writing` and the model
+/// watermark caught up with the data watermark. The queue table this used to
+/// poll (`model_update_pending`) retired with the second async ledger
+/// (ADR-072 D5); model and room work now run inside the task and the task tail
+/// stamps the watermarks in one transaction, so the watermark row is the truth.
+/// The room watermark is recorded in the evidence but not gated on: only DESI
+/// tasks own rooms.
 fn wait_fixture_pending(
     dir: &Path,
     ns: &str,
@@ -1929,53 +1924,54 @@ fn wait_fixture_pending(
     phase: &str,
 ) -> Result<()> {
     let deadline = Instant::now() + DEFAULT_TIMEOUT;
-    let mut empty_observations = 0_u8;
+    let mut settled_observations = 0_u8;
     loop {
         let response = fixture_surreal_sql(
             ns,
             project,
             &format!(
-                "RETURN SELECT action,target_refno,status,attempts,last_error \
-                 FROM model_update_pending WHERE \
-                 (dbnum = {dbnum} AND action NOT IN ['room_recalc_panel','room_recalc_element']) \
-                 OR action IN ['room_recalc_panel','room_recalc_element'];"
+                "RETURN {{ \
+                   watermark: (SELECT applied_sesno, model_sesno, room_sesno \
+                               FROM dbnum_watermark:{dbnum})[0], \
+                   write_state: (SELECT status, start_sesno, end_sesno, intent \
+                                 FROM dbnum_write_state:{dbnum})[0] \
+                 }};"
             ),
         )?;
-        let pending = surreal_result(&response)?;
-        let failed = pending.as_array().is_some_and(|rows| {
-            rows.iter().any(|row| {
-                row.get("status")
-                    .and_then(Value::as_str)
-                    .is_some_and(|status| matches!(status, "failed" | "dead_letter"))
-                    || row.get("last_error").is_some_and(|error| !error.is_null())
-            })
-        });
-        if failed {
-            fs::write(
-                dir.join(format!("{phase}-pending.json")),
-                serde_json::to_vec_pretty(&response)?,
-            )?;
-            anyhow::bail!("{phase} pending work failed: {pending}");
-        }
-        if pending.as_array().is_some_and(Vec::is_empty) {
-            empty_observations += 1;
+        let settlement = surreal_result(&response)?;
+        let writing = settlement
+            .pointer("/write_state/status")
+            .and_then(Value::as_str)
+            == Some("writing");
+        let watermark = |key: &str| {
+            settlement
+                .pointer(&format!("/watermark/{key}"))
+                .and_then(Value::as_i64)
+        };
+        let caught_up = watermark("applied_sesno").is_some()
+            && watermark("model_sesno") == watermark("applied_sesno");
+        if !writing && caught_up {
+            settled_observations += 1;
         } else {
-            empty_observations = 0;
+            settled_observations = 0;
         }
-        // Model generation and the idle worker hand room targets off in two
-        // adjacent phases. Require a short quiet window so an empty query in
-        // between those phases cannot become the case baseline.
-        if empty_observations >= 2 {
+        // Require a short quiet window: two consecutive settled reads, so a
+        // marker row observed between two back-to-back tasks cannot become the
+        // case baseline.
+        if settled_observations >= 2 {
             fs::write(
-                dir.join(format!("{phase}-pending.json")),
+                dir.join(format!("{phase}-settlement.json")),
                 serde_json::to_vec_pretty(&response)?,
             )?;
             return Ok(());
         }
-        ensure!(
-            Instant::now() < deadline,
-            "{phase} pending work did not converge: {pending}"
-        );
+        if Instant::now() >= deadline {
+            fs::write(
+                dir.join(format!("{phase}-settlement.json")),
+                serde_json::to_vec_pretty(&response)?,
+            )?;
+            anyhow::bail!("{phase} task did not settle: {settlement}");
+        }
         thread::sleep(Duration::from_secs(2));
     }
 }
@@ -2243,10 +2239,12 @@ mod tests {
     }
 
     #[test]
-    fn normalized_payload_ignores_watermarks_and_pending_only() {
-        let a = json!({"payload":{"watermark":{"applied_sesno":1},"pending":[],"room_pending":[],"pe":[1]}});
-        let b = json!({"payload":{"watermark":{"applied_sesno":2},"pending":[1],"room_pending":[2],"pe":[1]}});
+    fn normalized_payload_ignores_watermarks_only() {
+        let a = json!({"payload":{"watermark":{"applied_sesno":1},"pe":[1]}});
+        let b = json!({"payload":{"watermark":{"applied_sesno":2},"pe":[1]}});
         assert_eq!(restorable_payload(&a), restorable_payload(&b));
+        let c = json!({"payload":{"watermark":{"applied_sesno":2},"pe":[2]}});
+        assert_ne!(restorable_payload(&a), restorable_payload(&c));
     }
 
     #[test]

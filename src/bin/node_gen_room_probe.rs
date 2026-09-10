@@ -10,8 +10,8 @@
 //!    ref0 → db 文件由 `InMemoryCataLocator` 定位）；容器（WORL/SITE/ZONE）不进按需
 //!    入口（那是给 viewer 的策略门），直接以容器为根走定向生成引擎——与整库全量
 //!    「按 SITE 为根」同一条展开路径（`gen_all_geos_data` 定向分支）；
-//! 4. `rebuild_tree_from_pointers` 后 `drain_rooms`：面板分支的成员候选取自空间树，
-//!    顺序与批次 worker 房间轮的顺序钉一致（先空间树、再收房间）；
+//! 4. `rebuild_tree_from_pointers`：面板分支的成员候选取自空间树（房间归属由该库任务的
+//!    房间段整库算，探针不再消费房间待办行——那张表随 ADR-072 D5 退了）；
 //! 5. 汇报房间归属：目标自身的归属边、生成根子树的归属分布、容器子树内在册房间的成员统计。
 
 use std::collections::BTreeMap;
@@ -19,7 +19,6 @@ use std::collections::BTreeMap;
 use aios_core::{RefnoEnum, SUL_DB};
 use aios_database::data_interface::cata_closure::{CataDbLocator, InMemoryCataLocator};
 use aios_database::data_interface::generation_root::is_coarse_hierarchy_noun;
-use aios_database::data_interface::model_update_pending::drain_rooms;
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::fast_model::room_model::match_room_name_hd;
 
@@ -204,18 +203,6 @@ async fn room_member_edges(room: RefnoEnum) -> anyhow::Result<(usize, usize)> {
         .check()?;
     let edges: Option<usize> = response.take(0)?;
     Ok((panels.len(), edges.unwrap_or_default()))
-}
-
-async fn room_queue_depth() -> anyhow::Result<usize> {
-    let mut response = SUL_DB
-        .query(
-            "RETURN array::len(SELECT VALUE id FROM pending_model_work \
-             WHERE action IN ['room_recalc_element', 'room_recalc_panel']);",
-        )
-        .await?
-        .check()?;
-    let count: Option<usize> = response.take(0)?;
-    Ok(count.unwrap_or_default())
 }
 
 /// 目标自身的归属边：`(面板, 房间号)` 列表。
@@ -426,16 +413,12 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    // 2) 房间任务：生成阶段按「包围盒确实变了」入队，这里用生产同款消费者收干净。
-    // 面板分支的成员候选取自空间树——先从库指针整树重建（批次 worker 房间轮同款顺序钉）。
+    // 2) 空间树：面板分支的成员候选取自空间树——先从库指针整树重建。逐目标的房间待办行随
+    //    第二条异步账退了（ADR-072 D5）：按需生成不再排房间任务，房间归属由该库 dbnum 任务的
+    //    房间段整库算；下面汇报的是库里**现有**的归属边。
     if let Err(error) = aios_database::fast_model::aabb_tree::rebuild_tree_from_pointers().await {
         println!("SPATIAL-REBUILD-FAILED|{error:#}");
     }
-    let queued = room_queue_depth().await.unwrap_or_default();
-    println!("ROOM-QUEUE|before_drain={queued}");
-    let consumed = drain_rooms(aios_core::get_db_option()).await?.done;
-    let remaining = room_queue_depth().await.unwrap_or_default();
-    println!("ROOM-DRAIN|consumed={consumed}|remaining={remaining}");
 
     // 3) 房间归属汇报。
     for (refno, noun, scope) in &report_scopes {

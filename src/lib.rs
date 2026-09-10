@@ -2884,3 +2884,183 @@ mod startup_room_build_gate_tests {
         }
     }
 }
+
+/// ADR-072 W4：退役表名在 `src/` 里**只许**出现在 [`retire_publish_run_tables`] 的
+/// `REMOVE TABLE IF EXISTS` 清单里（计划 §5 R4 / §6-4 验收）。
+///
+/// 扫的是 `src/` 下每个 `.rs` 的**生产部分**——`#[cfg(test)]` 块整段摘掉、整行注释去掉之后
+/// 的文本。历史注释里提这些名字是在解释「为什么没了」，不算回来了；各文件自己的源码钉
+/// 本来就用 `concat!` 拆着写表名。`room_topology_source` 不在名单里：那个名字同时是磁盘
+/// 分片模块（d-89），表退了、模块留着。
+#[cfg(test)]
+mod retired_table_names_pin {
+    use std::path::{Path, PathBuf};
+
+    const RETIRED_TABLES: [&str; 6] = [
+        "model_update_pending",
+        "incr_side_effect_pending",
+        "published_file_input",
+        "increment_update_attempt",
+        "room_published_inst",
+        "room_published_topology",
+    ];
+
+    fn rust_sources(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                rust_sources(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    /// 摘掉每个 `#[cfg(test)]` 引导的条目：带花括号的（`mod tests { … }` / 带体的 fn）按
+    /// 花括号配对整段去掉，不带的（`#[cfg(test)] use …;`）去到分号。
+    fn without_cfg_test_items(source: &str) -> String {
+        let mut out = String::new();
+        let mut rest = source;
+        while let Some(idx) = rest.find("#[cfg(test)]") {
+            out.push_str(&rest[..idx]);
+            let after = &rest[idx..];
+            let brace = after.find('{');
+            let semi = after.find(';');
+            rest = match (brace, semi) {
+                (Some(b), Some(s)) if s < b => &after[s + 1..],
+                (None, Some(s)) => &after[s + 1..],
+                (Some(b), _) => {
+                    let mut depth = 0usize;
+                    let mut end = None;
+                    for (i, ch) in after[b..].char_indices() {
+                        match ch {
+                            '{' => depth += 1,
+                            '}' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    end = Some(b + i + 1);
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    end.map_or("", |e| &after[e..])
+                }
+                (None, None) => "",
+            };
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// 参与检查的文本：去测试块、去整行注释（`//` / `///` / `//!`）。
+    fn production_code(source: &str) -> String {
+        without_cfg_test_items(source)
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// 整个文件都是测试的模块：父模块里以 `#[cfg(test)] mod name;` 声明的那些
+    /// （`direct_window_replay_parity` / `room_increment_audit` …），文件里自己不再写
+    /// `#[cfg(test)]`，只能从声明处认出来。
+    fn test_only_files(files: &[PathBuf]) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        for path in files {
+            let source = std::fs::read_to_string(path).expect("read source");
+            let dir = path.parent().expect("source has a parent");
+            let mut rest = source.as_str();
+            while let Some(idx) = rest.find("#[cfg(test)]") {
+                rest = &rest[idx + "#[cfg(test)]".len()..];
+                let head = rest.trim_start();
+                let Some(head) = head
+                    .strip_prefix("pub(crate) ")
+                    .or_else(|| head.strip_prefix("pub "))
+                    .or(Some(head))
+                    .and_then(|h| h.strip_prefix("mod "))
+                else {
+                    continue;
+                };
+                let Some(name) = head.split(';').next().map(str::trim) else {
+                    continue;
+                };
+                if name.is_empty() || name.contains('{') {
+                    continue;
+                }
+                out.push(dir.join(format!("{name}.rs")));
+                out.push(dir.join(name).join("mod.rs"));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn retired_table_names_only_survive_in_the_remove_table_migration() {
+        let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        rust_sources(&src, &mut files);
+        files.sort();
+        assert!(
+            files.len() > 100,
+            "src/ 下应当有上百个 .rs，只扫到 {}",
+            files.len()
+        );
+        let test_only = test_only_files(&files);
+        assert!(
+            test_only
+                .iter()
+                .any(|p| p.ends_with("direct_window_replay_parity.rs")),
+            "整文件测试模块的识别要认得出 direct_window_replay_parity: {test_only:?}"
+        );
+
+        let mut offenders = Vec::new();
+        for path in &files {
+            if test_only.contains(path) {
+                continue;
+            }
+            let source = std::fs::read_to_string(path).expect("read source");
+            let mut code = production_code(&source);
+            if path.parent() == Some(src.as_path()) && path.ends_with("lib.rs") {
+                // 唯一许可的出现点：`retire_publish_run_tables` 的 RETIRED 清单。
+                let (head, rest) = code
+                    .split_once("const RETIRED: [&str; ")
+                    .expect("retire_publish_run_tables 的 RETIRED 清单必须在");
+                let (_, tail) = rest.split_once("];").expect("RETIRED 清单要收口");
+                code = format!("{head}{tail}");
+            }
+            let shown = path
+                .strip_prefix(&src)
+                .unwrap_or(path)
+                .display()
+                .to_string();
+            for table in RETIRED_TABLES {
+                for line in code.lines().filter(|line| line.contains(table)) {
+                    offenders.push(format!("{shown}: `{table}` — {}", line.trim()));
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "ADR-072 W4：退役表名只许出现在 REMOVE TABLE IF EXISTS 清单里，生产代码里还有：\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// 摘测试块的办法要对得住 lib.rs 自己：三个 `#[cfg(test)] mod` 散在文件中段，摘掉之后
+    /// `retire_publish_run_tables` 仍在、这个测试自己不在。
+    #[test]
+    fn the_cfg_test_stripper_keeps_production_and_drops_every_test_module() {
+        let source = include_str!("lib.rs");
+        let production = without_cfg_test_items(source);
+        assert!(production.contains("async fn retire_publish_run_tables()"));
+        assert!(!production.contains("mod retired_table_names_pin"));
+        assert!(!production.contains("mod startup_room_build_gate_tests"));
+        assert!(!production.contains("mod process_instance_lock_tests"));
+        assert_eq!(
+            without_cfg_test_items("a\n#[cfg(test)]\nuse x::y;\nb"),
+            "a\n\nb"
+        );
+    }
+}

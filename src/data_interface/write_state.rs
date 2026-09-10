@@ -254,6 +254,26 @@ pub(crate) async fn writing_states_on(db: &Surreal<Any>) -> anyhow::Result<Vec<W
     Ok(rows.into_iter().map(WriteState::from).collect())
 }
 
+/// 全部库的标记行，按 dbnum 升序——`/dbnums` 每行那格 `write_state`（spec §4.7）一趟读回，
+/// 不逐库点名。这是计划 §4.5 白名单里「`dbnum_write_state` 控制面信息」那一格的读法。
+pub async fn load_all() -> anyhow::Result<Vec<WriteState>> {
+    load_all_on(&SUL_DB).await
+}
+
+pub(crate) async fn load_all_on(db: &Surreal<Any>) -> anyhow::Result<Vec<WriteState>> {
+    let mut response = db
+        .query(format!(
+            "SELECT dbnum, status, start_sesno, end_sesno, intent, {TIME_COLUMNS} \
+             FROM {WRITE_STATE_TABLE} ORDER BY dbnum;"
+        ))
+        .await
+        .context("load write states")?
+        .check()
+        .context("load write states statement")?;
+    let rows: Vec<WriteStateRow> = response.take(0).context("decode write states")?;
+    Ok(rows.into_iter().map(WriteState::from).collect())
+}
+
 /// 任务开工前的同一检查（§4.2）：同库串行，所以此刻见到 `writing` 只可能是崩溃残留——
 /// 回退到它记的 S，再让调用方按自己的 S→T 继续。
 ///
@@ -407,6 +427,16 @@ mod tests {
             vec![8000],
             "盖成 finished 的库不再进启动扫描"
         );
+        // `/dbnums` 那一趟整表读：finished 与 writing 都回来，按 dbnum 升序，
+        // 与逐库 `load_on` 读到的是同一行。
+        let all = load_all_on(&db).await.unwrap();
+        assert_eq!(
+            all.iter()
+                .map(|state| (state.dbnum, state.status.as_str()))
+                .collect::<Vec<_>>(),
+            vec![(7997, STATUS_FINISHED), (8000, STATUS_WRITING)]
+        );
+        assert_eq!(all[0], closed);
     }
 
     /// 没有开工行时 `finished` 那一句不许造行——否则一个从没写过库的 dbnum 会凭空
