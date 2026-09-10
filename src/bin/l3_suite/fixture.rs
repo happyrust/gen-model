@@ -782,6 +782,11 @@ fn write_runtime_config(
         // this focused suite; using the production "-RM" keyword would make
         // those unrelated panels block every fixture room assertion.
         ("room_key_word", "[\"AIOS-INC-RM\"]".into()),
+        // The base config may carry a temporary production watch window. The
+        // fixture's named target must replace it as well as manual_db_nums;
+        // otherwise scan_project_candidates filters the target before the
+        // explicit baseline initializer can see it.
+        ("watch_dbnums", format!("[{dbnum}]")),
         ("manual_db_nums", format!("[{dbnum}]")),
         ("included_db_files", files),
         ("gen_model", "false".into()),
@@ -2310,7 +2315,11 @@ mod tests {
         let base = dir.join("base.toml");
         let output = dir.join("runtime.toml");
         let target = db_dir.join("ams8000_0001");
-        fs::write(&base, "gen_spatial_tree = false\n").unwrap();
+        fs::write(
+            &base,
+            "gen_spatial_tree = false\nwatch_dbnums = [7998, 8000]\n",
+        )
+        .unwrap();
         fs::write(&target, []).unwrap();
 
         write_runtime_config(
@@ -2339,6 +2348,14 @@ mod tests {
             rendered
                 .lines()
                 .any(|line| { line == "catalogue_project_priority = [\"AvevaMarineSample\"]" })
+        );
+        assert_eq!(
+            rendered
+                .lines()
+                .filter(|line| line.starts_with("watch_dbnums = "))
+                .collect::<Vec<_>>(),
+            vec!["watch_dbnums = [8000]"],
+            "fixture target must replace a stale production watch window"
         );
         let _ = fs::remove_dir_all(dir);
     }
