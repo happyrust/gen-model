@@ -2131,8 +2131,6 @@ mod tests {
             "fast_model/aabb_refresh.rs",
             // 启动加载/指针重建与提交后收敛：本身即自愈动作，落盘自带盖章。
             "fast_model/aabb_tree.rs",
-            // 房间测试夹具（#[cfg(test)]，不在生产路径）。
-            "fast_model/room_fixture.rs",
         ]
         .iter()
         .map(|path| path.to_string())
