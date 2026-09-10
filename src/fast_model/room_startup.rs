@@ -79,22 +79,22 @@ pub(crate) struct StartupApplyOutcome {
     /// 边已按新视图重写的面板数。
     pub recalculated: usize,
     /// 在册却**一条几何行都没有**（从未生成）、这次没算的面板，按**文件** dbnum 分组（与
-    /// `ResidentStats::missing_panels_by_dbnum` 同口径）。边不动。**不挡参照、不入队**
-    /// （共识 D-A (a)，2026-09-08）：没有几何就没有边可陈旧，几何到来时由发布事务排的
-    /// `RoomRecalcPanel` 补算——入队只会 `NoGeometry` 一路失败到死信，参照却永远写不上。
+    /// `ResidentStats::missing_panels_by_dbnum` 同口径）。边不动。**不挡参照**
+    /// （共识 D-A (a)，2026-09-08）：没有几何就没有边可陈旧，几何到来时随该库任务的房间段
+    /// 整库重算（ADR-072 D4）。
     pub no_geometry: BTreeMap<u32, Vec<RefnoEnum>>,
     /// 在册、有几何行、却有一行世界包围盒不可用的面板（`ResidentRoomModel::unusable_panels`），
-    /// 按文件 dbnum 分组。这块面板的几何不可信、存量边可能已陈旧：**挡参照、入队**等几何修好。
+    /// 按文件 dbnum 分组。这块面板的几何不可信、存量边可能已陈旧：**挡参照**，等几何修好后
+    /// 随该库任务的房间段重算。
     pub unusable: BTreeMap<u32, Vec<RefnoEnum>>,
     /// 逐块 / 逐间失败（覆盖率闸门、网格、写库）。边不动。
     pub failures: Vec<String>,
     /// **这一轮没能按新拓扑算过、且存量边可能因此陈旧的面板**——不可用的、删失败的、重算失败的、
-    /// 改列失败那间房里的面板，一视同仁（M2）：它们的边与新拓扑不一致，都要有 durable 的落点。
-    /// [`apply_startup_plan`] 把这一摊入队成 `RoomRecalcPanel`。从未生成的（`no_geometry`）不在
-    /// 这一摊（D-A (a)）。
+    /// 改列失败那间房里的面板，一视同仁（M2）：它们的边与新拓扑不一致。这一摊是**进程内的尾巴**：
+    /// 它挡住参照（[`StartupApplyOutcome::all_settled`]），参照不前进，下次启动同一份 diff 再比一次；
+    /// 边本身由该库任务的房间段整库重算收敛（ADR-072 D4，房间随任务算），不再另排 durable 待办行
+    /// （第二条异步账随 ADR-072 R4 退役）。从未生成的（`no_geometry`）不在这一摊（D-A (a)）。
     pub unsettled: BTreeSet<RefnoEnum>,
-    /// 上面那一摊真的入队成功了几块（入队失败时是 0，理由进 `failures`）。
-    pub requeued: usize,
     pub renumbered_rooms: usize,
     pub renumbered_panels: usize,
     pub elapsed_ms: u128,
@@ -143,23 +143,22 @@ impl StartupApplyOutcome {
     }
 
     /// 回执那一段：`删 N / 重算 M（成功 a · 无几何 b · 不可用 u · 失败 c）/ 改列 K 间 P 块`；
-    /// 有尾巴时末尾多一句「已入队重试 n 块」。
+    /// 有尾巴时末尾多一句「没算成的 n 块留作尾巴」。
     pub(crate) fn summary(&self) -> String {
         let recalc_failed = self
             .planned
             .recalc
             .saturating_sub(self.recalculated + self.no_geometry_count() + self.unusable_count());
-        let requeued = if self.unsettled.is_empty() {
+        let tail = if self.unsettled.is_empty() {
             String::new()
         } else {
             format!(
-                " / 没算成的 {} 块已入队 {} 块 RoomRecalcPanel",
-                self.unsettled.len(),
-                self.requeued
+                " / 没算成的 {} 块留作尾巴（挡参照，等该库任务的房间段重算）",
+                self.unsettled.len()
             )
         };
         format!(
-            "删 {}/{} / 重算 {}（成功 {} · 无几何 {} · 不可用 {} · 失败 {}）/ 改列 {}/{} 间 {}/{} 块{requeued}",
+            "删 {}/{} / 重算 {}（成功 {} · 无几何 {} · 不可用 {} · 失败 {}）/ 改列 {}/{} 间 {}/{} 块{tail}",
             self.removed,
             self.planned.removed,
             self.planned.recalc,
@@ -180,9 +179,9 @@ impl StartupApplyOutcome {
 pub(crate) struct RecalcSplit {
     /// 常驻模型里有可用几何：这次算。
     pub to_recalc: Vec<RefnoEnum>,
-    /// 一条几何行都没有（从未生成），按文件 dbnum 分组：不算、不挡参照、不入队（D-A (a)）。
+    /// 一条几何行都没有（从未生成），按文件 dbnum 分组：不算、不挡参照（D-A (a)）。
     pub no_geometry: BTreeMap<u32, Vec<RefnoEnum>>,
-    /// 有行却有一行包围盒不可用，按文件 dbnum 分组：不算、挡参照、入队。
+    /// 有行却有一行包围盒不可用，按文件 dbnum 分组：不算、挡参照。
     pub unusable: BTreeMap<u32, Vec<RefnoEnum>>,
 }
 
@@ -193,7 +192,7 @@ pub(crate) struct RecalcSplit {
 ///
 /// 没几何再分一刀（D-A (a)）：**从未生成**（一条行都没有）与**有行却不可用**（包围盒坏，
 /// `ResidentRoomModel::unusable_panels`）。前者没有边可陈旧，不挡参照；后者的存量边可能已经
-/// 陈旧，挡参照并入队。两者对归属计算一样都是「判不了就不写」。
+/// 陈旧，挡参照。两者对归属计算一样都是「判不了就不写」。
 pub(crate) fn split_recalc_by_geometry(
     model: &ResidentRoomModel,
     panels: &BTreeSet<RefnoEnum>,
@@ -221,8 +220,8 @@ pub(crate) fn split_recalc_by_geometry(
 
 /// 按 diff 删 / 重算 / 改列（§4.4）。**调用方已持 `lock_spatial_serial`**。
 ///
-/// 三类按序处理，每块面板 / 每间房一个事务（与 `build_room_relations`、`drain_rooms_selected`
-/// 同一纪律：单块失败不拦其余，失败逐条收集）：
+/// 三类按序处理，每块面板 / 每间房一个事务（与 `build_room_relations` 同一纪律：单块失败
+/// 不拦其余，失败逐条收集）：
 ///
 /// 1. 删（`removed_panels`，从旧视图枚举）：对每块面板调 `recalc_panel_membership_for_consumption`；
 ///    面板不在新视图里，它自然落进「面板已不在册」分支——清它全部出边与 `room_panel_relate`，
@@ -235,15 +234,12 @@ pub(crate) fn split_recalc_by_geometry(
 ///
 /// 顺序删 → 重算 → 改列只为日志好读；三类按面板 / 房间分键、互不重叠，换序不影响结果。
 ///
-/// **没算成、且存量边可能因此陈旧的那一摊入队**（M2）：三类里失败的、以及几何不可用那一摊，
-/// 收进 `unsettled` 并折成 `RoomRecalcPanel` durable 目标（[`enqueue_room_panel_recalcs`]）。
-/// 理由见那个函数的注释——一句话：不入队的话它们既不在房间表里、也不产生 drain 失败，写点 ③
-/// 的两条前提于是**恒真**，启动之后任意一轮干净的 drain 都会把参照推进到当前拓扑，那几条陈旧
-/// 的边就永久留下且无日志。**从未生成**的面板（`no_geometry`）不在这一摊（D-A (a)，2026-09-08）：
-/// 它没有边可陈旧，入队只会 `NoGeometry` 一路失败到死信、把 `room_work_is_drained` 永久按假，
-/// 参照却一次都写不上；几何到来时由发布事务的 `RoomRecalcPanel` 补算。
-///
-/// [`enqueue_room_panel_recalcs`]: crate::data_interface::model_update_pending::enqueue_room_panel_recalcs
+/// **没算成、且存量边可能因此陈旧的那一摊留作尾巴**（M2）：三类里失败的、以及几何不可用那一摊，
+/// 收进 `unsettled`。这一摊只有一个落点——进程内回执（[`record_startup_compare`]）：它挡住参照
+/// （写点 ①），参照不前进，下次启动同一份 diff 再比一次；边本身由该库任务的房间段整库重算收敛
+/// （ADR-072 D4，房间随任务算）。此前它还会折成 durable 待办行排进第二条异步账，那条账随
+/// ADR-072 R4 整体退役，这里**不再入队、不写库**。**从未生成**的面板（`no_geometry`）不在这一摊
+/// （D-A (a)，2026-09-08）：它没有边可陈旧，几何到来时同样随任务算。
 pub(crate) async fn apply_startup_plan(
     db_option: &DbOption,
     model: &ResidentRoomModel,
@@ -276,7 +272,7 @@ pub(crate) async fn apply_startup_plan(
     } = split_recalc_by_geometry(model, &diff.recalc_panels);
     // 几何不可用与重算失败一视同仁：两者都是「这块面板有几何、边却没有按新拓扑算过」。
     // 从未生成的那一摊（`no_geometry`，未监听库的常态，Q20 (a)）只进回执点名——它没有边可
-    // 陈旧，不挡参照、不入队（D-A (a)）。
+    // 陈旧，不挡参照（D-A (a)）。
     outcome
         .unsettled
         .extend(unusable.values().flatten().copied());
@@ -312,19 +308,8 @@ pub(crate) async fn apply_startup_plan(
             }
         }
     }
-    match crate::data_interface::model_update_pending::enqueue_room_panel_recalcs(
-        &outcome.unsettled,
-    )
-    .await
-    {
-        Ok(queued) => outcome.requeued = queued,
-        // 入队失败不改变「参照写不写」——`unsettled` 非空时 `all_settled()` 本来就是假。
-        // 但要点名：进程内那道闸（[`startup_tail_of`]）此刻是这条线唯一的守卫。
-        Err(error) => outcome.failures.push(format!(
-            "{} 块没算成的面板入队 RoomRecalcPanel 失败（本进程内仍由启动对比回执挡住参照）: {error:#}",
-            outcome.unsettled.len()
-        )),
-    }
+    // 尾巴不入队：`unsettled` 非空时 `all_settled()` 为假，参照不写；进程内那道闸
+    // （[`startup_tail_of`]）就是这条线的守卫，边由该库任务的房间段整库重算收敛。
     outcome.elapsed_ms = started.elapsed().as_millis();
     outcome
 }
@@ -402,23 +387,21 @@ pub(crate) struct StartupCompareReport {
     pub recalculated: usize,
     /// 从未生成、这次没算的面板数：**不挡参照**（D-A (a)），只是点名。
     pub no_geometry: usize,
-    /// 有几何却不可用、这次没算的面板数：挡参照、已入队。
+    /// 有几何却不可用、这次没算的面板数：挡参照。
     pub unusable: usize,
     pub failed: usize,
     pub renumbered_rooms: usize,
     pub renumbered_panels: usize,
-    /// 没算成、已折成 `RoomRecalcPanel` 目标的面板数（M2）。
-    pub requeued: usize,
     pub reference_written: bool,
     /// **本次启动对比给这个进程留下的尾巴**（M2 的进程内闸）。`None` = 没留尾巴：这一路的
-    /// 归属边确实按当前拓扑算过（`Unchanged` 零写入，或 `Apply` 全部成功），写点 ③ 可以放行。
-    /// `Some(理由)` = 有没算成的目标、或者压根没比过（跳过 / 显式全量还没收尾），写点 ③ 拒写。
+    /// 归属边确实按当前拓扑算过（`Unchanged` 零写入，或 `Apply` 全部成功），启动侧之外的参照
+    /// 写点可以放行。`Some(理由)` = 有没算成的目标、或者压根没比过（跳过 / 显式全量还没收尾），
+    /// 拒写。
     ///
-    /// 它与入队（(a)）是两道**互补**的守卫，不是二选一：入队那道靠 `room_work_is_drained()`
-    /// 起作用，行的 `dbnum` 一旦落在监听限定域之外就会被 drain 的范围谓词滤掉；而这一格是
-    /// 进程内的，谁也滤不掉。反过来它只活在本进程——但重启会重新做一次对比（参照没写、
+    /// 这一格是进程内的，谁也滤不掉；它只活在本进程——但重启会重新做一次对比（参照没写、
     /// 现状与参照的键仍不等 → 同一份 diff → 同一摊尾巴），所以「重启丢标志」不构成漏洞：
-    /// 缺省值（没有回执 = 还没比过）本身就是拒写。
+    /// 缺省值（没有回执 = 还没比过）本身就是拒写。尾巴不再另有 durable 待办行那道守卫
+    /// （第二条异步账随 ADR-072 R4 退役）：边由该库任务的房间段整库重算收敛。
     pub unsettled: Option<String>,
     /// 参照没写的原因 / 补充说明。
     pub note: Option<String>,
@@ -431,7 +414,7 @@ pub(crate) struct StartupCompareReport {
 
 impl StartupCompareReport {
     /// 缺省是**有尾巴**：只有明确走到「边 == 这份拓扑」的臂才把它清成 `None`。新增一条臂
-    /// 而忘了表态时，默认落在保守那一边（写点 ③ 拒写，下次启动多比一次）。
+    /// 而忘了表态时，默认落在保守那一边（拒写，下次启动多比一次）。
     fn new(form: ResidentForm, plan: String, elapsed_ms: u128) -> Self {
         Self {
             form: form.as_str().to_string(),
@@ -443,7 +426,6 @@ impl StartupCompareReport {
             failed: 0,
             renumbered_rooms: 0,
             renumbered_panels: 0,
-            requeued: 0,
             reference_written: false,
             unsettled: Some(plan),
             note: None,
@@ -461,19 +443,18 @@ impl StartupCompareReport {
         self.failed = outcome.failures.len();
         self.renumbered_rooms = outcome.renumbered_rooms;
         self.renumbered_panels = outcome.renumbered_panels;
-        self.requeued = outcome.requeued;
-        // 参照写失败不算尾巴：边确实按这份拓扑算过了，只是那一行没落库——写点 ③ 正是它的重试。
+        // 参照写失败不算尾巴：边确实按这份拓扑算过了，只是那一行没落库——下一次参照写点正是它的重试。
         self.unsettled = outcome.blocking_reason();
         self
     }
 }
 
-/// 写点 ③ 的第三条前提（M2，纯函数）：本进程的启动对比留没留下尾巴。
+/// 启动侧之外的参照写点要过的门（M2，纯函数）：本进程的启动对比留没留下尾巴。
 ///
 /// `None` = 放行。`Some(理由)` = 拒写参照，两种：
 /// 1. **没有回执** —— 本进程还没做过启动房间对比。这不是理论情形：worker
-///    （`ensure_batch_worker`）起在 `run_cli` 的房间段**之前**，它的空闲轮完全可能先跑一轮
-///    干净的 drain。那时启动 diff 一块面板都还没应用，参照却会被推进到当前拓扑，停机期间
+///    （`ensure_batch_worker`）起在 `run_cli` 的房间段**之前**，它的空闲轮完全可能先于房间段
+///    跑完一轮。那时启动 diff 一块面板都还没应用，参照却会被推进到当前拓扑，停机期间
 ///    未监听库的全部变化就此静默丢失。
 /// 2. **回执说有尾巴** —— 见 [`StartupCompareReport::unsettled`]。
 pub(crate) fn startup_tail_of(report: Option<&StartupCompareReport>) -> Option<String> {
@@ -487,7 +468,7 @@ pub(crate) fn startup_tail_of(report: Option<&StartupCompareReport>) -> Option<S
     }
 }
 
-/// [`startup_tail_of`] 的进程内取数版；写点 ③（`model_update_pending::settle_resident_reference`）调它。
+/// [`startup_tail_of`] 的进程内取数版，供启动侧之外的参照写点判门。
 pub(crate) fn startup_compare_tail() -> Option<String> {
     startup_tail_of(startup_compare_report().as_ref())
 }
@@ -513,7 +494,7 @@ pub(crate) fn record_startup_compare(report: StartupCompareReport) {
 
 /// 显式全量收尾后回填「参照写了没」。没有在途回执（全量不是本模块判的）就不动。
 ///
-/// 全量成功并写上参照 = 边就是按这份拓扑算的，尾巴一并清掉（写点 ③ 从此可以放行）；没写成
+/// 全量成功并写上参照 = 边就是按这份拓扑算的，尾巴一并清掉（其它参照写点从此可以放行）；没写成
 /// （身份换了代 / 参照写失败 / 模型建不起来）照旧留着尾巴。全量被 `startup_autorun` 挡住或
 /// 自己失败时，这个函数**根本不会被调**，`full()` 立的那句尾巴原样留着——正是要的。
 fn note_full_rebuild_settled(reference_written: bool, note: Option<String>) {
@@ -722,8 +703,8 @@ fn full(
 /// 门：`AIOS_SKIP_STARTUP_ROOM_BUILD` 最强（对比与全量一起跳，运维止血口语义不变）；空间树
 /// `ReadyEmpty` 照旧跳过并盖平凡章。`startup_autorun` **不**门对比——只门返回的
 /// [`StartupRoomVerdict::FullRebuild`] 那一臂，在 `lib.rs` 判。这里也不读 `room_build` 的空间凭据
-/// 对账（§4.6）：对比接管了「空间状态变了、房间没跟上」里拓扑那一半，几何那一半归发布事务的
-/// `RoomRecalcPanel`；每次成功全量照旧盖章，只是章不再决定跑不跑。
+/// 对账（§4.6）：对比接管了「空间状态变了、房间没跟上」里拓扑那一半，几何那一半归该库任务的
+/// 房间段（ADR-072 D4）；每次成功全量照旧盖章，只是章不再决定跑不跑。
 ///
 /// 进锁后先 `ensure_current`：初始化装的那份模型对应初始化那一刻的清单，到房间段时被监听文件的
 /// 首轮可能已发布、清单已变，身份键不同就整份重建（键没变是常路、零 I/O）。
@@ -851,7 +832,7 @@ pub(crate) async fn startup_room_reconcile(db_option: &DbOption) -> StartupRoomV
                 StartupCompareReport::new(form, plan.summary(), started.elapsed().as_millis());
             report.note = Some("参照摘要 == 现状，参照不动（D2）".to_string());
             // 零写入不是「没比」而是「比过、一样」：参照说的那份拓扑就是现状，边与它一致。
-            // 这一臂没有尾巴，写点 ③ 从此可以放行（它此后只是把 `settled_at` 往前推）。
+            // 这一臂没有尾巴，其它参照写点从此可以放行（它们此后只是把 `settled_at` 往前推）。
             report.unsettled = None;
             record_startup_compare(report);
             StartupRoomVerdict::Settled
@@ -1195,19 +1176,17 @@ mod tests {
         outcome.recalculated = 4;
         assert!(outcome.all_settled() && outcome.blocking_reason().is_none());
 
-        // 有尾巴时回执末尾多一句「已入队多少块」——(a) 那条路有没有真落下去，看这里。
+        // 有尾巴时回执末尾多一句「留作尾巴多少块」——尾巴只在进程内，不再有入队计数。
         outcome.unusable = BTreeMap::from([(8000u32, vec![r(9)])]);
         outcome.recalculated = 3;
         outcome.unsettled = BTreeSet::from([r(9)]);
-        outcome.requeued = 1;
         assert_eq!(
             outcome.summary(),
             "删 1/1 / 重算 4（成功 3 · 无几何 0 · 不可用 1 · 失败 0）/ 改列 1/1 间 2/2 块 \
-             / 没算成的 1 块已入队 1 块 RoomRecalcPanel"
+             / 没算成的 1 块留作尾巴（挡参照，等该库任务的房间段重算）"
         );
         outcome.unusable.clear();
         outcome.unsettled.clear();
-        outcome.requeued = 0;
         outcome.recalculated = 4;
 
         outcome
@@ -1379,10 +1358,10 @@ mod tests {
         assert!(slow["error"].as_str().unwrap().contains("超过"));
     }
 
-    /// M2 (b) 的闸（纯函数）：写点 ③ 只在「本进程比过、且没留尾巴」时放行。
+    /// M2 (b) 的闸（纯函数）：启动侧之外的参照写点只在「本进程比过、且没留尾巴」时放行。
     ///
     /// 没有回执那一条不是形式主义——worker（`ensure_batch_worker`）起在 `run_cli` 的房间段
-    /// **之前**，它的空闲轮完全可能先跑一轮干净的 drain；那时启动 diff 一块面板都没应用，
+    /// **之前**，它的空闲轮完全可能先于房间段跑完一轮；那时启动 diff 一块面板都没应用，
     /// 参照却会被推进到当前拓扑，停机期间未监听库的全部变化就此静默丢失。
     /// **重启不构成漏洞**：标志丢了 = 回到「没有回执」= 拒写，缺省就在保守那一边。
     #[test]
@@ -1407,10 +1386,10 @@ mod tests {
         assert_eq!(
             startup_tail_of(Some(&settled)),
             None,
-            "一块没落下：写点 ③ 照旧放行"
+            "一块没落下：参照写点照旧放行"
         );
 
-        // 只有从未生成的那一块没算：不是尾巴（D-A (a)），写点 ③ 照旧放行。
+        // 只有从未生成的那一块没算：不是尾巴（D-A (a)），参照写点照旧放行。
         let never_generated = StartupApplyOutcome {
             planned: PlannedCounts {
                 recalc: 2,
@@ -1437,7 +1416,6 @@ mod tests {
             recalculated: 1,
             unusable: BTreeMap::from([(8000u32, vec![r(9)])]),
             unsettled: BTreeSet::from([r(9)]),
-            requeued: 1,
             ..Default::default()
         };
         let held = StartupCompareReport::new(ResidentForm::Published, "对比".into(), 1)
@@ -1448,10 +1426,6 @@ mod tests {
             "拒写的理由要点名是哪一摊: {reason}"
         );
         assert_eq!(held.unusable, 1);
-        assert_eq!(
-            held.requeued, 1,
-            "尾巴同时也进了 durable 队列（(a) 那条路）"
-        );
 
         // 跳过与显式全量两条臂：缺省就是「有尾巴」，没人表态它也不会放行。
         let skipped =
@@ -1613,16 +1587,14 @@ mod tests {
         }
     }
 
-    /// 源码钉（M2 (a)）：应用臂里**每一条**没算成的路都要把面板收进 `unsettled`，并把那一摊
-    /// 折成 `RoomRecalcPanel` durable 目标。
+    /// 源码钉（M2 (a)，ADR-072 R5 修订）：应用臂里**每一条**没算成的路都要把面板收进 `unsettled`
+    /// ——它是进程内那道闸唯一的输入；而这一摊**不再入队**：第二条异步账（房间待办行）随
+    /// ADR-072 R4 退役，边由该库任务的房间段整库重算收敛，应用臂不写任何待办行、不自己拼 SQL。
     ///
-    /// 少任何一条，那些面板就既不在房间表里、也不产生 drain 失败——写点 ③ 的两条前提于是
-    /// 恒真，启动之后任意一轮干净的 drain 都会把参照推进到当前拓扑，陈旧的边永久留下且无日志。
     /// 「几何不可用」与「重算失败」一视同仁：两者都是「这块面板有几何、边却没有按新拓扑算过」。
-    /// **从未生成**的那一摊（`no_geometry`）不进（D-A (a)）：它没有边可陈旧，入队只会一路失败到
-    /// 死信、把参照永久按住。
+    /// **从未生成**的那一摊（`no_geometry`）不进（D-A (a)）：它没有边可陈旧。
     #[test]
-    fn every_unsettled_panel_of_the_startup_apply_lands_as_a_durable_room_target() {
+    fn every_unsettled_panel_of_the_startup_apply_is_a_tail_and_none_is_enqueued() {
         let apply = fn_body(
             production_source(),
             "pub(crate) async fn apply_startup_plan(",
@@ -1640,30 +1612,24 @@ mod tests {
         );
         assert!(
             !apply.contains("no_geometry.values()"),
-            "从未生成的面板不入队、不算尾巴（D-A (a)）: {apply}"
+            "从未生成的面板不算尾巴（D-A (a)）: {apply}"
         );
         // 改列失败那间房的面板整间重算（改列本来就是重算的省略式，多算不漏算）。
         assert!(
             apply.contains("outcome.unsettled.extend(renumber.panels.iter().copied())"),
             "改列失败同样算尾巴: {apply}"
         );
-        assert!(
-            apply.contains(
-                "model_update_pending::enqueue_room_panel_recalcs(\n        &outcome.unsettled,\n    )"
-            ),
-            "尾巴要走既有的入队入口，不许在这里自己拼 SQL: {apply}"
-        );
-        let enqueue_at = apply
-            .find("enqueue_room_panel_recalcs(")
-            .expect("入队必须在");
-        for collected in [
-            "outcome.unsettled.insert(",
-            "unusable.values().flatten().copied()",
-            "outcome.unsettled.extend(renumber.panels.iter().copied())",
+        // 尾巴不入队、不写库：房间随任务算（ADR-072 D4 / 附录 C.1）。
+        for retired in [
+            "enqueue_room_panel_recalcs(",
+            "enqueue_room_recalc(",
+            concat!("model_update_", "pending"),
+            "RoomRecalcPanel",
+            ".query(",
         ] {
             assert!(
-                apply.find(collected).expect("收集点必须在") < enqueue_at,
-                "三类都收完了才入队（少收一类就漏一摊）: {collected}"
+                !apply.contains(retired),
+                "应用臂不再排房间待办行（{retired}）: {apply}"
             );
         }
     }
@@ -1671,7 +1637,7 @@ mod tests {
     /// 源码钉（M2 (b)）：进程内那道闸的缺省是「有尾巴」，只有两处明确表态才清成 `None`
     /// ——`Unchanged` 零写入那一臂，与显式全量写上参照那一处。
     ///
-    /// 新增一条臂而忘了表态时，默认落在保守那一边（写点 ③ 拒写，下次启动多比一次）。
+    /// 新增一条臂而忘了表态时，默认落在保守那一边（拒写，下次启动多比一次）。
     #[test]
     fn the_startup_tail_defaults_to_blocked_and_is_cleared_at_exactly_two_places() {
         let code = code_lines(production_source());
@@ -1768,11 +1734,8 @@ mod tests {
     }
 
     /// 源码钉：`persist_reference(` 的生产调用点只有两处（写点 ① 对比应用全成、写点 ② 显式全量
-    /// 全成），每处紧邻「全部成功」判定。
-    #[test]
-    /// 写点 ③（一轮 drain 全成）不在本文件，在 `model_update_pending.rs`——它有自己的钉
-    /// （`the_third_reference_write_needs_a_clean_round_and_an_empty_room_queue`）。这里数的
-    /// 是**启动侧**的写点。
+    /// 全成），每处紧邻「全部成功」判定。这里数的是**启动侧**的写点；启动侧之外的写点各有
+    /// 自己的钉，过的门是 [`startup_compare_tail`]。
     #[test]
     fn the_reference_is_written_at_exactly_two_places_each_behind_a_success_check() {
         let code = code_lines(production_source());

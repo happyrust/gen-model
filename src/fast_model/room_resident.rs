@@ -3798,7 +3798,7 @@ mod tests {
     /// 回退即红：归属路径只许经 [`ensure_current`]（它内部是唯一调 [`ResidentRooms::for_membership`]
     /// 的地方）取模型，不许自己摸进程单例、两代或点名形态。
     ///
-    /// P2 接线后 `model_update_pending.rs` 的换代点走的就是 `ensure_current`；哪一路由
+    /// 启动对比（`room_startup.rs`）的换代点走的就是 `ensure_current`；哪一路由
     /// `data_face()` 决定，代码里出现 `ResidentForm::Latest` 就是绕开了这个决定。注释可以提
     /// ——`room_model.rs` 的凭据读法就在注释里点名 `resident_blocked` 为什么会先于全量重建
     /// 把行建出来。
@@ -3806,10 +3806,7 @@ mod tests {
     fn membership_paths_only_take_the_model_through_for_membership() {
         for (name, source) in [
             ("room_model.rs", include_str!("room_model.rs")),
-            (
-                "model_update_pending.rs",
-                include_str!("../data_interface/model_update_pending.rs"),
-            ),
+            ("room_startup.rs", include_str!("room_startup.rs")),
         ] {
             let mentions: Vec<&str> = source
                 .lines()

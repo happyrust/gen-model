@@ -7,9 +7,10 @@
 //!   回退）。现在 `WindowRootSources::collect` 多一条 `room_structural_trigger` 臂，文件侧读两端。
 //! - **F-B**（已修，2026-09-07）房间消费不区分数据面形态：读透（`spawned-mem` / `embedded-mem`）下没有文件轮次、
 //!   发布视图几何停在启动基线，房间任务却照算照销账，`e3d.room.lookup` 报 `current`。
-//!   现在视图随 `options::data_face()`（`room_model::consumption_view`），读透回 `unsupported`。
-//! - **F-C** 一个根 `Failed` 让文件轮次停在 `collecting`，空闲重试成功之后没有任何地方再调
-//!   `publish_completed_file_round`。
+//!   现在读透回 `unsupported`；几何视图两种形态只剩实时行一条路（ADR-072 R5，发布视图退役）。
+//! - **F-C**（已随 ADR-072 R3 退役）「一个根 `Failed` 让文件轮次停在 `collecting`，空闲重试成功之后
+//!   没有人再发布」——文件轮次与 publish 阶段整套退役后没有 `collecting` 可停：房间段的门是任务手里的
+//!   `TaskModelOutcome`（`room_task::finish_task_rooms`），根没全落就不盖房间水位，下一次任务重做。
 //!
 //! 只 `include_str!` 相关源文件、不连库、不碰全局状态，可以与任何测试并行。
 
@@ -133,20 +134,13 @@ mod tests {
         assert_eq!(untouched, ModelUpdatePlan::default());
     }
 
-    /// F-B：房间消费的几何视图必须按数据面形态选——读透形态没有文件轮次，
-    /// 发布视图几何永远停在启动基线，此时要么走 Live 视图、要么不算；
-    /// 与之配套，`e3d.room.lookup` 在读透形态下必须回 `publication_status = unsupported`
-    /// （ADR-062「读透不承诺文件级发布语义」），不能拿「无 collecting / 无 pending」凑成 `current`。
+    /// F-B：`e3d.room.lookup` 在读透形态下必须回 `publication_status = unsupported`
+    /// （ADR-062「读透不承诺文件级发布语义」），不能拿「无在飞任务」凑成 `current`。
+    ///
+    /// 这条原先还钉着房间 drain 按 `data_face()` 分流——那条消费路随第二条异步账退役
+    /// （ADR-072 R4 / R5），几何视图两种形态只剩实时行一条路，见下一条钉。
     #[test]
-    fn f_b_room_consumption_and_lookup_status_follow_the_data_face() {
-        let pending = include_str!("../data_interface/model_update_pending.rs");
-        let drain = fn_body(pending, "async fn drain_rooms_selected(");
-        assert!(
-            drain.contains("data_face") || drain.contains("is_read_through"),
-            "drain_rooms_selected 无条件走 Published 视图（`recalc_*_guarded` / `load_panel_index_published`），\
-             没有按 `options::data_face()` 分流：{drain}"
-        );
-
+    fn f_b_room_lookup_status_follows_the_data_face() {
         let query = include_str!("../query_service.rs");
         let status = fn_body(query, "async fn published_derivation_status(");
         assert!(
@@ -173,27 +167,5 @@ mod tests {
         for face in [DataFace::Ingest, DataFace::ReadThrough] {
             assert_eq!(consumption_view_for(face), RoomGeometryView::Live, "{face:?}");
         }
-    }
-
-    /// F-C：空闲轮消化完模型积压之后，必须回头看「有没有 collecting 的文件轮次已经不再有
-    /// 失败单元」，有就重新走 `publish_completed_file_round`——否则一个根失败一次，
-    /// 该库的房间目标永远释放不了，`has_collecting_file_rounds()` 恒真，
-    /// 所有库的 `e3d.room.lookup` 恒为 `updating`。
-    #[test]
-    fn f_c_idle_round_republishes_file_rounds_settled_by_retries() {
-        let worker = include_str!("../data_interface/batch_worker.rs");
-        let idle = worker
-            .split_once("async fn idle_round(")
-            .expect("idle_round 必须存在")
-            .1
-            .split_once("\nenum IdleOutcome")
-            .expect("idle_round 之后是 IdleOutcome")
-            .0;
-        assert!(
-            idle.contains("publish_completed_file_round(")
-                || idle.contains("republish_settled_file_rounds"),
-            "空闲轮里没有任何对 collecting 文件轮次的重新发布；今天 `publish_completed_file_round` \
-             只在 execute_frozen_batch 与发布队列 runtime 各被调一次：{idle}"
-        );
     }
 }

@@ -41,8 +41,8 @@ pub(crate) struct RoomTopologySource {
     pub nodes: Vec<TopologyNode>,
 }
 
-/// 分片身份摘要。**过渡件**：库里两张分片表退役后它已没有生产读者，只剩
-/// `side_effect_pending` 退役前的一处引用；随 T4 删该文件一起删。
+/// 分片身份摘要。**过渡件**：库里两张分片表退役后它已没有生产读者，只剩发布簿记模块
+/// 退役前的一处引用；随 D 线删那个文件一起删。
 pub(crate) fn source_key(token: &str) -> String {
     digest(format!("room-topology-source-v{SCHEMA_VERSION}\n{token}").as_bytes())
 }

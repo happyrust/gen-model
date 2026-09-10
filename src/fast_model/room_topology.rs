@@ -87,14 +87,13 @@ pub(crate) struct RoomGroup {
 // 房间拓扑的消费者只剩常驻房间模型，它从文件侧分组（下面 `load_room_groups_from_files`）与
 // 磁盘分片（`room_topology_source`）建，不再有「按清单键选中的那份库里拓扑」。
 //
-// 下面三个是**过渡壳**：调用点还留在 `batch_worker::publish_model_file_round` 与
-// `side_effect_pending`（T4 正在整段删），壳只保住编译、一个字不写库；T4 删掉调用点后
-// 连壳一起删。
+// 下面三个是**过渡壳**：调用点还留在 `batch_worker::publish_model_file_round` 与发布簿记
+// 模块（A2 / D 线正在整段删），壳只保住编译、一个字不写库；调用点删掉后连壳一起删（C2）。
 // ---------------------------------------------------------------------------
 
 /// 过渡壳：曾把这一轮的合成拓扑物化成发布视图的候选行；发布视图退役后没有消费者，
-/// 渲染成空串（调用方把它拼进事务，空语句无害）。泛型只为不依赖 `side_effect_pending`
-/// 里那个即将一起退役的清单行类型。
+/// 渲染成空串（调用方把它拼进事务，空语句无害）。泛型只为不依赖发布簿记模块里那个
+/// 即将一起退役的清单行类型。
 #[allow(dead_code)]
 pub(crate) async fn render_stage_published_room_topology<T>(
     inputs: &[T],

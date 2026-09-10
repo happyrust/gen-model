@@ -437,10 +437,10 @@ mod tests {
         assert!(!calculation.contains("applied_sesno"));
         assert!(!calculation.contains("state.model_sesno"));
 
-        // 房间段不再问发布轮次那一行，也不再替 `model_update_pending` 销账。
+        // 房间段不再问发布轮次那一行，也不再替第二条异步账（房间待办行）销账。
         assert!(!production.contains("SideEffectCompensator::file_round("));
         assert!(!production.contains("published_model_file_round_on"));
-        assert!(!production.contains("model_update_pending"));
+        assert!(!production.contains(concat!("model_update_", "pending")));
 
         // 水位整表只在启动补房间那一次读（白名单的 `dbnum_watermark`），房间段本体不读。
         assert_eq!(

@@ -235,8 +235,8 @@ mod tests {
         for needle in [
             "published_file_input",
             "commit_token",
-            "model_update_pending",
-            "side_effect_pending",
+            concat!("model_update_", "pending"),
+            concat!("side_effect_", "pending"),
         ] {
             assert!(!production.contains(needle), "生产路径不该再出现 `{needle}`");
         }
@@ -394,7 +394,7 @@ mod tests {
     }
 
     /// 清边不看开关也不看生成种类；**重算不再渲染成待办行**（ADR-072 D6：房间归属由任务的
-    /// 房间段整库算，`model_update_pending` 退役）；空影响是空串。
+    /// 房间段整库算，第二条异步账的房间待办行退役）；空影响是空串。
     #[test]
     fn rendering_always_clears_edges_and_never_enqueues_recalc_rows() {
         let effects = effects_of(
@@ -419,7 +419,8 @@ mod tests {
                 assert!(rendered.contains(needle), "missing `{needle}` in {rendered}");
             }
             assert!(
-                !rendered.contains("room_recalc_") && !rendered.contains("model_update_pending"),
+                !rendered.contains("room_recalc_")
+                    && !rendered.contains(concat!("model_update_", "pending")),
                 "{policy:?}/{switch}: 不许再排待办行: {rendered}"
             );
         }
@@ -542,13 +543,18 @@ mod tests {
             "重写的成员 9 的边原样"
         );
 
-        let mut response = db
-            .query("SELECT VALUE id FROM model_update_pending;")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        let pending: Vec<surrealdb::sql::Thing> = response.take(0).unwrap();
-        assert!(pending.is_empty(), "发布事务不再排房间待办行: {pending:?}");
+        // 发布事务只清边：语句里除 DELETE 之外什么都没有——待办行那张表已经没有写者。
+        let statements: Vec<&str> = sql
+            .split(';')
+            .map(str::trim)
+            .filter(|statement| !statement.is_empty())
+            .collect();
+        assert!(!statements.is_empty(), "{sql}");
+        assert!(
+            statements
+                .iter()
+                .all(|statement| statement.starts_with("DELETE ")),
+            "发布事务不再排房间待办行，只清边: {statements:?}"
+        );
     }
 }

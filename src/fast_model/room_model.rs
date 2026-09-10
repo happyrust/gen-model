@@ -75,10 +75,9 @@ async fn query_room_insts(
 /// `query_room_insts`、各读一次 `.mesh`。
 ///
 /// **本文件不读开关，也不摸进程单例。** 开关（`options::room_resident_model`）与形态
-/// （`options::data_face`）只在换代点判一次——`model_update_pending::ensure_resident_rooms`
-/// 里那一句 `room_resident::ensure_current(`，串行锁之内；启动对比那一路由
-/// `room_startup` 把它已经装好的那份直接递进来。模型只以参数形态进出，这里没有第二处
-/// 判定可以漂，也没有第二个取法可以绕开 `for_membership(`。
+/// （`options::data_face`）只在换代点判一次——`room_resident::ensure_current(` 的调用方
+/// （串行锁之内）；启动对比那一路由 `room_startup` 把它已经装好的那份直接递进来。模型只以
+/// 参数形态进出，这里没有第二处判定可以漂，也没有第二个取法可以绕开 `for_membership(`。
 ///
 /// 全量重建（[`load_panel_index`] / [`cal_room_refnos`] / [`recalc_panel_membership`]）在**类型
 /// 层面**恒为 `None`：它是显式修复入口，常驻模型不可信时正是靠它重算，接上去就没有退路了。
@@ -4476,7 +4475,7 @@ mod tests {
             .join("\n");
         assert!(
             !code.contains("room_resident_model()"),
-            "开关只在换代点判一次（model_update_pending::ensure_resident_rooms），本文件不判"
+            "开关只在换代点（`room_resident::ensure_current` 的调用方）判一次，本文件不判"
         );
     }
 

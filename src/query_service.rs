@@ -248,7 +248,7 @@ impl QueryService {
     /// ingest 形态（ADR-072 D4，publish 阶段退役）：**`published_version` = 该库的 `room_sesno`**
     /// （任务收尾那一笔盖的房间水位，读水位镜像，不问派生表），**`stale` = 该库有任务在飞**
     /// （`task_registry` 是在飞的唯一来源）。没有具体库号的调用（空间边界那一路）：版本回
-    /// `null`、在飞看全局。此前这里还问一遍 `model_update_pending` 的房间待办行——那张表随
+    /// `null`、在飞看全局。此前这里还问一遍第二条异步账里的房间待办行——那张表随
     /// 账本退役，房间归属如今在任务内算完写完，任务不在飞就是算完了。
     async fn published_derivation_status(
         dbnum: Option<u32>,
@@ -934,7 +934,7 @@ mod tests {
 
     /// ADR-072 D4：`e3d.room.lookup` 回的 `published_version` 就是该库的 `room_sesno`（任务收尾
     /// 盖的房间水位，读水位镜像），`stale` = 该库有任务在飞（`task_registry`）；不再问派生表
-    /// （`published_file_input` 的发布版本、`model_update_pending` 的房间待办行）。
+    /// （`published_file_input` 的发布版本、第二条异步账的房间待办行）。
     #[test]
     fn room_lookup_freshness_is_the_room_watermark_and_task_registry_only() {
         let source = include_str!("query_service.rs");
@@ -950,8 +950,8 @@ mod tests {
         assert!(status.contains("has_running_data_batch()"), "{status}");
         for retired in [
             "published_spatial_version",
-            "model_update_pending",
-            "side_effect_pending",
+            concat!("model_update_", "pending"),
+            concat!("side_effect_", "pending"),
             "SUL_DB",
             "room_recalc",
         ] {
@@ -970,7 +970,7 @@ mod tests {
         );
         let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
         assert!(!production.contains(concat!("fn render_room_", "pending_probe")));
-        assert!(!production.contains("model_update_pending::TABLE"));
+        assert!(!production.contains(concat!("model_update_", "pending::TABLE")));
     }
 
     #[test]
