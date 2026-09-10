@@ -2323,7 +2323,10 @@ mod tests {
         let service = stack
             .split_once("Command::new(service)")
             .expect("service command")
-            .1;
+            .1
+            .split_once("&run_dir.join(\"stack-service.log\")")
+            .expect("service command boundary")
+            .0;
         assert!(service.contains(".current_dir(run_dir)"));
         assert!(
             !service.lines().any(|line| line.trim() == ".current_dir(repo)"),
