@@ -314,6 +314,14 @@ const MODEL_FACE_TABLES: &[&str] = &["inst_relate", "inst_info", "tubi_relate"];
 
 /// §4.3 的 2–6：全部是按 `(dbnum, sesno)` 的谓词 `DELETE`，一句 `SELECT` 都没有（W3）。
 ///
+/// **不许给列套 `<int>`**（`docs/evidence/2026-09-10-rollback-predicate-index-measurement.md` §3.1）：
+/// SurrealDB 2.1.4 的优化器见到列上的转型就整条放弃索引，EXPLAIN 直接回
+/// `Iterate Table` + `Fallback {reason: "Unsupported value: <int> sesno"}`——每一次回退都变成
+/// 全表扫（1112 实测 30 940 行的库上，扫的是 90 617 行的整张 `pe`）。去掉转型是纯收益：
+/// 同一条谓词在 1112 上两种写法返回**一样的行数**（S=362 都是 30 939，S=724 都是 1），
+/// 而计划变回 `Iterate Index`。老 `prune_above_watermark` 里那个 `<int>` 是防御性的，
+/// 两个写口（`SPdmsElement::gen_sur_json` / `ElementRows::minimal_tombstone_row`）都写 JSON 数字。
+///
 /// `pe` 排在 noun / `ATT_UDA` **之后**：删 `pe` 顶点会把挂在它身上的边（`pe_owner` /
 /// `ref_rev` / `tubi_relate`）一并带走，回退要的正是这个级联（元素批模块头「pe 行为什么
 /// 不删」的反面）。
@@ -332,19 +340,19 @@ pub(crate) fn render_rollback(
     let mut deletes = Vec::with_capacity(noun_tables.len() + MODEL_FACE_TABLES.len() + 5);
     for table in noun_tables {
         deletes.push(format!(
-            "DELETE {table} WHERE dbnum = {dbnum} AND <int>sesno > {target_watermark};"
+            "DELETE {table} WHERE dbnum = {dbnum} AND sesno > {target_watermark};"
         ));
     }
     deletes.push(format!(
-        "DELETE pe WHERE dbnum = {dbnum} AND <int>sesno > {target_watermark};"
+        "DELETE pe WHERE dbnum = {dbnum} AND sesno > {target_watermark};"
     ));
     for table in MODEL_FACE_TABLES {
         deletes.push(format!(
-            "DELETE {table} WHERE dbnum = {dbnum} AND <int>direct_model.sesno > {target_watermark};"
+            "DELETE {table} WHERE dbnum = {dbnum} AND direct_model.sesno > {target_watermark};"
         ));
     }
     deletes.push(format!(
-        "DELETE gen_root WHERE dbnum = {dbnum} AND <int>source_end_sesno > {target_watermark};"
+        "DELETE gen_root WHERE dbnum = {dbnum} AND source_end_sesno > {target_watermark};"
     ));
     // 房间面整库删（房间本来就是整库重算，边上不带 sesno）。谓词落在 `in` 而不是 `dbnum`：
     // `room_model::render_room_edge_row` / `render_room_panel_relate_write` 写出的边只有
@@ -1096,16 +1104,21 @@ mod tests {
             sql.find(needle)
                 .unwrap_or_else(|| panic!("缺 {needle}\n{sql}"))
         };
-        let equi = at("DELETE EQUI WHERE dbnum = 7997 AND <int>sesno > 41;");
-        at("DELETE PANE WHERE dbnum = 7997 AND <int>sesno > 41;");
-        let pe = at("DELETE pe WHERE dbnum = 7997 AND <int>sesno > 41;");
+        let equi = at("DELETE EQUI WHERE dbnum = 7997 AND sesno > 41;");
+        at("DELETE PANE WHERE dbnum = 7997 AND sesno > 41;");
+        let pe = at("DELETE pe WHERE dbnum = 7997 AND sesno > 41;");
         assert!(equi < pe, "noun 行先删、pe 顶点后删:\n{sql}");
         for table in MODEL_FACE_TABLES {
             at(&format!(
-                "DELETE {table} WHERE dbnum = 7997 AND <int>direct_model.sesno > 41;"
+                "DELETE {table} WHERE dbnum = 7997 AND direct_model.sesno > 41;"
             ));
         }
-        at("DELETE gen_root WHERE dbnum = 7997 AND <int>source_end_sesno > 41;");
+        at("DELETE gen_root WHERE dbnum = 7997 AND source_end_sesno > 41;");
+        // 列上套 `<int>` 会让优化器整条放弃索引（证据页 §3.1），一处都不许有。
+        assert!(
+            !sql.contains("<int>"),
+            "回退谓词不得给列套转型，否则每次回退都全表扫:\n{sql}"
+        );
         // 房间边行上没有 dbnum 列，谓词落在 `in`（面板 / 房间那一端的 pe 行）。
         at("DELETE room_relate WHERE in.dbnum = 7997;");
         at("DELETE room_panel_relate WHERE in.dbnum = 7997;");
