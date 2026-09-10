@@ -357,22 +357,29 @@ async fn persist_root_in_chunks(
     persist_root_chunks_impl(target, store, root, chunk_size).await
 }
 
-/// 一组最多装这么多根（[`persist_roots_batched`]）。一组是失败的赔付边界：组内任一块失败，
-/// 整组的根都没盖章、都算落库失败；组与组之间互不牵连。
+/// 一组最多装这么多根（[`persist_roots_batched`]）：ADR-071 D2 的跨根合块（d-932 保留），
+/// 7997 六千多根不再是六千多笔事务。组的大小只是这一个常量：组内按 `tx_limits` 的字节上限合块、
+/// 一组一批事务；每根的房间边紧跟它自己的模型行、同一块同一事务（ADR-073 D1 / W2），一根一组
+/// 还是几百根一组都是同一条路。房间算不出来的根在写库**之前**就剔出组、单独记失败（ADR-073 D2）；
+/// 写库失败的赔付边界仍是组：组内任一块失败，写进这批事务的根都没盖章、都算落库失败，
+/// 组与组之间互不牵连。
 pub const BATCHED_PERSIST_ROOTS_PER_GROUP: usize = 512;
 
 /// 单条几何记录渲成语句之后的硬上限（与 [`persist_root_chunks_impl`] 同值）。
 const PUBLICATION_STATEMENT_HARD_CAP: usize = 8 * 1024 * 1024;
 
-/// 一次跨根合块落库的账（ADR-071）。
+/// 一次合块落库的账（ADR-071 / ADR-073 D1）。
 #[derive(Debug, Clone, Default)]
 pub struct BatchedPersist {
     /// 成功提交的行数账（介质随目标）。
     pub rows: Option<PersistedRows>,
-    /// 没落进去的根与原因：所在组的任一块失败，整组的根都在这里。
+    /// 没落进去的根与原因：房间算不出来（写前剔出组，原因带「room membership」）、或所在组
+    /// 任一块写库失败，整根都在这里。
     pub failed: Vec<(RefNo, String)>,
-    /// 实际发出的组数。
+    /// 实际发出的组数（≤ [`BATCHED_PERSIST_ROOTS_PER_GROUP`] 根一组）。
     pub groups: usize,
+    /// 随模型行同事务写下的房间归属边数（ADR-073 D1）。
+    pub room_edges: usize,
 }
 
 /// 库里既有的一条 e3d-model 几何身份及其祖先链（对账用，一库一次取回）。
@@ -461,8 +468,8 @@ async fn existing_geometry_for_window(
 /// 一组落成之后把快照推到「刚写完」的状态：这些根名下的旧身份换成刚投影的那批。
 ///
 /// 只对**做过对账**的根动手（`reconciliation_ready`）——没回执的根本来就不参与对账，
-/// 它在库里的行也没被这一组动过。
-fn advance_geometry_baseline(window: Option<(u32, i32)>, group: &[RootShare]) {
+/// 它在库里的行也没被这一组动过。只传真落进去的根（房间关卡剔掉的根没动库，快照不该跟着动）。
+fn advance_geometry_baseline(window: Option<(u32, i32)>, group: &[LiveShare<'_>]) {
     let Some(window) = window else {
         return;
     };
@@ -470,7 +477,11 @@ fn advance_geometry_baseline(window: Option<(u32, i32)>, group: &[RootShare]) {
     let Some(cached) = baseline.as_mut().filter(|cached| cached.window == window) else {
         return;
     };
-    for share in group.iter().filter(|share| share.reconciliation_ready()) {
+    for share in group
+        .iter()
+        .map(|live| live.share)
+        .filter(|share| share.reconciliation_ready())
+    {
         let packed_root = packed_refno(share.root);
         cached.rows.retain(|row| !row.under(packed_root));
         cached
@@ -524,6 +535,74 @@ impl RootShare {
     }
 }
 
+/// 过了房间关卡、要进本组事务的一根（[`room_stage`] 的产物）。
+///
+/// 渲染用的记录是它在组内**认领**的那份：嵌套根与祖先根共有的记录只归组序里先到的那根渲一次
+/// （先删后插、幂等，所以谁渲都一样）；房间边按同一份记录算，随它的行落在同一块里。对账仍按
+/// 该根自己的全集（`share.records`）。
+struct LiveShare<'a> {
+    share: &'a RootShare,
+    /// 本根认领的记录（去掉组内更早的根已经渲过的那些），保持投影顺序。
+    claimed: Vec<ProjectedGeometry>,
+    /// 这一根两张房间边的语句（`;\n` 收尾；没有计算器或没有几何时为空）。
+    room_statements: String,
+    /// 算出来的成员边数（`room_relate`）。
+    room_edges: usize,
+}
+
+/// 房间关卡（ADR-073 D1 / D2）：写库**之前**逐根算房间归属——输入只有该根的内存投影与任务开工时
+/// 冻住的计算器，一句库不读。算不出来（盒子不可用、面板网格不全）的根在这里就剔出本组、带原因
+/// 记进失败名单，房间失败 = 该根失败；其余根照常往下走。与组大小无关：一组一根或一组几百根都是
+/// 同一条路。`rooms` 为 `None`（本进程没有房间定义）时不算也不写新边，只由对账那一半清掉被删来源
+/// 的旧边。
+fn room_stage<'a>(
+    group: &'a [RootShare],
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+) -> (Vec<LiveShare<'a>>, Vec<(RefNo, String)>) {
+    let mut rendered_ids = BTreeSet::<String>::new();
+    let mut live = Vec::with_capacity(group.len());
+    let mut failed = Vec::new();
+    for share in group {
+        // 组内记录按 record_id 去重（嵌套根共有的记录只渲一次），保持根序。
+        let claimed = share
+            .records
+            .iter()
+            .filter(|record| !rendered_ids.contains(&record.record_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        let (room_statements, room_edges) = match rooms {
+            Some(calculator) if !claimed.is_empty() => {
+                match calculator.calculate_for_root(&claimed) {
+                    Ok(edges) => (
+                        calculator.render_root_room_edges(&claimed, &edges),
+                        edges.len(),
+                    ),
+                    Err(error) => {
+                        // 这一根一行都不落：记录不算认领，同组更晚的根若与它共有记录照常自己渲。
+                        failed.push((
+                            share.root,
+                            format!(
+                                "room membership of root {} could not be computed: {error:#}",
+                                share.root
+                            ),
+                        ));
+                        continue;
+                    }
+                }
+            }
+            _ => (String::new(), 0),
+        };
+        rendered_ids.extend(claimed.iter().map(|record| record.record_id.clone()));
+        live.push(LiveShare {
+            share,
+            claimed,
+            room_statements,
+            room_edges,
+        });
+    }
+    (live, failed)
+}
+
 /// 库里这些 dbnum 名下、由 e3d-model 写过的全部几何身份，**一条查询**取回（两张表各一句）。
 /// 各根在客户端按祖先链分摊——比 [`projected_geometry_ids_on`] 每根一问少几千个往返。
 /// 只认带 `dbnum` 列的行：没有它的历史行由启动回填（`backfill_inst_relate_anc`）补上。
@@ -572,24 +651,37 @@ fn render_publication_fence_batch(roots: &[RefNo], per_statement: usize) -> Stri
     statements
 }
 
-/// ADR-071 D1 / D2 / D11：一个 dbnum 任务把本轮全部成功根的模型行**跨根合块**、同步写进库。
+/// ADR-071 D1 / D11 × ADR-073 D1：一个 dbnum 任务把本轮全部成功根的模型行合块、同步写进库，
+/// 每根紧跟着它自己的两张房间归属边，同一块、同一笔事务、模型在前。
 ///
 /// 与 [`persist_root_on`] 同一套行与同一套纪律——按记录 id 先删后插、分支重置与对账删除在首块、
-/// 回执在末块（之前的块用栅栏标出中间态）、`spatial_epoch` 随动几何的块 +1、房间效果清边在前 /
-/// 排重算在后、混源守卫在写之前与盖章同事务各发一次——区别只有三处：
+/// 回执在末块（之前的块用栅栏标出中间态）、`spatial_epoch` 随动几何的块 +1、被对账掉的来源清边、
+/// 混源守卫在写之前与盖章同事务各发一次——区别有三处：
 ///
-/// 1. 块按 `tx_limits` 的字节上限切、**跨根**装满，不再一根一笔（7997 六千多根不再是六千多笔事务）；
+/// 1. 块按 `tx_limits` 的字节上限装、一组 ≤ [`BATCHED_PERSIST_ROOTS_PER_GROUP`] 根：每根先渲成
+///    自己的一段（几何行 + 房间边，边紧跟行），再按字节把相邻的段装进同一块，一根不拆（ADR-073 D1
+///    「合块允许跨根，一根不拆」）；装不下一块的大根按字节劈块，边跟在它最后一块几何后面。一根的
+///    行与边装得下就与回执并成一笔——中间态不存在、也就不需要栅栏；
 /// 2. 对账读一次：整库 e3d-model 几何身份一条查询取回，各根在客户端按祖先链分摊，不再每根一问；
 /// 3. 没有 per-root CAS / ACK / 队列：同一 dbnum 只有本任务一个写者（ADR-071 S1），语句渲好就发（D11），不落盘。
 ///
-/// 一组 ≤ [`BATCHED_PERSIST_ROOTS_PER_GROUP`] 根；一组任一块失败，该组全部根算落库失败（回执没盖、
-/// 栅栏留着，窗口规划器眼里仍未发布，下一次任务重生成），其余组照常。嵌套根共有的记录在一组里
-/// 只渲一次（`record_id` 去重），对账仍按每根自己的全集算。
+/// `rooms` 是任务开工时冻出来的房间计算器（[`frozen_room_calculator`]），`None` = 本进程没有
+/// 房间定义（常驻模型 Disabled / Unsupported），那时只清被对账掉来源的旧边、不写新边。有计算器时
+/// 一根的边由 [`MemoryRoomCalculator::calculate_for_root`] 按该根的内存投影算——**不回读库**——
+/// 算不出来（盒子不可用、面板网格不全）这一根在写库之前就剔出组、整根不落库（[`room_stage`]），
+/// 房间失败 = 该根失败（ADR-073 D2），同组其余根照常。
+///
+/// 一组任一块写失败，写进这批事务的根都算落库失败（回执没盖、栅栏留着，窗口规划器眼里仍未发布，
+/// 下一次任务重生成），其余组照常。嵌套根与祖先根共有的记录在一组里只渲一次（`record_id` 去重），
+/// 对账仍按每根自己的全集算。
+///
+/// [`MemoryRoomCalculator::calculate_for_root`]: crate::fast_model::room_model::MemoryRoomCalculator::calculate_for_root
 pub async fn persist_roots_batched(
     target: PersistTarget<'_>,
     store: &ModelMemoryStore,
     dbnum: u32,
     roots: &[RefNo],
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
 ) -> anyhow::Result<BatchedPersist> {
     let limits = crate::data_interface::tx_limits::data_tx_limits();
     persist_roots_batched_with_chunk_bytes(
@@ -598,8 +690,33 @@ pub async fn persist_roots_batched(
         dbnum,
         roots,
         limits.max_bytes.max(64 * 1024),
+        rooms,
     )
     .await
+}
+
+/// 任务开工时冻一份房间计算器（ADR-073 D1，硬约束：预加载房间模型只能是开工时冻结的不可变引用，
+/// 任务期间不换代）。`Ok(None)` = 本进程没有房间定义（常驻模型 Disabled / Unsupported：
+/// `room_resident_model = false`、无 project 特性、或启动没评估过）——落库只清被对账掉来源的
+/// 旧边、不写新边；常驻模型在建 / 降级 / 阻塞时是 `Err`——这一轮的根都算不出房间，
+/// 调用方按「房间失败 = 该根失败」记进 `failed`，下一次任务重生成。
+///
+/// 这里不回读库、不建模型、不换代：[`current_for_calculation`] 只取启动段装好的那份 `Arc`，
+/// 计算器把面板索引建在内存里；任务期间常驻模型换代与否与这份引用无关。
+///
+/// [`current_for_calculation`]: crate::fast_model::room_resident::current_for_calculation
+pub fn frozen_room_calculator()
+-> anyhow::Result<Option<crate::fast_model::room_model::MemoryRoomCalculator>> {
+    use crate::fast_model::room_resident::{ResidentLifecycle, lifecycle};
+    if matches!(
+        lifecycle(),
+        ResidentLifecycle::Disabled { .. } | ResidentLifecycle::Unsupported { .. }
+    ) {
+        return Ok(None);
+    }
+    let model = crate::fast_model::room_resident::current_for_calculation()?;
+    let mesh_dir = aios_core::get_db_option().get_meshes_path();
+    crate::fast_model::room_model::MemoryRoomCalculator::new(model, mesh_dir).map(Some)
 }
 
 /// [`persist_roots_batched`] 的显式块字节上限形态（测试把它压到 1 让每条记录自成一块）。
@@ -609,6 +726,7 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
     dbnum: u32,
     roots: &[RefNo],
     chunk_bytes: usize,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
 ) -> anyhow::Result<BatchedPersist> {
     let mut out = BatchedPersist::default();
     if roots.is_empty() {
@@ -659,30 +777,31 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
 
     for group in shares.chunks(BATCHED_PERSIST_ROOTS_PER_GROUP) {
         out.groups += 1;
-        match persist_group(
-            db,
-            group,
-            &existing,
-            chunk_bytes,
-        )
-        .await
-        {
+        // 房间关卡在写库之前、按根（ADR-073 D1 / D2）：算不出来的根就地记失败，
+        // 剩下的根才进本组的事务。
+        let (live, room_failed) = room_stage(group, rooms);
+        out.failed.extend(room_failed);
+        if live.is_empty() {
+            continue;
+        }
+        match persist_group(db, &live, &existing, chunk_bytes).await {
             Ok(outcome) => {
                 total.upserted += outcome.upserted;
                 total.removed += outcome.removed;
                 total.receipts += outcome.receipts;
                 total.commits += outcome.commits;
+                out.room_edges += outcome.room_edges;
                 refresh_all.extend(outcome.refresh);
                 boxes_all.extend(outcome.boxes);
                 cleared_all.extend(outcome.cleared);
-                advance_geometry_baseline(baseline_window, group);
+                advance_geometry_baseline(baseline_window, &live);
             }
             Err(error) => {
                 // 这一组可能已经提交了前几块，快照不再等于库：整份作废，下一次重读。
                 invalidate_geometry_baseline();
                 let text = format!("{error:#}");
                 out.failed
-                    .extend(group.iter().map(|share| (share.root, text.clone())));
+                    .extend(live.iter().map(|live| (live.share.root, text.clone())));
             }
         }
     }
@@ -707,6 +826,8 @@ struct GroupOutcome {
     removed: usize,
     receipts: usize,
     commits: usize,
+    /// 随模型行同事务写下的房间归属边数。
+    room_edges: usize,
     /// 写了新几何的来源（隐式管身不算）。
     refresh: Vec<aios_core::RefnoEnum>,
     /// `refresh` 的投影世界盒（[`crate::fast_model::aabb_tree::projected_tree_entry`]）。
@@ -715,30 +836,31 @@ struct GroupOutcome {
     cleared: Vec<aios_core::RefnoEnum>,
 }
 
-/// 一组根：渲块 → 逐块提交。任一块失败即返回 Err，调用方把整组记成失败。
+/// 一组过了房间关卡的根：渲块 → 逐块提交。任一块失败即返回 Err，调用方把这一组记成失败。
+/// 每根的顺序定死（ADR-073 D1，用户原话「放到模型计算后面」）：最终几何已在投影里 → 房间归属已在
+/// [`room_stage`] 算好 → 写模型行与房间边（同一块同一事务，模型在前）→ 盖章。
 async fn persist_group(
     db: &Surreal<Any>,
-    group: &[RootShare],
+    group: &[LiveShare<'_>],
     existing: &[ExistingGeometry],
     chunk_bytes: usize,
 ) -> anyhow::Result<GroupOutcome> {
-    // 组内记录按 record_id 去重（嵌套根共有的记录只渲一次），保持根序。
-    let mut rendered_ids = BTreeSet::new();
-    let mut records = Vec::new();
-    for share in group {
-        for record in &share.records {
-            if rendered_ids.insert(record.record_id.clone()) {
-                records.push(record.clone());
-            }
-        }
-    }
+    // 本组要渲的全部记录（各根认领的那份，已按 record_id 去重）。
+    let records = group
+        .iter()
+        .flat_map(|live| live.claimed.iter().cloned())
+        .collect::<Vec<_>>();
 
     // 对账：每根自己的全集 vs 库里挂在它祖先链下的身份；库里有、存储里没有的就是陈旧行。
     let mut removals = Vec::<String>::new();
     let mut removed_ids = BTreeSet::<String>::new();
     let mut removed_geometry = Vec::<GeometryId>::new();
     let mut branches = BTreeSet::<(u32, u32)>::new();
-    for share in group.iter().filter(|share| share.reconciliation_ready()) {
+    for share in group
+        .iter()
+        .map(|live| live.share)
+        .filter(|share| share.reconciliation_ready())
+    {
         let packed_root = packed_refno(share.root);
         let projected = share
             .records
@@ -787,31 +909,52 @@ async fn persist_group(
         .filter_map(crate::fast_model::aabb_tree::projected_tree_entry)
         .collect::<Vec<_>>();
 
-    // 几何块：按字节装满、超限劈半；管身槽位跨块延续。
-    let mut geometry_chunks = Vec::<String>::new();
+    // 几何段：**逐根**渲，一根一段（超限的大根劈半成几段）；管身槽位跨段延续。这一根的两张房间边
+    // 紧跟在它最后一段几何后面（ADR-073 D1 / W2：模型在前、房间在后，同一段 = 同一块 = 同一笔事务）；
+    // 只有回执没有几何的根（删干净了）没有边可写，它的旧边由上面的清边那一半处理。
+    let mut pieces = Vec::<String>::new();
     let mut tube_slots = BTreeMap::<(u32, u32), usize>::new();
-    let mut pending =
-        std::collections::VecDeque::from_iter((!records.is_empty()).then_some(records.as_slice()));
-    while let Some(chunk) = pending.pop_front() {
-        let mut slots = tube_slots.clone();
-        let rendered = render_chunk(chunk, WriteMode::Incremental, &mut slots)?;
-        if rendered.len() > chunk_bytes && chunk.len() > 1 {
-            let (left, right) = chunk.split_at(chunk.len() / 2);
-            pending.push_front(right);
-            pending.push_front(left);
-            continue;
-        }
-        anyhow::ensure!(
-            rendered.len() <= PUBLICATION_STATEMENT_HARD_CAP,
-            "single geometry exceeds publication byte budget"
+    for live in group {
+        let first_piece = pieces.len();
+        let mut pending = std::collections::VecDeque::from_iter(
+            (!live.claimed.is_empty()).then_some(live.claimed.as_slice()),
         );
-        tube_slots = slots;
-        geometry_chunks.push(rendered);
+        while let Some(chunk) = pending.pop_front() {
+            let mut slots = tube_slots.clone();
+            let rendered = render_chunk(chunk, WriteMode::Incremental, &mut slots)?;
+            if rendered.len() > chunk_bytes && chunk.len() > 1 {
+                let (left, right) = chunk.split_at(chunk.len() / 2);
+                pending.push_front(right);
+                pending.push_front(left);
+                continue;
+            }
+            anyhow::ensure!(
+                rendered.len() <= PUBLICATION_STATEMENT_HARD_CAP,
+                "single geometry exceeds publication byte budget"
+            );
+            tube_slots = slots;
+            pieces.push(rendered);
+        }
+        if !live.room_statements.is_empty() {
+            match pieces.get_mut(first_piece..).and_then(|own| own.last_mut()) {
+                Some(last) => last.push_str(&live.room_statements),
+                None => pieces.push(live.room_statements.clone()),
+            }
+        }
+    }
+    // 几何块：相邻的段按字节装进同一块（合块允许跨根），一段不拆——一根的行与边始终在同一块里。
+    let mut geometry_chunks = Vec::<String>::new();
+    for piece in pieces {
+        match geometry_chunks.last_mut() {
+            Some(last) if last.len() + piece.len() <= chunk_bytes => last.push_str(&piece),
+            _ => geometry_chunks.push(piece),
+        }
     }
 
     // 回执块：同一份 ModelTarget 只 `LET` 一次，几百根共用；按字节切成若干块。
     let receipted = group
         .iter()
+        .map(|live| live.share)
         .filter_map(|share| share.receipt.as_ref().map(|receipt| (share.root, receipt)))
         .collect::<Vec<_>>();
     let mut receipt_chunks = Vec::<String>::new();
@@ -852,6 +995,9 @@ async fn persist_group(
         flush(&mut header, &mut body, &mut receipt_chunks);
     }
 
+    // 本组随模型行同事务写下的房间边数（各根在 [`room_stage`] 里算好的那份）。
+    let room_edge_count = group.iter().map(|live| live.room_edges).sum::<usize>();
+
     let chunk_count = geometry_chunks.len() + receipt_chunks.len();
     let has_preamble = !removals.is_empty() || !branches.is_empty() || !cleared_room_edges.is_empty();
     let statement_count = chunk_count.max(usize::from(has_preamble));
@@ -861,6 +1007,7 @@ async fn persist_group(
             removed: 0,
             receipts: 0,
             commits: 0,
+            room_edges: 0,
             refresh: Vec::new(),
             boxes: Vec::new(),
             cleared: Vec::new(),
@@ -928,6 +1075,7 @@ async fn persist_group(
         removed: removals.len(),
         receipts: receipted.len(),
         commits,
+        room_edges: room_edge_count,
         refresh: deferred_refresh,
         boxes: tree_boxes,
         cleared: cleared_room_edges,
@@ -3045,7 +3193,7 @@ mod tests {
             .unwrap_or_default()
     }
 
-    /// ADR-071 D2：一批根的行跨根合块——嵌套根与祖先根共有的记录只渲一次、每根各自盖章、
+    /// ADR-071 D2（d-932 保留）：一批根的行跨根合块——嵌套根与祖先根共有的记录只渲一次、每根各自盖章、
     /// 全部在几笔事务里落完，而不是一根一笔。
     #[tokio::test]
     async fn batched_persist_shares_chunks_across_roots_and_stamps_every_receipt() {
@@ -3077,6 +3225,7 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[ancestor_root, NESTED_ROOT],
+            None,
         )
         .await
         .expect("batched persist");
@@ -3126,6 +3275,7 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[root],
+            None,
         )
         .await
         .expect("first batch");
@@ -3148,6 +3298,7 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[root],
+            None,
         )
         .await
         .expect("second batch");
@@ -3205,6 +3356,7 @@ mod tests {
                         &store,
                         BATCH_DBNUM,
                         &[root],
+                        None,
                     )
                     .await
                     .expect("first batch");
@@ -3226,6 +3378,7 @@ mod tests {
                         &store,
                         BATCH_DBNUM,
                         &[root],
+                        None,
                     )
                     .await
                     .expect("second batch");
@@ -3304,6 +3457,7 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[root],
+            None,
         )
         .await
         .expect("first batch");
@@ -3354,6 +3508,7 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[root],
+            None,
         )
         .await
         .expect("second batch");
@@ -3496,6 +3651,7 @@ mod tests {
             BATCH_DBNUM,
             &[root],
             1,
+            None,
         )
         .await
         .expect("batched persist");
@@ -3523,6 +3679,7 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[RefNo::new(24383, 1), RefNo::new(1, 1)],
+            None,
         )
         .await
         .expect_err("foreign root must be refused");
@@ -3836,8 +3993,490 @@ mod tests {
             spatial_epoch(&db).await > epoch_before,
             "动过几何的事务必须把 spatial_epoch 推高"
         );
-        // 「留下来的那条几何要排一次房间重算」那一半随 pending 表退了（ADR-072 D5）：房间随
-        // 任务整库算，发布事务里没有 `room_recalc_*` 行可查。
+        // 「留下来的那条几何要排一次房间重算」那一半随 pending 表退了（ADR-072 D5）；房间归属
+        // 如今随每根的模型行同事务写（ADR-073 D1，见下面 `room_*` 一族用例）。
+    }
+
+    // ---- ADR-073 D1：逐根房间归属随模型行同事务落边 ------------------------------------
+
+    const ROOM_ROOT_A: RefNo = RefNo::new(24383, 10);
+    const ROOM_ROOT_B: RefNo = RefNo::new(24383, 20);
+    const PANEL_R1: RefNo = RefNo::new(24383, 500);
+    const PANEL_R2: RefNo = RefNo::new(24383, 600);
+
+    /// 一根一件的夹具记录：根就是构件自己，盒子沿 x 从 `min` 到 `max`、y / z 落在 400–600。
+    /// 行上的 `dbnum` 与根的 `dbno()` 同值（生产口径）——删干净的根对账时只剩根自己的 dbnum 可问。
+    fn room_record(root: RefNo, min: f32, max: f32) -> ProjectedGeometry {
+        ProjectedGeometry {
+            record_id: format!("{}_{}", root.word0, root.word1),
+            geometry_id: GeometryId::Element {
+                refno: format!("{}/{}", root.word0, root.word1),
+            },
+            source_refno: root,
+            dbnum: BATCH_DBNUM,
+            world_bounds: [[min, 400.0, 400.0], [max, 600.0, 600.0]],
+            ancestors: vec![packed_refno(root), packed_refno(RefNo::new(24383, 1))],
+            ..baked_record()
+        }
+    }
+
+    /// 两块面板盒：R1 占 x 0–1000，R2 占 x 500–1500（重叠段 500–1000 里的构件同属两间）。
+    /// 面板几何来自内存投影，与生产同一条 `from_projection` 路；盒子只用 AABB 判定就够，
+    /// 落在盒里的构件不读任何网格文件。
+    fn room_calculator(
+        dir: &std::path::Path,
+    ) -> crate::fast_model::room_model::MemoryRoomCalculator {
+        use crate::fast_model::room_model::{RoomPanelMap, RoomPanels, box_mesh_for_test};
+        use crate::fast_model::room_resident::{
+            MeshCache, ResidentForm, ResidentManifest, ResidentRoomModel,
+        };
+        box_mesh_for_test(glam::Vec3::ZERO, glam::Vec3::splat(1000.))
+            .ser_to_file(&dir.join("panel_r1.mesh"))
+            .unwrap();
+        box_mesh_for_test(
+            glam::Vec3::new(500., 0., 0.),
+            glam::Vec3::new(1500., 1000., 1000.),
+        )
+        .ser_to_file(&dir.join("panel_r2.mesh"))
+        .unwrap();
+        let panel = |refno: RefNo, mesh: &str, min: [f32; 3], max: [f32; 3]| ProjectedGeometry {
+            record_id: format!("{}_{}", refno.word0, refno.word1),
+            geometry_id: GeometryId::Element {
+                refno: format!("{}/{}", refno.word0, refno.word1),
+            },
+            source_refno: refno,
+            noun: "PANE".into(),
+            mesh_id: mesh.into(),
+            world_bounds: [min, max],
+            ancestors: vec![packed_refno(refno)],
+            ..baked_record()
+        };
+        let r1: RefnoEnum = refno_from_e3d(PANEL_R1);
+        let r2: RefnoEnum = refno_from_e3d(PANEL_R2);
+        let map = RoomPanelMap {
+            rooms: vec![
+                RoomPanels {
+                    room: "24383_501".into(),
+                    room_num: "R1".into(),
+                    panels: vec![r1],
+                },
+                RoomPanels {
+                    room: "24383_601".into(),
+                    room_num: "R2".into(),
+                    panels: vec![r2],
+                },
+            ],
+            all_panels: std::collections::HashSet::from([r1, r2]),
+        };
+        let model = std::sync::Arc::new(ResidentRoomModel::from_projection(
+            ResidentManifest {
+                form: ResidentForm::Latest,
+                key: "rooms-fixture".into(),
+            },
+            vec![],
+            map,
+            &[
+                panel(PANEL_R1, "panel_r1", [0.; 3], [1000.; 3]),
+                panel(PANEL_R2, "panel_r2", [500., 0., 0.], [1500., 1000., 1000.]),
+            ],
+            std::sync::Arc::<MeshCache>::default(),
+        ));
+        crate::fast_model::room_model::MemoryRoomCalculator::new(model, dir.to_path_buf())
+            .expect("room calculator")
+    }
+
+    /// 库里全部房间边，`面板->构件` 形态、按字典序。
+    async fn room_edges(db: &Surreal<Any>) -> Vec<String> {
+        #[derive(serde::Deserialize)]
+        struct Edge {
+            i: String,
+            o: String,
+        }
+        let mut response = db
+            .query("SELECT <string>in AS i, <string>out AS o FROM room_relate;")
+            .await
+            .expect("room edges")
+            .check()
+            .expect("room edge statement");
+        let mut edges = response
+            .take::<Vec<Edge>>(0)
+            .expect("room edge rows")
+            .into_iter()
+            .map(|edge| format!("{}->{}", edge.i, edge.o))
+            .collect::<Vec<_>>();
+        edges.sort();
+        edges
+    }
+
+    fn room_store(commits: Vec<ProjectionCommit>) -> ModelMemoryStore {
+        let store = ModelMemoryStore::default();
+        store.commit(ProjectionScope::Current, commits);
+        store
+    }
+
+    fn root_commit(root: RefNo, records: Vec<ProjectedGeometry>) -> ProjectionCommit {
+        let count = records.len();
+        ProjectionCommit {
+            upserts: records,
+            receipt: Some(test_receipt(root, count)),
+            ..ProjectionCommit::default()
+        }
+    }
+
+    /// ADR-073 D1 ①：一根算完即可查——A 的房间边与模型行同一块、同一笔落下、马上在库里；同组的 B
+    /// 房间算不出来（盒子不可用）在写库之前就剔出组、整根不落库、进 `failed`（d-932 口径 2），
+    /// A 的边与章一点不受它牵连。事务账：A 的几何 + 房间边一块、回执一块，共两笔——房间边没有自己的
+    /// 那一笔。
+    #[tokio::test]
+    async fn a_root_lands_its_room_edges_with_its_model_rows_before_the_next_root_starts() {
+        let dir = tempfile::tempdir().unwrap();
+        let rooms = room_calculator(dir.path());
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        seed_gen_roots(&db, &[ROOM_ROOT_A, ROOM_ROOT_B]).await;
+        let store = room_store(vec![
+            root_commit(ROOM_ROOT_A, vec![room_record(ROOM_ROOT_A, 100., 200.)]),
+            // 盒子带 NaN（`aabb_is_usable` 不认）：房间算不出来，这一根一行都不能落。
+            root_commit(ROOM_ROOT_B, vec![room_record(ROOM_ROOT_B, f32::NAN, 200.)]),
+        ]);
+
+        let batched = persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A, ROOM_ROOT_B],
+            Some(&rooms),
+        )
+        .await
+        .expect("persist");
+
+        assert_eq!(batched.groups, 1, "两根同一组（≤ 512 根一组）");
+        assert_eq!(batched.room_edges, 1);
+        assert_eq!(
+            batched
+                .failed
+                .iter()
+                .map(|(root, _)| *root)
+                .collect::<Vec<_>>(),
+            vec![ROOM_ROOT_B]
+        );
+        assert!(
+            batched.failed[0].1.contains("room membership"),
+            "失败原因要说明是房间算不出来: {}",
+            batched.failed[0].1
+        );
+        let rows = batched.rows.expect("rows");
+        assert_eq!(rows.upserted, 1, "B 在写库之前就剔出去了，只渲 A 的行");
+        assert_eq!(rows.commits, 2, "A 的几何与房间边一块 + 回执一块；房间边没有自己的那一笔");
+        assert_eq!(rows.receipts, 1);
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_10".to_string()],
+            "A 在 R1 里；B 没算出来就一条边都没有"
+        );
+        assert_eq!(count_record(&db, "inst_relate", "24383_10").await, 1);
+        assert_eq!(
+            count_record(&db, "inst_relate", "24383_20").await,
+            0,
+            "房间失败 = 该根失败：B 的模型行也不落"
+        );
+        assert_eq!(publication_status_of(&db, ROOM_ROOT_A).await, "ready");
+        assert_eq!(
+            publication_status_of(&db, ROOM_ROOT_B).await,
+            "stale",
+            "B 没盖章，窗口规划器眼里仍未发布"
+        );
+    }
+
+    /// ADR-073 D1 ②：模型行写失败，对应的房间边不可见。库侧一条事件在 A 的模型行上 THROW，
+    /// 整笔事务回滚——同一笔里的房间边一起消失，库里一条边都没有。赔付边界是组（d-932）：
+    /// 同组的 B 与 A 装在同一块里，这一轮也算落库失败、没盖章；B 单独再来一轮照常落下，边随行一起出现。
+    #[tokio::test]
+    async fn a_failed_model_write_leaves_no_room_edge_behind() {
+        let dir = tempfile::tempdir().unwrap();
+        let rooms = room_calculator(dir.path());
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        seed_gen_roots(&db, &[ROOM_ROOT_A, ROOM_ROOT_B]).await;
+        db.query(
+            "DEFINE TABLE inst_relate SCHEMALESS; \
+             DEFINE EVENT boom ON TABLE inst_relate WHEN $after.generic = 'BOOM' THEN { THROW 'boom' };",
+        )
+        .await
+        .expect("define event")
+        .check()
+        .expect("define event statements");
+        let mut doomed = room_record(ROOM_ROOT_A, 100., 200.);
+        doomed.noun = "BOOM".into();
+        let store = room_store(vec![
+            root_commit(ROOM_ROOT_A, vec![doomed]),
+            root_commit(ROOM_ROOT_B, vec![room_record(ROOM_ROOT_B, 300., 400.)]),
+        ]);
+
+        let batched = persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A, ROOM_ROOT_B],
+            Some(&rooms),
+        )
+        .await
+        .expect("persist");
+
+        assert_eq!(
+            batched
+                .failed
+                .iter()
+                .map(|(root, _)| *root)
+                .collect::<Vec<_>>(),
+            vec![ROOM_ROOT_A, ROOM_ROOT_B],
+            "组是赔付边界：同一块里的 B 随 A 那一笔一起回滚"
+        );
+        assert!(
+            room_edges(&db).await.is_empty(),
+            "A 的模型行没写成，同一笔里的房间边不许出现"
+        );
+        assert_eq!(count_record(&db, "inst_relate", "24383_10").await, 0);
+        assert_eq!(count_record(&db, "inst_relate", "24383_20").await, 0);
+        assert_eq!(publication_status_of(&db, ROOM_ROOT_A).await, "stale");
+        assert_eq!(publication_status_of(&db, ROOM_ROOT_B).await, "stale");
+
+        // B 单独再落一轮：它的行与边同一笔出现。
+        let retried = persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_B],
+            Some(&rooms),
+        )
+        .await
+        .expect("persist");
+        assert!(retried.failed.is_empty(), "{:?}", retried.failed);
+        assert_eq!(retried.room_edges, 1);
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_20".to_string()]
+        );
+        assert_eq!(count_record(&db, "inst_relate", "24383_20").await, 1);
+        assert_eq!(publication_status_of(&db, ROOM_ROOT_B).await, "ready");
+    }
+
+    /// ADR-073 D1 ③：更新一个根不丢其他根的结果——移动 / 删除 / 空归属 / 多房间归属四条路都走一遍，
+    /// 每一步 B 的边原样不动：
+    /// 1. A、B 都在 R1；2. A 移进 R1 ∩ R2 → A 两条边；3. A 移出所有房间 → A 只剩 DELETE、边清空；
+    /// 4. A 的几何被删（对账）→ A 的边随删除那一块清掉。
+    #[tokio::test]
+    async fn updating_one_root_rewrites_its_own_room_edges_and_leaves_the_other_roots_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let rooms = room_calculator(dir.path());
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        seed_gen_roots(&db, &[ROOM_ROOT_A, ROOM_ROOT_B]).await;
+        async fn persist(
+            db: &Surreal<Any>,
+            rooms: &crate::fast_model::room_model::MemoryRoomCalculator,
+            store: &ModelMemoryStore,
+            roots: &[RefNo],
+        ) -> BatchedPersist {
+            let batched = persist_roots_batched(
+                PersistTarget::new(db, PersistMedium::EmbeddedMem),
+                store,
+                BATCH_DBNUM,
+                roots,
+                Some(rooms),
+            )
+            .await
+            .expect("persist");
+            assert!(batched.failed.is_empty(), "{:?}", batched.failed);
+            batched
+        }
+
+        // 1. 两根都在 R1。
+        let store = room_store(vec![
+            root_commit(ROOM_ROOT_A, vec![room_record(ROOM_ROOT_A, 100., 200.)]),
+            root_commit(ROOM_ROOT_B, vec![room_record(ROOM_ROOT_B, 300., 400.)]),
+        ]);
+        let first = persist(&db, &rooms, &store, &[ROOM_ROOT_A, ROOM_ROOT_B]).await;
+        assert_eq!(first.room_edges, 2);
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24383_10".to_string(),
+                "pe:24383_500->pe:24383_20".to_string(),
+            ]
+        );
+
+        // 2. A 移进 R1 与 R2 的重叠段：两条边；B 不动。
+        store.commit(
+            ProjectionScope::Current,
+            vec![root_commit(ROOM_ROOT_A, vec![room_record(ROOM_ROOT_A, 600., 700.)])],
+        );
+        let moved = persist(&db, &rooms, &store, &[ROOM_ROOT_A]).await;
+        assert_eq!(moved.room_edges, 2);
+        assert_eq!(
+            room_edges(&db).await,
+            vec![
+                "pe:24383_500->pe:24383_10".to_string(),
+                "pe:24383_500->pe:24383_20".to_string(),
+                "pe:24383_600->pe:24383_10".to_string(),
+            ]
+        );
+
+        // 3. A 移到所有房间之外：新归属为空也要写出清除；B 不动。
+        store.commit(
+            ProjectionScope::Current,
+            vec![root_commit(ROOM_ROOT_A, vec![room_record(ROOM_ROOT_A, 5000., 5100.)])],
+        );
+        let outside = persist(&db, &rooms, &store, &[ROOM_ROOT_A]).await;
+        assert_eq!(outside.room_edges, 0);
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_20".to_string()]
+        );
+
+        // 回到 R1 再删掉几何：被对账掉的来源清边，B 仍在。
+        store.commit(
+            ProjectionScope::Current,
+            vec![root_commit(ROOM_ROOT_A, vec![room_record(ROOM_ROOT_A, 100., 200.)])],
+        );
+        persist(&db, &rooms, &store, &[ROOM_ROOT_A]).await;
+        assert_eq!(room_edges(&db).await.len(), 2);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                removals: vec!["24383_10".into()],
+                receipt: Some(test_receipt(ROOM_ROOT_A, 0)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        let deleted = persist(&db, &rooms, &store, &[ROOM_ROOT_A]).await;
+        assert_eq!(deleted.rows.expect("rows").removed, 1);
+        assert_eq!(
+            room_edges(&db).await,
+            vec!["pe:24383_500->pe:24383_20".to_string()],
+            "删几何的根清掉自己的边，别的根的边原样"
+        );
+        assert_eq!(count_record(&db, "inst_relate", "24383_10").await, 0);
+    }
+
+    /// 没有房间计算器（本进程没有房间定义）时只清被对账掉来源的旧边、不写新边，落库照常。
+    #[tokio::test]
+    async fn without_a_room_calculator_the_root_still_lands_and_writes_no_edges() {
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        seed_gen_roots(&db, &[ROOM_ROOT_A]).await;
+        let store = room_store(vec![root_commit(
+            ROOM_ROOT_A,
+            vec![room_record(ROOM_ROOT_A, 100., 200.)],
+        )]);
+        let batched = persist_roots_batched(
+            PersistTarget::new(&db, PersistMedium::EmbeddedMem),
+            &store,
+            BATCH_DBNUM,
+            &[ROOM_ROOT_A],
+            None,
+        )
+        .await
+        .expect("persist");
+        assert!(batched.failed.is_empty());
+        assert_eq!(batched.room_edges, 0);
+        assert!(room_edges(&db).await.is_empty());
+        assert_eq!(count_record(&db, "inst_relate", "24383_10").await, 1);
+    }
+
+    /// 源码钉（ADR-073 D1 / D2 / W2，d-932）：房间归属在写库**之前**、按根算（[`room_stage`]，输入只有
+    /// 该根的内存投影与任务开工时冻住的计算器），算不出来的根在进组事务之前就剔掉；每根的边紧跟它
+    /// 自己的几何段（`live.room_statements`），段按字节装块、段不拆、块进事务——所以「模型行已提交、
+    /// 房间边稍后单独提交」这条路在源码里不存在。落库路径不回读库、不走整库房间算法
+    /// （`SUL_DB` / `query_room_insts` / `cal_room_refnos`）；两个生产调用方都在任务开工时冻一次
+    /// 计算器递进来。
+    #[test]
+    fn room_membership_is_computed_per_root_before_the_write_and_rides_the_same_transaction() {
+        let source = include_str!("model_db_adapter.rs");
+        let production = source
+            .split(concat!("#[cfg(test)]\n", "mod tests"))
+            .next()
+            .expect("production half");
+        // 调用方：房间关卡排在组事务之前，算不出来的根记失败、不进 `live`。
+        let batched = production
+            .split_once("pub(crate) async fn persist_roots_batched_with_chunk_bytes(")
+            .expect("batched persist exists")
+            .1
+            .split_once("struct GroupOutcome")
+            .expect("group outcome follows")
+            .0;
+        let stage_at = batched
+            .find("room_stage(group, rooms)")
+            .expect("写库前先过房间关卡");
+        let failed_at = batched
+            .find("out.failed.extend(room_failed)")
+            .expect("算不出来的根记失败");
+        let group_call_at = batched
+            .find("persist_group(db, &live, &existing, chunk_bytes)")
+            .expect("过了关卡的根才进组事务");
+        assert!(
+            stage_at < failed_at && failed_at < group_call_at,
+            "顺序：逐根算房间 → 算不出来的根剔出组 → 组事务"
+        );
+        // 组内：几何段渲好 → 边拼进该根自己的最后一段 → 段按字节装块（段不拆）→ 逐块提交。
+        let group = production
+            .split_once("async fn persist_group(")
+            .expect("persist_group exists")
+            .1
+            .split_once("/// The WS router can retain a pending response until reconnection.")
+            .expect("publication request helpers follow")
+            .0;
+        let render_at = group
+            .find("render_chunk(chunk, WriteMode::Incremental")
+            .expect("几何段渲染");
+        let attach_at = group
+            .find("last.push_str(&live.room_statements)")
+            .expect("房间边拼进这一根的最后一段");
+        let pack_at = group
+            .find("last.len() + piece.len() <= chunk_bytes")
+            .expect("段按字节装块、段不拆");
+        let commit_at = group
+            .find("db.query(publication_transaction(&statements))")
+            .expect("提交");
+        assert!(
+            render_at < attach_at && attach_at < pack_at && pack_at < commit_at,
+            "顺序：渲几何 → 房间边拼在几何之后 → 装块 → 提交"
+        );
+        // 房间关卡 + 落库路径：一句库不读，不走整间分支的算法。
+        let stage = production
+            .split_once("fn room_stage<'a>(")
+            .expect("room_stage exists")
+            .1
+            .split_once("pub async fn persist_roots_batched(")
+            .expect("batched persist follows")
+            .0;
+        for needle in ["SUL_DB", "query_room_insts(", "cal_room_refnos("] {
+            for (name, span) in [("room_stage", stage), ("batched", batched), ("group", group)] {
+                assert!(
+                    !span.contains(needle),
+                    "{name}: 落库路径不回读库、不走整库房间算法: {needle}"
+                );
+            }
+        }
+        for (file, source) in [
+            (
+                "model_refresh.rs",
+                include_str!("../data_interface/model_refresh.rs"),
+            ),
+            (
+                "batch_worker.rs",
+                include_str!("../data_interface/batch_worker.rs"),
+            ),
+        ] {
+            let production = source
+                .split(concat!("#[cfg(test)]\n", "mod tests"))
+                .next()
+                .expect("production half");
+            assert!(
+                production.contains("frozen_room_calculator()"),
+                "{file}: 生产调用方要在任务开工时冻一次房间计算器"
+            );
+        }
     }
 
     /// 按根对账的两边必须**同一个口径**：库那边是 `anc CONTAINS <根>`，存储那边是

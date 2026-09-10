@@ -2068,7 +2068,7 @@ impl MemoryRoomCalculator {
         model_sesno: i32,
         room_definition_version: &str,
         records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
-        mut points: impl FnMut(
+        points: impl FnMut(
             &crate::fast_model::model_memory_store::ProjectedGeometry,
         ) -> anyhow::Result<Vec<Point<Real>>>,
     ) -> anyhow::Result<Vec<ElementRoomEdge>> {
@@ -2078,24 +2078,102 @@ impl MemoryRoomCalculator {
                 && room_definition_version == self.definition_version,
             "room definition version changed"
         );
-        let mut by_element =
-            std::collections::BTreeMap::<RefnoEnum, HashMap<RefnoEnum, ElementRoomEdge>>::new();
         for record in records {
             anyhow::ensure!(
                 record.dbnum == dbnum && i64::from(record.source_sesno) <= i64::from(model_sesno),
                 "room model input is outside the frozen file window"
             );
+        }
+        self.calculate_edges(records, points)
+    }
+
+    /// 逐根房间归属（ADR-073 D1）：一根的模型算完，紧接着用它的内存投影算这一根名下每个
+    /// 构件的房间归属，结果随该根的模型行同一事务落边（[`crate::fast_model::model_db_adapter`]
+    /// 的 `room_stage`）。
+    ///
+    /// 与 [`Self::calculate`] 同一套算法，只是不再对模型水位与房间定义版本：房间定义的版本就是
+    /// 这台计算器自己（任务开工时按常驻模型冻出来的不可变引用，任务期间不换代），文件窗口的
+    /// 边界由生成路径守——记录到了这里就是这一根这一版的最终几何。一句库不读。
+    /// 输入不合法（盒子不可用、面板网格不全）直接 `Err`：房间算不出来的根不落库，
+    /// 房间失败 = 该根失败（ADR-073 D2）。
+    pub(crate) fn calculate_for_root(
+        &self,
+        records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
+    ) -> anyhow::Result<Vec<ElementRoomEdge>> {
+        self.calculate_edges(records, |record| {
+            memory_model_world_points(record, self.panels.mesh_dir())
+        })
+    }
+
+    /// 冻结那一刻的房间 → 面板现状（谁是面板、面板属于哪间在册的房）。
+    fn room_panel_map(&self) -> &RoomPanelMap {
+        &self
+            .panels
+            .resident
+            .as_ref()
+            .expect("a memory room calculator is always built from a resident model")
+            .map
+    }
+
+    /// 一根的两张房间边，拼进该根落库的**同一笔**事务（ADR-073 D1 / W2；模型行在前、这一段在后）。
+    ///
+    /// 按构件先删后插：这一根投影里每个构件各一句 `DELETE {element}<-room_relate`，再把算出来的
+    /// 成员边 `INSERT RELATION` 回去——新归属为空的构件只剩那句 DELETE，旧边随之清掉。构件本身是
+    /// 面板（在册与否都算）时再补 `room_panel_relate` 那一半：删掉指向它的旧 `房间 → 面板` 入边，
+    /// 属于某间在册房间就写回本次的（ADR-073 D4：两张边表的写者都是这条逐根路径）。根里没有几何的
+    /// 构件不在 `records` 里，它的边由对账删除那一半清（`model_db_adapter::room_edges_to_clear`）。
+    /// 语句以 `;\n` 收尾，直接 `push_str` 进发布事务的语句串。
+    pub(crate) fn render_root_room_edges(
+        &self,
+        records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
+        edges: &[ElementRoomEdge],
+    ) -> String {
+        let map = self.room_panel_map();
+        let mut by_element = std::collections::BTreeMap::<RefnoEnum, Vec<ElementRoomEdge>>::new();
+        for record in records {
+            by_element
+                .entry(crate::data_interface::generation_root::refno_from_e3d(
+                    record.source_refno,
+                ))
+                .or_default();
+        }
+        for edge in edges {
+            by_element
+                .entry(edge.member.refno)
+                .or_default()
+                .push(edge.clone());
+        }
+        let mut out = String::new();
+        for (element, edges) in &by_element {
+            let mut statements = render_element_relate_statements(*element, edges, &[]);
+            if map.all_panels.contains(element) {
+                statements.extend(render_panel_room_topology_statements(
+                    *element,
+                    map.room_of_panel(*element),
+                ));
+            }
+            for statement in statements {
+                out.push_str(&statement);
+                out.push_str(";\n");
+            }
+        }
+        out
+    }
+
+    fn calculate_edges(
+        &self,
+        records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
+        mut points: impl FnMut(
+            &crate::fast_model::model_memory_store::ProjectedGeometry,
+        ) -> anyhow::Result<Vec<Point<Real>>>,
+    ) -> anyhow::Result<Vec<ElementRoomEdge>> {
+        let mut by_element =
+            std::collections::BTreeMap::<RefnoEnum, HashMap<RefnoEnum, ElementRoomEdge>>::new();
+        for record in records {
             let element =
                 crate::data_interface::generation_root::refno_from_e3d(record.source_refno);
-            if self
-                .panels
-                .resident
-                .as_ref()
-                .unwrap()
-                .map
-                .all_panels
-                .contains(&element)
-            {
+            // 面板本身不做成员判定（它另有 `room_panel_relate` 那一半，见 `render_root_room_edges`）。
+            if self.room_panel_map().all_panels.contains(&element) {
                 continue;
             }
             let bounds = Aabb::new(record.world_bounds[0].into(), record.world_bounds[1].into());
@@ -2206,6 +2284,22 @@ fn render_element_relate_write(
     edges: &[ElementRoomEdge],
     protected_panels: &[RefnoEnum],
 ) -> String {
+    wrap_in_transaction(&render_element_relate_statements(
+        element,
+        edges,
+        protected_panels,
+    ))
+    .unwrap_or_default()
+}
+
+/// [`render_element_relate_write`] 的语句形态（不带事务壳）：`DELETE` 在前、`INSERT RELATION`
+/// 在后，边 id 与整间分支逐字一致；逐根路径（[`MemoryRoomCalculator::render_root_room_edges`]）
+/// 把它拼进该根的发布事务。
+fn render_element_relate_statements(
+    element: RefnoEnum,
+    edges: &[ElementRoomEdge],
+    protected_panels: &[RefnoEnum],
+) -> Vec<String> {
     let element_key = element.to_pe_key();
     let mut delete = format!("DELETE {element_key}<-room_relate");
     if !protected_panels.is_empty() {
@@ -2240,8 +2334,7 @@ fn render_element_relate_write(
             rows.join(",")
         ));
     }
-
-    wrap_in_transaction(&statements).unwrap_or_default()
+    statements
 }
 
 async fn write_element_room_relate(

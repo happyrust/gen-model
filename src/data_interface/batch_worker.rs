@@ -2346,23 +2346,40 @@ async fn run_single_unit(
 /// （batch_worker）而不是生成服务——`the_generation_service_never_reaches_for_a_database` 那条钉守着
 /// 生成入口不碰库。「登记进文件轮次、publish 阶段统一刷 durable」那一路随 publish 退了。
 ///
-/// 返回没落进去的根与原因（一组任一块失败整组算失败，见 [`persist_roots_batched`]）。
+/// 房间归属与 regen 同一条路（ADR-073 D1 硬约束④：刚体变换也接）：移动过的根按新投影重算它的
+/// 房间边，随模型行同一笔事务落下；计算器在这里冻一次、本批共用，冻不出来本批每根算失败。
+///
+/// 返回没落进去的根与原因（房间算不出来的根写前剔出、一组任一块写失败整组算失败，
+/// 见 [`persist_roots_batched`]）。
 ///
 /// [`persist_roots_batched`]: crate::fast_model::model_db_adapter::persist_roots_batched
 async fn persist_transform_roots(
     dbnum: u32,
     roots: &[String],
 ) -> anyhow::Result<std::collections::HashMap<String, String>> {
-    use crate::fast_model::model_db_adapter::{PersistTarget, persist_roots_batched};
+    use crate::fast_model::model_db_adapter::{
+        PersistTarget, frozen_room_calculator, persist_roots_batched,
+    };
     let refnos = roots
         .iter()
         .map(|root| crate::fast_model::e3d_model_service::parse_refno(root))
         .collect::<anyhow::Result<Vec<_>>>()?;
+    let rooms = match frozen_room_calculator() {
+        Ok(rooms) => rooms,
+        Err(error) => {
+            let text = format!("room calculator unavailable for this task: {error:#}");
+            return Ok(refnos
+                .iter()
+                .map(|root| (root.to_string(), text.clone()))
+                .collect());
+        }
+    };
     let batched = persist_roots_batched(
         PersistTarget::process(),
         crate::fast_model::model_memory_store::ModelMemoryStore::global(),
         dbnum,
         &refnos,
+        rooms.as_ref(),
     )
     .await?;
     Ok(batched

@@ -205,10 +205,15 @@ impl ModelRefreshPolicy {
             } else {
                 None
             };
-            // 生成只写进程内投影（ADR-057：模型面不认识库），落库是这一步。ADR-071 D2：本批
-            // 全部根的行**跨根合块**、一块一笔事务同步写进库（`persist_roots_batched`），不再一根
-            // 一笔、不登记进文件轮次等别人刷、不等 ACK；落不进去的那些根算失败——投影在内存里
-            // 是对的，但 Plant UI 看不见的东西不能算完成。
+            // 生成只写进程内投影（ADR-057：模型面不认识库），落库是这一步。ADR-071 D2 × ADR-073 D1：
+            // 本批全部根的行**跨根合块**、一块一笔事务同步写进库（`persist_roots_batched`，d-932 保留
+            // 512 根一组），每根的房间归属边紧跟它自己的行、同一块同一事务、模型在前；不登记进文件轮次
+            // 等别人刷、不等 ACK；落不进去的那些根算失败——投影在内存里是对的，但 Plant UI 看不见的
+            // 东西不能算完成。
+            //
+            // 房间计算器在这里**冻一次**（ADR-073 D1 硬约束：任务期间不换代），整批根共用；常驻模型
+            // 不可用（在建 / 降级）时本批每根都算「房间算不出来」= 该根失败，下一次任务重生成。
+            let rooms = crate::fast_model::model_db_adapter::frozen_room_calculator();
             let mut failures = Vec::new();
             let mut publishable: Vec<(String, e3d_io::refno::RefNo)> = Vec::new();
             for root in roots {
@@ -299,21 +304,36 @@ impl ModelRefreshPolicy {
                     .map(|(_, refno)| *refno)
                     .collect::<Vec<_>>();
                 let started = std::time::Instant::now();
-                let batched = crate::fast_model::model_db_adapter::persist_roots_batched(
-                    crate::fast_model::model_db_adapter::PersistTarget::process(),
-                    crate::fast_model::model_memory_store::ModelMemoryStore::global(),
-                    dbnum,
-                    &refnos,
-                )
-                .await?;
+                let batched = match &rooms {
+                    Ok(rooms) => {
+                        crate::fast_model::model_db_adapter::persist_roots_batched(
+                            crate::fast_model::model_db_adapter::PersistTarget::process(),
+                            crate::fast_model::model_memory_store::ModelMemoryStore::global(),
+                            dbnum,
+                            &refnos,
+                            rooms.as_ref(),
+                        )
+                        .await?
+                    }
+                    Err(error) => {
+                        // 房间失败 = 该根失败（ADR-073 D1）：计算器冻不出来，本批一根都不落库，
+                        // 投影留在内存里、回执不盖，下一次任务重生成。
+                        let text = format!("room calculator unavailable for this task: {error:#}");
+                        crate::fast_model::model_db_adapter::BatchedPersist {
+                            failed: refnos.iter().map(|refno| (*refno, text.clone())).collect(),
+                            ..Default::default()
+                        }
+                    }
+                };
                 if let Some(rows) = batched.rows.as_ref() {
                     println!(
-                        "[model-persist] dbnum={dbnum} roots={} groups={} rows={} removed={} receipts={} commits={} failed_roots={} elapsed_ms={}",
+                        "[model-persist] dbnum={dbnum} roots={} groups={} rows={} removed={} receipts={} room_edges={} commits={} failed_roots={} elapsed_ms={}",
                         refnos.len(),
                         batched.groups,
                         rows.upserted,
                         rows.removed,
                         rows.receipts,
+                        batched.room_edges,
                         rows.commits,
                         batched.failed.len(),
                         started.elapsed().as_millis()
