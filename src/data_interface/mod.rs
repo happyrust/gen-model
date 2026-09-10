@@ -196,10 +196,14 @@ pub mod cata_cascade_window;
 /// （2026-09-06 计划 P3；共识 d-635 / d-665）。文件侧纯函数，不碰库。
 pub mod reverse_reference;
 
-/// 数据窗口的崩溃恢复记录（`increment_update_attempt`）与收口尾事务。ADR-065 D3 判
-/// `model_update_pending` 整体退役时点名**保留**的正是这两样——它们是数据面的，不是
-/// 模型欠账；S5a 把它们从那个文件里搬出来，好让 T5 退表不必连着水位一起删。
+/// 数据窗口的收口尾事务（ADR-071 D4：数据行 + `applied_sesno` 那一笔原子提交）。崩溃恢复
+/// 记录 `increment_update_attempt` 随 ADR-072 D1 退役，位置让给 [`write_state`]。
 pub mod increment_tail;
+
+/// 写入标记 `dbnum_write_state:{dbnum}` 与「回退到水位」（ADR-072 D1 / D2 / D3）：任务第一笔
+/// 写库前置 `writing{S,T}`，收尾那一笔置 `finished`；见到 `writing` 就删掉 `sesno > S` 的痕迹、
+/// 三水位退回 S、排 S→T 重跑。
+pub mod write_state;
 
 /// 模型水位（ADR-060）：探针、Task 收尾盖章、对账。ADR-065 D2 让「欠什么」只由两枚水位
 /// 回答，同一份 ADR 的 D3 又判 `model_update_pending` 退役——退的是队列表，水位是留下的

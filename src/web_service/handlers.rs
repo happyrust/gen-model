@@ -2406,6 +2406,9 @@ pub async fn dbnum_prune_above_preview(
 ///
 /// Queue pause and an exact `confirm={dbnum}:{watermark}` are mandatory. The
 /// queue stays paused so the caller can inspect the result before replay.
+///
+/// 动手那一段与崩溃恢复走**同一份**回退核心（`fast_delete::rollback_to_watermark`，ADR-072 D2）：
+/// 不只削数据面，模型行、凭证、房间边与三枚水位一起退回 S。回执字段不变。
 pub async fn dbnum_prune_above(
     State(state): State<AppState>,
     Path((dbnum, watermark)): Path<(u32, i32)>,

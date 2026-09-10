@@ -10273,7 +10273,7 @@ mod tests {
         assert!(batch.contains(delivery_status), "{batch}");
         assert!(batch.ends_with("COMMIT TRANSACTION;"), "{batch}");
 
-        // 尾事务体：durable 工作 + 水位 + 恢复记录清理，且不再夹带窗口语句。
+        // 尾事务体：durable 工作 + 水位，且不再夹带窗口语句。
         let tail = &render.tail;
         assert!(
             tail.contains("UPSERT model_update_pending:regen_root_16777216_5"),
@@ -10283,9 +10283,15 @@ mod tests {
             tail.contains("applied_sesno = math::max([applied_sesno?:0, 42])"),
             "{tail}"
         );
+        // ADR-072 D1 的源码钉：数据尾事务不碰任何写入标记——恢复记录那一行退役了，
+        // 新的 `dbnum_write_state` 由任务收尾那一笔盖成 `finished`（W2）。
         assert!(
-            tail.contains("DELETE increment_update_attempt:8191"),
-            "{tail}"
+            !tail.contains("DELETE increment_update_attempt:8191"),
+            "尾事务不得再删恢复记录: {tail}"
+        );
+        assert!(
+            !tail.contains("dbnum_write_state"),
+            "尾事务不得碰写入标记: {tail}"
         );
         assert!(
             !tail.contains(delivery_status),
@@ -10351,9 +10357,11 @@ mod tests {
     }
 
     /// 拆块安全性的持久层验证：窗口语句批失败 → 尾事务不执行 → 水位不推进、
-    /// 恢复记录保留；成功路径则三样各就各位。
+    /// 写入标记保留；成功路径推进水位，而标记**照旧留在 `writing`**——收它的是任务收尾
+    /// 那一笔（ADR-072 W2）。
     #[tokio::test(flavor = "multi_thread")]
-    async fn a_failing_window_batch_gates_the_watermark_and_keeps_the_attempt() {
+    async fn a_failing_window_batch_gates_the_watermark_and_keeps_the_write_marker() {
+        use crate::data_interface::write_state::{WriteIntent, render_mark_writing};
         use surrealdb::engine::any::connect;
 
         let db = connect("mem://").await.expect("mem boots");
@@ -10361,13 +10369,11 @@ mod tests {
             .use_db("gate")
             .await
             .expect("use db");
-        db.query(format!(
-            "UPSERT {ATTEMPT_TABLE}:8191 SET dbnum = 8191, status = 'prepared';"
-        ))
-        .await
-        .expect("seed attempt transport")
-        .check()
-        .expect("seed attempt");
+        db.query(render_mark_writing(8191, 41, 42, WriteIntent::ApplyWindow))
+            .await
+            .expect("seed write marker transport")
+            .check()
+            .expect("seed write marker");
 
         let error = finalize_attempt_on(
             &db,
@@ -10381,25 +10387,19 @@ mod tests {
         .expect_err("坏窗口语句批必须让收口失败");
         assert!(format!("{error:#}").contains("window batch 0"), "{error:#}");
 
-        let mut response = db
-            .query(format!(
-                "SELECT VALUE applied_sesno FROM dbnum_watermark:8191;\
-                 SELECT VALUE status FROM {ATTEMPT_TABLE}:8191;"
-            ))
-            .await
-            .expect("read transport")
-            .check()
-            .expect("read");
+        let read = "SELECT VALUE applied_sesno FROM dbnum_watermark:8191;\
+                    SELECT VALUE status FROM dbnum_write_state:8191;";
+        let mut response = db.query(read).await.expect("read transport").check().expect("read");
         let watermark: Option<i32> = response.take(0).expect("watermark");
-        let attempt: Option<String> = response.take(1).expect("attempt");
+        let marker: Option<String> = response.take(1).expect("write marker");
         assert_eq!(watermark, None, "窗口语句批失败后水位不得推进");
         assert_eq!(
-            attempt.as_deref(),
-            Some("prepared"),
-            "恢复记录必须原样保留，等待整窗口重放"
+            marker.as_deref(),
+            Some("writing"),
+            "写入标记必须原样保留，等待回退重跑"
         );
 
-        // 成功路径：窗口语句应用、水位推进、恢复记录删除。
+        // 成功路径：窗口语句应用、水位推进、标记仍是 writing。
         finalize_attempt_on(
             &db,
             8191,
@@ -10410,19 +10410,15 @@ mod tests {
         )
         .await
         .expect("healthy finalize");
-        let mut response = db
-            .query(format!(
-                "SELECT VALUE applied_sesno FROM dbnum_watermark:8191;\
-                 SELECT VALUE id FROM {ATTEMPT_TABLE}:8191;"
-            ))
-            .await
-            .expect("read transport")
-            .check()
-            .expect("read");
+        let mut response = db.query(read).await.expect("read transport").check().expect("read");
         let watermark: Option<i32> = response.take(0).expect("watermark");
-        let attempt_rows: Vec<surrealdb::RecordId> = response.take(1).expect("attempt rows");
+        let marker: Option<String> = response.take(1).expect("write marker");
         assert_eq!(watermark, Some(42));
-        assert!(attempt_rows.is_empty(), "收口成功后恢复记录必须删除");
+        assert_eq!(
+            marker.as_deref(),
+            Some("writing"),
+            "数据尾事务不收标记：任务还要写模型 / 房间"
+        );
     }
 
     #[test]
@@ -10593,8 +10589,7 @@ mod tests {
 
     /// A baseline that advanced its watermark without durable generation work
     /// would leave the dbnum modelless forever. Work batches must therefore be
-    /// complete before the watermark tail. The tail must NOT drop an
-    /// `increment_update_attempt` row: a baseline never owns one.
+    /// complete before the watermark tail. 基线的写入标记（`writing{0,T}`）同样不由这一笔收。
     #[test]
     fn baseline_transaction_pairs_generation_work_with_the_watermark() {
         let plan = ModelUpdatePlan {
@@ -10635,6 +10630,11 @@ mod tests {
             render.tail
         );
         assert!(!render.tail.contains(ATTEMPT_TABLE), "{}", render.tail);
+        assert!(
+            !render.tail.contains("dbnum_write_state"),
+            "{}",
+            render.tail
+        );
 
         let empty = render_baseline_finalize(7997, 76, None, &ModelUpdatePlan::default(), true);
         assert!(empty.window_batches.is_empty());
@@ -10678,35 +10678,9 @@ mod tests {
         assert!(!render.tail.contains("UPSERT model_update_pending:"));
     }
 
-    #[test]
-    fn prepared_attempt_round_trips_the_fixed_range_and_model_plan() {
-        let attempt = IncrementUpdateAttempt {
-            dbnum: 8191,
-            db_type: "DESI".into(),
-            file_path: "D:/project/desi".into(),
-            start_sesno: 40,
-            end_sesno: 42,
-            plan: ModelUpdatePlan {
-                work_items: vec![ModelWorkItem {
-                    dbnum: 8191,
-                    db_type: "DESI".into(),
-                    source_end_sesno: 42,
-                    action: ModelWorkAction::Transform,
-                    target_refno: "16777216/9".into(),
-                    noun: String::new(),
-                }],
-                warnings: vec!["kept across restart".into()],
-                ..Default::default()
-            },
-            commit_token: None,
-            status: "prepared".into(),
-        };
-
-        let json = serde_json::to_string(&attempt).expect("serialize attempt");
-        let restored: IncrementUpdateAttempt =
-            serde_json::from_str(&json).expect("deserialize attempt");
-        assert_eq!(restored, attempt);
-    }
+    // `prepared_attempt_round_trips_the_fixed_range_and_model_plan` 随
+    // `IncrementUpdateAttempt` 一起退役（ADR-072 D1）：崩溃后不再复用持久化的旧计划，
+    // 写入标记只存 `status / start_sesno / end_sesno / intent`，序列化对拍无对象可拍。
 
     #[tokio::test]
     #[ignore = "manual live: verifies durable recovery state in configured Surreal"]
@@ -10724,19 +10698,9 @@ mod tests {
             warnings: vec!["crash recovery fixture".into()],
             ..Default::default()
         };
-        let attempt = IncrementUpdateAttempt {
-            dbnum: DBNUM,
-            db_type: "DESI".into(),
-            file_path: "D:/fixture/desi".into(),
-            start_sesno: 40,
-            end_sesno: 42,
-            plan: plan.clone(),
-            commit_token: Some("test-source-token-v1".into()),
-            status: "prepared".into(),
-        };
         let work_id = record_id(&plan.work_items[0]);
         let cleanup = format!(
-            "DELETE {ATTEMPT_TABLE}:{DBNUM}; DELETE dbnum_watermark:{DBNUM}; DELETE {work_id};"
+            "DELETE dbnum_write_state:{DBNUM}; DELETE dbnum_watermark:{DBNUM}; DELETE {work_id};"
         );
 
         aios_core::init_test_surreal()
@@ -10749,16 +10713,26 @@ mod tests {
             .check()
             .expect("pre-clean statements");
 
-        prepare_attempt(&attempt).await.expect("prepare attempt");
-        assert_eq!(
-            load_attempt(DBNUM).await.expect("load attempt"),
-            Some(attempt)
-        );
+        crate::data_interface::write_state::mark_writing(
+            DBNUM,
+            40,
+            42,
+            crate::data_interface::write_state::WriteIntent::ApplyWindow,
+        )
+        .await
+        .expect("mark writing");
 
         finalize_attempt(DBNUM, 42, None, &plan, &[])
             .await
             .expect("first finalize");
-        assert_eq!(load_attempt(DBNUM).await.expect("attempt removed"), None);
+        assert!(
+            crate::data_interface::write_state::load(DBNUM)
+                .await
+                .expect("load write marker")
+                .expect("marker row survives the tail")
+                .is_writing(),
+            "数据尾事务不收标记（ADR-072 W2）"
+        );
 
         // Replay the post-crash finalization: stable work id + max watermark
         // must keep exactly one task and the same applied sesno.
@@ -10794,14 +10768,17 @@ mod tests {
             .expect("cleanup statements");
     }
 
+    /// OS kill 之后写入标记必须还在——它是崩溃恢复唯一的入口（ADR-072 W1）。
     #[tokio::test]
-    #[ignore = "manual live: kills a helper process after durable prepare"]
-    async fn live_os_kill_preserves_prepared_attempt() {
+    #[ignore = "manual live: kills a helper process after the write marker lands"]
+    async fn live_os_kill_preserves_the_write_marker() {
+        use crate::data_interface::write_state::{WriteIntent, load, mark_writing};
+
         const DBNUM: u32 = 4_294_966_999;
         const HELPER_ENV: &str = "AIOS_OS_KILL_ATTEMPT_HELPER";
         const READY: &str = "AIOS_OS_KILL_ATTEMPT_READY";
         const TEST_NAME: &str =
-            "data_interface::model_update_pending::tests::live_os_kill_preserves_prepared_attempt";
+            "data_interface::model_update_pending::tests::live_os_kill_preserves_the_write_marker";
 
         let plan = ModelUpdatePlan {
             work_items: vec![ModelWorkItem {
@@ -10815,24 +10792,14 @@ mod tests {
             warnings: vec!["os-kill recovery fixture".into()],
             ..Default::default()
         };
-        let attempt = IncrementUpdateAttempt {
-            dbnum: DBNUM,
-            db_type: "DESI".into(),
-            file_path: "D:/fixture/os-kill-desi".into(),
-            start_sesno: 50,
-            end_sesno: 52,
-            plan: plan.clone(),
-            commit_token: Some("test-source-token-v1".into()),
-            status: "prepared".into(),
-        };
 
         if std::env::var_os(HELPER_ENV).is_some() {
             aios_core::init_test_surreal()
                 .await
                 .expect("helper connect surreal");
-            prepare_attempt(&attempt)
+            mark_writing(DBNUM, 50, 52, WriteIntent::ApplyWindow)
                 .await
-                .expect("helper prepare attempt");
+                .expect("helper marks writing");
             println!("{READY}");
             std::io::stdout().flush().expect("flush ready marker");
             loop {
@@ -10842,7 +10809,7 @@ mod tests {
 
         let work_id = record_id(&plan.work_items[0]);
         let cleanup = format!(
-            "DELETE {ATTEMPT_TABLE}:{DBNUM}; DELETE dbnum_watermark:{DBNUM}; DELETE {work_id};"
+            "DELETE dbnum_write_state:{DBNUM}; DELETE dbnum_watermark:{DBNUM}; DELETE {work_id};"
         );
         aios_core::init_test_surreal()
             .await
@@ -10884,7 +10851,7 @@ mod tests {
                 Err(error) => {
                     let _ = child.kill();
                     let _ = child.wait();
-                    panic!("helper did not report durable prepare: {error}");
+                    panic!("helper did not report a durable write marker: {error}");
                 }
             }
         }
@@ -10894,14 +10861,13 @@ mod tests {
             "helper must be terminated, not exit normally"
         );
 
-        assert_eq!(
-            load_attempt(DBNUM).await.expect("load after OS kill"),
-            Some(attempt)
-        );
-        finalize_attempt(DBNUM, 52, None, &plan, &[])
+        let marker = load(DBNUM)
             .await
-            .expect("recover killed attempt");
-        assert_eq!(load_attempt(DBNUM).await.expect("attempt removed"), None);
+            .expect("load after OS kill")
+            .expect("写入标记必须跨进程死亡活下来");
+        assert!(marker.is_writing());
+        assert_eq!((marker.start_sesno, marker.end_sesno), (50, 52));
+        assert_eq!(marker.intent, WriteIntent::ApplyWindow);
 
         SUL_DB
             .query(&cleanup)
@@ -11507,7 +11473,7 @@ mod tests {
         let cleanup = format!(
             "DELETE {TABLE} WHERE dbnum = {DBNUM}; \
              DELETE dbnum_watermark:{DBNUM}; \
-             DELETE {ATTEMPT_TABLE}:{DBNUM}; \
+             DELETE dbnum_write_state:{DBNUM}; \
              DELETE datacenter_version WHERE capacity_fixture = '{FIXTURE}';"
         );
 
@@ -11542,21 +11508,15 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let attempt = IncrementUpdateAttempt {
-            dbnum: DBNUM,
-            db_type: "DESI".into(),
-            file_path: "capacity-fixture".into(),
-            start_sesno: 42,
-            end_sesno: 42,
-            plan: plan.clone(),
-            commit_token: Some("test-source-token-v1".into()),
-            status: "prepared".into(),
-        };
-
         for _ in 0..2 {
-            prepare_attempt(&attempt)
-                .await
-                .expect("prepare capacity attempt");
+            crate::data_interface::write_state::mark_writing(
+                DBNUM,
+                41,
+                42,
+                crate::data_interface::write_state::WriteIntent::ApplyWindow,
+            )
+            .await
+            .expect("mark capacity fixture writing");
             finalize_attempt(DBNUM, 42, None, &plan, &delivery)
                 .await
                 .expect("finalize 5k delivery + 5k model work");
@@ -11568,7 +11528,7 @@ mod tests {
                     count(SELECT * FROM {TABLE} WHERE dbnum = {DBNUM}),
                     math::min(SELECT VALUE revision FROM {TABLE} WHERE dbnum = {DBNUM}),
                     (SELECT VALUE applied_sesno FROM dbnum_watermark:{DBNUM})[0],
-                    count(SELECT * FROM {ATTEMPT_TABLE}:{DBNUM}) = 0,
+                    dbnum_write_state:{DBNUM}.status = 'writing',
                     count(SELECT * FROM datacenter_version
                           WHERE capacity_fixture = '{FIXTURE}')
                 ];"

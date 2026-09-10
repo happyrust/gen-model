@@ -1,23 +1,23 @@
-//! 数据窗口的崩溃恢复记录（`increment_update_attempt`）与收口尾事务。
+//! 数据窗口的收口尾事务：「数据 + 水位（+ 未触根凭证前移）」那一笔原子提交。
 //!
 //! 与隔壁 [`model_update_pending`](crate::data_interface::model_update_pending) 同住过
-//! 一个文件，命却不同：那张表是模型工作队列，ADR-065 D3 判它**整体退役**；这里的两样
-//! 东西属**数据面**，同一条 D3 点名**保留**——`increment_update_attempt` 是固定区间重放
-//! 的恢复记录，收口尾事务是「数据 + 水位（+ 未触根凭证前移）」那一笔原子提交，两者都与
-//! 模型欠账无关。
+//! 一个文件，命却不同：那张表是模型工作队列，ADR-065 D3 判它**整体退役**；收口尾事务属
+//! **数据面**，同一条 D3 点名保留。搬出来是计划 §4 **S5a**
+//! （`docs/plans/2026-09-08-external-increment-refactor-plan.md`，缺口 G1）。
 //!
-//! 搬出来是计划 §4 **S5a**（`docs/plans/2026-09-08-external-increment-refactor-plan.md`，
-//! 缺口 G1）：不先搬，T5 的「删 `model_update_pending` 写读两侧」要么删不动、要么把水位
-//! 一起删了。**名字与行为不变**，只换住址：调用点与 `increment_pipeline` 那几条源码钉
-//! 现在一律写 `increment_tail::finalize_attempt`，`model_update_pending` 不再再导出本模块
-//! ——「退表」与「退模块」从此是两件分得开的事。
+//! **2026-09-10（ADR-072 D1）**：一起搬出来的那半边——固定区间重放的恢复记录
+//! `increment_update_attempt:{dbnum}`（`IncrementUpdateAttempt` / `prepare_attempt` /
+//! `load_attempt`）——退役了。崩溃恢复不再「复用旧计划重放那一段」，改成
+//! [`write_state`](crate::data_interface::write_state) 的写入标记：见 `writing{S,T}` 就回退到 S、
+//! 从头重算 S→T。于是尾事务这边少了最后一句：**它不再删任何标记行**，标记由任务收尾那一笔
+//! （`task_end`）盖成 `finished`。`ATTEMPT_TABLE` 常量留着，因为同一张表还住着
+//! `staging::attempts` 的 per-root attempts 与 `window_block`（R4 才退）。
 //!
 //! 尾事务渲染仍要回头调 `model_update_pending` 的 [`render_upsert`] / [`source_time_for`] /
 //! [`render_delete_revision`]：模型意图这会儿还落成 pending 行，那是 S6 / S7 掐掉写入点
 //! 之后才会消失的依赖，不是本次搬家要解决的。
 
 use aios_core::SUL_DB;
-use serde::{Deserialize, Serialize};
 use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::dbnum_state::escape_surql_str;
@@ -28,125 +28,6 @@ use crate::data_interface::model_update_plan::{ModelUpdatePlan, ModelWorkAction}
 use crate::data_interface::window_root_plan::CredentialAdvanceOutcome;
 
 pub const ATTEMPT_TABLE: &str = "increment_update_attempt";
-
-/// Short-lived recovery record written before any PE mutation. A retry reuses
-/// this exact range and pre-update model plan instead of recomputing ownership
-/// from a possibly partially-applied database.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IncrementUpdateAttempt {
-    pub dbnum: u32,
-    pub db_type: String,
-    pub file_path: String,
-    pub start_sesno: i32,
-    pub end_sesno: i32,
-    pub plan: ModelUpdatePlan,
-    #[serde(default)]
-    pub commit_token: Option<String>,
-    #[serde(default = "prepared_attempt_status")]
-    pub status: String,
-}
-
-fn prepared_attempt_status() -> String {
-    "prepared".to_string()
-}
-
-#[derive(Debug, Deserialize)]
-struct AttemptRow {
-    dbnum: u32,
-    db_type: String,
-    file_path: String,
-    start_sesno: i32,
-    end_sesno: i32,
-    plan_json: String,
-    #[serde(default)]
-    commit_token: Option<String>,
-    #[serde(default = "prepared_attempt_status")]
-    status: String,
-}
-
-pub async fn load_attempt(dbnum: u32) -> anyhow::Result<Option<IncrementUpdateAttempt>> {
-    let mut response = SUL_DB
-        .query(format!(
-            "SELECT dbnum, db_type, file_path, start_sesno, end_sesno, plan_json, \
-                    commit_token, status \
-             FROM {ATTEMPT_TABLE}:{dbnum};"
-        ))
-        .await
-        .map_err(|error| anyhow::anyhow!("load increment attempt dbnum={dbnum} failed: {error}"))?
-        .check()
-        .map_err(|error| {
-            anyhow::anyhow!("load increment attempt dbnum={dbnum} statement failed: {error}")
-        })?;
-    let rows: Vec<AttemptRow> = response.take(0).map_err(|error| {
-        anyhow::anyhow!("decode increment attempt dbnum={dbnum} failed: {error}")
-    })?;
-    rows.into_iter()
-        .next()
-        .map(|row| {
-            let plan = serde_json::from_str(&row.plan_json).map_err(|error| {
-                anyhow::anyhow!("decode increment attempt plan dbnum={dbnum} failed: {error}")
-            })?;
-            Ok(IncrementUpdateAttempt {
-                dbnum: row.dbnum,
-                db_type: row.db_type,
-                file_path: row.file_path,
-                start_sesno: row.start_sesno,
-                end_sesno: row.end_sesno,
-                plan,
-                commit_token: row.commit_token,
-                status: row.status,
-            })
-        })
-        .transpose()
-}
-
-pub async fn prepare_attempt(attempt: &IncrementUpdateAttempt) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        attempt
-            .commit_token
-            .as_deref()
-            .is_some_and(|token| !token.trim().is_empty()),
-        "increment attempt dbnum={} requires a durable source commit token",
-        attempt.dbnum
-    );
-    let plan_json = escape_surql_str(&serde_json::to_string(&attempt.plan)?);
-    let db_type = escape_surql_str(&attempt.db_type);
-    let file_path = escape_surql_str(&attempt.file_path);
-    let commit_token = attempt
-        .commit_token
-        .as_deref()
-        .map(escape_surql_str)
-        .map(|value| format!("'{value}'"))
-        .unwrap_or_else(|| "NONE".to_string());
-    let status = escape_surql_str(&attempt.status);
-    let sql = format!(
-        "UPSERT {ATTEMPT_TABLE}:{dbnum} SET dbnum = {dbnum}, \
-         db_type = '{db_type}', file_path = '{file_path}', \
-         start_sesno = {start_sesno}, end_sesno = {end_sesno}, \
-         plan_json = '{plan_json}', commit_token = {commit_token}, status = '{status}', \
-         created_at = created_at?:time::now(), updated_at = time::now();",
-        dbnum = attempt.dbnum,
-        start_sesno = attempt.start_sesno,
-        end_sesno = attempt.end_sesno,
-    );
-    SUL_DB
-        .query(sql)
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "prepare increment attempt dbnum={} failed: {error}",
-                attempt.dbnum
-            )
-        })?
-        .check()
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "prepare increment attempt dbnum={} statement failed: {error}",
-                attempt.dbnum
-            )
-        })?;
-    Ok(())
-}
 
 pub async fn mark_attempt_commit_state_on(
     db: &Surreal<Any>,
@@ -343,8 +224,10 @@ pub(crate) fn render_finalize_tail_with_effects(
         statements.push(render_model_root_observation(dbnum, lazy_roots, end_sesno));
     }
     statements.push(render_watermark_advance(dbnum, end_sesno, end_sesno_time));
+    // 只清 per-root attempts 与 `window_block` 那两类行（R4 随 `staging/attempts.rs` 一起退）。
+    // 写入标记 `dbnum_write_state:{dbnum}` **不在这里动**：数据尾事务盖的是 `applied_sesno`，
+    // 而「本任务的写库结束了」由任务收尾那一笔说（ADR-072 D1 / W2）。
     statements.push(crate::data_interface::staging::attempts::render_clear_window_attempts(dbnum));
-    statements.push(format!("DELETE {ATTEMPT_TABLE}:{dbnum};"));
     Ok(FinalizeRender {
         window_batches: render_window_statement_batches(window_statements),
         tail: statements.join("\n"),
@@ -355,9 +238,9 @@ pub(crate) fn render_finalize_tail_with_effects(
 ///
 /// Generation work is idempotent and executes in bounded transactions before
 /// the watermark tail. A failed batch therefore leaves the watermark in place;
-/// replaying the baseline only upserts the same deterministic work again. A
-/// baseline has no `increment_update_attempt` row, so the tail never removes
-/// one that may belong to another path.
+/// replaying the baseline only upserts the same deterministic work again. 基线
+/// 的写入标记（`writing{0,T}`，`baseline_ingest::ingest_file` 开头落）同样不在这一笔里
+/// 收——收它的是任务收尾（ADR-072 D1）。
 pub(crate) fn render_baseline_finalize(
     dbnum: u32,
     end_sesno: i32,
@@ -388,8 +271,8 @@ pub(crate) fn render_baseline_finalize(
     }
 }
 
-/// Establish durable model work, advance the authoritative watermark, and
-/// remove the recovery record — the last three atomically.
+/// Establish durable model work and advance the authoritative watermark
+/// atomically.
 ///
 /// `window_statements` carries writes that must never be lost under an
 /// advancing watermark — this window's `datacenter_version` status updates and

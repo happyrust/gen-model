@@ -1005,6 +1005,17 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         }
         Err(e) => eprintln!("模型 / 房间水位兼容播种失败（下次启动重试）: {e:#}"),
     }
+    // 写入标记回退（ADR-072 D2）：上一进程死在写库中途的库，先按各自的 `writing{S,T}` 退回 S、
+    // 再排 S→T 重跑。排在镜像水化**之前**——镜像是一次整表替换，先水化再回退，发布出去的
+    // 就是一版已经被删掉痕迹的水位，而且那几格再没有人来作废（理由见 `rollback_unfinished_writes`）。
+    let step_started = Instant::now();
+    let rollbacks = crate::data_interface::startup_reconcile::rollback_unfinished_writes().await;
+    if !rollbacks.is_empty() {
+        for line in &rollbacks {
+            println!("{line}");
+        }
+        println!("写入标记回退完成，耗时 {}", fmt_elapsed(step_started.elapsed()));
+    }
     // ---- 统一水化段（ADR-071 D7 / S6）：库 → 进程内，一次，排在全部播种之后、任何 worker /
     // watcher 之前。① 三水位镜像：`hydrate_watermark_mirror` 一次读全（水位行 + info 表旧水位）
     // 并单次替换发布，读者看不到半张快照——运行期的 `list_registered` 不再碰镜像，整表替换只在
@@ -2878,6 +2889,7 @@ mod startup_room_build_gate_tests {
         let at = |needle: &str| cli.find(needle).unwrap_or_else(|| panic!("缺 {needle}"));
         let state_storage = at("DbnumState::ensure_increment_state_storage().await?");
         let seeding = at("DbnumState::seed_legacy_model_watermarks().await");
+        let rollback = at("startup_reconcile::rollback_unfinished_writes().await");
         let mirror = at("DbnumState::enable_watermark_mirror();");
         let states = at("DbnumState::hydrate_watermark_mirror().await?");
         let projections = at("hydrate_model_projections(&hydrated_states).await");
@@ -2885,12 +2897,19 @@ mod startup_room_build_gate_tests {
         let reconcile = at("reconcile_model_coverage_at_startup().await");
         assert!(
             state_storage < seeding
-                && seeding < mirror
+                && seeding < rollback
+                && rollback < mirror
                 && mirror < states
                 && states < projections
                 && projections < migration
                 && migration < reconcile,
-            "水化段顺序：状态表播种 → 兼容播种 → 开镜像 → 读全水位 → 投影 → 迁移 → 启动核对"
+            "水化段顺序：状态表播种 → 兼容播种 → 写入标记回退 → 开镜像 → 读全水位 → 投影 → 迁移 → 启动核对"
+        );
+        // ADR-072 D2：回退必须落在整表水化之前。先水化再回退，发布出去的就是一版
+        // 已经被删掉痕迹的水位，而那几格再没有人来作废。
+        assert!(
+            rollback < states,
+            "写入标记回退必须排在 hydrate_watermark_mirror 之前"
         );
         assert_eq!(
             cli.matches("hydrate_model_projections(").count(),

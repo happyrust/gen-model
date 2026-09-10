@@ -65,6 +65,138 @@ pub async fn reconcile_model_coverage_at_startup() {
     crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
 }
 
+/// 启动水化段的**第一步**（ADR-072 D2）：把上一进程死在写库中途的库各自退回它记的 S，
+/// 再排 S→T 重跑。
+///
+/// 位置有讲究——必须排在
+/// [`hydrate_watermark_mirror`](crate::data_interface::dbnum_state::DbnumState::hydrate_watermark_mirror)
+/// **之前**。镜像是一次整表替换，替换之后每格只走「按需装载 + 写后作废」；先水化再回退，
+/// 发布出去的就是一版已经被删掉痕迹的水位，而回退那几格既没人作废、也没人重新装载。
+///
+/// 逐库独立：任何一库失败都不中止启动，只是把标记留在库里等下一次——回退是幂等的
+/// （`writing{S,T}` 那一行到最后一步才删）。返回要打的行，调用方原样打出来。
+pub async fn rollback_unfinished_writes() -> Vec<String> {
+    let states = match crate::data_interface::write_state::writing_states().await {
+        Ok(states) => states,
+        Err(error) => {
+            return vec![format!(
+                "写入标记扫描失败：本次启动不回退任何库（是未知，不是「都干净」），下次启动重试: {error:#}"
+            )];
+        }
+    };
+    if states.is_empty() {
+        return Vec::new();
+    }
+    // 排队要的是登记行里的项目 / 库类型 / 文件路径。读不到就只回退不排队——watcher 首扫
+    // 会把缺口补成一条新批次，比拿一份猜出来的身份去排要好。
+    let registered = crate::data_interface::dbnum_state::DbnumState::list_registered()
+        .await
+        .map(|rows| {
+            rows.into_iter()
+                .map(|state| (state.dbnum, state))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+
+    let mut lines = vec![format!(
+        "写入标记扫描：{} 个库上一次死在写库中途，逐库回退到各自的水位再排重跑（ADR-072 D2）",
+        states.len()
+    )];
+    for state in states {
+        let mut report = match crate::data_interface::write_state::rollback_to_watermark(
+            state.dbnum,
+            state.start_sesno,
+            state.intent,
+        )
+        .await
+        {
+            Ok(report) => report,
+            Err(error) => {
+                lines.push(format!(
+                    "  dbnum={} 回退失败（标记原样留在库里，下次启动重试）: {error:#}",
+                    state.dbnum
+                ));
+                continue;
+            }
+        };
+        lines.push(format!(
+            "  dbnum={} intent={} 回退到水位 {}（wiped={} 语句={} 事务={} {}ms），目标 {}",
+            state.dbnum,
+            report.intent,
+            report.target_watermark,
+            report.wiped,
+            report.statements,
+            report.transactions,
+            report.elapsed_ms,
+            state.end_sesno
+        ));
+        if let Some(note) = report.legacy_rows_note.take() {
+            lines.push(format!("    {note}"));
+        }
+        lines.push(format!(
+            "    {}",
+            requeue_after_rollback(registered.get(&state.dbnum), &state, &report)
+        ));
+    }
+    lines
+}
+
+/// 回退之后把 S→T 排回队列（§4.3-8），意图原样。
+///
+/// 排不成不是错误：`applied_sesno` 已经退到 S，watcher 首扫与队列重建看到同一个缺口，
+/// 下一轮照样会排出来。这里排只是让它**立刻**排上，不必等一圈空闲唤醒。
+fn requeue_after_rollback(
+    state: Option<&crate::data_interface::dbnum_state::DbnumState>,
+    marker: &crate::data_interface::write_state::WriteState,
+    report: &crate::data_interface::fast_delete::RollbackReport,
+) -> String {
+    let Some(state) = state else {
+        return format!(
+            "dbnum={} 在登记表里没有行，S→T 没排成；watcher 首扫会把缺口补成新批次",
+            marker.dbnum
+        );
+    };
+    if state.file_path.is_empty() {
+        return format!(
+            "dbnum={} 登记行没有文件路径，S→T 没排成；watcher 首扫会把缺口补成新批次",
+            marker.dbnum
+        );
+    }
+    let path = std::path::PathBuf::from(&state.file_path);
+    let intent = marker.intent.batch_intent();
+    let found = crate::data_interface::batch_scheduler::DiscoveredBatch {
+        project: state.owner_project.clone(),
+        dbnum: marker.dbnum,
+        db_type: state.db_type.clone(),
+        phase: crate::data_interface::initialization_phase::DataPhase::of_db_type(&state.db_type),
+        epoch_id: 0,
+        intent,
+        model_start_sesno: Some(report.target_watermark),
+        path,
+        file_name: state.file_name.clone(),
+        applied_sesno: report.target_watermark,
+        file_latest_sesno: marker.end_sesno.max(report.target_watermark),
+        previous_observed_sesno: report.target_watermark,
+        first_pending_sesno_time: None,
+        file_latest_sesno_time: None,
+        reinit_requested: false,
+        regen_roots: Vec::new(),
+    };
+    let outcome = crate::data_interface::batch_scheduler::BatchScheduler::global().enqueue(
+        crate::data_interface::task_registry::TaskRegistry::global(),
+        &found,
+        false,
+    );
+    format!(
+        "dbnum={} 已排 {}→{} intent={} task={}",
+        marker.dbnum,
+        report.target_watermark,
+        marker.end_sesno,
+        outcome.info.intent,
+        outcome.info.task_id
+    )
+}
+
 /// 启动那一刻**当前 MDB 声明了、却一条凭证记录都没有**的 DESI 库（ADR-058 D6：等按需
 /// ensure，启动一根不排）。
 ///

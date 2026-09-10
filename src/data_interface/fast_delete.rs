@@ -5,6 +5,7 @@ use std::time::Instant;
 use anyhow::{Context, bail};
 use serde::{Deserialize, Serialize};
 use surrealdb::sql::Thing;
+use surrealdb::{Surreal, engine::any::Any};
 
 use aios_core::SUL_DB;
 
@@ -227,93 +228,321 @@ pub async fn preview_prune_above_watermark(
     })
 }
 
-/// Remove partial/latest-state rows whose per-element session is newer than
-/// the selected authoritative watermark, maintaining statistics in each delete
-/// transaction before lowering the durable watermark. No full rescan is needed.
+/// 运维端点 `DELETE /dbnums/{dbnum}/data/above/{watermark}` 的入口（ADR-072 之后**改调
+/// 回退核心**）：预览（读）→ [`rollback_to_watermark`]（谓词删）→ 复核（读）。
 ///
-/// This is a residue cleanup operation, not a historical-version restore: PE
-/// stores one latest row per refno. The normal watcher replays the now-pending
-/// sessions after this operation.
+/// 三段职责分明：预览与复核是端点自己的诊断读（`SELECT`，白名单外但不在回退渲染里，
+/// 源码钉只钉 [`render_rollback`]）；真正动手的那一段与崩溃恢复走**同一份**渲染，
+/// 端点从此不会与启动回退长出两套语义。
+///
+/// 行为随之从「只削数据面 + `applied_sesno`」扩成整库回退到 S（ADR-072 D3 不分面）：
+/// 模型行、凭证、房间边与三枚水位一起退。这正是端点该有的语义——留着模型面不动，
+/// 削完的库在下一次一致性判决里就是「数据退了、模型没退」的幽灵形态。
 pub async fn prune_above_watermark(
     dbnum: u32,
     target_watermark: i32,
 ) -> anyhow::Result<PruneAboveWatermarkResult> {
     let started = Instant::now();
-    let _commit_guard = crate::data_interface::batch_worker::DATA_COMMIT_SERIAL
-        .lock()
-        .await;
-    let _state_guard = crate::data_interface::dbnum_state::DBNUM_STATE_WRITE_GATE
-        .write()
-        .await;
-    let (state, rows) = inspect_prune_rows(dbnum, target_watermark).await?;
-    let applied_sesno = state.applied_sesno.unwrap_or_default();
-    let mut statements = Vec::with_capacity(rows.len() * 6 + 4);
-    let mut sample_refnos = Vec::new();
-    for row in &rows {
-        let start = statements.len();
-        if !valid_table_name(&row.noun) {
-            bail!("invalid noun table name for dbnum {dbnum}: {}", row.noun);
-        }
-        let key = pe_key(&row.id)?;
-        if sample_refnos.len() < 20 {
-            sample_refnos.push(key.clone());
-        }
-        statements.push(format!(
-            "DELETE array::flatten(SELECT VALUE ->pe_owner FROM pe:{key});"
-        ));
-        statements.push(format!(
-            "DELETE array::flatten(SELECT VALUE <-pe_owner FROM pe:{key});"
-        ));
-        for table in RANGE_TABLES.iter().filter(|table| **table != "pe") {
-            statements.push(format!("DELETE {table}:{key};"));
-        }
-        statements.push(format!("DELETE {}:{key};", row.noun));
-        statements.push(format!("DELETE pe:{key};"));
-        let writes = statements.drain(start..).collect::<Vec<_>>().join(";\n");
-        let sql = super::pe_batch::transaction(dbnum, &[key], &writes)?;
-        super::pe_batch::execute_on(&SUL_DB, &sql).await?;
-    }
-    statements.push(format!(
-        "DELETE model_update_pending WHERE dbnum = {dbnum} AND <int>source_end_sesno > {target_watermark};"
-    ));
-    statements.push(format!(
-        "DELETE increment_update_attempt WHERE dbnum = {dbnum} AND <int>end_sesno > {target_watermark};"
-    ));
-    statements.push(format!(
-        "DELETE incr_side_effect_pending WHERE dbnum = {dbnum} AND <int>end_sesno > {target_watermark};"
-    ));
-    statements.push(format!(
-        "UPDATE dbnum_watermark:{dbnum} SET applied_sesno = {target_watermark}, sesno = {target_watermark};"
-    ));
-    execute_phase("prune rows above watermark", &statements).await?;
+    let preview = preview_prune_above_watermark(dbnum, target_watermark).await?;
+    rollback_to_watermark(
+        dbnum,
+        target_watermark,
+        crate::data_interface::write_state::WriteIntent::ApplyWindow,
+    )
+    .await?;
 
-    // A zero-row cleanup already proved the PE postcondition while both write
-    // gates were held. Avoid two full PE scans in that common diagnostic case.
-    let (rebuilt_info_rows, remaining_rows_above_watermark) = if rows.is_empty() {
-        (0, 0)
+    // A zero-row cleanup already proved the PE postcondition. Avoid a second
+    // full PE scan in that common diagnostic case.
+    let remaining_rows_above_watermark = if preview.pe_rows == 0 {
+        0
     } else {
-        let remaining = preview_prune_above_watermark(dbnum, target_watermark)
+        preview_prune_above_watermark(dbnum, target_watermark)
             .await?
-            .pe_rows;
-        (0, remaining)
+            .pe_rows
     };
     if remaining_rows_above_watermark != 0 {
         bail!(
             "dbnum {dbnum} prune incomplete: {remaining_rows_above_watermark} PE rows remain above watermark {target_watermark}"
         );
     }
-    sample_refnos.sort_unstable();
     Ok(PruneAboveWatermarkResult {
-        preview: PruneAboveWatermarkPreview {
-            dbnum,
-            target_watermark,
-            applied_sesno,
-            pe_rows: rows.len(),
-            sample_refnos,
-        },
-        deleted_pe_rows: rows.len(),
-        rebuilt_info_rows,
+        deleted_pe_rows: preview.pe_rows,
+        rebuilt_info_rows: 0,
         remaining_rows_above_watermark,
+        preview,
+        elapsed_ms: started.elapsed().as_millis() as u64,
+    })
+}
+
+/// 一次「回退到水位」的回执（ADR-072 D2）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RollbackReport {
+    pub dbnum: u32,
+    /// 退回到的 S。
+    pub target_watermark: i32,
+    pub intent: &'static str,
+    /// 走了整库 wipe（`initialize` / `reinitialize`，S 恒为 0）。
+    pub wiped: bool,
+    /// 谓词删除的语句数与它们合成的事务数（`wiped` 时为 0）。
+    pub statements: usize,
+    pub transactions: usize,
+    /// 历史库里没有 `dbnum` / `sesno` 两列的旧 noun / `ATT_UDA` 行谓词删够不着（计划 §9-6）。
+    /// 点名而不是装作删干净了：那种库只能靠整库 wipe 回退。
+    pub legacy_rows_note: Option<String>,
+    pub elapsed_ms: u64,
+}
+
+/// 回退的两段渲染：谓词删除 + 控制面收口。
+///
+/// 分两段是因为**收口那一段是回退的提交点**：三水位退回 S、spatial epoch 递增、标记行删除
+/// 必须同生同死，且排在全部删除之后。删除半途失败 → 水位没退、`writing` 还在 → 下一轮
+/// 幂等重放（与 `wipe_dbnum_rows` 的「元数据阶段最后」同一条纪律）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RollbackRender {
+    pub deletes: Vec<String>,
+    pub control: Vec<String>,
+}
+
+impl RollbackRender {
+    fn statements(&self) -> usize {
+        self.deletes.len() + self.control.len()
+    }
+}
+
+/// 模型面按 `direct_model.sesno` 谓词删的三张表（`gen_root` 用 `source_end_sesno`，另渲染）。
+const MODEL_FACE_TABLES: &[&str] = &["inst_relate", "inst_info", "tubi_relate"];
+
+/// §4.3 的 2–6：全部是按 `(dbnum, sesno)` 的谓词 `DELETE`，一句 `SELECT` 都没有（W3）。
+///
+/// `pe` 排在 noun / `ATT_UDA` **之后**：删 `pe` 顶点会把挂在它身上的边（`pe_owner` /
+/// `ref_rev` / `tubi_relate`）一并带走，回退要的正是这个级联（元素批模块头「pe 行为什么
+/// 不删」的反面）。
+///
+/// **已知缺口（计划 §4.3 与验收②之间的那一处）**：级联同时带走「属主 → 本元素」那条
+/// `pe_owner` 边，而边 id 里的槽位号只存在于**属主**的成员表里。属主没进本窗口时，S→T 重放
+/// 只重建本元素自己名下的槽位，那条入边补不回来（fork 行为见
+/// `test::fork_surreal_compat::dual_pe_rows_replace_in_place_and_keep_their_edges` 末段）。
+/// 这里钉的是**今天的行为**，回归见
+/// `tests::rolling_back_a_modified_element_drops_the_membership_edge_its_owner_owns`。
+pub(crate) fn render_rollback(
+    dbnum: u32,
+    target_watermark: i32,
+    noun_tables: &[String],
+) -> RollbackRender {
+    let mut deletes = Vec::with_capacity(noun_tables.len() + MODEL_FACE_TABLES.len() + 5);
+    for table in noun_tables {
+        deletes.push(format!(
+            "DELETE {table} WHERE dbnum = {dbnum} AND <int>sesno > {target_watermark};"
+        ));
+    }
+    deletes.push(format!(
+        "DELETE pe WHERE dbnum = {dbnum} AND <int>sesno > {target_watermark};"
+    ));
+    for table in MODEL_FACE_TABLES {
+        deletes.push(format!(
+            "DELETE {table} WHERE dbnum = {dbnum} AND <int>direct_model.sesno > {target_watermark};"
+        ));
+    }
+    deletes.push(format!(
+        "DELETE gen_root WHERE dbnum = {dbnum} AND <int>source_end_sesno > {target_watermark};"
+    ));
+    // 房间面整库删（房间本来就是整库重算，边上不带 sesno）。谓词落在 `in` 而不是 `dbnum`：
+    // `room_model::render_room_edge_row` / `render_room_panel_relate_write` 写出的边只有
+    // `in / out / room_num / …`，行上根本没有 `dbnum` 列；`in` 是本库的面板 / 房间 `pe` 行，
+    // 它才带 dbnum。给边加列是 T2/T3 的 `room_*`，本轮不碰。
+    deletes.push(format!("DELETE room_relate WHERE in.dbnum = {dbnum};"));
+    deletes.push(format!(
+        "DELETE room_panel_relate WHERE in.dbnum = {dbnum};"
+    ));
+
+    let control = vec![
+        // 三枚水位一起退回 S（ADR-072 D3 崩溃不分面）；`state_revision` 前进，读者据它
+        // 知道这一格换过代。
+        format!(
+            "UPDATE dbnum_watermark:{dbnum} SET \
+             applied_sesno = math::min([applied_sesno ?: 0, {target_watermark}]), \
+             model_sesno = math::min([model_sesno ?: 0, {target_watermark}]), \
+             room_sesno = math::min([room_sesno ?: 0, {target_watermark}]), \
+             sesno = {target_watermark}, state_revision = (state_revision ?? 0) + 1, \
+             updated_at = time::now();"
+        ),
+        // 回退删掉了 inst_relate / room_relate 行：epoch 不递增的话，重启会按指纹相等
+        // 复用一棵还留着被删构件包围盒的树（ADR-010 D4 的幽灵形态）。
+        crate::fast_model::aabb_tree::render_spatial_epoch_bump(),
+        // 标记行最后删——它是回退的提交点：删除半途失败时 `writing` 还在，下一轮重放。
+        crate::data_interface::write_state::render_clear(dbnum),
+    ];
+    RollbackRender { deletes, control }
+}
+
+/// 谓词删除按 [`tx_limits`](crate::data_interface::tx_limits) 合块：一笔事务装满字节 /
+/// 写行上限就换一笔。
+///
+/// 换掉的是 `prune_above_watermark` 原先「逐 pe 键一笔事务」的写法——7997 一窗几千个元素
+/// 回退要几千笔（计划 §9-1）。
+pub(crate) fn chunk_into_transactions(
+    statements: &[String],
+    limits: crate::data_interface::tx_limits::DataTxLimits,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chunk: Vec<&str> = Vec::new();
+    let mut bytes = "BEGIN TRANSACTION;\nCOMMIT TRANSACTION;".len();
+    for statement in statements {
+        let cost = statement.len() + 1;
+        let full = !chunk.is_empty()
+            && (bytes + cost > limits.max_bytes || chunk.len() as u64 >= limits.max_write_rows);
+        if full {
+            out.push(wrap(&chunk));
+            chunk.clear();
+            bytes = "BEGIN TRANSACTION;\nCOMMIT TRANSACTION;".len();
+        }
+        bytes += cost;
+        chunk.push(statement);
+    }
+    if !chunk.is_empty() {
+        out.push(wrap(&chunk));
+    }
+    return out;
+
+    fn wrap(chunk: &[&str]) -> String {
+        format!(
+            "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+            chunk.join("\n")
+        )
+    }
+}
+
+/// 库里现存的 noun 表名（`INFO FOR DB` 的表清单里全大写 / 数字 / 下划线的那些）。
+///
+/// 不走 `SELECT noun FROM pe … GROUP BY noun`（清库那条路的写法）：那是一次整库读，而回退
+/// 的白名单里没有它（§4.5）。`INFO FOR DB` 读的是 schema 而不是行，多圈进来的表（`UDA`
+/// 字典等）不带 `dbnum` / `sesno` 列，谓词天然落空。
+async fn noun_tables_on(db: &Surreal<Any>) -> anyhow::Result<Vec<String>> {
+    let mut response = db
+        .query("INFO FOR DB;")
+        .await
+        .context("list tables for rollback")?
+        .check()
+        .context("list tables for rollback statement")?;
+    let info: Option<serde_json::Value> = response.take(0).context("decode INFO FOR DB")?;
+    let mut tables: Vec<String> = info
+        .as_ref()
+        .and_then(|value| value.get("tables"))
+        .and_then(|value| value.as_object())
+        .map(|map| {
+            map.keys()
+                .filter(|name| valid_table_name(name))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    tables.sort_unstable();
+    tables.dedup();
+    Ok(tables)
+}
+
+/// 见到 `writing{S,T}` 时把这个库 S 之后的痕迹删掉、三水位退回 S（ADR-072 D2）。
+///
+/// **它删痕迹让重放补齐，不是还原 S 版本的行**：一个 Modified 元素的 `pe` 行被整行替换成
+/// (S, T] 版之后，回退是把它删掉，让 S→T 重放写回来（元素批 `Replace` 档整行覆盖、边
+/// `INSERT RELATION IGNORE`）。所以名字叫「回退到水位」，不叫还原。
+///
+/// 排队那一步（§4.3-8）不在这里：本函数同时是运维端点 `DELETE /dbnums/{dbnum}/data/above/…`
+/// 的核心，那条路的契约是「队列保持暂停，让人先看结果」。启动扫描的重排在
+/// [`startup_reconcile::rollback_unfinished_writes`](crate::data_interface::startup_reconcile::rollback_unfinished_writes)，
+/// 任务开工前那一次由任务自己的 S→T 顶上。
+pub async fn rollback_to_watermark(
+    dbnum: u32,
+    target_watermark: i32,
+    intent: crate::data_interface::write_state::WriteIntent,
+) -> anyhow::Result<RollbackReport> {
+    if dbnum == 0 {
+        bail!("dbnum must be greater than zero");
+    }
+    if target_watermark < 0 {
+        bail!("target watermark must be non-negative");
+    }
+    let started = Instant::now();
+
+    // 初始化 / 重初始化的 S 恒为 0：库里本来就没有「S 版本」可退，整库清空重排（§4.3-1）。
+    if intent.wipes_whole_dbnum() {
+        let wipe = wipe_dbnum_for_reinit(dbnum).await?;
+        crate::data_interface::write_state::clear_marker(dbnum).await?;
+        return Ok(RollbackReport {
+            dbnum,
+            target_watermark: 0,
+            intent: intent.as_str(),
+            wiped: true,
+            statements: 0,
+            transactions: 0,
+            legacy_rows_note: None,
+            elapsed_ms: started.elapsed().as_millis() as u64 + wipe.elapsed_ms,
+        });
+    }
+
+    let _commit_guard = crate::data_interface::batch_worker::DATA_COMMIT_SERIAL
+        .lock()
+        .await;
+    let _state_guard = crate::data_interface::dbnum_state::DBNUM_STATE_WRITE_GATE
+        .write()
+        .await;
+
+    let report = rollback_to_watermark_on(&SUL_DB, dbnum, target_watermark, intent).await?;
+
+    // 进程内那一半（§4.3-7）：镜像格作废（下一次读回填）、空间树置脏，启动判据落到指针重建。
+    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
+    crate::data_interface::dbnum_consistency::invalidate_census();
+    crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
+
+    Ok(RollbackReport {
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        ..report
+    })
+}
+
+/// [`rollback_to_watermark`] 的持久层那一半：渲染 → 合块 → 执行。
+///
+/// 单拎出来是为了让 `mem://` 崩溃点重放对拍能在自己的实例上跑同一份渲染（对拍的是生产
+/// 写法，不是测试自己拼的 SQL）。锁、整库 wipe 那一档与进程内作废都在公开入口那边。
+pub(crate) async fn rollback_to_watermark_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    target_watermark: i32,
+    intent: crate::data_interface::write_state::WriteIntent,
+) -> anyhow::Result<RollbackReport> {
+    let started = Instant::now();
+    let noun_tables = noun_tables_on(db).await?;
+    let render = render_rollback(dbnum, target_watermark, &noun_tables);
+    let batches = chunk_into_transactions(
+        &render.deletes,
+        crate::data_interface::tx_limits::data_tx_limits(),
+    );
+    for (index, batch) in batches.iter().enumerate() {
+        db.query(batch)
+            .await
+            .with_context(|| format!("rollback dbnum {dbnum} delete batch {index}"))?
+            .check()
+            .with_context(|| format!("rollback dbnum {dbnum} delete batch {index} statement"))?;
+    }
+    let control = render_transactional_phase(&render.control).expect("control plane is never empty");
+    db.query(control)
+        .await
+        .with_context(|| format!("rollback dbnum {dbnum} watermark and marker"))?
+        .check()
+        .with_context(|| format!("rollback dbnum {dbnum} watermark and marker statement"))?;
+
+    Ok(RollbackReport {
+        dbnum,
+        target_watermark,
+        intent: intent.as_str(),
+        wiped: false,
+        statements: render.statements(),
+        transactions: batches.len() + 1,
+        legacy_rows_note: Some(format!(
+            "noun 行与 ATT_UDA 行按 (dbnum, sesno) 谓词删（本库 schema 里 {} 张候选表）：\
+             本次改造之前写下的旧行没有这两列，谓词够不着，那种库只能靠整库重建回退",
+            noun_tables.len()
+        )),
         elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
@@ -833,6 +1062,165 @@ mod tests {
                  区间清库，否则回退重建后残留孤儿边: {ranges:?}"
             );
         }
+    }
+
+    fn rollback_sql(dbnum: u32, target: i32, nouns: &[&str]) -> String {
+        let nouns = nouns.iter().map(|n| (*n).to_string()).collect::<Vec<_>>();
+        let render = render_rollback(dbnum, target, &nouns);
+        [render.deletes, render.control].concat().join("\n")
+    }
+
+    /// ADR-072 W3 的源码钉：回退全部是按 `(dbnum, sesno)` 的谓词 `DELETE`，一句 `SELECT`
+    /// 都没有——老 `prune_above_watermark` 那套「SELECT id, noun FROM pe … → 逐键删」是
+    /// 这条纪律要换掉的东西。
+    #[test]
+    fn the_rollback_never_selects_before_it_deletes() {
+        let sql = rollback_sql(7997, 41, &["EQUI", "PANE"]);
+        assert!(!sql.contains("SELECT"), "回退渲染不得含 SELECT:\n{sql}");
+        assert!(
+            !sql.contains("->pe_owner") && !sql.contains("<-pe_owner"),
+            "也不得走图遍历逐键删:\n{sql}"
+        );
+    }
+
+    /// §4.3 的 2–6 逐条：数据面 / 模型面 / 房间面 / 三水位 / 标记行，且顺序固定
+    /// ——`pe` 顶点排在 noun 行之后（删顶点级联带走挂在它身上的边），标记行最后删
+    /// （它是回退的提交点）。
+    #[test]
+    fn the_rollback_covers_every_face_and_ends_at_the_marker() {
+        let render = render_rollback(7997, 41, &["EQUI".into(), "PANE".into()]);
+        let sql = [render.deletes.clone(), render.control.clone()]
+            .concat()
+            .join("\n");
+        let at = |needle: &str| {
+            sql.find(needle)
+                .unwrap_or_else(|| panic!("缺 {needle}\n{sql}"))
+        };
+        let equi = at("DELETE EQUI WHERE dbnum = 7997 AND <int>sesno > 41;");
+        at("DELETE PANE WHERE dbnum = 7997 AND <int>sesno > 41;");
+        let pe = at("DELETE pe WHERE dbnum = 7997 AND <int>sesno > 41;");
+        assert!(equi < pe, "noun 行先删、pe 顶点后删:\n{sql}");
+        for table in MODEL_FACE_TABLES {
+            at(&format!(
+                "DELETE {table} WHERE dbnum = 7997 AND <int>direct_model.sesno > 41;"
+            ));
+        }
+        at("DELETE gen_root WHERE dbnum = 7997 AND <int>source_end_sesno > 41;");
+        // 房间边行上没有 dbnum 列，谓词落在 `in`（面板 / 房间那一端的 pe 行）。
+        at("DELETE room_relate WHERE in.dbnum = 7997;");
+        at("DELETE room_panel_relate WHERE in.dbnum = 7997;");
+        assert!(
+            !sql.contains("DELETE room_relate WHERE dbnum ="),
+            "边行没有 dbnum 列，那个谓词会静默删不掉任何东西:\n{sql}"
+        );
+
+        // 三水位一起退（D3 崩溃不分面），且是 min 不是赋值——已经更低的水位不许被抬上来。
+        let watermark = &render.control[0];
+        for field in ["applied_sesno", "model_sesno", "room_sesno"] {
+            assert!(
+                watermark.contains(&format!("{field} = math::min([{field} ?: 0, 41])")),
+                "{field} 必须 min 到 41: {watermark}"
+            );
+        }
+        assert!(
+            watermark.contains("state_revision = (state_revision ?? 0) + 1"),
+            "{watermark}"
+        );
+        assert!(
+            render.control[1].contains("spatial_epoch:current"),
+            "回退删掉了 inst_relate / room_relate 行，epoch 必须递增: {:?}",
+            render.control
+        );
+        assert_eq!(
+            render.control.last().unwrap(),
+            "DELETE dbnum_write_state:7997;",
+            "标记行是回退的提交点，必须最后删: {:?}",
+            render.control
+        );
+    }
+
+    /// 计划 §9-1：回退按 `tx_limits` 合块，不再逐键一笔事务。
+    #[test]
+    fn the_rollback_batches_by_the_transaction_limits_instead_of_one_per_key() {
+        let nouns = (0..300)
+            .map(|index| format!("N{index}"))
+            .collect::<Vec<_>>();
+        let render = render_rollback(7997, 41, &nouns);
+        let roomy = chunk_into_transactions(
+            &render.deletes,
+            crate::data_interface::tx_limits::DataTxLimits::default(),
+        );
+        assert_eq!(roomy.len(), 1, "生效上限下 306 条谓词删只要一笔事务");
+        assert!(roomy[0].starts_with("BEGIN TRANSACTION;\n"));
+        assert!(roomy[0].ends_with("\nCOMMIT TRANSACTION;"));
+
+        let tight = chunk_into_transactions(
+            &render.deletes,
+            crate::data_interface::tx_limits::DataTxLimits {
+                max_write_rows: 50,
+                ..Default::default()
+            },
+        );
+        assert_eq!(tight.len(), render.deletes.len().div_ceil(50));
+        for batch in &tight {
+            assert_eq!(batch.matches("BEGIN TRANSACTION;").count(), 1, "{batch}");
+            assert!(batch.matches("DELETE ").count() <= 50, "{batch}");
+        }
+        // 一条都不许漏：合块只是换包装。
+        let packed = tight.join("\n");
+        for statement in &render.deletes {
+            assert!(packed.contains(statement.as_str()), "漏了 {statement}");
+        }
+
+        // 字节上限也管用：单条就撑爆时每条自成一笔，而不是拼成一个超限事务。
+        let byte_capped = chunk_into_transactions(
+            &render.deletes,
+            crate::data_interface::tx_limits::DataTxLimits {
+                max_bytes: 1,
+                ..Default::default()
+            },
+        );
+        assert_eq!(byte_capped.len(), render.deletes.len());
+    }
+
+    /// 意图决定走哪条清理路（§4.3-1）：初始化 / 重初始化没有「S 版本」可退，整库 wipe。
+    #[test]
+    fn initialize_and_reinitialize_take_the_wipe_path() {
+        use crate::data_interface::write_state::WriteIntent;
+        let source = include_str!("fast_delete.rs");
+        let body = source
+            .split_once("pub async fn rollback_to_watermark(")
+            .expect("rollback entry")
+            .1
+            .split_once("\n}\n")
+            .expect("body")
+            .0;
+        assert!(
+            body.contains("if intent.wipes_whole_dbnum()") && body.contains("wipe_dbnum_for_reinit"),
+            "初始化那一档必须走整库 wipe: {body}"
+        );
+        assert!(WriteIntent::Initialize.wipes_whole_dbnum());
+        assert!(!WriteIntent::ApplyWindow.wipes_whole_dbnum());
+    }
+
+    /// **已知缺口，钉的是今天的行为**：删 `pe` 顶点会级联带走「属主 → 本元素」那条
+    /// `pe_owner` 边，而边 id 里的槽位号只存在于属主的成员表里。属主没进本窗口时，S→T
+    /// 重放只重建本元素自己名下的槽位，那条入边补不回来。
+    ///
+    /// 渲染层能钉住的只有「回退确实删 `pe` 顶点、而且没有任何一句重建入边」。真要补，
+    /// 得让边带上 `dbnum` 或让重放拿到属主的成员表——两者都在本轮边界之外（房间 / 模型
+    /// 面的边归 T2/T3）。修的时候把本测试翻过来，别静默改。
+    #[test]
+    fn the_rollback_does_not_rebuild_the_membership_edge_its_cascade_removes() {
+        let sql = rollback_sql(7997, 41, &["EQUI"]);
+        assert!(
+            sql.contains("DELETE pe WHERE dbnum = 7997"),
+            "回退确实删 pe 顶点（级联带走它身上的边）:\n{sql}"
+        );
+        assert!(
+            !sql.contains("INSERT RELATION"),
+            "今天没有任何一句重建入边——这一行翻转时说明缺口补上了:\n{sql}"
+        );
     }
 
     #[test]

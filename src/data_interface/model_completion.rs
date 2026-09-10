@@ -382,6 +382,7 @@ mod tests {
                 }),
                 rooms: None,
                 info: None,
+                closes_task: true,
             },
         )
         .await

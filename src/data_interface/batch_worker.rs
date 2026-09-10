@@ -1502,6 +1502,35 @@ pub(crate) fn parse_explicit_flag(value: Option<&std::ffi::OsStr>) -> ExplicitFl
     }
 }
 
+/// 本次任务写在写入标记上的 `(intent, S)`（ADR-072 §4.1）。
+///
+/// S 是**本任务的起点**，也就是崩溃后要退回去的那一版：
+///
+/// - `ApplyWindow`：入队时的水位，即闭区间左端 − 1（[`DataBatch::start_sesno`](crate::data_interface::batch_queue::DataBatch::start_sesno)
+///   的定义就是「水位 + 1」）；
+/// - `ModelOnly`：起点模型水位（`model_start_sesno`）；
+/// - `Reinitialize`：0——整库重建没有「S 版本」可退，回退就是整库清空。
+///
+/// 排队期间文件还在长，冻结点重解出来的左端只会**不小于**这里算的 S。这个方向是安全的：
+/// S 偏小让回退多删一点痕迹、重放照样补齐；S 偏大才会留下够不着的残留。
+fn write_marker_window(
+    job: &FrozenBatch,
+) -> (crate::data_interface::write_state::WriteIntent, i32) {
+    use crate::data_interface::batch_queue::BatchIntent;
+    use crate::data_interface::write_state::WriteIntent;
+    match job.intent {
+        BatchIntent::Reinitialize => (WriteIntent::Reinitialize, 0),
+        BatchIntent::ModelOnly => (
+            WriteIntent::ModelOnly,
+            job.model_start_sesno.unwrap_or(0).max(0),
+        ),
+        BatchIntent::ApplyWindow => (
+            WriteIntent::ApplyWindow,
+            job.start_sesno.saturating_sub(1).max(0),
+        ),
+    }
+}
+
 async fn execute_frozen_batch(
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
@@ -1561,6 +1590,59 @@ async fn execute_frozen_batch(
     // 会话预算可能把本批截短，而 `cand` 随后被移进执行体：右端在这里留一份，
     // 提交后靠它判断「这一段追平了没有」。
     let file_latest_sesno = cand.file_latest_sesno;
+
+    // ── 开工写点（ADR-072 D1，计划 §4.2-1）：冻结点之后、第一笔写库之前 ──────────────
+    //
+    // 同库串行，所以此刻库里还留着 `writing` 只可能是上一次崩在写库中途（正常路径无论
+    // 成败都会把它盖成 `finished`）。先按它记的 S 回退，再落本次的标记——顺序反过来就把
+    // 上一次的证据抹了，谁都不知道该退到哪。回退失败**不许**接着写：半应用的库上再写一层
+    // 新窗口，正是这套机制要消灭的东西。
+    let (write_intent, mut write_start_sesno) = write_marker_window(job);
+    registry.set_stage(&job.task_id, "write_marker");
+    match crate::data_interface::write_state::rollback_if_writing(job.dbnum).await {
+        Ok(None) => {}
+        Ok(Some(report)) => {
+            write_start_sesno = report.target_watermark;
+            let note = format!(
+                "dbnum={} 上一次任务死在写库中途，已回退到水位 {}（intent={} wiped={} 语句={} 事务={}，{}ms）\
+                 ，本批从这一版重跑",
+                job.dbnum,
+                report.target_watermark,
+                report.intent,
+                report.wiped,
+                report.statements,
+                report.transactions,
+                report.elapsed_ms
+            );
+            println!("{note}");
+            warnings.push(note);
+        }
+        Err(error) => {
+            let message = format!(
+                "dbnum={} 见到未收口的写入标记但回退失败，本批不执行（下一轮幂等重放）: {error:#}",
+                job.dbnum
+            );
+            log::error!("{message}");
+            warnings.push(message);
+            return failed_window_result(job, warnings, "写入标记回退失败：库仍停在半应用状态");
+        }
+    }
+    if let Err(error) = crate::data_interface::write_state::mark_writing(
+        job.dbnum,
+        write_start_sesno,
+        file_latest_sesno,
+        write_intent,
+    )
+    .await
+    {
+        let message = format!(
+            "dbnum={} 写入标记未落，本批不执行（没有标记就没有崩溃出路，ADR-072 W1）: {error:#}",
+            job.dbnum
+        );
+        log::error!("{message}");
+        warnings.push(message);
+        return failed_window_result(job, warnings, "写入标记未落：本批不写库");
+    }
     let frozen_source_token = cand
         .frozen
         .as_ref()
@@ -1664,6 +1746,8 @@ async fn execute_frozen_batch(
                         model: None,
                         rooms: None,
                         info: Some(snapshot),
+                        // 中途那一笔：模型 / 房间还没写，不许宣告本任务的写库结束了。
+                        closes_task: false,
                     },
                 )
                 .await
@@ -1725,6 +1809,10 @@ async fn execute_frozen_batch(
             }
         }
     }
+
+    // 写入标记收没收（ADR-072 W1「有 writing 必有出路」）。下面收尾那一笔盖得上就是它收的；
+    // 收不上（没有 file_round、模型核验失败、收尾事务本身失败）由函数末尾那一笔兜底。
+    let mut write_marker_closed = false;
 
     // 收尾三段：收据（整库证据闸）→ 房间 → **一笔**盖三水位（ADR-071 D3 / ADR-065 G2 (i)）。
     // 顺序 2026-09-10 翻过来了：房间排在盖章之前算，修掉 d-73 指出的「模型水位先于房间前移」。
@@ -1789,7 +1877,7 @@ async fn execute_frozen_batch(
                     }
                 };
                 registry.set_stage(&job.task_id, "task_end");
-                if let Err(error) = crate::data_interface::task_end::commit_task_end_on(
+                match crate::data_interface::task_end::commit_task_end_on(
                     &aios_core::SUL_DB,
                     &crate::data_interface::task_end::TaskEnd {
                         dbnum: job.dbnum,
@@ -1800,16 +1888,20 @@ async fn execute_frozen_batch(
                             crate::data_interface::task_end::TaskRoomOutcome { ok: true },
                         ),
                         // Ref0 统计已在数据批次应用之后那一笔序列化（上面 `ref0_snapshot`），
-                        // 这一笔只盖水位。
+                        // 这一笔只盖水位与写入标记。
                         info: None,
+                        closes_task: true,
                     },
                 )
                 .await
                 {
-                    result.status = ManualUpdateStatus::Partial;
-                    result
-                        .warnings
-                        .push(format!("任务收尾水位未落 dbnum={}: {error:#}", job.dbnum));
+                    Ok(_) => write_marker_closed = true,
+                    Err(error) => {
+                        result.status = ManualUpdateStatus::Partial;
+                        result
+                            .warnings
+                            .push(format!("任务收尾水位未落 dbnum={}: {error:#}", job.dbnum));
+                    }
                 }
             }
             Ok(outcome) => {
@@ -1827,6 +1919,36 @@ async fn execute_frozen_batch(
                 ));
             }
         }
+    }
+
+    // ── 写入标记的兜底收口（ADR-072 W1）────────────────────────────────────────────
+    //
+    // 走到这里本任务就不会再写库了，无论它成、败还是 Partial：`finished` 说的是「本任务的
+    // 写库结束了」，欠什么由三水位回答。不收的话，一个**没崩**、只是模型失败的任务会在
+    // 库里留下 `writing`，下一次启动把一个数据完全一致的库整个退回 S 重跑。
+    //
+    // 上面收尾那一笔盖上了就不再来一次；它是唯一带三水位的那一笔，这里这一笔只收标记
+    // （`model` / `rooms` / `info` 全 None → 水位那一句只前进 `state_revision`）。
+    if !write_marker_closed
+        && let Err(error) = crate::data_interface::task_end::commit_task_end_on(
+            &aios_core::SUL_DB,
+            &crate::data_interface::task_end::TaskEnd {
+                dbnum: job.dbnum,
+                target_sesno: file_latest_sesno,
+                target_time: None,
+                model: None,
+                rooms: None,
+                info: None,
+                closes_task: true,
+            },
+        )
+        .await
+    {
+        result.status = ManualUpdateStatus::Partial;
+        result.warnings.push(format!(
+            "写入标记未收口 dbnum={}（下一次启动会把这个库退回水位 {write_start_sesno} 重跑）: {error:#}",
+            job.dbnum
+        ));
     }
 
     // 最终任务回执在模型单元与文件轮次发布之后取一次统一判决。它只是观测：
@@ -4496,6 +4618,107 @@ mod tests {
         assert!(
             idle_gate < idle_count && idle_gate < idle_drain,
             "房间阶段门必须早于目标统计和消费: {idle}"
+        );
+    }
+
+    /// ADR-072 D1 的开工写点：标记必须落在第一笔写库**之前**，而且落之前先把上一次崩溃
+    /// 留下的 `writing` 回退掉——顺序反过来就把「该退到哪」这条唯一的证据抹了。
+    #[test]
+    fn the_write_marker_lands_before_the_first_write_and_after_the_rollback() {
+        let source = include_str!("batch_worker.rs");
+        let body = source
+            .split_once("async fn execute_frozen_batch(")
+            .expect("execute_frozen_batch exists")
+            .1
+            .split_once("async fn execute_model_only_body(")
+            .expect("execute_frozen_batch end")
+            .0;
+        let at = |needle: &str| {
+            body.find(needle)
+                .unwrap_or_else(|| panic!("缺 {needle}\n{body}"))
+        };
+        let rollback = at("write_state::rollback_if_writing(job.dbnum).await");
+        let mark = at("write_state::mark_writing(");
+        let body_call = at("execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings)");
+        let model_only = at("execute_model_only_body(mgr, registry, job, cand, progress, warnings)");
+        assert!(rollback < mark, "先回退、再落标记: {body}");
+        assert!(
+            mark < body_call && mark < model_only,
+            "标记必须早于任何执行体（第一笔写库）: {body}"
+        );
+        // 回退失败 / 标记落不下去都不许接着写库。
+        let after_rollback = &body[rollback..mark];
+        assert!(
+            after_rollback.contains("return failed_window_result("),
+            "回退失败必须早退，不许在半应用的库上再写一层: {after_rollback}"
+        );
+        // 收口只有两处：正常收尾那一笔，和函数末尾的兜底那一笔（W1）。
+        assert_eq!(
+            body.matches("closes_task: true").count(),
+            2,
+            "收口写点恰好两处（收尾 + 兜底）: {body}"
+        );
+        assert_eq!(
+            body.matches("closes_task: false").count(),
+            1,
+            "中途那一笔（Ref0 统计）不许收标记: {body}"
+        );
+    }
+
+    /// `(intent, S)` 三档：`ApplyWindow` 取「闭区间左端 − 1」，`ModelOnly` 取起点模型水位，
+    /// `Reinitialize` 恒 0。S 只许偏小不许偏大——偏小多删痕迹、重放补齐；偏大留下够不着的残留。
+    #[test]
+    fn the_write_marker_window_never_overstates_the_start_sesno() {
+        use crate::data_interface::batch_queue::BatchIntent;
+        use crate::data_interface::write_state::WriteIntent;
+
+        let job = |intent: BatchIntent, start_sesno: i32, model_start: Option<i32>| FrozenBatch {
+            task_id: "t".into(),
+            project: "p".into(),
+            dbnum: 7997,
+            db_type: "DESI".into(),
+            phase: crate::data_interface::initialization_phase::DataPhase::Design,
+            epoch_id: 0,
+            intent,
+            model_start_sesno: model_start,
+            path: std::path::PathBuf::from("ams7997_0001"),
+            file_name: "ams7997_0001".into(),
+            start_sesno,
+            end_sesno: 63,
+            previous_observed_sesno: 0,
+            frozen_source_token: None,
+            reinit_requested: false,
+            regen_roots: Vec::new(),
+        };
+
+        assert_eq!(
+            write_marker_window(&job(BatchIntent::ApplyWindow, 42, None)),
+            (WriteIntent::ApplyWindow, 41),
+            "闭区间左端 = 水位 + 1，所以 S = 左端 − 1"
+        );
+        assert_eq!(
+            write_marker_window(&job(BatchIntent::ApplyWindow, 1, None)),
+            (WriteIntent::ApplyWindow, 0),
+            "空库的第一窗退回 0"
+        );
+        assert_eq!(
+            write_marker_window(&job(BatchIntent::ApplyWindow, 0, None)),
+            (WriteIntent::ApplyWindow, 0),
+            "左端 0 不许算出负数"
+        );
+        assert_eq!(
+            write_marker_window(&job(BatchIntent::ModelOnly, 42, Some(20))),
+            (WriteIntent::ModelOnly, 20),
+            "ModelOnly 的起点是模型水位"
+        );
+        assert_eq!(
+            write_marker_window(&job(BatchIntent::ModelOnly, 42, None)),
+            (WriteIntent::ModelOnly, 0)
+        );
+        assert_eq!(
+            write_marker_window(&job(BatchIntent::Reinitialize, 42, Some(20))),
+            (WriteIntent::Reinitialize, 0),
+            "整库重建没有 S 版本可退"
         );
     }
 

@@ -247,10 +247,10 @@ pub fn render_items(items: &[BatchItem], dbnum: i32, mode: WriteMode) -> Rendere
                     noun_rows
                         .entry(rows.noun.clone())
                         .or_default()
-                        .push(rows.noun_row.clone());
+                        .push(stamp_owner_columns(&rows.noun_row, dbnum, rows.sesno()));
                 }
                 if let Some(uda) = rows.uda_row.as_ref() {
-                    uda_rows.push(uda.clone());
+                    uda_rows.push(stamp_owner_columns(uda, dbnum, rows.sesno()));
                 }
                 edges.extend(rows.owner_edges.iter().cloned());
             }
@@ -301,6 +301,30 @@ pub fn render_items(items: &[BatchItem], dbnum: i32, mode: WriteMode) -> Rendere
     }
     out.sql = sql;
     out
+}
+
+/// 给 noun 行 / `ATT_UDA` 行 JSON 补上 `dbnum` / `sesno` 两列（计划 §9-6）。
+///
+/// `pe` 行本来就有这两列（`SPdmsElement::gen_sur_json`），noun 行与 UDA 行没有——它们的内容
+/// 来自属性映射（`NamedAttrMap::gen_sur_json` / `gen_sur_json_uda`），里面只有大写的 E3D
+/// 属性名。而回退到水位靠的正是按 `(dbnum, sesno)` 的谓词 `DELETE`
+/// （[`fast_delete::render_rollback`](crate::data_interface::fast_delete)）：少这两列的表删不动，
+/// 只能整库 wipe 才退得干净。
+///
+/// 与 [`flag_dependency`] 同一种插法：对象以 `{` 起头、字段逐行，在它后面插两个字段不碰
+/// 别的字段。小写也是刻意的——属性名一律大写（`DBNUM` / `TYPE`），撞不上。
+///
+/// **只覆盖本次改造之后写下的行**：历史行没有这两列，回退时按 `RollbackReport::legacy_rows_note`
+/// 点名，不装作删干净了。
+pub(crate) fn stamp_owner_columns(row: &str, dbnum: i32, sesno: u32) -> String {
+    match row.find('{') {
+        Some(brace) => format!(
+            "{}{{ \"dbnum\": {dbnum}, \"sesno\": {sesno},{}",
+            &row[..brace],
+            &row[brace + 1..]
+        ),
+        None => row.to_string(),
+    }
 }
 
 /// 给 `pe` 行 JSON 加上 `"dependency": true`（紧跟开头的 `{`）。`SPdmsElement::gen_sur_json` 的对象以
@@ -609,6 +633,39 @@ mod tests {
         // 生产纪律：没有逐元素的 UPSERT / UPDATE。
         assert!(!sql.contains("UPSERT "), "{sql}");
         assert!(!sql.contains("UPDATE pe:"), "{sql}");
+    }
+
+    /// 计划 §9-6：noun 行与 `ATT_UDA` 行必须带 `dbnum` + `sesno`——回退到水位是按这两列的
+    /// 谓词 `DELETE`，少一列那张表就删不动。两种写法（基线 `Fresh` / 增量 `Replace`）都要带。
+    #[test]
+    fn noun_and_uda_rows_carry_the_columns_the_rollback_predicate_needs() {
+        for mode in [WriteMode::Fresh, WriteMode::Replace] {
+            let items = items_from_changes(&fixture(), &[], DBNUM, &UdaKeyMap::empty());
+            let sql = render_items(&items, DBNUM, mode).sql;
+            for noun in ["ZONE", "BRAN", "EQUI"] {
+                assert!(
+                    sql.contains(&format!(
+                        "INSERT IGNORE INTO {noun} [{{ \"dbnum\": 8000, \"sesno\": 7,"
+                    )),
+                    "{mode:?}: {noun} 行缺回退谓词要的两列\n{sql}"
+                );
+            }
+            // 大写的 E3D 属性名照旧写出，两者撞不上。
+            assert!(sql.contains("\"DBNUM\": 8000"), "{mode:?}\n{sql}");
+        }
+    }
+
+    /// UDA 行走的是另一条渲染（`gen_sur_json_uda`），同样经 [`stamp_owner_columns`]。
+    /// 插入点是开头那个 `{` 的后面——对象结构不许被破坏，没有 `{` 的输入原样返回。
+    #[test]
+    fn the_stamp_goes_right_after_the_opening_brace_and_keeps_the_object_valid() {
+        let stamped = stamp_owner_columns("{\n  \"id\": \"24384_1\",\n  \"TYPE\": \"EQUI\"\n}", 8000, 7);
+        assert_eq!(
+            stamped,
+            "{ \"dbnum\": 8000, \"sesno\": 7,\n  \"id\": \"24384_1\",\n  \"TYPE\": \"EQUI\"\n}"
+        );
+        assert!(serde_json::from_str::<serde_json::Value>(&stamped).is_ok(), "{stamped}");
+        assert_eq!(stamp_owner_columns("", 8000, 7), "");
     }
 
     /// `PE_REPLACE_ASSIGNMENTS` 必须覆盖 `SPdmsElement::gen_sur_json` 写出的每一个字段：

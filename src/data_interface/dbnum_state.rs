@@ -256,6 +256,7 @@ const INCREMENT_STATE_SCHEMA: &str = r#"
 DEFINE TABLE IF NOT EXISTS dbnum_watermark SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS dbnum_info_table SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS increment_update_attempt SCHEMALESS;
+DEFINE TABLE IF NOT EXISTS dbnum_write_state SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS model_update_pending SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS incr_side_effect_pending SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS queue_control SCHEMALESS;
@@ -2082,6 +2083,7 @@ mod tests {
             WATERMARK_TABLE,
             INFO_TABLE,
             "increment_update_attempt",
+            crate::data_interface::write_state::WRITE_STATE_TABLE,
             "model_update_pending",
             "incr_side_effect_pending",
             "queue_control",

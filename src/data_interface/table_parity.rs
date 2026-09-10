@@ -23,9 +23,10 @@ use surrealdb::engine::any::{Any, connect};
 /// `dbnum_info_table` / `dbnum_stats_state` 是 pe 统计（与 PE 写同事务维护，行上带 `updated_at =
 /// time::now()`），逐字节对拍天然不等；它们的正确性由 `dbnum_stats` 自己的测试与
 /// `terminal_production_batches_replay_statistics_before_watermark`（pe 行数 == 统计和）查证。
-pub const CONTROL_PLANE_TABLES: [&str; 7] = [
+pub const CONTROL_PLANE_TABLES: [&str; 8] = [
     "dbnum_watermark",
     "increment_update_attempt",
+    "dbnum_write_state",
     "queue_control",
     "model_update_pending",
     "incr_side_effect_pending",

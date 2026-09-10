@@ -72,6 +72,17 @@ pub(crate) struct TaskEnd {
     /// `None` = 本任务没有权威的目标索引快照（例如 ModelOnly 任务一个元素都没动），
     /// 此时 `dbnum_info_table` 一行都不碰。
     pub info: Option<Ref0Snapshot>,
+    /// 这一笔是不是本任务的**收尾**那一笔（ADR-072 D1 / W2）。
+    ///
+    /// 为真时事务里多一句 `dbnum_write_state:{dbnum} SET status = 'finished'`——全库唯一
+    /// 写得出 `finished` 的地方。计划 §5 R1 原写着「`TaskEnd` 不需要新字段」，那是按
+    /// 「一个任务只调一次 `commit_task_end_on`」估的；实际执行体调两次（数据批次应用之后
+    /// 先落一笔 Ref0 统计，模型 / 房间跑完再落收尾那一笔），没有这一格，中途那一笔就会
+    /// 把还在写模型的任务提前宣告写完。
+    ///
+    /// 任务以 `Partial` 收尾（模型 / 房间失败但没崩）也要为真：`finished` 说的是「本任务
+    /// 的写库结束了」，欠什么由三水位回答。
+    pub closes_task: bool,
 }
 
 impl TaskEnd {
@@ -197,14 +208,26 @@ fn render_info_snapshot(dbnum: u32, snapshot: &Ref0Snapshot) -> String {
 
 /// 整笔收尾事务。统计块排在水位之前：统计描述的是**已经落库的数据**，与水位那一句的
 /// 数据水位闸各管各的（闸挡下水位时统计照旧成立）。
+///
+/// 写入标记那一句排在水位**之前**（ADR-072 D1）：它与三水位同生同死，但不带数据水位闸
+/// ——闸挡下水位说的是「这一版没盖成」，而本任务的写库确实结束了。位置也有讲究：
+/// [`commit_task_end_on`] 按 `num_statements() - 1` 取水位那一条的回执，水位必须是最后一句。
 pub(crate) fn render_task_end_tail(end: &TaskEnd) -> String {
     let info = end
         .info
         .as_ref()
         .map(|snapshot| render_info_snapshot(end.dbnum, snapshot))
         .unwrap_or_default();
+    let finished = if end.closes_task {
+        format!(
+            "{}\n",
+            super::write_state::render_mark_finished(end.dbnum)
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "BEGIN TRANSACTION;\n{info}{}\nCOMMIT TRANSACTION;",
+        "BEGIN TRANSACTION;\n{info}{finished}{}\nCOMMIT TRANSACTION;",
         render_watermark_update(end)
     )
 }
@@ -296,6 +319,7 @@ mod tests {
                     sesno: 26,
                 }],
             }),
+            closes_task: true,
         }
     }
 
@@ -377,6 +401,60 @@ mod tests {
             .find("room_sesno = math::max")
             .expect("room value clause");
         assert!(room_time < room_value, "{sql}");
+    }
+
+    /// ADR-072 W2：`status = 'finished'` 全库只有这一处写得出，而且**恰好一句**、
+    /// 与三水位同一笔事务、排在水位那一条之前（水位是最后一条，回执按下标取它）。
+    #[test]
+    fn the_closing_tail_carries_exactly_one_finished_marker_before_the_watermark() {
+        let sql = render_task_end_tail(&end());
+        assert_eq!(
+            sql.matches("status = 'finished'").count(),
+            1,
+            "收尾恰含一句 finished：{sql}"
+        );
+        assert!(
+            sql.contains("UPDATE dbnum_write_state:8000 SET status = 'finished'"),
+            "{sql}"
+        );
+        assert_eq!(sql.matches("BEGIN TRANSACTION;").count(), 1, "{sql}");
+        let marker = sql.find("dbnum_write_state:8000").expect("marker statement");
+        let watermark = sql
+            .find("UPDATE dbnum_watermark:8000")
+            .expect("watermark statement");
+        assert!(
+            marker < watermark,
+            "水位必须是事务最后一条（回执按下标取它）：{sql}"
+        );
+    }
+
+    /// 中途那一笔（数据批次应用之后的 Ref0 统计）不许宣告写完——模型 / 房间还没写。
+    #[test]
+    fn a_mid_task_tail_leaves_the_write_marker_alone() {
+        let mut end = end();
+        end.closes_task = false;
+        end.model = None;
+        end.rooms = None;
+        let sql = render_task_end_tail(&end);
+        assert!(!sql.contains("dbnum_write_state"), "{sql}");
+        assert!(!sql.contains("finished"), "{sql}");
+        assert!(sql.contains(INFO_TABLE), "统计照落：{sql}");
+    }
+
+    /// 模型 / 房间失败（没崩、走到了收尾）照样收标记：`finished` 说的是「本任务的写库
+    /// 结束了」，欠什么由三水位回答（ADR-072 D1）。
+    #[test]
+    fn a_partial_task_still_closes_its_write_marker() {
+        let mut end = end();
+        end.model = Some(TaskModelOutcome {
+            all_roots_ok: false,
+            dead_roots: 3,
+        });
+        end.rooms = Some(TaskRoomOutcome { ok: false });
+        let sql = render_task_end_tail(&end);
+        assert!(sql.contains("status = 'finished'"), "{sql}");
+        assert!(!sql.contains("model_sesno = math::max"), "{sql}");
+        assert!(!sql.contains("room_sesno = math::max"), "{sql}");
     }
 
     #[test]
@@ -686,8 +764,8 @@ mod tests {
         let sql = render_task_end_tail(&end);
         assert_eq!(
             sql.matches(';').count(),
-            3,
-            "BEGIN / UPDATE / COMMIT 三句：{sql}"
+            4,
+            "BEGIN / write_state / UPDATE / COMMIT 四句：{sql}"
         );
 
         let receipt = commit_task_end_on(&db, &end).await.unwrap();
