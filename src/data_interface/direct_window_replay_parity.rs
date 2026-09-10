@@ -10,7 +10,7 @@
 //! 窗口是合成的（不读 .dat 文件），但语句全部来自**真实渲染**：生产路
 //! （`IncrementPipeline::terminal_persist_batches` → `element_batch` 批量先删后插，
 //! plan 2026-09-06 §3 D2）与兼容路（`render_persist_statements` → old-pdms-io `to_surql` /
-//! `to_modify_surql`）各对拍一遍；分块来自真实分块、收口走真实 `finalize_attempt_on`：
+//! `to_modify_surql`）各对拍一遍；分块来自真实分块、收口使用真实 `render_finalize_tail`：
 //! 对拍的是生产写法，不是测试自己拼的 SQL。语句形态覆盖 Add（含 refno 复用的边清理）、
 //! Modified（属性修改 / 置空 + children）、删除（生产路落墓碑、兼容路软删）。
 //!
@@ -29,7 +29,7 @@ use surrealdb::engine::any::Any;
 use crate::data_interface::increment_pipeline::{
     IncrementPipeline, PERSIST_TX_CHUNK, persist_transaction_batches,
 };
-use crate::data_interface::increment_tail::finalize_attempt_on;
+use crate::data_interface::increment_tail::render_finalize_tail;
 use crate::data_interface::model_update_plan::ModelUpdatePlan;
 use crate::data_interface::write_state::{WRITE_STATE_TABLE, WriteIntent, render_mark_writing};
 use crate::data_interface::table_parity::{
@@ -235,9 +235,18 @@ async fn run_batches(db: &Surreal<Any>, batches: &[String]) {
 }
 
 async fn finalize(db: &Surreal<Any>) {
-    finalize_attempt_on(db, DBNUM, END_SESNO, None, &ModelUpdatePlan::default(), &[])
+    let render = render_finalize_tail(DBNUM, END_SESNO, None, &ModelUpdatePlan::default(), &[]);
+    apply_all(db, &render.window_batches)
         .await
-        .expect("finalize tail");
+        .expect("finalize window batches");
+    db.query(format!(
+        "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+        render.tail
+    ))
+    .await
+    .expect("finalize tail transport")
+    .check()
+    .expect("finalize tail");
 }
 
 async fn watermark(db: &Surreal<Any>) -> Option<i32> {
@@ -1081,7 +1090,7 @@ async fn terminal_production_batches_replay_statistics_before_watermark() {
 /// 一个 dbnum 任务写库时间线上的一步。`Data` / `Model` / `Rooms` 各是一笔独立提交。
 enum Step {
     Data(String),
-    /// 数据尾事务：`finalize_attempt_on`（窗口）或 `render_watermark_advance`（基线）。
+    /// 数据尾事务：`render_finalize_tail`（窗口）或 `render_watermark_advance`（基线）。
     DataTail { baseline: bool },
     Model(String),
     Rooms(String),

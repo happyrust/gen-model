@@ -25,7 +25,7 @@
 //!
 //! 执行端：`RegenRoot` / `DeleteCleanup` 照旧进 `model_update_pending`；`advance` 由本文件
 //! 的 [`advance_root_credentials_on`]（P2-2）在数据尾事务**之后**、模型 drain 之前批量前移
-//! ——`finalize_attempt_on` 提交完水位就调它，失败只记日志（N4：模型面不拦水位）。
+//! ——`finalize_attempt` 提交完水位就调它，失败只记日志（N4：模型面不拦水位）。
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -1879,19 +1879,18 @@ mod tests {
         let advance = render_credential_advance(8000, 200, None, &["24384/5".to_string()])
             .expect("statement renders")
             .join("\n");
-        let floors = include_str!("model_coverage.rs")
-            .split_once("pub(crate) async fn startup_coverage_floors_on(")
-            .expect("一级取数必须存在")
-            .1
-            .split_once("\n}")
-            .expect("函数体必须闭合")
-            .0;
-        for body in [advance.as_str(), floors] {
+        let shared = crate::data_interface::model_watermark::settled_root_predicate();
+        for body in [advance.as_str(), shared.as_str()] {
             assert!(
                 body.contains("(source_end_sesno ?: 0) > 0"),
                 "「凭证必须大于 0」这半条不能只在一处成立: {body}"
             );
         }
+        assert!(
+            include_str!("model_coverage.rs")
+                .contains("super::model_watermark::settled_root_predicate()"),
+            "一级取数必须复用同一安定谓词"
+        );
     }
 
     /// 折成 `ModelUpdatePlan`：前移名单落 `credential_advance`，退化原因进 warnings。
@@ -2460,40 +2459,6 @@ mod tests {
         assert_eq!(again.advanced, 0);
     }
 
-    /// 收口尾事务之后顺手前移：`finalize_attempt_on` 拿到带 `credential_advance` 的计划，
-    /// 水位推进到 T，名单上安定的根凭证也到 T——而且是在尾事务**之后**（水位先落）。
-    #[tokio::test(flavor = "multi_thread")]
-    async fn finalize_attempt_advances_the_planned_credentials_after_the_tail() {
-        use crate::data_interface::increment_tail::finalize_attempt_on;
-
-        let db = credential_advance_db("finalize_hook").await;
-        let plan = ModelUpdatePlan {
-            credential_advance: vec!["24384/1".into(), "24384/2".into()],
-            ..Default::default()
-        };
-        finalize_attempt_on(&db, 8000, 26, Some("2026-09-02T10:00:00+08:00"), &plan, &[])
-            .await
-            .expect("finalize");
-        let mut response = db
-            .query("SELECT VALUE applied_sesno FROM dbnum_watermark:8000;")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        let watermark: Option<i32> = response.take(0).unwrap();
-        assert_eq!(watermark, Some(26));
-        let rows = credential_rows(&db).await;
-        let sesno_of = |key: &str| {
-            rows.iter()
-                .find(|row| row.0 == key)
-                .map(|row| row.1)
-                .unwrap()
-        };
-        assert_eq!(sesno_of("24384_1"), Some(26));
-        assert_eq!(sesno_of("24384_2"), Some(20), "stale 行不得前移");
-        assert_eq!(sesno_of("24384_9"), Some(20), "不在名单上的根不动");
-    }
-
     /// P2-1 真库门：ams8000 上四个钉死的窗口，`roots_S` 取 **base 端**枚举（当作 S 时刻
     /// 每个根都已发布），`roots_T` 取 target 端枚举，看四个去向落得对不对。窗口与
     /// `docs/evidence/2026-09-02-planner-parity.md` §1 / e3d-model `increment_real.rs` 同一批：
@@ -2826,10 +2791,10 @@ mod tests {
     fn the_metadata_gate_is_wired_through_plan_update_with_behind_its_switch() {
         let src = include_str!("window_root_plan.rs");
         let collect = src
-            .split_once("    pub fn collect(\n")
+            .split_once("pub fn collect(")
             .expect("WindowRootSources::collect")
             .1
-            .split_once("    pub fn impact(")
+            .split_once("pub fn impact(")
             .expect("impact follows collect")
             .0;
         let gate = collect
@@ -2850,8 +2815,8 @@ mod tests {
             .split_once(concat!("pub(crate) fn ", "change_is_metadata_only("))
             .expect("谓词定义")
             .1
-            .split_once("\n}\n")
-            .expect("谓词函数体")
+            .split_once("pub(crate) fn owner_chain_t(")
+            .expect("owner_chain_t follows predicate")
             .0;
         assert!(
             predicate_body.contains(concat!("attribute_is_", "metadata_only(")),

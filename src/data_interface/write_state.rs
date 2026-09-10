@@ -1,25 +1,24 @@
-//! 写入标记 `dbnum_write_state:{dbnum}` 与「回退到水位」（ADR-072 D1 / D2 / D3）。
+//! 写入标记 `dbnum_write_state:{dbnum}` 与整库恢复（ADR-073 D3）。
 //!
 //! 一个 dbnum 任务把内存结果同步写进库；写库期间库里有一行 `writing{S,T}`，任务收尾那一笔
 //! 控制面事务把它改成 `finished`。进程死在中途，下次启动的水化段（或同库下一次任务开工前）
-//! 见到 `writing` 就把 `sesno > S` 的痕迹删掉、三水位退回 S、排 S→T 从头重跑。
+//! 见到 `writing` 就把该 dbnum 排成 `Reinitialize`，在普通重建路径整库清空后从头生成。
 //!
 //! 它住的是 `increment_update_attempt:{dbnum}` 那一行的位置（计划 §2.4），但**不是**它的改名版：
 //!
 //! | | `increment_update_attempt`（退役中） | `dbnum_write_state`（本模块） |
 //! |---|---|---|
 //! | 存什么 | 固定区间 + 整份 `plan_json` + `commit_token` | 只有 `status / start_sesno / end_sesno / intent` |
-//! | 崩溃后 | **复用旧计划**原样重放那一段 | 计划不留，回退到 S 再从头重算 S→T |
+//! | 崩溃后 | **复用旧计划**原样重放那一段 | 计划不留，整库重建 |
 //! | 谁删 | 数据尾事务（`finalize_attempt`） | 任务收尾那一笔改成 `finished`，行留着 |
 //!
 //! 三条不变量（ADR-072）：
 //!
 //! - **W1 有 writing 必有出路**：任一时刻 `status = writing` 的行，要么它的任务在飞，要么下一次
-//!   启动 / 开工会回退它。落实处：`batch_worker` 无论成败都以一笔收尾事务把它盖成 `finished`。
+//!   启动 / 开工会把整个 dbnum 重建。落实处：`batch_worker` 无论成败都以一笔收尾事务把它盖成 `finished`。
 //! - **W2 finished 只由收尾写**：`status = 'finished'` 只出现在 [`render_mark_finished`]，
 //!   而它只被 `task_end::render_task_end_tail` 拼进收尾那一笔。数据尾事务不碰这一行。
-//! - **W3 库读白名单**：回退全是按 `(dbnum, sesno)` 的谓词 `DELETE`，不 `SELECT` 出来再逐键删
-//!   （源码钉 [`tests::the_rollback_never_selects_before_it_deletes`]）。
+//! - **W3 恢复不猜局部完整性**：五种历史 intent 都折成 `Reinitialize`。
 
 use anyhow::Context;
 use serde::{Deserialize, Serialize};
@@ -84,6 +83,15 @@ impl WriteIntent {
             Self::ApplyWindow | Self::RoomOnly => super::batch_queue::BatchIntent::ApplyWindow,
         }
     }
+}
+
+/// ADR-073 D3: a durable `writing` row means the dbnum may contain a partially
+/// applied task. Recovery never tries to infer which face is safe to keep; all
+/// five historical intents restart through the whole-dbnum reinitialize path.
+pub const fn recovery_batch_intent(
+    _interrupted: WriteIntent,
+) -> super::batch_queue::BatchIntent {
+    super::batch_queue::BatchIntent::Reinitialize
 }
 
 /// 库里那一行的解出形态。
@@ -274,24 +282,6 @@ pub(crate) async fn load_all_on(db: &Surreal<Any>) -> anyhow::Result<Vec<WriteSt
     Ok(rows.into_iter().map(WriteState::from).collect())
 }
 
-/// 任务开工前的同一检查（§4.2）：同库串行，所以此刻见到 `writing` 只可能是崩溃残留——
-/// 回退到它记的 S，再让调用方按自己的 S→T 继续。
-///
-/// 返回 `Some(report)` = 真回退了一次。读不到标记行 / 已是 `finished` → `None`。
-pub async fn rollback_if_writing(dbnum: u32) -> anyhow::Result<Option<RollbackReport>> {
-    let Some(state) = load(dbnum).await? else {
-        return Ok(None);
-    };
-    if !state.is_writing() {
-        return Ok(None);
-    }
-    rollback_to_watermark(dbnum, state.start_sesno, state.intent)
-        .await
-        .map(Some)
-}
-
-pub use super::fast_delete::{RollbackReport, rollback_to_watermark};
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -374,6 +364,25 @@ mod tests {
             assert_eq!(
                 WriteIntent::from_str_or_apply_window(intent.as_str()),
                 intent
+            );
+        }
+    }
+
+    #[test]
+    fn every_unfinished_write_restarts_as_a_whole_dbnum_reinitialize() {
+        use crate::data_interface::batch_queue::BatchIntent;
+
+        for intent in [
+            WriteIntent::Initialize,
+            WriteIntent::ApplyWindow,
+            WriteIntent::ModelOnly,
+            WriteIntent::RoomOnly,
+            WriteIntent::Reinitialize,
+        ] {
+            assert_eq!(
+                recovery_batch_intent(intent),
+                BatchIntent::Reinitialize,
+                "unfinished {intent:?} must rebuild the whole dbnum"
             );
         }
     }

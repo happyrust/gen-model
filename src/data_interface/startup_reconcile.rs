@@ -65,8 +65,8 @@ pub async fn reconcile_model_coverage_at_startup() {
     crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
 }
 
-/// 启动水化段的**第一步**（ADR-072 D2）：把上一进程死在写库中途的库各自退回它记的 S，
-/// 再排 S→T 重跑。
+/// 启动水化段的**第一步**（ADR-073 D3）：把上一进程死在写库中途的库排成
+/// `Reinitialize`。这里只分类和排队；整库清空留在 worker 冻结点执行。
 ///
 /// 位置有讲究——必须排在
 /// [`hydrate_watermark_mirror`](crate::data_interface::dbnum_state::DbnumState::hydrate_watermark_mirror)
@@ -75,12 +75,12 @@ pub async fn reconcile_model_coverage_at_startup() {
 ///
 /// 逐库独立：任何一库失败都不中止启动，只是把标记留在库里等下一次——回退是幂等的
 /// （`writing{S,T}` 那一行到最后一步才删）。返回要打的行，调用方原样打出来。
-pub async fn rollback_unfinished_writes() -> Vec<String> {
+pub async fn schedule_unfinished_writes_for_reinitialize() -> Vec<String> {
     let states = match crate::data_interface::write_state::writing_states().await {
         Ok(states) => states,
         Err(error) => {
             return vec![format!(
-                "写入标记扫描失败：本次启动不回退任何库（是未知，不是「都干净」），下次启动重试: {error:#}"
+                "写入标记扫描失败：本次启动不能安排未完成写入重建（是未知，不是「都干净」），下次启动重试: {error:#}"
             )];
         }
     };
@@ -99,71 +99,46 @@ pub async fn rollback_unfinished_writes() -> Vec<String> {
         .unwrap_or_default();
 
     let mut lines = vec![format!(
-        "写入标记扫描：{} 个库上一次死在写库中途，逐库回退到各自的水位再排重跑（ADR-072 D2）",
+        "写入标记扫描：{} 个库上一次死在写库中途，逐库安排 Reinitialize（ADR-073 D3）",
         states.len()
     )];
     for state in states {
-        let mut report = match crate::data_interface::write_state::rollback_to_watermark(
-            state.dbnum,
-            state.start_sesno,
-            state.intent,
-        )
-        .await
-        {
-            Ok(report) => report,
-            Err(error) => {
-                lines.push(format!(
-                    "  dbnum={} 回退失败（标记原样留在库里，下次启动重试）: {error:#}",
-                    state.dbnum
-                ));
-                continue;
-            }
-        };
         lines.push(format!(
-            "  dbnum={} intent={} 回退到水位 {}（wiped={} 语句={} 事务={} {}ms），目标 {}",
+            "  dbnum={} interrupted_intent={} 窗口 {}→{}，保留标记等待 worker 整库重建",
             state.dbnum,
-            report.intent,
-            report.target_watermark,
-            report.wiped,
-            report.statements,
-            report.transactions,
-            report.elapsed_ms,
+            state.intent.as_str(),
+            state.start_sesno,
             state.end_sesno
         ));
-        if let Some(note) = report.legacy_rows_note.take() {
-            lines.push(format!("    {note}"));
-        }
         lines.push(format!(
             "    {}",
-            requeue_after_rollback(registered.get(&state.dbnum), &state, &report)
+            schedule_reinitialize(registered.get(&state.dbnum), &state)
         ));
     }
     lines
 }
 
-/// 回退之后把 S→T 排回队列（§4.3-8），意图原样。
-///
-/// 排不成不是错误：`applied_sesno` 已经退到 S，watcher 首扫与队列重建看到同一个缺口，
-/// 下一轮照样会排出来。这里排只是让它**立刻**排上，不必等一圈空闲唤醒。
-fn requeue_after_rollback(
+/// 把未完成写入排成整库重建。排不成时保留 `writing` 标记；watcher 首扫产生的
+/// 任意同库批次到 worker 冻结点后也会被该标记就地转成 Reinitialize。
+fn schedule_reinitialize(
     state: Option<&crate::data_interface::dbnum_state::DbnumState>,
     marker: &crate::data_interface::write_state::WriteState,
-    report: &crate::data_interface::fast_delete::RollbackReport,
 ) -> String {
     let Some(state) = state else {
         return format!(
-            "dbnum={} 在登记表里没有行，S→T 没排成；watcher 首扫会把缺口补成新批次",
+            "dbnum={} 在登记表里没有行，Reinitialize 暂未排成；writing 标记保留",
             marker.dbnum
         );
     };
     if state.file_path.is_empty() {
         return format!(
-            "dbnum={} 登记行没有文件路径，S→T 没排成；watcher 首扫会把缺口补成新批次",
+            "dbnum={} 登记行没有文件路径，Reinitialize 暂未排成；writing 标记保留",
             marker.dbnum
         );
     }
     let path = std::path::PathBuf::from(&state.file_path);
-    let intent = marker.intent.batch_intent();
+    let intent = crate::data_interface::write_state::recovery_batch_intent(marker.intent);
+    let applied = state.applied_sesno.max(0);
     let found = crate::data_interface::batch_scheduler::DiscoveredBatch {
         project: state.owner_project.clone(),
         dbnum: marker.dbnum,
@@ -171,12 +146,12 @@ fn requeue_after_rollback(
         phase: crate::data_interface::initialization_phase::DataPhase::of_db_type(&state.db_type),
         epoch_id: 0,
         intent,
-        model_start_sesno: Some(report.target_watermark),
+        model_start_sesno: None,
         path,
         file_name: state.file_name.clone(),
-        applied_sesno: report.target_watermark,
-        file_latest_sesno: marker.end_sesno.max(report.target_watermark),
-        previous_observed_sesno: report.target_watermark,
+        applied_sesno: applied,
+        file_latest_sesno: marker.end_sesno.max(applied),
+        previous_observed_sesno: applied,
         first_pending_sesno_time: None,
         file_latest_sesno_time: None,
         reinit_requested: false,
@@ -188,10 +163,8 @@ fn requeue_after_rollback(
         false,
     );
     format!(
-        "dbnum={} 已排 {}→{} intent={} task={}",
+        "dbnum={} 已排整库重建 intent={} task={}",
         marker.dbnum,
-        report.target_watermark,
-        marker.end_sesno,
         outcome.info.intent,
         outcome.info.task_id
     )

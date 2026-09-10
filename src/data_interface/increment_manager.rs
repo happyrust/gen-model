@@ -5187,14 +5187,8 @@ mod staged_transform_write_routing_tests {
             "新指针必须指向暂存里存在的 trans 记录（D9 不悬空）"
         );
 
-        // 3. 位姿位移 → 包围盒变化 → 房间重算意图寄存进窗口。
-        let spatial = window.deferred_spatial().await;
-        assert_eq!(
-            spatial.room_changes.get(&equi),
-            Some(&"EQUI".to_string()),
-            "包围盒确实变了的位姿目标必须寄存房间变更: {:?}",
-            spatial.room_changes
-        );
+        // 3.（原先这里断言「位姿位移 → 包围盒变化 → 房间重算意图寄存进窗口」；房间轮随
+        //    房间流程退役，房间归属在生成根落库时就地算，ADR-073 D1——窗口不再寄存房间变更。）
 
         window.drop_database().await.expect("cleanup");
     }

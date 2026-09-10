@@ -167,27 +167,24 @@ auto_initialize_new_dbnums = false
 # 不再阻断其它库完成初始化。需要恢复严格阻断时设为 true。
 block_file_identity_conflicts = false
 
-#【新增 2026-08-19】三段增量执行控制，默认均为 true。
-# 顺序固定为数据 → 模型 → 房间；关闭阶段只停消费，不删除 durable 工作。
-# 环境变量 AIOS_DATA_INCREMENTAL / AIOS_MODEL_INCREMENTAL 可覆盖前两项。
+#【新增 2026-08-19】两段增量执行控制，默认均为 true。
+# 数据与模型链并行；房间归属随生成根同步计算，不再是独立阶段。
+# 环境变量 AIOS_DATA_INCREMENTAL / AIOS_MODEL_INCREMENTAL 可覆盖。
 data_incremental = true
 model_incremental = true
 
-#【新增 2026-08-10，默认值 2026-08-12 改为 true】room_incremental
-# 房间归属的「增量」重算；默认 true = 照排照收。
-#   true ：位姿/删除刷新包围盒之后排 room_recalc 目标（直写事务与暂存窗口收口
-#          两个写入点），空闲轮收房间轮。
-#   false：两个写入点都不排，空闲轮也不收。已经排在 model_update_pending 里的
-#          目标原样留着，开关一开照常收——关掉不等于把那些活丢了。
-# 管的只有增量这一条链：启动全量重建、人工重建、以及 drain_rooms 直调（房间对拍
-# 夹具走的就是它）都不看本键。
-# 环境变量 AIOS_ROOM_INCREMENTAL 压过本键（取值规则同 AIOS_STARTUP_AUTORUN），
-# 想单独排查模型增量时用 AIOS_ROOM_INCREMENTAL=0 临时关一次，不必改文件。
-# 2026-08-10 默认取假的理由是现场压着 2580 个查不到几何的房间目标，每页 256 个
-# 付两次全量查询、约 88 秒，把模型侧真正的失败埋进日志。那批目标已经收干净，
-# 而关着的代价更贵：房间归属只在删除时还会被清，搬家后的重算全靠启动全量重建
-# 回补，而那条兜底路径排在 startup_autorun 之后——默认部署里等于没有回补通道。
-room_incremental = true
+#【新增 2026-09-10】room_membership —— 房间归属计算的总开关，默认 true
+# ADR-073 D1 之后房间不是一条独立流程：一个生成根算完几何，紧接着用常驻房间模型里的
+# 面板做点包含筛选、算出它每个构件属于哪些面板，边与模型行同一笔事务落库。本键就是
+# 那一步的开关，判定点只有一处（任务开工冻房间计算器 frozen_room_calculator）。
+#   true ：照算照写。
+#   false：启动不建常驻房间模型，生成任务在冻结房间计算器时失败；模型根不落库、模型水位
+#          不前移，因此不会产生“模型已完成但房间边缺失”的伪一致状态。空间树仍照常装载。
+# 【这是非正常运行状态】数据面仍可推进，模型根保留失败/欠账；重新打开后由模型重试补齐。
+# 护栏：启动横幅一行、/health 的 room_membership 栏、冻结计算器时返回明确错误。
+# 环境变量 AIOS_ROOM_MEMBERSHIP 压过本键（取值规则同 AIOS_STARTUP_AUTORUN），想临时关一次
+# 用 AIOS_ROOM_MEMBERSHIP=0，不必改文件。
+room_membership = true
 
 #【新增 2026-08-19】watch_dbnums —— 调试用，默认不写 = 全范围
 # 把增量摄入的数据批次圈到这几个 dbnum，例如 watch_dbnums = [7998, 8000]。
@@ -215,10 +212,11 @@ watch_dbnums = [7998, 8000]
 #【新增 2026-09-03】model_incremental_types —— 模型增量类型限定，默认不写 = 不限类型
 # 把「模型增量」圈到这几种最小交付单元类型的生成根，例如
 #   model_incremental_types = ["BRAN", "EQUI"]
-# 只有名单内类型的 regen_root / delete_cleanup 行会被本进程认领、生成、烧 attempts；
-# 其余类型的根**照常规划、照常入队、gen_root 照常标 stale**，只是留在
-# model_update_pending 里不消费——凭证不前移、重启后随退化窗口重排、名单一撤即照常
-# 消费（与 model_incremental = false「只停消费、不删 durable 工作」同一条纪律）。
+# 只有名单内类型的 regen_root / delete_cleanup 单元会被本进程生成；
+# 其余类型的根**照常规划、照常进任务的单元清单、gen_root 照常标 stale**，只是
+# 本进程不生成——凭证不前移、重启后随退化窗口重排、名单一撤即照常生成
+#（与 model_incremental = false「只停消费、不删工作」同一条纪律；模型意图队列表随
+# ADR-072 D5 退役，放行点在任务执行单元那一刻）。
 # 数据增量（窗口收集、pe / ATT_* 写回、水位推进）一律不受影响；Transform（老规划器
 # 便宜路径）、CascadeExpand、PostRegenAabb、房间任务与按需 ensure 也不看名单。
 # 归一：trim + 大写 + 去空 + 去重；noun 未知（空）的行不挡。
@@ -227,8 +225,7 @@ watch_dbnums = [7998, 8000]
 # delivery_unit_types 决定生成根「怎么选」（哪些 noun 是 MDU，改变的是根的归并）；
 # 本键只圈模型消费按「类型」，不动数据面、不改根的选法。
 # 【这是非正常运行状态】护栏与 watch_dbnums 同一套：启动横幅、/health 的
-# model_incremental_types 栏与 model_update_pending.held_by_model_incremental_types
-# 计数、每一份 preview / execute 回执的 warnings、数据窗口计划 warnings 点名本窗被
+# model_incremental_types 栏、每一份 preview / execute 回执的 warnings、数据窗口计划 warnings 点名本窗被
 # 暂扣的根（按类型计数）、worker 空闲轮首次一句，都会点名本键并说清来自配置还是
 # 环境变量。用完记得删——写在这里的能躺一个月。
 # model_incremental_types = ["BRAN", "EQUI"]

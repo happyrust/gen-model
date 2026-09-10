@@ -574,6 +574,39 @@ impl ModelMemoryStore {
         true
     }
 
+    /// A whole-dbnum reinitialize invalidates the process projection immediately.
+    /// The epoch bump also prevents an in-flight database snapshot from restoring
+    /// the pre-wipe image after this point.
+    pub fn clear_dbnum(&self, dbnum: u32) {
+        let mut scopes = self.write();
+        let state = scopes.entry(ProjectionScope::Current.key()).or_default();
+        state.room_baselines.remove(&dbnum);
+        let old = state
+            .geometries
+            .values()
+            .filter(|record| record.dbnum == dbnum)
+            .map(|record| record.record_id.clone())
+            .collect::<Vec<_>>();
+        for id in old {
+            state.remove(&id);
+        }
+        state.receipts.retain(|_, receipt| {
+            // A targetless receipt is legacy/ambiguous: after any whole-dbnum
+            // wipe it cannot prove ownership or freshness, so fail closed and
+            // make that root regenerate as well.
+            receipt
+                .model_target
+                .as_ref()
+                .is_some_and(|target| target.design.dbnum != dbnum)
+        });
+        state.published_sesno.remove(&dbnum);
+        state.room_changes.remove(&dbnum);
+        state.model_digests.remove(&dbnum);
+        state.room_spatial.remove(&dbnum);
+        state.room_spatial_dirty.retain(|(owner, _)| *owner != dbnum);
+        state.bump_epoch(dbnum);
+    }
+
     /// 一个生成根名下、指定库的已投影几何身份。旧 `existing_geometry_ids` 的内存版。
     pub fn geometry_ids_of_root(
         &self,
@@ -828,6 +861,43 @@ mod tests {
         assert!(!store.room_baseline_known(7997));
         assert!(store.ack_rooms(7997, store.commit_epoch(7997)));
         assert!(store.room_baseline_known(7997));
+    }
+
+    #[test]
+    fn clearing_one_dbnum_drops_only_its_projection_and_advances_the_epoch() {
+        let store = store();
+        let root_a = RefNo::new(24381, 1);
+        let root_b = RefNo::new(24382, 1);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![
+                    record("a", root_a, root_a, 7997),
+                    record("b", root_b, root_b, 1112),
+                ],
+                receipt: Some((
+                    root_a,
+                    RootReceipt {
+                        source_sesno: 42,
+                        model_target: None,
+                        manifest_hash: "legacy".into(),
+                        geometry_count: 1,
+                        published_via: default_published_via(),
+                    },
+                )),
+                ..Default::default()
+            }],
+        );
+        assert!(store.receipt(ProjectionScope::Current, root_a).is_some());
+        let epoch = store.commit_epoch(7997);
+
+        store.clear_dbnum(7997);
+
+        assert!(store.commit_epoch(7997) > epoch);
+        assert!(store.records_of_root(ProjectionScope::Current, root_a).is_empty());
+        assert!(store.receipt(ProjectionScope::Current, root_a).is_none());
+        assert!(!store.roots(ProjectionScope::Current).contains(&root_a));
+        assert_eq!(store.records_of_root(ProjectionScope::Current, root_b).len(), 1);
     }
 
     #[test]

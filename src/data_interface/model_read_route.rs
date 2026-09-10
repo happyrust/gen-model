@@ -13,7 +13,7 @@
 //! ```text
 //! Database ⇔ 数据面是 ingest ∧ applied_sesno > 0 ∧ 该库没有数据批次任务在跑（task_registry）
 //!            ∧ model_sesno == applied_sesno（镜像；ADR-071 D8「水位相等」，ADR-073 D2 收成两枚）
-//! Memory   ⇔ 其余（读透形态 / 基线未落 / 该库的任务在飞 / 模型落后于数据）
+//! Memory   ⇔ 其余（读透形态 / 基线未落 / 该库的任务在飞 / 两枚水位不相等）
 //! ```
 //!
 //! 「模型落后」那一档（ADR-071 D8）：库里的模型行是上一版的，而进程内投影是启动时从库读回 +
@@ -81,6 +81,10 @@ pub enum MemoryReason {
     /// 数据到了 T、模型水位还没追上（`model_sesno < applied_sesno`，ADR-071 D8）：库里的模型行
     /// 是旧版，进程内投影更全。房间边随根写在模型块里，模型追上就是房间追上（ADR-073 D2）。
     ModelLagging,
+    /// `/dbnums` 没拿到模型水位，无法证明两枚水位相等。
+    ModelWatermarkUnavailable,
+    /// 模型水位越过数据水位。两枚水位失配时持久层不能作为权威读源。
+    WatermarksInconsistent,
 }
 
 impl MemoryReason {
@@ -90,6 +94,8 @@ impl MemoryReason {
             Self::DataWatermarkUnestablished => "data_watermark_unestablished",
             Self::InitializationPublishing => "initialization_publishing",
             Self::ModelLagging => "model_lagging",
+            Self::ModelWatermarkUnavailable => "model_watermark_unavailable",
+            Self::WatermarksInconsistent => "watermarks_inconsistent",
         }
     }
 }
@@ -121,8 +127,7 @@ impl ModelReadRoute {
 /// 该库的 `dbnum_watermark.applied_sesno` / `model_sesno`（镜像，同一次读）、
 /// 该库是否有数据批次任务在跑。
 ///
-/// 「相等」按「没落后」判：模型水位跑到数据前面是 M2 违反，另有对账管，这里不把它
-/// 讲成「落后」。
+/// 两枚水位必须严格相等；模型水位落后或异常超前时，持久层都不能冒充权威读源。
 pub fn route(
     dbnum: u32,
     data_face: DataFace,
@@ -138,6 +143,8 @@ pub fn route(
         Some(MemoryReason::InitializationPublishing)
     } else if model_sesno < applied_sesno {
         Some(MemoryReason::ModelLagging)
+    } else if model_sesno > applied_sesno {
+        Some(MemoryReason::WatermarksInconsistent)
     } else {
         None
     };
@@ -149,6 +156,33 @@ pub fn route(
             ModelReadSource::Database
         },
         reason,
+    }
+}
+
+/// `/dbnums` 普查可能拿不到模型水位；缺席不是相等，必须 fail closed 到内存读源。
+pub fn route_with_optional_model_watermark(
+    dbnum: u32,
+    data_face: DataFace,
+    applied_sesno: i32,
+    model_sesno: Option<i32>,
+    initialization_publishing: bool,
+) -> ModelReadRoute {
+    match model_sesno {
+        Some(model_sesno) => route(
+            dbnum,
+            data_face,
+            applied_sesno,
+            model_sesno,
+            initialization_publishing,
+        ),
+        None if data_face.is_read_through() => route(dbnum, data_face, applied_sesno, 0, initialization_publishing),
+        None if applied_sesno <= 0 => route(dbnum, data_face, applied_sesno, 0, initialization_publishing),
+        None if initialization_publishing => route(dbnum, data_face, applied_sesno, 0, true),
+        None => ModelReadRoute {
+            dbnum,
+            source: ModelReadSource::Memory,
+            reason: Some(MemoryReason::ModelWatermarkUnavailable),
+        },
     }
 }
 
@@ -222,8 +256,11 @@ mod tests {
         assert_eq!(ok.source, ModelReadSource::Database);
         assert_eq!(ok.reason, None);
         assert!(ok.is_database());
-        // 模型水位跑到数据前面是 M2 违反，不是「落后」；这里只判「没追上」。
-        assert!(route(8000, DataFace::Ingest, 285, 300, false).is_database());
+        // 模型水位跑到数据前面同样违反「两水位相等」：异常库行不能对外冒充权威。
+        assert_eq!(
+            route(8000, DataFace::Ingest, 285, 300, false).source,
+            ModelReadSource::Memory
+        );
     }
 
     #[test]
@@ -244,12 +281,18 @@ mod tests {
             route(8000, DataFace::Ingest, 285, 284, false).reason,
             Some(MemoryReason::ModelLagging)
         );
+        assert_eq!(
+            route(8000, DataFace::Ingest, 285, 300, false).reason,
+            Some(MemoryReason::WatermarksInconsistent)
+        );
         let mut names = std::collections::BTreeSet::new();
         for reason in [
             MemoryReason::ReadThrough,
             MemoryReason::DataWatermarkUnestablished,
             MemoryReason::InitializationPublishing,
             MemoryReason::ModelLagging,
+            MemoryReason::ModelWatermarkUnavailable,
+            MemoryReason::WatermarksInconsistent,
         ] {
             assert!(!reason.as_str().is_empty());
             assert!(

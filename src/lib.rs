@@ -438,22 +438,19 @@ mod process_instance_lock_tests {
     }
 }
 
-/// 启动房间初始化（常驻房间模型，`docs/plans/2026-09-07-resident-room-model-plan.md` §3 P3，
-/// 第 5 轮 Q17–Q20）。
+/// 启动时把常驻房间模型建起来：房间→面板拓扑与在册面板几何，MDB 全部设计库、不看
+/// `watch_dbnums`。它是逐根房间归属那一步的**算法输入**（ADR-073 D1：一个生成根算完几何，
+/// 紧接着用这份面板集做点包含筛选，边与模型行同事务落库；`model_db_adapter::frozen_room_calculator`
+/// 在任务开工时从它冻一份不可变引用）——不是一条流程：不写归属边、不写发布视图 / 分片 / 清单，
+/// 没有启动对比、没有换代（ADR-067 作废）。
 ///
-/// 位置：紧跟空间树装载、排在 watcher / worker **之前**。门只有两道——`room_resident_model`
-/// 开关与 `spatial_compute`（关了就没有房间子系统），都由 `run_cli` 在调用处判；
-/// `startup_data_ready` / 上弦位 / `startup_autorun` / `model_incremental` 一道都不看
-/// （Q18 (a)）：房间是参照系，不是增量的一部分。它只建模、写分片与清单，不写归属边、
-/// 不写 `resident_reference`；建不起来打印原因、记 `resident_blocked`，不拦启动——下面的
-/// 增量轮与启动对比拿不到模型就止步（原则 2）。
-///
-/// 哪些文件的清单行归**文件轮次**管在这里按监听限定域算好传进去：限定域生效 = 限定域里
-/// 的库，其余库没有轮次推它、由初始化推进到文件最新会话（Q19 (a)）；未生效 = 每个文件都有
-/// 自己的轮次，初始化一行不动。房间那三份文件不认识 `watch_scope`（源码钉
-/// `room_files_never_consult_the_watch_scope`），限定域只在这里被问一次。
+/// 位置：紧跟空间树装载、排在 watcher / worker **之前**。门只有 `spatial_compute` 与
+/// project_hd / project_hh 特性两道，都在 [`prepare_room_resident_at_startup`] 判；
+/// `startup_data_ready` / 上弦位 / `startup_autorun` / `model_incremental` 一道都不看：
+/// 房间模型是参照系，不是增量的一部分。建不起来打印原因、记 `resident_blocked`，不拦启动
+/// ——之后每个任务开工冻计算器时拿不到模型，本批每根都算「房间算不出来」= 该根失败（D2）。
 async fn initialize_resident_rooms_at_startup(db_option: &DbOption) {
-    use crate::fast_model::room_resident::{self, RoundOwnership};
+    use crate::fast_model::room_resident;
     use crate::fast_model::room_topology::RoomHierarchy;
 
     let Some(hierarchy) = RoomHierarchy::configured() else {
@@ -464,25 +461,14 @@ async fn initialize_resident_rooms_at_startup(db_option: &DbOption) {
     let match_room_fn = crate::fast_model::room_model::configured_match_room_fn();
     #[cfg(not(any(feature = "project_hd", feature = "project_hh")))]
     let match_room_fn = |_: &str| false;
-    let ownership = if crate::data_interface::watch_scope::active() {
-        RoundOwnership::Only(
-            crate::data_interface::watch_scope::dbnums()
-                .into_iter()
-                .collect(),
-        )
-    } else {
-        RoundOwnership::EveryFile
-    };
     println!(
-        "正在初始化房间（常驻房间模型 · {}）：MDB 全部设计库，{}...",
+        "正在初始化房间（常驻房间模型 · {}）：MDB 全部设计库...",
         crate::options::data_face().as_str(),
-        ownership.describe()
     );
     let room_key_words = db_option.get_room_key_word();
     let mesh_dir = db_option.get_meshes_path();
     let result = room_resident::initialize_at_startup(
         crate::options::data_face(),
-        &ownership,
         hierarchy,
         &room_key_words,
         match_room_fn,
@@ -492,7 +478,7 @@ async fn initialize_resident_rooms_at_startup(db_option: &DbOption) {
     match &result {
         Ok(outcome) => println!("{}", outcome.summary()),
         Err(error) => eprintln!(
-            "[房间初始化] 建不起来（不动归属边；增量轮与启动对比拿不到模型就止步）: {error:#}"
+            "[房间初始化] 建不起来（不动归属边；之后的任务开工冻不出房间计算器，逐根按「房间算不出来」记失败）: {error:#}"
         ),
     }
     room_resident::record_startup_init(result.as_ref()).await;
@@ -503,10 +489,8 @@ async fn initialize_resident_rooms_at_startup(db_option: &DbOption) {
 async fn prepare_room_resident_at_startup(db_option: &DbOption) {
     use crate::fast_model::room_resident;
 
-    if !crate::options::room_resident_model() {
-        room_resident::mark_disabled("configuration");
-        return;
-    }
+    // `room_resident_model` 那道配置门随 ADR-067 作废（ADR-073）：常驻模型是逐根房间归属的
+    // 算法输入，不再单独开关；只剩 `spatial_compute` 与特性两道门。
     if !crate::options::spatial_compute() {
         room_resident::mark_unsupported(format!("{}=0", crate::options::SPATIAL_COMPUTE_ENV));
         return;
@@ -527,6 +511,19 @@ async fn prepare_room_resident_at_startup(db_option: &DbOption) {
         Err(error) => eprintln!("空间树启动加载失败（{error:#}），房间 resident 保持 blocked"),
     }
     crate::fast_model::spatial_state::spawn_spatial_revalidator();
+
+    // 房间归属开关（`room_membership`，默认开）关着：空间树照装（它不只服务房间），常驻房间
+    // 模型不建——生成路径反正不算房间（`frozen_room_calculator` 关着返回 None），建了也没人用，
+    // 而 MDB 全部设计库的面板几何装一遍不便宜。生命周期记 Disabled 并点名来源，/health 看得见。
+    if !crate::options::room_membership() {
+        room_resident::mark_disabled("room_membership=false");
+        println!(
+            "房间归属计算已关闭（DbOption.toml 的 room_membership / 环境变量 {}）：\
+             跳过常驻房间模型初始化；生成根不算房间、不写新边，重新打开后不自动回补",
+            crate::options::ROOM_MEMBERSHIP_ENV
+        );
+        return;
+    }
 
     room_resident::mark_loading("source-snapshot");
     let step_started = Instant::now();
@@ -853,7 +850,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 再排 S→T 重跑。排在镜像水化**之前**——镜像是一次整表替换，先水化再回退，发布出去的
     // 就是一版已经被删掉痕迹的水位，而且那几格再没有人来作废（理由见 `rollback_unfinished_writes`）。
     let step_started = Instant::now();
-    let rollbacks = crate::data_interface::startup_reconcile::rollback_unfinished_writes().await;
+    let rollbacks = crate::data_interface::startup_reconcile::schedule_unfinished_writes_for_reinitialize().await;
     if !rollbacks.is_empty() {
         for line in &rollbacks {
             println!("{line}");
@@ -1513,10 +1510,9 @@ fn print_startup_complete_banner(
         );
     }
     println!(
-        "  增量阶段：data={} model={} room={}（数据链与模型链并行，房间排在模型之后）",
+        "  增量阶段：data={} model={}（数据链与模型链并行，房间归属随生成根同步计算）",
         crate::options::data_incremental(),
         crate::options::model_incremental(),
-        crate::options::room_incremental()
     );
     {
         use crate::fast_model::room_resident::ResidentLifecycle;
@@ -1546,6 +1542,15 @@ fn print_startup_complete_banner(
             }
         };
         println!("  常驻房间模型：{state}");
+    }
+    // 非正常运行状态才出声（与 watch_dbnums / model_incremental_types 同一条纪律）：
+    // 关着时「没算房间」与「房间没变」在库上长得一模一样，横幅这一行是最先被翻到的证据。
+    if !crate::options::room_membership() {
+        println!(
+            "  房间归属计算：关（DbOption.toml 的 room_membership / 环境变量 {}）——\
+             生成根不算房间、不写新边；model_sesno 的「一致」此时不含房间，重新打开后不自动回补",
+            crate::options::ROOM_MEMBERSHIP_ENV
+        );
     }
     println!("  数据读取：direct / e3d-io（唯一形态；legacy db 读路由已于 2026-09-08 退役）");
     if let Some(notice) = crate::data_interface::watch_scope::mode_notice() {

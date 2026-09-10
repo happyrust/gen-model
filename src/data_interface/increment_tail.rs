@@ -131,7 +131,7 @@ fn render_window_statement_batches(window_statements: &[String]) -> Vec<String> 
 
 /// ADR-017 T1.3：窗口收口的渲染（窗口语句批 + 尾事务体）。
 ///
-/// 直写路径由 [`finalize_attempt_on`] 同序执行。顺序：窗口语句批（datacenter 交付
+/// 直写路径由 [`finalize_attempt`] 同序执行。顺序：窗口语句批（datacenter 交付
 /// 状态 + anc 重算，commit-time 语义）→ 尾事务（房间重建要求 → 懒根观察 → 水位推进）。
 /// 收口条件（水位单调）在持久层事务内判定。
 ///
@@ -206,30 +206,10 @@ pub async fn finalize_attempt(
     plan: &ModelUpdatePlan,
     window_statements: &[String],
 ) -> anyhow::Result<Option<CredentialAdvanceOutcome>> {
-    let outcome = finalize_attempt_on(
-        &SUL_DB,
-        dbnum,
-        end_sesno,
-        end_sesno_time,
-        plan,
-        window_statements,
-    )
-    .await?;
-    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
-    Ok(outcome)
-}
-
-pub(crate) async fn finalize_attempt_on(
-    db: &Surreal<Any>,
-    dbnum: u32,
-    end_sesno: i32,
-    end_sesno_time: Option<&str>,
-    plan: &ModelUpdatePlan,
-    window_statements: &[String],
-) -> anyhow::Result<Option<CredentialAdvanceOutcome>> {
     let render = render_finalize_tail(dbnum, end_sesno, end_sesno_time, plan, window_statements);
     for (index, batch) in render.window_batches.iter().enumerate() {
-        db.query(batch)
+        SUL_DB
+            .query(batch)
             .await
             .map_err(|error| {
                 anyhow::anyhow!(
@@ -244,20 +224,49 @@ pub(crate) async fn finalize_attempt_on(
                 )
             })?;
     }
-    db.query(format!(
-        "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
-        render.tail
-    ))
-    .await
-    .map_err(|error| anyhow::anyhow!("finalize increment attempt dbnum={dbnum} failed: {error}"))?
-    .check()
-    .map_err(|error| {
-        anyhow::anyhow!("finalize increment attempt dbnum={dbnum} statement failed: {error}")
-    })?;
+    SUL_DB
+        .query(format!(
+            "BEGIN TRANSACTION;\n{}\nCOMMIT TRANSACTION;",
+            render.tail
+        ))
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("finalize increment attempt dbnum={dbnum} failed: {error}")
+        })?
+        .check()
+        .map_err(|error| {
+            anyhow::anyhow!("finalize increment attempt dbnum={dbnum} statement failed: {error}")
+        })?;
 
-    // Unchanged roots retain their generation receipt. The enclosing Task
-    // commits continuous dbnum coverage only after all changed roots publish.
-    Ok(None)
+    let outcome = if plan.credential_advance.is_empty() {
+        None
+    } else {
+        let requested = plan.credential_advance.len();
+        Some(
+            match crate::data_interface::window_root_plan::advance_root_credentials_on(
+                &SUL_DB,
+                dbnum,
+                end_sesno,
+                end_sesno_time,
+                &plan.credential_advance,
+            )
+            .await
+            {
+                Ok(outcome) => outcome,
+                Err(error) => {
+                    log::warn!(
+                        "credential advance degraded after watermark commit dbnum={dbnum} end_sesno={end_sesno}: {error:#}"
+                    );
+                    CredentialAdvanceOutcome {
+                        requested,
+                        advanced: 0,
+                    }
+                }
+            },
+        )
+    };
+    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
+    Ok(outcome)
 }
 
 /// Advance a freshly parsed `dbnum`'s watermark.

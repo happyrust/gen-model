@@ -925,9 +925,7 @@ fn start_stack(
                     .env("RUST_MIN_STACK", "67108864")
                     // 套件把启动自动执行显式钉为 true，避免外部配置把批次改成 held；
                     // 整套断言都建立在「批次真的被执行」之上。
-                    // 房间全量重建仍旧跳过：这里要的是增量执行，不是 2 万面板重算。
-                    .env("AIOS_STARTUP_AUTORUN", "1")
-                    .env("AIOS_SKIP_STARTUP_ROOM_BUILD", "1"),
+                    .env("AIOS_STARTUP_AUTORUN", "1"),
                 debug_dbnum,
             ),
             &out.join("stack-service.log"),
@@ -1335,11 +1333,6 @@ fn run_scenario(
     let before = database_snapshot(s, None)?;
     fs::write(dir.join("before.json"), serde_json::to_vec_pretty(&before)?)?;
 
-    let room_before = if matches!(s.expect, Expect::Room) {
-        room_task_ids()?
-    } else {
-        HashSet::new()
-    };
     let target_db_file = standard_target_db_file(paths, s.dbnum)?;
     ensure_scenario_project_databases(&paths.project_work, s.required_project_dbs)?;
     ensure_current_scenario_refnos(&target_db_file, s.required_refnos)?;
@@ -1385,9 +1378,8 @@ fn run_scenario(
         "saved session {} is absent from data task merged_sesnos",
         apply_report.after_sesno
     );
-    if matches!(s.expect, Expect::Room) {
-        wait_room(&dir, &room_before)?;
-    }
+    // 房间归属随每个生成根算出、与模型行同一事务落库（ADR-073 D1）：数据任务收尾即房间
+    // 收尾，没有单独的房间轮可等；`Expect::Room` 的 I-4 / I-8 直接对下面的 after 快照判。
     // V 级判据的一半在这里：树上还找不找得到那个节点。删除场景要求找不到，
     // 新增/改名场景要求按**新**名字找得到——四张图只采不判的话，这两件事没人管。
     // --no-ui 档跳过树上判定，但动态 refno（f5 新建件）仍要解析：它走的是
@@ -1890,65 +1882,6 @@ fn receipt_task_ids(receipt: &Value) -> Vec<String> {
                 .map(str::to_owned)
         })
         .collect()
-}
-
-fn room_task_ids() -> Result<HashSet<String>> {
-    let response = http_json(
-        "GET",
-        &format!("{API}/tasks?kind=room_recalc&limit=200"),
-        None,
-    )?;
-    Ok(response
-        .get("tasks")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|task| {
-            task.get("task_id")
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        })
-        .collect())
-}
-
-fn wait_room(dir: &Path, old_ids: &HashSet<String>) -> Result<()> {
-    let deadline = Instant::now() + DEFAULT_TIMEOUT;
-    loop {
-        let response = http_json(
-            "GET",
-            &format!("{API}/tasks?kind=room_recalc&limit=200"),
-            None,
-        )?;
-        if let Some(task) = response
-            .get("tasks")
-            .and_then(Value::as_array)
-            .and_then(|tasks| {
-                tasks.iter().find(|task| {
-                    task.get("task_id")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| !old_ids.contains(id))
-                })
-            })
-            && task_terminal(task)? == Some(true)
-        {
-            let panels = task
-                .pointer("/detail/panels")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            let elements = task
-                .pointer("/detail/elements")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            ensure!(
-                panels == 0 && elements == 0,
-                "I-8 room round ended without convergence: {task}"
-            );
-            fs::write(dir.join("room-task.json"), serde_json::to_vec_pretty(task)?)?;
-            return Ok(());
-        }
-        ensure!(Instant::now() < deadline, "room round timed out");
-        thread::sleep(Duration::from_secs(2));
-    }
 }
 
 fn assert_scenario(

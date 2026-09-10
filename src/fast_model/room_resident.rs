@@ -1472,41 +1472,6 @@ async fn ensure_current_inner(
 // [`initialize_at_startup`]（P3-b）；门只有 `room_resident_model` 开关与 `spatial_compute`。
 // ---------------------------------------------------------------------------
 
-/// 哪些文件的清单行归**文件轮次**管（Q19 (a)）。由调用方按监听限定域算好传进来——本模块
-/// 不认识 `watch_scope`（原则 4）；归轮次管的行初始化一个字不动，其余的才由它前进。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum RoundOwnership {
-    /// 限定域没生效：MDB 每个 DESI 都有自己的文件轮次，初始化一行不动。
-    EveryFile,
-    /// 限定域生效：只有这些库归轮次管；不在其中的库没有轮次推它，清单行由初始化前进。
-    Only(BTreeSet<u32>),
-}
-
-impl RoundOwnership {
-    /// 对这一批 MDB 设计库，归轮次管的 dbnum 集合。
-    pub(crate) fn owned_by_rounds(&self, sources: &[(u32, PathBuf, u32)]) -> BTreeSet<u32> {
-        match self {
-            Self::EveryFile => sources.iter().map(|(dbnum, _, _)| *dbnum).collect(),
-            Self::Only(dbnums) => dbnums.clone(),
-        }
-    }
-
-    /// 给启动日志的一句。
-    pub(crate) fn describe(&self) -> String {
-        match self {
-            Self::EveryFile => "每个设计库都有自己的文件轮次，清单行一律由轮次推进".to_string(),
-            Self::Only(dbnums) => format!(
-                "只有 [{}] 归文件轮次管，其余设计库的清单行由初始化推进到文件最新会话",
-                dbnums
-                    .iter()
-                    .map(u32::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-        }
-    }
-}
-
 /// 一个 MDB 设计库文件在本次初始化里清单行的去向（摄入形态）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ManifestAction {
@@ -1649,13 +1614,11 @@ impl StartupInitOutcome {
 /// 记 `resident_blocked`、不动边。
 pub(crate) async fn initialize_at_startup(
     face: DataFace,
-    ownership: &RoundOwnership,
     hierarchy: RoomHierarchy,
     room_key_words: &[String],
     match_room_fn: impl Fn(&str) -> bool,
     mesh_dir: &Path,
 ) -> anyhow::Result<StartupInitOutcome> {
-    let _ = ownership; // file-round ownership no longer changes room calculation inputs
     initialize_file_backed_at_startup(
         ResidentForm::for_face(face),
         hierarchy,
@@ -3333,35 +3296,6 @@ mod tests {
         }
     }
 
-    /// `RoundOwnership` 只剩「给启动日志一句」与「归属口径解算」两个用途（清单前进计划随
-    /// 发布清单一起退役，ADR-072 D4）。
-    #[test]
-    fn round_ownership_resolves_the_owned_set_and_describes_itself() {
-        let sources = vec![
-            (8000u32, PathBuf::from("ams8000"), 12u32),
-            (7997, PathBuf::from("ams7997"), 155),
-            (8001, PathBuf::from("ams8001"), 7),
-            (8002, PathBuf::from("ams8002"), 3),
-        ];
-        let everyone: BTreeSet<u32> = sources.iter().map(|(dbnum, _, _)| *dbnum).collect();
-        assert_eq!(
-            RoundOwnership::EveryFile.owned_by_rounds(&sources),
-            everyone
-        );
-        let only: BTreeSet<u32> = [8000, 8191].into_iter().collect();
-        assert_eq!(
-            RoundOwnership::Only(only.clone()).owned_by_rounds(&sources),
-            only
-        );
-        assert!(RoundOwnership::EveryFile.describe().contains("轮次推进"));
-        assert!(
-            RoundOwnership::Only(only)
-                .describe()
-                .contains("[8000, 8191]")
-        );
-        assert_eq!(ManifestAction::Advanced { from_sesno: 2 }.as_str(), "前进");
-        assert_eq!(ManifestAction::OwnedByRounds.as_str(), "归轮次");
-    }
     /// `resident_blocked` 只动自己那一格：写原因 / 清成 NONE 都不碰 `resident_reference` 与空间凭据；
     /// 原因里的引号与换行照样往返。
     #[tokio::test]

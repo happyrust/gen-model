@@ -5,8 +5,8 @@
 #   * v_port 8019 → 8029：8019 上当前跑着别人的一次性 memory 实例，不去动它；
 #     8029 由 scripts/Start-Surreal8009.ps1 起，数据后端仍是 testbed 那份
 #     rocksdb:python/testbed/.surreal/pytest-ams（台账里「@8019」指的就是它）。
-#   * room_incremental false → true：位姿刷新那一步要真的排出 room_recalc 行，
-#     关着的话用例等的那条队列行永远不会出现。
+#   * （原第二处「room_incremental false → true」随该键退役删去，ADR-073 D7：房间归属
+#     随生成根算、与模型行同事务落库，没有独立的房间阶段可开关。）
 #
 # 起库：
 #   powershell -File scripts\Start-Surreal8009.ps1 -Bind 127.0.0.1:8029 `
@@ -137,7 +137,6 @@ http_api_cors = ["*"]
 startup_autorun = false
 data_incremental = true
 model_incremental = true
-room_incremental = true
 
 #调试选项
 save_model_mesh_to_graph_db = true

@@ -784,6 +784,10 @@ pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResu
 /// 幂等重放。
 pub(crate) async fn wipe_dbnum_for_reinit(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
     let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::ResetForReinit).await?;
+    crate::fast_model::model_memory_store::ModelMemoryStore::global().clear_dbnum(dbnum);
+    crate::fast_model::model_db_adapter::invalidate_geometry_baseline();
+    crate::data_interface::dbnum_consistency::invalidate_census();
+    crate::fast_model::aabb_tree::mark_aabb_tree_dirty();
     // 反向翻面（plan 2026-09-06 §8 R5）：水位清零后这个库在 rocksdb 里又「没准备好」了，
     // 按需请求改由进程内投影供数，直到重建的初始化任务跑完。
     crate::data_interface::model_read_route::announce_source_changed(

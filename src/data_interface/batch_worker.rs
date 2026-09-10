@@ -704,11 +704,10 @@ async fn run_batch_worker(mgr: Arc<AiosDBManager>) {
         );
     }
     println!(
-        "增量阶段控制：data={} model={} room={}（模型门随清单装好即开、不等数据相清零；\
-         单消费者每轮先数据批次、再模型积压、再房间）",
+        "增量阶段控制：data={} model={}（模型门随清单装好即开、不等数据相清零；\
+         房间归属随生成根同步计算）",
         crate::options::data_incremental(),
         crate::options::model_incremental(),
-        crate::options::room_incremental()
     );
     let slots = crate::options::data_batch_workers();
     if slots > 1 {
@@ -1331,6 +1330,39 @@ async fn execute_frozen_batch(
     progress: &Option<ManualUpdateProgress>,
     warnings: &mut Vec<String>,
 ) -> DataBatchTaskResult {
+    // ADR-073 D3: a leftover marker does not trigger sesno rollback. Convert
+    // this already-frozen batch in place so the ordinary Reinitialize path
+    // performs the wipe at the destructive-action boundary.
+    let mut effective_job = job.clone();
+    match crate::data_interface::write_state::load(job.dbnum).await {
+        Ok(Some(marker)) if marker.is_writing() => {
+            effective_job.intent =
+                crate::data_interface::write_state::recovery_batch_intent(marker.intent);
+            effective_job.reinit_requested = false;
+            effective_job.model_start_sesno = None;
+            let note = format!(
+                "dbnum={} 上一次任务死在写库中途（intent={} {}→{}），本批转 Reinitialize 整库重建",
+                job.dbnum,
+                marker.intent.as_str(),
+                marker.start_sesno,
+                marker.end_sesno,
+            );
+            println!("{note}");
+            warnings.push(note);
+        }
+        Ok(_) => {}
+        Err(error) => {
+            let message = format!(
+                "dbnum={} 写入标记读取失败，本批不执行：无法证明库里没有未完成写入: {error:#}",
+                job.dbnum
+            );
+            log::error!("{message}");
+            warnings.push(message);
+            return failed_window_result(job, warnings, "写入标记读取失败：本批不写库");
+        }
+    }
+    let job = &effective_job;
+
     // issue #16：收口硬前置缺失时，老形态是整个窗口（房间预载、目录闭包、模型
     // 重生成）白跑完才一头扎进写回的无限重试——控制台无声、水位不动、重启重放
     // 同一区间。确定性缺失在开窗之前拦下，换成一条带修法的失败终态；探针连不上
@@ -1385,40 +1417,11 @@ async fn execute_frozen_batch(
 
     // ── 开工写点（ADR-072 D1，计划 §4.2-1）：冻结点之后、第一笔写库之前 ──────────────
     //
-    // 同库串行，所以此刻库里还留着 `writing` 只可能是上一次崩在写库中途（正常路径无论
-    // 成败都会把它盖成 `finished`）。先按它记的 S 回退，再落本次的标记——顺序反过来就把
-    // 上一次的证据抹了，谁都不知道该退到哪。回退失败**不许**接着写：半应用的库上再写一层
-    // 新窗口，正是这套机制要消灭的东西。
-    let (write_intent, mut write_start_sesno) = write_marker_window(job);
+    // 同库串行，所以此刻执行的是上面已完成恢复裁决后的 effective_job：残留 `writing`
+    // 一律改成 Reinitialize，并由普通整库重建路径在破坏性边界清库。这里覆盖成本次标记，
+    // 随后的任何写入仍受 W1 保护。
+    let (write_intent, write_start_sesno) = write_marker_window(job);
     registry.set_stage(&job.task_id, "write_marker");
-    match crate::data_interface::write_state::rollback_if_writing(job.dbnum).await {
-        Ok(None) => {}
-        Ok(Some(report)) => {
-            write_start_sesno = report.target_watermark;
-            let note = format!(
-                "dbnum={} 上一次任务死在写库中途，已回退到水位 {}（intent={} wiped={} 语句={} 事务={}，{}ms）\
-                 ，本批从这一版重跑",
-                job.dbnum,
-                report.target_watermark,
-                report.intent,
-                report.wiped,
-                report.statements,
-                report.transactions,
-                report.elapsed_ms
-            );
-            println!("{note}");
-            warnings.push(note);
-        }
-        Err(error) => {
-            let message = format!(
-                "dbnum={} 见到未收口的写入标记但回退失败，本批不执行（下一轮幂等重放）: {error:#}",
-                job.dbnum
-            );
-            log::error!("{message}");
-            warnings.push(message);
-            return failed_window_result(job, warnings, "写入标记回退失败：库仍停在半应用状态");
-        }
-    }
     if let Err(error) = crate::data_interface::write_state::mark_writing(
         job.dbnum,
         write_start_sesno,
@@ -1550,7 +1553,7 @@ async fn execute_frozen_batch(
         }
     }
 
-    let round_complete = if job.intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly
+    let work_round_complete = if job.intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly
     {
         result.status == ManualUpdateStatus::Success
             && result
@@ -1565,6 +1568,13 @@ async fn execute_frozen_batch(
             &result.units,
         )
     };
+    let round_complete = work_round_complete && room_membership_allows_model_settlement(&job.db_type);
+    if work_round_complete && !round_complete {
+        result.status = ManualUpdateStatus::Partial;
+        result.warnings.push(
+            "room_membership=false：房间归属未参与根事务，本轮拒绝推进模型水位".to_string(),
+        );
+    }
     // 写入标记收没收（ADR-072 W1「有 writing 必有出路」）。下面收尾那一笔盖得上就是它收的；
     // 收不上（这一轮没追平、模型没全成、收尾事务本身失败）由函数末尾那一笔兜底。
     let mut write_marker_closed = false;
@@ -2004,6 +2014,10 @@ fn batch_round_complete(
             .all(|unit| unit.status == UnitGenStatus::Generated)
 }
 
+fn room_membership_allows_model_settlement(db_type: &str) -> bool {
+    !db_type.eq_ignore_ascii_case("DESI") || crate::options::room_membership()
+}
+
 /// 截断窗口的余量批次（ADR-017 拆窗）。
 ///
 /// 身份字段全部取自冻结批次，左端取刚提交的水位——右端由执行侧按预算再算一次，
@@ -2115,7 +2129,8 @@ async fn execute_frozen_batch_body(
             &cand,
             job.previous_observed_sesno,
             effective_window_session_budget(job.dbnum, job.epoch_id),
-            job.reinit_requested,
+            job.reinit_requested
+                || job.intent == crate::data_interface::batch_queue::BatchIntent::Reinitialize,
             progress,
             warnings,
             &mut side_actions,
@@ -2960,19 +2975,12 @@ async fn idle_round(mgr: &Arc<AiosDBManager>, _registry: &'static TaskRegistry) 
             ANNOUNCED.call_once(|| println!("*** {notice}"));
         }
     }
-    // 最后一页执行期间可能已有新批次入队。这里直接认领并跑掉，房间轮不能越过它。
+    // 最后一页执行期间可能已有新批次入队。这里直接认领并跑掉。
     let claimed_batches = drain_queue_until_empty(mgr).await;
     let data_outcome = idle_outcome(false, false, false, claimed_batches);
     // 空间树在 `persist_roots_batched` 落完那一刻就地收敛，没有 pending 的空间意图行可等。
     let spatial_pending = false;
-    let room_outcome = if room_round_is_due(data_outcome) {
-        room_round(mgr).await
-    } else {
-        IdleOutcome::Settled
-    };
-    // 房间失败压过数据侧 MoreWork：失败行需要走 IDLE_WAKE 退避，不能因为另一侧还有
-    // 工作就留下一个 Notify permit 把重试在热循环里瞬间烧完。
-    let outcome = combine_idle_outcomes(data_outcome, room_outcome);
+    let outcome = data_outcome;
 
     // 空间树增量变更落盘（ADR-010 落盘时机，2026-07-28 已决）：TransformOnly 的
     // AABB 刷新与删除清理只动内存树，这里每轮最多写一次项目树文件。不落盘的话，
@@ -3076,66 +3084,10 @@ fn idle_outcome(
     }
 }
 
-fn combine_idle_outcomes(data: IdleOutcome, room: IdleOutcome) -> IdleOutcome {
-    if data == IdleOutcome::Failed || room == IdleOutcome::Failed {
-        IdleOutcome::Failed
-    } else if data == IdleOutcome::Backoff || room == IdleOutcome::Backoff {
-        IdleOutcome::Backoff
-    } else if data == IdleOutcome::MoreWork || room == IdleOutcome::MoreWork {
-        IdleOutcome::MoreWork
-    } else {
-        IdleOutcome::Settled
-    }
-}
-
 /// 只有「确实还有活要干」才立刻回来。失败必须退避，见 [`idle_round`] 的说明。
 ///
 fn wakes_immediately(outcome: IdleOutcome) -> bool {
     outcome == IdleOutcome::MoreWork
-}
-
-/// 房间轮该不该在这一轮收。
-///
-/// ADR-011 §8 明确接受持续密集保存导致的房间饥饿：只有数据队列与 durable 数据阶段
-/// 都跑空（`Settled`）才收房间，不能按时间越过仍未落定的几何/AABB。
-fn room_round_is_due(outcome: IdleOutcome) -> bool {
-    outcome == IdleOutcome::Settled
-}
-
-/// 空闲轮的房间那一段：只剩**启动补缺**——模型水位已追平数据、房间水位还落后的库，
-/// 用内存里的投影与常驻房间参照把房间段补上。
-///
-/// 逐目标的房间重算行（`room_recalc_*` pending）与「收一轮房间归属重算」那条 `room_recalc`
-/// 任务随第二条异步账退了（ADR-072 D5）：房间随各自的 dbnum 任务整库算
-/// （`room_task::finish_task_rooms`），不再有队列可收。
-///
-/// 返回本轮处置：补过至少一个库是 `MoreWork`；失败是 `Failed`，交给 `IDLE_WAKE` 退避；
-/// 没有缺口是 `Settled`。
-async fn room_round(mgr: &Arc<AiosDBManager>) -> IdleOutcome {
-    let initialization =
-        crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot();
-    if !initialization.model_ready {
-        return IdleOutcome::Settled;
-    }
-    // 房间增量的总开关（`crate::options::room_incremental`，默认开）。
-    //
-    // 只说一次：空闲轮每 30 秒来一趟，每趟复述同一个配置项就是把日志刷成噪音
-    // （`live == 0` 那条播报当年正是这么退役的）。
-    if !crate::options::room_incremental() {
-        static ANNOUNCED: std::sync::Once = std::sync::Once::new();
-        ANNOUNCED.call_once(|| {
-            println!(
-                "房间增量重算已关闭（DbOption.toml 的 room_incremental / 环境变量 {}）：\
-                 本进程不补房间段",
-                crate::options::ROOM_INCREMENTAL_ENV
-            );
-        });
-        return IdleOutcome::Settled;
-    }
-    // 补房间水位那一路随房间流程退役（t-678）：房间归属改由生成路径逐根算并同事务写边
-    // （t-799），没有「模型追平了、房间还欠着」这种缺口可补，空闲轮这一格恒定收敛。
-    let _ = mgr;
-    IdleOutcome::Settled
 }
 
 /// 把领域进度事件接到任务注册表（计数）与 WS 广播（`http_api` 门内）。
@@ -3361,6 +3313,17 @@ mod tests {
             ),
             "一根失败单元就把这一轮留在 collecting"
         );
+    }
+
+    #[test]
+    fn room_membership_off_blocks_even_an_empty_desi_model_round() {
+        let _off = crate::options::RoomMembershipOverride::set(false);
+        assert!(
+            batch_round_complete(Some(42), 42, ManualUpdateStatus::Success, &[]),
+            "empty worklists are otherwise vacuously complete"
+        );
+        assert!(!room_membership_allows_model_settlement("DESI"));
+        assert!(room_membership_allows_model_settlement("SYST"));
     }
 
     #[test]
@@ -3611,8 +3574,8 @@ mod tests {
     }
 
 
-    /// ADR-072 D1 的开工写点：标记必须落在第一笔写库**之前**，而且落之前先把上一次崩溃
-    /// 留下的 `writing` 回退掉——顺序反过来就把「该退到哪」这条唯一的证据抹了。
+    /// ADR-073 D3 的开工写点：标记必须落在第一笔写库**之前**；上一次崩溃留下的
+    /// `writing` 先被读出并把 effective job 转为整库重建，禁止按 sesno 局部回滚。
     #[test]
     fn the_write_marker_lands_before_the_first_write_and_after_the_rollback() {
         let source = include_str!("batch_worker.rs");
@@ -3627,20 +3590,25 @@ mod tests {
             body.find(needle)
                 .unwrap_or_else(|| panic!("缺 {needle}\n{body}"))
         };
-        let rollback = at("write_state::rollback_if_writing(job.dbnum).await");
+        let recovery_read = at("write_state::load(job.dbnum).await");
+        let recovery_intent = at("write_state::recovery_batch_intent(marker.intent)");
         let mark = at("write_state::mark_writing(");
         let body_call = at("execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings)");
         let model_only = at("execute_model_only_body(mgr, registry, job, cand, progress, warnings)");
-        assert!(rollback < mark, "先回退、再落标记: {body}");
+        assert!(recovery_read < recovery_intent && recovery_intent < mark, "先裁决整库恢复、再落标记: {body}");
+        assert!(
+            !body.contains("rollback_if_writing") && !body.contains("rollback_to_watermark"),
+            "执行体不得再走按会话局部回滚: {body}"
+        );
         assert!(
             mark < body_call && mark < model_only,
             "标记必须早于任何执行体（第一笔写库）: {body}"
         );
-        // 回退失败 / 标记落不下去都不许接着写库。
-        let after_rollback = &body[rollback..mark];
+        // 标记读取失败 / 新标记落不下去都不许接着写库。
+        let after_recovery_read = &body[recovery_read..mark];
         assert!(
-            after_rollback.contains("return failed_window_result("),
-            "回退失败必须早退，不许在半应用的库上再写一层: {after_rollback}"
+            after_recovery_read.contains("return failed_window_result("),
+            "恢复裁决失败必须早退，不许在半应用的库上再写一层: {after_recovery_read}"
         );
         // 收口只有两处：正常收尾那一笔，和函数末尾的兜底那一笔（W1）。
         assert_eq!(
@@ -4342,70 +4310,6 @@ mod tests {
     }
 
     /// 无 live 目标的早退分支必须保持安静，也不得在这里跑探针。
-    ///
-    /// 它每 `IDLE_WAKE`（30 秒）被碰一次，所以任何无条件 `println!` 都会把一个静态
-    /// 事实刷成噪音——覆盖屏障时代就是这么刷了 5 个多小时。缺陷面板改由
-    /// `record_room_panel_defects` 在清单**变化时**说一次；这里既不播报也不 drain。
-    #[test]
-    fn an_empty_room_round_stays_quiet_and_runs_no_probe() {
-        let source = include_str!("batch_worker.rs");
-        let early_exit = source
-            .split_once("if live == 0 {")
-            .expect("room_round 必须保留无 live 目标的早退分支")
-            .1
-            .split_once("let task_id")
-            .expect("早退分支必须在创建 room task 之前结束")
-            .0;
-
-        assert!(
-            !early_exit.contains("println!"),
-            "每 30 秒走一次的早退分支不得打印: {early_exit}"
-        );
-        assert!(
-            !early_exit.contains("drain_rooms"),
-            "早退分支不得循环执行覆盖探针: {early_exit}"
-        );
-    }
-
-    /// ADR-011 §8 把房间放在数据队列与积压全部跑空之后；持续保存导致的饥饿是
-    /// 已接受代价，不能按时间越过仍未落定的几何/AABB。
-    #[test]
-    fn room_round_waits_until_all_data_work_is_settled() {
-        assert!(room_round_is_due(IdleOutcome::Settled));
-        assert!(!room_round_is_due(IdleOutcome::Failed));
-        assert!(!room_round_is_due(IdleOutcome::MoreWork));
-
-        let source = include_str!("batch_worker.rs");
-        let idle_body = source
-            .split_once("async fn idle_round(")
-            .expect("idle_round 必须存在")
-            .1
-            .split_once("/// 一个空闲轮消化完这一页之后的处置")
-            .expect("idle_round 之后是 IdleOutcome 的定义")
-            .0;
-        assert!(
-            idle_body.contains("if room_round_is_due(data_outcome) {"),
-            "房间轮必须由 room_round_is_due 把门，不能只认 Settled: {idle_body}"
-        );
-    }
-
-    #[test]
-    fn room_recovery_waits_for_model_but_not_a_project_wide_room_barrier() {
-        let source = include_str!("batch_worker.rs");
-        let room_body = source
-            .split_once("async fn room_round(")
-            .expect("room_round must exist")
-            .1
-            .split_once("// 房间增量的总开关")
-            .expect("room_round initialization gate must precede the feature gate")
-            .0;
-        assert!(
-            room_body.contains("if !initialization.model_ready")
-                && !room_body.contains("startup_rooms_pending"),
-            "per-dbnum room recovery must start as soon as its model input is ready: {room_body}"
-        );
-    }
-
     /// 空闲轮必须同时受暂停与上弦两道门管。
     ///
     /// 它们挡的是同一侧但理由不同：`paused` 是运维说「别动数据」，上弦门是
@@ -4453,20 +4357,6 @@ mod tests {
         assert!(!wakes_immediately(idle_outcome(false, true, true, 0)));
         assert!(!wakes_immediately(IdleOutcome::Settled));
         assert!(wakes_immediately(idle_outcome(false, false, true, 0)));
-
-        // 房间失败压过数据侧 MoreWork；否则另一侧留下的 Notify permit 会绕开 30s 退避。
-        assert_eq!(
-            combine_idle_outcomes(IdleOutcome::MoreWork, IdleOutcome::Failed),
-            IdleOutcome::Failed
-        );
-        assert!(!wakes_immediately(combine_idle_outcomes(
-            IdleOutcome::MoreWork,
-            IdleOutcome::Failed
-        )));
-        assert!(wakes_immediately(combine_idle_outcomes(
-            IdleOutcome::Settled,
-            IdleOutcome::MoreWork
-        )));
 
         // 调用点也得守住：`wake()` 只能出现一次，且必须在 `wakes_immediately` 门后。
         let source = include_str!("batch_worker.rs");

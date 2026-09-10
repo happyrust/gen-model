@@ -629,7 +629,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "awaiting_manual_initialization": crate::data_interface::increment_manager::awaiting_manual_initialization_snapshot(),
             "data_incremental": crate::options::data_incremental(),
             "model_incremental": crate::options::model_incremental(),
-            "room_incremental": crate::options::room_incremental(),
+            "room_membership": crate::options::room_membership(),
             "auto_work_armed": crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed(),
             "initialization": crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot(),
             "worker_alive": worker_alive,
@@ -765,13 +765,14 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 空、新库就是不动」少了这一格只能翻 sweep 日志；逐库真值（按水位现算）在
         // /dbnums 的 awaiting_manual_initialization。开关打开或没有新库时是空数组。
         "awaiting_manual_initialization": crate::data_interface::increment_manager::awaiting_manual_initialization_snapshot(),
-        // 三段增量的最终生效值（含环境变量覆盖）。顺序依赖由 worker 的共享阶段门
-        // 保证；这里拆成三个平铺字段，面板不用猜「没活」还是「阶段关闭」。
+        // 两段增量的最终生效值（含环境变量覆盖）。房间归属随生成根同步计算，
+        // 不再是一条可独立关闭的阶段。
         "data_incremental": crate::options::data_incremental(),
         "model_incremental": crate::options::model_incremental(),
-        // 房间增量的总开关（默认 true）。关着时房间泳道永远是空的，而「没活」与
-        // 「开关关着」在外面长得一模一样——少了这个字段，只能去翻启动日志里那一行。
-        "room_incremental": crate::options::room_incremental(),
+        // 房间归属计算的开关（默认 true，ADR-073 D1 逐根房间归属那一步）。关着时生成根
+        // 不算房间、不写新边，而 model_sesno 照常推进、一致性判决照常给「一致」——库上
+        // 「没算房间」与「房间没变」长得一模一样，少了这个字段只能翻启动横幅。
+        "room_membership": crate::options::room_membership(),
         // 本项目此刻生效的最小交付单元名词表。客户端要按元素归并生成根时只能靠它
         // ——`delivery_unit_types` 能整体替换默认值、`append_delivery_unit_types`
         // 能扩充，硬编码那四个默认名词在改过配置的项目上会静默算错。进程内
@@ -2012,9 +2013,7 @@ fn skeleton_dbnums(databases: &[crate::data_interface::mdb_memory_store::LoadedD
 /// 这个库的模型现在该从哪儿读。判据只有 `model_read_route::route` 一处，这里只是把行上已有的
 /// 两枚水位与「该库的数据批次任务在不在跑」喂给它；取数走闭包，让整形逻辑不依赖真队列也能测。
 ///
-/// 模型水位只在行上**有**那一格时才参与比较（ADR-071 D8「水位相等」，ADR-073 D2 收成两枚）：
-/// 判决列（`dbnum_consistency`）只给 DESI 行，普查失败时整格缺席。没有那一格就不判「落后」——
-/// 「不知道」不能写成「落后」，否则 SYST / CATA 与一次普查失败都会被讲成 `model_lagging`。
+/// 模型水位缺席时不能伪造成与数据水位相等；判据 fail closed 到内存并点名 unknown。
 fn annotate_model_source(
     rows: &mut [Value],
     data_face: crate::options::DataFace,
@@ -2038,8 +2037,8 @@ fn annotate_model_source(
                 .and_then(|value| i32::try_from(value).ok())
         };
         let applied = watermark("applied_sesno").unwrap_or_default();
-        let model = watermark("model_sesno").unwrap_or(applied);
-        let route = crate::data_interface::model_read_route::route(
+        let model = watermark("model_sesno");
+        let route = crate::data_interface::model_read_route::route_with_optional_model_watermark(
             dbnum,
             data_face,
             applied,
@@ -2163,38 +2162,10 @@ pub async fn dbnum_prune_above_preview(
         .map_err(|error| ApiError::from_domain(error.into()))
 }
 
-/// DELETE /api/v1/dbnums/{dbnum}/data/above/{watermark}
-///
-/// Queue pause and an exact `confirm={dbnum}:{watermark}` are mandatory. The
-/// queue stays paused so the caller can inspect the result before replay.
-///
-/// 动手那一段与崩溃恢复走**同一份**回退核心（`fast_delete::rollback_to_watermark`，ADR-072 D2）：
-/// 不只削数据面，模型行、凭证、房间边与三枚水位一起退回 S。回执字段不变。
-pub async fn dbnum_prune_above(
-    State(state): State<AppState>,
-    Path((dbnum, watermark)): Path<(u32, i32)>,
-    Query(query): Query<PruneAboveWatermarkReq>,
-) -> Result<Json<serde_json::Value>, ApiError> {
-    resolve_identity(&state, &query.identity)?;
-    let expected = format!("{dbnum}:{watermark}");
-    if query.confirm.as_deref() != Some(expected.as_str()) {
-        return Err(ApiError::bad_request(format!(
-            "confirm must equal {expected}"
-        )));
-    }
-    ensure_dbnum_mutation_idle(dbnum)?;
-    let result = crate::data_interface::fast_delete::prune_above_watermark(dbnum, watermark)
-        .await
-        .map_err(ApiError::from_domain)?;
-    serde_json::to_value(result)
-        .map(Json)
-        .map_err(|error| ApiError::from_domain(error.into()))
-}
-
 // `POST /dbnums/{dbnum}/realign`（单库回退对齐，2026-08-12 引入）随 ADR-021
 // 移除：回退由扫描路径自动入队重建批次、worker 冻结点复核后整库清空重建，
 // 端点没有剩余职责。手工兜底保留同家族的 `DELETE /dbnums/{dbnum}/data`（整库
-// 快删）与 `DELETE /dbnums/{dbnum}/data/above/{watermark}`（残留清理）。
+// 快删）；按水位残留端点仅保留 GET 预览，不再允许局部删除。
 
 /// GET /api/v1/queue — 队列快照：`{ paused, rows }`（rollout 服务端第 6 项）。
 ///
@@ -2792,9 +2763,9 @@ mod tests {
         annotate_model_source(&mut rows, crate::options::DataFace::Ingest, |dbnum| {
             dbnum == 8000
         });
-        // 没有判决列（SYST / CATA 行、普查失败）：不判落后，仍按 applied + 在飞给。
-        assert_eq!(rows[0]["model_source"], "database");
-        assert!(rows[0]["model_source_reason"].is_null());
+        // 缺模型水位不能证明相等：不冒充持久层权威。
+        assert_eq!(rows[0]["model_source"], "memory");
+        assert_eq!(rows[0]["model_source_reason"], "model_watermark_unavailable");
         assert_eq!(rows[1]["model_source"], "memory");
         assert_eq!(rows[1]["model_source_reason"], "initialization_publishing");
         assert_eq!(rows[2]["model_source"], "memory");
@@ -3277,9 +3248,13 @@ mod tests {
         for key in [
             "\"data_incremental\"",
             "\"model_incremental\"",
-            "\"room_incremental\"",
+            "\"room_membership\"",
         ] {
-            assert!(health.contains(key), "health 必须暴露 {key}: {health}");
+            assert_eq!(
+                health.matches(key).count(),
+                2,
+                "health 的两个分支都必须暴露 {key}: {health}"
+            );
         }
     }
 

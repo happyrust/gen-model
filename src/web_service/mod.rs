@@ -382,7 +382,7 @@ pub async fn serve(
         )
         .route(
             "/api/v1/dbnums/{dbnum}/data/above/{watermark}",
-            get(handlers::dbnum_prune_above_preview).delete(handlers::dbnum_prune_above),
+            get(handlers::dbnum_prune_above_preview),
         )
         .route("/api/v1/trace", get(handlers::trace))
         // 落盘错误事件。`/tasks` 那份回执更全但活不过重启，这两条读 logs/，
@@ -574,6 +574,28 @@ mod tests {
                 "missing direct tree GET route: {route}"
             );
         }
+    }
+
+    /// ADR-073：按水位删除会制造无法证明完整性的局部状态，只保留只读预览。
+    #[test]
+    fn residue_preview_route_has_no_delete_method() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("pub async fn serve(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        let route = serve
+            .split_once("\"/api/v1/dbnums/{dbnum}/data/above/{watermark}\",")
+            .expect("residue preview route must exist")
+            .1
+            .split_once("),")
+            .expect("route terminator")
+            .0;
+        assert!(route.contains("get(handlers::dbnum_prune_above_preview"), "{route}");
+        assert!(!route.contains(".delete("), "residue route must be read-only: {route}");
     }
 
     /// 浏览器端的网格口径：只读 GET，路径参数是 `{hash}.glb` 一整段（后缀在 handler 里剥，

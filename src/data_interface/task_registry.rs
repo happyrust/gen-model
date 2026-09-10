@@ -23,8 +23,9 @@ pub const TASK_KIND_MODEL_DRAIN: &str = "model_drain";
 pub const TASK_KIND_MODEL_REBUILD: &str = "model_rebuild";
 /// A read-only source session rebuilt into the dedicated historical kv-mem.
 pub const TASK_KIND_MODEL_HISTORY: &str = "model_history";
-/// 一轮房间归属收敛（ADR-011 §10：与数据批次同构的一种 kind）。
-pub const TASK_KIND_ROOM_RECALC: &str = "room_recalc";
+// 房间轮那一种 kind（`room_recalc`）随房间流程退役（ADR-073 D1 / W1）：房间归属随每个
+// 生成根在数据批次任务里算完写完，没有独立的房间任务行；`GET /tasks?kind=room_recalc`
+// 从此恒回空列表（spec §4.7.2）。
 
 /// 分层保留的兜底上限（ADR-011 §11 + rollout 第九节第 8 条）：
 /// 首轮放宽 `manual_db_nums` 后 287 条排队 + 287 条终态就要 ≥574，
@@ -350,50 +351,6 @@ impl TaskRegistry {
             dependency_refnos_missing: None,
             stall_deadline: None,
             detail: None,
-            result: None,
-            steps: Vec::new(),
-            steps_dropped: 0,
-        });
-    }
-
-    /// 新排一条房间收敛轮（房间轮不排队，创建即 running；ADR-011 §10）。
-    ///
-    /// `detail` 携带本轮的分项计数（面板 / 构件 / 死信），随任务详情带出。
-    pub fn insert_running_room_round(
-        &self,
-        task_id: &str,
-        project: &str,
-        total: u32,
-        detail: serde_json::Value,
-    ) {
-        let now = Local::now().to_rfc3339();
-        self.insert_entry(TaskEntry {
-            task_id: task_id.to_string(),
-            kind: TASK_KIND_ROOM_RECALC,
-            state: TaskState::Running,
-            project: project.to_string(),
-            created_at: now.clone(),
-            started_at: Some(now),
-            finished_at: None,
-            dbnum: None,
-            db_type: None,
-            start_sesno: None,
-            end_sesno: None,
-            start_sesno_time: None,
-            end_sesno_time: None,
-            units_done: Some(0),
-            total_units: Some(total),
-            events_seen: 0,
-            current_stage: None,
-            stage_started_at: None,
-            stage_last_progress_at: None,
-            dependency_dbnum: None,
-            dependency_path: None,
-            dependency_refnos_total: None,
-            dependency_refnos_parsed: None,
-            dependency_refnos_missing: None,
-            stall_deadline: None,
-            detail: Some(detail),
             result: None,
             steps: Vec::new(),
             steps_dropped: 0,
@@ -1267,70 +1224,6 @@ mod tests {
         assert!(
             first < second,
             "序号单调，字典序即入队序：{first} 应排在 {second} 之前"
-        );
-    }
-
-    /// 房间轮收尾用收敛后的计数覆盖 detail（2026-07-30 审计 B2）。
-    ///
-    /// `finish` 从不动 `detail`，而收敛到 0 的下一空闲轮不建新行——没有 `set_detail`
-    /// 的话，客户端泳道读到的 live 永远停在本轮开跑前的数字，收敛得越干净，
-    /// 「N 块面板待重算」的误报挂得越久，30 分钟后还会被判成「饥饿」。
-    #[test]
-    fn a_room_round_detail_can_be_overwritten_after_convergence() {
-        let registry = TaskRegistry::default();
-        registry.insert_running_room_round(
-            "room-1",
-            "P",
-            5,
-            serde_json::json!({ "panels": 3, "elements": 2, "dead_letters": 1 }),
-        );
-        registry.set_detail(
-            "room-1",
-            serde_json::json!({ "panels": 0, "elements": 0, "dead_letters": 1 }),
-        );
-        registry.finish(
-            "room-1",
-            TaskState::Succeeded,
-            serde_json::json!({ "done": 5, "total": 5 }),
-        );
-
-        let entry = registry.get("room-1").unwrap();
-        let detail = entry.detail.expect("detail 必须保留分项计数");
-        assert_eq!(detail["panels"], 0, "收敛后的面板数必须归零");
-        assert_eq!(detail["elements"], 0);
-        assert_eq!(detail["dead_letters"], 1, "死信数是唯一的暴露出口，不能丢");
-    }
-
-    #[test]
-    fn room_round_detail_preserves_membership_delta_for_task_api() {
-        let registry = TaskRegistry::default();
-        registry.insert_running_room_round(
-            "room-delta",
-            "P",
-            1,
-            serde_json::json!({
-                "panels": 0,
-                "elements": 1,
-                "dead_letters": 0,
-                "membership_delta": {
-                    "room_membership_changes": 1,
-                    "members_entered": 0,
-                    "members_left": 0,
-                    "samples": ["构件 4000000001_20: K100 -> K200"]
-                }
-            }),
-        );
-
-        let entry = registry.get("room-delta").expect("room task exists");
-        let payload = serde_json::to_value(&entry).expect("task entry serializes");
-        assert_eq!(payload["kind"], TASK_KIND_ROOM_RECALC);
-        assert_eq!(
-            payload["detail"]["membership_delta"]["room_membership_changes"],
-            1
-        );
-        assert_eq!(
-            payload["detail"]["membership_delta"]["samples"][0],
-            "构件 4000000001_20: K100 -> K200"
         );
     }
 

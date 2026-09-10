@@ -644,9 +644,7 @@ fn start_fixture_stack(
                     .env("RUST_MIN_STACK", "67108864")
                     // 套件把启动自动执行显式钉为 true，避免外部配置把批次改成 held；
                     // 整套断言都建立在「批次真的被执行」之上。
-                    // 房间全量重建仍旧跳过：这里要的是增量执行，不是 2 万面板重算。
-                    .env("AIOS_STARTUP_AUTORUN", "1")
-                    .env("AIOS_SKIP_STARTUP_ROOM_BUILD", "1"),
+                    .env("AIOS_STARTUP_AUTORUN", "1"),
                 cli.debug_dbnum.as_deref(),
             ),
             &run_dir.join("stack-service.log"),
@@ -789,10 +787,9 @@ fn write_runtime_config(
         ("gen_model", "false".into()),
         ("gen_mesh", "false".into()),
         ("gen_spatial_tree", "true".into()),
-        // `room-member` asserts that a transform recomputes room membership.
-        // The production default is deliberately off, so fixture mode must opt
-        // in instead of silently running that scenario with room work disabled.
-        ("room_incremental", "true".into()),
+        // `room-member` asserts that a transform recomputes room membership. Room
+        // membership is computed per generated root inside the task (ADR-073 D1);
+        // there is no separate room stage to opt into any more.
         ("load_spatial_tree", "false".into()),
         ("save_spatial_tree_to_db", "false".into()),
     ]);
@@ -1912,10 +1909,10 @@ fn fixture_identity(project: &str, mdb: &str, ns: &str) -> Value {
 /// (`dbnum_write_state`, ADR-072 D1) is no longer `writing` and the model
 /// watermark caught up with the data watermark. The queue table this used to
 /// poll (`model_update_pending`) retired with the second async ledger
-/// (ADR-072 D5); model and room work now run inside the task and the task tail
-/// stamps the watermarks in one transaction, so the watermark row is the truth.
-/// The room watermark is recorded in the evidence but not gated on: only DESI
-/// tasks own rooms.
+/// (ADR-072 D5); model work now runs inside the task and the task tail stamps the
+/// watermarks in one transaction, so the watermark row is the truth. Room edges
+/// are written with each root's model rows (ADR-073 D1), so there is no room
+/// watermark to record or gate on.
 fn wait_fixture_pending(
     dir: &Path,
     ns: &str,
@@ -2301,8 +2298,11 @@ mod tests {
         );
     }
 
+    /// The fixture pins the spatial tree on and never writes the retired
+    /// `room_incremental` key (ADR-073 D7): room membership has no switch of its
+    /// own in the fixture config any more.
     #[test]
-    fn fixture_runtime_config_enables_room_incremental_work() {
+    fn fixture_runtime_config_enables_spatial_tree_and_writes_no_room_switch() {
         let dir = std::env::temp_dir().join(format!("e3d-fixture-config-{}", std::process::id()));
         let project = dir.join("AvevaMarineSample");
         let db_dir = project.join("ams000");
@@ -2310,11 +2310,7 @@ mod tests {
         let base = dir.join("base.toml");
         let output = dir.join("runtime.toml");
         let target = db_dir.join("ams8000_0001");
-        fs::write(
-            &base,
-            "room_incremental = false\ngen_spatial_tree = false\n",
-        )
-        .unwrap();
+        fs::write(&base, "gen_spatial_tree = false\n").unwrap();
         fs::write(&target, []).unwrap();
 
         write_runtime_config(
@@ -2331,9 +2327,8 @@ mod tests {
 
         let rendered = fs::read_to_string(output).unwrap();
         assert!(
-            rendered
-                .lines()
-                .any(|line| line == "room_incremental = true")
+            !rendered.contains(concat!("room_", "incremental")),
+            "retired switch must not be rendered: {rendered}"
         );
         assert!(
             rendered

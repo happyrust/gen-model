@@ -100,8 +100,8 @@ body{
 .lane-name{font-size:10.5px;font-weight:600;letter-spacing:1.4px;color:var(--t3)}
 .lanes .verdict-line{font-size:20px;line-height:28px}
 .lanes .verdict-timer .val{font-size:24px}
-/* 房间接在模型面下面而不是自成一列：它吃的是模型产物，同级摆三列等于说它与两枚
-   凭证一样是根判据，而它只是派生。 */
+/* 面板尾巴上的补充段（不自成一列）：同级摆成第三列等于说它与两枚凭证一样是根判据，
+   而它只是派生。房间边如今随模型块落库，已无独立一段（ADR-073 D2）。 */
 .seg{margin-top:14px;padding-top:12px;border-top:1px solid var(--line);
   display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
 .seg .l{flex:0 0 auto;font-size:10.5px;font-weight:600;letter-spacing:1.4px;color:var(--t3)}
@@ -231,8 +231,8 @@ body{
 .acts-row .hint{font-size:11.5px;color:var(--t3);line-height:17px}
 a.jump{text-decoration:none}
 .jump.mut{color:var(--t3)}
-/* 每库三枚水位：数据提交、模型发布、房间发布分别显示。 */
-.w-tbl{grid-template-columns:72px minmax(90px,112px) 64px 72px minmax(132px,1fr) minmax(150px,1fr) minmax(150px,1fr) minmax(170px,260px)}
+/* 每库两枚水位：数据提交、模型落库分别显示；房间边随模型块同事务落库（ADR-073 D2），不单列。 */
+.w-tbl{grid-template-columns:72px minmax(90px,112px) 64px 72px minmax(132px,1fr) minmax(150px,1fr) minmax(170px,260px)}
 .w-tbl>.r{height:52px}
 .w-tbl .stk{display:flex;flex-direction:column;justify-content:center;gap:3px;min-width:0;
   font-size:11.5px;line-height:15px}
@@ -373,7 +373,7 @@ a.jump{text-decoration:none}
 .dbsummary>div:nth-child(n+4){display:none}
 .dbsummary .l{font-size:12px;color:var(--t2)}.dbsummary .v{font-size:25px;margin:12px 0 8px;letter-spacing:-.5px}.dbsummary .s{font-size:12px}
 .dbsummary>div::after{position:absolute;right:20px;top:19px;color:var(--t3);font:11px var(--mono)}
-.dbsummary>div:nth-child(1)::after{content:'01 / DATA'}.dbsummary>div:nth-child(2)::after{content:'02 / MODEL'}.dbsummary>div:nth-child(3)::after{content:'03 / ROOM'}
+.dbsummary>div:nth-child(1)::after{content:'01 / DATA'}.dbsummary>div:nth-child(2)::after{content:'02 / MODEL'}.dbsummary>div:nth-child(3)::after{content:'03 / QUEUE'}
 .verdict{padding:24px 28px;border-left-width:4px}.verdict-line{font-size:27px;line-height:1.4;margin-top:10px}
 .lanes>.verdict{flex:1 1 auto;padding:24px 28px}.lanes .verdict-line{font-size:24px;line-height:1.5}
 .verdict-detail{line-height:1.7}.verdict-body{min-width:0}.verdict-meta{flex-wrap:wrap}
@@ -547,8 +547,8 @@ button:focus-visible,a:focus-visible,select:focus-visible,summary:focus-visible{
   <div class="panel">
     <div class="panel-head" style="align-items:flex-start">
       <div style="min-width:0">
-        <div style="display:flex;align-items:baseline"><span class="t">每库三枚水位</span></div>
-        <div class="sub">数据、模型、房间水位按阶段推进；房间同时核对内存模型与房间定义版本。三者及版本凭证一致时才表示完整收敛。</div>
+        <div style="display:flex;align-items:baseline"><span class="t">每库两枚水位</span></div>
+        <div class="sub">数据、模型水位按阶段推进；房间归属随每个生成根算出、与模型行同一事务落库，模型水位追平即含房间边（ADR-073 D2）。两枚一致时才表示完整收敛。</div>
       </div>
       <div style="display:flex;flex-direction:column;align-items:flex-end;gap:8px">
         <span class="src">GET /api/v1/dbnums</span>
@@ -771,9 +771,9 @@ const ACTIONS = {
             hint:"全范围扫描 + 入队数据批次，顺带清掉连败账；推的是应用水位，不承诺模型追平",
             run:async () => enqueueReceipt(await post("/update/execute", {})) },
   initialize:{ label:"初始化该库", req:"POST /api/v1/update/execute", cls:"go",
-            hint:"只初始化当前选中的新 dbnum；数据、模型和房间阶段依次推进",
+            hint:"只初始化当前选中的新 dbnum；数据、模型阶段依次推进（房间归属随根算）",
             resolve:async (dbnum) => ({
-              note:`初始化 dbnum ${dbnum}：只提交该库，数据完成后继续模型发布与实时房间计算。`,
+              note:`初始化 dbnum ${dbnum}：只提交该库，数据完成后继续模型生成（房间边随模型块落库）。`,
               body:{ dbnums:[Number(dbnum)] } }),
             run:async (ctx) => enqueueReceipt(await post("/update/execute", ctx.body)) },
   initializeBatch:{ label:"初始化所选库", req:"POST /api/v1/update/execute", cls:"go",
@@ -892,7 +892,7 @@ function renderActions(m){
     const currentDbButton = manualInit
       ? `<button class="btn ${ACTIONS.initialize.cls}" data-act="initialize" data-arg="${esc(FOCUS_DBNUM)}"${live ? "" : " disabled"} title="${esc(ACTIONS.initialize.req + " — " + ACTIONS.initialize.hint)}">${esc(ACTIONS.initialize.label)}</button>`
       : (focused
-        ? `<button class="btn go" data-act="rerun" data-arg="${esc(FOCUS_DBNUM)}"${live ? "" : " disabled"} title="只重新检查当前 dbnum 的数据、模型和房间缺口">重新检查该库</button>`
+        ? `<button class="btn go" data-act="rerun" data-arg="${esc(FOCUS_DBNUM)}"${live ? "" : " disabled"} title="只重新检查当前 dbnum 的数据、模型缺口（房间边随模型块补）">重新检查该库</button>`
         // 自动初始化关闭且有新库等待时，隐藏无子集的全范围执行。空 body 是显式操作员
         // 指令，会把所有新库一并放行；跟旁边的精确多选同时出现很容易点错。
         : (waitingInit.length ? "" : btn("execute", live)));
@@ -1233,7 +1233,7 @@ function deadRootsPhrase(m){
 function enqueuedAt(m, row){ return ts(m.byTask.get(row.task_id)?.created_at); }
 
 /* ── verdicts ───────────────────────────────────────────── */
-// 三段判决：共享前置（halt）→ 数据面 → 模型面，房间挂在模型面尾巴上。每一段都是一把
+// 三段判决：共享前置（halt）→ 数据面 → 模型面（房间边随模型块落库，不单列）。每一段都是一把
 // 「上一级成立就不看下一级」的梯子；两面互不压制——ADR-056 D1 之后模型失败不再阻断
 // 应用水位，D2 又把「水位齐、模型没追平」定成承认且可观测的常态，压成一条梯子那个常态
 // 只能被讲成「进行中」或者被数据面盖掉。
@@ -1510,15 +1510,10 @@ function renderDbnumEntry(m){
     : r.model_verdict === "lagging" ? `${r.model_sesno || 0} · 追赶中` : "不判";
   const recent = m.tasks.slice().sort((a,b) => ts(b.started_at || b.created_at) - ts(a.started_at || a.created_at))[0];
   const logs = ((S.batchFailures && S.batchFailures.records) || []).filter(x => Number(x.dbnum) === FOCUS_DBNUM);
-  const roomKnown = Object.prototype.hasOwnProperty.call(r, "room_sesno");
-  const roomInputMatch = roomKnown && r.room_input_version && r.room_required_input
-    && JSON.stringify(r.room_input_version) === JSON.stringify(r.room_required_input);
-  const roomText = !roomKnown ? "后端未提供"
-    : `${r.room_sesno ?? 0}${Number(r.room_sesno ?? 0) === Number(r.model_sesno ?? 0) && roomInputMatch && r.room_result_version ? " · 一致" : " · 待补"}`;
+  // 房间边随模型块同事务落库（ADR-073 D1/D2）：没有第三枚水位，模型一致就是房间一致。
   summary.innerHTML = `
     <div><span class="l">数据水位</span><span class="v">${esc(r.applied_sesno)} / ${esc(r.file_latest_sesno)}</span><span class="s">已保存 / 文件最新</span></div>
-    <div><span class="l">模型水位</span><span class="v">${esc(modelText)}</span><span class="s">追赶 ${esc(r.model_chasing_roots || 0)} · 放弃 ${esc(r.model_dead_roots || 0)} · 懒生成 ${esc(r.model_lazy_roots || 0)}</span></div>
-    <div><span class="l">房间水位</span><span class="v">${esc(roomText)}</span><span class="s" title="${esc(r.room_result_version || "")}">${roomInputMatch ? "输入版本匹配" : "等待房间输入凭证"}</span></div>
+    <div><span class="l">模型水位</span><span class="v">${esc(modelText)}</span><span class="s">追赶 ${esc(r.model_chasing_roots || 0)} · 放弃 ${esc(r.model_dead_roots || 0)} · 懒生成 ${esc(r.model_lazy_roots || 0)}（含房间边）</span></div>
     <div><span class="l">当前队列</span><span class="v">${m.rows.length ? esc(m.rows.map(x => x.state).join(" · ")) : "空"}</span><span class="s">${m.rows.length ? esc(m.rows.map(x => `${x.start_sesno}–${x.end_sesno}`).join("；")) : "没有待应用的数据批次"}</span></div>
     <div><span class="l">最近任务 / 落盘错误</span><span class="v">${recent ? esc(recent.state) : "无任务"} · ${logs.length} 条</span><span class="s" title="${esc(recent && recent.task_id || "")}">${recent ? esc(recent.task_id) : "当前进程没有该库任务"}</span></div>`;
 }
@@ -2212,7 +2207,7 @@ function renderWatermark(m){
     $("w-body").innerHTML = `<div class="empty">${S.dbnums ? "范围内没有库 —— 当前 MDB 没有声明任何 DESI。" : `读不到 /dbnums：${esc(S.dbnumsErr || "请求失败")}`}</div>`;
     return;
   }
-  const head = `<div class="r h"><span>dbnum</span><span>项目</span><span>阶段</span><span>数据水位</span><span>模型水位</span><span>房间水位</span><span>数据进度</span><span>标记</span></div>`;
+  const head = `<div class="r h"><span>dbnum</span><span>项目</span><span>阶段</span><span>数据水位</span><span>模型水位</span><span>数据进度</span><span>标记</span></div>`;
   const body = list.map(r => {
     const lag = r.file_latest_sesno - r.applied_sesno;
     const isRun = running.has(r.dbnum);
@@ -2240,17 +2235,6 @@ function renderWatermark(m){
         : r.model_verdict === "not_judged"
           ? `<span class="chip sm mut" title="${esc(r.model_verdict_reason || "")}">不判</span>`
           : `<span class="mut">未知</span>`;
-    const roomKnown = Object.prototype.hasOwnProperty.call(r, "room_sesno");
-    const roomInputMatch = roomKnown && r.room_input_version && r.room_required_input
-      && JSON.stringify(r.room_input_version) === JSON.stringify(r.room_required_input);
-    const roomComplete = roomKnown
-      && Number(r.room_sesno ?? 0) === Number(r.model_sesno ?? 0)
-      && roomInputMatch && !!r.room_result_version;
-    const roomCell = !roomKnown ? `<span class="mut">未提供</span>`
-      : roomComplete
-        ? `<span class="mono">${esc(r.room_sesno)}</span> <span class="chip sm green" title="${esc(r.room_settled_at ? `房间追平 ${stamp(r.room_settled_at)}` : "房间已一致")}">一致</span>`
-        : `<span class="mono">${esc(r.room_sesno || 0)}</span> <span class="chip sm amber" title="${esc(roomInputMatch ? "房间水位落后模型" : "房间输入版本不匹配")}">待补</span>`;
-
     const pk = parked.get(r.dbnum);
     const note = pk ? `park · ${pk.reason || "连败到上限"}`
       : isRun ? "worker 执行中"
@@ -2269,7 +2253,6 @@ function renderWatermark(m){
       <span class="mono mut" style="font-size:11.5px">${esc(phaseOf(r.db_type))}</span>
       <span class="mono sec" style="font-size:12.5px">${esc(r.applied_sesno)} / ${esc(r.file_latest_sesno)}</span>
       <span>${modelCell}</span>
-      <span>${roomCell}</span>
       <span>${S.dataFace === "read-through" ? `<span class="mut">不判</span>` : `<span class="track"><i class="${cls}" style="width:${(meaningful ? pct(r.applied_sesno, r.file_latest_sesno) : 0).toFixed(1)}%"></i></span>`}</span>
       <span class="marks">${chips.join("")}<span class="note" title="${esc(note)}">${esc(note)}</span></span>
     </div>`;
