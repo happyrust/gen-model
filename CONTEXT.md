@@ -223,8 +223,20 @@ _Avoid_: 模型元数据、gen_root 表（当指概念时）、模型缓存
 _Avoid_: 数据批次（当指含模型与房间的整个执行体时）、模型 drain、pending 任务、模型积压
 
 **任务内序列化 (In-Task Serialization)**：
-dbnum 任务在结束前把本任务在内存里算出的数据行、模型行、房间边与三枚水位**同步**写进 SurrealDB；库里的这份是内存结果的落盘副本，不是计算输入、不是调度中枢，任务与库之间没有队列（ADR-071）。模型行按事务上限跨根合块写；数据水位在数据尾事务写，模型水位与房间水位在任务收尾的一笔事务写。
-_Avoid_: 异步备份、backup lane、发布队列、发布 run、ACK、收口、per-root CAS
+dbnum 任务在结束前把本任务在内存里算出的数据行、模型行、房间边与三枚水位**同步**写进 SurrealDB，写库期间由写入标记标出；库里的这份是内存结果的落盘副本，不是计算输入、不是调度中枢，任务内不回读库，任务与库之间没有队列（ADR-071 / ADR-072）。模型行按事务上限跨根合块写；数据水位在数据尾事务写，模型水位与房间水位在任务收尾的一笔事务写，写入标记的 `finished` 与它们同一笔。
+_Avoid_: 异步备份、backup lane、发布队列、发布 run、ACK、收口、per-root CAS、发布阶段、文件轮次
+
+**写入标记 (Write Marker)**：
+一个 `dbnum` 在库里的一行写入状态：任务第一笔写库前置 `writing{S,T}`，任务收尾那一笔与水位同事务置 `finished`。它回答「这个库有没有一次没写完的任务」，不回答「欠什么」——欠什么仍由三水位回答（ADR-072 D1）。
+_Avoid_: attempt 行、增量尝试记录、pending 状态、锁
+
+**回退到水位 (Rollback to Watermark)**：
+见到 `writing{S,T}` 时把该库 S 之后的痕迹删掉（`sesno > S` 的数据行与模型行、全部房间边）、三水位退回 S，再排 S→T 从头重放；全部是按 `(dbnum, sesno)` 谓词的删除。它删痕迹让重放补齐，**不是**还原 S 版本的行；初始化的回退就是整库清空（ADR-072 D2）。
+_Avoid_: 还原、恢复到快照、部分回滚、分面回退
+
+**库读白名单 (Database Read Allow-list)**：
+对 SurrealDB 的读只允许水位 / sesno / 写入状态这类控制面信息、启动水化一次、字典一次；其余对库的一切操作是写或删。「先删后插」的删那一半也是谓词删，不是查出全集再点名（ADR-072 D5）。
+_Avoid_: 对账读（泛指时）、回读确认、探针
 
 **内存镜像 (In-Memory Mirror)**：
 进程内每个 `dbnum` 一份的三水位、`gen_root` 凭证下限、安定根集与失败根集的工作副本：启动时从库反序列化一次，任务收尾写库成功后更新；运行期一切比对（要不要开窗、S 是多少、哪些根安定、房间前提、四格）都读它，不再逐次查库（ADR-071 D5 / D7）。真值仍在库里，镜像只是它在内存中的等价物。
@@ -324,14 +336,6 @@ _Avoid_: 软删（当指「只翻 pe.deleted、别的行不动」的旧写法时
 数据窗口 S→T 提交后，对 e3d-model `plan_update(S→T)` 判定**未被触到**、已安定且落后于 T 的生成根，一条语句批量把 `gen_root.source_end_sesno` 推到 T（行上记 `credential_advanced_from`），不重生成、不动几何 / manifest / revision。护栏：候选数超过索引键数的 30%，或 `plan_update` 报 `unresolved` 非空，即整窗放弃前移、全部根照旧过期，回执记 `credential_advance_degraded`。它动的是**根级**凭证，与库级的**模型水位**（ADR-060）不是一回事：前移只说「这份几何到 T 为止仍然有效」，水位说「整库到 T 为止已经追平」。
 _Avoid_: 凭证刷新、水位前移、跳过生成、与模型水位混用
 
-**模型窗口意图 (Model Window Intent)**：
-数据窗口尾事务与应用水位同事务写下的模型侧工作声明：本窗口受影响根集（`plan_update` 经 `touches_roots` 判定，含搬迁两端根与被删根的 `DeleteCleanup`）及其 revision，随尾事务 upsert 进 `model_update_pending`（进程本地账本，ADR-050）。它只说「这一窗要生成什么」，不承诺已生成；eager 生成的范围就是它，其余根前移凭证后懒生成、等按需 `ensure`（ADR-056 D9）。
-_Avoid_: 模型任务（泛指时）、全库过期入队、模型计划（当指 e3d-model 的 `UpdatePlan` 时）
-
-**提交后收敛 (Post-commit Reconciliation)**：
-水位与派生意图已经共同提交，但全局空间状态尚未持久化完成的过渡阶段。该阶段可跨重启恢复，并在完成前阻止下一数据批次进入。
-_Avoid_: 普通积压、空闲轮副作用
-
 **窗口阻断 (Window Block)**：
 稳态增量窗口**数据侧**确定性失败的终态（收集器报错、写回被持久层确定性拒绝）：该 `dbnum` 的水位停止推进、告警常驻，直到源数据或持久层修复后按同一区间重放。模型生成失败**不阻断窗口**（ADR-056 D1）：根级失败进 `model_update_pending` 重试账，水位照常推进。
 _Avoid_: 死信降级、跳过坏根、模型阻断
@@ -351,6 +355,8 @@ _Avoid_: 暂存窗口（基线不开窗口）、全量解析 / `DbBasicData`（�
 - **提交单元 (Commit Unit)**、**暂存库 (Staging Database)**、**暂存工作集 (Staged Working Set)**、**语句日志 (Statement Journal)**、**水位门控写回 (Watermark-gated Write-back)**、**commit-time-only 语句 (Commit-time-only Statement)**——ADR-017 kv-mem 暂存窗口的构件，随暂存层退役；现行口径见上方「数据窗口直写」。
 - **窗口阻断的模型侧含义**（生成根重试穷尽 → 整窗口水位停止、持久层零痕迹）——被 ADR-056 D1 取代，模型失败与水位解耦。
 - **成员关系仲裁补删 (ADR-036 Membership Reconciliation)**、**幽灵新增丢弃**——old-pdms-io 净窗口收集器在索引差分之外按成员表补判的删除 / 丢弃；2026-09-03 收集器换成 e3d-io 底座后随之退役（两根索引差分即终态，`membership_deleted` 恒 0）。现行口径见上方「净窗口收集器」。
+- **模型窗口意图 (Model Window Intent)**——数据窗口尾事务写进 `model_update_pending` 的模型侧工作声明；2026-09-10 随 `model_update_pending` 整体退役（ADR-071 D9 / ADR-072 D6），任务的计划只在内存。
+- **提交后收敛 (Post-commit Reconciliation)**——「水位已提交、空间状态尚未持久化完成、阻止下一批进入」的过渡阶段，就是 publish 屏障的名字；2026-09-10 随发布阶段退役（ADR-072 D4），空间树随模型行提交就地收敛。
 
 ## 依赖入库（Dependency Ingestion）——2026-09-06 起，CATA 按 DESI 依赖入库
 

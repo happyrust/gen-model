@@ -2,6 +2,16 @@
 
 ## 2026-09-10
 
+### ADR-072 已接受：发布阶段退役——任务写库带写入标记，中断按 sesno 回退到水位重做（计划已批准，R1–R6 待开工）
+
+grill-with-docs 两轮（Q1–Q15 全按推荐，共识 d-441）+ Plannotator 批准。口径：一个 dbnum 任务跑完把内存结果**同步**写库、最后盖水位；
+写库期间 `dbnum_write_state:{dbnum} = writing{S,T}`，收尾那一笔与水位同事务置 `finished`；启动 / 开工见 `writing` → 按 `(dbnum, sesno > S)`
+谓词删除整库回退到 S → 排 S→T 从头跑（初始化 S=0 即 wipe）。publish 九子步、任务内四处回读库、`model_update_pending` /
+`side_effect_pending` / `model_publish_queue` / `model_completion`、`room_published_*` 三表一次清干净；对库的读只剩水位 / sesno / 写入状态
+与启动水化。文档：`docs/adr/ADR-072-…`、`docs/plans/2026-09-10-retire-publish-stage-and-write-marker-plan.md`；ADR-062 作废、ADR-071 S3 / D4 / D9
+修订；CONTEXT.md 新增「写入标记」「回退到水位」「库读白名单」，改写「任务内序列化」，退役「模型窗口意图」「提交后收敛」。
+worktree `gen-model-refactor` / 分支 `refactor/retire-publish-stage`，基线 `6f0813f6b`（e3d-direct 上 ADR-071 S1–S6 在途的整份 WIP 提交）。
+
 ### S4（目录级联那一块）：反查命中的根改排带明确根名单的 ModelOnly 任务，目录版本核对搬进 `model_coverage.rs`（ADR-071 D1 / S4）
 
 目录级联（`reconcile_catalogue_versions` 点名 → 收窗 → 反查 → 排工）此前的「排工」是把命中的根写成

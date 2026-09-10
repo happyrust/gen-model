@@ -12,6 +12,9 @@ D3/D6 的执行体，`read_model_watermark_probe` 已退出任务收尾热路径
 统一水化段：开镜像 → `hydrate_watermark_mirror` → 模型投影 → 发布 run 六张表 `REMOVE TABLE IF EXISTS` →
 启动核对；`model_read_route` 按 D8 改「无任务在飞 ∧ 三水位相等」）也已落地——逐步进度以 changelog 当日
 头条为准。S3 后半（去文件轮次）与 S7–S8 未开工。
+**被 ADR-072 修订（2026-09-10）**：S3 崩溃语义改为「行幂等 + 水位最后 + 写入标记回退」；D4 加崩溃例外（崩在模型 / 房间中途时
+`applied_sesno` 一并退回 S）；D9 退役清单补 `model_completion` / `room_published_*` / `room_topology_source` / `increment_update_attempt`；
+S3 后半「去文件轮次」与 S7–S8 由 ADR-072 计划 R3–R5 接管。D1 的「同步」不变。
 日期：2026-09-10
 计划：`docs/plans/2026-09-10-finalization-loop-and-pe-statistics-plan.md`（v3，含实测起因、实施步骤 S1–S8 与 S1 的落地出入）。
 关联：
