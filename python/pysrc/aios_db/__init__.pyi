@@ -1,5 +1,4 @@
 from . import db as db
-from . import fixture as fixture
 from . import incr as incr
 from . import model as model
 from . import parse as parse

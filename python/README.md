@@ -31,7 +31,7 @@ $env:VIRTUAL_ENV = (Resolve-Path .venv).Path
 |---|---|---|---|---|
 | 解析层 | `aios_db.parse.*` | 纯文件解析 | 无 | ✔ 完全共存 |
 | 连接层 | `aios_db.connect()` | 只读查询 + `model.export_obj` + 窗口/队列/空间/房间观察（`incr.resolve_window` / `incr.queue_status` / `spatial.tree_status|tree_dump` / `room.code|nodes|names`） | 无 | ✔ 可边跑边查 |
-| 执行层 | `aios_db.full_init()` | 增量 apply / 模型生成 / 房间全量（`room.build_all`） / 基线（`sync.baseline`） / 空间树落盘（`spatial.persist|rebuild`），以及测试支撑面（`model.delete_subtree` / `fixture.*`） | 拿单实例锁 | ✖ 必须先停服务 |
+| 执行层 | `aios_db.full_init()` | 增量 apply / 模型生成 / 基线（`sync.baseline`） / 空间树落盘（`spatial.persist|rebuild`），以及测试支撑面（`model.delete_subtree`） | 拿单实例锁 | ✖ 必须先停服务 |
 
 - **`aios_db.set_config(path)` 必须最先调用**（解析层深处也读全局 DbOption，
   配置是进程级 OnceCell，第一次被读走后不可更换）。
@@ -81,8 +81,7 @@ aios_db.model.export_obj("24381_100677", "out_obj")  # 导 OBJ 目视（连接�
 # ── 执行层：mutating（先停服务）──────────────────────────────────
 aios_db.full_init(cwd=str(repo))               # 拿单实例锁 + run_cli 前置段
 aios_db.incr.apply_file(f)                     # 增量窗口（默认水位+1..=最新）
-aios_db.model.ensure("24381_100677", force=True)   # 单根重生成
-aios_db.room.build_all()                       # 房间归属全量重建
+aios_db.model.ensure("24381_100677", force=True)   # 单根重生成（房间归属随根在任务内算，ADR-073）
 aios_db.sync.baseline(7999)                    # 从未解析过的库补全量基线
 # 文件被还原（F6 回退）不再需要手动动作（ADR-021）：扫描/手动入队会自动排一条
 # 整库重建批次，worker 复核后清空该库并按首次导入重新解析（sync.realign 已移除）。
@@ -132,7 +131,7 @@ for ev in c.watch_tasks():        # WebSocket 任务事件（需 pip install web
 | 轨 | 选择器 | 需要什么 | 盯什么 |
 |---|---|---|---|
 | 离线档 | `-m offline` | 只要装好的扩展 | 解析层（仓内 issue-019 会话快照）、三层硬守护、`.pyi` 与运行时一致性、HTTP 客户端路由 |
-| 房间档 | `-m "not offline"` | `bin/surreal.exe` + testbed 项目副本 | 「直写 == 全量重建」逐边对拍、删除留痕、durable 直写不长房间待办行；连接层只读入口 |
+| 在线档 | `-m "not offline"` | `bin/surreal.exe` + testbed 项目副本 | 净窗口 A/B（`test_net_window_ab.py`）、回退重初始化（`test_rollback_reinit.py`）、RVM 真件（`test_rvm_ams1112.py`）等要真库的用例 |
 
 ```powershell
 cd python
@@ -146,25 +145,26 @@ uv pip install pytest --python .venv     # 首次
 （`.github/workflows/windows-tests.yml` 的 `python-bindings` job：`maturin build`
 → 装 wheel → smoke-import → 跑这一档 → 传 wheel artifact）。
 
-房间增量档对一次性内存 SurrealDB（conftest 自起 `bin/surreal.exe` @8071，进程
-退出即全丢）跑对拍，与 Rust 侧 `room_fixture` live 测试共用同一套合成夹具
-（`aios_db.fixture` 直通 `src/fast_model/room_fixture.rs`）。
+在线档对一次性内存 SurrealDB（conftest 自起 `bin/surreal.exe` @8071，进程
+退出即全丢）跑。合成房间夹具（`aios_db.fixture.*` ↔ `src/fast_model/room_fixture.rs`）
+与房间对拍档（`test_room_incremental.py` / `test_connection_layer.py`）已随房间独立
+流程整体删除（ADR-073 D1，S1）——房间归属随生成根在任务内算，绑定侧没有可单独
+造夹具、单独重算的入口了。
 
 DbOption 是进程级 OnceCell，一个进程只能有一份配置：conftest 按选中集合裁定
-——有房间档用例就用 `DbOption-roomtest`，纯离线档用 `DbOption-ci`。离线用例在
+——有在线档用例就用 `DbOption-roomtest`，纯离线档用 `DbOption-ci`。离线用例在
 任一配置下都成立，所以两档同跑不冲突，不必分两次。
 
 专为测试补的导出（生产脚本一般用不到）：
 
-- `fixture.create/drop/move_body/refnos`——合成房间夹具（只对一次性测试库使用）；
 - `model.delete_subtree(refnos)`——DeleteCleanup 同一入口的级联删除；
 - `model.update_aabbs(..., durable=True)`——生产直写事务路径（指针 + epoch 同事务；房间归属随该库任务的房间段整库算，ADR-072 D4 / D5）；
 - `spatial.tree_status()`——空间树九键指纹（/health `spatial_tree` 同源）；
 - `spatial.tree_dump()`——内存树逐条导出（refno/noun/mins/maxs），值级校验
   「树 == 已提交指针」用（`testbed/spatial_tree_8000.py` 的每窗断言就是它）。
 
-conftest 用 `tests/DbOption-roomtest`（`room_key_word=["ZZ-R-"]` 只圈夹具房、
-v_port=8071）；`full_init` 拿的是 testbed 项目副本的锁，测试期间别并行跑
+conftest 用 `tests/DbOption-roomtest`（v_port=8071 的一次性内存实例）；
+`full_init` 拿的是 testbed 项目副本的锁，测试期间别并行跑
 `testbed/run_full_loop.py`。
 
 ## 已知代价与坑

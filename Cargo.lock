@@ -168,7 +168,6 @@ dependencies = [
  "aios-database",
  "aios_core",
  "anyhow",
- "glam 0.29.3",
  "indexmap 2.14.0",
  "pyo3",
  "pythonize",

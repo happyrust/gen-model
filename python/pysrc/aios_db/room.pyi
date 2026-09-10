@@ -1,8 +1,5 @@
 from typing import Any
 
-def build_all() -> None:
-    """房间归属全量重建。"""
-
 def code(refno: str) -> str | None:
     """元素的房间编码（fn::room_code 直通，连接层只读；无归属返回 None）。"""
 

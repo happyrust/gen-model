@@ -15,7 +15,7 @@
 
 .EXAMPLE
     powershell -File scripts\Run-LiveBatch.ps1 -Manifest scripts\live-batches\batch1-selfcontained.json
-    powershell -File scripts\Run-LiveBatch.ps1 -Manifest ... -Only live_room_fixture_parity
+    powershell -File scripts\Run-LiveBatch.ps1 -Manifest ... -Only <用例名子串>[,<子串>...]
 #>
 [CmdletBinding()]
 param(

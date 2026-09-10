@@ -1,16 +1,16 @@
 # -*- coding: utf-8 -*-
-"""绑定测试的进程级编排（两条轨：离线档 + 房间增量档）。
+"""绑定测试的进程级编排（两条轨：离线档 + 在线档）。
 
 一个 pytest 进程 = 一个 aios_db 绑定实例 = 一次 full_init：配置是进程级
 OnceCell、SUL_DB 是全局连接，所以 SurrealDB 实例与执行层初始化都做成 session
-夹具；夹具数据（合成房间）做成 function 夹具，每条用例先建后清。
+夹具。
 
 两条轨：
 
 - **离线档**（`-m offline`）：只吃仓内 issue-019 夹具与打桩 HTTP 服务，不连
   SurrealDB、不碰项目目录、不做任何初始化——CI 唯一能跑的一档。
-- **房间增量档**（默认全跑）：对 conftest 自起的一次性内存 SurrealDB 做
-  「增量 == 全量」逐边对拍，需要 `bin/surreal.exe` 与 testbed 项目副本。
+- **在线档**（默认全跑）：对 conftest 自起的一次性内存 SurrealDB 跑净窗口 A/B、
+  回退重初始化等要真库的用例，需要 `bin/surreal.exe` 与 testbed 项目副本。
 
 隔离与残留纪律：
 - SurrealDB 用 bin/surreal.exe（fork 2.1.4）的一次性内存实例 @8071，进程退出
@@ -63,9 +63,9 @@ _SESSION_CONFIG: Path = CI_CONFIG
 def pytest_collection_modifyitems(config, items):
     """裁定本进程唯一的一份 DbOption（OnceCell，换库只能换进程）。
 
-    只要选中集合里有非 offline 用例，就必须用 roomtest 配置——它要连 8071 并按
-    `room_key_word` 圈住夹具房。离线用例在任何一份合法配置下都成立（纯文件解析
-    只读全局 debug 选项），所以让给房间档，避免两轨互斥、非要分两次跑。
+    只要选中集合里有非 offline 用例，就必须用 roomtest 配置——它要连 8071。
+    离线用例在任何一份合法配置下都成立（纯文件解析只读全局 debug 选项），
+    所以让给在线档，避免两轨互斥、非要分两次跑。
     """
     global _SESSION_CONFIG
     _SESSION_CONFIG = (
@@ -211,7 +211,7 @@ def _restore_tree_files(shelved: list[tuple[Path, Path]]) -> None:
 def binding(surreal, configured):
     """full_init 一次（配置由 `configured` 钉死，本档必须是 roomtest 那份）。"""
     if _SESSION_CONFIG != CONFIG:
-        pytest.skip(f"本进程的配置是 {_SESSION_CONFIG.name}，房间档要 {CONFIG.name}")
+        pytest.skip(f"本进程的配置是 {_SESSION_CONFIG.name}，在线档要 {CONFIG.name}")
     MESH_DIR.mkdir(exist_ok=True)
     shelved = _shelve_existing_tree_files()
     preloaded = _preload_net_ab_baseline()
@@ -228,18 +228,3 @@ def binding(surreal, configured):
         _restore_tree_files(shelved)
         _restore_net_ab_source(preloaded)
 
-
-@pytest.fixture()
-def room_fixture(binding):
-    """每条用例一套干净夹具：建（内部先 drop，幂等）→ 用 → 清。
-
-    返回 fixture.refnos() 的清单：{room_num, pane_a, pane_b, in_a, in_b,
-    straddler, seqs}。注意 GLOBAL_AABB_TREE 是进程级的——基线必须对全部夹具
-    refno 跑一次 update_aabbs(replace=True)，把上一条用例可能留下的旧树条目
-    同步掉（与 Rust 夹具 fixture_baseline 同一前提）。
-    """
-    binding.fixture.create()
-    try:
-        yield binding.fixture.refnos()
-    finally:
-        binding.fixture.drop()
