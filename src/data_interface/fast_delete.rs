@@ -523,7 +523,9 @@ pub async fn rollback_to_watermark(
 /// [`rollback_to_watermark`] 的持久层那一半：渲染 → 合块 → 执行。
 ///
 /// 单拎出来是为了让 `mem://` 崩溃点重放对拍能在自己的实例上跑同一份渲染（对拍的是生产
-/// 写法，不是测试自己拼的 SQL）。锁、整库 wipe 那一档与进程内作废都在公开入口那边。
+/// 写法，不是测试自己拼的 SQL）。锁与进程内作废都在公开入口那边；整库 wipe 那一档
+/// （`Initialize` / `Reinitialize`，§4.3-1）这里也走得通——同一份 [`wipe_dbnum_rows_on`]
+/// 渲染，只是不拿锁、不翻按需读路。
 pub(crate) async fn rollback_to_watermark_on(
     db: &Surreal<Any>,
     dbnum: u32,
@@ -531,6 +533,28 @@ pub(crate) async fn rollback_to_watermark_on(
     intent: crate::data_interface::write_state::WriteIntent,
 ) -> anyhow::Result<RollbackReport> {
     let started = Instant::now();
+    if intent.wipes_whole_dbnum() {
+        // 初始化的 S 恒为 0：库里没有「S 版本」可退，整库清空（水位行清值不删行）；
+        // 标记行最后删——它是回退的提交点（§4.3-6）。
+        let wipe = wipe_dbnum_rows_on(db, dbnum, WatermarkDisposal::ResetForReinit).await?;
+        db.query(crate::data_interface::write_state::render_clear(dbnum))
+            .await
+            .with_context(|| format!("rollback dbnum {dbnum} clear write marker after wipe"))?
+            .check()
+            .with_context(|| {
+                format!("rollback dbnum {dbnum} clear write marker after wipe statement")
+            })?;
+        return Ok(RollbackReport {
+            dbnum,
+            target_watermark: 0,
+            intent: intent.as_str(),
+            wiped: true,
+            statements: 0,
+            transactions: 0,
+            legacy_rows_note: None,
+            elapsed_ms: started.elapsed().as_millis().max(wipe.elapsed_ms as u128) as u64,
+        });
+    }
     let noun_tables = noun_tables_on(db).await?;
     let render = render_rollback(dbnum, target_watermark, &noun_tables);
     let batches = chunk_into_transactions(
@@ -619,6 +643,12 @@ fn render_delete_phases(
             !sql.starts_with("DELETE model_update_pending")
                 && !sql.starts_with("DELETE incr_side_effect_pending")
         });
+    } else {
+        // 凭证行 `gen_root:<ref0>_<ref1>` 带 dbnum 却不在 Ref0 区间清单里（区间只圈几何行）。
+        // 整库 wipe / 删库之后把它留下，重排的初始化会读到「这根已经生成到 T」的旧凭证——
+        // ADR-072 §4.3-1/-3：回退到 0 就是凭证全退（初始化在第 k 块 kill → wipe → 重排的
+        // mem:// 对拍 `an_initialization_killed_at_any_step_wipes_and_reruns_from_scratch` 钉它）。
+        metadata.push(format!("DELETE gen_root WHERE dbnum = {dbnum};"));
     }
     match watermark {
         WatermarkDisposal::DropRow => {
@@ -665,12 +695,15 @@ fn render_verify_query(dbnum: u32, ref0s: &[String]) -> String {
     sql
 }
 
-async fn execute_phase(label: &str, statements: &[String]) -> anyhow::Result<()> {
+async fn execute_phase(
+    db: &Surreal<Any>,
+    label: &str,
+    statements: &[String],
+) -> anyhow::Result<()> {
     if statements.is_empty() {
         return Ok(());
     }
-    SUL_DB
-        .query(statements.join("\n"))
+    db.query(statements.join("\n"))
         .await
         .with_context(|| format!("{label} transport failed"))?
         .check()
@@ -687,12 +720,15 @@ fn render_transactional_phase(statements: &[String]) -> Option<String> {
     })
 }
 
-async fn execute_transactional_phase(label: &str, statements: &[String]) -> anyhow::Result<()> {
+async fn execute_transactional_phase(
+    db: &Surreal<Any>,
+    label: &str,
+    statements: &[String],
+) -> anyhow::Result<()> {
     let Some(sql) = render_transactional_phase(statements) else {
         return Ok(());
     };
-    SUL_DB
-        .query(sql)
+    db.query(sql)
         .await
         .with_context(|| format!("{label} transport failed"))?
         .check()
@@ -746,7 +782,29 @@ async fn wipe_dbnum_rows(
         .write()
         .await;
 
-    let mut response = SUL_DB
+    let result = wipe_dbnum_rows_on(&SUL_DB, dbnum, watermark).await?;
+    Ok(FastDeleteDbnumResult {
+        elapsed_ms: started.elapsed().as_millis() as u64,
+        ..result
+    })
+}
+
+/// [`wipe_dbnum_rows`] 的持久层那一半：Ref0 区间圈定 → 三个删除阶段 → 核对，在给定实例上跑。
+///
+/// 单拎出来是为了让 `mem://` 崩溃点重放对拍能在自己的实例上跑同一份渲染——初始化在第 k 块
+/// kill → 回退 = 整库 wipe → 重排（计划 §4.3-1），对拍的是生产写法，不是测试自己拼的 SQL。
+/// 锁、`pe` 事件核对与按需读路翻面都在公开入口那边；镜像作废按实例判（`_on` 纪律）。
+pub(crate) async fn wipe_dbnum_rows_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+    watermark: WatermarkDisposal,
+) -> anyhow::Result<FastDeleteDbnumResult> {
+    if dbnum == 0 {
+        bail!("dbnum must be greater than zero");
+    }
+    let started = Instant::now();
+
+    let mut response = db
         .query(format!(
             "SELECT string::split(<string>id, '_')[0] AS prefix, count() AS count \
              FROM pe WHERE dbnum = {dbnum} GROUP BY prefix;\n\
@@ -787,11 +845,11 @@ async fn wipe_dbnum_rows(
 
     let (relations, ranges, metadata) =
         render_delete_phases(dbnum, &ref0s, &noun_tables, watermark);
-    execute_phase("delete owner relations", &relations).await?;
-    execute_phase("delete Ref0 ranges", &ranges).await?;
-    execute_transactional_phase("delete dbnum metadata", &metadata).await?;
+    execute_phase(db, "delete owner relations", &relations).await?;
+    execute_phase(db, "delete Ref0 ranges", &ranges).await?;
+    execute_transactional_phase(db, "delete dbnum metadata", &metadata).await?;
 
-    let mut verify = SUL_DB
+    let mut verify = db
         .query(render_verify_query(dbnum, &ref0s))
         .await
         .context("verify fast delete")?
@@ -821,7 +879,7 @@ async fn wipe_dbnum_rows(
         );
     }
 
-    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
+    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored_on(db, dbnum);
 
     Ok(FastDeleteDbnumResult {
         dbnum,
