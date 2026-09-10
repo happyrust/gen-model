@@ -7,8 +7,8 @@
 //! 这里一行不动（T171 的「P3 删 parity.rs 时不丢」）。
 //!
 //! 两条口径纪律：
-//! - **控制面白名单**（[`CONTROL_PLANE_TABLES`]）只用于「中途 diff」——恢复记录、水位、
-//!   队列控制、durable pending、副作用队列是 I1 明文豁免的落库，不属于「窗口数据」；
+//! - **控制面白名单**（[`CONTROL_PLANE_TABLES`]）只用于「中途 diff」——水位、写入标记、
+//!   队列控制、pe 统计是 I1 明文豁免的落库，不属于「窗口数据」；
 //!   终态对拍要不要排除它们由调用方决定（水位就该在终态里被**查证**，不是被掩掉）。
 //! - 快照是 `INFO FOR DB` 枚举表名 + 逐表 `SELECT * ORDER BY id` 的 serde 序列化文本：
 //!   两份文本相等 ⇔ 终态逐表相等（F3 口径），差异表名由 [`changed_data_tables`] 给出。
@@ -23,13 +23,13 @@ use surrealdb::engine::any::{Any, connect};
 /// `dbnum_info_table` / `dbnum_stats_state` 是 pe 统计（与 PE 写同事务维护，行上带 `updated_at =
 /// time::now()`），逐字节对拍天然不等；它们的正确性由 `dbnum_stats` 自己的测试与
 /// `terminal_production_batches_replay_statistics_before_watermark`（pe 行数 == 统计和）查证。
-pub const CONTROL_PLANE_TABLES: [&str; 8] = [
+///
+/// 第二条异步账的三张表（模型意图队列 / 固定区间恢复记录 / 副作用队列）随 ADR-072 D5 整体退役，
+/// 不再列在这里：库里没有它们，对拍也就没有可掩的。
+pub const CONTROL_PLANE_TABLES: [&str; 5] = [
     "dbnum_watermark",
-    "increment_update_attempt",
     "dbnum_write_state",
     "queue_control",
-    "model_update_pending",
-    "incr_side_effect_pending",
     "dbnum_info_table",
     "dbnum_stats_state",
 ];

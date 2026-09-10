@@ -41,21 +41,13 @@ pub mod manifold_csg;
 #[cfg(feature = "manifold")]
 pub mod manifold_tessellate;
 
-pub mod room_fixture;
-
-pub mod room_live_issue7;
-
 pub mod room_predicate;
 
 pub mod room_model;
 
-pub(crate) mod room_publication;
-
 pub(crate) mod room_topology;
 
 pub(crate) mod room_resident;
-pub(crate) mod room_startup;
-pub(crate) mod room_task;
 
 pub mod cal_model;
 
@@ -74,9 +66,6 @@ pub mod aabb_tree;
 pub mod spatial_state;
 
 pub mod coverage_audit;
-#[cfg(test)]
-mod room_increment_audit;
-pub(crate) mod room_topology_source;
 
 use aios_core::RefU64;
 use dashmap::{DashMap, DashSet};

@@ -86,11 +86,6 @@ name = "test_gen_geos_data"
 path = "src/bin/test_gen_geos_data.rs"
 required-features = ["legacy_model", "legacy_diagnostics"]
 
-[[bin]]
-name = "node_gen_room_probe"
-path = "src/bin/node_gen_room_probe.rs"
-required-features = ["legacy_model", "legacy_diagnostics"]
-
 [[example]]
 name = "performance_test_example"
 path = "examples/performance_test_example.rs"

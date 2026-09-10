@@ -280,12 +280,6 @@ pub struct WindowRootSources {
     /// 反查判不了时把原因交给 [`WindowImpact::cascade_degraded`]（放弃凭证前移）。开关
     /// `model_design_reference_cascade` 关着时是 `DesignReferenceCascade::off()`（零 I/O）。
     pub design_reference: crate::data_interface::reverse_reference::DesignReferenceCascade,
-    /// 房间结构触发（ADR-010 D12 / ADR-040 §4）：窗口里 FRMW / SBFR 改名命中 `room_key_word`、
-    /// PANE / CWALL / CFLOOR 换属主 → 要整间重算的 PANE。不进 `touched`（它不改几何根），
-    /// 由 [`build_model_update_plan_from_window`] 折成 `RoomRecalcPanel` 工作项；枚举读挂时
-    /// 让计划标 `room_rebuild_required`。账本粗筛零 I/O；没有开关（审核 F-A，d-272）。
-    pub(crate) room_structural:
-        crate::data_interface::room_structural_trigger::RoomStructuralTriggers,
     /// 刚体前移（ADR-066，S4b）的文件侧输入：候选（两端属主链、`Δ`、三条排除的判决）与每个根在
     /// T 端的属主链。开关 `model_transform_cheap_path` 关着时 `enabled = false`、两个集合都空——
     /// 一次 `world_matrix` 都不算，`impact` / `plan_window_roots` 的产物与今天逐位相同。
@@ -706,14 +700,6 @@ impl WindowRootSources {
         } else {
             crate::data_interface::reverse_reference::DesignReferenceCascade::off()
         };
-        // 房间结构触发（F-A）：账本里没有房间类 noun 的「修改」条目就一次文件读都不发生。
-        let room_structural =
-            crate::data_interface::room_structural_trigger::RoomStructuralTriggers::collect(
-                &plan,
-                base,
-                target,
-                &aios_core::get_db_option().get_room_key_word(),
-            );
         Ok(Self {
             base_sesno,
             target_sesno,
@@ -728,7 +714,6 @@ impl WindowRootSources {
             structural_connection,
             cable_endpoint,
             design_reference,
-            room_structural,
             rigid,
         })
     }
@@ -1073,17 +1058,6 @@ pub(crate) async fn build_model_update_plan_from_window(
             &sources.rigid.notes,
         ));
     }
-    warnings.push(sources.room_structural.summary_line(dbnum));
-    if !sources.room_structural.unreadable.is_empty() {
-        crate::data_interface::task_effects::mark_room_topology_changed(dbnum, target_sesno as i32);
-    }
-    warnings.extend(
-        sources
-            .room_structural
-            .unreadable
-            .iter()
-            .map(|reason| format!("dbnum={dbnum}: {reason}")),
-    );
     let units = plan
         .regen
         .iter()
@@ -1104,50 +1078,7 @@ pub(crate) async fn build_model_update_plan_from_window(
     // 不认识它的执行体（今天的 drain）照旧整根重算；B6 的分流认它。开关关时分桶已空，
     // `transform_units` 为空，计划与今天逐位相同。
     out.transform_units = transform_units;
-    // 房间结构触发（ADR-010 D12 / ADR-040 §4，审核 F-A）：与老 PE 规划器同一份落法——面板目标
-    // 折成 `RoomRecalcPanel`，随数据窗口落 `collecting`、跟文件轮次一起释放；枚举读挂不掐窗口，
-    // 但要在同一份计划上留下 `room_build:main = rebuild_required` 的持久信号（ADR-040 §5）。
-    append_room_structural_work(
-        &mut out,
-        &sources.room_structural,
-        dbnum,
-        db_type,
-        target_sesno as i32,
-    );
     Ok(out)
-}
-
-/// 把窗口的房间结构触发并进计划：`RoomRecalcPanel` 工作项 + 全量重建要求。纯函数。
-pub(crate) fn append_room_structural_work(
-    plan: &mut ModelUpdatePlan,
-    triggers: &crate::data_interface::room_structural_trigger::RoomStructuralTriggers,
-    dbnum: u32,
-    db_type: &str,
-    end_sesno: i32,
-) {
-    if !triggers.panel_targets.is_empty() {
-        plan.work_items
-            .extend(triggers.panel_targets.iter().map(|panel| ModelWorkItem {
-                dbnum,
-                db_type: db_type.to_string(),
-                source_end_sesno: end_sesno,
-                action: ModelWorkAction::RoomRecalcPanel,
-                target_refno: panel.to_pdms_str(),
-                noun: "PANE".to_string(),
-            }));
-        plan.work_items
-            .sort_by_key(|item| (item.action, item.target_refno.clone()));
-        plan.work_items
-            .dedup_by(|a, b| a.action == b.action && a.target_refno == b.target_refno);
-    }
-    if !triggers.unreadable.is_empty() {
-        let reason = triggers.unreadable.join("; ");
-        plan.room_rebuild_required = true;
-        plan.room_rebuild_reason = Some(match plan.room_rebuild_reason.take() {
-            Some(existing) => format!("{existing}; {reason}"),
-            None => reason,
-        });
-    }
 }
 
 /// A later data window must carry unfinished generation to its own target even

@@ -36,6 +36,55 @@ pub const QUERY_TOOL_NAMES: [&str; 11] = [
 
 static MODEL_DB: OnceCell<()> = OnceCell::const_new();
 
+/// `e3d.room.lookup` 读到的一条归属边。
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct RoomMembershipEdge {
+    panel: String,
+    room_num: String,
+    inside_count: u8,
+    center_dist: f32,
+}
+
+/// 一个构件挂在哪些面板上，两种结果形态都认。
+///
+/// 从 `data_interface/room_delta.rs` 原样搬过来的（房间流程退役，t-678）：那个模块整体退了，
+/// 而 `e3d.room.lookup` 与它的读路要保留，所以读法跟着查询走。语句一字未改——`delta2_`
+/// 版本走结果目录的分桶分片，其余走旧 `room_result` 表。
+async fn read_room_memberships(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    dbnum: u32,
+    member: &str,
+) -> anyhow::Result<Vec<RoomMembershipEdge>> {
+    let bucket = crate::data_interface::digest::digest(member.as_bytes())[..2].to_owned();
+    let mut response = db
+        .query(
+            "LET $version=$watermark.room_result_version;
+            RETURN IF string::starts_with($version ?? '', 'delta2_') {
+                LET $directory=type::thing('room_directory',$version);
+                LET $pages=$directory.buckets[$bucket] ?? [];
+                LET $fragments=(SELECT VALUE members[$member] FROM (array::map($pages, |$p| type::thing('room_directory_page',$p))));
+                LET $parts=array::flatten((SELECT VALUE parts FROM (array::map($fragments[WHERE $this != NONE], |$f| type::thing('room_fragment',$f)))));
+                array::flatten((SELECT VALUE edges FROM (array::map($parts, |$p| type::thing('room_fragment_part',$p)))))
+            } ELSE {
+                (SELECT panel,room_num,inside_count ?? 0 AS inside_count,center_dist ?? 0.0 AS center_dist FROM room_result
+                WHERE dbnum=$dbnum AND result_version=$version AND member=$member)
+            };",
+        )
+        .bind((
+            "watermark",
+            surrealdb::sql::Thing::from((
+                "dbnum_watermark",
+                surrealdb::sql::Id::Number(dbnum as i64),
+            )),
+        ))
+        .bind(("dbnum", dbnum))
+        .bind(("bucket", bucket))
+        .bind(("member", member.to_owned()))
+        .await?
+        .check()?;
+    Ok(response.take(1)?)
+}
+
 #[derive(Clone)]
 pub struct QueryService {
     repo: PathBuf,
@@ -514,8 +563,8 @@ impl QueryService {
                 ),
             )
         })?;
-        let edges = crate::data_interface::room_delta::read_member_compatible_on(
-            &SUL_DB, dbnum, &refno.to_string()).await
+        let edges = read_room_memberships(&SUL_DB, dbnum, &refno.to_string())
+            .await
             .map_err(|error| QueryError::new("DATABASE_ERROR", error.to_string()))?;
         let resident = crate::fast_model::room_resident::current_for_calculation().ok();
         let mut memberships = Vec::new();
@@ -952,7 +1001,7 @@ mod tests {
             assert!(body.contains("\"stale\""), "{body}");
             assert!(body.contains("\"publication_status\""), "{body}");
         }
-        assert!(room.contains("room_delta::read_member_compatible_on"), "{room}");
+        assert!(room.contains("read_room_memberships(&SUL_DB"), "{room}");
         assert!(room.contains("tree.dbnum_of(refno.refno())"), "{room}");
         assert!(
             !room.contains("let dbnum = refno.refno().get_0()"),

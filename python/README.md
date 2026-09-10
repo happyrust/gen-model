@@ -30,8 +30,8 @@ $env:VIRTUAL_ENV = (Resolve-Path .venv).Path
 | 层 | 入口 | 能做什么 | 锁 | 与在跑服务共存 |
 |---|---|---|---|---|
 | 解析层 | `aios_db.parse.*` | 纯文件解析 | 无 | ✔ 完全共存 |
-| 连接层 | `aios_db.connect()` | 只读查询 + `model.export_obj` + 窗口/队列/空间/房间观察（`incr.resolve_window` / `incr.queue_status` / `spatial.status|tree_status` / `room.code|nodes|names`） | 无 | ✔ 可边跑边查 |
-| 执行层 | `aios_db.full_init()` | 增量 apply / 模型生成 / 房间 / 基线（`sync.baseline`） / 副作用收尾（`incr.drain_side_effects` + `spatial.reconcile|persist|rebuild`），以及测试支撑面（`model.delete_subtree` / `room.enqueue` / `fixture.*`） | 拿单实例锁 | ✖ 必须先停服务 |
+| 连接层 | `aios_db.connect()` | 只读查询 + `model.export_obj` + 窗口/队列/空间/房间观察（`incr.resolve_window` / `incr.queue_status` / `spatial.tree_status|tree_dump` / `room.code|nodes|names`） | 无 | ✔ 可边跑边查 |
+| 执行层 | `aios_db.full_init()` | 增量 apply / 模型生成 / 房间全量（`room.build_all`） / 基线（`sync.baseline`） / 空间树落盘（`spatial.persist|rebuild`），以及测试支撑面（`model.delete_subtree` / `fixture.*`） | 拿单实例锁 | ✖ 必须先停服务 |
 
 - **`aios_db.set_config(path)` 必须最先调用**（解析层深处也读全局 DbOption，
   配置是进程级 OnceCell，第一次被读走后不可更换）。
@@ -82,20 +82,19 @@ aios_db.model.export_obj("24381_100677", "out_obj")  # 导 OBJ 目视（连接�
 aios_db.full_init(cwd=str(repo))               # 拿单实例锁 + run_cli 前置段
 aios_db.incr.apply_file(f)                     # 增量窗口（默认水位+1..=最新）
 aios_db.model.ensure("24381_100677", force=True)   # 单根重生成
-aios_db.room.drain()                           # 消化房间重算积压
+aios_db.room.build_all()                       # 房间归属全量重建
 aios_db.sync.baseline(7999)                    # 从未解析过的库补全量基线
 # 文件被还原（F6 回退）不再需要手动动作（ADR-021）：扫描/手动入队会自动排一条
 # 整库重建批次，worker 复核后清空该库并按首次导入重新解析（sync.realign 已移除）。
 
-# 零售组合收工前的收尾三件套（批次闭环 execute_manual 内置这些，不用手调）：
-aios_db.incr.drain_side_effects()              # SystDerived / RefRevMaintain
-aios_db.spatial.reconcile()                    # 空间意图收敛 + 树落盘
-aios_db.spatial.persist()                      # 兜底：树脏了但没意图时落盘
+# 收工：模型 / 房间 / 空间树都在 dbnum 任务内就地算完落库（ADR-072），没有
+# 「drain 队列 → 收尾三件套」这一步；只剩把内存空间树写盘。
+aios_db.spatial.persist()                      # 树脏了就落盘（force=True 无条件写）
 
 # 观察面（连接层即可，服务在跑也能用）：
 aios_db.incr.resolve_window(f)                 # 预览下一增量窗口（不执行）
 aios_db.incr.queue_status()                    # 本进程队列 {paused, rows}；row.intent=apply_window|reinitialize
-aios_db.spatial.status()                       # 空间收敛积压 {pending, stalled}
+aios_db.spatial.tree_status()                  # 空间树指纹 {entries, drift, startup_verdict, …}
 aios_db.room.code("24381_100677")              # 房间编码（无归属 None）
 aios_db.room.names("24381_100677")             # 穿越的房间号列表
 ```
@@ -126,14 +125,14 @@ for ev in c.watch_tasks():        # WebSocket 任务事件（需 pip install web
 | `scripts/demo_element_diff.py` | 示范：单元素「文件 vs 库」一致性 + 净窗口内的变化 |
 | `scripts/demo_export_obj.py` | 示范：按名字定位构件并导出 OBJ 目视 |
 | `scripts/baseline_with_cata.py` | 基线一个 DESI 库；CATA 默认按需读取，`--eager` 才整库预热 |
-| `testbed/run_full_loop.py` | 沙箱全链路：解析 → 基线 → 生成 → 导出 → 房间收尾（见 `testbed/README.md`） |
+| `testbed/run_full_loop.py` | 沙箱全链路：解析 → 基线 → 生成 → 导出 → 空间树落盘（见 `testbed/README.md`） |
 
 ## 测试（`tests/`，两条轨）
 
 | 轨 | 选择器 | 需要什么 | 盯什么 |
 |---|---|---|---|
 | 离线档 | `-m offline` | 只要装好的扩展 | 解析层（仓内 issue-019 会话快照）、三层硬守护、`.pyi` 与运行时一致性、HTTP 客户端路由 |
-| 房间增量档 | `-m "not offline"` | `bin/surreal.exe` + testbed 项目副本 | 「增量收敛 == 全量重建」逐边对拍、删除留痕、durable 直写；连接层只读入口 |
+| 房间档 | `-m "not offline"` | `bin/surreal.exe` + testbed 项目副本 | 「直写 == 全量重建」逐边对拍、删除留痕、durable 直写不长房间待办行；连接层只读入口 |
 
 ```powershell
 cd python
@@ -158,9 +157,8 @@ DbOption 是进程级 OnceCell，一个进程只能有一份配置：conftest �
 专为测试补的导出（生产脚本一般用不到）：
 
 - `fixture.create/drop/move_body/refnos`——合成房间夹具（只对一次性测试库使用）；
-- `room.enqueue(changes)`——按 `update_aabbs` 返回形态入队房间重算；
 - `model.delete_subtree(refnos)`——DeleteCleanup 同一入口的级联删除；
-- `model.update_aabbs(..., durable=True)`——生产直写事务路径（指针 + 房间任务 + epoch 同事务）；
+- `model.update_aabbs(..., durable=True)`——生产直写事务路径（指针 + epoch 同事务；房间归属随该库任务的房间段整库算，ADR-072 D4 / D5）；
 - `spatial.tree_status()`——空间树九键指纹（/health `spatial_tree` 同源）；
 - `spatial.tree_dump()`——内存树逐条导出（refno/noun/mins/maxs），值级校验
   「树 == 已提交指针」用（`testbed/spatial_tree_8000.py` 的每窗断言就是它）。
@@ -172,9 +170,9 @@ v_port=8071）；`full_init` 拿的是 testbed 项目副本的锁，测试期间
 ## 已知代价与坑
 
 - 长任务（整库生成等）期间 Ctrl+C 不能立刻中断 Rust 侧，只能等当前调用返回。
-- 零售组合（`apply_file` / `drain_data` / `room.drain` / `model.gen*`）**不会**像
-  批次闭环那样自动收尾提交后副作用——收工前依次调 `incr.drain_side_effects()`
-  与 `spatial.reconcile()`（`execute_manual` 的队列闭环内置这些，无需手调）。
+- 零售组合（`apply_file` / `model.gen*`）收工前只需 `spatial.persist()` 把内存树写盘；
+  `incr.drain_data` / `incr.drain_side_effects` / `room.drain|enqueue` / `spatial.status|reconcile`
+  与 `db.pending_model_units|window_blocks|root_attempts` 随第二条异步账退役（ADR-072 D5）。
 - `db.query` 返回干净 JSON（`Thing` 转简单形态），与 HTTP API 字段同源。
 - `parse.element` 读的是文件里真存了的持久属性（e3d-io 直读，不补模板默认值）；`sesno` 字段是这次读取钉住的会话，`name` 以文件内记录为准，可能为空。
 - SurrealDB 服务端必须用仓库自带的 fork 2.1.4（`scripts/Start-Surreal8009.ps1`），

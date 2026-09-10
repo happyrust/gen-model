@@ -34,7 +34,6 @@ use aios_core::tool::db_tool::{db1_dehash, db1_hash};
 use aios_core::{build_cate_relate, get_db_option};
 use aios_database::data_interface::tidb_manager::AiosDBManager;
 use aios_database::fast_model::cal_model::{update_cal_bran_component, update_cal_equip};
-use aios_database::fast_model::room_model::build_room_relations;
 use aios_database::versioned_db::database::*;
 use aios_database::{run_app, run_cli};
 use bevy_reflect::List;

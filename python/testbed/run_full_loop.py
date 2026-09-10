@@ -147,17 +147,14 @@ def main() -> int:
     check("无缺失 mesh（刚 force 生成过）", not export.get("missing_meshes"),
           brief(export.get("missing_meshes", []), 120))
 
-    # ── 6. 房间 + 零售组合收尾三件套 ────────────────────────────────────────
-    print("\n== 房间与收尾 ==")
-    drained = aios_db.room.drain()
-    check("room.drain", isinstance(drained, dict), brief(drained))
-    side_effects = aios_db.incr.drain_side_effects()
-    check("incr.drain_side_effects", isinstance(side_effects, int), f"{side_effects} 条")
-    reconciled = aios_db.spatial.reconcile()
+    # ── 6. 空间树落盘 ──────────────────────────────────────────────────────
+    # 房间 drain / 副作用 drain / 空间 reconcile 三件套随第二条异步账退役（ADR-072 D5）：
+    # 模型、房间、空间树都在 dbnum 任务内就地算完落库，收工只剩把内存树写盘。
+    print("\n== 收尾 ==")
     persisted = aios_db.spatial.persist()
-    status = aios_db.spatial.status()
-    check("spatial.reconcile+persist", isinstance(reconciled, int),
-          f"收敛 {reconciled} 条，persist={persisted}，status={brief(status, 100)}")
+    tree = aios_db.spatial.tree_status()
+    check("spatial.persist", isinstance(persisted, bool),
+          f"persist={persisted}，tree={brief(tree, 100)}")
 
     # ── 汇总 ────────────────────────────────────────────────────────────────
     print(f"\n{'全部通过' if not failures else '失败项：' + ', '.join(failures)}")

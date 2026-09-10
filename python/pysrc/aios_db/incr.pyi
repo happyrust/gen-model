@@ -12,14 +12,8 @@ def execute_manual(
 ) -> dict[str, Any]:
     """扫描 + 入队 + 当场消费到空（等价一次手动更新执行）。"""
 
-def drain_data() -> int:
-    """消化 durable pending 的前两个数据阶段，返回消化条数。"""
-
 def resolve_window(path: str, skip_cata: bool = False) -> dict[str, Any]:
     """只读预览下一增量窗口（不执行、不动水位；连接层即可用）。"""
-
-def drain_side_effects() -> int:
-    """消化 SystDerived / RefRevMaintain 副作用（不含空间收敛），返回完成数。"""
 
 def queue_pause() -> bool:
     """暂停队列出队（持久化）。"""

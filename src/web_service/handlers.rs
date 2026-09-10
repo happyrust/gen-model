@@ -687,24 +687,15 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         &mut degraded,
         || Value::Null,
     );
-    // room_build 自带 2 秒上限（room_build_health_from），降级形状也是它自己渲染的。
-    let mut room_build = crate::fast_model::room_model::room_build_health().await;
-    // 常驻房间模型（`room_resident_model` 开关）：启动初始化的结局 + 每一路当前模型的统计；
-    // 无几何的在册面板按库点名，限定域之外的库单独成一句（第 5 轮 Q20 (a)）。哪些库在
-    // 限定域里由这里对 `watch_scope` 说——房间文件自己不认识它。进程内读数，不套预算。
-    // P4 之后还多一格 `last_swap`：最近一次换代的 diff 摘要与护栏结论（拓扑变了而这一轮
-    // 一块面板目标都没碰到它 = 账本触发漏了，只出声不标脏）。
-    if let Value::Object(map) = &mut room_build {
-        let mut resident = crate::fast_model::room_resident::resident_health(
+    // 房间流程退役（t-678）：全量重建的盖章 / 对账那一格随 `room_model` 的 StartupRoomBuild
+    // 一族没了，启动对比的 `reference` / `startup_compare` 随 `room_startup` 没了。这一格
+    // 只剩常驻房间模型自己的统计——无几何的在册面板按库点名，限定域之外的库单独成一句
+    // （第 5 轮 Q20 (a)）。哪些库在限定域里由这里对 `watch_scope` 说。进程内读数，不套预算。
+    let room_build = json!({
+        "resident": crate::fast_model::room_resident::resident_health(
             crate::data_interface::watch_scope::admits,
-        );
-        // 启动对比（d-42 §4.7）再加两格：`reference`（上次成功结算所依据的文件版本与拓扑摘要，
-        // 读库、自带 2 秒上限）与 `startup_compare`（本进程最近一次对比的回执，进程内）。
-        if let Value::Object(resident) = &mut resident {
-            resident.extend(crate::fast_model::room_startup::startup_health().await);
-        }
-        map.insert("resident".to_string(), resident);
-    }
+        )
+    });
     let read_through = state.element_attributes.health().await;
     let source_snapshot =
         crate::data_interface::mdb_memory_store::get(&state.identity.project, &state.identity.mdb);
@@ -3200,52 +3191,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn every_health_db_section_runs_on_a_budget() {
-        let source = include_str!("handlers.rs");
-        let body = source
-            .split_once("pub async fn health(")
-            .expect("health handler must exist")
-            .1
-            .split_once("pub async fn trace(")
-            .expect("health 之后是 trace")
-            .0;
-
-        // `load_window_blocks` / `spatial_reconcile_status` / `model_pending_status` 三格随第二条
-        // 异步账退了（ADR-072 D5）；回来一个即红。
-        for retired in ["load_window_blocks", "spatial_reconcile_status", "model_pending_status"] {
-            assert!(!body.contains(retired), "{retired} 已随 pending 账退役，不得回到 /health: {body}");
-        }
-        for section in [
-            "parse_error::snapshot()",
-            "geom_error::snapshot()",
-            "spatial_tree_status()",
-        ] {
-            let at = body
-                .find(section)
-                .unwrap_or_else(|| panic!("{section} 必须还在 /health 里: {body}"));
-            let before = &body[..at];
-            let budget_at = before
-                .rfind("within_health_budget(")
-                .unwrap_or_else(|| panic!("{section} 必须套在 within_health_budget 里: {body}"));
-            assert!(
-                !before[budget_at..].contains(".await"),
-                "{section} 与它前面那个 within_health_budget 之间不该再有 .await——说明它没被套住: {body}"
-            );
-        }
-
-        // room_build 是唯一的豁免：它自带 ROOM_BUILD_HEALTH_TIMEOUT。
-        assert!(
-            body.contains("room_build_health()"),
-            "room_build 必须来自 room_model 的共享渲染器（含它自己的超时）: {body}"
-        );
-        // 超时不能装作没发生：降级分项名要摆出来，否则 `null` 分不出「表空」
-        // 还是「没答上来」。
-        assert!(
-            body.contains("\"degraded_sections\""),
-            "超时分项必须记名: {body}"
-        );
-    }
 
     #[test]
     fn health_and_model_ensure_expose_initialization_contract() {
@@ -3365,40 +3310,6 @@ mod tests {
         );
     }
 
-    /// `/health` 的 `spatial_reconcile` / `spatial_tree` / `room_build` 字段。
-    ///
-    /// 值级形状由渲染器旁边的单测钉住（side_effect_pending 四键 / aabb_tree
-    /// 九键），这里钉的是接线纪律：两个键必须在、读库失败的降级必须走共享的
-    /// 同键渲染器而不是在 handler 里手搓 JSON——手搓正是这两个形状此前
-    /// 靠肉眼保持一致的原因。
-    #[test]
-    fn health_routes_spatial_and_room_status_through_the_shared_renderers() {
-        let source = include_str!("handlers.rs");
-        let body = source
-            .split_once("pub async fn health(")
-            .expect("health handler must exist")
-            .1
-            .split_once("pub async fn update_preview(")
-            .expect("health 之后是 update_preview")
-            .0;
-
-        for key in ["\"spatial_tree\"", "\"room_build\""] {
-            assert!(body.contains(key), "health 必须暴露 {key}: {body}");
-        }
-        // `spatial_reconcile` 那一格随空间意图行退了（ADR-072 D5）：没有 pending 的空间收敛可报。
-        assert!(
-            !body.contains("\"spatial_reconcile\"") && !body.contains("spatial_reconcile_error_status"),
-            "spatial_reconcile 已随第二条异步账退役: {body}"
-        );
-        assert!(
-            body.contains("spatial_tree_status()"),
-            "spatial_tree 必须来自 aabb_tree 的共享渲染器: {body}"
-        );
-        assert!(
-            body.contains("room_build_health()"),
-            "room_build 必须来自 room_model 的共享渲染器: {body}"
-        );
-    }
 
     /// 非空间副作用补偿队列（SystDerived / RefRevMaintain）已退役（ADR-071 D9，d-300）：
     /// /health 不再有 `side_effect_pending` 一格，也没有复活端点。回来一个即红。

@@ -59,7 +59,7 @@
 //!
 //! 旧发布事务除了几何行还挂着三样，这里一并接回来（P3）：
 //!
-//! - **房间派生面**（[`crate::fast_model::room_publication`]）。被对账掉的来源两个方向的
+//! - **房间派生面**（[`room_edges_to_clear`]）。被对账掉的来源两个方向的
 //!   房间边跟着**删除那一块**走；拿到新几何的来源排一次房间重算，跟着**回执那一块**走。
 //!   两笔不能对调：清边落在删除后面的块，中途失败就留下一批指着已删几何的悬空边，而下一轮
 //!   对账再也看不见那些几何；排重算落在前面的块，任务一被消费就在照着只写了一半的几何算
@@ -75,6 +75,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use aios_core::RefnoEnum;
 use anyhow::Context;
 use e3d_io::refno::RefNo;
 use e3d_model::elmodl::GeometryId;
@@ -89,10 +90,54 @@ use crate::fast_model::e3d_model_service::{ModelTarget, geometry_source_refno, t
 use crate::fast_model::model_memory_store::{
     ModelMemoryStore, ProjectedGeometry, ProjectedShape, ProjectionScope, RootReceipt, packed_refno,
 };
-use crate::fast_model::room_publication::{
-    RoomEffectPolicy, RoomPublicationEffects, render_room_publication_effects,
-    room_publication_effects,
-};
+/// 一条 `DELETE … <->room_relate` 最多点名多少个来源（与 `delete_inst_relate_subtree` 的
+/// 分块同一量级）。
+const ROOM_EDGE_DELETE_CHUNK: usize = 300;
+
+/// 这一批落库要清掉房间边的来源元素（按 refno 排序去重）。
+///
+/// 从 `room_publication.rs` 搬过来的（房间流程退役，t-678）：那个模块整体退了，可「删掉一条
+/// 几何就要清掉它的房间边」是数据面行为——两张房间边表留着（d-757），不清就是悬空边。
+/// 原来那份还带一个 `recalc` 名单去排房间待办，随房间队列一起没了，所以只剩这一个名单；
+/// `RoomEffectPolicy` / `room_incremental` 两个形参在退役前就已经是空壳（渲染器里一句
+/// `let _ = (policy, room_incremental);`），一并去掉。
+///
+/// 拿到新几何的来源不清边——重算自己先清后写，两个名单互不相交。
+fn room_edges_to_clear<'a>(
+    upserts: impl IntoIterator<Item = (&'a GeometryId, RefNo, &'a str)>,
+    removals: &[GeometryId],
+    legacy_sources: &BTreeSet<RefnoEnum>,
+) -> anyhow::Result<Vec<RefnoEnum>> {
+    let mut kept: BTreeSet<RefnoEnum> = BTreeSet::new();
+    for (geometry_id, refno, _noun) in upserts {
+        if matches!(geometry_id, GeometryId::Element { .. }) {
+            kept.insert(refno_from_e3d(refno));
+        }
+    }
+    let mut cleared: BTreeSet<RefnoEnum> = legacy_sources.clone();
+    for geometry_id in removals {
+        if let GeometryId::Element { refno } = geometry_id {
+            let refno = crate::fast_model::e3d_model_service::parse_refno(refno)
+                .with_context(|| format!("removed geometry {geometry_id}"))?;
+            cleared.insert(refno_from_e3d(refno));
+        }
+    }
+    cleared.retain(|refno| !kept.contains(refno));
+    Ok(cleared.into_iter().collect())
+}
+
+/// 渲染成落库事务里的清边语句。名单为空时渲染成空串。
+fn render_room_edge_clear(cleared: &[RefnoEnum]) -> String {
+    let mut out = String::new();
+    for chunk in cleared.chunks(ROOM_EDGE_DELETE_CHUNK) {
+        let keys: Vec<String> = chunk.iter().map(RefnoEnum::to_pe_key).collect();
+        out.push_str(&crate::data_interface::helper::render_room_membership_delete(
+            &keys,
+        ));
+        out.push('\n');
+    }
+    out
+}
 
 /// 落库介质。**换掉的只是介质**：两种模式下渲染出来的行逐字相同，本模块也不因此分叉——
 /// 渲染那一半根本拿不到介质（看 [`render_records`] 的签名），所以它想分叉也分不出来。
@@ -271,7 +316,6 @@ pub async fn persist_dbnum_in_chunks(
             store,
             root,
             chunk_size,
-            RoomEffectPolicy::FullDatabase,
         )
         .await?;
         total.upserted += rows.upserted;
@@ -299,7 +343,6 @@ pub async fn persist_root_on(
         store,
         root,
         PERSIST_CHUNK,
-        RoomEffectPolicy::Directed,
     )
     .await
 }
@@ -310,9 +353,8 @@ async fn persist_root_in_chunks(
     store: &ModelMemoryStore,
     root: RefNo,
     chunk_size: usize,
-    room_policy: RoomEffectPolicy,
 ) -> anyhow::Result<PersistedRows> {
-    persist_root_chunks_impl(target, store, root, chunk_size, room_policy).await
+    persist_root_chunks_impl(target, store, root, chunk_size).await
 }
 
 /// 一组最多装这么多根（[`persist_roots_batched`]）。一组是失败的赔付边界：组内任一块失败，
@@ -548,7 +590,6 @@ pub async fn persist_roots_batched(
     store: &ModelMemoryStore,
     dbnum: u32,
     roots: &[RefNo],
-    room_policy: RoomEffectPolicy,
 ) -> anyhow::Result<BatchedPersist> {
     let limits = crate::data_interface::tx_limits::data_tx_limits();
     persist_roots_batched_with_chunk_bytes(
@@ -556,7 +597,6 @@ pub async fn persist_roots_batched(
         store,
         dbnum,
         roots,
-        room_policy,
         limits.max_bytes.max(64 * 1024),
     )
     .await
@@ -568,7 +608,6 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
     store: &ModelMemoryStore,
     dbnum: u32,
     roots: &[RefNo],
-    room_policy: RoomEffectPolicy,
     chunk_bytes: usize,
 ) -> anyhow::Result<BatchedPersist> {
     let mut out = BatchedPersist::default();
@@ -583,7 +622,6 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
         );
     }
     let db = target.db;
-    let room_incremental = crate::options::room_incremental();
     // 只给对账基线快照当作用域键（[`GeometryBaseline`]：换窗即失效）。它**不再**分叉任何写法：
     // 清边 / 空间收敛在窗口内外一律就地做（ADR-072 D4）。
     let baseline_window = crate::data_interface::batch_worker::active_data_window();
@@ -626,8 +664,6 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
             group,
             &existing,
             chunk_bytes,
-            room_policy,
-            room_incremental,
         )
         .await
         {
@@ -685,8 +721,6 @@ async fn persist_group(
     group: &[RootShare],
     existing: &[ExistingGeometry],
     chunk_bytes: usize,
-    room_policy: RoomEffectPolicy,
-    room_incremental: bool,
 ) -> anyhow::Result<GroupOutcome> {
     // 组内记录按 record_id 去重（嵌套根共有的记录只渲一次），保持根序。
     let mut rendered_ids = BTreeSet::new();
@@ -728,7 +762,7 @@ async fn persist_group(
         }
     }
 
-    let effects = room_publication_effects(
+    let cleared_room_edges = room_edges_to_clear(
         records.iter().map(|record| {
             (
                 &record.geometry_id,
@@ -739,14 +773,7 @@ async fn persist_group(
         &removed_geometry,
         &BTreeSet::new(),
     )?;
-    let clearing = RoomPublicationEffects {
-        cleared: effects.cleared.clone(),
-        recalc: Vec::new(),
-    };
-    let recalculation = RoomPublicationEffects {
-        cleared: Vec::new(),
-        recalc: effects.recalc.clone(),
-    };
+
     let deferred_refresh = records
         .iter()
         .filter(|record| record.tube.is_none())
@@ -826,7 +853,7 @@ async fn persist_group(
     }
 
     let chunk_count = geometry_chunks.len() + receipt_chunks.len();
-    let has_preamble = !removals.is_empty() || !branches.is_empty() || !clearing.cleared.is_empty();
+    let has_preamble = !removals.is_empty() || !branches.is_empty() || !cleared_room_edges.is_empty();
     let statement_count = chunk_count.max(usize::from(has_preamble));
     if statement_count == 0 {
         return Ok(GroupOutcome {
@@ -860,11 +887,7 @@ async fn persist_group(
                 &removals.iter().map(String::as_str).collect::<Vec<_>>(),
             );
             // 清边跟着删几何那一块走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
-            statements.push_str(&render_room_publication_effects(
-                &clearing,
-                room_policy,
-                room_incremental,
-            ));
+            statements.push_str(&render_room_edge_clear(&cleared_room_edges));
         }
         let touches_geometry;
         if index < geometry_chunks.len() {
@@ -877,11 +900,7 @@ async fn persist_group(
             }
         }
         if is_last {
-            statements.push_str(&render_room_publication_effects(
-                &recalculation,
-                room_policy,
-                room_incremental,
-            ));
+
         }
         if touches_geometry {
             statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
@@ -911,7 +930,7 @@ async fn persist_group(
         commits,
         refresh: deferred_refresh,
         boxes: tree_boxes,
-        cleared: effects.cleared,
+        cleared: cleared_room_edges,
     })
 }
 
@@ -1107,7 +1126,6 @@ async fn persist_root_chunks_impl(
     store: &ModelMemoryStore,
     root: RefNo,
     chunk_size: usize,
-    room_policy: RoomEffectPolicy,
 ) -> anyhow::Result<PersistedRows> {
     let db = target.db;
     let scope = ProjectionScope::Current;
@@ -1173,7 +1191,7 @@ async fn persist_root_chunks_impl(
     // e3d-model 接管生成之后断了一段时间；现在从投影记录上重新折出来：
     // 拿到新几何的来源排一次房间重算，被移除的来源两个方向的房间边一并清掉。
     // `legacy_sources` 空着——那是 pre-e3d 清理路径才有的名单，落库这一侧没有。
-    let effects = room_publication_effects(
+    let cleared_room_edges = room_edges_to_clear(
         records.iter().map(|record| {
             (
                 &record.geometry_id,
@@ -1184,7 +1202,6 @@ async fn persist_root_chunks_impl(
         &removed_geometry,
         &BTreeSet::new(),
     )?;
-    let room_incremental = crate::options::room_incremental();
     // 清边跟着删除走、排重算跟着回执走，两笔不能对调：
     //
     // - 清边排在**删几何那一块**。删了行却把清边留到后面的块，中途失败就留下一批指着
@@ -1192,14 +1209,7 @@ async fn persist_root_chunks_impl(
     //   不会被清——`fn::room_relate_of` 照样把它们取出来。
     // - 排重算排在**盖章那一块**。任务一进队列就可能被消费，排在前面等于让房间重算
     //   照着只写了一半的几何算归属；排在最后，中途失败就整个不排，下一轮重新走一遍。
-    let clearing = RoomPublicationEffects {
-        cleared: effects.cleared.clone(),
-        recalc: Vec::new(),
-    };
-    let recalculation = RoomPublicationEffects {
-        cleared: Vec::new(),
-        recalc: effects.recalc.clone(),
-    };
+
     let deferred_refresh = records
         .iter()
         .filter(|record| record.tube.is_none())
@@ -1264,21 +1274,13 @@ async fn persist_root_chunks_impl(
                 &removals.iter().map(String::as_str).collect::<Vec<_>>(),
             );
             // 清边跟着删几何那一块走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
-            statements.push_str(&render_room_publication_effects(
-                &clearing,
-                room_policy,
-                room_incremental,
-            ));
+            statements.push_str(&render_room_edge_clear(&cleared_room_edges));
         }
         if let Some((_, rendered)) = chunks.get(index) {
             statements.push_str(rendered);
         }
         if index + 1 == chunk_count {
-            statements.push_str(&render_room_publication_effects(
-                &recalculation,
-                room_policy,
-                room_incremental,
-            ));
+
             if let Some(receipt) = receipt.as_ref() {
                 statements.push_str(&render_receipt_version(root, receipt, None)?);
             }
@@ -1315,7 +1317,7 @@ async fn persist_root_chunks_impl(
         crate::fast_model::aabb_tree::converge_tree_after_persist(
             &deferred_refresh,
             tree_boxes,
-            &effects.cleared,
+            &cleared_room_edges,
         )
         .await;
     }
@@ -2983,7 +2985,7 @@ mod tests {
         );
 
         let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
-        let rows = persist_root_in_chunks(target, &store, root, 1, RoomEffectPolicy::Directed)
+        let rows = persist_root_in_chunks(target, &store, root, 1)
             .await
             .expect("persist");
         assert_eq!(rows.upserted, 3);
@@ -3075,7 +3077,6 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[ancestor_root, NESTED_ROOT],
-            RoomEffectPolicy::Directed,
         )
         .await
         .expect("batched persist");
@@ -3125,7 +3126,6 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[root],
-            RoomEffectPolicy::Directed,
         )
         .await
         .expect("first batch");
@@ -3148,7 +3148,6 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[root],
-            RoomEffectPolicy::Directed,
         )
         .await
         .expect("second batch");
@@ -3206,7 +3205,6 @@ mod tests {
                         &store,
                         BATCH_DBNUM,
                         &[root],
-                        RoomEffectPolicy::Directed,
                     )
                     .await
                     .expect("first batch");
@@ -3228,7 +3226,6 @@ mod tests {
                         &store,
                         BATCH_DBNUM,
                         &[root],
-                        RoomEffectPolicy::Directed,
                     )
                     .await
                     .expect("second batch");
@@ -3307,7 +3304,6 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[root],
-            RoomEffectPolicy::Directed,
         )
         .await
         .expect("first batch");
@@ -3358,7 +3354,6 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[root],
-            RoomEffectPolicy::Directed,
         )
         .await
         .expect("second batch");
@@ -3500,7 +3495,6 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[root],
-            RoomEffectPolicy::Directed,
             1,
         )
         .await
@@ -3529,7 +3523,6 @@ mod tests {
             &store,
             BATCH_DBNUM,
             &[RefNo::new(24383, 1), RefNo::new(1, 1)],
-            RoomEffectPolicy::Directed,
         )
         .await
         .expect_err("foreign root must be refused");
@@ -3724,7 +3717,7 @@ mod tests {
         );
         let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
         assert!(
-            persist_root_in_chunks(target, &store, root, 1, RoomEffectPolicy::Directed)
+            persist_root_in_chunks(target, &store, root, 1)
                 .await
                 .is_err()
         );
@@ -3740,7 +3733,7 @@ mod tests {
                 ..ProjectionCommit::default()
             }],
         );
-        persist_root_in_chunks(target, &store, root, 1, RoomEffectPolicy::Directed)
+        persist_root_in_chunks(target, &store, root, 1)
             .await
             .expect("persist");
         assert_eq!(publication_status(&db).await, "ready");
@@ -3764,7 +3757,7 @@ mod tests {
             }],
         );
         let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
-        persist_root_in_chunks(target, &store, root, 1, RoomEffectPolicy::Directed)
+        persist_root_in_chunks(target, &store, root, 1)
             .await
             .expect("persist");
         assert_eq!(publication_status(&db).await, "stale");

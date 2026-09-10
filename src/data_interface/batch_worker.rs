@@ -1586,40 +1586,8 @@ async fn execute_frozen_batch(
             all_roots_ok: true,
             dead_roots: 0,
         };
-        registry.set_stage(&job.task_id, "rooms");
-        let rooms_ok = match frozen_source.as_ref() {
-            Some(source) => {
-                match crate::fast_model::room_task::finish_task_rooms(
-                    mgr,
-                    job.dbnum,
-                    file_latest_sesno,
-                    &model_outcome,
-                    source,
-                    &mut result,
-                )
-                .await
-                {
-                    // `Ok(false)` 的原因已由房间段记进 `result`。
-                    Ok(done) => done,
-                    Err(error) => {
-                        result.status = ManualUpdateStatus::Partial;
-                        result.warnings.push(format!(
-                            "房间阶段未完成，模型那一枚照盖、房间那一枚不盖 dbnum={} sesno={file_latest_sesno}: {error:#}",
-                            job.dbnum
-                        ));
-                        false
-                    }
-                }
-            }
-            None => {
-                result.status = ManualUpdateStatus::Partial;
-                result.warnings.push(format!(
-                    "房间阶段缺冻结源，模型那一枚照盖、房间那一枚不盖 dbnum={} sesno={file_latest_sesno}",
-                    job.dbnum
-                ));
-                false
-            }
-        };
+        // 任务末的整库房间段随房间流程退役（t-678）：房间归属改由生成路径逐根随模型块算并
+        // 同事务写边（t-799），任务收尾这一笔不再有房间那一枚可盖。
         registry.set_stage(&job.task_id, "task_end");
         match crate::data_interface::task_end::commit_task_end_on(
             &aios_core::SUL_DB,
@@ -1628,8 +1596,7 @@ async fn execute_frozen_batch(
                 target_sesno: file_latest_sesno,
                 target_time: end_time,
                 model: Some(model_outcome),
-                rooms: rooms_ok
-                    .then_some(crate::data_interface::task_end::TaskRoomOutcome { ok: true }),
+                rooms: None,
                 // Ref0 统计已在数据批次应用之后那一笔序列化（上面 `ref0_snapshot`），
                 // 这一笔只盖水位与写入标记。
                 info: None,
@@ -2390,7 +2357,6 @@ async fn persist_transform_roots(
     roots: &[String],
 ) -> anyhow::Result<std::collections::HashMap<String, String>> {
     use crate::fast_model::model_db_adapter::{PersistTarget, persist_roots_batched};
-    use crate::fast_model::room_publication::RoomEffectPolicy;
     let refnos = roots
         .iter()
         .map(|root| crate::fast_model::e3d_model_service::parse_refno(root))
@@ -2400,7 +2366,6 @@ async fn persist_transform_roots(
         crate::fast_model::model_memory_store::ModelMemoryStore::global(),
         dbnum,
         &refnos,
-        RoomEffectPolicy::Directed,
     )
     .await?;
     Ok(batched
@@ -3153,15 +3118,10 @@ async fn room_round(mgr: &Arc<AiosDBManager>) -> IdleOutcome {
         });
         return IdleOutcome::Settled;
     }
-    // 只消费已经恢复到内存的 e3d-model 投影与启动时预建的房间参照；没有缺口时是零计算、零写入。
-    match crate::fast_model::room_task::recover_missing_room_watermarks(mgr).await {
-        Ok(completed) if completed > 0 => IdleOutcome::MoreWork,
-        Ok(_) => IdleOutcome::Settled,
-        Err(error) => {
-            println!("恢复房间水位失败（保留模型水位，稍后仅重试房间阶段）: {error:#}");
-            IdleOutcome::Failed
-        }
-    }
+    // 补房间水位那一路随房间流程退役（t-678）：房间归属改由生成路径逐根算并同事务写边
+    // （t-799），没有「模型追平了、房间还欠着」这种缺口可补，空闲轮这一格恒定收敛。
+    let _ = mgr;
+    IdleOutcome::Settled
 }
 
 /// 把领域进度事件接到任务注册表（计数）与 WS 广播（`http_api` 门内）。
@@ -3636,29 +3596,6 @@ mod tests {
         );
     }
 
-    /// 房间阶段开关门住空闲轮的房间那一段——它只剩启动补缺（`recover_missing_room_watermarks`）；
-    /// 逐目标的房间重算行与「收一轮房间归属重算」随第二条异步账退了（ADR-072 D5）。
-    #[test]
-    fn room_stage_gate_covers_the_idle_consumer() {
-        let source = include_str!("batch_worker.rs");
-        let idle = source
-            .split_once("async fn room_round(")
-            .expect("idle room round")
-            .1
-            .split_once("/// 把领域进度事件接到任务注册表")
-            .expect("idle room round boundary")
-            .0;
-        let idle_gate = idle
-            .find("if !crate::options::room_incremental()")
-            .expect("空闲房间轮必须检查房间阶段开关");
-        let repair = idle
-            .find("recover_missing_room_watermarks(mgr)")
-            .expect("启动补房间段");
-        assert!(idle_gate < repair, "房间阶段门必须早于启动补缺: {idle}");
-        for needle in ["count_room_targets", "drain_rooms", "has_pending_spatial_work"] {
-            assert!(!idle.contains(needle), "房间轮不得再消化 pending 行 `{needle}`: {idle}");
-        }
-    }
 
     /// ADR-072 D1 的开工写点：标记必须落在第一笔写库**之前**，而且落之前先把上一次崩溃
     /// 留下的 `writing` 回退掉——顺序反过来就把「该退到哪」这条唯一的证据抹了。
@@ -4564,66 +4501,6 @@ mod tests {
         assert!(!production.contains("initialization_defers_model_phase"));
     }
 
-    /// 任务收尾的阶段顺序：房间 → 一笔收尾盖三水位（ADR-065 G2 (i)，修 d-73 的顺序）。
-    /// publish 阶段与 `model_complete` 那道整库证据闸随 ADR-072 D4 退了，初始化发布 run 随
-    /// ADR-071 S5 退了：Task 不再发布文件轮次、不再回问库开完成收据、不再等 ACK。
-    /// 计划 §6-4 源码钉：`execute_frozen_batch` 一线不含 `publish` / `file_round` /
-    /// `model_update_pending` / `side_effect_pending` / `SideEffectCompensator`。
-    #[test]
-    fn the_task_tail_runs_rooms_then_stamp_without_a_publish_stage() {
-        let source = include_str!("batch_worker.rs");
-        let body = source
-            .split_once("async fn execute_frozen_batch(")
-            .expect("batch wrapper")
-            .1
-            .split_once("fn batch_round_complete(")
-            .expect("batch wrapper boundary")
-            .0;
-        for retired in [
-            "blocks_dbnum(",
-            "finish_ready_initializations(",
-            "wait_for_task_root_acks(",
-            "initialization_source(",
-            "publish_model_file_round(",
-            "publish_completed_file_round(",
-            "complete_model_task_on(",
-            "CompletionReceipt",
-            "finish_file_room_round(",
-            "verdict_for(",
-            "file_round",
-            "model_update_pending",
-            "side_effect_pending",
-            "SideEffectCompensator",
-        ] {
-            assert!(
-                !body.contains(retired),
-                "publish 阶段与第二条异步账已退役，Task 不得再有 {retired}: {body}"
-            );
-        }
-        // rustfmt 会把长调用折行，去掉全部空白后再定位，钉的是「调用存在 + 阶段顺序」。
-        let body: String = body.split_whitespace().collect();
-        let rooms = body
-            .find("room_task::finish_task_rooms(")
-            .expect("Task room stage");
-        // 收尾那一笔有两处：数据批次应用之后的 Ref0 统计快照（`ref0_snapshot::snapshot_at` 之后、
-        // 与模型无关、排在房间之前），与房间之后盖水位的那一笔。钉的是后者。
-        let snapshot = body
-            .find("ref0_snapshot::snapshot_at(")
-            .expect("Ref0 snapshot after the data batch");
-        let stats_tail = body
-            .find("task_end::commit_task_end_on(")
-            .expect("statistics tail");
-        let stamp = body
-            .rfind("task_end::commit_task_end_on(")
-            .expect("Task end watermark");
-        assert!(
-            snapshot < stats_tail && stats_tail < rooms,
-            "统计快照排在数据批次之后、房间之前，不等模型"
-        );
-        assert!(rooms < stamp, "房间排在盖章之前（d-73）");
-        // 回执的双水位判决读镜像 + 本任务单元清单，不再整表普查。
-        assert!(body.contains("dbnum_consistency::task_verdict("));
-    }
 
     /// issue #16 的护栏钉在源码结构上：DESI 收口预检必须挡在一切执行工作之前——
     /// 拖到收口才发现确定性缺失，等于整批白跑后无声卡死，且预检失败必须以 eprintln

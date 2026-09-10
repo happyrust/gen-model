@@ -5,12 +5,12 @@
 #   1. v_port=8071：conftest 自起的一次性内存 SurrealDB（bin/surreal.exe），
 #      进程退出即全部丢弃——不碰 8009 正式库、也不碰 8019 testbed 库；
 #   2. room_key_word=["ZZ-R-"]：只匹配合成夹具那一间房（/ZZ-R-K100），
-#      room.build_all / room.drain 用的是本配置值，不能像 Rust 测试那样
+#      room.build_all 用的是本配置值，不能像 Rust 测试那样
 #      进程内 clone 覆盖，所以必须钉在这里；
 #   3. meshes_path 指向 tests/.meshes（.gitignore 排除），夹具 zzfx_*.mesh
 #      不混入 testbed/仓库 assets；
-#   4. room_incremental=true：让 update_aabbs(durable=True) 的直写事务发布
-#      room_recalc 任务（epoch bump 不受此键影响，但那条用例要看 pending 行）。
+#   4. room_incremental=true：沿用生产直写事务的开关形态（逐目标的房间待办行
+#      随 ADR-072 D5 退役，这一键如今只影响直写事务本身，不再发布房间任务）。
 #
 # project_path 沿用 testbed 项目副本：full_init 的单实例锁与 manager 目录解析
 # 需要它（已被 run_full_loop.py 验证可用）。测试期间勿并行跑 testbed 脚本。

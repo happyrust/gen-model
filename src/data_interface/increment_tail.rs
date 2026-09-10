@@ -146,11 +146,6 @@ pub(crate) fn render_finalize_tail(
     window_statements: &[String],
 ) -> FinalizeRender {
     let mut statements: Vec<String> = Vec::new();
-    if plan.room_rebuild_required {
-        statements.push(crate::fast_model::room_model::render_room_rebuild_required(
-            plan.room_rebuild_reason.as_deref(),
-        ));
-    }
     if let Some(lazy_roots) = plan.lazy_roots {
         statements.push(render_model_root_observation(dbnum, lazy_roots, end_sesno));
     }
