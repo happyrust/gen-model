@@ -1,6 +1,6 @@
 # 去掉发布阶段：任务写库带写入标记，中断按 sesno 回退重做（ADR-072 计划）
 
-> 状态：**已批准**（2026-09-10 Plannotator `{"decision":"approved"}`；§1-15 / §4.5 / §9-6、9-7 的「库读白名单」是批准后按用户 17:15 口径补入的，ADR-072 D5 同；§4.3-2「不删 `pe` 顶点」与 §4.5 / §9-7「对账读保留」是 18:5x–19:05 用户拍板后按 d-570 / d-568 修订的，ADR-072 D2 / D5 / W3 同）。共识 **d-441**（grill-with-docs 第 1 轮 Q1–Q10，2026-09-10 全按推荐拍板）+ 第 2 轮 Q11–Q15 全按推荐 + 用户追加「全面退役 `model_update_pending`」。ADR：`docs/adr/ADR-072-the-publish-stage-retires-tasks-write-under-a-write-marker-and-roll-back-by-sesno.md`（已接受）。
+> 状态：**已批准**（2026-09-10 Plannotator `{"decision":"approved"}`；§1-15 / §4.5 / §9-6、9-7 的「库读白名单」是批准后按用户 17:15 口径补入的，ADR-072 D5 同；§4.3-2「不删 `pe` 顶点」与 §4.5 / §9-7「对账读保留」是 18:5x–19:05 用户拍板后按 d-570 / d-568 修订的，ADR-072 D2 / D5 / W3 同；§1-3 / §4.3 / §4.4 / §5 R1 / §6-2 / §9-8、9-9「回退按本任务写过的面退、重排必须自己补齐、RoomOnly 崩溃恢复整库 force」是 21:xx 用户拍板后按 d-732 修订的，ADR-072 D2 / D3 / W6 / 约束 5 同）。共识 **d-441**（grill-with-docs 第 1 轮 Q1–Q10，2026-09-10 全按推荐拍板）+ 第 2 轮 Q11–Q15 全按推荐 + 用户追加「全面退役 `model_update_pending`」。ADR：`docs/adr/ADR-072-the-publish-stage-retires-tasks-write-under-a-write-marker-and-roll-back-by-sesno.md`（已接受）。
 >
 > 工作树：`D:\work\plant-code\old\gen-model-refactor`，分支 `refactor/retire-publish-stage`，基线 `6f0813f6b`（= `e3d-direct` 上 ADR-071 S1–S6 在途成果的整份 WIP 提交）。主树 `gen-model` 不动。
 >
@@ -10,7 +10,7 @@
 
 ## 0. 一句话
 
-一个 dbnum 任务（初始化 / 增量）跑完，把内存结果**同步**写进库，最后盖水位；写库期间库里有一行 `writing{S,T}`，全写完那一笔改成 `finished`；进程死在中途，下次启动或开工见到 `writing` 就把 `sesno > S` 的痕迹删掉、三水位退回 S、从头重跑 S→T。publish 阶段、第二条异步账（`model_update_pending` / `side_effect_pending` / `model_publish_queue`）、任务内一切回读库、`room_published_*` 表，**一次清干净**。
+一个 dbnum 任务（初始化 / 增量）跑完，把内存结果**同步**写进库，最后盖水位；写库期间库里有一行 `writing{S,T}`，全写完那一笔改成 `finished`；进程死在中途，下次启动或开工见到 `writing` 就把本任务写过的面上 `sesno > S` 的痕迹删掉、对应水位退回 S、排能独立补齐这几面的同意图任务从头重跑 S→T（d-732）。publish 阶段、第二条异步账（`model_update_pending` / `side_effect_pending` / `model_publish_queue`）、任务内一切回读库、`room_published_*` 表，**一次清干净**。
 
 ## 1. 口径（拍板汇总）
 
@@ -18,7 +18,7 @@
 |---|---|---|
 | 1 | 任务同步写库；水位只是「全部写完」的终点标记、只供下次对比，不挂令牌 / 收据 / 摘要。**不做** TaskWriter / 通道 / 异步写者 | 16:16 原话；ADR-071 D1「同步」不变 |
 | 2 | 写入标记住 `increment_update_attempt:{dbnum}` 那一行的位置，**改名 `dbnum_write_state:{dbnum}`**；`status = writing / finished`，去 `plan_json`；`finished` 留行 + `finished_at` | Q1 (a) / Q2 (a) / Q15 (a) |
-| 3 | 崩在任何一面中途 → **整库回退到 S**（不分面），再排 S→T 从头跑；谓词 `sesno > S`，不是 `= T` | Q3 (a) |
+| 3 | 崩在任何一面中途 → **本任务写过的面**全部回退到 S（ApplyWindow 三面；ModelOnly 模型 + 房间；RoomOnly 房间），再排**能独立补齐这几面**的同意图任务 S→T；谓词 `sesno > S`，不是 `= T`。RoomOnly 的崩溃恢复一律整库 `force` 重算 | Q3 (a)；2026-09-10 21:xx 修订，d-732（代码 `9e02ec077` 先落） |
 | 4 | 初始化同一套，S = 0，崩溃后 = 整库 wipe 再重排初始化 | Q4 (a) |
 | 5 | publish 删；三个消费者（空间树 / 常驻房间模型 / 查询面）全认内存产出；任务内不回读库 | Q5 (a) |
 | 6 | `room_published_inst` / `room_published_topology` / `room_topology_source` 退役；启动水化从 `inst_relate` 实时行装（d-21） | Q6 (a)；此前「表不退」作废 |
@@ -92,7 +92,7 @@ publish（`publish_model_file_round`，`:2141`）九个子步里 7 件是簿记 
 | `status` | `writing` \| `finished` |
 | `start_sesno` | 本次任务的起点 S（初始化 = 0；ModelOnly = 起点 `model_sesno`；RoomOnly = 当前 `room_sesno`） |
 | `end_sesno` | 目标 T |
-| `intent` | `initialize` \| `apply_window` \| `model_only` \| `room_only` \| `reinitialize`（d-283 的五种意图，回退时决定用哪条清理路） |
+| `intent` | `initialize` \| `apply_window` \| `model_only` \| `room_only` \| `reinitialize`（d-283 的五种意图，回退时决定用哪条清理路；`room_only` 在 recompute 计划 P2 `BatchIntent::RoomOnly` 落地前写不出来——`WriteIntent::RoomOnly.batch_intent()` 今天映 `ApplyWindow` 是占位，P2 要改映 `RoomOnly`，先用测试钉住「不得是 ApplyWindow」） |
 | `started_at` / `finished_at` / `updated_at` | 时刻 |
 
 `plan_json` / `commit_token` / `file_path` 不再有——从头来，不复用旧计划。旧表 `increment_update_attempt` 随 R4 `REMOVE TABLE IF EXISTS`。
@@ -105,19 +105,19 @@ publish（`publish_model_file_round`，`:2141`）九个子步里 7 件是簿记 
 
 ### 4.3 回退算法 `rollback_to_watermark(dbnum, S, intent)`
 
-基于 `prune_above_watermark` 扩成（同一把 `DATA_COMMIT_SERIAL` + `DBNUM_STATE_WRITE_GATE`）：
+基于 `prune_above_watermark` 扩成（同一把 `DATA_COMMIT_SERIAL` + `DBNUM_STATE_WRITE_GATE`）。**`intent` 决定退哪几面**（d-732，ADR-072 D3）：`apply_window` 退 2 + 3 + 4；`model_only` 退 3 + 4；`room_only` 只退 4；第 5 步的 `min` 只写被退的那几枚。
 
 1. `intent = initialize | reinitialize`（S = 0）→ `wipe_dbnum_for_reinit(dbnum)`，完。
-2. 数据面：**谓词删除**，不再 `SELECT id FROM pe … ` 再逐键删（那是原来 `prune_above_watermark` 的写法）。**不删 `pe` 顶点**（2026-09-10 18:5x 用户拍板，d-570；已落 `54795e2e6`）：只删卫星行——noun 表行与 `ATT_UDA` 行按 `dbnum = X AND sesno > S` 删（行上要有 `dbnum` + `sesno`，见 §9-6）。
+2. 数据面（**仅 `apply_window`**）：**谓词删除**，不再 `SELECT id FROM pe … ` 再逐键删（那是原来 `prune_above_watermark` 的写法）。**不删 `pe` 顶点**（2026-09-10 18:5x 用户拍板，d-570；已落 `54795e2e6`）：只删卫星行——noun 表行与 `ATT_UDA` 行按 `dbnum = X AND sesno > S` 删（行上要有 `dbnum` + `sesno`，见 §9-6）。
    - 为什么不删 `pe`：`pe` 是图顶点，`DELETE pe` 会级联带走 `pe_owner:[属主, 槽位]` 那条**属主名下**的成员边；属主这一版没改、不进 S→T 重放窗口时，这条入边补不回来（`docs/evidence/2026-09-10-rollback-predicate-index-measurement.md` §4 在一次性 `memory` 实例上跑出来的，不是读代码推的）。而 `pe` 每 refno 一行最新态，重放的 `INSERT … ON DUPLICATE KEY UPDATE`（列清单 = `element_batch::PE_REPLACE_ASSIGNMENTS`）整行覆盖，先删那一步对 `pe` 从来不是必需的——元素批本来就不删 `pe`（`element_batch` 模块头「pe 行为什么不删」），回退删它等于把那条纪律在恢复路上又破一次。本条原文「回退恰好要这个级联」只论证了模型面那一半，作废。
    - 代价：`sesno > S` 的 `pe` 行在回退之后、重跑之前短暂高于水位，由同一窗口的重放逐行覆盖；只有「重放窗口比崩溃那次更窄」（会话预算截断）才留得下够不着的行，那一档由下一窗覆盖或人工走 `DELETE /dbnums/{dbnum}/data/above/{watermark}`。文件被换回旧版本那一档是 `Reinitialize`，整库 wipe，不走这条路。
    - 钉：`fast_delete::tests::the_rollback_never_deletes_the_pe_vertex_so_the_membership_edge_survives`（任何形态的 `pe` 行删除都不许有）；`direct_window_replay_parity::a_modified_element_keeps_the_membership_edge_its_unchanged_owner_owns`（SITE 名下挂 EQUI、SITE 不进窗口，崩在第一块后回退，成员边仍在，重跑后逐表与一次成功相等）。
-3. 模型面：`DELETE inst_relate / inst_info / tubi_relate WHERE dbnum = X AND direct_model.sesno > S`；`DELETE gen_root WHERE dbnum = X AND source_end_sesno > S`。
-4. 房间面：`DELETE room_relate / room_panel_relate WHERE dbnum = X`（房间本来就是整库重算，不给边加 sesno）。
-5. 水位：`UPDATE dbnum_watermark:{dbnum} SET applied_sesno = math::min([applied_sesno, S]), model_sesno = math::min([model_sesno, S]), room_sesno = math::min([room_sesno, S]), sesno = S, state_revision += 1`。
+3. 模型面（`apply_window` / `model_only`）：`DELETE inst_relate / inst_info / tubi_relate WHERE dbnum = X AND direct_model.sesno > S`；`DELETE gen_root WHERE dbnum = X AND source_end_sesno > S`。
+4. 房间面（三种都退）：`DELETE room_relate / room_panel_relate WHERE in.dbnum = X`（边上没有 `dbnum` 列，谓词落在 `in`；房间本来就是整库重算，不给边加 sesno）。
+5. 水位：`UPDATE dbnum_watermark:{dbnum} SET` ——退了数据面才有 `applied_sesno = math::min([applied_sesno ?: 0, S]), sesno = S`；退了模型面才有 `model_sesno = math::min([model_sesno ?: 0, S])`；总有 `room_sesno = math::min([room_sesno ?: 0, S]), state_revision += 1`。都是 `min` 不是赋值：已经更低的水位不许被抬上来。
 6. 标记：`DELETE dbnum_write_state:{dbnum}`（下一次任务开工重写 `writing`）。
 7. 进程内：镜像格作废并重水化；`mark_aabb_tree_dirty` + 启动判据落到指针重建；常驻房间模型按新 `room_sesno` 换代。
-8. 排队：`enqueue` 该库 S→T（intent 原样）。
+8. 排队：按 ADR-072 D3 表——`apply_window` → `ApplyWindow` S→T；`model_only` → `ModelOnly` S→T（`model_start_sesno = S`）；`room_only` → `RoomOnly`（S = `room_sesno`，T = `model_sesno`，整库 `force`；结构触发的 A* 增量形态只走正常路径）；`initialize` / `reinitialize` → `Reinitialize`。`DiscoveredBatch.applied_sesno` 填**库里的真值**，不填 S（`startup_reconcile::requeue_after_rollback` 今天填 `report.target_watermark`，要改）。**队列合并不得抄短重排窗口**：`batch_queue::enqueue` 的 ModelOnly→ApplyWindow 升格让模型规划基线 = `min(applied, model_start_sesno)`；开工前回退（`execute_frozen_batch`）回退到的 S 低于本批窗口左端时同样以 S 为模型规划基线（§9-8）。
 
 **它不是「还原 S 版本的行」**：一个 Modified 元素的 pe 行被整行替换成 (S, T] 版后，回退**不动它**（第 2 步，d-570），让 S→T 重放的 `ON DUPLICATE KEY UPDATE` 再整行覆盖一次；真正删掉让重放补齐的是卫星行（noun / `ATT_UDA`）、模型行、凭证行与房间边（元素批的 `Replace` 档整行覆盖、边 `INSERT RELATION IGNORE`）。`fast_delete.rs` 回退渲染器的头注本来就是这个意思——residue cleanup, not a historical restore。所以名字叫**回退到水位**，不叫还原。
 
@@ -145,7 +145,7 @@ publish（`publish_model_file_round`，`:2141`）九个子步里 7 件是簿记 
 ### 4.4 与既有 ADR 的关系
 
 - ADR-071 **S3** 改写为：「行幂等 + 水位最后 + **写入标记回退**：任务中途死掉 → 下次见 `writing` 整库回退到 S 再重放收敛」。
-- ADR-071 **D4** / ADR-056 **D1**「模型失败不拦数据水位」在**崩溃**这一种情形让路：数据已盖 T 也退回 S。正常的模型失败（没崩、任务走到 `task_end`）照旧不回退、只不盖 `model_sesno`。
+- ADR-071 **D4** / ADR-056 **D1**「模型失败不拦数据水位」在 **ApplyWindow 崩溃**这一种情形让路：数据已盖 T 也退回 S（本任务写过数据面）。ModelOnly / RoomOnly 崩溃不动数据水位（d-732）。正常的模型失败（没崩、任务走到 `task_end`）照旧不回退、只不盖 `model_sesno`。
 - ADR-062 整体作废（屏障 / 文件轮次 / 发布视图）。
 - ADR-067 D3「常驻房间模型键 = 各库上次收尾会话」原样，就是 `room_sesno`。
 - d-285 / d-300「任务与库之间没有队列」原样——标记是一行状态，不是队列。
@@ -164,7 +164,7 @@ publish（`publish_model_file_round`，`:2141`）九个子步里 7 件是簿记 
 | 启动水化段：`run_cli` 在 `hydrate_watermark_mirror` **之前**扫 `dbnum_write_state WHERE status='writing'`，逐库回退再排队；任务开工前同一检查 | `lib.rs`、`startup_reconcile.rs`、`batch_worker.rs` |
 | ops 端点 `prune_above_watermark` 保留，改调同一核心 | `web_service/handlers.rs:2422` |
 
-验收：`mem://` 真测——ApplyWindow 在数据第 k 块 / 模型第 k 块 / 房间提交前 / `task_end` 前 kill → 重启 → 回退 → 重跑 → 逐表与一次成功相等；ModelOnly 在模型第 k 块 kill 同形；初始化在第 k 块 kill → wipe → 重排。源码钉：`finalize_attempt` 渲染不含 `DELETE increment_update_attempt` / `dbnum_write_state`；`task_end` 渲染恰含一句 `status = 'finished'`。
+验收：`mem://` 真测——ApplyWindow 在数据第 k 块 / 模型第 k 块 / 房间提交前 / `task_end` 前 kill → 重启 → 回退 → 重跑 → 逐表与一次成功相等；ModelOnly 从 `(applied, model, room) = (T, S, S)` 与 `room < model < applied` 两种持久态起、模型第 k 块 / 房间 / `task_end` 前 kill → 只退模型 + 房间面、数据面逐表不动、三水位 `(applied, S, min(room, S))` → 重排同意图 → 逐表相等；RoomOnly（P2 起）房间提交前 kill → 只退房间面 → 重排整库 force → 逐表相等；初始化在第 k 块 kill → wipe → 重排；另一条走生产规划器的用例：ModelOnly 回退后队列被 SAVEWORK 升格为 ApplyWindow，(S, applied] 触及的根仍被重生成、`gen_root` 补回（ADR-072 W6）。源码钉：`finalize_attempt` 渲染不含 `DELETE increment_update_attempt` / `dbnum_write_state`；`task_end` 渲染恰含一句 `status = 'finished'`。
 
 ### R2　任务内去回读
 
@@ -203,7 +203,7 @@ ADR-072（附录 A 全文）落 `docs/adr/`；ADR-062 文头标「已作废（AD
 ## 6. 验收门（Q12 (a)）
 
 1. **单测**：每提交 `cargo test --lib` 不新增红。
-2. **`mem://` 崩溃点重放**（R1 起就有、R2–R5 每步复跑）：沿 `production_window_replay_converges_from_every_crash_point` 的形状扩到「整任务」——kill 点覆盖数据第 k 块、模型第 k 块、房间提交前、`task_end` 前；ModelOnly 与初始化各一组。断言：重启 → 见 `writing` → 回退 → 重跑 → 逐表（`pe` / noun / `pe_owner` / `inst_relate` / `gen_root` / `room_relate` / `dbnum_watermark` / `dbnum_write_state`）与一次成功相等。
+2. **`mem://` 崩溃点重放**（R1 起就有、R2–R5 每步复跑）：沿 `production_window_replay_converges_from_every_crash_point` 的形状扩到「整任务」——kill 点覆盖数据第 k 块、模型第 k 块、房间提交前、`task_end` 前；ModelOnly 两种三水位起点（`(T, S, S)` 与 `room < model < applied`）、RoomOnly（P2 起，重排整库 force）与初始化各一组，再加一条走生产规划器的「ModelOnly 回退后被 SAVEWORK 升格为 ApplyWindow」用例（ADR-072 W6）。断言：重启 → 见 `writing` → 回退（只退本任务写过的面，d-732）→ 重跑 → 逐表（`pe` / noun / `ATT_UDA` / `pe_owner` / `inst_relate` / `gen_root` / `room_relate` / `room_panel_relate` / `dbnum_watermark` / `dbnum_write_state`）与一次成功相等。
 3. **live 7997 移动 / 恢复重放**（R5 后一次）：`task-timings.json` 无 `publish` 格；执行总时长 ≤ 基线 212.2 / 266.8 s；`ams.stdout.log` 无 `[room-topology] composed sources=` 行；`/dbnums` 每行有 `write_state.status = finished`。
 4. **源码钉**：`execute_frozen_batch_body` 不含 `publish` / `file_round` / `model_update_pending` / `side_effect_pending` / `SideEffectCompensator`；退表名只出现在 `REMOVE TABLE IF EXISTS`；`finalize_attempt` 不写 `finished`；`task_end` 恰一句 `finished`。
 
@@ -228,6 +228,8 @@ ADR-072（附录 A 全文）落 `docs/adr/`；ADR-062 文头标「已作废（AD
 5. `staging/attempts.rs` 的 per-root attempts 是 ADR-050 进程本地账的残余，R4 一起退；`MAX_ATTEMPTS` 的 30 处引用全在观测口与死信判据，退了就没有「已放弃」这一格——`/dbnums` 的 `abandoned` 改由镜像失败根集回答。
 6. 谓词删除要求 noun 表行 / `ATT_UDA` 行带 `dbnum` + `sesno`：`pe` 行有（`element_batch.rs:56`），noun 行与 `ATT_UDA` 行是否都带 sesno 要在 R1 核一遍；没有就在元素批渲染里补这两列（一次性、随 R1 提交）。历史库里没有这两列的旧行只能靠整库 wipe 回退——记进 `rollback_to_watermark` 的回执。
 7. **已决 (a)**（2026-09-10 19:05 用户拍板，d-568；量测 `docs/evidence/2026-09-10-anc-contains-predicate-delete.md`）：`anc CONTAINS <root>` 在 `inst_relate` / `tubi_relate` 走索引（go），但 `inst_info` / `aabb` / `trans` 没有 `anc`（后两张连 `dbnum` 都没有），子查询退化成全表扫（8404 行小库 `aabb` 一次 42–62 s），按根谓词删 **no-go**。保留 `existing_geometry_for_window` 一次性对账读并列进 §4.5 白名单 / ADR-072 W3；`GeometryBaseline` / `CataSeedMemo` 不退；不选 (b) 三张表补 `anc` / `dbnum` 列 + 索引 + 历史回填，不选 (c) 同事务 `LET $rows = SELECT …; DELETE $rows.*`。
+8. **（d-732）队列升格抄短重排窗口**：`batch_queue::enqueue:185-190` 把排队的 ModelOnly 升成 ApplyWindow 时左端 = `applied + 1`，回退已删的 `gen_root (S, applied]` 让那些根在 `plan_window_roots` 落 `lazy`，收尾却盖 `model_sesno = T`——静默洞，`/dbnums` 与启动核对（`startup_coverage_floors` 取现存凭证下限，缺行不拉低）都看不见。修法二选一：升格时模型规划基线取 `min(applied, model_start_sesno)`（ApplyWindow 体要读 `model_start_sesno`），或回退不删 `gen_root` 而降级为非安定状态让 `carry_unsettled_generation` 接住。先写走生产规划器的失败用例复现（§5 R1 验收那一条）。
+9. **RoomOnly 跨库**：结构触发范围可能跨库（`2026-09-10-per-root-credential-retirement-and-room-pipelining.md` §188：面板在 A 库、成员在 B 库），写入标记一库一行、房间面谓词 `in.dbnum = X`。P2 落地时要么定「RoomOnly 严格按 `in` 所在库分任务」，要么开工时给每个要写的库都落 `writing`。
 
 ---
 
@@ -297,7 +299,7 @@ TaskWriter / 异步写者 / 任务与库之间的通道；d-427 / d-429（下一
 _Avoid_: attempt 行、增量尝试记录、pending 状态、锁
 
 **回退到水位 (Rollback to Watermark)**：
-见到 `writing{S,T}` 时把该库 S 之后的痕迹删掉（`sesno > S` 的数据行与模型行、全部房间边）、三水位退回 S，再排 S→T 从头重放。它删痕迹让重放补齐，**不是**还原 S 版本的行；初始化的回退就是整库清空。
+见到 `writing{S,T}` 时把该库 S 之后、**本任务写过的面**上的痕迹删掉（ApplyWindow：`sesno > S` 的数据卫星行与模型行、全部房间边；ModelOnly：模型行与全部房间边；RoomOnly：全部房间边）、对应水位退回 S，再排能独立补齐这几面的同意图任务 S→T 从头重放（RoomOnly 的恢复一律整库 force）。它删痕迹让重放补齐，**不是**还原 S 版本的行；初始化的回退就是整库清空。
 _Avoid_: 还原、恢复到快照、部分回滚、分面回退
 
 **改写**：
