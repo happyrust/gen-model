@@ -336,22 +336,6 @@ pub struct DbnumState {
     /// `model_caught_up_at` 对外；源保存时刻仍由 `model_sesno_time` 表达。
     #[serde(default)]
     pub model_settled_at: Option<String>,
-    /// Last model session whose room results were atomically published.
-    #[serde(default)]
-    pub room_sesno: i32,
-    #[serde(default)]
-    pub room_sesno_time: Option<String>,
-    #[serde(default)]
-    pub room_settled_at: Option<String>,
-    /// Source-bound model and room-definition versions, not a wall-clock token.
-    #[serde(default)]
-    pub room_input_version: Option<RoomInputVersion>,
-    /// Latest durable obligation; a boundary change can update this without a new session.
-    #[serde(default)]
-    pub room_required_input: Option<RoomInputVersion>,
-    /// Visible immutable result set, committed with room_sesno and its input proof.
-    #[serde(default)]
-    pub room_result_version: Option<String>,
     /// 生成根四格分类里的两格（ADR-060 D3/D5）：应有但从未生成过的根、已放弃的根
     /// （死信或 `http_422`）。两者都**不拦水位**，但都要露出来。
     ///
@@ -370,43 +354,17 @@ pub struct DbnumState {
 }
 
 impl DbnumState {
-    /// Select the first missing stage without reading model or room tables.
-    /// `expected` must come from the verified local E3D input manifest.
-    pub fn recovery_stage(&self, expected: Option<&RoomInputVersion>) -> RecoveryStage {
-        if self.room_sesno < 0
-            || self.model_sesno < self.room_sesno
-            || self.applied_sesno < self.model_sesno
-            || self.file_latest_sesno < self.applied_sesno
-        {
+    /// Select the first missing stage from the two watermarks alone, without reading
+    /// model tables. 房间归属随根生成、写在模型水位的承诺里（ADR-073 D2），没有自己的一档。
+    pub fn recovery_stage(&self) -> RecoveryStage {
+        if self.applied_sesno < self.model_sesno || self.file_latest_sesno < self.applied_sesno {
             return RecoveryStage::InvalidWatermarks;
-        }
-        let Some(expected) = expected.filter(|v| v.is_valid()) else {
-            return RecoveryStage::VerifyInput;
-        };
-        if self.room_input_version.as_ref().is_some_and(|old| {
-            old.source_identity != expected.source_identity
-                || old.generation_rule_version != expected.generation_rule_version
-        }) {
-            return RecoveryStage::VerifyInput;
         }
         if !self.initialized || self.applied_sesno < self.file_latest_sesno {
             return RecoveryStage::Data;
         }
         if self.model_sesno < self.applied_sesno {
             return RecoveryStage::Model;
-        }
-        if expected.model_sesno != self.model_sesno {
-            return RecoveryStage::VerifyInput;
-        }
-        if self.room_sesno < self.model_sesno
-            || self.room_input_version.as_ref() != Some(expected)
-            || self.room_required_input.as_ref() != Some(expected)
-            || self
-                .room_result_version
-                .as_ref()
-                .is_none_or(|v| v.is_empty())
-        {
-            return RecoveryStage::Room;
         }
         RecoveryStage::Complete
     }
@@ -421,39 +379,12 @@ impl DbnumState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct RoomInputVersion {
-    pub version: u32,
-    pub source_identity: String,
-    pub model_sesno: i32,
-    pub model_version: String,
-    pub room_definition_version: String,
-    pub generation_rule_version: String,
-}
-
-impl RoomInputVersion {
-    pub(crate) fn is_valid(&self) -> bool {
-        self.version == 1
-            && self.model_sesno >= 0
-            && [
-                &self.source_identity,
-                &self.model_version,
-                &self.room_definition_version,
-                &self.generation_rule_version,
-            ]
-            .into_iter()
-            .all(|s| !s.is_empty())
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RecoveryStage {
     InvalidWatermarks,
-    VerifyInput,
     Data,
     Model,
-    Room,
     Complete,
 }
 
@@ -496,18 +427,6 @@ struct StateRow {
     #[serde(default)]
     model_settled_at: Option<String>,
     #[serde(default)]
-    room_sesno: Option<i32>,
-    #[serde(default)]
-    room_sesno_time: Option<String>,
-    #[serde(default)]
-    room_settled_at: Option<String>,
-    #[serde(default)]
-    room_input_version: Option<RoomInputVersion>,
-    #[serde(default)]
-    room_required_input: Option<RoomInputVersion>,
-    #[serde(default)]
-    room_result_version: Option<String>,
-    #[serde(default)]
     model_lazy_roots: Option<u32>,
     #[serde(default)]
     model_dead_roots: Option<u32>,
@@ -520,8 +439,6 @@ struct StateRow {
 
 /// 本表里模型水位那一组列，两条读路径共用一份投影，漂不了。
 const MODEL_WATERMARK_COLUMNS: &str = "model_sesno, model_sesno_time, \
-     room_sesno, room_sesno_time, room_input_version, room_required_input, room_result_version, \
-     IF room_settled_at != NONE THEN type::string(room_settled_at) ELSE NONE END AS room_settled_at, \
      IF model_settled_at != NONE THEN type::string(model_settled_at) ELSE NONE END AS model_settled_at, \
      model_lazy_roots, \
      model_dead_roots, model_roots_observed_at";
@@ -985,25 +902,23 @@ struct LegacyModelWatermarkCandidate {
 const LEGACY_MODEL_WATERMARK_CANDIDATES: &str = "SELECT dbnum, applied_sesno FROM dbnum_watermark \
      WHERE dbnum != NONE AND model_sesno = NONE AND applied_sesno != NONE AND applied_sesno > 0;";
 
-/// 模型 / 房间水位兼容播种的去向（用户 2026-09-10 拍板「模型水位 + 房间水位默认按数据水位
-/// 保持一致」；ADR-060 D10）。两格措辞不同，日志里不许混。
+/// 模型水位兼容播种的去向（用户 2026-09-10 拍板「模型水位默认按数据水位保持一致」；
+/// ADR-060 D10；其中房间那半句随房间水位退役，接管本身保留，ADR-073 D7）。两格措辞不同，
+/// 日志里不许混。
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum LegacyModelWatermarkSeed {
-    /// 旧管线留下了模型投影（`inst_relate` / `tubi_relate`）：两枚水位缺省视作与数据水位追平。
+    /// 旧管线留下了模型投影（`inst_relate` / `tubi_relate`）：模型水位缺省视作与数据水位追平。
     Adopted { dbnum: u32, sesno: i32 },
     /// 数据在、模型一行没有：显式记 0，照旧由模型面生成；下次启动不再探。
     DataOnly { dbnum: u32 },
 }
 
 /// 接管：只填空（`??`），已写过的值一个不动。时刻列不贴——这一枚不是哪一条保存盖出来的，
-/// 贴任何时刻都是拿 A 标注 B（ADR-060 D1 的时刻纪律）；`*_settled_at` 只是运维展示的挂钟。
-/// `room_settled_at` 的判断要排在 `room_sesno` 赋值之前：SurrealDB 的 `SET` 顺序求值。
+/// 贴任何时刻都是拿 A 标注 B（ADR-060 D1 的时刻纪律）；`model_settled_at` 只是运维展示的挂钟。
 fn render_legacy_model_watermark_adoption(dbnum: u32, applied_sesno: i32) -> String {
     format!(
         "UPDATE {WATERMARK_TABLE}:{dbnum} SET \
          model_sesno = model_sesno ?? {applied_sesno}, model_settled_at = time::now(), \
-         room_settled_at = IF room_sesno = NONE THEN time::now() ELSE room_settled_at END, \
-         room_sesno = room_sesno ?? {applied_sesno}, \
          state_revision = (state_revision ?? 0) + 1, updated_at = time::now() RETURN NONE;"
     )
 }
@@ -1387,14 +1302,6 @@ impl DbnumState {
                     model_sesno: row.model_sesno.unwrap_or_default(),
                     model_sesno_time,
                     model_settled_at: row.model_settled_at,
-                    room_sesno: row.room_sesno.unwrap_or_default(),
-                    room_sesno_time: row
-                        .room_sesno_time
-                        .filter(|_| row.room_sesno.unwrap_or_default() > 0),
-                    room_settled_at: row.room_settled_at,
-                    room_input_version: row.room_input_version,
-                    room_required_input: row.room_required_input,
-                    room_result_version: row.room_result_version,
                     model_lazy_roots: row.model_lazy_roots,
                     model_dead_roots: row.model_dead_roots,
                     model_roots_observed_at: row.model_roots_observed_at,
@@ -1552,14 +1459,6 @@ impl DbnumState {
             model_sesno: row.model_sesno.unwrap_or_default(),
             model_sesno_time,
             model_settled_at: row.model_settled_at,
-            room_sesno: row.room_sesno.unwrap_or_default(),
-            room_sesno_time: row
-                .room_sesno_time
-                .filter(|_| row.room_sesno.unwrap_or_default() > 0),
-            room_settled_at: row.room_settled_at,
-            room_input_version: row.room_input_version,
-            room_required_input: row.room_required_input,
-            room_result_version: row.room_result_version,
             model_lazy_roots: row.model_lazy_roots,
             model_dead_roots: row.model_dead_roots,
             model_roots_observed_at: row.model_roots_observed_at,
@@ -1945,8 +1844,7 @@ mod tests {
         db.use_ns("test").use_db("hydrate").await.unwrap();
         db.query(
             "CREATE dbnum_watermark:7997 SET dbnum=7997, db_type='DESI', file_name='ams7997', \
-             owner_project='AMS', state_revision=9, applied_sesno=26, model_sesno=26, room_sesno=20, \
-             room_result_version='rooms-26';\
+             owner_project='AMS', state_revision=9, applied_sesno=26, model_sesno=26;\
              CREATE dbnum_watermark:8000 SET dbnum=8000, db_type='DESI', applied_sesno=12;\
              CREATE dbnum_info_table SET dbnum=8000, sesno=11;\
              CREATE dbnum_info_table SET dbnum=8000, sesno=15;",
@@ -1981,8 +1879,6 @@ mod tests {
         assert_eq!(row.state_revision, Some(9));
         assert_eq!(row.applied_sesno, Some(26));
         assert_eq!(row.model_sesno, Some(26));
-        assert_eq!(row.room_sesno, Some(20));
-        assert_eq!(row.room_result_version.as_deref(), Some("rooms-26"));
         assert_eq!(facts.info_max, None, "没有 info 行的库回退值就是 NONE");
 
         let facts = match super::mirror::acquire(8000) {
@@ -2016,73 +1912,38 @@ mod tests {
         super::mirror::disable();
     }
 
+    /// ADR-073 D2：库上只剩两枚水位，恢复阶段只有数据 → 模型 → 完成三档；房间归属随根生成，
+    /// 写在模型水位的承诺里，没有自己的一档。
     #[test]
-    fn three_watermarks_recover_only_the_missing_stage() {
-        use super::{DbnumState, RecoveryStage as Stage, RoomInputVersion};
-        let input = RoomInputVersion {
-            version: 1,
-            source_identity: "source-a".into(),
-            model_sesno: 12,
-            model_version: "model-12".into(),
-            room_definition_version: "rooms-a".into(),
-            generation_rule_version: "v1".into(),
-        };
+    fn two_watermarks_recover_only_the_missing_stage() {
+        use super::{DbnumState, RecoveryStage as Stage};
         let mut state = DbnumState {
             initialized: true,
             file_latest_sesno: 12,
             applied_sesno: 12,
             model_sesno: 12,
-            room_sesno: 12,
-            room_input_version: Some(input.clone()),
-            room_required_input: Some(input.clone()),
-            room_result_version: Some("results-a".into()),
             ..Default::default()
         };
-        assert_eq!(state.recovery_stage(Some(&input)), Stage::Complete);
-        state.room_result_version = None;
-        assert_eq!(state.recovery_stage(Some(&input)), Stage::Room);
-        state.room_result_version = Some("results-a".into());
-        state.room_required_input = None;
-        assert_eq!(state.recovery_stage(Some(&input)), Stage::Room);
-        state.room_required_input = Some(input.clone());
+        assert_eq!(state.recovery_stage(), Stage::Complete);
         for _ in 0..3 {
-            // unchanged restart preserves the serialized completion proof
+            // unchanged restart preserves the serialized completion state
             state = serde_json::from_str(&serde_json::to_string(&state).unwrap()).unwrap();
-            assert_eq!(state.recovery_stage(Some(&input)), Stage::Complete);
+            assert_eq!(state.recovery_stage(), Stage::Complete);
         }
-        let mut changed = input.clone();
-        changed.room_definition_version = "rooms-b".into();
-        assert_eq!(state.recovery_stage(Some(&changed)), Stage::Room);
-        changed.source_identity = "replacement-file".into();
-        assert_eq!(state.recovery_stage(Some(&changed)), Stage::VerifyInput);
-        assert_eq!(state.recovery_stage(None), Stage::VerifyInput);
-        state.room_sesno = 10;
-        assert_eq!(state.recovery_stage(Some(&input)), Stage::Room);
         state.model_sesno = 11;
-        assert_eq!(state.recovery_stage(Some(&input)), Stage::Model);
+        assert_eq!(state.recovery_stage(), Stage::Model);
         state.applied_sesno = 11;
-        assert_eq!(state.recovery_stage(Some(&input)), Stage::Data);
-        state.room_sesno = 12;
-        assert_eq!(state.recovery_stage(Some(&input)), Stage::InvalidWatermarks);
-    }
-
-    #[test]
-    fn missing_room_proof_is_not_inherited_from_model_watermark() {
-        use super::{DbnumState, RecoveryStage, RoomInputVersion};
-        let state = DbnumState {
-            initialized: true,
-            file_latest_sesno: 0,
+        assert_eq!(state.recovery_stage(), Stage::Data);
+        state.model_sesno = 12;
+        assert_eq!(state.recovery_stage(), Stage::InvalidWatermarks);
+        state.model_sesno = 11;
+        state.file_latest_sesno = 10;
+        assert_eq!(state.recovery_stage(), Stage::InvalidWatermarks);
+        let cold = DbnumState {
+            initialized: false,
             ..Default::default()
         };
-        let input = RoomInputVersion {
-            version: 1,
-            source_identity: "empty-file".into(),
-            model_sesno: 0,
-            model_version: "verified-empty-model".into(),
-            room_definition_version: "verified-empty-rooms".into(),
-            generation_rule_version: "v1".into(),
-        };
-        assert_eq!(state.recovery_stage(Some(&input)), RecoveryStage::Room);
+        assert_eq!(cold.recovery_stage(), Stage::Data);
     }
 
     use super::*;
@@ -2851,8 +2712,9 @@ mod initializing_watermark_tests {
     }
 }
 
-/// ADR-060 D10：模型 / 房间水位缺省按数据水位追平——只对「已有数据 + 已有模型投影 +
+/// ADR-060 D10：模型水位缺省按数据水位追平——只对「已有数据 + 已有模型投影 +
 /// 模型水位从未写过」的行；数据在模型无的记 0；显式写过的值一个不动。
+/// （房间那半句随房间水位退役，ADR-073 D7：接管保留，行上不再有房间格。）
 #[cfg(test)]
 mod legacy_model_watermark_seed_tests {
     use super::*;
@@ -2864,15 +2726,13 @@ mod legacy_model_watermark_seed_tests {
         #[serde(default)]
         model_sesno: Option<i32>,
         #[serde(default)]
-        room_sesno: Option<i32>,
-        #[serde(default)]
         model_sesno_time: Option<String>,
     }
 
     async fn row(db: &surrealdb::Surreal<surrealdb::engine::any::Any>, dbnum: u32) -> Row {
         let mut response = db
             .query(format!(
-                "SELECT applied_sesno, model_sesno, room_sesno, model_sesno_time \
+                "SELECT applied_sesno, model_sesno, model_sesno_time \
                  FROM ONLY dbnum_watermark:{dbnum};"
             ))
             .await
@@ -2889,7 +2749,7 @@ mod legacy_model_watermark_seed_tests {
         db.use_ns("legacy_seed").use_db("test").await.unwrap();
         // 8000：旧管线投影（dbnum 直写形态）→ 接管。
         // 8001：旧管线投影（只有 in、没有 dbnum 的历史形态）→ 也接管。
-        // 8002：数据在、模型一行没有 → 记 0，房间不动。
+        // 8002：数据在、模型一行没有 → 记 0。
         // 8003：本仓显式写过 0（D7 / D8）→ 不是候选，一个字不动。
         // 8004：数据水位未建立 → 不是候选。
         // 8005：初始化在飞（protected）→ 跳过。
@@ -2934,29 +2794,21 @@ mod legacy_model_watermark_seed_tests {
         );
 
         let adopted = row(&db, 8000).await;
-        assert_eq!(
-            (adopted.model_sesno, adopted.room_sesno),
-            (Some(26), Some(26))
-        );
+        assert_eq!(adopted.model_sesno, Some(26));
         assert_eq!(
             adopted.model_sesno_time, None,
             "接管不贴时刻：没有哪一条保存盖出它"
         );
         let adopted_via_in = row(&db, 8001).await;
-        assert_eq!(
-            (adopted_via_in.model_sesno, adopted_via_in.room_sesno),
-            (Some(30), Some(30))
-        );
+        assert_eq!(adopted_via_in.model_sesno, Some(30));
         let data_only = row(&db, 8002).await;
         assert_eq!(
             data_only.model_sesno,
             Some(0),
             "数据在模型无：显式记 0，退出候选集"
         );
-        assert_eq!(data_only.room_sesno, None, "房间水位不替模型面说话");
         let explicit_zero = row(&db, 8003).await;
         assert_eq!(explicit_zero.model_sesno, Some(0));
-        assert_eq!(explicit_zero.room_sesno, None);
         let never_applied = row(&db, 8004).await;
         assert_eq!(never_applied.model_sesno, None);
         let protected = row(&db, 8005).await;
@@ -2982,24 +2834,19 @@ mod legacy_model_watermark_seed_tests {
         assert_eq!(row(&db, 8005).await.model_sesno, Some(40));
     }
 
-    /// 接管语句只填空：`??` 两处都在，没有 `math::max`、没有 `=` 覆盖；时刻列不碰。
+    /// 接管语句只填空：`??` 在，没有 `math::max`、没有 `=` 覆盖；时刻列不碰；
+    /// 行上没有房间那一枚可填（ADR-073 D2 / D7）。
     #[test]
     fn the_adoption_statement_is_fill_only_and_never_stamps_a_time() {
         let sql = render_legacy_model_watermark_adoption(8000, 26);
         assert!(sql.contains("model_sesno = model_sesno ?? 26"));
-        assert!(sql.contains("room_sesno = room_sesno ?? 26"));
         assert!(!sql.contains("math::max"));
         assert!(!sql.contains("model_sesno_time"), "时刻纪律：不贴 {sql}");
-        assert!(!sql.contains("room_sesno_time"), "时刻纪律：不贴 {sql}");
-        let settled = sql
-            .find("room_settled_at = IF room_sesno = NONE")
-            .expect("挂钟按填空与否");
-        let room = sql.find("room_sesno = room_sesno ??").expect("房间填空");
-        assert!(settled < room, "SET 顺序求值：挂钟判断要排在赋值之前 {sql}");
+        assert!(!sql.contains("room_"), "库上只剩两枚水位，接管不填房间格 {sql}");
 
         let zero = render_legacy_model_watermark_data_only(8002);
         assert!(zero.contains("model_sesno = model_sesno ?? 0"));
-        assert!(!zero.contains("room_sesno"));
+        assert!(!zero.contains("room_"));
     }
 
     #[test]

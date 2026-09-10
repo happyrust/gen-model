@@ -2010,10 +2010,10 @@ fn skeleton_dbnums(databases: &[crate::data_interface::mdb_memory_store::LoadedD
 
 /// 给 `/dbnums` 的每一行写 `model_source` / `model_source_reason`（plan 2026-09-06 §8 R1）：
 /// 这个库的模型现在该从哪儿读。判据只有 `model_read_route::route` 一处，这里只是把行上已有的
-/// 三枚水位与「该库的数据批次任务在不在跑」喂给它；取数走闭包，让整形逻辑不依赖真队列也能测。
+/// 两枚水位与「该库的数据批次任务在不在跑」喂给它；取数走闭包，让整形逻辑不依赖真队列也能测。
 ///
-/// 模型 / 房间两枚水位只在行上**有**那两格时才参与比较（ADR-071 D8「三水位相等」）：判决列
-/// （`dbnum_consistency`）只给 DESI 行，普查失败时整格缺席。没有那两格就不判「落后」——
+/// 模型水位只在行上**有**那一格时才参与比较（ADR-071 D8「水位相等」，ADR-073 D2 收成两枚）：
+/// 判决列（`dbnum_consistency`）只给 DESI 行，普查失败时整格缺席。没有那一格就不判「落后」——
 /// 「不知道」不能写成「落后」，否则 SYST / CATA 与一次普查失败都会被讲成 `model_lagging`。
 fn annotate_model_source(
     rows: &mut [Value],
@@ -2039,13 +2039,11 @@ fn annotate_model_source(
         };
         let applied = watermark("applied_sesno").unwrap_or_default();
         let model = watermark("model_sesno").unwrap_or(applied);
-        let room = watermark("room_sesno").unwrap_or(applied);
         let route = crate::data_interface::model_read_route::route(
             dbnum,
             data_face,
             applied,
             model,
-            room,
             publishing(dbnum),
         );
         object.insert("model_source".into(), json!(route.source.as_str()));
@@ -2777,9 +2775,9 @@ mod tests {
         assert!(rows[2].get("ref0s").is_none(), "没有 dbnum 的行不该被写");
     }
 
-    /// `/dbnums` 每行的 `model_source` 只由行上的三枚水位与「该库的数据批次任务在不在跑」决定
-    /// （plan 2026-09-06 §8 R1；ADR-071 D8 三水位相等）；没有 `dbnum` 的行不碰；没有模型 / 房间
-    /// 判决列的行（非 DESI、普查失败）不判「落后」。
+    /// `/dbnums` 每行的 `model_source` 只由行上的两枚水位与「该库的数据批次任务在不在跑」决定
+    /// （plan 2026-09-06 §8 R1；ADR-071 D8 水位相等，ADR-073 D2 收成两枚）；没有 `dbnum` 的行不碰；
+    /// 没有模型判决列的行（非 DESI、普查失败）不判「落后」。
     #[test]
     fn dbnum_rows_carry_their_model_source_from_the_single_predicate() {
         let mut rows = vec![
@@ -2787,9 +2785,9 @@ mod tests {
             json!({ "dbnum": 8000, "applied_sesno": 285 }),
             json!({ "dbnum": 7999, "applied_sesno": 0 }),
             json!({ "note": "no dbnum here" }),
-            json!({ "dbnum": 7998, "applied_sesno": 264, "model_sesno": 260, "room_sesno": 264 }),
-            json!({ "dbnum": 7996, "applied_sesno": 264, "model_sesno": 264, "room_sesno": 200 }),
-            json!({ "dbnum": 7995, "applied_sesno": 264, "model_sesno": 264, "room_sesno": 264 }),
+            json!({ "dbnum": 7998, "applied_sesno": 264, "model_sesno": 260 }),
+            json!({ "dbnum": 7996, "applied_sesno": 264, "model_sesno": 264 }),
+            json!({ "dbnum": 7995, "applied_sesno": 264, "model_sesno": 264 }),
         ];
         annotate_model_source(&mut rows, crate::options::DataFace::Ingest, |dbnum| {
             dbnum == 8000
@@ -2810,8 +2808,9 @@ mod tests {
         );
         assert_eq!(rows[4]["model_source"], "memory");
         assert_eq!(rows[4]["model_source_reason"], "model_lagging");
-        assert_eq!(rows[5]["model_source"], "memory");
-        assert_eq!(rows[5]["model_source_reason"], "room_lagging");
+        // 模型追平即整库追平：房间边随根写在模型块里，没有第三枚水位可落后（ADR-073 D2）。
+        assert_eq!(rows[5]["model_source"], "database");
+        assert!(rows[5]["model_source_reason"].is_null());
         assert_eq!(rows[6]["model_source"], "database");
         assert!(rows[6]["model_source_reason"].is_null());
 

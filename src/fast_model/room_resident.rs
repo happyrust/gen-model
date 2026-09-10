@@ -2378,22 +2378,20 @@ mod tests {
             let mut reference_room_ms = None;
             let mut optimized_room_ms = None;
             if failures.is_empty() {
-                let version = crate::data_interface::dbnum_state::RoomInputVersion {
-                    version: 1,
-                    source_identity: token,
-                    model_sesno: session as i32,
-                    model_version: input,
-                    room_definition_version: room_version.clone(),
-                    generation_rule_version: "model-target-v1".into(),
-                };
-                match calculator.calculate(dbnum, &version, &records) {
+                // 房间输入版本结构随第三枚水位退了（ADR-073 D2）：算的是哪一版模型、按哪一版
+                // 面板定义，直接两格传给计算器。
+                match calculator.calculate(dbnum, session as i32, &room_version, &records) {
                     Ok(edges) => {
                         optimized_room_ms = Some(room_started.elapsed().as_millis());
                         edge_count = Some(edges.len());
                         if check_parity {
                             let reference_started = Instant::now();
-                            let reference = calculator
-                                .calculate_with_component_bvh(dbnum, &version, &records)?;
+                            let reference = calculator.calculate_with_component_bvh(
+                                dbnum,
+                                session as i32,
+                                &room_version,
+                                &records,
+                            )?;
                             reference_room_ms = Some(reference_started.elapsed().as_millis());
                             let key = |edge: &crate::fast_model::room_model::ElementRoomEdge| {
                                 (

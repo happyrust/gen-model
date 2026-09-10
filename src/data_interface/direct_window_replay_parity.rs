@@ -880,9 +880,7 @@ async fn the_rollback_takes_every_face_back_to_s_and_leaves_the_older_rows_alone
                 "INSERT RELATION INTO room_relate [\
                    {{ id: room_relate:r1, in: {equi}, out: {gone}, room_num: 'R301' }}];"
             ),
-            format!(
-                "UPDATE dbnum_watermark:{DBNUM} SET model_sesno = {END_SESNO}, room_sesno = {END_SESNO};"
-            ),
+            format!("UPDATE dbnum_watermark:{DBNUM} SET model_sesno = {END_SESNO};"),
         ],
     )
     .await
@@ -907,20 +905,19 @@ async fn the_rollback_takes_every_face_back_to_s_and_leaves_the_older_rows_alone
     struct Marks {
         applied_sesno: Option<i32>,
         model_sesno: Option<i32>,
-        room_sesno: Option<i32>,
     }
     let mut response = db
         .query(format!(
-            "SELECT applied_sesno, model_sesno, room_sesno FROM ONLY dbnum_watermark:{DBNUM};"
+            "SELECT applied_sesno, model_sesno FROM ONLY dbnum_watermark:{DBNUM};"
         ))
         .await
         .expect("watermark transport");
     let marks: Option<Marks> = response.take(0).expect("watermark row");
     let marks = marks.expect("watermark row exists");
     assert_eq!(
-        (marks.applied_sesno, marks.model_sesno, marks.room_sesno),
-        (Some(BASE_SESNO), Some(BASE_SESNO), Some(BASE_SESNO)),
-        "三枚水位一起退回 S"
+        (marks.applied_sesno, marks.model_sesno),
+        (Some(BASE_SESNO), Some(BASE_SESNO)),
+        "两枚水位一起退回 S"
     );
 }
 
@@ -1134,7 +1131,6 @@ async fn run_step(db: &Surreal<Any>, step: &Step) {
                         all_roots_ok: true,
                         dead_roots: 0,
                     }),
-                    rooms: Some(crate::data_interface::task_end::TaskRoomOutcome { ok: true }),
                     info: None,
                     closes_task: true,
                 },
@@ -1142,7 +1138,6 @@ async fn run_step(db: &Surreal<Any>, step: &Step) {
             .await
             .expect("task end");
             assert_eq!(receipt.model_sesno, Some(END_SESNO), "收尾必须盖上模型水位");
-            assert_eq!(receipt.room_sesno, Some(END_SESNO), "收尾必须盖上房间水位");
         }
     }
 }
@@ -1207,16 +1202,15 @@ fn model_steps(f: &Fixture) -> Vec<Step> {
 }
 
 #[derive(Debug, PartialEq, Eq, serde::Deserialize)]
-struct WatermarkTriple {
+struct WatermarkPair {
     applied_sesno: Option<i32>,
     model_sesno: Option<i32>,
-    room_sesno: Option<i32>,
 }
 
-async fn watermark_triple(db: &Surreal<Any>) -> Option<WatermarkTriple> {
+async fn watermark_pair(db: &Surreal<Any>) -> Option<WatermarkPair> {
     let mut response = db
         .query(format!(
-            "SELECT applied_sesno, model_sesno, room_sesno FROM ONLY dbnum_watermark:{DBNUM};"
+            "SELECT applied_sesno, model_sesno FROM ONLY dbnum_watermark:{DBNUM};"
         ))
         .await
         .expect("watermark transport");
@@ -1224,7 +1218,7 @@ async fn watermark_triple(db: &Surreal<Any>) -> Option<WatermarkTriple> {
 }
 
 /// 一次成功与「崩溃 → 回退 → 重跑」之后的终态对拍：数据面逐表相等（`spatial_epoch` 是回退
-/// 故意 bump 的控制面计数器，摘掉），三水位都在 T，写入标记盖成 `finished` 且窗口不变。
+/// 故意 bump 的控制面计数器，摘掉），两水位都在 T，写入标记盖成 `finished` 且窗口不变。
 async fn assert_converged(
     db: &Surreal<Any>,
     expected: &BTreeMap<String, String>,
@@ -1244,13 +1238,12 @@ async fn assert_converged(
          expected={expected:#?}\nreplayed={replayed:#?}"
     );
     assert_eq!(
-        watermark_triple(db).await,
-        Some(WatermarkTriple {
+        watermark_pair(db).await,
+        Some(WatermarkPair {
             applied_sesno: Some(END_SESNO),
             model_sesno: Some(END_SESNO),
-            room_sesno: Some(END_SESNO),
         }),
-        "{context}: 三水位都该在 T"
+        "{context}: 两水位都该在 T"
     );
     let marker = crate::data_interface::write_state::load_on(db, DBNUM)
         .await
@@ -1312,16 +1305,15 @@ async fn an_apply_window_task_killed_at_any_step_rolls_back_to_s_and_reruns_to_t
             .await
             .expect("rollback to watermark");
         assert!(!report.wiped, "{context}");
-        // 夹具的窗口前世界只有数据水位（模型 / 房间水位是 NONE）：`math::min([NONE ?: 0, S])` = 0，
+        // 夹具的窗口前世界只有数据水位（模型水位是 NONE）：`math::min([NONE ?: 0, S])` = 0，
         // 而已经盖到 T 的那几档（尾事务后 / task_end 前）都得退回 S——崩溃不分面（D3）。
         assert_eq!(
-            watermark_triple(&db).await,
-            Some(WatermarkTriple {
+            watermark_pair(&db).await,
+            Some(WatermarkPair {
                 applied_sesno: Some(BASE_SESNO),
                 model_sesno: Some(0),
-                room_sesno: Some(0),
             }),
-            "{context}: 三水位退到 S（崩溃不分面）"
+            "{context}: 两水位退到 S（崩溃不分面）"
         );
         assert_eq!(write_state_status(&db).await, None, "{context}: 回退删标记行");
         let leftovers = ids(
@@ -1356,7 +1348,7 @@ async fn an_apply_window_task_killed_at_any_step_rolls_back_to_s_and_reruns_to_t
 /// 回退按标记记的 S = 模型水位走，但**不动数据面**（t-664 ⑥，`fast_delete::render_rollback`）：
 /// 这类任务没写过数据，退数据面只会把上一窗已收口的 (S, applied] 数据行删掉、而重排的 ModelOnly
 /// 又不补数据。所以回退只删 `direct_model.sesno > S` 的模型行、`source_end_sesno > S` 的凭证、
-/// 整库房间边，`model_sesno` / `room_sesno` 退到 S、`applied_sesno` 原地不动；重跑就是同意图的
+/// 整库房间边，`model_sesno` 退到 S、`applied_sesno` 原地不动；重跑就是同意图的
 /// ModelOnly S→T（模型 + 房间 + 收尾），终态与一次成功逐表相等。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_model_only_task_killed_in_a_model_block_rolls_back_to_the_model_watermark_and_reruns() {
@@ -1376,9 +1368,7 @@ async fn a_model_only_task_killed_in_a_model_block_rolls_back_to_the_model_water
         apply_all(
             &db,
             &[
-                format!(
-                    "UPDATE dbnum_watermark:{DBNUM} SET model_sesno = {BASE_SESNO}, room_sesno = {BASE_SESNO};"
-                ),
+                format!("UPDATE dbnum_watermark:{DBNUM} SET model_sesno = {BASE_SESNO};"),
                 render_mark_writing(DBNUM, BASE_SESNO, END_SESNO, WriteIntent::ModelOnly),
             ],
         )
@@ -1410,13 +1400,12 @@ async fn a_model_only_task_killed_in_a_model_block_rolls_back_to_the_model_water
             .expect("rollback");
         assert!(!report.wiped, "{context}");
         assert_eq!(
-            watermark_triple(&db).await,
-            Some(WatermarkTriple {
+            watermark_pair(&db).await,
+            Some(WatermarkPair {
                 applied_sesno: Some(END_SESNO),
                 model_sesno: Some(BASE_SESNO),
-                room_sesno: Some(BASE_SESNO),
             }),
-            "{context}: 模型 / 房间水位退回 S，数据水位原地不动"
+            "{context}: 模型水位退回 S，数据水位原地不动"
         );
         // 数据面一行不少、模型面 / 房间面回到「还没跑模型」那一刻。被删空的表还留着表定义，
         // 对照库里则从没建过——「不存在」与「空」在这里是一回事。
@@ -1650,7 +1639,6 @@ fn the_data_tail_never_writes_finished_and_the_task_end_writes_it_exactly_once()
             all_roots_ok: true,
             dead_roots: 0,
         }),
-        rooms: Some(crate::data_interface::task_end::TaskRoomOutcome { ok: true }),
         info: None,
         closes_task: true,
     };

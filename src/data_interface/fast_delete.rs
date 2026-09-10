@@ -346,12 +346,13 @@ const MODEL_FACE_TABLES: &[&str] = &["inst_relate", "inst_info", "tubi_relate"];
 /// `DELETE /dbnums/{dbnum}/data/above/{watermark}`。文件被换回旧版本那一档不走这条路——
 /// 它是 `Reinitialize`，整库 wipe。
 ///
-/// **意图决定退哪几面**（t-664 ⑥，ADR-072 D3 的适用范围）：`ApplyWindow` 写过三面，三面都退、
-/// 三水位都 min 到 S；`ModelOnly` 的 S 是模型水位，这类任务**没写过数据面**——退数据面等于把
-/// 上一窗已经收口的 (S, applied] 数据行删掉、而重排的 ModelOnly 又不补数据，库就此缺一段
+/// **意图决定退哪几面**（t-664 ⑥，ADR-072 D3 的适用范围）：`ApplyWindow` 写过数据面 + 模型面
+/// （房间边随模型块落，ADR-073 D1），两面都退、两水位都 min 到 S；`ModelOnly` 的 S 是模型水位，
+/// 这类任务**没写过数据面**——退数据面等于把上一窗已经收口的 (S, applied] 数据行删掉、而重排的
+/// ModelOnly 又不补数据，库就此缺一段
 /// （`direct_window_replay_parity::a_model_only_task_killed_in_a_model_block_…` 钉的正是这一处）
-/// ——所以只退模型面 + 房间面、`model_sesno` / `room_sesno` 退到 S，`applied_sesno` / `sesno`
-/// 不动；`RoomOnly` 的 S 是房间水位（可能低于模型水位），只退房间面 + `room_sesno`。
+/// ——所以只退模型面 + 房间边、`model_sesno` 退到 S，`applied_sesno` / `sesno` 不动；
+/// `RoomOnly` 只写过房间边，只退房间边——库上没有房间水位可退（ADR-073 D2）。
 /// `Initialize` / `Reinitialize` 不走这里（整库 wipe）。
 pub(crate) fn render_rollback(
     dbnum: u32,
@@ -410,9 +411,6 @@ pub(crate) fn render_rollback(
             "model_sesno = math::min([model_sesno ?: 0, {target_watermark}])"
         ));
     }
-    sets.push(format!(
-        "room_sesno = math::min([room_sesno ?: 0, {target_watermark}])"
-    ));
     if data_face {
         sets.push(format!("sesno = {target_watermark}"));
     }
@@ -1182,9 +1180,9 @@ mod tests {
         [render.deletes, render.control].concat().join("\n")
     }
 
-    /// t-664 ⑥：ModelOnly 的 S 是模型水位，这类任务没写过数据面——回退只退模型面 + 房间面，
+    /// t-664 ⑥：ModelOnly 的 S 是模型水位，这类任务没写过数据面——回退只退模型面 + 房间边，
     /// `applied_sesno` / `sesno` 与 noun 行一个都不动，否则上一窗已收口的 (S, applied] 数据行被删、
-    /// 重排的 ModelOnly 又不补数据。RoomOnly 更窄：只退房间面 + `room_sesno`。
+    /// 重排的 ModelOnly 又不补数据。RoomOnly 更窄：只退房间边，水位一枚不动（ADR-073 D2）。
     #[test]
     fn a_model_only_or_room_only_rollback_leaves_the_data_face_alone() {
         let nouns: Vec<String> = vec!["ATT_UDA".into(), "EQUI".into()];
@@ -1212,7 +1210,7 @@ mod tests {
             "ModelOnly 不动数据水位: {watermark}"
         );
         assert!(watermark.contains("model_sesno = math::min([model_sesno ?: 0, 41])"));
-        assert!(watermark.contains("room_sesno = math::min([room_sesno ?: 0, 41])"));
+        assert!(!watermark.contains("room_"), "库上没有房间水位可退: {watermark}");
         assert!(watermark.contains("state_revision = (state_revision ?? 0) + 1"));
         assert_eq!(model_only.control.last().unwrap(), "DELETE dbnum_write_state:7997;");
 
@@ -1228,10 +1226,10 @@ mod tests {
         assert!(sql.contains("DELETE room_panel_relate WHERE in.dbnum = 7997;"));
         let watermark = &room_only.control[0];
         assert!(
-            !watermark.contains("applied_sesno") && !watermark.contains("model_sesno"),
-            "RoomOnly 只退房间水位: {watermark}"
+            !watermark.contains("math::min"),
+            "RoomOnly 不动任何一枚水位: {watermark}"
         );
-        assert!(watermark.contains("room_sesno = math::min([room_sesno ?: 0, 41])"));
+        assert!(watermark.contains("state_revision = (state_revision ?? 0) + 1"));
         // 三种意图的 SQL 仍然一句 SELECT 都没有（W3）。
         for intent in [WriteIntent::ApplyWindow, WriteIntent::ModelOnly, WriteIntent::RoomOnly] {
             let render = render_rollback(7997, 41, &nouns, intent);
@@ -1253,7 +1251,7 @@ mod tests {
         );
     }
 
-    /// §4.3 的 2–6 逐条：数据面 / 模型面 / 房间面 / 三水位 / 标记行，且顺序固定
+    /// §4.3 的 2–6 逐条：数据面 / 模型面 / 房间边 / 两水位 / 标记行，且顺序固定
     /// ——`pe` 顶点排在 noun 行之后（删顶点级联带走挂在它身上的边），标记行最后删
     /// （它是回退的提交点）。
     #[test]
@@ -1293,9 +1291,11 @@ mod tests {
             "边行没有 dbnum 列，那个谓词会静默删不掉任何东西:\n{sql}"
         );
 
-        // 三水位一起退（D3 崩溃不分面），且是 min 不是赋值——已经更低的水位不许被抬上来。
+        // 两水位一起退（D3 崩溃不分面），且是 min 不是赋值——已经更低的水位不许被抬上来；
+        // 行上没有第三枚（ADR-073 W3）。
         let watermark = &render.control[0];
-        for field in ["applied_sesno", "model_sesno", "room_sesno"] {
+        assert!(!watermark.contains("room_"), "{watermark}");
+        for field in ["applied_sesno", "model_sesno"] {
             assert!(
                 watermark.contains(&format!("{field} = math::min([{field} ?: 0, 41])")),
                 "{field} 必须 min 到 41: {watermark}"

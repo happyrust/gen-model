@@ -132,34 +132,6 @@ pub struct VerdictColumns {
     pub model_lazy_roots: Option<u32>,
 }
 
-/// 房间阶段与模型阶段并排暴露的持久证据。这里不重新计算房间归属，
-/// 只转述 `dbnum_watermark` 上已经原子提交的第三枚水位与输入凭证。
-#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
-pub struct RoomVerdictColumns {
-    pub room_sesno: i32,
-    pub room_sesno_time: Option<String>,
-    pub room_settled_at: Option<String>,
-    pub room_input_version: Option<super::dbnum_state::RoomInputVersion>,
-    pub room_required_input: Option<super::dbnum_state::RoomInputVersion>,
-    pub room_result_version: Option<String>,
-    pub room_input_version_matches: bool,
-}
-
-impl From<&DbnumState> for RoomVerdictColumns {
-    fn from(row: &DbnumState) -> Self {
-        Self {
-            room_sesno: row.room_sesno,
-            room_sesno_time: row.room_sesno_time.clone(),
-            room_settled_at: row.room_settled_at.clone(),
-            room_input_version: row.room_input_version.clone(),
-            room_required_input: row.room_required_input.clone(),
-            room_result_version: row.room_result_version.clone(),
-            room_input_version_matches: row.room_input_version.is_some()
-                && row.room_input_version == row.room_required_input,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
 pub struct ConsistencySummary {
     pub judged: u32,
@@ -177,7 +149,6 @@ pub(crate) struct ConsistencyObservation {
     pub applied_sesno: i32,
     pub initialized: bool,
     pub verdict: ConsistencyVerdict,
-    pub room: RoomVerdictColumns,
 }
 
 pub fn verdict(row: &DbnumState, census: &RootCensus, data_face: DataFace) -> ConsistencyVerdict {
@@ -397,18 +368,6 @@ struct WatermarkRow {
     #[serde(default)]
     model_settled_at: Option<String>,
     #[serde(default)]
-    room_sesno: Option<i32>,
-    #[serde(default)]
-    room_sesno_time: Option<String>,
-    #[serde(default)]
-    room_settled_at: Option<String>,
-    #[serde(default)]
-    room_input_version: Option<super::dbnum_state::RoomInputVersion>,
-    #[serde(default)]
-    room_required_input: Option<super::dbnum_state::RoomInputVersion>,
-    #[serde(default)]
-    room_result_version: Option<String>,
-    #[serde(default)]
     model_lazy_roots: Option<u32>,
     #[serde(default)]
     model_dead_roots: Option<u32>,
@@ -426,14 +385,6 @@ impl From<WatermarkRow> for DbnumState {
             model_sesno: row.model_sesno.unwrap_or_default(),
             model_sesno_time: row.model_sesno_time,
             model_settled_at: row.model_settled_at,
-            room_sesno: row.room_sesno.unwrap_or_default(),
-            room_sesno_time: row
-                .room_sesno_time
-                .filter(|_| row.room_sesno.unwrap_or_default() > 0),
-            room_settled_at: row.room_settled_at,
-            room_input_version: row.room_input_version,
-            room_required_input: row.room_required_input,
-            room_result_version: row.room_result_version,
             model_lazy_roots: row.model_lazy_roots,
             model_dead_roots: row.model_dead_roots,
             model_roots_observed_at: row.model_roots_observed_at,
@@ -492,8 +443,6 @@ async fn watermark_states(db: &Surreal<Any>) -> anyhow::Result<BTreeMap<u32, Dbn
     let mut response = db
         .query(
             "SELECT dbnum, db_type, applied_sesno, model_sesno, model_sesno_time, \
-             room_sesno, room_sesno_time, room_input_version, room_required_input, room_result_version, \
-             IF room_settled_at != NONE THEN type::string(room_settled_at) ELSE NONE END AS room_settled_at, \
              IF model_settled_at != NONE THEN type::string(model_settled_at) ELSE NONE END AS model_settled_at, \
              model_lazy_roots, model_dead_roots, model_roots_observed_at FROM dbnum_watermark;",
         )
@@ -511,8 +460,6 @@ async fn watermark_states(db: &Surreal<Any>) -> anyhow::Result<BTreeMap<u32, Dbn
 async fn states_and_census(db: &Surreal<Any>) -> anyhow::Result<CensusSnapshot> {
     let mut response = db.query(format!(
         "SELECT dbnum, db_type, applied_sesno, model_sesno, model_sesno_time, \
-         room_sesno, room_sesno_time, room_input_version, room_required_input, room_result_version, \
-         IF room_settled_at != NONE THEN type::string(room_settled_at) ELSE NONE END AS room_settled_at, \
          IF model_settled_at != NONE THEN type::string(model_settled_at) ELSE NONE END AS model_settled_at, \
          model_lazy_roots, \
          model_dead_roots, model_roots_observed_at FROM dbnum_watermark;\n{}",
@@ -678,7 +625,6 @@ pub(crate) async fn observations_for_all(
                     applied_sesno: row.applied_sesno,
                     initialized: row.initialized,
                     verdict: result,
-                    room: RoomVerdictColumns::from(&row),
                 },
             )
         })

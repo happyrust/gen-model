@@ -1518,9 +1518,8 @@ async fn execute_frozen_batch(
                         target_sesno: committed_end_sesno,
                         target_time,
                         model: None,
-                        rooms: None,
                         info: Some(snapshot),
-                        // 中途那一笔：模型 / 房间还没写，不许宣告本任务的写库结束了。
+                        // 中途那一笔：模型还没写，不许宣告本任务的写库结束了。
                         closes_task: false,
                     },
                 )
@@ -1596,7 +1595,6 @@ async fn execute_frozen_batch(
                 target_sesno: file_latest_sesno,
                 target_time: end_time,
                 model: Some(model_outcome),
-                rooms: None,
                 // Ref0 统计已在数据批次应用之后那一笔序列化（上面 `ref0_snapshot`），
                 // 这一笔只盖水位与写入标记。
                 info: None,
@@ -1618,11 +1616,11 @@ async fn execute_frozen_batch(
     // ── 写入标记的兜底收口（ADR-072 W1）────────────────────────────────────────────
     //
     // 走到这里本任务就不会再写库了，无论它成、败还是 Partial：`finished` 说的是「本任务的
-    // 写库结束了」，欠什么由三水位回答。不收的话，一个**没崩**、只是模型失败的任务会在
+    // 写库结束了」，欠什么由两水位回答。不收的话，一个**没崩**、只是模型失败的任务会在
     // 库里留下 `writing`，下一次启动把一个数据完全一致的库整个退回 S 重跑。
     //
-    // 上面收尾那一笔盖上了就不再来一次；它是唯一带三水位的那一笔，这里这一笔只收标记
-    // （`model` / `rooms` / `info` 全 None → 水位那一句只前进 `state_revision`）。
+    // 上面收尾那一笔盖上了就不再来一次；它是唯一带水位的那一笔，这里这一笔只收标记
+    // （`model` / `info` 全 None → 水位那一句只前进 `state_revision`）。
     if !write_marker_closed
         && let Err(error) = crate::data_interface::task_end::commit_task_end_on(
             &aios_core::SUL_DB,
@@ -1631,7 +1629,6 @@ async fn execute_frozen_batch(
                 target_sesno: file_latest_sesno,
                 target_time: None,
                 model: None,
-                rooms: None,
                 info: None,
                 closes_task: true,
             },

@@ -45,40 +45,23 @@ struct RoomMembershipEdge {
     center_dist: f32,
 }
 
-/// 一个构件挂在哪些面板上，两种结果形态都认。
+/// 一个构件挂在哪些面板上：直接读 `room_relate` 边（ADR-073 D1 / D4）。
 ///
-/// 从 `data_interface/room_delta.rs` 原样搬过来的（房间流程退役，t-678）：那个模块整体退了，
-/// 而 `e3d.room.lookup` 与它的读路要保留，所以读法跟着查询走。语句一字未改——`delta2_`
-/// 版本走结果目录的分桶分片，其余走旧 `room_result` 表。
+/// 房间归属由生成路径逐根写成 `panel -> room_relate -> element` 边、与该根的模型行同事务落库，
+/// 库上没有别的房间结果形态——结果目录 / 分片工件与旧结果表随房间流程退役，结果版本那一格
+/// 随第三枚水位退（D2）。排序与 `fn::room_relate_of` 同一口径（`inside_count` 降序 →
+/// `center_dist` 升序 → `room_num` 升序，ADR-010 §5），多归属时首条即材料表取到的那条。
 async fn read_room_memberships(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    dbnum: u32,
     member: &str,
 ) -> anyhow::Result<Vec<RoomMembershipEdge>> {
-    let bucket = crate::data_interface::digest::digest(member.as_bytes())[..2].to_owned();
     let mut response = db
         .query(
-            "LET $version=$watermark.room_result_version;
-            RETURN IF string::starts_with($version ?? '', 'delta2_') {
-                LET $directory=type::thing('room_directory',$version);
-                LET $pages=$directory.buckets[$bucket] ?? [];
-                LET $fragments=(SELECT VALUE members[$member] FROM (array::map($pages, |$p| type::thing('room_directory_page',$p))));
-                LET $parts=array::flatten((SELECT VALUE parts FROM (array::map($fragments[WHERE $this != NONE], |$f| type::thing('room_fragment',$f)))));
-                array::flatten((SELECT VALUE edges FROM (array::map($parts, |$p| type::thing('room_fragment_part',$p)))))
-            } ELSE {
-                (SELECT panel,room_num,inside_count ?? 0 AS inside_count,center_dist ?? 0.0 AS center_dist FROM room_result
-                WHERE dbnum=$dbnum AND result_version=$version AND member=$member)
-            };",
+            "LET $pe = type::thing('pe', $member);
+            SELECT record::id(in) AS panel, room_num, inside_count ?? 0 AS inside_count, \
+             center_dist ?? 0.0 AS center_dist FROM $pe<-room_relate \
+             ORDER BY inside_count DESC, center_dist ASC, room_num ASC;",
         )
-        .bind((
-            "watermark",
-            surrealdb::sql::Thing::from((
-                "dbnum_watermark",
-                surrealdb::sql::Id::Number(dbnum as i64),
-            )),
-        ))
-        .bind(("dbnum", dbnum))
-        .bind(("bucket", bucket))
         .bind(("member", member.to_owned()))
         .await?
         .check()?;
@@ -275,11 +258,12 @@ impl QueryService {
     /// 房间任务读实时行（`room_model::consumption_view`）。这时既没有「发布版本」也谈不上
     /// 「stale」——读透不承诺文件级发布语义，所以两格回 `null`、状态回 `unsupported`（审核 F-B）。
     ///
-    /// ingest 形态（ADR-072 D4，publish 阶段退役）：**`published_version` = 该库的 `room_sesno`**
-    /// （任务收尾那一笔盖的房间水位，读水位镜像，不问派生表），**`stale` = 该库有任务在飞**
-    /// （`task_registry` 是在飞的唯一来源）。没有具体库号的调用（空间边界那一路）：版本回
-    /// `null`、在飞看全局。此前这里还问一遍第二条异步账里的房间待办行——那张表随
-    /// 账本退役，房间归属如今在任务内算完写完，任务不在飞就是算完了。
+    /// ingest 形态（ADR-072 D4，publish 阶段退役；ADR-073 D2 / D4 对齐）：**`published_version` =
+    /// 该库的 `model_sesno`**——房间边随根写在模型块里，房间的承诺并入模型水位，第三枚水位退了；
+    /// 读水位镜像，不问派生表。**`stale` = 该库有任务在飞**（`task_registry` 是在飞的唯一来源）。
+    /// 没有具体库号的调用（空间边界那一路）：版本回 `null`、在飞看全局。此前这里还问一遍
+    /// 第二条异步账里的房间待办行——那张表随账本退役，房间归属如今随根算完写完，
+    /// 任务不在飞就是算完了。
     async fn published_derivation_status(
         dbnum: Option<u32>,
     ) -> Result<(Value, Value, &'static str), QueryError> {
@@ -291,12 +275,12 @@ impl QueryService {
         let registry = crate::data_interface::task_registry::TaskRegistry::global();
         let (published_version, stale) = match dbnum {
             Some(dbnum) => {
-                let room_sesno = crate::data_interface::dbnum_state::DbnumState::read(dbnum)
+                let model_sesno = crate::data_interface::dbnum_state::DbnumState::read(dbnum)
                     .await
                     .map_err(db_error)?
-                    .map(|state| state.room_sesno);
+                    .map(|state| state.model_sesno);
                 (
-                    room_sesno.map_or(Value::Null, |sesno| json!(sesno)),
+                    model_sesno.map_or(Value::Null, |sesno| json!(sesno)),
                     registry.has_running_data_batch_for(dbnum),
                 )
             }
@@ -563,7 +547,7 @@ impl QueryService {
                 ),
             )
         })?;
-        let edges = read_room_memberships(&SUL_DB, dbnum, &refno.to_string())
+        let edges = read_room_memberships(&SUL_DB, &refno.to_string())
             .await
             .map_err(|error| QueryError::new("DATABASE_ERROR", error.to_string()))?;
         let resident = crate::fast_model::room_resident::current_for_calculation().ok();
@@ -937,11 +921,12 @@ mod tests {
         assert!(!unique.contains(&"model.pending_units"));
     }
 
-    /// ADR-072 D4：`e3d.room.lookup` 回的 `published_version` 就是该库的 `room_sesno`（任务收尾
-    /// 盖的房间水位，读水位镜像），`stale` = 该库有任务在飞（`task_registry`）；不再问派生表
-    /// （`published_file_input` 的发布版本、第二条异步账的房间待办行）。
+    /// ADR-072 D4 / ADR-073 D2、D4：`e3d.room.lookup` 回的 `published_version` 就是该库的
+    /// `model_sesno`（房间的承诺并入模型水位，第三枚水位退了；读水位镜像），`stale` = 该库有
+    /// 任务在飞（`task_registry`）；不再问派生表（`published_file_input` 的发布版本、第二条
+    /// 异步账的房间待办行），也不再有房间水位可问。
     #[test]
-    fn room_lookup_freshness_is_the_room_watermark_and_task_registry_only() {
+    fn room_lookup_freshness_is_the_model_watermark_and_task_registry_only() {
         let source = include_str!("query_service.rs");
         let status = source
             .split_once("async fn published_derivation_status(")
@@ -950,7 +935,7 @@ mod tests {
             .split_once("async fn identity(&self")
             .expect("status boundary")
             .0;
-        assert!(status.contains("room_sesno"), "{status}");
+        assert!(status.contains("state.model_sesno"), "{status}");
         assert!(status.contains("has_running_data_batch_for(dbnum)"), "{status}");
         assert!(status.contains("has_running_data_batch()"), "{status}");
         for retired in [
@@ -959,9 +944,20 @@ mod tests {
             concat!("side_effect_", "pending"),
             "SUL_DB",
             "room_recalc",
+            concat!("room_", "sesno"),
         ] {
-            assert!(!status.contains(retired), "`{retired}` 已随 publish 阶段退役: {status}");
+            assert!(!status.contains(retired), "`{retired}` 已随 publish 阶段 / 房间流程退役: {status}");
         }
+        // 读口只认两张边（ADR-073 D4）：结果目录 / 分片工件与旧结果表都退了。
+        let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
+        for retired in [
+            concat!("room_", "result"),
+            concat!("room_", "directory"),
+            concat!("room_", "fragment"),
+        ] {
+            assert!(!production.contains(retired), "`{retired}` 已随房间流程退役");
+        }
+        assert!(production.contains("<-room_relate"), "读口走 room_relate 边");
         let room = source
             .split_once("async fn room(&self")
             .expect("room query exists")

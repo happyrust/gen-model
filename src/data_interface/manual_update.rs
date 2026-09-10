@@ -2788,11 +2788,8 @@ pub struct DbnumStatus {
     /// 数据水位与模型水位的统一判决。整体缺席 = 本次取数失败，见 `warnings`。
     #[serde(flatten)]
     pub model: Option<crate::data_interface::dbnum_consistency::VerdictColumns>,
-    /// 第三枚水位及房间输入/结果凭证。与模型判决同一次批量读取，避免面板自行查库拼状态。
-    #[serde(flatten)]
-    pub room: Option<crate::data_interface::dbnum_consistency::RoomVerdictColumns>,
     /// 写入标记（ADR-072 D1，spec §4.7）：这个库有没有一次没写完的任务。它不回答「欠什么」
-    /// ——欠什么仍由三枚水位回答。整格缺失 = 这个库从没被任务写过，或上一次回退刚把标记行
+    /// ——欠什么仍由两枚水位回答。整格缺失 = 这个库从没被任务写过，或上一次回退刚把标记行
     /// 删掉、下一次任务还没开工；客户端按「没有这一格」处理，不许退回 `finished` 画绿灯。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub write_state: Option<WriteStateColumns>,
@@ -3864,7 +3861,6 @@ impl AiosDBManager {
                 excluded,
                 not_in_project: false,
                 model: None,
-                room: None,
                 write_state: None,
             });
         }
@@ -3896,7 +3892,6 @@ impl AiosDBManager {
                 excluded: false,
                 not_in_project: false,
                 model: None,
-                room: None,
                 write_state: None,
             });
         }
@@ -3932,7 +3927,6 @@ impl AiosDBManager {
                             row.applied_sesno = observation.applied_sesno;
                             row.initialized = observation.initialized;
                             row.model = Some(observation.verdict.columns());
-                            row.room = Some(observation.room.clone());
                         }
                     }
                 }

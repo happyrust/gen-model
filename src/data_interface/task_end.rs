@@ -1,8 +1,9 @@
 //! 任务收尾的一笔控制面事务（ADR-071 D3 / D6，计划 v3 S2）。
 //!
-//! 一个 dbnum 任务在自己的目标 `T` 上把数据、模型、房间三段跑完之后，把「这一版的承诺」
-//! **一次**写进库：模型 / 房间水位、每个 Ref0 的元素统计、`state_revision`。事实全部来自
-//! 任务自己手里的内存结果——一条都不回查库，这正是它替掉的三处的代价所在：
+//! 一个 dbnum 任务在自己的目标 `T` 上把数据、模型两段跑完之后（房间归属随根算、随模型块
+//! 同事务落边，ADR-073 D1，收尾没有房间段），把「这一版的承诺」**一次**写进库：模型水位、
+//! 每个 Ref0 的元素统计、`state_revision`。事实全部来自任务自己手里的内存结果——一条都不
+//! 回查库，这正是它替掉的三处的代价所在：
 //!
 //! | 换掉的 | 它原来的代价 |
 //! |---|---|
@@ -23,19 +24,14 @@ use surrealdb::{Surreal, engine::any::Any};
 
 use super::dbnum_state::{DbnumState, INFO_TABLE, WATERMARK_TABLE, escape_surql_str};
 
-/// 本任务模型阶段的结果，独立于后续房间阶段。
+/// 本任务模型阶段的结果。`all_roots_ok` 里的「成功」含该根的房间归属：某根房间算不出来
+/// 或写不进去 = 该根本轮未完成（ADR-073 D2），模型水位不越过。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TaskModelOutcome {
     /// 这一版要生成的根全部落库成功；失败时保持模型水位。
     pub all_roots_ok: bool,
     /// 永久放弃的根数（写进 `model_dead_roots`，供 `/dbnums` 观测）。
     pub dead_roots: usize,
-}
-
-/// 房间失败保留已完成的模型水位，恢复时仅补房间阶段。
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct TaskRoomOutcome {
-    pub ok: bool,
 }
 
 /// 目标索引里一个 Ref0 的元素统计（`count` = 该 Ref0 在 `T` 上的**活**元素数）。
@@ -67,8 +63,6 @@ pub(crate) struct TaskEnd {
     pub target_time: Option<String>,
     /// `None` = 本任务没跑模型（纯数据批次），模型水位与根观测都不动。
     pub model: Option<TaskModelOutcome>,
-    /// `None` = 本任务没跑房间。
-    pub rooms: Option<TaskRoomOutcome>,
     /// `None` = 本任务没有权威的目标索引快照（例如 ModelOnly 任务一个元素都没动），
     /// 此时 `dbnum_info_table` 一行都不碰。
     pub info: Option<Ref0Snapshot>,
@@ -77,23 +71,18 @@ pub(crate) struct TaskEnd {
     /// 为真时事务里多一句 `dbnum_write_state:{dbnum} SET status = 'finished'`——全库唯一
     /// 写得出 `finished` 的地方。计划 §5 R1 原写着「`TaskEnd` 不需要新字段」，那是按
     /// 「一个任务只调一次 `commit_task_end_on`」估的；实际执行体调两次（数据批次应用之后
-    /// 先落一笔 Ref0 统计，模型 / 房间跑完再落收尾那一笔），没有这一格，中途那一笔就会
+    /// 先落一笔 Ref0 统计，模型跑完再落收尾那一笔），没有这一格，中途那一笔就会
     /// 把还在写模型的任务提前宣告写完。
     ///
-    /// 任务以 `Partial` 收尾（模型 / 房间失败但没崩）也要为真：`finished` 说的是「本任务
-    /// 的写库结束了」，欠什么由三水位回答。
+    /// 任务以 `Partial` 收尾（模型失败但没崩）也要为真：`finished` 说的是「本任务
+    /// 的写库结束了」，欠什么由两水位回答。
     pub closes_task: bool,
 }
 
 impl TaskEnd {
-    /// 模型阶段完成，不受房间阶段结果影响。
+    /// 模型阶段完成（含各根的房间归属，ADR-073 D2）。
     fn model_stamps(&self) -> bool {
         self.model.as_ref().is_some_and(|model| model.all_roots_ok)
-    }
-
-    /// 这一笔推不推 `room_sesno`：房间跑了且成了。
-    fn room_stamps(&self) -> bool {
-        self.rooms.as_ref().is_some_and(|rooms| rooms.ok)
     }
 }
 
@@ -102,7 +91,6 @@ impl TaskEnd {
 pub(crate) struct TaskEndReceipt {
     /// 盖上的模型水位；未跑模型、模型失败或前置水位不足时为 None。
     pub model_sesno: Option<i32>,
-    pub room_sesno: Option<i32>,
     /// 写了几个 Ref0 的统计；`None` = 本次没有权威快照，没动 info 表。
     pub info_rows: Option<usize>,
     /// 兼容字段名：数据或模型前置水位不足，整条水位更新被挡下。
@@ -115,7 +103,7 @@ fn max_tail_bytes() -> usize {
     super::tx_limits::data_tx_limits().max_bytes
 }
 
-/// 水位那一句。没有任何一枚水位要盖时只剩 `state_revision` 前进，不带数据水位闸。
+/// 水位那一句。模型水位不用盖时只剩 `state_revision` 前进，不带数据水位闸。
 fn render_watermark_update(end: &TaskEnd) -> String {
     let TaskEnd {
         dbnum,
@@ -126,7 +114,6 @@ fn render_watermark_update(end: &TaskEnd) -> String {
     let mut stamps = false;
 
     if let Some(model) = &end.model {
-        // 模型完成独立盖章，房间失败仅留下房间缺口。
         if end.model_stamps() {
             stamps = true;
             if let Some(time) = end.target_time.as_deref() {
@@ -146,31 +133,13 @@ fn render_watermark_update(end: &TaskEnd) -> String {
         sets.push(format!("model_roots_observed_at = {target_sesno}"));
     }
 
-    if end.room_stamps() {
-        stamps = true;
-        if let Some(time) = end.target_time.as_deref() {
-            sets.push(format!(
-                "room_sesno_time = IF {target_sesno} >= (room_sesno ?: 0) \
-                 THEN '{}' ELSE room_sesno_time END",
-                escape_surql_str(time)
-            ));
-        }
-        sets.push(format!(
-            "room_sesno = math::max([room_sesno ?: 0, {target_sesno}])"
-        ));
-        sets.push("room_settled_at = time::now()".to_owned());
-    }
-
     sets.push("state_revision = (state_revision ?? 0) + 1".to_owned());
     sets.push("updated_at = time::now()".to_owned());
 
     // `UPDATE` 而不是 `UPSERT`：没有数据水位行就谈不上「与数据一致到哪一版」，
     // 凭空造一行出来只会造出一个没有对手的水位。
     let guard = if stamps {
-        let room_guard = if end.room_stamps() && !end.model_stamps() {
-            format!(" AND (model_sesno ?: 0) >= {target_sesno}")
-        } else { String::new() };
-        format!(" WHERE (applied_sesno ?: 0) >= {target_sesno}{room_guard}")
+        format!(" WHERE (applied_sesno ?: 0) >= {target_sesno}")
     } else {
         String::new()
     };
@@ -209,7 +178,7 @@ fn render_info_snapshot(dbnum: u32, snapshot: &Ref0Snapshot) -> String {
 /// 整笔收尾事务。统计块排在水位之前：统计描述的是**已经落库的数据**，与水位那一句的
 /// 数据水位闸各管各的（闸挡下水位时统计照旧成立）。
 ///
-/// 写入标记那一句排在水位**之前**（ADR-072 D1）：它与三水位同生同死，但不带数据水位闸
+/// 写入标记那一句排在水位**之前**（ADR-072 D1）：它与两水位同生同死，但不带数据水位闸
 /// ——闸挡下水位说的是「这一版没盖成」，而本任务的写库确实结束了。位置也有讲究：
 /// [`commit_task_end_on`] 按 `num_statements() - 1` 取水位那一条的回执，水位必须是最后一句。
 pub(crate) fn render_task_end_tail(end: &TaskEnd) -> String {
@@ -284,12 +253,9 @@ pub(crate) async fn commit_task_end_on(
     DbnumState::invalidate_mirrored_on(db, end.dbnum);
     super::dbnum_consistency::invalidate_census();
 
-    let model_stamped = stamped && end.model_stamps();
-    let room_stamped = stamped && end.room_stamps();
-    let wanted_stamp = end.model_stamps() || end.room_stamps();
+    let wanted_stamp = end.model_stamps();
     Ok(TaskEndReceipt {
-        model_sesno: model_stamped.then_some(end.target_sesno),
-        room_sesno: room_stamped.then_some(end.target_sesno),
+        model_sesno: (stamped && wanted_stamp).then_some(end.target_sesno),
         info_rows: end.info.as_ref().map(|snapshot| snapshot.rows.len()),
         blocked_by_data: wanted_stamp && !stamped,
     })
@@ -308,7 +274,6 @@ mod tests {
                 all_roots_ok: true,
                 dead_roots: 0,
             }),
-            rooms: Some(TaskRoomOutcome { ok: true }),
             info: Some(Ref0Snapshot {
                 file_name: "ams".to_owned(),
                 db_type: "DESI".to_owned(),
@@ -333,8 +298,6 @@ mod tests {
     struct WatermarkRow {
         model_sesno: Option<i32>,
         model_sesno_time: Option<String>,
-        room_sesno: Option<i32>,
-        room_sesno_time: Option<String>,
         state_revision: Option<u64>,
         model_dead_roots: Option<u32>,
         model_roots_observed_at: Option<i32>,
@@ -372,7 +335,7 @@ mod tests {
     }
 
     #[test]
-    fn the_tail_is_one_transaction_and_stamps_both_watermarks_under_the_data_gate() {
+    fn the_tail_is_one_transaction_and_stamps_the_model_watermark_under_the_data_gate() {
         let sql = render_task_end_tail(&end());
         assert_eq!(sql.matches("BEGIN TRANSACTION;").count(), 1, "{sql}");
         assert_eq!(sql.matches("COMMIT TRANSACTION;").count(), 1, "{sql}");
@@ -381,13 +344,11 @@ mod tests {
             "{sql}"
         );
         assert!(
-            sql.contains("room_sesno = math::max([room_sesno ?: 0, 26])"),
-            "{sql}"
-        );
-        assert!(
             sql.contains("WHERE (applied_sesno ?: 0) >= 26"),
             "数据水位闸（M2）必须在：{sql}"
         );
+        // ADR-073 W3：行上只有两枚水位，收尾不写任何房间格。
+        assert!(!sql.contains("room_"), "收尾没有房间那一枚可盖：{sql}");
         // 时刻子句排在赋值之前（SurrealDB 的 SET 顺序求值）。
         let model_time = sql
             .find("model_sesno_time = IF")
@@ -396,15 +357,10 @@ mod tests {
             .find("model_sesno = math::max")
             .expect("model value clause");
         assert!(model_time < model_value, "{sql}");
-        let room_time = sql.find("room_sesno_time = IF").expect("room time clause");
-        let room_value = sql
-            .find("room_sesno = math::max")
-            .expect("room value clause");
-        assert!(room_time < room_value, "{sql}");
     }
 
     /// ADR-072 W2：`status = 'finished'` 全库只有这一处写得出，而且**恰好一句**、
-    /// 与三水位同一笔事务、排在水位那一条之前（水位是最后一条，回执按下标取它）。
+    /// 与两水位同一笔事务、排在水位那一条之前（水位是最后一条，回执按下标取它）。
     #[test]
     fn the_closing_tail_carries_exactly_one_finished_marker_before_the_watermark() {
         let sql = render_task_end_tail(&end());
@@ -428,21 +384,20 @@ mod tests {
         );
     }
 
-    /// 中途那一笔（数据批次应用之后的 Ref0 统计）不许宣告写完——模型 / 房间还没写。
+    /// 中途那一笔（数据批次应用之后的 Ref0 统计）不许宣告写完——模型还没写。
     #[test]
     fn a_mid_task_tail_leaves_the_write_marker_alone() {
         let mut end = end();
         end.closes_task = false;
         end.model = None;
-        end.rooms = None;
         let sql = render_task_end_tail(&end);
         assert!(!sql.contains("dbnum_write_state"), "{sql}");
         assert!(!sql.contains("finished"), "{sql}");
         assert!(sql.contains(INFO_TABLE), "统计照落：{sql}");
     }
 
-    /// 模型 / 房间失败（没崩、走到了收尾）照样收标记：`finished` 说的是「本任务的写库
-    /// 结束了」，欠什么由三水位回答（ADR-072 D1）。
+    /// 模型失败（没崩、走到了收尾）照样收标记：`finished` 说的是「本任务的写库
+    /// 结束了」，欠什么由两水位回答（ADR-072 D1）。
     #[test]
     fn a_partial_task_still_closes_its_write_marker() {
         let mut end = end();
@@ -450,11 +405,9 @@ mod tests {
             all_roots_ok: false,
             dead_roots: 3,
         });
-        end.rooms = Some(TaskRoomOutcome { ok: false });
         let sql = render_task_end_tail(&end);
         assert!(sql.contains("status = 'finished'"), "{sql}");
         assert!(!sql.contains("model_sesno = math::max"), "{sql}");
-        assert!(!sql.contains("room_sesno = math::max"), "{sql}");
     }
 
     #[test]
@@ -482,40 +435,18 @@ mod tests {
         assert!(!sql.contains("model_sesno_time = IF"), "{sql}");
         assert!(sql.contains("model_dead_roots = 2"), "{sql}");
         assert!(sql.contains("model_roots_observed_at = 26"), "{sql}");
-        assert!(
-            sql.contains("room_sesno = math::max"),
-            "房间照旧能盖：{sql}"
-        );
-    }
-
-    #[test]
-    fn a_failed_room_preserves_the_completed_model_watermark() {
-        // Independent stages: completed models survive a failed room stage.
-        let mut end = end();
-        end.rooms = Some(TaskRoomOutcome { ok: false });
-        let sql = render_task_end_tail(&end);
-        assert!(sql.contains("model_sesno = math::max"), "{sql}");
-        assert!(sql.contains("model_sesno_time = IF"), "{sql}");
-        assert!(sql.contains("model_settled_at"), "{sql}");
-        assert!(!sql.contains("room_sesno = math::max"), "{sql}");
-        assert!(sql.contains("WHERE (applied_sesno"), "{sql}");
-        assert!(sql.contains("model_dead_roots = 0"), "{sql}");
-        assert!(sql.contains("model_roots_observed_at = 26"), "{sql}");
+        // 模型没盖成就没有任何一枚水位要盖：数据水位闸随之不带。
+        assert!(!sql.contains("WHERE (applied_sesno"), "{sql}");
         assert!(
             sql.contains("state_revision = (state_revision ?? 0) + 1"),
             "{sql}"
         );
-        // 没跑房间（`None`）不算失败：模型照旧能盖。
-        end.rooms = None;
-        let sql = render_task_end_tail(&end);
-        assert!(sql.contains("model_sesno = math::max"), "{sql}");
     }
 
     #[test]
     fn a_tail_that_stamps_nothing_only_advances_the_revision_and_drops_the_data_gate() {
         let mut end = end();
         end.model = None;
-        end.rooms = None;
         end.info = None;
         let sql = render_task_end_tail(&end);
         assert!(
@@ -571,7 +502,6 @@ mod tests {
             receipt,
             TaskEndReceipt {
                 model_sesno: Some(26),
-                room_sesno: Some(26),
                 info_rows: Some(1),
                 blocked_by_data: false,
             }
@@ -579,13 +509,8 @@ mod tests {
 
         let row = watermark(&db, 8000).await;
         assert_eq!(row.model_sesno, Some(26));
-        assert_eq!(row.room_sesno, Some(26));
         assert_eq!(
             row.model_sesno_time.as_deref(),
-            Some("2026-09-10T09:00:00+08:00")
-        );
-        assert_eq!(
-            row.room_sesno_time.as_deref(),
             Some("2026-09-10T09:00:00+08:00")
         );
         assert_eq!(row.state_revision, Some(5));
@@ -600,7 +525,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_data_gate_holds_back_both_watermarks_but_not_the_statistics() {
+    async fn the_data_gate_holds_back_the_model_watermark_but_not_the_statistics() {
         let db = database().await;
         db.query("CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=12, model_sesno=12;")
             .await
@@ -611,7 +536,6 @@ mod tests {
         let receipt = commit_task_end_on(&db, &end()).await.unwrap();
         assert!(receipt.blocked_by_data);
         assert_eq!(receipt.model_sesno, None);
-        assert_eq!(receipt.room_sesno, None);
 
         let row = watermark(&db, 8000).await;
         assert_eq!(row.model_sesno, Some(12), "水位一格都没动");
@@ -623,8 +547,10 @@ mod tests {
         );
     }
 
+    /// 模型失败（含某根房间算不出来，ADR-073 D2）：模型水位不动、根观测照记、
+    /// 收尾照样落地——这不是「被数据挡下」，是这一版没完成。
     #[tokio::test]
-    async fn a_failed_model_prevents_room_watermark_overtaking_it() {
+    async fn a_failed_model_leaves_the_watermark_behind_but_records_the_roots() {
         let db = database().await;
         db.query("CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=20;")
             .await
@@ -638,50 +564,24 @@ mod tests {
             dead_roots: 1,
         });
         let receipt = commit_task_end_on(&db, &end).await.unwrap();
-        assert_eq!(receipt.model_sesno, None);
-        assert_eq!(receipt.room_sesno, None);
-        assert!(receipt.blocked_by_data);
-
-        let row = watermark(&db, 8000).await;
-        assert_eq!(row.model_sesno, Some(20));
-        assert_eq!(row.room_sesno, None);
-        assert_eq!(row.model_dead_roots, None);
-    }
-
-    #[tokio::test]
-    async fn a_failed_room_keeps_only_the_room_watermark_behind() {
-        let db = database().await;
-        db.query(
-            "CREATE dbnum_watermark:8000 SET dbnum=8000, applied_sesno=26, model_sesno=20, room_sesno=8;",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-
-        let mut end = end();
-        end.rooms = Some(TaskRoomOutcome { ok: false });
-        let receipt = commit_task_end_on(&db, &end).await.unwrap();
         assert_eq!(
             receipt,
             TaskEndReceipt {
-                model_sesno: Some(26),
-                room_sesno: None,
+                model_sesno: None,
                 info_rows: Some(1),
                 blocked_by_data: false,
-            },
-            "房间失败不是「被数据挡下」，是这一版没完成"
+            }
         );
 
         let row = watermark(&db, 8000).await;
-        assert_eq!(row.model_sesno, Some(26), "模型完成不受房间失败影响");
-        assert_eq!(row.room_sesno, Some(8));
-        assert_eq!(row.model_roots_observed_at, Some(26), "观测照记");
+        assert_eq!(row.model_sesno, Some(20), "模型没成，水位原地");
+        assert_eq!(row.model_dead_roots, Some(1), "观测照记");
+        assert_eq!(row.model_roots_observed_at, Some(26));
         assert_eq!(row.state_revision, Some(1));
         assert_eq!(
             info(&db, 24384).await.expect("ref0 row").count,
             Some(3),
-            "统计描述的是已落库的数据，与房间成败无关"
+            "统计描述的是已落库的数据，与模型成败无关"
         );
     }
 
@@ -759,7 +659,6 @@ mod tests {
             .unwrap();
 
         let mut end = end();
-        end.rooms = None;
         end.info = None;
         let sql = render_task_end_tail(&end);
         assert_eq!(
@@ -773,14 +672,12 @@ mod tests {
             receipt,
             TaskEndReceipt {
                 model_sesno: Some(26),
-                room_sesno: None,
                 info_rows: None,
                 blocked_by_data: false,
             }
         );
         let row = watermark(&db, 8000).await;
         assert_eq!(row.model_sesno, Some(26));
-        assert_eq!(row.room_sesno, None, "没跑房间，房间水位不动");
         assert!(info(&db, 24384).await.is_none(), "没有快照就不碰 info 表");
     }
 

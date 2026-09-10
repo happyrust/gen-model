@@ -1931,7 +1931,7 @@ fn wait_fixture_pending(
             project,
             &format!(
                 "RETURN {{ \
-                   watermark: (SELECT applied_sesno, model_sesno, room_sesno \
+                   watermark: (SELECT applied_sesno, model_sesno \
                                FROM dbnum_watermark:{dbnum})[0], \
                    write_state: (SELECT status, start_sesno, end_sesno, intent \
                                  FROM dbnum_write_state:{dbnum})[0] \

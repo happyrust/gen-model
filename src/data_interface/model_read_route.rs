@@ -12,17 +12,15 @@
 //!
 //! ```text
 //! Database ⇔ 数据面是 ingest ∧ applied_sesno > 0 ∧ 该库没有数据批次任务在跑（task_registry）
-//!            ∧ model_sesno == applied_sesno ∧ room_sesno == applied_sesno（镜像；ADR-071 D8「三水位相等」）
-//! Memory   ⇔ 其余（读透形态 / 基线未落 / 该库的任务在飞 / 模型落后于数据 / 房间落后于数据）
+//!            ∧ model_sesno == applied_sesno（镜像；ADR-071 D8「水位相等」，ADR-073 D2 收成两枚）
+//! Memory   ⇔ 其余（读透形态 / 基线未落 / 该库的任务在飞 / 模型落后于数据）
 //! ```
 //!
 //! 「模型落后」那一档（ADR-071 D8）：库里的模型行是上一版的，而进程内投影是启动时从库读回 +
 //! 本进程刚生成的**超集**——任务落库失败留痕、下一窗未触到的根，内存里都有；读内存不会比读库少。
-//!
-//! 「房间落后」那一档（同 D8）：ADR-064 D7 的「已初始化」在 ADR-071 里被定义成**三枚水位齐平**
-//! ——任务收尾那一笔把模型与房间一起盖到 T，房间那一枚没盖上（房间阶段失败留痕、等启动恢复
-//! 或下一窗补）就是这个库的这一版还没收完，读者仍按「未初始化」由进程内投影供数。三枚水位
-//! 同一次读（镜像那一格），分两次点查会在收尾那一笔的前后各读到一半。
+//! 房间归属随根算、随模型块同事务落边（ADR-073 D1），`model_sesno` 的承诺已含房间边，
+//! 「房间落后」不再是独立的一档。两枚水位同一次读（镜像那一格），分两次点查会在收尾那一笔的
+//! 前后各读到一半。
 //!
 //! - `Database`：rocksdb 为准，一个字不改（R4）。
 //! - `Memory`：按需请求直接从文件生成进 `ModelMemoryStore`、由 API 供数；**不落 rocksdb**——同一个库的
@@ -81,12 +79,8 @@ pub enum MemoryReason {
     /// 字面值沿用 `initialization_publishing`：plant-ui 已经认这个字，含义不变——「这个库正在被写」。
     InitializationPublishing,
     /// 数据到了 T、模型水位还没追上（`model_sesno < applied_sesno`，ADR-071 D8）：库里的模型行
-    /// 是旧版，进程内投影更全。
+    /// 是旧版，进程内投影更全。房间边随根写在模型块里，模型追上就是房间追上（ADR-073 D2）。
     ModelLagging,
-    /// 数据与模型都到了 T、房间水位还没追上（`room_sesno < applied_sesno`，ADR-071 D8）：这一版的
-    /// 任务收尾没能把房间那一枚一起盖上（房间阶段失败留痕，等启动恢复或下一窗补），按 D8 的
-    /// 「三水位相等」这个库还不算初始化完。
-    RoomLagging,
 }
 
 impl MemoryReason {
@@ -96,7 +90,6 @@ impl MemoryReason {
             Self::DataWatermarkUnestablished => "data_watermark_unestablished",
             Self::InitializationPublishing => "initialization_publishing",
             Self::ModelLagging => "model_lagging",
-            Self::RoomLagging => "room_lagging",
         }
     }
 }
@@ -124,18 +117,17 @@ impl ModelReadRoute {
     }
 }
 
-/// **唯一的判据**（纯函数）。五个输入分别来自：数据面形态（`options::data_face()`）、
-/// 该库的 `dbnum_watermark.applied_sesno` / `model_sesno` / `room_sesno`（镜像，同一次读）、
+/// **唯一的判据**（纯函数）。四个输入分别来自：数据面形态（`options::data_face()`）、
+/// 该库的 `dbnum_watermark.applied_sesno` / `model_sesno`（镜像，同一次读）、
 /// 该库是否有数据批次任务在跑。
 ///
-/// 「相等」按「没落后」判：模型 / 房间水位跑到数据前面是 M2 违反，另有对账管，这里不把它
+/// 「相等」按「没落后」判：模型水位跑到数据前面是 M2 违反，另有对账管，这里不把它
 /// 讲成「落后」。
 pub fn route(
     dbnum: u32,
     data_face: DataFace,
     applied_sesno: i32,
     model_sesno: i32,
-    room_sesno: i32,
     initialization_publishing: bool,
 ) -> ModelReadRoute {
     let reason = if data_face.is_read_through() {
@@ -146,8 +138,6 @@ pub fn route(
         Some(MemoryReason::InitializationPublishing)
     } else if model_sesno < applied_sesno {
         Some(MemoryReason::ModelLagging)
-    } else if room_sesno < applied_sesno {
-        Some(MemoryReason::RoomLagging)
     } else {
         None
     };
@@ -167,16 +157,16 @@ pub fn route(
 pub async fn route_for(dbnum: u32) -> anyhow::Result<ModelReadRoute> {
     let face = crate::options::data_face();
     if face.is_read_through() {
-        return Ok(route(dbnum, face, 0, 0, 0, false));
+        return Ok(route(dbnum, face, 0, 0, false));
     }
-    // 三枚水位同一次读（镜像那一格）：分几次点查会在任务收尾那一笔的前后各读到一半。
-    let (applied, model, room) = crate::data_interface::dbnum_state::DbnumState::read(dbnum)
+    // 两枚水位同一次读（镜像那一格）：分几次点查会在任务收尾那一笔的前后各读到一半。
+    let (applied, model) = crate::data_interface::dbnum_state::DbnumState::read(dbnum)
         .await?
-        .map(|state| (state.applied_sesno, state.model_sesno, state.room_sesno))
+        .map(|state| (state.applied_sesno, state.model_sesno))
         .unwrap_or_default();
     let in_flight = crate::data_interface::task_registry::TaskRegistry::global()
         .has_running_data_batch_for(dbnum);
-    Ok(route(dbnum, face, applied, model, room, in_flight))
+    Ok(route(dbnum, face, applied, model, in_flight))
 }
 
 tokio::task_local! {
@@ -224,39 +214,35 @@ pub fn announce_source_changed(dbnum: u32, source: ModelReadSource) {
 mod tests {
     use super::*;
 
-    /// ADR-071 D8：`Database` ⇔ ingest ∧ 基线已落 ∧ 无任务在飞 ∧ **三水位相等**。
+    /// ADR-071 D8（ADR-073 D2 收成两枚）：`Database` ⇔ ingest ∧ 基线已落 ∧ 无任务在飞 ∧
+    /// **两水位相等**。
     #[test]
-    fn database_needs_ingest_watermark_no_task_in_flight_and_three_equal_watermarks() {
-        let ok = route(8000, DataFace::Ingest, 285, 285, 285, false);
+    fn database_needs_ingest_watermark_no_task_in_flight_and_two_equal_watermarks() {
+        let ok = route(8000, DataFace::Ingest, 285, 285, false);
         assert_eq!(ok.source, ModelReadSource::Database);
         assert_eq!(ok.reason, None);
         assert!(ok.is_database());
-        // 模型 / 房间水位跑到数据前面是 M2 违反，不是「落后」；这里只判「没追上」。
-        assert!(route(8000, DataFace::Ingest, 285, 300, 285, false).is_database());
-        assert!(route(8000, DataFace::Ingest, 285, 285, 300, false).is_database());
+        // 模型水位跑到数据前面是 M2 违反，不是「落后」；这里只判「没追上」。
+        assert!(route(8000, DataFace::Ingest, 285, 300, false).is_database());
     }
 
     #[test]
     fn every_memory_reason_has_its_own_name() {
         assert_eq!(
-            route(8000, DataFace::ReadThrough, 285, 285, 285, false).reason,
+            route(8000, DataFace::ReadThrough, 285, 285, false).reason,
             Some(MemoryReason::ReadThrough)
         );
         assert_eq!(
-            route(8000, DataFace::Ingest, 0, 0, 0, false).reason,
+            route(8000, DataFace::Ingest, 0, 0, false).reason,
             Some(MemoryReason::DataWatermarkUnestablished)
         );
         assert_eq!(
-            route(8000, DataFace::Ingest, 285, 285, 285, true).reason,
+            route(8000, DataFace::Ingest, 285, 285, true).reason,
             Some(MemoryReason::InitializationPublishing)
         );
         assert_eq!(
-            route(8000, DataFace::Ingest, 285, 284, 285, false).reason,
+            route(8000, DataFace::Ingest, 285, 284, false).reason,
             Some(MemoryReason::ModelLagging)
-        );
-        assert_eq!(
-            route(8000, DataFace::Ingest, 285, 285, 284, false).reason,
-            Some(MemoryReason::RoomLagging)
         );
         let mut names = std::collections::BTreeSet::new();
         for reason in [
@@ -264,7 +250,6 @@ mod tests {
             MemoryReason::DataWatermarkUnestablished,
             MemoryReason::InitializationPublishing,
             MemoryReason::ModelLagging,
-            MemoryReason::RoomLagging,
         ] {
             assert!(!reason.as_str().is_empty());
             assert!(
@@ -275,12 +260,23 @@ mod tests {
         }
     }
 
+    /// ADR-073 实施约束 2：理由字面值里没有房间那一档——房间边随根写在模型块里，
+    /// 「房间落后」不再是 `/dbnums` / `/model/records` 上可见的独立理由。
+    #[test]
+    fn there_is_no_room_reason_anymore() {
+        let source = include_str!("model_read_route.rs");
+        let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
+        assert!(!production.contains(concat!("room_", "lagging")), "{production}");
+        assert!(!production.contains(concat!("Room", "Lagging")), "{production}");
+        assert!(!production.contains(concat!("room_", "sesno")), "{production}");
+    }
+
     /// 读透形态下水位恒 0、也没有任务在飞，但理由必须点名「读透」而不是「水位未建立」：
     /// 后者读起来像「基线还没跑」，而读透根本不做基线。
     #[test]
     fn read_through_wins_over_the_other_reasons() {
         assert_eq!(
-            route(8000, DataFace::ReadThrough, 0, 0, 0, true).reason,
+            route(8000, DataFace::ReadThrough, 0, 0, true).reason,
             Some(MemoryReason::ReadThrough)
         );
     }
@@ -290,29 +286,9 @@ mod tests {
     #[test]
     fn a_task_in_flight_is_named_before_a_lagging_model() {
         assert_eq!(
-            route(8000, DataFace::Ingest, 285, 200, 200, true).reason,
+            route(8000, DataFace::Ingest, 285, 200, true).reason,
             Some(MemoryReason::InitializationPublishing)
         );
-    }
-
-    /// 模型落后压过房间落后：房间是在模型之后算的（ADR-065 D1 顺序），模型没追上时房间
-    /// 必然也没追上，只报最靠前的那一枚。
-    #[test]
-    fn a_lagging_model_is_named_before_a_lagging_room() {
-        assert_eq!(
-            route(8000, DataFace::Ingest, 285, 200, 100, false).reason,
-            Some(MemoryReason::ModelLagging)
-        );
-    }
-
-    /// 房间那一枚的落后是 `/dbnums` 与 `/model/records` 上可见的独立理由（`room_lagging`），
-    /// 而不是折进 `model_lagging`：读者要分得清「模型行旧」与「模型齐了、房间没收完」。
-    #[test]
-    fn a_lagging_room_alone_routes_to_memory_with_its_own_reason() {
-        let route = route(8000, DataFace::Ingest, 285, 285, 260, false);
-        assert_eq!(route.source, ModelReadSource::Memory);
-        assert_eq!(route.reason, Some(MemoryReason::RoomLagging));
-        assert_eq!(route.columns()["model_source_reason"], "room_lagging");
     }
 
     #[test]
@@ -342,13 +318,13 @@ mod tests {
 
     #[test]
     fn columns_expose_source_and_reason() {
-        let value = route(8000, DataFace::Ingest, 285, 285, 285, true).columns();
+        let value = route(8000, DataFace::Ingest, 285, 285, true).columns();
         assert_eq!(value["model_source"], "memory");
         assert_eq!(value["model_source_reason"], "initialization_publishing");
-        let value = route(8000, DataFace::Ingest, 285, 285, 285, false).columns();
+        let value = route(8000, DataFace::Ingest, 285, 285, false).columns();
         assert_eq!(value["model_source"], "database");
         assert!(value["model_source_reason"].is_null());
-        let value = route(8000, DataFace::Ingest, 285, 280, 285, false).columns();
+        let value = route(8000, DataFace::Ingest, 285, 280, false).columns();
         assert_eq!(value["model_source"], "memory");
         assert_eq!(value["model_source_reason"], "model_lagging");
     }

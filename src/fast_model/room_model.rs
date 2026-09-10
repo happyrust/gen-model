@@ -1836,7 +1836,6 @@ pub(crate) fn box_mesh_for_test(min: Vec3, max: Vec3) -> PlantMesh {
 #[cfg(test)]
 mod memory_calculation_tests {
     use super::*;
-    use crate::data_interface::dbnum_state::RoomInputVersion;
     use crate::fast_model::model_memory_store::{ProjectedGeometry, ProjectedShape};
     use crate::fast_model::room_resident::{MeshCache, ResidentForm, ResidentManifest};
 
@@ -1921,50 +1920,65 @@ mod memory_calculation_tests {
             &[panel_record],
             Arc::<MeshCache>::default(),
         ));
-        let input = RoomInputVersion {
-            version: 1,
-            source_identity: "source".into(),
-            model_sesno: 12,
-            model_version: "model".into(),
-            room_definition_version: model.input_version(),
-            generation_rule_version: "v1".into(),
-        };
+        let model_sesno = 12;
+        let rooms_version = model.input_version();
         let calc = MemoryRoomCalculator::new(model, dir.path().to_path_buf()).unwrap();
         let inside = record(10, 400., 600.);
         let outside = record(20, 1400., 1600.);
         let full = calc
-            .calculate_with_points(8000, &input, &[inside.clone(), outside.clone()], |_| {
-                panic!("fully inside/outside must not load mesh points")
-            })
+            .calculate_with_points(
+                8000,
+                model_sesno,
+                &rooms_version,
+                &[inside.clone(), outside.clone()],
+                |_| panic!("fully inside/outside must not load mesh points"),
+            )
             .unwrap();
         assert_eq!(full.len(), 1);
         assert_eq!(full[0].member.inside_count, 8);
         let moved = record(10, 1400., 1600.);
-        assert!(calc.calculate(8000, &input, &[moved]).unwrap().is_empty());
-        assert!(calc.calculate(8000, &input, &[]).unwrap().is_empty());
+        assert!(
+            calc.calculate(8000, model_sesno, &rooms_version, &[moved])
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            calc.calculate(8000, model_sesno, &rooms_version, &[])
+                .unwrap()
+                .is_empty()
+        );
         // Multiple instances of the same element keep their individual boxes.
         let mut far = record(10, 2400., 2600.);
         far.record_id = "second-instance".into();
-        let split = calc.calculate(8000, &input, &[inside, far]).unwrap();
+        let split = calc
+            .calculate(8000, model_sesno, &rooms_version, &[inside, far])
+            .unwrap();
         assert_eq!(split.len(), 1);
         assert_eq!(split[0].member.center_dist, full[0].member.center_dist);
         let straddling = record(30, 900., 1100.);
         let edges = calc
-            .calculate_with_points(8000, &input, &[straddling.clone()], |_| {
-                Ok(vec![Point::new(950., 500., 500.)])
-            })
+            .calculate_with_points(
+                8000,
+                model_sesno,
+                &rooms_version,
+                &[straddling.clone()],
+                |_| Ok(vec![Point::new(950., 500., 500.)]),
+            )
             .unwrap();
         assert_eq!(edges.len(), 1);
         assert!(
-            calc.calculate_with_points(8000, &input, &[straddling], |_| {
+            calc.calculate_with_points(8000, model_sesno, &rooms_version, &[straddling], |_| {
                 anyhow::bail!("local mesh missing")
             })
             .is_err()
         );
-        let mut stale = input.clone();
-        stale.room_definition_version = "old-rooms".into();
-        assert!(calc.calculate(8000, &stale, &[]).is_err());
-        assert!(calc.calculate(7000, &input, &[outside]).is_err());
+        // 面板定义换了版 / 模型版本非法 / 记录不属于这个库：与原先拿房间输入版本结构对版本时同样拒算。
+        assert!(calc.calculate(8000, model_sesno, "old-rooms", &[]).is_err());
+        assert!(calc.calculate(8000, -1, &rooms_version, &[]).is_err());
+        assert!(
+            calc.calculate(7000, model_sesno, &rooms_version, &[outside])
+                .is_err()
+        );
     }
 }
 
@@ -1973,10 +1987,11 @@ impl MemoryRoomCalculator {
     pub(crate) fn calculate_with_component_bvh(
         &self,
         dbnum: u32,
-        input: &crate::data_interface::dbnum_state::RoomInputVersion,
+        model_sesno: i32,
+        room_definition_version: &str,
         records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
     ) -> anyhow::Result<Vec<ElementRoomEdge>> {
-        self.calculate_with_points(dbnum, input, records, |record| {
+        self.calculate_with_points(dbnum, model_sesno, room_definition_version, records, |record| {
             let transform = match &record.shape {
                 crate::fast_model::model_memory_store::ProjectedShape::Baked => {
                     record.world_transform
@@ -2018,15 +2033,19 @@ impl MemoryRoomCalculator {
         })
     }
 
+    /// `model_sesno`：记录的 `source_sesno` 不得越过它（算的是哪一版模型）；
+    /// `room_definition_version`：调用方以为的面板索引版本，与本计算器建索引时的那一版不符就拒算。
+    /// （原先这两格装在 `dbnum_state` 的房间输入版本结构里，那个结构随第三枚水位退了，ADR-073 D2。）
     pub(crate) fn calculate(
         &self,
         dbnum: u32,
-        input: &crate::data_interface::dbnum_state::RoomInputVersion,
+        model_sesno: i32,
+        room_definition_version: &str,
         records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
     ) -> anyhow::Result<Vec<ElementRoomEdge>> {
         #[cfg(test)]
         let mut reads = HashMap::<String, usize>::new();
-        let result = self.calculate_with_points(dbnum, input, records, |record| {
+        let result = self.calculate_with_points(dbnum, model_sesno, room_definition_version, records, |record| {
             #[cfg(test)]
             {
                 *reads.entry(record.mesh_id.clone()).or_default() += 1;
@@ -2046,22 +2065,24 @@ impl MemoryRoomCalculator {
     fn calculate_with_points(
         &self,
         dbnum: u32,
-        input: &crate::data_interface::dbnum_state::RoomInputVersion,
+        model_sesno: i32,
+        room_definition_version: &str,
         records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
         mut points: impl FnMut(
             &crate::fast_model::model_memory_store::ProjectedGeometry,
         ) -> anyhow::Result<Vec<Point<Real>>>,
     ) -> anyhow::Result<Vec<ElementRoomEdge>> {
         anyhow::ensure!(
-            input.is_valid() && input.room_definition_version == self.definition_version,
+            model_sesno >= 0
+                && !room_definition_version.is_empty()
+                && room_definition_version == self.definition_version,
             "room definition version changed"
         );
         let mut by_element =
             std::collections::BTreeMap::<RefnoEnum, HashMap<RefnoEnum, ElementRoomEdge>>::new();
         for record in records {
             anyhow::ensure!(
-                record.dbnum == dbnum
-                    && i64::from(record.source_sesno) <= i64::from(input.model_sesno),
+                record.dbnum == dbnum && i64::from(record.source_sesno) <= i64::from(model_sesno),
                 "room model input is outside the frozen file window"
             );
             let element =
