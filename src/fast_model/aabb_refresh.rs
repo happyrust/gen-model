@@ -311,9 +311,6 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
     durable_room_trigger: bool,
 ) -> anyhow::Result<Vec<AabbChange>> {
     const CHUNK: usize = 100;
-    let file_round = durable_room_trigger
-        .then(crate::data_interface::batch_worker::active_data_window)
-        .flatten();
     let mut changes = Vec::new();
     for chunk in refnos.chunks(CHUNK) {
         if chunk.is_empty() {
@@ -433,16 +430,10 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             direct_tree = Some(GLOBAL_AABB_TREE.write().await);
         }
         let t_stale = std::time::Instant::now();
-        let (stale_by_refno, stale_tree_entries) = if let Some(tree) = direct_tree.as_ref() {
-            let mut stale = HashMap::<RefU64, Vec<Aabb>>::new();
-            for old in tree.iter().filter(|old| target_refnos.contains(&old.refno)) {
-                stale.entry(old.refno).or_default().push(old.aabb);
-            }
-            (stale, tree.size())
-        } else {
-            // 暂存窗口这一轮不动树，读一次持久主库的旧基线就够：窗口内的变化寄存进
-            // 上下文，提交后由 `sync_tree_from_committed_pointers` 按已提交指针收敛。
-            let tree = GLOBAL_AABB_TREE.read().await;
+        let (stale_by_refno, stale_tree_entries) = {
+            let tree = direct_tree
+                .as_ref()
+                .expect("两条分支到这里都已持有树写锁");
             let mut stale = HashMap::<RefU64, Vec<Aabb>>::new();
             for old in tree.iter().filter(|old| target_refnos.contains(&old.refno)) {
                 stale.entry(old.refno).or_default().push(old.aabb);
@@ -502,28 +493,6 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
             if let Some(room_upserts) = room_upserts {
                 statements.push(room_upserts);
             }
-            if let Some((dbnum, round_end_sesno)) = file_round {
-                let refresh_refnos = chunk_changes
-                    .iter()
-                    .map(|change| change.refno.to_string())
-                    .collect::<Vec<_>>();
-                crate::data_interface::task_effects::record(
-                    dbnum,
-                    round_end_sesno,
-                    &refresh_refnos,
-                    &[],
-                    &[],
-                );
-                statements.push(
-                    crate::data_interface::side_effect_pending::SideEffectCompensator::render_file_spatial_reconcile_upsert(
-                        dbnum,
-                        round_end_sesno,
-                        &refresh_refnos,
-                        &[],
-                        &[],
-                    )?,
-                );
-            }
             statements.push(crate::fast_model::aabb_tree::render_spatial_epoch_bump());
             let transaction =
                 crate::data_interface::increment_pipeline::wrap_in_transaction(&statements)
@@ -548,7 +517,9 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
 
         // 内存树只在本块 DB 写入全部成功后才动：失败块不留「树新库旧」的半掺状态。
         // sync_refnos 一次遍历摘掉这些 refno 的全部旧条目（含历史堆叠的重复）并插入新值。
-        if file_round.is_none() {
+        // 在不在数据窗口里都一样就地同步（ADR-072 D4）：此前窗口内只寄意图行等 publish
+        // 阶段重放，那条路随 publish 退役。
+        {
             let tree = direct_tree
                 .as_mut()
                 .expect("直写分支必须持有写锁直到树同步结束");
@@ -831,14 +802,8 @@ mod aabb_write_order_tests {
         // 声明，否则进程态停在 Uninitialized，基线 persist 会被发布门拒绝
         // （一致性闭环方案 §2 步骤 0；用例写于状态机落地之前，2026-08-12 补）。
         crate::fast_model::spatial_state::mark_spatial_tree_fixture_preloaded();
-        let pending =
-            crate::data_interface::side_effect_pending::SideEffectCompensator::has_pending_spatial_work()
-                .await
-                .expect("query pending spatial work");
-        assert!(
-            !pending,
-            "沙箱库还有未收敛的空间意图（会走 HealByReplay 而不是本用例要验的 Rebuild）"
-        );
+        // ADR-072 之后启动判据只看快照头（epoch 章 + 各库水位数对）与库是否一致，没有
+        // 「待重放意图」这一档要先排除。
 
         // 采一个已生成、带双指针的普通实例（TUBI 走指针回退分支，不在本用例口径）。
         let mut response = aios_core::SUL_DB

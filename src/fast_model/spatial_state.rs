@@ -3,10 +3,10 @@
 //! 方案 `docs/plans/2026-08-12-spatial-tree-consistency-closure-plan.md`。
 //!
 //! 状态只回答一个问题：**空间消费者现在能不能安全地用 `GLOBAL_AABB_TREE`**。
-//! `Ready` 的定义刻意放宽为「无未知漂移」（方案 D5）：已提交而未重放的空间意图
-//! （`spatial_reconcile` pending 行）是**已知**差异，由消费者门前的重放（worker
-//! 派发门 / 空闲轮）收口——staged 尾事务提交不翻状态，否则常态流量下状态高频
-//! 抖动，health 的 `state` 字段成了噪音。
+//! `Ready` 的定义是「无未知漂移」（方案 D5）：任务落库后的就地收敛（ADR-072 D4，
+//! 盒来自内存投影）在串行段内直接把树推到与库一致，不翻状态——否则常态流量下状态
+//! 高频抖动，health 的 `state` 字段成了噪音。`ReplayRequired` 是账本时代的遗留档，
+//! 启动判据已不再产生它，随第二条异步账一起删（计划 R4）。
 //!
 //! 锁序（源码钉在 `batch_worker` / `aabb_refresh` / 本模块测试）：
 //!
@@ -332,9 +332,8 @@ async fn revalidator_loop() {
                 crate::fast_model::aabb_tree::load_project_tree_verified().await
             }
             SpatialTreeState::DegradedBlocked => {
-                // A blocked manifest may belong to a private file round. The
-                // verified loader applies that fence before choosing whether
-                // rebuilding pointers is safe.
+                // 只有指针重建连续漂移/失败才会落到这一档（ADR-072 之后启动判据本身
+                // 不再产生它）；重跑一遍装载器，它按同一套判据决定复用还是再重建。
                 crate::fast_model::aabb_tree::load_project_tree_verified().await
             }
             _ => unreachable!("上面刚筛过"),
@@ -478,18 +477,20 @@ mod tests {
         with_state(|cell| cell.state = SpatialTreeState::Uninitialized);
     }
 
-    /// 空间发布收敛之后必须把这一格对齐现实——否则冷启动那枚 `ready_empty` 会跟一辈子。
+    /// 落库后的空间收敛必须把这一格对齐现实——否则冷启动那枚 `ready_empty` 会跟一辈子。
+    /// ADR-072 之后收敛只剩 `aabb_tree::converge_tree_after_persist` 这一条路（publish
+    /// 阶段的重放晋升点随账本退役），钉它。
     #[test]
     fn every_spatial_convergence_refreshes_the_ready_label() {
-        let body = include_str!("../data_interface/side_effect_pending.rs")
-            .split_once("async fn promote_state_after_replay()")
-            .expect("晋升点还在")
+        let body = include_str!("aabb_tree.rs")
+            .split_once("pub(crate) async fn converge_tree_after_persist(")
+            .expect("落库后收敛还在")
             .1;
-        let end = body.find("\n    }").expect("函数有尾");
+        let end = body.find("\n}").expect("函数有尾");
         let body = &body[..end];
         assert!(
             body.contains("refresh_ready_kind(entries)"),
-            "不是 ReplayRequired 的那一支也要把 Ready/ReadyEmpty 对齐树: {body}"
+            "落库后收敛动了树就要把 Ready/ReadyEmpty 对齐树: {body}"
         );
     }
 

@@ -64,11 +64,14 @@
 //!   两笔不能对调：清边落在删除后面的块，中途失败就留下一批指着已删几何的悬空边，而下一轮
 //!   对账再也看不见那些几何；排重算落在前面的块，任务一被消费就在照着只写了一半的几何算
 //!   房间归属。全库落库（[`persist_dbnum`]）只清边不排重算。
-//! - **空间版本号**。动过几何的每一块在同一条事务里把 `spatial_epoch` +1——那是直写路径
-//!   在库侧留下的唯一痕迹，少这一下，崩溃重启会按 sidecar 复用一棵停在旧盒上的树。
-//! - **进程内空间树**。提交之后按已提交指针收敛
-//!   （[`crate::fast_model::aabb_tree::converge_tree_after_persist`]），只有写全局库的目标
-//!   才做——树镜像的是那个库。
+//! - **空间版本号**。动过几何的每一块在同一条事务里把 `spatial_epoch` +1——它与各库水位数对
+//!   一起组成快照的启动指纹，少这一下，崩溃重启会按快照复用一棵停在旧盒上的树。
+//! - **进程内空间树**。提交之后**就地**收敛（ADR-072 D4）：盒直接取投影记录的
+//!   `world_bounds`（[`crate::fast_model::aabb_tree::projected_tree_entry`]），交给
+//!   [`crate::fast_model::aabb_tree::converge_tree_after_persist`] 换新 / 摘旧，不回读库；
+//!   只有写全局库的目标才做——树镜像的是那个库。此前这一步曾按数据窗口在不在
+//!   （`file_round`）分两条路：窗口内寄进 `spatial_reconcile` 意图行等 publish 阶段重放，
+//!   窗口外按已提交指针回读——publish 阶段退役，两条路收成一条。
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -168,6 +171,16 @@ impl PersistTarget<'_> {
             db,
             medium,
             converge_spatial: false,
+        }
+    }
+
+    /// 测试专用：自带句柄**且**提交后收敛全局空间树——给「落库后树 = 投影盒」的 `mem://`
+    /// 用例用。生产上只有 [`Self::process`] 才该动树，所以不对外。
+    #[cfg(test)]
+    pub(crate) fn converging_for_test(db: &Surreal<Any>, medium: PersistMedium) -> PersistTarget<'_> {
+        PersistTarget {
+            converge_spatial: true,
+            ..Self::new(db, medium)
         }
     }
 
@@ -622,7 +635,9 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
     }
     let db = target.db;
     let room_incremental = crate::options::room_incremental();
-    let file_round = crate::data_interface::batch_worker::active_data_window();
+    // 只给对账基线快照当作用域键（[`GeometryBaseline`]：换窗即失效）。它**不再**分叉任何写法：
+    // 清边 / 空间收敛在窗口内外一律就地做（ADR-072 D4）。
+    let baseline_window = crate::data_interface::batch_worker::active_data_window();
 
     // 去重后的根序（同一根点两次只落一次）。
     let mut seen = BTreeSet::new();
@@ -645,13 +660,14 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
                 .iter()
                 .flat_map(|share| share.records.iter().map(|record| record.dbnum)),
         );
-        existing_geometry_for_window(db, &dbnums, file_round).await?
+        existing_geometry_for_window(db, &dbnums, baseline_window).await?
     } else {
         Vec::new()
     };
 
     let mut total = PersistedRows::none(target.medium);
     let mut refresh_all = Vec::<aios_core::RefnoEnum>::new();
+    let mut boxes_all = Vec::<aios_core::accel_tree::acceleration_tree::RStarBoundingBox>::new();
     let mut cleared_all = Vec::<aios_core::RefnoEnum>::new();
 
     for group in shares.chunks(BATCHED_PERSIST_ROOTS_PER_GROUP) {
@@ -663,7 +679,6 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
             chunk_bytes,
             room_policy,
             room_incremental,
-            file_round,
         )
         .await
         {
@@ -673,8 +688,9 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
                 total.receipts += outcome.receipts;
                 total.commits += outcome.commits;
                 refresh_all.extend(outcome.refresh);
+                boxes_all.extend(outcome.boxes);
                 cleared_all.extend(outcome.cleared);
-                advance_geometry_baseline(file_round, group);
+                advance_geometry_baseline(baseline_window, group);
             }
             Err(error) => {
                 // 这一组可能已经提交了前几块，快照不再等于库：整份作废，下一次重读。
@@ -686,23 +702,31 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
         }
     }
 
-    // 行已经提交，进程内空间树还停在旧盒上——收敛在事务之外（读的是已提交指针）。
-    if target.converge_spatial && total.commits > 0 && file_round.is_none() {
-        crate::fast_model::aabb_tree::converge_tree_after_persist(&refresh_all, &cleared_all)
-            .await
-            .with_context(|| format!("落库后收敛空间树（dbnum {dbnum}，{} 根）", roots.len()))?;
+    // 行已经提交，进程内空间树还停在旧盒上——就地收敛：盒是刚落库那批记录的 `world_bounds`
+    // （ADR-072 D4），不回读库，也不看在不在数据窗口里。
+    if target.converge_spatial && total.commits > 0 {
+        crate::fast_model::aabb_tree::converge_tree_after_persist(
+            &refresh_all,
+            boxes_all,
+            &cleared_all,
+        )
+        .await;
     }
     out.rows = Some(total);
     Ok(out)
 }
 
-/// 一组落完的账：行数 + 提交之后要收敛进空间树的两份名单。
+/// 一组落完的账：行数 + 提交之后要收敛进空间树的名单与盒。
 struct GroupOutcome {
     upserted: usize,
     removed: usize,
     receipts: usize,
     commits: usize,
+    /// 写了新几何的来源（隐式管身不算）。
     refresh: Vec<aios_core::RefnoEnum>,
+    /// `refresh` 的投影世界盒（[`crate::fast_model::aabb_tree::projected_tree_entry`]）。
+    boxes: Vec<aios_core::accel_tree::acceleration_tree::RStarBoundingBox>,
+    /// 被对账掉、房间边也一并清掉的来源。
     cleared: Vec<aios_core::RefnoEnum>,
 }
 
@@ -714,7 +738,6 @@ async fn persist_group(
     chunk_bytes: usize,
     room_policy: RoomEffectPolicy,
     room_incremental: bool,
-    file_round: Option<(u32, i32)>,
 ) -> anyhow::Result<GroupOutcome> {
     // 组内记录按 record_id 去重（嵌套根共有的记录只渲一次），保持根序。
     let mut rendered_ids = BTreeSet::new();
@@ -781,6 +804,11 @@ async fn persist_group(
         .map(|record| refno_from_e3d(record.source_refno))
         .collect::<BTreeSet<_>>()
         .into_iter()
+        .collect::<Vec<_>>();
+    // 树条目就是这批记录的世界盒——落库那一侧写进 `aabb.d` 的同一份值，提交后直接进树。
+    let tree_boxes = records
+        .iter()
+        .filter_map(crate::fast_model::aabb_tree::projected_tree_entry)
         .collect::<Vec<_>>();
 
     // 几何块：按字节装满、超限劈半；管身槽位跨块延续。
@@ -859,6 +887,7 @@ async fn persist_group(
             receipts: 0,
             commits: 0,
             refresh: Vec::new(),
+            boxes: Vec::new(),
             cleared: Vec::new(),
         });
     }
@@ -889,13 +918,12 @@ async fn persist_group(
                 &mut statements,
                 &removals.iter().map(String::as_str).collect::<Vec<_>>(),
             );
-            if file_round.is_none() {
-                statements.push_str(&render_room_publication_effects(
-                    &clearing,
-                    room_policy,
-                    room_incremental,
-                ));
-            }
+            // 清边跟着删几何那一块走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
+            statements.push_str(&render_room_publication_effects(
+                &clearing,
+                room_policy,
+                room_incremental,
+            ));
         }
         let touches_geometry;
         if index < geometry_chunks.len() {
@@ -913,34 +941,6 @@ async fn persist_group(
                 room_policy,
                 room_incremental,
             ));
-            if let Some((dbnum, round_end_sesno)) = file_round {
-                let refresh = deferred_refresh
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>();
-                let removed = effects
-                    .cleared
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>();
-                crate::data_interface::task_effects::record(
-                    dbnum,
-                    round_end_sesno,
-                    &refresh,
-                    &removed,
-                    &removed,
-                );
-                statements.push_str(
-                    &crate::data_interface::side_effect_pending::SideEffectCompensator::render_file_spatial_reconcile_upsert(
-                        dbnum,
-                        round_end_sesno,
-                        &refresh,
-                        &removed,
-                        &removed,
-                    )?,
-                );
-                statements.push('\n');
-            }
         }
         if touches_geometry {
             statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
@@ -969,6 +969,7 @@ async fn persist_group(
         receipts: receipted.len(),
         commits,
         refresh: deferred_refresh,
+        boxes: tree_boxes,
         cleared: effects.cleared,
     })
 }
@@ -1505,13 +1506,17 @@ async fn persist_root_chunks_impl(
         cleared: Vec::new(),
         recalc: effects.recalc.clone(),
     };
-    let file_round = crate::data_interface::batch_worker::active_data_window();
     let deferred_refresh = records
         .iter()
         .filter(|record| record.tube.is_none())
         .map(|record| refno_from_e3d(record.source_refno))
         .collect::<BTreeSet<_>>()
         .into_iter()
+        .collect::<Vec<_>>();
+    // 树条目就是这批记录的世界盒——落库那一侧写进 `aabb.d` 的同一份值，提交后直接进树。
+    let tree_boxes = records
+        .iter()
+        .filter_map(crate::fast_model::aabb_tree::projected_tree_entry)
         .collect::<Vec<_>>();
 
     // 大根切块提交（一块一个事务）。整根一笔在 7997 上是两笔各 2.6 万件的大报文——
@@ -1572,13 +1577,12 @@ async fn persist_root_chunks_impl(
                 &mut statements,
                 &removals.iter().map(String::as_str).collect::<Vec<_>>(),
             );
-            if file_round.is_none() || frozen.is_some() {
-                statements.push_str(&render_room_publication_effects(
-                    &clearing,
-                    room_policy,
-                    room_incremental,
-                ));
-            }
+            // 清边跟着删几何那一块走，任务内外一律如此（ADR-072 D4：没有 publish 阶段替它补做）。
+            statements.push_str(&render_room_publication_effects(
+                &clearing,
+                room_policy,
+                room_incremental,
+            ));
         }
         if let Some((_, rendered)) = chunks.get(index) {
             statements.push_str(rendered);
@@ -1589,40 +1593,6 @@ async fn persist_root_chunks_impl(
                 room_policy,
                 room_incremental,
             ));
-            if let Some((dbnum, round_end_sesno)) = file_round {
-                let refresh = deferred_refresh
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>();
-                let removed = effects
-                    .cleared
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>();
-                if let Some(envelope) = frozen {
-                    statements.push_str(
-                        &crate::data_interface::model_publish_queue::render_spatial_fragment(
-                            envelope, &refresh, &removed,
-                        )?,
-                    );
-                } else {
-                    crate::data_interface::task_effects::record(
-                        dbnum,
-                        round_end_sesno,
-                        &refresh,
-                        &removed,
-                        &removed,
-                    );
-                    statements.push_str(&crate::data_interface::side_effect_pending::SideEffectCompensator::render_file_spatial_reconcile_upsert(
-                        dbnum,
-                        round_end_sesno,
-                        &refresh,
-                        &removed,
-                        &removed,
-                    )?);
-                }
-                statements.push('\n');
-            }
             if let Some(receipt) = receipt.as_ref() {
                 statements.push_str(&render_receipt_version(
                     root,
@@ -1670,15 +1640,16 @@ async fn persist_root_chunks_impl(
         commits += 1;
     }
 
-    // 行已经提交，进程内空间树还停在旧盒上——收敛在事务之外，因为它读的是**已提交**
-    // 的指针（`inst_relate.aabb`），事务里读不到自己还没提交的那一半。
-    if target.converge_spatial && commits > 0 && file_round.is_none() {
+    // 行已经提交，进程内空间树还停在旧盒上——就地收敛：盒是刚落库那批记录的 `world_bounds`
+    // （ADR-072 D4），不回读库，也不看在不在数据窗口里。只渲不发（`preparing`）的那条路
+    // 没有提交，`commits == 0`，树不动。
+    if target.converge_spatial && commits > 0 {
         crate::fast_model::aabb_tree::converge_tree_after_persist(
             &deferred_refresh,
+            tree_boxes,
             &effects.cleared,
         )
-        .await
-        .with_context(|| format!("落库后收敛空间树（根 {root}）"))?;
+        .await;
     }
 
     Ok(PersistedRows {
@@ -3770,6 +3741,227 @@ mod tests {
             cached, refetched,
             "对账基线收成一个任务读一次之后，终态必须与每批都重读一遍完全一样\
              （左：吃内存快照；右：每批重读）"
+        );
+    }
+
+    /// ADR-072 D4（验收 ③）：合块落库提交之后，全局空间树**就地**追上投影——每条非管身记录
+    /// 在树上恰有一条条目、盒逐位等于它的 `world_bounds`、noun 逐字相同；管身不进树；
+    /// 被对账掉的来源从树上消失；再落一次换了盒的记录，树上换新不堆叠。全程不回读库：
+    /// 树里的盒来自 `ProjectedGeometry`，库里的 `aabb.d` 只是同一份值的落盘副本。
+    ///
+    /// 本用例独占来源 `24383/73948`、`24383/500`、`24383/600`、`24383/9999` 在全局树上的条目，
+    /// 结束时清掉，不影响同进程其它用例。
+    #[tokio::test]
+    async fn batched_persist_converges_the_spatial_tree_from_projected_world_bounds() {
+        use aios_core::room::room::GLOBAL_AABB_TREE;
+
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        let root = RefNo::new(24383, 1);
+        seed_gen_roots(&db, &[root]).await;
+        invalidate_geometry_baseline();
+
+        let stale = ProjectedGeometry {
+            record_id: "24383_9999".into(),
+            geometry_id: GeometryId::Element {
+                refno: "24383/9999".into(),
+            },
+            source_refno: RefNo::new(24383, 9999),
+            world_bounds: [[-9.0, -9.0, -9.0], [-8.0, -8.0, -8.0]],
+            ..baked_record()
+        };
+        let mut moved = other_canonical_record();
+        moved.world_bounds = [[10.0, 20.0, 30.0], [11.0, 22.0, 33.0]];
+        let store = ModelMemoryStore::default();
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![
+                    baked_record(),
+                    moved.clone(),
+                    stale.clone(),
+                    tube_record(0, TUBE_A),
+                ],
+                receipt: Some(test_receipt(root, 4)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        let target = PersistTarget::converging_for_test(&db, PersistMedium::EmbeddedMem);
+        let sources = [
+            refno_from_e3d(BRANCH),
+            refno_from_e3d(RefNo::new(24383, 500)),
+            refno_from_e3d(RefNo::new(24383, 9999)),
+        ];
+        crate::fast_model::aabb_tree::evict_tree_entries_for_test(&sources).await;
+
+        let first = persist_roots_batched(
+            target,
+            &store,
+            BATCH_DBNUM,
+            &[root],
+            RoomEffectPolicy::Directed,
+        )
+        .await
+        .expect("first batch");
+        assert!(first.failed.is_empty(), "{:?}", first.failed);
+
+        let entries_of = |tree: &aios_core::accel_tree::acceleration_tree::AccelerationTree,
+                          source: aios_core::RefnoEnum| {
+            tree.iter()
+                .filter(|entry| entry.refno == source.refno())
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let expect_box = |record: &ProjectedGeometry| {
+            parry3d::bounding_volume::Aabb::new(
+                record.world_bounds[0].into(),
+                record.world_bounds[1].into(),
+            )
+        };
+        {
+            let tree = GLOBAL_AABB_TREE.read().await;
+            for record in [&baked_record(), &moved, &stale] {
+                let entries = entries_of(&tree, refno_from_e3d(record.source_refno));
+                assert_eq!(entries.len(), 1, "{} 在树上恰一条: {entries:?}", record.record_id);
+                assert_eq!(entries[0].aabb, expect_box(record), "盒 = 投影 world_bounds");
+                assert_eq!(entries[0].noun, record.noun, "noun 逐字进树");
+            }
+            assert!(
+                tree.iter().all(|entry| entry.refno != refno_from_e3d(RefNo::new(24383, 10)).refno()
+                    && entry.refno != refno_from_e3d(RefNo::new(24383, 20)).refno()),
+                "隐式管身不进树"
+            );
+        }
+
+        // 第二批：9999 从投影里消失（被对账掉），500 的盒换了。
+        let mut moved_again = moved.clone();
+        moved_again.world_bounds = [[100.0, 200.0, 300.0], [101.0, 202.0, 303.0]];
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                removals: vec![stale.record_id.clone()],
+                upserts: vec![moved_again.clone()],
+                receipt: Some(test_receipt(root, 3)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        let second = persist_roots_batched(
+            target,
+            &store,
+            BATCH_DBNUM,
+            &[root],
+            RoomEffectPolicy::Directed,
+        )
+        .await
+        .expect("second batch");
+        assert!(second.failed.is_empty(), "{:?}", second.failed);
+        // 9999 被对账掉；夹具管身的 record_id 不是真摘要，每轮都会被当陈旧行对账掉再插回
+        //（与 `batched_persist_reconciles_stale_rows_from_one_database_read` 同一口径）。
+        assert_eq!(second.rows.expect("rows").removed, 2, "9999 与夹具管身被对账掉");
+        assert_eq!(count(&db, "inst_relate").await, 2, "库里只剩 73948 与 500");
+        {
+            let tree = GLOBAL_AABB_TREE.read().await;
+            assert!(
+                entries_of(&tree, refno_from_e3d(RefNo::new(24383, 9999))).is_empty(),
+                "被对账掉的来源必须从树上消失"
+            );
+            let entries = entries_of(&tree, refno_from_e3d(RefNo::new(24383, 500)));
+            assert_eq!(entries.len(), 1, "换盒不堆叠: {entries:?}");
+            assert_eq!(entries[0].aabb, expect_box(&moved_again), "树上是新盒");
+            assert_eq!(
+                entries_of(&tree, refno_from_e3d(BRANCH))[0].aabb,
+                expect_box(&baked_record()),
+                "没动的记录原盒不变"
+            );
+        }
+        // 树上的盒与库里落下的 aabb.d 是同一份值。
+        let mut response = db
+            .query("SELECT VALUE aabb.d FROM type::thing('inst_relate', '24383_500');")
+            .await
+            .expect("aabb query")
+            .check()
+            .expect("aabb statement");
+        let landed: Option<parry3d::bounding_volume::Aabb> =
+            response.take(0).expect("aabb row");
+        assert_eq!(landed, Some(expect_box(&moved_again)));
+
+        crate::fast_model::aabb_tree::evict_tree_entries_for_test(&sources).await;
+        invalidate_geometry_baseline();
+    }
+
+    /// ADR-072 D4 的源码钉（验收 ②）：`persist_roots_batched` / `persist_root_chunks_impl` 提交之后的
+    /// 空间收敛**不带**数据窗口（`file_round` / `active_data_window`）条件，也不再往
+    /// `spatial_reconcile` 意图行或 `task_effects` 内存账里寄名单；清边不再按窗口分叉；
+    /// 收敛的盒来自投影记录（`projected_tree_entry`），不回读库。回退即红。
+    #[test]
+    fn spatial_convergence_after_persist_is_unconditional_and_takes_projected_boxes() {
+        let source = include_str!("model_db_adapter.rs");
+        let production = source
+            .split(concat!("#[cfg(test)]\n", "mod tests"))
+            .next()
+            .expect("production half");
+        for retired in [
+            "file_round.is_none()",
+            "render_file_spatial_reconcile_upsert",
+            "task_effects::record",
+            "render_spatial_fragment",
+            concat!("sync_tree_from_", "committed_pointers"),
+        ] {
+            assert!(
+                !production.contains(retired),
+                "落库路径不得再按窗口分叉 / 寄意图行（{retired}）"
+            );
+        }
+        let batched = production
+            .split_once("pub(crate) async fn persist_roots_batched_with_chunk_bytes(")
+            .expect("batched persist exists")
+            .1
+            .split_once("struct GroupOutcome")
+            .expect("group outcome follows")
+            .0;
+        let converge = batched
+            .split_once("if target.converge_spatial && total.commits > 0")
+            .expect("合块落库提交后必须收敛空间树")
+            .1;
+        assert!(
+            converge.contains("converge_tree_after_persist(") && converge.contains("boxes_all"),
+            "收敛喂的是各组攒下的投影盒: {converge}"
+        );
+        assert!(
+            !batched.contains("active_data_window().is_none()")
+                && !batched.contains("baseline_window.is_none()"),
+            "数据窗口只给对账基线当作用域键，不得门控收敛: {batched}"
+        );
+        let group = production
+            .split_once("async fn persist_group(")
+            .expect("persist_group exists")
+            .1
+            .split_once("pub async fn persist_frozen_on(")
+            .expect("frozen persist follows")
+            .0;
+        assert!(
+            group.contains("filter_map(crate::fast_model::aabb_tree::projected_tree_entry)"),
+            "组内记录直接折成树条目: {group}"
+        );
+        assert!(
+            !group.contains("file_round"),
+            "persist_group 不再认识数据窗口: {group}"
+        );
+        let per_root = production
+            .split_once("async fn persist_root_chunks_impl(")
+            .expect("per-root persist exists")
+            .1
+            .split_once("pub(crate) fn render_frozen_chunk(")
+            .expect("frozen chunk renderer follows")
+            .0;
+        assert!(
+            per_root.contains("if target.converge_spatial && commits > 0 {")
+                && per_root.contains("tree_boxes,"),
+            "逐根落库提交后同样无条件按投影盒收敛: {per_root}"
+        );
+        assert!(
+            !per_root.contains("file_round"),
+            "逐根落库不再认识数据窗口: {per_root}"
         );
     }
 
