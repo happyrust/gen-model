@@ -522,13 +522,13 @@ plant-ui 的单根调用零影响。
 | `/health` · `model_drain`、`blocking_conditions` 里的 `model_drain.page_starved` | `handlers.rs:726`、`:956`、`:803`–`:804` | `model_update_pending::model_drain_telemetry_snapshot()` / `model_drain_page_starved()` | 计划 C.1 第 2 行（没有 drain 了） | 整格删；`blocking_conditions` 少一档 |
 | `/health` · `spatial_reconcile` | `handlers.rs:755`–`:764`、`:974`；`ops.html:1390`（`m.h.spatial_reconcile`） | `SideEffectCompensator::spatial_reconcile_status()` | ADR-072 D4（空间树随 `persist_roots_batched` 就地收敛）；计划 C.2 第 4 行 | 整格删；树是否落后看下面那两格 |
 | `/health` · `spatial_tree.pending` / `published_version` / `published_input_files` / `published_input_sha256` | 已落 —— 提交 `f2bdaa21c` | 发布输入 manifest（`published_file_input`） | ADR-072 D4；计划 C.2 第 3 行 | **已退**；换成同一节新增的 `snapshot_watermarks` / `db_watermarks` 两格（快照头记的各库 `(applied, model)` 数对 vs 库里现值，不等即重建） |
-| `/health` · `window_blocks` | `handlers.rs:744`–`:746`（取数）与 `:967` 一带（回执键，注释里记着它从 `staging_window_blocks` 改名的经过）；`ops.html:492`、`:1231`–`:1242`、`:1813`–`:1819` | `staging::attempts::load_window_blocks()`（`increment_update_attempt` 的 `kind = 'window_block'` 行） | 计划 §5 R4（`staging/attempts.rs` 整文件退，`increment_update_attempt` `REMOVE TABLE`） | **本轮不删**：R4 才退。退的时候 ops 那三处一起删，别只删一处 |
+| `/health` · `window_blocks` | 已落 —— 提交 `0025edaa4`（`handlers.rs` 取数与回执键）与 `588e71915`（`ops.html` 的「窗口阻断」卡、`renderStaging` 与三处读取整块删） | `staging::attempts::load_window_blocks()`（`increment_update_attempt` 的 `kind = 'window_block'` 行） | 计划 §5 R4（`staging/attempts.rs` 整文件退，`increment_update_attempt` `REMOVE TABLE`） | **已退**：ops 那三处随 R4 一起删了；写了一半的库看 `/dbnums` 每行的 `write_state`（ops.html KPI「写入中 / 未写完」） |
 | 任务回执 · `file_round` / `published_version` / 文件轮次一族 | `handlers.rs:3292`–`:3307`（回执测试里的 `file_rounds` / `published_version`） | `side_effect_pending::CompletedFileRound` | ADR-072 D4/D5 | 不画 |
 | 任务回执 · `model_verdict` / `model_caught_up_at` | `handlers.rs`（`/dbnums` 与 `/tasks` 两处同名） | 由 `dbnum_consistency::verdict_for` 回问库 → **改读水位镜像** | ADR-072 D4（任务内不回读库） | **名字与取值不变，照画**；只是不再等模型那一段 |
 | 任务回执 · `credential_advance` | `window_root_plan::CredentialAdvanceOutcome` | 数据尾事务之后的凭证前移 | 不在本轮（d-427） | 照画 |
 
 判真假的方法：表里每条「定义点」都能 `rg -n "<字段名>" src/web_service/handlers.rs web/ops.html`
-命中；T4 改完之后同一条命令应当查无此项（`window_blocks` 那一行除外——它留到 R4）。
+命中；T4 / R4 改完之后同一条命令应当查无此项（`window_blocks` 那一行随 R4 在 `588e71915` 收掉）。
 
 ### 4.7.2 随房间流程退役的格与查询工具（2026-09-10）
 
