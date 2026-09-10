@@ -187,8 +187,8 @@ pub(crate) struct RecalcSplit {
 }
 
 /// 重算集按「常驻模型里有没有可用几何」分**三**摊（纯函数）。没几何的这次不算、边不动、进回执
-/// 点名（Q20 (a)）——`recalc_panel_membership_for_consumption` 读的是同一份几何（摄入
-/// `room_published_inst` / 读透实时行），去了也只会 `NoGeometry` 上抛；在这里先分开，回执里
+/// 点名（Q20 (a)）——`recalc_panel_membership_for_consumption` 读的是同一份几何（两种数据面
+/// 都是实时行，ADR-072 D4），去了也只会 `NoGeometry` 上抛；在这里先分开，回执里
 /// 「无几何」与「失败」才是两句话，不必从错误文本里猜。
 ///
 /// 没几何再分一刀（D-A (a)）：**从未生成**（一条行都没有）与**有行却不可用**（包围盒坏，

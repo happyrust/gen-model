@@ -139,29 +139,6 @@ fn default_true() -> bool {
     true
 }
 
-fn render_room_pending_probe(room_targets: &[String]) -> String {
-    if room_targets.is_empty() {
-        return "RETURN false;".to_string();
-    }
-    let targets = room_targets
-        .iter()
-        .map(|target| {
-            format!(
-                "'{}'",
-                crate::data_interface::dbnum_state::escape_surql_str(target)
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "RETURN array::len((SELECT VALUE id FROM {} WHERE action IN \
-         ['room_recalc_panel', 'room_recalc_element'] AND status IN \
-         ['collecting', 'pending', 'failed', 'running'] AND target_refno IN \
-         [{targets}] LIMIT 1)) > 0;",
-        crate::data_interface::model_update_pending::TABLE
-    )
-}
-
 impl QueryService {
     pub fn from_env(repo: &Path) -> anyhow::Result<Self> {
         let option = aios_core::get_db_option();
@@ -265,45 +242,38 @@ impl QueryService {
     /// 派生面（空间树 / 房间归属）的发布状态三元组 `(published_version, stale, publication_status)`。
     ///
     /// 读透形态（`data_face = read-through`，spawned-mem / embedded-mem 的默认）没有数据批次，
-    /// 也就没有文件轮次：`published_file_input` 停在启动基线，`room_published_inst` 不再更新，
-    /// 房间任务改读实时行（`room_model::consumption_view`）。这时既没有「发布版本」也谈不上
-    /// 「stale」——ADR-062 明写读透不承诺文件级发布语义，所以两格回 `null`、状态回
-    /// `unsupported`，不拿「无 collecting / 无 pending」凑成 `current`（审核 F-B）。
+    /// 房间任务读实时行（`room_model::consumption_view`）。这时既没有「发布版本」也谈不上
+    /// 「stale」——读透不承诺文件级发布语义，所以两格回 `null`、状态回 `unsupported`（审核 F-B）。
+    ///
+    /// ingest 形态（ADR-072 D4，publish 阶段退役）：**`published_version` = 该库的 `room_sesno`**
+    /// （任务收尾那一笔盖的房间水位，读水位镜像，不问派生表），**`stale` = 该库有任务在飞**
+    /// （`task_registry` 是在飞的唯一来源）。没有具体库号的调用（空间边界那一路）：版本回
+    /// `null`、在飞看全局。此前这里还问一遍 `model_update_pending` 的房间待办行——那张表随
+    /// 账本退役，房间归属如今在任务内算完写完，任务不在飞就是算完了。
     async fn published_derivation_status(
-        room_targets: Option<&[String]>,
+        dbnum: Option<u32>,
     ) -> Result<(Value, Value, &'static str), QueryError> {
         if crate::options::data_face().is_read_through() {
             return Ok((Value::Null, Value::Null, "unsupported"));
         }
         crate::fast_model::spatial_state::ensure_spatial_ready()
             .map_err(|error| QueryError::new("UPDATING", error))?;
-        let published_version =
-            crate::data_interface::side_effect_pending::SideEffectCompensator::
-                published_spatial_version()
-                .await
-                .map_err(db_error)?;
-        // 「有没有一轮发布在飞」问任务注册表，不问库（ADR-071 / 计划 v3 S7：`task_registry`
-        // 是在飞的唯一来源）。原先问的 `has_collecting_file_rounds()` 是「文件轮次那一行还
-        // 开着吗」，那一行随账本退役。崩溃留下的未收敛意图不归这一问管——它由上面那句
-        // `ensure_spatial_ready()` 拦住（空间树是 `ReplayRequired` 时这里根本走不到）。
-        let collecting =
-            crate::data_interface::task_registry::TaskRegistry::global().has_running_data_batch();
-        let room_pending = if let Some(room_targets) = room_targets {
-            let mut response = SUL_DB
-                .query(render_room_pending_probe(room_targets))
-                .await
-                .and_then(|response| response.check())
-                .map_err(db_error)?;
-            response
-                .take::<Option<bool>>(0)
-                .unwrap_or(Some(true))
-                .unwrap_or(true)
-        } else {
-            false
+        let registry = crate::data_interface::task_registry::TaskRegistry::global();
+        let (published_version, stale) = match dbnum {
+            Some(dbnum) => {
+                let room_sesno = crate::data_interface::dbnum_state::DbnumState::read(dbnum)
+                    .await
+                    .map_err(db_error)?
+                    .map(|state| state.room_sesno);
+                (
+                    room_sesno.map_or(Value::Null, |sesno| json!(sesno)),
+                    registry.has_running_data_batch_for(dbnum),
+                )
+            }
+            None => (Value::Null, registry.has_running_data_batch()),
         };
-        let stale = collecting || room_pending;
         Ok((
-            json!(published_version),
+            published_version,
             json!(stale),
             if stale { "updating" } else { "current" },
         ))
@@ -568,7 +538,6 @@ impl QueryService {
             .map_err(|error| QueryError::new("DATABASE_ERROR", error.to_string()))?;
         let resident = crate::fast_model::room_resident::current_for_calculation().ok();
         let mut memberships = Vec::new();
-        let mut panels = Vec::with_capacity(edges.len());
         for edge in edges {
             let panel = RefnoEnum::from(
                 edge.panel
@@ -588,14 +557,9 @@ impl QueryService {
                 "room_num": edge.room_num,
                 "panel_refno": panel.to_string(),
             }));
-            panels.push(panel);
         }
-        let mut room_targets = vec![refno.to_pdms_str()];
-        room_targets.extend(panels.iter().map(|panel| panel.to_pdms_str()));
-        room_targets.sort_unstable();
-        room_targets.dedup();
         let (published_version, stale, publication_status) =
-            Self::published_derivation_status(Some(&room_targets)).await?;
+            Self::published_derivation_status(Some(dbnum)).await?;
         Ok(json!({
             "refno": refno.to_string(),
             "memberships": memberships,
@@ -968,15 +932,45 @@ mod tests {
         assert_eq!(unique.len(), 12);
     }
 
+    /// ADR-072 D4：`e3d.room.lookup` 回的 `published_version` 就是该库的 `room_sesno`（任务收尾
+    /// 盖的房间水位，读水位镜像），`stale` = 该库有任务在飞（`task_registry`）；不再问派生表
+    /// （`published_file_input` 的发布版本、`model_update_pending` 的房间待办行）。
     #[test]
-    fn room_freshness_probe_is_targeted_and_escapes_refnos() {
-        let sql = render_room_pending_probe(&["24381/10".into(), "panel'with\\quote".into()]);
-        assert!(sql.contains("target_refno IN ['24381/10', 'panel\\'with\\\\quote']"));
-        assert!(sql.contains("'collecting', 'pending', 'failed', 'running'"));
+    fn room_lookup_freshness_is_the_room_watermark_and_task_registry_only() {
+        let source = include_str!("query_service.rs");
+        let status = source
+            .split_once("async fn published_derivation_status(")
+            .expect("published_derivation_status exists")
+            .1
+            .split_once("async fn identity(&self")
+            .expect("status boundary")
+            .0;
+        assert!(status.contains("room_sesno"), "{status}");
+        assert!(status.contains("has_running_data_batch_for(dbnum)"), "{status}");
+        assert!(status.contains("has_running_data_batch()"), "{status}");
+        for retired in [
+            "published_spatial_version",
+            "model_update_pending",
+            "side_effect_pending",
+            "SUL_DB",
+            "room_recalc",
+        ] {
+            assert!(!status.contains(retired), "`{retired}` 已随 publish 阶段退役: {status}");
+        }
+        let room = source
+            .split_once("async fn room(&self")
+            .expect("room query exists")
+            .1
+            .split_once("async fn generation_root")
+            .expect("room query boundary")
+            .0;
         assert!(
-            !sql.contains("dbnum ="),
-            "shared targets cannot be filtered by file: {sql}"
+            room.contains("published_derivation_status(Some(dbnum))"),
+            "房间查询按自己的库号问水位: {room}"
         );
+        let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
+        assert!(!production.contains(concat!("fn render_room_", "pending_probe")));
+        assert!(!production.contains("model_update_pending::TABLE"));
     }
 
     #[test]

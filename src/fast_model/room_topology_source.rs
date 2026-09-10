@@ -6,7 +6,7 @@
 //! **本文件的冻结令牌**寻址、不含整组文件的 composite——邻库前进不作废没变文件的分片。
 //! 启动参照（`room_resident::ResidentReference`）按令牌读回这些分片合成「旧」视图；找不到
 //! 就是 `ReferenceUnreadable`，走显式全量（多算不漏算）。此前这一层是两张表
-//! （头 + 512 KiB 分块）加 `publication_request` 串行写，随 publish 阶段一起退役。
+//! （头 + 512 KiB 分块）加发布串行闸写入，随 publish 阶段一起退役。
 use super::room_topology::{RoomGroup, RoomHierarchy, collect_room_groups};
 use crate::data_interface::{
     digest::digest,
@@ -347,9 +347,9 @@ mod tests {
         next[2].nodes[0].noun = "BOX".into();
         assert_eq!(old[0].source_token, next[0].source_token);
         assert_eq!(old[2].source_sesno, next[2].source_sesno);
-        // 分片身份 = 文件令牌本身（`source_key`）。`RoomTopologySource::key()` 随
-        // `room_published_topology` 一起退役：那把键是发布视图的 manifest 键，而分片
-        // 现在只按令牌寻址（`the_shard_artifact_is_addressed_by_the_file_token_alone`）。
+        // 分片身份 = 文件令牌本身（`source_key`）。`RoomTopologySource::key()` 随库里的
+        // 分片表一起退役：那把键是库记录 id，而分片现在只按令牌寻址成磁盘工件
+        // （`the_shard_artifact_is_addressed_by_the_file_token_alone`）。
         assert_ne!(
             source_key(&old[2].source_token),
             source_key(&next[2].source_token)

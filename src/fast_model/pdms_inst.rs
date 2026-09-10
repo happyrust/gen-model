@@ -148,8 +148,6 @@ pub const INST_RELATE_INDEX_SQL: &str = "\
     DEFINE INDEX IF NOT EXISTS idx_inst_relate_anc ON TABLE inst_relate COLUMNS anc;\n\
     DEFINE INDEX IF NOT EXISTS idx_inst_relate_dbnum ON TABLE inst_relate COLUMNS dbnum;\n\
     DEFINE INDEX IF NOT EXISTS idx_inst_relate_in ON TABLE inst_relate COLUMNS in;\n\
-    DEFINE INDEX IF NOT EXISTS idx_room_published_refno ON TABLE room_published_inst COLUMNS refno;\n\
-    DEFINE INDEX IF NOT EXISTS idx_room_published_old_refno ON TABLE room_published_inst COLUMNS old_refno;\n\
     DEFINE INDEX IF NOT EXISTS idx_geo_relate_in ON TABLE geo_relate COLUMNS in;\n\
     DEFINE INDEX IF NOT EXISTS idx_tubi_relate_anc ON TABLE tubi_relate COLUMNS anc;\n\
     DEFINE INDEX IF NOT EXISTS idx_tubi_relate_dbnum ON TABLE tubi_relate COLUMNS dbnum;

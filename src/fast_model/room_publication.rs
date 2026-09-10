@@ -6,11 +6,12 @@
 //! `room_panel_relate` 边（`helper.rs` 写着：少清一个方向，`fn::room_relate_of` 照样把悬空边
 //! 取出来）。本模块把两件事折回**同一个发布事务**（ADR-040 §3 的同事务纪律）：
 //!
-//! - **重算**：本次发布 upsert 的每个 `GeometryId::Element` 来源元素按 noun 分流成
-//!   `RoomRecalcPanel`（PANE）/ `RoomRecalcElement`——ADR-040 §1 的保守口径：定向生成的
-//!   目标就是这一窗真正重写的元素，AABB 变没变都排（判定消费的是网格，不只是盒子）。
-//!   隐式管身（`ImpliedTube`）不排：房间系统今天不读 `tubi_relate`，对容器排元素任务只会
-//!   让 `recalc_element_membership` 查不到实例而把容器的存量入边清成空集。
+//! - **重算名单**：本次发布 upsert 的每个 `GeometryId::Element` 来源元素按 noun 分流
+//!   （PANE / 其余）折成 `recalc` 名单——ADR-040 §1 的保守口径：定向生成的目标就是这一窗
+//!   真正重写的元素。2026-09-10（ADR-072 D6）起它**只进回执与日志**、不再渲染成
+//!   房间待办表的 `RoomRecalc*` 行：房间归属由本 dbnum 任务的房间段
+//!   （`room_task::finish_task_rooms`）按内存投影整库算完写边。隐式管身（`ImpliedTube`）
+//!   不进名单：房间系统不读 `tubi_relate`。
 //! - **清边**：被移除的 `Element` 几何、以及被 pre-e3d 清理删掉行却没有拿到新几何的旧来源，
 //!   两个方向的房间边一并删（作为成员的入边；作为面板的出边与 `room_panel_relate`）。
 //!   清边**不看** `room_incremental` 开关——它不是增量重算，是删除路径的当场清理（ADR-010 §4
@@ -27,7 +28,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use aios_core::{GeomInstQuery, RefnoEnum, SUL_DB};
+use aios_core::{GeomInstQuery, RefnoEnum};
 use anyhow::Context;
 use e3d_io::refno::RefNo;
 use e3d_model::elmodl::GeometryId;
@@ -35,24 +36,21 @@ use e3d_model::elmodl::GeometryId;
 use crate::data_interface::generation_root::refno_from_e3d;
 use crate::fast_model::aabb_refresh::AabbChange;
 
-// Old database images remain only as migration/parity test fixtures. Production
-// has neither a writer nor a geometry reader for this retired input table.
-#[cfg(test)]
-const PUBLISHED_ROOM_INPUT_TABLE: &str = "room_published_inst";
-
-/// Render one immutable room-geometry version from the current model rows.
+/// 在册面板的几何从 `inst_relate` **实时行**读（d-21 / ADR-072 D5 白名单里的「启动水化：
+/// 常驻房间模型几何（实时行）」）。发布视图几何表（按清单令牌选版本）
+/// 随 publish 阶段一起退役：库里只有一份几何，就是任务同步写进去的那份。
 ///
-/// The row set is written before the file manifest is switched.  Readers only
-/// select tokens present in `published_file_input`, so a crash before the
-/// spatial publication leaves this candidate invisible.  Retrying the same
-/// frozen round replaces only its own candidate rows.
-#[cfg(test)]
-pub(crate) fn render_stage_published_room_input(dbnum: u32, commit_token: &str) -> String {
-    let token = crate::data_interface::dbnum_state::escape_surql_str(commit_token);
+/// 投影形状与从前发布视图那一份逐字同形（`owner` 缺省从 `anc[1]` 折出生成根；`insts`
+/// 先看 `booled_id`，再看 `insts_flat`，最后才走 `geo_relate`），所以下游 `assemble` 一字不改。
+/// 只按 `in IN [...]` 点名查（`idx_inst_relate_in`），不扫表。
+pub(crate) fn render_live_room_inst_query(refnos: &[RefnoEnum]) -> String {
+    let keys = refnos
+        .iter()
+        .map(RefnoEnum::to_pe_key)
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
-        "DELETE {PUBLISHED_ROOM_INPUT_TABLE} WHERE dbnum = {dbnum} AND commit_token = '{token}' RETURN NONE; \
-         INSERT INTO {PUBLISHED_ROOM_INPUT_TABLE} \
-         SELECT {dbnum} AS dbnum, '{token}' AS commit_token, in AS refno, in.old_pe AS old_refno, \
+        "SELECT in AS refno, in.old_pe AS old_refno, \
            (in.owner ?? type::thing('pe', string::concat(<string><int>math::floor(anc[1] / 4294967296), '_', <string>(anc[1] % 4294967296)))) AS owner, \
            generic, (aabb_d ?? aabb.d) AS world_aabb, \
            (world_trans_d ?? world_trans.d) AS world_trans, out.ptset.d.pt AS pts, \
@@ -62,44 +60,29 @@ pub(crate) fn render_stage_published_room_input(dbnum: u32, commit_token: &str) 
                                   WHERE visible AND out.meshed AND (transform ?? trans.d) != NONE AND geo_type = 'Pos') }} AS insts, \
            booled_id != NONE AS has_neg, dt AS date \
          FROM inst_relate \
-         WHERE (dbnum = {dbnum} OR string::starts_with(record::id(in), '{dbnum}_')) \
+         WHERE in IN [{keys}] \
            AND (aabb_d ?? aabb.d) != NONE \
-           AND (world_trans_d ?? world_trans.d) != NONE RETURN NONE;"
+           AND (world_trans_d ?? world_trans.d) != NONE;"
     )
 }
 
-/// Materialize a complete candidate for one frozen file version.  Publication
-/// of the matching token is a separate, later transaction.
-#[cfg(test)]
-pub(crate) async fn stage_published_room_input(
-    dbnum: u32,
-    commit_token: &str,
-) -> anyhow::Result<()> {
-    let statements = render_stage_published_room_input(dbnum, commit_token);
-    SUL_DB
-        .query(format!(
-            "BEGIN TRANSACTION; {statements} COMMIT TRANSACTION;"
-        ))
-        .await
-        .context("stage immutable room input query")?
-        .check()
-        .context("stage immutable room input statements")?;
-    Ok(())
-}
-
-/// Read room geometry only from file versions named by the committed manifest.
-/// Candidate versions may already exist in the same table, but remain
-/// invisible until their file token is published.
-pub(crate) async fn query_published_room_insts(
+/// 按 refno 点名读实时行几何。`db` 显式传入：启动水化喂 `SUL_DB`，`mem://` 门直接喂。
+pub(crate) async fn query_live_room_insts_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     refnos: &[RefnoEnum],
 ) -> anyhow::Result<Vec<GeomInstQuery>> {
-    // This compatibility caller does not own a dbnum Task. Do not expose a
-    // half-published live projection through the former Published view.
-    anyhow::ensure!(
-        !crate::data_interface::side_effect_pending::SideEffectCompensator::has_inflight_file_round_on(&SUL_DB).await?,
-        "room input publication is incomplete; consume through the owning memory room Task"
-    );
-    query_memory_room_insts(refnos)
+    if refnos.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut response = db
+        .query(render_live_room_inst_query(refnos))
+        .await
+        .context("live room inst query")?
+        .check()
+        .context("live room inst statements")?;
+    response
+        .take::<Vec<GeomInstQuery>>(0)
+        .map_err(anyhow::Error::from)
 }
 
 pub(crate) fn query_memory_room_insts(refnos: &[RefnoEnum]) -> anyhow::Result<Vec<GeomInstQuery>> {
@@ -120,39 +103,6 @@ pub(crate) fn query_memory_room_insts(refnos: &[RefnoEnum]) -> anyhow::Result<Ve
         .filter(|record| matches!(record.geometry_id, GeometryId::Element { .. }))
         .map(|record| record.room_inst()));
     Ok(rows)
-}
-
-#[cfg(test)]
-pub(crate) async fn query_published_room_insts_on(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    refnos: &[RefnoEnum],
-) -> anyhow::Result<Vec<GeomInstQuery>> {
-    if refnos.is_empty() {
-        return Ok(Vec::new());
-    }
-    let sql = render_published_room_inst_query(refnos);
-    let mut response = db.query(sql).await?.check()?;
-    response
-        .take::<Vec<GeomInstQuery>>(0)
-        .map_err(anyhow::Error::from)
-}
-
-#[cfg(test)]
-fn render_published_room_inst_query(refnos: &[RefnoEnum]) -> String {
-    // Keep the manifest subquery outside the indexed element lookup: Surreal
-    // otherwise falls back to scanning every version and evaluating the
-    // manifest predicate for every row, even for a single requested element.
-    let keys = refnos
-        .iter()
-        .map(RefnoEnum::to_pe_key)
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "SELECT refno, old_refno, owner, generic, world_aabb, world_trans, pts, insts, has_neg, date \
-         FROM (SELECT * FROM {PUBLISHED_ROOM_INPUT_TABLE} \
-               WHERE refno IN [{keys}] OR old_refno IN [{keys}]) \
-         WHERE commit_token IN (SELECT VALUE commit_token FROM published_file_input);"
-    )
 }
 
 /// 这次发布是定向生成（窗口 `RegenRoot` / 按需 `ensure`）还是全库生成。
@@ -219,24 +169,22 @@ pub(crate) fn room_publication_effects<'a>(
     })
 }
 
-/// 渲染成发布事务里的语句：先清边，再排重算。空影响渲染成空串。
+/// 渲染成发布事务里的语句：只清边。空影响渲染成空串。
+///
+/// 「排重算」那一半（`RoomRecalcPanel` / `RoomRecalcElement` 进房间待办表）随
+/// ADR-072 D6 退役：房间归属由本 dbnum 任务的房间段（`room_task::finish_task_rooms`）按内存
+/// 投影整库算完写边，不再靠逐元素的 durable 待办行；`recalc` 名单只剩回执与日志用。
+/// `policy` / `room_incremental` 两个参数保留给调用方（落库适配器）的既有签名，不再影响渲染。
 pub(crate) fn render_room_publication_effects(
     effects: &RoomPublicationEffects,
     policy: RoomEffectPolicy,
     room_incremental: bool,
 ) -> String {
+    let _ = (policy, room_incremental);
     let mut out = String::new();
     for chunk in effects.cleared.chunks(ROOM_EDGE_DELETE_CHUNK) {
         let keys: Vec<String> = chunk.iter().map(RefnoEnum::to_pe_key).collect();
         out.push_str(&crate::data_interface::helper::render_room_membership_delete(&keys));
-        out.push('\n');
-    }
-    if policy == RoomEffectPolicy::Directed && room_incremental && !effects.recalc.is_empty() {
-        out.push_str(
-            &crate::data_interface::model_update_pending::render_room_recalc_upserts(
-                &effects.recalc,
-            ),
-        );
         out.push('\n');
     }
     out
@@ -278,182 +226,97 @@ pub(crate) async fn clear_deferred_room_edges(refnos: &[String]) -> anyhow::Resu
 mod tests {
     use super::*;
 
+    /// 发布视图退役（ADR-072 D4）：本文件没有整库复制几何的写者、没有按清单令牌选版本的
+    /// 读者；内存那条读法只经常驻面板与投影存储；实时行那条读法只按 refno 点名、不扫表。
     #[test]
-    fn room_input_publication_has_no_database_copy_writer() {
-        for source in [include_str!("../data_interface/batch_worker.rs"), include_str!("../data_interface/side_effect_pending.rs")] {
-            let production = source.split("#[cfg(test)]").next().unwrap();
-            assert!(!production.contains("stage_published_room_input"));
-            assert!(!production.contains("room_published_inst"));
-        }
+    fn room_input_has_no_published_copy_and_the_live_read_is_keyed_by_refno() {
         let source = include_str!("room_publication.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap();
+        for needle in [
+            "published_file_input",
+            "commit_token",
+            "model_update_pending",
+            "side_effect_pending",
+        ] {
+            assert!(!production.contains(needle), "生产路径不该再出现 `{needle}`");
+        }
         let input = source.split_once("pub(crate) fn query_memory_room_insts(").unwrap().1
-            .split_once("#[cfg(test)]").unwrap().0;
+            .split_once("/// 这次发布是定向生成").unwrap().0;
         assert!(!input.contains("SUL_DB") && !input.contains(".query("));
         assert!(input.contains("resident.panels.get") && input.contains("room_records_for_members"));
+
+        let sql = render_live_room_inst_query(&[RefnoEnum::from("24384/7"), RefnoEnum::from("24385/8")]);
+        assert!(sql.contains("FROM inst_relate"));
+        assert!(sql.contains("WHERE in IN [pe:24384_7, pe:24385_8]"), "{sql}");
+        assert!(!sql.contains("SELECT * FROM inst_relate"), "不许扫表: {sql}");
+
         let resident = include_str!("room_resident.rs").replace("\r\n", "\n");
         let published = resident.split_once("pub(crate) async fn load_published(").unwrap().1.split_once("\n}\n").unwrap().0;
         assert!(published.contains("load_file_backed("));
         assert!(!published.contains("SUL_DB") && !published.contains("load_published_on("));
     }
 
+    /// `mem://` 门：实时行读法只回点名的 refno、投影形状与从前发布视图逐字同形（`owner`
+    /// 缺省从 `anc[1]` 折出生成根，`insts` 取 `insts_flat`），行改了读到的就是改后的那份
+    /// ——库里只有一份几何，没有「候选 / 已发布」两个版本可选。
     #[tokio::test]
-    async fn room_input_candidates_stay_hidden_until_the_file_token_switches() {
+    async fn the_live_read_returns_the_current_rows_for_the_named_refnos_only() {
         use surrealdb::engine::any::connect;
 
         let db = connect("mem://").await.expect("mem boots");
         db.use_ns("room_publication")
-            .use_db("versioned_input")
+            .use_db("live_input")
             .await
             .unwrap();
         db.query(
             "CREATE pe:24384_1 SET noun = 'SITE'; \
              CREATE pe:24384_7 SET noun = 'EQUI'; \
+             CREATE pe:24385_8 SET noun = 'EQUI'; \
              CREATE inst_relate:24384_7 SET dbnum = 8000, in = pe:24384_7, \
                anc = [104728482619399, 104728482619393], generic = 'OLD', \
                aabb_d = { mins: [0f, 0f, 0f], maxs: [1f, 1f, 1f] }, \
                world_trans_d = { translation: [0f, 0f, 0f], rotation: [0f, 0f, 0f, 1f], scale: [1f, 1f, 1f] }, \
-               insts_flat = [{ geo_hash: 'mesh-old' }], booled_id = NONE;",
+               insts_flat = [{ geo_hash: 'mesh-old' }], booled_id = NONE; \
+             CREATE inst_relate:24385_8 SET dbnum = 8001, in = pe:24385_8, \
+               anc = [104732777586696, 104732777586689], generic = 'B', \
+               aabb_d = { mins: [2f, 0f, 0f], maxs: [3f, 1f, 1f] }, \
+               world_trans_d = { translation: [0f, 0f, 0f], rotation: [0f, 0f, 0f, 1f], scale: [1f, 1f, 1f] }, \
+               insts_flat = [{ geo_hash: 'mesh-b' }], booled_id = NONE;",
         )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        db.query(format!(
-            "BEGIN TRANSACTION; {} \
-             CREATE published_file_input:8000 SET dbnum = 8000, commit_token = 'old-token'; \
-             COMMIT TRANSACTION;",
-            render_stage_published_room_input(8000, "old-token")
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        db.query("UPDATE inst_relate:24384_7 SET generic = 'NEW';")
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        db.query(format!(
-            "BEGIN TRANSACTION; {} COMMIT TRANSACTION;",
-            render_stage_published_room_input(8000, "new-token")
-        ))
         .await
         .unwrap()
         .check()
         .unwrap();
 
         let target = RefnoEnum::from("24384/7");
-        let mut response = db
-            .query(render_published_room_inst_query(&[target]))
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        let rows: Vec<GeomInstQuery> = response.take(0).unwrap();
-        assert_eq!(rows.len(), 1);
+        let rows = query_live_room_insts_on(&db, &[target]).await.unwrap();
+        assert_eq!(rows.len(), 1, "只回点名的那一行");
         assert_eq!(rows[0].generic, "OLD");
+        assert_eq!(rows[0].refno, target);
+        // anc[1] = 104728482619393 = 24384 << 32 | 73729：owner 从它折出生成根。
+        assert_eq!(rows[0].owner, RefnoEnum::from("24384/73729"), "owner 从 anc[1] 折出");
+        assert_eq!(rows[0].insts.len(), 1);
+        assert_eq!(rows[0].insts[0].geo_hash, "mesh-old");
 
-        db.query("UPDATE published_file_input:8000 SET commit_token = 'new-token';")
+        db.query("UPDATE inst_relate:24384_7 SET generic = 'NEW', insts_flat = [{ geo_hash: 'mesh-new' }];")
             .await
             .unwrap()
             .check()
             .unwrap();
-        let mut response = db
-            .query(render_published_room_inst_query(&[target]))
-            .await
-            .unwrap()
-            .check()
-            .unwrap();
-        let rows: Vec<GeomInstQuery> = response.take(0).unwrap();
+        let rows = query_live_room_insts_on(&db, &[target]).await.unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].generic, "NEW");
-    }
+        assert_eq!(rows[0].insts[0].geo_hash, "mesh-new");
 
-    #[tokio::test]
-    async fn completed_file_publishes_with_the_other_files_previous_version() {
-        use surrealdb::engine::any::connect;
-
-        let db = connect("mem://").await.expect("mem boots");
-        db.use_ns("room_publication")
-            .use_db("cross_file_versions")
-            .await
-            .unwrap();
-        db.query(
-            "CREATE pe:24384_7 SET noun = 'EQUI'; \
-             CREATE pe:24385_8 SET noun = 'EQUI'; \
-             CREATE inst_relate:a_old SET dbnum = 8000, in = pe:24384_7, \
-               anc = [104728482619399, 104728482619393], generic = 'A-OLD', \
-               aabb_d = { mins: [0f, 0f, 0f], maxs: [1f, 1f, 1f] }, \
-               world_trans_d = { translation: [0f, 0f, 0f], rotation: [0f, 0f, 0f, 1f], scale: [1f, 1f, 1f] }, \
-               insts_flat = [{ geo_hash: 'mesh-a-old' }], booled_id = NONE; \
-             CREATE inst_relate:b_old SET dbnum = 8001, in = pe:24385_8, \
-               anc = [104732777586696, 104732777586689], generic = 'B-OLD', \
-               aabb_d = { mins: [2f, 0f, 0f], maxs: [3f, 1f, 1f] }, \
-               world_trans_d = { translation: [0f, 0f, 0f], rotation: [0f, 0f, 0f, 1f], scale: [1f, 1f, 1f] }, \
-               insts_flat = [{ geo_hash: 'mesh-b-old' }], booled_id = NONE;",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        db.query(format!(
-            "BEGIN TRANSACTION; {} {} \
-             CREATE published_file_input:8000 SET dbnum = 8000, commit_token = 'a-old'; \
-             CREATE published_file_input:8001 SET dbnum = 8001, commit_token = 'b-old'; \
-             COMMIT TRANSACTION;",
-            render_stage_published_room_input(8000, "a-old"),
-            render_stage_published_room_input(8001, "b-old")
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-
-        db.query(
-            "UPDATE inst_relate:a_old SET generic = 'A-NEW', insts_flat = [{ geo_hash: 'mesh-a-new' }]; \
-             UPDATE inst_relate:b_old SET generic = 'B-NEW', insts_flat = [{ geo_hash: 'mesh-b-new' }];",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        db.query(format!(
-            "BEGIN TRANSACTION; {} {} COMMIT TRANSACTION;",
-            render_stage_published_room_input(8000, "a-new"),
-            render_stage_published_room_input(8001, "b-new")
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-
-        let targets = [RefnoEnum::from("24384/7"), RefnoEnum::from("24385/8")];
-        let mut before = query_published_room_insts_on(&db, &targets)
+        let mut both = query_live_room_insts_on(&db, &[target, RefnoEnum::from("24385/8")])
             .await
             .unwrap()
             .into_iter()
             .map(|row| row.generic)
             .collect::<Vec<_>>();
-        before.sort();
-        assert_eq!(before, ["A-OLD", "B-OLD"]);
-
-        // A 的新轮次失败并保持旧清单；只发布 B。随后删除实时模型行，确保读取没有兜底。
-        db.query(
-            "UPDATE published_file_input:8001 SET commit_token = 'b-new'; \
-             DELETE inst_relate;",
-        )
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        let mut after = query_published_room_insts_on(&db, &targets)
-            .await
-            .unwrap()
-            .into_iter()
-            .map(|row| row.generic)
-            .collect::<Vec<_>>();
-        after.sort();
-        assert_eq!(after, ["A-OLD", "B-NEW"]);
+        both.sort();
+        assert_eq!(both, ["B", "NEW"]);
+        assert!(query_live_room_insts_on(&db, &[]).await.unwrap().is_empty());
     }
 
     fn element(id: &str) -> GeometryId {
@@ -530,9 +393,10 @@ mod tests {
         assert_eq!(effects.cleared, vec![r(6), r(7)]);
     }
 
-    /// 清边不看开关也不看生成种类；重算只在定向生成且开关打开时渲染；空影响是空串。
+    /// 清边不看开关也不看生成种类；**重算不再渲染成待办行**（ADR-072 D6：房间归属由任务的
+    /// 房间段整库算，`model_update_pending` 退役）；空影响是空串。
     #[test]
-    fn rendering_always_clears_edges_and_gates_recalc_on_policy_and_switch() {
+    fn rendering_always_clears_edges_and_never_enqueues_recalc_rows() {
         let effects = effects_of(
             &[
                 (element("24384/7"), 7, "PANE"),
@@ -541,33 +405,24 @@ mod tests {
             &[element("24384/9")],
             &[],
         );
-        let directed = render_room_publication_effects(&effects, RoomEffectPolicy::Directed, true);
-        for needle in [
-            "DELETE pe:24384_9<->room_relate;",
-            "DELETE pe:24384_9<->room_panel_relate;",
-            "model_update_pending:room_recalc_panel_24384_7",
-            "model_update_pending:room_recalc_element_24384_5",
-            "action = 'room_recalc_panel'",
-            "action = 'room_recalc_element'",
+        assert_eq!(effects.recalc.len(), 2, "名单照旧折出来，供回执与日志");
+        for (policy, switch) in [
+            (RoomEffectPolicy::Directed, true),
+            (RoomEffectPolicy::Directed, false),
+            (RoomEffectPolicy::FullDatabase, true),
         ] {
+            let rendered = render_room_publication_effects(&effects, policy, switch);
+            for needle in [
+                "DELETE pe:24384_9<->room_relate;",
+                "DELETE pe:24384_9<->room_panel_relate;",
+            ] {
+                assert!(rendered.contains(needle), "missing `{needle}` in {rendered}");
+            }
             assert!(
-                directed.contains(needle),
-                "missing `{needle}` in {directed}"
+                !rendered.contains("room_recalc_") && !rendered.contains("model_update_pending"),
+                "{policy:?}/{switch}: 不许再排待办行: {rendered}"
             );
         }
-        assert!(
-            directed.find("<->room_relate").unwrap() < directed.find("room_recalc_").unwrap(),
-            "清边排在重算之前: {directed}"
-        );
-
-        let switched_off =
-            render_room_publication_effects(&effects, RoomEffectPolicy::Directed, false);
-        assert!(switched_off.contains("DELETE pe:24384_9<->room_relate;"));
-        assert!(!switched_off.contains("room_recalc_"), "{switched_off}");
-
-        let full = render_room_publication_effects(&effects, RoomEffectPolicy::FullDatabase, true);
-        assert!(full.contains("DELETE pe:24384_9<->room_relate;"));
-        assert!(!full.contains("room_recalc_"), "{full}");
 
         assert_eq!(
             render_room_publication_effects(
@@ -591,8 +446,8 @@ mod tests {
 
     /// 真引擎门（`mem://`）：一块 PANE 被 e3d 发布移除后，它作为面板的出边（成员）、作为
     /// 面板的 `room_panel_relate` 入边、以及被移除成员的入边一个都不剩；没被碰的面板与
-    /// 成员原样；重写的成员排进了 `room_recalc_element` 行。库里**没有** pe 记录的来源
-    /// （零解析库）清边同样不报错。
+    /// 成员原样；重写的成员**不再**排待办行（归属由任务房间段算）。库里**没有** pe 记录的
+    /// 来源（零解析库）清边同样不报错。
     #[tokio::test]
     async fn deleting_a_pane_leaves_no_dangling_room_edges() {
         use surrealdb::engine::any::connect;
@@ -688,17 +543,12 @@ mod tests {
         );
 
         let mut response = db
-            .query(
-                "SELECT VALUE action FROM model_update_pending:room_recalc_element_24384_9;\
-                 SELECT VALUE target_refno FROM model_update_pending:room_recalc_element_24384_9;",
-            )
+            .query("SELECT VALUE id FROM model_update_pending;")
             .await
             .unwrap()
             .check()
             .unwrap();
-        let action: Option<String> = response.take(0).unwrap();
-        let target: Option<String> = response.take(1).unwrap();
-        assert_eq!(action.as_deref(), Some("room_recalc_element"));
-        assert_eq!(target.as_deref(), Some("24384/9"));
+        let pending: Vec<surrealdb::sql::Thing> = response.take(0).unwrap();
+        assert!(pending.is_empty(), "发布事务不再排房间待办行: {pending:?}");
     }
 }

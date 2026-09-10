@@ -6,7 +6,7 @@
 //!   FRMW 改名、CWALL/CFLOOR/PANE 的 OWNER 变更排不出 `RoomRecalcPanel`（ADR-010 D12 / ADR-040 §4
 //!   回退）。现在 `WindowRootSources::collect` 多一条 `room_structural_trigger` 臂，文件侧读两端。
 //! - **F-B**（已修，2026-09-07）房间消费不区分数据面形态：读透（`spawned-mem` / `embedded-mem`）下没有文件轮次、
-//!   `room_published_inst` 停在启动基线，房间任务却照算照销账，`e3d.room.lookup` 报 `current`。
+//!   发布视图几何停在启动基线，房间任务却照算照销账，`e3d.room.lookup` 报 `current`。
 //!   现在视图随 `options::data_face()`（`room_model::consumption_view`），读透回 `unsupported`。
 //! - **F-C** 一个根 `Failed` 让文件轮次停在 `collecting`，空闲重试成功之后没有任何地方再调
 //!   `publish_completed_file_round`。
@@ -134,7 +134,7 @@ mod tests {
     }
 
     /// F-B：房间消费的几何视图必须按数据面形态选——读透形态没有文件轮次，
-    /// `room_published_inst` 永远停在启动基线，此时要么走 Live 视图、要么不算；
+    /// 发布视图几何永远停在启动基线，此时要么走 Live 视图、要么不算；
     /// 与之配套，`e3d.room.lookup` 在读透形态下必须回 `publication_status = unsupported`
     /// （ADR-062「读透不承诺文件级发布语义」），不能拿「无 collecting / 无 pending」凑成 `current`。
     #[test]
@@ -165,7 +165,7 @@ mod tests {
     /// **两种数据面读的是同一份实时行**——`RoomGeometryView` 只剩 `Live`。
     ///
     /// 这条原先钉的是「ingest 读已发布房间几何、读透退回实时行」。那个分叉正是这轮要消灭的
-    /// 东西：`room_published_inst` 退役后没有第二份几何可读，ingest 与读透同一条路。
+    /// 东西：发布视图几何表退役后没有第二份几何可读，ingest 与读透同一条路。
     #[test]
     fn f_b_consumption_view_is_the_live_rows_on_every_data_face() {
         use crate::fast_model::room_model::{RoomGeometryView, consumption_view_for};

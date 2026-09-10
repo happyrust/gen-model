@@ -37,35 +37,26 @@ pub(crate) struct RoomWriteGuard {
     pub settle_statements: Vec<String>,
 }
 
-/// Geometry source used by one room calculation. Incremental room tasks use
-/// the immutable per-file publication view; maintenance/full rebuild callers
-/// keep an explicit live entry point.
+/// Geometry source used by one room calculation.
+///
+/// 只剩 `Live` 一档（ADR-072 D4 / R5）：此前 ingest 形态还有一档 `Published`，读的是按发布
+/// 清单令牌选版本的整库几何副本（发布视图表）；publish 阶段退役后库里只有一份几何
+/// ——任务同步写进去的那份——两种数据面同一条路。枚举保留是为了各条分支的签名不动。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) enum RoomGeometryView {
     #[default]
     Live,
-    Published,
 }
 
-/// 房间增量消费（两条分支 + 在册面板索引）该读哪一份几何。
-///
-/// ingest 形态读已发布房间几何（`room_published_inst` 里当前清单选中的行，ADR-062）。
-/// 读透形态（spawned-mem / embedded-mem 默认）没有数据批次、没有文件轮次，
-/// `room_published_inst` 永远停在启动基线；再读它等于拿旧几何算新任务、算完还销账。
-/// 所以读透退回实时行——一致性回到 ADR-062 之前的弱口径，但不撒谎：`e3d.room.lookup`
-/// 同时回 `publication_status = unsupported`（`query_service::published_derivation_status`）。
-/// 把文件轮次延伸到读透是另一份计划，见 `docs/2026-09-07-room-increment-audit.md` §4。
+/// 房间增量消费（两条分支 + 在册面板索引）该读哪一份几何：两种数据面都是实时那一份。
 pub(crate) fn consumption_view() -> RoomGeometryView {
     consumption_view_for(crate::options::data_face())
 }
 
-/// [`consumption_view`] 的纯函数形态，单测直接喂数据面。
+/// [`consumption_view`] 的纯函数形态，单测直接喂数据面。发布视图退役后与数据面无关。
 pub(crate) fn consumption_view_for(face: crate::options::DataFace) -> RoomGeometryView {
-    if face.is_read_through() {
-        RoomGeometryView::Live
-    } else {
-        RoomGeometryView::Published
-    }
+    let _ = face;
+    RoomGeometryView::Live
 }
 
 async fn query_room_insts(
@@ -74,9 +65,6 @@ async fn query_room_insts(
 ) -> anyhow::Result<Vec<GeomInstQuery>> {
     match view {
         RoomGeometryView::Live => crate::fast_model::room_publication::query_memory_room_insts(refnos),
-        RoomGeometryView::Published => {
-            crate::fast_model::room_publication::query_published_room_insts(refnos).await
-        }
     }
 }
 
@@ -1177,10 +1165,11 @@ where
     }
 }
 
-/// 房间 → 面板现状的来源（ADR-053 / ADR-056 N7 的房间面）：先看已发布文件清单（ADR-062），
-/// 没有就从 MDB 的设计库文件实时读（`room_topology`）。一行 SurrealDB 都不读——legacy
-/// 「noun 表 + `pe_owner`」那条读路由 2026-09-08 随 S4 退役（不跑数据解析的部署与零解析库
-/// 此前在那条路上拿到的是 0 间房）。名字里的 `_by_mode` 是历史遗留：数据面只剩一条读路由。
+/// 房间 → 面板现状的来源（ADR-053 / ADR-056 N7 的房间面）：从 MDB 的设计库文件实时读
+/// （`room_topology`）。一行 SurrealDB 都不读——legacy「noun 表 + `pe_owner`」那条读路由
+/// 2026-09-08 随 S4 退役（不跑数据解析的部署与零解析库此前在那条路上拿到的是 0 间房）；
+/// 「先看已发布文件清单」那一档 2026-09-10 随 publish 阶段退役（ADR-072 D4）。
+/// 名字里的 `_by_mode` 是历史遗留：数据面只剩一条读路由。
 async fn load_room_panel_groups_by_mode<F>(
     room_key_word: &Vec<String>,
     match_room_fn: F,
@@ -1190,16 +1179,6 @@ where
 {
     let hierarchy = crate::fast_model::room_topology::RoomHierarchy::configured()
         .ok_or_else(|| anyhow::anyhow!("房间子系统需要 project_hd 或 project_hh 特性"))?;
-    if let Some(published) =
-        crate::fast_model::room_topology::load_room_panel_map_from_published_files(
-            room_key_word,
-            hierarchy,
-            &match_room_fn,
-        )
-        .await?
-    {
-        return Ok(published);
-    }
     crate::fast_model::room_topology::load_room_panel_map_from_files(
         room_key_word,
         hierarchy,
@@ -1632,45 +1611,16 @@ async fn query_geom_pts_for_view(
     refnos: &[RefnoEnum],
     mesh_dir: &Path,
 ) -> anyhow::Result<Vec<GeomPtsQuery>> {
-    if view == RoomGeometryView::Live {
-        let mut rows = query_geom_pts(refnos).await?;
-        rows.extend(query_baked_geom_pts(refnos, mesh_dir).await?);
-        return Ok(rows);
-    }
-    let mut rows = Vec::new();
-    for inst in query_room_insts(view, refnos).await? {
-        let mut pts_group = Vec::with_capacity(inst.insts.len());
-        for geo in &inst.insts {
-            // 烘焙件的 `insts` 是 stage 时按 `booled_id != NONE` 折出来的 `[{geo_hash: booled_id}]`
-            //（`room_publication.rs`），历史脏值 `''` / `'none'` 也会折进来；它们是「无成品」
-            // 不是网格 id，没有点可查——与 Live 侧 `VALID_BOOLED` 同一口径，跳过而不是拿去读
-            // `.mesh` 把整块面板判成失败。
-            if geo_hash_is_dirty(&geo.geo_hash) {
-                continue;
-            }
-            let path = mesh_dir.join(format!("{}.mesh", geo.geo_hash));
-            let mesh = PlantMesh::des_mesh_file(&path).map_err(|error| {
-                anyhow::anyhow!("读取已发布网格 {} 失败: {error}", path.display())
-            })?;
-            pts_group.push((
-                geo.transform,
-                Some(mesh.vertices.iter().map(|point| point.as_dvec3()).collect()),
-            ));
-        }
-        rows.push(GeomPtsQuery {
-            refno: inst.refno,
-            world_trans: inst.world_trans,
-            world_aabb: inst.world_aabb,
-            pts_group,
-        });
-    }
+    let RoomGeometryView::Live = view;
+    let mut rows = query_geom_pts(refnos).await?;
+    rows.extend(query_baked_geom_pts(refnos, mesh_dir).await?);
     Ok(rows)
 }
 
-/// `booled_id` 的历史脏值（空串、任意大小写的字面 `none`）被 stage 折成 `geo_hash` 之后的样子。
+/// `booled_id` 的历史脏值（空串、任意大小写的字面 `none`）被折成 `geo_hash` 之后的样子。
 /// 判据与 [`VALID_BOOLED`](crate::fast_model::pdms_inst::VALID_BOOLED) 那句 SurrealQL 逐条对应
-///（`!= ''` 与 `string::lowercase(…) != 'none'`），Rust 侧这一份只给已经物化好的
-/// `room_published_inst` 行用——它们在 stage 时没经过那道判据。
+///（`!= ''` 与 `string::lowercase(…) != 'none'`），Rust 侧这一份给已经物化成 `insts` 的行用
+/// （实时行的 `insts_flat` / 常驻面板的实例表）——它们没经过那道 SurrealQL 判据。
 pub(crate) fn geo_hash_is_dirty(geo_hash: &str) -> bool {
     geo_hash.is_empty() || geo_hash.eq_ignore_ascii_case("none")
 }
@@ -4747,9 +4697,12 @@ mod tests {
         assert_eq!(resident_index.usable_panels(), 0, "这是唯一的口径差");
     }
 
-    /// `mem://` 两态门（P2 验收）：同一份夹具、同一批任务，开关**关**（面板几何来自
-    /// `query_published_room_insts`）与开关**开**（来自常驻模型）算出的 `room_relate`
-    /// 写入语句**逐字相同**——边 id、目标、`room_num`、`inside_count`、`center_dist` 全在里面。
+    /// `mem://` 两态门（P2 验收，R5 后改喂实时行）：同一份夹具、同一批任务，开关**关**
+    /// （面板几何逐块从 `inst_relate` 实时行读，`query_live_room_insts_on`）与开关**开**
+    /// （来自按同一批实时行装出来的常驻模型，`room_resident::load_live_on`）算出的
+    /// `room_relate` 写入语句**逐字相同**——边 id、目标、`room_num`、`inside_count`、
+    /// `center_dist` 全在里面。它同时就是 ADR-072 R5 那道门：常驻模型从实时行装出来的
+    /// 在册面板集 / 缺几何面板集，与此前从发布表装的那份完全一样（拓扑分组喂的是同一份）。
     ///
     /// 接缝选的是**显式参数**而不是环境变量：`room_resident_model()` 读的是进程级
     /// `OnceLock`，同一个测试进程里翻不了两次；而生产侧的开关本来就只在换代点判一次
@@ -4762,15 +4715,10 @@ mod tests {
     /// 不在 `mem://` 能喂的范围里，所以门比到**渲染出来的语句**为止，不落库。
     #[tokio::test]
     async fn the_two_faces_render_the_same_room_edges_on_a_mem_fixture() {
-        use crate::data_interface::side_effect_pending::PublishedFileInput;
         use crate::fast_model::room_fixture::box_mesh_for_test;
-        use crate::fast_model::room_publication::{
-            query_published_room_insts_on, render_stage_published_room_input,
-        };
+        use crate::fast_model::room_publication::query_live_room_insts_on;
         use crate::fast_model::room_resident::{self, MeshCache};
-        use crate::fast_model::room_topology::{
-            RoomGroup, RoomHierarchy, published_topology_manifest_key,
-        };
+        use crate::fast_model::room_topology::{RoomGroup, RoomHierarchy};
         use glam::Vec3;
         use surrealdb::engine::any::connect;
 
@@ -4794,10 +4742,7 @@ mod tests {
         // 一间房两块面板（7 有几何、8 在册无几何），另一间房两块（9 有几何、10 的包围盒
         // 溢出成 inf 不可用）；三个构件：20 完全落在 7 里、21 谁都不沾、22 跨 7 的边界
         // （第二轮逐点兜底的待办）。
-        let mut statements = vec![
-            "CREATE published_file_input:8000 SET dbnum = 8000, commit_token = 'token-a';"
-                .to_string(),
-        ];
+        let mut statements: Vec<String> = Vec::new();
         for (seq, generic, mesh, mins, maxs) in [
             (
                 7u32,
@@ -4862,13 +4807,6 @@ mod tests {
             .check()
             .unwrap();
 
-        let inputs = vec![PublishedFileInput {
-            dbnum: 8000,
-            db_type: "DESI".into(),
-            end_sesno: 5,
-            commit_token: "token-a".into(),
-            published_version: 1,
-        }];
         let groups = vec![
             RoomGroup {
                 room: rm(1),
@@ -4881,49 +4819,38 @@ mod tests {
                 panels: vec![rm(9), rm(10)],
             },
         ];
-        let manifest_key = published_topology_manifest_key(&inputs, RoomHierarchy::Hd);
-        db.query(format!(
-            "CREATE room_published_topology:a SET manifest_key = '{manifest_key}', \
-             dbnum = 8000, groups = {}; BEGIN TRANSACTION; {} COMMIT TRANSACTION;",
-            serde_json::to_string(&groups).unwrap(),
-            render_stage_published_room_input(8000, "token-a"),
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
 
         let keywords = vec!["-RM".to_string()];
         let meshes: Arc<MeshCache> = Arc::default();
         let model = Arc::new(
-            room_resident::load_published_on(
+            room_resident::load_live_on(
                 &db,
-                &inputs,
-                RoomHierarchy::Hd,
+                vec![(8000, groups.clone())],
                 &keywords,
                 match_room_name_hd,
                 meshes.clone(),
             )
             .await
-            .expect("常驻模型建得起来"),
+            .expect("常驻模型从实时行建得起来"),
         );
+        let _ = RoomHierarchy::Hd;
 
         let rooms = model.map.clone();
         let registered = room_resident::registered_panels(&rooms);
         assert_eq!(registered, vec![rm(7), rm(8), rm(9), rm(10)]);
-        let rows = query_published_room_insts_on(&db, &registered)
+        let rows = query_live_room_insts_on(&db, &registered)
             .await
-            .expect("今天那条路读在册面板");
+            .expect("今天那条路读在册面板的实时行");
 
         let mut off = PanelIndex {
             mesh_dir: mesh_dir.clone(),
-            view: RoomGeometryView::Published,
+            view: RoomGeometryView::Live,
             ..Default::default()
         };
         fill_panel_index_from_rows(&mut off, &rooms, &registered, rows);
         let mut on = PanelIndex {
             mesh_dir: mesh_dir.clone(),
-            view: RoomGeometryView::Published,
+            view: RoomGeometryView::Live,
             resident: Some(model.clone()),
             ..Default::default()
         };
@@ -4967,7 +4894,7 @@ mod tests {
 
         // ② 整间分支喂进判定的东西：世界包围盒与三角网逐字相同。
         for panel in [rm(7), rm(9)] {
-            let panel_rows = query_published_room_insts_on(&db, &[panel])
+            let panel_rows = query_live_room_insts_on(&db, &[panel])
                 .await
                 .expect("面板实例");
             let today = PanelMeshes::from_rows(&panel_rows, &mesh_dir);
@@ -4984,7 +4911,7 @@ mod tests {
         // ③ 逐边对拍：元素分支第一轮的产物渲染成 `room_relate` 语句，两态逐字相同。
         let mut shape = Vec::new();
         for element in [rm(20), rm(21), rm(22)] {
-            let element_insts = query_published_room_insts_on(&db, &[element])
+            let element_insts = query_live_room_insts_on(&db, &[element])
                 .await
                 .expect("构件实例");
             assert_eq!(element_insts.len(), 1, "{element}");
@@ -5033,10 +4960,9 @@ mod tests {
         assert_eq!(shape, vec![(true, 0), (false, 0), (false, 1)], "{shape:?}");
 
         // ④ 跨代复用：同一把 `MeshCache` 建出的第二份模型直接命中，不再读盘。
-        let next = room_resident::load_published_on(
+        let next = room_resident::load_live_on(
             &db,
-            &inputs,
-            RoomHierarchy::Hd,
+            vec![(8000, groups)],
             &keywords,
             match_room_name_hd,
             meshes.clone(),

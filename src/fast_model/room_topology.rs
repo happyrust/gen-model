@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use aios_core::{RefnoEnum, SUL_DB};
+use aios_core::RefnoEnum;
 use anyhow::Context;
 use e3d_io::db_element::DbSet;
 use e3d_io::refno::RefNo;
@@ -34,8 +34,6 @@ use crate::data_interface::generation_root::{
     SubtreeElement, refno_from_e3d, subtree_element_from_set,
 };
 use crate::fast_model::room_model::{RoomPanelMap, room_panel_map_from_groups};
-
-const PUBLISHED_TOPOLOGY_TABLE: &str = "room_published_topology";
 
 /// 房间层级口径按项目在编译期选定（与 `room_model::configured_match_room_fn` 同一对开关）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -84,134 +82,43 @@ pub(crate) struct RoomGroup {
     pub panels: Vec<RefnoEnum>,
 }
 
-/// 清单身份：`room_published_topology.manifest_key`。常驻房间模型（`room_resident`）的
-/// 摄入侧以它为换代键，所以两边必须是同一个函数算出来的字符串。
-pub(crate) fn published_topology_manifest_key(
-    inputs: &[crate::data_interface::side_effect_pending::PublishedFileInput],
-    hierarchy: RoomHierarchy,
-) -> String {
-    use sha2::{Digest, Sha256};
+// ---------------------------------------------------------------------------
+// 发布视图的合成（manifest 合成 / 按清单键物化到库）随 publish 阶段一起退役（ADR-072 D4 / D6）：
+// 房间拓扑的消费者只剩常驻房间模型，它从文件侧分组（下面 `load_room_groups_from_files`）与
+// 磁盘分片（`room_topology_source`）建，不再有「按清单键选中的那份库里拓扑」。
+//
+// 下面三个是**过渡壳**：调用点还留在 `batch_worker::publish_model_file_round` 与
+// `side_effect_pending`（T4 正在整段删），壳只保住编译、一个字不写库；T4 删掉调用点后
+// 连壳一起删。
+// ---------------------------------------------------------------------------
 
-    let mut ordered = inputs.to_vec();
-    ordered.sort_by_key(|input| input.dbnum);
-    let mut digest = Sha256::new();
-    digest.update(match hierarchy {
-        RoomHierarchy::Hd => b"hd".as_slice(),
-        RoomHierarchy::Hh => b"hh".as_slice(),
-    });
-    for input in ordered {
-        digest.update(input.dbnum.to_le_bytes());
-        digest.update((input.db_type.len() as u64).to_le_bytes());
-        digest.update(input.db_type.as_bytes());
-        digest.update(input.end_sesno.to_le_bytes());
-        digest.update((input.commit_token.len() as u64).to_le_bytes());
-        digest.update(input.commit_token.as_bytes());
-    }
-    hex::encode(digest.finalize())
-}
-
-/// Build the complete topology candidate for one composite file manifest and
-/// return replay-safe statements which publish none of it yet. The current
-/// `published_file_input` rows choose the visible manifest key.
-pub(crate) async fn render_stage_published_room_topology(
-    inputs: &[crate::data_interface::side_effect_pending::PublishedFileInput],
+/// 过渡壳：曾把这一轮的合成拓扑物化成发布视图的候选行；发布视图退役后没有消费者，
+/// 渲染成空串（调用方把它拼进事务，空语句无害）。泛型只为不依赖 `side_effect_pending`
+/// 里那个即将一起退役的清单行类型。
+#[allow(dead_code)]
+pub(crate) async fn render_stage_published_room_topology<T>(
+    inputs: &[T],
 ) -> anyhow::Result<String> {
-    let started = std::time::Instant::now();
-    let hierarchy = RoomHierarchy::configured()
-        .ok_or_else(|| anyhow::anyhow!("房间子系统需要 project_hd 或 project_hh 特性"))?;
-    let manifest_key = published_topology_manifest_key(inputs, hierarchy);
-    let mut sources = Vec::new();
-    for input in inputs
-        .iter()
-        .filter(|input| input.db_type.eq_ignore_ascii_case("DESI"))
-    {
-        let source = super::room_topology_source::load_on(&SUL_DB, &input.commit_token).await?;
-        anyhow::ensure!(
-            source.dbnum == input.dbnum && source.source_sesno as i32 == input.end_sesno,
-            "published topology input row/token mismatch for dbnum {}",
-            input.dbnum
-        );
-        sources.push(source);
-    }
-    let groups = tokio::task::spawn_blocking(move || {
-        super::room_topology_source::compose(&sources, hierarchy)
-    })
-    .await
-    .context("compose published room topology")??;
-    let mut statements = vec![format!(
-        "DELETE {PUBLISHED_TOPOLOGY_TABLE} WHERE manifest_key = '{manifest_key}';"
-    )];
-    for (dbnum, groups) in groups {
-        let groups = serde_json::to_string(&groups)?;
-        statements.push(format!(
-            "UPSERT type::thing('{PUBLISHED_TOPOLOGY_TABLE}', '{manifest_key}_{dbnum}') \
-             SET manifest_key = '{manifest_key}', dbnum = {dbnum}, groups = {groups}, updated_at = time::now();"
-        ));
-    }
-    println!(
-        "[room-topology] composed sources={} elapsed_ms={}",
-        inputs.len(),
-        started.elapsed().as_millis()
-    );
-    Ok(statements.join(" "))
+    let _ = inputs;
+    Ok(String::new())
 }
 
+/// 过渡壳：见 [`render_stage_published_room_topology`]。
+#[allow(dead_code)]
 pub(crate) async fn stage_candidate_room_topology(
     dbnum: u32,
     db_type: &str,
     end_sesno: i32,
     commit_token: &str,
 ) -> anyhow::Result<()> {
-    let mut inputs =
-        crate::data_interface::side_effect_pending::SideEffectCompensator::published_file_inputs()
-            .await?;
-    inputs.retain(|input| input.dbnum != dbnum);
-    inputs.push(
-        crate::data_interface::side_effect_pending::PublishedFileInput {
-            dbnum,
-            db_type: db_type.to_string(),
-            end_sesno,
-            commit_token: commit_token.to_string(),
-            published_version: 0,
-        },
-    );
-    ensure_published_room_topology(&inputs).await
+    let _ = (dbnum, db_type, end_sesno, commit_token);
+    Ok(())
 }
 
-/// Ensure a complete topology candidate exists for the exact composite. This
-/// is called once before promotion and again under the spatial publication
-/// lock. The second call closes races with another file publication; after a
-/// crash it also reuses the already durable candidate without reopening files.
-pub(crate) async fn ensure_published_room_topology(
-    inputs: &[crate::data_interface::side_effect_pending::PublishedFileInput],
-) -> anyhow::Result<()> {
-    let hierarchy = RoomHierarchy::configured()
-        .ok_or_else(|| anyhow::anyhow!("房间子系统需要 project_hd 或 project_hh 特性"))?;
-    let manifest_key = published_topology_manifest_key(inputs, hierarchy);
-    let mut expected_dbnums = inputs
-        .iter()
-        .filter(|input| input.db_type.eq_ignore_ascii_case("DESI"))
-        .map(|input| input.dbnum)
-        .collect::<Vec<_>>();
-    expected_dbnums.sort_unstable();
-    let mut response = SUL_DB
-        .query(format!(
-            "SELECT VALUE dbnum FROM {PUBLISHED_TOPOLOGY_TABLE} \
-             WHERE manifest_key = '{manifest_key}' ORDER BY dbnum ASC;"
-        ))
-        .await?
-        .check()?;
-    let actual_dbnums: Vec<u32> = response.take(0)?;
-    if actual_dbnums == expected_dbnums {
-        return Ok(());
-    }
-    let statements = render_stage_published_room_topology(inputs).await?;
-    SUL_DB
-        .query(format!(
-            "BEGIN TRANSACTION; {statements} COMMIT TRANSACTION;"
-        ))
-        .await?
-        .check()?;
+/// 过渡壳：见 [`render_stage_published_room_topology`]。
+#[allow(dead_code)]
+pub(crate) async fn ensure_published_room_topology<T>(inputs: &[T]) -> anyhow::Result<()> {
+    let _ = inputs;
     Ok(())
 }
 
@@ -449,7 +356,7 @@ where
 }
 
 /// 摊平「按文件分好的分组」。房间从哪个文件来只有 `/health` 的点名要（见
-/// [`load_published_topology_groups_on`]），别的读法照旧只看一整份分组。
+/// `room_resident::load_live_on` 的 `room_files`），别的读法照旧只看一整份分组。
 pub(crate) fn flatten_groups_by_file(by_file: Vec<(u32, Vec<RoomGroup>)>) -> Vec<RoomGroup> {
     by_file.into_iter().flat_map(|(_, groups)| groups).collect()
 }
@@ -579,75 +486,6 @@ pub(crate) async fn load_room_groups_from_files(
     Ok((composite, tokens, by_file))
 }
 
-/// Load room topology from the durable composite of each file's last
-/// successful publication. `None` means the upgrade baseline has not been
-/// established yet, so callers may retain their legacy startup behavior.
-pub(crate) async fn load_room_panel_map_from_published_files<F>(
-    room_key_words: &[String],
-    hierarchy: RoomHierarchy,
-    match_room_fn: F,
-) -> anyhow::Result<Option<RoomPanelMap>>
-where
-    F: Fn(&str) -> bool,
-{
-    let rows =
-        crate::data_interface::side_effect_pending::SideEffectCompensator::published_file_inputs()
-            .await?;
-    if rows.is_empty() {
-        return Ok(None);
-    }
-    let by_file = load_published_topology_groups_on(&SUL_DB, &rows, hierarchy).await?;
-    Ok(Some(room_panel_map_from_groups(
-        room_panel_groups(&flatten_groups_by_file(by_file), room_key_words),
-        match_room_fn,
-    )))
-}
-
-/// 发布清单选中的那份拓扑，**按文件 dbnum 分好**（`room_published_topology` 一个 dbnum 一行，
-/// 行里的分组就是那个文件的房间树贡献的）。
-///
-/// 保留行 dbnum 是为了「这块面板来自哪个库」有个能说给人听的答案：面板 refno 的头一段是
-/// **refno 空间**的库号（ams7997 里的元素是 24381），与 `watch_dbnums` / 发布清单说的**文件**
-/// 库号不是同一套编号。
-pub(crate) async fn load_published_topology_groups_on(
-    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
-    inputs: &[crate::data_interface::side_effect_pending::PublishedFileInput],
-    hierarchy: RoomHierarchy,
-) -> anyhow::Result<Vec<(u32, Vec<RoomGroup>)>> {
-    #[derive(serde::Deserialize)]
-    struct TopologyRow {
-        dbnum: u32,
-        groups: Vec<RoomGroup>,
-    }
-    let mut expected_dbnums = inputs
-        .iter()
-        .filter(|row| row.db_type.eq_ignore_ascii_case("DESI"))
-        .map(|row| row.dbnum)
-        .collect::<Vec<_>>();
-    expected_dbnums.sort_unstable();
-    let manifest_key = published_topology_manifest_key(inputs, hierarchy);
-    let mut response = db
-        .query(format!(
-            "SELECT dbnum, groups FROM {PUBLISHED_TOPOLOGY_TABLE} \
-             WHERE manifest_key = '{manifest_key}' ORDER BY dbnum ASC;"
-        ))
-        .await?
-        .check()?;
-    let topology_rows: Vec<TopologyRow> = response.take(0)?;
-    let actual_dbnums = topology_rows
-        .iter()
-        .map(|row| row.dbnum)
-        .collect::<Vec<_>>();
-    anyhow::ensure!(
-        actual_dbnums == expected_dbnums,
-        "published room topology {manifest_key} incomplete: expected dbnums {expected_dbnums:?}, got {actual_dbnums:?}"
-    );
-    Ok(topology_rows
-        .into_iter()
-        .map(|row| (row.dbnum, row.groups))
-        .collect())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -659,92 +497,39 @@ mod tests {
         RefnoEnum::from(RefU64::from_two_nums(24384, id))
     }
 
-    fn published_input(
-        dbnum: u32,
-        end_sesno: i32,
-        token: &str,
-    ) -> crate::data_interface::side_effect_pending::PublishedFileInput {
-        crate::data_interface::side_effect_pending::PublishedFileInput {
-            dbnum,
-            db_type: "DESI".into(),
-            end_sesno,
-            commit_token: token.into(),
-            published_version: 99,
+    /// 发布视图退役（ADR-072 D4）：本文件不再有 manifest 合成、不再物化拓扑到库、不再从库
+    /// 里按清单键选拓扑；文件侧分组仍按文件分好（`by_file` 的 dbnum 是**文件**库号）。
+    #[test]
+    fn room_topology_has_no_published_view_and_never_queries_the_database() {
+        let source = include_str!("room_topology.rs");
+        let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
+        for needle in [
+            "SUL_DB",
+            ".query(",
+            "manifest_key",
+            "PUBLISHED_TOPOLOGY_TABLE",
+            "load_published_topology_groups_on",
+            "load_room_panel_map_from_published_files",
+        ] {
+            assert!(
+                !production.contains(needle),
+                "room_topology.rs 生产路径不该再出现 `{needle}`"
+            );
         }
-    }
-
-    #[tokio::test]
-    async fn persisted_topology_is_selected_by_the_complete_file_manifest() {
-        use surrealdb::engine::any::connect;
-
-        let db = connect("mem://").await.expect("mem boots");
-        db.use_ns("room_topology")
-            .use_db("published_manifest")
-            .await
-            .unwrap();
-        let inputs = vec![
-            published_input(8001, 7, "token-b"),
-            published_input(8000, 5, "token-a"),
-        ];
-        let reversed = inputs.iter().cloned().rev().collect::<Vec<_>>();
-        let key = published_topology_manifest_key(&inputs, RoomHierarchy::Hd);
-        assert_eq!(
-            key,
-            published_topology_manifest_key(&reversed, RoomHierarchy::Hd),
-            "清单身份不得依赖查询返回顺序"
-        );
-        assert_ne!(
-            key,
-            published_topology_manifest_key(
-                &[published_input(8000, 6, "token-new"), inputs[0].clone()],
-                RoomHierarchy::Hd,
-            ),
-            "任一文件版本变化必须选择另一份拓扑"
-        );
-
         let first = vec![RoomGroup {
             room: r(1),
             name: "/AREA-R001".into(),
             panels: vec![r(2)],
         }];
-        db.query(format!(
-            "CREATE room_published_topology:a SET manifest_key = '{key}', dbnum = 8000, groups = {};",
-            serde_json::to_string(&first).unwrap()
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        let error = load_published_topology_groups_on(&db, &inputs, RoomHierarchy::Hd)
-            .await
-            .expect_err("缺少一个文件分片必须失败关闭");
-        assert!(
-            error.to_string().contains("expected dbnums [8000, 8001]"),
-            "{error:#}"
-        );
-
         let second = vec![RoomGroup {
             room: r(3),
             name: "/AREA-R002".into(),
             panels: vec![r(4)],
         }];
-        db.query(format!(
-            "CREATE room_published_topology:b SET manifest_key = '{key}', dbnum = 8001, groups = {};",
-            serde_json::to_string(&second).unwrap()
-        ))
-        .await
-        .unwrap()
-        .check()
-        .unwrap();
-        let by_file = load_published_topology_groups_on(&db, &inputs, RoomHierarchy::Hd)
-            .await
-            .unwrap();
         assert_eq!(
-            by_file,
-            vec![(8000, first.clone()), (8001, second.clone())],
-            "行 dbnum 是**文件**库号，要留着——面板 refno 的头一段是 refno 空间的库号，两套编号"
+            flatten_groups_by_file(vec![(8000, first.clone()), (8001, second.clone())]),
+            [first, second].concat()
         );
-        assert_eq!(flatten_groups_by_file(by_file), [first, second].concat());
     }
 
     struct Tree {
@@ -960,17 +745,17 @@ mod tests {
             .split_once("pub(crate) fn room_panel_map_from_groups<F>(")
             .expect("by_mode end")
             .0;
-        let published = by_mode
-            .find("load_room_panel_map_from_published_files(")
-            .expect("已发布文件清单必须优先于实时来源");
-        let files = by_mode
-            .find("load_room_panel_map_from_files(")
-            .expect("实时文件来源必须存在");
-        assert!(published < files, "发布清单必须先于实时来源: {by_mode}");
+        assert!(
+            by_mode.contains("load_room_panel_map_from_files("),
+            "实时文件来源必须存在: {by_mode}"
+        );
+        // 「先看已发布文件清单」那一档随 publish 阶段退役（ADR-072 D4）：数据面只剩文件侧一条读路。
         for forbidden in [
             concat!("direct_read", "_mode"),
             concat!("load_room_panel", "_groups("),
             "active_data_db()",
+            concat!("load_room_panel_map_from_", "published_files("),
+            concat!("published_", "file_inputs"),
         ] {
             assert!(
                 !by_mode.contains(forbidden),

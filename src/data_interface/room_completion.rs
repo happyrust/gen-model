@@ -150,27 +150,30 @@ impl PreparedRoomResult {
         Ok(())
     }
 
-    /// Required input is a durable obligation. The caller holding the memory
-    /// version lock installs it before calculation; CAS rejects an older task
-    /// replacing an obligation created by a newer model or boundary change.
+    /// Required input is a durable obligation, installed before calculation.
+    ///
+    /// 2026-09-10（ADR-072 D4）：这里原先是一道 CAS——比对数据水位与上一版义务，挡的是
+    /// 「另一个任务换了义务，我这份陈旧结果还想接着提交」。同库改成单写者同步写之后
+    /// 这道比对没有对手了（计划 §2.2 房间门那一行），退成普通写；「这一版模型成没成」
+    /// 由任务手里的 `TaskModelOutcome` 在 `room_task` 那道门回答，不在这里回读水位。
     pub(crate) async fn require_on(
         db: &Surreal<Any>,
         dbnum: u32,
-        previous: Option<RoomInputVersion>,
         next: &RoomInputVersion,
     ) -> anyhow::Result<()> {
         ensure!(next.is_valid(), "invalid required room input");
-        db.query("BEGIN TRANSACTION;
-            IF NOT ($watermark.applied_sesno >= $input.model_sesno)
-                { THROW 'room input data watermark missing or behind'; };
-            IF NOT (($watermark.room_required_input ?? NONE) = $previous OR $watermark.room_required_input = $input)
-                { THROW 'room input obligation changed'; };
-            UPDATE $watermark SET room_required_input=$input,
-                state_revision=($watermark.state_revision ?? 0) + 1;
-            COMMIT TRANSACTION;")
-            .bind(("watermark", Thing::from(("dbnum_watermark", surrealdb::sql::Id::Number(dbnum as i64)))))
-            .bind(("previous", previous)).bind(("input", next.clone()))
-            .await?.check().context("register room input obligation")?;
+        db.query(
+            "UPDATE $watermark SET room_required_input=$input,
+            state_revision=($watermark.state_revision ?? 0) + 1;",
+        )
+        .bind((
+            "watermark",
+            Thing::from(("dbnum_watermark", surrealdb::sql::Id::Number(dbnum as i64))),
+        ))
+        .bind(("input", next.clone()))
+        .await?
+        .check()
+        .context("register room input obligation")?;
         super::dbnum_consistency::invalidate_census();
         super::dbnum_state::DbnumState::invalidate_mirrored_on(db, dbnum);
         Ok(())
@@ -180,14 +183,11 @@ impl PreparedRoomResult {
     /// `room_sesno` 挪进任务收尾那一笔（`task_end::commit_task_end_on`），因为房间现在排在
     /// 盖章**之前**算——那一刻 `model_sesno` 还没动，拿它当闸就永远过不去。
     ///
-    /// 挡住陈旧结果的是义务 CAS（`room_required_input = $input`）：另一个任务一旦
-    /// [`PreparedRoomResult::require_on`] 换了义务，这一笔就提交不了。剩下两道是
-    /// 数据水位与房间水位的单调性。
+    /// 三道对手 CAS（数据水位、房间水位单调性、义务比对）随 ADR-072 D4 退役：同库单写者，
+    /// 没有「另一个任务换了义务」这回事。**留下的那一道不是 CAS 而是自检**——批次齐不齐
+    /// 问的是这一笔自己刚 stage 的东西，答错了是本地 bug，不是并发。
     fn commit_sql(&self) -> &'static str {
         "BEGIN TRANSACTION;
-        IF NOT ($watermark.applied_sesno >= $input.model_sesno
-            AND ($watermark.room_sesno ?? 0) <= $input.model_sesno AND $watermark.room_required_input = $input)
-            { THROW 'room completion input changed'; };
         LET $count = array::len((SELECT VALUE id FROM $part_ids WHERE result_version=$version));
         IF $count != $parts { THROW 'room completion has missing result batches'; };
         UPDATE $watermark SET room_result_version=$version, room_input_version=$input,
@@ -288,6 +288,8 @@ mod tests {
                 model: None,
                 rooms: Some(crate::data_interface::task_end::TaskRoomOutcome { ok: true }),
                 info: None,
+                // 这条只验水位那一句，不牵扯写入标记（T1 的 `write_state`）。
+                closes_task: false,
             },
         )
         .await
@@ -311,7 +313,7 @@ mod tests {
     async fn partial_batches_and_transaction_failure_preserve_old_results_and_model_progress() {
         let db = database().await;
         let result = result("rooms-a", BATCH_SIZE + 1);
-        PreparedRoomResult::require_on(&db, 8000, None, &result.input)
+        PreparedRoomResult::require_on(&db, 8000, &result.input)
             .await
             .unwrap();
         result.stage_part_on(&db, 0).await.unwrap();
@@ -347,26 +349,28 @@ mod tests {
         );
     }
 
+    /// 义务 CAS 退役之后（ADR-072 D4）：同库单写者，登记义务是一笔**普通写**——后写的
+    /// 那一版原样落下，先前那一版也不再被库这一层挡住。挡陈旧结果的责任前移到
+    /// `room_task` 那道 `TaskModelOutcome` 门，这里不再有对手判据。
     #[tokio::test]
-    async fn boundary_change_during_calculation_preserves_new_obligation_and_rejects_stale_commit()
-    {
+    async fn the_obligation_is_a_plain_write_with_no_contender_check() {
         let db = database().await;
         let old = result("rooms-a", 1);
         let new = result("rooms-b", 0);
-        PreparedRoomResult::require_on(&db, 8000, None, &old.input)
+        PreparedRoomResult::require_on(&db, 8000, &old.input)
             .await
             .unwrap();
         old.stage_on(&db).await.unwrap();
-        PreparedRoomResult::require_on(&db, 8000, Some(old.input.clone()), &new.input)
+        PreparedRoomResult::require_on(&db, 8000, &new.input)
             .await
             .unwrap();
-        assert!(old.commit_on(&db).await.is_err());
-        assert!(
-            PreparedRoomResult::require_on(&db, 8000, None, &old.input)
-                .await
-                .is_err()
-        );
-        assert_state(&db, 8, "old").await;
+        // 换过义务之后重登记先前那一版不再报错，先前那一版也提交得下去。
+        PreparedRoomResult::require_on(&db, 8000, &old.input)
+            .await
+            .unwrap();
+        old.commit_on(&db).await.unwrap();
+        assert_state(&db, 8, &old.version).await;
+
         new.stage_on(&db).await.unwrap();
         new.commit_on(&db).await.unwrap();
         assert_state(&db, 8, &new.version).await;
@@ -374,20 +378,35 @@ mod tests {
         assert_state(&db, 12, &new.version).await;
     }
 
+    /// 数据水位落后不再是这一层的闸（门前移到任务结果）；留下的那道自检——批次齐不齐
+    /// ——照旧挡得住，它问的是这一笔自己刚 stage 的东西。
     #[tokio::test]
-    async fn missing_or_behind_data_blocks_room_completion() {
-        for mutation in [
-            "UPDATE dbnum_watermark:8000 SET applied_sesno=11;",
-            "DELETE dbnum_watermark:8000;",
-        ] {
-            let db = database().await;
-            let result = result("rooms-a", 0);
-            PreparedRoomResult::require_on(&db, 8000, None, &result.input)
-                .await
-                .unwrap();
-            db.query(mutation).await.unwrap().check().unwrap();
-            assert!(result.commit_on(&db).await.is_err(), "{mutation}");
-        }
+    async fn missing_batches_still_block_but_a_behind_data_watermark_does_not() {
+        let db = database().await;
+        let result = result("rooms-a", BATCH_SIZE + 1);
+        PreparedRoomResult::require_on(&db, 8000, &result.input)
+            .await
+            .unwrap();
+        result.stage_part_on(&db, 0).await.unwrap();
+        assert!(result.commit_on(&db).await.is_err(), "缺批次要挡下");
+
+        db.query("UPDATE dbnum_watermark:8000 SET applied_sesno=11;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        result.stage_on(&db).await.unwrap();
+        result.commit_on(&db).await.unwrap();
+        let mut rows = db
+            .query("RETURN dbnum_watermark:8000.room_result_version;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        assert_eq!(
+            rows.take::<Option<String>>(0).unwrap().as_deref(),
+            Some(result.version.as_str())
+        );
     }
 
     /// 模型水位**自己**不再是房间提交的闸（2026-09-10，ADR-071 D3）。
@@ -400,7 +419,7 @@ mod tests {
     async fn a_model_watermark_that_moved_on_its_own_no_longer_blocks_the_room_commit() {
         let db = database().await;
         let result = result("rooms-a", 0);
-        PreparedRoomResult::require_on(&db, 8000, None, &result.input)
+        PreparedRoomResult::require_on(&db, 8000, &result.input)
             .await
             .unwrap();
         db.query("UPDATE dbnum_watermark:8000 SET model_sesno=13, applied_sesno=13;")
@@ -422,7 +441,7 @@ mod tests {
             .unwrap();
         let mut before = input("rooms-a");
         before.model_sesno = 7;
-        PreparedRoomResult::require_on(&db, 8001, None, &before)
+        PreparedRoomResult::require_on(&db, 8001, &before)
             .await
             .unwrap();
         let first = PreparedRoomResult::new(8001, before.clone(), &[]).unwrap();
@@ -430,7 +449,7 @@ mod tests {
         first.commit_on(&db).await.unwrap();
         let mut after = before.clone();
         after.room_definition_version = "rooms-b".into();
-        PreparedRoomResult::require_on(&db, 8001, Some(before), &after)
+        PreparedRoomResult::require_on(&db, 8001, &after)
             .await
             .unwrap();
         let second = PreparedRoomResult::new(8001, after.clone(), &[]).unwrap();

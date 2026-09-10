@@ -29,8 +29,6 @@ use aios_core::{RefnoEnum, SUL_DB};
 use glam::Vec3;
 use parry3d::bounding_volume::Aabb;
 
-use crate::fast_model::room_topology::RoomHierarchy;
-
 /// 夹具占用的库号。沿用仓库既有的保留段约定（见 `model_refresh.rs` 的 live 用例）。
 pub const FIXTURE_DBNUM: u64 = 4000000001;
 
@@ -228,7 +226,7 @@ pub async fn create_room_fixture(mesh_dir: &Path) -> anyhow::Result<()> {
     }
 
     // 发布视图退役之后（ADR-072 D4 / 计划 R5）这里不再「把合成层级发布一遍」：
-    // `room_published_topology` / `published_file_input` 两张表都退了，房间分组由
+    // 发布拓扑快照表与发布清单表都退了，房间分组由
     // `room_model` 直接从 `pe + pe_owner` 实时行读（`array::flatten([id<-pe_owner<-pe, …])[?noun='PANE']`）
     // ——而上面那段 SQL 建的正是这份实时层级（FRMW 房间 + CWALL 面板 + pe_owner 边）。
     // 少了那一步，这个夹具跑的反而更像生产：只有一份几何、一条读路。
@@ -280,8 +278,6 @@ pub async fn drop_room_fixture(mesh_dir: &Path) -> anyhow::Result<()> {
         format!("pe:{}", refno(2)),
         format!("pe:{}", refno(4)),
         format!("trans:zzfx_id"),
-        format!("published_file_input:{}", FIXTURE_DBNUM),
-        "room_published_topology:fixture".to_string(),
     ];
     for body in bodies() {
         let geo_hash = body.geo_hash();
