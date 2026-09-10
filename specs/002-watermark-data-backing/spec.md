@@ -129,7 +129,8 @@
 - **FR-010**：清库关系与区间阶段 MUST 可独立幂等重放；统计/持久队列清理、spatial epoch 与水位清零 MUST 位于同一个显式 SurrealDB 事务，水位更新置尾。任一元数据语句失败 MUST 整体回滚、记批次 Failed，下一轮 MUST 能幂等重放。
 - **FR-010a**：初始化批次 MUST 只完成数据、水位与 durable 模型工作登记；当数据队列仍有初始化任务时 MUST NOT 执行模型生成。数据队列清空后 MUST 由统一空闲轮分页消费模型工作；稳态增量窗口的模型提交语义保持不变。
 - **FR-011**：`TypeChanged` / `Duplicate` / `Missing` / `ForeignProject` MUST 保持阻断语义，MUST NOT 触发自动清库；「哪些异常转重建」MUST 由 `FileAnomaly` 上的单一谓词（`requires_reinit`）裁决。
-- **FR-012**：`watermark_realign` 配置键、`AIOS_WATERMARK_REALIGN` 环境变量、`POST /api/v1/dbnums/{dbnum}/realign` 端点与 Python 绑定 `aios_db.sync.realign` MUST 移除；`DELETE /api/v1/dbnums/{dbnum}/data` 与 `…/data/above/{watermark}` 两个运维端点 MUST 保留且行为不变。
+- **FR-012**：`watermark_realign` 配置键、`AIOS_WATERMARK_REALIGN` 环境变量、`POST /api/v1/dbnums/{dbnum}/realign` 端点与 Python 绑定 `aios_db.sync.realign` MUST 移除；`DELETE /api/v1/dbnums/{dbnum}/data` 与 `GET /api/v1/dbnums/{dbnum}/data/above/{watermark}` 两个运维端点 MUST 保留且行为不变。
+  - **FR-012a**（2026-09-10，决策 d-747 修订本条）：同一路径的 **`DELETE …/data/above/{watermark}` 半边随「恢复即整库重初始化」退役**，MUST 移除；本条原文里「两个运维端点」中的 `…/data/above/{watermark}` 自此**只指 GET 半边**。GET 只做 SELECT，是清库之后自证「真的干净了」的唯一现成只读工具，因此保留；削库一律改走 `POST /api/v1/dbnums/{dbnum}/data/reinitialize`——它排一条整库重建批次，清库在 worker 冻结点做，与直接按水位删残留不是一回事。
 - **FR-013**：回退重建 MUST 在扫描日志、worker 日志与批次回执三处可见（含删除规模）；只出现在日志、回执里看不见的报告不满足本条。
 - **FR-014**：预览的 `blocked` / `initialization_required` MUST 与执行体的路由结论一致；回退行 MUST 保留 `anomaly` 证据（判据两端与保存时刻）。
 - **FR-015**：以上每条修复 MUST 附带一条回归测试，且该测试在回退到旧实现时 MUST 失败。

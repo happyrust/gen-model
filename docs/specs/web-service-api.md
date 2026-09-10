@@ -568,11 +568,17 @@ plant-ui 的单根调用零影响。
   **共八条路径，本服务从来没有实现过**（`rg -n "api/room" src web` = **0**）。它们经
   `getBackendApiBaseUrl()` 打的是另一套旧后端，与本规格无关：房间退役既不影响它们，
   本规格也不为它们背书。它们今天在本服务上就是 404，退役后仍是 404。
-- `room_relate` / `room_panel_relate` 两张边与 `fn::room_code` / `fn::room_num_of` 一族
-  SurrealDB 函数是**数据库层**契约，不在本规格的对外面上。plant-ui 直连 `SUL_DB` 读它们
-  （`crates/plant-ui-data/src/room.rs` 20 命中、`crates/plant-ui/src/room_browser.rs`、
-  `resource/surreal/*.surql` 9 命中），**不经 HTTP**。是否随本次一并删表尚未拍板，
-  本节不作决定，也不因为「HTTP 面上看不见」就当它没有消费者。
+- `room_relate` / `room_panel_relate` 两张边，与 `fn::room_code`（hd / hh 两版）/
+  `fn::room_relate_of` / `fn::room_num_of` 一族 SurrealDB 函数，是**数据库层**契约，
+  不在本规格的对外面上。**已拍板：库层资源原样保留**——函数定义、
+  `resource/surreal/get_room_nodes.surql` 与 `embedded_surql` 的灌入清单全部照旧，
+  `src/api/room_code.rs`、`src/plug_in/room_setting.rs` 同理不动。
+  但实话要说全：**这两张边从此没有写者**。plant-ui 直连 `SUL_DB` 读它们（不经 HTTP：
+  `crates/plant-ui-data/src/room.rs` 20 命中、`crates/plant-ui/src/room_browser.rs`、
+  `resource/surreal/*.surql` 9 命中），退役后这些查询**不报错，但对新库永远返空**
+  ——老库里的存量边还在，新库一条也不会再写。「查得到零条」与「这个能力没有了」
+  在库层分不开，这是保留资源换来的代价。
+  服务侧的 `e3d.room.lookup` 不适用本条：它调的 `room_delta` 没了，留不住。
 
 复核命令（2026-09-10 实测，工作目录 `D:\work\plant-code\old`）：
 
@@ -609,8 +615,14 @@ rg -n  --no-heading "api/room"                     gen-model-refactor/src gen-mo
   把回退库排成整库重建批次，worker 冻结点复核后 `wipe_dbnum_for_reinit` 清库并按
   首次导入重新解析，端点没有剩余职责（服役期间无对外消费者，plant-ui 未接入）。
 - 调用该路径现在返回 404。手工兜底保留同家族的 `DELETE /dbnums/{dbnum}/data`
-  （整库快删）与 `DELETE /dbnums/{dbnum}/data/above/{watermark}`（残留清理），
-  操作契约（暂停队列 → 等该库空闲 → 精确 confirm）不变。
+  （整库快删），操作契约（暂停队列 → 等该库空闲 → 精确 confirm）不变。
+- **`DELETE /dbnums/{dbnum}/data/above/{watermark}`（按水位删残留）随「恢复即整库
+  重初始化」退役**（2026-09-10，决策 d-747）：削库一律改走
+  `POST /dbnums/{dbnum}/data/reinitialize`——它排一条整库重建批次，清库在 worker
+  冻结点做，与「按水位删掉一段」不是一回事，别当同义替换。
+  **同一路径的 `GET` 半边保留**：它只 SELECT，是清库之后自证「真的干净了」的唯一
+  现成只读工具。同一句话的规格出处见 `specs/002-watermark-data-backing/spec.md`
+  的 FR-012 / FR-012a。
 
 ### 4.10 `GET /api/v1/tree/{roots,children,ancestors}`、`GET /api/v1/search` — 直读模型树
 - 数据源是 e3d-io 直读（`DirectTreeService` + 进程级骨架），**不查 `pe` / `pe_owner`**：
@@ -838,7 +850,9 @@ tokio/serde/serde_json 均已存在，无其他新增。
      `400 bad_request`。**请按「这个能力没有了」提示，不要按「查不到房间」提示**——
      服务端刻意不回空 `memberships`，就是不想让「面没了」被读成「这个构件不在任何房间」。
    - 你**直连 SurrealDB** 读的 `room_relate` / `room_panel_relate` / `fn::room_code`
-     （房间浏览器、材料表 surql）不在本规格管辖内，另行拍板，不随本节退役。
+     （房间浏览器、材料表 surql）**不随本节退役，库层资源原样保留**——但它们从此
+     **没有写者**：老库的存量边还在，新库永远查到零条，而且不会报错。房间浏览器因此
+     会悄悄变成一个空面板，不是一个坏面板。要不要就此摘掉它，是你们自己的取舍。
 
 `DbnumStatus` 上少的那一枚是 `room_sesno`（连同 `room_sesno_time` 等五列）：
 水位从三枚回到两枚，`applied_sesno` / `model_sesno` 语义不变。**少的格别退回默认值再画**
