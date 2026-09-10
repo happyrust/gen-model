@@ -665,19 +665,14 @@ fn render_delete_phases(
         }
         ranges.push(format!("DELETE {};", range_of("pe", ref0)));
     }
+    // 第二条异步账的三张表（模型意图队列 / 恢复记录 / 副作用队列）不再逐库清：它们整体退役
+    // （ADR-072 D5），随 `retire_publish_run_tables` 的 `REMOVE TABLE IF EXISTS` 一次删掉，
+    // 清库路上再点名它们只是给退役表续命。
     let mut metadata = vec![
-        format!("DELETE model_update_pending WHERE dbnum = {dbnum};"),
-        format!("DELETE increment_update_attempt WHERE dbnum = {dbnum};"),
-        format!("DELETE incr_side_effect_pending WHERE dbnum = {dbnum};"),
         format!("DELETE dbnum_info_table WHERE dbnum = {dbnum};"),
         format!("DELETE dbnum_stats_state:{dbnum};"),
     ];
-    if watermark == WatermarkDisposal::RestartInitializationData {
-        metadata.retain(|sql| {
-            !sql.starts_with("DELETE model_update_pending")
-                && !sql.starts_with("DELETE incr_side_effect_pending")
-        });
-    } else {
+    if watermark != WatermarkDisposal::RestartInitializationData {
         // 凭证行 `gen_root:<ref0>_<ref1>` 带 dbnum 却不在 Ref0 区间清单里（区间只圈几何行）。
         // 整库 wipe / 删库之后把它留下，重排的初始化会读到「这根已经生成到 T」的旧凭证——
         // ADR-072 §4.3-1/-3：回退到 0 就是凭证全退（初始化在第 k 块 kill → wipe → 重排的
