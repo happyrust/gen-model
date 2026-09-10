@@ -345,27 +345,49 @@ const MODEL_FACE_TABLES: &[&str] = &["inst_relate", "inst_info", "tubi_relate"];
 /// 才会留下够不着的行，那一档由下一窗覆盖，或人工走
 /// `DELETE /dbnums/{dbnum}/data/above/{watermark}`。文件被换回旧版本那一档不走这条路——
 /// 它是 `Reinitialize`，整库 wipe。
+///
+/// **意图决定退哪几面**（t-664 ⑥，ADR-072 D3 的适用范围）：`ApplyWindow` 写过三面，三面都退、
+/// 三水位都 min 到 S；`ModelOnly` 的 S 是模型水位，这类任务**没写过数据面**——退数据面等于把
+/// 上一窗已经收口的 (S, applied] 数据行删掉、而重排的 ModelOnly 又不补数据，库就此缺一段
+/// （`direct_window_replay_parity::a_model_only_task_killed_in_a_model_block_…` 钉的正是这一处）
+/// ——所以只退模型面 + 房间面、`model_sesno` / `room_sesno` 退到 S，`applied_sesno` / `sesno`
+/// 不动；`RoomOnly` 的 S 是房间水位（可能低于模型水位），只退房间面 + `room_sesno`。
+/// `Initialize` / `Reinitialize` 不走这里（整库 wipe）。
 pub(crate) fn render_rollback(
     dbnum: u32,
     target_watermark: i32,
     noun_tables: &[String],
+    intent: crate::data_interface::write_state::WriteIntent,
 ) -> RollbackRender {
+    use crate::data_interface::write_state::WriteIntent;
+    let (data_face, model_face) = match intent {
+        WriteIntent::ModelOnly => (false, true),
+        WriteIntent::RoomOnly => (false, false),
+        WriteIntent::ApplyWindow | WriteIntent::Initialize | WriteIntent::Reinitialize => {
+            (true, true)
+        }
+    };
+
     let mut deletes = Vec::with_capacity(noun_tables.len() + MODEL_FACE_TABLES.len() + 5);
-    for table in noun_tables {
-        deletes.push(format!(
-            "DELETE {table} WHERE dbnum = {dbnum} AND sesno > {target_watermark};"
-        ));
+    if data_face {
+        for table in noun_tables {
+            deletes.push(format!(
+                "DELETE {table} WHERE dbnum = {dbnum} AND sesno > {target_watermark};"
+            ));
+        }
     }
     // `pe` 行不在这张清单里（见本函数文档）。`ATT_UDA` 已经在 `noun_tables` 里——
     // 它同样是全大写表名，`noun_tables_on` 的 `INFO FOR DB` 过滤天然圈到它。
-    for table in MODEL_FACE_TABLES {
+    if model_face {
+        for table in MODEL_FACE_TABLES {
+            deletes.push(format!(
+                "DELETE {table} WHERE dbnum = {dbnum} AND direct_model.sesno > {target_watermark};"
+            ));
+        }
         deletes.push(format!(
-            "DELETE {table} WHERE dbnum = {dbnum} AND direct_model.sesno > {target_watermark};"
+            "DELETE gen_root WHERE dbnum = {dbnum} AND source_end_sesno > {target_watermark};"
         ));
     }
-    deletes.push(format!(
-        "DELETE gen_root WHERE dbnum = {dbnum} AND source_end_sesno > {target_watermark};"
-    ));
     // 房间面整库删（房间本来就是整库重算，边上不带 sesno）。谓词落在 `in` 而不是 `dbnum`：
     // `room_model::render_room_edge_row` / `render_room_panel_relate_write` 写出的边只有
     // `in / out / room_num / …`，行上根本没有 `dbnum` 列；`in` 是本库的面板 / 房间 `pe` 行，
@@ -375,17 +397,29 @@ pub(crate) fn render_rollback(
         "DELETE room_panel_relate WHERE in.dbnum = {dbnum};"
     ));
 
+    // 水位那一句：退哪几面就 min 哪几枚，都是 min 不是赋值——已经更低的水位不许被抬上来；
+    // `state_revision` 前进，读者据它知道这一格换过代。
+    let mut sets = Vec::with_capacity(5);
+    if data_face {
+        sets.push(format!(
+            "applied_sesno = math::min([applied_sesno ?: 0, {target_watermark}])"
+        ));
+    }
+    if model_face {
+        sets.push(format!(
+            "model_sesno = math::min([model_sesno ?: 0, {target_watermark}])"
+        ));
+    }
+    sets.push(format!(
+        "room_sesno = math::min([room_sesno ?: 0, {target_watermark}])"
+    ));
+    if data_face {
+        sets.push(format!("sesno = {target_watermark}"));
+    }
+    sets.push("state_revision = (state_revision ?? 0) + 1".to_owned());
+    sets.push("updated_at = time::now()".to_owned());
     let control = vec![
-        // 三枚水位一起退回 S（ADR-072 D3 崩溃不分面）；`state_revision` 前进，读者据它
-        // 知道这一格换过代。
-        format!(
-            "UPDATE dbnum_watermark:{dbnum} SET \
-             applied_sesno = math::min([applied_sesno ?: 0, {target_watermark}]), \
-             model_sesno = math::min([model_sesno ?: 0, {target_watermark}]), \
-             room_sesno = math::min([room_sesno ?: 0, {target_watermark}]), \
-             sesno = {target_watermark}, state_revision = (state_revision ?? 0) + 1, \
-             updated_at = time::now();"
-        ),
+        format!("UPDATE dbnum_watermark:{dbnum} SET {};", sets.join(", ")),
         // 回退删掉了 inst_relate / room_relate 行：epoch 不递增的话，重启会按指纹相等
         // 复用一棵还留着被删构件包围盒的树（ADR-010 D4 的幽灵形态）。
         crate::fast_model::aabb_tree::render_spatial_epoch_bump(),
@@ -556,7 +590,7 @@ pub(crate) async fn rollback_to_watermark_on(
         });
     }
     let noun_tables = noun_tables_on(db).await?;
-    let render = render_rollback(dbnum, target_watermark, &noun_tables);
+    let render = render_rollback(dbnum, target_watermark, &noun_tables, intent);
     let batches = chunk_into_transactions(
         &render.deletes,
         crate::data_interface::tx_limits::data_tx_limits(),
@@ -894,6 +928,7 @@ pub(crate) async fn wipe_dbnum_rows_on(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::data_interface::write_state::WriteIntent;
 
     #[test]
     fn renders_ref0_ranges_and_keeps_metadata_last() {
@@ -1148,8 +1183,66 @@ mod tests {
             .map(|n| (*n).to_string())
             .chain(std::iter::once("ATT_UDA".to_string()))
             .collect::<Vec<_>>();
-        let render = render_rollback(dbnum, target, &nouns);
+        let render = render_rollback(dbnum, target, &nouns, WriteIntent::ApplyWindow);
         [render.deletes, render.control].concat().join("\n")
+    }
+
+    /// t-664 ⑥：ModelOnly 的 S 是模型水位，这类任务没写过数据面——回退只退模型面 + 房间面，
+    /// `applied_sesno` / `sesno` 与 noun 行一个都不动，否则上一窗已收口的 (S, applied] 数据行被删、
+    /// 重排的 ModelOnly 又不补数据。RoomOnly 更窄：只退房间面 + `room_sesno`。
+    #[test]
+    fn a_model_only_or_room_only_rollback_leaves_the_data_face_alone() {
+        let nouns: Vec<String> = vec!["ATT_UDA".into(), "EQUI".into()];
+        let model_only = render_rollback(7997, 41, &nouns, WriteIntent::ModelOnly);
+        let sql = [model_only.deletes.clone(), model_only.control.clone()]
+            .concat()
+            .join("\n");
+        assert!(
+            !sql.contains("DELETE EQUI") && !sql.contains("DELETE ATT_UDA"),
+            "ModelOnly 不删数据面: {sql}"
+        );
+        for table in MODEL_FACE_TABLES {
+            assert!(
+                sql.contains(&format!(
+                    "DELETE {table} WHERE dbnum = 7997 AND direct_model.sesno > 41;"
+                )),
+                "ModelOnly 仍退模型面 {table}: {sql}"
+            );
+        }
+        assert!(sql.contains("DELETE gen_root WHERE dbnum = 7997 AND source_end_sesno > 41;"));
+        assert!(sql.contains("DELETE room_relate WHERE in.dbnum = 7997;"));
+        let watermark = &model_only.control[0];
+        assert!(
+            !watermark.contains("applied_sesno") && !watermark.contains(" sesno ="),
+            "ModelOnly 不动数据水位: {watermark}"
+        );
+        assert!(watermark.contains("model_sesno = math::min([model_sesno ?: 0, 41])"));
+        assert!(watermark.contains("room_sesno = math::min([room_sesno ?: 0, 41])"));
+        assert!(watermark.contains("state_revision = (state_revision ?? 0) + 1"));
+        assert_eq!(model_only.control.last().unwrap(), "DELETE dbnum_write_state:7997;");
+
+        let room_only = render_rollback(7997, 41, &nouns, WriteIntent::RoomOnly);
+        let sql = [room_only.deletes.clone(), room_only.control.clone()]
+            .concat()
+            .join("\n");
+        assert!(
+            !sql.contains("DELETE EQUI") && !sql.contains("direct_model.sesno") && !sql.contains("gen_root"),
+            "RoomOnly 只退房间面: {sql}"
+        );
+        assert!(sql.contains("DELETE room_relate WHERE in.dbnum = 7997;"));
+        assert!(sql.contains("DELETE room_panel_relate WHERE in.dbnum = 7997;"));
+        let watermark = &room_only.control[0];
+        assert!(
+            !watermark.contains("applied_sesno") && !watermark.contains("model_sesno"),
+            "RoomOnly 只退房间水位: {watermark}"
+        );
+        assert!(watermark.contains("room_sesno = math::min([room_sesno ?: 0, 41])"));
+        // 三种意图的 SQL 仍然一句 SELECT 都没有（W3）。
+        for intent in [WriteIntent::ApplyWindow, WriteIntent::ModelOnly, WriteIntent::RoomOnly] {
+            let render = render_rollback(7997, 41, &nouns, intent);
+            let sql = [render.deletes, render.control].concat().join("\n");
+            assert!(!sql.contains("SELECT"), "{intent:?}: {sql}");
+        }
     }
 
     /// ADR-072 W3 的源码钉：回退全部是按 `(dbnum, sesno)` 的谓词 `DELETE`，一句 `SELECT`
@@ -1174,6 +1267,7 @@ mod tests {
             7997,
             41,
             &["ATT_UDA".into(), "EQUI".into(), "PANE".into()],
+            WriteIntent::ApplyWindow,
         );
         let sql = [render.deletes.clone(), render.control.clone()]
             .concat()
@@ -1235,7 +1329,7 @@ mod tests {
         let nouns = (0..300)
             .map(|index| format!("N{index}"))
             .collect::<Vec<_>>();
-        let render = render_rollback(7997, 41, &nouns);
+        let render = render_rollback(7997, 41, &nouns, WriteIntent::ApplyWindow);
         let roomy = chunk_into_transactions(
             &render.deletes,
             crate::data_interface::tx_limits::DataTxLimits::default(),

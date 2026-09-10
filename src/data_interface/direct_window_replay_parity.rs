@@ -1353,9 +1353,11 @@ async fn an_apply_window_task_killed_at_any_step_rolls_back_to_s_and_reruns_to_t
 
 /// ModelOnly：数据已经在 T、模型停在 S 的库上跑一个只写模型的任务，在模型第 k 块 kill。
 ///
-/// 回退按标记记的 S = 模型水位走，D3「不分面」：数据水位也退回 S、`sesno > S` 的 noun 行一并
-/// 删掉——所以重跑必须是**整窗口** S→T（数据 + 模型 + 收尾），只补模型那一半补不回数据面。
-/// 这条把这个依赖钉成断言：回退之后数据面确实空了一段，整窗口重跑之后逐表相等。
+/// 回退按标记记的 S = 模型水位走，但**不动数据面**（t-664 ⑥，`fast_delete::render_rollback`）：
+/// 这类任务没写过数据，退数据面只会把上一窗已收口的 (S, applied] 数据行删掉、而重排的 ModelOnly
+/// 又不补数据。所以回退只删 `direct_model.sesno > S` 的模型行、`source_end_sesno > S` 的凭证、
+/// 整库房间边，`model_sesno` / `room_sesno` 退到 S、`applied_sesno` 原地不动；重跑就是同意图的
+/// ModelOnly S→T（模型 + 房间 + 收尾），终态与一次成功逐表相等。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_model_only_task_killed_in_a_model_block_rolls_back_to_the_model_watermark_and_reruns() {
     use crate::data_interface::fast_delete::rollback_to_watermark_on;
@@ -1392,7 +1394,11 @@ async fn a_model_only_task_killed_in_a_model_block_rolls_back_to_the_model_water
     run_steps(&clean, &model_only).await;
     let expected = snapshot_data_tables(&clean).await.expect("clean snapshot");
 
-    let full_window = apply_window_steps(&f);
+    // 数据面在崩溃前后都该原样：拿一份「数据在 T、还没跑模型」的快照当对照。
+    let data_only = snapshot_data_tables(&data_at_t("model_only_data_only").await)
+        .await
+        .expect("data-only snapshot");
+
     for killed_after in 1..model_only.len() {
         let context = format!("model-only kill after {} step(s)", killed_after);
         let db = data_at_t(&format!("model_only_crash_{killed_after}")).await;
@@ -1406,22 +1412,34 @@ async fn a_model_only_task_killed_in_a_model_block_rolls_back_to_the_model_water
         assert_eq!(
             watermark_triple(&db).await,
             Some(WatermarkTriple {
-                applied_sesno: Some(BASE_SESNO),
+                applied_sesno: Some(END_SESNO),
                 model_sesno: Some(BASE_SESNO),
                 room_sesno: Some(BASE_SESNO),
             }),
-            "{context}: 数据水位也退回 S（D3 不分面）"
+            "{context}: 模型 / 房间水位退回 S，数据水位原地不动"
         );
-        let nouns_above_s = ids(
-            &db,
-            format!("SELECT VALUE record::id(id) FROM EQUI WHERE dbnum = {DBNUM} AND sesno > {BASE_SESNO};"),
-        )
-        .await;
-        assert!(
-            nouns_above_s.is_empty(),
-            "{context}: 数据面 sesno > S 的 noun 行随回退消失——重跑必须补数据，不能只补模型 {nouns_above_s:?}"
-        );
+        // 数据面一行不少、模型面 / 房间面回到「还没跑模型」那一刻。被删空的表还留着表定义，
+        // 对照库里则从没建过——「不存在」与「空」在这里是一回事。
+        let after_rollback = snapshot_data_tables(&db).await.expect("post-rollback snapshot");
+        for (table, rows) in &data_only {
+            assert_eq!(
+                after_rollback.get(table),
+                Some(rows),
+                "{context}: 回退不得动 {table}（数据面）"
+            );
+        }
+        for (table, rows) in &after_rollback {
+            if table == "spatial_epoch" || data_only.contains_key(table) {
+                continue;
+            }
+            // 空表的序列化形态是 `surrealdb::Value::Array([])`。
+            assert!(
+                rows == "[]" || rows == "{\"Array\":[]}",
+                "{context}: 回退之后 {table} 必须清空: {rows}"
+            );
+        }
 
+        // 重排同意图：ModelOnly S→T。
         apply_all(
             &db,
             &[render_mark_writing(
@@ -1433,7 +1451,7 @@ async fn a_model_only_task_killed_in_a_model_block_rolls_back_to_the_model_water
         )
         .await
         .expect("re-mark writing");
-        run_steps(&db, &full_window).await;
+        run_steps(&db, &model_only).await;
         assert_converged(&db, &expected, BASE_SESNO, WriteIntent::ModelOnly, &context).await;
     }
 }
