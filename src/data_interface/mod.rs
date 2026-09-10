@@ -2,6 +2,8 @@
 pub mod cata_dependency;
 pub mod db_model;
 pub mod dbnum_stats;
+/// PE 写事务的包装（`BEGIN / COMMIT`、上限、切块、执行；原 `dbnum_stats`，ADR-071 D6 / S7 搬出）。
+pub mod pe_batch;
 /// 元素数据行的批量渲染器：先删后插、每表一条 `INSERT IGNORE`（plan 2026-09-06 §3 D1/D2）。
 /// rocksdb 形态下基线与增量唯一的写法出口。
 pub mod element_batch;
@@ -59,6 +61,15 @@ pub mod db_file_header;
 pub mod frozen_source;
 pub(crate) mod model_completion;
 pub(crate) mod room_completion;
+pub(crate) mod room_delta;
+
+/// dbnum 任务收尾的一笔控制面事务：模型 / 房间水位 + Ref0 统计，事实全来自任务内存
+/// （ADR-071 D3 / D6）。
+pub(crate) mod task_end;
+
+/// 一个 dbnum 任务这一版攒下的副作用集合（空间刷新 / 删除、房间清边）——内存里的那本，
+/// 替掉「文件轮次」那一行的写进去又读回来（ADR-071 D1）。
+pub(crate) mod task_effects;
 
 /// e3d-io 净窗口收集器：数据面增量窗口的默认底座（替代 old-pdms-io `net_window`）。
 pub mod e3d_collector;
@@ -88,17 +99,31 @@ pub mod model_read_route;
 /// Persistent project/namespace/data-face ownership marker for data-plane rows.
 pub mod data_face_signature;
 
+/// 机器级写者锁：按端点 + namespace + database 一台库只许一个写者（2026-09-10 数据窗口计划 §2）。
+pub mod database_writer_lock;
+
 pub mod fast_delete;
 
 pub mod manual_update;
 
 pub mod mdb_membership;
 
+/// SHA-256 摘要（原 `model_publish_queue::digest`，ADR-071 S7 搬出）。
+pub mod digest;
 /// 本 MDB 的元素骨架（noun + owner + ref0 归属），进程级常驻，启动时从 e3d-io 预热。
 /// 属性不在里面——那一档实测 1.29 GiB，见模块头。
 pub mod mdb_memory_store;
 pub mod mirror_spool;
+/// `gen_root` 凭证的只读取数（凭证命中 / 启动下限 / 模型门 / 目录落款；原 `model_update_pending`，
+/// ADR-071 S7 搬出）。
+pub mod model_coverage;
+/// 只剩根发布信封；随文件轮次那一刀（ADR-071 S3 后半）整目录删。
 pub mod model_publish_queue;
+/// Ref0 统计快照的生产者：目标索引 `DbSet@T` 按 Ref0 数活元素（ADR-071 D6）。
+pub mod ref0_snapshot;
+/// 数据窗口的内存产物 + 同步落库口（原 `model_publish_queue/{structured_data_sink,
+/// increment_window_artifact}.rs`，ADR-071 S7 搬出）。
+pub mod window_landing;
 
 pub mod update_scope;
 
@@ -170,6 +195,20 @@ pub mod cata_cascade_window;
 /// `DB_MDB::findElements` 逐库点查文件自带的反向引用表，不读 `ref_rev`
 /// （2026-09-06 计划 P3；共识 d-635 / d-665）。文件侧纯函数，不碰库。
 pub mod reverse_reference;
+
+/// 数据窗口的崩溃恢复记录（`increment_update_attempt`）与收口尾事务。ADR-065 D3 判
+/// `model_update_pending` 整体退役时点名**保留**的正是这两样——它们是数据面的，不是
+/// 模型欠账；S5a 把它们从那个文件里搬出来，好让 T5 退表不必连着水位一起删。
+pub mod increment_tail;
+
+/// 模型水位（ADR-060）：探针、Task 收尾盖章、对账。ADR-065 D2 让「欠什么」只由两枚水位
+/// 回答，同一份 ADR 的 D3 又判 `model_update_pending` 退役——退的是队列表，水位是留下的
+/// 那一半。S5a 把它搬出来，免得 T5 删表时连着水位一起删。
+pub mod model_watermark;
+
+/// 启动期模型覆盖复核：凭证 ↔ 文件最新会话对齐，缺口开退化窗口（ADR-058 D4）。ADR-050
+/// 清空队列之后「这个库欠到哪」只剩 `gen_root` 凭证一个说法，这里就是读那个说法的地方。
+pub mod startup_reconcile;
 
 pub mod model_update_pending;
 

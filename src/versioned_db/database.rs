@@ -145,71 +145,44 @@ mod pe_stat_row_tests {
     }
 }
 
-/// 显式修复统计；重建和版本标记同事务提交，保留历史 Ref0 及最大编号。
-/// 常态初始化/增量由 dbnum_stats 的批次事务维护，不调用全量重建。
+/// 显式修复统计（`bin/rebuild_dbnum_stats` / 探针）：重建和版本标记同事务提交，保留历史 Ref0 及
+/// 最大编号，并补上文件身份。常态下这张表由 dbnum 任务收尾从目标索引序列化（ADR-071 D6），
+/// 重建口径同为活元素（`!deleted`）——所以不再拿「pe 行数（含墓碑）」对账收敛，那两个数本就不必相等。
+/// 返回本库活的 pe 行数。
 pub async fn rebuild_dbnum_info_from_pe(
     dbnum: u32,
     file_name: &str,
     db_type: &str,
 ) -> anyhow::Result<usize> {
+    #[derive(Deserialize)]
+    struct PeCountRow {
+        count: usize,
+    }
     let sql = format!(
         "BEGIN TRANSACTION;\n{}\n{}\nCOMMIT TRANSACTION;",
         crate::data_interface::dbnum_stats::rebuild_body(dbnum),
         stamp_dbnum_info_identity_sql(dbnum, file_name, db_type)
     );
-    crate::data_interface::dbnum_stats::execute_on(&SUL_DB, &sql).await?;
-    let (pe_count, _, info_count) = dbnum_stat_totals(dbnum).await?;
-    anyhow::ensure!(
-        pe_count == info_count,
-        "PE statistics rebuild did not converge"
-    );
-    Ok(pe_count)
-}
-
-/// `dbnum` 的两侧计数：pe 实际行数、`dbnum_info_table` 的统计行数与 count 之和。
-///
-/// 两条都是索引支撑的服务端聚合（1112 实测各 20ms 级），跟按 Ref0 分组那条
-/// 逐行 `string::split` 的语句不是一个量级——所以「要不要重建」值得先问一次。
-pub(crate) async fn dbnum_stat_totals(dbnum: u32) -> anyhow::Result<(usize, usize, usize)> {
-    #[derive(Deserialize)]
-    struct PeCountRow {
-        count: usize,
-    }
-    #[derive(Deserialize)]
-    struct InfoTotalRow {
-        row_count: usize,
-        total: Option<usize>,
-    }
-
+    crate::data_interface::pe_batch::execute_on(&SUL_DB, &sql).await?;
     let mut response = SUL_DB
         .query(format!(
-            "SELECT count() AS count FROM pe WHERE dbnum = {dbnum} GROUP ALL; \
-             SELECT count() AS row_count, math::sum(count) AS total \
-             FROM dbnum_info_table WHERE dbnum = {dbnum} GROUP ALL;"
+            "SELECT count() AS count FROM pe WHERE dbnum = {dbnum} AND !deleted GROUP ALL;"
         ))
         .await
-        .map_err(|error| anyhow::anyhow!("read stat totals dbnum={dbnum} failed: {error}"))?
+        .map_err(|error| anyhow::anyhow!("read live PE count dbnum={dbnum} failed: {error}"))?
         .check()
         .map_err(|error| {
-            anyhow::anyhow!("read stat totals dbnum={dbnum} statement failed: {error}")
+            anyhow::anyhow!("read live PE count dbnum={dbnum} statement failed: {error}")
         })?;
-    let pe_rows: Vec<PeCountRow> = response
+    let rows: Vec<PeCountRow> = response
         .take(0)
-        .map_err(|error| anyhow::anyhow!("decode PE count dbnum={dbnum} failed: {error}"))?;
-    let info_rows: Vec<InfoTotalRow> = response
-        .take(1)
-        .map_err(|error| anyhow::anyhow!("decode stats total dbnum={dbnum} failed: {error}"))?;
-    let pe_count = pe_rows.first().map(|row| row.count).unwrap_or_default();
-    let (info_rows, info_count) = info_rows
-        .first()
-        .map(|row| (row.row_count, row.total.unwrap_or_default()))
-        .unwrap_or_default();
-    Ok((pe_count, info_rows, info_count))
+        .map_err(|error| anyhow::anyhow!("decode live PE count dbnum={dbnum} failed: {error}"))?;
+    Ok(rows.first().map(|row| row.count).unwrap_or_default())
 }
 
-/// Remove the retired trigger; all PE writers maintain statistics explicitly.
+/// Remove the retired trigger; `dbnum_info_table` is written by the task tail only.
 pub async fn retire_dbnum_event() -> anyhow::Result<()> {
-    crate::data_interface::dbnum_stats::retire_event_on(&SUL_DB).await
+    crate::data_interface::pe_batch::retire_event_on(&SUL_DB).await
 }
 
 #[cfg(test)]

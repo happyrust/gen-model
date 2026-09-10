@@ -60,6 +60,11 @@ save_spatial_tree_to_db = false
 #【变更 2026-07-29】16→4：ams7997 全量生成 16 并发曾在 save_instance_data
 # 撞 rocksdb 事务写冲突（empty127 轮），降到 4。
 gen_model_batch_size = 4
+#【新增 2026-09-10】初始化跑的模型阶段按组收口，组数 = 根数 / execution_group：7997 6769 根 / 16 一组
+# = 424 组，每组一次收口开销（2026-09-10 07:23 那一跑模型阶段 60 多分钟，96% 是这个）。抬到上限 100
+#（被 model_regen_claim_page 钳住）→ 68 组。代码侧已去掉「每组一趟整 run 收口」，这里是双保险。
+model_regen_claim_page = 100
+model_regen_execution_group = 100
 
 build_cate_relate = false
 

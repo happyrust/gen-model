@@ -602,7 +602,7 @@ pub(crate) async fn persist_aabb_tree_if_dirty_locked() -> anyhow::Result<bool> 
 }
 
 pub(crate) async fn persist_aabb_tree_if_dirty_locked_for_publication(
-    jobs: &[crate::data_interface::side_effect_pending::PendingJob],
+    jobs: &[crate::data_interface::side_effect_pending::PublishedRoundIdentity],
 ) -> anyhow::Result<bool> {
     let manifest = crate::data_interface::side_effect_pending::SideEffectCompensator::
         candidate_published_input_manifest(jobs)

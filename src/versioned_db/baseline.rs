@@ -10,11 +10,9 @@
 //!   同一个 dbnum（`replace_dbs = false`），靠的就是「已有行赢」：叶子 extract 里正在改的
 //!   版本不许被母库的旧版本覆盖。`Replace` 会把这条语义改掉。
 //! * 事务切块按 `tx_limits`（默认 2 MiB / 5000 行 / 1000 元素）；`DbOption::pe_chunk / att_chunk` 不再参与切块。
-//! * **不带逐笔 pe 统计观测**（`StatisticsMode::Deferred`，2026-09-07）：整库基线写进刚清空的 dbnum，
-//!   `$before` 恒空、`$after` 恒等于本批，逐笔观测的点读量与正文同量级、UPSERT 的又是同一个热点行；
-//!   写者排空后 `baseline_ingest::settle_statistics` 用 `dbnum_stats::rebuild_on` **无条件**一次算清。
-//!   父层补缺（`replace_dbs = false`）走的也是这条路——同一个收尾重建对它同样成立（GROUP BY 数的是实际行；
-//!   条件重建 `initialize_on` 在这里不成立，第二次摄入时版本标记早已是当前）。
+//! * **不带 pe 统计观测**：写事务只包 `BEGIN / COMMIT`（2026-09-10 起增量路也是如此，ADR-071 D6）；
+//!   `dbnum_info_table` 由 dbnum 任务在数据批次应用之后从目标索引序列化（`ref0_snapshot` → `task_end`），
+//!   基线与增量同一笔，这里不再有「写者排空后重建统计」的收尾。
 //! * 编排半边（收集 → 队列 → 单写者 → 闭包 → 清库 / 统计收尾）在 [`super::baseline_ingest`]。
 //! * WORL 作为普通元素写全三样行（legacy 不写它的 `pe` 行），计数口径见
 //!   [`BaselineStats::elements`]。
@@ -24,8 +22,7 @@ use aios_core::RefU64;
 use crate::data_interface::e3d_collector::BaselineChunk;
 use crate::data_interface::ele_ops::{ElementRows, UdaKeyMap};
 use crate::data_interface::element_batch::{
-    BatchItem, ElementBatchReport, StatisticsMode, WriteMode,
-    render_item_transactions_with_limits_and_statistics,
+    BatchItem, ElementBatchReport, WriteMode, render_item_transactions_with_limits,
 };
 use crate::data_interface::tx_limits::{DataTxLimits, data_tx_limits};
 
@@ -81,13 +78,7 @@ pub fn render_baseline_batches_with_limits(
             dependency: false,
         })
         .collect::<Vec<_>>();
-    render_item_transactions_with_limits_and_statistics(
-        &items,
-        dbnum,
-        WriteMode::Fresh,
-        limits,
-        StatisticsMode::Deferred,
-    )
+    render_item_transactions_with_limits(&items, dbnum, WriteMode::Fresh, limits)
 }
 
 /// 行 id 与增量路同一口径：`PersistElementChange::id` 用 `refno.to_string()`，
@@ -107,8 +98,8 @@ mod tests {
 
     const DBNUM: i32 = 8000;
 
-    /// 基线事务不带逐笔统计观测（`Deferred`），统计由收尾的 `rebuild_on` 一次算清——三轮（基线 + 两次
-    /// 父层补缺重放）之后 `dbnum_info_table` 的 count 仍等于实际 pe 行数，且**写块自身**不碰统计表。
+    /// 基线事务不带统计观测（ADR-071 D6：统计由任务收尾从目标索引序列化，这里不重建）——三轮
+    /// （基线 + 两次父层补缺重放）之后 pe 仍是 3 行、已有行赢，且**写块自身**不碰统计表。
     #[tokio::test]
     async fn baseline_and_parent_gap_replay_keep_actual_pe_counts() {
         let db = surrealdb::engine::any::connect("mem://").await.unwrap();
@@ -126,24 +117,34 @@ mod tests {
                     !sql.contains("dbnum_info_table") && !sql.contains("$before_"),
                     "基线写块不带观测:\n{sql}"
                 );
-                crate::data_interface::dbnum_stats::execute_on(&db, &sql)
+                crate::data_interface::pe_batch::execute_on(&db, &sql)
                     .await
                     .unwrap();
             }
-            // 与 `baseline_ingest::settle_statistics` 同一步：写者排空后按 Ref0 重建统计。
-            crate::data_interface::dbnum_stats::rebuild_on(&db, DBNUM as u32)
-                .await
-                .unwrap();
         }
         let mut result = db
-            .query("RETURN dbnum_info_table:8000.count; RETURN pe:8000_2.sesno;")
+            .query(
+                "SELECT count() AS n FROM pe WHERE dbnum = 8000 GROUP ALL; RETURN pe:8000_2.sesno; \
+                 SELECT count() AS n FROM dbnum_info_table GROUP ALL;",
+            )
             .await
             .unwrap();
-        assert_eq!(result.take::<Option<i64>>(0).unwrap(), Some(3));
+        #[derive(serde::Deserialize)]
+        struct Count {
+            n: i64,
+        }
+        let pe: Vec<Count> = result.take(0).unwrap();
+        assert_eq!(pe[0].n, 3);
         assert_eq!(
             result.take::<Option<i64>>(1).unwrap(),
             Some(5),
             "父层补缺重放：已有行赢（Fresh 只 INSERT IGNORE）"
+        );
+        let info: Vec<Count> = result.take(2).unwrap();
+        assert_eq!(
+            info.first().map_or(0, |count| count.n),
+            0,
+            "基线写块不碰 dbnum_info_table"
         );
     }
 

@@ -201,6 +201,7 @@ mod tests {
             epoch_id: 7,
             blocked_by_phase,
             intent: "apply_window",
+            reinit_trigger: None,
             state,
             start_sesno: 90,
             end_sesno: 92,

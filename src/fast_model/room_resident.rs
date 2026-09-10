@@ -94,6 +94,22 @@ pub(crate) struct ResidentPanel {
     pub has_neg: bool,
 }
 
+impl ResidentPanel {
+    /// Preserve the preloaded world-space instances when adapting an older
+    /// calculation entry; no model row or mesh needs to be fetched again.
+    pub(crate) fn room_inst(&self) -> GeomInstQuery {
+        use bevy_transform::components::Transform;
+        GeomInstQuery {
+            refno: self.panel, old_refno: None, owner: self.room,
+            world_aabb: self.world_aabb, world_trans: Transform::IDENTITY,
+            insts: self.insts.iter().map(|inst| aios_core::ModelHashInst {
+                geo_hash: inst.geo_hash.clone(), transform: Transform::from_matrix(inst.matrix), ..Default::default()
+            }).collect(),
+            has_neg: self.has_neg, generic: "PANE".into(), pts: None, date: None,
+        }
+    }
+}
+
 /// 三角网缓存键：`.mesh` 按内容寻址不可变，键里再带世界矩阵的位模式，命中即可复用、
 /// 永不陈旧（工程默认①）。`Ord` 给换代回收的活键集（`BTreeSet`）用。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -371,40 +387,7 @@ impl ResidentRoomModel {
         records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
         meshes: Arc<MeshCache>,
     ) -> Self {
-        use crate::fast_model::model_memory_store::ProjectedShape;
-        use bevy_transform::components::Transform;
-        let rows = records
-            .iter()
-            .map(|record| {
-                let refno =
-                    crate::data_interface::generation_root::refno_from_e3d(record.source_refno);
-                let local = match &record.shape {
-                    ProjectedShape::Baked => Mat4::IDENTITY,
-                    ProjectedShape::Canonical {
-                        local_transform, ..
-                    } => local_transform.as_mat4(),
-                };
-                GeomInstQuery {
-                    refno,
-                    old_refno: None,
-                    owner: refno,
-                    world_aabb: Aabb::new(
-                        record.world_bounds[0].into(),
-                        record.world_bounds[1].into(),
-                    ),
-                    world_trans: Transform::from_matrix(record.world_transform.as_mat4()),
-                    insts: vec![aios_core::ModelHashInst {
-                        geo_hash: record.mesh_id.clone(),
-                        transform: Transform::from_matrix(local),
-                        ..Default::default()
-                    }],
-                    has_neg: false,
-                    generic: record.noun.clone(),
-                    pts: None,
-                    date: None,
-                }
-            })
-            .collect();
+        let rows = records.iter().map(|record| record.room_inst()).collect();
         Self::assemble(manifest, groups, map, rows, meshes)
     }
     fn mesh_keys(&self) -> impl Iterator<Item = MeshKey> + '_ {
@@ -868,6 +851,7 @@ impl fmt::Display for ResidentBuildError {
 impl std::error::Error for ResidentBuildError {}
 
 /// 摄入侧：从库里当前清单选中的合成分组与版本化几何合成。`db` 显式传入，`mem://` 门直接喂。
+#[cfg(test)]
 pub(crate) async fn load_published_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     inputs: &[PublishedFileInput],
@@ -950,41 +934,8 @@ pub(crate) async fn load_published(
     match_room_fn: impl Fn(&str) -> bool,
     meshes: Arc<MeshCache>,
 ) -> anyhow::Result<Option<ResidentRoomModel>> {
-    let inputs =
-        crate::data_interface::side_effect_pending::SideEffectCompensator::published_file_inputs()
-            .await
-            .map_err(|error| {
-                ResidentBuildError::new(
-                    ResidentForm::Published,
-                    None,
-                    format!("读发布清单失败: {error:#}"),
-                )
-            })?;
-    if inputs.is_empty() {
-        return Ok(None);
-    }
-    let sources = crate::fast_model::e3d_model_service::E3dModelService::from_current()
-        .await
-        .and_then(|service| service.design_sources())
-        .map_err(|error| {
-            ResidentBuildError::new(
-                ResidentForm::Published,
-                None,
-                format!("枚举 MDB 设计库失败: {error:#}"),
-            )
-        })?;
-    validate_source_coverage(&sources, &inputs)?;
-    load_published_on(
-        &aios_core::SUL_DB,
-        &inputs,
-        hierarchy,
-        room_key_words,
-        match_room_fn,
-        meshes,
-    )
-    .await
-    .map(|model| model.with_expected_dbnums(sources.iter().map(|(dbnum, _, _)| *dbnum).collect()))
-    .map(Some)
+    load_file_backed(ResidentForm::Published, hierarchy, room_key_words, match_room_fn, meshes)
+        .await.map(Some)
 }
 
 /// Current MDB room inputs come exclusively from frozen E3D sources and local
@@ -1586,32 +1537,9 @@ async fn probe_manifest(
     form: ResidentForm,
     hierarchy: RoomHierarchy,
 ) -> anyhow::Result<Option<ResidentManifest>> {
-    let key = match form {
-        ResidentForm::Published => {
-            let inputs = crate::data_interface::side_effect_pending::SideEffectCompensator::
-                published_file_inputs()
-            .await
-            .map_err(|error| {
-                ResidentBuildError::new(form, None, format!("读发布清单失败: {error:#}"))
-            })?;
-            if inputs.is_empty() {
-                return Ok(None);
-            }
-            crate::fast_model::room_topology::published_topology_manifest_key(&inputs, hierarchy)
-        }
-        ResidentForm::Latest => {
-            crate::fast_model::room_topology::latest_frozen_sources()
-                .await
-                .map_err(|error| {
-                    ResidentBuildError::new(
-                        form,
-                        None,
-                        format!("读各设计库当前文件版本失败: {error:#}"),
-                    )
-                })?
-                .0
-        }
-    };
+    let _ = hierarchy;
+    // Both faces use frozen E3D sources, never a database geometry snapshot.
+    let key = crate::fast_model::room_topology::latest_frozen_sources().await?.0;
     Ok(Some(ResidentManifest { form, key }))
 }
 
@@ -2048,6 +1976,7 @@ async fn initialize_file_backed_at_startup(
 }
 
 /// 摄入形态：基线（全 MDB，已有就跳过）→ 替不归轮次管的文件前进清单行 → 从清单建模并装进单例。
+#[cfg(test)]
 async fn initialize_published_at_startup(
     ownership: &RoundOwnership,
     hierarchy: RoomHierarchy,
@@ -2212,11 +2141,6 @@ async fn advance_orphaned_manifest_rows(
         crate::fast_model::room_topology_source::prepare_producer_source(&source)
             .await
             .with_context(|| format!("冻结 dbnum {} 的房间拓扑分片", step.dbnum))?;
-        statements.push(
-            crate::fast_model::room_publication::render_stage_published_room_input(
-                step.dbnum, &token,
-            ),
-        );
         statements.push(SideEffectCompensator::render_published_file_input_upsert(
             step.dbnum,
             source.db_type(),
@@ -4802,8 +4726,8 @@ mod tests {
             .expect("probe_manifest 后面就是 ensure_current")
             .0;
         assert!(
-            probe.contains("published_topology_manifest_key(&inputs, hierarchy)"),
-            "摄入侧的键必须是 published_topology_manifest_key 算的: {probe}"
+            !probe.contains("published_file_inputs") && !probe.contains("published_topology_manifest_key"),
+            "两种形态均使用文件侧版本，不能读旧发布快照: {probe}"
         );
         assert!(
             probe.contains("latest_frozen_sources()"),
@@ -4822,7 +4746,7 @@ mod tests {
     fn the_read_through_change_key_has_exactly_one_definition() {
         let source = include_str!("room_topology.rs");
         assert_eq!(
-            source.matches("model_publish_queue::digest(").count(),
+            source.matches("digest::digest(").count(),
             1,
             "room_topology.rs 里只许 latest_frozen_sources 算这个摘要"
         );

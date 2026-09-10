@@ -437,8 +437,8 @@ struct RootRow {
 /// 的一整核长期占满。谓词照 [`settled_root_predicate`] /
 /// [`blocking_root_predicate`] 的口径在进程内判。
 ///
-/// [`settled_root_predicate`]: crate::data_interface::model_update_pending::settled_root_predicate
-/// [`blocking_root_predicate`]: crate::data_interface::model_update_pending::blocking_root_predicate
+/// [`settled_root_predicate`]: crate::data_interface::model_watermark::settled_root_predicate
+/// [`blocking_root_predicate`]: crate::data_interface::model_watermark::blocking_root_predicate
 #[derive(Debug, Deserialize)]
 struct RootStateRow {
     dbnum: u32,
@@ -552,12 +552,12 @@ async fn states_and_census(db: &Surreal<Any>) -> anyhow::Result<CensusSnapshot> 
         dbnum: u32,
         end_sesno: i32,
         model_completion: String,
-        commit_token: Option<String>,
     }
+    // 收据住在水位行上（`model_completion::receipt_row`），不再寄居在文件轮次那一行。
     let receipts: Vec<ReceiptRow> = db
         .query(
-            "SELECT dbnum, end_sesno, model_completion, commit_token FROM incr_side_effect_pending \
-         WHERE model_completion != NONE AND status = 'done';",
+            "SELECT dbnum, model_completion_sesno AS end_sesno, model_completion \
+         FROM dbnum_watermark WHERE model_completion != NONE AND model_completion_sesno != NONE;",
         )
         .await?
         .check()?
@@ -574,7 +574,7 @@ async fn states_and_census(db: &Surreal<Any>) -> anyhow::Result<CensusSnapshot> 
             row.dbnum,
             row.end_sesno,
         )
-        .is_some_and(|receipt| row.commit_token.as_deref() == Some(receipt.source_token()));
+        .is_some();
         let counts = census.entry(row.dbnum).or_default();
         counts.verified_completion = valid.then_some(row.end_sesno);
         counts.completion_invalid = !valid;

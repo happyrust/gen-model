@@ -1,0 +1,107 @@
+-- 生成模型的 E3D 侧真值探针（只读，无 SAVEWORK）。
+--
+-- 目的：拿 E3D TTY 自己报的世界坐标，核对 gen-model 落库的 inst_relate.aabb_d
+-- 是否把这个构件放在了对的地方。挑的是 dbnum 7997（ams7997_0001，ref0 24381）里
+-- 十个 BOX / CYLI —— 它们的 AABB 中心在轴对齐时就该等于世界位置。
+--
+-- 两条既有教训照搬（db8000_zone_members_probe.mac 头注）：
+--   1. ALPHA LOG 的内容要到 ALPHA LOG END 才落盘，中途任一语句报错整段日志都没有；
+--      所以**一个目标一个日志块**，一个失败不带走其它九个。
+--   2. 按 refno 导航（`=24381/100738`）在 db8000 的会话里不成立过，所以头四块先做
+--      语法探针：导航、Q POS、Q POS WRT WORLD、Q POS WRT /* 各自独立成块，
+--      哪一种能落盘就用哪一种读后面的值。
+
+-- ===== 语法探针 A：refno 导航本身
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/syntax_a_nav.log" OVER
+$P SYNTAX-A-ALIVE
+=24381/100738
+Q TYPE
+$P SYNTAX-A-DONE
+ALPHA LOG END
+
+-- ===== 语法探针 B：属主系 POS
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/syntax_b_pos.log" OVER
+$P SYNTAX-B-ALIVE
+=24381/100738
+Q POS
+$P SYNTAX-B-DONE
+ALPHA LOG END
+
+-- ===== 语法探针 C：WRT WORLD
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/syntax_c_world.log" OVER
+$P SYNTAX-C-ALIVE
+=24381/100738
+Q POS WRT WORLD
+$P SYNTAX-C-DONE
+ALPHA LOG END
+
+-- ===== 语法探针 D：WRT /*
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/syntax_d_star.log" OVER
+$P SYNTAX-D-ALIVE
+=24381/100738
+Q POS WRT /*
+$P SYNTAX-D-DONE
+ALPHA LOG END
+
+-- ===== 十个目标，各自一块。每块只放最稳的三句。
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/t01.log" OVER
+=24381/100738
+Q TYPE
+Q POS WRT WORLD
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/t02.log" OVER
+=24381/100692
+Q TYPE
+Q POS WRT WORLD
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/t03.log" OVER
+=24381/100780
+Q TYPE
+Q POS WRT WORLD
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/t04.log" OVER
+=24381/100604
+Q TYPE
+Q POS WRT WORLD
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/t05.log" OVER
+=24381/101669
+Q TYPE
+Q POS WRT WORLD
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/t06.log" OVER
+=24381/101542
+Q TYPE
+Q POS WRT WORLD
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/t07.log" OVER
+=24381/101629
+Q TYPE
+Q POS WRT WORLD
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/t08.log" OVER
+=24381/101589
+Q TYPE
+Q POS WRT WORLD
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/t09.log" OVER
+=24381/101878
+Q TYPE
+Q POS WRT WORLD
+ALPHA LOG END
+
+ALPHA LOG "D:/work/plant-code/old/gen-model/output/e3d-crosscheck/t10.log" OVER
+=24381/101316
+Q TYPE
+Q POS WRT WORLD
+ALPHA LOG END
+
+FINISH

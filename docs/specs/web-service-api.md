@@ -552,24 +552,29 @@ plant-ui 的单根调用零影响。
 实现 `data_interface::model_read_route`。
 
 - **判据只有一处**（`model_read_route::route`）：`database` ⇔ 数据面是 `ingest` ∧ 该库
-  `applied_sesno > 0` ∧ 该库没有活着的初始化发布 run；其余 `memory`，理由三选一：
-  `read-through` / `data_watermark_unestablished`（基线未落）/ `initialization_publishing`
-  （基线落了、初始化发布 run 在飞）。
+  `applied_sesno > 0` ∧ 该库没有数据批次任务在跑（`task_registry`）∧ `model_sesno == applied_sesno`
+  ∧ `room_sesno == applied_sesno`（ADR-071 D8「三水位相等」，三枚同一次读进程内镜像）；其余 `memory`，
+  理由五选一、按此优先序只报最靠前的一条：`read-through` / `data_watermark_unestablished`（基线未落）/
+  `initialization_publishing`（基线落了、该库的 dbnum 任务在飞；字面值沿用，含义 = 「这个库正在被写」）/
+  `model_lagging`（数据到了 T、模型水位没追上：库里的模型行是旧版，进程内投影更全）/
+  `room_lagging`（数据与模型到了 T、房间水位没追上：这一版的收尾没把房间那一枚盖上）。
+  模型 / 房间水位跑到数据**前面**不算落后（那是 M2 违反，另有对账管）。
 - **`memory` 库上的 `POST /model/ensure`**：不等初始化队列、不进 durable 队列、不落 rocksdb，直接
-  从文件生成进进程内投影（有初始化 run 就钉它那一版会话，翻面时零差异）。回执多四格：
+  从文件生成进进程内投影（该库有任务在飞就钉它那一版会话，翻面时零差异）。回执多四格：
   `dbnum`、`model_source`、`model_source_reason`、`durable`（`false` = 这批行活不过进程重启，
-  持久由初始化 run 负责）；`publication_status` 取 `ready` / `empty`（`gen_root` 上没有这根的行）。
+  持久由该库的 dbnum 任务负责）；`publication_status` 取 `ready` / `empty`（`gen_root` 上没有这根的行）。
 - **`memory` 库上的 `POST /model/records`**：从进程内投影回，`source = "model-memory"`；投影里
   没有这根（还没 ensure 过）回 `409 conflict`，消息以 `not_generated:` 开头——客户端先去
   `/model/ensure`，它今天本来就是这个顺序。空数组**不**用来表达「没生成过」。
 - **`database` 库上**两条接口与 §4.5 逐字相同：`records` 读 rocksdb（`source = "model-database"`），
   `ensure` 落库后读库。一次 `records` 请求只有一根、一个库，所以一个响应只有一个源；
   回执同样带 `dbnum` / `model_source` / `model_source_reason` / `durable`。
-- **`GET /dbnums`** 每行加 `model_source` / `model_source_reason`（§4.7）；读透形态的冷行恒
-  `memory` / `read-through`。
-- **翻面事件**：初始化发布 run 收口 → `database`；回退重建清库 → `memory`。两处都在 WS `tasks`
-  主题发 `model_source_changed { dbnum, model_source }`（§5.3）。客户端只刷那一格、不重载场景
-  ——内存投影与刚发布的行是同一版文件算出来的，下一次范围重载自然读到 rocksdb。
+- **`GET /dbnums`** 每行加 `model_source` / `model_source_reason`（§4.7），喂给判据的是行上自己的
+  `applied_sesno` / `model_sesno` / `room_sesno`；没有模型 / 房间判决列的行（非 DESI 库、这一次
+  普查失败）**不判落后**——「不知道」不写成 `model_lagging`。读透形态的冷行恒 `memory` / `read-through`。
+- **翻面事件**：该库的 dbnum 任务跑完（收尾那一笔把三枚水位盖齐）→ `database`；回退重建清库 →
+  `memory`。两处都在 WS `tasks` 主题发 `model_source_changed { dbnum, model_source }`（§5.3）。
+  客户端只刷那一格、不重载场景——内存投影与刚落的行是同一版文件算出来的，下一次范围重载自然读到 rocksdb。
 
 ## 5. WebSocket 协议（`GET /api/v1/ws`）
 

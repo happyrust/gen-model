@@ -14,10 +14,11 @@
 //! 执行体复用 [`AiosDBManager::execute_one_dbnum`]（rollout 第九节第 6 条）：
 //! 它自带回退阻断、基线补全、窗口冻结与崩溃重放，两条触发路径共用同一份语义。
 
+use std::future::Future;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use chrono::Local;
 use futures::FutureExt;
@@ -30,6 +31,7 @@ use crate::data_interface::manual_update::{
     include_model_side_effect_failure, load_pending_model_units_for_retry, merge_unit_worklist,
 };
 use crate::data_interface::model_update_pending;
+use crate::data_interface::model_watermark;
 use crate::data_interface::side_effect_pending::SideEffectCompensator;
 use crate::data_interface::task_registry::{TaskRegistry, TaskState};
 use crate::data_interface::tidb_manager::AiosDBManager;
@@ -1249,6 +1251,11 @@ async fn run_one_batch(
                                 &format!("建立已发布房间输入基线失败: {error:#}"),
                             );
                         }
+                        // 开一轮：内存那本与库里那一行同时开，之后生成阶段两边一起喂。
+                        crate::data_interface::task_effects::open(
+                            job.dbnum,
+                            cand.file_latest_sesno,
+                        );
                         let round_intent =
                             SideEffectCompensator::render_file_spatial_reconcile_upsert(
                                 job.dbnum,
@@ -1495,13 +1502,6 @@ pub(crate) fn parse_explicit_flag(value: Option<&std::ffi::OsStr>) -> ExplicitFl
     }
 }
 
-/// 稳态增量只有一条路径（ADR-056）：直写持久层。`/health.increment_mode` 这一字段
-/// 保留给监控切换，值只剩 `direct`；`GEN_MODEL_DIRECT_INCREMENT` 与 kv-mem 暂存窗口
-/// 一并退役，回退靠 git tag（D6）。
-pub(crate) fn increment_mode() -> &'static str {
-    "direct"
-}
-
 async fn execute_frozen_batch(
     mgr: &Arc<AiosDBManager>,
     registry: &'static TaskRegistry,
@@ -1565,8 +1565,15 @@ async fn execute_frozen_batch(
         .frozen
         .as_ref()
         .and_then(|source| source.commit_token_json().ok());
+    // Ref0 统计快照要用的文件身份（ADR-071 D6）：数据批次应用到哪一版，就按那一版的索引数活元素。
+    let snapshot_source = crate::data_interface::ref0_snapshot::SnapshotSource {
+        frozen: cand.frozen.clone(),
+        path: cand.path.clone(),
+        file_name: cand.file_name.clone(),
+        db_type: cand.db_type.clone(),
+    };
     let body_started = std::time::Instant::now();
-    let completion_inputs = if job.db_type.eq_ignore_ascii_case("DESI") {
+    let mut completion_inputs = if job.db_type.eq_ignore_ascii_case("DESI") {
         match frozen_source_token
             .as_deref()
             .ok_or_else(|| anyhow::anyhow!("missing frozen source"))
@@ -1581,6 +1588,13 @@ async fn execute_frozen_batch(
     } else {
         None
     };
+    if let Some(inputs) = completion_inputs.as_mut() {
+        let base_start = completion_coverage_start(job.intent, job.start_sesno, job.model_start_sesno);
+        if let Err(error) = inputs.bind_base_on(&aios_core::SUL_DB, job.dbnum, base_start).await {
+            warnings.push(format!("完成基线读取失败: {error:#}"));
+            return failed_window_result(job, warnings, "完成基线读取失败");
+        }
+    }
     let mut result = if job.intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly {
         execute_model_only_body(mgr, registry, job, cand, progress, warnings).await
     } else {
@@ -1616,6 +1630,69 @@ async fn execute_frozen_batch(
         ));
     }
 
+    // Ref0 统计快照（ADR-071 D6）：数据批次一应用到 `committed_end_sesno`，就按那一版的目标索引
+    // `DbSet@end` 数每个 Ref0 的活元素，经 `task_end` 那一笔按绝对值覆盖 `dbnum_info_table`——
+    // `count` 从此只有这一个写者（逐笔 ±1 观测块已退）。库类型不限（CATA / SYST 的统计也在这张表里），
+    // 与模型 / 房间无关，所以排在模型那一段之前、也不等它：模型失败不该让统计停在上一版。
+    // ModelOnly 不动数据行，不做。失败只留痕、标 Partial：数据行与水位不受影响，这一版的统计等
+    // 下一次该库任务再序列化。
+    if job.intent != crate::data_interface::batch_queue::BatchIntent::ModelOnly
+        && let Some(committed_end_sesno) = committed_end_sesno
+        && committed_end_sesno > 0
+    {
+        registry.set_stage(&job.task_id, "ref0_snapshot");
+        let target_time = result
+            .batch
+            .as_ref()
+            .and_then(|batch| batch.end_sesno_time.clone());
+        let source = snapshot_source.clone();
+        let snapshot = tokio::task::spawn_blocking(move || {
+            crate::data_interface::ref0_snapshot::snapshot_at(&source, committed_end_sesno as u32)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("Ref0 统计快照任务异常: {error}"))
+        .and_then(|snapshot| snapshot);
+        match snapshot {
+            Ok(snapshot) => {
+                let rows = snapshot.rows.len();
+                match crate::data_interface::task_end::commit_task_end_on(
+                    &aios_core::SUL_DB,
+                    &crate::data_interface::task_end::TaskEnd {
+                        dbnum: job.dbnum,
+                        target_sesno: committed_end_sesno,
+                        target_time,
+                        model: None,
+                        rooms: None,
+                        info: Some(snapshot),
+                    },
+                )
+                .await
+                {
+                    Ok(_) => println!(
+                        "Ref0 统计已按会话 {committed_end_sesno} 的索引序列化 dbnum={} Ref0={rows}",
+                        job.dbnum
+                    ),
+                    Err(error) => {
+                        result.status = ManualUpdateStatus::Partial;
+                        result.warnings.push(format!(
+                            "Ref0 统计快照未落库（数据行与水位不受影响，下次任务再序列化） dbnum={} \
+                             sesno={committed_end_sesno}: {error:#}",
+                            job.dbnum
+                        ));
+                    }
+                }
+            }
+            Err(error) => {
+                result.status = ManualUpdateStatus::Partial;
+                result.warnings.push(format!(
+                    "Ref0 统计快照未取到（数据行与水位不受影响，下次任务再序列化） dbnum={} \
+                     sesno={committed_end_sesno}: {error:#}",
+                    job.dbnum
+                ));
+            }
+        }
+    }
+
     let round_complete = if job.intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly
     {
         result.status == ManualUpdateStatus::Success
@@ -1649,32 +1726,47 @@ async fn execute_frozen_batch(
         }
     }
 
-    // Commit the model checkpoint before room work. The Task still owns this
-    // dbnum, but a room failure must not erase successful model publication.
+    // 收尾三段：收据（整库证据闸）→ 房间 → **一笔**盖三水位（ADR-071 D3 / ADR-065 G2 (i)）。
+    // 顺序 2026-09-10 翻过来了：房间排在盖章之前算，修掉 d-73 指出的「模型水位先于房间前移」。
+    // 房间失败不擦掉已经成的模型那一半——那一枚照盖，房间那一枚不盖，启动恢复再补。
     if let Some(file_round) = completed_file_round {
+        if let Some(inputs) = completion_inputs.as_mut() {
+            inputs.changed_roots = result.units.iter().map(|unit| unit.root_refno.clone()).collect();
+        }
         registry.set_stage(&job.task_id, "model_complete");
         let end_time = result
             .batch
             .as_ref()
             .and_then(|batch| batch.end_sesno_time.clone());
-        match model_update_pending::complete_model_task_on(
+        // 收尾的事实全来自本任务手里的单元清单（ADR-071 D3）：走到这里
+        // `round_complete` 已经担保每个交付单元都是 `Generated`，`persist_roots_batched`
+        // 落不进去的根会先把单元标回失败，所以「这一版的根全 OK」不必回问库。
+        let model_outcome = crate::data_interface::task_end::TaskModelOutcome {
+            all_roots_ok: result
+                .units
+                .iter()
+                .all(|unit| unit.status == UnitGenStatus::Generated),
+            dead_roots: 0,
+        };
+        match model_watermark::complete_model_task_on(
             &aios_core::SUL_DB,
             job.dbnum,
-            model_update_pending::ModelTaskCompletion {
+            model_watermark::ModelTaskCompletion {
                 target_sesno: file_latest_sesno,
                 file_round,
                 inputs: completion_inputs,
+                model: model_outcome.clone(),
+                roots: result.units.len(),
             },
-            end_time.as_deref(),
         )
         .await
         {
-            Ok(model_update_pending::ModelWatermarkOutcome::Advanced { sesno })
-            | Ok(model_update_pending::ModelWatermarkOutcome::Unchanged { sesno })
+            Ok(model_watermark::ModelWatermarkOutcome::Advanced { sesno })
+            | Ok(model_watermark::ModelWatermarkOutcome::Unchanged { sesno })
                 if sesno >= file_latest_sesno =>
             {
                 registry.set_stage(&job.task_id, "rooms");
-                match crate::fast_model::room_task::finish_file_room_round(
+                let rooms_ok = match crate::fast_model::room_task::finish_file_room_round(
                     mgr,
                     job.dbnum,
                     file_latest_sesno,
@@ -1682,28 +1774,42 @@ async fn execute_frozen_batch(
                 )
                 .await
                 {
-                    Ok(Some(_)) => {}
-                    Ok(None) => result.status = ManualUpdateStatus::Partial,
+                    Ok(Some(_)) => true,
+                    Ok(None) => {
+                        result.status = ManualUpdateStatus::Partial;
+                        false
+                    }
                     Err(error) => {
                         result.status = ManualUpdateStatus::Partial;
                         result.warnings.push(format!(
-                            "房间阶段未完成，已保留模型水位 dbnum={} sesno={sesno}: {error:#}",
+                            "房间阶段未完成，模型那一枚照盖、房间那一枚不盖 dbnum={} sesno={sesno}: {error:#}",
                             job.dbnum
                         ));
+                        false
                     }
-                }
-                if result.status == ManualUpdateStatus::Success
-                    && let Err(error) =
-                        crate::data_interface::model_publish_queue::finish_ready_initializations(
-                            mgr,
-                        )
-                        .await
+                };
+                registry.set_stage(&job.task_id, "task_end");
+                if let Err(error) = crate::data_interface::task_end::commit_task_end_on(
+                    &aios_core::SUL_DB,
+                    &crate::data_interface::task_end::TaskEnd {
+                        dbnum: job.dbnum,
+                        target_sesno: file_latest_sesno,
+                        target_time: end_time.clone(),
+                        model: Some(model_outcome),
+                        rooms: rooms_ok.then_some(
+                            crate::data_interface::task_end::TaskRoomOutcome { ok: true },
+                        ),
+                        // Ref0 统计已在数据批次应用之后那一笔序列化（上面 `ref0_snapshot`），
+                        // 这一笔只盖水位。
+                        info: None,
+                    },
+                )
+                .await
                 {
                     result.status = ManualUpdateStatus::Partial;
-                    result.warnings.push(format!(
-                        "模型发布 run 收口失败 dbnum={}: {error:#}",
-                        job.dbnum
-                    ));
+                    result
+                        .warnings
+                        .push(format!("任务收尾水位未落 dbnum={}: {error:#}", job.dbnum));
                 }
             }
             Ok(outcome) => {
@@ -1761,52 +1867,8 @@ async fn execute_model_only_body(
     progress: &Option<ManualUpdateProgress>,
     warnings: &mut Vec<String>,
 ) -> DataBatchTaskResult {
-    // Restart adoption reuses the retained root revisions and durable ACKs.
-    // Replanning them would change the journal's binding, and an empty worklist
-    // would otherwise bypass the generation-level ACK barrier altogether.
-    if let Some(retained) =
-        crate::data_interface::model_publish_queue::initialization_source(job.dbnum)
-    {
-        registry.set_stage(&job.task_id, "publication_ack");
-        let adoption = async {
-            let frozen = cand
-                .frozen
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("adoption has no frozen source"))?;
-            anyhow::ensure!(
-                retained.commit_token_json()? == frozen.commit_token_json()?,
-                "retained initialization source differs from recovery Task"
-            );
-            anyhow::ensure!(
-                crate::data_interface::model_publish_queue::wait_for_task_root_acks(
-                    mgr,
-                    job.dbnum,
-                    cand.file_latest_sesno as u32,
-                    &[],
-                )
-                .await?,
-                "retained initialization disappeared before adoption"
-            );
-            anyhow::Ok(())
-        }
-        .await;
-        let status = match adoption {
-            Ok(()) => ManualUpdateStatus::Success,
-            Err(error) => {
-                warnings.push(format!("初始化运行接管失败: {error:#}"));
-                ManualUpdateStatus::Failed
-            }
-        };
-        return DataBatchTaskResult {
-            project: job.project.clone(),
-            status,
-            batch: None,
-            units: Vec::new(),
-            warnings: std::mem::take(warnings),
-            model_verdict: None,
-            model_caught_up_at: None,
-        };
-    }
+    // 没有「保留的初始化 run」可接管了（ADR-071 S5，d-300）：ModelOnly 任务一律按镜像里的
+    // 凭证下限重新规划、自己生成、自己合块落库，不等任何 ACK。
     let target = crate::data_interface::model_source::SourceVersion {
         dbnum: job.dbnum,
         db_type: job.db_type.clone(),
@@ -1841,13 +1903,6 @@ async fn execute_model_only_body(
 
     registry.set_stage(&job.task_id, "pre_generation");
     let mut failed = false;
-    match SideEffectCompensator::drain(mgr).await {
-        Ok(_) => {}
-        Err(error) => {
-            warnings.push(format!("模型恢复前副作用补偿失败: {error:#}"));
-            failed = true;
-        }
-    }
     match model_update_pending::drain_non_regen_report(mgr).await {
         Ok(report) if report.blocks(job.dbnum) => {
             warnings.extend(report.failures);
@@ -1867,7 +1922,10 @@ async fn execute_model_only_body(
     } else {
         match load_pending_model_units_for_retry(job.dbnum).await {
             Ok(pending) => {
-                let worklist = merge_unit_worklist(Vec::new(), pending);
+                // 明确要重算的根（目录级联反查命中的名单，ADR-071 S4）随任务本身进来，不再写
+                // pending 行等 drain 领：它们与规划器排出来的待重试并成一张工作单。
+                let worklist =
+                    merge_unit_worklist(explicit_regen_units(job, target.sesno as i32), pending);
                 run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
             }
             Err(error) => {
@@ -1910,6 +1968,29 @@ async fn execute_model_only_body(
         model_verdict: None,
         model_caught_up_at: None,
     }
+}
+
+/// 任务随身带来的**明确根名单**（[`FrozenBatch::regen_roots`]，目录级联反查命中的根）→ 工作单。
+/// 生成时点取任务的目标会话（ADR-054：文件最新）；它们是本任务的新单元（`attempts = 0`、无队列
+/// revision），与规划器的待重试按 `(dbnum, root)` 去重合并。
+fn explicit_regen_units(
+    job: &FrozenBatch,
+    source_end_sesno: i32,
+) -> Vec<crate::data_interface::manual_update::UnitTask> {
+    job.regen_roots
+        .iter()
+        .map(|root| crate::data_interface::manual_update::UnitTask {
+            dbnum: job.dbnum,
+            root_refno: root.refno.clone(),
+            noun: root.noun.clone(),
+            source_end_sesno,
+            attempts: 0,
+            revision: None,
+            old_owner: None,
+            new_owner: None,
+            transform: None,
+        })
+        .collect()
 }
 
 /// 文件轮次完成屏障，批次侧那一半（ADR-062）。
@@ -1973,7 +2054,7 @@ impl FileRoundReadiness {
 }
 
 pub(crate) fn file_round_readiness(
-    probe: &model_update_pending::ModelWatermarkProbe,
+    probe: &model_watermark::ModelWatermarkProbe,
     frozen_end_sesno: i32,
 ) -> FileRoundReadiness {
     if probe.applied_sesno < frozen_end_sesno {
@@ -1996,19 +2077,79 @@ pub(crate) fn file_round_readiness(
     FileRoundReadiness::Ready
 }
 
+/// 一轮发布内部的逐子阶段计时。
+///
+/// 整段 `publish` 早就进了任务级 `stages`，但内部一直是一个数：7997 实测 35.4 / 64.9 s、
+/// 1112 实测 36.6 / 49.5 s——两个体量差 5 倍的库几乎一样快，光看总数分不出这里面哪一笔
+/// 与库大小成比例、哪一笔是项目级固定开销。这几个格子就是为了把那个数拆开。
+#[derive(Debug, Default)]
+struct PublishStageTimings {
+    round_read: Duration,
+    deferred_delete: Duration,
+    persist_roots: Duration,
+    deferred_other: Duration,
+    room_input: Duration,
+    topology_source: Duration,
+    topology_stage: Duration,
+    promote: Duration,
+    spatial: Duration,
+    roots: usize,
+    deferred: usize,
+}
+
+impl PublishStageTimings {
+    async fn measure<T>(slot: &mut Duration, work: impl Future<Output = T>) -> T {
+        let start = Instant::now();
+        let value = work.await;
+        *slot += start.elapsed();
+        value
+    }
+
+    fn report(&self, dbnum: u32, round_end_sesno: i32) {
+        println!(
+            "发布阶段 阶段耗时 dbnum={dbnum} sesno={round_end_sesno} 根={} 延迟动作={}: \
+             round_read={}ms deferred_delete={}ms persist_roots={}ms deferred_other={}ms \
+             room_input={}ms topology_source={}ms topology_stage={}ms promote={}ms spatial={}ms",
+            self.roots,
+            self.deferred,
+            self.round_read.as_millis(),
+            self.deferred_delete.as_millis(),
+            self.persist_roots.as_millis(),
+            self.deferred_other.as_millis(),
+            self.room_input.as_millis(),
+            self.topology_source.as_millis(),
+            self.topology_stage.as_millis(),
+            self.promote.as_millis(),
+            self.spatial.as_millis(),
+        );
+    }
+}
+
 /// Publish the derivations collected by one fully settled file round. Spatial
 /// publication is the barrier: room edges and room tasks stay private until the
 /// tree snapshot has converged successfully.
+fn completion_coverage_start(intent: crate::data_interface::batch_queue::BatchIntent, first_sesno: i32, model_start: Option<i32>) -> i32 {
+    // Queue windows include the first changed session; coverage starts at the
+    // preceding completed session. ModelOnly can cover an earlier model gap.
+    if intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly {
+        model_start.unwrap_or_else(|| first_sesno.saturating_sub(1)).max(0)
+    } else {
+        first_sesno.saturating_sub(1).max(0)
+    }
+}
+
 async fn publish_model_file_round(
     mgr: &AiosDBManager,
     dbnum: u32,
     round_end_sesno: i32,
 ) -> anyhow::Result<crate::data_interface::side_effect_pending::CompletedFileRound> {
-    let round = SideEffectCompensator::file_round(dbnum, round_end_sesno)
-        .await?
-        .ok_or_else(|| {
-            anyhow::anyhow!("missing file publication round {dbnum}/{round_end_sesno}")
-        })?;
+    let mut timings = PublishStageTimings::default();
+    let round = PublishStageTimings::measure(
+        &mut timings.round_read,
+        SideEffectCompensator::file_round(dbnum, round_end_sesno),
+    )
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("missing file publication round {dbnum}/{round_end_sesno}"))?;
     anyhow::ensure!(
         matches!(round.status.as_str(), "collecting" | "pending" | "done"),
         "file publication is held in {}",
@@ -2028,24 +2169,36 @@ async fn publish_model_file_round(
         let deferred_actions =
             SideEffectCompensator::file_round_deferred_model_actions(dbnum, round_end_sesno)
                 .await?;
+        timings.deferred = deferred_actions.len();
         for action in deferred_actions
             .iter()
             .filter(|action| action.action == "delete_cleanup")
         {
-            model_update_pending::execute_deferred_file_model_action(mgr, action).await?;
+            PublishStageTimings::measure(
+                &mut timings.deferred_delete,
+                model_update_pending::execute_deferred_file_model_action(mgr, action),
+            )
+            .await?;
         }
         // The in-memory projection may advance while the round is private, but the
         // durable model rows consumed by room calculation remain on the previous
         // published version. Flush every completed root now, before spatial replay.
-        for root in
-            SideEffectCompensator::file_round_model_publish_roots(dbnum, round_end_sesno).await?
-        {
+        let publish_roots = PublishStageTimings::measure(
+            &mut timings.persist_roots,
+            SideEffectCompensator::file_round_model_publish_roots(dbnum, round_end_sesno),
+        )
+        .await?;
+        timings.roots = publish_roots.len();
+        for root in publish_roots {
             let refno = crate::fast_model::e3d_model_service::parse_refno(&root)?;
-            crate::fast_model::model_db_adapter::persist_root_for_file_round(
-                refno,
-                dbnum,
-                round_end_sesno,
-                &commit_token,
+            PublishStageTimings::measure(
+                &mut timings.persist_roots,
+                crate::fast_model::model_db_adapter::persist_root_for_file_round(
+                    refno,
+                    dbnum,
+                    round_end_sesno,
+                    &commit_token,
+                ),
             )
             .await?;
         }
@@ -2053,35 +2206,60 @@ async fn publish_model_file_round(
             .iter()
             .filter(|action| action.action != "delete_cleanup")
         {
-            model_update_pending::execute_deferred_file_model_action(mgr, action).await?;
+            PublishStageTimings::measure(
+                &mut timings.deferred_other,
+                model_update_pending::execute_deferred_file_model_action(mgr, action),
+            )
+            .await?;
         }
-        // Capture one immutable room input after every root and deferred model
-        // action has settled.  It stays invisible until spatial publication moves
-        // this round's token into `published_file_input`.
-        crate::fast_model::room_publication::stage_published_room_input(dbnum, &commit_token)
-            .await
-            .map_err(|error| anyhow::anyhow!("freeze file room geometry: {error:#}"))?;
+        // Room inputs already reside in ResidentRoomModel / ModelMemoryStore.
+        // Publication persists model results, never a second full-db geometry image.
         let frozen = crate::data_interface::frozen_source::FrozenSource::from_commit_token_json(
             &commit_token,
         )?;
-        if !crate::data_interface::model_publish_queue::blocks_dbnum(dbnum) {
-            crate::fast_model::room_topology_source::prepare_producer_source(&frozen).await?;
-        }
-        crate::fast_model::room_topology::stage_candidate_room_topology(
-            dbnum,
-            frozen.db_type(),
-            round_end_sesno,
-            &commit_token,
+        PublishStageTimings::measure(
+            &mut timings.topology_source,
+            crate::fast_model::room_topology_source::prepare_producer_source(&frozen),
         )
         .await?;
-        SideEffectCompensator::promote_file_round(dbnum, round_end_sesno).await?;
+        PublishStageTimings::measure(
+            &mut timings.topology_stage,
+            crate::fast_model::room_topology::stage_candidate_room_topology(
+                dbnum,
+                frozen.db_type(),
+                round_end_sesno,
+                &commit_token,
+            ),
+        )
+        .await?;
+        PublishStageTimings::measure(
+            &mut timings.promote,
+            SideEffectCompensator::promote_file_round(dbnum, round_end_sesno),
+        )
+        .await?;
     }
     if round.status != "done" {
-        SideEffectCompensator::reconcile_spatial_pending(mgr).await?;
+        // 任务直发：这一轮的空间增删从 `task_effects` 那本内存账拿，不再绕库一圈
+        // （ADR-071 D1）。别的库遗留的 pending 行不归这里管——出队前那道闸
+        // （`reconcile_spatial_pending`）照旧扫全局。
+        PublishStageTimings::measure(
+            &mut timings.spatial,
+            SideEffectCompensator::publish_task_spatial_effects(
+                dbnum,
+                round_end_sesno,
+                &round.db_type,
+                round.commit_token.as_deref(),
+            ),
+        )
+        .await?;
     }
-    let published = SideEffectCompensator::file_round(dbnum, round_end_sesno)
-        .await?
-        .ok_or_else(|| anyhow::anyhow!("file publication round disappeared"))?;
+    let published = PublishStageTimings::measure(
+        &mut timings.round_read,
+        SideEffectCompensator::file_round(dbnum, round_end_sesno),
+    )
+    .await?
+    .ok_or_else(|| anyhow::anyhow!("file publication round disappeared"))?;
+    timings.report(dbnum, round_end_sesno);
     anyhow::ensure!(
         published.status == "done",
         "file spatial publication has not converged: {}",
@@ -2128,6 +2306,10 @@ fn window_remainder_batch(
         previous_observed_sesno: job.previous_observed_sesno,
         first_pending_sesno_time: None,
         file_latest_sesno_time: None,
+        // 余量是同一条重建的续跑：人说过要清库的话跟着走（清库本身在首段已经做完，
+        // 续跑的冻结点若仍判无异常也不会再清——applied 已非 0，走的是增量分支）。
+        reinit_requested: job.reinit_requested,
+        regen_roots: job.regen_roots.clone(),
     }
 }
 
@@ -2209,6 +2391,7 @@ async fn execute_frozen_batch_body(
             &cand,
             job.previous_observed_sesno,
             effective_window_session_budget(job.dbnum, job.epoch_id),
+            job.reinit_requested,
             progress,
             warnings,
         )
@@ -2224,17 +2407,10 @@ async fn execute_frozen_batch_body(
     // makes that intent exclusive.
     let defer_model_phase = model_phase_is_deferred(model_incremental, applied);
 
-    // SYST 数据落库后，TEAM 等派生表要跟着刷。走持久补偿队列而不是就地同步：
-    // 同一条重试通道、同一个 MAX_ATTEMPTS，崩了下一轮接着来。
+    // SYST 数据落库后：MDB / CURD 就在这个库里，本期执行范围可能刚被它撑宽，作废范围缓存。
+    // TEAM 等派生表的同步（`team_data::sync_team_data`）已于 2026-09-07 随 feature = "sql" 退役，
+    // 原先排进补偿队列的 SYST 派生作业是空转，随非空间补偿队列一起删掉（ADR-071 D9，d-300）。
     if applied && job.db_type == "SYST" {
-        if let Some(b) = &batch {
-            if let Err(error) =
-                SideEffectCompensator::enqueue_syst(job.dbnum, b.end_sesno, &job.db_type).await
-            {
-                warnings.push(format!("SYST 派生任务入队失败: {error:#}"));
-            }
-        }
-        // MDB / CURD 就在这个库里，本期执行范围可能刚被它撑宽。
         crate::data_interface::update_scope::invalidate_scope_cache();
         SCOPE_DIRTY.store(true, Ordering::SeqCst);
     }
@@ -2244,16 +2420,6 @@ async fn execute_frozen_batch_body(
     // 都属于当前 dbnum Task，不再等全局 idle drain。
     let mut non_regen_failed = false;
     let mut side_effect_failed = false;
-    if !defer_model_phase {
-        match SideEffectCompensator::drain(mgr).await {
-            Ok(n) if n > 0 => println!("批次后副作用补偿完成 {n} 个任务"),
-            Ok(_) => {}
-            Err(error) => {
-                warnings.push(format!("副作用补偿失败（已保留待重试）: {error:#}"));
-                side_effect_failed = true;
-            }
-        }
-    }
 
     // 位姿 / 删除 / 级联先行——级联展开会反过来入队 regen 工作，随后一起并进
     // 本批的单元工作单（与旧手动路径的顺序一致）。
@@ -2310,6 +2476,14 @@ async fn execute_frozen_batch_body(
     } else if batch_regen_is_allowed(non_regen_failed) {
         match load_pending_model_units_for_retry(job.dbnum).await {
             Ok(pending) => {
+                // 明确要重算的根（目录级联并进这条 ApplyWindow 时带来的名单）也进本任务的工作单。
+                new_units.extend(explicit_regen_units(
+                    job,
+                    batch
+                        .as_ref()
+                        .map(|batch| batch.end_sesno)
+                        .unwrap_or(job.end_sesno),
+                ));
                 let worklist = merge_unit_worklist(new_units, pending);
                 run_unit_worklist(mgr, registry, &job.task_id, worklist, progress, warnings).await
             }
@@ -2805,120 +2979,150 @@ async fn run_unit_worklist(
     }
 
     if !batchable.is_empty() {
-        for task in &batchable {
-            emit(
-                progress,
-                ManualUpdateEvent::ModelUnitStarted {
-                    dbnum: task.dbnum,
-                    root_refno: task.root_refno.clone(),
-                    noun: task.noun.clone(),
-                },
-            );
-        }
-        let roots = batchable
-            .iter()
-            .map(|task| task.root_refno.clone())
-            .collect::<Vec<_>>();
-        let mut lock_roots = roots.clone();
-        lock_roots.sort_unstable();
-        lock_roots.dedup();
-        // 排序去重是防死锁纪律：多个持有者必须按同一顺序（refno 字典序）获取。
-        let locks = lock_roots
-            .iter()
-            .map(|root| generation_root_lock(root))
-            .collect::<Vec<_>>();
-        let mut guards = Vec::with_capacity(locks.len());
-        for lock in &locks {
-            guards.push(lock.lock().await);
-        }
-        let batch_started = std::time::Instant::now();
-        let report =
-            crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots_report(
-                mgr, &roots,
-            )
-            .await;
-        let (completed, mut failures) = match report {
-            Ok(report) => (
-                report
-                    .completed
-                    .into_iter()
-                    .collect::<std::collections::HashSet<_>>(),
-                report
-                    .failures
-                    .into_iter()
-                    .map(|failure| (failure.root, failure.error))
-                    .collect::<std::collections::HashMap<_, _>>(),
-            ),
-            Err(error) => (
-                std::collections::HashSet::new(),
-                roots
-                    .iter()
-                    .cloned()
-                    .map(|root| (root, format!("{error:#}")))
-                    .collect(),
-            ),
-        };
-        println!(
-            "  批量重生成 {} 个根完成（成功 {} / 失败 {}，耗时 {}ms）：{}",
-            roots.len(),
-            completed.len(),
-            failures.len(),
-            batch_started.elapsed().as_millis(),
-            render_roots(&roots)
-        );
-        for task in batchable {
-            let message = failures.remove(&task.root_refno).or_else(|| {
-                (!completed.contains(&task.root_refno))
-                    .then(|| "生成器未返回该根的成功或失败结果".to_string())
-            });
-            let success = message.is_none();
-            if let Err(error) = model_update_pending::settle_regen_work(
-                &task.root_refno,
-                task.revision,
-                message.as_deref(),
-            )
-            .await
-            {
-                log::error!(
-                    "收口模型 pending 失败 dbnum={} root={}: {error:#}",
-                    task.dbnum,
-                    task.root_refno
+        // 与 durable drain 使用同一个 execution-group 上限。初始化可能一次规划数万根；
+        // 把整份 worklist 交给 generate_roots_report 会让 visited_by_root、根锁和发布回执
+        // 一直存活到最后一根，SurrealDB 侧也会同时承受数万个逐根发布事务。按小组生成并
+        // 收口后立即释放这组的文件快照、投影报告和锁，崩溃恢复则只会捡尚未收口的组。
+        let group_size = crate::options::model_regen_execution_group().max(1);
+        let mut batchable = batchable.into_iter();
+        loop {
+            let group = batchable.by_ref().take(group_size).collect::<Vec<_>>();
+            if group.is_empty() {
+                break;
+            }
+            for task in &group {
+                emit(
+                    progress,
+                    ManualUpdateEvent::ModelUnitStarted {
+                        dbnum: task.dbnum,
+                        root_refno: task.root_refno.clone(),
+                        noun: task.noun.clone(),
+                    },
                 );
+            }
+            let roots = group
+                .iter()
+                .map(|task| task.root_refno.clone())
+                .collect::<Vec<_>>();
+            let mut lock_roots = roots.clone();
+            lock_roots.sort_unstable();
+            lock_roots.dedup();
+            // 排序去重是防死锁纪律：多个持有者必须按同一顺序（refno 字典序）获取。
+            let locks = lock_roots
+                .iter()
+                .map(|root| generation_root_lock(root))
+                .collect::<Vec<_>>();
+            let mut guards = Vec::with_capacity(locks.len());
+            for lock in &locks {
+                guards.push(lock.lock().await);
+            }
+            let batch_started = std::time::Instant::now();
+            let report =
+                crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots_report(
+                    mgr, &roots,
+                )
+                .await;
+            let (completed, mut failures) = match report {
+                Ok(report) => (
+                    report
+                        .completed
+                        .into_iter()
+                        .collect::<std::collections::HashSet<_>>(),
+                    report
+                        .failures
+                        .into_iter()
+                        .map(|failure| (failure.root, failure.error))
+                        .collect::<std::collections::HashMap<_, _>>(),
+                ),
+                Err(error) => (
+                    std::collections::HashSet::new(),
+                    roots
+                        .iter()
+                        .cloned()
+                        .map(|root| (root, format!("{error:#}")))
+                        .collect(),
+                ),
+            };
+            println!(
+                "  分组重生成 {} 个根完成（成功 {} / 失败 {}，耗时 {}ms）：{}",
+                roots.len(),
+                completed.len(),
+                failures.len(),
+                batch_started.elapsed().as_millis(),
+                render_roots(&roots)
+            );
+
+            // 成功根在一条有界事务里收口；失败根仍逐根记录自己的错误。收口失败不是
+            // 生成失败：成功根保持 pending，下一次恢复会幂等重跑并再次尝试收口。
+            let settlements = group
+                .iter()
+                .filter(|task| completed.contains(&task.root_refno))
+                .filter_map(|task| {
+                    task.revision
+                        .map(|revision| (task.root_refno.clone(), revision))
+                })
+                .collect::<Vec<_>>();
+            if let Err(error) = model_update_pending::clear_regen_work_batch(&settlements).await {
+                log::error!("批量收口模型 pending 失败: {error:#}");
                 warnings.push(error.to_string());
                 settlement_failed = true;
             }
-            if !success {
-                settlement_failed = true;
-            }
-            emit(
-                progress,
-                ManualUpdateEvent::ModelUnitFinished {
+
+            for task in group {
+                let message = failures.remove(&task.root_refno).or_else(|| {
+                    (!completed.contains(&task.root_refno))
+                        .then(|| "生成器未返回该根的成功或失败结果".to_string())
+                });
+                let success = message.is_none();
+                if let Some(error_message) = message.as_deref()
+                    && let Err(error) = model_update_pending::settle_regen_work(
+                        &task.root_refno,
+                        task.revision,
+                        Some(error_message),
+                    )
+                    .await
+                {
+                    log::error!(
+                        "记录模型 pending 失败 dbnum={} root={}: {error:#}",
+                        task.dbnum,
+                        task.root_refno
+                    );
+                    warnings.push(error.to_string());
+                    settlement_failed = true;
+                }
+                if !success {
+                    settlement_failed = true;
+                }
+                emit(
+                    progress,
+                    ManualUpdateEvent::ModelUnitFinished {
+                        dbnum: task.dbnum,
+                        root_refno: task.root_refno.clone(),
+                        success,
+                        message: message.clone(),
+                    },
+                );
+                registry.bump_units_done(task_id);
+                results.push(ModelUnitResult {
                     dbnum: task.dbnum,
-                    root_refno: task.root_refno.clone(),
-                    success,
-                    message: message.clone(),
-                },
-            );
-            registry.bump_units_done(task_id);
-            results.push(ModelUnitResult {
-                dbnum: task.dbnum,
-                root_refno: task.root_refno,
-                noun: task.noun,
-                status: if success {
-                    UnitGenStatus::Generated
-                } else {
-                    UnitGenStatus::Failed
-                },
-                attempts: task.attempts + u32::from(!success),
-                message,
-                old_owner: task.old_owner,
-                new_owner: task.new_owner,
-                kind: UnitKind::Regen,
-                transform_fallback_reason: None,
-            });
+                    root_refno: task.root_refno,
+                    noun: task.noun,
+                    status: if success {
+                        UnitGenStatus::Generated
+                    } else {
+                        UnitGenStatus::Failed
+                    },
+                    attempts: task.attempts + u32::from(!success),
+                    message,
+                    old_owner: task.old_owner,
+                    new_owner: task.new_owner,
+                    kind: UnitKind::Regen,
+                    transform_fallback_reason: None,
+                });
+            }
+            drop(guards);
+            drop(locks);
         }
-        drop(guards);
-        drop(locks);
     }
 
     for task in singles {
@@ -3115,27 +3319,26 @@ async fn republish_settled_file_rounds(mgr: &AiosDBManager) -> IdleOutcome {
     let mut failed = false;
     let mut holds = Vec::new();
     for round in rounds {
-        // 非 DESI 没有文件轮次可发布（冻结点也只给 DESI 落意图行）；被发布队列接管的库
-        // 由它自己的收口调发布，这里不抢。两条与批次侧的守卫同一形状。
-        if !round.db_type.eq_ignore_ascii_case("DESI")
-            || crate::data_interface::model_publish_queue::blocks_dbnum(round.dbnum)
-        {
+        // 非 DESI 没有文件轮次可发布（冻结点也只给 DESI 落意图行）。
+        if !round.db_type.eq_ignore_ascii_case("DESI") {
             continue;
         }
-        let probe =
-            match model_update_pending::read_model_watermark_probe(&aios_core::SUL_DB, round.dbnum)
-                .await
-            {
-                Ok(probe) => probe,
-                Err(error) => {
-                    println!(
-                        "读取 dbnum={} 的文件轮次完成屏障判据失败（保留待下一轮）: {error:#}",
-                        round.dbnum
-                    );
-                    failed = true;
-                    continue;
-                }
-            };
+        let probe = match model_watermark::read_model_watermark_probe(
+            &aios_core::SUL_DB,
+            round.dbnum,
+        )
+        .await
+        {
+            Ok(probe) => probe,
+            Err(error) => {
+                println!(
+                    "读取 dbnum={} 的文件轮次完成屏障判据失败（保留待下一轮）: {error:#}",
+                    round.dbnum
+                );
+                failed = true;
+                continue;
+            }
+        };
         let readiness = file_round_readiness(&probe, round.end_sesno);
         if let Some(reason) = readiness.describe() {
             holds.push(format!(
@@ -3250,31 +3453,9 @@ async fn idle_round(
             ANNOUNCED.call_once(|| println!("*** {notice}"));
         }
     }
-    let mut side_effect_failed = false;
-    if model_phase_open {
-        if let Err(error) = SideEffectCompensator::drain(mgr).await {
-            println!("空闲副作用补偿失败（保留待重试）: {error:#}");
-            side_effect_failed = true;
-        }
-        // 队列三出路的「可收口」：drain 成功即 mark_done，但 done 行从不删。每轮顺手
-        // 清一次终态行（幂等；失败保留、下一轮重试），与 inst_relate 平表清扫同纪律。
-        match SideEffectCompensator::sweep_done().await {
-            Ok(0) => {}
-            Ok(swept) => println!("副作用补偿队列 done 行清扫：删 {swept} 行"),
-            Err(error) => println!("副作用补偿 done 行清扫失败（下一轮重试）: {error:#}"),
-        }
-        match SideEffectCompensator::has_dead_work().await {
-            Ok(true) => {
-                println!("副作用补偿存在死信，模型门保持未就绪，等待新触发复活或人工处置");
-                side_effect_failed = true;
-            }
-            Ok(false) => {}
-            Err(error) => {
-                println!("检查副作用死信失败（模型门保持未就绪）: {error:#}");
-                side_effect_failed = true;
-            }
-        }
-    }
+    // 非空间副作用补偿队列（SYST 派生 / ref_rev 补偿）的 drain / 死信 / 清扫已退役
+    // （ADR-071 D9，d-300）：空闲轮不再有「副作用补偿」这一段，模型门也不再被它的死信卡住。
+    let side_effect_failed = false;
     let (data_phase_failed, model_lock_deferred) = if model_phase_open {
         match model_update_pending::drain_data_phases_disposition(mgr).await {
             Ok(model_update_pending::ModelDrainDisposition::Completed { done }) => {
@@ -3427,7 +3608,7 @@ async fn idle_round(
     } else if crate::data_interface::watch_scope::active() {
         let mut current = true;
         for dbnum in crate::data_interface::watch_scope::dbnums() {
-            match crate::data_interface::model_update_pending::model_coverage_current(dbnum).await {
+            match crate::data_interface::model_coverage::model_coverage_current(dbnum).await {
                 Ok(true) => {}
                 Ok(false) => current = false,
                 Err(error) => {
@@ -3774,14 +3955,6 @@ fn progress_sink(registry: &'static TaskRegistry, task_id: &str) -> Option<Manua
 
 /// 冻结点重扫候选文件：路径 / 类型不变（F6 已在入队前把关），会话号与大小取现值。
 async fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
-    let retained_token = if job.intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly
-    {
-        crate::data_interface::model_publish_queue::initialization_source(job.dbnum)
-            .map(|source| source.commit_token_json())
-            .transpose()?
-    } else {
-        None
-    };
     let recovered = if job.frozen_source_token.is_none() {
         SideEffectCompensator::recover_collecting_file_round(job.dbnum, job.end_sesno).await?
     } else {
@@ -3790,7 +3963,6 @@ async fn refresh_candidate(job: &FrozenBatch) -> anyhow::Result<FileCandidate> {
     let frozen_token = job
         .frozen_source_token
         .as_deref()
-        .or(retained_token.as_deref())
         .or_else(|| recovered.as_ref().map(|(_, token)| token.as_str()));
     let frozen = match frozen_token {
         Some(token) => {
@@ -3899,6 +4071,9 @@ async fn schedule_frozen_source_replacement(
         previous_observed_sesno: 0,
         first_pending_sesno_time,
         file_latest_sesno_time,
+        // 文件被替换：这是检出的重建，不是人点的。
+        reinit_requested: false,
+        regen_roots: Vec::new(),
     };
     let outcome = scheduler.enqueue(registry, &found, false);
     scheduler.record_frozen_source(job.dbnum, false, replacement.commit_token_json()?);
@@ -3951,8 +4126,8 @@ mod tests {
         applied_sesno: i32,
         blockers: &[&str],
         abandoned: usize,
-    ) -> model_update_pending::ModelWatermarkProbe {
-        model_update_pending::ModelWatermarkProbe {
+    ) -> model_watermark::ModelWatermarkProbe {
+        model_watermark::ModelWatermarkProbe {
             blockers: blockers.iter().map(|root| (*root).to_owned()).collect(),
             abandoned,
             settled_floor: Some(applied_sesno),
@@ -4138,6 +4313,8 @@ mod tests {
             end_sesno: 90,
             previous_observed_sesno: 39,
             frozen_source_token: Some("round-token".into()),
+            reinit_requested: false,
+            regen_roots: Vec::new(),
         };
         let found = window_remainder_batch(&job, 60, 90);
         assert_eq!(found.applied_sesno, 60, "左端 = 刚提交的水位");
@@ -4357,10 +4534,10 @@ mod tests {
     /// 等 `AIOS_SCOPE_CACHE_SECS`（默认 300s）过期或者等重启才进得了执行范围，
     /// 现场只表现为「这个库怎么不更新」——issue #10 那种查不出所以然的形状。
     ///
-    /// 入队点只有一个（ADR-056 P1 之后没有提交尾那一半）：数据应用后立刻记，那一刻
-    /// 数据已经 durable。
+    /// SYST 派生（TEAM_DATA 镜像）已于 2026-09-07 退役，它的补偿队列于 2026-09-10 随非空间副作用
+    /// 队列一起删除（ADR-071 D9，d-300）：SYST 批次落库后只剩「作废执行范围缓存 + 让空闲轮重扫」。
     #[test]
-    fn a_syst_batch_books_its_derived_sync_and_invalidates_the_scope_cache() {
+    fn a_syst_batch_invalidates_the_scope_cache_without_booking_a_derived_sync() {
         let source = include_str!("batch_worker.rs");
         let executor = source
             .split_once("async fn execute_frozen_batch(")
@@ -4378,8 +4555,8 @@ mod tests {
             .0;
 
         assert!(
-            direct.contains("SideEffectCompensator::enqueue_syst("),
-            "直写路径必须把 SYST 派生同步记进补偿队列"
+            !direct.contains("enqueue_syst(") && !direct.contains("SideEffectCompensator::drain("),
+            "非空间补偿队列已退役（ADR-071 D9，d-300）：直写路径不得再排 SYST 派生作业或 drain 补偿队列"
         );
         assert!(
             direct.contains("update_scope::invalidate_scope_cache()"),
@@ -4390,12 +4567,8 @@ mod tests {
             "直写路径必须让空闲轮重扫：新进范围的库没有自己的文件事件"
         );
         assert!(
-            direct.contains("SYST 派生任务入队失败"),
-            "入队失败要说出口，不能静默吞掉"
-        );
-        assert!(
             !executor.contains("enqueue_syst("),
-            "执行入口不得再有第二个入队点，否则同一批次记两遍: {executor}"
+            "执行入口也不得再有 SYST 派生入队点: {executor}"
         );
     }
 
@@ -4604,16 +4777,15 @@ mod tests {
         assert!(batch_failure_blocks_data_phase(Partial, None));
     }
 
-    /// 增量模式只剩一个值，且 `/health` 仍从这一处读它（ADR-056 P1；翻自
-    /// `emergency_direct_mode_is_visible_and_does_not_warn_for_baselines`）。
+    /// 稳态增量只有直写一条路径（ADR-056 P1）。`/health.increment_mode` 那一格曾为监控
+    /// 切换保留、值只剩 `direct`，2026-09-10 随 ADR-071 S7 一并删掉（plant-ui / ops.html /
+    /// spec 都不读它）；翻自 `emergency_direct_mode_is_visible_and_does_not_warn_for_baselines`。
     ///
     /// `GEN_MODEL_DIRECT_INCREMENT` 随暂存一起退役（D6）：环境入口、开关解析与
     /// 「应急直写已启用」告警都不得再出现——留一个读环境变量的口子就是留一条没人
     /// 测的第二路径。
     #[test]
-    fn increment_mode_is_direct_and_health_reports_it() {
-        assert_eq!(increment_mode(), "direct");
-
+    fn the_direct_increment_switch_family_stays_retired() {
         let source = include_str!("batch_worker.rs");
         let production = source
             .split_once("\n#[cfg(test)]")
@@ -4623,19 +4795,19 @@ mod tests {
         assert!(
             !production.contains("\"GEN_MODEL_DIRECT_INCREMENT\"")
                 && !production.contains("fn direct_increment_enabled")
-                && !production.contains("fn use_staged_increment_window"),
+                && !production.contains("fn use_staged_increment_window")
+                && !production.contains("fn increment_mode("),
             "直写开关族已随 kv-mem 暂存退役，不得回来"
         );
         assert!(
             !production.contains("\"direct_emergency\"") && !production.contains("\"staged\""),
-            "increment_mode 只剩 direct 一个值"
+            "增量模式没有第二个值"
         );
 
         let health = include_str!("../web_service/handlers.rs");
         assert!(
-            health.contains(
-                "\"increment_mode\": crate::data_interface::batch_worker::increment_mode()"
-            )
+            !health.contains("\"increment_mode\""),
+            "/health 不再有 increment_mode 这一格（只剩 direct 的字段没有信息量）"
         );
         // 曾钉「直写模式强制空间树重建」（aabb_tree.rs 引用本模块的
         // direct_increment_enabled）。启动改走分层指纹判据（2026-08-11 方案）后
@@ -4714,6 +4886,15 @@ mod tests {
             units.contains("ModelRefreshPolicy::generate_roots_report("),
             "批量重生成必须消费逐根结果，不能把部分失败折成整批错误: {units}"
         );
+        assert!(
+            units.contains("crate::options::model_regen_execution_group().max(1)")
+                && units.contains("batchable.by_ref().take(group_size)"),
+            "初始化工作单也必须按 durable drain 的有界 execution group 生成: {units}"
+        );
+        assert!(
+            units.contains("clear_regen_work_batch(&settlements).await"),
+            "每个有界生成组必须随即批量收口，不能把数万条逐根事务压给 SurrealDB: {units}"
+        );
         assert!(!units.contains("回退逐根重试以定位问题根"));
 
         for gone in [
@@ -4785,24 +4966,33 @@ mod tests {
             .split_once("async fn publish_model_file_round(")
             .expect("发布帮助函数")
             .1;
+        // 空间发布现在是任务直发（集合来自 `task_effects` 那本内存账，ADR-071 D1），
+        // 不再绕账本一圈；顺序纪律不变。
         let spatial = helper
-            .find("reconcile_spatial_pending(mgr)")
+            .find("publish_task_spatial_effects(")
             .expect("空间发布");
-        let room_input = helper
-            .find("stage_published_room_input")
-            .expect("房间候选输入");
+        assert!(!helper.contains("stage_published_room_input"), "publication must not copy room geometry");
         let room_topology = helper
             .find("stage_candidate_room_topology")
             .expect("房间候选拓扑");
         let promote = helper.find("promote_file_round").expect("发布意图提升");
         assert!(
-            room_input < room_topology && room_topology < promote && promote < spatial,
+            room_topology < promote && promote < spatial,
             "房间候选必须完整落库后才能切换文件发布清单: {helper}"
         );
         // 空间发布先于房间收尾：房间收尾（清边 → 定向消费 → 开关早退）已随 T4.1 原样搬进
         // `fast_model::room_task`。两阶段的先后由 `execute_frozen_batch` 的调用序钉住
         // （publish < rooms，见 `an_initialization_publish_run_is_closed_by_the_owning_task`）；
         // 收尾内部的清边/消费/开关次序由 `room_task::room_finalization_clears_before_draining` 钉。
+    }
+
+    #[test]
+    fn completion_coverage_uses_the_exclusive_left_boundary() {
+        use crate::data_interface::batch_queue::BatchIntent;
+        assert_eq!(completion_coverage_start(BatchIntent::ApplyWindow, 166, None), 165);
+        assert_eq!(completion_coverage_start(BatchIntent::ApplyWindow, 1, None), 0);
+        assert_eq!(completion_coverage_start(BatchIntent::ModelOnly, 166, Some(160)), 160);
+        assert_eq!(completion_coverage_start(BatchIntent::ModelOnly, 166, None), 165);
     }
 
     fn unit_task(
@@ -5350,8 +5540,11 @@ mod tests {
         assert!(!production.contains("initialization_defers_model_phase"));
     }
 
+    /// 任务收尾的阶段顺序：文件轮次发布 → 完成收据 → 房间 → 一笔收尾盖三水位（ADR-065 G2 (i)，
+    /// 修 d-73 的顺序）。初始化发布 run 已退役（ADR-071 S5，d-300）：Task 不再等 ACK、不再
+    /// 「收口 run」、也不再问某库是否被发布队列接管。
     #[test]
-    fn an_initialization_publish_run_is_closed_by_the_owning_task() {
+    fn the_task_tail_runs_publish_receipt_rooms_then_stamp_without_a_publish_run() {
         let source = include_str!("batch_worker.rs");
         let body = source
             .split_once("async fn execute_frozen_batch(")
@@ -5360,24 +5553,44 @@ mod tests {
             .split_once("fn batch_round_complete(")
             .expect("batch wrapper boundary")
             .0;
-        assert!(!body.contains("blocks_dbnum(job.dbnum)"));
-        // rustfmt 会把长调用折行（`finish_ready_initializations(\n mgr,\n)`），逐字面
-        // 找带实参的调用会被格式化打红；去掉全部空白后再定位，钉的仍是「调用存在 +
-        // 阶段顺序」这两件事。
+        for retired in [
+            "blocks_dbnum(",
+            "finish_ready_initializations(",
+            "wait_for_task_root_acks(",
+            "initialization_source(",
+        ] {
+            assert!(
+                !body.contains(retired),
+                "初始化发布 run 已退役，Task 不得再调 {retired}"
+            );
+        }
+        // rustfmt 会把长调用折行，去掉全部空白后再定位，钉的是「调用存在 + 阶段顺序」。
         let body: String = body.split_whitespace().collect();
         let publish = body
             .find("publish_model_file_round(")
             .expect("Task publish");
-        let complete = body
+        let receipt = body
             .find("complete_model_task_on(")
-            .expect("Task watermark");
-        let finish = body
-            .find("finish_ready_initializations(mgr")
-            .expect("Task closes acknowledged initialization run");
+            .expect("Task completion receipt");
         let rooms = body
             .find("finish_file_room_round(")
             .expect("Task room stage");
-        assert!(publish < complete && complete < rooms && rooms < finish);
+        // 收尾那一笔有两处：数据批次应用之后的 Ref0 统计快照（`ref0_snapshot::snapshot_at` 之后、
+        // 与模型无关、排在发布之前），与模型 / 房间之后盖水位的那一笔。钉的是后者。
+        let snapshot = body
+            .find("ref0_snapshot::snapshot_at(")
+            .expect("Ref0 snapshot after the data batch");
+        let stats_tail = body
+            .find("task_end::commit_task_end_on(")
+            .expect("statistics tail");
+        let stamp = body
+            .rfind("task_end::commit_task_end_on(")
+            .expect("Task end watermark");
+        assert!(
+            snapshot < stats_tail && stats_tail < publish,
+            "统计快照排在数据批次之后、模型发布之前，不等模型"
+        );
+        assert!(publish < receipt && receipt < rooms && rooms < stamp);
     }
 
     /// 前置阻断只认**本批这个库**的失败。

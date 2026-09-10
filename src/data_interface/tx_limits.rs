@@ -11,7 +11,7 @@
 //! | 一笔事务的写行上限 | 5000 | `data_tx_max_write_rows` |
 //! | 一块的元素数上限 | 1000 | `data_tx_elements` |
 //!
-//! 三个都是**上限**：超过任一项就把块劈半（`element_batch` / `dbnum_stats::batches` 已有的形状）。
+//! 三个都是**上限**：超过任一项就把块劈半（`element_batch` / `pe_batch::batches` 已有的形状）。
 //! `/health` 报生效值。Q6 的取舍：先 2 MiB，P0 实测单笔超 3 s 再降。
 
 /// 一笔数据面事务的 SQL 字节上限（默认 2 MiB）。

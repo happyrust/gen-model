@@ -210,7 +210,7 @@ impl StagedExecutor {
     /// 任何一块失败即上抛——日志与暂存原样保留，调用方可整体重试（T4.1 的
     /// 退避与「写回滞留」告警在上层）。窗口语句批失败同样发生在尾事务之前：
     /// 水位不动，重试或整窗口重算都会幂等收敛（2026-08-10 审核 P1 的拆块论证
-    /// 见 `model_update_pending::FinalizeRender`）。尾事务自身单独一个事务，
+    /// 见 `increment_tail::FinalizeRender`）。尾事务自身单独一个事务，
     /// 收口条件（水位、revision 判真）在持久层判定。
     pub async fn commit_to(
         &self,

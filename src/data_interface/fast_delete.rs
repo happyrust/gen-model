@@ -270,8 +270,8 @@ pub async fn prune_above_watermark(
         statements.push(format!("DELETE {}:{key};", row.noun));
         statements.push(format!("DELETE pe:{key};"));
         let writes = statements.drain(start..).collect::<Vec<_>>().join(";\n");
-        let sql = super::dbnum_stats::transaction(dbnum, &[key], &writes)?;
-        super::dbnum_stats::execute_on(&SUL_DB, &sql).await?;
+        let sql = super::pe_batch::transaction(dbnum, &[key], &writes)?;
+        super::pe_batch::execute_on(&SUL_DB, &sql).await?;
     }
     statements.push(format!(
         "DELETE model_update_pending WHERE dbnum = {dbnum} AND <int>source_end_sesno > {target_watermark};"
@@ -473,21 +473,12 @@ pub async fn delete_dbnum_fast(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResu
 pub(crate) async fn wipe_dbnum_for_reinit(dbnum: u32) -> anyhow::Result<FastDeleteDbnumResult> {
     let result = wipe_dbnum_rows(dbnum, WatermarkDisposal::ResetForReinit).await?;
     // 反向翻面（plan 2026-09-06 §8 R5）：水位清零后这个库在 rocksdb 里又「没准备好」了，
-    // 按需请求改由进程内投影供数，直到重建的初始化 run 收口。
+    // 按需请求改由进程内投影供数，直到重建的初始化任务跑完。
     crate::data_interface::model_read_route::announce_source_changed(
         dbnum,
         crate::data_interface::model_read_route::ModelReadSource::Memory,
     );
     Ok(result)
-}
-pub(crate) async fn wipe_uncommitted_initialization_data(
-    dbnum: u32,
-) -> anyhow::Result<FastDeleteDbnumResult> {
-    anyhow::ensure!(
-        crate::data_interface::model_publish_queue::preparing_dbnum(dbnum),
-        "no prepared initialization owns this database"
-    );
-    wipe_dbnum_rows(dbnum, WatermarkDisposal::RestartInitializationData).await
 }
 
 async fn wipe_dbnum_rows(
@@ -497,7 +488,7 @@ async fn wipe_dbnum_rows(
     if dbnum == 0 {
         bail!("dbnum must be greater than zero");
     }
-    super::dbnum_stats::require_no_event_on(&SUL_DB).await?;
+    super::pe_batch::require_no_event_on(&SUL_DB).await?;
     let started = Instant::now();
     let _commit_guard = crate::data_interface::batch_worker::DATA_COMMIT_SERIAL
         .lock()
@@ -580,6 +571,8 @@ async fn wipe_dbnum_rows(
             "dbnum {dbnum} fast delete incomplete: {remaining_owner_edges} pe_owner edges remain in the Ref0 id ranges"
         );
     }
+
+    crate::data_interface::dbnum_state::DbnumState::invalidate_mirrored(dbnum);
 
     Ok(FastDeleteDbnumResult {
         dbnum,

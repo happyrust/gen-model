@@ -12,9 +12,11 @@ use crate::data_interface::generation_root::{
     configured_delivery_unit_types, is_coarse_hierarchy_noun, resolve_live_element_generation_root,
 };
 use crate::data_interface::manual_update::{generate_unit_model, generation_root_lock};
+use crate::data_interface::model_coverage::{
+    generation_root_cache_current, generation_roots_cache_current,
+};
 use crate::data_interface::model_update_pending::{
-    ensure_regen_pending_current, generation_root_cache_current, generation_roots_cache_current,
-    settle_regen_work,
+    ensure_regen_pending_current, settle_regen_work,
 };
 use crate::data_interface::tidb_manager::AiosDBManager;
 

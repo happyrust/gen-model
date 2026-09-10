@@ -28,7 +28,8 @@ use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 
 use crate::data_interface::dbnum_state::escape_surql_str;
-use crate::data_interface::model_update_pending::{ATTEMPT_TABLE, MAX_ATTEMPTS};
+use crate::data_interface::increment_tail::ATTEMPT_TABLE;
+use crate::data_interface::model_update_pending::MAX_ATTEMPTS;
 
 /// 一个生成根的失败记录。
 #[derive(Debug, Clone, Deserialize, Serialize)]

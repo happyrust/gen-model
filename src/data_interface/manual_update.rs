@@ -54,7 +54,9 @@ use surrealdb::sql::Thing;
 
 use crate::data_interface::db_file_header::DbBasicInfo;
 
-use crate::data_interface::batch_scheduler::{ManualEnqueueReceipt, ShadowedCandidate};
+use crate::data_interface::batch_scheduler::{
+    ManualEnqueueOptions, ManualEnqueueReceipt, ShadowedCandidate,
+};
 use crate::data_interface::dbnum_state::{
     DbnumState, FileAnomaly, FileObservation, check_file_against_state, escape_surql_str,
 };
@@ -129,6 +131,36 @@ pub(crate) fn has_data_backing(
     confirmed_empty_baseline_sesno: Option<i32>,
 ) -> bool {
     has_any_data || confirmed_empty_baseline_sesno == Some(applied_sesno)
+}
+
+/// 冻结点「要不要清库」的三格裁决（ADR-021 §3 + 2026-09-10 重新计算契约 C2）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReinitWipeDecision {
+    /// 身份歧义（`TypeChanged` / `Duplicate` / `Missing`…）：不清库、Skipped 等人——
+    /// 机器不替人挑文件，**人要求重新解析也不放宽**（ADR-021 §5）。
+    Skip(String),
+    /// 清库并按首次导入重新解析；带的是**触发源**那句（进阶段名与回执，两种措辞分开）。
+    Wipe(String),
+    /// 无异常、也没人要求清库：按普通窗口 / 基线走。
+    Proceed,
+}
+
+/// 三格：① 有异常且是回退 → 清库（回退重建，照旧）；② 有异常但不是回退 → Skipped（照旧）；
+/// ③ 无异常 → 人工要求过（`reinit_requested`）才清库，否则照常。人工请求**只在第 ③ 格说话**：
+/// 它不能把身份歧义翻成清库，也不需要在回退那一格重复——那一格本来就清。
+pub(crate) fn reinit_wipe_decision(
+    reinit_requested: bool,
+    block_reason: Option<String>,
+    requires_reinit: bool,
+) -> ReinitWipeDecision {
+    match block_reason {
+        Some(reason) if requires_reinit => {
+            ReinitWipeDecision::Wipe(format!("检测到回退（{reason}）"))
+        }
+        Some(reason) => ReinitWipeDecision::Skip(reason),
+        None if reinit_requested => ReinitWipeDecision::Wipe("人工重新解析".to_owned()),
+        None => ReinitWipeDecision::Proceed,
+    }
 }
 
 fn needs_initial_load(
@@ -3189,10 +3221,6 @@ fn baseline_has_uncommitted_rows(pe_count: usize, applied_sesno: i32) -> bool {
     pe_count > 0 && applied_sesno == 0
 }
 
-fn baseline_stats_need_rebuild(pe_count: usize, info_count: usize) -> bool {
-    pe_count != info_count
-}
-
 fn baseline_parse_matches(pe_count: usize, root_count: usize, parsed_count: usize) -> bool {
     pe_count.checked_sub(root_count) == Some(parsed_count)
 }
@@ -3206,10 +3234,6 @@ fn baseline_parse_confirmed_empty(
 ) -> bool {
     parsed_count == Some(0) && baseline_parse_matches(pe_count, root_count, 0)
 }
-
-#[cfg(test)]
-#[path = "baseline_root_parity_tests.rs"]
-mod baseline_root_parity_tests;
 
 /// Turn a freshly baselined dbnum's active ownership graph into durable,
 /// fine-grained generation work (pure).
@@ -3359,40 +3383,6 @@ async fn baseline_model_plan(
         &nodes,
         &configured_delivery_unit_types(),
     )
-}
-
-/// Use the same root resolver as the persisted baseline, with a session-pinned
-/// ownership graph. It is available before attribute ingestion writes any PE.
-async fn frozen_baseline_model_plan(
-    dbnum: u32,
-    source: &crate::data_interface::frozen_source::FrozenSource,
-) -> anyhow::Result<ModelUpdatePlan> {
-    let source = source.reopen_verified()?;
-    let service =
-        crate::fast_model::e3d_model_service::E3dModelService::from_frozen_source(&source).await?;
-    let units = configured_delivery_unit_types();
-    tokio::task::spawn_blocking(move || {
-        use crate::data_interface::generation_root::refno_from_e3d;
-        use e3d_io::refno::RefNo;
-        let session = source.target_sesno();
-        let index = crate::fast_model::e3d_model_service::scan_index(source.path(), Some(session))?;
-        let set = service.build_set(dbnum, Some(session))?;
-        let mut nodes = HashMap::with_capacity(index.owners.len());
-        for (&(word0, word1), &owner) in index.owners.iter() {
-            let refno = RefNo::new(word0, word1);
-            let element = set.element(refno);
-            nodes.insert(
-                refno_from_e3d(refno),
-                OwnerNode {
-                    owner: (owner.is_valid() && owner != refno).then(|| refno_from_e3d(owner)),
-                    noun: element.element_type()?,
-                    name: element.stored_name()?.unwrap_or_default(),
-                },
-            );
-        }
-        baseline_work_items(dbnum, "DESI", session as i32, &nodes, &units)
-    })
-    .await?
 }
 
 fn file_modified_rfc3339(meta: &std::fs::Metadata) -> Option<String> {
@@ -3687,14 +3677,11 @@ impl AiosDBManager {
             Ok(rows.first().map(|row| row.count).unwrap_or_default())
         }
 
-        async fn baseline_counts(dbnum: u32) -> anyhow::Result<(usize, usize, usize)> {
+        /// pe 行数与 WORL 根数。`dbnum_info_table` 不再参与基线完整性判定（ADR-071 D6：统计由
+        /// 任务收尾从目标索引序列化，`count` 是活元素数，与「pe 行数」本就不是同一口径）。
+        async fn baseline_counts(dbnum: u32) -> anyhow::Result<(usize, usize)> {
             let pe_count = scalar_count(format!(
                 "SELECT count() AS count FROM pe WHERE dbnum = {dbnum} GROUP ALL"
-            ))
-            .await?;
-            let info_count = scalar_count(format!(
-                "SELECT math::sum(count) AS count \
-                 FROM dbnum_info_table WHERE dbnum = {dbnum} GROUP ALL"
             ))
             .await?;
             // 走 `pe_dbnum_noun` 整键索引（common.surql）：`string::uppercase(noun)` 会让计划器
@@ -3705,7 +3692,7 @@ impl AiosDBManager {
                  WHERE dbnum = {dbnum} AND noun = 'WORL' GROUP ALL"
             ))
             .await?;
-            Ok((pe_count, info_count, root_count))
+            Ok((pe_count, root_count))
         }
 
         // 基线也要留下文件身份（file_path / db_type / file_name / 观察值）：
@@ -3737,52 +3724,17 @@ impl AiosDBManager {
         }
 
         let applied_sesno = DbnumState::applied_sesno(dbnum).await?;
-        let (mut count, mut info_count, mut root_count) = baseline_counts(dbnum).await?;
+        let (mut count, mut root_count) = baseline_counts(dbnum).await?;
         if baseline_has_uncommitted_rows(count, applied_sesno) {
-            let wiped = if crate::data_interface::model_publish_queue::preparing_dbnum(dbnum) {
-                crate::data_interface::fast_delete::wipe_uncommitted_initialization_data(dbnum)
-                    .await?
-            } else {
-                crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await?
-            };
+            // 半截基线只有一种清法（ADR-071 S5，d-300）：没有「预备中的初始化 run」可认领它。
+            let wiped = crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await?;
             println!(
                 "dbnum={dbnum} 清理未提交基线残留 PE={}，从水位 0 重新解析",
                 wiped.pe_rows
             );
-            (count, info_count, root_count) = baseline_counts(dbnum).await?;
+            (count, root_count) = baseline_counts(dbnum).await?;
         }
         let mut parsed_count = None;
-        let parallel_initialization = crate::options::init_async_publish()
-            && db_type == "DESI"
-            && std::env::var("AIOS_INIT_PARALLEL_GENERATION").as_deref() != Ok("0");
-        let frozen_initialization = if parallel_initialization {
-            let active_source = crate::data_interface::batch_worker::active_frozen_source()?;
-            let source = crate::versioned_db::baseline::source_for_file(
-                file_path,
-                Some(u32::try_from(file_latest_sesno)?),
-                active_source.as_ref(),
-            )?;
-            if !crate::data_interface::model_publish_queue::blocks_dbnum(dbnum) {
-                let started = std::time::Instant::now();
-                let plan = frozen_baseline_model_plan(dbnum, &source).await?;
-                if !plan.work_items.is_empty() {
-                    crate::data_interface::model_update_pending::enqueue_plan(&plan).await?;
-                    crate::data_interface::model_publish_queue::prepare_baseline(
-                        dbnum,
-                        source.clone(),
-                    )
-                    .await?;
-                }
-                println!(
-                    "[model-publish] dbnum={dbnum} frozen plan roots={} elapsed_ms={}",
-                    plan.work_items.len(),
-                    started.elapsed().as_millis()
-                );
-            }
-            Some(source)
-        } else {
-            None
-        };
         if baseline_needs_full_parse(count, applied_sesno) {
             // 单文件基线摄入（`Fresh` 整库写，不动水位；失败先清库再 Err）。冻结在本轮复核过的
             // `file_latest_sesno` 上，与模型面的冻结源同一个会话；文件头 dbnum / db_type 与这里
@@ -3797,7 +3749,7 @@ impl AiosDBManager {
             )
             .await?;
             parsed_count = Some(ingested.elements);
-            (count, info_count, root_count) = baseline_counts(dbnum).await?;
+            (count, root_count) = baseline_counts(dbnum).await?;
             let parent = extract_parent
                 .map(std::path::Path::to_path_buf)
                 .or_else(|| crate::data_interface::extract_family::parent_path_of(file_path))
@@ -3830,7 +3782,7 @@ impl AiosDBManager {
                                 parent.display()
                             )
                         })?;
-                        (count, info_count, root_count) = baseline_counts(dbnum).await?;
+                        (count, root_count) = baseline_counts(dbnum).await?;
                         parsed_count = None;
                     }
                     Err(error) => anyhow::bail!(
@@ -3839,24 +3791,15 @@ impl AiosDBManager {
                     ),
                 }
             }
-        } else if baseline_stats_need_rebuild(count, info_count) {
-            crate::versioned_db::database::rebuild_dbnum_info_from_pe(dbnum, file_name, db_type)
-                .await?;
-            (count, info_count, root_count) = baseline_counts(dbnum).await?;
         }
-        if count != info_count {
-            anyhow::bail!(
-                "dbnum={} 基线不完整: PE={} dbnum_info={}; 不推进 applied_sesno",
-                dbnum,
-                count,
-                info_count
-            );
-        }
+        // `pe_count == info_count` 那道对账 2026-09-10 随 ADR-071 D6 退了：统计不再由写事务逐笔
+        // 维护、也不在基线收尾重建，而是任务收尾从目标索引序列化，口径是活元素数——拿它跟 pe 行数
+        // 对账既不成立也没必要（序列化没有漂移可抓）。基线完整性只看 `baseline_parse_matches`。
         // 与增量收口同一把尺子：水位落在 `file_latest_sesno` 上，就存那一条保存的写入时刻。
         let applied_sesno_time = session_time_rfc3339(project, file_path, file_latest_sesno);
         if baseline_parse_confirmed_empty(parsed_count, count, root_count) {
             // 空库（无 PE 或仅 WORL 根）：全量解析成功但确实没有业务元素。
-            crate::data_interface::model_update_pending::finalize_baseline(
+            crate::data_interface::increment_tail::finalize_baseline(
                 dbnum,
                 file_latest_sesno,
                 applied_sesno_time.as_deref(),
@@ -3884,19 +3827,11 @@ impl AiosDBManager {
         // 生成工作与水位同一事务收口：枚举失败就整体不推进，下一轮重来（applied
         // 仍为 0，`baseline_needs_full_parse` 会再解析一遍，幂等但不便宜）——这比
         // 「水位推上去、库里一个模型都没有、而且此后永远不会有」要好得多。
-        let prepared = frozen_initialization.is_some()
-            && crate::data_interface::model_publish_queue::preparing_dbnum(dbnum);
-        let plan = if prepared {
-            ModelUpdatePlan::default()
-        } else {
-            baseline_model_plan(dbnum, db_type, file_latest_sesno).await?
-        };
-        let roots = if prepared {
-            crate::data_interface::model_publish_queue::planned_roots(dbnum)
-        } else {
-            plan.work_items.len()
-        };
-        crate::data_interface::model_update_pending::finalize_baseline(
+        // 初始化发布 run 已退役（ADR-071 S5，d-300）：基线的全量生成根一律由本 dbnum 任务自己
+        // 生成、合块落库，这里只把工作单与水位同一事务收口。
+        let plan = baseline_model_plan(dbnum, db_type, file_latest_sesno).await?;
+        let roots = plan.work_items.len();
+        crate::data_interface::increment_tail::finalize_baseline(
             dbnum,
             file_latest_sesno,
             applied_sesno_time.as_deref(),
@@ -3905,22 +3840,8 @@ impl AiosDBManager {
         )
         .await?;
         if roots > 0 {
-            if crate::options::init_async_publish() && db_type == "DESI" {
-                let frozen = if let Some(source) = frozen_initialization {
-                    source.reopen_verified()?
-                } else {
-                    let active_source =
-                        crate::data_interface::batch_worker::active_frozen_source()?;
-                    crate::versioned_db::baseline::source_for_file(
-                        file_path,
-                        Some(u32::try_from(file_latest_sesno)?),
-                        active_source.as_ref(),
-                    )?
-                };
-                crate::data_interface::model_publish_queue::admit_baseline(dbnum, frozen).await?;
-            }
             println!(
-                "dbnum={} 基线已建立，排入 {roots} 个全量生成根（等待模型任务消费）",
+                "dbnum={} 基线已建立，排入 {roots} 个全量生成根（本任务随即生成）",
                 dbnum
             );
         }
@@ -4854,6 +4775,27 @@ impl AiosDBManager {
         mdb: Option<&str>,
         selected_dbnums: Option<&[u32]>,
     ) -> ManualEnqueueReceipt {
+        self.enqueue_manual_update_with(
+            project,
+            mdb,
+            selected_dbnums,
+            ManualEnqueueOptions::default(),
+        )
+        .await
+    }
+
+    /// [`Self::enqueue_manual_update`] 带选项的形态。`reinitialize`（人工重新解析，
+    /// 2026-09-10 重新计算契约 C2 / C3）只许与显式 `selected_dbnums` 同用：名单里的每个库按
+    /// 首次导入形状（`intent = Reinitialize`、`applied = 0`、窗口 `1..=file_latest`）入队并带
+    /// `reinit_requested = true`；「文件没有新保存」不再早退——人要清库，追平与否无关。
+    /// 身份歧义异常照旧阻断（ADR-021 §5 不因人要求放宽）；清库仍只在 worker 冻结点做。
+    pub async fn enqueue_manual_update_with(
+        &self,
+        project: &str,
+        mdb: Option<&str>,
+        selected_dbnums: Option<&[u32]>,
+        options: ManualEnqueueOptions,
+    ) -> ManualEnqueueReceipt {
         use crate::data_interface::batch_queue::{BatchIntent, Enqueued};
         use crate::data_interface::batch_scheduler::{
             BatchScheduler, BlockedDbnum, DiscoveredBatch,
@@ -4875,6 +4817,15 @@ impl AiosDBManager {
         // 模型类型限定同理：执行回执说「已入队」时，名单外类型的生成根其实只会入队
         // 不生成，这一句必须跟着回执走到前端。
         receipt.warnings.extend(model_type_scope::mode_notice());
+        // 人工重新解析必须点名：全范围清库重建没有人会真的想要，而且回执上也说不清
+        // 是哪些库被清了。名单缺席就整次拒，一个库都不排。
+        if options.reinitialize && selected_dbnums.is_none() {
+            receipt.warnings.push(
+                "重新解析必须显式给出 dbnums 名单（整库清空重建不接受全范围），未入队任何批次"
+                    .to_owned(),
+            );
+            return receipt;
+        }
         let Some(project_dir) = resolve_project_root(&self.db_option, project) else {
             receipt
                 .warnings
@@ -5050,6 +5001,18 @@ impl AiosDBManager {
             }
             let mut applied = verdict.applied_sesno();
             let mut intent = BatchIntent::ApplyWindow;
+            // 人工重新解析（契约 C2 / C3）：只对名单里的库、只在没有异常时改写意图——
+            // 有异常的走下面那段既有裁决（回退本来就转重建；身份歧义照旧阻断，人要求也不放宽）。
+            // 清库仍归 worker 冻结点，这里同样**不删任何数据**。
+            let reinit_requested =
+                options.reinitialize && selection.as_ref().is_some_and(|s| s.contains(&dbnum));
+            if reinit_requested && verdict.block_reason().is_none() {
+                receipt.warnings.push(format!(
+                    "dbnum={dbnum}: 人工重新解析，已按整库重建入队：worker 执行时将清空该库数据并按首次导入重新解析当前文件"
+                ));
+                applied = 0;
+                intent = BatchIntent::Reinitialize;
+            }
             if let Some(reason) = verdict.block_reason() {
                 // 回退默认整库重建（ADR-021）：不阻断，按首次导入形状（applied=0，
                 // 窗口 1..file_latest）入队；清库归 worker 执行体（冻结点复核仍判
@@ -5154,9 +5117,11 @@ impl AiosDBManager {
                     file_name: cand.file_name.clone(),
                     applied_sesno: applied,
                     file_latest_sesno: cand.file_latest_sesno,
+                    reinit_requested,
                     previous_observed_sesno,
                     first_pending_sesno_time,
                     file_latest_sesno_time,
+                    regen_roots: Vec::new(),
                 },
                 // 人按下的执行永不挂起：回执刚告诉他「已入队」，行却不动，是
                 // 最难自查的一种失望。它同时放行这个 dbnum 启动时挂起的积压。
@@ -5253,6 +5218,7 @@ impl AiosDBManager {
         cand: &FileCandidate,
         previous_observed_sesno: i32,
         session_budget: Option<usize>,
+        reinit_requested: bool,
         progress: &Option<ManualUpdateProgress>,
         warnings: &mut Vec<String>,
     ) -> (Option<DataBatchResult>, Vec<UnitTask>) {
@@ -5330,31 +5296,41 @@ impl AiosDBManager {
         }
         let mut applied = verdict.applied_sesno();
         let mut reinitialized = false;
-        if let Some(reason) = verdict.block_reason() {
-            // 回退默认整库重建（ADR-021）：执行侧以冻结点的**新鲜裁决**为准（入队
-            // 与执行之间文件可能被换掉，这里是最后一道复核），仍判回退才允许破坏
-            // 性的清库；复核不判回退时绝不动手。清库成功后 applied=0，恰好落进
-            // 下面现成的 needs_initial_load 分支——基线在同一个批次槽位里完成，
-            // 与其它批次保持串行。其余异常照旧 Skipped 等人（身份歧义不许机器替
-            // 人挑文件）；清库失败计 Failed 而不是 Skipped——半途而废的破坏性动作
-            // 不是「主动裁决」，好在水位清零排在清库的最后一个阶段，失败时水位未
-            // 动、下一轮仍判回退、清库幂等重放。
-            if !verdict
+        // 回退默认整库重建（ADR-021）：执行侧以冻结点的**新鲜裁决**为准（入队
+        // 与执行之间文件可能被换掉，这里是最后一道复核），仍判回退才允许破坏
+        // 性的清库；复核不判回退时绝不动手。清库成功后 applied=0，恰好落进
+        // 下面现成的 needs_initial_load 分支——基线在同一个批次槽位里完成，
+        // 与其它批次保持串行。其余异常照旧 Skipped 等人（身份歧义不许机器替
+        // 人挑文件）；清库失败计 Failed 而不是 Skipped——半途而废的破坏性动作
+        // 不是「主动裁决」，好在水位清零排在清库的最后一个阶段，失败时水位未
+        // 动、下一轮仍判回退、清库幂等重放。
+        //
+        // 2026-09-10 重新计算契约 C2：清库规则多认一种触发源——**人工重新解析**
+        // （`reinit_requested`，随 `Reinitialize` 行从入队一路带到这里）且冻结点复核
+        // **没有任何异常**时也清库。身份歧义照旧 Skipped，人要求也不放宽；三格判定
+        // 收在纯函数 [`reinit_wipe_decision`] 里，测试钉着。
+        let wipe_reason = match reinit_wipe_decision(
+            reinit_requested,
+            verdict.block_reason(),
+            verdict
                 .anomaly
                 .as_ref()
-                .is_some_and(FileAnomaly::requires_reinit)
-            {
-                return skipped(reason);
-            }
+                .is_some_and(FileAnomaly::requires_reinit),
+        ) {
+            ReinitWipeDecision::Skip(reason) => return skipped(reason),
+            ReinitWipeDecision::Wipe(reason) => Some(reason),
+            ReinitWipeDecision::Proceed => None,
+        };
+        if let Some(reason) = wipe_reason {
             Self::stage(
                 dbnum,
                 "wipe_reinit",
-                &format!("检测到回退（{reason}），按 ADR-021 整库清空重建"),
+                &format!("{reason}，按 ADR-021 整库清空重建"),
             );
             match crate::data_interface::fast_delete::wipe_dbnum_for_reinit(dbnum).await {
                 Ok(report) => {
                     let note = format!(
-                        "dbnum={dbnum} 回退重建：已整库清空 {} 行 PE（含派生行、统计与队列残留，\
+                        "dbnum={dbnum} {reason}：已整库清空 {} 行 PE（含派生行、统计与队列残留，\
                          {}ms），水位已清零，按首次导入重新解析当前文件",
                         report.pe_rows, report.elapsed_ms
                     );
@@ -6986,6 +6962,79 @@ mod tests {
         );
     }
 
+    /// 2026-09-10 重新计算契约 C2：冻结点清库的三格裁决。人工请求只在「无异常」那一格说话——
+    /// 它不能把身份歧义翻成清库（ADR-021 §5 不放宽），也不需要在回退那一格重复。
+    #[test]
+    fn a_manual_reinitialize_wipes_only_when_the_fresh_verdict_has_no_anomaly() {
+        // ① 回退：清库，人有没有要求都一样，措辞点名「检测到回退」。
+        for requested in [false, true] {
+            assert_eq!(
+                reinit_wipe_decision(requested, Some("文件回退".to_owned()), true),
+                ReinitWipeDecision::Wipe("检测到回退（文件回退）".to_owned())
+            );
+        }
+        // ② 身份歧义：Skipped 等人，人要求重新解析也不放宽。
+        for requested in [false, true] {
+            assert_eq!(
+                reinit_wipe_decision(requested, Some("同号多文件".to_owned()), false),
+                ReinitWipeDecision::Skip("同号多文件".to_owned())
+            );
+        }
+        // ③ 无异常：人要求过才清库；没人要求就是普通窗口 / 基线。
+        assert_eq!(
+            reinit_wipe_decision(true, None, false),
+            ReinitWipeDecision::Wipe("人工重新解析".to_owned())
+        );
+        assert_eq!(
+            reinit_wipe_decision(false, None, false),
+            ReinitWipeDecision::Proceed
+        );
+    }
+
+    /// 人工重新解析的标记要从入队一路带到冻结点：入队路只改意图与标记、**不清库**
+    /// （上面 `scan_paths_never_wipe` 已钉）；执行体的清库只经 [`reinit_wipe_decision`] 一处裁。
+    #[test]
+    fn the_manual_reinitialize_flag_rides_the_batch_and_the_wipe_is_decided_once() {
+        let source = include_str!("manual_update.rs");
+        let enqueue_body = source
+            .split_once("pub async fn enqueue_manual_update_with(")
+            .expect("enqueue_manual_update_with must exist")
+            .1
+            .split_once("pub(crate) async fn execute_one_dbnum(")
+            .expect("execute_one_dbnum follows")
+            .0;
+        assert!(
+            enqueue_body.contains("options.reinitialize && selected_dbnums.is_none()"),
+            "全范围重新解析必须整次拒绝: {enqueue_body}"
+        );
+        let flag = enqueue_body
+            .find("intent = BatchIntent::Reinitialize;")
+            .expect("人工请求改写意图");
+        let carry = enqueue_body
+            .rfind("reinit_requested,")
+            .expect("标记随 DiscoveredBatch 入队");
+        assert!(flag < carry, "先定意图再带标记入队: {enqueue_body}");
+
+        let execute_body = source
+            .split_once("pub(crate) async fn execute_one_dbnum(")
+            .expect("execute_one_dbnum must exist")
+            .1
+            .split_once("\n    /// ")
+            .map_or("", |(body, _)| body);
+        let decision = execute_body
+            .find("reinit_wipe_decision(")
+            .expect("冻结点必须经三格裁决");
+        let wipe = execute_body
+            .find("wipe_dbnum_for_reinit(")
+            .expect("清库仍在执行体");
+        assert!(decision < wipe, "先裁决再清库: {execute_body}");
+        assert_eq!(
+            execute_body.matches("wipe_dbnum_for_reinit(").count(),
+            1,
+            "执行体里清库只有一处调用"
+        );
+    }
+
     /// A baseline used to advance its watermark and queue nothing, so every root
     /// the user never edited again stayed modelless forever (incremental windows
     /// only revisit what changed). Design baselines must therefore hand back
@@ -7141,9 +7190,21 @@ mod tests {
         assert!(baseline_needs_full_parse(0, 83));
         assert!(!baseline_has_uncommitted_rows(0, 0));
         assert!(!baseline_has_uncommitted_rows(21_000, 83));
-        assert!(baseline_stats_need_rebuild(21_000, 55_653));
         assert!(!baseline_needs_full_parse(34_653, 83));
-        assert!(!baseline_stats_need_rebuild(34_653, 34_653));
+        // `pe_count == info_count` 那道对账随 ADR-071 D6 退役：基线分支不许再读 dbnum_info_table。
+        let baseline = include_str!("manual_update.rs")
+            .split_once("async fn baseline_counts(dbnum: u32)")
+            .expect("baseline_counts")
+            .1
+            .split_once("Ok(count)\n    }")
+            .expect("baseline branch end")
+            .0;
+        assert!(
+            !baseline.contains("dbnum_info_table")
+                && !baseline.contains("baseline_stats_need_rebuild(")
+                && !baseline.contains("rebuild_dbnum_info_from_pe("),
+            "基线完整性不再拿 dbnum_info_table 对账、也不在这里重建统计（ADR-071 D6）"
+        );
 
         let source = include_str!("manual_update.rs");
         let cleanup = source
@@ -8699,16 +8760,21 @@ mod tests {
             );
         }
 
-        let pipeline = include_str!("increment_pipeline.rs");
+        // 2026-09-10 起 `ref_rev` 语句在 Task 只渲染（`build_reverse_index_statements`）、随
+        // 工件由 lane 执行；形态门要挡在渲染之前，否则读透形态下 lane 会替 Task 把索引写回去。
+        let pipeline = include_str!("increment_pipeline.rs")
+            .split_once("async fn apply_one(")
+            .expect("apply_one 还在")
+            .1;
         let guarded = pipeline
             .find("if crate::options::data_face().is_read_through() {")
-            .expect("反向索引维护必须先问形态（ADR-063 D2）");
-        let maintain = pipeline
-            .find("Self::maintain_reverse_index(&range_eles)")
-            .expect("维护调用还在");
+            .expect("反向索引渲染必须先问形态（ADR-063 D2）");
+        let rendered = pipeline
+            .find("build_reverse_index_statements(&range_eles)")
+            .expect("渲染调用还在");
         assert!(
-            guarded < maintain,
-            "读透形态必须在调用之前就跳过维护（ADR-063 D2）"
+            guarded < rendered,
+            "读透形态必须在渲染之前就跳过（ADR-063 D2）"
         );
 
         let body = include_str!("manual_update.rs")

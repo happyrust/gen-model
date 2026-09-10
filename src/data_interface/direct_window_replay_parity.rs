@@ -29,7 +29,7 @@ use surrealdb::engine::any::Any;
 use crate::data_interface::increment_pipeline::{
     IncrementPipeline, PERSIST_TX_CHUNK, persist_transaction_batches,
 };
-use crate::data_interface::model_update_pending::{ATTEMPT_TABLE, finalize_attempt_on};
+use crate::data_interface::increment_tail::{ATTEMPT_TABLE, finalize_attempt_on};
 use crate::data_interface::model_update_plan::ModelUpdatePlan;
 use crate::data_interface::table_parity::{
     apply_all, changed_data_tables, fresh_mem_db, init_schema_on, snapshot_data_tables,
@@ -224,7 +224,7 @@ async fn seeded_db(label: &str) -> Surreal<Any> {
         .await
         .expect("base fixture");
     // 窗口前的行归本库、停在窗口前水位：生产路的事务带 pe 统计观测
-    // （`dbnum_stats::render` 的 `$row.dbnum != dbnum → THROW`），没有 dbnum 的行会被当成别库的。
+    // （`pe_batch::render` 的 `$row.dbnum != dbnum → THROW`），没有 dbnum 的行会被当成别库的。
     db.query(format!("UPDATE pe SET dbnum={DBNUM}, sesno={BASE_SESNO};"))
         .await
         .expect("stamp dbnum transport")
@@ -792,21 +792,32 @@ async fn terminal_production_batches_replay_statistics_before_watermark() {
     let batches = production_batches(&f);
     for _ in 0..2 {
         for sql in &batches {
-            crate::data_interface::dbnum_stats::execute_on(&db, sql)
+            crate::data_interface::pe_batch::execute_on(&db, sql)
                 .await
                 .unwrap();
         }
         assert_eq!(watermark(&db).await, Some(BASE_SESNO));
         assert_eq!(attempt_status(&db).await.as_deref(), Some("prepared"));
     }
-    let mut response = db.query("SELECT count() AS n FROM pe GROUP ALL; SELECT math::sum(count) AS n FROM dbnum_info_table GROUP ALL;").await.unwrap();
-    #[derive(serde::Deserialize)]
+    // pe 统计不再随写事务逐笔记账（ADR-071 D6）：终态批次重放两遍，`dbnum_info_table` 一行都不动
+    // ——`count` 由该库任务在数据批次应用之后从目标索引序列化（`ref0_snapshot` → `task_end`），
+    // 这条只跑数据面语句的对拍看不到它。
+    let mut response = db
+        .query("SELECT count() AS n FROM pe GROUP ALL; SELECT count() AS n FROM dbnum_info_table GROUP ALL;")
+        .await
+        .unwrap();
+    #[derive(Debug, serde::Deserialize)]
     struct Count {
         n: i64,
     }
     let pe: Vec<Count> = response.take(0).unwrap();
     let stats: Vec<Count> = response.take(1).unwrap();
-    assert_eq!(pe[0].n, stats[0].n, "pe 行数（含墓碑）与统计一致");
+    assert!(pe[0].n > 0);
+    assert_eq!(
+        stats.first().map_or(0, |count| count.n),
+        0,
+        "写事务不再碰 dbnum_info_table: {stats:?}"
+    );
     finalize(&db).await;
     assert_eq!(watermark(&db).await, Some(END_SESNO));
 }

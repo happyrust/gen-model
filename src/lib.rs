@@ -243,7 +243,7 @@ pub fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()>
     });
 
     match held {
-        Ok(lock) if lock.project == project => Ok(()),
+        Ok(lock) if lock.project == project => {}
         Ok(lock) => anyhow::bail!(
             "本进程已持有项目 {} 的单实例锁 {}，不能再启动项目 {project}",
             lock.project,
@@ -251,6 +251,71 @@ pub fn acquire_process_instance_lock(db_option: &DbOption) -> anyhow::Result<()>
         ),
         Err(error) => anyhow::bail!("{error}"),
     }
+    // 运行目录锁挡不住「两个运行目录写同一台库」，那一层由机器级写者锁挡（2026-09-10
+    // 数据窗口计划 §2）。与单实例锁同一处拿：所有走到这里的入口（服务、`db_window_repair`、
+    // Python 绑定的 full_init）一并被门住，不必各自记得再拿一把。
+    acquire_database_writer_lock(db_option).map_err(|error| anyhow::anyhow!("{error}"))
+}
+
+static DATABASE_WRITER_LOCK: OnceLock<
+    Result<Option<crate::data_interface::database_writer_lock::DatabaseWriterLock>, String>,
+> = OnceLock::new();
+
+/// 机器级写者锁：按端点 + namespace + database 一台库只许一个写者。拿不到就是启动失败——
+/// 「拿不到锁就当没有锁」正是两个写者互踩镜像的形状。重启交接窗口内照单实例锁的规矩重试
+/// （父进程的句柄要等它退出才释放）。同进程再来一份不同身份的配置同样拒绝。
+fn acquire_database_writer_lock(db_option: &DbOption) -> Result<(), String> {
+    use crate::data_interface::database_writer_lock::{self as writer_lock, WriterLockError};
+
+    let wanted =
+        writer_lock::WriterIdentity::from_db_option(db_option, crate::options::store_mode());
+    let held = DATABASE_WRITER_LOCK.get_or_init(|| {
+        let holder = format!("gen-model project={}", db_option.project_name);
+        let deadline = restart_handoff_deadline();
+        loop {
+            match writer_lock::acquire_for(db_option, crate::options::store_mode(), &holder) {
+                Ok(lock) => return Ok(lock),
+                Err(error @ WriterLockError::HeldByOther { .. }) => {
+                    if let Some(deadline) = deadline
+                        && std::time::Instant::now() < deadline
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(250));
+                        continue;
+                    }
+                    return Err(error.to_string());
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+    });
+    match (held, wanted) {
+        (Ok(None), None) => Ok(()),
+        (Ok(Some(lock)), Some(wanted)) if lock.identity() == &wanted => Ok(()),
+        (Ok(Some(lock)), wanted) => Err(format!(
+            "本进程已持有数据库 {} {}/{} 的写者锁 {}，不能再以另一份配置（{:?}）写库",
+            lock.identity().endpoint,
+            lock.identity().namespace,
+            lock.identity().database,
+            lock.path().display(),
+            wanted
+        )),
+        (Ok(None), Some(wanted)) => Err(format!(
+            "本进程以 embedded-mem 起过、没有写者锁，不能再以 {} {}/{} 写库",
+            wanted.endpoint, wanted.namespace, wanted.database
+        )),
+        (Err(error), _) => Err(error.clone()),
+    }
+}
+
+/// 重启交接（`/api/v1/setup/restart`）的重试截止时刻；没有 http_api 就没有交接，也就不重试。
+#[cfg(feature = "http_api")]
+fn restart_handoff_deadline() -> Option<std::time::Instant> {
+    crate::web_service::setup::handoff_deadline()
+}
+
+#[cfg(not(feature = "http_api"))]
+fn restart_handoff_deadline() -> Option<std::time::Instant> {
+    None
 }
 
 #[cfg(test)]
@@ -259,6 +324,26 @@ mod process_instance_lock_tests {
         INSTANCE_LOCK_FILE_NAME, instance_lock_skip_reason, open_advisory_process_instance_lock,
         open_process_instance_lock, process_instance_lock_path,
     };
+
+    /// 单实例锁与机器级写者锁同一处拿（2026-09-10 数据窗口计划 §2）：凡经 `acquire_process_instance_lock`
+    /// 进来的入口都被写者锁门住。把写者锁从这里摘出去、让某个入口只拿运行目录锁，这条就红。
+    #[test]
+    fn the_instance_lock_entry_also_takes_the_database_writer_lock() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("pub fn acquire_process_instance_lock(")
+            .expect("acquire_process_instance_lock")
+            .1
+            .split_once("\nstatic DATABASE_WRITER_LOCK")
+            .expect("写者锁静态紧跟其后")
+            .0;
+        assert!(
+            body.contains("acquire_database_writer_lock(db_option)"),
+            "单实例锁入口必须顺手拿机器级写者锁：{body}"
+        );
+        // 拿不到写者锁是启动失败，不是一句提示。
+        assert!(!body.contains("println!(\"*** 不拿写者锁"));
+    }
 
     /// 锁落在运行目录，不落在项目树里。把锚点改回项目根这条就红。
     #[test]
@@ -705,6 +790,81 @@ pub(crate) fn fmt_elapsed(elapsed: std::time::Duration) -> String {
     }
 }
 
+/// 启动水化（ADR-071 D7）：把每个已落过模型的库（`model_sesno > 0`）的模型投影从库整体反序列化进
+/// 进程内 `ModelMemoryStore`。这是「库 = 内存结果的序列化」的正当读法，取代了此前只对「有发布
+/// run 清单的库」做的 `recover_before_cleanup`。失败只出声不拦启动：投影缺席时按需生成会自己补
+/// （`/model/ensure` 对内存里没有的根按凭证重建），不会读到错的东西。
+///
+/// `states` 是同一水化段里刚读回的水位镜像（`list_registered`）——排在 ADR-060 D10 的兼容播种
+/// **之后**，接管的历史库才会带着 `model_sesno > 0` 进来。
+async fn hydrate_model_projections(states: &[crate::data_interface::dbnum_state::DbnumState]) {
+    if !crate::options::store_mode().is_durable() {
+        return;
+    }
+    let started = Instant::now();
+    let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
+    let (mut hydrated, mut failed) = (0usize, 0usize);
+    for state in states
+        .iter()
+        .filter(|state| state.model_sesno > 0 && state.db_type.eq_ignore_ascii_case("DESI"))
+    {
+        match crate::fast_model::model_db_adapter::restore_projection_on(
+            &aios_core::SUL_DB,
+            store,
+            state.dbnum,
+        )
+        .await
+        {
+            Ok(()) => hydrated += 1,
+            Err(error) => {
+                failed += 1;
+                eprintln!(
+                    "模型投影启动水化 dbnum={} 失败（按需生成会自行重建）：{error:#}",
+                    state.dbnum
+                );
+            }
+        }
+    }
+    println!(
+        "模型投影启动水化完成：{hydrated} 个库已读回进程内投影，{failed} 个失败，耗时 {}",
+        fmt_elapsed(started.elapsed())
+    );
+}
+
+/// 一次性迁移（ADR-071 S6）：初始化发布 run 的几张表已经没有写者（S5 删掉了 run），存量库里
+/// 若还留着就丢掉。`REMOVE TABLE IF EXISTS` 幂等，每次启动跑一遍也只是空转；失败只出声不拦启动
+/// ——这些表不参与任何读路。`model_update_pending` / `incr_side_effect_pending` /
+/// `published_file_input` / `room_published_*` **不在这里**：它们随 S4 后半 / S7 各自的那一刀退。
+async fn retire_publish_run_tables() {
+    if !crate::options::store_mode().is_durable() {
+        return;
+    }
+    const RETIRED: [&str; 6] = [
+        "model_publish_run",
+        "model_publish_fragment",
+        "model_publish_ack",
+        "model_publish_database",
+        "model_publish_error",
+        "model_publish_superseded",
+    ];
+    let sql = RETIRED
+        .iter()
+        .map(|table| format!("REMOVE TABLE IF EXISTS {table};"))
+        .collect::<Vec<_>>()
+        .join(" ");
+    match SUL_DB
+        .query(sql)
+        .await
+        .and_then(|response| response.check())
+    {
+        Ok(_) => println!(
+            "初始化发布 run 的 {} 张表已确认不存在（一次性迁移，幂等）",
+            RETIRED.len()
+        ),
+        Err(error) => eprintln!("清理初始化发布 run 遗留表失败（下次启动重试）: {error:#}"),
+    }
+}
+
 pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     let startup_started = mark_process_start();
     // Must precede logging, schema repair, watcher startup and every model/
@@ -817,6 +977,8 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         "增量状态表检查完成（兼容检查 {migrated} 个旧 DBNUM 水位），耗时 {}",
         fmt_elapsed(step_started.elapsed())
     );
+    // 数据窗口的结构行由 dbnum 任务自己同步落库（ADR-071 D1 / D11）：这里没有本地 journal 要对账、
+    // 没有绑定要刷新、也没有 backup lane 要起。进程内镜像的水化在下面的统一水化段（D7 / S6）。
     retire_dbnum_event().await?;
     println!("预加载方法完成。");
 
@@ -828,6 +990,39 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     if let Err(e) = crate::fast_model::pdms_inst::backfill_inst_relate_anc().await {
         eprintln!("inst_relate anc/dbnum 回填失败（下次启动重试）: {}", e);
     }
+    // 模型 / 房间水位的兼容播种（用户 2026-09-10 拍板「模型水位 + 房间水位默认按数据水位
+    // 保持一致」，ADR-060 D10）：已有数据且旧管线留有模型投影、模型水位从未写过的库，两枚
+    // 水位填成数据水位；数据在模型无的记 0。排在索引与 anc/dbnum 回填**之后**——投影探针要走
+    // idx_inst_relate_dbnum / idx_inst_relate_in，没索引时是逐 pe 行全表扫；排在启动模型核对
+    // **之前**——否则那一轮会给这些库排从 0 起的恢复 Task。失败只提示，下次启动幂等重来。
+    match crate::data_interface::dbnum_state::DbnumState::seed_legacy_model_watermarks().await {
+        Ok(seeds) => {
+            for line in
+                crate::data_interface::dbnum_state::legacy_model_watermark_seed_lines(&seeds)
+            {
+                println!("{line}");
+            }
+        }
+        Err(e) => eprintln!("模型 / 房间水位兼容播种失败（下次启动重试）: {e:#}"),
+    }
+    // ---- 统一水化段（ADR-071 D7 / S6）：库 → 进程内，一次，排在全部播种之后、任何 worker /
+    // watcher 之前。① 三水位镜像：`hydrate_watermark_mirror` 一次读全（水位行 + info 表旧水位）
+    // 并单次替换发布，读者看不到半张快照——运行期的 `list_registered` 不再碰镜像，整表替换只在
+    // 这个没有写者的时刻做；② 模型投影 + `gen_root` 根凭证回执：每个已落过模型的库整体读回
+    // `ModelMemoryStore`（`restore_projection_on` 一并带回每根的 `RootReceipt`）；③ 一次性迁移：
+    // 删掉已退役的发布 run 表。`gen_root` 凭证的整库口径（安定下限 / 未安定根）不另建镜像——
+    // 启动核对与规划器按需读库里刚落的那一份（d-227 的镜像口径只覆盖水位行）。
+    let step_started = Instant::now();
+    crate::data_interface::dbnum_state::DbnumState::enable_watermark_mirror();
+    let hydrated_states =
+        crate::data_interface::dbnum_state::DbnumState::hydrate_watermark_mirror().await?;
+    println!(
+        "水位内存镜像已水化 {} 个 dbnum，耗时 {}",
+        hydrated_states.len(),
+        fmt_elapsed(step_started.elapsed())
+    );
+    hydrate_model_projections(&hydrated_states).await;
+    retire_publish_run_tables().await;
     // 存量行平表副本清扫（P4 写时物化；幂等——pre-P4 库首轮付清，之后空转即返回。
     // 崩溃在空闲轮清扫前留下的 NONE 行也在这里自愈）
     if let Err(e) = crate::fast_model::pdms_inst::sweep_inst_relate_flat().await {
@@ -1080,8 +1275,7 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // “从未生成过的根”误判成完成；这里只补缺失工作，并为已有属性与模型投影但缺少
     // 水位追踪的历史库统一初始化两枚水位；不删旧模型，也不越过 watch_dbnums。
     // 任何一库失败都告警后继续，不把一个库的配置错变成整个服务的崩溃循环。
-    crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup().await;
-
+    crate::data_interface::startup_reconcile::reconcile_model_coverage_at_startup().await;
     // 数据等待的退出口（09-04 审核 #10）：判据是「受阻」不是「久」——Design 基线在大项目上
     // 合法地跑几小时，按时长降级会误伤；只有 `blockers` 非空**且**队列里没有任何批次在
     // `queued/running`、连续 [`STARTUP_DATA_STALL_DEGRADE_SECS`] 之后，才放弃等待降级进入监听。
@@ -2002,7 +2196,9 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     // Clear it after the database connection exists but before spatial loading,
     // preload, db-manager construction, watcher startup, or worker startup. A
     // cleanup error is fatal: continuing would replay a prior process snapshot.
-    crate::data_interface::model_publish_queue::recover_before_cleanup().await?;
+    //
+    // 初始化发布 run 的 journal 恢复（`recover_before_cleanup`）已退役（ADR-071 S5，d-300）；
+    // 模型投影的启动水化在 `run_cli` 的统一水化段里（ADR-071 D7 / S6）。
     let cleared = crate::data_interface::model_update_pending::clear_stale_at_process_start()
         .await
         .map_err(|error| anyhow!("启动清理 model_update_pending 失败，拒绝继续：{error:#}"))?;
@@ -2314,6 +2510,44 @@ mod startup_room_build_gate_tests {
         );
     }
 
+    /// ADR-060 D10：模型 / 房间水位的兼容播种夹在两道门之间——索引与 anc/dbnum 回填**之后**
+    /// （投影探针的 `WHERE in = $parent.id` 没有 `idx_inst_relate_in` 时是逐 pe 行全表扫），
+    /// 启动模型核对**之前**（否则那一轮会给这些库排从 0 起的恢复 Task，接管等于没做）。
+    /// 失败只提示不上抛：这一步是幂等填空，下次启动重来。
+    #[test]
+    fn legacy_model_watermark_seeding_runs_after_the_indices_and_before_the_model_reconcile() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli exists")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_cli end exists")
+            .0;
+        let indices = body
+            .find("init_inst_relate_indices().await")
+            .expect("索引初始化");
+        let backfill = body
+            .find("backfill_inst_relate_anc().await")
+            .expect("anc/dbnum 回填");
+        let seed = body
+            .find("DbnumState::seed_legacy_model_watermarks().await")
+            .expect("模型 / 房间水位兼容播种必须挂进启动");
+        let reconcile = body
+            .find("reconcile_model_coverage_at_startup().await")
+            .expect("启动模型核对");
+        assert!(
+            indices < backfill && backfill < seed && seed < reconcile,
+            "顺序必须是 索引 → 回填 → 兼容播种 → 启动模型核对"
+        );
+        let seed_block = &body[seed..reconcile];
+        assert!(
+            seed_block.contains("legacy_model_watermark_seed_lines(&seeds)")
+                && seed_block.contains("模型 / 房间水位兼容播种失败（下次启动重试）"),
+            "播种要出声、失败不上抛: {seed_block}"
+        );
+    }
+
     /// 常驻房间模型第 5 轮 Q17 (a) / Q18 (a)：空间树装载与房间初始化排在 watcher / worker
     /// **之前**，房间初始化紧跟树装载；两者之间与初始化本体都不许出现 `startup_data_ready` /
     /// 上弦位 / `startup_autorun` / `model_incremental` 任何一道门——房间是参照系，不是增量的
@@ -2425,7 +2659,7 @@ mod startup_room_build_gate_tests {
         );
         assert!(
             body.contains(
-                "\n    crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup().await;\n"
+                "\n    crate::data_interface::startup_reconcile::reconcile_model_coverage_at_startup().await;\n"
             ),
             "覆盖核对必须在 run_cli 顶层（4 空格缩进、不在任何 if 内）无条件执行（ADR-050）"
         );
@@ -2593,6 +2827,89 @@ mod startup_room_build_gate_tests {
                 .filter(|line| !line.trim_start().starts_with("//"))
                 .any(|line| line.contains("mark_model_ready()")),
             "启动主线不得自己宣告模型收敛；收敛由 worker 空闲轮判定（S5-2）"
+        );
+    }
+
+    /// ADR-071 不变量 S5（任务与库之间没有队列）在启动序列上的钉：`run_cli` 不得再打开本地
+    /// journal、对账 Prepared 窗口、刷新数据库绑定或起结构备份 lane——那是 (a) 的异步账本
+    /// （共识 d-285 / d-288 已作废）。数据窗口的结构行由任务自己在 `apply_one` 里同步落库。
+    #[test]
+    fn startup_neither_opens_a_local_journal_nor_starts_a_backup_lane() {
+        let source = include_str!("lib.rs");
+        let body = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli exists")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_cli end exists")
+            .0;
+        assert!(
+            body.contains("DbnumState::hydrate_watermark_mirror().await?"),
+            "启动仍要从库水化水位镜像（整表替换只在这一步）"
+        );
+        for forbidden in [
+            "increment_local_runtime(",
+            "reconcile_prepared_data_windows(",
+            "record_startup_reconciliation(",
+            "bind_database(",
+            "start_increment_backup_lane(",
+            "observe_database_applied(",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "run_cli 不得再有本地账本 / lane 的接线：{forbidden}"
+            );
+        }
+    }
+
+    /// ADR-071 D7 / S6 的统一水化段：全部播种（ADR-001 的 `ensure_increment_state_storage`、
+    /// ADR-060 D10 的 `seed_legacy_model_watermarks`）之后、启动模型核对之前，按「三水位镜像 →
+    /// 模型投影 → 一次性迁移」一次做完；`run_app` 不得再在连库后自己先水化一遍。
+    #[test]
+    fn startup_hydrates_mirrors_once_after_seeding_and_before_the_model_reconcile() {
+        let source = include_str!("lib.rs");
+        let cli = source
+            .split_once("pub async fn run_cli(")
+            .expect("run_cli exists")
+            .1
+            .split_once("pub async fn run_app(")
+            .expect("run_cli end exists")
+            .0;
+        let at = |needle: &str| cli.find(needle).unwrap_or_else(|| panic!("缺 {needle}"));
+        let state_storage = at("DbnumState::ensure_increment_state_storage().await?");
+        let seeding = at("DbnumState::seed_legacy_model_watermarks().await");
+        let mirror = at("DbnumState::enable_watermark_mirror();");
+        let states = at("DbnumState::hydrate_watermark_mirror().await?");
+        let projections = at("hydrate_model_projections(&hydrated_states).await");
+        let migration = at("retire_publish_run_tables().await");
+        let reconcile = at("reconcile_model_coverage_at_startup().await");
+        assert!(
+            state_storage < seeding
+                && seeding < mirror
+                && mirror < states
+                && states < projections
+                && projections < migration
+                && migration < reconcile,
+            "水化段顺序：状态表播种 → 兼容播种 → 开镜像 → 读全水位 → 投影 → 迁移 → 启动核对"
+        );
+        assert_eq!(
+            cli.matches("hydrate_model_projections(").count(),
+            1,
+            "投影水化只做一次"
+        );
+        assert_eq!(
+            cli.matches("hydrate_watermark_mirror(").count(),
+            1,
+            "镜像整表水化只做一次；运行期读全表走 list_registered，它不碰镜像"
+        );
+        let app = source
+            .split_once("pub async fn run_app(")
+            .expect("run_app exists")
+            .1;
+        let app = app.split_once("\n}\n").map_or(app, |(body, _)| body);
+        assert!(
+            !app.contains("hydrate_model_projections("),
+            "run_app 不得抢在 run_cli 之前水化投影（播种还没跑）"
         );
     }
 

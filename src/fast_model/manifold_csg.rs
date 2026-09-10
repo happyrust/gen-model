@@ -240,14 +240,17 @@ pub(crate) fn load_manifold(
 ///
 /// 为什么是 0.051 而不是原来那个 1e-6 相对量：相对量在薄方向上等于没有——那堵墙的负体
 /// 沿墙厚只有 750mm，1e-6 给出 0.000375mm，比实测的 0.01mm 缝还小一个量级。而 libgm
-/// 自己的口径是绝对的 `restol = 0.051mm`：**这个距离在它的世界里不存在**，
-/// `GM_Facets::obscureFaces` 先按它把近共面塞成真共面再在面内相减。让出正好一个
-/// `restol`，跨不过任何 libgm 分得清的界限。
+/// 自己的口径是绝对的 `normtol = 0.051mm`（与 `restol` 被 Core3D 同处设成同值）：
+/// **这个距离在它的世界里不存在**，负体的三维 set-op（`gm_combine` / `GM_SetOp`）在
+/// `normalisePostSetOp(GM_User::normtol_)` 里按它把近共面判成重合。让出正好一个这样的
+/// 绝对量，跨不过任何 libgm 分得清的界限。
 ///
-/// E3D 不需要「让」这一步，因为它压根不做三维实体 CSG（见
-/// `docs/evidence/2026-08-25-ida-libgm-coincidence-tolerances.md`）；共面反向面逐面
+/// E3D 不需要我们这种「让」，因为它的负体走的是 libgm **三维 facet set-op**、共面重合由
+/// `normtol`(0.051) 内建治理（2026-09-09 逐帧实测更正：早前这里写「E3D 不做三维实体 CSG /
+/// obscureFaces 面内二维相减」是误判，见
+/// `docs/evidence/2026-08-25-ida-libgm-coincidence-tolerances.md` §三）；而共面反向面逐面
 /// 全等抵消那条路（`plant-4/libgm-boolean-algorithm.md` §6.11）要求两侧段数、相位
-/// 完全一致，我们这条精确 CSG 的路给不出这个前提。
+/// 完全一致，我们这条精确 CSG（`to_bits()` 逐位焊、无位置容差）的路给不出这个前提。
 const NEGATIVE_INFLATE_MM: f64 = crate::fast_model::libgm_discretise::RES_TOL_MM;
 
 /// 以自身包围盒中心为原点放大，位置不动，每根轴向外各让 `grow` 毫米。

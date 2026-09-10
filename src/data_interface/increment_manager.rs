@@ -186,6 +186,7 @@ mod tests {
             epoch_id: 7,
             blocked_by_phase: None,
             intent: "apply_window",
+            reinit_trigger: None,
             state: "running",
             start_sesno: 34,
             end_sesno: 232,
@@ -1227,11 +1228,12 @@ mod tests {
     }
 
     /// 全新库（范围内、从未解析：无水位行、无统计行、无 pe 行）的启动重扫路由随
-    /// `auto_initialize_new_dbnums` 二分，本用例两拍各钉一半：**缺省 false**——重扫
+    /// `auto_initialize_new_dbnums` 二分，本用例两拍各钉一半：**显式关掉**——重扫
     /// 发现它但不入队，留给 plant-ui 手动初始化（`/update/execute` 那条路不看这个
-    /// 开关）；**显式开启**——自动发现并走全量基线（`needs_initial_load` →
-    /// `initialize_dbnum_baseline`），全程不需要人工放行（ADR-023 §4 当年的生产缺省，
-    /// 如今是开关打开后的形状）。
+    /// 开关）；**缺省或显式开启**——自动发现并走全量基线（`needs_initial_load` →
+    /// `initialize_dbnum_baseline`），全程不需要人工放行（ADR-023 §4 的生产缺省，
+    /// 2026-09-10 翻回缺省）。两拍都用 `AutoInitializeNewDbnumsOverride` 钉死，
+    /// 不靠缺省值——缺省翻面时这条用例不该跟着变。
     ///
     /// 与上一条幽灵水位用例的分界：那条留着登记行（水位在撒谎，属**已初始化库的
     /// 维护**，不受开关门控），这条**连登记行都没有**（`delete_dbnum_fast` 按
@@ -1310,9 +1312,9 @@ mod tests {
         // 模拟生产缺省 startup_autorun=true：重扫排出来的行不挂起，worker 直接消费。
         BatchScheduler::global().arm_auto_work();
 
-        // 第一拍：缺省 auto_initialize_new_dbnums=false——从未解析的库重扫**不入队**，
+        // 第一拍：auto_initialize_new_dbnums=false 时从未解析的库重扫**不入队**，
         // 等前端手动初始化。覆盖摁成 false 而不是依赖 testbed 配置，测试才不随
-        // 现场 DbOption 漂移。
+        // 现场 DbOption 漂移——缺省 2026-09-10 已翻成 true，这一拍靠的就是这个覆盖。
         {
             let _default_off = crate::options::AutoInitializeNewDbnumsOverride::set(false);
             mgr.sweep_watch_dirs("live-startup-never-parsed-default", false)
@@ -1578,7 +1580,7 @@ mod tests {
     /// 一行都不排（`discover_batch` 的水位早退），新库走「发现从未解析过的文件」
     /// → worker `needs_initial_load` → `initialize_dbnum_baseline`，而不是拿
     /// `applied + 1` 去接一个根本不存在的增量窗口。本用例显式开启
-    /// `auto_initialize_new_dbnums`（缺省 false 时新库整轮不入队，那一半归
+    /// `auto_initialize_new_dbnums`（关掉时新库整轮不入队，那一半归
     /// [`live_startup_sweep_baselines_a_never_parsed_db`] 的第一拍钉）。
     ///
     /// 与 [`live_startup_sweep_baselines_a_never_parsed_db`] 的分界：那条的目录里
@@ -1721,7 +1723,7 @@ mod tests {
     ///    不写**（范围门排在 `record_observation` 之前，那条断言正是它的证据）。
     /// 2. 装回 CURD → [`AiosDBManager::resweep_for_scope_change`]（SYS meta 落库后
     ///    那条 `scope-refresh` 重扫）把它发现出来，照样走首次导入基线（全程显式
-    ///    开着 `auto_initialize_new_dbnums`——缺省 false 时刚进范围的新库同样等
+    ///    开着 `auto_initialize_new_dbnums`——关掉时刚进范围的新库同样等
     ///    前端手动初始化，本用例钉的是范围门，不是初始化准入门）。
     ///
     /// 第二拍复刻的是生产里「有人往 MDB 里加一个库」的形状：那些**刚刚进入范围**
@@ -3338,7 +3340,8 @@ impl AiosDBManager {
     // `execute_incr_update`（发现即执行的旧自动编排）随 ADR-011 合流退役：
     // 执行只发生在 `batch_worker` 的消费循环里（一条队列、一个消费者）。它独有的
     // 三步都有了新家——MySQL 可选同步进了 `execute_one_dbnum` 的成功分支，SYST
-    // 派生由 worker 经 `SideEffectCompensator::enqueue_syst` 走持久补偿队列，
+    // 派生（TEAM_DATA 镜像）已于 2026-09-07 随 feature = "sql" 退役、其补偿队列于
+    // 2026-09-10 随非空间副作用队列一起删除（ADR-071 D9，d-300），
     // `notify_incr_applied` 摘要随之删除（plant-ui 只订 tasks 主题，它从未有过消费者）。
 
     /// 初始化文件监控器
@@ -3410,7 +3413,7 @@ impl AiosDBManager {
                 // This creates model work only.  It does not enter the data
                 // batch/finalize path and therefore cannot advance
                 // `applied_sesno` in read-through mode.
-                crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup()
+                crate::data_interface::startup_reconcile::reconcile_model_coverage_at_startup()
                     .await;
                 if let Err(error) = crate::data_interface::element_attributes::refresh_cached(
                     &self.db_option.project_name,
@@ -4070,24 +4073,24 @@ impl AiosDBManager {
         if surface == SweepSurface::Full {
             let observed = catalogue_observed.len();
             let verdict =
-                crate::data_interface::model_update_pending::reconcile_catalogue_versions_after_sweep(
+                crate::data_interface::model_coverage::reconcile_catalogue_versions_after_sweep(
                     origin,
                     catalogue_observed,
                     origin == "reconcile",
                 );
             match verdict {
-                crate::data_interface::model_update_pending::CatalogueSweepVerdict::Run {
-                    trigger,
-                } => sweep_log::note(format!(
-                    "[{origin}] 目录版本核对已另起任务（{trigger}，本轮观察到 {observed} 个目录库）：\
+                crate::data_interface::model_coverage::CatalogueSweepVerdict::Run { trigger } => {
+                    sweep_log::note(format!(
+                        "[{origin}] 目录版本核对已另起任务（{trigger}，本轮观察到 {observed} 个目录库）：\
                      目录库不进数据批次，前移只触发模型面重算引用它的根；结果见 /health.catalogue_reconcile"
-                )),
-                crate::data_interface::model_update_pending::CatalogueSweepVerdict::Seeded => {
+                    ))
+                }
+                crate::data_interface::model_coverage::CatalogueSweepVerdict::Seeded => {
                     log::debug!(
                         "[{origin}] 首轮 sweep 记下 {observed} 个目录库的最新会话；启动那次目录版本核对归 reconcile_model_coverage_at_startup"
                     )
                 }
-                crate::data_interface::model_update_pending::CatalogueSweepVerdict::Unchanged => {}
+                crate::data_interface::model_coverage::CatalogueSweepVerdict::Unchanged => {}
             }
             if !catalogue_unreadable.is_empty() {
                 sweep_log::note(format!(
@@ -4198,6 +4201,9 @@ impl AiosDBManager {
             previous_observed_sesno,
             first_pending_sesno_time,
             file_latest_sesno_time,
+            // 回退检出的重建：不是人点的（人工重新解析走 manual_update 那条入队路）。
+            reinit_requested: false,
+            regen_roots: Vec::new(),
         }
     }
 
@@ -4303,6 +4309,8 @@ impl AiosDBManager {
                 previous_observed_sesno,
                 first_pending_sesno_time,
                 file_latest_sesno_time,
+                reinit_requested: false,
+                regen_roots: Vec::new(),
             },
         ))
     }

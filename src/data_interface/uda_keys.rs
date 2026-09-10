@@ -93,7 +93,14 @@ impl UdaKeyMap {
     /// 从当前 SurrealDB 的 `UDA` 表建表。DICT 相先于 DESI 相同步，所以 DESI 基线 /
     /// 增量到这里时定义已经在库里；表为空不是错误（项目没有 UDA 或没配 DICT 库）。
     pub async fn load() -> anyhow::Result<Self> {
-        let mut response = aios_core::SUL_DB
+        Self::load_on(&aios_core::SUL_DB).await
+    }
+
+    /// 同 [`UdaKeyMap::load`]，目标库由调用方给（结构化 sink 在 backup lane 上渲 `ATT_UDA` 时用）。
+    pub async fn load_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    ) -> anyhow::Result<Self> {
+        let mut response = db
             .query("SELECT id, UKEY, UDNA FROM UDA;")
             .await
             .map_err(|e| anyhow::anyhow!("读取 UDA 定义表失败: {e}"))?;

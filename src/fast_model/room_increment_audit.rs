@@ -17,11 +17,13 @@
 mod tests {
     /// 从 `start` 之后取到函数在第 0 列的 `}` 为止（rustfmt 布局）。
     fn fn_body<'a>(source: &'a str, start: &str) -> &'a str {
-        source
+        let tail = source
             .split_once(start)
             .unwrap_or_else(|| panic!("源码里必须还有 `{start}`"))
-            .1
+            .1;
+        tail
             .split_once("\n}\n")
+            .or_else(|| tail.split_once("\r\n}\r\n"))
             .unwrap_or_else(|| panic!("`{start}` 之后必须有第 0 列的 `}}`"))
             .0
     }

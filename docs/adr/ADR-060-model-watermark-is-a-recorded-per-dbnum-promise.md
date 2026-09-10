@@ -10,8 +10,12 @@
 `docs/plans/2026-09-05-dbnum-consistency-verdict-plan.md` 收口；
 **2026-09-05 三轮追记 D9 / M8**（fable-5-1-12 架构评审候选 C2「库一致性判决」，Q4–Q13 全按推荐拍板，共识 d-594）：
 三态判决、读透形态「不判」、`ModelCredentialColumns` 从 `/dbnums` 撤下、`model_lazy_roots` 写点补上；
-实施计划 `docs/plans/2026-09-05-dbnum-consistency-verdict-plan.md`
-日期：2026-09-04（状态行 2026-09-05 更新）
+实施计划 `docs/plans/2026-09-05-dbnum-consistency-verdict-plan.md`；
+**2026-09-10 四轮追记 D10**（用户拍板「模型水位 + 房间水位默认按数据水位保持一致」）：已有数据的库兼容播种时，
+有旧管线模型投影的库把 `model_sesno` / `room_sesno` 填成 `applied_sesno`、启动核对按 `legacy_adopted` 跳过恢复 Task，
+数据在模型无的库显式记 0；**已实施**（`dbnum_state::seed_legacy_model_watermarks_on`、
+`ModelWatermarkProbe::legacy_adopted`、`lib.rs` 启动序列一句）
+日期：2026-09-04（状态行 2026-09-10 更新）
 关联：
 - **修订** ADR-056 N5（「两枚凭证表达读者一致性」从「库级数据水位 + 根级模型凭证」升为**两枚同粒度库级水位**）、
   ADR-058 D5（一级过滤的读数改挂新列，`startup_coverage_floors` 降为校验者）；
@@ -255,6 +259,40 @@ cohort 收口 → 盖章；尾事务 → 凭证前移 → 盖章（稳态）；�
 5. **`/health` 加 `dbnum_consistency` 聚合栏**（judged / in_sync / lagging / not_judged / chasing_roots / dead_roots /
    lazy_roots / lagging_samples），过 `within_health_budget`，**不进 `blocking_conditions`、不改 `status`**（M4）。
    批次回执每库带 `model_verdict` 与 `model_caught_up_at`（一致时 = `model_settled_at`，ADR-056 D2 欠的字段）。
+
+### D10　兼容播种：已有数据的库，模型 / 房间水位缺省按数据水位追平（2026-09-10 追记）
+
+> 追记来源：用户 2026-09-10 06:5x 拍板（原话「模型水位 + 房间水位默认按数据水位 保持一致」），
+> 起因是核对「gen-model 兼容一个已有数据的数据库的初始化」：数据那一枚（ADR-001 的 pe 兼容播种）
+> 早就实现，模型这一枚却**没有任何播种路径**——历史库（`pe` + 旧管线的 `inst_relate` / `tubi_relate`
+> 投影、无 `gen_root`、`model_sesno` 从未写过）在 D6 对账里只得到 `AwaitingTaskCompletion`，随后被启动
+> 核对排成一条从 0 起的 `ModelOnly` 恢复 Task——**兼容一个已有模型数据的库 = 对它做一次全库模型重建**，
+> 而 `complete_model_task_on` 对「无根却有投影」的库还永远盖不了章。这是用户明确不要的形状。
+
+1. **播种点与对象。** `dbnum_state::seed_legacy_model_watermarks_on` 在启动序列里跟在
+   `init_inst_relate_indices` / `backfill_inst_relate_anc` **之后**、启动模型核对**之前**跑（`lib.rs`，源码顺序测试
+   钉住）。候选只有一格：`applied_sesno > 0` 且 `model_sesno` **从未写过**（`NONE`）的行；`NONE` 与显式 `0`
+   分开——`0` 是本仓写下的判定（D7 清零、D8 归零、本条的「数据在模型无」），不许被播种改写成「追平」。
+   初始化在飞（`model_publish_queue::blocked_dbnums`）的库跳过，下一轮再来。
+2. **两格去向，措辞分开。** 该库有旧管线模型投影（`model_completion::projection_presence_expr`，与 D6 探针
+   同一段谓词）→ **接管**：`model_sesno = model_sesno ?? applied_sesno`、`room_sesno = room_sesno ?? applied_sesno`，
+   只填空、不贴 `*_sesno_time`（D1 的时刻纪律：这一枚不是哪一条保存盖出来的）。数据在、模型一行没有 →
+   **显式记 `model_sesno = 0`**，语义不变（读侧本就 `unwrap_or_default`），只为让它退出候选集——投影探针在
+   大库上不便宜，不该每次启动都付；房间水位不动。两格各一行启动日志带样本，安静的一次不出声。
+3. **接管之后的处置。** 探针的 `supported()` 对「无根 + 有属性 + 有投影」本就回 `applied_sesno`，所以接管的
+   库在 D6 对账里是 **Aligned**（不下调、不按 D7 清零）。启动核对新增判定 `ModelWatermarkProbe::legacy_adopted`
+   （无根 ∧ 有属性 ∧ 有投影 ∧ `model_sesno > 0` ∧ `model_sesno >= applied_sesno`）：命中就**跳过恢复 Task**、
+   逐库出声 `reason=legacy_adopted`、进汇总行「兼容接管 N 库」。数据一旦前移（`model_sesno < applied_sesno`）
+   它就不再是这一格，照常开窗；那一窗的热路径（D5 第二触发点）对无根有投影的库同样能盖到 `T`。
+4. **它不是 M1 的例外，是 M1 的起点。** 承诺的支撑是旧管线**已经落库的模型投影**——与 D6 上调时拿
+   `settled_floor` 当证据是同一个形状：证据在库里，不是凭空盖章。它也不放宽 M2（填的就是 `applied_sesno`）、
+   不碰 M7（只写两列，不等不查任何一条链）。
+
+**已知边界（有意留下）**：接管的库在**新管线写下第一行 `gen_root` 之前**没有严格完成凭据
+（`model_completion` 回执）。这期间若来一窗**零 regen** 的数据窗口，Task 收尾的 `complete_model_task_on`
+仍按「无根须无投影」判它 Partial（模型水位本身已由热路径盖到 `T`，房间阶段那一窗不跑）。这是完成凭据的
+语义问题（`CompletionReceipt.empty` 只有「已验证为空」一种），不是水位的问题，本条不改它；要收，另起一条
+给回执加「兼容接管」形态。
 
 ## 新不变量
 

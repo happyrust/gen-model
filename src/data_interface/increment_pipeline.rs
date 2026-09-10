@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use aios_core::data_center::DataCenterRecordOperate;
 use aios_core::pdms_types::*;
 use aios_core::{RefnoEnum, SUL_DB, clear_all_caches_batch};
+use anyhow::Context as _;
 use indexmap::IndexMap;
 
 use crate::data_interface::db_file_header::DbFileHeader;
@@ -446,7 +447,7 @@ fn same_attempt_file_path(left: &str, right: &str) -> bool {
 }
 
 fn validate_prepared_attempt(
-    attempt: &crate::data_interface::model_update_pending::IncrementUpdateAttempt,
+    attempt: &crate::data_interface::increment_tail::IncrementUpdateAttempt,
     db_type: &str,
     file_path: &str,
     current_file_latest_sesno: i32,
@@ -973,7 +974,7 @@ impl IncrementPipeline {
         // intentionally unchanged. In that case the pre-update OWNER graph is
         // no longer trustworthy, so reuse the durable fixed range + model plan
         // prepared before the first write.
-        let prepared = crate::data_interface::model_update_pending::load_attempt(dbnum).await?;
+        let prepared = crate::data_interface::increment_tail::load_attempt(dbnum).await?;
         // 恢复记录一律按持久化的固定区间**原样重放**（ADR-056 P1 之后只有直写这一条路）：
         // PE 块可能已经写了一半而水位故意没动，这条路上没有 journal、也没有「整窗口
         // 重算」那条退路，只能照先前备好的计划走。记录超前于文件（回退 / 换文件）由
@@ -1035,8 +1036,8 @@ impl IncrementPipeline {
                 .commit_token_json()?;
             StageTimings::measure(
                 &mut timings.plan,
-                crate::data_interface::model_update_pending::prepare_attempt(
-                    &crate::data_interface::model_update_pending::IncrementUpdateAttempt {
+                crate::data_interface::increment_tail::prepare_attempt(
+                    &crate::data_interface::increment_tail::IncrementUpdateAttempt {
                         dbnum,
                         db_type: db_type.to_string(),
                         file_path: path_text,
@@ -1115,7 +1116,7 @@ impl IncrementPipeline {
         // CATA 依赖块排在 DESI 块与水位**之前**（plan 2026-09-06 §3 D6 (a) / Q3）：本窗口写回的 DESI 元素
         // 所依赖的目录链元素先入库，缺依赖的窗口不算落地。闭包解析失败（locator / 文件 I/O）拦水位，
         // 与 DESI 块同纪律；「库不在 MDB / 元素不在」只进 warning。非 DESI 窗口（SYS / DICT）没有目录链。
-        if db_type.eq_ignore_ascii_case("DESI") {
+        let cata_rows = if db_type.eq_ignore_ascii_case("DESI") {
             let seeds = crate::data_interface::cata_dependency::seeds_from_elements(
                 persist_changes.iter().filter_map(|change| match &change.state {
                     crate::data_interface::ele_ops::PersistElementState::Add(data)
@@ -1125,38 +1126,46 @@ impl IncrementPipeline {
                     crate::data_interface::ele_ops::PersistElementState::Deleted { .. } => None,
                 }),
             );
-            if !seeds.is_empty() {
+            if seeds.is_empty() {
+                None
+            } else {
                 let project = aios_core::get_db_option().project_name.clone();
-                let report = StageTimings::measure(
+                let rows = StageTimings::measure(
                     &mut timings.cata_dependency,
-                    crate::data_interface::cata_dependency::persist_cata_dependencies(
+                    crate::data_interface::cata_dependency::resolve_dependency_rows(
                         &project, dbnum, &seeds,
                     ),
                 )
                 .await?;
-                warnings.extend(report.warning(dbnum));
+                if rows.manifest.missing > 0 {
+                    warnings.push(format!(
+                        "dbnum={dbnum}: CATA 依赖闭包缺失 {} 项，详情随窗口工件保留",
+                        rows.manifest.missing
+                    ));
+                }
+                Some(rows)
             }
-        }
+        } else {
+            None
+        };
 
         // 只保留最新数据：仅写入 pe 主数据（最新状态），不再写 sessions / element_changes 历史表
         //
         // Cache invalidation must run after every attempted persist, including a
         // partially failed batch: earlier Surreal statements may already have
         // changed data even though the watermark must remain unchanged.
-        let persist_result = StageTimings::measure(
-            &mut timings.persist,
-            Self::persist_latest_main_data(&persist_changes, &retired_type_rows, dbnum as i32),
-        )
-        .await;
+        // 结构数据不在 Task 热路径直写；确定性内容随窗口工件落盘，提交证明出现后由
+        // 单项目串行 sink 投影。这里的 persist 槽只统计工件组装/落盘，见下方。
+        // 失效名单随后还要装进工件：lane 落完结构行会按同一份名单再失效一次
+        // （`IncrementWindowArtifact::cache_refnos` 说了为什么）。
         let invalidated =
-            StageTimings::measure(&mut timings.cache, Self::invalidate_caches(cache_refnos)).await;
+            StageTimings::measure(&mut timings.cache, Self::invalidate_caches(&cache_refnos)).await;
         if invalidated > 0 {
             println!(
                 "IncrementPipeline: invalidated {invalidated} PE/attribute cache entries \
                  and world-transform caches"
             );
         }
-        warnings.extend(persist_result?);
 
         // ADR-003 B1-emit / ADR-063：`ref_rev` **只在摄入形态维护，且只服务 UI**。
         //
@@ -1168,25 +1177,11 @@ impl IncrementPipeline {
         //
         // 跳过之后**不许**有人把「索引没维护」读成「没有引用者」：`fetch_ref_rev_edges`
         // 在同一形态下直接报错，调用方走既有的 `cascade_deferred` 退化路（见 ADR-063 D3）。
-        if crate::options::data_face().is_read_through() {
-            timings.reverse_index = std::time::Duration::ZERO;
-        } else if let Err(e) = StageTimings::measure(
-            &mut timings.reverse_index,
-            Self::maintain_reverse_index(&range_eles),
-        )
-        .await
-        {
-            warnings.push(format!(
-                "reverse-index maintain (non-fatal) {}: {}",
-                path.display(),
-                e
-            ));
-            let referrers = Self::changed_refnos(&range_eles);
-            crate::data_interface::side_effect_pending::SideEffectCompensator::enqueue_ref_rev(
-                dbnum, end_sesno, db_type, &referrers,
-            )
-            .await?;
-        }
+        let reverse_index_statements = if crate::options::data_face().is_read_through() {
+            Vec::new()
+        } else {
+            crate::data_interface::manual_update::build_reverse_index_statements(&range_eles)
+        };
 
         // Resolve-then-render（W3）：这个计时槽现在只含**窗口前持久态的点查**
         // （overlay 兜不住的祖先 noun/owner），产出的语句是固定目标 id 的纯
@@ -1202,6 +1197,53 @@ impl IncrementPipeline {
         window_statements.extend(Self::anc_repair_statements_for_window(&range_eles, db_type));
         // refno 复用（窗口内换了 noun）的旧 noun 表行不再单独排进尾事务：它随元素块的删除块
         // 一起清（`element_batch::items_from_changes` 的 `old_noun`，plan 2026-09-06 §3 D2）。
+
+        let project = aios_core::get_db_option().project_name.clone();
+        let from_sesno = u32::try_from(start_sesno.saturating_sub(1))?;
+        let target_sesno = u32::try_from(end_sesno)?;
+        // 本窗的结构行（pe / ATT_ / CATA 依赖 / `ref_rev` / 随窗语句）先在内存里装成一份窗口产物，
+        // 再**同步**落库——内存 → 语句 → 库，一步到位（ADR-071 D1 / D11）：没有 journal、没有
+        // lane、没有 ACK。行先落、水位最后（ADR-071 不变量 S3）：落库失败就在这里返回，水位不动、
+        // attempt 记录仍在，整个固定区间重放收敛（落库幂等，`landing_the_same_window_twice_converges`）。
+        let artifact = crate::data_interface::window_landing::IncrementWindowArtifact::from_window(
+            &project,
+            dbnum,
+            db_type,
+            from_sesno,
+            target_sesno,
+            &persist_changes,
+            &retired_type_rows,
+            cata_rows.as_ref(),
+            reverse_index_statements,
+            window_statements,
+            cache_refnos.iter().copied(),
+        );
+        let landing = StageTimings::measure(
+            &mut timings.persist,
+            crate::data_interface::window_landing::land_increment_window(
+                &aios_core::SUL_DB,
+                u64::from(target_sesno),
+                &artifact,
+            ),
+        )
+        .await
+        .with_context(|| {
+            format!(
+                "dbnum={dbnum} 窗口 {from_sesno}..={target_sesno} 结构行落库失败，水位不动、\
+                 attempt 记录保留，整窗重放收敛"
+            )
+        })?;
+        warnings.extend(landing.warnings.iter().cloned());
+        println!(
+            "[data-window] dbnum={dbnum} 窗口 {from_sesno}..={target_sesno} 结构行落库：元素 {}（{} 笔事务）、\
+             CATA 依赖 {} 行（{} 笔）、ref_rev {} 句、随窗 {} 句",
+            landing.elements,
+            landing.element_transactions,
+            landing.cata_elements,
+            landing.cata_transactions,
+            landing.reverse_index_statements,
+            landing.window_statements
+        );
 
         // Finalization publishes this window's delivery-status updates as ordered
         // chunked batches, then one tail transaction establishes durable model
@@ -1227,12 +1269,12 @@ impl IncrementPipeline {
         // permanently losing the only durable request to generate them.
         let credential_advance = StageTimings::measure(
             &mut timings.finalize,
-            crate::data_interface::model_update_pending::finalize_attempt(
+            crate::data_interface::increment_tail::finalize_attempt(
                 dbnum,
                 end_sesno,
                 end_sesno_time.as_deref(),
                 &model_plan,
-                &window_statements,
+                &[],
             ),
         )
         .await?;
@@ -1420,11 +1462,13 @@ impl IncrementPipeline {
     /// Invalidating per refno would re-clear the global world-transform caches
     /// and re-take every cache lock once per element, so a wide window paid for
     /// the same wholesale clear thousands of times.
-    async fn invalidate_caches(refnos: HashSet<RefnoEnum>) -> usize {
+    /// 两个调用点：Task 在 journal 之前（`apply_one`），lane 在结构行落定之后
+    /// （`window_landing::land_increment_window`，名单随工件走）。
+    pub(crate) async fn invalidate_caches(refnos: impl IntoIterator<Item = &RefnoEnum>) -> usize {
+        let refnos: Vec<RefnoEnum> = refnos.into_iter().copied().collect();
         if refnos.is_empty() {
             return 0;
         }
-        let refnos: Vec<RefnoEnum> = refnos.into_iter().collect();
         clear_all_caches_batch(&refnos).await;
         refnos.len()
     }
@@ -1457,7 +1501,7 @@ impl IncrementPipeline {
         for tx_sql in &batches {
             // `.check()`：把事务内被取消/失败的语句错误上浮为 Err。原实现只 map_err
             // 传输错误、未 check 语句级错误，事务被取消时仍可能返回 Ok → 水位误推进。
-            crate::data_interface::dbnum_stats::execute_on(&SUL_DB, tx_sql).await?;
+            crate::data_interface::pe_batch::execute_on(&SUL_DB, tx_sql).await?;
         }
 
         println!(
@@ -1804,7 +1848,7 @@ impl IncrementPipeline {
     /// the staged commit, which execute them as ordered batches **before** the
     /// watermark-advancing tail transaction — a failure keeps the watermark
     /// unmoved so the window replays and the idempotent updates converge
-    /// (`model_update_pending::FinalizeRender` has the full argument).
+    /// (`increment_tail::FinalizeRender` has the full argument).
     async fn datacenter_statements(
         data: &BTreeMap<u32, Vec<EleOperationData>>,
         db_type: &str,
@@ -1870,28 +1914,36 @@ mod cache_tests {
             .find("cache_refnos.extend(model_plan.regen_root_refnos())")
             .expect("失效集必须并入生成根");
         let invalidate_at = source
-            .find("Self::invalidate_caches(cache_refnos)")
-            .expect("直写路径的失效必须存在");
+            .find("Self::invalidate_caches(&cache_refnos)")
+            .expect("Task 侧的失效必须存在");
         assert!(
             collect_at < extend_at && extend_at < invalidate_at,
             "顺序必须是 collect → extend(regen roots) → 直写失效"
         );
     }
 
-    /// ADR-056 P1（spec 035 成功标准 1）：`apply_one` 只剩直写这一条路——函数体里
-    /// 不得再出现任何 `staging::` 引用，也不得再按窗口模式丢弃持久化的恢复记录。
-    /// 顺序纪律一并钉住：persist → invalidate → reverse_index → datacenter 语句批 →
-    /// `finalize_attempt`（水位最后）。
-    #[test]
-    fn apply_one_has_no_staging_fork() {
-        let source = include_str!("increment_pipeline.rs");
-        let body = source
+    /// `apply_one` 的函数体（到 `fn anc_repair_statements_for_window(` 为止）。
+    fn apply_one_body() -> &'static str {
+        include_str!("increment_pipeline.rs")
             .split_once("async fn apply_one(")
             .expect("apply_one must exist")
             .1
             .split_once("fn anc_repair_statements_for_window(")
             .expect("anc_repair_statements_for_window must follow apply_one")
-            .0;
+            .0
+    }
+
+    /// ADR-056 P1（spec 035 成功标准 1）：`apply_one` 只剩一条路——函数体里不得再出现任何
+    /// `staging::` 引用，也不得再按窗口模式丢弃持久化的恢复记录。
+    ///
+    /// 2026-09-10 起这条路是 **任务内同步序列化**（ADR-071 D1 / D11，共识 d-285 / d-288 作废了
+    /// (a) 的 lane）：Task 解闭包、渲染、失效缓存、装成内存里的窗口产物，随即**同步**落库，再走
+    /// 尾事务。顺序纪律：闭包解析（失败拦水位）→ 缓存失效 → `ref_rev` 渲染 → 随窗语句渲染 →
+    /// 窗口产物 → `land_increment_window`（结构行落库）→ 冻结源复核 → `finalize_attempt`
+    /// （尾事务，水位）。行先落、水位最后，中间没有 journal / accept / complete。
+    #[test]
+    fn apply_one_has_no_staging_fork() {
+        let body = apply_one_body();
         assert!(
             !body.contains("staging::"),
             "apply_one 不得再引用 staging（ADR-056 P1）"
@@ -1901,24 +1953,79 @@ mod cache_tests {
             "直写路径从不丢弃一份持久化的恢复记录"
         );
         let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("缺 {needle}"));
-        // 09-03 退役后主数据按 `PersistElementChange` 终态写（`terminal_persist_changes`），入参不再是 `range_eles`；
-        // 09-06 起换 noun 的旧表行随元素块一起清，所以 `retired_type_rows` 也进 persist。
-        let persist = at(
-            "Self::persist_latest_main_data(&persist_changes, &retired_type_rows, dbnum as i32)",
-        );
-        // CATA 依赖块（plan 2026-09-06 §3 D6 (a)）排在 DESI 块之前、水位之前，失败拦水位。
-        let cata = at("cata_dependency::persist_cata_dependencies(");
-        assert!(cata < persist, "CATA 依赖块必须排在 DESI 块之前");
-        let invalidate = at("Self::invalidate_caches(cache_refnos)");
-        let reverse_index = at("Self::maintain_reverse_index(&range_eles)");
+        // CATA 闭包解析仍在 Task（plan 2026-09-06 §3 D6 (a)：解析失败拦水位的口径保留），
+        // 行本身随窗口产物一起落。
+        let cata = at("cata_dependency::resolve_dependency_rows(");
+        let invalidate = at("Self::invalidate_caches(&cache_refnos)");
+        let reverse_index = at("build_reverse_index_statements(&range_eles)");
         let datacenter = at("Self::datacenter_statements(&range_eles, db_type)");
-        let finalize = at("model_update_pending::finalize_attempt(");
+        let artifact = at("IncrementWindowArtifact::from_window(");
+        let landed = at("land_increment_window(");
+        let recheck = at("reopen_verified()");
+        let finalize = at("increment_tail::finalize_attempt(");
         assert!(
-            persist < invalidate
+            cata < invalidate
                 && invalidate < reverse_index
                 && reverse_index < datacenter
-                && datacenter < finalize,
-            "直写顺序纪律：persist → invalidate → reverse_index → datacenter → finalize"
+                && datacenter < artifact
+                && artifact < landed
+                && landed < recheck
+                && recheck < finalize,
+            "同步序列化顺序纪律：闭包 → 失效 → ref_rev 渲染 → 随窗渲染 → 窗口产物 → 落库 → \
+             复核 → finalize"
+        );
+    }
+
+    /// ADR-071 不变量 S3 / S5 的源码钉：数据窗口的结构行由 Task **自己同步**落库，落库口只有
+    /// `land_increment_window` 一处、排在尾事务之前；Task 与库之间没有 journal / lane / ACK
+    /// （`increment_local_runtime` / `store_backup_bundle` / `accept` / `complete` 一个都不许回来
+    /// ——回来一个，就是把同步序列化偷换回 (a) 的异步账本）。老的逐段直写口
+    /// （`persist_latest_main_data` / `maintain_reverse_index` …）也不许回来：它们的渲染器已在
+    /// 落库入口里复用，再写一遍就是双写。尾事务的随窗语句形参保持为空——它们已随窗口产物落了。
+    #[test]
+    fn the_data_window_lands_its_structured_rows_synchronously_before_the_tail() {
+        let body = apply_one_body();
+        for forbidden in [
+            "increment_local_runtime(",
+            "store_backup_bundle(",
+            "runtime.accept(",
+            "runtime.complete(",
+            "LocalWindow",
+            "LocalCompletion",
+            "observe_database_applied(",
+            "persist_latest_main_data(",
+            "persist_cata_dependencies(",
+            "persist_resolved_rows",
+            "maintain_reverse_index(",
+            "terminal_persist_batches(",
+            "execute_on(",
+            "enqueue_ref_rev",
+        ] {
+            assert!(
+                !body.contains(forbidden),
+                "apply_one 不得再有异步账本 / 第二个结构行写点：{forbidden}"
+            );
+        }
+        assert_eq!(
+            body.matches("land_increment_window(").count(),
+            1,
+            "结构行落库口只有一处: {body}"
+        );
+        let landed = body.find("land_increment_window(").expect("落库口");
+        let finalize = body
+            .find("increment_tail::finalize_attempt(")
+            .expect("尾事务还在");
+        assert!(landed < finalize, "行先落、水位最后（ADR-071 S3）");
+        let tail = body
+            .split_once("increment_tail::finalize_attempt(")
+            .expect("尾事务还在")
+            .1
+            .split_once(".await?")
+            .expect("尾事务要 await")
+            .0;
+        assert!(
+            tail.contains("&[],"),
+            "尾事务不再携带随窗语句（它们已随窗口产物同步落库）: {tail}"
         );
     }
 
@@ -2047,25 +2154,36 @@ mod cache_tests {
         assert!(rows.is_empty(), "持久层缺行时不得凭空长出 pe 行: {rows:?}");
     }
 
+    /// ADR-003 B1-emit 的 `ref_rev` 维护在 lane 形态下的去向（plan 2026-09-09 §1 #5）：
+    /// 渲染留 Task（`build_reverse_index_statements`，仍先问读透形态，ADR-063 D2），语句
+    /// 原样进工件由 lane 执行；`side_effect_pending` 的 `enqueue_ref_rev` 补偿分支在这条路
+    /// 上退役——lane 从同一份工件顺序重放，本来就是那条补偿要提供的保证。前身
+    /// `reverse_index_failure_requires_durable_recovery_before_finalize` 钉的是补偿分支存在，
+    /// 现在钉相反的一面。
     #[test]
-    fn reverse_index_failure_requires_durable_recovery_before_finalize() {
-        let source = include_str!("increment_pipeline.rs");
-        let recovery = source
-            .split_once("Self::maintain_reverse_index(&range_eles)")
-            .expect("reverse-index maintenance must exist")
+    fn reverse_index_rides_the_window_artifact_without_a_compensation_queue() {
+        let body = apply_one_body();
+        let guarded = body
+            .find("if crate::options::data_face().is_read_through() {")
+            .expect("反向索引渲染必须先问形态（ADR-063 D2）");
+        let rendered = body
+            .find("build_reverse_index_statements(&range_eles)")
+            .expect("渲染还在 Task");
+        assert!(guarded < rendered, "读透形态必须在渲染之前就跳过");
+        let artifact = body
+            .split_once("IncrementWindowArtifact::from_window(")
+            .expect("工件组装还在")
             .1
-            .split_once("let datacenter_statements")
-            .expect("recovery must finish before finalization")
+            .split_once(");")
+            .expect("组装有结尾")
             .0;
-
-        assert!(recovery.contains("enqueue_ref_rev"), "{recovery}");
         assert!(
-            !recovery.contains("if let Err(enqueue_error)"),
-            "recovery enqueue failure must escape apply_one instead of becoming a warning"
+            artifact.contains("reverse_index_statements,"),
+            "渲染好的 ref_rev 语句必须原样装进工件: {artifact}"
         );
         assert!(
-            recovery.contains("await?"),
-            "durable recovery must succeed before finalization"
+            !body.contains("enqueue_ref_rev") && !body.contains("side_effect_pending"),
+            "补偿队列在 lane 形态下退役，不许回到 apply_one"
         );
     }
 
@@ -2111,7 +2229,7 @@ mod cache_tests {
 
     #[test]
     fn prepared_attempt_rejects_a_file_that_no_longer_covers_fixed_range() {
-        let attempt = crate::data_interface::model_update_pending::IncrementUpdateAttempt {
+        let attempt = crate::data_interface::increment_tail::IncrementUpdateAttempt {
             dbnum: 8191,
             db_type: "DESI".to_string(),
             file_path: "D:/project/desi".to_string(),
@@ -2403,33 +2521,40 @@ mod cache_tests {
         );
     }
 
-    /// IU-S8-05 / IU-S12-02（L1 源码钉）：直写路径的缓存失效必须在**每次尝试
-    /// 落库之后**执行——包括部分失败的批次。persist 的结果被捕获成
-    /// `persist_result`、失效跑完才 `?` 上抛：部分失败时前面的 Surreal 语句可能
-    /// 已经改了数据而水位保持不动，此刻不清缓存，preview / 模型刷新这些后继者
-    /// 读到的就是旧值。回退成落库当场 `?` 直接上抛即红。
+    /// IU-S8-05 / IU-S12-02（L1 源码钉）：缓存失效要跟着**结构行真正改变的那一刻**走。
+    /// 前身 `cache_invalidation_survives_a_partially_failed_persist` 钉的是「直写部分失败也要
+    /// 失效」。现在结构行由 Task 同步落库（`land_increment_window`），两处都要失效：Task 在装
+    /// 窗口产物之前失效一次（名单同时装进产物），落库入口在结构行全部落定之后按同一份名单再失效
+    /// 一次——落库中途失败时前一次失效已经生效，不留陈旧缓存。任一处退掉即红。
     #[test]
-    fn cache_invalidation_survives_a_partially_failed_persist() {
-        let source = include_str!("increment_pipeline.rs");
-        let body = source
-            .split_once(concat!("async fn ", "apply_one("))
-            .expect("apply_one must exist")
-            .1
-            .split_once(concat!("async fn ", "invalidate_caches("))
-            .expect("invalidate_caches follows apply_one")
-            .0;
-        let capture_at = body
-            .find("let persist_result = ")
-            .expect("persist 结果必须被捕获而不是当场上抛");
-        let invalidate_at = body
-            .find("Self::invalidate_caches(cache_refnos)")
-            .expect("直写路径必须执行缓存失效");
-        let propagate_at = body
-            .find("persist_result?")
-            .expect("persist 失败最终要上抛（水位不推进）");
+    fn cache_invalidation_runs_before_the_landing_and_again_after_the_rows_land() {
+        let body = apply_one_body();
+        let at = |needle: &str| body.find(needle).unwrap_or_else(|| panic!("缺 {needle}"));
+        let invalidate = at("Self::invalidate_caches(&cache_refnos)");
+        let listed = at("cache_refnos.iter().copied(),");
+        let landed = at("land_increment_window(");
         assert!(
-            capture_at < invalidate_at && invalidate_at < propagate_at,
-            "顺序必须是 捕获 persist 结果 → 缓存失效 → 才上抛失败: {body}"
+            invalidate < listed && listed < landed,
+            "Task 侧：失效 → 名单进窗口产物 → 才落库: {body}"
+        );
+
+        // 那个文件是 CRLF，别拿 "\n}\n" 当函数结尾切；测试模块头是稳的。
+        let landing = include_str!("window_landing/mod.rs")
+            .split_once("pub async fn land_increment_window(")
+            .expect("落库入口还在")
+            .1
+            .split_once("#[cfg(test)]")
+            .expect("落库入口之后是测试模块")
+            .0;
+        let last_write = landing
+            .find("report.window_statements = window.window_statements.len();")
+            .expect("随窗语句是最后一步结构写");
+        let landing_invalidate = landing
+            .find("IncrementPipeline::invalidate_caches(&window.cache_refnos())")
+            .expect("落完必须按产物名单再失效一次");
+        assert!(
+            last_write < landing_invalidate,
+            "落库侧：结构行全部落定之后才失效: {landing}"
         );
     }
 
@@ -2643,8 +2768,7 @@ mod fold_tests {
             .expect("timing report must follow the finalize tail")
             .0;
         assert!(
-            block.contains("model_update_pending::finalize_attempt(")
-                && block.contains("&model_plan,"),
+            block.contains("increment_tail::finalize_attempt(") && block.contains("&model_plan,"),
             "the full pre-persist plan must enter the finalize tail: {block}"
         );
         assert!(

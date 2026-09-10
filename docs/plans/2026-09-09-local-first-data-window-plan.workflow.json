@@ -1,0 +1,64 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "数据窗口本地优先化重构执行图（2026-09-09）",
+    "output": "docs/plans/2026-09-09-local-first-data-window-plan.workflow.html",
+    "locale": "zh-CN",
+    "quality_profile": "showcase"
+  },
+  "lanes": [
+    { "id": "plan", "label": "方案与范围" },
+    { "id": "apply", "label": "Task / apply_one" },
+    { "id": "journal", "label": "Journal 与 Runtime" },
+    { "id": "sink", "label": "Structured Sink Lane" },
+    { "id": "store", "label": "SurrealDB 持久化" },
+    { "id": "recovery", "label": "恢复与可观测" },
+    { "id": "verify", "label": "验收与回归" }
+  ],
+  "groups": [
+    { "id": "group_window", "label": "(a) 结构行异步落库", "lane": "sink", "fromCol": 2, "toCol": 3, "variant": "emphasis" },
+    { "id": "group_resilience", "label": "失败恢复路径（单序列重放）", "lane": "recovery", "fromCol": 2, "toCol": 3, "variant": "security" }
+  ],
+  "mainPath": [
+    "plan_lock",
+    "apply_split",
+    "artifact_bundle",
+    "artifact_accept",
+    "journal_complete",
+    "backup_drive",
+    "sink_write",
+    "db_tail",
+    "lane_health",
+    "release_guard"
+  ],
+  "nodes": [
+    { "id": "plan_lock", "lane": "plan", "col": 0, "type": "backend", "label": "口径冻结", "width": 140 },
+    { "id": "apply_split", "lane": "apply", "col": 1, "type": "backend", "label": "拆写点", "width": 140 },
+    { "id": "artifact_bundle", "lane": "apply", "col": 2, "type": "backend", "label": "组装 artifact", "width": 180 },
+    { "id": "artifact_accept", "lane": "journal", "col": 2, "type": "messagebus", "label": "accept", "width": 140 },
+    { "id": "journal_complete", "lane": "journal", "col": 2, "type": "database", "label": "complete Data", "sublabel": "Data 阶段先于 watermark", "width": 140, "yOffset": 64 },
+    { "id": "backup_drive", "lane": "sink", "col": 2, "type": "backend", "label": "backup 循环", "sublabel": "单游标串行落库", "width": 140 },
+    { "id": "sink_write", "lane": "sink", "col": 3, "type": "database", "label": "结构化 sink", "sublabel": "按顺序落库", "width": 140 },
+    { "id": "lane_health", "lane": "recovery", "col": 3, "type": "external", "label": "/health", "sublabel": "lag / last_error", "width": 140 },
+    { "id": "db_tail", "lane": "store", "col": 3, "type": "database", "label": "尾事务与水位", "sublabel": "finalize_attempt 不变", "width": 140 },
+    { "id": "replay_resume", "lane": "store", "col": 2, "type": "backend", "label": "崩溃重放", "sublabel": "领先一窗只补尾事务", "width": 140 },
+    { "id": "parity_check", "lane": "verify", "col": 2, "type": "backend", "label": "parity 验证", "sublabel": "window_repair 与表对比", "width": 140 },
+    { "id": "release_guard", "lane": "verify", "col": 3, "type": "frontend", "label": "交付结点", "sublabel": "回归、告警与可观测", "width": 140 }
+  ],
+  "edges": [
+    { "from": "plan_lock", "to": "apply_split", "role": "main", "label": "确认重构边界" },
+    { "from": "apply_split", "to": "artifact_bundle", "role": "main", "label": "保留 Task 内渲染职责" },
+    { "from": "artifact_bundle", "to": "artifact_accept", "role": "main", "label": "runtime.accept LocalWindow" },
+    { "from": "artifact_accept", "to": "journal_complete", "role": "main", "label": "complete(Data)" },
+    { "from": "journal_complete", "to": "backup_drive", "role": "main", "label": "journal seq 入列" },
+    { "from": "backup_drive", "to": "sink_write", "role": "main", "label": "执行下一条 completion" },
+    { "from": "sink_write", "to": "db_tail", "role": "return", "label": "结构化行落库成功" },
+    { "from": "db_tail", "to": "lane_health", "role": "main", "label": "公开 lag 与错误快照" },
+    { "from": "lane_health", "to": "release_guard", "role": "main", "label": "输出到健康可见面" },
+    { "from": "lane_health", "to": "parity_check", "role": "branch", "label": "对齐可见性与测试结论" },
+    { "from": "parity_check", "to": "release_guard", "role": "branch", "label": "确认回归无偏" },
+    { "from": "sink_write", "to": "replay_resume", "role": "error", "label": "中途失败则记 error 并重放" },
+    { "from": "replay_resume", "to": "lane_health", "role": "branch", "label": "重建后继续消费" }
+  ]
+}

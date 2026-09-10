@@ -170,6 +170,12 @@ execute_one_dbnum                 数据窗口：收集 → 依赖块 → 元素
   `complete_model_task_on`（model_sesno 推进）排在了房间阶段之前，与 D1/G2 (i) 顺序相反（审核 H1）；过渡期由 durable
   房间行 + `room_released` + 空闲恢复兜住债务。**d-73：S9/T5 退表绝不能先于 S8/T4 落地**；T4 须恢复 D1 顺序、反向重钉
   （现有源码钉断言的恰是过渡顺序）并补「房间失败挡住牵涉根凭证前移」的 mem:// 真测（实施约束 2）。
+  - **顺序那一半已修（2026-09-10，随 ADR-071 S2-b / S3 前半）**：Task 末尾现在是「文件轮次发布 → 完成收据 →
+    房间 → **一笔**收尾盖三水位」，源码钉已反向重钉成 `publish < 收据 < 房间 < 收尾 < finish_ready`。
+    房间那三道「模型水位已盖」的闸换成了数据水位 + 义务 CAS（`room_required_input`），`room_sesno` 的唯一
+    生产写者是 `task_end`。**「房间失败挡住牵涉根凭证前移」仍未做**：今天是「模型整枚照盖、房间那一枚不盖，
+    启动恢复再补」，按根剔除要等根级凭证前移的集合就位——提前实现成「整枚不盖」会让一次持久的房间失败把
+    整库模型永远钉在旧版重算。
 - T4 开工（2026-09-09）：执行工单 `docs/plans/2026-09-09-t4-room-into-task-work-order.md`（切片 T4.0–T4.6，
   每片全量收口；协调前提单列）。T4.0（GroupCache 跨代命中即提升，Q16 / ADR-067 实施约束 3）已落：
   没变文件跨代内存直接命中、写入收口唯一入口，全量 1952 passed / 0 failed。T4.1（`room_task.rs` 模块搬家）
@@ -177,6 +183,12 @@ execute_one_dbnum                 数据窗口：收集 → 依赖块 → 元素
   `pub(crate)`），`batch_worker.rs` 两处调用点改指新模块、行为不变，收尾内部清边→消费顺序钉随迁为
   `room_finalization_clears_before_draining`，全量 1955 passed / 0 failed。D1 顺序恢复（房间移到 model_sesno
   推进之前）+ 反向重钉 + mem:// 真测留 T4.2。
+- 输入面审核（2026-09-09，`docs/2026-09-09-local-first-input-audit.md`）：对照「E3D 文件 + 内存索引 + 本地产物为输入、
+  SurrealDB 只做异步备份」核出 Task 主路径仍以库为调度中枢（`persist_root` 同步落库为根成功判据、尾事务的模型意图行与
+  pending 表），`local_runtime` / `local_initialization` 雏形已落但零生产接线；迁移顺序见该文 §6。
+  用户同日两次拍板：「水位还是要以数据库里面的值为增值」「gen_root 凭证真值也留库」——三水位与 `gen_root` 凭证真值留库，
+  `discover_batch` 读库水位、规划器读 `gen_root`、尾事务水位 / 凭证前移**不算偏离**；该文 §6 原第 1 步「账本先行」整步删除，
+  迁移从数据窗口开始。
 3. **观测**：任务回执 `units` 逐根成败；`/health` 的 `tasks` / `task_registry` 是「在飞」的唯一来源；`/dbnums` 四格照 D7；
    失败记录（`parse_error`）能说出根、步骤、原因（ISSUE-025 的活顺带补）。
 4. **CONTEXT.md**：新词条「dbnum 任务 (Dbnum Task)」「ModelOnly 任务」；「待重试单元」「模型窗口意图」「revision 收口」

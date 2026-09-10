@@ -26,9 +26,7 @@ fn room_input_version(
 ) -> RoomInputVersion {
     RoomInputVersion {
         version: 1,
-        source_identity: crate::data_interface::model_publish_queue::digest(
-            source_token.as_bytes(),
-        ),
+        source_identity: crate::data_interface::digest::digest(source_token.as_bytes()),
         model_sesno,
         model_version,
         room_definition_version,
@@ -45,6 +43,7 @@ async fn calculate_and_commit_memory_rooms(
     model_sesno: i32,
     source_token: &str,
 ) -> anyhow::Result<usize> {
+    let _serial = super::spatial_state::lock_spatial_serial().await;
     let resident = super::room_resident::current_for_calculation()?;
     ensure!(
         resident.missing_panels.is_empty(),
@@ -53,24 +52,35 @@ async fn calculate_and_commit_memory_rooms(
     );
 
     let store = ModelMemoryStore::global();
-    let (epoch, records) = store.snapshot_dbnum(dbnum);
-    let model_version = crate::data_interface::model_publish_queue::digest(
-        &serde_json::to_vec(&records).context("serialize memory model projection")?,
-    );
+    let state = DbnumState::read(dbnum)
+        .await?
+        .with_context(|| format!("dbnum {dbnum} has no watermark row"))?;
+    let cache = mgr.db_option.get_meshes_path().join("room-result-cache");
+    let previous: crate::data_interface::room_delta::Directory = state.room_result_version.as_ref()
+        .and_then(|version| super::model_artifact::load_value(&cache, &format!("room-directory:{dbnum}:{version}")))
+        .unwrap_or_default();
+    let definition = resident.input_version();
+    let full = !store.room_baseline_known(dbnum)
+        || previous.version != state.room_result_version || previous.version.is_none()
+        || previous.input.as_ref().is_none_or(|input| input.room_definition_version != definition);
+    let (epoch, model_version, changes, records) = store.room_snapshot(dbnum, full);
+    let mut changed: std::collections::BTreeSet<String> = changes.keys()
+        .map(|member| aios_core::RefU64(*member as u64).to_string()).collect();
+    if full { changed.extend(previous.members.keys().cloned()); }
     let input = room_input_version(
         source_token,
         model_sesno,
         model_version,
-        resident.input_version(),
+        definition,
     );
-    let state = DbnumState::read(dbnum)
-        .await?
-        .with_context(|| format!("dbnum {dbnum} has no watermark row"))?;
+    // Model completion is durable before room calculation starts.
     ensure!(
-        state.model_sesno == model_sesno && state.applied_sesno >= model_sesno,
-        "dbnum {dbnum} model watermark changed before room calculation"
+        state.applied_sesno >= model_sesno && state.model_sesno >= model_sesno,
+        "dbnum {dbnum} data watermark {} is behind the room target {model_sesno}",
+        state.applied_sesno
     );
     if state.recovery_stage(Some(&input)) == RecoveryStage::Complete {
+        store.ack_rooms(dbnum, epoch);
         return Ok(0);
     }
 
@@ -89,13 +99,23 @@ async fn calculate_and_commit_memory_rooms(
         "dbnum {dbnum} memory model changed during room calculation"
     );
 
-    let prepared = PreparedRoomResult::new(dbnum, input, &edges)?;
+    ensure!(super::room_resident::current_for_calculation()?.input_version() == input.room_definition_version,
+        "room definition changed during calculation");
+    let prepared = crate::data_interface::room_delta::PreparedDelta::new(
+        dbnum, previous, state.room_result_version.clone(), input, &changed, &edges)?;
+    // Save the candidate before switching visibility. A crash after the database
+    // ACK can reload this exact content-addressed directory without recomputation.
+    super::model_artifact::store_value(&cache,
+        &format!("room-directory:{dbnum}:{}", prepared.next.version.as_deref().unwrap()), &prepared.next)?;
     prepared.stage_on(&SUL_DB).await?;
     ensure!(
         store.commit_epoch(dbnum) == epoch,
         "dbnum {dbnum} memory model changed while staging room result"
     );
     prepared.commit_on(&SUL_DB).await?;
+    store.ack_rooms(dbnum, epoch);
+    println!("[room-delta] dbnum={dbnum} full={full} members={} edge_writes={} directory_members_visited={}",
+        changed.len(), prepared.edge_writes(), prepared.directory_members_visited());
     Ok(edges.len())
 }
 
@@ -162,7 +182,15 @@ pub(crate) async fn finish_file_room_round(
             .map(Some);
     }
 
-    super::room_publication::clear_deferred_room_edges(&published.room_clear_refnos).await?;
+    // 清边名单从**任务内存**里拿（ADR-071 D1 / ADR-067 D7）：它就是本轮生成时算出来的
+    // 「产物 → 目标」，写进库那一行再读回来是异步时代的绕路。库那一行只作崩溃回落——
+    // 进程中途重启，内存那本没了，这一轮的名单还在库里；S4 把那一行拆掉之后这条也没了
+    // （届时语义是「收尾没盖章 = 这一窗没发生过，整窗重跑」）。
+    let room_clear = match crate::data_interface::task_effects::snapshot(dbnum, round_end_sesno) {
+        Some(effects) => effects.room_clear.into_iter().collect::<Vec<_>>(),
+        None => published.room_clear_refnos.clone(),
+    };
+    super::room_publication::clear_deferred_room_edges(&room_clear).await?;
     if !crate::options::room_incremental() {
         return SideEffectCompensator::mark_file_rooms_released(dbnum, round_end_sesno)
             .await
@@ -179,8 +207,9 @@ pub(crate) async fn finish_file_room_round(
             retire_file_room_pending(dbnum, round_end_sesno).await?;
             let completion =
                 SideEffectCompensator::mark_file_rooms_released(dbnum, round_end_sesno).await?;
+            crate::data_interface::task_effects::forget(dbnum, round_end_sesno);
             println!(
-                "文件轮次发布完成 dbnum={dbnum} sesno={round_end_sesno}：实时内存房间归属 {done} 条，房间水位已提交"
+                "文件轮次发布完成 dbnum={dbnum} sesno={round_end_sesno}：实时内存房间归属 {done} 条，房间水位待收尾那一笔盖"
             );
             Ok(Some(completion))
         }
@@ -216,6 +245,24 @@ pub(crate) async fn recover_missing_room_watermarks(mgr: &AiosDBManager) -> anyh
         let done = calculate_and_commit_memory_rooms(mgr, state.dbnum, state.model_sesno, &token)
             .await
             .with_context(|| format!("restore room watermark for dbnum {}", state.dbnum))?;
+        // 房间水位不再跟着结果一起提交（见 `PreparedRoomResult::commit_sql`）：这条恢复路
+        // 自己盖，目标就是这个库现在的模型水位。只在**确实落后**时盖——否则每次启动都会给
+        // 每个已完成的库白涨一次 `state_revision`。
+        if state.room_sesno < state.model_sesno || state.room_result_version.is_none() {
+            crate::data_interface::task_end::commit_task_end_on(
+                &SUL_DB,
+                &crate::data_interface::task_end::TaskEnd {
+                    dbnum: state.dbnum,
+                    target_sesno: state.model_sesno,
+                    target_time: state.model_sesno_time.clone(),
+                    model: None,
+                    rooms: Some(crate::data_interface::task_end::TaskRoomOutcome { ok: true }),
+                    info: None,
+                },
+            )
+            .await
+            .with_context(|| format!("stamp restored room watermark for dbnum {}", state.dbnum))?;
+        }
         if done > 0 || state.room_sesno != state.model_sesno || state.room_result_version.is_none()
         {
             completed += 1;
@@ -246,5 +293,10 @@ mod tests {
         assert!(!calculation.contains("SUL_DB.query"));
         assert!(!production.contains("startup_rooms_pending"));
         assert!(!production.contains("drain_rooms_scoped"));
+        assert!(calculation.contains("state.model_sesno >= model_sesno"));
+        assert!(calculation.contains("store.room_snapshot(dbnum, full)"));
+        assert!(!calculation.contains("snapshot_dbnum"));
+        assert!(calculation.contains("room_delta::PreparedDelta::new"));
+        assert!(calculation.contains("state.applied_sesno >= model_sesno"));
     }
 }

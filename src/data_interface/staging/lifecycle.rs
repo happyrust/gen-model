@@ -79,7 +79,7 @@ pub struct ActiveStagedWindow {
 
 /// Event absence is the compatible schema; never cache a previous success.
 async fn ensure_writeback_schema_compatible() -> anyhow::Result<()> {
-    crate::data_interface::dbnum_stats::require_no_event_on(&aios_core::SUL_DB).await
+    crate::data_interface::pe_batch::require_no_event_on(&aios_core::SUL_DB).await
 }
 
 /// 在独立的生产内存实例上开一个新窗口。
@@ -298,7 +298,7 @@ impl ActiveStagedWindow {
         if let Err(error) = &result
             && error.to_string().contains("commit outcome unknown")
         {
-            crate::data_interface::model_update_pending::mark_attempt_commit_state_on(
+            crate::data_interface::increment_tail::mark_attempt_commit_state_on(
                 target,
                 self.meta.dbnum,
                 &self.meta.commit_token,
@@ -379,7 +379,7 @@ impl ActiveStagedWindow {
 
     pub(crate) async fn render_finalize_tail(
         &self,
-    ) -> anyhow::Result<crate::data_interface::model_update_pending::FinalizeRender> {
+    ) -> anyhow::Result<crate::data_interface::increment_tail::FinalizeRender> {
         let mut finalize = self
             .staged_finalize()
             .await
@@ -412,7 +412,7 @@ impl ActiveStagedWindow {
             .collect::<Vec<_>>();
         refresh.sort_unstable();
         remove.sort_unstable();
-        crate::data_interface::model_update_pending::render_finalize_tail_with_effects(
+        crate::data_interface::increment_tail::render_finalize_tail_with_effects(
             finalize.dbnum,
             finalize.end_sesno,
             finalize.end_sesno_time.as_deref(),

@@ -98,12 +98,21 @@ gm_SetDefaultFacetTolerance(0.5);           // → GM_User::arctol_，本仓 FAC
 
 **0.051mm 是 libgm 的「多近算同一个」**，而 0.5 那个我们已经从同一处抄过来了。
 
-更关键的是 E3D 的负体**不是三维实体 CSG**：`CSG_PrimitiveUtilities::addStandAloneNegative`
-建 `gm_CreateCombination(3)`（3 = 相减），`GM_AggregateCombination::calcFacets` 把
-`restol_` 一路传给 `GM_CompFacets::aggregateWith`，真正相减发生在
-`GM_Facets::obscureFaces`（libgm `0x10068710`）——逐对超级面在**面内做二维多边形相减**
-（`D2_PolySet::booleanPrecise(..., 3)`），切分线的 side 判定与事后
-`D2_PolySet::normalise` 都吃 `restol`。近共面被 0.051mm 塞成真共面，然后减掉。
+更关键的是 libgm 的共面重合有个**绝对容差**（0.051mm），而我们一个都没有。
+**〔2026-09-09 逐帧实测更正〕** 早前这里写「E3D 负体不是三维实体 CSG、靠 `obscureFaces`
+面内二维相减」是误挂——`obscureFaces` 其实是隐藏面 / 出图例程（调用者只有 `GM_Facets::obscure` /
+`selfHide`），`D2_PolySet::booleanPrecise` 是二维截面布尔，两者都不在实体减法路上。真实链：
+`CSG_PrimitiveUtilities::addStandAloneNegative`（Core3D `0x10726620`）建 `gm_CreateCombination(3)`
+→ **`GM_SolidCombination`**（实体减法，不是 `AggregateCombination`）→ 自有
+`GM_SolidCombination::calcFacets`（`0x100A00D0`）→ **`gm_combine`（`GM_SetOp.cxx`）真三维 facet 布尔**：
+`GM_IntCurve::create` 求交线、`buildFacets` 重建、`normalisePostSetOp(GM_User::normtol_)` 归一。
+共面 / 近共面的「算不算同一处」由 **`normtol_ = 0.051mm`** 治理（`restol_` 与 `normtol_` 被 Core3D
+同处设成同值，所以数值 0.051 的结论不变，只是治理它的是 `normtol_`）。**那层皮被消掉的确切一步**：
+`gm_combine` 收尾 `normalisePostSetOp(normtol)` → `normaliseStage1` → `adjustVertices(normtol)`
+（`GM_Near::pointNearPoint` 把 ≤0.051mm 的顶点焊成一份）+ `doFacetCancellation(normtol)`
+（`expandBy(normtol)` 找重叠 → 平面法向夹角 ≥175° 判共面对向 → `cancelFacets(…, normtol)` 抵消）
+——**不在 `GM_IntCurve`**（那只求横切交线）。详见
+`docs/evidence/2026-08-25-ida-libgm-coincidence-tolerances.md` §三 与 §三·补。
 
 对照我们这条路：`plant_mesh_to_manifold` 焊顶点用的是 `to_bits()` **逐位相等**，
 整条链上没有任何位置容差。所以结论不是「libgm 有个共面规则我们没抄」，而是

@@ -31,6 +31,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use aios_core::{NamedAttrMap, NamedAttrValue, RefU64, SUL_DB};
 use anyhow::Context;
+use surrealdb::{Surreal, engine::any::Any};
 
 use crate::data_interface::cata_closure::{
     CataClosureConfig, CataClosureManifest, CataClosureResolver, CataDbLocator,
@@ -289,6 +290,18 @@ pub async fn refresh_moved_catalogues(
     dbnums: impl IntoIterator<Item = u32>,
     uda_keys: &UdaKeyMap,
 ) -> anyhow::Result<Vec<CatalogueRefresh>> {
+    refresh_moved_catalogues_on(&SUL_DB, project, dbnums, uda_keys).await
+}
+
+/// 同 [`refresh_moved_catalogues`]，目标库由调用方给：本地优先化的结构化 sink 在 backup lane 上
+/// 落 CATA 依赖行时用它（`docs/plans/2026-09-09-local-first-data-window-plan.md` §2.3）；
+/// 文件侧的差分 / 闭包解析不变，只有读写库的那几口改打 `db`。
+pub async fn refresh_moved_catalogues_on(
+    db: &Surreal<Any>,
+    project: &str,
+    dbnums: impl IntoIterator<Item = u32>,
+    uda_keys: &UdaKeyMap,
+) -> anyhow::Result<Vec<CatalogueRefresh>> {
     let dbnums = dbnums.into_iter().collect::<BTreeSet<_>>();
     if dbnums.is_empty() {
         return Ok(Vec::new());
@@ -298,7 +311,7 @@ pub async fn refresh_moved_catalogues(
         .context("build CATA locator for dependency refresh")?;
     let mut out = Vec::new();
     for dbnum in dbnums {
-        let Some((base_sesno, _rows)) = dependency_rows_of(dbnum).await? else {
+        let Some((base_sesno, _rows)) = dependency_rows_of_on(db, dbnum).await? else {
             continue; // 从没入过依赖行的库没有可前移的东西
         };
         let Some((_, file)) = locator.file_of(dbnum) else {
@@ -354,17 +367,17 @@ pub async fn refresh_moved_catalogues(
                     "候选 {} 超过 {CATALOGUE_WINDOW_MAX_RECORDS}",
                     window.truncated_candidates.unwrap_or_default()
                 ));
-                (all_dependency_refnos(dbnum).await?, Vec::new())
+                (all_dependency_refnos_on(db, dbnum).await?, Vec::new())
             }
             Err(error) => {
                 refresh.full_refresh = true;
                 refresh.degraded_reason = Some(format!("{error:#}"));
-                (all_dependency_refnos(dbnum).await?, Vec::new())
+                (all_dependency_refnos_on(db, dbnum).await?, Vec::new())
             }
         };
         // 只刷已入库的依赖行：与 `pe … dependency = true` 求交（点查，不扫表）。
-        let present = dependency_rows_among(&targets).await?;
-        let gone = dependency_rows_among(&deleted).await?;
+        let present = dependency_rows_among_on(db, &targets).await?;
+        let gone = dependency_rows_among_on(db, &deleted).await?;
         if !present.is_empty() {
             let seeds = present.iter().copied().collect::<BTreeSet<_>>();
             let mut resolver = CataClosureResolver::new(&locator, {
@@ -393,7 +406,7 @@ pub async fn refresh_moved_catalogues(
                 render_dependency_transactions(&rows, uda_keys, WriteMode::Replace)?
             {
                 for sql in sqls {
-                    crate::data_interface::dbnum_stats::execute_on(&SUL_DB, &sql)
+                    crate::data_interface::pe_batch::execute_on(db, &sql)
                         .await
                         .with_context(|| {
                             format!("refresh moved catalogue rows of dbnum {row_dbnum}")
@@ -422,7 +435,7 @@ pub async fn refresh_moved_catalogues(
                 WriteMode::Replace,
             )?;
             for sql in sqls {
-                crate::data_interface::dbnum_stats::execute_on(&SUL_DB, &sql)
+                crate::data_interface::pe_batch::execute_on(db, &sql)
                     .await
                     .with_context(|| {
                         format!("tombstone deleted catalogue rows of dbnum {dbnum}")
@@ -430,8 +443,7 @@ pub async fn refresh_moved_catalogues(
             }
             refresh.tombstoned = gone.len();
         }
-        SUL_DB
-            .query(render_dependency_state(dbnum, target_sesno, 0))
+        db.query(render_dependency_state(dbnum, target_sesno, 0))
             .await
             .and_then(|response| response.check())
             .with_context(|| format!("advance CATA dependency state of dbnum {dbnum}"))?;
@@ -587,7 +599,10 @@ async fn dependency_state_dbnums() -> anyhow::Result<Vec<u32>> {
 }
 
 /// 这些 refno 里哪些是已入库的依赖行（`pe … dependency = true`）：点查，不扫表。
-async fn dependency_rows_among(refnos: &[RefU64]) -> anyhow::Result<Vec<RefU64>> {
+async fn dependency_rows_among_on(
+    db: &Surreal<Any>,
+    refnos: &[RefU64],
+) -> anyhow::Result<Vec<RefU64>> {
     let mut out = Vec::new();
     for chunk in refnos.chunks(200) {
         let keys = chunk
@@ -595,7 +610,7 @@ async fn dependency_rows_among(refnos: &[RefU64]) -> anyhow::Result<Vec<RefU64>>
             .map(|refno| format!("pe:{refno}"))
             .collect::<Vec<_>>()
             .join(",");
-        let mut response = SUL_DB
+        let mut response = db
             .query(format!(
                 "SELECT VALUE record::id(id) FROM [{keys}] WHERE record::exists(id) AND dependency = true;"
             ))
@@ -608,8 +623,8 @@ async fn dependency_rows_among(refnos: &[RefU64]) -> anyhow::Result<Vec<RefU64>>
 }
 
 /// 一个目录库全部已入库的依赖行（差分退化时的整库重渲名单）。
-async fn all_dependency_refnos(dbnum: u32) -> anyhow::Result<Vec<RefU64>> {
-    let mut response = SUL_DB
+async fn all_dependency_refnos_on(db: &Surreal<Any>, dbnum: u32) -> anyhow::Result<Vec<RefU64>> {
+    let mut response = db
         .query(format!(
             "SELECT VALUE record::id(id) FROM pe WHERE dbnum = {dbnum} AND dependency = true;"
         ))
@@ -695,11 +710,21 @@ pub async fn persist_resolved_rows(
     project: &str,
     rows: &CataDependencyRows,
 ) -> anyhow::Result<CataDependencyReport> {
-    let uda_keys = UdaKeyMap::load().await?;
+    persist_resolved_rows_on(&SUL_DB, project, rows).await
+}
+
+/// 同 [`persist_resolved_rows`]，目标库由调用方给（结构化 sink 在 backup lane 上落本窗的
+/// CATA 依赖行走这里；语句与判据一行不差）。
+pub async fn persist_resolved_rows_on(
+    db: &Surreal<Any>,
+    project: &str,
+    rows: &CataDependencyRows,
+) -> anyhow::Result<CataDependencyReport> {
+    let uda_keys = UdaKeyMap::load_on(db).await?;
     // D7：本批碰到的目录库，文件比已入库依赖行的版本新的，先把被改的依赖行 Replace 刷新——
     // 排在 Fresh 之前，否则新闭包里「已有行赢」会把旧版本留下。
     let refreshed =
-        refresh_moved_catalogues(project, rows.by_dbnum.keys().copied(), &uda_keys).await?;
+        refresh_moved_catalogues_on(db, project, rows.by_dbnum.keys().copied(), &uda_keys).await?;
     let transactions = render_dependency_transactions(rows, &uda_keys, WriteMode::Fresh)?;
     let mut report = CataDependencyReport {
         elements: rows.elements(),
@@ -711,7 +736,7 @@ pub async fn persist_resolved_rows(
     };
     for (dbnum, sqls) in &transactions {
         for sql in sqls {
-            crate::data_interface::dbnum_stats::execute_on(&SUL_DB, sql)
+            crate::data_interface::pe_batch::execute_on(db, sql)
                 .await
                 .with_context(|| format!("persist CATA dependency rows for dbnum {dbnum}"))?;
             report.transactions += 1;
@@ -723,8 +748,7 @@ pub async fn persist_resolved_rows(
             .map(|(sesno, _)| *sesno)
             .unwrap_or(0);
         let elements = rows.by_dbnum.get(dbnum).map(Vec::len).unwrap_or(0);
-        SUL_DB
-            .query(render_dependency_state(*dbnum, sesno, elements))
+        db.query(render_dependency_state(*dbnum, sesno, elements))
             .await
             .and_then(|response| response.check())
             .with_context(|| format!("record CATA dependency state for dbnum {dbnum}"))?;
@@ -732,8 +756,71 @@ pub async fn persist_resolved_rows(
     Ok(report)
 }
 
+/// 任务范围内「这一版已经落过库的 seed」。
+///
+/// 模型根发布**每根**调一次 [`persist_for_design_subtree`]，而目录链是海量共享的——同一个
+/// 规格、同一个元件，几千根管子都指着它。7997 那一轮实测：2,469 次调用重解重写了 387,132 行，
+/// 而这个库整份闭包只有 15,500 行（数据阶段基线已经一次性落过），25 倍的重复占掉模型阶段
+/// 628.7 s 里的 323.7 s。每一次调用还都重建一遍 `InMemoryCataLocator`。
+///
+/// 与 `model_db_adapter` 的对账基线同一条纪律（ADR-071 D1：任务是这个 dbnum 唯一的写者，
+/// **它知道自己写了什么**）：作用域绑在数据窗口上（`active_data_window()`），换窗即失效；
+/// 窗口不在（`/model/ensure` 那类一根一调的路）就不记，照旧每根解一次。
+struct CataSeedMemo {
+    window: (u32, i32),
+    seeds: BTreeSet<RefU64>,
+}
+
+static CATA_SEED_MEMO: std::sync::Mutex<Option<CataSeedMemo>> = std::sync::Mutex::new(None);
+
+fn cata_seed_memo() -> std::sync::MutexGuard<'static, Option<CataSeedMemo>> {
+    CATA_SEED_MEMO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// 别的写者动过目录行之后调：记忆不再等于库。
+pub(crate) fn invalidate_cata_seed_memo() {
+    *cata_seed_memo() = None;
+}
+
+/// 本窗还没落过库的那些 seed。窗口不在就原样返回——不记忆的路每次都得自己解。
+fn unseen_seeds(window: Option<(u32, i32)>, seeds: &BTreeSet<RefU64>) -> BTreeSet<RefU64> {
+    let Some(window) = window else {
+        return seeds.clone();
+    };
+    match cata_seed_memo()
+        .as_ref()
+        .filter(|memo| memo.window == window)
+    {
+        Some(memo) => seeds.difference(&memo.seeds).cloned().collect(),
+        None => seeds.clone(),
+    }
+}
+
+/// 记下这些 seed 已经落过库。**只在写成功之后调**：失败的 seed 必须让下一根重试，
+/// 否则整窗都以为它写过了。换窗时整份换掉，不与上一窗混。
+fn remember_seeds(window: Option<(u32, i32)>, seeds: &BTreeSet<RefU64>) {
+    let Some(window) = window else {
+        return;
+    };
+    let mut memo = cata_seed_memo();
+    match memo.as_mut().filter(|memo| memo.window == window) {
+        Some(memo) => memo.seeds.extend(seeds.iter().cloned()),
+        None => {
+            *memo = Some(CataSeedMemo {
+                window,
+                seeds: seeds.clone(),
+            });
+        }
+    }
+}
+
 /// 模型根发布前的入口：根的子树名单（e3d-model DFS `visited`）→ 从文件读属性 → seed → 入库。
 /// 只 warning 不拦发布（ADR-056 D1 的对偶：依赖块也不拦模型）。
+///
+/// 本窗已经落过的 seed 不再解第二遍闭包（见 [`CataSeedMemo`]）：整根的 seed 都是老面孔时
+/// 连定位器都不建，直接回一份「这一根 N 个 seed，没有新的」。
 pub async fn persist_for_design_subtree(
     project: &str,
     design_dbnum: u32,
@@ -747,17 +834,35 @@ pub async fn persist_for_design_subtree(
             seeds.extend(seeds_from_attmap(element.att_map()));
         }
     }
-    persist_cata_dependencies(project, design_dbnum, &seeds).await
+    let window = crate::data_interface::batch_worker::active_data_window();
+    let fresh = unseen_seeds(window, &seeds);
+    if fresh.is_empty() {
+        return Ok(CataDependencyReport {
+            seeds: seeds.len(),
+            ..Default::default()
+        });
+    }
+    let report = persist_cata_dependencies(project, design_dbnum, &fresh).await?;
+    remember_seeds(window, &fresh);
+    Ok(report)
 }
 
 /// 一个 CATA 库已入库的依赖行数（`/health` / 回执用）。
 pub async fn dependency_rows_of(dbnum: u32) -> anyhow::Result<Option<(u32, u64)>> {
+    dependency_rows_of_on(&SUL_DB, dbnum).await
+}
+
+/// 同 [`dependency_rows_of`]，目标库由调用方给。
+pub async fn dependency_rows_of_on(
+    db: &Surreal<Any>,
+    dbnum: u32,
+) -> anyhow::Result<Option<(u32, u64)>> {
     #[derive(serde::Deserialize)]
     struct Row {
         sesno: Option<u32>,
         rows: Option<u64>,
     }
-    let mut response = SUL_DB
+    let mut response = db
         .query(format!(
             "SELECT sesno, rows FROM ONLY cata_dependency_state:{dbnum};"
         ))
@@ -921,9 +1026,10 @@ mod tests {
             "{sql}"
         );
         assert!(!sql.contains("DELETE"), "Fresh 只插:\n{sql}");
+        // pe 统计不再逐笔记账（ADR-071 D6）：写事务里没有观测块，`count` 由该库任务收尾从目标索引序列化。
         assert!(
-            sql.contains("dbnum_stats_state:5052"),
-            "pe 统计按 CATA 库记账:\n{sql}"
+            !sql.contains("dbnum_stats_state") && !sql.contains("dbnum_info_table"),
+            "写事务不得再带逐笔统计观测:\n{sql}"
         );
     }
 
@@ -958,7 +1064,7 @@ mod tests {
         for _ in 0..2 {
             for (dbnum, sqls) in &batches {
                 for sql in sqls {
-                    crate::data_interface::dbnum_stats::execute_on(&db, sql)
+                    crate::data_interface::pe_batch::execute_on(&db, sql)
                         .await
                         .unwrap();
                 }
@@ -990,10 +1096,11 @@ mod tests {
             "重跑不翻倍（已有行赢）"
         );
         assert_eq!(response.take::<Option<i64>>(2).unwrap(), Some(184));
+        // 统计不再随写事务逐笔记账（ADR-071 D6）：这里没有任务收尾，info 表就该一行都没有。
         assert_eq!(
             response.take::<Option<i64>>(3).unwrap(),
-            Some(2),
-            "pe 统计按 CATA 库记账"
+            None,
+            "写事务不再动 dbnum_info_table，统计由任务收尾序列化"
         );
     }
 
@@ -1011,10 +1118,22 @@ mod tests {
     /// 没带它的目录链」。
     #[test]
     fn all_three_write_points_persist_catalogue_dependencies() {
-        let pipeline = include_str!("increment_pipeline.rs");
+        // 数据窗口（ADR-071 任务内同步序列化）：Task 解闭包（`resolve_dependency_rows`，失败仍
+        // 拦水位）、行装进窗口产物，`land_increment_window` 用同一个 `persist_resolved_rows_on`
+        // 在尾事务之前同步落库——写入点没少，只是收进了一个落库入口。
+        let pipeline = include_str!("increment_pipeline.rs")
+            .split_once("async fn apply_one(")
+            .expect("apply_one 还在")
+            .1;
         assert!(
-            pipeline.contains("cata_dependency::persist_cata_dependencies("),
-            "数据窗口 apply_one 必须入库 CATA 依赖"
+            pipeline.contains("cata_dependency::resolve_dependency_rows("),
+            "数据窗口 apply_one 必须在 Task 侧解 CATA 依赖闭包"
+        );
+        let sink = include_str!("window_landing/mod.rs");
+        assert!(
+            sink.contains("cata_dependency::persist_resolved_rows_on(")
+                && sink.contains("window.cata_rows()"),
+            "落库入口必须用同一个写入口把窗口产物里的 CATA 依赖行落库"
         );
         let baseline = include_str!("../versioned_db/baseline_ingest.rs");
         assert!(
@@ -1035,6 +1154,76 @@ mod tests {
         assert!(
             publish_body.contains("cata_dependency_degraded") && publish_body.contains("不拦发布"),
             "模型侧的依赖块失败只 warning、不拦发布"
+        );
+    }
+
+    fn seed_set(raw: &[(u32, u32)]) -> BTreeSet<RefU64> {
+        raw.iter()
+            .map(|(word0, word1)| RefU64::from_two_nums(*word0, *word1))
+            .collect()
+    }
+
+    /// 目录 seed 的记忆只覆盖**一个数据窗口**：同一窗里老 seed 不再解第二遍闭包，换一窗
+    /// 必须从头来，没有窗口的那条路（`/model/ensure` 一根一调）一个都不记。
+    ///
+    /// 钉的是 2026-09-10 那次实测：7997 模型阶段 2,469 次逐根调用重解重写了 387,132 行，
+    /// 而这个库整份闭包只有 15,500 行——323.7 s，占模型阶段一半。
+    #[test]
+    fn the_catalogue_seed_memo_is_scoped_to_one_data_window() {
+        invalidate_cata_seed_memo();
+        let window = Some((7997, 160));
+        let first = seed_set(&[(24381, 1), (24381, 2)]);
+
+        assert_eq!(unseen_seeds(window, &first), first, "第一根：全都是新的");
+        remember_seeds(window, &first);
+        assert!(
+            unseen_seeds(window, &first).is_empty(),
+            "同一窗里的第二根：老面孔一个都不该再解"
+        );
+        assert_eq!(
+            unseen_seeds(window, &seed_set(&[(24381, 2), (24381, 3)])),
+            seed_set(&[(24381, 3)]),
+            "混着新老 seed 时只解新的那些"
+        );
+
+        assert_eq!(
+            unseen_seeds(Some((7997, 161)), &first),
+            first,
+            "换一版目标就是另一窗：记忆不跨窗"
+        );
+        assert_eq!(unseen_seeds(None, &first), first, "没有窗口就不吃记忆");
+        remember_seeds(None, &first);
+        assert_eq!(unseen_seeds(None, &first), first, "也记不进去");
+
+        invalidate_cata_seed_memo();
+        assert_eq!(
+            unseen_seeds(window, &first),
+            first,
+            "作废之后回到「什么都不知道」"
+        );
+    }
+
+    /// 记忆只在**写成功之后**落：`?` 早退的那一根不能把自己的 seed 记成写过了，否则
+    /// 整窗剩下的根都会跳过它，缺行到下一个任务才补得回来。
+    #[test]
+    fn the_catalogue_seed_memo_records_only_after_a_successful_write() {
+        let body = include_str!("cata_dependency.rs")
+            .split_once("pub async fn persist_for_design_subtree(")
+            .expect("模型根发布的入口还在")
+            .1;
+        let persisted = body
+            .find("persist_cata_dependencies(project, design_dbnum, &fresh)")
+            .expect("落库那一句还在");
+        let remembered = body
+            .find("remember_seeds(window, &fresh)")
+            .expect("记忆那一句还在");
+        assert!(
+            persisted < remembered,
+            "remember_seeds 必须排在落库之后：写失败的 seed 要让下一根重试"
+        );
+        assert!(
+            body[..persisted].contains("if fresh.is_empty()"),
+            "整根都是老 seed 时必须直接返回——不建定位器、不解闭包、不发事务"
         );
     }
 
@@ -1189,7 +1378,14 @@ mod tests {
     /// 候选名单来自 `cata_dependency_state`，不是模型面的「过期」名单；逐库调用、一库失败不挡别的库。
     #[test]
     fn the_catalogue_reconcile_refreshes_dependency_rows_after_scheduling_roots_and_exposes_it() {
-        let pending = include_str!("model_update_pending.rs").replace("\r\n", "\n");
+        // 目录版本核对自 ADR-071 S4 起住在 `model_coverage.rs`（排的是带根名单的 ModelOnly 任务，
+        // 不再写 pending 行）；启动那个出口自 S5a 起住在 `startup_reconcile.rs`。
+        // 「两个出口都带上」这条判据于是对两份源码一起找。
+        let pending = include_str!("model_coverage.rs").replace("\r\n", "\n");
+        let both = format!(
+            "{pending}\n{}",
+            include_str!("startup_reconcile.rs").replace("\r\n", "\n")
+        );
         let reconcile = pending
             .split_once("async fn reconcile_catalogue_versions() -> CatalogueReconcile {")
             .expect("reconcile exists")
@@ -1214,13 +1410,13 @@ mod tests {
             "        catalogue_cascade,\n        catalogue_dependency_refresh,\n    };",
         ] {
             assert!(
-                pending.contains(probe),
+                both.contains(probe),
                 "两个出口都要带上这份账：找不到 {probe:?}"
             );
         }
         assert!(
-            pending.contains("self.catalogue_dependency_refresh.banner_line()")
-                && pending.contains("catalogue_dependency_refresh.banner_line() {"),
+            both.contains("self.catalogue_dependency_refresh.banner_line()")
+                && both.contains("catalogue_dependency_refresh.banner_line() {"),
             "运行期横幅与启动横幅都要给数据面那一半一行"
         );
 

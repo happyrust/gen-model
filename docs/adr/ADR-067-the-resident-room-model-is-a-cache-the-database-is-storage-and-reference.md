@@ -142,3 +142,9 @@ Blocked）时返回结构化 `RESIDENT_MODEL_UPDATING`，由调用方按可重�
 （`dbe5f4670`）、P4（护栏 + 闸，`e7628f886`）、completion S1（生命周期 / 双启动路径 / UPDATING 门，工作树未提交）、
 `warm_meshes`（S3 半截）。待做：S2 严格覆盖 + S3 指标；**T4 搬家 = 08 计划 S8 = completion S4 同一笔**（本 ADR 过目后开工）；
 live #2 验收；默认翻转与三份计划文档落显式提交；CONTEXT.md 词条（§9 新稿，等文件离开在途改动集）。
+
+输入面审核（2026-09-09，`docs/2026-09-09-local-first-input-audit.md` §4）：`room_task.rs` 的计算输入已只剩常驻模型 +
+`ModelMemoryStore` + `.mesh`，启动建模两形态都走文件；仍偏离目标的是 `freeze_source_shards` 同步写分片、`ensure_current`
+只被 legacy drain 调且 ingest 面从库重建（与启动文件版双轨）、写边 `room_result` 同步写库、room_task.rs:49 `missing_panels`
+整库拒算与 D6 相反。三水位的 DB CAS 按用户同日拍板「水位以库中值为准」留库、不算偏离（`LocalDbnumState` 的 `room_sesno`
+只能是镜像）。

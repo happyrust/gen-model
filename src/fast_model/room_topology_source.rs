@@ -2,9 +2,9 @@
 //! combines exact source tokens and never consults the current model projection.
 use super::room_topology::{RoomGroup, RoomHierarchy, collect_room_groups};
 use crate::data_interface::{
+    digest::digest,
     frozen_source::FrozenSource,
     generation_root::{SubtreeElement, refno_from_e3d, subtree_element_from_set},
-    model_publish_queue::digest,
 };
 use aios_core::RefnoEnum;
 use anyhow::{Context, ensure};

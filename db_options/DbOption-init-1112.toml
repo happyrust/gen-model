@@ -60,6 +60,9 @@ save_spatial_tree_to_db = false
 #【变更 2026-07-29】16→4：ams7997 全量生成 16 并发曾在 save_instance_data
 # 撞 rocksdb 事务写冲突（empty127 轮），降到 4。
 gen_model_batch_size = 4
+#【新增 2026-09-10】初始化跑的模型阶段按组收口，组数 = 根数 / execution_group（见 DbOption-init-7997.toml 同款注释）。
+model_regen_claim_page = 100
+model_regen_execution_group = 100
 
 build_cate_relate = false
 

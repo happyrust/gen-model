@@ -63,7 +63,10 @@ fn main() -> anyhow::Result<()> {
         println!(
             "  dbnum={:<8} PROJ={:<3} {:<28} [{}] {}{}",
             database.dbnum,
-            database.proj,
+            database
+                .declared_project_code
+                .as_deref()
+                .unwrap_or("<current>"),
             database.name,
             database.project.as_deref().unwrap_or("-"),
             database

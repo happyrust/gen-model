@@ -29,6 +29,17 @@ pub(crate) struct PreparedRoomResult {
 }
 
 impl PreparedRoomResult {
+    /// Validated, ordered local result batches, without database staging.
+    pub(crate) fn local_batches(&self) -> impl Iterator<Item = anyhow::Result<Vec<u8>>> + '_ {
+        self.edges
+            .chunks(BATCH_SIZE)
+            .map(|batch| Ok(serde_json::to_vec(batch)?))
+    }
+
+    pub(crate) fn local_version(&self) -> &str {
+        &self.version
+    }
+
     pub(crate) fn new(
         dbnum: u32,
         input: RoomInputVersion,
@@ -60,7 +71,7 @@ impl PreparedRoomResult {
                 .any(|pair| pair[0].member == pair[1].member && pair[0].panel == pair[1].panel),
             "duplicate room membership edge"
         );
-        let version = crate::data_interface::model_publish_queue::digest(&serde_json::to_vec(&(
+        let version = crate::data_interface::digest::digest(&serde_json::to_vec(&(
             "memory-room-result-v1",
             dbnum,
             &input,
@@ -150,28 +161,37 @@ impl PreparedRoomResult {
     ) -> anyhow::Result<()> {
         ensure!(next.is_valid(), "invalid required room input");
         db.query("BEGIN TRANSACTION;
-            IF NOT ($watermark.model_sesno = $input.model_sesno AND $watermark.applied_sesno >= $input.model_sesno)
-                { THROW 'room input model watermark changed'; };
+            IF NOT ($watermark.applied_sesno >= $input.model_sesno)
+                { THROW 'room input data watermark missing or behind'; };
             IF NOT (($watermark.room_required_input ?? NONE) = $previous OR $watermark.room_required_input = $input)
                 { THROW 'room input obligation changed'; };
-            UPDATE $watermark SET room_required_input=$input;
+            UPDATE $watermark SET room_required_input=$input,
+                state_revision=($watermark.state_revision ?? 0) + 1;
             COMMIT TRANSACTION;")
             .bind(("watermark", Thing::from(("dbnum_watermark", surrealdb::sql::Id::Number(dbnum as i64)))))
             .bind(("previous", previous)).bind(("input", next.clone()))
             .await?.check().context("register room input obligation")?;
         super::dbnum_consistency::invalidate_census();
+        super::dbnum_state::DbnumState::invalidate_mirrored_on(db, dbnum);
         Ok(())
     }
 
+    /// **只写边与结果版本，不盖房间水位**（2026-09-10，ADR-071 D3 / ADR-065 G2 (i)）：
+    /// `room_sesno` 挪进任务收尾那一笔（`task_end::commit_task_end_on`），因为房间现在排在
+    /// 盖章**之前**算——那一刻 `model_sesno` 还没动，拿它当闸就永远过不去。
+    ///
+    /// 挡住陈旧结果的是义务 CAS（`room_required_input = $input`）：另一个任务一旦
+    /// [`PreparedRoomResult::require_on`] 换了义务，这一笔就提交不了。剩下两道是
+    /// 数据水位与房间水位的单调性。
     fn commit_sql(&self) -> &'static str {
         "BEGIN TRANSACTION;
-        IF NOT ($watermark.model_sesno = $input.model_sesno AND $watermark.applied_sesno >= $input.model_sesno
+        IF NOT ($watermark.applied_sesno >= $input.model_sesno
             AND ($watermark.room_sesno ?? 0) <= $input.model_sesno AND $watermark.room_required_input = $input)
             { THROW 'room completion input changed'; };
         LET $count = array::len((SELECT VALUE id FROM $part_ids WHERE result_version=$version));
         IF $count != $parts { THROW 'room completion has missing result batches'; };
         UPDATE $watermark SET room_result_version=$version, room_input_version=$input,
-            room_sesno=$input.model_sesno, room_sesno_time=model_sesno_time, room_settled_at=time::now();
+            state_revision=($watermark.state_revision ?? 0) + 1;
         COMMIT TRANSACTION;"
     }
 
@@ -206,6 +226,7 @@ impl PreparedRoomResult {
             .check()
             .context("commit room result and watermark")?;
         super::dbnum_consistency::invalidate_census();
+        super::dbnum_state::DbnumState::invalidate_mirrored_on(db, self.dbnum);
         Ok(())
     }
 }
@@ -256,6 +277,23 @@ mod tests {
         .unwrap();
         db
     }
+    /// 房间水位现在由任务收尾那一笔盖（`commit_on` 只写边与结果版本）。
+    async fn stamp_room_watermark(db: &Surreal<Any>, dbnum: u32, sesno: i32) {
+        crate::data_interface::task_end::commit_task_end_on(
+            db,
+            &crate::data_interface::task_end::TaskEnd {
+                dbnum,
+                target_sesno: sesno,
+                target_time: None,
+                model: None,
+                rooms: Some(crate::data_interface::task_end::TaskRoomOutcome { ok: true }),
+                info: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
     async fn assert_state(db: &Surreal<Any>, room: i32, version: &str) {
         let mut response = db.query("RETURN dbnum_watermark:8000.room_sesno;
             RETURN dbnum_watermark:8000.room_result_version; RETURN dbnum_watermark:8000.model_sesno;
@@ -287,6 +325,8 @@ mod tests {
         assert!(result.execute_commit_on(&db, &broken).await.is_err());
         assert_state(&db, 8, "old").await;
         result.commit_on(&db).await.unwrap();
+        assert_state(&db, 8, &result.version).await;
+        stamp_room_watermark(&db, 8000, 12).await;
         assert_state(&db, 12, &result.version).await;
         let mut rows = db
             .query(
@@ -329,13 +369,14 @@ mod tests {
         assert_state(&db, 8, "old").await;
         new.stage_on(&db).await.unwrap();
         new.commit_on(&db).await.unwrap();
+        assert_state(&db, 8, &new.version).await;
+        stamp_room_watermark(&db, 8000, 12).await;
         assert_state(&db, 12, &new.version).await;
     }
 
     #[tokio::test]
-    async fn newer_model_or_missing_data_blocks_room_completion() {
+    async fn missing_or_behind_data_blocks_room_completion() {
         for mutation in [
-            "UPDATE dbnum_watermark:8000 SET model_sesno=13;",
             "UPDATE dbnum_watermark:8000 SET applied_sesno=11;",
             "DELETE dbnum_watermark:8000;",
         ] {
@@ -347,6 +388,28 @@ mod tests {
             db.query(mutation).await.unwrap().check().unwrap();
             assert!(result.commit_on(&db).await.is_err(), "{mutation}");
         }
+    }
+
+    /// 模型水位**自己**不再是房间提交的闸（2026-09-10，ADR-071 D3）。
+    ///
+    /// 房间现在排在盖章之前算，提交那一刻库里的 `model_sesno` 还停在上一版——拿它当闸
+    /// 就永远过不去。挡住陈旧结果的是义务 CAS（`room_required_input`），由
+    /// [`boundary_change_during_calculation_preserves_new_obligation_and_rejects_stale_commit`]
+    /// 钉着；这里钉的是「闸确实松开了」，别让它哪天被顺手加回去。
+    #[tokio::test]
+    async fn a_model_watermark_that_moved_on_its_own_no_longer_blocks_the_room_commit() {
+        let db = database().await;
+        let result = result("rooms-a", 0);
+        PreparedRoomResult::require_on(&db, 8000, None, &result.input)
+            .await
+            .unwrap();
+        db.query("UPDATE dbnum_watermark:8000 SET model_sesno=13, applied_sesno=13;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        result.stage_on(&db).await.unwrap();
+        result.commit_on(&db).await.unwrap();
     }
 
     #[tokio::test]

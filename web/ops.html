@@ -135,6 +135,17 @@ body{
 .acts .hint{font-size:11.5px;color:var(--t3)}
 .acts-msg{font-size:12px;line-height:19px;padding-top:2px;word-break:break-word}
 .acts-msg.ok{color:var(--green)} .acts-msg.err{color:var(--red)} .acts-msg.info{color:var(--t2)}
+.init-picker{margin-top:12px;padding:16px 18px;border:1px solid var(--edge);border-radius:10px;background:var(--panel)}
+.init-picker-head,.init-picker-foot{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.init-picker-title{font-size:13px;font-weight:600;color:var(--t1)}
+.init-picker-note{font-size:11.5px;line-height:18px;color:var(--t3);margin-top:4px}
+.init-picker-tools{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:13px 0 11px}
+.init-picker-tools input{flex:1 1 220px;min-width:160px;background:var(--panel);color:var(--t1);border:1px solid var(--edge);border-radius:7px;padding:8px 11px;font:12px var(--mono)}
+.init-picker-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:7px;max-height:210px;overflow:auto;padding:2px 1px 11px}
+.init-choice{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:7px;padding:8px 10px;color:var(--t2);cursor:pointer;font:12px var(--mono)}
+.init-choice:hover{border-color:var(--hover-edge);background:var(--hover-bg)}
+.init-choice:has(input:checked){border-color:var(--blue);background:var(--tint-blue);color:var(--blue)}
+.init-choice input{margin:0}.init-picker-foot{border-top:1px solid var(--line);padding-top:12px}
 
 /* ── kpi ────────────────────────────────────────────────── */
 .kpi{display:flex;padding:10px 0 12px}
@@ -345,6 +356,42 @@ a.jump{text-decoration:none}
   .verdict-line,.lanes .verdict-line{font-size:21px;line-height:29px}
   .dbsummary{grid-template-columns:repeat(2,minmax(140px,1fr))}
 }
+/* Daily monitoring first; technical evidence remains available on demand. */
+[hidden]{display:none!important}
+.page{max-width:1200px;padding:36px 32px 24px;gap:20px}
+.hdr h1{font-size:25px;letter-spacing:-.7px;display:flex;align-items:center;gap:18px}
+.brand-note{font-size:10px;letter-spacing:1.5px;font-weight:500;color:var(--t3)}
+.panel,.verdict{border-radius:14px;overflow:hidden;box-shadow:0 2px 8px #00000003}
+.hdr .endpoint{margin-top:8px}.src{display:none}
+.dbscope{display:flex;align-items:center;justify-content:space-between;padding:12px 20px;gap:16px}
+.dbscope .panel-head{padding:0;border:0;gap:16px}.dbscope .sub{display:none}
+.dbscope-body{padding:0}.db-picker{display:flex;align-items:center;gap:12px;color:var(--t3);font-size:12px}
+.db-picker select{background:var(--panel);color:var(--t1);border:1px solid var(--edge);border-radius:8px;padding:9px 32px 9px 12px;font:inherit;min-width:190px}
+.dbentry[hidden]{display:none!important}
+.dbsummary{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:0;border:0;padding:0}
+.dbsummary>div{position:relative;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:22px 24px;min-width:0}
+.dbsummary>div:nth-child(n+4){display:none}
+.dbsummary .l{font-size:12px;color:var(--t2)}.dbsummary .v{font-size:25px;margin:12px 0 8px;letter-spacing:-.5px}.dbsummary .s{font-size:12px}
+.dbsummary>div::after{position:absolute;right:20px;top:19px;color:var(--t3);font:11px var(--mono)}
+.dbsummary>div:nth-child(1)::after{content:'01 / DATA'}.dbsummary>div:nth-child(2)::after{content:'02 / MODEL'}.dbsummary>div:nth-child(3)::after{content:'03 / ROOM'}
+.verdict{padding:24px 28px;border-left-width:4px}.verdict-line{font-size:27px;line-height:1.4;margin-top:10px}
+.lanes>.verdict{flex:1 1 auto;padding:24px 28px}.lanes .verdict-line{font-size:24px;line-height:1.5}
+.verdict-detail{line-height:1.7}.verdict-body{min-width:0}.verdict-meta{flex-wrap:wrap}
+.status-details{margin-top:14px}.status-details summary{font-size:12px;color:var(--t3);cursor:pointer}.status-details[open] summary{margin-bottom:12px}
+.ctl{padding:0 4px}.btn{border-radius:8px;padding:9px 15px}.acts .btn.go{order:-1;background:var(--blue);color:white;border-color:var(--blue)}
+.acts .btn:disabled{display:none}.acts .hint{font-size:11px}.operation-scope{font-size:11px;color:var(--t3);margin-bottom:9px}
+.mid{display:flex;flex-direction:column;gap:18px}.col-l,.col-r{display:contents}
+.panel-head{padding:17px 22px}.panel-head .sub{max-width:700px}.empty{padding:25px 22px;line-height:1.8}
+.fold{background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.fold>summary{padding:18px 22px;cursor:pointer;color:var(--t2);font-size:13px;list-style:none;display:flex;align-items:center;gap:12px}
+.fold>summary::before{content:'+';font:18px var(--mono);color:var(--t3)}.fold[open]>summary::before{content:'−'}
+.fold>summary .fold-note{margin-left:auto;font-size:11px;color:var(--t3)}
+.fold>.panel{border:0;border-top:1px solid var(--line);border-radius:0;box-shadow:none}
+.fold .kpi{margin:16px;flex-wrap:wrap}.fold .sysbar{margin:16px}.fold .src{display:inline}
+.fold .panel-head .sub{font-size:11px}.fold .foot{padding:18px}.fold .legend{flex-wrap:wrap}
+.page>.foot{display:none}.tbl{overflow-x:auto}.fold details{max-width:100%}
+button:focus-visible,a:focus-visible,select:focus-visible,summary:focus-visible{outline:3px solid var(--blue);outline-offset:3px}
+@media(max-width:700px){.page{padding:20px 14px;gap:14px}.hdr{align-items:flex-start}.hdr h1{font-size:22px;display:block}.brand-note{display:block;margin-top:7px}.hdr-right{max-width:45%}.dbscope{align-items:flex-start;flex-direction:column}.dbscope-body,.db-picker,.db-picker select{width:100%}.dbsummary{grid-template-columns:1fr;gap:10px}.dbsummary>div{padding:16px 20px}.dbsummary .v{font-size:23px;margin:8px 0}.verdict{padding:20px}.verdict-line{font-size:22px}.fold>summary{padding:16px}.fold-note{max-width:50%;text-align:right}.acts{flex-wrap:wrap}}
 </style>
 </head>
 <body>
@@ -352,7 +399,7 @@ a.jump{text-decoration:none}
 
   <div class="hdr">
     <div>
-      <h1>AIOS 数据库 · 增量运行监控</h1>
+      <h1>增量更新<span class="brand-note">PLANT / 运行中心</span></h1>
       <div class="endpoint" id="endpoint">—</div>
     </div>
     <div class="hdr-right">
@@ -364,13 +411,14 @@ a.jump{text-decoration:none}
   <div class="panel dbscope" id="dbnum-entry">
     <div class="panel-head">
       <div>
-        <span class="t">每库入口</span><span class="n" id="dbentry-count">—</span>
+        <span class="t">监控范围</span><span class="n" id="dbentry-count">—</span>
         <div class="sub" id="dbscope-label">选择一个 dbnum，独立追踪它的数据水位、模型水位、队列、任务与错误。</div>
       </div>
       <a class="dbscope-all" id="dbscope-all" href="ops.html">全部库</a>
     </div>
     <div class="dbscope-body">
-      <nav class="dbentry" id="dbentry-list" aria-label="dbnum 入口"><span class="empty">正在读取库清单…</span></nav>
+      <label class="db-picker">数据库 <select id="db-picker" aria-label="选择监控数据库"><option>正在读取…</option></select></label>
+      <nav class="dbentry" id="dbentry-list" aria-label="dbnum 入口" hidden></nav>
       <div class="dbsummary" id="dbsummary" hidden></div>
     </div>
   </div>
@@ -398,6 +446,19 @@ a.jump{text-decoration:none}
   <div class="ctl">
     <div class="acts" id="acts" hidden></div>
     <div class="acts-msg" id="acts-msg" hidden></div>
+    <div class="init-picker" id="init-picker" hidden>
+      <div class="init-picker-head">
+        <div><div class="init-picker-title">选择本次初始化的 dbnum</div><div class="init-picker-note">只列出当前 MDB 中等待手动初始化的 DESI 库；监听仍保持全范围。</div></div>
+        <button class="btn" type="button" data-init-close>关闭</button>
+      </div>
+      <div class="init-picker-tools">
+        <input id="init-search" type="search" inputmode="numeric" autocomplete="off" placeholder="搜索 dbnum，例如 7997">
+        <button class="btn" type="button" data-init-all>全选</button>
+        <button class="btn" type="button" data-init-clear>清空</button>
+      </div>
+      <div class="init-picker-list" id="init-picker-list"></div>
+      <div class="init-picker-foot"><span class="hint" id="init-picked">已选 0 个</span><button class="btn go" type="button" data-init-submit disabled>初始化所选库</button></div>
+    </div>
   </div>
 
   <div class="kpi" id="kpi"></div>
@@ -528,7 +589,10 @@ const DBNUM_PARAM = String(qs.get("dbnum") || "").trim();
 const FOCUS_DBNUM = /^\d+$/.test(DBNUM_PARAM) ? Number(DBNUM_PARAM) : null;
 const FAST_MS = num(qs.get("interval"), 2000);
 const SLOW_EVERY = 3;            // /dbnums 每 3 个周期拉一次
-const REQ_TIMEOUT = 8000;
+// `/dbnums` performs the three-watermark consistency census. During a large
+// publish recovery it can legitimately take more than eight seconds; aborting
+// it made the focused page lose its dbnum and fall back to a global action.
+const REQ_TIMEOUT = 20000;
 const MAX_ATTEMPTS = 5;          // model_update_pending::MAX_ATTEMPTS
 
 const WRITE = !qs.has("readonly");
@@ -569,6 +633,7 @@ const S = {
   lastOk:0, lastErr:"", errSince:0, tick:0, startedAt:null, blockedSince:0,
   // 写操作：pending 是「已点、等二次确认」的那一条，msg 是上一次调用的回执。
   act:{ pending:null, busy:false, msg:null, level:"", at:0 },
+  initPick:{ open:false, query:"", selected:new Set() },
   // 事件流与轮询各活各的：WS 连不上（老后端、代理不转 upgrade）只让这一块变灰，
   // 页面其余部分照常。dropped 记的是 seq 断层，慢消费者被服务端跳帧时才看得见。
   ws:{ state:"init", events:[], lastSeq:null, dropped:0, backoff:1000, since:0, err:"" },
@@ -712,6 +777,32 @@ const ACTIONS = {
   execute:{ label:"立即执行", req:"POST /api/v1/update/execute", cls:"go",
             hint:"全范围扫描 + 入队数据批次，顺带清掉连败账；推的是应用水位，不承诺模型追平",
             run:async () => enqueueReceipt(await post("/update/execute", {})) },
+  initialize:{ label:"初始化该库", req:"POST /api/v1/update/execute", cls:"go",
+            hint:"只初始化当前选中的新 dbnum；数据、模型和房间阶段依次推进",
+            resolve:async (dbnum) => ({
+              note:`初始化 dbnum ${dbnum}：只提交该库，数据完成后继续模型发布与实时房间计算。`,
+              body:{ dbnums:[Number(dbnum)] } }),
+            run:async (ctx) => enqueueReceipt(await post("/update/execute", ctx.body)) },
+  initializeBatch:{ label:"初始化所选库", req:"POST /api/v1/update/execute", cls:"go",
+            hint:"从等待手动初始化的库中多选；一次提交精确的 dbnums[]，不改变全范围监听",
+            resolve:async (raw) => {
+              const requested = String(raw || "").split(",").map(Number).filter(Number.isFinite);
+              const waiting = new Set(((S.dbnums && S.dbnums.dbnums) || [])
+                .filter(r => r.awaiting_manual_initialization && !r.excluded && !r.not_in_project)
+                .map(r => Number(r.dbnum)));
+              const dbnums = [...new Set(requested)].filter(dbnum => waiting.has(dbnum)).sort((a,b) => a-b);
+              if(!dbnums.length) throw new Error("所选库已不再等待初始化，请刷新后重新选择");
+              if(dbnums.length !== new Set(requested).size) throw new Error("部分所选库状态已变化，请刷新后重新选择");
+              return {
+                note:`将初始化 ${dbnums.length} 个 dbnum：${dbnums.join("、")}。请求只含这些库，watch-dbnums 仍保持放开。`,
+                body:{ dbnums }
+              };
+            },
+            run:async (ctx) => {
+              const receipt = enqueueReceipt(await post("/update/execute", ctx.body));
+              S.initPick.selected.clear(); S.initPick.open = false;
+              return receipt;
+            } },
   // 只推一个库。ADR-020 第 3 项的 `dbnums[]` 子集选择服务端早就认，面板此前只会
   // 全范围地推——而人在连败卡上想做的事从来只是「把这一个再试一次」。
   //
@@ -752,17 +843,8 @@ const ACTIONS = {
               const r = await post("/update/pending-units/retry", ctx.body);
               return `已复活 ${r.target_refno}（action = ${r.action ?? "regen_root"}，status = ${r.status}）。revision +1、attempts 归零，等 worker 捡走。`;
             } },
-  // 副作用补偿队列（SystDerived / RefRevMaintain）的到顶死信。跟上面那个不同：
-  // 服务端一次全捞，不用挑行，body 可空。spatial 无视上限、不在复活范围里。
-  sideRetry:{ label:"复活副作用死信", req:"POST /api/v1/update/side-effects/retry", cls:"warn",
-            hint:"side_effect_pending：一次全捞，attempts 归零回 pending；spatial 不动",
-            run:async () => {
-              const r = await post("/update/side-effects/retry", {});
-              const k = Number(r.revived || 0);
-              return k
-                ? `已复活 ${n(k)} 行副作用补偿 —— attempts 归零回 pending，worker 已叫醒，等下一轮 drain 取走。`
-                : "202，但一行都没复活 —— 当前没有 attempts 到顶的副作用死信。";
-            } },
+  // 「复活副作用死信」按钮随非空间副作用补偿队列一起退役（2026-09-10，ADR-071 D9）：
+  // SYST 派生 / ref_rev 补偿不再排队，`POST /update/side-effects/retry` 端点已删。
 };
 
 /// `/update/execute` 的 202 入队回执，全范围与按库子集共用一份渲染。
@@ -824,26 +906,58 @@ function renderActions(m){
   }else{
     const paused = !!(m.h && m.h.queue_paused);
     const dead = Number(m.mup.dead_letters || 0);
-    const sepDead = Number((m.h && m.h.side_effect_pending && m.h.side_effect_pending.dead_letters) || 0);
     const live = !!m.h && !S.act.busy;
+    const focused = FOCUS_DBNUM == null ? null : m.byDb.get(FOCUS_DBNUM);
+    const manualInit = !!(focused && focused.awaiting_manual_initialization);
+    const waitingInit = m.inScope.filter(r => r.awaiting_manual_initialization);
     const btn = (key, on, extra) => {
       const a = ACTIONS[key];
       return `<button class="btn ${a.cls}" data-act="${key}"${on ? "" : " disabled"} title="${esc(a.req + " — " + a.hint)}">${esc(a.label)}${extra || ""}</button>`;
     };
+    const currentDbButton = manualInit
+      ? `<button class="btn ${ACTIONS.initialize.cls}" data-act="initialize" data-arg="${esc(FOCUS_DBNUM)}"${live ? "" : " disabled"} title="${esc(ACTIONS.initialize.req + " — " + ACTIONS.initialize.hint)}">${esc(ACTIONS.initialize.label)}</button>`
+      : (focused
+        ? `<button class="btn go" data-act="rerun" data-arg="${esc(FOCUS_DBNUM)}"${live ? "" : " disabled"} title="只重新检查当前 dbnum 的数据、模型和房间缺口">重新检查该库</button>`
+        // 自动初始化关闭且有新库等待时，隐藏无子集的全范围执行。空 body 是显式操作员
+        // 指令，会把所有新库一并放行；跟旁边的精确多选同时出现很容易点错。
+        : (waitingInit.length ? "" : btn("execute", live)));
     row.innerHTML = btn("pause", live && !paused) + btn("resume", live && paused)
-      + btn("execute", live)
+      + currentDbButton
+      + (FOCUS_DBNUM == null && waitingInit.length
+          ? `<button class="btn go" type="button" data-init-open${live ? "" : " disabled"} title="多选等待手动初始化的 dbnum；不会收窄监听范围">选择初始化库 <span class="hint">${waitingInit.length}</span></button>`
+          : "")
       // 死信数读不出来时按钮照亮：它不靠这个数干活，点下去先拉一轮 /pending-units
       // （另一个端点，不吃 health 的 2 秒预算）把真目标摆到确认行上；真没有可复活的，
-      // resolve 会自己报「没有 attempts ≥ 5 的行」。这跟副作用那个按钮不同，那个是
-      // 一次全捞、没有目标可看，未知时只能压着不亮。
+      // resolve 会自己报「没有 attempts ≥ 5 的行」。
       + btn("retry", live && (dead > 0 || m.mupBlind), dead > 1 ? ` <span class="hint">${dead}</span>` : "")
-      + btn("sideRetry", live && sepDead > 0, sepDead > 1 ? ` <span class="hint">${sepDead}</span>` : "")
       + `<span class="hint">${S.act.busy ? "处理中…" : "点一下亮出请求，再点确认才发"}</span>`;
   }
   // 回执留 25 秒，别在墙上一直挂着。
   const fresh = S.act.msg && Date.now() - S.act.at < 25000;
   msg.hidden = !fresh;
   if(fresh){ msg.className = "acts-msg " + S.act.level; msg.textContent = S.act.msg; }
+}
+
+function waitingInitializationRows(m){
+  return m.inScope.filter(r => r.awaiting_manual_initialization)
+    .sort((a,b) => Number(a.dbnum) - Number(b.dbnum));
+}
+
+function renderInitPicker(m){
+  const panel = $("init-picker"), list = $("init-picker-list");
+  const rows = waitingInitializationRows(m);
+  const valid = new Set(rows.map(r => Number(r.dbnum)));
+  for(const dbnum of [...S.initPick.selected]) if(!valid.has(dbnum)) S.initPick.selected.delete(dbnum);
+  panel.hidden = !WRITE || FOCUS_DBNUM != null || !S.initPick.open || !rows.length;
+  if(panel.hidden) return;
+  const q = S.initPick.query.trim();
+  const shown = rows.filter(r => !q || String(r.dbnum).includes(q));
+  list.innerHTML = shown.length ? shown.map(r => {
+    const dbnum = Number(r.dbnum), checked = S.initPick.selected.has(dbnum);
+    return `<label class="init-choice" title="${esc(r.file_path || "")}"><input type="checkbox" data-init-dbnum="${dbnum}"${checked ? " checked" : ""}><span>${dbnum}</span><span class="mut">${esc(r.db_type || "DESI")}</span></label>`;
+  }).join("") : `<span class="empty">没有匹配“${esc(q)}”的待初始化库。</span>`;
+  $("init-picked").textContent = `已选 ${S.initPick.selected.size} 个${S.initPick.selected.size ? `：${[...S.initPick.selected].sort((a,b)=>a-b).join("、")}` : ""}`;
+  panel.querySelector("[data-init-submit]").disabled = !S.initPick.selected.size || S.act.busy;
 }
 
 /* ── poll ───────────────────────────────────────────────── */
@@ -1268,40 +1382,22 @@ function dataLane(m){
       detail:"标志持久化在 queue_control:main，活过重启。恢复：POST /api/v1/queue/resume。",
       timer:null };
   }
-  // 两个 stalled 不是一回事：spatial 不重试，一次失败即死信（status=dead），原因落
-  // logs/batch-failures-*.jsonl（event=side_effect_dead_letter，「错误日志」卡能看到），
-  // 修好原因后 UPDATE 该行 status='pending' 才会重放；副作用队列到顶就成死信，被 drain
-  // 挡在候选集外，不人工复活永远回不来。
-  // 读库失败那一支也把 stalled 立成真、dead_letters 留 0 —— 那时「有没有死信」是未知，
-  // 不能当成「没有」。
-  const sep = m.h.side_effect_pending || {};
-  const sepDead = Number(sep.dead_letters || 0);
+  // 空间对账不重试，一次失败即死信（status=dead），原因落 logs/batch-failures-*.jsonl
+  // （event=side_effect_dead_letter，「错误日志」卡能看到），修好原因后 UPDATE 该行
+  // status='pending' 才会重放。读库失败那一支把 stalled 立成真、dead_letters 留 0 —— 那时
+  // 「有没有死信」是未知，不能当成「没有」。（非空间的副作用补偿队列与它的死信 / 复活按钮
+  // 2026-09-10 随 ADR-071 D9 退役，/health 不再有 side_effect_pending 这一格。）
   const spatial = m.h.spatial_reconcile || {};
   const spatialDead = Number(spatial.dead_letters || 0);
-  if(sepDead > 0 || sep.stalled || spatial.stalled){
-    const kinds = Object.entries(sep.by_kind || {})
-      .filter(([, v]) => Number(v && v.dead_letters) > 0)
-      .map(([k, v]) => `${k} ${v.dead_letters} 条`);
-    // spatial 只在副作用队列当主角时才作为附注出现，不然就是它自己那一句。
-    const aside = spatial.stalled && (sepDead > 0 || sep.stalled)
-      ? `空间对账另有 ${spatialDead} 条死信（不重试）；原因在「错误日志」卡（side_effect_dead_letter），不在复活按钮的范围里。` : "";
+  if(spatial.stalled){
     const why = e => e ? `最近一条：${e}。` : "";
-    const line = sepDead > 0
-      ? `副作用队列有 ${sepDead} 条死信（attempts ≥ ${MAX_ATTEMPTS}）—— 数据批次照跑，派生结果不再更新`
-      : sep.stalled
-        ? "副作用队列这一段读不出来 —— 有没有死信现在是未知的"
-        : spatialDead > 0
-          ? `空间对账有 ${spatialDead} 条死信（不重试）—— 该文件轮次的空间/房间发布停在上一次成功版本`
-          : "空间对账状态暂时未知 —— 状态读取失败，不代表任务已失败";
-    const detail = sepDead > 0
-      ? `${kinds.length ? kinds.join(" · ") + "。" : ""}到顶死信被 drain 挡在候选集外，周期重试不会把它们捡回来；复活 = attempts 归零回 pending。${why(sep.last_error)}${aside}`
-      : sep.stalled
-        ? `${why(sep.last_error) || "health 里只给了 stalled 标志，没给原因；去控制台翻日志。"}死信数这一轮读不到，不代表是零 —— 按钮先不亮，等下一轮读回来。${aside}`
-        : spatialDead > 0
-          ? `${why(spatial.last_error)}空间对账不自动重试：全文原因在「错误日志」卡（event=side_effect_dead_letter）；修好之后 UPDATE incr_side_effect_pending 该行 status='pending' 即重放。复活按钮不管它。`
-          : `${why(spatial.last_error)}等待下一轮状态读取；当前没有可据此复活的死信。`;
-    const unknownOnly = sepDead === 0 && !sep.stalled && spatialDead === 0;
-    return { lv:"warn", chip:["amber", unknownOnly ? "状态未知" : "停摆"], path, line, detail:esc(detail), timer:null };
+    const line = spatialDead > 0
+      ? `空间对账有 ${spatialDead} 条死信（不重试）—— 该文件轮次的空间/房间发布停在上一次成功版本`
+      : "空间对账状态暂时未知 —— 状态读取失败，不代表任务已失败";
+    const detail = spatialDead > 0
+      ? `${why(spatial.last_error)}空间对账不自动重试：全文原因在「错误日志」卡（event=side_effect_dead_letter）；修好之后 UPDATE incr_side_effect_pending 该行 status='pending' 即重放。`
+      : `${why(spatial.last_error)}等待下一轮状态读取；当前没有可据此复活的死信。`;
+    return { lv:"warn", chip:["amber", spatialDead === 0 ? "状态未知" : "停摆"], path, line, detail:esc(detail), timer:null };
   }
   const dl = Number(m.mup.dead_letters || 0);
   if(dl > 0){
@@ -1426,6 +1522,12 @@ function render(){
   renderWatermark(m);
   renderSysbar(m);
   renderActions(m);
+  renderInitPicker(m);
+  const historyNote = document.querySelector("#history-fold .fold-note");
+  if(historyNote) historyNote.textContent = $("bf-count").textContent;
+  const diagnosticNote = document.querySelector("#diagnostic-fold .fold-note");
+  if(diagnosticNote) diagnosticNote.textContent = m.blockedPhase || m.parked.length || m.failures.length
+    ? "存在阻断或失败 · 展开查看原因" : "水位明细 · 服务状态";
 }
 
 function renderDbnumEntry(m){
@@ -1435,6 +1537,13 @@ function renderDbnumEntry(m){
     if(!held || (m.h && m.h.project && projOf(r) === m.h.project)) unique.set(Number(r.dbnum), r);
   }
   const rows = [...unique.values()].sort((a, b) => Number(a.dbnum) - Number(b.dbnum));
+  const picker = $("db-picker");
+  const options = `<option value="">全部数据库</option>` + rows.map(r => `<option value="${esc(r.dbnum)}">${esc(r.dbnum)} · ${esc(r.db_type || "数据库")}</option>`).join("");
+  if(picker.dataset.options !== options){
+    picker.innerHTML = options;
+    picker.dataset.options = options;
+    picker.value = FOCUS_DBNUM == null ? "" : String(FOCUS_DBNUM);
+  }
   $("dbentry-count").textContent = S.dbnums ? `${rows.length} 个` : "—";
   $("dbscope-all").href = dbHref(null);
   $("dbscope-all").hidden = FOCUS_DBNUM == null;
@@ -1481,7 +1590,6 @@ function renderSysbar(m){
   const sul = m.h.sul_db || {};
   const tree = m.h.spatial_tree || {};
   const pe = m.h.parse_errors;
-  const sep = m.h.side_effect_pending || {};
   const cell = (label, value, level) =>
     `<span class="${level || ""}"><span>${esc(label)}</span><b>${esc(value)}</b></span>`;
 
@@ -1495,11 +1603,6 @@ function renderSysbar(m){
     tree.state || tree.drift ? cell("空间树", tree.drift ? `漂移 file ${tree.file_epoch} ≠ db ${tree.db_epoch}`
       : `${tree.state} · ${n(tree.entries)} 条`, tree.drift ? "warn" : "") : "",
     pe && pe.total ? cell("解析错误", `${n(pe.total)} 类 · ${n(pe.occurrences)} 次`, "warn") : "",
-    // 死信数会被别的判决盖过去（库断连、阻断都排在前面），这一格保证它始终露脸。
-    sep.dead_letters || sep.failed || sep.stalled
-      ? cell("副作用队列", sep.dead_letters ? `死信 ${n(sep.dead_letters)}`
-          : (sep.stalled ? "读不出来" : `failed ${n(sep.failed)}`),
-        sep.dead_letters || sep.stalled ? "bad" : "warn") : "",
     m.h.queue_paused ? cell("队列", "已暂停", "warn") : "",
     cell("epoch", `${m.init.epoch_id ?? "—"} · ${m.init.status ?? "—"}`),
   ].filter(Boolean).join("");
@@ -2389,6 +2492,7 @@ $("bf-task").addEventListener("input", e => {
 // 跳转一律**把其余筛选清干净**再落一个。留着上一次的（比如还开着「近 1 小时」或
 // 另一个 task_id），跳过去多半是一屏「没有记录」，而人会把它读成「这个库没出过错」。
 function bfJump(next){
+  $("history-fold").open = true;
   S.bfKind = ""; S.bfDbnum = ""; S.bfTask = ""; S.bfSince = 0;
   Object.assign(S, next);
   // 筛选框是静态 markup，渲染器故意不重写它（每轮重画会把焦点和光标一起换掉），
@@ -2418,12 +2522,49 @@ $("t-body").addEventListener("click", e => {
   try{ render(); }catch(err){ console.error(err); }
 });
 $("acts").addEventListener("click", e => {
+  const initOpen = e.target.closest("[data-init-open]");
+  if(initOpen){
+    S.initPick.open = !S.initPick.open;
+    S.act.pending = null;
+    try{ render(); }catch(err){ console.error(err); }
+    if(S.initPick.open) $("init-search").focus();
+    return;
+  }
   const button = e.target.closest("button");
   const key = button && button.dataset.act;
   if(!key) return;
   if(key === "cancel"){ S.act.pending = null; setMsg(null, ""); render(); return; }
   // 目标得跟着确认那一下一起传回去，否则 act() 认不出这是对同一条命令的确认。
   act(key, button.dataset.arg);
+});
+$("init-picker").addEventListener("click", e => {
+  if(e.target.closest("[data-init-close]")){
+    S.initPick.open = false; render(); return;
+  }
+  if(e.target.closest("[data-init-all]")){
+    for(const r of waitingInitializationRows(model())) S.initPick.selected.add(Number(r.dbnum));
+    render(); return;
+  }
+  if(e.target.closest("[data-init-clear]")){
+    S.initPick.selected.clear(); render(); return;
+  }
+  if(e.target.closest("[data-init-submit]")){
+    const dbnums = [...S.initPick.selected].sort((a,b) => a-b);
+    if(!dbnums.length) return;
+    S.initPick.open = false;
+    act("initializeBatch", dbnums.join(","));
+  }
+});
+$("init-picker").addEventListener("change", e => {
+  const box = e.target.closest("input[data-init-dbnum]");
+  if(!box) return;
+  const dbnum = Number(box.dataset.initDbnum);
+  if(box.checked) S.initPick.selected.add(dbnum); else S.initPick.selected.delete(dbnum);
+  render();
+});
+$("init-search").addEventListener("input", e => {
+  S.initPick.query = e.target.value;
+  renderInitPicker(model());
 });
 // 连败卡上的「重扫这个库」。它不自己发请求，只是把确认行填好——写操作全页只有那
 // 一处出口，确认样式、二次确认、回执展示都在那儿，在卡片里再写一遍就会有第二套。
@@ -2442,6 +2583,37 @@ $("bf-dbnum").title = FOCUS_DBNUM == null ? "" : `页面已锁定 dbnum ${FOCUS_
 $("wm-all").disabled = FOCUS_DBNUM != null;
 $("foot-note").textContent = (WRITE ? `${Object.keys(ACTIONS).length} 个写操作带二次确认 · 给客户看请加 ?readonly=1` : "只读视图 · 写操作已关闭")
   + " · 深色主题加 ?theme=dark · /assets/ops.html · 同源轮询，不改 Rust、不重启服务";
+// Reorder existing panels once. IDs, polling, receipts and write confirmations
+// remain the same; disclosure state survives every polling render.
+function setupMonitorLayout(){
+  const page = document.querySelector(".page");
+  const summary = $("dbsummary");
+  $("lanes").after(summary);
+  const explanation = document.createElement("details");
+  explanation.className = "status-details";
+  explanation.innerHTML = '<summary>查看同步详情</summary>';
+  $("v-detail").before(explanation);
+  explanation.append($("v-detail"));
+  const scope = document.createElement("div");
+  scope.className = "operation-scope";
+  scope.textContent = "服务控制 · 以下操作作用于整个服务，执行前需确认";
+  if(WRITE) document.querySelector(".ctl").prepend(scope);
+  const fold = (id, title, note, nodes) => {
+    const el = document.createElement("details"); el.id = id; el.className = "fold";
+    const heading = document.createElement("summary"); heading.textContent = title;
+    const hint = document.createElement("span"); hint.className = "fold-note"; hint.textContent = note;
+    heading.append(hint); el.append(heading); nodes.forEach(n => el.append(n)); page.append(el); return el;
+  };
+  const panel = id => $(id).closest(".panel");
+  panel("t-body").querySelector(".sub").textContent = "查看本次服务启动后的任务与阶段进度，点击任务展开回执。";
+  panel("q-body").querySelector(".t").textContent = "等待处理";
+  fold("history-fold", "历史错误", "查看记录与筛选", [panel("bf-body")]);
+  fold("events-fold", "实时事件", "连接状态与事件明细", [panel("e-body")]);
+  fold("diagnostic-fold", "高级诊断", "阻断原因 · 水位明细 · 服务状态", [$("kpi"),panel("f-body"),panel("sw-body"),panel("w-body"),$("sysbar"),document.querySelector(".foot")]);
+  if(FOCUS_DBNUM == null) document.querySelector(".mid").before(panel("w-body"));
+  $("db-picker").addEventListener("change", e => { location.href = dbHref(e.target.value || null); });
+}
+setupMonitorLayout();
 loop();
 connectEvents();
 </script>

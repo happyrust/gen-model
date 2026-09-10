@@ -70,6 +70,12 @@ pub struct DataBatch {
     /// 放行不需要单独一步：同 dbnum 的下一次真实触发会并进这一行（见
     /// [`enqueue`]），顺带把标记清掉，于是积压与新会话**合成一条**一次跑完。
     pub held: bool,
+    /// 人工「重新解析」（`POST /dbnums/{dbnum}/data/reinitialize`，2026-09-10 重新计算契约 C2）：
+    /// 这条 `Reinitialize` 行是**人要求**清库重建的，不是回退检测排出来的。它一路带到冻结点，
+    /// `execute_one_dbnum` 据它把清库规则多认一种触发源（人工 ∧ 无身份歧义 → 清库）；
+    /// 回退那一种照旧不靠它。合并时 OR：人说过的话不因为后来的自动触发被冲掉。
+    /// 只对 `Reinitialize` 有意义，其余意图恒 `false`。
+    pub reinit_requested: bool,
 }
 
 /// 一次入队的落点。调用方拿它写日志或发事件，不必自己再判一遍。
@@ -112,6 +118,10 @@ fn covers(start_sesno: i32, end_sesno: i32) -> bool {
 /// **一定要把它放行**——那正是「增量触发了再执行」，而合并已经让新会话与积压
 /// 变成同一条区间。放行写在 `Merged` / `AlreadyCovered` 两条分支之前：迟到的
 /// 事件可能一个新会话都没带来（`AlreadyCovered`），但它同样证明有人在动这个库。
+///
+/// `reinit_requested` 只随 `Reinitialize` 意图有意义（见 [`DataBatch::reinit_requested`]）：
+/// 并进已排队的重建行时 OR 上去，第一次翻成真算一次 `Merged`（面板与回执要看见它）。
+#[allow(clippy::too_many_arguments)]
 pub fn enqueue(
     queue: &mut Vec<DataBatch>,
     dbnum: u32,
@@ -122,9 +132,11 @@ pub fn enqueue(
     model_start_sesno: Option<i32>,
     hold: bool,
     intent: BatchIntent,
+    reinit_requested: bool,
     phase: crate::data_interface::initialization_phase::DataPhase,
     epoch_id: u64,
 ) -> Enqueued {
+    let reinit_requested = reinit_requested && intent == BatchIntent::Reinitialize;
     if let Some(queued) = queue
         .iter_mut()
         .find(|b| b.dbnum == dbnum && b.state == BatchState::Queued)
@@ -147,11 +159,13 @@ pub fn enqueue(
             let start_sesno = reinitialize_start(file_latest_sesno);
             let changed = queued.intent != intent
                 || queued.start_sesno != start_sesno
-                || queued.end_sesno != file_latest_sesno;
+                || queued.end_sesno != file_latest_sesno
+                || (reinit_requested && !queued.reinit_requested);
             queued.intent = intent;
             queued.model_start_sesno = Some(0);
             queued.start_sesno = start_sesno;
             queued.end_sesno = file_latest_sesno;
+            queued.reinit_requested |= reinit_requested;
             return if changed {
                 Enqueued::Merged
             } else {
@@ -259,6 +273,7 @@ pub fn enqueue(
         previous_observed_sesno,
         state: BatchState::Queued,
         held: hold,
+        reinit_requested,
     });
     outcome
 }
@@ -361,6 +376,7 @@ mod tests {
             previous_observed_sesno: start - 1,
             state: BatchState::Queued,
             held: false,
+            reinit_requested: false,
         }
     }
 
@@ -423,6 +439,7 @@ mod tests {
             None,
             false,
             BatchIntent::ApplyWindow,
+            false,
             crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type),
             1,
         )
@@ -446,6 +463,7 @@ mod tests {
             None,
             true,
             BatchIntent::ApplyWindow,
+            false,
             crate::data_interface::initialization_phase::DataPhase::of_db_type(db_type),
             1,
         )
@@ -467,9 +485,107 @@ mod tests {
             Some(0),
             false,
             BatchIntent::Reinitialize,
+            false,
             crate::data_interface::initialization_phase::DataPhase::Design,
             1,
         )
+    }
+
+    /// 人工「重新解析」：与 [`reinitialize`] 同一条入队路，只多一个 `reinit_requested = true`。
+    fn manual_reinitialize(
+        queue: &mut Vec<DataBatch>,
+        dbnum: u32,
+        applied_sesno: i32,
+        file_latest_sesno: i32,
+    ) -> Enqueued {
+        enqueue(
+            queue,
+            dbnum,
+            "DESI",
+            applied_sesno,
+            file_latest_sesno,
+            applied_sesno,
+            Some(0),
+            false,
+            BatchIntent::Reinitialize,
+            true,
+            crate::data_interface::initialization_phase::DataPhase::Design,
+            1,
+        )
+    }
+
+    /// 2026-09-10 重新计算契约 C2：人工重新解析的标记随行入队、合并时 OR、不因后来的
+    /// 自动触发被冲掉；只对 `Reinitialize` 有意义——普通窗口带着它也恒 false。
+    #[test]
+    fn a_manual_reinitialize_request_survives_merges_and_only_rides_the_reinitialize_intent() {
+        // 新排：标记落在行上。
+        let mut queue = Vec::new();
+        assert_eq!(manual_reinitialize(&mut queue, 7997, 42, 50), Enqueued::New);
+        assert!(queue[0].reinit_requested);
+        assert_eq!(queue[0].intent, BatchIntent::Reinitialize);
+
+        // 回退检出的重建（无标记）并进人工那一行：标记保住，区间照旧。
+        assert_eq!(
+            reinitialize(&mut queue, 7997, 42, 50),
+            Enqueued::AlreadyCovered
+        );
+        assert!(queue[0].reinit_requested, "自动触发不得冲掉人说过的话");
+
+        // 后来的普通保存并进来：意图不降级、标记不丢。
+        assert_eq!(
+            live_trigger(&mut queue, 7997, "DESI", 42, 53),
+            Enqueued::Merged
+        );
+        assert_eq!(queue[0].intent, BatchIntent::Reinitialize);
+        assert!(queue[0].reinit_requested);
+
+        // 反过来：先有回退检出的重建行，人再要求重新解析——第一次翻成真算一次 Merged，
+        // 面板与回执要看见它。
+        let mut auto_first = Vec::new();
+        assert_eq!(reinitialize(&mut auto_first, 8000, 20, 26), Enqueued::New);
+        assert!(!auto_first[0].reinit_requested);
+        assert_eq!(
+            manual_reinitialize(&mut auto_first, 8000, 20, 26),
+            Enqueued::Merged
+        );
+        assert!(auto_first[0].reinit_requested);
+        assert_eq!(
+            manual_reinitialize(&mut auto_first, 8000, 20, 26),
+            Enqueued::AlreadyCovered,
+            "同样的话说第二遍不算变化"
+        );
+
+        // 标记只随 Reinitialize：普通窗口带着 true 入队，行上仍是 false。
+        let mut plain = Vec::new();
+        assert_eq!(
+            enqueue(
+                &mut plain,
+                7998,
+                "DESI",
+                10,
+                12,
+                10,
+                None,
+                false,
+                BatchIntent::ApplyWindow,
+                true,
+                crate::data_interface::initialization_phase::DataPhase::Design,
+                1,
+            ),
+            Enqueued::New
+        );
+        assert!(!plain[0].reinit_requested);
+
+        // 排在运行中同库之后的人工重建行也带着标记。
+        let mut behind = vec![DataBatch {
+            state: BatchState::Running,
+            ..queued(7999, 1, 50)
+        }];
+        assert_eq!(
+            manual_reinitialize(&mut behind, 7999, 42, 50),
+            Enqueued::BehindRunning
+        );
+        assert!(behind[1].reinit_requested);
     }
 
     fn model_only(
@@ -488,6 +604,7 @@ mod tests {
             Some(model_start_sesno),
             false,
             BatchIntent::ModelOnly,
+            false,
             crate::data_interface::initialization_phase::DataPhase::Design,
             1,
         )
@@ -613,6 +730,7 @@ mod tests {
             None,
             false,
             BatchIntent::ApplyWindow,
+            false,
             crate::data_interface::initialization_phase::DataPhase::Design,
             1,
         );
@@ -631,6 +749,7 @@ mod tests {
             None,
             false,
             BatchIntent::ApplyWindow,
+            false,
             crate::data_interface::initialization_phase::DataPhase::Design,
             1,
         );
@@ -817,6 +936,7 @@ mod tests {
                 previous_observed_sesno: 4,
                 state: BatchState::Queued,
                 held: false,
+                reinit_requested: false,
             },
             queued(7997, 1024, 1038),
         ];

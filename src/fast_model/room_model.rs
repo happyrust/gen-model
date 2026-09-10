@@ -73,7 +73,7 @@ async fn query_room_insts(
     refnos: &[RefnoEnum],
 ) -> anyhow::Result<Vec<GeomInstQuery>> {
     match view {
-        RoomGeometryView::Live => crate::data_interface::staging::query_valid_insts(refnos).await,
+        RoomGeometryView::Live => crate::fast_model::room_publication::query_memory_room_insts(refnos),
         RoomGeometryView::Published => {
             crate::fast_model::room_publication::query_published_room_insts(refnos).await
         }
@@ -640,24 +640,28 @@ where
             Some(stamp) => serde_json::json!({
                 "rebuild_required": record.requires_rebuild(),
                 "rebuild_reason": record.rebuild_reason,
+                "stamped": true,
                 "spatial_epoch": stamp.spatial_epoch,
                 "tree_entries": stamp.tree_entries,
             }),
             // 行在、章不在：常驻房间模型先写了自己那几格。与没有这一行同一句话。
             None => serde_json::json!({
-                "rebuild_required": true,
-                "rebuild_reason": record
-                    .rebuild_reason
-                    .unwrap_or_else(|| "没有成功的全量房间重建凭据".to_string()),
+                "rebuild_required": record.requires_rebuild(),
+                "rebuild_reason": record.rebuild_reason.unwrap_or_else(unstamped_reason),
+                "stamped": false,
             }),
         },
         Ok(Ok(None)) => serde_json::json!({
-            "rebuild_required": true,
-            "rebuild_reason": "没有成功的全量房间重建凭据",
+            "rebuild_required": false,
+            "rebuild_reason": unstamped_reason(),
+            "stamped": false,
         }),
+        // 读不出来 = 判不了，照旧 fail-closed 报要重建：这一档说的是「不知道」，
+        // 与「没人要求过」不是一回事。
         Ok(Err(error)) => serde_json::json!({
             "rebuild_required": true,
             "rebuild_reason": format!("读取房间重建凭据失败: {error:#}"),
+            "stamped": null,
         }),
         Err(_) => serde_json::json!({
             "rebuild_required": true,
@@ -665,8 +669,30 @@ where
                 "读取房间重建凭据超过 {} 秒",
                 timeout.as_secs_f64()
             ),
+            "stamped": null,
         }),
     }
+}
+
+/// 章不在时的说明。**不再据此报 `rebuild_required`**。
+///
+/// 这枚章由「项目级启动全量房间重建」盖，而那套机制已经退役（`lib.rs`：「房间计算采用逐 dbnum
+/// 实时内存模式；启动项目全算与数据库计算输入已停用」）——`stamp_room_build` 的两个调用点都在
+/// 退役了的启动臂上，现役形态下它**永远盖不上**。把「没盖过章」渲染成「要求重建」，等于让
+/// `/health` 对着一个不存在的机制常亮报警：2026-09-10 三轮 live 里 `rebuild_required` 恒为 true，
+/// 而同一份 payload 里常驻房间模型报的是 `status: ready` / 215 间房 / 230 块面板 / 0 块无几何，
+/// monitor 的 DONE 判据（`status == 'ready' && !rebuild_required`）因此永远不成立。
+///
+/// 现役的「欠一次全量重建」信号是**持久标志**本身（`render_room_rebuild_required`，数据窗口尾
+/// 事务在结构枚举失败时写、只有成功的全量重建清除）——那一条一格没动。章在不在另有 `stamped`
+/// 一格如实报，没有藏起来。
+///
+/// 启动那一侧的判据（[`room_build_record_verdict`]）**不跟着改**：它决定要不要真跑一次重建，
+/// 「没建过就跑」是那里该有的保守。
+fn unstamped_reason() -> String {
+    "没有全量房间重建凭据（项目级启动全量已退役，改由常驻房间模型逐 dbnum 实时计算）；\
+     此项不代表欠一次重建，真要求见 rebuild_required"
+        .to_string()
 }
 
 pub async fn room_build_health() -> serde_json::Value {
@@ -3783,13 +3809,21 @@ mod tests {
             StartupRoomBuild::Run("没有上次成功全量重建的记录".to_string()),
             "章不在 = 从没成功建过，不是「凭据损坏」"
         );
+        // `/health` 那一侧与启动判据分家（2026-09-10）：章不在只说明「项目级启动全量已退役、
+        // 没人盖得上这枚章」，不是「欠一次重建」。欠不欠看持久标志本身。
         let health = room_build_health_from(
             std::time::Duration::from_secs(1),
             std::future::ready(Ok(Some(record))),
         )
         .await;
-        assert_eq!(health["rebuild_required"], true);
-        assert_eq!(health["rebuild_reason"], "没有成功的全量房间重建凭据");
+        assert_eq!(health["rebuild_required"], false, "{health}");
+        assert_eq!(health["stamped"], false, "章在不在要如实报");
+        assert!(
+            health["rebuild_reason"]
+                .as_str()
+                .is_some_and(|reason| reason.contains("不代表欠一次重建")),
+            "{health}"
+        );
         assert!(health.get("spatial_epoch").is_none(), "{health}");
 
         // 一格在一格不在也不算章（半截章只能来自手改）。
@@ -3847,6 +3881,45 @@ mod tests {
             room_build_record_verdict(Some(record(false)), stamp(292, 22056)),
             StartupRoomBuild::Skip("与上次成功全量重建一致（空间 epoch 292、树 22056 条）".into())
         );
+    }
+
+    /// 持久标志说要重建，`/health` 就得说要重建——哪怕章不在。分家分的是「没盖过章」那一支，
+    /// 不是把这条信号一起松掉。
+    #[tokio::test]
+    async fn an_unstamped_row_still_reports_a_persisted_rebuild_demand() {
+        let required: RoomBuildRecord = serde_json::from_value(serde_json::json!({
+            "spatial_epoch": null,
+            "tree_entries": null,
+            "rebuild_required": true,
+            "rebuild_reason": "房间结构枚举失败",
+        }))
+        .unwrap();
+        let health = room_build_health_from(
+            std::time::Duration::from_secs(1),
+            std::future::ready(Ok(Some(required))),
+        )
+        .await;
+        assert_eq!(health["rebuild_required"], true, "{health}");
+        assert_eq!(health["rebuild_reason"], "房间结构枚举失败");
+        assert_eq!(health["stamped"], false);
+
+        // 整行都没有 = 没人要求过，也没盖过章。
+        let missing = room_build_health_from(
+            std::time::Duration::from_secs(1),
+            std::future::ready(Ok(None)),
+        )
+        .await;
+        assert_eq!(missing["rebuild_required"], false, "{missing}");
+        assert_eq!(missing["stamped"], false);
+
+        // 读不出来仍然 fail-closed：「不知道」不等于「没人要求过」。
+        let stalled = room_build_health_from(
+            std::time::Duration::from_millis(1),
+            std::future::pending::<anyhow::Result<Option<RoomBuildRecord>>>(),
+        )
+        .await;
+        assert_eq!(stalled["rebuild_required"], true, "{stalled}");
+        assert!(stalled["stamped"].is_null(), "判不了就别说章在不在");
     }
 
     #[test]

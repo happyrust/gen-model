@@ -235,7 +235,7 @@ pub async fn repair_committed_window(
         println!("{warning}");
     }
     for sql in &batches {
-        super::dbnum_stats::execute_on(&aios_core::SUL_DB, sql).await?;
+        super::pe_batch::execute_on(&aios_core::SUL_DB, sql).await?;
     }
     let statements = super::manual_update::build_reverse_index_statements(&collected.range_eles);
     for sql in &statements {
@@ -252,7 +252,7 @@ pub async fn repair_committed_window(
         // 复合 id 前缀范围。谓词形式的 `WHERE in = {pe}` 在 SurrealDB 2.1 的
         // DELETE 里拿不到 `unique_pe_owner`，退化成边表全扫
         // （`increment_pipeline::render_persist_statements` 同一对语句）。
-        let sql = super::dbnum_stats::transaction(
+        let sql = super::pe_batch::transaction(
             dbnum,
             &[refno.refno().to_string()],
             &format!(
@@ -263,7 +263,7 @@ pub async fn repair_committed_window(
                 refno.refno()
             ),
         )?;
-        super::dbnum_stats::execute_on(&aios_core::SUL_DB, &sql)
+        super::pe_batch::execute_on(&aios_core::SUL_DB, &sql)
             .await
             .context("纠正窗口主数据硬删除失败")?;
     }

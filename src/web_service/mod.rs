@@ -329,24 +329,12 @@ pub async fn serve(
 
     let app = Router::new()
         .route("/api/v1/health", get(handlers::health))
-        .route(
-            "/api/v1/model-publish/jobs/{id}/replay",
-            post(handlers::model_publish_replay),
-        )
-        .route(
-            "/api/v1/model-publish/resume",
-            post(handlers::model_publish_resume),
-        )
         .route("/api/v1/update/preview", post(handlers::update_preview))
         .route("/api/v1/update/execute", post(handlers::update_execute))
         .route("/api/v1/update/pending-units", get(handlers::pending_units))
         .route(
             "/api/v1/update/pending-units/retry",
             post(handlers::pending_units_retry),
-        )
-        .route(
-            "/api/v1/update/side-effects/retry",
-            post(handlers::side_effects_retry),
         )
         .route("/api/v1/tasks", get(handlers::tasks_list))
         .route("/api/v1/tasks/{id}", get(handlers::task_get))
@@ -389,6 +377,12 @@ pub async fn serve(
         .route(
             "/api/v1/dbnums/{dbnum}/data",
             delete(handlers::dbnum_fast_delete),
+        )
+        // 人工「重新解析」（2026-09-10 重新计算契约 C3）：排一条整库重建批次，清库在 worker
+        // 冻结点做。与上面那条运维快删是两回事——这条不要求先暂停队列。
+        .route(
+            "/api/v1/dbnums/{dbnum}/data/reinitialize",
+            post(handlers::dbnum_data_reinitialize),
         )
         .route(
             "/api/v1/dbnums/{dbnum}/data/above/{watermark}",

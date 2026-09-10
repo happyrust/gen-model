@@ -1092,14 +1092,12 @@ mod tests {
     #[test]
     #[ignore = "manual live: walks the ams7000_0001 session chain and opens every DESI in ams000"]
     fn live_ams7000_catalogue_window_regenerates_referrers_and_fails_stale_stamps() {
-        use crate::data_interface::model_update_pending::{
-            CatalogueStamp, catalogue_stamps_current,
-        };
+        use crate::data_interface::model_coverage::{CatalogueStamp, catalogue_stamps_current};
         if !fixtures_present() || !Path::new(AMS7000).is_file() {
             println!("skip: ams7000_0001 is not installed");
             return;
         }
-        // 与 `model_update_pending::CATALOGUE_CASCADE_SEED_CAP` 同值：更大的窗在运行期本来就退化。
+        // 与 `model_coverage::CATALOGUE_CASCADE_SEED_CAP` 同值：更大的窗在运行期本来就退化。
         const SEED_CAP: usize = 50;
         let file = Path::new(AMS7000);
         let sessions: Vec<u32> = ReadOnlyEngine::open(file)

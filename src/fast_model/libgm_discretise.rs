@@ -47,12 +47,13 @@ pub use aios_core::prim_geo::libgm_discretise::{
 /// gm_SetDefaultFacetTolerance(0.5);            // → GM_User::arctol_，就是上面那个常量
 /// ```
 ///
-/// `restol_` 是 libgm 面级布尔的判定容差：`GM_AggregateCombination::calcFacets`
-/// 把它传给 `GM_CompFacets::aggregateWith`，最终在 `GM_Facets::obscureFaces`
-/// （libgm 3.1 `0x10068710`）里既当切分线的 side 判定、又当
-/// `D2_PolySet::normalise` 的归一容差。所以近共面的两张面在 libgm 眼里先被塞成
-/// 真共面，再在面内做二维多边形相减。取证：
-/// `docs/evidence/2026-08-25-ida-libgm-coincidence-tolerances.md`。
+/// 0.051mm 是 libgm 的共面重合容差：Core3D 建体前 `gm_SetResolutionTolerance(0.051)` 与
+/// `gm_SetDefaultNormalisationTolerance(0.051)` 把 `restol_` / `normtol_` 设成同一个值。
+/// 负体的三维 set-op（`GM_SolidCombination::calcFacets` → `gm_combine` / `GM_SetOp`）在
+/// `normalisePostSetOp(GM_User::normtol_)` 里按它把近共面判成重合（2026-09-09 逐帧实测更正：
+/// 早前这里写的 `GM_Facets::obscureFaces` 面内二维相减是误挂——那是隐藏面 / 出图例程，
+/// 不在实体减法路上）。常量名 `RES_TOL_MM` 保留（值 0.051 不变，restol 与 normtol 同值）。
+/// 取证：`docs/evidence/2026-08-25-ida-libgm-coincidence-tolerances.md` §三。
 pub const RES_TOL_MM: f64 = 0.051;
 
 /// libgeom 判「这一段其实是直线」的 bulge 阈值。同一个字面量在

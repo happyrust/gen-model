@@ -66,22 +66,6 @@ pub enum WriteMode {
     Replace,
 }
 
-/// pe 统计观测（`dbnum_stats::render`）的口径。
-///
-/// 每笔观测 = 本块全部 id 的 `$before` / `$after` 两次点读（各 ≤ `tx_limits.elements` 条）+ 一段
-/// `FOR $row IN $observed` 解释器循环 + 每个 Ref0 一次 `dbnum_info_table` UPSERT。整库基线写进**刚清空**
-/// 的 dbnum 时 `$before` 恒空、`$after` 恒等于本批，这笔观测的键操作量与正文写入同量级，却只为把
-/// `dbnum_info_table.count` 逐笔推到一个收尾时一条 `GROUP BY` 就能算出来的数；同一个 UPSERT 目标行
-/// 还是全部事务共同的热点键（多写者撞的正是它）。所以基线延后到收尾一次算清
-/// （`versioned_db::database::settle_dbnum_info_after_baseline` → `dbnum_stats::rebuild_body`）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StatisticsMode {
-    /// 每笔事务自带前后观测：稳态增量窗口、CATA 依赖行、任何写进**已有统计**的 dbnum 的路。
-    PerTransaction,
-    /// 不带观测，只包 `BEGIN / COMMIT`：整库基线（写者排空后由收尾重建统计）。
-    Deferred,
-}
-
 /// 一个待落库的元素。
 pub enum BatchItem {
     /// Add / Modified：完整行。`is_add` 决定要不要清它自己的旧出向边（refno 复用）；
@@ -374,8 +358,8 @@ impl ElementBatchReport {
 /// 整窗口 → 若干笔事务 SQL（含 `BEGIN / COMMIT` 与 pe 统计观测）。
 ///
 /// 顺序：前置块（Add / 墓碑的旧出向边清理）→ 元素块 × N。每块 ≤ `tx_limits.elements` 个元素，
-/// 再过 `dbnum_stats::transaction` 的字节 / 行上限，不合就劈半——与模型侧 `render_chunk`、
-/// `dbnum_stats::batches` 同一个形状。
+/// 再过 `pe_batch::transaction` 的字节 / 行上限，不合就劈半——与模型侧 `render_chunk`、
+/// `pe_batch::batches` 同一个形状。
 pub fn render_transactions(
     changes: &[PersistElementChange],
     retired: &[RetiredTypeRow],
@@ -426,39 +410,23 @@ pub fn render_item_transactions_with_limits(
     mode: WriteMode,
     limits: crate::data_interface::tx_limits::DataTxLimits,
 ) -> anyhow::Result<(Vec<String>, ElementBatchReport)> {
-    render_item_transactions_with_limits_and_statistics(
-        items,
-        dbnum,
-        mode,
-        limits,
-        StatisticsMode::PerTransaction,
-    )
-}
-
-/// [`render_item_transactions_with_limits`] 再带上统计口径（[`StatisticsMode`]）。
-/// 基线走 `Deferred`；其余调用方用不带这一格的两个入口，默认逐笔观测。
-pub fn render_item_transactions_with_limits_and_statistics(
-    items: &[BatchItem],
-    dbnum: i32,
-    mode: WriteMode,
-    limits: crate::data_interface::tx_limits::DataTxLimits,
-    statistics: StatisticsMode,
-) -> anyhow::Result<(Vec<String>, ElementBatchReport)> {
     let mut transactions = Vec::new();
     let mut report = ElementBatchReport::default();
 
     let preamble = render_preamble(items, mode);
     if !preamble.is_empty() {
-        // 前置块只删边、不碰 pe 行：不带 id，统计观测为空。字节超限就按行劈半。
+        // 前置块只删边、不碰 pe 行：不带 id。字节超限就按行劈半。
         push_preamble_transactions(dbnum as u32, &preamble, &mut transactions)?;
         report.transactions = transactions.len();
     }
 
+    // 事务只包 `BEGIN / COMMIT` 与上限校验（ADR-071 D6：逐笔 pe 统计观测块已退，`dbnum_info_table`
+    // 由任务收尾从目标索引序列化）；`ids` 只交去校验规范性。此前这里按 `StatisticsMode` 分
+    // 「逐笔观测 / 基线延后」两档，两档合一之后那个枚举随 S7 删了。
     fn append(
         items: &[BatchItem],
         dbnum: i32,
         mode: WriteMode,
-        statistics: StatisticsMode,
         out: &mut Vec<String>,
         report: &mut ElementBatchReport,
     ) -> anyhow::Result<()> {
@@ -466,16 +434,8 @@ pub fn render_item_transactions_with_limits_and_statistics(
             return Ok(());
         }
         let rendered = render_items(items, dbnum, mode);
-        // `Deferred`：不交 id，`dbnum_stats::render` 就不渲观测块，只剩 BEGIN / COMMIT 与上限校验。
-        let observed_ids: &[String] = match statistics {
-            StatisticsMode::PerTransaction => &rendered.ids,
-            StatisticsMode::Deferred => &[],
-        };
-        match crate::data_interface::dbnum_stats::transaction(
-            dbnum as u32,
-            observed_ids,
-            &rendered.sql,
-        ) {
+        match crate::data_interface::pe_batch::transaction(dbnum as u32, &rendered.ids, &rendered.sql)
+        {
             Ok(sql) => {
                 report.max_transaction_bytes = report.max_transaction_bytes.max(sql.len());
                 report.transactions += 1;
@@ -487,25 +447,18 @@ pub fn render_item_transactions_with_limits_and_statistics(
             }
             Err(_) if items.len() > 1 => {
                 let middle = items.len() / 2;
-                append(&items[..middle], dbnum, mode, statistics, out, report)?;
-                append(&items[middle..], dbnum, mode, statistics, out, report)
+                append(&items[..middle], dbnum, mode, out, report)?;
+                append(&items[middle..], dbnum, mode, out, report)
             }
             Err(error) => Err(error.context(format!(
-                "single element {} exceeds the data transaction limits (including statistics)",
+                "single element {} exceeds the data transaction limits",
                 items[0].id()
             ))),
         }
     }
 
     for chunk in items.chunks(limits.elements.max(1)) {
-        append(
-            chunk,
-            dbnum,
-            mode,
-            statistics,
-            &mut transactions,
-            &mut report,
-        )?;
+        append(chunk, dbnum, mode, &mut transactions, &mut report)?;
     }
     Ok((transactions, report))
 }
@@ -516,7 +469,7 @@ fn push_preamble_transactions(
     writes: &str,
     out: &mut Vec<String>,
 ) -> anyhow::Result<()> {
-    match crate::data_interface::dbnum_stats::transaction(dbnum, &[], writes) {
+    match crate::data_interface::pe_batch::transaction(dbnum, &[], writes) {
         Ok(sql) => {
             out.push(sql);
             Ok(())
@@ -784,40 +737,30 @@ mod tests {
             assert!(tx.starts_with("BEGIN TRANSACTION;"));
             assert!(tx.trim_end().ends_with("COMMIT TRANSACTION;"));
         }
+        // 观测块已退（ADR-071 D6）：元素块只有正文，统计由任务收尾从目标索引序列化。
         assert!(
-            txs[1].contains("dbnum_stats_state:8000"),
-            "元素块带 pe 统计观测"
+            !txs[1].contains("dbnum_stats_state") && !txs[1].contains("dbnum_info_table"),
+            "元素块不得再带 pe 统计观测"
         );
     }
 
-    /// 基线的 `Deferred` 口径：事务照旧包 `BEGIN / COMMIT`、照旧过字节 / 行上限，但**没有**观测块
-    /// （不点读 `$before` / `$after`、不碰 `dbnum_info_table` / `dbnum_stats_state`）；正文与逐笔观测
-    /// 那一档逐字相同。统计由收尾的 `rebuild_body` 一次算清。
+    /// 元素事务只包 `BEGIN / COMMIT`、过字节 / 行上限，没有观测块（不点读 `$before` / `$after`、
+    /// 不碰 `dbnum_info_table` / `dbnum_stats_state`）——ADR-071 D6；`StatisticsMode` 那个两档枚举随之删了。
     #[test]
-    fn deferred_statistics_render_the_same_writes_without_an_observation_block() {
+    fn element_transactions_carry_no_statistics_observation_block() {
         let items = items_from_changes(&fixture(), &[], DBNUM, &UdaKeyMap::empty());
         let limits = crate::data_interface::tx_limits::DataTxLimits::default();
-        let (observed, observed_report) = render_item_transactions_with_limits_and_statistics(
-            &items,
-            DBNUM,
-            WriteMode::Fresh,
-            limits,
-            StatisticsMode::PerTransaction,
-        )
-        .unwrap();
-        let (deferred, deferred_report) = render_item_transactions_with_limits_and_statistics(
-            &items,
-            DBNUM,
-            WriteMode::Fresh,
-            limits,
-            StatisticsMode::Deferred,
-        )
-        .unwrap();
-        assert_eq!(observed.len(), 1);
+        let (deferred, deferred_report) =
+            render_item_transactions_with_limits(&items, DBNUM, WriteMode::Fresh, limits).unwrap();
         assert_eq!(deferred.len(), 1);
-        assert_eq!(observed_report.elements, deferred_report.elements);
-        assert!(observed[0].contains("dbnum_stats_state:8000"));
-        assert!(observed[0].contains("$before_"));
+        assert!(
+            !include_str!("element_batch.rs")
+                .split_once("#[cfg(test)]")
+                .expect("tests follow")
+                .0
+                .contains("enum StatisticsMode"),
+            "两档口径的枚举已删（ADR-071 D6 / S7）"
+        );
         for marker in [
             "dbnum_stats_state",
             "dbnum_info_table",
@@ -827,20 +770,16 @@ mod tests {
         ] {
             assert!(
                 !deferred[0].contains(marker),
-                "Deferred 不得渲观测块（{marker}）:\n{}",
+                "不得渲观测块（{marker}）:\n{}",
                 deferred[0]
             );
         }
         assert!(deferred[0].starts_with("BEGIN TRANSACTION;\n"));
         assert!(deferred[0].trim_end().ends_with("COMMIT TRANSACTION;"));
-        // 正文一字不差：观测块只是包在外面的东西。
+        // 正文一字不差：事务只是包在外面的 BEGIN / COMMIT。
         let body = render_items(&items, DBNUM, WriteMode::Fresh).sql;
         assert!(deferred[0].contains(&body));
-        assert!(observed[0].contains(&body));
-        assert!(
-            deferred_report.max_transaction_bytes < observed_report.max_transaction_bytes,
-            "省掉的正是观测块那几 KB"
-        );
+        assert_eq!(deferred_report.max_transaction_bytes, deferred[0].len());
     }
 
     /// 本模块是 rocksdb 数据面**唯一**的写法出口：生产代码里不许有 UPSERT，也不许有逐记录的

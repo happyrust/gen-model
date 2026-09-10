@@ -848,6 +848,46 @@ impl TaskRegistry {
         self.entries().get(task_id).cloned()
     }
 
+    /// 有没有数据批次任务正在跑（任一库）。
+    ///
+    /// 「在飞」的**唯一来源**（ADR-071 / 计划 v3 S7）。读路原先问的是
+    /// `SideEffectCompensator::has_collecting_file_rounds()`——那问的是「文件轮次那一行
+    /// 还开着吗」，而那一行随账本一起退役；同一件事今天在注册表里就有答案，不必查库。
+    ///
+    /// 只看 `Running`：`Queued` 还没开始动这个库的数据，把它算进「在飞」会让读路在
+    /// 一整条积压队列的存续期间都说「更新中」。
+    pub fn has_running_data_batch(&self) -> bool {
+        self.entries()
+            .values()
+            .any(|task| task.kind == TASK_KIND_DATA_BATCH && task.state == TaskState::Running)
+    }
+
+    /// 这个库有没有数据批次任务正在跑（初始化 / 增量 / ModelOnly 同一种任务）。
+    ///
+    /// 替掉的是初始化发布 run 的 `model_publish_queue::blocks_dbnum(dbnum)`（ADR-071 S5，
+    /// d-300）：「某库在飞」的唯一来源是注册表，不再是 journal 里有没有一条 run。
+    pub fn has_running_data_batch_for(&self, dbnum: u32) -> bool {
+        self.entries().values().any(|task| {
+            task.kind == TASK_KIND_DATA_BATCH
+                && task.state == TaskState::Running
+                && task.dbnum == Some(dbnum)
+        })
+    }
+
+    /// 正在跑数据批次任务的库（去重、升序）。替掉发布 run 的 `blocked_dbnums()`：启动播种 /
+    /// 迁移 / 待办清理要绕开的「正在被写的库」从这里拿。
+    pub fn running_data_batch_dbnums(&self) -> Vec<u32> {
+        let mut dbnums: Vec<u32> = self
+            .entries()
+            .values()
+            .filter(|task| task.kind == TASK_KIND_DATA_BATCH && task.state == TaskState::Running)
+            .filter_map(|task| task.dbnum)
+            .collect();
+        dbnums.sort_unstable();
+        dbnums.dedup();
+        dbnums
+    }
+
     /// 按创建时间倒序（最近优先）过滤列出。
     pub fn list(&self, state: Option<&str>, kind: Option<&str>, limit: usize) -> Vec<TaskEntry> {
         let inner = self.entries();
@@ -903,6 +943,29 @@ mod tests {
     /// 只关心区间的用例走这个；关心时刻的用例直接调 `insert_queued_batch`。
     fn queue_row(registry: &TaskRegistry, task_id: &str, dbnum: u32, start: i32, end: i32) {
         registry.insert_queued_batch(task_id, "P", dbnum, "DESI", start, None, end, None);
+    }
+
+    /// 「在飞」的唯一来源（ADR-071 / 计划 v3 S7）：读路拿它替掉
+    /// `has_collecting_file_rounds()`，所以三种状态各自该答什么必须钉住。
+    #[test]
+    fn only_a_running_data_batch_counts_as_a_publication_in_flight() {
+        let registry = TaskRegistry::default();
+        assert!(!registry.has_running_data_batch(), "空注册表不在飞");
+
+        queue_row(&registry, "t-1", 7997, 1, 9);
+        assert!(
+            !registry.has_running_data_batch(),
+            "排着队还没动这个库，读路不该说更新中"
+        );
+
+        registry.mark_started("t-1");
+        assert!(registry.has_running_data_batch());
+
+        registry.finish("t-1", TaskState::Succeeded, serde_json::Value::Null);
+        assert!(!registry.has_running_data_batch(), "终态不在飞");
+
+        terminal(&registry, "t-2", 1112, "2026-09-10T09:00:00+08:00");
+        assert!(!registry.has_running_data_batch());
     }
 
     fn fill_to_capacity_with_queued(registry: &TaskRegistry, count: usize) {

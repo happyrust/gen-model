@@ -200,7 +200,7 @@ impl MirrorSpool {
             );
             for transaction in &pending.job.transactions {
                 let result = if pending.job.target == "element" {
-                    super::dbnum_stats::execute_on(db, transaction).await
+                    super::pe_batch::execute_on(db, transaction).await
                 } else {
                     crate::surreal_retry::execute_surreal_checked_on(
                         db,
@@ -349,7 +349,7 @@ mod tests {
         let spool = MirrorSpool::open(root.clone(), 1024 * 1024).unwrap();
         let db = surrealdb::engine::any::connect("mem://").await.unwrap();
         db.use_ns("stats").use_db("spool").await.unwrap();
-        let sql = crate::data_interface::dbnum_stats::transaction(
+        let sql = crate::data_interface::pe_batch::transaction(
             7,
             &["40_1".into()],
             "UPSERT pe:40_1 SET dbnum=7, sesno=2",
@@ -358,13 +358,23 @@ mod tests {
         spool
             .persist(1, vec![(7, 2)], "element", vec![sql.clone()])
             .unwrap();
-        crate::data_interface::dbnum_stats::execute_on(&db, &sql)
+        crate::data_interface::pe_batch::execute_on(&db, &sql)
             .await
             .unwrap();
         assert_eq!(spool.replay(&db).await.unwrap(), 1);
         assert_eq!(spool.replay(&db).await.unwrap(), 0);
-        let mut result = db.query("RETURN dbnum_info_table:40.count;").await.unwrap();
-        assert_eq!(result.take::<Option<i64>>(0).unwrap(), Some(1));
+        // 重放收敛到同一行；pe 统计不再随写事务逐笔记账（ADR-071 D6），这里没有任务收尾，info 表无行。
+        let mut result = db
+            .query("SELECT count() AS n FROM pe WHERE dbnum = 7 GROUP ALL; RETURN dbnum_info_table:40.count;")
+            .await
+            .unwrap();
+        #[derive(serde::Deserialize)]
+        struct Count {
+            n: i64,
+        }
+        let rows: Vec<Count> = result.take(0).unwrap();
+        assert_eq!(rows[0].n, 1);
+        assert_eq!(result.take::<Option<i64>>(1).unwrap(), None);
         fs::remove_dir_all(root).unwrap();
     }
 

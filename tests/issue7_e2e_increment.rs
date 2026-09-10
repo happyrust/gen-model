@@ -574,7 +574,9 @@ async fn issue7_e2e_room_comes_back_after_e3d_save() {
         previous_observed_sesno: applied_sesno,
         // 保存窗口两端的时刻只喂界面，这条链路不校验它，缺席即可（ADR-0019 降级路径）。
         first_pending_sesno_time: None,
+        reinit_requested: false,
         file_latest_sesno_time: None,
+        regen_roots: Vec::new(),
     };
     // 夹具扮演的是「有人真的动了这个库」，与 watch 事件同口径：不挂起，
     // 否则这一行会一直停在 held 上，下面的 drain 永远消费不到它。

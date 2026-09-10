@@ -192,6 +192,30 @@ pub(crate) fn set_ready_by_entries(entries: usize) {
     });
 }
 
+/// 树的条目数变了之后，把 `Ready` ⇄ `ReadyEmpty` 这一格跟上。
+///
+/// `ReadyEmpty` 说的是「校验成功且**库里没有可用几何指针**，语义上无候选」。冷启动打在空库上时
+/// 它是对的，可这一版的初始化紧接着就把几万条几何发布进树里——标签不跟着翻，`/health` 就会
+/// 一边报 `state = ready_empty`、一边在同一份 payload 里报 `entries = 52346`。2026-09-10 连着
+/// 三轮 live 都是这个样子，而 `vacuous_room_build_reason` 又正是拿 `ReadyEmpty` 判「全量重建
+/// 无事可做」的，陈旧标签不只是难看。
+///
+/// **只在已经就绪的那两档之间翻**：`Loading` / `Rebuilding` / `ReplayRequired` / 两档 `Degraded`
+/// 各自管自己的迁移，这里不碰；验证时刻与 `last_error` 也不动——这不是一次校验，只是把
+/// 「空/不空」这一格对齐现实。
+pub(crate) fn refresh_ready_kind(entries: usize) {
+    with_state(|cell| {
+        if !cell.state.is_ready() {
+            return;
+        }
+        cell.state = if entries == 0 {
+            SpatialTreeState::ReadyEmpty
+        } else {
+            SpatialTreeState::Ready
+        };
+    });
+}
+
 pub(crate) fn record_error(error: &str) {
     with_state(|cell| cell.last_error = Some(error.to_string()));
 }
@@ -400,6 +424,73 @@ mod tests {
                 "{denied:?} 覆盖快照会把不可信内容写过好文件"
             );
         }
+    }
+
+    /// 冷启动贴在空库上的 `ReadyEmpty` 不许在树填起来之后留着——`/health` 一边报
+    /// `state = ready_empty`、一边报 `entries = 52346`（2026-09-10 三轮 live 的现场），
+    /// 而 `vacuous_room_build_reason` 正是拿这一档判「全量重建无事可做」。
+    ///
+    /// 反过来也要成立（清库之后回到空），而**没就绪的那几档一格都不许碰**：它们各自
+    /// 管自己的迁移，被这里顺手翻成 Ready 就是把门禁拆了。
+    #[test]
+    fn a_ready_label_follows_the_tree_and_never_touches_the_other_states() {
+        let flip = |from: SpatialTreeState, entries: usize| {
+            with_state(|cell| cell.state = from);
+            refresh_ready_kind(entries);
+            current_state()
+        };
+
+        assert_eq!(
+            flip(SpatialTreeState::ReadyEmpty, 52_346),
+            SpatialTreeState::Ready,
+            "树填起来之后 ready_empty 必须翻面"
+        );
+        assert_eq!(
+            flip(SpatialTreeState::Ready, 0),
+            SpatialTreeState::ReadyEmpty,
+            "清空之后也要翻回来"
+        );
+        assert_eq!(flip(SpatialTreeState::Ready, 7), SpatialTreeState::Ready);
+
+        for untouched in [
+            SpatialTreeState::Uninitialized,
+            SpatialTreeState::Loading,
+            SpatialTreeState::ReplayRequired,
+            SpatialTreeState::Rebuilding,
+            SpatialTreeState::DegradedReuse,
+            SpatialTreeState::DegradedBlocked,
+        ] {
+            assert_eq!(flip(untouched, 52_346), untouched, "{untouched:?} 不该被翻");
+            assert_eq!(flip(untouched, 0), untouched, "{untouched:?} 不该被翻");
+        }
+
+        // 这一格不是一次校验：验证时刻与错误都不许被它改写。
+        with_state(|cell| {
+            cell.state = SpatialTreeState::ReadyEmpty;
+            cell.last_verified_at_unix = Some(7);
+            cell.last_error = Some("旧错".to_string());
+        });
+        refresh_ready_kind(9);
+        let after = snapshot();
+        assert_eq!(after.state, SpatialTreeState::Ready);
+        assert_eq!(after.last_verified_at_unix, Some(7), "不是校验，别盖时刻");
+        assert_eq!(after.last_error.as_deref(), Some("旧错"), "也别清错");
+        with_state(|cell| cell.state = SpatialTreeState::Uninitialized);
+    }
+
+    /// 空间发布收敛之后必须把这一格对齐现实——否则冷启动那枚 `ready_empty` 会跟一辈子。
+    #[test]
+    fn every_spatial_convergence_refreshes_the_ready_label() {
+        let body = include_str!("../data_interface/side_effect_pending.rs")
+            .split_once("async fn promote_state_after_replay()")
+            .expect("晋升点还在")
+            .1;
+        let end = body.find("\n    }").expect("函数有尾");
+        let body = &body[..end];
+        assert!(
+            body.contains("refresh_ready_kind(entries)"),
+            "不是 ReplayRequired 的那一支也要把 Ready/ReadyEmpty 对齐树: {body}"
+        );
     }
 
     /// failpoint 只认精确同名：别名/前缀/未配置都必须安然返回。

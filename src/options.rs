@@ -137,14 +137,6 @@ pub struct DbOptionExt {
     /// 一片内存批最多携带多少个已生成元素。详见 [`model_memory_slice_elements`]。
     #[serde(default)]
     pub model_memory_slice_elements: Option<usize>,
-    #[serde(default)]
-    pub init_async_publish: Option<bool>,
-    #[serde(default)]
-    pub model_publish_queue_dir: Option<String>,
-    #[serde(default)]
-    pub model_publish_memory_bytes: Option<u64>,
-    #[serde(default)]
-    pub model_publish_disk_bytes: Option<u64>,
 
     #[serde(default)]
     pub model_root_inflight_max: Option<usize>,
@@ -274,10 +266,6 @@ impl From<DbOption> for DbOptionExt {
             model_post_regen_aabb_page: None,
             model_regen_execution_group: None,
             model_memory_slice_elements: None,
-            init_async_publish: None,
-            model_publish_queue_dir: None,
-            model_publish_memory_bytes: None,
-            model_publish_disk_bytes: None,
 
             model_root_inflight_max: None,
             model_full_rebuild_enabled: None,
@@ -355,14 +343,6 @@ struct DbOptionExtFields {
     model_regen_execution_group: Option<usize>,
     #[serde(default)]
     model_memory_slice_elements: Option<usize>,
-    #[serde(default)]
-    init_async_publish: Option<bool>,
-    #[serde(default)]
-    model_publish_queue_dir: Option<String>,
-    #[serde(default)]
-    model_publish_memory_bytes: Option<u64>,
-    #[serde(default)]
-    model_publish_disk_bytes: Option<u64>,
 
     #[serde(default)]
     model_root_inflight_max: Option<usize>,
@@ -568,10 +548,6 @@ pub fn get_db_option_ext() -> DbOptionExt {
         model_post_regen_aabb_page: ext.model_post_regen_aabb_page,
         model_regen_execution_group: ext.model_regen_execution_group,
         model_memory_slice_elements: ext.model_memory_slice_elements,
-        init_async_publish: ext.init_async_publish,
-        model_publish_queue_dir: ext.model_publish_queue_dir.clone(),
-        model_publish_memory_bytes: ext.model_publish_memory_bytes,
-        model_publish_disk_bytes: ext.model_publish_disk_bytes,
 
         model_root_inflight_max: ext.model_root_inflight_max,
         model_full_rebuild_enabled: ext.model_full_rebuild_enabled,
@@ -1121,6 +1097,13 @@ pub fn auto_initialize_new_dbnums() -> bool {
         })
 }
 
+/// 缺省 **true**（2026-09-10 翻面）：范围之内、盘上有文件、从未初始化的库自动入队走基线，
+/// 不再等 plant-ui 手动点一次。翻面之前现场是 18 个库在准入门后面积着，谁也没去点。
+///
+/// 关掉的路只剩配置键与环境变量（`auto_initialize_new_dbnums = false` /
+/// `AIOS_AUTO_INITIALIZE_NEW_DBNUMS=false`）——CLI 那个 `--auto-initialize-new-dbnums`
+/// 是只写 `true` 的 `OnceLock`，翻面后它既开不出新东西，还会在设了的时候把环境变量的
+/// `false` 顶掉（见 [`auto_initialize_new_dbnums`] 的短路顺序）。要关就别带那个 flag。
 fn effective_auto_initialize_new_dbnums(
     configured: Option<bool>,
     env_override: Option<&str>,
@@ -1128,7 +1111,7 @@ fn effective_auto_initialize_new_dbnums(
     env_override
         .and_then(parse_bool_flag)
         .or(configured)
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// 环境变量名：数据面读哪儿（ADR-053 direct 生成读 / ADR-058 D8）。
@@ -2066,10 +2049,14 @@ mod tests {
         assert!(effective_startup_autorun(Some(true), None));
     }
 
+    /// 缺省自动入队；要拦下新库得**显式**说 false（配置键或环境变量），
+    /// 而且认不出的环境变量值按「没设」处理，不许静默变成关。
     #[test]
-    fn new_dbnum_initialization_requires_explicit_opt_in() {
-        assert!(!effective_auto_initialize_new_dbnums(None, None));
-        assert!(!effective_auto_initialize_new_dbnums(None, Some("typo")));
+    fn new_dbnum_initialization_is_automatic_unless_explicitly_refused() {
+        assert!(effective_auto_initialize_new_dbnums(None, None));
+        assert!(effective_auto_initialize_new_dbnums(None, Some("typo")));
+        assert!(!effective_auto_initialize_new_dbnums(Some(false), None));
+        assert!(!effective_auto_initialize_new_dbnums(None, Some("off")));
         assert!(effective_auto_initialize_new_dbnums(Some(true), None));
         assert!(effective_auto_initialize_new_dbnums(
             Some(false),
@@ -3129,15 +3116,6 @@ mod tests {
     }
 }
 
-/// This switch controls new runs only. Existing journals must always recover.
-pub fn init_async_publish() -> bool {
-    std::env::var("AIOS_INIT_ASYNC_PUBLISH")
-        .ok()
-        .map(|v| !matches!(v.as_str(), "0" | "false"))
-        .unwrap_or_else(|| load_ext_fields().init_async_publish.unwrap_or(true))
-        && store_mode().is_durable()
-        && !data_face().is_read_through()
-}
 /// 数据面事务切块上限的三个配置值（原样、未填默认）；合成与默认值在
 /// `data_interface::tx_limits::DataTxLimits::from_config`。
 pub fn data_tx_limits_config() -> (Option<u64>, Option<u64>, Option<u64>) {
@@ -3146,23 +3124,5 @@ pub fn data_tx_limits_config() -> (Option<u64>, Option<u64>, Option<u64>) {
         ext.data_tx_max_bytes,
         ext.data_tx_max_write_rows,
         ext.data_tx_elements,
-    )
-}
-
-pub fn model_publish_queue_limits() -> (std::path::PathBuf, u64, u64) {
-    let ext = load_ext_fields();
-    let base = std::env::var_os("GEN_MODEL_RUN_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().expect("process run directory"));
-    let root = ext
-        .model_publish_queue_dir
-        .as_ref()
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|| base.join(".gen-model/model-publish-queue-v1"));
-    (
-        root,
-        ext.model_publish_memory_bytes.unwrap_or(512 * 1024 * 1024),
-        ext.model_publish_disk_bytes
-            .unwrap_or(20 * 1024 * 1024 * 1024),
     )
 }

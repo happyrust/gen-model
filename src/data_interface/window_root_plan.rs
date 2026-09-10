@@ -1078,6 +1078,9 @@ pub(crate) async fn build_model_update_plan_from_window(
         ));
     }
     warnings.push(sources.room_structural.summary_line(dbnum));
+    if !sources.room_structural.unreadable.is_empty() {
+        crate::data_interface::task_effects::mark_room_topology_changed(dbnum, target_sesno as i32);
+    }
     warnings.extend(
         sources
             .room_structural
@@ -1293,6 +1296,13 @@ impl CredentialAdvanceReceipt {
 ///
 /// 不碰几何、manifest、`published_*`、`desired_*`、`status`——前移改的只是「这份几何到
 /// 哪个会话为止仍然有效」这一个事实。
+///
+/// 名单**点在 `UPDATE` 的目标位上**，不是写成 `UPDATE gen_root ... WHERE id IN [...]`。
+/// 后者会让规划器看见 `dbnum` + `status` 就挑 `gen_root_dbnum_status`，把每一批都变成
+/// 一次该库全部安定根的索引段扫描再逐行判名单——名单按 [`CREDENTIAL_ADVANCE_CHUNK`]
+/// 切块之后，同一段索引被重走 `名单/500` 遍，总代价是根数的**平方**。7997 实测
+/// （6767 根 / 14 批）：同谓词同名单的只读对照，段扫描写法库内 2.97 s、点名记录 0.13 s。
+/// `dbnum` 与状态谓词照旧留在 `WHERE` 里当守卫——记录已经取到手，判一下不要钱。
 pub fn render_credential_advance(
     dbnum: u32,
     end_sesno: i32,
@@ -1321,10 +1331,10 @@ pub fn render_credential_advance(
         .chunks(CREDENTIAL_ADVANCE_CHUNK)
         .map(|chunk| {
             format!(
-                "UPDATE gen_root SET credential_advanced_from = source_end_sesno, \
+                "UPDATE {} SET credential_advanced_from = source_end_sesno, \
                  source_end_sesno = {end_sesno}{time_clause}, \
                  credential_advanced_at = time::now(), updated_at = time::now() \
-                 WHERE dbnum = {dbnum} AND id IN [{}] \
+                 WHERE dbnum = {dbnum} \
                  AND status IN [{statuses}] \
                  AND (publication_status ?: 'ready') = 'ready' \
                  AND (desired_revision ?: 0) = (published_revision ?: 0) \
@@ -1396,16 +1406,22 @@ pub struct PersistedRootState {
     pub root: PersistedRoot,
     pub status: Option<String>,
     pub source_end_sesno: Option<i32>,
+    pub publication_status: Option<String>,
+    pub desired_revision: Option<u64>,
+    pub published_revision: Option<u64>,
 }
 
 impl PersistedRootState {
     /// 已发布且凭证有效。与 [`SETTLED_ROOT_STATUSES`] 和 [`render_credential_advance`] 的 SQL
     /// 守卫同一口径：只有这样的行的凭证才有资格当窗口左端，也才会被前移。
     pub fn is_settled(&self) -> bool {
-        self.status
-            .as_deref()
-            .is_some_and(|status| SETTLED_ROOT_STATUSES.contains(&status))
-            && self.source_end_sesno.is_some_and(|sesno| sesno > 0)
+        root_is_settled(
+            self.status.as_deref(),
+            self.source_end_sesno,
+            self.publication_status.as_deref(),
+            self.desired_revision,
+            self.published_revision,
+        )
     }
 }
 
@@ -1427,6 +1443,12 @@ async fn load_persisted_root_states_on(
         status: Option<String>,
         #[serde(default)]
         source_end_sesno: Option<i32>,
+        #[serde(default)]
+        publication_status: Option<String>,
+        #[serde(default)]
+        desired_revision: Option<u64>,
+        #[serde(default)]
+        published_revision: Option<u64>,
     }
     let started = std::time::Instant::now();
     let mut rows: Vec<Row> = Vec::new();
@@ -1436,7 +1458,8 @@ async fn load_persisted_root_states_on(
         let mut response = db
             .query(format!(
                 "SELECT id, pe ?: type::thing('pe', type::string(record::id(id))) AS pe, \
-             noun ?: '' AS noun, status, source_end_sesno FROM gen_root \
+             noun ?: '' AS noun, status, source_end_sesno, publication_status, \
+             desired_revision, published_revision FROM gen_root \
              WHERE dbnum = {dbnum}{after} ORDER BY id LIMIT 500;"
             ))
             .await
@@ -1471,6 +1494,9 @@ async fn load_persisted_root_states_on(
                 },
                 status: row.status,
                 source_end_sesno: row.source_end_sesno,
+                publication_status: row.publication_status,
+                desired_revision: row.desired_revision,
+                published_revision: row.published_revision,
             })
         })
         .collect()
@@ -1643,7 +1669,7 @@ pub async fn reconcile_startup_window(
     if let Some(lazy) = lazy_roots {
         aios_core::SUL_DB
             .query(
-                crate::data_interface::model_update_pending::render_model_root_observation(
+                crate::data_interface::increment_tail::render_model_root_observation(
                     dbnum,
                     lazy,
                     target_sesno as i32,
@@ -1666,16 +1692,7 @@ pub async fn reconcile_startup_window(
         .await?;
         crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
     }
-    if !advance.is_empty() {
-        report.advanced = advance_root_credentials(
-            dbnum,
-            target_sesno as i32,
-            target.session_time.as_deref(),
-            &advance,
-        )
-        .await?
-        .advanced;
-    }
+    // Coverage advances only in the owning Task completion transaction.
     // 即使本窗口没有生成项，也不在规划/探针路径推进库级完成水位。调用方仍需通过
     // ModelOnly Task 完成发布、空间与房间，再由 Task 收尾盖章。
     Ok(report)
@@ -1898,7 +1915,7 @@ mod tests {
 
     /// 「安定」这个判据现在有三处用户：[`PersistedRootState::is_settled`]（挑窗口左端、
     /// 决定谁被无条件强排）、[`render_credential_advance`] 的 SQL 守卫（谁能被前移）、
-    /// `model_update_pending::startup_coverage_floors` 的聚合（一级过滤的下限与未安定计数）。
+    /// `model_coverage::startup_coverage_floors` 的聚合（一级过滤的下限与未安定计数）。
     ///
     /// 状态名单三处共用同一个 [`SETTLED_ROOT_STATUSES`]，漂不了；漂得了的是
     /// 「凭证必须大于 0」这半条——它在三处各写了一遍字面量。漂开的后果不报错：下限从一条
@@ -1909,6 +1926,9 @@ mod tests {
             root: persisted(5, "BRAN"),
             status: status.map(str::to_string),
             source_end_sesno: sesno,
+            publication_status: None,
+            desired_revision: None,
+            published_revision: None,
         };
         for status in SETTLED_ROOT_STATUSES {
             assert!(state(Some(status), Some(106)).is_settled(), "{status}");
@@ -1921,11 +1941,19 @@ mod tests {
         assert!(!state(Some("Failed"), Some(106)).is_settled());
         assert!(!state(Some("Pending"), Some(106)).is_settled());
         assert!(!state(None, Some(106)).is_settled());
+        let mut stale = state(Some("Generated"), Some(106));
+        stale.publication_status = Some("stale".into());
+        stale.desired_revision = Some(2);
+        stale.published_revision = Some(1);
+        assert!(
+            !stale.is_settled(),
+            "启动恢复不得把 stale / revision 落后的根当成安定根"
+        );
 
         let advance = render_credential_advance(8000, 200, None, &["24384/5".to_string()])
             .expect("statement renders")
             .join("\n");
-        let floors = include_str!("model_update_pending.rs")
+        let floors = include_str!("model_coverage.rs")
             .split_once("pub(crate) async fn startup_coverage_floors_on(")
             .expect("一级取数必须存在")
             .1
@@ -2172,7 +2200,7 @@ mod tests {
             .into_iter()
             .find(|item| item.action == ModelWorkAction::RegenRoot)
             .unwrap();
-        let tail = crate::data_interface::model_update_pending::render_finalize_tail(
+        let tail = crate::data_interface::increment_tail::render_finalize_tail(
             8000,
             424,
             None,
@@ -2206,7 +2234,8 @@ mod tests {
 
     #[tokio::test]
     async fn deletion_replaces_old_dead_generation_but_preserves_newer_intent() {
-        use crate::data_interface::model_update_pending::{record_id_of, render_finalize_tail};
+        use crate::data_interface::increment_tail::render_finalize_tail;
+        use crate::data_interface::model_update_pending::record_id_of;
         let db = surrealdb::engine::any::connect("mem://").await.unwrap();
         db.use_ns("pending")
             .use_db("delete_supersedes_regen")
@@ -2264,7 +2293,7 @@ mod tests {
         assert_eq!(sql.len(), 1, "{sql:?}");
         let sql = &sql[0];
         for needle in [
-            "UPDATE gen_root SET",
+            "UPDATE type::thing('gen_root', '24384_8'), type::thing('gen_root', '24384_1') SET",
             "credential_advanced_from = source_end_sesno",
             "source_end_sesno = 26",
             "source_end_sesno_time = '2026-09-02T10:00:00+08:00'",
@@ -2294,6 +2323,10 @@ mod tests {
             "published_target =",
             "status =",
             "publication_status =",
+            // 名单回到 `WHERE` 上，规划器就会挑 `gen_root_dbnum_status`，每一批退化成
+            // 一次全库段扫描——见 `render_credential_advance` 的文档。
+            "UPDATE gen_root",
+            "id IN [",
         ] {
             assert!(!sql.contains(forbidden), "`{forbidden}` in {sql}");
         }
@@ -2594,7 +2627,7 @@ mod tests {
     /// 水位推进到 T，名单上安定的根凭证也到 T——而且是在尾事务**之后**（水位先落）。
     #[tokio::test(flavor = "multi_thread")]
     async fn finalize_attempt_advances_the_planned_credentials_after_the_tail() {
-        use crate::data_interface::model_update_pending::finalize_attempt_on;
+        use crate::data_interface::increment_tail::finalize_attempt_on;
 
         let db = credential_advance_db("finalize_hook").await;
         let plan = ModelUpdatePlan {

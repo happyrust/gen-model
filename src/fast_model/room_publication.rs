@@ -35,6 +35,9 @@ use e3d_model::elmodl::GeometryId;
 use crate::data_interface::generation_root::refno_from_e3d;
 use crate::fast_model::aabb_refresh::AabbChange;
 
+// Old database images remain only as migration/parity test fixtures. Production
+// has neither a writer nor a geometry reader for this retired input table.
+#[cfg(test)]
 const PUBLISHED_ROOM_INPUT_TABLE: &str = "room_published_inst";
 
 /// Render one immutable room-geometry version from the current model rows.
@@ -43,6 +46,7 @@ const PUBLISHED_ROOM_INPUT_TABLE: &str = "room_published_inst";
 /// select tokens present in `published_file_input`, so a crash before the
 /// spatial publication leaves this candidate invisible.  Retrying the same
 /// frozen round replaces only its own candidate rows.
+#[cfg(test)]
 pub(crate) fn render_stage_published_room_input(dbnum: u32, commit_token: &str) -> String {
     let token = crate::data_interface::dbnum_state::escape_surql_str(commit_token);
     format!(
@@ -66,6 +70,7 @@ pub(crate) fn render_stage_published_room_input(dbnum: u32, commit_token: &str) 
 
 /// Materialize a complete candidate for one frozen file version.  Publication
 /// of the matching token is a separate, later transaction.
+#[cfg(test)]
 pub(crate) async fn stage_published_room_input(
     dbnum: u32,
     commit_token: &str,
@@ -88,9 +93,36 @@ pub(crate) async fn stage_published_room_input(
 pub(crate) async fn query_published_room_insts(
     refnos: &[RefnoEnum],
 ) -> anyhow::Result<Vec<GeomInstQuery>> {
-    query_published_room_insts_on(&SUL_DB, refnos).await
+    // This compatibility caller does not own a dbnum Task. Do not expose a
+    // half-published live projection through the former Published view.
+    anyhow::ensure!(
+        !crate::data_interface::side_effect_pending::SideEffectCompensator::has_inflight_file_round_on(&SUL_DB).await?,
+        "room input publication is incomplete; consume through the owning memory room Task"
+    );
+    query_memory_room_insts(refnos)
 }
 
+pub(crate) fn query_memory_room_insts(refnos: &[RefnoEnum]) -> anyhow::Result<Vec<GeomInstQuery>> {
+    if refnos.is_empty() { return Ok(Vec::new()); }
+    let resident = crate::fast_model::room_resident::current_for_calculation()?;
+    let mut rows = Vec::new();
+    let mut members = BTreeSet::new();
+    for refno in refnos.iter().copied().collect::<BTreeSet<_>>() {
+        anyhow::ensure!(!resident.missing_panels.contains(&refno), "preloaded room panel {refno} has no geometry");
+        if let Some(panel) = resident.panels.get(&refno) {
+            rows.push(panel.room_inst());
+        } else {
+            members.insert(refno.refno().0 as i64);
+        }
+    }
+    rows.extend(crate::fast_model::model_memory_store::ModelMemoryStore::global()
+        .room_records_for_members(&members).iter()
+        .filter(|record| matches!(record.geometry_id, GeometryId::Element { .. }))
+        .map(|record| record.room_inst()));
+    Ok(rows)
+}
+
+#[cfg(test)]
 pub(crate) async fn query_published_room_insts_on(
     db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
     refnos: &[RefnoEnum],
@@ -105,6 +137,7 @@ pub(crate) async fn query_published_room_insts_on(
         .map_err(anyhow::Error::from)
 }
 
+#[cfg(test)]
 fn render_published_room_inst_query(refnos: &[RefnoEnum]) -> String {
     // Keep the manifest subquery outside the indexed element lookup: Surreal
     // otherwise falls back to scanning every version and evaluating the
@@ -244,6 +277,24 @@ pub(crate) async fn clear_deferred_room_edges(refnos: &[String]) -> anyhow::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn room_input_publication_has_no_database_copy_writer() {
+        for source in [include_str!("../data_interface/batch_worker.rs"), include_str!("../data_interface/side_effect_pending.rs")] {
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            assert!(!production.contains("stage_published_room_input"));
+            assert!(!production.contains("room_published_inst"));
+        }
+        let source = include_str!("room_publication.rs");
+        let input = source.split_once("pub(crate) fn query_memory_room_insts(").unwrap().1
+            .split_once("#[cfg(test)]").unwrap().0;
+        assert!(!input.contains("SUL_DB") && !input.contains(".query("));
+        assert!(input.contains("resident.panels.get") && input.contains("room_records_for_members"));
+        let resident = include_str!("room_resident.rs").replace("\r\n", "\n");
+        let published = resident.split_once("pub(crate) async fn load_published(").unwrap().1.split_once("\n}\n").unwrap().0;
+        assert!(published.contains("load_file_backed("));
+        assert!(!published.contains("SUL_DB") && !published.contains("load_published_on("));
+    }
 
     #[tokio::test]
     async fn room_input_candidates_stay_hidden_until_the_file_token_switches() {

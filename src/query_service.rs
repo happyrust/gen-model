@@ -282,11 +282,12 @@ impl QueryService {
                 published_spatial_version()
                 .await
                 .map_err(db_error)?;
+        // 「有没有一轮发布在飞」问任务注册表，不问库（ADR-071 / 计划 v3 S7：`task_registry`
+        // 是在飞的唯一来源）。原先问的 `has_collecting_file_rounds()` 是「文件轮次那一行还
+        // 开着吗」，那一行随账本退役。崩溃留下的未收敛意图不归这一问管——它由上面那句
+        // `ensure_spatial_ready()` 拦住（空间树是 `ReplayRequired` 时这里根本走不到）。
         let collecting =
-            crate::data_interface::side_effect_pending::SideEffectCompensator::
-                has_collecting_file_rounds()
-                .await
-                .map_err(db_error)?;
+            crate::data_interface::task_registry::TaskRegistry::global().has_running_data_batch();
         let room_pending = if let Some(room_targets) = room_targets {
             let mut response = SUL_DB
                 .query(render_room_pending_probe(room_targets))
@@ -542,28 +543,29 @@ impl QueryService {
             #[serde(default)]
             room_num: Option<String>,
         }
-        let dbnum = refno.refno().get_0();
-        let mut response = SUL_DB
-            .query(
-                "SELECT panel, room_num FROM room_result \
-                 WHERE dbnum = $dbnum AND result_version = $watermark.room_result_version \
-                 AND member = $member;",
-            )
-            .bind(("dbnum", dbnum))
-            .bind((
-                "watermark",
-                surrealdb::sql::Thing::from((
-                    "dbnum_watermark".to_owned(),
-                    surrealdb::sql::Id::Number(i64::from(dbnum)),
-                )),
-            ))
-            .bind(("member", refno.to_string()))
+        // A REFNO's first word is a project-local Ref0, not the database number.
+        // Resolve it through the MDB skeleton just like the tree HTTP handlers do;
+        // using `get_0()` here silently queried an unrelated dbnum and made every
+        // valid room membership look empty in plant-ui (for example Ref0 17496 is
+        // owned by dbnum 1112 in the AMS /ALL MDB).
+        let tree = self
+            .direct_tree
+            .get()
             .await
-            .and_then(|response| response.check())
-            .map_err(db_error)?;
-        let edges: Vec<RoomEdge> = response
-            .take(0)
-            .map_err(|error| QueryError::new("PARSE_ERROR", error))?;
+            .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?;
+        let dbnum = tree.dbnum_of(refno.refno()).ok_or_else(|| {
+            QueryError::new(
+                "NOT_FOUND",
+                format!(
+                    "ref0 {} is not declared by MDB {}",
+                    refno.refno().get_0(),
+                    tree.mdb()
+                ),
+            )
+        })?;
+        let edges = crate::data_interface::room_delta::read_member_compatible_on(
+            &SUL_DB, dbnum, &refno.to_string()).await
+            .map_err(|error| QueryError::new("DATABASE_ERROR", error.to_string()))?;
         let resident = crate::fast_model::room_resident::current_for_calculation().ok();
         let mut memberships = Vec::new();
         let mut panels = Vec::with_capacity(edges.len());
@@ -1000,8 +1002,12 @@ mod tests {
             assert!(body.contains("\"stale\""), "{body}");
             assert!(body.contains("\"publication_status\""), "{body}");
         }
-        assert!(room.contains("FROM room_result"), "{room}");
-        assert!(room.contains("room_result_version"), "{room}");
+        assert!(room.contains("room_delta::read_member_compatible_on"), "{room}");
+        assert!(room.contains("tree.dbnum_of(refno.refno())"), "{room}");
+        assert!(
+            !room.contains("let dbnum = refno.refno().get_0()"),
+            "ref0 is not a dbnum: {room}"
+        );
         assert!(!room.contains("<-room_relate"), "{room}");
         assert!(!room.contains("<-room_panel_relate"), "{room}");
         assert!(spatial.contains("\"unsupported\""));

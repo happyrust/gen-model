@@ -278,6 +278,9 @@ pub async fn persist_root_on(
     store: &ModelMemoryStore,
     root: RefNo,
 ) -> anyhow::Result<PersistedRows> {
+    // 逐根那条路也写 `inst_relate` / `tubi_relate`（`/model/ensure`、未退役的文件轮次），
+    // 它一动，合块那边的任务基线快照就不再等于库——作废，下一次重读。
+    invalidate_geometry_baseline();
     persist_root_in_chunks(
         target,
         store,
@@ -348,6 +351,626 @@ async fn persist_root_in_chunks(
         false,
     )
     .await
+}
+
+/// 一组最多装这么多根（[`persist_roots_batched`]）。一组是失败的赔付边界：组内任一块失败，
+/// 整组的根都没盖章、都算落库失败；组与组之间互不牵连。
+pub const BATCHED_PERSIST_ROOTS_PER_GROUP: usize = 512;
+
+/// 单条几何记录渲成语句之后的硬上限（与 [`persist_root_chunks_impl`] 同值）。
+const PUBLICATION_STATEMENT_HARD_CAP: usize = 8 * 1024 * 1024;
+
+/// 一次跨根合块落库的账（ADR-071）。
+#[derive(Debug, Clone, Default)]
+pub struct BatchedPersist {
+    /// 成功提交的行数账（介质随目标）。
+    pub rows: Option<PersistedRows>,
+    /// 没落进去的根与原因：所在组的任一块失败，整组的根都在这里。
+    pub failed: Vec<(RefNo, String)>,
+    /// 实际发出的组数。
+    pub groups: usize,
+}
+
+/// 库里既有的一条 e3d-model 几何身份及其祖先链（对账用，一库一次取回）。
+#[derive(Debug, serde::Deserialize)]
+struct ExistingGeometry {
+    geometry_id: GeometryId,
+    /// 祖先链；历史行可能没有（`NONE`），那样的行不归任何根、也不会被当陈旧行删。
+    #[serde(default)]
+    anc: Option<Vec<i64>>,
+}
+
+impl Clone for ExistingGeometry {
+    fn clone(&self) -> Self {
+        Self {
+            geometry_id: self.geometry_id.clone(),
+            anc: self.anc.clone(),
+        }
+    }
+}
+
+impl ExistingGeometry {
+    fn under(&self, packed_root: i64) -> bool {
+        self.anc
+            .as_deref()
+            .is_some_and(|anc| anc.contains(&packed_root))
+    }
+}
+
+/// 任务范围内的「库里现有几何身份」快照。
+///
+/// 对账读原先**每调一次 [`persist_roots_batched`] 就整库扫一遍**。7997 那一轮实测：68 组
+/// 累计读约 180 万行，单笔事务从头 400 ms 涨到尾 1,280 ms——写入行数一路没变，涨的全是这个读。
+/// 典型的 O(N²)：读的是「这个库**至今为止**的全部几何身份」，而写的人正是自己。
+///
+/// ADR-071 D1 说得明白：任务是这个 dbnum 唯一的写者，**它知道自己写了什么**。所以一个任务
+/// 读一次基线，之后每组落完把自己写的那部分就地更新进来——快照始终等于「现在再读一次会得到
+/// 的东西」，不是近似。
+///
+/// 作用域绑在**数据窗口**上（`active_data_window()`）：换窗即失效；窗口不在（`/model/ensure`
+/// 那类一根一调的路）就不缓存，照旧每次读。任一组落库失败 → 整份作废（那一组可能已经提交了
+/// 前几块，快照不再可信）。
+struct GeometryBaseline {
+    window: (u32, i32),
+    dbnums: BTreeSet<u32>,
+    rows: Vec<ExistingGeometry>,
+}
+
+static GEOMETRY_BASELINE: std::sync::Mutex<Option<GeometryBaseline>> =
+    std::sync::Mutex::new(None);
+
+fn geometry_baseline() -> std::sync::MutexGuard<'static, Option<GeometryBaseline>> {
+    GEOMETRY_BASELINE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// 别的写者动过 `inst_relate` / `tubi_relate` 之后调：快照不再等于库。
+pub(crate) fn invalidate_geometry_baseline() {
+    *geometry_baseline() = None;
+}
+
+/// 取这一轮的对账依据：命中窗口且覆盖了要的库就用内存那份，否则读一次并存下。
+async fn existing_geometry_for_window(
+    db: &Surreal<Any>,
+    dbnums: &BTreeSet<u32>,
+    window: Option<(u32, i32)>,
+) -> anyhow::Result<Vec<ExistingGeometry>> {
+    let Some(window) = window else {
+        return existing_geometry_of_dbnums_on(db, dbnums).await;
+    };
+    if let Some(cached) = geometry_baseline().as_ref()
+        && cached.window == window
+        && dbnums.is_subset(&cached.dbnums)
+    {
+        return Ok(cached.rows.clone());
+    }
+    let rows = existing_geometry_of_dbnums_on(db, dbnums).await?;
+    *geometry_baseline() = Some(GeometryBaseline {
+        window,
+        dbnums: dbnums.clone(),
+        rows: rows.clone(),
+    });
+    Ok(rows)
+}
+
+/// 一组落成之后把快照推到「刚写完」的状态：这些根名下的旧身份换成刚投影的那批。
+///
+/// 只对**做过对账**的根动手（`reconciliation_ready`）——没回执的根本来就不参与对账，
+/// 它在库里的行也没被这一组动过。
+fn advance_geometry_baseline(window: Option<(u32, i32)>, group: &[RootShare]) {
+    let Some(window) = window else {
+        return;
+    };
+    let mut baseline = geometry_baseline();
+    let Some(cached) = baseline.as_mut().filter(|cached| cached.window == window) else {
+        return;
+    };
+    for share in group.iter().filter(|share| share.reconciliation_ready()) {
+        let packed_root = packed_refno(share.root);
+        cached.rows.retain(|row| !row.under(packed_root));
+        cached
+            .rows
+            .extend(share.records.iter().map(|record| ExistingGeometry {
+                geometry_id: record.geometry_id.clone(),
+                anc: Some(record.ancestors.clone()),
+            }));
+    }
+}
+
+/// 一根在合块里的份：记录、回执、能不能拿它做对账。
+struct RootShare {
+    root: RefNo,
+    records: Vec<ProjectedGeometry>,
+    receipt: Option<RootReceipt>,
+}
+
+impl RootShare {
+    fn load(store: &ModelMemoryStore, root: RefNo) -> anyhow::Result<Self> {
+        let scope = ProjectionScope::Current;
+        let records = store.records_of_root(scope, root);
+        let receipt = store.receipt(scope, root);
+        if let Some(receipt) = receipt.as_ref() {
+            anyhow::ensure!(
+                receipt.geometry_count == records.len(),
+                "root {root} projection is incomplete: receipt expects {} geometries, store has {}",
+                receipt.geometry_count,
+                records.len()
+            );
+            let packed_root = packed_refno(root);
+            anyhow::ensure!(
+                records.iter().all(|record| {
+                    record.source_sesno == receipt.source_sesno
+                        && record.ancestors.contains(&packed_root)
+                }),
+                "root {root} projection contains records outside its receipt scope"
+            );
+        }
+        Ok(Self {
+            root,
+            records,
+            receipt,
+        })
+    }
+
+    /// 有回执才能拿投影当「全集」去对账；没有回执的根可能只是半份或刚恢复的视图
+    /// （与 [`persist_root_chunks_impl`] 的 `reconciliation_ready` 同一条规矩）。
+    fn reconciliation_ready(&self) -> bool {
+        self.receipt.is_some()
+    }
+}
+
+/// 库里这些 dbnum 名下、由 e3d-model 写过的全部几何身份，**一条查询**取回（两张表各一句）。
+/// 各根在客户端按祖先链分摊——比 [`projected_geometry_ids_on`] 每根一问少几千个往返。
+/// 只认带 `dbnum` 列的行：没有它的历史行由启动回填（`backfill_inst_relate_anc`）补上。
+async fn existing_geometry_of_dbnums_on(
+    db: &Surreal<Any>,
+    dbnums: &BTreeSet<u32>,
+) -> anyhow::Result<Vec<ExistingGeometry>> {
+    if dbnums.is_empty() {
+        return Ok(Vec::new());
+    }
+    let dbnums = dbnums
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut response = db
+        .query(format!(
+            "SELECT direct_model.geometry_id AS geometry_id, anc FROM inst_relate \
+             WHERE dbnum IN [{dbnums}] AND direct_model.source = 'e3d-model' \
+             AND direct_model.geometry_id != NONE;\
+             SELECT direct_model.geometry_id AS geometry_id, anc FROM tubi_relate \
+             WHERE dbnum IN [{dbnums}] AND direct_model.source = 'e3d-model' \
+             AND direct_model.geometry_id != NONE;"
+        ))
+        .await?
+        .check()?;
+    let mut rows: Vec<ExistingGeometry> = response.take(0)?;
+    rows.extend(response.take::<Vec<ExistingGeometry>>(1)?);
+    Ok(rows)
+}
+
+/// 多根一条的可见性栅栏（[`render_publication_fence`] 的批量形态）：`UPDATE a, b, c SET …`，
+/// 每条最多点名 `per_statement` 根。
+fn render_publication_fence_batch(roots: &[RefNo], per_statement: usize) -> String {
+    let mut statements = String::new();
+    for chunk in roots.chunks(per_statement.max(1)) {
+        let targets = chunk
+            .iter()
+            .map(|root| format!("type::thing('gen_root', {})", sql_string(&refno_key(*root))))
+            .collect::<Vec<_>>()
+            .join(", ");
+        statements.push_str(&format!(
+            "UPDATE {targets} SET publication_status='publishing', updated_at=time::now();\n"
+        ));
+    }
+    statements
+}
+
+/// ADR-071 D1 / D2 / D11：一个 dbnum 任务把本轮全部成功根的模型行**跨根合块**、同步写进库。
+///
+/// 与 [`persist_root_on`] 同一套行与同一套纪律——按记录 id 先删后插、分支重置与对账删除在首块、
+/// 回执在末块（之前的块用栅栏标出中间态）、`spatial_epoch` 随动几何的块 +1、房间效果清边在前 /
+/// 排重算在后、混源守卫在写之前与盖章同事务各发一次——区别只有三处：
+///
+/// 1. 块按 `tx_limits` 的字节上限切、**跨根**装满，不再一根一笔（7997 六千多根不再是六千多笔事务）；
+/// 2. 对账读一次：整库 e3d-model 几何身份一条查询取回，各根在客户端按祖先链分摊，不再每根一问；
+/// 3. 没有 per-root CAS / ACK / 队列：同一 dbnum 只有本任务一个写者（ADR-071 S1），语句渲好就发（D11），不落盘。
+///
+/// 一组 ≤ [`BATCHED_PERSIST_ROOTS_PER_GROUP`] 根；一组任一块失败，该组全部根算落库失败（回执没盖、
+/// 栅栏留着，窗口规划器眼里仍未发布，下一次任务重生成），其余组照常。嵌套根共有的记录在一组里
+/// 只渲一次（`record_id` 去重），对账仍按每根自己的全集算。
+pub async fn persist_roots_batched(
+    target: PersistTarget<'_>,
+    store: &ModelMemoryStore,
+    dbnum: u32,
+    roots: &[RefNo],
+    room_policy: RoomEffectPolicy,
+) -> anyhow::Result<BatchedPersist> {
+    let limits = crate::data_interface::tx_limits::data_tx_limits();
+    persist_roots_batched_with_chunk_bytes(
+        target,
+        store,
+        dbnum,
+        roots,
+        room_policy,
+        limits.max_bytes.max(64 * 1024),
+    )
+    .await
+}
+
+/// [`persist_roots_batched`] 的显式块字节上限形态（测试把它压到 1 让每条记录自成一块）。
+pub(crate) async fn persist_roots_batched_with_chunk_bytes(
+    target: PersistTarget<'_>,
+    store: &ModelMemoryStore,
+    dbnum: u32,
+    roots: &[RefNo],
+    room_policy: RoomEffectPolicy,
+    chunk_bytes: usize,
+) -> anyhow::Result<BatchedPersist> {
+    let mut out = BatchedPersist::default();
+    if roots.is_empty() {
+        return Ok(out);
+    }
+    for root in roots {
+        anyhow::ensure!(
+            root.dbno() == dbnum,
+            "root {root} belongs to dbnum {}, not the batch's dbnum {dbnum}",
+            root.dbno()
+        );
+    }
+    let db = target.db;
+    let room_incremental = crate::options::room_incremental();
+    let file_round = crate::data_interface::batch_worker::active_data_window();
+
+    // 去重后的根序（同一根点两次只落一次）。
+    let mut seen = BTreeSet::new();
+    let roots = roots
+        .iter()
+        .copied()
+        .filter(|root| seen.insert(packed_refno(*root)))
+        .collect::<Vec<_>>();
+    let shares = roots
+        .iter()
+        .map(|root| RootShare::load(store, *root))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+
+    // 对账读一次（只有有回执的根才拿得起自己的全集）。行上的 `dbnum` 是投影记录写下的那个，
+    // 与根的 `dbno()` 在生产上同值；两者都问，夹具或历史行的口径差异不会让陈旧行漏网。
+    let existing = if shares.iter().any(RootShare::reconciliation_ready) {
+        let mut dbnums = BTreeSet::from([dbnum]);
+        dbnums.extend(
+            shares
+                .iter()
+                .flat_map(|share| share.records.iter().map(|record| record.dbnum)),
+        );
+        existing_geometry_for_window(db, &dbnums, file_round).await?
+    } else {
+        Vec::new()
+    };
+
+    let mut total = PersistedRows::none(target.medium);
+    let mut refresh_all = Vec::<aios_core::RefnoEnum>::new();
+    let mut cleared_all = Vec::<aios_core::RefnoEnum>::new();
+
+    for group in shares.chunks(BATCHED_PERSIST_ROOTS_PER_GROUP) {
+        out.groups += 1;
+        match persist_group(
+            db,
+            group,
+            &existing,
+            chunk_bytes,
+            room_policy,
+            room_incremental,
+            file_round,
+        )
+        .await
+        {
+            Ok(outcome) => {
+                total.upserted += outcome.upserted;
+                total.removed += outcome.removed;
+                total.receipts += outcome.receipts;
+                total.commits += outcome.commits;
+                refresh_all.extend(outcome.refresh);
+                cleared_all.extend(outcome.cleared);
+                advance_geometry_baseline(file_round, group);
+            }
+            Err(error) => {
+                // 这一组可能已经提交了前几块，快照不再等于库：整份作废，下一次重读。
+                invalidate_geometry_baseline();
+                let text = format!("{error:#}");
+                out.failed
+                    .extend(group.iter().map(|share| (share.root, text.clone())));
+            }
+        }
+    }
+
+    // 行已经提交，进程内空间树还停在旧盒上——收敛在事务之外（读的是已提交指针）。
+    if target.converge_spatial && total.commits > 0 && file_round.is_none() {
+        crate::fast_model::aabb_tree::converge_tree_after_persist(&refresh_all, &cleared_all)
+            .await
+            .with_context(|| format!("落库后收敛空间树（dbnum {dbnum}，{} 根）", roots.len()))?;
+    }
+    out.rows = Some(total);
+    Ok(out)
+}
+
+/// 一组落完的账：行数 + 提交之后要收敛进空间树的两份名单。
+struct GroupOutcome {
+    upserted: usize,
+    removed: usize,
+    receipts: usize,
+    commits: usize,
+    refresh: Vec<aios_core::RefnoEnum>,
+    cleared: Vec<aios_core::RefnoEnum>,
+}
+
+/// 一组根：渲块 → 逐块提交。任一块失败即返回 Err，调用方把整组记成失败。
+async fn persist_group(
+    db: &Surreal<Any>,
+    group: &[RootShare],
+    existing: &[ExistingGeometry],
+    chunk_bytes: usize,
+    room_policy: RoomEffectPolicy,
+    room_incremental: bool,
+    file_round: Option<(u32, i32)>,
+) -> anyhow::Result<GroupOutcome> {
+    // 组内记录按 record_id 去重（嵌套根共有的记录只渲一次），保持根序。
+    let mut rendered_ids = BTreeSet::new();
+    let mut records = Vec::new();
+    for share in group {
+        for record in &share.records {
+            if rendered_ids.insert(record.record_id.clone()) {
+                records.push(record.clone());
+            }
+        }
+    }
+
+    // 对账：每根自己的全集 vs 库里挂在它祖先链下的身份；库里有、存储里没有的就是陈旧行。
+    let mut removals = Vec::<String>::new();
+    let mut removed_ids = BTreeSet::<String>::new();
+    let mut removed_geometry = Vec::<GeometryId>::new();
+    let mut branches = BTreeSet::<(u32, u32)>::new();
+    for share in group.iter().filter(|share| share.reconciliation_ready()) {
+        let packed_root = packed_refno(share.root);
+        let projected = share
+            .records
+            .iter()
+            .map(|record| record.record_id.as_str())
+            .collect::<BTreeSet<_>>();
+        for record in share.records.iter().filter(|record| record.tube.is_some()) {
+            branches.insert((record.source_refno.word0, record.source_refno.word1));
+        }
+        for row in existing.iter().filter(|row| row.under(packed_root)) {
+            let source = geometry_source_refno(&row.geometry_id)?;
+            let record_id = geometry_record_id(&row.geometry_id, source);
+            if projected.contains(record_id.as_str()) || !removed_ids.insert(record_id.clone()) {
+                continue;
+            }
+            if matches!(row.geometry_id, GeometryId::ImpliedTube { .. }) {
+                branches.insert((source.word0, source.word1));
+            }
+            removals.push(record_id);
+            removed_geometry.push(row.geometry_id.clone());
+        }
+    }
+
+    let effects = room_publication_effects(
+        records.iter().map(|record| {
+            (
+                &record.geometry_id,
+                record.source_refno,
+                record.noun.as_str(),
+            )
+        }),
+        &removed_geometry,
+        &BTreeSet::new(),
+    )?;
+    let clearing = RoomPublicationEffects {
+        cleared: effects.cleared.clone(),
+        recalc: Vec::new(),
+    };
+    let recalculation = RoomPublicationEffects {
+        cleared: Vec::new(),
+        recalc: effects.recalc.clone(),
+    };
+    let deferred_refresh = records
+        .iter()
+        .filter(|record| record.tube.is_none())
+        .map(|record| refno_from_e3d(record.source_refno))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    // 几何块：按字节装满、超限劈半；管身槽位跨块延续。
+    let mut geometry_chunks = Vec::<String>::new();
+    let mut tube_slots = BTreeMap::<(u32, u32), usize>::new();
+    let mut pending =
+        std::collections::VecDeque::from_iter((!records.is_empty()).then_some(records.as_slice()));
+    while let Some(chunk) = pending.pop_front() {
+        let mut slots = tube_slots.clone();
+        let rendered = render_chunk(chunk, WriteMode::Incremental, &mut slots)?;
+        if rendered.len() > chunk_bytes && chunk.len() > 1 {
+            let (left, right) = chunk.split_at(chunk.len() / 2);
+            pending.push_front(right);
+            pending.push_front(left);
+            continue;
+        }
+        anyhow::ensure!(
+            rendered.len() <= PUBLICATION_STATEMENT_HARD_CAP,
+            "single geometry exceeds publication byte budget"
+        );
+        tube_slots = slots;
+        geometry_chunks.push(rendered);
+    }
+
+    // 回执块：同一份 ModelTarget 只 `LET` 一次，几百根共用；按字节切成若干块。
+    let receipted = group
+        .iter()
+        .filter_map(|share| share.receipt.as_ref().map(|receipt| (share.root, receipt)))
+        .collect::<Vec<_>>();
+    let mut receipt_chunks = Vec::<String>::new();
+    {
+        let mut targets = BTreeMap::<String, usize>::new();
+        let mut header = String::new();
+        let mut body = String::new();
+        let flush = |header: &mut String, body: &mut String, out: &mut Vec<String>| {
+            if !body.is_empty() {
+                out.push(format!("{header}{body}"));
+            }
+            header.clear();
+            body.clear();
+        };
+        for (root, receipt) in &receipted {
+            let literal = receipt_model_target_literal(receipt)?;
+            let expression = if literal == "NONE" {
+                literal
+            } else {
+                let next = targets.len();
+                let index = *targets.entry(literal.clone()).or_insert(next);
+                if index == next {
+                    header.push_str(&format!("LET $mt{index} = {literal};\n"));
+                }
+                format!("$mt{index}")
+            };
+            body.push_str(&render_publication_guard(*root, receipt));
+            body.push_str(&render_receipt_with_target(
+                *root,
+                receipt,
+                None,
+                &expression,
+            ));
+            if header.len() + body.len() > chunk_bytes {
+                flush(&mut header, &mut body, &mut receipt_chunks);
+                targets.clear();
+            }
+        }
+        flush(&mut header, &mut body, &mut receipt_chunks);
+    }
+
+    let chunk_count = geometry_chunks.len() + receipt_chunks.len();
+    let has_preamble = !removals.is_empty() || !branches.is_empty() || !clearing.cleared.is_empty();
+    let statement_count = chunk_count.max(usize::from(has_preamble));
+    if statement_count == 0 {
+        return Ok(GroupOutcome {
+            upserted: 0,
+            removed: 0,
+            receipts: 0,
+            commits: 0,
+            refresh: Vec::new(),
+            cleared: Vec::new(),
+        });
+    }
+    let fenced = statement_count > 1 && !receipted.is_empty();
+    let fence_roots = receipted.iter().map(|(root, _)| *root).collect::<Vec<_>>();
+    // 回执块自带守卫（check-then-write 同事务）；首块若本身就是回执块，不再重复发一遍。
+    let first_is_receipt_chunk = geometry_chunks.is_empty() && !receipt_chunks.is_empty();
+
+    let mut commits = 0usize;
+    for index in 0..statement_count {
+        let mut statements = String::new();
+        let is_first = index == 0;
+        let is_last = index + 1 == statement_count;
+        if is_first {
+            // 写任何东西之前先过混源守卫；多块时把中间态标在凭证行上。
+            if !first_is_receipt_chunk {
+                for (root, receipt) in &receipted {
+                    statements.push_str(&render_publication_guard(*root, receipt));
+                }
+            }
+            if fenced {
+                statements.push_str(&render_publication_fence_batch(&fence_roots, 500));
+            }
+            for &(word0, word1) in &branches {
+                append_tube_branch_reset(&mut statements, RefNo::new(word0, word1));
+            }
+            append_geometry_removals(
+                &mut statements,
+                &removals.iter().map(String::as_str).collect::<Vec<_>>(),
+            );
+            if file_round.is_none() {
+                statements.push_str(&render_room_publication_effects(
+                    &clearing,
+                    room_policy,
+                    room_incremental,
+                ));
+            }
+        }
+        let touches_geometry;
+        if index < geometry_chunks.len() {
+            statements.push_str(&geometry_chunks[index]);
+            touches_geometry = true;
+        } else {
+            touches_geometry = is_first && (!removals.is_empty() || !branches.is_empty());
+            if let Some(receipt_chunk) = receipt_chunks.get(index - geometry_chunks.len()) {
+                statements.push_str(receipt_chunk);
+            }
+        }
+        if is_last {
+            statements.push_str(&render_room_publication_effects(
+                &recalculation,
+                room_policy,
+                room_incremental,
+            ));
+            if let Some((dbnum, round_end_sesno)) = file_round {
+                let refresh = deferred_refresh
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                let removed = effects
+                    .cleared
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                crate::data_interface::task_effects::record(
+                    dbnum,
+                    round_end_sesno,
+                    &refresh,
+                    &removed,
+                    &removed,
+                );
+                statements.push_str(
+                    &crate::data_interface::side_effect_pending::SideEffectCompensator::render_file_spatial_reconcile_upsert(
+                        dbnum,
+                        round_end_sesno,
+                        &refresh,
+                        &removed,
+                        &removed,
+                    )?,
+                );
+                statements.push('\n');
+            }
+        }
+        if touches_geometry {
+            statements.push_str(&crate::fast_model::aabb_tree::render_spatial_epoch_bump());
+            statements.push('\n');
+        }
+        if statements.is_empty() {
+            continue;
+        }
+        db.query(publication_transaction(&statements))
+            .await
+            .map_err(anyhow::Error::from)
+            .and_then(check_publication_response)
+            .with_context(|| {
+                format!(
+                    "persist {} projected root(s)（第 {} / {statement_count} 块）",
+                    group.len(),
+                    index + 1
+                )
+            })?;
+        commits += 1;
+    }
+
+    Ok(GroupOutcome {
+        upserted: records.len(),
+        removed: removals.len(),
+        receipts: receipted.len(),
+        commits,
+        refresh: deferred_refresh,
+        cleared: effects.cleared,
+    })
 }
 
 /// Consume an immutable journal payload. This store is private to this call;
@@ -437,9 +1060,7 @@ pub async fn prepare_frozen_profiled_for_baseline_on(
     );
     let plan = crate::data_interface::model_publish_queue::PreparedRootPublication {
         version: crate::data_interface::model_publish_queue::FORMAT_VERSION,
-        envelope_hash: crate::data_interface::model_publish_queue::digest(&serde_json::to_vec(
-            envelope,
-        )?),
+        envelope_hash: crate::data_interface::digest::digest(&serde_json::to_vec(envelope)?),
         chunks: prepared.chunks,
         memory_removals: prepared.memory_removals,
         memory_tube_branch_resets: prepared.memory_tube_branch_resets,
@@ -469,8 +1090,7 @@ pub async fn persist_prepared_frozen_on(
         "invalid frozen publication plan"
     );
     anyhow::ensure!(
-        plan.envelope_hash
-            == crate::data_interface::model_publish_queue::digest(&serde_json::to_vec(envelope)?),
+        plan.envelope_hash == crate::data_interface::digest::digest(&serde_json::to_vec(envelope)?),
         "prepared publication belongs to a different envelope"
     );
     let hash = plan.hash()?;
@@ -551,9 +1171,7 @@ pub(crate) async fn persist_prepared_frozen_batch_on(
         );
         anyhow::ensure!(
             plan.envelope_hash
-                == crate::data_interface::model_publish_queue::digest(&serde_json::to_vec(
-                    envelope
-                )?),
+                == crate::data_interface::digest::digest(&serde_json::to_vec(envelope)?),
             "prepared publication belongs to a different envelope"
         );
         let hash = plan.hash()?;
@@ -988,6 +1606,13 @@ async fn persist_root_chunks_impl(
                         )?,
                     );
                 } else {
+                    crate::data_interface::task_effects::record(
+                        dbnum,
+                        round_end_sesno,
+                        &refresh,
+                        &removed,
+                        &removed,
+                    );
                     statements.push_str(&crate::data_interface::side_effect_pending::SideEffectCompensator::render_file_spatial_reconcile_upsert(
                         dbnum,
                         round_end_sesno,
@@ -1107,9 +1732,8 @@ fn render_frozen_plan_chunk(
     statements: &str,
 ) -> String {
     let last = chunk + 1 == count;
-    let chunk_hash = crate::data_interface::model_publish_queue::digest(statements.as_bytes());
-    let source_hash =
-        crate::data_interface::model_publish_queue::digest(envelope.source_token.as_bytes());
+    let chunk_hash = crate::data_interface::digest::digest(statements.as_bytes());
+    let source_hash = crate::data_interface::digest::digest(envelope.source_token.as_bytes());
     let dbnum = envelope.dbnum;
     let incarnation = sql_string(&envelope.database_incarnation);
     let root_id = sql_string(&refno_key(
@@ -1643,6 +2267,45 @@ fn render_receipt_version(
     receipt: &RootReceipt,
     frozen: Option<(u64, u32)>,
 ) -> anyhow::Result<String> {
+    let model_target = receipt_model_target_literal(receipt)?;
+    // 这份清单是整个 run 的（设计库 + 目录库的身份、会话、摘要），与根无关，而两列恒等。
+    // 写成字面量就是每根把同一串发两遍：AMS 7997 那轮一份 5 952 字节、6 769 根合计 80.5 MB，
+    // 占整批发布 SQL 的 26%。绑一次再引用两次，库里落的东西一字不变。
+    let mut statements = String::new();
+    let model_target = if model_target == "NONE" {
+        model_target
+    } else {
+        statements.push_str(&format!("LET $mt = {model_target};\n"));
+        "$mt".to_string()
+    };
+    statements.push_str(&render_receipt_with_target(
+        root,
+        receipt,
+        frozen,
+        &model_target,
+    ));
+    Ok(statements)
+}
+
+/// 回执里 `ModelTarget` 的 SurrealQL 字面量；没有目标就是 `NONE`。
+fn receipt_model_target_literal(receipt: &RootReceipt) -> anyhow::Result<String> {
+    Ok(receipt
+        .model_target
+        .as_ref()
+        .map(serde_json::to_value)
+        .transpose()?
+        .map(|value| sql_value(&value))
+        .unwrap_or_else(|| "NONE".to_string()))
+}
+
+/// 回执本体：`model_target` 由调用方给表达式（`NONE`、字面量或一个已 `LET` 好的变量）。
+/// 跨根合块（[`persist_roots_batched`]）把同一份清单绑一次、几百根共用一个变量，就是靠这一层。
+fn render_receipt_with_target(
+    root: RefNo,
+    receipt: &RootReceipt,
+    frozen: Option<(u64, u32)>,
+    model_target: &str,
+) -> String {
     let (revision, published_target) = frozen
         .map(|(revision, dbnum)| {
             (
@@ -1655,23 +2318,7 @@ fn render_receipt_version(
         })
         .unwrap_or_else(|| ("desired_revision".into(), "desired_target".into()));
     let root_id = sql_string(&refno_key(root));
-    let model_target = receipt
-        .model_target
-        .as_ref()
-        .map(serde_json::to_value)
-        .transpose()?
-        .map(|value| sql_value(&value))
-        .unwrap_or_else(|| "NONE".to_string());
-    // 这份清单是整个 run 的（设计库 + 目录库的身份、会话、摘要），与根无关，而两列恒等。
-    // 写成字面量就是每根把同一串发两遍：AMS 7997 那轮一份 5 952 字节、6 769 根合计 80.5 MB，
-    // 占整批发布 SQL 的 26%。绑一次再引用两次，库里落的东西一字不变。
     let mut statements = String::new();
-    let model_target = if model_target == "NONE" {
-        model_target
-    } else {
-        statements.push_str(&format!("LET $mt = {model_target};\n"));
-        "$mt".to_string()
-    };
     statements.push_str(&format!(
         "UPDATE type::thing('gen_root', {root_id}) SET \
          status='Generated', publication_status='ready', \
@@ -1685,7 +2332,7 @@ fn render_receipt_version(
         sql_string(&receipt.published_via),
     ));
     append_root_dependency_receipt(&mut statements, root, receipt.model_target.as_ref());
-    Ok(statements)
+    statements
 }
 
 /// 多块发布期间盖在 `gen_root` 上的可见性栅栏（P5）。
@@ -1915,6 +2562,9 @@ mod tests {
     use crate::fast_model::model_memory_store::{ProjectedTube, ProjectionCommit};
 
     const BRANCH: RefNo = RefNo::new(24383, 73948);
+    /// 夹具根 `24383/*` 按 word0 解出的库号（`RefNo::dbno`）；记录上写的 `dbnum: 7997` 是
+    /// 另一回事，跨根合块的对账两个都问。
+    const BATCH_DBNUM: u32 = RefNo::new(24383, 1).dbno();
     /// 派生几何的记录 id 就是身份摘要，形状如此（真值是 64 位，夹具截短）。
     const TUBE_A: &str = "a1b2c3d4";
     const TUBE_B: &str = "e5f60718";
@@ -2448,7 +3098,7 @@ mod tests {
             generator_fingerprint: "generator".into(),
             tessellation_profile: "profile".into(),
         };
-        let target_hash = crate::data_interface::model_publish_queue::digest(
+        let target_hash = crate::data_interface::digest::digest(
             &serde_json::to_vec(&Some(model_target.clone())).unwrap(),
         );
         let mut record = baked_record();
@@ -2879,6 +3529,312 @@ mod tests {
                 .is_empty(),
             "夹具里没有 gen_root 行，UPDATE 是空操作——这一条只要求它不报错"
         );
+    }
+
+    async fn seed_gen_roots(db: &Surreal<Any>, roots: &[RefNo]) {
+        for root in roots {
+            db.query(format!(
+                "CREATE type::thing('gen_root','{}_{}') SET dbnum=7997, status='Generated', \
+                 publication_status='stale', desired_revision=2, published_revision=1;",
+                root.word0, root.word1
+            ))
+            .await
+            .expect("seed gen_root")
+            .check()
+            .expect("seed gen_root statements");
+        }
+    }
+
+    async fn publication_status_of(db: &Surreal<Any>, root: RefNo) -> String {
+        let mut response = db
+            .query(format!(
+                "SELECT VALUE publication_status FROM type::thing('gen_root','{}_{}');",
+                root.word0, root.word1
+            ))
+            .await
+            .expect("publication status")
+            .check()
+            .expect("publication status statement");
+        response
+            .take::<Vec<String>>(0)
+            .expect("publication status rows")
+            .into_iter()
+            .next()
+            .unwrap_or_default()
+    }
+
+    /// ADR-071 D2：一批根的行跨根合块——嵌套根与祖先根共有的记录只渲一次、每根各自盖章、
+    /// 全部在几笔事务里落完，而不是一根一笔。
+    #[tokio::test]
+    async fn batched_persist_shares_chunks_across_roots_and_stamps_every_receipt() {
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        let ancestor_root = RefNo::new(24383, 1);
+        seed_gen_roots(&db, &[ancestor_root, NESTED_ROOT]).await;
+
+        let store = ModelMemoryStore::default();
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![baked_record(), nested_root_record(), tube_record(0, TUBE_A)],
+                receipt: Some(test_receipt(ancestor_root, 3)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                receipt: Some(test_receipt(NESTED_ROOT, 1)),
+                ..ProjectionCommit::default()
+            }],
+        );
+
+        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let batched = persist_roots_batched(
+            target,
+            &store,
+            BATCH_DBNUM,
+            &[ancestor_root, NESTED_ROOT],
+            RoomEffectPolicy::Directed,
+        )
+        .await
+        .expect("batched persist");
+        assert!(batched.failed.is_empty(), "{:?}", batched.failed);
+        assert_eq!(batched.groups, 1);
+        let rows = batched.rows.expect("rows");
+        assert_eq!(rows.medium, PersistMedium::EmbeddedMem);
+        assert_eq!(rows.upserted, 3, "嵌套根共有的那条记录只渲一次");
+        assert_eq!(rows.removed, 0);
+        assert_eq!(rows.receipts, 2);
+        assert_eq!(rows.commits, 2, "三条记录一块几何 + 一块回执");
+        assert_eq!(count(&db, "inst_relate").await, 2);
+        assert_eq!(count(&db, "tubi_relate").await, 1);
+        assert_eq!(publication_status_of(&db, ancestor_root).await, "ready");
+        assert_eq!(publication_status_of(&db, NESTED_ROOT).await, "ready");
+    }
+
+    /// 对账只读一次库：库里挂在根名下、存储里已经没有的几何在下一批里被删掉，
+    /// 上一轮的管身随分支重置一起清。
+    #[tokio::test]
+    async fn batched_persist_reconciles_stale_rows_from_one_database_read() {
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        let root = RefNo::new(24383, 1);
+        seed_gen_roots(&db, &[root]).await;
+
+        let store = ModelMemoryStore::default();
+        let stale = ProjectedGeometry {
+            record_id: "24383_9999".into(),
+            geometry_id: GeometryId::Element {
+                refno: "24383/9999".into(),
+            },
+            source_refno: RefNo::new(24383, 9999),
+            ..baked_record()
+        };
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![baked_record(), stale.clone(), tube_record(0, TUBE_A)],
+                receipt: Some(test_receipt(root, 3)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let first = persist_roots_batched(
+            target,
+            &store,
+            BATCH_DBNUM,
+            &[root],
+            RoomEffectPolicy::Directed,
+        )
+        .await
+        .expect("first batch");
+        assert!(first.failed.is_empty());
+        assert_eq!(first.rows.expect("rows").upserted, 3);
+        assert_eq!(count(&db, "inst_relate").await, 2);
+        assert_eq!(count(&db, "tubi_relate").await, 1);
+
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                removals: vec![stale.record_id.clone()],
+                tube_branch_resets: vec![BRANCH],
+                receipt: Some(test_receipt(root, 1)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        let second = persist_roots_batched(
+            target,
+            &store,
+            BATCH_DBNUM,
+            &[root],
+            RoomEffectPolicy::Directed,
+        )
+        .await
+        .expect("second batch");
+        assert!(second.failed.is_empty());
+        let rows = second.rows.expect("rows");
+        assert_eq!(rows.upserted, 1);
+        assert_eq!(rows.removed, 2, "陈旧元素与上一轮的管身都要对账掉");
+        assert_eq!(count(&db, "inst_relate").await, 1);
+        assert_eq!(count(&db, "tubi_relate").await, 0);
+        assert_eq!(publication_status_of(&db, root).await, "ready");
+    }
+
+    /// 同一个数据窗口里连着落两批：第二批吃的是**内存里的基线快照**（对账读一个任务只做一次，
+    /// 见 [`GeometryBaseline`]），对账结果必须与每批都重读一遍完全一样。
+    ///
+    /// 这一条钉的是 2026-09-10 那次 O(N²) 修复：7997 实测 68 组累计读 180 万行、单笔事务从
+    /// 400 ms 涨到 1,280 ms。快照要是没跟着任务自己的写更新，陈旧行就会漏删——那是数据错，
+    /// 不是慢。
+    #[tokio::test]
+    async fn a_task_reads_the_reconciliation_baseline_once_and_still_clears_stale_rows() {
+        /// 同一个窗口里连落两批；`refetch = true` 时在第二批之前把快照丢掉（等价于旧行为，
+        /// 每批都重读一次库），`false` 时吃上一批就地更新出来的快照。两者的终态必须一样。
+        async fn two_batches(refetch: bool) -> (usize, i64, i64) {
+            let db = surreal_mem().await;
+            seed_pe(&db).await;
+            let root = RefNo::new(24383, 1);
+            seed_gen_roots(&db, &[root]).await;
+            invalidate_geometry_baseline();
+
+            let store = ModelMemoryStore::default();
+            let stale = ProjectedGeometry {
+                record_id: "24383_9999".into(),
+                geometry_id: GeometryId::Element {
+                    refno: "24383/9999".into(),
+                },
+                source_refno: RefNo::new(24383, 9999),
+                ..baked_record()
+            };
+            let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+
+            crate::data_interface::batch_worker::with_model_publication_window(
+                BATCH_DBNUM,
+                7,
+                "{}",
+                async {
+                    store.commit(
+                        ProjectionScope::Current,
+                        vec![ProjectionCommit {
+                            upserts: vec![baked_record(), stale.clone(), tube_record(0, TUBE_A)],
+                            receipt: Some(test_receipt(root, 3)),
+                            ..ProjectionCommit::default()
+                        }],
+                    );
+                    persist_roots_batched(
+                        target,
+                        &store,
+                        BATCH_DBNUM,
+                        &[root],
+                        RoomEffectPolicy::Directed,
+                    )
+                    .await
+                    .expect("first batch");
+
+                    store.commit(
+                        ProjectionScope::Current,
+                        vec![ProjectionCommit {
+                            removals: vec![stale.record_id.clone()],
+                            tube_branch_resets: vec![BRANCH],
+                            receipt: Some(test_receipt(root, 1)),
+                            ..ProjectionCommit::default()
+                        }],
+                    );
+                    if refetch {
+                        invalidate_geometry_baseline();
+                    }
+                    let second = persist_roots_batched(
+                        target,
+                        &store,
+                        BATCH_DBNUM,
+                        &[root],
+                        RoomEffectPolicy::Directed,
+                    )
+                    .await
+                    .expect("second batch");
+                    (
+                        second.rows.expect("rows").removed,
+                        count(&db, "inst_relate").await,
+                        count(&db, "tubi_relate").await,
+                    )
+                },
+            )
+            .await
+        }
+
+        let cached = two_batches(false).await;
+        let refetched = two_batches(true).await;
+        invalidate_geometry_baseline();
+        assert_eq!(
+            cached, refetched,
+            "对账基线收成一个任务读一次之后，终态必须与每批都重读一遍完全一样\
+             （左：吃内存快照；右：每批重读）"
+        );
+    }
+
+    /// 块按字节切、跨块延续管身槽位；多块时先盖栅栏、回执最后解除。
+    #[tokio::test]
+    async fn batched_persist_splits_by_bytes_keeps_tube_slots_and_lifts_the_fence_last() {
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        let root = RefNo::new(24383, 1);
+        seed_gen_roots(&db, &[root]).await;
+
+        let store = ModelMemoryStore::default();
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![
+                    baked_record(),
+                    tube_record(0, TUBE_A),
+                    tube_record(0, TUBE_B),
+                ],
+                receipt: Some(test_receipt(root, 3)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let batched = persist_roots_batched_with_chunk_bytes(
+            target,
+            &store,
+            BATCH_DBNUM,
+            &[root],
+            RoomEffectPolicy::Directed,
+            1,
+        )
+        .await
+        .expect("batched persist");
+        assert!(batched.failed.is_empty(), "{:?}", batched.failed);
+        let rows = batched.rows.expect("rows");
+        assert_eq!(rows.upserted, 3);
+        assert_eq!(rows.commits, 4, "字节上限 1：三块几何 + 一块回执");
+        assert_eq!(count(&db, "inst_relate").await, 1);
+        assert_eq!(
+            count(&db, "tubi_relate").await,
+            2,
+            "同分支两段分在两块里，前一块的那段不能被后一块的重置删掉"
+        );
+        assert_eq!(publication_status_of(&db, root).await, "ready");
+    }
+
+    /// 一批只属于一个 dbnum（任务是隔离单元）；混进别的库的根整批拒收、一行不写。
+    #[tokio::test]
+    async fn batched_persist_refuses_roots_of_another_dbnum() {
+        let db = surreal_mem().await;
+        let store = ModelMemoryStore::default();
+        let target = PersistTarget::new(&db, PersistMedium::EmbeddedMem);
+        let error = persist_roots_batched(
+            target,
+            &store,
+            BATCH_DBNUM,
+            &[RefNo::new(24383, 1), RefNo::new(1, 1)],
+            RoomEffectPolicy::Directed,
+        )
+        .await
+        .expect_err("foreign root must be refused");
+        assert!(error.to_string().contains("dbnum"), "{error}");
+        assert_eq!(count(&db, "inst_relate").await, 0);
     }
 
     /// PDMS 的文本不许从字符串字面量里跑出来。`noun` 是库里读回来的，四字母代码撞上

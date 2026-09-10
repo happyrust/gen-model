@@ -102,7 +102,7 @@ impl ModelRefreshPolicy {
     }
 
     pub(crate) async fn generate_roots_report(
-        mgr: &AiosDBManager,
+        _mgr: &AiosDBManager,
         roots: &[String],
     ) -> anyhow::Result<TargetedGenerationReport> {
         if roots.is_empty() {
@@ -134,25 +134,8 @@ impl ModelRefreshPolicy {
         let failure_policy =
             crate::data_interface::geom_error::GeometryFailurePolicy::BestEffortFallback;
         crate::data_interface::batch_worker::set_active_task_stage("model_generate");
-        if let Some((round_dbnum, round_end)) =
-            crate::data_interface::batch_worker::active_data_window()
-            && round_dbnum == dbnum
-            && crate::data_interface::model_publish_queue::wait_for_task_root_acks(
-                mgr,
-                dbnum,
-                round_end.max(0) as u32,
-                roots,
-            )
-            .await?
-        {
-            return Ok(TargetedGenerationReport {
-                completed: roots.to_vec(),
-                failures: Vec::new(),
-            });
-        }
-        if !memory_only {
-            crate::data_interface::model_publish_queue::wait_for_dbnum(dbnum).await;
-        }
+        // ADR-071 D1：没有初始化 run、不等 ACK、不等别的写者——同一 dbnum 只有本任务一个写者，
+        // 生成完就地把行写进库。冻结源在手（任务窗口内）就钉它那一版文件，否则取文件最新。
         let service = match crate::data_interface::batch_worker::active_frozen_source()? {
             Some(source) => {
                 anyhow::ensure!(
@@ -162,16 +145,7 @@ impl ModelRefreshPolicy {
                 );
                 E3dModelService::from_frozen_source(&source).await?
             }
-            // Q9：有初始化 run 在飞就钉它那一版文件——按需投影与 run 稍后发布的行同版，
-            // 翻面时 `commit_prepared_frozen_projection` 覆盖进来零差异；没有 run 取文件最新。
-            None => match crate::data_interface::model_read_route::memory_only_scope()
-                .and_then(crate::data_interface::model_publish_queue::initialization_source)
-            {
-                Some(source) if source.dbnum() as u32 == dbnum => {
-                    E3dModelService::from_frozen_source(&source).await?
-                }
-                _ => E3dModelService::from_current().await?,
-            },
+            None => E3dModelService::from_current().await?,
         };
         let persisted = service
             .generate_and_persist_roots(dbnum, roots, failure_policy)
@@ -231,10 +205,12 @@ impl ModelRefreshPolicy {
             } else {
                 None
             };
-            // 生成只写进程内投影（ADR-057：模型面不认识库），落库是这一步。一根一个事务，
-            // 落不进去的那根算它自己失败、进重试账——投影在内存里是对的，但 Plant UI 看不见
-            // 的东西不能算完成。
+            // 生成只写进程内投影（ADR-057：模型面不认识库），落库是这一步。ADR-071 D2：本批
+            // 全部根的行**跨根合块**、一块一笔事务同步写进库（`persist_roots_batched`），不再一根
+            // 一笔、不登记进文件轮次等别人刷、不等 ACK；落不进去的那些根算失败——投影在内存里
+            // 是对的，但 Plant UI 看不见的东西不能算完成。
             let mut failures = Vec::new();
+            let mut publishable: Vec<(String, e3d_io::refno::RefNo)> = Vec::new();
             for root in roots {
                 let refno = crate::fast_model::e3d_model_service::parse_refno(root)?;
                 if let (Some(set), Some(visited)) = (
@@ -306,34 +282,58 @@ impl ModelRefreshPolicy {
                 if !crate::options::data_face().is_read_through()
                     || !crate::options::store_mode().is_durable()
                 {
-                    let publish_result = if let Some((round_dbnum, round_end)) =
-                        crate::data_interface::batch_worker::active_data_window()
+                    publishable.push((root.clone(), refno));
+                }
+            }
+            if !publishable.is_empty() {
+                if let Some((round_dbnum, _)) =
+                    crate::data_interface::batch_worker::active_data_window()
+                {
+                    anyhow::ensure!(
+                        round_dbnum == dbnum,
+                        "file round {round_dbnum} cannot publish model roots for dbnum {dbnum}"
+                    );
+                }
+                let refnos = publishable
+                    .iter()
+                    .map(|(_, refno)| *refno)
+                    .collect::<Vec<_>>();
+                let started = std::time::Instant::now();
+                let batched = crate::fast_model::model_db_adapter::persist_roots_batched(
+                    crate::fast_model::model_db_adapter::PersistTarget::process(),
+                    crate::fast_model::model_memory_store::ModelMemoryStore::global(),
+                    dbnum,
+                    &refnos,
+                    crate::fast_model::room_publication::RoomEffectPolicy::Directed,
+                )
+                .await?;
+                if let Some(rows) = batched.rows.as_ref() {
+                    println!(
+                        "[model-persist] dbnum={dbnum} roots={} groups={} rows={} removed={} receipts={} commits={} failed_roots={} elapsed_ms={}",
+                        refnos.len(),
+                        batched.groups,
+                        rows.upserted,
+                        rows.removed,
+                        rows.receipts,
+                        rows.commits,
+                        batched.failed.len(),
+                        started.elapsed().as_millis()
+                    );
+                }
+                let mut failed_by_refno = std::collections::BTreeMap::new();
+                for (refno, error) in batched.failed {
+                    failed_by_refno.insert(
+                        crate::fast_model::model_memory_store::packed_refno(refno),
+                        error,
+                    );
+                }
+                for (root, refno) in &publishable {
+                    if let Some(error) = failed_by_refno
+                        .get(&crate::fast_model::model_memory_store::packed_refno(*refno))
                     {
-                        anyhow::ensure!(
-                            round_dbnum == dbnum,
-                            "file round {round_dbnum} cannot collect model root for dbnum {dbnum}"
-                        );
-                        let statement = crate::data_interface::side_effect_pending::
-                            SideEffectCompensator::render_file_model_publish_root(
-                                dbnum,
-                                round_end,
-                                root,
-                            )?;
-                        aios_core::SUL_DB
-                            .query(statement)
-                            .await
-                            .map_err(anyhow::Error::from)
-                            .and_then(|response| response.check().map_err(anyhow::Error::from))
-                            .map(|_| ())
-                    } else {
-                        crate::fast_model::model_db_adapter::persist_root(refno)
-                            .await
-                            .map(|_| ())
-                    };
-                    if let Err(error) = publish_result {
                         failures.push(RootGenerationFailure {
                             root: root.clone(),
-                            error: format!("{error:#}"),
+                            error: error.clone(),
                         });
                     }
                 }
@@ -559,12 +559,42 @@ mod tests {
             .find("Self::write_through_root(")
             .expect("generate_roots_report 必须在读透形态下调 write_through_root");
         let publish = body
-            .find("model_db_adapter::persist_root(")
-            .expect("generate_roots_report 必须调 persist_root");
-        assert!(write_through < publish, "写透必须排在 persist_root 之前");
+            .find("model_db_adapter::persist_roots_batched(")
+            .expect("generate_roots_report 必须调 persist_roots_batched");
+        assert!(
+            write_through < publish,
+            "写透必须排在 persist_roots_batched 之前"
+        );
         assert!(
             body.contains("crate::options::data_face().is_read_through()"),
             "写透只在读透形态下发生，判据必须是 data_face()"
+        );
+    }
+
+    /// ADR-071 D1 / D2 / 实施约束 2：模型行由本任务**同步、跨根合块**写进库——不等初始化 run 的
+    /// ACK、不等别的写者、不把根登记进文件轮次让别处稍后刷、不再一根一笔 `persist_root`。
+    /// 任何一处把这些形状接回来，这里就红。
+    #[test]
+    fn model_rows_are_persisted_in_task_without_acks_or_deferred_publication() {
+        let source = include_str!("model_refresh.rs").replace("\r\n", "\n");
+        let body = generate_roots_report_body(&source);
+        for needle in [
+            "wait_for_task_root_acks",
+            "wait_for_dbnum(",
+            "render_file_model_publish_root",
+            "initialization_source",
+            "model_db_adapter::persist_root(",
+        ] {
+            assert!(
+                !body.contains(needle),
+                "generate_roots_report 不得再含 `{needle}`（ADR-071）"
+            );
+        }
+        assert_eq!(
+            body.matches("model_db_adapter::persist_roots_batched(")
+                .count(),
+            1,
+            "整批根只走一次跨根合块落库"
         );
     }
 

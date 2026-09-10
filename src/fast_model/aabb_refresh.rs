@@ -507,6 +507,13 @@ async fn update_inst_relate_aabbs_by_refnos_mode(
                     .iter()
                     .map(|change| change.refno.to_string())
                     .collect::<Vec<_>>();
+                crate::data_interface::task_effects::record(
+                    dbnum,
+                    round_end_sesno,
+                    &refresh_refnos,
+                    &[],
+                    &[],
+                );
                 statements.push(
                     crate::data_interface::side_effect_pending::SideEffectCompensator::render_file_spatial_reconcile_upsert(
                         dbnum,

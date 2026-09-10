@@ -58,6 +58,21 @@ pub struct DiscoveredBatch {
     pub first_pending_sesno_time: Option<String>,
     /// `file_latest_sesno` 那条保存的 E3D 写入时刻，窗口右端。
     pub file_latest_sesno_time: Option<String>,
+    /// 人工「重新解析」（2026-09-10 重新计算契约 C2）：随 `Reinitialize` 意图一路带到冻结点，
+    /// 见 [`batch_queue::DataBatch::reinit_requested`]。自动发现与回退检测恒 `false`。
+    pub reinit_requested: bool,
+    /// **明确要重算的根**（ADR-071 S4，2026-09-10）：目录级联反查命中、落款仍在旧目录上的根。
+    /// 空 = 由规划器按凭证定（绝大多数入队）。它随队列行走（并入已排队行时取并集）、随冻结进
+    /// [`FrozenBatch::regen_roots`]，任务体把它并进本任务的工作单——此前这份名单是写成
+    /// `model_update_pending` 行等 drain 领的，那张队列表随 ADR-071 退役。
+    pub regen_roots: Vec<RegenRoot>,
+}
+
+/// 一个明确要重算的生成根（`a/b` 拼法 + noun）。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct RegenRoot {
+    pub refno: String,
+    pub noun: String,
 }
 
 /// 端点对得上才把时刻贴上去。
@@ -85,6 +100,8 @@ struct RowMeta {
     /// The first execution of a file round captures this token. Window-budget
     /// remainders carry it forward so a later SAVEWORK cannot widen the round.
     frozen_source_token: Option<String>,
+    /// 见 [`DiscoveredBatch::regen_roots`]；并入时取并集、去重。
+    regen_roots: Vec<RegenRoot>,
 }
 
 /// 冻结出队后交给 worker 的一份快照。
@@ -107,6 +124,21 @@ pub struct FrozenBatch {
     /// Stable file generation + frozen round target. `None` only before the
     /// first slice of a newly discovered file round reaches the freeze point.
     pub frozen_source_token: Option<String>,
+    /// 人工「重新解析」标记（见 [`batch_queue::DataBatch::reinit_requested`]）。冻结点
+    /// `execute_one_dbnum` 据它判清库；只随 `Reinitialize` 意图为真。
+    pub reinit_requested: bool,
+    /// 明确要重算的根（见 [`DiscoveredBatch::regen_roots`]），任务体并进工作单。
+    pub regen_roots: Vec<RegenRoot>,
+}
+
+/// `Reinitialize` 行是谁排的：`manual`（人工重新解析）/ `rollback`（回退检出）；
+/// 其余意图没有这一格。面板与回执据它分得开「人点的」与「检出的」（契约 C4）。
+pub fn reinit_trigger(intent: BatchIntent, reinit_requested: bool) -> Option<&'static str> {
+    match (intent, reinit_requested) {
+        (BatchIntent::Reinitialize, true) => Some("manual"),
+        (BatchIntent::Reinitialize, false) => Some("rollback"),
+        _ => None,
+    }
 }
 
 /// 入队回执的一行（HTTP 202 与日志共用；rollout 第九节第 7 条）。
@@ -118,6 +150,9 @@ pub struct EnqueuedBatchInfo {
     pub phase: &'static str,
     pub epoch_id: u64,
     pub intent: &'static str,
+    /// `reinitialize` 行才有：`manual` / `rollback`（[`reinit_trigger`]）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reinit_trigger: Option<&'static str>,
     pub model_start_sesno: Option<i32>,
     /// 在排队中的位置（1 起，含运行中的行不算）。
     pub position: usize,
@@ -141,6 +176,15 @@ pub enum DispatchOutcome {
     HeadNeedsExclusive,
     /// 无事可派（空队列 / 暂停 / 可跑行的 dbnum 都在跑）。
     Idle,
+}
+
+/// 手动「扫描 + 入队」的选项（`enqueue_manual_update_with`）。缺省 = 今天 `/update/execute` 的行为。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ManualEnqueueOptions {
+    /// 人工「重新解析」（2026-09-10 重新计算契约 C2 / C3）：名单里的库按整库重建入队
+    /// （`intent = Reinitialize` + `reinit_requested`），worker 冻结点清库后按首次导入重新解析。
+    /// 只许与显式 `dbnums` 名单同用；全范围清库重建不接受。
+    pub reinitialize: bool,
 }
 
 /// 手动触发「扫描 + 入队”的整体回执（POST /update/execute 的 202 响应体）。
@@ -201,6 +245,9 @@ pub struct QueueRow {
     pub epoch_id: u64,
     pub blocked_by_phase: Option<&'static str>,
     pub intent: &'static str,
+    /// `reinitialize` 行才有：`manual` / `rollback`（[`reinit_trigger`]）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reinit_trigger: Option<&'static str>,
     pub model_start_sesno: Option<i32>,
     /// `running` / `queued` / `held`。`held` = 重扫排出来的积压，等这个 dbnum
     /// 真的来一次增量才会被派发（见 [`batch_queue::DataBatch::held`]）。
@@ -320,7 +367,7 @@ impl BatchScheduler {
         }
         let outcome = {
             let mut state = self.queue();
-            let outcome = batch_queue::enqueue(
+            let mut outcome = batch_queue::enqueue(
                 &mut state.queue,
                 found.dbnum,
                 &found.db_type,
@@ -330,9 +377,43 @@ impl BatchScheduler {
                 found.model_start_sesno,
                 hold,
                 found.intent,
+                found.reinit_requested,
                 found.phase,
                 found.epoch_id,
             );
+            // 带明确根名单的 ModelOnly（目录级联）不能被「区间已覆盖」吞掉：运行中的批次不会
+            // 重算这几根（它的工作单在冻结时就定了），排队行又不存在时，给它排一条退化区间
+            // `[end, end]` 的 ModelOnly 行接在运行行之后——区间语义上什么都不用做，名单才是活。
+            if !found.regen_roots.is_empty()
+                && found.intent == BatchIntent::ModelOnly
+                && outcome == Enqueued::AlreadyCovered
+                && !state
+                    .queue
+                    .iter()
+                    .any(|b| b.dbnum == found.dbnum && b.state == BatchState::Queued)
+            {
+                let end = state
+                    .queue
+                    .iter()
+                    .find(|b| b.dbnum == found.dbnum && b.state == BatchState::Running)
+                    .map(|b| b.end_sesno.max(found.file_latest_sesno))
+                    .unwrap_or(found.file_latest_sesno);
+                state.queue.push(batch_queue::DataBatch {
+                    dbnum: found.dbnum,
+                    phase: found.phase,
+                    epoch_id: found.epoch_id,
+                    db_type: found.db_type.clone(),
+                    intent: BatchIntent::ModelOnly,
+                    model_start_sesno: Some(end),
+                    start_sesno: end,
+                    end_sesno: end,
+                    previous_observed_sesno: found.previous_observed_sesno,
+                    state: BatchState::Queued,
+                    held: hold,
+                    reinit_requested: false,
+                });
+                outcome = Enqueued::New;
+            }
 
             let queued_row = state
                 .queue
@@ -380,6 +461,7 @@ impl BatchScheduler {
                         phase: found.phase.as_str(),
                         epoch_id: found.epoch_id,
                         intent: found.intent.as_str(),
+                        reinit_trigger: reinit_trigger(found.intent, found.reinit_requested),
                         model_start_sesno: found.model_start_sesno,
                         position,
                         start_sesno: found.applied_sesno + 1,
@@ -402,6 +484,12 @@ impl BatchScheduler {
                             if let Some(meta) = state.meta.get_mut(&(found.dbnum, false)) {
                                 meta.path = found.path.clone();
                                 meta.file_name = found.file_name.clone();
+                                // 明确根名单取并集：并进已排队行的名单一根都不能丢。
+                                if !found.regen_roots.is_empty() {
+                                    meta.regen_roots.extend(found.regen_roots.iter().cloned());
+                                    meta.regen_roots.sort();
+                                    meta.regen_roots.dedup();
+                                }
                             }
                             if outcome == Enqueued::Merged {
                                 registry.replace_queued_range(
@@ -460,6 +548,7 @@ impl BatchScheduler {
                                     path: found.path.clone(),
                                     file_name: found.file_name.clone(),
                                     frozen_source_token: None,
+                                    regen_roots: found.regen_roots.clone(),
                                 },
                             );
                             task_id
@@ -472,6 +561,7 @@ impl BatchScheduler {
                         phase: row.phase.as_str(),
                         epoch_id: row.epoch_id,
                         intent: row.intent.as_str(),
+                        reinit_trigger: reinit_trigger(row.intent, row.reinit_requested),
                         model_start_sesno: row.model_start_sesno,
                         position,
                         start_sesno: row.start_sesno,
@@ -482,15 +572,18 @@ impl BatchScheduler {
             EnqueueOutcome { outcome, info }
         };
         if !outcome.info.task_id.is_empty() {
-            registry.set_detail(
-                &outcome.info.task_id,
-                serde_json::json!({
-                    "intent": outcome.info.intent,
-                    "model_start_sesno": outcome.info.model_start_sesno,
-                    "frozen_target_sesno": outcome.info.end_sesno,
-                    "stages": ["data", "generation", "publication", "spatial", "rooms"],
-                }),
-            );
+            let mut detail = serde_json::json!({
+                "intent": outcome.info.intent,
+                "model_start_sesno": outcome.info.model_start_sesno,
+                "frozen_target_sesno": outcome.info.end_sesno,
+                "stages": ["data", "generation", "publication", "spatial", "rooms"],
+            });
+            // 重建行多一格「谁排的」（契约 C4）：面板据它把「人点的重新解析」与
+            // 「回退检出的重建」分开写，两件事措辞不同。
+            if let Some(trigger) = outcome.info.reinit_trigger {
+                detail["reinit_trigger"] = serde_json::Value::String(trigger.to_owned());
+            }
+            registry.set_detail(&outcome.info.task_id, detail);
         }
         // 阶段闸的当下裁定跟着入队一起记。入队成功不等于会被执行：屏障是按
         // **阶段**关的，别的项目的一处身份歧义就能让本行永远停在 queued，而回执里
@@ -555,9 +648,8 @@ impl BatchScheduler {
             in_flight_empty,
             &is_exclusive,
             |batch| {
-                !crate::data_interface::model_publish_queue::blocks_data_batch(batch)
-                    && (batch.epoch_id == 0
-                        || InitializationCoordinator::global().allows(batch.phase, batch.epoch_id))
+                batch.epoch_id == 0
+                    || InitializationCoordinator::global().allows(batch.phase, batch.epoch_id)
             },
         ) {
             batch_queue::NextDispatch::Freeze(index) => index,
@@ -594,6 +686,8 @@ impl BatchScheduler {
                 end_sesno: row.end_sesno,
                 previous_observed_sesno: row.previous_observed_sesno,
                 frozen_source_token: meta.frozen_source_token,
+                reinit_requested: row.reinit_requested,
+                regen_roots: meta.regen_roots,
             },
             exclusive,
         };
@@ -887,6 +981,7 @@ impl BatchScheduler {
                             .unwrap_or("manifest")
                     }),
                     intent: b.intent.as_str(),
+                    reinit_trigger: reinit_trigger(b.intent, b.reinit_requested),
                     model_start_sesno: b.model_start_sesno,
                     // 挂起行单列一个状态，不混进 queued：它不会自己往前走，
                     // 显示成排队会让人以为消费者卡住了，而那是完全不同的故障。
@@ -934,6 +1029,8 @@ mod tests {
             previous_observed_sesno: applied,
             first_pending_sesno_time: at(applied + 1),
             file_latest_sesno_time: at(latest),
+            reinit_requested: false,
+            regen_roots: Vec::new(),
         }
     }
 
@@ -942,6 +1039,100 @@ mod tests {
             intent: BatchIntent::Reinitialize,
             ..found(dbnum, applied, latest)
         }
+    }
+
+    fn regen(refno: &str, noun: &str) -> RegenRoot {
+        RegenRoot {
+            refno: refno.into(),
+            noun: noun.into(),
+        }
+    }
+
+    /// ADR-071 S4：目录级联的明确根名单随 ModelOnly 任务走。下限 = 目标（区间语义上什么都不用做）
+    /// 时 `batch_queue` 判「已覆盖」、不排行——名单不能被吞掉：给它一条退化区间 `[T, T]` 的
+    /// ModelOnly 行；并进已排队行时名单取并集；冻结时整份名单进 `FrozenBatch`。
+    #[test]
+    fn explicit_regen_roots_survive_coverage_merge_and_freeze() {
+        let (scheduler, registry) = fresh();
+        let cascade = DiscoveredBatch {
+            intent: BatchIntent::ModelOnly,
+            model_start_sesno: Some(50),
+            regen_roots: vec![regen("24384/26229", "BRAN"), regen("24384/5", "EQUI")],
+            ..found(7997, 50, 50)
+        };
+        let outcome = scheduler.enqueue_live(&registry, &cascade);
+        assert_eq!(outcome.outcome, Enqueued::New, "已覆盖也要为名单排一条行");
+        assert_eq!((outcome.info.start_sesno, outcome.info.end_sesno), (50, 50));
+        assert_eq!(outcome.info.intent, "model_only");
+
+        // 第二次级联并进同一条排队行：名单取并集、去重。
+        let more = DiscoveredBatch {
+            regen_roots: vec![regen("24384/5", "EQUI"), regen("24384/77", "PIPE")],
+            ..cascade.clone()
+        };
+        let merged = scheduler.enqueue_live(&registry, &more);
+        assert_ne!(merged.outcome, Enqueued::New);
+        assert_eq!(merged.info.task_id, outcome.info.task_id);
+
+        let frozen = scheduler.freeze_next(&registry).expect("running row");
+        assert_eq!(frozen.intent, BatchIntent::ModelOnly);
+        assert_eq!(frozen.model_start_sesno, Some(50));
+        assert_eq!(
+            frozen.regen_roots,
+            vec![
+                regen("24384/26229", "BRAN"),
+                regen("24384/5", "EQUI"),
+                regen("24384/77", "PIPE"),
+            ]
+        );
+
+        // 没有名单的普通发现照旧：区间已覆盖就不排行。
+        let plain = DiscoveredBatch {
+            intent: BatchIntent::ModelOnly,
+            model_start_sesno: Some(50),
+            ..found(8000, 50, 50)
+        };
+        assert_eq!(
+            scheduler.enqueue_live(&registry, &plain).outcome,
+            Enqueued::AlreadyCovered
+        );
+    }
+
+    /// 契约 C2 / C4：人工重新解析的标记从发现行进队列、再进冻结批与快照 / 回执 / 任务详情。
+    #[test]
+    fn a_manual_reinitialize_carries_its_trigger_from_discovery_to_the_frozen_batch() {
+        let (scheduler, registry) = fresh();
+        let manual = DiscoveredBatch {
+            reinit_requested: true,
+            ..reinit_found(7997, 42, 50)
+        };
+        let outcome = scheduler.enqueue_live(&registry, &manual);
+        assert_eq!(outcome.outcome, Enqueued::New);
+        assert_eq!(outcome.info.intent, "reinitialize");
+        assert_eq!(outcome.info.reinit_trigger, Some("manual"));
+        let rows = scheduler.snapshot();
+        assert_eq!(rows[0].reinit_trigger, Some("manual"));
+        let detail = registry
+            .get(&outcome.info.task_id)
+            .and_then(|t| t.detail)
+            .expect("任务详情");
+        assert_eq!(detail["reinit_trigger"], "manual");
+        assert_eq!(detail["intent"], "reinitialize");
+
+        // 回退检出的重建并进来：标记不丢，回执照旧说 manual。
+        let merged = scheduler.enqueue_live(&registry, &reinit_found(7997, 42, 50));
+        assert_eq!(merged.info.reinit_trigger, Some("manual"));
+
+        // 冻结：标记随冻结批到 worker。
+        let frozen = scheduler.freeze_next(&registry).expect("running row");
+        assert!(frozen.reinit_requested);
+        assert_eq!(frozen.intent, BatchIntent::Reinitialize);
+
+        // 对照：回退检出的重建行是 rollback，普通窗口没有这一格。
+        let auto = scheduler.enqueue_live(&registry, &reinit_found(8000, 20, 26));
+        assert_eq!(auto.info.reinit_trigger, Some("rollback"));
+        let plain = scheduler.enqueue_live(&registry, &found(8010, 3, 5));
+        assert_eq!(plain.info.reinit_trigger, None);
     }
 
     #[test]

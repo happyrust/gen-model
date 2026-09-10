@@ -39,7 +39,7 @@ use surrealdb::Surreal;
 use surrealdb::engine::any::Any;
 
 use super::db_file_header::session_chain;
-use super::dbnum_stats;
+use super::pe_batch;
 use super::e3d_collector::{PageSessions, read_ele_data, read_ele_data_with_uda_catalog};
 use super::ele_ops::{ElementRows, UdaKeyMap, UdaRowPolicy};
 
@@ -230,8 +230,8 @@ impl ReadThroughCommitCoordinator {
                 ),
             )
         }));
-        for transaction in dbnum_stats::batches(dbnum, &statements)? {
-            dbnum_stats::execute_on(db, &transaction).await?;
+        for transaction in pe_batch::batches(dbnum, &statements)? {
+            pe_batch::execute_on(db, &transaction).await?;
         }
         Ok((candidates.len(), epoch))
     }
@@ -447,7 +447,7 @@ pub(crate) fn rendered_transaction_batches(
             .zip(element_statements)
             .map(|(element, sql)| (Some(element.refno.to_string()), sql)),
     );
-    dbnum_stats::batches(source.dbnum, &statements)
+    pe_batch::batches(source.dbnum, &statements)
 }
 
 fn mirror_epoch_guard(dbnum: u32, sesno: u32, commit_id: &str) -> String {
@@ -557,8 +557,8 @@ async fn execute_serial(
             .zip(statements)
             .map(|(element, sql)| (Some(element.refno.to_string()), sql)),
     );
-    for tx_sql in dbnum_stats::batches(source.dbnum, &transaction_statements)? {
-        dbnum_stats::execute_on(db, &tx_sql).await?;
+    for tx_sql in pe_batch::batches(source.dbnum, &transaction_statements)? {
+        pe_batch::execute_on(db, &tx_sql).await?;
     }
     Ok(element_statement_count)
 }
@@ -701,19 +701,20 @@ mod tests {
             .unwrap();
         for _ in 0..2 {
             for sql in rendered_transaction_batches(&rendered, &source, &[]).unwrap() {
-                dbnum_stats::execute_on(&db, &sql).await.unwrap();
+                pe_batch::execute_on(&db, &sql).await.unwrap();
             }
         }
         ReadThroughCommitCoordinator::global()
             .soft_delete_missing(&db, 8000, 6, &[refno.to_string()])
             .await
             .unwrap();
-        // A stale read must not restore the tombstone or change its count.
+        // A stale read must not restore the tombstone. pe 统计不再随写事务逐笔记账（ADR-071 D6），
+        // 读透这条路上没有任务收尾，`dbnum_info_table` 就该一行都没有。
         execute_serial(&db, &rendered, &source, None, &[])
             .await
             .unwrap();
-        let mut result = db.query("RETURN dbnum_info_table:24384.count; RETURN pe:24384_1.deleted; RETURN dbnum_info_table:24384.sesno;").await.unwrap();
-        assert_eq!(result.take::<Option<i64>>(0).unwrap(), Some(1));
+        let mut result = db.query("RETURN dbnum_info_table:24384.count; RETURN pe:24384_1.deleted; RETURN pe:24384_1.sesno;").await.unwrap();
+        assert_eq!(result.take::<Option<i64>>(0).unwrap(), None);
         assert_eq!(result.take::<Option<bool>>(1).unwrap(), Some(true));
         assert_eq!(result.take::<Option<i64>>(2).unwrap(), Some(6));
     }

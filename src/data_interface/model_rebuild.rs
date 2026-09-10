@@ -203,9 +203,7 @@ fn spawn_monitor(task_id: String, dbnum: u32, expected_roots: usize) {
                 break;
             }
             if pending == 0 {
-                match crate::data_interface::model_update_pending::model_coverage_current(dbnum)
-                    .await
-                {
+                match crate::data_interface::model_coverage::model_coverage_current(dbnum).await {
                     Ok(true) => {
                         registry.finish(
                             &task_id,

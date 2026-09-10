@@ -34,6 +34,224 @@ pub const INFO_TABLE: &str = "dbnum_info_table";
 pub(crate) static DBNUM_STATE_WRITE_GATE: tokio::sync::RwLock<()> =
     tokio::sync::RwLock::const_new(());
 
+/// 进程内水位镜像（共识 d-227：「内存里可以保持住水位，surreal 数据库相当于是一个落盘的
+/// 序列化方案。在比对时，我们都可以使用内存里的缓存。」）。
+///
+/// 镜像里放的是**库里那一行的原样投影**（[`StateRow`] + `dbnum_info_table` 的旧水位），
+/// 不是解析完的 [`DbnumState`]：解析要看 `task_registry` 里「该库任务在跑」这类进程态，
+/// 它会在没有任何库写的情况下翻转，缓存解析结果就会把「初始化中」的判定钉死。事实缓存、
+/// 判定现算，判定永远跟着进程态走。
+///
+/// **写者落库后作废那一格**（[`DbnumState::invalidate_mirrored`]），下一次读回填——
+/// 作废而不是回填，是因为不少写者是 `_on(db)` 形态，写的库未必是 `SUL_DB`；作废对任何
+/// 目标库都安全，代价只是多一次读。每格自己的 revision 与 singleflight 通知把版本检查和
+/// 缓存发布放在同一个锁边界；正在飞的旧装载既不能回填，也不能把旧值交给本次比较。
+///
+/// 缺省**关**：`run_cli` 的统一水化段（ADR-071 D7 / S6）打开它
+/// （[`DbnumState::enable_watermark_mirror`]），随即用 [`DbnumState::hydrate_watermark_mirror`]
+/// 整表水化一次——排在全部播种之后、任何 worker / watcher 之前；之后每格只走「按需装载 +
+/// 写后作废」。关着时每一条读路都是今天的直读，单测 / 集成测试不受影响；镜像自己的行为由
+/// 本模块的单测显式开关覆盖。
+mod mirror {
+    use super::StateRow;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, LazyLock, Mutex};
+    use tokio::sync::watch;
+
+    /// 一格：库里那一行 + info 表旧水位（`None` 行也缓存——未登记的库每轮扫描都会被问到）。
+    #[derive(Debug, Clone, Default)]
+    pub(super) struct Facts {
+        pub row: Option<StateRow>,
+        pub info_max: Option<i32>,
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+    pub(super) struct Identity {
+        pub endpoint: String,
+        pub namespace: String,
+        pub database: String,
+        pub project: String,
+    }
+
+    #[derive(Debug)]
+    struct Entry {
+        facts: Option<Facts>,
+        revision: u64,
+        loading: bool,
+        changed: Arc<watch::Sender<u64>>,
+    }
+
+    #[derive(Debug, Default)]
+    struct State {
+        enabled: bool,
+        identity: Option<Identity>,
+        entries: BTreeMap<(Identity, u32), Entry>,
+    }
+
+    static STATE: LazyLock<Mutex<State>> = LazyLock::new(|| Mutex::new(State::default()));
+
+    pub(super) enum Acquire {
+        Disabled,
+        Hit(Facts),
+        Wait(watch::Receiver<u64>),
+        Load(Ticket),
+    }
+
+    pub(super) struct Ticket {
+        key: (Identity, u32),
+        revision: u64,
+        changed: Arc<watch::Sender<u64>>,
+    }
+
+    fn state() -> std::sync::MutexGuard<'static, State> {
+        STATE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(super) fn enabled() -> bool {
+        state().enabled
+    }
+
+    pub(super) fn enable(identity: Identity) {
+        let mut state = state();
+        if state.identity.as_ref() != Some(&identity) {
+            state.entries.clear();
+        }
+        state.identity = Some(identity);
+        state.enabled = true;
+    }
+
+    pub(super) fn disable() {
+        let mut state = state();
+        state.enabled = false;
+        state.identity = None;
+        state.entries.clear();
+    }
+
+    pub(super) fn acquire(dbnum: u32) -> Acquire {
+        let mut state = state();
+        if !state.enabled {
+            return Acquire::Disabled;
+        }
+        let Some(identity) = state.identity.clone() else {
+            return Acquire::Disabled;
+        };
+        let key = (identity, dbnum);
+        let entry = state.entries.entry(key.clone()).or_insert_with(|| {
+            let (changed, _) = watch::channel(0);
+            Entry {
+                facts: None,
+                revision: 0,
+                loading: false,
+                changed: Arc::new(changed),
+            }
+        });
+        if let Some(facts) = &entry.facts {
+            return Acquire::Hit(facts.clone());
+        }
+        if entry.loading {
+            return Acquire::Wait(entry.changed.subscribe());
+        }
+        entry.loading = true;
+        Acquire::Load(Ticket {
+            key,
+            revision: entry.revision,
+            changed: Arc::clone(&entry.changed),
+        })
+    }
+
+    /// `false` 表示装载期间发生了写入/失效；调用方必须重读，不得返回旧值。
+    pub(super) fn publish(ticket: Ticket, facts: Facts) -> bool {
+        let mut state = state();
+        let published = state.entries.get_mut(&ticket.key).is_some_and(|entry| {
+            if entry.revision != ticket.revision || !entry.loading {
+                return false;
+            }
+            entry.facts = Some(facts);
+            entry.loading = false;
+            true
+        });
+        drop(state);
+        ticket.changed.send_modify(|version| *version += 1);
+        published
+    }
+
+    pub(super) fn abort(ticket: Ticket) {
+        let mut state = state();
+        if let Some(entry) = state.entries.get_mut(&ticket.key) {
+            if entry.revision == ticket.revision {
+                entry.loading = false;
+            }
+        }
+        drop(state);
+        ticket.changed.send_modify(|version| *version += 1);
+    }
+
+    pub(super) fn forget(dbnum: u32) {
+        let mut state = state();
+        let Some(identity) = state.identity.clone() else {
+            return;
+        };
+        if let Some(entry) = state.entries.get_mut(&(identity, dbnum)) {
+            entry.revision = entry.revision.wrapping_add(1);
+            entry.facts = None;
+            entry.loading = false;
+            let changed = Arc::clone(&entry.changed);
+            drop(state);
+            changed.send_modify(|version| *version += 1);
+        }
+    }
+
+    pub(super) fn clear() {
+        let mut state = state();
+        let changed = state
+            .entries
+            .values_mut()
+            .map(|entry| {
+                entry.revision = entry.revision.wrapping_add(1);
+                entry.facts = None;
+                entry.loading = false;
+                Arc::clone(&entry.changed)
+            })
+            .collect::<Vec<_>>();
+        drop(state);
+        for sender in changed {
+            sender.send_modify(|version| *version += 1);
+        }
+    }
+
+    /// 启动水化一次性替换快照；不会让调用方观察到半张登记表。
+    pub(super) fn replace(facts: impl IntoIterator<Item = (u32, Facts)>) {
+        let mut state = state();
+        let Some(identity) = state.identity.clone() else {
+            return;
+        };
+        let mut replacement = BTreeMap::new();
+        for (dbnum, facts) in facts {
+            let (changed, _) = watch::channel(0);
+            replacement.insert(
+                (identity.clone(), dbnum),
+                Entry {
+                    facts: Some(facts),
+                    revision: 0,
+                    loading: false,
+                    changed: Arc::new(changed),
+                },
+            );
+        }
+        state.entries = replacement;
+    }
+
+    pub(super) fn len() -> usize {
+        state()
+            .entries
+            .values()
+            .filter(|entry| entry.facts.is_some())
+            .count()
+    }
+}
+
 const INCREMENT_STATE_SCHEMA: &str = r#"
 DEFINE TABLE IF NOT EXISTS dbnum_watermark SCHEMALESS;
 DEFINE TABLE IF NOT EXISTS dbnum_info_table SCHEMALESS;
@@ -74,6 +292,9 @@ pub struct FileObservation {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct DbnumState {
     pub dbnum: u32,
+    /// 数据库内这行持久事实的版本。每个权威写者在同一事务中推进，供窗口 CAS 使用。
+    #[serde(default)]
+    pub state_revision: u64,
     /// 这一行归哪个项目。空串表示旧数据（本字段引入前写的），此时不做归属校验。
     #[serde(default)]
     pub owner_project: String,
@@ -240,6 +461,8 @@ pub enum RecoveryStage {
 struct StateRow {
     #[serde(default)]
     dbnum: Option<u32>,
+    #[serde(default)]
+    state_revision: Option<u64>,
     #[serde(default)]
     owner_project: Option<String>,
     #[serde(default)]
@@ -551,8 +774,11 @@ fn resolve_dbnum_applied(
     dedicated: Option<(Option<i32>, Option<i32>)>,
     info: Option<i32>,
 ) -> Option<i32> {
+    // 「这个库正在被写」的来源是任务注册表（ADR-071 S5，d-300），不再是发布 run：任务在跑时
+    // 只认专用水位行，不拿 `dbnum_info_table` 里半截基线的 max sesno 当应用水位。
     resolve_initializing_applied(
-        crate::data_interface::model_publish_queue::blocks_dbnum(dbnum),
+        crate::data_interface::task_registry::TaskRegistry::global()
+            .has_running_data_batch_for(dbnum),
         dedicated,
         info,
     )
@@ -647,61 +873,11 @@ fn should_seed_from_current_database(
     watermark_table_missing || watermark_rows == 0 || !seed_marker_present
 }
 
-/// 完整性对不上账的 dbnum（纯函数）：pe 与统计表的按 dbnum 元素计数不相等。
-///
-/// 正常基线路径有 `count(pe) == sum(info.count)` 的完整性校验，播种路径没有——
-/// 一个被历史全量解析中断留下洞的老库，pe 的最大会话号会接近文件尾。给它播上
-/// 水位，`baseline_needs_full_parse` 就因 `applied_sesno != 0` 再也不会重建基线，
-/// 中间那些洞增量永远补不回来：库里少着元素，面板却显示已应用到最新会话。
-///
-/// 所以这些 dbnum **不播种**。没有水位意味着它们按首次导入处理，下一次基线会把
-/// 整库重解析一遍——多花一次解析，换一份对得上账的数据。
-///
-/// `dbnum_info_table` 整体为空时（更老的库没有这张表）没有比对的依据，此时不认定
-/// 任何一个可疑：拿「无从比对」当「都有问题」会把这类库全部推去重解析。
-fn seed_suspect_dbnums(
-    pe_counts: &BTreeMap<u32, i64>,
-    info_counts: &BTreeMap<u32, i64>,
-) -> BTreeSet<u32> {
-    if pe_counts.is_empty() || info_counts.is_empty() {
-        return BTreeSet::new();
-    }
-    pe_counts
-        .iter()
-        .filter(|(dbnum, pe_count)| info_counts.get(dbnum).copied().unwrap_or(0) != **pe_count)
-        .map(|(dbnum, _)| *dbnum)
-        .collect()
-}
-
-/// 播种完整性告警：逐个说清楚哪个库对不上账、因此不给它播水位。
-fn seed_integrity_warnings(
-    pe_counts: &BTreeMap<u32, i64>,
-    info_counts: &BTreeMap<u32, i64>,
-) -> Vec<String> {
-    if pe_counts.is_empty() {
-        return Vec::new();
-    }
-    if info_counts.is_empty() {
-        return vec![
-            "播种完整性比对跳过：dbnum_info_table 无统计数据（更老的库没有这张表，属预期）"
-                .to_string(),
-        ];
-    }
-    seed_suspect_dbnums(pe_counts, info_counts)
-        .into_iter()
-        .map(|dbnum| {
-            let pe_count = pe_counts.get(&dbnum).copied().unwrap_or(0);
-            let info_count = info_counts.get(&dbnum).copied().unwrap_or(0);
-            format!(
-                "播种完整性告警 dbnum={dbnum}：pe {pe_count} 条 != 统计 {info_count} 条；\
-                 该库可能带着历史解析中断留下的洞，**不播种水位**，\
-                 将按首次导入在下一次基线里整库重解析"
-            )
-        })
-        .collect()
-}
-
-/// 把播种候选分成「可以固化」与「按下不表」两拨。
+/// 把播种候选分成「可以固化」与「按下不表」两拨。按下不表的只有**任务在飞**的库
+/// （`protected`）——半截基线的 info 表 max sesno 不能当应用水位。此前还按
+/// `count(pe) != sum(dbnum_info_table.count)` 扣一批「可疑库」，那是逐笔观测块时代的对账
+/// （两个数当时都是「pe 行数含墓碑」）；ADR-071 D6 之后 `count` 是活元素数、由任务收尾序列化，
+/// 拿它跟 pe 行数比不再成立，那道对账 2026-09-10 退役。
 fn partition_seedable(
     watermarks: Vec<DatabaseWatermark>,
     suspect: &BTreeSet<u32>,
@@ -793,39 +969,170 @@ async fn write_seed_marker(
     Ok(())
 }
 
-/// 拉取播种完整性比对的两组按 dbnum 计数：pe 实际元素数、`dbnum_info_table` 统计和。
+/// 模型 / 房间水位兼容播种的候选行：`applied_sesno > 0` 而 `model_sesno` **从未写过**（NONE）。
 ///
-/// pe 侧是第二次全表扫描（与水位聚合分开发，互不影响已验证的水位语句）；
-/// 只在走 pe 源播种的启动里执行一次。
-async fn fetch_seed_integrity_counts() -> anyhow::Result<(BTreeMap<u32, i64>, BTreeMap<u32, i64>)> {
-    #[derive(Deserialize)]
-    struct DbnumCount {
-        dbnum: u32,
-        count: i64,
-    }
-    let mut response = SUL_DB
-        .query("SELECT dbnum, count() AS count FROM pe WHERE dbnum != NONE GROUP BY dbnum;")
-        .query(
-            "SELECT dbnum, math::sum(count) AS count FROM dbnum_info_table \
-             WHERE dbnum != NONE GROUP BY dbnum;",
-        )
+/// 只圈 NONE、不圈 0：0 是本仓显式写下的（D7 幽灵清零 / D8 清库归零 / 本播种的
+/// [`LegacyModelWatermarkSeed::DataOnly`]），再播一次就把「已判过」改写成「追平」。
+#[derive(Debug, Deserialize)]
+struct LegacyModelWatermarkCandidate {
+    dbnum: u32,
+    applied_sesno: i32,
+}
+
+const LEGACY_MODEL_WATERMARK_CANDIDATES: &str = "SELECT dbnum, applied_sesno FROM dbnum_watermark \
+     WHERE dbnum != NONE AND model_sesno = NONE AND applied_sesno != NONE AND applied_sesno > 0;";
+
+/// 模型 / 房间水位兼容播种的去向（用户 2026-09-10 拍板「模型水位 + 房间水位默认按数据水位
+/// 保持一致」；ADR-060 D10）。两格措辞不同，日志里不许混。
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LegacyModelWatermarkSeed {
+    /// 旧管线留下了模型投影（`inst_relate` / `tubi_relate`）：两枚水位缺省视作与数据水位追平。
+    Adopted { dbnum: u32, sesno: i32 },
+    /// 数据在、模型一行没有：显式记 0，照旧由模型面生成；下次启动不再探。
+    DataOnly { dbnum: u32 },
+}
+
+/// 接管：只填空（`??`），已写过的值一个不动。时刻列不贴——这一枚不是哪一条保存盖出来的，
+/// 贴任何时刻都是拿 A 标注 B（ADR-060 D1 的时刻纪律）；`*_settled_at` 只是运维展示的挂钟。
+/// `room_settled_at` 的判断要排在 `room_sesno` 赋值之前：SurrealDB 的 `SET` 顺序求值。
+fn render_legacy_model_watermark_adoption(dbnum: u32, applied_sesno: i32) -> String {
+    format!(
+        "UPDATE {WATERMARK_TABLE}:{dbnum} SET \
+         model_sesno = model_sesno ?? {applied_sesno}, model_settled_at = time::now(), \
+         room_settled_at = IF room_sesno = NONE THEN time::now() ELSE room_settled_at END, \
+         room_sesno = room_sesno ?? {applied_sesno}, \
+         state_revision = (state_revision ?? 0) + 1, updated_at = time::now() RETURN NONE;"
+    )
+}
+
+/// 数据在、模型一行没有：把「从未追平」从 NONE 写成显式 0。语义不变（读侧本来就
+/// `unwrap_or_default`），只为让这一行退出候选集——投影探针在大库上不便宜，不该每次启动都付。
+fn render_legacy_model_watermark_data_only(dbnum: u32) -> String {
+    format!(
+        "UPDATE {WATERMARK_TABLE}:{dbnum} SET model_sesno = model_sesno ?? 0, \
+         state_revision = (state_revision ?? 0) + 1, updated_at = time::now() RETURN NONE;"
+    )
+}
+
+/// 兼容播种的第二半（ADR-060 D10）：模型 / 房间水位缺省按数据水位追平。
+///
+/// 对象是「已有数据的库」里**旧管线已经留下模型投影**、而 `model_sesno` 从未写过的行：
+/// 两枚水位填成 `applied_sesno`。数据在、模型一行没有的库显式记 0，照旧由模型面生成。
+/// 只填空，重跑无损；`protected`（初始化在飞）的库不碰。
+///
+/// **必须排在 `init_inst_relate_indices` 之后**：投影探针（`model_completion::
+/// projection_presence_expr`）的 `WHERE in = $parent.id` 没有 `idx_inst_relate_in` 时是逐 pe
+/// 行全表扫，大库上跑不完。
+pub(crate) async fn seed_legacy_model_watermarks_on(
+    db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    protected: &[u32],
+) -> anyhow::Result<Vec<LegacyModelWatermarkSeed>> {
+    let mut response = db
+        .query(LEGACY_MODEL_WATERMARK_CANDIDATES)
         .await
-        .map_err(|e| anyhow::anyhow!("读取播种完整性计数失败: {e}"))?
+        .map_err(|e| anyhow::anyhow!("读取模型水位兼容播种候选失败: {e}"))?
         .check()
-        .map_err(|e| anyhow::anyhow!("读取播种完整性计数语句失败: {e}"))?;
-    let pe_rows: Vec<DbnumCount> = response
+        .map_err(|e| anyhow::anyhow!("读取模型水位兼容播种候选语句失败: {e}"))?;
+    let candidates: Vec<LegacyModelWatermarkCandidate> = response
         .take(0)
-        .map_err(|e| anyhow::anyhow!("解码 pe 元素计数失败: {e}"))?;
-    let info_rows: Vec<DbnumCount> = response
-        .take(1)
-        .map_err(|e| anyhow::anyhow!("解码 DBNUM 统计计数失败: {e}"))?;
-    Ok((
-        pe_rows.into_iter().map(|r| (r.dbnum, r.count)).collect(),
-        info_rows.into_iter().map(|r| (r.dbnum, r.count)).collect(),
-    ))
+        .map_err(|e| anyhow::anyhow!("解码模型水位兼容播种候选失败: {e}"))?;
+    let mut outcomes = Vec::with_capacity(candidates.len());
+    for candidate in candidates {
+        let dbnum = candidate.dbnum;
+        if protected.contains(&dbnum) {
+            continue;
+        }
+        let projection = crate::data_interface::model_completion::projection_presence_expr(dbnum);
+        let mut probe = db
+            .query(format!("RETURN {projection};"))
+            .await
+            .map_err(|e| anyhow::anyhow!("探测 dbnum={dbnum} 的模型投影失败: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("探测 dbnum={dbnum} 的模型投影语句失败: {e}"))?;
+        let has_projection: Option<bool> = probe
+            .take(0)
+            .map_err(|e| anyhow::anyhow!("解码 dbnum={dbnum} 的模型投影探测失败: {e}"))?;
+        let (sql, outcome) = if has_projection.unwrap_or(false) {
+            (
+                render_legacy_model_watermark_adoption(dbnum, candidate.applied_sesno),
+                LegacyModelWatermarkSeed::Adopted {
+                    dbnum,
+                    sesno: candidate.applied_sesno,
+                },
+            )
+        } else {
+            (
+                render_legacy_model_watermark_data_only(dbnum),
+                LegacyModelWatermarkSeed::DataOnly { dbnum },
+            )
+        };
+        db.query(sql)
+            .await
+            .map_err(|e| anyhow::anyhow!("写 dbnum={dbnum} 的模型 / 房间兼容水位失败: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("写 dbnum={dbnum} 的模型 / 房间兼容水位语句失败: {e}"))?;
+        DbnumState::invalidate_mirrored_on(db, dbnum);
+        outcomes.push(outcome);
+    }
+    Ok(outcomes)
+}
+
+/// 兼容播种的启动日志：安静的一次不出声；两格各一行、各带样本。
+pub fn legacy_model_watermark_seed_lines(seeds: &[LegacyModelWatermarkSeed]) -> Vec<String> {
+    fn sample(dbnums: &[String]) -> String {
+        let shown = dbnums
+            .iter()
+            .take(12)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("、");
+        if dbnums.len() > 12 {
+            format!("{shown} …")
+        } else {
+            shown
+        }
+    }
+    let adopted: Vec<String> = seeds
+        .iter()
+        .filter_map(|seed| match seed {
+            LegacyModelWatermarkSeed::Adopted { dbnum, sesno } => Some(format!("{dbnum}@{sesno}")),
+            LegacyModelWatermarkSeed::DataOnly { .. } => None,
+        })
+        .collect();
+    let data_only: Vec<String> = seeds
+        .iter()
+        .filter_map(|seed| match seed {
+            LegacyModelWatermarkSeed::DataOnly { dbnum } => Some(dbnum.to_string()),
+            LegacyModelWatermarkSeed::Adopted { .. } => None,
+        })
+        .collect();
+    let mut lines = Vec::new();
+    if !adopted.is_empty() {
+        lines.push(format!(
+            "模型 / 房间水位兼容播种：{} 个已有模型投影的库按数据水位接管为追平（ADR-060 D10，\
+             不排恢复 Task）：{}",
+            adopted.len(),
+            sample(&adopted)
+        ));
+    }
+    if !data_only.is_empty() {
+        lines.push(format!(
+            "模型 / 房间水位兼容播种：{} 个库数据在、模型一行没有，模型水位记 0，照旧由模型面生成：{}",
+            data_only.len(),
+            sample(&data_only)
+        ));
+    }
+    lines
 }
 
 impl DbnumState {
+    /// [`seed_legacy_model_watermarks_on`] 打在主库上；初始化在飞的库照 applied 播种同一份名单排除。
+    pub async fn seed_legacy_model_watermarks() -> anyhow::Result<Vec<LegacyModelWatermarkSeed>> {
+        let protected = crate::data_interface::task_registry::TaskRegistry::global()
+            .running_data_batch_dbnums();
+        seed_legacy_model_watermarks_on(&SUL_DB, &protected).await
+    }
+
     /// Ensure an old Surreal database can run the current incremental pipeline in place.
     ///
     /// Table definitions are idempotent. When the watermark table is absent — or exists but
@@ -867,7 +1174,8 @@ impl DbnumState {
             .check()
             .map_err(|e| anyhow::anyhow!("初始化增量状态表语句失败: {e}"))?;
 
-        let protected = crate::data_interface::model_publish_queue::blocked_dbnums();
+        let protected = crate::data_interface::task_registry::TaskRegistry::global()
+            .running_data_batch_dbnums();
         SUL_DB
             .query(render_legacy_applied_migration(&protected))
             .await
@@ -876,7 +1184,6 @@ impl DbnumState {
             .map_err(|e| anyhow::anyhow!("迁移旧 DBNUM 水位语句失败: {e}"))?;
 
         let (source_sql, source_name) = migration_watermark_source(seed_from_current_database);
-        let mut suspect: BTreeSet<u32> = BTreeSet::new();
         if seed_from_current_database {
             // 这一步在大库上是 pe 全表聚合，可能长时间无输出；不喊一声的话，
             // 现场很容易把首次兼容启动当成卡死。
@@ -890,24 +1197,6 @@ impl DbnumState {
             println!(
                 "增量水位播种开始：{reason}，按{source_name}（每个 dbnum 的最大 sesno）建立基线，大库上可能耗时较长…"
             );
-            // 对不上账的库不播种（见 [`seed_suspect_dbnums`]）。
-            match fetch_seed_integrity_counts().await {
-                Ok((pe_counts, info_counts)) => {
-                    suspect = seed_suspect_dbnums(&pe_counts, &info_counts);
-                    for warning in seed_integrity_warnings(&pe_counts, &info_counts) {
-                        eprintln!("{warning}");
-                    }
-                }
-                Err(error) => {
-                    // 比对跑不起来时不能假定干净。这一轮索性不播，也不落完成标记，
-                    // 下次启动重来一遍——固化一份没校验过的水位是不可逆的，
-                    // 而重跑一次播种是幂等的。
-                    eprintln!(
-                        "播种完整性比对失败，本轮不按 PE 数据播种（不落完成标记，下次启动重试）: {error:#}"
-                    );
-                    return Ok(0);
-                }
-            }
         }
         let seed_started = std::time::Instant::now();
         let mut response = SUL_DB
@@ -919,13 +1208,12 @@ impl DbnumState {
         let watermarks: Vec<DatabaseWatermark> = response
             .take(0)
             .map_err(|e| anyhow::anyhow!("解码{source_name}水位失败: {e}"))?;
-        // This exclusion applies to both PE and legacy info-table migration.
-        // Their row counts can agree even when both contain the same partial import.
-        suspect.extend(protected.iter().copied());
-        let (watermarks, held_back) = partition_seedable(watermarks, &suspect);
+        // 任务在飞的库不播：半截基线的 max sesno 不是应用水位。这一道对 PE 源与旧 info 表源同样适用。
+        let protected: BTreeSet<u32> = protected.iter().copied().collect();
+        let (watermarks, held_back) = partition_seedable(watermarks, &protected);
         if !held_back.is_empty() {
             eprintln!(
-                "播种跳过 {} 个不完整或初始化未完成的 dbnum（保留完整导入路径）: {held_back:?}",
+                "播种跳过 {} 个初始化未完成的 dbnum（保留完整导入路径）: {held_back:?}",
                 held_back.len()
             );
         }
@@ -958,6 +1246,8 @@ impl DbnumState {
                 eprintln!("写播种完成标记失败（下次启动会重新播种一遍，幂等无损）: {error:#}");
             }
         }
+        // 迁移 + 播种动了哪些行不逐个记账：整个镜像作废。
+        Self::invalidate_mirror();
         println!(
             "增量水位回填检查完成：源={source_name}，固化 {} 个 dbnum，跳过 {} 个，耗时 {:.1} 秒",
             watermarks.len(),
@@ -969,24 +1259,93 @@ impl DbnumState {
 
     /// List registered DB files. Used by project scans to surface files that
     /// disappeared instead of silently omitting their dbnum.
+    ///
+    /// 只读、**不碰镜像**。整表替换是启动水化专用的一步（[`Self::hydrate_watermark_mirror`]）：
+    /// 这个函数在运行期被 `/dbnums` 轮询、项目扫描与房间恢复反复调，若每次都整表替换，就有
+    /// 「SELECT 已发出 → 某任务落库并作废了那一格 → 这里再用 SELECT 之前的旧行整表盖回去」
+    /// 的窗口，那一格从此陈旧，而且再没有人来作废它。
     pub async fn list_registered() -> anyhow::Result<Vec<DbnumState>> {
+        Ok(Self::states_from_rows(
+            Self::registered_rows_on(&SUL_DB).await?,
+        ))
+    }
+
+    /// 启动统一水化段（ADR-071 D7 / S6）的第一步：把整张登记表从库读回来，**一次性**替换
+    /// 进程内水位镜像，再把解析好的状态交给同一段里的后续步骤（模型投影水化、启动核对）。
+    ///
+    /// 镜像里每格放的与 [`Self::read`] 按需装载时**一样**：`dbnum_watermark` 那一行的原样投影
+    /// + `dbnum_info_table` 的旧水位（兼容回退用）；两张表各一句聚合读，不逐库点读。
+    /// 只许在没有写者的时刻调（`run_cli` 里排在任何 worker / watcher 之前）：整表替换不理会
+    /// 装载途中的作废，写者一活跃就可能把刚作废的那一格盖回旧值。运行期要读全表用
+    /// [`Self::list_registered`]。
+    pub async fn hydrate_watermark_mirror() -> anyhow::Result<Vec<DbnumState>> {
+        Self::hydrate_watermark_mirror_on(&SUL_DB).await
+    }
+
+    pub(crate) async fn hydrate_watermark_mirror_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    ) -> anyhow::Result<Vec<DbnumState>> {
+        let rows = Self::registered_rows_on(db).await?;
+        if mirror::enabled() {
+            let info_max = Self::legacy_info_watermarks_on(db).await?;
+            mirror::replace(rows.iter().filter_map(|row| {
+                row.dbnum.map(|dbnum| {
+                    (
+                        dbnum,
+                        mirror::Facts {
+                            row: Some(row.clone()),
+                            info_max: info_max.get(&dbnum).copied(),
+                        },
+                    )
+                })
+            }));
+        }
+        Ok(Self::states_from_rows(rows))
+    }
+
+    /// 整张登记表的原样行（不解析）。[`Self::list_registered`] 与
+    /// [`Self::hydrate_watermark_mirror_on`] 共用这一句。
+    async fn registered_rows_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    ) -> anyhow::Result<Vec<StateRow>> {
         let sql = format!(
-            "SELECT dbnum, owner_project, db_type, file_name, file_path, file_size, file_latest_sesno, \
+            "SELECT dbnum, state_revision, owner_project, db_type, file_name, file_path, file_size, file_latest_sesno, \
              applied_sesno, applied_sesno_time, confirmed_empty_baseline_sesno, \
              {MODEL_WATERMARK_COLUMNS}, sesno \
              FROM {WATERMARK_TABLE};"
         );
-        let mut response = SUL_DB
+        let mut response = db
             .query(sql)
             .await
             .map_err(|e| anyhow::anyhow!("读取 DBNUM 注册表失败: {e}"))?
             .check()
             .map_err(|e| anyhow::anyhow!("读取 DBNUM 注册表语句失败: {e}"))?;
-        let rows: Vec<StateRow> = response
+        response
             .take(0)
-            .map_err(|e| anyhow::anyhow!("解码 DBNUM 注册表失败: {e}"))?;
-        Ok(rows
-            .into_iter()
+            .map_err(|e| anyhow::anyhow!("解码 DBNUM 注册表失败: {e}"))
+    }
+
+    /// `dbnum_info_table` 里每个库的旧水位（`math::max(sesno)`），与 [`Self::read_row`] 第二句
+    /// 同一口径，只是一次聚合全表——水化时给每格镜像配上兼容回退用的 `info_max`。
+    async fn legacy_info_watermarks_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+    ) -> anyhow::Result<BTreeMap<u32, i32>> {
+        let mut response = db
+            .query(LEGACY_INFO_WATERMARKS)
+            .await
+            .map_err(|e| anyhow::anyhow!("读取旧 DBNUM 水位失败: {e}"))?
+            .check()
+            .map_err(|e| anyhow::anyhow!("读取旧 DBNUM 水位语句失败: {e}"))?;
+        let rows: Vec<DatabaseWatermark> = response
+            .take(0)
+            .map_err(|e| anyhow::anyhow!("解码旧 DBNUM 水位失败: {e}"))?;
+        Ok(rows.into_iter().map(|row| (row.dbnum, row.sesno)).collect())
+    }
+
+    /// 登记表原样行 → 生效状态（与 [`Self::list_registered`] 一直以来的解析一致：这里没有
+    /// 逐库的 info 表回退，`initialized` 只看专用行）。
+    fn states_from_rows(rows: Vec<StateRow>) -> Vec<DbnumState> {
+        rows.into_iter()
             .filter_map(|row| {
                 let dbnum = row.dbnum?;
                 let effective =
@@ -995,6 +1354,7 @@ impl DbnumState {
                 let model_sesno_time = model_time_of(&row);
                 Some(DbnumState {
                     dbnum,
+                    state_revision: row.state_revision.unwrap_or_default(),
                     owner_project: row.owner_project.unwrap_or_default(),
                     db_type: row.db_type.unwrap_or_default(),
                     file_name: row.file_name.unwrap_or_default(),
@@ -1021,7 +1381,7 @@ impl DbnumState {
                     initialized: effective.is_some(),
                 })
             })
-            .collect())
+            .collect()
     }
 
     /// Read the raw stored row + info-table fallback for one `dbnum`.
@@ -1030,7 +1390,7 @@ impl DbnumState {
         // 伪元素写出过无 sesno 的行），混进聚合会让 math::max 整条报错，进而把
         // 「读状态」变成扫描/执行的阻断点（2026-08-06 审计，1112 / 7999 实测）。
         let sql = format!(
-            "SELECT dbnum, owner_project, db_type, file_name, file_path, file_size, file_latest_sesno, \
+            "SELECT dbnum, state_revision, owner_project, db_type, file_name, file_path, file_size, file_latest_sesno, \
              applied_sesno, applied_sesno_time, confirmed_empty_baseline_sesno, \
              {MODEL_WATERMARK_COLUMNS}, sesno \
              FROM {WATERMARK_TABLE}:{dbnum};\
@@ -1052,10 +1412,96 @@ impl DbnumState {
         Ok((rows.into_iter().next(), info_max))
     }
 
+    /// 事实从哪来：镜像开着且命中 → 内存；否则读库，并在没有作废穿插时回填。
+    async fn facts_for(dbnum: u32) -> anyhow::Result<(Option<StateRow>, Option<i32>)> {
+        loop {
+            match mirror::acquire(dbnum) {
+                mirror::Acquire::Disabled => return Self::read_row(dbnum).await,
+                mirror::Acquire::Hit(facts) => return Ok((facts.row, facts.info_max)),
+                mirror::Acquire::Wait(mut changed) => {
+                    changed
+                        .changed()
+                        .await
+                        .map_err(|_| anyhow::anyhow!("水位镜像 singleflight 通知通道关闭"))?;
+                }
+                mirror::Acquire::Load(ticket) => match Self::read_row(dbnum).await {
+                    Ok((row, info_max)) => {
+                        let facts = mirror::Facts {
+                            row: row.clone(),
+                            info_max,
+                        };
+                        if mirror::publish(ticket, facts) {
+                            return Ok((row, info_max));
+                        }
+                        // 装载期间发生写入或清理：旧值既不入缓存，也不参与本次比较。
+                    }
+                    Err(error) => {
+                        mirror::abort(ticket);
+                        return Err(error);
+                    }
+                },
+            }
+        }
+    }
+
+    /// 打开进程内水位镜像（d-227）。`run_cli` 在启动对账之后调一次；之后所有
+    /// [`DbnumState::read`] / [`DbnumState::applied_sesno`] 的比对读内存，写者落库后
+    /// 调 [`DbnumState::invalidate_mirrored`] 作废那一格。前提：本进程是该库的唯一写者
+    /// （`data_face_signature::validate_or_claim` 的归属门）。
+    pub fn enable_watermark_mirror() {
+        let option = crate::options::get_db_option_ext().inner;
+        let store_mode = crate::options::store_mode();
+        mirror::enable(mirror::Identity {
+            endpoint: if matches!(store_mode, crate::options::StoreMode::EmbeddedMem) {
+                "embedded-mem".to_owned()
+            } else {
+                format!("{}:{}", option.v_ip.trim(), option.v_port)
+            },
+            namespace: option.surreal_ns.clone(),
+            database: option.project_name.clone(),
+            project: option.project_name,
+        });
+    }
+
+    #[cfg(test)]
+    pub(crate) fn disable_watermark_mirror_for_test() {
+        mirror::disable();
+    }
+
+    pub fn watermark_mirror_enabled() -> bool {
+        mirror::enabled()
+    }
+
+    /// 镜像里现有几格（`/health` 观测用）。
+    pub fn mirrored_dbnums() -> usize {
+        mirror::len()
+    }
+
+    /// 写者落库之后调：作废这一格，下一次读回填。对任何目标库都安全（见模块说明）。
+    pub fn invalidate_mirrored(dbnum: u32) {
+        mirror::forget(dbnum);
+    }
+
+    /// `_on(db)` 写者共用的回填出口：测试/暂存连接不影响主库镜像，生产 `SUL_DB` 写成功
+    /// 后精确失效该格。调用必须位于数据库确认成功之后。
+    pub(crate) fn invalidate_mirrored_on(
+        db: &surrealdb::Surreal<surrealdb::engine::any::Any>,
+        dbnum: u32,
+    ) {
+        if std::ptr::eq(db, &*SUL_DB) {
+            Self::invalidate_mirrored(dbnum);
+        }
+    }
+
+    /// 批量 / 不知道动了哪些行的写者（播种迁移、启动对账、整表清理）调：整个镜像作废。
+    pub fn invalidate_mirror() {
+        mirror::clear();
+    }
+
     /// Read the effective state for one `dbnum` (with one-time migration applied
     /// in-memory). Returns `None` only when the `dbnum` has no record at all.
     pub async fn read(dbnum: u32) -> anyhow::Result<Option<DbnumState>> {
-        let (row, info_max) = Self::read_row(dbnum).await?;
+        let (row, info_max) = Self::facts_for(dbnum).await?;
         let Some(row) = row else {
             // No dedicated record. Still surface a migrated watermark if the info
             // table knows one (legacy full-parse before the watermark existed).
@@ -1073,6 +1519,7 @@ impl DbnumState {
         let model_sesno_time = model_time_of(&row);
         Ok(Some(DbnumState {
             dbnum: row.dbnum.unwrap_or(dbnum),
+            state_revision: row.state_revision.unwrap_or_default(),
             owner_project: row.owner_project.unwrap_or_default(),
             db_type: row.db_type.unwrap_or_default(),
             file_name: row.file_name.unwrap_or_default(),
@@ -1104,7 +1551,7 @@ impl DbnumState {
     ///
     /// Read-only: never writes, so it is safe to call from preview scanning.
     pub async fn applied_sesno(dbnum: u32) -> anyhow::Result<i32> {
-        let (row, info_max) = Self::read_row(dbnum).await?;
+        let (row, info_max) = Self::facts_for(dbnum).await?;
         Ok(
             resolve_dbnum_applied(dbnum, row.map(|r| (r.applied_sesno, r.sesno)), info_max)
                 .unwrap_or(0),
@@ -1242,6 +1689,7 @@ impl DbnumState {
             .map_err(|e| anyhow::anyhow!("阻断重复文件身份失败 dbnum={dbnum}: {e}"))?
             .check()
             .map_err(|e| anyhow::anyhow!("阻断重复文件身份语句失败 dbnum={dbnum}: {e}"))?;
+        Self::invalidate_mirrored(dbnum);
         Ok(())
     }
 
@@ -1279,6 +1727,7 @@ impl DbnumState {
              db_type = '{db_type}', file_name = '{file_name}', \
              file_path = '{file_path}', file_size = {file_size}, \
              file_latest_sesno = {file_latest_sesno}, file_modified_at = {modified_expr}, \
+             state_revision = (state_revision ?? 0) + 1, \
              scanned_at = time::now(), updated_at = time::now();",
             dbnum = obs.dbnum,
             owner_project = escape_surql_str(&obs.project),
@@ -1294,6 +1743,7 @@ impl DbnumState {
             .map_err(|e| anyhow::anyhow!("记录扫描观察失败 dbnum={}: {}", obs.dbnum, e))?
             .check()
             .map_err(|e| anyhow::anyhow!("记录扫描观察语句失败 dbnum={}: {}", obs.dbnum, e))?;
+        Self::invalidate_mirrored(obs.dbnum);
         Ok(())
     }
 
@@ -1313,6 +1763,7 @@ impl DbnumState {
         let sql = format!(
             "UPSERT {WATERMARK_TABLE}:{dbnum} SET dbnum = {dbnum}, \
              file_size = {file_size}, file_latest_sesno = {file_latest_sesno}, \
+             state_revision = (state_revision ?? 0) + 1, \
              scanned_at = time::now(), updated_at = time::now();",
             dbnum = obs.dbnum,
             file_size = obs.file_size,
@@ -1324,6 +1775,7 @@ impl DbnumState {
             .map_err(|e| anyhow::anyhow!("记录阻断观察失败 dbnum={}: {}", obs.dbnum, e))?
             .check()
             .map_err(|e| anyhow::anyhow!("记录阻断观察语句失败 dbnum={}: {}", obs.dbnum, e))?;
+        Self::invalidate_mirrored(obs.dbnum);
         Ok(())
     }
 
@@ -1333,7 +1785,7 @@ impl DbnumState {
     /// path. Mirrors the legacy `sesno` field for backward compatibility.
     ///
     /// 语句本身**不在这里渲染**：生产路径（窗口收口 / 基线事务）走的是
-    /// `model_update_pending::render_watermark_advance`，那句注释写着「只渲染一处，
+    /// `increment_tail::render_watermark_advance`，那句注释写着「只渲染一处，
     /// 窗口与基线事务不可能漂移」——这个函数曾经是同一条 SQL 的第二份拷贝，
     /// 那句话在两者之间早就不成立了。现在它只是那一处的独立调用外壳。
     pub async fn advance_applied(
@@ -1341,7 +1793,7 @@ impl DbnumState {
         end_sesno: i32,
         end_sesno_time: Option<&str>,
     ) -> anyhow::Result<()> {
-        let sql = crate::data_interface::model_update_pending::render_watermark_advance(
+        let sql = crate::data_interface::increment_tail::render_watermark_advance(
             dbnum,
             end_sesno,
             end_sesno_time,
@@ -1352,6 +1804,7 @@ impl DbnumState {
             .map_err(|e| anyhow::anyhow!("推进应用水位失败 dbnum={}: {}", dbnum, e))?
             .check()
             .map_err(|e| anyhow::anyhow!("推进应用水位语句失败 dbnum={}: {}", dbnum, e))?;
+        Self::invalidate_mirrored(dbnum);
         Ok(())
     }
 }
@@ -1359,12 +1812,190 @@ impl DbnumState {
 fn render_duplicate_identity_block(dbnum: u32) -> String {
     format!(
         "UPDATE {WATERMARK_TABLE}:{dbnum} SET file_name = '', file_path = '', \
-         scanned_at = time::now(), updated_at = time::now();"
+         state_revision = (state_revision ?? 0) + 1, scanned_at = time::now(), updated_at = time::now();"
     )
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    static MIRROR_TEST_GUARD: Mutex<()> = Mutex::new(());
+
+    fn mirror_identity(database: &str) -> super::mirror::Identity {
+        super::mirror::Identity {
+            endpoint: "127.0.0.1:8000".into(),
+            namespace: "test".into(),
+            database: database.into(),
+            project: database.into(),
+        }
+    }
+
+    fn mirrored_facts(sesno: i32) -> super::mirror::Facts {
+        super::mirror::Facts {
+            row: Some(super::StateRow {
+                applied_sesno: Some(sesno),
+                ..Default::default()
+            }),
+            info_max: None,
+        }
+    }
+
+    fn fact_sesno(facts: super::mirror::Facts) -> i32 {
+        facts.row.and_then(|row| row.applied_sesno).unwrap_or(0)
+    }
+
+    #[test]
+    fn mirror_identity_and_inflight_invalidation_never_publish_stale_facts() {
+        let _guard = MIRROR_TEST_GUARD.lock().unwrap();
+        super::mirror::disable();
+        super::mirror::enable(mirror_identity("db-a"));
+
+        let first = match super::mirror::acquire(8190) {
+            super::mirror::Acquire::Load(ticket) => ticket,
+            _ => panic!("first miss must load"),
+        };
+        super::mirror::forget(8190);
+        assert!(
+            !super::mirror::publish(first, mirrored_facts(10)),
+            "a read invalidated in flight must not publish"
+        );
+        let second = match super::mirror::acquire(8190) {
+            super::mirror::Acquire::Load(ticket) => ticket,
+            _ => panic!("invalidation must make the next caller reload"),
+        };
+        assert!(super::mirror::publish(second, mirrored_facts(11)));
+        match super::mirror::acquire(8190) {
+            super::mirror::Acquire::Hit(facts) => assert_eq!(fact_sesno(facts), 11),
+            _ => panic!("fresh facts must be cached"),
+        }
+
+        super::mirror::enable(mirror_identity("db-b"));
+        assert!(matches!(
+            super::mirror::acquire(8190),
+            super::mirror::Acquire::Load(_)
+        ));
+        super::mirror::disable();
+    }
+
+    async fn singleflight_value(dbnum: u32, loads: Arc<AtomicUsize>) -> i32 {
+        loop {
+            match super::mirror::acquire(dbnum) {
+                super::mirror::Acquire::Disabled => panic!("mirror unexpectedly disabled"),
+                super::mirror::Acquire::Hit(facts) => return fact_sesno(facts),
+                super::mirror::Acquire::Wait(mut changed) => {
+                    changed.changed().await.expect("loader remains alive");
+                }
+                super::mirror::Acquire::Load(ticket) => {
+                    loads.fetch_add(1, Ordering::SeqCst);
+                    tokio::task::yield_now().await;
+                    if super::mirror::publish(ticket, mirrored_facts(77)) {
+                        return 77;
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn one_hundred_same_database_misses_share_one_load() {
+        let _guard = MIRROR_TEST_GUARD.lock().unwrap();
+        super::mirror::disable();
+        super::mirror::enable(mirror_identity("singleflight"));
+        let loads = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..100 {
+            tasks.push(tokio::spawn(singleflight_value(7997, Arc::clone(&loads))));
+        }
+        for task in tasks {
+            assert_eq!(task.await.unwrap(), 77);
+        }
+        assert_eq!(loads.load(Ordering::SeqCst), 1);
+        super::mirror::disable();
+    }
+
+    /// ADR-071 D7 / S6：启动水化 = 反序列化。写库 →（进程重启）→ 水化 → 镜像里每格与库行
+    /// **逐字段**相等（含 info 表旧水位的兼容回退），之后的读命中镜像、不再回库——库里悄悄改了
+    /// 也读不到，直到写者作废那一格。
+    #[tokio::test]
+    async fn startup_hydration_mirrors_every_registered_row_field_by_field() {
+        let _guard = MIRROR_TEST_GUARD.lock().unwrap();
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("test").use_db("hydrate").await.unwrap();
+        db.query(
+            "CREATE dbnum_watermark:7997 SET dbnum=7997, db_type='DESI', file_name='ams7997', \
+             owner_project='AMS', state_revision=9, applied_sesno=26, model_sesno=26, room_sesno=20, \
+             room_result_version='rooms-26';\
+             CREATE dbnum_watermark:8000 SET dbnum=8000, db_type='DESI', applied_sesno=12;\
+             CREATE dbnum_info_table SET dbnum=8000, sesno=11;\
+             CREATE dbnum_info_table SET dbnum=8000, sesno=15;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        super::mirror::disable();
+        super::mirror::enable(mirror_identity("hydrate"));
+
+        let mut states = super::DbnumState::hydrate_watermark_mirror_on(&db)
+            .await
+            .unwrap();
+        states.sort_by_key(|state| state.dbnum);
+        assert_eq!(
+            states.iter().map(|state| state.dbnum).collect::<Vec<_>>(),
+            vec![7997, 8000],
+            "解析结果与 list_registered 同一份"
+        );
+        assert_eq!(super::mirror::len(), 2, "登记表有几行镜像就有几格");
+
+        let facts = match super::mirror::acquire(7997) {
+            super::mirror::Acquire::Hit(facts) => facts,
+            _ => panic!("水化之后第一次读就该命中"),
+        };
+        let row = facts.row.expect("库里那一行原样在镜像里");
+        assert_eq!(row.dbnum, Some(7997));
+        assert_eq!(row.db_type.as_deref(), Some("DESI"));
+        assert_eq!(row.file_name.as_deref(), Some("ams7997"));
+        assert_eq!(row.owner_project.as_deref(), Some("AMS"));
+        assert_eq!(row.state_revision, Some(9));
+        assert_eq!(row.applied_sesno, Some(26));
+        assert_eq!(row.model_sesno, Some(26));
+        assert_eq!(row.room_sesno, Some(20));
+        assert_eq!(row.room_result_version.as_deref(), Some("rooms-26"));
+        assert_eq!(facts.info_max, None, "没有 info 行的库回退值就是 NONE");
+
+        let facts = match super::mirror::acquire(8000) {
+            super::mirror::Acquire::Hit(facts) => facts,
+            _ => panic!("水化之后第一次读就该命中"),
+        };
+        let row = facts.row.expect("库里那一行原样在镜像里");
+        assert_eq!(row.applied_sesno, Some(12));
+        assert_eq!(row.model_sesno, None, "库里没写过的列是「未观察」，不是 0");
+        assert_eq!(
+            facts.info_max,
+            Some(15),
+            "info 表旧水位与 read_row 第二句同一口径：math::max(sesno)"
+        );
+
+        // 不经写者作废的库改动，镜像看不见——这正是「比对读镜像」的含义；作废后才回库。
+        db.query("UPDATE dbnum_watermark:7997 SET applied_sesno=27;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        match super::mirror::acquire(7997) {
+            super::mirror::Acquire::Hit(facts) => assert_eq!(fact_sesno(facts), 26),
+            _ => panic!("没人作废，那一格还在"),
+        }
+        super::mirror::forget(7997);
+        assert!(matches!(
+            super::mirror::acquire(7997),
+            super::mirror::Acquire::Load(_)
+        ));
+        super::mirror::disable();
+    }
+
     #[test]
     fn three_watermarks_recover_only_the_missing_stage() {
         use super::{DbnumState, RecoveryStage as Stage, RoomInputVersion};
@@ -1509,50 +2140,11 @@ mod tests {
         assert!(should_seed_from_current_database(true, 0, true));
     }
 
-    /// 完整性告警只喊「对不上」的库：pe 与统计一致的不出声；统计缺行按 0 比；
-    /// 统计表整体为空（更老的库没有它）时只给一条整体提示，不逐库刷屏。
+    /// 播种只按下「任务在飞」的库（半截基线的 max sesno 不是应用水位）。此前还按
+    /// `count(pe) != sum(dbnum_info_table.count)` 扣一批「可疑库」并在比对失败时整轮不播——那道
+    /// 对账随 ADR-071 D6 退役（`count` 现在是任务收尾序列化的活元素数，与 pe 行数本就不必相等）。
     #[test]
-    fn seed_integrity_flags_only_mismatched_dbnums() {
-        let pe = BTreeMap::from([(7997u32, 1000i64), (8000, 34), (8191, 169)]);
-        let info = BTreeMap::from([(7997u32, 1000i64), (8000, 30), (251047, 6)]);
-
-        let warnings = seed_integrity_warnings(&pe, &info);
-        // 7997 一致不告警；8000 计数不等、8191 统计缺行（按 0 比）要告警。
-        assert_eq!(warnings.len(), 2);
-        assert!(warnings.iter().any(|w| w.contains("dbnum=8000")
-            && w.contains("pe 34 条")
-            && w.contains("统计 30 条")));
-        assert!(
-            warnings
-                .iter()
-                .any(|w| w.contains("dbnum=8191") && w.contains("统计 0 条"))
-        );
-
-        // 统计表整体为空：一条整体提示。
-        let empty_info = BTreeMap::new();
-        let skipped = seed_integrity_warnings(&pe, &empty_info);
-        assert_eq!(skipped.len(), 1);
-        assert!(skipped[0].contains("跳过"));
-
-        // pe 为空（全新库）：什么都不喊。
-        assert!(seed_integrity_warnings(&BTreeMap::new(), &info).is_empty());
-    }
-
-    /// 对不上账的 dbnum 不能拿到水位。
-    ///
-    /// 播种一旦给它写上 `applied_sesno`，`baseline_needs_full_parse` 就因为
-    /// `applied_sesno != 0` 再也不会重建这个库的基线——历史解析中断留下的洞增量
-    /// 永远补不回来，而面板显示「已应用到最新会话」。宁可让它按首次导入整库
-    /// 重解析一遍，也不能把一份没校验过的 pe 数据固化成水位。
-    #[test]
-    fn a_dbnum_that_does_not_add_up_is_not_given_a_watermark() {
-        let pe = BTreeMap::from([(7997u32, 1000i64), (8000, 34), (8191, 169)]);
-        let info = BTreeMap::from([(7997u32, 1000i64), (8000, 30), (251047, 6)]);
-
-        // 8000 计数不等、8191 统计缺行（按 0 比）；7997 一致。
-        let suspect = seed_suspect_dbnums(&pe, &info);
-        assert_eq!(suspect, BTreeSet::from([8000u32, 8191]));
-
+    fn seeding_holds_back_only_in_flight_dbnums_and_no_longer_reconciles_pe_with_info() {
         let candidates = vec![
             DatabaseWatermark {
                 dbnum: 7997,
@@ -1567,20 +2159,14 @@ mod tests {
                 sesno: 169,
             },
         ];
-        let (seedable, held_back) = partition_seedable(candidates, &suspect);
+        let protected = BTreeSet::from([8000u32]);
+        let (seedable, held_back) = partition_seedable(candidates, &protected);
         assert_eq!(
             seedable.iter().map(|row| row.dbnum).collect::<Vec<_>>(),
-            vec![7997],
-            "只有对得上账的库能固化水位"
+            vec![7997, 8191]
         );
-        assert_eq!(held_back, vec![8000, 8191]);
+        assert_eq!(held_back, vec![8000]);
 
-        // 没有比对依据时不能把「无从判断」当「都有问题」——那会把这类老库
-        // 全部推去重解析。
-        assert!(seed_suspect_dbnums(&pe, &BTreeMap::new()).is_empty());
-        assert!(seed_suspect_dbnums(&BTreeMap::new(), &info).is_empty());
-
-        // 播种循环必须吃过滤后的那份，且比对失败时整轮不播。
         let source = include_str!("dbnum_state.rs");
         let body = source
             .split_once("pub async fn ensure_increment_state_storage(")
@@ -1590,16 +2176,23 @@ mod tests {
             .expect("它之后是 list_registered")
             .0;
         let partition_at = body
-            .find("partition_seedable(watermarks, &suspect)")
-            .expect("播种候选必须先过滤");
+            .find("partition_seedable(watermarks, &protected)")
+            .expect("播种候选按任务在飞过滤");
         let upsert_at = body
             .find("for chunk in watermarks.chunks(500)")
             .expect("固化循环必须还在");
         assert!(partition_at < upsert_at, "过滤要发生在固化之前: {body}");
-        assert!(
-            body.contains("本轮不按 PE 数据播种"),
-            "完整性比对失败时必须整轮不播: {body}"
-        );
+        for retired in [
+            "seed_suspect_dbnums(",
+            "fetch_seed_integrity_counts(",
+            "seed_integrity_warnings(",
+            "dbnum_info_table",
+        ] {
+            assert!(
+                !body.contains(retired),
+                "播种不再拿 dbnum_info_table 对账: {retired}"
+            );
+        }
     }
 
     #[test]
@@ -2237,5 +2830,172 @@ mod initializing_watermark_tests {
         assert_eq!(seedable.len(), 1);
         assert_eq!(seedable[0].dbnum, 8000);
         assert_eq!(held, vec![7997]);
+    }
+}
+
+/// ADR-060 D10：模型 / 房间水位缺省按数据水位追平——只对「已有数据 + 已有模型投影 +
+/// 模型水位从未写过」的行；数据在模型无的记 0；显式写过的值一个不动。
+#[cfg(test)]
+mod legacy_model_watermark_seed_tests {
+    use super::*;
+
+    #[derive(Debug, Deserialize, PartialEq)]
+    struct Row {
+        #[serde(default)]
+        applied_sesno: Option<i32>,
+        #[serde(default)]
+        model_sesno: Option<i32>,
+        #[serde(default)]
+        room_sesno: Option<i32>,
+        #[serde(default)]
+        model_sesno_time: Option<String>,
+    }
+
+    async fn row(db: &surrealdb::Surreal<surrealdb::engine::any::Any>, dbnum: u32) -> Row {
+        let mut response = db
+            .query(format!(
+                "SELECT applied_sesno, model_sesno, room_sesno, model_sesno_time \
+                 FROM ONLY dbnum_watermark:{dbnum};"
+            ))
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        let row: Option<Row> = response.take(0).unwrap();
+        row.expect("水位行还在")
+    }
+
+    #[tokio::test]
+    async fn legacy_libraries_with_a_projection_adopt_the_data_watermark_and_the_rest_do_not() {
+        let db = surrealdb::engine::any::connect("mem://").await.unwrap();
+        db.use_ns("legacy_seed").use_db("test").await.unwrap();
+        // 8000：旧管线投影（dbnum 直写形态）→ 接管。
+        // 8001：旧管线投影（只有 in、没有 dbnum 的历史形态）→ 也接管。
+        // 8002：数据在、模型一行没有 → 记 0，房间不动。
+        // 8003：本仓显式写过 0（D7 / D8）→ 不是候选，一个字不动。
+        // 8004：数据水位未建立 → 不是候选。
+        // 8005：初始化在飞（protected）→ 跳过。
+        db.query(
+            "CREATE pe:24381_1 SET dbnum = 8000, sesno = 26;\
+             CREATE inst_relate:24381_1 SET in = pe:24381_1, dbnum = 8000;\
+             CREATE dbnum_watermark:8000 SET dbnum = 8000, applied_sesno = 26;\
+             CREATE pe:24382_1 SET dbnum = 8001, sesno = 30;\
+             CREATE tubi_relate:24382_1 SET in = pe:24382_1;\
+             CREATE dbnum_watermark:8001 SET dbnum = 8001, applied_sesno = 30;\
+             CREATE pe:24383_1 SET dbnum = 8002, sesno = 12;\
+             CREATE dbnum_watermark:8002 SET dbnum = 8002, applied_sesno = 12;\
+             CREATE pe:24384_1 SET dbnum = 8003, sesno = 9;\
+             CREATE inst_relate:24384_1 SET in = pe:24384_1, dbnum = 8003;\
+             CREATE dbnum_watermark:8003 SET dbnum = 8003, applied_sesno = 9, model_sesno = 0;\
+             CREATE inst_relate:24385_1 SET dbnum = 8004;\
+             CREATE dbnum_watermark:8004 SET dbnum = 8004, applied_sesno = 0;\
+             CREATE pe:24386_1 SET dbnum = 8005, sesno = 40;\
+             CREATE inst_relate:24386_1 SET in = pe:24386_1, dbnum = 8005;\
+             CREATE dbnum_watermark:8005 SET dbnum = 8005, applied_sesno = 40;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+
+        let mut seeds = seed_legacy_model_watermarks_on(&db, &[8005]).await.unwrap();
+        seeds.sort();
+        assert_eq!(
+            seeds,
+            vec![
+                LegacyModelWatermarkSeed::Adopted {
+                    dbnum: 8000,
+                    sesno: 26
+                },
+                LegacyModelWatermarkSeed::Adopted {
+                    dbnum: 8001,
+                    sesno: 30
+                },
+                LegacyModelWatermarkSeed::DataOnly { dbnum: 8002 },
+            ]
+        );
+
+        let adopted = row(&db, 8000).await;
+        assert_eq!(
+            (adopted.model_sesno, adopted.room_sesno),
+            (Some(26), Some(26))
+        );
+        assert_eq!(
+            adopted.model_sesno_time, None,
+            "接管不贴时刻：没有哪一条保存盖出它"
+        );
+        let adopted_via_in = row(&db, 8001).await;
+        assert_eq!(
+            (adopted_via_in.model_sesno, adopted_via_in.room_sesno),
+            (Some(30), Some(30))
+        );
+        let data_only = row(&db, 8002).await;
+        assert_eq!(
+            data_only.model_sesno,
+            Some(0),
+            "数据在模型无：显式记 0，退出候选集"
+        );
+        assert_eq!(data_only.room_sesno, None, "房间水位不替模型面说话");
+        let explicit_zero = row(&db, 8003).await;
+        assert_eq!(explicit_zero.model_sesno, Some(0));
+        assert_eq!(explicit_zero.room_sesno, None);
+        let never_applied = row(&db, 8004).await;
+        assert_eq!(never_applied.model_sesno, None);
+        let protected = row(&db, 8005).await;
+        assert_eq!(protected.model_sesno, None);
+
+        // 幂等：同样的保护名单再跑一遍没有候选，一行不动。
+        assert!(
+            seed_legacy_model_watermarks_on(&db, &[8005])
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(row(&db, 8000).await, adopted);
+
+        // 初始化收口、保护解除之后，那个库才轮到接管——跳过不是判定，下一轮照常来。
+        assert_eq!(
+            seed_legacy_model_watermarks_on(&db, &[]).await.unwrap(),
+            vec![LegacyModelWatermarkSeed::Adopted {
+                dbnum: 8005,
+                sesno: 40
+            }]
+        );
+        assert_eq!(row(&db, 8005).await.model_sesno, Some(40));
+    }
+
+    /// 接管语句只填空：`??` 两处都在，没有 `math::max`、没有 `=` 覆盖；时刻列不碰。
+    #[test]
+    fn the_adoption_statement_is_fill_only_and_never_stamps_a_time() {
+        let sql = render_legacy_model_watermark_adoption(8000, 26);
+        assert!(sql.contains("model_sesno = model_sesno ?? 26"));
+        assert!(sql.contains("room_sesno = room_sesno ?? 26"));
+        assert!(!sql.contains("math::max"));
+        assert!(!sql.contains("model_sesno_time"), "时刻纪律：不贴 {sql}");
+        assert!(!sql.contains("room_sesno_time"), "时刻纪律：不贴 {sql}");
+        let settled = sql
+            .find("room_settled_at = IF room_sesno = NONE")
+            .expect("挂钟按填空与否");
+        let room = sql.find("room_sesno = room_sesno ??").expect("房间填空");
+        assert!(settled < room, "SET 顺序求值：挂钟判断要排在赋值之前 {sql}");
+
+        let zero = render_legacy_model_watermark_data_only(8002);
+        assert!(zero.contains("model_sesno = model_sesno ?? 0"));
+        assert!(!zero.contains("room_sesno"));
+    }
+
+    #[test]
+    fn the_seed_lines_stay_silent_when_nothing_happened_and_split_the_two_cases() {
+        assert!(legacy_model_watermark_seed_lines(&[]).is_empty());
+        let lines = legacy_model_watermark_seed_lines(&[
+            LegacyModelWatermarkSeed::Adopted {
+                dbnum: 8000,
+                sesno: 26,
+            },
+            LegacyModelWatermarkSeed::DataOnly { dbnum: 8002 },
+        ]);
+        assert_eq!(lines.len(), 2);
+        assert!(lines[0].contains("1 个已有模型投影的库") && lines[0].contains("8000@26"));
+        assert!(lines[1].contains("1 个库数据在、模型一行没有") && lines[1].contains("8002"));
     }
 }

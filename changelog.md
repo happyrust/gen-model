@@ -1,5 +1,684 @@
 # 变更记录
 
+## 2026-09-10
+
+### S4（目录级联那一块）：反查命中的根改排带明确根名单的 ModelOnly 任务，目录版本核对搬进 `model_coverage.rs`（ADR-071 D1 / S4）
+
+目录级联（`reconcile_catalogue_versions` 点名 → 收窗 → 反查 → 排工）此前的「排工」是把命中的根写成
+`model_update_pending` 行、`wake()` 一下等空闲轮 drain 领——那是 ADR-071 要拆的第二条队列。现在它排的是任务：
+
+- **队列行随身带名单**：`DiscoveredBatch` / `FrozenBatch` 多一格 `regen_roots: Vec<RegenRoot{refno, noun}>`
+  （空 = 由规划器按凭证定，绝大多数入队）。并入已排队行时名单取并集、去重（`RowMeta.regen_roots`），冻结时整份进
+  `FrozenBatch`。**「已覆盖」不能吞名单**：级联的 ModelOnly 以 `model_start_sesno = 目标 = 文件最新` 入队，区间语义上
+  什么都不用做，`batch_queue::enqueue` 于是判 `AlreadyCovered`、不排行；`BatchScheduler::enqueue` 在这一档给它排一条
+  退化区间 `[T, T]` 的 ModelOnly 行接在运行行之后（运行中的批次工作单在冻结时就定了，不会重算这几根）。
+- **任务体并进工作单**（`batch_worker::explicit_regen_units`）：ModelOnly 体 `merge_unit_worklist(名单, 待重试)`，
+  ApplyWindow 体（级联并进了一条数据窗口时）把名单接在本窗新单元后面；生成时点取任务目标会话，`attempts = 0`、
+  无队列 revision，与规划器的待重试按 `(dbnum, root)` 去重。下限 = 目标 → `reconcile_startup_window` 不开窗
+  （凭证等于右端即追平），进工作单的只有名单与本就未安定的根，不会把整库拖进来。
+- **`enqueue_catalogue_cascade`**：按设计库聚成 `refno → noun`，每库一条 `DiscoveredBatch{ModelOnly, regen_roots}`
+  经 `BatchScheduler::enqueue`；账目（`enqueued` / `enqueued_degraded` / `already_current` / `lazy_roots` /
+  `skipped_out_of_scope`）与 `/health.catalogue_reconcile` 的形状不变。`enqueue_plan` 在这条路上不再出现。
+- **搬家**：目录版本核对整块（`CatalogueReconcile*` / `reconcile_catalogue_versions{,_after_sweep,_now}` /
+  `catalogue_reconcile_snapshot` / `CatalogueSweepVerdict` / `catalogue_sweep_verdict` / 收窗、反查、排工与
+  `roots_behind_catalogue_on`，962 行 + 5 条测试）从 `model_update_pending.rs` 搬进 `model_coverage.rs`——它现在
+  一行 pending 都不写，与那张表无关。调用点改路径：`startup_reconcile` / `increment_manager` / `handlers` /
+  `reverse_reference`；`cata_dependency` 那条「排完根再前移依赖行」的源码钉改认新文件。`model_update_pending.rs`
+  12,344 → 11,257 行。还留在那边写 pending 的只剩 `sync_and_seed_model_coverage`（`/model/rebuild`）。
+- **钉**：`batch_scheduler` 新增「已覆盖也为名单排行 / 并入取并集去重 / 冻结整份带走 / 无名单的普通发现照旧
+  AlreadyCovered」；原来的 5 条级联测试随代码搬家。
+- 验证：`cargo check --lib --tests --bins` 干净；全量 `cargo test --lib -- --skip damaged_` **1982 passed / 0 failed /
+  136 ignored**（10 s）；`rustfmt --check` 改动十一文件干净。**未验证**：live（改一个目录件 → 反查 → 看 `/tasks` 里
+  是否出现 `model_only` 行、根被重算、`/health.catalogue_reconcile.enqueued` 计数）。
+
+### S2 后半：Ref0 统计从目标索引序列化，逐笔 ±1 观测块退役（ADR-071 D6 / ADR-039 #3）
+
+`dbnum_info_table.count` 此前由 `dbnum_stats::render` 的观测块逐笔维护：每笔元素写都带 `$before_` / `$after_`
+两次点读、一段 `FOR $row IN $observed` 解释器循环、每个 Ref0 一次热点键 UPSERT，口径是「pe 行数含墓碑」。
+ADR-071 D6 把它改成任务收尾**从内存序列化**、`count` = 目标会话上的**活元素数**；S2-a 落了渲染器
+（`task_end::Ref0Snapshot`），生产者一直欠着（`batch_worker` 里 `info: None` 那一句）。这一刀补上，并把观测块拆掉。
+
+- **生产者 `data_interface/ref0_snapshot.rs`**：`snapshot_at(source, end)`——`FrozenSource::reopen_verified_at(end)`
+  （路径身份 + 会话链复核，文件被换过就在这里报错）→ `ReadOnlyEngine::indexed_refnos()`（`DbSet@end` 的 RefNo 树只列
+  活元素，一趟遍历 24 B / 元素，零库读）→ `fold_ref0_stats`：按 `word0` 分组数、取最大 `word1`。`sesno` 取 `end`：
+  逐元素的最后修改会话不在索引里（要走全部会话 delta），而这一列唯一的消费者是兼容回退水位
+  （`dbnum_state::LEGACY_INFO_WATERMARKS` 取 `math::max(sesno)`），「数据序列化到了哪一版」正是 `end`。
+- **写点**：`batch_worker` 在数据批次应用到 `committed_end_sesno` 之后、模型发布之前，单独一笔
+  `TaskEnd{ model: None, rooms: None, info: Some(snapshot) }`（`spawn_blocking` 取快照 → `commit_task_end_on`）；
+  库类型不限（CATA / SYST 的统计也在这张表里，此前只有 DESI 才走收尾）；ModelOnly 不动数据、不做。失败只留痕、
+  标 Partial：数据行与水位不受影响，等下一次该库任务再序列化。模型 / 房间那一笔照旧 `info: None`——统计描述的
+  是数据，模型失败不该让它停在上一版。
+- **观测块退役**（`dbnum_stats.rs`）：`render` 只校验 `ids` 规范性、正文原样返回（末尾缺分号补一个——老观测块一直替
+  `read_through` 那类调用方兜着这一下）；`batch_rows` 不再每 Ref0 +1；`render` / `transaction` / `batches` 签名不动，
+  十来个调用方零改动。`rebuild_body`（`bin/rebuild_dbnum_stats` 与基线收尾用）改 `FROM pe WHERE … AND !deleted`
+  ——与快照同为活元素口径，ADR-039 #3「二选一不并存」里两条路终于同一口径（审核项 I6）。
+  **必须同一刀**：观测块的一致性闸 `IF ($old.count) < array::len($before) THROW` 拿的是「含墓碑」口径，快照写进
+  活元素数之后它会在下一窗对着墓碑行 THROW，把数据窗口打死——两个写者不能并存一分钟。
+- **钉**：`ref0_snapshot` 纯函数口径 + 真文件（ams1112，装了样例才跑）「count 之和 == 索引树元素数、max_ref1 ≥ 树里
+  同 Ref0 任一 word1、sesno 全等于目标、按 Ref0 升序、有无冻结源同一份」；`dbnum_stats`「render 原样 / 补分号 / 拒不规范
+  id / 生产正文无 `LET $before_` 等四个字眼」「rebuild 只数活行、历史 Ref0 留行清零、幂等」；`batch_worker` 收尾顺序钉
+  加「快照在数据批次之后、模型发布之前、不等模型」；`element_batch` / `cata_dependency` / `read_through` /
+  `mirror_spool` / `direct_window_replay_parity` 五处「写事务带观测」的钉翻成「写事务不碰 `dbnum_info_table`」。
+- **没退、留给 S7**：`StatisticsMode` 枚举（`versioned_db::baseline` 还按它选，两档现在无差别）；`execute_on`
+  每笔的 `require_no_event_on`（`INFO FOR TABLE pe`）；`baseline_ingest::settle_statistics` 的 `rebuild_on` +
+  `pe_count == info_count`（基线现在也走同一笔快照，rebuild 是同口径的第二个写者）；`classify_stats_settlement` /
+  `baseline_stats_need_rebuild` / `seed_suspect_dbnums` 三处对账。
+- 验证：`cargo check --lib --tests --bins` 干净；全量 `cargo test --lib -- --skip damaged_` **1981 passed / 0 failed /
+  136 ignored**（10 s）；`rustfmt --check` 改动九文件干净。**未验证**：live（7997 一窗收尾多一次索引遍历 + 一笔 info
+  事务，预估毫秒级；`/dbnums` 的 `cached_pe_rows` 直接数 `pe`，不受口径变化影响）。
+
+### 修：`/health` 两个常亮的假警报（空间树标签停在冷启动那一刻 + 房间凭据属于已退役机制）
+
+三轮 live 里 `/health` 一直报 `spatial_tree.state = ready_empty` 与 `room_build.rebuild_required = true`，
+而同一份 payload 里写着 `entries = 52346`、`resident.status = ready` / 215 间房 / 230 块面板 / 0 块无几何。
+两个都是标签问题，不是数据问题——但它们让 run 守望脚本的 DONE 判据**永远不成立**，07:23 那轮就是这么
+空转到 150 min 超时的。
+
+- **空间树标签跟着树走**（`spatial_state::refresh_ready_kind`）。`ReadyEmpty` 的意思是「校验成功且库里
+  没有可用几何指针，语义上无候选」；冷启动打在空库上时它是对的，可紧接着的初始化就把 5 万多条几何
+  发布进树里，标签却没人翻。现在每次空间发布收敛（`promote_state_after_replay`，三个调用点共用）
+  都把 `Ready` ⇄ `ReadyEmpty` 这一格对齐树。**只在已就绪的那两档之间翻**：`Loading` / `Rebuilding` /
+  `ReplayRequired` / 两档 `Degraded` 各自管自己的迁移，一格不碰；也不盖验证时刻、不清 `last_error`
+  ——这不是一次校验。要紧的是 `vacuous_room_build_reason` 正是拿 `ReadyEmpty` 判「全量重建无事可做」的。
+- **房间凭据不再被渲染成「欠一次重建」**。那枚章由「项目级启动全量房间重建」盖，而那套机制已经退役
+  （`lib.rs`：「房间计算采用逐 dbnum 实时内存模式；启动项目全算与数据库计算输入已停用」），
+  `stamp_room_build` 的两个调用点都在退役了的启动臂上——现役形态下**永远盖不上**。`/health` 因此
+  改成只报**持久标志本身**（`render_room_rebuild_required`：数据窗口尾事务在结构枚举失败时写、
+  只有成功的全量重建清除，这一条一格没动）；章在不在另开一格 `stamped` 如实报，没有藏起来。
+  读不出 / 超时那两支照旧 fail-closed 报 true——「不知道」与「没人要求过」不是一回事。
+  **启动那一侧的判据（`room_build_record_verdict`）不跟着改**：它决定要不要真跑一次重建，
+  「没建过就跑」是那里该有的保守。
+- **`scripts/Watch-InitRun.ps1`**（新）取代各 run 目录里那份一次性的 `monitor.ps1`。旧脚本除了上面两条，
+  还读着三处已经不存在的路径：`room_build.status`（房间结论在 `room_build.resident.status`，
+  `room_build` 这一层从来没有这一格）、`model_publish_queue.*` 与 `local_runtime.*`（随发布队列 /
+  backup lane 一起删了）；另有一处 PowerShell 的坑——`$Dbnums | Where-Object { … [int]$_.dbnum -eq $_ … }`
+  内层 `$_` 遮住了外层库号，那个判据实际恒真。新脚本逐格取值（缺字段读成 `$null` 不会报错，
+  得先确认它真的在），并把「三水位齐」也纳入判据。
+- **钉**：3 条——标签只在两档就绪态之间翻且不动验证时刻 / 错误（其余六档逐个断言不被翻）；
+  每一次空间收敛都要刷这一格（源码钉在 `promote_state_after_replay` 体内）；章不在时
+  `rebuild_required` 跟持久标志走，而持久标志说要重建时照样报 true、读不出时仍 fail-closed。
+- 验证：全量 `cargo test --lib -- --skip damaged_` **1979 passed / 0 failed / 136 ignored**；
+  `rustfmt --check` 干净。live：新二进制重启到 12:30 那一轮的库上，`/health` 现在是
+  `status=ok`、`spatial_tree.state=ready`（52,346 条）、`rebuild_required=false`、
+  `room_build.resident.status=ready`。
+- **第三轮冷启动整条走通了**（13:37 新 run `20260910-133645`，端口 18622 / surreal 18609）：守望脚本
+  `13:48:58 DONE after 11 min` 自行判定并退出（写下 `final-health.json`），七条判据无一豁免。
+  中途逐帧看得见标签跟着树走：开跑时 `spatial=ready_empty/0`，模型阶段中 `spatial=ready/4702`，
+  终态 `spatial=ready/52346`——正是这一刀修的东西。终帧两库 `applied=file=model=room`、
+  `data_batch:succeeded=15 running=[]`、6,787 根 0 失败。
+
+### S7 前置（续）：`gen_root` 凭证的只读取数搬出 `model_update_pending.rs`（`data_interface/model_coverage.rs`，ADR-071 S7 B3）
+
+`model_update_pending.rs` 里有一串**只读 `gen_root`、一行都不碰 pending 表**的取数——它们是凭证真值
+（d-227：`gen_root` 凭证留库）的正经读法，与队列无关，却要跟着队列表一起被删。搬出来，名字与行为不变
+（同 S5a 搬 `model_watermark.rs` 的做法），最后那一刀就是纯删除：
+
+- **搬到 `model_coverage.rs`（455 行 + 3 条测试）**：按需 `ensure` 的凭证命中判据 `generation_root_cache_current` /
+  `generation_roots_cache_current` / `render_generation_root_credentials` + 目录落款那一半 `CatalogueStamp` /
+  `catalogue_stamps_current`；启动一级过滤 `startup_coverage_floors(_on)` / `StartupCoverageFloor` /
+  `backfill_gen_root_dbnum_on`；空闲轮模型门 `model_coverage_current`；`coverage_tracked_dbnums(_on)`；
+  已发布根的目录落款 `published_catalogue_sessions_on` / `stale_catalogue_dbnums`。调用点改路径：
+  `startup_reconcile` / `on_demand_model` / `batch_worker` / `model_rebuild`；`model_update_pending` 自己的目录版本核对
+  改 `use` 新住址；三条源码钉（`window_root_plan` 的凭证 > 0、mup 两条以 `model_coverage_current` 为边界的）改认新文件 /
+  新边界；`reverse_reference` 那条 live 测试的 `use` 改指。
+- **没搬、为什么**：`sync_and_seed_model_coverage`（把缺凭证的根 `render_upsert` 进 pending）与目录版本核对
+  `reconcile_catalogue_versions*` / `CatalogueReconcile*` / `catalogue_sweep_verdict` / `roots_behind_catalogue_on`
+  ——后者经 `cascade_stale_catalogue_windows → enqueue_catalogue_cascade → enqueue_plan` 排 `RegenRoot`，**写队列**。
+  上一条把它们记成「不含 pending 内部引用」是只看了函数本体没看被调链，这里纠正：它们随 S4 把「排 pending 行」改成
+  「排 ModelOnly 任务」时再搬。`record_id_of` / `source_time_for` / `root_identity_key` 是队列行身份的事，留在队列那边。
+- 验证：`cargo check --lib --tests --bins` 干净；定向 7 passed；全量 `cargo test --lib -- --skip damaged_`
+  **1979 passed / 0 failed / 136 ignored**（10 s）；`rustfmt --check` 改动九文件干净。**未验证**：live。
+
+### S7 前置：搬家与死格——`digest` / 数据窗口落库口搬出 `model_publish_queue`，删零引用死代码与 `/health.increment_mode`（ADR-071 S7 A+B）
+
+S7「删文件」这一步现在还整刀下不去：`model_update_pending.rs`（12,826 行）里 73 个 pub 项仍被外部调用
+——它今天**仍是活的工作队列**（非 regen 项、房间目标 `RoomRecalcPanel` / `RoomRecalcElement`、延迟文件
+模型动作、drain 页、`retry_pending_unit`），`side_effect_pending.rs` 剩下的全是文件轮次 / 空间对账 /
+`published_file_input` 清单。这正是 d-73 的约束（退表不得先于房间进 Task），随 S3 后半 / S4 后半走。
+这一刀只做**现在就能做**的两档：把活的从要退的目录里搬出去，删真死的。
+
+- **搬**：`model_publish_queue::digest` → `data_interface/digest.rs`（SHA-256 小写十六进制，口径钉
+  `digest_is_plain_lowercase_hex_sha256`——房间输入版本 / 目录版本令牌 / `manifest_key` 都靠它不漂；8 处调用
+  改路径）；`model_publish_queue/{structured_data_sink,increment_window_artifact}.rs` → `data_interface/window_landing/`
+  （`mod.rs` = `land_increment_window` 同步落库口，`artifact.rs` = `IncrementWindowArtifact` 产物）——它们是
+  去账本之后的**生产路**，只是还住在叫「发布队列 / sink / artifact」的目录里；`apply_one` 的调用与四条源码钉
+  （`the_data_window_lands_…` / `apply_one_has_no_staging_fork` / `cache_invalidation_runs_…` /
+  `all_three_write_points_…`）改认新住址。`model_publish_queue/mod.rs` 只剩根发布信封（`FrozenRootEnvelope` /
+  `PreparedRootPublication` / `RootIntent` / `render_spatial_fragment`）。
+- **信封分支不是死的**：`persist_root_for_file_round` 仍被 `batch_worker.rs:2025`（文件轮次发布路）调，
+  `frozen: Some(..)` 在 batch_worker / increment_pipeline 也还在——S5 条目里「生产已无人走到」那句不准，
+  它随 S3 后半（去文件轮次）一起删。
+- **删**：`model_update_pending::has_dead_data_work`（空闲轮的 `has_dead_work` 已随死信扣门退役，探针零调用；
+  钉 `dead_letters_no_longer_gate_the_model_phase` 翻过来）；`SideEffectCompensator::mark_file_rooms_released_for_project_rebuild(_on)`
+  （零引用）；`/health.increment_mode`（只剩 `direct` 一个值，plant-ui / ops.html / spec 都不读；`batch_worker::increment_mode`
+  与它的钉一起删，钉改成 `the_direct_increment_switch_family_stays_retired`）；`web/ops.html` 的「复活副作用死信」
+  按钮（端点已删、打 404）与两处 `side_effect_pending` 读格，「停摆」判决只剩空间对账那一支。
+- **计划文本纠正**（用户拍板）：v3 S6 / S7 把 `room_published_*` 列进了 `REMOVE TABLE`——`room_published_topology` /
+  `room_published_inst` 是 ADR-067 D1 房间参照的库侧已发布物，**不退**，已从清单划掉；CONTEXT.md「已发布房间几何」
+  词条随之不退。
+- **留下的**：`model_coverage.rs` 那一搬（`startup_coverage_floors(_on)` / `StartupCoverageFloor` /
+  `backfill_gen_root_dbnum_on` / 目录版本核对 `reconcile_catalogue_versions*` + `CatalogueReconcile*` /
+  `catalogue_stamps_current` / `roots_behind_catalogue_on` / `model_coverage_current` / `generation_root(s)_cache_current`
+  / `root_identity_key`，约 560 行不含 pending 内部引用；`record_id_of` 与 `sync_and_seed_model_coverage` 写 pending 行、
+  留在原处）——下一刀。`MAX_ATTEMPTS` 63 处随 pending 表退。
+- 验证：`cargo check --lib --tests --bins` 干净；全量 `cargo test --lib -- --skip damaged_` **1976 passed / 0 failed /
+  136 ignored**（11 s；-2 随死代码删的测试 +2 新钉）；`rustfmt --check` 改动文件干净（`model_db_adapter.rs` 那一处
+  `GEOMETRY_BASELINE` 的格式差是别的会话在途的）。**未验证**：live；ops.html 只做了静态改动没开浏览器。
+
+### S6：启动统一水化段收口——镜像整表水化只做一次、取数源路由按 D8 改「三水位相等」（ADR-071 D7 / D8 / S6）
+
+S5 把 `recover_before_cleanup` 换成 `hydrate_model_projections` 之后，`run_cli` 里已经长出了统一水化段
+（同日 12:0x，那一段没进 changelog，这里一并记）；这一刀把它收口。
+
+- **统一水化段的顺序**（源码钉 `startup_hydrates_mirrors_once_after_seeding_and_before_the_model_reconcile`）：
+  状态表播种（ADR-001 `ensure_increment_state_storage`）→ 兼容播种（ADR-060 D10 `seed_legacy_model_watermarks`）
+  → **开镜像 → `DbnumState::hydrate_watermark_mirror`** → `hydrate_model_projections`（每个 `model_sesno > 0`
+  的 DESI 库 `restore_projection_on`，连带每根 `RootReceipt`）→ `retire_publish_run_tables` → 启动模型核对
+  （ADR-060 D6 双向对账在里面，读刚水化的镜像、写后逐格作废）→ worker / watcher。播种排在水化**之前**
+  （审核项 B3）：接管的历史库才带着 `model_sesno > 0` 进镜像；`run_app` 不得抢在前面水化投影。
+- **镜像整表替换只在启动做一次**（新 `hydrate_watermark_mirror` / `hydrate_watermark_mirror_on`）：
+  一句读全水位行 + 一句聚合 `dbnum_info_table` 旧水位，每格与 `read_row` 按需装载时**同一口径**（含
+  `info_max` 兼容回退），单次 `mirror::replace` 发布。`list_registered` **不再碰镜像**——它被 `/dbnums` 轮询、
+  项目扫描、房间恢复在运行期反复调，每次整表替换会有「SELECT 已发出 → 某任务落库并作废那一格 → 用 SELECT
+  之前的旧行整表盖回去」的窗口，那一格从此陈旧且再没人作废它。`gen_root` 凭证的整库口径（安定下限 /
+  未安定根）不另建镜像：启动核对与规划器按需读库里刚落的那一份（d-227 的镜像只覆盖水位行）。
+- **一次性迁移** `retire_publish_run_tables`：`REMOVE TABLE IF EXISTS` × 6（`model_publish_run / _fragment /
+  _ack / _database / _error / _superseded`，S5 后零写者），幂等、失败只出声。`model_update_pending` /
+  `incr_side_effect_pending` / `published_file_input` / `room_published_*` **仍有写者**，随 S3 后半 / S4 后半 /
+  S7 各自那一刀退，不在这里。
+- **取数源路由按 D8 改「三水位相等」**（`model_read_route::route` 多一个 `room_sesno` 入参）：
+  `Database ⇔ ingest ∧ applied_sesno > 0 ∧ 该库无数据批次任务在飞 ∧ model_sesno == applied ∧ room_sesno == applied`；
+  新理由 `room_lagging`（数据与模型到了 T、房间那一枚没盖上），优先序 在飞 > `model_lagging` > `room_lagging`；
+  跑到数据前面不算落后（M2 违反另有对账管）。`route_for` 三枚水位同一次读镜像那一格。`model_lagging` 是
+  12:0x 那一段加的（数据到 T、模型没追上 → memory），当时没记，这里一并记。
+- **`/dbnums` 的 `annotate_model_source`** 喂三枚水位；**没有判决列的行不判落后**（判决列只给 DESI 行，
+  普查失败时整格缺席）——「不知道」不能写成 `model_lagging`。这也修掉了别的会话在途那条红测
+  `dbnum_rows_carry_their_model_source_from_the_single_predicate`（夹具没跟上 `ModelLagging`）。
+  spec §4.12 同步改口。
+- **钉**：`startup_hydration_mirrors_every_registered_row_field_by_field`（`mem://`：写库 → 水化 → 镜像每格
+  与库行逐字段相等、`info_max` = `math::max(sesno)`、不经作废的库改动读不到、作废后回库）；`model_read_route`
+  新增「房间落后单独一条理由」「模型落后先于房间落后」「五个理由字面值不撞」；`run_cli` 两条源码钉改认
+  `hydrate_watermark_mirror`，并钉「镜像整表水化只做一次」。
+- **留下的**：① 任务跑完翻成 `database` 的 `model_source_changed` 事件自 S5 起没有发送者了
+  （原来在 run 收口里），plant-ui 靠轮询 `/dbnums` 兜着；接线点在 `batch_worker` 的 `commit_task_end_on`
+  之后（那一段的回执 `Ok(tail)` 目前也没被消费），随 S3 后半那一刀补。② `wait_for_model_ready` 的进度源仍是
+  空闲轮的 `model_coverage_current`（读 `gen_root`）与 pending / 副作用判据，随 S4 后半 / S7 走。
+  ③ `reconcile_model_coverage_at_startup` 里那次 `list_registered` 是启动的第二次整表读（只读，不再替换）。
+- 验证：`cargo check --lib --tests --bins` 干净；全量 `cargo test --lib -- --skip damaged_` **1976 passed /
+  0 failed / 136 ignored**（11 s）；`rustfmt --check` 改动四文件干净。**未验证**：live（重启后 `/dbnums`
+  三水位与重启前一致那一条要下一轮冷启动看）。
+
+### 模型阶段的第二处 O(N·M)：CATA 依赖闭包收成一个任务一次（ADR-071 D1）
+
+模型根发布前的目录依赖块（`cata_dependency::persist_for_design_subtree`）是**逐根**调的，而目录链
+海量共享——同一个规格、同一个元件，几千根管子都指着它。7997 那一轮把日志聚出来：
+
+| | 实测 |
+|---|---|
+| `[cata_dependency]` 调用 | **2,469 次**（6,787 根），平均 131 ms，最大 1,148 ms |
+| 写入行数 | **387,132 行** |
+| 而这个库整份闭包 | **15,500 行**（数据阶段基线已经一次性落过） |
+| 合计 | **323.7 s**，占 7997 模型阶段 628.7 s 的 **51.5%** |
+
+每一次调用还都重建一遍 `InMemoryCataLocator`（扫目录文件身份 + 依赖清单）。25 倍的重复写的是
+`Fresh`（`INSERT IGNORE`）——语义上全是空转，代价却是实的。
+
+- **改法与对账基线同一条纪律**（ADR-071 D1：任务是这个 dbnum 唯一的写者，**它知道自己写了什么**）：
+  `CataSeedMemo` 记住本窗已经落过库的 seed，作用域绑在数据窗口（`active_data_window()`）上，换窗即
+  失效；一根的 seed 全是老面孔时**连定位器都不建**，直接回一份「N 个 seed，没有新的」。
+- **只在写成功之后记**：`?` 早退的那一根不能把自己的 seed 记成写过了，否则整窗剩下的根都会跳过它，
+  缺行要等下一个任务才补得回来。窗口不在（`/model/ensure` 那类一根一调的路）一个都不记，照旧每根解一次。
+- **两个写者并发**（`root_inflight` 最多 2）时最坏只是重复做一遍已经幂等的事，不会漏。
+- **钉**：两条——记忆只覆盖一个数据窗口（同窗跳过 / 混着新老只解新的 / 换窗重来 / 无窗不记 / 作废归零）；
+  `remember_seeds` 必须排在落库之后且空集要早退。
+- 验证：`cargo check --lib --tests` 干净；全量 `cargo test --lib -- --skip damaged_` **1972 passed /
+  0 failed / 136 ignored**（另有 1 条**别的会话在途**的红，见下）；`rustfmt --check` 干净。
+- **live 已复跑坐实**（12:30 冷启动新 run `20260910-122504`，端口 18422 / surreal 18409，空 rocksdb）：
+
+  | 项 | 07:23（改造前） | 10:53（八刀后） | **12:30（两处 O(N·M) 都收）** |
+  |---|---|---|---|
+  | 7997 模型阶段 | 2,287 s ≈ 38 min | 628.7 s ≈ 10.5 min | **159.7 s ≈ 2.7 min** |
+  | 7997 任务总耗时 | — | 1,185 s ≈ 19.8 min | **571.4 s ≈ 9.5 min** |
+  | 　CATA 依赖 | — | 323.7 s，2,469 次，387,132 行 | **35.8 s，280 次，25,602 行** |
+  | 　模型行落库 | — | 174.7 s，单笔 400 → 1,280 ms | **72.3 s，单笔 313 → 383 ms（不再随表长）** |
+  | 　几何生成本体 | — | 130.3 s | 51.6 s |
+  | `surreal.exe` CPU | ≈2,600 s | 1,010 s | **512 s** |
+  | `watermark_probe` / `spatial_fragments` | 237 / 237 次 | 0 / 0 | 0 / 0 |
+  | 交付单元 | — | — | 6,769 / 6,769 成功，失败 0；三水位 `in_sync` |
+
+  **S8 那条「7997 模型阶段 ≤ 5 min」达成（2.7 min）。** 落库单笔耗时前后十批 313 → 383 ms，
+  O(N²) 那条增长曲线没了（原先 400 → 1,280 ms）。
+- **13:37 第三轮冷启动复现**：模型阶段 **146.4 s ≈ 2.4 min**（CATA 34.2 s / 280 次、落库 63.8 s、
+  几何 48.4 s），6,787 根 0 失败。CATA 那一格两轮分别是 35.8 s / 280 次与 34.2 s / 280 次——
+  收敛值稳定，不是一次侥幸。
+- **落库结果与未记忆的旧码逐行相等**（把 10:53 那个 rocksdb 另起一个 surreal 对拍）：15 张表计数
+  全等，`pe.dependency`（15,557）、`room_result`（65,319）、`inst_relate` / `tubi_relate` 的 id 集合
+  **两个方向的差都是 0**。写入次数从 387,132 降到 25,602，落地的行一行不差。10:53 / 12:30 / 13:37
+  三轮两两相等。
+- **引用完整性**：库里点名的 19,445 个 mesh **悬空 0**（磁盘 19,446 个，多的 1 个是内容寻址的孤儿）；
+  房间边点名的 37,942 个构件 / 202 块面板在 `pe` 里**悬空 0**；每个库恰好一个活的 `result_version`，
+  `room_result_part` 同版本。
+- **拿 E3D 自己当真值对了一遍几何**（`scripts/e3d/ams7997_geom_crosscheck.mac`，只读 TTY 会话、
+  无 SAVEWORK）：7997 里随机十件 BOX / CYLI，E3D `Q POS WRT WORLD` 与本地 `inst_relate.aabb_d`
+  的中心逐件比——**10/10 类型一致、世界坐标差 ≤ 0.5 mm**（E3D TTY 只打到整毫米，残差就是取整）。
+  其中两件在 W 向（负 X），符号也对上了，量的不只是数值大小还有坐标系口径。
+
+**同时纠正一条上一轮写下的判断**：那时把模型阶段拆成「生成 454 s + 落库 174.7 s」，并推断 454 s 是
+19,705 次 mesh 小文件写盘的系统调用风暴（`19,700 × 20 ms ≈ 394 s`）。**这条是错的，已实测证伪**：在同一
+块盘上逐项复刻 `ensure_mesh_file` 的调用序列（exists → create_dir_all → 写临时 → 读回校验 → `sync_all`
+→ hard_link → 删临时），单件 **1.63 ms**，19,705 件合计 **约 32 s**；其中 `sync_all` 只占 0.26 ms/件。
+真正的拆分是：**CATA 依赖 323.7 s（51.5%）+ 落库 174.7 s（27.8%）+ 几何生成本体 130.3 s（20.7%）**，
+三段相加正好 628.7 s。几何生成本体只有 130 s，「≤ 5 min」这条验收并非不可达。
+
+### 模型落库的对账读收成一个任务一次（`GeometryBaseline`，ADR-071 D1）
+
+`persist_roots_batched` 每调一次就整库扫一遍 e3d-model 几何身份。7997 实测：68 组累计读约 **180 万行**，
+写入行数一路没变而单笔事务从 **400 ms 涨到 1,280 ms**——典型 O(N²)，读的是「这个库至今为止的全部几何
+身份」，而写的人正是自己。
+
+- 一个任务读**一次**基线，之后每组落完把自己写的那部分就地更新进快照（`advance_geometry_baseline`），
+  快照始终等于「现在再读一次会得到的东西」，不是近似。作用域绑数据窗口；窗口不在就不缓存；
+  任一组落库失败 → 整份作废（那一组可能已经提交了前几块，快照不再可信）。
+- **钉**：同一窗里连落两批，吃内存快照与每批都重读一遍的**终态必须完全相同**（陈旧行漏删是数据错，不是慢）。
+- 验证：全量 `cargo test --lib -- --skip damaged_` 绿；`rustfmt --check` 干净。
+  live（12:30 那一轮，见上一条的对照表）：落库 174.7 s → **72.3 s**，单笔 400 → 1,280 ms 变成 313 → 383 ms，
+  写入行数与事务笔数一格没变（54,441 行 / 180 笔），也就是说省掉的全是那条随表长大的读。
+
+### 去账本：初始化发布 run / ACK / journal 整体退役，启动改为 D7 水化（ADR-071 S5）
+
+S1 把 `init_async_publish` 缺省翻成 `false` 之后，这套机制在缺省配置下就已经是死代码：没有 run，
+`blocks_dbnum` / `blocked_dbnums` / `preparing_dbnum` / `planned_roots` / `blocks_data_batch` /
+`can_adopt_retained_initialization` / `initialization_source` 恒回「无」，`finish_ready_initializations` /
+`kick` / `prepare_baseline` / `admit_baseline` 是空转，只剩 `recover_before_cleanup` 会在启动时替**有 run 清单
+的库**水化模型投影。这一刀把它们连根拔掉，调用点按「无 run」那一支化简：
+
+- **删文件**：`model_publish_queue/{runtime,journal,local_state,tests,generation_handoff_tests}.rs`（约 4,400 行）、
+  `bin/model_publish_sql.rs`、`data_interface/baseline_root_parity_tests.rs`（它测的 `frozen_baseline_model_plan` 只服务 run）。
+  `model_publish_queue/mod.rs` 只剩 `IncrementWindowArtifact` + `land_increment_window` + `digest` + 根发布信封
+  （`FrozenRootEnvelope` / `PreparedRootPublication` / `RootIntent` / `FORMAT_VERSION` / `render_spatial_fragment`
+  ——`model_db_adapter` 的 `frozen: Some(_)` 分支还引用着、生产已无人走到，随文件轮次那一刀一起删）。
+- **「某库在飞」的唯一来源改成任务注册表**：`TaskRegistry::has_running_data_batch_for(dbnum)` /
+  `running_data_batch_dbnums()`（新）。`model_read_route::route_for`（Memory ⇔ 任务在跑）、`/dbnums` 的
+  `annotate_model_source`、`dbnum_state::resolve_dbnum_applied`（任务在跑时只认专用水位行，不拿半截基线的
+  info max 当 applied）、播种 / 迁移 / 待办清理的 protected 名单、`model_update_pending` 的初始化排除，
+  全部改吃它。`MemoryReason::InitializationPublishing` 字面值不变（plant-ui 已认），含义 = 「这个库正在被写」。
+- **调用点化简**：`batch_worker` 删 `finish_ready_initializations`、ModelOnly 的 run 接管分支
+  （`initialization_source` + `wait_for_task_root_acks`）、`refresh_candidate` 的 retained token、两处
+  `blocks_dbnum` 守卫；`batch_scheduler` 出队谓词去 `blocks_data_batch`；`manual_update` 基线路只剩
+  `wipe_dbnum_for_reinit` + `baseline_model_plan`（`frozen_baseline_model_plan` / `AIOS_INIT_PARALLEL_GENERATION`
+  分支删）；`fast_delete::wipe_uncommitted_initialization_data` 删；`startup_reconcile` 去「保留 run 才接管」条件。
+- **启动**：`recover_before_cleanup` → `hydrate_model_projections()`（`lib.rs`）：durable 形态下对每个
+  `model_sesno > 0` 的 DESI 库 `restore_projection_on`，失败出声不拦启动（按需生成会自行重建）。这是 D7
+  「库 = 序列化，启动反序列化」的第一版，S6 再并进统一的水化段。
+- **对外面**：`/health` 去 `model_publish_queue` 一格与 `model_publish_queue.held` 阻断条件；
+  `POST /api/v1/model-publish/jobs/{id}/replay`、`POST /api/v1/model-publish/resume` 端点与路由删。
+  `DbOption` 的 `init_async_publish` / `model_publish_queue_dir` / `model_publish_memory_bytes` /
+  `model_publish_disk_bytes` 与 `AIOS_INIT_ASYNC_PUBLISH` 删（无人再读）。
+- **钉**：`batch_worker` 的收尾顺序钉改成 `the_task_tail_runs_publish_receipt_rooms_then_stamp_without_a_publish_run`
+  （四个 run 名字一个不许回来）；`model_update_pending` 的启动核对钉改成
+  `startup_reconcile_no_longer_consults_a_retained_publish_run`。
+- **留给 S6 / 文件轮次那一刀**：一次性 `REMOVE TABLE IF EXISTS model_publish_run / model_publish_fragment /
+  model_publish_ack`（表已无写者）；`model_db_adapter` 的信封分支（~800 行）与 `persist_root_for_file_round`。
+- 验证：`cargo check --lib --tests --bins` 干净；全量 `cargo test --lib -- --skip damaged_` **1969 passed /
+  0 failed / 136 ignored**（较上一刀的 2023 少的是随 run 删掉的测试）；rustfmt 改动文件干净。**未验证**：live。
+  被删文件的副本在 `%TEMP%\gen-model-lane-retired-20260910\`。
+
+### live 复跑（S8 那条验收）：7997 模型阶段 38 min → 10.3 min，两条 O(N) 读**归零**
+
+新二进制冷启动重跑 `ams-init-1112-7997`（新 run 目录 `output/ams-init-1112-7997/20260910-104959`，
+独立端口 18322 / surreal 18309，空 rocksdb），与今早 07:23 那轮逐项对照：
+
+| 项 | 旧（07:23，S1 之前） | 新（10:53，八刀之后） |
+|---|---|---|
+| 7997 模型阶段墙钟 | 2,287 s ≈ **38 min** | 619.7 s ≈ **10.3 min** |
+| `[model-query] query=watermark_probe` | **237 次**，合计 1,309 s | **0 次**（全程 29 次，全在启动对账，每次 3–4 ms） |
+| `spatial_fragments=` | **237 次**，合计 875 s | **0 次** |
+| 7997 数据+模型总计 | — | 1,185 s ≈ 19.8 min |
+| `surreal.exe` CPU | 1.03 核跑满 42 min ≈ 2,600 s | 1,010 s（≈0.7 核 × 24 min） |
+| 三水位终态 | model 追平、room 未盖 | 1112 与 7997 都 `applied = model = room`，`in_sync` |
+
+- 计划预期的「≤ 5 min」**没达到**：剩下的 10.3 min 是真活——6,769 个根的几何生成 + 68 批
+  `persist_roots_batched`（每批 100 根、1.7–8.4 s）。收口循环那 2,184 s 的空转确实一秒不剩了，
+  但生成本身没变快，也不该由这条线变快。
+- **`room_build.rebuild_required=True` 与 `spatial_tree=ready_empty` 两个老问题照旧在**，与今早那轮
+  一模一样——不是本轮改动带来的，但它们让 monitor 的 DONE 判据永远不成立（今早那轮就是这么
+  空转到 150 min 超时的）。下一步要单独查。
+
+### 修：收据搬到水位行之后漏了作废镜像那一句（live 抓到）
+
+`model_completion::commit_on` 现在写的是 `dbnum_watermark`，却没跟着作废水位镜像那一格。
+后果在 live 里当场现形：1112 的房间那一段读到 `applied_sesno=0`（库里是 725），被自己的前置条件
+挡下，`房间水位保留待恢复`。启动恢复随后补上了，终态没错，但那一轮白算一次房间。
+
+补上 `DbnumState::invalidate_mirrored_on(db, dbnum)`——**任何写 `dbnum_watermark` 的人都欠这一句**，
+这是 d-227 镜像的成文契约，收据搬家时漏了。
+
+### 去账本：非空间副作用补偿队列（SYST 派生 / ref_rev 补偿 / cata_ref_rev）连 drain / 死信 / 复活 / 清扫整体退役（ADR-071 D9，S4 后半第一刀）
+
+用户指派「side_effect_pending（空间树 reconcile / ref_rev 补偿 / SYST 派生）改随任务收尾就地做，删表」。核下来
+**非空间那三档根本没有活可就地做**：SYST 派生的执行体 `team_data::sync_team_data` 自 2026-09-07 起只打一行声就返回
+（TEAM_DATA 镜像随 feature = "sql" 退役），补偿队列里排的是空转作业；`ref_rev` 补偿早已没有生产入队点（`enqueue_ref_rev`
+零调用），如今 `ref_rev` 维护失败直接让数据窗口的同步落库失败、整窗重放，没有可补偿的东西；`cata_ref_rev` 09-07 已退役。
+于是这一刀是**纯删除**：
+
+- **`side_effect_pending.rs`**（2,749 → 2,028 行）：删 `enqueue_from_incr` / `enqueue_syst` / `enqueue_ref_rev` /
+  `upsert_pending` / `mark_failed` / `mark_abandoned` / `drain` / `revive_dead_letters` / `sweep_done` / `has_dead_work` /
+  `side_effect_status` / `side_effect_error_status` / `parse_ref_rev_payload` / `MAX_ATTEMPTS`；`SideEffectKind` 只剩
+  `SpatialReconcile`，`render_mark_done` 随之只剩空间那一笔；8 条非空间测试随删。模块头改口：只剩「文件轮次」那一行与
+  它的发布清单，随 S4 后半 / S5 并进 `task_effects`。
+- **`batch_worker.rs`**：三处 `SideEffectCompensator::drain` 删（模型恢复前置、批次后、空闲轮）；SYST 批次落库后只剩
+  作废范围缓存 + `SCOPE_DIRTY`；空闲轮的 `sweep_done` / `has_dead_work`（曾以死信扣模型门）删。钉
+  `a_syst_batch_books_its_derived_sync_…` 翻成 `a_syst_batch_invalidates_the_scope_cache_without_booking_a_derived_sync`
+  （不得再有 `enqueue_syst(` / `SideEffectCompensator::drain(`）。
+- **`/health`** 去 `side_effect_pending` 一格；**`POST /api/v1/update/side-effects/retry`** 端点与路由删。
+  钉 `health_exposes_side_effect_pending_dead_letters` 翻成 `health_no_longer_exposes_the_retired_side_effect_queue`。
+  `web/ops.html` 读这一格是 `|| {}` 兜底、不会炸，但「复活死信」按钮现在打到 404——随 S7 的 ops.html 卡片清理一起删。
+- **没动**（这一刀之外、仍在 `side_effect_pending.rs` 里）：空间 `spatial_reconcile_{dbnum}_{sesno}` 行、
+  `published_file_input` manifest、`CompletedFileRound` / `promote_file_round` / `mark_file_rooms_released` /
+  `has_collecting_file_rounds` 等文件轮次机制——它们与 `finish_file_room_round`、`aabb_tree` 启动短路、`room_resident`
+  基线交织，正由「去账本第一～四刀」那条线往 `task_effects` / `task_registry` 搬（第一刀条目末段列的就是这张清单）。
+- 验证：`cargo check --lib --tests --bins` 干净；全量 `cargo test --lib -- --skip damaged_` **2023 passed /
+  0 failed / 137 ignored**（30.2 s）；rustfmt 改动文件干净。**未验证**：live 复跑。
+
+### 去账本：数据窗口的本地 journal / backup lane 整条拆掉，结构行回 dbnum 任务同步落库（ADR-071 D1 / D11，S4 前半）
+
+用户 10:0x 原话「不需要账本……我们都是按照一个 dbnum task 处理，初始化也好，增量更新也好。不需要以前的方式了，
+帮我清理干净……不要把架构弄的复杂了」。此前工作树里的数据窗口已经是 (a) 的 lane 形态（d-183 / d-279，共识
+d-285 / d-288 已作废）：`apply_one` 一行结构行不写，把 pe / ATT_ / CATA 依赖 / `ref_rev` / 随窗语句装进工件落本地
+journal，`accept` → 尾事务 → `complete`，再由 `start_increment_backup_lane` 起的 sink 异步落库；启动还要对账
+Prepared 窗口、刷新数据库绑定。ADR-071 D10 那句「数据窗口的写法本来就是同步的」对这棵树不成立——这一刀把它变成立。
+
+- **`increment_pipeline::apply_one`**：窗口产物 `IncrementWindowArtifact::from_window` 仍在内存里装（事实不是 SQL），
+  随即 **同步** `land_increment_window(&SUL_DB, T, &artifact)`（计入 `timings.persist`），失败即返回——水位不动、
+  attempt 记录保留，整窗重放收敛；然后才 `reopen_verified` → `finalize_attempt`（尾事务，随窗语句形参仍为空：已随
+  产物落了）。`LocalInput` / `increment_local_runtime` / `observe_database_applied` / `store_backup_bundle` /
+  `accept` / `complete` 全部删除；回执 `warnings` 接落库回执的 UDA 缺键 / 墓碑退化 / CATA 缺失。
+- **`lib.rs run_cli`**：删本地 runtime 打开、`reconcile_prepared_data_windows`、`record_startup_reconciliation`、
+  `bind_database`、`start_increment_backup_lane` 整段；`/health` 两处 `local_runtime` 块删除；`DbOption` 的
+  `local_runtime_root` 与 `options::local_runtime_limits` 删除。
+- **`model_publish_queue/`**：删 `local_runtime.rs`、`local_backup.rs`、`local_state_tests.rs`、`reconcile_tests.rs`，
+  `mod.rs` 去掉 lane 的四个 static、`increment_local_runtime*` / `local_runtime_health` / `PreparedWindowReconciliation` /
+  `reconcile_prepared_data_windows` / `start_increment_backup_lane`；`structured_data_sink.rs` 只剩 `LandingReport` +
+  `land_increment_window`（同步落库入口，`SurrealStructuredDataSink` 与 `LocalBackupSink` impl 删除；随窗语句批的
+  错误改为 `take_errors` 全收，THROW 原话不再被 `.check()` 吞掉）；`increment_window_artifact.rs` 去掉
+  `into_bundle` / `from_bundle`（不再落盘）。`fast_model/local_initialization.rs`、`bin/local_init_producer.rs` 删除。
+  **留到 S5 / S7 一并删**：`journal.rs` 里的 `LocalWindow` / `LocalCompletion` 事件与 `local_state.rs`（journal 还
+  引用着，发布 run 退役时整目录一起走）。
+- **钉**：`apply_one_has_no_staging_fork` 改钉同步序列化顺序（闭包 → 失效 → ref_rev 渲染 → 随窗渲染 → 产物 →
+  落库 → 复核 → finalize）；新钉 `the_data_window_lands_its_structured_rows_synchronously_before_the_tail`
+  （落库口只有一处、在尾事务之前、lane 六个名字一个不许回来、老逐段直写口也不许回来）；
+  `cache_invalidation_runs_before_the_landing_and_again_after_the_rows_land`；lib.rs 新钉
+  `startup_neither_opens_a_local_journal_nor_starts_a_backup_lane`；sink 测试改为
+  `landing_the_window_product_equals_the_segment_by_segment_direct_write`（产物落库 == 逐段直写，逐表）、
+  `landing_the_same_window_twice_converges`（不动）、`a_failing_statement_errors_out_and_a_replay_converges`
+  （坏语句 → Err 带 THROW 原话 → 重放与一次成功逐表相等）。`a_dbnum_unknown_to_the_binding_…` /
+  `the_window_is_prepared_before_the_tail_…` / lane 三条 completion 测试随 lane 删。
+- **顺手核出一条 `mem://` 怪癖**（写进测试注释）：一张表若**首次隐式定义发生在被回滚的事务里**，之后对它的写会
+  静默落空；生产里随窗语句的目标表都在启动 DEFINE 过，风险低，但新表别指望隐式定义。
+- 验证：`cargo check --lib --tests --bins` 干净；全量 `cargo test --lib -- --skip damaged_` **2031 passed /
+  0 failed / 137 ignored**（28.7 s；较 S2-a 后的 2060 少的是随 lane 删掉的测试）。**未验证**：live 复跑。
+- 被删文件的副本留在 `%TEMP%\gen-model-lane-retired-20260910\`（仅本机，几小时后可清）。
+
+### 去账本第四刀：完成收据从账本那一行搬到水位行
+
+收据原先寄居在「文件轮次」那一行（`incr_side_effect_pending:spatial_reconcile_{dbnum}_{sesno}`
+的 `model_completion` 字段）——账本时代它要跟着那一轮的发布状态走，所以住在那儿。它描述的
+本来就是「这个库追平到哪一版」，账本退役之后自然的家是 `dbnum_watermark:{dbnum}`。
+
+- **`model_completion::round_id()` → `receipt_row(dbnum)`**：收据 + 新字段
+  `model_completion_sesno`（这张收据是给哪一版开的）都写在水位行上，读者拿它与 `model_sesno`
+  对齐，对不上就当没有。
+- **退了一道闸**：原先第一道是「文件轮次那一行还是 `done` 且 `commit_token` 没换」
+  （`rejection::FILE_ROUND_CHANGED`）。没有那一行可问了，同一件事由任务自己担保——走到这里
+  它刚把这一轮的空间发布完，令牌就是它手里那一个（`complete_model_task_on` 已断言收据的
+  `source_token` 与之相等）。**其余七道库侧证据闸一道没少**（数据水位、四种根证据、模型待办为空）。
+- **同理退掉的交叉校验**：读者原先要比「收据的 `source_token` == 那一轮的 `commit_token`」。
+  收据当时寄居在别人的行上，得问两边同不同意；现在它住在任务自己盖章的那一行，
+  没有第二方可以不同意。探针（`read_model_watermark_probe` 第 10 句）与
+  `dbnum_consistency` 的普查查询都改读水位行。
+- 钉：收据表驱动用例从 13 格减到 10 格（去掉的三格钉的正是那道退役的闸），
+  新增断言「收据要说清自己是给哪一版开的」。
+- 验证：`cargo test --lib`（排除下面说的那个模块）**2028 passed / 0 failed**。
+
+### 去账本第三刀：空间发布改由任务直发，账本不再是集合的来源
+
+`publish_model_file_round` 末尾那句 `reconcile_spatial_pending(mgr)` 换成
+`publish_task_spatial_effects(dbnum, end_sesno, db_type, commit_token)`：这一轮的空间增删
+直接从 `task_effects` 那本内存账拿，不再「写进行里 → `SELECT` 回来 → 应用 → 销账」绕一圈。
+
+- **`PublishedRoundIdentity`（新）**：一轮发布的身份只有四样（dbnum / db_type / end_sesno /
+  commit_token）。候选清单与快照 manifest 原先从 `&[PendingJob]` 算——也就是从账本那几行算；
+  抽出这个结构之后，**任务内存也能造出同一份候选**，而启动那套「快照头 vs 库侧清单」的对拍
+  逻辑一行没动（这是用户选的 (a) 路）。`From<&PendingJob>` 让账本那条路原样可用。
+- **`publish_one_spatial_round`（新）**：拓扑候选 → 应用增删 → 发布快照，**账本重放与任务直发
+  共用同一段身体**。两条路走同一段，是为了账本拆掉时不会有一条路悄悄少做一步；
+  「拓扑先于快照」那条纪律的钉子也随之移到它身上。
+- **任务直发顺手销账**：发布成功后 `mark_done` + `promote_state_after_replay`，出队前那道闸
+  （`reconcile_spatial_pending`，扫全局）就不必再重放一遍。别的库遗留的 pending 行仍由那道闸兜。
+- **内存那本取不到时回落到库里那一行**：内存跨不过重启。过渡期两本账内容相同，行拆掉之后
+  回落也一起没——届时兜住崩溃窗口 ②/④ 的是「收尾那一笔没盖章 = 这一窗没发生过，整窗重跑」。
+- 钉：`batch_worker` 的发布顺序钉改看 `publish_task_spatial_effects(`；`side_effect_pending`
+  的发布纪律钉改钉在共用执行体上（`persist_aabb_tree_if_dirty_locked_for_publication(rounds)`）。
+
+### 去账本第二刀（半刀）：`e3d.room.lookup` 的「在飞」改问任务注册表
+
+`task_registry::has_running_data_batch()`（新）替掉 `query_service` 里那句
+`SideEffectCompensator::has_collecting_file_rounds()`。后者问的是「文件轮次那一行还开着吗」，
+那一行随账本退役；同一件事注册表里就有答案，还省一次库读。
+
+- **只看 `Running`**：`Queued` 还没开始动这个库的数据，算进「在飞」会让读路在一整条积压队列的
+  存续期间都说「更新中」。
+- **崩溃留下的未收敛意图不归这一问管**：它由同一个函数上面那句 `ensure_spatial_ready()` 拦住
+  ——空间树是 `ReplayRequired` 时，`e3d.room.lookup` 根本走不到这一行。
+- **`aabb_tree` 那两处 `has_collecting_file_rounds` 没动**：启动短路判据与 `file_round_private`
+  裁决要和「行不再产生」同一刀换，单独换会让启动在还有 `collecting` 行时判错。
+- 钉：`only_a_running_data_batch_counts_as_a_publication_in_flight`（排队 / 在跑 / 终态三态各答什么）。
+- 验证：全量 **2064 passed / 0 failed / 138 ignored**（26.6 s）。
+
+### 去账本第一刀：副作用集合搬进内存（`data_interface/task_effects.rs`，ADR-071 D1）
+
+用户 2026-09-10 拍板「**不需要账本**，我们都是按照一个 dbnum task 处理，初始化也好，增量更新也好」。
+所谓账本就是 `incr_side_effect_pending:spatial_reconcile_{dbnum}_{sesno}` 那一行（「文件轮次」）：
+生成阶段把「空间要刷新的 / 要删的 refno」「房间要清的边」写进去，同一个任务收尾时再读回来用。
+写进去又读回来这一趟是异步时代的遗产——那会儿模型行、空间重放、房间收尾分属三条路，得有一本
+**持久的**待办把它们串起来；ADR-071 之后三段都在同一个任务里同步跑完，串它们的应该是内存。
+
+- **`task_effects`（新）**：键是（dbnum, 这一轮的目标 sesno），与库里那一行同一把钥匙。
+  集合代数与 `render_file_spatial_reconcile_upsert` 逐条对齐——一个 refno 从 refresh 挪到 remove
+  （或反过来）时另一边同时摘掉，否则同一根会既被刷新又被删除。`open` 时丢掉这个 dbnum 的**全部**
+  历史键：上一轮半途没收尾的残留漏进新一轮，比少记一条危险得多。
+- **喂养点与库那一行一一对应**：`model_db_adapter` 两处（合块落库 / 逐根落库）、`aabb_refresh` 一处、
+  `batch_worker` 的开轮处。同一处调用同时喂两边，过渡期两本账内容相同。
+- **房间那一段改吃内存那本**：`finish_file_room_round` 的清边名单来自 `task_effects::snapshot`，
+  库里那一行只作**崩溃回落**（进程中途重启内存那本没了，名单还在库里）。S4 把那一行拆掉之后
+  回落也没了——届时语义是「收尾没盖章 = 这一窗没发生过，整窗重跑」。
+- **钉**：4 条新用例——没开轮是 `None`、开了轮但空是 `Some(空)`（两者要分得开，前者才回落）、
+  改主意的 refno 从另一边摘掉且清边名单只增不减、开新一轮丢掉同库旧账但不碰别的库。
+- 验证：全量 `cargo test --lib -- --skip damaged_` **2063 passed / 0 failed / 138 ignored**（27.8 s）。
+- **下一刀（S4，还没做）**：账本真正拆掉要等空间重放进任务内存。今天 `publish_model_file_round`
+  末尾那句 `reconcile_spatial_pending(mgr)` 已经**在任务里同步跑**了——它只是绕了库一圈：
+  把集合写进行里、再 `SELECT` 出来、`apply_deferred_spatial_mutations`、然后销账。改成直接吃
+  `task_effects` 就少这一圈。真正要换的是**崩溃语义**：今天靠那一行 `pending` 跨重启重放
+  （崩溃窗口 ②/④），拆掉之后靠「收尾那一笔没盖章 → 整窗重跑」。这一换必须和
+  `has_collecting_file_rounds`（`e3d.room.lookup` 的 `updating` 判据、启动 `file_round_private`）
+  改吃 `task_registry` 一起做，否则读路会永远说「更新中」。
+
+### S3（前半）+ S2-b（后半）：房间排到盖章之前，任务收尾一笔盖三水位（ADR-065 G2 (i)，修 d-73）
+
+顺序翻过来了。`batch_worker` 的 Task 末尾从「文件轮次发布 → **模型盖章** → 房间」变成
+「文件轮次发布 → 完成收据 → **房间** → 一笔收尾盖三水位」——d-73 指出的「模型水位先于房间前移」
+就此消失：房间没成，模型那一枚照盖（房间失败不擦掉已经成的模型），房间那一枚不盖，启动恢复再补。
+
+翻不动的原因原本是三道闸都要求**模型水位已经盖在库里**，本轮把它们换成了任务手里的事实：
+
+| 闸 | 原来 | 现在 |
+|---|---|---|
+| `calculate_and_commit_memory_rooms` 前置 | `state.model_sesno == model_sesno && applied >= model_sesno` | 只剩 `state.applied_sesno >= model_sesno` |
+| `PreparedRoomResult::require_on` CAS | `$watermark.model_sesno = $input.model_sesno AND …` | `$watermark.applied_sesno >= $input.model_sesno` |
+| `PreparedRoomResult::commit_on` CAS | 同上 + 房间单调 + 义务相等 | 去掉模型那一条，另两条留着 |
+
+**挡住陈旧房间结果的仍然是义务 CAS**（`room_required_input = $input`）：另一个任务一旦
+`require_on` 换了义务，旧结果就提交不了——这条由
+`boundary_change_during_calculation_preserves_new_obligation_and_rejects_stale_commit` 钉着，
+本轮另加一条反向钉「模型水位自己动了**不再**挡房间提交」，免得哪天被顺手加回去。
+
+- **`PreparedRoomResult::commit_on` 只写边与结果版本**：`room_sesno` / `room_sesno_time` /
+  `room_settled_at` 三格挪进 `task_end`。生产路径上 `room_sesno` 现在**只有 `task_end` 一个写者**。
+- **两个调用方各自盖**：`batch_worker` 的 Task 末尾在房间之后一笔盖（模型 + 房间 + `state_revision`）；
+  `room_task::recover_missing_room_watermarks`（启动恢复）自己盖，且**只在确实落后时**盖——
+  否则每次启动都会给每个已完成的库白涨一次 `state_revision`。
+- **`complete_model_task_on` 退成纯收据写者**：不再盖水位，`target_time` 参数一并去掉（时刻跟着
+  收尾那一笔走）。它那四道整库证据闸留在收据里，位置也没变——房间算之前就该确认「整库追平到 T」。
+- **钉**：`batch_worker` 的阶段顺序钉改成 `publish < 收据 < 房间 < 收尾 < finish_ready`；
+  `room_task` 源码钉「计算段不得再拿库里那枚模型水位当前置条件」；`room_completion` 三条测试按
+  新的两段式改（`commit_on` 之后房间水位**不动**，收尾那一笔盖了才到 12）。
+- 验证：`cargo check --lib --tests` 干净；全量 `cargo test --lib -- --skip damaged_`
+  **2059 passed / 0 failed / 138 ignored**（27.7 s）。
+- **未动**（S3 剩下的一半 + S4）：`finish_file_room_round` 仍认文件轮次
+  （`file_round` / `room_released` / `retire_file_room_pending` / `mark_file_rooms_released` /
+  `clear_deferred_room_edges(published.room_clear_refnos)`），`publish_model_file_round` 仍挂着延迟
+  模型动作、`stage_published_room_input`、房间候选拓扑与 `reconcile_spatial_pending`。清边名单改由
+  任务内存合成、`missing_panels` 整库拒算改成留痕 + 排除集（ADR-067 D6），都还没做。
+  **房间失败挡住牵涉根凭证前移**（G2 (i) 的后半）也没做：今天仍是「模型整枚照盖」，
+  按根剔除要等根级凭证前移的集合就位。
+
+### S2-b（前半）：任务收尾接上 `task_end`，`read_model_watermark_probe` 退出热路径（ADR-071 D3）
+
+收尾那一问从库挪回了任务自己手里。`complete_model_task_on` 原先开头就跑一次
+`read_model_watermark_probe`——10 条语句、两趟 `gen_root` 全库扫，7997 实测 avg 5.5 s——问的三件事
+任务其实都知道：「还有根在赶吗」是本任务单元清单的成败、「凭证下限够不够到 T」是本任务刚把这一版
+每一根都落了库（S1）、「这库是不是空模型」是本任务规划出来的根数。
+
+- **`ModelTaskCompletion` 多两格**：`model: TaskModelOutcome`（本任务这一版的成败与放弃根数）与
+  `roots: usize`（落库的根数，`0` = 权威空清单，走 `receipt.empty` 那条）。`batch_worker` 从
+  `result.units` 现算，不查库；走到那一步 `round_complete` 已经担保每个交付单元都是 `Generated`。
+- **`model_completion::commit_on` 只写收据，不再盖水位**：原先它把
+  `render_model_watermark_advance` 嵌在同一笔事务里。水位统一归 `task_end::commit_task_end_on`。
+  收据那四道**库侧证据闸**一道没退——闸问的是「整库都追平到 `sesno` 了吗」（含别的轮次留下的
+  未安定根），任务自己的单元清单答不了这一问，它只知道本任务那些根。闸是 `LIMIT 1` 的存在性判定，
+  一趟；探针那两趟是全量取回。
+- **收据落完立刻接收尾那一笔**：`task_end::commit_task_end_on(model: Some(..), rooms: None,
+  info: None)`。房间水位仍由 `PreparedRoomResult::commit_on` 盖、Ref0 统计仍由 `dbnum_stats` 的逐笔
+  观测块维护——这两半随 S3 并进同一笔（见下「未动」）。收据刚证过 `applied_sesno >= T`，紧接着
+  收尾又被数据水位闸挡下的话，只可能是这个库有第二个写者：**报错**，不是一句 `AheadOfData`。
+- **钉**：`model_update_pending` 两条新源码钉（收尾段内不得再含 `read_model_watermark_probe(`；
+  空清单判据必须是 `completion.roots == 0`，不得再读 `probe.has_roots` / `probe.settled_floor`），
+  `model_completion` 那条钉翻面（收据落地但**水位不动**，改由收尾那一笔盖后才到 12）。
+- 验证：`cargo check --lib --tests` 干净；全量 `cargo test --lib -- --skip damaged_`
+  **2053 passed / 0 failed / 138 ignored**（31.3 s）。
+- **未动**：`batch_worker` 末尾的顺序还是「文件轮次发布 → 模型盖章 → 房间」，**没翻成** ADR-065 G2 (i)
+  要求的「模型行 → 房间 → 收尾一笔」。翻不动的原因是硬的：房间那一段
+  （`calculate_and_commit_memory_rooms` 的 `state.model_sesno == model_sesno` 前置、
+  `PreparedRoomResult::require_on` / `commit_on` 的两道 CAS）**要求模型水位已经盖在库里**才肯算，
+  所以水位挪到房间之后就得同时改房间的三道闸——那是 S3 本体。`publish_model_file_round` 同理不能删：
+  它里面还挂着延迟模型动作、`stage_published_room_input`、房间候选拓扑与 `reconcile_spatial_pending`
+  （分属 S3 / S4）。`read_model_watermark_probe` 本体保留，剩下的调用者是启动对账（D6）、
+  `advance_model_watermark_on` 与空闲循环的 `republish_settled_file_rounds`——它们问的都是整库口径，
+  任务内存答不了，随 S5 / S6 一起收。
+
+### S2-a：任务收尾的一笔控制面事务落地（`data_interface/task_end.rs`，ADR-071 D3/D6）
+
+计划 §2 S2 的第一半：**渲染器 + 落库器 + 钉**，还没接进 `batch_worker`（接线要连着 S3 的
+`finish_task_rooms` 一起换，见下）。它要替掉的三处写入各有各的代价——`complete_model_task_on`
+背后那次 `read_model_watermark_probe` 是 10 条语句两趟 `gen_root` 全库扫（7997 实测 avg 5.5 s）、
+`PreparedRoomResult::commit_on` 把房间提交与水位耦在一笔 CAS 里（房间先于模型盖章，d-73）、
+`dbnum_stats` 的逐笔 ±1 观测块每笔元素写都带 `$before_` / `$after_` 读回。
+
+- **`task_end::render_task_end_tail(&TaskEnd) -> String`（新）**：一笔 `BEGIN/COMMIT`，先 Ref0
+  统计块、后水位那一句。统计块 = 本库现有行先 `count = 0`（历史 Ref0 留行不留数，供清理发现），
+  再按快照逐个**绝对**覆盖（`count` 来自任务手里的目标索引，不再逐笔加减；`sesno` / `max_ref1`
+  仍 `math::max` 单调；Ref0 归属冲突照旧 `THROW`——三个项目的 sys 库都是 8191，这道闸不能省）。
+  水位那一句留着 ADR-060 的三条纪律：单调 `math::max`、时刻子句排在赋值之前、
+  `WHERE (applied_sesno ?: 0) >= T` 是数据水位的第二道闸（M2）；`UPDATE` 不是 `UPSERT`。
+- **谁盖章谁不盖**：`model_sesno` 只在 `model.all_roots_ok` 时推，`room_sesno` 只在 `rooms.ok` 时推
+  （ADR-065 G2 (i)：房间失败挡住牵涉根的凭证前移，但模型失败不挡房间已成的那一半）。
+  `model_dead_roots` / `model_roots_observed_at` 是现场观测，成败都记。一枚水位都不盖时整句退成
+  `state_revision + 1`，**不带**数据水位闸。
+- **`commit_task_end_on`**：落库 + 作废该 dbnum 的水位镜像格（d-227）与一致性普查缓存，回执说清
+  「盖了哪枚水位 / 写了几个 Ref0 / 是不是被数据水位挡下」。回滚的事务会给出错语句**之前**的每一条
+  都报一句笼统的「事务失败」，所以按 `check_publication_response` 的老办法把带序号的错误全留下——
+  只看第一条就永远看不到 `THROW` 的原话。
+- **口径**：`TaskEnd.info` 是**目标索引的全量快照**（`None` = 本任务没有权威快照，一行都不碰
+  info 表；`Some(vec![])` = 该库在 `T` 上没有活元素，全部清零）。统计块排在水位闸之前是有意的：
+  统计描述的是**已经落库的数据**，水位闸管的是模型/房间承诺，两者各管各的。
+- **钉**：10 条新用例——6 条渲染钉（一笔事务 / 两枚水位与闸 / 时刻先于赋值 / 模型失败只留观测 /
+  空尾只推 revision / 收尾不得回查 `gen_root` 等四个形状 / 文件名与时刻的引号逃不出字面量），
+  4 条 `mem://` 真跑（三样事实一次落地且历史 Ref0 清零留行 / 数据水位挡住两枚水位但不挡统计 /
+  模型失败房间照推 / 别库的 Ref0 让整笔回滚且一格没改）。
+- 验证：`cargo check --lib --tests` 干净；全量 `cargo test --lib -- --skip damaged_`
+  **2051 passed / 0 failed / 138 ignored**（24.6 s，S1 之后是 2041，新增 10 条即本条）。
+- **未接线**（S2-b + S3 一起做）：`batch_worker` Task 末尾仍走 `publish_model_file_round` →
+  `complete_model_task_on` → `finish_file_room_round` → `finish_ready_initializations` 那一串；
+  `read_model_watermark_probe` / `ModelWatermarkProbe` / `advance_model_watermark_on` 还都在。
+  新顺序（模型行 → 房间 → 收尾尾事务 → 镜像 → 回执）要等 `room_task::finish_task_rooms` 就位，
+  否则房间那一段还认文件轮次。Ref0 快照的**生产者**（从任务手里的 `DbSet@T` 按 Ref0 分组数活元素）
+  也还没写，`info` 目前只有测试在喂。
+
+### S1：模型行由 dbnum 任务跨根合块**同步**落库，初始化不再开异步发布 run（ADR-071）
+
+ADR-071（已接受）计划 §2 的第一步。今早 `ams-init-1112-7997` 那 40 分钟里 95% 花在「每 16 根一次的收口循环」
+拖着的两条 O(N) 读上（`watermark_probe` 237 次 1,309 s、`spatial_fragments` 237 次 875 s），它们长在 pending +
+异步发布这套模式上；S1 把模型行的写者从队列消费者换回任务自己——生成完就地写，不排队、不等 ACK、不落中间 SQL 文件（D11）。
+
+- **`model_db_adapter::persist_roots_batched`（新）**：一批根的记录**跨根合块**，按 `tx_limits::data_tx_limits()`
+  的字节上限装满切块（超限劈半、管身槽位跨块延续），一块一笔事务；语句形状仍是 ADR-060 的「按记录 id 先删后插 +
+  每表一条 `INSERT IGNORE`」。对账读从每根一问收成整库一次（`existing_geometry_of_dbnums_on`，各根按祖先链在客户端
+  分摊）；嵌套根共有的记录一组内只渲一次；`gen_root` 凭证行末块盖章，之前的块由 `render_publication_fence_batch`
+  标出中间态。一组 ≤ `BATCHED_PERSIST_ROOTS_PER_GROUP`（512）根，**组是赔付边界**：组内任一块失败，该组根全算落库
+  失败（回执没盖、栅栏留着，窗口规划器眼里仍未发布，下次任务重生成），其余组照常。没有 per-root CAS / ACK——同一
+  dbnum 只有本任务一个写者。
+- **`model_refresh::generate_roots_report`**：`wait_for_task_root_acks` / `wait_for_dbnum` /
+  `render_file_model_publish_root` / `initialization_source` / 逐根 `persist_root` 循环全部去掉，整批根只走一次
+  `persist_roots_batched`；`memory_only` 库照旧只写内存（R2 / ADR-064 D7），读透形态照旧「先写透 `pe` 再发布模型行」，
+  CATA 依赖块仍只 warning 不拦发布。落不进去的根按组进回执 `failures`。新增 `[model-persist]` 一行日志
+  （roots / groups / rows / removed / receipts / commits / failed_roots / elapsed_ms）。
+- **`init_async_publish` 缺省翻成 `false`**（`options.rs`）：新 run 不再开异步发布，显式 `AIOS_INIT_ASYNC_PUBLISH=1`
+  只为回放旧 journal 留门，S5 拆掉 run 时连门一起删。
+- **钉**：`model_db_adapter` 四条新 `mem://` 用例——跨根合块且每根都盖章、一次对账读就删净陈旧行、按字节劈块时管身
+  槽位跨块延续且栅栏末块才抬、拒收别库的根；`model_refresh` 源码钉「不得再含 ACK / 逐根发布那五个形状，整批只落一次」。
+- 验证：`cargo check --lib --tests` 干净；全量 `cargo test --lib -- --skip damaged_` **2041 passed / 0 failed /
+  138 ignored**（26.6 s）。**未验证**：7997 live 复跑没做——S8 那条验收（模型阶段 ≤ 5 min、`serve.stdout.log` 零
+  `watermark_probe` / `spatial_fragments`、surreal 不再一核满跑）要等下一次 `ams-init-1112-7997`。
+- 未动（S4 / S5 再收）：`persist_root` / `persist_root_in_chunks` / `persist_root_for_file_round` 与 `PERSIST_CHUNK`
+  仍在，服务尚未退役的文件轮次路径；`batch_worker` 的初始化接管分支与 `blocks_dbnum` 判据、`model_update_pending` /
+  `model_publish_queue` 本体、根级 CAS 的库侧半边也都留到那两步。
+
+### 已有数据库的兼容初始化：模型 / 房间水位缺省按数据水位追平（ADR-060 D10）
+
+用户拍板「模型水位 + 房间水位默认按数据水位 保持一致」，起因是核对「gen-model 兼容一个已有数据的数据库的
+初始化，主要是水位的初始化」：数据那一枚早有 ADR-001 的 pe 兼容播种（`ensure_increment_state_storage`，按
+`max(pe.sesno)` 填 `applied_sesno`、`queue_control:watermark_seed` 标记、完整性比对不齐不播）；模型那一枚却
+**没有任何播种路径**——历史库（`pe` + 旧管线 `inst_relate` / `tubi_relate` 投影、无 `gen_root`、`model_sesno` 从未
+写过）在 D6 对账里只得到 `AwaitingTaskCompletion`，随后被启动核对排成从 0 起的 `ModelOnly` 恢复 Task；
+**兼容一个已有模型数据的库 = 全库模型重建**，且 `complete_model_task_on` 对「无根却有投影」的库永远盖不了章。
+
+- **播种**（`dbnum_state.rs` 新增 `seed_legacy_model_watermarks_on` / `DbnumState::seed_legacy_model_watermarks` /
+  `legacy_model_watermark_seed_lines`）：候选 = `applied_sesno > 0 ∧ model_sesno = NONE`（`NONE` 与显式 `0` 分开，
+  `0` 是 D7 / D8 / 本条写下的判定，不改写）；初始化在飞的库跳过。有旧管线投影（`projection_presence_expr`，
+  与 D6 探针同一段谓词）→ **接管**：`model_sesno = model_sesno ?? applied`、`room_sesno = room_sesno ?? applied`，
+  只填空、不贴 `*_sesno_time`（D1 时刻纪律）、`state_revision` 自增、逐格作废水位镜像；数据在模型无 → 显式记
+  `model_sesno = 0`（语义不变，只为退出候选集——投影探针大库上不便宜），房间不动。两格各一行启动日志带样本，
+  安静的一次不出声。
+- **启动序列**（`lib.rs run_cli`）：播种排在 `init_inst_relate_indices` / `backfill_inst_relate_anc` **之后**
+  （探针的 `WHERE in = $parent.id` 没 `idx_inst_relate_in` 时是逐 pe 行全表扫）、`reconcile_model_coverage_at_startup`
+  **之前**（否则那一轮给这些库排从 0 起的恢复 Task，接管等于没做）；失败只提示不上抛，下次启动幂等重来。
+- **启动核对**（`model_update_pending.rs`）：`ModelWatermarkProbe::legacy_adopted`（无根 ∧ 有属性 ∧ 有投影 ∧
+  `model_sesno > 0` ∧ `model_sesno >= applied_sesno`）命中即跳过恢复 Task，逐库 `reason=legacy_adopted` 出声、
+  汇总行加「兼容接管 N 库」。探针 `supported()` 对该形状本就回 `applied`，所以接管的库在 D6 对账里是 Aligned。
+  数据一旦前移就不再是这一格，照常开窗。
+- **已知边界（有意留下，写进 ADR-060 D10）**：接管的库在新管线写下第一行 `gen_root` 之前没有严格完成凭据；
+  这期间一窗零 regen 的 Task 收尾仍按「无根须无投影」判 Partial（水位已由热路径盖到 T、房间那一窗不跑）——
+  是 `CompletionReceipt.empty` 只有一种形态的问题，本条不改，要收另起一条给回执加「兼容接管」形态。
+- 文档：ADR-060 状态行 + D10 追记；CONTEXT.md 新词条「兼容接管 (Legacy Adoption)」。
+- 验证：全量 `cargo test --lib -- --skip damaged_` **2028 passed / 0 failed / 138 ignored**（24.1 s）。新钉 7 条：
+  `mem://` 六库一表（dbnum 直写投影接管 / 只有 `in` 的历史投影接管 / 数据在模型无记 0 且房间不动 / 显式 0 不动 /
+  `applied = 0` 不是候选 / protected 跳过、解除后再接管、同名单重跑幂等），接管语句只填空不贴时刻、`SET` 顺序
+  （`room_settled_at` 判断排在 `room_sesno` 赋值前），日志两格分开且安静不出声；探针 `legacy_adopted` 四条件缺一
+  不可；播种后的历史库对账 `Aligned{26}` 且 `legacy_adopted()`；启动核对源码钉「接管判定 < 取文件最新 < 开窗」
+  且出声进汇总；`run_cli` 源码钉「索引 → 回填 → 播种 → 启动模型核对」且失败不上抛。既有 `legacy_inst_projection_
+  waits_for_a_completion_task` / `legacy_tubi_projection_…` 照旧绿——对账本身仍不上调，上调只由播种与 Task 做。
+  **未做实机 live**（需要一台带旧管线投影的历史库）：接管后首启应见「兼容接管 N 库」且 `/dbnums` 该行 `in_sync`。
+
 ## 2026-09-09
 
 ### 自带持久库档 `spawned-rocksdb`：「创建数据库实例」是一档配置（0.1.21，ADR-070）

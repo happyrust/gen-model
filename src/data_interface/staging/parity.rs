@@ -129,7 +129,7 @@ async fn staged_parse_window_with_real_rendering_matches_direct_write() {
     use crate::data_interface::ele_data::EleData;
     use crate::data_interface::ele_ops::{EleOperationData, EleOperationDetail};
     use crate::data_interface::increment_pipeline::IncrementPipeline;
-    use crate::data_interface::model_update_pending::render_finalize_tail;
+    use crate::data_interface::increment_tail::render_finalize_tail;
     use crate::data_interface::model_update_plan::ModelUpdatePlan;
     use aios_core::{NamedAttrValue, RefU64};
     use std::collections::BTreeMap;

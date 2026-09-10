@@ -65,29 +65,6 @@ fn default_ensure_depth() -> usize {
     1
 }
 
-pub async fn model_publish_replay(
-    State(state): State<AppState>,
-    Path(id): Path<String>,
-    Json(req): Json<ProjectReq>,
-) -> Result<impl IntoResponse, ApiError> {
-    resolve_identity(&state, &req)?;
-    crate::data_interface::model_publish_queue::replay_job(&id).map_err(ApiError::from_domain)?;
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(json!({"job_id":id,"status":"ready"})),
-    ))
-}
-pub async fn model_publish_resume(
-    State(state): State<AppState>,
-    Json(req): Json<ProjectReq>,
-) -> Result<impl IntoResponse, ApiError> {
-    resolve_identity(&state, &req)?;
-    crate::data_interface::model_publish_queue::resume_consumer()
-        .await
-        .map_err(ApiError::from_domain)?;
-    Ok((StatusCode::ACCEPTED, Json(json!({"status":"resumed"}))))
-}
-
 /// POST /api/v1/element/attributes — complete e3d-io attributes.  Rendering is
 /// blocking file work; the compatibility backup is merely queued by the service.
 pub async fn element_attributes(
@@ -682,7 +659,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         crate::data_interface::model_type_scope::resolved();
     let model_incremental_types_origin =
         (!model_incremental_types.is_empty()).then(|| model_type_origin.describe());
-    let model_publish_queue = crate::data_interface::model_publish_queue::health();
     if sul_db.get("connected").and_then(Value::as_bool) == Some(false) {
         let read_through = state.element_attributes.health().await;
         let snapshot = crate::data_interface::mdb_memory_store::get(
@@ -709,6 +685,8 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "mirror": {
                 "status": "degraded",
                 "endpoint": sul_db.get("endpoint").cloned().unwrap_or(Value::Null),
+                "watermark_mirror_enabled": crate::data_interface::dbnum_state::DbnumState::watermark_mirror_enabled(),
+                "watermark_mirrored_dbnums": crate::data_interface::dbnum_state::DbnumState::mirrored_dbnums(),
                 "spool_depth": read_through.spool_depth,
                 "spool_bytes": read_through.spool_bytes,
                 "spool_oldest_age_ms": read_through.spool_oldest_age_ms,
@@ -720,12 +698,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
                 "operations": {"status": "degraded", "reason": "mirror unavailable"},
             },
             "degraded_sections": ["mirror", "room", "history", "operations"],
-            "blocking_conditions": if model_publish_queue["failed_hold"].as_u64().unwrap_or(0) > 0
-                || model_publish_queue["unknown_hold"].as_u64().unwrap_or(0) > 0
-                || model_publish_queue["consumer_paused"].as_bool().unwrap_or(false) {
-                    vec!["model_publish_queue.held"]
-                } else { Vec::<&str>::new() },
-            "model_publish_queue": model_publish_queue,
+            "blocking_conditions": Vec::<&str>::new(),
             "project": state.identity.project,
             "mdb": state.identity.mdb,
             "namespace": state.identity.namespace,
@@ -744,7 +717,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "model_incremental": crate::options::model_incremental(),
             "room_incremental": crate::options::room_incremental(),
             "auto_work_armed": crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed(),
-            "increment_mode": crate::data_interface::batch_worker::increment_mode(),
             "initialization": crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot(),
             "worker_alive": worker_alive,
             "worker_idle_secs": worker_idle_secs,
@@ -794,23 +766,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             )
         }
     };
-    // 可 drain 副作用（SystDerived / RefRevMaintain）的死信/待处理计数（P2-4）。
-    // 读库失败的降级与成功形状同源（side_effect_pending 里同键渲染，形状由那边的
-    // 单测钉住），不在这里手搓 JSON。
-    let side_effect_pending = match within_health_budget(
-        crate::data_interface::side_effect_pending::SideEffectCompensator::side_effect_status(),
-    )
-    .await
-    {
-        Some(Ok(status)) => status,
-        Some(Err(error)) => crate::data_interface::side_effect_pending::SideEffectCompensator::side_effect_error_status(&error),
-        None => {
-            degraded.push("side_effect_pending");
-            crate::data_interface::side_effect_pending::SideEffectCompensator::side_effect_error_status(
-                &health_budget_exceeded("副作用补偿状态"),
-            )
-        }
-    };
     // 采样版（见 `sampled_model_pending_status`）：现读三条全表聚合每 5 s 一次会把
     // SurrealDB 占满；仍套分项预算，第一份样本没到时按超时降级。
     let model_update_pending = match within_health_budget(sampled_model_pending_status()).await {
@@ -836,14 +791,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         }
     };
     let mut blocking_conditions: Vec<&'static str> = Vec::new();
-    if model_publish_queue["failed_hold"].as_u64().unwrap_or(0) > 0
-        || model_publish_queue["unknown_hold"].as_u64().unwrap_or(0) > 0
-        || model_publish_queue["consumer_paused"]
-            .as_bool()
-            .unwrap_or(false)
-    {
-        blocking_conditions.push("model_publish_queue.held");
-    }
     if model_update_pending.has_data_dead_letters() {
         blocking_conditions.push("model_update_pending.data_dead_letters");
     }
@@ -907,7 +854,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 有分项没在预算内答完就不是 ok：库半死不活时这个字段是唯一一眼可见的
         // 信号，剩下的看 degraded_sections。
         "status": health_status(&degraded, &blocking_conditions),
-        "model_publish_queue": model_publish_queue,
         "core": {
             "status": if source_stale.is_some() { "stale" } else if source_snapshot.is_some() { "ready" } else { "unavailable" },
             "snapshot_epoch": source_snapshot.as_ref().map(|value| value.epoch()).unwrap_or_default(),
@@ -918,6 +864,8 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         "mirror": {
             "status": "ready",
             "endpoint": sul_db.get("endpoint").cloned().unwrap_or(Value::Null),
+            "watermark_mirror_enabled": crate::data_interface::dbnum_state::DbnumState::watermark_mirror_enabled(),
+            "watermark_mirrored_dbnums": crate::data_interface::dbnum_state::DbnumState::mirrored_dbnums(),
             "spool_depth": read_through.spool_depth,
             "spool_bytes": read_through.spool_bytes,
             "spool_oldest_age_ms": read_through.spool_oldest_age_ms,
@@ -973,7 +921,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // OnceLock，不读库，因此不套 within_health_budget。
         "delivery_unit_types": crate::data_interface::generation_root::configured_delivery_unit_types(),
         "auto_work_armed": crate::data_interface::batch_scheduler::BatchScheduler::global().is_auto_work_armed(),
-        "increment_mode": crate::data_interface::batch_worker::increment_mode(),
         "initialization": crate::data_interface::initialization_phase::InitializationCoordinator::global().snapshot(),
         // direct 形态自 2026-09-02 起也起 worker（只不起 watcher），这里一律报真值。
         // 客户端（plant-ui M1）把 `data_read_mode == "direct"` 且本字段为 `null` 判成
@@ -1005,7 +952,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 前移 / 周期对账那一拍 / `/update/execute`。`null` = 本进程还没跑过运行期核对
         // （启动那一次在 `initialization.startup.reconcile`）；`stale_catalogue_dbnums` 非空
         // 且 `catalogue_cascade_degraded` 为真 = 前移了却没能精确反查，看 `catalogue_cascade`。
-        "catalogue_reconcile": crate::data_interface::model_update_pending::catalogue_reconcile_snapshot(),
+        "catalogue_reconcile": crate::data_interface::model_coverage::catalogue_reconcile_snapshot(),
         "model_drain": crate::data_interface::model_update_pending::model_drain_telemetry_snapshot(),
         "model_concurrency": crate::data_interface::model_concurrency::snapshot(),
         "geometry_concurrency": crate::fast_model::concurrency::snapshot(),
@@ -1025,10 +972,6 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 升成数据面独立一级判决，不再埋在别的卡的尾巴里。
         "window_blocks": window_blocks,
         "spatial_reconcile": spatial_reconcile,
-        // 可 drain 副作用队列（SystDerived / RefRevMaintain）的待处理/死信计数
-        // （P2-4）。到顶死信此前只在库里、/health 看不见，也没有复活出口——现在
-        // dead_letters/by_kind 摆出来，复活走 POST /update/side-effects/retry。
-        "side_effect_pending": side_effect_pending,
         // 数据模型与房间工作一次查询得出同一快照；死信样本最多十条，普通积压
         // 只计数、不把启动期间的正常工作误标成 degraded。
         "model_update_pending": model_update_pending,
@@ -1311,10 +1254,9 @@ pub async fn mesh_glb(
     } else {
         let stem_owned = stem.to_string();
         let glb = tokio::task::spawn_blocking(move || {
-            let mesh = aios_core::shape::pdms_shape::PlantMesh::des_from_bytes(&bytes)
-                .map_err(|error| {
-                    anyhow::anyhow!("网格 {stem_owned} 不是合法的 .mesh 归档: {error}")
-                })?;
+            let mesh = aios_core::shape::pdms_shape::PlantMesh::des_from_bytes(&bytes).map_err(
+                |error| anyhow::anyhow!("网格 {stem_owned} 不是合法的 .mesh 归档: {error}"),
+            )?;
             crate::web_service::mesh_glb::plant_mesh_to_glb(&mesh)
         })
         .await
@@ -1412,8 +1354,7 @@ pub async fn update_execute(
         crate::data_interface::batch_scheduler::BatchScheduler::global().arm_auto_work();
         let attributes = state.element_attributes.clone();
         tokio::spawn(async move {
-            crate::data_interface::model_update_pending::reconcile_model_coverage_at_startup()
-                .await;
+            crate::data_interface::startup_reconcile::reconcile_model_coverage_at_startup().await;
             if let Err(error) = attributes.refresh_cached().await {
                 log::warn!("manual read-through cache refresh degraded: {error:#}");
             }
@@ -1449,10 +1390,8 @@ pub async fn update_execute(
     // 显式执行是人在说「现在就核」，目录版本核对随之另起任务跑一次（H1 (b)），与读透分支的
     // `reconcile_model_coverage_at_startup` 对称。不在这里等它：反查要开 MDB 的每个设计库。
     tokio::spawn(async {
-        crate::data_interface::model_update_pending::reconcile_catalogue_versions_now(
-            "update-execute",
-        )
-        .await;
+        crate::data_interface::model_coverage::reconcile_catalogue_versions_now("update-execute")
+            .await;
     });
     receipt.warnings.push(
         "目录版本核对已随本次执行另起任务（目录库不进数据批次，前移只触发模型面重算引用它的根）：\
@@ -1944,6 +1883,50 @@ pub async fn dbnum_model_rebuild(
     Ok((StatusCode::ACCEPTED, Json(body)))
 }
 
+/// POST /api/v1/dbnums/{dbnum}/data/reinitialize — 人工「重新解析」（2026-09-10 重新计算契约 C2 / C3）。
+///
+/// 它就是 `enqueue_manual_update(selected=[dbnum], reinitialize=true)` 的单库糖：排一条
+/// `intent=reinitialize` 且 `reinit_requested` 的批次，worker 冻结点复核无身份歧义后
+/// `wipe_dbnum_for_reinit` 整库清空 → 首次导入 → 整库模型 → 房间（回退重建同一条路，
+/// ADR-021 §3）。**不要求调用方暂停队列**——清库在 worker 里做，本来就受暂停 /
+/// `startup_autorun` 约束；不受 `auto_initialize_new_dbnums` 门控（手动路径，d-103）。
+/// `watch_scope` 外 400；身份歧义进回执 `blocked` 桶带原因原文（HTTP 仍 202——批量客户端
+/// 要的是逐库回执）；读透形态下没有数据面可清，409。
+pub async fn dbnum_data_reinitialize(
+    State(state): State<AppState>,
+    Path(dbnum): Path<u32>,
+    Json(identity): Json<ProjectReq>,
+) -> Result<(StatusCode, Json<serde_json::Value>), ApiError> {
+    let identity = resolve_identity(&state, &identity)?;
+    if !crate::data_interface::watch_scope::admits(dbnum) {
+        return Err(ApiError::bad_request(
+            crate::data_interface::watch_scope::excluded_reason(dbnum),
+        ));
+    }
+    if crate::options::data_face().is_read_through() {
+        return Err(ApiError::conflict(
+            "read-through data face has no ingested data to reinitialize",
+        ));
+    }
+    let mut receipt = state
+        .mgr
+        .enqueue_manual_update_with(
+            &identity.project,
+            Some(&identity.mdb),
+            Some(&[dbnum]),
+            crate::data_interface::batch_scheduler::ManualEnqueueOptions { reinitialize: true },
+        )
+        .await;
+    // 与 `/update/execute` 同一条纪律：显式触发要放行本进程的持久积压。
+    crate::data_interface::batch_scheduler::BatchScheduler::global().arm_auto_work();
+    receipt.project.clone_from(&identity.project);
+    receipt.mdb.clone_from(&identity.mdb);
+    receipt.namespace.clone_from(&identity.namespace);
+    serde_json::to_value(&receipt)
+        .map(|value| (StatusCode::ACCEPTED, Json(value)))
+        .map_err(|e| ApiError::from_domain(e.into()))
+}
+
 /// 解不出生成根不是服务端的错，客户端对这三种的出路也各不相同——都压成
 /// `internal` 的话它只能干瞪眼（ADR-0009 要求客户端认出容器并展开一层）。
 fn ensure_error(error: anyhow::Error) -> ApiError {
@@ -2042,27 +2025,6 @@ pub async fn pending_units_retry(
             "status": revived.status,
         })),
     ))
-}
-
-/// POST /api/v1/update/side-effects/retry — 人工复活副作用补偿队列的死信（P2-4）。
-///
-/// `SystDerived` / `RefRevMaintain` 到顶死信（attempts >= 上限）被 `drain` 的上限
-/// 挡在候选集外，此前除了直接改库没有复活路（spatial 无视上限、不走这里）。复活 =
-/// attempts 清零回到 `pending` + 唤醒 worker，与 `pending-units/retry` 同纪律。
-/// 返回 202 + 复活行数（0 也算成功，表示当前没有到顶死信）。
-pub async fn side_effects_retry(
-    State(state): State<AppState>,
-    body: Option<Json<ProjectReq>>,
-) -> Result<impl IntoResponse, ApiError> {
-    let req = body.map(|b| b.0).unwrap_or_default();
-    resolve_identity(&state, &req)?;
-    let revived =
-        crate::data_interface::side_effect_pending::SideEffectCompensator::revive_dead_letters()
-            .await
-            .map_err(ApiError::from_domain)?;
-    // 复活绕过入队通道，worker 的 Notify 没人碰过；不叫醒它，这些行要等兜底轮询。
-    crate::data_interface::batch_scheduler::BatchScheduler::global().wake();
-    Ok((StatusCode::ACCEPTED, Json(json!({ "revived": revived }))))
 }
 
 /// GET /api/v1/dbnums — 映射 `dbnum_statuses`（spec §4.7）。
@@ -2189,7 +2151,8 @@ pub async fn dbnums(
             }
         }
         annotate_model_source(rows, crate::options::data_face(), |dbnum| {
-            crate::data_interface::model_publish_queue::blocks_dbnum(dbnum)
+            crate::data_interface::task_registry::TaskRegistry::global()
+                .has_running_data_batch_for(dbnum)
         });
         // 摄入形态下骨架不一定预热过；有就给 `ref0s`，没有就不写这一格（不写空数组
         // ——空数组读起来是「这个库一个 ref0 都没有」，那是另一句话）。
@@ -2284,7 +2247,11 @@ fn skeleton_dbnums(databases: &[crate::data_interface::mdb_memory_store::LoadedD
 
 /// 给 `/dbnums` 的每一行写 `model_source` / `model_source_reason`（plan 2026-09-06 §8 R1）：
 /// 这个库的模型现在该从哪儿读。判据只有 `model_read_route::route` 一处，这里只是把行上已有的
-/// `applied_sesno` 与「初始化发布 run 在不在飞」喂给它；取数走闭包，让整形逻辑不依赖真队列也能测。
+/// 三枚水位与「该库的数据批次任务在不在跑」喂给它；取数走闭包，让整形逻辑不依赖真队列也能测。
+///
+/// 模型 / 房间两枚水位只在行上**有**那两格时才参与比较（ADR-071 D8「三水位相等」）：判决列
+/// （`dbnum_consistency`）只给 DESI 行，普查失败时整格缺席。没有那两格就不判「落后」——
+/// 「不知道」不能写成「落后」，否则 SYST / CATA 与一次普查失败都会被讲成 `model_lagging`。
 fn annotate_model_source(
     rows: &mut [Value],
     data_face: crate::options::DataFace,
@@ -2301,15 +2268,21 @@ fn annotate_model_source(
         else {
             continue;
         };
-        let applied = object
-            .get("applied_sesno")
-            .and_then(Value::as_i64)
-            .and_then(|value| i32::try_from(value).ok())
-            .unwrap_or_default();
+        let watermark = |key: &str| {
+            object
+                .get(key)
+                .and_then(Value::as_i64)
+                .and_then(|value| i32::try_from(value).ok())
+        };
+        let applied = watermark("applied_sesno").unwrap_or_default();
+        let model = watermark("model_sesno").unwrap_or(applied);
+        let room = watermark("room_sesno").unwrap_or(applied);
         let route = crate::data_interface::model_read_route::route(
             dbnum,
             data_face,
             applied,
+            model,
+            room,
             publishing(dbnum),
         );
         object.insert("model_source".into(), json!(route.source.as_str()));
@@ -3038,8 +3011,9 @@ mod tests {
         assert!(rows[2].get("ref0s").is_none(), "没有 dbnum 的行不该被写");
     }
 
-    /// `/dbnums` 每行的 `model_source` 只由行上的 `applied_sesno` 与「初始化 run 在不在飞」决定
-    /// （plan 2026-09-06 §8 R1）；没有 `dbnum` 的行不碰。
+    /// `/dbnums` 每行的 `model_source` 只由行上的三枚水位与「该库的数据批次任务在不在跑」决定
+    /// （plan 2026-09-06 §8 R1；ADR-071 D8 三水位相等）；没有 `dbnum` 的行不碰；没有模型 / 房间
+    /// 判决列的行（非 DESI、普查失败）不判「落后」。
     #[test]
     fn dbnum_rows_carry_their_model_source_from_the_single_predicate() {
         let mut rows = vec![
@@ -3047,10 +3021,14 @@ mod tests {
             json!({ "dbnum": 8000, "applied_sesno": 285 }),
             json!({ "dbnum": 7999, "applied_sesno": 0 }),
             json!({ "note": "no dbnum here" }),
+            json!({ "dbnum": 7998, "applied_sesno": 264, "model_sesno": 260, "room_sesno": 264 }),
+            json!({ "dbnum": 7996, "applied_sesno": 264, "model_sesno": 264, "room_sesno": 200 }),
+            json!({ "dbnum": 7995, "applied_sesno": 264, "model_sesno": 264, "room_sesno": 264 }),
         ];
         annotate_model_source(&mut rows, crate::options::DataFace::Ingest, |dbnum| {
             dbnum == 8000
         });
+        // 没有判决列（SYST / CATA 行、普查失败）：不判落后，仍按 applied + 在飞给。
         assert_eq!(rows[0]["model_source"], "database");
         assert!(rows[0]["model_source_reason"].is_null());
         assert_eq!(rows[1]["model_source"], "memory");
@@ -3064,6 +3042,12 @@ mod tests {
             rows[3].get("model_source").is_none(),
             "没有 dbnum 的行不该被写"
         );
+        assert_eq!(rows[4]["model_source"], "memory");
+        assert_eq!(rows[4]["model_source_reason"], "model_lagging");
+        assert_eq!(rows[5]["model_source"], "memory");
+        assert_eq!(rows[5]["model_source_reason"], "room_lagging");
+        assert_eq!(rows[6]["model_source"], "database");
+        assert!(rows[6]["model_source_reason"].is_null());
 
         let mut rows = vec![json!({ "dbnum": 7997, "applied_sesno": 264 })];
         annotate_model_source(&mut rows, crate::options::DataFace::ReadThrough, |_| false);
@@ -3338,6 +3322,9 @@ mod tests {
             "id=\"lanes\"",
             "/api/v1/queue",
             "FOCUS_DBNUM",
+            "id=\"init-picker\"",
+            "initializeBatch",
+            "body:{ dbnums }",
         ] {
             assert!(
                 OPS_PANEL_EMBEDDED.contains(marker),
@@ -3488,7 +3475,6 @@ mod tests {
         for section in [
             "load_window_blocks()",
             "spatial_reconcile_status()",
-            "side_effect_status()",
             "model_pending_status()",
             "parse_error::snapshot()",
             "geom_error::snapshot()",
@@ -3604,7 +3590,7 @@ mod tests {
         );
     }
 
-    /// 初始化准入门（`auto_initialize_new_dbnums`，默认 false）：/health 除了报开关
+    /// 初始化准入门（`auto_initialize_new_dbnums`，默认 true）：/health 除了报开关
     /// 生效值，还要点名最近一轮重扫拦下的库——「服务健康、队列空、新库就是不动」
     /// 少了这一格就只能去翻 sweep 日志。镜像降级早退与正常两个分支都要带，且都
     /// 必须走同一个重扫快照，不许各自手搓。
@@ -3717,11 +3703,10 @@ mod tests {
         );
     }
 
-    /// P2-4：/health 必须曝光可 drain 副作用队列（SystDerived / RefRevMaintain）的
-    /// 死信，且走共享的同键渲染器（成功 + 读库降级两分支同源，不在 handler 里手搓
-    /// JSON）。删掉 side_effect_pending 接线即红。
+    /// 非空间副作用补偿队列（SystDerived / RefRevMaintain）已退役（ADR-071 D9，d-300）：
+    /// /health 不再有 `side_effect_pending` 一格，也没有复活端点。回来一个即红。
     #[test]
-    fn health_exposes_side_effect_pending_dead_letters() {
+    fn health_no_longer_exposes_the_retired_side_effect_queue() {
         let source = include_str!("handlers.rs");
         let body = source
             .split_once("pub async fn health(")
@@ -3730,18 +3715,19 @@ mod tests {
             .split_once("pub async fn update_preview(")
             .expect("health 之后是 update_preview")
             .0;
-
+        for retired in [
+            "\"side_effect_pending\"",
+            "side_effect_status()",
+            "side_effect_error_status",
+        ] {
+            assert!(
+                !body.contains(retired),
+                "非空间补偿队列已退役，/health 不得再接 {retired}: {body}"
+            );
+        }
         assert!(
-            body.contains("\"side_effect_pending\""),
-            "health 必须曝光 side_effect_pending 死信计数: {body}"
-        );
-        assert!(
-            body.contains("side_effect_status()"),
-            "side_effect_pending 必须走共享状态渲染器: {body}"
-        );
-        assert!(
-            body.contains("side_effect_error_status"),
-            "读库失败必须走同键降级渲染器，不许在 handler 手搓: {body}"
+            !source.contains(concat!("pub async fn ", "side_effects_retry(")),
+            "复活死信的端点随补偿队列一起退役"
         );
     }
 

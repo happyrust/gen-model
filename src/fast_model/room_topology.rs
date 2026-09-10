@@ -492,8 +492,7 @@ pub(crate) async fn latest_frozen_sources() -> anyhow::Result<(
         .iter()
         .map(|source| source.commit_token_json())
         .collect::<anyhow::Result<Vec<_>>>()?;
-    let composite =
-        crate::data_interface::model_publish_queue::digest(&serde_json::to_vec(&tokens)?);
+    let composite = crate::data_interface::digest::digest(&serde_json::to_vec(&tokens)?);
     Ok((composite, tokens, sources))
 }
 

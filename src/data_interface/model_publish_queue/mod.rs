@@ -1,12 +1,13 @@
-//! Initialization-only durable hand-off. The journal, never the current memory
-//! projection, owns generated results until the database acknowledges them.
-mod journal;
-mod runtime;
-#[cfg(test)]
-mod tests;
-pub use journal::{Journal, QueueHealth, TaskState};
-pub use runtime::*;
-
+//! 只剩根发布信封（`FrozenRootEnvelope` / `PreparedRootPublication` / `RootIntent` /
+//! `render_spatial_fragment`）：`model_db_adapter` 的信封分支与 `persist_root_for_file_round`
+//! 还引用着，随文件轮次那一刀（ADR-071 S3 后半）一起删，删完这个目录就没了。
+//!
+//! 曾经住在这里的**初始化发布 run**（journal / 消费者 / ACK / 收口 / `/health.model_publish_queue`
+//! / replay / resume）已于 2026-09-10 整体退役（ADR-071 S5，共识 d-300）：初始化与增量都是一个
+//! dbnum 任务，任务自己同步落库，任务与库之间没有 journal、队列或 ACK。数据窗口的内存产物与
+//! 同步落库口（`IncrementWindowArtifact` / `land_increment_window`）同日搬去
+//! `data_interface::window_landing`，摘要 `digest` 搬去 `data_interface::digest`（S7）。
+use crate::data_interface::digest::digest;
 use crate::fast_model::model_memory_store::ProjectionCommit;
 use serde::{Deserialize, Serialize};
 
@@ -17,34 +18,6 @@ pub struct RootIntent {
     pub root: String,
     pub revision: u64,
     pub token: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RunManifest {
-    pub version: u16,
-    pub run_id: String,
-    pub dbnum: u32,
-    pub source_sesno: u32,
-    pub source_token: String,
-    #[serde(default)]
-    pub database_incarnation: String,
-    /// The database registry transaction proved that this dbnum had no model
-    /// projection rows before this run was reserved. The proof belongs to the
-    /// run and remains true after this run starts publishing rows.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub model_projection_empty_at_reservation: bool,
-    pub dependency_tokens: Vec<String>,
-    #[serde(default)]
-    pub room_source_keys: Vec<String>,
-    #[serde(default)]
-    pub room_context_fingerprint: String,
-    pub target_hash: String,
-    pub roots: Vec<RootIntent>,
-    pub created_ms: u64,
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -161,14 +134,22 @@ impl FrozenRootEnvelope {
     }
 }
 
-pub fn digest(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    hex::encode(Sha256::digest(bytes))
-}
-
-pub fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis() as u64
+/// 初始化 run 时代的空间碎片行（`model_publish_run` / `model_publish_fragment`）。只剩
+/// `model_db_adapter` 的信封分支（`frozen: Some(_)`，生产已无人走到）引用；随文件轮次那一刀
+/// 与 `FrozenRootEnvelope` 一起删，两张表由 S6 的一次性 `REMOVE TABLE IF EXISTS` 收尾。
+pub(crate) fn render_spatial_fragment(
+    e: &FrozenRootEnvelope,
+    refresh: &[String],
+    removed: &[String],
+) -> anyhow::Result<String> {
+    let run = serde_json::to_string(&e.run_id)?;
+    let refresh = serde_json::to_string(refresh)?;
+    let removed = serde_json::to_string(removed)?;
+    let hash = serde_json::to_string(&e.target_hash)?;
+    Ok(format!(
+        "UPSERT type::thing('model_publish_run',{run}) SET next_sequence=(next_sequence ?? 0)+1;\n\
+        LET $fragment_sequence = (SELECT VALUE next_sequence FROM type::thing('model_publish_run',{run}))[0];\n\
+        CREATE type::thing('model_publish_fragment',[{run},$fragment_sequence]) SET sequence=$fragment_sequence, \
+        run_id={run}, target_hash={hash}, refresh={refresh}, removed={removed};\n"
+    ))
 }

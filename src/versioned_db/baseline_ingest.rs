@@ -7,10 +7,10 @@
 //! | 部件 | 出处 |
 //! |---|---|
 //! | 收集 | [`e3d_collector::stream_baseline`]（与 `collect_net_window` 同一套枚举 / 读取 / 失败闸） |
-//! | 渲染 | [`baseline::render_baseline_batches`] → `element_batch`（`Fresh`，`StatisticsMode::Deferred`） |
-//! | 执行 | [`dbnum_stats::execute_on`] → `surreal_retry`（乐观冲突指数退避重试） |
+//! | 渲染 | [`baseline::render_baseline_batches`] → `element_batch`（`Fresh`，事务不带统计观测） |
+//! | 执行 | [`pe_batch::execute_on`] → `surreal_retry`（乐观冲突指数退避重试） |
 //! | CATA 依赖 | [`cata_dependency`]（seed 流式攒、文件收尾一次闭包、同一条写者队列） |
-//! | 统计 | [`dbnum_stats::rebuild_on`]（写者排空后**无条件**一次算清） |
+//! | 统计 | **不在这里**：`dbnum_info_table` 由 dbnum 任务在数据批次应用之后从目标索引序列化（`ref0_snapshot` → `task_end`，ADR-071 D6），基线与增量同一笔 |
 //!
 //! 形状：`spawn_blocking` 里流式收集 → 每块渲成若干笔事务（每条队列消息 = 一笔事务 SQL）→
 //! 有界队列（[`QUEUE_CAPACITY`]）→ **单写者**（SurrealDB 2.1 乐观事务下多写者在共享表 / 索引键上
@@ -18,7 +18,7 @@
 //!
 //! 纪律：
 //! * **不动水位**。`applied_sesno` 与模型计划的收口是调用方（`manual_update::initialize_dbnum_baseline`
-//!   → `model_update_pending::finalize_baseline`）的事，本模块只回「写了多少」。
+//!   → `increment_tail::finalize_baseline`）的事，本模块只回「写了多少」。
 //! * **任何失败先清库再 Err**（解析 / 写者 / 闭包 / 统计对不上）：`fast_delete::wipe_dbnum_for_reinit`
 //!   把这个 dbnum 的行清干净，下一轮从 `applied_sesno = 0` 重来，不留半写的库。
 //! * **`Fresh` 只插不删、已有行赢**：父层补缺（`replace_dbs = false`）把 extract 母库整库再摄入进同一个
@@ -297,14 +297,9 @@ async fn ingest_frozen(
         stats.pages_read
     );
 
-    // 写者排空后统计一次算清（`Deferred` 的另一半）。**无条件**重建：`initialize_on` 只在版本标记
-    // 落后时才算，而父层补缺是同一个 dbnum 的第二次摄入，版本标记早已是当前——那会让
-    // `pe_count != info_count` 在这里直接报错、且下一轮清库重来照样死在同一处。
-    if let Err(error) = settle_statistics(dbnum, &file_name, &db_type).await {
-        println!("{file_name}: 基线统计收尾失败，清库后重来（dbnum={dbnum}）: {error:#}");
-        wipe_after_failure(dbnum).await?;
-        return Err(error);
-    }
+    // 统计不在这里收尾（ADR-071 D6，2026-09-10）：`dbnum_info_table` 由 dbnum 任务在数据批次应用
+    // 之后从目标索引序列化，基线与增量同一笔（`batch_worker` 的 `ref0_snapshot` → `task_end`）。
+    // 此前这里 `rebuild_on` 一次再核 `pe_count == info_count`，那是逐笔观测块时代的对账。
 
     Ok(BaselineIngest {
         dbnum,
@@ -425,7 +420,7 @@ fn spawn_writer(receiver: flume::Receiver<String>) -> tokio::task::JoinHandle<Wr
         while let Some(window) = stream.next().await {
             for sql in window {
                 if let Err(error) =
-                    crate::data_interface::dbnum_stats::execute_on(&SUL_DB, &sql).await
+                    crate::data_interface::pe_batch::execute_on(&SUL_DB, &sql).await
                 {
                     outcome.record("element batch", error);
                 }
@@ -462,21 +457,6 @@ async fn wipe_after_failure(dbnum: u32) -> anyhow::Result<()> {
             println!("dbnum={dbnum} 基线失败清库完成：PE={}", wiped.pe_rows);
         })
         .with_context(|| format!("baseline chunk 失败后的清库未完成: dbnum={dbnum}"))
-}
-
-/// 写者排空后的统计收尾：按 Ref0 重算 `dbnum_info_table`（无条件）、核验与 pe 行数相等、补身份。
-async fn settle_statistics(dbnum: u32, file_name: &str, db_type: &str) -> anyhow::Result<()> {
-    crate::data_interface::dbnum_stats::rebuild_on(&SUL_DB, dbnum).await?;
-    let (pe_count, _, info_count) = crate::versioned_db::database::dbnum_stat_totals(dbnum).await?;
-    anyhow::ensure!(
-        pe_count == info_count,
-        "dbnum={dbnum} statistics mismatch: PE={pe_count}, statistics={info_count}"
-    );
-    crate::surreal_retry::execute_surreal_checked(
-        &crate::versioned_db::database::stamp_dbnum_info_identity_sql(dbnum, file_name, db_type),
-        "stamp explicit PE statistics identity",
-    )
-    .await
 }
 
 #[cfg(test)]
@@ -655,7 +635,8 @@ mod tests {
         );
     }
 
-    /// I2 / I5：本模块不带 legacy 全量同步的任何形状，统计收尾是无条件重建。
+    /// I2 / I5：本模块不带 legacy 全量同步的任何形状；统计也不在这里收尾（ADR-071 D6：
+    /// 基线与增量同一笔任务收尾快照，`rebuild_on` / `pe_count == info_count` 都不许回来）。
     #[test]
     fn the_ingest_entry_carries_no_legacy_sync_shape() {
         let source = include_str!("baseline_ingest.rs");
@@ -668,16 +649,15 @@ mod tests {
             "DashSet",
             "feature = \"sql\"",
             "initialize_on(",
+            "rebuild_on(",
+            "dbnum_stat_totals(",
+            "settle_statistics(",
         ] {
             assert!(
                 code_lines_mentioning(production, forbidden).is_empty(),
                 "基线摄入入口不许带 legacy 形状 `{forbidden}`"
             );
         }
-        assert!(
-            !code_lines_mentioning(production, "rebuild_on(").is_empty(),
-            "统计收尾必须是无条件重建（父层补缺的第二次摄入不会再有版本落后）"
-        );
     }
 
     /// I4：清库只发生在写者排空之后，且排在成功回执之前的每条失败路上。
@@ -698,18 +678,15 @@ mod tests {
         let wipe = body
             .find("wipe_after_failure(dbnum).await?")
             .expect("failure cleanup");
-        let settle = body
-            .find("settle_statistics(dbnum")
-            .expect("statistics settle");
         let success = body.find("Ok(BaselineIngest {").expect("success receipt");
         assert!(
-            drain < judge && judge < wipe && wipe < settle && settle < success,
-            "顺序必须是 排空写者 → 裁决 → 清库 → 统计收尾 → 成功回执"
+            drain < judge && judge < wipe && wipe < success,
+            "顺序必须是 排空写者 → 裁决 → 清库 → 成功回执（统计收尾已随 ADR-071 D6 退出这里）"
         );
         assert_eq!(
             body.matches("wipe_after_failure(dbnum).await?").count(),
-            2,
-            "裁决失败与统计收尾失败两条路都要清库"
+            1,
+            "裁决失败那条路要清库；统计收尾那条已经没有了"
         );
         assert_eq!(
             body.matches(".expect(").count(),
