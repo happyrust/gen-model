@@ -767,6 +767,88 @@ async fn a_rolled_back_window_reruns_into_the_same_state_as_one_clean_pass() {
     }
 }
 
+/// 属主没进本窗口的 Modified 元素，回退之后**它在属主名下那条成员边还在**。
+///
+/// 这是 t-468 量出来、这一版修掉的那处缺口：`pe` 是图顶点，删它会级联带走
+/// `pe_owner:[属主, 槽位]`（`in` 指着被删元素的那条），而槽位号只存在于属主的成员表里
+/// ——属主这一版没被改、不进 S→T 重放窗口，那条入边就再也补不回来。所以回退只删卫星行
+/// （noun / `ATT_UDA`）与模型 / 房间面，**不删 `pe` 顶点**：数据面靠行幂等收敛，重放的
+/// `INSERT … ON DUPLICATE KEY UPDATE` 整行覆盖。
+///
+/// 夹具刻意补上 `site → equi` 那条边：原来的 `base_statements` 里 EQUI 没有入边，
+/// 缺口正好测不出来。
+#[tokio::test(flavor = "multi_thread")]
+async fn a_modified_element_keeps_the_membership_edge_its_unchanged_owner_owns() {
+    use crate::data_interface::fast_delete::rollback_to_watermark_on;
+
+    let f = fixture();
+    let db = seeded_db("membership_edge").await;
+    let (site, equi) = (pe(f.site), pe(f.equi));
+    // SITE 停在窗口前水位、名下挂着 EQUI：EQUI 在窗口里只是 Modified，SITE 不进窗口。
+    crate::data_interface::table_parity::apply_all(
+        &db,
+        &[format!(
+            "INSERT RELATION INTO pe_owner [\
+               {{ id: pe_owner:[{site}, 0], in: {equi}, out: {site} }}];"
+        )],
+    )
+    .await
+    .expect("owner edge fixture");
+
+    let batches = production_batches_with_elements(&f, 1);
+    let clean = seeded_db("membership_edge_clean").await;
+    crate::data_interface::table_parity::apply_all(
+        &clean,
+        &[format!(
+            "INSERT RELATION INTO pe_owner [\
+               {{ id: pe_owner:[{site}, 0], in: {equi}, out: {site} }}];"
+        )],
+    )
+    .await
+    .expect("owner edge fixture");
+    run_batches(&clean, &batches).await;
+    finalize(&clean).await;
+    let expected = snapshot_data_tables(&clean).await.expect("clean snapshot");
+
+    // 崩在第一块之后 → 回退 → 重跑。
+    run_batches(&db, &batches[..1]).await;
+    rollback_to_watermark_on(&db, DBNUM, BASE_SESNO, WriteIntent::ApplyWindow)
+        .await
+        .expect("rollback");
+    let owners = ids(
+        &db,
+        format!("SELECT VALUE record::id(out) FROM pe_owner WHERE in = {equi};"),
+    )
+    .await;
+    assert_eq!(
+        owners,
+        vec![f.site.to_string()],
+        "回退不得带走属主名下那条成员边（删 pe 顶点就会）"
+    );
+
+    crate::data_interface::table_parity::apply_all(
+        &db,
+        &[render_mark_writing(
+            DBNUM,
+            BASE_SESNO,
+            END_SESNO,
+            WriteIntent::ApplyWindow,
+        )],
+    )
+    .await
+    .expect("re-mark writing");
+    run_batches(&db, &batches).await;
+    finalize(&db).await;
+
+    let replayed = snapshot_data_tables(&db).await.expect("replayed snapshot");
+    let mut changed = changed_data_tables(&expected, &replayed);
+    changed.remove("spatial_epoch");
+    assert!(
+        changed.is_empty(),
+        "回退重跑之后逐表仍须与一次成功相等，差异表 {changed:?}"
+    );
+}
+
 /// 回退把三枚水位一起退回 S（ADR-072 D3「崩溃不分面」），模型面 / 房间面的行按谓词一起走，
 /// 而 S 及以前的行一个都不许动。
 #[tokio::test(flavor = "multi_thread")]

@@ -152,7 +152,26 @@ ref_rev
    - 或者回退不删 `pe` 顶点，只删它的卫星行（noun / `ATT_UDA`），让重放的 `INSERT … ON DUPLICATE KEY UPDATE`
      整行覆盖——代价是「本窗口新增、而重放窗口更窄」的元素会留成残留。
 
-   **这一条要指挥官拍板，不在 t-468 的范围内。**
+   **已拍板并落地（2026-09-10 18:5x，用户拍第二条）**：回退**不删 `pe` 顶点**，只删卫星行
+   （noun / `ATT_UDA`）与模型 / 房间面。理由是这份量测本身给的——数据面靠**行幂等**收敛
+   （ADR-071 S3）：`pe` 是每个 refno 一行最新态，重放的
+   `INSERT … ON DUPLICATE KEY UPDATE`（列清单 = `element_batch::PE_REPLACE_ASSIGNMENTS`）
+   整行覆盖，先删那一步对 `pe` 从来不是必需的；而元素批**本来就不删 `pe`**，正是因为同一条
+   级联（`element_batch` 模块头「pe 行为什么不删」）。回退删它等于把那条纪律在恢复路上又
+   破了一次。
+
+   代价写在 `fast_delete::render_rollback` 的文档里：`sesno > S` 的 `pe` 行会在回退之后、
+   重跑之前短暂高于水位；同一窗口重放逐行覆盖，只有「重放窗口比崩溃那次更窄」（会话预算
+   截断）才留得下够不着的行，那一档由下一窗覆盖或人工走
+   `DELETE /dbnums/{dbnum}/data/above/{watermark}`。文件被换回旧版本那一档是 `Reinitialize`，
+   整库 wipe，不走这条路。
+
+   回归：`direct_window_replay_parity::a_modified_element_keeps_the_membership_edge_its_unchanged_owner_owns`
+   ——夹具补上「SITE 名下挂着 EQUI、SITE 不进窗口」那条入边（原夹具里 EQUI 没有入边，
+   缺口正好测不出来），崩在第一块之后回退，断言那条成员边还在，再重跑一遍断言逐表与一次
+   成功相等。渲染侧另有
+   `fast_delete::tests::the_rollback_never_deletes_the_pe_vertex_so_the_membership_edge_survives`
+   钉住「任何形态的 `pe` 行删除都不许有」。
 
 ---
 

@@ -322,16 +322,29 @@ const MODEL_FACE_TABLES: &[&str] = &["inst_relate", "inst_info", "tubi_relate"];
 /// 而计划变回 `Iterate Index`。老 `prune_above_watermark` 里那个 `<int>` 是防御性的，
 /// 两个写口（`SPdmsElement::gen_sur_json` / `ElementRows::minimal_tombstone_row`）都写 JSON 数字。
 ///
-/// `pe` 排在 noun / `ATT_UDA` **之后**：删 `pe` 顶点会把挂在它身上的边（`pe_owner` /
-/// `ref_rev` / `tubi_relate`）一并带走，回退要的正是这个级联（元素批模块头「pe 行为什么
-/// 不删」的反面）。
+/// **`pe` 行不删**（2026-09-10 改，计划 §4.3-2 原写着要删）。理由是量出来的，不是推的：
 ///
-/// **已知缺口（计划 §4.3 与验收②之间的那一处）**：级联同时带走「属主 → 本元素」那条
-/// `pe_owner` 边，而边 id 里的槽位号只存在于**属主**的成员表里。属主没进本窗口时，S→T 重放
-/// 只重建本元素自己名下的槽位，那条入边补不回来（fork 行为见
-/// `test::fork_surreal_compat::dual_pe_rows_replace_in_place_and_keep_their_edges` 末段）。
-/// 这里钉的是**今天的行为**，回归见
-/// `tests::rolling_back_a_modified_element_drops_the_membership_edge_its_owner_owns`。
+/// `pe` 是图顶点，删它会把挂在它身上的边一并带走——`tubi_relate` / `ref_rev` 那些是回退要的，
+/// 可**「属主 → 本元素」那条 `pe_owner` 成员边也一起没了**，而边 id 是 `pe_owner:[属主, 槽位]`，
+/// 槽位号只存在于**属主**的成员表里。属主没进本窗口（纯属性 Modified 的常态）时，S→T 重放
+/// 只重建本元素自己名下的槽位，那条入边**补不回来**。一次性 `memory` 实例上的对照实测：
+/// 属主 o31 名下 c30（sesno 43，本窗口改过）/ c33（41，没改），跑
+/// `DELETE pe WHERE dbnum = 8000 AND sesno > 42` 之后 `pe_owner` 从 `[o31,0]+[o31,1]`
+/// 只剩 `[o31,1]`（`docs/evidence/2026-09-10-rollback-predicate-index-measurement.md` §4；
+/// fork 行为另见 `test::fork_surreal_compat::dual_pe_rows_replace_in_place_and_keep_their_edges`
+/// 末段）。而 R1 验收②要求回退重跑之后 `pe_owner` 与一次成功逐表相等——两者打架。
+///
+/// 不删也收敛，因为**数据面本来就靠行幂等**（ADR-071 S3）：`pe` 是每个 refno 一行最新态，
+/// 重放的 `INSERT … ON DUPLICATE KEY UPDATE`（`element_batch::PE_REPLACE_ASSIGNMENTS`，
+/// 列清单与 `gen_sur_json` 一一对应）整行覆盖，先删那一步对 `pe` 从来不是必需的——元素批
+/// 自己就是因为这条级联才不删 `pe`（见 `element_batch` 模块头「pe 行为什么不删」）。
+/// noun 行与 `ATT_UDA` 行没有边挂着，照删不误：它们是「先删后插」的删那一半。
+///
+/// **代价说清楚**：`sesno > S` 的 `pe` 行会在回退之后、重跑之前短暂高于水位。同一窗口重放
+/// 会把它们逐行覆盖，所以正常路径上是过渡态；只有「重放窗口比崩溃那次更窄」（会话预算截断）
+/// 才会留下够不着的行，那一档由下一窗覆盖，或人工走
+/// `DELETE /dbnums/{dbnum}/data/above/{watermark}`。文件被换回旧版本那一档不走这条路——
+/// 它是 `Reinitialize`，整库 wipe。
 pub(crate) fn render_rollback(
     dbnum: u32,
     target_watermark: i32,
@@ -343,9 +356,8 @@ pub(crate) fn render_rollback(
             "DELETE {table} WHERE dbnum = {dbnum} AND sesno > {target_watermark};"
         ));
     }
-    deletes.push(format!(
-        "DELETE pe WHERE dbnum = {dbnum} AND sesno > {target_watermark};"
-    ));
+    // `pe` 行不在这张清单里（见本函数文档）。`ATT_UDA` 已经在 `noun_tables` 里——
+    // 它同样是全大写表名，`noun_tables_on` 的 `INFO FOR DB` 过滤天然圈到它。
     for table in MODEL_FACE_TABLES {
         deletes.push(format!(
             "DELETE {table} WHERE dbnum = {dbnum} AND direct_model.sesno > {target_watermark};"
@@ -1073,7 +1085,11 @@ mod tests {
     }
 
     fn rollback_sql(dbnum: u32, target: i32, nouns: &[&str]) -> String {
-        let nouns = nouns.iter().map(|n| (*n).to_string()).collect::<Vec<_>>();
+        let nouns = nouns
+            .iter()
+            .map(|n| (*n).to_string())
+            .chain(std::iter::once("ATT_UDA".to_string()))
+            .collect::<Vec<_>>();
         let render = render_rollback(dbnum, target, &nouns);
         [render.deletes, render.control].concat().join("\n")
     }
@@ -1096,7 +1112,11 @@ mod tests {
     /// （它是回退的提交点）。
     #[test]
     fn the_rollback_covers_every_face_and_ends_at_the_marker() {
-        let render = render_rollback(7997, 41, &["EQUI".into(), "PANE".into()]);
+        let render = render_rollback(
+            7997,
+            41,
+            &["ATT_UDA".into(), "EQUI".into(), "PANE".into()],
+        );
         let sql = [render.deletes.clone(), render.control.clone()]
             .concat()
             .join("\n");
@@ -1104,10 +1124,9 @@ mod tests {
             sql.find(needle)
                 .unwrap_or_else(|| panic!("缺 {needle}\n{sql}"))
         };
-        let equi = at("DELETE EQUI WHERE dbnum = 7997 AND sesno > 41;");
+        at("DELETE EQUI WHERE dbnum = 7997 AND sesno > 41;");
         at("DELETE PANE WHERE dbnum = 7997 AND sesno > 41;");
-        let pe = at("DELETE pe WHERE dbnum = 7997 AND sesno > 41;");
-        assert!(equi < pe, "noun 行先删、pe 顶点后删:\n{sql}");
+        at("DELETE ATT_UDA WHERE dbnum = 7997 AND sesno > 41;");
         for table in MODEL_FACE_TABLES {
             at(&format!(
                 "DELETE {table} WHERE dbnum = 7997 AND direct_model.sesno > 41;"
@@ -1216,23 +1235,30 @@ mod tests {
         assert!(!WriteIntent::ApplyWindow.wipes_whole_dbnum());
     }
 
-    /// **已知缺口，钉的是今天的行为**：删 `pe` 顶点会级联带走「属主 → 本元素」那条
-    /// `pe_owner` 边，而边 id 里的槽位号只存在于属主的成员表里。属主没进本窗口时，S→T
-    /// 重放只重建本元素自己名下的槽位，那条入边补不回来。
+    /// 回退**不删 `pe` 顶点**（2026-09-10 翻转，见 `render_rollback` 文档）。
     ///
-    /// 渲染层能钉住的只有「回退确实删 `pe` 顶点、而且没有任何一句重建入边」。真要补，
-    /// 得让边带上 `dbnum` 或让重放拿到属主的成员表——两者都在本轮边界之外（房间 / 模型
-    /// 面的边归 T2/T3）。修的时候把本测试翻过来，别静默改。
+    /// 删顶点会级联带走「属主 → 本元素」那条 `pe_owner` 成员边，而边 id 里的槽位号只存在于
+    /// 属主的成员表里，属主没进本窗口时重放补不回来（实测见证据页 §4）。数据面靠行幂等收敛，
+    /// `pe` 不需要先删——这一条与 `element_batch` 模块头「pe 行为什么不删」是同一条纪律。
+    ///
+    /// 本测试同时钉住「没有任何一句重建入边」：真去删顶点了，就得先把这一半补上。
     #[test]
-    fn the_rollback_does_not_rebuild_the_membership_edge_its_cascade_removes() {
+    fn the_rollback_never_deletes_the_pe_vertex_so_the_membership_edge_survives() {
         let sql = rollback_sql(7997, 41, &["EQUI"]);
         assert!(
-            sql.contains("DELETE pe WHERE dbnum = 7997"),
-            "回退确实删 pe 顶点（级联带走它身上的边）:\n{sql}"
+            !sql.contains("DELETE pe WHERE"),
+            "回退不得删 pe 顶点——级联会带走属主名下那条成员边:\n{sql}"
         );
         assert!(
+            !sql.contains("DELETE pe:") && !sql.contains("DELETE pe;"),
+            "任何形态的 pe 行删除都不许有:\n{sql}"
+        );
+        // 卫星行照删：它们没有边挂着，是「先删后插」的删那一半。
+        assert!(sql.contains("DELETE EQUI WHERE dbnum = 7997 AND sesno > 41;"), "{sql}");
+        assert!(sql.contains("DELETE ATT_UDA WHERE dbnum = 7997 AND sesno > 41;"), "{sql}");
+        assert!(
             !sql.contains("INSERT RELATION"),
-            "今天没有任何一句重建入边——这一行翻转时说明缺口补上了:\n{sql}"
+            "既然不删顶点就不必重建入边；哪天真要删顶点了，这两条断言得一起改:\n{sql}"
         );
     }
 
