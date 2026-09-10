@@ -434,19 +434,28 @@ plant-ui 的单根调用零影响。
 
   | 字段 | 类型 | 取值 / 含义 |
   |---|---|---|
-  | `status` | string | `writing`（正在写库，或上一次死在写库中途）\| `finished`（那一次任务的写库结束了） |
+  | `status` | string \| null | `writing`（正在写库，或上一次死在写库中途）\| `finished`（那一次任务的写库结束了）\| `null`（这个库从没被任务写过；等价于整格缺失，见下） |
   | `start_sesno` | int ≥ 0 | 本次任务的起点 **S**。崩溃后回退删的是 `sesno > S` 的痕迹、三水位退回它。初始化 / 重初始化恒 `0`；`apply_window` 是任务开工时的 `applied_sesno`；`model_only` 是起点 `model_sesno` |
   | `end_sesno` | int ≥ 0 | 目标 **T**。回退之后按 `S→T` 重排 |
   | `intent` | string | `initialize` \| `apply_window` \| `model_only` \| `room_only` \| `reinitialize`。决定回退走哪条清理路：前者与 `reinitialize` 整库清空重排，其余按 sesno 谓词删 |
   | `started_at` | RFC3339 \| null | 置 `writing` 的时刻 |
   | `finished_at` | RFC3339 \| null | 置 `finished` 的时刻；`status = writing` 时恒 `null` |
 
-  **整格不写**表示这个库从来没有被任务写过（或上一次回退把标记行删掉了、下一次任务还没开工）
-  ——不写成 `status: null`，那是另一句话。
+  **整格缺失 / `status: null` 是同一件事**：这个库从没被任务写过，或上一次回退把标记行删掉了、
+  下一次任务还没开工。两种形态客户端都要认，处置一样——那一栏留空，**别退回 `finished` 再据此
+  画绿灯**。
 
-  界面读法：`status = writing` 且这个库**不在** `/queue` 的运行行里 = 上一次死在写库中途，
-  下一次启动或该库下一次任务开工会先回退到 `start_sesno` 再从头重跑。回退期间这一行会
-  短暂缺失、而 `state_revision` 已经前进——那不是异常，是回退在进行。
+  `status` 与三枚水位的分工要分清：`finished` 只说「本任务的写库结束了」，**不说这个库追平了**
+  ——欠什么仍由 `applied_sesno` / `model_sesno` / `room_sesno` 回答。一个模型失败的任务照样以
+  `finished` 收尾（`model_sesno` 不动），那不是矛盾。反过来 `writing` 也不表示数据坏了：它只说
+  「这一次写库还没结束」，启动水化段或该库下一次任务开工前会把它回退到 `start_sesno` 再从
+  `start_sesno → end_sesno` 重跑。
+
+  界面读法：`status = writing` 且这个库**不在** `/queue` 的运行行里 = 上一次死在写库中途。
+  回退期间这一行会短暂缺失、三枚水位往回走、`state_revision` 已经前进——那不是异常，是回退在进行。
+
+  字段真值以 `src/data_interface/write_state.rs` 的 `WriteState` 为准（`dbnum` 那一格是行主键，
+  不重复出到 JSON 里；库里还有一个 `updated_at` 是写入时刻的运维痕迹，不进契约）。
 - `model_verdict` 是双水位的唯一判决：`in_sync` 表示 `model_sesno == applied_sesno`
   且没有根仍在追赶；`lagging` 表示数据与模型暂时不同步；`not_judged` 表示当前形态
   没有可比较的两枚水位。读透形态的 reason 为 `read-through`，这是中性状态。
@@ -498,6 +507,24 @@ plant-ui 的单根调用零影响。
 `model_caught_up_at`（名字与取值不变，来源换镜像）、`credential_advance`、`anomaly` / `blocked` /
 `excluded`、`model_source` / `model_source_reason`。契约上这一轮**只加一格 `write_state`**，
 其余全是减法。
+
+##### 逐条对照表（T4 改 `handlers.rs` / `ops.html` 时按这张表判真假）
+
+「定义点 / 消费点」一栏给的是**当前源码里 grep 得到的位置**；改完之后那一栏应当查无此项。
+
+| 端点 · 格 | 定义点 / 消费点（grep 得到） | 数据来源 | 退役依据 | plant-ui / ops 侧处置 |
+|---|---|---|---|---|
+| `/health` · `model_update_pending`、`model_update_pending_observation` | `handlers.rs:771`（`sampled_model_pending_status`，:528）、`:979`、`:581` | `model_update_pending::model_pending_status()` | ADR-072 D5（整表退）；计划 C.1 第 2 行 | 整格删；「欠什么」看三枚水位 |
+| `/health` · `model_drain`、`blocking_conditions` 里的 `model_drain.page_starved` | `handlers.rs:726`、`:956`、`:803`–`:804` | `model_update_pending::model_drain_telemetry_snapshot()` / `model_drain_page_starved()` | 计划 C.1 第 2 行（没有 drain 了） | 整格删；`blocking_conditions` 少一档 |
+| `/health` · `spatial_reconcile` | `handlers.rs:755`–`:764`、`:974`；`ops.html:1390`（`m.h.spatial_reconcile`） | `SideEffectCompensator::spatial_reconcile_status()` | ADR-072 D4（空间树随 `persist_roots_batched` 就地收敛）；计划 C.2 第 4 行 | 整格删；树是否落后看下面那两格 |
+| `/health` · `spatial_tree.pending` / `published_version` / `published_input_files` / `published_input_sha256` | 已落 —— 提交 `f2bdaa21c` | 发布输入 manifest（`published_file_input`） | ADR-072 D4；计划 C.2 第 3 行 | **已退**；换成同一节新增的 `snapshot_watermarks` / `db_watermarks` 两格（快照头记的各库 `(applied, model)` 数对 vs 库里现值，不等即重建） |
+| `/health` · `window_blocks` | `handlers.rs:744`–`:746`（取数）与 `:967` 一带（回执键，注释里记着它从 `staging_window_blocks` 改名的经过）；`ops.html:492`、`:1231`–`:1242`、`:1813`–`:1819` | `staging::attempts::load_window_blocks()`（`increment_update_attempt` 的 `kind = 'window_block'` 行） | 计划 §5 R4（`staging/attempts.rs` 整文件退，`increment_update_attempt` `REMOVE TABLE`） | **本轮不删**：R4 才退。退的时候 ops 那三处一起删，别只删一处 |
+| 任务回执 · `file_round` / `published_version` / 文件轮次一族 | `handlers.rs:3292`–`:3307`（回执测试里的 `file_rounds` / `published_version`） | `side_effect_pending::CompletedFileRound` | ADR-072 D4/D5 | 不画 |
+| 任务回执 · `model_verdict` / `model_caught_up_at` | `handlers.rs`（`/dbnums` 与 `/tasks` 两处同名） | 由 `dbnum_consistency::verdict_for` 回问库 → **改读水位镜像** | ADR-072 D4（任务内不回读库） | **名字与取值不变，照画**；只是不再等模型那一段 |
+| 任务回执 · `credential_advance` | `window_root_plan::CredentialAdvanceOutcome` | 数据尾事务之后的凭证前移 | 不在本轮（d-427） | 照画 |
+
+判真假的方法：表里每条「定义点」都能 `rg -n "<字段名>" src/web_service/handlers.rs web/ops.html`
+命中；T4 改完之后同一条命令应当查无此项（`window_blocks` 那一行除外——它留到 R4）。
 
 ### 4.8 `GET /api/v1/queue`、`POST /api/v1/queue/pause`、`POST /api/v1/queue/resume`（ADR-011 §9）
 - `GET /queue` → `{ "paused": false, "epoch_id": 7, "blocked_by_phase": "catalogue",
