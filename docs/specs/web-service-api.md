@@ -232,8 +232,10 @@
 - 每个数据批次是一条 `kind = "data_batch"` 的任务：`queued -> running -> succeeded|partial|failed`；
   进度经 WebSocket 推送（第 5 节），终态 result 为 `{ project, status, batch: DataBatchResult,
   units: [ModelUnitResult], warnings, model_verdict?, model_caught_up_at? }`（一行任务一个批次，
-  「一次运行」的复数形态随 ADR-011 退役）。双水位字段在模型与文件轮次发布之后读取；
-  `model_caught_up_at` 只在 `model_verdict = in_sync` 时出现，取自水位行的 `model_settled_at`。
+  「一次运行」的复数形态随 ADR-011 退役）。双水位字段在任务收尾那一笔之后读取（ADR-072 D4
+  之前是「模型与文件轮次发布之后」——文件轮次退役了）；`model_caught_up_at` 只在
+  `model_verdict = in_sync` 时出现，取自水位行的 `model_settled_at`。回执里文件轮次 /
+  pending / drain / publish 那一族格随 ADR-072 一并消失，逐条见 §4.7.1。
 - 模型持久工作由正式消费者 `kind = "model_drain"` 分页认领（每页至多 16 根）。状态为
   `running -> succeeded|partial|failed|yielded`；`yielded` 表示初始化门或数据优先级要求让位，
   是本次进程内任务的终态，但未执行的 durable pending 行、revision 与 attempts 均保持原值。
@@ -418,13 +420,38 @@ plant-ui 的单根调用零影响。
   "model_caught_up_roots": 956, "model_chasing_roots": 1,
   "model_dead_roots": 0, "model_lazy_roots": 12,
   "initialized": true,
+  "write_state": { "status": "finished", "start_sesno": 1001, "end_sesno": 1005,
+                   "intent": "apply_window",
+                   "started_at": "2026-09-10T17:02:11+08:00",
+                   "finished_at": "2026-09-10T17:06:48+08:00" },
   "anomaly": { "kind": "rollback", "file_latest_sesno": 812, "applied_sesno": 1005 },
   "blocked": false, "excluded": false }
 ```
 
+- `write_state`（2026-09-10，ADR-072 D1）：**这个库有没有一次没写完的任务**。它不回答
+  「欠什么」——欠什么仍由三枚水位回答。一库一行（`dbnum_write_state:{dbnum}`），任务第一笔
+  写库之前置 `writing{S,T}`，任务收尾那一笔与三枚水位同事务置 `finished`（行留着，不删）。
+
+  | 字段 | 类型 | 取值 / 含义 |
+  |---|---|---|
+  | `status` | string | `writing`（正在写库，或上一次死在写库中途）\| `finished`（那一次任务的写库结束了） |
+  | `start_sesno` | int ≥ 0 | 本次任务的起点 **S**。崩溃后回退删的是 `sesno > S` 的痕迹、三水位退回它。初始化 / 重初始化恒 `0`；`apply_window` 是任务开工时的 `applied_sesno`；`model_only` 是起点 `model_sesno` |
+  | `end_sesno` | int ≥ 0 | 目标 **T**。回退之后按 `S→T` 重排 |
+  | `intent` | string | `initialize` \| `apply_window` \| `model_only` \| `room_only` \| `reinitialize`。决定回退走哪条清理路：前者与 `reinitialize` 整库清空重排，其余按 sesno 谓词删 |
+  | `started_at` | RFC3339 \| null | 置 `writing` 的时刻 |
+  | `finished_at` | RFC3339 \| null | 置 `finished` 的时刻；`status = writing` 时恒 `null` |
+
+  **整格不写**表示这个库从来没有被任务写过（或上一次回退把标记行删掉了、下一次任务还没开工）
+  ——不写成 `status: null`，那是另一句话。
+
+  界面读法：`status = writing` 且这个库**不在** `/queue` 的运行行里 = 上一次死在写库中途，
+  下一次启动或该库下一次任务开工会先回退到 `start_sesno` 再从头重跑。回退期间这一行会
+  短暂缺失、而 `state_revision` 已经前进——那不是异常，是回退在进行。
 - `model_verdict` 是双水位的唯一判决：`in_sync` 表示 `model_sesno == applied_sesno`
   且没有根仍在追赶；`lagging` 表示数据与模型暂时不同步；`not_judged` 表示当前形态
   没有可比较的两枚水位。读透形态的 reason 为 `read-through`，这是中性状态。
+  **字段名与取值不变，来源换了**（ADR-072 D4）：判决此前由 `dbnum_consistency::verdict_for`
+  在任务收尾之后回问库算出来，现在由水位镜像算——任务内不回读库。消费者不受影响。
 - `model_sesno_time` 表示对应 E3D 保存时刻；`model_caught_up_at` 表示模型水位真正写下的
   挂钟时刻，只在 `model_verdict = in_sync` 时非空。
 - `model_dead_roots` 与 `model_lazy_roots` 不阻断水位，但必须并排展示；后者为 `null`
@@ -452,6 +479,25 @@ plant-ui 的单根调用零影响。
   不是精确行数；要精确数就 `SELECT count() FROM pe WHERE dbnum = … AND dependency = true GROUP ALL`。
   没有依赖行的库**整格不写**——写 0 读起来像「一个依赖都没有」，那是另一句话。
 - 旧字段是新形状的子集，既有消费者不受影响。
+
+#### 4.7.1 随发布阶段退役的格（ADR-072 D4/D5，2026-09-10）
+
+发布阶段（文件轮次屏障）与第二条异步账整体退役之后，下面这些格**从回执与 `/dbnums` 里消失**。
+它们不是改名、不是置空，是不再出现——客户端读不到就是读不到，按「没有这一格」处理，
+别退回默认值再据此画状态。
+
+| 消失的格 | 出处 | 为什么没了 |
+|---|---|---|
+| `file_round` / `file_round_status`（`collecting` / `pending` / `done`）、`published_version`、`published_input_manifest` | 任务回执、`/dbnums` | 屏障退役：同库单写者同步写，没有「让三条异步路看到同一版本」这回事。想知道「这一次写完没有」看 `write_state.status` |
+| `model_pending` / `model_pending_status` / `model_pending_phase`、`abandoned`、`attempts` / `MAX_ATTEMPTS` 那一族 | `/dbnums`、`web/ops.html` | `model_update_pending` 整表退役。任务的单元清单就是真值；「已放弃」改由镜像的失败根集回答 |
+| `model_drain_*`（`telemetry` / `page_starved` / `starved_pages`）、`drain_report`、`drain_page_progress` | `/dbnums`、WS `task_started` / `task_finished` 的 `model_drain` 分支 | 没有 drain 了：模型随任务同步生成 |
+| `spatial_pending` / `spatial_reconcile_*` / `published_spatial_version` | `/dbnums`、`/health` | 空间树随 `persist_roots_batched` 就地收敛，不再留意图行 |
+| `room_published_*`（`room_published_version` / `room_topology_source`） | 房间查询面 | `room_published_inst` / `room_published_topology` / `room_topology_source` 三表退役；「已发布到哪一版」= `room_sesno` |
+
+**不动的格**：`applied_sesno` / `model_sesno` / `room_sesno` 三枚水位、`model_verdict` /
+`model_caught_up_at`（名字与取值不变，来源换镜像）、`credential_advance`、`anomaly` / `blocked` /
+`excluded`、`model_source` / `model_source_reason`。契约上这一轮**只加一格 `write_state`**，
+其余全是减法。
 
 ### 4.8 `GET /api/v1/queue`、`POST /api/v1/queue/pause`、`POST /api/v1/queue/resume`（ADR-011 §9）
 - `GET /queue` → `{ "paused": false, "epoch_id": 7, "blocked_by_phase": "catalogue",
@@ -673,3 +719,20 @@ tokio/serde/serde_json 均已存在，无其他新增。
 2. **鉴权**：本期不做；前端部署到共享环境前可追加最简 token 头校验。
 3. **`incr_applied` 已退役**：自动与手动批次统一发布 tasks 主题事件。
 4. **任务历史持久化**：仅内存分层保留最多 1000 条（durable 语义由水位 + pending 表承担），不做持久化。
+
+## 10. 给 plant-ui 的一句话（ADR-072，2026-09-10）
+
+**`DbnumStatus` 多一格可选的 `write_state`，此外全是减法：文件轮次 / pending / drain / publish
+那一族格不再出现，消失的格就别画。**
+
+展开成三句：
+
+1. `write_state` 是**可选**的（`DbnumStatus.write_state?: WriteState`）：整格缺失 = 这个库
+   从没被任务写过，或上一次回退刚把标记删掉、下一次任务还没开工。缺失时那一栏留空，
+   别退回 `finished` 再据此画绿灯。字段清单见 §4.7。
+2. 画法：`finished` 是常态（安静，不必出声）；`writing` 且该库在 `/queue` 的运行行里 =
+   正在写库；`writing` 而队列里没有它 = 上一次死在写库中途，下一次启动或该库下一次任务
+   开工会回退到 `start_sesno` 再从 `start_sesno → end_sesno` 重跑——这一档值得在库那一行
+   出声，它是「为什么这个库的水位会往回走」的唯一出处。
+3. 回退进行中那几秒，`write_state` 整格会短暂消失、三枚水位往回走、`state_revision` 前进。
+   **水位回退不是异常**，别按数据丢失报警；跨仓同步一句即可，不阻本仓落地。
