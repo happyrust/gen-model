@@ -26,23 +26,25 @@ use std::sync::{Arc, Mutex};
 
 use aios_core::{NamedAttrMap, RefU64};
 use dashmap::DashMap;
-use e3d_io::ReadOnlyEngine;
 use e3d_io::record::element::ParsedElement;
 use e3d_io::record::explicit::ExplicitAttribute;
 use e3d_io::record::template::TemplateProvider;
 use e3d_io::refno::RefNo;
+use e3d_io::{E3dVersion, ReadOnlyEngine, SchemaPack};
 
 use super::cata_closure::CataDbLocator;
 use super::direct_attmap::{self, DirectAttrs};
 use super::direct_index::{DbIndexes, IndexFingerprint};
 
-/// 模板与字典文件所在目录。
+/// 显式覆盖模板与字典文件所在目录。
 ///
-/// 这些是从 E3D 安装里抽出来的 schema 资产（`attlib.dat` 与各 `*vir.dat`），不随工程
-/// 走、也不在本仓里，所以只能由环境指定。`DbOption` 的配置键属于 ADR-053 的 P2/P4
-/// （`model_gen_mode` 一起进），本阶段先用环境变量 + 一个本机默认值。
+/// 不设置时不再默认为某台机器的 E3D 3.1 shadow：[`DirectSchema::open_from_env`]
+/// 会从 `DbOption.project_path` 的标准版本目录（如 `E3D2.1` / `E3D3.1`）识别版本，
+/// 再打开 e3d-io 对应的 schema pack。设置本变量表示调用方明确接管选择，保留给
+/// 临时探针和夹具。
 pub const TEMPLATE_DIR_ENV: &str = "AIOS_E3D_TEMPLATE_DIR";
-const TEMPLATE_DIR_DEFAULT: &str = r"E:\reverse\e3d\shadow_e3d31_aps_all";
+/// e3d-io schema packs 的父目录；未设置时使用 e3d-io 随源码携带的 `schema/`。
+pub const SCHEMA_ROOT_ENV: &str = "AIOS_E3D_SCHEMA_ROOT";
 
 /// 一个库的读取时点与身份。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -176,23 +178,54 @@ impl std::error::Error for DirectStoreError {
 pub struct DirectSchema {
     attlib: e3d_attlib::AttlibData,
     template_dir: PathBuf,
+    version: Option<&'static E3dVersion>,
 }
 
 impl std::fmt::Debug for DirectSchema {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DirectSchema")
             .field("template_dir", &self.template_dir)
+            .field("version", &self.version.map(|version| version.id))
             .finish_non_exhaustive()
     }
 }
 
 impl DirectSchema {
-    /// 从 [`TEMPLATE_DIR_ENV`] 指定的目录加载，未设时用本机默认值。
+    /// 显式 [`TEMPLATE_DIR_ENV`] 优先；未设置时识别当前配置项目的 E3D
+    /// 版本，并从匹配的 e3d-io schema pack 加载。
     pub fn open_from_env() -> anyhow::Result<Self> {
-        let dir = std::env::var_os(TEMPLATE_DIR_ENV)
+        if let Some(dir) = std::env::var_os(TEMPLATE_DIR_ENV) {
+            return Self::open(PathBuf::from(dir));
+        }
+        let project_root = Path::new(&aios_core::get_db_option().project_path);
+        let schema_root = std::env::var_os(SCHEMA_ROOT_ENV)
             .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(TEMPLATE_DIR_DEFAULT));
-        Self::open(dir)
+            .unwrap_or_else(e3d_io::bundled_schema_root);
+        Self::open_for_project_with_schema_root(project_root, schema_root)
+    }
+
+    /// Detect `project_root` from its version-bearing path and load the
+    /// matching schema pack carried by e3d-io. The database tree identities
+    /// are the same in measured E3D 2.1 and 3.1 projects, so they cannot safely
+    /// choose between the two packs.
+    pub fn open_for_project(project_root: impl AsRef<Path>) -> anyhow::Result<Self> {
+        Self::open_for_project_with_schema_root(project_root, e3d_io::bundled_schema_root())
+    }
+
+    /// Same as [`Self::open_for_project`], with an explicit pack root for
+    /// deployment and tests.
+    pub fn open_for_project_with_schema_root(
+        project_root: impl AsRef<Path>,
+        schema_root: impl AsRef<Path>,
+    ) -> anyhow::Result<Self> {
+        let project_root = project_root.as_ref();
+        let pack = SchemaPack::detect_for_project(schema_root, project_root).map_err(|error| {
+            anyhow::anyhow!(
+                "识别 E3D 项目 {} 并选择 schema pack 失败: {error}",
+                project_root.display()
+            )
+        })?;
+        Self::open_pack(pack)
     }
 
     pub fn open(template_dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
@@ -209,11 +242,52 @@ impl DirectSchema {
         Ok(Self {
             attlib,
             template_dir,
+            version: None,
+        })
+    }
+
+    fn open_pack(pack: SchemaPack) -> anyhow::Result<Self> {
+        let version = pack.version();
+        let attlib_path = pack
+            .attlib()
+            .map_err(|error| anyhow::anyhow!("{} 的 attlib 解析路径失败: {error}", version.id))?;
+        let template_dir = attlib_path
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("{} 没有父目录", attlib_path.display()))?
+            .to_path_buf();
+        // SchemaPack may search several roots. All release-bound files used
+        // by the legacy directory-shaped API must still resolve together;
+        // accepting a split would reintroduce the cross-version mix the pack
+        // exists to prevent.
+        for db_type in ["DESI", "CATA", "DICT"] {
+            let template = pack.template(db_type).map_err(|error| {
+                anyhow::anyhow!("{} 的 {db_type} 模板解析路径失败: {error}", version.id)
+            })?;
+            anyhow::ensure!(
+                template.parent() == Some(template_dir.as_path()),
+                "{} 的 attlib 与 {db_type} 模板不在同一 schema 目录：{} vs {}",
+                version.id,
+                attlib_path.display(),
+                template.display()
+            );
+        }
+        let attlib = e3d_attlib::AttlibData::parse_file(&attlib_path)
+            .map_err(|error| anyhow::anyhow!("parse {}: {error}", attlib_path.display()))?;
+        Ok(Self {
+            attlib,
+            template_dir,
+            version: Some(version),
         })
     }
 
     pub fn template_dir(&self) -> &Path {
         &self.template_dir
+    }
+
+    /// Auto-detected release. Explicit [`Self::open`] overrides return `None`
+    /// because a directory of `.dat` files does not identify its own release.
+    pub fn version(&self) -> Option<&'static E3dVersion> {
+        self.version
     }
 
     /// The decoded system attribute dictionary.  File-side UDA catalog loading
@@ -883,6 +957,7 @@ mod tests {
         let schema = Arc::new(DirectSchema {
             attlib: e3d_attlib::AttlibData::default(),
             template_dir: PathBuf::from("nowhere"),
+            version: None,
         });
         let locator = FakeLocator {
             ref0_to_dbnum: BTreeMap::from([(24_384, 8000)]),
@@ -946,6 +1021,7 @@ mod tests {
         let schema = Arc::new(DirectSchema {
             attlib: e3d_attlib::AttlibData::default(),
             template_dir: PathBuf::from("nowhere"),
+            version: None,
         });
         let store = DirectStore::new(schema, Arc::new(LocatorWithFile));
         assert!(store.pinned(8000).is_none());
@@ -1032,6 +1108,7 @@ mod tests {
         let schema = DirectSchema {
             attlib: e3d_attlib::AttlibData::default(),
             template_dir: PathBuf::from("dir"),
+            version: None,
         };
         // 目录里没有文件，所以只看它找的是哪一个。
         let error = schema.template_file("DESI").unwrap_err().to_string();
@@ -1039,5 +1116,56 @@ mod tests {
         let error = schema.template_file("CATA").unwrap_err().to_string();
         assert!(error.contains("catvir.dat"), "{error}");
         assert!(schema.template_file("DI").is_err());
+    }
+
+    #[test]
+    fn an_e3d_2_1_project_path_selects_the_2_10_schema_pack() {
+        let schema = DirectSchema::open_for_project("D:/AVEVA/Projects/E3D2.1/AvevaMarineSample")
+            .expect("the bundled E3D 2.10 schema pack opens");
+        assert_eq!(schema.version().map(|version| version.id), Some("e3d210"));
+        assert!(
+            schema
+                .template_dir()
+                .ends_with(Path::new("schema/e3d210/binaries")),
+            "{}",
+            schema.template_dir().display()
+        );
+        assert!(schema.template_file("DESI").unwrap().is_file());
+        assert!(schema.template_file("CATA").unwrap().is_file());
+        assert!(schema.template_file("DICT").unwrap().is_file());
+    }
+
+    #[test]
+    fn installed_e3d_2_1_bran_parses_through_the_direct_store() {
+        let database = Path::new(r"D:\AVEVA\Projects\E3D2.1\AvevaMarineSample\ams000\ams8000_0001");
+        if !database.is_file() {
+            eprintln!("skipped: installed E3D 2.1 sample is absent");
+            return;
+        }
+
+        let schema = Arc::new(
+            DirectSchema::open_for_project(database)
+                .expect("the database path selects the E3D 2.10 schema pack"),
+        );
+        assert_eq!(schema.version().map(|version| version.id), Some("e3d210"));
+
+        let locator = FakeLocator {
+            ref0_to_dbnum: BTreeMap::from([(24_384, 8000)]),
+            lookups: AtomicUsize::new(0),
+        };
+        let store = DirectStore::new(schema, Arc::new(locator));
+        store.pin(DbPin {
+            dbnum: 8000,
+            db_type: "DESI".to_string(),
+            file: database.to_path_buf(),
+            sesno: None,
+        });
+        let attrs = store
+            .attrs_in(8000, RefU64::from_two_nums(24_384, 23_257))
+            .expect("BRAN 24384/23257 parses with the selected 2.10 descriptors");
+        assert!(attrs.map.map.contains_key("TYPE"));
+        assert!(attrs.map.map.contains_key("OWNER"));
+        assert!(attrs.map.map.contains_key("REFNO"));
+        assert!(store.pinned_sesno(8000).is_some());
     }
 }
