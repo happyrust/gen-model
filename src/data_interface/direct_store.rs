@@ -209,10 +209,24 @@ impl std::fmt::Debug for DirectSchema {
 }
 
 impl DirectSchema {
-    /// 显式 [`TEMPLATE_DIR_ENV`] 优先；未设置时识别当前配置项目的 E3D
+    /// TOML 手动版本优先，其次 [`TEMPLATE_DIR_ENV`]；均未设置时识别当前项目的 E3D
     /// 版本，并从匹配的 e3d-io schema pack 加载。
     pub fn open_from_env() -> anyhow::Result<Self> {
         let started = Instant::now();
+        if let Some(version) = crate::options::configured_e3d_version().map_err(anyhow::Error::msg)? {
+            let schema_root = std::env::var_os(SCHEMA_ROOT_ENV)
+                .map(PathBuf::from)
+                .or_else(schema_root_next_to_executable)
+                .unwrap_or_else(e3d_io::bundled_schema_root);
+            let context = format!(
+                "mode=manual source=DbOption e3d_version={version} auto_detect=false schema_root={}",
+                schema_root.display()
+            );
+            report_schema_info(&format!("[E3D schema] 开始加载: {context}"));
+            return Self::report_load_result(
+                Self::open_explicit_version(&schema_root, &version), &context, started,
+            );
+        }
         if let Some(dir) = std::env::var_os(TEMPLATE_DIR_ENV) {
             let template_dir = PathBuf::from(dir);
             let context = format!(
@@ -302,6 +316,13 @@ impl DirectSchema {
             )
         })?;
         Self::open_pack(pack)
+    }
+
+    fn open_explicit_version(schema_root: &Path, version: &str) -> anyhow::Result<Self> {
+        let version = e3d_io::schema::version_by_id(version.trim()).ok_or_else(|| {
+            anyhow::anyhow!("e3d_version={version:?} 无效：支持 e3d210 / e3d31")
+        })?;
+        Self::open_pack(SchemaPack::open_version(schema_root, version.id)?)
     }
 
     pub fn open(template_dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
