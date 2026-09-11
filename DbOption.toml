@@ -25,9 +25,8 @@ sync_chunk_size = 10_0000
 
 #项目设置
 #【新增 2026-09-11】显式选择 E3D 模板版本：e3d210 / e3d31。
-# 设置后完全跳过项目数据库的 COMM.VERS 自动取证，也不做自动版本冲突阻断。
-# 删除此项才启用自动识别；缺少/未知 COMM.VERS 会明确报错，不回退目录名、文件时间、
-# 文件大小、Saving Meta Data. 或 AIOS_E3D_TEMPLATE_DIR。
+# 必填；数据库中尚无已证实的持久产品版本字段，缺失时解析器明确失败。
+# 不读取目录名、文件时间、文件大小、UPGDNO、Saving Meta Data. 或 COMM.VERS 猜版本。
 e3d_version = "e3d31"
 #【变更 2026-07-27】E3D2.1→E3D3.1：AMS 样例工程迁移到 E3D3.1 项目目录。
 project_path = "D:/AVEVA/Projects/E3D3.1"

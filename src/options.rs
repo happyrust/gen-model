@@ -12,7 +12,7 @@ pub struct DbOptionExt {
     #[serde(flatten)]
     pub inner: DbOption,
 
-    /// 显式选择模板包（e3d210 / e3d31）；设置后完全跳过 COMM.VERS 自动取证。
+    /// 必须显式选择模板包（e3d210 / e3d31）；缺失时解析器拒绝启动。
     #[serde(default)]
     pub e3d_version: Option<String>,
 
@@ -528,8 +528,8 @@ pub(crate) fn apply_asset_root(mut option: DbOption) -> DbOption {
 
 /// 模板版本必须严格读配置；不能经过扩展表解析失败后回落默认值的路径。
 ///
-/// `Some` 是完整的手动模式：调用方不得再跑数据库探针或做“冲突阻断”。
-/// `None` 才允许从项目 Communication 数据库的当前 `COMM.VERS` 自动选择。
+/// `Some` 是唯一可用模式：调用方不得再跑数据库探针或做“冲突阻断”。
+/// `None` 保留到共享加载器报出针对性的必填错误。
 pub(crate) fn configured_e3d_version() -> Result<Option<String>, String> {
     Ok(read_ext_fields(std::env::var_os("DB_OPTION_FILE"))?.e3d_version)
 }

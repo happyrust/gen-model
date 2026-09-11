@@ -1,4 +1,4 @@
-# Database-field E3D schema selection
+# Manual E3D schema selection after database-field audit
 
 ## Corrected evidence
 
@@ -12,47 +12,46 @@ release values. Direct record reads and IDA disprove that assumption:
   product release.
 - `DB_Communication::updateVersion()` writes `VersionInfo::version()` into
   `COMM.VERS`.
-- The E3D 3.1 AMS Communication database has current indexed
-  `COMM.VERS=3.1.9.0`.
-- The E3D 2.1 AMS Communication database has no measured product-version
-  value, so strict automatic selection returns `Unknown`.
+- `DB_Communication::clearComm()` clears `COMM.VERS` on logout/expunge.
+- The E3D 3.1 AMS Communication database has current indexed values from
+  different clients/modules (`3.1.9.0` and `1.3.13.0`), while idle projects
+  commonly have no value.
 
 The full IDA addresses and hashes are recorded in
 `../../../vendor/e3d-io/docs/evidence/2026-09-11-e3d-database-version.md`.
 
 ## Implemented policy
 
-- `DbOption.toml` with `e3d_version` is manual mode. It opens that SchemaPack
-  immediately and does not inspect project databases or block on a mismatch.
-- Without `e3d_version`, gen-model asks e3d-io for current project-level
-  `COMM.VERS` evidence.
-- Discovery is limited to `included_projects` (including `project_dirs`
-  remapping); an excluded project cannot lend its version to the configured
-  scope. Multiple included projects use the highest measured version.
-- A measured `3.1.*` value selects `e3d31`; measured `2.1.*` / `12.1.*`
-  values select `e3d210`.
-- Missing or unfamiliar evidence stops with an explicit error.
+- `DbOption.toml.e3d_version` is required and is the only SchemaPack selector.
+- The manual value opens that pack immediately; no database probe or
+  automatic mismatch block runs.
+- A missing value fails with a targeted configuration error even if
+  `AIOS_E3D_TEMPLATE_DIR` or recognizable-looking `COMM.VERS` text exists.
+- e3d-io keeps `COMM.VERS` and `UPGDNO` in its diagnostic output, but
+  `detect_*` / `SchemaPack::detect_*` fail loudly instead of assigning a
+  release.
 - Directory names, timestamps, file sizes, `WORL.UPGDNO`,
-  `Saving Meta Data.`, and `AIOS_E3D_TEMPLATE_DIR` are not automatic
-  selection inputs.
+  `Saving Meta Data.`, and `COMM.VERS` are not selection inputs.
 
 ## Directed verification
 
-- e3d-io schema unit tests: 15 passed, 2 live tests ignored in the normal run.
-- live E3D 3.1 project evidence: passed (`COMM.VERS=3.1.9.0`).
-- copied 3.1 `amscom` under a directory named `E3D2.1`: passed as `e3d31`.
-- E3D 2.1 AMS with no measured `COMM.VERS`: returned `Unknown`.
+- e3d-io schema tests: 14 passed, 2 live tests ignored in the normal run;
+  they cover fail-loud automatic entry points, diagnostic extraction,
+  truncated sessions, shared `UPGDNO`, and ignored path names.
+- live E3D 3.1 diagnostics retain both AMS client/module versions but assign
+  no release.
+- copying 3.1 `amscom` under a directory named `E3D2.1` preserves diagnostics
+  and still assigns no release.
 - gen-model explicit-version tests: 4 passed.
-- gen-model missing-evidence test: passed.
-- gen-model live automatic selection: passed and opened
-  `schema/e3d31/binaries`.
-- additional E3D 3.1 projects: AvevaPlantSample, TEST, YCYK-E3D and the SLYK
-  YCYK copy selected `e3d31`; AvevaCatalogue, SCB and ZDJ returned `Unknown`
-  because their current COMM records carry no measured product version.
+- gen-model missing-version test proves that neither a real project path nor
+  `AIOS_E3D_TEMPLATE_DIR` re-enables guessing; passed.
+- additional project inspection established why `COMM.VERS` is unstable:
+  AvevaCatalogue is an identical untouched copy; SCB and ZDJ have current
+  empty values after communication cleanup.
 
 ## Full checks
 
-- e3d-io `cargo test --lib`: 243 passed, 2 ignored.
+- e3d-io `cargo test --lib`: 242 passed, 2 ignored.
 - e3d-io `cargo check --all-targets`: passed; two pre-existing example
   dead-code warnings.
 - e3d-io Clippy: no warning in the changed version-selection files; the
@@ -60,8 +59,8 @@ The full IDA addresses and hashes are recorded in
 - gen-model `cargo check --lib`: passed.
 - gen-model Clippy: passed for this crate; one pre-existing dead-code warning
   comes from `e3d-model`.
-- gen-model `cargo test --lib`: the six version-selection/configuration tests
-  passed. The repository-wide result was 1989 passed, 137 ignored, and 9
+- gen-model `cargo test --lib`: the five version-selection/configuration tests
+  passed. The repository-wide result was 1989 passed, 136 ignored, and 9
   failures in unrelated pre-existing model-finalization, pe-batch,
   window-root-plan, and embedded-web-bundle tests; none of those files is part
   of this change.

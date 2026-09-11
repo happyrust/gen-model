@@ -38,9 +38,8 @@ use super::direct_index::{DbIndexes, IndexFingerprint};
 
 /// 旧版显式模板目录环境变量。
 ///
-/// 自动选择不再读取它：`DbOption.toml` 未指定 `e3d_version` 时，必须从项目数据库的
-/// `COMM.VERS` 取证并打开同版本 SchemaPack。保留常量只是给仍显式调用
-/// [`DirectSchema::open`] 的工具提供一致的错误提示。
+/// 共享加载器不再读取它：版本必须由 `DbOption.toml.e3d_version` 明确选择。
+/// 保留常量只是给仍显式调用 [`DirectSchema::open`] 的工具提供一致的错误提示。
 pub const TEMPLATE_DIR_ENV: &str = "AIOS_E3D_TEMPLATE_DIR";
 
 /// 一个库的读取时点与身份。
@@ -186,37 +185,20 @@ impl std::fmt::Debug for DirectSchema {
 }
 
 impl DirectSchema {
-    /// DbOption.toml 的显式版本优先；未设时从项目 COMM 数据库自动取证。
+    /// 只接受 DbOption.toml 的显式版本。
+    ///
+    /// 已调查的 `UPGDNO`、`Saving Meta Data.` 与 `COMM.VERS` 都不是持久产品版本
+    /// 字段；缺配置就失败，不能从路径或会话现场猜一套偏移继续解析。
     pub fn open_from_env() -> anyhow::Result<Self> {
-        let version = crate::options::configured_e3d_version().map_err(anyhow::Error::msg)?;
-        if let Some(version) = version {
-            return Self::open_version(&version);
-        }
-        let option = aios_core::get_db_option();
-        let configured_root = option.project_path.trim();
-        anyhow::ensure!(
-            !configured_root.is_empty(),
-            "DbOption.toml 未指定 e3d_version，且 project_path 为空：无法从 COMM.VERS 自动识别"
-        );
-        anyhow::ensure!(
-            !option.included_projects.is_empty(),
-            "DbOption.toml 未指定 e3d_version，且 included_projects 为空：\
-             没有可读取 COMM.VERS 的项目"
-        );
-        let mut project_roots = Vec::with_capacity(option.included_projects.len());
-        for project in &option.included_projects {
-            let root =
-                super::project_paths::resolve_project_root(option, project).ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "无法解析 included_projects 中项目 {project:?} 的目录，\
-                     不能读取 COMM.VERS"
-                    )
-                })?;
-            project_roots.push(root);
-        }
-        project_roots.sort();
-        project_roots.dedup();
-        Self::open_detected_projects(&project_roots)
+        let version = crate::options::configured_e3d_version()
+            .map_err(anyhow::Error::msg)?
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "DbOption.toml 必须显式配置 e3d_version = \"e3d210\" 或 \"e3d31\"；\
+                     自动识别已禁用，因为尚未证实持久的数据库产品版本字段"
+                )
+            })?;
+        Self::open_version(&version)
     }
 
     /// 直接打开该版本的整套模板，不读取工程或数据库进行版本识别。
@@ -227,66 +209,6 @@ impl DirectSchema {
         log::info!(
             "[E3D schema] source=DbOption evidence_field=manual raw_value=- raw_text=- \
              e3d_version={} auto_detect=false template_dir={}",
-            version.id,
-            schema.template_dir.display()
-        );
-        Ok(schema)
-    }
-
-    /// 从项目树中的当前 `COMM.VERS` 取证，并打开对应 SchemaPack。
-    fn open_detected_project(project_root: &Path) -> anyhow::Result<Self> {
-        let evidence = e3d_io::project_version_evidence(project_root)?;
-        Self::open_detected_evidence(evidence)
-    }
-
-    /// 多项目共用一套模板时取已测版本中的最高者；没有一个项目能给出版本就失败。
-    fn open_detected_projects(project_roots: &[PathBuf]) -> anyhow::Result<Self> {
-        let mut selected = None;
-        let mut failures = Vec::new();
-        for project_root in project_roots {
-            match e3d_io::project_version_evidence(project_root) {
-                Ok(evidence) if evidence.version == Some(&e3d_io::E3D31) => {
-                    selected = Some(evidence);
-                    break;
-                }
-                Ok(evidence) if evidence.version == Some(&e3d_io::E3D210) => {
-                    selected.get_or_insert(evidence);
-                }
-                Ok(evidence) => failures.push(format!(
-                    "{}: field={} raw_value={:?} raw_text={:?}",
-                    project_root.display(),
-                    evidence.source.field_name(),
-                    evidence.raw_value,
-                    evidence.raw_text
-                )),
-                Err(error) => failures.push(format!("{}: {error}", project_root.display())),
-            }
-        }
-        let evidence = selected.ok_or_else(|| {
-            anyhow::anyhow!(
-                "配置范围内没有项目给出可识别的 COMM.VERS，无法自动选择 E3D SchemaPack：{}",
-                failures.join("；")
-            )
-        })?;
-        Self::open_detected_evidence(evidence)
-    }
-
-    fn open_detected_evidence(evidence: e3d_io::DatabaseVersionEvidence) -> anyhow::Result<Self> {
-        let version = evidence.version.ok_or_else(|| {
-            anyhow::anyhow!(
-                "{}: COMM.VERS 证据不足，无法自动选择 E3D SchemaPack",
-                evidence.database.display()
-            )
-        })?;
-        let schema = Self::open_pack(version)?;
-        log::info!(
-            "[E3D schema] source=database-file evidence_field={} raw_value={:?} raw_text={:?} \
-             database={} session_page={:?} e3d_version={} auto_detect=true template_dir={}",
-            evidence.source.field_name(),
-            evidence.raw_value,
-            evidence.raw_text,
-            evidence.database.display(),
-            evidence.session_page,
             version.id,
             schema.template_dir.display()
         );
@@ -1013,30 +935,36 @@ mod tests {
     }
 
     #[test]
-    fn automatic_selection_refuses_a_project_without_comm_version_evidence() {
-        let project = tempfile::tempdir().unwrap();
-        let error = DirectSchema::open_detected_project(project.path())
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("COMM.VERS"), "{error}");
-        assert!(
-            !error.contains(TEMPLATE_DIR_ENV),
-            "automatic selection must not fall back to {TEMPLATE_DIR_ENV}: {error}"
-        );
-    }
-
-    #[test]
-    #[ignore = "requires the installed E3D 3.1 AvevaMarineSample and ZDJ projects"]
-    fn automatic_selection_uses_the_live_project_comm_version() {
-        let known = PathBuf::from(r"D:\AVEVA\Projects\E3D3.1\AvevaMarineSample\ams000");
-        let unknown = PathBuf::from(r"D:\AVEVA\Projects\E3D3.1\ZDJ\ZDJ000");
-        let schema = DirectSchema::open_detected_projects(&[unknown.clone(), known]).unwrap();
-        assert!(schema.template_dir().ends_with("e3d31/binaries"));
-
-        let error = DirectSchema::open_detected_projects(&[unknown])
-            .unwrap_err()
-            .to_string();
-        assert!(error.contains("没有项目给出可识别的 COMM.VERS"), "{error}");
+    fn missing_e3d_version_never_probes_or_falls_back() {
+        const CHILD: &str = "AIOS_TEST_MISSING_E3D_VERSION";
+        if std::env::var_os(CHILD).is_some() {
+            let error = DirectSchema::open_from_env().unwrap_err().to_string();
+            assert!(error.contains("必须显式配置 e3d_version"), "{error}");
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("DbOption.toml");
+        std::fs::write(
+            &config,
+            "project_path = \"D:/AVEVA/Projects/E3D3.1\"\n\
+             included_projects = [\"AvevaMarineSample\"]\n",
+        )
+        .unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "data_interface::direct_store::tests::missing_e3d_version_never_probes_or_falls_back",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("DB_OPTION_FILE", config)
+            .env(
+                TEMPLATE_DIR_ENV,
+                e3d_io::bundled_schema_root().join("e3d31/binaries"),
+            )
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
     }
 
     #[derive(Default)]
