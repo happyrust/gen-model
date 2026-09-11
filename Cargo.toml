@@ -1,6 +1,6 @@
 [package]
 name = "aios-database"
-version = "0.1.21"
+version = "0.1.22"
 edition = "2024"
 
 # Python 调试绑定（python/aios-py）与主 crate 同一个 workspace：
