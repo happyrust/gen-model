@@ -190,6 +190,11 @@ mod tests {
             body.contains("e3d_io::detect_database_version(path)"),
             "SYS 版本必须来自数据库二进制探针"
         );
+        assert!(
+            body.contains("e3d_io::detect_project_version(&self.db_option.project_path)")
+                && body.contains("项目数据库二进制版本识别也失败"),
+            "SYS/MDB 先于文件扫描失败时也必须补充项目二进制版本或其失败原因"
+        );
         for required in [
             "SYS E3D 版本识别成功",
             "schema={}",
@@ -3561,7 +3566,22 @@ impl AiosDBManager {
         let scope = match self.update_scope(None).await {
             Ok(scope) => scope,
             Err(error) => {
-                let msg = format!("[{origin}] 无法确定本期执行范围，未入队任何批次: {error:#}");
+                let e3d_context = if origin == "init" {
+                    match e3d_io::detect_project_version(&self.db_option.project_path) {
+                        Ok(version) => format!(
+                            "；项目数据库二进制版本={}，E3D=\"{}\"",
+                            version.id, version.display
+                        ),
+                        Err(version_error) => {
+                            format!("；项目数据库二进制版本识别也失败: {version_error}")
+                        }
+                    }
+                } else {
+                    String::new()
+                };
+                let msg = format!(
+                    "[{origin}] 无法确定本期执行范围，未入队任何批次: {error:#}{e3d_context}"
+                );
                 log::error!("{msg}");
                 eprintln!("{msg}");
                 return Ok(());
