@@ -18,13 +18,14 @@
 //! initialization — before anything has been synced — which is the point at
 //! which the Dictionary set has to be known.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
 
 use aios_core::RefU64;
 use aios_core::options::DbOption;
 use aios_core::types::named_attvalue::NamedAttrValue;
+use anyhow::Context;
 
 /// The `STYP` a Dictionary database carries in the SYS record.
 ///
@@ -164,6 +165,92 @@ impl MdbMembership {
     }
 }
 
+fn report_sys_info(message: &str) {
+    log::info!("{message}");
+    println!("{message}");
+}
+
+fn report_sys_error(message: &str) {
+    log::error!("{message}");
+    eprintln!("{message}");
+}
+
+fn sys_basic_info_message(
+    sys: &Path,
+    header: &crate::data_interface::db_file_header::DbFileHeader,
+    selected_schema: &str,
+    binary_version: &str,
+) -> String {
+    let saved_at = header
+        .latest_session
+        .rfc3339()
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "[SYS 解析] 基本信息: file={} bytes={} dbnum={} db_type={} latest_sesno={} \
+         latest_ses_pgno={} session_pgno={} previous_session_pgno={:?} end_pgno={} \
+         index_root_pgno={} saved_at={} machine={:?} comment={:?} selected_schema={} \
+         binary_version={}",
+        sys.display(),
+        header.file_size,
+        header.dbnum,
+        header.db_type,
+        header.latest_sesno(),
+        header.latest_ses_pgno,
+        header.latest_session.pgno,
+        header.latest_session.previous_pgno,
+        header.latest_session.end_pgno,
+        header.latest_session.index_root_pgno,
+        saved_at,
+        header.latest_session.machine,
+        header.latest_session.comment,
+        selected_schema,
+        binary_version
+    )
+}
+
+fn mdb_parse_summary_message(
+    sys: &Path,
+    mdb: &str,
+    root: RefU64,
+    curd_entries: usize,
+    decoded_databases: usize,
+    skipped_databases: usize,
+    counts_by_styp: &BTreeMap<i64, usize>,
+) -> String {
+    format!(
+        "[SYS 解析] MDB 解析成功: file={} mdb={} root={}/{} curd_entries={} \
+         decoded_databases={} skipped_databases={} styp={counts_by_styp:?}",
+        sys.display(),
+        mdb,
+        root.get_0(),
+        root.get_1(),
+        curd_entries,
+        decoded_databases,
+        skipped_databases
+    )
+}
+
+fn named_attr_value_kind(value: &NamedAttrValue) -> &'static str {
+    match value {
+        NamedAttrValue::InvalidType => "InvalidType",
+        NamedAttrValue::IntegerType(_) => "IntegerType",
+        NamedAttrValue::StringType(_) => "StringType",
+        NamedAttrValue::F32Type(_) => "F32Type",
+        NamedAttrValue::F32VecType(_) => "F32VecType",
+        NamedAttrValue::Vec3Type(_) => "Vec3Type",
+        NamedAttrValue::StringArrayType(_) => "StringArrayType",
+        NamedAttrValue::BoolArrayType(_) => "BoolArrayType",
+        NamedAttrValue::IntArrayType(_) => "IntArrayType",
+        NamedAttrValue::BoolType(_) => "BoolType",
+        NamedAttrValue::ElementType(_) => "ElementType",
+        NamedAttrValue::WordType(_) => "WordType",
+        NamedAttrValue::RefU64Type(_) => "RefU64Type",
+        NamedAttrValue::RefU64Array(_) => "RefU64Array",
+        NamedAttrValue::LongType(_) => "LongType",
+        NamedAttrValue::RefnoEnumType(_) => "RefnoEnumType",
+    }
+}
+
 /// Read `<project>`'s SYS database and resolve `mdb`'s declaration.
 pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result<MdbMembership> {
     let plan = crate::data_interface::project_paths::plan_watch_dirs(db_option);
@@ -188,6 +275,9 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
     let wanted = format!("/{}", mdb.trim_start_matches('/'));
 
     let mut tried = Vec::new();
+    let mut candidate_names = BTreeSet::new();
+    let mut candidate_scan_errors = Vec::new();
+    let mut declaration_errors = Vec::new();
     for sys in sys_candidates(&own_dirs) {
         tried.push(sys.display().to_string());
         match read_declaration(&sys, project, &wanted, &projects) {
@@ -205,21 +295,63 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
                     problems,
                 });
             }
-            Ok(None) => continue,
+            Ok(None) => {
+                match read_mdb_candidate_names(&sys) {
+                    Ok(names) => candidate_names.extend(names),
+                    Err(error) => {
+                        candidate_scan_errors.push(format!("{}：{error:#}", sys.display()))
+                    }
+                }
+                continue;
+            }
             Err(error) => {
+                let detail = format!(
+                    "[SYS 解析] 解析失败: file={} project={} mdb={} reason={error:#}",
+                    sys.display(),
+                    project,
+                    wanted
+                );
+                report_sys_error(&detail);
                 log::warn!("读取 {} 失败，继续找下一个：{error:#}", sys.display());
                 problems.push(format!("读取 {} 失败，已跳过：{error:#}", sys.display()));
+                declaration_errors.push(format!("{}：{error:#}", sys.display()));
             }
         }
     }
-    anyhow::bail!(
-        "在项目 {project} 的 SYS 库里找不到名为 {wanted} 的 MDB。已尝试：{}",
+    let candidates = if candidate_names.is_empty() {
+        "（没有解析到任何 MDB 名称）".to_string()
+    } else {
+        candidate_names
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("、")
+    };
+    let scan_errors = if candidate_scan_errors.is_empty() {
+        String::new()
+    } else {
+        format!("\n候选名称扫描失败：{}", candidate_scan_errors.join(" / "))
+    };
+    let parse_errors = if declaration_errors.is_empty() {
+        String::new()
+    } else {
+        format!("\nSYS 解析失败：{}", declaration_errors.join(" / "))
+    };
+    let message = format!(
+        "在项目 {project} 的 SYS 库里找不到名为 {wanted} 的 MDB。\n\
+         MDB 候选名称（{} 个）：{candidates}\n\
+         已尝试 SYS 库：{}{}{}",
+        candidate_names.len(),
         if tried.is_empty() {
             "（没有找到任何 SYS 库文件）".to_string()
         } else {
             tried.join(" / ")
-        }
-    )
+        },
+        scan_errors,
+        parse_errors
+    );
+    println!("[warn] {message}");
+    anyhow::bail!(message)
 }
 
 /// Files whose name ends in `sys`, which is how E3D names the SYSTEM database
@@ -246,6 +378,52 @@ fn sys_candidates(dirs: &[PathBuf]) -> Vec<PathBuf> {
     out
 }
 
+/// Best-effort diagnostic for a misspelled `mdb_name`.
+///
+/// The normal lookup above asks e3d-io for one exact stored `NAME`. On a miss,
+/// scan the same SYS file's Named tier and show every element whose noun is
+/// `MDB`, so the error tells the operator what can actually be configured.
+/// This deliberately runs only on the error path: a Named scan parses every
+/// record in the SYS database.
+fn read_mdb_candidate_names(sys: &Path) -> anyhow::Result<Vec<String>> {
+    let mut engine = e3d_io::ReadOnlyEngine::open(sys)
+        .map_err(|error| anyhow::anyhow!("打开 SYS 库扫描 MDB 候选失败：{error}"))?;
+    let rows = engine
+        .scan_elements(e3d_io::ScanTier::Named)
+        .map_err(|error| anyhow::anyhow!("扫描 SYS 库 Named 档失败：{error}"))?;
+    let mdb_noun = e3d_attlib::db1_hash("MDB");
+    let mut names = BTreeSet::new();
+    let mut skipped = Vec::new();
+    for row in rows {
+        match row {
+            Ok(row) if row.noun_hash == mdb_noun => {
+                if let Some(name) = row.name {
+                    let name = name.trim();
+                    if !name.is_empty() {
+                        names.insert(format!("/{}", name.trim_start_matches('/')));
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(error) => skipped.push(error.to_string()),
+        }
+    }
+    anyhow::ensure!(
+        !names.is_empty() || skipped.is_empty(),
+        "扫描中有 {} 条记录无法读取，且未解析出 MDB 名称；首条错误：{}",
+        skipped.len(),
+        skipped.first().map(String::as_str).unwrap_or_default()
+    );
+    if !skipped.is_empty() {
+        log::warn!(
+            "扫描 {} 的 MDB 候选时跳过 {} 条损坏记录；已保留其余候选",
+            sys.display(),
+            skipped.len()
+        );
+    }
+    Ok(names.into_iter().collect())
+}
+
 /// `Ok(None)` when the file parses but holds no MDB of that name — the caller
 /// moves on to the next candidate rather than failing.
 fn read_declaration(
@@ -265,34 +443,158 @@ fn read_declaration(
     // catalogue one's CURD is often nearly empty. `UpdateScope` takes the
     // longest for the same reason; picking either is otherwise a coin flip
     // that silently shrinks the scope.
-    let mut best: Option<Vec<RefU64>> = None;
-    for refno in sys_db.named(wanted)? {
-        let Some(merged) = sys_db.attrs(refno) else {
-            continue;
+    let named = sys_db
+        .named(wanted)
+        .with_context(|| format!("在 {} 查找 MDB {wanted}", sys.display()))?;
+    let named_matches = named.len();
+    report_sys_info(&format!(
+        "[SYS 解析] MDB 查找完成: file={} mdb={} named_matches={named_matches}",
+        sys.display(),
+        wanted
+    ));
+
+    let mut candidate_errors = Vec::new();
+    let mut best: Option<(RefU64, Vec<RefU64>)> = None;
+    for refno in named {
+        let merged = match sys_db.attrs(refno) {
+            Ok(Some(merged)) => merged,
+            Ok(None) => {
+                let message = format!(
+                    "[SYS 解析] MDB 候选解析失败: file={} mdb={} root={}/{} \
+                     stage=element_lookup reason=元素不在最新会话索引中",
+                    sys.display(),
+                    wanted,
+                    refno.get_0(),
+                    refno.get_1()
+                );
+                report_sys_error(&message);
+                candidate_errors.push(message);
+                continue;
+            }
+            Err(error) => {
+                let message = format!(
+                    "[SYS 解析] MDB 候选解析失败: file={} mdb={} root={}/{} \
+                     stage=attribute_extract reason={error:#}",
+                    sys.display(),
+                    wanted,
+                    refno.get_0(),
+                    refno.get_1()
+                );
+                report_sys_error(&message);
+                candidate_errors.push(message);
+                continue;
+            }
         };
-        if merged.get_as_string("TYPE").unwrap_or_default().trim() != "MDB"
-            || merged.get_as_string("NAME").unwrap_or_default().trim() != wanted
-        {
+        let actual_type = merged.get_as_string("TYPE").unwrap_or_default();
+        let actual_name = merged.get_as_string("NAME").unwrap_or_default();
+        if actual_type.trim() != "MDB" || actual_name.trim() != wanted {
+            let message = format!(
+                "[SYS 解析] MDB 候选解析失败: file={} mdb={} root={}/{} \
+                 stage=identity_check reason=TYPE/NAME 不匹配 actual_type={actual_type:?} \
+                 actual_name={actual_name:?}",
+                sys.display(),
+                wanted,
+                refno.get_0(),
+                refno.get_1()
+            );
+            report_sys_error(&message);
+            candidate_errors.push(message);
             continue;
         }
-        let Some(NamedAttrValue::RefU64Array(items)) = merged.get_val("CURD") else {
-            continue;
+        let items = match merged.get_val("CURD") {
+            Some(NamedAttrValue::RefU64Array(items)) => items,
+            Some(other) => {
+                let message = format!(
+                    "[SYS 解析] MDB 候选解析失败: file={} mdb={} root={}/{} \
+                     stage=curd_decode reason=CURD 类型错误 actual={}",
+                    sys.display(),
+                    wanted,
+                    refno.get_0(),
+                    refno.get_1(),
+                    named_attr_value_kind(other)
+                );
+                report_sys_error(&message);
+                candidate_errors.push(message);
+                continue;
+            }
+            None => {
+                let message = format!(
+                    "[SYS 解析] MDB 候选解析失败: file={} mdb={} root={}/{} \
+                     stage=curd_decode reason=没有解析出 CURD 属性",
+                    sys.display(),
+                    wanted,
+                    refno.get_0(),
+                    refno.get_1()
+                );
+                report_sys_error(&message);
+                candidate_errors.push(message);
+                continue;
+            }
         };
         let members: Vec<RefU64> = items.iter().map(|item| item.refno()).collect();
-        if best.as_ref().is_none_or(|held| members.len() > held.len()) {
-            best = Some(members);
+        report_sys_info(&format!(
+            "[SYS 解析] MDB 候选读取成功: file={} mdb={} root={}/{} curd_entries={}",
+            sys.display(),
+            wanted,
+            refno.get_0(),
+            refno.get_1(),
+            members.len()
+        ));
+        if best
+            .as_ref()
+            .is_none_or(|(_, held)| members.len() > held.len())
+        {
+            best = Some((refno, members));
         }
     }
-    let Some(members) = best else {
+    let Some((root, members)) = best else {
+        if named_matches > 0 {
+            anyhow::bail!(
+                "SYS {} 找到 {named_matches} 个名为 {wanted} 的元素，但没有一个可用的 MDB \
+                 声明；候选错误：{}",
+                sys.display(),
+                candidate_errors.join(" | ")
+            );
+        }
         return Ok(None);
     };
 
+    let curd_entries = members.len();
     let mut databases = Vec::with_capacity(members.len());
-    for refno in members {
-        // A `CURD` entry the SYS index does not hold, or a record that will not
-        // decode, is skipped exactly as the legacy byte reader skipped it.
-        let Some(merged) = sys_db.attrs(refno) else {
-            continue;
+    let mut skipped_databases = 0usize;
+    for (curd_index, refno) in members.into_iter().enumerate() {
+        let merged = match sys_db.attrs(refno) {
+            Ok(Some(merged)) => merged,
+            Ok(None) => {
+                skipped_databases += 1;
+                report_sys_error(&format!(
+                    "[SYS 解析] DB 声明解析失败: file={} mdb={} root={}/{} curd_index={} \
+                     refno={}/{} stage=element_lookup reason=元素不在最新会话索引中",
+                    sys.display(),
+                    wanted,
+                    root.get_0(),
+                    root.get_1(),
+                    curd_index,
+                    refno.get_0(),
+                    refno.get_1()
+                ));
+                continue;
+            }
+            Err(error) => {
+                skipped_databases += 1;
+                report_sys_error(&format!(
+                    "[SYS 解析] DB 声明解析失败: file={} mdb={} root={}/{} curd_index={} \
+                     refno={}/{} stage=attribute_extract reason={error:#}",
+                    sys.display(),
+                    wanted,
+                    root.get_0(),
+                    root.get_1(),
+                    curd_index,
+                    refno.get_0(),
+                    refno.get_1()
+                ));
+                continue;
+            }
         };
         let number = |key: &str| -> Option<i64> {
             merged
@@ -300,19 +602,65 @@ fn read_declaration(
                 .and_then(|value| value.trim().parse::<i64>().ok())
         };
         let Some(dbnum) = number("DBNO").and_then(|value| u32::try_from(value).ok()) else {
+            skipped_databases += 1;
+            report_sys_error(&format!(
+                "[SYS 解析] DB 声明解析失败: file={} mdb={} root={}/{} curd_index={} \
+                 refno={}/{} stage=dbno_decode reason=DBNO 缺失、不是整数或超出 u32 \
+                 raw={:?}",
+                sys.display(),
+                wanted,
+                root.get_0(),
+                root.get_1(),
+                curd_index,
+                refno.get_0(),
+                refno.get_1(),
+                merged.get_as_string("DBNO")
+            ));
             continue;
         };
+        let styp = number("STYP").unwrap_or_else(|| {
+            report_sys_error(&format!(
+                "[SYS 解析] DB 声明字段异常: file={} mdb={} root={}/{} curd_index={} \
+                 refno={}/{} dbnum={} field=STYP reason=缺失或不是整数，保留为 -1 raw={:?}",
+                sys.display(),
+                wanted,
+                root.get_0(),
+                root.get_1(),
+                curd_index,
+                refno.get_0(),
+                refno.get_1(),
+                dbnum,
+                merged.get_as_string("STYP")
+            ));
+            -1
+        });
         // Read the native character vector before NamedAttrMap can stringify
         // it as an array length. Missing/undecoded evidence is not an empty PROJ.
-        let declared_project_code = sys_db.project_code(refno)?;
+        let declared_project_code = sys_db.project_code(refno).with_context(|| {
+            format!(
+                "解析 SYS {} 的 MDB {wanted}（root={}/{}, curd_index={curd_index}, \
+                 refno={}/{}, dbnum={dbnum}）PROJ 失败",
+                sys.display(),
+                root.get_0(),
+                root.get_1(),
+                refno.get_0(),
+                refno.get_1()
+            )
+        })?;
         // Keep the legacy numeric field as a length, not a project identifier.
         let proj = declared_project_code
             .as_ref()
             .map_or(0, |code| code.len() as i64);
-        let located = locate_declared(projects, project, declared_project_code.as_deref(), dbnum)?;
+        let located = locate_declared(projects, project, declared_project_code.as_deref(), dbnum)
+            .with_context(|| {
+            format!(
+                "定位 SYS {} 的 MDB {wanted} CURD[{curd_index}] dbnum={dbnum} 文件失败",
+                sys.display()
+            )
+        })?;
         databases.push(MdbDatabase {
             dbnum,
-            styp: number("STYP").unwrap_or(-1),
+            styp,
             proj,
             declared_project_code,
             name: merged
@@ -325,6 +673,33 @@ fn read_declaration(
             shadowed: located.map(|found| found.shadowed).unwrap_or_default(),
         });
     }
+    let mut counts_by_styp = BTreeMap::new();
+    for database in &databases {
+        *counts_by_styp.entry(database.styp).or_default() += 1;
+    }
+    if curd_entries > 0 && databases.is_empty() {
+        let message = format!(
+            "[SYS 解析] MDB 解析失败: file={} mdb={} root={}/{} curd_entries={} \
+             decoded_databases=0 skipped_databases={} reason=CURD 非空但所有 DB 声明均解析失败",
+            sys.display(),
+            wanted,
+            root.get_0(),
+            root.get_1(),
+            curd_entries,
+            skipped_databases
+        );
+        report_sys_error(&message);
+        anyhow::bail!(message);
+    }
+    report_sys_info(&mdb_parse_summary_message(
+        sys,
+        wanted,
+        root,
+        curd_entries,
+        databases.len(),
+        skipped_databases,
+        &counts_by_styp,
+    ));
     Ok(Some(databases))
 }
 
@@ -339,23 +714,88 @@ impl SysDb {
         let extraction = self
             .set
             .element(e3d_io::RefNo::new(refno.get_0(), refno.get_1()))
-            .extraction()?;
+            .extraction()
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "提取 SYS DB 元素 {}/{} 的 PROJ 失败: {error}",
+                    refno.get_0(),
+                    refno.get_1()
+                )
+            })?;
         let attr = extraction
             .attributes
             .iter()
             .find(|attr| attr.name == "PROJ")
-            .ok_or_else(|| anyhow::anyhow!("SYS {refno}: PROJ descriptor missing"))?;
-        decode_project_code(attr.value.as_ref())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "SYS DB 元素 {}/{} 没有 PROJ descriptor",
+                    refno.get_0(),
+                    refno.get_1()
+                )
+            })?;
+        decode_project_code(attr.value.as_ref()).with_context(|| {
+            format!(
+                "解码 SYS DB 元素 {}/{} 的 PROJ",
+                refno.get_0(),
+                refno.get_1()
+            )
+        })
     }
+
     fn open(sys: &Path) -> anyhow::Result<Self> {
-        let schema = crate::data_interface::direct_store::DirectSchema::open_from_env()?;
-        let header = crate::data_interface::db_file_header::DbFileHeader::read(sys)?;
+        let header = crate::data_interface::db_file_header::DbFileHeader::read(sys)
+            .with_context(|| format!("读取 SYS 基本信息 {}", sys.display()))?;
+        let detected = e3d_io::detect_database_version(sys);
+        let binary_version = match &detected {
+            Ok(version) => version.id.to_string(),
+            Err(error) => {
+                report_sys_error(&format!(
+                    "[SYS 解析] 二进制版本识别失败: file={} reason={error}",
+                    sys.display()
+                ));
+                "unknown".to_string()
+            }
+        };
+        let schema = crate::data_interface::direct_store::DirectSchema::open_from_env()
+            .with_context(|| format!("为 SYS {} 加载 schema", sys.display()))?;
+        let selected_schema = schema
+            .version()
+            .map(|version| version.id)
+            .unwrap_or("explicit-directory");
+        if let Ok(detected) = detected
+            && schema
+                .version()
+                .is_some_and(|selected| selected.id != detected.id)
+        {
+            report_sys_error(&format!(
+                "[SYS 解析] 版本不匹配: file={} selected_schema={} binary_version={}；\
+                 继续尝试解析并打印诊断，请核对配置后再使用结果",
+                sys.display(),
+                selected_schema,
+                detected.id
+            ));
+        }
         let set = crate::data_interface::e3d_collector::open_pinned_set(
             &schema,
             sys,
             &header.db_type,
             header.latest_sesno(),
-        )?;
+        )
+        .with_context(|| {
+            format!(
+                "按 dbnum={} db_type={} latest_sesno={} 打开 SYS {}",
+                header.dbnum,
+                header.db_type,
+                header.latest_sesno(),
+                sys.display()
+            )
+        })?;
+        report_sys_info(&sys_basic_info_message(
+            sys,
+            &header,
+            selected_schema,
+            &binary_version,
+        ));
         Ok(Self {
             set,
             dbno: header.dbnum as u32,
@@ -374,19 +814,39 @@ impl SysDb {
     }
 
     /// The element's attributes in the shape the legacy `whole_attmap.merge()`
-    /// produced; `None` when the SYS index has no such element or the record
-    /// does not decode (the byte reader skipped both the same way).
-    fn attrs(&self, refno: RefU64) -> Option<aios_core::NamedAttrMap> {
+    /// produced. Absence and parsing failure are deliberately separate: the
+    /// old `Option` shape swallowed every e3d-io/conversion error and reduced
+    /// them all to the misleading startup line "声明 0 个库".
+    fn attrs(&self, refno: RefU64) -> anyhow::Result<Option<aios_core::NamedAttrMap>> {
         let element = self
             .set
             .element(e3d_io::RefNo::new(refno.get_0(), refno.get_1()));
-        if !element.exists().ok()? {
-            return None;
+        let exists = element.exists().map_err(|error| {
+            anyhow::anyhow!(
+                "检查 SYS 元素 {}/{} 是否存在失败: {error}",
+                refno.get_0(),
+                refno.get_1()
+            )
+        })?;
+        if !exists {
+            return Ok(None);
         }
-        let extraction = element.extraction().ok()?;
+        let extraction = element.extraction().map_err(|error| {
+            anyhow::anyhow!(
+                "提取 SYS 元素 {}/{} 属性失败: {error}",
+                refno.get_0(),
+                refno.get_1()
+            )
+        })?;
         crate::data_interface::direct_attmap::to_named_attmap(&extraction)
-            .ok()
-            .map(|attrs| attrs.map)
+            .map(|attrs| Some(attrs.map))
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "转换 SYS 元素 {}/{} 属性失败: {error}",
+                    refno.get_0(),
+                    refno.get_1()
+                )
+            })
     }
 }
 
@@ -567,6 +1027,95 @@ pub fn get(project: &str, mdb: &str) -> Option<Arc<MdbMembership>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sys_basic_info_log_names_header_and_version_evidence() {
+        let header = crate::data_interface::db_file_header::DbFileHeader {
+            dbnum: 8191,
+            db_type: "SYST".to_string(),
+            latest_ses_pgno: 42,
+            latest_session: crate::data_interface::db_file_header::SessionStamp {
+                sesno: 37,
+                pgno: 42,
+                previous_pgno: Some(40),
+                end_pgno: 43,
+                index_root_pgno: 41,
+                stamp_words: [0; 5],
+                machine: "SITE-A".to_string(),
+                comment: "SAVEWORK".to_string(),
+            },
+            file_size: 123_456,
+        };
+
+        let line = sys_basic_info_message(
+            Path::new(r"D:\release\9001\project\JEU\JEU000\jeusys"),
+            &header,
+            "e3d210",
+            "e3d210",
+        );
+        for required in [
+            "[SYS 解析] 基本信息",
+            r"file=D:\release\9001\project\JEU\JEU000\jeusys",
+            "bytes=123456",
+            "dbnum=8191",
+            "db_type=SYST",
+            "latest_sesno=37",
+            "latest_ses_pgno=42",
+            "session_pgno=42",
+            "index_root_pgno=41",
+            "selected_schema=e3d210",
+            "binary_version=e3d210",
+            "machine=\"SITE-A\"",
+            "comment=\"SAVEWORK\"",
+        ] {
+            assert!(line.contains(required), "基本信息缺 {required}: {line}");
+        }
+    }
+
+    #[test]
+    fn mdb_parse_summary_separates_raw_decoded_and_skipped_members() {
+        let line = mdb_parse_summary_message(
+            Path::new(r"D:\project\JEU000\jeusys"),
+            "/ALL",
+            RefU64::from_two_nums(24575, 1308),
+            71,
+            68,
+            3,
+            &BTreeMap::from([(DESI_STYP, 29), (DICT_STYP, 6)]),
+        );
+        for required in [
+            "[SYS 解析] MDB 解析成功",
+            "mdb=/ALL",
+            "root=24575/1308",
+            "curd_entries=71",
+            "decoded_databases=68",
+            "skipped_databases=3",
+            "styp={1: 29, 8: 6}",
+        ] {
+            assert!(line.contains(required), "解析摘要缺 {required}: {line}");
+        }
+    }
+
+    #[test]
+    fn sys_member_parse_failures_keep_the_stage_and_reason() {
+        let source = include_str!("mdb_membership.rs");
+        assert!(
+            !source.contains(concat!(".exists()", ".ok()?"))
+                && !source.contains(concat!(".extraction()", ".ok()?")),
+            "exists/extraction/conversion 错误不能再被 Option 吞掉"
+        );
+        for required in [
+            "stage=element_lookup",
+            "stage=attribute_extract",
+            "stage=curd_decode",
+            "stage=dbno_decode",
+            "reason={error:#}",
+            "curd_entries=",
+            "skipped_databases=",
+        ] {
+            assert!(source.contains(required), "SYS 解析失败日志缺少 {required}");
+        }
+    }
 
     #[test]
     fn project_characters_are_not_a_foreign_project_flag() {
