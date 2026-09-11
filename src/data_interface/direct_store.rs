@@ -23,6 +23,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 
 use aios_core::{NamedAttrMap, RefU64};
 use dashmap::DashMap;
@@ -30,6 +31,7 @@ use e3d_io::record::element::ParsedElement;
 use e3d_io::record::explicit::ExplicitAttribute;
 use e3d_io::record::template::TemplateProvider;
 use e3d_io::refno::RefNo;
+use e3d_io::schema::MANIFEST_FILE;
 use e3d_io::{E3dVersion, ReadOnlyEngine, SchemaPack};
 
 use super::cata_closure::CataDbLocator;
@@ -50,6 +52,16 @@ pub const SCHEMA_ROOT_ENV: &str = "AIOS_E3D_SCHEMA_ROOT";
 fn schema_root_next_to_executable() -> Option<PathBuf> {
     let root = std::env::current_exe().ok()?.parent()?.join("schema");
     root.is_dir().then_some(root)
+}
+
+fn report_schema_info(message: &str) {
+    log::info!("{message}");
+    println!("{message}");
+}
+
+fn report_schema_error(message: &str) {
+    log::error!("{message}");
+    eprintln!("{message}");
 }
 
 /// 一个库的读取时点与身份。
@@ -200,15 +212,73 @@ impl DirectSchema {
     /// 显式 [`TEMPLATE_DIR_ENV`] 优先；未设置时识别当前配置项目的 E3D
     /// 版本，并从匹配的 e3d-io schema pack 加载。
     pub fn open_from_env() -> anyhow::Result<Self> {
+        let started = Instant::now();
         if let Some(dir) = std::env::var_os(TEMPLATE_DIR_ENV) {
-            return Self::open(PathBuf::from(dir));
+            let template_dir = PathBuf::from(dir);
+            let context = format!(
+                "mode=explicit source={TEMPLATE_DIR_ENV} template_dir={}",
+                template_dir.display()
+            );
+            report_schema_info(&format!("[E3D schema] 开始加载: {context}"));
+            return Self::report_load_result(Self::open(template_dir), &context, started);
         }
-        let project_root = Path::new(&aios_core::get_db_option().project_path);
-        let schema_root = std::env::var_os(SCHEMA_ROOT_ENV)
-            .map(PathBuf::from)
-            .or_else(schema_root_next_to_executable)
-            .unwrap_or_else(e3d_io::bundled_schema_root);
-        Self::open_for_project_with_schema_root(project_root, schema_root)
+
+        let project_root = PathBuf::from(&aios_core::get_db_option().project_path);
+        let (schema_root, schema_root_source) =
+            if let Some(root) = std::env::var_os(SCHEMA_ROOT_ENV) {
+                (PathBuf::from(root), SCHEMA_ROOT_ENV)
+            } else if let Some(root) = schema_root_next_to_executable() {
+                (root, "executable-adjacent")
+            } else {
+                (e3d_io::bundled_schema_root(), "development-bundled")
+            };
+        let context = format!(
+            "mode=auto project={} schema_root={} schema_root_source={schema_root_source}",
+            project_root.display(),
+            schema_root.display()
+        );
+        report_schema_info(&format!(
+            "[E3D schema] 开始加载: {context}；先从项目数据库二进制识别版本"
+        ));
+
+        let result = (|| {
+            let version = e3d_io::detect_project_version(&project_root).map_err(|error| {
+                anyhow::anyhow!(
+                    "识别 E3D 项目 {} 的数据库二进制版本失败: {error}",
+                    project_root.display()
+                )
+            })?;
+            report_schema_info(&format!(
+                "[E3D schema] 二进制版本识别成功: project={} schema={} e3d=\"{}\"",
+                project_root.display(),
+                version.id,
+                version.display
+            ));
+
+            let manifest = schema_root.join(version.id).join(MANIFEST_FILE);
+            report_schema_info(&format!(
+                "[E3D schema] 开始读取 schema pack: manifest={}",
+                manifest.display()
+            ));
+            let pack = SchemaPack::open_version(&schema_root, version.id).map_err(|error| {
+                anyhow::anyhow!("读取 E3D schema pack {} 失败: {error}", manifest.display())
+            })?;
+            report_schema_info(&format!(
+                "[E3D schema] schema pack 清单读取成功: pack={} schema={} e3d=\"{}\" \
+                 template_entries={}",
+                pack.root().display(),
+                version.id,
+                version.display,
+                pack.template_types().count()
+            ));
+            report_schema_info(&format!(
+                "[E3D schema] 开始校验 schema 文件并解析 attlib: pack={} \
+                 required=attlib.dat,DESI,CATA,DICT",
+                pack.root().display()
+            ));
+            Self::open_pack(pack)
+        })();
+        Self::report_load_result(result, &context, started)
     }
 
     /// Detect the highest binary writer format evidenced below `project_root`
@@ -284,6 +354,51 @@ impl DirectSchema {
             template_dir,
             version: Some(version),
         })
+    }
+
+    fn report_load_result(
+        result: anyhow::Result<Self>,
+        context: &str,
+        started: Instant,
+    ) -> anyhow::Result<Self> {
+        match result {
+            Ok(schema) => {
+                report_schema_info(
+                    &schema.load_success_message(context, started.elapsed().as_millis()),
+                );
+                Ok(schema)
+            }
+            Err(error) => {
+                report_schema_error(&Self::load_failure_message(
+                    context,
+                    started.elapsed().as_millis(),
+                    &error,
+                ));
+                Err(error)
+            }
+        }
+    }
+
+    fn load_success_message(&self, context: &str, elapsed_ms: u128) -> String {
+        let (schema_id, e3d_display, template_validation) = self
+            .version
+            .map(|version| (version.id, version.display, "DESI,CATA,DICT"))
+            .unwrap_or((
+                "explicit",
+                "未知（AIOS_E3D_TEMPLATE_DIR 显式覆盖未做版本识别）",
+                "deferred（按库打开时检查）",
+            ));
+        format!(
+            "[E3D schema] 加载成功: {context} schema={schema_id} e3d=\"{e3d_display}\" \
+             template_dir={} attlib={} validated_templates={template_validation} \
+             elapsed_ms={elapsed_ms}",
+            self.template_dir.display(),
+            self.template_dir.join("attlib.dat").display()
+        )
+    }
+
+    fn load_failure_message(context: &str, elapsed_ms: u128, error: &anyhow::Error) -> String {
+        format!("[E3D schema] 加载失败: {context} elapsed_ms={elapsed_ms}；原因: {error:#}")
     }
 
     pub fn template_dir(&self) -> &Path {
@@ -1123,6 +1238,78 @@ mod tests {
         let error = schema.template_file("CATA").unwrap_err().to_string();
         assert!(error.contains("catvir.dat"), "{error}");
         assert!(schema.template_file("DI").is_err());
+    }
+
+    #[test]
+    fn schema_loading_diagnostics_name_success_and_full_failure_context() {
+        let source = include_str!("direct_store.rs");
+        for required in [
+            "[E3D schema] 开始加载",
+            "[E3D schema] 二进制版本识别成功",
+            "[E3D schema] 开始读取 schema pack",
+            "[E3D schema] schema pack 清单读取成功",
+            "[E3D schema] 开始校验 schema 文件并解析 attlib",
+            "[E3D schema] 加载成功",
+            "[E3D schema] 加载失败",
+        ] {
+            assert!(
+                source.contains(required),
+                "schema 加载过程缺日志 {required}"
+            );
+        }
+
+        let schema = DirectSchema {
+            attlib: e3d_attlib::AttlibData::default(),
+            template_dir: PathBuf::from(r"C:\runtime\schema\e3d210\binaries"),
+            version: Some(&e3d_io::E3D210),
+        };
+        let success = schema.load_success_message(
+            r"mode=auto project=D:\AVEVA\Projects\E3D2.1 schema_root=C:\runtime\schema",
+            37,
+        );
+        for required in [
+            "[E3D schema] 加载成功",
+            "schema=e3d210",
+            "e3d=\"AVEVA Everything3D 2.1 (2.10)\"",
+            r"attlib=C:\runtime\schema\e3d210\binaries\attlib.dat",
+            "validated_templates=DESI,CATA,DICT",
+            "elapsed_ms=37",
+        ] {
+            assert!(
+                success.contains(required),
+                "成功日志缺字段 {required}: {success}"
+            );
+        }
+
+        let explicit = DirectSchema {
+            version: None,
+            ..schema
+        }
+        .load_success_message("mode=explicit", 1);
+        assert!(explicit.contains("schema=explicit"), "{explicit}");
+        assert!(
+            explicit.contains("validated_templates=deferred（按库打开时检查）"),
+            "{explicit}"
+        );
+
+        let error = anyhow::anyhow!("attlib.dat 不存在").context("读取 pack 失败");
+        let failure = DirectSchema::load_failure_message(
+            r"mode=auto project=D:\broken schema_root=C:\missing",
+            19,
+            &error,
+        );
+        for required in [
+            "[E3D schema] 加载失败",
+            r"project=D:\broken",
+            r"schema_root=C:\missing",
+            "elapsed_ms=19",
+            "原因: 读取 pack 失败: attlib.dat 不存在",
+        ] {
+            assert!(
+                failure.contains(required),
+                "失败日志缺字段 {required}: {failure}"
+            );
+        }
     }
 
     #[test]
