@@ -43,8 +43,14 @@ use super::direct_index::{DbIndexes, IndexFingerprint};
 /// 打开 e3d-io 对应的 schema pack；目录名不参与判定。设置本变量表示调用方明确
 /// 接管选择，保留给临时探针和夹具。
 pub const TEMPLATE_DIR_ENV: &str = "AIOS_E3D_TEMPLATE_DIR";
-/// e3d-io schema packs 的父目录；未设置时使用 e3d-io 随源码携带的 `schema/`。
+/// e3d-io schema packs 的父目录；未设置时先找 exe 同级 `schema/`（部署包），
+/// 开发构建再回落到 e3d-io 源码携带的目录。
 pub const SCHEMA_ROOT_ENV: &str = "AIOS_E3D_SCHEMA_ROOT";
+
+fn schema_root_next_to_executable() -> Option<PathBuf> {
+    let root = std::env::current_exe().ok()?.parent()?.join("schema");
+    root.is_dir().then_some(root)
+}
 
 /// 一个库的读取时点与身份。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,6 +206,7 @@ impl DirectSchema {
         let project_root = Path::new(&aios_core::get_db_option().project_path);
         let schema_root = std::env::var_os(SCHEMA_ROOT_ENV)
             .map(PathBuf::from)
+            .or_else(schema_root_next_to_executable)
             .unwrap_or_else(e3d_io::bundled_schema_root);
         Self::open_for_project_with_schema_root(project_root, schema_root)
     }

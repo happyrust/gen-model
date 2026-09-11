@@ -170,6 +170,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn startup_sys_detection_reports_version_and_preserves_failure_reasons() {
+        let src = include_str!("increment_manager.rs");
+        let body = src
+            .split_once(concat!("async fn ", "sweep_dirs("))
+            .expect("sweep_dirs 未找到")
+            .1
+            .split_once(concat!("fn ", "reinit_batch("))
+            .expect("sweep_dirs 之后应当是 reinit_batch")
+            .0;
+        assert!(
+            body.contains("origin == \"init\"")
+                && body.contains("db_type.eq_ignore_ascii_case(\"SYST\")")
+                && body.contains("project.eq_ignore_ascii_case(&self.db_option.project_name)"),
+            "版本播报只挂初始化启动时主项目的 SYST 文件"
+        );
+        assert!(
+            body.contains("e3d_io::detect_database_version(path)"),
+            "SYS 版本必须来自数据库二进制探针"
+        );
+        for required in [
+            "SYS E3D 版本识别成功",
+            "schema={}",
+            "e3d=\\\"{}\\\"",
+            "SYS E3D 版本识别失败",
+            "原因: {reason}",
+            "SYS 文件解析失败",
+        ] {
+            assert!(body.contains(required), "启动日志缺字段 {required}");
+        }
+        assert!(
+            body.matches(concat!("phase_blockers", ".push(")).count() >= 4,
+            "SYS 头解析失败与版本识别失败都必须进入 Meta blocker，而不是只打一行日志"
+        );
+    }
+
     use super::*;
     use crate::SUL_DB;
     use std::path::Path;
@@ -3642,6 +3678,7 @@ impl AiosDBManager {
                     println!("[{origin}] 跳过无法解析文件名的条目: {}", path.display());
                     continue;
                 };
+                let sys_filename = file_name.to_ascii_lowercase().ends_with("sys");
 
                 // 解析数据库基本信息
                 let Some(DbBasicInfo {
@@ -3650,7 +3687,34 @@ impl AiosDBManager {
                     db_no,
                 }) = try_parse_db_basic_info(path)
                 else {
-                    println!("跳过无法读取 E3D 数据库头的文件: {}", path.display());
+                    let project = self.owning_project(path);
+                    if origin == "init"
+                        && sys_filename
+                        && project.eq_ignore_ascii_case(&self.db_option.project_name)
+                    {
+                        let reason = match e3d_io::detect_database_version(path) {
+                            Ok(version) => format!(
+                                "基础头解析失败，但完整版本探针意外识别为 {} ({})",
+                                version.id, version.display
+                            ),
+                            Err(error) => error.to_string(),
+                        };
+                        let msg = format!(
+                            "[{origin}] SYS 文件解析失败: project={project} file={}；原因: {reason}",
+                            path.display()
+                        );
+                        log::error!("{msg}");
+                        eprintln!("{msg}");
+                        phase_blockers.push(
+                            crate::data_interface::initialization_phase::PhaseBlocker::new(
+                                crate::data_interface::initialization_phase::DataPhase::Meta,
+                                format!("SYS 文件解析失败: {}；原因: {reason}", path.display()),
+                            )
+                            .with_project(project),
+                        );
+                    } else {
+                        println!("跳过无法读取 E3D 数据库头的文件: {}", path.display());
+                    }
                     continue;
                 };
                 // 记在所有门之前：这里回答的是「盘上有没有这个库号的设计库文件」，
@@ -3689,6 +3753,51 @@ impl AiosDBManager {
                 // 主项目目录里找，必然找不到、批次必然 failed（见 `project_of_path`）。
                 // 必须先于范围门：范围门要用它判「是不是别的项目的运行态系统库」。
                 let project = self.owning_project(path);
+                if origin == "init"
+                    && db_type.eq_ignore_ascii_case("SYST")
+                    && project.eq_ignore_ascii_case(&self.db_option.project_name)
+                {
+                    match e3d_io::detect_database_version(path) {
+                        Ok(version) => {
+                            let evidence = if version.id == "e3d31" {
+                                "保留会话中存在 \"Saving Meta Data.\""
+                            } else {
+                                "保留会话中没有 E3D 3.1 metadata marker，二进制为 2.10 兼容格式"
+                            };
+                            let msg = format!(
+                                "[{origin}] SYS E3D 版本识别成功: project={project} \
+                                 file={} dbnum={db_no} schema={} e3d=\"{}\"；证据: {evidence}",
+                                path.display(),
+                                version.id,
+                                version.display
+                            );
+                            log::info!("{msg}");
+                            println!("{msg}");
+                        }
+                        Err(error) => {
+                            let reason = error.to_string();
+                            let msg = format!(
+                                "[{origin}] SYS E3D 版本识别失败: project={project} \
+                                 file={} dbnum={db_no}；原因: {reason}",
+                                path.display()
+                            );
+                            log::error!("{msg}");
+                            eprintln!("{msg}");
+                            phase_blockers.push(
+                                crate::data_interface::initialization_phase::PhaseBlocker::new(
+                                    crate::data_interface::initialization_phase::DataPhase::Meta,
+                                    format!(
+                                        "dbnum={db_no} SYS E3D 版本识别失败: {}；原因: {reason}",
+                                        path.display()
+                                    ),
+                                )
+                                .with_dbnum(db_no)
+                                .with_project(project.clone()),
+                            );
+                            continue;
+                        }
+                    }
+                }
                 // 本期 MDB 声明的设计库（SYS meta 例外），与手动路径共用（`in_scope`）。
                 let in_scope = self.in_scope(&scope, &project, &db_type, db_no);
                 if !in_scope {
