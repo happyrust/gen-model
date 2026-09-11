@@ -12,6 +12,10 @@ pub struct DbOptionExt {
     #[serde(flatten)]
     pub inner: DbOption,
 
+    /// 显式选择模板包（e3d210 / e3d31）；设置后完全跳过 COMM.VERS 自动取证。
+    #[serde(default)]
+    pub e3d_version: Option<String>,
+
     /// MQTT服务器地址，用于异地部署
     #[serde(default)]
     pub mqtt_server: Option<String>,
@@ -242,6 +246,7 @@ impl From<DbOption> for DbOptionExt {
     fn from(option: DbOption) -> Self {
         Self {
             inner: option,
+            e3d_version: None,
             mqtt_server: None,
             mqtt_port: None,
             http_server: None,
@@ -295,6 +300,8 @@ impl From<DbOption> for DbOptionExt {
 /// 唯一途径——加字段时那句告警要自动跟上，靠的就是它。
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct DbOptionExtFields {
+    #[serde(default)]
+    e3d_version: Option<String>,
     #[serde(default)]
     mqtt_server: Option<String>,
     #[serde(default)]
@@ -519,11 +526,20 @@ pub(crate) fn apply_asset_root(mut option: DbOption) -> DbOption {
     option
 }
 
+/// 模板版本必须严格读配置；不能经过扩展表解析失败后回落默认值的路径。
+///
+/// `Some` 是完整的手动模式：调用方不得再跑数据库探针或做“冲突阻断”。
+/// `None` 才允许从项目 Communication 数据库的当前 `COMM.VERS` 自动选择。
+pub(crate) fn configured_e3d_version() -> Result<Option<String>, String> {
+    Ok(read_ext_fields(std::env::var_os("DB_OPTION_FILE"))?.e3d_version)
+}
+
 /// 获取扩展的数据库选项
 pub fn get_db_option_ext() -> DbOptionExt {
     let ext = load_ext_fields();
     DbOptionExt {
         inner: apply_asset_root(aios_core::get_db_option().clone()),
+        e3d_version: ext.e3d_version.clone(),
         mqtt_server: ext.mqtt_server.clone(),
         mqtt_port: ext.mqtt_port,
         http_server: ext.http_server.clone(),
@@ -1988,6 +2004,20 @@ fn parse_bool_flag(raw: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicit_e3d_version_is_read_from_the_selected_toml() {
+        let (_dir, path) = write_probe_config("custom.toml", "e3d_version = \"e3d210\"\n");
+        let fields = read_ext_fields(Some(path.into())).unwrap();
+        assert_eq!(fields.e3d_version.as_deref(), Some("e3d210"));
+        let (_dir, path) = write_probe_config("missing-key.toml", "startup_autorun = false\n");
+        assert!(read_ext_fields(Some(path.into()))
+            .unwrap()
+            .e3d_version
+            .is_none());
+        let (_dir, path) = write_probe_config("bad.toml", "e3d_version = []\n");
+        assert!(read_ext_fields(Some(path.into())).is_err());
+    }
 
     #[test]
     fn data_batch_worker_limit_defaults_and_clamps_to_supported_range() {
