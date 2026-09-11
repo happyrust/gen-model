@@ -39,9 +39,9 @@ use super::direct_index::{DbIndexes, IndexFingerprint};
 /// 显式覆盖模板与字典文件所在目录。
 ///
 /// 不设置时不再默认为某台机器的 E3D 3.1 shadow：[`DirectSchema::open_from_env`]
-/// 会从 `DbOption.project_path` 的标准版本目录（如 `E3D2.1` / `E3D3.1`）识别版本，
-/// 再打开 e3d-io 对应的 schema pack。设置本变量表示调用方明确接管选择，保留给
-/// 临时探针和夹具。
+/// 会检查 `DbOption.project_path` 下数据库二进制的保留会话，识别实际写入格式后
+/// 打开 e3d-io 对应的 schema pack；目录名不参与判定。设置本变量表示调用方明确
+/// 接管选择，保留给临时探针和夹具。
 pub const TEMPLATE_DIR_ENV: &str = "AIOS_E3D_TEMPLATE_DIR";
 /// e3d-io schema packs 的父目录；未设置时使用 e3d-io 随源码携带的 `schema/`。
 pub const SCHEMA_ROOT_ENV: &str = "AIOS_E3D_SCHEMA_ROOT";
@@ -204,10 +204,9 @@ impl DirectSchema {
         Self::open_for_project_with_schema_root(project_root, schema_root)
     }
 
-    /// Detect `project_root` from its version-bearing path and load the
-    /// matching schema pack carried by e3d-io. The database tree identities
-    /// are the same in measured E3D 2.1 and 3.1 projects, so they cannot safely
-    /// choose between the two packs.
+    /// Detect the highest binary writer format evidenced below `project_root`
+    /// and load the matching schema pack carried by e3d-io. Directory names
+    /// and filesystem timestamps do not participate.
     pub fn open_for_project(project_root: impl AsRef<Path>) -> anyhow::Result<Self> {
         Self::open_for_project_with_schema_root(project_root, e3d_io::bundled_schema_root())
     }
@@ -284,8 +283,9 @@ impl DirectSchema {
         &self.template_dir
     }
 
-    /// Auto-detected release. Explicit [`Self::open`] overrides return `None`
-    /// because a directory of `.dat` files does not identify its own release.
+    /// Auto-detected binary writer format. Explicit [`Self::open`] overrides
+    /// return `None` because a directory of `.dat` files does not identify its
+    /// own release.
     pub fn version(&self) -> Option<&'static E3dVersion> {
         self.version
     }
@@ -1119,8 +1119,13 @@ mod tests {
     }
 
     #[test]
-    fn an_e3d_2_1_project_path_selects_the_2_10_schema_pack() {
-        let schema = DirectSchema::open_for_project("D:/AVEVA/Projects/E3D2.1/AvevaMarineSample")
+    fn installed_e3d_2_1_project_binaries_select_the_2_10_schema_pack() {
+        let project = Path::new(r"D:\AVEVA\Projects\E3D2.1");
+        if !project.is_dir() {
+            eprintln!("skipped: installed E3D 2.1 sample project is absent");
+            return;
+        }
+        let schema = DirectSchema::open_for_project(project)
             .expect("the bundled E3D 2.10 schema pack opens");
         assert_eq!(schema.version().map(|version| version.id), Some("e3d210"));
         assert!(
@@ -1133,6 +1138,25 @@ mod tests {
         assert!(schema.template_file("DESI").unwrap().is_file());
         assert!(schema.template_file("CATA").unwrap().is_file());
         assert!(schema.template_file("DICT").unwrap().is_file());
+    }
+
+    #[test]
+    fn installed_e3d_3_1_project_binaries_select_the_3_1_schema_pack() {
+        let project = Path::new(r"D:\AVEVA\Projects\E3D3.1");
+        if !project.is_dir() {
+            eprintln!("skipped: installed E3D 3.1 sample project is absent");
+            return;
+        }
+        let schema =
+            DirectSchema::open_for_project(project).expect("the bundled E3D 3.1 schema pack opens");
+        assert_eq!(schema.version().map(|version| version.id), Some("e3d31"));
+        assert!(
+            schema
+                .template_dir()
+                .ends_with(Path::new("schema/e3d31/binaries")),
+            "{}",
+            schema.template_dir().display()
+        );
     }
 
     #[test]
