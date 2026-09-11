@@ -838,15 +838,32 @@ impl SysDb {
                 refno.get_1()
             )
         })?;
-        crate::data_interface::direct_attmap::to_named_attmap(&extraction)
-            .map(|attrs| Some(attrs.map))
-            .map_err(|error| {
+        let attrs = crate::data_interface::direct_attmap::to_named_attmap(&extraction).map_err(
+            |error| {
                 anyhow::anyhow!(
                     "转换 SYS 元素 {}/{} 属性失败: {error}",
                     refno.get_0(),
                     refno.get_1()
                 )
+            },
+        )?;
+        let undecoded = attrs
+            .undecoded
+            .iter()
+            .filter(|attr| {
+                matches!(
+                    attr.name.as_str(),
+                    "CURD" | "DBNO" | "STYP" | "PROJ" | "NAME"
+                )
             })
+            .map(|attr| format!("{}={}", attr.name, attr.reason))
+            .collect::<Vec<_>>();
+        anyhow::ensure!(
+            undecoded.is_empty(),
+            "SYS 关键属性未解码: {}",
+            undecoded.join(", ")
+        );
+        Ok(Some(attrs.map))
     }
 }
 
@@ -1110,6 +1127,7 @@ mod tests {
             "stage=curd_decode",
             "stage=dbno_decode",
             "reason={error:#}",
+            "SYS 关键属性未解码",
             "curd_entries=",
             "skipped_databases=",
         ] {
