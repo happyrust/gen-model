@@ -131,7 +131,7 @@ fn empty_arguments() -> Value {
     json!({})
 }
 
-fn resolve_identity<'a>(
+pub(super) fn resolve_identity<'a>(
     state: &'a AppState,
     requested: &ProjectReq,
 ) -> Result<&'a ServiceIdentity, ApiError> {

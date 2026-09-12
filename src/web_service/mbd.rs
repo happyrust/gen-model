@@ -32,7 +32,8 @@ use crate::mbd::{BranchQueryError, layout_pipe};
 static SERVICE: OnceCell<Arc<E3dModelService>> = OnceCell::const_new();
 
 /// 进程内共享的 MDB 视图；建不起来（DbOption / MDB 成员表 / 模板目录缺）时每次请求重试。
-async fn service() -> Result<Arc<E3dModelService>, ApiError> {
+/// `element/ptset`（[`super::ptset`]）与这里共用同一份视图。
+pub(super) async fn service() -> Result<Arc<E3dModelService>, ApiError> {
     SERVICE
         .get_or_try_init(|| async { E3dModelService::from_current().await.map(Arc::new) })
         .await

@@ -689,6 +689,44 @@ rg -n  --no-heading "api/room"                     gen-model-refactor/src gen-mo
   几何时，参数须与它们对齐，见 `web_service::mesh_glb` 的
   `repository_unit_meshes_convert_end_to_end`（`cargo test -- --nocapture` 打印包围盒）。
 
+### 4.11.1 `POST /api/v1/element/ptset` — 构件目录 P 点集（E3D `PTSET`）
+
+给 plant3d-web 测量捕捉（P-Point 吸附、点→线垂距的轴线）用。此前浏览器端的 P-Point 只有
+legacy 模型包的 `ptsets.parquet` 或旧后端 `:3100` `/api/pdms/ptset/{refno}` 两条来源，
+gen-model-v1 读透形态两样都没有（投影只存网格与世界矩阵，`ptset` 从未落库）。这条端点**不经
+投影、不连库**：与 `element/attributes` 同一口径直读 dabacon 文件，用 e3d-model 的目录链
+`SPRE → SCOM → PTRE → PTSE`（`e3d_model::catalogue_point_set`）解出整个点集——与隐式管身两端
+所用的 P 点是同一份求值环境算出来的数字（`web_service::ptset`）。
+
+- 请求：`{ "refno": "24381/145031", "include_members": false }`（`refno` 收 `a/b` / `a_b` /
+  带 `=` 前缀；身份三元组可选，同 §3）。`include_members=true` 一并解**直属成员**的点集：
+  BRAN / EQUI 这类容器自身没有 `SPRE`，测量悬停在容器上时要显示的是成员的 P 点（E3D 元素级
+  捕捉的等价口径），前端用这一发代替逐成员请求。
+- 响应（构件字段平铺；`members` 仅 `include_members=true` 时出现）：
+
+  ```json
+  {
+    "source": "e3d-model",
+    "refno": "24381/145031", "dbnum": 7997, "noun": "ELBO", "name": null,
+    "catalogue": { "component": "24380/1234", "point_set": "24380/1235" },
+    "world_transform": [16 个数], "unit": "mm",
+    "points": [{ "number": 1, "noun": "PTAX", "pt": [x, y, z], "dir": [x, y, z], "bore": 100.0 }],
+    "unresolved": [{ "number": 3, "reason": "P3（PTCA）方向解不出" }],
+    "members": [ …同形，每个直属成员一条… ]
+  }
+  ```
+
+  `pt` / `dir` 在**构件局部系**（mm，`dir` 已归一化）；`world_transform` 是局部→世界的列主序
+  16 元素矩阵（THREE `Matrix4.fromArray` 布局，平移在 12–14，mm），与 `model/records` 的
+  `world_trans` 同一折叠（`e3d_model::transform::world_matrix`）。`points` 按 `PTSE` 成员原序；
+  `unresolved` 是 `PTSE` 里有、但位置 / 方向表达式求不出的点，`reason` 区分「点不在 PTSET」
+  与「解码缺口」。
+- 状态：`200` 构件存在（没有 `SPRE` 链或目录件没有 `PTRE` → `catalogue: null`、`points: []`，
+  那是「这个构件没有 P 点」，E3D 也不画，不是错）；`400 bad_request` refno 写法不对；
+  `404 not_found` refno 在所钉会话里不存在；`500 internal` 读库出错。
+- 数据时点同 `/api/mbd/v2/pipe`：目标库按 ADR-054 取**文件最新会话**（每次请求新开 `DbSet`），
+  MDB 视图进程内只建一次。
+
 ### 4.12 模型取数源路由（`model_source`）——未初始化的库由 API 供数，已初始化的以 rocksdb 为准
 
 出处：`docs/plans/2026-09-06-rocksdb-batch-write-and-cata-dependency-plan.md` §8（共识 d-29）；
