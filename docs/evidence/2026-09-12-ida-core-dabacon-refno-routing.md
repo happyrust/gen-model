@@ -208,7 +208,7 @@ struct DB_DB *__thiscall DB_MDB::getDB(DB_MDB *this, int a2)
 | `sub_5AF58E0` 已开库有序表 + 错 41 | `DbSet::db_slot()` 池 + `DbFileResolver::resolve()`；`MdbRouteDirectory::route_dbno()` 未命中 → `DbNotInMdb` / `NoFileForDbnum`，不回退扫描 |
 | `DB_MDB::internalOpenDB` 决定开哪些库 | `MdbRouteDirectory::from_membership()`（SYS/CURD 成员清单 + 文件头，零元素 I/O）+ `add_dependency_dir()`（依赖项目 CATA / PROP） |
 | 打开后自报的库号 | `DirectStore::open_session` 核 `descriptor().db_mark == pin.dbnum` → `DbNumberMismatch`（不变量 3）；探针 `DbnumLedger` 在 ams8000 上 1313/1313 相等 |
-| `sub_5AEB6B0:181–183` 目标库 B+tree 点查 | `ReadOnlyEngine::find_element()` / `DbSet::element_exists()`；`model_source::dbnum_of_root` 只在解出的那一个库点查一次 |
+| `sub_5AEB6B0:181–183` 目标库 B+tree 点查 | `ReadOnlyEngine::search_index()` / `DbSet::element_exists()`；`model_source::dbnum_of_root` 只在解出的那一个库点查一次（`element_exists(pin, root)`：开库一次 + 核 `db_mark` + 索引点查一次，`db49238e3`） |
 | core 没有 ref0 → dbnum 表 | 已退役：`model_source::DBNUM_BY_REF0`（`425ca98d8`）、属性 / 树服务的 `locator_parts()` 骨架定位器（同一提交）、探针的 `InMemoryCataLocator::build_for_project`（`7f501ab0d`）。`MdbMemoryStore.affiliations` 本体留给母计划阶段 6 删 |
 
 ## 5. 重跑

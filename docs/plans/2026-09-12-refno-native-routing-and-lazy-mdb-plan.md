@@ -364,7 +364,8 @@ impl MdbRouteDirectory {
 
 **结果（2026-09-12）**：2B `5cc5e3e04`——`DirectStore::dbnum_of / locator_dbnum / dbnum_hint` 只经 `refno_route::refno_dbnum()`，
 `UnresolvedRef0` → `InvalidRefNo / DbNotInMdb`，`open_session` 加 `DbNumberMismatch` 核头；真库门 DESI 1112 上 25 条跨库引用换库读通、
-仅开 2 个会话。2A `425ca98d8`——`dbnum_of_root` 位解码 + 核 DESI/ISOD 成员 + 目标库一次 `find_element`，删 `DBNUM_BY_REF0`。
+仅开 2 个会话。2A `425ca98d8` + `db49238e3`——`dbnum_of_root` 位解码 + 核 DESI/ISOD 成员 + 目标库一次 `element_exists`
+（开库一次、核 `db_mark`、索引点查一次），删 `DBNUM_BY_REF0`；错误成类型 `RootDbError` 六类；`mdb_design_dbnums` 分母同步 DESI+ISOD。
 退出标准成立：`tests/refno_native_guards.rs` 守 `resolve_ref0( / dbnum_of_ref0( / .get_0()` 不再出现在 `direct_store.rs` 生产代码、
 `dbnum_of_root` 不遍历 pins 且只开一库。探针 `7f501ab0d` 同步退役 `InMemoryCataLocator::build_for_project`，ams8000 对账 1313/1313。
 

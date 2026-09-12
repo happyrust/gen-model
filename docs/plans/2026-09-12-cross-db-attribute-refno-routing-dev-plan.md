@@ -21,7 +21,11 @@
     整 SITE `/1RX03-EQUI`（1,978 元素）也显示成功，但 `model/ensure` 走满 120 s 回 504 后由客户端
     后台补齐——在案，不属本切片；
   - W7 已提交 `7f501ab0d`（探针退役全库扫描定位器、加对账栏；ams8000 真库 1313/1313 相等、338 条跨库引用 0 失败）；
-  - W0（阶段 0 收口，见 §4）(d)(e)、W9（文档）未做。
+  - W4 补齐 `db49238e3`（并行会话，13:43）：`element_exists` 点查 + 核头、`RootDbError` 六类、`mdb_design_dbnums` DESI+ISOD、
+    护栏加 `read_stats` 行为断言（8 passed）；
+  - W9 已提交 `d9b631fa2`：`docs/evidence/2026-09-12-ida-core-dabacon-refno-routing.md`（core.dll 取证原文）、CONTEXT.md
+    「RefNo 库归属 / dbnum 路由目录 / 跨库属性」三条新词条 + Ref0 三条退役、母计划状态与阶段 1 / 2 / 3A 结果段；
+  - 只剩 W0(d)(e)（AMS 阶段 0 基线 JSON、contract 注释）未做；本切片其余工作项全部提交。
 - 母计划：`docs/plans/2026-09-12-refno-native-routing-and-lazy-mdb-plan.md`（已批准；阶段 0 已落地：
   `vendor/e3d-io/tests/refno_dbno_corpus.rs`、`refno_native_stage0.rs`、`tests/refno_native_api_contract.rs`、
   `docs/baselines/2026-09-12-jeu-refno-routing-stage0.{json,md}`；阶段 0 退出门「位解码 corpus 零分歧」
@@ -238,11 +242,11 @@ pub fn dbnum_of_root(root: RefNo) -> anyhow::Result<u32> {
 | W1 | **已提交 `bb16105d2`** | 抽 `refno_dbnum()` helper + 单测 | `refno_route.rs`（新） | `24572/115 → 8188`；primary/secondary extent 同 dbnum；`251000`；非法/空 → `None`；全 18 位 dbnum 往返 |
 | W2 | **已提交 `bb16105d2`** | `MdbRouteDirectory` + `DbFileResolver`/`CataDbLocator` 实现 + 单测 | `mdb_route_directory.rs`（新）；`e3d_model_service.rs` 的共享构建**尚未抽**（留到 W5/W6 后收敛） | 用 `MdbMembership` 夹具：dbnum 在/不在 MDB、文件头 dbnum 不符、同号跨项目按 `preferred_project` 选、DICT/CATA 依赖并入；真库门 `live_directory_matches_every_file_header` |
 | W3 | **已提交 `5cc5e3e04`** | `DirectStore` 换路由与错误变体 | `direct_store.rs`、`direct_store_refno_live_tests.rs`（新）、`web_service/mod.rs`、`on_demand_db.rs`、`element_attributes.rs`（missing 判定） | `direct_store::tests` 全绿；新增「解码 dbnum 不在目录报 `DbNotInMdb`」「非法 refno 报 `InvalidRefNo`」「N+1 钉到 N 的文件报 `DbNumberMismatch`」；真库门：AMS `/ALL` DESI 1112 扫 2,132 元素、25 条跨库引用按解码换库读通（CATA 7001，仅开 2 个会话）；本文件源码护栏 `production_code_never_consults_the_ref0_table` |
-| W4 | **已提交 `425ca98d8`** | `model_source::dbnum_of_root` 改解码 + 目标库一次 `find_element` 点查；删 `DBNUM_BY_REF0`；类型集 DESI+ISOD（`mdb_design_dbnums()` 分母**未**放宽——它是启动复核「哪些库没有凭证」的分母，改动要看 `/health.startup.reconcile` 回归，留待 3B） | `model_source.rs` | 单测：非法根在解码那一步就停（三种非法形状）；文件内源码护栏：无 `DBNUM_BY_REF0`、函数体无 `for pin in`、恰一次 `ReadOnlyEngine::open(`。三类错误文案：「不是合法 RefNo」/「不在当前 MDB 的成员清单里」/「索引里没有它」（anyhow 文本，未做成枚举；`read_stats` 计数断言留 W8 行为断言那一档） |
+| W4 | **已提交 `425ca98d8` + `db49238e3`** | `425ca98d8`：`dbnum_of_root` 改解码 + 只开目标库；删 `DBNUM_BY_REF0`。`db49238e3`（并行会话补齐）：拆 `dbnum_of_root_in(root, \|\| members)`，点查收进 `element_exists(pin, root)`（`ReadOnlyEngine::open` 一次 + 核 `descriptor().db_mark == dbnum` + `search_index` 一次）；错误成类型 `RootDbError { InvalidRefNo / DbNotInMdb / NotAnElementDb / Open / DbNumberMismatch / ElementMissing }`，签名仍回 `anyhow::Result<u32>`；`mdb_design_dbnums()` 分母放宽到 DESI+ISOD，与定库共用 `is_element_db()` | `model_source.rs` | `cargo test --lib model_source` 11 passed；三处调用方零改动。**未验真库**：ISOD 进分母后 `/health.startup.reconcile` 的回归（AMS `/ALL` 的 ISOD 成员是否有凭证行） |
 | W5 | **已提交 `425ca98d8`** | `ElementAttributeService` 脱离骨架：`MdbRouteDirectory::from_membership` + `add_dependency_dir`（CATA / PROP 只读文件头），`is_current` / `snapshot_epoch` 只看成员文件指纹，UDA 字典 `load_uda_catalog` 直接读 DICT | `element_attributes.rs` | 真库：AMS `/ALL` 上 plant-ui 选中 SITE / ZONE 属性面板正常（通用 + 元素属性 + UDA）；`open()` 期间 `scan_elements == 0` 的计数器断言未加（W8 行为断言那一档，见 §5.2） |
 | W6 | **已提交 `425ca98d8`** | `DirectTreeService` locator 换源（`ensure()` 仍在：WORL 枚举与 noun / owner 查询，3B / 3C） | `direct_tree.rs` | 真库：根层 38 个 SITE、展开 `/1RX03-EQUI` 三个 ZONE 正常；direct tree TTY 对拍未重跑 |
 | W7 | **已提交 `7f501ab0d`** | 探针定位器换 `MdbRouteDirectory`（退役 `InMemoryCataLocator::build_for_project` 全库扫描），加 `DbnumLedger`「解码 = 文件自报」对账栏（样本 + owner 链每跳 + 跨库引用目标），不符计 fatal | `bin/direct_attmap_probe.rs` | ams8000 @444 `--sample 200 --owner-climb --nouns EQUI,BRAN,GENSEC`（DB 侧 `_runs/ams-refno` 18909）：路由目录 77 条 / 29 元素库 / 7 依赖 2.2 s；200 样本 0 真值冲突；跨库引用 **338 条换库读通、0 失败**（CATA 5052 @189）；owner 链 200 条到根未出本库；对账 **1313/1313 相等、0 不符**；exit 0，6 s。「计数与改前相同」因随机采样不可复现，改记「0 失败」；日志 `D:\work\plant-code\old\_runs\ams-refno\probe-w7-ams8000.log` |
-| W8 | **已提交 `425ca98d8`**（文本护栏那一半） | 源码护栏测试 | `tests/refno_native_guards.rs`（新） | 六条文本护栏全绿（CRLF 检出下同样成立）；§5.2 的 `read_stats` 行为断言（合成多库夹具）未做 |
+| W8 | **已提交 `425ca98d8` + `db49238e3`** | 源码护栏测试：文本护栏（`425ca98d8`）+ `read_stats` 行为护栏（`db49238e3`，合成 4 页库文件） | `tests/refno_native_guards.rs`（新） | 8 passed（CRLF 检出下同样成立）：位公式只在 `refno_route`；`direct_store` 无 ref0 表 / `.get_0()` / `UnresolvedRef0`；`dbnum_of_root` 不遍历 pins、`element_exists(` 恰一次、整模块只一处开库且核 `db_mark`、分母与定库共用 `is_element_db`；属性 / 树服务定位器来自路由目录；路由目录无逐元素表；不写死 8188；行为：合法根 `database_opens=1 / scan_calls=0 / index_point_lookups=1`，元素不存在 → `ElementMissing`，头自报 1002 登记 1001 → `DbNumberMismatch`，不在 MDB / CATA / 非法 / 声明了没文件零新增开库 |
 | W9 | 未做 | 文档 | `CONTEXT.md`（跨库属性词条）、母计划状态、`docs/evidence/2026-09-12-ida-core-dabacon-refno-routing.md` | 证据文件记录 §0.1 全部地址与反编译片段 |
 
 顺序（§9 Q1 定：**2A 前置**）：W0 → **W4** → W5/W6（依赖已提交的 W2+W3）→ W7/W8 → W9。W4 不依赖 W2：它只用
