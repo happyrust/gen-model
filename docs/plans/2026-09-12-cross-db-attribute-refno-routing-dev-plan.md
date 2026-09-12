@@ -20,7 +20,8 @@
     （`/1RX03-CASE-DQ` 23/26 根、23 个网格实例，服务侧 `model-persist failed_roots=0`）；
     整 SITE `/1RX03-EQUI`（1,978 元素）也显示成功，但 `model/ensure` 走满 120 s 回 504 后由客户端
     后台补齐——在案，不属本切片；
-  - W0（阶段 0 收口，见 §4）(d)(e)、W7（探针对账栏）、W9（文档）未做。
+  - W7 已提交 `7f501ab0d`（探针退役全库扫描定位器、加对账栏；ams8000 真库 1313/1313 相等、338 条跨库引用 0 失败）；
+  - W0（阶段 0 收口，见 §4）(d)(e)、W9（文档）未做。
 - 母计划：`docs/plans/2026-09-12-refno-native-routing-and-lazy-mdb-plan.md`（已批准；阶段 0 已落地：
   `vendor/e3d-io/tests/refno_dbno_corpus.rs`、`refno_native_stage0.rs`、`tests/refno_native_api_contract.rs`、
   `docs/baselines/2026-09-12-jeu-refno-routing-stage0.{json,md}`；阶段 0 退出门「位解码 corpus 零分歧」
@@ -224,6 +225,10 @@ pub fn dbnum_of_root(root: RefNo) -> anyhow::Result<u32> {
 
 - `--owner-climb` 与 `cross_db_references()` 改用 `store.dbnum_of()`（内部已是解码）；输出多两栏：`decoded_dbnum` 与 `descriptor_dbnum`，
   逐条断言相等——这是真库上「解码 = 文件自报」的活体对账。
+- **已落地（`7f501ab0d`）**：定位器从 `InMemoryCataLocator::build_for_project`（全库扫描建 ref0 表，退役）换成
+  `MdbRouteDirectory::from_membership + add_dependency_dir`，与属性 / 树服务同一种造法；`DbnumLedger` 对每个样本、
+  owner 链每一跳、每条跨库引用目标在读出属性后记一笔（`refno_dbnum` == 打开的 dbnum == 文件头 `db_mark`，每库只读一次头），
+  不符计入 fatal，汇总打印触达的库。
 
 ## 4. 工作项与顺序
 
@@ -236,7 +241,7 @@ pub fn dbnum_of_root(root: RefNo) -> anyhow::Result<u32> {
 | W4 | **已提交 `425ca98d8`** | `model_source::dbnum_of_root` 改解码 + 目标库一次 `find_element` 点查；删 `DBNUM_BY_REF0`；类型集 DESI+ISOD（`mdb_design_dbnums()` 分母**未**放宽——它是启动复核「哪些库没有凭证」的分母，改动要看 `/health.startup.reconcile` 回归，留待 3B） | `model_source.rs` | 单测：非法根在解码那一步就停（三种非法形状）；文件内源码护栏：无 `DBNUM_BY_REF0`、函数体无 `for pin in`、恰一次 `ReadOnlyEngine::open(`。三类错误文案：「不是合法 RefNo」/「不在当前 MDB 的成员清单里」/「索引里没有它」（anyhow 文本，未做成枚举；`read_stats` 计数断言留 W8 行为断言那一档） |
 | W5 | **已提交 `425ca98d8`** | `ElementAttributeService` 脱离骨架：`MdbRouteDirectory::from_membership` + `add_dependency_dir`（CATA / PROP 只读文件头），`is_current` / `snapshot_epoch` 只看成员文件指纹，UDA 字典 `load_uda_catalog` 直接读 DICT | `element_attributes.rs` | 真库：AMS `/ALL` 上 plant-ui 选中 SITE / ZONE 属性面板正常（通用 + 元素属性 + UDA）；`open()` 期间 `scan_elements == 0` 的计数器断言未加（W8 行为断言那一档，见 §5.2） |
 | W6 | **已提交 `425ca98d8`** | `DirectTreeService` locator 换源（`ensure()` 仍在：WORL 枚举与 noun / owner 查询，3B / 3C） | `direct_tree.rs` | 真库：根层 38 个 SITE、展开 `/1RX03-EQUI` 三个 ZONE 正常；direct tree TTY 对拍未重跑 |
-| W7 | 未做 | 探针补对账栏 | `bin/direct_attmap_probe.rs` | ams8000 `--owner-climb`：`decoded == descriptor` 100%；`cross_db_refs` 计数与改前相同 |
+| W7 | **已提交 `7f501ab0d`** | 探针定位器换 `MdbRouteDirectory`（退役 `InMemoryCataLocator::build_for_project` 全库扫描），加 `DbnumLedger`「解码 = 文件自报」对账栏（样本 + owner 链每跳 + 跨库引用目标），不符计 fatal | `bin/direct_attmap_probe.rs` | ams8000 @444 `--sample 200 --owner-climb --nouns EQUI,BRAN,GENSEC`（DB 侧 `_runs/ams-refno` 18909）：路由目录 77 条 / 29 元素库 / 7 依赖 2.2 s；200 样本 0 真值冲突；跨库引用 **338 条换库读通、0 失败**（CATA 5052 @189）；owner 链 200 条到根未出本库；对账 **1313/1313 相等、0 不符**；exit 0，6 s。「计数与改前相同」因随机采样不可复现，改记「0 失败」；日志 `D:\work\plant-code\old\_runs\ams-refno\probe-w7-ams8000.log` |
 | W8 | **已提交 `425ca98d8`**（文本护栏那一半） | 源码护栏测试 | `tests/refno_native_guards.rs`（新） | 六条文本护栏全绿（CRLF 检出下同样成立）；§5.2 的 `read_stats` 行为断言（合成多库夹具）未做 |
 | W9 | 未做 | 文档 | `CONTEXT.md`（跨库属性词条）、母计划状态、`docs/evidence/2026-09-12-ida-core-dabacon-refno-routing.md` | 证据文件记录 §0.1 全部地址与反编译片段 |
 
@@ -398,6 +403,11 @@ RefNo → dbnum → 文件，与 schema pack 无关，2.1/3.1 的差异在属性
 
 截至 2026-09-12 11:15，工作树 66 项未提交，混着四条流水；gen-model 的未提交代码依赖 e3d-io **未提交**的
 `database_header_diagnostics`（HEAD 里没有），所以 e3d-io 先提交、gen-model 后提交。按 hunk 拆，提交前贴出 map：
+
+> **e3d-io 侧已提交（2026-09-12 13:30，`main`）**：A → `b90c585` `feat(diagnostics): header/session diagnostics, DAB engine tags, GLOB template name`（14 文件）；
+> D → `e8d0ece` `feat(read-stats): count opens/scans/point lookups; locate WORLD by descriptor, gate both on the corpus`（11 文件，含 CHANGELOG「Added」三条）。
+> `engine.rs` / `meta/descriptor.rs` 按 hunk 拆（A：`DatabaseHeaderDiagnostics` 段 + 描述符 +0x24/+0x40/+0x154 字段 + 尾部 rustfmt；D：四个 `note_*` + `world()` + `world_refno()`）。
+> A 单独检出全套 `cargo test --release` 68 套 399 通过 0 失败；两笔叠加 = 提交前工作树内容，72 套 406 通过 0 失败。gen-model 侧四笔未动。
 
 | 流水 | e3d-io | gen-model | 备注 |
 |---|---|---|---|
