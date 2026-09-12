@@ -16,7 +16,6 @@ use aios_core::pdms_types::EleTreeNode;
 use aios_core::{RefU64, RefnoEnum};
 use anyhow::Context;
 
-use super::cata_closure::InMemoryCataLocator;
 use super::direct_store::{DbPin, DirectSchema, DirectStore};
 use super::generation_root::{
     GenerationNode, GenerationRoot, SubtreeElement, enumerate_generation_roots_in_subtree,
@@ -24,6 +23,7 @@ use super::generation_root::{
 };
 use super::mdb_membership::{ISOD_STYP, MdbMembership};
 use super::mdb_memory_store::MdbMemoryStore;
+use super::mdb_route_directory::MdbRouteDirectory;
 
 /// One process-local, immutable view of the current MDB model tree.
 ///
@@ -53,19 +53,17 @@ impl DirectTreeService {
                 super::mdb_membership::resolve(option, project, mdb).map(Arc::new)
             })?;
         let skeleton = super::mdb_memory_store::ensure(project, mdb)?;
-        // The generic directory locator uses a project-wide scan and also walks
-        // unrelated project databases; tree direct mode must neither depend on
-        // that nor scan outside the MDB's CURD — so the locator is built from
-        // the skeleton, which was itself built from the CURD's DESI files.
-        let (affiliations, files) = skeleton.locator_parts();
-        let locator = Arc::new(InMemoryCataLocator::from_parts(affiliations, files));
+        let schema = Arc::new(DirectSchema::open_from_env()?);
+        // 定位器是 dbnum → 文件的路由目录，直接从 CURD 成员清单造（切片 W6）：refno 归哪个库由
+        // `DirectStore` 位解码，不再从骨架抄 `ref0 → dbnum`。骨架在这里只剩 WORL 枚举
+        // （`roots()` 的 `refnos_of_noun`）与 noun / owner 查询在用——那是母计划 3B / 3C 的活。
+        let directory = MdbRouteDirectory::from_membership(&membership, schema.template_dir());
         anyhow::ensure!(
-            locator.ref0_count() > 0,
-            "direct tree 在 MDB {} 的 DESI CURD 中没有建立出任何 ref0 定位记录",
+            directory.element_databases().next().is_some(),
+            "direct tree 在 MDB {} 的 CURD 里没有路由出任何 DESI / ISOD 库文件",
             membership.mdb()
         );
-        let schema = Arc::new(DirectSchema::open_from_env()?);
-        let store = Arc::new(DirectStore::new(schema, locator));
+        let store = Arc::new(DirectStore::new(schema, Arc::new(directory)));
 
         let mut pinned = 0usize;
         for db in membership.element_databases() {

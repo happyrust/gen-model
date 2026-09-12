@@ -11,9 +11,11 @@
 //! * **「最新」怎么解**——[`latest_source_version`]，复用历史投影那把尺子
 //!   `historical_model::resolve_session(path, Latest)`；按文件身份（长度 + 修改时刻）缓存，
 //!   文件没动就不重开。E3D 的保存是追加写，长度一变就重解。
-//! * **生成根归哪个库**——[`dbnum_of_root`]，在 MDB 的 DESI 文件里按会话索引点查；命中零个
-//!   或多个都是错误，不猜（CONTEXT.md「Ref0 库归属」）。命中后按 ref0 缓存：同一 ref0 的
-//!   全部元素都在同一个库里。
+//! * **生成根归哪个库**——[`dbnum_of_root`]，从 refno 自身**位解码**（`RefNo::dbno()`，与 core.dll
+//!   `DB_Element::dbno` 同式），再核它在 MDB 成员清单里且是 DESI / ISOD，最后只在**那一个库**
+//!   点查一次索引确认元素存在。不再逐个打开全部 DESI 试查，也没有按 word0 建的归属缓存——
+//!   同一个库每个 extent 一个 word0，那张表是为一个不存在的歧义建的（切片计划
+//!   `2026-09-12-cross-db-attribute-refno-routing-dev-plan.md` §0.2 / W4）。
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -24,6 +26,7 @@ use e3d_io::ReadOnlyEngine;
 use e3d_io::refno::RefNo;
 use once_cell::sync::Lazy;
 
+use crate::data_interface::refno_route::refno_dbnum_of;
 use crate::fast_model::e3d_model_service::current_mdb_sources;
 use crate::fast_model::historical_model::{SessionSelector, resolve_session};
 
@@ -57,7 +60,6 @@ impl FileStamp {
 }
 
 static LATEST_BY_FILE: Lazy<DashMap<PathBuf, (FileStamp, SourceVersion)>> = Lazy::new(DashMap::new);
-static DBNUM_BY_REF0: Lazy<DashMap<u32, u32>> = Lazy::new(DashMap::new);
 
 /// 当前 MDB 里 `dbnum` 的库类型与文件。
 pub fn source_file_of(dbnum: u32) -> anyhow::Result<(String, PathBuf)> {
@@ -126,39 +128,46 @@ pub fn latest_source_version_of_file(
     Ok(version)
 }
 
-/// 生成根所在的 DESI 库。
+/// 生成根所在的 DESI / ISOD 库。
 ///
-/// 不查 `pe`（零解析下没有行），在 MDB 的每个 DESI 文件里按会话索引点查这个元素：
-/// 恰好一个库命中才是答案；一个都没有说明它不在当前 MDB 里，多个命中是 Ref0 归属冲突。
+/// 三步，每一步失败都说清是哪一步：
+/// 1. `RefNo::dbno()` 位解码——编号内生，不查表、不开库；
+/// 2. 解出的 dbnum 必须是当前 MDB 声明的 DESI / ISOD 成员——范围封闭，不在就是「不在这个 MDB」；
+/// 3. 只在**那一个库**的最新会话索引里点查一次——区分「编号合法但元素不存在」（删了、
+///    或 refno 写错）与「库不在」。这一步开的是目标库那一个文件，不是全部 DESI。
 pub fn dbnum_of_root(root: RefNo) -> anyhow::Result<u32> {
-    if let Some(hit) = DBNUM_BY_REF0.get(&root.word0) {
-        return Ok(*hit);
-    }
+    let dbnum = refno_dbnum_of(root)
+        .with_context(|| format!("生成根 {root} 不是合法 RefNo（word1 为负或解出 dbnum 0）"))?;
     let (pins, _) = current_mdb_sources()?;
-    let mut hits = Vec::new();
-    let mut searched = 0usize;
-    for pin in pins
+    let pin = pins
         .iter()
-        .filter(|pin| pin.db_type.eq_ignore_ascii_case("DESI"))
-    {
-        searched += 1;
-        let mut engine = ReadOnlyEngine::open(&pin.file)
-            .with_context(|| format!("e3d-io 打开 DESI {} ({})", pin.dbnum, pin.file.display()))?;
-        let found = engine
-            .find_element(root)
-            .with_context(|| format!("在 DESI {} 里点查 {root}", pin.dbnum))?;
-        if found.is_some() {
-            hits.push(pin.dbnum as u32);
-        }
-    }
-    match hits.as_slice() {
-        [dbnum] => {
-            DBNUM_BY_REF0.insert(root.word0, *dbnum);
-            Ok(*dbnum)
-        }
-        [] => anyhow::bail!("生成根 {root} 不在当前 MDB 的任何 DESI 库里（已查 {searched} 个库）"),
-        many => anyhow::bail!("生成根 {root} 同时出现在 DESI {many:?} 里：Ref0 归属冲突，不猜"),
-    }
+        .find(|pin| pin.dbnum == dbnum as i32)
+        .with_context(|| {
+            format!("生成根 {root} 解出 dbnum {dbnum}，它不在当前 MDB 的成员清单里")
+        })?;
+    anyhow::ensure!(
+        pin.db_type.eq_ignore_ascii_case("DESI") || pin.db_type.eq_ignore_ascii_case("ISOD"),
+        "生成根 {root} 解出 dbnum {dbnum}，但那是 {} 库，不是 DESI / ISOD",
+        pin.db_type
+    );
+    let mut engine = ReadOnlyEngine::open(&pin.file).with_context(|| {
+        format!(
+            "e3d-io 打开 {} {} ({})",
+            pin.db_type,
+            dbnum,
+            pin.file.display()
+        )
+    })?;
+    let found = engine
+        .find_element(root)
+        .with_context(|| format!("在 {} {} 里点查 {root}", pin.db_type, dbnum))?;
+    anyhow::ensure!(
+        found.is_some(),
+        "生成根 {root} 解出 dbnum {dbnum}，但 {} 最新会话 {} 的索引里没有它",
+        pin.file.display(),
+        engine.session().sesno
+    );
+    Ok(dbnum)
 }
 
 /// 一个生成根在当前投影下的生成源版本：所在库 + 该库文件的最新会话。
@@ -193,6 +202,51 @@ mod tests {
         assert!(!credential_covers(Some(0), 0));
         assert!(!credential_covers(Some(0), 1));
         assert!(!credential_covers(None, 1));
+    }
+
+    /// 非法 refno 在位解码那一步就停，报错说的是「不是合法 RefNo」——连 MDB 成员清单都不必读
+    /// （本测试进程没有 DbOption，读了就会是另一种错）。
+    #[test]
+    fn an_invalid_root_is_rejected_before_the_mdb_is_consulted() {
+        for root in [
+            RefNo::new(0, 0),
+            RefNo::new(24_384, 0x8000_0000),
+            RefNo::new(3 << 13, 5),
+        ] {
+            let error = dbnum_of_root(root).unwrap_err().to_string();
+            assert!(error.contains("不是合法 RefNo"), "{root}: {error}");
+        }
+    }
+
+    /// 切片 §5.2 源码护栏：定库只靠位解码，不遍历 MDB 的全部 DESI，也没有按 word0 建的缓存。
+    #[test]
+    fn dbnum_of_root_decodes_instead_of_probing_every_desi() {
+        // 只看生产代码：测试模块自己就写着那个名字。
+        let source = include_str!("model_source.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("production part");
+        assert!(
+            !source.contains("DBNUM_BY_REF0"),
+            "按 word0 键的归属缓存必须删干净"
+        );
+        let body = source
+            .split_once("pub fn dbnum_of_root(")
+            .expect("dbnum_of_root exists")
+            .1
+            .split_once("\n}\n")
+            .expect("function end")
+            .0;
+        assert!(
+            body.contains("refno_dbnum_of(root)"),
+            "定库必须走位解码 helper"
+        );
+        assert!(!body.contains("for pin in"), "不得遍历 MDB 成员逐库试查");
+        assert_eq!(
+            body.matches("ReadOnlyEngine::open(").count(),
+            1,
+            "只开解出的那一个库"
+        );
     }
 
     #[test]

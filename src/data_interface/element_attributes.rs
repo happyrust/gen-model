@@ -21,10 +21,10 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, RwLock, mpsc};
 
-use super::cata_closure::InMemoryCataLocator;
 use super::direct_store::{DirectElementSnapshot, DirectSchema, DirectStore, DirectStoreError};
 use super::e3d_collector::open_pinned_set;
 use super::mdb_membership::MdbMembership;
+use super::mdb_route_directory::MdbRouteDirectory;
 use super::mirror_spool::MirrorSpool;
 use super::read_through::{
     ReadThroughSource, render_rows_with_catalog, rendered_transaction_batches,
@@ -146,44 +146,67 @@ pub struct ElementAttributeService {
     backup_tx: mpsc::Sender<()>,
     spool: Arc<MirrorSpool>,
     stats: Arc<QueueStats>,
+    /// MDB 成员清单 + 每个成员文件的身份（长度 / 修改时刻 / 最新会话）的哈希。
+    /// 本服务「还新不新」只看它——不再比对整份元素骨架的会话指纹（切片 W5）。
     file_fingerprint: u64,
-    skeleton_fingerprint: Vec<(u32, std::path::PathBuf, u32)>,
+    /// 交给镜像 spool 的来源世代。骨架退役后取 [`Self::file_fingerprint`]：同一份成员文件
+    /// 集合产出的行才共享一个世代。
     snapshot_epoch: u64,
 }
 
 impl ElementAttributeService {
+    /// 打开属性服务：MDB 成员清单 → dbnum 路由目录 → `DirectStore`。
+    ///
+    /// **不读任何元素**（切片 W5，母计划阶段 3A）：库文件由 CURD 声明定，refno 属于哪个库
+    /// 由 `RefNo::dbno()` 位解码定（`DirectStore::dbnum_of`），所以这里不再等
+    /// `mdb_memory_store` 那份逐元素 `ref0 → dbnum` 骨架——JEU 现场那 68 秒 /
+    /// 1,221,858 个元素就是它。依赖项目的目录库（CATA / PROP）按文件头并进目录，
+    /// 同号跨项目副本留作 `preferred_project` 候选。
     fn open(project: &str, mdb: &str) -> anyhow::Result<(Self, mpsc::Receiver<()>)> {
         let option = aios_core::get_db_option();
-        let skeleton = super::mdb_memory_store::ensure(project, mdb)?;
-        let membership = skeleton.membership();
-        let (affiliations, files) = skeleton.locator_parts();
-        let mut locator = InMemoryCataLocator::from_parts(affiliations, files);
-        // DESI affiliation comes from the already-prewarmed MDB skeleton.  A cold
-        // read-through store has no watermark rows, so rebuilding this locator from
-        // the database (or a best-effort directory walk) would make valid tree nodes
-        // unreadable by the attribute service.  Catalogue files are then merged from
-        // every configured dependency project; merge_cata_files deliberately ignores
-        // their DESI/DICT files.
+        let membership = super::mdb_membership::get(project, mdb)
+            .map(Ok)
+            .unwrap_or_else(|| {
+                super::mdb_membership::resolve(option, project, mdb).map(Arc::new)
+            })?;
+        let schema = Arc::new(DirectSchema::open_from_env()?);
+        let started = Instant::now();
+        let mut directory = MdbRouteDirectory::from_membership(&membership, schema.template_dir());
         for dependency_project in &option.included_projects {
             let Some(project_root) =
                 super::project_paths::resolve_project_root(option, dependency_project)
             else {
                 continue;
             };
-            locator.merge_cata_files(InMemoryCataLocator::build_from_dir(
-                dependency_project,
-                &project_root,
-            ));
+            let scan = directory.add_dependency_dir(dependency_project, &project_root);
+            log::info!(
+                "[attributes] 依赖项目 {dependency_project} 目录库并入路由: candidates={} added_routes={} duplicate_keys={} ({})",
+                scan.candidates,
+                scan.added_routes,
+                scan.duplicate_keys,
+                project_root.display()
+            );
+        }
+        for problem in directory.problems() {
+            log::warn!("[attributes] {problem}");
         }
         anyhow::ensure!(
-            locator.ref0_count() > 0,
-            "no E3D element index could be built for MDB {mdb}"
+            !directory.is_empty(),
+            "MDB {mdb} 的成员清单没有路由出任何库文件，属性服务无库可读"
         );
-        let schema = Arc::new(DirectSchema::open_from_env()?);
-        let catalog = skeleton.uda_catalog();
+        let stats = directory.stats();
+        log::info!(
+            "[attributes] 路由目录就绪: routes={} element={} dependency={} declared_without_file={} candidates={} elapsed_ms={}",
+            stats.routes,
+            stats.element_routes,
+            stats.dependency_routes,
+            stats.declared_without_file,
+            stats.project_candidates,
+            started.elapsed().as_millis()
+        );
+        let catalog = Arc::new(load_uda_catalog(&membership, &schema)?);
         let file_fingerprint = membership_fingerprint(&membership)?;
-        let skeleton_fingerprint = skeleton.session_fingerprint();
-        let store = Arc::new(DirectStore::new(schema, Arc::new(locator)));
+        let store = Arc::new(DirectStore::new(schema, Arc::new(directory)));
         let spool = Arc::new(MirrorSpool::for_process(&option.surreal_ns, project, mdb)?);
         let (backup_tx, backup_rx) = mpsc::channel(BACKUP_QUEUE_CAPACITY);
         Ok((
@@ -197,8 +220,7 @@ impl ElementAttributeService {
                 spool,
                 stats: Arc::new(QueueStats::default()),
                 file_fingerprint,
-                skeleton_fingerprint,
-                snapshot_epoch: skeleton.epoch(),
+                snapshot_epoch: file_fingerprint,
             },
             backup_rx,
         ))
@@ -221,13 +243,11 @@ impl ElementAttributeService {
         health
     }
 
+    /// 成员文件（DESI / CATA / DICT …）任一的长度、修改时刻或最新会话变了，就是不新了——
+    /// 粗粒度但不静默：重建一次服务，路由目录与 UDA 字典一起刷新。按 dbnum 定向失效是
+    /// 母计划阶段 5 的活。
     fn is_current(&self) -> anyhow::Result<bool> {
-        if super::mdb_memory_store::stale_reason(&self.project, &self.mdb).is_some() {
-            return Ok(false);
-        }
-        let skeleton_current = super::mdb_memory_store::get(&self.project, &self.mdb)
-            .is_some_and(|store| store.session_fingerprint() == self.skeleton_fingerprint);
-        Ok(skeleton_current && membership_fingerprint(&self.membership)? == self.file_fingerprint)
+        Ok(membership_fingerprint(&self.membership)? == self.file_fingerprint)
     }
 
     pub fn read(&self, refno: RefU64) -> anyhow::Result<ElementAttributesResponse> {
