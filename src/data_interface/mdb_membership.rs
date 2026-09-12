@@ -40,6 +40,12 @@ pub const DESI_STYP: i64 = 1;
 /// like DESI; CATA remains catalogue-only and is deliberately excluded.
 pub const ISOD_STYP: i64 = 6;
 
+/// SYST 库（dbno 8191）的 WORL：`24575/3`——`24575 = 8191 | 0x4000`，系统元素落在第 2 个 extent，
+/// 不是元素库那种 `primary_extent_ref / 0`。E3D 2.1 + 3.1 全部 14 个 `*sys` 库实测同一位置（2026-09-12）。
+pub const SYS_WORLD: e3d_io::RefNo = e3d_io::RefNo::new(24575, 3);
+/// SYST 库的 MDB 世界 `MDBW`（名 `/*M`）：`24575/7`，owner 是 [`SYS_WORLD`]，每个 MDB 元素都是它的直接成员。
+pub const SYS_MDB_WORLD: e3d_io::RefNo = e3d_io::RefNo::new(24575, 7);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdbDatabase {
     pub dbnum: u32,
@@ -444,7 +450,7 @@ fn read_declaration(
     // longest for the same reason; picking either is otherwise a coin flip
     // that silently shrinks the scope.
     let named = sys_db
-        .named(wanted)
+        .mdbs_named(wanted)
         .with_context(|| format!("在 {} 查找 MDB {wanted}", sys.display()))?;
     let named_matches = named.len();
     report_sys_info(&format!(
@@ -802,7 +808,61 @@ impl SysDb {
         })
     }
 
+    /// MDB elements whose stored `NAME` is exactly `name` (leading `/` included), found by
+    /// **navigation, not by scanning**: SYS `WORL` → `MDBW` (`/*M`) → members, each a point lookup.
+    ///
+    /// 位置是确定的（2026-09-12 对 E3D 2.1 + 3.1 两套安装下全部 14 个 `*sys` 库实测，0 例外）：
+    /// SYST 的 WORL 在 `24575/3`（dbno 8191 的第 2 个 extent，owner 0，名 `/*`），MDB 世界 `MDBW`
+    /// 在 `24575/7`（owner = WORL，名 `/*M`），**每一个** MDB 元素都是它的直接成员（AMS 50 个、
+    /// APS 5 个、ZDJ 12 个…）。所以找一个 MDB = 读 MDBW 的成员表 + 逐成员核 noun 与 NAME，
+    /// `read_stats.scan_calls` 为 0——此前这里是 `find_named` 的一次 Named 档全库扫
+    /// （AMS 1,207 个元素），是启动链上最后一次非零 `scan_calls`。
+    ///
+    /// 位置对不上（不是 SYST、或那两处不是 WORL / MDBW）就**出声**回落到扫描，不静默：
+    /// 那是格式假设被打破，得让人看见。
+    fn mdbs_named(&self, name: &str) -> anyhow::Result<Vec<RefU64>> {
+        let mdb_noun = e3d_attlib::db1_hash("MDB");
+        let mdbw_noun = e3d_attlib::db1_hash("MDBW");
+        let mdbw = self.set.element(SYS_MDB_WORLD);
+        let mdbw_ok = mdbw
+            .exists()
+            .map_err(|error| anyhow::anyhow!("检查 SYS MDBW {SYS_MDB_WORLD} 是否存在失败: {error}"))?
+            && mdbw
+                .noun_hash()
+                .map_err(|error| anyhow::anyhow!("读 SYS MDBW {SYS_MDB_WORLD} 的 noun 失败: {error}"))?
+                == mdbw_noun;
+        if !mdbw_ok {
+            report_sys_error(&format!(
+                "[SYS 解析] dbno={} 的 {SYS_MDB_WORLD} 不是 MDBW（格式假设被打破），回落到 Named 档全库扫描找 {name}",
+                self.dbno
+            ));
+            return self.named(name);
+        }
+        let mut out = Vec::new();
+        for member in mdbw
+            .members()
+            .map_err(|error| anyhow::anyhow!("读 SYS MDBW {SYS_MDB_WORLD} 成员表失败: {error}"))?
+        {
+            let refno = member.refno();
+            let noun = member
+                .noun_hash()
+                .map_err(|error| anyhow::anyhow!("读 SYS 元素 {refno} 的 noun 失败: {error}"))?;
+            if noun != mdb_noun {
+                continue;
+            }
+            let stored = member
+                .get_string("NAME")
+                .map_err(|error| anyhow::anyhow!("读 SYS MDB {refno} 的 NAME 失败: {error}"))?;
+            if stored.as_deref() == Some(name) {
+                out.push(RefU64::from_two_nums(refno.word0, refno.word1));
+            }
+        }
+        Ok(out)
+    }
+
     /// Elements whose stored `NAME` is exactly `name` (leading `/` included).
+    ///
+    /// 一次 Named 档全库扫；正常路径不走它（见 [`Self::mdbs_named`]），只留给格式假设被打破时的回落。
     fn named(&self, name: &str) -> anyhow::Result<Vec<RefU64>> {
         Ok(self
             .set
@@ -1339,3 +1399,8 @@ mod tests {
         )
     }
 }
+
+/// SYS 固定结构导航（WORL → MDBW → 成员）的门：真库两条装了 AMS 才跑，文本护栏一条哪儿都跑。
+#[cfg(test)]
+#[path = "mdb_membership_sys_nav_tests.rs"]
+mod sys_nav_tests;
