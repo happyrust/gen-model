@@ -10,6 +10,9 @@ mod handlers;
 /// MBD 管道尺寸标注端点（`/api/mbd/v2/pipe/{refno}`，前端契约路径，不在 `/api/v1` 下）。
 pub mod mbd;
 pub mod mesh_glb;
+/// 三维校审域（`/api/review/*`、`/api/users/*`、`/api/auth/*`），自 plant-model-gen 移植；
+/// 契约路径由 plant3d-web 写死，不在 `/api/v1` 下（`docs/plans/2026-09-12-review-backend-port-plan.md`）。
+pub mod review;
 /// 配置向导（`/setup.html` + `/api/v1/setup/*`）与「设置模式」最小启动臂。
 pub mod setup;
 mod ws;
@@ -401,6 +404,10 @@ pub async fn serve(
         // MBD 管道尺寸标注：路径是 plant3d-web `mbdV2Api.ts` 写死的契约（不在 /api/v1 下），
         // 返回冻结的 V2 `MbdV2PipeData`；状态语义见 `web_service::mbd`。
         .route("/api/mbd/v2/pipe/{refno}", get(mbd::mbd_v2_pipe))
+        // 三维校审域：同样是 plant3d-web 写死的契约路径（reviewApi.ts），响应沿用旧端
+        // `{success,…}` 信封而不是本服务的 ApiError；路由清单与鉴权在 `web_service::review` 内。
+        // 必须在 `.layer(...)` 之前合入，CORS / trace 才会覆盖到它。
+        .merge(review::router())
         // 显式路由压过下面的 ServeDir 兜底：磁盘上没有这个文件时也要有面板，
         // 而它自己会先去 ServeDir 同一个目录里找一次，所以有文件时结果不变。
         .route("/ops.html", get(handlers::ops_panel))
@@ -615,6 +622,32 @@ mod tests {
             .find(".fallback(get(handlers::plant_ui_web))")
             .expect("plant-ui web fallback must exist");
         assert!(api < fallback, "API routes must win over the web fallback");
+    }
+
+    /// 校审域整棵路由靠这一句 `.merge` 进主 Router（计划 §6 A3 护栏的挂载半边）。
+    /// 它必须在 `.layer(...)` 之前——axum 的 `layer` 只包已注册的路由，合在后面 CORS 就
+    /// 覆盖不到 `/api/review/*`，浏览器端的预检会静默失败；也必须在静态兜底之前。
+    #[test]
+    fn review_router_is_merged_before_layers_and_the_web_fallback() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("pub async fn serve(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        let review = serve
+            .find(".merge(review::router())")
+            .expect("review router must be merged into the app");
+        let cors = serve
+            .find(".layer(build_cors(cors_origins))")
+            .expect("cors layer must exist");
+        let fallback = serve
+            .find(".fallback(get(handlers::plant_ui_web))")
+            .expect("plant-ui web fallback must exist");
+        assert!(review < cors, "review router must be merged before the CORS layer");
+        assert!(review < fallback, "review router must be merged before the web fallback");
     }
 
     #[test]
