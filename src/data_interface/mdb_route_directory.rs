@@ -15,9 +15,9 @@
 //! * **文件自证**：候选副本用前核一次 60 字节头（不变量 3）；MDB 自己那份的核头留给开库方
 //!   （`DbSet::db_slot` 的 `DbNumberMismatch` / `DirectStore` W3），这里不重复开文件。
 //!
-//! **W3 之前不要把它塞给 `DirectStore::new`**：它作为 [`CataDbLocator`] 兼容壳时
-//! `dbnum_of_ref0` 恒 `None`——那条老路本来就该断，但 `DirectStore::dbnum_of` 换成位解码
-//! 之前，断在这里只会让每次读都报 `UnresolvedRef0`。
+//! 作为 [`CataDbLocator`] 兼容壳时 `dbnum_of_ref0` 恒 `None`：`DirectStore::dbnum_of` 已改为位解码
+//! （切片 W3），只拿 dbnum 问 `file_of` / `db_type_of`，ref0 那一问没有调用方了。可以直接塞给
+//! `DirectStore::new`。
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;

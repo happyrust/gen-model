@@ -769,7 +769,9 @@ fn refno_of(attrs: &DirectAttrs) -> String {
 fn error_kind(error: &aios_database::data_interface::direct_store::DirectStoreError) -> String {
     use aios_database::data_interface::direct_store::DirectStoreError as E;
     match error {
-        E::UnresolvedRef0 { .. } => "UnresolvedRef0".into(),
+        E::InvalidRefNo { .. } => "InvalidRefNo".into(),
+        E::DbNotInMdb { .. } => "DbNotInMdb".into(),
+        E::DbNumberMismatch { .. } => "DbNumberMismatch".into(),
         E::Session { .. } => "Session".into(),
         E::NoSuchElement { .. } => "NoSuchElement".into(),
         E::FileReplaced { .. } => "FileReplaced".into(),

@@ -7,9 +7,11 @@
 //!   索引是 copy-on-write，会话页各自携带当时的索引根，所以「按会话号打开」不是事后
 //!   过滤，而是选哪棵树下降；`ReadOnlyEngine::open_at` 就是这一步。要与 DB 模式对拍
 //!   读同一逻辑时点，用 [`pins_from_watermark`] 显式钉到 `applied_sesno`。
-//! * **ref0 属于哪个库**——走 [`CataDbLocator`] 反查。`Ref0` 不是 `dbnum`，
-//!   `RefU64::get_0()` 顶不了它；反查不到就报错，不凑一个看着像真的。跨库 owner 上溯
-//!   （DESI 元素的 owner 在 SITE 库）全靠这一步。
+//! * **refno 属于哪个库**——从 refno 自身**位解码**（[`super::refno_route`]，与 core.dll
+//!   `DB_Element::dbno` 同式），再拿 dbnum 问 [`CataDbLocator`] 要文件。`Ref0`（word0）不是
+//!   `dbnum`——它还带着 extent 位——但解码就够了，不需要也不再有 ref0 反查表；解不出、
+//!   或解出的库谁都不认识就报错，不凑一个看着像真的。跨库引用换库与跨库 owner 上溯
+//!   （DESI 元素的 owner 在 SITE 库）全靠这一步。开库后核一次文件自报的库号（不变量 3）。
 //! * **属性长什么形状**——[`super::direct_attmap`]，它查 DB 读侧的同一张 schema。
 //!
 //! 定位器登记不出的 dbnum、反查不到的 ref0、打不开的文件，一律 `Err` 并说出是哪个。
@@ -30,13 +32,13 @@ use dashmap::DashMap;
 use e3d_io::record::element::ParsedElement;
 use e3d_io::record::explicit::ExplicitAttribute;
 use e3d_io::record::template::TemplateProvider;
-use e3d_io::refno::RefNo;
 use e3d_io::schema::MANIFEST_FILE;
 use e3d_io::{E3dVersion, ReadOnlyEngine, SchemaPack};
 
 use super::cata_closure::CataDbLocator;
 use super::direct_attmap::{self, DirectAttrs};
 use super::direct_index::{DbIndexes, IndexFingerprint};
+use super::refno_route::{refno_dbnum, to_refno};
 
 /// 显式覆盖模板与字典文件所在目录。
 ///
@@ -109,9 +111,24 @@ impl FileIdentity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DirectStoreError {
-    UnresolvedRef0 {
-        ref0: u32,
+    /// `word1` 为负或解出 dbnum 0：这串数字不指向任何库（`refno_route::refno_dbnum` 给 `None`）。
+    InvalidRefNo {
         refno: String,
+    },
+
+    /// 编号合法、dbnum 解出来了，但既没被钉住、定位器也没有这个库的文件：确定性的
+    /// 「不在这个 MDB」。`web_service` 把它与 `NoSuchElement` 同码 404。
+    DbNotInMdb {
+        dbnum: i32,
+        refno: String,
+    },
+
+    /// 文件自报的库号与要开的不一致（不变量 3「文件自证」）：路径还在、文件被换成
+    /// 别的库，或定位器把 dbnum 绑到了错的文件。读出来的东西完全正常，只是不是你要的库。
+    DbNumberMismatch {
+        dbnum: i32,
+        actual: i32,
+        file: PathBuf,
     },
 
     Session {
@@ -154,9 +171,21 @@ pub enum DirectStoreError {
 impl std::fmt::Display for DirectStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::UnresolvedRef0 { ref0, refno } => {
-                write!(f, "ref0 {ref0} 反查不到 dbnum，{refno} 未解析")
+            Self::InvalidRefNo { refno } => {
+                write!(f, "{refno} 不是合法 RefNo（word1 为负或解出 dbnum 0），无库可读")
             }
+            Self::DbNotInMdb { dbnum, refno } => {
+                write!(f, "{refno} 解出 dbnum {dbnum}，但它不在当前 MDB 也不在依赖目录里")
+            }
+            Self::DbNumberMismatch {
+                dbnum,
+                actual,
+                file,
+            } => write!(
+                f,
+                "要开 dbnum {dbnum}，文件 {} 自报 dbnum {actual}：不是同一个库",
+                file.display()
+            ),
             Self::Session { dbnum, detail } => write!(f, "dbnum {dbnum}：{detail}"),
             Self::NoSuchElement {
                 refno,
@@ -609,22 +638,29 @@ impl DirectStore {
         self.attrs.len()
     }
 
-    /// `ref0` → dbnum，走定位器反查。**不是** `RefU64::get_0()`。
+    /// refno → dbnum：**位解码**（`refno_route::refno_dbnum`，与 core.dll `DB_Element::dbno` 同式），
+    /// 再问一句「这个库我认识吗」——钉过、或定位器有它的文件，就是认识。
+    ///
+    /// 既不是 `RefU64::get_0()`（那是 word0，带着 extent 位），也不再走 ref0 反查表：
+    /// 同一个库每个 extent 一个 word0，表是为一个不存在的歧义建的（切片计划 §0.2）。
+    /// 解不出 → [`DirectStoreError::InvalidRefNo`]；解出了但谁都不认识 →
+    /// [`DirectStoreError::DbNotInMdb`]，不凑一个看着像真的。
     pub fn dbnum_of(&self, refno: RefU64) -> Result<i32, DirectStoreError> {
-        let ref0 = refno.get_0();
-        match self.locator.resolve_ref0(ref0) {
-            Ok(Some(dbnum)) => Ok(dbnum as i32),
-            Ok(None) => Err(DirectStoreError::UnresolvedRef0 {
-                ref0,
-                refno: refno.to_string(),
-            }),
-            // 归属歧义（同一个 ref0 落在多个库）在定位器那里就是错误，这里照样上浮：
-            // 挑一个「看着像的」库读出来的属性，比读不出来更难查。
-            Err(error) => Err(DirectStoreError::Session {
-                dbnum: 0,
-                detail: format!("resolving ref0 {ref0} for {refno}: {error:#}"),
-            }),
+        let dbnum = refno_dbnum(refno).ok_or_else(|| DirectStoreError::InvalidRefNo {
+            refno: refno.to_string(),
+        })?;
+        if self.knows_dbnum(dbnum) {
+            return Ok(dbnum as i32);
         }
+        Err(DirectStoreError::DbNotInMdb {
+            dbnum: dbnum as i32,
+            refno: refno.to_string(),
+        })
+    }
+
+    /// 钉过、或定位器登记得出文件——两者任一即「认识这个库」。只问目录，不开文件。
+    fn knows_dbnum(&self, dbnum: u32) -> bool {
+        self.pinned(dbnum as i32).is_some() || self.locator.file_of(dbnum).is_some()
     }
 
     /// 取一个元素的属性，库由 ref0 反查决定。**跨库引用走的就是这条。**
@@ -818,7 +854,7 @@ impl DirectStore {
             .engine
             .referrers_of(
                 e3d_attlib::db1_hash(attribute),
-                RefNo::new(target.get_0(), target.get_1()),
+                to_refno(target),
             )
             .map_err(|error| DirectStoreError::Session {
                 dbnum,
@@ -868,7 +904,7 @@ impl DirectStore {
         dbnum: i32,
         refno: RefU64,
     ) -> Result<ParsedElement, DirectStoreError> {
-        let target = RefNo::new(refno.get_0(), refno.get_1());
+        let target = to_refno(refno);
         let sesno = session.pin.sesno;
 
         let view = session
@@ -896,7 +932,7 @@ impl DirectStore {
         dbnum: i32,
         refno: RefU64,
     ) -> Result<e3d_io::record::descriptor::ElementExtraction, DirectStoreError> {
-        let target = RefNo::new(refno.get_0(), refno.get_1());
+        let target = to_refno(refno);
         let DbSession {
             engine,
             provider,
@@ -967,6 +1003,18 @@ impl DirectStore {
             ))
         })?;
 
+        // 文件自证（不变量 3）：描述符页自报的库号必须就是要开的那个。定位器把 dbnum 绑到
+        // 错的文件、或路径上的文件被换成别的库，都在这里响亮地停下——与 e3d-io
+        // `DbSet::db_slot` 的 `DbNumberMismatch` 同一条门。
+        let actual = engine.descriptor().db_mark as i32;
+        if actual != pin.dbnum {
+            return Err(DirectStoreError::DbNumberMismatch {
+                dbnum: pin.dbnum,
+                actual,
+                file: pin.file.clone(),
+            });
+        }
+
         // 冻结点。`pin.sesno` 给了就是它；没给就是**此刻**文件自报的最新，解一次之后
         // 整个 store 生命周期内不再重解——见 `DbPin::sesno` 的注释。
         let pinned_sesno = engine.session().sesno;
@@ -988,23 +1036,18 @@ impl DirectStore {
         })
     }
 
-    /// ref0 反查，反查不到给 `None` 而不是错。
+    /// 「问路」版的 [`DirectStore::dbnum_of`]：解不出、或解出的库谁都不认识，给 `None` 而不是错。
     ///
-    /// 与 [`DirectStore::dbnum_of`] 的区别是「问路」和「要读」：扫一个元素身上的引用
-    /// 属性时，指向本工程之外的引用是正常的，不该把整轮扫描打断。
+    /// 扫一个元素身上的引用属性时，指向本工程之外的引用是正常的，不该把整轮扫描打断。
+    /// `Result` 外壳是历史签名（反查表时代定位器可能报歧义），现在没有失败路径，留着不改调用方。
     pub fn locator_dbnum(&self, refno: RefU64) -> anyhow::Result<Option<i32>> {
-        Ok(self
-            .locator
-            .resolve_ref0(refno.get_0())?
-            .map(|dbnum| dbnum as i32))
+        Ok(self.dbnum_hint(refno))
     }
 
-    /// 缓存失效用的粗筛：这个 refno 的 ref0 反查得到的库。反查不出来就别动它。
+    /// 缓存失效用的粗筛：这个 refno 解出来、且认识的库。解不出或不认识就别动它。
     fn dbnum_hint(&self, refno: RefU64) -> Option<i32> {
-        self.locator
-            .resolve_ref0(refno.get_0())
-            .ok()
-            .flatten()
+        refno_dbnum(refno)
+            .filter(|dbnum| self.knows_dbnum(*dbnum))
             .map(|dbnum| dbnum as i32)
     }
 }
@@ -1109,24 +1152,70 @@ mod tests {
         DirectStore::new(schema, Arc::new(locator))
     }
 
-    /// **改成「反查不到就拿 get_0() 当 dbnum」会让这条红。**
-    /// `Ref0` 不是 `dbnum`，两者恰好相等只是巧合。
+    /// 同上，但把定位器的把手也交出来——要数它被问了几次 ref0。
+    fn store_with_counting_locator() -> (DirectStore, Arc<FakeLocator>) {
+        let schema = Arc::new(DirectSchema {
+            attlib: e3d_attlib::AttlibData::default(),
+            template_dir: PathBuf::from("nowhere"),
+            version: None,
+        });
+        let locator = Arc::new(FakeLocator {
+            ref0_to_dbnum: BTreeMap::from([(24_384, 8000)]),
+            lookups: AtomicUsize::new(0),
+        });
+        (DirectStore::new(schema, locator.clone()), locator)
+    }
+
+    fn ref0_lookups(locator: &FakeLocator) -> usize {
+        locator.lookups.load(Ordering::Relaxed)
+    }
+
+    /// **改成「拿 get_0() 当 dbnum」会让这条红。** `99999/7` 的 word0 是 99999，解码出的
+    /// dbnum 是 1695（低 13 位 0x69F；高位段为 0）——两者不等，且谁也不认识 1695。
+    /// 定位器的 ref0 反查**一次都不许被问**：那张表已经不是路由依据。
     #[test]
-    fn an_unresolvable_ref0_is_an_error_not_a_guess() {
-        let store = store_without_files();
+    fn a_valid_refno_nobody_knows_is_not_in_mdb_and_never_consults_the_ref0_table() {
+        let (store, locator) = store_with_counting_locator();
         let unknown = RefU64::from_two_nums(99_999, 7);
         let error = store.attrs(unknown).unwrap_err();
         assert!(
-            matches!(error, DirectStoreError::UnresolvedRef0 { ref0: 99_999, .. }),
+            matches!(
+                &error,
+                DirectStoreError::DbNotInMdb { dbnum: 1_695, refno } if refno == &unknown.to_string()
+            ),
             "{error}"
         );
-        assert!(!error.to_string().contains("99999_7 read from dbnum"));
+        let text = error.to_string();
+        assert!(
+            text.contains("dbnum 1695") && text.contains(&unknown.to_string()),
+            "错误要同时说出 refno 与解出的 dbnum: {text}"
+        );
+        assert_eq!(ref0_lookups(&locator), 0, "dbnum_of 不得再问 ref0 反查表");
+    }
+
+    /// 非法引用（word1 符号位置位 / 解出 dbnum 0）在解码那一步就停，报的是 `InvalidRefNo`。
+    #[test]
+    fn an_invalid_refno_is_rejected_before_any_lookup() {
+        let store = store_without_files();
+        for refno in [
+            RefU64::from_two_nums(0, 0),
+            RefU64::from_two_nums(24_384, 0x8000_0000),
+            RefU64::from_two_nums(3 << 13, 5),
+        ] {
+            let error = store.attrs(refno).unwrap_err();
+            assert!(
+                matches!(&error, DirectStoreError::InvalidRefNo { refno: text } if text == &refno.to_string()),
+                "{refno}: {error}"
+            );
+            assert_eq!(store.locator_dbnum(refno).unwrap(), None);
+        }
     }
 
     /// ADR-054：定位器**不认识**的库才是错误。**改回「没钉 pin 就报错」会让下一条红。**
     ///
-    /// 两条入口同一口径：点名库的 `attrs_in` 与靠 ref0 反查的 `attrs` 都先去定位器补 pin，
-    /// 定位器也拿不出文件时才报 `NoFileForDbnum`——不凑一个看着像真的。
+    /// 两条入口两种说法：点名库的 `attrs_in` 去定位器补 pin，拿不出文件报 `NoFileForDbnum`；
+    /// 靠 refno 解码的 `attrs` 在解出 dbnum 8000 之后先问「认识吗」，不认识就是 `DbNotInMdb`
+    /// ——`web_service` 把后者当 404「不在这个 MDB」。两条都不凑一个看着像真的。
     #[test]
     fn a_dbnum_the_locator_does_not_know_is_an_error_not_a_guess() {
         let store = store_without_files();
@@ -1140,9 +1229,47 @@ mod tests {
 
         let error = store.attrs(refno).unwrap_err();
         assert!(
-            matches!(error, DirectStoreError::NoFileForDbnum { dbnum: 8000 }),
+            matches!(error, DirectStoreError::DbNotInMdb { dbnum: 8000, .. }),
             "{error}"
         );
+        assert_eq!(store.locator_dbnum(refno).unwrap(), None, "问路也说不认识");
+    }
+
+    /// 钉过的库就是认识的库，哪怕定位器没有它的文件：解码出的 dbnum 直接命中 pin。
+    /// 同一个库的另一个 extent（word0 + 0x2000）落到同一个 pin。
+    #[test]
+    fn a_pinned_dbnum_is_known_for_every_extent_without_asking_the_locator() {
+        let (store, locator) = store_with_counting_locator();
+        store.pin(DbPin {
+            dbnum: 8000,
+            db_type: "DESI".to_string(),
+            file: PathBuf::from("no-such-file"),
+            sesno: None,
+        });
+        for word0 in [16_192u32, 24_384, 32_576] {
+            let refno = RefU64::from_two_nums(word0, 1);
+            assert_eq!(store.dbnum_of(refno).unwrap(), 8000, "word0={word0}");
+            assert_eq!(store.locator_dbnum(refno).unwrap(), Some(8000));
+        }
+        assert_eq!(ref0_lookups(&locator), 0);
+    }
+
+    /// 生产代码里不得再出现 ref0 反查：`resolve_ref0(` / `dbnum_of_ref0(` 只许活在测试里。
+    /// （切片 §5.2 源码护栏的本文件那一条，W8 汇总成独立测试文件前先在这里守着。）
+    #[test]
+    fn production_code_never_consults_the_ref0_table() {
+        let source = include_str!("direct_store.rs");
+        let production = source
+            .split_once("#[cfg(test)]\nmod tests {")
+            .expect("test module marker")
+            .0;
+        for needle in ["resolve_ref0(", "dbnum_of_ref0(", ".get_0()"] {
+            assert!(
+                !production.contains(needle),
+                "direct_store 生产代码不得包含 `{needle}`：refno → dbnum 只走 refno_route"
+            );
+        }
+        assert!(production.contains("refno_dbnum("), "解码 helper 必须是唯一入口");
     }
 
     /// ADR-054 Q1：定位器认识、却没人钉时点的库，pin 出来就是「开库那一刻的最新」
@@ -1408,3 +1535,8 @@ mod tests {
         assert!(store.pinned_sesno(8000).is_some());
     }
 }
+
+/// 真库门（手动）：跨库引用读通与文件自证，见该文件头。
+#[cfg(test)]
+#[path = "direct_store_refno_live_tests.rs"]
+mod refno_live_tests;

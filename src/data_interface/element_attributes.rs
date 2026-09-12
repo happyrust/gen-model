@@ -586,7 +586,8 @@ impl ElementAttributeService {
                 }
                 Err(
                     DirectStoreError::NoSuchElement { .. }
-                    | DirectStoreError::UnresolvedRef0 { .. },
+                    | DirectStoreError::InvalidRefNo { .. }
+                    | DirectStoreError::DbNotInMdb { .. },
                 ) => {
                     missing.entry(row.dbnum).or_default().push(id);
                 }

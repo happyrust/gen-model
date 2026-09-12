@@ -132,7 +132,8 @@ impl OnDemandDbSession {
         let att = match self.store.named_attmap(refno) {
             Ok(att) => att,
             Err(DirectStoreError::NoSuchElement { .. })
-            | Err(DirectStoreError::UnresolvedRef0 { .. }) => return Ok(None),
+            | Err(DirectStoreError::InvalidRefNo { .. })
+            | Err(DirectStoreError::DbNotInMdb { .. }) => return Ok(None),
             Err(error) => {
                 return Err(anyhow::anyhow!(
                     "e3d-io read {} from dbnum {} session {} ({}): {error}",
