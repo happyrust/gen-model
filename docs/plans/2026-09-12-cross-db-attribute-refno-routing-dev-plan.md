@@ -1,10 +1,33 @@
 # 开发计划：跨库属性改走 RefNo 原生路由（母计划阶段 1–2 + 3A 的执行切片）
 
 - 日期：2026-09-12
-- 状态：Plannotator 已批准（2026-09-12，无附注）；§8 四项拍板按推荐项执行，未实施
+- 状态：Plannotator 已批准（2026-09-12，无附注）；§8 四项拍板按推荐项执行；**§9 十五项口径已于
+  2026-09-12 与用户逐题对齐**（本文件为唯一记录，母计划同步）
+- 进度（截至 2026-09-12 13:25，分支 `refactor/retire-publish-stage`）：
+  - W1+W2 已提交 `bb16105d2`（`refno_route.rs`、`mdb_route_directory.rs`）；
+  - W3 已提交 `5cc5e3e04`（`DirectStore` 改位解码，删 `UnresolvedRef0`，加 `DbNumberMismatch`，
+    真库门 `direct_store_refno_live_*` 在 AMS `/ALL` DESI 1112 上通过）；
+  - W4+W5+W6+W8 已提交 `425ca98d8`（`dbnum_of_root` 位解码 + 目标库一次点查，删 `DBNUM_BY_REF0`；
+    属性服务与树服务的定位器改从 `MdbRouteDirectory::from_membership` 造；`tests/refno_native_guards.rs`
+    六条文本护栏）。提交树单独检出 `cargo check --lib --tests` 通过；`direct_store::tests::installed_e3d_*`
+    三条在基线 `e22023492` 上同样红（依赖另一会话未提交的 schema 选择改动），与本切片无关；
+  - **端到端已验**（2026-09-12 11:34 起，隔离副本 `D:\work\plant-code\old\_runs\ams-refno`，
+    `store_mode=spawned-rocksdb` / `19099` / `watch_dbnums=[7998,8000]`，`build_id 0.1.23+g5cc5e3e04973…dirty`
+    = HEAD `5cc5e3e04` + 工作树里的 W4–W6）：`/health` `initialization.status=model_ready`、
+    `startup.reconcile.result=ok`、design 2/2 与 meta 13/13 阶段零失败零阻断、`dbnum_consistency 2/2 in_sync`、
+    7998 `[12,12]` / 8000 `[444,444]` 数据与模型水位一致；plant-ui（服务供数，`PLANT_READ_FACE=service`）
+    连上 `ns 1516` 根层 38 个 SITE，展开 `/1RX03-EQUI` 三个 ZONE 逐个点眼按需生成并显示
+    （`/1RX03-CASE-DQ` 23/26 根、23 个网格实例，服务侧 `model-persist failed_roots=0`）；
+    整 SITE `/1RX03-EQUI`（1,978 元素）也显示成功，但 `model/ensure` 走满 120 s 回 504 后由客户端
+    后台补齐——在案，不属本切片；
+  - W0（阶段 0 收口，见 §4）(d)(e)、W7（探针对账栏）、W9（文档）未做。
 - 母计划：`docs/plans/2026-09-12-refno-native-routing-and-lazy-mdb-plan.md`（已批准；阶段 0 已落地：
   `vendor/e3d-io/tests/refno_dbno_corpus.rs`、`refno_native_stage0.rs`、`tests/refno_native_api_contract.rs`、
-  `docs/baselines/2026-09-12-jeu-refno-routing-stage0.{json,md}`）
+  `docs/baselines/2026-09-12-jeu-refno-routing-stage0.{json,md}`；阶段 0 退出门「位解码 corpus 零分歧」
+  已在本机全部 E3D 2.1/3.1 语料上实测通过，见 §10）
+- 调试 / 验收项目：**AMS**（`DbOption.toml`：E3D 3.1 `AvevaMarineSample` / MDB `ALL` / `e3d_version="e3d31"` /
+  `store_mode="spawned-mem"` / `room_membership=false` / `watch_dbnums=[7998, 8000]`）。JEU 在另一台机器上，
+  本机不可访问；母计划里 JEU 的 417 库 / 1,221,858 元素 / 68 s 只作旧成本记录，本机不得估算填充。
 - 本切片范围：把**跨库属性读取**（引用属性 `SPRE/CATR/LSTU/PSPE` 换库、`OWNER` 跨库上溯、生成根定库）
   从「ref0 全局反查表」改成「RefNo 位解码 + dbnum 目录点查」。不碰启动链懒加载（阶段 4）、
   按 dbnum 失效（阶段 5）、健康接口与旧模块删除（阶段 6）。
@@ -59,8 +82,12 @@ refno ──RefNo::dbno()──▶ dbnum ──MdbRouteDirectory::pin(dbnum)─�
 **非目标**
 - 不改 `RefNo` 位格式、不改 SYS/CURD 成员语义、不写死任何现场 dbnum。
 - 不动 `DirectTreeService` 的 WORL/根枚举（仍读骨架；那是母计划 3B/3C）；不动启动链预热顺序（阶段 4）。
+  3C 需要的「WORL 在哪」已在全语料上实测为确定位置（§10.2），3B/3C 不再需要「首次展开单库扫描」兜底，
+  但仍留给下一切片。
 - 不删 `MdbMemoryStore` 模块（阶段 6）；本切片只让**属性与根定库路径**脱离它。
 - 反向引用（谁引用了我）的跨库并集（`reverse_reference.rs` `foreign_referrers`、`cable_endpoint.rs` 196 条跨库边）不在本切片。
+- 单根生成的 `e3d_model_service::scan_index`（目标库一次 Header 全扫建 `SourceIndex.owners`）不在本切片：
+  已定为母计划**阶段 7**，独立阶段（§9 Q16，2026-09-12）。
 
 ## 2. 不变量（照母计划 §4，本切片逐条落到代码）
 
@@ -109,6 +136,30 @@ impl CataDbLocator for MdbRouteDirectory {           // 迁移期兼容壳
 - `included_projects` 的目录库（CATA/PROP/DICT）并入目录，替代 `ElementAttributeService::open` 里那段
   `InMemoryCataLocator::build_from_dir` 合并；DESI/DICT 仍按现规则忽略。
 
+**已落地形态（`bb16105d2`，与上面草稿的差别）**
+
+- 构造：`from_membership(&MdbMembership, template_dir)` / `from_databases(project, mdb, &[MdbDatabase], template_dir)`；
+  `add_dependency_dir(project, root_dir) -> DependencyScan` 并入依赖项目的 `DEPENDENCY_ROUTE_TYPES = [CATA, PROP]`
+  （比旧 `merge_cata_files` 多收 PROP）；`register_project_file` 登记同号跨项目候选。
+- 查询：`route_refno / route_refu64 / route_dbno -> &DbRoute`；`pin(dbnum)` = `pin_for(dbnum, None)`；
+  **`pin_for(dbnum, preferred_project)`** 就是 §9 Q11 定的「目标库上下文」入口——同类型副本核头通过才用，
+  否则回落 MDB 声明文件并 warn。`E3dDbResolver` 与 `current_mdb_source_inventory()` 尚未改为从目录派生（W5/W6 之后收敛）。
+- `DbRoute { dbnum, db_type, project, path, shadowed, origin: Mdb | Dependency }`；`shadowed` 只记不选（§9 Q12）。
+- `RouteError` 六类：`InvalidRefNo / DbNotInMdb / NoFileForDbnum / TemplateMissing / HeaderUnreadable / HeaderMismatch`，
+  「声明了没文件」与「根本没声明」分开报。
+- `verify_all_headers()` 给启动复核 / 真库门；`stats() -> RouteDirectoryStats { routes, mdb_routes, dependency_routes,
+  element_routes, declared_without_file, project_candidates, problems }` 给日志与将来 `/health.core`。
+- `impl DbFileResolver`（miss → `None`，debug 级日志）；`impl CataDbLocator`（`dbnum_of_ref0` 恒 `None`）。
+- `curd_order` 保 CURD 原序：`element_databases()` 按它出，树首页与增量排工都要这个序。
+
+**阶段 5 前置字段（本切片未做，接口先定，§9 Q13）**
+
+每个 dbnum 一份 `DbGeneration { generation: u64, identity: FileIdentity(len, mtime), latest_sesno: u32 }`：
+`identity` 或 `latest_sesno` 任一变化则 `generation += 1`，并标出变化类型——`sesno` 变大 = 会话前进、变小 = 回滚、
+身份变但 `sesno` 不变 = 换文件。这是母计划不变量 7「换文件、回滚、session 前进必须能区分」的落点，
+`refresh_path(path) -> RouteRefresh { dbnum, from, to, kind }` 在阶段 5 加；`/health.core` 的 `route_directory.generation`
+（§7 风险 2）以它为源。
+
 ### 3.2 共享解码 helper
 
 `src/data_interface/refno_route.rs`（或放进 `mdb_route_directory.rs`）：
@@ -137,17 +188,21 @@ pub fn refno_dbnum(refno: RefU64) -> Option<u32> {
 
 ```rust
 pub fn dbnum_of_root(root: RefNo) -> anyhow::Result<u32> {
-    anyhow::ensure!(root.is_valid(), "生成根 {root} 不是合法 RefNo");
+    anyhow::ensure!(root.is_valid(), "生成根 {root} 不是合法 RefNo");            // InvalidRefNo
     let dbnum = root.dbno();
     let (pins, _) = current_mdb_sources()?;
     let pin = pins.iter().find(|p| p.dbnum == dbnum as i32 && matches!(p.db_type.as_str(), "DESI" | "ISOD"))
-        .with_context(|| format!("生成根 {root} 解出 dbnum {dbnum}，不在当前 MDB 的 DESI/ISOD 库里"))?;
-    // 可选：只在目标库点查一次，区分「编号合法但元素不存在」
+        .with_context(|| format!("生成根 {root} 解出 dbnum {dbnum}，不在当前 MDB 的 DESI/ISOD 库里"))?; // DbNotInMdb
+    // 已定（§9 Q5）：只在目标库点查一次，区分「编号合法但元素不存在」——1 次开库 + 1 次 B+tree 点查，
+    // 后面生成很快也要开它，几乎免费；换来「历史 gen_root 行指向已删元素」能一句说清。
+    anyhow::ensure!(element_exists_in(pin, root)?, "生成根 {root} 在 DESI/ISOD {dbnum} 的当前会话里不存在"); // ElementMissing
     Ok(dbnum)
 }
 ```
 
-删除 `DBNUM_BY_REF0`。是否保留 `element_exists` 点查由评审拍板（见 §8 Q2）。
+删除 `DBNUM_BY_REF0`。三类错误分开：`InvalidRefNo` / `DbNotInMdb` / `ElementMissing`。类型集合放宽到 **DESI + ISOD**
+（与 baseline 的 417 口径一致），`mdb_design_dbnums()` 同步放宽——它是启动复核「哪些库没有凭证」的分母，改了要看
+`/health.startup.reconcile` 的回归。`root_source_version()` 的调用方（启动复核、增量排工）里若有按错误文本匹配的，W4 一并改。
 
 ### 3.5 `ElementAttributeService::open`
 
@@ -156,7 +211,9 @@ pub fn dbnum_of_root(root: RefNo) -> anyhow::Result<u32> {
 - `catalog`：从 `UdaCatalog::from_dictionaries(membership.dictionary_paths(), &schema)` 取（母计划 5.2 `UdaCatalogProvider` 的最小形态；
   若现有 `skeleton.uda_catalog()` 的构造逻辑不能直接复用，本切片先抽一个只读 DICT 的构造函数，不做缓存/失效）。
 - `is_current()`：不再比骨架指纹，只比 `membership_fingerprint`（DICT 文件身份纳入指纹）。
-- `snapshot_epoch`：来源改为 `membership` 的文件指纹哈希；`/health.core.skeleton_elements` 字段**保留**并标 deprecated（母计划 §10 Q2）。
+- `snapshot_epoch`：来源改为 `membership` 的文件指纹哈希；`/health.core.skeleton_elements` 在**本切片**仍有值
+  （树服务还持骨架），但最终口径已定为**阶段 6 直接删、不留 deprecated 版**（§9 Q3：plant-ui 与 plant3d-web 都不读它，
+  唯一"消费者"是 `tests/refno_native_api_contract.rs` 的冻结清单——阶段 6 改路由时同步改那条测试，别把它当回归）。
 
 ### 3.6 `DirectTreeService::open`
 
@@ -170,19 +227,30 @@ pub fn dbnum_of_root(root: RefNo) -> anyhow::Result<u32> {
 
 ## 4. 工作项与顺序
 
-| # | 工作项 | 文件 | 验收 |
-|---|---|---|---|
-| W1 | 抽 `refno_dbnum()` helper + 单测 | `refno_route.rs`（新） | `24572/115 → 8188`；primary/secondary extent 同 dbnum；`251000`；非法/空 → `None` |
-| W2 | `MdbRouteDirectory` + `DbFileResolver`/`CataDbLocator` 实现 + 单测 | `mdb_route_directory.rs`（新）、`e3d_model_service.rs`（抽共享构建） | 用 `MdbMembership` 夹具：dbnum 在/不在 MDB、文件头 dbnum 不符、同号跨项目按 `preferred_project` 选、DICT/CATA 依赖并入 |
-| W3 | `DirectStore` 换路由与错误变体 | `direct_store.rs` | 现有 `direct_store::tests` 全绿；新增「双库夹具跨库引用读通」「解码 dbnum 不在目录报 `DbNotInMdb`」「文件自报不符报 `DbNumberMismatch`」 |
-| W4 | `model_source::dbnum_of_root` 改解码；删 `DBNUM_BY_REF0` | `model_source.rs` | 单测：合法根→dbnum 不开任何库；不在 MDB 报错含 dbnum；源码护栏 |
-| W5 | `ElementAttributeService` 脱离骨架 | `element_attributes.rs` | `read()` 对拍不变（direct attribute/UDA parity）；`open()` 期间 `scan_elements` 计数 = 0 |
-| W6 | `DirectTreeService` locator 换源 | `direct_tree.rs` | direct tree TTY 对拍逐字相同 |
-| W7 | 探针补对账栏 | `bin/direct_attmap_probe.rs` | ams8000 `--owner-climb`：`decoded == descriptor` 100%；`cross_db_refs` 计数与改前相同 |
-| W8 | 源码护栏测试 | `tests/refno_native_guards.rs`（新） | 见 §5.2 |
-| W9 | 文档 | `CONTEXT.md`（跨库属性词条）、母计划状态、`docs/evidence/2026-09-12-ida-core-dabacon-refno-routing.md` | 证据文件记录 §0.1 全部地址与反编译片段 |
+| # | 状态 | 工作项 | 文件 | 验收 |
+|---|---|---|---|---|
+| W0 | **(a)(b)(c) 已做**（2026-09-12，未提交）；(d)(e) 未做 | **阶段 0 收口**（§9 Q1/Q4/Q8）：(a) 修 `vendor/e3d-io/tests/refno_dbno_corpus.rs::looks_like_primary_database` 的 `split_at(3)` 字节切崩溃（中文文件名 → `end byte index 3 is not a char boundary`），加 `!name.is_ascii()` 直接返回 `false`；(b) 语料根改读环境变量 `E3D_CORPUS_ROOTS`（`;` 分隔），未设置则 skip 而非 `#[ignore]`；(c) 把 §10.1 的 1,947 库 / 38,891,013 元素 / 0 分歧写进 `docs/baselines/2026-09-12-jeu-refno-routing-stage0.md`，JEU 三项 `null` 标「现场不可达」；(d) 采一份 **AMS 3.1 基线** `docs/baselines/2026-09-12-ams-refno-routing-stage0.json`（同 schema：现版启动 `mdb_memory_store::ensure` 的 `read_stats` 差值 `database_opens / scan_calls / scanned_elements`、骨架耗时、RSS 前后、首属性、首根；首属性/首根取 DESI 8000 里 `scripts/e3d/db8000_bran_probe.mac` 用的那个 BRAN）；(e) `tests/refno_native_api_contract.rs` 里 `skeleton_elements` 一行加注「阶段 6 删」 | `vendor/e3d-io/tests/refno_dbno_corpus.rs`、`docs/baselines/*`、`tests/refno_native_api_contract.rs` | 全语料门 `cargo test --test refno_dbno_corpus -- --include-ignored` 在本机跑通且 0 分歧；AMS JSON 无 `null` |
+| W1 | **已提交 `bb16105d2`** | 抽 `refno_dbnum()` helper + 单测 | `refno_route.rs`（新） | `24572/115 → 8188`；primary/secondary extent 同 dbnum；`251000`；非法/空 → `None`；全 18 位 dbnum 往返 |
+| W2 | **已提交 `bb16105d2`** | `MdbRouteDirectory` + `DbFileResolver`/`CataDbLocator` 实现 + 单测 | `mdb_route_directory.rs`（新）；`e3d_model_service.rs` 的共享构建**尚未抽**（留到 W5/W6 后收敛） | 用 `MdbMembership` 夹具：dbnum 在/不在 MDB、文件头 dbnum 不符、同号跨项目按 `preferred_project` 选、DICT/CATA 依赖并入；真库门 `live_directory_matches_every_file_header` |
+| W3 | **已提交 `5cc5e3e04`** | `DirectStore` 换路由与错误变体 | `direct_store.rs`、`direct_store_refno_live_tests.rs`（新）、`web_service/mod.rs`、`on_demand_db.rs`、`element_attributes.rs`（missing 判定） | `direct_store::tests` 全绿；新增「解码 dbnum 不在目录报 `DbNotInMdb`」「非法 refno 报 `InvalidRefNo`」「N+1 钉到 N 的文件报 `DbNumberMismatch`」；真库门：AMS `/ALL` DESI 1112 扫 2,132 元素、25 条跨库引用按解码换库读通（CATA 7001，仅开 2 个会话）；本文件源码护栏 `production_code_never_consults_the_ref0_table` |
+| W4 | **已提交 `425ca98d8`** | `model_source::dbnum_of_root` 改解码 + 目标库一次 `find_element` 点查；删 `DBNUM_BY_REF0`；类型集 DESI+ISOD（`mdb_design_dbnums()` 分母**未**放宽——它是启动复核「哪些库没有凭证」的分母，改动要看 `/health.startup.reconcile` 回归，留待 3B） | `model_source.rs` | 单测：非法根在解码那一步就停（三种非法形状）；文件内源码护栏：无 `DBNUM_BY_REF0`、函数体无 `for pin in`、恰一次 `ReadOnlyEngine::open(`。三类错误文案：「不是合法 RefNo」/「不在当前 MDB 的成员清单里」/「索引里没有它」（anyhow 文本，未做成枚举；`read_stats` 计数断言留 W8 行为断言那一档） |
+| W5 | **已提交 `425ca98d8`** | `ElementAttributeService` 脱离骨架：`MdbRouteDirectory::from_membership` + `add_dependency_dir`（CATA / PROP 只读文件头），`is_current` / `snapshot_epoch` 只看成员文件指纹，UDA 字典 `load_uda_catalog` 直接读 DICT | `element_attributes.rs` | 真库：AMS `/ALL` 上 plant-ui 选中 SITE / ZONE 属性面板正常（通用 + 元素属性 + UDA）；`open()` 期间 `scan_elements == 0` 的计数器断言未加（W8 行为断言那一档，见 §5.2） |
+| W6 | **已提交 `425ca98d8`** | `DirectTreeService` locator 换源（`ensure()` 仍在：WORL 枚举与 noun / owner 查询，3B / 3C） | `direct_tree.rs` | 真库：根层 38 个 SITE、展开 `/1RX03-EQUI` 三个 ZONE 正常；direct tree TTY 对拍未重跑 |
+| W7 | 未做 | 探针补对账栏 | `bin/direct_attmap_probe.rs` | ams8000 `--owner-climb`：`decoded == descriptor` 100%；`cross_db_refs` 计数与改前相同 |
+| W8 | **已提交 `425ca98d8`**（文本护栏那一半） | 源码护栏测试 | `tests/refno_native_guards.rs`（新） | 六条文本护栏全绿（CRLF 检出下同样成立）；§5.2 的 `read_stats` 行为断言（合成多库夹具）未做 |
+| W9 | 未做 | 文档 | `CONTEXT.md`（跨库属性词条）、母计划状态、`docs/evidence/2026-09-12-ida-core-dabacon-refno-routing.md` | 证据文件记录 §0.1 全部地址与反编译片段 |
 
-W1→W2→W3 串行；W4 可与 W3 并行；W5/W6 依赖 W2+W3；W7/W8 最后。
+顺序（§9 Q1 定：**2A 前置**）：W0 → **W4** → W5/W6（依赖已提交的 W2+W3）→ W7/W8 → W9。W4 不依赖 W2：它只用
+`root.dbno()` + 现有 `source_file_lookup()`，目录派生留到收敛 `current_mdb_source_inventory()` 时一起换。
+W1–W3 已由并行会话提交，本表按提交号对账，不重做。
+
+W0-a/b 的实际落法：全语料门去掉 `#[ignore]`，语料根读 `E3D_CORPUS_ROOTS`（`;` 分隔，`std::env::split_paths`），未设置则打印
+skip 并返回；本机 `E3D_CORPUS_ROOTS="D:\AVEVA\Projects\E3D2.1;D:\AVEVA\Projects\E3D3.1" cargo test --release --test refno_dbno_corpus`
+→ 1,947 库 / 38,891,013 元素 / 0 分歧，38 s。W0-c 写进 `docs/baselines/2026-09-12-jeu-refno-routing-stage0.md`
+（新增「位解码 corpus 门」「WORL 位置」两节，判定段改为退出标准已过）。
+
+**下一切片**：`docs/plans/2026-09-12-lazy-startup-dev-plan.md`（母计划阶段 4，兼并 3B/3C 与阶段 5 最小形态），
+依赖本切片 W4–W6 合入。
 
 ## 5. 测试
 
@@ -193,20 +261,38 @@ W1→W2→W3 串行；W4 可与 W3 并行；W5/W6 依赖 W2+W3；W7/W8 最后。
 - 冻结语义回归：`pinned_sesno` 在两次读之间不变；文件替换后 `verify_file_identity` 仍报 `FileReplaced`。
 
 ### 5.2 源码护栏（`tests/refno_native_guards.rs`，`include_str!` 扫源）
-- `direct_store.rs` 不含 `resolve_ref0(`、`dbnum_of_ref0(`。
-- `model_source.rs` 不含 `DBNUM_BY_REF0`，`dbnum_of_root` 函数体不含 `for pin in` / `find_element(`（若 Q2 决定保留单库点查，则允许一次 `element_exists(`）。
+
+形态按 §9 Q14：沿用仓内 `include_str!` 文本护栏（`lib.rs` 切 `run_cli(` 段落、`mdb_membership.rs` 断言生产区无 `8188`
+的既有写法），**加** `e3d_io::read_stats` 计数器行为断言。文本护栏粗，但「有人把 `ensure()` 加回启动」这类回归在
+`cargo test` 里就红，不用真启动。
+
+- `direct_store.rs` 不含 `resolve_ref0(`、`dbnum_of_ref0(`、`.get_0()`（W3 已在文件内自带 `production_code_never_consults_the_ref0_table`，W8 只把它挪进公共护栏文件或保留双份）。
+- `model_source.rs` 不含 `DBNUM_BY_REF0`，`dbnum_of_root` 函数体不含 `for pin in` / `find_element(` / `ReadOnlyEngine::open(`；允许恰好一次 `element_exists(`（Q5 已定保留点查）。
 - `element_attributes.rs` 不含 `mdb_memory_store::ensure(`。
 - 生产源码不含字面 `8188`（测试与基线文件除外）。
-- `DirectStoreError::UnresolvedRef0` 不再存在。
+- `DirectStoreError::UnresolvedRef0` 不再存在（W3 已删）。
+- 行为断言（合成多库夹具，复用 `refno_native_stage0.rs` 的写法）：属性服务 `open()` 期间 `scan_calls == 0`；定一个根 `database_opens ≤ 1 + 依赖数`；单属性读取 `scan_calls == 0`。
+- 阶段 4 到来时再加：`run_cli(` / `run_read_through_core(` / `serve(` 段落不含 `mdb_memory_store::ensure(`、`scan_elements(`；`serve(` 里 `.get().await` 不得出现在 `Router::new()` 之前。本切片不加，避免先红。
 
 ### 5.3 现有回归（必须全绿）
 `web_service::tests`、direct tree TTY 对拍、direct attribute/UDA parity、model generation root parity、CATA dependency closure、
 MDB Global resolver、E3D 2.1 与 3.1 schema pack、`tests/refno_native_api_contract.rs`。
 
 ### 5.4 真库（手动，记入 `docs/2026-08-12_live-test-ledger.md`）
+
+一律在 **AMS 3.1**（当前 `DbOption.toml`）上跑（§9 Q9）；2.1 的 AMS 端到端留到阶段 4 收尾补一次——路由改的是
+RefNo → dbnum → 文件，与 schema pack 无关，2.1/3.1 的差异在属性解码，那块已有 parity 测试。JEU 不可达，
+下面原 JEU 项全部改写为 AMS 口径；JEU 只在拿到现场机器时按母计划 §7.4 补采。
+
 - ams8000：`direct_attmap_probe --owner-climb --nouns EQUI,BRAN,GENSEC`，对账栏 100% 相等；跨库引用换库成功数不低于改前。
-- JEU 离线：`/api/v1/attributes/24572/115` 与 TTY 相同；日志里打开的库数 = 1 + 实际依赖数；不出现「DESI 骨架 N 个元素」于属性服务构造期
+- ams `/ALL` 属性：任取 DESI 8000 一个 BRAN 的 `/api/v1/element/attributes`，与 E3D TTY 相同；`read_stats` 差值里
+  `database_opens = 1 + 实际依赖数`、`scan_calls = 0`；属性服务构造期不出现「DESI 骨架 N 个元素」
   （树服务仍会打印——在案，3B）。
+- 单库 SAVEWORK 只刷对应 dbnum（阶段 5 的门，夹具现在就定，§9 Q10）：用现成的
+  `scripts/e3d/db8000_bran_ftub_move_apply.mac` / `..._restore.mac`（apply + restore 业务净变化为空），
+  验 8000 刷新、7998 的 pin/cache generation 不动（两者都在 `watch_dbnums`）；阶段 5 给 `/health` 加
+  「最近定向刷新」字段后即可断言。
+- 树首页（3B/3C 到来时）：每库 1 次开库 + 1 次 WORL 点查 + 1 次成员表，`scan_calls == 0`；WORL 位置见 §10.2。
 
 ## 6. 发布与回滚
 
@@ -222,10 +308,103 @@ MDB Global resolver、E3D 2.1 与 3.1 schema pack、`tests/refno_native_api_cont
   这正是阶段 5 要解决的按 dbnum 失效；本切片在 `/health` 里同时暴露 `route_directory.generation`，前端先不依赖。
 - **DICT 变更**：属性服务的 UDA catalog 不再随骨架刷新；本切片让 `is_current()` 把 DICT 文件身份算进指纹，变了就重建服务（粗粒度但不静默）。
 
-## 8. 需要评审拍板
+## 8. 评审拍板（已按推荐项执行）
 
-1. `MdbRouteDirectory` 是否同时实现 `CataDbLocator` 兼容壳（推荐：是，`dbnum_of_ref0` 恒 `None`，让 `DirectStore::new` 签名本切片不动）；
-   还是直接把 `DirectStore` 改成持 `Arc<dyn DbFileResolver>`（改动面更大，牵动 7 处构造）。
-2. `dbnum_of_root` 是否保留一次目标库 `element_exists` 点查以区分「编号合法但元素不存在」（推荐：保留，代价是开一库一次点查）。
-3. `ElementAttributeService` 的 UDA catalog 本切片是「只读 DICT 构造、不缓存」还是直接做成母计划 5.2 的 `UdaCatalogProvider`（推荐：前者，provider 留给阶段 5）。
-4. `snapshot_epoch` 改源是否可接受，或本切片先保持从骨架取（意味着属性服务仍要 `mdb_memory_store::get()` 但不 `ensure()`）。
+1. `MdbRouteDirectory` 同时实现 `CataDbLocator` 兼容壳，`dbnum_of_ref0` 恒 `None`，`DirectStore::new` 签名本切片不动 —— **已落地**（`bb16105d2`）。
+2. `dbnum_of_root` 保留一次目标库 `element_exists` 点查 —— **已定**（§9 Q5，另加类型集 DESI+ISOD）。
+3. UDA catalog 本切片「只读 DICT 构造、不缓存」，`UdaCatalogProvider` 留给阶段 5 —— **按推荐**。
+4. `snapshot_epoch` 改源为 membership 指纹哈希，同时暴露 `route_directory.generation` —— **按推荐**；generation 的定义见 §3.1 末段。
+
+## 9. 口径记录（2026-09-12，与用户逐题对齐；十五题全按推荐项）
+
+编号沿用对齐时的问法，后续文档与提交信息引用 `§9 Qn` 即可。
+
+| # | 问题 | 定论 |
+|---|---|---|
+| Q1 | 下一切片到哪 | 阶段 0 收口（W0）+ **阶段 2A 前置**（W4），阶段 1 的目录收敛（`current_mdb_source_inventory` / `E3dDbResolver` 派生）再下一片 |
+| Q2 | 在哪棵树做 | 就在 `refactor/retire-publish-stage` 当前工作树；先把另外三条无关流水各自提交（见 §11），不开新 worktree——e3d-io 是共享 path 依赖，worktree 隔离对它是假的 |
+| Q3 | `skeleton_elements` | 阶段 6 **直接删**，不留 deprecated 版；同步改 `refno_native_api_contract.rs` |
+| Q4 | 全语料门 | 修 `split_at` 崩溃 + `E3D_CORPUS_ROOTS` 环境变量 + 把 §10.1 结果写进 baseline |
+| Q5 | 2A 语义 | 目录 + 目标库一次 `element_exists`；类型集 DESI+ISOD；三类错误 `InvalidRefNo / DbNotInMdb / ElementMissing` |
+| Q6 | 谁做 | 单会话做到阶段 2 结束；阶段 3 起（树 / 属性两服务分属不同文件）再考虑分组 |
+| Q7 | JEU 三项 null | 不阻塞；JEU 本机不可达，只能现场补采 |
+| Q8 | AMS 基线 | 采一份 AMS 3.1 阶段 0 基线（W0-d），否则「改前多慢」在 AMS 上没有数 |
+| Q9 | 验收版本 | 只跑 3.1；2.1 在阶段 4 收尾补一次 |
+| Q10 | SAVEWORK 夹具 | `db8000_bran_ftub_move_apply/restore.mac`，验 8000 刷、7998 不动 |
+| Q11 | 目录边界 | 目录带「目标库上下文」：`pin_for(dbnum, preferred_project)`（已落地），后续给 `resolver_for(target_dbnum)` 视图，`E3dDbResolver` 变壳或删；`SysMetadataResolver` 独立不并（它在 membership 之前） |
+| Q12 | MDB 内同号 | MDB 声明路径胜出，`shadowed` 只记不选、只作依赖候选；真歧义（同目录两文件自报同 dbnum）已由 `initialization_phase` blocker 与 `SysMetadataResolver` 的拒绝覆盖 |
+| Q13 | generation | 每 dbnum 单调 `u64`，存 `(FileIdentity, latest_sesno)`，任一变化 +1 并标类型（前进 / 回滚 / 换文件）；阶段 1 定接口，阶段 5 实现 |
+| Q14 | 护栏形态 | `include_str!` 文本护栏 + `read_stats` 计数器行为断言，两者都要 |
+| Q15 | 提交拆法 | 按 hunk 拆：e3d-io 两笔、gen-model 四笔（三条无关流水 + 阶段 0）；提交前先贴 file→commit map；提交信息沿仓内惯例但**省略 t-编号**，只引 ADR / plan 路径 |
+| Q16 | 单根生成的 `scan_index` 单库全扫 | **已定（2026-09-12）**：记为母计划**阶段 7**，独立阶段，不入本片也不入阶段 4 切片 |
+
+## 10. 实测记录（2026-09-12，本机，仓外临时工程，已删）
+
+### 10.1 阶段 0 退出门：位解码 corpus 零分歧
+
+仓内 `refno_dbno_corpus.rs` 的全语料门因 `split_at(3)` 在中文文件名上 panic，从未在本机跑通（W0-a 修）。用同一逻辑
+（修掉崩溃）在 `D:\AVEVA\Projects\E3D2.1` 与 `E3D3.1` 全部主库文件上重跑：
+
+| 语料 | 主库文件 | 元素（Header 扫） | `refno.dbno() != descriptor.db_mark` | 最大 dbno |
+|---|---|---|---|---|
+| E3D 2.1 | 883 | 16,154,107 | 0 | 251,453 |
+| E3D 3.1 | 1,064 | 22,736,906 | 0 | 251,712 |
+| 合计 | 1,947 | 38,891,013 | **0** | — |
+
+母计划阶段 0 的退出标准成立；三个真实样本文件的非 ignore 门（375,392 元素）与 `refno_native_stage0.rs`、
+`refno_native_api_contract.rs`（4 条）本机全绿。
+
+### 10.2 3C spike：WORL 位置确定，不需要单库扫描兜底
+
+同一 1,947 个库上统计每库 WORL（`noun_hash == db1_hash("WORL")`）与无主根：
+
+- 每库**恰好一个** WORL，owner 全为 0；
+- 全部 1,905 个非 SYS/COMM/MISC 库（DESI/CATA/DICT/PADD/ISOD…）WORL == `RefNo(descriptor.primary_extent_ref, 0)`，
+  即 `(dbno | 0x2000) / 0`，**0 例外**，`find_element` 一次点查命中；
+- 例外只有项目管理库：COMM(8190) `16382/1`、MISC(8189) `16381/1`、SYST(8191) `24575/3`（extent 2）——都不是 CURD 元素库；
+- 每库另有恰好 1 个无主的 `MNUM` 系统元素（noun_hash 803020），不是 WORL；`DirectTreeService::roots()` 只取 WORL 成员所以不受影响，
+  `scan_index().roots` 里它会出现但 `enumerate_generation_roots` 对它产 0 根，现状已如此。
+
+与 IDA `DB_DB::getWorld` 口径一致。结论：3B/3C 的树首页 = 每库 1 次开库 + 1 次 WORL 点查 + 1 次成员表读，
+`by_noun` 表的唯一消费者（`roots()` 的 `refnos_of_noun(dbnum, "WORL")`）可以零扫描替代；母计划 3C 里
+「若格式库暂时无法复现原生索引，只允许首次展开该 dbnum 时扫描该单库」这条兜底不再需要。已记入共享记忆 mem-532。
+
+### 10.3 骨架消费者对账（回答「改完能不能不全库扫描」）
+
+**能。** `MdbMemoryStore` 每个消费者的替代与扫描成本：
+
+| 骨架字段 | 消费者 | 替代 | 元素扫描 |
+|---|---|---|---|
+| `affiliations: ref0→dbnum` | `dbnum_of/dbnum_of_ref0`（direct_tree.rs）；`locator_parts()`→`InMemoryCataLocator`（direct_tree.rs、element_attributes.rs）；`ref0s_of`→`/dbnums.ref0s`（handlers.rs） | `RefNo::dbno()`；`ref0s` = e3d-io `FileInfo::extent_refs(descriptor)`（page 0 + page 1） | 0 |
+| `elements: refno→(noun, owner)` | `contains`（direct_tree.rs；lib.rs 2 s 循环判删根）；`ancestors/owner_of`；`noun_hash_of` | `DbSet::element_exists` 点查；`DbElement::owner()` 逐级跨库；noun 从记录头 | 0（链长 × 点查） |
+| `by_noun` | `roots()` 找 WORL | §10.2 确定位置 | 0 |
+| `uda_catalog` | element_attributes.rs、read_through.rs | 只读 DICT 构造（阶段 5 变 `UdaCatalogProvider`） | 0 |
+| `session_fingerprint/is_current` | `/health` `snapshot_epoch/session_vector`；两个 provider 的新鲜度 | 目录 per-dbnum generation（只读文件头） | 0 |
+| `describe/stats` | 启动横幅、`skeleton_elements` | `RouteDirectoryStats` | 0 |
+| 整份 snapshot | `bootstrap_read_through_rooms`（仅 `room_membership=true`） | 按库流式 `scan_index`，母计划允许的显式全量 | 默认 false 不触发 |
+
+替代后仍存在的扫描只有两处，都是**单库**：(1) `search_names` → `DirectStore::indexes(dbnum)` 的 `scan_elements(Full)`，
+母计划已定为显式后台索引任务；(2) 单根 `/model/ensure` → `generation_input()` → `scan_index(&pin.file, sesno)`
+（e3d_model_service.rs）对目标库一次 Header 全扫建 `SourceIndex{roots, owners}`，整库 owner 表随 `GeneratedSnapshot`
+进 publication，按 `(dbnum, sesno, identity)` 缓存；kv-mem 的 `model_dbnum_ensure` 也走它。它不违反母计划的门
+（「单根不打开全部 DESI」），但违反不变量 6 的字面（成本 ∝ 触达元素）。改法：publication 的 owner 从生成时已解析的
+元素记录头取，`roots` 只在整库 ensure 时才要——见 §9 Q16。
+
+启动链（`room_membership=false`）删掉 `run_cli` / `run_read_through_core` 的 `ensure()` 与 `serve()` bind 前的
+`element_attributes.get()` 后，只剩 SYS/CURD 解析（按 NAME 精确查 MDB；`mdb_membership.rs` 那次 SYS `scan_elements(Named)`
+**只在 `mdb_name` 拼错的错误路径**上跑）+ DICT UDA 目录 + 文件头读取：DESI 元素扫描 = 0，`read_stats.scan_calls` 可断言。
+
+## 11. 工作树与提交拆分（§9 Q2 / Q15）
+
+截至 2026-09-12 11:15，工作树 66 项未提交，混着四条流水；gen-model 的未提交代码依赖 e3d-io **未提交**的
+`database_header_diagnostics`（HEAD 里没有），所以 e3d-io 先提交、gen-model 后提交。按 hunk 拆，提交前贴出 map：
+
+| 流水 | e3d-io | gen-model | 备注 |
+|---|---|---|---|
+| A. E3D schema 版本选择 / 版本证据 / SysMetadataResolver / dabacon 汇总 | `schema.rs`、`meta/*`、`session/mod.rs`（DAB tag）、`engine.rs` 中 `DatabaseHeaderDiagnostics` 段、`db_element.rs`（GLOB→`glbvir.dat`）、`lib.rs` 导出、`dabacon_tags.rs`、`bin/e3d-descriptor.rs`、`tests/header_diagnostics_real.rs`、`tests/project_dabacon_tags.rs`、`examples/probe_world.rs`、`docs/evidence/2026-09-11-*`、`CHANGELOG.md` | `direct_store.rs`（`DEFAULT_E3D_VERSION` 段）、`mdb_membership.rs`（`SysMetadataResolver` + 版本证据）、`options.rs`、`increment_manager.rs`（部分）、`dabacon_tag_summary.rs`、`handlers.rs`（`dabacon_tags`）、`setup.rs` / `web/setup.html` / `web/ops.html`、`DbOption*.toml`、`templates/DbOption.factory.toml` | `engine.rs`、`handlers.rs`、`increment_manager.rs` 需 `add -p` |
+| B. kv-mem 房间启动与发布（plan 2026-09-11） | — | `model_dbnum_ensure.rs`、`task_registry.rs`、`model_memory_store.rs`、`model_db_adapter.rs`、`e3d_model_service.rs`、`model_refresh.rs`、`model_read_route.rs`、`room_model.rs`、`e3d_mesh_store.rs`、`initialization_phase.rs`、`lib.rs` / `main.rs`（部分）、`Run-KvMemRoomBootstrap.ps1`、`docs/plans/2026-09-11-kv-mem-*.md`、ADR-073 | `lib.rs`、`main.rs` 需 `add -p` |
+| C. aios-patch / build_info / 0.1.22 发布 | — | `tools/aios-patch/*`、`build.rs`、`build_info.rs`、`New-LocalRelease.ps1`、`New-/Install-AiosDatabasePatch.ps1`、`start-local-release.ps1`、`docs/release-notes/0.1.22.md`、`0.1.23.md`、ADR-068/069、`Cargo.toml` / `Cargo.lock`、`docs/specs/web-service-api.md`（部分） | `Cargo.toml` 若含 B 的依赖变更要核 |
+| D. 本计划阶段 0 + 3C 封装 + 阶段 5 账本 | `read_stats.rs`、`refno.rs`、`engine.rs` 中四个 `note_*` 打点与 `world()`、`meta/descriptor.rs` 的 `world_refno()`、`error.rs` 的 `NotAWorld`、`record/mod.rs` 的 `ElementRecordView::header()`、`tests/refno_dbno_corpus.rs`、`tests/refno_native_stage0.rs`、`tests/world_refno_synthetic.rs`、`tests/world_refno_corpus.rs` | `tests/refno_native_api_contract.rs`、`docs/baselines/2026-09-12-*`、`docs/plans/2026-09-12-refno-native-routing-and-lazy-mdb-plan.md`、`docs/plans/2026-09-12-lazy-startup-dev-plan.md`、本文件、`src/data_interface/db_generation.rs`（新）+ `data_interface/mod.rs` 的 `pub mod db_generation` 一行 | W0-a/b/c、A-4（WORL 封装）、A-5（`GenerationLedger`，未接线）都进这一笔；`engine.rs` / `meta/descriptor.rs` / `mod.rs` 与别的流水共文件，按 hunk 归 |
+
+未归类前不动 `git add`；`handlers.rs` / `lib.rs` / `main.rs` / `increment_manager.rs` / `engine.rs` 五个跨流水文件按 hunk 归属。
+提交信息：英文 conventional 前缀 + 中文正文 + `(ADR-0xx / docs/plans/...)` 尾注，**不写 t-编号**（无来源）。
