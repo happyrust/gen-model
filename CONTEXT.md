@@ -11,24 +11,24 @@
 _Avoid_: 局部更新、局部刷新
 
 **增量阶段控制 (Increment Stage Control)**：
-分别许可数据增量、模型增量两个顺序阶段执行的调试配置（`data_incremental` / `model_incremental`）。控制的是消费，不是发现或删队列：上游关闭时下游不得越过，重新开启后从水位继续。房间归属随每个生成根一起算（ADR-073 D1），不是第三个阶段：原 `room_incremental` / `AIOS_ROOM_INCREMENTAL` 开关随房间流程退役（ADR-073 D7）。
-_Avoid_: 流水线模式、跳步开关、增量总开关、房间增量开关（已退役）、三阶段
+分别许可数据增量、模型增量两个顺序阶段执行的调试配置（`data_incremental` / `model_incremental`）。控制的是消费，不是发现或删队列：上游关闭时下游不得越过，重新开启后从水位继续。房间归属不是第三个阶段：`room_membership` 只决定每个模型根持久化时是否顺带计算、写入房间边；关闭不阻断模型根与 `model_sesno`，重新开启也不会按模型水位发现历史房间欠账，需显式模型重建。原阶段开关 `room_incremental` / `AIOS_ROOM_INCREMENTAL` 已随房间流程退役（ADR-073 D7）。
+_Avoid_: 流水线模式、跳步开关、增量总开关、把 `room_membership` 当模型消费门、三阶段
 
 **生成根 (Generation Root)**：
-一次增量重算所选定的**根参考号**——从它开始（含其子树）重新生成模型。生成根以 `refno` 为唯一身份，所属数据库由 Ref0 库归属映射得到，`dbnum` 不属于生成根身份；一个变化元素归一到恰好一个生成根，同一生成根在一个批次内只生成一次。生成根有两种口径：交付单元根、正常颗粒根。
+一次增量重算所选定的**根参考号**——从它开始（含其子树）重新生成模型。生成根以 `refno` 为唯一身份，所属数据库由 RefNo 位解码得到（见「RefNo 库归属」），`dbnum` 不属于生成根身份；一个变化元素归一到恰好一个生成根，同一生成根在一个批次内只生成一次。生成根有两种口径：交付单元根、正常颗粒根。
 _Avoid_: 重生成根、regen root、目标根
 
-**Ref0 库归属 (Ref0 Database Affiliation)**：
-项目内每个 Ref0 唯一归属一个 `dbnum`，而一个 `dbnum` 可以拥有多个 Ref0；因此 `dbnum → Ref0` 是一对多关系，`Ref0 → dbnum` 可唯一反查，但 Ref0 本身不是 `dbnum`。同一 Ref0 出现在不同 `dbnum` 中属于库归属冲突，不存在可自动选择的有效归属。
-_Avoid_: Ref0 数据库号、把 Ref0 当作 dbnum
+**RefNo 库归属 (RefNo Database Affiliation)**：
+一个合法 refno 属于哪个 `dbnum`，由它自己的 `word0` **按位解出**：`w0 & 0x1FFF | (w0 >> 13) & 0x3E000`（`vendor/e3d-io` `RefNo::dbno()`，与 core.dll `DB_Element::dbno` / `sub_5B05260` 同式，2.1 / 3.1 一致；证据 `docs/evidence/2026-09-12-ida-core-dabacon-refno-routing.md`）。bits 13..25 是 extent 号，所以同一库每个 extent 一个不同的 `word0`——`word0` 不是 `dbnum`，但也**不需要任何表**来反查。gen-model 里唯一的解法是 `data_interface::refno_route::refno_dbnum()`（`tests/refno_native_guards.rs` 守着，位公式别处不得再写）；解不出（`word1` 为负、dbno 为 0）是 `InvalidRefNo`，与「不在 MDB」分开报。
+_Avoid_: Ref0 库归属、ref0 反查、ref0 → dbnum 表、把 word0 当作 dbnum、逐库试查
 
-**Ref0 库归属缺失 (Unresolved Ref0 Affiliation)**：
-一个合法 Ref0 当前没有可用的 `dbnum` 归属。它表示模型依赖暂时无法定位，不等同于元素不存在，也不表示该依赖可以跳过。
-_Avoid_: Refno 不存在、忽略的外部引用
+**dbnum 路由目录 (dbnum Route Directory)**：
+`dbnum → 文件`的那张表（`data_interface::mdb_route_directory::MdbRouteDirectory`），只从当前 MDB 的 SYS/CURD 成员清单与每个成员文件的 60 字节头造（`from_membership`），再并入依赖项目（`included_projects`）的 CATA / PROP 文件头（`add_dependency_dir`），**不读任何元素**。它回答的是「这个 dbnum 的文件在哪、是什么类型、用哪份模板」（`pin` / `pin_for(preferred_project)`，`sesno: None` = 开库时冻最新），不回答「这个 refno 在哪个库」——那是位解码的事。同号跨项目按 `preferred_project` 选同类型副本并核头，MDB 声明路径胜出，落选的只记 `shadowed`。属性服务、树服务、探针三处的定位器都从它造；解出的 dbnum 不在目录里是 `DbNotInMdb`（声明了没文件是 `NoFileForDbnum`），**不回退扫描**。
+_Avoid_: 定位器（泛指时）、ref0 定位器、`InMemoryCataLocator`（生产路径）、骨架的 `locator_parts()`
 
-**Ref0 库归属冲突 (Conflicting Ref0 Affiliation)**：
-同一 Ref0 在项目文件索引中同时归属多个 `dbnum`，违反 Ref0 可唯一反查的不变量。系统不得猜选其中一个归属；只阻断命中该 Ref0 的工作，其他无冲突 Ref0 继续可用。
-_Avoid_: 重复 Ref0、任选一个 dbnum
+**跨库属性 (Cross-database Attribute)**：
+引用类属性（`SPRE` / `CATR` / `LSTU` / `PSPE` / `HSTU`、`OWNER`）的值是一个裸 refno；「跨库」不发生在取值那一步（取值只拷两个 word，零 I/O），而发生在**顺着它去读目标元素**那一步：位解码得 dbnum → 路由目录给文件 → 开库核头（文件自报 `db_mark` 必须等于解出的 dbnum，否则 `DbNumberMismatch`）→ 在目标库自己的索引上点查。跨库 `OWNER` 上溯（ZONE → SITE）与生成根定库（`model_source::dbnum_of_root`：解码 + 核成员是 DESI / ISOD + 只在那一个库点查一次）走同一条路。成本与 MDB 元素总数无关：读一个属性只开触达的库。真库对账口径是 `direct_attmap_probe --owner-climb` 的「解码 = 文件自报」账本（ams8000：1313/1313）。
+_Avoid_: 跨库引用解析（当指建表时）、换库反查、CATA 闭包（那是生成期把目录依赖**落库**的另一件事）
 
 **最小交付单元 (Minimum Delivery Unit, MDU)**：
 一类**具备独立成败与独立交付语义**的模型单元类型。类型集合由项目配置决定：默认 `BRAN / HANG / SUPPO / EQUI`，`delivery_unit_types` 可完全取代默认集合、`append_delivery_unit_types` 可在默认集合上追加；层级容器 `WORL/WORLD/SITE/ZONE` 与管件 `FTUB` 恒被拒绝。当变化元素自身或其最近祖先命中该类型时，以该单元为生成根；`FTUB` 及其子件在正常颗粒路径中也必须继续上溯，不能成为生成根。
@@ -352,7 +352,7 @@ _Avoid_: 暂存窗口（基线不开窗口）、全量解析 / `DbBasicData`（�
 
 ### 已退役词条（retired，ADR-065 / ADR-071 / ADR-073）
 
-以下词条只为读 2026-07-27 ～ 2026-09-10 之间的 ADR / 计划 / 证据时对照使用，**现行代码与文档不得再用**（现行口径见「逐根房间归属」「未完成写入重初始化」「任务内序列化」）：
+以下词条只为读 2026-07-27 ～ 2026-09-12 之间的 ADR / 计划 / 证据时对照使用，**现行代码与文档不得再用**（现行口径见「逐根房间归属」「未完成写入重初始化」「任务内序列化」「RefNo 库归属」）：
 
 - **回退到水位 (Rollback to Watermark)**——见到 `writing{S,T}` 按 `(dbnum, sesno > S)` 谓词删痕迹、三水位退回 S、排 S→T 重放（ADR-072 D2，含 d-570「不删 `pe` 顶点」）；2026-09-10 随「任何未完成写入 → 整库重初始化」退役（ADR-073 D3），连同 `DELETE …/data/above/{watermark}` 那半个运维端点（ADR-073 D5；GET 半边保留）。「三水位」「房间水位」两个说法随之一并退。
 - **房间增量 (Room Increment)**——「从文件更新轮次发布到 `RoomRecalcPanel` / `RoomRecalcElement` 结算」的整条流程，含几何目标 + 结构触发、发布屏障、消费与结算；随房间流程整套退役（ADR-073 D1）。硬验收「增量收敛 == 全量重建，逐边」不退，挂在「逐根房间归属」上。
@@ -361,6 +361,7 @@ _Avoid_: 暂存窗口（基线不开窗口）、全量解析 / `DbBasicData`（�
 - **房间重建要求 (Room Rebuild Requirement)**——结构面板枚举失败时随数据水位写入 `room_build:main` 的持久降级标志、只由下一次成功的启动全量房间重建清除（ADR-040 D5）；结构触发账本与启动全量房间重建都退（ADR-073 D1；ADR-040 作废）。
 - **文件更新轮次 (File Update Round)**、**已发布派生输入 (Published Derivation Input)**、**空间发布版本 (Published Spatial Version)**——ADR-062 文件轮次屏障 / 发布视图 / manifest 的三个构件（冻结终点 `T` 的更新单位；空间树与房间算法可消费的最后成功文件版本集合；候选空间变更经意图重放、快照落盘、切树后的可消费版本）；ADR-065 D8 起退役、ADR-072 R3 删除。空间树今天随模型块提交就地收敛，快照头记各库 `(applied_sesno, model_sesno)`（ADR-072 D4，ADR-073 D1）。
 - **待重试单元 (Pending Model Unit)**、**revision 收口 (Revision-safe Settlement)**——`model_update_pending` 里持久化保存的独立模型任务（按需生成保护记录、跨窗口派生工作、房间任务积压，以动作 + 目标为身份）与「以该行队列内部单调 `revision` 为条件完成删除 / 标记失败」的收口规则；表与 drain 随 ADR-065 D3 / ADR-071 D9 / ADR-072 D6 整体退役（ADR-065 实施约束 4 点名的搬家），失败只留痕不排队（ADR-065 D4）。
+- **Ref0 库归属 (Ref0 Database Affiliation)**、**Ref0 库归属缺失 (Unresolved Ref0 Affiliation)**、**Ref0 库归属冲突 (Conflicting Ref0 Affiliation)**——「项目内每个 Ref0 唯一归属一个 `dbnum`、`Ref0 → dbnum` 靠全库扫描建表反查、同一 Ref0 落两库即冲突」那套说法；2026-09-12 随 RefNo 原生路由退役（母计划 `docs/plans/2026-09-12-refno-native-routing-and-lazy-mdb-plan.md`，切片 W1–W7 提交 `bb16105d2` / `5cc5e3e04` / `425ca98d8` / `7f501ab0d`）：dbnum 从 refno 位里解，core.dll 里从来没有这张表；「缺失」变成 `InvalidRefNo` / `DbNotInMdb` / `NoFileForDbnum` 三种明确错误，「冲突」在位解码下不存在（同号跨项目的文件歧义由「dbnum 路由目录」的 `preferred_project` 与 `initialization_phase` blocker 处置）。现行口径见上方「RefNo 库归属」「dbnum 路由目录」「跨库属性」。`DirectStoreError::UnresolvedRef0`、`model_source::DBNUM_BY_REF0`、`InMemoryCataLocator::build_for_project` 生产依赖已删；`MdbMemoryStore.affiliations` 本体留母计划阶段 6 删。
 
 ## 依赖入库（Dependency Ingestion）——2026-09-06 起，CATA 按 DESI 依赖入库
 
