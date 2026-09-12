@@ -132,6 +132,11 @@ pub mod helper;
 
 pub mod cata_closure;
 
+/// RefNo → dbnum 的唯一解法：位解码（母计划 2026-09-12 refno 原生路由，不变量 1）。
+pub mod refno_route;
+/// dbnum → 文件的路由目录，从 SYS/CURD 成员清单造，不含逐元素表（母计划 §5.1 / 切片 W2）。
+pub mod mdb_route_directory;
+
 /// ADR-053 direct 模式的取数底座：按 dbnum 池化 e3d-io 引擎、钉在各库
 /// `applied_sesno` 上，直接从 db 文件取元素属性，不经 SurrealDB。
 pub mod direct_store;
