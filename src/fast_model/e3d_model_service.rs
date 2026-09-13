@@ -110,6 +110,30 @@ pub(crate) struct SourceIndex {
     pub(crate) owners: Arc<BTreeMap<(u32, u32), RefNo>>,
 }
 
+/// Typed failures of [`E3dModelService::generate_snapshot_source`] that a caller
+/// must be able to distinguish without parsing message text.  Everything else
+/// that path returns is a plain `anyhow` error meaning "geometry could not be
+/// generated"; downcast to this type to recognise the source-side cases.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SnapshotSourceError {
+    /// The session's element index has no entry for the requested root: at that
+    /// session the refno simply did not exist (yet, or any more).
+    RootNotInSession { root: RefNo, dbnum: u32, sesno: u32 },
+}
+
+impl std::fmt::Display for SnapshotSourceError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::RootNotInSession { root, dbnum, sesno } => write!(
+                f,
+                "refno {root} is not in the element index of dbnum {dbnum} at session {sesno}"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SnapshotSourceError {}
+
 /// Pure, session-pinned generation result.  It contains no database handle and
 /// is safe to route either to the current projection or to the historical
 /// in-memory projection.
@@ -1146,6 +1170,11 @@ impl E3dModelService {
 
     /// Generate one root at an exact source session without reading or writing
     /// the persisted model projection.
+    ///
+    /// A root that the session's element index does not contain fails **before**
+    /// geometry evaluation with [`SnapshotSourceError::RootNotInSession`], so a
+    /// caller can tell "this refno did not exist at that session" apart from
+    /// "its geometry could not be generated" by type instead of by message text.
     pub async fn generate_snapshot_source(
         &self,
         dbnum: u32,
@@ -1155,6 +1184,14 @@ impl E3dModelService {
     ) -> anyhow::Result<GeneratedSnapshot> {
         let _generation_guard = db_generation_lock(dbnum).lock_owned().await;
         let input = generation_input(self, dbnum, source_sesno)?;
+        if !input.index.owners.contains_key(&(root.word0, root.word1)) {
+            return Err(SnapshotSourceError::RootNotInSession {
+                root,
+                dbnum,
+                sesno: source_sesno,
+            }
+            .into());
+        }
         let mut cache = CatalogueMeshCache::default();
         let snapshot = generate_snapshot_from_set(&input.set, &input.index, root, &mut cache)?;
         if !snapshot.report.failed.is_empty()
@@ -3494,6 +3531,34 @@ mod tests {
         assert!(
             body.contains("Arc::clone(&index.owners)") && !body.contains("index.owners.clone()"),
             "每个快照复制一份整库 owner 表，一页就是百 MB 级的纯重复"
+        );
+    }
+
+    /// 单根快照路：根不在那一会话的元素索引里，要在求几何**之前**以类型化错误退出。
+    /// 判在后面（或只靠消息文本）就是 2026-09-13 live 用例 3 那种「根不存在却报几何失败、
+    /// 消息里还没原因」。
+    #[test]
+    fn snapshot_source_rejects_a_root_missing_from_the_session_index_before_generating() {
+        let source = service_source();
+        let body = source
+            .split_once("pub async fn generate_snapshot_source(")
+            .expect("snapshot source")
+            .1
+            .split_once("pub(crate) fn source_file(")
+            .expect("snapshot source end")
+            .0;
+        let index_gate = body
+            .find("input.index.owners.contains_key(&(root.word0, root.word1))")
+            .expect("the session index gate");
+        let typed_error = body
+            .find("SnapshotSourceError::RootNotInSession")
+            .expect("the typed not-in-session error");
+        let generation = body
+            .find("generate_snapshot_from_set(")
+            .expect("snapshot generation");
+        assert!(
+            index_gate < generation && typed_error < generation,
+            "the index gate and its typed error must come before geometry evaluation"
         );
     }
 
