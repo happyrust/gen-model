@@ -814,6 +814,13 @@ impl ModelMemoryStore {
         if self.current_max_bytes.is_none() {
             return;
         }
+        // Keep the resident check and access update ordered with eviction.
+        let scopes = self.read();
+        if !scopes.get(&ScopeKey::Current).is_some_and(|state| {
+            state.receipts.contains_key(&packed_refno(root))
+        }) {
+            return;
+        }
         let mut cache = self.cache_control();
         cache.clock = cache.clock.wrapping_add(1);
         let clock = cache.clock;
@@ -1316,7 +1323,30 @@ impl ModelMemoryStore {
             .collect()
     }
 
-    /// 一个生成根名下的全部记录，按库分组。按需删除路径用它。
+    /// 在同一读锁下复制整根回执与几何，避免发布或淘汰把两个版本拼在一起。
+    pub fn root_snapshot(
+        &self,
+        scope: ProjectionScope<'_>,
+        root: RefNo,
+    ) -> Option<(RootReceipt, Vec<ProjectedGeometry>)> {
+        let snapshot = {
+            let scopes = self.read();
+            let state = scopes.get(&scope.key())?;
+            let receipt = state.receipts.get(&packed_refno(root))?.clone();
+            let records = state
+                .record_ids_under(root)
+                .into_iter()
+                .filter_map(|id| state.geometries.get(&id).cloned())
+                .collect();
+            (receipt, records)
+        };
+        if matches!(scope, ProjectionScope::Current) {
+            self.touch_root(root);
+        }
+        Some(snapshot)
+    }
+
+    /// 一个生成根名下的全部记录。按需删除路径用它。
     pub fn records_of_root(
         &self,
         scope: ProjectionScope<'_>,
@@ -1661,6 +1691,80 @@ mod tests {
 
     fn store() -> ModelMemoryStore {
         ModelMemoryStore::default()
+    }
+
+    #[test]
+    fn cold_receipt_lookups_do_not_allocate_cache_metadata() {
+        let store = ModelMemoryStore::with_cache_limit(4096);
+        store.commit(ProjectionScope::Current, vec![ProjectionCommit {
+            receipt: Some((RefNo::new(7997, 10_001), RootReceipt {
+                source_sesno: 42, model_target: None, manifest_hash: "resident".into(),
+                geometry_count: 0, published_via: default_published_via(),
+            })),
+            ..Default::default()
+        }]);
+        let before = store.cache_control().last_access.len();
+        for id in 0..10_000 {
+            assert!(store.receipt(ProjectionScope::Current, RefNo::new(7997, id)).is_none());
+        }
+        assert_eq!(store.cache_control().last_access.len(), before);
+    }
+
+    #[test]
+    fn concurrent_root_snapshots_never_mix_receipts_and_geometry() {
+        let store = store();
+        let root = RefNo::new(7997, 1);
+        let barrier = std::sync::Barrier::new(2);
+        std::thread::scope(|threads| {
+            threads.spawn(|| {
+                barrier.wait();
+                for version in 0..2_000 {
+                    let count = version % 2 + 1;
+                    store.commit(ProjectionScope::Current, vec![ProjectionCommit {
+                        removals: vec!["one".into(), "two".into()],
+                        upserts: ["one", "two"].into_iter().take(count).map(|id| {
+                            let mut row = record(id, root, root, 7997);
+                            row.mesh_id = version.to_string();
+                            row
+                        }).collect(),
+                        receipt: Some((root, RootReceipt {
+                            source_sesno: 42, model_target: None,
+                            manifest_hash: version.to_string(), geometry_count: count,
+                            published_via: default_published_via(),
+                        })),
+                        ..Default::default()
+                    }]);
+                }
+            });
+            barrier.wait();
+            for _ in 0..2_000 {
+                if let Some((receipt, records)) = store.root_snapshot(ProjectionScope::Current, root) {
+                    assert_eq!(records.len(), receipt.geometry_count);
+                    assert!(records.iter().all(|row| row.mesh_id == receipt.manifest_hash));
+                }
+                std::thread::yield_now();
+            }
+        });
+    }
+
+    #[test]
+    fn root_snapshot_keeps_receipt_and_records_from_one_commit() {
+        let store = store();
+        let root = RefNo::new(7997, 1);
+        let publish = |manifest: &str| store.commit(ProjectionScope::Current, vec![ProjectionCommit {
+            upserts: vec![record("one", root, root, 7997)],
+            receipt: Some((root, RootReceipt {
+                source_sesno: 42, model_target: None, manifest_hash: manifest.into(),
+                geometry_count: 1, published_via: default_published_via(),
+            })),
+            ..Default::default()
+        }]);
+        publish("old");
+        let (receipt, records) = store.root_snapshot(ProjectionScope::Current, root).unwrap();
+        publish("new");
+        assert_eq!(receipt.manifest_hash, "old");
+        assert_eq!(records.len(), receipt.geometry_count);
+        assert_eq!(store.root_snapshot(ProjectionScope::Current, root).unwrap().0.manifest_hash, "new");
     }
 
     /// lazy-startup L4：一个库保存了，只作废**它自己**的回执与 ACK（含第二个 extent 的根——

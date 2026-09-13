@@ -16,20 +16,26 @@ pub async fn records_of_root(
     let packed = root.refno().0 as u64;
     let e3d_root = e3d_io::refno::RefNo::new((packed >> 32) as u32, packed as u32);
     let store = ModelMemoryStore::global();
-    if let Some(receipt) = store.receipt(ProjectionScope::Current, e3d_root) {
-        let records = store.records_of_root(ProjectionScope::Current, e3d_root);
+    if let Some((receipt, mut records)) = store.root_snapshot(ProjectionScope::Current, e3d_root) {
         anyhow::ensure!(
             records.len() == receipt.geometry_count,
             "memory overlay root {e3d_root} is incomplete: receipt expects {}, store has {}",
             receipt.geometry_count,
             records.len()
         );
+        // Match the durable order: inst_relate first, then tubi_relate,
+        // each ordered by record id. Eviction must not change cursor offsets.
+        sort_overlay_records(&mut records);
         return Ok(records
             .into_iter()
             .map(|record| projection_record_to_query(record, e3d_root))
             .collect());
     }
     durable_records_of_root(db, root).await
+}
+
+fn sort_overlay_records(records: &mut [ProjectedGeometry]) {
+    records.sort_by(|a, b| (a.tube.is_some(), &a.record_id).cmp(&(b.tube.is_some(), &b.record_id)));
 }
 
 async fn durable_records_of_root(
@@ -147,6 +153,23 @@ mod tests {
             shape,
             tube,
         }
+    }
+
+    #[test]
+    fn overlay_order_matches_durable_table_order_even_when_tube_id_sorts_first() {
+        let mut tube = projected(ProjectedShape::Baked, Some(ProjectedTube {
+            route_ordinal: 0, from: RefNo::new(7997, 1),
+            to: RefNo::new(7997, 2), invalid: false,
+        }));
+        tube.record_id = "0_tube".into();
+        let mut first = projected(ProjectedShape::Baked, None);
+        first.record_id = "a_element".into();
+        let mut last = first.clone();
+        last.record_id = "z_element".into();
+        let mut rows = vec![tube, last, first];
+        super::sort_overlay_records(&mut rows);
+        assert_eq!(rows.iter().map(|r| r.record_id.as_str()).collect::<Vec<_>>(),
+            vec!["a_element", "z_element", "0_tube"]);
     }
 
     #[test]

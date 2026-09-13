@@ -803,7 +803,11 @@ async fn settle(controller: &ModelWriteBehind, dbnum: u32, settlement: Settlemen
     let mut state = controller.state();
     match outcome {
         Ok(()) => {
-            state.settlements.remove(&dbnum);
+            if state.settlements.get(&dbnum).is_some_and(|current| {
+                current.target_sesno <= settlement.target_sesno
+            }) {
+                state.settlements.remove(&dbnum);
+            }
             state
                 .durable_target_by_dbnum
                 .insert(dbnum, settlement.target_sesno);
@@ -1339,6 +1343,30 @@ mod tests {
         assert!(!store.root_needs_persist(root));
         controller.state().accepting = false;
         controller.notify.notify_waiters();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_settlement_preserves_a_newer_queued_target() {
+        let store = Box::leak(Box::new(ModelMemoryStore::default()));
+        let adapter = Arc::new(ScriptedPersistence::new(vec![]));
+        let controller = ModelWriteBehind::new(store, adapter.clone());
+        let old = Settlement {
+            target_sesno: 41,
+            target_time: None,
+            attempts: 0,
+            next_retry_at: Instant::now(),
+            last_error: None,
+        };
+        let new = Settlement { target_sesno: 42, ..old.clone() };
+        // The worker already captured 41 when another request queued 42.
+        controller.state().settlements.insert(7996, new.clone());
+        settle(&controller, 7996, old).await;
+        assert_eq!(controller.state().settlements[&7996].target_sesno, 42);
+        assert_eq!(controller.state().durable_target_by_dbnum[&7996], 41);
+        settle(&controller, 7996, new).await;
+        assert!(controller.state().settlements.is_empty());
+        assert_eq!(controller.state().durable_target_by_dbnum[&7996], 42);
+        assert_eq!(adapter.settle_calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test(start_paused = true)]

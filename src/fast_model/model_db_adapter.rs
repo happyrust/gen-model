@@ -913,7 +913,7 @@ async fn persist_roots_batched_with_chunk_bytes_unacked(
                 invalidate_geometry_baseline();
                 out.push_failure(
                     live[0].share.root,
-                    PersistFailureKind::Retryable,
+                    publication_failure_kind(&error),
                     format!("{error:#}"),
                 );
             }
@@ -960,7 +960,7 @@ async fn persist_roots_batched_with_chunk_bytes_unacked(
                             invalidate_geometry_baseline();
                             out.push_failure(
                                 retry[0].share.root,
-                                PersistFailureKind::Retryable,
+                                publication_failure_kind(&error),
                                 format!("{error:#}"),
                             );
                         }
@@ -1055,9 +1055,28 @@ fn accept_group_outcome(
     advance_geometry_baseline(baseline_window, group);
 }
 
+/// Typed context for failures that retrying the same local payload cannot fix.
+#[derive(Debug)]
+struct DeterministicPublicationFailure;
+
+impl std::fmt::Display for DeterministicPublicationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("invalid local publication payload")
+    }
+}
+
+impl std::error::Error for DeterministicPublicationFailure {}
+
+fn publication_failure_kind(error: &anyhow::Error) -> PersistFailureKind {
+    if error.downcast_ref::<DeterministicPublicationFailure>().is_some() {
+        PersistFailureKind::Blocked
+    } else {
+        PersistFailureKind::Retryable
+    }
+}
+
 /// 一组过了房间关卡的根：渲块 → 逐块提交。任一块失败即返回 Err，调用方把这一组记成失败。
-/// 每根的顺序定死（ADR-073 D1，用户原话「放到模型计算后面」）：最终几何已在投影里 → 房间归属已在
-/// [`room_stage`] 算好 → 写模型行与房间边（同一块同一事务，模型在前）→ 盖章。
+/// 每根的顺序：最终几何 → 房间归属 → 同事务写模型行、房间边与回执。
 async fn persist_group(
     db: &Surreal<Any>,
     group: &[LiveShare<'_>],
@@ -1091,7 +1110,8 @@ async fn persist_group(
             branches.insert((record.source_refno.word0, record.source_refno.word1));
         }
         for row in existing.iter().filter(|row| row.under(packed_root)) {
-            let source = geometry_source_refno(&row.geometry_id)?;
+            let source = geometry_source_refno(&row.geometry_id)
+                .context(DeterministicPublicationFailure)?;
             let record_id = geometry_record_id(&row.geometry_id, source);
             if projected.contains(record_id.as_str()) || !removed_ids.insert(record_id.clone()) {
                 continue;
@@ -1114,7 +1134,8 @@ async fn persist_group(
         }),
         &removed_geometry,
         &BTreeSet::new(),
-    )?;
+    )
+    .context(DeterministicPublicationFailure)?;
 
     let deferred_refresh = records
         .iter()
@@ -1138,7 +1159,8 @@ async fn persist_group(
         let mut piece = if live.claimed.is_empty() {
             String::new()
         } else {
-            render_chunk(&live.claimed, WriteMode::Incremental, &mut tube_slots)?
+            render_chunk(&live.claimed, WriteMode::Incremental, &mut tube_slots)
+                .context(DeterministicPublicationFailure)?
         };
         piece.push_str(&live.room_statements);
         if !piece.is_empty() {
@@ -1173,7 +1195,8 @@ async fn persist_group(
             body.clear();
         };
         for (root, receipt) in &receipted {
-            let literal = receipt_model_target_literal(receipt)?;
+            let literal = receipt_model_target_literal(receipt)
+                .context(DeterministicPublicationFailure)?;
             let expression = if literal == "NONE" {
                 literal
             } else {
@@ -1272,13 +1295,12 @@ async fn persist_group(
         if statements.is_empty() {
             continue;
         }
-        anyhow::ensure!(
-            statements.len() <= PUBLICATION_STATEMENT_HARD_CAP,
-            "root {} exceeds publication transaction hard cap ({} > {} bytes)",
-            group[0].share.root,
-            statements.len(),
-            PUBLICATION_STATEMENT_HARD_CAP
-        );
+        if statements.len() > PUBLICATION_STATEMENT_HARD_CAP {
+            return Err(anyhow::anyhow!(
+                "root {} exceeds publication transaction hard cap ({} > {} bytes)",
+                group[0].share.root, statements.len(), PUBLICATION_STATEMENT_HARD_CAP
+            ).context(DeterministicPublicationFailure));
+        }
         max_transaction_bytes = max_transaction_bytes.max(statements.len());
         db.query(publication_transaction(&statements))
             .await
@@ -2622,6 +2644,24 @@ mod tests {
     /// 派生几何的记录 id 就是身份摘要，形状如此（真值是 64 位，夹具截短）。
     const TUBE_A: &str = "a1b2c3d4";
     const TUBE_B: &str = "e5f60718";
+
+    #[tokio::test]
+    async fn oversized_local_publication_is_blocked_before_database_io() {
+        let mut record = baked_record();
+        record.mesh_id = "x".repeat(PUBLICATION_STATEMENT_HARD_CAP + 1);
+        let shares = vec![RootShare {
+            root: BRANCH,
+            records: vec![record],
+            receipt: Some(test_receipt(BRANCH, 1).1),
+        }];
+        let (live, failed) = room_stage(&shares, None);
+        assert!(failed.is_empty());
+        let db = Surreal::<Any>::init();
+        let error = persist_group(&db, &live, &[], 1024, true).await.err().unwrap();
+        assert_eq!(publication_failure_kind(&error), PersistFailureKind::Blocked);
+        assert_eq!(publication_failure_kind(&anyhow::anyhow!("unknown database failure")),
+            PersistFailureKind::Retryable);
+    }
 
     fn baked_record() -> ProjectedGeometry {
         ProjectedGeometry {
