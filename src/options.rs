@@ -173,8 +173,8 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub store_mode: Option<String>,
 
-    /// Durable model projection read policy: `memory-first` (default) or
-    /// `database-first`. This is intentionally independent from [`StoreMode`].
+    /// Durable model projection policy. `incremental-overlay` keeps only
+    /// generated deltas in kv-mem and never hydrates them from RocksDB.
     #[serde(default)]
     pub model_cache_mode: Option<String>,
 
@@ -726,29 +726,27 @@ pub const MODEL_CACHE_MODE_ENV: &str = "AIOS_MODEL_CACHE_MODE";
 /// Environment override for [`model_cache_max_bytes`].
 pub const MODEL_CACHE_MAX_BYTES_ENV: &str = "AIOS_MODEL_CACHE_MAX_BYTES";
 
-/// Read policy for the process-local model projection cache.
+/// Policy for the process-local incremental model overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ModelCacheMode {
-    /// Serve a resident root first and load only cache misses from RocksDB.
-    MemoryFirst,
-    /// Refresh a requested root from RocksDB before serving it.
-    DatabaseFirst,
+    /// Memory contains generated root overlays; RocksDB serves cold roots.
+    IncrementalOverlay,
 }
 
 impl ModelCacheMode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::MemoryFirst => "memory-first",
-            Self::DatabaseFirst => "database-first",
+            Self::IncrementalOverlay => "incremental-overlay",
         }
     }
 }
 
 fn parse_model_cache_mode(raw: Option<&str>) -> Option<ModelCacheMode> {
     match raw?.trim().to_ascii_lowercase().replace('_', "-").as_str() {
-        "memory-first" => Some(ModelCacheMode::MemoryFirst),
-        "database-first" => Some(ModelCacheMode::DatabaseFirst),
+        "incremental-overlay" | "write-behind" | "memory-first" => {
+            Some(ModelCacheMode::IncrementalOverlay)
+        }
         _ => None,
     }
 }
@@ -756,7 +754,7 @@ fn parse_model_cache_mode(raw: Option<&str>) -> Option<ModelCacheMode> {
 pub fn model_cache_mode() -> ModelCacheMode {
     parse_model_cache_mode(std::env::var(MODEL_CACHE_MODE_ENV).ok().as_deref())
         .or_else(|| parse_model_cache_mode(load_ext_fields().model_cache_mode.as_deref()))
-        .unwrap_or(ModelCacheMode::MemoryFirst)
+        .unwrap_or(ModelCacheMode::IncrementalOverlay)
 }
 
 pub fn model_cache_max_bytes() -> usize {
@@ -2280,18 +2278,21 @@ mod tests {
     }
 
     #[test]
-    fn model_cache_policy_defaults_to_memory_first_and_accepts_env_spelling() {
+    fn model_cache_policy_is_an_incremental_overlay_and_rejects_database_backfill() {
         assert_eq!(parse_model_cache_mode(None), None);
         assert_eq!(
             parse_model_cache_mode(Some(" memory_first ")),
-            Some(ModelCacheMode::MemoryFirst)
+            Some(ModelCacheMode::IncrementalOverlay)
+        );
+        assert_eq!(parse_model_cache_mode(Some("DATABASE-FIRST")), None);
+        assert_eq!(
+            parse_model_cache_mode(Some("write-behind")),
+            Some(ModelCacheMode::IncrementalOverlay)
         );
         assert_eq!(
-            parse_model_cache_mode(Some("DATABASE-FIRST")),
-            Some(ModelCacheMode::DatabaseFirst)
+            ModelCacheMode::IncrementalOverlay.as_str(),
+            "incremental-overlay"
         );
-        assert_eq!(parse_model_cache_mode(Some("write-behind")), None);
-        assert_eq!(ModelCacheMode::MemoryFirst.as_str(), "memory-first");
     }
 
     /// 没写 `store_mode` 但写了旧开关时，**由旧开关说话**，语义与它今天的两态逐字相同。
@@ -2457,7 +2458,7 @@ mod tests {
     ///
     /// 只放过仓根那份 `DbOption.toml`：它是默认形态的样板，默认值正是为它准备的。
     #[test]
-    fn every_db_option_fixture_declares_its_store_mode_and_data_face() {
+    fn every_db_option_fixture_declares_its_store_mode() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut missing = Vec::new();
         let mut checked = 0;
@@ -2484,7 +2485,7 @@ mod tests {
                         !line.starts_with('#') && line.starts_with(key)
                     })
                 };
-                for key in ["store_mode", "data_face"] {
+                for key in ["store_mode"] {
                     if !declares(key) {
                         missing.push(format!("{name} 缺 {key}"));
                     }
@@ -2494,8 +2495,8 @@ mod tests {
         assert!(checked > 0, "一份夹具配置都没扫到，护栏的路径写错了");
         assert!(
             missing.is_empty(),
-            "这些配置没有显式声明形态键：{missing:?}。默认值（store_mode=spawned-mem、\
-             data_face=read-through）已经多次翻转，依赖它的配置每翻一次就静默换一回介质 / 数据面"
+            "这些配置没有显式声明存储形态：{missing:?}。data_face 由 store_mode 统一派生，\
+             不要求每份配置重复声明"
         );
     }
 

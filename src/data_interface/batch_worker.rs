@@ -2371,6 +2371,10 @@ async fn persist_transform_roots(
                 .collect());
         }
     };
+    if crate::options::store_mode().is_durable() {
+        crate::fast_model::model_db_adapter::enqueue_roots_write_behind(dbnum, refnos).await?;
+        return Ok(std::collections::HashMap::new());
+    }
     let batched = persist_roots_batched(
         PersistTarget::process(),
         crate::fast_model::model_memory_store::ModelMemoryStore::global(),

@@ -199,13 +199,11 @@ fn health_status(
 }
 
 fn model_cache_health(store_reachable: bool) -> Value {
-    let mut health = json!(
-        crate::fast_model::model_memory_store::ModelMemoryStore::global().cache_stats()
-    );
+    let mut health =
+        json!(crate::fast_model::model_memory_store::ModelMemoryStore::global().cache_stats());
     health["store_reachable"] = json!(store_reachable);
-    health["degraded_read_only"] = json!(
-        crate::options::store_mode().is_durable() && !store_reachable
-    );
+    health["degraded_read_only"] =
+        json!(crate::options::store_mode().is_durable() && !store_reachable);
     health
 }
 
@@ -2795,10 +2793,16 @@ pub async fn model_records(
             return Err(ApiError::conflict(message));
         }
     }
+    let mut memory_overlay_used = false;
     let mut per_root: Vec<(String, Vec<aios_core::GeomInstQuery>)> =
         Vec::with_capacity(roots.len());
     for (name, root) in roots.iter().zip(&parsed_roots) {
-        let records = if route.is_database() {
+        // Durable reads never hydrate kv-mem.  A resident receipt is a complete
+        // newer root snapshot and shadows the RocksDB root; cold roots continue
+        // to be served directly by RocksDB.
+        let memory_overlay = store.receipt(scope, *root).is_some();
+        memory_overlay_used |= memory_overlay;
+        let records = if route.is_database() && !memory_overlay {
             let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
             crate::fast_model::model_record_reader::records_of_root(&aios_core::SUL_DB, refno)
                 .await
@@ -2813,7 +2817,11 @@ pub async fn model_records(
         per_root.push((name.clone(), records));
     }
     let page = page_records_across_roots(per_root, cursor, limit);
-    let source = route.source.records_source_label();
+    let source = if route.is_database() && memory_overlay_used {
+        "rocksdb+memory-overlay"
+    } else {
+        route.source.records_source_label()
+    };
     let incomplete_roots = if route.is_database()
         || !crate::data_interface::model_read_route::publication_policy(true).uses_process_store()
     {

@@ -73,8 +73,8 @@
 //!   （`file_round`）分两条路：窗口内寄进 `spatial_reconcile` 意图行等 publish 阶段重放，
 //!   窗口外按已提交指针回读——publish 阶段退役，两条路收成一条。
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::OnceLock;
 
 use aios_core::RefnoEnum;
 use anyhow::Context;
@@ -283,6 +283,134 @@ impl PersistedRows {
 /// [`crate::fast_model::historical_model`] 直接回包。
 pub async fn persist_root(root: RefNo) -> anyhow::Result<PersistedRows> {
     persist_root_on(PersistTarget::process(), ModelMemoryStore::global(), root).await
+}
+
+#[derive(Debug, Clone)]
+struct WriteBehindJob {
+    dbnum: u32,
+    roots: Vec<RefNo>,
+    attempt: u32,
+}
+
+struct WriteBehindQueue {
+    sender: tokio::sync::mpsc::Sender<WriteBehindJob>,
+}
+
+static WRITE_BEHIND_QUEUE: OnceLock<WriteBehindQueue> = OnceLock::new();
+
+fn write_behind_queue() -> &'static WriteBehindQueue {
+    WRITE_BEHIND_QUEUE.get_or_init(|| {
+        // Jobs contain only root identities; geometry remains in ModelMemoryStore.
+        // Bounding the hand-off prevents an unavailable durable store from
+        // turning duplicate scheduler work into an unbounded metadata queue.
+        let (sender, receiver) = tokio::sync::mpsc::channel(64);
+        let retry_sender = sender.clone();
+        tokio::spawn(run_write_behind(receiver, retry_sender));
+        WriteBehindQueue { sender }
+    })
+}
+
+/// Hand durable publication to the process-local writer. Generation has already
+/// committed the complete root snapshots to kv-mem before this call; waiting for
+/// queue capacity never waits for RocksDB I/O.
+pub async fn enqueue_roots_write_behind(
+    dbnum: u32,
+    roots: Vec<RefNo>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::options::store_mode().is_durable(),
+        "model write-behind requires a durable process store"
+    );
+    let roots = roots
+        .into_iter()
+        .filter(|root| ModelMemoryStore::global().root_needs_persist(*root))
+        .collect::<Vec<_>>();
+    if roots.is_empty() {
+        return Ok(());
+    }
+    write_behind_queue()
+        .sender
+        .send(WriteBehindJob {
+            dbnum,
+            roots,
+            attempt: 0,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("model write-behind worker stopped"))
+}
+
+async fn run_write_behind(
+    mut receiver: tokio::sync::mpsc::Receiver<WriteBehindJob>,
+    retry_sender: tokio::sync::mpsc::Sender<WriteBehindJob>,
+) {
+    while let Some(mut job) = receiver.recv().await {
+        job.roots.retain(|root| {
+            root.dbno() == job.dbnum && ModelMemoryStore::global().root_needs_persist(*root)
+        });
+        if job.roots.is_empty() {
+            continue;
+        }
+
+        let outcome = async {
+            let rooms = frozen_room_calculator()?;
+            persist_roots_batched(
+                PersistTarget::process(),
+                ModelMemoryStore::global(),
+                job.dbnum,
+                &job.roots,
+                rooms.as_ref(),
+            )
+            .await
+        }
+        .await;
+
+        let retry_roots = match outcome {
+            Ok(report) => {
+                let explicitly_failed = report
+                    .failed
+                    .into_iter()
+                    .map(|(root, error)| {
+                        log::warn!(
+                            "model write-behind root {root} failed at attempt {}: {error}",
+                            job.attempt + 1
+                        );
+                        packed_refno(root)
+                    })
+                    .collect::<BTreeSet<_>>();
+                job.roots
+                    .iter()
+                    .copied()
+                    .filter(|root| {
+                        explicitly_failed.contains(&packed_refno(*root))
+                            || ModelMemoryStore::global().root_needs_persist(*root)
+                    })
+                    .collect::<Vec<_>>()
+            }
+            Err(error) => {
+                log::warn!(
+                    "model write-behind dbnum={} roots={} failed at attempt {}: {error:#}",
+                    job.dbnum,
+                    job.roots.len(),
+                    job.attempt + 1
+                );
+                job.roots.clone()
+            }
+        };
+        if retry_roots.is_empty() {
+            continue;
+        }
+
+        job.roots = retry_roots;
+        job.attempt = job.attempt.saturating_add(1);
+        let delay_secs = 1u64 << job.attempt.min(5);
+        let sender = retry_sender.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+            if sender.send(job).await.is_err() {
+                log::error!("model write-behind retry was dropped because the worker stopped");
+            }
+        });
+    }
 }
 
 /// 跑一次旧 `direct_*` 命名空间的清扫（[`render_legacy_prefix_sweep_once`]）。
@@ -818,7 +946,7 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
                     live.len()
                 );
                 let mut retries = VecDeque::new();
-                let middle = live.len() / 2;
+                let middle = live.len() >> 1;
                 retries.push_back((0usize, middle));
                 retries.push_back((middle, live.len()));
                 while let Some((start, end)) = retries.pop_front() {
@@ -861,7 +989,7 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
                                 "model publication subgroup of {} roots failed; bisecting again: {error:#}",
                                 retry.len()
                             );
-                            let middle = start + retry.len() / 2;
+                            let middle = start + (retry.len() >> 1);
                             retries.push_back((start, middle));
                             retries.push_back((middle, end));
                         }
@@ -926,6 +1054,8 @@ fn accept_group_outcome(
                     dbnum,
                     source_sesno: receipt.source_sesno,
                     geometry_count: receipt.geometry_count,
+                    manifest_hash: receipt.manifest_hash.clone(),
+                    model_target: receipt.model_target.clone(),
                     room_membership: rooms.is_some(),
                     room_generation: rooms
                         .map(|calculator| calculator.resident_generation().to_string()),
@@ -1252,22 +1382,9 @@ impl std::error::Error for ProjectionRestoreConflict {}
 /// 读库镜像撞上并发提交时原地重读几次。再撞就不占着收口这一轮了。
 const RESTORE_ATTEMPTS: usize = 3;
 
-static ROOT_LOAD_LOCKS: OnceLock<Mutex<HashMap<i64, Arc<tokio::sync::Mutex<()>>>>> =
-    OnceLock::new();
-
-fn root_load_lock(root: RefNo) -> Arc<tokio::sync::Mutex<()>> {
-    ROOT_LOAD_LOCKS
-        .get_or_init(|| Mutex::new(HashMap::new()))
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .entry(packed_refno(root))
-        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
-}
-
-/// Ensure a single durable generation root is resident. Durable modes never
-/// hydrate a whole dbnum: a memory-first hit returns immediately and a miss is
-/// loaded through the `anc` indexes. Database-first refreshes the requested root.
+/// Check whether a root is available in either layer without hydrating kv-mem.
+/// A memory receipt means an incremental overlay exists; otherwise RocksDB is
+/// queried only for availability and remains the cold-data provider.
 pub async fn ensure_root_cached(root: RefNo) -> anyhow::Result<bool> {
     if !crate::options::store_mode().is_durable() {
         return Ok(ModelMemoryStore::global()
@@ -1282,42 +1399,21 @@ pub async fn ensure_root_cached_on(
     store: &ModelMemoryStore,
     root: RefNo,
 ) -> anyhow::Result<bool> {
-    let memory_first = matches!(
-        crate::options::model_cache_mode(),
-        crate::options::ModelCacheMode::MemoryFirst
-    );
-    if memory_first && store.receipt(ProjectionScope::Current, root).is_some() {
+    if store.receipt(ProjectionScope::Current, root).is_some() {
         store.note_cache_lookup(true);
         return Ok(true);
     }
     store.note_cache_lookup(false);
-    let lock = root_load_lock(root);
-    let _guard = lock.lock().await;
-    if memory_first && store.receipt(ProjectionScope::Current, root).is_some() {
-        store.note_cache_lookup(true);
-        return Ok(true);
-    }
-
-    for _ in 0..RESTORE_ATTEMPTS {
-        let epoch = store.commit_epoch(root.dbno());
-        store.note_cache_load_started();
-        let loaded = read_published_root_on(db, root).await;
-        store.note_cache_load_finished(loaded.is_ok());
-        let Some((records, receipt)) = loaded? else {
-            if !memory_first {
-                store.drop_cached_root(root);
-            }
-            return Ok(false);
-        };
-        if store.restore_root(root, records, receipt, epoch) {
-            return Ok(true);
-        }
-    }
-    Err(ProjectionRestoreConflict {
-        dbnum: root.dbno(),
-        attempts: RESTORE_ATTEMPTS,
-    }
-    .into())
+    store.note_cache_load_started();
+    let root_id = format!("{}_{}", root.word0, root.word1);
+    let result = db
+        .query("SELECT VALUE publication_status = 'ready' FROM type::thing('gen_root', $root_id);")
+        .bind(("root_id", root_id))
+        .await
+        .and_then(|response| response.check());
+    store.note_cache_load_finished(result.is_ok());
+    let mut response = result?;
+    Ok(response.take::<Option<bool>>(0)?.unwrap_or(false))
 }
 
 /// Load exactly one complete committed root. Both geometry predicates are backed
@@ -1649,7 +1745,7 @@ async fn persist_root_chunks_impl(
         let mut slots = tube_slots.clone();
         let rendered = render_chunk(chunk, WriteMode::Incremental, &mut slots)?;
         if rendered.len() > 2 * 1024 * 1024 && chunk.len() > 1 {
-            let (left, right) = chunk.split_at(chunk.len() / 2);
+            let (left, right) = chunk.split_at(chunk.len() >> 1);
             pending.push_front(right);
             pending.push_front(left);
             continue;
@@ -2926,7 +3022,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn durable_projection_cache_loads_only_the_requested_root() {
+    async fn durable_root_probe_never_hydrates_the_incremental_overlay() {
         let db = surreal_mem().await;
         let requested_root = RefNo::new(7997, 73948);
         let other_root = RefNo::new(7997, 70000);
@@ -2964,10 +3060,14 @@ mod tests {
                 .await
                 .unwrap()
         );
-        assert_eq!(
-            store.records(ProjectionScope::Current),
-            vec![requested],
-            "an indexed root miss must not hydrate its dbnum sibling"
+        assert!(
+            store.records(ProjectionScope::Current).is_empty(),
+            "a RocksDB availability probe must not hydrate kv-mem"
+        );
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, requested_root)
+                .is_none()
         );
         assert!(
             store

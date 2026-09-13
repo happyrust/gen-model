@@ -164,9 +164,24 @@ pub struct RootPublicationAck {
     pub dbnum: u32,
     pub source_sesno: u32,
     pub geometry_count: usize,
+    /// Durable content identity. `sesno` alone is insufficient when a
+    /// generator/catalogue change republishes a root at the same source session.
+    pub manifest_hash: String,
+    pub model_target: Option<ModelTarget>,
     pub room_membership: bool,
     pub room_generation: Option<String>,
     pub medium: crate::fast_model::model_db_adapter::PersistMedium,
+}
+
+impl RootPublicationAck {
+    /// Exact candidate/durable equality. `published_via` is deliberately not
+    /// part of the identity: it is observability metadata, not model content.
+    pub fn matches(&self, receipt: &RootReceipt) -> bool {
+        self.source_sesno == receipt.source_sesno
+            && self.geometry_count == receipt.geometry_count
+            && self.manifest_hash == receipt.manifest_hash
+            && self.model_target == receipt.model_target
+    }
 }
 
 /// `RootReceipt::published_via` 的默认值：旧回执与整根重算都是 `"regen"`。
@@ -571,6 +586,10 @@ pub struct ModelCacheStats {
     pub evictions: u64,
     pub oversize_bypasses: u64,
     pub inflight: usize,
+    /// Memory candidates whose exact content identity is not durable yet.
+    pub pending_roots: usize,
+    /// Resident roots whose exact candidate identity is confirmed by RocksDB.
+    pub durable_roots: usize,
 }
 
 #[derive(Debug, Default)]
@@ -798,6 +817,22 @@ impl ModelMemoryStore {
         let scopes = self.read();
         let current = scopes.get(&ScopeKey::Current);
         let cache = self.cache_control();
+        let (pending_roots, durable_roots) = current.map_or((0, 0), |state| {
+            state
+                .receipts
+                .iter()
+                .fold((0, 0), |(pending, durable), (root, receipt)| {
+                    let caught_up = state
+                        .publication_acks
+                        .get(root)
+                        .is_some_and(|ack| ack.matches(receipt));
+                    if caught_up {
+                        (pending, durable + 1)
+                    } else {
+                        (pending + 1, durable)
+                    }
+                })
+        });
         ModelCacheStats {
             mode: crate::options::model_cache_mode().as_str(),
             max_bytes: self.current_max_bytes,
@@ -810,6 +845,8 @@ impl ModelMemoryStore {
             evictions: cache.evictions,
             oversize_bypasses: cache.oversize_bypasses,
             inflight: cache.inflight,
+            pending_roots,
+            durable_roots,
         }
     }
 
@@ -1210,23 +1247,51 @@ impl ModelMemoryStore {
     }
 
     /// 只在对应 process-store 根事务已经成功提交后调用。
+    ///
+    /// 返回 `false` 表示写盘期间内存候选已经前移；这个旧 ACK 不得推进 durable
+    /// 水位，也不得使新候选获得可淘汰资格。
+    #[must_use]
     pub fn record_publication_ack(
         &self,
         scope: ProjectionScope<'_>,
         root: RefNo,
         ack: RootPublicationAck,
-    ) {
+    ) -> bool {
         let current = matches!(scope, ProjectionScope::Current);
         let durable = ack.medium.is_durable();
-        self.write()
-            .entry(scope.key())
-            .or_default()
-            .publication_acks
-            .insert(packed_refno(root), ack);
-        if current && durable {
+        let accepted = {
+            let mut scopes = self.write();
+            let state = scopes.entry(scope.key()).or_default();
+            let Some(receipt) = state.receipts.get(&packed_refno(root)) else {
+                return false;
+            };
+            if !ack.matches(receipt) {
+                return false;
+            }
+            state.publication_acks.insert(packed_refno(root), ack);
+            true
+        };
+        if accepted && current && durable {
             self.touch_root(root);
             self.enforce_current_cache_limit(root);
         }
+        accepted
+    }
+
+    /// Whether this root has a memory overlay newer or different from the exact
+    /// content identity last confirmed by the durable store.
+    pub fn root_needs_persist(&self, root: RefNo) -> bool {
+        let scopes = self.read();
+        let Some(state) = scopes.get(&ScopeKey::Current) else {
+            return false;
+        };
+        let Some(receipt) = state.receipts.get(&packed_refno(root)) else {
+            return false;
+        };
+        !state
+            .publication_acks
+            .get(&packed_refno(root))
+            .is_some_and(|ack| ack.matches(receipt))
     }
 
     pub fn invalidate_publication_ack(&self, scope: ProjectionScope<'_>, root: RefNo) {
@@ -1421,6 +1486,8 @@ mod tests {
             dbnum,
             source_sesno: sesno,
             geometry_count: 1,
+            manifest_hash: "manifest".into(),
+            model_target: None,
             room_membership: false,
             room_generation: None,
             medium: crate::fast_model::model_db_adapter::PersistMedium::EmbeddedMem,
@@ -1504,6 +1571,8 @@ mod tests {
             dbnum: 7997,
             source_sesno: 42,
             geometry_count: 1,
+            manifest_hash: "manifest".into(),
+            model_target: None,
             room_membership: true,
             room_generation: Some("rooms-v1".into()),
             medium: crate::fast_model::model_db_adapter::PersistMedium::EmbeddedMem,
@@ -2182,6 +2251,8 @@ mod tests {
             dbnum: root.dbno(),
             source_sesno: 42,
             geometry_count: 1,
+            manifest_hash: if root == root_a { "a" } else { "b" }.into(),
+            model_target: None,
             room_membership: false,
             room_generation: None,
             medium: crate::fast_model::model_db_adapter::PersistMedium::RocksDb,
@@ -2201,5 +2272,45 @@ mod tests {
         assert_eq!(stats.evictions, 2);
         assert_eq!(stats.resident_bytes, 0);
         assert_eq!(stats.oversize_bypasses, 2);
+    }
+
+    #[test]
+    fn an_old_same_session_ack_cannot_advance_the_durable_watermark() {
+        let store = ModelMemoryStore::with_cache_limit(1024);
+        let root = RefNo::new(7997, 300);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                receipt: Some((
+                    root,
+                    RootReceipt {
+                        source_sesno: 42,
+                        model_target: None,
+                        manifest_hash: "new-content".into(),
+                        geometry_count: 0,
+                        published_via: "regen".into(),
+                    },
+                )),
+                ..Default::default()
+            }],
+        );
+        let accepted = store.record_publication_ack(
+            ProjectionScope::Current,
+            root,
+            RootPublicationAck {
+                dbnum: root.dbno(),
+                source_sesno: 42,
+                geometry_count: 0,
+                manifest_hash: "old-content".into(),
+                model_target: None,
+                room_membership: false,
+                room_generation: None,
+                medium: crate::fast_model::model_db_adapter::PersistMedium::RocksDb,
+            },
+        );
+        assert!(!accepted);
+        assert!(store.root_needs_persist(root));
+        let stats = store.cache_stats();
+        assert_eq!((stats.pending_roots, stats.durable_roots), (1, 0));
     }
 }

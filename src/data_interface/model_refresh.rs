@@ -398,62 +398,75 @@ impl ModelRefreshPolicy {
                     .iter()
                     .map(|(_, refno)| *refno)
                     .collect::<Vec<_>>();
-                let started = std::time::Instant::now();
-                let batched = match &rooms {
-                    Ok(rooms) => {
-                        crate::fast_model::model_db_adapter::persist_roots_batched(
-                            crate::fast_model::model_db_adapter::PersistTarget::process(),
-                            crate::fast_model::model_memory_store::ModelMemoryStore::global(),
-                            dbnum,
-                            &refnos,
-                            rooms.as_ref(),
-                        )
-                        .await?
-                    }
-                    Err(error) => {
-                        // 房间失败 = 该根失败（ADR-073 D1）：计算器冻不出来，本批一根都不落库，
-                        // 投影留在内存里、回执不盖，下一次任务重生成。
-                        let text = format!("room calculator unavailable for this task: {error:#}");
-                        crate::fast_model::model_db_adapter::BatchedPersist {
-                            failed: refnos.iter().map(|refno| (*refno, text.clone())).collect(),
-                            ..Default::default()
-                        }
-                    }
-                };
-                if let Some(rows) = batched.rows.as_ref() {
-                    room_edges_written = batched.room_edges;
-                    rows_upserted = rows.upserted;
-                    commits = rows.commits;
-                    max_transaction_bytes = batched.max_transaction_bytes;
+                if crate::options::store_mode().is_durable() {
+                    crate::fast_model::model_db_adapter::enqueue_roots_write_behind(
+                        dbnum,
+                        refnos.clone(),
+                    )
+                    .await?;
                     println!(
-                        "[model-persist] dbnum={dbnum} roots={} groups={} rows={} removed={} receipts={} room_edges={} commits={} max_transaction_bytes={} failed_roots={} elapsed_ms={}",
-                        refnos.len(),
-                        batched.groups,
-                        rows.upserted,
-                        rows.removed,
-                        rows.receipts,
-                        batched.room_edges,
-                        rows.commits,
-                        batched.max_transaction_bytes,
-                        batched.failed.len(),
-                        started.elapsed().as_millis()
+                        "[model-write-behind] dbnum={dbnum} roots={} memory=ready durable=pending",
+                        refnos.len()
                     );
-                }
-                let mut failed_by_refno = std::collections::BTreeMap::new();
-                for (refno, error) in batched.failed {
-                    failed_by_refno.insert(
-                        crate::fast_model::model_memory_store::packed_refno(refno),
-                        error,
-                    );
-                }
-                for (root, refno) in &publishable {
-                    if let Some(error) = failed_by_refno
-                        .get(&crate::fast_model::model_memory_store::packed_refno(*refno))
-                    {
-                        failures.push(RootGenerationFailure {
-                            root: root.clone(),
-                            error: error.clone(),
-                        });
+                } else {
+                    let started = std::time::Instant::now();
+                    let batched = match &rooms {
+                        Ok(rooms) => {
+                            crate::fast_model::model_db_adapter::persist_roots_batched(
+                                crate::fast_model::model_db_adapter::PersistTarget::process(),
+                                crate::fast_model::model_memory_store::ModelMemoryStore::global(),
+                                dbnum,
+                                &refnos,
+                                rooms.as_ref(),
+                            )
+                            .await?
+                        }
+                        Err(error) => {
+                            // 房间失败 = 该根失败（ADR-073 D1）：计算器冻不出来，本批一根都不落库，
+                            // 投影留在内存里、回执不盖，下一次任务重生成。
+                            let text =
+                                format!("room calculator unavailable for this task: {error:#}");
+                            crate::fast_model::model_db_adapter::BatchedPersist {
+                                failed: refnos.iter().map(|refno| (*refno, text.clone())).collect(),
+                                ..Default::default()
+                            }
+                        }
+                    };
+                    if let Some(rows) = batched.rows.as_ref() {
+                        room_edges_written = batched.room_edges;
+                        rows_upserted = rows.upserted;
+                        commits = rows.commits;
+                        max_transaction_bytes = batched.max_transaction_bytes;
+                        println!(
+                            "[model-persist] dbnum={dbnum} roots={} groups={} rows={} removed={} receipts={} room_edges={} commits={} max_transaction_bytes={} failed_roots={} elapsed_ms={}",
+                            refnos.len(),
+                            batched.groups,
+                            rows.upserted,
+                            rows.removed,
+                            rows.receipts,
+                            batched.room_edges,
+                            rows.commits,
+                            batched.max_transaction_bytes,
+                            batched.failed.len(),
+                            started.elapsed().as_millis()
+                        );
+                    }
+                    let mut failed_by_refno = std::collections::BTreeMap::new();
+                    for (refno, error) in batched.failed {
+                        failed_by_refno.insert(
+                            crate::fast_model::model_memory_store::packed_refno(refno),
+                            error,
+                        );
+                    }
+                    for (root, refno) in &publishable {
+                        if let Some(error) = failed_by_refno
+                            .get(&crate::fast_model::model_memory_store::packed_refno(*refno))
+                        {
+                            failures.push(RootGenerationFailure {
+                                root: root.clone(),
+                                error: error.clone(),
+                            });
+                        }
                     }
                 }
             }
@@ -702,11 +715,10 @@ mod tests {
         );
     }
 
-    /// ADR-071 D1 / D2 / 实施约束 2：模型行由本任务**同步、跨根合块**写进库——不等初始化 run 的
-    /// ACK、不等别的写者、不把根登记进文件轮次让别处稍后刷、不再一根一笔 `persist_root`。
-    /// 任何一处把这些形状接回来，这里就红。
+    /// RocksDB 模式只把已在 kv-mem 可读的根交给后台 writer，不等待数据库事务；
+    /// 非持久 process store 仍复用原来的跨根合块事务。
     #[test]
-    fn model_rows_are_persisted_in_task_without_acks_or_deferred_publication() {
+    fn durable_model_rows_are_handed_to_write_behind_after_memory_commit() {
         let source = include_str!("model_refresh.rs").replace("\r\n", "\n");
         let body = generate_roots_report_body(&source);
         for needle in [
@@ -725,8 +737,10 @@ mod tests {
             body.matches("model_db_adapter::persist_roots_batched(")
                 .count(),
             1,
-            "整批根只走一次跨根合块落库"
+            "非持久 process store 仍只走一次跨根合块落库"
         );
+        assert!(body.contains("model_db_adapter::enqueue_roots_write_behind("));
+        assert!(body.contains("memory=ready durable=pending"));
     }
 
     #[test]

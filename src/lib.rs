@@ -890,8 +890,8 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             fmt_elapsed(step_started.elapsed())
         );
     }
-    // ---- 统一水化段：启动只水化小型控制面。模型投影不再按 dbnum 整库读回；持久模式
-    // 在真实 root 请求处通过 `ensure_root_cached` 走索引 cache-aside，避免启动扫描和无界常驻。
+    // ---- 统一水化段：启动只水化小型控制面。模型投影绝不从 RocksDB 回填 kv-mem；
+    // RocksDB 直接服务冷根，kv-mem 只保留生成出的增量 overlay。
     let step_started = Instant::now();
     crate::data_interface::dbnum_state::DbnumState::enable_watermark_mirror();
     let hydrated_states =
@@ -2350,7 +2350,7 @@ pub async fn run_app(option: Option<DbOptionExt>) -> anyhow::Result<()> {
     // cleanup error is fatal: continuing would replay a prior process snapshot.
     //
     // 初始化发布 run 的 journal 恢复（`recover_before_cleanup`）已退役（ADR-071 S5，d-300）；
-    // 模型投影不在启动期水化；持久模式在 root 请求处按索引读透。启动清理
+    // 模型投影不在启动期水化、也不在 root 请求处回填。启动清理
     // `model_update_pending` 也没有了（ADR-072 D5）：那张表随第二条异步账退役，`run_cli` 的
     // 水化段用 `REMOVE TABLE IF EXISTS` 一次收掉；崩溃残留的出路是写入标记回退。
 
