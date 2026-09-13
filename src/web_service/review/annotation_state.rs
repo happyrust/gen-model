@@ -367,7 +367,7 @@ async fn apply_annotation_state(
     }
 
     let upsert_sql = r#"
-        UPSERT type::record('review_annotation_states', $composite_id) MERGE {
+        UPSERT type::thing('review_annotation_states', $composite_id) MERGE {
             form_id: $form_id,
             task_id: $task_id,
             annotation_id: $annotation_id,
@@ -746,7 +746,7 @@ pub async fn sync_annotation_states_from_snapshot(
             );
 
             let sql = r#"
-                UPSERT type::record('review_annotation_states', $composite_id) MERGE {
+                UPSERT type::thing('review_annotation_states', $composite_id) MERGE {
                     form_id: $form_id,
                     task_id: $task_id,
                     annotation_id: $annotation_id,

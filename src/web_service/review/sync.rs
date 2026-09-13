@@ -241,6 +241,14 @@ pub struct ImportResponse {
     pub error_message: Option<String>,
 }
 
+/// `import_review_data` 的「任务已存在？」探针。旧端原文是 `SELECT id FROM review_tasks …`，
+/// 整行读成 `Vec<serde_json::Value>`；本仓 2.1.4 fork 的 serde 桥把 record id 以 enum 喂给
+/// `serde_json::Value` 会直接报错（见 `mod.rs::sdk_compat_probe`），`unwrap_or_default()`
+/// 把它吞成「不存在」——`overwrite=true` 时本该 UPDATE 的任务会走 CREATE 撞已有 id、被计成
+/// skipped。这里把 record id 投成键字符串，读法与旧端等价（2026-09-13 R5 复核）。
+const IMPORT_TASK_EXISTS_SQL: &str =
+    "SELECT record::id(id) AS id FROM review_tasks WHERE record::id(id) = $id";
+
 /// POST /api/review/sync/import - 导入校审数据
 async fn import_review_data(Json(request): Json<ImportRequest>) -> impl IntoResponse {
     info!("Importing {} review tasks", request.tasks.len());
@@ -266,10 +274,9 @@ async fn import_review_data(Json(request): Json<ImportRequest>) -> impl IntoResp
 
     for task in request.tasks {
         // 检查任务是否已存在
-        let check_sql = "SELECT id FROM review_tasks WHERE record::id(id) = $id";
         let exists = match await_review_query(
             "review.sync.import.exists",
-            db.query(check_sql).bind(("id", task.id.clone())),
+            db.query(IMPORT_TASK_EXISTS_SQL).bind(("id", task.id.clone())),
         )
         .await
         {
@@ -396,5 +403,53 @@ async fn import_review_data(Json(request): Json<ImportRequest>) -> impl IntoResp
             error_message: None,
         }),
     )
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `POST /api/review/sync/import` 的存在性探针必须真能看见已有任务（计划 §7 SDK 半边）：
+    /// 命中 → 一行、`id` 是键字符串；不命中 → 空。用嵌入式 `mem://` 实跑，
+    /// 旧端 `SELECT id …` 原文在 2.1.4 fork 下会在 `take::<Vec<serde_json::Value>>` 处报 enum 错、
+    /// 被 `unwrap_or_default()` 吞成「不存在」（`overwrite=true` 的 UPDATE 语义静默失效）。
+    #[tokio::test]
+    async fn import_exists_probe_sees_existing_task_through_the_sdk_bridge() {
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem 引擎应能启动（kv-mem feature）");
+        db.use_ns("review_probe")
+            .use_db("sync_import_exists")
+            .await
+            .expect("use ns/db");
+        db.query("CREATE type::thing('review_tasks', 'task-import-1') SET title = 'imported'")
+            .await
+            .expect("seed 应执行")
+            .check()
+            .expect("seed 应成功");
+
+        let mut hit = db
+            .query(IMPORT_TASK_EXISTS_SQL)
+            .bind(("id", "task-import-1"))
+            .await
+            .expect("探针 SQL 应执行");
+        let rows: Vec<serde_json::Value> = hit
+            .take(0)
+            .expect("已有任务的探针行必须能读成 JSON，否则 import 永远以为任务不存在");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0]["id"], "task-import-1");
+
+        let mut miss = db
+            .query(IMPORT_TASK_EXISTS_SQL)
+            .bind(("id", "task-import-nope"))
+            .await
+            .expect("探针 SQL 应执行");
+        let rows: Vec<serde_json::Value> = miss.take(0).expect("不命中也是 Ok");
+        assert!(rows.is_empty(), "{rows:?}");
+    }
 }
 

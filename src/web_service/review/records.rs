@@ -499,7 +499,7 @@ pub(super) async fn create_record(
                 "review.records.refresh_noop",
                 db.query(
                     r#"
-                    UPDATE type::record('review_records', $id) MERGE {
+                    UPDATE type::thing('review_records', $id) MERGE {
                         task_id: $task_id,
                         form_id: $form_id,
                         type: $type,
@@ -567,7 +567,7 @@ pub(super) async fn create_record(
     let write_sql = match dimension_version_plan {
         DimensionDocumentVersionPlan::Update { .. } => {
             r#"
-            UPDATE type::record('review_records', $id) MERGE {
+            UPDATE type::thing('review_records', $id) MERGE {
                 task_id: $task_id,
                 form_id: $form_id,
                 type: $type,
@@ -598,7 +598,7 @@ pub(super) async fn create_record(
         }
         DimensionDocumentVersionPlan::Preserve { .. } if record_existed => {
             r#"
-            UPDATE type::record('review_records', $id) MERGE {
+            UPDATE type::thing('review_records', $id) MERGE {
                 task_id: $task_id,
                 form_id: $form_id,
                 type: $type,
@@ -620,7 +620,7 @@ pub(super) async fn create_record(
         DimensionDocumentVersionPlan::Create { .. }
         | DimensionDocumentVersionPlan::Preserve { .. } => {
             r#"
-            CREATE ONLY type::record('review_records', $id) CONTENT {
+            CREATE ONLY type::thing('review_records', $id) CONTENT {
                 task_id: $task_id,
                 form_id: $form_id,
                 type: $type,
@@ -865,11 +865,27 @@ pub(super) async fn get_records_by_task(Path(task_id): Path<String>) -> impl Int
     }
 }
 
+/// `delete_record` 的语句。旧端原文 `DELETE [type::record('review_records', $id)]`（数组目标）
+/// 只有旧端 3.x fork 的解析器认；本仓 2.1.4 fork 报 ``Unexpected token `[` ``，整条 500——
+/// 改为单记录目标，语义相同（2026-09-13 R5 复核，护栏 `tests::delete_record_sql_removes_exactly_that_row`）。
+///
+/// 构造子也换了：本仓 2.1.4 fork 的 `type::record` 是**值在前、表在后**，写成
+/// `type::record('review_records', $id)` 会把表名当值、把 id 当表，运行时报
+/// ``ConvertTo { from: Strand("review_records"), into: "record<`rec-a`>" }``。
+/// 用 `type::thing(表, id)` 才是这一档的正解。见本域的 `type_thing_is_the_only_record_constructor` 护栏。
+const DELETE_RECORD_SQL: &str = "DELETE type::thing('review_records', $id)";
+
+/// `clear_records_by_task` 的语句（两端逐字相同，2.1.4 fork 解析与执行都过）。
+const CLEAR_TASK_RECORDS_SQL: &str = r#"
+        LET $ids = SELECT VALUE id FROM review_records WHERE task_id = $task_id;
+        DELETE $ids;
+    "#;
+
 /// DELETE /api/review/records/:record_id - 删除记录
 pub(super) async fn delete_record(Path(record_id): Path<String>) -> impl IntoResponse {
     info!("Deleting record: {}", record_id);
 
-    let sql = "DELETE [type::record('review_records', $id)]";
+    let sql = DELETE_RECORD_SQL;
 
     let db = match fresh_review_db().await {
         Ok(db) => db,
@@ -916,10 +932,7 @@ pub(super) async fn delete_record(Path(record_id): Path<String>) -> impl IntoRes
 pub(super) async fn clear_records_by_task(Path(task_id): Path<String>) -> impl IntoResponse {
     info!("Clearing records for task: {}", task_id);
 
-    let sql = r#"
-        LET $ids = SELECT VALUE id FROM review_records WHERE task_id = $task_id;
-        DELETE $ids;
-    "#;
+    let sql = CLEAR_TASK_RECORDS_SQL;
 
     let db = match fresh_review_db().await {
         Ok(db) => db,
@@ -980,6 +993,130 @@ mod tests {
     use tower::ServiceExt;
 
     use crate::web_service::review::auth::TokenClaims;
+
+    async fn probe_db(db_name: &str) -> surrealdb::Surreal<surrealdb::engine::any::Any> {
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem 引擎应能启动（kv-mem feature）");
+        db.use_ns("review_probe").use_db(db_name).await.expect("use ns/db");
+        db
+    }
+
+    async fn record_ids(db: &surrealdb::Surreal<surrealdb::engine::any::Any>) -> Vec<String> {
+        let mut response = db
+            .query("SELECT record::id(id) AS id FROM review_records ORDER BY id ASC")
+            .await
+            .expect("SELECT 应执行");
+        let rows: Vec<serde_json::Value> = response.take(0).expect("JSON rows");
+        rows.into_iter()
+            .map(|row| row["id"].as_str().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    /// 本域任何 SurrealQL 都不许再写 `type::record('表', $id)`。
+    ///
+    /// 为什么值得一道文本护栏：这一族语句**解析得过、编译得过、单测也测不到**，只有真打到库上
+    /// 才会炸——本仓 2.1.4 fork 的 `type::record` 是「值在前、表在后」，写成表在前会把表名当值、
+    /// 把 id 当表，运行时报 ``ConvertTo { from: Strand("review_records"), into: "record<`rec-a`>" }``，
+    /// 前端看到的是 500。2026-09-13 R5 复核时本域一共 12 处这么写：records 5、comments 5、
+    /// annotation_states 2，覆盖「确认记录写入 / 评论删改 / 批注严重度 / 批注处理状态」四条前端主链路。
+    /// 全部改成 `type::thing(表, id)`（与本文件 seed 语句同款，实跑验证过）。
+    ///
+    /// 护栏只钉「表名字面量在前」那一种写法；`type::record($value)` 单参强转不在此列。
+    #[test]
+    fn type_thing_is_the_only_record_constructor_in_this_domain() {
+        const SOURCES: &[(&str, &str)] = &[
+            ("records.rs", include_str!("records.rs")),
+            ("comments.rs", include_str!("comments.rs")),
+            ("annotation_state.rs", include_str!("annotation_state.rs")),
+            ("tasks.rs", include_str!("tasks.rs")),
+            ("attachments.rs", include_str!("attachments.rs")),
+            ("sync.rs", include_str!("sync.rs")),
+            ("users.rs", include_str!("users.rs")),
+            ("auth.rs", include_str!("auth.rs")),
+        ];
+
+        // 针拆成两半拼出来：整串写在源码里，本护栏自己这一行就会被自己扫中。
+        let needle = concat!("type::", "record('");
+
+        let mut offenders = Vec::new();
+        for (name, source) in SOURCES {
+            for (lineno, line) in source.lines().enumerate() {
+                // 文档注释里引用旧端原文是允许的——那是史料，不是本仓要执行的语句。
+                if line.trim_start().starts_with("//") {
+                    continue;
+                }
+                if line.contains(needle) {
+                    offenders.push(format!("{name}:{}: {}", lineno + 1, line.trim()));
+                }
+            }
+        }
+
+        assert!(
+            offenders.is_empty(),
+            "本仓 2.1.4 fork 的 type::record 是值在前、表在后；表名在前会在运行时炸成 500。\
+             改用 type::thing(表, id)。命中：\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// `DELETE /api/review/records/item/{record_id}` 的语句在本仓 2.1.4 fork 下必须能解析
+    /// 并**只**删那一行（旧端 `DELETE [type::record(...)]` 数组目标在这里整条报解析错、
+    /// 前端删一条记录得到 500）。用嵌入式 `mem://` 实跑。
+    #[tokio::test]
+    async fn delete_record_sql_removes_exactly_that_row() {
+        let db = probe_db("records_delete").await;
+        db.query(
+            "CREATE type::thing('review_records', 'rec-a') SET task_id = 't1'; \
+             CREATE type::thing('review_records', 'rec-b') SET task_id = 't1';",
+        )
+        .await
+        .expect("seed")
+        .check()
+        .expect("seed ok");
+
+        db.query(DELETE_RECORD_SQL)
+            .bind(("id", "rec-a"))
+            .await
+            .expect("删除语句必须能被本仓解析器接受")
+            .check()
+            .expect("删除语句必须执行成功");
+        assert_eq!(record_ids(&db).await, vec!["rec-b".to_string()]);
+
+        // 删不存在的 id 也是 Ok（handler 对此回 200「记录已删除」，与旧端一致）。
+        db.query(DELETE_RECORD_SQL)
+            .bind(("id", "rec-nope"))
+            .await
+            .expect("执行")
+            .check()
+            .expect("删不存在的记录不报错");
+        assert_eq!(record_ids(&db).await, vec!["rec-b".to_string()]);
+    }
+
+    /// `DELETE /api/review/records/clear-task/{task_id}`：`LET $ids = SELECT VALUE id …; DELETE $ids`
+    /// 两端逐字相同，这里钉住它在 2.1.4 fork 下只清该任务的记录。
+    #[tokio::test]
+    async fn clear_task_records_sql_only_touches_that_task() {
+        let db = probe_db("records_clear").await;
+        db.query(
+            "CREATE type::thing('review_records', 'rec-a') SET task_id = 't1'; \
+             CREATE type::thing('review_records', 'rec-b') SET task_id = 't1'; \
+             CREATE type::thing('review_records', 'rec-c') SET task_id = 't2';",
+        )
+        .await
+        .expect("seed")
+        .check()
+        .expect("seed ok");
+
+        db.query(CLEAR_TASK_RECORDS_SQL)
+            .bind(("task_id", "t1"))
+            .await
+            .expect("清空语句必须能被本仓解析器接受")
+            .check()
+            .expect("清空语句必须执行成功");
+        assert_eq!(record_ids(&db).await, vec!["rec-c".to_string()]);
+    }
+
     #[test]
     fn test_confirmed_record_dimension_contract_is_camel_case_and_legacy_safe() {
         let legacy: ConfirmedRecordData = serde_json::from_value(json!({

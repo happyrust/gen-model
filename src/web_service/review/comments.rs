@@ -348,11 +348,11 @@ pub(super) async fn edit_comment(
     info!("Editing comment: {}", comment_id);
 
     let sql = r#"
-        LET $comment = SELECT * FROM type::record('review_comments', $id);
+        LET $comment = SELECT * FROM type::thing('review_comments', $id);
         IF $comment[0].author_id != $author_id {
             THROW "仅评论作者本人可编辑";
         };
-        UPDATE type::record('review_comments', $id) SET
+        UPDATE type::thing('review_comments', $id) SET
             content = $content,
             updated_at = time::now()
     "#;
@@ -432,7 +432,7 @@ pub(super) async fn delete_comment(
         author_id: Option<String>,
     }
 
-    let lookup_sql = "SELECT author_id FROM type::record('review_comments', $id)";
+    let lookup_sql = "SELECT author_id FROM type::thing('review_comments', $id)";
     let db = match fresh_review_db().await {
         Ok(db) => db,
         Err(e) => {
@@ -493,7 +493,7 @@ pub(super) async fn delete_comment(
     }
 
     let sql = r#"
-        UPDATE type::record('review_comments', $id) SET
+        UPDATE type::thing('review_comments', $id) SET
             deleted = true,
             deleted_at = time::now(),
             deleted_by = $user_id
@@ -685,7 +685,7 @@ where
         }
 
         let update_sql = r#"
-            UPDATE type::record('review_records', $id) SET
+            UPDATE type::thing('review_records', $id) SET
                 annotations = $annotations,
                 cloud_annotations = $cloud_annotations,
                 rect_annotations = $rect_annotations,

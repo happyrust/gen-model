@@ -109,7 +109,11 @@ struct AttachmentTaskContextRow {
 const ATTACHMENT_TASK_CONTEXT_BY_ID_SQL: &str = "SELECT record::id(id) AS logical_id, form_id, components, requester_id, current_node, attachments \
      FROM review_tasks WHERE record::id(id) = $id AND (deleted IS NONE OR deleted = false) LIMIT 1";
 
-const ATTACHMENT_TASK_CONTEXT_BY_FORM_SQL: &str = "SELECT record::id(id) AS logical_id, form_id, components, requester_id, current_node, attachments \
+/// 按 form_id 反查最早的那条任务。投影里多带一列 `created_at`：本仓 2.1.4 fork 的解析器要求
+/// `ORDER BY` 的字段出现在非 `*` 投影里（旧端 3.x fork 不要求），否则整条报
+/// ``Missing order idiom `created_at` ``、`DELETE /api/review/attachments/{id}` 一律 504——
+/// 行结构体不接这一列，响应形状不变（2026-09-13 R5 复核，护栏 `tests::task_context_by_form_sql_picks_the_earliest_task`）。
+const ATTACHMENT_TASK_CONTEXT_BY_FORM_SQL: &str = "SELECT record::id(id) AS logical_id, form_id, components, requester_id, current_node, attachments, created_at \
      FROM review_tasks WHERE form_id = $form_id AND (deleted IS NONE OR deleted = false) ORDER BY created_at ASC LIMIT 1";
 
 /// 已有任务的附件编辑权限：仅任务发起人在 sj（设计）节点可上传/删除。
@@ -874,5 +878,64 @@ async fn delete_attachment(
         }),
     )
         .into_response()
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn probe_db(db_name: &str) -> surrealdb::Surreal<surrealdb::engine::any::Any> {
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem 引擎应能启动（kv-mem feature）");
+        db.use_ns("review_probe").use_db(db_name).await.expect("use ns/db");
+        db
+    }
+
+    /// 两条任务上下文查询都必须能被本仓 2.1.4 fork 解析、读进 `AttachmentTaskContextRow`；
+    /// 按 form_id 的那条要取 `created_at` 最早的一行（旧端语义），且软删行不参与。
+    #[tokio::test]
+    async fn task_context_by_form_sql_picks_the_earliest_task() {
+        let db = probe_db("attachments_task_context").await;
+        db.query(
+            "CREATE type::thing('review_tasks', 'task-late') SET form_id = 'F-1', requester_id = 'u-late', current_node = 'jd', created_at = d'2026-09-13T02:00:00Z'; \
+             CREATE type::thing('review_tasks', 'task-early') SET form_id = 'F-1', requester_id = 'u-early', current_node = 'sj', created_at = d'2026-09-13T01:00:00Z', components = [{ id: 'c1', name: 'BRAN', refNo: '24381/145018', type: 'pipe' }]; \
+             CREATE type::thing('review_tasks', 'task-deleted') SET form_id = 'F-1', requester_id = 'u-gone', created_at = d'2026-09-13T00:00:00Z', deleted = true;",
+        )
+        .await
+        .expect("seed")
+        .check()
+        .expect("seed ok");
+
+        let mut by_form = db
+            .query(ATTACHMENT_TASK_CONTEXT_BY_FORM_SQL)
+            .bind(("form_id", "F-1"))
+            .await
+            .expect("按 form_id 的上下文查询必须能被本仓解析器接受（ORDER BY 列要在投影里）");
+        let rows: Vec<AttachmentTaskContextRow> = by_form.take(0).expect("typed rows");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let row = &rows[0];
+        assert_eq!(row.logical_id.as_deref(), Some("task-early"));
+        assert_eq!(row.requester_id.as_deref(), Some("u-early"));
+        assert_eq!(row.current_node.as_deref(), Some("sj"));
+        assert_eq!(
+            row.components.as_ref().map(|c| c[0].ref_no.as_str()),
+            Some("24381/145018")
+        );
+
+        let mut by_id = db
+            .query(ATTACHMENT_TASK_CONTEXT_BY_ID_SQL)
+            .bind(("id", "task-late"))
+            .await
+            .expect("按 id 的上下文查询必须能被本仓解析器接受");
+        let rows: Vec<AttachmentTaskContextRow> = by_id.take(0).expect("typed rows");
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].logical_id.as_deref(), Some("task-late"));
+        assert_eq!(rows[0].current_node.as_deref(), Some("jd"));
+    }
 }
 

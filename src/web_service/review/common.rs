@@ -263,9 +263,16 @@ pub(super) struct TaskRow {
     pub(super) updated_at: Option<surrealdb::sql::Datetime>,
     /// Historical writes stored RFC3339 strings (see `create_task` /
     /// `update_task`), while newer rows may store native `time::*` datetime.
-    /// Accept the dynamic SurrealDB `Value` here so deserialization does not
-    /// fail the entire page when a single legacy row carries a string.
-    pub(super) due_date: Option<surrealdb::sql::Value>,
+    /// Accept a dynamic value here so deserialization does not fail the entire
+    /// page when a single legacy row carries a string.
+    ///
+    /// 旧端接的是 `Option<surrealdb_types::Value>`（`SurrealValue` 原生取值）；本仓 2.1.4 fork
+    /// 走 serde 桥（`mod.rs::sdk_compat_probe`），桥把 datetime / 字符串都送成裸字符串、数字送成
+    /// 数字，`sql::Value` 的 enum `Deserialize` 接不住裸字符串（`unknown variant`），一行带
+    /// due_date 就让 `take::<Vec<TaskRow>>` 整页报错。`serde_json::Value` 三种形态都接得住，
+    /// 再交给 [`value_to_timestamp_millis`]（RFC 3339 / 毫秒数 / 秒数都认）——
+    /// 护栏 `task_row_reads_every_due_date_shape_through_the_sdk_bridge`。
+    pub(super) due_date: Option<Value>,
     pub(super) current_node: Option<String>,
     pub(super) workflow_history: Option<Vec<WorkflowStep>>,
     pub(super) return_reason: Option<String>,
@@ -310,7 +317,7 @@ impl TaskRow {
             review_comment: self.review_comment,
             created_at: datetime_to_millis(&self.created_at),
             updated_at: datetime_to_millis(&self.updated_at),
-            due_date: flexible_value_to_millis(self.due_date.as_ref()),
+            due_date: self.due_date.as_ref().and_then(value_to_timestamp_millis),
             current_node: self.current_node.unwrap_or_else(default_current_node),
             workflow_history: self.workflow_history.unwrap_or_default(),
             return_reason: self.return_reason,
@@ -846,46 +853,9 @@ pub(super) fn datetime_to_millis(dt: &Option<surrealdb::sql::Datetime>) -> i64 {
         .unwrap_or_else(|| chrono::Utc::now().timestamp_millis())
 }
 
-/// Converts a dynamic SurrealDB `Value` into millis-since-epoch, accepting
-/// both native `Datetime` (current writers) and RFC3339 strings (legacy
-/// writers in `create_task` / `update_task`).
-pub(super) fn flexible_value_to_millis(value: Option<&surrealdb::sql::Value>) -> Option<i64> {
-    match value? {
-        surrealdb::sql::Value::None | surrealdb::sql::Value::Null => None,
-        surrealdb::sql::Value::Datetime(dt) => Some(dt.timestamp_millis()),
-        surrealdb::sql::Value::Strand(s) => {
-            let trimmed = s.trim();
-            if trimmed.is_empty() {
-                None
-            } else {
-                chrono::DateTime::parse_from_rfc3339(trimmed)
-                    .ok()
-                    .map(|dt| dt.timestamp_millis())
-            }
-        }
-        surrealdb::sql::Value::Number(n) => match n {
-            surrealdb::sql::Number::Int(i) => Some(*i),
-            surrealdb::sql::Number::Float(f) => Some(*f as i64),
-            surrealdb::sql::Number::Decimal(d) => d.to_string().parse::<i64>().ok(),
-            // 2.1.4 fork 的 `Number` 是 `#[non_exhaustive]`（旧端 3.x fork 三个变体封闭）；
-            // 未知数值形态与旧端 `other` 分支同口径：告警 + None。
-            other => {
-                warn!(
-                    "flexible_value_to_millis: unsupported numeric variant for due_date-like field: {:?}",
-                    other
-                );
-                None
-            }
-        },
-        other => {
-            warn!(
-                "flexible_value_to_millis: unsupported variant for due_date-like field: {:?}",
-                other
-            );
-            None
-        }
-    }
-}
+// 旧端 `flexible_value_to_millis(Option<&surrealdb_types::Value>)` 在这里没有对应物：
+// `TaskRow.due_date` 经 serde 桥落成 `serde_json::Value`，直接交给 `value_to_timestamp_millis`
+// （见 `TaskRow::due_date` 的注释与护栏测试）。
 
 pub(super) fn parse_datetime(s: &Option<String>) -> i64 {
     s.as_ref()
@@ -1402,6 +1372,171 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].id, "task-good-1");
         assert_eq!(tasks[1].id, "task-legacy-2");
+    }
+
+    /// 计划 §7「7k 行拆分时形状走样」的 SDK 半边（2026-09-13 R5 复核）：`review_tasks` 整页经
+    /// 2.1.4 fork 的 serde 桥读成 `TaskRow` 时，`due_date` 的三种在库形态——`create_task` /
+    /// `update_task` 写的 RFC 3339 **字符串**、原生 datetime、缺省——都必须落成毫秒 / None。
+    /// 旧端 `Option<surrealdb_types::Value>` 走 `SurrealValue` 原生取值天然接得住；这里走
+    /// serde 桥，桥把 datetime / 字符串都送成裸字符串，`sql::Value` 的 enum `Deserialize`
+    /// 接不住（`unknown variant`），一行 due_date 就让 `take::<Vec<TaskRow>>` 整页报错——
+    /// 表现是带截止日期的任务从列表消失、对它的写操作 404。用嵌入式 `mem://` 实跑钉住。
+    #[tokio::test]
+    async fn task_row_reads_every_due_date_shape_through_the_sdk_bridge() {
+        let db = surrealdb::engine::any::connect("mem://")
+            .await
+            .expect("mem 引擎应能启动（kv-mem feature）");
+        db.use_ns("review_probe")
+            .use_db("task_row_due_date")
+            .await
+            .expect("use ns/db");
+
+        let due_string = "2026-09-20T08:00:00+00:00";
+        let due_datetime = chrono::DateTime::parse_from_rfc3339("2026-09-21T08:00:00Z")
+            .expect("rfc3339")
+            .with_timezone(&chrono::Utc);
+        db.query(
+            "CREATE type::thing('review_tasks', 'due-string') SET title = 'string', created_at = time::now(), due_date = $due_string; \
+             CREATE type::thing('review_tasks', 'due-datetime') SET title = 'datetime', created_at = time::now(), due_date = $due_datetime; \
+             CREATE type::thing('review_tasks', 'due-none') SET title = 'none', created_at = time::now();",
+        )
+        .bind(("due_string", due_string))
+        .bind(("due_datetime", surrealdb::sql::Datetime::from(due_datetime)))
+        .await
+        .expect("seed 应执行")
+        .check()
+        .expect("seed 三条语句都应成功");
+
+        let mut response = db
+            .query("SELECT * FROM review_tasks ORDER BY title ASC")
+            .await
+            .expect("SELECT 应执行");
+        let rows: Vec<TaskRow> = response
+            .take(0)
+            .expect("整页 TaskRow 必须能经 serde 桥读出：一行 due_date 读不出会让整页为空、写操作 404");
+        let tasks: Vec<ReviewTask> = rows.into_iter().map(TaskRow::to_review_task).collect();
+        assert_eq!(tasks.len(), 3, "{tasks:?}");
+        let by_id = |id: &str| {
+            tasks
+                .iter()
+                .find(|task| task.id == id)
+                .unwrap_or_else(|| panic!("missing {id}: {tasks:?}"))
+        };
+        assert_eq!(
+            by_id("due-string").due_date,
+            Some(
+                chrono::DateTime::parse_from_rfc3339(due_string)
+                    .unwrap()
+                    .timestamp_millis()
+            ),
+            "RFC 3339 字符串形态（现役写法）"
+        );
+        assert_eq!(
+            by_id("due-datetime").due_date,
+            Some(due_datetime.timestamp_millis()),
+            "原生 datetime 形态"
+        );
+        assert_eq!(by_id("due-none").due_date, None, "缺省形态");
+        // 对外仍是北京时间字符串（`serialize_optional_beijing_datetime_millis`），与旧端逐字一致。
+        let json = serde_json::to_value(by_id("due-string")).expect("serialize");
+        assert_eq!(json["dueDate"], "2026-09-20 16:00:00");
+    }
+
+    /// 从（已剥注释的）源码里挑出 SurrealQL 字面量：`r#"…"#` 原始串（可多行）与普通 `"…"` 串
+    /// （处理 `\"` 与行尾 `\` 续行），只认以语句关键字开头的。返回 `(起始行号, 文本)`。
+    fn surrealql_literals(source: &str) -> Vec<(usize, String)> {
+        const KEYWORDS: [&str; 12] = [
+            "SELECT", "UPDATE", "CREATE", "DELETE", "INSERT", "UPSERT", "LET ", "BEGIN", "RETURN",
+            "DEFINE", "IF ", "RELATE",
+        ];
+        let bytes = source.as_bytes();
+        let mut out = Vec::new();
+        let mut i = 0usize;
+        let line_of = |at: usize| source[..at].matches('\n').count() + 1;
+        while i < bytes.len() {
+            if source[i..].starts_with("r#\"") {
+                let start = i + 3;
+                let Some(len) = source[start..].find("\"#") else { break };
+                out.push((line_of(i), source[start..start + len].to_string()));
+                i = start + len + 2;
+            } else if bytes[i] == b'"' {
+                let mut text = String::new();
+                let mut j = i + 1;
+                while j < bytes.len() && bytes[j] != b'"' {
+                    if bytes[j] == b'\\' {
+                        match bytes.get(j + 1) {
+                            Some(b'\n') | Some(b'\r') => {
+                                j += 1;
+                                while j < bytes.len() && (bytes[j] as char).is_whitespace() {
+                                    j += 1;
+                                }
+                                continue;
+                            }
+                            Some(b'n') => text.push('\n'),
+                            Some(&c) => text.push(c as char),
+                            None => {}
+                        }
+                        j += 2;
+                        continue;
+                    }
+                    let ch = source[j..].chars().next().unwrap();
+                    text.push(ch);
+                    j += ch.len_utf8();
+                }
+                out.push((line_of(i), text));
+                i = j + 1;
+            } else {
+                // 按字符步进：源码里有中文注释与字面量，按字节 +1 会切进多字节字符。
+                i += source[i..].chars().next().map_or(1, char::len_utf8);
+            }
+        }
+        // 关键字按大写原样匹配（本域 SQL 一律大写），且得引用 `review_*` 表——
+        // 挡住 "return" / "insert … failed" 这类日志文案与测试断言消息。
+        out.into_iter()
+            .filter(|(_, text)| {
+                let head = text.trim_start();
+                KEYWORDS.iter().any(|k| head.starts_with(k)) && text.contains("review_")
+            })
+            .collect()
+    }
+
+    /// 计划 §7 SDK 风险的另一半：handler 逐字搬运，SurrealQL 字符串也逐字搬运，但引擎从旧端
+    /// 3.x fork 换成了本仓 2.1.4 fork——语法不被本仓解析器接受的语句会在运行时整条 500，
+    /// 对前端就是「旧端能用、新端静默失效」。这里把八个 T2 文件里每条静态 SurrealQL 字面量
+    /// 过一遍 `surrealdb::sql::parse`（含 `{}` 的是 `format!` 模板，跳过并计数）。
+    #[test]
+    fn every_static_surrealql_literal_in_review_handlers_parses_under_the_bundled_engine() {
+        let sources: [(&str, &str); 8] = [
+            ("tasks.rs", include_str!("tasks.rs")),
+            ("records.rs", include_str!("records.rs")),
+            ("comments.rs", include_str!("comments.rs")),
+            ("annotation_state.rs", include_str!("annotation_state.rs")),
+            ("attachments.rs", include_str!("attachments.rs")),
+            ("sync.rs", include_str!("sync.rs")),
+            ("users.rs", include_str!("users.rs")),
+            ("common.rs", include_str!("common.rs")),
+        ];
+        let (mut parsed, mut templates) = (0usize, 0usize);
+        let mut failures = Vec::new();
+        for (file, source) in sources {
+            for (line, sql) in surrealql_literals(&strip_comments(source)) {
+                if sql.contains("{}") {
+                    templates += 1;
+                    continue;
+                }
+                match surrealdb::sql::parse(&sql) {
+                    Ok(_) => parsed += 1,
+                    Err(error) => failures.push(format!("{file}:{line}: {error}\n    {sql}")),
+                }
+            }
+        }
+        println!("surrealql literals: parsed={parsed} format_templates_skipped={templates}");
+        assert!(parsed >= 40, "扫描器没认出足够的 SurrealQL 字面量（parsed={parsed}），扫描器本身坏了");
+        assert!(
+            failures.is_empty(),
+            "以下 SurrealQL 在本仓 2.1.4 fork 下解析失败（运行时会整条 500）：\n{}",
+            failures.join("\n")
+        );
     }
 
     // ========================================================================
