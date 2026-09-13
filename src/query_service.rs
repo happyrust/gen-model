@@ -581,6 +581,21 @@ impl QueryService {
 
     async fn room(&self, args: RefnoArgs) -> Result<Value, QueryError> {
         let refno = parsed_model_refno(&args.refno)?;
+        if crate::options::data_face().is_read_through() && crate::options::room_membership() {
+            let tree = self.direct_tree.get().await
+                .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?;
+            return crate::data_interface::room_read_through::lookup(refno, tree).await
+                .map_err(|error| {
+                    let code = if error.is::<crate::data_interface::room_read_through::RoomNotReady>() {
+                        "UPDATING"
+                    } else if error.chain().any(|cause| matches!(
+                        cause.downcast_ref::<crate::data_interface::direct_store::DirectStoreError>(),
+                        Some(crate::data_interface::direct_store::DirectStoreError::NoSuchElement { refno: missing, .. })
+                            if missing == &refno.to_string() || missing == &refno.to_pdms_str()
+                    )) { "NOT_FOUND" } else { "SOURCE_UNAVAILABLE" };
+                    QueryError::new(code, error)
+                });
+        }
         Self::ensure_model_db().await?;
         let _published_view_guard = crate::fast_model::spatial_state::lock_spatial_serial().await;
         #[derive(Deserialize)]

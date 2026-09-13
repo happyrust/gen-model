@@ -169,6 +169,8 @@ pub mod geom_error;
 pub mod embedded_surql;
 
 pub mod generation_root;
+pub(crate) mod room_read_through;
+pub(crate) mod generation_flight;
 
 /// Core3D 粒度/去重规则的可执行参考模型。**不在生产路径上**——它是给
 /// `generation_root` / `model_update_plan` 当契约的，见模块头。

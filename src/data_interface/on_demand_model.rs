@@ -241,6 +241,39 @@ impl AiosDBManager {
         root_noun: &str,
         force: bool,
     ) -> anyhow::Result<OnDemandModelResult> {
+        // Detached producers must never lose an active transaction or frozen window.
+        if super::model_read_route::memory_only_scope().is_some()
+            || super::batch_worker::active_data_window().is_some()
+            || super::staging::write_context::active_staging_writes().is_some()
+        {
+            return self.ensure_exact_generation_root_inner(requested_refno, root, root_noun, force).await;
+        }
+        static FLIGHTS: std::sync::OnceLock<super::generation_flight::Flights<OnDemandModelResult>> = std::sync::OnceLock::new();
+        let version = generation_source_identity(root).await?;
+        let key = format!("{}|{}|{}|{}|{}", self.db_option.project_name,
+            self.db_option.mdb_name, root.to_pdms_str(), force, version);
+        let manager = self.clone();
+        let noun = root_noun.to_string();
+        let future = FLIGHTS.get_or_init(Default::default).run(key, async move {
+            manager.ensure_exact_generation_root_inner(root, root, &noun, force).await
+        });
+        let mut result = tokio::time::timeout(std::time::Duration::from_secs(110), future).await
+            .map_err(|_| ModelGenerationInProgress { root_refno: root.to_pdms_str() })??;
+        anyhow::ensure!(generation_source_identity(root).await? == version,
+            ModelGenerationInProgress { root_refno: root.to_pdms_str() });
+        anyhow::ensure!(tokio::task::spawn_blocking(move || memory_root_current(root)).await?,
+            ModelGenerationInProgress { root_refno: root.to_pdms_str() });
+        result.requested_refno = requested_refno.to_pdms_str();
+        Ok(result)
+    }
+
+    async fn ensure_exact_generation_root_inner(
+        &self,
+        requested_refno: RefnoEnum,
+        root: RefnoEnum,
+        root_noun: &str,
+        force: bool,
+    ) -> anyhow::Result<OnDemandModelResult> {
         crate::data_interface::model_rebuild::reject_ensure_during_rebuild(root).await?;
         let root_refno = root.to_pdms_str();
         let _guard = try_generation_root(&root_refno)?;
@@ -525,7 +558,25 @@ fn memory_root_current(root: RefnoEnum) -> bool {
                 root,
             )
         })
-        .is_some()
+        .is_some_and(|receipt| {
+            // Frozen/task-local callers retain their pinned-window cache semantics.
+            if super::model_read_route::memory_only_scope().is_some()
+                || super::batch_worker::active_data_window().is_some()
+                || super::staging::write_context::active_staging_writes().is_some() {
+                return true;
+            }
+            receipt.model_target.as_ref().is_some_and(|target|
+                super::room_read_through::target_current(target).unwrap_or(false))
+        })
+}
+
+async fn generation_source_identity(root: RefnoEnum) -> anyhow::Result<String> {
+    tokio::task::spawn_blocking(move || {
+        let native = super::generation_root::refno_to_e3d(root);
+        let version = super::model_source::root_source_version(native)?;
+        let source = super::frozen_source::FrozenSource::capture(version.file)?;
+        source.commit_token_json()
+    }).await?
 }
 
 fn memory_counts(roots: &[RefnoEnum]) -> InstanceCounts {

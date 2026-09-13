@@ -102,8 +102,12 @@ impl DirectTreeService {
         Ok(metadata)
     }
 
-    fn is_current(&self) -> bool {
+    pub(crate) fn is_current(&self) -> bool {
         self.reader.view().is_ok_and(|view| Arc::ptr_eq(&self.store, &view))
+    }
+
+    pub(crate) fn source_metadata(&self, dbnum: u32) -> anyhow::Result<e3d_io::db_element::DbMetadata> {
+        Ok(self.store.metadata(dbnum)?)
     }
 
     pub fn project(&self) -> &str {
