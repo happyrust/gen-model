@@ -289,7 +289,14 @@ pub async fn persist_root(root: RefNo) -> anyhow::Result<PersistedRows> {
 struct WriteBehindJob {
     dbnum: u32,
     roots: Vec<RefNo>,
+    settlement: Option<WriteBehindSettlement>,
     attempt: u32,
+}
+
+#[derive(Debug, Clone)]
+struct WriteBehindSettlement {
+    target_sesno: i32,
+    target_time: Option<String>,
 }
 
 struct WriteBehindQueue {
@@ -313,10 +320,7 @@ fn write_behind_queue() -> &'static WriteBehindQueue {
 /// Hand durable publication to the process-local writer. Generation has already
 /// committed the complete root snapshots to kv-mem before this call; waiting for
 /// queue capacity never waits for RocksDB I/O.
-pub async fn enqueue_roots_write_behind(
-    dbnum: u32,
-    roots: Vec<RefNo>,
-) -> anyhow::Result<()> {
+pub async fn enqueue_roots_write_behind(dbnum: u32, roots: Vec<RefNo>) -> anyhow::Result<()> {
     anyhow::ensure!(
         crate::options::store_mode().is_durable(),
         "model write-behind requires a durable process store"
@@ -333,6 +337,35 @@ pub async fn enqueue_roots_write_behind(
         .send(WriteBehindJob {
             dbnum,
             roots,
+            settlement: None,
+            attempt: 0,
+        })
+        .await
+        .map_err(|_| anyhow::anyhow!("model write-behind worker stopped"))
+}
+
+/// Queue the durable database watermark behind all root writes already handed
+/// to this FIFO. The worker also reconciles any still-pending memory roots
+/// before advancing `dbnum_watermark.model_sesno`, so a retry can never leave
+/// the durable watermark ahead of RocksDB model rows.
+pub(crate) async fn enqueue_model_watermark_write_behind(
+    dbnum: u32,
+    target_sesno: i32,
+    target_time: Option<String>,
+) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        crate::options::store_mode().is_durable(),
+        "model watermark write-behind requires a durable process store"
+    );
+    write_behind_queue()
+        .sender
+        .send(WriteBehindJob {
+            dbnum,
+            roots: Vec::new(),
+            settlement: Some(WriteBehindSettlement {
+                target_sesno,
+                target_time,
+            }),
             attempt: 0,
         })
         .await
@@ -344,6 +377,19 @@ async fn run_write_behind(
     retry_sender: tokio::sync::mpsc::Sender<WriteBehindJob>,
 ) {
     while let Some(mut job) = receiver.recv().await {
+        if let Some(settlement) = job.settlement.as_ref() {
+            if let Err(error) = settle_model_watermark(job.dbnum, settlement).await {
+                log::warn!(
+                    "model watermark write-behind dbnum={} target={} failed at attempt {}: {error:#}",
+                    job.dbnum,
+                    settlement.target_sesno,
+                    job.attempt + 1
+                );
+                schedule_write_behind_retry(job, &retry_sender);
+            }
+            continue;
+        }
+
         job.roots.retain(|root| {
             root.dbno() == job.dbnum && ModelMemoryStore::global().root_needs_persist(*root)
         });
@@ -401,16 +447,87 @@ async fn run_write_behind(
         }
 
         job.roots = retry_roots;
-        job.attempt = job.attempt.saturating_add(1);
-        let delay_secs = 1u64 << job.attempt.min(5);
-        let sender = retry_sender.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
-            if sender.send(job).await.is_err() {
-                log::error!("model write-behind retry was dropped because the worker stopped");
-            }
-        });
+        schedule_write_behind_retry(job, &retry_sender);
     }
+}
+
+fn schedule_write_behind_retry(
+    mut job: WriteBehindJob,
+    retry_sender: &tokio::sync::mpsc::Sender<WriteBehindJob>,
+) {
+    job.attempt = job.attempt.saturating_add(1);
+    let delay_secs = 1u64 << job.attempt.min(5);
+    let sender = retry_sender.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(delay_secs)).await;
+        if sender.send(job).await.is_err() {
+            log::error!("model write-behind retry was dropped because the worker stopped");
+        }
+    });
+}
+
+async fn settle_model_watermark(
+    dbnum: u32,
+    settlement: &WriteBehindSettlement,
+) -> anyhow::Result<()> {
+    let store = ModelMemoryStore::global();
+    let rooms = frozen_room_calculator()?;
+    settle_model_watermark_on(
+        PersistTarget::process(),
+        store,
+        dbnum,
+        settlement,
+        rooms.as_ref(),
+    )
+    .await
+}
+
+async fn settle_model_watermark_on(
+    target: PersistTarget<'_>,
+    store: &ModelMemoryStore,
+    dbnum: u32,
+    settlement: &WriteBehindSettlement,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+) -> anyhow::Result<()> {
+    let pending = store.pending_roots_of_dbnum(dbnum);
+    if !pending.is_empty() {
+        let report = persist_roots_batched(target, store, dbnum, &pending, rooms).await?;
+        anyhow::ensure!(
+            report.failed.is_empty(),
+            "{} model roots remain unpersisted",
+            report.failed.len()
+        );
+    }
+
+    let remaining = store.pending_roots_of_dbnum(dbnum);
+    anyhow::ensure!(
+        remaining.is_empty(),
+        "{} model roots changed while settling the durable watermark",
+        remaining.len()
+    );
+
+    let receipt = crate::data_interface::task_end::commit_task_end_on(
+        target.db,
+        &crate::data_interface::task_end::TaskEnd {
+            dbnum,
+            target_sesno: settlement.target_sesno,
+            target_time: settlement.target_time.clone(),
+            model: Some(crate::data_interface::task_end::TaskModelOutcome {
+                all_roots_ok: true,
+                dead_roots: 0,
+            }),
+            info: None,
+            // The foreground closes its write marker before returning. This
+            // background transaction advances only the durable model waterline.
+            closes_task: false,
+        },
+    )
+    .await?;
+    anyhow::ensure!(
+        receipt.model_sesno == Some(settlement.target_sesno),
+        "durable model watermark was blocked by the data watermark"
+    );
+    Ok(())
 }
 
 /// 跑一次旧 `direct_*` 命名空间的清扫（[`render_legacy_prefix_sweep_once`]）。
@@ -3575,6 +3692,58 @@ mod tests {
         let rows = persist_root_on(target, &empty, root).await.unwrap();
         assert_eq!(rows.removed, 2);
         assert_eq!(count(&db, "inst_relate").await, 0);
+    }
+
+    #[tokio::test]
+    async fn durable_settlement_persists_pending_roots_before_advancing_model_watermark() {
+        let db = surreal_mem().await;
+        seed_pe(&db).await;
+        let root = RefNo::new(24383, 1);
+        seed_gen_roots(&db, &[root]).await;
+        db.query(format!(
+            "UPSERT dbnum_watermark:{BATCH_DBNUM} SET dbnum={BATCH_DBNUM}, \
+             applied_sesno=42, model_sesno=41;"
+        ))
+        .await
+        .expect("seed watermark")
+        .check()
+        .expect("seed watermark statement");
+
+        let store = ModelMemoryStore::default();
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![baked_record()],
+                receipt: Some(test_receipt(root, 1)),
+                ..ProjectionCommit::default()
+            }],
+        );
+        assert_eq!(store.pending_roots_of_dbnum(BATCH_DBNUM), vec![root]);
+
+        settle_model_watermark_on(
+            PersistTarget::new(&db, PersistMedium::RocksDb),
+            &store,
+            BATCH_DBNUM,
+            &WriteBehindSettlement {
+                target_sesno: 42,
+                target_time: None,
+            },
+            None,
+        )
+        .await
+        .expect("settle durable model watermark");
+
+        assert!(store.pending_roots_of_dbnum(BATCH_DBNUM).is_empty());
+        assert_eq!(publication_status_of(&db, root).await, "ready");
+        let mut response = db
+            .query(format!(
+                "SELECT VALUE model_sesno FROM dbnum_watermark:{BATCH_DBNUM};"
+            ))
+            .await
+            .expect("read watermark")
+            .check()
+            .expect("watermark statement");
+        assert_eq!(response.take::<Option<i32>>(0).unwrap(), Some(42));
     }
 
     /// 切块提交的三条顺序：分支重置只在第一块（否则后一块把前一块的管身删掉）、管身槽位

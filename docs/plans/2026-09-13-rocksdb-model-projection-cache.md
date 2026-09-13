@@ -19,12 +19,13 @@ model_cache_max_bytes = 2147483648
 
 ## 双水位
 
-正确性按 root 判断，库级最大会话号只可用于统计：
+内容正确性按 root 判断；库级会话水位只在全部 root 追平后表示整库持久进度：
 
 - memory watermark：`RootReceipt` 的 `source_sesno + manifest_hash + geometry_count + model_target`。
 - durable watermark：RocksDB 根事务成功后的 `RootPublicationAck`，携带同一组内容身份。
 - 两者完全相同才是 clean；否则是 pending/dirty，不能淘汰。
 - 同 sesno 不同 manifest 或 target 仍是新内容，旧后台任务完成后不得误推进 ACK。
+- database watermark：后台水位栅栏确认该 dbnum 没有 pending root 后，才推进 RocksDB 中的 `model_sesno`。
 
 ## 生命周期
 
@@ -32,7 +33,9 @@ model_cache_max_bytes = 2147483648
 2. 刷新任务只等待 bounded queue 接收 root，不等待数据库 I/O。
 3. 后台 writer 从当前完整内存快照渲染幂等替换事务并提交 RocksDB。
 4. 事务成功后，只有 ACK 与当前 `RootReceipt` 完全一致才推进 durable 水位。
-5. 水位追平后，该 root 才可按内存上限参与 LRU 淘汰。
+5. 前台任务只关闭本轮 `writing` 标记，不推进 `model_sesno`，因此下一批增量可以继续进入 kv-mem。
+6. 队列中的整库水位栅栏自动补齐该 dbnum 尚未获得精确 ACK 的 root；全部追平后，后台才在 RocksDB 推进 `dbnum_watermark.model_sesno`。
+7. 水位追平后，该 root 才可按内存上限参与 LRU 淘汰。
 
 ## 可观测性与验收
 
@@ -41,3 +44,4 @@ model_cache_max_bytes = 2147483648
 - 内存 root 必须覆盖 RocksDB 中同 root 的旧版本。
 - RocksDB 不可用时 pending root 保留且继续可读；后台重试不得阻塞生成请求。
 - 同 sesno 不同内容的旧 ACK 不得使 root clean 或可淘汰。
+- RocksDB 根事务尚未全部完成时，`model_sesno` 不得提前；后台水位栅栏完成后才单调推进。

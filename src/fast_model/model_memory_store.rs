@@ -934,7 +934,9 @@ impl ModelMemoryStore {
                 .as_ref()
                 .is_none_or(|target| target.design.dbnum != dbnum)
         });
-        state.invalidated_roots.retain(|packed| RefNo::new((*packed >> 32) as u32, *packed as u32).dbno() != dbnum);
+        state
+            .invalidated_roots
+            .retain(|packed| RefNo::new((*packed >> 32) as u32, *packed as u32).dbno() != dbnum);
         state.publication_acks.retain(|_, ack| ack.dbnum != dbnum);
         state.published_sesno.remove(&dbnum);
         for record in records {
@@ -1105,7 +1107,9 @@ impl ModelMemoryStore {
                 .as_ref()
                 .is_some_and(|target| target.design.dbnum != dbnum)
         });
-        state.invalidated_roots.retain(|packed| RefNo::new((*packed >> 32) as u32, *packed as u32).dbno() != dbnum);
+        state
+            .invalidated_roots
+            .retain(|packed| RefNo::new((*packed >> 32) as u32, *packed as u32).dbno() != dbnum);
         state.publication_acks.retain(|_, ack| ack.dbnum != dbnum);
         state.published_sesno.remove(&dbnum);
         state.room_changes.remove(&dbnum);
@@ -1201,7 +1205,9 @@ impl ModelMemoryStore {
                     .receipts
                     .keys()
                     .chain(state.invalidated_roots.iter())
-                    .copied().collect::<BTreeSet<_>>().into_iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
                     .map(|packed| RefNo::new((packed >> 32) as u32, packed as u32))
                     .collect()
             })
@@ -1294,6 +1300,16 @@ impl ModelMemoryStore {
             .is_some_and(|ack| ack.matches(receipt))
     }
 
+    /// Current-memory roots of one database whose exact receipt has not yet
+    /// been acknowledged by the durable store. This is the write-behind
+    /// pipeline's reconciliation set; it never reads or hydrates RocksDB.
+    pub fn pending_roots_of_dbnum(&self, dbnum: u32) -> Vec<RefNo> {
+        self.roots(ProjectionScope::Current)
+            .into_iter()
+            .filter(|root| root.dbno() == dbnum && self.root_needs_persist(*root))
+            .collect()
+    }
+
     pub fn invalidate_publication_ack(&self, scope: ProjectionScope<'_>, root: RefNo) {
         if let Some(state) = self.write().get_mut(&scope.key()) {
             state.publication_acks.remove(&packed_refno(root));
@@ -1325,7 +1341,9 @@ impl ModelMemoryStore {
             return 0;
         };
         let invalidated = state.receipts.len();
-        state.invalidated_roots.extend(state.receipts.keys().copied());
+        state
+            .invalidated_roots
+            .extend(state.receipts.keys().copied());
         state.receipts.clear();
         state.publication_acks.clear();
         invalidated
@@ -1346,7 +1364,9 @@ impl ModelMemoryStore {
             )) == Some(dbnum)
         };
         let before = state.receipts.len();
-        state.invalidated_roots.extend(state.receipts.keys().filter(|key| belongs(key)).copied());
+        state
+            .invalidated_roots
+            .extend(state.receipts.keys().filter(|key| belongs(key)).copied());
         state.receipts.retain(|packed, _| !belongs(packed));
         state.publication_acks.retain(|packed, _| !belongs(packed));
         before - state.receipts.len()
@@ -1517,7 +1537,11 @@ mod tests {
         assert!(roots.contains(&root_8000_second_extent));
         assert!(roots.contains(&root_7998));
         store.forget_retired_root(ProjectionScope::Current, root_8000_second_extent);
-        assert!(!store.roots(ProjectionScope::Current).contains(&root_8000_second_extent));
+        assert!(
+            !store
+                .roots(ProjectionScope::Current)
+                .contains(&root_8000_second_extent)
+        );
         assert!(store.roots(ProjectionScope::Current).contains(&root_8000));
         assert!(
             store.receipt(ProjectionScope::Current, root_7998).is_some(),
@@ -2310,7 +2334,24 @@ mod tests {
         );
         assert!(!accepted);
         assert!(store.root_needs_persist(root));
+        assert_eq!(store.pending_roots_of_dbnum(root.dbno()), vec![root]);
         let stats = store.cache_stats();
         assert_eq!((stats.pending_roots, stats.durable_roots), (1, 0));
+
+        assert!(store.record_publication_ack(
+            ProjectionScope::Current,
+            root,
+            RootPublicationAck {
+                dbnum: root.dbno(),
+                source_sesno: 42,
+                geometry_count: 0,
+                manifest_hash: "new-content".into(),
+                model_target: None,
+                room_membership: false,
+                room_generation: None,
+                medium: crate::fast_model::model_db_adapter::PersistMedium::RocksDb,
+            },
+        ));
+        assert!(store.pending_roots_of_dbnum(root.dbno()).is_empty());
     }
 }
