@@ -47,7 +47,9 @@ impl SessionStamp {
             end_pgno: page.end.page,
             index_root_pgno: page.index_root.page,
             stamp_words: page.stamp_words,
-            machine: page.machine.clone(),
+            // e3d-io 829a347 起这一格叫 `user`（`core.dll` 的会话属性 `USER`：写会话的人 / 登录名）；
+            // 本仓的 `SessionStamp::machine` 名字沿用，语义就是它。
+            machine: page.user.clone(),
             comment: page.comment.clone(),
         }
     }

@@ -727,6 +727,46 @@ gen-model-v1 读透形态两样都没有（投影只存网格与世界矩阵，`
 - 数据时点同 `/api/mbd/v2/pipe`：目标库按 ADR-054 取**文件最新会话**（每次请求新开 `DbSet`），
   MDB 视图进程内只建一次。
 
+### 4.11.2 `POST /api/v1/element/plines` — 型材 PLINE 线（E3D `PLSTART / PLEND pline`）
+
+给 plant3d-web 测量拾取层的 **Pline 过滤器**用（E3D `EDGPLINE.line(dbRef, pline)`：Snap 吸最近端、
+Mid-Point / Fraction / Proportion / Distance 沿线派生、Intersect 当 LINE、Perpendicular to 取这条线）。
+gen-model-v1 读透形态只存烘好的网格；PLINE 是目录 `SPRF.PSTR`（PTSS）里的二维 p-line（`PLIN`：`PKEY` /
+`PX` / `PY`），从未落库，前端从网格上也认不出「哪条棱是 NA」。这条端点**不经投影、不连库**：与
+`element/ptset` 同一口径直读 dabacon，复用 e3d-model 建型材实体的那条链
+（`section_catalogue → evaluate_section_profile → section_placement | spine_path`，`web_service::plines`），
+把每条 p-line 放进截面标架再乘世界矩阵——与画出来的梁是同一份 `JUSL` 对齐、`LMIRR` 镜像、`BANG` 与
+中性轴旋转，所以线一定落在梁的实体上。
+
+- 请求：`{ "refno": "24381/177301" }`（`refno` 收 `a/b` / `a_b` / 带 `=` 前缀；身份三元组可选，同 §3）。
+- 响应（世界系，mm）：
+
+  ```json
+  {
+    "source": "e3d-model",
+    "refno": "24381/177301", "dbnum": 7997, "noun": "SCTN", "name": "/COL-1", "unit": "mm",
+    "justification_line": "NA",
+    "plines": [
+      { "key": "NA",  "offset": [0.0, 0.0],   "start": [x, y, z], "end": [x, y, z], "dir": [x, y, z], "length": 3000.0 },
+      { "key": "TOS", "offset": [0.0, 150.0], "start": [x, y, z], "end": [x, y, z], "dir": [x, y, z], "length": 3000.0,
+        "start_cut": [x, y, z], "end_cut": [x, y, z] }
+    ],
+    "notes": []
+  }
+  ```
+
+  `start` / `end` 是 E3D `PLSTART pline` / `PLEND pline`：p-line 在 `POSS` / `POSE` 两个截面平面上的点
+  （`EDGPLINE.line` 缺省 `cut = false` 取的就是这两个），**不**按 `DRNS` / `DRNE` 斜切；斜切后的端点
+  `PLSTCUT / PLENCUT` 另给在 `start_cut` / `end_cut`，只在端面不垂直于轴时出现。`offset` 是 p-line 在截面
+  平面里、`JUSL` 对齐与 `LMIRR` 镜像之后的位置（`JUSL` 那条线恒为 `[0, 0]`，它就是 `POSS → POSE`）。
+  `plines` 按 `PSTR` 成员原序；`notes` 是截面求值 / SPINE 建路径的非致命记录（与实体生成的 notes 同源）。
+- GENSEC 只接**直 SPINE**（一段 `POINSP → POINSP`，两端 + `BANG` 走 `placement_between`）；含弧的 SPINE 在 E3D
+  里是 `edgPline.arc()` 不是 `line()`，回空并在 `reason` 说明。GENSEC 的 `DRNS / DRNE` 在 SPINE 上，本期不给 cut 端点。
+- 状态：`200` 构件存在——不是 SCTN / GENSEC、没有 `SPRE`、目录链断、SPRF 无 `PSTR`、GENSEC 含弧 →
+  `plines: []` 且带 `reason`（E3D 同样没有 p-line 可拾，不是错）；`400 bad_request` refno 写法不对；
+  `404 not_found` refno 在所钉会话里不存在（含其 db 不在项目 / MDB 里）；`500 internal` 读库出错。
+- 数据时点同 §4.11.1。
+
 ### 4.12 模型取数源路由（`model_source`）——未初始化的库由 API 供数，已初始化的以 rocksdb 为准
 
 出处：`docs/plans/2026-09-06-rocksdb-batch-write-and-cata-dependency-plan.md` §8（共识 d-29）；

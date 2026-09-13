@@ -10,6 +10,8 @@ mod handlers;
 /// MBD 管道尺寸标注端点（`/api/mbd/v2/pipe/{refno}`，前端契约路径，不在 `/api/v1` 下）。
 pub mod mbd;
 pub mod mesh_glb;
+/// 型材 PLINE 线端点（`POST /api/v1/element/plines`），plant3d-web 测量拾取层 Pline 过滤器的来源。
+pub mod plines;
 /// 构件目录 P 点集端点（`POST /api/v1/element/ptset`），plant3d-web 测量捕捉的 P-Point 来源。
 pub mod ptset;
 /// 配置向导（`/setup.html` + `/api/v1/setup/*`）与「设置模式」最小启动臂。
@@ -350,6 +352,8 @@ pub async fn serve(
         .route("/api/v1/element/ensure", post(handlers::element_ensure))
         // 构件目录 P 点集（E3D PTSET）：直读 dabacon，不经投影；语义见 `web_service::ptset`。
         .route("/api/v1/element/ptset", post(ptset::element_ptset))
+        // 型材 PLINE 线（E3D `PLSTART / PLEND pline`）：复用建型材实体的截面链；语义见 `web_service::plines`。
+        .route("/api/v1/element/plines", post(plines::element_plines))
         .route(
             "/api/v1/model/history/generate",
             post(handlers::model_history_generate),
