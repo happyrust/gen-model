@@ -1420,6 +1420,19 @@ fn startup_data_wait_is_stalled(
 
 #[cfg(test)]
 mod startup_data_wait_tests {
+    #[test]
+    fn read_through_startup_never_generates_the_whole_mdb() {
+        let source = include_str!("lib.rs");
+        let body = source.rsplit_once("async fn run_read_through_core(").unwrap().1
+            .split_once("pub async fn run_app(").unwrap().0;
+        for forbidden in ["model_dbnum_ensure::start_and_wait", "scan_index(",
+            "scan_elements(", "bootstrap_read_through_rooms("] {
+            assert!(!body.contains(forbidden), "startup contains {forbidden}");
+        }
+        assert!(body.contains("initialization.configure_model_bootstrap(false)"));
+        assert!(body.contains("targeted_model_refresh(&refresh_manager, &change).await"));
+    }
+
     use super::*;
 
     fn snapshot(
@@ -1831,196 +1844,6 @@ pub async fn attach_store_connected() -> anyhow::Result<()> {
     ensure_store_connected(&db_option, crate::store_process::StoreStartup::AttachOnly).await
 }
 
-#[cfg(feature = "ws")]
-async fn bootstrap_read_through_rooms(
-    manager: Arc<AiosDBManager>,
-    db_option: &DbOption,
-    directory: &crate::data_interface::mdb_route_directory::MdbRouteDirectory,
-) -> bool {
-    use crate::data_interface::task_registry::TaskState;
-
-    let initialization =
-        crate::data_interface::initialization_phase::InitializationCoordinator::global();
-    let started = std::time::Instant::now();
-    let room_generation = match crate::fast_model::model_db_adapter::required_room_generation() {
-        Ok(Some(generation)) => generation,
-        Ok(None) => {
-            initialization.fail_startup_rooms(
-                "blocked",
-                "room_membership=true but no resident generation was frozen",
-            );
-            return false;
-        }
-        Err(error) => {
-            initialization.fail_startup_rooms(
-                "blocked",
-                format!("room resident is unavailable: {error:#}"),
-            );
-            return false;
-        }
-    };
-    // 这里要的只是 dbnum 清单，不是元素表：从路由目录（CURD 成员清单，零元素 I/O）取 MDB 全部
-    // DESI，按 dbnum 升序覆盖（CONTEXT.md「kv-mem 房间启动屏障」）。每库的整库扫描在
-    // `model_dbnum_ensure` 自己的 `scan_index` 里，那是显式全量操作，允许。
-    let mut dbnums = directory
-        .element_databases()
-        .filter(|route| route.db_type.eq_ignore_ascii_case("DESI"))
-        .map(|route| route.dbnum)
-        .collect::<Vec<_>>();
-    dbnums.sort_unstable();
-    dbnums.dedup();
-    let dbnums_total = dbnums.len();
-    initialization.set_startup_room_totals(dbnums_total, 0);
-
-    let mut dbnums_done = 0usize;
-    let mut dbnums_failed = 0usize;
-    let mut roots_total = 0usize;
-    let mut roots_ready = 0usize;
-    let mut roots_failed = 0usize;
-    let mut room_edges_written = 0usize;
-    let mut failures = Vec::new();
-    let mut peak_rss_mib = crate::data_interface::model_concurrency::process_rss_bytes()
-        .map(|bytes| bytes / (1024 * 1024));
-    for dbnum in dbnums {
-        if let Some(current) = crate::data_interface::model_concurrency::process_rss_bytes()
-            .map(|bytes| bytes / (1024 * 1024))
-        {
-            peak_rss_mib = Some(peak_rss_mib.unwrap_or_default().max(current));
-        }
-        initialization.record_startup_room_progress(
-            dbnums_done,
-            dbnums_failed,
-            roots_ready,
-            roots_failed,
-            Some(dbnum),
-            "model_and_room_publication",
-            room_edges_written,
-            started.elapsed().as_millis(),
-            peak_rss_mib,
-        );
-        match crate::data_interface::model_dbnum_ensure::start_and_wait(
-            manager.clone(),
-            &db_option.project_name,
-            dbnum,
-            room_generation.clone(),
-        )
-        .await
-        {
-            Ok(entry) => {
-                let total = entry.total_units.unwrap_or_default() as usize;
-                let ready = entry.units_done.unwrap_or_default() as usize;
-                let failed = entry
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("failed"))
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or_else(|| total.saturating_sub(ready) as u64)
-                    as usize;
-                let room_edges = entry
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("room_edges_written"))
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or_default() as usize;
-                let max_transaction_bytes = entry
-                    .result
-                    .as_ref()
-                    .and_then(|result| result.get("max_transaction_bytes"))
-                    .and_then(serde_json::Value::as_u64)
-                    .unwrap_or_default() as usize;
-                roots_total += total;
-                roots_ready += ready;
-                roots_failed += failed;
-                room_edges_written += room_edges;
-                initialization.observe_startup_room_transaction_bytes(max_transaction_bytes);
-                println!(
-                    "[room-bootstrap] dbnum={dbnum} state={} roots={ready}/{total} failed={failed} room_edges={room_edges} max_transaction_bytes={max_transaction_bytes} elapsed_ms={}",
-                    entry.state.as_str(),
-                    started.elapsed().as_millis()
-                );
-                dbnums_done += 1;
-                if entry.state != TaskState::Succeeded {
-                    dbnums_failed += 1;
-                    failures.push(format!(
-                        "dbnum={dbnum} task={} state={} ready={ready}/{total} failed={failed}",
-                        entry.task_id,
-                        entry.state.as_str()
-                    ));
-                }
-
-                #[test]
-                fn read_through_room_bootstrap_finishes_before_model_ready() {
-                    let source = include_str!("lib.rs").replace("\r\n", "\n");
-                    let body = source
-                        .split_once("async fn run_read_through_core(")
-                        .expect("read-through core")
-                        .1
-                        .split_once("#[cfg(not(feature = \"ws\"))]")
-                        .expect("read-through core end")
-                        .0;
-                    let begin = body
-                        .find("initialization.begin_startup_rooms()")
-                        .expect("room barrier begins");
-                    let resident = body
-                        .find("prepare_room_resident_at_startup(&db_option).await")
-                        .expect("resident initialization");
-                    let bootstrap = body
-                        .find("bootstrap_read_through_rooms(manager.clone()")
-                        .expect("whole-MDB model+room bootstrap");
-                    let ready = body
-                        .find("initialization.mark_model_ready()")
-                        .expect("model ready");
-                    assert!(begin < resident && resident < bootstrap && bootstrap < ready);
-
-                    let bootstrap_body = source
-                        .split_once("async fn bootstrap_read_through_rooms(")
-                        .expect("bootstrap helper")
-                        .1
-                        .split_once("/// File/memory-first service path")
-                        .expect("bootstrap helper end")
-                        .0;
-                    assert!(bootstrap_body.contains(".element_databases()"));
-                    assert!(bootstrap_body.contains("dbnums.sort_unstable()"));
-                    assert!(bootstrap_body.contains("model_dbnum_ensure::start_and_wait("));
-                    assert!(
-                        !bootstrap_body.contains("watch_scope::"),
-                        "startup room initialization covers the whole MDB, not only watch_dbnums"
-                    );
-                }
-            }
-            Err(error) => {
-                dbnums_done += 1;
-                dbnums_failed += 1;
-                failures.push(format!("dbnum={dbnum}: {error:#}"));
-            }
-        }
-        if let Some(current) = crate::data_interface::model_concurrency::process_rss_bytes()
-            .map(|bytes| bytes / (1024 * 1024))
-        {
-            peak_rss_mib = Some(peak_rss_mib.unwrap_or_default().max(current));
-        }
-        initialization.set_startup_room_totals(dbnums_total, roots_total);
-        initialization.record_startup_room_progress(
-            dbnums_done,
-            dbnums_failed,
-            roots_ready,
-            roots_failed,
-            None,
-            "between_dbnums",
-            room_edges_written,
-            started.elapsed().as_millis(),
-            peak_rss_mib,
-        );
-    }
-    if failures.is_empty() {
-        initialization.settle_startup_rooms();
-        true
-    } else {
-        initialization.fail_startup_rooms("partial", failures.join("; "));
-        false
-    }
-}
-
 /// 一个库的文件变了（会话前进 / 回滚 / 换文件）：只动**这个 dbnum** 的模型
 /// （`docs/plans/2026-09-12-lazy-startup-dev-plan.md` L4 / §3.4，母计划不变量 7）。
 ///
@@ -2241,14 +2064,23 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
     let initialization =
         crate::data_interface::initialization_phase::InitializationCoordinator::global();
     let rooms_required = crate::options::room_membership();
-    initialization.configure_model_bootstrap(rooms_required);
+    // Startup prepares reference inputs only. Whole-database generation is an
+    // explicit model/rebuild operation, never implied by enabling room queries.
+    initialization.configure_model_bootstrap(false);
     initialization.mark_data_ready_without_manifest();
     if rooms_required {
         initialization.begin_startup_rooms();
     }
     prepare_room_resident_at_startup(&db_option).await;
     let room_bootstrap_ready = !rooms_required
-        || bootstrap_read_through_rooms(manager.clone(), &db_option, &directory).await;
+        || crate::fast_model::room_resident::current_for_calculation().is_ok();
+    if rooms_required {
+        if room_bootstrap_ready {
+            initialization.settle_startup_rooms();
+        } else {
+            initialization.fail_startup_rooms("blocked", "room reference model is unavailable");
+        }
+    }
     if room_bootstrap_ready {
         let _ = initialization.open_model_phase();
         let _ = initialization.mark_model_ready();
