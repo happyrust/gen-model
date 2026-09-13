@@ -33,7 +33,7 @@
     让后续二进制 patch 始终有精确的源包可取。
 
     runtime 出厂配置默认 embedded-mem（无 Surreal TCP 端口）；-IncludeWorkspace 形态继续使用
-    spawned-mem@127.0.0.1:8009。两档都保留 .first-run-pending 首跑哨兵，自动进入配置向导。
+    spawned-rocksdb@127.0.0.1:8009。两档都保留 .first-run-pending 首跑哨兵，自动进入配置向导。
 
     冒烟门（Q9，三腿）：A 腿出厂配置起服务考「设置模式 + 向导页」；B 腿本机配置全启动考
     health + 首页；C 腿本机配置改 spawned-rocksdb@18010 考「自带持久库」（ADR-070：
@@ -97,7 +97,7 @@ param(
     [switch]$SkipSmoke,
     [switch]$IncludeWorkspace,
     [switch]$ExcludeMeshes,
-    [ValidateSet('embedded-mem', 'spawned-mem', 'external')][string]$SmokeStoreMode,
+    [ValidateSet('embedded-mem', 'spawned-mem', 'spawned-rocksdb', 'external')][string]$SmokeStoreMode,
     [int]$SmokeTimeoutSeconds = 90,
     [ValidateRange(1, 65535)][int]$SmokeHttpPort = 9099,
     [switch]$StrictSmoke,
@@ -230,7 +230,7 @@ elseif ($ExcludeMeshes) {
 else {
     'full'
 }
-$defaultStoreMode = if ($IncludeWorkspace) { 'spawned-mem' } else { 'embedded-mem' }
+$defaultStoreMode = if ($IncludeWorkspace) { 'spawned-rocksdb' } else { 'embedded-mem' }
 if (-not $SmokeStoreMode) { $SmokeStoreMode = $defaultStoreMode }
 if (-not $Name) {
     $Name = "ams-local-$(ConvertTo-FileToken $BuildId)-$packageTier"
@@ -355,7 +355,12 @@ else {
 }
 $browserConfigPath = Join-Path $webStage 'config.json'
 if (-not (Test-Path -LiteralPath $browserConfigPath)) {
-    throw "web 组装后缺 config.json，无法保证浏览器使用同源 API"
+    $browserConfigTemplate = Join-Path $webStage 'config.example.json'
+    if (-not (Test-Path -LiteralPath $browserConfigTemplate)) {
+        throw "web 组装后缺 config.json / config.example.json，无法保证浏览器使用同源 API"
+    }
+    Copy-Item -LiteralPath $browserConfigTemplate -Destination $browserConfigPath
+    Write-Step "从 config.example.json 生成发布用 config.json"
 }
 $browserConfig = Get-Content -LiteralPath $browserConfigPath -Raw | ConvertFrom-Json
 $browserConfig | Add-Member -NotePropertyName model_api_url -NotePropertyValue 'http://127.0.0.1:8022' -Force
@@ -441,7 +446,7 @@ if (-not (Test-Path -LiteralPath $factoryConfig)) { throw "缺出厂配置模板
 if ($IncludeWorkspace) {
 Write-Step "组装 workspace\ 依赖资源（assets 延后直灌）"
 # 出厂配置模板 + 首跑哨兵：包不再带本机配置快照。
-# 模板是「设置模式」形态（project_path 空、默认 spawned-mem@127.0.0.1:8009、监听 0.0.0.0:9099），
+# 模板是「设置模式」形态（project_path 空、默认 spawned-rocksdb@127.0.0.1:8009、监听 0.0.0.0:9099），
 # 解压首跑自动进 /setup.html 配置向导；哨兵由向导「完成」时删除。
 Copy-Item -LiteralPath $factoryConfig -Destination (Join-Path $wsStage 'DbOption.toml')
 Set-Content -LiteralPath (Join-Path $wsStage '.first-run-pending') -Value ("shipped by New-LocalRelease " + (Get-Date -Format 'o')) -Encoding ascii
@@ -478,7 +483,7 @@ else {
     )
     $runtimeConfig = [regex]::Replace(
         $runtimeConfig,
-        '(?m)^# 默认 spawned-mem（也可写别名 kv-mem）：.*\r?\n# 需要数据跨重启保留可改 spawned-rocksdb；连接既有库则改 external。\r?\n',
+        '(?m)^# full / workspace 档默认 spawned-rocksdb：.*\r?\n# 只需临时内存库可改 spawned-mem（别名 kv-mem）；连接既有库则改 external。\r?\n',
         "# runtime 默认 embedded-mem：数据库在后端进程内，无子进程、无 Surreal TCP 端口。`r`n# 需要外部诊断可改 spawned-mem；需要持久化可改 spawned-rocksdb / external。`r`n"
     )
     $runtimeConfig = [regex]::Replace(
@@ -694,7 +699,7 @@ else {
     '根目录附带一份不含本机路径的出厂 ``DbOption.toml`` 与首跑哨兵；第一次启动会进入配置向导。'
 }
 $storeRuntimeNote = if ($IncludeWorkspace) {
-    '- **SurrealDB 数据与源模型不打入包。** 附带配置默认 ``store_mode=spawned-mem``，服务会用 workspace 内二进制自行拉起内存库。'
+    '- **SurrealDB 数据与源模型不打入包。** 附带配置默认 ``store_mode=spawned-rocksdb``，服务会用 workspace 内二进制自行拉起持久库；新数据写入 ``workspace\.surreal\``。'
 }
 else {
     '- **workspace 默认不打入包。** runtime 默认使用进程内 ``embedded-mem``；``bin\surreal.exe`` 作为切换到 spawned 档的备用文件保留。索引、快照与 assets 从 ``-Workspace`` / ``AMS_WORKSPACE`` 指向的外部目录读取。'
@@ -713,7 +718,7 @@ $startupInstruction
 ## 首跑：配置向导
 $firstRunNote
 进入配置向导后（浏览器首页跳到 ``/setup.html``）：
-①选 E3D 项目目录与项目 → ②确认默认 kv-mem，或改用持久/外置 SurrealDB → ③定监听端口
+①选 E3D 项目目录与项目 → ②确认默认本机持久 RocksDB，或改用临时/外置 SurrealDB → ③定监听端口
 → ④选「只导数据 / 一步到位」并保存重启 → ⑤勾库初始化。向导页只许在**本机**打开
 （局域网访问应用没问题，但改配置的接口只收 127.0.0.1 的请求）。
 不想用向导：直接改 ``workspace\DbOption.toml`` 后重启，并删掉 ``workspace\.first-run-pending``。
@@ -732,7 +737,7 @@ $workspaceLayoutLines
 ## 运行依赖（不在包内 —— 见 ADR-068）
 $storeRuntimeNote
   $meshRuntimeNote
-  - embedded-mem / spawned-mem 都是 read-through：属性直接读 E3D 文件，模型缓存随进程消失；要保留摄入数据，改用 ``spawned-rocksdb`` 或 ``external``。
+  - full / workspace 档默认 ``spawned-rocksdb``：kv-mem 保存增量 overlay，RocksDB 保存持久基线；runtime 档仍默认 ``embedded-mem``。
 - **切换到 spawned / external 时，SurrealDB 必须是本仓 fork 的 2.1.x**（包内 ``bin\surreal.exe``）。别用 PATH 上 ``cargo install`` 装的 3.x：
   它会要求对数据做不可逆迁移、且与 2.1.4 客户端握不上手。
 

@@ -1,6 +1,6 @@
 # ADR-068：本地发布包带全资源、但不带库数据与源模型
 
-状态：**已接受，2026-09-11 修订为 runtime 默认 embedded-mem、带 workspace 档默认 spawned-mem**（runtime 面向单进程浏览器解压即跑，优先消除数据库子进程与端口冲突；诊断/持久化档仍保留真实 Surreal 端点。）
+状态：**已接受，2026-09-13 修订为 runtime 默认 embedded-mem、带 workspace 档默认 spawned-rocksdb**（完整包以跨重启持久化为默认，同时保留 kv-mem 增量 overlay。）
 日期：2026-09-09
 落地：`scripts/New-LocalRelease.ps1`（全链路组包）、`docs/release-notes/<版本>.md`（后端提炼稿）、产物 `releases/ams-local-0.1.19-full.zip`。
 关联：
@@ -31,7 +31,7 @@
 - **源模型不进包**（AVEVA E3D 工程目录）。
 - 包内 `DbOption.toml` 不复制打包机的绝对路径：`project_path` 留空并带
   `.first-run-pending`，首跑进入配置向导。runtime 档默认 `store_mode=embedded-mem`，
-  无 SurrealDB 子进程与数据库端口；带 workspace 档默认 `spawned-mem@127.0.0.1:8009`。
+  无 SurrealDB 子进程与数据库端口；带 workspace 档默认 `spawned-rocksdb@127.0.0.1:8009`，并默认开启房间归属计算。
   runtime 包根仍保留 fork 2.1.x 的 `bin\surreal.exe`，供用户显式切回 spawned 档。
 - HTTP 监听与展示分开：`http_api_addr` 可用 `0.0.0.0:9099` 覆盖全部接口，
   `http_public_addr` 填当前主机可导航的局域网地址；首跑向导仍只从回环入口打开。
@@ -49,7 +49,7 @@
 - 版本号以两仓 `Cargo.toml` 为准；`releases` 里已有同名 zip 则**拒绝执行**（`-Force` 才覆盖）；CHANGELOG 找不到当版条目**只警告不中止**（gen-model changelog 按日期记，严格中止会常误伤）。`releases` 旧版不自动清理，人工删。
 - runtime 冒烟两腿：出厂配置进入设置模式；本机真配置以 `embedded-mem` 完整启动，
   要求首页可用、`/health.sul_db.medium=embedded-mem` 且没有 Surreal 子进程。
-- 带 workspace 档仍跑三腿：设置模式、`spawned-mem`、`spawned-rocksdb@18010`。
+- 带 workspace 档仍跑三腿：设置模式、默认 `spawned-rocksdb`、隔离的 `spawned-rocksdb@18010`。
   失败写进 `release.json.smoke`，`-StrictSmoke` 下中止出包。
 
 ## 后果

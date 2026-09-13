@@ -5,7 +5,7 @@
 # 只起 HTTP 供 http://127.0.0.1:9099/setup.html 配置向导，配好保存并重启后进入正常服务。
 # 不想用向导的，直接改本文件再重启也一样：真值永远是这份文件。
 # New-LocalRelease 对 runtime 档会把 store_mode 外科改成 embedded-mem；带 workspace
-# 的档位保留本模板的 spawned-mem。这里只维护两档共用的其余出厂键。
+# 的档位保留本模板的 spawned-rocksdb。这里只维护两档共用的其余出厂键。
 # ============================================================================
 
 #同步文件配置（缺省形态，向导不管这几项）
@@ -74,9 +74,9 @@ v_user = "root"
 v_password = "root"
 # 自带 memory SurrealDB 的默认端口；这一格是数字，不能写空串。
 v_port = "8009"
-# 默认 spawned-mem（也可写别名 kv-mem）：服务自行拉起内存库，数据不落盘。
-# 需要数据跨重启保留可改 spawned-rocksdb；连接既有库则改 external。
-store_mode = "spawned-mem"
+# full / workspace 档默认 spawned-rocksdb：服务自行拉起持久库，数据跨重启保留。
+# 只需临时内存库可改 spawned-mem（别名 kv-mem）；连接既有库则改 external。
+store_mode = "spawned-rocksdb"
 # 持久模式：kv-mem 只保存新生成的 root overlay，冷 root 直接查 RocksDB，不回填。
 model_cache_mode = "incremental-overlay"
 model_cache_max_bytes = 2147483648
@@ -120,10 +120,10 @@ puhua_database_password = "root"
 replace_mesh = true
 room_key_word = ["-RM"]
 
-# 数据与模型增量缺省开启；房间归属计算默认关闭（不影响模型更新）。
+# 数据、模型增量与房间归属计算缺省开启。
 data_incremental = true
 model_incremental = true
-room_membership = false
+room_membership = true
 
 # 文件身份冲突只记录并跳过，不阻断其它库初始化。
 block_file_identity_conflicts = false
