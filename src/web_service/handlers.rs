@@ -3915,4 +3915,59 @@ mod tests {
             "route selection must happen before either executor is admitted: {body}"
         );
     }
+
+    /// spec §4.13：树不在 Ready / ReadyEmpty 时 `spatial/*` 回 503 `spatial_not_ready`，带
+    /// `Retry-After: 5` 与非空的 `detail.state`（状态字面值）——统一信封（§3）之外唯一一处，
+    /// 客户端按它分型重试而不是当 500。另外三档（400 / 404 / 500）仍走 `ApiError` 的信封。
+    #[tokio::test]
+    async fn spatial_not_ready_is_a_503_with_retry_after_and_the_state_in_detail() {
+        use crate::fast_model::spatial_state::SpatialTreeState;
+
+        for state in [
+            SpatialTreeState::Uninitialized,
+            SpatialTreeState::Loading,
+            SpatialTreeState::ReplayRequired,
+            SpatialTreeState::Rebuilding,
+            SpatialTreeState::DegradedReuse,
+            SpatialTreeState::DegradedBlocked,
+        ] {
+            let error: SpatialApiError = spatial_query::SpatialQueryError::NotReady(state).into();
+            let response = error.into_response();
+            assert_eq!(
+                response.status(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "{state:?}"
+            );
+            assert_eq!(
+                response.headers().get(header::RETRY_AFTER),
+                Some(&header::HeaderValue::from(spatial_query::RETRY_AFTER_SECS)),
+                "{state:?}"
+            );
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .expect("503 body is readable");
+            let body: serde_json::Value = serde_json::from_slice(&bytes).expect("503 body is JSON");
+            assert_eq!(body["code"], "spatial_not_ready", "{state:?}");
+            assert_eq!(body["detail"]["state"], state.as_str(), "{state:?}");
+            assert!(
+                body["message"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains(state.as_str()),
+                "{state:?}: {body}"
+            );
+        }
+
+        let bad: SpatialApiError =
+            spatial_query::SpatialQueryError::BadRequest("radius".into()).into();
+        let response = bad.into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(response.headers().get(header::RETRY_AFTER).is_none());
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("400 body is readable");
+        let body: serde_json::Value = serde_json::from_slice(&bytes).expect("400 body is JSON");
+        assert_eq!(body["code"], "bad_request");
+        assert!(body["detail"].is_null(), "{body}");
+    }
 }
