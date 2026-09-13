@@ -1,0 +1,8 @@
+{
+  "form_id": "",
+  "token": "",
+  "action": "active",
+  "actor": { "id": "platform-e2e", "name": "设计", "roles": "sj" },
+  "next_step": { "assignee_id": "JH", "name": "校对", "roles": "jd" },
+  "comments": "verify_platform_api_json: 设计完成，激活到校对"
+}

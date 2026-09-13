@@ -1,0 +1,6 @@
+{
+  "form_id": "",
+  "token": "",
+  "action": "query",
+  "actor": { "id": "platform-e2e", "name": "设计", "roles": "sj" }
+}
