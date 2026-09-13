@@ -612,7 +612,7 @@ impl QueryService {
                 &crate::data_interface::generation_root::configured_delivery_unit_types(),
             )
             .map_err(|error| QueryError::new("SOURCE_UNAVAILABLE", error))?
-            .map(|root| root.root);
+            .map(|root| crate::data_interface::generation_root::refno_to_e3d(root.root));
         let edges = read_room_memberships(&SUL_DB, &refno.to_string())
             .await
             .map_err(|error| QueryError::new("DATABASE_ERROR", error.to_string()))?;

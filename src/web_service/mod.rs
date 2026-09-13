@@ -211,6 +211,7 @@ impl ApiError {
         let (status, code) = match error.code {
             "INVALID_ARGUMENT" => (StatusCode::BAD_REQUEST, "invalid_argument"),
             "NOT_FOUND" => (StatusCode::NOT_FOUND, "not_found"),
+            "UPDATING" => (StatusCode::CONFLICT, "updating"),
             "NO_RENDERABLE_GEOMETRY" => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "no_renderable_geometry")
             }
@@ -858,6 +859,7 @@ mod tests {
         for (code, status) in [
             ("INVALID_ARGUMENT", StatusCode::BAD_REQUEST),
             ("NOT_FOUND", StatusCode::NOT_FOUND),
+            ("UPDATING", StatusCode::CONFLICT),
             ("ATTR_NOT_APPLICABLE", StatusCode::UNPROCESSABLE_ENTITY),
             ("CHAIN_INCOMPLETE", StatusCode::UNPROCESSABLE_ENTITY),
             ("DB_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE),
