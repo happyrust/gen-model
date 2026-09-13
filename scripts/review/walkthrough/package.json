@@ -1,0 +1,24 @@
+{
+  "name": "review-a4-walkthrough",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "gen-model 校审域 A4 前端走查自动化（计划 §6 A4 / §4 U1-U3）。依赖自带在本目录，不进仓库根。",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "scripts": {
+    "selftest": "node selftest.mjs",
+    "preflight": "node run.mjs --dry-run",
+    "dry-run": "node run.mjs --dry-run",
+    "walkthrough": "node run.mjs",
+    "u1": "node run.mjs --steps=u1",
+    "u2": "node run.mjs --steps=u2",
+    "u1u2": "node run.mjs --steps=u1,u2",
+    "u3": "node run.mjs --steps=u3",
+    "browsers": "playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "1.58.2"
+  }
+}
