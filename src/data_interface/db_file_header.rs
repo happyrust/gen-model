@@ -47,7 +47,9 @@ impl SessionStamp {
             end_pgno: page.end.page,
             index_root_pgno: page.index_root.page,
             stamp_words: page.stamp_words,
-            machine: page.machine.clone(),
+            // e3d-io 把这一格改叫 `user`（core.dll 的会话属性 USER，按 +0x78 的长度字读）；
+            // 本仓对外的 `SessionStamp.machine` 键名是既有 JSON 契约，不跟着改。
+            machine: page.user.clone(),
             comment: page.comment.clone(),
         }
     }

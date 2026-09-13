@@ -14,6 +14,7 @@
 //! | --- | --- | --- |
 //! | `auth` / `users` / `tasks` / `records` / `comments` / `annotation_state` / `attachments` / `sync` | `jwt_auth.rs`、`review_api.rs`、`review_annotation_state.rs` | T2 |
 //! | `common`（跨子模块共用的契约类型 / 行映射 / 授权判定 / 持久层接缝，`pub(super)` 可见） | `review_api.rs` 跨段共用部分 | T2（持久层接缝那一段待 T1b `db.rs` 落地后改为再导出） |
+//! | `db`（落点、超时与慢查询口径、持久化闸）/ `schema`（首启建表建索引） | `review_db.rs` | T1b |
 //! | `platform` | `platform_api/*` | T3 |
 //! | `integration` | `review_integration.rs`（`aux-data` / `collision-data`，P2） | T4 |
 //!
@@ -29,9 +30,11 @@ pub mod auth;
 pub mod comments;
 /// 跨子模块共用件；条目一律 `pub(super)`，本域之外不可见（`platform` 等后代模块可见）。
 mod common;
+pub mod db;
 pub mod integration;
 pub mod platform;
 pub mod records;
+pub mod schema;
 pub mod sync;
 pub mod tasks;
 pub mod users;
@@ -125,9 +128,13 @@ pub async fn health() -> Response {
 
 /// 对校审数据落点做一次最小查询。
 ///
-/// 骨架阶段落点是进程唯一的持久层连接 `aios_core::SUL_DB`（`ensure_store_connected`
-/// 连上的那一个）；持久层任务（计划 §5 T1 后半、Q6 的 ADR）若把校审数据放到独立连接，
-/// 只需换掉这里的被探对象，[`health`] 的响应形状不动。
+/// 落点是进程唯一的持久层连接 `aios_core::SUL_DB`（`ensure_store_connected` 连上的那一个），
+/// 与 [`db::fresh_review_db`] 取的是同一个句柄——ADR-072 D1 定的就是它，校审不另开连接。
+/// 这里直接探 `SUL_DB` 而不绕 `fresh_review_db()`，是为了把「库答不答话」与「建表建索引
+/// 做完没有」分开问：schema 预热失败只该退化成慢查询，不该让健康探针报库挂了。
+///
+/// 介质活不过重启时本函数根本不会被调到：`web_service::serve` 在挂路由前就把整个校审域
+/// 换成了拒绝路由，`/api/review/health` 一并回 503（ADR-072 D2）。
 ///
 /// `/api/v1/health` 的断连账本（`surreal_retry::record_sul_db_disconnect`）不在这里记：
 /// 那本账归站点探针，校审探针被外部轮询时不该给它灌水。

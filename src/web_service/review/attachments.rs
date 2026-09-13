@@ -469,9 +469,11 @@ async fn upload_attachment(
     let file_ext_with_dot = format!(".{}", file_ext);
     let resolved_mime = mime_type_for_extension(&file_ext);
 
-    // 确保上传目录存在
-    let upload_dir = "assets/review_attachments";
-    if let Err(e) = std::fs::create_dir_all(upload_dir) {
+    // 确保上传目录存在。落盘位置只认 `options::review_attachments_dir()` 这一个解析口
+    // （asset_root + `[review_attachments].dir`），与 `/files/review_attachments` 的 ServeDir
+    // 同源；写死 `assets/review_attachments` 会让配了 PLANT_ASSET_ROOT 的部署传得上、下不来。
+    let upload_dir = crate::options::review_attachments_dir();
+    if let Err(e) = std::fs::create_dir_all(&upload_dir) {
         return attachment_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("创建上传目录失败: {}", e),
@@ -483,7 +485,7 @@ async fn upload_attachment(
     }
 
     // 保存文件（校验全部通过后才落盘）
-    let file_path = format!("{}/{}", upload_dir, stored_name);
+    let file_path = upload_dir.join(&stored_name);
     if let Err(e) = std::fs::write(&file_path, &file_data) {
         return attachment_error_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -500,7 +502,9 @@ async fn upload_attachment(
         if let Err(remove_error) = std::fs::remove_file(&file_path) {
             warn!(
                 "[REVIEW_API.upload_attachment] rollback file failed path={} reason={} remove_error={}",
-                file_path, reason, remove_error
+                file_path.display(),
+                reason,
+                remove_error
             );
         }
     };
@@ -637,7 +641,7 @@ async fn delete_attachment(
     let started = std::time::Instant::now();
     info!("Deleting attachment: {}", attachment_id);
 
-    let upload_dir = "assets/review_attachments";
+    let upload_dir = crate::options::review_attachments_dir();
 
     let db = match fresh_review_db().await {
         Ok(db) => db,
@@ -812,10 +816,8 @@ async fn delete_attachment(
         .filter(|s| !s.is_empty())
     {
         let normalized = ext.trim_start_matches('.');
-        file_paths_to_delete.push(
-            std::path::PathBuf::from(upload_dir).join(format!("{}.{}", attachment_id, normalized)),
-        );
-    } else if let Ok(entries) = std::fs::read_dir(upload_dir) {
+        file_paths_to_delete.push(upload_dir.join(format!("{}.{}", attachment_id, normalized)));
+    } else if let Ok(entries) = std::fs::read_dir(&upload_dir) {
         let prefix = format!("{}.", attachment_id);
         for entry in entries.flatten() {
             if entry

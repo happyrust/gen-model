@@ -7,7 +7,8 @@
 #   ./scripts/review/test_review_api.sh                 # 打 http://localhost:8022，跑业务流
 #   ./scripts/review/test_review_api.sh http://host:port
 #   ./scripts/review/test_review_api.sh legacy          # 打旧端 http://localhost:3100 作对照
-#   ./scripts/review/test_review_api.sh <base> routes   # 只跑「42 条路由非 404」探针（计划 §6 A3）
+#   ./scripts/review/test_review_api.sh <base> routes   # 只跑「契约路由非 404」探针（计划 §6 A3）
+#   ./scripts/review/test_review_api.sh <base> auth     # 只跑 401/403 文本两端对照（计划 §6 A5）
 #
 # 环境变量:
 #   REVIEW_TOKEN   直接给 Bearer；不给则先 POST /api/auth/token（debug 角色 sj）换一个。
@@ -102,30 +103,34 @@ test_api() {
         if [ -n "$expected_field" ]; then
             if echo "$body" | grep -q "\"$expected_field\""; then
                 echo -e "${GREEN}✅ PASS${NC} (HTTP $http_code)"
-                ((PASSED++))
+                PASSED=$((PASSED + 1))
                 return 0
             else
                 echo -e "${RED}❌ FAIL${NC} (missing field: $expected_field)"
-                ((FAILED++))
+                FAILED=$((FAILED + 1))
                 return 1
             fi
         else
             echo -e "${GREEN}✅ PASS${NC} (HTTP $http_code)"
-            ((PASSED++))
+            PASSED=$((PASSED + 1))
             return 0
         fi
     elif [ "$http_code" = "000" ]; then
         echo -e "${RED}❌ FAIL${NC} (连接失败)"
-        ((FAILED++))
+        FAILED=$((FAILED + 1))
         return 1
     else
         echo -e "${YELLOW}⚠️  WARN${NC} (HTTP $http_code)"
-        ((FAILED++))
+        FAILED=$((FAILED + 1))
         return 1
     fi
 }
 
-# 路由存在性探针：只断言「不是 404」（A3 的 curl 半边；语义正确性由业务流与单测负责）
+# 路由存在性探针：断言「这个方法在这条路径上真的注册了」（A3 的 curl 半边；
+# 语义正确性由业务流与单测负责）。
+#
+# 404 / 000 不用说；405 也算失败：它表示路径被别的 handler（比如前端 SPA 的 GET 兜底）
+# 接住了、但本方法没注册——只按「非 404」判会把这种情况判成绿。
 probe_route() {
     local method="$1"
     local endpoint="$2"
@@ -133,13 +138,16 @@ probe_route() {
     http_code=$(curl -s -o /dev/null -w "%{http_code}" -X "$method" \
         -H "Content-Type: application/json" "${AUTH_HEADER[@]}" -d '{}' \
         "${BASE_URL}${endpoint}" 2>/dev/null || echo "000")
-    if [ "$http_code" = "404" ] || [ "$http_code" = "000" ]; then
-        echo -e "${RED}❌ FAIL${NC} (HTTP $http_code)"
-        ((FAILED++))
-    else
-        echo -e "${GREEN}✅ 非404${NC} (HTTP $http_code)"
-        ((PASSED++))
-    fi
+    case "$http_code" in
+        404|405|000)
+            echo -e "${RED}❌ FAIL${NC} (HTTP $http_code)"
+            FAILED=$((FAILED + 1))
+            ;;
+        *)
+            echo -e "${GREEN}✅ 已注册${NC} (HTTP $http_code)"
+            PASSED=$((PASSED + 1))
+            ;;
+    esac
 }
 
 summarize() {
@@ -163,10 +171,14 @@ summarize() {
 }
 
 # ==================================================
-# routes 模式：计划 §1.2「鉴权/用户/任务/记录/评论·批注状态/附件/同步/健康」八行 42 条
+# routes 模式：计划 §1.2「鉴权/用户/任务/记录/评论·批注状态/附件/同步/健康」八行
+#
+# 逐条数下来是 37 条方法·路径（含前端未调用但旧端一直注册的 returned / batch-reactivate）
+# 外加 1 条静态挂载，共 38 个探针；计划 §6 A3 与本脚本旧注释里的「42 条」是计数笔误，
+# 清单以 `src/web_service/review/common.rs` 的 `REVIEW_CONTRACT_ROUTES` 护栏为准（两处一一对应）。
 # ==================================================
 if [ "$MODE" = "routes" ]; then
-    echo -e "${YELLOW}📋 42 条方法·路径非 404 探针${NC}"
+    echo -e "${YELLOW}📋 契约方法·路径非 404 探针（37 条路由 + 1 条静态挂载）${NC}"
     # 鉴权 2
     probe_route POST   /api/auth/token
     probe_route POST   /api/auth/verify
@@ -174,7 +186,7 @@ if [ "$MODE" = "routes" ]; then
     probe_route GET    /api/users
     probe_route GET    /api/users/me
     probe_route GET    /api/users/reviewers
-    # 任务 16
+    # 任务 15
     probe_route POST   /api/review/tasks
     probe_route GET    /api/review/tasks
     probe_route GET    /api/review/tasks/probe-id
@@ -209,12 +221,92 @@ if [ "$MODE" = "routes" ]; then
     probe_route DELETE /api/review/attachments/probe-id
     echo -n "  静态: GET /files/review_attachments/ ... "
     http_code=$(curl -s -o /dev/null -w "%{http_code}" "${BASE_URL}/files/review_attachments/__probe__.bin" 2>/dev/null || echo "000")
-    if [ "$http_code" = "000" ]; then echo -e "${RED}❌ FAIL${NC} (连接失败)"; ((FAILED++)); else echo -e "${GREEN}✅ 已应答${NC} (HTTP $http_code，缺文件 404 属正常)"; ((PASSED++)); fi
+    if [ "$http_code" = "000" ]; then echo -e "${RED}❌ FAIL${NC} (连接失败)"; FAILED=$((FAILED + 1)); else echo -e "${GREEN}✅ 已应答${NC} (HTTP $http_code，缺文件 404 属正常)"; PASSED=$((PASSED + 1)); fi
     # 同步 2
     probe_route POST   /api/review/sync/export
     probe_route POST   /api/review/sync/import
     # 健康 1
     probe_route GET    /api/review/health
+    summarize
+fi
+
+# ==================================================
+# auth 模式：401 / 403 错误文本两端逐字对照（计划 §6 A5）
+#
+# 旧端出处：jwt_auth.rs:513（缺 Bearer）、:517（token 无效）、review_api.rs:1458（任务写授权）。
+# 输出只含「标签 | HTTP 码 | error_message」，不带 ID / 时间戳，两端可直接 diff：
+#   ./scripts/review/test_review_api.sh legacy auth > /tmp/a5-legacy.txt
+#   ./scripts/review/test_review_api.sh local  auth > /tmp/a5-gen-model.txt
+#   diff /tmp/a5-legacy.txt /tmp/a5-gen-model.txt        # 应为空
+# 前提：两端都要 review_auth.enabled=true，否则中间件注入调试身份，压根不会回 401。
+# ==================================================
+error_message_of() {
+    echo "$1" | grep -o '"error_message":"[^"]*"' | head -1 | cut -d'"' -f4
+}
+
+# expect_error <标签> <期望HTTP码> <期望文本|前缀匹配写 "prefix:xxx"> <方法> <路径> [curl 附加参数...]
+expect_error() {
+    local label="$1" want_code="$2" want_message="$3" method="$4" endpoint="$5"
+    shift 5
+    local out code body message
+    out=$(curl -s -w "\n%{http_code}" -X "$method" -H "Content-Type: application/json" \
+        "$@" -d '{}' "${BASE_URL}${endpoint}" 2>/dev/null || printf '\n000')
+    code=$(printf '%s' "$out" | tail -n1)
+    body=$(printf '%s' "$out" | sed '$d')
+    message=$(error_message_of "$body")
+
+    local ok=0
+    case "$want_message" in
+        prefix:*) case "$message" in "${want_message#prefix:}"*) ok=1 ;; esac ;;
+        *) [ "$message" = "$want_message" ] && ok=1 ;;
+    esac
+    [ "$code" = "$want_code" ] || ok=0
+
+    echo -n "  $label | HTTP $code | $message ... "
+    if [ "$ok" = "1" ]; then
+        echo -e "${GREEN}✅${NC}"
+        PASSED=$((PASSED + 1))
+    else
+        echo -e "${RED}❌ FAIL${NC}（期望 HTTP $want_code / ${want_message}）"
+        FAILED=$((FAILED + 1))
+    fi
+}
+
+if [ "$MODE" = "auth" ]; then
+    echo -e "${YELLOW}📋 401 / 403 错误文本逐字对照${NC}"
+
+    expect_error "匿名读任务列表" 401 "Missing or invalid Authorization header" \
+        GET /api/review/tasks
+    expect_error "匿名传附件" 401 "Missing or invalid Authorization header" \
+        POST /api/review/attachments
+    expect_error "非 Bearer 头" 401 "Missing or invalid Authorization header" \
+        GET /api/review/tasks -H "Authorization: Basic dXNlcjpwYXNz"
+    expect_error "坏 token" 401 "prefix:Invalid token: " \
+        GET /api/review/tasks -H "Authorization: Bearer not-a-jwt"
+
+    # 403：本域没有把 jwt_auth::require_roles 挂到任何路由上（两端都没有），
+    # 浏览器侧真正会撞到的角色不足是任务写授权 authorize_task_write（旧端 review_api.rs:1458）。
+    if [ -n "$REVIEW_TOKEN" ]; then
+        created=$(curl -s -X POST -H "Content-Type: application/json" "${AUTH_HEADER[@]}" \
+            -d '{"title":"A5 授权探针","description":"auth mode probe","modelName":"probe","priority":"low"}' \
+            "${BASE_URL}/api/review/tasks" 2>/dev/null || echo "")
+        probe_task=$(echo "$created" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
+        other_token=$(curl -s -X POST -H "Content-Type: application/json" \
+            -d '{"project":"debug-project","username":"outsider_999","name":"局外人","role":"sj"}' \
+            "${BASE_URL}/api/auth/token" 2>/dev/null | grep -o '"token":"[^"]*"' | head -1 | cut -d'"' -f4)
+        if [ -n "$probe_task" ] && [ -n "$other_token" ]; then
+            expect_error "他人改任务" 403 \
+                "prefix:权限不足：用户 outsider_999 " \
+                PATCH "/api/review/tasks/${probe_task}" -H "Authorization: Bearer ${other_token}"
+            curl -s -o /dev/null -X DELETE "${AUTH_HEADER[@]}" \
+                "${BASE_URL}/api/review/tasks/${probe_task}" 2>/dev/null || true
+        else
+            echo -e "  他人改任务 ... ${YELLOW}跳过${NC}（建探针任务或换第二个 token 失败）"
+        fi
+    else
+        echo -e "  他人改任务 ... ${YELLOW}跳过${NC}（没有 Bearer；review_auth.enabled=true 才跑得了）"
+    fi
+
     summarize
 fi
 
@@ -259,14 +351,14 @@ if [ "$http_code" = "200" ]; then
     TASK_ID=$(echo "$body" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
     if [ -n "$TASK_ID" ]; then
         echo -e "${GREEN}✅ PASS${NC} (ID: $TASK_ID)"
-        ((PASSED++))
+        PASSED=$((PASSED + 1))
     else
         echo -e "${YELLOW}⚠️  PASS${NC} (无法提取 ID)"
-        ((PASSED++))
+        PASSED=$((PASSED + 1))
     fi
 else
     echo -e "${RED}❌ FAIL${NC} (HTTP $http_code)"
-    ((FAILED++))
+    FAILED=$((FAILED + 1))
 fi
 
 test_api "GET" "/api/review/tasks" "" "tasks" "获取任务列表"
@@ -309,10 +401,10 @@ if [ -n "$TASK_ID" ]; then
     if [ "$http_code" = "200" ]; then
         RECORD_ID=$(echo "$body" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
         echo -e "${GREEN}✅ PASS${NC} (ID: $RECORD_ID)"
-        ((PASSED++))
+        PASSED=$((PASSED + 1))
     else
         echo -e "${RED}❌ FAIL${NC} (HTTP $http_code)"
-        ((FAILED++))
+        FAILED=$((FAILED + 1))
     fi
 
     test_api "GET" "/api/review/records/by-task/$TASK_ID" "" "records" "获取任务记录"
@@ -345,10 +437,10 @@ body=$(echo "$response" | sed '$d')
 if [ "$http_code" = "200" ]; then
     COMMENT_ID=$(echo "$body" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
     echo -e "${GREEN}✅ PASS${NC} (ID: $COMMENT_ID)"
-    ((PASSED++))
+    PASSED=$((PASSED + 1))
 else
     echo -e "${RED}❌ FAIL${NC} (HTTP $http_code)"
-    ((FAILED++))
+    FAILED=$((FAILED + 1))
 fi
 
 test_api "GET" "/api/review/comments/by-annotation/anno-test-1?type=text" "" "comments" "获取评论"

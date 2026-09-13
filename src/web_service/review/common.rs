@@ -7,9 +7,9 @@
 //! - `review_tasks` 行映射（`TaskRow`）以及对旧数据形态的动态值转换；
 //! - 任务节点负责人判定与任务写操作授权（`authorize_task_write`）；
 //! - 附件白名单 / MIME / 文件头校验常量（上传 handler 与任务附件水合共用）；
-//! - 持久层接缝：`fresh_review_db` / `await_review_query*` / `review_workflow_history_schema_ready`。
-//!   骨架阶段指向进程唯一连接 `aios_core::SUL_DB`（与 `mod.rs` 探针同一被探对象）；T1b 的 `db.rs`
-//!   落地后本段换成一行 `pub(super) use super::db::{...}`，六个子模块零改动。
+//! - 持久层接缝：`fresh_review_db` / `await_review_query*` / `review_workflow_history_schema_ready`
+//!   四个名字，自 T1b 落地起只是 `db.rs` / `schema.rs` 的再导出（落点、超时口径、持久化闸与
+//!   首启建表都在那两个文件里），六个子模块的 `use super::common::…` 不动。
 //!
 //! 与旧端的差异只在 SDK：surrealdb 3.x fork 的 `types::{RecordId, RecordIdKey, Datetime, Value}`、
 //! `SurrealValue` derive、`IndexedResults`，对应 gen-model 所用 2.1.4 fork 的
@@ -19,120 +19,22 @@
 //! `platform::REVIEW_TASK_ACTIVE_SQL` 保持同步（见 plant-surrealdb 技能：可选 bool / 逻辑删除）。
 //! 文件归 T2（`docs/plans/2026-09-12-review-backend-port-plan.md` §5）。
 
-use std::future::{Future, IntoFuture};
-use std::time::Instant;
-
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use axum::http::StatusCode;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use surrealdb::Surreal;
-use surrealdb::engine::any::Any;
-use tokio::time::{Duration, timeout};
 
 use super::auth::TokenClaims;
 
 // ============================================================================
-// 持久层接缝（旧端 review_db.rs 的调用面；连接与 schema 归 T1b db.rs / schema.rs）
+// 持久层接缝（T1b `db.rs` / `schema.rs` 的再导出；旧端 review_db.rs 的调用面）
 // ============================================================================
 
-const REVIEW_QUERY_TIMEOUT: Duration = Duration::from_secs(5);
-const REVIEW_QUERY_LONG_TIMEOUT: Duration = Duration::from_secs(8);
-const REVIEW_SLOW_QUERY_WARN: Duration = Duration::from_millis(1000);
-
-async fn with_review_timeout<T, F>(
-    operation: &'static str,
-    timeout_after: Duration,
-    fut: F,
-) -> Result<T>
-where
-    F: Future<Output = Result<T>>,
-{
-    let started = Instant::now();
-    match timeout(timeout_after, fut).await {
-        Ok(Ok(value)) => {
-            let elapsed = started.elapsed();
-            if elapsed >= REVIEW_SLOW_QUERY_WARN {
-                warn!(
-                    "[REVIEW_DB.slow] operation={} elapsed_ms={} timeout_ms={}",
-                    operation,
-                    elapsed.as_millis(),
-                    timeout_after.as_millis()
-                );
-            }
-            Ok(value)
-        }
-        Ok(Err(error)) => {
-            warn!(
-                "[REVIEW_DB.error] operation={} elapsed_ms={} error={}",
-                operation,
-                started.elapsed().as_millis(),
-                error
-            );
-            Err(error)
-        }
-        Err(_) => {
-            warn!(
-                "[REVIEW_DB.timeout] operation={} elapsed_ms={} timeout_ms={}",
-                operation,
-                started.elapsed().as_millis(),
-                timeout_after.as_millis()
-            );
-            Err(anyhow!(
-                "{} 超时（{}ms）",
-                operation,
-                timeout_after.as_millis()
-            ))
-        }
-    }
-}
-
-/// 普通查询：5s 超时 + 慢查询告警（旧端 `review_db::await_review_query`）。
-pub(super) async fn await_review_query<F>(
-    operation: &'static str,
-    fut: F,
-) -> Result<surrealdb::Response>
-where
-    F: IntoFuture<Output = std::result::Result<surrealdb::Response, surrealdb::Error>>,
-{
-    with_review_timeout(operation, REVIEW_QUERY_TIMEOUT, async {
-        fut.into_future().await.map_err(anyhow::Error::from)
-    })
-    .await
-}
-
-/// 分页 / 批量查询：8s 超时（旧端 `review_db::await_review_query_long`）。
-pub(super) async fn await_review_query_long<F>(
-    operation: &'static str,
-    fut: F,
-) -> Result<surrealdb::Response>
-where
-    F: IntoFuture<Output = std::result::Result<surrealdb::Response, surrealdb::Error>>,
-{
-    with_review_timeout(operation, REVIEW_QUERY_LONG_TIMEOUT, async {
-        fut.into_future().await.map_err(anyhow::Error::from)
-    })
-    .await
-}
-
-/// 取一个可用的校审库句柄。
-///
-/// 旧端为规避 ws 客户端高并发下的 channel 堵塞，每次新建独立连接；gen-model 的持久层只有
-/// `ensure_store_connected` 连上的那一个 `SUL_DB: Surreal<Any>`，这里直接复用（`Surreal` 是 Arc 句柄，
-/// clone 不建连接）。校审数据落哪一档介质、内存介质时如何响亮拒绝，由 T1b 的 ADR 与 `db.rs` 决定，
-/// 届时本函数换成 `super::db::fresh_review_db`。
-pub(super) async fn fresh_review_db() -> Result<Surreal<Any>> {
-    Ok(aios_core::SUL_DB.clone())
-}
-
-/// `review_workflow_history` 是否已升级到 RUS-244 形态。
-///
-/// schema 预热归 T1b `schema.rs`；接上之前如实回 `false`，让工作流写入路径按旧端逻辑打出
-/// 「schema warmup is not ready」告警而不是假装已就位（宪法 III：不静默）。
-pub(super) fn review_workflow_history_schema_ready() -> bool {
-    false
-}
+// 落点、超时与慢查询口径、持久化闸、首启建表建索引都在 `db.rs` / `schema.rs`；这里只把四个
+// 名字搬过来，六个业务子模块的 `use super::common::…` 一行不改。
+pub(super) use super::db::{await_review_query, await_review_query_long, fresh_review_db};
+pub(super) use super::schema::review_workflow_history_schema_ready;
 
 // ============================================================================
 // 契约类型（旧端 review_api.rs「Request/Response Types」中跨文件共用的部分）
@@ -1315,10 +1217,7 @@ mod tests {
     #[test]
     fn test_task_row_to_review_task_compat() {
         let row = TaskRow {
-            id: surrealdb::sql::Thing {
-                tb: "review_tasks".to_string(),
-                id: surrealdb::sql::Id::String("task-123".to_string()),
-            },
+            id: surrealdb::sql::Thing::from(("review_tasks", "task-123")),
             form_id: Some("form-456".to_string()),
             title: Some("Test Task".to_string()),
             description: None,
@@ -1366,10 +1265,7 @@ mod tests {
     #[test]
     fn test_task_row_to_review_task_checker_preferred() {
         let row = TaskRow {
-            id: surrealdb::sql::Thing {
-                tb: "review_tasks".to_string(),
-                id: surrealdb::sql::Id::String("task-789".to_string()),
-            },
+            id: surrealdb::sql::Thing::from(("review_tasks", "task-789")),
             form_id: None,
             title: Some("Task with checker".to_string()),
             description: None,
@@ -1506,5 +1402,359 @@ mod tests {
         assert_eq!(tasks.len(), 2);
         assert_eq!(tasks[0].id, "task-good-1");
         assert_eq!(tasks[1].id, "task-legacy-2");
+    }
+
+    // ========================================================================
+    // 路由清单护栏（宪法 VI · 计划 §6 A3；旧端对应 `stateless_web_api_route_paths()`）
+    // ========================================================================
+
+    /// 计划 §1.2 表里「鉴权 / 用户 / 提资单·任务 / 批注记录 / 评论·批注状态 / 附件 / 同步 /
+    /// 健康」八个域的方法·路径全集，逐条对照 `plant3d-web/src/api/reviewApi.ts`。
+    ///
+    /// 表里有而这里没有的两处，都不是校审模块 `routes()` 能钉的：
+    /// - 静态 `GET /files/review_attachments/{stored_name}`（旧端 `web_server/mod.rs:1434` 的
+    ///   `ServeDir`）挂在 Web 服务总入口，不经本域路由；
+    /// - PMS 平台入站 6 条与模型侧集成 2 条分属 T3 / T4，护栏由各自模块自己立。
+    ///
+    /// 末两条（`returned` / `batch-reactivate`）前端当前未调用，但旧端
+    /// `review_api.rs:1733` 起注册着，移植不减项，故一并钉住。
+    const REVIEW_CONTRACT_ROUTES: &[(&str, &str, &str)] = &[
+        // 鉴权（reviewApi.ts:2356-2408）
+        ("auth.rs", "post", "/api/auth/token"),
+        ("auth.rs", "post", "/api/auth/verify"),
+        // 用户（reviewApi.ts:1775-1801）
+        ("users.rs", "get", "/api/users"),
+        ("users.rs", "get", "/api/users/me"),
+        ("users.rs", "get", "/api/users/reviewers"),
+        // 提资单 CRUD（reviewApi.ts:1008-1091）
+        ("tasks.rs", "post", "/api/review/tasks"),
+        ("tasks.rs", "get", "/api/review/tasks"),
+        ("tasks.rs", "get", "/api/review/tasks/{id}"),
+        ("tasks.rs", "patch", "/api/review/tasks/{id}"),
+        ("tasks.rs", "delete", "/api/review/tasks/{id}"),
+        // 审核操作（reviewApi.ts:1103-1468）
+        ("tasks.rs", "post", "/api/review/tasks/{id}/start-review"),
+        ("tasks.rs", "post", "/api/review/tasks/{id}/approve"),
+        ("tasks.rs", "post", "/api/review/tasks/{id}/reject"),
+        ("tasks.rs", "post", "/api/review/tasks/{id}/cancel"),
+        ("tasks.rs", "get", "/api/review/tasks/{id}/history"),
+        // 多级审批流转（reviewApi.ts:1167-1202）
+        ("tasks.rs", "post", "/api/review/tasks/{id}/submit"),
+        ("tasks.rs", "post", "/api/review/tasks/{id}/return"),
+        ("tasks.rs", "get", "/api/review/tasks/{id}/workflow"),
+        // 驳回重流转（旧端 `review_api.rs:1733`）
+        ("tasks.rs", "get", "/api/review/tasks/returned"),
+        ("tasks.rs", "post", "/api/review/tasks/batch-reactivate"),
+        // 批注记录（reviewApi.ts:1410-1455）
+        ("records.rs", "post", "/api/review/records"),
+        ("records.rs", "get", "/api/review/records/by-task/{task_id}"),
+        (
+            "records.rs",
+            "delete",
+            "/api/review/records/item/{record_id}",
+        ),
+        (
+            "records.rs",
+            "delete",
+            "/api/review/records/clear-task/{task_id}",
+        ),
+        // 评论（reviewApi.ts:1493-1556）
+        ("comments.rs", "post", "/api/review/comments"),
+        (
+            "comments.rs",
+            "get",
+            "/api/review/comments/by-annotation/{annotation_id}",
+        ),
+        (
+            "comments.rs",
+            "delete",
+            "/api/review/comments/item/{comment_id}",
+        ),
+        (
+            "comments.rs",
+            "patch",
+            "/api/review/comments/item/{comment_id}",
+        ),
+        // 批注轻量字段与严重度（reviewApi.ts:1585-1637）
+        (
+            "comments.rs",
+            "patch",
+            "/api/review/annotations/{annotation_id}",
+        ),
+        (
+            "comments.rs",
+            "patch",
+            "/api/review/annotations/{annotation_id}/severity",
+        ),
+        // 批注处理状态（reviewApi.ts:1747-1760）
+        (
+            "annotation_state.rs",
+            "post",
+            "/api/review/annotation-states/apply",
+        ),
+        (
+            "annotation_state.rs",
+            "get",
+            "/api/review/annotation-states",
+        ),
+        // 附件（reviewApi.ts:1927-2084）
+        ("attachments.rs", "post", "/api/review/attachments"),
+        (
+            "attachments.rs",
+            "delete",
+            "/api/review/attachments/{attachment_id}",
+        ),
+        // 同步（reviewApi.ts:2497-2510）
+        ("sync.rs", "post", "/api/review/sync/export"),
+        ("sync.rs", "post", "/api/review/sync/import"),
+        // 健康（旧端 `review_api.rs:1752`）
+        ("mod.rs", "get", "/api/review/health"),
+    ];
+
+    /// 切出路由函数体：从 `marker` 之后到行首 `}`（体内的 `}` 都带缩进）。CRLF / LF 都能匹配。
+    fn router_fn_body<'a>(file: &str, source: &'a str, marker: &str) -> &'a str {
+        source
+            .split_once(marker)
+            .unwrap_or_else(|| panic!("{file}: 找不到路由函数签名 `{marker}`"))
+            .1
+            .split_once("\n}")
+            .unwrap_or_else(|| panic!("{file}: 路由函数体没有闭合"))
+            .0
+    }
+
+    /// 先剥掉注释再做文本匹配：注释掉的 `.route(...)` 不算注册。
+    /// （2026-09-13 变异验证：不剥注释时把 `workflow` 那行注掉，护栏照样绿。）
+    fn strip_comments(body: &str) -> String {
+        let mut out = String::with_capacity(body.len());
+        let mut chars = body.chars().peekable();
+        let (mut in_string, mut in_line, mut in_block) = (false, false, false);
+        while let Some(c) = chars.next() {
+            if in_line {
+                if c == '\n' {
+                    in_line = false;
+                    out.push('\n');
+                }
+            } else if in_block {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    in_block = false;
+                } else if c == '\n' {
+                    out.push('\n');
+                }
+            } else if in_string {
+                out.push(c);
+                if c == '\\' {
+                    out.extend(chars.next());
+                } else if c == '"' {
+                    in_string = false;
+                }
+            } else {
+                match c {
+                    '"' => {
+                        in_string = true;
+                        out.push(c);
+                    }
+                    '/' if chars.peek() == Some(&'/') => {
+                        chars.next();
+                        in_line = true;
+                    }
+                    '/' if chars.peek() == Some(&'*') => {
+                        chars.next();
+                        in_block = true;
+                    }
+                    _ => out.push(c),
+                }
+            }
+        }
+        out
+    }
+
+    /// 按括号配对切出每个 `.route(` 的实参片段（字符串字面量内的括号不计）。
+    fn route_calls<'a>(file: &str, body: &'a str) -> Vec<&'a str> {
+        let bytes = body.as_bytes();
+        let mut calls = Vec::new();
+        let mut cursor = 0usize;
+        while let Some(offset) = body[cursor..].find(".route(") {
+            let open = cursor + offset + ".route(".len();
+            let mut depth = 1usize;
+            let mut in_string = false;
+            let mut at = open;
+            while at < bytes.len() {
+                match bytes[at] {
+                    b'"' => in_string = !in_string,
+                    b'(' if !in_string => depth += 1,
+                    b')' if !in_string => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                at += 1;
+            }
+            assert_eq!(depth, 0, "{file}: `.route(` 括号没有配平");
+            calls.push(&body[open..at]);
+            cursor = at;
+        }
+        calls
+    }
+
+    fn route_path<'a>(file: &str, call: &'a str) -> &'a str {
+        let rest = &call[call
+            .find('"')
+            .unwrap_or_else(|| panic!("{file}: `.route(` 第一个实参不是路径字面量：{call}"))
+            + 1..];
+        &rest[..rest
+            .find('"')
+            .unwrap_or_else(|| panic!("{file}: 路径字面量没有闭合：{call}"))]
+    }
+
+    /// 取本次注册用到的 HTTP 方法。只认前面不接标识符字符的 `verb(`，
+    /// 免得把 `get(get_current_user)` 里的 handler 名认成第二个方法。
+    fn route_methods(call: &str) -> Vec<&'static str> {
+        ["get", "post", "put", "patch", "delete"]
+            .into_iter()
+            .filter(|verb| {
+                let needle = format!("{verb}(");
+                let mut cursor = 0usize;
+                while let Some(offset) = call[cursor..].find(&needle) {
+                    let at = cursor + offset;
+                    let standalone = call[..at]
+                        .chars()
+                        .next_back()
+                        .is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+                    if standalone {
+                        return true;
+                    }
+                    cursor = at + needle.len();
+                }
+                false
+            })
+            .collect()
+    }
+
+    /// 逐条钉住计划 §1.2 的契约路由：少一条（前端静默 404）红，
+    /// 多一条没登记在册的（契约外扩面）也红。
+    #[test]
+    fn review_contract_routes_are_registered_verbatim() {
+        use std::collections::BTreeSet;
+
+        const SUBMODULE_MARKER: &str = "pub fn routes<S>() -> Router<S>";
+        let sources: [(&str, &str, &str); 9] = [
+            ("auth.rs", include_str!("auth.rs"), SUBMODULE_MARKER),
+            ("users.rs", include_str!("users.rs"), SUBMODULE_MARKER),
+            ("tasks.rs", include_str!("tasks.rs"), SUBMODULE_MARKER),
+            ("records.rs", include_str!("records.rs"), SUBMODULE_MARKER),
+            ("comments.rs", include_str!("comments.rs"), SUBMODULE_MARKER),
+            (
+                "annotation_state.rs",
+                include_str!("annotation_state.rs"),
+                SUBMODULE_MARKER,
+            ),
+            (
+                "attachments.rs",
+                include_str!("attachments.rs"),
+                SUBMODULE_MARKER,
+            ),
+            ("sync.rs", include_str!("sync.rs"), SUBMODULE_MARKER),
+            (
+                "mod.rs",
+                include_str!("mod.rs"),
+                "pub fn router() -> Router<AppState> {",
+            ),
+        ];
+
+        let bodies: Vec<(&str, String)> = sources
+            .into_iter()
+            .map(|(file, source, marker)| {
+                (file, strip_comments(router_fn_body(file, source, marker)))
+            })
+            .collect();
+
+        let mut registered: BTreeSet<(&str, &str, &str)> = BTreeSet::new();
+        for (file, body) in &bodies {
+            let file = *file;
+            for call in route_calls(file, body) {
+                let path = route_path(file, call);
+                let methods = route_methods(call);
+                assert!(
+                    !methods.is_empty(),
+                    "{file}: `{path}` 没认出 HTTP 方法：{call}"
+                );
+                for method in methods {
+                    assert!(
+                        registered.insert((file, method, path)),
+                        "{file}: {} {path} 注册了两次",
+                        method.to_uppercase()
+                    );
+                }
+            }
+        }
+
+        let expected: BTreeSet<(&str, &str, &str)> =
+            REVIEW_CONTRACT_ROUTES.iter().copied().collect();
+        assert_eq!(
+            expected.len(),
+            REVIEW_CONTRACT_ROUTES.len(),
+            "契约表里有重复条目"
+        );
+
+        let missing: Vec<_> = expected.difference(&registered).collect();
+        assert!(
+            missing.is_empty(),
+            "契约路由没注册（前端会 404）：{missing:#?}"
+        );
+        let extra: Vec<_> = registered.difference(&expected).collect();
+        assert!(
+            extra.is_empty(),
+            "注册了契约表外的路由，要么是笔误要么得先改计划 §1.2：{extra:#?}"
+        );
+    }
+
+    /// 契约路由必须真的能被 `Router` 接住：把每条 `.route()` 原样搭一遍，
+    /// 确认 axum 不会因为路径冲突（同一段上既有 `{id}` 又有字面量）在启动时 panic，
+    /// 且每条都不是 404。
+    #[tokio::test]
+    async fn contract_routes_are_reachable_without_path_conflicts() {
+        use axum::routing::{MethodRouter, any};
+        use std::collections::BTreeMap;
+
+        let mut app: Router<()> = Router::new();
+        let mut by_path: BTreeMap<&str, MethodRouter<()>> = BTreeMap::new();
+        for (_, _, path) in REVIEW_CONTRACT_ROUTES {
+            by_path
+                .entry(path)
+                .or_insert_with(|| any(|| async { "ok" }));
+        }
+        for (path, method_router) in by_path {
+            app = app.route(path, method_router);
+        }
+
+        // `/api/review/tasks/returned` 与 `/api/review/tasks/{id}` 同段共存是旧端就有的形状，
+        // axum 0.8 的 matchit 按「字面量优先」解析，这里顺带钉住它不退化成 404。
+        for probe in [
+            "/api/review/tasks/returned",
+            "/api/review/tasks/batch-reactivate",
+            "/api/review/tasks/task-123",
+            "/api/review/tasks/task-123/workflow",
+            "/api/review/health",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(probe)
+                        .body(Body::empty())
+                        .expect("request"),
+                )
+                .await
+                .expect("router must answer");
+            assert_ne!(
+                response.status(),
+                StatusCode::NOT_FOUND,
+                "{probe} 被路由表判成 404"
+            );
+        }
     }
 }

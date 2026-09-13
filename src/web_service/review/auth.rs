@@ -10,9 +10,11 @@
 //!   `pub mod web_service`），故不再逐项标注；
 //! - `review-internal-workflow` 特性按计划 Q7 不移植，旧端 `#[cfg(feature)]` 双分支处只保留
 //!   默认（外部驱动）分支：`workflow_mode` 不写进 claims，`/api/auth/token` 收到该字段只告警忽略；
-//! - 配置仍由旧端的 `load_config()`（`DB_OPTION_FILE` → `db_options/DbOption` → `DbOption`）读取
-//!   `[review_auth]` / `[platform_auth]` / `model_center.token_secret`，自包含、不碰 `options.rs`；
-//!   T1b 若把这几段收进 `DbOptionExt`，改这一处即可。
+//! - `[review_auth]` / `[platform_auth]` 自 T1b 起走 `crate::options::{review_auth, platform_auth}`
+//!   这一个解析口，缺省值与旧端 `jwt_auth.rs` 的 `Default` 逐字相同；JWT 密钥不在其中，
+//!   仍是 `JWT_SECRET` 环境变量与 `model_center.token_secret` 那一路，因此本文件的
+//!   `load_config()`（`DB_OPTION_FILE` → `db_options/DbOption` → `DbOption`）保留——
+//!   `JwtConfig` 与 T3 的 `platform::config` 都还从它取值。
 //!
 //! 文件归 T2（`docs/plans/2026-09-12-review-backend-port-plan.md` §5）。
 
@@ -167,40 +169,27 @@ impl JwtConfig {
 }
 
 impl PlatformAuthConfig {
-    /// 从配置文件加载
+    /// 从 `[platform_auth]` 加载（T1b 的 `options::platform_auth()` 是唯一解析口，
+    /// 缺省值与本文件的 `Default` 逐字相同）。
     pub fn from_config_file() -> Self {
-        if let Some(config) = load_config() {
-            return Self {
-                enabled: config.get_bool("platform_auth.enabled").unwrap_or(true),
-                debug_token: config
-                    .get_string("platform_auth.debug_token")
-                    .unwrap_or_default(),
-            };
+        let section = crate::options::platform_auth();
+        Self {
+            enabled: section.enabled(),
+            debug_token: section.debug_token().to_string(),
         }
-
-        Self::default()
     }
 }
 
 impl ReviewAuthConfig {
-    /// 从配置文件加载
+    /// 从 `[review_auth]` 加载（同上，走 `options::review_auth()`）。
     pub fn from_config_file() -> Self {
-        if let Some(config) = load_config() {
-            return Self {
-                enabled: config.get_bool("review_auth.enabled").unwrap_or(true),
-                debug_project_id: config
-                    .get_string("review_auth.debug_project_id")
-                    .unwrap_or_else(|_| "debug-project".to_string()),
-                debug_user_id: config
-                    .get_string("review_auth.debug_user_id")
-                    .unwrap_or_else(|_| "designer_001".to_string()),
-                debug_role: config
-                    .get_string("review_auth.debug_role")
-                    .unwrap_or_else(|_| "sj".to_string()),
-            };
+        let section = crate::options::review_auth();
+        Self {
+            enabled: section.enabled(),
+            debug_project_id: section.debug_project_id().to_string(),
+            debug_user_id: section.debug_user_id().to_string(),
+            debug_role: section.debug_role().to_string(),
         }
-
-        Self::default()
     }
 }
 
@@ -1168,6 +1157,154 @@ mod tests {
                 .and_then(|data| data.claims.as_ref())
                 .map(|claims| claims.project_id.as_str()),
             Some("project-1")
+        );
+    }
+
+    // ========================================================================
+    // 401 / 403 错误文本逐字护栏（计划 §6 A5）
+    // ========================================================================
+    //
+    // 前端按 `error_message` 的内容分支（`reviewApi.ts` 把它原样弹给用户），所以这三句
+    // 是契约的一部分，不是日志。改动任意一句都要同步改旧端，否则两端行为分叉。
+
+    /// 旧端 `plant-model-gen/src/web_api/jwt_auth.rs:513`
+    const LEGACY_MISSING_BEARER_MESSAGE: &str = "Missing or invalid Authorization header";
+    /// 旧端 `jwt_auth.rs:517`（`Invalid token: {jsonwebtoken 的错误}`）
+    const LEGACY_INVALID_TOKEN_PREFIX: &str = "Invalid token: ";
+    /// 旧端 `jwt_auth.rs:647`
+    const LEGACY_ROLE_DENIED_TEMPLATE: &str = "Access denied. Required roles: {:?}, your role: {}";
+    /// 旧端 `jwt_auth.rs:657`
+    const LEGACY_NO_CLAIMS_MESSAGE: &str = "No authentication token found";
+
+    async fn error_body(response: axum::response::Response) -> serde_json::Value {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        serde_json::from_slice(&bytes).expect("错误响应必须是 JSON")
+    }
+
+    fn enabled_auth_app() -> Router {
+        Router::new()
+            .route("/claims", get(claims_echo_handler))
+            .layer(middleware::from_fn_with_state(
+                ReviewAuthConfig {
+                    enabled: true,
+                    debug_project_id: "debug-project".to_string(),
+                    debug_user_id: "designer_001".to_string(),
+                    debug_role: "sj".to_string(),
+                },
+                review_auth_middleware,
+            ))
+    }
+
+    #[tokio::test]
+    async fn review_auth_401_body_is_verbatim_legacy_text() {
+        let missing = enabled_auth_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/claims")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+        let payload = error_body(missing).await;
+        assert_eq!(payload["success"], false);
+        assert_eq!(payload["error_message"], LEGACY_MISSING_BEARER_MESSAGE);
+
+        // 带了 Bearer 但不是有效 JWT：旧端走 `verify_token` 失败分支，文本带 jsonwebtoken 的原因。
+        let invalid = enabled_auth_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/claims")
+                    .header(AUTHORIZATION, "Bearer not-a-jwt")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(invalid.status(), StatusCode::UNAUTHORIZED);
+        let payload = error_body(invalid).await;
+        assert_eq!(payload["success"], false);
+        let message = payload["error_message"].as_str().expect("error_message");
+        assert!(
+            message.starts_with(LEGACY_INVALID_TOKEN_PREFIX),
+            "401 文本要沿用旧端 `Invalid token: {{e}}`，实得 {message:?}"
+        );
+
+        // `Authorization` 存在但不是 Bearer 形态时，旧端归到「缺 header」那一句而不是「token 无效」。
+        let not_bearer = enabled_auth_app()
+            .oneshot(
+                Request::builder()
+                    .uri("/claims")
+                    .header(AUTHORIZATION, "Basic dXNlcjpwYXNz")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(not_bearer.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            error_body(not_bearer).await["error_message"],
+            LEGACY_MISSING_BEARER_MESSAGE
+        );
+    }
+
+    #[tokio::test]
+    async fn require_roles_403_body_is_verbatim_legacy_text() {
+        const ALLOWED: &[&str] = &["pz"];
+
+        let claims = TokenClaims {
+            project_id: "project-1".into(),
+            user_id: "designer_001".into(),
+            user_name: "张设计".into(),
+            role: Some("sj".into()),
+            workflow_mode: None,
+            legacy_form_id: None,
+            exp: 0,
+            iat: 0,
+        };
+
+        let denied = Router::new()
+            .route("/claims", get(claims_echo_handler))
+            .layer(middleware::from_fn(require_roles(ALLOWED)))
+            // 后加的 layer 在外层先跑，claims 因此在 require_roles 之前就进了 extensions。
+            .layer(Extension(claims))
+            .oneshot(
+                Request::builder()
+                    .uri("/claims")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let payload = error_body(denied).await;
+        assert_eq!(payload["success"], false);
+        assert_eq!(
+            payload["error_message"],
+            format!("Access denied. Required roles: {ALLOWED:?}, your role: sj"),
+            "403 文本要逐字沿用旧端模板 {LEGACY_ROLE_DENIED_TEMPLATE:?}"
+        );
+
+        // 没有 claims（中间件没跑或 token 缺失）时旧端回 401 而不是 403。
+        let anonymous = Router::new()
+            .route("/claims", get(claims_echo_handler))
+            .layer(middleware::from_fn(require_roles(ALLOWED)))
+            .oneshot(
+                Request::builder()
+                    .uri("/claims")
+                    .body(axum::body::Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(anonymous.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            error_body(anonymous).await["error_message"],
+            LEGACY_NO_CLAIMS_MESSAGE
         );
     }
 }
