@@ -473,6 +473,16 @@ async fn serve_with_ready(
         .route("/api/v1/tree/roots", get(handlers::tree_roots))
         .route("/api/v1/tree/children", get(handlers::tree_children))
         .route("/api/v1/tree/ancestors", get(handlers::tree_ancestors))
+        // 空间邻近查询（spec §4.13）：只读进程内 `GLOBAL_AABB_TREE`，三条都是 GET。
+        .route("/api/v1/spatial/nearby", get(handlers::spatial_nearby))
+        .route(
+            "/api/v1/spatial/nearby/refnos",
+            get(handlers::spatial_nearby_refnos),
+        )
+        .route(
+            "/api/v1/spatial/negative-nouns",
+            get(handlers::spatial_negative_nouns),
+        )
         // 单位网格的 GLB 形态。与下面 `/assets` 的 ServeDir 是同一份 `.mesh` 的两种口径：
         // 那条给 plant-ui（原生读 rkyv），这条给浏览器（只认 glTF）。
         .route("/api/v1/meshes/{file}", get(handlers::mesh_glb))
@@ -772,6 +782,30 @@ mod tests {
                 "missing direct tree GET route: {route}"
             );
         }
+    }
+
+    /// spec §4.13：空间邻近查询三条都是只读 GET，且挂在 `/api/v1/spatial/` 下。
+    #[test]
+    fn spatial_routes_are_read_only_get_endpoints() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("async fn serve_with_ready(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        for route in [
+            ".route(\"/api/v1/spatial/nearby\", get(handlers::spatial_nearby))",
+            "\"/api/v1/spatial/nearby/refnos\",\n            get(handlers::spatial_nearby_refnos)",
+            "\"/api/v1/spatial/negative-nouns\",\n            get(handlers::spatial_negative_nouns)",
+        ] {
+            assert!(serve.contains(route), "missing spatial GET route: {route}");
+        }
+        assert!(
+            !serve.contains("post(handlers::spatial_") && !serve.contains("delete(handlers::spatial_"),
+            "spatial routes must stay read-only"
+        );
     }
 
     /// ADR-073：按水位删除会制造无法证明完整性的局部状态，只保留只读预览。
