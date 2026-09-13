@@ -24,9 +24,9 @@
    时间：`ReviewTask.createdAt/updatedAt/dueDate`、`WorkflowStep.timestamp`、`AnnotationComment.createdAt`、
    任务 history 的 `timestamp` 序列化为**北京时间字符串** `YYYY-MM-DD HH:MM:SS`；`ReviewAttachment.uploadedAt`、
    `ConfirmedRecordWithMeta.confirmedAt`、`AnnotationStateView.updatedAt` 是毫秒时间戳整数。
-4. **持久化。** 本域数据落 SurrealDB（宪法 I），连接与介质、内存介质时的响亮拒绝由持久化 ADR 定（计划 Q6、A9）；
-   本文不重复。
-5. **护栏（宪法 VI）。** 路由清单以源码文本护栏钉住：`review/common.rs::REVIEW_CONTRACT_ROUTES`（§1–§7、§10 共 42 条）、
+4. **持久化。** 本域数据落 SurrealDB（宪法 I），连接与介质、内存介质时的响亮拒绝由 `docs/adr/ADR-072-review-data-persistence.md`
+   定（计划 Q6、A9：落点 = `SUL_DB` 同一 ns·db；介质不 durable 时四个前缀一律 503 并打多行横幅）；本文不重复。
+5. **护栏（宪法 VI）。** 路由清单以源码文本护栏钉住：`review/common.rs::REVIEW_CONTRACT_ROUTES`（§1–§7、§10 共 **37 条**方法·路径；计划 §6 A3 写的「42」是计数笔误，见计划 §11 R3 条）、
    `review/mod.rs` 的 merge 顺序护栏、`review/integration.rs::integration_routes_are_registered_verbatim`（§9 两条）、
    PMS 六条由 `review/platform` 自己立。少一条前端静默 404、多一条契约外扩面，都红。
 6. **非目标。** `/ws/review*`（旧端从未实现，前端未配 `VITE_REVIEW_WS_BASE_URL` 时自动关闭，计划 N1 / Q9）、
@@ -231,7 +231,7 @@ CollisionItem = { ObjectOneLoc, ObjectOne, ObjectTowLoc, ObjectTow,   // "Tow" �
 - `reason` 是本仓相对旧端**唯一新增**的键；有数据源时不序列化，键集与旧端逐字相同（`integration.rs::legacy_shapes_are_preserved_when_a_source_exists`）。
 - 数据源接缝是 `integration::CollisionSource`（今天只有 `Unavailable`）。接入时（候选：PMS `/HD/QueryAssistReview` 代理——前端注释
   「后端代理 → PMS」即此方向；或 gen-model 自带碰撞结果落 SurrealDB `collision_events`）只加一个变体并把 `AppState.queries` 穿进
-  `collision_source()`，两条 handler 形状不动。「碰撞数据源待接」记在持久化 ADR。
+  `collision_source()`，两条 handler 形状不动。「碰撞数据源待接」记在 `docs/adr/ADR-072-review-data-persistence.md` §未决。
 
 ## 10. 健康（`review/mod.rs`）
 
@@ -246,7 +246,7 @@ CollisionItem = { ObjectOneLoc, ObjectOne, ObjectTowLoc, ObjectTow,   // "Tow" �
 | 计划 §6 | 本文 | 怎么判 |
 | --- | --- | --- |
 | A2 | §10 | 两端 `curl /api/review/health` 键集相同 |
-| A3 | §1–§7、§10 | `cargo test review_contract_routes_are_registered_verbatim`（42 条）+ `scripts/review/test_review_api.sh <base> routes` |
+| A3 | §1–§7、§10 | `cargo test review_contract_routes_are_registered_verbatim`（37 条 + 静态 1 条）+ `scripts/review/test_review_api.sh <base> routes`（38 个探针） |
 | A5 | §1.3 | curl 对比 401 / 403 文本 |
 | A8 | §8 | `scripts/review/test_workflow_e2e.sh`、`scripts/review/verify_platform_api_json.sh` 指向 `:8022` |
 | A10 | §9 | 两端 curl 对比键集；无数据源时 `reason` 在场、`total:0`、无 mock；`cargo test web_service::review::integration` |
