@@ -138,7 +138,12 @@ mod tests {
         }
     }
 
-    /// 索引清单逐条对旧端 `review_db.rs:190-207`：少一条就是某个列表页悄悄变成全表扫。
+    /// 索引清单逐条对旧端运行时 DDL：少一条就是某个列表页悄悄变成全表扫。
+    ///
+    /// 出处有**三处**，不是两处：`review_db.rs:190-207`（查询索引）、`:247-267`
+    /// （workflow_history）、`platform_api/review_form.rs:37-50`（`review_forms`，经
+    /// `web_server/mod.rs:568` 的 `warm_review_forms_schema()` 在启动时执行）。第三处
+    /// 曾被整条漏掉，复核见 `docs/evidence/2026-09-13-review-schema-parity.md` §7 P1-1。
     #[tokio::test]
     async fn every_query_index_from_the_legacy_runtime_ddl_is_created() {
         let db = fresh_db().await;
@@ -171,6 +176,8 @@ mod tests {
                 "review_workflow_history",
                 vec!["idx_workflow_task", "idx_workflow_form"],
             ),
+            // 出处 C：`review_forms` 上唯一的索引，且是 UNIQUE（唯一性另由下一条测试钉）。
+            ("review_forms", vec!["idx_form_id"]),
         ] {
             let actual = index_names(&db, table).await;
             for index in expected {
@@ -180,6 +187,59 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `idx_form_id` 必须是 **UNIQUE**，不是普通索引：一个 form_id 只能有一行主单据。
+    ///
+    /// `ensure_review_form_stub`（`platform/review_form.rs:88-181`）是「先 SELECT 再
+    /// CREATE」的读改写，中间没有事务；PMS 的 embed-url 与 workflow/sync 对同一 form_id
+    /// 并发进来时，挡住第二条 CREATE 的就只有这条唯一索引。少了它不会报错，只会静默多出
+    /// 一行，而读取取的是 `ORDER BY updated_at DESC LIMIT 1` —— 另一行成为读不到却仍在
+    /// 库里的影子行，主单据的 status / role / task_created 随哪一行被更新而漂。
+    #[tokio::test]
+    async fn review_forms_rejects_a_second_row_with_the_same_form_id() {
+        let db = fresh_db().await;
+        apply_review_schema(&db).await.expect("DDL");
+
+        let create = |form_id: &str, status: &str| {
+            format!(
+                "CREATE review_forms CONTENT {{ form_id: '{form_id}', status: '{status}' }};"
+            )
+        };
+
+        db.query(create("FORM-UNIQUE-1", "blank"))
+            .await
+            .expect("CREATE 应执行")
+            .check()
+            .expect("第一行主单据要能写进去");
+
+        let second = db
+            .query(create("FORM-UNIQUE-1", "active"))
+            .await
+            .expect("CREATE 应执行")
+            .check();
+        assert!(
+            second.is_err(),
+            "同一 form_id 的第二行必须被唯一索引挡下（挡不下就会多出读不到的影子行）"
+        );
+
+        // 换一个 form_id 照样能写：挡的是重复，不是这张表本身。
+        db.query(create("FORM-UNIQUE-2", "blank"))
+            .await
+            .expect("CREATE 应执行")
+            .check()
+            .expect("不同 form_id 不该被挡");
+
+        let mut response = db
+            .query("SELECT count() AS n FROM review_forms GROUP ALL;")
+            .await
+            .expect("SELECT");
+        let counted: Option<Value> = response.take(0).expect("take count");
+        assert_eq!(
+            counted.as_ref().and_then(|row| row.get("n")),
+            Some(&Value::from(2)),
+            "库里应当只剩两行（两个不同的 form_id）：{counted:?}"
+        );
     }
 
     /// RUS-244 回归的原样复现条件：只给 actor_* 一族、不给旧的 operator_* / timestamp。

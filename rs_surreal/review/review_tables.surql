@@ -6,13 +6,20 @@
 --     review_attachment / review_form_model 定义成 **SCHEMAFULL**；
 --   * `resource/surreal/review_workflow.surql`  —— 把同名的三张表定义成 **SCHEMALESS**，
 --     字段集也不同（多 created_at、少 file_name/file_size/mime_type）。
--- 两份都**不是**旧端跑起来时的实际形态：旧端启动只执行 `src/web_api/review_db.rs`
--- 里的运行时 DDL（`:186-216` 索引 + `:241-277` workflow_history 升级），两份 surql
--- 文件从未被加载。因此本文件**以 review_db.rs 的运行时 DDL 为真**，两份旧 surql 只当
--- 史料。移植计划 `docs/plans/2026-09-12-review-backend-port-plan.md` §1.3 末行、
+-- 两份都**不是**旧端跑起来时的实际形态：旧端启动只执行下面三处运行时 DDL，两份 surql
+-- 文件从未被加载。因此本文件**以这三处运行时 DDL 为真**，两份旧 surql 只当史料。
+--   A. `src/web_api/review_db.rs:190-207`（`ensure_review_query_indexes_inner`）——查询索引；
+--   B. `src/web_api/review_db.rs:247-267`（`ensure_review_workflow_history_schema_inner`）
+--      —— workflow_history 升级；
+--   C. `src/web_api/platform_api/review_form.rs:37-50`（`ensure_review_forms_schema_inner`）
+--      —— `review_forms` 的表定义与 `idx_form_id ... UNIQUE`，由 `src/web_server/mod.rs:568`
+--      的 `warm_review_forms_schema()` 在启动时执行。**C 容易被漏**：它不在 review_db.rs 里，
+--      本文件初版就漏了它那条唯一索引（复核见 `docs/evidence/2026-09-13-review-schema-parity.md`
+--      §7 P1-1）。往后核对三处都要走一遍。
+-- 移植计划 `docs/plans/2026-09-12-review-backend-port-plan.md` §1.3 末行、
 -- 落点决定见 `docs/adr/ADR-072-review-data-persistence.md`。
 --
--- 由此产生的三处「与旧 surql 不同」，都是有意的：
+-- 由此产生的四处「与旧端不同」，都是有意的：
 --   1. review_attachment 是 **SCHEMALESS**。旧 SCHEMAFULL 版没有 file_name / file_size /
 --      mime_type 三个字段，而上传 handler 每次都写它们（`review/attachments.rs:512-526`）
 --      ——照旧 surql 建表，附件一条也存不进去。
@@ -23,6 +30,11 @@
 --      于是「表在不在」取决于有没有人写过；这里让首启后 `INFO FOR DB` 就是完整清单。
 --      `IF NOT EXISTS` 不动既有定义：从旧端 SCHEMAFULL 库整体迁移过来的场景不在本次
 --      范围（ADR-072「未决」一节）。
+--   4. review_forms 取 **SCHEMALESS**，不照出处 C 那样 SCHEMAFULL + 13 个 DEFINE FIELD。
+--      写入路径不依赖 DB 侧 DEFAULT（`platform/review_form.rs:148-161` 的 CREATE 把 12 个
+--      字段全显式写出，三处 UPDATE 也显式写 deleted / updated_at），丢的是类型约束不是
+--      数据；其余 9 张表一律 SCHEMALESS，单独把这张改回去会让 ADR-072「旧库整体迁入」
+--      更难办。但 **`idx_form_id ... UNIQUE` 必须照搬**——那是行为，不是口径，见下方第 2 节。
 --
 -- 执行方：`src/web_service/review/schema.rs::ensure_review_schema`（`include_str!` 冻进
 -- 二进制，进程内 OnceCell 只跑一次，30s DDL 超时 = 旧端 REVIEW_DDL_TIMEOUT）。
@@ -58,6 +70,14 @@ DEFINE INDEX IF NOT EXISTS idx_review_records_task_id ON TABLE review_records FI
 DEFINE INDEX IF NOT EXISTS idx_review_comments_annotation_id ON TABLE review_comments FIELDS annotation_id;
 DEFINE INDEX IF NOT EXISTS idx_review_attachment_form_id ON TABLE review_attachment FIELDS form_id;
 DEFINE INDEX IF NOT EXISTS idx_review_form_model_form_id ON TABLE review_form_model FIELDS form_id;
+
+-- 主单据唯一索引（逐字取自出处 C `platform_api/review_form.rs:50`，同名同字段）。
+-- 这一条不在 review_db.rs 里，所以跟着「只有两处运行时 DDL」的口径核对时会整条漏掉。
+-- 它不是口径而是行为：`ensure_review_form_stub` 是「先 SELECT 再 CREATE」的读改写，
+-- 没有事务；PMS 的 embed-url 与 workflow/sync 对同一 form_id 并发进来时，靠的就是这条
+-- 唯一索引把第二条 CREATE 挡下来。没有它就会静默多出一行主单据，而读取只取
+-- `ORDER BY updated_at DESC LIMIT 1`，另一行成为读不到却仍在库里的影子行。
+DEFINE INDEX IF NOT EXISTS idx_form_id ON TABLE review_forms FIELDS form_id UNIQUE;
 
 -- ----------------------------------------------------------------------------
 -- 3. 旧行补字段（review_db.rs:201-203 夹在索引之间的那一句）。幂等：只碰缺这一格的行。
