@@ -173,6 +173,16 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub store_mode: Option<String>,
 
+    /// Durable model projection policy. `incremental-overlay` keeps only
+    /// generated deltas in kv-mem and never hydrates them from RocksDB.
+    #[serde(default)]
+    pub model_cache_mode: Option<String>,
+
+    /// Maximum resident bytes used by the process-local model projection cache.
+    /// The default is 2 GiB. It is only enforced for durable store modes.
+    #[serde(default)]
+    pub model_cache_max_bytes: Option<u64>,
+
     /// 旧数据面配置，保留用于冲突提示；实际备份范围由 `store_mode` 决定。
     #[serde(default)]
     pub data_face: Option<String>,
@@ -283,6 +293,8 @@ impl From<DbOption> for DbOptionExt {
             data_tx_elements: None,
             in_memory_db: None,
             store_mode: None,
+            model_cache_mode: None,
+            model_cache_max_bytes: None,
             data_face: None,
             model_xgeometry_gate: None,
             model_significant_over_point: None,
@@ -369,6 +381,10 @@ struct DbOptionExtFields {
     in_memory_db: Option<bool>,
     #[serde(default)]
     store_mode: Option<String>,
+    #[serde(default)]
+    model_cache_mode: Option<String>,
+    #[serde(default)]
+    model_cache_max_bytes: Option<u64>,
     #[serde(default)]
     data_face: Option<String>,
     #[serde(default)]
@@ -573,6 +589,8 @@ pub fn get_db_option_ext() -> DbOptionExt {
         data_tx_elements: ext.data_tx_elements,
         in_memory_db: ext.in_memory_db,
         store_mode: ext.store_mode.clone(),
+        model_cache_mode: ext.model_cache_mode.clone(),
+        model_cache_max_bytes: ext.model_cache_max_bytes,
         data_face: ext.data_face.clone(),
         model_xgeometry_gate: ext.model_xgeometry_gate,
         model_significant_over_point: ext.model_significant_over_point,
@@ -701,6 +719,53 @@ fn effective_in_memory_db(configured: Option<bool>, env_override: Option<&str>) 
 
 /// 环境变量名：一次性覆盖 [`store_mode`]，不必改配置文件。
 pub const STORE_MODE_ENV: &str = "AIOS_STORE_MODE";
+
+/// Environment override for [`model_cache_mode`].
+pub const MODEL_CACHE_MODE_ENV: &str = "AIOS_MODEL_CACHE_MODE";
+
+/// Environment override for [`model_cache_max_bytes`].
+pub const MODEL_CACHE_MAX_BYTES_ENV: &str = "AIOS_MODEL_CACHE_MAX_BYTES";
+
+/// Policy for the process-local incremental model overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ModelCacheMode {
+    /// Memory contains generated root overlays; RocksDB serves cold roots.
+    IncrementalOverlay,
+}
+
+impl ModelCacheMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IncrementalOverlay => "incremental-overlay",
+        }
+    }
+}
+
+fn parse_model_cache_mode(raw: Option<&str>) -> Option<ModelCacheMode> {
+    match raw?.trim().to_ascii_lowercase().replace('_', "-").as_str() {
+        "incremental-overlay" | "write-behind" | "memory-first" => {
+            Some(ModelCacheMode::IncrementalOverlay)
+        }
+        _ => None,
+    }
+}
+
+pub fn model_cache_mode() -> ModelCacheMode {
+    parse_model_cache_mode(std::env::var(MODEL_CACHE_MODE_ENV).ok().as_deref())
+        .or_else(|| parse_model_cache_mode(load_ext_fields().model_cache_mode.as_deref()))
+        .unwrap_or(ModelCacheMode::IncrementalOverlay)
+}
+
+pub fn model_cache_max_bytes() -> usize {
+    const DEFAULT: u64 = 2 * 1024 * 1024 * 1024;
+    std::env::var(MODEL_CACHE_MAX_BYTES_ENV)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .or(load_ext_fields().model_cache_max_bytes)
+        .unwrap_or(DEFAULT)
+        .clamp(1, usize::MAX as u64) as usize
+}
 
 /// 持久层的介质，外加「谁负责把它拉起来」。
 ///
@@ -2212,6 +2277,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn model_cache_policy_is_an_incremental_overlay_and_rejects_database_backfill() {
+        assert_eq!(parse_model_cache_mode(None), None);
+        assert_eq!(
+            parse_model_cache_mode(Some(" memory_first ")),
+            Some(ModelCacheMode::IncrementalOverlay)
+        );
+        assert_eq!(parse_model_cache_mode(Some("DATABASE-FIRST")), None);
+        assert_eq!(
+            parse_model_cache_mode(Some("write-behind")),
+            Some(ModelCacheMode::IncrementalOverlay)
+        );
+        assert_eq!(
+            ModelCacheMode::IncrementalOverlay.as_str(),
+            "incremental-overlay"
+        );
+    }
+
     /// 没写 `store_mode` 但写了旧开关时，**由旧开关说话**，语义与它今天的两态逐字相同。
     /// `in_memory_db = false` 必须继续得到 external，不能被新的 spawned-mem 默认盖掉。
     #[test]
@@ -2375,7 +2458,7 @@ mod tests {
     ///
     /// 只放过仓根那份 `DbOption.toml`：它是默认形态的样板，默认值正是为它准备的。
     #[test]
-    fn every_db_option_fixture_declares_its_store_mode_and_data_face() {
+    fn every_db_option_fixture_declares_its_store_mode() {
         let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let mut missing = Vec::new();
         let mut checked = 0;
@@ -2402,7 +2485,7 @@ mod tests {
                         !line.starts_with('#') && line.starts_with(key)
                     })
                 };
-                for key in ["store_mode", "data_face"] {
+                for key in ["store_mode"] {
                     if !declares(key) {
                         missing.push(format!("{name} 缺 {key}"));
                     }
@@ -2412,8 +2495,8 @@ mod tests {
         assert!(checked > 0, "一份夹具配置都没扫到，护栏的路径写错了");
         assert!(
             missing.is_empty(),
-            "这些配置没有显式声明形态键：{missing:?}。默认值（store_mode=spawned-mem、\
-             data_face=read-through）已经多次翻转，依赖它的配置每翻一次就静默换一回介质 / 数据面"
+            "这些配置没有显式声明存储形态：{missing:?}。data_face 由 store_mode 统一派生，\
+             不要求每份配置重复声明"
         );
     }
 

@@ -199,6 +199,16 @@ fn health_status(
     }
 }
 
+fn model_cache_health(store_reachable: bool) -> Value {
+    let mut health =
+        json!(crate::fast_model::model_memory_store::ModelMemoryStore::global().cache_stats());
+    health["write_behind"] = json!(crate::fast_model::model_write_behind::snapshot());
+    health["store_reachable"] = json!(store_reachable);
+    health["degraded_read_only"] =
+        json!(crate::options::store_mode().is_durable() && !store_reachable);
+    health
+}
+
 /// 运维面板的内嵌副本。
 ///
 /// 内嵌是为了部署：一个 exe 拷到现场就有面板，不必再同步一个目录，也不会出现
@@ -763,6 +773,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
             "model_incremental_types": model_incremental_types,
             "model_incremental_types_origin": model_incremental_types_origin,
             "in_memory_db": !crate::options::store_mode().is_durable(),
+            "model_cache": model_cache_health(false),
         }));
     }
     // 以下每一项都读库，因此每一项都过 within_health_budget；超时的记进
@@ -878,6 +889,7 @@ pub async fn health(State(state): State<AppState>) -> Json<serde_json::Value> {
         // 与 model_sesno 照常推进，只跳过房间边重算；重新打开不自动补历史欠账。这个字段让
         // 客户端知道「模型一致」是否包含房间归属。
         "room_membership": crate::options::room_membership(),
+        "model_cache": model_cache_health(true),
         // 本项目此刻生效的最小交付单元名词表。客户端要按元素归并生成根时只能靠它
         // ——`delivery_unit_types` 能整体替换默认值、`append_delivery_unit_types`
         // 能扩充，硬编码那四个默认名词在改过配置的项目上会静默算错。进程内
@@ -2741,79 +2753,6 @@ pub(crate) fn page_records_across_roots<T>(
     }
 }
 
-/// 进程内投影的一条记录 → `GeomInstQuery`（与从库里读出来的同一形状；`owner` 填生成根）。
-fn projection_record_to_query(
-    record: crate::fast_model::model_memory_store::ProjectedGeometry,
-    root: e3d_io::refno::RefNo,
-) -> aios_core::GeomInstQuery {
-    // Ordinary canonical primitives keep their placement separate from
-    // the element world transform. Tubes already fold it into world.
-    let local_transform = match (&record.shape, &record.tube) {
-        (
-            crate::fast_model::model_memory_store::ProjectedShape::Canonical {
-                local_transform,
-                ..
-            },
-            None,
-        ) => *local_transform,
-        _ => glam::DMat4::IDENTITY,
-    };
-    let (local_scale, local_rotation, local_translation) =
-        local_transform.to_scale_rotation_translation();
-    let (scale, rotation, translation) = record.world_transform.to_scale_rotation_translation();
-    let world_trans = bevy_transform::components::Transform {
-        translation: glam::Vec3::new(
-            translation.x as f32,
-            translation.y as f32,
-            translation.z as f32,
-        ),
-        rotation: glam::Quat::from_xyzw(
-            rotation.x as f32,
-            rotation.y as f32,
-            rotation.z as f32,
-            rotation.w as f32,
-        ),
-        scale: glam::Vec3::new(scale.x as f32, scale.y as f32, scale.z as f32),
-    };
-    let source = RefnoEnum::from(RefU64::from_two_nums(
-        record.source_refno.word0,
-        record.source_refno.word1,
-    ));
-    let owner = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
-    aios_core::GeomInstQuery {
-        refno: source,
-        old_refno: None,
-        owner,
-        world_aabb: parry3d::bounding_volume::Aabb::new(
-            parry3d::math::Point::new(
-                record.world_bounds[0][0],
-                record.world_bounds[0][1],
-                record.world_bounds[0][2],
-            ),
-            parry3d::math::Point::new(
-                record.world_bounds[1][0],
-                record.world_bounds[1][1],
-                record.world_bounds[1][2],
-            ),
-        ),
-        world_trans,
-        insts: vec![aios_core::ModelHashInst {
-            geo_hash: record.mesh_id,
-            transform: bevy_transform::components::Transform {
-                translation: local_translation.as_vec3(),
-                rotation: local_rotation.as_quat(),
-                scale: local_scale.as_vec3(),
-            },
-            is_tubi: record.tube.is_some(),
-            is_invalid_tubi: record.tube.as_ref().is_some_and(|tube| tube.invalid),
-        }],
-        has_neg: false,
-        generic: record.noun,
-        pts: None,
-        date: None,
-    }
-}
-
 /// POST /api/v1/model/records — 按生成根分页取模型记录：单根（原有形状）或
 /// `generation_roots[]` 多根批量（spec §4.5.2，决策 d-181）。
 pub async fn model_records(
@@ -2893,25 +2832,28 @@ pub async fn model_records(
             return Err(ApiError::conflict(message));
         }
     }
+    let mut memory_overlay_used = false;
     let mut per_root: Vec<(String, Vec<aios_core::GeomInstQuery>)> =
         Vec::with_capacity(roots.len());
     for (name, root) in roots.iter().zip(&parsed_roots) {
-        let records = if route.is_database() {
-            let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
+        // Durable reads never hydrate kv-mem.  A resident receipt is a complete
+        // newer root snapshot and shadows the RocksDB root; cold roots continue
+        // to be served directly by RocksDB.
+        let memory_overlay = store.receipt(scope, *root).is_some();
+        memory_overlay_used |= memory_overlay;
+        let refno = RefnoEnum::from(RefU64::from_two_nums(root.word0, root.word1));
+        let records =
             crate::fast_model::model_record_reader::records_of_root(&aios_core::SUL_DB, refno)
                 .await
-                .map_err(ApiError::from_domain)?
-        } else {
-            store
-                .records_of_root(scope, *root)
-                .into_iter()
-                .map(|record| projection_record_to_query(record, *root))
-                .collect()
-        };
+                .map_err(ApiError::from_domain)?;
         per_root.push((name.clone(), records));
     }
     let page = page_records_across_roots(per_root, cursor, limit);
-    let source = route.source.records_source_label();
+    let source = if route.is_database() && memory_overlay_used {
+        "rocksdb+memory-overlay"
+    } else {
+        route.source.records_source_label()
+    };
     let incomplete_roots = if route.is_database()
         || !crate::data_interface::model_read_route::publication_policy(true).uses_process_store()
     {

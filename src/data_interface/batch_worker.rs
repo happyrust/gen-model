@@ -1573,44 +1573,62 @@ async fn execute_frozen_batch(
     // 收不上（这一轮没追平、模型没全成、收尾事务本身失败）由函数末尾那一笔兜底。
     let mut write_marker_closed = false;
 
-    // 模型收尾一笔盖 model_sesno。publish 阶段与 `model_complete` 那道整库证据闸都退了
-    // （ADR-072 D4）：空间树已在 `persist_roots_batched` 落完那一刻就地收敛，「这一版的根
-    // 全 OK」由 `round_complete` 担保（每个交付单元都是 `Generated`，落不进去的根会先把
-    // 单元标回失败），不回问库。房间开关开启时，房间边已随各根事务落下；关闭时根事务只含
-    // 模型，model_sesno 仍照常盖。只有 DESI 才有模型可收，非 DESI 由末尾兜底收写入标记。
+    // 模型收尾盖 model_sesno。持久模式下根生成只说明 kv-mem 增量层已经就绪，不能据此
+    // 提前承诺 RocksDB 已经追平；因此把整库水位作为 FIFO 栅栏交给 write-behind worker。
+    // worker 会先补齐这个 dbnum 所有未获精确 ACK 的根，再在 RocksDB 上盖 model_sesno。
+    // 非持久 process store 沿用同步收尾。只有 DESI 才有模型可收。
     if round_complete && job.db_type.eq_ignore_ascii_case("DESI") {
         let end_time = result
             .batch
             .as_ref()
             .and_then(|batch| batch.end_sesno_time.clone());
-        let model_outcome = crate::data_interface::task_end::TaskModelOutcome {
-            all_roots_ok: true,
-            dead_roots: 0,
-        };
-        // 任务末的整库房间段随房间流程退役（t-678）：房间归属改由生成路径逐根随模型块算并
-        // 同事务写边（t-799），任务收尾这一笔不再有房间那一枚可盖。
-        registry.set_stage(&job.task_id, "task_end");
-        match crate::data_interface::task_end::commit_task_end_on(
-            &aios_core::SUL_DB,
-            &crate::data_interface::task_end::TaskEnd {
-                dbnum: job.dbnum,
-                target_sesno: file_latest_sesno,
-                target_time: end_time,
-                model: Some(model_outcome),
-                // Ref0 统计已在数据批次应用之后那一笔序列化（上面 `ref0_snapshot`），
-                // 这一笔只盖水位与写入标记。
-                info: None,
-                closes_task: true,
-            },
-        )
-        .await
-        {
-            Ok(_) => write_marker_closed = true,
-            Err(error) => {
-                result.status = ManualUpdateStatus::Partial;
-                result
-                    .warnings
-                    .push(format!("任务收尾水位未落 dbnum={}: {error:#}", job.dbnum));
+        if crate::options::store_mode().is_durable() {
+            registry.set_stage(&job.task_id, "durable_pending");
+            match crate::fast_model::model_db_adapter::enqueue_model_watermark_write_behind(
+                job.dbnum,
+                file_latest_sesno,
+                end_time,
+            )
+            .await
+            {
+                // The foreground fallback below still closes the write marker,
+                // without a model stamp. The background job owns only the
+                // durable model waterline so the next increment need not wait.
+                Ok(()) => {}
+                Err(error) => {
+                    result.status = ManualUpdateStatus::Partial;
+                    result.warnings.push(format!(
+                        "持久模型水位未进入后台流水线 dbnum={}: {error:#}",
+                        job.dbnum
+                    ));
+                }
+            }
+        } else {
+            let model_outcome = crate::data_interface::task_end::TaskModelOutcome {
+                all_roots_ok: true,
+                dead_roots: 0,
+            };
+            registry.set_stage(&job.task_id, "task_end");
+            match crate::data_interface::task_end::commit_task_end_on(
+                &aios_core::SUL_DB,
+                &crate::data_interface::task_end::TaskEnd {
+                    dbnum: job.dbnum,
+                    target_sesno: file_latest_sesno,
+                    target_time: end_time,
+                    model: Some(model_outcome),
+                    info: None,
+                    closes_task: true,
+                },
+            )
+            .await
+            {
+                Ok(_) => write_marker_closed = true,
+                Err(error) => {
+                    result.status = ManualUpdateStatus::Partial;
+                    result
+                        .warnings
+                        .push(format!("任务收尾水位未落 dbnum={}: {error:#}", job.dbnum));
+                }
             }
         }
     }
@@ -2361,6 +2379,12 @@ async fn persist_transform_roots(
         .iter()
         .map(|root| crate::fast_model::e3d_model_service::parse_refno(root))
         .collect::<anyhow::Result<Vec<_>>>()?;
+    if crate::options::store_mode().is_durable() {
+        // `republish_roots_by_rigid_motion` already crossed the single
+        // ModelWriteBehind::publish seam. Persistence and room calculation are
+        // owned by its background worker.
+        return Ok(std::collections::HashMap::new());
+    }
     let rooms = match frozen_room_calculator() {
         Ok(rooms) => rooms,
         Err(error) => {
@@ -3315,6 +3339,36 @@ mod tests {
         assert!(
             !production.contains("房间归属未参与根事务，本轮拒绝推进模型水位"),
             "关闭房间不能再把成功的模型任务降成 Partial"
+        );
+    }
+
+    #[test]
+    fn durable_model_watermark_is_owned_by_the_write_behind_barrier() {
+        let source = include_str!("batch_worker.rs");
+        let settlement = source
+            .split_once("if round_complete && job.db_type.eq_ignore_ascii_case(\"DESI\")")
+            .expect("DESI settlement gate")
+            .1
+            .split_once("// ── 写入标记的兜底收口")
+            .expect("settlement boundary")
+            .0;
+        let durable = settlement
+            .split_once("if crate::options::store_mode().is_durable()")
+            .expect("durable branch")
+            .1
+            .split_once("} else {")
+            .expect("non-durable branch")
+            .0;
+
+        assert!(durable.contains("enqueue_model_watermark_write_behind("));
+        assert!(durable.contains("durable_pending"));
+        assert!(
+            !durable.contains("commit_task_end_on("),
+            "foreground durable branch must not advance RocksDB model_sesno: {durable}"
+        );
+        assert!(
+            settlement.contains("commit_task_end_on("),
+            "non-durable mode keeps its synchronous settlement"
         );
     }
 

@@ -64,6 +64,8 @@ impl AiosDBManager {
 
         if crate::options::data_face().is_read_through() {
             let root = crate::data_interface::generation_root::refno_to_e3d(requested_refno);
+            let _generation_guard =
+                crate::fast_model::e3d_model_service::lock_db_generation(root.dbno()).await;
             let store = crate::fast_model::model_memory_store::ModelMemoryStore::global();
             let scope = crate::fast_model::model_memory_store::ProjectionScope::Current;
             let records = store.records_of_root(scope, root);
@@ -141,14 +143,13 @@ impl AiosDBManager {
                 vec![transaction],
             )?;
 
-            store.commit(
-                scope,
-                vec![crate::fast_model::model_memory_store::ProjectionCommit {
+            crate::fast_model::model_write_behind::publish(vec![
+                crate::fast_model::model_memory_store::ProjectionCommit {
                     tube_branch_resets: tube_branches,
                     removals: record_ids.into_iter().collect(),
                     ..Default::default()
-                }],
-            );
+                },
+            ])?;
             for affected in affected_roots {
                 store.invalidate_receipt(scope, affected);
             }

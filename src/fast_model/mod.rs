@@ -7,6 +7,7 @@ pub(crate) mod model_artifact;
 pub mod model_db_adapter;
 pub mod model_memory_store;
 pub mod model_record_reader;
+pub(crate) mod model_write_behind;
 
 pub mod concurrency;
 

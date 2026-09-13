@@ -74,6 +74,7 @@
 //!   窗口外按已提交指针回读——publish 阶段退役，两条路收成一条。
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::sync::OnceLock;
 
 use aios_core::RefnoEnum;
 use anyhow::Context;
@@ -284,6 +285,19 @@ pub async fn persist_root(root: RefNo) -> anyhow::Result<PersistedRows> {
     persist_root_on(PersistTarget::process(), ModelMemoryStore::global(), root).await
 }
 
+/// Queue the durable database watermark behind all root writes already handed
+/// to this FIFO. The worker also reconciles any still-pending memory roots
+/// before advancing `dbnum_watermark.model_sesno`, so a retry can never leave
+/// the durable watermark ahead of RocksDB model rows.
+pub(crate) async fn enqueue_model_watermark_write_behind(
+    dbnum: u32,
+    target_sesno: i32,
+    target_time: Option<String>,
+) -> anyhow::Result<()> {
+    crate::fast_model::model_write_behind::request_settlement(dbnum, target_sesno, target_time)
+        .await
+}
+
 /// 跑一次旧 `direct_*` 命名空间的清扫（[`render_legacy_prefix_sweep_once`]）。
 ///
 /// [`persist_dbnum`] 的收尾自己会调它，这条另外露出来是给运维口：一个库已经整库重生成过
@@ -372,12 +386,45 @@ pub struct BatchedPersist {
     /// 没落进去的根与原因：房间算不出来（写前剔出组，原因带「room membership」）、或所在组
     /// 任一块写库失败，整根都在这里。
     pub failed: Vec<(RefNo, String)>,
+    /// Typed form consumed by the write-behind state machine.  `failed` stays
+    /// as the compatibility view for synchronous callers.
+    pub(crate) failures: Vec<RootPersistFailure>,
+    /// Durable transaction results which have not yet been accepted as a
+    /// process-local ACK.  The write-behind coordinator performs that exact
+    /// identity check after the adapter returns.
+    pub(crate) acknowledged: Vec<ExactAckCandidate>,
     /// 实际发出的组数（≤ [`BATCHED_PERSIST_ROOTS_PER_GROUP`] 根一组）。
     pub groups: usize,
     /// 随模型行同事务写下的房间归属边数（ADR-073 D1）。
     pub room_edges: usize,
     /// 本批真正提交过的最大一笔 SurrealQL 事务字节数。
     pub max_transaction_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PersistFailureKind {
+    Retryable,
+    Blocked,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RootPersistFailure {
+    pub root: RefNo,
+    pub kind: PersistFailureKind,
+    pub error: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExactAckCandidate {
+    pub root: RefNo,
+    pub ack: crate::fast_model::model_memory_store::RootPublicationAck,
+}
+
+impl BatchedPersist {
+    fn push_failure(&mut self, root: RefNo, kind: PersistFailureKind, error: String) {
+        self.failed.push((root, error.clone()));
+        self.failures.push(RootPersistFailure { root, kind, error });
+    }
 }
 
 /// 库里既有的一条 e3d-model 几何身份及其祖先链（对账用，一库一次取回）。
@@ -650,8 +697,8 @@ fn render_publication_fence_batch(roots: &[RefNo], per_statement: usize) -> Stri
 /// 1. 一组 ≤ [`BATCHED_PERSIST_ROOTS_PER_GROUP`] 根，共享对账读取与房间预计算；持久化时每根的
 ///    几何行、房间边和回执合成一笔事务。软字节上限不得拆根，超过数据库硬上限则整根失败；
 /// 2. 对账读一次：整库 e3d-model 几何身份一条查询取回，各根在客户端按祖先链分摊，不再每根一问；
-/// 3. 没有 durable per-root CAS / 队列：同一 dbnum 只有本任务一个写者。事务成功后只在
-///    `ModelMemoryStore` 写一枚进程级完整发布 ACK，进程退出即丢。
+/// 3. 没有 durable per-root queue。事务成功后返回精确 ACK 候选；同步调用方立即接受，
+///    write-behind 调用方则在自己的 submission epoch 栅栏后接受，进程退出即丢。
 ///
 /// `rooms` 是任务开工时冻出来的房间计算器（[`frozen_room_calculator`]），`None` = 房间归属开关
 /// 已关闭或显式底层调用不要求房间；模型根仍照常持久化，只清被
@@ -671,8 +718,30 @@ pub async fn persist_roots_batched(
     roots: &[RefNo],
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
 ) -> anyhow::Result<BatchedPersist> {
+    let result = persist_roots_batched_unacked(target, store, dbnum, roots, rooms).await?;
+    for candidate in &result.acknowledged {
+        let _ = store.record_publication_ack(
+            ProjectionScope::Current,
+            candidate.root,
+            candidate.ack.clone(),
+        );
+    }
+    Ok(result)
+}
+
+/// Persist roots without mutating process-local publication ACK state.
+///
+/// This is the durability seam used by write-behind: a process can disappear
+/// after RocksDB commits but before the coordinator accepts these candidates.
+pub(crate) async fn persist_roots_batched_unacked(
+    target: PersistTarget<'_>,
+    store: &ModelMemoryStore,
+    dbnum: u32,
+    roots: &[RefNo],
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+) -> anyhow::Result<BatchedPersist> {
     let limits = crate::data_interface::tx_limits::data_tx_limits();
-    persist_roots_batched_with_chunk_bytes(
+    persist_roots_batched_with_chunk_bytes_unacked(
         target,
         store,
         dbnum,
@@ -724,6 +793,33 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
     chunk_bytes: usize,
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
 ) -> anyhow::Result<BatchedPersist> {
+    let result = persist_roots_batched_with_chunk_bytes_unacked(
+        target,
+        store,
+        dbnum,
+        roots,
+        chunk_bytes,
+        rooms,
+    )
+    .await?;
+    for candidate in &result.acknowledged {
+        let _ = store.record_publication_ack(
+            ProjectionScope::Current,
+            candidate.root,
+            candidate.ack.clone(),
+        );
+    }
+    Ok(result)
+}
+
+async fn persist_roots_batched_with_chunk_bytes_unacked(
+    target: PersistTarget<'_>,
+    store: &ModelMemoryStore,
+    dbnum: u32,
+    roots: &[RefNo],
+    chunk_bytes: usize,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+) -> anyhow::Result<BatchedPersist> {
     let mut out = BatchedPersist::default();
     if roots.is_empty() {
         return Ok(out);
@@ -747,10 +843,16 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
         .copied()
         .filter(|root| seen.insert(packed_refno(*root)))
         .collect::<Vec<_>>();
-    let shares = roots
-        .iter()
-        .map(|root| RootShare::load(store, *root))
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut shares = Vec::with_capacity(roots.len());
+    for root in roots {
+        match RootShare::load(store, root) {
+            Ok(share) => shares.push(share),
+            Err(error) => out.push_failure(root, PersistFailureKind::Blocked, format!("{error:#}")),
+        }
+    }
+    if shares.is_empty() {
+        return Ok(out);
+    }
 
     // 对账读一次（只有有回执的根才拿得起自己的全集）。行上的 `dbnum` 是投影记录写下的那个，
     // 与根的 `dbno()` 在生产上同值；两者都问，夹具或历史行的口径差异不会让陈旧行漏网。
@@ -776,7 +878,9 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
         // 房间关卡在写库之前、按根（ADR-073 D1 / D2）：算不出来的根就地记失败，
         // 剩下的根才进本组的事务。
         let (live, room_failed) = room_stage(group, rooms);
-        out.failed.extend(room_failed);
+        for (root, error) in room_failed {
+            out.push_failure(root, PersistFailureKind::Blocked, error);
+        }
         if live.is_empty() {
             continue;
         }
@@ -793,7 +897,6 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
         .await
         {
             Ok(outcome) => accept_group_outcome(
-                store,
                 &live,
                 dbnum,
                 target.medium,
@@ -808,7 +911,11 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
             ),
             Err(error) if live.len() == 1 => {
                 invalidate_geometry_baseline();
-                out.failed.push((live[0].share.root, format!("{error:#}")));
+                out.push_failure(
+                    live[0].share.root,
+                    PersistFailureKind::Retryable,
+                    format!("{error:#}"),
+                );
             }
             Err(error) => {
                 invalidate_geometry_baseline();
@@ -817,7 +924,7 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
                     live.len()
                 );
                 let mut retries = VecDeque::new();
-                let middle = live.len() / 2;
+                let middle = live.len() >> 1;
                 retries.push_back((0usize, middle));
                 retries.push_back((middle, live.len()));
                 while let Some((start, end)) = retries.pop_front() {
@@ -837,7 +944,6 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
                     .await
                     {
                         Ok(outcome) => accept_group_outcome(
-                            store,
                             retry,
                             dbnum,
                             target.medium,
@@ -852,7 +958,11 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
                         ),
                         Err(error) if retry.len() == 1 => {
                             invalidate_geometry_baseline();
-                            out.failed.push((retry[0].share.root, format!("{error:#}")));
+                            out.push_failure(
+                                retry[0].share.root,
+                                PersistFailureKind::Retryable,
+                                format!("{error:#}"),
+                            );
                         }
                         Err(error) => {
                             invalidate_geometry_baseline();
@@ -860,7 +970,7 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
                                 "model publication subgroup of {} roots failed; bisecting again: {error:#}",
                                 retry.len()
                             );
-                            let middle = start + retry.len() / 2;
+                            let middle = start + (retry.len() >> 1);
                             retries.push_back((start, middle));
                             retries.push_back((middle, end));
                         }
@@ -903,7 +1013,6 @@ struct GroupOutcome {
 
 #[allow(clippy::too_many_arguments)]
 fn accept_group_outcome(
-    store: &ModelMemoryStore,
     group: &[LiveShare<'_>],
     dbnum: u32,
     medium: PersistMedium,
@@ -918,19 +1027,20 @@ fn accept_group_outcome(
 ) {
     for root in group {
         if let Some(receipt) = root.share.receipt.as_ref() {
-            store.record_publication_ack(
-                ProjectionScope::Current,
-                root.share.root,
-                crate::fast_model::model_memory_store::RootPublicationAck {
+            out.acknowledged.push(ExactAckCandidate {
+                root: root.share.root,
+                ack: crate::fast_model::model_memory_store::RootPublicationAck {
                     dbnum,
                     source_sesno: receipt.source_sesno,
                     geometry_count: receipt.geometry_count,
+                    manifest_hash: receipt.manifest_hash.clone(),
+                    model_target: receipt.model_target.clone(),
                     room_membership: rooms.is_some(),
                     room_generation: rooms
                         .map(|calculator| calculator.resident_generation().to_string()),
                     medium,
                 },
-            );
+            });
         }
     }
     total.upserted += outcome.upserted;
@@ -1230,12 +1340,14 @@ pub(crate) async fn publication_request_with_timeout<T>(
 
 /// 读库镜像与换进内存之间被并发提交插了队：镜像已旧，重读 [`RESTORE_ATTEMPTS`] 次仍撞上
 /// 就抛这个，交给调用方推迟（收口每轮都会重新驱动）。
+#[cfg(test)]
 #[derive(Debug)]
 pub struct ProjectionRestoreConflict {
     pub dbnum: u32,
     pub attempts: usize,
 }
 
+#[cfg(test)]
 impl std::fmt::Display for ProjectionRestoreConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -1246,10 +1358,121 @@ impl std::fmt::Display for ProjectionRestoreConflict {
     }
 }
 
+#[cfg(test)]
 impl std::error::Error for ProjectionRestoreConflict {}
 
 /// 读库镜像撞上并发提交时原地重读几次。再撞就不占着收口这一轮了。
+#[cfg(test)]
 const RESTORE_ATTEMPTS: usize = 3;
+
+/// Check whether a root is available in either layer without hydrating kv-mem.
+/// A memory receipt means an incremental overlay exists; otherwise RocksDB is
+/// queried only for availability and remains the cold-data provider.
+pub async fn ensure_root_cached(root: RefNo) -> anyhow::Result<bool> {
+    if !crate::options::store_mode().is_durable() {
+        return Ok(ModelMemoryStore::global()
+            .receipt(ProjectionScope::Current, root)
+            .is_some());
+    }
+    ensure_root_cached_on(&aios_core::SUL_DB, ModelMemoryStore::global(), root).await
+}
+
+pub async fn ensure_root_cached_on(
+    db: &Surreal<Any>,
+    store: &ModelMemoryStore,
+    root: RefNo,
+) -> anyhow::Result<bool> {
+    if store.receipt(ProjectionScope::Current, root).is_some() {
+        store.note_cache_lookup(true);
+        return Ok(true);
+    }
+    store.note_cache_lookup(false);
+    store.note_cache_load_started();
+    let root_id = format!("{}_{}", root.word0, root.word1);
+    let result = db
+        .query("SELECT VALUE publication_status = 'ready' FROM type::thing('gen_root', $root_id);")
+        .bind(("root_id", root_id))
+        .await
+        .and_then(|response| response.check());
+    store.note_cache_load_finished(result.is_ok());
+    let mut response = result?;
+    Ok(response.take::<Option<bool>>(0)?.unwrap_or(false))
+}
+
+/// Load exactly one complete committed root. Both geometry predicates are backed
+/// by `idx_*_anc`; `gen_root` is a point lookup. An incomplete durable root fails
+/// closed instead of becoming a cache entry.
+#[cfg(test)]
+async fn read_published_root_on(
+    db: &Surreal<Any>,
+    root: RefNo,
+) -> anyhow::Result<Option<(Vec<ProjectedGeometry>, RootReceipt)>> {
+    #[derive(serde::Deserialize)]
+    struct ReceiptRow {
+        source_end_sesno: u32,
+        published_model_target: Option<ModelTarget>,
+        published_manifest_hash: String,
+        published_geometry_count: usize,
+    }
+    let root_id = format!("{}_{}", root.word0, root.word1);
+    let mut response = db
+        .query(
+            "SELECT source_end_sesno,published_model_target,published_manifest_hash,\
+             published_geometry_count FROM type::thing('gen_root', $root_id) \
+             WHERE publication_status = 'ready';",
+        )
+        .bind(("root_id", root_id))
+        .await?
+        .check()?;
+    let Some(row) = response.take::<Option<ReceiptRow>>(0)? else {
+        return Ok(None);
+    };
+    let receipt = RootReceipt {
+        source_sesno: row.source_end_sesno,
+        model_target: row.published_model_target,
+        manifest_hash: row.published_manifest_hash,
+        geometry_count: row.published_geometry_count,
+        published_via: crate::fast_model::model_memory_store::default_published_via(),
+    };
+
+    #[derive(serde::Deserialize)]
+    struct GeometryRow {
+        memory_projection: ProjectedGeometry,
+    }
+    let packed = packed_refno(root);
+    let mut records = Vec::new();
+    for table in ["inst_relate", "tubi_relate"] {
+        let sql = root_projection_sql(table, root);
+        let rows: Vec<GeometryRow> = db.query(sql).await?.check()?.take(0)?;
+        records.extend(rows.into_iter().map(|row| row.memory_projection));
+    }
+    anyhow::ensure!(
+        records.len() == receipt.geometry_count,
+        "durable root {root} is incomplete: receipt expects {}, indexed rows returned {}",
+        receipt.geometry_count,
+        records.len()
+    );
+    anyhow::ensure!(
+        records.iter().all(|record| {
+            record.dbnum == root.dbno()
+                && record.source_sesno == receipt.source_sesno
+                && record.ancestors.contains(&packed)
+        }),
+        "durable root {root} contains rows outside its receipt scope"
+    );
+    Ok(Some((records, receipt)))
+}
+
+#[cfg(test)]
+fn root_projection_sql(table: &str, root: RefNo) -> String {
+    debug_assert!(matches!(table, "inst_relate" | "tubi_relate"));
+    format!(
+        "SELECT memory_projection FROM {table} WHERE anc CONTAINS {} \
+         AND dbnum = {} AND memory_projection != NONE;",
+        packed_refno(root),
+        root.dbno()
+    )
+}
 
 /// 用库里已提交的行整体换掉某个库的进程内投影。
 ///
@@ -1257,7 +1480,8 @@ const RESTORE_ATTEMPTS: usize = 3;
 /// 提交（`model_read_route` R2）。所以取镜像**之前**先记下提交纪元，换进去时由
 /// [`ModelMemoryStore::restore_dbnum`] 校验：纪元变了就重读，不拿旧镜像盖掉那些只在内存
 /// 里的记录。
-pub async fn restore_projection_on(
+#[cfg(test)]
+async fn restore_projection_on(
     db: &Surreal<Any>,
     store: &ModelMemoryStore,
     dbnum: u32,
@@ -1278,6 +1502,7 @@ pub async fn restore_projection_on(
 
 /// Rehydrate only committed structured rows; no E3D reads and no SQL writes.
 /// Primary-key ranges keep both result frames and work per page bounded.
+#[cfg(test)]
 async fn read_published_projection_on(
     db: &Surreal<Any>,
     dbnum: u32,
@@ -1507,7 +1732,7 @@ async fn persist_root_chunks_impl(
         let mut slots = tube_slots.clone();
         let rendered = render_chunk(chunk, WriteMode::Incremental, &mut slots)?;
         if rendered.len() > 2 * 1024 * 1024 && chunk.len() > 1 {
-            let (left, right) = chunk.split_at(chunk.len() / 2);
+            let (left, right) = chunk.split_at(chunk.len() >> 1);
             pending.push_front(right);
             pending.push_front(left);
             continue;
@@ -2781,6 +3006,111 @@ mod tests {
             records.len(),
             "failed recovery must preserve the previous image"
         );
+    }
+
+    #[tokio::test]
+    async fn durable_root_probe_never_hydrates_the_incremental_overlay() {
+        let db = surreal_mem().await;
+        let requested_root = RefNo::new(7997, 73948);
+        let other_root = RefNo::new(7997, 70000);
+        let mut requested = baked_record();
+        requested.ancestors = vec![packed_refno(requested_root)];
+        let mut unrelated = other_canonical_record();
+        unrelated.ancestors = vec![packed_refno(other_root)];
+        db.query(render_records(&[requested.clone(), unrelated], WriteMode::Initial).unwrap())
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+        db.query("CREATE gen_root:7997_73948 SET dbnum=7997, publication_status='ready', source_end_sesno=42, published_manifest_hash='requested', published_geometry_count=1; CREATE gen_root:7997_70000 SET dbnum=7997, publication_status='ready', source_end_sesno=42, published_manifest_hash='other', published_geometry_count=1;")
+            .await
+            .unwrap()
+            .check()
+            .unwrap();
+
+        let probe: Vec<Value> = db
+            .query(format!(
+                "SELECT anc,dbnum,memory_projection != NONE AS structured FROM inst_relate WHERE anc CONTAINS {};",
+                packed_refno(requested_root)
+            ))
+            .await
+            .unwrap()
+            .check()
+            .unwrap()
+            .take(0)
+            .unwrap();
+        assert_eq!(probe.len(), 1, "root lookup fixture: {probe:?}");
+
+        let store = ModelMemoryStore::with_cache_limit(1024 * 1024);
+        assert!(
+            ensure_root_cached_on(&db, &store, requested_root)
+                .await
+                .unwrap()
+        );
+        assert!(
+            store.records(ProjectionScope::Current).is_empty(),
+            "a RocksDB availability probe must not hydrate kv-mem"
+        );
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, requested_root)
+                .is_none()
+        );
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, other_root)
+                .is_none()
+        );
+        let stats = store.cache_stats();
+        assert_eq!((stats.misses, stats.loads), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_missing_durable_root_is_not_negative_cached() {
+        let db = surreal_mem().await;
+        let store = ModelMemoryStore::with_cache_limit(1024);
+        let root = RefNo::new(7997, 999);
+        assert!(!ensure_root_cached_on(&db, &store, root).await.unwrap());
+        assert!(!ensure_root_cached_on(&db, &store, root).await.unwrap());
+        let stats = store.cache_stats();
+        assert_eq!((stats.misses, stats.loads), (2, 2));
+        assert_eq!(stats.resident_roots, 0);
+    }
+
+    #[tokio::test]
+    async fn root_cache_queries_are_planned_through_ancestor_indexes() {
+        let db = surreal_mem().await;
+        db.query(
+            "DEFINE INDEX idx_inst_relate_anc ON TABLE inst_relate COLUMNS anc;\
+             DEFINE INDEX idx_tubi_relate_anc ON TABLE tubi_relate COLUMNS anc;",
+        )
+        .await
+        .unwrap()
+        .check()
+        .unwrap();
+        let root = RefNo::new(7997, 1);
+        for (table, index) in [
+            ("inst_relate", "idx_inst_relate_anc"),
+            ("tubi_relate", "idx_tubi_relate_anc"),
+        ] {
+            let explain = format!(
+                "{} EXPLAIN FULL;",
+                root_projection_sql(table, root).trim_end_matches(';')
+            );
+            let plan: Vec<Value> = db
+                .query(explain)
+                .await
+                .unwrap()
+                .check()
+                .unwrap()
+                .take(0)
+                .unwrap();
+            let text = serde_json::to_string(&plan).unwrap();
+            assert!(
+                text.contains(index),
+                "root cache query must use {index}, plan: {text}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -4747,7 +5077,7 @@ mod tests {
             .find("room_stage(group, rooms)")
             .expect("写库前先过房间关卡");
         let failed_at = batched
-            .find("out.failed.extend(room_failed)")
+            .find("out.push_failure(root, PersistFailureKind::Blocked, error)")
             .expect("算不出来的根记失败");
         let group_call_at = batched
             .find("match persist_group(")

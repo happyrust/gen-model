@@ -573,7 +573,7 @@ _Avoid_: 初始化锁、队列锁（泛指时）。
 
 # 本地发布包 (Local Release Package)
 
-`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档默认 `store_mode=embedded-mem`：kv-mem 在后端进程内，无 SurrealDB 子进程与数据库端口，浏览器读面统一走同源服务 API；包根仍保留本仓 fork 的 `bin\surreal.exe`，需要外部 SQL / 探针时可显式切回 `spawned-mem`。房间兼容页仍是直连库的保留功能，embedded 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档把依赖资源装进包根 `workspace\`，默认仍是 `spawned-mem`。两档首次打开都由向导配置 E3D 路径；需要持久化时显式改 `spawned-rocksdb` / `external`。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
+`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档默认 `store_mode=embedded-mem`：kv-mem 在后端进程内，无 SurrealDB 子进程与数据库端口，浏览器读面统一走同源服务 API；包根仍保留本仓 fork 的 `bin\surreal.exe`，需要外部 SQL / 探针时可显式切回 `spawned-mem`。房间兼容页仍是直连库的保留功能，embedded 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档把依赖资源装进包根 `workspace\`，出厂默认 `spawned-rocksdb + incremental-overlay + room_membership=true`，无需手改配置选择持久模式；首次打开仍由向导填写 E3D 路径与项目。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
 
 _Avoid_: 安装包、部署包（泛指时不指这一档）、发行版。
 
@@ -585,7 +585,7 @@ _Avoid_: 数据包、库包、离线数据（这些会误读成含库数据）�
 
 # 冒烟门 (Smoke Gate)
 
-本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式；B 腿以本机真配置和 `embedded-mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="embedded-mem"` 且后端没有 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 以 `spawned-mem` 全启动；C 改 `spawned-rocksdb`@18010，要求 `medium:"spawned-rocksdb"`、`durable:true` 且 `workspace\.surreal\` 真落盘。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
+本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式；B 腿以本机真配置和 `embedded-mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="embedded-mem"` 且后端没有 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 以出厂默认 `spawned-rocksdb` 全启动；C 用隔离端口 `spawned-rocksdb`@18010，要求 `medium:"spawned-rocksdb"`、`durable:true` 且 `workspace\.surreal\` 真落盘。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
 
 _Avoid_: 冒烟测试（泛指）、健康检查（那是运行期 `/health`，不是发布门）、验收（那是 Live E2E Testing）。
 

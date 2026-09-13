@@ -467,6 +467,13 @@ fn db_generation_lock(dbnum: u32) -> Arc<Mutex<()>> {
         .clone()
 }
 
+/// Serializes the final durable-watermark fence with every current-model
+/// generation for this database. The write-behind worker holds it only for the
+/// last pending check and the short control-plane transaction.
+pub(crate) async fn lock_db_generation(dbnum: u32) -> tokio::sync::OwnedMutexGuard<()> {
+    db_generation_lock(dbnum).lock_owned().await
+}
+
 pub struct E3dModelService {
     schema: DirectSchema,
     pins: Vec<DbPin>,
@@ -1093,25 +1100,22 @@ impl E3dModelService {
                     continue;
                 }
             };
-            // 回执整根前移到 T；`model_target` 暂沿用旧的（见函数头「待补」）。只提交进内存投影，
-            // 登记 / durable flush 交给调用方（batch_worker）——生成服务不碰库。
-            store.commit(
-                ProjectionScope::Current,
-                vec![ProjectionCommit {
-                    upserts: moved,
-                    receipt: Some((
-                        root,
-                        RootReceipt {
-                            source_sesno: target_sesno,
-                            model_target: old_receipt.model_target.clone(),
-                            manifest_hash: manifest_digest,
-                            geometry_count,
-                            published_via: "transform".into(),
-                        },
-                    )),
-                    ..ProjectionCommit::default()
-                }],
-            );
+            // 回执整根前移到 T；`model_target` 暂沿用旧的（见函数头「待补」）。发布调用只同步
+            // 提交内存投影并登记 write-behind；后台 worker 独立完成 durable flush。
+            super::model_write_behind::publish(vec![ProjectionCommit {
+                upserts: moved,
+                receipt: Some((
+                    root,
+                    RootReceipt {
+                        source_sesno: target_sesno,
+                        model_target: old_receipt.model_target.clone(),
+                        manifest_hash: manifest_digest,
+                        geometry_count,
+                        published_via: "transform".into(),
+                    },
+                )),
+                ..ProjectionCommit::default()
+            }])?;
             report.completed.push(root_refno.clone());
         }
         Ok(report)
@@ -1425,7 +1429,7 @@ impl E3dModelService {
             // containing several BRANs land in the store together. A cold
             // process store has no old ownership to preserve, so complete
             // siblings may still land when another root cannot be generated.
-            store.commit(ProjectionScope::Current, commits);
+            super::model_write_behind::publish(commits)?;
             for report in prepared_reports {
                 total.merge_counts(report);
             }
@@ -2035,7 +2039,12 @@ pub(crate) async fn apply_geometry_delta_on(
         None,
         owners,
     )?;
-    ModelMemoryStore::global().commit(scope, vec![commit]);
+    match scope {
+        ProjectionScope::Current => {
+            super::model_write_behind::publish(vec![commit])?;
+        }
+        ProjectionScope::Historical(_) => ModelMemoryStore::global().commit(scope, vec![commit]),
+    }
     report.unique_meshes = report.mesh_ids.len();
     Ok(report)
 }

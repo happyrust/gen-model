@@ -726,9 +726,17 @@ impl QueryService {
 
     async fn spatial_bounds(&self, args: BoundsArgs) -> Result<Value, QueryError> {
         let refno = parsed_model_refno(&args.refno)?;
+        let source_root = crate::data_interface::generation_root::refno_to_e3d(refno);
+        let overlay_present = crate::fast_model::model_memory_store::ModelMemoryStore::global()
+            .receipt(
+                crate::fast_model::model_memory_store::ProjectionScope::Current,
+                source_root,
+            )
+            .is_some();
         // Use the same per-database projection as ensure/records. In ingest mode,
         // a database without an applied watermark still publishes on-demand models to memory.
-        let memory_projection = if crate::options::data_face().is_read_through() {
+        let memory_projection = if overlay_present || crate::options::data_face().is_read_through()
+        {
             true
         } else if args.scope == BoundsScope::Subtree {
             let dbnum = crate::fast_model::e3d_model_service::E3dModelService::dbnum_for_roots(
@@ -744,7 +752,7 @@ impl QueryService {
             false
         };
         if memory_projection {
-            let source = crate::data_interface::generation_root::refno_to_e3d(refno);
+            let source = source_root;
             let target = crate::fast_model::model_memory_store::packed_refno(source);
             let records = crate::fast_model::model_memory_store::ModelMemoryStore::global()
                 .records_of_root(
