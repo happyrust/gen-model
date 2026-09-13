@@ -134,7 +134,7 @@ impl ProjectedGeometry {
                 transform: Transform::from_matrix(local),
                 ..Default::default()
             }],
-            has_neg: false,
+            has_neg: self.tube.is_none() && matches!(&self.shape, ProjectedShape::Baked),
             generic: self.noun.clone(),
             pts: None,
             date: None,
@@ -1848,6 +1848,10 @@ mod tests {
         let rows = store.room_records_for_members(&BTreeSet::from([packed_refno(source)]));
         assert_eq!(rows, vec![geometry.clone()]);
         let inst = rows[0].room_inst();
+        assert!(
+            inst.has_neg,
+            "baked memory records must match durable booled_id records"
+        );
         assert_eq!(
             inst.refno,
             crate::data_interface::generation_root::refno_from_e3d(source)
@@ -1875,6 +1879,20 @@ mod tests {
                 .room_records_for_members(&BTreeSet::from([packed_refno(source)]))
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn canonical_room_input_is_not_reported_as_a_boolean_mesh() {
+        let source = RefNo::new(24381, 8);
+        let root = RefNo::new(24381, 1);
+        let mut geometry = record("canonical_room_member", source, root, 7997);
+        geometry.shape = ProjectedShape::Canonical {
+            key: PrimitiveMeshKey::CylinderV3 { segments: 32 },
+            local_transform: DMat4::IDENTITY,
+            local_bounds: [[-1.0, -1.0, 0.0], [1.0, 1.0, 2.0]],
+        };
+
+        assert!(!geometry.room_inst().has_neg);
     }
 
     #[test]

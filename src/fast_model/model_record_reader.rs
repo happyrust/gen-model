@@ -73,6 +73,9 @@ fn projection_record_to_query(
     record: ProjectedGeometry,
     root: e3d_io::refno::RefNo,
 ) -> GeomInstQuery {
+    // Durable inst_relate encodes every non-tube Baked projection with a
+    // booled_id; canonical rows and tubi_relate rows do not have one.
+    let has_neg = record.tube.is_none() && matches!(&record.shape, ProjectedShape::Baked);
     let local_transform = match (&record.shape, &record.tube) {
         (
             ProjectedShape::Canonical {
@@ -112,7 +115,7 @@ fn projection_record_to_query(
             is_tubi: record.tube.is_some(),
             is_invalid_tubi: record.tube.as_ref().is_some_and(|tube| tube.invalid),
         }],
-        has_neg: false,
+        has_neg,
         generic: record.noun,
         pts: None,
         date: None,
@@ -121,6 +124,53 @@ fn projection_record_to_query(
 
 #[cfg(test)]
 mod tests {
+    use e3d_io::refno::RefNo;
+    use e3d_model::elmodl::GeometryId;
+    use glam::DMat4;
+
+    use super::super::model_memory_store::{ProjectedGeometry, ProjectedShape, ProjectedTube};
+
+    fn projected(shape: ProjectedShape, tube: Option<ProjectedTube>) -> ProjectedGeometry {
+        ProjectedGeometry {
+            record_id: "24384_26609".into(),
+            geometry_id: GeometryId::Element {
+                refno: "24384/26609".into(),
+            },
+            source_refno: RefNo::new(24384, 26609),
+            dbnum: 7997,
+            source_sesno: 42,
+            noun: "FLOOR".into(),
+            mesh_id: "mesh".into(),
+            world_transform: DMat4::IDENTITY,
+            world_bounds: [[0.0; 3], [1.0; 3]],
+            ancestors: vec![],
+            shape,
+            tube,
+        }
+    }
+
+    #[test]
+    fn memory_conversion_matches_the_durable_boolean_contract() {
+        let root = RefNo::new(24384, 26606);
+        let baked = super::projection_record_to_query(
+            projected(ProjectedShape::Baked, None),
+            root,
+        );
+        assert!(baked.has_neg, "durable baked rows have booled_id");
+
+        let tube = ProjectedTube {
+            route_ordinal: 0,
+            from: RefNo::new(24384, 1),
+            to: RefNo::new(24384, 2),
+            invalid: false,
+        };
+        let tube = super::projection_record_to_query(
+            projected(ProjectedShape::Baked, Some(tube)),
+            root,
+        );
+        assert!(!tube.has_neg, "durable tubi_relate rows are never boolean rows");
+    }
+
     #[tokio::test]
     async fn cold_read_includes_baked_canonical_and_tube_but_not_other_roots() {
         let db = surrealdb::engine::any::connect("mem://").await.unwrap();
@@ -147,10 +197,11 @@ mod tests {
         assert_eq!(canonical.insts[0].transform.translation.x, 5.0);
         assert_eq!(canonical.world_trans.translation.x, 120.0);
         let tube = records.iter().find(|r| r.generic == "TUBI").unwrap();
+        assert!(!canonical.has_neg);
+        assert!(!tube.has_neg);
         assert!(tube.insts[0].is_tubi && tube.insts[0].is_invalid_tubi);
-        assert_eq!(
-            records.iter().find(|r| r.generic == "FLOOR").unwrap().insts[0].geo_hash,
-            "hole"
-        );
+        let baked = records.iter().find(|r| r.generic == "FLOOR").unwrap();
+        assert!(baked.has_neg);
+        assert_eq!(baked.insts[0].geo_hash, "hole");
     }
 }
