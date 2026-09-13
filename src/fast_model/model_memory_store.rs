@@ -24,6 +24,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::sync::{Mutex, OnceLock, RwLock, RwLockReadGuard, RwLockWriteGuard};
+use std::time::Instant;
 
 use e3d_io::refno::RefNo;
 use e3d_model::elmodl::GeometryId;
@@ -299,6 +300,9 @@ struct ScopeState {
     model_digests: BTreeMap<u32, [u8; 32]>,
     room_spatial: BTreeMap<u32, aios_core::accel_tree::acceleration_tree::AccelerationTree>,
     room_spatial_dirty: BTreeSet<(u32, i64)>,
+    room_spatial_rebuild_count: u64,
+    room_spatial_rows_rebuilt: u64,
+    room_spatial_rebuild_duration_ms: u64,
 }
 
 impl std::fmt::Debug for ScopeState {
@@ -341,6 +345,7 @@ impl ScopeState {
             .collect::<BTreeSet<_>>();
         for dbnum in dbnums {
             use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
+            let started_at = Instant::now();
             let boxes = self
                 .by_source
                 .range((dbnum, i64::MIN)..=(dbnum, i64::MAX))
@@ -356,9 +361,17 @@ impl ScopeState {
                         row.noun.clone(),
                     )
                 })
-                .collect();
+                .collect::<Vec<_>>();
+            let row_count = boxes.len() as u64;
             self.room_spatial
                 .insert(dbnum, AccelerationTree::load(boxes));
+            self.room_spatial_rebuild_count = self.room_spatial_rebuild_count.saturating_add(1);
+            self.room_spatial_rows_rebuilt = self
+                .room_spatial_rows_rebuilt
+                .saturating_add(row_count);
+            self.room_spatial_rebuild_duration_ms = self
+                .room_spatial_rebuild_duration_ms
+                .saturating_add(started_at.elapsed().as_millis() as u64);
         }
     }
     fn toggle_digest(&mut self, record: &ProjectedGeometry) {
@@ -581,6 +594,12 @@ pub struct ModelCacheStats {
     pub pending_roots: usize,
     /// Resident roots whose exact candidate identity is confirmed by RocksDB.
     pub durable_roots: usize,
+    /// Number of per-dbnum overlay spatial bulk rebuilds in this process.
+    pub room_spatial_rebuild_count: u64,
+    /// Cumulative resident rows fed into those bulk rebuilds.
+    pub room_spatial_rows_rebuilt: u64,
+    /// Cumulative foreground time spent collecting and rebuilding, in milliseconds.
+    pub room_spatial_rebuild_duration_ms: u64,
 }
 
 /// The current overlay cannot accept another atomic projection cohort without
@@ -859,6 +878,14 @@ impl ModelMemoryStore {
             inflight: cache.inflight,
             pending_roots,
             durable_roots,
+            room_spatial_rebuild_count: current.map_or(0, |state| {
+                state.room_spatial_rebuild_count
+            }),
+            room_spatial_rows_rebuilt: current
+                .map_or(0, |state| state.room_spatial_rows_rebuilt),
+            room_spatial_rebuild_duration_ms: current.map_or(0, |state| {
+                state.room_spatial_rebuild_duration_ms
+            }),
         }
     }
 
@@ -2044,6 +2071,58 @@ mod tests {
                 .len(),
             1_512
         );
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                removals: (0..100).map(|index| format!("pipe-{index}")).collect(),
+                ..Default::default()
+            }],
+        );
+        let remaining = store.room_members_intersecting(8000, &[[[-20_000.0; 3], [20_000.0; 3]]]);
+        assert_eq!(remaining.len(), 1_412);
+        assert!((0..100).all(|index| {
+            !remaining.contains(&packed_refno(RefNo::new(24384, 100_000 + index)))
+        }));
+        let stats = store.cache_stats();
+        assert_eq!(stats.room_spatial_rebuild_count, 5);
+        assert_eq!(stats.room_spatial_rows_rebuilt, 5_315);
+    }
+
+    #[test]
+    fn replacing_one_record_moves_the_spatial_member_without_leaving_old_bounds() {
+        let store = store();
+        let root = RefNo::new(7997, 100);
+        let old_member = RefNo::new(7997, 10);
+        let new_member = RefNo::new(7997, 20);
+        let mut original = record("same", old_member, root, 7997);
+        original.world_bounds = [[0.0; 3], [1.0; 3]];
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![original],
+                ..Default::default()
+            }],
+        );
+
+        let mut moved = record("same", new_member, root, 7997);
+        moved.world_bounds = [[10.0; 3], [11.0; 3]];
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![moved],
+                ..Default::default()
+            }],
+        );
+
+        assert!(
+            store
+                .room_members_intersecting(7997, &[[[0.0; 3], [1.0; 3]]])
+                .is_empty()
+        );
+        assert_eq!(
+            store.room_members_intersecting(7997, &[[[10.0; 3], [11.0; 3]]]),
+            BTreeSet::from([packed_refno(new_member)])
+        );
     }
 
     /// 祖先索引就是旧 `anc CONTAINS <packed>` 的形态：按根能取回子树的全部记录，
@@ -2258,6 +2337,11 @@ mod tests {
                 vec![source, destination]
             };
             store.commit(ProjectionScope::Current, commits);
+            assert_eq!(
+                store.room_members_intersecting(7997, &[[[0.0; 3], [1.0; 3]]]),
+                BTreeSet::from([packed_refno(member)]),
+                "destination_first={destination_first}"
+            );
             assert!(
                 store
                     .records_of_root(ProjectionScope::Current, old_root)
@@ -2636,6 +2720,10 @@ mod tests {
                 medium: crate::fast_model::model_db_adapter::PersistMedium::RocksDb,
             },
         ));
+        assert_eq!(
+            store.room_members_intersecting(7997, &[[[0.0; 3], [1.0; 3]]]),
+            BTreeSet::from([packed_refno(RefNo::new(7997, 1))])
+        );
 
         store
             .try_commit_current(vec![ProjectionCommit {
@@ -2648,6 +2736,10 @@ mod tests {
         assert!(store.receipt(ProjectionScope::Current, root_b).is_some());
         assert!(store.root_needs_persist(root_b));
         assert_eq!(store.cache_stats().evictions, 1);
+        assert_eq!(
+            store.room_members_intersecting(7997, &[[[0.0; 3], [1.0; 3]]]),
+            BTreeSet::from([packed_refno(RefNo::new(7997, 2))])
+        );
     }
 
     #[test]
