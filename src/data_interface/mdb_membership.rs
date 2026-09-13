@@ -110,6 +110,10 @@ pub struct MdbMembership {
 }
 
 impl MdbMembership {
+    #[cfg(test)]
+    pub(crate) fn test_with_databases(project: &str, mdb: &str, databases: Vec<MdbDatabase>) -> Self {
+        Self { mdb: mdb.into(), project: project.into(), databases, problems: Vec::new() }
+    }
     pub fn mdb(&self) -> &str {
         &self.mdb
     }

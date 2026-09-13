@@ -1065,6 +1065,31 @@ impl ModelMemoryStore {
             .unwrap_or(0)
     }
 
+    /// Retire a confirmed-missing current root only if no publication occurred
+    /// since the caller began its source point lookup. Never scan other roots
+    /// or remove another database's projection. Historical scopes are untouched.
+    pub fn evict_missing_root(&self, root: RefNo, expected_epoch: u64) -> bool {
+        let dbnum = root.dbno();
+        let mut scopes = self.write();
+        let Some(state) = scopes.get_mut(&ProjectionScope::Current.key()) else {
+            return expected_epoch == 0;
+        };
+        if state.commit_epochs.get(&dbnum).copied().unwrap_or(0) != expected_epoch {
+            return false;
+        }
+        let ids = state.record_ids_under(root);
+        for id in ids {
+            if state.geometries.get(&id).is_some_and(|row| row.dbnum == dbnum) {
+                state.remove(&id);
+            }
+        }
+        if state.receipts.remove(&packed_refno(root)).is_some() {
+            state.bump_epoch(dbnum);
+        }
+        state.flush_room_spatial();
+        true
+    }
+
     /// Restore a complete published database image without executing generation.
     /// The replacement is atomic to all readers of the process projection.
     ///
@@ -1824,6 +1849,49 @@ mod tests {
                 .publication_ack(ProjectionScope::Current, root)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn missing_root_eviction_is_indexed_scoped_and_idempotent() {
+        let store = store();
+        let root = RefNo::new(24384, 1);
+        let other = RefNo::new(24384, 2);
+        assert_eq!(root.dbno(), 8000);
+        let receipt = RootReceipt { source_sesno: 1, model_target: None,
+            manifest_hash: "test".into(), geometry_count: 1, published_via: "regen".into() };
+        let commit = ProjectionCommit {
+            upserts: vec![record("deleted", root, root, 8000),
+                record("same-db-survivor", other, other, 8000),
+                record("other-db-survivor", root, root, 7997)],
+            receipt: Some((root, receipt)), ..Default::default()
+        };
+        store.commit(ProjectionScope::Current, vec![commit.clone()]);
+        store.commit(ProjectionScope::Historical("before"), vec![commit]);
+        let other_epoch = store.commit_epoch(7997);
+        let epoch = store.commit_epoch(8000);
+        assert!(store.evict_missing_root(root, epoch));
+        assert_eq!(store.current_counts(), (2, 0));
+        assert_eq!(store.records_of_root(ProjectionScope::Current, other).len(), 1);
+        assert_eq!(store.records(ProjectionScope::Historical("before")).len(), 3);
+        assert_eq!(store.commit_epoch(7997), other_epoch);
+        assert!(store.commit_epoch(8000) > epoch);
+        let epoch = store.commit_epoch(8000);
+        assert!(store.evict_missing_root(root, epoch));
+        assert_eq!(store.commit_epoch(8000), epoch);
+    }
+
+    #[test]
+    fn missing_root_eviction_rejects_a_concurrent_publication() {
+        let store = store();
+        let root = RefNo::new(24384, 1);
+        let put = || store.commit(ProjectionScope::Current, vec![ProjectionCommit {
+            upserts: vec![record("model", root, root, 8000)], ..Default::default()
+        }]);
+        put();
+        let epoch = store.commit_epoch(8000);
+        put();
+        assert!(!store.evict_missing_root(root, epoch));
+        assert_eq!(store.current_counts(), (1, 0));
     }
 
     #[test]

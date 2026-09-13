@@ -113,6 +113,15 @@ param(
     [switch]$Force
 )
 
+function Get-Sha256Compat([string]$LiteralPath) {
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($LiteralPath)
+        try { return ([System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '').ToLowerInvariant() }
+        finally { $stream.Dispose() }
+    } finally { $sha.Dispose() }
+}
+
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.IO.Compression | Out-Null
 Add-Type -AssemblyName System.IO.Compression.FileSystem | Out-Null
@@ -249,7 +258,7 @@ if ($ReuseWebFromZip) {
         $priorSmoke.rocks_leg.status -ne 'passed') {
         throw "复用包三腿冒烟未全部通过，不能作为 Web 来源：$priorManifestPath"
     }
-    $webSourceSha256 = (Get-FileHash -LiteralPath $ReuseWebFromZip -Algorithm SHA256).Hash.ToLower()
+    $webSourceSha256 = Get-Sha256Compat $ReuseWebFromZip
     if ($priorManifest.zip.sha256 -and $priorManifest.zip.sha256 -ne $webSourceSha256) {
         throw "复用包 SHA-256 与发布清单不一致：$ReuseWebFromZip"
     }
@@ -1170,7 +1179,7 @@ try {
         $rel = $_.FullName.Substring($stage.Length + 1)
         $entry = ($rel -replace '\\', '/')
         [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $_.FullName, $entry, $cl) | Out-Null
-        $h = (Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash.ToLower()
+        $h = Get-Sha256Compat $_.FullName
         [void]$files.Add([ordered]@{ path = $entry; sha256 = $h; bytes = $_.Length })
     }
     # 6b. assets 从源直灌到 workspace/assets/*（不进暂存、不逐一 hash，按目录汇总）
@@ -1238,7 +1247,7 @@ finally {
 }
 
 # ── 7. 整包 sha256 + sibling release.json ────────────────────────────────────
-$zipHash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLower()
+$zipHash = Get-Sha256Compat $zip
 $zipBytes = (Get-Item -LiteralPath $zip).Length
 "$Name.zip  sha256=$zipHash  bytes=$zipBytes" | Set-Content -LiteralPath "$zip.sha256" -Encoding ascii
 $manifest.zip = [ordered]@{ name = "$Name.zip"; bytes = $zipBytes; sha256 = $zipHash }
