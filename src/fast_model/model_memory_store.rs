@@ -255,6 +255,17 @@ impl ProjectionCommit {
     }
 }
 
+// BTree nodes, the packed root key and the receipt allocation all remain
+// resident even when a generated root contains no geometry.  This deliberately
+// stable estimate is an admission-control unit, not an allocator measurement.
+const ROOT_RECEIPT_OVERHEAD_BYTES: usize = 128;
+
+fn receipt_resident_bytes(root: RefNo, receipt: &RootReceipt) -> usize {
+    ROOT_RECEIPT_OVERHEAD_BYTES
+        .saturating_add(std::mem::size_of_val(&root))
+        .saturating_add(serde_json::to_vec(receipt).map_or(0, |encoded| encoded.len()))
+}
+
 /// 把 refno 打包成旧 `anc` 数组里那个 i64。
 pub fn packed_refno(refno: RefNo) -> i64 {
     (((refno.word0 as u64) << 32) | refno.word1 as u64) as i64
@@ -310,6 +321,18 @@ pub(crate) struct GeometryChange {
 }
 
 impl ScopeState {
+    fn total_resident_bytes(&self) -> usize {
+        self.resident_bytes.saturating_add(
+            self.receipts
+                .iter()
+                .map(|(packed, receipt)| {
+                    let root = RefNo::new((*packed >> 32) as u32, *packed as u32);
+                    receipt_resident_bytes(root, receipt)
+                })
+                .sum::<usize>(),
+        )
+    }
+
     fn flush_room_spatial(&mut self) {
         let dirty = std::mem::take(&mut self.room_spatial_dirty);
         let cold: BTreeSet<_> = dirty
@@ -627,7 +650,7 @@ struct CacheControl {
 }
 
 /// 进程内的模型投影存储。生成侧只写它，读侧（历史快照查询、按需删除、落库适配器）
-/// 只读它。持久模式下 `current_max_bytes` 使它成为按根淘汰的 cache-aside 投影；未收到
+/// 只读它。持久模式下 `current_max_bytes` 使它成为按根淘汰的有界增量 overlay；未收到
 /// durable ACK 的候选根不会被淘汰，确保失败后仍可重试发布。
 #[derive(Debug)]
 pub struct ModelMemoryStore {
@@ -857,7 +880,7 @@ impl ModelMemoryStore {
         ModelCacheStats {
             mode: crate::options::model_cache_mode().as_str(),
             max_bytes: self.current_max_bytes,
-            resident_bytes: current.map_or(0, |state| state.resident_bytes),
+            resident_bytes: current.map_or(0, ScopeState::total_resident_bytes),
             resident_roots: current.map_or(0, |state| state.receipts.len()),
             hits: cache.hits,
             misses: cache.misses,
@@ -941,15 +964,43 @@ impl ModelMemoryStore {
                 .iter()
                 .filter_map(|id| state.geometry_bytes.get(id))
                 .sum::<usize>();
-            let added_bytes = commits
+            // A cohort has final-write semantics.  Counting every intermediate
+            // upsert can reject a batch whose installed state is within budget.
+            let final_upserts = commits
                 .iter()
                 .flat_map(|commit| &commit.upserts)
+                .map(|row| (row.record_id.as_str(), row))
+                .collect::<BTreeMap<_, _>>();
+            let added_bytes = final_upserts
+                .values()
                 .map(|row| serde_json::to_vec(row).map_or(0, |bytes| bytes.len()))
                 .sum::<usize>();
+            let final_receipts = commits
+                .iter()
+                .filter_map(|commit| commit.receipt.as_ref())
+                .map(|(root, receipt)| (packed_refno(*root), (*root, receipt)))
+                .collect::<BTreeMap<_, _>>();
+            let removed_receipt_bytes = final_receipts
+                .keys()
+                .filter_map(|root| {
+                    state.receipts.get(root).map(|receipt| {
+                        receipt_resident_bytes(
+                            RefNo::new((*root >> 32) as u32, *root as u32),
+                            receipt,
+                        )
+                    })
+                })
+                .sum::<usize>();
+            let added_receipt_bytes = final_receipts
+                .values()
+                .map(|(root, receipt)| receipt_resident_bytes(*root, receipt))
+                .sum::<usize>();
             let projected_bytes = state
-                .resident_bytes
+                .total_resident_bytes()
                 .saturating_sub(removed_bytes)
-                .saturating_add(added_bytes);
+                .saturating_sub(removed_receipt_bytes)
+                .saturating_add(added_bytes)
+                .saturating_add(added_receipt_bytes);
             if projected_bytes <= max_bytes {
                 break;
             }
@@ -1141,11 +1192,17 @@ impl ModelMemoryStore {
             .record_ids_under(RefNo::new((protected >> 32) as u32, protected as u32))
             .into_iter()
             .filter_map(|id| state.geometry_bytes.get(&id))
-            .sum::<usize>();
+            .sum::<usize>()
+            .saturating_add(state.receipts.get(&protected).map_or(0, |receipt| {
+                receipt_resident_bytes(
+                    RefNo::new((protected >> 32) as u32, protected as u32),
+                    receipt,
+                )
+            }));
         if protected_bytes > max_bytes {
             cache.oversize_bypasses += 1;
         }
-        while state.resident_bytes > max_bytes {
+        while state.total_resident_bytes() > max_bytes {
             let Some(candidate) = state
                 .publication_acks
                 .keys()
@@ -1299,7 +1356,13 @@ impl ModelMemoryStore {
             .record_ids_under(root)
             .into_iter()
             .filter_map(|id| state.geometry_bytes.get(&id))
-            .sum()
+            .sum::<usize>()
+            .saturating_add(
+                state
+                    .receipts
+                    .get(&packed_refno(root))
+                    .map_or(0, |receipt| receipt_resident_bytes(root, receipt)),
+            )
     }
 
     /// 整个投影域的记录，按 record_id 排序。历史快照查询与落库适配器用它。
@@ -2463,16 +2526,62 @@ mod tests {
     }
 
     #[test]
+    fn hard_limit_charges_nonzero_residency_for_empty_roots() {
+        let store = ModelMemoryStore::with_cache_limit(1);
+        let root = RefNo::new(7997, 101);
+        let error = store
+            .try_commit_current(vec![ProjectionCommit {
+                receipt: Some((
+                    root,
+                    RootReceipt {
+                        source_sesno: 42,
+                        model_target: None,
+                        manifest_hash: "empty".into(),
+                        geometry_count: 0,
+                        published_via: "regen".into(),
+                    },
+                )),
+                ..Default::default()
+            }])
+            .expect_err("an empty root still consumes receipt and identity memory");
+        assert!(error.projected_bytes > 1);
+        assert_eq!(store.current_counts(), (0, 0));
+        assert_eq!(store.commit_epoch(7997), 0);
+    }
+
+    #[test]
+    fn admission_counts_only_the_final_upsert_for_a_record_id() {
+        let root = RefNo::new(7997, 102);
+        let first = record("same", RefNo::new(7997, 1), root, 7997);
+        let mut last = first.clone();
+        last.noun = "LAST".into();
+        let receipt = RootReceipt {
+            source_sesno: 42,
+            model_target: None,
+            manifest_hash: "final-write".into(),
+            geometry_count: 1,
+            published_via: "regen".into(),
+        };
+        let exact_limit =
+            serde_json::to_vec(&last).unwrap().len() + receipt_resident_bytes(root, &receipt);
+        let store = ModelMemoryStore::with_cache_limit(exact_limit);
+        store
+            .try_commit_current(vec![ProjectionCommit {
+                upserts: vec![first, last],
+                receipt: Some((root, receipt)),
+                ..Default::default()
+            }])
+            .expect("final-write accounting must not double-charge duplicate ids");
+        assert_eq!(store.current_counts(), (1, 1));
+        assert!(store.cache_stats().resident_bytes <= exact_limit);
+    }
+
+    #[test]
     fn hard_limit_evicts_a_clean_root_to_admit_a_new_pending_root() {
         let root_a = RefNo::new(7997, 100);
         let root_b = RefNo::new(7997, 200);
         let row_a = record("a", RefNo::new(7997, 1), root_a, 7997);
         let row_b = record("b", RefNo::new(7997, 2), root_b, 7997);
-        let max_bytes = serde_json::to_vec(&row_a)
-            .unwrap()
-            .len()
-            .max(serde_json::to_vec(&row_b).unwrap().len());
-        let store = ModelMemoryStore::with_cache_limit(max_bytes);
         let receipt = |manifest: &str| RootReceipt {
             source_sesno: 42,
             model_target: None,
@@ -2480,6 +2589,13 @@ mod tests {
             geometry_count: 1,
             published_via: "regen".into(),
         };
+        let max_bytes = (serde_json::to_vec(&row_a).unwrap().len()
+            + receipt_resident_bytes(root_a, &receipt("a")))
+        .max(
+            serde_json::to_vec(&row_b).unwrap().len()
+                + receipt_resident_bytes(root_b, &receipt("b")),
+        );
+        let store = ModelMemoryStore::with_cache_limit(max_bytes);
         store
             .try_commit_current(vec![ProjectionCommit {
                 upserts: vec![row_a],

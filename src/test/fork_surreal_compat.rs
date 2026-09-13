@@ -52,6 +52,16 @@ struct SpawnedFork {
     child: Child,
     dir: PathBuf,
     ws_url: String,
+    preserve_dir: bool,
+}
+
+impl SpawnedFork {
+    fn stop_preserving(mut self) -> PathBuf {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        self.preserve_dir = true;
+        self.dir.clone()
+    }
 }
 
 impl Drop for SpawnedFork {
@@ -59,7 +69,9 @@ impl Drop for SpawnedFork {
         let _ = self.child.kill();
         let _ = self.child.wait();
         // Windows 上 rocksdb 句柄释放可能滞后于 kill，清不掉就留给系统临时目录。
-        let _ = std::fs::remove_dir_all(&self.dir);
+        if !self.preserve_dir {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
     }
 }
 
@@ -78,22 +90,34 @@ fn free_port() -> u16 {
 
 /// 起一台一次性 fork 服务器（rocksdb 后端）。二进制缺失时返回 `None`（软跳过）。
 fn spawn_fork_server(case: &str) -> Option<SpawnedFork> {
-    let exe = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bin/surreal.exe");
+    let dir = std::env::temp_dir().join(format!(
+        "aios-compat-{}-{}-{}",
+        std::process::id(),
+        case,
+        free_port()
+    ));
+    spawn_fork_server_in(case, dir)
+}
+
+fn fork_executable() -> PathBuf {
+    std::env::var_os("AIOS_SURREAL_EXE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("bin/surreal.exe"))
+}
+
+fn spawn_fork_server_in(case: &str, dir: PathBuf) -> Option<SpawnedFork> {
+    let exe = fork_executable();
     if !exe.exists() {
         if compat_require() {
             panic!("AIOS_COMPAT_REQUIRE=1 但缺少 {}", exe.display());
         }
         eprintln!(
-            "[compat] skip {case}: 缺 bin/surreal.exe（fork 2.1.4 服务器二进制，机器本地文件）"
+            "[compat] skip {case}: 缺 {}（可用 AIOS_SURREAL_EXE 指定 fork 2.1.4）",
+            exe.display()
         );
         return None;
     }
     let port = free_port();
-    let dir = std::env::temp_dir().join(format!(
-        "aios-compat-{}-{}-{port}",
-        std::process::id(),
-        case
-    ));
     std::fs::create_dir_all(&dir).expect("create compat temp dir");
     let child = Command::new(&exe)
         .args([
@@ -117,6 +141,7 @@ fn spawn_fork_server(case: &str) -> Option<SpawnedFork> {
         child,
         dir,
         ws_url: format!("ws://127.0.0.1:{port}"),
+        preserve_dir: false,
     };
     // 先等 TCP 可达，WS 握手交给带重试的 connect_fork。
     let deadline = Instant::now() + Duration::from_secs(20);
@@ -1951,4 +1976,95 @@ async fn dual_delete_then_insert_ignore_block_is_idempotent_and_replaces_rows() 
     )
     .await;
     assert_eq!(children, vec!["8000_20".to_string()]);
+}
+
+/// Real-process restart proof for the write-behind durability seam.  The first
+/// process commits a root but deliberately does not accept its process-local
+/// ACK; the second process opens the same RocksDB directory and reads the
+/// durable receipt while its fresh kv-mem projection remains empty.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "requires the fork Surreal binary; set AIOS_SURREAL_EXE and AIOS_COMPAT_REQUIRE=1"]
+async fn model_write_behind_rocksdb_restart_keeps_rows_without_hydrating_memory() {
+    use crate::fast_model::model_db_adapter::{
+        PersistMedium, PersistTarget, persist_roots_batched_unacked,
+    };
+    use crate::fast_model::model_memory_store::{
+        ModelMemoryStore, ProjectionCommit, ProjectionScope, RootReceipt,
+    };
+    use e3d_io::refno::RefNo;
+
+    let Some(server_a) = spawn_fork_server("model-write-behind-restart") else {
+        return;
+    };
+    let db_a = connect_fork(&server_a.ws_url, "model_write_behind_restart").await;
+    let root = RefNo::new(7997, 1);
+    db_a
+        .query(
+            "CREATE type::thing('gen_root', '7997_1') SET dbnum=7997, desired_revision=0, publication_status='pending';",
+        )
+        .await
+        .expect("seed root transport")
+        .check()
+        .expect("seed root");
+    let store_a = ModelMemoryStore::with_cache_limit(16 * 1024);
+    store_a
+        .try_commit_current(vec![ProjectionCommit {
+            receipt: Some((
+                root,
+                RootReceipt {
+                    source_sesno: 42,
+                    model_target: None,
+                    manifest_hash: "restart-proof".into(),
+                    geometry_count: 0,
+                    published_via: "regen".into(),
+                },
+            )),
+            ..Default::default()
+        }])
+        .expect("memory publish");
+
+    let durable = persist_roots_batched_unacked(
+        PersistTarget::new(&db_a, PersistMedium::RocksDb),
+        &store_a,
+        7997,
+        &[root],
+        None,
+    )
+    .await
+    .expect("durable root transaction");
+    assert_eq!(durable.acknowledged.len(), 1);
+    assert!(
+        store_a.root_needs_persist(root),
+        "database commit must not synthesize a process ACK"
+    );
+    db_a.query("UPSERT dbnum_watermark:7997 SET applied_sesno=43, model_sesno=42;")
+        .await
+        .expect("watermark transport")
+        .check()
+        .expect("watermark write");
+    drop(db_a);
+
+    let dir = server_a.stop_preserving();
+    let server_b = spawn_fork_server_in("model-write-behind-restart-b", dir)
+        .expect("restart fork on the same RocksDB directory");
+    let db_b = connect_fork(&server_b.ws_url, "model_write_behind_restart").await;
+    let mut response = db_b
+        .query(
+            "SELECT count() AS count FROM gen_root GROUP ALL;\
+             SELECT applied_sesno, model_sesno FROM dbnum_watermark:7997;",
+        )
+        .await
+        .expect("restart query transport")
+        .check()
+        .expect("restart query");
+    let root_rows: Vec<serde_json::Value> = response.take(0).expect("root count");
+    let watermarks: Option<serde_json::Value> = response.take(1).expect("watermark row");
+    assert_eq!(root_rows[0]["count"], 1);
+    let watermarks = watermarks.expect("watermark persisted");
+    assert_eq!(watermarks["applied_sesno"], 43);
+    assert_eq!(watermarks["model_sesno"], 42);
+
+    let store_b = ModelMemoryStore::with_cache_limit(16 * 1024);
+    assert_eq!(store_b.current_counts(), (0, 0));
+    assert!(store_b.roots(ProjectionScope::Current).is_empty());
 }

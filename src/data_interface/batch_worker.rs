@@ -2379,6 +2379,12 @@ async fn persist_transform_roots(
         .iter()
         .map(|root| crate::fast_model::e3d_model_service::parse_refno(root))
         .collect::<anyhow::Result<Vec<_>>>()?;
+    if crate::options::store_mode().is_durable() {
+        // `republish_roots_by_rigid_motion` already crossed the single
+        // ModelWriteBehind::publish seam. Persistence and room calculation are
+        // owned by its background worker.
+        return Ok(std::collections::HashMap::new());
+    }
     let rooms = match frozen_room_calculator() {
         Ok(rooms) => rooms,
         Err(error) => {
@@ -2389,10 +2395,6 @@ async fn persist_transform_roots(
                 .collect());
         }
     };
-    if crate::options::store_mode().is_durable() {
-        crate::fast_model::model_db_adapter::enqueue_roots_write_behind(dbnum, refnos).await?;
-        return Ok(std::collections::HashMap::new());
-    }
     let batched = persist_roots_batched(
         PersistTarget::process(),
         crate::fast_model::model_memory_store::ModelMemoryStore::global(),

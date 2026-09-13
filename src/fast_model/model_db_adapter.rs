@@ -285,13 +285,6 @@ pub async fn persist_root(root: RefNo) -> anyhow::Result<PersistedRows> {
     persist_root_on(PersistTarget::process(), ModelMemoryStore::global(), root).await
 }
 
-/// Hand durable publication to the process-local writer. Generation has already
-/// committed the complete root snapshots to kv-mem before this call; waiting for
-/// queue capacity never waits for RocksDB I/O.
-pub async fn enqueue_roots_write_behind(dbnum: u32, roots: Vec<RefNo>) -> anyhow::Result<()> {
-    crate::fast_model::model_write_behind::submit_roots(dbnum, roots).await
-}
-
 /// Queue the durable database watermark behind all root writes already handed
 /// to this FIFO. The worker also reconciles any still-pending memory roots
 /// before advancing `dbnum_watermark.model_sesno`, so a retry can never leave
@@ -393,12 +386,45 @@ pub struct BatchedPersist {
     /// 没落进去的根与原因：房间算不出来（写前剔出组，原因带「room membership」）、或所在组
     /// 任一块写库失败，整根都在这里。
     pub failed: Vec<(RefNo, String)>,
+    /// Typed form consumed by the write-behind state machine.  `failed` stays
+    /// as the compatibility view for synchronous callers.
+    pub(crate) failures: Vec<RootPersistFailure>,
+    /// Durable transaction results which have not yet been accepted as a
+    /// process-local ACK.  The write-behind coordinator performs that exact
+    /// identity check after the adapter returns.
+    pub(crate) acknowledged: Vec<ExactAckCandidate>,
     /// 实际发出的组数（≤ [`BATCHED_PERSIST_ROOTS_PER_GROUP`] 根一组）。
     pub groups: usize,
     /// 随模型行同事务写下的房间归属边数（ADR-073 D1）。
     pub room_edges: usize,
     /// 本批真正提交过的最大一笔 SurrealQL 事务字节数。
     pub max_transaction_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PersistFailureKind {
+    Retryable,
+    Blocked,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct RootPersistFailure {
+    pub root: RefNo,
+    pub kind: PersistFailureKind,
+    pub error: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ExactAckCandidate {
+    pub root: RefNo,
+    pub ack: crate::fast_model::model_memory_store::RootPublicationAck,
+}
+
+impl BatchedPersist {
+    fn push_failure(&mut self, root: RefNo, kind: PersistFailureKind, error: String) {
+        self.failed.push((root, error.clone()));
+        self.failures.push(RootPersistFailure { root, kind, error });
+    }
 }
 
 /// 库里既有的一条 e3d-model 几何身份及其祖先链（对账用，一库一次取回）。
@@ -671,8 +697,8 @@ fn render_publication_fence_batch(roots: &[RefNo], per_statement: usize) -> Stri
 /// 1. 一组 ≤ [`BATCHED_PERSIST_ROOTS_PER_GROUP`] 根，共享对账读取与房间预计算；持久化时每根的
 ///    几何行、房间边和回执合成一笔事务。软字节上限不得拆根，超过数据库硬上限则整根失败；
 /// 2. 对账读一次：整库 e3d-model 几何身份一条查询取回，各根在客户端按祖先链分摊，不再每根一问；
-/// 3. 没有 durable per-root CAS / 队列：同一 dbnum 只有本任务一个写者。事务成功后只在
-///    `ModelMemoryStore` 写一枚进程级完整发布 ACK，进程退出即丢。
+/// 3. 没有 durable per-root queue。事务成功后返回精确 ACK 候选；同步调用方立即接受，
+///    write-behind 调用方则在自己的 submission epoch 栅栏后接受，进程退出即丢。
 ///
 /// `rooms` 是任务开工时冻出来的房间计算器（[`frozen_room_calculator`]），`None` = 房间归属开关
 /// 已关闭或显式底层调用不要求房间；模型根仍照常持久化，只清被
@@ -692,8 +718,30 @@ pub async fn persist_roots_batched(
     roots: &[RefNo],
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
 ) -> anyhow::Result<BatchedPersist> {
+    let result = persist_roots_batched_unacked(target, store, dbnum, roots, rooms).await?;
+    for candidate in &result.acknowledged {
+        let _ = store.record_publication_ack(
+            ProjectionScope::Current,
+            candidate.root,
+            candidate.ack.clone(),
+        );
+    }
+    Ok(result)
+}
+
+/// Persist roots without mutating process-local publication ACK state.
+///
+/// This is the durability seam used by write-behind: a process can disappear
+/// after RocksDB commits but before the coordinator accepts these candidates.
+pub(crate) async fn persist_roots_batched_unacked(
+    target: PersistTarget<'_>,
+    store: &ModelMemoryStore,
+    dbnum: u32,
+    roots: &[RefNo],
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+) -> anyhow::Result<BatchedPersist> {
     let limits = crate::data_interface::tx_limits::data_tx_limits();
-    persist_roots_batched_with_chunk_bytes(
+    persist_roots_batched_with_chunk_bytes_unacked(
         target,
         store,
         dbnum,
@@ -745,6 +793,33 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
     chunk_bytes: usize,
     rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
 ) -> anyhow::Result<BatchedPersist> {
+    let result = persist_roots_batched_with_chunk_bytes_unacked(
+        target,
+        store,
+        dbnum,
+        roots,
+        chunk_bytes,
+        rooms,
+    )
+    .await?;
+    for candidate in &result.acknowledged {
+        let _ = store.record_publication_ack(
+            ProjectionScope::Current,
+            candidate.root,
+            candidate.ack.clone(),
+        );
+    }
+    Ok(result)
+}
+
+async fn persist_roots_batched_with_chunk_bytes_unacked(
+    target: PersistTarget<'_>,
+    store: &ModelMemoryStore,
+    dbnum: u32,
+    roots: &[RefNo],
+    chunk_bytes: usize,
+    rooms: Option<&crate::fast_model::room_model::MemoryRoomCalculator>,
+) -> anyhow::Result<BatchedPersist> {
     let mut out = BatchedPersist::default();
     if roots.is_empty() {
         return Ok(out);
@@ -768,10 +843,16 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
         .copied()
         .filter(|root| seen.insert(packed_refno(*root)))
         .collect::<Vec<_>>();
-    let shares = roots
-        .iter()
-        .map(|root| RootShare::load(store, *root))
-        .collect::<anyhow::Result<Vec<_>>>()?;
+    let mut shares = Vec::with_capacity(roots.len());
+    for root in roots {
+        match RootShare::load(store, root) {
+            Ok(share) => shares.push(share),
+            Err(error) => out.push_failure(root, PersistFailureKind::Blocked, format!("{error:#}")),
+        }
+    }
+    if shares.is_empty() {
+        return Ok(out);
+    }
 
     // 对账读一次（只有有回执的根才拿得起自己的全集）。行上的 `dbnum` 是投影记录写下的那个，
     // 与根的 `dbno()` 在生产上同值；两者都问，夹具或历史行的口径差异不会让陈旧行漏网。
@@ -797,7 +878,9 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
         // 房间关卡在写库之前、按根（ADR-073 D1 / D2）：算不出来的根就地记失败，
         // 剩下的根才进本组的事务。
         let (live, room_failed) = room_stage(group, rooms);
-        out.failed.extend(room_failed);
+        for (root, error) in room_failed {
+            out.push_failure(root, PersistFailureKind::Blocked, error);
+        }
         if live.is_empty() {
             continue;
         }
@@ -814,7 +897,6 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
         .await
         {
             Ok(outcome) => accept_group_outcome(
-                store,
                 &live,
                 dbnum,
                 target.medium,
@@ -829,7 +911,11 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
             ),
             Err(error) if live.len() == 1 => {
                 invalidate_geometry_baseline();
-                out.failed.push((live[0].share.root, format!("{error:#}")));
+                out.push_failure(
+                    live[0].share.root,
+                    PersistFailureKind::Retryable,
+                    format!("{error:#}"),
+                );
             }
             Err(error) => {
                 invalidate_geometry_baseline();
@@ -858,7 +944,6 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
                     .await
                     {
                         Ok(outcome) => accept_group_outcome(
-                            store,
                             retry,
                             dbnum,
                             target.medium,
@@ -873,7 +958,11 @@ pub(crate) async fn persist_roots_batched_with_chunk_bytes(
                         ),
                         Err(error) if retry.len() == 1 => {
                             invalidate_geometry_baseline();
-                            out.failed.push((retry[0].share.root, format!("{error:#}")));
+                            out.push_failure(
+                                retry[0].share.root,
+                                PersistFailureKind::Retryable,
+                                format!("{error:#}"),
+                            );
                         }
                         Err(error) => {
                             invalidate_geometry_baseline();
@@ -924,7 +1013,6 @@ struct GroupOutcome {
 
 #[allow(clippy::too_many_arguments)]
 fn accept_group_outcome(
-    store: &ModelMemoryStore,
     group: &[LiveShare<'_>],
     dbnum: u32,
     medium: PersistMedium,
@@ -939,10 +1027,9 @@ fn accept_group_outcome(
 ) {
     for root in group {
         if let Some(receipt) = root.share.receipt.as_ref() {
-            store.record_publication_ack(
-                ProjectionScope::Current,
-                root.share.root,
-                crate::fast_model::model_memory_store::RootPublicationAck {
+            out.acknowledged.push(ExactAckCandidate {
+                root: root.share.root,
+                ack: crate::fast_model::model_memory_store::RootPublicationAck {
                     dbnum,
                     source_sesno: receipt.source_sesno,
                     geometry_count: receipt.geometry_count,
@@ -953,7 +1040,7 @@ fn accept_group_outcome(
                         .map(|calculator| calculator.resident_generation().to_string()),
                     medium,
                 },
-            );
+            });
         }
     }
     total.upserted += outcome.upserted;
@@ -4990,7 +5077,7 @@ mod tests {
             .find("room_stage(group, rooms)")
             .expect("写库前先过房间关卡");
         let failed_at = batched
-            .find("out.failed.extend(room_failed)")
+            .find("out.push_failure(root, PersistFailureKind::Blocked, error)")
             .expect("算不出来的根记失败");
         let group_call_at = batched
             .find("match persist_group(")

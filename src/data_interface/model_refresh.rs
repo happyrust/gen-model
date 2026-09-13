@@ -276,16 +276,15 @@ impl ModelRefreshPolicy {
             } else {
                 None
             };
-            // 生成只写进程内投影（ADR-057：模型面不认识库），落库是这一步。ADR-071 D2 × ADR-073 D1：
-            // 本批全部根的行**跨根合块**、一块一笔事务同步写进库（`persist_roots_batched`，d-932 保留
-            // 512 根一组），每根的房间归属边紧跟它自己的行、同一块同一事务、模型在前；不登记进文件轮次
-            // 等别人刷、不等 ACK；落不进去的那些根算失败——投影在内存里是对的，但 Plant UI 看不见的
-            // 东西不能算完成。
+            // 生成通过 ModelWriteBehind::publish 原子写内存并登记根。持久档到这里时只报告
+            // memory=ready；后台再跨根合块写 RocksDB。非持久档仍在这里同步调用适配器。
             //
             // 房间计算器在这里**冻一次**（ADR-073 D1 硬约束：任务期间不换代），整批根共用。
             // 开关关闭时得到 None：模型照常持久化、不写新房间边；开关开启但常驻模型不可用
             // （在建 / 降级）时才把本批每根记成「房间算不出来」，下一次任务重生成。
-            let rooms = if publication_policy.uses_process_store() {
+            let rooms = if publication_policy.uses_process_store()
+                && !crate::options::store_mode().is_durable()
+            {
                 crate::fast_model::model_db_adapter::frozen_room_calculator().and_then(|rooms| {
                     if let Some(expected) = expected_room_generation {
                         let actual = rooms
@@ -399,11 +398,6 @@ impl ModelRefreshPolicy {
                     .map(|(_, refno)| *refno)
                     .collect::<Vec<_>>();
                 if crate::options::store_mode().is_durable() {
-                    crate::fast_model::model_db_adapter::enqueue_roots_write_behind(
-                        dbnum,
-                        refnos.clone(),
-                    )
-                    .await?;
                     println!(
                         "[model-write-behind] dbnum={dbnum} roots={} memory=ready durable=pending",
                         refnos.len()
@@ -718,7 +712,7 @@ mod tests {
     /// RocksDB 模式只把已在 kv-mem 可读的根交给后台 writer，不等待数据库事务；
     /// 非持久 process store 仍复用原来的跨根合块事务。
     #[test]
-    fn durable_model_rows_are_handed_to_write_behind_after_memory_commit() {
+    fn durable_model_rows_cross_only_the_atomic_write_behind_publish_seam() {
         let source = include_str!("model_refresh.rs").replace("\r\n", "\n");
         let body = generate_roots_report_body(&source);
         for needle in [
@@ -739,7 +733,11 @@ mod tests {
             1,
             "非持久 process store 仍只走一次跨根合块落库"
         );
-        assert!(body.contains("model_db_adapter::enqueue_roots_write_behind("));
+        assert!(!body.contains("model_db_adapter::enqueue_roots_write_behind("));
+        assert!(
+            include_str!("../fast_model/e3d_model_service.rs")
+                .contains("model_write_behind::publish")
+        );
         assert!(body.contains("memory=ready durable=pending"));
     }
 

@@ -143,7 +143,7 @@ impl AiosDBManager {
                 vec![transaction],
             )?;
 
-            store.try_commit_current(vec![
+            crate::fast_model::model_write_behind::publish(vec![
                 crate::fast_model::model_memory_store::ProjectionCommit {
                     tube_branch_resets: tube_branches,
                     removals: record_ids.into_iter().collect(),

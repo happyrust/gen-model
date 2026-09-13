@@ -1099,9 +1099,9 @@ impl E3dModelService {
                     continue;
                 }
             };
-            // 回执整根前移到 T；`model_target` 暂沿用旧的（见函数头「待补」）。只提交进内存投影，
-            // 登记 / durable flush 交给调用方（batch_worker）——生成服务不碰库。
-            store.try_commit_current(vec![ProjectionCommit {
+            // 回执整根前移到 T；`model_target` 暂沿用旧的（见函数头「待补」）。发布调用只同步
+            // 提交内存投影并登记 write-behind；后台 worker 独立完成 durable flush。
+            super::model_write_behind::publish(vec![ProjectionCommit {
                 upserts: moved,
                 receipt: Some((
                     root,
@@ -1428,7 +1428,7 @@ impl E3dModelService {
             // containing several BRANs land in the store together. A cold
             // process store has no old ownership to preserve, so complete
             // siblings may still land when another root cannot be generated.
-            store.try_commit_current(commits)?;
+            super::model_write_behind::publish(commits)?;
             for report in prepared_reports {
                 total.merge_counts(report);
             }
@@ -2039,7 +2039,9 @@ pub(crate) async fn apply_geometry_delta_on(
         owners,
     )?;
     match scope {
-        ProjectionScope::Current => ModelMemoryStore::global().try_commit_current(vec![commit])?,
+        ProjectionScope::Current => {
+            super::model_write_behind::publish(vec![commit])?;
+        }
         ProjectionScope::Historical(_) => ModelMemoryStore::global().commit(scope, vec![commit]),
     }
     report.unique_meshes = report.mesh_ids.len();
