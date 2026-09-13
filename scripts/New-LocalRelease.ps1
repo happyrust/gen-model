@@ -626,7 +626,12 @@ $ver = (& $exe version) -join ' '
 if ($ver -notmatch '(\d+)\.(\d+)\.(\d+)' -or [int]$Matches[1] -ne 2) {
     throw "surreal 版本不对：$ver（本仓客户端是 fork 2.1.x；别用 PATH 上 cargo install 的 3.x）"
 }
-Write-Host "SurrealDB $ver  bind 127.0.0.1:$Port  data $Datastore"
+# fork 默认的响应缓冲定时器在 Windows 上给每次顺序 RPC 加 ~15 ms；服务以前自己拉库时替你设成 0，
+# 现在库由这个脚本起，这一行不能丢——否则模型顺序发布与初始化会明显变慢。显式设过的不覆盖。
+if ([string]::IsNullOrEmpty($env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE)) {
+    $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE = '0'
+}
+Write-Host "SurrealDB $ver  bind 127.0.0.1:$Port  data $Datastore  response-buffer $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE"
 & $exe start --user $User --pass $Password --bind "127.0.0.1:$Port" $Datastore
 '@
 Set-Content -LiteralPath (Join-Path $wsStage 'Start-Surreal.ps1') -Value $startSurreal -Encoding UTF8
@@ -800,6 +805,10 @@ function Start-SmokeSurreal([string]$SurrealBin, [int]$Port, [string]$DataDir, [
     $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($listener) { throw "$Port 被 PID $($listener.OwningProcess) 占用" }
     New-Item -ItemType Directory -Force $DataDir | Out-Null
+    # 与包内 Start-Surreal.ps1 同一条纪律：响应缓冲设 0（退役的 spawner 以前替服务设的），显式设过的不覆盖。
+    if ([string]::IsNullOrEmpty($env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE)) {
+        $env:SURREAL_WEBSOCKET_RESPONSE_BUFFER_SIZE = '0'
+    }
     $proc = Start-Process -FilePath $SurrealBin -WindowStyle Hidden -PassThru `
         -ArgumentList @('start', '--user', $User, '--pass', $Password, '--bind', "127.0.0.1:$Port", "rocksdb:$DataDir")
     $deadline = (Get-Date).AddSeconds(30)
