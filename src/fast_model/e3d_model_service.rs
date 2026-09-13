@@ -122,6 +122,45 @@ pub struct GeneratedSnapshot {
     pub visited: Vec<RefNo>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ProjectDbFile {
+    db_type: String,
+    project: String,
+    path: PathBuf,
+}
+
+type ProjectDbFiles = Arc<HashMap<(String, u32), ProjectDbFile>>;
+type DependencySessions = Arc<std::sync::Mutex<BTreeMap<(u32, u32), u32>>>;
+
+fn project_db_key(project: &str, dbnum: u32) -> (String, u32) {
+    (project.trim().to_ascii_lowercase(), dbnum)
+}
+
+/// Pick a dependency in the target design database's project when that project
+/// has a same-type copy of the selected MDB database. Foreign DESI files carry
+/// project-relative catalogue references: ACP 7015, for example, needs ACP
+/// CATA 7000 even though `/ALL` also declares AMS CATA 7000.
+fn select_dependency_file(
+    locator: &InMemoryCataLocator,
+    project_files: &ProjectDbFiles,
+    preferred_project: Option<&str>,
+    dbnum: u32,
+) -> Option<ProjectDbFile> {
+    let selected_type = locator.db_type_of(dbnum)?;
+    if let Some(candidate) = preferred_project
+        .and_then(|project| project_files.get(&project_db_key(project, dbnum)))
+        .filter(|candidate| candidate.db_type.eq_ignore_ascii_case(&selected_type))
+    {
+        return Some(candidate.clone());
+    }
+    let (project, path) = locator.file_of(dbnum)?;
+    Some(ProjectDbFile {
+        db_type: selected_type,
+        project,
+        path,
+    })
+}
+
 /// A source-session-pinned batch of generated roots.  Generation fills this
 /// structure without touching the persisted model projection; a later
 /// consumer may publish its snapshots in bounded transactions.
@@ -130,7 +169,7 @@ pub struct GeneratedMemoryBatch {
     pub(crate) source_sesno: u32,
     pub(crate) set: Arc<DbSet>,
     pub(crate) index: Arc<SourceIndex>,
-    dependency_sessions: Arc<std::sync::Mutex<BTreeMap<u32, u32>>>,
+    dependency_sessions: DependencySessions,
     pub(crate) snapshots: Vec<(RefNo, BakedSnapshot)>,
     /// Roots whose generation raised a hard error, kept as dead letters instead
     /// of aborting the batch (ADR-041 §6).  The consumer counts them as failed.
@@ -339,7 +378,7 @@ static DB_GENERATION_LOCKS: OnceLock<dashmap::DashMap<u32, Arc<Mutex<()>>>> = On
 struct GenerationInput {
     set: Arc<DbSet>,
     index: Arc<SourceIndex>,
-    dependency_sessions: Arc<std::sync::Mutex<BTreeMap<u32, u32>>>,
+    dependency_sessions: DependencySessions,
 }
 
 type GenerationInputKey = (u32, u32, String);
@@ -432,7 +471,8 @@ pub struct E3dModelService {
     schema: DirectSchema,
     pins: Vec<DbPin>,
     locator: InMemoryCataLocator,
-    dependency_sessions: Arc<std::sync::Mutex<BTreeMap<u32, u32>>>,
+    project_files: ProjectDbFiles,
+    dependency_sessions: DependencySessions,
     mesh_dir: PathBuf,
     /// Digest of the durable file-generation token for a file update round.
     /// It prevents a replaced file at the same path/dbnum/session from reusing
@@ -450,33 +490,41 @@ mod initialization_target_tests;
 #[derive(Clone)]
 struct E3dDbResolver {
     locator: InMemoryCataLocator,
+    project_files: ProjectDbFiles,
+    target_dbnum: u32,
+    preferred_project: Option<String>,
     template_dir: PathBuf,
-    sessions: Arc<std::sync::Mutex<BTreeMap<u32, u32>>>,
+    sessions: DependencySessions,
 }
 
 impl DbFileResolver for E3dDbResolver {
     fn resolve(&self, dbno: u32) -> Option<DbFilePin> {
-        let db_type = self.locator.db_type_of(dbno)?;
-        let (_project, file) = self.locator.file_of(dbno)?;
-        let template = template_file_for(&self.template_dir, &db_type).ok()?;
+        let selected = select_dependency_file(
+            &self.locator,
+            &self.project_files,
+            self.preferred_project.as_deref(),
+            dbno,
+        )?;
+        let template = template_file_for(&self.template_dir, &selected.db_type).ok()?;
         let sesno = {
             let mut sessions = self
                 .sessions
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            if let Some(&sesno) = sessions.get(&dbno) {
+            let key = (self.target_dbnum, dbno);
+            if let Some(&sesno) = sessions.get(&key) {
                 sesno
             } else {
-                let mut view = DbView::open(&file).ok()?;
+                let mut view = DbView::open(&selected.path).ok()?;
                 let sesno = view.walk_sessions().ok()?.first()?.sesno;
-                sessions.insert(dbno, sesno);
+                sessions.insert(key, sesno);
                 sesno
             }
         };
         Some(DbFilePin {
-            file,
+            file: selected.path,
             template,
-            db_type: Some(db_type),
+            db_type: Some(selected.db_type),
             sesno: Some(sesno),
         })
     }
@@ -491,7 +539,7 @@ impl E3dModelService {
     /// not stop a never-parsed project from generating.
     pub async fn from_current() -> anyhow::Result<Self> {
         let option = aios_core::get_db_option();
-        let (pins, locator) = current_mdb_sources()?;
+        let (pins, locator, project_files) = current_mdb_source_inventory()?;
         Ok(Self {
             schema: DirectSchema::open_from_env()?,
             // CATA identity stays with the project-aware locator (see `build_set`
@@ -502,6 +550,7 @@ impl E3dModelService {
                 .filter(|pin| !pin.db_type.eq_ignore_ascii_case("CATA"))
                 .collect(),
             locator,
+            project_files,
             dependency_sessions: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             mesh_dir: option.get_meshes_path(),
             generation_identity: None,
@@ -527,6 +576,7 @@ impl E3dModelService {
         let mut service = Self::from_frozen_source(source).await?;
         let mut files = HashMap::new();
         let mut tokens = vec![source.commit_token_json()?];
+        let target_dbnum = source.dbnum() as u32;
         for token in dependencies.iter().chain(tokens.clone().iter()) {
             let frozen = FrozenSource::from_commit_token_json(token)?.reopen_verified()?;
             service.frozen_file_digests.insert(
@@ -550,13 +600,17 @@ impl E3dModelService {
                 .dependency_sessions
                 .lock()
                 .unwrap()
-                .insert(frozen.dbnum() as u32, frozen.target_sesno());
+                .insert((target_dbnum, frozen.dbnum() as u32), frozen.target_sesno());
             if let Some(pin) = service.pins.iter_mut().find(|p| p.dbnum == frozen.dbnum()) {
                 pin.file = frozen.path().to_path_buf();
                 pin.sesno = Some(frozen.target_sesno());
             }
         }
         service.locator = InMemoryCataLocator::from_parts(HashMap::new(), files);
+        // The initialization token list is already the exact dependency
+        // inventory. Do not replace one of those frozen files with a live
+        // same-project alternative.
+        service.project_files = Arc::new(HashMap::new());
         tokens.extend_from_slice(dependencies);
         tokens.sort_unstable();
         service.generation_identity =
@@ -786,6 +840,7 @@ impl E3dModelService {
         for (root, error) in std::mem::take(&mut batch.failures) {
             log::error!("e3d-model root {root} was not generated: {error}");
             total.failed += 1;
+            total.failed_roots.push((root, error));
         }
         let mut snapshots = snapshots;
         while !snapshots.is_empty() {
@@ -1125,6 +1180,7 @@ impl E3dModelService {
             schema: DirectSchema::open_from_env()?,
             pins,
             locator,
+            project_files: Arc::new(HashMap::new()),
             dependency_sessions: Arc::new(std::sync::Mutex::new(BTreeMap::new())),
             mesh_dir,
             generation_identity: None,
@@ -1202,7 +1258,7 @@ impl E3dModelService {
         index: &SourceIndex,
         roots: &[RefNo],
         failure_policy: GeometryFailurePolicy,
-        dependency_sessions: &Arc<std::sync::Mutex<BTreeMap<u32, u32>>>,
+        dependency_sessions: &DependencySessions,
         mut memory_snapshots: Option<&mut Vec<(RefNo, BakedSnapshot)>>,
     ) -> anyhow::Result<E3dPersistReport> {
         let store = ModelMemoryStore::global();
@@ -1220,6 +1276,7 @@ impl E3dModelService {
             .copied()
             .map(|root| store.receipt(ProjectionScope::Current, root))
             .collect::<Vec<_>>();
+        let cohort_was_empty = published.iter().all(Option::is_none);
         for receipt in published.iter().flatten() {
             self.hydrate_published_dependencies(receipt, dependency_sessions)?;
         }
@@ -1285,6 +1342,7 @@ impl E3dModelService {
                     Ok(outcome) => outcome,
                     Err(error) if !matches!(failure_policy, GeometryFailurePolicy::Required) => {
                         total.failed += 1;
+                        total.failed_roots.push((root, format!("{error:#}")));
                         log::error!("e3d-model root {root} failed: {error:#}");
                         continue;
                     }
@@ -1298,6 +1356,10 @@ impl E3dModelService {
                 bail!("e3d-model root {root} has {root_failed} failed element(s)");
             }
             if root_failed > 0 {
+                let failure = format!(
+                    "{root_failed} geometry element(s) failed: {:?}",
+                    snapshot.report.failed
+                );
                 eprintln!(
                     "e3d-model root {root} failed geometry details: {:?}",
                     snapshot.report.failed
@@ -1308,6 +1370,7 @@ impl E3dModelService {
                 let root_skipped = snapshot.report.skipped.len();
                 generation.merge(snapshot.report);
                 total.failed += root_failed;
+                total.failed_roots.push((root, failure));
                 total.skipped += root_skipped;
                 log::error!(
                     "e3d-model root {root} produced an incomplete candidate ({root_failed} failure(s)); preserving published snapshot"
@@ -1355,13 +1418,38 @@ impl E3dModelService {
             commits.push(commit);
             prepared_reports.push(projected);
         }
-        if total.failed == 0 {
+        if total.failed == 0 || cohort_was_empty {
             // One generate_roots call is one projection cohort: an OWNER move
             // (old root cleanup + new root takeover) and a PIPE expansion
-            // containing several BRANs land in the store together.
+            // containing several BRANs land in the store together. A cold
+            // process store has no old ownership to preserve, so complete
+            // siblings may still land when another root cannot be generated.
             store.commit(ProjectionScope::Current, commits);
             for report in prepared_reports {
                 total.merge_counts(report);
+            }
+        } else {
+            // On a warm projection, committing only the roots that happened to
+            // generate could delete an element from its old root while its new
+            // (failed) root never publishes it. Keep the established cohort
+            // atomic and report every held sibling explicitly instead of
+            // letting an upper layer mistake an uncommitted candidate for
+            // success.
+            let failed = total
+                .failed_roots
+                .iter()
+                .map(|(root, _)| (root.word0, root.word1))
+                .collect::<BTreeSet<_>>();
+            for root in roots
+                .iter()
+                .copied()
+                .filter(|root| !failed.contains(&(root.word0, root.word1)))
+            {
+                total.failed += 1;
+                total.failed_roots.push((
+                    root,
+                    "projection cohort held because a peer root failed".into(),
+                ));
             }
         }
         total.generation_report = serde_json::to_value(generation)?;
@@ -1418,7 +1506,7 @@ impl E3dModelService {
         &self,
         dbnum: u32,
         source_sesno: u32,
-        dependency_sessions: &Arc<std::sync::Mutex<BTreeMap<u32, u32>>>,
+        dependency_sessions: &DependencySessions,
     ) -> anyhow::Result<ModelTarget> {
         let design_pin = self.pin(dbnum)?;
         let sessions = dependency_sessions
@@ -1453,7 +1541,7 @@ impl E3dModelService {
             .filter(|pin| pin.db_type.eq_ignore_ascii_case("CATA"))
         {
             let session = sessions
-                .get(&(pin.dbnum as u32))
+                .get(&(dbnum, pin.dbnum as u32))
                 .copied()
                 .or(pin.sesno)
                 .unwrap_or_default();
@@ -1462,22 +1550,22 @@ impl E3dModelService {
                 file_target(pin.dbnum as u32, &pin.db_type, &pin.file, session)?,
             );
         }
-        for (&dependency_dbnum, &session) in sessions.iter() {
+        for (&(target_dbnum, dependency_dbnum), &session) in sessions.iter() {
+            if target_dbnum != dbnum {
+                continue;
+            }
             if catalogue.contains_key(&dependency_dbnum) {
                 continue;
             }
-            let Some(db_type) = self.locator.db_type_of(dependency_dbnum) else {
+            let Some(selected) = self.dependency_file(dbnum, dependency_dbnum) else {
                 continue;
             };
-            if !db_type.eq_ignore_ascii_case("CATA") {
+            if !selected.db_type.eq_ignore_ascii_case("CATA") {
                 continue;
             }
-            let Some((_project, file)) = self.locator.file_of(dependency_dbnum) else {
-                continue;
-            };
             catalogue.insert(
                 dependency_dbnum,
-                file_target(dependency_dbnum, &db_type, &file, session)?,
+                file_target(dependency_dbnum, &selected.db_type, &selected.path, session)?,
             );
         }
         let project = self
@@ -1505,7 +1593,7 @@ impl E3dModelService {
     fn hydrate_published_dependencies(
         &self,
         receipt: &RootReceipt,
-        dependency_sessions: &Arc<std::sync::Mutex<BTreeMap<u32, u32>>>,
+        dependency_sessions: &DependencySessions,
     ) -> anyhow::Result<()> {
         let Some(published) = receipt.model_target.as_ref() else {
             return Ok(());
@@ -1514,18 +1602,33 @@ impl E3dModelService {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         for dependency in &published.catalogue {
-            if sessions.contains_key(&dependency.dbnum) {
+            let key = (published.design.dbnum, dependency.dbnum);
+            if sessions.contains_key(&key) {
                 continue;
             }
-            let Some((_project, file)) = self.locator.file_of(dependency.dbnum) else {
+            let Some(selected) = self.dependency_file(published.design.dbnum, dependency.dbnum)
+            else {
                 continue;
             };
-            let mut view = DbView::open(&file)?;
+            let mut view = DbView::open(&selected.path)?;
             if let Some(session) = view.walk_sessions()?.first() {
-                sessions.insert(dependency.dbnum, session.sesno);
+                sessions.insert(key, session.sesno);
             }
         }
         Ok(())
+    }
+
+    fn dependency_file(&self, target_dbnum: u32, dependency_dbnum: u32) -> Option<ProjectDbFile> {
+        let preferred_project = self
+            .locator
+            .file_of(target_dbnum)
+            .map(|(project, _)| project);
+        select_dependency_file(
+            &self.locator,
+            &self.project_files,
+            preferred_project.as_deref(),
+            dependency_dbnum,
+        )
     }
 
     /// Open the MDB's DESI files as one `DbSet`, pinning `target_dbnum` at
@@ -1538,10 +1641,17 @@ impl E3dModelService {
         target_dbnum: u32,
         target_sesno: Option<u32>,
     ) -> anyhow::Result<Arc<DbSet>> {
+        let preferred_project = self
+            .locator
+            .file_of(target_dbnum)
+            .map(|(project, _)| project);
         let set = Arc::new(DbSet::with_attlib_file_and_resolver(
             self.schema.template_dir().join("attlib.dat"),
             Box::new(E3dDbResolver {
                 locator: self.locator.clone(),
+                project_files: self.project_files.clone(),
+                target_dbnum,
+                preferred_project,
                 template_dir: self.schema.template_dir().to_path_buf(),
                 sessions: self.dependency_sessions.clone(),
             }),
@@ -1573,7 +1683,8 @@ impl E3dModelService {
 /// used by both current and historical generation.  Current projection replaces
 /// the returned pins with watermark-pinned DESI pins, while historical generation
 /// keeps these paths and selects a session per request.
-pub(crate) fn current_mdb_sources() -> anyhow::Result<(Vec<DbPin>, InMemoryCataLocator)> {
+fn current_mdb_source_inventory()
+-> anyhow::Result<(Vec<DbPin>, InMemoryCataLocator, ProjectDbFiles)> {
     let option = aios_core::get_db_option();
     let project = option.project_name.clone();
     let mdb = option.mdb_name.clone();
@@ -1582,7 +1693,10 @@ pub(crate) fn current_mdb_sources() -> anyhow::Result<(Vec<DbPin>, InMemoryCataL
         .unwrap_or_else(|| {
             mdb_membership::resolve(option, &project, &mdb).map(std::sync::Arc::new)
         })?;
+    let watch_dirs = crate::data_interface::project_paths::plan_watch_dirs(option);
+    crate::data_interface::project_paths::record_watch_dir_owners(&watch_dirs);
     let mut files = HashMap::new();
+    let mut project_files = HashMap::new();
     let mut pins = Vec::new();
     for item in membership.databases() {
         let Some(path) = item.path.clone() else {
@@ -1592,6 +1706,34 @@ pub(crate) fn current_mdb_sources() -> anyhow::Result<(Vec<DbPin>, InMemoryCataL
             continue;
         };
         let source_project = item.project.clone().unwrap_or_else(|| project.clone());
+        project_files
+            .entry(project_db_key(&source_project, item.dbnum))
+            .or_insert_with(|| ProjectDbFile {
+                db_type: db_type.to_string(),
+                project: source_project.clone(),
+                path: path.clone(),
+            });
+        for shadowed in &item.shadowed {
+            let Ok(header) = crate::data_interface::db_file_header::DbFileHeader::read(shadowed)
+            else {
+                continue;
+            };
+            if header.dbnum != item.dbnum as i32 || !header.db_type.eq_ignore_ascii_case(db_type) {
+                continue;
+            }
+            let Some(shadowed_project) =
+                crate::data_interface::project_paths::project_of_path(shadowed)
+            else {
+                continue;
+            };
+            project_files
+                .entry(project_db_key(&shadowed_project, item.dbnum))
+                .or_insert_with(|| ProjectDbFile {
+                    db_type: header.db_type,
+                    project: shadowed_project,
+                    path: shadowed.clone(),
+                });
+        }
         files.insert(
             item.dbnum,
             (db_type.to_string(), source_project, path.clone()),
@@ -1603,7 +1745,16 @@ pub(crate) fn current_mdb_sources() -> anyhow::Result<(Vec<DbPin>, InMemoryCataL
             sesno: None,
         });
     }
-    Ok((pins, InMemoryCataLocator::from_parts(HashMap::new(), files)))
+    Ok((
+        pins,
+        InMemoryCataLocator::from_parts(HashMap::new(), files),
+        Arc::new(project_files),
+    ))
+}
+
+pub(crate) fn current_mdb_sources() -> anyhow::Result<(Vec<DbPin>, InMemoryCataLocator)> {
+    let (pins, locator, _) = current_mdb_source_inventory()?;
+    Ok((pins, locator))
 }
 
 fn styp_name(value: i64) -> Option<&'static str> {
@@ -1797,6 +1948,7 @@ impl E3dPersistReport {
         self.mesh_reused += other.mesh_reused;
         self.mesh_written += other.mesh_written;
         self.mesh_ids.extend(other.mesh_ids);
+        self.failed_roots.extend(other.failed_roots);
         self.unique_meshes = self.mesh_ids.len();
         self.source_sesno = self.source_sesno.or(other.source_sesno);
         self.visited_by_root.extend(other.visited_by_root);
@@ -2290,6 +2442,22 @@ mod tests {
     use crate::fast_model::model_memory_store::packed_refno;
     use std::collections::HashMap;
 
+    #[test]
+    fn persist_report_merge_keeps_failed_root_identity() {
+        let root = RefNo::new(23399, 13);
+        let mut total = E3dPersistReport::default();
+        total.merge_counts(E3dPersistReport {
+            failed: 3,
+            failed_roots: vec![(root, "three geometry incidents".into())],
+            ..Default::default()
+        });
+        assert_eq!(total.failed, 3);
+        assert_eq!(
+            total.failed_roots,
+            vec![(root, "three geometry incidents".into())]
+        );
+    }
+
     #[tokio::test]
     #[ignore = "read-only AMS catalogue source diagnosis"]
     async fn ams_catalogue_7000_reference_inventory() -> anyhow::Result<()> {
@@ -2342,6 +2510,30 @@ mod tests {
                     element.element_type()
                 );
             }
+        }
+        let target = service.build_set(7015, None)?;
+        for id in [11893, 19297, 32948, 11899, 19303, 47230] {
+            anyhow::ensure!(
+                target.element(RefNo::new(15192, id)).element_type().is_ok(),
+                "ACP DESI 7015 must resolve catalogue ref 15192/{id} through ACP CATA 7000"
+            );
+        }
+        let pin = service.pin(7015)?;
+        let source_sesno = service.source_session(pin)?;
+        let index = scan_index(&pin.file, Some(source_sesno))?;
+        let mut cache = CatalogueMeshCache::default();
+        for root in [
+            RefNo::new(23399, 13),
+            RefNo::new(23399, 22),
+            RefNo::new(23399, 24),
+            RefNo::new(23399, 33),
+        ] {
+            let snapshot = generate_snapshot_from_set(&target, &index, root, &mut cache)?;
+            anyhow::ensure!(
+                snapshot.report.failed.is_empty(),
+                "ACP root {root} still has geometry incidents: {:?}",
+                snapshot.report.failed
+            );
         }
         Ok(())
     }
@@ -3006,7 +3198,7 @@ mod tests {
             .split_once("pub async fn generate_roots(")
             .expect("from_current and dbnum_for_roots end before generate_roots")
             .0;
-        assert!(body.contains("current_mdb_sources()"));
+        assert!(body.contains("current_mdb_source_inventory()"));
         assert!(body.contains("model_source::dbnum_of_root("));
         assert!(!body.contains("dbnum_watermark"), "{body}");
         assert!(!body.contains("pins_from_watermark"), "{body}");
@@ -3347,19 +3539,40 @@ mod tests {
     }
 
     #[test]
-    fn catalogue_resolver_uses_the_project_selected_same_dbnum_file() {
-        let selected = PathBuf::from(r"D:\selected\ZDJ\zdj7600_0001");
+    fn catalogue_resolver_prefers_the_target_design_projects_same_dbnum_file() {
+        let global = PathBuf::from(r"D:\selected\AMS\ams7000_0001");
+        let contextual = PathBuf::from(r"D:\selected\ACP\acp7000_0001");
         let locator = InMemoryCataLocator::from_parts(
             HashMap::from([(23984, 7600)]),
-            HashMap::from([(7600, ("CATA".into(), "ZDJ".into(), selected.clone()))]),
+            HashMap::from([
+                (7000, ("CATA".into(), "AMS".into(), global)),
+                (
+                    7015,
+                    (
+                        "DESI".into(),
+                        "ACP".into(),
+                        PathBuf::from(r"D:\selected\ACP\acp7015_0001"),
+                    ),
+                ),
+            ]),
         );
         let resolver = E3dDbResolver {
             locator,
+            project_files: Arc::new(HashMap::from([(
+                project_db_key("ACP", 7000),
+                ProjectDbFile {
+                    db_type: "CATA".into(),
+                    project: "ACP".into(),
+                    path: contextual.clone(),
+                },
+            )])),
+            target_dbnum: 7015,
+            preferred_project: Some("ACP".into()),
             template_dir: PathBuf::from(r"D:\templates"),
-            sessions: Arc::new(std::sync::Mutex::new(BTreeMap::from([(7600, 42)]))),
+            sessions: Arc::new(std::sync::Mutex::new(BTreeMap::from([((7015, 7000), 42)]))),
         };
-        let pin = resolver.resolve(7600).expect("selected CATA pin");
-        assert_eq!(pin.file, selected);
+        let pin = resolver.resolve(7000).expect("contextual CATA pin");
+        assert_eq!(pin.file, contextual);
         assert_eq!(pin.sesno, Some(42));
         assert_eq!(pin.db_type.as_deref(), Some("CATA"));
         assert!(pin.template.ends_with("catvir.dat"));

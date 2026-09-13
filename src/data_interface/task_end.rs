@@ -24,8 +24,8 @@ use surrealdb::{Surreal, engine::any::Any};
 
 use super::dbnum_state::{DbnumState, INFO_TABLE, WATERMARK_TABLE, escape_surql_str};
 
-/// 本任务模型阶段的结果。`all_roots_ok` 里的「成功」含该根的房间归属：某根房间算不出来
-/// 或写不进去 = 该根本轮未完成（ADR-073 D2），模型水位不越过。
+/// 本任务模型阶段的结果。房间归属开关开启时，`all_roots_ok` 里的「成功」含该根的房间
+/// 归属；开关关闭时模型根不计算房间，几何持久化成功即可参与模型水位收尾。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct TaskModelOutcome {
     /// 这一版要生成的根全部落库成功；失败时保持模型水位。
@@ -80,7 +80,7 @@ pub(crate) struct TaskEnd {
 }
 
 impl TaskEnd {
-    /// 模型阶段完成（含各根的房间归属，ADR-073 D2）。
+    /// 模型阶段完成；房间归属开启时含各根房间边，关闭时只承诺模型几何。
     fn model_stamps(&self) -> bool {
         self.model.as_ref().is_some_and(|model| model.all_roots_ok)
     }
@@ -188,10 +188,7 @@ pub(crate) fn render_task_end_tail(end: &TaskEnd) -> String {
         .map(|snapshot| render_info_snapshot(end.dbnum, snapshot))
         .unwrap_or_default();
     let finished = if end.closes_task {
-        format!(
-            "{}\n",
-            super::write_state::render_mark_finished(end.dbnum)
-        )
+        format!("{}\n", super::write_state::render_mark_finished(end.dbnum))
     } else {
         String::new()
     };
@@ -374,7 +371,9 @@ mod tests {
             "{sql}"
         );
         assert_eq!(sql.matches("BEGIN TRANSACTION;").count(), 1, "{sql}");
-        let marker = sql.find("dbnum_write_state:8000").expect("marker statement");
+        let marker = sql
+            .find("dbnum_write_state:8000")
+            .expect("marker statement");
         let watermark = sql
             .find("UPDATE dbnum_watermark:8000")
             .expect("watermark statement");

@@ -18,14 +18,16 @@
 //!
 //! 「模型落后」那一档（ADR-071 D8）：库里的模型行是上一版的，而进程内投影是启动时从库读回 +
 //! 本进程刚生成的**超集**——任务落库失败留痕、下一窗未触到的根，内存里都有；读内存不会比读库少。
-//! 房间归属随根算、随模型块同事务落边（ADR-073 D1），`model_sesno` 的承诺已含房间边，
-//! 「房间落后」不再是独立的一档。两枚水位同一次读（镜像那一格），分两次点查会在收尾那一笔的
-//! 前后各读到一半。
+//! 房间开关开启时归属随根算、随模型块同事务落边（ADR-073 D1）；关闭时模型路由仍只按
+//! `model_sesno` 选库，因为该水位此时只承诺几何，房间降级由 `/health.room_membership`
+//! 单独表达。两枚水位同一次读（镜像那一格），分两次点查会在收尾那一笔的前后各读到一半。
 //!
 //! - `Database`：rocksdb 为准，一个字不改（R4）。
-//! - `Memory`：按需请求直接从文件生成进 `ModelMemoryStore`、由 API 供数；**不落 rocksdb**——同一个库的
-//!   库行只有它的 dbnum 任务一个写者（ADR-071 D1），按需生成不去当第二个。这一档由 [`scope_memory_only`]
-//!   的任务级作用域表达，生成链路上的门各自用 [`memory_only_for`] 判一次。
+//! - `Memory`：按需请求直接从文件生成进 `ModelMemoryStore`、由 API 供数；不写 durable rocksdb。
+//!   ingest 的临时 memory 路由是 `ProjectionOnly`；read-through 的 spawned/embedded kv-mem
+//!   则是正式 `ProcessStore{durable:false}`，仍发布模型行、房间边与根回执。
+//!   [`scope_memory_only`] 只表达“不写 durable 权威库”，生成链路再用 [`publication_policy`]
+//!   判断是否写当前 process store。
 //!
 //! 「在飞」的来源是任务注册表（ADR-071 S5，d-300）：初始化发布 run 已退役，不再有「run 收口」这一刻；
 //! 翻面（Memory → Database）就是该库的任务跑完。相反方向只在回退重建清库时发生。两处都发
@@ -123,6 +125,51 @@ impl ModelReadRoute {
     }
 }
 
+/// 模型从哪里读与本轮产物向哪里发布是两件事。
+///
+/// `ProjectionOnly` 只保护 ingest 初始化尚未收口的 durable 库：这时数据库有唯一写者，
+/// 按需生成只能留在进程内投影。read-through 的 process store 本身就是本进程正式的
+/// 非持久发布目标，因此即使读取源是 [`ModelReadSource::Memory`] 也必须走 `ProcessStore`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelPublicationPolicy {
+    ProjectionOnly,
+    ProcessStore { durable: bool },
+}
+
+impl ModelPublicationPolicy {
+    pub fn uses_process_store(self) -> bool {
+        matches!(self, Self::ProcessStore { .. })
+    }
+
+    pub fn durable(self) -> bool {
+        matches!(self, Self::ProcessStore { durable: true })
+    }
+}
+
+/// 发布策略的纯函数形态，测试把四种读源/介质组合逐格钉住。
+pub fn publication_policy_for(
+    memory_only: bool,
+    data_face: DataFace,
+    store_mode: crate::options::StoreMode,
+) -> ModelPublicationPolicy {
+    if memory_only && !(data_face.is_read_through() && !store_mode.is_durable()) {
+        ModelPublicationPolicy::ProjectionOnly
+    } else {
+        ModelPublicationPolicy::ProcessStore {
+            durable: store_mode.is_durable(),
+        }
+    }
+}
+
+/// 当前任务的发布策略。`memory_only` 来自任务级路由作用域，不再被解释成“永不写数据库”。
+pub fn publication_policy(memory_only: bool) -> ModelPublicationPolicy {
+    publication_policy_for(
+        memory_only,
+        crate::options::data_face(),
+        crate::options::store_mode(),
+    )
+}
+
 /// **唯一的判据**（纯函数）。四个输入分别来自：数据面形态（`options::data_face()`）、
 /// 该库的 `dbnum_watermark.applied_sesno` / `model_sesno`（镜像，同一次读）、
 /// 该库是否有数据批次任务在跑。
@@ -175,8 +222,20 @@ pub fn route_with_optional_model_watermark(
             model_sesno,
             initialization_publishing,
         ),
-        None if data_face.is_read_through() => route(dbnum, data_face, applied_sesno, 0, initialization_publishing),
-        None if applied_sesno <= 0 => route(dbnum, data_face, applied_sesno, 0, initialization_publishing),
+        None if data_face.is_read_through() => route(
+            dbnum,
+            data_face,
+            applied_sesno,
+            0,
+            initialization_publishing,
+        ),
+        None if applied_sesno <= 0 => route(
+            dbnum,
+            data_face,
+            applied_sesno,
+            0,
+            initialization_publishing,
+        ),
         None if initialization_publishing => route(dbnum, data_face, applied_sesno, 0, true),
         None => ModelReadRoute {
             dbnum,
@@ -309,9 +368,18 @@ mod tests {
     fn there_is_no_room_reason_anymore() {
         let source = include_str!("model_read_route.rs");
         let production = source.split_once("#[cfg(test)]").expect("test boundary").0;
-        assert!(!production.contains(concat!("room_", "lagging")), "{production}");
-        assert!(!production.contains(concat!("Room", "Lagging")), "{production}");
-        assert!(!production.contains(concat!("room_", "sesno")), "{production}");
+        assert!(
+            !production.contains(concat!("room_", "lagging")),
+            "{production}"
+        );
+        assert!(
+            !production.contains(concat!("Room", "Lagging")),
+            "{production}"
+        );
+        assert!(
+            !production.contains(concat!("room_", "sesno")),
+            "{production}"
+        );
     }
 
     /// 读透形态下水位恒 0、也没有任务在飞，但理由必须点名「读透」而不是「水位未建立」：
@@ -343,6 +411,29 @@ mod tests {
         assert_eq!(
             ModelReadSource::Database.records_source_label(),
             "model-database"
+        );
+    }
+
+    #[test]
+    fn publication_policy_separates_read_source_from_process_store_target() {
+        use crate::options::StoreMode;
+
+        assert_eq!(
+            publication_policy_for(false, DataFace::Ingest, StoreMode::External),
+            ModelPublicationPolicy::ProcessStore { durable: true }
+        );
+        assert_eq!(
+            publication_policy_for(true, DataFace::Ingest, StoreMode::External),
+            ModelPublicationPolicy::ProjectionOnly,
+            "an ingest fallback must not compete with the durable database writer"
+        );
+        assert_eq!(
+            publication_policy_for(true, DataFace::ReadThrough, StoreMode::SpawnedMem),
+            ModelPublicationPolicy::ProcessStore { durable: false }
+        );
+        assert_eq!(
+            publication_policy_for(true, DataFace::ReadThrough, StoreMode::EmbeddedMem),
+            ModelPublicationPolicy::ProcessStore { durable: false }
         );
     }
 

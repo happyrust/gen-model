@@ -103,7 +103,7 @@ _Avoid_: 水位、sesno 水位（泛指时）
 _Avoid_: 生成水位、把 applied_sesno 当生成时点、拿它当库级追平判据
 
 **模型水位 (Model Watermark)**：
-某 `dbnum` 上与应用水位并排、写在同一行（`dbnum_watermark:{dbnum}.model_sesno`）的第二枚水位：模型已经追平到哪一版**数据窗口**（ADR-060）。它是**被写下的承诺**而非查询时算出的派生量——只在本任务的全部根生成并序列化成功、该库无未安定 `gen_root` 行、且 `T <= applied_sesno` 时，由该 dbnum 任务收尾的那一笔事务写下（ADR-071 D4；此前是模型排空的收口在根发布 CAS 之后写），单调推进。永不超过应用水位；按需 `ensure`、启动退化窗口生成的根都**不推进**它。它的承诺**包含房间归属**：某根的房间算不出来或写不进去 = 该根本轮未完成、非安定，`model_sesno` 不越过它，库上没有第三枚房间水位（ADR-073 D2）。判「这个库现在是不是最新一致」用等值：`applied_sesno > 0 且 model_sesno == applied_sesno 且无未安定根`。落后是常态不是告警（ADR-056 D1/N4）。生成根按四格分类且互不重叠：**已追平 / 还在赶（拦水位）/ 已放弃（死信或 `http_422`，不拦水位但必须并排陈述）/ 没生成过（懒生成，不拦水位）**——已放弃根若算进「还在赶」，一个坏根就让整库的灯永红且看不出被谁卡。**它是仪表不是闸门**：没有任何代码路径可以等它、轮询它、或以它为条件放行另一条链，两条链的异步性一个字不改（ADR-060 M7）。
+某 `dbnum` 上与应用水位并排、写在同一行（`dbnum_watermark:{dbnum}.model_sesno`）的第二枚水位：模型已经追平到哪一版**数据窗口**（ADR-060）。它是**被写下的承诺**而非查询时算出的派生量——只在本任务的全部根生成并序列化成功、该库无未安定 `gen_root` 行、且 `T <= applied_sesno` 时，由该 dbnum 任务收尾的那一笔事务写下（ADR-071 D4；此前是模型排空的收口在根发布 CAS 之后写），单调推进。永不超过应用水位；按需 `ensure`、启动退化窗口生成的根都**不推进**它。`room_membership=true` 时承诺包含房间归属，房间算不出会使该根失败；`room_membership=false` 时只承诺模型几何，根与水位照常推进，库上仍没有第三枚房间水位，主动降级由 `/health.room_membership` 单独表达。判「这个库现在是不是最新一致」用等值：`applied_sesno > 0 且 model_sesno == applied_sesno 且无未安定根`；该结论是否包含房间必须与 `room_membership` 并读。落后是常态不是告警（ADR-056 D1/N4）。生成根按四格分类且互不重叠：**已追平 / 还在赶（拦水位）/ 已放弃（死信或 `http_422`，不拦水位但必须并排陈述）/ 没生成过（懒生成，不拦水位）**——已放弃根若算进「还在赶」，一个坏根就让整库的灯永红且看不出被谁卡。**它是仪表不是闸门**：没有任何代码路径可以等它、轮询它、或以它为条件放行另一条链，两条链的异步性一个字不改（ADR-060 M7）。
 _Avoid_: 模型凭证下限（那是它的校验者 `settled_floor`）、生成水位、模型进度、把它当「模型有多新」的答案、拿它当同步点
 
 **数据支撑 (Data Backing)**：
@@ -131,7 +131,7 @@ _Avoid_: 幽灵水位（那是数据面的）、模型缺失、按幽灵水位�
 _Avoid_: 模型水位播种（只说了接管那一格）、把接管当成盖章 / 完成凭据、把数据在模型无的库也接管、把显式 0 当成没写过
 
 **库一致性判决 (Dbnum Consistency Verdict)**：
-对一个 `dbnum` 回答「此刻数据与模型是否一致」的**单点结论**，三态：**一致**（应用水位已建立、模型水位与之相等、且没有「还在赶」的根，ADR-060 D4）／**落后**（前述任一不成立，附四格计数）／**不判**（没有可判等的水位对：读透形态下数据面不摄入、应用水位恒 0；或摄入形态下数据水位尚未建立）。「不判」是中性陈述，不是落后、不是告警。结论由同一行上的两枚水位与该库生成根的实时四格（已追平 / 还在赶 / 已放弃 / 没生成过）合成；「已放弃」与「没生成过」不否决结论，但必须与它**并排陈述**（ADR-060 D5）。它是读者（面板、健康页、批次回执、启动日志）唯一该消费的一致性口径——任何读者都不得自己拿水位列、凭证下限或队列计数重新拼一个。房间归属**在**它的承诺范围内：某根的房间算不出 = 该根非安定，判决落在「落后」；库上没有单独的房间水位可比（ADR-073 D2）。
+对一个 `dbnum` 回答「此刻数据与模型是否一致」的**单点结论**，三态：**一致**（应用水位已建立、模型水位与之相等、且没有「还在赶」的根，ADR-060 D4）／**落后**（前述任一不成立，附四格计数）／**不判**（没有可判等的水位对：读透形态下数据面不摄入、应用水位恒 0；或摄入形态下数据水位尚未建立）。「不判」是中性陈述，不是落后、不是告警。结论由同一行上的两枚水位与该库生成根的实时四格（已追平 / 还在赶 / 已放弃 / 没生成过）合成；「已放弃」与「没生成过」不否决结论，但必须与它**并排陈述**（ADR-060 D5）。它是读者（面板、健康页、批次回执、启动日志）唯一该消费的一致性口径——任何读者都不得自己拿水位列、凭证下限或队列计数重新拼一个。房间归属只在 `room_membership=true` 时属于这项承诺；关闭时“一致”仅指数据与模型几何，读者必须同时展示 `room_membership=false`，不得把它解释成房间也一致。
 _Avoid_: 模型追平（只说了一半）、`model_caught_up`（行内那一半的名字）、把 `settled_floor` 露出来当判决、面板自己算一致、把「不判」画成落后
 
 **重建批次 (Reinit Batch)**：
@@ -215,11 +215,11 @@ _Avoid_: 模型元数据、gen_root 表（当指概念时）、模型缓存
 ## 模型生成执行（Model Generation Execution）
 
 **dbnum 任务 (Dbnum Task)**：
-一个 `dbnum` 的一次增量就是一个任务：数据窗口、模型重算（每根算完几何紧接着算它的房间归属，ADR-073 D1）、凭证前移与模型水位收尾在同一个任务里一气做完（ADR-065 D1）；任务末没有整库房间段。「欠什么」不另记账，只由应用水位与模型水位两枚水位回答（ADR-073 D2）。稳态任务跨库并行、同库串行；初始化意图的任务按入队先后串行。它同时是**隔离单元**：同一 `dbnum` 的库行在任一时刻只有它的任务一个写者，所以写库不需要 CAS、ACK 或收口（ADR-071 D1）。
+一个 `dbnum` 的一次增量就是一个任务：数据窗口、模型重算（`room_membership=true` 时每根算完几何紧接着算房间归属，关闭时跳过房间，ADR-073 D1）、凭证前移与模型水位收尾在同一个任务里一气做完（ADR-065 D1）；任务末没有整库房间段。模型欠账由应用水位与模型水位回答，关闭期间的房间欠账不进水位，靠开关状态与显式模型重建处置。稳态任务跨库并行、同库串行；初始化意图的任务按入队先后串行。它同时是**隔离单元**：同一 `dbnum` 的库行在任一时刻只有它的任务一个写者，所以写库不需要 CAS、ACK 或收口（ADR-071 D1）。
 _Avoid_: 数据批次（当指含模型与房间的整个执行体时）、模型 drain、pending 任务、模型积压
 
 **任务内序列化 (In-Task Serialization)**：
-dbnum 任务在结束前把本任务在内存里算出的数据行、模型行、房间边与两枚水位**同步**写进 SurrealDB，写库期间由写入标记标出；库里的这份是内存结果的落盘副本，不是计算输入、不是调度中枢，任务内不回读库，任务与库之间没有队列（ADR-071 / ADR-072）。模型行按事务上限跨根合块写，每根的 `room_relate` / `room_panel_relate` 变更与它的模型行同块同事务（合块可跨根、一根不拆，ADR-073 D1 / W2）；数据水位在数据尾事务写，模型水位在任务收尾的一笔事务写，写入标记的 `finished` 与它同一笔（ADR-073 D2）。
+dbnum 任务在结束前把本任务在内存里算出的数据行、模型行、可选的房间边与两枚水位**同步**写进 SurrealDB，写库期间由写入标记标出；库里的这份是内存结果的落盘副本，不是计算输入、不是调度中枢，任务内不回读库，任务与库之间没有队列（ADR-071 / ADR-072）。`room_membership=true` 时每根的 `room_relate` / `room_panel_relate` 变更与模型行同块同事务；关闭时该段为空，模型行仍按同一路径提交（合块可跨根、一根不拆）。数据水位在数据尾事务写，模型水位在任务收尾的一笔事务写，写入标记的 `finished` 与它同一笔。
 _Avoid_: 异步备份、backup lane、发布队列、发布 run、ACK、收口、per-root CAS、发布阶段、文件轮次、房间水位、任务末房间段
 
 **写入标记 (Write Marker)**：
@@ -239,7 +239,7 @@ _Avoid_: 对账读（泛指时）、回读确认、探针
 _Avoid_: 本地账本、缓存（泛指时）、第二份真值、水位探针
 
 **ModelOnly 任务 (ModelOnly Task)**：
-只有模型半边、没有数据半边的 dbnum 任务：起点是该库的安定凭证下限、终点是文件最新会话，排进同一条数据批次队列、由同一个 worker 执行（ADR-065 D5）；模型半边含每根的房间归属（ADR-073 D1）。启动退化窗口排出的算初始化意图、阻就绪；`model/rebuild` 与读透文件事件排出的算稳态、不阻就绪。同族的 **`RoomOnly`** 是生成路径上的**内部**意图：同一条逐根路径、跳过几何生成，用已有几何对该库全部根重算房间归属并重写两张边；它只在面板（房间定义）自身变化时由本窗变更集触发（d-819，见「逐根房间归属」），不是对外契约、不引入房间水位，失败语义同逐根。
+只有模型半边、没有数据半边的 dbnum 任务：起点是该库的安定凭证下限、终点是文件最新会话，排进同一条数据批次队列、由同一个 worker 执行（ADR-065 D5）；`room_membership=true` 时模型半边含每根房间归属，关闭时只生成模型。启动退化窗口排出的算初始化意图、阻就绪；`model/rebuild` 与读透文件事件排出的算稳态、不阻就绪。重新打开房间开关不会制造模型水位缺口，历史房间欠账需显式 `model/rebuild`。同族的 **`RoomOnly`** 是生成路径上的**内部**意图：同一条逐根路径、跳过几何生成，用已有几何对该库全部根重算房间归属并重写两张边；它只在面板（房间定义）自身变化时由本窗变更集触发（d-819，见「逐根房间归属」），不是对外契约、不引入房间水位，失败语义同逐根。
 _Avoid_: 模型恢复批次、退化窗口任务、全库过期入队、model drain 页、房间任务、`rooms/rebuild` 对外口
 
 **联动更新 (Cascade Update)**：
@@ -329,7 +329,7 @@ _Avoid_: 软删（当指「只翻 pe.deleted、别的行不动」的旧写法时
 _Avoid_: 凭证刷新、水位前移、跳过生成、与模型水位混用
 
 **窗口阻断 (Window Block)**：
-稳态增量窗口**数据侧**确定性失败的终态（收集器报错、写回被持久层确定性拒绝）：该 `dbnum` 的水位停止推进、告警常驻，直到源数据或持久层修复后按同一区间重放。模型生成失败（含某根的房间归属算不出，ADR-073 D2）**不阻断窗口**（ADR-056 D1）：根级失败只留痕、不排队（ADR-065 D4），数据水位照常推进。
+稳态增量窗口**数据侧**确定性失败的终态（收集器报错、写回被持久层确定性拒绝）：该 `dbnum` 的水位停止推进、告警常驻，直到源数据或持久层修复后按同一区间重放。模型生成失败**不阻断数据窗口**（ADR-056 D1）：根级失败只留痕、不排队（ADR-065 D4），数据水位照常推进。房间归属开启时算不出会让该根成为模型失败；房间开关关闭时不运行计算，因此不产生这类失败。
 _Avoid_: 死信降级、跳过坏根、模型阻断
 
 **pe_owner 边 (Owner Edge)**：
@@ -449,6 +449,18 @@ _Avoid_: 房间关系、房间隶属
 房间归属的现行算法形态（ADR-073 D1 / D2）：一个生成根的完成 = 生成最终几何 → 用当前候选面板做点包含筛选、算出该根下每个构件属于哪些面板 → 模型行与 `room_relate` / `room_panel_relate` 边在同一笔事务写入。房间不是独立阶段：没有房间目标、房间轮、发布 / 结果目录、常驻模型换代、结构触发账本与房间水位；任务末没有整库房间段。某根的归属算不出来或写不进去 = 该根本轮未完成（非安定、凭证不前移、`model_sesno` 不越过），不排队、不自动重试。面板自身的变化（FRMW/SBFR 改名命中关键字、PANE 换属主、CWALL/CFLOOR 搬迁）不改几何、逐根路径点不着：按 d-819 由本窗变更集触发，给该库排一条内部 `RoomOnly`（见「ModelOnly 任务」），用已有几何对该库全部根重算归属并重写两张边，不重生成几何。硬验收沿用 ADR-010 §9：一组增量收敛后的两张边与同一份数据从零初始化的结果逐边相等。
 _Avoid_: 房间增量（流程含义，已退役）、房间任务、房间阶段、房间收尾、房间刷新、房间同步
 
+**模型发布策略 (Model Publication Policy)**：
+与“模型从哪里读”正交的写目标判决。`ProjectionOnly` 只用于 ingest 库尚未就绪时的临时内存投影，避免与 durable dbnum 单写者竞争；read-through 的 spawned/embedded kv-mem 虽然读取源也是 memory，却是本进程正式的 `ProcessStore{durable:false}`，模型行、可选房间边与数据库根回执仍逐根同事务写入，只是不跨重启保存。不得再把 `scope_memory_only` 解释成“不写任何数据库”。
+_Avoid_: 模型读路由（那只回答读取源）、把 kv-mem process store 叫持久库、memory-only 等于 projection-only
+
+**完整根发布确认 (Root Publication ACK)**：
+当前进程内对“候选几何已经完整发布”的确认：源会话、几何条数、房间开关、resident generation 与介质必须匹配。`RootReceipt` 只证明几何候选投影存在；模型行/房间边/process-store 回执事务成功后才写 ACK。几何重生成、删除、源换代或 resident 换代先使旧 ACK 失效。ACK 不落控制面、不推进水位、进程退出即丢，因此不是第三枚房间水位。
+_Avoid_: 根回执（候选几何）、房间水位、durable ACK、发布队列
+
+**kv-mem 房间启动屏障 (Kv-mem Room Bootstrap Barrier)**：
+`room_membership=true` 时 spawned/embedded kv-mem 每次冷启动从空结果库开始，先冻结 resident generation，再按 dbnum 顺序覆盖 MDB 全部可读 DESI 的模型根与逐根房间发布，全部成功后才置 `model_ready` / `features.room.available`。它不受 `watch_dbnums`、`startup_autorun` 限制；失败保留 health 与诊断服务，但模型完整产出入口不放行。`room_membership=false` 保持快速路径。
+_Avoid_: 房间阶段、房间队列、启动预热（只说 resident）、把 watch 范围当 MDB 完整性范围
+
 **面板 (Panel / PANE)**：
 房间的几何载体：`FRMW/SBFR 房间节点 → CWALL/CFLOOR → PANE` 层级中带盒状 mesh 的 PANE 元素。归属判定以面板 mesh 为容器做点包含检查；房间节点自身不参与几何判定。
 _Avoid_: 板、墙板（泛指时）
@@ -561,7 +573,7 @@ _Avoid_: 初始化锁、队列锁（泛指时）。
 
 # 本地发布包 (Local Release Package)
 
-`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。程序档只含程序（现有 `ams-local-0.1.19`）；`-full` 档再把运行所需依赖资源装进包根 `workspace\`（一体化，`Start-AMS.ps1` 默认 `-Workspace` 指向包内）。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
+`ams-local-<版本>` 一档：把某次已发布的后端 `aios-database.exe` 与 plant-ui Web 静态资源打成解压即跑的压缩包。runtime 档默认 `store_mode=embedded-mem`：kv-mem 在后端进程内，无 SurrealDB 子进程与数据库端口，浏览器读面统一走同源服务 API；包根仍保留本仓 fork 的 `bin\surreal.exe`，需要外部 SQL / 探针时可显式切回 `spawned-mem`。房间兼容页仍是直连库的保留功能，embedded 下必须明确报“不可直连”，不得退回配置里的旧 TCP 端口。`-full` / 带 workspace 档把依赖资源装进包根 `workspace\`，默认仍是 `spawned-mem`。两档首次打开都由向导配置 E3D 路径；需要持久化时显式改 `spawned-rocksdb` / `external`。版本号以两仓 `Cargo.toml` 为准，同名 zip 拒绝覆盖（`-Force` 才覆盖）。
 
 _Avoid_: 安装包、部署包（泛指时不指这一档）、发行版。
 
@@ -573,9 +585,21 @@ _Avoid_: 数据包、库包、离线数据（这些会误读成含库数据）�
 
 # 冒烟门 (Smoke Gate)
 
-本地发布组包后、压 zip 前的一道自动校验，**三腿**（ADR-069 D8 + ADR-070 D6）：A 腿以出厂配置起包内服务，`/health` 报 `mode:"setup"` 且 `/setup.html` 含向导标记才算过（考「新机器解压第一步」）；B 腿以本机真配置全启动，`health` 200 + 首页含 plant-ui 或向导页才算过（默认 `spawned-mem`，自带内存库、不依赖外部 8010）；C 腿以本机配置副本改 `spawned-rocksdb`@18010 全启动，`/health` 报 `medium:"spawned-rocksdb"` + `durable:true` 且 `workspace\.surreal\` 目录真落盘才算过（考「自带持久库」主路，绝不碰真 8010）。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
+本地发布组包后、压 zip 前的一道自动校验。runtime 档两腿：A 腿以出厂配置进入设置模式；B 腿以本机真配置和 `embedded-mem` 全启动，要求 `health` 200、首页含 plant-ui、`/health.sul_db.medium="embedded-mem"` 且后端没有 SurrealDB 子进程。带 workspace 档三腿：A 同前；B 以 `spawned-mem` 全启动；C 改 `spawned-rocksdb`@18010，要求 `medium:"spawned-rocksdb"`、`durable:true` 且 `workspace\.surreal\` 真落盘。端口被占或起不来则跳过 / 失败并在 `release.json.smoke` 与产物旁标「未冒烟」，不静默放行。
 
 _Avoid_: 冒烟测试（泛指）、健康检查（那是运行期 `/health`，不是发布门）、验收（那是 Live E2E Testing）。
+
+# HTTP 监听地址 (HTTP Bind Address)
+
+`DbOption.toml` 的 `http_api_addr`：服务实际绑定的 socket 地址。`0.0.0.0:<端口>` 表示全部 IPv4 接口；它不应该被当作浏览器链接展示。
+
+_Avoid_: 对外地址、分享地址、把 `0.0.0.0` 当成可导航主机名
+
+# HTTP 对外展示地址 (HTTP Public Address)
+
+`DbOption.toml` 的 `http_public_addr`：日志、自动打开与分享链接使用的可导航地址，不参与 socket 绑定。留空时从监听地址派生；首跑向导与重启轮询始终使用回环地址，不消费本键。
+
+_Avoid_: 监听地址、绑定地址、反向代理监听
 
 # 配置向导 (Setup Wizard)
 
@@ -585,7 +609,7 @@ _Avoid_: 安装向导（没有安装动作）、配置中心 / 配置页（真�
 
 # 设置模式 (Setup Mode)
 
-启动臂的一档：**配置无效**（`project_path` 缺 / 不存在，或需要端点的档位——`external` / `spawned-rocksdb` / `spawned-mem`——`v_ip` 空 / `v_port=0` 哨兵；ADR-070 把后两档并进来：spawn 档空地址是必坏形状，bind 端口 0）时，进程不连库、不扫描、不起 watcher / 队列，只绑 HTTP 供配置向导与 `/health`（`mode:"setup"`）。判据是配置文件自身的形状，**不做网络探测**——库地址填了但连不上照旧走正常启动失败，不盖真故障。配置修好经重启口交接后，新进程自然走正常启动。
+启动臂的一档：**配置无效**（`project_path` 缺 / 不存在，或需要端点的档位——`external` / `spawned-rocksdb` / `spawned-mem`——`v_ip` 空 / `v_port=0`）时，进程不连库、不扫描、不起 watcher / 队列，只绑 HTTP 供配置向导与 `/health`（`mode:"setup"`）。当前出厂模板靠空 `project_path` 进入此模式；kv-mem 地址已预填为 `127.0.0.1:8009`。判据是配置文件自身的形状，**不做网络探测**——库地址填了但连不上照旧走正常启动失败，不盖真故障。配置修好经重启口交接后，新进程自然走正常启动。
 
 _Avoid_: 安全模式 / 降级模式（正常启动链的失败语义没改）、维护模式（没有这一档）。
 
@@ -603,6 +627,6 @@ _Avoid_: 内嵌库（有真端口，别的进程连得上）、外置库 / exter
 
 # 引导子集 (Guided Subset)
 
-配置向导管的那部分 `DbOption.toml` 键：`project_path` / `included_projects` / `project_name` / `mdb_name` / `module` / `project_code` / `surreal_ns` / `store_mode` / `v_ip` / `v_port` / `http_api_addr` / `gen_model` / `gen_mesh` / `watch_dbnums` / `manual_db_nums`。向导的职责是「把非改不可的引导完」，不是替代 toml——子集之外的键留给手改（`PUT /api/v1/setup/config` 也只认这个子集，`deny_unknown_fields`）。
+配置向导管的那部分 `DbOption.toml` 键：`project_path` / `included_projects` / `project_name` / `mdb_name` / `module` / `project_code` / `surreal_ns` / `store_mode` / `v_ip` / `v_port` / `http_api_addr` / `http_public_addr` / `gen_model` / `gen_mesh` / `watch_dbnums` / `manual_db_nums`。向导的职责是「把非改不可的引导完」，不是替代 toml——子集之外的键留给手改（`PUT /api/v1/setup/config` 也只认这个子集，`deny_unknown_fields`）。
 
 _Avoid_: 全量配置编辑器、配置模板（那是出厂模板，另一个东西）。

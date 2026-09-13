@@ -1,10 +1,11 @@
 # ============================================================================
 # AMS 本地发布包 · 出厂配置模板（DbOption.factory.toml）
 #
-# 这份是「还没配置」的形态：project_path 留空、库地址留空（v_port 用哨兵值 "0"，
-# 它是数字字段，写空串会让配置整个读不动）。服务用这份配置启动会进「设置模式」——
+# 这份是「还没配置」的形态：project_path 留空，因此服务会进「设置模式」——
 # 只起 HTTP 供 http://127.0.0.1:9099/setup.html 配置向导，配好保存并重启后进入正常服务。
 # 不想用向导的，直接改本文件再重启也一样：真值永远是这份文件。
+# New-LocalRelease 对 runtime 档会把 store_mode 外科改成 embedded-mem；带 workspace
+# 的档位保留本模板的 spawned-mem。这里只维护两档共用的其余出厂键。
 # ============================================================================
 
 #同步文件配置（缺省形态，向导不管这几项）
@@ -22,7 +23,8 @@ sync_chunk_size = 100_0000
 
 #项目设置 —— 向导第①步填这里
 # 手动指定模板版本后跳过自动识别，优先于 AIOS_E3D_TEMPLATE_DIR。
-# 支持 e3d31 / e3d210；删除此项恢复原有环境目录 / 自动识别行为。
+# 支持 e3d31 / e3d210；删除此项后仍优先采用 AIOS_E3D_TEMPLATE_DIR，
+# 环境目录也未设置时使用产品默认 e3d210（不是从数据库二进制自动识别）。
 e3d_version = "e3d31"
 # E3D 项目根目录（装着各项目子目录的那一层），如 "D:/AVEVA/Projects/E3D3.1"
 project_path = ""
@@ -66,21 +68,21 @@ port = "3306"
 sql_threads_number = 50
 batch_insert_sql_cnt = 100
 
-#版本服务配置（SurrealDB）—— 向导第②步填这里
-v_ip = ""
+#版本服务配置（SurrealDB）—— 默认 kv-mem，向导第②步可改
+v_ip = "127.0.0.1"
 v_user = "root"
 v_password = "root"
-# "0" = 未设置（哨兵；这一格是数字，不能写空串）。连已有库填真实端口，如 "8010"。
-v_port = "0"
-# 缺省 external：连 v_ip:v_port 上已经在跑的 SurrealDB（必须本包 workspace\bin 的 fork 2.1.x）。
-# 新部署推荐改 "spawned-rocksdb"：服务自己用包内 surreal 在 v_ip:v_port 起一台落盘库，
-#   数据在 workspace\.surreal\<项目代号>，活得过重启（向导第②步第三档就是它）。
-# 试用/演示可改 "spawned-mem"：服务自带内存库，数据不落盘。
-store_mode = "external"
+# 自带 memory SurrealDB 的默认端口；这一格是数字，不能写空串。
+v_port = "8009"
+# 默认 spawned-mem（也可写别名 kv-mem）：服务自行拉起内存库，数据不落盘。
+# 需要数据跨重启保留可改 spawned-rocksdb；连接既有库则改 external。
+store_mode = "spawned-mem"
 
 #服务器启动配置 —— 向导第③步；0.0.0.0 = 局域网可访问（配置向导页仍只许本机打开）
 server_release_ip = "0.0.0.0:9099"
 http_api_addr = "0.0.0.0:9099"
+# 对外展示地址只生成日志/浏览器/分享链接，不参与 socket 绑定；留空从监听地址派生。
+http_public_addr = ""
 
 #消息队列（未使用，保留缺省）
 mqtt_host = "127.0.0.1"
@@ -115,10 +117,10 @@ puhua_database_password = "root"
 replace_mesh = true
 room_key_word = ["-RM"]
 
-# 增量三开关：缺省全开
+# 数据与模型增量缺省开启；房间归属计算默认关闭（不影响模型更新）。
 data_incremental = true
 model_incremental = true
-room_incremental = true
+room_membership = false
 
 # 文件身份冲突只记录并跳过，不阻断其它库初始化。
 block_file_identity_conflicts = false

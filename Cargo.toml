@@ -1,14 +1,16 @@
 [package]
 name = "aios-database"
-version = "0.1.21"
+version = "0.1.23"
 edition = "2024"
+description = "AVEVA E3D incremental parsing and geometry service"
+build = "build.rs"
 
 # Python 调试绑定（python/aios-py）与主 crate 同一个 workspace：
 # [patch] 段作用于全图（vendor 本地重定向对绑定同样生效），共享 Cargo.lock 与
 # target/（OCC 只编一次）。default-members 钉在根 package，日常 cargo build/test
 # 行为不变；绑定构建走 python/ 目录的 maturin（docs/plans/2026-08-11-python-binding-api-plan.md）。
 [workspace]
-members = [".", "python"]
+members = [".", "python", "tools/aios-patch"]
 default-members = ["."]
 resolver = "3"
 
@@ -274,6 +276,7 @@ aios_core = { path = "../vendor/old-aios-core" }
 
 [build-dependencies]
 cc = { version = "1.0", features = ["parallel"] }
+winresource = "0.1.31"
 
 
 #[profile.release]

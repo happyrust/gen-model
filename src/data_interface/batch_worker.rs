@@ -1553,39 +1553,31 @@ async fn execute_frozen_batch(
         }
     }
 
-    let work_round_complete = if job.intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly
-    {
-        result.status == ManualUpdateStatus::Success
-            && result
-                .units
-                .iter()
-                .all(|unit| unit.status == UnitGenStatus::Generated)
-    } else {
-        batch_round_complete(
-            committed_end_sesno,
-            file_latest_sesno,
-            result.status,
-            &result.units,
-        )
-    };
-    let round_complete = work_round_complete && room_membership_allows_model_settlement(&job.db_type);
-    if work_round_complete && !round_complete {
-        result.status = ManualUpdateStatus::Partial;
-        result.warnings.push(
-            "room_membership=false：房间归属未参与根事务，本轮拒绝推进模型水位".to_string(),
-        );
-    }
+    let work_round_complete =
+        if job.intent == crate::data_interface::batch_queue::BatchIntent::ModelOnly {
+            result.status == ManualUpdateStatus::Success
+                && result
+                    .units
+                    .iter()
+                    .all(|unit| unit.status == UnitGenStatus::Generated)
+        } else {
+            batch_round_complete(
+                committed_end_sesno,
+                file_latest_sesno,
+                result.status,
+                &result.units,
+            )
+        };
+    let round_complete = work_round_complete;
     // 写入标记收没收（ADR-072 W1「有 writing 必有出路」）。下面收尾那一笔盖得上就是它收的；
     // 收不上（这一轮没追平、模型没全成、收尾事务本身失败）由函数末尾那一笔兜底。
     let mut write_marker_closed = false;
 
-    // 收尾两段：房间 → **一笔**盖三水位（ADR-071 D3 / ADR-065 G2 (i)）。publish 阶段与
-    // `model_complete` 那道整库证据闸都退了（ADR-072 D4）：空间树已在 `persist_roots_batched`
-    // 落完那一刻就地收敛，「这一版的根全 OK」由 `round_complete` 担保（每个交付单元都是
-    // `Generated`，落不进去的根会先把单元标回失败），不回问库。
-    // 房间排在盖章之前算（d-73）：房间失败不擦掉已经成的模型那一半——那一枚照盖，
-    // 房间那一枚不盖，启动恢复再补。只有 DESI 才有模型 / 房间可收（SYS meta 的数据批次
-    // 不产生任何模型产物），非 DESI 由末尾那一笔收标记。
+    // 模型收尾一笔盖 model_sesno。publish 阶段与 `model_complete` 那道整库证据闸都退了
+    // （ADR-072 D4）：空间树已在 `persist_roots_batched` 落完那一刻就地收敛，「这一版的根
+    // 全 OK」由 `round_complete` 担保（每个交付单元都是 `Generated`，落不进去的根会先把
+    // 单元标回失败），不回问库。房间开关开启时，房间边已随各根事务落下；关闭时根事务只含
+    // 模型，model_sesno 仍照常盖。只有 DESI 才有模型可收，非 DESI 由末尾兜底收写入标记。
     if round_complete && job.db_type.eq_ignore_ascii_case("DESI") {
         let end_time = result
             .batch
@@ -1765,9 +1757,7 @@ async fn execute_model_only_body(
             .any(|unit| unit.status != UnitGenStatus::Generated);
 
     registry.set_stage(&job.task_id, "post_generation_aabb");
-    if !failed
-        && let Err(error) = refresh_post_regen_aabbs_for(&side_actions).await
-    {
+    if !failed && let Err(error) = refresh_post_regen_aabbs_for(&side_actions).await {
         warnings.push(format!("模型恢复后置 AABB 失败: {error:#}"));
         failed = true;
     }
@@ -1913,8 +1903,7 @@ async fn run_model_side_actions(
                     .await
             }
             ModelWorkAction::CascadeExpand => {
-                match crate::data_interface::manual_update::expand_live_reverse_cascade(refno)
-                    .await
+                match crate::data_interface::manual_update::expand_live_reverse_cascade(refno).await
                 {
                     Ok(roots) => {
                         derived.extend(roots.into_iter().map(|root| {
@@ -2000,7 +1989,7 @@ async fn refresh_post_regen_aabbs_for(items: &[ModelWorkItem]) -> anyhow::Result
 }
 
 /// 这一轮跑完了：把冻结右端追平、数据事务成功、交付单元全部生成——三件事同时成立，
-/// 才盖模型 / 房间那两枚水位（ADR-072 D4；文件轮次的完成屏障退了，判据只剩这一份）。
+/// 才盖模型水位（ADR-072 D4；文件轮次的完成屏障退了，判据只剩这一份）。
 fn batch_round_complete(
     committed_end_sesno: Option<i32>,
     file_latest_sesno: i32,
@@ -2012,10 +2001,6 @@ fn batch_round_complete(
         && units
             .iter()
             .all(|unit| unit.status == UnitGenStatus::Generated)
-}
-
-fn room_membership_allows_model_settlement(db_type: &str) -> bool {
-    !db_type.eq_ignore_ascii_case("DESI") || crate::options::room_membership()
 }
 
 /// 截断窗口的余量批次（ADR-017 拆窗）。
@@ -2272,10 +2257,7 @@ fn model_phase_is_deferred(model_incremental: bool, data_applied: bool) -> bool 
 
 /// 还没失败过的可解析根才并进批量重生成（ADR-012）；失败过的逐根跑，让它的错误自己说出口。
 fn unit_joins_regen_batch(task: &UnitTask) -> bool {
-    crate::data_interface::window_root_plan::root_joins_regen_batch(
-        task.attempts,
-        &task.root_refno,
-    )
+    crate::data_interface::window_root_plan::root_joins_regen_batch(task.attempts, &task.root_refno)
 }
 
 async fn run_single_unit(
@@ -3316,14 +3298,24 @@ mod tests {
     }
 
     #[test]
-    fn room_membership_off_blocks_even_an_empty_desi_model_round() {
+    fn room_membership_off_does_not_block_desi_model_settlement() {
         let _off = crate::options::RoomMembershipOverride::set(false);
         assert!(
             batch_round_complete(Some(42), 42, ManualUpdateStatus::Success, &[]),
-            "empty worklists are otherwise vacuously complete"
+            "房间开关关闭不改变模型任务自己的完成判据"
         );
-        assert!(!room_membership_allows_model_settlement("DESI"));
-        assert!(room_membership_allows_model_settlement("SYST"));
+        let production = include_str!("batch_worker.rs")
+            .split_once("\n#[cfg(test)]")
+            .expect("production code precedes tests")
+            .0;
+        assert!(
+            !production.contains("room_membership_allows_model_settlement"),
+            "房间开关不得重新成为 model_sesno 的收尾门"
+        );
+        assert!(
+            !production.contains("房间归属未参与根事务，本轮拒绝推进模型水位"),
+            "关闭房间不能再把成功的模型任务降成 Partial"
+        );
     }
 
     #[test]
@@ -3490,7 +3482,10 @@ mod tests {
             "SideEffectCompensator",
             "has_pending_spatial_work",
         ] {
-            assert!(!body.contains(needle), "出队门不得再等空间意图行 `{needle}`: {body}");
+            assert!(
+                !body.contains(needle),
+                "出队门不得再等空间意图行 `{needle}`: {body}"
+            );
         }
         assert!(body.contains("next_dispatch(registry"), "dispatch call");
         // 并发派发（ADR-011 2026-08-09 修订）：独占判定必须传给调度器而不是派发后再补救。
@@ -3565,14 +3560,16 @@ mod tests {
             "model_pending_status",
             "republish_settled_file_rounds",
         ] {
-            assert!(!idle.contains(needle), "空闲轮不得再消化 pending 积压 `{needle}`: {idle}");
+            assert!(
+                !idle.contains(needle),
+                "空闲轮不得再消化 pending 积压 `{needle}`: {idle}"
+            );
         }
         assert!(
             idle.contains("let model_became_ready = crate::options::model_incremental()"),
             "模型关闭时不得把下游房间门标为 ready"
         );
     }
-
 
     /// ADR-073 D3 的开工写点：标记必须落在第一笔写库**之前**；上一次崩溃留下的
     /// `writing` 先被读出并把 effective job 转为整库重建，禁止按 sesno 局部回滚。
@@ -3593,9 +3590,14 @@ mod tests {
         let recovery_read = at("write_state::load(job.dbnum).await");
         let recovery_intent = at("write_state::recovery_batch_intent(marker.intent)");
         let mark = at("write_state::mark_writing(");
-        let body_call = at("execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings)");
-        let model_only = at("execute_model_only_body(mgr, registry, job, cand, progress, warnings)");
-        assert!(recovery_read < recovery_intent && recovery_intent < mark, "先裁决整库恢复、再落标记: {body}");
+        let body_call =
+            at("execute_frozen_batch_body(mgr, registry, job, cand, progress, warnings)");
+        let model_only =
+            at("execute_model_only_body(mgr, registry, job, cand, progress, warnings)");
+        assert!(
+            recovery_read < recovery_intent && recovery_intent < mark,
+            "先裁决整库恢复、再落标记: {body}"
+        );
         assert!(
             !body.contains("rollback_if_writing") && !body.contains("rollback_to_watermark"),
             "执行体不得再走按会话局部回滚: {body}"
@@ -4007,7 +4009,10 @@ mod tests {
             "drain_post_regen_aabb_report",
             "load_pending_model_units_for_retry",
         ] {
-            assert!(!body.contains(retired), "pending 消费不得回来 `{retired}`: {body}");
+            assert!(
+                !body.contains(retired),
+                "pending 消费不得回来 `{retired}`: {body}"
+            );
         }
 
         let units = production
@@ -4041,8 +4046,15 @@ mod tests {
             "初始化工作单也必须按有界 execution group 生成: {units}"
         );
         // 没有 pending 行要收口了（ADR-072 D5）：成败直接进本任务的单元清单。
-        for retired in ["clear_regen_work_batch", "settle_regen_work", "task.revision"] {
-            assert!(!units.contains(retired), "pending 收口不得回来 `{retired}`: {units}");
+        for retired in [
+            "clear_regen_work_batch",
+            "settle_regen_work",
+            "task.revision",
+        ] {
+            assert!(
+                !units.contains(retired),
+                "pending 收口不得回来 `{retired}`: {units}"
+            );
         }
         assert!(!units.contains("回退逐根重试以定位问题根"));
 
@@ -4404,7 +4416,6 @@ mod tests {
             .map_or(source, |(production, _)| production);
         assert!(!production.contains("initialization_defers_model_phase"));
     }
-
 
     /// issue #16 的护栏钉在源码结构上：DESI 收口预检必须挡在一切执行工作之前——
     /// 拖到收口才发现确定性缺失，等于整批白跑后无声卡死，且预检失败必须以 eprintln

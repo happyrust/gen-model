@@ -889,7 +889,7 @@ async fn write_seed_marker(
     Ok(())
 }
 
-/// 模型 / 房间水位兼容播种的候选行：`applied_sesno > 0` 而 `model_sesno` **从未写过**（NONE）。
+/// 模型水位兼容播种的候选行：`applied_sesno > 0` 而 `model_sesno` **从未写过**（NONE）。
 ///
 /// 只圈 NONE、不圈 0：0 是本仓显式写下的（D7 幽灵清零 / D8 清库归零 / 本播种的
 /// [`LegacyModelWatermarkSeed::DataOnly`]），再播一次就把「已判过」改写成「追平」。
@@ -2842,7 +2842,10 @@ mod legacy_model_watermark_seed_tests {
         assert!(sql.contains("model_sesno = model_sesno ?? 26"));
         assert!(!sql.contains("math::max"));
         assert!(!sql.contains("model_sesno_time"), "时刻纪律：不贴 {sql}");
-        assert!(!sql.contains("room_"), "库上只剩两枚水位，接管不填房间格 {sql}");
+        assert!(
+            !sql.contains("room_"),
+            "库上只剩两枚水位，接管不填房间格 {sql}"
+        );
 
         let zero = render_legacy_model_watermark_data_only(8002);
         assert!(zero.contains("model_sesno = model_sesno ?? 0"));

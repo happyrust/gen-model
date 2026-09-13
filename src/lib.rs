@@ -512,14 +512,15 @@ async fn prepare_room_resident_at_startup(db_option: &DbOption) {
     }
     crate::fast_model::spatial_state::spawn_spatial_revalidator();
 
-    // 房间归属开关（`room_membership`，默认开）关着：空间树照装（它不只服务房间），常驻房间
-    // 模型不建——生成路径反正不算房间（`frozen_room_calculator` 关着返回 None），建了也没人用，
-    // 而 MDB 全部设计库的面板几何装一遍不便宜。生命周期记 Disabled 并点名来源，/health 看得见。
+    // 房间归属开关（`room_membership`，默认关）关着：空间树照装（它不只服务房间），常驻房间
+    // 模型不建；`frozen_room_calculator` 返回 None，生成根与 model_sesno 照常推进，只跳过
+    // 房间边重算。生命周期记 Disabled 并点名来源，/health 看得见。
     if !crate::options::room_membership() {
         room_resident::mark_disabled("room_membership=false");
         println!(
             "房间归属计算已关闭（DbOption.toml 的 room_membership / 环境变量 {}）：\
-             跳过常驻房间模型初始化；生成根不算房间、不写新边，重新打开后不自动回补",
+             跳过常驻房间模型初始化；模型根与 model_sesno 照常推进，不重算房间边；\
+             重启并打开后历史房间欠账需执行模型重建",
             crate::options::ROOM_MEMBERSHIP_ENV
         );
         return;
@@ -538,6 +539,7 @@ async fn prepare_room_resident_at_startup(db_option: &DbOption) {
 }
 
 pub mod api;
+pub mod build_info;
 pub mod cata;
 pub mod consts;
 pub mod data_interface;
@@ -706,6 +708,73 @@ async fn retire_publish_run_tables() {
     }
 }
 
+/// 启动链用的 dbnum 路由目录（`docs/plans/2026-09-12-lazy-startup-dev-plan.md` L3）。
+///
+/// 成员清单取 `init_mdb` 刚登记的那份（没有就从 SYS 解一次），模板目录取 schema pack；
+/// 目录构造**零元素 I/O**。此前这一步预热的是整份元素骨架（每个 DESI 一次头扫描：AMS 28 库 /
+/// 611,345 元素 0.72 s，JEU 417 库 / 1,221,858 元素 68 s），而属性、树的定位器与生成根定库都已改走
+/// RefNo 位解码 + 路由目录（跨库属性切片 W4–W6），启动链要的只剩「这个 MDB 有哪些库、文件在哪」。
+fn startup_route_directory(
+    db_option: &DbOption,
+) -> anyhow::Result<Arc<crate::data_interface::mdb_route_directory::MdbRouteDirectory>> {
+    let membership =
+        crate::data_interface::mdb_membership::get(&db_option.project_name, &db_option.mdb_name)
+            .map(Ok)
+            .unwrap_or_else(|| {
+                crate::data_interface::mdb_membership::resolve(
+                    db_option,
+                    &db_option.project_name,
+                    &db_option.mdb_name,
+                )
+                .map(Arc::new)
+            })?;
+    let schema = crate::data_interface::direct_store::DirectSchema::open_from_env()?;
+    let directory = Arc::new(
+        crate::data_interface::mdb_route_directory::MdbRouteDirectory::from_membership(
+            &membership,
+            schema.template_dir(),
+        ),
+    );
+    crate::data_interface::mdb_route_directory::register_active(directory.clone());
+    Ok(directory)
+}
+
+/// 路由目录的启动横幅：路由数 / 元素库数 / 声明了没文件 / 构造期问题，尾巴带 e3d-io 读计数器
+/// ——启动期 `scans=0` 就是「没扫元素」的证据（lazy-startup 不变量 6）。
+///
+/// 然后核一遍每个成员文件的 60 字节头（不变量 3「文件自证」，只读头不读元素）：声明了却不在盘上
+/// 的库、自报库号与声明不符的文件——两者在下游都表现为「这个 refno 不存在」，跟元素真的被删了
+/// 长得一模一样，必须在这里当面点名。
+fn print_route_directory_banner(
+    directory: &crate::data_interface::mdb_route_directory::MdbRouteDirectory,
+    step_started: Instant,
+) {
+    let stats = directory.stats();
+    println!(
+        "MDB {} / {}：dbnum 路由目录 {} 条路由（元素库 {}，声明了没文件 {}，构造期问题 {}），\
+         零元素 I/O，本步耗时 {}；e3d-io 读计数：{}",
+        directory.mdb(),
+        directory.project(),
+        stats.routes,
+        stats.element_routes,
+        stats.declared_without_file,
+        stats.problems,
+        fmt_elapsed(step_started.elapsed()),
+        e3d_io::read_stats::snapshot().summary()
+    );
+    for problem in directory.problems() {
+        eprintln!("*** MDB 路由目录：{problem} ***");
+    }
+    for (dbnum, name) in directory.declared_without_file() {
+        eprintln!(
+            "*** MDB 路由目录：声明了 dbnum {dbnum}（{name}），配置的项目目录里却没有它的文件 ***"
+        );
+    }
+    for error in directory.verify_all_headers() {
+        eprintln!("*** MDB 路由目录：{error} ***");
+    }
+}
+
 pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     let startup_started = mark_process_start();
     // Must precede logging, schema repair, watcher startup and every model/
@@ -850,12 +919,17 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
     // 再排 S→T 重跑。排在镜像水化**之前**——镜像是一次整表替换，先水化再回退，发布出去的
     // 就是一版已经被删掉痕迹的水位，而且那几格再没有人来作废（理由见 `rollback_unfinished_writes`）。
     let step_started = Instant::now();
-    let rollbacks = crate::data_interface::startup_reconcile::schedule_unfinished_writes_for_reinitialize().await;
+    let rollbacks =
+        crate::data_interface::startup_reconcile::schedule_unfinished_writes_for_reinitialize()
+            .await;
     if !rollbacks.is_empty() {
         for line in &rollbacks {
             println!("{line}");
         }
-        println!("写入标记回退完成，耗时 {}", fmt_elapsed(step_started.elapsed()));
+        println!(
+            "写入标记回退完成，耗时 {}",
+            fmt_elapsed(step_started.elapsed())
+        );
     }
     // ---- 统一水化段（ADR-071 D7 / S6）：库 → 进程内，一次，排在全部播种之后、任何 worker /
     // watcher 之前。① 三水位镜像：`hydrate_watermark_mirror` 一次读全（水位行 + info 表旧水位）
@@ -949,47 +1023,21 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
             db_option.mdb_name
         );
     }
-    // 成员名单解完，紧接着把这个 MDB 的**元素骨架**装进内存：每个声明的 DESI 做一次
-    // e3d-io 头扫描，落成 `ref0 → dbnum` 归属、`refno → 属主`、`refno → noun` 三张表。
-    // 属性不在里面——2026-09-05 实测 AMS `/ALL`（28 库 / 611,345 元素）：骨架 0.72s /
-    // 19.8 MiB，全属性 8.02s / **1291 MiB**，而那 2215 B/元素大半是 per-element
-    // `HashMap<String, _>` 的表示开销。换紧凑布局之前不谈全属性常驻。
+    // 成员名单解完，紧接着造这个 MDB 的 **dbnum 路由目录**并打横幅：SYS/CURD 成员 →
+    // `dbnum → 文件`，再核一遍每个成员文件的 60 字节头。**不读任何元素**——此前这里预热的是
+    // 整份元素骨架（`ref0 → dbnum` / `refno → 属主` / `refno → noun` 三张表，每个 DESI 一次头
+    // 扫描），而属性、树的定位器与生成根定库都已改走 RefNo 位解码 + 路由目录，启动链不再需要它
+    // （`docs/plans/2026-09-12-lazy-startup-dev-plan.md` L3）。树服务剩下的 WORL 枚举与
+    // noun / owner 查询仍在骨架上，由它第一次被用到时自建（同计划 L5 把它也换掉）。
     //
-    // 放在这里而不是更早：它吃 `init_mdb` 刚登记的成员名单。放在这里而不是更晚：
-    // 树接口（`/api/v1/tree/*`）与按需生成的选根都要它，此前是第一次树请求时现扫，
-    // 那 0.7 秒落在用户点第一下树的那一刻。
-    //
-    // 失败只告警不中止：`mdb_memory_store::ensure` 在第一次用到时会自己再建一遍，
-    // 行为退回到预热之前，不是回归。
+    // 放在这里而不是更早：它吃 `init_mdb` 刚登记的成员名单。失败只告警不中止：横幅不是启动门，
+    // 各服务开自己那份目录时会再报一次。
     let step_started = Instant::now();
-    match crate::data_interface::mdb_memory_store::ensure(
-        &db_option.project_name,
-        &db_option.mdb_name,
-    ) {
-        Ok(skeleton) => {
-            println!(
-                "{}，本步耗时 {}",
-                skeleton.describe(),
-                fmt_elapsed(step_started.elapsed())
-            );
-            // 声明了却不在盘上的库、自报库号与声明不符的文件——两者在下游都表现为
-            // 「这个 refno 不存在」，跟元素真的被删了长得一模一样，必须当面点名。
-            for problem in skeleton.problems() {
-                eprintln!("*** MDB 骨架：{problem} ***");
-            }
-            if skeleton.stats().unreadable_records > 0 {
-                eprintln!(
-                    "*** MDB 骨架：{} 条记录索引指得到、内容读不出来，它们不在骨架里 ***",
-                    skeleton.stats().unreadable_records
-                );
-            }
-        }
+    match startup_route_directory(&db_option) {
+        Ok(directory) => print_route_directory_banner(&directory, step_started),
         Err(error) => {
-            log::warn!("MDB 元素骨架预热失败，退回按需现建：{error:#}");
-            eprintln!(
-                "*** MDB 元素骨架预热失败，退回第一次树请求时现建（行为与预热之前相同）：\
-                 {error:#} ***"
-            );
+            log::warn!("MDB dbnum 路由目录构造失败，各服务首次使用时会再试：{error:#}");
+            eprintln!("*** MDB dbnum 路由目录构造失败（各服务首次使用时会再试）：{error:#} ***");
         }
     }
     let mgr = Arc::new(manager);
@@ -1036,6 +1084,10 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
         );
         println!("启动模型凭证复核仍照常执行；发现的缺口只入队，不越过上弦门消费");
     }
+
+    crate::data_interface::dabacon_tag_summary::start_at_startup(std::path::PathBuf::from(
+        &db_option.project_path,
+    ));
 
     // 先把健康接口起起来，再做 watcher 的首次全目录扫描。扫描慢或阻断时，外部仍能
     // 从 /health 看到初始化快照，而不是只能等到扫描结束才连得上服务。
@@ -1271,7 +1323,11 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
                 waited_secs += 60;
                 let registry = crate::data_interface::task_registry::TaskRegistry::global();
                 let running = registry.running_data_batch_dbnums();
-                let queued = scheduler.snapshot().iter().filter(|row| row.state == "queued").count();
+                let queued = scheduler
+                    .snapshot()
+                    .iter()
+                    .filter(|row| row.state == "queued")
+                    .count();
                 let message = format!(
                     "初始化模型进行中：在飞任务 {} 个（dbnum {:?}）、排队 {queued} 条，已等={waited_secs}s",
                     running.len(),
@@ -1335,10 +1391,11 @@ pub async fn run_cli(db_option: DbOption) -> anyhow::Result<()> {
 
     let _ = watch_task.await;
 
-    // 看门狗退出之后若 Web 服务已启用，保持进程长驻对外服务，供前端触发
-    // preview/execute 手动更新与按需生成。
+    // 看门狗退出之后保持 Web 服务长驻，供前端触发 preview/execute 手动更新与按需生成。
+    // `http_api_addr` 缺失时 Web 服务会兼容旧 `server_release_ip` 或回环默认值，因此这里
+    // 不能再拿新键是否存在当成「Web 是否启用」的判据。
     #[cfg(feature = "http_api")]
-    if crate::get_db_option_ext().http_api_addr.is_some() {
+    {
         println!("Web 服务保持运行（Ctrl+C 退出）...");
         let _ = web_task.await;
     }
@@ -1379,6 +1436,7 @@ mod startup_data_wait_tests {
             model_phase_open: true,
             startup_reconcile_pending: false,
             startup_rooms_pending: false,
+            room_bootstrap: Default::default(),
             startup: None,
             startup_data_wait_degraded: None,
             phases: Default::default(),
@@ -1491,6 +1549,17 @@ fn print_startup_complete_banner(
 ) {
     const RULE: &str = "==========================================================";
     println!("{RULE}");
+    println!(
+        "AIOS Database 构建：{}（release {} / git {}{}）",
+        crate::build_info::BUILD_ID,
+        crate::build_info::VERSION,
+        crate::build_info::GIT_COMMIT,
+        if crate::build_info::GIT_DIRTY_TEXT == "true" {
+            " / dirty"
+        } else {
+            ""
+        }
+    );
     match data_wait_degraded {
         Some(_) => println!(
             "初始化完成（**数据受阻，降级进入监听**）：项目 {}，启动总耗时 {}",
@@ -1548,7 +1617,8 @@ fn print_startup_complete_banner(
     if !crate::options::room_membership() {
         println!(
             "  房间归属计算：关（DbOption.toml 的 room_membership / 环境变量 {}）——\
-             生成根不算房间、不写新边；model_sesno 的「一致」此时不含房间，重新打开后不自动回补",
+             模型根与 model_sesno 照常推进，不重算房间边；\
+             重启并打开后历史房间欠账需执行模型重建",
             crate::options::ROOM_MEMBERSHIP_ENV
         );
     }
@@ -1596,9 +1666,12 @@ fn print_startup_complete_banner(
     #[cfg(feature = "http_api")]
     {
         let ext = crate::get_db_option_ext();
-        if let Some(addr) = ext.http_api_addr.as_deref() {
-            println!("  HTTP API：http://{addr}/api/v1");
-        }
+        let addr = crate::web_service::effective_http_api_addr(
+            ext.http_api_addr.as_deref(),
+            &ext.server_release_ip,
+        );
+        let public = crate::web_service::public_http_addr(&addr, ext.http_public_addr.as_deref());
+        println!("  HTTP API：http://{public}/api/v1（监听 {addr}）");
     }
     println!("已进入增量更新监听：库文件一有变化就入队处理，往下的日志都是运行期输出。");
     println!("{RULE}");
@@ -1758,6 +1831,374 @@ pub async fn attach_store_connected() -> anyhow::Result<()> {
     ensure_store_connected(&db_option, crate::store_process::StoreStartup::AttachOnly).await
 }
 
+#[cfg(feature = "ws")]
+async fn bootstrap_read_through_rooms(
+    manager: Arc<AiosDBManager>,
+    db_option: &DbOption,
+    directory: &crate::data_interface::mdb_route_directory::MdbRouteDirectory,
+) -> bool {
+    use crate::data_interface::task_registry::TaskState;
+
+    let initialization =
+        crate::data_interface::initialization_phase::InitializationCoordinator::global();
+    let started = std::time::Instant::now();
+    let room_generation = match crate::fast_model::model_db_adapter::required_room_generation() {
+        Ok(Some(generation)) => generation,
+        Ok(None) => {
+            initialization.fail_startup_rooms(
+                "blocked",
+                "room_membership=true but no resident generation was frozen",
+            );
+            return false;
+        }
+        Err(error) => {
+            initialization.fail_startup_rooms(
+                "blocked",
+                format!("room resident is unavailable: {error:#}"),
+            );
+            return false;
+        }
+    };
+    // 这里要的只是 dbnum 清单，不是元素表：从路由目录（CURD 成员清单，零元素 I/O）取 MDB 全部
+    // DESI，按 dbnum 升序覆盖（CONTEXT.md「kv-mem 房间启动屏障」）。每库的整库扫描在
+    // `model_dbnum_ensure` 自己的 `scan_index` 里，那是显式全量操作，允许。
+    let mut dbnums = directory
+        .element_databases()
+        .filter(|route| route.db_type.eq_ignore_ascii_case("DESI"))
+        .map(|route| route.dbnum)
+        .collect::<Vec<_>>();
+    dbnums.sort_unstable();
+    dbnums.dedup();
+    let dbnums_total = dbnums.len();
+    initialization.set_startup_room_totals(dbnums_total, 0);
+
+    let mut dbnums_done = 0usize;
+    let mut dbnums_failed = 0usize;
+    let mut roots_total = 0usize;
+    let mut roots_ready = 0usize;
+    let mut roots_failed = 0usize;
+    let mut room_edges_written = 0usize;
+    let mut failures = Vec::new();
+    let mut peak_rss_mib = crate::data_interface::model_concurrency::process_rss_bytes()
+        .map(|bytes| bytes / (1024 * 1024));
+    for dbnum in dbnums {
+        if let Some(current) = crate::data_interface::model_concurrency::process_rss_bytes()
+            .map(|bytes| bytes / (1024 * 1024))
+        {
+            peak_rss_mib = Some(peak_rss_mib.unwrap_or_default().max(current));
+        }
+        initialization.record_startup_room_progress(
+            dbnums_done,
+            dbnums_failed,
+            roots_ready,
+            roots_failed,
+            Some(dbnum),
+            "model_and_room_publication",
+            room_edges_written,
+            started.elapsed().as_millis(),
+            peak_rss_mib,
+        );
+        match crate::data_interface::model_dbnum_ensure::start_and_wait(
+            manager.clone(),
+            &db_option.project_name,
+            dbnum,
+            room_generation.clone(),
+        )
+        .await
+        {
+            Ok(entry) => {
+                let total = entry.total_units.unwrap_or_default() as usize;
+                let ready = entry.units_done.unwrap_or_default() as usize;
+                let failed = entry
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("failed"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_else(|| total.saturating_sub(ready) as u64)
+                    as usize;
+                let room_edges = entry
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("room_edges_written"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default() as usize;
+                let max_transaction_bytes = entry
+                    .result
+                    .as_ref()
+                    .and_then(|result| result.get("max_transaction_bytes"))
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_default() as usize;
+                roots_total += total;
+                roots_ready += ready;
+                roots_failed += failed;
+                room_edges_written += room_edges;
+                initialization.observe_startup_room_transaction_bytes(max_transaction_bytes);
+                println!(
+                    "[room-bootstrap] dbnum={dbnum} state={} roots={ready}/{total} failed={failed} room_edges={room_edges} max_transaction_bytes={max_transaction_bytes} elapsed_ms={}",
+                    entry.state.as_str(),
+                    started.elapsed().as_millis()
+                );
+                dbnums_done += 1;
+                if entry.state != TaskState::Succeeded {
+                    dbnums_failed += 1;
+                    failures.push(format!(
+                        "dbnum={dbnum} task={} state={} ready={ready}/{total} failed={failed}",
+                        entry.task_id,
+                        entry.state.as_str()
+                    ));
+                }
+
+                #[test]
+                fn read_through_room_bootstrap_finishes_before_model_ready() {
+                    let source = include_str!("lib.rs").replace("\r\n", "\n");
+                    let body = source
+                        .split_once("async fn run_read_through_core(")
+                        .expect("read-through core")
+                        .1
+                        .split_once("#[cfg(not(feature = \"ws\"))]")
+                        .expect("read-through core end")
+                        .0;
+                    let begin = body
+                        .find("initialization.begin_startup_rooms()")
+                        .expect("room barrier begins");
+                    let resident = body
+                        .find("prepare_room_resident_at_startup(&db_option).await")
+                        .expect("resident initialization");
+                    let bootstrap = body
+                        .find("bootstrap_read_through_rooms(manager.clone()")
+                        .expect("whole-MDB model+room bootstrap");
+                    let ready = body
+                        .find("initialization.mark_model_ready()")
+                        .expect("model ready");
+                    assert!(begin < resident && resident < bootstrap && bootstrap < ready);
+
+                    let bootstrap_body = source
+                        .split_once("async fn bootstrap_read_through_rooms(")
+                        .expect("bootstrap helper")
+                        .1
+                        .split_once("/// File/memory-first service path")
+                        .expect("bootstrap helper end")
+                        .0;
+                    assert!(bootstrap_body.contains(".element_databases()"));
+                    assert!(bootstrap_body.contains("dbnums.sort_unstable()"));
+                    assert!(bootstrap_body.contains("model_dbnum_ensure::start_and_wait("));
+                    assert!(
+                        !bootstrap_body.contains("watch_scope::"),
+                        "startup room initialization covers the whole MDB, not only watch_dbnums"
+                    );
+                }
+            }
+            Err(error) => {
+                dbnums_done += 1;
+                dbnums_failed += 1;
+                failures.push(format!("dbnum={dbnum}: {error:#}"));
+            }
+        }
+        if let Some(current) = crate::data_interface::model_concurrency::process_rss_bytes()
+            .map(|bytes| bytes / (1024 * 1024))
+        {
+            peak_rss_mib = Some(peak_rss_mib.unwrap_or_default().max(current));
+        }
+        initialization.set_startup_room_totals(dbnums_total, roots_total);
+        initialization.record_startup_room_progress(
+            dbnums_done,
+            dbnums_failed,
+            roots_ready,
+            roots_failed,
+            None,
+            "between_dbnums",
+            room_edges_written,
+            started.elapsed().as_millis(),
+            peak_rss_mib,
+        );
+    }
+    if failures.is_empty() {
+        initialization.settle_startup_rooms();
+        true
+    } else {
+        initialization.fail_startup_rooms("partial", failures.join("; "));
+        false
+    }
+}
+
+/// 一个库的文件变了（会话前进 / 回滚 / 换文件）：只动**这个 dbnum** 的模型
+/// （`docs/plans/2026-09-12-lazy-startup-dev-plan.md` L4 / §3.4，母计划不变量 7）。
+///
+/// 该库此前已发布的根 → 在新会话的索引里逐根点查（`snapshot_presence`，只开这一个文件）：没了的
+/// 删子树（否则 Plant UI 永远显示一条幽灵管线），还在的按新会话重生成；只作废**这个库**的发布回执；
+/// 最后记一笔「最近定向刷新」给 `/health`。别的库一根不碰、一个回执不作废——8000 保存了，7998
+/// 的世代与回执一动不动（跨库属性切片 §9 Q10 的验收形状）。
+///
+/// 目录库（CATA / DICT / PROP）的变化只记账不动模型：它们的依赖失效是阶段 5 余下的活。
+/// 属性 / 树两个服务不在这里刷：它们各自的 `is_current()` 看文件头，下一次请求自己重建。
+#[cfg(feature = "ws")]
+async fn targeted_model_refresh(
+    manager: &Arc<AiosDBManager>,
+    change: &crate::data_interface::mdb_route_directory::RouteRefresh,
+) {
+    use crate::data_interface::db_generation::{TargetedRefresh, record_targeted_refresh};
+    use crate::data_interface::generation_root::refno_from_e3d;
+    use crate::fast_model::model_memory_store::{ModelMemoryStore, ProjectionScope};
+
+    log::info!(
+        "[route-poll] dbnum={} {} {}: sesno {}→{} generation {}→{} ({})",
+        change.dbnum,
+        change.db_type,
+        change.kind,
+        change.from.latest_sesno,
+        change.to.latest_sesno,
+        change.from.generation,
+        change.to.generation,
+        change.path.display()
+    );
+    let mut refresh = TargetedRefresh {
+        dbnum: change.dbnum,
+        db_type: change.db_type.clone(),
+        kind: change.kind,
+        from: change.from,
+        to: change.to,
+        roots_seen: 0,
+        roots_regenerated: 0,
+        roots_retired: 0,
+        receipts_invalidated: 0,
+        outcome: "ok".to_string(),
+        at_unix_ms: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as u64)
+            .unwrap_or_default(),
+    };
+    let option = aios_core::get_db_option();
+    if let Err(error) = crate::data_interface::mdb_read_store::invalidate_cached(
+        &option.project_name, &option.mdb_name, change.dbnum,
+    ) {
+        refresh.outcome = format!("read_view_refresh_failed: {error:#}");
+        record_targeted_refresh(refresh);
+        return;
+    }
+    if !crate::data_interface::model_source::is_element_db(&change.db_type) {
+        refresh.outcome = "catalogue_change_recorded_only".to_string();
+        record_targeted_refresh(refresh);
+        return;
+    }
+
+    let model_store = ModelMemoryStore::global();
+    let roots: Vec<e3d_io::refno::RefNo> = model_store
+        .roots(ProjectionScope::Current)
+        .into_iter()
+        .filter(|root| {
+            crate::data_interface::refno_route::refno_dbnum_of(*root) == Some(change.dbnum)
+        })
+        .collect();
+    refresh.roots_seen = roots.len();
+    refresh.receipts_invalidated =
+        model_store.invalidate_receipts_of_dbnum(ProjectionScope::Current, change.dbnum);
+    log::info!(
+        "[route-poll] dbnum={} invalidated {} publication receipt(s) of its own; {} published root(s) to re-check",
+        change.dbnum,
+        refresh.receipts_invalidated,
+        refresh.roots_seen
+    );
+    if roots.is_empty() {
+        record_targeted_refresh(refresh);
+        return;
+    }
+
+    // 新会话的索引里还有哪些根：只开这一个文件，逐根点查。
+    let requested: Vec<aios_core::RefU64> = roots
+        .iter()
+        .map(|root| refno_from_e3d(*root).refno())
+        .collect();
+    let path = change.path.clone();
+    let presence = match tokio::task::spawn_blocking(move || {
+        crate::data_interface::db_file_header::snapshot_presence(&path, &requested)
+    })
+    .await
+    {
+        Ok(Ok(presence)) => presence,
+        Ok(Err(error)) => {
+            log::error!(
+                "[route-poll] dbnum={} 在新会话索引里核对已发布根失败，根保留、回执已作废，下一次 ensure 按新会话重比：{error:#}",
+                change.dbnum
+            );
+            refresh.outcome = format!("presence_check_failed: {error:#}");
+            record_targeted_refresh(refresh);
+            return;
+        }
+        Err(error) => {
+            log::error!(
+                "[route-poll] dbnum={} 核对任务异常结束：{error}",
+                change.dbnum
+            );
+            refresh.outcome = format!("presence_check_task_failed: {error}");
+            record_targeted_refresh(refresh);
+            return;
+        }
+    };
+    let (live, retired): (Vec<_>, Vec<_>) = roots
+        .into_iter()
+        .partition(|root| presence.contains(&refno_from_e3d(*root).refno()));
+
+    for root in retired {
+        let requested = refno_from_e3d(root);
+        match manager.delete_model_subtree(requested).await {
+            Ok(()) => {
+                model_store.forget_retired_root(ProjectionScope::Current, root);
+                refresh.roots_retired += 1;
+                log::info!(
+                    "[route-poll] dbnum={} retired deleted model root {requested} from the current projection",
+                    change.dbnum
+                );
+            }
+            Err(error) => {
+                log::error!(
+                    "[route-poll] dbnum={} failed to retire deleted model root {requested}: {error:#}",
+                    change.dbnum
+                );
+                refresh.outcome = format!("retire_failed: {error:#}");
+            }
+        }
+    }
+    if !live.is_empty() {
+        let root_names = live
+            .iter()
+            .map(|root| format!("{}/{}", root.word0, root.word1))
+            .collect::<Vec<_>>();
+        match crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots_report(
+            manager,
+            &root_names,
+        )
+        .await
+        {
+            Ok(report) if report.failures.is_empty() => {
+                refresh.roots_regenerated = report.completed.len();
+                log::info!(
+                    "[route-poll] dbnum={} republished {} model root(s) at sesno {}",
+                    change.dbnum,
+                    report.completed.len(),
+                    change.to.latest_sesno
+                );
+            }
+            Ok(report) => {
+                refresh.roots_regenerated = report.completed.len();
+                refresh.outcome = format!("{} root(s) pending retry", report.failures.len());
+                log::error!(
+                    "[route-poll] dbnum={} refresh left {} model root(s) pending retry",
+                    change.dbnum,
+                    report.failures.len()
+                );
+            }
+            Err(error) => {
+                refresh.outcome = format!("regenerate_failed: {error:#}");
+                log::error!(
+                    "[route-poll] dbnum={} model refresh failed; roots remain unpublished: {error:#}",
+                    change.dbnum
+                );
+            }
+        }
+    }
+    record_targeted_refresh(refresh);
+}
+
 /// File/memory-first service path.  No database operation is allowed before
 /// the HTTP core is ready; the optional mirror connects and drains its spool
 /// in the background.
@@ -1784,100 +2225,61 @@ async fn run_read_through_core(db_option: DbOption) -> anyhow::Result<()> {
         })?;
     let manager = Arc::new(manager);
     #[cfg(feature = "http_api")]
-    let web_task = {
-        let manager = manager.clone();
-        tokio::spawn(async move { crate::web_service::serve_if_configured(manager).await })
-    };
-    let snapshot = crate::data_interface::mdb_memory_store::ensure(
-        &db_option.project_name,
-        &db_option.mdb_name,
-    )?;
-    println!("read-through core snapshot ready: {}", snapshot.describe());
-    prepare_room_resident_at_startup(&db_option).await;
+    let web_task = crate::web_service::start_configured(manager.clone()).await?;
+    // 不再预热元素骨架（lazy-startup L3）：HTTP 已经 spawn，这里只造 dbnum 路由目录打横幅
+    // ——零元素 I/O，初始化三步紧跟其后，不等任何元素读取。属性 / 树服务各自按需开库；树服务
+    // 剩下的骨架用途（WORL 枚举、noun / owner）由它第一次被用到时自建，L5 换掉。
+    let step_started = Instant::now();
+    let directory = startup_route_directory(&db_option).map_err(|error| {
+        anyhow!(
+            "build dbnum route directory for MDB {}: {error:#}",
+            db_option.mdb_name
+        )
+    })?;
+    print_route_directory_banner(&directory, step_started);
 
     let initialization =
         crate::data_interface::initialization_phase::InitializationCoordinator::global();
-    initialization.configure_model_bootstrap(false);
+    let rooms_required = crate::options::room_membership();
+    initialization.configure_model_bootstrap(rooms_required);
     initialization.mark_data_ready_without_manifest();
-    let _ = initialization.open_model_phase();
-    let _ = initialization.mark_model_ready();
+    if rooms_required {
+        initialization.begin_startup_rooms();
+    }
+    prepare_room_resident_at_startup(&db_option).await;
+    let room_bootstrap_ready = !rooms_required
+        || bootstrap_read_through_rooms(manager.clone(), &db_option, &directory).await;
+    if room_bootstrap_ready {
+        let _ = initialization.open_model_phase();
+        let _ = initialization.mark_model_ready();
+    }
 
+    // 2 s 循环改按 dbnum 轮询会话号（lazy-startup L4，阶段 5 的最小形态）：路由目录对每条路由
+    // `stat` 一次、身份变了才开一次头，报出「哪些库变了」；每个变了的库只动它自己的根与回执。
+    // 此前这里是 `refresh_if_stale`——任一库的会话号一变就重解 MDB 成员、整份重扫全 MDB 重建
+    // 元素骨架，再把**全部**发布回执作废；一个 DESI 的 SAVEWORK = 重扫 AMS 28 库 / JEU 417 库。
+    // 先叫一次把每个库的基线记进账本：第一次见只记不报，之后每轮返回的才是「自上次以来变了的库」。
+    let seeded = directory.poll_generations();
+    debug_assert!(seeded.is_empty(), "第一次轮询只记基线，不该报变化");
     let refresh_manager = manager.clone();
-    let project = db_option.project_name.clone();
-    let mdb = db_option.mdb_name.clone();
+    let refresh_directory = directory.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {
             interval.tick().await;
-            match crate::data_interface::mdb_memory_store::refresh_if_stale(&project, &mdb) {
-                Ok(true) => {
-                    let model_store =
-                        crate::fast_model::model_memory_store::ModelMemoryStore::global();
-                    let previous_roots = model_store
-                        .roots(crate::fast_model::model_memory_store::ProjectionScope::Current);
-                    // A source snapshot can remove a whole delivery root. Regenerating every
-                    // previous root treats that absence as a generation failure and deliberately
-                    // retains its old rows, which makes Plant UI show a ghost pipeline forever.
-                    // Partition against the newly-published skeleton first: missing roots are
-                    // successful tombstones, while only live roots enter regeneration.
-                    let current = crate::data_interface::mdb_memory_store::get(&project, &mdb);
-                    let (refresh_roots, deleted_roots): (Vec<_>, Vec<_>) =
-                        previous_roots.into_iter().partition(|root| {
-                            current.as_ref().is_some_and(|snapshot| {
-                                snapshot.contains(
-                                    crate::data_interface::generation_root::refno_from_e3d(*root)
-                                        .refno(),
-                                )
-                            })
-                        });
-                    for root in deleted_roots {
-                        let requested =
-                            crate::data_interface::generation_root::refno_from_e3d(root);
-                        if let Err(error) = refresh_manager.delete_model_subtree(requested).await {
-                            log::error!(
-                                "source snapshot failed to retire deleted model root {requested}: {error:#}"
-                            );
-                        } else {
-                            log::info!(
-                                "source snapshot retired deleted model root {requested} from the current projection"
-                            );
-                        }
-                    }
-                    let invalidated = model_store.invalidate_all_receipts(
-                        crate::fast_model::model_memory_store::ProjectionScope::Current,
-                    );
-                    log::info!(
-                        "source snapshot advanced atomically for {project}/{mdb}; invalidated {invalidated} model publication receipt(s)"
-                    );
-                    if !refresh_roots.is_empty() {
-                        let roots = refresh_roots
-                            .into_iter()
-                            .map(|root| format!("{}/{}", root.word0, root.word1))
-                            .collect::<Vec<_>>();
-                        match crate::data_interface::model_refresh::ModelRefreshPolicy::generate_roots_report(
-                            &refresh_manager,
-                            &roots,
-                        )
-                        .await
-                        {
-                            Ok(report) if report.failures.is_empty() => log::info!(
-                                "source snapshot refresh published {} model root(s) from the new epoch",
-                                report.completed.len()
-                            ),
-                            Ok(report) => log::error!(
-                                "source snapshot refresh left {} model root(s) pending retry",
-                                report.failures.len()
-                            ),
-                            Err(error) => log::error!(
-                                "source snapshot model refresh failed; roots remain unpublished: {error:#}"
-                            ),
-                        }
-                    }
-                }
-                Ok(false) => {}
+            let polled = {
+                let directory = refresh_directory.clone();
+                tokio::task::spawn_blocking(move || directory.poll_generations()).await
+            };
+            let changes = match polled {
+                Ok(changes) => changes,
                 Err(error) => {
-                    log::error!("source snapshot refresh failed; old epoch retained: {error:#}")
+                    log::error!("[route-poll] 轮询任务异常结束，下一拍重试：{error}");
+                    continue;
                 }
+            };
+            for change in changes {
+                targeted_model_refresh(&refresh_manager, &change).await;
             }
         }
     });

@@ -43,13 +43,17 @@ use super::refno_route::{refno_dbnum, to_refno};
 /// 显式覆盖模板与字典文件所在目录。
 ///
 /// 不设置时不再默认为某台机器的 E3D 3.1 shadow：[`DirectSchema::open_from_env`]
-/// 会检查 `DbOption.project_path` 下数据库二进制的保留会话，识别实际写入格式后
-/// 打开 e3d-io 对应的 schema pack；目录名不参与判定。设置本变量表示调用方明确
-/// 接管选择，保留给临时探针和夹具。
+/// 优先认 DbOption 手填的 `e3d_version`，其次认本变量；两者都没设置时使用
+/// [`DEFAULT_E3D_VERSION`]。目录名与数据库二进制都不参与判定（后者没有可靠的
+/// 版本字段）。设置本变量表示调用方明确接管选择，保留给临时探针和夹具。
 pub const TEMPLATE_DIR_ENV: &str = "AIOS_E3D_TEMPLATE_DIR";
 /// e3d-io schema packs 的父目录；未设置时先找 exe 同级 `schema/`（部署包），
 /// 开发构建再回落到 e3d-io 源码携带的目录。
 pub const SCHEMA_ROOT_ENV: &str = "AIOS_E3D_SCHEMA_ROOT";
+/// `DbOption.toml` 未配置 `e3d_version` 时使用的 schema pack。
+///
+/// 这是产品默认值，不是数据库二进制识别结果；版本证据仍会写入启动日志供排障。
+pub const DEFAULT_E3D_VERSION: &str = "e3d210";
 
 fn schema_root_next_to_executable() -> Option<PathBuf> {
     let root = std::env::current_exe().ok()?.parent()?.join("schema");
@@ -172,10 +176,16 @@ impl std::fmt::Display for DirectStoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidRefNo { refno } => {
-                write!(f, "{refno} 不是合法 RefNo（word1 为负或解出 dbnum 0），无库可读")
+                write!(
+                    f,
+                    "{refno} 不是合法 RefNo（word1 为负或解出 dbnum 0），无库可读"
+                )
             }
             Self::DbNotInMdb { dbnum, refno } => {
-                write!(f, "{refno} 解出 dbnum {dbnum}，但它不在当前 MDB 也不在依赖目录里")
+                write!(
+                    f,
+                    "{refno} 解出 dbnum {dbnum}，但它不在当前 MDB 也不在依赖目录里"
+                )
             }
             Self::DbNumberMismatch {
                 dbnum,
@@ -238,11 +248,13 @@ impl std::fmt::Debug for DirectSchema {
 }
 
 impl DirectSchema {
-    /// TOML 手动版本优先，其次 [`TEMPLATE_DIR_ENV`]；均未设置时识别当前项目的 E3D
-    /// 版本，并从匹配的 e3d-io schema pack 加载。
+    /// TOML 手动版本优先，其次 [`TEMPLATE_DIR_ENV`]；均未设置时读取项目数据库的
+    /// 版本证据供诊断，然后打开 [`DEFAULT_E3D_VERSION`]。
     pub fn open_from_env() -> anyhow::Result<Self> {
         let started = Instant::now();
-        if let Some(version) = crate::options::configured_e3d_version().map_err(anyhow::Error::msg)? {
+        if let Some(version) =
+            crate::options::configured_e3d_version().map_err(anyhow::Error::msg)?
+        {
             let schema_root = std::env::var_os(SCHEMA_ROOT_ENV)
                 .map(PathBuf::from)
                 .or_else(schema_root_next_to_executable)
@@ -253,7 +265,9 @@ impl DirectSchema {
             );
             report_schema_info(&format!("[E3D schema] 开始加载: {context}"));
             return Self::report_load_result(
-                Self::open_explicit_version(&schema_root, &version), &context, started,
+                Self::open_explicit_version(&schema_root, &version),
+                &context,
+                started,
             );
         }
         if let Some(dir) = std::env::var_os(TEMPLATE_DIR_ENV) {
@@ -266,6 +280,11 @@ impl DirectSchema {
             return Self::report_load_result(Self::open(template_dir), &context, started);
         }
 
+        // 默认模式：没有任何已证实的库字段能**可靠双向**分开 2.1 与 3.1。页身份、
+        // WORL.UPGDNO、COMM.VERS 在两版样本里会相同（见 e3d-io
+        // docs/evidence/2026-09-11-e3d-database-version.md）；CRINFO 又是创建工具，
+        // TMPLVN 是模板兼容版本，session DAB tag 是最后写入引擎。detect_* 一律失败。
+        // 这里把探针证据打出来供排障，但选版明确走产品默认值，不把默认伪装成自动识别。
         let project_root = PathBuf::from(&aios_core::get_db_option().project_path);
         let (schema_root, schema_root_source) =
             if let Some(root) = std::env::var_os(SCHEMA_ROOT_ENV) {
@@ -276,82 +295,79 @@ impl DirectSchema {
                 (e3d_io::bundled_schema_root(), "development-bundled")
             };
         let context = format!(
-            "mode=auto project={} schema_root={} schema_root_source={schema_root_source}",
+            "mode=default source=DbOption-unconfigured e3d_version={DEFAULT_E3D_VERSION} \
+             auto_detect=false project={} schema_root={} schema_root_source={schema_root_source}",
             project_root.display(),
             schema_root.display()
         );
         report_schema_info(&format!(
-            "[E3D schema] 开始加载: {context}；先从项目数据库二进制识别版本"
+            "[E3D schema] 开始加载: {context}；DbOption 未配置 e3d_version，使用默认 \
+             {DEFAULT_E3D_VERSION}；自动识别不可用，仍读取项目数据库二进制版本证据供排障"
         ));
-
-        let result = (|| {
-            let version = e3d_io::detect_project_version(&project_root).map_err(|error| {
-                anyhow::anyhow!(
-                    "识别 E3D 项目 {} 的数据库二进制版本失败: {error}",
-                    project_root.display()
+        let evidence = match e3d_io::project_version_evidence(&project_root) {
+            Ok(evidence) => {
+                let header = match e3d_io::database_header_diagnostics(&evidence.database) {
+                    Ok(header) => format!(
+                        "header_crinfo={:?} header_tmplno={} header_tmplvn={} \
+                         header_format={:?} header_session_page={} header_session_number={} \
+                         session_dab_tag={:?}",
+                        header.creation_info,
+                        header.template_type_name.as_deref().unwrap_or("unknown"),
+                        header.template_version,
+                        header.header_format,
+                        header.session_page.page,
+                        header.session_number,
+                        header.dabacon_version_tag
+                    ),
+                    Err(error) => format!("header_diagnostics_error={error}"),
+                };
+                format!(
+                    "database={} field={} raw_value={:?} raw_text={:?} session_page={:?} {header}",
+                    evidence.database.display(),
+                    evidence.source.field_name(),
+                    evidence.raw_value,
+                    evidence.raw_text,
+                    evidence.session_page
                 )
-            })?;
-            report_schema_info(&format!(
-                "[E3D schema] 二进制版本识别成功: project={} schema={} e3d=\"{}\"",
-                project_root.display(),
-                version.id,
-                version.display
-            ));
-
-            let manifest = schema_root.join(version.id).join(MANIFEST_FILE);
-            report_schema_info(&format!(
-                "[E3D schema] 开始读取 schema pack: manifest={}",
-                manifest.display()
-            ));
-            let pack = SchemaPack::open_version(&schema_root, version.id).map_err(|error| {
-                anyhow::anyhow!("读取 E3D schema pack {} 失败: {error}", manifest.display())
-            })?;
-            report_schema_info(&format!(
-                "[E3D schema] schema pack 清单读取成功: pack={} schema={} e3d=\"{}\" \
-                 template_entries={}",
-                pack.root().display(),
-                version.id,
-                version.display,
-                pack.template_types().count()
-            ));
-            report_schema_info(&format!(
-                "[E3D schema] 开始校验 schema 文件并解析 attlib: pack={} \
-                 required=attlib.dat,DESI,CATA,DICT",
-                pack.root().display()
-            ));
-            Self::open_pack(pack)
-        })();
-        Self::report_load_result(result, &context, started)
-    }
-
-    /// Detect the highest binary writer format evidenced below `project_root`
-    /// and load the matching schema pack carried by e3d-io. Directory names
-    /// and filesystem timestamps do not participate.
-    pub fn open_for_project(project_root: impl AsRef<Path>) -> anyhow::Result<Self> {
-        Self::open_for_project_with_schema_root(project_root, e3d_io::bundled_schema_root())
-    }
-
-    /// Same as [`Self::open_for_project`], with an explicit pack root for
-    /// deployment and tests.
-    pub fn open_for_project_with_schema_root(
-        project_root: impl AsRef<Path>,
-        schema_root: impl AsRef<Path>,
-    ) -> anyhow::Result<Self> {
-        let project_root = project_root.as_ref();
-        let pack = SchemaPack::detect_for_project(schema_root, project_root).map_err(|error| {
-            anyhow::anyhow!(
-                "识别 E3D 项目 {} 并选择 schema pack 失败: {error}",
-                project_root.display()
-            )
-        })?;
-        Self::open_pack(pack)
+            }
+            Err(error) => format!("读取失败: {error}"),
+        };
+        report_schema_info(&format!(
+            "[E3D schema] 项目数据库二进制版本证据（仅诊断，不用于选版本）: project={} {evidence}",
+            project_root.display()
+        ));
+        Self::report_load_result(
+            Self::open_explicit_version(&schema_root, DEFAULT_E3D_VERSION),
+            &context,
+            started,
+        )
     }
 
     fn open_explicit_version(schema_root: &Path, version: &str) -> anyhow::Result<Self> {
-        let version = e3d_io::schema::version_by_id(version.trim()).ok_or_else(|| {
-            anyhow::anyhow!("e3d_version={version:?} 无效：支持 e3d210 / e3d31")
+        let version = e3d_io::schema::version_by_id(version.trim())
+            .ok_or_else(|| anyhow::anyhow!("e3d_version={version:?} 无效：支持 e3d210 / e3d31"))?;
+        let manifest = schema_root.join(version.id).join(MANIFEST_FILE);
+        report_schema_info(&format!(
+            "[E3D schema] 开始读取 schema pack: manifest={}",
+            manifest.display()
+        ));
+        let pack = SchemaPack::open_version(schema_root, version.id).map_err(|error| {
+            anyhow::anyhow!("读取 E3D schema pack {} 失败: {error}", manifest.display())
         })?;
-        Self::open_pack(SchemaPack::open_version(schema_root, version.id)?)
+        report_schema_info(&format!(
+            "[E3D schema] schema pack 清单读取成功: pack={} schema={} e3d=\"{}\" \
+             template_entries={}",
+            pack.root().display(),
+            version.id,
+            version.display,
+            pack.template_types().count()
+        ));
+        report_schema_info(&format!(
+            "[E3D schema] 开始校验 schema 文件并解析 attlib: pack={} \
+             required=attlib.dat,DESI,CATA,DICT",
+            pack.root().display()
+        ));
+        Self::open_pack(pack)
     }
 
     pub fn open(template_dir: impl Into<PathBuf>) -> anyhow::Result<Self> {
@@ -455,9 +471,10 @@ impl DirectSchema {
         &self.template_dir
     }
 
-    /// Auto-detected binary writer format. Explicit [`Self::open`] overrides
-    /// return `None` because a directory of `.dat` files does not identify its
-    /// own release.
+    /// The release named by the schema pack this schema was opened from
+    /// (DbOption `e3d_version`). Explicit [`Self::open`] overrides return
+    /// `None` because a directory of `.dat` files does not identify its own
+    /// release.
     pub fn version(&self) -> Option<&'static E3dVersion> {
         self.version
     }
@@ -638,6 +655,10 @@ impl DirectStore {
         self.attrs.len()
     }
 
+    pub fn opened_dbnums(&self) -> Vec<i32> {
+        self.sessions.iter().map(|entry| *entry.key()).collect()
+    }
+
     /// refno → dbnum：**位解码**（`refno_route::refno_dbnum`，与 core.dll `DB_Element::dbno` 同式），
     /// 再问一句「这个库我认识吗」——钉过、或定位器有它的文件，就是认识。
     ///
@@ -660,7 +681,7 @@ impl DirectStore {
 
     /// 钉过、或定位器登记得出文件——两者任一即「认识这个库」。只问目录，不开文件。
     fn knows_dbnum(&self, dbnum: u32) -> bool {
-        self.pinned(dbnum as i32).is_some() || self.locator.file_of(dbnum).is_some()
+        self.pinned(dbnum as i32).is_some() || self.locator.contains_dbnum(dbnum)
     }
 
     /// 取一个元素的属性，库由 ref0 反查决定。**跨库引用走的就是这条。**
@@ -852,10 +873,7 @@ impl DirectStore {
             .map_err(|_| DirectStoreError::Poisoned { slot: "session" })?;
         let found = session
             .engine
-            .referrers_of(
-                e3d_attlib::db1_hash(attribute),
-                to_refno(target),
-            )
+            .referrers_of(e3d_attlib::db1_hash(attribute), to_refno(target))
             .map_err(|error| DirectStoreError::Session {
                 dbnum,
                 detail: format!("反向引用表 {attribute}：{error}"),
@@ -1139,6 +1157,22 @@ mod tests {
         }
     }
 
+    #[test]
+    fn declared_missing_file_is_not_an_outside_mdb_reference() {
+        struct Missing;
+        impl CataDbLocator for Missing {
+            fn dbnum_of_ref0(&self, _: u32) -> Option<u32> { None }
+            fn contains_dbnum(&self, dbnum: u32) -> bool { dbnum == 8000 }
+            fn db_type_of(&self, _: u32) -> Option<String> { Some("DESI".into()) }
+            fn file_of(&self, _: u32) -> Option<(String, PathBuf)> { None }
+        }
+        let schema = Arc::new(DirectSchema { attlib: e3d_attlib::AttlibData::default(), template_dir: "unused".into(), version: None });
+        let store = DirectStore::new(schema, Arc::new(Missing));
+        let reference = RefU64::from_two_nums(24384, 42);
+        assert_eq!(store.dbnum_of(reference).unwrap(), 8000);
+        assert!(matches!(store.attrs(reference), Err(DirectStoreError::NoFileForDbnum { dbnum: 8000 })));
+    }
+
     fn store_without_files() -> DirectStore {
         let schema = Arc::new(DirectSchema {
             attlib: e3d_attlib::AttlibData::default(),
@@ -1219,6 +1253,7 @@ mod tests {
     #[test]
     fn a_dbnum_the_locator_does_not_know_is_an_error_not_a_guess() {
         let store = store_without_files();
+        // 24384 = 0x5F40：extent 2 的 dbnum 8000。
         let refno = RefU64::from_two_nums(24_384, 18_447);
 
         let error = store.attrs_in(8000, refno).unwrap_err();
@@ -1269,7 +1304,10 @@ mod tests {
                 "direct_store 生产代码不得包含 `{needle}`：refno → dbnum 只走 refno_route"
             );
         }
-        assert!(production.contains("refno_dbnum("), "解码 helper 必须是唯一入口");
+        assert!(
+            production.contains("refno_dbnum("),
+            "解码 helper 必须是唯一入口"
+        );
     }
 
     /// ADR-054 Q1：定位器认识、却没人钉时点的库，pin 出来就是「开库那一刻的最新」
@@ -1393,7 +1431,7 @@ mod tests {
         let source = include_str!("direct_store.rs");
         for required in [
             "[E3D schema] 开始加载",
-            "[E3D schema] 二进制版本识别成功",
+            "[E3D schema] 项目数据库二进制版本证据（仅诊断，不用于选版本）",
             "[E3D schema] 开始读取 schema pack",
             "[E3D schema] schema pack 清单读取成功",
             "[E3D schema] 开始校验 schema 文件并解析 attlib",
@@ -1403,6 +1441,36 @@ mod tests {
             assert!(
                 source.contains(required),
                 "schema 加载过程缺日志 {required}"
+            );
+        }
+        // 自动识别已废止（e3d-io 2c6f11d）：这里只准读证据，不准再调 detect_*。
+        assert!(
+            !source.contains(concat!("e3d_io::", "detect_project_version("))
+                && !source.contains(concat!("SchemaPack::", "detect_for_project(")),
+            "schema 加载不得再调 detect_*：它一律失败，报错还是一句英文 API 说明"
+        );
+        assert!(
+            source.contains("e3d_io::database_header_diagnostics(&evidence.database)"),
+            "默认 schema 启动日志必须补充 CRINFO/TMPLVN/session DAB tag"
+        );
+        for required in [
+            "header_crinfo=",
+            "header_tmplvn=",
+            "session_dab_tag=",
+            "header_diagnostics_error=",
+        ] {
+            assert!(source.contains(required), "schema 启动头诊断缺 {required}");
+        }
+        assert_eq!(DEFAULT_E3D_VERSION, "e3d210");
+        for required in [
+            "mode=default source=DbOption-unconfigured",
+            "e3d_version={DEFAULT_E3D_VERSION}",
+            "DbOption 未配置 e3d_version，使用默认",
+            "Self::open_explicit_version(&schema_root, DEFAULT_E3D_VERSION)",
+        ] {
+            assert!(
+                source.contains(required),
+                "未配置 e3d_version 的默认路径缺 {required}"
             );
         }
 
@@ -1461,13 +1529,8 @@ mod tests {
     }
 
     #[test]
-    fn installed_e3d_2_1_project_binaries_select_the_2_10_schema_pack() {
-        let project = Path::new(r"D:\AVEVA\Projects\E3D2.1");
-        if !project.is_dir() {
-            eprintln!("skipped: installed E3D 2.1 sample project is absent");
-            return;
-        }
-        let schema = DirectSchema::open_for_project(project)
+    fn explicit_e3d210_opens_the_bundled_2_10_schema_pack() {
+        let schema = DirectSchema::open_explicit_version(&e3d_io::bundled_schema_root(), "e3d210")
             .expect("the bundled E3D 2.10 schema pack opens");
         assert_eq!(schema.version().map(|version| version.id), Some("e3d210"));
         assert!(
@@ -1483,14 +1546,9 @@ mod tests {
     }
 
     #[test]
-    fn installed_e3d_3_1_project_binaries_select_the_3_1_schema_pack() {
-        let project = Path::new(r"D:\AVEVA\Projects\E3D3.1");
-        if !project.is_dir() {
-            eprintln!("skipped: installed E3D 3.1 sample project is absent");
-            return;
-        }
-        let schema =
-            DirectSchema::open_for_project(project).expect("the bundled E3D 3.1 schema pack opens");
+    fn explicit_e3d31_opens_the_bundled_3_1_schema_pack() {
+        let schema = DirectSchema::open_explicit_version(&e3d_io::bundled_schema_root(), " E3D31 ")
+            .expect("the bundled E3D 3.1 schema pack opens (id is trimmed, case-insensitive)");
         assert_eq!(schema.version().map(|version| version.id), Some("e3d31"));
         assert!(
             schema
@@ -1499,6 +1557,10 @@ mod tests {
             "{}",
             schema.template_dir().display()
         );
+        let invalid = DirectSchema::open_explicit_version(&e3d_io::bundled_schema_root(), "e3d40")
+            .unwrap_err()
+            .to_string();
+        assert!(invalid.contains("支持 e3d210 / e3d31"), "{invalid}");
     }
 
     #[test]
@@ -1510,8 +1572,8 @@ mod tests {
         }
 
         let schema = Arc::new(
-            DirectSchema::open_for_project(database)
-                .expect("the database path selects the E3D 2.10 schema pack"),
+            DirectSchema::open_explicit_version(&e3d_io::bundled_schema_root(), "e3d210")
+                .expect("the bundled E3D 2.10 schema pack opens"),
         );
         assert_eq!(schema.version().map(|version| version.id), Some("e3d210"));
 

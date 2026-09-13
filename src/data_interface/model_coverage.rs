@@ -167,7 +167,11 @@ pub async fn generation_roots_cache_current(
         .map_err(|error| anyhow::anyhow!("resolve catalogue versions task failed: {error}"))?
     };
     let mut covered = BTreeMap::new();
-    for dbnum in versions.iter().map(|(_, dbnum, _)| *dbnum).collect::<BTreeSet<_>>() {
+    for dbnum in versions
+        .iter()
+        .map(|(_, dbnum, _)| *dbnum)
+        .collect::<BTreeSet<_>>()
+    {
         if let Some(sesno) = library_coverage_on(&SUL_DB, dbnum).await? {
             covered.insert(dbnum, sesno);
         }
@@ -178,15 +182,22 @@ pub async fn generation_roots_cache_current(
             let root_id = root_refno.replace('/', "_");
             rows.get(&root_id)
                 .is_some_and(|row| {
-                    super::window_root_plan::root_is_settled(row.status.as_deref(), row.source_end_sesno,
-                        row.publication_status.as_deref(), row.desired_revision, row.published_revision)
-                    && (covered.get(&dbnum).is_some_and(|sesno| *sesno >= required_sesno)
-                    || crate::data_interface::model_source::credential_covers(
+                    super::window_root_plan::root_is_settled(
+                        row.status.as_deref(),
                         row.source_end_sesno,
-                        required_sesno,
-                    )) && catalogue_stamps_current(&row.catalogue, |dbnum| {
-                        catalogue_latest.get(&dbnum).copied().flatten()
-                    })
+                        row.publication_status.as_deref(),
+                        row.desired_revision,
+                        row.published_revision,
+                    ) && (covered
+                        .get(&dbnum)
+                        .is_some_and(|sesno| *sesno >= required_sesno)
+                        || crate::data_interface::model_source::credential_covers(
+                            row.source_end_sesno,
+                            required_sesno,
+                        ))
+                        && catalogue_stamps_current(&row.catalogue, |dbnum| {
+                            catalogue_latest.get(&dbnum).copied().flatten()
+                        })
                 })
                 .then_some(root_refno)
         })
@@ -211,7 +222,9 @@ async fn library_coverage_on(db: &Surreal<Any>, dbnum: u32) -> anyhow::Result<Op
             .map(|state| state.model_sesno)
     } else {
         let row: Option<Row> = db
-            .query(format!("SELECT model_sesno FROM ONLY dbnum_watermark:{dbnum};"))
+            .query(format!(
+                "SELECT model_sesno FROM ONLY dbnum_watermark:{dbnum};"
+            ))
             .await?
             .check()?
             .take(0)?;
@@ -305,8 +318,13 @@ pub async fn model_coverage_current(dbnum: u32) -> anyhow::Result<bool> {
         .await?
         .is_some_and(|sesno| sesno >= target.sesno as i32);
     let settled = super::model_watermark::settled_root_predicate();
-    let lag = if covered { String::new() } else {
-        format!(" OR (source_end_sesno?:0) <= 0 OR (source_end_sesno?:0) < {}", target.sesno)
+    let lag = if covered {
+        String::new()
+    } else {
+        format!(
+            " OR (source_end_sesno?:0) <= 0 OR (source_end_sesno?:0) < {}",
+            target.sesno
+        )
     };
     let started = Instant::now();
     let coverage_result = SUL_DB
@@ -579,7 +597,7 @@ struct StaleCatalogueWindow {
 ///
 /// ADR-058 D2 的触发源就在这里：direct / 读透形态下目录库没有数据批次，读透形态的文件事件也
 /// 汇到 `reconcile_model_coverage_at_startup`，所以启动与文件事件共用这一处。**摄入形态**
-/// （external / rocksdb，2026-09-07 起的默认）的文件事件走的是数据面 sweep，目录库在那条路上
+/// （external / rocksdb，需显式配置）的文件事件走的是数据面 sweep，目录库在那条路上
 /// 被 `UpdateScope::admits` 挡在数据批次之外——2026-09-08 之前它们到不了这里，目录改了要等
 /// 重启；现在 sweep 收尾经 [`reconcile_catalogue_versions_after_sweep`]、`/update/execute` 经
 /// [`reconcile_catalogue_versions_now`] 也汇到这一处（H1）。三条入口串行（同一把
@@ -1718,7 +1736,10 @@ mod tests {
             .expect("model gate ends before the next row type")
             .0;
         assert!(body.contains("(source_end_sesno?:0) <= 0 OR (source_end_sesno?:0) < {}"));
-        assert!(body.contains("library_coverage_on(&SUL_DB, dbnum)"), "库级覆盖读水位镜像，不再问收据");
+        assert!(
+            body.contains("library_coverage_on(&SUL_DB, dbnum)"),
+            "库级覆盖读水位镜像，不再问收据"
+        );
         assert!(
             !body.contains("source_end_sesno_time"),
             "时刻列只记不比（ADR-054）: {body}"

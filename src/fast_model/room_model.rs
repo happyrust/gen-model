@@ -983,8 +983,14 @@ async fn recalc_panel_membership_inner(
     // 没有几何同样是「判不了」，在这里要比全量那一侧更响：整间任务的入队条件是这块
     // 面板的包围盒确实变过，能变就说明它刚才还有几何，此刻却查不到，本身就是信号。
     // 上抛让任务保留重试，而不是写一个空集把这间房清掉。
-    let members =
-        match cal_room_refnos_from(&db_option.get_meshes_path(), panel, &exclude, resident).await? {
+    let members = match cal_room_refnos_from(
+        &db_option.get_meshes_path(),
+        panel,
+        &exclude,
+        resident,
+    )
+    .await?
+    {
         PanelMembers::Computed(members) => members,
         PanelMembers::NoGeometry => anyhow::bail!(
             "面板 {panel} 查不到任何几何实例，不改写它的房间归属（任务保留重试）。\
@@ -1991,25 +1997,31 @@ impl MemoryRoomCalculator {
         room_definition_version: &str,
         records: &[crate::fast_model::model_memory_store::ProjectedGeometry],
     ) -> anyhow::Result<Vec<ElementRoomEdge>> {
-        self.calculate_with_points(dbnum, model_sesno, room_definition_version, records, |record| {
-            let transform = match &record.shape {
-                crate::fast_model::model_memory_store::ProjectedShape::Baked => {
-                    record.world_transform
-                }
-                crate::fast_model::model_memory_store::ProjectedShape::Canonical {
-                    local_transform,
-                    ..
-                } => record.world_transform * *local_transform,
-            };
-            Ok(crate::fast_model::room_resident::build_tri_mesh(
-                self.panels.mesh_dir(),
-                &record.mesh_id,
-                transform.as_mat4(),
-            )
-            .map_err(anyhow::Error::msg)?
-            .vertices()
-            .to_vec())
-        })
+        self.calculate_with_points(
+            dbnum,
+            model_sesno,
+            room_definition_version,
+            records,
+            |record| {
+                let transform = match &record.shape {
+                    crate::fast_model::model_memory_store::ProjectedShape::Baked => {
+                        record.world_transform
+                    }
+                    crate::fast_model::model_memory_store::ProjectedShape::Canonical {
+                        local_transform,
+                        ..
+                    } => record.world_transform * *local_transform,
+                };
+                Ok(crate::fast_model::room_resident::build_tri_mesh(
+                    self.panels.mesh_dir(),
+                    &record.mesh_id,
+                    transform.as_mat4(),
+                )
+                .map_err(anyhow::Error::msg)?
+                .vertices()
+                .to_vec())
+            },
+        )
     }
 
     pub(crate) fn new(model: Arc<ResidentRoomModel>, mesh_dir: PathBuf) -> anyhow::Result<Self> {
@@ -2045,13 +2057,19 @@ impl MemoryRoomCalculator {
     ) -> anyhow::Result<Vec<ElementRoomEdge>> {
         #[cfg(test)]
         let mut reads = HashMap::<String, usize>::new();
-        let result = self.calculate_with_points(dbnum, model_sesno, room_definition_version, records, |record| {
-            #[cfg(test)]
-            {
-                *reads.entry(record.mesh_id.clone()).or_default() += 1;
-            }
-            memory_model_world_points(record, self.panels.mesh_dir())
-        });
+        let result = self.calculate_with_points(
+            dbnum,
+            model_sesno,
+            room_definition_version,
+            records,
+            |record| {
+                #[cfg(test)]
+                {
+                    *reads.entry(record.mesh_id.clone()).or_default() += 1;
+                }
+                memory_model_world_points(record, self.panels.mesh_dir())
+            },
+        );
         #[cfg(test)]
         println!(
             "ROOM_MESH_READS dbnum={dbnum} records={} reads={} unique={}",
@@ -2103,6 +2121,17 @@ impl MemoryRoomCalculator {
         self.calculate_edges(records, |record| {
             memory_model_world_points(record, self.panels.mesh_dir())
         })
+    }
+
+    /// 这台计算器冻结的 resident generation。完整根 ACK 用它防止旧房间拓扑冒充新代。
+    pub(crate) fn resident_generation(&self) -> &str {
+        &self
+            .panels
+            .resident
+            .as_ref()
+            .expect("a memory room calculator is always built from a resident model")
+            .manifest
+            .key
     }
 
     /// 冻结那一刻的房间 → 面板现状（谁是面板、面板属于哪间在册的房）。

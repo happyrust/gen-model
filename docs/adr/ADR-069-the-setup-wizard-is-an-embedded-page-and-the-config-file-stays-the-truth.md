@@ -1,6 +1,6 @@
 # ADR-069：配置向导是内嵌单页 + 设置模式，配置真值仍是 DbOption.toml 文件
 
-状态：**已接受**（2026-09-09 用户两轮 16 问全按推荐拍板 + 两条补拍：出厂 external 空地址、默认监听全 0。**号到提交时复核**——ADR-060 曾撞号两次，ADR-067/068 亦有此注）。
+状态：**已接受，2026-09-11 增补 embedded-mem 向导档与 runtime 默认值**（配置真值、回环安全闸和保存重启协议不变。）
 日期：2026-09-09
 落地：`src/web_service/setup.rs`（setup API + 设置模式）、`web/setup.html`（向导页）、`src/lib.rs`（启动臂分支 + 单实例锁交接窗）、`scripts/templates/DbOption.factory.toml` + `scripts/New-LocalRelease.ps1`（出厂形态 + 冒烟两腿）。
 关联：
@@ -38,19 +38,21 @@ HTTP（`GET/PUT /api/v1/setup/config`）只是它的读写口。写盘用 `toml_
 
 ### D5　出厂形态：模板 + 哨兵（修订 ADR-068 D3）
 
--full 包的 `workspace\DbOption.toml` 换成出厂模板（`scripts/templates/DbOption.factory.toml`）：`project_path=""`、`store_mode="external"` + `v_ip=""` / `v_port="0"`、`http_api_addr="0.0.0.0:9099"`、gen 全关、watch 空；另落 `.first-run-pending`。「连回原环境的坐标」不再随包走——那些是**部署现场**的事实，由首跑向导现场填（或手改 toml + 删哨兵，README 写明）。
+出厂配置都令 `project_path=""`、`http_api_addr="0.0.0.0:9099"`、gen 全关、watch 空，并带 `.first-run-pending`。runtime 档由组包脚本写成 `store_mode="embedded-mem"`；带 workspace 档保留模板的 `spawned-mem`。向导提供 external / spawned-rocksdb / embedded-mem / spawned-mem 四档，embedded 不要求也不改写有效数据库端点；配置读回时必须原样选中，不能静默翻回 spawned-mem。
 
 ### D6　配置生效走「保存并重启」口，交接靠重试窗
 
 `POST /api/v1/setup/restart`：202 → 300ms 后 spawn 同 exe / 同参数 / 同环境的子进程（带 `AIOS_RESTART_HANDOFF=1`）→ 父进程 `exit(0)` 一并交出端口与单实例锁。子进程在 ≤10s 窗口内对「端口被占」「锁被持」重试（`bind_with_handoff` / `open_lock_within_handoff_window`）；窗口只在环境变量在场时存在，平时绑不上就是失败，不悄悄重试。向导页轮询新地址（`0.0.0.0` 映射 `127.0.0.1`）等它回来。失败不静默：子进程拉不起来父进程继续跑并出声；轮询超时给「手动重跑 Start-AMS」文案。
 
+`http_api_addr` 与 `http_public_addr` 分工固定：前者只决定 socket 监听，后者只生成日志、自动打开与分享链接。首跑与 restart 轮询不消费 public 地址，始终把全接口监听映射到回环地址，以满足 D4 的配置安全闸。正常模式可用 `0.0.0.0:9099` 监听并展示 `192.168.1.9:9099`，无需在“局域网可达”和“本机能配置”之间二选一。
+
 ### D7　初始化面不加新口
 
 向导第 ⑤ 步全部复用既有 API：`/api/v1/dbnums`（`awaiting_manual_initialization` 名单 + 水位）、`/update/preview`、`/update/execute`（`dbnums[]` 子集，ADR-020）。「只导数据 / 一步到位」两档单选写回 `gen_model` / `gen_mesh` 随 ④ 保存。手动初始化的准入口径仍是 d-103（缺省不自动初始化新库），向导没有旁路。
 
-### D8　冒烟门两腿（修订 ADR-068 D6）
+### D8　冒烟门按发布档位分腿（修订 ADR-068 D6）
 
-A 腿：出厂模板 + 哨兵起包内 exe，期待 `/health` 报 `mode:"setup"` 且 `/setup.html` 含向导标记——考「新机器解压第一步」；B 腿：本机真配置全启动（原有腿，`spawned-mem`），首页判定放宽为「plant-ui 或向导页」二择一。任一腿失败照旧标「未冒烟」不静默放行，`-StrictSmoke` 任一腿失败即不出包。
+A 腿：该档出厂配置 + 哨兵起包内 exe，期待 `/health` 报 `mode:"setup"` 且 `/setup.html` 含向导标记。B 腿：本机真配置全启动；runtime 强制 `embedded-mem`，除 health 与首页外还要求没有 Surreal 子进程；带 workspace 档强制 `spawned-mem`。带 workspace 档另有 ADR-070 的 spawned-rocksdb C 腿。任一必需腿失败照旧标「未冒烟」，`-StrictSmoke` 下不出包。
 
 ## 后果
 
@@ -62,7 +64,7 @@ A 腿：出厂模板 + 哨兵起包内 exe，期待 `/health` 报 `mode:"setup"`
 ## 实施约束
 
 1. 回环闸的判据只能是 TCP 对端（源码钉 `the_gate_never_reads_forwarded_headers`：签名只收 `SocketAddr`、模块不读请求头）。
-2. 设置模式判据是纯函数 `setup_mode_reason_for`（真值表钉死：project_path 两态 × store 三档 × 地址空满）。
+2. 设置模式判据是纯函数 `setup_mode_reason_for`（真值表钉死：project_path 两态 × store 四档 × 地址空满）；embedded-mem 不需要端点。
 3. 写盘承诺由 `config_writes_keep_comments_unknown_keys_and_integer_shapes` 与 `write_config_backs_up_before_touching_the_file` 钉死：注释 / 未知键保留、整数键不漂移成字符串、先备份后写、空补丁不碰盘。
 4. `v_port` 的「未设置」哨兵是 `"0"`：任何路径（向导写盘、手改模板）都不得把空串写进这一格。
-5. `spawned-mem` 落盘必须带真实本机地址（向导默认 127.0.0.1:8009）：`v_port=0` 会让下次正常启动把内存库绑到端口 0 而必然失败——写口在**合并后**校验拦截（`write_config_refuses_spawned_mem_with_a_blank_address`），前端试用档对空地址自动补默认值。external 留空不拦（只会安全回设置模式）。
+5. `spawned-mem` 必须带真实本机地址（向导默认 127.0.0.1:8009）；`v_port=0` 会让下次正常启动必然失败，写口在合并后拦截。embedded-mem 的 v_ip/v_port 被禁用且不参与判定；external 留空只会安全回设置模式。

@@ -159,9 +159,12 @@ impl CataDbLocator for MdbRouteDirectory {           // 迁移期兼容壳
 
 **阶段 5 前置字段（本切片未做，接口先定，§9 Q13）**
 
-每个 dbnum 一份 `DbGeneration { generation: u64, identity: FileIdentity(len, mtime), latest_sesno: u32 }`：
+每个 dbnum 一份 `DbGeneration { generation: u64, identity: FileIdentity(len, mtime), latest_sesno: u32, base_sesno: Option<u32> }`：
 `identity` 或 `latest_sesno` 任一变化则 `generation += 1`，并标出变化类型——`sesno` 变大 = 会话前进、变小 = 回滚、
-身份变但 `sesno` 不变 = 换文件。这是母计划不变量 7「换文件、回滚、session 前进必须能区分」的落点，
+身份变但 `sesno` 不变 = 换文件；**2026-09-12 追加**：`sesno` 变大但新会话页的 `BASESN`（e3d-io `SessionPage::tail.base_sesno`，`c7cc6c8`）
+低于上次观察到的 `sesno` 也是**回滚**——E3D BACKTRACK 后 SAVEWORK 会话号照涨、内容回到旧会话，且其 `REASON` 为 0，
+只有 BASESN 能看出来（3.1 `ams8000_0001` 第 243 会话基于 239、其后保留 242）。规则表与跨多会话时的沿链回看见
+`docs/plans/2026-09-12-lazy-startup-dev-plan.md` §3.4。这是母计划不变量 7「换文件、回滚、session 前进必须能区分」的落点，
 `refresh_path(path) -> RouteRefresh { dbnum, from, to, kind }` 在阶段 5 加；`/health.core` 的 `route_directory.generation`
 （§7 风险 2）以它为源。
 
@@ -342,7 +345,7 @@ RefNo → dbnum → 文件，与 schema pack 无关，2.1/3.1 的差异在属性
 | Q10 | SAVEWORK 夹具 | `db8000_bran_ftub_move_apply/restore.mac`，验 8000 刷、7998 不动 |
 | Q11 | 目录边界 | 目录带「目标库上下文」：`pin_for(dbnum, preferred_project)`（已落地），后续给 `resolver_for(target_dbnum)` 视图，`E3dDbResolver` 变壳或删；`SysMetadataResolver` 独立不并（它在 membership 之前） |
 | Q12 | MDB 内同号 | MDB 声明路径胜出，`shadowed` 只记不选、只作依赖候选；真歧义（同目录两文件自报同 dbnum）已由 `initialization_phase` blocker 与 `SysMetadataResolver` 的拒绝覆盖 |
-| Q13 | generation | 每 dbnum 单调 `u64`，存 `(FileIdentity, latest_sesno)`，任一变化 +1 并标类型（前进 / 回滚 / 换文件）；阶段 1 定接口，阶段 5 实现 |
+| Q13 | generation | 每 dbnum 单调 `u64`，存 `(FileIdentity, latest_sesno, base_sesno)`，任一变化 +1 并标类型（前进 / 回滚 / 换文件）；回滚含「会话号变大但 BASESN 低于上次会话号」（2026-09-12 追加，§3.1 / 阶段 4 切片 §3.4）；阶段 1 定接口，阶段 5 实现 |
 | Q14 | 护栏形态 | `include_str!` 文本护栏 + `read_stats` 计数器行为断言，两者都要 |
 | Q15 | 提交拆法 | 按 hunk 拆：e3d-io 两笔、gen-model 四笔（三条无关流水 + 阶段 0）；提交前先贴 file→commit map；提交信息沿仓内惯例但**省略 t-编号**，只引 ADR / plan 路径 |
 | Q16 | 单根生成的 `scan_index` 单库全扫 | **已定（2026-09-12）**：记为母计划**阶段 7**，独立阶段，不入本片也不入阶段 4 切片 |

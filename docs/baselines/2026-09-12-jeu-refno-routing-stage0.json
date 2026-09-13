@@ -1,0 +1,38 @@
+{
+  "schema": "gen-model/refno-native-stage0-baseline/v1",
+  "project": "JEU",
+  "mdb": "/ALL",
+  "captured_from": {
+    "kind": "field-startup-log-summary",
+    "date": "2026-09-11",
+    "raw_log_path": null
+  },
+  "runtime": {
+    "store_mode": "embedded-mem",
+    "data_face": "read-through",
+    "room_membership": false
+  },
+  "membership": {
+    "raw_curd_rows": 479,
+    "decoded_databases": 479,
+    "skipped_databases": 0,
+    "design_or_isod_databases": 417
+  },
+  "legacy_skeleton": {
+    "elements": 1221858,
+    "elapsed_ms_approx": 68000,
+    "database_opens": null,
+    "scan_calls": null,
+    "scanned_elements": 1221858,
+    "index_point_lookups": null
+  },
+  "process_rss_bytes": null,
+  "first_attribute_ms": null,
+  "first_generation_root_ms": null,
+  "limitations": [
+    "The source field log was summarized in the handoff but was not copied into this repository.",
+    "The current implementation session did not have the JEU database corpus mounted.",
+    "RSS and first-request timings were not present in the source summary and are intentionally null.",
+    "The observed process exited before HTTP service validation because its old config omitted http_api_addr."
+  ]
+}

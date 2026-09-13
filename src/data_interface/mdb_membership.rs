@@ -8,6 +8,11 @@
 //! not — and neither mistake reports anything. A UDA whose dictionary was left
 //! out reads exactly like a UDA with no value.
 //!
+//! A `CURD` entry is not always a `DB`: E3D lets it be a `DBSET`, which
+//! `openMDB` unfolds through `DBL.DBF` / `DBSTL.DBSTF` before opening anything
+//! (core.dll `CURRFU`). [`expand_curd_dbsets`] does the same here, so a set
+//! declared in ADMIN is not read as one declaration with no `DBNO`.
+//!
 //! SYS PROJ is a character vector (ACP / SCB / APS), not an integer flag.
 //! An empty vector selects the declaring project. Never substitute another
 //! project merely because it contains a file with the same dbnum.
@@ -181,11 +186,27 @@ fn report_sys_error(message: &str) {
     eprintln!("{message}");
 }
 
+/// e3d-io 探针读到的版本证据，压成 `{field=… raw_value=… raw_text=… session_page=…}`。
+///
+/// 探针不给版本结论——目前没有任何库字段被证明能分开 2.1 与 3.1（e3d-io
+/// docs/evidence/2026-09-11-e3d-database-version.md）。SYS 库本身不是 COMM，
+/// 通常只会给到 `field=none` 与会话页号：这一行的价值在于「e3d-io 能按已知页身份
+/// 打开它」，读不出来才是异常。
+fn sys_version_evidence_summary(evidence: &e3d_io::DatabaseVersionEvidence) -> String {
+    format!(
+        "{{field={} raw_value={:?} raw_text={:?} session_page={:?}}}",
+        evidence.source.field_name(),
+        evidence.raw_value,
+        evidence.raw_text,
+        evidence.session_page
+    )
+}
+
 fn sys_basic_info_message(
     sys: &Path,
     header: &crate::data_interface::db_file_header::DbFileHeader,
     selected_schema: &str,
-    binary_version: &str,
+    version_evidence: &str,
 ) -> String {
     let saved_at = header
         .latest_session
@@ -194,8 +215,8 @@ fn sys_basic_info_message(
     format!(
         "[SYS 解析] 基本信息: file={} bytes={} dbnum={} db_type={} latest_sesno={} \
          latest_ses_pgno={} session_pgno={} previous_session_pgno={:?} end_pgno={} \
-         index_root_pgno={} saved_at={} machine={:?} comment={:?} selected_schema={} \
-         binary_version={}",
+         index_root_pgno={} saved_at={} user={:?} comment={:?} selected_schema={} \
+         version_evidence={}",
         sys.display(),
         header.file_size,
         header.dbnum,
@@ -207,10 +228,10 @@ fn sys_basic_info_message(
         header.latest_session.end_pgno,
         header.latest_session.index_root_pgno,
         saved_at,
-        header.latest_session.machine,
+        header.latest_session.user,
         header.latest_session.comment,
         selected_schema,
-        binary_version
+        version_evidence
     )
 }
 
@@ -287,7 +308,8 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
     for sys in sys_candidates(&own_dirs) {
         tried.push(sys.display().to_string());
         match read_declaration(&sys, project, &wanted, &projects) {
-            Ok(Some(databases)) => {
+            Ok(Some((databases, expansion_problems))) => {
+                problems.extend(expansion_problems);
                 for db in databases.iter().filter(|db| db.path.is_none()) {
                     problems.push(format!(
                         "MDB {wanted}: dbnum={} ({}) declared project {} has no matching configured source; same-dbnum foreign fallback disabled",
@@ -361,7 +383,8 @@ pub fn resolve(db_option: &DbOption, project: &str, mdb: &str) -> anyhow::Result
 }
 
 /// Files whose name ends in `sys`, which is how E3D names the SYSTEM database
-/// (`amssys`, `acpsys`). Sibling `*mis` / `*com` files are other things.
+/// (`amssys`, `acpsys`). Sibling `*mis` / `*com` / `*glb` files are not MDB
+/// roots; [`SysMetadataResolver`] still indexes them for cross-database refs.
 fn sys_candidates(dirs: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for dir in dirs {
@@ -430,19 +453,160 @@ fn read_mdb_candidate_names(sys: &Path) -> anyhow::Result<Vec<String>> {
     Ok(names.into_iter().collect())
 }
 
+/// What the CURD expansion needs from a SYS element, narrowed so the walk can be
+/// exercised against an in-memory tree in tests without a database file.
+trait CurdElements {
+    /// Noun name of the element, `None` when it is not in the pinned session's index.
+    fn element_type(&self, refno: RefU64) -> anyhow::Result<Option<String>>;
+    fn member_refnos(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>>;
+    /// A reference attribute; `None` for unset, Nulref, or an attribute the noun
+    /// does not carry (a `DBL` without `DBF` is reported by the caller, not here).
+    fn get_ref(&self, refno: RefU64, attribute: &str) -> anyhow::Result<Option<RefU64>>;
+    /// Whether the DBSET carries a `DBCRITERIA` expression.
+    fn has_db_criteria(&self, refno: RefU64) -> anyhow::Result<bool>;
+}
+
+/// One database element of the expanded current list.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CurdEntry {
+    refno: RefU64,
+    /// `None` for a `DB` listed directly in `CURD`; otherwise the DBSET chain
+    /// that pulled it in, for diagnostics.
+    via: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct CurdExpansion {
+    entries: Vec<CurdEntry>,
+    /// How many raw `CURD` entries were DBSETs.
+    dbset_entries: usize,
+    /// Anything the walk had to skip or approximate; a person should see these.
+    problems: Vec<String>,
+}
+
+/// `MDB.CURD` as E3D opens it: what core.dll's `CURRFU` pseudo-attribute yields
+/// (E3D 2.1 `DB_PseudoCURRFULLonMDB::get` `0x105C06B0` feeding `DB_MDB::openMDB`).
+///
+/// A `DB` entry passes through. A `DBSET` entry is replaced by the databases its
+/// `DBL` members reference through `DBF`, nested sets reached through
+/// `DBSTL.DBSTF` included (`DBSLIS` `0x105C03B0` / `0x105C0010`). Each set is
+/// entered once, so a cycle terminates, and each database is kept at its first
+/// position: E3D dedupes inside one set, and `DB_DB::construct` reuses the
+/// already-open `DB_DB` for a repeat, so one occurrence is what it ends up with.
+///
+/// Anything that is neither `DB` nor `DBSET` — including an entry missing from
+/// the session index — is left in place so the per-database decode reports it
+/// with its usual stage. What this does not reproduce is `DBCRITERIA`: E3D also
+/// pulls in every database matching that expression (`sub_105BD020`), which is
+/// reported as a problem rather than silently approximated.
+fn expand_curd_dbsets<E: CurdElements>(
+    elements: &E,
+    curd: &[RefU64],
+) -> anyhow::Result<CurdExpansion> {
+    let mut out = CurdExpansion::default();
+    let mut seen_dbs: BTreeSet<RefU64> = BTreeSet::new();
+    let mut seen_dbsets: BTreeSet<RefU64> = BTreeSet::new();
+    for (index, refno) in curd.iter().enumerate() {
+        let noun = elements.element_type(*refno)?;
+        if noun.as_deref() == Some("DBSET") {
+            out.dbset_entries += 1;
+            let chain = format!("CURD[{index}] DBSET {}/{}", refno.get_0(), refno.get_1());
+            expand_one_dbset(
+                elements,
+                *refno,
+                &chain,
+                &mut seen_dbs,
+                &mut seen_dbsets,
+                &mut out,
+            )?;
+            continue;
+        }
+        if seen_dbs.insert(*refno) {
+            out.entries.push(CurdEntry {
+                refno: *refno,
+                via: None,
+            });
+        } else {
+            out.problems.push(format!(
+                "CURD[{index}] {}/{} 已在前面出现（直接声明或经 DBSET），按首次位置保留一份",
+                refno.get_0(),
+                refno.get_1()
+            ));
+        }
+    }
+    Ok(out)
+}
+
+fn expand_one_dbset<E: CurdElements>(
+    elements: &E,
+    dbset: RefU64,
+    chain: &str,
+    seen_dbs: &mut BTreeSet<RefU64>,
+    seen_dbsets: &mut BTreeSet<RefU64>,
+    out: &mut CurdExpansion,
+) -> anyhow::Result<()> {
+    if !seen_dbsets.insert(dbset) {
+        return Ok(());
+    }
+    if elements.has_db_criteria(dbset)? {
+        out.problems.push(format!(
+            "{chain} 带 DBCRITERIA 动态条件；本实现只展开 DBL/DBSTL 静态成员，E3D 还会把满足条件的库补进来，\
+             该 DBSET 可能少库"
+        ));
+    }
+    for member in elements.member_refnos(dbset)? {
+        let member_id = format!("{}/{}", member.get_0(), member.get_1());
+        match elements.element_type(member)?.as_deref() {
+            Some("DBL") => match elements.get_ref(member, "DBF")? {
+                Some(db) => {
+                    if seen_dbs.insert(db) {
+                        out.entries.push(CurdEntry {
+                            refno: db,
+                            via: Some(chain.to_string()),
+                        });
+                    }
+                }
+                None => out.problems.push(format!(
+                    "{chain} 成员 DBL {member_id} 没有 DBF 引用，已跳过"
+                )),
+            },
+            Some("DBSTL") => match elements.get_ref(member, "DBSTF")? {
+                Some(nested) => {
+                    let nested_chain =
+                        format!("{chain} > DBSET {}/{}", nested.get_0(), nested.get_1());
+                    expand_one_dbset(elements, nested, &nested_chain, seen_dbs, seen_dbsets, out)?;
+                }
+                None => out.problems.push(format!(
+                    "{chain} 成员 DBSTL {member_id} 没有 DBSTF 引用，已跳过"
+                )),
+            },
+            Some(other) => out.problems.push(format!(
+                "{chain} 成员 {member_id} 类型 {other} 不是 DBL/DBSTL，已跳过"
+            )),
+            None => out.problems.push(format!(
+                "{chain} 成员 {member_id} 不在最新会话索引中，已跳过"
+            )),
+        }
+    }
+    Ok(())
+}
+
 /// `Ok(None)` when the file parses but holds no MDB of that name — the caller
-/// moves on to the next candidate rather than failing.
+/// moves on to the next candidate rather than failing. `Ok(Some)` carries the
+/// databases plus the problems the CURD expansion had to report.
 fn read_declaration(
     sys: &Path,
     project: &str,
     wanted: &str,
     projects: &[(String, Vec<PathBuf>)],
-) -> anyhow::Result<Option<Vec<MdbDatabase>>> {
-    // e3d-io 读法（parse_pdms_db 退役清单 §B5）：SYS 库按最新会话钉成一个单库 `DbSet`
-    // （模板 `sysvir.dat`），MDB 元素按存储的 NAME 找（`find_named` 是一次 Named 档全树扫，
-    // 与旧读法整库 `gen_ref_type_pos_table` 同量级），属性经 `direct_attmap::to_named_attmap`
-    // 落成与旧 `whole_attmap.merge()` 同一形状的 `NamedAttrMap`——下面对 `CURD` / `DBNO` /
-    // `PROJ` / `STYP` / `NAME` 的读法逐字不变。
+) -> anyhow::Result<Option<(Vec<MdbDatabase>, Vec<String>)>> {
+    // e3d-io 读法（parse_pdms_db 退役清单 §B5）：SYS 库按最新会话钉进 `DbSet`
+    // （模板 `sysvir.dat`）；Global Project 的 MDB 在本地 SYS、DB 声明在同目录 GLB，
+    // `DbSet` 经文件头索引按 refno 自带的 dbno 惰性补开后者。MDB 元素按 SYS 的固定结构
+    // 导航找（WORL `24575/3` → MDBW `24575/7` → 成员，逐个点查核 noun 与 NAME，零扫描；
+    // 见 `SysDb::mdbs_named`），属性经 `direct_attmap::to_named_attmap` 落成与旧
+    // `whole_attmap.merge()` 同一形状的 `NamedAttrMap`——下面对 `CURD` / `DBNO` / `PROJ` /
+    // `STYP` / `NAME` 的读法逐字不变。
     let sys_db = SysDb::open(sys)?;
 
     // Design and catalogue SYS databases both declare `/ALL`, and the
@@ -566,16 +730,55 @@ fn read_declaration(
     };
 
     let curd_entries = members.len();
+    // `curd_index` below is the position in this expanded list, not in the raw
+    // CURD, once a DBSET has been unfolded into its databases.
+    let expansion = expand_curd_dbsets(&sys_db, &members).with_context(|| {
+        format!(
+            "展开 SYS {} 的 MDB {wanted}（root={}/{}）CURD 里的 DBSET",
+            sys.display(),
+            root.get_0(),
+            root.get_1()
+        )
+    })?;
+    let mut problems = Vec::with_capacity(expansion.problems.len());
+    for problem in expansion.problems {
+        let message = format!(
+            "[SYS 解析] CURD DBSET 展开: file={} mdb={} root={}/{} {problem}",
+            sys.display(),
+            wanted,
+            root.get_0(),
+            root.get_1()
+        );
+        report_sys_error(&message);
+        problems.push(message);
+    }
+    if expansion.dbset_entries > 0 {
+        report_sys_info(&format!(
+            "[SYS 解析] CURD DBSET 展开完成: file={} mdb={} root={}/{} curd_entries={} \
+             dbset_entries={} expanded_entries={}",
+            sys.display(),
+            wanted,
+            root.get_0(),
+            root.get_1(),
+            curd_entries,
+            expansion.dbset_entries,
+            expansion.entries.len()
+        ));
+    }
+    let members = expansion.entries;
     let mut databases = Vec::with_capacity(members.len());
     let mut skipped_databases = 0usize;
-    for (curd_index, refno) in members.into_iter().enumerate() {
+    for (curd_index, entry) in members.into_iter().enumerate() {
+        let refno = entry.refno;
+        // Where the entry came from: `CURD` itself, or the DBSET chain that unfolded to it.
+        let origin = entry.via.as_deref().unwrap_or("CURD");
         let merged = match sys_db.attrs(refno) {
             Ok(Some(merged)) => merged,
             Ok(None) => {
                 skipped_databases += 1;
                 report_sys_error(&format!(
                     "[SYS 解析] DB 声明解析失败: file={} mdb={} root={}/{} curd_index={} \
-                     refno={}/{} stage=element_lookup reason=元素不在最新会话索引中",
+                     refno={}/{} origin={origin} stage=element_lookup reason=元素不在最新会话索引中",
                     sys.display(),
                     wanted,
                     root.get_0(),
@@ -590,7 +793,7 @@ fn read_declaration(
                 skipped_databases += 1;
                 report_sys_error(&format!(
                     "[SYS 解析] DB 声明解析失败: file={} mdb={} root={}/{} curd_index={} \
-                     refno={}/{} stage=attribute_extract reason={error:#}",
+                     refno={}/{} origin={origin} stage=attribute_extract reason={error:#}",
                     sys.display(),
                     wanted,
                     root.get_0(),
@@ -611,7 +814,7 @@ fn read_declaration(
             skipped_databases += 1;
             report_sys_error(&format!(
                 "[SYS 解析] DB 声明解析失败: file={} mdb={} root={}/{} curd_index={} \
-                 refno={}/{} stage=dbno_decode reason=DBNO 缺失、不是整数或超出 u32 \
+                 refno={}/{} origin={origin} stage=dbno_decode reason=DBNO 缺失、不是整数或超出 u32 \
                  raw={:?}",
                 sys.display(),
                 wanted,
@@ -706,7 +909,165 @@ fn read_declaration(
         skipped_databases,
         &counts_by_styp,
     ));
-    Ok(Some(databases))
+    Ok(Some((databases, problems)))
+}
+
+/// Same-directory project administration files, keyed by the dbnum read from
+/// each file's descriptor page.
+///
+/// A Global Project stores the MDB element in `<project>sys`, while the DB
+/// elements referenced by `MDB.CURD` live in `<project>glb`.  Their reserved
+/// numbers are installation data, not parser constants: discover every
+/// SYS/COMM/MISC/GLB sibling by name (the Global header type is `GLOB`), then
+/// trust only its file header for the routing key, database type and pinned
+/// session.
+#[derive(Debug, Clone)]
+struct SysMetadataResolver {
+    source: PathBuf,
+    by_dbno: BTreeMap<u32, e3d_io::DbFilePin>,
+}
+
+impl SysMetadataResolver {
+    fn discover(sys: &Path, template_dir: &Path) -> anyhow::Result<Self> {
+        let directory = sys
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("SYS 路径没有父目录: {}", sys.display()))?;
+        let entries = std::fs::read_dir(directory)
+            .with_context(|| format!("扫描 SYS 同目录元数据库 {}", directory.display()))?;
+        let mut headers = Vec::new();
+        let mut unreadable = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(error) => {
+                    unreadable.push(format!("目录项读取失败: {error}"));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            let is_file = entry
+                .file_type()
+                .map(|kind| kind.is_file())
+                .unwrap_or_else(|_| path.is_file());
+            if !is_file {
+                continue;
+            }
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            if !crate::data_interface::increment_manager::is_project_runtime_db_file_name(name) {
+                continue;
+            }
+            match crate::data_interface::db_file_header::DbFileHeader::read(&path) {
+                Ok(header)
+                    if crate::data_interface::increment_manager::PROJECT_RUNTIME_SYS_TYPES
+                        .iter()
+                        .any(|candidate| candidate.eq_ignore_ascii_case(&header.db_type)) =>
+                {
+                    headers.push((path, header));
+                }
+                Ok(header) => unreadable.push(format!(
+                    "{} 名字符合项目元数据库，但文件自报类型为 {}，已跳过",
+                    path.display(),
+                    header.db_type
+                )),
+                Err(error) => unreadable.push(format!("{}: {error:#}", path.display())),
+            }
+        }
+        for problem in unreadable {
+            report_sys_error(&format!(
+                "[SYS 解析] 同目录元数据库头读取失败（继续使用其余文件）: \
+                 source={} reason={problem}",
+                sys.display()
+            ));
+        }
+        let resolver = Self::from_headers(sys, template_dir, headers)?;
+        let inventory = resolver
+            .by_dbno
+            .iter()
+            .map(|(dbno, pin)| {
+                format!(
+                    "{dbno}:{}@{}",
+                    pin.db_type.as_deref().unwrap_or("unknown"),
+                    pin.file.display()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        report_sys_info(&format!(
+            "[SYS 解析] 同目录元数据库索引: source={} entries={} files=[{}]",
+            sys.display(),
+            resolver.by_dbno.len(),
+            inventory
+        ));
+        Ok(resolver)
+    }
+
+    fn from_headers(
+        sys: &Path,
+        template_dir: &Path,
+        headers: impl IntoIterator<
+            Item = (PathBuf, crate::data_interface::db_file_header::DbFileHeader),
+        >,
+    ) -> anyhow::Result<Self> {
+        let mut by_dbno: BTreeMap<u32, e3d_io::DbFilePin> = BTreeMap::new();
+        for (path, header) in headers {
+            let dbno = u32::try_from(header.dbnum).with_context(|| {
+                format!(
+                    "项目元数据库 {} 自报非法 dbnum={}",
+                    path.display(),
+                    header.dbnum
+                )
+            })?;
+            anyhow::ensure!(dbno > 0, "项目元数据库 {} 自报非法 dbnum=0", path.display());
+            let template = e3d_io::db_element::template_file_for(template_dir, &header.db_type)
+                .with_context(|| {
+                    format!(
+                        "为项目元数据库 {}（dbnum={dbno}, db_type={}）选择模板",
+                        path.display(),
+                        header.db_type
+                    )
+                })?;
+            let latest_sesno = header.latest_sesno();
+            let db_type = header.db_type;
+            let pin = e3d_io::DbFilePin {
+                file: path.clone(),
+                template,
+                db_type: Some(db_type),
+                sesno: Some(latest_sesno),
+            };
+            if let Some(existing) = by_dbno.insert(dbno, pin) {
+                anyhow::bail!(
+                    "SYS {} 同目录发现两个自报 dbnum={} 的项目元数据库：{} / {}；\
+                     拒绝按文件名或遍历顺序任选一个",
+                    sys.display(),
+                    dbno,
+                    existing.file.display(),
+                    path.display()
+                );
+            }
+        }
+        Ok(Self {
+            source: sys.to_path_buf(),
+            by_dbno,
+        })
+    }
+}
+
+impl e3d_io::DbFileResolver for SysMetadataResolver {
+    fn resolve(&self, dbno: u32) -> Option<e3d_io::DbFilePin> {
+        let pin = self.by_dbno.get(&dbno)?.clone();
+        report_sys_info(&format!(
+            "[SYS 解析] 跨库元数据按文件头定位成功: source={} requested_dbno={} \
+             file={} db_type={} pinned_sesno={:?}",
+            self.source.display(),
+            dbno,
+            pin.file.display(),
+            pin.db_type.as_deref().unwrap_or("unknown"),
+            pin.sesno
+        ));
+        Some(pin)
+    }
 }
 
 /// One SYS database file, pinned at its latest session and read through e3d-io.
@@ -751,15 +1112,18 @@ impl SysDb {
     fn open(sys: &Path) -> anyhow::Result<Self> {
         let header = crate::data_interface::db_file_header::DbFileHeader::read(sys)
             .with_context(|| format!("读取 SYS 基本信息 {}", sys.display()))?;
-        let detected = e3d_io::detect_database_version(sys);
-        let binary_version = match &detected {
-            Ok(version) => version.id.to_string(),
+        // 版本证据只进基本信息那一行，不裁决。e3d-io 2c6f11d 起自动识别一律不可用
+        // （页身份 / WORL.UPGDNO / COMM.VERS 都分不开 2.1 与 3.1），schema 只认
+        // DbOption 的 e3d_version；从前这里那句「版本不匹配」比的是一条已被推翻的规则，
+        // 现场看到它只会去改一个本来对的配置。探针开不了文件才值得上 stderr。
+        let version_evidence = match e3d_io::database_version_evidence(sys) {
+            Ok(evidence) => sys_version_evidence_summary(&evidence),
             Err(error) => {
                 report_sys_error(&format!(
-                    "[SYS 解析] 二进制版本识别失败: file={} reason={error}",
+                    "[SYS 解析] 二进制版本证据读取失败（仅诊断，不影响解析）: file={} reason={error}",
                     sys.display()
                 ));
-                "unknown".to_string()
+                "unavailable".to_string()
             }
         };
         let schema = crate::data_interface::direct_store::DirectSchema::open_from_env()
@@ -768,25 +1132,24 @@ impl SysDb {
             .version()
             .map(|version| version.id)
             .unwrap_or("explicit-directory");
-        if let Ok(detected) = detected
-            && schema
-                .version()
-                .is_some_and(|selected| selected.id != detected.id)
-        {
-            report_sys_error(&format!(
-                "[SYS 解析] 版本不匹配: file={} selected_schema={} binary_version={}；\
-                 继续尝试解析并打印诊断，请核对配置后再使用结果",
-                sys.display(),
-                selected_schema,
-                detected.id
-            ));
-        }
-        let set = crate::data_interface::e3d_collector::open_pinned_set(
-            &schema,
-            sys,
-            &header.db_type,
-            header.latest_sesno(),
-        )
+        let resolver = SysMetadataResolver::discover(sys, schema.template_dir())?;
+        let set = Arc::new(
+            e3d_io::DbSet::with_attlib_file_and_resolver(
+                schema.template_dir().join("attlib.dat"),
+                Box::new(resolver),
+            )
+            .map_err(|error| anyhow::anyhow!("打开 SYS attlib 失败: {error}"))?,
+        );
+        let template =
+            e3d_io::db_element::template_file_for(schema.template_dir(), &header.db_type).map_err(
+                |error| anyhow::anyhow!("SYS 库类型 {} 找不到模板: {error}", header.db_type),
+            )?;
+        set.add_db(e3d_io::DbFilePin {
+            file: sys.to_path_buf(),
+            template,
+            db_type: Some(header.db_type.clone()),
+            sesno: Some(header.latest_sesno()),
+        })
         .with_context(|| {
             format!(
                 "按 dbnum={} db_type={} latest_sesno={} 打开 SYS {}",
@@ -800,7 +1163,7 @@ impl SysDb {
             sys,
             &header,
             selected_schema,
-            &binary_version,
+            &version_evidence,
         ));
         Ok(Self {
             set,
@@ -924,6 +1287,87 @@ impl SysDb {
             undecoded.join(", ")
         );
         Ok(Some(attrs.map))
+    }
+}
+
+impl SysDb {
+    fn element(&self, refno: RefU64) -> e3d_io::DbElement {
+        self.set
+            .element(e3d_io::RefNo::new(refno.get_0(), refno.get_1()))
+    }
+}
+
+impl CurdElements for SysDb {
+    fn element_type(&self, refno: RefU64) -> anyhow::Result<Option<String>> {
+        let element = self.element(refno);
+        let exists = element.exists().map_err(|error| {
+            anyhow::anyhow!(
+                "检查 SYS 元素 {}/{} 是否存在失败: {error}",
+                refno.get_0(),
+                refno.get_1()
+            )
+        })?;
+        if !exists {
+            return Ok(None);
+        }
+        element.element_type().map(Some).map_err(|error| {
+            anyhow::anyhow!(
+                "读取 SYS 元素 {}/{} 类型失败: {error}",
+                refno.get_0(),
+                refno.get_1()
+            )
+        })
+    }
+
+    fn member_refnos(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
+        Ok(self
+            .element(refno)
+            .member_refnos()
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "读取 SYS 元素 {}/{} 成员失败: {error}",
+                    refno.get_0(),
+                    refno.get_1()
+                )
+            })?
+            .into_iter()
+            .map(|member| RefU64::from_two_nums(member.word0, member.word1))
+            .collect())
+    }
+
+    fn get_ref(&self, refno: RefU64, attribute: &str) -> anyhow::Result<Option<RefU64>> {
+        match self.element(refno).get_ref(attribute) {
+            Ok(target) => {
+                Ok(target.map(|target| RefU64::from_two_nums(target.word0, target.word1)))
+            }
+            // The noun has no such attribute: the caller reports the member as unusable.
+            Err(e3d_io::DbElementError::UnknownAttribute { .. }) => Ok(None),
+            Err(error) => Err(anyhow::anyhow!(
+                "读取 SYS 元素 {}/{} 的 {attribute} 失败: {error}",
+                refno.get_0(),
+                refno.get_1()
+            )),
+        }
+    }
+
+    fn has_db_criteria(&self, refno: RefU64) -> anyhow::Result<bool> {
+        use e3d_io::record::descriptor::DescriptorValue;
+        match self.element(refno).attribute("DBCRITERIA") {
+            Ok(None) => Ok(false),
+            // The stored expression is an integer word array; an all-zero array is
+            // the template default, not a criterion.
+            Ok(Some(DescriptorValue::IntArray(words))) => Ok(words.iter().any(|word| *word != 0)),
+            Ok(Some(DescriptorValue::RawWords(words) | DescriptorValue::WordArray(words))) => {
+                Ok(words.iter().any(|word| *word != 0))
+            }
+            Ok(Some(_)) => Ok(true),
+            Err(e3d_io::DbElementError::UnknownAttribute { .. }) => Ok(false),
+            Err(error) => Err(anyhow::anyhow!(
+                "读取 SYS 元素 {}/{} 的 DBCRITERIA 失败: {error}",
+                refno.get_0(),
+                refno.get_1()
+            )),
+        }
     }
 }
 
@@ -1118,17 +1562,25 @@ mod tests {
                 end_pgno: 43,
                 index_root_pgno: 41,
                 stamp_words: [0; 5],
-                machine: "SITE-A".to_string(),
+                user: "SITE-A".to_string(),
                 comment: "SAVEWORK".to_string(),
             },
             file_size: 123_456,
         };
 
+        let evidence = sys_version_evidence_summary(&e3d_io::DatabaseVersionEvidence {
+            version: None,
+            source: e3d_io::VersionEvidenceSource::Unknown,
+            raw_value: None,
+            raw_text: None,
+            session_page: Some(42),
+            database: std::path::PathBuf::from(r"D:\release\9001\project\JEU\JEU000\jeusys"),
+        });
         let line = sys_basic_info_message(
             Path::new(r"D:\release\9001\project\JEU\JEU000\jeusys"),
             &header,
             "e3d210",
-            "e3d210",
+            &evidence,
         );
         for required in [
             "[SYS 解析] 基本信息",
@@ -1141,12 +1593,22 @@ mod tests {
             "session_pgno=42",
             "index_root_pgno=41",
             "selected_schema=e3d210",
-            "binary_version=e3d210",
-            "machine=\"SITE-A\"",
+            "version_evidence={field=none raw_value=None raw_text=None session_page=Some(42)}",
+            "user=\"SITE-A\"",
             "comment=\"SAVEWORK\"",
         ] {
             assert!(line.contains(required), "基本信息缺 {required}: {line}");
         }
+        // 探针从不给版本结论，这一行也不得再拿一条已被推翻的规则去比「版本不匹配」。
+        let source = include_str!("mdb_membership.rs");
+        assert!(
+            !source.contains(concat!("e3d_io::", "detect_database_version(")),
+            "SYS 解析不得再调 detect_*：e3d-io 2c6f11d 起它一律失败，只会在 stderr 留一行噪音"
+        );
+        assert!(
+            !source.contains(concat!("[SYS 解析] ", "版本不匹配")),
+            "「版本不匹配」比的是已被推翻的识别规则，不得再打"
+        );
     }
 
     #[test]
@@ -1193,6 +1655,74 @@ mod tests {
         ] {
             assert!(source.contains(required), "SYS 解析失败日志缺少 {required}");
         }
+    }
+
+    #[test]
+    fn sys_metadata_resolver_uses_file_header_dbnum_instead_of_reserved_constants() {
+        let header = crate::data_interface::db_file_header::DbFileHeader {
+            dbnum: 4242,
+            db_type: "GLOB".to_string(),
+            latest_ses_pgno: 12,
+            latest_session: crate::data_interface::db_file_header::SessionStamp {
+                sesno: 9,
+                ..Default::default()
+            },
+            file_size: 123,
+        };
+        let global = PathBuf::from(r"D:\project\JEU000\jeuglb");
+        let resolver = SysMetadataResolver::from_headers(
+            Path::new(r"D:\project\JEU000\jeusys"),
+            Path::new(r"D:\runtime\schema\e3d210\binaries"),
+            [(global.clone(), header)],
+        )
+        .expect("header-discovered resolver");
+
+        assert!(
+            e3d_io::DbFileResolver::resolve(&resolver, 8188).is_none(),
+            "文件没自报 8188 时不得凭 Global 角色猜一个保留号"
+        );
+        let pin = e3d_io::DbFileResolver::resolve(&resolver, 4242)
+            .expect("文件头自报的任意 dbnum 都能定位");
+        assert_eq!(pin.file, global);
+        assert_eq!(pin.db_type.as_deref(), Some("GLOB"));
+        assert_eq!(pin.sesno, Some(9));
+        assert!(pin.template.ends_with("glbvir.dat"), "{pin:?}");
+
+        let production = include_str!("mdb_membership.rs")
+            .split_once("#[cfg(test)]")
+            .expect("test module marker")
+            .0;
+        assert!(
+            !production.contains("8188"),
+            "生产解析器不得写死 Global DB 的保留号"
+        );
+    }
+
+    #[test]
+    fn sys_metadata_resolver_rejects_duplicate_header_dbnums() {
+        let header = || crate::data_interface::db_file_header::DbFileHeader {
+            dbnum: 4242,
+            db_type: "GLOB".to_string(),
+            latest_session: crate::data_interface::db_file_header::SessionStamp {
+                sesno: 9,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let error = SysMetadataResolver::from_headers(
+            Path::new(r"D:\project\JEU000\jeusys"),
+            Path::new(r"D:\runtime\schema\e3d210\binaries"),
+            [
+                (PathBuf::from(r"D:\project\JEU000\jeuglb"), header()),
+                (PathBuf::from(r"D:\project\JEU000\jeuglb-copy"), header()),
+            ],
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("两个自报 dbnum=4242") && error.contains("拒绝"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -1384,6 +1914,185 @@ mod tests {
             Some(master_only.path().join("scb100")),
             "没有抽取时主库本身就是答案，不该被报成缺件"
         );
+    }
+
+    /// An in-memory SYS tree for the CURD expansion: noun, members and the two
+    /// reference attributes the walk reads, keyed by refno.
+    #[derive(Default)]
+    struct FakeSys {
+        nouns: BTreeMap<RefU64, &'static str>,
+        members: BTreeMap<RefU64, Vec<RefU64>>,
+        refs: BTreeMap<(RefU64, &'static str), RefU64>,
+        criteria: BTreeSet<RefU64>,
+    }
+
+    impl FakeSys {
+        fn element(&mut self, refno: RefU64, noun: &'static str) -> &mut Self {
+            self.nouns.insert(refno, noun);
+            self
+        }
+
+        fn dbset(&mut self, refno: RefU64, members: &[RefU64]) -> &mut Self {
+            self.nouns.insert(refno, "DBSET");
+            self.members.insert(refno, members.to_vec());
+            self
+        }
+
+        fn dbl(&mut self, refno: RefU64, db: RefU64) -> &mut Self {
+            self.nouns.insert(refno, "DBL");
+            self.refs.insert((refno, "DBF"), db);
+            self
+        }
+
+        fn dbstl(&mut self, refno: RefU64, dbset: RefU64) -> &mut Self {
+            self.nouns.insert(refno, "DBSTL");
+            self.refs.insert((refno, "DBSTF"), dbset);
+            self
+        }
+    }
+
+    impl CurdElements for FakeSys {
+        fn element_type(&self, refno: RefU64) -> anyhow::Result<Option<String>> {
+            Ok(self.nouns.get(&refno).map(|noun| noun.to_string()))
+        }
+
+        fn member_refnos(&self, refno: RefU64) -> anyhow::Result<Vec<RefU64>> {
+            Ok(self.members.get(&refno).cloned().unwrap_or_default())
+        }
+
+        fn get_ref(&self, refno: RefU64, attribute: &str) -> anyhow::Result<Option<RefU64>> {
+            Ok(self
+                .refs
+                .iter()
+                .find(|((owner, name), _)| *owner == refno && *name == attribute)
+                .map(|(_, target)| *target))
+        }
+
+        fn has_db_criteria(&self, refno: RefU64) -> anyhow::Result<bool> {
+            Ok(self.criteria.contains(&refno))
+        }
+    }
+
+    fn r(n: u32) -> RefU64 {
+        RefU64::from_two_nums(24575, n)
+    }
+
+    fn refnos(expansion: &CurdExpansion) -> Vec<RefU64> {
+        expansion.entries.iter().map(|entry| entry.refno).collect()
+    }
+
+    /// The common case must stay byte-for-byte what it was: a CURD of plain DB
+    /// elements comes back unchanged, in order, with nothing to report.
+    #[test]
+    fn curd_of_plain_databases_passes_through_untouched() {
+        let mut sys = FakeSys::default();
+        sys.element(r(1), "DB")
+            .element(r(2), "DB")
+            .element(r(3), "DB");
+        let expansion = expand_curd_dbsets(&sys, &[r(3), r(1), r(2)]).unwrap();
+        assert_eq!(refnos(&expansion), vec![r(3), r(1), r(2)]);
+        assert!(expansion.entries.iter().all(|entry| entry.via.is_none()));
+        assert_eq!(expansion.dbset_entries, 0);
+        assert!(expansion.problems.is_empty(), "{:?}", expansion.problems);
+    }
+
+    /// A DBSET in CURD is replaced, at its position, by the databases its DBL
+    /// members point at — E3D's `CURRFU` — and each carries the set it came from.
+    #[test]
+    fn dbset_entry_unfolds_into_its_dbl_targets_in_place() {
+        let mut sys = FakeSys::default();
+        sys.element(r(1), "DB")
+            .element(r(2), "DB")
+            .element(r(3), "DB")
+            .dbl(r(101), r(2))
+            .dbl(r(102), r(3))
+            .dbset(r(100), &[r(101), r(102)]);
+        let expansion = expand_curd_dbsets(&sys, &[r(1), r(100)]).unwrap();
+        assert_eq!(refnos(&expansion), vec![r(1), r(2), r(3)]);
+        assert_eq!(expansion.entries[0].via, None);
+        assert_eq!(
+            expansion.entries[1].via.as_deref(),
+            Some("CURD[1] DBSET 24575/100")
+        );
+        assert_eq!(expansion.dbset_entries, 1);
+        assert!(expansion.problems.is_empty(), "{:?}", expansion.problems);
+    }
+
+    /// Nested sets are reached through DBSTL.DBSTF; a set referenced twice, or
+    /// one that refers back to an ancestor, is entered once and the walk ends.
+    #[test]
+    fn nested_and_cyclic_dbsets_are_entered_once() {
+        let mut sys = FakeSys::default();
+        sys.element(r(1), "DB")
+            .element(r(2), "DB")
+            .dbl(r(201), r(1))
+            .dbstl(r(202), r(300))
+            .dbstl(r(203), r(300))
+            .dbset(r(200), &[r(201), r(202), r(203)])
+            .dbl(r(301), r(2))
+            .dbstl(r(302), r(200))
+            .dbset(r(300), &[r(301), r(302)]);
+        let expansion = expand_curd_dbsets(&sys, &[r(200)]).unwrap();
+        assert_eq!(refnos(&expansion), vec![r(1), r(2)]);
+        assert_eq!(
+            expansion.entries[1].via.as_deref(),
+            Some("CURD[0] DBSET 24575/200 > DBSET 24575/300")
+        );
+        assert!(expansion.problems.is_empty(), "{:?}", expansion.problems);
+    }
+
+    /// One database reached twice — directly and through a set, or through two
+    /// sets — is kept once at its first position, and the repeat is reported.
+    #[test]
+    fn a_database_reached_twice_is_kept_once_at_its_first_position() {
+        let mut sys = FakeSys::default();
+        sys.element(r(1), "DB")
+            .element(r(2), "DB")
+            .dbl(r(101), r(1))
+            .dbl(r(102), r(2))
+            .dbset(r(100), &[r(101), r(102)]);
+        let expansion = expand_curd_dbsets(&sys, &[r(2), r(100), r(2)]).unwrap();
+        assert_eq!(refnos(&expansion), vec![r(2), r(1)]);
+        assert_eq!(expansion.problems.len(), 1, "{:?}", expansion.problems);
+        assert!(expansion.problems[0].contains("CURD[2] 24575/2"));
+    }
+
+    /// What E3D would do with these is fail or guess; here each is a reported
+    /// problem and the rest of the set still comes through.
+    #[test]
+    fn dbset_anomalies_are_reported_not_swallowed() {
+        let mut sys = FakeSys::default();
+        sys.element(r(1), "DB")
+            .dbl(r(101), r(1))
+            .element(r(102), "DBL") // no DBF
+            .element(r(103), "DBSTL") // no DBSTF
+            .element(r(104), "TEAM") // not a set member type
+            .dbset(r(100), &[r(101), r(102), r(103), r(104), r(105)]); // 105 missing
+        sys.criteria.insert(r(100));
+        let expansion = expand_curd_dbsets(&sys, &[r(100)]).unwrap();
+        assert_eq!(refnos(&expansion), vec![r(1)]);
+        let problems = expansion.problems.join("\n");
+        for required in [
+            "DBCRITERIA",
+            "DBL 24575/102 没有 DBF",
+            "DBSTL 24575/103 没有 DBSTF",
+            "24575/104 类型 TEAM",
+            "24575/105 不在最新会话索引中",
+        ] {
+            assert!(problems.contains(required), "缺少 {required}:\n{problems}");
+        }
+        assert_eq!(expansion.problems.len(), 5, "{problems}");
+    }
+
+    /// Entries that are neither DB nor DBSET — a missing element included —
+    /// stay in the list so the per-database decode reports them with its stage.
+    #[test]
+    fn unknown_and_missing_curd_entries_are_left_for_the_decoder_to_report() {
+        let mut sys = FakeSys::default();
+        sys.element(r(1), "DB").element(r(9), "TEAM");
+        let expansion = expand_curd_dbsets(&sys, &[r(1), r(9), r(42)]).unwrap();
+        assert_eq!(refnos(&expansion), vec![r(1), r(9), r(42)]);
+        assert!(expansion.problems.is_empty(), "{:?}", expansion.problems);
     }
 
     fn two_projects(

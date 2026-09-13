@@ -31,7 +31,11 @@ project_path = "D:/AVEVA/Projects/E3D3.1"
 # project_path = "/Users/dongpengcheng/Documents/models/e3d_models"
 # included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 #【变更 2026-07-27】移除 SCB：E3D3.1 下未部署该工程，避免扫描报错。
-included_projects = ["AvevaMarineSample", "AvevaCatalogue", "ZDJ"]
+#【变更 2026-09-11】加回 SCB：D:/AVEVA/Projects/E3D3.1/SCB 现已部署（scb6000–scb6003 都在盘上）。MDB /ALL
+# 声明的 6003 (*MASTER/SCBDESI) 属于它——不收进来，开启 room_membership 时常驻房间模型建不起来
+#（room inputs incomplete），之后每个生成根都按「房间算不出来」记失败（ADR-073 D2）。
+# catalogue_project_priority 不动：不在名单里的项目按 included_projects 顺序排在最后。
+included_projects = ["AvevaMarineSample", "AvevaCatalogue", "SCB", "ZDJ"]
 catalogue_project_priority = ["AvevaMarineSample", "AvevaCatalogue", "ZDJ"]
 #project_dirs = ["AvevaMarineSample"]
 
@@ -99,8 +103,12 @@ v_ip = "localhost"
 v_port = 8009
 v_user = "root"
 v_password = "root"
+#【变更 2026-09-11】默认使用自带 kv-mem：服务自行拉起 memory SurrealDB，
+# 进程退出数据即消失；需要外置/持久库时显式改为 external 或 spawned-rocksdb。
+store_mode = "spawned-mem"
 
-#【新增 2026-08-27】in_memory_db —— 调试用，默认不写 = 连上面那台 SurrealDB
+#【新增 2026-08-27】in_memory_db —— 已被 store_mode 取代的兼容开关；默认不写 = 由上面的
+# store_mode 决定。只有未写 store_mode 时，显式 true 才选 embedded-mem、false 选 external。
 # true：持久层换成**进程内嵌的 kv-mem 引擎**，上面 v_ip / v_port / v_user /
 #       v_password 整个不再使用。初始化解析、增量窗口写回、模型与房间派生数据
 #       全部照原路走，只是落点从 rocksdb 变成内存——SUL_DB 是 Surreal<Any>，
@@ -175,18 +183,18 @@ block_file_identity_conflicts = false
 data_incremental = true
 model_incremental = true
 
-#【新增 2026-09-10】room_membership —— 房间归属计算的总开关，默认 true
+#【新增 2026-09-10，默认值 2026-09-11 改为 false】room_membership —— 房间归属计算的总开关
 # ADR-073 D1 之后房间不是一条独立流程：一个生成根算完几何，紧接着用常驻房间模型里的
 # 面板做点包含筛选、算出它每个构件属于哪些面板，边与模型行同一笔事务落库。本键就是
 # 那一步的开关，判定点只有一处（任务开工冻房间计算器 frozen_room_calculator）。
-#   true ：照算照写。
-#   false：启动不建常驻房间模型，生成任务在冻结房间计算器时失败；模型根不落库、模型水位
-#          不前移，因此不会产生“模型已完成但房间边缺失”的伪一致状态。空间树仍照常装载。
-# 【这是非正常运行状态】数据面仍可推进，模型根保留失败/欠账；重新打开后由模型重试补齐。
-# 护栏：启动横幅一行、/health 的 room_membership 栏、冻结计算器时返回明确错误。
-# 环境变量 AIOS_ROOM_MEMBERSHIP 压过本键（取值规则同 AIOS_STARTUP_AUTORUN），想临时关一次
-# 用 AIOS_ROOM_MEMBERSHIP=0，不必改文件。
-room_membership = true
+#   true ：开启房间增量更新，照算照写。
+#   false：默认关闭；启动不建常驻房间模型，冻结房间计算器得到 None；模型根照常落库、
+#          model_sesno 照常前移，只是不计算、不写新房间边。被模型对账删除的来源旧边仍清。
+# 关闭期间 model_sesno 只承诺模型几何，不承诺房间归属；/health 的 room_membership=false
+# 是这项主动降级的判据。重新打开只影响之后重生成的根，历史房间欠账需显式执行模型重建补齐。
+# 环境变量 AIOS_ROOM_MEMBERSHIP 压过本键（取值规则同 AIOS_STARTUP_AUTORUN），想临时开一次
+# 用 AIOS_ROOM_MEMBERSHIP=1，不必改文件。
+room_membership = false
 
 #【新增 2026-08-19】watch_dbnums —— 调试用，默认不写 = 全范围
 # 把增量摄入的数据批次圈到这几个 dbnum，例如 watch_dbnums = [7998, 8000]。

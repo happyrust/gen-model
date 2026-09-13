@@ -1,32 +1,39 @@
 <#
 .SYNOPSIS
-    一键产出 AMS 本地发布包（-full 档：程序 + 一体化 workspace\ 依赖资源）。
+    一键产出 AMS 本地运行包（程序 + Web；按需附带 workspace\ 依赖资源）。
 
 .DESCRIPTION
     全链路（Q6=本机脚本 / Q7=全链路）：
-        构建 backend + web(wasm)  →  组包（程序 + workspace\ 资源）  →  组装 CHANGELOG
+        构建 backend + web(wasm)  →  组包（默认仅程序 + Web）  →  组装 CHANGELOG
         →  冒烟门（起服务、health + 首页含 plant_ui_app.js）  →  zip + sha256 清单
 
-    包内布局（Q3=A 一体化，解压即跑）：
+    默认包内布局：
         <包根>\
           aios-database.exe            后端（gen-model）
           web\                         plant-ui Web 静态资源（wasm/字体/贴图；不含冗余 meshes）
-          Start-AMS.ps1 / .cmd         默认 -Workspace 指向包内 workspace\
+          bin\surreal.exe              可切回 spawned-mem 的 SurrealDB 2.1.x
+          resource\surreal\*.surql     连接后初始化数据库函数所需的同版脚本
+          schema\e3d210|e3d31\         e3d_version 选择的 attlib / *vir.dat（未配置默认 e3d210）
+          DbOption.toml                不带本机路径的出厂配置（默认运行包）
+          Start-AMS.ps1 / .cmd         通过 -Workspace / AMS_WORKSPACE 指向外部运行环境
           Rollback.ps1
           CHANGELOG.md                 后端 + 前端两节（Q4=A）
           release.json                 程序文件 sha256 清单 + 资源摘要 + 冒烟结果
+
+    只有显式 -IncludeWorkspace 才增加：
           workspace\                   运行依赖（Q2=全资源）
             DbOption.toml, config\, resource\, search-index\, accel_tree_*.snapshot
             assets\                    模型网格/字体等（PLANT_ASSET_ROOT 指向它）
             bin\surreal.exe            本仓 fork 的 SurrealDB 2.1.x
             Start-Surreal.ps1          用包内 surreal 起一台本地库（可选）
 
-    版本纪律（Q8）：版本号以两仓 Cargo.toml 为准；输出 zip 已存在则拒绝执行（-Force 覆盖）；
-    CHANGELOG 找不到当版条目时只警告、不中止。releases 目录不自动清理旧版。
+    版本纪律（Q8）：版本号以两仓 Cargo.toml 为准；每次正常构建另生成唯一 build_id，
+    默认 ZIP 名同时携带版本号与 build_id。输出 zip 已存在则拒绝执行（-Force 覆盖）；
+    CHANGELOG 找不到当版条目时只警告、不中止。releases 目录不自动清理旧构建，
+    让后续二进制 patch 始终有精确的源包可取。
 
-    出厂形态（2026-09-09 向导计划 Q10/Q15/Q16）：包内 workspace\DbOption.toml 是出厂模板
-    （scripts\templates\DbOption.factory.toml：project_path 空、external 且 v_port="0" 哨兵、
-    监听 0.0.0.0:9099），另落 .first-run-pending 首跑哨兵——解压首跑自动进 /setup.html 配置向导。
+    runtime 出厂配置默认 embedded-mem（无 Surreal TCP 端口）；-IncludeWorkspace 形态继续使用
+    spawned-mem@127.0.0.1:8009。两档都保留 .first-run-pending 首跑哨兵，自动进入配置向导。
 
     冒烟门（Q9，三腿）：A 腿出厂配置起服务考「设置模式 + 向导页」；B 腿本机配置全启动考
     health + 首页；C 腿本机配置改 spawned-rocksdb@18010 考「自带持久库」（ADR-070：
@@ -39,11 +46,32 @@
     复用现成程序产物（本次 0.1.19 发布走这条：Q1=A 用已随发布验证的包内那份 exe/web），
     从 -SourcePackage 取 aios-database.exe 与 web\（自动剔除冗余的 web\assets\meshes）。
 
+.PARAMETER BuildId
+    本次后端二进制的唯一构建号。正常构建默认生成
+    <Cargo版本>+release.<UTC时间戳>.g<提交>[.dirty]，写入 EXE ProductVersion、
+    version --json 与 release.json；默认 ZIP 文件名也带这个构建号，禁止同一 Cargo
+    版本的后续包覆盖前一份 patch 基线。-SkipBuild 时必须沿用源 EXE 自报的构建号。
+
 .PARAMETER SkipSmoke
     跳过冒烟门，产物标「未冒烟（-SkipSmoke）」。
 
+.PARAMETER IncludeWorkspace
+    显式把数据库运行环境 workspace\ 打进 zip。默认不打包 workspace，但仍会把
+    SurrealExe 放进包根 bin\；其他运行资源通过 Start-AMS.ps1 -Workspace 或 AMS_WORKSPACE 提供。
+
+.PARAMETER ExcludeMeshes
+    与 -IncludeWorkspace 同用：附带 workspace，但不把 workspace\assets\meshes 打进 zip。
+    未指定 -IncludeWorkspace 时 workspace 本就整体不进包，本开关无需设置。
+
+.PARAMETER SurrealExe
+    本仓 fork 的 SurrealDB 2.1.x 路径。所有发布档位都必须提供；未传时按仓库与默认
+    Workspace 路径自动寻找。runtime 放包根 bin\，带 workspace 的档位放 workspace\bin\。
+
 .PARAMETER SmokeStoreMode
-    冒烟时后端的存储形态：spawned-mem（默认，自带内存库、不依赖外部 8010）或 external（连 8010）。
+    冒烟时后端的存储形态。省略时 runtime 用 embedded-mem，带 workspace 的档位用 spawned-mem。
+
+.PARAMETER BackendTargetDir
+    可选的独立 Cargo target 目录；机器上已有 release exe 正在运行、Windows 锁住默认输出时使用。
 
 .PARAMETER Force
     覆盖已存在的同名输出 zip / 暂存目录。
@@ -55,18 +83,23 @@
 [CmdletBinding()]
 param(
     [string]$BackendVersion,
+    [string]$BuildId,
     [string]$WebVersion,
     [string]$RepoRoot,
     [string]$PlantUiRoot,
     [string]$Workspace = 'D:\work\plant-code\old\test-worklspace\bin',
     [string]$SourcePackage,
     [string]$SurrealExe,
+    [string]$BackendTargetDir,
     [string]$OutDir,
     [string]$Name,
     [switch]$SkipBuild,
     [switch]$SkipSmoke,
-    [ValidateSet('spawned-mem', 'external')][string]$SmokeStoreMode = 'spawned-mem',
+    [switch]$IncludeWorkspace,
+    [switch]$ExcludeMeshes,
+    [ValidateSet('embedded-mem', 'spawned-mem', 'external')][string]$SmokeStoreMode,
     [int]$SmokeTimeoutSeconds = 90,
+    [ValidateRange(1, 65535)][int]$SmokeHttpPort = 9099,
     [switch]$StrictSmoke,
     [ValidateSet('Optimal', 'Fastest', 'NoCompression')][string]$CompressionLevel = 'Optimal',
     [switch]$Force
@@ -86,26 +119,132 @@ function Get-CargoVersion([string]$cargoToml) {
     return $m.Groups[1].Value
 }
 
+function ConvertTo-FileToken([string]$value) {
+    $token = ($value -replace '[^A-Za-z0-9._-]', '_').Trim('_')
+    if ($token.Length -gt 64) { $token = $token.Substring(0, 64) }
+    if (-not $token) { throw "构建号无法转换成文件名：$value" }
+    return $token
+}
+
+function Get-AiosBuildInfo([string]$exe) {
+    $savedPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+        $json = @(& $exe version --json 2>&1)
+        $jsonExit = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $savedPreference
+    }
+    if ($jsonExit -eq 0) {
+        try {
+            $parsed = ($json -join "`n") | ConvertFrom-Json
+            if ($parsed.product -eq 'aios-database' -and $parsed.version -and $parsed.build_id) {
+                return $parsed
+            }
+        }
+        catch {}
+    }
+    $plain = @(& $exe --version 2>&1)
+    if ($LASTEXITCODE -ne 0) { throw "无法读取后端版本：$exe" }
+    $match = [regex]::Match(($plain -join ' '), '(?i)\baios-database\s+([^\s]+)')
+    if (-not $match.Success) { throw "后端 --version 输出无法识别：$($plain -join ' ')" }
+    return [pscustomobject]@{
+        product = 'aios-database'
+        version = $match.Groups[1].Value
+        build_id = $match.Groups[1].Value
+        git_commit = $null
+    }
+}
+
 # ── 0. 解析路径与版本 ────────────────────────────────────────────────────────
 $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
 if (-not $RepoRoot) { $RepoRoot = Split-Path -Parent $scriptDir }
 if (-not $PlantUiRoot) { $PlantUiRoot = Join-Path (Split-Path -Parent $RepoRoot) 'plant-ui' }
 if (-not $OutDir) { $OutDir = Join-Path $RepoRoot 'releases' }
-if (-not $SurrealExe) { $SurrealExe = Join-Path $RepoRoot 'bin\surreal.exe' }
+if (-not $SurrealExe) {
+    $surrealCandidates = @(
+        (Join-Path $RepoRoot 'bin\surreal.exe'),
+        (Join-Path (Split-Path -Parent $RepoRoot) 'gen-model\bin\surreal.exe'),
+        (Join-Path $Workspace 'bin\surreal.exe')
+    )
+    $SurrealExe = $surrealCandidates | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+}
+if (-not $SurrealExe -or -not (Test-Path -LiteralPath $SurrealExe -PathType Leaf)) {
+    throw "找不到本仓 fork 的 surreal.exe；spawned-mem 发布包无法解压即跑。请用 -SurrealExe 显式指定。"
+}
+$surrealVersion = (& $SurrealExe version 2>&1) -join ' '
+if ($LASTEXITCODE -ne 0 -or
+    $surrealVersion -notmatch '(?<!\d)(\d+)\.(\d+)\.(\d+)' -or
+    [int]$Matches[1] -ne 2) {
+    throw "surreal 版本不对：$surrealVersion（发布包要求本仓 fork 的 2.1.x）"
+}
 if (-not $BackendVersion) { $BackendVersion = Get-CargoVersion (Join-Path $RepoRoot 'Cargo.toml') }
 if (-not $WebVersion) { $WebVersion = Get-CargoVersion (Join-Path $PlantUiRoot 'Cargo.toml') }
-if (-not $Name) { $Name = "ams-local-$BackendVersion-full" }
 if (-not $SourcePackage) { $SourcePackage = Join-Path $OutDir "ams-local-$BackendVersion" }
+
+$buildEpoch = $null
+if ($SkipBuild) {
+    $sourceExeForIdentity = Join-Path $SourcePackage 'aios-database.exe'
+    if (-not (Test-Path -LiteralPath $sourceExeForIdentity -PathType Leaf)) {
+        throw "缺可读取构建号的源 EXE：$sourceExeForIdentity"
+    }
+    $sourceBuildInfo = Get-AiosBuildInfo $sourceExeForIdentity
+    if ($BuildId -and [string]$sourceBuildInfo.build_id -ne [string]$BuildId) {
+        throw "-SkipBuild 不能改写构建号：指定 $BuildId，源 EXE 自报 $($sourceBuildInfo.build_id)"
+    }
+    $BuildId = [string]$sourceBuildInfo.build_id
+}
+else {
+    $buildEpoch = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    if (-not $BuildId) {
+        $stamp = [DateTimeOffset]::UtcNow.ToString('yyyyMMddHHmmss')
+        $gitCommit = ((& git -C $RepoRoot rev-parse --short=12 HEAD 2>$null) -join '').Trim()
+        if ($LASTEXITCODE -ne 0 -or -not $gitCommit) {
+            throw "无法读取 git 提交，不能生成可追溯的发布构建号"
+        }
+        $gitStatus = @(& git -C $RepoRoot status --porcelain --untracked-files=no 2>$null)
+        if ($LASTEXITCODE -ne 0) {
+            throw "无法读取 git 工作树状态，不能判断发布构建是否 dirty"
+        }
+        $dirtySuffix = if ($gitStatus.Count -gt 0) { '.dirty' } else { '' }
+        $BuildId = "$BackendVersion+release.$stamp.g$gitCommit$dirtySuffix"
+    }
+}
+$BuildId = $BuildId.Trim()
+if (-not $BuildId.StartsWith("$BackendVersion+", [StringComparison]::Ordinal)) {
+    if ($SkipBuild -and $BuildId -eq $BackendVersion) {
+        Write-Warn2 "源 EXE 是旧式版本身份（只有 $BackendVersion，没有独立 build_id）；允许复用，但不满足新版 patch 基线约定"
+    }
+    else {
+        throw "构建号必须以 Cargo 版本加 '+' 开头：期望 $BackendVersion+...，实际 $BuildId"
+    }
+}
+
+$packageTier = if (-not $IncludeWorkspace) {
+    'runtime'
+}
+elseif ($ExcludeMeshes) {
+    'runtime-workspace'
+}
+else {
+    'full'
+}
+$defaultStoreMode = if ($IncludeWorkspace) { 'spawned-mem' } else { 'embedded-mem' }
+if (-not $SmokeStoreMode) { $SmokeStoreMode = $defaultStoreMode }
+if (-not $Name) {
+    $Name = "ams-local-$(ConvertTo-FileToken $BuildId)-$packageTier"
+}
 
 $stage = Join-Path $OutDir $Name
 $zip = Join-Path $OutDir "$Name.zip"
 
-Write-Step "版本：backend $BackendVersion / plant-ui $WebVersion"
+Write-Step "版本：backend $BackendVersion / build $BuildId / plant-ui $WebVersion"
 Write-Step "输出：$zip"
 
 # ── 1. 版本纪律：拒绝覆盖（Q8） ──────────────────────────────────────────────
 if ((Test-Path -LiteralPath $zip) -and -not $Force) {
-    throw "输出已存在：$zip`n同版已发布则拒绝执行；确要覆盖加 -Force。releases 旧版不自动清理，人工删。"
+    throw "输出已存在：$zip`n同一构建已发布则拒绝执行；确要覆盖加 -Force。releases 旧构建不自动清理，供 patch 使用。"
 }
 if (Test-Path -LiteralPath $stage) {
     if (-not $Force) { throw "暂存目录已存在：$stage（-Force 清掉重来）" }
@@ -113,9 +252,13 @@ if (Test-Path -LiteralPath $stage) {
 }
 New-Item -ItemType Directory -Force $stage | Out-Null
 $wsStage = Join-Path $stage 'workspace'
-New-Item -ItemType Directory -Force $wsStage | Out-Null
-
-if (-not (Test-Path -LiteralPath $Workspace)) { throw "找不到资源工作区：$Workspace" }
+if ($IncludeWorkspace) {
+    New-Item -ItemType Directory -Force $wsStage | Out-Null
+    if (-not (Test-Path -LiteralPath $Workspace)) { throw "找不到资源工作区：$Workspace" }
+}
+elseif ($ExcludeMeshes) {
+    Write-Warn2 "-ExcludeMeshes 已忽略：未指定 -IncludeWorkspace，workspace 默认整体不进包"
+}
 
 # ── 2. 程序产物：构建 或 复用（Q1=A 复用包内已验证那份） ─────────────────────
 $webStage = Join-Path $stage 'web'
@@ -147,13 +290,33 @@ else {
     finally { Pop-Location }
     Write-Step "构建 backend：$RepoRoot"
     Push-Location $RepoRoot
+    $previousTargetDir = $env:CARGO_TARGET_DIR
+    $previousBuildId = $env:AIOS_BUILD_ID
+    $previousBuildEpoch = $env:AIOS_BUILD_EPOCH
     try {
+        if ($BackendTargetDir) { $env:CARGO_TARGET_DIR = $BackendTargetDir }
+        $env:AIOS_BUILD_ID = $BuildId
+        $env:AIOS_BUILD_EPOCH = [string]$buildEpoch
         cargo build --release --features http_api --bin aios-database
         if ($LASTEXITCODE) { throw "cargo build 失败（exit $LASTEXITCODE）" }
     }
-    finally { Pop-Location }
-    $builtExe = Join-Path $RepoRoot 'target\release\aios-database.exe'
-    if (-not (Test-Path -LiteralPath $builtExe)) { $builtExe = 'D:\Rust\target\release\aios-database.exe' }
+    finally {
+        if ($null -eq $previousTargetDir) { Remove-Item Env:CARGO_TARGET_DIR -ErrorAction SilentlyContinue }
+        else { $env:CARGO_TARGET_DIR = $previousTargetDir }
+        if ($null -eq $previousBuildId) { Remove-Item Env:AIOS_BUILD_ID -ErrorAction SilentlyContinue }
+        else { $env:AIOS_BUILD_ID = $previousBuildId }
+        if ($null -eq $previousBuildEpoch) { Remove-Item Env:AIOS_BUILD_EPOCH -ErrorAction SilentlyContinue }
+        else { $env:AIOS_BUILD_EPOCH = $previousBuildEpoch }
+        Pop-Location
+    }
+    $builtExe = if ($BackendTargetDir) {
+        Join-Path $BackendTargetDir 'release\aios-database.exe'
+    } else {
+        Join-Path $RepoRoot 'target\release\aios-database.exe'
+    }
+    if (-not $BackendTargetDir -and -not (Test-Path -LiteralPath $builtExe)) {
+        $builtExe = 'D:\Rust\target\release\aios-database.exe'
+    }
     if (-not (Test-Path -LiteralPath $builtExe)) { throw "构建后找不到 aios-database.exe" }
     Copy-Item -LiteralPath $builtExe -Destination (Join-Path $stage 'aios-database.exe')
     $pub = Join-Path $PlantUiRoot 'web\public'
@@ -168,18 +331,118 @@ else {
 if (-not (Test-Path -LiteralPath (Join-Path $webStage 'pkg\plant_ui_app_bg.wasm'))) {
     throw "web 组装后缺 pkg\plant_ui_app_bg.wasm，无法继续"
 }
+$backendBuildInfo = Get-AiosBuildInfo (Join-Path $stage 'aios-database.exe')
+if ([string]$backendBuildInfo.version -ne [string]$BackendVersion) {
+    throw "后端版本与发布名不一致：期望 $BackendVersion，EXE 自报 $($backendBuildInfo.version)"
+}
+if ([string]$backendBuildInfo.build_id -ne [string]$BuildId) {
+    throw "后端构建号与发布名不一致：期望 $BuildId，EXE 自报 $($backendBuildInfo.build_id)"
+}
+Write-Step "后端构建身份：$($backendBuildInfo.build_id)"
 # 配置向导页的磁盘副本（exe 内嵌版兜底；磁盘版便于现场热替换——与 ops.html 同一套逻辑）
 $setupHtml = Join-Path $RepoRoot 'web\setup.html'
 if (Test-Path -LiteralPath $setupHtml) { Copy-Item -LiteralPath $setupHtml -Destination (Join-Path $webStage 'setup.html') -Force }
 else { Write-Warn2 "缺 $setupHtml —— 包内只有 exe 内嵌的向导页副本" }
+# 浏览器包必须以当前页面 origin 为服务地址，不能把打包机的 127.0.0.1:9099/8022
+# 烘进发给别人的 ZIP。即使 -SkipBuild 复用旧 Web，也用前端仓当前入口覆盖并把
+# config.json 归一成“model legacy sentinel + data 空值”，由 index.html 映射到 origin。
+$browserIndex = Join-Path $PlantUiRoot 'web\public\index.html'
+if (Test-Path -LiteralPath $browserIndex) {
+    Copy-Item -LiteralPath $browserIndex -Destination (Join-Path $webStage 'index.html') -Force
+}
+else {
+    throw "缺浏览器入口：$browserIndex"
+}
+$browserConfigPath = Join-Path $webStage 'config.json'
+if (-not (Test-Path -LiteralPath $browserConfigPath)) {
+    throw "web 组装后缺 config.json，无法保证浏览器使用同源 API"
+}
+$browserConfig = Get-Content -LiteralPath $browserConfigPath -Raw | ConvertFrom-Json
+$browserConfig | Add-Member -NotePropertyName model_api_url -NotePropertyValue 'http://127.0.0.1:8022' -Force
+$browserConfig | Add-Member -NotePropertyName data_api_url -NotePropertyValue '' -Force
+[System.IO.File]::WriteAllText(
+    $browserConfigPath,
+    ($browserConfig | ConvertTo-Json -Depth 8),
+    [System.Text.UTF8Encoding]::new($false)
+)
+
+# aios_core 的连接入口仍会从进程 CWD 读取 resource/surreal；即使后端另有内置快照，
+# 目录缺失也会在内置兜底执行前以 os error 3 退出。所有发布档位都把本仓同版脚本
+# 放进包根，不能依赖打包机或外部 workspace 恰好带着一份。
+$repoSurrealDir = Join-Path $RepoRoot 'resource\surreal'
+if (-not (Test-Path -LiteralPath $repoSurrealDir -PathType Container)) {
+    throw "缺后端 SurrealQL 资源目录：$repoSurrealDir"
+}
+$surqlSources = @(Get-ChildItem -LiteralPath $repoSurrealDir -Filter '*.surql' -File | Sort-Object Name)
+if ($surqlSources.Count -eq 0) {
+    throw "后端 SurrealQL 资源目录为空：$repoSurrealDir"
+}
+$stageSurrealDir = Join-Path $stage 'resource\surreal'
+New-Item -ItemType Directory -Force $stageSurrealDir | Out-Null
+foreach ($source in $surqlSources) {
+    $destination = Join-Path $stageSurrealDir $source.Name
+    Copy-Item -LiteralPath $source.FullName -Destination $destination -Force
+    if ((Get-FileHash -LiteralPath $source.FullName -Algorithm SHA256).Hash -ne
+        (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash) {
+        throw "SurrealQL 资源复制后校验失败：$($source.Name)"
+    }
+}
+Write-Step "包根 SurrealQL 资源已就绪：$($surqlSources.Count) 个文件"
+
+# 版本由 DbOption.e3d_version 显式选择，未配置时默认 e3d210；二进制证据只写诊断日志。
+# 真正解析仍必须拿到对应版本的 attlib.dat / *vir.dat。
+# 开发态可回落到 e3d-io 源码目录，部署机没有源码，所以两个 schema pack 都必须进包根。
+$e3dSchemaSource = Join-Path (Split-Path -Parent $RepoRoot) 'vendor\e3d-io\schema'
+if (-not (Test-Path -LiteralPath $e3dSchemaSource -PathType Container)) {
+    throw "缺 e3d-io schema 目录：$e3dSchemaSource"
+}
+$stageSchema = Join-Path $stage 'schema'
+$schemaSources = New-Object System.Collections.ArrayList
+foreach ($release in 'e3d210', 'e3d31') {
+    $sourceRelease = Join-Path $e3dSchemaSource $release
+    $destRelease = Join-Path $stageSchema $release
+    $manifestSource = Join-Path $sourceRelease 'manifest.json'
+    if (-not (Test-Path -LiteralPath $manifestSource -PathType Leaf)) {
+        throw "缺 E3D schema manifest：$manifestSource"
+    }
+    New-Item -ItemType Directory -Force $destRelease | Out-Null
+    Copy-Item -LiteralPath $manifestSource -Destination (Join-Path $destRelease 'manifest.json') -Force
+    [void]$schemaSources.Add((Get-Item -LiteralPath $manifestSource))
+
+    foreach ($folder in 'binaries', 'catalog') {
+        $sourceFolder = Join-Path $sourceRelease $folder
+        if (-not (Test-Path -LiteralPath $sourceFolder -PathType Container)) { continue }
+        Get-ChildItem -LiteralPath $sourceFolder -Recurse -File | ForEach-Object {
+            $rel = $_.FullName.Substring($sourceRelease.Length + 1)
+            $destination = Join-Path $destRelease $rel
+            New-Item -ItemType Directory -Force (Split-Path -Parent $destination) | Out-Null
+            Copy-Item -LiteralPath $_.FullName -Destination $destination -Force
+            if ((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash -ne
+                (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash) {
+                throw "E3D schema 复制后校验失败：$release\$rel"
+            }
+            [void]$schemaSources.Add($_)
+        }
+    }
+    # Global Project 的 MDB 在 *sys、DB 声明在 *glb；运行时会按文件头 dbnum
+    # 惰性跨库打开，所以 glbvir（以及其它项目元数据库模板）不是可选诊断资源。
+    foreach ($required in 'attlib.dat', 'desvir.dat', 'catvir.dat', 'dicvir.dat',
+        'sysvir.dat', 'comvir.dat', 'misvir.dat', 'glbvir.dat') {
+        if (-not (Test-Path -LiteralPath (Join-Path $destRelease "binaries\$required") -PathType Leaf)) {
+            throw "$release 缺部署必需 schema 文件：$required"
+        }
+    }
+}
+Write-Step "E3D schema packs 已就绪：$($schemaSources.Count) 个文件"
 
 # ── 3. workspace\ 小资源（assets 不进暂存，组 zip 时从源直灌，省磁盘） ─────────
-Write-Step "组装 workspace\ 依赖资源（assets 延后直灌）"
-# 出厂配置模板 + 首跑哨兵（计划 2026-09-09 向导 Q10/Q15/Q16）：包不再带本机配置快照。
-# 模板是「设置模式」形态（project_path 空、external 且 v_port="0" 哨兵、监听 0.0.0.0:9099），
-# 解压首跑自动进 /setup.html 配置向导；哨兵由向导「完成」时删除。
 $factoryConfig = Join-Path $scriptDir 'templates\DbOption.factory.toml'
 if (-not (Test-Path -LiteralPath $factoryConfig)) { throw "缺出厂配置模板：$factoryConfig" }
+if ($IncludeWorkspace) {
+Write-Step "组装 workspace\ 依赖资源（assets 延后直灌）"
+# 出厂配置模板 + 首跑哨兵：包不再带本机配置快照。
+# 模板是「设置模式」形态（project_path 空、默认 spawned-mem@127.0.0.1:8009、监听 0.0.0.0:9099），
+# 解压首跑自动进 /setup.html 配置向导；哨兵由向导「完成」时删除。
 Copy-Item -LiteralPath $factoryConfig -Destination (Join-Path $wsStage 'DbOption.toml')
 Set-Content -LiteralPath (Join-Path $wsStage '.first-run-pending') -Value ("shipped by New-LocalRelease " + (Get-Date -Format 'o')) -Encoding ascii
 foreach ($d in 'config', 'resource', 'search-index') {
@@ -187,43 +450,115 @@ foreach ($d in 'config', 'resource', 'search-index') {
     if (Test-Path -LiteralPath $src) { Copy-Item -LiteralPath $src -Destination (Join-Path $wsStage $d) -Recurse }
     else { Write-Warn2 "workspace 资源缺 $d（跳过）" }
 }
+# SurrealQL/字典资源必须与本次后端源码同版。workspace 提供现场资源全集，仓内 resource
+# 再逐文件覆盖它，避免拿旧工作区里的函数定义配新 exe。
+$repoResource = Join-Path $RepoRoot 'resource'
+if (Test-Path -LiteralPath $repoResource) {
+    Get-ChildItem -LiteralPath $repoResource -Recurse -File | ForEach-Object {
+        $rel = $_.FullName.Substring($repoResource.Length + 1)
+        $dest = Join-Path (Join-Path $wsStage 'resource') $rel
+        New-Item -ItemType Directory -Force (Split-Path -Parent $dest) | Out-Null
+        Copy-Item -LiteralPath $_.FullName -Destination $dest -Force
+    }
+}
 $snapCount = 0
 Get-ChildItem -LiteralPath $Workspace -Filter 'accel_tree_*.snapshot' -File -ErrorAction SilentlyContinue | ForEach-Object {
     Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $wsStage $_.Name); $script:snapCount++
 }
 if ($snapCount -eq 0) { Write-Warn2 "没找到 accel_tree_*.snapshot" }
-# 包内 surreal 二进制 + 起库脚本
-New-Item -ItemType Directory -Force (Join-Path $wsStage 'bin') | Out-Null
-if (Test-Path -LiteralPath $SurrealExe) { Copy-Item -LiteralPath $SurrealExe -Destination (Join-Path $wsStage 'bin\surreal.exe') }
-else { Write-Warn2 "没找到 surreal.exe：$SurrealExe（包内不含本地库二进制）" }
+}
+else {
+    Write-Step "跳过 workspace\：根目录保留 DbOption.toml、bin\surreal.exe、SurrealQL 与 E3D schema（其他资源外接）"
+    $runtimeConfigPath = Join-Path $stage 'DbOption.toml'
+    $runtimeConfig = Get-Content -LiteralPath $factoryConfig -Raw
+    $runtimeConfig = [regex]::Replace(
+        $runtimeConfig,
+        '(?m)^# 自带 memory SurrealDB 的默认端口；这一格是数字，不能写空串。\r?\n',
+        "# runtime 默认 embedded-mem，不使用 v_ip/v_port；保留 8009 便于手工切回 spawned-mem。`r`n"
+    )
+    $runtimeConfig = [regex]::Replace(
+        $runtimeConfig,
+        '(?m)^# 默认 spawned-mem（也可写别名 kv-mem）：.*\r?\n# 需要数据跨重启保留可改 spawned-rocksdb；连接既有库则改 external。\r?\n',
+        "# runtime 默认 embedded-mem：数据库在后端进程内，无子进程、无 Surreal TCP 端口。`r`n# 需要外部诊断可改 spawned-mem；需要持久化可改 spawned-rocksdb / external。`r`n"
+    )
+    $runtimeConfig = [regex]::Replace(
+        $runtimeConfig,
+        '(?m)^store_mode\s*=\s*["''][^"'']+["'']\s*$',
+        'store_mode = "embedded-mem"'
+    )
+    [System.IO.File]::WriteAllText(
+        $runtimeConfigPath,
+        $runtimeConfig,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    Set-Content -LiteralPath (Join-Path $stage '.first-run-pending') -Value ("shipped by New-LocalRelease " + (Get-Date -Format 'o')) -Encoding ascii
+}
+$surrealBinDir = if ($IncludeWorkspace) { Join-Path $wsStage 'bin' } else { Join-Path $stage 'bin' }
+New-Item -ItemType Directory -Force $surrealBinDir | Out-Null
+$packagedSurrealExe = Join-Path $surrealBinDir 'surreal.exe'
+Copy-Item -LiteralPath $SurrealExe -Destination $packagedSurrealExe -Force
+if ((Get-FileHash -LiteralPath $SurrealExe -Algorithm SHA256).Hash -ne
+    (Get-FileHash -LiteralPath $packagedSurrealExe -Algorithm SHA256).Hash) {
+    throw "surreal.exe 复制后校验失败：$packagedSurrealExe"
+}
+Write-Step "SurrealDB 二进制已就绪：$packagedSurrealExe / $surrealVersion"
 
 # ── 4. 生成包内脚本与文档 ────────────────────────────────────────────────────
 Write-Step "生成 Start-AMS / Rollback / Start-Surreal / README / CHANGELOG"
 
 $startAms = @'
 param(
-    [string]$Workspace = (Join-Path $PSScriptRoot 'workspace'),
+    [string]$Workspace = $env:AMS_WORKSPACE,
     [switch]$NoBrowser,
     [int]$TimeoutSeconds = 600
 )
 $ErrorActionPreference = 'Stop'
 $root = $PSScriptRoot
 $exe = Join-Path $root 'aios-database.exe'
-$url = 'http://127.0.0.1:9099/'
 $logRoot = Join-Path $root 'logs'
 New-Item -ItemType Directory -Force $logRoot | Out-Null
+if (-not $Workspace) {
+    $bundledWorkspace = Join-Path $root 'workspace'
+    $Workspace = if (Test-Path -LiteralPath $bundledWorkspace) { $bundledWorkspace } else { $root }
+}
 if (-not (Test-Path -LiteralPath $exe)) { throw "Missing backend: $exe" }
 if (-not (Test-Path -LiteralPath (Join-Path $root 'web/pkg/plant_ui_app_bg.wasm'))) { throw 'Web package missing' }
-if (-not (Test-Path -LiteralPath (Join-Path $Workspace 'DbOption.toml'))) { throw "Missing workspace config: $Workspace" }
+$rootConfig = Join-Path $root 'DbOption.toml'
+$configPath = if (Test-Path -LiteralPath $rootConfig) { $rootConfig } else { Join-Path $Workspace 'DbOption.toml' }
+if (-not (Test-Path -LiteralPath $configPath)) { throw "Missing workspace config: $Workspace" }
+$configText = Get-Content -LiteralPath $configPath -Raw
+$addr = [regex]::Match($configText, '(?m)^\s*http_api_addr\s*=\s*["'']?([^"''#\r\n]+)').Groups[1].Value.Trim()
+if (-not $addr) {
+    $addr = [regex]::Match($configText, '(?m)^\s*server_release_ip\s*=\s*["'']?([^"''#\r\n]+)').Groups[1].Value.Trim()
+}
+if (-not $addr) { $addr = '127.0.0.1:9099' }
+$portMatch = [regex]::Match($addr, ':(\d+)$')
+if (-not $portMatch.Success) { throw "Invalid http_api_addr/server_release_ip: $addr" }
+$httpPort = [int]$portMatch.Groups[1].Value
+$localAddr = if ($addr.StartsWith('0.0.0.0:')) { '127.0.0.1:' + $addr.Substring(8) } else { $addr }
+$publicAddr = [regex]::Match($configText, '(?m)^\s*http_public_addr\s*=\s*["'']?([^"''#\r\n]+)').Groups[1].Value.Trim()
+if (-not $publicAddr) { $publicAddr = $localAddr }
+$configRoot = Split-Path -Parent $configPath
+$firstRunPending = Test-Path -LiteralPath (Join-Path $configRoot '.first-run-pending')
+$probeUrl = "http://$localAddr/"
+# 配置向导的 API 只认回环来源；首跑必须打开本机地址。配置完成后才使用对外展示地址。
+$browserUrl = if ($firstRunPending) { $probeUrl } else { "http://$publicAddr/" }
+# 启动脚本自己等服务就绪后打开页面；关掉后端的包布局自动打开，避免同次启动弹两次。
+$env:AIOS_OPEN_BROWSER = '0'
 $existing = Get-CimInstance Win32_Process -Filter "Name='aios-database.exe'" | Where-Object { $_.ExecutablePath -eq $exe }
 if ($existing) {
     $process = Get-Process -Id $existing.ProcessId
 } else {
-    $listener = Get-NetTCPConnection -LocalPort 9099 -State Listen -ErrorAction SilentlyContinue
-    if ($listener) { throw "Port 9099 already belongs to PID $($listener.OwningProcess). Stop the prior release first." }
-    $env:DB_OPTION_FILE = Join-Path $Workspace 'DbOption.toml'
+    # 用 BCL 查监听端口，兼容 Windows PowerShell 5.1 与 PowerShell 7；后者在部分机器上
+    # 无法加载 Windows-only 的 NetTCPIP 模块，不能让解压即跑因此失效。
+    $listener = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() |
+        Where-Object { $_.Port -eq $httpPort } |
+        Select-Object -First 1
+    if ($listener) { throw "Port $httpPort is already in use. Stop the prior release first." }
+    $env:DB_OPTION_FILE = $configPath
     $env:PLANT_UI_WEB_ROOT = Join-Path $root 'web'
     $env:PLANT_ASSET_ROOT = Join-Path $Workspace 'assets'
+    $env:AIOS_E3D_SCHEMA_ROOT = Join-Path $root 'schema'
     $surreal = Join-Path $Workspace 'bin\surreal.exe'
     if (Test-Path -LiteralPath $surreal) { $env:AIOS_SURREAL_EXE = $surreal }
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
@@ -235,12 +570,12 @@ do {
     $process.Refresh()
     if ($process.HasExited) { throw "Backend exited: $($process.ExitCode); see $logRoot" }
     try {
-        $health = Invoke-WebRequest -Uri ($url + 'api/v1/health') -UseBasicParsing -TimeoutSec 3
-        $page = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 3
+        $health = Invoke-WebRequest -Uri ($probeUrl + 'api/v1/health') -UseBasicParsing -TimeoutSec 3
+        $page = Invoke-WebRequest -Uri $probeUrl -UseBasicParsing -TimeoutSec 3
         # 首跑（哨兵在场）首页 302 到 /setup.html（含 ams-setup-wizard）；配置完成后是 plant-ui。
         if ($health.StatusCode -eq 200 -and ($page.Content.Contains('plant_ui_app.js') -or $page.Content.Contains('ams-setup-wizard'))) {
-            Write-Output "READY PID=$($process.Id) URL=$url"
-            if (-not $NoBrowser) { Start-Process $url }
+            Write-Output "READY PID=$($process.Id) URL=$browserUrl (probe $probeUrl)"
+            if (-not $NoBrowser) { Start-Process $browserUrl }
             exit 0
         }
     } catch {}
@@ -273,6 +608,7 @@ Write-Output 'Prior installation restored; files and database were not replaced.
 '@
 Set-Content -LiteralPath (Join-Path $stage 'Rollback.ps1') -Value $rollback -Encoding UTF8
 
+if ($IncludeWorkspace) {
 $startSurreal = @'
 # 用包内 surreal.exe（本仓 fork 的 2.1.x）手动起一台本地库。多数情况不必用它：
 # 配置向导第②步「新建本机持久库（spawned-rocksdb）」由服务自己拉起并管生命周期。
@@ -293,7 +629,7 @@ if (-not $Port) {
     $m = [regex]::Match($dbo, '(?m)^\s*v_port\s*=\s*"?(\d+)"?')
     $Port = if ($m.Success) { [int]$m.Groups[1].Value } else { 8010 }
 }
-# 出厂模板的 v_port="0" 是「未设置」哨兵，不是端口——读到 0 一律回落 8010。
+# 兼容旧模板的 v_port="0" 未设置哨兵：读到 0 一律回落 8010。
 if ($Port -le 0) { $Port = 8010 }
 if (-not $Datastore) { $Datastore = 'rocksdb:' + (Join-Path $root '.surreal\ams') }
 $ver = (& $exe version) -join ' '
@@ -304,18 +640,80 @@ Write-Host "SurrealDB $ver  bind 127.0.0.1:$Port  data $Datastore"
 & $exe start --user $User --pass $Password --bind "127.0.0.1:$Port" $Datastore
 '@
 Set-Content -LiteralPath (Join-Path $wsStage 'Start-Surreal.ps1') -Value $startSurreal -Encoding UTF8
+}
 
-# README（-full）
+# README
+$assetLayoutLine = if ($ExcludeMeshes) {
+    '- ``assets\`` —— 运行期资源目录；本包不含 ``assets\meshes``，网格由目标环境生成或另行提供'
+}
+else {
+    '- ``assets\`` —— 模型网格/字体等（``PLANT_ASSET_ROOT`` 指向它）'
+}
+$meshRuntimeNote = if (-not $IncludeWorkspace) {
+    '- **本包不含 workspace 与 meshes。** 三维网格从外部 workspace 读取，或由目标环境连接 E3D 项目后生成。'
+}
+elseif ($ExcludeMeshes) {
+    '- **本包不含 meshes。** 需要三维网格时，由目标环境连接 E3D 项目后生成，或另行放入 ``workspace\assets\meshes``。'
+}
+else {
+    '- 已生成模型的**三维可直接看**：树走文件、几何走 ``assets`` + accel 快照，不必等库。'
+}
+$startupInstruction = if ($IncludeWorkspace) {
+    '解压后双击 **Start-AMS.cmd**（或运行 Start-AMS.ps1）。服务就绪后自动打开 http://127.0.0.1:9099/ 。'
+}
+else {
+    '本包默认不带 workspace，``store_mode=embedded-mem``：kv-mem 在后端进程内，无 Surreal 子进程或数据库端口。根目录仍带 ``bin\surreal.exe``，需要外部诊断时可切回 spawned-mem。assets 等资源可通过 ``Start-AMS.ps1 -Workspace <外部 workspace 路径>`` 或 ``AMS_WORKSPACE`` 提供。'
+}
+$rootSurrealLayoutLine = if ($IncludeWorkspace) {
+    ''
+}
+else {
+    '- ``bin\surreal.exe`` —— 本仓 fork 的 SurrealDB 2.1.x；仅在切换 spawned-mem / spawned-rocksdb 时使用'
+}
+$workspaceLayoutLines = if ($IncludeWorkspace) {
+@"
+- ``workspace\`` —— 运行所需依赖资源，Start-AMS 未传参时自动使用
+  - ``DbOption.toml`` / ``config\`` / ``resource\`` / ``search-index\`` / ``accel_tree_*.snapshot``
+  $assetLayoutLine
+  - ``bin\surreal.exe`` —— 本仓 fork 的 SurrealDB 2.1.x；``Start-Surreal.ps1`` 起一台本地库
+"@
+}
+else {
+    '- 默认不含 ``workspace\``；索引、快照与 assets 由外部 workspace 提供'
+}
+$configLayoutLine = if ($IncludeWorkspace) {
+    '- ``workspace\DbOption.toml`` —— 附带 workspace 时唯一一份出厂配置'
+}
+else {
+    '- ``DbOption.toml`` —— 默认运行包唯一一份、不含本机路径的出厂配置'
+}
+$firstRunNote = if ($IncludeWorkspace) {
+    '本包附带的 workspace 使用出厂配置（``DbOption.toml`` + ``.first-run-pending``）；第一次启动会自动进入配置向导。'
+}
+else {
+    '根目录附带一份不含本机路径的出厂 ``DbOption.toml`` 与首跑哨兵；第一次启动会进入配置向导。'
+}
+$storeRuntimeNote = if ($IncludeWorkspace) {
+    '- **SurrealDB 数据与源模型不打入包。** 附带配置默认 ``store_mode=spawned-mem``，服务会用 workspace 内二进制自行拉起内存库。'
+}
+else {
+    '- **workspace 默认不打入包。** runtime 默认使用进程内 ``embedded-mem``；``bin\surreal.exe`` 作为切换到 spawned 档的备用文件保留。索引、快照与 assets 从 ``-Workspace`` / ``AMS_WORKSPACE`` 指向的外部目录读取。'
+}
 $readme = @"
-# AMS 本地发布包（-full）：gen-model $BackendVersion + plant-ui $WebVersion（Web）
+# AMS 本地发布包（-$packageTier）：gen-model $BackendVersion + plant-ui $WebVersion（Web）
 
-解压后双击 **Start-AMS.cmd**（或运行 Start-AMS.ps1）。服务就绪后自动打开 http://127.0.0.1:9099/ 。
+后端构建 ID：``$($backendBuildInfo.build_id)``。排障与生成二进制 patch 时以此 ID + SHA-256 双重定位。
+
+$startupInstruction
 重复运行会复用本包已启动的进程；9099 被别的版本占用会明确报错，不打开错版本网页。
+``http_api_addr`` 优先决定监听（推荐 ``0.0.0.0:9099``）；旧配置缺少它时兼容
+``server_release_ip``，两者都空时默认 ``127.0.0.1:9099``。``http_public_addr`` 只决定
+日志、自动打开和分享链接。首跑向导始终通过回环地址打开，配置 API 不对局域网放行。
 
 ## 首跑：配置向导
-本包出厂配置是「未配置」形态（``workspace\DbOption.toml`` 出厂模板 + ``.first-run-pending`` 哨兵）。
-**第一次启动会自动进入配置向导**（浏览器打开的首页跳到 ``/setup.html``）：
-①选 E3D 项目目录与项目 → ②选存储（连已有 SurrealDB，或试用模式）→ ③定监听端口
+$firstRunNote
+进入配置向导后（浏览器首页跳到 ``/setup.html``）：
+①选 E3D 项目目录与项目 → ②确认默认 kv-mem，或改用持久/外置 SurrealDB → ③定监听端口
 → ④选「只导数据 / 一步到位」并保存重启 → ⑤勾库初始化。向导页只许在**本机**打开
 （局域网访问应用没问题，但改配置的接口只收 127.0.0.1 的请求）。
 不想用向导：直接改 ``workspace\DbOption.toml`` 后重启，并删掉 ``workspace\.first-run-pending``。
@@ -323,19 +721,19 @@ $readme = @"
 ## 包内布局（一体化，解压即跑）
 - ``aios-database.exe`` —— 后端服务（gen-model $BackendVersion）
 - ``web\`` —— plant-ui $WebVersion 的 Web 静态资源（wasm + 字体 + 贴图）
-- ``workspace\`` —— 运行所需依赖资源，Start-AMS 默认 ``-Workspace`` 指向这里
-  - ``DbOption.toml`` / ``config\`` / ``resource\`` / ``search-index\`` / ``accel_tree_*.snapshot``
-  - ``assets\`` —— 模型网格/字体等（``PLANT_ASSET_ROOT`` 指向它）
-  - ``bin\surreal.exe`` —— 本仓 fork 的 SurrealDB 2.1.x；``Start-Surreal.ps1`` 起一台本地库
+- ``resource\surreal\`` —— 与后端同版的数据库函数脚本；直接启动时不可缺
+- ``schema\e3d210|e3d31\`` —— ``e3d_version`` 选用的 attlib / *vir.dat；未配置时默认 e3d210
+$rootSurrealLayoutLine
+$configLayoutLine
+$workspaceLayoutLines
 - ``CHANGELOG.md`` —— 本版更新说明（后端 + 前端两节）
 - ``release.json`` —— 程序文件 sha256 清单 + 资源摘要 + 冒烟结果
 
 ## 运行依赖（不在包内 —— 见 ADR-068）
-- **SurrealDB 数据与源模型不打入包。** DbOption 默认 ``store_mode=external``，连 ``127.0.0.1:8010`` 上「已经在跑」的库。
-  - 已生成模型的**三维可直接看**：树走文件、几何走 ``assets`` + accel 快照，不必等库。
-  - 但**属性 / 搜索 / 补齐 / 更新仍需连回原始库**。换机器且无外部库时：可跑 ``workspace\Start-Surreal.ps1``
-    用包内 surreal 起一台空库，或设 ``AIOS_STORE_MODE=spawned-mem`` 让后端自带内存库（都不含既有数据）。
-- **SurrealDB 必须是本仓 fork 的 2.1.x**（就是包内 ``bin\surreal.exe``）。别用 PATH 上 ``cargo install`` 装的 3.x：
+$storeRuntimeNote
+  $meshRuntimeNote
+  - embedded-mem / spawned-mem 都是 read-through：属性直接读 E3D 文件，模型缓存随进程消失；要保留摄入数据，改用 ``spawned-rocksdb`` 或 ``external``。
+- **切换到 spawned / external 时，SurrealDB 必须是本仓 fork 的 2.1.x**（包内 ``bin\surreal.exe``）。别用 PATH 上 ``cargo install`` 装的 3.x：
   它会要求对数据做不可逆迁移、且与 2.1.4 客户端握不上手。
 
 ## 回退
@@ -384,33 +782,69 @@ $plantSection
 Set-Content -LiteralPath (Join-Path $stage 'CHANGELOG.md') -Value $changelog -Encoding UTF8
 
 # ── 5. 冒烟门（Q9） ──────────────────────────────────────────────────────────
-$url = 'http://127.0.0.1:9099/'
+$url = "http://127.0.0.1:$SmokeHttpPort/"
 $smoke = [ordered]@{ status = 'unknown'; reason = ''; url = $url; store_mode = $SmokeStoreMode }
+
+function Set-SmokeHttpPort([string]$ConfigText, [int]$Port) {
+    if ($ConfigText -match '(?m)^\s*http_api_addr\s*=') {
+        return [regex]::Replace(
+            $ConfigText,
+            '(?m)^\s*http_api_addr\s*=.*$',
+            "http_api_addr = `"127.0.0.1:$Port`""
+        )
+    }
+    return $ConfigText + "`r`nhttp_api_addr = `"127.0.0.1:$Port`"`r`n"
+}
+
 function Invoke-Smoke {
     $exe = Join-Path $stage 'aios-database.exe'
-    $listener = Get-NetTCPConnection -LocalPort 9099 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    $listener = Get-NetTCPConnection -LocalPort $SmokeHttpPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($listener) {
-        return [ordered]@{ status = 'skipped'; reason = "9099 被 PID $($listener.OwningProcess) 占用"; url = $smoke.url; store_mode = $SmokeStoreMode }
+        return [ordered]@{ status = 'skipped'; reason = "$SmokeHttpPort 被 PID $($listener.OwningProcess) 占用"; url = $smoke.url; store_mode = $SmokeStoreMode }
     }
-    # 冒烟工作区：把包内 workspace\（不含 assets）复制到临时盘，assets 用环境变量指回源。
-    # exe 以临时目录为 cwd（包内 bin\surreal.exe 就在手边，spawned-mem 找得到），
+    # 冒烟工作区：workspace 档复制 workspace\；runtime 只复制根配置与存储启动资源。
+    # assets 用环境变量指回源。exe 以临时目录为 cwd，
     # 跑出的日志/锁落在临时目录、不污染待打包的暂存目录。
     $smokeWs = Join-Path $env:TEMP ("ams-smoke-" + (Get-Date -Format 'yyyyMMddHHmmss'))
-    Copy-Item -LiteralPath $wsStage -Destination $smokeWs -Recurse
+    if ($IncludeWorkspace) {
+        Copy-Item -LiteralPath $wsStage -Destination $smokeWs -Recurse
+    }
+    else {
+        New-Item -ItemType Directory -Force $smokeWs | Out-Null
+        Copy-Item -LiteralPath (Join-Path $stage 'resource') -Destination (Join-Path $smokeWs 'resource') -Recurse
+        Copy-Item -LiteralPath (Join-Path $stage 'bin') -Destination (Join-Path $smokeWs 'bin') -Recurse
+    }
     # 全启动腿考的是「真配置 + 包内程序」：包里现在装的是出厂模板（设置模式形态），
     # 这一腿换回本机 workspace 的配置、摘掉首跑哨兵；出厂形态由 Invoke-SetupSmoke 那一腿考。
-    Copy-Item -LiteralPath (Join-Path $Workspace 'DbOption.toml') -Destination (Join-Path $smokeWs 'DbOption.toml') -Force
+    $smokeConfigPath = Join-Path $smokeWs 'DbOption.toml'
+    $smokeConfig = Get-Content -LiteralPath (Join-Path $Workspace 'DbOption.toml') -Raw
+    if ($smokeConfig -match '(?m)^\s*store_mode\s*=') {
+        $smokeConfig = [regex]::Replace(
+            $smokeConfig,
+            '(?m)^\s*store_mode\s*=.*$',
+            "store_mode = `"$SmokeStoreMode`""
+        )
+    }
+    else {
+        $smokeConfig += "`r`nstore_mode = `"$SmokeStoreMode`"`r`n"
+    }
+    $smokeConfig = Set-SmokeHttpPort $smokeConfig $SmokeHttpPort
+    [System.IO.File]::WriteAllText($smokeConfigPath, $smokeConfig, [System.Text.UTF8Encoding]::new($false))
     Remove-Item -LiteralPath (Join-Path $smokeWs '.first-run-pending') -Force -ErrorAction SilentlyContinue
     $logDir = Join-Path $stage 'smoke-logs'
     New-Item -ItemType Directory -Force $logDir | Out-Null
     $env:DB_OPTION_FILE = Join-Path $smokeWs 'DbOption.toml'
     $env:PLANT_UI_WEB_ROOT = Join-Path $stage 'web'
     $env:PLANT_ASSET_ROOT = Join-Path $Workspace 'assets'
-    if (Test-Path -LiteralPath $SurrealExe) { $env:AIOS_SURREAL_EXE = $SurrealExe }
-    if ($SmokeStoreMode -eq 'spawned-mem') {
-        $env:AIOS_STORE_MODE = 'spawned-mem'; $env:AIOS_STARTUP_AUTORUN = '0'; $env:RUST_MIN_STACK = '134217728'
+    $env:AIOS_E3D_SCHEMA_ROOT = $stageSchema
+    $smokeSurreal = Join-Path $smokeWs 'bin\surreal.exe'
+    if (Test-Path -LiteralPath $smokeSurreal) {
+        $env:AIOS_SURREAL_EXE = $smokeSurreal
     }
-    else { Remove-Item Env:AIOS_STORE_MODE -ErrorAction SilentlyContinue }
+    else { Remove-Item Env:AIOS_SURREAL_EXE -ErrorAction SilentlyContinue }
+    $env:AIOS_STORE_MODE = $SmokeStoreMode
+    $env:AIOS_STARTUP_AUTORUN = '0'
+    $env:RUST_MIN_STACK = '134217728'
     $surrealBefore = @(Get-CimInstance Win32_Process -Filter "Name='surreal.exe'" | Select-Object -ExpandProperty ProcessId)
     $proc = Start-Process -FilePath $exe -ArgumentList 'serve' -WorkingDirectory $smokeWs -WindowStyle Hidden -PassThru `
         -RedirectStandardOutput (Join-Path $logDir 'smoke.stdout.log') -RedirectStandardError (Join-Path $logDir 'smoke.stderr.log')
@@ -423,8 +857,16 @@ function Invoke-Smoke {
             try {
                 $h = Invoke-WebRequest -Uri ($smoke.url + 'api/v1/health') -UseBasicParsing -TimeoutSec 3
                 $p = Invoke-WebRequest -Uri $smoke.url -UseBasicParsing -TimeoutSec 3
-                if ($h.StatusCode -eq 200 -and $p.Content.Contains('plant_ui_app.js')) {
-                    $result.status = 'passed'; $result.reason = 'health 200 + 首页含 plant_ui_app.js'; break
+                $health = $h.Content | ConvertFrom-Json
+                $childStore = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($proc.Id)" -ErrorAction SilentlyContinue |
+                    Where-Object { $_.Name -eq 'surreal.exe' } | Select-Object -First 1
+                $modeOk = $health.sul_db.medium -eq $SmokeStoreMode
+                $childOk = $SmokeStoreMode -ne 'embedded-mem' -or -not $childStore
+                if ($h.StatusCode -eq 200 -and $p.Content.Contains('plant_ui_app.js') -and $modeOk -and $childOk) {
+                    $result.status = 'passed'
+                    $result.reason = "health 200 + 首页含 plant_ui_app.js + medium=$SmokeStoreMode" +
+                        $(if ($SmokeStoreMode -eq 'embedded-mem') { ' + 无 surreal 子进程' } else { '' })
+                    break
                 }
             }
             catch {}
@@ -446,18 +888,30 @@ function Invoke-Smoke {
 # /api/v1/health 报 mode=setup、/setup.html 200 且含向导标记。这一腿不连库、不扫描，几秒就完。
 function Invoke-SetupSmoke {
     $exe = Join-Path $stage 'aios-database.exe'
-    $listener = Get-NetTCPConnection -LocalPort 9099 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    $listener = Get-NetTCPConnection -LocalPort $SmokeHttpPort -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
     if ($listener) {
-        return [ordered]@{ status = 'skipped'; reason = "9099 被 PID $($listener.OwningProcess) 占用" }
+        return [ordered]@{ status = 'skipped'; reason = "$SmokeHttpPort 被 PID $($listener.OwningProcess) 占用" }
     }
     $setupWs = Join-Path $env:TEMP ("ams-setup-smoke-" + (Get-Date -Format 'yyyyMMddHHmmss'))
     New-Item -ItemType Directory -Force $setupWs | Out-Null
-    Copy-Item -LiteralPath (Join-Path $wsStage 'DbOption.toml') -Destination (Join-Path $setupWs 'DbOption.toml')
+    $setupConfig = if ($IncludeWorkspace) {
+        Join-Path $wsStage 'DbOption.toml'
+    }
+    else {
+        Join-Path $stage 'DbOption.toml'
+    }
+    $setupConfigText = Set-SmokeHttpPort (Get-Content -LiteralPath $setupConfig -Raw) $SmokeHttpPort
+    [System.IO.File]::WriteAllText(
+        (Join-Path $setupWs 'DbOption.toml'),
+        $setupConfigText,
+        [System.Text.UTF8Encoding]::new($false)
+    )
     Set-Content -LiteralPath (Join-Path $setupWs '.first-run-pending') -Value 'setup-smoke' -Encoding ascii
     $logDir = Join-Path $stage 'smoke-logs'
     New-Item -ItemType Directory -Force $logDir | Out-Null
     $env:DB_OPTION_FILE = Join-Path $setupWs 'DbOption.toml'
     $env:PLANT_UI_WEB_ROOT = Join-Path $stage 'web'
+    $env:AIOS_E3D_SCHEMA_ROOT = $stageSchema
     Remove-Item Env:AIOS_STORE_MODE -ErrorAction SilentlyContinue
     Remove-Item Env:AIOS_STARTUP_AUTORUN -ErrorAction SilentlyContinue
     $proc = Start-Process -FilePath $exe -ArgumentList 'serve' -WorkingDirectory $setupWs -WindowStyle Hidden -PassThru `
@@ -469,8 +923,8 @@ function Invoke-SetupSmoke {
             $proc.Refresh()
             if ($proc.HasExited) { $result.reason = "backend exited $($proc.ExitCode)"; break }
             try {
-                $h = Invoke-WebRequest -Uri 'http://127.0.0.1:9099/api/v1/health' -UseBasicParsing -TimeoutSec 3
-                $p = Invoke-WebRequest -Uri 'http://127.0.0.1:9099/setup.html' -UseBasicParsing -TimeoutSec 3
+                $h = Invoke-WebRequest -Uri "http://127.0.0.1:$SmokeHttpPort/api/v1/health" -UseBasicParsing -TimeoutSec 3
+                $p = Invoke-WebRequest -Uri "http://127.0.0.1:$SmokeHttpPort/setup.html" -UseBasicParsing -TimeoutSec 3
                 if ($h.StatusCode -eq 200 -and $h.Content.Contains('"mode":"setup"') -and $p.Content.Contains('ams-setup-wizard')) {
                     $result.status = 'passed'; $result.reason = 'health mode=setup + /setup.html 含向导标记'; break
                 }
@@ -494,7 +948,7 @@ function Invoke-SetupSmoke {
 # rocksdb 数据目录真的落在 workspace\.surreal\。surreal 用暂存包里那只（顺带验包内二进制）。
 function Invoke-RocksSmoke {
     $exe = Join-Path $stage 'aios-database.exe'
-    foreach ($port in 9099, 18010) {
+    foreach ($port in $SmokeHttpPort, 18010) {
         $listener = Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($listener) { return [ordered]@{ status = 'skipped'; reason = "$port 被 PID $($listener.OwningProcess) 占用" } }
     }
@@ -507,12 +961,14 @@ function Invoke-RocksSmoke {
     $cfg = $cfg -replace '(?m)^\s*store_mode\s*=.*$', ''
     $cfg = $cfg -replace '(?m)^(\s*v_port\s*=\s*).*$', '$1"18010"'
     $cfg = $cfg + "`r`nstore_mode = `"spawned-rocksdb`"`r`n"
+    $cfg = Set-SmokeHttpPort $cfg $SmokeHttpPort
     Set-Content -LiteralPath (Join-Path $rocksWs 'DbOption.toml') -Value $cfg -Encoding utf8
     $logDir = Join-Path $stage 'smoke-logs'
     New-Item -ItemType Directory -Force $logDir | Out-Null
     $env:DB_OPTION_FILE = Join-Path $rocksWs 'DbOption.toml'
     $env:PLANT_UI_WEB_ROOT = Join-Path $stage 'web'
-    $env:AIOS_SURREAL_EXE = Join-Path $wsStage 'bin\surreal.exe'
+    $env:AIOS_E3D_SCHEMA_ROOT = $stageSchema
+    $env:AIOS_SURREAL_EXE = Join-Path $rocksWs 'bin\surreal.exe'
     Remove-Item Env:AIOS_STORE_MODE -ErrorAction SilentlyContinue
     Remove-Item Env:AIOS_STARTUP_AUTORUN -ErrorAction SilentlyContinue
     $proc = Start-Process -FilePath $exe -ArgumentList 'serve' -WorkingDirectory $rocksWs -WindowStyle Hidden -PassThru `
@@ -524,7 +980,7 @@ function Invoke-RocksSmoke {
             $proc.Refresh()
             if ($proc.HasExited) { $result.reason = "backend exited $($proc.ExitCode)"; break }
             try {
-                $h = Invoke-WebRequest -Uri 'http://127.0.0.1:9099/api/v1/health' -UseBasicParsing -TimeoutSec 3
+                $h = Invoke-WebRequest -Uri "http://127.0.0.1:$SmokeHttpPort/api/v1/health" -UseBasicParsing -TimeoutSec 3
                 if ($h.StatusCode -eq 200 -and $h.Content.Contains('"medium":"spawned-rocksdb"') -and $h.Content.Contains('"durable":true')) {
                     if (Test-Path -LiteralPath (Join-Path $rocksWs '.surreal')) {
                         $result.status = 'passed'; $result.reason = 'medium=spawned-rocksdb + durable=true + .surreal 目录真落盘'; break
@@ -549,11 +1005,12 @@ function Invoke-RocksSmoke {
 
 $setupSmoke = [ordered]@{ status = 'unknown'; reason = '' }
 $rocksSmoke = [ordered]@{ status = 'unknown'; reason = '' }
+$smokeSkipReason = '-SkipSmoke'
 if ($SkipSmoke) {
-    $smoke = [ordered]@{ status = 'skipped'; reason = '-SkipSmoke'; url = $smoke.url; store_mode = $SmokeStoreMode }
-    $setupSmoke = [ordered]@{ status = 'skipped'; reason = '-SkipSmoke' }
-    $rocksSmoke = [ordered]@{ status = 'skipped'; reason = '-SkipSmoke' }
-    Write-Warn2 "冒烟门已跳过（-SkipSmoke）——产物标『未冒烟』"
+    $smoke = [ordered]@{ status = 'skipped'; reason = $smokeSkipReason; url = $smoke.url; store_mode = $SmokeStoreMode }
+    $setupSmoke = [ordered]@{ status = 'skipped'; reason = $smokeSkipReason }
+    $rocksSmoke = [ordered]@{ status = 'skipped'; reason = $smokeSkipReason }
+    Write-Warn2 "冒烟门已跳过（$smokeSkipReason）——产物标『未冒烟』"
 }
 else {
     Write-Step "冒烟门 A：出厂配置起服务 → 设置模式 + 向导页（超时 30s）"
@@ -572,14 +1029,20 @@ else {
             Write-Warn2 "冒烟未过：$($smoke.reason)（看 $stage\smoke-logs）"
         }
     }
-    Write-Step "冒烟门 C：自带持久库（spawned-rocksdb@18010，超时 ${SmokeTimeoutSeconds}s）"
-    $rocksSmoke = Invoke-RocksSmoke
-    switch ($rocksSmoke.status) {
-        'passed' { Write-Host "  [OK] 持久库腿通过：$($rocksSmoke.reason)" -ForegroundColor Green }
-        'skipped' { Write-Warn2 "持久库腿跳过：$($rocksSmoke.reason)" }
-        default { Write-Warn2 "持久库腿未过：$($rocksSmoke.reason)（看 $stage\smoke-logs\rocks-smoke.*.log）" }
+    if ($IncludeWorkspace) {
+        Write-Step "冒烟门 C：自带持久库（spawned-rocksdb@18010，超时 ${SmokeTimeoutSeconds}s）"
+        $rocksSmoke = Invoke-RocksSmoke
+        switch ($rocksSmoke.status) {
+            'passed' { Write-Host "  [OK] 持久库腿通过：$($rocksSmoke.reason)" -ForegroundColor Green }
+            'skipped' { Write-Warn2 "持久库腿跳过：$($rocksSmoke.reason)" }
+            default { Write-Warn2 "持久库腿未过：$($rocksSmoke.reason)（看 $stage\smoke-logs\rocks-smoke.*.log）" }
+        }
     }
-    $legFailed = ($smoke.status -eq 'failed') -or ($setupSmoke.status -eq 'failed') -or ($rocksSmoke.status -eq 'failed')
+    else {
+        $rocksSmoke = [ordered]@{ status = 'skipped'; reason = 'runtime tier does not bundle a workspace' }
+    }
+    $legFailed = ($smoke.status -eq 'failed') -or ($setupSmoke.status -eq 'failed') -or
+        ($IncludeWorkspace -and $rocksSmoke.status -eq 'failed')
     if ($StrictSmoke -and $legFailed) {
         throw "冒烟未过且 -StrictSmoke，中止、不出包。（A=$($setupSmoke.status) / B=$($smoke.status) / C=$($rocksSmoke.status)）"
     }
@@ -589,7 +1052,8 @@ else {
 }
 $smoke.setup_leg = $setupSmoke
 $smoke.rocks_leg = $rocksSmoke
-$smoked = (($smoke.status -eq 'passed') -and ($setupSmoke.status -eq 'passed') -and ($rocksSmoke.status -eq 'passed'))
+$smoked = (($smoke.status -eq 'passed') -and ($setupSmoke.status -eq 'passed') -and
+    ((-not $IncludeWorkspace) -or ($rocksSmoke.status -eq 'passed')))
 
 # ── 6. 组 zip + sha256 清单（assets 从源直灌，省磁盘） ───────────────────────
 $free = (Get-PSDrive (Split-Path $OutDir -Qualifier).TrimEnd(':')).Free
@@ -597,6 +1061,16 @@ Write-Step ("组 zip（{0} 压缩）；目标盘剩余 {1:N1} GB" -f $Compressio
 
 $files = New-Object System.Collections.ArrayList
 $resources = New-Object System.Collections.ArrayList
+[void]$resources.Add([ordered]@{
+    path = 'resource/surreal'
+    bytes = [long](($surqlSources | Measure-Object Length -Sum).Sum)
+    files = $surqlSources.Count
+})
+[void]$resources.Add([ordered]@{
+    path = 'schema'
+    bytes = [long](($schemaSources | Measure-Object Length -Sum).Sum)
+    files = $schemaSources.Count
+})
 $cl = [System.IO.Compression.CompressionLevel]::$CompressionLevel
 $fs = [System.IO.File]::Open($zip, [System.IO.FileMode]::Create)
 $archive = New-Object System.IO.Compression.ZipArchive($fs, [System.IO.Compression.ZipArchiveMode]::Create)
@@ -611,24 +1085,50 @@ try {
     }
     # 6b. assets 从源直灌到 workspace/assets/*（不进暂存、不逐一 hash，按目录汇总）
     $assetSrc = Join-Path $Workspace 'assets'
-    if (Test-Path -LiteralPath $assetSrc) {
+    if ($IncludeWorkspace -and (Test-Path -LiteralPath $assetSrc)) {
         $aBytes = [long]0; $aFiles = 0
+        $meshSkippedBytes = [long]0; $meshSkippedFiles = 0
         Get-ChildItem -LiteralPath $assetSrc -Recurse -File | ForEach-Object {
             $rel = $_.FullName.Substring($assetSrc.Length + 1)
+            if ($ExcludeMeshes -and $rel -match '^(?i:meshes)[\\/]') {
+                $meshSkippedBytes += $_.Length
+                $meshSkippedFiles++
+                return
+            }
             $entry = 'workspace/assets/' + ($rel -replace '\\', '/')
             [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $_.FullName, $entry, $cl) | Out-Null
             $aBytes += $_.Length; $aFiles++
         }
-        [void]$resources.Add([ordered]@{ path = 'workspace/assets'; bytes = $aBytes; files = $aFiles })
+        [void]$resources.Add([ordered]@{
+            path = 'workspace/assets'
+            bytes = $aBytes
+            files = $aFiles
+            meshes_excluded = [bool]$ExcludeMeshes
+            excluded_mesh_bytes = $meshSkippedBytes
+            excluded_mesh_files = $meshSkippedFiles
+        })
         Write-Step ("assets 已灌入：{0} 个文件 / {1:N1} MB" -f $aFiles, ($aBytes / 1MB))
+        if ($ExcludeMeshes) {
+            Write-Step ("meshes 已排除：{0} 个文件 / {1:N1} MB" -f $meshSkippedFiles, ($meshSkippedBytes / 1MB))
+        }
     }
-    else { Write-Warn2 "源 assets 不存在：$assetSrc（包内无 assets）" }
+    elseif ($IncludeWorkspace) { Write-Warn2 "源 assets 不存在：$assetSrc（包内无 assets）" }
 
     # 6c. release.json（不含自身 hash；zip 整体 sha 另写到 sibling）
+    $backendFile = @($files | Where-Object { $_.path -eq 'aios-database.exe' })
+    if ($backendFile.Count -ne 1) { throw "发布清单中 aios-database.exe 应恰好一条，实际 $($backendFile.Count)" }
     $manifest = [ordered]@{
         name             = $Name
-        tier             = 'full'
+        tier             = $packageTier
+        workspace_included = [bool]$IncludeWorkspace
+        meshes_included  = [bool]$IncludeWorkspace -and -not [bool]$ExcludeMeshes
         backend_version  = $BackendVersion
+        backend_build_id = $backendBuildInfo.build_id
+        backend_build_epoch = $backendBuildInfo.build_epoch
+        backend_git_commit = $backendBuildInfo.git_commit
+        backend_git_dirty  = [bool]$backendBuildInfo.git_dirty
+        backend_sha256   = $backendFile[0].sha256
+        backend_bytes    = $backendFile[0].bytes
         plant_ui_version = $WebVersion
         created          = (Get-Date).ToString('o')
         smoke            = $smoke

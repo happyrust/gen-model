@@ -5263,7 +5263,10 @@ impl AiosDBManager {
                 )
                 .await
             {
-                Ok(BaselineOutcome { elements: count, units }) => (
+                Ok(BaselineOutcome {
+                    elements: count,
+                    units,
+                }) => (
                     Some(DataBatchResult {
                         dbnum,
                         db_type: cand.db_type.clone(),
@@ -5920,7 +5923,10 @@ mod tests {
         let target_scan = direct
             .find("scan_project_candidates(")
             .expect("target scan");
-        assert!(prepare < target_scan, "依赖清单必须在目标 DESI 扫描/写入前准备");
+        assert!(
+            prepare < target_scan,
+            "依赖清单必须在目标 DESI 扫描/写入前准备"
+        );
 
         let manager = include_str!("increment_manager.rs")
             .split_once("fn prepare_dependency_manifests_for_initialization(")
@@ -5932,8 +5938,14 @@ mod tests {
         assert!(manager.contains("catalogue_manifest_for_dirs(&watch_dirs)"));
         assert!(manager.contains("install_dependency_manifest(cata_dependencies)"));
         assert!(manager.contains("install_dependency_identity_manifest("));
-        assert!(!manager.contains(".in_scope("), "依赖解析不得走 DESI watch 范围门");
-        assert!(!manager.contains("watch_scope::"), "依赖解析不得读取 watch 限定状态");
+        assert!(
+            !manager.contains(".in_scope("),
+            "依赖解析不得走 DESI watch 范围门"
+        );
+        assert!(
+            !manager.contains("watch_scope::"),
+            "依赖解析不得读取 watch 限定状态"
+        );
     }
 
     #[tokio::test]
@@ -6856,6 +6868,7 @@ mod tests {
             cand(8191, "SYST"),
             cand(212, "CATA"),
             cand(1529, "dict"),
+            cand(8188, "GLOB"),
             cand(8189, "MISC"),
             cand(8190, "COMM"),
             cand(5001, "PROP"),
@@ -6867,6 +6880,7 @@ mod tests {
         assert_eq!(
             ordered,
             vec![
+                (8188, "GLOB"),
                 (8189, "MISC"),
                 (8190, "COMM"),
                 (8191, "SYST"),

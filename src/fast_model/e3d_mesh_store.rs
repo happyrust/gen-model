@@ -37,6 +37,10 @@ pub struct E3dPersistReport {
     /// 本次生成读的是哪一版设计文件（一次调用一个 dbnum、一个会话）。读透写行时钉的
     /// 就是它——写透与生成必须看同一版文件。
     pub source_sesno: Option<u32>,
+    /// 失败根的稳定身份与原因。`failed` 保留历史的元素/根计数，这一格让上层只扣真正失败的根，
+    /// 不把同批所有兄弟一起判死。
+    #[serde(skip)]
+    pub failed_roots: Vec<(RefNo, String)>,
     /// 每个**新生成**（非缓存命中）的根：e3d-model DFS 访问到的子树元素名单
     /// （`GenerationOutcome::visited`）。生成服务只报名单、不写库（ADR-057）；把它们写透进
     /// `pe` / `ATT_*` 是编排层 `model_refresh::generate_roots_report` 在发布模型行之前做的事。

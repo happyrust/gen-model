@@ -1,7 +1,8 @@
 //! Web 服务（REST + WebSocket），面向前端提供触发生成与增量更新信息。
 //!
 //! 设计与评审结论见 `docs/specs/web-service-api.md`：
-//! - 监听地址来自 `DbOption.toml` 的 `http_api_addr`（未配置则不启动）；
+//! - 监听地址优先取 `http_api_addr`，缺失时兼容 `server_release_ip`，两者都空时只监听本机
+//!   `127.0.0.1:9099`；
 //! - 领域结构体 JSON 原样透传，服务层零领域逻辑；
 //! - 任务进度经 WebSocket 广播，任务记录仅内存保留（durable 语义由水位 + pending 表承担）。
 
@@ -14,7 +15,7 @@ pub mod mesh_glb;
 pub mod setup;
 mod ws;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::Router;
@@ -29,6 +30,25 @@ use crate::data_interface::element_attributes::ElementAttributeProvider;
 use crate::data_interface::task_registry::TaskRegistry;
 use crate::data_interface::tidb_manager::AiosDBManager;
 use crate::query_service::{QueryError, QueryService};
+
+const DEFAULT_HTTP_API_ADDR: &str = "127.0.0.1:9099";
+
+/// HTTP 监听地址的兼容解析。
+///
+/// `http_api_addr` 是当前配置键；老现场只有 `server_release_ip`。服务进程不能因为新键
+/// 缺失而让 Web task 立即成功返回——read-through 主流程会随之正常退出，看起来既不像
+/// 配置错也不像崩溃。两项都没给时只开放回环默认值，不意外扩大网络暴露面。
+pub(crate) fn effective_http_api_addr(configured: Option<&str>, server_release_ip: &str) -> String {
+    configured
+        .map(str::trim)
+        .filter(|addr| !addr.is_empty())
+        .or_else(|| {
+            let legacy = server_release_ip.trim();
+            (!legacy.is_empty()).then_some(legacy)
+        })
+        .unwrap_or(DEFAULT_HTTP_API_ADDR)
+        .to_owned()
+}
 
 /// The immutable project identity served by this process.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -144,6 +164,14 @@ impl ApiError {
         }
     }
 
+    pub fn service_unavailable(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code,
+            message: message.into(),
+        }
+    }
+
     pub fn timeout(message: impl Into<String>) -> Self {
         Self {
             status: StatusCode::GATEWAY_TIMEOUT,
@@ -245,20 +273,62 @@ impl IntoResponse for ApiError {
     }
 }
 
-/// 按配置启动 Web 服务；`http_api_addr` 未配置时立即返回（不启动）。
+/// 按有效地址启动 Web 服务；新键缺失时兼容旧键，再缺失则提供本机默认访问。
 pub async fn serve_if_configured(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
+    serve_configured(mgr, None).await
+}
+
+/// Return only after bind succeeds. A bind error reaches startup before it can
+/// launch source polling, model generation or optional room work.
+pub async fn start_configured(
+    mgr: Arc<AiosDBManager>,
+) -> anyhow::Result<tokio::task::JoinHandle<anyhow::Result<()>>> {
+    let (ready, bound) = tokio::sync::oneshot::channel();
+    let task = tokio::spawn(serve_configured(mgr, Some(ready)));
+    if bound.await.is_err() {
+        task.await??;
+        anyhow::bail!("HTTP service exited before binding");
+    }
+    Ok(task)
+}
+
+async fn serve_configured(
+    mgr: Arc<AiosDBManager>,
+    ready: Option<tokio::sync::oneshot::Sender<()>>,
+) -> anyhow::Result<()> {
     let ext = crate::get_db_option_ext();
-    let Some(addr) = ext.http_api_addr.clone() else {
-        return Ok(());
-    };
-    serve(mgr, &addr, ext.http_api_cors.clone()).await
+    let addr = effective_http_api_addr(ext.http_api_addr.as_deref(), &ext.server_release_ip);
+    if ext
+        .http_api_addr
+        .as_deref()
+        .is_none_or(|configured| configured.trim().is_empty())
+    {
+        if ext.server_release_ip.trim().is_empty() {
+            println!("http_api_addr 未配置且 server_release_ip 为空，使用默认本机监听 {addr}");
+        } else {
+            println!("http_api_addr 未配置，兼容使用 server_release_ip 监听 {addr}");
+        }
+    }
+    let public_addr = public_http_addr(&addr, ext.http_public_addr.as_deref());
+    serve_with_ready(mgr, &addr, &public_addr, ext.http_api_cors.clone(), ready).await
 }
 
 /// 在 `addr` 上启动服务并阻塞运行（正常情况下不返回）。
 pub async fn serve(
     mgr: Arc<AiosDBManager>,
     addr: &str,
+    public_addr: &str,
     cors_origins: Option<Vec<String>>,
+) -> anyhow::Result<()> {
+    serve_with_ready(mgr, addr, public_addr, cors_origins, None).await
+}
+
+async fn serve_with_ready(
+    mgr: Arc<AiosDBManager>,
+    addr: &str,
+    public_addr: &str,
+    cors_origins: Option<Vec<String>>,
+    ready: Option<tokio::sync::oneshot::Sender<()>>,
 ) -> anyhow::Result<()> {
     let db_option = aios_core::get_db_option();
     let ui_root = PathBuf::from(
@@ -297,13 +367,6 @@ pub async fn serve(
     let direct_tree = DirectTreeProvider::new(identity.project.clone(), identity.mdb.clone());
     let element_attributes =
         ElementAttributeProvider::new(identity.project.clone(), identity.mdb.clone());
-    if crate::options::data_face().is_read_through()
-        && let Err(error) = element_attributes.get().await
-    {
-        // Keep the HTTP service alive so health and structured endpoint errors
-        // remain available; the provider retries atomically on the next call.
-        log::error!("read-through attribute/UDA prewarm failed: {error:#}");
-    }
     let state = AppState {
         mgr,
         tasks: TaskRegistry::global(),
@@ -323,7 +386,7 @@ pub async fn serve(
         println!("运维面板：{}（磁盘副本，优先于内嵌版）", panel.display());
     } else {
         println!(
-            "运维面板：内嵌副本（http://{addr}/ops.html；在 {} 放一份即可覆盖，不必重编）",
+            "运维面板：内嵌副本（http://{public_addr}/ops.html；在 {} 放一份即可覆盖，不必重编）",
             panel.display()
         );
     }
@@ -361,6 +424,14 @@ pub async fn serve(
         .route(
             "/api/v1/dbnums/{dbnum}/model/rebuild",
             post(handlers::dbnum_model_rebuild),
+        )
+        .route(
+            "/api/v1/dbnums/{dbnum}/model/ensure",
+            post(handlers::dbnum_model_ensure),
+        )
+        .route(
+            "/api/v1/dbnums/{dbnum}/model/roots",
+            get(handlers::dbnum_model_roots),
         )
         .route("/api/v1/query", post(handlers::query))
         .route("/api/v1/search", get(handlers::search))
@@ -424,13 +495,105 @@ pub async fn serve(
 
     // 交接窗口内重试绑定：restart 口的父进程还有零点几秒才交出端口。
     let listener = setup::bind_with_handoff(addr).await?;
-    println!("Web 服务已启动: http://{addr}/api/v1 （地址由 DbOption.toml 的 http_api_addr 配置）");
+    if let Some(ready) = ready {
+        let _ = ready.send(());
+    }
+    let ui_url = plant_ui_url(public_addr);
+    println!("plant-ui 网页: {ui_url}");
+    maybe_open_plant_ui(&ui_url);
+    println!(
+        "Web 服务已启动: 监听 http://{addr}/api/v1；对外 http://{public_addr}/api/v1 \
+         （http_api_addr / http_public_addr）"
+    );
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .await?;
     Ok(())
+}
+
+pub(crate) fn public_http_addr(bind_addr: &str, configured: Option<&str>) -> String {
+    configured
+        .map(str::trim)
+        .filter(|addr| !addr.is_empty() && addr.parse::<std::net::SocketAddr>().is_ok())
+        .map(str::to_owned)
+        .unwrap_or_else(|| setup::browser_facing(bind_addr))
+}
+
+fn plant_ui_url(public_addr: &str) -> String {
+    format!("http://{public_addr}/")
+}
+
+const OPEN_BROWSER_ENV: &str = "AIOS_OPEN_BROWSER";
+
+fn parse_open_browser(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn packaged_runtime_layout(root: &Path) -> bool {
+    root.join("DbOption.toml").is_file() && root.join("web/pkg/plant_ui_app_bg.wasm").is_file()
+}
+
+fn should_open_plant_ui() -> bool {
+    if let Ok(value) = std::env::var(OPEN_BROWSER_ENV)
+        && let Some(enabled) = parse_open_browser(&value)
+    {
+        return enabled;
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .is_some_and(|root| packaged_runtime_layout(&root))
+}
+
+/// 打包后的 Windows 运行包直接启动 `aios-database.exe` 时，默认拉起 plant-ui。
+///
+/// 开发构建与服务器部署不在包布局里，默认不打开；显式
+/// `AIOS_OPEN_BROWSER=1|0` 可双向覆盖。启动脚本自己负责等健康后打开页面，因此会给
+/// 子进程设置 `AIOS_OPEN_BROWSER=0`，避免同一次启动弹两个标签页。
+pub(crate) fn maybe_open_plant_ui(url: &str) {
+    if !should_open_plant_ui() {
+        return;
+    }
+    let url = url.to_owned();
+    let _ = std::thread::Builder::new()
+        .name("open-plant-ui".into())
+        .spawn(move || {
+            // listener 已经绑定，但 axum::serve 还差一次调度；稍等再交给浏览器。
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            if let Err(error) = open_system_browser(&url) {
+                eprintln!("[warn] 无法自动打开 plant-ui（{url}）：{error}");
+            }
+        });
+}
+
+#[cfg(target_os = "windows")]
+fn open_system_browser(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("cmd.exe")
+        .args(["/C", "start", "", url])
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+fn open_system_browser(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_system_browser(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
 }
 
 fn resolve_asset_root() -> PathBuf {
@@ -504,7 +667,7 @@ mod tests {
     fn a_missing_asset_dir_degrades_instead_of_killing_the_service() {
         let source = include_str!("mod.rs");
         let body = source
-            .split_once("pub async fn serve(")
+            .split_once("async fn serve_with_ready(")
             .expect("serve 必须存在")
             .1
             .split_once("\nfn resolve_asset_root")
@@ -540,7 +703,7 @@ mod tests {
     fn model_subtree_delete_uses_delete_method_and_query_handler() {
         let source = include_str!("mod.rs");
         let serve = source
-            .split_once("pub async fn serve(")
+            .split_once("async fn serve_with_ready(")
             .expect("serve must exist")
             .1
             .split_once("\nfn resolve_asset_root")
@@ -559,7 +722,7 @@ mod tests {
     fn direct_tree_routes_are_read_only_get_endpoints() {
         let source = include_str!("mod.rs");
         let serve = source
-            .split_once("pub async fn serve(")
+            .split_once("async fn serve_with_ready(")
             .expect("serve must exist")
             .1
             .split_once("\nfn resolve_asset_root")
@@ -582,7 +745,7 @@ mod tests {
     fn residue_preview_route_has_no_delete_method() {
         let source = include_str!("mod.rs");
         let serve = source
-            .split_once("pub async fn serve(")
+            .split_once("async fn serve_with_ready(")
             .expect("serve must exist")
             .1
             .split_once("\nfn resolve_asset_root")
@@ -595,8 +758,14 @@ mod tests {
             .split_once("),")
             .expect("route terminator")
             .0;
-        assert!(route.contains("get(handlers::dbnum_prune_above_preview"), "{route}");
-        assert!(!route.contains(".delete("), "residue route must be read-only: {route}");
+        assert!(
+            route.contains("get(handlers::dbnum_prune_above_preview"),
+            "{route}"
+        );
+        assert!(
+            !route.contains(".delete("),
+            "residue route must be read-only: {route}"
+        );
     }
 
     /// 浏览器端的网格口径：只读 GET，路径参数是 `{hash}.glb` 一整段（后缀在 handler 里剥，
@@ -605,7 +774,7 @@ mod tests {
     fn mesh_glb_is_a_read_only_get_route_under_api_v1() {
         let source = include_str!("mod.rs");
         let serve = source
-            .split_once("pub async fn serve(")
+            .split_once("async fn serve_with_ready(")
             .expect("serve must exist")
             .1
             .split_once("\nfn resolve_asset_root")
@@ -618,10 +787,28 @@ mod tests {
     }
 
     #[test]
+    fn dbnum_model_ensure_and_roots_use_their_fixed_http_methods() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("async fn serve_with_ready(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        assert!(serve.contains(
+            "\"/api/v1/dbnums/{dbnum}/model/ensure\",\n            post(handlers::dbnum_model_ensure)"
+        ));
+        assert!(serve.contains(
+            "\"/api/v1/dbnums/{dbnum}/model/roots\",\n            get(handlers::dbnum_model_roots)"
+        ));
+    }
+
+    #[test]
     fn plant_ui_web_is_the_last_fallback_after_api_routes() {
         let source = include_str!("mod.rs");
         let serve = source
-            .split_once("pub async fn serve(")
+            .split_once("async fn serve_with_ready(")
             .expect("serve must exist")
             .1
             .split_once("\nfn resolve_asset_root")
@@ -634,6 +821,36 @@ mod tests {
             .find(".fallback(get(handlers::plant_ui_web))")
             .expect("plant-ui web fallback must exist");
         assert!(api < fallback, "API routes must win over the web fallback");
+    }
+
+    #[test]
+    fn public_http_address_is_separate_from_the_bind_address() {
+        assert_eq!(
+            public_http_addr("0.0.0.0:8022", Some("192.168.1.5:8022")),
+            "192.168.1.5:8022"
+        );
+        assert_eq!(public_http_addr("0.0.0.0:8022", None), "127.0.0.1:8022");
+        assert_eq!(
+            public_http_addr("0.0.0.0:8022", Some("not-an-address")),
+            "127.0.0.1:8022"
+        );
+        assert_eq!(plant_ui_url("192.168.1.5:8022"), "http://192.168.1.5:8022/");
+    }
+
+    #[test]
+    fn missing_http_api_address_uses_legacy_then_safe_default() {
+        assert_eq!(
+            effective_http_api_addr(Some(" 0.0.0.0:8022 "), "127.0.0.1:9099"),
+            "0.0.0.0:8022"
+        );
+        assert_eq!(
+            effective_http_api_addr(None, " 192.168.1.9:9099 "),
+            "192.168.1.9:9099"
+        );
+        assert_eq!(
+            effective_http_api_addr(Some("   "), ""),
+            DEFAULT_HTTP_API_ADDR
+        );
     }
 
     #[test]

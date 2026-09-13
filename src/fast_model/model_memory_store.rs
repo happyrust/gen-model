@@ -112,15 +112,32 @@ impl ProjectedGeometry {
         let refno = crate::data_interface::generation_root::refno_from_e3d(self.source_refno);
         let local = match &self.shape {
             ProjectedShape::Baked => glam::Mat4::IDENTITY,
-            ProjectedShape::Canonical { local_transform, .. } => local_transform.as_mat4(),
+            ProjectedShape::Canonical {
+                local_transform, ..
+            } => local_transform.as_mat4(),
         };
         aios_core::GeomInstQuery {
-            refno, old_refno: None,
-            owner: self.ancestors.get(1).map(|id| aios_core::RefU64(*id as u64).into()).unwrap_or(refno),
-            world_aabb: parry3d::bounding_volume::Aabb::new(self.world_bounds[0].into(), self.world_bounds[1].into()),
+            refno,
+            old_refno: None,
+            owner: self
+                .ancestors
+                .get(1)
+                .map(|id| aios_core::RefU64(*id as u64).into())
+                .unwrap_or(refno),
+            world_aabb: parry3d::bounding_volume::Aabb::new(
+                self.world_bounds[0].into(),
+                self.world_bounds[1].into(),
+            ),
             world_trans: Transform::from_matrix(self.world_transform.as_mat4()),
-            insts: vec![aios_core::ModelHashInst { geo_hash: self.mesh_id.clone(), transform: Transform::from_matrix(local), ..Default::default() }],
-            has_neg: false, generic: self.noun.clone(), pts: None, date: None,
+            insts: vec![aios_core::ModelHashInst {
+                geo_hash: self.mesh_id.clone(),
+                transform: Transform::from_matrix(local),
+                ..Default::default()
+            }],
+            has_neg: false,
+            generic: self.noun.clone(),
+            pts: None,
+            date: None,
         }
     }
 }
@@ -136,6 +153,20 @@ pub struct RootReceipt {
     /// 旧回执没有这一列 → `"regen"`。落 `gen_root.published_via` 供观测，不进任何判据。
     #[serde(default = "default_published_via")]
     pub published_via: String,
+}
+
+/// 当前进程里一根“模型行 + 房间边 + 数据库回执”已经完整提交的确认。
+///
+/// 它故意不落 durable 控制面：kv-mem 重启后模型、边和 ACK 一起消失。几何 [`RootReceipt`]
+/// 仍表示候选投影；只有 process-store 事务成功后才补这枚 ACK。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootPublicationAck {
+    pub dbnum: u32,
+    pub source_sesno: u32,
+    pub geometry_count: usize,
+    pub room_membership: bool,
+    pub room_generation: Option<String>,
+    pub medium: crate::fast_model::model_db_adapter::PersistMedium,
 }
 
 /// `RootReceipt::published_via` 的默认值：旧回执与整根重算都是 `"regen"`。
@@ -224,6 +255,10 @@ struct ScopeState {
     by_tube_branch: BTreeMap<i64, BTreeSet<String>>,
     /// 生成根 → 回执。
     receipts: BTreeMap<i64, RootReceipt>,
+    /// Roots remain discoverable after failed refresh, including empty roots.
+    invalidated_roots: BTreeSet<i64>,
+    /// 生成根 → 当前进程的完整发布确认。任何候选几何变动都先使它失效。
+    publication_acks: BTreeMap<i64, RootPublicationAck>,
     /// 每个库投影过的最高源会话。单调，只涨不落——它护的是「旧会话不许盖新会话」。
     published_sesno: BTreeMap<u32, u32>,
     /// 每个库的提交纪元：本作用域里凡动了该库的几何或回执就 +1。
@@ -242,6 +277,7 @@ impl std::fmt::Debug for ScopeState {
         f.debug_struct("ScopeState")
             .field("geometries", &self.geometries.len())
             .field("receipts", &self.receipts.len())
+            .field("publication_acks", &self.publication_acks.len())
             .field("commit_epochs", &self.commit_epochs)
             .finish_non_exhaustive()
     }
@@ -258,31 +294,63 @@ pub(crate) struct GeometryChange {
 impl ScopeState {
     fn flush_room_spatial(&mut self) {
         let dirty = std::mem::take(&mut self.room_spatial_dirty);
-        let cold: BTreeSet<_> = dirty.iter().map(|(dbnum, _)| *dbnum)
-            .filter(|dbnum| !self.room_spatial.contains_key(dbnum)).collect();
+        let cold: BTreeSet<_> = dirty
+            .iter()
+            .map(|(dbnum, _)| *dbnum)
+            .filter(|dbnum| !self.room_spatial.contains_key(dbnum))
+            .collect();
         for dbnum in &cold {
             use aios_core::accel_tree::acceleration_tree::{AccelerationTree, RStarBoundingBox};
-            let boxes = self.by_source.range((*dbnum, i64::MIN)..=(*dbnum, i64::MAX))
-                .flat_map(|(_, ids)| ids).filter_map(|id| self.geometries.get(id))
-                .map(|row| RStarBoundingBox::new(
-                    parry3d::bounding_volume::Aabb::new(row.world_bounds[0].into(), row.world_bounds[1].into()),
-                    crate::data_interface::generation_root::refno_from_e3d(row.source_refno), row.noun.clone())).collect();
-            self.room_spatial.insert(*dbnum, AccelerationTree::load(boxes));
+            let boxes = self
+                .by_source
+                .range((*dbnum, i64::MIN)..=(*dbnum, i64::MAX))
+                .flat_map(|(_, ids)| ids)
+                .filter_map(|id| self.geometries.get(id))
+                .map(|row| {
+                    RStarBoundingBox::new(
+                        parry3d::bounding_volume::Aabb::new(
+                            row.world_bounds[0].into(),
+                            row.world_bounds[1].into(),
+                        ),
+                        crate::data_interface::generation_root::refno_from_e3d(row.source_refno),
+                        row.noun.clone(),
+                    )
+                })
+                .collect();
+            self.room_spatial
+                .insert(*dbnum, AccelerationTree::load(boxes));
         }
         for (dbnum, member) in dirty {
-            if !cold.contains(&dbnum) { self.refresh_room_spatial(dbnum, member); }
+            if !cold.contains(&dbnum) {
+                self.refresh_room_spatial(dbnum, member);
+            }
         }
     }
     fn refresh_room_spatial(&mut self, dbnum: u32, member: i64) {
         use aios_core::accel_tree::acceleration_tree::RStarBoundingBox;
-        let rows: Vec<_> = self.by_source.get(&(dbnum,member)).into_iter().flatten()
-            .filter_map(|id| self.geometries.get(id)).map(|row| RStarBoundingBox::new(
-                parry3d::bounding_volume::Aabb::new(row.world_bounds[0].into(),row.world_bounds[1].into()),
-                crate::data_interface::generation_root::refno_from_e3d(row.source_refno), row.noun.clone())).collect();
+        let rows: Vec<_> = self
+            .by_source
+            .get(&(dbnum, member))
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.geometries.get(id))
+            .map(|row| {
+                RStarBoundingBox::new(
+                    parry3d::bounding_volume::Aabb::new(
+                        row.world_bounds[0].into(),
+                        row.world_bounds[1].into(),
+                    ),
+                    crate::data_interface::generation_root::refno_from_e3d(row.source_refno),
+                    row.noun.clone(),
+                )
+            })
+            .collect();
         let tree = self.room_spatial.entry(dbnum).or_default();
         if rows.is_empty() {
             tree.remove_by_refnos(&[aios_core::RefU64(member as u64)].into_iter().collect());
-        } else { tree.sync_refnos(rows); }
+        } else {
+            tree.sync_refnos(rows);
+        }
     }
     fn toggle_digest(&mut self, record: &ProjectedGeometry) {
         use sha2::{Digest, Sha256};
@@ -290,18 +358,65 @@ impl ScopeState {
         let bytes = serde_json::to_vec(record).expect("projection is serializable");
         let hash = Sha256::digest(bytes);
         let digest = self.model_digests.entry(record.dbnum).or_default();
-        for (target, byte) in digest.iter_mut().zip(hash) { *target ^= byte; }
+        for (target, byte) in digest.iter_mut().zip(hash) {
+            *target ^= byte;
+        }
     }
 
     fn observe_member(&mut self, record: &ProjectedGeometry) {
         let member = packed_refno(record.source_refno);
-        if self.room_changes.get(&record.dbnum).is_some_and(|changes| changes.contains_key(&member)) { return; }
-        let before = self.by_source.get(&(record.dbnum, member)).into_iter().flatten()
-            .filter_map(|id| self.geometries.get(id)).map(|row| row.world_bounds).collect();
-        self.room_changes.entry(record.dbnum).or_default().insert(member, GeometryChange { before, after: Vec::new() });
+        if self
+            .room_changes
+            .get(&record.dbnum)
+            .is_some_and(|changes| changes.contains_key(&member))
+        {
+            return;
+        }
+        let before = self
+            .by_source
+            .get(&(record.dbnum, member))
+            .into_iter()
+            .flatten()
+            .filter_map(|id| self.geometries.get(id))
+            .map(|row| row.world_bounds)
+            .collect();
+        self.room_changes.entry(record.dbnum).or_default().insert(
+            member,
+            GeometryChange {
+                before,
+                after: Vec::new(),
+            },
+        );
     }
     fn bump_epoch(&mut self, dbnum: u32) {
         *self.commit_epochs.entry(dbnum).or_default() += 1;
+    }
+
+    fn invalidate_publication_acks_for(&mut self, commit: &ProjectionCommit) {
+        let mut touched = BTreeSet::new();
+        if let Some((root, _)) = &commit.receipt {
+            touched.insert(packed_refno(*root));
+        }
+        for record in &commit.upserts {
+            touched.extend(record.ancestors.iter().copied());
+        }
+        for record_id in &commit.removals {
+            if let Some(record) = self.geometries.get(record_id) {
+                touched.extend(record.ancestors.iter().copied());
+            }
+        }
+        for branch in &commit.tube_branch_resets {
+            if let Some(record_ids) = self.by_tube_branch.get(&packed_refno(*branch)) {
+                for record_id in record_ids {
+                    if let Some(record) = self.geometries.get(record_id) {
+                        touched.extend(record.ancestors.iter().copied());
+                    }
+                }
+            }
+        }
+        for root in touched {
+            self.publication_acks.remove(&root);
+        }
     }
 
     fn insert(&mut self, record: ProjectedGeometry) {
@@ -309,7 +424,10 @@ impl ScopeState {
         self.observe_member(&record);
         self.remove(&record.record_id);
         self.toggle_digest(&record);
-        self.by_source.entry((dbnum, packed_refno(record.source_refno))).or_default().insert(record.record_id.clone());
+        self.by_source
+            .entry((dbnum, packed_refno(record.source_refno)))
+            .or_default()
+            .insert(record.record_id.clone());
         for &ancestor in &record.ancestors {
             self.by_ancestor
                 .entry(ancestor)
@@ -341,7 +459,9 @@ impl ScopeState {
         let key = (record.dbnum, packed_refno(record.source_refno));
         if let Some(ids) = self.by_source.get_mut(&key) {
             ids.remove(record_id);
-            if ids.is_empty() { self.by_source.remove(&key); }
+            if ids.is_empty() {
+                self.by_source.remove(&key);
+            }
         }
         self.bump_epoch(record.dbnum);
         for ancestor in &record.ancestors {
@@ -361,7 +481,8 @@ impl ScopeState {
                 }
             }
         }
-        self.room_spatial_dirty.insert((record.dbnum, packed_refno(record.source_refno)));
+        self.room_spatial_dirty
+            .insert((record.dbnum, packed_refno(record.source_refno)));
         Some(record)
     }
 
@@ -397,6 +518,7 @@ impl ScopeState {
                 .entry(root.dbno())
                 .or_insert(receipt.source_sesno);
             *sesno = (*sesno).max(receipt.source_sesno);
+            self.invalidated_roots.remove(&packed_refno(root));
             self.receipts.insert(packed_refno(root), receipt);
             self.bump_epoch(root.dbno());
         }
@@ -422,54 +544,126 @@ impl ModelMemoryStore {
     /// A restored projection has no complete deletion history. Until an exact
     /// room ACK, compare against the complete local membership baseline.
     pub(crate) fn room_baseline_known(&self, dbnum: u32) -> bool {
-        self.read().get(&ScopeKey::Current)
+        self.read()
+            .get(&ScopeKey::Current)
             .is_some_and(|state| state.room_baselines.contains(&dbnum))
     }
-    pub(crate) fn room_members_intersecting(&self, dbnum: u32, bounds: &[[[f32;3];2]]) -> BTreeSet<i64> {
+    pub(crate) fn room_members_intersecting(
+        &self,
+        dbnum: u32,
+        bounds: &[[[f32; 3]; 2]],
+    ) -> BTreeSet<i64> {
         let scopes = self.read();
-        let Some(tree) = scopes.get(&ScopeKey::Current).and_then(|state| state.room_spatial.get(&dbnum)) else { return BTreeSet::new(); };
-        bounds.iter().flat_map(|bounds| tree.locate_intersecting_bounds(&parry3d::bounding_volume::Aabb::new(bounds[0].into(), bounds[1].into()))
-            .map(|row| row.refno.0 as i64).collect::<Vec<_>>()).collect()
+        let Some(tree) = scopes
+            .get(&ScopeKey::Current)
+            .and_then(|state| state.room_spatial.get(&dbnum))
+        else {
+            return BTreeSet::new();
+        };
+        bounds
+            .iter()
+            .flat_map(|bounds| {
+                tree.locate_intersecting_bounds(&parry3d::bounding_volume::Aabb::new(
+                    bounds[0].into(),
+                    bounds[1].into(),
+                ))
+                .map(|row| row.refno.0 as i64)
+                .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
-    pub(crate) fn room_member_records(&self, dbnum: u32, members: &BTreeSet<i64>) -> Vec<ProjectedGeometry> {
+    pub(crate) fn room_member_records(
+        &self,
+        dbnum: u32,
+        members: &BTreeSet<i64>,
+    ) -> Vec<ProjectedGeometry> {
         let scopes = self.read();
-        let Some(state) = scopes.get(&ScopeKey::Current) else { return Vec::new(); };
-        members.iter().flat_map(|member| state.by_source.get(&(dbnum,*member)).into_iter().flatten())
-            .filter_map(|id| state.geometries.get(id).cloned()).collect()
+        let Some(state) = scopes.get(&ScopeKey::Current) else {
+            return Vec::new();
+        };
+        members
+            .iter()
+            .flat_map(|member| state.by_source.get(&(dbnum, *member)).into_iter().flatten())
+            .filter_map(|id| state.geometries.get(id).cloned())
+            .collect()
     }
     /// Ref0 is not a dbnum. Resolve requested sources against the resident
     /// per-db indexes rather than guessing ownership or querying database geometry.
-    pub(crate) fn room_records_for_members(&self, members: &BTreeSet<i64>) -> Vec<ProjectedGeometry> {
+    pub(crate) fn room_records_for_members(
+        &self,
+        members: &BTreeSet<i64>,
+    ) -> Vec<ProjectedGeometry> {
         let scopes = self.read();
-        let Some(state) = scopes.get(&ScopeKey::Current) else { return Vec::new(); };
-        state.commit_epochs.keys().flat_map(|dbnum| members.iter()
-            .flat_map(|member| state.by_source.get(&(*dbnum, *member)).into_iter().flatten()))
-            .filter_map(|id| state.geometries.get(id).cloned()).collect()
+        let Some(state) = scopes.get(&ScopeKey::Current) else {
+            return Vec::new();
+        };
+        state
+            .commit_epochs
+            .keys()
+            .flat_map(|dbnum| {
+                members.iter().flat_map(|member| {
+                    state
+                        .by_source
+                        .get(&(*dbnum, *member))
+                        .into_iter()
+                        .flatten()
+                })
+            })
+            .filter_map(|id| state.geometries.get(id).cloned())
+            .collect()
     }
-    pub(crate) fn room_snapshot(&self, dbnum: u32, full: bool) -> (u64, String, BTreeMap<i64, GeometryChange>, Vec<ProjectedGeometry>) {
+    pub(crate) fn room_snapshot(
+        &self,
+        dbnum: u32,
+        full: bool,
+    ) -> (
+        u64,
+        String,
+        BTreeMap<i64, GeometryChange>,
+        Vec<ProjectedGeometry>,
+    ) {
         let scopes = self.read();
-        let Some(state) = scopes.get(&ScopeKey::Current) else { return (0, hex::encode([0u8;32]), BTreeMap::new(), Vec::new()); };
+        let Some(state) = scopes.get(&ScopeKey::Current) else {
+            return (0, hex::encode([0u8; 32]), BTreeMap::new(), Vec::new());
+        };
         let mut changes = state.room_changes.get(&dbnum).cloned().unwrap_or_default();
         if full {
             for ((db, member), _) in state.by_source.range((dbnum, i64::MIN)..=(dbnum, i64::MAX)) {
-                if *db == dbnum { changes.entry(*member).or_default(); }
+                if *db == dbnum {
+                    changes.entry(*member).or_default();
+                }
             }
         }
         let mut records = Vec::new();
         for (member, change) in &mut changes {
-            let rows = state.by_source.get(&(dbnum, *member)).into_iter().flatten()
+            let rows = state
+                .by_source
+                .get(&(dbnum, *member))
+                .into_iter()
+                .flatten()
                 .filter_map(|id| state.geometries.get(id));
-            for row in rows { change.after.push(row.world_bounds); records.push(row.clone()); }
+            for row in rows {
+                change.after.push(row.world_bounds);
+                records.push(row.clone());
+            }
         }
-        (state.commit_epochs.get(&dbnum).copied().unwrap_or(0),
-            hex::encode(state.model_digests.get(&dbnum).copied().unwrap_or_default()), changes, records)
+        (
+            state.commit_epochs.get(&dbnum).copied().unwrap_or(0),
+            hex::encode(state.model_digests.get(&dbnum).copied().unwrap_or_default()),
+            changes,
+            records,
+        )
     }
 
     pub(crate) fn ack_rooms(&self, dbnum: u32, epoch: u64) -> bool {
         let mut scopes = self.write();
-        let Some(state) = scopes.get_mut(&ScopeKey::Current) else { return epoch == 0; };
-        if state.commit_epochs.get(&dbnum).copied().unwrap_or(0) != epoch { return false; }
+        let Some(state) = scopes.get_mut(&ScopeKey::Current) else {
+            return epoch == 0;
+        };
+        if state.commit_epochs.get(&dbnum).copied().unwrap_or(0) != epoch {
+            return false;
+        }
         state.room_changes.remove(&dbnum);
         state.room_baselines.insert(dbnum);
         true
@@ -502,6 +696,7 @@ impl ModelMemoryStore {
         // root removes the same identity that the new root upserts. Retire the
         // prior snapshot first, independent of root completion/order.
         for commit in &commits {
+            state.invalidate_publication_acks_for(commit);
             state.apply_removals(commit);
         }
         for commit in commits {
@@ -561,6 +756,8 @@ impl ModelMemoryStore {
                 .as_ref()
                 .is_none_or(|target| target.design.dbnum != dbnum)
         });
+        state.invalidated_roots.retain(|packed| RefNo::new((*packed >> 32) as u32, *packed as u32).dbno() != dbnum);
+        state.publication_acks.retain(|_, ack| ack.dbnum != dbnum);
         state.published_sesno.remove(&dbnum);
         for record in records {
             state.insert(record);
@@ -568,6 +765,7 @@ impl ModelMemoryStore {
         for (root, receipt) in receipts {
             let session = state.published_sesno.entry(dbnum).or_default();
             *session = (*session).max(receipt.source_sesno);
+            state.invalidated_roots.remove(&packed_refno(root));
             state.receipts.insert(packed_refno(root), receipt);
         }
         state.flush_room_spatial();
@@ -599,11 +797,15 @@ impl ModelMemoryStore {
                 .as_ref()
                 .is_some_and(|target| target.design.dbnum != dbnum)
         });
+        state.invalidated_roots.retain(|packed| RefNo::new((*packed >> 32) as u32, *packed as u32).dbno() != dbnum);
+        state.publication_acks.retain(|_, ack| ack.dbnum != dbnum);
         state.published_sesno.remove(&dbnum);
         state.room_changes.remove(&dbnum);
         state.model_digests.remove(&dbnum);
         state.room_spatial.remove(&dbnum);
-        state.room_spatial_dirty.retain(|(owner, _)| *owner != dbnum);
+        state
+            .room_spatial_dirty
+            .retain(|(owner, _)| *owner != dbnum);
         state.bump_epoch(dbnum);
     }
 
@@ -683,10 +885,21 @@ impl ModelMemoryStore {
                 state
                     .receipts
                     .keys()
-                    .map(|&packed| RefNo::new((packed >> 32) as u32, packed as u32))
+                    .chain(state.invalidated_roots.iter())
+                    .copied().collect::<BTreeSet<_>>().into_iter()
+                    .map(|packed| RefNo::new((packed >> 32) as u32, packed as u32))
                     .collect()
             })
             .unwrap_or_default()
+    }
+
+    /// Called only after source absence and output deletion have succeeded.
+    pub fn forget_retired_root(&self, scope: ProjectionScope<'_>, root: RefNo) {
+        if let Some(state) = self.write().get_mut(&scope.key()) {
+            state.invalidated_roots.remove(&packed_refno(root));
+            state.receipts.remove(&packed_refno(root));
+            state.publication_acks.remove(&packed_refno(root));
+        }
     }
 
     pub fn receipt(&self, scope: ProjectionScope<'_>, root: RefNo) -> Option<RootReceipt> {
@@ -698,13 +911,50 @@ impl ModelMemoryStore {
             .cloned()
     }
 
+    pub fn publication_ack(
+        &self,
+        scope: ProjectionScope<'_>,
+        root: RefNo,
+    ) -> Option<RootPublicationAck> {
+        let scopes = self.read();
+        scopes
+            .get(&scope.key())?
+            .publication_acks
+            .get(&packed_refno(root))
+            .cloned()
+    }
+
+    /// 只在对应 process-store 根事务已经成功提交后调用。
+    pub fn record_publication_ack(
+        &self,
+        scope: ProjectionScope<'_>,
+        root: RefNo,
+        ack: RootPublicationAck,
+    ) {
+        self.write()
+            .entry(scope.key())
+            .or_default()
+            .publication_acks
+            .insert(packed_refno(root), ack);
+    }
+
+    pub fn invalidate_publication_ack(&self, scope: ProjectionScope<'_>, root: RefNo) {
+        if let Some(state) = self.write().get_mut(&scope.key()) {
+            state.publication_acks.remove(&packed_refno(root));
+        }
+    }
+
     /// Remove only the publication marker for a root while retaining its
     /// generated records.  A caller uses this when an external durability gate
     /// (the mirror spool) fails after projection commit: later `ensure` calls
     /// must retry publication instead of treating the in-memory rows as done.
     pub fn invalidate_receipt(&self, scope: ProjectionScope<'_>, root: RefNo) {
         if let Some(state) = self.write().get_mut(&scope.key()) {
+            if state.receipts.contains_key(&packed_refno(root)) {
+                state.invalidated_roots.insert(packed_refno(root));
+            }
             state.receipts.remove(&packed_refno(root));
+            state.publication_acks.remove(&packed_refno(root));
         }
     }
 
@@ -719,8 +969,31 @@ impl ModelMemoryStore {
             return 0;
         };
         let invalidated = state.receipts.len();
+        state.invalidated_roots.extend(state.receipts.keys().copied());
         state.receipts.clear();
+        state.publication_acks.clear();
         invalidated
+    }
+
+    /// 只作废**一个库**的发布回执与 ACK，记录照旧可显示（lazy-startup L4：文件变化只让对应
+    /// dbnum 失效，母计划不变量 7）。根归哪个库由它自己的 refno 位解码定（不变量 1）；
+    /// 别的库一个回执都不碰——8000 保存了，7998 的根仍然是「已发布」。
+    pub fn invalidate_receipts_of_dbnum(&self, scope: ProjectionScope<'_>, dbnum: u32) -> usize {
+        let mut scopes = self.write();
+        let Some(state) = scopes.get_mut(&scope.key()) else {
+            return 0;
+        };
+        let belongs = |packed: &i64| {
+            crate::data_interface::refno_route::refno_dbnum_of(RefNo::new(
+                (*packed >> 32) as u32,
+                *packed as u32,
+            )) == Some(dbnum)
+        };
+        let before = state.receipts.len();
+        state.invalidated_roots.extend(state.receipts.keys().filter(|key| belongs(key)).copied());
+        state.receipts.retain(|packed, _| !belongs(packed));
+        state.publication_acks.retain(|packed, _| !belongs(packed));
+        before - state.receipts.len()
     }
 
     /// 某个库已投影过的最高源会话。旧 `persisted_e3d_session` 的内存版。
@@ -819,6 +1092,161 @@ mod tests {
         ModelMemoryStore::default()
     }
 
+    /// lazy-startup L4：一个库保存了，只作废**它自己**的回执与 ACK（含第二个 extent 的根——
+    /// 归属按位解码，不按 word0），别的库的根仍是「已发布」；记录本身不动。
+    #[test]
+    fn invalidating_one_dbnum_leaves_other_dbnums_receipts_alone() {
+        let store = store();
+        let receipt = |sesno: u32| RootReceipt {
+            source_sesno: sesno,
+            model_target: None,
+            manifest_hash: "manifest".into(),
+            geometry_count: 1,
+            published_via: default_published_via(),
+        };
+        let root_8000 = RefNo::new(8_000, 100);
+        let root_8000_second_extent = RefNo::new(8_000 + 0x2000, 7);
+        let root_7998 = RefNo::new(7_998, 100);
+        store.commit(
+            ProjectionScope::Current,
+            vec![
+                ProjectionCommit {
+                    upserts: vec![record("a", RefNo::new(8_000, 1), root_8000, 8_000)],
+                    receipt: Some((root_8000, receipt(37))),
+                    ..Default::default()
+                },
+                ProjectionCommit {
+                    receipt: Some((root_8000_second_extent, receipt(37))),
+                    ..Default::default()
+                },
+                ProjectionCommit {
+                    upserts: vec![record("b", RefNo::new(7_998, 1), root_7998, 7_998)],
+                    receipt: Some((root_7998, receipt(5))),
+                    ..Default::default()
+                },
+            ],
+        );
+        let ack = |dbnum: u32, sesno: u32| RootPublicationAck {
+            dbnum,
+            source_sesno: sesno,
+            geometry_count: 1,
+            room_membership: false,
+            room_generation: None,
+            medium: crate::fast_model::model_db_adapter::PersistMedium::EmbeddedMem,
+        };
+        store.record_publication_ack(ProjectionScope::Current, root_8000, ack(8_000, 37));
+        store.record_publication_ack(ProjectionScope::Current, root_7998, ack(7_998, 5));
+
+        assert_eq!(
+            store.invalidate_receipts_of_dbnum(ProjectionScope::Current, 8_000),
+            2,
+            "两个 extent 的根都归 8000"
+        );
+        assert!(store.receipt(ProjectionScope::Current, root_8000).is_none());
+        assert!(
+            store
+                .receipt(ProjectionScope::Current, root_8000_second_extent)
+                .is_none()
+        );
+        assert!(
+            store
+                .publication_ack(ProjectionScope::Current, root_8000)
+                .is_none()
+        );
+        let roots = store.roots(ProjectionScope::Current);
+        assert_eq!(roots.len(), 3);
+        assert!(roots.contains(&root_8000));
+        assert!(roots.contains(&root_8000_second_extent));
+        assert!(roots.contains(&root_7998));
+        store.forget_retired_root(ProjectionScope::Current, root_8000_second_extent);
+        assert!(!store.roots(ProjectionScope::Current).contains(&root_8000_second_extent));
+        assert!(store.roots(ProjectionScope::Current).contains(&root_8000));
+        assert!(
+            store.receipt(ProjectionScope::Current, root_7998).is_some(),
+            "7998 一个回执不动"
+        );
+        assert!(
+            store
+                .publication_ack(ProjectionScope::Current, root_7998)
+                .is_some()
+        );
+        assert_eq!(
+            store
+                .records_of_root(ProjectionScope::Current, root_8000)
+                .len(),
+            1,
+            "记录照旧可显示，只有回执作废"
+        );
+        assert_eq!(
+            store.invalidate_receipts_of_dbnum(ProjectionScope::Current, 8_000),
+            0,
+            "第二次没有可作废的"
+        );
+        assert_eq!(
+            store.invalidate_receipts_of_dbnum(ProjectionScope::Current, 5_052),
+            0,
+            "没发布过根的库作废 0 条，不 panic"
+        );
+    }
+
+    #[test]
+    fn complete_publication_ack_is_invalidated_before_candidate_geometry_changes() {
+        let store = store();
+        let root = RefNo::new(24381, 1);
+        let geometry = record("a", RefNo::new(24381, 7), root, 7997);
+        let receipt = RootReceipt {
+            source_sesno: 42,
+            model_target: None,
+            manifest_hash: "manifest".into(),
+            geometry_count: 1,
+            published_via: default_published_via(),
+        };
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![geometry.clone()],
+                receipt: Some((root, receipt.clone())),
+                ..Default::default()
+            }],
+        );
+        let ack = RootPublicationAck {
+            dbnum: 7997,
+            source_sesno: 42,
+            geometry_count: 1,
+            room_membership: true,
+            room_generation: Some("rooms-v1".into()),
+            medium: crate::fast_model::model_db_adapter::PersistMedium::EmbeddedMem,
+        };
+        store.record_publication_ack(ProjectionScope::Current, root, ack.clone());
+        assert_eq!(
+            store.publication_ack(ProjectionScope::Current, root),
+            Some(ack.clone())
+        );
+
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![geometry],
+                receipt: Some((root, receipt)),
+                ..Default::default()
+            }],
+        );
+        assert!(
+            store
+                .publication_ack(ProjectionScope::Current, root)
+                .is_none(),
+            "a regenerated candidate must be re-published before it is complete"
+        );
+
+        store.record_publication_ack(ProjectionScope::Current, root, ack);
+        store.clear_dbnum(7997);
+        assert!(
+            store
+                .publication_ack(ProjectionScope::Current, root)
+                .is_none()
+        );
+    }
+
     #[test]
     fn room_input_adapter_uses_resident_sources_not_ref0_as_dbnum() {
         let store = store();
@@ -826,37 +1254,75 @@ mod tests {
         let parent = RefNo::new(24381, 1);
         let mut geometry = record("room_member", source, parent, 7997);
         geometry.world_transform = DMat4::from_translation(glam::DVec3::new(3.0, 4.0, 5.0));
-        store.commit(ProjectionScope::Current, vec![ProjectionCommit { upserts: vec![geometry.clone()], ..Default::default() }]);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![geometry.clone()],
+                ..Default::default()
+            }],
+        );
         let rows = store.room_records_for_members(&BTreeSet::from([packed_refno(source)]));
         assert_eq!(rows, vec![geometry.clone()]);
         let inst = rows[0].room_inst();
-        assert_eq!(inst.refno, crate::data_interface::generation_root::refno_from_e3d(source));
-        assert_eq!(inst.owner, crate::data_interface::generation_root::refno_from_e3d(parent));
+        assert_eq!(
+            inst.refno,
+            crate::data_interface::generation_root::refno_from_e3d(source)
+        );
+        assert_eq!(
+            inst.owner,
+            crate::data_interface::generation_root::refno_from_e3d(parent)
+        );
         assert_eq!(inst.world_trans.translation, glam::Vec3::new(3.0, 4.0, 5.0));
         assert_eq!(inst.insts[0].geo_hash, geometry.mesh_id);
-        assert!(store.room_records_for_members(&BTreeSet::from([packed_refno(parent)])).is_empty());
-        store.commit(ProjectionScope::Current, vec![ProjectionCommit { removals: vec![geometry.record_id], ..Default::default() }]);
-        assert!(store.room_records_for_members(&BTreeSet::from([packed_refno(source)])).is_empty());
+        assert!(
+            store
+                .room_records_for_members(&BTreeSet::from([packed_refno(parent)]))
+                .is_empty()
+        );
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                removals: vec![geometry.record_id],
+                ..Default::default()
+            }],
+        );
+        assert!(
+            store
+                .room_records_for_members(&BTreeSet::from([packed_refno(source)]))
+                .is_empty()
+        );
     }
 
     #[test]
     fn restored_room_baseline_requires_new_ack_and_is_dbnum_scoped() {
         let store = store();
         let root = RefNo::new(24381, 1);
-        store.commit(ProjectionScope::Current, vec![ProjectionCommit {
-            upserts: vec![record("a", root, root, 7997), record("b", root, root, 1112)],
-            ..Default::default()
-        }]);
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                upserts: vec![record("a", root, root, 7997), record("b", root, root, 1112)],
+                ..Default::default()
+            }],
+        );
         assert!(!store.room_baseline_known(7997));
         assert!(store.ack_rooms(7997, store.commit_epoch(7997)));
         assert!(store.ack_rooms(1112, store.commit_epoch(1112)));
         assert!(store.room_baseline_known(7997));
         let epoch = store.commit_epoch(7997);
         assert!(!store.restore_dbnum(7997, vec![], vec![], epoch + 1));
-        assert!(store.room_baseline_known(7997), "rejected restore preserves baseline");
+        assert!(
+            store.room_baseline_known(7997),
+            "rejected restore preserves baseline"
+        );
         assert!(store.restore_dbnum(7997, vec![], vec![], epoch));
-        assert!(!store.room_baseline_known(7997), "restored empty model may have deleted prior members");
-        assert!(store.room_baseline_known(1112), "other database baseline stays valid");
+        assert!(
+            !store.room_baseline_known(7997),
+            "restored empty model may have deleted prior members"
+        );
+        assert!(
+            store.room_baseline_known(1112),
+            "other database baseline stays valid"
+        );
         assert!(!store.ack_rooms(7997, epoch));
         assert!(!store.room_baseline_known(7997));
         assert!(store.ack_rooms(7997, store.commit_epoch(7997)));
@@ -894,10 +1360,19 @@ mod tests {
         store.clear_dbnum(7997);
 
         assert!(store.commit_epoch(7997) > epoch);
-        assert!(store.records_of_root(ProjectionScope::Current, root_a).is_empty());
+        assert!(
+            store
+                .records_of_root(ProjectionScope::Current, root_a)
+                .is_empty()
+        );
         assert!(store.receipt(ProjectionScope::Current, root_a).is_none());
         assert!(!store.roots(ProjectionScope::Current).contains(&root_a));
-        assert_eq!(store.records_of_root(ProjectionScope::Current, root_b).len(), 1);
+        assert_eq!(
+            store
+                .records_of_root(ProjectionScope::Current, root_b)
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -906,32 +1381,66 @@ mod tests {
         let root = RefNo::new(24381, 1);
         let member = RefNo::new(24381, 2);
         let original = record("a", member, root, 7997);
-        let put = |row| store.commit(ProjectionScope::Current, vec![ProjectionCommit {
-            upserts: vec![row], ..Default::default()
-        }]);
+        let put = |row| {
+            store.commit(
+                ProjectionScope::Current,
+                vec![ProjectionCommit {
+                    upserts: vec![row],
+                    ..Default::default()
+                }],
+            )
+        };
         put(original.clone());
         let (baseline, digest, _, _) = store.room_snapshot(7997, true);
         assert!(store.ack_rooms(7997, baseline));
         let mut moved = original.clone();
-        moved.world_bounds = [[10.0;3],[11.0;3]];
+        moved.world_bounds = [[10.0; 3], [11.0; 3]];
         put(moved.clone());
         let (epoch, moved_digest, changes, records) = store.room_snapshot(7997, false);
         assert_eq!(records.len(), 1);
         assert_ne!(digest, moved_digest);
-        assert_eq!(changes[&packed_refno(member)].before, vec![original.world_bounds]);
-        assert_eq!(changes[&packed_refno(member)].after, vec![moved.world_bounds]);
-        assert!(store.room_members_intersecting(7997, &[original.world_bounds]).is_empty());
-        assert!(store.room_members_intersecting(7997, &[moved.world_bounds]).contains(&packed_refno(member)));
-        store.commit(ProjectionScope::Current, vec![ProjectionCommit {
-            removals: vec!["a".into()], ..Default::default()
-        }]);
-        assert!(!store.ack_rooms(7997, epoch), "new deletion survives old ACK");
+        assert_eq!(
+            changes[&packed_refno(member)].before,
+            vec![original.world_bounds]
+        );
+        assert_eq!(
+            changes[&packed_refno(member)].after,
+            vec![moved.world_bounds]
+        );
+        assert!(
+            store
+                .room_members_intersecting(7997, &[original.world_bounds])
+                .is_empty()
+        );
+        assert!(
+            store
+                .room_members_intersecting(7997, &[moved.world_bounds])
+                .contains(&packed_refno(member))
+        );
+        store.commit(
+            ProjectionScope::Current,
+            vec![ProjectionCommit {
+                removals: vec!["a".into()],
+                ..Default::default()
+            }],
+        );
+        assert!(
+            !store.ack_rooms(7997, epoch),
+            "new deletion survives old ACK"
+        );
         let (_, _, deleted, records) = store.room_snapshot(7997, false);
         assert!(records.is_empty());
-        assert_eq!(deleted[&packed_refno(member)].before, vec![original.world_bounds]);
+        assert_eq!(
+            deleted[&packed_refno(member)].before,
+            vec![original.world_bounds]
+        );
         assert!(deleted[&packed_refno(member)].after.is_empty());
         put(original);
-        assert_eq!(store.room_snapshot(7997, false).1, digest, "content digest is history independent");
+        assert_eq!(
+            store.room_snapshot(7997, false).1,
+            digest,
+            "content digest is history independent"
+        );
     }
 
     /// 祖先索引就是旧 `anc CONTAINS <packed>` 的形态：按根能取回子树的全部记录，

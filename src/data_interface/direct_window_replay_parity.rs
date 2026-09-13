@@ -31,10 +31,10 @@ use crate::data_interface::increment_pipeline::{
 };
 use crate::data_interface::increment_tail::render_finalize_tail;
 use crate::data_interface::model_update_plan::ModelUpdatePlan;
-use crate::data_interface::write_state::{WRITE_STATE_TABLE, WriteIntent, render_mark_writing};
 use crate::data_interface::table_parity::{
     apply_all, changed_data_tables, fresh_mem_db, init_schema_on, snapshot_data_tables,
 };
+use crate::data_interface::write_state::{WRITE_STATE_TABLE, WriteIntent, render_mark_writing};
 
 /// 保留段 dbnum / refno，避开其它夹具（GLOBAL_AABB_TREE 等进程级共享物不在本文件的
 /// 调用树上，但 refno 空间仍按惯例隔开）。
@@ -904,11 +904,26 @@ async fn the_rollback_takes_every_face_back_to_s_and_leaves_the_older_rows_alone
         "SELECT VALUE record::id(id) FROM inst_relate;".to_string(),
     )
     .await;
-    assert_eq!(survivors, vec!["old".to_string()], "只带走 sesno > S 的模型行");
-    let roots = ids(&db, "SELECT VALUE record::id(id) FROM gen_root;".to_string()).await;
+    assert_eq!(
+        survivors,
+        vec!["old".to_string()],
+        "只带走 sesno > S 的模型行"
+    );
+    let roots = ids(
+        &db,
+        "SELECT VALUE record::id(id) FROM gen_root;".to_string(),
+    )
+    .await;
     assert_eq!(roots, vec!["old".to_string()], "凭证同理");
-    let rooms = ids(&db, "SELECT VALUE record::id(id) FROM room_relate;".to_string()).await;
-    assert!(rooms.is_empty(), "房间边整库删（本来就是整库重算）: {rooms:?}");
+    let rooms = ids(
+        &db,
+        "SELECT VALUE record::id(id) FROM room_relate;".to_string(),
+    )
+    .await;
+    assert!(
+        rooms.is_empty(),
+        "房间边整库删（本来就是整库重算）: {rooms:?}"
+    );
 
     #[derive(Debug, serde::Deserialize)]
     struct Marks {
@@ -1091,7 +1106,9 @@ async fn terminal_production_batches_replay_statistics_before_watermark() {
 enum Step {
     Data(String),
     /// 数据尾事务：`render_finalize_tail`（窗口）或 `render_watermark_advance`（基线）。
-    DataTail { baseline: bool },
+    DataTail {
+        baseline: bool,
+    },
     Model(String),
     Rooms(String),
     TaskEnd,
@@ -1258,7 +1275,10 @@ async fn assert_converged(
         .await
         .expect("load marker")
         .expect("marker row stays after finished");
-    assert_eq!(marker.status, "finished", "{context}: 收尾那一笔盖成 finished");
+    assert_eq!(
+        marker.status, "finished",
+        "{context}: 收尾那一笔盖成 finished"
+    );
     assert_eq!(
         (marker.start_sesno, marker.end_sesno, marker.intent),
         (start_sesno, END_SESNO, intent),
@@ -1277,7 +1297,10 @@ async fn an_apply_window_task_killed_at_any_step_rolls_back_to_s_and_reruns_to_t
     let f = fixture();
     let steps = apply_window_steps(&f);
     assert_eq!(
-        steps.iter().filter(|step| matches!(step, Step::Model(_))).count(),
+        steps
+            .iter()
+            .filter(|step| matches!(step, Step::Model(_)))
+            .count(),
         3,
         "三根各一块，模型第 k 块才有 k 可停"
     );
@@ -1297,9 +1320,7 @@ async fn an_apply_window_task_killed_at_any_step_rolls_back_to_s_and_reruns_to_t
     for killed_after in 0..steps.len() {
         let context = format!(
             "kill after step {killed_after} ({})",
-            steps[..killed_after]
-                .last()
-                .map_or("start", Step::label)
+            steps[..killed_after].last().map_or("start", Step::label)
         );
         let db = seeded_db(&format!("task_crash_{killed_after}")).await;
         run_steps(&db, &steps[..killed_after]).await;
@@ -1324,7 +1345,11 @@ async fn an_apply_window_task_killed_at_any_step_rolls_back_to_s_and_reruns_to_t
             }),
             "{context}: 两水位退到 S（崩溃不分面）"
         );
-        assert_eq!(write_state_status(&db).await, None, "{context}: 回退删标记行");
+        assert_eq!(
+            write_state_status(&db).await,
+            None,
+            "{context}: 回退删标记行"
+        );
         let leftovers = ids(
             &db,
             format!(
@@ -1333,7 +1358,10 @@ async fn an_apply_window_task_killed_at_any_step_rolls_back_to_s_and_reruns_to_t
             ),
         )
         .await;
-        assert!(leftovers.is_empty(), "{context}: 模型面 sesno > S 的行必须删干净 {leftovers:?}");
+        assert!(
+            leftovers.is_empty(),
+            "{context}: 模型面 sesno > S 的行必须删干净 {leftovers:?}"
+        );
 
         // 重跑 S→T：开工标记 → 整条时间线。
         apply_all(
@@ -1348,7 +1376,14 @@ async fn an_apply_window_task_killed_at_any_step_rolls_back_to_s_and_reruns_to_t
         .await
         .expect("re-mark writing");
         run_steps(&db, &steps).await;
-        assert_converged(&db, &expected, BASE_SESNO, WriteIntent::ApplyWindow, &context).await;
+        assert_converged(
+            &db,
+            &expected,
+            BASE_SESNO,
+            WriteIntent::ApplyWindow,
+            &context,
+        )
+        .await;
     }
 }
 
@@ -1358,7 +1393,7 @@ async fn an_apply_window_task_killed_at_any_step_rolls_back_to_s_and_reruns_to_t
 /// 这类任务没写过数据，退数据面只会把上一窗已收口的 (S, applied] 数据行删掉、而重排的 ModelOnly
 /// 又不补数据。所以回退只删 `direct_model.sesno > S` 的模型行、`source_end_sesno > S` 的凭证、
 /// 整库房间边，`model_sesno` 退到 S、`applied_sesno` 原地不动；重跑就是同意图的
-/// ModelOnly S→T（模型 + 房间 + 收尾），终态与一次成功逐表相等。
+/// ModelOnly S→T（模型 + 开关开启时的房间 + 收尾），终态与一次成功逐表相等。
 #[tokio::test(flavor = "multi_thread")]
 async fn a_model_only_task_killed_in_a_model_block_rolls_back_to_the_model_watermark_and_reruns() {
     use crate::data_interface::fast_delete::rollback_to_watermark_on;
@@ -1402,7 +1437,11 @@ async fn a_model_only_task_killed_in_a_model_block_rolls_back_to_the_model_water
         let context = format!("model-only kill after {} step(s)", killed_after);
         let db = data_at_t(&format!("model_only_crash_{killed_after}")).await;
         run_steps(&db, &model_only[..killed_after]).await;
-        assert_eq!(write_state_status(&db).await.as_deref(), Some("writing"), "{context}");
+        assert_eq!(
+            write_state_status(&db).await.as_deref(),
+            Some("writing"),
+            "{context}"
+        );
 
         let report = rollback_to_watermark_on(&db, DBNUM, BASE_SESNO, WriteIntent::ModelOnly)
             .await
@@ -1418,7 +1457,9 @@ async fn a_model_only_task_killed_in_a_model_block_rolls_back_to_the_model_water
         );
         // 数据面一行不少、模型面 / 房间面回到「还没跑模型」那一刻。被删空的表还留着表定义，
         // 对照库里则从没建过——「不存在」与「空」在这里是一回事。
-        let after_rollback = snapshot_data_tables(&db).await.expect("post-rollback snapshot");
+        let after_rollback = snapshot_data_tables(&db)
+            .await
+            .expect("post-rollback snapshot");
         for (table, rows) in &data_only {
             assert_eq!(
                 after_rollback.get(table),
@@ -1463,11 +1504,18 @@ async fn an_initialization_killed_at_any_step_wipes_and_reruns_from_scratch() {
     let f = fixture();
     let steps = initialization_steps(&f);
     async fn empty_db(label: &str) -> Surreal<Any> {
-        let db = fresh_mem_db("replay_parity", label).await.expect("mem boots");
+        let db = fresh_mem_db("replay_parity", label)
+            .await
+            .expect("mem boots");
         init_schema_on(&db).await.expect("production schema");
         apply_all(
             &db,
-            &[render_mark_writing(DBNUM, 0, END_SESNO, WriteIntent::Initialize)],
+            &[render_mark_writing(
+                DBNUM,
+                0,
+                END_SESNO,
+                WriteIntent::Initialize,
+            )],
         )
         .await
         .expect("initialize marker");
@@ -1490,22 +1538,47 @@ async fn an_initialization_killed_at_any_step_wipes_and_reruns_from_scratch() {
         );
         let db = empty_db(&format!("init_crash_{killed_after}")).await;
         run_steps(&db, &steps[..killed_after]).await;
-        assert_eq!(write_state_status(&db).await.as_deref(), Some("writing"), "{context}");
+        assert_eq!(
+            write_state_status(&db).await.as_deref(),
+            Some("writing"),
+            "{context}"
+        );
 
         let report = rollback_to_watermark_on(&db, DBNUM, 0, WriteIntent::Initialize)
             .await
             .expect("rollback = wipe");
         assert!(report.wiped, "{context}: 初始化的回退是整库 wipe");
         assert_eq!(report.target_watermark, 0);
-        for table in ["pe", "EQUI", "BOX", "inst_relate", "inst_info", "gen_root", "room_relate", "room_panel_relate"] {
+        for table in [
+            "pe",
+            "EQUI",
+            "BOX",
+            "inst_relate",
+            "inst_info",
+            "gen_root",
+            "room_relate",
+            "room_panel_relate",
+        ] {
             let rows = ids(&db, format!("SELECT VALUE <string>id FROM {table};")).await;
-            assert!(rows.is_empty(), "{context}: wipe 之后 {table} 还剩 {rows:?}");
+            assert!(
+                rows.is_empty(),
+                "{context}: wipe 之后 {table} 还剩 {rows:?}"
+            );
         }
-        assert_eq!(write_state_status(&db).await, None, "{context}: 标记行最后删");
+        assert_eq!(
+            write_state_status(&db).await,
+            None,
+            "{context}: 标记行最后删"
+        );
 
         apply_all(
             &db,
-            &[render_mark_writing(DBNUM, 0, END_SESNO, WriteIntent::Initialize)],
+            &[render_mark_writing(
+                DBNUM,
+                0,
+                END_SESNO,
+                WriteIntent::Initialize,
+            )],
         )
         .await
         .expect("re-mark writing");
@@ -1611,12 +1684,19 @@ fn the_data_tail_never_writes_finished_and_the_task_end_writes_it_exactly_once()
         &["UPDATE pe:x SET datacenter_version = 1;".to_owned()],
     );
     let tail = format!("{}\n{}", render.window_batches.join("\n"), render.tail);
-    assert!(tail.contains("applied_sesno"), "尾事务至少推进数据水位: {tail}");
+    assert!(
+        tail.contains("applied_sesno"),
+        "尾事务至少推进数据水位: {tail}"
+    );
     // `DELETE increment_update_attempt:{dbnum}` 是旧恢复记录的记录形式（`prepare_attempt` 写、
     // 尾事务删）——ADR-072 D1 之后尾事务不再删它。同一张表里 per-root attempts / `window_block`
     // 那两类行的清理（`WHERE dbnum = … AND kind IN […]`）是 R4 随 `staging/attempts.rs` 一起退的
     // 事，不在这条钉的口径里。
-    for forbidden in ["finished", "DELETE increment_update_attempt:", WRITE_STATE_TABLE] {
+    for forbidden in [
+        "finished",
+        "DELETE increment_update_attempt:",
+        WRITE_STATE_TABLE,
+    ] {
         assert!(
             !tail.contains(forbidden),
             "数据尾事务不许出现 {forbidden:?}（ADR-072 D1 / W2）: {tail}"
@@ -1658,7 +1738,9 @@ fn the_data_tail_never_writes_finished_and_the_task_end_writes_it_exactly_once()
         "收尾那一笔恰含一句 finished: {closing}"
     );
     assert!(
-        closing.contains(&format!("UPDATE {WRITE_STATE_TABLE}:{DBNUM} SET status = 'finished'")),
+        closing.contains(&format!(
+            "UPDATE {WRITE_STATE_TABLE}:{DBNUM} SET status = 'finished'"
+        )),
         "{closing}"
     );
     end.closes_task = false;

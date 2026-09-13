@@ -19,16 +19,36 @@
 //! （切片 W3），只拿 dbnum 问 `file_of` / `db_type_of`，ref0 那一问没有调用方了。可以直接塞给
 //! `DirectStore::new`。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, PoisonError, RwLock};
 
 use aios_core::RefU64;
 use e3d_io::db_element::{DbFilePin, DbFileResolver, template_file_for};
 use e3d_io::refno::RefNo;
 
 use super::cata_closure::CataDbLocator;
-use super::db_file_header::DbBasicInfo;
+
+// The HTTP health reader observes the exact directory used by the watcher.
+// Reading health must never initialize a provider or open source files.
+static ACTIVE_DIRECTORY: RwLock<Option<Arc<MdbRouteDirectory>>> = RwLock::new(None);
+
+pub fn register_active(directory: Arc<MdbRouteDirectory>) {
+    *ACTIVE_DIRECTORY.write().unwrap_or_else(PoisonError::into_inner) = Some(directory);
+}
+
+pub fn active(project: &str, mdb: &str) -> Option<Arc<MdbRouteDirectory>> {
+    ACTIVE_DIRECTORY.read().unwrap_or_else(PoisonError::into_inner)
+        .as_ref()
+        .filter(|directory| directory.project() == project
+            && directory.mdb().trim_start_matches('/') == mdb.trim_start_matches('/'))
+        .cloned()
+}
+use super::db_file_header::{DbBasicInfo, DbFileHeader};
+use super::db_generation::{
+    DbGeneration, FileIdentity, GenerationChange, GenerationLedger, Observation,
+};
 use super::mdb_membership::{MdbDatabase, MdbMembership};
 use super::refno_route::{refno_dbnum_of, to_refno};
 
@@ -200,8 +220,27 @@ pub struct RouteDirectoryStats {
     pub problems: usize,
 }
 
+/// `poll_generations` 报出的一条变化：哪个库、哪个文件、从哪一版到哪一版、哪一种变化
+/// （`docs/plans/2026-09-12-lazy-startup-dev-plan.md` §3.4）。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RouteRefresh {
+    pub dbnum: u32,
+    pub db_type: String,
+    pub path: PathBuf,
+    pub from: DbGeneration,
+    pub to: DbGeneration,
+    pub kind: GenerationChange,
+}
+
+/// 轮询状态：世代账本 + 此刻读不出头的库（只在进出这个集合时各说一次，别每 2 s 刷屏）。
+#[derive(Debug, Clone, Default)]
+struct PollState {
+    ledger: GenerationLedger,
+    unreadable: BTreeSet<u32>,
+}
+
 /// 见模块头。
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct MdbRouteDirectory {
     project: String,
     mdb: String,
@@ -215,6 +254,25 @@ pub struct MdbRouteDirectory {
     project_files: HashMap<(String, u32), ProjectDbFile>,
     /// 构造期发现、该让人看见的事（CURD 重复声明、认不出的 STYP）。
     problems: Vec<String>,
+    /// 每个路由库文件的世代（母计划不变量 7）：[`Self::poll_generations`] 更新，`/health.core` 读。
+    /// 目录本身在构造后只读，账本是它唯一会动的部分，所以单独上锁而不是把整个目录锁起来。
+    generations: Mutex<PollState>,
+}
+
+impl Clone for MdbRouteDirectory {
+    fn clone(&self) -> Self {
+        Self {
+            project: self.project.clone(),
+            mdb: self.mdb.clone(),
+            template_dir: self.template_dir.clone(),
+            routes: self.routes.clone(),
+            curd_order: self.curd_order.clone(),
+            declared_without_file: self.declared_without_file.clone(),
+            project_files: self.project_files.clone(),
+            problems: self.problems.clone(),
+            generations: Mutex::new(self.poll_state().clone()),
+        }
+    }
 }
 
 impl MdbRouteDirectory {
@@ -244,6 +302,7 @@ impl MdbRouteDirectory {
             declared_without_file: BTreeMap::new(),
             project_files: HashMap::new(),
             problems: Vec::new(),
+            generations: Mutex::new(PollState::default()),
         };
         for db in databases {
             let Some(db_type) = styp_name(db.styp) else {
@@ -488,6 +547,132 @@ impl MdbRouteDirectory {
             .collect()
     }
 
+    fn poll_state(&self) -> std::sync::MutexGuard<'_, PollState> {
+        self.generations
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// 看一眼每个路由库的文件现在是哪一版，回答**哪些库变了**（母计划不变量 7；
+    /// `docs/plans/2026-09-12-lazy-startup-dev-plan.md` §3.4）。
+    ///
+    /// 每条路由先 `stat`（[`FileIdentity::of`]）；身份没变就不开文件——E3D 的保存是追加写，会话号
+    /// 只可能随文件内容一起变。身份变了才开一次头（描述符页 + 会话页，[`DbFileHeader::read`]）读
+    /// `latest_sesno`，交给账本 [`GenerationLedger::observe`] 分成前进 / 回滚 / 换文件。不读任何元素；
+    /// 成本与库数成正比、与元素数无关。第一次见到一个库只记基线，不算变化——所以启动时先叫一次
+    /// 把基线记下来，之后每一次返回的才是「自上次以来变了的库」。
+    ///
+    /// 读不出头 / stat 不到的库这一轮跳过、不算变化，进出「读不出」集合时各说一次。
+    /// 目录库（CATA / DICT / PROP）的变化同样报出来——它们的依赖失效是阶段 5 余下的活，
+    /// 调用方自己决定对哪些类型动手。
+    ///
+    /// 一个已知的边：SAVEWORK 写到一半被看见时，长度已变、描述符页还指着旧会话，会先报一次
+    /// `FileReplaced`，下一轮再报 `SessionAdvanced`。两次都只落在这一个 dbnum 上，多做一次
+    /// 该库的定向刷新，不会错到别的库。
+    pub fn poll_generations(&self) -> Vec<RouteRefresh> {
+        let mut state = self.poll_state();
+        let mut changes = Vec::new();
+        for route in self.routes.values() {
+            let identity = match FileIdentity::of(&route.path) {
+                Ok(identity) => identity,
+                Err(error) => {
+                    if state.unreadable.insert(route.dbnum) {
+                        log::warn!(
+                            "[route-poll] dbnum {} 的文件 {} stat 不到，本轮跳过：{error}",
+                            route.dbnum,
+                            route.path.display()
+                        );
+                    }
+                    continue;
+                }
+            };
+            let previous = state.ledger.get(route.dbnum);
+            let (latest_sesno, base_sesno, crossed_backtrack) = match previous {
+                Some(old) if old.identity == identity => (old.latest_sesno, old.base_sesno, false),
+                _ => {
+                    let observed = (|| -> anyhow::Result<_> {
+                        let mut view = e3d_io::session::DbView::open(&route.path)?;
+                        let chain = view.walk_sessions()?;
+                        let latest = chain.first().ok_or_else(|| anyhow::anyhow!("empty session chain"))?;
+                        let crossed = previous.is_some_and(|old| chain.windows(2).any(|pair| {
+                            pair[0].sesno > old.latest_sesno && pair[0].tail.as_ref().is_some_and(|tail|
+                                tail.base_sesno != 0 && tail.base_sesno < pair[1].sesno)
+                        }));
+                        Ok((latest.sesno, latest.tail.as_ref().map(|tail| tail.base_sesno), crossed))
+                    })();
+                    match observed {
+                        Ok(value) => value,
+                        Err(error) => {
+                            state.unreadable.insert(route.dbnum);
+                            log::warn!("[route-poll] dbnum {} session read failed: {error:#}", route.dbnum);
+                            continue;
+                        }
+                    }
+                }
+            };
+            if state.unreadable.remove(&route.dbnum) {
+                log::info!(
+                    "[route-poll] dbnum {} 的文件 {} 又能读了",
+                    route.dbnum,
+                    route.path.display()
+                );
+            }
+            if let Observation::Changed { from, to, kind } =
+                state.ledger.observe_session(route.dbnum, super::db_generation::Observed::new(identity, latest_sesno, base_sesno))
+            {
+                changes.push(RouteRefresh {
+                    dbnum: route.dbnum,
+                    db_type: route.db_type.clone(),
+                    path: route.path.clone(),
+                    from,
+                    to,
+                    kind: if crossed_backtrack { super::db_generation::GenerationChange::RolledBack } else { kind },
+                });
+            }
+        }
+        changes
+    }
+
+    /// 某库当前世代；没轮询过 → `None`。
+    pub fn generation_of(&self, dbnum: u32) -> Option<DbGeneration> {
+        self.poll_state().ledger.get(dbnum)
+    }
+
+    /// 全部世代之和：任何一个库变了它就变（`/health.core.snapshot_epoch` 的新来源，阶段 4 切片 §8-3）。
+    pub fn generations_epoch(&self) -> u64 {
+        self.poll_state().ledger.epoch()
+    }
+
+    /// 账本快照，dbnum 升序。
+    pub fn generations(&self) -> Vec<(u32, DbGeneration)> {
+        self.poll_state()
+            .ledger
+            .iter()
+            .map(|(dbnum, entry)| (dbnum, *entry))
+            .collect()
+    }
+
+    /// Process-local observation only; no filesystem access on a health request.
+    pub fn health(&self) -> serde_json::Value {
+        let state = self.poll_state();
+        let failed: BTreeSet<_> = state.unreadable.iter().copied()
+            .chain(self.declared_without_file.keys().copied()).collect();
+        let stale: Vec<_> = state.unreadable.iter().copied()
+            .filter(|dbnum| state.ledger.get(*dbnum).is_some()).collect();
+        serde_json::json!({
+            "status": if failed.is_empty() { "ready" } else { "degraded" },
+            "route_count": self.len(),
+            "snapshot_epoch": state.ledger.epoch(),
+            "session_vector": state.ledger.iter().map(|(dbnum, entry)|
+                serde_json::json!({"dbnum": dbnum, "sesno": entry.latest_sesno,
+                    "generation": entry.generation})).collect::<Vec<_>>(),
+            "stale_dbnums": stale,
+            "failed_dbnums": failed,
+            "problems": self.problems(),
+            "last_targeted_refresh": super::db_generation::last_targeted_refresh(),
+        })
+    }
+
     /// DESI / ISOD 路由，CURD 原序。
     pub fn element_databases(&self) -> impl Iterator<Item = &DbRoute> {
         self.curd_order
@@ -527,6 +712,14 @@ impl MdbRouteDirectory {
 
     pub fn problems(&self) -> &[String] {
         &self.problems
+    }
+
+    /// MDB 声明了、配置的项目目录下却没有文件的库：`(dbnum, SYS 元素名)`，dbnum 升序。
+    /// 启动横幅逐条点名用；查询时它们报 `NoFileForDbnum`，不混进 `DbNotInMdb`。
+    pub fn declared_without_file(&self) -> impl Iterator<Item = (u32, &str)> {
+        self.declared_without_file
+            .iter()
+            .map(|(dbnum, name)| (*dbnum, name.as_str()))
     }
 
     pub fn stats(&self) -> RouteDirectoryStats {
@@ -588,6 +781,9 @@ impl DbFileResolver for MdbRouteDirectory {
 /// 迁移期兼容壳：`DirectStore` 还持 `Arc<dyn CataDbLocator>` 时能直接换上；`dbnum` 键的两问照答，
 /// `ref0` 那一问**永远不答**——见模块头最后一段。
 impl CataDbLocator for MdbRouteDirectory {
+    fn contains_dbnum(&self, dbnum: u32) -> bool {
+        self.routes.contains_key(&dbnum) || self.declared_without_file.contains_key(&dbnum)
+    }
     fn dbnum_of_ref0(&self, _ref0: u32) -> Option<u32> {
         None
     }
@@ -641,6 +837,20 @@ mod tests {
             ],
             TEMPLATE_DIR,
         )
+    }
+
+    #[test]
+    fn health_reports_missing_routes_without_opening_or_polling_files() {
+        let directory = directory();
+        let before = directory.generations();
+        let health = directory.health();
+        assert_eq!(health["route_count"], 4); // SYS is not an element/catalogue route.
+        assert_eq!(health["failed_dbnums"], serde_json::json!([7000]));
+        assert_eq!(health["stale_dbnums"], serde_json::json!([]));
+        assert_eq!(health["status"], "degraded");
+        assert_eq!(directory.generations(), before);
+        assert_eq!(health["session_vector"], serde_json::json!([]));
+        assert!(health.get("skeleton_elements").is_none());
     }
 
     /// 路由键是**解码出的 dbnum**，不是 word0：同一库的三个 extent 都落到同一条路由。
@@ -1033,6 +1243,288 @@ mod tests {
                 stats.declared_without_file
             ),
             (1, 2, 1)
+        );
+    }
+
+    // ---- 会话世代：四页合成库（描述符 + 会话页 + 索引叶 + 记录），照 refno_native_stage0.rs 的写法 ----
+
+    const WORDS_PER_PAGE: u32 = 64;
+    const PAGE_BYTES: usize = WORDS_PER_PAGE as usize * 4;
+
+    fn put_be(page: &mut [u8], offset: usize, value: u32) {
+        page[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+    }
+
+    /// 一个 `ReadOnlyEngine::open` 开得起来的最小库：第 0 页描述符（自报 `dbnum` / 类型 / 会话页在第 1 页）、
+    /// 第 1 页会话页（`+0x0C` 会话号）、第 2 页一条索引叶、第 3 页一条记录。
+    fn session_db_pages(dbnum: u32, db_type: &str, sesno: u32) -> Vec<u8> {
+        let element = RefNo::new(word0_for(dbnum, 1), 42);
+        let mut pages = vec![vec![0_u8; PAGE_BYTES]; 4];
+        put_be(&mut pages[0], 0x04, 2);
+        put_be(&mut pages[0], 0x08, dbnum);
+        put_be(&mut pages[0], 0x20, e3d_attlib::db1_hash(db_type));
+        put_be(&mut pages[0], 0x28, 1);
+        put_be(&mut pages[0], 0x2C, 1);
+        put_be(&mut pages[0], 0x30, 1);
+        put_be(&mut pages[0], 0x34, WORDS_PER_PAGE);
+        put_be(&mut pages[0], 0x38, element.word0);
+        put_be(&mut pages[1], 0x00, 3);
+        put_be(&mut pages[1], 0x04, u32::MAX);
+        put_be(&mut pages[1], 0x0C, sesno);
+        put_be(&mut pages[1], 0x1C, 2);
+        put_be(&mut pages[1], 0x20, 1);
+        put_be(&mut pages[2], 0x00, 5);
+        for (index, value) in [13_387_743_u32, 0, 2, 2, 0, 53].into_iter().enumerate() {
+            put_be(&mut pages[2], (index + 1) * 4, value);
+        }
+        for (index, value) in [element.word0, element.word1, 3, (20_u32 << 12) | 1]
+            .into_iter()
+            .enumerate()
+        {
+            put_be(&mut pages[2], (7 + index) * 4, value);
+        }
+        put_be(&mut pages[3], 0x00, 7);
+        for (index, value) in [
+            11,
+            element.word0,
+            element.word1,
+            0x000A_AA01,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            put_be(&mut pages[3], 40 + index * 4, value);
+        }
+        pages.concat()
+    }
+
+    /// 写一个库；`extra_pages` 模拟追加写过的尾巴（E3D 的保存是追加写，长度随会话一起变）。
+    fn write_session_db(
+        dir: &Path,
+        name: &str,
+        dbnum: u32,
+        db_type: &str,
+        sesno: u32,
+        extra_pages: usize,
+    ) -> PathBuf {
+        let mut bytes = session_db_pages(dbnum, db_type, sesno);
+        bytes.extend(std::iter::repeat_n(0_u8, PAGE_BYTES * extra_pages));
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).expect("write synthetic session db");
+        path
+    }
+
+    #[test]
+    fn poll_detects_backtrack_between_two_observations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = write_session_db(tmp.path(), "ams8000_0001", 8000, "DESI", 242, 0);
+        let directory = MdbRouteDirectory::from_databases("ams", "ALL",
+            &[declared(8000, 1, "/AMS/DESI", path.to_str())], TEMPLATE_DIR);
+        assert!(directory.poll_generations().is_empty());
+        // 244 is an ordinary save on 243, but 243 rolled back to 239 from 242.
+        let full_pages = |sesno| {
+            let short = session_db_pages(8000, "DESI", sesno);
+            let mut bytes = Vec::new();
+            for page in short.chunks(PAGE_BYTES) {
+                bytes.extend_from_slice(page);
+                bytes.resize(bytes.len() + 2048 - PAGE_BYTES, 0);
+            }
+            put_be(&mut bytes, 0x34, 512);
+            bytes
+        };
+        let mut bytes = full_pages(244);
+        put_be(&mut bytes, 2048 + 0x7F0, 243);
+        put_be(&mut bytes, 2048 + 0x04, 4);
+        for (sesno, base, previous) in [(243, 239, 5), (242, 241, u32::MAX)] {
+            let source = full_pages(sesno);
+            let mut page = source[2048..4096].to_vec();
+            put_be(&mut page, 0x7F0, base);
+            put_be(&mut page, 0x04, previous);
+            bytes.extend(page);
+        }
+        std::fs::write(&path, bytes).unwrap();
+        let changes = directory.poll_generations();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, GenerationChange::RolledBack);
+        assert_eq!(changes[0].to.latest_sesno, 244);
+        assert_eq!(changes[0].to.base_sesno, Some(243));
+        assert!(directory.poll_generations().is_empty());
+    }
+
+    fn generation_pair(directory: &MdbRouteDirectory, dbnum: u32) -> Option<(u64, u32)> {
+        directory
+            .generation_of(dbnum)
+            .map(|entry| (entry.generation, entry.latest_sesno))
+    }
+
+    /// lazy-startup L4 / 母计划不变量 7：第一次轮询只记基线；之后 8000 保存了只报 8000，7998 的世代
+    /// 一动不动；前进 / 回滚 / 换文件三种变化分得开；目录库的变化同样报出来；声明了没文件的库不进账本。
+    #[test]
+    fn poll_generations_reports_only_the_dbnum_whose_file_changed() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let desi_8000 = write_session_db(tmp.path(), "ams8000_0001", 8_000, "DESI", 37, 0);
+        let desi_7998 = write_session_db(tmp.path(), "ams7998_0001", 7_998, "DESI", 5, 0);
+        let cata_5052 = write_session_db(tmp.path(), "ams5052_0001", 5_052, "CATA", 189, 0);
+        let directory = MdbRouteDirectory::from_databases(
+            "ams",
+            "ALL",
+            &[
+                declared(8_000, 1, "/AMS/DESI", desi_8000.to_str()),
+                declared(7_998, 1, "/AMS/DESI2", desi_7998.to_str()),
+                declared(5_052, 2, "/AMS/CATA", cata_5052.to_str()),
+                declared(7_000, 2, "/AMS/CATA-MISSING", None),
+            ],
+            TEMPLATE_DIR,
+        );
+
+        assert!(
+            directory.poll_generations().is_empty(),
+            "第一次见只记基线，不算变化"
+        );
+        assert_eq!(generation_pair(&directory, 8_000), Some((1, 37)));
+        assert_eq!(generation_pair(&directory, 7_998), Some((1, 5)));
+        assert_eq!(generation_pair(&directory, 5_052), Some((1, 189)));
+        assert_eq!(
+            generation_pair(&directory, 7_000),
+            None,
+            "没文件的库不进账本"
+        );
+        assert_eq!(directory.generations_epoch(), 3);
+        assert!(directory.poll_generations().is_empty(), "没动就没变化");
+
+        // 8000 SAVEWORK：会话 37 → 38，文件长了一页。
+        write_session_db(tmp.path(), "ams8000_0001", 8_000, "DESI", 38, 1);
+        let changes = directory.poll_generations();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        let change = &changes[0];
+        assert_eq!(
+            (change.dbnum, change.db_type.as_str(), change.kind),
+            (8_000, "DESI", GenerationChange::SessionAdvanced)
+        );
+        assert_eq!(change.path, desi_8000);
+        assert_eq!((change.from.generation, change.from.latest_sesno), (1, 37));
+        assert_eq!((change.to.generation, change.to.latest_sesno), (2, 38));
+        assert_eq!(
+            generation_pair(&directory, 7_998),
+            Some((1, 5)),
+            "7998 一动不动"
+        );
+        assert_eq!(directory.generations_epoch(), 4);
+
+        // 恢复了旧备份：会话号变小。
+        write_session_db(tmp.path(), "ams8000_0001", 8_000, "DESI", 30, 0);
+        let changes = directory.poll_generations();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0].kind, GenerationChange::RolledBack);
+        assert_eq!(
+            (changes[0].to.generation, changes[0].to.latest_sesno),
+            (3, 30)
+        );
+
+        // 路径不变、文件换了、会话号恰好相同：只有身份能分出来。
+        write_session_db(tmp.path(), "ams8000_0001", 8_000, "DESI", 30, 2);
+        let changes = directory.poll_generations();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(changes[0].kind, GenerationChange::FileReplaced);
+        assert_eq!(changes[0].to.generation, 4);
+
+        // 目录库的变化同样报出来（怎么处置是调用方的事）。
+        write_session_db(tmp.path(), "ams5052_0001", 5_052, "CATA", 190, 1);
+        let changes = directory.poll_generations();
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert_eq!(
+            (
+                changes[0].dbnum,
+                changes[0].db_type.as_str(),
+                changes[0].kind
+            ),
+            (5_052, "CATA", GenerationChange::SessionAdvanced)
+        );
+
+        // 两个库同一拍都变：各报一条，按 dbnum 升序。
+        write_session_db(tmp.path(), "ams7998_0001", 7_998, "DESI", 6, 1);
+        write_session_db(tmp.path(), "ams8000_0001", 8_000, "DESI", 31, 3);
+        let dbnums: Vec<u32> = directory
+            .poll_generations()
+            .iter()
+            .map(|change| change.dbnum)
+            .collect();
+        assert_eq!(dbnums, vec![7_998, 8_000]);
+
+        let snapshot = directory.generations();
+        assert_eq!(
+            snapshot
+                .iter()
+                .map(|(dbnum, entry)| (*dbnum, entry.generation))
+                .collect::<Vec<_>>(),
+            vec![(5_052, 2), (7_998, 2), (8_000, 5)]
+        );
+        assert_eq!(directory.generations_epoch(), 9);
+    }
+
+    /// 文件读不出来（删了、坏了）那一轮跳过、不算变化、账本不动；回来之后按身份 / 会话号照常判。
+    #[test]
+    fn unreadable_files_are_skipped_without_touching_the_ledger() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let desi = write_session_db(tmp.path(), "ams8000_0001", 8_000, "DESI", 37, 0);
+        let directory = MdbRouteDirectory::from_databases(
+            "ams",
+            "ALL",
+            &[declared(8_000, 1, "/AMS/DESI", desi.to_str())],
+            TEMPLATE_DIR,
+        );
+        assert!(directory.poll_generations().is_empty());
+
+        std::fs::remove_file(&desi).unwrap();
+        assert!(directory.poll_generations().is_empty(), "stat 不到：跳过");
+        assert_eq!(generation_pair(&directory, 8_000), Some((1, 37)));
+
+        std::fs::write(&desi, b"not a database at all").unwrap();
+        assert!(directory.poll_generations().is_empty(), "读不出头：跳过");
+        assert_eq!(generation_pair(&directory, 8_000), Some((1, 37)));
+
+        write_session_db(tmp.path(), "ams8000_0001", 8_000, "DESI", 38, 1);
+        let changes = directory.poll_generations();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].kind, GenerationChange::SessionAdvanced);
+        assert_eq!(generation_pair(&directory, 8_000), Some((2, 38)));
+    }
+
+    /// 克隆带走账本的快照，之后两边各记各的。
+    #[test]
+    fn cloning_copies_the_ledger_snapshot() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let desi = write_session_db(tmp.path(), "ams8000_0001", 8_000, "DESI", 37, 0);
+        let directory = MdbRouteDirectory::from_databases(
+            "ams",
+            "ALL",
+            &[declared(8_000, 1, "/AMS/DESI", desi.to_str())],
+            TEMPLATE_DIR,
+        );
+        directory.poll_generations();
+        let copy = directory.clone();
+        assert_eq!(generation_pair(&copy, 8_000), Some((1, 37)));
+        write_session_db(tmp.path(), "ams8000_0001", 8_000, "DESI", 38, 1);
+        assert_eq!(directory.poll_generations().len(), 1);
+        assert_eq!(generation_pair(&copy, 8_000), Some((1, 37)), "副本没跟着动");
+    }
+
+    #[test]
+    fn declared_without_file_is_listed_by_dbnum() {
+        let directory = directory();
+        assert!(directory.contains_dbnum(7_000));
+        assert!(directory.file_of(7_000).is_none());
+        assert!(!directory.contains_dbnum(999_999));
+        assert_eq!(
+            directory.declared_without_file().collect::<Vec<_>>(),
+            vec![(7_000, "/AMS/CATA2")]
         );
     }
 

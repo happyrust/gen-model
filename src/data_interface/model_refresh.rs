@@ -27,6 +27,32 @@ pub(crate) struct RootGenerationFailure {
 pub(crate) struct TargetedGenerationReport {
     pub completed: Vec<String>,
     pub failures: Vec<RootGenerationFailure>,
+    pub room_edges_written: usize,
+    pub rows_upserted: usize,
+    pub commits: usize,
+    pub max_transaction_bytes: usize,
+}
+
+/// 把逐根失败并回调用方给的根序。持久层允许同批部分成功，因此不能因为 failures 非空
+/// 就抹掉已经成功的根；调用方会把“不在 completed 也不在 failures”的根视为编排缺陷。
+fn report_from_failures(
+    roots: &[String],
+    failures: Vec<RootGenerationFailure>,
+) -> TargetedGenerationReport {
+    let failed = failures
+        .iter()
+        .map(|failure| failure.root.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let completed = roots
+        .iter()
+        .filter(|root| !failed.contains(root.as_str()))
+        .cloned()
+        .collect();
+    TargetedGenerationReport {
+        completed,
+        failures,
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
@@ -102,19 +128,40 @@ impl ModelRefreshPolicy {
     }
 
     pub(crate) async fn generate_roots_report(
+        mgr: &AiosDBManager,
+        roots: &[String],
+    ) -> anyhow::Result<TargetedGenerationReport> {
+        Self::generate_roots_report_on_source(mgr, roots, None, None).await
+    }
+
+    /// 与 [`Self::generate_roots_report`] 同一条执行/持久化流水线，但设计文件严格钉在
+    /// 调用方已经冻结的身份与会话。整库即时任务用它保证「枚举根的文件」与
+    /// 「真正生成模型的文件」是同一份；不得在后台 worker 里退回 `from_current()`。
+    pub(crate) async fn generate_roots_report_from_frozen_source(
+        mgr: &AiosDBManager,
+        roots: &[String],
+        source: &crate::data_interface::frozen_source::FrozenSource,
+        room_generation: Option<&str>,
+    ) -> anyhow::Result<TargetedGenerationReport> {
+        Self::generate_roots_report_on_source(mgr, roots, Some(source), room_generation).await
+    }
+
+    async fn generate_roots_report_on_source(
         _mgr: &AiosDBManager,
         roots: &[String],
+        explicit_source: Option<&crate::data_interface::frozen_source::FrozenSource>,
+        expected_room_generation: Option<&str>,
     ) -> anyhow::Result<TargetedGenerationReport> {
         if roots.is_empty() {
             return Ok(TargetedGenerationReport::default());
         }
         let dbnum = E3dModelService::dbnum_for_roots(roots).await?;
-        // 「只写内存」作用域（plan 2026-09-06 §8 R2）：这个库在 rocksdb 里还没准备好（基线未落
-        // 或初始化发布 run 在飞），按需请求直接从文件生成进进程内投影、由 API 供数。三道门
-        // 对它都不适用——`require_model_generation` 挡的是 durable 工作与启动全量，
-        // `wait_for_dbnum` 等的是持久层上那个 run，`persist_root` 写的是持久层；这一档三样
-        // 都不碰。持久由初始化 run 负责，两个写者只会撞乐观事务（Q8）。
+        // memory 读源作用域（plan 2026-09-06 §8 R2）不碰 durable 权威库，也不等 ingest
+        // 初始化写者；发布目标另判：ingest fallback 只留投影，read-through 的 kv-mem
+        // 是本进程正式 process store，仍走逐根模型行 + 房间边 + 回执事务。
         let memory_only = crate::data_interface::model_read_route::memory_only_for(dbnum);
+        let publication_policy =
+            crate::data_interface::model_read_route::publication_policy(memory_only);
         if !memory_only {
             crate::data_interface::initialization_phase::require_model_generation()?;
         }
@@ -136,21 +183,43 @@ impl ModelRefreshPolicy {
         crate::data_interface::batch_worker::set_active_task_stage("model_generate");
         // ADR-071 D1：没有初始化 run、不等 ACK、不等别的写者——同一 dbnum 只有本任务一个写者，
         // 生成完就地把行写进库。冻结源在手（任务窗口内）就钉它那一版文件，否则取文件最新。
-        let service = match crate::data_interface::batch_worker::active_frozen_source()? {
+        let service = match explicit_source {
             Some(source) => {
                 anyhow::ensure!(
                     source.dbnum() as u32 == dbnum,
-                    "active file round dbnum {} cannot generate roots owned by dbnum {dbnum}",
+                    "explicit frozen source dbnum {} cannot generate roots owned by dbnum {dbnum}",
                     source.dbnum()
                 );
-                E3dModelService::from_frozen_source(&source).await?
+                E3dModelService::from_frozen_source(source).await?
             }
-            None => E3dModelService::from_current().await?,
+            None => match crate::data_interface::batch_worker::active_frozen_source()? {
+                Some(source) => {
+                    anyhow::ensure!(
+                        source.dbnum() as u32 == dbnum,
+                        "active file round dbnum {} cannot generate roots owned by dbnum {dbnum}",
+                        source.dbnum()
+                    );
+                    E3dModelService::from_frozen_source(&source).await?
+                }
+                None => E3dModelService::from_current().await?,
+            },
         };
         let persisted = service
             .generate_and_persist_roots(dbnum, roots, failure_policy)
             .await?;
-        if persisted.failed == 0 {
+        let generation_failures = persisted
+            .failed_roots
+            .iter()
+            .map(|(root, error)| RootGenerationFailure {
+                root: format!("{}/{}", root.word0, root.word1),
+                error: error.clone(),
+            })
+            .collect::<Vec<_>>();
+        let generation_failed_roots = generation_failures
+            .iter()
+            .map(|failure| failure.root.clone())
+            .collect::<std::collections::HashSet<_>>();
+        if persisted.failed == 0 || !generation_failures.is_empty() {
             // 读透形态（`data_face = read-through`）：新生成的每根在**发布模型行之前**先把
             // 子树（DFS 访问名单 ∪ 祖先链）的数据面终态写透进 `pe` / `ATT_*` / `pe_owner`
             // ——plant-ui 拿到 ensure 回执后读模型行时 `in.owner` 已经在。生成服务只报名单
@@ -177,6 +246,7 @@ impl ModelRefreshPolicy {
                                     error: format!("durable mirror source unavailable: {error:#}"),
                                 })
                                 .collect(),
+                            ..Default::default()
                         });
                     }
                 }
@@ -186,7 +256,8 @@ impl ModelRefreshPolicy {
             // CATA 依赖块（plan 2026-09-06 §3 D6 (c)）：摄入 + 落库的形态下，每根发布前把它子树
             // （e3d-model DFS `visited`）依赖的目录链元素 Fresh 入库——服务 ADR-056 N7 下 `pe` 零行的库
             // 走按需 ensure 时属性面板也有目录属性可读。独立于模型发布事务，失败只 warning、不拦发布
-            // （ADR-056 D1 的对偶：依赖块也不拦模型）。只写内存的库不落任何东西。
+            // （ADR-056 D1 的对偶：依赖块也不拦模型）。memory 路由不摄入属性/目录依赖；
+            // read-through process store 只接模型行、房间边与根回执。
             let dependency_source = if !memory_only
                 && !crate::options::data_face().is_read_through()
                 && crate::options::store_mode().is_durable()
@@ -211,12 +282,35 @@ impl ModelRefreshPolicy {
             // 等别人刷、不等 ACK；落不进去的那些根算失败——投影在内存里是对的，但 Plant UI 看不见的
             // 东西不能算完成。
             //
-            // 房间计算器在这里**冻一次**（ADR-073 D1 硬约束：任务期间不换代），整批根共用；常驻模型
-            // 不可用（在建 / 降级）时本批每根都算「房间算不出来」= 该根失败，下一次任务重生成。
-            let rooms = crate::fast_model::model_db_adapter::frozen_room_calculator();
-            let mut failures = Vec::new();
+            // 房间计算器在这里**冻一次**（ADR-073 D1 硬约束：任务期间不换代），整批根共用。
+            // 开关关闭时得到 None：模型照常持久化、不写新房间边；开关开启但常驻模型不可用
+            // （在建 / 降级）时才把本批每根记成「房间算不出来」，下一次任务重生成。
+            let rooms = if publication_policy.uses_process_store() {
+                crate::fast_model::model_db_adapter::frozen_room_calculator().and_then(|rooms| {
+                    if let Some(expected) = expected_room_generation {
+                        let actual = rooms
+                            .as_ref()
+                            .map(|calculator| calculator.resident_generation());
+                        anyhow::ensure!(
+                            actual == Some(expected),
+                            "room resident generation changed before model publication: expected {expected}, actual {actual:?}"
+                        );
+                    }
+                    Ok(rooms)
+                })
+            } else {
+                Ok(None)
+            };
+            let mut failures = generation_failures;
+            let mut room_edges_written = 0usize;
+            let mut rows_upserted = 0usize;
+            let mut commits = 0usize;
+            let mut max_transaction_bytes = 0usize;
             let mut publishable: Vec<(String, e3d_io::refno::RefNo)> = Vec::new();
             for root in roots {
+                if generation_failed_roots.contains(root) {
+                    continue;
+                }
                 let refno = crate::fast_model::e3d_model_service::parse_refno(root)?;
                 if let (Some(set), Some(visited)) = (
                     dependency_source.as_ref(),
@@ -280,8 +374,9 @@ impl ModelRefreshPolicy {
                         continue;
                     }
                 }
-                // 只写内存的库不落 rocksdb（R2 / Q8）：投影在内存里、`/model/records` 从那儿供数。
-                if memory_only {
+                // ingest 初始化在飞时仍只留投影；read-through 的 kv-mem 是正式 process store，
+                // 必须继续走逐根模型行 + 房间边 + 回执事务。
+                if !publication_policy.uses_process_store() {
                     continue;
                 }
                 if !crate::options::data_face().is_read_through()
@@ -326,8 +421,12 @@ impl ModelRefreshPolicy {
                     }
                 };
                 if let Some(rows) = batched.rows.as_ref() {
+                    room_edges_written = batched.room_edges;
+                    rows_upserted = rows.upserted;
+                    commits = rows.commits;
+                    max_transaction_bytes = batched.max_transaction_bytes;
                     println!(
-                        "[model-persist] dbnum={dbnum} roots={} groups={} rows={} removed={} receipts={} room_edges={} commits={} failed_roots={} elapsed_ms={}",
+                        "[model-persist] dbnum={dbnum} roots={} groups={} rows={} removed={} receipts={} room_edges={} commits={} max_transaction_bytes={} failed_roots={} elapsed_ms={}",
                         refnos.len(),
                         batched.groups,
                         rows.upserted,
@@ -335,6 +434,7 @@ impl ModelRefreshPolicy {
                         rows.receipts,
                         batched.room_edges,
                         rows.commits,
+                        batched.max_transaction_bytes,
                         batched.failed.len(),
                         started.elapsed().as_millis()
                     );
@@ -357,16 +457,12 @@ impl ModelRefreshPolicy {
                     }
                 }
             }
-            if !failures.is_empty() {
-                return Ok(TargetedGenerationReport {
-                    completed: Vec::new(),
-                    failures,
-                });
-            }
-            Ok(TargetedGenerationReport {
-                completed: roots.to_vec(),
-                failures: Vec::new(),
-            })
+            let mut report = report_from_failures(roots, failures);
+            report.room_edges_written = room_edges_written;
+            report.rows_upserted = rows_upserted;
+            report.commits = commits;
+            report.max_transaction_bytes = max_transaction_bytes;
+            Ok(report)
         } else {
             Ok(TargetedGenerationReport {
                 completed: Vec::new(),
@@ -380,6 +476,7 @@ impl ModelRefreshPolicy {
                         ),
                     })
                     .collect(),
+                ..Default::default()
             })
         }
     }
@@ -532,6 +629,21 @@ impl ModelRefreshPolicy {
 mod tests {
     use super::*;
 
+    #[test]
+    fn a_failed_root_does_not_erase_successful_peers_from_the_report() {
+        let roots = vec!["24383/10".into(), "24383/20".into(), "24383/30".into()];
+        let report = report_from_failures(
+            &roots,
+            vec![RootGenerationFailure {
+                root: "24383/20".into(),
+                error: "room membership failed".into(),
+            }],
+        );
+        assert_eq!(report.completed, vec!["24383/10", "24383/30"]);
+        assert_eq!(report.failures.len(), 1);
+        assert_eq!(report.failures[0].root, "24383/20");
+    }
+
     /// ADR-056 D8-A（spec 035 T121）：CATA 必需依赖门 `prepare_required_dependencies`
     /// 与它的停滞看门狗整个退场——模型面经 `E3dDbResolver` 从文件读 CATA，
     /// `cata_closure` 入 Surreal 只服务 `ref_rev` / UI（补偿队列，T126）。
@@ -614,6 +726,58 @@ mod tests {
                 .count(),
             1,
             "整批根只走一次跨根合块落库"
+        );
+    }
+
+    #[test]
+    fn read_through_process_store_does_not_skip_model_and_room_publication() {
+        let source = include_str!("model_refresh.rs").replace("\r\n", "\n");
+        let body = generate_roots_report_body(&source);
+        assert!(
+            body.contains("model_read_route::publication_policy(memory_only)"),
+            "read/write routing must be split before deciding whether to publish"
+        );
+        assert!(
+            !body.contains("if memory_only {\n                    continue;\n                }"),
+            "memory-routed read-through uses the volatile process store; it must not skip publication"
+        );
+        assert!(
+            body.contains("model_db_adapter::persist_roots_batched("),
+            "the volatile process store must reuse the same per-root model+room transaction"
+        );
+    }
+
+    #[test]
+    fn one_bad_generation_root_does_not_charge_every_sibling_in_the_dbnum() {
+        let source = include_str!("model_refresh.rs").replace("\r\n", "\n");
+        let body = generate_roots_report_body(&source);
+        assert!(
+            body.contains("let generation_failures = persisted") && body.contains(".failed_roots")
+        );
+        assert!(body.contains("generation_failed_roots.contains(root)"));
+        assert!(
+            body.contains("persisted.failed == 0 || !generation_failures.is_empty()"),
+            "identified bad roots must leave successful siblings on the publication path"
+        );
+    }
+
+    #[test]
+    fn explicit_frozen_source_precedes_task_context_and_current_files() {
+        let source = include_str!("model_refresh.rs").replace("\r\n", "\n");
+        let body = generate_roots_report_body(&source);
+        let explicit = body
+            .find("match explicit_source")
+            .expect("source selection must start with the explicit task snapshot");
+        let task_context = body
+            .find("active_frozen_source()")
+            .expect("normal data tasks still consume their task-local source");
+        let current = body
+            .find("E3dModelService::from_current()")
+            .expect("ordinary on-demand calls retain the current-source fallback");
+        assert!(explicit < task_context && task_context < current);
+        assert!(
+            body.contains("E3dModelService::from_frozen_source(source).await?"),
+            "the explicit source must be passed to the generator unchanged"
         );
     }
 

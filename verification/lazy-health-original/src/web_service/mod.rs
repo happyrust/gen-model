@@ -1,0 +1,908 @@
+//! Web 服务（REST + WebSocket），面向前端提供触发生成与增量更新信息。
+//!
+//! 设计与评审结论见 `docs/specs/web-service-api.md`：
+//! - 监听地址优先取 `http_api_addr`，缺失时兼容 `server_release_ip`，两者都空时只监听本机
+//!   `127.0.0.1:9099`；
+//! - 领域结构体 JSON 原样透传，服务层零领域逻辑；
+//! - 任务进度经 WebSocket 广播，任务记录仅内存保留（durable 语义由水位 + pending 表承担）。
+
+pub mod events;
+mod handlers;
+/// MBD 管道尺寸标注端点（`/api/mbd/v2/pipe/{refno}`，前端契约路径，不在 `/api/v1` 下）。
+pub mod mbd;
+pub mod mesh_glb;
+/// 配置向导（`/setup.html` + `/api/v1/setup/*`）与「设置模式」最小启动臂。
+pub mod setup;
+mod ws;
+
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use axum::Router;
+use axum::http::{HeaderValue, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::routing::{delete, get, post};
+use tower_http::cors::{Any, CorsLayer};
+use tower_http::trace::TraceLayer;
+
+use crate::data_interface::direct_tree::DirectTreeProvider;
+use crate::data_interface::element_attributes::ElementAttributeProvider;
+use crate::data_interface::task_registry::TaskRegistry;
+use crate::data_interface::tidb_manager::AiosDBManager;
+use crate::query_service::{QueryError, QueryService};
+
+const DEFAULT_HTTP_API_ADDR: &str = "127.0.0.1:9099";
+
+/// HTTP 监听地址的兼容解析。
+///
+/// `http_api_addr` 是当前配置键；老现场只有 `server_release_ip`。服务进程不能因为新键
+/// 缺失而让 Web task 立即成功返回——read-through 主流程会随之正常退出，看起来既不像
+/// 配置错也不像崩溃。两项都没给时只开放回环默认值，不意外扩大网络暴露面。
+pub(crate) fn effective_http_api_addr(configured: Option<&str>, server_release_ip: &str) -> String {
+    configured
+        .map(str::trim)
+        .filter(|addr| !addr.is_empty())
+        .or_else(|| {
+            let legacy = server_release_ip.trim();
+            (!legacy.is_empty()).then_some(legacy)
+        })
+        .unwrap_or(DEFAULT_HTTP_API_ADDR)
+        .to_owned()
+}
+
+/// The immutable project identity served by this process.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ServiceIdentity {
+    pub project: String,
+    pub mdb: String,
+    pub namespace: String,
+}
+
+impl ServiceIdentity {
+    pub fn new(project: impl Into<String>, mdb: &str, namespace: impl Into<String>) -> Self {
+        Self {
+            project: project.into().trim().to_owned(),
+            mdb: aios_core::helper::to_e3d_name(mdb.trim()).into_owned(),
+            namespace: namespace.into().trim().to_owned(),
+        }
+    }
+
+    /// Missing values preserve the legacy “use server defaults” contract.
+    /// Explicit values must identify this process before any scan or write starts.
+    pub fn validate(
+        &self,
+        project: Option<&str>,
+        mdb: Option<&str>,
+        namespace: Option<&str>,
+    ) -> Result<(), ApiError> {
+        let requested_mdb =
+            mdb.map(|value| aios_core::helper::to_e3d_name(value.trim()).into_owned());
+        for (label, requested, expected) in [
+            ("project", project.map(str::trim), self.project.as_str()),
+            ("mdb", requested_mdb.as_deref(), self.mdb.as_str()),
+            (
+                "namespace",
+                namespace.map(str::trim),
+                self.namespace.as_str(),
+            ),
+        ] {
+            if let Some(requested) = requested
+                && requested != expected
+            {
+                return Err(ApiError::identity_mismatch(format!(
+                    "请求的 {label}={requested} 与模型服务 {label}={expected} 不一致"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// 各 handler 共享的服务状态。
+///
+/// 任务注册表是进程级单例（`TaskRegistry::global()`）：队列真身住在 feature
+/// 无关层，`web_service` 只是它的 HTTP 视图（rollout 第九节第 4 条）。
+#[derive(Clone)]
+pub struct AppState {
+    pub mgr: Arc<AiosDBManager>,
+    pub tasks: &'static TaskRegistry,
+    pub identity: ServiceIdentity,
+    /// 启动时资源目录是否存在（spec §4.1 的 `static_assets`）。缺失不是故障：
+    /// `/assets` 返回 404，REST/WS 照常，这个旗子让 `/health` 能把降级说出来。
+    pub static_assets: bool,
+    /// 前端静态根。`/ops.html` 每次请求都在这里找一次磁盘副本，找不到才用内嵌的
+    /// ——所以存的是目录而不是启动时定死的结论，热替换才谈得上「不重启」。
+    pub ui_root: PathBuf,
+    /// 运行期模型资源根。浏览器包里的 `/assets` 请求仍优先从这里取，以便模型网格
+    /// 与站点配置无需重编服务即可更新。
+    pub asset_root: PathBuf,
+    pub queries: Arc<QueryService>,
+    /// e3d-io backed tree reader. It stays lazy until a tree endpoint is used.
+    pub direct_tree: DirectTreeProvider,
+    /// Complete file-side attributes and their bounded compatibility-backup queue.
+    pub element_attributes: ElementAttributeProvider,
+}
+
+/// 统一错误响应：`{ "code": ..., "message": ..., "detail": null }`（spec §3）。
+#[derive(Debug)]
+pub struct ApiError {
+    pub status: StatusCode,
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl ApiError {
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::BAD_REQUEST,
+            code: "bad_request",
+            message: message.into(),
+        }
+    }
+
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::NOT_FOUND,
+            code: "not_found",
+            message: message.into(),
+        }
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "conflict",
+            message: message.into(),
+        }
+    }
+
+    pub fn initialization_not_ready(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
+            code: "initialization_not_ready",
+            message: message.into(),
+        }
+    }
+
+    pub fn service_unavailable(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            code: "timeout",
+            message: message.into(),
+        }
+    }
+
+    /// 容器（WORL / SITE / ZONE）不能做生成根。单列一个 code 是给客户端用的：
+    /// 它拿到这条该展开一层、对子节点逐个 ensure，而不是把这次显示当成失败。
+    pub fn container(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "container",
+            message: message.into(),
+        }
+    }
+
+    /// 请求本身没错，是数据的前置条件不满足。
+    pub fn precondition(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "precondition",
+            message: message.into(),
+        }
+    }
+
+    pub fn identity_mismatch(message: impl Into<String>) -> Self {
+        Self {
+            status: StatusCode::UNPROCESSABLE_ENTITY,
+            code: "identity_mismatch",
+            message: message.into(),
+        }
+    }
+
+    pub fn from_query(error: QueryError) -> Self {
+        let (status, code) = match error.code {
+            "INVALID_ARGUMENT" => (StatusCode::BAD_REQUEST, "invalid_argument"),
+            "NOT_FOUND" => (StatusCode::NOT_FOUND, "not_found"),
+            "NO_RENDERABLE_GEOMETRY" => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "no_renderable_geometry")
+            }
+            "ATTR_NOT_APPLICABLE" => (StatusCode::UNPROCESSABLE_ENTITY, "attr_not_applicable"),
+            "CHAIN_INCOMPLETE" => (StatusCode::UNPROCESSABLE_ENTITY, "chain_incomplete"),
+            "DB_UNAVAILABLE" => (StatusCode::SERVICE_UNAVAILABLE, "db_unavailable"),
+            "E3D_SESSION_FAILED" => (StatusCode::SERVICE_UNAVAILABLE, "e3d_session_failed"),
+            "TIMEOUT" => (StatusCode::GATEWAY_TIMEOUT, "timeout"),
+            "PARSE_ERROR" => (StatusCode::INTERNAL_SERVER_ERROR, "parse_error"),
+            _ => (StatusCode::INTERNAL_SERVER_ERROR, "internal"),
+        };
+        Self {
+            status,
+            code,
+            message: error.message,
+        }
+    }
+
+    /// 领域层 `anyhow::Error` 的统一映射：元素不存在归为 404，其余 500。
+    ///
+    /// 「不存在」有三种：库里索引不到这个 refno（`NoSuchElement`）；refno 解出的 dbnum 在本
+    /// MDB 与依赖目录里都没有（`DbNotInMdb`）；refno 本身非法、指不到任何库（`InvalidRefNo`）。
+    /// 后两种是确定性的「不在这个 MDB」，不是暂时解析不到，`on_demand_db` /
+    /// `element_attributes` 也一直把它们一并当 missing。此前 `tree/children?refno=1/1` 这类
+    /// 请求回 500 `internal`，客户端只能当服务端故障重试；现在与 `NoSuchElement` 同码 404，
+    /// 可负缓存。
+    ///
+    /// 曾经还有一支按错误文本里有没有 `sync_live` 判 422 的——那个开关 2026-09-07 随
+    /// ADR-058 D8 退役，没有任何一处再产出这种文本，分支跟着删了。真要报前置条件不满足，
+    /// 用 [`ApiError::precondition`]，别再回到按文本猜的路上。
+    pub fn from_domain(error: anyhow::Error) -> Self {
+        let message = format!("{error:#}");
+        if matches!(
+            error.downcast_ref::<crate::data_interface::direct_store::DirectStoreError>(),
+            Some(
+                crate::data_interface::direct_store::DirectStoreError::NoSuchElement { .. }
+                    | crate::data_interface::direct_store::DirectStoreError::DbNotInMdb { .. }
+                    | crate::data_interface::direct_store::DirectStoreError::InvalidRefNo { .. }
+            )
+        ) {
+            Self::not_found(message)
+        } else {
+            Self {
+                status: StatusCode::INTERNAL_SERVER_ERROR,
+                code: "internal",
+                message,
+            }
+        }
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        let body = serde_json::json!({
+            "code": self.code,
+            "message": self.message,
+            "detail": null,
+        });
+        (self.status, axum::Json(body)).into_response()
+    }
+}
+
+/// 按有效地址启动 Web 服务；新键缺失时兼容旧键，再缺失则提供本机默认访问。
+pub async fn serve_if_configured(mgr: Arc<AiosDBManager>) -> anyhow::Result<()> {
+    let ext = crate::get_db_option_ext();
+    let addr = effective_http_api_addr(ext.http_api_addr.as_deref(), &ext.server_release_ip);
+    if ext
+        .http_api_addr
+        .as_deref()
+        .is_none_or(|configured| configured.trim().is_empty())
+    {
+        if ext.server_release_ip.trim().is_empty() {
+            println!("http_api_addr 未配置且 server_release_ip 为空，使用默认本机监听 {addr}");
+        } else {
+            println!("http_api_addr 未配置，兼容使用 server_release_ip 监听 {addr}");
+        }
+    }
+    let public_addr = public_http_addr(&addr, ext.http_public_addr.as_deref());
+    serve(mgr, &addr, &public_addr, ext.http_api_cors.clone()).await
+}
+
+/// 在 `addr` 上启动服务并阻塞运行（正常情况下不返回）。
+pub async fn serve(
+    mgr: Arc<AiosDBManager>,
+    addr: &str,
+    public_addr: &str,
+    cors_origins: Option<Vec<String>>,
+) -> anyhow::Result<()> {
+    let db_option = aios_core::get_db_option();
+    let ui_root = PathBuf::from(
+        std::env::var("PLANT_UI_WEB_ROOT").unwrap_or_else(|_| "../plant-ui/web".into()),
+    );
+    let asset_root = resolve_asset_root();
+    // 静态前端资源是可选能力（spec §7）：目录缺失只告警一次，静态路径返回 404，
+    // REST/WS 照常启动，不得因此终止服务。这里曾经是 `anyhow::bail!`，而
+    // `serve_if_configured` 被 spawn 包着、错误只有一句 stderr——真实症状是队列在跑、
+    // 数据在进，HTTP 端口从头到尾没起来，界面只会说「读不到任务队列」。
+    let static_assets = asset_root.is_dir();
+    if static_assets {
+        println!(
+            "Web 资产目录：{}（其内容通过 /assets 公开）",
+            asset_root.display()
+        );
+    } else {
+        let message = format!(
+            "Web 资产目录不存在或不是目录：{}（/assets 将返回 404，REST/WS 照常启动；\
+             可用 PLANT_ASSET_ROOT 指定）",
+            asset_root.display()
+        );
+        log::warn!("{message}");
+        println!("[warn] {message}");
+    }
+    let identity = ServiceIdentity::new(
+        db_option.project_name.clone(),
+        &db_option.mdb_name,
+        db_option.surreal_ns.clone(),
+    );
+    let queries = Arc::new(QueryService::for_identity(
+        &std::env::current_dir()?,
+        &identity.project,
+        &identity.mdb,
+    )?);
+    let direct_tree = DirectTreeProvider::new(identity.project.clone(), identity.mdb.clone());
+    let element_attributes =
+        ElementAttributeProvider::new(identity.project.clone(), identity.mdb.clone());
+    if crate::options::data_face().is_read_through()
+        && let Err(error) = element_attributes.get().await
+    {
+        // Keep the HTTP service alive so health and structured endpoint errors
+        // remain available; the provider retries atomically on the next call.
+        log::error!("read-through attribute/UDA prewarm failed: {error:#}");
+    }
+    let state = AppState {
+        mgr,
+        tasks: TaskRegistry::global(),
+        identity,
+        static_assets,
+        ui_root: ui_root.clone(),
+        asset_root: asset_root.clone(),
+        queries,
+        direct_tree,
+        element_attributes,
+    };
+
+    // 面板有两份，说清这一次用的是哪一份。两份不一致时人只会相信屏幕上那一份，
+    // 而它到底从哪儿来，只有这里和响应头 `x-ops-panel-source` 讲得出。
+    let panel = ui_root.join("ops.html");
+    if panel.is_file() {
+        println!("运维面板：{}（磁盘副本，优先于内嵌版）", panel.display());
+    } else {
+        println!(
+            "运维面板：内嵌副本（http://{public_addr}/ops.html；在 {} 放一份即可覆盖，不必重编）",
+            panel.display()
+        );
+    }
+
+    let app = Router::new()
+        .route("/api/v1/health", get(handlers::health))
+        .route("/api/v1/update/preview", post(handlers::update_preview))
+        .route("/api/v1/update/execute", post(handlers::update_execute))
+        // `/update/pending-units`（含 `/retry`）随 pending 表退了（ADR-072 D5，spec §7 退役格清单）。
+        .route("/api/v1/tasks", get(handlers::tasks_list))
+        .route("/api/v1/tasks/{id}", get(handlers::task_get))
+        .route(
+            "/api/v1/model/subtree",
+            delete(handlers::model_delete_subtree),
+        )
+        .route("/api/v1/model/ensure", post(handlers::model_ensure))
+        .route("/api/v1/model/records", post(handlers::model_records))
+        .route(
+            "/api/v1/element/attributes",
+            post(handlers::element_attributes),
+        )
+        .route("/api/v1/element/ensure", post(handlers::element_ensure))
+        .route(
+            "/api/v1/model/history/generate",
+            post(handlers::model_history_generate),
+        )
+        .route(
+            "/api/v1/model/history/query",
+            post(handlers::model_history_query),
+        )
+        .route(
+            "/api/v1/model/history/{snapshot_key}",
+            get(handlers::model_history_get).delete(handlers::model_history_delete),
+        )
+        .route(
+            "/api/v1/dbnums/{dbnum}/model/rebuild",
+            post(handlers::dbnum_model_rebuild),
+        )
+        .route(
+            "/api/v1/dbnums/{dbnum}/model/ensure",
+            post(handlers::dbnum_model_ensure),
+        )
+        .route(
+            "/api/v1/dbnums/{dbnum}/model/roots",
+            get(handlers::dbnum_model_roots),
+        )
+        .route("/api/v1/query", post(handlers::query))
+        .route("/api/v1/search", get(handlers::search))
+        .route("/api/v1/tree/roots", get(handlers::tree_roots))
+        .route("/api/v1/tree/children", get(handlers::tree_children))
+        .route("/api/v1/tree/ancestors", get(handlers::tree_ancestors))
+        // 单位网格的 GLB 形态。与下面 `/assets` 的 ServeDir 是同一份 `.mesh` 的两种口径：
+        // 那条给 plant-ui（原生读 rkyv），这条给浏览器（只认 glTF）。
+        .route("/api/v1/meshes/{file}", get(handlers::mesh_glb))
+        .route("/api/v1/dbnums", get(handlers::dbnums))
+        .route(
+            "/api/v1/dbnums/{dbnum}/data",
+            delete(handlers::dbnum_fast_delete),
+        )
+        // 人工「重新解析」（2026-09-10 重新计算契约 C3）：排一条整库重建批次，清库在 worker
+        // 冻结点做。与上面那条运维快删是两回事——这条不要求先暂停队列。
+        .route(
+            "/api/v1/dbnums/{dbnum}/data/reinitialize",
+            post(handlers::dbnum_data_reinitialize),
+        )
+        .route(
+            "/api/v1/dbnums/{dbnum}/data/above/{watermark}",
+            get(handlers::dbnum_prune_above_preview),
+        )
+        .route("/api/v1/trace", get(handlers::trace))
+        // 落盘错误事件。`/tasks` 那份回执更全但活不过重启，这两条读 logs/，
+        // 面板靠它们回答「上一次为什么失败」。分界就是名字：`batch-failures`
+        // 只给同名那一族（失败 + park），`error-log` 把队列停滞也并进同一条线。
+        .route("/api/v1/batch-failures", get(handlers::batch_failures))
+        .route("/api/v1/error-log", get(handlers::error_log))
+        .route("/api/v1/queue", get(handlers::queue_snapshot))
+        .route("/api/v1/queue/pause", post(handlers::queue_pause))
+        .route("/api/v1/queue/resume", post(handlers::queue_resume))
+        .route("/api/v1/ws", get(ws::ws_handler))
+        // MBD 管道尺寸标注：路径是 plant3d-web `mbdV2Api.ts` 写死的契约（不在 /api/v1 下），
+        // 返回冻结的 V2 `MbdV2PipeData`；状态语义见 `web_service::mbd`。
+        .route("/api/mbd/v2/pipe/{refno}", get(mbd::mbd_v2_pipe))
+        // 显式路由压过下面的 ServeDir 兜底：磁盘上没有这个文件时也要有面板，
+        // 而它自己会先去 ServeDir 同一个目录里找一次，所以有文件时结果不变。
+        .route("/ops.html", get(handlers::ops_panel))
+        // 首页过首跑闸：哨兵 `.first-run-pending` 在场时 302 到 /setup.html，
+        // 不在场时原样交给 plant-ui 静态兜底（向导完成删哨兵，无需重启即恢复）。
+        .route("/", get(setup::root_gate))
+        // 完整 plant-ui WASM 包编译进当前服务；同路径的磁盘副本仍优先，便于现场替换
+        // 配置、网格和前端包。API 路由都在 fallback 之前注册，不会被静态处理吞掉。
+        .fallback(get(handlers::plant_ui_web))
+        .layer(build_cors(cors_origins))
+        .layer(TraceLayer::new_for_http())
+        .with_state(state);
+    // setup 面（配置读写 / 探测 / 重启 / /setup.html）带自己的小状态，正常模式在这里
+    // 合进来；设置模式（lib.rs 最小启动臂）单独用它成军。回环闸在 handler 内按对端判。
+    let bound_port = addr
+        .parse::<std::net::SocketAddr>()
+        .ok()
+        .map(|parsed| parsed.port());
+    let app = app.merge(setup::router(setup::SetupCtx::new(
+        "normal",
+        ui_root.clone(),
+        bound_port,
+    )));
+
+    // 交接窗口内重试绑定：restart 口的父进程还有零点几秒才交出端口。
+    let listener = setup::bind_with_handoff(addr).await?;
+    let ui_url = plant_ui_url(public_addr);
+    println!("plant-ui 网页: {ui_url}");
+    maybe_open_plant_ui(&ui_url);
+    println!(
+        "Web 服务已启动: 监听 http://{addr}/api/v1；对外 http://{public_addr}/api/v1 \
+         （http_api_addr / http_public_addr）"
+    );
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .await?;
+    Ok(())
+}
+
+pub(crate) fn public_http_addr(bind_addr: &str, configured: Option<&str>) -> String {
+    configured
+        .map(str::trim)
+        .filter(|addr| !addr.is_empty() && addr.parse::<std::net::SocketAddr>().is_ok())
+        .map(str::to_owned)
+        .unwrap_or_else(|| setup::browser_facing(bind_addr))
+}
+
+fn plant_ui_url(public_addr: &str) -> String {
+    format!("http://{public_addr}/")
+}
+
+const OPEN_BROWSER_ENV: &str = "AIOS_OPEN_BROWSER";
+
+fn parse_open_browser(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn packaged_runtime_layout(root: &Path) -> bool {
+    root.join("DbOption.toml").is_file() && root.join("web/pkg/plant_ui_app_bg.wasm").is_file()
+}
+
+fn should_open_plant_ui() -> bool {
+    if let Ok(value) = std::env::var(OPEN_BROWSER_ENV)
+        && let Some(enabled) = parse_open_browser(&value)
+    {
+        return enabled;
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf))
+        .is_some_and(|root| packaged_runtime_layout(&root))
+}
+
+/// 打包后的 Windows 运行包直接启动 `aios-database.exe` 时，默认拉起 plant-ui。
+///
+/// 开发构建与服务器部署不在包布局里，默认不打开；显式
+/// `AIOS_OPEN_BROWSER=1|0` 可双向覆盖。启动脚本自己负责等健康后打开页面，因此会给
+/// 子进程设置 `AIOS_OPEN_BROWSER=0`，避免同一次启动弹两个标签页。
+pub(crate) fn maybe_open_plant_ui(url: &str) {
+    if !should_open_plant_ui() {
+        return;
+    }
+    let url = url.to_owned();
+    let _ = std::thread::Builder::new()
+        .name("open-plant-ui".into())
+        .spawn(move || {
+            // listener 已经绑定，但 axum::serve 还差一次调度；稍等再交给浏览器。
+            std::thread::sleep(std::time::Duration::from_millis(350));
+            if let Err(error) = open_system_browser(&url) {
+                eprintln!("[warn] 无法自动打开 plant-ui（{url}）：{error}");
+            }
+        });
+}
+
+#[cfg(target_os = "windows")]
+fn open_system_browser(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("cmd.exe")
+        .args(["/C", "start", "", url])
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(target_os = "macos")]
+fn open_system_browser(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn open_system_browser(url: &str) -> std::io::Result<()> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+}
+
+fn resolve_asset_root() -> PathBuf {
+    if let Some(configured) = std::env::var_os("PLANT_ASSET_ROOT")
+        .filter(|path| !path.to_string_lossy().trim().is_empty())
+    {
+        return configured.into();
+    }
+    if let Ok(executable) = std::env::current_exe()
+        && let Some(executable_dir) = executable.parent()
+    {
+        let packaged = executable_dir
+            .parent()
+            .map(|root| root.join("backend/assets"));
+        for candidate in [Some(executable_dir.join("assets")), packaged]
+            .into_iter()
+            .flatten()
+        {
+            if candidate.is_dir() {
+                return candidate;
+            }
+        }
+    }
+    "assets".into()
+}
+
+/// CORS 策略：未配置或包含 `*` 时放开（开发期）；否则按 origin 白名单。
+fn build_cors(origins: Option<Vec<String>>) -> CorsLayer {
+    match origins {
+        None => CorsLayer::permissive(),
+        Some(list) if list.iter().any(|o| o == "*") => CorsLayer::permissive(),
+        Some(list) => {
+            let parsed: Vec<HeaderValue> = list
+                .iter()
+                .filter_map(|o| o.parse::<HeaderValue>().ok())
+                .collect();
+            CorsLayer::new()
+                .allow_origin(parsed)
+                .allow_methods(Any)
+                .allow_headers(Any)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn identity() -> ServiceIdentity {
+        ServiceIdentity::new("AvevaMarineSample", "ALL", "1516")
+    }
+
+    #[test]
+    fn service_identity_accepts_legacy_defaults_and_canonical_mdb() {
+        let identity = identity();
+
+        assert_eq!(identity.mdb, "/ALL");
+        assert!(identity.validate(None, None, None).is_ok());
+        assert!(
+            identity
+                .validate(Some("AvevaMarineSample"), Some("ALL"), Some("1516"))
+                .is_ok()
+        );
+    }
+
+    /// 静态资源缺失只降级不终止（spec §7 / 2026-07-30 审计 A1）。
+    ///
+    /// `serve_if_configured` 被 spawn 包着、错误只有一句 stderr——这里一 bail，
+    /// 真实症状就是队列在跑、HTTP 端口从头到尾没起来，而界面只说「读不到任务队列」。
+    #[test]
+    fn a_missing_asset_dir_degrades_instead_of_killing_the_service() {
+        let source = include_str!("mod.rs");
+        let body = source
+            .split_once("pub async fn serve(")
+            .expect("serve 必须存在")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("serve 之后是 resolve_asset_root")
+            .0;
+        // 按调用点形态（带左括号）断言，避免撞上讲历史的注释文本。
+        assert!(
+            !body.contains("bail!("),
+            "serve 不得因资源目录缺失终止服务，REST/WS 必须照常启动"
+        );
+        assert!(
+            body.contains("static_assets"),
+            "降级必须通过 static_assets 旗子暴露给 /health"
+        );
+    }
+
+    #[test]
+    fn service_identity_rejects_each_explicit_mismatch() {
+        let identity = identity();
+
+        for error in [
+            identity.validate(Some("OtherProject"), None, None),
+            identity.validate(None, Some("/OTHER"), None),
+            identity.validate(None, None, Some("9999")),
+        ] {
+            let error = error.expect_err("explicit mismatch must be rejected");
+            assert_eq!(error.status, StatusCode::UNPROCESSABLE_ENTITY);
+            assert_eq!(error.code, "identity_mismatch");
+        }
+    }
+
+    #[test]
+    fn model_subtree_delete_uses_delete_method_and_query_handler() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("pub async fn serve(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+
+        assert!(
+            serve.contains(
+                ".route(\n            \"/api/v1/model/subtree\",\n            delete(handlers::model_delete_subtree),\n        )"
+            ),
+            "model subtree cleanup must be a DELETE route: {serve}"
+        );
+    }
+
+    #[test]
+    fn direct_tree_routes_are_read_only_get_endpoints() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("pub async fn serve(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        for route in [
+            ".route(\"/api/v1/tree/roots\", get(handlers::tree_roots))",
+            ".route(\"/api/v1/tree/children\", get(handlers::tree_children))",
+            ".route(\"/api/v1/tree/ancestors\", get(handlers::tree_ancestors))",
+        ] {
+            assert!(
+                serve.contains(route),
+                "missing direct tree GET route: {route}"
+            );
+        }
+    }
+
+    /// ADR-073：按水位删除会制造无法证明完整性的局部状态，只保留只读预览。
+    #[test]
+    fn residue_preview_route_has_no_delete_method() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("pub async fn serve(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        let route = serve
+            .split_once("\"/api/v1/dbnums/{dbnum}/data/above/{watermark}\",")
+            .expect("residue preview route must exist")
+            .1
+            .split_once("),")
+            .expect("route terminator")
+            .0;
+        assert!(
+            route.contains("get(handlers::dbnum_prune_above_preview"),
+            "{route}"
+        );
+        assert!(
+            !route.contains(".delete("),
+            "residue route must be read-only: {route}"
+        );
+    }
+
+    /// 浏览器端的网格口径：只读 GET，路径参数是 `{hash}.glb` 一整段（后缀在 handler 里剥，
+    /// 不在路由上拆——axum 的段匹配不认 `{hash}.glb` 这种半段模式）。
+    #[test]
+    fn mesh_glb_is_a_read_only_get_route_under_api_v1() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("pub async fn serve(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        assert!(
+            serve.contains(".route(\"/api/v1/meshes/{file}\", get(handlers::mesh_glb))"),
+            "missing mesh GLB GET route: {serve}"
+        );
+    }
+
+    #[test]
+    fn dbnum_model_ensure_and_roots_use_their_fixed_http_methods() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("pub async fn serve(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        assert!(serve.contains(
+            "\"/api/v1/dbnums/{dbnum}/model/ensure\",\n            post(handlers::dbnum_model_ensure)"
+        ));
+        assert!(serve.contains(
+            "\"/api/v1/dbnums/{dbnum}/model/roots\",\n            get(handlers::dbnum_model_roots)"
+        ));
+    }
+
+    #[test]
+    fn plant_ui_web_is_the_last_fallback_after_api_routes() {
+        let source = include_str!("mod.rs");
+        let serve = source
+            .split_once("pub async fn serve(")
+            .expect("serve must exist")
+            .1
+            .split_once("\nfn resolve_asset_root")
+            .expect("router must end before asset resolution")
+            .0;
+        let api = serve
+            .find(".route(\"/api/v1/health\", get(handlers::health))")
+            .expect("health route must exist");
+        let fallback = serve
+            .find(".fallback(get(handlers::plant_ui_web))")
+            .expect("plant-ui web fallback must exist");
+        assert!(api < fallback, "API routes must win over the web fallback");
+    }
+
+    #[test]
+    fn public_http_address_is_separate_from_the_bind_address() {
+        assert_eq!(
+            public_http_addr("0.0.0.0:8022", Some("192.168.1.5:8022")),
+            "192.168.1.5:8022"
+        );
+        assert_eq!(public_http_addr("0.0.0.0:8022", None), "127.0.0.1:8022");
+        assert_eq!(
+            public_http_addr("0.0.0.0:8022", Some("not-an-address")),
+            "127.0.0.1:8022"
+        );
+        assert_eq!(plant_ui_url("192.168.1.5:8022"), "http://192.168.1.5:8022/");
+    }
+
+    #[test]
+    fn missing_http_api_address_uses_legacy_then_safe_default() {
+        assert_eq!(
+            effective_http_api_addr(Some(" 0.0.0.0:8022 "), "127.0.0.1:9099"),
+            "0.0.0.0:8022"
+        );
+        assert_eq!(
+            effective_http_api_addr(None, " 192.168.1.9:9099 "),
+            "192.168.1.9:9099"
+        );
+        assert_eq!(
+            effective_http_api_addr(Some("   "), ""),
+            DEFAULT_HTTP_API_ADDR
+        );
+    }
+
+    #[test]
+    fn query_errors_have_stable_http_statuses() {
+        for (code, status) in [
+            ("INVALID_ARGUMENT", StatusCode::BAD_REQUEST),
+            ("NOT_FOUND", StatusCode::NOT_FOUND),
+            ("ATTR_NOT_APPLICABLE", StatusCode::UNPROCESSABLE_ENTITY),
+            ("CHAIN_INCOMPLETE", StatusCode::UNPROCESSABLE_ENTITY),
+            ("DB_UNAVAILABLE", StatusCode::SERVICE_UNAVAILABLE),
+            ("E3D_SESSION_FAILED", StatusCode::SERVICE_UNAVAILABLE),
+            ("TIMEOUT", StatusCode::GATEWAY_TIMEOUT),
+            ("PARSE_ERROR", StatusCode::INTERNAL_SERVER_ERROR),
+            ("INTERNAL", StatusCode::INTERNAL_SERVER_ERROR),
+        ] {
+            let error = ApiError::from_query(QueryError {
+                code,
+                message: "fixture".into(),
+            });
+            assert_eq!(error.status, status, "{code}");
+        }
+    }
+
+    #[test]
+    fn a_deleted_direct_element_is_not_an_internal_server_error() {
+        let error = ApiError::from_domain(anyhow::Error::new(
+            crate::data_interface::direct_store::DirectStoreError::NoSuchElement {
+                refno: "24384_26291".into(),
+                dbnum: 8000,
+                sesno: Some(302),
+            },
+        ));
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.code, "not_found");
+        assert!(error.message.contains("24384_26291"));
+    }
+
+    /// `tree/children?refno=1/1`（dbnum 1 不在本 MDB）曾回 500 `internal`：解出的库不在
+    /// 目录里是「不在这个 MDB」的确定性结论，与 `NoSuchElement` 同码 404，客户端才能负缓存而不是重试。
+    #[test]
+    fn a_refno_outside_the_mdb_is_not_found_not_an_internal_server_error() {
+        let error = ApiError::from_domain(anyhow::Error::new(
+            crate::data_interface::direct_store::DirectStoreError::DbNotInMdb {
+                dbnum: 1,
+                refno: "1_1".into(),
+            },
+        ));
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.code, "not_found");
+        assert!(error.message.contains("dbnum 1"), "{}", error.message);
+    }
+
+    /// 非法 refno（`0/0`、word1 为负）同样是确定性的「没有这个元素」，404 而不是 500。
+    #[test]
+    fn an_invalid_refno_is_not_found_not_an_internal_server_error() {
+        let error = ApiError::from_domain(anyhow::Error::new(
+            crate::data_interface::direct_store::DirectStoreError::InvalidRefNo {
+                refno: "0_0".into(),
+            },
+        ));
+        assert_eq!(error.status, StatusCode::NOT_FOUND);
+        assert_eq!(error.code, "not_found");
+    }
+
+    /// 其余 `DirectStoreError`（会话 / 文件被换 / 库号不符 / 锁毒化…）仍是 500：它们不是「不存在」，
+    /// 是服务端或部署出了状况。
+    #[test]
+    fn other_direct_store_errors_stay_internal() {
+        for error in [
+            crate::data_interface::direct_store::DirectStoreError::NoFileForDbnum { dbnum: 8000 },
+            crate::data_interface::direct_store::DirectStoreError::DbNumberMismatch {
+                dbnum: 8000,
+                actual: 8001,
+                file: std::path::PathBuf::from("ams8000_0001"),
+            },
+        ] {
+            let error = ApiError::from_domain(anyhow::Error::new(error));
+            assert_eq!(error.status, StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(error.code, "internal");
+        }
+    }
+}

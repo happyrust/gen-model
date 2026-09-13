@@ -50,6 +50,8 @@ pub(crate) fn is_valid_ref0(ref0: u32) -> bool {
 /// 抽象成 trait 是为了让闭包引擎不强依赖具体存储（surreal / 文件扫描 / 将来的 sqlite），
 /// 便于替换实现与单测。语义与参考项目 `data_interface::cata_closure::CataDbLocator` 对齐。
 pub trait CataDbLocator {
+    /// Membership is independent of source-file availability.
+    fn contains_dbnum(&self, dbnum: u32) -> bool { self.file_of(dbnum).is_some() }
     /// `ref0`（`RefU64::get_0()`）-> 所属 dbnum。
     fn dbnum_of_ref0(&self, ref0: u32) -> Option<u32>;
     /// Resolve an affiliation without hiding an ambiguous Ref0 behind iteration order.

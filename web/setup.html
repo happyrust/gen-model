@@ -121,21 +121,27 @@
   <section class="card" id="step2" hidden>
     <h2>② 存储：模型数据放哪</h2>
     <label class="radio-line">
-      <input type="radio" name="store" id="store-external" value="external" checked>
+      <input type="radio" name="store" id="store-external" value="external">
       <div><b>连接已有 SurrealDB（external）</b><br>
         <span class="hint">连一台已经在跑的库。必须是本套发布配套的 SurrealDB 2.1.x（包内 workspace\bin\surreal.exe），不能用官方 3.x。</span>
       </div>
     </label>
     <label class="radio-line">
       <input type="radio" name="store" id="store-rocks" value="spawned-rocksdb">
-      <div><b>新建本机持久库（spawned-rocksdb，新部署推荐）</b><br>
+      <div><b>新建本机持久库（spawned-rocksdb）</b><br>
         <span class="hint">服务启动时自动用包内 SurrealDB 在下方地址起一台落盘库，<b>数据活得过重启</b>；数据目录 <code id="rocks-dir">workspace\.surreal\&lt;项目代号&gt;</code>（换项目代号 = 新目录新库，旧目录留在盘上）。</span>
       </div>
     </label>
     <label class="radio-line">
+      <input type="radio" name="store" id="store-embedded" value="embedded-mem" checked>
+      <div><b>runtime 默认 kv-mem（embedded-mem）</b><br>
+        <span class="hint">内存库直接嵌在后端进程中，<b>无数据库子进程、无数据库端口冲突</b>；数据不落盘，重启即清空。浏览器通过本服务 API 访问。</span>
+      </div>
+    </label>
+    <label class="radio-line">
       <input type="radio" name="store" id="store-spawned" value="spawned-mem">
-      <div><b>试用模式（spawned-mem）</b><br>
-        <span class="hint">服务自己拉一台内存库，开箱即看。<b>数据不落盘，重启即清空</b>，只适合演示与验证。地址留空时内存库默认挂在本机 8009 端口。</span>
+      <div><b>可外部诊断的 kv-mem（spawned-mem）</b><br>
+        <span class="hint">服务自己拉一台内存 SurrealDB，外部 SQL / 探针可以连接；<b>数据不落盘，重启即清空</b>，默认使用本机 8009 端口。</span>
       </div>
     </label>
     <div class="row" style="margin-top:12px">
@@ -154,12 +160,14 @@
   <!-- ③ 服务 -->
   <section class="card" id="step3" hidden>
     <h2>③ 服务：本服务监听在哪</h2>
-    <label>监听地址 http_api_addr <span class="hint">0.0.0.0 = 局域网可访问（配置页仍只许本机打开）；127.0.0.1 = 仅本机</span></label>
+    <label>监听地址 http_api_addr <span class="hint">决定 socket 绑定；0.0.0.0 = 全接口，配置页仍只许回环访问</span></label>
     <div class="row">
       <div><input type="text" id="f-http_api_addr" placeholder="0.0.0.0:9099"></div>
       <div style="flex:0 0 auto"><button id="btn-probe-port">端口预检</button></div>
     </div>
     <div id="probe-port-out"></div>
+    <label>对外展示地址 http_public_addr <span class="hint">只用于日志、自动打开和分享链接，不参与监听；如 192.168.1.9:9099</span></label>
+    <input type="text" id="f-http_public_addr" placeholder="留空 = 从监听地址派生本机可访问地址">
     <div class="actions"><button id="back-3">上一步</button><button class="primary" id="next-3">下一步</button></div>
   </section>
 
@@ -270,7 +278,7 @@ async function boot() {
   if (!state.first_run_pending) {
     $("banner").innerHTML = '<div class="note">当前不是首跑：本页也可当配置页用——改完在第 ④ 步「保存并重启」即可，初始化那一步可跳过。</div>';
   }
-  if (resume === "init" || (state.mode === "normal" && state.first_run_pending && haveCoreConfig())) {
+  if (state.mode === "normal" && (resume === "init" || (state.first_run_pending && haveCoreConfig()))) {
     goto(5); loadDbnums().catch((e) => note($("dbnums-out"), "bad", e.message));
   } else {
     goto(1);
@@ -281,7 +289,8 @@ async function boot() {
 }
 function haveCoreConfig() {
   const v = S.cfg;
-  return v && v.project_path && (v.store_mode === "spawned-mem" || (v.v_ip && v.v_port));
+  return v && v.project_path &&
+    (v.store_mode === "embedded-mem" || v.store_mode === "spawned-mem" || (v.v_ip && v.v_port));
 }
 function fillForm(v) {
   const put = (id, x) => { if (x !== null && x !== undefined) $(id).value = Array.isArray(x) ? x.join(",") : x; };
@@ -294,11 +303,14 @@ function fillForm(v) {
   put("f-v_ip", v.v_ip);
   put("f-v_port", v.v_port);
   put("f-http_api_addr", v.http_api_addr || "0.0.0.0:9099");
+  put("f-http_public_addr", v.http_public_addr);
   put("f-watch_dbnums", v.watch_dbnums);
   put("f-manual_db_nums", v.manual_db_nums);
-  if (v.store_mode === "spawned-mem") $("store-spawned").checked = true;
+  if (v.store_mode === "embedded-mem") $("store-embedded").checked = true;
+  else if (v.store_mode === "spawned-mem") $("store-spawned").checked = true;
   else if (v.store_mode === "spawned-rocksdb") $("store-rocks").checked = true;
-  else $("store-external").checked = true;
+  else if (v.store_mode === "external") $("store-external").checked = true;
+  else $("store-embedded").checked = true;
   updateStoreUi();
   if (v.gen_model === true || v.gen_mesh === true) $("tier-full").checked = true; else $("tier-data").checked = true;
   renderProjects((v.included_projects || []).map((name) => ({ name, e3d_shape: true, db_files: null })), v.included_projects || [], v.project_name);
@@ -306,6 +318,7 @@ function fillForm(v) {
 
 // ---------- ② 档位联动 ----------
 function storeTier() {
+  if ($("store-embedded").checked) return "embedded-mem";
   if ($("store-rocks").checked) return "spawned-rocksdb";
   if ($("store-spawned").checked) return "spawned-mem";
   return "external";
@@ -316,13 +329,19 @@ function rocksDirHint() {
 }
 function updateStoreUi() {
   const tier = storeTier();
+  const embedded = tier === "embedded-mem";
   rocksDirHint();
   $("btn-probe-store").hidden = tier !== "external";
-  $("btn-precheck-store").hidden = tier === "external";
-  $("lbl-v_ip").textContent = tier === "external" ? "地址 v_ip（连接目标）" : "绑定地址 v_ip（库建在哪）";
-  $("lbl-v_port").textContent = "端口 v_port";
+  $("btn-precheck-store").hidden = tier === "external" || embedded;
+  $("f-v_ip").disabled = embedded;
+  $("f-v_port").disabled = embedded;
+  $("lbl-v_ip").textContent = embedded ? "地址 v_ip（embedded-mem 不使用）" :
+    tier === "external" ? "地址 v_ip（连接目标）" : "绑定地址 v_ip（库建在哪）";
+  $("lbl-v_port").textContent = embedded ? "端口 v_port（embedded-mem 不使用）" : "端口 v_port";
   $("f-v_port").placeholder = tier === "spawned-mem" ? "8009" : "8010";
-  if (tier === "external") {
+  if (embedded) {
+    $("store-note").innerHTML = '<div class="note">浏览器、树、属性和模型均走本服务同源 API。外部 <code>surreal sql</code> / rvm_verify 无法直连进程内库；需要这类诊断时改选 spawned-mem。</div>';
+  } else if (tier === "external") {
     $("store-note").innerHTML = '<div class="note">还没有库？选上面「新建本机持久库」最省事；或用包里带的脚本手动起一台（数据落在 workspace）：<br>' +
       "<code>powershell -ExecutionPolicy Bypass -File .\\workspace\\Start-Surreal.ps1</code></div>";
   } else if (tier === "spawned-rocksdb") {
@@ -334,6 +353,9 @@ function updateStoreUi() {
 }
 async function precheckStore() {
   const tier = storeTier();
+  if (tier === "embedded-mem") {
+    return note($("probe-store-out"), "ok", "embedded-mem 不占数据库端口，无需预检。");
+  }
   const ip = val("f-v_ip") || "127.0.0.1";
   const port = val("f-v_port") || (tier === "spawned-mem" ? "8009" : "8010");
   note($("probe-store-out"), "", "预检中…");
@@ -439,6 +461,7 @@ function gatherPatch() {
     v_ip: val("f-v_ip"),
     v_port: val("f-v_port"),
     http_api_addr: val("f-http_api_addr"),
+    http_public_addr: val("f-http_public_addr"),
     gen_model: full,
     gen_mesh: full,
     watch_dbnums: intsOf("f-watch_dbnums"),
@@ -447,8 +470,8 @@ function gatherPatch() {
   const code = val("f-project_code");
   if (code) patch.project_code = parseInt(code, 10);
   if (!patch.included_projects.length && patch.project_name) patch.included_projects = [patch.project_name];
-  if (tier !== "external") {
-    // 自带两档不逼用户填地址，但库要有真实端口放（v_port=0 会让下次启动绑死在端口 0）。
+  if (tier === "spawned-mem" || tier === "spawned-rocksdb") {
+    // spawned 两档不逼用户填地址，但库要有真实端口放（v_port=0 会让下次启动绑死在端口 0）。
     if (!patch.v_ip) patch.v_ip = "127.0.0.1";
     if (!patch.v_port || patch.v_port === "0") patch.v_port = tier === "spawned-mem" ? "8009" : "8010";
   }
@@ -558,6 +581,20 @@ async function executeInit() {
 }
 async function finish() {
   try {
+    const state = await api("/api/v1/setup/state");
+    S.state = state;
+    if (state.mode !== "normal") {
+      alert("服务仍处于设置模式，配置尚未生效。请回到第④步「保存并重启」，等待正常服务启动后再完成向导。");
+      goto(1);
+      return;
+    }
+    const config = await api("/api/v1/setup/config");
+    S.cfg = config.values || {};
+    if (!haveCoreConfig()) {
+      alert("当前配置仍不完整，不能完成向导。请回到第①—④步补齐并保存重启。");
+      goto(1);
+      return;
+    }
     await api("/api/v1/setup/complete", { method: "POST" });
     if (S.pollTimer) clearInterval(S.pollTimer);
     goto(6);
@@ -568,7 +605,7 @@ async function finish() {
 $("btn-probe-project").addEventListener("click", probeProject);
 $("btn-probe-store").addEventListener("click", probeStore);
 $("btn-precheck-store").addEventListener("click", precheckStore);
-["store-external", "store-rocks", "store-spawned"].forEach((id) =>
+["store-external", "store-rocks", "store-embedded", "store-spawned"].forEach((id) =>
   $(id).addEventListener("change", () => { $("probe-store-out").innerHTML = ""; updateStoreUi(); }));
 $("f-project_code").addEventListener("input", rocksDirHint);
 $("btn-probe-port").addEventListener("click", probePort);
@@ -592,7 +629,8 @@ $("next-2").addEventListener("click", () => {
     if (!val("f-v_ip") || !val("f-v_port")) return alert("external 模式要填 v_ip / v_port");
     if (!S.storeTestOk) return alert("先点「测试连接」并通过（连通 + 版本 2.1.x）再往下走");
   }
-  // 自带两档地址可留空（保存时自动补 127.0.0.1:8010 / :8009）；端口预检是建议不是闸——
+  // embedded 不用地址；spawned 两档地址可留空（保存时自动补 127.0.0.1:8010 / :8009）。
+  // spawned 端口预检是建议不是闸——
   // 被占着的可能正是上次自家的库，启动时按署名收编。
   goto(3);
 });

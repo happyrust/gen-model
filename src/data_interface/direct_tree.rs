@@ -4,26 +4,66 @@
 //! SurrealDB element table.  MDB membership comes from the SYS file, and every
 //! displayed node is decoded from the selected DESI database by [`DirectStore`].
 //!
-//! 骨架（哪个 ref0 属于哪个库、谁是谁的属主、每个元素是什么 noun）来自进程级的
-//! [`MdbMemoryStore`]，启动时预热好；本模块只在需要**属性**（NAME、成员表）时才
-//! 落到 [`DirectStore`]。此前这三样是本模块自己在第一次树请求时逐库
-//! `indexed_refnos()` 现扫的，而且 owner 链每上一级要抽一整条记录。
+//! 库级元数据来自文件头；OWNER、TYPE 和成员仅按请求点查。
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use aios_core::pdms_types::EleTreeNode;
 use aios_core::{RefU64, RefnoEnum};
 use anyhow::Context;
 
-use super::direct_store::{DbPin, DirectSchema, DirectStore};
+use super::direct_store::{DirectStore, DirectStoreError};
+use super::mdb_read_store::{MdbReadProvider, MdbReadStore};
 use super::generation_root::{
     GenerationNode, GenerationRoot, SubtreeElement, enumerate_generation_roots_in_subtree,
     resolve_element_generation_root,
 };
-use super::mdb_membership::{ISOD_STYP, MdbMembership};
-use super::mdb_memory_store::MdbMemoryStore;
-use super::mdb_route_directory::MdbRouteDirectory;
+use super::mdb_membership::MdbMembership;
+
+/// One element database of the frozen tree view: its identity and the session it is
+/// pinned to, read from the file header through the shared read view. No element count —
+/// there is no census behind this service.
+#[derive(Debug, Clone)]
+pub struct TreeDatabase {
+    pub dbnum: u32,
+    pub db_type: String,
+    pub file: PathBuf,
+    pub sesno: u32,
+}
+
+/// Frozen database metadata; no per-element census.
+pub struct TreeMetadata {
+    databases: Vec<TreeDatabase>,
+    worlds: HashMap<u32, RefU64>,
+    ref0s: HashMap<u32, Vec<u32>>,
+    problems: Vec<String>,
+}
+impl TreeMetadata {
+    fn open(membership: &MdbMembership, store: &MdbReadStore) -> anyhow::Result<Self> {
+        let mut result = Self { databases: Vec::new(), worlds: HashMap::new(), ref0s: HashMap::new(), problems: membership.problems().to_vec() };
+        for db in membership.element_databases() {
+            if db.path.is_none() { continue; }
+            let metadata = store.metadata(db.dbnum)?;
+            result.worlds.insert(db.dbnum, RefU64::from_two_nums(metadata.world.word0, metadata.world.word1));
+            result.ref0s.insert(db.dbnum, metadata.extent_ref0s);
+            result.databases.push(TreeDatabase { dbnum: db.dbnum, db_type: metadata.db_type,
+                file: metadata.source.file, sesno: metadata.source.sesno });
+        }
+        Ok(result)
+    }
+    pub fn databases(&self) -> &[TreeDatabase] { &self.databases }
+    pub fn ref0s_of(&self, dbnum: u32) -> Vec<u32> { self.ref0s.get(&dbnum).cloned().unwrap_or_default() }
+    pub fn problems(&self) -> &[String] { &self.problems }
+    pub fn session_fingerprint(&self) -> Vec<(u32, std::path::PathBuf, u32)> { self.databases.iter().map(|db| (db.dbnum, db.file.clone(), db.sesno)).collect() }
+    pub fn epoch(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        self.session_fingerprint().hash(&mut hash);
+        hash.finish()
+    }
+}
 
 /// One process-local, immutable view of the current MDB model tree.
 ///
@@ -34,72 +74,36 @@ pub struct DirectTreeService {
     project: String,
     mdb: String,
     membership: Arc<MdbMembership>,
-    store: Arc<DirectStore>,
-    skeleton: Arc<MdbMemoryStore>,
-    skeleton_fingerprint: Vec<(u32, std::path::PathBuf, u32)>,
+    store: Arc<MdbReadStore>,
+    reader: Arc<MdbReadProvider>,
+    metadata: std::sync::Mutex<Option<Arc<TreeMetadata>>>,
 }
 
 impl DirectTreeService {
-    /// Resolve the MDB from its SYS file and take the e3d-io ref0 locator from
-    /// the process-level skeleton.  No element row is read from SurrealDB.
+    /// Resolve the MDB from its SYS file and build the service on the current
+    /// sessions of its files.  No element row is read from SurrealDB.
     ///
-    /// 骨架预热过就是一次 `Arc` 克隆；没预热过（预热失败、或探针 / 单测这类不走
-    /// 启动链的进程）由 `ensure` 现建一份，代价就是此前每次 open 都要付的那一遍扫描。
+    /// Freeze exact sessions from headers without enumerating elements.
     pub fn open(project: &str, mdb: &str) -> anyhow::Result<Self> {
-        let option = aios_core::get_db_option();
-        let membership = super::mdb_membership::get(project, mdb)
-            .map(Ok)
-            .unwrap_or_else(|| {
-                super::mdb_membership::resolve(option, project, mdb).map(Arc::new)
-            })?;
-        let skeleton = super::mdb_memory_store::ensure(project, mdb)?;
-        let schema = Arc::new(DirectSchema::open_from_env()?);
-        // 定位器是 dbnum → 文件的路由目录，直接从 CURD 成员清单造（切片 W6）：refno 归哪个库由
-        // `DirectStore` 位解码，不再从骨架抄 `ref0 → dbnum`。骨架在这里只剩 WORL 枚举
-        // （`roots()` 的 `refnos_of_noun`）与 noun / owner 查询在用——那是母计划 3B / 3C 的活。
-        let directory = MdbRouteDirectory::from_membership(&membership, schema.template_dir());
-        anyhow::ensure!(
-            directory.element_databases().next().is_some(),
-            "direct tree 在 MDB {} 的 CURD 里没有路由出任何 DESI / ISOD 库文件",
-            membership.mdb()
-        );
-        let store = Arc::new(DirectStore::new(schema, Arc::new(directory)));
-
-        let mut pinned = 0usize;
-        for db in membership.element_databases() {
-            let Some(file) = db.path.clone() else {
-                continue;
-            };
-            store.pin(DbPin {
-                dbnum: db.dbnum as i32,
-                db_type: if db.styp == ISOD_STYP { "ISOD" } else { "DESI" }.to_string(),
-                file,
-                // Direct tree is compared with the current E3D TTY view.  None
-                // resolves the file's latest session once, then freezes it.
-                sesno: None,
-            });
-            pinned += 1;
-        }
-        anyhow::ensure!(pinned > 0, "MDB {} 没有可读的 DESI 文件", membership.mdb());
-
+        let reader = MdbReadProvider::shared(project, mdb)?;
+        let store = reader.view()?;
         Ok(Self {
-            project: project.to_string(),
-            mdb: format!("/{}", mdb.trim_start_matches('/')),
-            membership,
-            store,
-            skeleton_fingerprint: skeleton.session_fingerprint(),
-            skeleton,
+            project: project.to_string(), mdb: format!("/{}", mdb.trim_start_matches('/')),
+            membership: reader.membership.clone(), store, reader,
+            metadata: std::sync::Mutex::new(None),
         })
     }
 
-    /// 这次服务背后的骨架。
-    pub fn skeleton(&self) -> anyhow::Result<Arc<MdbMemoryStore>> {
-        Ok(self.skeleton.clone())
+    pub fn metadata(&self) -> anyhow::Result<Arc<TreeMetadata>> {
+        let mut slot = self.metadata.lock().map_err(|_| anyhow::anyhow!("tree metadata lock poisoned"))?;
+        if let Some(metadata) = slot.as_ref() { return Ok(metadata.clone()); }
+        let metadata = Arc::new(TreeMetadata::open(&self.membership, &self.store)?);
+        *slot = Some(metadata.clone());
+        Ok(metadata)
     }
 
     fn is_current(&self) -> bool {
-        super::mdb_memory_store::get(&self.project, &self.mdb)
-            .is_some_and(|current| current.session_fingerprint() == self.skeleton_fingerprint)
+        self.reader.view().is_ok_and(|view| Arc::ptr_eq(&self.store, &view))
     }
 
     pub fn project(&self) -> &str {
@@ -112,20 +116,17 @@ impl DirectTreeService {
 
     /// SITE rows in MDB CURD order, then in each WORL's stored member order.
     ///
-    /// WORL 从骨架查，不再触发 [`DirectStore::indexes`]——那是每库一次全树扫描加
-    /// 描述符抽取，而这里只要「哪些元素是 WORL」。骨架看不到「成员表非空」这一格
-    /// （头扫描不解析成员表），少这一格结果不变：成员表空的 WORL 下面一个 SITE 都
-    /// 没有，过不过滤都贡献零行。两边都按 refno 升序交，顺序也不变。
+    /// Enumerating every SITE explicitly needs each library WORLD; ancestors/children do not.
     pub fn roots(&self) -> anyhow::Result<Vec<EleTreeNode>> {
-        let skeleton = self.skeleton()?;
+        let metadata = self.metadata()?;
+
         let mut out = Vec::new();
         for db in self.membership.element_databases() {
             if db.path.is_none() {
                 continue;
             }
-            let dbnum = db.dbnum as i32;
-            for world in skeleton.refnos_of_noun(db.dbnum, "WORL") {
-                for (order, child) in self.store.members_in(dbnum, world)?.into_iter().enumerate() {
+            for world in metadata.worlds.get(&db.dbnum).copied() {
+                for (order, child) in self.store.members(world)?.into_iter().enumerate() {
                     let node = self.node(child, Some(world), order)?;
                     if node.noun.eq_ignore_ascii_case("SITE") {
                         out.push(node);
@@ -177,22 +178,7 @@ impl DirectTreeService {
         root: RefU64,
         unit_types: &[String],
     ) -> anyhow::Result<Vec<GenerationRoot>> {
-        // Give the HTTP layer the same typed absence signal as direct attribute reads.
-        // `MdbMemoryStore::ancestors` carries a diagnostic-rich anyhow message, but that
-        // erased the category and `/model/ensure` exposed a deleted element as HTTP 500.
-        if !self.skeleton.contains(root) {
-            let dbnum = self
-                .skeleton
-                .dbnum_of_ref0(root.get_0())
-                .map(|value| value as i32)
-                .unwrap_or_default();
-            return Err(super::direct_store::DirectStoreError::NoSuchElement {
-                refno: RefnoEnum::from(root).to_string(),
-                dbnum,
-                sesno: None,
-            }
-            .into());
-        }
+        self.store.element_snapshot(root)?;
         let requested = RefnoEnum::from(root);
         let nodes = self
             .ancestors(root)?
@@ -219,29 +205,32 @@ impl DirectTreeService {
         {
             return Ok(vec![ancestor]);
         }
-        generation_roots_in_subtree_on(&self.store, root, unit_types)
+        generation_roots_in_subtree_on(self.store.as_ref(), root, unit_types)
     }
 
     /// Self -> OWNER -> ... chain, matching Plant UI's existing contract.
     ///
-    /// 走骨架里的属主表，全程零解析。此前每上一级要抽一整条记录再转一张属性表，
-    /// 只为读一个 `OWNER`——而这条链是 `generation_roots_in_subtree` 每次按需生成
-    /// 都要先走一遍的东西。
+    /// 每一级从钉住会话点查 OWNER，跨库沿同一服务的路由目录读取。
     pub fn ancestors(&self, start: RefU64) -> anyhow::Result<Vec<RefnoEnum>> {
-        Ok(self
-            .skeleton()?
-            .ancestors(start)?
-            .into_iter()
-            .map(RefnoEnum::from)
-            .collect())
+        let mut chain = Vec::new();
+        let mut seen = HashSet::new();
+        let mut current = start;
+        while current.0 != 0 {
+            anyhow::ensure!(seen.insert(current), "OWNER cycle at {current}");
+            anyhow::ensure!(chain.len() < 4096, "OWNER depth exceeded at {current}");
+            let attrs = self.store.named_attmap(current)?;
+            chain.push(RefnoEnum::from(current));
+            match attrs.get_refu64("OWNER") {
+                Some(owner) if owner.0 != 0 => current = owner,
+                _ => break,
+            }
+        }
+        Ok(chain)
     }
 
-    /// 这个元素归属的库号（骨架的 `ref0 → dbnum`）。`None` = 它的 Ref0 不在本 MDB 里。
-    ///
-    /// 给 HTTP 层往树节点上外包 `dbnum` 用：refno 前半段只是 Ref0，浏览器端拿它当库号
-    /// 分桶会分错，库号只有这里答得出。
+    /// RefNo 原生库号，并验证当前路由目录是否包含该库。
     pub fn dbnum_of(&self, refno: RefU64) -> Option<u32> {
-        self.skeleton.dbnum_of(refno)
+        self.store.dbnum_of(refno).ok().map(|dbnum| dbnum as u32)
     }
 
     /// 这个元素的 noun（`TYPE`），与 [`Self::children`] 节点上的 `noun` 同一来源。
@@ -330,8 +319,21 @@ impl DirectTreeService {
 /// Free function so a single pinned store (no MDB, no `DirectTreeService`) can
 /// be enumerated too — that is how the parity test in `generation_root.rs`
 /// compares this read path with the e3d-io `DbSet` read path.
+pub trait TreeStore {
+    fn named_attmap(&self, refno: RefU64) -> Result<aios_core::NamedAttrMap, DirectStoreError>;
+    fn members(&self, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError>;
+}
+impl TreeStore for DirectStore {
+    fn named_attmap(&self, refno: RefU64) -> Result<aios_core::NamedAttrMap, DirectStoreError> { DirectStore::named_attmap(self, refno) }
+    fn members(&self, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError> { DirectStore::members(self, refno) }
+}
+impl TreeStore for MdbReadStore {
+    fn named_attmap(&self, refno: RefU64) -> Result<aios_core::NamedAttrMap, DirectStoreError> { MdbReadStore::named_attmap(self, refno) }
+    fn members(&self, refno: RefU64) -> Result<Vec<RefU64>, DirectStoreError> { MdbReadStore::members(self, refno) }
+}
+
 pub fn generation_roots_in_subtree_on(
-    store: &DirectStore,
+    store: &dyn TreeStore,
     root: RefU64,
     unit_types: &[String],
 ) -> anyhow::Result<Vec<GenerationRoot>> {
@@ -361,6 +363,12 @@ pub struct DirectTreeProvider {
 }
 
 impl DirectTreeProvider {
+    pub async fn cache_stats(&self) -> (Vec<i32>, usize) {
+        self.service.read().await.as_ref().map(|service|
+            (service.store.opened_dbnums(), service.store.cached_elements()))
+            .unwrap_or_default()
+    }
+
     pub fn new(project: impl Into<String>, mdb: impl Into<String>) -> Self {
         Self {
             project: project.into(),
@@ -371,11 +379,6 @@ impl DirectTreeProvider {
     }
 
     pub async fn get(&self) -> anyhow::Result<Arc<DirectTreeService>> {
-        if let Some(reason) = super::mdb_memory_store::stale_reason(&self.project, &self.mdb) {
-            anyhow::bail!(
-                "MDB_SNAPSHOT_STALE: latest file session could not be installed: {reason}"
-            );
-        }
         if let Some(service) = self.service.read().await.clone()
             && service.is_current()
         {
@@ -395,5 +398,35 @@ impl DirectTreeProvider {
             .map(Arc::new)?;
         *self.service.write().await = Some(service.clone());
         Ok(service)
+    }
+}
+
+#[cfg(test)]
+mod lazy_live_tests {
+    use super::*;
+
+    impl DirectTreeService {
+        /// Test seam: the shared read view this service is pinned to, so the cross-service
+        /// sharing proof in `element_attributes` can compare `Arc` identity instead of statistics.
+        /// Lives under `#[cfg(test)]` here (not on the production impl) because the source guards
+        /// cut production code at the first `#[cfg(test)]` marker.
+        pub(crate) fn read_view(&self) -> Arc<MdbReadStore> {
+            self.store.clone()
+        }
+    }
+
+    #[test]
+    #[ignore = "requires local AMS source files"]
+    fn ams_tree_first_read_does_not_scan_elements() {
+        e3d_io::read_stats::reset();
+        let service = DirectTreeService::open("AvevaMarineSample", "ALL").unwrap();
+        let roots = service.roots().unwrap();
+        assert!(!roots.is_empty());
+        let chain = service.ancestors(RefU64::from_two_nums(24384, 23257)).unwrap();
+        assert!(chain.len() > 1);
+        let stats = e3d_io::read_stats::snapshot();
+        assert_eq!(stats.scan_calls, 0, "{stats:?}");
+        assert_eq!(stats.scanned_elements, 0);
+        eprintln!("AMS roots={} ancestors={} costs={}", roots.len(), chain.len(), stats.summary());
     }
 }

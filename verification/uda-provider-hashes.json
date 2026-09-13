@@ -1,0 +1,32 @@
+[
+  {
+    "path": "src/data_interface/element_attributes.rs",
+    "original_sha256": "024b2529908186ba8f023ee3501593371d1c73042d34b11c5e812f66cc0c3001",
+    "modified_sha256": "43a4b9e154fff50dc8db34b9918b048e22192a2a62cf98d864754c800b34d6db"
+  },
+  {
+    "path": "src/data_interface/mdb_memory_store.rs",
+    "original_sha256": "0ff4ba36e33b9c02c142f61afa55b5b0adafdf8aeb5f28dcd983a8d1141c3bcd",
+    "modified_sha256": "b8eef6b706fb45353a13e11082132e9ec49e0adcafb302629277fa970d4af017"
+  },
+  {
+    "path": "src/data_interface/mod.rs",
+    "original_sha256": "a2d806865eaf2b7f665ab728721c2100e25db27c75e2ca42bebe73a7b5f451bc",
+    "modified_sha256": "ca2ca1edaafeee3275e4bd507140e1b36e5d96efa585b85091b282809ffcba98"
+  },
+  {
+    "path": "src/data_interface/read_through.rs",
+    "original_sha256": "db5b3bb92d135191c2707583198047453ea96e2601fbdb3fa0e1e41c3fb824e8",
+    "modified_sha256": "5838c2426ba764cd23c23610fc48d0d3ccca69946070cc6ac0e22f52c07b6c85"
+  },
+  {
+    "path": "src/data_interface/uda_catalog_provider.rs",
+    "original_sha256": null,
+    "modified_sha256": "36b04fffa66c9c78fc24e708474976d23731401ad54d4c1ed59570ea68c8553f"
+  },
+  {
+    "path": "tests/refno_native_guards.rs",
+    "original_sha256": "4c42ed5c8ab0f800f165040a6fe19d3c7f9d35ac39a8410f4e18069d9e6397b2",
+    "modified_sha256": "85b2027d0a54f5d89564bc0546b83f1b6fae3cbd97de80c71fd1287a191b316b"
+  }
+]

@@ -20,6 +20,8 @@ const ELEMENT_ATTRIBUTES: &str = include_str!("../src/data_interface/element_att
 const DIRECT_TREE: &str = include_str!("../src/data_interface/direct_tree.rs");
 const REFNO_ROUTE: &str = include_str!("../src/data_interface/refno_route.rs");
 const ROUTE_DIRECTORY: &str = include_str!("../src/data_interface/mdb_route_directory.rs");
+const MDB_READ_STORE: &str = include_str!("../src/data_interface/mdb_read_store.rs");
+const LIB: &str = include_str!("../src/lib.rs");
 
 /// 去掉 `#[cfg(test)]` 之后的测试模块，只留生产代码；换行统一成 `\n`，Windows 检出的
 /// CRLF 副本与仓内 LF 原件在这里长得一样。
@@ -34,7 +36,12 @@ fn production(source: &str) -> String {
 /// 从签名到与它同缩进的闭括号：方法（四格缩进）与自由函数（零缩进）都停在自己的 `}` 上。
 fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
     let start = source
-        .find(signature)
+        .match_indices(signature)
+        .map(|(at, _)| at)
+        .find(|at| {
+            let line_start = source[..*at].rfind('\n').map_or(0, |i| i + 1);
+            source[line_start..*at].chars().all(char::is_whitespace)
+        })
         .unwrap_or_else(|| panic!("missing function: {signature}"));
     let line_start = source[..start].rfind('\n').map_or(0, |i| i + 1);
     let indent = &source[line_start..start];
@@ -47,6 +54,76 @@ fn function_body<'a>(source: &'a str, signature: &str) -> &'a str {
         .find(&format!("\n{indent}}}\n"))
         .unwrap_or_else(|| panic!("function end not found: {signature}"));
     &rest[..end]
+}
+
+#[test]
+fn watcher_and_health_do_not_rebuild_or_require_an_element_skeleton() {
+    let watcher = include_str!("../src/data_interface/increment_manager.rs");
+    let sweep = function_body(watcher, "async fn sweep_watch_dirs(");
+    for forbidden in ["mdb_memory_store::", "scan_elements(", "refresh_cached(",
+        "reconcile_model_coverage_at_startup("] {
+        assert!(!sweep.contains(forbidden), "watcher reintroduced {forbidden}");
+    }
+    let handlers = include_str!("../src/web_service/handlers.rs");
+    let health = function_body(handlers, "pub async fn health(");
+    for forbidden in ["mdb_memory_store::", "skeleton_elements", ".get().await"] {
+        assert!(!health.contains(forbidden), "health reintroduced {forbidden}");
+    }
+    assert!(health.contains("mdb_route_directory::active("));
+    // 缓存统计从共享读视图模块的观测口取，不经任何 provider 的 `.get().await`（那会开服务）。
+    assert!(health.contains("mdb_read_store::cache_stats("));
+    let web = include_str!("../src/web_service/mod.rs");
+    let serve = function_body(web, "async fn serve_with_ready(");
+    assert!(!serve.contains(".get().await"));
+    assert!(serve.find("bind_with_handoff(addr).await?").unwrap()
+        < serve.find("ready.send(())").unwrap());
+    let core = function_body(LIB, "async fn run_read_through_core(");
+    assert!(core.find("start_configured(manager.clone()).await?").unwrap()
+        < core.find("startup_route_directory(&db_option)").unwrap());
+    // 新鲜度只经共享读视图比 Arc 身份：两个服务的 `is_current` 都不读文件头、不开库、不问骨架。
+    for source in [ELEMENT_ATTRIBUTES, DIRECT_TREE] {
+        let code = production(source);
+        let current = function_body(&code, "fn is_current(");
+        assert!(current.contains("self.reader.view()"));
+        assert!(current.contains("Arc::ptr_eq("));
+        for forbidden in ["DbFileHeader::read(", "ReadOnlyEngine::open(", "mdb_memory_store::"] {
+            assert!(!current.contains(forbidden), "is_current reintroduced {forbidden}");
+        }
+    }
+}
+
+#[test]
+fn uda_catalogue_and_spool_do_not_depend_on_the_element_skeleton() {
+    let legacy = production(include_str!("../src/data_interface/mdb_memory_store.rs"));
+    assert!(!legacy.contains("uda_catalog"));
+    let read_through = include_str!("../src/data_interface/read_through.rs");
+    let spool = function_body(read_through, "pub(crate) fn spool_write_through(");
+    assert!(!spool.contains("mdb_memory_store::"));
+    assert!(spool.contains("UdaCatalogProvider::shared("));
+    // 旧形状里这条意图写在 `membership_fingerprint` 的 `db.styp != DICT_STYP`：字典不进属性服务的
+    // 整体新鲜度。新形状下新鲜度 = 共享读视图的 Arc 身份，视图只核**已打开**的库文件
+    // （`opened_sources()`），而字典由 `UdaCatalogProvider` 独立持有、从不经共享 `DbSet` 打开——
+    // 所以 DICT 定义变化仍然不会让属性服务重建。三处都钉住：`is_current` 不碰字典、不读文件头；
+    // 属性服务不自己追踪 DICT 文件；共享读视图不枚举字典。
+    let attributes = production(ELEMENT_ATTRIBUTES);
+    let current = function_body(&attributes, "fn is_current(");
+    assert!(current.contains("self.reader.view()"));
+    for forbidden in ["catalog", "DICT", "dictionary_paths(", "DbFileHeader::read("] {
+        assert!(
+            !current.contains(forbidden),
+            "is_current must not fingerprint the dictionary: {forbidden}"
+        );
+    }
+    assert!(
+        !attributes.contains("DICT_STYP") && !attributes.contains("dictionary_paths("),
+        "the attribute service does not track DICT files itself; UdaCatalogProvider owns them"
+    );
+    let store = production(MDB_READ_STORE);
+    let view = function_body(&store, "pub fn view(&self)");
+    assert!(view.contains("opened_sources()"), "freshness comes from already-open sources only");
+    assert!(!store.contains("DICT_STYP") && !store.contains("dictionary_paths("));
+    let read = function_body(&attributes, "pub fn read(&self, refno: RefU64)");
+    assert_eq!(read.matches("self.catalog.get()?").count(), 1);
 }
 
 /// 不变量 1：dbnum 只由 `RefNo::dbno()` 给出，且只在 `refno_route` 里出现这一个解码式。
@@ -154,7 +231,11 @@ fn design_dbnums_and_root_resolution_share_one_element_db_predicate() {
     assert!(predicate.contains("\"DESI\"") && predicate.contains("\"ISOD\""));
 }
 
-/// 属性服务与树服务的定位器都从 CURD 成员清单造，不再从元素骨架抄 `ref0 → dbnum`。
+/// 属性服务与树服务的定位器都来自**同一份**共享读视图（`MdbReadProvider::shared`）：路由目录
+/// 只在共享读视图模块里从 CURD 成员清单造一次，两个服务都不再各造一份，也不从元素骨架抄
+/// `ref0 → dbnum`——两个服务的生产源码里连 `mdb_memory_store` 的名字都不再出现。
+/// 行为面的共用证明是 `element_attributes::tests::ams_tree_and_attribute_services_share_one_read_view`
+///（AMS opt-in：同一 `Arc<MdbReadStore>`、二服务首读零开库、同元素再读缓存不长、零扫描）。
 #[test]
 fn attribute_and_tree_services_take_their_locator_from_the_route_directory() {
     let attributes = production(ELEMENT_ATTRIBUTES);
@@ -167,11 +248,29 @@ fn attribute_and_tree_services_take_their_locator_from_the_route_directory() {
         !attributes.contains("build_from_dir("),
         "依赖目录只读文件头，不再逐库扫 ref0"
     );
-    assert!(attributes.contains("MdbRouteDirectory::from_membership("));
-
     let tree = production(DIRECT_TREE);
     assert!(!tree.contains("locator_parts()"));
-    assert!(tree.contains("MdbRouteDirectory::from_membership("));
+
+    for (name, code) in [("element_attributes", &attributes), ("direct_tree", &tree)] {
+        assert!(
+            code.contains("MdbReadProvider::shared("),
+            "{name}: 服务必须接共享读视图"
+        );
+        assert!(
+            !code.contains("MdbRouteDirectory::from_membership("),
+            "{name}: 路由目录只在共享读视图模块里造，服务不得再各造一份"
+        );
+        assert!(
+            !code.contains("mdb_memory_store"),
+            "{name}: 元素骨架的名字不得再出现在服务生产源码里（注释也算）"
+        );
+    }
+    let store = production(MDB_READ_STORE);
+    assert_eq!(
+        store.matches("MdbRouteDirectory::from_membership(").count(),
+        1,
+        "共享读视图模块从成员清单造路由目录恰好一处"
+    );
 }
 
 /// 路由目录里没有逐元素表：构造只读成员清单与文件头。
@@ -206,6 +305,139 @@ fn production_sources_do_not_hardcode_site_dbnums() {
         assert!(
             !production(source).contains("8188") && !production(source).contains("8_188"),
             "{name}: 现场 dbnum 8188 只许出现在测试与基线文件里"
+        );
+    }
+}
+
+/// 从一个签名到一个结束标记之间的源码段。`lib.rs` 的 `#[cfg(test)]` 模块散在函数之间，
+/// 不能像别的文件那样切一刀就得到生产代码，所以按段落取。
+fn section<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+    source
+        .split_once(start)
+        .unwrap_or_else(|| panic!("missing section start: {start}"))
+        .1
+        .split_once(end)
+        .unwrap_or_else(|| panic!("missing section end after {start}: {end}"))
+        .0
+}
+
+/// lazy-startup L3（`docs/plans/2026-09-12-lazy-startup-dev-plan.md` §3.3）：启动链不再预热元素骨架。
+/// `run_cli` / `run_read_through_core` / `bootstrap_read_through_rooms` 三段里没有
+/// `mdb_memory_store::ensure(`、没有 `scan_elements(`；两条启动链都经 `startup_route_directory` 打
+/// 路由目录横幅（零元素 I/O + 核头），房间屏障的 dbnum 清单来自路由目录而不是元素表。
+/// 2 s 循环的 `refresh_if_stale` / `get` 是 L4 的活，这里不禁。
+#[test]
+fn startup_chain_does_not_prewarm_the_element_skeleton() {
+    let code = LIB.replace("\r\n", "\n");
+    let run_cli = section(
+        &code,
+        "pub async fn run_cli(",
+        "\nfn print_startup_complete_banner(",
+    );
+    let core = section(
+        &code,
+        "async fn run_read_through_core(",
+        "\npub async fn run_app(",
+    );
+    let rooms = section(
+        &code,
+        "async fn bootstrap_read_through_rooms(",
+        "/// File/memory-first service path",
+    );
+    for (name, body) in [
+        ("run_cli", run_cli),
+        ("run_read_through_core", core),
+        ("bootstrap_read_through_rooms", rooms),
+    ] {
+        assert!(
+            !body.contains("mdb_memory_store::ensure("),
+            "{name}: 启动链不得预热元素骨架"
+        );
+        assert!(!body.contains("scan_elements("), "{name}: 启动链不得扫元素");
+        assert!(
+            !body.contains("MdbMemoryStore"),
+            "{name}: 启动链不得再持元素骨架"
+        );
+    }
+    assert!(run_cli.contains("startup_route_directory(&db_option)"));
+    assert!(core.contains("startup_route_directory(&db_option)"));
+    assert!(
+        rooms.contains(".element_databases()"),
+        "房间屏障的 dbnum 清单来自路由目录"
+    );
+
+    let directory = function_body(&code, "fn startup_route_directory(");
+    assert!(directory.contains("MdbRouteDirectory::from_membership("));
+    let banner = function_body(&code, "fn print_route_directory_banner(");
+    assert!(
+        banner.contains("read_stats::snapshot().summary()"),
+        "横幅要带读计数器：启动期 scans=0 是「没扫元素」的证据"
+    );
+    assert!(
+        banner.contains(".verify_all_headers()"),
+        "横幅要核每个成员文件的头（不变量 3）"
+    );
+}
+
+/// lazy-startup L4（§3.4）：2 s 循环按 dbnum 轮询会话号，只动变了的那个库。`run_read_through_core`
+/// 段落里没有 `refresh_if_stale(`、没有 `invalidate_all_receipts(`、不再碰 `mdb_memory_store::`，有
+/// `poll_generations(`；定向刷新只作废该库回执、只在该库文件里点查已发布根、记一笔给 `/health`；
+/// 轮询本身只 stat + 读头，不扫元素、不点查。
+#[test]
+fn the_two_second_loop_refreshes_by_dbnum() {
+    let code = LIB.replace("\r\n", "\n");
+    let core = section(
+        &code,
+        "async fn run_read_through_core(",
+        "\npub async fn run_app(",
+    );
+    assert!(
+        core.contains(".poll_generations()"),
+        "循环要经路由目录轮询世代"
+    );
+    for needle in [
+        "refresh_if_stale(",
+        "invalidate_all_receipts(",
+        "mdb_memory_store::",
+    ] {
+        assert!(
+            !core.contains(needle),
+            "run_read_through_core 不得含 `{needle}`：文件变化只失效对应 dbnum"
+        );
+    }
+
+    let refresh = function_body(&code, "async fn targeted_model_refresh(");
+    for needle in [
+        "invalidate_receipts_of_dbnum(",
+        "snapshot_presence(",
+        "record_targeted_refresh(",
+        "is_element_db(",
+    ] {
+        assert!(
+            refresh.contains(needle),
+            "targeted_model_refresh 要含 `{needle}`"
+        );
+    }
+    for needle in [
+        "invalidate_all_receipts(",
+        "mdb_memory_store::",
+        "scan_elements(",
+    ] {
+        assert!(
+            !refresh.contains(needle),
+            "targeted_model_refresh 不得含 `{needle}`"
+        );
+    }
+
+    let directory = production(ROUTE_DIRECTORY);
+    let poll = function_body(&directory, "pub fn poll_generations(&self)");
+    for needle in ["FileIdentity::of(", "DbView::open(", ".walk_sessions()", ".observe_session(", "base_sesno"] {
+        assert!(poll.contains(needle), "poll_generations 要含 `{needle}`");
+    }
+    for needle in ["scan_elements(", "find_element(", "search_index("] {
+        assert!(
+            !poll.contains(needle),
+            "poll_generations 只 stat + 读头，不得含 `{needle}`"
         );
     }
 }

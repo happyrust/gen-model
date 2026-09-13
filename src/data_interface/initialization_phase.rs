@@ -235,6 +235,25 @@ impl Default for StartupReconcile {
     }
 }
 
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct StartupRoomBootstrap {
+    /// idle / initializing / ready / partial / blocked
+    pub status: &'static str,
+    pub dbnums_total: usize,
+    pub dbnums_done: usize,
+    pub dbnums_failed: usize,
+    pub roots_total: usize,
+    pub roots_ready: usize,
+    pub roots_failed: usize,
+    pub current_dbnum: Option<u32>,
+    pub stage: Option<String>,
+    pub room_edges_written: usize,
+    pub max_transaction_bytes: usize,
+    pub elapsed_ms: u128,
+    pub rss_mib: Option<u64>,
+    pub failure_samples: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct InitializationSnapshot {
     pub epoch_id: u64,
@@ -254,6 +273,8 @@ pub struct InitializationSnapshot {
     pub startup_reconcile_pending: bool,
     /// 启动主线正在等待项目级房间计算。为真时 worker 不消费逐文件房间任务。
     pub startup_rooms_pending: bool,
+    /// kv-mem 房间冷启动的项目级进度；与模型/房间版本三元组正交。
+    pub room_bootstrap: StartupRoomBootstrap,
     /// 本次启动的模型覆盖面。`null` = 本进程没跑过启动复核（python 绑定、测试与
     /// 不经 `run_cli` 的入口都没有这一步），不是「覆盖为空」。
     pub startup: Option<StartupCoverage>,
@@ -293,6 +314,7 @@ struct CoordinatorState {
     /// 与不经 `run_cli` 的入口没有这一步，不该被它拦住。
     startup_reconcile_pending: bool,
     startup_rooms_pending: bool,
+    room_bootstrap: StartupRoomBootstrap,
     /// 本次启动核对到的覆盖面。进程级事实，**不随 `begin_discovery` 清**：重扫开
     /// 一个新 epoch，但启动那一刻核了多少库不会因此改变。
     startup_coverage: Option<StartupCoverage>,
@@ -317,6 +339,10 @@ impl Default for CoordinatorState {
             model_in_flight: false,
             startup_reconcile_pending: false,
             startup_rooms_pending: false,
+            room_bootstrap: StartupRoomBootstrap {
+                status: "idle",
+                ..Default::default()
+            },
             startup_coverage: None,
             startup_data_wait_degraded: None,
             phases: BTreeMap::new(),
@@ -655,7 +681,11 @@ impl InitializationCoordinator {
 
     pub fn mark_model_ready(&self) -> bool {
         let mut state = self.state();
-        if state.data_ready && state.model_phase_open && !state.startup_reconcile_pending {
+        if state.data_ready
+            && state.model_phase_open
+            && !state.startup_reconcile_pending
+            && !state.startup_rooms_pending
+        {
             let changed = !state.model_ready;
             state.status = InitializationStatus::ModelReady;
             state.model_ready = true;
@@ -696,11 +726,73 @@ impl InitializationCoordinator {
     }
 
     pub fn begin_startup_rooms(&self) {
-        self.state().startup_rooms_pending = true;
+        let mut state = self.state();
+        state.startup_rooms_pending = true;
+        state.model_ready = false;
+        state.room_bootstrap = StartupRoomBootstrap {
+            status: "initializing",
+            ..Default::default()
+        };
+    }
+
+    pub fn set_startup_room_totals(&self, dbnums_total: usize, roots_total: usize) {
+        let mut state = self.state();
+        state.room_bootstrap.dbnums_total = dbnums_total;
+        state.room_bootstrap.roots_total = roots_total;
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_startup_room_progress(
+        &self,
+        dbnums_done: usize,
+        dbnums_failed: usize,
+        roots_ready: usize,
+        roots_failed: usize,
+        current_dbnum: Option<u32>,
+        stage: impl Into<String>,
+        room_edges_written: usize,
+        elapsed_ms: u128,
+        rss_mib: Option<u64>,
+    ) {
+        let mut state = self.state();
+        let progress = &mut state.room_bootstrap;
+        progress.dbnums_done = dbnums_done;
+        progress.dbnums_failed = dbnums_failed;
+        progress.roots_ready = roots_ready;
+        progress.roots_failed = roots_failed;
+        progress.current_dbnum = current_dbnum;
+        progress.stage = Some(stage.into());
+        progress.room_edges_written = room_edges_written;
+        progress.elapsed_ms = elapsed_ms;
+        progress.rss_mib = rss_mib;
+    }
+
+    pub fn fail_startup_rooms(&self, status: &'static str, reason: impl Into<String>) {
+        debug_assert!(matches!(status, "partial" | "blocked"));
+        let mut state = self.state();
+        state.startup_rooms_pending = true;
+        state.model_ready = false;
+        state.room_bootstrap.status = status;
+        state.room_bootstrap.current_dbnum = None;
+        state.room_bootstrap.stage = Some("failed".into());
+        let reason = reason.into();
+        if state.room_bootstrap.failure_samples.len() < 32 {
+            state.room_bootstrap.failure_samples.push(reason);
+        }
+    }
+
+    pub fn observe_startup_room_transaction_bytes(&self, bytes: usize) {
+        let mut state = self.state();
+        state.room_bootstrap.max_transaction_bytes =
+            state.room_bootstrap.max_transaction_bytes.max(bytes);
     }
 
     pub fn settle_startup_rooms(&self) {
-        self.state().startup_rooms_pending = false;
+        let mut state = self.state();
+        state.startup_rooms_pending = false;
+        state.room_bootstrap.status = "ready";
+        state.room_bootstrap.current_dbnum = None;
+        state.room_bootstrap.stage = Some("complete".into());
     }
 
     pub fn startup_rooms_pending(&self) -> bool {
@@ -728,6 +820,7 @@ impl InitializationCoordinator {
             model_phase_open: state.model_phase_open,
             startup_reconcile_pending: state.startup_reconcile_pending,
             startup_rooms_pending: state.startup_rooms_pending,
+            room_bootstrap: state.room_bootstrap.clone(),
             startup: state.startup_coverage.clone(),
             startup_data_wait_degraded: state.startup_data_wait_degraded.clone(),
             phases: state
@@ -1251,18 +1344,23 @@ mod tests {
     }
 
     #[test]
-    fn project_room_barrier_blocks_worker_rooms_after_models_are_ready() {
+    fn project_room_barrier_blocks_model_ready_until_rooms_settle() {
         let coordinator = coordinator();
         let epoch = coordinator.begin_discovery();
         coordinator.install_manifest(epoch, [], false, []);
         coordinator.begin_startup_rooms();
-        assert!(coordinator.mark_model_ready());
-        assert!(coordinator.snapshot().model_ready);
+        assert!(
+            !coordinator.mark_model_ready(),
+            "room-enabled kv-mem must not advertise model_ready before startup rooms settle"
+        );
+        assert!(!coordinator.snapshot().model_ready);
         assert!(coordinator.snapshot().startup_rooms_pending);
         assert!(!coordinator.postprocess_allowed());
 
         coordinator.settle_startup_rooms();
         assert!(!coordinator.snapshot().startup_rooms_pending);
+        assert!(coordinator.mark_model_ready());
+        assert!(coordinator.snapshot().model_ready);
         assert!(coordinator.postprocess_allowed());
     }
 

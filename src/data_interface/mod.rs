@@ -1,12 +1,14 @@
 /// CATA 依赖闭包按需入库：每一批 DESI 写回都把它依赖的目录元素一起写进库（plan 2026-09-06 §3 D5–D7）。
 pub mod cata_dependency;
+pub mod uda_catalog_provider;
+pub mod mdb_read_store;
 pub mod db_model;
 pub mod dbnum_stats;
-/// PE 写事务的包装（`BEGIN / COMMIT`、上限、切块、执行；原 `dbnum_stats`，ADR-071 D6 / S7 搬出）。
-pub mod pe_batch;
 /// 元素数据行的批量渲染器：先删后插、每表一条 `INSERT IGNORE`（plan 2026-09-06 §3 D1/D2）。
 /// rocksdb 形态下基线与增量唯一的写法出口。
 pub mod element_batch;
+/// PE 写事务的包装（`BEGIN / COMMIT`、上限、切块、执行；原 `dbnum_stats`，ADR-071 D6 / S7 搬出）。
+pub mod pe_batch;
 /// 数据面事务切块上限（plan 2026-09-06 §3 D3）：2 MiB / 5000 行 / 1000 元素，可配。
 pub mod tx_limits;
 // pub mod spatial_model;
@@ -41,6 +43,9 @@ pub mod window_repair;
 
 pub mod model_refresh;
 
+/// memory-routed 库的整库即时生成：冻结根快照、任务 single-flight 与 ready-roots 对账。
+pub mod model_dbnum_ensure;
+
 pub mod model_impact;
 
 pub mod sesno_range;
@@ -56,6 +61,13 @@ pub mod uda_keys;
 
 /// 库文件头 / 会话页读法（e3d-io 版，替代 `DbPageBasicInfo` / `PdmsIO`）。
 pub mod db_file_header;
+
+/// 按 dbnum 的文件世代账本：`(FileIdentity, latest_sesno)` 任一变化 +1，区分会话前进 / 回滚 / 换文件
+/// （母计划不变量 7；阶段 4/5 切片接线，本模块纯内存）。
+pub mod db_generation;
+
+/// 项目内全部数据库的 DAB session tag 启动聚合，以及 `/health` 的有界只读快照。
+pub mod dabacon_tag_summary;
 
 /// 冻结源：收集时冻住的文件世代与目标会话（替代 `SnapshotToken` / `DabaconSnapshot`）。
 pub mod frozen_source;
@@ -132,10 +144,10 @@ pub mod helper;
 
 pub mod cata_closure;
 
-/// RefNo → dbnum 的唯一解法：位解码（母计划 2026-09-12 refno 原生路由，不变量 1）。
-pub mod refno_route;
 /// dbnum → 文件的路由目录，从 SYS/CURD 成员清单造，不含逐元素表（母计划 §5.1 / 切片 W2）。
 pub mod mdb_route_directory;
+/// RefNo → dbnum 的唯一解法：位解码（母计划 2026-09-12 refno 原生路由，不变量 1）。
+pub mod refno_route;
 
 /// ADR-053 direct 模式的取数底座：按 dbnum 池化 e3d-io 引擎、钉在各库
 /// `applied_sesno` 上，直接从 db 文件取元素属性，不经 SurrealDB。

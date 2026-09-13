@@ -73,6 +73,8 @@ struct Cli {
 enum Command {
     /// 起增量服务（不带任何子命令时的默认行为）。
     Serve(ServeArgs),
+    /// 打印可用于发布与二进制补丁追踪的完整构建身份。
+    Version(VersionArgs),
     /// 取本机服务的增量链路追踪。纯客户端，走 HTTP，不拿实例锁。
     ///
     /// 不拿锁是关键：`run_app` 一上来就 `acquire_process_instance_lock`，若这个
@@ -104,6 +106,13 @@ struct ServeArgs {
     watch_dbnum: Option<String>,
 }
 
+#[derive(clap::Args, Default)]
+struct VersionArgs {
+    /// 输出机器可读 JSON；补丁生成脚本使用这一形态。
+    #[arg(long)]
+    json: bool,
+}
+
 #[derive(clap::Args)]
 struct TraceArgs {
     /// 只看这一个 dbnum；不给就全都要。
@@ -122,6 +131,7 @@ fn main() -> anyhow::Result<()> {
 
     let cli = Cli::parse();
     let serve = match cli.command {
+        Some(Command::Version(args)) => return print_version(&args),
         Some(Command::Trace(args)) => return fetch_trace(&args),
         Some(Command::Serve(args)) => args,
         None => ServeArgs::default(),
@@ -152,6 +162,25 @@ fn main() -> anyhow::Result<()> {
         .thread_stack_size(RUNTIME_STACK_SIZE)
         .build()?
         .block_on(run_app(None))
+}
+
+fn print_version(args: &VersionArgs) -> anyhow::Result<()> {
+    let info = aios_database::build_info::current();
+    if args.json {
+        println!("{}", serde_json::to_string(&info)?);
+    } else {
+        println!(
+            "{} {} (release {}, git {}{}, target {}, profile {})",
+            info.product,
+            info.build_id,
+            info.version,
+            info.git_commit,
+            if info.git_dirty { ", dirty" } else { "" },
+            info.target,
+            info.profile
+        );
+    }
+    Ok(())
 }
 
 /// 走 curl 而不是引一个 HTTP 客户端依赖：仓内已有先例

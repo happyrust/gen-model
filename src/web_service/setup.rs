@@ -102,8 +102,8 @@ pub fn setup_mode_reason(option: &aios_core::options::DbOption) -> Option<String
 /// [`setup_mode_reason`] 的纯函数体，store 形态从参数来，测试不必碰进程级 OnceLock。
 ///
 /// `v_port` 在 `DbOption` 里是 `u16`（toml 写字符串也会被 config 层折成数），所以
-/// 「未设置」的哨兵值是 **0**——出厂模板写 `v_port = "0"`；写空串会让整份配置
-/// 反序列化失败，连设置模式都起不来。
+/// 「未设置」的哨兵值是 **0**；当前出厂模板已经为 kv-mem 预填 8009，手改为 0
+/// 仍会进入设置模式。写空串会让整份配置反序列化失败，连设置模式都起不来。
 pub(crate) fn setup_mode_reason_for(
     store: crate::options::StoreMode,
     project_path: &str,
@@ -119,7 +119,7 @@ pub(crate) fn setup_mode_reason_for(
     }
     if store != crate::options::StoreMode::EmbeddedMem && (v_ip.trim().is_empty() || v_port == 0) {
         return Some(format!(
-            "store_mode={} 需要 v_ip / v_port，当前未设置（v_port=0 即出厂哨兵值）",
+            "store_mode={} 需要 v_ip / v_port，当前未设置（v_port=0 是未设置哨兵值）",
             store.as_str()
         ));
     }
@@ -139,6 +139,58 @@ pub fn clear_first_run_marker(workspace: &Path) -> std::io::Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(error) => Err(error),
     }
+}
+
+/// 删除首跑哨兵前的最后一道后端闸。
+///
+/// `ctx.mode` 证明当前进程已经用有效配置完成过一次正常启动；再读当前文件，是为了挡住
+/// normal 进程里把配置改坏、却尚未重启就直接点「完成」的窗口。
+fn ensure_completion_ready(mode: &str, config_path: &Path) -> anyhow::Result<()> {
+    if mode != "normal" {
+        anyhow::bail!("当前仍处于设置模式；请先在第④步保存配置并等待服务自动重启成功");
+    }
+    let text = std::fs::read_to_string(config_path)
+        .map_err(|error| anyhow::anyhow!("读配置 {} 失败：{error}", config_path.display()))?;
+    let document: toml_edit::DocumentMut = text
+        .parse()
+        .map_err(|error| anyhow::anyhow!("解析配置 {} 失败：{error}", config_path.display()))?;
+    let values = subset_values(&document);
+    let text_value = |key: &str| {
+        values
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    let store_name = text_value("store_mode")
+        .to_ascii_lowercase()
+        .replace('_', "-");
+    let store = match store_name.as_str() {
+        "" | "spawned-mem" | "kv-mem" => crate::options::StoreMode::SpawnedMem,
+        "external" | "rocksdb" => crate::options::StoreMode::External,
+        "spawned-rocksdb" => crate::options::StoreMode::SpawnedRocks,
+        "embedded-mem" => crate::options::StoreMode::EmbeddedMem,
+        other => anyhow::bail!("store_mode 无效：{other:?}"),
+    };
+    let v_port = values
+        .get("v_port")
+        .and_then(|value| {
+            value
+                .as_u64()
+                .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+        })
+        .and_then(|port| u16::try_from(port).ok())
+        .unwrap_or_default();
+    if let Some(reason) = setup_mode_reason_for(
+        store,
+        &text_value("project_path"),
+        &text_value("v_ip"),
+        v_port,
+    ) {
+        anyhow::bail!("配置尚未就绪：{reason}");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -179,6 +231,7 @@ pub struct SetupConfigPatch {
     pub v_ip: Option<String>,
     pub v_port: Option<String>,
     pub http_api_addr: Option<String>,
+    pub http_public_addr: Option<String>,
     pub gen_model: Option<bool>,
     pub gen_mesh: Option<bool>,
     pub watch_dbnums: Option<Vec<u32>>,
@@ -211,6 +264,14 @@ fn validate_patch(patch: &SetupConfigPatch) -> Vec<String> {
     {
         problems.push(format!(
             "http_api_addr 不是 <IP>:<端口> 形态（如 0.0.0.0:9099）：{addr:?}"
+        ));
+    }
+    if let Some(addr) = patch.http_public_addr.as_deref()
+        && !addr.trim().is_empty()
+        && addr.trim().parse::<SocketAddr>().is_err()
+    {
+        problems.push(format!(
+            "http_public_addr 不是 <IP>:<端口> 形态（如 192.168.1.9:9099）：{addr:?}"
         ));
     }
     problems
@@ -275,6 +336,9 @@ fn apply_patch(
     }
     if let Some(addr) = &patch.http_api_addr {
         set(document, "http_api_addr", value(addr.as_str()));
+    }
+    if let Some(addr) = &patch.http_public_addr {
+        set(document, "http_public_addr", value(addr.as_str()));
     }
     if let Some(gen_model) = patch.gen_model {
         set(document, "gen_model", value(gen_model));
@@ -399,6 +463,7 @@ fn subset_values(document: &toml_edit::DocumentMut) -> serde_json::Value {
         "v_ip",
         "v_port",
         "http_api_addr",
+        "http_public_addr",
         "gen_model",
         "gen_mesh",
         "save_db",
@@ -625,7 +690,8 @@ async fn setup_state(
         "first_run_pending": first_run_pending_at(&workspace),
         "config_path": ctx.config_path.display().to_string(),
         "workspace_dir": workspace.display().to_string(),
-        "version": env!("CARGO_PKG_VERSION"),
+        "version": crate::build_info::VERSION,
+        "build_id": crate::build_info::BUILD_ID,
     })))
 }
 
@@ -780,6 +846,8 @@ async fn setup_complete(
     State(ctx): State<SetupCtx>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     require_loopback(peer)?;
+    ensure_completion_ready(ctx.mode, &ctx.config_path)
+        .map_err(|error| ApiError::precondition(format!("{error:#}")))?;
     let workspace = ctx.workspace_dir();
     let removed = clear_first_run_marker(&workspace).map_err(|error| {
         ApiError::precondition(format!(
@@ -886,10 +954,7 @@ async fn setup_mode_health(State(reason): State<&'static str>) -> Json<serde_jso
 /// restart 口交接之后，新进程走正常启动，这里就再也进不来了。
 pub async fn run_setup_mode(reason: String) -> anyhow::Result<()> {
     let ext = crate::get_db_option_ext();
-    let addr = ext
-        .http_api_addr
-        .clone()
-        .unwrap_or_else(|| "127.0.0.1:9099".to_string());
+    let addr = super::effective_http_api_addr(ext.http_api_addr.as_deref(), &ext.server_release_ip);
     let ui_root = PathBuf::from(
         std::env::var("PLANT_UI_WEB_ROOT").unwrap_or_else(|_| "../plant-ui/web".into()),
     );
@@ -908,10 +973,11 @@ pub async fn run_setup_mode(reason: String) -> anyhow::Result<()> {
 
     let listener = bind_with_handoff(&addr).await?;
     println!("*** 设置模式：{reason_static} ***");
+    let setup_url = format!("http://{}/setup.html", browser_facing(&addr));
     println!(
-        "*** 配置向导：http://{}/setup.html （库、扫描、监听一概没起；配置保存并重启后进入正常服务）***",
-        browser_facing(&addr)
+        "*** 配置向导：{setup_url} （库、扫描、监听一概没起；配置保存并重启后进入正常服务）***"
     );
+    super::maybe_open_plant_ui(&setup_url);
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
@@ -1016,6 +1082,75 @@ mod tests {
         assert!(!clear_first_run_marker(dir.path()).unwrap());
     }
 
+    /// 回归：配置仍为空时，哪怕前端误把人送到了第⑤步，也不能让「完成向导」
+    /// 删除哨兵并制造假完成。设置模式与「normal 进程里刚写入无效配置、尚未重启」
+    /// 两种入口都必须由后端兜底拒绝。
+    #[tokio::test]
+    async fn completion_refuses_setup_mode_and_an_invalid_current_config() {
+        for mode in ["setup", "normal"] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let config = dir.path().join("DbOption.toml");
+            std::fs::write(
+                &config,
+                "project_path = \"\"\nstore_mode = \"spawned-mem\"\nv_ip = \"127.0.0.1\"\nv_port = \"8009\"\n",
+            )
+            .unwrap();
+            let marker = dir.path().join(FIRST_RUN_MARKER);
+            std::fs::write(&marker, "pending").unwrap();
+            let ctx = SetupCtx {
+                mode,
+                config_path: config,
+                ui_root: dir.path().join("web"),
+                bound_port: Some(9099),
+            };
+            let result =
+                setup_complete(ConnectInfo("127.0.0.1:41234".parse().unwrap()), State(ctx)).await;
+            assert!(result.is_err(), "mode={mode} 不得完成无效配置");
+            assert!(marker.is_file(), "拒绝完成时不得删除首跑哨兵");
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let project_root = dir.path().join("projects");
+        std::fs::create_dir(&project_root).unwrap();
+        let config = dir.path().join("DbOption.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "project_path = {:?}\nstore_mode = \"spawned-mem\"\nv_ip = \"127.0.0.1\"\nv_port = \"8009\"\n",
+                project_root.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .unwrap();
+        let marker = dir.path().join(FIRST_RUN_MARKER);
+        std::fs::write(&marker, "pending").unwrap();
+        let result = setup_complete(
+            ConnectInfo("127.0.0.1:41234".parse().unwrap()),
+            State(SetupCtx {
+                mode: "normal",
+                config_path: config,
+                ui_root: dir.path().join("web"),
+                bound_port: Some(9099),
+            }),
+        )
+        .await;
+        assert!(result.is_ok(), "normal + 有效配置应允许完成：{result:?}");
+        assert!(!marker.exists(), "完成成功后应删除首跑哨兵");
+    }
+
+    /// 前端两道门：`?resume=init` 只有 normal 模式能进入第⑤步；完成按钮还要现场
+    /// 复核一次状态，不能仅凭旧页面内存把 setup 模式画成「完成」。
+    #[test]
+    fn the_wizard_never_resumes_or_completes_initialization_in_setup_mode() {
+        assert!(
+            SETUP_PANEL_EMBEDDED.contains(r#"state.mode === "normal" && (resume === "init""#),
+            "resume=init 必须受 normal 模式约束"
+        );
+        assert!(
+            SETUP_PANEL_EMBEDDED.contains(r#"if (state.mode !== "normal")"#),
+            "finish() 必须重新读取状态并拒绝 setup 模式"
+        );
+    }
+
     // ---------- 写盘 ----------
 
     const FIXTURE: &str = r#"# 顶部注释：决策史，一个字都不能丢
@@ -1034,6 +1169,7 @@ v_ip = "127.0.0.1"
 v_port = "8010"
 
 http_api_addr = "127.0.0.1:9099"
+http_public_addr = ""
 gen_model = true
 gen_mesh = true
 watch_dbnums = []
@@ -1055,6 +1191,7 @@ room_key_word = ["-RM"]
             v_ip: Some("192.168.0.10".into()),
             v_port: Some("8010".into()),
             http_api_addr: Some("0.0.0.0:9099".into()),
+            http_public_addr: Some("192.168.1.9:9099".into()),
             gen_model: Some(false),
             gen_mesh: Some(false),
             watch_dbnums: Some(vec![7997, 8000]),
@@ -1070,6 +1207,7 @@ room_key_word = ["-RM"]
                 "v_ip",
                 "v_port",
                 "http_api_addr",
+                "http_public_addr",
                 "gen_model",
                 "gen_mesh",
                 "watch_dbnums",
@@ -1185,21 +1323,23 @@ room_key_word = ["-RM"]
         );
     }
 
-    /// PUT 的形状校验：store_mode 拼错、v_port 非数字、http_api_addr 不成形都拦在写盘前。
+    /// PUT 的形状校验：store_mode 拼错、v_port 非数字、监听/展示地址不成形都拦在写盘前。
     #[test]
     fn patch_validation_rejects_malformed_values() {
         let bad = SetupConfigPatch {
             store_mode: Some("rocksdb".into()),
             v_port: Some("eight".into()),
             http_api_addr: Some("9099".into()),
+            http_public_addr: Some("host:9099".into()),
             ..Default::default()
         };
         let problems = validate_patch(&bad);
-        assert_eq!(problems.len(), 3, "{problems:?}");
+        assert_eq!(problems.len(), 4, "{problems:?}");
         let good = SetupConfigPatch {
             store_mode: Some("external".into()),
             v_port: Some("8010".into()),
             http_api_addr: Some("0.0.0.0:9099".into()),
+            http_public_addr: Some("192.168.1.9:9099".into()),
             ..Default::default()
         };
         assert!(validate_patch(&good).is_empty());
@@ -1234,6 +1374,25 @@ room_key_word = ["-RM"]
             SETUP_PANEL_EMBEDDED.contains("ams-setup-wizard"),
             "web/setup.html 必须含 id=\"ams-setup-wizard\" 标记"
         );
+    }
+
+    /// runtime 出厂配置默认 embedded-mem；向导必须能原样显示并保存这一档，不能因
+    /// 没有对应 radio 而静默回写成 spawned-mem、再次引入数据库端口冲突。
+    #[test]
+    fn the_wizard_preserves_the_embedded_runtime_store_mode() {
+        for needle in [
+            r#"id="store-embedded" value="embedded-mem""#,
+            r#"v.store_mode === "embedded-mem""#,
+            r#"return "embedded-mem""#,
+            r#"tier === "embedded-mem""#,
+            r#"id="f-http_public_addr""#,
+            r#"http_public_addr: val("f-http_public_addr")"#,
+        ] {
+            assert!(
+                SETUP_PANEL_EMBEDDED.contains(needle),
+                "web/setup.html 缺 embedded-mem 接线：{needle}"
+            );
+        }
     }
 
     /// 路由面源码钉：mod.rs 必须把 setup 路由 merge 进主 app、把 `/` 交给 root_gate——

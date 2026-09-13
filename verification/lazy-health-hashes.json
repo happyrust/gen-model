@@ -1,0 +1,57 @@
+[
+  {
+    "path": "docs/specs/web-service-api.md",
+    "original_sha256": "20d4e90825b620cfd00e32c98605c0164d0c760040a386042a8be9eb817d500b",
+    "modified_sha256": "07db40deff4525166330b461d4b12b6853af8286bbdc1a99ef580aec35fba776"
+  },
+  {
+    "path": "src/data_interface/direct_store.rs",
+    "original_sha256": "7cfd8671e82e4ef1ce763ca78fbb2f84948501ad39f0f9aaec5d582b67a5418f",
+    "modified_sha256": "f98564bae74a96ba1686c3733d78d1169bf8d9c27feca128d15450eec0319021"
+  },
+  {
+    "path": "src/data_interface/direct_tree.rs",
+    "original_sha256": "9402095a54cfccd3877fac39bdef7383fb566afc4dfb508e97a4a25ffa106f6a",
+    "modified_sha256": "cecedd1f6a07976da0c1eccdda79898863513269ddd90ca8ec0279a7c3251b3a"
+  },
+  {
+    "path": "src/data_interface/element_attributes.rs",
+    "original_sha256": "c300229476c033bd7399b779096b5dc766e9baf1975886e92dcbdd788e5a1d76",
+    "modified_sha256": "024b2529908186ba8f023ee3501593371d1c73042d34b11c5e812f66cc0c3001"
+  },
+  {
+    "path": "src/data_interface/increment_manager.rs",
+    "original_sha256": "a623d721408eb5962273f58f0930ca344e3a742991fc72bd1db5d720a7b15ad5",
+    "modified_sha256": "54f4f340d6934eb11e9310c83f296538220896433ae7a5e9908500def6ca0929"
+  },
+  {
+    "path": "src/data_interface/mdb_route_directory.rs",
+    "original_sha256": "c38e173cd67383a19d9a30805f61e1411d51c639bdc6ec796c99004802ad3403",
+    "modified_sha256": "7f0d62779396a18cf5193b97c7fc0e83f54cc285c55abecb4fc7d6b924ff0816"
+  },
+  {
+    "path": "src/lib.rs",
+    "original_sha256": "b7e2a80b68b4a6e005337865d8246d5cd02654440803cf82adf775afcfadfab5",
+    "modified_sha256": "3547b406f423ddb1370af8f87e49c86496922aff81d4d5628bc6c474e8dd8491"
+  },
+  {
+    "path": "src/web_service/handlers.rs",
+    "original_sha256": "5423ab4cd9e3c58dbf0658b916ddff1dfa932a05635e5f5642f4d0168991dddb",
+    "modified_sha256": "f9f570fba76b42aeab2759d65247437541ee8b8269ab7b10365a20f835f6f2b6"
+  },
+  {
+    "path": "src/web_service/mod.rs",
+    "original_sha256": "07656c816eb2cbc2939e52bd1921972f93e11bc8c598fc390cd1086f67b3c798",
+    "modified_sha256": "1082365d6aa5c3587281780c48f753a8d2bbec6a5c7c6db8852f760c28848ad1"
+  },
+  {
+    "path": "tests/refno_native_api_contract.rs",
+    "original_sha256": "45615c0ced1d228943b1557f2cce33f7b283e5bcef43edb27b4faa9bc2f418ba",
+    "modified_sha256": "550398e0f5cbe6100175b335462675c5f91a2452a7e63ae89562c81a1f5fc514"
+  },
+  {
+    "path": "tests/refno_native_guards.rs",
+    "original_sha256": "bd57e6513ac145ad8b96e875dfe00118a518507af0fb532618be8e69b287b9e3",
+    "modified_sha256": "4c42ed5c8ab0f800f165040a6fe19d3c7f9d35ac39a8410f4e18069d9e6397b2"
+  }
+]

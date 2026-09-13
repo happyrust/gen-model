@@ -1,6 +1,6 @@
 # ADR-073：房间随根生成、不再是一条流程；任何未完成写入一律整库重初始化
 
-状态：**已接受**（2026-09-10 用户拍板：「房间只保留几何与筛选算法，流程整套删除」（共识 **d-757**）；「任何未完成的写入
+状态：**已接受，2026-09-11 修订房间总开关语义**（2026-09-10 用户拍板：「房间只保留几何与筛选算法，流程整套删除」（共识 **d-757**）；「任何未完成的写入
 重启后一律按整个 dbnum 清理并重新初始化，不再按 sesno 回退」（共识 **d-747**，三条口径）。本文由协同组「房间」t-803 起草，
 是 t-735 文档清点里拆出的「刀 1」——后续 ADR / CONTEXT / 计划改写都以本文为尺子。措辞待指挥官 / 用户过目；
 **号到提交时复核**——ADR-060 曾撞号两次。）**实施中**：worktree `gen-model-refactor`，分支 `refactor/retire-publish-stage`，
@@ -22,6 +22,49 @@
   每轮重发 59,691 条归属）；d-429 的可行性依据（`MemoryRoomCalculator::calculate_with_points` 逐记录独立、无跨记录聚合）；
   R0 勘察实位（开工前写入标记检查在 `batch_worker.rs` 的 `rollback_if_writing` 那条路；`fast_delete::rollback_to_watermark`
   的 wipe 分支提前 return，镜像作废 / 空间树置脏 / 普查作废三句在整库路上一句没跑到）。
+
+## 2026-09-11 修订：kv-mem 房间启动屏障与完整根 ACK
+
+用户批准决策 **d-381**：`room_membership=true` 的 spawned/embedded kv-mem 每次冷启动都是空结果库，
+必须依次完成 resident 输入、MDB 全部可读 DESI 的模型根、逐根房间归属与 process-store 发布，
+全部成功后才允许 `initialization.model_ready=true` / `features.room.status=available`。范围不受
+`watch_dbnums` 限定；`startup_autorun=false` 也不跳过。失败时服务保留 health/诊断能力，但普通
+模型完整产出入口返回 `room_bootstrap_in_progress|room_bootstrap_unavailable`，不能制造“几何完成、
+房间未计算”的成功根。
+
+这要求把两个概念拆开：
+
+- `ModelReadRoute` 只回答从投影还是数据库读取；
+- `ModelPublicationPolicy` 回答写到哪里。ingest 初始化未收口时仍是 `ProjectionOnly`；read-through
+  kv-mem 是 `ProcessStore{durable:false}`，复用 D1 的逐根模型行 + 两类房间边 + `gen_root` 同事务写法。
+
+`RootReceipt` 继续表示候选几何。process-store 事务成功后，进程内另记
+`RootPublicationAck{source_sesno,room_generation,medium,...}`；ready 根在房间开启时必须同时匹配
+冻结源与 resident generation。几何重生成、删除、源换代与 resident 换代会使旧 ACK 失效。
+ACK 不持久、不参与 ingest 水位判决，进程退出即消失，因此它不是第三枚房间水位。
+
+`POST /dbnums/{dbnum}/model/rebuild` 按模型路由分派：Database 保持 durable worker；Memory 复用同一个
+整库内存执行器，不再向 read-through 中没有消费者的 durable queue 排永久 queued 任务。
+`e3d.room.lookup` 保留版本三元组语义（read-through 仍为 `null/null/unsupported`），另加
+`calculation_status` 区分 `ready_empty` 与 `not_computed/initializing/failed`。
+
+## 2026-09-11 修订：房间总开关不阻断模型
+
+用户进一步拍板：`room_membership=false` 的含义是**只关闭房间归属计算，不影响模型更新**。本节在
+开关关闭时取代 D1 / D2 与 W2 / W3 中“房间是模型完成前置”的部分；开关开启时原规则不变。
+
+- `frozen_room_calculator` 在开关关闭时返回 `Ok(None)`，不是错误。生成根照常持久化、凭证照常安定，
+  `model_sesno` 照常前移；根事务不写新的 `room_relate` / `room_panel_relate`，模型对账删除掉的来源旧边仍清。
+- `model_sesno` 的承诺随开关显式分档：开时包含房间归属，关时只包含模型几何。库上不恢复第三枚
+  `room_sesno`；`/health.room_membership=false` 是“当前一致性不含房间”的必备伴随信号。
+- 关闭期间既不会产生失败根，也不会留下模型水位缺口，因此重新打开后**不能**靠启动模型覆盖复核自动发现
+  历史房间欠账。重新打开只影响之后重生成的根；要补齐关闭期间缺失或陈旧的房间边，运维显式执行该库
+  `POST /api/v1/dbnums/{dbnum}/model/rebuild`。
+- 这是有意接受的降级：关闭时材料表可能读到旧房间号或无房间号，但模型几何与模型水位继续工作。启动横幅
+  与 `/health` 必须把这一点说清楚，不得把 `model_sesno == applied_sesno` 单独表述成“房间也一致”。
+- `e3d.room.lookup` 在关闭时仍返回存量边供诊断，但增加 `room_membership=false`，并返回
+  `publication_status="disabled"`、`published_version=null`、`stale=null`；此分档修订 D4
+  “直接用 model_sesno 表达房间版本”的旧约束。
 
 ## 背景
 

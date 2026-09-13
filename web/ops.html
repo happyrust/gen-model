@@ -954,6 +954,8 @@ async function cycle(){
     if(st && S.startedAt && st !== S.startedAt) S.blockedSince = 0;
     S.startedAt = st || S.startedAt;
     S.health = h.value; S.lastOk = Date.now(); S.errSince = 0; S.lastErr = "";
+    // 读透形态（spawned-mem / embedded-mem）不推水位，库表那一格按它画「不判」。
+    S.dataFace = h.value?.data_face || "";
   }else{
     S.lastErr = String(h.reason?.message || h.reason || "请求失败");
     if(!S.errSince) S.errSince = Date.now();
@@ -1366,6 +1368,35 @@ function dataLane(m){
       line:`${m.held.length} 条重扫积压挂在队里，等对应的库真的来一次增量`,
       detail:"held 行不会被派发，它只是把「这个库有欠账」记在明面上。",
       timer:null };
+  }
+  // kv-mem 房间启动屏障（spec §4.1 `initialization.room_bootstrap`）：`room_membership=true`
+  // 的读透进程在 resident 之后要把 MDB 全部 DESI 的模型根、房间归属与逐根发布走完，才放
+  // `model_ready`。这一段 data_ready=true、model_in_flight=false、model_ready=false——落到
+  // 下面那条「模型工作单还没收敛」会把几十个库的整库生成讲成 AABB 收口，而进度明明就在
+  // health 里。idle = 本形态没有这道屏障；ready = 已放行，两档都不在这里说话。
+  const rb = m.init.room_bootstrap;
+  if(rb && rb.status && rb.status !== "idle" && rb.status !== "ready"){
+    const t0 = ts(m.h.started_at);
+    const roots = `根 ${n(rb.roots_ready)}/${n(rb.roots_total)}${rb.roots_failed ? `（失败 ${n(rb.roots_failed)}）` : ""}`;
+    const edges = `房间边 ${n(rb.room_edges_written)}`;
+    const cost = `已耗时 ${dur(Number(rb.elapsed_ms))}${rb.rss_mib != null ? `，RSS ${n(rb.rss_mib)} MiB` : ""}${rb.max_transaction_bytes ? `，最大单根事务 ${n(rb.max_transaction_bytes)} B` : ""}。`;
+    if(rb.status === "initializing"){
+      const at = rb.current_dbnum != null
+        ? `正在做第 ${n(rb.dbnums_done + 1)}/${n(rb.dbnums_total)} 个库（dbnum ${rb.current_dbnum}）`
+        : `已完成 ${n(rb.dbnums_done)}/${n(rb.dbnums_total)} 个库，正在切下一个`;
+      return { lv:"run", chip:["blue","房间初始化"], path,
+        line:`房间启动屏障未放行：${at} —— ${roots}，${edges}`,
+        detail:esc(`room_membership=true 的 kv-mem 冷启动先把 MDB 全部可读 DESI 的模型根生成、逐根房间归属与模型行 + 房间边 + 回执的逐根事务走完，才置 model_ready、才把 features.room 报成 available；范围不受 watch_dbnums 限定。${cost}`
+          + "期间 memory 路由库的 /model/ensure（单根与整库）和 /model/rebuild 回 503 room_bootstrap_in_progress；树、属性、搜索这些直读接口照常。"),
+        timer:t0 ? { label:"已初始化", val:dur(now - t0), since:clock(t0), cls:"blue" } : null };
+    }
+    const samples = (rb.failure_samples || []).slice(0, 3);
+    return { lv:"bad", chip:["red", rb.status === "blocked" ? "房间屏障阻断" : "房间屏障部分失败"], path,
+      line:`房间启动屏障 ${rb.status}：${n(rb.dbnums_failed)} 个库 / ${n(rb.roots_failed)} 个根失败，model_ready 不放行`,
+      detail:esc(`${n(rb.dbnums_done)}/${n(rb.dbnums_total)} 个库已过，${roots}，${edges}。${cost}`
+        + (samples.length ? `失败样本：${samples.join("；")}` : "health 没给失败样本。")
+        + " 成功的根保留，失败的根没有完整回执；服务保持可诊断，修正来源后重启进程重跑这道屏障。"),
+      timer:t0 ? { label:"已初始化", val:dur(now - t0), since:clock(t0), cls:"red" } : null };
   }
   // 水位齐、队列空，引擎却还没收口。模型阶段不进 /queue，上面那些判据一个都碰不到
   // 它，落到绿灯就成了「全好了」。两个信号要分开看：in_flight / model_running 是

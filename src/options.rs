@@ -48,9 +48,15 @@ pub struct DbOptionExt {
     pub append_delivery_unit_types: Option<Vec<String>>,
 
     /// Web 服务（REST + WebSocket）监听地址，如 `0.0.0.0:8020`。
-    /// 未配置时即使编译了 `http_api` feature 也不启动服务。
+    /// 未配置或留空时兼容使用 [`DbOption::server_release_ip`]；后者也为空时只监听
+    /// `127.0.0.1:9099`，服务不会因缺少新键而静默退出。
     #[serde(default)]
     pub http_api_addr: Option<String>,
+
+    /// 浏览器与日志对外展示的 HTTP 地址，如 `192.168.1.9:9099`。
+    /// 只用于生成链接；未配置时从最终生效的监听地址派生。
+    #[serde(default)]
+    pub http_public_addr: Option<String>,
 
     /// Web 服务允许的 CORS origin 列表；`["*"]` 表示放开（开发期）。
     /// 未配置时默认放开。
@@ -101,11 +107,11 @@ pub struct DbOptionExt {
     // 两个键随房间流程退役（ADR-073 D7；ADR-067 D9 作废）：房间归属随每个生成根算出、与模型行
     // 同事务落库，没有独立的房间阶段可开关；常驻房间模型是那一步的算法输入，随 `spatial_compute`
     // 一道门走。配置里再写这两个键会进「未知键」告警名单。
-
-    /// 房间归属计算的总开关（默认 `true`；ADR-073 D1 的逐根房间归属）。
+    /// 房间归属计算的总开关（默认 `false`；ADR-073 D1 的逐根房间归属）。
     ///
     /// 关掉时生成路径不算房间归属、不写 `room_relate` / `room_panel_relate` 新边，
-    /// 启动也不建常驻房间模型；被对账掉的来源旧边照旧清。详见 [`room_membership`]。
+    /// 但模型根与 `model_sesno` 照常推进；启动也不建常驻房间模型，被对账掉的来源
+    /// 旧边照旧清。详见 [`room_membership`]。
     #[serde(default)]
     pub room_membership: Option<bool>,
 
@@ -153,15 +159,16 @@ pub struct DbOptionExt {
     #[serde(default)]
     pub data_tx_elements: Option<u64>,
 
-    /// 持久层换成进程内嵌的 kv-mem 引擎（默认 `false` = 连 `v_ip:v_port` 的
-    /// SurrealDB 服务）。详见 [`in_memory_db`]。
+    /// 旧开关：持久层换成进程内嵌的 kv-mem 引擎。显式 `false` 仍表示 external；
+    /// 两个形态键都不写时的新默认由 [`store_mode`] 决定。详见 [`in_memory_db`]。
     ///
     /// **已被 [`store_mode`] 取代**：它只表达得了 `embedded-mem` 那一档。保留是因为
     /// 它散在环境变量、`/health`、`PersistTarget` 与两份 ADR 里，一次性删的面太大。
     #[serde(default)]
     pub in_memory_db: Option<bool>,
 
-    /// 持久层的介质与「谁把它拉起来」：`external` / `spawned-mem` / `embedded-mem`。
+    /// 持久层的介质与「谁把它拉起来」：`external` / `spawned-rocksdb` /
+    /// `spawned-mem` / `embedded-mem`。
     /// 详见 [`store_mode`]。
     #[serde(default)]
     pub store_mode: Option<String>,
@@ -251,6 +258,7 @@ impl From<DbOption> for DbOptionExt {
             delivery_unit_types: None,
             append_delivery_unit_types: None,
             http_api_addr: None,
+            http_public_addr: None,
             http_api_cors: None,
             data_batch_workers: None,
             startup_autorun: None,
@@ -312,6 +320,8 @@ struct DbOptionExtFields {
     append_delivery_unit_types: Option<Vec<String>>,
     #[serde(default)]
     http_api_addr: Option<String>,
+    #[serde(default)]
+    http_public_addr: Option<String>,
     #[serde(default)]
     http_api_cors: Option<Vec<String>>,
     #[serde(default)]
@@ -538,6 +548,7 @@ pub fn get_db_option_ext() -> DbOptionExt {
         delivery_unit_types: ext.delivery_unit_types.clone(),
         append_delivery_unit_types: ext.append_delivery_unit_types.clone(),
         http_api_addr: ext.http_api_addr.clone(),
+        http_public_addr: ext.http_public_addr.clone(),
         http_api_cors: ext.http_api_cors.clone(),
         data_batch_workers: ext.data_batch_workers,
         startup_autorun: ext.startup_autorun,
@@ -738,11 +749,10 @@ impl StoreMode {
 /// 本进程生效的存储形态（`DbOption.toml` 的 `store_mode`，环境变量
 /// [`STORE_MODE_ENV`] 压过它）。
 ///
-/// **默认 `external`**（2026-09-07 用户拍板，翻回 2026-09-04 之前的口径）。默认连
-/// `v_ip:v_port` 上那台已经在跑的 SurrealDB，不由本进程拉起——现场配置绝大多数指着一台
-/// 手工起的落盘库，而那台库没有本进程的[署名][`crate::store_process::StoreSignature`]，
-/// `spawned-mem` 默认下 [`crate::store_process::judge_port`] 只能判「分不清」并拒绝启动。
-/// 开箱即用那一档改为**显式**写 `store_mode = "spawned-mem"`。
+/// **默认 `spawned-mem`**（2026-09-11 用户拍板）：服务自行拉起 `v_ip:v_port` 上的
+/// memory SurrealDB，进程退出后数据消失。需要外置持久库的现场配置必须显式写
+/// `store_mode = "external"`；仓内夹具均由
+/// `every_db_option_fixture_declares_its_store_mode_and_data_face` 护栏钉住，不依赖默认值。
 ///
 /// 这个默认同时决定 [`data_face`]（`external` → `ingest`，两档内存 → `read-through`），
 /// 所以漏写这一项换掉的不只是介质，还有整个数据面；`db_options/` 下的夹具由护栏
@@ -750,7 +760,8 @@ impl StoreMode {
 ///
 /// 兼容：没写 `store_mode` 但 [`in_memory_db`] 为真时回 `embedded-mem`，与那个旧开关
 /// 今天的行为逐字相同；写了 `in_memory_db = false` 而没写 `store_mode` 的同样回
-/// `external`——与新默认一致，那句 `false` 本来说的就是这件事。
+/// `external`——即使默认已经翻成 `spawned-mem`，这句显式的 `false` 仍然是人的意图，
+/// 不能被新默认覆盖。两个键都没写时才采用 `spawned-mem`。
 /// 两个键都写且互相矛盾时以 `store_mode` 为准并由 [`store_mode_notice`] 出声。
 /// 认不出的值当没设，同样出声。
 pub fn store_mode() -> StoreMode {
@@ -772,14 +783,15 @@ fn effective_store_mode(
     if let Some(mode) = parse_store_mode(env_override).or_else(|| parse_store_mode(configured)) {
         return mode;
     }
-    // 没写 `store_mode` 时由旧开关说话，语义与它今天的两态逐字相同：
-    // `true` = 库在进程里，`false` = 过外置库。两处都没写也是外置——自带存储要显式要。
+    // 没写 `store_mode` 时先尊重旧开关，语义与它今天的两态逐字相同：
+    // `true` = 库在进程里，`false` = 过外置库。两个键都没写才走新默认 spawned-mem。
     match in_memory_db_env
         .and_then(parse_bool_flag)
         .or(configured_in_memory_db)
     {
         Some(true) => StoreMode::EmbeddedMem,
-        Some(false) | None => StoreMode::External,
+        Some(false) => StoreMode::External,
+        None => StoreMode::SpawnedMem,
     }
 }
 
@@ -1309,18 +1321,20 @@ fn effective_spatial_compute(env_override: Option<&str>) -> bool {
 /// 环境变量名：一次性覆盖 [`room_membership`]，不必改配置文件。
 pub const ROOM_MEMBERSHIP_ENV: &str = "AIOS_ROOM_MEMBERSHIP";
 
-/// 房间归属计算开不开（`DbOption.toml` 的 `room_membership`，**默认 true**）。
+/// 房间归属计算开不开（`DbOption.toml` 的 `room_membership`，**默认 false**）。
 ///
 /// ADR-073 D1 之后房间不是一条独立流程：一个生成根算完几何，紧接着用常驻房间模型里的
 /// 面板做点包含筛选、算出它每个构件属于哪些面板，边与模型行同一笔事务落库。本开关门的
 /// 就是那一步，判定点只有一处——任务开工冻房间计算器的
-/// [`crate::fast_model::model_db_adapter::frozen_room_calculator`]，关着直接报错，模型根不落库、
-/// 模型水位不前移。启动段（`prepare_room_resident_at_startup`）
-/// 同时跳过常驻房间模型的构建，生命周期记 `Disabled { source: "room_membership=false" }`。
+/// [`crate::fast_model::model_db_adapter::frozen_room_calculator`]。关着返回 `Ok(None)`：
+/// 模型根照常落库、`model_sesno` 照常前移，只是不计算、不写新房间边；被模型对账删除的
+/// 来源旧边仍清。启动段（`prepare_room_resident_at_startup`）同时跳过常驻房间模型的
+/// 构建，生命周期记 `Disabled { source: "room_membership=false" }`。
 ///
-/// **这是非正常运行状态**：关着期间数据面仍可推进，但模型根保持失败/欠账；重新打开后由
-/// 后续模型重试补齐，不允许产生“模型已完成但房间边缺失”的伪一致状态。
-/// 护栏：启动横幅一行、`/health` 的 `room_membership` 栏、开工冻计算器时只说一次。
+/// `model_sesno` 在关闭期间只承诺模型几何，不承诺房间归属；`/health` 的
+/// `room_membership=false` 是这项主动降级的判据。重新打开只影响之后重生成的根，历史期间
+/// 未算或已陈旧的房间边不会凭模型水位自动发现，需显式执行该库的模型重建来补齐。
+/// 护栏：启动横幅与 `/health` 的 `room_membership` 栏必须把这项代价说清楚。
 ///
 /// 它不是退役中的 `room_incremental`（ADR-073 D7）：那个键门的「房间阶段」已经没了，
 /// 如今只剩空闲轮一句播报，不管任何计算。
@@ -1361,8 +1375,7 @@ impl RoomMembershipOverride {
         let lock = ROOM_MEMBERSHIP_OVERRIDE_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        ROOM_MEMBERSHIP_OVERRIDE
-            .store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
+        ROOM_MEMBERSHIP_OVERRIDE.store(if on { 1 } else { 2 }, std::sync::atomic::Ordering::SeqCst);
         Self { _lock: lock }
     }
 }
@@ -1378,7 +1391,7 @@ fn effective_room_membership(configured: Option<bool>, env_override: Option<&str
     env_override
         .and_then(parse_bool_flag)
         .or(configured)
-        .unwrap_or(true)
+        .unwrap_or(false)
 }
 
 /// 环境变量名：一次性覆盖 [`model_xgeometry_gate`]，不必改配置文件。
@@ -2184,26 +2197,23 @@ mod tests {
         assert!(!effective_in_memory_db(None, Some("ture")));
     }
 
-    /// **默认是外置库**（2026-09-07 拍板，翻回 2026-09-04 之前的口径）：两个键都没写 =
-    /// `external`。默认 `spawned-mem` 服役期间，任何指着一台手工起的库的现场配置都会被
-    /// `judge_port` 判「端口上是一台没有署名的 SurrealDB」而拒绝启动——那台库不可能有本
-    /// 进程的署名，配置又没说要连它，两边都没错，人却起不来。自带存储从此要显式要。
+    /// **默认是自带 kv-mem**（2026-09-11 拍板）：两个形态键都没写 = `spawned-mem`。
+    /// 外置库部署必须显式写 `external`，不能让旧现场配置靠一个会变化的默认值决定介质。
     #[test]
-    fn the_default_store_mode_is_external() {
+    fn the_default_store_mode_is_spawned_mem() {
         assert_eq!(
             effective_store_mode(None, None, None, None),
-            StoreMode::External
+            StoreMode::SpawnedMem
         );
         assert_eq!(
-            effective_store_mode(Some("spawned-mem"), None, None, None),
-            StoreMode::SpawnedMem,
-            "开箱即用那一档仍然要得到，只是要显式写"
+            effective_store_mode(Some("external"), None, None, None),
+            StoreMode::External,
+            "外置库仍然可显式选择"
         );
     }
 
     /// 没写 `store_mode` 但写了旧开关时，**由旧开关说话**，语义与它今天的两态逐字相同。
-    /// `in_memory_db = true` 是它唯一还能改变结论的取值；`false` 与不写都是外置库，
-    /// 与新默认一致。
+    /// `in_memory_db = false` 必须继续得到 external，不能被新的 spawned-mem 默认盖掉。
     #[test]
     fn an_explicit_legacy_flag_still_decides_when_store_mode_is_unset() {
         assert_eq!(
@@ -2358,8 +2368,8 @@ mod tests {
     /// 漏写的症状一律不是报错，而是「测试莫名其妙全查不到数据」「开机后 `pe` 一行都不进」
     /// ——看上去像解析坏了，实际是配置少了一行。
     ///
-    /// 默认值本身翻过两次（2026-09-04 `external` → `spawned-mem`，2026-09-07 翻回
-    /// `external`），每一次都会让没写这一项的配置静默换介质、连带换掉 `data_face`
+    /// 默认值本身翻过三次（2026-09-04 `external` → `spawned-mem`，2026-09-07 翻回
+    /// `external`，2026-09-11 再改为 `spawned-mem`），每一次都会让没写这一项的配置静默换介质、连带换掉 `data_face`
     /// （它是从 `store_mode` 派生的）。护栏守的正是「不许有配置去依赖那个会变的默认」，
     /// 所以它与默认值当前指向哪一档无关。
     ///
@@ -2402,8 +2412,8 @@ mod tests {
         assert!(checked > 0, "一份夹具配置都没扫到，护栏的路径写错了");
         assert!(
             missing.is_empty(),
-            "这些配置没有显式声明形态键：{missing:?}。默认值（store_mode=external、\
-             data_face=ingest）翻过两次，依赖它的配置每翻一次就静默换一回介质 / 数据面"
+            "这些配置没有显式声明形态键：{missing:?}。默认值（store_mode=spawned-mem、\
+             data_face=read-through）已经多次翻转，依赖它的配置每翻一次就静默换一回介质 / 数据面"
         );
     }
 
@@ -2481,11 +2491,11 @@ mod tests {
         ));
     }
 
-    /// 房间归属计算**默认开**（ADR-073 D1：房间是根产出的一部分）：缺配置、拼错的环境变量
-    /// 都保持默认；配置或环境变量能显式关掉，环境变量两个方向都压过配置。
+    /// 房间归属计算默认关：缺配置时不做房间增量更新；配置或环境变量能显式打开，
+    /// 环境变量两个方向都压过配置，拼错的值退回配置值或默认值。
     #[test]
-    fn room_membership_is_on_unless_someone_turns_it_off() {
-        assert!(effective_room_membership(None, None));
+    fn room_membership_is_off_unless_someone_turns_it_on() {
+        assert!(!effective_room_membership(None, None));
         assert!(effective_room_membership(Some(true), None));
         assert!(!effective_room_membership(Some(false), None));
         assert!(effective_room_membership(None, Some("1")));
@@ -2494,7 +2504,7 @@ mod tests {
         assert!(effective_room_membership(Some(false), Some("on")));
         assert!(effective_room_membership(Some(true), Some("ture")));
         assert!(!effective_room_membership(Some(false), Some("ture")));
-        assert!(effective_room_membership(None, Some("ture")));
+        assert!(!effective_room_membership(None, Some("ture")));
         assert!(
             ext_field_names()
                 .iter()
@@ -2610,6 +2620,7 @@ mod tests {
         assert_eq!(fields.watch_dbnums, None);
         assert_eq!(fields.data_batch_workers, None);
         assert_eq!(fields.http_api_addr, None);
+        assert_eq!(fields.http_public_addr, None);
     }
 
     /// **本轮要修的就是这一条。** 一个字段类型写错，此前会让整张扩展表静默回落
@@ -2667,7 +2678,8 @@ mod tests {
             "startup_autorun = false\n\
              watch_dbnums = [8000, 7998]\n\
              data_batch_workers = 4\n\
-             http_api_addr = \"0.0.0.0:8020\"\n",
+             http_api_addr = \"0.0.0.0:8020\"\n\
+             http_public_addr = \"192.168.1.9:8020\"\n",
         );
         let fields = read_ext_fields(Some(path.into())).expect("合法配置要照常读出来");
         assert_eq!(fields.startup_autorun, Some(false));
@@ -2677,6 +2689,7 @@ mod tests {
         );
         assert_eq!(fields.data_batch_workers, Some(4));
         assert_eq!(fields.http_api_addr.as_deref(), Some("0.0.0.0:8020"));
+        assert_eq!(fields.http_public_addr.as_deref(), Some("192.168.1.9:8020"));
     }
 
     /// TOML 本身就坏掉时同样要出声，理由与字段类型写错完全一样：文件在那儿、
@@ -2711,6 +2724,7 @@ mod tests {
             "watch_dbnums",
             "data_batch_workers",
             "http_api_addr",
+            "http_public_addr",
         ] {
             assert!(notice.contains(field), "话里要点到 {field}：{notice}");
         }

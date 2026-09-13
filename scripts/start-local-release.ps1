@@ -15,11 +15,15 @@ $existing = Get-CimInstance Win32_Process -Filter "Name='aios-database.exe'" | W
 if ($existing) {
     $process = Get-Process -Id $existing.ProcessId
 } else {
-    $listener = Get-NetTCPConnection -LocalPort 9099 -State Listen -ErrorAction SilentlyContinue
-    if ($listener) { throw "Port 9099 already belongs to PID $($listener.OwningProcess). Stop the prior release first." }
+    $listener = [System.Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners() |
+        Where-Object { $_.Port -eq 9099 } |
+        Select-Object -First 1
+    if ($listener) { throw "Port 9099 is already in use. Stop the prior release first." }
     $env:DB_OPTION_FILE = Join-Path $Workspace 'DbOption.toml'
     $env:PLANT_UI_WEB_ROOT = Join-Path $root 'web'
     $env:PLANT_ASSET_ROOT = Join-Path $Workspace 'assets'
+    $surreal = Join-Path $Workspace 'bin\surreal.exe'
+    if (Test-Path -LiteralPath $surreal) { $env:AIOS_SURREAL_EXE = $surreal }
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $process = Start-Process -FilePath $exe -ArgumentList 'serve' -WorkingDirectory $Workspace -WindowStyle Hidden -PassThru -RedirectStandardOutput (Join-Path $logRoot "$stamp.stdout.log") -RedirectStandardError (Join-Path $logRoot "$stamp.stderr.log")
     @{ pid=$process.Id; start_time=$process.StartTime.ToString('o'); executable=$exe } | ConvertTo-Json | Set-Content (Join-Path $root 'process.json')

@@ -69,6 +69,8 @@ struct CountRow {
     count: usize,
 }
 
+/// `GET /api/v1/dbnums/{dbnum}/data/above/{watermark}` 的回执（ADR-073 D5 保留的只读半边）：
+/// 水位之上还有多少 `pe` 行、抽样几个 refno。它是清库之后自证「真的干净了」的唯一现成只读工具。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PruneAboveWatermarkPreview {
     pub dbnum: u32,
@@ -76,16 +78,6 @@ pub struct PruneAboveWatermarkPreview {
     pub applied_sesno: i32,
     pub pe_rows: usize,
     pub sample_refnos: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct PruneAboveWatermarkResult {
-    #[serde(flatten)]
-    pub preview: PruneAboveWatermarkPreview,
-    pub deleted_pe_rows: usize,
-    pub rebuilt_info_rows: usize,
-    pub remaining_rows_above_watermark: usize,
-    pub elapsed_ms: u64,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,7 +120,9 @@ fn range_of(table: &str, ref0: &str) -> String {
 /// 这个**跨 owner** 的区间形状恰是 `staging::replay_safe::is_owner_scoped_range`
 /// 明令拒绝的写法。那道闸门守的是重放路径上「圈到别人头上还不报错」；这里两端
 /// Ref0 同源、由权威 Ref0 集合导出，整段区间本来就要全删，所以安全——**仅限**
-/// 整库清理。按水位裁剪只删一部分元素，不满足这个前提，继续走逐元素双向删除。
+/// 整库清理。而 ADR-073 D3 / D5 之后库上也只剩整库清理这一种删法：按水位的部分裁剪
+/// （`sesno > S` 谓词删 / 逐元素双向删）整段退役，`/data/above/{watermark}` 只剩 GET 预览的
+/// `SELECT`（[`preview_prune_above_watermark`]）。
 fn owner_range_of(ref0: &str) -> String {
     format!("pe_owner:[pe:{ref0}_0, NONE]..=[pe:{ref0}_{RANGE_END}, ..]")
 }
@@ -225,52 +219,6 @@ pub async fn preview_prune_above_watermark(
         applied_sesno: state.applied_sesno.unwrap_or_default(),
         pe_rows: rows.len(),
         sample_refnos,
-    })
-}
-
-/// 运维端点 `DELETE /dbnums/{dbnum}/data/above/{watermark}` 的入口（ADR-072 之后**改调
-/// 回退核心**）：预览（读）→ [`rollback_to_watermark`]（谓词删）→ 复核（读）。
-///
-/// 三段职责分明：预览与复核是端点自己的诊断读（`SELECT`，白名单外但不在回退渲染里，
-/// 源码钉只钉 [`render_rollback`]）；真正动手的那一段与崩溃恢复走**同一份**渲染，
-/// 端点从此不会与启动回退长出两套语义。
-///
-/// 行为随之从「只削数据面 + `applied_sesno`」扩成整库回退到 S（ADR-072 D3 不分面）：
-/// 模型行、凭证、房间边与三枚水位一起退。这正是端点该有的语义——留着模型面不动，
-/// 削完的库在下一次一致性判决里就是「数据退了、模型没退」的幽灵形态。
-pub async fn prune_above_watermark(
-    dbnum: u32,
-    target_watermark: i32,
-) -> anyhow::Result<PruneAboveWatermarkResult> {
-    let started = Instant::now();
-    let preview = preview_prune_above_watermark(dbnum, target_watermark).await?;
-    rollback_to_watermark(
-        dbnum,
-        target_watermark,
-        crate::data_interface::write_state::WriteIntent::ApplyWindow,
-    )
-    .await?;
-
-    // A zero-row cleanup already proved the PE postcondition. Avoid a second
-    // full PE scan in that common diagnostic case.
-    let remaining_rows_above_watermark = if preview.pe_rows == 0 {
-        0
-    } else {
-        preview_prune_above_watermark(dbnum, target_watermark)
-            .await?
-            .pe_rows
-    };
-    if remaining_rows_above_watermark != 0 {
-        bail!(
-            "dbnum {dbnum} prune incomplete: {remaining_rows_above_watermark} PE rows remain above watermark {target_watermark}"
-        );
-    }
-    Ok(PruneAboveWatermarkResult {
-        deleted_pe_rows: preview.pe_rows,
-        rebuilt_info_rows: 0,
-        remaining_rows_above_watermark,
-        preview,
-        elapsed_ms: started.elapsed().as_millis() as u64,
     })
 }
 
@@ -600,7 +548,8 @@ pub(crate) async fn rollback_to_watermark_on(
             .check()
             .with_context(|| format!("rollback dbnum {dbnum} delete batch {index} statement"))?;
     }
-    let control = render_transactional_phase(&render.control).expect("control plane is never empty");
+    let control =
+        render_transactional_phase(&render.control).expect("control plane is never empty");
     db.query(control)
         .await
         .with_context(|| format!("rollback dbnum {dbnum} watermark and marker"))?
@@ -1214,16 +1163,24 @@ mod tests {
             "ModelOnly 不动数据水位: {watermark}"
         );
         assert!(watermark.contains("model_sesno = math::min([model_sesno ?: 0, 41])"));
-        assert!(!watermark.contains("room_"), "库上没有房间水位可退: {watermark}");
+        assert!(
+            !watermark.contains("room_"),
+            "库上没有房间水位可退: {watermark}"
+        );
         assert!(watermark.contains("state_revision = (state_revision ?? 0) + 1"));
-        assert_eq!(model_only.control.last().unwrap(), "DELETE dbnum_write_state:7997;");
+        assert_eq!(
+            model_only.control.last().unwrap(),
+            "DELETE dbnum_write_state:7997;"
+        );
 
         let room_only = render_rollback(7997, 41, &nouns, WriteIntent::RoomOnly);
         let sql = [room_only.deletes.clone(), room_only.control.clone()]
             .concat()
             .join("\n");
         assert!(
-            !sql.contains("DELETE EQUI") && !sql.contains("direct_model.sesno") && !sql.contains("gen_root"),
+            !sql.contains("DELETE EQUI")
+                && !sql.contains("direct_model.sesno")
+                && !sql.contains("gen_root"),
             "RoomOnly 只退房间面: {sql}"
         );
         assert!(sql.contains("DELETE room_relate WHERE in.dbnum = 7997;"));
@@ -1235,7 +1192,11 @@ mod tests {
         );
         assert!(watermark.contains("state_revision = (state_revision ?? 0) + 1"));
         // 三种意图的 SQL 仍然一句 SELECT 都没有（W3）。
-        for intent in [WriteIntent::ApplyWindow, WriteIntent::ModelOnly, WriteIntent::RoomOnly] {
+        for intent in [
+            WriteIntent::ApplyWindow,
+            WriteIntent::ModelOnly,
+            WriteIntent::RoomOnly,
+        ] {
             let render = render_rollback(7997, 41, &nouns, intent);
             let sql = [render.deletes, render.control].concat().join("\n");
             assert!(!sql.contains("SELECT"), "{intent:?}: {sql}");
@@ -1379,7 +1340,8 @@ mod tests {
             .expect("body")
             .0;
         assert!(
-            body.contains("if intent.wipes_whole_dbnum()") && body.contains("wipe_dbnum_for_reinit"),
+            body.contains("if intent.wipes_whole_dbnum()")
+                && body.contains("wipe_dbnum_for_reinit"),
             "初始化那一档必须走整库 wipe: {body}"
         );
         assert!(WriteIntent::Initialize.wipes_whole_dbnum());
@@ -1405,8 +1367,14 @@ mod tests {
             "任何形态的 pe 行删除都不许有:\n{sql}"
         );
         // 卫星行照删：它们没有边挂着，是「先删后插」的删那一半。
-        assert!(sql.contains("DELETE EQUI WHERE dbnum = 7997 AND sesno > 41;"), "{sql}");
-        assert!(sql.contains("DELETE ATT_UDA WHERE dbnum = 7997 AND sesno > 41;"), "{sql}");
+        assert!(
+            sql.contains("DELETE EQUI WHERE dbnum = 7997 AND sesno > 41;"),
+            "{sql}"
+        );
+        assert!(
+            sql.contains("DELETE ATT_UDA WHERE dbnum = 7997 AND sesno > 41;"),
+            "{sql}"
+        );
         assert!(
             !sql.contains("INSERT RELATION"),
             "既然不删顶点就不必重建入边；哪天真要删顶点了，这两条断言得一起改:\n{sql}"
